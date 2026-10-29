@@ -27,7 +27,7 @@ TASK_TERMINAL_STATUSES = frozenset(
 
 
 # LLM: Policy 是 runtime 唯一 retention 配置合同；旧 key 必须经 migration 转换，不能在这里永久兼容。
-# 类用途: 保存各类 owner 数据的保留天数、legal hold 和后台维护节流配置。
+# 类用途: 保存各类owner保留天数，安全审计与原始策展audit分开，零关闭对应类别。
 @dataclass(frozen=True)
 class MemoryRetentionPolicy:
     conversation_days: int = 365
@@ -47,8 +47,9 @@ class MemoryRetentionPolicy:
     maintenance_enabled: bool = True
     maintenance_interval_seconds: int = 86_400
     schema_version: str = RETENTION_SCHEMA_VERSION
+    security_audit_days: int = 180
 
-    # LLM: 缺字段、错类型、负值或旧 schema 都必须失败，避免默认值掩盖损坏/未迁移策略。
+    # LLM: 原字段严格必填；新增安全审计缺失沿明确180天默认，提供时严格拒绝错类型/负值。
     # 函数用途: 从 retention.json 严格恢复一份可执行策略。
     @classmethod
     def from_payload(cls, payload: object) -> MemoryRetentionPolicy:
@@ -74,6 +75,9 @@ class MemoryRetentionPolicy:
             field_name: _strict_nonnegative_int(payload, field_name)
             for field_name in day_fields
         }
+        values["security_audit_days"] = _strict_nonnegative_int(
+            {"security_audit_days": payload.get("security_audit_days", 180)}, "security_audit_days"
+        )
         legal_hold = _strict_bool(payload, "legal_hold")
         maintenance_enabled = _strict_bool(payload, "maintenance_enabled")
         interval = _strict_nonnegative_int(payload, "maintenance_interval_seconds")

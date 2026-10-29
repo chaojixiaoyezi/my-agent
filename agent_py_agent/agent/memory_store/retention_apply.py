@@ -18,8 +18,10 @@ from typing import Any
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     append_private_jsonl_records,
+    locked_json_path,
     read_json_object_report,
     write_private_json_file_atomic,
+    write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import NoFollowPathError, ensure_private_dir, open_directory_beneath
 from ..common.request_execution_ports import (
@@ -35,6 +37,7 @@ from .candidates import (
     CandidateService,
     _is_binding_tombstone,
 )
+from .reference_pins import ReferencePinSnapshot
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -46,6 +49,8 @@ from .retention_scan import (
     current_tool_manifest_references,
     file_fingerprint,
     paths_fingerprint,
+    security_audit_content,
+    security_audit_paths,
     trash_payload_pinned,
     tree_fingerprint,
     valid_fingerprint,
@@ -58,7 +63,7 @@ from .retention_transition import RetentionPolicyChangedError
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # LLM: 仅已通过策略/法律保留的executor追加tmp/cache空目录清扫；扫描门外，每次rmdir仍沿原transition核权。
 # LLM: 本次now沿候选phase/actions透传到原删除提交，冷归档年龄不得另取真实墙钟；CAS及原短门保持。
-# 函数用途: 统一按本次时钟执行保留计划和过期目录清扫，返回原动作状态及错误。
+# 函数用途: 统一执行保留计划；同阶段引用视图按源代次复核后复用，保留原动作状态与错误。
 def execute_retention_plan(
     *,
     home: object,
@@ -71,6 +76,7 @@ def execute_retention_plan(
 ) -> MemoryRetentionReport:
     results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan, now=now), commit_transition)
     manifest_references = None
+    pin_snapshot = ReferencePinSnapshot(home, allowed_external_roots, now, current_retention_pins)
     for action in plan.actions:
         if action.operation == "candidate_delete":
             continue
@@ -83,6 +89,7 @@ def execute_retention_plan(
                 now=now,
                 allowed_external_roots=allowed_external_roots,
                 manifest_references=manifest_references,
+                pin_snapshot=pin_snapshot,
             ), commit_transition)
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError, RetentionPolicyChangedError):
@@ -201,7 +208,9 @@ def _apply_candidate_actions(
         if record is None:
             results.append(replace(action, status="missing"))
             continue
-        updated = _timestamp(record.updated_at)
+        from .candidates import candidate_retention_time
+
+        updated = _timestamp(candidate_retention_time(record))
         eligible = bool(
             record.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
             and not _is_binding_tombstone(record)
@@ -243,7 +252,7 @@ def _apply_candidate_actions(
 # LLM: 所有动作先拒绝无效摘要；Daily/Compact/Curator及trash永久删除前重核引用，来源不可读直接拒绝。
 #   operation是宿主枚举；清单仍复核快照阶段后的引用，不信旧规划。
 # LLM: tmp/cache文件确已删除才按同一action cutoff清空过期祖先，沿规范根的nofollow目录句柄rmdir，不删根或跨链接。
-# 函数用途: 分派并复核保留动作，文件删除后仅尝试清理未变新且已空的父目录。
+# 函数用途: 分派动作并复核当前源代次；安全审计仅按原追加锁整理记录，不用旧规划替代执行检查。
 def _apply_action(
     *,
     home: object,
@@ -251,14 +260,28 @@ def _apply_action(
     now: datetime,
     allowed_external_roots: tuple[Path, ...],
     manifest_references: tuple[frozenset[str], bool] | None = None,
+    pin_snapshot: ReferencePinSnapshot | None = None,
 ) -> MemoryRetentionAction:
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
     if not valid_fingerprint(action.source_fingerprint):
         return replace(action, status="state_changed")
+    if action.operation == "security_audit_compact":
+        if action.path not in security_audit_paths(home) or action.cutoff_timestamp is None:
+            return replace(action, status="state_changed")
+        with locked_json_path(action.path):
+            if file_fingerprint(action.path) != action.source_fingerprint:
+                return replace(action, status="state_changed")
+            content, removed = security_audit_content(action.path, action.cutoff_timestamp)
+            if file_fingerprint(action.path) != action.source_fingerprint:
+                return replace(action, status="state_changed")
+            if removed:
+                write_private_text_file_atomic_unlocked(action.path, content)
+        return replace(action, status="compacted" if removed else "state_changed")
     if action.category in {"daily", "compact", "curator_run", "trash"}:
         pin_errors: list[MemoryRetentionError] = []
-        pins, complete = current_retention_pins(home, allowed_external_roots, pin_errors, now=now)
+        pins, complete = (pin_snapshot.current(pin_errors) if pin_snapshot is not None else
+                          current_retention_pins(home, allowed_external_roots, pin_errors, now=now))
         if not complete:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         protected = (trash_payload_pinned(pins, action.path, pin_errors) if action.category == "trash"

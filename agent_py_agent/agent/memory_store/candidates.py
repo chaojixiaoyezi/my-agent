@@ -12,6 +12,7 @@ import json
 import os
 import pickle
 import re
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
@@ -83,7 +84,7 @@ _CANDIDATE_STAMP_DIGEST_CACHE: OrderedDict[
 ] = OrderedDict()
 _CandidateStatStamp = tuple[int, int, int, int, int]
 _CANDIDATE_LOAD_CACHE: OrderedDict[
-    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...], dict[str, MemoryCandidate]]
+    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...], dict[str, MemoryCandidate], int]
 ] = OrderedDict()
 _CANDIDATE_LOAD_CACHE_LOCK = threading.Lock()
 # 旧注入点仅在显式替换时接管冷读；正常路径保持M1同FD流式解析。
@@ -136,19 +137,45 @@ def _drop_candidate_load_cache(path: Path) -> None:
         _CANDIDATE_STAMP_DIGEST_CACHE.pop(str(path), None)
 
 
-# LLM: 写侧先归一化owned副本，只读解析独占模型可接管；同代ID索引与元组原子发表/驱逐，最多8路径128MiB。
-# 函数用途: 缓存严格读验证且磁盘代次稳定的候选及其ID索引，不以写侧副本代替读验证。
-def _remember_candidate_load(path, probe, records, *, copy_records: bool = True):
+# LLM: 只读模型直接接管，不复制整账本；锁外计量原行/索引及条目元数据，锁内加容器开销，超额不入驻。
+# 函数用途: 缓存严格读验证的同代候选及ID索引，保持最多8路径、128MiB实际对象预算。
+def _remember_candidate_load(path, probe, records):
     if probe is None or _candidate_load_stamp(path) != probe[0]:
         return
-    snapshot = deepcopy(tuple(records)) if copy_records else tuple(records)
+    snapshot = tuple(records)
     by_id = {row.candidate_id: row for row in snapshot}
+    key, stamp = str(path), probe[0][:4]
+    retained = _candidate_retained_bytes((key, stamp, probe[1], snapshot, by_id, 0)) + 64
     with _CANDIDATE_LOAD_CACHE_LOCK:
-        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot, by_id)
+        _CANDIDATE_LOAD_CACHE.pop(str(path), None)
+        if retained > _CANDIDATE_LOAD_CACHE_MAX_BYTES:
+            return
+        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot, by_id, retained)
         _CANDIDATE_LOAD_CACHE.move_to_end(str(path))
         while (len(_CANDIDATE_LOAD_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS
-               or sum(entry[0][1] for entry in _CANDIDATE_LOAD_CACHE.values()) > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
+               or sys.getsizeof(_CANDIDATE_LOAD_CACHE) + sum(entry[4] for entry in _CANDIDATE_LOAD_CACHE.values())
+               > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
             _CANDIDATE_LOAD_CACHE.popitem(last=False)
+
+
+# LLM: 迭代计量只跟随候选JSON容器和实例字典，共享对象按身份去重，不计类全局或调用方栈。
+# 函数用途: 计算缓存实际保留的对象树大小，避免拿文件长度代替内存用量。
+def _candidate_retained_bytes(value):
+    total, seen, pending = 0, set(), [value]
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+        elif isinstance(item, MemoryCandidate):
+            pending.append(vars(item))
+    return total
 
 
 # LLM: 校验磁盘探针与缓存摘要完全一致才返回只读元组；不一致时可驱逐旧缓存，调用方负责深复制输出。
@@ -190,7 +217,7 @@ def _borrow_candidate_readonly_rows(service: CandidateService) -> tuple[MemoryCa
         return cached
     probe, records = service._parse_candidate_ledger_unlocked()
     snapshot = tuple(records)
-    _remember_candidate_load(service.path, probe, snapshot, copy_records=False)
+    _remember_candidate_load(service.path, probe, snapshot)
     return snapshot
 
 
@@ -570,15 +597,15 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
-    # LLM: 此入口仅规划合法未晋升候选，禁止为归档暗中写盘；终态维护由执行delete_terminal负责。
-    # 函数用途: 不复制全账本地规划过期候选ID，不执行删除。
+    # LLM: 未终态按最后观察计龄，审核更新时间不冒充新证据；此入口只规划不删除。
+    # 函数用途: 规划真正陈旧候选ID，保护最近再次观察到的候选。
     def retention_candidates(self, *, before: datetime) -> list[str]:
         cutoff = before.astimezone(timezone.utc)
         result: list[str] = []
         for item in self.readonly_rows(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
             if _is_binding_tombstone(item):
                 continue
-            if datetime.fromisoformat(item.updated_at) < cutoff:
+            if datetime.fromisoformat(candidate_retention_time(item)) < cutoff:
                 result.append(item.candidate_id)
         return result
 
@@ -646,15 +673,14 @@ class CandidateService:
         options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
         return locked_json_path(self.path, **options)
 
-    # LLM: 写侧始终取得可修改的独立模型；热快照深复制，冷解析以copy_records=True隔离缓存，不向写方借缓存对象。
-    # 函数用途: 在原文件锁内加载可安全修改的候选列表。
+    # LLM: 热缓存只复制写方所需的独占模型；冷解析直接归写方，不再为了缓存复制整账本。
+    # 函数用途: 在原文件锁内取得可安全修改的候选列表，读侧缓存由只读解析独立建立。
     def _load_unlocked(self) -> list[MemoryCandidate]:
         probe = _candidate_load_probe(self.path)
         cached = _cached_candidate_rows(self.path, probe, evict_on_miss=True)
         if cached is not None:
             return list(deepcopy(cached))
-        probe, records = self._parse_candidate_ledger_unlocked()
-        _remember_candidate_load(self.path, probe, records, copy_records=True)
+        _probe, records = self._parse_candidate_ledger_unlocked()
         return records
 
     # LLM: 持原锁逐行严格解析；同FD流式摘要不保留整表原文/字典，归一化改变时不复用旧原行。
@@ -668,6 +694,14 @@ class CandidateService:
 # 类用途: 表示一条观察撞上了已有观察身份、但类型化主题不同。
 class CandidateIdentityConflictError(ValueError):
     pass
+
+
+# LLM: 终态沿更新时间；未终态优先宿主最后观察时间，旧行缺字段才逐级回退，不解析正文。
+# 函数用途: 为扫描、执行复核和仓库清理提供同一个候选计龄基准。
+def candidate_retention_time(candidate):
+    if candidate.status in TERMINAL_CANDIDATE_STATUSES:
+        return candidate.updated_at or candidate.created_at
+    return candidate.last_observed_at or candidate.updated_at or candidate.created_at
 
 
 # LLM: 两个提交入口共用纯合并；先按规范证据及精确目标校验版本，再按候选/观察身份合并。

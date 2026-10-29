@@ -461,7 +461,7 @@ def test_hard_delete_scrubs_authority_indexes_candidate_and_not_conversation(tmp
     assert conversation.read_bytes() == conversation_before
 
 
-# LLM: 只在临时账本设置测试时钟；覆盖全部合法状态、严格三十天边界及未满保留期，不接触生产候选。
+# LLM: 只在临时账本设置观察及更新时间；覆盖全部合法状态和三十天边界，不把新观察伪装成陈旧草稿。
 # 函数用途: 准备陈旧与活跃候选并返回按保留策略应清理的精确集合。
 def _retention_drafts(candidates):
     specs = [(status, 31) for status in sorted(CANDIDATE_STATUSES)]
@@ -472,6 +472,7 @@ def _retention_drafts(candidates):
         for index in range(len(specs))
     ])
     rows = [replace(row, status=status, updated_at=(NOW - timedelta(days=age)).isoformat(),
+                     last_observed_at=(NOW - timedelta(days=age)).isoformat(),
                     status_history=[{**row.status_history[-1], "status": status}],
                     promoted_at=OLD if status == "promoted" else row.promoted_at,
                     promotion_ref="fixture:promoted" if status == "promoted" else row.promotion_ref)
@@ -514,7 +515,7 @@ def test_candidate_retention_apis_clean_old_drafts_and_protect_promoted(tmp_path
     assert candidates.get(promoted).status == "promoted"
 
 
-# LLM: 新增可清理状态带正式目标版本约束时，只脱敏并转终态；重复清理仍保留原绑定，不能重授权旧证据。
+# LLM: 陈旧观察带正式目标版本约束时，只脱敏并转终态；重复清理仍保原绑定，不重新授权旧证据。
 # 函数用途: 验证陈旧待审候选保留合法可读的证据墓碑。
 @pytest.mark.parametrize("status", ["pending_review", "approved", "blocked_missing_evidence", "blocked_conflict", "observed"])
 def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
@@ -525,7 +526,7 @@ def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
         subject_key="retention.bound", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson"))
     bindings = [{"key": ["memory-old", "message", "thread-old", "message-old"], "version": 1}]
-    old = replace(row, status=status, updated_at=OLD, target_evidence_bindings=bindings,
+    old = replace(row, status=status, updated_at=OLD, last_observed_at=OLD, target_evidence_bindings=bindings,
                   source_message_refs=[{"thread_id": "thread-old", "message_id": "message-old"}],
                   status_history=[{**row.status_history[-1], "status": status}])
     old = replace(old, learning_source_coverage=initial_source_coverage(old))
@@ -558,14 +559,14 @@ def test_retention_draft_change_after_plan_is_preserved(tmp_path):
     assert candidates.path.read_bytes() == before
 
 
-# LLM: 真实审核故意发生在 apply 已读快照、删除尚未取锁的窗口；不用假指纹掩盖真实 TOCTOU。
+# LLM: 陈旧观察上的真实审核发生在apply已读快照、删除尚未取锁的窗口；不伪造指纹掩盖TOCTOU。
 # 函数用途: 证明刚获批并变新的候选不能被旧保留计划删除。
 def test_retention_skips_candidate_updated_between_unlocked_read_and_locked_delete(tmp_path, monkeypatch):
     _home, candidates, _memory, service = _runtime(tmp_path)
     row = candidates.observe(CandidateObservation(candidate_type="lesson", content="刚获批的经验必须保留",
         subject_key="retention.atomic", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson"))
-    candidates.path.write_text(json.dumps(replace(row, updated_at=OLD).to_record()) + "\n", encoding="utf-8")
+    candidates.path.write_text(json.dumps(replace(row, updated_at=OLD, last_observed_at=OLD).to_record()) + "\n", encoding="utf-8")
     plan = service.plan(now=NOW)
     assert [action.record_id for action in plan.actions] == [row.candidate_id]
     original = candidates.delete_terminal

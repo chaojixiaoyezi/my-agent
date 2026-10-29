@@ -28,6 +28,7 @@ from .candidates import (
     _is_binding_tombstone,
 )
 from .curator_run_log import _CURSOR_CHECKPOINT, _CURSOR_DELTA
+from .reference_pins import watch_pin_source
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -187,7 +188,7 @@ def _protected_runtime_actions(
 
 
 # LLM: 引用来源读全才规划Daily/Compact/Curator；Daily/Compact沿原trash_file合同，不直接删除。
-# 函数用途: 汇总按龄动作并保护引用和恢复材料，坏pin来源时关闭相关回收。
+# 函数用途: 汇总按龄动作并保护引用；安全审计按记录计龄，原始audit继续禁止删除。
 def _aged_file_actions(
     context: _RetentionScanContext,
     selected_task_roots: frozenset[Path],
@@ -222,7 +223,61 @@ def _aged_file_actions(
                 protection=(pins, home) if category in {"daily", "compact", "curator_run"} else None,
             )
         )
+    actions.extend(_security_audit_actions(home, policy.security_audit_days, context.now, context.errors))
     return actions
+
+
+# LLM: 仅处理原写入器的两个owner内规范安全审计文件；不扫描raw audit/，不按文件mtime删除整份混龄账本。
+# 函数用途: 为存在过期记录的安全审计账本规划有指纹保护的记录级整理。
+def _security_audit_actions(home, days, now, errors):
+    if days <= 0:
+        return []
+    cutoff = now.timestamp() - days * _DAY_SECONDS
+    actions = []
+    for path in security_audit_paths(home):
+        try:
+            if not path.exists():
+                continue
+            digest = file_fingerprint(path)
+            _content, removed = security_audit_content(path, cutoff)
+            if not removed:
+                continue
+            actions.append(_action(category="security_audit", operation="security_audit_compact", path=path,
+                reason=f"older_than_{days}_days", proof=_ActionProof(
+                    source_fingerprint=digest, cutoff_timestamp=cutoff)))
+        except (OSError, ValueError):
+            errors.append(_state_error("MEMORY_RETENTION_SECURITY_AUDIT_UNREADABLE", path))
+    return actions
+
+
+# LLM: 路径与runtime_paths、interaction_actor_audit现有生产写入器一致；自定义外部audit路径不由retention猜测或扫描。
+# 函数用途: 返回默认特权工具与交互事件的安全审计文件，不混入策展原料。
+def security_audit_paths(home):
+    return (Path(home.owner_logs_dir) / "audit" / "audit.jsonl", Path(home.owner_audit_log_jsonl))
+
+
+# LLM: 保留未知/坏JSON行及原字节排版；仅严格可判定的旧timestamp可删，首末FD/路径变化拒绝整批。
+# 函数用途: 计算安全审计保留内容与实际删除行数，扫描和锁内执行共用。
+def security_audit_content(path, cutoff):
+    kept, removed = [], 0
+    with _fingerprint_source(path) as source:
+        before = _file_identity(os.fstat(source.fileno()))
+        for raw in source:
+            text = raw.decode("utf-8")
+            try:
+                row = json.loads(text)
+            except ValueError:
+                row = None
+            stamp = _timestamp(row.get("timestamp")) if isinstance(row, dict) else None
+            if stamp is not None and stamp < cutoff:
+                removed += 1
+            else:
+                kept.append(text)
+        if before != _file_identity(os.fstat(source.fileno())):
+            raise OSError("security audit changed while reading")
+    if before != _file_identity(path.stat(follow_symlinks=False)):
+        raise OSError("security audit replaced while reading")
+    return "".join(kept), removed
 
 
 # LLM: 快照清理只接进现有 retention 流程（回收站 / legal hold / 执行前复核 / 报告都复用），不另造清理器。
@@ -462,7 +517,9 @@ def _candidate_actions(
     for record in records:
         if _is_binding_tombstone(record):
             continue
-        updated = _timestamp(record.updated_at)
+        from .candidates import candidate_retention_time
+
+        updated = _timestamp(candidate_retention_time(record))
         if updated is None:
             errors.append(
                 MemoryRetentionError(
@@ -987,7 +1044,7 @@ def _trash_actions(
     return actions
 
 
-# LLM: 各Python版本统一用scandir传播发现错误；不跟随runtime子目录链接，缺失可选源为空而不可读不是零pin。
+# LLM: 用scandir传播发现错误；目录与缺失threads也登记pin失效源，新建会话根不能漏掉，链接仍拒绝。
 # 函数用途: 严格发现标准ConversationStore根（含直连与runtime布局），保证pin发现完整性。
 def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path, ...]:
     discovered = list(explicit)
@@ -995,6 +1052,7 @@ def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path,
     if owner_home is not None:
         discovered.append(Path(owner_home) / "conversations")
     runtime = Path(home.owner_workspace_dir) / "runtime" / "workspaces"
+    watch_pin_source(runtime)
     try:
         runtime.stat()
     except FileNotFoundError:
@@ -1011,6 +1069,8 @@ def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path,
     result: list[Path] = []
     for raw in discovered:
         path = Path(raw).expanduser()
+        watch_pin_source(path)
+        watch_pin_source(path / "threads")
         try:
             info = (path / "threads").stat(follow_symlinks=False)
         except FileNotFoundError:
@@ -1224,9 +1284,10 @@ def paths_fingerprint(paths: tuple[Path, ...]) -> str:
     return hashlib.sha256("\n".join(material).encode("utf-8")).hexdigest()
 
 
-# LLM: os.walk错误必须显式传播；不存在的可选根为空，已存在根的权限和symlink错误不能洗成零成员。
+# LLM: os.walk错误显式传播；记录发现目录与缺失根，变化使阶段pin视图失效，不跟随链接。
 # 函数用途: 严格枚举目录，供指纹和pin来源扫描复用。
 def _walk_files(root: Path, *, include_dirs: bool = False):
+    watch_pin_source(root)
     try:
         info = root.stat(follow_symlinks=False)
     except FileNotFoundError:
@@ -1239,6 +1300,7 @@ def _walk_files(root: Path, *, include_dirs: bool = False):
         raise error
     for directory, dirs, files in os.walk(root, followlinks=False, onerror=failed):
         base = Path(directory)
+        watch_pin_source(base)
         for name in sorted(dirs):
             child = base / name
             if child.is_symlink():
@@ -1317,6 +1379,7 @@ def _row_has_pinned_id(value: object, ids: set[str]) -> bool:
 # LLM: JSONL逐行释放而不物化全账本；源须普通文件且FD/路径首末一致，完整消费后方可认定零pins。
 # 函数用途: 流式严格读取pin来源；提前停止者须close，函数不创建锁或写文件。
 def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
+    watch_pin_source(path)
     try:
         before = path.stat(follow_symlinks=False)
     except FileNotFoundError:
@@ -1452,6 +1515,7 @@ def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[M
                 raise ValueError("duplicate candidate pin source")
             candidate_ids.add(candidate_id)
             if candidate.cold_detail_ref:
+                watch_pin_source(candidate_path.parent / candidate.cold_detail_ref.partition("#")[0])
                 candidate = _hydrate_candidate(candidate_path, candidate)
                 row = candidate.to_record()
             pins.collect(row, candidate_path)

@@ -301,7 +301,7 @@ def test_unreadable_pin_sources_fail_closed(tmp_path, store):
     assert plan.errors
 
 
-# LLM: 原候选删除锁内CAS保持；仅观察借用入口与合法状态筛选。
+# LLM: 旧龄夹具同步观察时间；原候选删除锁内CAS保持，仅观察借用入口与合法状态筛选。
 # 函数用途: 防止执行端恢复全账本深复制。
 def test_apply_candidate_phase_borrows_filtered_readonly_rows(tmp_path, monkeypatch):
     from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
@@ -310,7 +310,8 @@ def test_apply_candidate_phase_borrows_filtered_readonly_rows(tmp_path, monkeypa
     row = candidates.observe(CandidateObservation(candidate_type="lesson", content="old",
         subject_key="test.old", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson"))
-    candidates.path.write_text(json.dumps(replace(row, updated_at="2020-01-01T00:00:00+00:00").to_record()) + "\n")
+    candidates.path.write_text(json.dumps(replace(row, updated_at="2020-01-01T00:00:00+00:00",
+        last_observed_at="2020-01-01T00:00:00+00:00").to_record()) + "\n")
     plan = service.plan(now=NOW)
     original = candidates.readonly_rows
     calls = []
