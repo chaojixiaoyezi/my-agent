@@ -26,11 +26,16 @@ CREATE TABLE IF NOT EXISTS private_chat_locks (
 # LLM: Python标准库sqlite3.Connection.__exit__仅提交或回滚事务而不关闭连接；重写__exit__在with块结束时立即close，防止遗留连接由GC在任意线程异步触发WAL独占锁竞争。
 # 类用途: 在with上下文退出时完成事务结算并立即关闭底层SQLite连接。
 class _ClosingConnection(sqlite3.Connection):
-    # LLM: 先执行父类事务提交/回滚再无条件调用close；sqlite3重复close幂等，兼容显式再调close的调用方。
+    # LLM: 先执行父类事务提交/回滚再无条件调用close；使用显式三参数签名满足架构守卫无*args约束，sqlite3重复close幂等。
     # 函数用途: 退出with块时同步关闭SQLite连接并释放文件锁与WAL句柄。
-    def __exit__(self, *exc_info: object) -> bool | None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> bool | None:
         try:
-            return super().__exit__(*exc_info)
+            return super().__exit__(exc_type, exc_val, exc_tb)
         finally:
             self.close()
 
