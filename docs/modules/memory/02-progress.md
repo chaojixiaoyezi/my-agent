@@ -1,3 +1,10 @@
+## 2026-10-29 e905 sol-9：规范 CLI 与统一 Doctor（开发分支，未部署）
+
+- 内置命令收敛为 24 个规范根。新调用使用 `memory remember/list/search`、`memory route`、`memory archive resume`、`memory doctor`；旧平铺输入只在根边界转换，不另建诊断实现。完整目录见 [CLI Reference](../../../CLI_REFERENCE.md)。
+- 删除 `cli/memory_doctor.py`、`cli/memory_commands/memory_doctor_cmd.py` 及其 re-export；诊断聚合归 `agent/user_space/home_doctor.py::DoctorService`，`cli/memory_admin_commands.py` 注入原只读工厂、格式化并保留各视图退出合同；`cli/memory_commands/__init__.py` 不再导出已删除 handler。
+- `memory doctor` 默认 memory 视图，runtime 不装配记忆维护组件；all 保留两侧独立事实，`common` 各字段固定以 `runtime` / `memory` 子键表达，不因内容相同而折叠。只读取 stats/status/plan，不执行 apply、正式晋升或模型；字段值与实际回归结果由集成者核验。
+- [人工规则与记忆候选控制](../../../CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布) 恢复现行说明与跨文档锚点；历史手册只用于迁移核对，不生成新调用。此处记录源码和文档职责，不宣称运行包、真实 IM 或服务生命周期已验收。
+
 ## 2026-10-27 CI 全绿收敛：记忆候选兼容读口、自动晋升补全与产物大索引流式过滤
 
 - `memory_store/candidates.py` 与 `_candidate_read_compat.py`：保留完整五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离，兼容对 `_load_unlocked` 的测试覆盖。
@@ -504,7 +511,7 @@ Gateway 用户的记忆总闸按各自 home 生效（分支 `claude/9b-owner-pat
 决策点未触发原因计数（分支 `claude/9b-decision-miss-reasons`，2026-09-27）：记忆侧四个决策点（recall、pre_recall、curator、curator_relation）每次到达都经 `conversation/decision_reach_counts` 记一次结果：没调用记宿主原因码（如 `memory_count`、`no_free_slots`、`nothing_to_label`、`memory_changed`、`point_off`、材料不合格的 `bad_material`），真正调用前记 `called`。只在进程内累加、按 owner 节流合并写盘，召回与整理的结果、警告码和游标都不变。见[决策审计与管控](../../design/DECISION_AUDIT_AND_ADMIN_CONTROLS.md#每个点位最近为什么没触发2026-09-27)。
 
 参数中心同名常数收敛（分支 `claude/param-center-dup-constants`，2026-09-27）：记忆诊断两处没有读取方的 `RECENT_ARCHIVE_FILE_LIMIT`
-删除（归档文件条数当时改为只读配置 `memory_doctor_recent_archive_file_limit`；参数减量第 3 批又把它降级为 `memory_doctor_cmd.MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`，两处入口共用这一处定义）；压缩失败熔断阈值与冷却只在 `memory_archive/compact_circuit_breaker`
+删除（归档文件条数当时改为只读配置 `memory_doctor_recent_archive_file_limit`，参数减量后改为代码常数；e905 统一诊断后当前唯一来源是 `agent/user_space/home_doctor.py::MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`）；压缩失败熔断阈值与冷却只在 `memory_archive/compact_circuit_breaker`
 定义，`agent_core/runtime/context_compactor` 改为导入，不再保留同值副本。数值不变。
 
 记忆整理输入预算缩批（分支 `claude/curator-budget`，2026-09-26）：生产本机 owner 自 9/24 15:39Z 起每次都是 `CURATOR_INPUT_BUDGET_EXCEEDED`、游标不动。收集只按条目估算，消息收满后审计仍按保底至少收一条，身份清单里的编号也不在预算内，最终提示超预算；提取前检查不缩批，同一批永远失败。现在在标注前按最终提示实测长度截尾（先消息后审计，各留一条），尾部下一轮重放；同时修复预算早退复用上一调用者尝试形状的诊断残留。DeepSeek 官方接口拒绝 `json_schema` 的问题随后修复：模型档案新增可选 `structured_output`，该接口默认改用 JSON 对象模式并把 schema 写进提示，结果仍由 Curator 严格解析（见 TESTS.md 顶部）。没配模型的 owner 也不再按维护周期反复失败：永久配置错误不原地重试，未配模型记 `CURATOR_MODEL_NOT_CONFIGURED` 并退避一小时（发现层与 Curator 同源）。

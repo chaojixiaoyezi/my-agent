@@ -1,5 +1,44 @@
 {
   "schema": "my-agent.optimization-removal.v2",
+  "frozen_cli_cross_version": {
+    "gateway supervisor-stop": {
+      "argv": ["gateway", "supervisor-stop"],
+      "handler": "cmd_supervisor_stop",
+      "expected": {}
+    },
+    "gateway supervisor-start": {
+      "argv": ["gateway", "supervisor-start"],
+      "handler": "cmd_supervisor_start",
+      "expected": {}
+    },
+    "gateway stop": {
+      "argv": ["gateway", "stop", "--drain", "--stop-background", "--background-timeout", "30"],
+      "handler": "cmd_gateway_stop",
+      "expected": {"drain": true, "stop_background": true, "background_timeout": 30.0}
+    },
+    "gateway start": {
+      "argv": ["gateway", "start", "--ready-timeout", "60"],
+      "handler": "cmd_gateway_start",
+      "expected": {"ready_timeout": 60.0}
+    },
+    "adapter stop": {
+      "argv": ["adapter", "stop"],
+      "handler": "cmd_adapter_stop",
+      "expected": {"timeout": 10.0}
+    },
+    "subagents-dispatch": {
+      "argv": ["--config", "/frozen/config.yaml", "subagents-dispatch", "--workspace-root", "/frozen/workspace",
+        "--apply", "--start-runners", "--max-runners", "2", "--limit", "20",
+        "--reviewer", "create-subagents-auto-start", "--note", "auto-start after create_subagents launch_id=launch-1",
+        "--background-launch-id", "launch-1", "--run-id", "run-1", "--expected-attempt", "run-1", "attempt-1",
+        "--run-id", "run-2", "--expected-attempt", "run-2", "attempt-2"],
+      "handler": "cmd_subagents_dispatch",
+      "expected": {"config": "/frozen/config.yaml", "workspace_root": "/frozen/workspace", "apply": true, "start_runners": true,
+        "max_runners": 2, "limit": 20, "reviewer": "create-subagents-auto-start",
+        "note": "auto-start after create_subagents launch_id=launch-1", "background_launch_id": "launch-1",
+        "run_id": ["run-1", "run-2"], "expected_attempt": [["run-1", "attempt-1"], ["run-2", "attempt-2"]]}
+    }
+  },
   "source_baseline": "e9050945bc54bcc96aecd1c7bc83135cf603d7e6",
   "inspection_baseline": "4bea324e3209ef9b9ecc39b6c2378bacc078b374",
   "source_sha256": "9201fdcf3203d870079298f2e3fd6493a08899c2e3142fa4f029bee7b180d46e",
@@ -12154,7 +12193,7 @@
             "--workspace-root"
           ],
           "dest": "workspace_root",
-          "default": null,
+          "default": "==SUPPRESS==",
           "nargs": null,
           "type": null,
           "choices": null,

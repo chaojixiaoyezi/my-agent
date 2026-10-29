@@ -147,3 +147,118 @@ def test_cli_decoder_rejects_unsupported_global_nargs():
     parser.add_argument("--pair", nargs=2)
     with pytest.raises(ValueError, match="多值选项"):
         parser.parse_args(["--pair", "x", "memory-doctor"])
+
+
+# LLM: 普通argparse消费者只使用规范树；解析后核对原handler和预算，不启动服务。
+# 函数用途: 防止局部注册Gateway命令时遗漏规范看门狗动作。
+@pytest.mark.parametrize("action,handler", [("start", "cmd_supervisor_start"), ("stop", "cmd_supervisor_stop")])
+def test_cli_local_gateway_supervisor(action, handler):
+    from agent_py_agent.cli.subcommands_gateway import add_gateway_subcommands
+    parser = argparse.ArgumentParser()
+    add_gateway_subcommands(parser.add_subparsers(dest="command"))
+    argv = ["gateway", "supervisor", action]
+    if action == "stop":
+        argv += ["--timeout", "30.5"]
+    args = parser.parse_args(argv)
+    assert args.func.__name__ == handler
+    if action == "stop":
+        assert args.timeout == 30.5
+
+
+# LLM: 真实根解析器应保留显式目录，规范及跨版本旧入口都必须成立。
+# 函数用途: 守住看门狗子解析器不能用默认None覆盖顶层目录的合同。
+@pytest.mark.parametrize("action", ["start", "stop", "status", "install-service", "uninstall-service"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_cli_supervisor_preserves_explicit_workspace(action, legacy):
+    route = ["gateway", "supervisor-" + action] if legacy else ["gateway", "supervisor", action]
+    args = build_parser().parse_args(["--dir", "/w", *route])
+    assert args.workspace_root == "/w"
+
+
+# LLM: 扩展只注册独立根；碰撞必须在返回内置parser之前拒绝，不执行任何handler。
+# 函数用途: 用真实扩展回调验证退休名、规范名和重复扩展名都不能接管Doctor。
+@pytest.mark.parametrize("name", ["memory-doctor", "memory", "dev", "subagent-run", "extension-status"])
+def test_cli_extension_cannot_reuse_reserved_parser(name):
+    # LLM: 仅模拟扩展注册回调，不加载插件或执行处理器。
+    # 类用途: 验证冲突在内置Doctor处理器被返回之前拒绝。
+    class Registry:
+        # LLM: 捕获真实内置处理器并在拒绝后核对身份；允许先登记一个独立扩展做重名对照。
+        # 函数用途: 尝试注册保留名或重复名，确认不会接管内置命令。
+        def register_cli_commands(self, sub):
+            memory = sub.choices["memory"]
+            doctor = memory.add_subparsers().choices["doctor"]
+            original = doctor.get_default("func")
+            if name == "extension-status":
+                sub.add_parser(name)
+            with pytest.raises(argparse.ArgumentError):
+                sub.add_parser(name).set_defaults(func=lambda args: 99)
+            assert doctor.get_default("func") is original
+    args = build_parser(Registry()).parse_args(["memory", "doctor"])
+    assert args.func.__name__ == "cmd_memory_v2_doctor"
+
+
+# LLM: 检查实际帮助伪动作而非静态目录，不允许规范中间节点只显示自身英文名字。
+# 函数用途: 遍历完整CLI帮助树，防止注册顺序吞掉分组说明。
+def test_cli_no_placeholder_group_help():
+    pending = [build_parser()]
+    bad = []
+    while pending:
+        parser = pending.pop()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                bad.extend((parser.prog, choice.dest) for choice in action._choices_actions if choice.help == choice.dest)
+                pending.extend(action.choices.values())
+    assert not bad
+    memory = build_parser().add_subparsers().choices["memory"]
+    assert memory.description and "统一" in memory.description
+
+
+# LLM: 复用只能合并帮助元数据，不重建子树或丢失先注册的命令。
+# 函数用途: 验证后注册分组的标题、描述和metavar同步到真实帮助组。
+def test_cli_reused_subparser_help_metadata():
+    from agent_py_agent.cli.argv_compat_v1 import CanonicalArgumentParser
+    parser = CanonicalArgumentParser()
+    original = parser.add_subparsers()
+    original.add_parser("first", help="原动作")
+    reused = parser.add_subparsers(title="业务动作", description="动作说明", metavar="动作", help="选择业务动作")
+    assert reused is original
+    assert "first" in reused.choices
+    assert reused.metavar == "动作"
+    assert reused.help == "选择业务动作"
+    assert "业务动作" in parser.format_help()
+    assert "动作说明" in parser.format_help()
+
+
+# LLM: 冻结真实安装器/后台argv及参数值，含重复run与双值attempt身份；来源独立于产品转换表，只解析不执行。
+# 函数用途: 永久守住跨版本升级、回滚和派工消费者，不能随普通v1别名一起删除。
+def test_cli_cross_version_frozen_contracts():
+    expected = {
+        "gateway supervisor-stop": (["gateway", "supervisor-stop"], "cmd_supervisor_stop", {}),
+        "gateway supervisor-start": (["gateway", "supervisor-start"], "cmd_supervisor_start", {}),
+        "gateway stop": (["gateway", "stop", "--drain", "--stop-background", "--background-timeout", "30"], "cmd_gateway_stop", {"drain": True, "stop_background": True, "background_timeout": 30.0}),
+        "gateway start": (["gateway", "start", "--ready-timeout", "60"], "cmd_gateway_start", {"ready_timeout": 60.0}),
+        "adapter stop": (["adapter", "stop"], "cmd_adapter_stop", {"timeout": 10.0}),
+        "subagents-dispatch": (
+            ["--config", "/frozen/config.yaml", "subagents-dispatch", "--workspace-root", "/frozen/workspace",
+             "--apply", "--start-runners", "--max-runners", "2", "--limit", "20",
+             "--reviewer", "create-subagents-auto-start", "--note", "auto-start after create_subagents launch_id=launch-1",
+             "--background-launch-id", "launch-1", "--run-id", "run-1", "--expected-attempt", "run-1", "attempt-1",
+             "--run-id", "run-2", "--expected-attempt", "run-2", "attempt-2"],
+            "cmd_subagents_dispatch",
+            {"config": "/frozen/config.yaml", "workspace_root": "/frozen/workspace", "apply": True, "start_runners": True,
+             "max_runners": 2, "limit": 20, "reviewer": "create-subagents-auto-start",
+             "note": "auto-start after create_subagents launch_id=launch-1", "background_launch_id": "launch-1",
+             "run_id": ["run-1", "run-2"], "expected_attempt": [["run-1", "attempt-1"], ["run-2", "attempt-2"]]},
+        ),
+    }
+    manifest = json.loads((Path(__file__).resolve().parents[2] / "scripts/optimization_removal_manifest.json").read_text())
+    frozen = manifest.get("frozen_cli_cross_version", {})
+    assert set(frozen) == set(expected)
+    parser = build_parser()
+    for name, (argv, handler, values) in expected.items():
+        assert frozen[name]["argv"] == argv
+        assert frozen[name]["handler"] == handler
+        assert frozen[name]["expected"] == values
+        args = parser.parse_args(argv)
+        assert args.func.__name__ == handler
+        assert {key: getattr(args, key) for key in values} == values

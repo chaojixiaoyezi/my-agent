@@ -240,7 +240,9 @@ def _command_offset(argv: Sequence[str], options: dict[str, bool]) -> int:
     return index
 
 
-# LLM: 发布N仅接受精确v1路由，N+1可移除此纯转换器；未知输入交给唯一规范parser拒绝。
+# LLM: 仅转换精确v1路由，未知输入交给规范parser拒绝；普通别名可按发布计划退役。
+# 安装器使用的 gateway supervisor-start/stop、gateway start/stop、adapter stop 与后台
+# subagents-dispatch 是跨版本冻结入口，在安装器/后台派工迁移完成前不得随普通别名删除。
 # 函数用途: 将旧命令前缀转换为规范路径，保留全局选项、业务参数与值的字节内容。
 def decode_v1_argv(argv: Sequence[str], options: dict[str, bool], *, canonical_paths=None) -> list[str]:
     result = list(argv)
@@ -285,15 +287,24 @@ class CanonicalArgumentParser(argparse.ArgumentParser):
         self.legacy_input_boundary = False
         super().__init__(prog=prog, **kwargs)
 
-    # LLM: 已创建的命名空间不能再拥有第二棵子树；原业务dest由原注册器保持。
-    # 函数用途: 复用已存在的子命令集合，供按领域注册的命令共享父节点。
+    # LLM: 复用原action和命令对象，只合并显式参数及帮助元数据；分组迁移不影响位置参数或处理器。
+    # 函数用途: 让后注册的领域补齐标题、描述和动作说明，而不重建已有子树。
     def add_subparsers(self, **kwargs):
         existing = next((a for a in self._actions if isinstance(a, argparse._SubParsersAction)), None)
         if existing is not None:
-            if "dest" in kwargs:
-                existing.dest = kwargs["dest"]
-            if "required" in kwargs:
-                existing.required = kwargs["required"]
+            for key in ("dest", "required", "metavar", "help"):
+                if key in kwargs:
+                    setattr(existing, key, kwargs[key])
+            if "title" in kwargs or "description" in kwargs:
+                group = next(g for g in self._action_groups if existing in g._group_actions)
+                if group is self._positionals:
+                    group._group_actions.remove(existing)
+                    group = self.add_argument_group(kwargs.get("title", "subcommands"))
+                    group._group_actions.append(existing)
+                    self._subparsers = group
+                for key in ("title", "description"):
+                    if key in kwargs:
+                        setattr(group, key, kwargs[key])
             return existing
         return super().add_subparsers(**kwargs)
 
@@ -310,21 +321,54 @@ class CanonicalArgumentParser(argparse.ArgumentParser):
         return super().parse_known_args(args, namespace)
 
 
-# LLM: 注册器把声明直接放进唯一规范树，不先建旧parser再复制；所有处理器仍为原业务函数。
+# 合成节点没有独立注册器，帮助文案必须在首次创建时就可读；完整注册随后可覆盖说明。
+_GROUP_HELP = {
+    ("memory",): "记忆读取、候选管理与统一诊断",
+    ("context",): "上下文快照与输入信息",
+    ("dev",): "开发调试、模型基准与合同检查",
+    ("home",): "用户空间状态、索引与保留期管理",
+    ("task",): "任务查询、控制与工作区管理",
+    ("runtime",): "运行状态与残留执行检查",
+    ("local-store",): "本地存储检索、索引与诊断",
+    ("guidance",): "向执行中的代理发送补充指导",
+    ("subagents",): "子代理创建、派工、查询与恢复",
+    ("audit",): "审计记录查询",
+    ("config",): "配置读取与受控修改",
+    ("admin",): "管理员密码与渠道身份绑定",
+    ("memory", "daily"): "记忆日记查询",
+    ("memory", "archive"): "记忆归档查询、检索与恢复",
+    ("memory", "artifact"): "记忆产物读取",
+    ("memory", "fact"): "事实记忆写入",
+    ("home", "index"): "用户空间索引管理",
+    ("task", "workspace"): "任务工作区查询",
+    ("subagents", "leadership"): "子代理指挥权恢复计划与执行",
+    ("subagents", "actions"): "子代理动作计划与执行",
+}
+
+
+# LLM: 注册器把声明直接放进唯一规范树；内置阶段允许归并节点，扩展阶段拒绝全部保留名。
 # 类用途: 将现有命令族接入规范命名空间，保留业务Namespace字段但不注册旧平铺入口。
 class CanonicalCommandRegistrar:
-    # LLM: choices直接指向真实规范根；第三方根扩展仍保留，但不能覆盖内置命名空间。
-    # 函数用途: 绑定唯一根解析器并记录已经完成的注册。
+    # LLM: choices直接指向真实规范根；默认处于内置装配阶段，扩展须由build_parser显式切换。
+    # 函数用途: 绑定唯一根解析器，初始化命令去重集合和注册阶段。
     def __init__(self, root):
         self.root = root
         self.choices = root.add_subparsers().choices
         self._registered = set()
+        self._extensions = False
 
-    # LLM: 中间节点默认只显示帮助，不能继承裸启动的聊天处理器而发起业务。
-    # 函数用途: 沿规范路径找到或创建命名空间，返回唯一实际解析器。
+    # LLM: 内置注册完成后单向切换，不清空保留名或已经注册的命令，不改变业务处理器。
+    # 函数用途: 在调用第三方扩展前关闭内置节点归并权限。
+    def begin_extensions(self):
+        self._extensions = True
+
+    # LLM: 扩展名和别名在返回parser前检查冲突；合成节点只显示帮助，内置复用保留子树并补齐说明。
+    # 函数用途: 将命令注册到唯一规范路径，拒绝扩展借退休名字接管内置处理器。
     def add_parser(self, name, **kwargs):
         if name in self._registered:
             raise argparse.ArgumentError(self.root.add_subparsers(), f"命令已注册：{name}")
+        if self._extensions and name in (CANONICAL_ROOTS | CLI_ROOT_PATHS.keys() | self.choices.keys()):
+            raise argparse.ArgumentError(self.root.add_subparsers(), f"扩展不得占用内置或历史命令：{name}")
         aliases = set(kwargs.get("aliases", ()))
         if aliases & (CANONICAL_ROOTS | CLI_ROOT_PATHS.keys() | self.choices.keys()):
             raise argparse.ArgumentError(self.root.add_subparsers(), "别名不得占用规范根或历史路由")
@@ -334,12 +378,20 @@ class CanonicalCommandRegistrar:
             sub = parser.add_subparsers()
             final = index == len(path) - 1
             if part not in sub.choices:
-                parser = sub.add_parser(part, **(kwargs if final else {"help": part}))
+                parser = sub.add_parser(part, **(kwargs if final else {"help": _GROUP_HELP[path[:index + 1]]}))
                 parser.set_defaults(func=_namespace_help, _namespace_parser=parser)
             else:
                 parser = sub.choices[part]
                 if final and name not in CLI_ROOT_PATHS:
                     raise argparse.ArgumentError(sub, f"命令已注册：{name}")
+                if final:
+                    for key in ("description", "epilog", "usage", "formatter_class"):
+                        if key in kwargs:
+                            setattr(parser, key, kwargs[key])
+                    if "help" in kwargs:
+                        for choice in sub._choices_actions:
+                            if choice.dest == part:
+                                choice.help = kwargs["help"]
         parser.set_defaults(command=name)
         self._registered.add(name)
         return parser

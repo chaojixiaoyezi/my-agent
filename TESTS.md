@@ -1,3 +1,33 @@
+## 2026-10-29 e905 sol-9 R1：CLI 消费方、冻结合同与诊断返工
+
+来源：07 `fix-e905-sol-9-r1.md` 七项要求及 Opus/Astra-1 复核。接 `74c56cf71`；真实检查基线仍为 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。
+
+- 普通 argparse 消费方改用 `gateway supervisor start/stop`，保留原 handler、超时预算和退出码断言，不恢复平铺注册；顶层目录用 SUPPRESS 避免被子解析器覆盖。冻结快照中仅 supervisor 的目录默认值由 null 修正为 SUPPRESS，并有规范/旧路径显式目录回归；这是本轮明确要求的缺陷修复，不是放宽冻结比较。
+- 内置装配与扩展阶段分离，退休名/规范名/重复名在返回 parser 前拒绝；合成组中文帮助、复用节点 description 和真实子解析器帮助分组元数据均恢复。
+- manifest 新增永久 `frozen_cli_cross_version` 表，独立测试逐项锁定安装器五类调用和后台 dispatch 的 argv、handler 与参数；不依赖产品映射表反推期望，不随普通 v1 别名退役。
+- 独立复核后补强两处测试：后台 dispatch 采用真实生产者参数形状，锁定 config/workspace、执行开关、预算、launch、重复 run 和双值 expected-attempt；配置失败直接断言服务的具体整数校验原因，避免中文兜底也通过。
+- 配置旧值先按原 YAML 读取语义去引号再脱敏，打印中文失败原因，空串显示未设置；仅已知全局写门拒绝转结构化非零。Doctor all.common 固定四字段的 runtime/memory 双键，新增真实 parser→Agent→DoctorService 临时 owner 回归；默认与 v1 原视图保持。
+- 恢复有效 CLI 章节、跨文档锚点和模型/插件/会话/身份说明，同步记忆模块、文件树和设计账；替换机械双层注释及 parser 英文模块注释。
+
+红测：原局部消费方 10/10 失败；扩展/目录/帮助/冻结合同文件 191 项中 14 失败；配置/聚合红测 23 项中 10 失败，真实 Doctor CLI 两项中一项失败。首次整合 382 项中仅子进程导入检查失败：当时 PYTHONSAFEPATH=1 且 PYTHONPATH 未设，`find_spec('agent_py_agent')` 返回 None。后续只显式设置本工作树 PYTHONPATH，不取消 safe_path、不修改测试。最终结果见本轮 DONE。
+
+在工作树根复现（独立进程也从此树导入；只跑明确列出的测试）：
+
+```sh
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  agent_py_agent/tests/test_opt_cli_contracts.py agent_py_agent/tests/test_cli_parser.py \
+  agent_py_agent/tests/test_subcommands_basic_class.py agent_py_agent/tests/test_subcommands_gateway_class.py \
+  agent_py_agent/tests/test_adapter_daemon.py agent_py_agent/tests/test_home_doctor.py \
+  agent_py_agent/tests/test_memory_v2_cli.py agent_py_agent/tests/test_cli_config.py \
+  agent_py_agent/tests/test_memory_doctor_class.py agent_py_agent/tests/test_memory_commands_cli.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base 4bea324e3
+git diff --check 4bea324e3..HEAD
+```
+
+不运行全仓测试，不启动/停止生产服务，不修改真实 owner 配置；解析与临时 owner 验证不代表安装器升级回滚、launchd/systemd、真实 OAuth/IM 或部署已经验证。
+
 ## 2026-10-29 e905 sol-9：规范CLI、统一诊断与删除门
 
 来源：07 的 `task-e905-sol-9.md` v2（291行）及总规划4.2；工作树 `/tmp/wt-e905-sol-9`，分支 `opt-e905/sol-9`，真实基线 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。只改本分支；不推送、部署、修改真实owner数据或安装系统服务。

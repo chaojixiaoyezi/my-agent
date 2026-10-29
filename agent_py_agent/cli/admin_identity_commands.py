@@ -102,7 +102,7 @@ def cmd_admin_password_status(args) -> int:
     return 0
 
 
-# LLM: 有副作用：删除密码文件；不删除绑定，提示用户如需解除绑定另用 admin-identities remove。
+# LLM: 仅可信本地管理员可删除密码文件；不删除绑定，解除绑定另走规范 admin identities remove。
 # 函数用途: 清除管理员密码。
 def cmd_admin_password_clear(args) -> int:
     home_root = _local_admin_home(args)
@@ -110,7 +110,7 @@ def cmd_admin_password_clear(args) -> int:
         return 2
     removed = clear_admin_password(home_root)
     print("管理员密码已清除。" if removed else "本来就没有设置管理员密码。")
-    print("已绑定的 IM 身份保持不变；需要解除时运行 my-agent admin-identities list / remove。")
+    print("已绑定的 IM 身份保持不变；需要解除时运行 my-agent admin identities list / remove。")
     return 0
 
 

@@ -1,8 +1,8 @@
 
 from __future__ import annotations
 
-# LLM: The module import itself is a startup boundary. Keep module-scope imports dependency-light;
-# full command families and extension discovery are loaded only when their route is actually needed.
+# LLM: 模块导入本身就是启动边界，顶层依赖必须保持轻量；只有实际需要完整路由时
+# 才加载管理命令族与扩展发现，不在导入阶段初始化业务状态。
 # 模块用途: 构建命令行解析器并分发命令；chat/resume 走轻量入口，让 TUI 不必等待所有管理
 # 命令和插件加载，其他命令仍使用完整解析器。
 
@@ -26,11 +26,9 @@ if TYPE_CHECKING:
     from ..agent.extensions import ExtensionRegistry
 
 
-# LLM: 全量解析器在原run注册后补共用目录参数，顶层与子命令均走同一工作区字段，不改其它命令处理器。
-# Full parser compatibility remains the authority for every non-interactive command. Keep
-# registrations unchanged and pass an already loaded extension registry from main().
-# `skills` is the only user entry that may confirm self-learning Skill proposals.
-# `admin-password` / `admin-identities` are the only CLI entries for the IM admin password and bindings.
+# LLM: 全量解析器先装配内置规范树，再切换扩展注册阶段；扩展不可复用保留名或修改内置处理器。
+# 顶层与run共用目录字段；传入的扩展已经由main加载，本函数不加载配置或执行任何业务。
+# skills保留技能候选确认入口，admin password/identities保留密码与身份绑定入口。
 # 函数用途: 构建包含全部内置命令和扩展命令的解析器，供管理命令、测试和帮助页使用。
 def build_parser(extension_registry: ExtensionRegistry | None = None) -> argparse.ArgumentParser:
     parser = _build_root_parser()
@@ -89,6 +87,7 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_feishu_subcommands(subparsers)
     add_admin_identity_subcommands(subparsers)
     if extension_registry is not None:
+        subparsers.begin_extensions()
         extension_registry.register_cli_commands(subparsers)
 
     memory = subparsers.choices["memory"]

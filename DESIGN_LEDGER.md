@@ -1,3 +1,11 @@
+## 2026-10-29 e905 sol-9：规范 CLI、统一 Doctor 与冻结合同（开发分支，未部署）
+
+- **唯一规范入口**：内置 CLI 从旧平铺目录收敛为 24 根，`cli/parser.py` 与 `cli/argv_compat_v1.py` 复用同一解析树；旧输入只在根边界解码，不重新解释配置值、正文或 `--` 后的文本。新生产提示、脚本和人工调用生成规范路径；扩展不得占用规范根或历史映射名来覆盖内置处理函数。
+- **兼容层生命周期**：普通 v1 输入迁移与持久化/跨版本合同不能混为一谈。除原 `gateway supervisor`、`gateway run`、`adapter start`、maintenance lock/unlock 和模块入口外，安装器真实使用的 `gateway supervisor-start`、`gateway supervisor-stop`、`gateway stop --drain --stop-background --background-timeout 30`、`gateway start --ready-timeout 60`、`adapter stop` 须永久守护。后台 `background/dispatch.py` 及 `startup_recovery.py` 的 `subagents-dispatch` 在消费者完成迁移并验证前不可随转换器移除；新调用仍用 `gateway supervisor start/stop` 与 `subagents dispatch`。实际冻结清单和测试由代码集成者核验，不由文档文字代替。
+- **唯一诊断聚合**：`agent/user_space/home_doctor.py::DoctorService` 承接 runtime/memory/all，只读读取原 stats/status/plan，CLI 保留原投影及退出语义；删除 `cli/memory_doctor.py`、`cli/memory_commands/memory_doctor_cmd.py` 和旧导出。all 的 `common` 各公共字段始终含 `runtime` / `memory` 子键，不按两侧值是否相等改变结构；不推测字段值。
+- **文档不退役有效能力**：根 [CLI Reference](CLI_REFERENCE.md) 保留人工规则与候选控制的准确标题/锚点、`self_map`、`/plugins`、`/model`、OAuth、`/goal`、`/btw` 和 IM 管理员身份开关。历史手册只供迁移核对；`/exit` 退出界面，`/admin logout` 撤销绑定，`/logout` 不再代指任一动作。
+- **结构与验证边界**：新增兼容注册器、删除门/manifest 和性能 Probe 的职责见 [文件树](CODEBASE_TREE.md)，记忆导出与诊断职责见 [Memory Structure](docs/modules/memory/04-structure.md)。文档修复、解析与局部 Probe 不证明安装器真实升级/回滚、Gateway 生命周期、外部访问或运行包部署；这些观察点仍须独立验收。
+
 ## 2026-10-28 Wave 9 Item 9：12 域兼容的渐进能力寻址与初始提示瘦身（已集成，未部署）
 
 来源：`07-tasks/wave9-item9.md` 与 `batch_20261028_features_and_bugfixes_plan.md` Item 9，在集成工作树 `/tmp/wt-wave9-integrated`（`wave9-integrated`）落地。

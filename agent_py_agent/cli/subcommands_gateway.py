@@ -210,11 +210,11 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_result.set_defaults(func=cmd_gateway_result)
 
 
-# LLM: 注册不运行服务；监护参数与安装维护入口分别保持原handler归属。
+# LLM: 注册不运行服务；目录选项未给出时不覆盖顶层显式目录，监护及安装维护保留原handler。
 # 函数用途: 注册监护的启动、停止、状态及维护命令。
 def _add_gateway_supervisor_subcommands(gateway_sub):
     supervisor_run = gateway_sub.add_parser("supervisor", help="运行看门狗；不带子动作时保持持久化的前台启动合同")
-    supervisor_run.add_argument("--workspace-root", help="工作区根目录")
+    supervisor_run.add_argument("--workspace-root", default=argparse.SUPPRESS, help="工作区根目录")
     supervisor_run.add_argument("--heartbeat-timeout", type=float, default=120.0, help="心跳超时秒数")
     supervisor_run.add_argument("--check-interval", type=float, default=10.0, help="健康检查间隔秒数")
     supervisor_run.add_argument("--max-restart-attempts", type=int, default=5, help="最大重启次数")

@@ -13,9 +13,12 @@ from __future__ import annotations
 """
 
 import argparse
+import json
 from pathlib import Path
 
+from agent_py_agent.agent.common.global_write_guard import GlobalWriteInWorkerError
 from agent_py_agent.agent.settings import load_config
+from agent_py_agent.agent.settings.config_io import load_simple_yaml
 from agent_py_agent.agent.settings.parameter_changes import ChangeOrigin, WritePaths, set_parameter
 from agent_py_agent.agent.settings.user_config_capability import (
     mask_value,
@@ -43,8 +46,8 @@ def add_config_subcommands(sub: argparse._SubParsersAction) -> None:
     getter.set_defaults(func=cmd_config_get)
 
 
-# LLM: CLI保留原五项白名单，写入只经现有typed参数服务及其全局写门、正式回读和脱敏账本，不授予Slash身份。
-# 函数用途: 校验允许的字段后委托唯一参数写服务，不再直接修改YAML。
+# LLM: 仅五项白名单可写；旧值只读解析后立即脱敏，写入仍经唯一参数服务和全局写门；仅捕获已知门拒绝，未知执行故障不伪报未执行。
+# 函数用途: 展示安全的前后值或中文失败原因，权限拒绝返回结构化非零结果；不直接写 YAML。
 def cmd_config_set(args) -> int:
     key = str(args.key)
     if key not in _SETTABLE_KEYS:
@@ -55,18 +58,24 @@ def cmd_config_set(args) -> int:
     if not path.exists():
         print(f"❌ 配置文件不存在: {path}")
         return 1
-    report = set_parameter(key, args.value, paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
-    if not report.get("ok"):
-        print(f"❌ {report.get('code', 'CONFIG_WRITE_FAILED')}")
+    # 服务账本中的 previous 已在带 YAML 引号时脱敏，无法还原正确前缀；只读原配置并先解析再脱敏。
+    previous = load_simple_yaml(path).get(key)
+    before = mask_value(key, previous) if previous is not None else "(新增)"
+    try:
+        report = set_parameter(key, args.value, paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
+    except GlobalWriteInWorkerError as exc:
+        print(json.dumps({"ok": False, "code": exc.error_code,
+                          "error": "当前受限进程没有写入全局配置的权限。", "executed": False}, ensure_ascii=False))
         return 1
-    old = report.get("previous")
-    before = str(old) if old is not None else "(新增)"
+    if not report.get("ok"):
+        print(f"❌ {report.get('code', 'CONFIG_WRITE_FAILED')}: {report.get('error') or '配置写入失败，原因未知。'}")
+        return 1
     print(f"✅ 已设置 {key}: {before} → {mask_value(key, str(args.value))}\n   写入 {path}")
     return 0
 
 
-# LLM: 读取统一参数事实中的生效值和来源，服务端已脱敏；不再维护raw YAML优先级分支。
-# 函数用途: 从当前显式配置路径读取正式配置事实，缺失保持原0退出码。
+# LLM: 生效值与来源只取统一参数事实，值已脱敏；缺失和空串保持未设置展示，不把数字零当空串，不产生写入。
+# 函数用途: 读取显式配置的安全展示值，未设置正常返回零。
 def cmd_config_get(args) -> int:
     path = Path(args.config)
     if not path.exists():
@@ -74,7 +83,7 @@ def cmd_config_get(args) -> int:
         return 1
     key = str(args.key)
     fact = read_config_fact(key, user_path=path, default_path=packaged_config_path(), config=load_config(path))
-    if fact["source"] == "missing":
+    if fact["source"] == "missing" or fact["effective"] == "":
         print(f"(未设置) {key}")
         return 0
     print(f"{key}: {fact['effective']}")

@@ -490,8 +490,8 @@ __all__ = [
 def _doctor_projection(agent, args):
     return DoctorService(agent, migration_factory=_migration_service, retention_factory=_retention_service).report(args, scope=getattr(args, "scope", "memory"))
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _print_memory_doctor_report 提供对应的诊断计算或显示字段。
+# LLM: 仅接受 legacy runtime 报告；JSON 保留机器字段，文本展示配置、索引和归档统计，不在打印时重新诊断或修复。
+# 函数用途: 向终端输出旧版 Memory Doctor 的 JSON 或分段摘要。
 def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -> None:
 
     if json_output:
@@ -534,8 +534,8 @@ def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -
             f"files={state['file_count']} recent={recent}"
         )
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _print_home_report 提供对应的诊断计算或显示字段。
+# LLM: 只消费 Home 报告已有的 root/counts/directories；目录存在性不等于健康，不产生文件系统副作用。
+# 函数用途: 打印 Home 根目录、日记与任务数及各目录存在状态。
 def _print_home_report(home: dict[str, Any]) -> None:
     print("Home")
     print(f"- root={home['root']}")
@@ -543,8 +543,8 @@ def _print_home_report(home: dict[str, Any]) -> None:
     for name, state in home["directories"].items():
         print(f"- {name}: exists={state['exists']}")
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _print_home_doctor_summary 提供对应的诊断计算或显示字段。
+# LLM: dangling_count 与 planned_count 均来自既有诊断报告；候选数不是已清理数，不执行索引重建或保留期清理。
+# 函数用途: 打印悬空索引数量与保留期清理候选数量。
 def _print_home_doctor_summary(report: dict[str, Any]) -> None:
     print("Home Doctor")
     print(

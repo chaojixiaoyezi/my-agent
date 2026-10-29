@@ -333,8 +333,8 @@ __all__ = ["build_home_doctor_report", "DoctorService"]
 
 MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT = 5
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _normalize_warning_item 提供对应的诊断计算或显示字段。
+# LLM: 接受字典、带 to_dict 的对象、数据类或普通值；只转换展示形状，不更改警告语义或执行修复。
+# 函数用途: 将一种配置警告转换为报告字典。
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
@@ -344,14 +344,14 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
         return asdict(item)
     return {"message": str(item)}
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _config_warnings 提供对应的诊断计算或显示字段。
+# LLM: 仅消费加载器已记录的 memory_config_warnings，缺失按空列表处理；不重新校验或修改配置。
+# 函数用途: 汇集配置对象中的记忆警告并统一其展示格式。
 def _config_warnings(config: object) -> list[dict[str, Any]]:
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _memory_config_payload 提供对应的诊断计算或显示字段。
+# LLM: 只投影四项记忆诊断配置；缺属性仍抛错，不伪造默认值，也不包含通道凭据。
+# 函数用途: 提取归档、钩子、路由模式和自动读取限额。
 def _memory_config_payload(config: object) -> dict[str, Any]:
     fields = [
         "memory_archive_level",
@@ -361,8 +361,8 @@ def _memory_config_payload(config: object) -> dict[str, Any]:
     ]
     return {field: getattr(config, field) for field in fields}
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _build_routing_doctor 提供对应的诊断计算或显示字段。
+# LLM: 从显式索引只读加载路由并按传入根验证；加载失败保留 load_error，extended=False 省去旧视图没有的两项字段。
+# 函数用途: 生成路由索引状态、路由详情及校验警告。
 def _build_routing_doctor(root: Path, index_path: Path, *, extended: bool = True) -> dict[str, Any]:
     from ..memory_routing import load_routes, validate_routes
 
@@ -390,8 +390,8 @@ def _build_routing_doctor(root: Path, index_path: Path, *, extended: bool = True
     payload["validation_warnings"] = validate_routes(routes, root)
     return payload
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _build_archive_doctor 提供对应的诊断计算或显示字段。
+# LLM: 仅检查指定根的 hook/raw 与可选快照；include_snapshots=False 保持旧 runtime 字段，不创建目录或归档。
+# 函数用途: 聚合归档保留配置、文件统计和快照一致性警告。
 def _build_archive_doctor(root: Path, config: object, *, include_snapshots: bool = True) -> dict[str, Any]:
     hook_today_path = snapshot_path_for(root)
     raw_today_path = raw_event_path_for(root)
@@ -410,8 +410,8 @@ def _build_archive_doctor(root: Path, config: object, *, include_snapshots: bool
         result["consistency_warnings"] = _archive_consistency_warnings(hook_today_path.parent, snapshot_dir)
     return result
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _archive_dir_payload 提供对应的诊断计算或显示字段。
+# LLM: 只统计目录内普通 JSONL 文件，按修改时间和名称倒序保留最近五项；不读正文，缺目录不创建。
+# 函数用途: 返回归档目录存在性、文件总数、当日路径与近期文件元数据。
 def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | None = None) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
@@ -429,8 +429,8 @@ def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | 
         ],
     }
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _archive_file_payload 提供对应的诊断计算或显示字段。
+# LLM: 对已选文件只做 stat，不读记忆正文；文件消失或不可读的异常沿原调用链暴露。
+# 函数用途: 投影归档文件的名称、路径、大小与修改时间。
 def _archive_file_payload(path: Path) -> dict[str, Any]:
     stat = path.stat()
     return {
@@ -440,8 +440,8 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
         "modified_at": stat.st_mtime,
     }
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _snapshot_dir_payload 提供对应的诊断计算或显示字段。
+# LLM: 检查普通 JSON 快照是否可读且顶层为对象；坏文件单列路径，不修复或输出正文，最近五项仅带元数据。
+# 函数用途: 汇总快照目录文件数、无效文件及近期快照。
 def _snapshot_dir_payload(directory: Path, *, config: object) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.json") if path.is_file()] if directory.exists() else [],
@@ -468,8 +468,8 @@ def _snapshot_dir_payload(directory: Path, *, config: object) -> dict[str, Any]:
         ],
     }
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _archive_consistency_warnings 提供对应的诊断计算或显示字段。
+# LLM: 仅比较 hook JSONL 与快照 JSON 两层是否各有文件；这是存在性提示，不证明内容一致，不执行补齐。
+# 函数用途: 报告钩子记录和压缩快照单边缺失的情况。
 def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[str]:
     warnings: list[str] = []
     hook_exists = hook_dir.exists() and any(hook_dir.glob("*.jsonl"))
@@ -480,8 +480,8 @@ def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[st
         warnings.append("snapshot JSON files exist but hook JSONL layer is empty")
     return warnings
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _index_payload 提供对应的诊断计算或显示字段。
+# LLM: 对传入的索引路径只查询 exists/is_file，不读取内容，也不把存在性等同于有效路由。
+# 函数用途: 生成索引路径及文件类型的诊断字段。
 def _index_payload(index_path: Path) -> dict[str, Any]:
     return {
         "path": str(index_path),
@@ -489,8 +489,8 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
         "is_file": index_path.is_file(),
     }
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _route_payload 提供对应的诊断计算或显示字段。
+# LLM: 原样投影已加载 Route 的元数据，不解析目标正文或改变读取策略；旧 runtime 字段裁剪由调用方负责。
+# 函数用途: 序列化一条路由的触发、来源、范围和时效字段。
 def _route_payload(route) -> dict[str, Any]:
     return {
         "route_id": route.route_id,
@@ -508,8 +508,8 @@ def _route_payload(route) -> dict[str, Any]:
         "source_path": route.source_path,
     }
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 类用途: 统一两种体检facet与请求内缓存。
+# LLM: 当前 Agent 决定 owner 边界，迁移和保留期工厂由 CLI 注入；请求内缓存只读事实，不触发 apply、模型或修复。
+# 类用途: 统一 runtime/memory 诊断投影并隔离公开报告与内部缓存。
 class DoctorService:
     # LLM: 保存显式当前Agent与请求级缓存，不初始化任何持久服务或目录。
     # 函数用途: 建立一次只读诊断请求。
@@ -524,8 +524,8 @@ class DoctorService:
     def report(self, args, *, scope="memory", legacy=False):
         return deepcopy(self._report(args, scope=scope, legacy=legacy))
 
-    # LLM: scope与v1是封闭协议值；未知输入拒绝，v1只投影runtime，不能触发memory维护。
-    # 函数用途: 计算指定范围的诊断，默认memory保持既有机器字段。
+    # LLM: scope 与 v1 只接受封闭值；all 公共字段始终用 runtime/memory 双键，即使值相等也不缩形；v1 不调用记忆维护服务。
+    # 函数用途: 选择原视图或稳定的双视图聚合，不改变默认 memory 字段与成功判据。
     def _report(self, args, *, scope="memory", legacy=False):
         if scope not in {"runtime", "memory", "all"}:
             raise ValueError("未知诊断范围")
@@ -540,9 +540,9 @@ class DoctorService:
         common = {}
         for key in ("config", "routing", "archive"):
             runtime_value, memory_value = runtime.pop(key), memory.pop(key)
-            common[key] = runtime_value if runtime_value == memory_value else {"runtime": runtime_value, "memory": memory_value}
+            common[key] = {"runtime": runtime_value, "memory": memory_value}
         runtime_warnings, memory_warnings = runtime.pop("warnings"), memory.pop("config_warnings")
-        common["warnings"] = runtime_warnings if runtime_warnings == memory_warnings else {"runtime": runtime_warnings, "memory": memory_warnings}
+        common["warnings"] = {"runtime": runtime_warnings, "memory": memory_warnings}
         return {"ok": runtime["ok"] and memory["ok"], "scope": "all", "common": common,
                 "runtime": runtime, "memory": memory}
 
@@ -590,7 +590,7 @@ class DoctorService:
 
 
 
-# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
-# 函数用途: _resolve_index_path 提供对应的诊断计算或显示字段。
+# LLM: 显式 raw_index 与 owner 默认索引的优先级全部委托统一解析器；本函数不判断内容有效性或创建文件。
+# 函数用途: 将工作根、可选索引和 Home 路径解析为诊断读取目标。
 def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths=None) -> Path:
     return resolve_route_index_target(root, raw_index, home_paths=home_paths).path

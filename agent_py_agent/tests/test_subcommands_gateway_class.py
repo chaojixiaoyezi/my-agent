@@ -295,8 +295,10 @@ class TestGatewayResultCommand:
 class TestSupervisorSubcommands:
     """测试 supervisor 相关子命令。"""
 
+    # LLM: 使用普通argparse的局部注册，不借根入口旧名解码，也不运行服务。
+    # 函数用途: 验证规范看门狗启动路径接到原处理器。
     def test_supervisor_start_command_exists(self):
-        """测试 supervisor-start 命令存在。
+        """测试 gateway supervisor start 命令存在。
 
         验证命令被正确注册。
         """
@@ -306,11 +308,14 @@ class TestSupervisorSubcommands:
         sub = parser.add_subparsers(dest="gateway_command")
         add_gateway_subcommands(sub)
 
-        args = parser.parse_args(["gateway", "supervisor-start"])
+        args = parser.parse_args(["gateway", "supervisor", "start"])
         assert hasattr(args, "func")
+        assert args.func.__name__ == "cmd_supervisor_start"
 
+    # LLM: 只解析规范停止路径及浮点超时，不触发进程终止。
+    # 函数用途: 验证局部注册保留原停止处理器和显式预算。
     def test_supervisor_stop_command_has_timeout(self):
-        """测试 supervisor-stop 命令有 --timeout 参数。
+        """测试 gateway supervisor stop 命令有 --timeout 参数。
 
         验证 --timeout 参数正确工作。
         """
@@ -320,8 +325,9 @@ class TestSupervisorSubcommands:
         sub = parser.add_subparsers(dest="gateway_command")
         add_gateway_subcommands(sub)
 
-        args = parser.parse_args(["gateway", "supervisor-stop", "--timeout", "30.0"])
+        args = parser.parse_args(["gateway", "supervisor", "stop", "--timeout", "30.0"])
         assert args.timeout == 30.0
+        assert args.func.__name__ == "cmd_supervisor_stop"
 
     def test_start_all_command_exists(self):
         """测试 start-all 命令存在。
