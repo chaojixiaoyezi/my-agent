@@ -750,8 +750,8 @@ def test_reflected_token_scrubbed_before_operation_ledger(receiver, adverse_rece
 
     _server, agent, _secret, _path = receiver
     url, state = adverse_receiver
-    # 混合大小写证明Content-Encoding小写规范化后仍不会泄漏。
-    secret = "Reflect-Canary-Mixed-" + uuid.uuid4().hex
+    # 混合大小写证明Content-Encoding小写规范化后仍不会泄漏；映射d/e避免随机hex撞上edac/22de四字符退避。
+    secret = "Reflect-Canary-Mixed-" + uuid.uuid4().hex.translate(str.maketrans("de", "01"))
     state["encoding"] = encoding
     if marker_overlap:
         tail = "a" * 22
@@ -1021,7 +1021,7 @@ def test_secret_variants_scrubbed_in_real_http_and_ledger(receiver, adverse_rece
 
     _server, agent, _secret, _path = receiver
     url, state = adverse_receiver
-    secret = "R3+Token/Key%:" + uuid.uuid4().hex + "?"
+    secret = "R3+Token/Key%:" + uuid.uuid4().hex.translate(str.maketrans("de", "01")) + "?"
     state.update(encoding=True, echo_form=form)
     save_remote_endpoint(agent, "r3-reflect", url, secret, allowed_private_hosts=["127.0.0.1"])
     store = LocalStore(tmp_path / "operations.db", enable_fts=False)
