@@ -2,11 +2,13 @@
 # 模块用途: 显式调用的孤儿删除与七日瘦身、三十日归档服务；不自行启动后台或接入生产清理。
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
 import sqlite3
 import stat
+import sys
 import threading
 import time
 import uuid
@@ -14,12 +16,14 @@ from collections import OrderedDict
 from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from functools import lru_cache
 from itertools import islice
 from pathlib import Path
 from typing import Any
 
 from ....common.json_io import write_private_json_file_atomic
 from ....common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
+from ....common.opaque_id import validate_opaque_id
 from ....runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from ....runtime_db.schema import runtime_db_path
 
@@ -212,9 +216,9 @@ def _pinned_projection(owner_home, run_dir, expected=None):
         yield boundary
 
 
-# LLM: 每次高风险操作重新从受信owner入口核对父链；固定旧FD仍可读不能证明它仍属于当前owner。
+# LLM: 每次高风险操作重核父链及已固定批次；仅未打开批次的异常恢复可单独核原投影，不授予销毁许可。
 # 函数用途: 拒绝owner、agents或当前run目录的身份置换。
-def _verify_boundary(boundary):
+def _verify_boundary(boundary, *, include_batch=True):
     for label, parts in (("owner", ()), ("agents", ("agents",)),
                          ("run", ("agents", boundary["current_name"]))):
         descriptor = open_directory_beneath(boundary["owner_home"], parts, require_dir_fd=True)
@@ -223,6 +227,12 @@ def _verify_boundary(boundary):
                 raise ValueError("维护中的投影父链已变化")
         finally:
             os.close(descriptor)
+    if include_batch and boundary.get("batch_name") is not None:
+        if boundary.get("batch") is None:
+            raise ValueError("整批隔离目录尚未固定FD")
+        current = os.stat(boundary["batch_name"], dir_fd=boundary["agents"], follow_symlinks=False)
+        if not stat.S_ISDIR(current.st_mode) or _identity(current) != _identity(os.fstat(boundary["batch"])):
+            raise ValueError("整批隔离目录身份已变化")
 
 
 # LLM: 时间必须有限且结构化；支持已有ISO时间戳，错误不能使目录显得更旧。
@@ -260,7 +270,7 @@ def _has_parent_wake(owner_home: Path, run_id: str, payload: dict[str, Any]) -> 
     roots.extend((owner_home / "workspace/runtime/workspaces").glob("*/conversations"))
     checked = 0
     for root in roots:
-        for kind in ("urgent", "normal", "processing"):
+        for kind in ("urgent", "normal", "processing", "dedupe"):
             folder = root / "wake_queue" / kind
             if folder.is_symlink():
                 return True
@@ -274,6 +284,8 @@ def _has_parent_wake(owner_home: Path, run_id: str, payload: dict[str, Any]) -> 
                     if checked > 5000:
                         return True
                     wake = read_projection_object(Path(entry.path))
+                    if kind == "dedupe" and wake.get("phase") != "prepared":
+                        continue
                     if str(wake.get("status", "pending")) in {"consumed", "acked", "acknowledged", "cancelled"}:
                         continue
                     if _references_ids(wake, ids):
@@ -412,6 +424,10 @@ def _archive_entry(path: Path, compact: dict[str, Any]) -> None:
     boundary = _MAINTENANCE_BOUNDARY.get()
     if boundary is None or path.parent != boundary["owner_home"] / "agents":
         raise ValueError("归档缺少受信维护边界")
+    if (not isinstance(compact, dict) or compact.get("schema") != "subagent_compact.v1"
+            or compact.get("run_id") != boundary["run_id"]):
+        raise ValueError("归档新条目schema或run_id不符")
+    validate_opaque_id(compact["run_id"], kind="run_id")
     _verify_boundary(boundary)
     with ExitStack() as stack:
         fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
@@ -456,7 +472,7 @@ def _verify_archive_leaf(boundary, name, fd):
         raise ValueError("归档不是当前单链接普通文件")
 
 
-# LLM: 先固定父链并持owner目录排他锁；缺库时显式初始化canonical，再锁所有现存runtime写事务和已有state锁。
+# LLM: owner目录EX与真实发布的祖先SH共用同一inode；固定父链后初始化canonical并锁runtime写事务及state，锁序先目录后业务锁。
 # 函数用途: 为末次验证到删除持有真实FD与运行库锁；不改业务行，锁忙放弃本目录。
 @contextmanager
 def _maintenance_guard(owner_home: Path, run_dir: Path, *, expected=None):
@@ -539,53 +555,144 @@ def _maintain_projection(owner_home, run_dir, info, report, *, now, active_run_i
                 report["archived_dirs"] += 1
 
 
-# LLM: 原子移入固定agents下的唯一tombstone后重查权威及wake；每叶仍查保护与FD身份，失败恢复目录不报成功。
-# 函数用途: 删除中间件或整份投影；所有rename、删叶及rmdir都相对已固定的目录FD执行。
+# LLM: 空库存不是删除授权；非空投影先无覆盖隔离，整批待删根校验后才unlink；恢复冲突和部分I/O显式留证。
+# 函数用途: 分离元数据与整批待删项，在共享维护锁内删除并按实际结果恢复名称。
 def _remove_records(run_dir: Path, records: dict, roots: set[str] | None, report: dict) -> None:
     boundary = _MAINTENANCE_BOUNDARY.get()
     if boundary is None or run_dir != boundary["owner_home"] / "agents" / boundary["run_id"]:
         raise ValueError("删除缺少受信维护边界")
+    if not records:
+        raise ValueError("空库存不能授权删除投影")
     _verify_boundary(boundary)
     if _inventory(run_dir, root_fd=boundary["run"]) != records:
         raise ValueError("删除前投影已变化")
     selected = [name for name in records if roots is None or Path(name).parts[0] in roots]
     tombstone = f".purge_{run_dir.name}_{uuid.uuid4().hex}"
-    os.rename(run_dir.name, tombstone, src_dir_fd=boundary["agents"], dst_dir_fd=boundary["agents"])
+    _rename_noreplace(boundary["agents"], run_dir.name, boundary["agents"], tombstone)
     boundary["current_name"] = tombstone
-    removed = False
-    try:
-        _assert_no_new_obligation(boundary)
-        if _inventory(run_dir, root_fd=boundary["run"]) != records:
-            raise ValueError("隔离后投影已变化")
-        for name in sorted(selected, key=lambda value: (len(Path(value).parts), value != "state.json", value), reverse=True):
+    boundary["deleted_entries"] = 0
+    with ExitStack() as stack:
+        try:
             _assert_no_new_obligation(boundary)
-            parts = Path(name).parts
-            with ExitStack() as stack:
-                parent_fd = boundary["run"]
-                for part in parts[:-1]:
-                    parent_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-                    stack.callback(os.close, parent_fd)
-                info = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
-                observed = _record_fp(info)
-                if stat.S_ISDIR(info.st_mode):
-                    if (observed[0], observed[1], observed[4]) != (records[name][0], records[name][1], records[name][4]):
-                        raise ValueError("删除时目录已变化")
-                    os.rmdir(parts[-1], dir_fd=parent_fd)
-                else:
-                    if observed != records[name] or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                        raise ValueError("删除时文件已变化")
-                    os.unlink(parts[-1], dir_fd=parent_fd)
-                    report["removed_files"] += 1
-                    report["removed_bytes"] += info.st_size
-        if roots is None:
+            if _inventory(run_dir, root_fd=boundary["run"]) != records:
+                raise ValueError("隔离后投影已变化")
+            _stage_records(boundary, run_dir, records, selected, stack)
+            _assert_no_new_obligation(boundary)
+            _purge_staged(boundary, records, selected, report)
             _verify_boundary(boundary)
-            os.rmdir(tombstone, dir_fd=boundary["agents"])
-            removed = True
-            report["removed_dirs"] += 1
+            os.rmdir(boundary["batch_name"], dir_fd=boundary["agents"])
+            boundary["batch_name"] = None
+            if roots is None:
+                _verify_boundary(boundary)
+                os.rmdir(tombstone, dir_fd=boundary["agents"])
+                boundary["current_name"] = None
+                report["removed_dirs"] += 1
+            else:
+                _restore_projection(boundary)
             os.fsync(boundary["agents"])
-    finally:
-        if not removed:
+        except BaseException as primary:
+            _recover_projection(boundary, primary)
+            raise
+
+
+# LLM: 搬移前先初始化恢复状态并记录已建容器；两个固定FD内完整库存匹配且fsync后才准不可逆销毁。
+# 函数用途: 建立私有批次并一次性隔离待删内容，不删除任何文件。
+def _stage_records(boundary, run_dir, records, selected, stack):
+    boundary["batch"] = None
+    boundary["staged_roots"] = []
+    boundary["staged_records"] = {key: records[key] for key in selected}
+    name = f".purge_{boundary['run_id']}_{uuid.uuid4().hex}.files"
+    os.mkdir(name, 0o700, dir_fd=boundary["agents"])
+    boundary["batch_name"] = name
+    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=boundary["agents"])
+    stack.callback(os.close, descriptor)
+    boundary["batch"] = descriptor
+    for root in sorted({Path(key).parts[0] for key in selected}):
+        _verify_boundary(boundary)
+        _rename_noreplace(boundary["run"], root, descriptor, root)
+        boundary["staged_roots"].append(root)
+    if _inventory(run_dir, root_fd=descriptor) != boundary["staged_records"]:
+        raise ValueError("待删整批隔离后已变化")
+    remaining = {key: value for key, value in records.items() if key not in boundary["staged_records"]}
+    if _inventory(run_dir, root_fd=boundary["run"]) != remaining:
+        raise ValueError("隔离后原投影保留项已变化")
+    _verify_boundary(boundary)
+    for fd in (descriptor, boundary["run"], boundary["agents"]):
+        os.fsync(fd)
+
+
+# LLM: 仅销毁已整批验证的隔离FD，后代父目录也核对库存物理身份；任何失败保留首因和已删计量。
+# 函数用途: 在元数据投影之外删除隔离文件，不把尚未验证的原路径逐叶当作授权。
+def _purge_staged(boundary, records, selected, report):
+    for name in sorted(selected, key=lambda value: (len(Path(value).parts), value != "state.json", value), reverse=True):
+        _assert_no_new_obligation(boundary)
+        parts = Path(name).parts
+        with ExitStack() as stack:
+            parent_fd = boundary["batch"]
+            for index, part in enumerate(parts[:-1], 1):
+                parent_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                stack.callback(os.close, parent_fd)
+                expected = records[str(Path(*parts[:index]))]
+                if _identity(os.fstat(parent_fd)) != (expected[4], expected[1]):
+                    raise ValueError("隔离后代目录身份变化")
+            info = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            observed = _record_fp(info)
+            if stat.S_ISDIR(info.st_mode):
+                if (observed[0], observed[1], observed[4]) != (records[name][0], records[name][1], records[name][4]):
+                    raise ValueError("删除时目录已变化")
+                os.rmdir(parts[-1], dir_fd=parent_fd)
+            else:
+                if observed != records[name] or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError("删除时文件已变化")
+                os.unlink(parts[-1], dir_fd=parent_fd)
+                report["removed_files"] += 1
+                report["removed_bytes"] += info.st_size
+            boundary["deleted_entries"] += 1
+
+
+# LLM: 剩余项仅无覆盖移回原FD且须来自库存；未打开容器不得擅删，其尚未搬移的原投影可独立恢复。
+# 函数用途: 回填未销毁的批次根并移除已空的隔离容器。
+def _restore_staged(boundary):
+    if boundary.get("batch_name") is None:
+        return
+    if boundary.get("batch") is None:
+        if boundary.get("staged_roots"):
+            raise ValueError("已有隔离项但缺少批次FD")
+        _verify_boundary(boundary, include_batch=False)
+        return
+    _verify_boundary(boundary)
+    with os.scandir(boundary["batch"]) as entries:
+        remaining = list(entries)
+    for entry in remaining:
+        expected = boundary["staged_records"].get(entry.name)
+        info = entry.stat(follow_symlinks=False)
+        if expected is None or _identity(info) != (expected[4], expected[1]):
+            raise ValueError("隔离恢复出现未知根或身份变化")
+        _rename_noreplace(boundary["batch"], entry.name, boundary["run"], entry.name)
+    os.rmdir(boundary["batch_name"], dir_fd=boundary["agents"])
+    boundary["batch_name"] = None
+    os.fsync(boundary["run"])
+
+
+# LLM: 恢复失败不能掩盖首因；名称恢复不等于内容回滚，结构化结果明示部分销毁及存留隔离位置。
+# 函数用途: 在异常路径尽力恢复并将可核对的恢复事实附到原异常。
+def _recover_projection(boundary, primary):
+    recovery_error = None
+    try:
+        _restore_staged(boundary)
+        if boundary["current_name"] is not None and boundary["current_name"] != boundary["run_id"]:
             _restore_projection(boundary)
+    except BaseException as error:
+        recovery_error = type(error).__name__
+    paths = [str(boundary["owner_home"] / "agents" / name)
+             for name in (boundary.get("batch_name"), boundary.get("current_name"))
+             if name is not None and name != boundary["run_id"]]
+    partial = boundary["deleted_entries"] > 0
+    primary.projection_recovery = {
+        "status": "quarantined" if paths else "partial" if partial else "restored",
+        "partial_deletion": partial, "quarantine_paths": paths,
+        "primary_error_type": type(primary).__name__, "recovery_error_type": recovery_error,
+    }
 
 
 # LLM: 隔离后及每叶删除前再核真实runtime和父唤醒；不把tombstone的新目录名当运行身份。
@@ -598,18 +705,43 @@ def _assert_no_new_obligation(boundary):
         raise ValueError("隔离后运行恢复或出现父唤醒")
 
 
-# LLM: 回滚只使用原agents FD，原名称被并发占用时绝不覆盖；保留tombstone并显式报错等待恢复。
-# 函数用途: 恢复失败清理或七日瘦身的目录名称，不丢弃尚未删除的原件。
+# LLM: 只加载平台原子禁止覆盖接口；不支持时拒绝破坏性维护，绝不用stat再rename模拟。
+# 函数用途: 缓存本机renameat无覆盖函数及系统标志。
+@lru_cache(maxsize=1)
+def _noreplace_api():
+    import ctypes
+
+    library = ctypes.CDLL(None, use_errno=True)
+    name, flag = ("renameatx_np", 4) if sys.platform == "darwin" else ("renameat2", 1)
+    function = getattr(library, name, None)
+    if function is None:
+        raise OSError(errno.ENOTSUP, "平台不支持原子无覆盖重命名")
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    return function, flag
+
+
+# LLM: 源目标都是已固定父FD内单段名称，系统调用原子拒绝EEXIST，恢复和隔离共用；任何未知平台失败关闭。
+# 函数用途: 把一个叶移到另一个目录FD，绝不覆盖并发出现的对象。
+def _rename_noreplace(source_fd, source, target_fd, target):
+    import ctypes
+
+    for name in (source, target):
+        if not isinstance(name, str) or name in {"", ".", ".."} or "/" in name or "\x00" in name:
+            raise ValueError("隔离重命名必须使用单段名称")
+    function, flag = _noreplace_api()
+    if function(source_fd, os.fsencode(source), target_fd, os.fsencode(target), flag) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), target)
+
+
+# LLM: 内核无覆盖rename抵抗原名占位；未打开且从未承接内容的容器留证，不阻止独立核验后恢复原投影。
+# 函数用途: 安全恢复投影名称，不将名称恢复说成内容事务回滚。
 def _restore_projection(boundary):
-    try:
-        os.stat(boundary["run_id"], dir_fd=boundary["agents"], follow_symlinks=False)
-    except FileNotFoundError:
-        os.rename(boundary["current_name"], boundary["run_id"],
-                  src_dir_fd=boundary["agents"], dst_dir_fd=boundary["agents"])
-        boundary["current_name"] = boundary["run_id"]
-        os.fsync(boundary["agents"])
-    else:
-        raise ValueError("原名称被占用，投影保留在隔离目录")
+    _verify_boundary(boundary, include_batch=boundary.get("batch") is not None)
+    _rename_noreplace(boundary["agents"], boundary["current_name"], boundary["agents"], boundary["run_id"])
+    boundary["current_name"] = boundary["run_id"]
+    os.fsync(boundary["agents"])
 
 
 # LLM: 仅显式调用执行；预算扫描、dry-run纯读，保护优先；compact/归档先耐久后删，逐目录失败隔离不谎报成功。
@@ -648,5 +780,8 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
             _maintain_projection(owner_home, run_dir, info, report, now=current, active_run_ids=active_run_ids,
                                   pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days)
         except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
-            report["errors"].append({"run_id": run_dir.name, "error_type": type(exc).__name__})
+            error = {"run_id": run_dir.name, "error_type": type(exc).__name__}
+            if getattr(exc, "projection_recovery", None) is not None:
+                error["recovery"] = exc.projection_recovery
+            report["errors"].append(error)
     return report

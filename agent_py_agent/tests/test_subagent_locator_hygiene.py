@@ -477,3 +477,252 @@ def test_r1_publication_at_unlink_cannot_partially_delete_projection(tmp_path, m
     assert fired
     assert {p.name: p.read_bytes() for p in run.iterdir()} == before
     assert result["removed_files"] == 0 and result["errors"]
+
+
+# LLM: 根、旧data及任务工作区会话必须都覆盖同一owner维护锁；锁忙前不能写prepared或队列。
+# 函数用途: 验证真实非阻塞发布跨进程也不能穿过维护临界区。
+@pytest.mark.parametrize("prefix", ["", "data", "workspace/runtime/workspaces/task-one"])
+def test_r1p2_publication_lock_covers_store_layouts_and_processes(tmp_path, prefix):
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+
+    home, run, _, _ = _projection(tmp_path)
+    storage = ConversationStorage(home / prefix / "conversations")
+    script = """import sys
+sys.path.insert(0, sys.argv[2])
+from agent_py_agent.agent.conversation.models import WakeSignal
+from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+from agent_py_agent.agent.conversation.store_wake_publication import publish_deduped
+s=ConversationStorage(sys.argv[1], initialize=False)
+try:
+    publish_deduped(s, WakeSignal.from_dict({'wake_signal_id':'wake-cross','thread_id':'thread-race','source_agent_id':'child','dedupe_key':'cross'}), blocking=False)
+except BlockingIOError:
+    print('blocked')
+else:
+    print('published')
+"""
+    with _service()._maintenance_guard(home, run):
+        result = subprocess.run([sys.executable, "-B", "-c", script, str(storage.root), str(Path(__file__).resolve().parents[2])],
+                                capture_output=True, text=True, timeout=10, check=False,
+                                cwd=Path(__file__).resolve().parents[2])
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "blocked", result.stderr
+    assert not list(storage.wake_dedupe_dir.glob("*.json"))
+    assert not list((storage.wake_queue_dir / "normal").glob("*.json"))
+
+
+# LLM: prepared失败重试同样先取维护互斥；旧半提交必须保护投影，释放锁后重放原身份。
+# 函数用途: 验证失败重放不丢唤醒、不在维护期间补装且仍可恢复。
+def test_r1p2_prepared_replay_is_protected_and_blocked(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import store_wake_publication as publication
+    from agent_py_agent.agent.conversation.models import WakeSignal
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+
+    home, run, now, _ = _projection(tmp_path, days=31)
+    storage = ConversationStorage(home / "conversations")
+    signal = WakeSignal.from_dict({"wake_signal_id": "wake-prepared", "thread_id": "thread-race", "urgency": "normal",
+                                 "source_agent_id": "child", "dedupe_key": "prepared"})
+    original = publication.write_private_json_file_atomic
+    # LLM: 只阻断第一次信号安装，prepared仍由真实发布写入，不伪造半提交。
+    # 函数用途: 注入一次安装磁盘错误。
+    def fail_install(*args, **kwargs):
+        raise OSError("install failed")
+    monkeypatch.setattr(publication, "write_private_json_file_atomic", fail_install)
+    with pytest.raises(OSError):
+        publication.publish_deduped(storage, signal)
+    monkeypatch.setattr(publication, "write_private_json_file_atomic", original)
+    receipt = storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key)
+    frozen = receipt.read_bytes()
+    assert json.loads(frozen)["phase"] == "prepared"
+    result = _service().maintain_owner_agent_projections(home, now=now)
+    assert (run / "state.json").exists() and result["removed_dirs"] == 0
+    with _service()._maintenance_guard(home, run):
+        with pytest.raises(BlockingIOError):
+            publication.publish_deduped(storage, signal, blocking=False)
+        assert receipt.read_bytes() == frozen
+    _, installed = publication.publish_deduped(storage, signal, blocking=False)
+    assert installed.wake_signal_id == signal.wake_signal_id
+    assert json.loads(receipt.read_text())["phase"] == "published"
+    assert len(list((storage.wake_queue_dir / "normal").glob("*.json"))) == 1
+
+
+# LLM: 默认与非阻塞发布在prepared到install阶段均必须持共享锁；真实维护EX不能进入。
+# 函数用途: 反向验证发布临界区排斥维护并保留已有安装次序。
+@pytest.mark.parametrize("blocking", [True, False])
+def test_r1p2_publisher_holds_lock_through_install(tmp_path, monkeypatch, blocking):
+    from agent_py_agent.agent.conversation import store_wake_publication as publication
+    from agent_py_agent.agent.conversation.models import WakeSignal
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+
+    home, run, _, _ = _projection(tmp_path)
+    storage = ConversationStorage(home / "conversations")
+    original, attempts = publication._install, []
+    # LLM: 维护尝试发生在真实prepared之后，原安装仍执行；不能只断言锁工具被调用。
+    # 函数用途: 在安装入口争抢真实维护锁。
+    def install(*args, **kwargs):
+        try:
+            with _service()._maintenance_guard(home, run):
+                attempts.append("entered")
+        except BlockingIOError:
+            attempts.append("blocked")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(publication, "_install", install)
+    publication.publish_deduped(storage, WakeSignal.from_dict({"wake_signal_id": "wake-held",
+        "thread_id": "thread-race", "source_agent_id": "child", "dedupe_key": "held"}), blocking=blocking)
+    assert attempts == ["blocked"] and (run / "state.json").exists()
+
+
+# LLM: 无覆盖必须由实际rename系统调用裁决；stat之后突然出现的空目录也不能被覆盖。
+# 函数用途: 验证恢复冲突保留原隔离内容并提供结构化恢复位置。
+def test_r1p2_restore_conflict_is_atomic_and_reported(tmp_path, monkeypatch):
+    home, run, now, _ = _projection(tmp_path, days=31, scratch=False)
+    service, fired = _service(), []
+    real_rename = os.rename
+    native = getattr(service, "_rename_noreplace", None)
+    # LLM: 在恢复底层rename之前才占位，旧stat检查已经通过，不能提前把竞态变成普通存在分支。
+    # 函数用途: 植入并发创建的空原目录。
+    def occupy(src, dst, parent_fd):
+        if str(src).startswith(".purge_") and str(dst) == "child" and not fired:
+            os.mkdir("child", dir_fd=parent_fd)
+            fired.append(True)
+    # LLM: 旧实现的os.rename和新原子入口均注入相同实际时点，保持红绿触发有效。
+    # 函数用途: 截获原普通重命名。
+    def rename(src, dst, *args, **kwargs):
+        occupy(src, dst, kwargs.get("dst_dir_fd"))
+        return real_rename(src, dst, *args, **kwargs)
+    # LLM: 新入口仍委托真实无覆盖系统调用，不能用mock假造EEXIST。
+    # 函数用途: 截获无覆盖重命名的恢复目标。
+    def no_replace(source_fd, source, target_fd, target):
+        occupy(source, target, target_fd)
+        return native(source_fd, source, target_fd, target)
+    # LLM: 义务失败发生在隔离后、物理删除前，要求原件完整保存在隔离目录。
+    # 函数用途: 强制进入恢复路径。
+    def fail(_boundary):
+        raise ValueError("force restore")
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {rename})
+    if native is not None:
+        monkeypatch.setattr(service, "_rename_noreplace", no_replace)
+    monkeypatch.setattr(service, "_assert_no_new_obligation", fail)
+    result = service.maintain_owner_agent_projections(home, now=now)
+    assert fired and run.is_dir() and not list(run.iterdir())
+    recovery = result["errors"][0]["recovery"]
+    assert recovery["status"] == "quarantined" and not recovery["partial_deletion"]
+    assert any((Path(path) / "state.json").exists() for path in recovery["quarantine_paths"])
+    assert result["removed_files"] == 0
+
+
+# LLM: 整批所有待删根须先移出元数据投影并校验；不能一边检查原目录一边逐叶销毁。
+# 函数用途: 在首次真实unlink观察全部隔离完成且元数据未进入scratch批次。
+@pytest.mark.parametrize("days", [8, 31])
+def test_r1p2_entire_batch_isolated_before_first_unlink(tmp_path, monkeypatch, days):
+    home, run, now, _ = _projection(tmp_path, days=days)
+    service, original, observed = _service(), os.unlink, []
+    # LLM: 观察真实FD中的内容，保留真实unlink；不是只检查私有方法是否存在。
+    # 函数用途: 核对物理删除前元数据根已无任何待删项。
+    def unlink(path, *args, **kwargs):
+        if not observed and kwargs.get("dir_fd") is not None:
+            boundary = service._MAINTENANCE_BOUNDARY.get()
+            remaining = {entry.name for entry in os.scandir(boundary["run"])}
+            assert not (remaining & {"events.jsonl", "tmp", "snapshots"})
+            if days == 31:
+                assert not remaining
+            else:
+                assert {"state.json", "workspace_locator.json", "subagent_compact.json"} <= remaining
+            observed.append(True)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {unlink})
+    result = service.maintain_owner_agent_projections(home, now=now)
+    assert observed and not result["errors"]
+
+
+# LLM: 物理删除已经开始时不能谎称完整内容回滚；恢复名称后也必须明示部分完成。
+# 函数用途: 验证中途I/O错误的实际删量及结构化恢复状态。
+def test_r1p2_partial_io_failure_reports_recovery(tmp_path, monkeypatch):
+    home, run, now, _ = _projection(tmp_path, days=31)
+    original, deleted = os.unlink, []
+    # LLM: 第一次真实删除成功，第二次真实删除边界失败，不能把错误包装成外层成功。
+    # 函数用途: 注入可复现的部分删除。
+    def unlink(path, *args, **kwargs):
+        if deleted:
+            raise OSError("second unlink failed")
+        original(path, *args, **kwargs)
+        deleted.append(str(path))
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {unlink})
+    result = _service().maintain_owner_agent_projections(home, now=now)
+    assert deleted and result["removed_files"] == 1 and result["removed_dirs"] == 0
+    assert (run / "state.json").exists()
+    recovery = result["errors"][0]["recovery"]
+    assert recovery["status"] == "partial" and recovery["partial_deletion"]
+    assert recovery["quarantine_paths"] == []
+
+
+# LLM: 入口拒绝错误schema、空ID和与隔离run不符的ID，必须在创建归档之前完成。
+# 函数用途: 验证新条目不能制造下轮自拒绝的坏归档。
+@pytest.mark.parametrize("compact", [
+    {"schema": "wrong", "run_id": "child"},
+    {"schema": "subagent_compact.v1", "run_id": ""},
+    {"schema": "subagent_compact.v1", "run_id": "other"},
+])
+def test_r1p2_archive_validates_new_entry_before_write(tmp_path, compact):
+    home, run, _, _ = _projection(tmp_path, days=31)
+    service = _service()
+    archive = home / "agents/archived_subagents_test.jsonl"
+    with service._maintenance_guard(home, run):
+        with pytest.raises(ValueError):
+            service._archive_entry(archive, compact)
+    assert not archive.exists() and (run / "state.json").exists()
+
+
+# LLM: 批次mkdir之后且任何搬移之前的EMFILE必须保留原件并恢复run名称，不能让未初始化FD掩盖首因。
+# 函数用途: 验证批次打开失败时只留下明示的空容器，不遗失原投影路径。
+def test_r1p2_unopened_batch_restores_projection_and_reports_residue(tmp_path, monkeypatch):
+    import errno
+
+    home, run, now, _ = _projection(tmp_path, days=31)
+    before = {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()}
+    original, fired = os.open, []
+    # LLM: 只在本批次的首次真实open注入失败，其余父链打开仍由真实系统调用完成。
+    # 函数用途: 在已创建但未固定FD的边界制造可恢复磁盘错误。
+    def fail_open(path, flags, *args, **kwargs):
+        if str(path).startswith(".purge_") and str(path).endswith(".files"):
+            fired.append(True)
+            raise OSError(errno.EMFILE, "injected batch open failure")
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", fail_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {fail_open})
+    result = _service().maintain_owner_agent_projections(home, now=now)
+    assert fired
+    assert run.is_dir(), "尚未搬移任何内容时，原投影名称必须恢复"
+    assert {path.relative_to(run): path.read_bytes() for path in run.rglob("*") if path.is_file()} == before
+    assert result["removed_dirs"] == result["removed_files"] == 0
+    recovery = result["errors"][0]["recovery"]
+    assert recovery["primary_error_type"] == "OSError" and recovery["recovery_error_type"] is None
+    assert recovery["status"] == "quarantined" and not recovery["partial_deletion"]
+    residue = {Path(path) for path in recovery["quarantine_paths"]}
+    assert residue == set((home / "agents").glob(".purge_*")) and len(residue) == 1
+    assert all(path.name.endswith(".files") and path.is_dir() and not list(path.iterdir()) for path in residue)
+
+
+# LLM: 公共候选必须有state，私有删除帮助函数也要显式拒绝空库存，不能把空目录删除后的异常记成已恢复。
+# 函数用途: 验证空库存不构成隔离或删除授权，原目录与计量均保持不变。
+def test_r1p2_empty_inventory_cannot_authorize_projection_removal(tmp_path):
+    home, run, _, _ = _projection(tmp_path, scratch=False)
+    for path in run.iterdir():
+        path.unlink()
+    service, rejected = _service(), False
+    report = {"removed_dirs": 0, "removed_files": 0, "removed_bytes": 0}
+    with service._maintenance_guard(home, run) as boundary:
+        boundary["payload"] = {}
+        try:
+            service._remove_records(run, {}, None, report)
+        except ValueError:
+            rejected = True
+    assert rejected, "空库存必须在任何隔离/删除之前被拒绝"
+    assert run.is_dir() and not list(run.iterdir())
+    assert report == {"removed_dirs": 0, "removed_files": 0, "removed_bytes": 0}
+    assert not list((home / "agents").glob(".purge_*"))
