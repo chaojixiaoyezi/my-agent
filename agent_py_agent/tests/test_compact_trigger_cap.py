@@ -134,6 +134,70 @@ def test_r7_yaml_explicit_default_canonical_trigger_survives_replace(tmp_path):
     assert loaded.config_sources["memory_compact_trigger_percent"]["source"] == str(cfg_path.resolve())
 
 
+# LLM: 旧比例先赋值为范围外数值（如40被夹取到50）再改回范围内（如90）或经replace更新时，新比例必须继续联动。
+# 函数用途: 回归验证旧比例经范围夹取后再次修改不会断开与新比例的同步关系。
+def test_r8_out_of_range_legacy_trigger_clamped_still_resyncs_on_update():
+    cfg = AgentConfig()
+    cfg.memory_compact_auto_trigger_percent = 40
+    assert cfg.memory_compact_trigger_percent == 50
+    cfg.memory_compact_auto_trigger_percent = 90
+    assert cfg.memory_compact_trigger_percent == 90
+
+    cfg_replace = AgentConfig(memory_compact_auto_trigger_percent=40)
+    assert cfg_replace.memory_compact_trigger_percent == 50
+    replaced = replace(cfg_replace, memory_compact_auto_trigger_percent=90)
+    assert replaced.memory_compact_trigger_percent == 90
+
+
+# LLM: 同一replace或任务/环境配置覆盖层同时显式指定新旧比例时，即使新比例等于80或原旧比例值，也必须以显式新比例为准。
+# 函数用途: 回归验证replace与runtime_config_task/runtime_config_env在新旧比例并列时始终保持新键优先。
+@pytest.mark.parametrize("canonical_target", [70, 75, 80])
+def test_r8_explicit_canonical_trigger_wins_over_co_specified_legacy_in_replace_and_overlays(
+    tmp_path,
+    canonical_target,
+):
+    from agent_py_agent.agent.settings.config import load_config
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+    from agent_py_agent.agent.settings.services.runtime_config_task import (
+        project_task_runtime_config_overlay,
+    )
+
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(
+        "memory_compact_trigger_percent: 80\nmemory_compact_auto_trigger_percent: 70\n",
+        encoding="utf-8",
+    )
+    base = load_config(base_path)
+    direct = replace(
+        base,
+        memory_compact_trigger_percent=canonical_target,
+        memory_compact_auto_trigger_percent=85,
+    )
+    assert direct.memory_compact_trigger_percent == canonical_target
+    assert direct.memory_compact_auto_trigger_percent == 85
+
+    overlay_path = tmp_path / f"overlay_{canonical_target}.yaml"
+    overlay_path.write_text(
+        f"memory_compact_trigger_percent: {canonical_target}\nmemory_compact_auto_trigger_percent: 85\n",
+        encoding="utf-8",
+    )
+    task = SimpleNamespace(
+        runtime_identity=SimpleNamespace(config_overlay_ref=str(overlay_path), config_scope="run")
+    )
+    projected = project_task_runtime_config_overlay(base, task, workspace_root=tmp_path)
+    assert projected.memory_compact_trigger_percent == canonical_target
+    assert projected.memory_compact_auto_trigger_percent == 85
+
+    env_applied = apply_runtime_config_environment(
+        base,
+        env={"MY_AGENT_RUNTIME_CONFIG": str(overlay_path)},
+    )
+    assert env_applied.memory_compact_trigger_percent == canonical_target
+    assert env_applied.memory_compact_auto_trigger_percent == 85
+
+
 # 函数用途: 造一个只带窗口与三项压缩配置的轻量 agent，给 runtime_compact_policy 用。
 def _agent(cap, *, percent=90, recovery=60):
     return SimpleNamespace(

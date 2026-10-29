@@ -680,7 +680,7 @@ def test_task_local_preflight_uses_the_configured_exact_compact_threshold(
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
             model_context_window_tokens=1_000,
         ),
         backend=SimpleNamespace(context_window_tokens=1_000, name="fake"),

@@ -31,6 +31,11 @@ def apply_runtime_config_environment(base_config: AgentConfig, *, env: dict[str,
         return base_config
     effective = merge_runtime_config_layers(base_config, layers, config_cls=type(base_config))
     config = freeze_managed_secret_environment(replace(freeze_managed_secret_environment(base_config), **effective.values))
+    object.__setattr__(
+        config,
+        "memory_compact_trigger_percent",
+        effective.values["memory_compact_trigger_percent"],
+    )
     config.config_path = base_config.config_path
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)
@@ -43,6 +48,8 @@ def apply_runtime_config_environment(base_config: AgentConfig, *, env: dict[str,
     return config
 
 
+# LLM: 按环境变量声明顺序加载各作用域配置层，不修改传入基础配置。
+# 函数用途: 从环境变量规格列表解析并读取运行配置覆盖层。
 def _runtime_config_layers_from_env(config: AgentConfig, env: dict[str, str]) -> list[RuntimeConfigLayer]:
     specs = _layer_specs(env)
     layers: list[RuntimeConfigLayer] = []
@@ -52,6 +59,8 @@ def _runtime_config_layers_from_env(config: AgentConfig, env: dict[str, str]) ->
     return layers
 
 
+# LLM: 多层环境变量优先于单文件环境变量，空值返回空列表。
+# 函数用途: 提取环境变量中配置的(scope, path)覆盖层规格列表。
 def _layer_specs(env: dict[str, str]) -> list[tuple[str, str]]:
     layered = str(env.get(_ENV_RUNTIME_CONFIG_LAYERS, "") or "").strip()
     if layered:
@@ -62,6 +71,8 @@ def _layer_specs(env: dict[str, str]) -> list[tuple[str, str]]:
     return [(str(env.get(_ENV_RUNTIME_CONFIG_SCOPE, "") or "runtime").strip() or "runtime", single)]
 
 
+# LLM: 支持scope=path、scope:path与裸路径三种格式，缺省作用域为runtime。
+# 函数用途: 解析单条运行配置层规格字符串为作用域与路径元组。
 def _parse_layer_spec(raw: str) -> tuple[str, str]:
     text = raw.strip()
     if "=" in text:
@@ -74,6 +85,8 @@ def _parse_layer_spec(raw: str) -> tuple[str, str]:
     return "runtime", text
 
 
+# LLM: 按层顺序聚合配置解析告警并加上来源前缀，不丢弃任何层内告警。
+# 函数用途: 汇总全部运行配置覆盖层的告警列表。
 def _runtime_config_warnings(layers: list[RuntimeConfigLayer]) -> list[str]:
     warnings: list[str] = []
     for layer in layers:

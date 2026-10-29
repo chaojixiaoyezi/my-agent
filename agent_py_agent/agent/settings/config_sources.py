@@ -10,6 +10,7 @@ from typing import Any
 from .config_layers import ConfigLayer, EffectiveConfig, compact_policy_percent, merge_config_layers
 
 INTERNAL_RUNTIME_CONFIG_FIELDS = {
+    "_compact_trigger_previous_auto",
     "config_layers",
     "config_path",
     "config_sources",

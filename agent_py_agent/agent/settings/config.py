@@ -297,9 +297,12 @@ class _RuntimeBudgetConfigFields:
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
-    # LLM: 构造、replace、YAML共用校验；私有InitVar承运来源对象当前旧比例，不进入fields/asdict及用户配置；独立新比例优先。
-    # 函数用途: 校验部署与白名单，在构造或复制仍等于原旧比例的配置时同步新比例，不修改来源配置。
-    def __post_init__(self, _compact_trigger_previous_auto: int | None = None) -> None:
+    # LLM: 构造、replace、YAML共用校验；私有InitVar承运来源对象当前旧比例与显式新键标记，不进入fields/asdict及用户配置；独立新比例优先。
+    # 函数用途: 校验部署与白名单，在构造或复制仍等于原旧比例（含夹取后值）且未显式指定新键的配置时同步新比例，不修改来源配置。
+    def __post_init__(
+        self,
+        _compact_trigger_previous_auto: int | tuple[int | None, bool] | None = None,
+    ) -> None:
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
         values = self.allowed_private_hosts
         self.allowed_private_hosts = (
@@ -307,23 +310,28 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
             if isinstance(values, (list, tuple, set, frozenset))
             else []
         )
-        if _compact_trigger_previous_auto is None:
+        self.__dict__.pop("_compact_replace_trigger_copied", None)
+        if isinstance(_compact_trigger_previous_auto, tuple):
+            prev_auto, trigger_copied = _compact_trigger_previous_auto
+        else:
+            prev_auto, trigger_copied = _compact_trigger_previous_auto, True
+        if prev_auto is None:
             follows_legacy = (
                 self.memory_compact_trigger_percent == 80
                 and self.memory_compact_auto_trigger_percent != 90
             )
         else:
             follows_legacy = (
-                self.memory_compact_auto_trigger_percent != _compact_trigger_previous_auto
-                and self.memory_compact_trigger_percent in (80, _compact_trigger_previous_auto)
+                trigger_copied
+                and self.memory_compact_auto_trigger_percent != prev_auto
+                and self.memory_compact_trigger_percent
+                in (80, prev_auto, _normalized_compact_percent(prev_auto))
             )
         if follows_legacy:
-            from .config_layers import compact_policy_percent
-
             object.__setattr__(
                 self,
                 "memory_compact_trigger_percent",
-                compact_policy_percent(self.memory_compact_auto_trigger_percent, 80),
+                _normalized_compact_percent(self.memory_compact_auto_trigger_percent),
             )
         object.__setattr__(self, "_compact_trigger_previous_auto", self.memory_compact_auto_trigger_percent)
 
@@ -715,9 +723,24 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         }
 
     # replace读取InitVar的实例属性来比较来源对象的旧比例；它不属于公共配置，也不输出到asdict。
-    _compact_trigger_previous_auto: InitVar[int | None] = None
+    _compact_trigger_previous_auto: InitVar[int | tuple[int | None, bool] | None] = None
 
-    # LLM: 旧键变化只同步默认或仍等于旧值的新比例；每次更新复制上下文为当前旧比例，不让历史同步值复活；同值重赋不覆盖。
+    # LLM: 仅在dataclasses.replace遍历字段期间观测memory_compact_trigger_percent是否从原对象复制，读取InitVar后立即弹出临时标记。
+    # 函数用途: 让__post_init__准确区分replace调用中显式传入的新比例键与从原配置对象继承的新比例键。
+    def __getattribute__(self, name: str) -> Any:
+        if name == "host_home_snapshot":
+            object.__getattribute__(self, "__dict__")["_compact_replace_trigger_copied"] = False
+        elif name == "memory_compact_trigger_percent":
+            state = object.__getattribute__(self, "__dict__")
+            if "_compact_replace_trigger_copied" in state:
+                state["_compact_replace_trigger_copied"] = True
+        elif name == "_compact_trigger_previous_auto":
+            state = object.__getattribute__(self, "__dict__")
+            trigger_copied = state.pop("_compact_replace_trigger_copied", True)
+            return (state.get("_compact_trigger_previous_auto"), bool(trigger_copied))
+        return object.__getattribute__(self, name)
+
+    # LLM: 旧键变化只同步默认或仍等于旧值（含夹取后值）的新比例；每次更新复制上下文为当前旧比例，不让历史同步值复活；同值重赋不覆盖。
     # 函数用途: 保留独立新比例，动态更新仍跟随旧键的值，并让复制配置使用新鲜旧比例。
     def __setattr__(self, name: str, value: Any) -> None:
         was_initialized = "memory_compact_auto_trigger_percent" in self.__dict__
@@ -725,11 +748,25 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         current_trigger = self.__dict__.get("memory_compact_trigger_percent", 80)
         object.__setattr__(self, name, value)
         if was_initialized and name == "memory_compact_auto_trigger_percent":
-            if value != prev_auto and current_trigger in (80, prev_auto):
-                from .config_layers import compact_policy_percent
-
-                object.__setattr__(self, "memory_compact_trigger_percent", compact_policy_percent(value, 80))
+            if value != prev_auto and current_trigger in (
+                80,
+                prev_auto,
+                _normalized_compact_percent(prev_auto),
+            ):
+                object.__setattr__(
+                    self,
+                    "memory_compact_trigger_percent",
+                    _normalized_compact_percent(value),
+                )
             object.__setattr__(self, "_compact_trigger_previous_auto", value)
+
+
+# LLM: 委托compact_policy_percent将旧压缩比例规范化到50..95有效区间，非法类型回退80。
+# 函数用途: 计算旧压缩比例对应的规范化新比例数值，供构造、replace与属性赋值判据共用。
+def _normalized_compact_percent(value: object) -> int:
+    from .config_layers import compact_policy_percent
+
+    return int(compact_policy_percent(value, 80) or 80)
 
 
 # LLM: 原YAML决策严格校验保持；两个管理员强制别名由规范化转换成唯一字段，不当未知键忽略。

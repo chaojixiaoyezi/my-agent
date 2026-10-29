@@ -70,7 +70,7 @@ YAML 与 `AgentConfig` 同源；参数中心自动登记为布尔值、分类“
   `user_config_capability`、`model_provider_schema`，加已有排除的 config.py/parameter_registry/parameter_metadata），
   重新按“引用最多”选真实消费方；`log_level` 经 `apply_log_level` 应用、无直接引用，补显式映射到
   `runtime_config_env`。抽查结果：`memory_compact_auto_trigger_percent` →
-  `agent/agent_core/runtime/context_compactor`，`memory_curator_interval_seconds` →
+  `agent/conversation/compact_threshold_policy`，`memory_curator_interval_seconds` →
   `agent/memory_store/curator_models`，`api_base` → `agent/settings/model_profiles` 等。
 - **enable_capability_package_selection**：从 free 名单改为边界项（`BOUNDARY_KEYS` + `USER_SETTINGS_BOUNDARY_KEYS`，
   照 P12 `memory_curator_model_profile`）：用户经 /settings 可改，模型 user_config 不能改（C16）。

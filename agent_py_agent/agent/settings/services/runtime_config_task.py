@@ -50,6 +50,11 @@ def project_task_runtime_config_overlay(
     layer = load_runtime_config_layer(path, scope=scope, config_cls=type(base_config))
     effective = merge_runtime_config_layers(base_config, [layer], config_cls=type(base_config))
     config = freeze_managed_secret_environment(replace(freeze_managed_secret_environment(base_config), **effective.values))
+    object.__setattr__(
+        config,
+        "memory_compact_trigger_percent",
+        effective.values["memory_compact_trigger_percent"],
+    )
     config.config_path = base_config.config_path
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)
