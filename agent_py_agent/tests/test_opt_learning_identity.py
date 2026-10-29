@@ -588,3 +588,66 @@ def test_stage_update_registration_failure_restores_previous_text(tmp_path, monk
         module.publish_learned_skill(store, PublishRequest(update, expected_revision=record.revision, expected_sha256=record.sha256))
     assert path.read_text() == previous
     assert store.load_registry().skills[decision.name] == record
+
+
+# LLM: 仅在第二次正式rename前换源，可附加一次目标打开EMFILE；发布/扫描/Store/发现仍为真实实现，未知内容只能保留隔离。
+# 函数用途: 防未扫描SKILL被留在正式发现根，且隔离不能删除替代物或阻断干净重试。
+@pytest.mark.parametrize('fail_open', [False, True])
+def test_r2_final_rename_source_swap_is_quarantined_and_not_discoverable(tmp_path, monkeypatch, fail_open):
+    import errno
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+    from agent_py_agent.agent.capability.skill_service import (
+        SkillRoot,
+        _discover_root,
+        _parse_manifest_entry,
+    )
+    from agent_py_agent.agent.common import nofollow_fs
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='final-source-race', description='核对资料', body='# 核对\n1. 比较输入\n')
+    replacement = module.render_learned_skill(replace(decision, body='# 未扫描替代正文\n1. 保留原件\n'))
+    original_rename, injected = os.rename, []
+    original_open, failures = nofollow_fs._openat_directory, []
+
+    # LLM: 将已扫描A另存，把真实B放到待rename的名字上；不替换扫描、回滚和发现逻辑。
+    # 函数用途: 固定最后核验与正式移动之间的第二窗口。
+    def swap(source, target, **kwargs):
+        if str(source).startswith('.publish_') and target == decision.name and not injected:
+            prepared = store.directory / source
+            prepared.rename(prepared.with_name(prepared.name + '-original'))
+            prepared.mkdir()
+            (prepared / 'SKILL.md').write_text(replacement)
+            injected.append((prepared.stat().st_dev, prepared.stat().st_ino))
+        return original_rename(source, target, **kwargs)
+
+    # LLM: 只有正式rename成功后的首次目标打开报EMFILE，回滚后续真实打开不替代；不需要第二次并发改名。
+    # 函数用途: 覆盖未取得installed_fd时也必须移出正式根的异常出口。
+    def open_target(parent_fd, name):
+        if fail_open and injected and not failures and name == decision.name and (store.learned_root / name).exists():
+            failures.append(True)
+            raise OSError(errno.EMFILE, 'installed directory open failed')
+        return original_open(parent_fd, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, 'os', SimpleNamespace(**{**vars(os), 'rename': swap}))
+        patch.setattr(nofollow_fs, '_openat_directory', open_target)
+        with pytest.raises((SkillLearningGateError, OSError)) as failure:
+            module.publish_learned_skill(store, PublishRequest(decision))
+    assert injected
+    assert bool(failures) == fail_open
+    manifest, errors = _discover_root(SkillRoot(store.learned_root, 'owner'))
+    assert not errors
+    assert not [entry for item in manifest for entry, error in [_parse_manifest_entry(item)] if entry and entry.enabled]
+    assert not (store.learned_root / decision.name).exists()
+    assert decision.name not in store.load_registry().skills
+    quarantined = list(store.directory.glob('.quarantine_*'))
+    assert len(quarantined) == 1
+    assert (quarantined[0].stat().st_dev, quarantined[0].stat().st_ino) == injected[0]
+    assert (quarantined[0] / 'SKILL.md').read_text() == replacement
+    assert isinstance(failure.value, SkillLearningGateError)
+    assert failure.value.code == 'SKILL_LEARNING_INSTALL_FAILED'
+    if fail_open:
+        assert failure.value.__cause__.errno == errno.EMFILE
+    assert module.publish_learned_skill(store, PublishRequest(decision)).event == 'published'

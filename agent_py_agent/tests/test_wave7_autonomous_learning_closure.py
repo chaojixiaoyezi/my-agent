@@ -1040,3 +1040,291 @@ def test_r3_f07_package_carrier_is_representable():
     from agent_py_agent.agent.capability.asset_promotion import select_asset_carrier
 
     assert select_asset_carrier({'kind':'capability_package'}) == 'capability_package'
+
+
+# LLM: 在真实版本写入完成后、登记表写入前注入IO失败；验证回滚及不同正文重试，不模拟版本Store。
+# 函数用途: 新建与更新失败不得留下阻塞后续发布的未提交版本。
+@pytest.mark.parametrize('operation', ['create', 'update', 'legacy_update'])
+def test_r2_uncommitted_version_removed_and_different_retry_succeeds(tmp_path, monkeypatch, operation):
+    from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
+
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path / 'home'))
+    request = PublishRequest(decision())
+    previous = None
+    revision = 1
+    if operation != 'create':
+        publish_learned_skill(store, request)
+        previous = store.skill_path(request.decision.name).read_text()
+        current = store.load_registry().skills[request.decision.name]
+        revision = current.revision + 1
+        request = PublishRequest(replace(decision(), decision='update', body=BODY + '\n失败的新内容。'),
+                                 expected_revision=current.revision, expected_sha256=current.sha256)
+        if operation == 'legacy_update':
+            raw = json.loads(store.registry_path.read_text())
+            raw['skills'][current.name].pop('revision')
+            store.registry_path.write_text(json.dumps(raw))
+    before = store.load_registry()
+    original = store.save_registry
+    visited = []
+
+    # LLM: 只有目标版本真实落盘后才抛错，避免在save_version之前失败而漏测残留。
+    # 函数用途: 精确命中版本已写、登记未提交的事务窗口。
+    def fail_registry(registry):
+        assert store.read_version(request.decision.name, revision) is not None
+        visited.append(True)
+        raise OSError('registry unavailable after version write')
+
+    monkeypatch.setattr(store, 'save_registry', fail_registry)
+    with pytest.raises(SkillLearningGateError, match='INSTALL_FAILED'):
+        publish_learned_skill(store, request)
+    assert visited == [True]
+    assert store.load_registry() == before
+    if previous is None:
+        assert not store.skill_path(request.decision.name).exists()
+    else:
+        assert store.skill_path(request.decision.name).read_text() == previous
+    assert store.read_version(request.decision.name, revision) is None
+    monkeypatch.setattr(store, 'save_registry', original)
+    retry = replace(request, decision=replace(request.decision, body=BODY + '\n重试时再次核对排序。'))
+    event = publish_learned_skill(store, retry)
+    assert event.event == ('published' if operation == 'create' else 'updated')
+    assert event.version == revision
+    assert store.read_version(event.skill_name, revision) == store.skill_path(event.skill_name).read_text()
+
+
+# LLM: 两次真实负反馈触发自动回退，在保存登记时失败；随后不同内容更新须可使用同一未提交revision。
+# 函数用途: 负反馈回退的版本与正文一起撤回，不留下不可变版本冲突。
+@pytest.mark.parametrize('legacy_registry', [False, True])
+def test_r2_failed_trial_rollback_cleans_uncommitted_version(learned, monkeypatch, legacy_registry):
+    _, store = learned
+    stable = store.load_registry().skills['csv-cleaner']
+    request = PublishRequest(replace(decision(), decision='update', body=BODY + '\n试用新版。'),
+                             expected_revision=stable.revision, expected_sha256=stable.sha256)
+    publish_learned_skill(store, request)
+    trial = store.load_registry().skills[stable.name]
+    for task in ('first', 'second'):
+        observe_learning(store, trial.name, sha256=trial.sha256, task_id=task, outcome='adopted')
+    observe_learning(store, trial.name, sha256=trial.sha256, task_id='first', outcome='ineffective',
+                     source=LearningObservationSource(authority='host', receipt_id='first'))
+    if legacy_registry:
+        raw = json.loads(store.registry_path.read_text())
+        raw['skills'][trial.name].pop('revision')
+        store.registry_path.write_text(json.dumps(raw))
+    before = store.load_registry()
+    previous = store.skill_path(trial.name).read_text()
+    original = store.save_registry
+
+    # LLM: 验证确实已写回退版本后抛异常，不跳过真实反馈汇总和回退逻辑。
+    # 函数用途: 命中自动回退的登记失败窗口。
+    def fail_registry(registry):
+        assert store.read_version(trial.name, trial.revision + 1) == store.read_version(stable.name, stable.version)
+        raise OSError('trial registry unavailable')
+
+    monkeypatch.setattr(store, 'save_registry', fail_registry)
+    with pytest.raises(OSError, match='trial registry unavailable'):
+        observe_learning(store, trial.name, sha256=trial.sha256, task_id='second', outcome='ineffective',
+                         source=LearningObservationSource(authority='host', receipt_id='second'))
+    assert store.load_registry() == before
+    assert store.skill_path(trial.name).read_text() == previous
+    assert store.read_version(trial.name, trial.revision + 1) is None
+    monkeypatch.setattr(store, 'save_registry', original)
+    retry = PublishRequest(replace(decision(), decision='update', body=BODY + '\n改进后重新核对。'),
+                           expected_revision=trial.revision, expected_sha256=trial.sha256)
+    assert publish_learned_skill(store, retry).version == trial.revision + 1
+
+
+# LLM: 直接调用发布入口绕过上游必填过滤，以真实frontmatter读回证明发布器自己也拒绝空说明。
+# 函数用途: 防止发布成功却无法被正式Skill加载器解析的空description。
+def test_r2_publish_rejects_empty_description(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
+
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path / 'home'))
+    with pytest.raises(SkillLearningGateError, match='DRAFT_INVALID'):
+        publish_learned_skill(store, PublishRequest(replace(decision(), description='')))
+    assert not store.load_registry().skills
+    assert not store.skill_path('csv-cleaner').exists()
+
+
+# LLM: 实际chmod为000，使用真实FD打开与清理；不是模拟权限成功，不跟随外部链接。
+# 函数用途: 确认无读执行权限的子目录可回收，根外目录权限与文件保持不变。
+def test_r2_stage_zero_mode_directory_is_cleaned(tmp_path):
+    import os
+    import stat
+
+    from agent_py_agent.agent.capability.asset_promotion import _stage_dir
+
+    external = tmp_path / 'external'
+    external.mkdir(mode=0o700)
+    (external / 'keep').write_text('keep')
+    external.chmod(0o500)
+    child = None
+    try:
+        with _stage_dir(tmp_path) as stage:
+            child = stage / 'closed'
+            child.mkdir()
+            (child / 'payload').write_text('temporary')
+            (stage / 'link').symlink_to(external, target_is_directory=True)
+            child.chmod(0)
+        assert not stage.exists()
+        assert (external / 'keep').read_text() == 'keep'
+        assert stat.S_IMODE(os.stat(external).st_mode) == 0o500
+    finally:
+        external.chmod(0o700)
+        if child is not None and child.exists():
+            child.chmod(0o700)
+        # 旧版红测会把000目录隔离到墓碑，测试也要把该准确残留恢复权限供pytest回收。
+        for pending in (tmp_path / 'data' / 'skill_learning').glob('.purge_*/closed'):
+            pending.chmod(0o700)
+
+
+# LLM: 只向清理函数注入非OS异常；真实上下文负责登记pending、保留首因并关闭所有自己取得的目录FD。
+# 函数用途: 非OS清理失败也不能漏掉欠账或覆盖业务异常。
+@pytest.mark.parametrize('business_failure', [False, True])
+def test_r2_stage_unexpected_cleanup_error_preserves_fds_and_pending(tmp_path, monkeypatch, business_failure):
+    import errno
+    import os
+
+    from agent_py_agent.agent.capability import asset_promotion as module
+    from agent_py_agent.agent.common import nofollow_fs
+
+    opened = []
+    original = nofollow_fs.open_directory_beneath
+    primary = ValueError('primary business failure')
+    cleanup = RuntimeError('unexpected cleanup failure')
+
+    # LLM: 记录真实打开的父目录FD，不改变打开、权限或清理行为。
+    # 函数用途: 在退出后用fstat核对FD确实关闭。
+    def track_open(*args, **kwargs):
+        descriptor = original(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    # LLM: 注入清理期非OS首因，覆盖原窄except没有登记的分支。
+    # 函数用途: 模拟普通运行时清理异常。
+    def fail_cleanup(*args):
+        raise cleanup
+
+    monkeypatch.setattr(nofollow_fs, 'open_directory_beneath', track_open)
+    monkeypatch.setattr(module, '_purge_directory', fail_cleanup)
+    expected = primary if business_failure else cleanup
+    with pytest.raises(type(expected)) as caught:
+        with module._stage_dir(tmp_path, with_fd=True) as (stage, fd):
+            opened.append(fd)
+            if business_failure:
+                raise primary
+    assert caught.value is expected
+    for descriptor in set(opened):
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
+    receipts = list((stage.parent / 'cleanup_pending').glob('*.json'))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text())['stage'] == stage.name
+
+
+# LLM: 构造真实深目录，只在修权限期间临时收紧Python调用栈；finally恢复限制并自底向上清理测试树。
+# 函数用途: 验证修权限不再按目录深度递归；FD峰值与关闭另有真实FD观测测试。
+def test_r2_stage_permission_repair_is_iterative(tmp_path):
+    import os
+    import sys
+
+    from agent_py_agent.agent.capability.asset_promotion import _repair_stage_permissions
+
+    paths = []
+    child = tmp_path
+    for _ in range(150):
+        child = child / 'd'
+        child.mkdir()
+        paths.append(child)
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    previous_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(120)
+        _repair_stage_permissions(descriptor)
+    finally:
+        sys.setrecursionlimit(previous_limit)
+        os.close(descriptor)
+        for path in reversed(paths):
+            path.rmdir()
+
+
+# LLM: 通过真实发布入口检查已有历史与写后被改内容的保留；仅注入失败时点，不绕过版本冲突或nofollow门。
+# 函数用途: 回滚只能删本次新写且未变的版本，不能按编号盲删。
+@pytest.mark.parametrize('case', ['existing_same', 'existing_other', 'changed_after_write', 'version_write_raises'])
+def test_r2_version_cleanup_preserves_foreign_or_existing_bytes(tmp_path, monkeypatch, case):
+    from agent_py_agent.agent.capability.skill_learning_publish import (
+        SkillLearningGateError,
+        render_learned_skill,
+    )
+
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path / 'home'))
+    request = PublishRequest(decision())
+    text = render_learned_skill(request.decision)
+    foreign = text + '\n不是本次事务的内容。'
+    if case.startswith('existing_'):
+        with store.state_lock():
+            store.save_version(request.decision.name, 1, text if case == 'existing_same' else foreign)
+    original = store.save_version
+
+    # LLM: 先调用真实save_version，只有目标落盘后才失败。
+    # 函数用途: 覆盖版本写入返回前的异常也会撤销本次新版本。
+    def fail_version(*args):
+        original(*args)
+        raise OSError('version write returned late failure')
+
+    # LLM: 不提交registry；可选改动已写版本内容，回滚不得将这份变动后的内容当成本次原文。
+    # 函数用途: 覆盖登记失败与未提交叶被改变两个窗口。
+    def fail_registry(registry):
+        if case == 'changed_after_write':
+            (store.versions_dir / request.decision.name / 'v1.md').write_text(foreign)
+        raise OSError('registry rejected')
+
+    monkeypatch.setattr(store, 'save_registry', fail_registry)
+    if case == 'version_write_raises':
+        monkeypatch.setattr(store, 'save_version', fail_version)
+    with pytest.raises(SkillLearningGateError, match='INSTALL_FAILED'):
+        publish_learned_skill(store, request)
+    expected = None if case == 'version_write_raises' else text if case == 'existing_same' else foreign
+    assert store.read_version(request.decision.name, 1) == expected
+    assert not store.load_registry().skills
+    assert not store.skill_path(request.decision.name).exists()
+
+
+# LLM: 跟踪真实子目录FD同时存活数量，不模拟打开结果；多个平级目录不应全部保留至遍历结束。
+# 函数用途: 防止迭代修权限把递归栈问题换成宽目录的FD耗尽问题。
+def test_r2_stage_permission_repair_releases_completed_directories(tmp_path, monkeypatch):
+    import os
+
+    from agent_py_agent.agent.capability.asset_promotion import _repair_stage_permissions
+    from agent_py_agent.agent.common import nofollow_fs
+
+    for index in range(40):
+        (tmp_path / f'child-{index}').mkdir()
+    original = nofollow_fs._openat_directory
+    descriptors = set()
+    peak = 0
+
+    # LLM: 每次打开前核验旧FD是否仍有效，避免把系统复用的编号当成泄漏。
+    # 函数用途: 观测真实遍历同时持有的子目录数量。
+    def track_open(*args):
+        nonlocal peak
+        for fd in tuple(descriptors):
+            try:
+                os.fstat(fd)
+            except OSError:
+                descriptors.remove(fd)
+        result = original(*args)
+        descriptors.add(result)
+        peak = max(peak, len(descriptors))
+        return result
+
+    monkeypatch.setattr(nofollow_fs, '_openat_directory', track_open)
+    root = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _repair_stage_permissions(root)
+        assert peak <= 2
+        for fd in descriptors:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+    finally:
+        os.close(root)

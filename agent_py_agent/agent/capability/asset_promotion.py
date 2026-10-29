@@ -283,7 +283,7 @@ def _dependency_hashes(home, steps):
 
 
 # LLM: parent/stage FD贯穿复制与yield；with_fd只供宿主发布器取固定FD，清理先随机墓碑改名再比原inode，首因显式捕获。
-# 函数用途: 创建有预算的执行区，依赖只经固定FD写入；失败回收本次对象或登记准确残留，不借外层except猜首因。
+# 函数用途: 创建有预算的执行区，普通清理异常均登记准确残留并关闭目录FD，不借外层except猜首因。
 @contextmanager
 def _stage_dir(home, *, dependencies=(), dependency_hashes=None, with_fd=False):
     import logging
@@ -341,12 +341,12 @@ def _stage_dir(home, *, dependencies=(), dependency_hashes=None, with_fd=False):
             try:
                 if identity is not None:
                     _purge_directory(parent_fd, staging.name, identity, stage_fd, tombstone)
-            except (OSError, SkillLearningGateError) as cleanup_error:
+            except Exception as cleanup_error:
                 try:
                     write_text_atomic_beneath(home, ('data', 'skill_learning', 'cleanup_pending', staging.name + '.json'),
                         json.dumps({'schema_version': 1, 'stage': staging.name, 'tombstone': tombstone,
                                     'identity': identity, 'status': 'cleanup_pending'}))
-                except (OSError, ValueError) as receipt_error:
+                except Exception as receipt_error:
                     cleanup_error.add_note('cleanup_pending_write_failed:' + type(receipt_error).__name__)
                     logging.getLogger(__name__).error('LEARNING_CLEANUP_PENDING_WRITE_FAILED stage=%s identity=%s', staging.name, identity)
                 if primary is not None:
@@ -382,7 +382,7 @@ def _write_stage_bytes(stage_fd, parts, raw):
         os.fsync(descriptor)
 
 
-# LLM: 墓碑与原FD核同后仅从pinned_fd的点目录递归清内容，不按墓碑名重选删除根；最后rmdir只移除已核验的空目录。
+# LLM: 墓碑与原FD核同后仅从pinned_fd清内容；最后rmdir是核验后的按名空目录操作，不承诺并发替换时的inode条件删除。
 # 函数用途: 先隔离名字，再从固定对象回收文件，墓碑换入其他目录时保留替代物并登记清理欠账。
 def _purge_directory(parent_fd, name, identity, pinned_fd, tombstone):
     import shutil
@@ -424,21 +424,39 @@ def _retain_stage_root(function, path, error):
     raise error
 
 
-# LLM: 仅在墓碑已与原FD核同后调用，逐层nofollow打开目录再fchmod；文件/链接不改权限，不作用于未核验替代物。
-# 函数用途: 修复候选留下的只读子目录，避免正常临时文件永远无法回收。
+# LLM: 固定根内显式深度帧遍历，完成子树即关闭FD；缺权限的真实目录先在父FD下nofollow补权限，打开后核inode；异常由独立栈收尾。
+# 函数用途: 不依赖Python递归深度修复只读或000子目录；同UID并发换名不具备原子chmod保证。
 def _repair_stage_permissions(descriptor):
     import stat
 
     from ..common.nofollow_fs import _openat_directory
+    from .skill_learning_publish import SkillLearningGateError
 
     os.fchmod(descriptor, stat.S_IMODE(os.fstat(descriptor).st_mode) | stat.S_IRWXU)
-    for name in os.listdir(descriptor):
-        metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if stat.S_ISDIR(metadata.st_mode):
-            with _StageFDStack() as descriptors:
-                child = _openat_directory(descriptor, name)
-                descriptors.callback(os.close, child)
-                _repair_stage_permissions(child)
+    pending = [(descriptor, iter(os.listdir(descriptor)), None)]
+    with _StageFDStack() as descriptors:
+        while pending:
+            parent, names, lifetime = pending[-1]
+            name = next(names, None)
+            if name is None:
+                pending.pop()
+                if lifetime is not None:
+                    lifetime.close()
+                continue
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode):
+                continue
+            mode = stat.S_IMODE(metadata.st_mode)
+            if mode & stat.S_IRWXU != stat.S_IRWXU:
+                os.chmod(name, mode | stat.S_IRWXU, dir_fd=parent, follow_symlinks=False)
+            child_lifetime = descriptors.enter_context(_StageFDStack())
+            child = _openat_directory(parent, name)
+            child_lifetime.callback(os.close, child)
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
+            os.fchmod(child, stat.S_IMODE(opened.st_mode) | stat.S_IRWXU)
+            pending.append((child, iter(os.listdir(child)), child_lifetime))
 
 
 # LLM: 逐段strict nofollow重开当前路径，只比对本次创建inode，不沿链接或用新目录替换原对象。
@@ -581,7 +599,7 @@ def _promote_package_asset(home, name, desc, candidate, *, commit=None):
     return _binding_from_record('capability_package', enabled)
 
 
-# LLM: Verify不占C短门；精确identity+正式binding才复用，缺Skill记录/receipt不成功；登记资产读回不得嵌套state锁。
+# LLM: Verify不占C短门；Skill锁内读回须同时匹配正式事件revision/hash、receipt摘要和目标正文；非正式事件/缺证明不成功，非Skill不得嵌套资产锁。
 # 函数用途: 四载体验证/CAS后绑定真实回执，不用同族、缺失记录或晚到的新版本伪造成功。
 def promote_verified_asset(owner_home, candidate, *, commit=None):
     from copy import deepcopy
@@ -608,11 +626,24 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
         event = promote_verified_skill(store, PublishRequest(dec), candidate.get('verifier'), commit=commit)
         if event is None:
             return None
-        rec = store.load_registry().skills.get(event.skill_name or name)
-        verification = rec.maintenance.get('verification_receipt') if rec is not None and isinstance(rec.maintenance, dict) else None
-        if not isinstance(verification, dict) or not verification:
-            return None
-        return {'carrier': 'skill', 'asset_id': event.skill_name or name, **verification}
+        with store.state_lock():
+            rec = store.load_registry().skills.get(event.skill_name or name)
+            verification = rec.maintenance.get('verification_receipt') if rec is not None and isinstance(rec.maintenance, dict) else None
+            if not isinstance(verification, dict) or not verification:
+                return None
+            if getattr(event, 'event', '') not in {'published', 'updated', 'skipped'}:
+                return None
+            if (rec.revision != event.version or rec.sha256 != event.sha256
+                    or verification.get('sha256') != event.sha256):
+                raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'})
+            path = store.skill_path(rec.name)
+            try:
+                actual = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
+            except (OSError, ValueError) as exc:
+                raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'}) from exc
+            if actual is None or skill_content_sha256(actual) != event.sha256:
+                raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'})
+            return {'carrier': 'skill', 'asset_id': event.skill_name or name, **verification}
     identity = asset_identity(carrier, candidate, home)
     previous = store.load_registry().assets.get(identity, {})
     binding = _formal_binding(home, carrier, name)

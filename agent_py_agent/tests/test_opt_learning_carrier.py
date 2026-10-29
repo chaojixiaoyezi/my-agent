@@ -215,3 +215,102 @@ def test_promotion_record_and_extraction_lock_order_never_deadlocks(tmp_path):
     assert observed['interleaved']
     assert observed['stuck'] == [False, False], observed
     assert not observed['errors'], observed
+
+
+# LLM: 在真实A发布返回与外层读回之间，用真实CAS发布同名B；只替换交错时点，不替换Store或发布器。
+# 函数用途: 证明A调用绝不能拿B的摘要或验证回执冒充自己的晋升证明。
+def test_r2_skill_promotion_rejects_later_same_name_receipt(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import asset_promotion as module
+    from agent_py_agent.agent.capability.skill_learning_publish import (
+        PublishRequest,
+        SkillLearningGateError,
+    )
+
+    original = module.promote_verified_skill
+    published = []
+
+    # LLM: 先完成A真实发布，再以A的revision/hash执行B的真实更新，最后仍返回A事件。
+    # 函数用途: 确定性制造同名技能被并发更新的读回窗口。
+    def interleave(store, request, verifier, *, commit=None):
+        event_a = original(store, request, verifier, commit=commit)
+        current = store.load_registry().skills[event_a.skill_name]
+        update = replace(request.decision, decision='update', body=request.decision.body + '\n再次核对字段。')
+        event_b = original(store, PublishRequest(update, expected_revision=current.revision,
+                                                expected_sha256=current.sha256), commit=commit)
+        proof_b = store.load_registry().skills[event_a.skill_name].maintenance['verification_receipt']
+        published.append((event_a, event_b, proof_b))
+        return event_a
+
+    monkeypatch.setattr(module, 'promote_verified_skill', interleave)
+    candidate = {'kind': 'skill', 'name': 'receipt-race', 'description': '核对资料',
+                 'body': '# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4}
+    with pytest.raises(SkillLearningGateError, match='LEARNING_FORMAL_REVISION_CHANGED'):
+        module.promote_verified_asset(tmp_path, candidate)
+    event_a, event_b, proof_b = published[0]
+    assert event_a.version == 1 and event_b.version == 2
+    assert event_a.sha256 != event_b.sha256 == proof_b['sha256']
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    assert store.load_registry().skills[candidate['name']].maintenance['verification_receipt'] == proof_b
+
+
+# LLM: 保留真实已发布记录与匹配的版本/hash，只将返回事件改成候选状态；候选绝不能借旧正式记录签成功。
+# 函数用途: 明确候选保存事件不是正式晋升回执。
+def test_r2_candidate_saved_event_is_not_formal_success(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import asset_promotion as module
+
+    original = module.promote_verified_skill
+
+    # LLM: 真实验证和写入完成后仅注入非正式事件类型，以排除其它字段不匹配造成的误通过。
+    # 函数用途: 检查事件类别门而非版本/hash门。
+    def candidate_event(*args, **kwargs):
+        return replace(original(*args, **kwargs), event='candidate_saved')
+
+    monkeypatch.setattr(module, 'promote_verified_skill', candidate_event)
+    candidate = {'kind': 'skill', 'name': 'not-published', 'description': '核对资料',
+                 'body': '# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4}
+    assert module.promote_verified_asset(tmp_path, candidate) is None
+
+
+# LLM: 没有并发写入时仍用真实默认静态验证、真实发布和读回，不以拒绝所有请求伪造竞态修复。
+# 函数用途: 正常晋升返回准确已发布版本的证明。
+def test_r2_skill_promotion_returns_own_receipt(tmp_path):
+    from agent_py_agent.agent.capability.asset_promotion import promote_verified_asset
+
+    candidate = {'kind': 'skill', 'name': 'receipt-own', 'description': '核对资料',
+                 'body': '# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4}
+    result = promote_verified_asset(tmp_path, candidate)
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    record = store.load_registry().skills[candidate['name']]
+    assert result == {'asset_id': record.name, **record.maintenance['verification_receipt']}
+    assert result['sha256'] == record.sha256
+
+
+# LLM: 真实发布后仅改回执或目标正文，保持事件不变；不以registry单独匹配代替正式目标与证明绑定。
+# 函数用途: 拒绝摘要被换的证明及发布后被改写的活动文件。
+@pytest.mark.parametrize('damage', ['receipt', 'body'])
+def test_r2_skill_receipt_and_target_must_match_event(tmp_path, monkeypatch, damage):
+    from agent_py_agent.agent.capability import asset_promotion as module
+    from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
+
+    original = module.promote_verified_skill
+
+    # LLM: 保留真实发布/验证，仅在读回前制造持久化损坏；正常锁内更新由另一条A/B测试覆盖。
+    # 函数用途: 区分registry字段匹配与回执、正文真的匹配。
+    def interleave(store, request, *args, **kwargs):
+        event = original(store, request, *args, **kwargs)
+        with store.state_lock():
+            registry = store.load_registry()
+            rec = registry.skills[event.skill_name]
+            if damage == 'receipt':
+                proof = {**rec.maintenance['verification_receipt'], 'sha256': '0' * 64}
+                changed = replace(rec, maintenance={**rec.maintenance, 'verification_receipt': proof})
+                store.save_registry(replace(registry, skills={**registry.skills, rec.name: changed}))
+            else:
+                store.skill_path(rec.name).write_text('# 用户改写的正文\n')
+        return event
+
+    monkeypatch.setattr(module, 'promote_verified_skill', interleave)
+    candidate = {'kind': 'skill', 'name': 'proof-binding', 'description': '核对资料',
+                 'body': '# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4}
+    with pytest.raises(SkillLearningGateError, match='LEARNING_FORMAL_REVISION_CHANGED'):
+        module.promote_verified_asset(tmp_path, candidate)

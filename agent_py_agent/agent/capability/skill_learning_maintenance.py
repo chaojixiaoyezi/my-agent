@@ -77,9 +77,9 @@ def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
 
 
 # LLM: 调用方持原state锁；previous_stable全文和hash双核，用户手改已由_owned_record挡住；保revision高水位。
-# 函数用途: 回归失败时自动恢复上一稳定正文，原事务失败则撤回正文替换。
+# 函数用途: 回归失败时自动恢复上一稳定正文，原事务失败则撤回正文和本次新建的未提交版本。
 def _rollback_trial(store, current, data, rollback):
-    from .skill_learning_publish import _historical_adoptions
+    from .skill_learning_publish import _historical_adoptions, _save_version_with_rollback
     from .skill_learning_store import replace_skill_file
     from .skill_snapshot import skill_content_sha256
 
@@ -94,7 +94,7 @@ def _rollback_trial(store, current, data, rollback):
     store.check_write(path, text)
     rollback.callback(replace_skill_file, path, previous)
     replace_skill_file(path, text)
-    store.save_version(current.name, current.revision+1, text)
+    _save_version_with_rollback(store, current.name, current.revision+1, text, rollback)
     restored = {**data, 'state':'active', 'quality':'trial', 'observations':[], 'helped_count':0, 'hurt_count':0,
                 'historical_adoptions':_historical_adoptions(replace(current, maintenance=data)),
                 'rolled_back_from':current.sha256, **data.get('previous_verification', {})}

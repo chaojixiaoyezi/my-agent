@@ -1,17 +1,19 @@
 # LLM: 自学习 S3 用户明确确认后的发布闸门；调用方须先验证候选id/revision与真实人类权限。顺序固定：重名/删过的名字/数量上限
 #   （新建）或登记在册且磁盘 hash 未被用户改动（更新）→ 字段脱敏 → 暂存目录渲染 SKILL.md 并按 require_frontmatter
 #   解析、核对 frontmatter 无损往返 → agent_generated guard（从不 force，caution/dangerous 都拒）→ 原子安装/替换 →
-#   版本全文 → 登记表。暂存写读扫描固定FD；移动后清理/登记失败仅按本次inode回滚，保磁盘与登记一致。全程持state_lock。
+#   版本全文 → 登记表。暂存写读扫描固定FD；失败补偿正文并清理本次新建且未提交的匹配版本，既有历史不删。全程持state_lock。
 #   不调用模型；revert/remove 也在这里，供 CLI 使用。同步检查 skill_learning.py、cli/skill_learning_commands.py 与测试。
 # 模块用途: 把一次已校验的总结决定安全地发布为 owner 的 skills/learned/<name>/SKILL.md，并提供回滚和删除。
 from __future__ import annotations
 
+import json
 import os
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..common.log_redaction import redact_sensitive_text
-from ..common.nofollow_fs import read_text_beneath
+from ..common.nofollow_fs import read_text_beneath, unlink_file_beneath
 from ..contracts.gates.skill_guard import SkillScanResult, install_decision
 from .skill_learning_prompt import DECISION_CREATE, SkillLearningDecision
 from .skill_learning_store import (
@@ -45,7 +47,6 @@ CODE_REDACTED = "SKILL_LEARNING_REDACTED"
 CODE_NOT_LEARNED = "SKILL_LEARNING_NOT_LEARNED"
 CODE_USER_MODIFIED = "SKILL_LEARNING_USER_MODIFIED"
 CODE_VERSION_MISSING = "SKILL_LEARNING_VERSION_MISSING"
-_STAGING_PREFIX = ".staging-"
 
 
 # LLM: code 是唯一机器判断字段；detail 只放字段名、guard pattern ID 等结构化事实，不复制 Skill 正文。
@@ -99,7 +100,7 @@ def render_learned_skill(decision: SkillLearningDecision) -> str:
 
 
 # LLM: 名字闸门在前（删过的名字、快照重名、目录已存在、数量上限），通过后才渲染、检查、安装；
-#   元数据先准备再移动；移动/收尾由安装器按原inode回滚，登记前任意异常也补偿本次对象，取消首因不改类。
+#   元数据先准备再移动；登记失败清理本次新建且匹配的未提交版本，再按原inode补偿安装，取消首因不改类。
 # 函数用途: 在锁内新建自学Skill，普通错误、取消或stage收尾失败都不绕过准确安装回滚。
 def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
@@ -118,8 +119,10 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
         'promotion_history':['observed','candidate','validated','trial']})
     installed_identity = _stage_check_and_move(store, publish, text, target)
     try:
-        store.save_version(name, 1, text)
-        store.save_registry(_registered_publication(store, registry, record, publish))
+        with ExitStack() as rollback:
+            _save_version_with_rollback(store, name, 1, text, rollback)
+            store.save_registry(_registered_publication(store, registry, record, publish))
+            rollback.pop_all()
     except BaseException as exc:
         try:
             _rollback_created_skill(store, target, installed_identity)
@@ -133,7 +136,7 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
 
 
 # LLM: 更新须CAS/磁盘hash一致，保稳定快照/历史身份；替换后任意登记前异常恢复旧文，取消/首因保持原类。
-#   副作用：原子替换SKILL.md且保同目录其它文件，写versions/registry，失败补偿正文。
+#   副作用：原子替换SKILL.md且保同目录其它文件，写versions/registry，失败补偿正文与本次未提交版本。
 # 函数用途: 在锁内更新自学Skill，不让非OS持久化错误留下与registry不一致的新正文。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
@@ -164,8 +167,10 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     try:
         store.check_write(path,text)
         replace_skill_file(path, text)
-        store.save_version(current.name, record.version, text)
-        store.save_registry(_registered_publication(store, registry, record, publish))
+        with ExitStack() as rollback:
+            _save_version_with_rollback(store, current.name, record.version, text, rollback)
+            store.save_registry(_registered_publication(store, registry, record, publish))
+            rollback.pop_all()
     except BaseException as exc:
         try:
             replace_skill_file(path, previous)
@@ -176,6 +181,30 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
             raise
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
     return _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else "")
+
+
+# LLM: 调用方持state锁并在registry提交后撤销回调；只清事务前不存在、内容仍匹配且未登记的版本；提交依据是持久化revision，不用磁盘高水位迁移值。
+# 函数用途: 写不可变版本并加入原事务回滚，版本写后或登记失败都能干净重试。
+def _save_version_with_rollback(store, name, revision, text, rollback):
+    if store.read_version(name, revision) is None:
+        # LLM: 仍在原state锁内运行；读回不明确或清理失败仅附原异常note，不误删版本或掩盖业务首因。
+        # 函数用途: 撤销本次未提交的匹配版本，保留已有或已登记的版本文件。
+        def remove_uncommitted(exc_type, primary, traceback):
+            try:
+                raw = read_text_beneath(store.directory, ('registry.json',))
+                current = json.loads(raw or '{}').get('skills', {}).get(name, {})
+                if int(current.get('revision', current.get('version', 0))) >= revision:
+                    return False
+                if store.read_version(name, revision) == text:
+                    unlink_file_beneath(store.directory, ('versions', name, f'v{revision}.md'))
+            except BaseException as cleanup_error:
+                if primary is None:
+                    raise
+                primary.add_note('uncommitted_version_cleanup_failed:' + type(cleanup_error).__name__)
+            return False
+
+        rollback.push(remove_uncommitted)
+    store.save_version(name, revision, text)
 
 
 # LLM: 调用方持发布锁；只保存真实model/adopted的run+hash身份，去重但不把旧版质量带到新版。
@@ -295,8 +324,8 @@ def _redacted_publish(publish: PublishRequest) -> tuple[PublishRequest, bool]:
     return replace(publish, decision=safe), safe != decision
 
 
-# LLM: 固定FD先移到data下随机隔离名核inode，stage成功收尾后才进正式名；独立关闭保首因，失败按准确移动对象回滚。
-# 函数用途: 不把未扫描的源替代物直接暴露为正式Skill，返回本次安装身份供登记失败补偿。
+# LLM: state锁内先移到data准备区，stage收尾后才进正式名；移动后核验失败（含目标打开失败）用现有父FD隔离实际对象，不拿原身份删除。
+# 函数用途: 发布已扫描Skill；二次移动后未能验证的对象移出正式发现根，返回成功安装身份供登记失败补偿。
 def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, text: str, target: Path) -> tuple[int, int]:
     from uuid import uuid4
 
@@ -336,9 +365,22 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
                 raise SkillLearningGateError(CODE_NAME_TAKEN, {'skill_name': publish.decision.name})
             os.rename(prepared.name, target.name, src_dir_fd=prepared_fd, dst_dir_fd=target_fd)
             placement = target
-            installed = os.stat(target.name, dir_fd=target_fd, follow_symlinks=False)
-            if (installed.st_dev, installed.st_ino) != identity:
-                raise SkillLearningGateError(CODE_INSTALL_FAILED, {'field': 'installed_identity'})
+            installed_fd = None
+            try:
+                installed_fd = _openat_directory(target_fd, target.name)
+                descriptors.callback(os.close, installed_fd)
+                installed = os.fstat(installed_fd)
+                if (installed.st_dev, installed.st_ino) != identity:
+                    raise SkillLearningGateError(CODE_INSTALL_FAILED, {'field': 'installed_identity'})
+            except BaseException as validation_error:
+                # 正式名此前为空且rename已成功；即使没有取得目标FD，也不能交给原身份删除补偿。
+                moved_identity = None
+                try:
+                    _quarantine_unverified_skill(store, target.name, target_fd, prepared_fd, installed_fd)
+                except BaseException as quarantine_error:
+                    validation_error.add_note('unverified_skill_quarantine_failed:' + type(quarantine_error).__name__)
+                    raise validation_error from quarantine_error
+                raise
         return moved_identity
     except BaseException as exc:
         if moved_identity is not None:
@@ -352,8 +394,36 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
         raise
 
 
-# LLM: 只回滚data隔离区或learned下本次移动的inode；替代物不删，失败记录原位置/身份，不扩大到其它owner目录。
-# 函数用途: stage收尾或登记失败后撤销本次新移动，让正式名称可重试，未知对象保留隔离并记欠账。
+# LLM: 仅在本次rename前正式名为空、移动后核验失败时调用；有目标FD用fstat，否则父FD下nofollow stat；固定父FD改名核实际inode，不删未知内容，失败记欠账。
+# 函数用途: 不依赖再次分配目录FD，将移入正式根的未验证对象原样隔离，避免EMFILE绕过隔离。
+def _quarantine_unverified_skill(store, name, target_fd, data_fd, actual_fd):
+    from uuid import uuid4
+
+    from ..common.nofollow_fs import write_text_atomic_beneath
+
+    identity = None
+    quarantine = '.quarantine_' + uuid4().hex
+    location = ['skills', 'learned', name]
+    try:
+        actual = os.fstat(actual_fd) if actual_fd is not None else os.stat(name, dir_fd=target_fd, follow_symlinks=False)
+        identity = (actual.st_dev, actual.st_ino)
+        os.rename(name, quarantine, src_dir_fd=target_fd, dst_dir_fd=data_fd)
+        location = ['data', 'skill_learning', quarantine]
+        moved = os.stat(quarantine, dir_fd=data_fd, follow_symlinks=False)
+        if (moved.st_dev, moved.st_ino) != identity:
+            raise SkillLearningGateError(CODE_INSTALL_FAILED, {'field': 'quarantine_identity'})
+    except BaseException as error:
+        try:
+            write_text_atomic_beneath(store.skills_root.parent, ('data', 'skill_learning', 'cleanup_pending', quarantine + '.json'),
+                json.dumps({'schema_version': 1, 'subject': 'unverified_skill', 'location': location,
+                            'identity': identity, 'quarantine': quarantine, 'status': 'cleanup_pending'}))
+        except Exception as pending_error:
+            error.add_note('quarantine_pending_write_failed:' + type(pending_error).__name__)
+        raise
+
+
+# LLM: 只删除data准备区或learned下本次已验证inode；替代物不删，失败记录位置/身份；正式rename的已知换源由专门隔离函数处理。
+# 函数用途: stage收尾或登记失败后撤销已验证安装；未能确认归属的对象保留并登记欠账。
 def _rollback_created_skill(store, target, identity):
     import json
     from uuid import uuid4
@@ -394,7 +464,7 @@ def _stage_and_check(store: SkillLearningStore, publish: PublishRequest, text: s
         _staged_skill(store, stage, publish, text, stage_fd=stage_fd)
 
 
-# LLM: 只经固定stage FD创建/读取单文件Skill；共用原frontmatter codec及guard规则，以agent_generated扫描，返回名字与inode。
+# LLM: 只经固定stage FD创建/读取单文件Skill；共用frontmatter codec并显式保留description必填门，以agent_generated扫描，返回名字与inode。
 # 函数用途: 将正文写入真正暂存对象并核对同一字节的格式/安全门，绝不按可变stage Path写读。
 def _staged_skill(store: SkillLearningStore, stage: Path, publish: PublishRequest, text: str, *, stage_fd: int):
     from ..common.nofollow_fs import _openat_directory, _validate_relative_parts
@@ -421,6 +491,8 @@ def _staged_skill(store: SkillLearningStore, stage: Path, publish: PublishReques
         raise SkillLearningGateError(CODE_DRAFT_INVALID, {"error": type(exc).__name__}) from exc
     parsed = (str(meta.get('name') or '').strip(), str(meta.get('description') or '').strip(),
               str(meta.get('when_to_use', '')).strip(), tuple(meta.get('tags', ())))
+    if not parsed[1]:
+        raise SkillLearningGateError(CODE_DRAFT_INVALID, {"field": "description"})
     if parsed != (decision.name, decision.description, decision.when_to_use, decision.tags):
         raise SkillLearningGateError(CODE_DRAFT_INVALID, {"field": "frontmatter"})
     _require_guard_allowed(_scan_staged_text(actual, publish))

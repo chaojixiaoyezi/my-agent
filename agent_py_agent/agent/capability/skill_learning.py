@@ -445,9 +445,6 @@ class SkillLearningService:
                                           str(request.get("request_key") or event.request_key))
 
 
-# LLM: 实际来源未知必须原对象上抛；普通快照读取失败（例如Skill总闸配置损坏）保持原空索引降级：
-#   发布侧仍会检查 learned/<name> 目录与登记表，不会覆盖任何文件。
-# 函数用途: 取当前快照的 Skill 条目。
 # LLM: 此类仅标记宿主快照失败，不作为模型输入或可持久化授权；与成功但空目录区分。
 # 类用途: 在总结材料中保留目录重名保护不完整的事实。
 class _UnavailableSkillEntries(tuple):
