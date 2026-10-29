@@ -1,3 +1,28 @@
+## 2026-10-28 Wave 9 Round 7：审计发现修复
+
+来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。
+
+- B1：删除运行策略两条无效旧阈值读取，参数元数据断言改为真正消费方`agent/conversation/compact_threshold_policy`，不增加登记旁路。
+- B2：门户夹具三条个人地址替换为通用占位路径；测试默认固定仓库夹具，只有显式`MY_AGENT_PORTAL_SOURCE_DIR`覆盖。伪造存在的旧home目录后仍必须选择仓库版本。
+- 治理：真实权威类在`user_space/managed_user_governance.py`；新增只读`policy_path`投影复用原store根和prefix，压缩消费者不再拼目录。原nofollow有界读取、身份拒绝和损坏传播不变。
+- MCP：生命周期锁内、归还借用之前保存客户端tuple，最后借用导致owner原共享list清空后仍按tuple撤销门面代理。新增1/2借用者真实临时MCP回归，核对重复close幂等、基础工具保留、旧代理撤销及客户端关闭。
+- 配置：旧比例只联动默认80或仍等于先前旧比例的新字段；私有`InitVar`承运来源对象当前旧比例，支持`dataclasses.replace`，不进入`fields()`、`asdict()`或新增公开配置键。覆盖连续复制、源对象不变、显式新比例优先、同值重赋、初始双字段显式相等及历史数值不得复活的边界。
+
+红绿证据：首轮同12个聚焦节点为9失败/3通过，修复后12通过；独审提出的配置边界新增4节点先3失败/1通过，修正后全部9个配置专项节点通过。没有删测、skip、xfail或降低断言。
+
+最终版本的指定7文件组合264通过、0失败/错误/跳过，JUnit为`.pytest_cache/r7-opus-required-final.xml`；全范围Ruff通过，导入边界返回`[]`且退出0，`git diff --check`通过，夹具`rg /Users/`为0匹配，目标工作树未创建`.background_jobs`。独立静态首审两项配置P2均已按红绿回归修正，复审确认关闭且未发现新的P1/P2；评审仅核所给精确代码片段，不冒称独立执行了测试或完整仓库验收。
+
+复现（均从工作树根执行）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_parameter_metadata.py agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py agent_py_agent/tests/test_compact_trigger_cap.py agent_py_agent/tests/test_context_pressure.py agent_py_agent/tests/test_runtime_context_pressure.py agent_py_agent/tests/test_mixed_compact_recovery.py agent_py_agent/tests/test_wave8_p0_locks_pty_and_diagnostics.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_mcp_lifecycle.py agent_py_agent/tests/test_compact_threshold_unification.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_dual_owner_concurrent_canary.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+额外套件初次272节点中260通过、12失败（0错误/跳过）；在同工作树缓存内从上述准确起点`git archive`导出的未改源码上运行原269节点，257通过、同名12失败（0错误/跳过），两份失败节点集合相等。失败涉及原MCP进程身份/清理确认，未把原因推断为沙箱或当作本片全部验证通过；未扩写无关进程治理逻辑。原始JUnit保留于`.pytest_cache/r7-opus-extra.xml`与`r7-opus-baseline.xml`。这些临时组件与回归结果不代表真实用户MCP、模型、部署或跨平台端到端验收。
+
 ## 2026-10-28 Wave 9 Item 9：12域兼容的渐进寻址与初始提示瘦身
 
 来源：先完整阅读`07-tasks/wave9-item9.md`全78行及其引用计划；唯一目标`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，干净起点`b84b1479f08194a308a1ec0b0cfe69879b2c7324`。不推送、部署或启停服务。宿主环境已跑通全部 9 个相关测试文件（286 passed, 0 failed）与 5 项严格门禁。

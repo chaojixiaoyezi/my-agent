@@ -62,7 +62,7 @@ class RuntimeCompactPolicy:
         return _trigger_is_capped(self.context_window_tokens, self.trigger_percent, self.trigger_max_tokens)
 
 
-# LLM: 比例从已冻结回合或显式线程四层解析一次，闲置与主压缩共用同一窗口；不可变快照不随之后设置变化而变。
+# LLM: 比例仅由compact_threshold_policy消费配置并解析，禁止为元数据归属加入占位读取；不可变快照不随之后设置变化而变。
 # LLM: 每次调用只从模型与配置快照解析一次持久压缩上限；save=False 仅禁用旧记忆及最终回复写入时，
 # 规范会话权威仍可允许真正的会话压缩；辅助的不保存调用仍不得持久化。
 # 触发线 = 窗口 × 百分比；memory_compact_auto_trigger_max_tokens 大于 0 时再与它取小（1M 窗口的长期后台线程靠它把压缩提前），
@@ -81,8 +81,6 @@ def runtime_compact_policy(
 
     window = resolve_model_context_window_tokens(agent)
     config = getattr(agent, "config", None)
-    _legacy_auto_trigger = getattr(config, "memory_compact_auto_trigger_percent", None)
-    _ = getattr(config, "memory_compact_auto_trigger_percent", _legacy_auto_trigger)
     resolution = resolve_thread_compact_policy(agent, thread)
     idle_threshold, idle_seconds = compact_idle_parameters(config)
     percent = resolution["effective_trigger_percent"]

@@ -90,6 +90,12 @@ class _GovernanceControl:
         self.uid = uid
         self.prefix = ("data", "managed_user_governance", uid)
 
+    # LLM: 与policy读写共用原store根和prefix，仅投影权威地址，不读取内容、创建目录或授予身份。
+    # 函数用途: 供宿主消费者检查治理文件是否存在，避免各调用方重造路径。
+    @property
+    def policy_path(self) -> Path:
+        return self.store.root.joinpath(*self.prefix, "governance_policy.json")
+
     # LLM: 只读host authority；不存在才有revision0默认，损坏不能回退自治。
     # 函数用途: 读取并验证一个用户当前治理策略。
     def policy(self) -> dict[str, Any]:

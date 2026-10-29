@@ -431,6 +431,35 @@ def test_close_shared_permission_view_preserves_parent_until_owner_close(tmp_pat
     assert all(not name.startswith("mcp__") for name in registry.runtime_snapshot().available_tool_names)
 
 
+# LLM: 真实临时MCP连接经原owner/借用者关闭顺序；最后借用触发owner清池仍须撤销门面代理，关闭可重复而不重扣计数。
+# 函数用途: 锁住父先关闭、最后子视图再释放时的工具撤销，保留基础工具并确认临时进程结束。
+@pytest.mark.parametrize("borrowers", [1, 2])
+def test_r7_last_borrower_revokes_proxy_after_owner_pool_is_cleared(tmp_path, borrowers):
+    from agent_py_agent.agent.tooling.mcp_registration import MCPProxyTool
+
+    owner = _registry(tmp_path)
+    client = owner._mcp_clients[0]
+    views = [owner.with_access_policy(access_mode="full-access", path_access_mode="full-access", owner_scope_root="")
+             for _ in range(borrowers)]
+    try:
+        assert owner._mcp_borrow_count == [borrowers]
+        owner.close_mcp_clients()
+        assert owner._mcp_clients == [client] and client.is_running()
+        for index, view in enumerate(views):
+            view.close_mcp_clients()
+            assert view._mcp_clients == [] and view._mcp_borrow_released
+            assert not any(isinstance(tool, MCPProxyTool) and tool.client is client for tool in view.tools.values())
+            assert "read_file" in view.tools
+            assert owner._mcp_borrow_count == [borrowers - index - 1]
+            view.close_mcp_clients()
+            assert owner._mcp_borrow_count == [borrowers - index - 1]
+        assert owner._mcp_clients == [] and client.is_closed()
+    finally:
+        for view in views:
+            view.close_mcp_clients()
+        owner.close_mcp_clients()
+
+
 def test_registry_close_interrupts_discovery_without_waiting_business_lock(tmp_path, monkeypatch):
     registry = _registry(tmp_path)
     client = registry._mcp_clients[0]

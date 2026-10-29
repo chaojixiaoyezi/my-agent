@@ -61,6 +61,79 @@ from agent_py_agent.tests.test_subagent_compact_recovery import _http
 WINDOW = 1_000_000
 
 
+# LLM: 构造和动态赋值都走真实AgentConfig；replace不得遗失旧字段派生关系，也不得覆盖独立的新字段。
+# 函数用途: 核对连续修改旧比例及复制配置时仍同步，原配置和显式新比例保持不变。
+@pytest.mark.parametrize("initial", [70, 85])
+def test_r7_replace_keeps_legacy_trigger_link_without_mutating_source(initial):
+    from dataclasses import asdict, fields
+
+    original = AgentConfig(memory_compact_auto_trigger_percent=initial)
+    assert original.memory_compact_trigger_percent == initial
+    changed = replace(original, memory_compact_auto_trigger_percent=90)
+    assert changed.memory_compact_trigger_percent == 90
+    assert original.memory_compact_trigger_percent == original.memory_compact_auto_trigger_percent == initial
+    changed.memory_compact_auto_trigger_percent = 85
+    assert changed.memory_compact_trigger_percent == 85
+    copied = replace(changed, memory_compact_auto_trigger_percent=75)
+    assert copied.memory_compact_trigger_percent == 75
+    assert changed.memory_compact_trigger_percent == 85
+    assert not any(name.startswith("_compact_trigger_") for name in asdict(copied))
+    assert not any(item.name.startswith("_compact_trigger_") for item in fields(copied))
+
+
+# LLM: 旧配置兼容不能取得覆盖管理员新字段的权限；同值重赋保持现行合同。
+# 函数用途: 验证显式新比例在运行期赋值和dataclasses.replace后均不被旧比例覆盖。
+@pytest.mark.parametrize("operation", ["assign", "replace", "same-value"])
+def test_r7_legacy_trigger_changes_preserve_explicit_new_trigger(operation):
+    config = AgentConfig(memory_compact_auto_trigger_percent=70)
+    config.memory_compact_trigger_percent = 75
+    if operation == "replace":
+        result = replace(config, memory_compact_auto_trigger_percent=85)
+    else:
+        config.memory_compact_auto_trigger_percent = 70 if operation == "same-value" else 85
+        result = config
+    assert result.memory_compact_trigger_percent == 75
+
+
+# LLM: 联动条件取原对象的新旧字段关系，不限于曾从默认80同步的实例。
+# 函数用途: 验证构造时显式相等的两个比例在复制更新旧键后也联动。
+def test_r7_replace_tracks_initially_equal_explicit_triggers():
+    config = AgentConfig(memory_compact_trigger_percent=70, memory_compact_auto_trigger_percent=70)
+    changed = replace(config, memory_compact_auto_trigger_percent=85)
+    assert changed.memory_compact_trigger_percent == 85
+    assert config.memory_compact_trigger_percent == config.memory_compact_auto_trigger_percent == 70
+
+
+# LLM: 私有复制上下文只能表示当前旧比例，不能把历史同步值当作新字段当前仍受旧键控制的证据。
+# 函数用途: 验证独立赋值后回到历史数值也不会被普通复制或显式复制误覆盖。
+@pytest.mark.parametrize("overrides", [{}, {"memory_compact_trigger_percent": 70}, {"memory_compact_trigger_percent": 65}])
+def test_r7_replace_does_not_revive_stale_trigger_link(overrides):
+    config = AgentConfig(memory_compact_auto_trigger_percent=70)
+    config.memory_compact_trigger_percent = 75
+    config.memory_compact_auto_trigger_percent = 85
+    config.memory_compact_trigger_percent = 70
+    changed = replace(config, **overrides)
+    assert changed.memory_compact_trigger_percent == overrides.get("memory_compact_trigger_percent", 70)
+    assert config.memory_compact_trigger_percent == 70
+
+
+# LLM: YAML同时配置显式默认新比例80与旧比例70时，新比例权威优先，且后续克隆不能把80回退成70。
+# 函数用途: 验证load_config加载并经dataclasses.replace克隆后显式80不被旧字段70覆盖。
+def test_r7_yaml_explicit_default_canonical_trigger_survives_replace(tmp_path):
+    from agent_py_agent.agent.settings.config import load_config
+
+    cfg_path = tmp_path / "agent.yaml"
+    cfg_path.write_text(
+        "memory_compact_trigger_percent: 80\nmemory_compact_auto_trigger_percent: 70\n",
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg_path)
+    assert loaded.memory_compact_trigger_percent == 80
+    cloned = replace(loaded, log_level="debug")
+    assert cloned.memory_compact_trigger_percent == 80
+    assert loaded.config_sources["memory_compact_trigger_percent"]["source"] == str(cfg_path.resolve())
+
+
 # 函数用途: 造一个只带窗口与三项压缩配置的轻量 agent，给 runtime_compact_policy 用。
 def _agent(cap, *, percent=90, recovery=60):
     return SimpleNamespace(

@@ -13,8 +13,8 @@ from ..runtime_scope_config import load_runtime_config_layer, merge_runtime_conf
 from ..secret_ref import freeze_managed_secret_environment
 
 
-# LLM: 子代理任务配置覆盖不改进程共享logger级别，仅幂等确保日志脱敏器已安装。
-# 函数用途: 为子代理配置覆盖提供与主配置同名的脱敏安装钩子。
+# LLM: 子代理任务配置覆盖不改进程共享logger级别，仅幂等确保日志脱敏器已安装；保留config入参契约供投影与生效对比测试核验。
+# 函数用途: 为子代理配置覆盖提供不污染全局日志级别的脱敏安装入口。
 def apply_log_level(_config: AgentConfig) -> None:
     install_log_redaction()
 

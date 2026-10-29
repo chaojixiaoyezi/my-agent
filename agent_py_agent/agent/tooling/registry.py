@@ -110,7 +110,7 @@ def _register_registry_borrow(facade: ToolRegistry) -> None:
         facade, _MCP_BORROW_RELEASES.put, (facade._mcp_catalog_owner, facade._mcp_borrow_release_completed))
 
 
-# LLM: Called only by explicit close or the release worker, never by GC; lifecycle lock serializes borrow count with owner close/reopen without blocking on prepare.
+# LLM: 仅由显式关闭或后台释放线程调用，绝不在GC回调内直接运行；生命周期锁串行化借用计数与父级关闭重开，不阻塞于prepare锁。
 # 函数用途: 归还已消失或显式关闭的借用，最后一份退出后完成父级延迟关闭。
 def _release_registry_borrow(owner: ToolRegistry) -> None:
     with owner._mcp_lifecycle_lock:
@@ -1197,11 +1197,12 @@ def _unregister_registry_mcp_proxies(registry, clients=None):
                                    else not isinstance(tool.client, PluginMCPClient)))}
 
 
-# LLM: Stopping remains outside prepare to interrupt discovery; borrowed facades detach and release owner lease before waiting on prepare cleanup.
-# 函数用途: 提取生命周期关闭，并在丢弃借用客户端前归还父级借用计数与清除本门面旧代理。
+# LLM: 借用释放前在生命周期锁内冻结客户端身份；最后借用可能清空共享池，之后仍按该快照撤销门面代理；stop保持可中断发现的原锁序。
+# 函数用途: 单次归还借用并清除本门面旧代理，父级延迟关闭清池也不能留下过期工具。
 def _close_registry_mcp_lifecycle(registry):
     _ensure_registry_lifecycle_fields(registry)
     with registry._mcp_lifecycle_lock:
+        facade_clients = tuple(registry._mcp_clients)
         if getattr(registry, "_mcp_borrowed", False):
             if registry._mcp_borrow_released:
                 return
@@ -1218,7 +1219,7 @@ def _close_registry_mcp_lifecycle(registry):
         else:
             return
     with registry._mcp_prepare_lock:
-        _unregister_registry_mcp_proxies(registry, registry._mcp_clients)
+        _unregister_registry_mcp_proxies(registry, facade_clients)
         registry._mcp_clients = []
         registry._mcp_connected_state = [False]
 

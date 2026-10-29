@@ -11,7 +11,7 @@ from ..settings.config_layers import compact_admin_forced, resolve_compact_trigg
 _TURN_COMPACT_POLICY = ContextVar("turn_compact_policy", default=None)
 
 
-# LLM: thread只来自已授权Store，home来自宿主；治理损坏必须传播，不能把锁定静默降为用户自治。
+# LLM: thread只来自已授权Store，home来自宿主；治理地址只取_GovernanceControl.policy_path，损坏或身份拒绝不能降为自治。
 # 函数用途: 读取四层比例及三个管理员开关名，返回独立的结构化快照。
 def resolve_thread_compact_policy(agent, thread=None, *, use_frozen=True):
     frozen = _TURN_COMPACT_POLICY.get()
@@ -49,7 +49,7 @@ def resolve_thread_compact_policy(agent, thread=None, *, use_frozen=True):
                 uid, _identity, _owner = resolve_managed_local_user(home.root, home.owner_id)
             except ManagedUserScopeDeniedError:
                 raw_uid = str(getattr(home, "owner_id", "") or "").removeprefix("local/").strip()
-                gov_path = home.root / "data" / "managed_user_governance" / raw_uid / "governance_policy.json"
+                gov_path = _GovernanceControl(home.root, raw_uid).policy_path
                 if LocalUserStore(home.root).get(raw_uid) is not None or gov_path.exists():
                     raise
                 uid = ""

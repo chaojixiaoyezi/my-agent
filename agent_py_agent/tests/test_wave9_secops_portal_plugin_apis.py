@@ -15,14 +15,43 @@ from pathlib import Path
 
 import pytest
 
-_DEFAULT_LOCAL_PORTAL_SOURCE = Path.home() / ".my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff"
 _REPO_FIXTURE_PORTAL_SOURCE = Path(__file__).resolve().parent / "fixtures/web_portal_plugin_handoff"
-SOURCE = Path(
-    os.environ.get(
-        "MY_AGENT_PORTAL_SOURCE_DIR",
-        str(_DEFAULT_LOCAL_PORTAL_SOURCE if _DEFAULT_LOCAL_PORTAL_SOURCE.exists() else _REPO_FIXTURE_PORTAL_SOURCE),
-    )
-)
+
+
+# LLM: 默认只用版本控制内夹具；外部来源仅由显式环境变量覆盖，不探测home或按本机目录存在性回退。
+# 函数用途: 确定本次API测试的源码目录，不读写个人门户项目。
+def _resolve_portal_source_dir():
+    override = os.environ.get("MY_AGENT_PORTAL_SOURCE_DIR")
+    return Path(override) if override is not None else _REPO_FIXTURE_PORTAL_SOURCE
+
+
+SOURCE = _resolve_portal_source_dir()
+
+
+# LLM: 重载测试模块只定义夹具，不执行服务；伪造存在的旧本机目录，不能据存在性越过仓库夹具默认。
+# 函数用途: 验证默认来源固定且只有明确环境变量能够覆盖，结果不依赖当前机器的home内容。
+@pytest.mark.parametrize("override", [False, True])
+def test_r7_portal_source_selection_is_machine_independent(tmp_path, monkeypatch, override):
+    import runpy
+
+    fake_home = tmp_path / "home"
+    legacy = fake_home / ".my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff"
+    legacy.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.delenv("MY_AGENT_PORTAL_SOURCE_DIR", raising=False)
+    selected = tmp_path / "explicit-source"
+    if override:
+        monkeypatch.setenv("MY_AGENT_PORTAL_SOURCE_DIR", str(selected))
+    namespace = runpy.run_path(__file__)
+    expected = selected if override else Path(__file__).resolve().parent / "fixtures/web_portal_plugin_handoff"
+    assert namespace["SOURCE"] == expected
+
+
+# LLM: 仅检查随仓库夹具，不读取本机外部源；禁止个人绝对路径进入可分发示例。
+# 函数用途: 验证工作台夹具中不包含个人home路径。
+def test_r7_portal_fixture_contains_no_personal_home_paths():
+    root = Path(__file__).resolve().parent / "fixtures/web_portal_plugin_handoff"
+    assert all("/Users/" not in path.read_text(encoding="utf-8") for path in root.rglob("*.py"))
 
 
 # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.

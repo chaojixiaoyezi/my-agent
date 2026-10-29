@@ -1513,6 +1513,8 @@ class WorkbenchRuntime:
         if hasattr(comp.issuer, "_session_verifier"):
             comp.issuer._session_verifier = self._verify_session_for_issuer
 
+        # LLM: 测试契约探针内部调用入口，统一封装plugin_host_call.v2授权与分发，不绕过宿主鉴权边界。
+        # 函数用途: 在契约验收场景中构造并执行一次插件宿主调用。
         def _call(source: Any, action: str, payload: dict | None = None, *, key: str | None = None, as_user: str | None = None):
             row: dict[str, Any] = {
                 "schema": "plugin_host_call.v2",
@@ -5532,8 +5534,8 @@ class WorkbenchRuntime:
                 },
             }
 
-    # LLM: 为「🚀 新接口实验室」6 张能力卡片聚合所有下拉框选项（真实会话含终端席位与最近一次任务情况、工作目录、待晋升资产、数据源、提炼草稿、浏览器录制与后台进程）。
-    # 函数用途: 响应 GET /api/portal/core-lab/options 请求，让用户无需手填任何 ID 即可从下拉框直接选择并查看会话最近一次任务详情。
+    # LLM: 为「🚀 新接口实验室」6 张能力卡片聚合下拉框选项；默认工作目录只展示可分发占位地址，不嵌入个人机器路径。
+    # 函数用途: 响应 GET /api/portal/core-lab/options，让用户选择会话、工作目录、资产与后台资源，并查看最近一次任务详情。
     def get_core_lab_options(self, owner_id: str = "local/main") -> dict[str, Any]:
         with self._lock:
             norm_owner, owner_dir, main_dir = self._resolve_portal_owner_dirs(owner_id)
@@ -5554,9 +5556,9 @@ class WorkbenchRuntime:
             ]
             if norm_owner == "local/main":
                 candidate_dirs = [
-                    ("/Users/xiaoyezi/my-agent-dsh", "💻 主开发仓库 (/Users/xiaoyezi/my-agent-dsh)"),
-                    ("/Users/xiaoyezi/my-agent-worktrees", "🌿 多分支并行工作区 (/Users/xiaoyezi/my-agent-worktrees)"),
-                    ("/Users/xiaoyezi/.my-agent/releases/claude-tools", "🛠️ 07 协同工具与门户目录 (/Users/xiaoyezi/.my-agent/releases/claude-tools)"),
+                    ("/workspace/my-agent-dsh", "💻 主开发仓库 (/workspace/my-agent-dsh)"),
+                    ("/workspace/my-agent-worktrees", "🌿 多分支并行工作区 (/workspace/my-agent-worktrees)"),
+                    ("/workspace/claude-tools", "🛠️ 07 协同工具与门户目录 (/workspace/claude-tools)"),
                     (str(main_dir / "workspace"), f"📂 主控运行空间 ({main_dir / 'workspace'})"),
                 ]
                 for p_str, lbl in candidate_dirs:

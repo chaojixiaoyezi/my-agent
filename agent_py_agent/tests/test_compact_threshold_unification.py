@@ -58,3 +58,26 @@ def test_owner_layer_cannot_override_alias_forced_admin_default(tmp_path, key):
     config = AgentConfig(**merged.values, config_sources=merged.sources)
     result = resolve_thread_compact_policy(SimpleNamespace(config=config))
     assert result["effective_trigger_percent"] == 80 and result["force_locked"]
+
+
+# LLM: 只替换resolver与只读权威路径，不模拟策略解析；找不到账户但原控制文件存在时必须继续拒绝，不能退回自治。
+# 函数用途: 验证无效受管用户的治理文件检测复用_GovernanceControl提供的唯一地址。
+def test_r7_denied_managed_user_uses_canonical_governance_path(tmp_path, monkeypatch):
+    from agent_py_agent.agent.user_space import managed_user_governance as governance
+
+    canonical = tmp_path / "canonical" / "policy.json"
+    canonical.parent.mkdir()
+    canonical.write_text("{}")
+    monkeypatch.setattr(governance._GovernanceControl, "policy_path", property(lambda self: canonical), raising=False)
+    monkeypatch.setattr(governance, "read_global_compact_force_policy", lambda root: None)
+
+    # LLM: 不创建真实用户，也不修改治理；仅让正式拒绝分支走到权威路径存在性核验。
+    # 函数用途: 产生与受管身份无效相同的结构化拒绝。
+    def denied(*args):
+        raise governance.ManagedUserScopeDeniedError()
+
+    monkeypatch.setattr(governance, "resolve_managed_local_user", denied)
+    home = SimpleNamespace(root=tmp_path, owner_provider="local", owner_kind="user", owner_id="local/missing")
+    agent = SimpleNamespace(config=SimpleNamespace(memory_compact_trigger_percent=80), home_paths=home)
+    with pytest.raises(governance.ManagedUserScopeDeniedError):
+        resolve_thread_compact_policy(agent)
