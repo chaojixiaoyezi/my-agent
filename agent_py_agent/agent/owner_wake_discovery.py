@@ -446,6 +446,7 @@ def seed_registry_page_from_disk(
 # the signature would cost more than the judgement it replaces. Only judgements slower than
 # _FACT_MIN_CACHED_SECONDS are remembered, which removes the regression for light owners while
 # keeping the win for content-heavy ones.
+# LLM: 只缓存同一快照内稳定判断；分页probe发现hard后，本次二次判定不得覆盖成否定并长时缓存。
 # 函数用途: 判定一个 owner home 是否有待驱动的事实;贵的判定在文件没变时不再逐盘重读。
 def _owner_fact_kind(owner_home: Path) -> str:
     cache_key = str(owner_home)
@@ -480,7 +481,11 @@ def _owner_fact_kind(owner_home: Path) -> str:
         if before is None:
             _bump_fact_stat("fallback")
             return kind
-        kind = _evaluate_owner_fact_kind(owner_home, deadlines)
+        rechecked = _evaluate_owner_fact_kind(owner_home, deadlines)
+        if kind == "hard" and rechecked != "hard":
+            _drop_owner_fact_kind(cache_key)
+            return kind
+        kind = rechecked
         try:
             digest, file_count = _owner_fact_signature_digest(owner_home)
         except Exception:  # noqa: BLE001 签名不可读: 结论照常返回,只是不缓存
@@ -568,6 +573,7 @@ def _bump_fact_stat(name: str) -> None:
         _OWNER_FACT_STATS[name] = int(_OWNER_FACT_STATS.get(name, 0)) + 1
 
 
+# LLM: agents签名采用独立有界页；大目录页变即放弃缓存，不能用无界glob换取缓存命中。
 # LLM: The signature must cover exactly the paths the fact predicates read; a path that is read
 # but not signed can change without invalidating the cached verdict. When a predicate starts
 # reading a new path, add it here in the same change (tests assert add/remove/edit invalidation).
@@ -586,7 +592,7 @@ def _owner_fact_signature(owner_home: Path) -> tuple[tuple[str, tuple[Any, ...]]
         parts.append((f"wake_normal:{root}", _dir_entries_signature(root / "wake_queue" / "normal", "*.json")))
         parts.append((f"policies:{root}", _dir_entries_signature(root / "progress_policies", "*.json")))
         parts.append((f"messages:{root}", _dir_entries_signature(root / "messages", "*.jsonl")))
-    parts.append(("agents", _dir_entries_signature(owner_home / "agents", "*/state.json")))
+    parts.append(("agents", _subagent_page_signature(owner_home)))
     parts.append(
         (
             "task_links",
@@ -1031,6 +1037,18 @@ def _blocked_subagent_is_quiescent(owner_home: Path, run_id: str, payload: dict[
 
 # 每次发现最多检查5000个目录项；跨轮内存迭代器避免大目录反复从头扫描。
 _SUBAGENT_SCAN_MAX_DIRS = 5000
+_SUBAGENT_SWEEP_LOCK = threading.RLock()
+_SUBAGENT_SWEEP_POSITIVES: OrderedDict[str, tuple[tuple[int, int], bool]] = OrderedDict()
+
+
+# LLM: 签名与wake扫描使用不同游标，不消耗彼此页面；每轮只stat预算内状态，跨页变动使缓存保守失效。
+# 函数用途: 为owner事实缓存生成有界agents页签名，包含目录物理身份。
+def _subagent_page_signature(owner_home: Path) -> tuple[Any, ...]:
+    from .subagents.services.persistence.locator_hygiene import agent_projection_page
+
+    runs, complete = agent_projection_page(owner_home, _SUBAGENT_SCAN_MAX_DIRS, purpose="signature")
+    return (_dir_own_signature(owner_home / "agents"), complete,
+            tuple((run.name, *_file_signature(run / "state.json")) for run in runs))
 
 
 # LLM: 仅明示缺失工作区且无runtime活跃行才可跳过；读错、未知和closeout均保原唤醒，不改任何状态。
@@ -1054,6 +1072,25 @@ def _subagent_projection_is_dangling_orphan(owner_home: Path, run_dir: Path, pay
 # LLM: 收口重试优先，缺失locator和runtime终态过滤仅作用于陈旧投影；公平有界分页不新建数据库。
 # 函数用途: 从owner级投影发现需驱动的子代理，跳过测试孤儿但不改变可恢复状态。
 def _has_unfinished_subagent_run(owner_home: Path) -> bool:
+    with _SUBAGENT_SWEEP_LOCK:
+        root = owner_home / "agents"
+        if root.is_symlink() or not root.is_dir():
+            _SUBAGENT_SWEEP_POSITIVES.pop(str(root), None)
+            return False
+        info = root.stat()
+        identity = info.st_dev, info.st_ino
+        previous = _SUBAGENT_SWEEP_POSITIVES.pop(str(root), None)
+        positive, exhausted = _probe_subagent_page(owner_home)
+        positive = positive or bool(previous and previous[0] == identity and previous[1])
+        _SUBAGENT_SWEEP_POSITIVES[str(root)] = (identity, False if exhausted else positive)
+        while len(_SUBAGENT_SWEEP_POSITIVES) > 32:
+            _SUBAGENT_SWEEP_POSITIVES.popitem(last=False)
+        return positive or not exhausted
+
+
+# LLM: 单页正事实与是否穷尽分开返回，由调用方跨页聚合；读取错误不伪造完整目录扫描。
+# 函数用途: 按原runtime和closeout判据检查一页子代理投影。
+def _probe_subagent_page(owner_home: Path) -> tuple[bool, bool]:
     """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/state.json 的 status)。
 
     ``owner_home/agents`` 是 owner 级全局投影，不是 SubAgentManager 的工作区。
@@ -1071,12 +1108,12 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
 
     agents_dir = owner_home / "agents"
     if agents_dir.is_symlink() or not agents_dir.is_dir():
-        return False
+        return False, True
     try:
         runs, exhausted = agent_projection_page(owner_home, _SUBAGENT_SCAN_MAX_DIRS, purpose="wake")
         task_files = [run / "state.json" for run in runs]
     except OSError:
-        return False
+        return False, False
     for path in task_files:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1085,7 +1122,7 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
         if not isinstance(payload, dict):
             continue
         if bool(payload.get("runtime_closeout_pending")):
-            return True
+            return True, exhausted
         status = str(payload.get("status") or "").strip().upper()
         if status in _UNFINISHED_RUN_STATUSES:
             if _subagent_projection_is_dangling_orphan(owner_home, path.parent, payload):
@@ -1099,9 +1136,9 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
                     pass
             if status == "BLOCKED" and _blocked_subagent_is_quiescent(owner_home, path.parent.name, payload):
                 continue
-            return True
+            return True, exhausted
     # 尚未检查到目录尾只能说未知，不能让预算外的活跃/closeout被当作不存在。
-    return not exhausted
+    return False, exhausted
 
 
 _TASK_STATUS_CACHE_MAX_ENTRIES_COUNT = 131072

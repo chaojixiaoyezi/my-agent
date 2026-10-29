@@ -318,3 +318,162 @@ def test_late_parent_wake_after_archive_keeps_projection(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_archive_entry", append_wake)
     report = service.maintain_owner_agent_projections(home, now=now)
     assert run.exists() and report["errors"] and report["archived_dirs"] == 0
+
+
+# LLM: 并发事件放在末次验证之后的真实删除入口，不再沿用过早的归档后注入点。
+# 函数用途: 复现首次runtime登记和真实父唤醒发布抢在删叶前的竞态。
+@pytest.mark.parametrize("event", ["runtime", "wake"])
+def test_r1_late_registration_or_publication_preserves_projection(tmp_path, monkeypatch, event):
+    from agent_py_agent.agent.conversation.models import WakeSignal
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+    from agent_py_agent.agent.conversation.store_wake_publication import publish_deduped
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    home, run, now, _ = _projection(tmp_path, days=31)
+    assert not (home / "runtime.db").exists()
+    storage = ConversationStorage(home / "conversations")
+    service, fired = _service(), []
+    original = service._remove_records
+    # LLM: 调真实发布/登记；锁忙须中止本次维护，成功写入则必须由末次保护识别。
+    # 函数用途: 将业务写者固定在删除函数入口。
+    def interleave(*args, **kwargs):
+        fired.append(True)
+        if event == "runtime":
+            db = home / "runtime.db"
+            repo = RuntimeRepository(db, existing_only=db.exists())
+            repo.record_run_creation(owner_id="local/main", goal="late", run_id="child")
+        else:
+            publish_deduped(storage, WakeSignal.from_dict({"wake_signal_id": "wake-race", "thread_id": "thread-race",
+                "source_agent_id": "child", "root_task_id": "task", "dedupe_key": "late"}), blocking=False)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(service, "_remove_records", interleave)
+    report = service.maintain_owner_agent_projections(home, now=now)
+    assert fired and (run / "state.json").exists()
+    assert report["removed_dirs"] == 0
+
+
+# LLM: 路径中的agents在最终验证后可被替换，最终run叶NOFOLLOW不能保护祖先。
+# 函数用途: 确定性复现父目录链接置换后的域外删叶。
+def test_r1_swapped_agents_parent_cannot_delete_outside(tmp_path, monkeypatch):
+    home, run, now, _ = _projection(tmp_path, dangling=True, status="PLANNING", days=2)
+    service, original = _service(), _service()._remove_records
+    moved = tmp_path / "outside-agents"
+    # LLM: 仅改变真实路径关系，不伪造inode或清单；同一旧inode被移到owner外。
+    # 函数用途: 在删除入口换成祖先软链接。
+    def swap(*args, **kwargs):
+        (home / "agents").rename(moved)
+        (home / "agents").symlink_to(moved, target_is_directory=True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(service, "_remove_records", swap)
+    report = service.maintain_owner_agent_projections(home, now=now)
+    assert (moved / "child/state.json").exists()
+    assert report["errors"] and report["removed_dirs"] == 0
+
+
+# LLM: 同时在旧Path.open与新os.open的真实追加缝隙注入；禁止靠绕过触发点让回归虚绿。
+# 函数用途: 复现归档叶预检后被链接替换时的域外追加。
+def test_r1_archive_leaf_swap_never_appends_outside(tmp_path, monkeypatch):
+    home, run, now, _ = _projection(tmp_path, days=31)
+    service = _service()
+    archive = home / "agents" / time.strftime("archived_subagents_%Y_%m.jsonl", time.gmtime(now))
+    outside = tmp_path / "outside.jsonl"
+    outside.write_bytes(b"")
+    real_path_open, real_os_open, fired = Path.open, os.open, []
+    # LLM: 置换在实际打开前发生；受管NOFOLLOW必须拒绝而不是沿链接写外部文件。
+    # 函数用途: 安装一次恶意归档叶链接。
+    def replace_leaf():
+        if not fired:
+            fired.append(True)
+            if archive.exists():
+                archive.unlink()
+            archive.symlink_to(outside)
+    # LLM: 老实现的路径追加也要触发相同窗口，保证红灯有效。
+    # 函数用途: 截获Path追加打开。
+    def path_open(path, mode="r", *args, **kwargs):
+        if path == archive and "a" in mode:
+            replace_leaf()
+        return real_path_open(path, mode, *args, **kwargs)
+    # LLM: 新实现以dir_fd和O_APPEND打开同一叶，注入后仍交真实系统调用裁决。
+    # 函数用途: 截获受管FD追加打开。
+    def fd_open(path, flags, *args, **kwargs):
+        if str(path) in {str(archive), archive.name} and flags & os.O_APPEND:
+            replace_leaf()
+        return real_os_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", path_open)
+    monkeypatch.setattr(os, "open", fd_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {fd_open})
+    report = service.maintain_owner_agent_projections(home, now=now)
+    assert fired and outside.read_bytes() == b""
+    assert (run / "state.json").exists() and report["errors"]
+
+
+# LLM: refs的..不能被词法首段误认成tmp，含歧义段时整份投影须保留。
+# 函数用途: 验证scratch中经父路径定位的唯一报告不会被七日瘦身删除。
+@pytest.mark.parametrize("absolute", [False, True])
+def test_r1_dotdot_deliverable_protects_entire_run(tmp_path, absolute):
+    home, run, now, payload = _projection(tmp_path)
+    report = run / "snapshots/report.txt"
+    report.write_text("唯一报告")
+    ref = Path("tmp/../snapshots/report.txt")
+    payload["deliverable_paths"] = [str(run / ref if absolute else ref)]
+    (run / "state.json").write_text(json.dumps(payload))
+    for path in [*run.rglob("*"), run]:
+        os.utime(path, (now - 8 * 86400, now - 8 * 86400))
+    result = _service().maintain_owner_agent_projections(home, now=now)
+    assert report.exists() and report.read_text() == "唯一报告"
+    assert (run / "events.jsonl").exists() and result["slimmed_dirs"] == 0
+
+
+# LLM: 非..形式也可能不能唯一定位交付子项，目录自身与缺失相对引用都不得当作清理许可。
+# 函数用途: 验证歧义相对引用保守保护整个投影。
+@pytest.mark.parametrize("ref", [".", "snapshots/missing.txt"])
+def test_r1_ambiguous_relative_ref_preserves_all_scratch(tmp_path, ref):
+    home, run, now, payload = _projection(tmp_path)
+    payload["deliverable_paths"] = [ref]
+    (run / "state.json").write_text(json.dumps(payload))
+    for path in [*run.rglob("*"), run]:
+        os.utime(path, (now - 8 * 86400, now - 8 * 86400))
+    result = _service().maintain_owner_agent_projections(home, now=now)
+    assert (run / "events.jsonl").exists() and (run / "tmp/scratch").exists()
+    assert result["slimmed_dirs"] == 0
+
+
+# LLM: 外部引用别名实际指向同一run时也要保护；解析只增加保留范围，不能扩展删除根。
+# 函数用途: 验证规范化实际交付位置而不是仅做路径字符串前缀比较。
+def test_r1_deliverable_alias_resolves_to_internal_report(tmp_path):
+    home, run, now, payload = _projection(tmp_path)
+    (run / "snapshots/report.txt").write_text("唯一报告")
+    alias = tmp_path / "report-alias"
+    alias.symlink_to(run, target_is_directory=True)
+    payload["deliverable_paths"] = [str(alias / "snapshots/report.txt")]
+    (run / "state.json").write_text(json.dumps(payload))
+    for path in [*run.rglob("*"), run]:
+        os.utime(path, (now - 8 * 86400, now - 8 * 86400))
+    _service().maintain_owner_agent_projections(home, now=now)
+    assert (run / "snapshots/report.txt").exists()
+
+
+# LLM: 末次业务重查之后的真实发布仍须被共享临界区拦住；仅多读一次队列不能保证原子。
+# 函数用途: 在真实首个删叶前发布父唤醒，要求一份原投影都不能被部分删除。
+def test_r1_publication_at_unlink_cannot_partially_delete_projection(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.models import WakeSignal
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+    from agent_py_agent.agent.conversation.store_wake_publication import publish_deduped
+
+    home, run, now, _ = _projection(tmp_path, days=31, scratch=False)
+    before = {p.name: p.read_bytes() for p in run.iterdir()}
+    storage, fired, original = ConversationStorage(home / "conversations"), [], os.unlink
+    # LLM: 委托真实发布与unlink，非阻塞只避免测试自等待；锁忙必须向维护方传播并保原件。
+    # 函数用途: 将发布固定在最终检查与删叶系统调用之间。
+    def unlink(path, *args, **kwargs):
+        if str(path) == "workspace_locator.json" and not fired:
+            fired.append(True)
+            publish_deduped(storage, WakeSignal.from_dict({"wake_signal_id": "wake-last-leaf", "thread_id": "thread-race",
+                "source_agent_id": "child", "root_task_id": "task", "dedupe_key": "last-leaf"}), blocking=False)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {unlink})
+    result = _service().maintain_owner_agent_projections(home, now=now)
+    assert fired
+    assert {p.name: p.read_bytes() for p in run.iterdir()} == before
+    assert result["removed_files"] == 0 and result["errors"]

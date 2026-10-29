@@ -9,15 +9,17 @@ import sqlite3
 import stat
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from contextlib import ExitStack, closing, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from ....common.json_io import locked_json_path, write_private_json_file_atomic
-from ....common.nofollow_fs import open_readonly_file_beneath
+from ....common.json_io import write_private_json_file_atomic
+from ....common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ....runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from ....runtime_db.schema import runtime_db_path
 
@@ -28,6 +30,7 @@ _METADATA = frozenset({"state.json", "workspace_locator.json", "refs.json", "sub
 _INTERNAL_LOCKS = frozenset(f"{name}.lock" for name in _METADATA)
 _SCAN_LOCK = threading.RLock()
 _SCANS: OrderedDict[tuple[str, str], tuple[int, Any]] = OrderedDict()
+_MAINTENANCE_BOUNDARY: ContextVar[dict | None] = ContextVar("projection_maintenance_boundary", default=None)
 
 
 # LLM: 只读nofollow普通文件；缺失可显式为空，损坏、链接和非对象均抛错，不能作删除许可。
@@ -68,14 +71,24 @@ def projection_workspace_missing(run_dir: Path, payload: dict[str, Any]) -> bool
     return False
 
 
-# LLM: 不实例化可写Repository；只读真实WAL，冷WAL禁建sidecar；未知库/冲突状态由调用方保护。
+# LLM: 分类只读真实WAL，canonical和存量data库都必须核对；维护新建canonical不能遮蔽旧库活跃事实。
 # 函数用途: 返回同run的runtime状态及未消费闹钟；无库或无行不是活跃记录。
 def projection_runtime_facts(owner_home: Path, run_id: str, payload: dict[str, Any]) -> tuple[str, bool]:
-    db = runtime_db_path(owner_home)
-    if not db.exists() and not db.is_symlink():
-        db = owner_home / "data/runtime.db"
-    if not db.exists() and not db.is_symlink():
-        return "", False
+    statuses, pending = set(), False
+    for db in (runtime_db_path(owner_home), owner_home / "data/runtime.db"):
+        if not db.exists() and not db.is_symlink():
+            continue
+        status, debt = _runtime_file_facts(db, run_id, payload)
+        if status:
+            statuses.add(status)
+        pending = pending or debt
+    active = statuses - AGENT_RUN_TERMINAL_STATUSES
+    return (sorted(active or statuses)[0] if statuses else ""), pending
+
+
+# LLM: 单库查询绝不初始化schema，拒绝链接及冷WAL副写；任何未知库向调用方报错保留投影。
+# 函数用途: 读取一个现存runtime库的运行状态和闹钟。
+def _runtime_file_facts(db: Path, run_id: str, payload: dict[str, Any]) -> tuple[str, bool]:
     if db.is_symlink() or db.parent.is_symlink() or not db.is_file():
         raise ValueError("拒绝链接runtime库")
     wal = Path(f"{db}-wal")
@@ -136,24 +149,80 @@ def _validate_run_dir(owner_home: Path, run_dir: Path) -> None:
         raise ValueError("投影目录越界或不是实目录")
 
 
-# LLM: 不跟链接，拒绝特殊文件与多硬链接；物理清单同时作为删除前一致性证据及精确计量来源。
+# LLM: 清单从固定FD逐段读取，设备与inode一并留证；拒绝链接、特殊文件和多硬链接，不跟随被换掉的路径父链。
 # 函数用途: 列出投影相对路径、类型、inode、尺寸和mtime，不读取正文。
-def _inventory(run_dir: Path) -> dict[str, tuple[int, int, int, int]]:
+def _inventory(run_dir: Path, *, root_fd: int | None = None) -> dict[str, tuple[int, ...]]:
     records = {}
-    pending = [run_dir]
-    while pending:
-        parent = pending.pop()
-        with os.scandir(parent) as entries:
+    # LLM: 子目录FD仅在当前递归栈保留，任何读取或身份失败均由finally关闭，不扩大删除授权。
+    # 函数用途: 通过已固定的目录逐叶建立清单。
+    def walk(parent_fd, prefix):
+        with os.scandir(parent_fd) as entries:
             for entry in entries:
                 info = entry.stat(follow_symlinks=False)
                 if stat.S_ISLNK(info.st_mode) or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                     raise ValueError("投影包含链接或特殊文件")
                 if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
                     raise ValueError("投影包含多链接文件")
-                records[str(Path(entry.path).relative_to(run_dir))] = (info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns)
+                name = str(Path(prefix) / entry.name)
+                records[name] = _record_fp(info)
                 if stat.S_ISDIR(info.st_mode):
-                    pending.append(Path(entry.path))
+                    child_fd = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                    try:
+                        if _identity(os.fstat(child_fd)) != _identity(info):
+                            raise ValueError("清单目录身份已变化")
+                        walk(child_fd, name)
+                    finally:
+                        os.close(child_fd)
+    descriptor = os.dup(root_fd) if root_fd is not None else open_directory_beneath(run_dir, (), require_dir_fd=True)
+    try:
+        walk(descriptor, "")
+    finally:
+        os.close(descriptor)
     return records
+
+
+# LLM: 设备号和inode共同构成物理身份，不以路径字符串或目录mtime代替身份。
+# 函数用途: 取得目录及普通文件可比较的物理编号。
+def _identity(info):
+    return info.st_dev, info.st_ino
+
+
+# LLM: mtime仍占原索引三以保持年龄计算；新增设备号防止跨设备的inode碰撞。
+# 函数用途: 为清单和删叶生成统一物理指纹。
+def _record_fp(info):
+    return info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns, info.st_dev
+
+
+# LLM: 固定owner及agents根并逐段NOFOLLOW打开run；expected来自分类清单，任一父组件换身份均拒绝。
+# 函数用途: 在维护或分类期间持有真实父链FD，结束时归还全部描述符。
+@contextmanager
+def _pinned_projection(owner_home, run_dir, expected=None):
+    with ExitStack() as stack:
+        descriptors = {}
+        for label, parts in (("owner", ()), ("agents", ("agents",)), ("run", ("agents", run_dir.name))):
+            descriptor = open_directory_beneath(owner_home, parts, require_dir_fd=True)
+            stack.callback(os.close, descriptor)
+            descriptors[label] = descriptor
+        ids = {key: _identity(os.fstat(value)) for key, value in descriptors.items()}
+        if expected is not None and ids != expected:
+            raise ValueError("投影父链与分类快照不一致")
+        boundary = {**descriptors, "ids": ids, "owner_home": owner_home, "run_id": run_dir.name,
+                    "current_name": run_dir.name}
+        _verify_boundary(boundary)
+        yield boundary
+
+
+# LLM: 每次高风险操作重新从受信owner入口核对父链；固定旧FD仍可读不能证明它仍属于当前owner。
+# 函数用途: 拒绝owner、agents或当前run目录的身份置换。
+def _verify_boundary(boundary):
+    for label, parts in (("owner", ()), ("agents", ("agents",)),
+                         ("run", ("agents", boundary["current_name"]))):
+        descriptor = open_directory_beneath(boundary["owner_home"], parts, require_dir_fd=True)
+        try:
+            if _identity(os.fstat(descriptor)) != boundary["ids"][label]:
+                raise ValueError("维护中的投影父链已变化")
+        finally:
+            os.close(descriptor)
 
 
 # LLM: 时间必须有限且结构化；支持已有ISO时间戳，错误不能使目录显得更旧。
@@ -235,25 +304,33 @@ def _deliverables(payload: dict[str, Any]) -> list[str]:
     return result
 
 
-# LLM: 目录内产物即使位于tmp/snapshots也不能按中间件删除；未知顶层文件只保留，不猜用途。
-# 函数用途: 找出被交付物引用覆盖的清理根，并判定是否存在不可归档的唯一文件。
+# LLM: 引用规范化仅能增加保护，绝不扩大删除根；含..、目录自身或无法钉到清单的相对引用保留整份投影。
+# 函数用途: 解析唯一交付物位置，保护实际子目录并对歧义引用停止全部scratch删除。
 def _protected_files(run_dir: Path, payload: dict[str, Any], records: dict) -> tuple[set[str], bool]:
     roots = set()
+    all_roots = {Path(name).parts[0] for name in records}
+    canonical_run = run_dir.resolve(strict=True)
     for value in _deliverables(payload):
         path = Path(value)
-        if not path.is_absolute():
+        if ".." in path.parts or "\x00" in value:
+            return all_roots, True
+        relative_input = not path.is_absolute()
+        if relative_input:
             path = run_dir / path
         try:
-            relative = path.relative_to(run_dir)
+            relative = path.resolve(strict=False).relative_to(canonical_run)
         except ValueError:
+            if relative_input:
+                return all_roots, True
             continue
-        if relative.parts:
-            roots.add(relative.parts[0])
+        if not relative.parts or (relative_input and str(relative) not in records):
+            return all_roots, True
+        roots.add(relative.parts[0])
     unknown = any(Path(name).parts[0] not in _SCRATCH | _METADATA | _INTERNAL_LOCKS for name in records)
     return roots, bool(roots or unknown)
 
 
-# LLM: 仅投影结构与文件事实决定分类；运行库、唤醒、pin或未知强制保护；年龄不受本服务compact写入刷新。
+# LLM: 分类同时固定物理父链和FD清单供执行复核；运行库、唤醒、pin或未知强制保护，compact不刷新年龄。
 # 函数用途: 读取一致清单并给出清理候选，返回内部证据供执行前复核。
 def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_after_days, archive_after_days):
     result = {"run_id": run_dir.name, "classification": "active_or_protected", "reason": "unknown", "age_seconds": 0.0}
@@ -262,8 +339,9 @@ def _classify(owner_home, run_dir, *, now, active_run_ids, pinned_run_ids, slim_
         payload = read_projection_object(run_dir / "state.json")
         if payload.get("run_id", run_dir.name) != run_dir.name:
             raise ValueError("投影run_id与目录冲突")
-        records = _inventory(run_dir)
-        result.update(payload=payload, inventory=records)
+        with _pinned_projection(owner_home, run_dir) as boundary:
+            records = _inventory(run_dir, root_fd=boundary["run"])
+            result.update(payload=payload, inventory=records, directory_ids=boundary["ids"])
         if run_dir.name in (active_run_ids or set()) | (pinned_run_ids or set()) or _pending_obligation(payload):
             result["reason"] = "explicit_protection"
             return result
@@ -326,61 +404,97 @@ def _compact(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
             "usage_summary": payload.get("usage_summary", payload.get("usage", {}))}
 
 
-# LLM: 归档锁覆盖去重、append、fsync与读回；已有run只接受合法schema，损坏档案保留原目录。
+# LLM: 归档在固定agents FD内NOFOLLOW打开，持同一普通文件FD锁完成去重、追加、同步及读回；路径变更拒绝删除原件。
 # 函数用途: 耐久保存一个终态摘要，成功前调用方不能删除投影。
 def _archive_entry(path: Path, compact: dict[str, Any]) -> None:
-    with locked_json_path(path):
-        if path.is_symlink() or (path.exists() and path.stat().st_nlink != 1):
-            raise ValueError("归档不是单链接普通文件")
-        found = False
-        if path.exists():
-            with path.open(encoding="utf-8") as source:
-                for line in source:
-                    if not line.endswith("\n"):
-                        raise ValueError("归档缺少末尾换行")
-                    entry = json.loads(line)
-                    if not isinstance(entry, dict) or entry.get("schema") != "subagent_compact.v1" or not entry.get("run_id"):
-                        raise ValueError("归档条目损坏")
-                    if entry["run_id"] == compact["run_id"]:
-                        if entry != compact:
-                            raise ValueError("同run归档内容冲突")
-                        if found:
-                            raise ValueError("归档已有重复run")
-                        found = True
-        with path.open("a", encoding="utf-8") as target:
-            os.chmod(path, 0o600)
-            if not found:
-                target.write(json.dumps(compact, ensure_ascii=False, sort_keys=True) + "\n")
-            target.flush()
-            os.fsync(target.fileno())
-        with path.open(encoding="utf-8") as source:
-            if not any(json.loads(line) == compact for line in source):
-                raise ValueError("归档读回失败")
-        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    import fcntl
 
-
-# LLM: SQLite保留写锁与既有state写者锁覆盖最终分类到删除；不初始化schema、不改行，锁忙就放弃本目录。
-# 函数用途: 阻止runtime恢复/闹钟事务和正常投影写者在删除临界区提交，结束时回滚释放。
-@contextmanager
-def _maintenance_guard(owner_home: Path, run_dir: Path):
+    boundary = _MAINTENANCE_BOUNDARY.get()
+    if boundary is None or path.parent != boundary["owner_home"] / "agents":
+        raise ValueError("归档缺少受信维护边界")
+    _verify_boundary(boundary)
     with ExitStack() as stack:
-        db = runtime_db_path(owner_home)
-        if not db.exists() and not db.is_symlink():
-            db = owner_home / "data/runtime.db"
-        if db.exists() or db.is_symlink():
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                     0o600, dir_fd=boundary["agents"])
+        stack.callback(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _verify_archive_leaf(boundary, path.name, fd)
+        target = stack.enter_context(os.fdopen(os.dup(fd), "a+", encoding="utf-8"))
+        target.seek(0)
+        found = False
+        for line in target:
+            if not line.endswith("\n"):
+                raise ValueError("归档缺少末尾换行")
+            entry = json.loads(line)
+            if not isinstance(entry, dict) or entry.get("schema") != "subagent_compact.v1" or not entry.get("run_id"):
+                raise ValueError("归档条目损坏")
+            if entry["run_id"] == compact["run_id"]:
+                if entry != compact or found:
+                    raise ValueError("同run归档内容冲突或重复")
+                found = True
+        _verify_archive_leaf(boundary, path.name, fd)
+        os.fchmod(fd, 0o600)
+        if not found:
+            target.write(json.dumps(compact, ensure_ascii=False, sort_keys=True) + "\n")
+        target.flush()
+        os.fsync(fd)
+        target.seek(0)
+        if not any(json.loads(line) == compact for line in target):
+            raise ValueError("归档读回失败")
+        _verify_archive_leaf(boundary, path.name, fd)
+        os.fsync(boundary["agents"])
+
+
+# LLM: FD仍可读不代表路径仍指向该归档；单链接、普通类型和当前路径身份同时成立才准继续。
+# 函数用途: 核对归档打开前后未被换名、链接或脱链。
+def _verify_archive_leaf(boundary, name, fd):
+    _verify_boundary(boundary)
+    info = os.fstat(fd)
+    current = os.stat(name, dir_fd=boundary["agents"], follow_symlinks=False)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1 or _identity(info) != _identity(current)):
+        raise ValueError("归档不是当前单链接普通文件")
+
+
+# LLM: 先固定父链并持owner目录排他锁；缺库时显式初始化canonical，再锁所有现存runtime写事务和已有state锁。
+# 函数用途: 为末次验证到删除持有真实FD与运行库锁；不改业务行，锁忙放弃本目录。
+@contextmanager
+def _maintenance_guard(owner_home: Path, run_dir: Path, *, expected=None):
+    import fcntl
+
+    from ....runtime_db.repository import RuntimeRepository
+
+    with _pinned_projection(owner_home, run_dir, expected) as boundary, ExitStack() as stack:
+        fcntl.flock(boundary["owner"], fcntl.LOCK_EX | fcntl.LOCK_NB)
+        canonical = runtime_db_path(owner_home)
+        try:
+            fd = os.open(canonical.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=boundary["owner"])
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+            RuntimeRepository(canonical)
+        for db in (canonical, owner_home / "data/runtime.db"):
+            if not db.exists() and not db.is_symlink():
+                continue
             if db.is_symlink() or db.parent.is_symlink() or not db.is_file():
                 raise ValueError("拒绝链接runtime库")
             conn = stack.enter_context(closing(sqlite3.connect(db.absolute().as_uri() + "?mode=rw", uri=True, timeout=0.05)))
             conn.execute("BEGIN IMMEDIATE")
             stack.callback(conn.rollback)
-        # 真实投影写者自带同名锁；无锁历史夹具不凭空增加文件，保持孤儿删除精确计量。
         if (run_dir / "state.json.lock").exists():
-            stack.enter_context(locked_json_path(run_dir / "state.json", blocking=False))
-        yield
+            fd = os.open("state.json.lock", os.O_RDWR | os.O_NOFOLLOW, dir_fd=boundary["run"])
+            stack.callback(os.close, fd)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("state锁不是单链接普通文件")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        token = _MAINTENANCE_BOUNDARY.set(boundary)
+        try:
+            yield boundary
+        finally:
+            _MAINTENANCE_BOUNDARY.reset(token)
 
 
 # LLM: compact是本次唯一允许新增/替换的叶；原state/refs/locator及其余清单变化均不得成为新删除授权。
@@ -398,12 +512,13 @@ def _verify_before_delete(owner_home, run_dir, info, *, now, active_run_ids, pin
     return fresh["inventory"]
 
 
-# LLM: 末次权威核验到删叶在同一维护临界区；归档失败不删原件，唯一文件保护沿分类结果保持。
+# LLM: 执行沿分类时父链身份取锁；末次权威核验到删叶共用FD临界区，归档失败不删原件。
 # 函数用途: 执行一个候选目录的完整持锁维护动作。
 def _maintain_projection(owner_home, run_dir, info, report, *, now, active_run_ids, pinned_run_ids, slim_after_days, archive_after_days):
     options = dict(now=now, active_run_ids=active_run_ids, pinned_run_ids=pinned_run_ids,
                    slim_after_days=slim_after_days, archive_after_days=archive_after_days)
-    with _maintenance_guard(owner_home, run_dir):
+    with _maintenance_guard(owner_home, run_dir, expected=info["directory_ids"]) as boundary:
+        boundary["payload"] = info["payload"]
         records = _verify_before_delete(owner_home, run_dir, info, **options)
         kind = info["classification"]
         if kind == "terminal_slim_candidate":
@@ -424,34 +539,77 @@ def _maintain_projection(owner_home, run_dir, info, report, *, now, active_run_i
                 report["archived_dirs"] += 1
 
 
-# LLM: 删除只使用清单内已核inode；逐个父目录FD用NOFOLLOW打开，避免祖先链接置换后删除域外文件。
-# 函数用途: 删除选中顶层中间文件或整份投影，逐文件累计实际成功删除的字节。
+# LLM: 原子移入固定agents下的唯一tombstone后重查权威及wake；每叶仍查保护与FD身份，失败恢复目录不报成功。
+# 函数用途: 删除中间件或整份投影；所有rename、删叶及rmdir都相对已固定的目录FD执行。
 def _remove_records(run_dir: Path, records: dict, roots: set[str] | None, report: dict) -> None:
-    if _inventory(run_dir) != records:
+    boundary = _MAINTENANCE_BOUNDARY.get()
+    if boundary is None or run_dir != boundary["owner_home"] / "agents" / boundary["run_id"]:
+        raise ValueError("删除缺少受信维护边界")
+    _verify_boundary(boundary)
+    if _inventory(run_dir, root_fd=boundary["run"]) != records:
         raise ValueError("删除前投影已变化")
     selected = [name for name in records if roots is None or Path(name).parts[0] in roots]
-    for name in sorted(selected, key=lambda value: (len(Path(value).parts), value != "state.json", value), reverse=True):
-        parts = Path(name).parts
-        fds = [os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
-        try:
-            for part in parts[:-1]:
-                fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
-            info = os.stat(parts[-1], dir_fd=fds[-1], follow_symlinks=False)
-            observed = (info.st_mode, info.st_ino, info.st_size, info.st_mtime_ns)
-            if (observed[:2] != records[name][:2] if stat.S_ISDIR(info.st_mode) else observed != records[name]):
-                raise ValueError("删除时投影已变化")
-            if stat.S_ISDIR(info.st_mode):
-                os.rmdir(parts[-1], dir_fd=fds[-1])
-            else:
-                os.unlink(parts[-1], dir_fd=fds[-1])
-                report["removed_files"] += 1
-                report["removed_bytes"] += info.st_size
-        finally:
-            for fd in reversed(fds):
-                os.close(fd)
-    if roots is None:
-        run_dir.rmdir()
-        report["removed_dirs"] += 1
+    tombstone = f".purge_{run_dir.name}_{uuid.uuid4().hex}"
+    os.rename(run_dir.name, tombstone, src_dir_fd=boundary["agents"], dst_dir_fd=boundary["agents"])
+    boundary["current_name"] = tombstone
+    removed = False
+    try:
+        _assert_no_new_obligation(boundary)
+        if _inventory(run_dir, root_fd=boundary["run"]) != records:
+            raise ValueError("隔离后投影已变化")
+        for name in sorted(selected, key=lambda value: (len(Path(value).parts), value != "state.json", value), reverse=True):
+            _assert_no_new_obligation(boundary)
+            parts = Path(name).parts
+            with ExitStack() as stack:
+                parent_fd = boundary["run"]
+                for part in parts[:-1]:
+                    parent_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                    stack.callback(os.close, parent_fd)
+                info = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+                observed = _record_fp(info)
+                if stat.S_ISDIR(info.st_mode):
+                    if (observed[0], observed[1], observed[4]) != (records[name][0], records[name][1], records[name][4]):
+                        raise ValueError("删除时目录已变化")
+                    os.rmdir(parts[-1], dir_fd=parent_fd)
+                else:
+                    if observed != records[name] or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("删除时文件已变化")
+                    os.unlink(parts[-1], dir_fd=parent_fd)
+                    report["removed_files"] += 1
+                    report["removed_bytes"] += info.st_size
+        if roots is None:
+            _verify_boundary(boundary)
+            os.rmdir(tombstone, dir_fd=boundary["agents"])
+            removed = True
+            report["removed_dirs"] += 1
+            os.fsync(boundary["agents"])
+    finally:
+        if not removed:
+            _restore_projection(boundary)
+
+
+# LLM: 隔离后及每叶删除前再核真实runtime和父唤醒；不把tombstone的新目录名当运行身份。
+# 函数用途: 在删叶临界区拒绝晚到的运行登记、通知和收口责任。
+def _assert_no_new_obligation(boundary):
+    _verify_boundary(boundary)
+    status, pending = projection_runtime_facts(boundary["owner_home"], boundary["run_id"], boundary["payload"])
+    if ((status and status not in AGENT_RUN_TERMINAL_STATUSES) or pending
+            or _has_parent_wake(boundary["owner_home"], boundary["run_id"], boundary["payload"])):
+        raise ValueError("隔离后运行恢复或出现父唤醒")
+
+
+# LLM: 回滚只使用原agents FD，原名称被并发占用时绝不覆盖；保留tombstone并显式报错等待恢复。
+# 函数用途: 恢复失败清理或七日瘦身的目录名称，不丢弃尚未删除的原件。
+def _restore_projection(boundary):
+    try:
+        os.stat(boundary["run_id"], dir_fd=boundary["agents"], follow_symlinks=False)
+    except FileNotFoundError:
+        os.rename(boundary["current_name"], boundary["run_id"],
+                  src_dir_fd=boundary["agents"], dst_dir_fd=boundary["agents"])
+        boundary["current_name"] = boundary["run_id"]
+        os.fsync(boundary["agents"])
+    else:
+        raise ValueError("原名称被占用，投影保留在隔离目录")
 
 
 # LLM: 仅显式调用执行；预算扫描、dry-run纯读，保护优先；compact/归档先耐久后删，逐目录失败隔离不谎报成功。

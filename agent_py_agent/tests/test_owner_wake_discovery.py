@@ -1439,3 +1439,62 @@ def test_e905_subagent_scan_is_bounded_and_eventually_visits_all(tmp_path, monke
         visited.update(reads)
     assert len(visited) == 9
     assert outcomes[:5] == [True, True, True, True, False]
+
+
+# LLM: 三个真实目录分两页，前页正事实必须覆盖尾页；测试不替换分页器或状态读取。
+# 函数用途: 复现活跃或待收口运行被后续终态页覆盖成无工作的回归。
+@pytest.mark.parametrize("closeout", [False, True])
+def test_r1_positive_subagent_page_survives_tail_and_cache(tmp_path, monkeypatch, closeout):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    for name in ("first", "second", "third"):
+        _write_run(home, name, "DONE")
+    with os.scandir(home / "agents") as entries:
+        first = Path(next(entries).path) / "state.json"
+    first.write_text(json.dumps({"status": "DONE" if closeout else "RUNNING", "runtime_closeout_pending": closeout}))
+    monkeypatch.setattr(discovery, "_SUBAGENT_SCAN_MAX_DIRS", 2)
+    assert [discovery._has_unfinished_subagent_run(home) for _ in range(4)] == [True] * 4
+
+
+# LLM: 缓存成本阈值置零只固定慢路径，不伪造签名、状态或hard谓词；不能将二次probe的尾页缓存为none。
+# 函数用途: 经真实owner缓存入口复现分页与重复判定的组合错误。
+def test_r1_owner_fact_cache_does_not_cache_tail_as_none(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    for name in ("first", "second", "third"):
+        _write_run(home, name, "DONE")
+    with os.scandir(home / "agents") as entries:
+        (Path(next(entries).path) / "state.json").write_text('{"status":"RUNNING"}')
+    monkeypatch.setattr(discovery, "_SUBAGENT_SCAN_MAX_DIRS", 2)
+    monkeypatch.setattr(discovery, "_FACT_MIN_CACHED_SECONDS", 0)
+    monkeypatch.setattr(discovery, "_owner_has_soft_facts", lambda *a, **k: False)
+    assert [discovery._owner_fact_kind(home) for _ in range(3)] == ["hard"] * 3
+
+
+# LLM: 直接核外层签名的实际stat预算，叶谓词有界不能代替整条路径预算。
+# 函数用途: 禁止agents签名再全量glob，并限制单次签名最多读取一页状态元数据。
+def test_r1_agents_signature_is_bounded(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    for index in range(7):
+        _write_run(home, str(index), "DONE")
+    monkeypatch.setattr(discovery, "_SUBAGENT_SCAN_MAX_DIRS", 2)
+    real_glob, real_stat, visits = Path.glob, Path.stat, []
+    # LLM: 仅拒绝目标agents的全量模式，其余目录仍执行真实查询。
+    # 函数用途: 将外层无界枚举变为明确失败。
+    def glob(path, pattern):
+        assert not (path == home / "agents" and pattern == "*/state.json"), "agents签名不得全量glob"
+        return real_glob(path, pattern)
+    # LLM: 不替代stat结果，仅记录被测状态文件的实际探测。
+    # 函数用途: 统计签名对状态叶的元数据读取数。
+    def observe(path, *args, **kwargs):
+        if path.name == "state.json" and path.parent.parent == home / "agents":
+            visits.append(path)
+        return real_stat(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(Path, "stat", observe)
+    discovery._owner_fact_signature(home)
+    assert len(visits) <= 2
