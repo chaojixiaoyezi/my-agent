@@ -732,3 +732,463 @@ def test_active_runtime_path_semantics_preserve_workspace(home, tmp_path, monkey
     assert victim.exists(), "可读配置不代表原文未匹配的workspace已不活动"
     assert victim.read_text() == "active-database"
     assert report["categories"][CATEGORIES[2]]["deleted_files"] == 0
+
+
+# LLM: R2-B1在第二次真实移出后的核验点注入故障，要求整单元零删除并逆序恢复，冲突分支保留双方。
+# 函数用途: 防止第一条已删后第二条失败的半套清理。
+@pytest.mark.parametrize("conflict", [False, True])
+def test_batch_second_verification_failure_restores_all_without_clobber(home, monkeypatch, conflict):
+    first = write(home, OWNER / "tasks" / OLD_DATE / "batch/tmp/a.bin", "first")
+    second = write(home, first.with_name("b.bin").relative_to(home), "second")
+    age_tree(first.parent)
+    original_verify, original_restore = cleanup._verify_quarantined, cleanup._restore_entry
+    verified, restored = [], []
+
+    # LLM: 仅第二个移出文件核验失败，保留真实第一条检查及真实内核恢复。
+    # 函数用途: 在物理删除屏障前制造后继条目故障。
+    def fail_second(fd, name, expected):
+        verified.append(name)
+        if len(verified) == 2:
+            if conflict:
+                first.write_text("new-owner")
+            raise cleanup.SafetyError("injected_second_verification_failure")
+        return original_verify(fd, name, expected)
+
+    # LLM: 只记录真实恢复的目标名，不改变系统调用成败。
+    # 函数用途: 核实恢复按逆序发生。
+    def record_restore(source_fd, source, destination_fd, destination):
+        restored.append(str(destination))
+        return original_restore(source_fd, source, destination_fd, destination)
+
+    monkeypatch.setattr(cleanup, "_verify_quarantined", fail_second)
+    monkeypatch.setattr(cleanup, "_restore_entry", record_restore)
+    report = cleanup.run_cleanup(home, apply=True, now=NOW)
+    assert report["errors"] and len(verified) == 2
+    assert restored == ["b.bin", "a.bin"]
+    assert report["categories"][CATEGORIES[1]]["deleted_files"] == 0
+    assert second.read_text() == "second"
+    if conflict:
+        assert first.read_text() == "new-owner"
+        recovery = report["candidates"][0]["recovery_required"]
+        assert len(recovery) == 1
+        assert Path(recovery[0]["quarantine"]).read_text() == "first"
+    else:
+        assert first.read_text() == "first"
+        assert not list(home.parent.glob(".slimming-quarantine-*"))
+
+
+# LLM: R2-B1用真实文件、目录、JSON和fsync观察第一条物理删除屏障，不把callback调用当持久化。
+# 函数用途: 确认整单元隔离映射持久化后才开始删除。
+def test_batch_mapping_is_fsynced_before_any_physical_delete(home, monkeypatch):
+    first = write(home, OWNER / "tasks" / OLD_DATE / "batch/tmp/nested/a.bin", "first")
+    second = write(home, first.with_name("b.bin").relative_to(home), "second")
+    age_tree(first.parent.parent)
+    original_sync, original_unlink = cleanup.os.fsync, cleanup.os.unlink
+    synced, observed = [], []
+
+    # LLM: 调用真实fsync，完成后才记录inode；目录同步和文件同步都不省略。
+    # 函数用途: 为屏障断言保留持久化观察点。
+    def synced_fd(fd):
+        original_sync(fd)
+        synced.append(os.fstat(fd).st_ino)
+
+    # LLM: 第一个目标unlink之前读真实隔离清单，排除清单本身的收尾删除。
+    # 函数用途: 验证映射身份、祖先和全体源移出事实早于物理删除。
+    def guarded_unlink(path, *args, **kwargs):
+        if str(path) != "manifest.json" and not observed:
+            manifests = list(home.parent.glob(".slimming-quarantine-*/manifest.json"))
+            assert len(manifests) == 1, "删除之前必须存在持久隔离清单"
+            journal = manifests[0]
+            mapping = json.loads(journal.read_text())
+            assert journal.stat().st_ino in synced
+            assert mapping["ancestors"] and len(mapping["entries"]) == 3
+            assert not first.exists() and not second.exists()
+            for entry in mapping["entries"]:
+                assert entry["source"] and len(entry["identity"]) == 7
+                assert (journal.parent / entry["quarantine_name"]).exists()
+            observed.append(mapping)
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(cleanup.os, "fsync", synced_fd)
+    monkeypatch.setattr(cleanup.os, "unlink", guarded_unlink)
+    report = cleanup.run_cleanup(home, apply=True, now=NOW)
+    assert observed and not report["errors"]
+    assert report["categories"][CATEGORIES[1]]["deleted_files"] == 2
+    assert not list(home.parent.glob(".slimming-quarantine-*"))
+
+
+# LLM: 清单落盘与可选checkpoint任一失败均在物理屏障之前；故障仅注入一次以核真实恢复。
+# 函数用途: 证明嵌套目录与所有文件都能因持久化故障一起回滚。
+@pytest.mark.parametrize("failure", ["fsync", "checkpoint"])
+def test_batch_persistence_failure_rolls_back_nested_tree(home, monkeypatch, failure):
+    import stat
+
+    first = write(home, OWNER / "tasks" / OLD_DATE / "batch/tmp/nested/a.bin", "first")
+    write(home, first.with_name("b.bin").relative_to(home), "second")
+    age_tree(first.parent.parent)
+    before = snapshot(home)
+    original_sync = cleanup.os.fsync
+    fired = []
+
+    # LLM: 只对隔离清单文件的首次同步注入EIO，不伪造恢复目录内容。
+    # 函数用途: 重现写出映射但尚未持久化时的故障。
+    def broken_sync(fd):
+        if failure == "fsync" and not fired and stat.S_ISREG(os.fstat(fd).st_mode):
+            fired.append(True)
+            raise OSError(5, "injected journal fsync")
+        return original_sync(fd)
+
+    # LLM: 仅在所有源路径已移出时拒绝checkpoint，初始及错误回执保持正常。
+    # 函数用途: 验证外部清单提交失败同样触发逆序恢复。
+    def broken_checkpoint(_manifest):
+        if failure == "checkpoint" and not first.exists() and not fired:
+            fired.append(True)
+            raise OSError(5, "injected checkpoint")
+
+    monkeypatch.setattr(cleanup.os, "fsync", broken_sync)
+    report = cleanup.run_cleanup(home, apply=True, now=NOW, checkpoint=broken_checkpoint)
+    assert fired and report["errors"]
+    assert snapshot(home) == before
+    counts = report["categories"][CATEGORIES[1]]
+    assert counts["deleted_files"] == counts["deleted_directories"] == 0
+    assert not list(home.parent.glob(".slimming-quarantine-*"))
+
+
+# LLM: R2-B2通过真实第二个open描述符验证同inode互斥，覆盖整个run_cleanup和save临界区。
+# 函数用途: 扫描开始前已经锁住清单，退出后其它句柄才可拿锁。
+def test_manifest_lock_covers_scan_and_save(home, tmp_path, monkeypatch):
+    import fcntl
+
+    output = tmp_path / "locked.json"
+    original_run, original_save = cleanup.run_cleanup, cleanup.ManifestOutput.save
+    checked = []
+
+    # LLM: 独立open产生不同文件描述，真实LOCK_NB必须失败；只释放本探针FD。
+    # 函数用途: 证明目标inode被当前运行持锁。
+    def assert_locked():
+        with output.open("rb") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        checked.append(True)
+
+    # LLM: 包装真实规划入口，只在入口前加锁观察，不替代实现。
+    # 函数用途: 检查扫描开始时的锁状态。
+    def checked_run(*args, **kwargs):
+        assert_locked()
+        return original_run(*args, **kwargs)
+
+    # LLM: 保存前后均独立竞争文件锁，不能提前解锁再做末次fsync。
+    # 函数用途: 检查所有checkpoint仍处于同一锁临界区。
+    def checked_save(self, payload):
+        assert_locked()
+        result = original_save(self, payload)
+        assert_locked()
+        return result
+
+    monkeypatch.setattr(cleanup, "run_cleanup", checked_run)
+    monkeypatch.setattr(cleanup.ManifestOutput, "save", checked_save)
+    assert cleanup.main(["--home-dir", str(home), "--manifest-out", str(output)]) == 0
+    assert len(checked) >= 3
+    with output.open("rb") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(other.fileno(), fcntl.LOCK_UN)
+
+
+# LLM: 用独立句柄抢先锁住刚出生的输出，验证获取失败/初始化异常/正常退出的关闭顺序，不mock flock成功。
+# 函数用途: 清单FD的所有出口均无泄漏，拿到锁的出口先解锁后关闭。
+@pytest.mark.parametrize("exit_kind", ["conflict", "initialize", "normal"])
+def test_manifest_lock_release_order_and_no_fd_leak(home, tmp_path, monkeypatch, exit_kind):
+    import fcntl
+
+    output = tmp_path / "lifecycle.json"
+    original_open, original_close = cleanup.os.open, cleanup.os.close
+    original_flock, original_init = fcntl.flock, cleanup.ManifestOutput.__init__
+    target, events, competitor = [], [], []
+
+    # LLM: 保持O_EXCL和nofollow真实创建，只在返回前用第二个句柄取得竞争锁。
+    # 函数用途: 将锁冲突固定在产品open与flock之间。
+    def tracked_open(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if str(path) == output.name:
+            target.append(fd)
+            if exit_kind == "conflict":
+                other = original_open(output, os.O_RDONLY)
+                competitor.append(other)
+                original_flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+
+    # LLM: 原样转发系统锁，只记录清单FD的真实调用次序。
+    # 函数用途: 核实异常和正常退出的LOCK_UN。
+    def tracked_flock(fd, mode):
+        if fd in target:
+            events.append(("lock", mode))
+        return original_flock(fd, mode)
+
+    # LLM: 原样关闭所有FD，只跟踪本次清单FD而非祖先链临时描述符。
+    # 函数用途: 核实close不能早于unlock。
+    def tracked_close(fd):
+        if fd in target:
+            events.append(("close", None))
+        return original_close(fd)
+
+    # LLM: 在拿锁之后的初始化位置失败，不在mock中替产品关闭句柄。
+    # 函数用途: 检查构造异常的清理责任。
+    def broken_init(self, *args, **kwargs):
+        if exit_kind == "initialize":
+            raise ValueError("injected initialization")
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(cleanup.os, "open", tracked_open)
+    monkeypatch.setattr(cleanup.os, "close", tracked_close)
+    monkeypatch.setattr(fcntl, "flock", tracked_flock)
+    monkeypatch.setattr(cleanup.ManifestOutput, "__init__", broken_init)
+    try:
+        if exit_kind == "normal":
+            with cleanup._manifest_output(home, output) as destination:
+                destination.save({"test": "normal"})
+        else:
+            with pytest.raises((OSError, ValueError)), cleanup._manifest_output(home, output):
+                pytest.fail("并发持锁或初始化失败必须拒绝")
+    finally:
+        for fd in competitor:
+            original_flock(fd, fcntl.LOCK_UN)
+            original_close(fd)
+    assert len(target) == 1
+    with pytest.raises(OSError):
+        os.fstat(target[0])
+    assert events[0] == ("lock", fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert events[-1] == ("close", None)
+    if exit_kind != "conflict":
+        assert events[-2] == ("lock", fcntl.LOCK_UN)
+
+
+# LLM: R2-B3引用只给workspace父路径，原文不存在候选名，必须实际递归解析；JSON/YAML均走真实读取。
+# 函数用途: 嵌套字典、列表和路径配置节不能漏掉活动引用。
+@pytest.mark.parametrize("shape", ["json-list", "yaml-list", "paths-section"])
+def test_nested_active_config_paths_protect_workspace(home, tmp_path, shape):
+    workspace = home / OWNER / "workspace/runtime/workspaces/test-ws-nested"
+    victim = write(workspace, "cache.bin", "active")
+    age_tree(workspace)
+    parent = str(workspace.parent)
+    if shape == "json-list":
+        text = json.dumps({"services": [{"nested": {"storage_root": parent}}]})
+    elif shape == "yaml-list":
+        text = "services:\n  - nested:\n      storage_home: " + parent + "\n"
+    else:
+        text = "services:\n  paths:\n    database: " + parent + "\n"
+    config = write(tmp_path, "nested.yaml", text)
+    result = cleanup.run_cleanup(home, apply=True, now=NOW, active_configs=[config])
+    assert victim.read_text() == "active"
+    assert result["categories"][CATEGORIES[2]]["deleted_files"] == 0
+
+
+# LLM: 内联结构沿产品标准库literal语法，递归tuple/list/dict中的路径均须被提取。
+# 函数用途: 防止只遍历最外层映射或只支持单一容器。
+def test_recursive_config_references_include_tuple_and_path_sections(tmp_path):
+    value = str(tmp_path.resolve())
+    text = "outer: " + repr({"seq": ({"cache_home": value}, [{"paths": {"database": value}}])})
+    refs, known = cleanup._config_references(text)
+    assert known and Path(value) in refs
+
+
+# LLM: 损坏/非映射/未知语法不能降级为只跳workspace；真实tmp垃圾同样必须零删除且ValueError直接传播。
+# 函数用途: 对环境和显式两种选择入口验证全局失败关闭。
+@pytest.mark.parametrize("source", ["environment", "explicit"])
+@pytest.mark.parametrize("text", ["", "# only comment\n", "[]", '"scalar"',
+                                  'cache_path: "unclosed', "illegal line", "outer:\n  bad line",
+                                  "a: 1\na: 2\n", "outer:\n\tbad_path: /tmp/active"])
+def test_bad_selected_config_aborts_all_cleanup(home, tmp_path, monkeypatch, source, text):
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "bad-config/tmp/leaf.bin", "keep")
+    age_tree(victim.parent)
+    config = write(tmp_path, "bad.yaml", text)
+    kwargs = {"active_configs": [config]} if source == "explicit" else {}
+    if source == "environment":
+        monkeypatch.setenv("MY_AGENT_CONFIG", str(config))
+    with pytest.raises(ValueError):
+        cleanup.run_cleanup(home, apply=True, now=NOW, **kwargs)
+    assert victim.read_text() == "keep"
+    assert not list(home.parent.glob(".slimming-quarantine-*"))
+
+
+# LLM: 以真实存在但不能nofollow读取的选中配置检验失败，不把不存在路径混同语法错误。
+# 函数用途: 活动配置读取拒绝必须全局中止，不能继续清理tmp。
+def test_unreadable_selected_config_aborts_all_cleanup(home, tmp_path):
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "bad-config/tmp/leaf.bin")
+    age_tree(victim.parent)
+    config = tmp_path / "selected.yaml"
+    config.symlink_to(write(tmp_path, "target.yaml", "name: active\n"))
+    with pytest.raises(ValueError):
+        cleanup.run_cleanup(home, apply=True, now=NOW, active_configs=[config])
+    assert victim.exists()
+
+
+# LLM: 初始规划之后、第一删除之前配置变坏，fresh Planner的ValueError也不得被逐单元catch吞掉。
+# 函数用途: 确认坏配置晚出现时立即终止整个apply。
+def test_selected_config_becoming_invalid_aborts_before_first_delete(home, tmp_path):
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "bad-config/tmp/leaf.bin")
+    age_tree(victim.parent)
+    config = write(tmp_path, "selected.yaml", "name: active\n")
+
+    # LLM: 仅修改指定临时配置，不改变候选本身。
+    # 函数用途: 在规划checkpoint制造损坏配置。
+    def corrupt(_manifest):
+        config.write_text('name: "unclosed')
+
+    with pytest.raises(ValueError):
+        cleanup.run_cleanup(home, apply=True, now=NOW, active_configs=[config], checkpoint=corrupt)
+    assert victim.exists()
+
+
+# LLM: R2-B4默认输出和批准读取须使用相同结构化指纹，不拿无候选空清单验证格式。
+# 函数用途: 验证新schema及字典指纹写出后能真正批准删除。
+def test_manifest_new_schema_and_structured_fingerprint_roundtrip(home):
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "schema/tmp/leaf.bin")
+    age_tree(victim.parent)
+    approved = cleanup.run_cleanup(home, now=NOW)
+    assert approved["schema"] == "my-agent.home_file_slimming_cleanup_manifest.v1"
+    assert isinstance(approved["candidates"][0]["fingerprint"], dict)
+    result = cleanup.run_cleanup(home, apply=True, now=NOW, approved_manifest=approved)
+    assert not victim.exists() and not result["errors"]
+
+
+# LLM: Legacy无schema只允许必需字段与列表别名；旧schema名兼容但不绕过版本/策略/指纹校验。
+# 函数用途: 两个schema、两种列表名字及严格legacy都保留正向批准路径。
+@pytest.mark.parametrize("schema", [None, "home-file-slimming.v1", "my-agent.home_file_slimming_cleanup_manifest.v1"])
+@pytest.mark.parametrize("field", ["candidates", "entries"])
+def test_manifest_supported_schema_and_legacy_alias_apply(home, schema, field):
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "schema/tmp/leaf.bin")
+    age_tree(victim.parent)
+    original = cleanup.run_cleanup(home, now=NOW)
+    approved = {k: original[k] for k in ("home", "policy", "script_sha256", "mode")}
+    approved[field] = original["candidates"]
+    if schema is not None:
+        approved["schema"] = schema
+    result = cleanup.run_cleanup(home, apply=True, now=NOW, approved_manifest=approved)
+    assert not victim.exists() and not result["errors"]
+
+
+# LLM: 畸形清单必须统一ValueError而非KeyError/TypeError，当前真实候选始终保留；禁止只靠集合交集掩盖坏格式。
+# 函数用途: 覆盖schema、legacy顶层、别名容器和每个元素的严格输入形状。
+@pytest.mark.parametrize("bad", ["root-list", "schema", "schema-type", "unknown-key", "missing-field",
+                                 "candidates-type", "entries-type", "entry-type", "path-type", "path-empty",
+                                 "path-absolute", "path-traversal", "category-type", "category-unknown",
+                                 "fingerprint-type", "fingerprint-empty", "aliases-disagree"])
+def test_manifest_malformed_input_is_rejected_without_delete(home, bad):
+    import copy
+
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "schema/tmp/leaf.bin")
+    age_tree(victim.parent)
+    original = cleanup.run_cleanup(home, now=NOW)
+    approved = copy.deepcopy(original)
+    entry = approved["candidates"][0]
+    if bad == "root-list":
+        approved = []
+    elif bad == "schema":
+        approved["schema"] = "foreign-tool.v1"
+    elif bad == "schema-type":
+        approved["schema"] = []
+    elif bad == "unknown-key":
+        approved = {k: approved[k] for k in ("home", "policy", "script_sha256", "mode", "candidates")}
+        approved["delete_all"] = True
+    elif bad == "missing-field":
+        approved.pop("mode")
+    elif bad == "candidates-type":
+        approved["candidates"] = {}
+    elif bad == "entries-type":
+        approved["entries"] = "not a list"
+    elif bad == "entry-type":
+        approved["candidates"] = ["not an entry"]
+    elif bad.startswith("path-"):
+        entry["path"] = {"path-type": 1, "path-empty": "", "path-absolute": "/tmp/other",
+                         "path-traversal": "a/../other"}[bad]
+    elif bad.startswith("category-"):
+        entry["category"] = 1 if bad == "category-type" else "foreign-category"
+    elif bad.startswith("fingerprint-"):
+        entry["fingerprint"] = "flat-hash" if bad == "fingerprint-type" else {}
+    else:
+        approved["entries"] = []
+    with pytest.raises(ValueError):
+        cleanup.run_cleanup(home, apply=True, now=NOW, approved_manifest=approved)
+    assert victim.exists()
+
+
+# LLM: 独审P1：显式JSON null不能等同未提供批准；分别通过真实CLI和库参数验证拒绝且不删除。
+# 函数用途: 防止空批准绕过根节点和批准集合限制。
+@pytest.mark.parametrize("entrypoint", ["cli", "library"])
+def test_explicit_null_approval_is_rejected(home, tmp_path, entrypoint):
+    victim = write(home, OWNER / "tasks" / OLD_DATE / "null-approval/tmp/leaf.bin", "keep")
+    age_tree(victim.parent)
+    if entrypoint == "cli":
+        approved = write(tmp_path, "approved.json", "null")
+        result = subprocess.run([
+            sys.executable, "-B", str(SCRIPT), "--home-dir", str(home), "--apply",
+            "--approved-manifest", str(approved), "--manifest-out", str(tmp_path / "out.json"),
+        ], capture_output=True, text=True)
+        assert result.returncode == 2, result.stdout + result.stderr
+    else:
+        with pytest.raises(ValueError):
+            cleanup.run_cleanup(home, apply=True, now=NOW, approved_manifest=None)
+    assert victim.read_text() == "keep"
+
+
+# LLM: 独审P2：prepared不等同已删除；首个物理删除前异常须恢复，已删一条后的失败则明确保留残余恢复记录。
+# 函数用途: 验证实际物理删除事实才是回滚屏障，含原位晚占用冲突。
+@pytest.mark.parametrize("fault", ["verify", "conflict", "unlink", "partial-delete"])
+def test_first_physical_delete_boundary_and_residual_recovery(home, monkeypatch, fault):
+    first = write(home, OWNER / "tasks" / OLD_DATE / "barrier/tmp/a.bin", "first")
+    second = write(home, first.with_name("b.bin").relative_to(home), "second")
+    age_tree(first.parent)
+    original_verify, original_unlink = cleanup._verify_quarantined, cleanup.os.unlink
+    state = {"prepared": False, "fired": False, "deleted": 0}
+
+    # LLM: 只观察结构化prepared状态，不直接改变清理器状态机。
+    # 函数用途: 标记持久映射checkpoint已到达。
+    def prepared(manifest):
+        if manifest["candidates"][0].get("isolation", {}).get("state") == "prepared":
+            state["prepared"] = True
+
+    # LLM: 第一条最终核验发生在checkpoint之后；EIO不要求伪造对象身份。
+    # 函数用途: 重现物理删除尚未发生时的迟到校验失败。
+    def late_failure(fd, name, expected):
+        if state["prepared"] and not state["fired"] and fault in {"verify", "conflict"}:
+            state["fired"] = True
+            if fault == "conflict":
+                first.write_text("new-owner")
+            raise OSError(5, "injected pre-unlink verification")
+        return original_verify(fd, name, expected)
+
+    # LLM: 目标unlink失败与清单收尾分开；只在真实成功返回后记录物理删除。
+    # 函数用途: 区分首条删除未发生与已经部分删除的两种错误出口。
+    def failing_unlink(path, *args, **kwargs):
+        if str(path) != "manifest.json":
+            if fault in {"unlink", "partial-delete"} and not state["fired"] and (
+                fault == "unlink" or state["deleted"] == 1
+            ):
+                state["fired"] = True
+                raise OSError(5, "injected physical delete")
+            result = original_unlink(path, *args, **kwargs)
+            state["deleted"] += 1
+            return result
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(cleanup, "_verify_quarantined", late_failure)
+    monkeypatch.setattr(cleanup.os, "unlink", failing_unlink)
+    result = cleanup.run_cleanup(home, apply=True, now=NOW, checkpoint=prepared)
+    assert state["fired"] and result["errors"]
+    row = result["candidates"][0]
+    if fault == "partial-delete":
+        assert state["deleted"] == result["categories"][CATEGORIES[1]]["deleted_files"] == 1
+        assert not first.exists()
+        assert row["isolation"]["state"] == "partial_delete"
+        assert len(row["recovery_required"]) == 1
+        assert Path(row["recovery_required"][0]["quarantine"]).read_text() == "second"
+    else:
+        assert state["deleted"] == result["categories"][CATEGORIES[1]]["deleted_files"] == 0
+        assert second.read_text() == "second"
+        if fault == "conflict":
+            assert first.read_text() == "new-owner"
+            assert len(row["recovery_required"]) == 1
+            assert Path(row["recovery_required"][0]["quarantine"]).read_text() == "first"
+        else:
+            assert first.read_text() == "first"
+            assert not list(home.parent.glob(".slimming-quarantine-*"))

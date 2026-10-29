@@ -1,5 +1,5 @@
-# LLM: 独立一次性清理器；只认五类白名单，默认预演；删除沿原目录FD且不跟随链接，保护规则须同步回归测试。
-# 模块用途: 生成可审计的历史垃圾清单，核验后删除明确获准的中间件，不处理在线数据库或正式数据。
+# LLM: 独立一次性清理器；五类白名单、默认预演；整单元隔离/持久映射后删除，屏障前失败无覆盖回滚，CLI清单全程持锁。
+# 模块用途: 核验并清理明确获准的历史中间件，不处理在线数据库；保护与事务协议必须同步回归测试。
 """保守清理：默认dry-run；apply可用--approved-manifest限制为已审阅集合。
 
 清单记录逻辑字节和路径累计分配块，不承诺APFS快照/克隆后的物理释放量。
@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -28,7 +29,12 @@ from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
+import tomllib
+
 DAY = 86400
+MANIFEST_SCHEMA = "my-agent.home_file_slimming_cleanup_manifest.v1"
+MANIFEST_SCHEMAS = {MANIFEST_SCHEMA, "home-file-slimming.v1"}
+_NO_APPROVAL = object()
 OWNER = Path("owners/local/main")
 CATEGORIES = (
     "dangling_orphan_agent_projections",
@@ -77,21 +83,168 @@ class ConfigSnapshot:
         return self.text.removeprefix("\ufeff")
 
 
-# LLM: 路径后缀采用保守超集；相对值缺运行根不能猜，类型/结构不明亦失败关闭，绝对值按父子关系保留。
-# 函数用途: 从原配置语法提取保护路径，并报告是否存在未知运行根。
-def _config_references(text):
-    loader, _digest = _config_parser()
-    raw = loader(ConfigSnapshot(text))
+# LLM: JSON重复键会隐藏活动路径；所有配置JSON对象均经此只读构造，重复键直接拒绝。
+# 函数用途: 保证配置映射不会静默用后值覆盖前值。
+def _unique_mapping(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("配置键重复")
+        result[key] = value
+    return result
+
+
+# LLM: 严格检查单行引号闭合及缩进；支持引号内#和双引号转义，不支持多行标量时明确拒绝而非静默跳过。
+# 函数用途: 提取可安全解析的配置行，坏行统一抛ValueError。
+def _config_line(raw):
+    if "\t" in raw[:len(raw) - len(raw.lstrip())]:
+        raise ValueError("配置缩进不能用制表符")
+    quote, escaped = None, False
+    for index, char in enumerate(raw):
+        if escaped:
+            escaped = False
+        elif quote == '"' and char == "\\":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#":
+            return raw[:index].rstrip()
+    if quote:
+        raise ValueError("配置含未闭合引号")
+    return raw.rstrip()
+
+
+# LLM: 保留产品标量语义；结构值必须由JSON或原标准库literal解析成功，拒绝未支持语法而非当作普通路径。
+# 函数用途: 严格解析一个配置标量或内联容器，不执行代码。
+def _config_value(value):
+    loader, _ = _config_parser()
+    if value.startswith(("[", "{", "(")):
+        try:
+            return json.loads(value, object_pairs_hook=_unique_mapping)
+        except json.JSONDecodeError:
+            try:
+                return loader.__globals__["_literal_eval"](value)
+            except (SyntaxError, ValueError) as exc:
+                raise ValueError("配置内联结构非法") from exc
+    if value.startswith(('"', "'")):
+        try:
+            parsed = loader.__globals__["_literal_eval"](value)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError("配置字符串非法") from exc
+        if not isinstance(parsed, str) or value[-1] != value[0]:
+            raise ValueError("配置字符串非法")
+    elif value.startswith(("!", "&", "*", "|", ">", "%", "@", "`")) or re.search(r":\s", value):
+        raise ValueError("配置含不支持或非法语法")
+    return loader.__globals__["parse_scalar"](value)
+
+
+# LLM: 标准库严格扩展产品简化YAML到嵌套映射/序列；支持JSON与显式TOML，未知结构一律拒绝，不装第三方依赖。
+# 函数用途: 将冻结配置解析为映射，避免原宽松解析器吞掉坏行或嵌套活动路径。
+def _parse_config_tree(text, suffix=""):
+    text = text.removeprefix("\ufeff")
+    if not text.strip():
+        raise ValueError("活动配置为空")
+    if suffix == ".toml":
+        raw = tomllib.loads(text)
+    elif text.lstrip().startswith(("{", "[", '"')):
+        raw = json.loads(text, object_pairs_hook=_unique_mapping)
+    else:
+        lines = []
+        for line in text.splitlines():
+            clean = _config_line(line)
+            if clean.strip():
+                lines.append((len(clean) - len(clean.lstrip()), clean.strip()))
+        if not lines or lines[0][0] != 0:
+            raise ValueError("活动配置为空或根缩进非法")
+
+        # LLM: 递归只按明确缩进归属；序列映射转为同层映射行，重复键/悬空缩进/非法行不得跳过。
+        # 函数用途: 读取一段映射或序列并返回下一条未消费行。
+        def block(index, indent):
+            sequence = lines[index][1] == "-" or lines[index][1].startswith("- ")
+            result = [] if sequence else {}
+            while index < len(lines) and lines[index][0] >= indent:
+                level, line = lines[index]
+                if level != indent:
+                    raise ValueError("配置缩进无归属")
+                is_item = line == "-" or line.startswith("- ")
+                if is_item != sequence:
+                    break
+                if sequence:
+                    value = line[1:].strip()
+                    if re.match(r"[\w.-]+:(?:\s|$)", value):
+                        lines[index] = (indent + 2, value)
+                        child, index = block(index, indent + 2)
+                    else:
+                        index += 1
+                        if value:
+                            child = _config_value(value)
+                        elif index < len(lines) and lines[index][0] > indent:
+                            child, index = block(index, lines[index][0])
+                        else:
+                            child = None
+                    result.append(child)
+                else:
+                    match = re.fullmatch(r"([\w.-]+):(?:\s+(.*))?", line)
+                    if not match or match[1] in result:
+                        raise ValueError("配置映射行非法或键重复")
+                    key, value = match[1], match[2]
+                    index += 1
+                    if value:
+                        child = _config_value(value)
+                    elif index < len(lines) and (
+                        lines[index][0] > indent or
+                        (lines[index][0] == indent and lines[index][1].startswith("- "))
+                    ):
+                        child, index = block(index, lines[index][0])
+                    else:
+                        child = []  # 与产品空值/列表节语义一致。
+                    result[key] = child
+            return result, index
+
+        raw, end = block(0, 0)
+        if end != len(lines):
+            raise ValueError("配置有未解析行")
+    if not isinstance(raw, dict):
+        raise ValueError("活动配置根必须为映射")
+    return raw
+
+
+# LLM: 递归遍历任意dict/list/tuple；路径后缀及路径配置节收紧保护，相对值缺运行根仍标未知，不猜运行位置。
+# 函数用途: 从严格配置树提取所有绝对活动路径，解析失败直接中止调用方。
+def _config_references(text, suffix=""):
+    raw = _parse_config_tree(text, suffix)
     refs, known = [], True
-    if text.strip() and not raw and not all(not line.strip() or line.lstrip().startswith("#") for line in text.splitlines()):
-        known = False
-    for key, value in raw.items():
-        if not key.endswith(("_path", "_dir", "_workspace")) or value == "":
-            continue
-        if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
-            known = False
-        else:
-            refs.append(Path(value).expanduser().resolve())
+    suffixes = ("_path", "_dir", "_workspace", "_root", "_home")
+    sections = {"path", "paths", "directories", "workspaces", "roots", "homes"}
+
+    # LLM: 节标志沿后代继承，容器无层数特判；非字符串叶不冒充路径，非空相对字符串保留未知标志。
+    # 函数用途: 遍历嵌套配置树，累积真实路径引用。
+    def visit(value, path_section=False):
+        nonlocal known
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("配置键必须为字符串")
+                selected = (key.lower() in sections or key.endswith(suffixes) or
+                            (isinstance(child, (dict, list, tuple)) and key.endswith(
+                                ("_paths", "_directories", "_workspaces", "_roots", "_homes"))))
+                visit(child, path_section or selected)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child, path_section)
+        elif path_section and isinstance(value, str) and value != "":
+            if not Path(value).expanduser().is_absolute():
+                known = False
+            else:
+                refs.append(Path(value).expanduser().resolve())
+
+    try:
+        visit(raw)
+    except (RecursionError, RuntimeError) as exc:
+        raise ValueError("配置路径树无法安全解析") from exc
     return refs, known
 
 
@@ -171,8 +324,8 @@ def _protected(name):
     return name in PROTECTED_DIRS or name in PROTECTED_FILES or name.lower().endswith(".md")
 
 
-# LLM: 扫描不跟随链接；保护子树仍只读元数据以核年龄，删除表不含保护项；任何读取错误使整个单元退出。
-# 函数用途: 收集候选的版本摘要、实际文件数和删除用元数据，不保存文件正文。
+# LLM: 扫描不跟随链接；保护子树仅核元数据，删除表不含保护项；指纹以sha256字典对齐严格批准合同。
+# 函数用途: 收集结构化版本指纹、实际计数和删除用身份，读取错误使整个单元退出。
 def _scan(home, relative):
     digest = hashlib.sha256()
     nodes, protected = [], []
@@ -215,7 +368,7 @@ def _scan(home, relative):
         digest.update(json.dumps(sorted(chain.items())).encode())
         visit(parent, relative.name, relative.parent)
     return {
-        "fingerprint": digest.hexdigest(),
+        "fingerprint": {"sha256": digest.hexdigest()},
         "newest_mtime": newest,
         "files": sum(stat.S_ISREG(row[1][2]) for row in nodes),
         "bytes": sum(row[1][4] for row in nodes if stat.S_ISREG(row[1][2])),
@@ -228,8 +381,8 @@ def _scan(home, relative):
     }
 
 
-# LLM: 备份套组只聚合明确成员，不递归扫描/删除承载目录；成员有链接、类型异常或不完整时整组保留。
-# 函数用途: 为整套备份或普通树生成相同的版本/计数视图，避免按文件删到半套后丢失集合身份。
+# LLM: 备份只聚合明确成员的结构化指纹，不递归删除承载目录；链接/类型异常整组保留。
+# 函数用途: 为整套备份生成与普通树一致的字典指纹和计数，按整组验证和隔离。
 def _scan_unit(home, candidate):
     members = candidate.get("members")
     if members is None:
@@ -242,9 +395,9 @@ def _scan_unit(home, candidate):
         for key in ("files", "bytes", "allocated_bytes", "directories", "protected_count")
     }
     result.update(
-        fingerprint=hashlib.sha256(
+        fingerprint={"sha256": hashlib.sha256(
             json.dumps([(member, t["fingerprint"]) for member, t in trees]).encode()
-        ).hexdigest(),
+        ).hexdigest()},
         newest_mtime=max(t["newest_mtime"] for _, t in trees),
         protected_examples=[],
         nodes=[node for _, t in trees for node in t["nodes"]],
@@ -288,8 +441,8 @@ class Planner:
             self.skip("unreadable_or_symlink_scope:" + type(exc).__name__, relative)
         return []
 
-    # LLM: 选中配置遵循MY_AGENT_CONFIG/显式active-config来源；只用于收紧保护；读取前后版本不同则workspace失败关闭。
-    # 函数用途: 安全读取活动配置文本，不解析为权限或输出配置正文。
+    # LLM: 读取沿nofollow父链与叶FD，前后身份/版本不同直接拒绝；异常由_references按来源全局中止或保守保留。
+    # 函数用途: 安全读取冻结活动配置，只用来收紧保护，不输出正文。
     def config_text_at(self, path):
         path = Path(path).expanduser().absolute()
         # /tmp等系统别名只在首次选择时规范化；配置叶仍nofollow，父链完整核对。
@@ -311,8 +464,8 @@ class Planner:
             finally:
                 os.close(fd)
 
-    # LLM: 固定目录仅作额外保留；真正选中配置不能漏掉；缺失/坏配置使全部测试workspace保留。
-    # 函数用途: 从活动配置、固定位置和浅层当前链接收集保护引用，不输出正文。
+    # LLM: 选中且存在的配置读取/语法错误统一ValueError全局中止；缺失配置标覆盖未知；固定目录仍仅作额外保守保护。
+    # 函数用途: 收集实际活动配置与补充引用，绝不在损坏活动配置下继续删其他类别。
     def _references(self):
         references, texts, okay = [], [], True
         selected = str(os.environ.get("MY_AGENT_CONFIG") or "").strip()
@@ -320,15 +473,17 @@ class Planner:
         for path in config_paths:
             try:
                 text = self.config_text_at(path)
-                refs, known = _config_references(text)
+                refs, known = _config_references(text, Path(path).suffix)
                 texts.append(text)
                 references.extend(refs)
                 okay = okay and known
                 if not known:
                     self.skip("active_configuration_unresolved_root", path)
-            except (OSError, ValueError, RuntimeError):
+            except FileNotFoundError:
                 okay = False
                 self.skip("active_configuration_unavailable", path)
+            except (OSError, ValueError, RuntimeError, RecursionError) as exc:
+                raise ValueError("选中活动配置不可读或格式非法") from exc
         for base in (Path("config"), OWNER / "config", OWNER / "workspace/runtime"):
             try:
                 with _directory(self.home, base):
@@ -346,7 +501,7 @@ class Planner:
                 if path.suffix in {".yaml", ".yml", ".toml", ".json"}:
                     try:
                         text = self.config_text_at(path)
-                        refs, known = _config_references(text)
+                        refs, known = _config_references(text, path.suffix)
                         texts.append(text)
                         references.extend(refs)
                         okay = okay and known
@@ -653,55 +808,198 @@ def _verify_quarantined(fd, name, expected):
         raise SafetyError("quarantined_leaf_replaced")
 
 
-# LLM: 活目录只rename到专属隔离区；移出后核对象及原祖先身份，失败原子无覆盖恢复；不合作同权限写者不能获全局事务承诺。
-# 函数用途: 删除一个批准单元，只有核验后的隔离条目才能unlink/rmdir并累计成功数。
-def _delete_unit(home, candidate, tree, counters):
+# LLM: 只向本次独占隔离FD创建0600映射，内容不含正文；短写循环及文件/目录fsync均成功才返回屏障。
+# 函数用途: 在任何目标物理删除前，持久保存整批原路径、隔离名、身份和共享祖先链。
+def _persist_isolation(fd, mapping):
+    data = json.dumps(mapping, ensure_ascii=False, indent=2).encode("utf-8")
+    journal = os.open("manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(journal, view)
+            if written <= 0:
+                raise OSError(errno.EIO, "隔离清单写入无进展")
+            view = view[written:]
+        os.fsync(journal)
+        os.fsync(fd)
+    finally:
+        os.close(journal)
+
+
+# LLM: 恢复只调用内核no-replace；可用当前仍持有的源父FD，失败保留双方并记录准确隔离位置，不覆盖新原名。
+# 函数用途: 恢复一条隔离对象并记录状态；目录同步失败也留下需人工核对的回执。
+def _restore_isolated(fd, q_fd, q_path, entry, candidate):
+    try:
+        _restore_entry(q_fd, entry["quarantine_name"], fd, Path(entry["source"]).name)
+        entry["state"] = "restored"
+        os.fsync(fd)
+        os.fsync(q_fd)
+    except OSError as exc:
+        entry["state"] = "recovery_required"
+        candidate.setdefault("recovery_required", []).append({
+            "source": entry["source"], "quarantine": str(q_path / entry["quarantine_name"]),
+            "errno": exc.errno,
+        })
+
+
+# LLM: 逆序先恢复父目录再恢复子叶；只重新打开已核祖先，不为全批保留海量FD；未知祖先不猜恢复位置。
+# 函数用途: 回滚本单元所有尚未恢复的移出条目，并保留无法安全恢复的隔离对象。
+def _rollback_isolation(home, q_fd, q_path, mapping, candidate):
+    for entry in reversed(mapping["entries"]):
+        if entry["state"] != "isolated":
+            continue
+        try:
+            with _open_chain(home / Path(entry["source"]).parent, mapping["ancestors"]) as (fd, _):
+                _restore_isolated(fd, q_fd, q_path, entry, candidate)
+        except (OSError, ValueError) as exc:
+            entry["state"] = "recovery_required"
+            candidate.setdefault("recovery_required", []).append({
+                "source": entry["source"], "quarantine": str(q_path / entry["quarantine_name"]),
+                "errno": getattr(exc, "errno", None),
+            })
+    mapping["state"] = "recovery_required" if candidate.get("recovery_required") else "rolled_back"
+
+
+# LLM: 单候选全批移出/核验/持久化后删除；首次物理删除成功前任意异常均逆序恢复，部分删除后保留残留恢复坐标，不假装完整回滚。
+# 函数用途: 安全清理一个整批单元并累计真实删除量，不对不合作的同权限写者或断电提供全局事务承诺。
+def _delete_unit(home, candidate, tree, counters, checkpoint=None):
     with _quarantine(home) as (q_fd, q_path, q_chain):
-        for relative, expected, blocks in tree["nodes"]:
-            path = Path(relative)
-            if candidate["keep_root"] and relative == candidate["path"]:
-                continue
-            with _open_chain(home / path.parent, tree["ancestors"]) as (fd, _chain):
-                current = _identity(os.stat(path.name, dir_fd=fd, follow_symlinks=False))
-                directory = stat.S_ISDIR(expected[2])
-                if (current[:3] != expected[:3] if directory else current != expected) or _protected(path.name):
-                    raise SafetyError("source_version_changed")
-                if directory:
-                    with _open_chain(home / path, tree["ancestors"]) as (child, _):
-                        if os.listdir(child):
-                            continue  # 不移动含保护文件或新增条目的目录。
-                # 最后stat可能已触发并发迁移，先重新确认全链再允许移出。
-                with _open_chain(home / path.parent, tree["ancestors"]):
-                    pass
-                token = uuid4().hex
-                os.rename(path.name, token, src_dir_fd=fd, dst_dir_fd=q_fd)
-                try:
-                    _verify_quarantined(q_fd, token, expected)
+        mapping = {"state": "staging", "quarantine": str(q_path), "ancestors": tree["ancestors"], "entries": []}
+        candidate["isolation"] = mapping
+        physically_deleted = False
+        try:
+            for relative, expected, blocks in tree["nodes"]:
+                path = Path(relative)
+                if candidate["keep_root"] and relative == candidate["path"]:
+                    continue
+                with _open_chain(home / path.parent, tree["ancestors"]) as (fd, _chain):
+                    current = _identity(os.stat(path.name, dir_fd=fd, follow_symlinks=False))
+                    directory = stat.S_ISDIR(expected[2])
+                    if (current[:3] != expected[:3] if directory else current != expected) or _protected(path.name):
+                        raise SafetyError("source_version_changed")
+                    if directory:
+                        with _open_chain(home / path, tree["ancestors"]) as (child, _):
+                            if os.listdir(child):
+                                continue  # 不移动含保护文件或新增条目的目录。
+                    # 最后stat可能已触发并发迁移，重新确认全链再允许移出。
                     with _open_chain(home / path.parent, tree["ancestors"]):
                         pass
-                    with _open_chain(q_path, q_chain):
-                        pass
+                    token = uuid4().hex
+                    os.rename(path.name, token, src_dir_fd=fd, dst_dir_fd=q_fd)
+                    entry = {"source": relative, "quarantine_name": token, "identity": expected,
+                             "allocated_bytes": blocks, "state": "isolated"}
+                    mapping["entries"].append(entry)
+                    try:
+                        _verify_quarantined(q_fd, token, expected)
+                        with _open_chain(home / path.parent, tree["ancestors"]), _open_chain(q_path, q_chain):
+                            pass
+                        os.fsync(fd)
+                    except BaseException:
+                        # 当前父FD仍持有：即便父目录被搬走，也恢复到原inode而不覆盖替代路径。
+                        _restore_isolated(fd, q_fd, q_path, entry, candidate)
+                        raise
+            with _open_chain(q_path, q_chain), _open_chain(home.parent) as (parent, _):
+                os.fsync(parent)
+            for entry in mapping["entries"]:
+                _verify_quarantined(q_fd, entry["quarantine_name"], entry["identity"])
+            mapping["state"] = "prepared"
+            _persist_isolation(q_fd, mapping)
+            if checkpoint is not None:
+                checkpoint()
+            mapping["state"] = "deleting"
+            for entry in mapping["entries"]:
+                token, expected = entry["quarantine_name"], entry["identity"]
+                with _open_chain(q_path, q_chain):
+                    _verify_quarantined(q_fd, token, expected)
+                    directory = stat.S_ISDIR(expected[2])
                     if directory:
                         os.rmdir(token, dir_fd=q_fd)
-                        counters["deleted_directories"] += 1
                     else:
                         os.unlink(token, dir_fd=q_fd)
+                    # prepared/checkpoint与删除尝试都不是提交事实，只有系统调用成功才越过回滚边界。
+                    physically_deleted = True
+                    entry["state"] = "deleted"
+                    if directory:
+                        counters["deleted_directories"] += 1
+                    else:
                         counters["deleted_files"] += 1
                         counters["deleted_bytes"] += expected[4]
-                        counters["deleted_allocated_bytes"] += blocks
-                except BaseException:
-                    try:
-                        _restore_entry(q_fd, token, fd, path.name)
-                    except OSError as recovery_error:
-                        candidate.setdefault("recovery_required", []).append(
-                            {"source": relative, "quarantine": str(q_path / token), "errno": recovery_error.errno}
-                        )
-                        raise SafetyError("restore_conflict_preserved_in_quarantine") from recovery_error
-                    raise
+                        counters["deleted_allocated_bytes"] += entry["allocated_bytes"]
+        except BaseException as exc:
+            if physically_deleted:
+                mapping["state"] = "partial_delete"
+                for entry in mapping["entries"]:
+                    if entry["state"] != "deleted":
+                        entry["state"] = "recovery_required"
+                        candidate.setdefault("recovery_required", []).append({
+                            "source": entry["source"], "quarantine": str(q_path / entry["quarantine_name"]),
+                            "errno": getattr(exc, "errno", None),
+                        })
+                raise
+            _rollback_isolation(home, q_fd, q_path, mapping, candidate)
+            if candidate.get("recovery_required"):
+                # 早期校验失败也尽量留下持久恢复映射；已有日志不覆盖，外层清单仍保留本次状态。
+                if "manifest.json" not in os.listdir(q_fd):
+                    _persist_isolation(q_fd, mapping)
+                raise SafetyError("restore_conflict_preserved_in_quarantine") from None
+            if "manifest.json" in os.listdir(q_fd):
+                os.unlink("manifest.json", dir_fd=q_fd)
+            raise
+        mapping["state"] = "deleted"
+        os.unlink("manifest.json", dir_fd=q_fd)
+        os.fsync(q_fd)
 
 
-# LLM: 执行前重建资格并交集已审清单；每单元再核摘要，保护/配置有变化就跳过；apply不会纳入预演后新出现的垃圾。
-# 函数用途: 以库接口预演或执行一次受限清理，返回完整审计回执。
+# LLM: 只验证本脚本批准数据形状，不授予删除权；新旧schema均须满足同一严格条目合同，legacy顶层必须精确。
+# 函数用途: 在执行前拒绝其他工具JSON、坏别名或畸形条目，并返回可比较的批准身份集合。
+def _approved_keys(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("批准清单根必须为字典")
+    required = {"home", "policy", "script_sha256", "mode"}
+    fields = set(manifest) & {"candidates", "entries"}
+    if not required.issubset(manifest) or not fields:
+        raise ValueError("批准清单缺少必需字段")
+    if "schema" in manifest:
+        if not isinstance(manifest["schema"], str) or manifest["schema"] not in MANIFEST_SCHEMAS:
+            raise ValueError("批准清单schema不属于本脚本")
+        allowed = required | {"schema", "candidates", "entries", "started_at", "finished_at",
+                              "categories", "exclusions", "exclusion_examples", "errors", "complete"}
+        if set(manifest) - allowed:
+            raise ValueError("批准清单含未知顶层字段")
+    elif set(manifest) != required | fields:
+        raise ValueError("legacy批准清单顶层字段不精确")
+    if (not isinstance(manifest["home"], str) or not isinstance(manifest["policy"], dict)
+            or not isinstance(manifest["script_sha256"], str) or manifest["mode"] != "dry-run"):
+        raise ValueError("批准清单归属字段格式非法")
+    aliases = []
+    for field in sorted(fields):
+        rows = manifest[field]
+        if not isinstance(rows, list):
+            raise ValueError("批准候选必须为列表")
+        keys = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("批准条目必须为字典")
+            path, category, fingerprint = row.get("path"), row.get("category"), row.get("fingerprint")
+            if (not isinstance(path, str) or not path.strip() or "\0" in path
+                    or Path(path).is_absolute() or ".." in Path(path).parts
+                    or Path(path).as_posix() != path or path == "."):
+                raise ValueError("批准路径必须为规范相对字符串")
+            if not isinstance(category, str) or category not in CATEGORIES:
+                raise ValueError("批准类别非法")
+            if (not isinstance(fingerprint, dict) or set(fingerprint) != {"sha256"}
+                    or not isinstance(fingerprint["sha256"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", fingerprint["sha256"]) is None):
+                raise ValueError("批准指纹必须为合法sha256字典")
+            keys.add((path, category, fingerprint["sha256"]))
+        aliases.append(keys)
+    if any(keys != aliases[0] for keys in aliases[1:]):
+        raise ValueError("批准清单candidates与entries不一致")
+    return aliases[0]
+
+
+# LLM: 未传批准使用专用哨兵；显式null也须校验并拒绝；有效批准交集当前候选，坏活动配置全局中止，隔离与结果均checkpoint。
+# 函数用途: 预演或执行受限清理，返回新版schema、逐单元隔离/恢复及真实删除回执。
 def run_cleanup(
     home_dir,
     *,
@@ -709,7 +1007,7 @@ def run_cleanup(
     now=None,
     min_task_tmp_age_days=3.0,
     keep_release_backups=2,
-    approved_manifest=None,
+    approved_manifest=_NO_APPROVAL,
     checkpoint=None,
     active_configs=(),
 ):
@@ -739,7 +1037,8 @@ def run_cleanup(
         "config_parser_sha256": _config_parser()[1],
     }
     script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    if approved_manifest is not None:
+    if approved_manifest is not _NO_APPROVAL:
+        approved = _approved_keys(approved_manifest)
         if (
             approved_manifest.get("home") != str(home)
             or approved_manifest.get("policy") != policy
@@ -747,11 +1046,8 @@ def run_cleanup(
             or approved_manifest.get("mode") != "dry-run"
         ):
             raise ValueError("预演的根、策略、脚本版本或模式不匹配")
-        approved = {
-            (r["path"], r["category"], r["fingerprint"]) for r in approved_manifest["candidates"]
-        }
         candidates = [
-            r for r in candidates if (r["path"], r["category"], r["fingerprint"]) in approved
+            r for r in candidates if (r["path"], r["category"], r["fingerprint"]["sha256"]) in approved
         ]
     categories = {
         key: dict(
@@ -766,7 +1062,7 @@ def run_cleanup(
         for key in CATEGORIES
     }
     manifest = {
-        "schema": "home-file-slimming.v1",
+        "schema": MANIFEST_SCHEMA,
         "home": str(home),
         "policy": policy,
         "mode": "apply" if apply else "dry-run",
@@ -787,9 +1083,9 @@ def run_cleanup(
         checkpoint(manifest)
     if apply:
         for row in candidates:
+            # 活动配置损坏必须全局中止，不落入下方逐单元文件系统错误的继续分支。
+            fresh = Planner(home, current, min_task_tmp_age_days, keep_release_backups, active_configs)
             try:
-                # 在规划或此前单元耗时期间，配置可能切换、临时目标也可能重新出现。
-                fresh = Planner(home, current, min_task_tmp_age_days, keep_release_backups, active_configs)
                 relative = Path(row["path"])
                 if row["category"] == CATEGORIES[2] and (
                     not fresh.config_ok or fresh.referenced(relative)
@@ -814,7 +1110,8 @@ def run_cleanup(
                 if row["newest_mtime"] >= time.time() - row["min_age_days"] * DAY and now is None:
                     row["status"] = "skipped_recent"
                     continue
-                _delete_unit(home, row, tree, categories[row["category"]])
+                _delete_unit(home, row, tree, categories[row["category"]],
+                             checkpoint=(lambda: checkpoint(manifest)) if checkpoint is not None else None)
                 row["status"] = "applied"
             except (OSError, ValueError, RecursionError) as exc:
                 row["status"] = "stopped_on_error"
@@ -872,8 +1169,28 @@ class ManifestOutput:
         self.verify()
 
 
-# LLM: 初次父目录规范化后立即nofollow固定全链，再O_EXCL预留；异常只关闭FD，不删除可能被他人替换的输出名。
-# 函数用途: 在开始扫描前安全取得全新Home外清单文件。
+# LLM: 接管已open的FD生命周期；非阻塞独占锁失败立即关闭，成功后任何出口先解锁再关闭，解锁失败亦必须close。
+# 函数用途: 保护整个规划、apply和清单fsync临界区，不把O_EXCL所有权误当文件锁。
+@contextmanager
+def _manifest_lock(fd):
+    locked = False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            raise SafetyError("manifest_lock_unavailable") from exc
+        yield
+    finally:
+        try:
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+# LLM: 全链nofollow、O_EXCL出生后立即交给锁上下文拥有FD；初始化与yield异常也按unlock/close释放。
+# 函数用途: 在扫描之前固定Home外输出身份并持有独占文件锁直到末次fsync结束。
 @contextmanager
 def _manifest_output(home, output):
     home = home.resolve(strict=True)
@@ -884,15 +1201,13 @@ def _manifest_output(home, output):
         if any(value[:2] == home_chain[str(home)][:2] for value in chain.values()):
             raise SafetyError("manifest_parent_inside_home")
         fd = os.open(output.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
-        try:
+        with _manifest_lock(fd):
             destination = ManifestOutput(output, parent, chain, fd, home, home_chain)
             destination.verify()
             yield destination
-        finally:
-            os.close(fd)
 
 
-# LLM: CLI默认dry-run；显式apply才删除，已审预演仅收紧集合；返回非零表示未完整应用或参数不安全。
+# LLM: CLI默认dry-run；显式apply才删除，批准文件即使为null也必须验证，只有未提供文件才用哨兵；失败返回非零。
 # 函数用途: 解析参数并输出摘要，完整清单只写指定路径。
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -902,14 +1217,14 @@ def main(argv=None):
     modes.add_argument("--apply", action="store_true")
     parser.add_argument("--manifest-out", type=Path, required=True)
     parser.add_argument("--approved-manifest", type=Path)
-    parser.add_argument("--active-config", type=Path, action="append", default=[], help="额外活动配置路径；不可读则保留全部测试workspace")
+    parser.add_argument("--active-config", type=Path, action="append", default=[], help="额外活动配置；存在但不可读或格式非法则全局中止")
     parser.add_argument("--min-task-tmp-age-days", type=float, default=3.0)
     parser.add_argument("--keep-release-backups", type=int, default=2)
     args = parser.parse_args(argv)
     output = args.manifest_out.absolute()
     try:
         approved = (
-            json.loads(args.approved_manifest.read_text()) if args.approved_manifest else None
+            json.loads(args.approved_manifest.read_text()) if args.approved_manifest else _NO_APPROVAL
         )
         with _manifest_output(args.home_dir, output) as destination:
             result = run_cleanup(

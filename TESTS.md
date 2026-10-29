@@ -1,3 +1,26 @@
+## 2026-10-29 e905 sol-12 Round 2：清理协议强化
+
+来源：`fix-e905-sol-12-r2.md`，起点 `95b52ccba3d5fc7219219a10578361eefabaabd5`。只修改清理脚本、对应测试和本文档；不再次扫描或清理真实 Home，不部署、不推送。
+
+- 删除以**单个候选单元**为事务边界：所有叶子/空目录先隔离并复核，持久写出隔离 `manifest.json`（源路径、隔离名、身份、共享祖先链）并同步文件/目录，随后才删除。首次物理删除成功前（含 checkpoint 后的最后核验）失败均逆序无覆盖恢复；原位被占用时保留双方和 `recovery_required`。部分删除后的异常以 `partial_delete` 及残留恢复坐标记录，不冒充全批回滚；不是多个候选之间的全局原子事务，也不承诺掉电恢复自动化。
+- 输出 FD 由 `_manifest_lock` 持有全扫描/规划/apply/末次保存的非阻塞独占 `flock`。锁冲突立即拒绝并关闭；初始化异常和正常退出均先 `LOCK_UN` 再 `close`，解锁异常也不能漏关闭。
+- 活动路径递归遍历 dict/list/tuple，提取 `_path/_dir/_workspace/_root/_home` 及路径配置节中的字符串。保留产品标量语义，以标准库严格支持 JSON、嵌套简化 YAML、TOML；JSON/块映射重复键、非法行/缩进、空正文、未闭引号、非映射根或不支持的语法拒绝，不把宽松解析器忽略的内容当无引用。选中且存在的配置读取/解析失败直接 `ValueError` 全局中止，执行前再读取也不可被逐单元错误处理吞掉。缺失配置和未知相对运行根继续保守保留 workspace；布尔开关不是字符串路径，不能只因字段名像路径就误判整个默认配置。
+- 默认 schema 为 `my-agent.home_file_slimming_cleanup_manifest.v1`，仍接受 `home-file-slimming.v1` 的归属标识；批准清单支持 `candidates`/`entries`，双字段必须一致。无 schema 的 legacy 顶层严格为四个归属字段和一/两个候选列表；所有候选必须含规范相对 path、合法 category 与 `{"sha256": "64位小写摘要"}` 字典指纹。未知 schema/顶层、错误类型/路径/指纹均 `ValueError`，实际授权仍是当前规划交集。旧版字符串指纹不在新严格格式内，历史批准清单亦不能绕过脚本 SHA 校验，必须重新预演。
+
+回归包括第二文件失败整批恢复/恢复冲突、嵌套目录回滚、持久映射先于第一 unlink、fsync/checkpoint 故障、真实同 inode 第二句柄锁竞争、初始化与退出释放次序、嵌套配置及环境/显式坏配置全局中止、新旧 schema 和 legacy 正反例。原测试 AST 与断言保持不变。首批先红 9 项后整文件 71 项通过；第二批新增 48 项中 44 项先红，4 项是原本已支持的正向/拒绝控制；组合曾暴露默认配置布尔/枚举误当路径，按真实类型修正后 119 项通过。
+
+独立 Astra high 静态复核发现显式批准 `null` 绕过和最后核验的回滚范围遗漏。新增 CLI/库拒绝 `null`、首次删除前校验/冲突/unlink 失败和部分删除残留 6 个反例全部先红；批准默认值改为专用哨兵，删除异常处理以实际成功 syscall 为界。原样重跑后整文件 125 项通过，无失败、错误或跳过。最终提交对应证据及复审范围见外部 DONE 的 Round 2 节。
+
+复现（工作树根；只运行这一份 pytest，不跑全仓）：
+```bash
+PYTHONPATH=/tmp/wt-e905-sol-12 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest /tmp/wt-e905-sol-12/agent_py_agent/tests/test_home_file_slimming_cleanup.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol12_fix2
+ruff check --no-cache /tmp/wt-e905-sol-12/scripts/home_file_slimming_cleanup.py /tmp/wt-e905-sol-12/agent_py_agent/tests/test_home_file_slimming_cleanup.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B /tmp/wt-e905-sol-12/scripts/check_import_boundaries.py --json
+git -C /tmp/wt-e905-sol-12 diff --check 4bea324e3
+```
+
+未验证：真实 Home、Linux/Windows、真实硬链接全链路、掉电/崩溃恢复与线上服务。清单 inode 锁不是跨不同输出文件的 Home 级互斥锁；仍须单执行者及写者协作维护窗口。
+
 ## 2026-10-29 e905 sol-12 Round 1：清理隔离与清单身份修复
 
 来源：`fix-e905-sol-12-r1.md` 和 Astra-1/Astra-2 两份独立审查；起点 `e10d64afa843b9aee6d18aa62a145ec6c55a2275`。本轮只在隔离 `/tmp` 样本测试，不再对真实 Home 执行清理，不推送或部署。
