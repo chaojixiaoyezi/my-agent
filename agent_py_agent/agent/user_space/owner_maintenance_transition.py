@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 
 from ..common.json_io import locked_json_path, read_json_object_report
 from ..common.nofollow_fs import read_bytes_beneath
 from ..common.request_execution_ports import gateway_transaction_writer
+from ..contracts.optimization_contracts import require_schema_generation
 from ..memory_store.retention_scan import file_fingerprint
 from ..memory_store.retention_transition import RetentionPolicyChangedError
 from .home_retention import apply_owner_retention
@@ -26,6 +28,8 @@ def _state_bytes(home):
 # LLM: callback来自原C/W执行门；逐写重核原policy/state，已有局部副作用不回滚或伪造未进入。
 # LLM: TTL/事件删除仍在原保留安全门后；runtime安全清理沿commit执行，不被retention未到期或hold推迟。
 # 函数用途: 沿原活scope逐步提交维护并最终CAS同一状态，不新增维护账或权限来源。
+# LLM: 在runtime清理等任何领域动作前核准确CAS前像的R1代际，不能等最终写回才拒绝高代际。
+# 函数用途: 先验证原状态版本，再沿原逐写门运行已有维护。
 def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
@@ -42,6 +46,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     )
 
     before = _state_bytes(home)
+    require_schema_generation(json.loads(before) if before else {})
     digest = "missing" if before is None else hashlib.sha256(before).hexdigest()
     if expected_state_fingerprint is not None and digest != expected_state_fingerprint:
         raise ValueError("original_maintenance_source_changed")

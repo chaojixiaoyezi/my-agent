@@ -1,4 +1,4 @@
-# LLM: blocking=False只调用各原reader/writer的try-file-lock，抢不到显式失败；默认True及JSON字节/CAS/锁身份不变，不签执行许可。
+# LLM: blocking=False沿原try-file-lock，抢不到显式失败；直接JSON替换在原锁内先读当前header拒写高代际，JSON字节/CAS/锁身份不变，不签执行许可。
 # 模块用途: 可选deadline只守原IO末步骤，不签权；None默认与所有原锁/序列化保持。
 # 模块用途: 供原任务refs与发布使用同一原文件事务，并可拒绝显式等待。
 # LLM: Gateway原文件队列读写和只读统计；首次prepare沿原T内单次提交，延迟callback不得越过PID/thread/退出边界，不由计数派生许可或终态。
@@ -44,6 +44,7 @@ from ..common.nofollow_fs import (
     open_private_lock_beneath_tightened,
     split_existing_anchor,
 )
+from ..contracts.optimization_contracts import require_schema_generation
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .paths import GatewayPaths
 
@@ -149,11 +150,10 @@ def validated_gateway_request_fingerprint(payload: dict, request_id: str) -> str
     return expected
 
 
+# LLM: 兼容旧名称但不保留无栅栏写者；与原私有原子入口同编码，遇高代际在原文件锁内拒写。
+# 函数用途: 将旧直接写名称收敛到同一R1安全写入口。
 def write_json_file(path: Path, payload: dict) -> None:
-
-    # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
-    ensure_private_dir(path.parent)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_json_file_atomic(path, payload)
 
 
 # LLM: 队列文件（请求/响应/状态）都是宿主自己的运行数据，一律按私有权限落盘：目录 0700、文件出生 0600、
@@ -161,12 +161,14 @@ def write_json_file(path: Path, payload: dict) -> None:
 #   收紧到 0600 不影响它们；内容格式与原来逐字节一致（indent=2、sort_keys、无尾换行）。
 #   C显式False只尝试原common写锁及同一unlocked原语；不能因资源忙跳过锁或假写成功，默认True沿原body。
 # 函数用途: 原子替换本人JSON；可选deadline与try锁到同一末writer，原默认行为保留。
+# LLM: R1在原private JSON锁内核原header和输入，不能在检查与replace间让迁移写者插入；deadline不授予权限。
+# 函数用途: 沿原锁和序列化原子写入，拒绝覆盖当前进程不理解的存储代际。
 def write_json_file_atomic(path: Path, payload: dict, *, blocking: bool = True, deadline: float | None = None) -> None:
     check_io_deadline(deadline)
-    if blocking and deadline is None:
-        write_private_json_file_atomic_no_newline(path, payload, sort_keys=True)
-        return
+    require_schema_generation(payload)
     with locked_private_json_path(path, blocking=blocking):
+        current, _readable, _raw, _version = _read_json_dict_unlocked_report(path)
+        require_schema_generation(current)
         check_io_deadline(deadline)
         options = {} if deadline is None else {"deadline": deadline}
         write_private_json_file_atomic_no_newline_unlocked(path, payload, sort_keys=True, **options)
@@ -248,6 +250,8 @@ def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> di
 # 函数用途: 在同一原文件事务内可选立即拒绝锁忙，不新增writer或假成功。
 # LLM: 可选deadline在读/updater/精确去重后及replace前核；不改原版本验证或CAS，None保持原调用形状。
 # 函数用途: 在原JSON锁内更新；短窗过期不启动下一写，已提交事实不回滚。
+# LLM: R1在原锁内、updater之前核原header，旧写者遇高代际必须STORE_SCHEMA_NEWER，不允许回写覆盖未来字段。
+# 函数用途: 原JSON事务保留原去重与锁序，并在任何业务更新前拒绝不支持的存储代际。
 def update_json_file_atomic(
     path: Path,
     updater: Callable[[dict], dict],
@@ -263,8 +267,10 @@ def update_json_file_atomic(
         if require_existing and not path.is_file():
             raise FileNotFoundError(path)
         current, current_readable, raw_text, read_version = _read_json_dict_unlocked_report(path)
+        require_schema_generation(current)
         check_io_deadline(deadline)
         updated = _updated_json_dict(updater, current)
+        require_schema_generation(updated)
         check_io_deadline(deadline)
         skip_candidate = not force_write and current_readable and _skip_write_is_safe(path, read_version)
         if skip_candidate and _serialized_matches(updated, raw_text):

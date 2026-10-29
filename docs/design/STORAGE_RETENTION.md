@@ -1,5 +1,11 @@
 # 产品持久数据的保留策略（盘点与方案，部分落地）
 
+## 2026-10-29 e905 sol-2 局部状态补充
+
+本段只描述当前候选工作树，不改变下文历史盘点或原领域删除权威。`home_retention.py` 已登记 31 类 `StorageKind` 元数据；`owner_maintenance.py` 的调度片接收显式 adapter，按 item/byte/deadline 分配剩余额度，已确认提交才推进来源游标，未知效果停止同拍，未绑定类别明确保留为 partial。该框架**尚未与 31 类真实 resolver/adapter 及默认 CLI/Gateway 周期接通**；时间/字节是交给领域的合作式预算，不能强制抢占超预算 adapter，测试通过不证明全部增长目录已有有界清理。
+
+原 `maintenance.json` 写入保留未知扩展并增加局部 schema_generation 检查，partial 不再受完整日周期等待；原保留策略、引用保护、请求权限及 transition/CAS 不由登记表替代。Gateway 终态分段封存、增量配额账及后台对账未实现，也没有对生产 home 运行维护或迁移。RD-01 的未接线 `common/rotating_log.py` 和专用测试已物理退役，历史表格里提到该模块仅为当时盘点证据，不是当前入口。详细验证与限制见 `TESTS.md` 同日 e905 节。
+
 状态：**部分落地**（2026-09-29 按 R4 上线后的代码与生产首跑核对，见第 8 节；第 1–7 节保留 09-28 的原始盘点，不逐段改写）。本文最初只做只读盘点和方案方向，不改产品代码。盘点基于 main `54880f8e9` 的源码，测量对象是本机生产 home
 （`~/.my-agent`，2026-09-28 下午数据盘写满后）。
 
@@ -168,7 +174,7 @@
 2. **只追加的日志与索引，按段轮转或整理压缩**。
    - 适用于 `global_index/*.jsonl`、`local_store/events.jsonl`、`gateway_requests.jsonl`、`blobs/tool_outputs/index.jsonl`、审计日志。
    - 做法：写满或过期就切段；索引类定期按“当前有效行”重写。`home-index-rebuild` 已有的压缩逻辑可以挪进维护线程，
-     `common/rotating_log.py` 可以接到 `gateway.log`。
+     Gateway日志应沿现有logging与维护入口使用专用适配；`common/rotating_log.py`未接入生产，已在2026-10-29 e905 RD-01退役，不再建议接回。
 3. **每请求、每运行的快照与记录，终态后按天数保留**。
    - 适用于上下文快照、`runtime_facts`、Gateway 的 `done/terminal/failed/responses`、`agents/`、`runs/`、子代理 `daily/`。
    - 规则：终态后过 N 天清理，N 走配置，并且只清没有被结构化引用的项（被任务、线程、pin 或 refs 引用的保留），

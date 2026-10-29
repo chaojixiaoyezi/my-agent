@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 
@@ -415,6 +416,19 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
         return False
 
 
+# LLM: metadata是原runtime.db唯一header；只查询，不建表，不将忙或坏库当代际0。先发R1到所有写者后才允许提升代际。
+# 函数用途: 每次借用可写连接前拒绝较新存储，旧库缺header按0处理。
+def require_runtime_schema_generation(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone() is None:
+        return
+    row = conn.execute("SELECT value FROM metadata WHERE key='schema_generation'").fetchone()
+    if row is not None:
+        value = row[0]
+        if not isinstance(value, str) or not value.isdecimal():
+            raise ValueError('STORE_SCHEMA_INVALID')
+        require_schema_generation({'schema_generation': int(value)})
+
+
 # LLM: RuntimeSchemaMixin 只向前补当前仍被消费的列；禁止为了清理旧库而
 # 自动 DROP，避免升级时破坏用户历史，旧 acceptance 表仅作为惰性遗留数据。
 #   完成摘要与初始化同事务，连接工厂只在显式作用域跟踪语句，不改变独立 transaction 调用方。
@@ -483,6 +497,12 @@ class RuntimeSchemaMixin:
         timeout = 0.0 if existing_only else 30.0
         conn = sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=sqlite_connection_factory())
         conn.row_factory = sqlite3.Row
+        if not read_only:
+            try:
+                require_runtime_schema_generation(conn)
+            except BaseException:
+                conn.close()
+                raise
         conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
         if not read_only and not existing_only:
             try:
@@ -505,4 +525,6 @@ class RuntimeSchemaMixin:
                 conn.close()
             return
         with scoped_connection(self.db_path, getattr(self, "read_only", False), self._runtime_connect) as conn:
+            if not getattr(self, 'read_only', False):
+                require_runtime_schema_generation(conn)
             yield conn

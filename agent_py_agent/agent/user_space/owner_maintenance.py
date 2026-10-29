@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
+from ..contracts.optimization_contracts import require_schema_generation
 from .home_layout import MyAgentHomePaths
 from .home_retention import OwnerRetentionPlan, apply_owner_retention
 
@@ -115,6 +117,8 @@ class OwnerMaintenanceResult:
         return payload
 
 
+# LLM: 原关闭/间隔规则优先；已提交partial沿同一maintenance.json下一拍续作，不重新等待整周期。
+# 函数用途: 判断原维护是否到期，包含有游标的未完成片。
 def owner_maintenance_due(
     owner_home: str | Path,
     *,
@@ -134,6 +138,9 @@ def owner_maintenance_due(
         _maintenance_state_path(home),
         context="owner_maintenance.state",
     ).payload
+    require_schema_generation(marker)
+    if marker.get('maintenance_partial') is True:
+        return True
     last_attempt = _timestamp(marker.get("last_attempt_at"))
     current = float(now if now is not None else time.time())
     return last_attempt <= 0 or current - last_attempt >= interval
@@ -310,10 +317,15 @@ def _cleanup_owner_runtime(home: MyAgentHomePaths, *, now: float, commit_transit
 
 # LLM: caller已持原maintenance锁；仍写原唯一schema/状态口径，不把局部成功变成新许可或第二账。
 # 函数用途: 用原保留回执和附加维护事实更新同一个maintenance.json。
+# LLM: R1先核header，未知扩展保真；partial只由已确认的领域回执派生，不能被日周期吞掉。
+# 函数用途: 在原状态写者内保存扩展、来源游标及下一拍责任。
 def _write_maintenance_result(state_path, retention, previous, current, effects):
+    require_schema_generation(previous)
     fields = _outcome_fields(retention, previous, current)
-    payload = {"schema_version": "owner-maintenance.v1", "last_attempt_at": current, **fields,
+    payload = {**previous, "schema_generation": 1, "schema_version": "owner-maintenance.v1", "last_attempt_at": current, **fields,
                "load_errors": list(retention.load_errors), "legal_hold": retention.legal_hold, **effects}
+    if isinstance(effects.get('storage_maintenance'), dict):
+        payload['maintenance_partial'] = effects['storage_maintenance']['partial']
     write_json_file_atomic_unlocked(state_path, payload)
     return OwnerMaintenanceResult(True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
         isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"])
@@ -574,3 +586,75 @@ __all__ = [
     "reclaim_owner_orphan_lock_files",
     "maybe_run_cli_owner_maintenance",
 ]
+
+
+# LLM: 本函数只编排原领域已提交回执，不创建删除权威；调用方仍走原request/owner/transition并写同一maintenance.json。
+# 函数用途: 按item、字节、时间预算推进登记类别，未接线与未知结果保留为partial。
+def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: int = 512,
+                                  max_bytes: int = 8 * 1024 * 1024, max_seconds: float = 0.05,
+                                  should_yield=None) -> dict:
+    import math
+
+    from .home_retention import storage_kind_registry
+
+    require_schema_generation(previous)
+    kinds = {kind.kind: kind for kind in storage_kind_registry()}
+    if any(key not in kinds for key in adapters):
+        raise ValueError('unknown_storage_kind')
+    if (type(max_items) is not int or type(max_bytes) is not int
+            or max_items < 0 or max_bytes < 0
+            or type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or max_seconds < 0):
+        raise ValueError('invalid_maintenance_budget')
+    state = deepcopy(previous)
+    cursors = state.setdefault('cursors', {})
+    errors, completed = [], []
+    missing = [key for key in kinds if not callable(adapters.get(key))]
+    items, size = 0, 0
+    deadline = time.monotonic() + max_seconds if max_seconds else None
+    partial = False
+    ordered = tuple(kinds)
+    next_kind = state.get('next_kind', ordered[0])
+    if next_kind not in kinds:
+        raise ValueError('invalid_maintenance_kind_cursor')
+    start = ordered.index(next_kind)
+    for offset in range(len(ordered)):
+        index = (start + offset) % len(ordered)
+        key = ordered[index]
+        adapter = adapters.get(key)
+        if not callable(adapter):
+            continue
+        if ((max_items and items >= max_items) or (max_bytes and size >= max_bytes)
+                or (deadline is not None and time.monotonic() >= deadline)
+                or (should_yield is not None and should_yield())):
+            partial = True
+            next_kind = key
+            break
+        budget = {'items': max_items - items if max_items else None,
+                  'bytes': max_bytes - size if max_bytes else None, 'deadline': deadline}
+        next_kind = ordered[(index + 1) % len(ordered)]
+        try:
+            receipt = adapter(deepcopy(cursors.get(key, {})), budget)
+            if (not isinstance(receipt, dict) or not isinstance(receipt.get('cursor'), dict)
+                    or type(receipt.get('complete')) is not bool
+                    or any(type(receipt.get(field)) is not int or receipt[field] < 0 for field in ('items', 'bytes'))):
+                raise ValueError('invalid_storage_maintenance_receipt')
+            # 领域已确认提交后才发布来源位置；若返回前失败，旧游标仍承担恢复责任。
+            cursors[key] = deepcopy(receipt['cursor'])
+            items += receipt['items']
+            size += receipt['bytes']
+            if receipt['complete']:
+                completed.append(key)
+            else:
+                partial = True
+        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            errors.append({'kind': key, 'error_type': type(exc).__name__, 'side_effects_unknown': True})
+            partial = True
+            # 失败前可能已消耗额度；未知效果不能视为零并重新分给后续类别。
+            break
+    state.update({'schema_generation': 1, 'partial': partial or bool(errors) or bool(missing),
+                  'items': items, 'bytes': size, 'errors': errors, 'completed': completed,
+                  'unbound_kinds': missing, 'next_kind': next_kind})
+    return state

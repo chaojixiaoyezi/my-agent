@@ -1,3 +1,28 @@
+## 2026-10-29 e905 sol-2：局部实现与续办交接（不是整席完成）
+
+来源：`task-e905-sol-2.md` 与 `continue-e905-sol-2.md`；唯一工作树 `/tmp/wt-e905-sol-2`，分支 `opt-e905/sol-2`，基线 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。续办要求提交现有改动；本节不将聚焦测试通过外推为原任务全部功能已实现。
+
+- Worker：池、心跳和 reaper 共用单一 monotonic drain deadline；停止新领取但保留在途线程/claim，完成或失败确认未知不能报告 drained，也不把完成确认异常改写成业务 fail。入口按实际 unfinished 非零退出，部署样例应用 110 秒与 Pod 120 秒宽限配对。
+- R1 局部：新增 `optimization_contracts.py` 的版本栅栏及深复制 `_extra_fields` 往返；接到 Gateway 两种直接 JSON 写入/更新、Runtime 可写连接检查及维护状态入口。维护状态保留未知键。**尚未覆盖所有领域 DTO、写者、header stamping 及升级事务竞争，不代表全局 R1 可上线。**
+- 维护局部：31 类 `StorageKind` 元数据与显式 resolver 合同，预算调度片保存已确认游标、轮转避免饿死，异常后停止本片，拒绝非法/非有限预算；partial 状态允许下一拍续作。**真实领域 resolver/adapter 和默认 CLI/Gateway 调用尚未接齐，现有测试用假 adapter 验证框架，不证明 31 类实际完成清理。**
+- RD-01：无生产调用的 `common/rotating_log.py` 与其专用测试物理退役；对应私有写性质迁到真实 Gateway history append/同 ID replace，验证 0600/0700、内容与幂等性。RD-14 的本地停止逻辑已替换；其他删除项未因替代尚未落地而盲删。
+- 未实现：增量配额预留账、后台分批对账、Gateway 终态分段封存、全部删除清单、checkout verified-delta。`io/storage_transaction.py`、`owner_read_index.py`、`distributed_lock.py` 未列入第 2 节精确写集，未越界新建或删除，交集成者协调。
+
+续办单指定的以下命令于当前代码运行退出 0；另一次同四文件只收集确认 **58 个节点**。默认 addopts 隐藏汇总，运行日志为 `job-1793284190545299000.log`，全部进度到 `[100%]`。同一代码此前五文件组合（加 `test_queue_worker.py`）JUnit 为 **62 测试、0 失败/错误/跳过**；只复用该有效结果，不重新把旧产物说成新一轮执行。
+
+```bash
+python3 -B -m pytest agent_py_agent/tests/test_opt_maintenance_registry.py agent_py_agent/tests/test_config_migration_transaction.py agent_py_agent/tests/test_shutdown_total_deadline.py agent_py_agent/tests/test_private_writes_batch3.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol2
+ruff check --no-cache agent_py_agent scripts
+python3 -B scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+Ruff 输出 `All checks passed!`，导入边界输出 `[]`。新增测试覆盖真实临时 SQLite、真实线程和两个自有子进程：真实 SIGTERM 后 30 秒 handler 先 complete 再退出；2.2 秒 grace 超时非零退出、等待期间真实续租、进程退出后由原 `recover_stale` 和 `QueueWorker` 恢复完成。**未验证完整 `serve()` 的 sandbox/数据库角色装配、容器、Linux/Windows、外部用户链路。**
+
+开发阶段按红绿方式覆盖 R1 拒写、确认异常、RD-01 物理退役、维护预算及公平性；独审指出的未知效果后重复分配预算/非有限预算已用新增回归先失败再修正。独审只针对提供的代码片段，不是完整分支批准。
+
+原任务宽选择门禁 **未通过**：先因缺少已声明开发依赖中断收集，隔离环境补齐后长跑发现多处失败/错误并被停止；首错诊断运行 34 通过后失败于 `test_admin_self_gateway_diagnostics.py` 的真实 shell 用例。进一步观察到 `return_code=71`、`sandbox-exec: sandbox_apply: Operation not permitted`，仅此失败有明确沙箱拒绝证据；没有基线对照，不能说全部失败既有，也没有禁用沙箱或跳过失败项来造绿。续办改用上述聚焦门禁，不宣称原宽门禁通过。按续办要求提交前移除工作树临时缓存/隔离环境，原始输出由工具运行记录保留，缓存内 XML 不随提交分发。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

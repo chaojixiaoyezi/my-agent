@@ -242,23 +242,6 @@ class TestStoreTasksSummary:
         assert "- current_step: RUNNING" in text
 
 
-class TestRotatingLog:
-    def test_append_with_rotation_private_and_readable(self, tmp_path: Path) -> None:
-        from agent_py_agent.agent.common.rotating_log import (
-            RotatePolicy,
-            append_with_rotation,
-            total_line_count,
-        )
-
-        log = tmp_path / "logs" / "app.log"
-        append_with_rotation(log, "line1\n", RotatePolicy())
-        _assert_private_dir(log.parent)
-        _assert_private_file(log)
-        _assert_private_file(tmp_path / "logs" / "app.log.rotmeta.json")
-        assert total_line_count(log) == 1
-        assert log.read_text(encoding="utf-8") == "line1\n"
-
-
 class TestMessageRepairs:
     def test_queue_gateway_conversation_repair_private(self, tmp_path: Path) -> None:
         from agent_py_agent.agent.gateway_parts.request_history import (
