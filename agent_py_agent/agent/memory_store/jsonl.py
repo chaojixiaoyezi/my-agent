@@ -1,7 +1,7 @@
 # LLM: C仅存IO策略，原资源/锁/费用算法共用；formal成功比较清旧pending、archive与全部client清理末叶闭合，实际native先透传再到下一付费。
 # LLM: 新C snapshot flush只在成功search后由原活scope显式调用，锁出生及固定formal一次replace沿原末门；失败保pending，默认flush/apply_batch不变。
 # LLM: 本片只修原cache回收catch的四实际类型优先，原authority/记忆/删除/派生算法与权限保持不变。
-# 模块用途: 实现唯一JSONL长期记忆主链；原可选回收短门不把未结降级成零回收成功。
+# 模块用途: 实现唯一冷热长期记忆逻辑库；原可选回收短门不把未结降级成零回收成功。
 
 # LLM: C recent显式path只读与原Agent虚方法链共用唯一scanner/materializer，不构造仓库或增加写权。
 # LLM: 记忆权威链保持原schema/path；后台缓存回收只把最终派生缓存改写接原claim短门，完整keep扫描在T外。
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 """Owner 正式长期记忆 JSONL 权威仓库及其可重建检索投影。"""
 
-# LLM: memory.jsonl is the only formal long-term fact authority; indexes and ops never become recall authorities.
-# 模块用途: 提供长期事实的稳定 ID 新增/替换/删除、原子批处理、hard delete 与 active 召回。
+# LLM: 初始JSONL与迁移后同代分片是同一逻辑权威；根选择已提交快照，索引/ops永不成为正文权威。
+# 模块用途: 提供稳定ID事实新增/替换/删除、同代冷热提交、永久遗忘与授权召回。
 
 import json
 import logging
@@ -60,7 +60,7 @@ from .operations import (
 )
 
 if TYPE_CHECKING:
-    from ..local_storage import LocalSearchResult, LocalStore
+    from ..local_storage import LocalStore
     from ..user_space.owner_quota import OwnerQuotaEnforcer
     from .candidates import CandidateService
 
@@ -179,14 +179,12 @@ def _check_memory_quota(
     admission.check(changes)
 
 
-# LLM: 学习库（long_term JSONL）写入硬帽（设计 §3.5.1，用户 2026-10-08 决定）：按写入后的
-#   活跃正文总量（字符）判断，与 AGENTS 注入预算同口径（2 万字符）；超帽且非净缩减的写入在锁内
-#   拒绝并给结构化错误，已超帽的文件仍允许受控净缩减（清理才能进行）。
+# LLM: 仅保留旧调用方导入名；20k现在是默认热工作集预算，不再作为正式写入拒绝条件。
 MEMORY_LIBRARY_WRITE_CAP_CHARS = 20000
 
 
-# LLM: 结构化写入帽错误：稳定 code + 帽值与前后量；promotion/remember 等调用方据此转结构化结果。
-# 类用途: 表示一次 long_term 写入会让学习库超过写入硬帽且没有净缩减。
+# LLM: 历史调用方仍导入此异常；新正式写链永不抛出，避免跨席位导入断裂。
+# 类用途: 仅兼容识别旧回执，不能再用于拒绝新的长期记忆。
 class MemoryLibraryWriteCapExceeded(RuntimeError):
     code = "MEMORY_LIBRARY_WRITE_CAP_EXCEEDED"
 
@@ -206,30 +204,6 @@ class MemoryLibraryWriteCapExceeded(RuntimeError):
 # 类用途: 表示一次 replace/remove 的 expected_version 已落后于当前活动版本。
 class MemoryVersionConflict(RuntimeError):
     code = "MEMORY_VERSION_CONFLICT"
-
-
-# LLM: 帽按"写入后的状态"判断：before 必须在 _prepare_memory_operations 污染本批 active 视图前算好；
-#   after 用最终视图（active 已并入 committed，再按 committed 覆盖一遍）计算；净缩减永远放行。
-# 函数用途: 在原子替换前检查学习库写入硬帽，超帽且非净缩减时抛结构化错误。
-def _check_learning_library_write_cap(
-    before_chars: int,
-    active: dict[str, MemoryRecord],
-    committed: list[MemoryRecord],
-) -> None:
-    after = dict(active)
-    for record in committed:
-        if str(record.action or "add").strip().lower() == "remove":
-            after.pop(record.entry_id, None)
-        else:
-            after[record.entry_id] = record
-    after_chars = sum(len(str(record.content or "")) for record in after.values())
-    if after_chars <= MEMORY_LIBRARY_WRITE_CAP_CHARS or after_chars < before_chars:
-        return
-    raise MemoryLibraryWriteCapExceeded(
-        before_chars=before_chars,
-        after_chars=after_chars,
-        cap_chars=MEMORY_LIBRARY_WRITE_CAP_CHARS,
-    )
 
 
 # LLM: 正式记忆记录是带版本的事实事件；普通聊天不得自动转成该记录，替换/删除必须按原CAS。
@@ -332,12 +306,12 @@ class _JsonlMemoryIdentityMixin:
     """JSONL-backed memory store with optional LocalStore indexing.
 
     新手说明:
-    JSONL 是事实流水，LocalStore 是检索索引。
-    即使 SQLite 或 FTS5 出问题，JSONL 记忆也不应该因此写不进去。
+    JSONL 与同代根构成正式事实库，MemoryReadIndex 是可重建文本投影。
+    SQLite 或 FTS5 出问题不能使已提交事实丢失。
 
     字段说明:
     path: JSONL 记忆文件路径。
-    local_store: 可选 LocalStore；有它时 add/index_all/search 可以同步索引和优先搜索索引。"""
+    local_store: 仅保留旧副本精确删除和remember审计脱敏依赖，不供文本投影读写。"""
 
     # LLM: 构造器只绑定唯一 authority/ops/Candidate/index/quota；不得增加 legacy 双读路径。
     # 函数用途: 初始化当前 owner 正式长期记忆仓库及可选派生服务。
@@ -361,7 +335,7 @@ class _JsonlMemoryIdentityMixin:
         创建 JsonlMemory 时只准备文件路径和可选索引对象，不会读取全部记忆。
 
         path: JSONL 文件路径。
-        local_store: 可选 LocalStore，用于索引和搜索；为空时仍可正常写 JSONL。
+        local_store: 可选旧副本删除/审计脱敏依赖；不参与正式索引新增或召回。
         vector_identity: 可选向量空间身份（档案编号/线路协议/端点摘要/模型名，见 embedding_identity）；
             P14 用它裁决向量库快照，不一致、缺失或维度不符时语义召回退回关键词，不静默混用。
             None 是不管理身份的通用模式，只给测试和通用组件用；生产接线身份建不起来会直接关掉语义通道。
@@ -439,11 +413,11 @@ class _JsonlMemoryIdentityMixin:
         expires_at: float = 0.0,
         attributes: dict | None = None,
     ) -> MemoryRecord:
-        """追加一条记忆到 JSONL，并尽力同步索引到 LocalStore。
+        """提交一条正式记忆，超过字符热预算时同代转冷。
 
         新手说明:
-        这是写入记忆的主入口。先构造 MemoryRecord，再写入 JSONL，最后尝试写索引。
-        索引失败不会让记忆写入失败，因为 JSONL 才是主事实流水。
+        这是写入主入口。先构造MemoryRecord，再原子提交完整逻辑事实，最后尝试向量投影。
+        文本索引由显式有界维护追平，不再双写workspace。
         需要带结构化扩展字段（attributes，如教训的 trigger_conditions）时，
         自行构造 MemoryRecord 走 add_record。
 
@@ -456,7 +430,7 @@ class _JsonlMemoryIdentityMixin:
         返回刚写入的 MemoryRecord。
 
         副作用说明:
-        会追加写入 JSONL 文件；如果 local_store 存在，会尝试 upsert 一条索引记录。"""
+        会原子写入正式快照；有embedder时尝试同步派生向量。"""
 
         return self.add_record(
             MemoryRecord(
@@ -473,7 +447,7 @@ class _JsonlMemoryIdentityMixin:
 
     # LLM: 记忆写入的底层唯一落盘口(add 是它的便捷封装)。接受完整 MemoryRecord,
     #   attributes 等扩展字段(P5-2 trigger_conditions)由调用方在 record 上携带。
-    #   副作用:JSONL 原子提交 + LocalStore/向量派生索引更新(索引失败不改变权威事实)。
+    #   副作用:正式快照原子提交与向量派生更新；文本索引由独立有界维护追平。
     # 函数用途: 想写带结构化扩展字段的记忆时,构造好 MemoryRecord 从这里进。
     def add_record(self, record: MemoryRecord) -> MemoryRecord:
         record = _normalized_new_record(record)
@@ -587,11 +561,12 @@ class _JsonlMemoryMutationMixin:
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
     # LLM: C原扫描/配额/编码/脱敏门外，formal准确一次末写成功才compare-delete本次pending；ops/清理仍原顺序且native不洗成功。
     # LLM: 统一quota→受管policy→formal锁；晋升活锁精确复用，锁ID与治理学习开关每次重核，source不授豁免。
-    # 函数用途: 沿唯一原批量算法落正式事实，失败保真实已写与待落访问信号。
+    # LLM: 20k只触发同代转冷；永久删除ID禁止旧写者重加，冷热事实共用原CAS、来源与权限门。
+    # 函数用途: 沿唯一原批量算法提交完整冷热事实，失败保真实已写与待落访问信号。
     def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
 
-        The JSONL file remains the sole authority.  All operations are applied
+        The committed logical snapshot remains the sole authority. All operations are applied
         to an in-memory copy while the file lock is held; a bad operation
         aborts before any bytes are replaced.
         """
@@ -604,8 +579,12 @@ class _JsonlMemoryMutationMixin:
                 current_events = _strict_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)
                 active = {record.entry_id: record for record in working}
-                # 写入硬帽的 before 量：_prepare_memory_operations 会把本批记录并入 active 视图，必须先算。
-                before_chars = sum(len(str(record.content or "")) for record in active.values())
+                from .generation_manifest import StorageTombstones
+
+                barriers = StorageTombstones(self.path).load()
+                if any(str(raw.get("action") or "add").strip().lower() == "add" and raw.get("entry_id") in barriers
+                       for raw in operations if isinstance(raw, dict)):
+                    raise ValueError("MEMORY_TOMBSTONED_ID")
                 latest_events = {record.entry_id: record for record in current_events if record.action != "touch"}
                 committed = _prepare_memory_operations(
                     operations,
@@ -643,7 +622,6 @@ class _JsonlMemoryMutationMixin:
                     record for record in current_events if record.entry_id not in final_removed_ids
                 ]
                 pending_snapshot = dict(self._pending_access)
-                _check_learning_library_write_cap(before_chars, active, committed)
                 _write_compacted_memory(self, current_events, [*retained_events, *persisted], pending_snapshot, admission,
                                         keep_history=len(retained_events) + len(persisted) <= 128,
                                         redact_contents=removed_contents)
@@ -723,7 +701,6 @@ class _JsonlMemoryMutationMixin:
                         include_expired=True,
                     )
                 }
-                before_chars = sum(len(str(record.content or "")) for record in active.values())
                 for entry_id, (version, content_hash) in expected.items():
                     current = active.get(entry_id)
                     if current is None:
@@ -754,7 +731,6 @@ class _JsonlMemoryMutationMixin:
                     if record.entry_id not in expected
                 ]
                 tombstones = _persisted_remove_events(tombstones, current_events, set(expected))
-                _check_learning_library_write_cap(before_chars, active, tombstones)
                 _write_compacted_memory(self, current_events, [*retained, *tombstones], {}, admission)
         append_memory_purge_event(
             self.ops_path,
@@ -765,7 +741,7 @@ class _JsonlMemoryMutationMixin:
         self._after_commit_indexes(tombstones)
         return tombstones
 
-# LLM: 检索投影与生命周期治理分离:Search 只消费 active JSONL 并返回不含陈旧索引正文的召回。
+# LLM: 检索与治理分离；Search只消费完整冷热逻辑库，陈旧投影不能成为独立正文。
 # 类用途: 提供关键词/语义融合与 scope 内确定性召回。
 # LLM: C只在实际embedding前复用原scope纯当前校验；实际native先同对象穿出，不重搜/重嵌，原排序保持。
 # 类用途: 复用原JSONL与派生融合检索，显式访问flush归HTTP调用方。
@@ -826,17 +802,10 @@ class _JsonlMemorySearchMixin:
     #   空库记 none 且不发查询嵌入；非空库按“每次检索记一次”计入 S7 召回方式。
     # 函数用途: 返回不含陈旧索引正文的长期记忆召回结果。
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
-        """搜索记忆，优先使用 LocalStore 索引，再读取 JSONL 正式源。
+        """优先从owner内读索引选候选，回读同代正文并应用墓碑；缺索引从正式源检索。
 
-        新手说明:
-        有 LocalStore 时优先走 SQLite/FTS5。
-        没有索引、索引为空或索引临时失败时，继续从正式 JSONL 检索。
-
-        query: 搜索文本。
-        top_k: 最多返回多少条结果。
-
-        返回说明:
-        返回 MemoryRecord 列表。LocalStore 是检索索引，JSONL 是正式记忆源。"""
+        query是搜索文本，top_k是最多返回条数；返回当前有效的MemoryRecord。
+        旧workspace的memory投影不参与任何召回。"""
 
         candidate_limit = max(top_k * 4, top_k + 8)
         records, _load_errors = self.search_report(query, top_k=candidate_limit)
@@ -930,7 +899,8 @@ class _JsonlMemorySearchMixin:
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         if top_k <= 0:
             return [], _scoped_retrieval_facts(None, 0, self._semantic_status)
-        active = [record for record in self.all() if predicate(record)]
+        projected, coverage = self._search_tier_index(query, 1000) if self._embedder is None else (None, {"status": "semantic_full_scan"})
+        active = [record for record in (self.all() if projected is None else projected) if predicate(record)]
         retriever = None
         candidate_limit = max(top_k * 4, top_k + 8)
         # 混合检索:BM25 词面 + 向量语义 RRF 融合(治"换词就召不回"),替代原纯子串+自管 RRF;
@@ -969,7 +939,8 @@ class _JsonlMemorySearchMixin:
         if record_access:
             for record in selected:
                 self._note_access(record.entry_id)
-        return selected, _scoped_retrieval_facts(retriever, len(active), self._semantic_status)
+        facts = _scoped_retrieval_facts(retriever, len(active), self._semantic_status)
+        return selected, {**facts, "coverage": coverage}
 
     # LLM: 检索侧缓存只是派生索引，读取失败必须静默退化为"没有缓存"（现嵌），结果不变。
     #   先用权威向量库 memory_vectors.json 里已有的向量（_stored_vectors_for：身份对上、文本完全一致），剩下的才查正文哈希缓存；
@@ -1087,28 +1058,24 @@ class _JsonlMemorySearchMixin:
     def search_report(self, query: str, top_k: int = 5) -> tuple[list[MemoryRecord], list[dict]]:
         """搜索记忆并保留可恢复的索引读取错误。
 
-        LocalStore 只是检索索引，不是记忆事实源。索引坏了时继续从当前 owner JSONL
-        检索，但把错误报告给调用方，避免上层误判为“没有记忆”。
+        只查询owner读索引或同代逻辑权威，索引未追平时报告coverage和实际降级，
+        不回退旧workspace或把索引不可用说成没有记忆。
         """
 
         candidate_limit = max(top_k * 4, top_k + 8)
-        indexed, load_errors = self._search_local_store_report(query, candidate_limit)
+        projected, coverage = self._search_tier_index(query, candidate_limit)
+        if projected is not None:
+            diagnostics = ([{"context": "memory_store.read_index", "error_type": "MEMORY_READ_INDEX_TRUNCATED",
+                             "coverage": coverage}] if coverage.get("result_truncated") else [])
+            return _rerank_memory_records(projected, query, top_k), diagnostics
+        load_errors = []
+        if coverage["status"] != "unmigrated":
+            load_errors.append({"context": "memory_store.read_index", "error_type": "MEMORY_READ_INDEX_PENDING",
+                                "coverage": coverage, "fallback": "committed_authority_scan"})
         active_records = self.all()
-        active_by_id = {record.entry_id: record for record in active_records if record.entry_id}
-        # Index rows are projections only. Return the current source object and reject any
-        # missing/deleted ID so an old index cannot resurrect a removed or replaced body.
-        indexed = [
-            active_by_id[record.entry_id]
-            for record in indexed
-            if record.entry_id in active_by_id
-        ]
         lexical = _MemoryLexicalQuery(query)
         source_records = _search_memory_records(active_records, query, candidate_limit, lexical=lexical)
-        merged = _merge_search_result_groups(
-            (indexed, source_records),
-            top_k=candidate_limit,
-        )
-        return _rerank_memory_records(merged, query, top_k, lexical=lexical), load_errors
+        return _rerank_memory_records(source_records, query, top_k, lexical=lexical), load_errors
 
 
 # LLM: 生命周期治理与检索投影分离:Lifecycle 只做访问信号、总量闸与健康快照,不直接召回。
@@ -1118,8 +1085,8 @@ class _JsonlMemorySearchMixin:
 # LLM: C仍原condense/访问算法，archive先提交的partial保留，不新建恢复表或改变user_explicit保留。
 # 类用途: 管理原长期记忆访问元数据与配额治理。
 class _JsonlMemoryLifecycleMixin:
-    # LLM: all 只 materialize 当前 active、未过期的正式记忆，绝不合并 Daily/Candidate/ops。
-    # 函数用途: 读取当前 owner 可召回的全部长期事实。
+    # LLM: all是同代active+cold减去永久墓碑的逻辑全集，绝不合并Daily/Candidate/ops。
+    # 函数用途: 读取当前owner全部已承诺且未过期的长期事实。
     def all(self) -> list[MemoryRecord]:
         """从 JSONL 文件读取全部记忆记录。
 
@@ -1129,12 +1096,55 @@ class _JsonlMemoryLifecycleMixin:
         这个方法没有输入参数。
 
         返回说明:
-        返回当前 owner 唯一正式长期记忆文件的 active MemoryRecord 列表。
+        返回当前owner同代active+cold扣除永久墓碑和过期记录后的完整逻辑集合。
 
         异常说明:
-        如果某一行不是合法 JSON，目前会由 json.loads 抛错；后续如需容错可加 read audit。"""
+        初始旧格式保留原逐行容错；迁移后根、分片摘要或永久删除账损坏会拒绝读取。"""
 
         return self._read_memory_file(self.path)
+
+    # LLM: 配置只读唯一memory_policy.json，坏政策不降级默认；构造本身不迁移或写配置。
+    # 函数用途: 取得本库实际生效的类型化库存及注入预算。
+    def memory_policy(self):
+        from ..common.nofollow_fs import read_text_beneath
+        from .generation_manifest import MemoryPolicyV2
+
+        root = self.path.parents[2] if tuple(self.path.parts[-3:]) == ("memory", "long_term", "memory.jsonl") else self.path.parent
+        raw = read_text_beneath(root, ("memory_policy.json",))
+        return MemoryPolicyV2.from_payload(json.loads(raw) if raw is not None else {})
+
+    # LLM: 物理热层不是事实全集；公开检索、删除和CAS必须继续使用all的逻辑库。
+    # 函数用途: 提供热工作集的单独视图供预算检查与维护。
+    def active_records(self):
+        from .generation_manifest import MemoryGenerationStore
+
+        events = MemoryGenerationStore(self.path).events(tier="active")
+        return self.all() if events is None else _materialize_memory_events(events)
+
+    # LLM: 迁移不改正文/version，默认预留20%热空间；同代根已存在时幂等，不对真实库自动执行。
+    # 函数用途: 预演或执行旧库的一次性冷热分层。
+    def migrate_tiers(self, *, dry_run=False):
+        from ._jsonl_maintenance import migrate_tiers
+
+        return migrate_tiers(self, dry_run=dry_run)
+
+    # LLM: 只供已授权恢复流程，旧备份不能覆盖当前墓碑或同ID更新版本。
+    # 函数用途: 合并备份事实并应用永久遗忘屏障后发布新代。
+    def restore_tier_records(self, records):
+        from ._jsonl_maintenance import restore_tier_records
+
+        return restore_tier_records(self, records)
+
+    # LLM: 显式维护才创建SQLite；沿原quota→policy→formal锁序，一次至多1000条且水位同事务提交。
+    # 函数用途: 有界追平冷热派生读索引，重启后沿耐久游标续作。
+    def rebuild_read_index(self, *, batch_size=1000):
+        from .read_index import MemoryReadIndex
+
+        owner = self.path.parents[2] if len(self.path.parents) >= 3 else self.path.parent
+        with _quota_admission(self.quota_enforcer) as admission, _managed_policy_scope(owner):
+            with self._locked_memory():
+                return MemoryReadIndex(self.path, coordinator_io=self.coordinator_io).rebuild_step(
+                    batch_size=batch_size, admission=admission)
 
     # LLM: 兼容仅需记录的维护调用方；破坏性跨阶段操作使用带source_opened的快照，不以空列表推断缺库。
     # 函数用途: 读取严格维护快照中的全部活跃事实，保留普通召回all的兼容语义。
@@ -1149,7 +1159,10 @@ class _JsonlMemoryLifecycleMixin:
             MaintenanceSnapshot,
             read_maintenance_objects,
         )
+        from .generation_manifest import MemoryGenerationStore
 
+        if MemoryGenerationStore(self.path).manifest() is not None:
+            return MaintenanceSnapshot(_materialize_memory_events(_strict_memory_events(self.path)), True)
         _payloads, source_opened = read_maintenance_objects(self.path, require_source=require_source)
         events = _strict_memory_events(self.path)
         return MaintenanceSnapshot(_materialize_memory_events(events), source_opened)
@@ -1208,13 +1221,8 @@ class _JsonlMemoryLifecycleMixin:
         _consume_pending_snapshot(self, snapshot)
         return len(pending)
 
-    # LLM: 总量闸只淘汰"非用户明确要求"的冷条目;user_explicit 永不因用量淘汰(用户显式记忆
-    # 是硬事实),且单次最多移除 25%——冷启动后仍有渐进收缩空间,不一次性清空。
-    # 函数用途: 超总量上限时,把最久未被访问的非 user_explicit 条目移入 archive 并移除。
-    # LLM: C仅archive锁FD出生及现成raw末写入Root，原选择/比例/顺序不变；archive成功后formal失败保真实partial。
-    # LLM: 浓缩排除管理员锁ID；quota→policy先核授权再写archive，正式删除重入原guard并复用同一准入。
-    # LLM: 归档整写前也严格校验旧归档，坏行不被覆盖或静默解释成空历史。
-    # 函数用途: 保留原归档后删除治理和管理员锁保护。
+    # LLM: 原参数仅保留调用形状，条数/比例不再决定遗忘；只按字符预算同代转冷，返回搬迁条目而非删除事件。
+    # 函数用途: 超热工作集预算时无损分层，彻底替代archive后remove的旧算法。
     def condense(
         self,
         *,
@@ -1222,53 +1230,12 @@ class _JsonlMemoryLifecycleMixin:
         target_records: int = 1200,
         max_ratio: float = 0.25,
     ) -> list[MemoryRecord]:
-        from ..user_space.managed_user_governance import (
-            managed_locked_memory_ids,
-            managed_memory_batch_guard,
-        )
-
-        active = self.all()
-        if len(active) <= max_records:
+        active = self.active_records()
+        if sum(len(record.content) for record in active) <= self.memory_policy().active_library_max_chars:
             return []
-        locked_ids = managed_locked_memory_ids(self.path)
-        removable = [
-            record
-            for record in active
-            if str((record.attributes or {}).get("origin") or "") != "user_explicit" and record.entry_id not in locked_ids
-        ]
-        if not removable:
-            return []
-        excess = len(active) - target_records
-        cap = max(1, int(len(active) * max_ratio))
-        to_remove = sorted(
-            removable,
-            key=lambda item: (
-                float(item.last_accessed_at or 0.0)
-                or float(item.updated_at or 0.0)
-                or float(item.created_at or 0.0),
-                item.entry_id,
-            ),
-        )[: min(excess, cap)]
-        if not to_remove:
-            return []
-        # 先入 archive 账本,再在主文件移除——archive 多写一次无害,主文件移除失败可下次重试。
-        archive_path = self.path.with_name(self.path.name + ".archive.jsonl")
-        operations = [{"action": "remove", "entry_id": record.entry_id, "source": "condense:quota",
-                       "expected_version": record.version} for record in to_remove]
-        with _quota_admission(self.quota_enforcer) as admission:
-            with managed_memory_batch_guard(self.path, operations):
-                with locked_json_path(archive_path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
-                    _strict_memory_events(archive_path)
-                    archived_text = "".join(json.dumps(_record_payload(record), ensure_ascii=False) + "\n" for record in to_remove)
-                    if archive_path.exists():
-                        archived_text = archive_path.read_text(encoding="utf-8") + archived_text
-                    if self.coordinator_io:
-                        _write_coordinator_memory_raw(archive_path, archived_text)
-                    else:
-                        write_private_text_file_atomic_unlocked(archive_path, archived_text)
-            # guard不是可重入锁；释放后由原apply_batch重核当前策略，quota准入始终复用。
-            self.apply_batch(operations, _admission=admission)
-        return to_remove
+        self.migrate_tiers()
+        remaining = {record.entry_id for record in self.active_records()}
+        return [record for record in active if record.entry_id not in remaining]
 
     # LLM: 过期 active 记录仍可能含需迁移/清除的正文；此入口只供 retention、migration 和 doctor，召回不得使用。
     # 函数用途: 返回包括已过期但尚未删除的全部 active 长期记忆。
@@ -1278,27 +1245,33 @@ class _JsonlMemoryLifecycleMixin:
             include_expired=True,
         )
 
-    # LLM: 健康快照只返回计数/错误码/索引状态；禁用通道的清理错误也要可见，不能泄露正文或路径。
-    # 函数用途: 为 capabilities/doctor 投影长期记忆运行状态。
+    # LLM: 同代库只从根和分片统计；字段active_total保留逻辑可见数，另列物理cold_total，不暴露正文路径。
+    # 函数用途: 为capabilities/doctor提供完整冷热健康与派生索引水位。
     def runtime_snapshot(self) -> dict[str, object]:
         """Project owner-local Memory health without exposing paths or content."""
 
         try:
             from ._jsonl_maintenance import require_maintenance_event
+            from .generation_manifest import MemoryGenerationStore
+            from .read_index import MemoryReadIndex
 
+            store = MemoryGenerationStore(self.path)
+            generation = store.manifest()
             report = read_jsonl_objects_report(
                 self.path,
                 context="memory_store.runtime_snapshot",
-            )
+            ) if generation is None else None
             events: list[MemoryRecord] = []
             invalid_records = 0
-            for payload in report.records:
+            for payload in report.records if report is not None else ():
                 record = _memory_record_from_obj(payload)
                 if record is None:
                     invalid_records += 1
                     continue
                 require_maintenance_event(record)
                 events.append(_with_legacy_identity(record))
+            if generation is not None:
+                events = store.events(generation)
             active = _materialize_memory_events(events)
         except Exception as exc:
             return {
@@ -1317,12 +1290,12 @@ class _JsonlMemoryLifecycleMixin:
         error_codes = sorted(
             {
                 str(error.get("error_type") or "MEMORY_LOAD_ERROR")
-                for error in report.load_errors
+                for error in (report.load_errors if report is not None else ())
             }
         )
         if invalid_records:
             error_codes.append("MemoryRecordValidationError")
-        load_error_count = len(report.load_errors) + invalid_records
+        load_error_count = (len(report.load_errors) if report is not None else 0) + invalid_records
         return {
             "state": "available",
             "health": "degraded" if load_error_count or self._semantic_errors or self._semantic_status.get("state") == "degraded" else "healthy",
@@ -1331,7 +1304,9 @@ class _JsonlMemoryLifecycleMixin:
             "event_total": len(events),
             "load_error_count": load_error_count,
             "load_error_codes": sorted(set(error_codes)),
-            "text_index": "configured" if self.local_store is not None else "unconfigured",
+            "text_index": "configured" if generation is not None else "unconfigured",
+            "cold_total": generation["cold_total"] if generation is not None else 0,
+            "read_index_coverage": MemoryReadIndex(self.path).coverage(generation),
             "semantic_index": "configured" if self._embedder is not None else "unconfigured",
             "semantic_recall": dict(self._semantic_status),
         }
@@ -1415,8 +1390,8 @@ def _semantic_unavailable_reason(semantic_status: dict[str, str]) -> str:
     return code.removeprefix("memory_") or "embedder_unavailable"
 
 
-# LLM: 此层只读active权威并维护可重建检索投影；派生索引和缓存都不成为正式记忆权威。
-# 类用途: 从 active JSONL 读取并执行关键词、FTS 与可选向量召回。
+# LLM: 此层只读完整冷热逻辑库并维护可重建投影；派生索引和缓存都不能成为事实权威。
+# 类用途: 从同代JSONL分片读取事实并执行关键词、FTS和可选向量召回。
 # LLM: C各client可达writer/lock出生接当前scope，native先传播；未接管理维护接口不据此称可执行。
 # 类用途: 复用原正式召回与投影，不赋予索引独立权威。
 class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixin, JsonlMemoryIndexMixin):
@@ -1529,38 +1504,19 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         except Exception:
             pass
 
-    # LLM: 全量建索引只读完整active authority；reset额外持正式写入锁，require_source保留调用方已见源的事实。
-    # 函数用途: 从正式长期记忆重建 LocalStore/FTS，坏源或已知源消失不清空；锁外回收避免自锁。
+    # LLM: 显式维护只操作owner内读索引，先严格预检再迁移/重建；一次至多1000条，完整性另见coverage。
+    # 函数用途: 推进正式记忆派生索引并返回实际已覆盖条数，不再清空或重写workspace。
     def index_all(self, *, reset: bool = False, require_source: bool = False) -> int:
-        """把现有 JSONL 记忆补写到 LocalStore 索引。
-
-        新手说明:
-        这个命令适合第一次升级到 SQLite/FTS5 后运行一次。
-        如果没有 local_store，就不写文本索引，但仍尝试回收孤儿缓存。
-
-        reset=True 时在正式写入锁内完整读取后才清空并重建派生索引；默认仅增量补写。
-
-        返回说明:
-        返回成功尝试索引的 owner 长期记忆记录数量。
-
-        副作用说明:
-        会调用 LocalStore.upsert_record；不会改写 JSONL。"""
-
-        if not self.local_store:
-            # 即便没配 LocalStore，正文哈希缓存仍可能积累孤儿键；回收不依赖 FTS 索引。
-            self._retain_text_cache_keys()
-            return 0
-        count = 0
         if reset:
             from ._jsonl_maintenance import reset_local_index
 
-            count = reset_local_index(self, require_source=require_source)
-        else:
-            for record in self._maintenance_records():
-                self._index_record(record)
-                count += 1
+            return reset_local_index(self, require_source=require_source)
+        with self._locked_memory():
+            self._maintenance_snapshot(require_source=require_source)
+        self.migrate_tiers()
+        progress = self.rebuild_read_index()
         self._retain_text_cache_keys()
-        return count
+        return int(progress.get("indexed_records") or 0)
 
     # LLM: 维护与正式提交统一按活跃index_text回收全部指纹，不依赖embedder；软写失败必须可见。
     # 函数用途: 在权威锁内回收孤儿缓存，成功后只清除本项健康错误。
@@ -1832,14 +1788,6 @@ def _record_vec_id(record: MemoryRecord) -> str:
     return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-# LLM: 精确去重键只做 Unicode 规范化，不用相似度合并不同事实。
-# 函数用途: 生成 legacy 召回结果的稳定去重键。
-def _memory_record_key(record: MemoryRecord) -> tuple[str, str, str, float]:
-    # content 走 nfc 规范化(审计 #20):NFD/NFC 等价的同一条记忆(macOS 文件名/不同输入法)归一后
-    # 同键去重,不再因码点形式差异重复堆积。用 nfc 而非 fold_key——内容去重保大小写/全角语义,只统一编码形式。
-    return (record.role, record.kind, nfc(record.content), float(record.created_at or 0.0))
-
-
 # LLM: legacy ID 来自完整结构化事件 hash，必须跨重启稳定且不依赖文件行号。
 # 函数用途: 为没有 entry_id 的旧正式记忆派生只读稳定身份。
 def _legacy_entry_id(record: MemoryRecord) -> str:
@@ -1917,19 +1865,25 @@ def read_memory_records_from_path(path: str | Path) -> list[MemoryRecord]:
 
 
 # LLM: 这是原_read_memory_events唯一scanner，下移原字节逻辑；缺失/坏行/读取report语义保持，不能合并候选或触碰缓存。
-# LLM: 容错读保持，归档先于热文件重放，不做写入或自动修复。
-# 函数用途: 读取同owner墓碑归档及热事件，跳过坏行。
+# LLM: 已迁移库只读同代根；旧库保留逐行容错且叠加永久墓碑，坏根不回退旧正文。
+# 函数用途: 为显式path及实例召回统一读取冷热逻辑库。
 def _read_memory_events_from_path(path: Path) -> list[MemoryRecord]:
-    # 逐行容错:坏 JSON 行跳过并上报(复用 json_io 健壮读取器),未知顶层字段过滤——
-    # 单坏行/旧版本写的新字段记录不再崩掉整条记忆召回(审计 #11,多版本滚动升级的数据可用性)。
+    from .generation_manifest import GENERATION_SCHEMA, MemoryGenerationStore
+
+    store = MemoryGenerationStore(path)
+    committed = store.events()
+    if committed is not None:
+        return committed
     records: list[MemoryRecord] = []
     for source in (_tombstone_path(path), path):
         report = read_jsonl_objects_report(source, context="memory_store.read_memory_file")
         for obj in report.records:
+            if obj.get("schema_version") == GENERATION_SCHEMA:
+                raise MemoryAuthorityCorruptError("MEMORY_AUTHORITY_UNREADABLE")
             record = _memory_record_from_obj(obj)
             if record is not None:
                 records.append(_with_legacy_identity(record))
-    return records
+    return [*records, *store.tombstones.load().values()]
 
 
 # LLM: materialization 只按 entry/version/action/expiry 计算当前态，新时间不会替代不同 entry 的事实。
@@ -2372,51 +2326,6 @@ def _select_diverse_memory_records(
     return selected
 
 
-# LLM: 分组按调用方优先级合并并使用精确记录键去重，不做语义覆盖。
-# 函数用途: 合并多个检索投影并保持确定性先后顺序。
-def _merge_search_result_groups(groups: tuple[list[MemoryRecord], ...], *, top_k: int) -> list[MemoryRecord]:
-    records: list[MemoryRecord] = []
-    seen: set[tuple[str, str, str, float]] = set()
-    for group in groups:
-        _append_unique_records(records, seen, group, top_k=top_k)
-        if len(records) >= top_k:
-            return records
-    return records
-
-
-# LLM: helper 只追加尚未出现的精确键，并严格遵守 top_k 上限。
-# 函数用途: 向检索结果追加一组不重复记录。
-def _append_unique_records(
-    records: list[MemoryRecord],
-    seen: set[tuple[str, str, str, float]],
-    group: list[MemoryRecord],
-    *,
-    top_k: int,
-) -> None:
-    for record in group:
-        key = _memory_record_key(record)
-        if key in seen:
-            continue
-        seen.add(key)
-        records.append(record)
-        if len(records) >= top_k:
-            return
-
-
-# LLM: 去重只按精确规范化键，不能把相似但 scope/事实不同的内容合并。
-# 函数用途: 对 legacy 检索记录做稳定去重。
-def _dedupe_memory_records(records: list[MemoryRecord]) -> list[MemoryRecord]:
-    deduped: list[MemoryRecord] = []
-    seen: set[tuple[str, str, str, float]] = set()
-    for record in records:
-        key = _memory_record_key(record)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(record)
-    return deduped
-
-
 # LLM: 只消费当次真实scope；准确目录/FD出生及已批准付费前纯当前校验复用此门，不储存callback。
 # 函数用途: 为C原JSONL固定本地叶逐次核对来源，网络/扫描/锁等待不入Root。
 def _coordinator_memory_write(operation):
@@ -2444,11 +2353,18 @@ def _tombstone_path(path: Path) -> Path:
     return path.with_name(name)
 
 
-# LLM: 两文件指纹均含dev/ino/mtime_ns/ctime_ns/size；原地等长改写恢复mtime也失效，IO错误不伪装缺失。
-# 函数用途: 取正式库和墓碑归档的同进程缓存代次。
+# LLM: 指纹覆盖根、永久墓碑和引用分片；等长原地改写仍失效，坏根不回退旧库。
+# 函数用途: 获取完整逻辑库的缓存身份。
 def _memory_stamp(path: Path) -> tuple:
+    from .generation_manifest import MemoryGenerationStore
+
+    store = MemoryGenerationStore(path)
     stamps = [str(path.absolute())]
-    for source in (path, _tombstone_path(path)):
+    sources = [path, _tombstone_path(path), store.manifest_path, store.tombstones.path]
+    root = store.manifest()
+    if root:
+        sources.extend(path.parent / item["path"] for item in root["segments"])
+    for source in sources:
         try:
             stat = source.stat()
             stamps.append((stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
@@ -2463,11 +2379,16 @@ class MemoryAuthorityCorruptError(ValueError):
     code = "MEMORY_AUTHORITY_UNREADABLE"
 
 
-# LLM: 写调用方须持formal锁；严格源缺失/不可读与坏JSON/schema统一报权威不可读，不创建空库或清pending。
-# 函数用途: 严格读取全部前像事件，保护重写不丢未解析行。
+# LLM: 迁移后验证根和全部分片；旧小库仍严格验证前像，缺失根不回退旧正文。
+# 函数用途: 严格读取完整冷热事件，保护重写不丢冷事实。
 def _strict_memory_events(path: Path, *, require_source: bool = False) -> list[MemoryRecord]:
     from ._jsonl_maintenance import require_maintenance_event
+    from .generation_manifest import GENERATION_SCHEMA, MemoryGenerationStore
 
+    store = MemoryGenerationStore(path)
+    committed = store.events()
+    if committed is not None:
+        return committed
     events = []
     if require_source:
         try:
@@ -2479,6 +2400,8 @@ def _strict_memory_events(path: Path, *, require_source: bool = False) -> list[M
         if report.load_errors:
             raise MemoryAuthorityCorruptError("MEMORY_AUTHORITY_UNREADABLE")
         for payload in report.records:
+            if payload.get("schema_version") == GENERATION_SCHEMA:
+                raise MemoryAuthorityCorruptError("MEMORY_AUTHORITY_UNREADABLE")
             record = _memory_record_from_obj(payload)
             try:
                 require_maintenance_event(record)
@@ -2490,7 +2413,7 @@ def _strict_memory_events(path: Path, *, require_source: bool = False) -> list[M
             except (TypeError, ValueError) as exc:
                 raise MemoryAuthorityCorruptError("MEMORY_AUTHORITY_UNREADABLE") from exc
             events.append(_with_legacy_identity(record))
-    return events
+    return [*events, *store.tombstones.load().values()]
 
 
 # LLM: 只保留最后semantic版本并合并访问最大值及历史hash；不按热度淘汰任何active（包括managed锁定及过期条目）。
@@ -2528,9 +2451,20 @@ def _memory_events_text(events) -> str:
 # LLM: 必须持formal锁；归档只包含preimage已提交删除，先fsync归档再原子发布热文件，任一点崩溃均可归档→热重放。
 #   新删除只在热文件正式提交，绝不提前写归档；小于128条可保留批次历史，touch始终折叠。
 #   配额包括两文件且先于原工具账本脱敏，不在锁内申请quota/policy。
-# 函数用途: 归档历史墓碑并压实热库，成功之后调用方才能消费pending。
+# LLM: 热预算只触发同代转冷；旧小库沿原压实协议，任何成功后才消费pending。
+# 函数用途: 提交完整正式快照和访问信号，不产生冷热半代。
 def _write_compacted_memory(memory, history, events, pending, admission, *, commit=None, keep_history=False,
                             redact_contents=None):
+    from .generation_manifest import MemoryGenerationStore
+
+    current = _compact_memory_events(events, pending)
+    budget = memory.memory_policy().active_library_max_chars
+    if MemoryGenerationStore(memory.path).manifest() is not None or sum(len(r.content) for r in current) > budget:
+        from ._jsonl_maintenance import publish_tier_generation
+
+        publish_tier_generation(memory, current, admission=admission, commit=commit,
+                                redact_contents=redact_contents, max_chars=budget)
+        return
     archived = _historical_tombstones(history)
     archive_by_id = {record.entry_id: _record_payload(record) for record in archived}
     compacted = [record for record in _compact_memory_events(events, pending)

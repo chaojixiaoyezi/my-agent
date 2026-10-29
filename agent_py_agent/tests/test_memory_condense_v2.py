@@ -1,9 +1,11 @@
+# LLM: 访问信号与冷热预算共用真实临时库，验证转层不改正文或生成删除。
+# 模块用途: 回归记忆访问落盘、字符预算分层及晋升后的维护调用。
 from __future__ import annotations
 
 """P2 long_term 访问信号(touch 事件)与总量闸(condense 浓缩)的确定性测试。
 
-覆盖:召回命中写 last_accessed_at、浓缩只淘汰非 user_explicit 冷条目、
-archive 账本、单次 ≤25% 上限、promotion 写路径自动触发浓缩。
+覆盖:召回命中写 last_accessed_at、字符预算只调整冷热位置而不遗忘、
+旧条数/比例参数不再触发删除、promotion 写路径自动触发浓缩。
 """
 
 from pathlib import Path
@@ -90,7 +92,9 @@ def test_scoped_candidate_replaced_or_out_of_scope_is_not_touched(tmp_path: Path
     assert memory.flush_access_events() == 0
 
 
-def test_condense_removes_coldest_non_user_explicit_only(tmp_path: Path) -> None:
+# LLM: 旧max_records不能再触发业务删除；四个已承诺事实均必须保留原版本。
+# 函数用途: 验证条数预算已被字符热工作集预算替代。
+def test_condense_does_not_use_legacy_record_count_to_forget(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     _fact(memory, "memory-a", "事实一。", origin="user_explicit")
     _fact(memory, "memory-b", "事实二。", origin="user_explicit")
@@ -98,21 +102,26 @@ def test_condense_removes_coldest_non_user_explicit_only(tmp_path: Path) -> None
     _fact(memory, "memory-d", "工具记忆。", origin="tool_verified")
 
     removed = memory.condense(max_records=3, target_records=2)
-    assert [record.entry_id for record in removed] == ["memory-c"]
-    assert [record.entry_id for record in memory.all()] == ["memory-a", "memory-b", "memory-d"]
-    # user_explicit 永不因用量淘汰。
-    assert all(record.entry_id != "memory-a" for record in removed)
+    assert removed == []
+    assert [record.entry_id for record in memory.all()] == ["memory-a", "memory-b", "memory-c", "memory-d"]
+    assert all(record.version == 1 for record in memory.all())
+    assert memory.committed_removal_record("memory-c") is None
 
 
-def test_condense_archives_removed_records(tmp_path: Path) -> None:
+# LLM: 跨字符热预算后仍保留全文，冷层由同代根选择而非archive+remove。
+# 函数用途: 验证自动转冷不再产生旧归档删除账。
+def test_condense_preserves_cold_records_without_legacy_archive(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
-    _fact(memory, "memory-a", "事实一。", origin="user_explicit")
-    _fact(memory, "memory-c", "待淘汰正文。", origin="model_inferred")
+    _fact(memory, "memory-a", "事实一。" * 3000, origin="user_explicit")
+    _fact(memory, "memory-c", "待淘汰正文。" * 2000, origin="model_inferred")
 
     memory.condense(max_records=1, target_records=1)
     archive = tmp_path / "memory.jsonl.archive.jsonl"
-    assert archive.exists()
-    assert "待淘汰正文" in archive.read_text(encoding="utf-8")
+    assert not archive.exists()
+    assert {record.entry_id for record in memory.all()} == {"memory-a", "memory-c"}
+    assert (tmp_path / "memory.jsonl.manifest.json").exists()
+    assert sum(len(record.content) for record in memory.active_records()) <= 20000
+    assert memory.committed_removal_record("memory-a") is None
 
 
 def test_condense_noop_within_limit(tmp_path: Path) -> None:
@@ -125,7 +134,9 @@ def test_condense_noop_within_limit(tmp_path: Path) -> None:
     assert not (tmp_path / "memory.jsonl.archive.jsonl").exists()
 
 
-def test_condense_caps_removal_at_ratio(tmp_path: Path) -> None:
+# LLM: 比例参数不再授权删除；小于字符预算的事实保持完整。
+# 函数用途: 验证旧淘汰比例参数仅保留调用兼容。
+def test_condense_ignores_legacy_removal_ratio(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     for index in range(10):
         _fact(
@@ -137,10 +148,11 @@ def test_condense_caps_removal_at_ratio(tmp_path: Path) -> None:
     removed = memory.condense(
         max_records=5,
         target_records=0,
-        max_ratio=0.25,  # 10 条 → 单次最多移除 2 条
+        max_ratio=0.25,
     )
-    assert len(removed) == 2
-    assert len(memory.all()) == 8
+    assert removed == []
+    assert len(memory.all()) == 10
+    assert all(record.version == 1 for record in memory.all())
 
 
 def test_condense_empty_and_all_user_explicit_noop(tmp_path: Path) -> None:

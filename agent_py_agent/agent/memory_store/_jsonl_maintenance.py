@@ -83,21 +83,199 @@ class AuthorityPreflightError(ValueError):
     pass
 
 
-# LLM: 全表reset共用正式锁；require_source来自预检实际读取，不用独立exists猜测；不重复取锁。
-# 函数用途: 在锁内重读并保留已见源要求，验证完才reset及投影；锁外另做缓存回收。
+# LLM: reset先预检逻辑权威；旧格式才复核原文件存活，已迁移库以根/分片/永久账为准，不触碰workspace。
+# 函数用途: 在权威校验后清空本库派生索引，再按有界维护入口追平。
 def reset_local_index(memory, *, require_source=False, rebuild_memory=True):
-    from ..common.json_io import locked_json_path
+    from .generation_manifest import MemoryGenerationStore
+    from .read_index import MemoryReadIndex
 
-    with locked_json_path(memory.path):
+    with memory._locked_memory():
         try:
             snapshot = memory._maintenance_snapshot(require_source=require_source)
-            records = snapshot.records
-            if require_source or snapshot.source_opened:
+            if (require_source or snapshot.source_opened) and MemoryGenerationStore(memory.path).manifest() is None:
                 memory.path.stat()
         except (OSError, ValueError, TypeError) as exc:
             raise AuthorityPreflightError('MEMORY_AUTHORITY_UNREADABLE') from exc
-        memory.local_store.reset()
-        if rebuild_memory:
-            for record in records:
-                memory._write_record_projection(record)
-        return len(records) if rebuild_memory else 0
+        MemoryReadIndex(memory.path, coordinator_io=memory.coordinator_io).invalidate()
+    return memory.index_all(require_source=require_source) if rebuild_memory else 0
+
+
+# LLM: 复用唯一quota→policy→formal锁序；dry-run不创建锁或代次文件，清单已存在时幂等。
+# 函数用途: 将旧正式库按字符一次性分层，旧archive只隔离保存不猜可见性。
+def migrate_tiers(memory, *, dry_run=False):
+    from ..common.nofollow_fs import read_text_beneath
+    from .generation_manifest import MemoryGenerationStore, partition_records
+    from .jsonl import (
+        _managed_policy_scope,
+        _materialize_memory_events,
+        _quota_admission,
+        _strict_memory_events,
+    )
+
+    store = MemoryGenerationStore(memory.path)
+
+    # LLM: 只从当前完整前像生成预演，不写备份或索引；正式执行在原锁内重读。
+    # 函数用途: 计算同一份迁移结果及隔离材料。
+    def prepare():
+        root = store.manifest()
+        if root:
+            return root, None, None
+        events = _strict_memory_events(memory.path)
+        live = _materialize_memory_events(events, include_expired=True)
+        live_ids = {record.entry_id for record in live}
+        tombstones = {record.entry_id: record for record in events
+                      if record.action == "remove" and record.entry_id not in live_ids}
+        budget = memory.memory_policy().active_library_max_chars * 4 // 5
+        budget = max(1, budget)
+        from ..user_space.managed_user_governance import managed_locked_memory_ids
+
+        pinned = managed_locked_memory_ids(memory.path)
+        active, cold = partition_records(live, budget, pinned_ids=pinned)
+        archive_name = memory.path.name + ".archive.jsonl"
+        quarantine = read_text_beneath(memory.path.parent, (archive_name,))
+        if quarantine:
+            for line in quarantine.split("\n"):
+                if line.strip():
+                    payload = json.loads(line)
+                    if not isinstance(payload, dict):
+                        raise ValueError("MEMORY_AUTHORITY_UNREADABLE")
+        preview = {"generation": 0, "total_chars": sum(len(r.content) for r in live),
+                   "active_chars": sum(len(r.content) for r in active),
+                   "cold_chars": sum(len(r.content) for r in cold), "total_records": len(live),
+                   "legacy_visibility_unknown": sum(bool(line.strip()) for line in (quarantine or "").split("\n"))}
+        return preview, [*live, *tombstones.values()], (budget, quarantine)
+
+    if dry_run:
+        return prepare()[0]
+    root = memory.path.parents[2] if len(memory.path.parents) >= 3 else memory.path.parent
+    with _quota_admission(memory.quota_enforcer) as admission, _managed_policy_scope(root):
+        with memory._locked_memory():
+            preview, records, options = prepare()
+            if records is None:
+                return preview
+            result = publish_tier_generation(memory, records, admission=admission,
+                max_chars=options[0], quarantine=options[1])
+            return {**preview, **result}
+
+
+# LLM: 新分片、删除账及根复用原私有writer/当前C末门；不复制Curator回滚算法，未发表材料天然不可见。
+# 函数用途: 提交冷热代次，并将旧单文件降为阻止旧写者混写的schema标记。
+def publish_tier_generation(memory, records, *, admission=None, commit=None, redact_contents=None,
+                            max_chars=None, quarantine=None):
+    from ..common.nofollow_fs import read_text_beneath
+    from ..user_space.managed_user_governance import managed_locked_memory_ids
+    from . import jsonl
+    from .generation_manifest import GENERATION_SCHEMA, MemoryGenerationStore
+
+    if commit is None and memory.coordinator_io:
+        commit = jsonl._coordinator_memory_write
+
+    # LLM: 仅固定单文件落盘操作进入原末门，编码、配额和目录扫描保持门外。
+    # 函数用途: 为同代文件复用唯一私有原子写入口及测试故障注入点。
+    def write(path, raw):
+        if commit is None:
+            jsonl.write_private_text_file_atomic_unlocked(path, raw)
+        else:
+            commit(lambda: jsonl.write_private_text_file_atomic_unlocked(path, raw, replace_once=True))
+
+    store = MemoryGenerationStore(memory.path)
+    plan = store.prepare(records, max_chars=max_chars or memory.memory_policy().active_library_max_chars,
+                         pinned_ids=managed_locked_memory_ids(memory.path), quarantine=quarantine)
+    result = store.publish(plan, write=write, admission=admission, commit=commit,
+        redact=(lambda: memory._redact_local_tool_ledgers(redact_contents)) if redact_contents else None)
+    marker = json.dumps({"schema_version": GENERATION_SCHEMA, "manifest": store.manifest_path.name}) + "\n"
+    if read_text_beneath(memory.path.parent, (memory.path.name,)) != marker:
+        try:
+            write(memory.path, marker)
+        except Exception as exc:
+            if isinstance(exc, jsonl._NATIVE_MEMORY_ERRORS):
+                raise
+            from ._jsonl_indexing import RemovalCleanupError
+
+            raise RemovalCleanupError("MEMORY_GENERATION_COMMITTED_CLEANUP_PENDING", formal_memory_changed=True) from exc
+    return result
+
+
+# LLM: 恢复只能增加未遗忘事实，不能用旧版本覆盖当前记录；所有输入先严格验证再发表，墓碑不来自备份。
+# 函数用途: 在当前库与删除屏障上叠加已授权的备份事实。
+def restore_tier_records(memory, records):
+    from .generation_manifest import MemoryGenerationStore
+    from .jsonl import (
+        _managed_policy_scope,
+        _materialize_memory_events,
+        _quota_admission,
+        _record_payload,
+        _strict_memory_events,
+    )
+
+    incoming = list(records)
+    for record in incoming:
+        require_maintenance_event(record)
+        if record.action not in {"add", "replace"}:
+            raise ValueError("MEMORY_BACKUP_RECORD_INVALID")
+    owner = memory.path.parents[2] if len(memory.path.parents) >= 3 else memory.path.parent
+    with _quota_admission(memory.quota_enforcer) as admission, _managed_policy_scope(owner):
+        with memory._locked_memory():
+            events = _strict_memory_events(memory.path)
+            current = {r.entry_id: r for r in _materialize_memory_events(events, include_expired=True)}
+            tombstones = {r.entry_id: r for r in events if r.action == "remove"}
+            tombstones.update(MemoryGenerationStore(memory.path).tombstones.load())
+            for record in incoming:
+                if record.entry_id in tombstones:
+                    continue
+                existing = current.get(record.entry_id)
+                if existing is not None:
+                    before, after = _record_payload(record), _record_payload(existing)
+                    for payload in (before, after):
+                        payload.pop("last_accessed_at", None)
+                        payload.pop("removed_content_hashes", None)
+                    if record.version == existing.version and before != after:
+                        raise ValueError("MEMORY_BACKUP_CONFLICT")
+                    continue
+                current[record.entry_id] = record
+            return publish_tier_generation(memory, [*current.values(), *tombstones.values()], admission=admission)
+
+
+# LLM: 删除屏障已提交后调用；只扫描本库固定代次目录及旧archive，失败由原REMOVE_CLEANUP_PENDING保留责任。
+# 函数用途: 清除内部历史分片中的已删正文，并丢弃含旧正文的派生SQLite。
+def purge_tier_copies(memory):
+    from ..common.nofollow_fs import NoFollowPathError, read_text_beneath
+    from . import jsonl
+    from .generation_manifest import MemoryGenerationStore
+    from .read_index import MemoryReadIndex
+
+    store = MemoryGenerationStore(memory.path)
+    if store.manifest() is None:
+        return
+    with memory._locked_memory():
+        root = store.manifest()
+        blocked = store.tombstones.load()
+        if not blocked:
+            return
+        MemoryReadIndex(memory.path, coordinator_io=memory.coordinator_io).invalidate()
+        current = {item["path"] for item in root["segments"]}
+        files = [memory.path.with_name(memory.path.name + ".archive.jsonl")]
+        for directory in store.directory.iterdir():
+            if directory.is_symlink():
+                raise NoFollowPathError("invalid memory generation directory")
+            if directory.is_dir():
+                files.extend(directory.glob("*.jsonl"))
+        for path in files:
+            relative = path.relative_to(memory.path.parent)
+            raw = read_text_beneath(memory.path.parent, tuple(relative.parts))
+            if raw is None:
+                continue
+            rows = [json.loads(line) for line in raw.split("\n") if line.strip()]
+            if any(not isinstance(row, dict) for row in rows):
+                raise ValueError("MEMORY_AUTHORITY_UNREADABLE")
+            retained = [row for row in rows if row.get("entry_id") not in blocked]
+            if len(retained) == len(rows):
+                continue
+            if str(relative) in current:
+                raise ValueError("MEMORY_GENERATION_DELETE_INCONSISTENT")
+            text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in retained)
+            if memory.coordinator_io:
+                jsonl._coordinator_memory_write(lambda target=path, value=text:
+                    jsonl.write_private_text_file_atomic_unlocked(target, value, replace_once=True))
+            else:
+                jsonl.write_private_text_file_atomic_unlocked(path, text)

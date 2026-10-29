@@ -69,10 +69,8 @@ def build_owner_candidates(home_paths: object, quota: OwnerQuotaEnforcer | None,
                             **({} if not coordinator_io else {"coordinator_io": True}))
 
 
-# LLM: 原JsonlMemory构造会准备父目录；所有索引、Candidate、quota、embedder引用原样透传，不重建identity或发请求。
-# 函数用途: 在原聊天快照时点之后构造正式长期记忆仓库。
-# LLM: 此默认入口保持原八参/调用形状；明确C装配走JsonlMemoryDependencies/from_dependencies同唯一初始化叶，勿再添第九flag。
-# 函数用途: 创建唯一原JSONL正式记忆并接已有资源。
+# LLM: LocalStore参数仅保精确旧投影删除及remember审计脱敏，不再授正式memory文本查询/写入；新索引由逻辑库所有。
+# 函数用途: 在原聊天快照时点构造唯一冷热正式库，保留Candidate/quota/向量及隐私清理依赖。
 def build_owner_long_term(home_paths: object, paths: dict[str, object], quota: OwnerQuotaEnforcer | None, *,
                           local_store: LocalStore, candidates: CandidateService, embedder: object | None,
                           semantic_status: dict[str, str], vector_identity: dict[str, object] | None) -> JsonlMemory:
