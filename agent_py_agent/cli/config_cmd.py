@@ -8,7 +8,7 @@ from __future__ import annotations
 
 雏鸟学飞:小白只要在 CLI 跟 my-agent 说"接飞书",my-agent 就能 `config-set feishu_app_id ...` 自己把
 凭证写进配置——可靠、原子、保留注释,而不是用通用 edit 工具硬改 yaml。
-白名单(_SETTABLE_KEYS)限定可自助设置的字段:当前聚焦飞书接入,挡掉对安全相关配置(path/access 等)的误改;
+共享白名单限定可自助设置的字段:当前聚焦飞书接入,挡掉对安全相关配置(path/access 等)的误改;
 敏感字段(secret/token)回显一律脱敏,不把明文打回终端或日志。
 """
 
@@ -19,6 +19,7 @@ from pathlib import Path
 from agent_py_agent.agent.common.global_write_guard import GlobalWriteInWorkerError
 from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.parameter_changes import (
+    CLI_DEPLOYMENT_WRITABLE_KEYS,
     ChangeOrigin,
     WritePaths,
     cli_deployment_write_scope,
@@ -28,15 +29,6 @@ from agent_py_agent.agent.settings.user_config_capability import (
     mask_value,
     packaged_config_path,
     read_config_fact,
-)
-
-# 可自助设置的字段白名单:聚焦飞书通道接入。其他字段(尤其 path/access 等安全项)请手动编辑配置。
-_SETTABLE_KEYS = (
-    "feishu_app_id",
-    "feishu_app_secret",
-    "feishu_verification_token",
-    "feishu_encrypt_key",
-    "feishu_callback_port",
 )
 
 
@@ -54,8 +46,8 @@ def add_config_subcommands(sub: argparse._SubParsersAction) -> None:
 # 函数用途: 委托 typed 服务读取写前展示值并写配置和账本，展示安全前后值或具体失败原因；未知故障继续向上传播。
 def cmd_config_set(args) -> int:
     key = str(args.key)
-    if key not in _SETTABLE_KEYS:
-        allowed = ", ".join(_SETTABLE_KEYS)
+    if key not in CLI_DEPLOYMENT_WRITABLE_KEYS:
+        allowed = ", ".join(sorted(CLI_DEPLOYMENT_WRITABLE_KEYS))
         print(f"⚠️ '{key}' 不在可自助设置白名单({allowed})。\n   为防误改安全相关配置,其他字段请手动编辑配置文件。")
         return 1
     path = Path(args.config)

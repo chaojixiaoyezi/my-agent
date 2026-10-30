@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import EllipsisType
 
 from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
@@ -481,8 +482,12 @@ class RuntimeWriteFence:
 
     # LLM: 手工游标仍走同一栅栏，不暴露游标connection作为旁路。
     # 函数用途: 返回保护后的原游标。
-    def cursor(self, *args, **kwargs):
-        return _RuntimeFenceCursor(self, self._connection.cursor(*args, **kwargs))
+    def cursor(
+        self, factory: Callable[[sqlite3.Connection], sqlite3.Cursor] | None | EllipsisType = ...,
+    ) -> _RuntimeFenceCursor:
+        # 不给factory须沿底层默认入口；显式None保留普通连接与跟踪连接各自的原合同。
+        cursor = self._connection.cursor() if factory is ... else self._connection.cursor(factory)
+        return _RuntimeFenceCursor(self, cursor)
 
     # LLM: 保持原提交/回滚/trace等接口和lease有效性检查，不接管物理关闭。
     # 函数用途: 透传非SQL连接接口。

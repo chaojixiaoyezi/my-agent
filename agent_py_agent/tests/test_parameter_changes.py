@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.settings import parameter_changes as changes
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.parameter_changes import ChangeOrigin
@@ -171,3 +173,48 @@ def test_tool_search_and_view_mark_the_common_parameters(tmp_path, monkeypatch):
     assert advanced[0]["key"] == "dynamic_timeout_min" and advanced[0]["common"] is False
     view = json.loads(tool.execute({"action": "view", "key": "request_timeout"}).output)
     assert view["parameter"]["common"] is True
+
+
+def test_cli_deployment_allowlist_has_one_canonical_definition():
+    from agent_py_agent.cli import config_cmd
+
+    expected = frozenset({"feishu_app_id", "feishu_app_secret", "feishu_verification_token",
+                          "feishu_encrypt_key", "feishu_callback_port"})
+    assert getattr(changes, "CLI_DEPLOYMENT_WRITABLE_KEYS", None) == expected
+    assert config_cmd.CLI_DEPLOYMENT_WRITABLE_KEYS is changes.CLI_DEPLOYMENT_WRITABLE_KEYS
+
+
+@pytest.mark.parametrize("key,value,code", [
+    ("path_access_mode", "full", "PARAMETER_BOUNDARY"),
+    ("system_prompt", "synthetic override", "PARAMETER_BOUNDARY"),
+    ("enable_plugins", "true", "PARAMETER_BOUNDARY"),
+    ("gateway_bind_host", "0.0.0.0", "PARAMETER_SOURCE_READ_ONLY"),
+])
+def test_cli_scope_cannot_bypass_inner_security_key_boundary(tmp_path, key, value, code):
+    path = _user(tmp_path)
+    before = path.read_bytes()
+    with changes.cli_deployment_write_scope():
+        result = _set(path, key, value)
+    assert result["ok"] is False
+    assert result.get("code") == code
+    assert path.read_bytes() == before
+    assert not changes.ledger_path(path).exists()
+
+
+@pytest.mark.parametrize("key,value", [
+    ("feishu_app_id", "synthetic-app"),
+    ("feishu_app_secret", "synthetic-secret"),
+    ("feishu_verification_token", "synthetic-token"),
+    ("feishu_encrypt_key", "synthetic-encrypt"),
+    ("feishu_callback_port", "9001"),
+])
+def test_cli_scope_retains_exact_five_key_write_contract(tmp_path, key, value):
+    path = _user(tmp_path)
+    with changes.cli_deployment_write_scope():
+        result = _set(path, key, value)
+    assert result["ok"] is True
+    expected = int(value) if key == "feishu_callback_port" else value
+    assert getattr(load_config(path), key) == expected
+    committed = path.read_bytes()
+    assert _set(path, key, value)["code"] == "PARAMETER_SOURCE_READ_ONLY"
+    assert path.read_bytes() == committed

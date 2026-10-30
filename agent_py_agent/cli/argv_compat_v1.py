@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+
+
+class _Unset:
+    """区别省略参数与显式None/False，避免合并元数据时覆盖旧值。"""
+
+
+_UNSET = _Unset()
 
 CANONICAL_ROOTS = frozenset(['adapter', 'admin', 'audit', 'background', 'chat', 'collaboration', 'config', 'context', 'dev', 'feishu', 'gateway', 'guidance', 'home', 'local-store', 'memory', 'resume', 'run', 'runtime', 'skills', 'status', 'subagents', 'task', 'timeline', 'update'])
 
@@ -283,13 +290,60 @@ def _registered_command_paths(parser, prefix=()):
 class CanonicalArgumentParser(argparse.ArgumentParser):
     # LLM: 注册阶段无旧输入边界；只有build_parser显式标记的根才允许纯解码。
     # 函数用途: 初始化普通解析器及根边界标记。
-    def __init__(self, prog=None, **kwargs):
+    def __init__(
+        self,
+        prog: str | None = None,
+        *,
+        usage: str | None = None,
+        description: str | None = None,
+        epilog: str | None = None,
+        parents: Sequence[argparse.ArgumentParser] = (),
+        formatter_class: Callable[[str], argparse.HelpFormatter] = argparse.HelpFormatter,
+        prefix_chars: str = "-",
+        fromfile_prefix_chars: str | None = None,
+        argument_default: object = None,
+        conflict_handler: str = "error",
+        add_help: bool = True,
+        allow_abbrev: bool = True,
+        exit_on_error: bool = True,
+        suggest_on_error: bool | None | _Unset = _UNSET,
+        color: bool | None | _Unset = _UNSET,
+    ) -> None:
         self.legacy_input_boundary = False
-        super().__init__(prog=prog, **kwargs)
+        # 新版独有参数只在调用者明确提供时转发；旧版自然抛TypeError，默认构造仍可用。
+        version_options = {
+            key: value for key, value in {"suggest_on_error": suggest_on_error, "color": color}.items()
+            if value is not _UNSET
+        }
+        super().__init__(
+            prog=prog, usage=usage, description=description, epilog=epilog, parents=parents,
+            formatter_class=formatter_class, prefix_chars=prefix_chars,
+            fromfile_prefix_chars=fromfile_prefix_chars, argument_default=argument_default,
+            conflict_handler=conflict_handler, add_help=add_help, allow_abbrev=allow_abbrev,
+            exit_on_error=exit_on_error, **version_options,
+        )
 
     # LLM: 复用原action和命令对象，只合并显式参数及帮助元数据；分组迁移不影响位置参数或处理器。
     # 函数用途: 让后注册的领域补齐标题、描述和动作说明，而不重建已有子树。
-    def add_subparsers(self, **kwargs):
+    def add_subparsers(
+        self,
+        *,
+        title: str | None | _Unset = _UNSET,
+        description: str | None | _Unset = _UNSET,
+        prog: str | None | _Unset = _UNSET,
+        parser_class: Callable[..., argparse.ArgumentParser] | _Unset = _UNSET,
+        action: str | Callable[..., argparse.Action] | None | _Unset = _UNSET,
+        dest: str | None | _Unset = _UNSET,
+        required: bool | _Unset = _UNSET,
+        help: str | None | _Unset = _UNSET,
+        metavar: str | None | _Unset = _UNSET,
+    ) -> argparse._SubParsersAction:
+        kwargs = {
+            key: value for key, value in {
+                "title": title, "description": description, "prog": prog, "parser_class": parser_class,
+                "action": action, "dest": dest, "required": required, "help": help, "metavar": metavar,
+            }.items() if value is not _UNSET
+        }
         existing = next((a for a in self._actions if isinstance(a, argparse._SubParsersAction)), None)
         if existing is not None:
             for key in ("dest", "required", "metavar", "help"):
@@ -364,7 +418,42 @@ class CanonicalCommandRegistrar:
 
     # LLM: 扩展名和别名在返回parser前检查冲突；合成节点只显示帮助，内置复用保留子树并补齐说明。
     # 函数用途: 将命令注册到唯一规范路径，拒绝扩展借退休名字接管内置处理器。
-    def add_parser(self, name, **kwargs):
+    def add_parser(
+        self,
+        name: str,
+        *,
+        help: str | None | _Unset = _UNSET,
+        aliases: Sequence[str] | _Unset = _UNSET,
+        prog: str | None | _Unset = _UNSET,
+        usage: str | None | _Unset = _UNSET,
+        description: str | None | _Unset = _UNSET,
+        epilog: str | None | _Unset = _UNSET,
+        parents: Sequence[argparse.ArgumentParser] | _Unset = _UNSET,
+        formatter_class: Callable[[str], argparse.HelpFormatter] | None | _Unset = _UNSET,
+        prefix_chars: str | _Unset = _UNSET,
+        fromfile_prefix_chars: str | None | _Unset = _UNSET,
+        argument_default: object = _UNSET,
+        conflict_handler: str | _Unset = _UNSET,
+        add_help: bool | _Unset = _UNSET,
+        allow_abbrev: bool | _Unset = _UNSET,
+        exit_on_error: bool | _Unset = _UNSET,
+        suggest_on_error: bool | None | _Unset = _UNSET,
+        color: bool | None | _Unset = _UNSET,
+        deprecated: bool | None | _Unset = _UNSET,
+    ) -> argparse.ArgumentParser:
+        # help/aliases由_SubParsersAction消费，其余原样交给真正的parser构造器。
+        # 包含3.13的deprecated和3.14的显示参数，但不替旧stdlib吞掉不支持的显式关键字。
+        kwargs = {
+            key: value for key, value in {
+                "help": help, "aliases": aliases, "prog": prog, "usage": usage,
+                "description": description, "epilog": epilog, "parents": parents,
+                "formatter_class": formatter_class, "prefix_chars": prefix_chars,
+                "fromfile_prefix_chars": fromfile_prefix_chars, "argument_default": argument_default,
+                "conflict_handler": conflict_handler, "add_help": add_help, "allow_abbrev": allow_abbrev,
+                "exit_on_error": exit_on_error, "suggest_on_error": suggest_on_error,
+                "color": color, "deprecated": deprecated,
+            }.items() if value is not _UNSET
+        }
         if name in self._registered:
             raise argparse.ArgumentError(self.root.add_subparsers(), f"命令已注册：{name}")
         if self._extensions and name in (CANONICAL_ROOTS | CLI_ROOT_PATHS.keys() | self.choices.keys()):

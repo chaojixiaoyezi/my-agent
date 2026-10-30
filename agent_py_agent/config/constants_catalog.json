@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1207,
+  "count": 1246,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -420,14 +420,6 @@
       "description": "派生代理名里的默认层级深度，用于生成可读的系统血缘名字。"
     },
     {
-      "name": "DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS",
-      "file": "agent_py_agent/agent/agent_core/provider_transient_auto_resume.py",
-      "value": 1800.0,
-      "unit": "秒",
-      "category": "上限预算",
-      "description": "一整个模型调用的自动重试总时长上限；0 表示不限（只受上面的次数阶梯约束）。"
-    },
-    {
       "name": "_DEFAULT_RUNNER_CONCURRENCY_COUNT",
       "file": "agent_py_agent/agent/agent_core/runner/dispatch.py",
       "value": 8,
@@ -700,46 +692,6 @@
       "description": "调用护栏最多保留的记录条数，防内存膨胀。"
     },
     {
-      "name": "DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT",
-      "file": "agent_py_agent/agent/agent_core/tool_guard/call_guardrail_config.py",
-      "value": 15,
-      "unit": "个",
-      "category": "比例阈值",
-      "description": "L4 阶梯:真硬门默认关;开启后同类失败达该值强制收口等用户介入。"
-    },
-    {
-      "name": "DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT",
-      "file": "agent_py_agent/agent/agent_core/tool_guard/call_guardrail_config.py",
-      "value": 3,
-      "unit": "个",
-      "category": "比例阈值",
-      "description": "只读无进展连续次数阈值。"
-    },
-    {
-      "name": "DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT",
-      "file": "agent_py_agent/agent/agent_core/tool_guard/call_guardrail_config.py",
-      "value": 15,
-      "unit": "个",
-      "category": "比例阈值",
-      "description": "当前 turn。15 次既避免偶发构建失败过早触发，也能提醒明显的机械重试。"
-    },
-    {
-      "name": "DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT",
-      "file": "agent_py_agent/agent/agent_core/tool_guard/call_guardrail_config.py",
-      "value": 5,
-      "unit": "个",
-      "category": "比例阈值",
-      "description": "重复成功提示的次数阈值。"
-    },
-    {
-      "name": "DEFAULT_REPEAT_FAIL_THRESHOLD_COUNT",
-      "file": "agent_py_agent/agent/agent_core/tool_guard/call_guardrail_config.py",
-      "value": 10,
-      "unit": "个",
-      "category": "比例阈值",
-      "description": "重复失败判定次数阈值。"
-    },
-    {
       "name": "_CHANNEL_HINT_THRESHOLD_COUNT",
       "file": "agent_py_agent/agent/agent_core/tool_guard/loop_hints.py",
       "value": 2,
@@ -1002,6 +954,22 @@
       "unit": "",
       "category": "其它",
       "description": "FICLONE ioctl（Linux reflink）：_IOW(0x94, 9, int)；文件克隆的系统调用号，平台协议值（无物理单位）。"
+    },
+    {
+      "name": "_AUDIT_RETENTION_MAX_BYTES",
+      "file": "agent_py_agent/agent/audit/query.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_AUDIT_RETENTION_ROW_MAX_BYTES",
+      "file": "agent_py_agent/agent/audit/query.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "MAX_RESULT_BYTES",
@@ -2492,14 +2460,6 @@
       "description": "单条嵌套程序的字符上限：解析是线性的，超长输入不再递归（fail-closed 给 finding）。32k 足够容纳真实包装文本。"
     },
     {
-      "name": "DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT",
-      "file": "agent_py_agent/agent/contracts/main_agent_auto_resume.py",
-      "value": 3,
-      "unit": "个",
-      "category": "重试",
-      "description": "主代理自动恢复最多尝试的次数；超过后不再自动重试，避免故障循环消耗资源。"
-    },
-    {
       "name": "_RATIO_WARNING",
       "file": "agent_py_agent/agent/contracts/model_call_budget.py",
       "value": 0.8,
@@ -2874,6 +2834,62 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "空响应回退文本最多 12000 字符：控制重放体积。"
+    },
+    {
+      "name": "MAX_ACTIVE_COMPACT_CHECKPOINTS",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
+      "value": 32,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_ACTIVE_CHECKPOINT_BYTE_BUDGET",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
+      "value": 2097152,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_ACTIVE_CHECKPOINT_HIGH_WATER",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
+      "value": 64,
+      "unit": "",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_MAX_COLD_PAYLOAD_BYTES",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_CHECKPOINT_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint_scan.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_CHECKPOINT_ROW_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint_scan.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_CACHED_OFFSETS",
+      "file": "agent_py_agent/agent/conversation/compact_checkpoint_scan.py",
+      "value": 131072,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_DEFAULT_MAX_TOKENS",
@@ -3260,12 +3276,28 @@
       "description": "展示归档：单行最多 2000 字符，超长行截断显示。"
     },
     {
+      "name": "_MAX_DISPLAY_ARCHIVE_BUNDLE_BYTES",
+      "file": "agent_py_agent/agent/conversation/display_archive.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "展示归档合页的总读取上限，独立于资产投递包的大小限制。"
+    },
+    {
       "name": "_MAX_PAGE_BYTES",
       "file": "agent_py_agent/agent/conversation/display_archive.py",
       "value": 256000,
       "unit": "字节",
       "category": "上限预算",
       "description": "展示归档单页最大 256000 字节：控制分页存储体积。"
+    },
+    {
+      "name": "_DAY",
+      "file": "agent_py_agent/agent/conversation/display_archive_maintenance.py",
+      "value": 86400,
+      "unit": "",
+      "category": "其它",
+      "description": ""
     },
     {
       "name": "HOST_NOTICE_LIMIT_COUNT",
@@ -3396,6 +3428,22 @@
       "description": "每份首ID过滤器8KiB，32768份极端上界256MiB；同一次读取的多个位置共享不可变过滤器。"
     },
     {
+      "name": "TRANSCRIPT_ROTATE_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_scan.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "TRANSCRIPT_ROTATE_ROWS",
+      "file": "agent_py_agent/agent/conversation/message_scan.py",
+      "value": 128,
+      "unit": "",
+      "category": "其它",
+      "description": ""
+    },
+    {
       "name": "_MAX_DEDUPE_INDEX_FILES",
       "file": "agent_py_agent/agent/conversation/message_scan.py",
       "value": 64,
@@ -3410,6 +3458,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "单个消息文件去重索引最多保留的幂等键数量。"
+    },
+    {
+      "name": "_TRANSCRIPT_SEGMENT_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_scan.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
     },
     {
       "name": "_LIGHT_FIELDS_MAX_BYTES",
@@ -4364,6 +4420,22 @@
       "description": "macOS 每秒确认直接父进程；同一节拍读控制，心跳仍独立保持 2 秒周期。"
     },
     {
+      "name": "_RECEIPT_MAX_FILE_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/owner_retention.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_RECEIPT_MAX_SEGMENT_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/owner_retention.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
       "name": "_APPROVAL_POLL_SECONDS",
       "file": "agent_py_agent/agent/gateway_parts/permission_bridge.py",
       "value": 0.05,
@@ -5260,12 +5332,124 @@
       "description": "防长跑进程随历史租户数无界增长(审计 #16)。真·活跃且在限流中的租户是工作集不是泄漏,保留。"
     },
     {
+      "name": "_FTS_SYNC_SINGLE_MAX_BYTES",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "完整驱动的单文档准入上限，不是源文件大小或RSS上限；显式step可另选预算。"
+    },
+    {
       "name": "PREVIEW_CHARS",
       "file": "agent_py_agent/agent/local_storage/models.py",
       "value": 12000,
       "unit": "字符",
       "category": "其它",
       "description": "存储记录预览正文的最大字符数；列表/详情展示时截断，避免整篇内容进展示。"
+    },
+    {
+      "name": "_ANCHOR_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 1024,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_CHUNK",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 65536,
+      "unit": "",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_INT64_MAX",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 9223372036854775807,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_BATCH_IDS",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_DB",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 134217728,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_DOCUMENT",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 8388608,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_MEMO_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 33554432,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_MEMO_ENTRIES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 128,
+      "unit": "条",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_PAGE",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 1000,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_READ",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 33554432,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_RESULT",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 16777216,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_ROW",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 1048576,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_MAX_TRACKED_SOURCES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 128,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "DERIVED_RECORD_TTL_SECONDS",
@@ -5785,7 +5969,23 @@
       "value": 20000,
       "unit": "字符",
       "category": "其它",
-      "description": "拒绝并给结构化错误，已超帽的文件仍允许受控净缩减（清理才能进行）。"
+      "description": "LLM: 仅保留旧调用方导入名；20k现在是默认热工作集预算，不再作为正式写入拒绝条件。"
+    },
+    {
+      "name": "_AUTHORITY_SCAN_MAX_BYTES",
+      "file": "agent_py_agent/agent/memory_store/jsonl.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_AUTHORITY_SCAN_MAX_RECORDS",
+      "file": "agent_py_agent/agent/memory_store/jsonl.py",
+      "value": 1000,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_SOURCE_SNAPSHOT_CACHE_COUNT",
@@ -5850,6 +6050,14 @@
       "unit": "字符",
       "category": "其它",
       "description": "英文关键词最短 3 个字符：太短没有区分度；只收 ASCII 词面，用于 BM25 跨语言命中。"
+    },
+    {
+      "name": "_MAX_PIN_SOURCE_DIGEST_BYTES",
+      "file": "agent_py_agent/agent/memory_store/reference_pins.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "小型 pin 来源增加内容代次；单次读取上限为 16 MiB，不沿链接或无界读取特殊文件。"
     },
     {
       "name": "_CONTEXT_BUNDLE_SNAPSHOT_DAYS",
@@ -5954,6 +6162,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "(多租户/多测试目录)把缓存撑大。"
+    },
+    {
+      "name": "_SUBAGENT_SCAN_MAX_DIRS",
+      "file": "agent_py_agent/agent/owner_wake_discovery.py",
+      "value": 5000,
+      "unit": "",
+      "category": "上限预算",
+      "description": "每次发现最多检查5000个目录项；跨轮内存迭代器避免大目录反复从头扫描。"
     },
     {
       "name": "AGENTS_PROTECTION_CONFIG_MAX_BYTES",
@@ -6652,30 +6868,6 @@
       "description": "调度事件历史报告缓存最多跟踪的文件路径数。"
     },
     {
-      "name": "_HISTORY_RUN_IDS_ANCHOR_BYTES",
-      "file": "agent_py_agent/agent/scheduler/repository.py",
-      "value": 4096,
-      "unit": "字节",
-      "category": "其它",
-      "description": "校验调度历史文件首尾锚点时读取的字节数。"
-    },
-    {
-      "name": "_HISTORY_RUN_IDS_CACHE_MAX_IDS",
-      "file": "agent_py_agent/agent/scheduler/repository.py",
-      "value": 1000000,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "单个调度历史文件最多缓存的运行 ID 数量上限。"
-    },
-    {
-      "name": "_HISTORY_RUN_IDS_CACHE_MAX_PATHS",
-      "file": "agent_py_agent/agent/scheduler/repository.py",
-      "value": 32,
-      "unit": "个路径",
-      "category": "上限预算",
-      "description": "调度历史运行 ID 集合缓存最多跟踪的文件路径数。"
-    },
-    {
       "name": "_MANUAL_DISPATCH_DELAY_SECONDS",
       "file": "agent_py_agent/agent/scheduler/repository.py",
       "value": 2.0,
@@ -6908,6 +7100,14 @@
       "description": "连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。"
     },
     {
+      "name": "_MAX_CONFIGURATION_BYTES",
+      "file": "agent_py_agent/agent/settings/config_migration.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "比例阈值",
+      "description": ""
+    },
+    {
       "name": "SELECTION_POINT_TIMEOUT_SECONDS",
       "file": "agent_py_agent/agent/settings/decision_settings_defaults.py",
       "value": 5.0,
@@ -6946,6 +7146,14 @@
       "unit": "",
       "category": "其它",
       "description": "输出上限最多占已知上下文窗口的几分之一：给输入留出至少四分之三窗口，避免输入加输出超窗被供应商拒绝。"
+    },
+    {
+      "name": "_MAX_DEPLOYMENT_POLICY_SOURCE_BYTES",
+      "file": "agent_py_agent/agent/settings/deployment_policy.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "BROWSER_LOGIN_SECONDS",
@@ -7042,14 +7250,6 @@
       "unit": "",
       "category": "比例阈值",
       "description": "（max 组最少的一次也比 low 组最多的一次多）。同分布下三对三完全不重叠的概率只有 1/20，噪声很难凑出“支持”。"
-    },
-    {
-      "name": "_RUNTIME_GUARD_RAW_CACHE_MAX_SIZE",
-      "file": "agent_py_agent/agent/settings/runtime_guard_config.py",
-      "value": 64,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "运行时防护原始配置缓存的最大条目数。"
     },
     {
       "name": "_MAX_WARNING_VALUE_CHARS",
@@ -7212,6 +7412,14 @@
       "description": "文件锁账本最多保留的条目数；防止一次任务锁太多文件导致账本膨胀。"
     },
     {
+      "name": "ORPHAN_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/subagents/services/persistence/locator_hygiene.py",
+      "value": 3600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": ""
+    },
+    {
       "name": "MAX_PROJECTION_LEDGER_LINE_COUNT",
       "file": "agent_py_agent/agent/subagents/services/persistence/projections.py",
       "value": 2000,
@@ -7292,6 +7500,46 @@
       "description": "Todo 收尾软提醒最多列 24 个 open id：防清单过长刷屏，超出的只给计数。"
     },
     {
+      "name": "_FIND_SNAPSHOT_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_find.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_FIND_SNAPSHOT_MAX_CACHED",
+      "file": "agent_py_agent/agent/tooling/_filesystem_find.py",
+      "value": 4,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_FIND_SNAPSHOT_MAX_CURSORS",
+      "file": "agent_py_agent/agent/tooling/_filesystem_find.py",
+      "value": 128,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_FIND_SNAPSHOT_TTL_SECONDS",
+      "file": "agent_py_agent/agent/tooling/_filesystem_find.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_DISCOVERY_ARG_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_helpers.py",
+      "value": 196608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
       "name": "_FALLBACK_SCAN_MAX_FILES",
       "file": "agent_py_agent/agent/tooling/_filesystem_helpers.py",
       "value": 20000,
@@ -7346,6 +7594,46 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "缺上下文预览最多 4000 字符：控制补丁回执体积。"
+    },
+    {
+      "name": "_SEARCH_LINE_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_search.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_SEARCH_READ_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_search.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_SEARCH_RETAIN_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_search.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_SEARCH_RG_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_search.py",
+      "value": 33554432,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_SEARCH_RG_RECORD_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/_filesystem_search.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_MAX_OWNERS_COUNT",
@@ -8009,7 +8297,7 @@
       "value": 12000,
       "unit": "字节",
       "category": "上限预算",
-      "description": "list_tools 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。"
+      "description": "tool_search(action=catalog) 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。"
     },
     {
       "name": "_MAX_EXCEPTION_MESSAGE_CHARS",
@@ -8508,6 +8796,14 @@
       "description": "主上下文捆的最大提示段 1600 字符：够放身份/范围/契约摘要，又不至于挤占实际对话预算。"
     },
     {
+      "name": "MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT",
+      "file": "agent_py_agent/agent/user_space/home_doctor.py",
+      "value": 5,
+      "unit": "个",
+      "category": "其它",
+      "description": ""
+    },
+    {
       "name": "COMPACT_COOLDOWN_SECONDS",
       "file": "agent_py_agent/agent/user_space/home_index_compact.py",
       "value": 21600,
@@ -8602,6 +8898,30 @@
       "unit": "秒",
       "category": "超时",
       "description": "原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。"
+    },
+    {
+      "name": "_QUOTA_SCAN_CACHE_SIZE",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 16,
+      "unit": "个",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_QUOTA_SCAN_CURSOR_TTL",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 3600,
+      "unit": "",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_QUOTA_SORT_BATCH",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 128,
+      "unit": "",
+      "category": "其它",
+      "description": ""
     },
     {
       "name": "_MAX_FACT_FILE_BYTES",
@@ -9586,14 +9906,6 @@
       "unit": "个",
       "category": "其它",
       "description": "memory-archive 命令默认最多返回 20 条记录，--limit 优先"
-    },
-    {
-      "name": "MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT",
-      "file": "agent_py_agent/cli/memory_commands/memory_doctor_cmd.py",
-      "value": 5,
-      "unit": "个",
-      "category": "其它",
-      "description": "doctor 列出最近 5 个归档文件，旧入口 cli/memory_doctor.py 从这里 import"
     },
     {
       "name": "_CLI_MEMORY_ROUTE_COUNT",

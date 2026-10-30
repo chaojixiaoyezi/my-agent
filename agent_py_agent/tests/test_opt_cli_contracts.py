@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
-from agent_py_agent.cli.argv_compat_v1 import CLI_V1_PATHS, decode_v1_argv
+from agent_py_agent.cli.argv_compat_v1 import (
+    CLI_V1_PATHS,
+    CanonicalArgumentParser,
+    CanonicalCommandRegistrar,
+    decode_v1_argv,
+)
 from agent_py_agent.cli.parser import build_parser
 
 ROOTS = {"adapter", "admin", "audit", "background", "chat", "collaboration", "config", "context", "dev", "feishu", "gateway", "guidance", "home", "local-store", "memory", "resume", "run", "runtime", "skills", "status", "subagents", "task", "timeline", "update"}
@@ -262,3 +268,179 @@ def test_cli_cross_version_frozen_contracts():
         args = parser.parse_args(argv)
         assert args.func.__name__ == handler
         assert {key: getattr(args, key) for key in values} == values
+
+
+@pytest.mark.parametrize("entry", [CanonicalArgumentParser.__init__, CanonicalArgumentParser.add_subparsers, CanonicalCommandRegistrar.add_parser])
+def test_cli_registration_signatures_are_explicit_and_typed(entry):
+    for name, parameter in inspect.signature(entry).parameters.items():
+        if name == "self":
+            continue
+        assert parameter.kind not in {inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL}
+        assert parameter.annotation is not inspect.Parameter.empty
+
+
+def test_cli_typed_constructor_preserves_argparse_options(tmp_path):
+    parent = argparse.ArgumentParser(add_help=False, prefix_chars="+")
+    parent.add_argument("+shared", default="继承值")
+    parent.set_defaults(parent_marker=True)
+    parser = CanonicalArgumentParser(
+        "选项测试", usage="自定用法", description="第一行\n第二行", epilog="末尾说明",
+        parents=[parent], formatter_class=argparse.RawTextHelpFormatter,
+        prefix_chars="+", fromfile_prefix_chars="@", argument_default=argparse.SUPPRESS,
+        conflict_handler="resolve", add_help=False, allow_abbrev=False, exit_on_error=False,
+    )
+    assert parser.legacy_input_boundary is False
+    assert parser.parse_args([]).parent_marker is True
+    assert parser.parse_args([]).shared == "继承值"
+    parser.add_argument("+shared", default="覆盖值")
+    parser.add_argument("++optional")
+    parser.add_argument("++mode", choices=["safe"])
+    args = parser.parse_args([])
+    assert args.shared == "覆盖值" and not hasattr(args, "optional")
+    assert all("++help" not in a.option_strings for a in parser._actions)
+    argfile = tmp_path / "argv.txt"
+    argfile.write_text("++mode\nsafe\n", encoding="utf-8")
+    assert parser.parse_args(["@" + str(argfile)]).mode == "safe"
+    with pytest.raises(argparse.ArgumentError):
+        parser.parse_args(["++mode", "unsafe"])
+    _, remaining = parser.parse_known_args(["++opt", "value"])
+    assert remaining == ["++opt", "value"]
+    help_text = parser.format_help()
+    assert "自定用法" in help_text and "第一行\n第二行" in help_text and "末尾说明" in help_text
+
+
+@pytest.mark.parametrize("option", ["color", "suggest_on_error"])
+@pytest.mark.parametrize("value", [None, False, True])
+def test_cli_constructor_versioned_options_use_native_contract(option, value):
+    # 不模拟新版本：当前stdlib支持时核实际属性，否则核原生TypeError。
+    if option in inspect.signature(argparse.ArgumentParser).parameters:
+        parser = CanonicalArgumentParser(**{option: value})
+        assert getattr(parser, option) is value
+    else:
+        with pytest.raises(TypeError, match=option):
+            CanonicalArgumentParser(**{option: value})
+    assert CanonicalArgumentParser().parse_args([]) == argparse.Namespace()
+
+
+def test_cli_subparser_explicit_options_and_custom_action():
+    class Subcommands(argparse._SubParsersAction):
+        pass
+
+    parser = CanonicalArgumentParser(prog="root")
+    parser.add_argument("prefix")
+    sub = parser.add_subparsers(
+        title="领域", description="领域说明", prog="explicit-prefix", parser_class=argparse.ArgumentParser,
+        action=Subcommands, dest="operation", required=True, help="动作帮助", metavar="动作",
+    )
+    child = sub.add_parser("inspect", aliases=["i"], help="检查")
+    assert isinstance(sub, Subcommands) and type(child) is argparse.ArgumentParser
+    assert child.prog == "explicit-prefix inspect"
+    assert parser.parse_args(["p", "i"]).operation == "i"
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["p"])
+    assert exc.value.code == 2
+    assert all(text in parser.format_help() for text in ["领域", "领域说明", "动作帮助", "检查"])
+
+
+@pytest.mark.parametrize("metadata", [{}, {"title": None}, {"description": None}, {"title": "", "description": ""}])
+def test_cli_subparser_group_omission_matches_stdlib(metadata):
+    ordinary = argparse.ArgumentParser(prog="root")
+    canonical = CanonicalArgumentParser(prog="root")
+    for parser in (ordinary, canonical):
+        parser.add_subparsers(**metadata).add_parser("child", help=None)
+    assert canonical.format_help() == ordinary.format_help()
+
+
+def test_cli_reused_subparser_preserves_omitted_and_applies_explicit_falsy_metadata():
+    parser = CanonicalArgumentParser(prog="root")
+    original = parser.add_subparsers(dest="operation", required=True, metavar="ACTION", help="先前帮助")
+    child = original.add_parser("child")
+    child.set_defaults(marker="原子树")
+    assert parser.add_subparsers() is original
+    assert (original.dest, original.required, original.metavar, original.help) == ("operation", True, "ACTION", "先前帮助")
+    assert parser.add_subparsers(title="动作组", description="先前说明") is original
+    parser.add_subparsers(title=None, description=None, required=False, metavar=None, help=None)
+    group = next(g for g in parser._action_groups if original in g._group_actions)
+    assert group.title is None and group.description is None
+    assert original.required is False and original.metavar is None and original.help is None
+    parser.add_subparsers()
+    assert original.choices["child"] is child
+    assert parser.parse_args(["child"]).marker == "原子树"
+    assert parser.parse_args([]).operation is None
+
+
+def test_cli_registrar_forwards_parser_options_and_alias_help():
+    parent = argparse.ArgumentParser(add_help=False, prefix_chars="+")
+    parent.add_argument("+parent", default="继承参数")
+    parent.set_defaults(parent_marker=True)
+    root = CanonicalArgumentParser(prog="root")
+    registrar = CanonicalCommandRegistrar(root)
+    child = registrar.add_parser(
+        "extension", aliases=["ext"], help=None, prog="explicit-child", usage="扩展用法",
+        description="扩展\n说明", epilog="扩展结尾", parents=[parent],
+        formatter_class=argparse.RawTextHelpFormatter, prefix_chars="+", fromfile_prefix_chars="@",
+        argument_default=argparse.SUPPRESS, conflict_handler="resolve", add_help=False,
+        allow_abbrev=False, exit_on_error=False,
+    )
+    assert child is registrar.choices["ext"] and child.prog == "explicit-child"
+    args = root.parse_args(["ext", "+parent", "输入值"])
+    assert (args.command, args.parent, args.parent_marker) == ("extension", "输入值", True)
+    assert (child.prefix_chars, child.fromfile_prefix_chars, child.argument_default) == ("+", "@", argparse.SUPPRESS)
+    assert (child.conflict_handler, child.add_help, child.allow_abbrev, child.exit_on_error) == ("resolve", False, False, False)
+    assert all(text in child.format_help() for text in ["扩展用法", "扩展\n说明", "扩展结尾"])
+    choices = root.add_subparsers()._choices_actions
+    assert len(choices) == 1 and choices[0].help is None
+    registrar.add_parser("unlisted")
+    assert len(choices) == 1  # 未提供help不创建帮助伪动作；显式None则创建。
+
+
+@pytest.mark.parametrize("metadata", [{}, {"description": None, "epilog": None, "usage": None, "help": None}])
+def test_cli_registrar_namespace_merge_only_changes_supplied_metadata(metadata):
+    root = CanonicalArgumentParser(prog="root")
+    registrar = CanonicalCommandRegistrar(root)
+    leaf = registrar.add_parser("memory-list")
+    memory = registrar.choices["memory"]
+    memory.description, memory.epilog, memory.usage = "已有说明", "已有结尾", "已有用法"
+    memory.formatter_class = argparse.RawTextHelpFormatter
+    original_handler = memory.get_default("func")
+    choice = next(c for c in root.add_subparsers()._choices_actions if c.dest == "memory")
+    old_help = choice.help
+    assert registrar.add_parser("memory", **metadata) is memory
+    if metadata:
+        assert memory.description is None and memory.epilog is None and memory.usage is None
+        assert choice.help is None
+    else:
+        assert (memory.description, memory.epilog, memory.usage, choice.help) == ("已有说明", "已有结尾", "已有用法", old_help)
+    assert memory.formatter_class is argparse.RawTextHelpFormatter
+    assert memory.get_default("func") is original_handler
+    assert memory.add_subparsers().choices["list"] is leaf
+
+
+@pytest.mark.parametrize("option", ["color", "suggest_on_error", "deprecated"])
+@pytest.mark.parametrize("value", [None, False, True])
+def test_cli_registrar_versioned_options_use_native_contract(option, value):
+    root = CanonicalArgumentParser(prog="root")
+    registrar = CanonicalCommandRegistrar(root)
+    contract = argparse._SubParsersAction.add_parser if option == "deprecated" else argparse.ArgumentParser
+    if option in inspect.signature(contract).parameters:
+        child = registrar.add_parser("extension", **{option: value})
+        if option == "deprecated":
+            assert ("extension" in root.add_subparsers()._deprecated) is bool(value)
+        else:
+            expected = root.color if option == "color" and value is None else value
+            assert getattr(child, option) is expected
+        assert root.parse_args(["extension"]).command == "extension"
+    else:
+        with pytest.raises(TypeError, match=option):
+            registrar.add_parser("extension", **{option: value})
+
+
+def test_cli_registrar_alias_conflict_rejected_before_tree_mutation():
+    root = CanonicalArgumentParser()
+    registrar = CanonicalCommandRegistrar(root)
+    original = registrar.add_parser("extension", aliases=["short"])
+    registrar.begin_extensions()
+    with pytest.raises(argparse.ArgumentError):
+        registrar.add_parser("other", aliases=["short"])
+    assert "other" not in registrar.choices
+    assert registrar.choices["short"] is original

@@ -9,6 +9,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import BinaryIO
 
 from ..io.cursor_cache import note_seen
@@ -482,7 +483,10 @@ class TranscriptReader:
 
     # LLM: 失败和提前退出都关闭原热FD，冷块仅在内存中持有。
     # 函数用途: 释放本次快照资源。
-    def __exit__(self, *_args):
+    def __exit__(
+        self, exc_type: type[BaseException] | None = None,
+        exc_value: BaseException | None = None, traceback: TracebackType | None = None,
+    ) -> None:
         self.hot.close()
         self.cached = None
 

@@ -63,6 +63,53 @@ def test_runtime_db_filename_is_single_authority_db(tmp_path):
     assert RUNTIME_DB_FILENAME == "runtime.db"
 
 
+@pytest.mark.parametrize('scoped', [False, True])
+def test_r2_runtime_cursor_factory_preserves_fence_and_lease(repo, scoped, monkeypatch):
+    import inspect
+
+    from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
+    from agent_py_agent.agent.runtime_db import schema
+
+    calls = []
+
+    class CustomCursor(sqlite3.Cursor):
+        pass
+
+    def factory(connection):
+        calls.append(connection)
+        return CustomCursor(connection)
+
+    with sqlite_connection_scope(enabled=scoped):
+        with repo._runtime_connection() as conn:
+            for cursor in (conn.cursor(), conn.cursor(CustomCursor), conn.cursor(factory=factory)):
+                assert cursor.connection is conn
+                assert tuple(cursor.execute('SELECT 7').fetchone()) == (7,)
+                cursor.close()
+            assert len(calls) == 1
+            if scoped:
+                conn.cursor(None).close()
+            else:
+                with pytest.raises(TypeError):
+                    conn.cursor(None)
+            cursor = conn.cursor(factory=CustomCursor)
+            injected = ValueError('generation changed')
+
+            def reject_generation(connection):
+                raise injected
+
+            monkeypatch.setattr(schema, 'require_runtime_schema_generation', reject_generation)
+            with pytest.raises(ValueError) as caught:
+                cursor.execute("INSERT INTO metadata(key,value) VALUES('r2-cursor','forbidden')")
+            assert caught.value is injected
+            assert conn.execute("SELECT value FROM metadata WHERE key='r2-cursor'").fetchone() is None
+            cursor.close()
+    signature = inspect.signature(schema.RuntimeWriteFence.cursor)
+    assert signature.return_annotation is not inspect.Signature.empty
+    assert signature.parameters['factory'].annotation is not inspect.Parameter.empty
+    assert all(parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+               for parameter in signature.parameters.values())
+
+
 def test_runtime_events_append_only_never_rewritten(repo):
     task = repo.create_task(owner_id="local/main")
     run = repo.create_agent_run(task_run_id=repo.create_task_run(task_id=task["task_id"])["task_run_id"])

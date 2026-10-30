@@ -766,6 +766,9 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                     break
                 if entry is None:
                     enumerated += 1
+                    if replay_skip > 0 and enumerated == replay_skip:
+                        # 旧前缀不消耗新一片的时间额度；只在这次重放完成时刷新一次。
+                        deadline = time.monotonic() + max_ms / 1000
                     continue
                 relpath, size, count = entry
                 scan['used'] += size

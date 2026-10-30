@@ -46,6 +46,22 @@ def test_literal_recommended_actions_use_unified_vocabulary() -> None:
     assert _unknown_literal_recommended_actions(allowed) == []
 
 
+@pytest.mark.parametrize("code,category,retryable,action", [
+    ("FILE_SNAPSHOT_STALE", "state", True, "change_strategy"),
+    ("SCHEDULER_HISTORY_READ_FAILED", "state", False, "report_blocker"),
+    ("PARENT_TOOL_ACTION_EVIDENCE_MISSING", "capability", False, "report_blocker"),
+])
+def test_e905_read_and_authority_failures_have_safe_recovery_contracts(code, category, retryable, action):
+    from agent_py_agent.agent.contracts.error_taxonomy import ERROR_CONTRACTS
+
+    contract = ERROR_CONTRACTS.get(code)
+    assert contract is not None
+    assert (contract.code, contract.category, contract.retryable, contract.recommended_action) == (
+        code, category, retryable, action,
+    )
+    assert contract.recovery_hint
+
+
 def _unknown_literal_recommended_actions(allowed: set[str]) -> list[tuple[str, int, str]]:
     roots = (
         Path("agent_py_agent/agent/contracts"),

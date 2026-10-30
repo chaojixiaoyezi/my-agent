@@ -187,8 +187,43 @@ def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version
     assert [action for action in service.plan(now=NOW).actions if action.path == target]
 
 
+def _freeze_pin_file_stat(monkeypatch, path):
+    fixed = path.stat(follow_symlinks=False)
+    original_stat, original_fstat = Path.stat, os.fstat
+
+    def frozen_stat(self, *args, **kwargs):
+        return fixed if self == path else original_stat(self, *args, **kwargs)
+
+    def frozen_fstat(fd):
+        current = original_fstat(fd)
+        return fixed if (current.st_dev, current.st_ino) == (fixed.st_dev, fixed.st_ino) else current
+
+    monkeypatch.setattr(Path, "stat", frozen_stat)
+    monkeypatch.setattr(os, "fstat", frozen_fstat)
+
+
+@pytest.mark.parametrize("name", ["formal.jsonl", "memory_tombstones.jsonl"])
+def test_pin_source_stamp_detects_same_inode_equal_length_rewrite_with_frozen_stat(tmp_path, monkeypatch, name):
+    from agent_py_agent.agent.memory_store.reference_pins import source_stamp
+
+    path = tmp_path / name
+    before_raw, after_raw = b'{"version":1}\n', b'{"version":2}\n'
+    assert len(before_raw) == len(after_raw)
+    path.write_bytes(before_raw)
+    identity = os.stat(path, follow_symlinks=False)
+    _freeze_pin_file_stat(monkeypatch, path)
+    before = source_stamp(path)
+    path.write_bytes(after_raw)
+    current = os.stat(path, follow_symlinks=False)
+    assert (current.st_ino, current.st_size) == (identity.st_ino, identity.st_size)
+    after = source_stamp(path)
+    assert before[:6] == after[:6]
+    assert before != after
+
+
 @pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
-def test_legacy_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, source):
+@pytest.mark.parametrize("freeze_stat", [False, True], ids=["native-clock", "coarse-clock"])
+def test_legacy_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, source, freeze_stat):
     from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
     from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
     from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
@@ -203,6 +238,8 @@ def test_legacy_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, 
         path = _tombstone_path(path)
         row.update(action="remove", content="", entry_id="unrelated-deletion", attributes=None)
         path.write_text(json.dumps(row) + "\n")
+    if freeze_stat:
+        _freeze_pin_file_stat(monkeypatch, path)
     changed = []
     original_load = StorageTombstones.load
 

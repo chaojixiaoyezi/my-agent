@@ -43,6 +43,42 @@ def _write_audit_query_data(audit_path: Path, audit_file: Path) -> None:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def test_r2_audit_query_report_explicit_keywords_and_params_precedence(tmp_path):
+    import inspect
+
+    from agent_py_agent.agent.audit.query import AuditQueryParams
+
+    config = SimpleNamespace(audit_log_path='audit')
+    _write_audit_query_data(tmp_path / 'audit', tmp_path / 'audit/audit.jsonl')
+    query = AuditQuery(config, root=tmp_path)
+    first = query.query_report()
+    assert first['total_count'] == 4 and first['coverage']['status'] == 'complete'
+    assert set(first) == {'entries', 'total_count', 'query_time_ms', 'coverage', 'view', 'next_cursor'}
+    timestamp = next(entry.timestamp for entry in first['entries'] if entry.entry_id == 'audit_2')
+    options = dict(user_id='alice', action=AuditAction.DISPATCH, target_id='task-1',
+                   target_type='task', status='success', start_time=timestamp,
+                   end_time=timestamp, limit=1, offset=0)
+    report = query.query_report(view=first['view'], **options)
+    assert [entry.entry_id for entry in report['entries']] == ['audit_2']
+    assert report['total_count'] == 1
+    assert query.query_report(AuditQueryParams(**options), view=first['view'], user_id='ignored',
+                              action='ignored', limit=0, offset=100)['entries'] == report['entries']
+    assert query.query_report(params=None, view=first['view'], **options)['entries'] == report['entries']
+    assert query.query_report(view=first['view'], limit=0)['entries'] == []
+    assert query.query_report(view=first['view'], limit=1, offset=1)['entries'] == first['entries'][1:2]
+    with pytest.raises(TypeError, match='unexpected keyword argument'):
+        query.query_report(unknown_filter='alice')
+    with pytest.raises(ValueError, match='invalid pagination'):
+        query.query_report(limit=-1)
+    with pytest.raises(ValueError, match='mutually exclusive'):
+        query.query_report(view=first['view'], after_cursor=report['next_cursor'] or {}, offset=1)
+    signature = inspect.signature(AuditQuery.query_report)
+    assert signature.return_annotation is not inspect.Signature.empty
+    assert all(parameter.annotation is not inspect.Parameter.empty
+               and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+               for name, parameter in signature.parameters.items() if name != 'self')
+
+
 class TestAuditAction(unittest.TestCase):
     """审计动作枚举测试。"""
 

@@ -20,7 +20,8 @@ DISPLAY_PAGE_CHARS = 12_000
 DISPLAY_ROW_CHARS = 2_000
 # 展示归档单页最大 256000 字节：控制分页存储体积。
 _MAX_PAGE_BYTES = 256_000
-_MAX_BUNDLE_BYTES = 16 * 1024 * 1024
+# 展示归档合页的总读取上限，独立于资产投递包的大小限制。
+_MAX_DISPLAY_ARCHIVE_BUNDLE_BYTES = 16 * 1024 * 1024
 DISPLAY_BUNDLE_SCHEMA = "display_archive_bundle.v1"
 _ID = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 _ARCHIVE_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -134,7 +135,7 @@ def _raise_if_expired(manifest: dict) -> None:
 # LLM: 只用已校验的磁盘page_count估算读取上限，总大小始终受16MiB硬界限制。
 # 函数用途: 给合页读取保留JSON封装余量而不允许无界读取。
 def _bundle_limit(count: int) -> int:
-    return min(_MAX_BUNDLE_BYTES, max(_MAX_PAGE_BYTES, _MAX_PAGE_BYTES * count))
+    return min(_MAX_DISPLAY_ARCHIVE_BUNDLE_BYTES, max(_MAX_PAGE_BYTES, _MAX_PAGE_BYTES * count))
 
 
 # LLM: bundle必须绑定同一归档与线程且逐页满足原行合同；维护验证与读页共用此校验。
@@ -213,9 +214,9 @@ def _read_json_bounded(path: Path, maximum: int) -> dict:
 
 # LLM: 成功返回后所有权仅归文件对象；构造抛错时本层关闭裸FD，不二次关闭成功封装的资源。
 # 函数用途: 为归档读写建立没有空档的FD交接。
-def _fdopen_owned(descriptor, mode, **kwargs):
+def _fdopen_owned(descriptor: int, mode: str, *, encoding: str | None = None):
     try:
-        return os.fdopen(descriptor, mode, **kwargs)
+        return os.fdopen(descriptor, mode, encoding=encoding)
     except BaseException:
         os.close(descriptor)
         raise

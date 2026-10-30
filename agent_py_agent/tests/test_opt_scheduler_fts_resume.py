@@ -23,6 +23,32 @@ def seeded(tmp_path):
     return store
 
 
+def test_r2_fts_update_explicit_fields_preserve_omission_and_null(tmp_path):
+    import inspect
+
+    with sqlite3.connect(tmp_path / 'update.db') as conn:
+        conn.execute('CREATE TABLE maintenance_fts_job (slot INTEGER PRIMARY KEY, generation INTEGER, '
+                     'phase TEXT, cursor INTEGER, ack INTEGER, copied INTEGER, verify_cursor INTEGER, '
+                     'verified_epoch INTEGER, verified_count INTEGER, directory TEXT)')
+        conn.execute("INSERT INTO maintenance_fts_job VALUES(1,1,'copy',4,5,6,7,8,9,'old')")
+        assert maintenance._fts_update(conn, phase='verify', cursor=10, ack=11, copied=12,
+                                       verify_cursor=13, verified_epoch=14, verified_count=15,
+                                       directory='new') is None
+        assert conn.execute('SELECT * FROM maintenance_fts_job').fetchone() == (
+            1, 2, 'verify', 10, 11, 12, 13, 14, 15, 'new')
+        maintenance._fts_update(conn, cursor=None, verify_cursor=None, verified_epoch=None, directory=None)
+        assert conn.execute('SELECT * FROM maintenance_fts_job').fetchone() == (
+            1, 3, 'verify', None, 11, 12, None, None, 15, None)
+        maintenance._fts_update(conn)
+        assert conn.execute('SELECT * FROM maintenance_fts_job').fetchone() == (
+            1, 4, 'verify', None, 11, 12, None, None, 15, None)
+    signature = inspect.signature(maintenance._fts_update)
+    assert signature.return_annotation is not inspect.Signature.empty
+    assert all(parameter.annotation is not inspect.Parameter.empty
+               and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+               for parameter in signature.parameters.values())
+
+
 # LLM: 用真实DB检查变更前后事实，只有可用空间返回值被固定为零。
 # 函数用途: 预检失败必须先于清表、shadow建立或pending清除。
 def test_fts_low_space_preserves_active_and_pending(tmp_path, monkeypatch):

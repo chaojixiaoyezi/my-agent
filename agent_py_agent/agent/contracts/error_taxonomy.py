@@ -56,6 +56,21 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "FILE_SNAPSHOT_STALE": ErrorContract(
+        code="FILE_SNAPSHOT_STALE", category="state", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="文件或目录已变化，旧快照及分页游标失效；重新读取目标取得新快照，不重放旧游标或据旧结果执行写入。",
+    ),
+    "SCHEDULER_HISTORY_READ_FAILED": ErrorContract(
+        code="SCHEDULER_HISTORY_READ_FAILED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="调度历史不可读取，无法完成去重核验；保留当前状态并报告阻塞，核对原错误和历史源后再恢复，不把未知当作未执行而重放任务。",
+    ),
+    "PARENT_TOOL_ACTION_EVIDENCE_MISSING": ErrorContract(
+        code="PARENT_TOOL_ACTION_EVIDENCE_MISSING", category="capability", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="父级快照只有工具名称而缺少动作授权证据；由宿主恢复权威动作快照，不自行补造grant、借用owner全权或扩大工具发现权限。",
+    ),
     "ASSET_DEPENDENCY_MISSING": ErrorContract(
         code="ASSET_DEPENDENCY_MISSING", category="state", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

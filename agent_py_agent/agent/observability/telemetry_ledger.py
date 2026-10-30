@@ -248,8 +248,18 @@ class ToolTelemetryLedger:
 
     # LLM: 显式view固定来源代次和through；after_cursor绑定同一view及筛选，cursor保留旧偏移合同。
     # 函数用途: 查询带coverage的有限遥测页。
-    def query_tool_calls_page(self, *, limit=100, cursor=0, view=None, after_cursor=None, **filters):
-        selected = self._query_filters(filters)
+    def query_tool_calls_page(
+        self, *, limit: int = 100, cursor: int = 0, view: dict[str, Any] | None = None,
+        after_cursor: dict[str, Any] | None = None, task_id: str | None = None,
+        run_id: str | None = None, workflow_run_id: str | None = None,
+        tool_name: str | None = None, status: str | None = None,
+        min_duration_ms: float | None = None, since: float | None = None, until: float | None = None,
+    ) -> dict[str, Any]:
+        selected = self._query_filters({
+            'task_id': task_id, 'run_id': run_id, 'workflow_run_id': workflow_run_id,
+            'tool_name': tool_name, 'status': status, 'min_duration_ms': min_duration_ms,
+            'since': since, 'until': until,
+        })
         if view is None:
             view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
         return {**self._read_index.query(view, filters=selected, limit=limit, offset=cursor,

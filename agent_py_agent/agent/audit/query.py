@@ -178,8 +178,18 @@ class AuditQuery:
 
     # LLM: 时间相等仍按物理顺序，seek绑定固定view和过滤；旧offset仅首拍使用，内部续页不重复COUNT或偏移扫描。
     # 函数用途: 返回审计条目、总数、coverage和下一页游标，不扩大固定through范围。
-    def query_report(self, params=None, *, view=None, after_cursor=None, **kwargs):
-        params = _normalize_query_params(params, **kwargs)
+    def query_report(
+        self, params: AuditQueryParams | None = None, *, view: dict[str, Any] | None = None,
+        after_cursor: dict[str, Any] | None = None, user_id: str | None = None,
+        action: AuditAction | str | None = None, target_id: str | None = None,
+        target_type: str | None = None, status: str | None = None,
+        start_time: float | None = None, end_time: float | None = None,
+        limit: int = 100, offset: int = 0,
+    ) -> dict[str, Any]:
+        params = _normalize_query_params(
+            params, user_id=user_id, action=action, target_id=target_id, target_type=target_type,
+            status=status, start_time=start_time, end_time=end_time, limit=limit, offset=offset,
+        )
         if (type(params.limit) is not int or type(params.offset) is not int
                 or min(params.limit, params.offset) < 0):
             raise ValueError('invalid pagination')

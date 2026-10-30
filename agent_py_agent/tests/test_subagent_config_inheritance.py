@@ -23,7 +23,7 @@ AGENT_ROOT = REPO_ROOT / "agent_py_agent" / "agent"
 
 
 class _FakeConfig:
-    memory_compact_auto_trigger_percent = 70
+    memory_compact_trigger_percent = 70
     model_context_window_tokens = 200_000
 
 
@@ -112,7 +112,7 @@ def test_compact_auto_cycle_fields_reads_finalize_context_scope(tmp_path):
         runtime_source = ""
 
     class _Cfg:
-        memory_compact_auto_trigger_percent = 70
+        memory_compact_trigger_percent = 70
         model_context_window_tokens = 200_000
         agent_name = "test"
         auto_save_memory = False

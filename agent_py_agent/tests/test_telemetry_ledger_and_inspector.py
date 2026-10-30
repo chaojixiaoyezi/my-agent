@@ -162,6 +162,37 @@ def test_r1_repeated_append_io_and_rewrite_breaks_witness(tmp_path, monkeypatch)
 
 # LLM: 构造与空查询不应写 owner 数据。
 # 函数用途: 验证空账本是只读的。
+def test_r2_telemetry_page_explicit_filters_and_unknown_rejection(tmp_path):
+    import inspect
+
+    ledger = ToolTelemetryLedger(tmp_path, owner_id='one')
+    selected = {**call(0), 'run_id': 'run', 'workflow_run_id': 'flow', 'duration_ms': 25}
+    ledger.record_tool_call(selected)
+    ledger.record_tool_call({**call(1), 'run_id': 'other', 'status': 'error', 'duration_ms': 5})
+    ToolTelemetryLedger(tmp_path, owner_id='two').record_tool_call({**selected, 'call_id': 'foreign'})
+    page = ledger.query_tool_calls_page(task_id='t1', run_id='run', workflow_run_id='flow',
+                                        tool_name='read', status='ok', min_duration_ms=25,
+                                        since=10, until=10)
+    assert [row['call_id'] for row in page['rows']] == ['c0']
+    assert page['total_count'] == 1 and page['coverage']['status'] == 'complete'
+    assert set(page) == {'rows', 'total_count', 'coverage', 'next_cursor', 'view'}
+    for key, value in {'task_id': 'missing', 'run_id': 'missing', 'workflow_run_id': 'missing',
+                       'tool_name': 'missing', 'status': 'timeout', 'min_duration_ms': 1000,
+                       'since': 20, 'until': 1}.items():
+        assert ledger.query_tool_calls_page(view=page['view'], **{key: value})['rows'] == []
+    assert ledger.query_tool_calls_page(view=page['view'], task_id='', run_id=None)['total_count'] == 2
+    for query in (ledger.query_tool_calls_page, ledger.query_tool_calls):
+        with pytest.raises(TypeError, match='unexpected keyword argument'):
+            query(owner_id='two')
+        with pytest.raises(TypeError, match='unexpected keyword argument'):
+            query(tool_nmae='read')
+    signature = inspect.signature(ToolTelemetryLedger.query_tool_calls_page)
+    assert signature.return_annotation is not inspect.Signature.empty
+    assert all(parameter.annotation is not inspect.Parameter.empty
+               and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+               for name, parameter in signature.parameters.items() if name != 'self')
+
+
 def test_empty_is_read_only(tmp_path):
     ledger = ToolTelemetryLedger(tmp_path, owner_id="one")
     assert ledger.query_tool_calls() == []

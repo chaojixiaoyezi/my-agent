@@ -30,6 +30,32 @@ def _append(store, thread_id, content="中文\u0085\u2028完整内容"):
     return store.messages.append({"thread_id": thread_id, "role": "user", "content": content})
 
 
+@pytest.mark.parametrize('error', [None, RuntimeError('read failed'), KeyboardInterrupt()])
+def test_r2_transcript_reader_exit_closes_without_suppressing(conversation, error):
+    import inspect
+
+    from agent_py_agent.agent.conversation.message_scan import TranscriptReader
+
+    store, tid = conversation
+    _append(store, tid)
+    reader = TranscriptReader(store.storage.message_path(tid))
+    if error is None:
+        with reader as entered:
+            assert entered is reader and reader.read()
+    else:
+        with pytest.raises(type(error)) as caught:
+            with reader:
+                reader.cached = ('cached', b'body')
+                raise error
+        assert caught.value is error
+    assert reader.hot.closed and reader.cached is None
+    signature = inspect.signature(TranscriptReader.__exit__)
+    assert signature.return_annotation is not inspect.Signature.empty
+    assert all(parameter.annotation is not inspect.Parameter.empty
+               and parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+               for name, parameter in signature.parameters.items() if name != 'self')
+
+
 def test_fixed_end_excludes_later_rows_and_partial_tail(conversation):
     store, tid = conversation
     first = _append(store, tid)

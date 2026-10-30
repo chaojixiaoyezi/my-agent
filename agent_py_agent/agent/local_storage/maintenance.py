@@ -26,6 +26,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from types import EllipsisType
 from typing import Any
 
 from ..common.json_io import (
@@ -821,11 +822,19 @@ def _fts_same_job(current, expected):
 
 # LLM: 只更新固定状态字段并递增持久代次，参数不携带正文或提交来源。
 # 函数用途: 原子推进任务状态。
-def _fts_update(conn, **changes):
-    allowed = {'phase', 'cursor', 'ack', 'copied', 'verify_cursor',
-               'verified_epoch', 'verified_count', 'directory'}
-    if not changes.keys() <= allowed:
-        raise ValueError('invalid fts job update')
+def _fts_update(
+    conn: sqlite3.Connection, *, phase: str | EllipsisType = ...,
+    cursor: int | None | EllipsisType = ..., ack: int | EllipsisType = ...,
+    copied: int | EllipsisType = ..., verify_cursor: int | None | EllipsisType = ...,
+    verified_epoch: int | None | EllipsisType = ..., verified_count: int | EllipsisType = ...,
+    directory: str | None | EllipsisType = ...,
+) -> None:
+    # 省略字段不改旧值；显式None仍须写SQL NULL，不能当作未提供。
+    changes = {key: value for key, value in {
+        'phase': phase, 'cursor': cursor, 'ack': ack, 'copied': copied,
+        'verify_cursor': verify_cursor, 'verified_epoch': verified_epoch,
+        'verified_count': verified_count, 'directory': directory,
+    }.items() if value is not ...}
     assignments = [f'{key}=?' for key in changes]
     conn.execute('UPDATE maintenance_fts_job SET '
                  + ','.join([*assignments, 'generation=generation+1'])

@@ -473,6 +473,64 @@ def test_buffered_cookie_progress_with_default_time_slice(tmp_path, monkeypatch,
         quota._QUOTA_SCANS.clear()
 
 
+@pytest.mark.parametrize("block,files,replay_target", [(1363, 1400, 1024), (5000, 5200, 3072)])
+def test_buffered_cookie_replay_gets_full_fresh_time_budget(tmp_path, monkeypatch, block, files, replay_target):
+    from types import SimpleNamespace
+
+    _buffer_directory_cookies(monkeypatch, block)
+    root = tmp_path / "fresh-slice"
+    root.mkdir()
+    assert _reconcile(root, max_entries=256, max_ms=1000)["complete"]
+    for index in range(files):
+        (root / f"{index:05d}").write_bytes(b"x")
+    result = _reconcile(root, max_entries=256, max_ms=1000)
+    while result["cursor"]["prep"]["block_skip"] < replay_target:
+        result = _reconcile(root, max_entries=256, max_ms=1000)
+    before = result["cursor"]
+    skip = before["prep"]["block_skip"]
+    for scan in quota._QUOTA_SCANS.values():
+        scan["iterator"].close()
+    quota._QUOTA_SCANS.clear()
+    original_scan, original_time = quota.os.scandir, quota.time
+    clock = [0.0]
+
+    class TimedScan:
+        def __init__(self, fd):
+            self.scan = original_scan(fd)
+
+        def __enter__(self):
+            self.scan.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return self.scan.__exit__(exc_type, exc_val, exc_tb)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.scan)
+            clock[0] += 0.001  # 枚举本身消耗时间，不能只模拟 deadline 检查开销。
+            return entry
+
+    monkeypatch.setattr(quota.os, "scandir", TimedScan)
+    monkeypatch.setattr(quota, "time", SimpleNamespace(time=original_time.time, monotonic=lambda: clock[0]))
+    try:
+        result = _reconcile(root, max_entries=256, max_ms=10)
+        fresh = result["enumerated_entries"] - skip
+        assert 5 <= fresh <= 11, (skip, fresh)
+        assert result["enumerated_entries"] <= 1024 + result["replay_allowance"]
+        assert result["scanned_entries"] <= 256
+        cursor = result["cursor"]
+        assert cursor["epoch"] == before["epoch"]
+        assert cursor["prep"]["enumerated"] > before["prep"]["enumerated"]
+        assert json.loads((root / ".owner-quota-ledger.json").read_text())["reconcile_cursor"] == cursor
+    finally:
+        for scan in quota._QUOTA_SCANS.values():
+            scan["iterator"].close()
+        quota._QUOTA_SCANS.clear()
+
+
 def _buffer_directory_cookies(monkeypatch, block_size):
     """真实 DirEntry/统计不变，仅模拟 glibc 整块预读期间保持不变的目录 cookie。"""
     import stat

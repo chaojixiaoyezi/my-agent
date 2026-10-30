@@ -47,6 +47,11 @@ from .user_config_capability import (
     packaged_config_path,
 )
 
+# CLI 与内层写服务共享此边界；进入作用域不能放行其他 SOURCE_AGENT 安全项。
+CLI_DEPLOYMENT_WRITABLE_KEYS = frozenset({
+    "feishu_app_id", "feishu_app_secret", "feishu_verification_token",
+    "feishu_encrypt_key", "feishu_callback_port",
+})
 LEDGER_NAME = "settings-changes.jsonl"
 # 设置修改台账最多保留 500 条：超限轮转，防 JSONL 无限增长。
 _MAX_LEDGER_RECORD_COUNT = 500
@@ -194,7 +199,8 @@ def _writable_spec(key: str) -> ParameterSpec:
     spec = parameter_registry().get(str(key or "").strip())
     if spec is None:
         raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
-    cli_allowed = _CLI_DEPLOYMENT_WRITE.get() and spec.source == SOURCE_AGENT
+    cli_allowed = (_CLI_DEPLOYMENT_WRITE.get() and spec.source == SOURCE_AGENT
+                   and spec.key in CLI_DEPLOYMENT_WRITABLE_KEYS)
     if spec.tier == "deployment" and not cli_allowed:
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",

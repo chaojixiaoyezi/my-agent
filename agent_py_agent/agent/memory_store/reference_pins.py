@@ -2,10 +2,16 @@
 # 模块用途: 记录pin视图读取的源代次，避免为每个目标重复解析全部候选、正式记忆和会话。
 from __future__ import annotations
 
+import hashlib
+import stat
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
+from ..common.nofollow_fs import read_bytes_beneath
+
+# 小型 pin 来源增加内容代次；单次读取上限为 16 MiB，不沿链接或无界读取特殊文件。
+_MAX_PIN_SOURCE_DIGEST_BYTES = 16 * 1024 * 1024
 _SOURCES: ContextVar[dict | None] = ContextVar("retention_pin_sources", default=None)
 _TARGET_READ: ContextVar[bool] = ContextVar("retention_pin_target_read", default=False)
 
@@ -28,13 +34,20 @@ def target_pin_read_enabled():
 
 
 # LLM: nofollow元数据只用于否定缓存有效性，不授予删除或认定正文无引用；非ENOENT错误原样传播。
-# 函数用途: 取得源路径的类型、身份与变化时间，缺失也作为需要监测的事实。
+# 函数用途: 取得源路径代次；小型普通文件增加内容摘要，识别同tick等长原地改写。
 def source_stamp(path):
+    path = Path(path)
     try:
-        info = Path(path).stat(follow_symlinks=False)
+        info = path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return None
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    stamp = (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if stat.S_ISREG(info.st_mode) and info.st_size <= _MAX_PIN_SOURCE_DIGEST_BYTES:
+        raw = read_bytes_beneath(path.parent, (path.name,), max_bytes=_MAX_PIN_SOURCE_DIGEST_BYTES)
+        if raw is None:
+            raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
+        return (*stamp, hashlib.blake2b(raw, digest_size=16).digest())
+    return stamp
 
 
 # LLM: 只在本次严格pin扫描上下文记录源，重复观察不同代会使快照立即失效，不改持久源或授权。

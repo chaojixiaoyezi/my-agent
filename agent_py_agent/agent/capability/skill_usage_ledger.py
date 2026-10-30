@@ -16,7 +16,12 @@ from ..common.nofollow_fs import (
     unlink_file_beneath,
     write_text_atomic_beneath,
 )
-from ..local_storage.owner_read_index import OwnerReadIndex, OwnerReadUnavailable, require_complete
+from ..local_storage.owner_read_index import (
+    _INT64_MAX,
+    OwnerReadIndex,
+    OwnerReadUnavailable,
+    require_complete,
+)
 from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_learning_store import SkillLearningStore
 
@@ -24,7 +29,6 @@ USAGE_EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
 MAX_USAGE_LEDGER_EVENTS = 2000
 KEEP_USAGE_LEDGER_EVENTS = 1000
 _CONTEXT_DEFAULTS = {"request_id": "", "thread_id": "", "task_id": "", "chars": 0}
-_INT64_MAX = 2**63 - 1
 
 
 # LLM: Store传params，旧调用方的显式关键字覆盖同名项；归一后复用批量口校验/事务，记录异常只warning。
