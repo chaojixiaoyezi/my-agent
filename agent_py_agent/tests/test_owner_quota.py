@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -371,3 +372,104 @@ def test_max_active_agents_caps_main_plus_live_subagents() -> None:
     assert slots == 0
     assert details["active_agent_cap"] == 2
     assert details["owner_active"] == 1
+
+
+def _finish_reconcile(root):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for _ in range(100):
+        result = quota.reconcile_owner_quota_slice(root, max_entries=128, max_ms=20)
+        if result['complete']:
+            return result
+    pytest.fail('quota reconciliation did not converge')
+
+
+@pytest.mark.parametrize('files', [125, 126, 160, 256])
+def test_reconciled_finite_owner_allows_consecutive_growth(tmp_path, files):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(files):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    assert _finish_reconcile(tmp_path)['used_bytes'] == files
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1_048_576)
+    target = tmp_path / 'managed'
+    for turn in range(4):
+        with enforcer.reserve([quota.OwnerQuotaChange(target, 1, append=True)]) as projection:
+            assert projection.used_bytes == files + turn
+            with target.open('ab') as stream:
+                stream.write(b'y')
+        ledger = json.loads((tmp_path / '.owner-quota-ledger.json').read_text())
+        assert ledger['used_bytes'] == files + turn + 1
+        assert ledger['dirty_since'] is None and not ledger['reservations']
+        assert ledger['reconcile_cursor']['ledger_revision'] == ledger['revision']
+    with enforcer.admission() as admission:
+        admission.check([quota.OwnerQuotaChange(target, 5)])
+        target.write_bytes(b'12345')
+    assert json.loads((tmp_path / '.owner-quota-ledger.json').read_text())['used_bytes'] == files + 5
+
+
+@pytest.mark.parametrize('mutation', ['create', 'unlink', 'append', 'nested-append', 'symlink'])
+def test_unmanaged_changes_invalidate_reconciled_growth(tmp_path, mutation):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(160):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    (tmp_path / 'nested').mkdir()
+    (tmp_path / 'nested' / 'data').write_bytes(b'x')
+    _finish_reconcile(tmp_path)
+    target = tmp_path / 'managed'
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1_048_576)
+    if mutation == 'create':
+        (tmp_path / 'external').write_bytes(b'external')
+    elif mutation == 'unlink':
+        (tmp_path / '0000').unlink()
+    elif mutation in ('append', 'nested-append'):
+        path = tmp_path / ('0000' if mutation == 'append' else 'nested/data')
+        with path.open('ab') as stream:
+            stream.write(b'external')
+    else:
+        (tmp_path / '0000').unlink()
+        (tmp_path / '0000').symlink_to('/dev/null')
+    with pytest.raises(quota.OwnerQuotaUnavailable, match='reconciliation pending'):
+        with enforcer.reserve([quota.OwnerQuotaChange(target, 1)]):
+            pytest.fail('unmanaged modification was trusted')
+    assert not target.exists()
+    assert json.loads((tmp_path / '.owner-quota-ledger.json').read_text())['dirty_since'] is not None
+    _finish_reconcile(tmp_path)
+    with enforcer.reserve([quota.OwnerQuotaChange(target, 1)]):
+        target.write_bytes(b'y')
+
+
+def test_reconciled_baseline_refuses_orphan_and_still_enforces_limit(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(160):
+        (tmp_path / str(index)).write_bytes(b'x')
+    _finish_reconcile(tmp_path)
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=160)
+    with pytest.raises(quota.OwnerQuotaExceeded) as raised:
+        with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'new', 1)]):
+            pytest.fail('quota bypassed')
+    assert raised.value.projection.projected_bytes == 161
+    path = tmp_path / '.owner-quota-ledger.json'
+    ledger = json.loads(path.read_text())
+    ledger.update(reservations={'crashed': {'bytes': 1, 'expires_at': 1}}, reserved_bytes=1)
+    path.write_text(json.dumps(ledger))
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1_048_576)
+    with pytest.raises(quota.OwnerQuotaUnavailable, match='reconciliation pending'):
+        with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'new', 1)]):
+            pytest.fail('orphan reservation trusted')
+    _finish_reconcile(tmp_path)
+    with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'new', 1)]):
+        (tmp_path / 'new').write_bytes(b'y')
+
+
+def test_bounded_snapshot_detects_eof_at_exact_entry_budget(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(128):
+        (tmp_path / str(index)).write_bytes(b'x')
+    assert quota._bounded_quota_snapshot(tmp_path, max_entries=128, max_ms=1000) == (128, 128, True)
+    (tmp_path / 'overflow').write_bytes(b'xx')
+    total, count, complete = quota._bounded_quota_snapshot(tmp_path, max_entries=128, max_ms=1000)
+    assert not complete and count == 128 and 128 <= total <= 129

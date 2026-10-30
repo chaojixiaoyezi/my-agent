@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1246,
+  "count": 1256,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3300,6 +3300,22 @@
       "description": "展示归档维护将保留天数换算为秒所用的每日秒数。"
     },
     {
+      "name": "_DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/display_archive_maintenance.py",
+      "value": 64,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "小批维护至少允许枚举64项，避免少量未到期归档挡住本批有效工作。"
+    },
+    {
+      "name": "_DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/display_archive_maintenance.py",
+      "value": 16,
+      "unit": "条",
+      "category": "其它",
+      "description": "每个处理名额最多枚举16个目录项，跳过与非UUID名称同样消耗扫描预算。"
+    },
+    {
       "name": "HOST_NOTICE_LIMIT_COUNT",
       "file": "agent_py_agent/agent/conversation/host_notices.py",
       "value": 5,
@@ -5356,6 +5372,14 @@
       "description": "投影追加见证按此字节数划分前缀摘要锚点。"
     },
     {
+      "name": "_APPEND_WITNESS_WINDOW_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "其它",
+      "description": "追加见证的头尾历史核验窗口各为8 KiB，与领域writer的16 KiB总历史读预算对应。"
+    },
+    {
       "name": "_INT64_MAX",
       "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
       "value": 9223372036854775807,
@@ -6052,12 +6076,20 @@
       "description": "英文关键词最短 3 个字符：太短没有区分度；只收 ASCII 词面，用于 BM25 跨语言命中。"
     },
     {
-      "name": "_MAX_PIN_SOURCE_DIGEST_BYTES",
+      "name": "_MAX_RESUMABLE_DIGEST_ENTRIES",
       "file": "agent_py_agent/agent/memory_store/reference_pins.py",
-      "value": 16777216,
-      "unit": "字节",
+      "value": 128,
+      "unit": "条",
       "category": "上限预算",
-      "description": "小型 pin 来源增加内容代次；单次读取上限为 16 MiB，不沿链接或无界读取特殊文件。"
+      "description": "可续切片状态表最大保留路径数，防止离线调用缓存无界增长。"
+    },
+    {
+      "name": "_PIN_SOURCE_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/memory_store/reference_pins.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "热源单次系统调用分块读取上限为 64 KiB，保持流式读取与块级摘要复用粒度。"
     },
     {
       "name": "_CONTEXT_BUNDLE_SNAPSHOT_DAYS",
@@ -6082,6 +6114,14 @@
       "unit": "",
       "category": "其它",
       "description": "迁移串行化用的 PG 事务级 advisory lock key（固定常量）；保证多进程迁移互斥（无物理单位）。"
+    },
+    {
+      "name": "_MAX_APPEND_WITNESS_READ_BYTES",
+      "file": "agent_py_agent/agent/observability/telemetry_ledger.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "追加见证最多核验16 KiB历史字节，新增记录另计，不随账本长度增长。"
     },
     {
       "name": "_DEFAULT_MAX_AGENT_COUNT",
@@ -8898,6 +8938,46 @@
       "unit": "秒",
       "category": "超时",
       "description": "原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。"
+    },
+    {
+      "name": "_QUOTA_DIR_BUFFER_BYTES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 32768,
+      "unit": "字节",
+      "category": "其它",
+      "description": "原生目录读取缓冲固定32KiB；未消费记录随prep持久化，不在重启时重新枚举。"
+    },
+    {
+      "name": "_QUOTA_MAX_CACHED_DIR_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 65536,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "单目录排序候选缓存上限；更大目录才回退到多遍有界选择。"
+    },
+    {
+      "name": "_QUOTA_MAX_PERSISTED_DIR_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 4096,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "持久目录批次的名称总上限，避免续点账本无限增长。"
+    },
+    {
+      "name": "_QUOTA_MAX_TRACKED_DIRS",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 256,
+      "unit": "个目录",
+      "category": "上限预算",
+      "description": "权威准入最多核对这些目录的无链接元数据。"
+    },
+    {
+      "name": "_QUOTA_MAX_TRACKED_FILES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 2048,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "权威准入最多核对这些普通文件，超过上限不授权旧账增长。"
     },
     {
       "name": "_QUOTA_SCAN_CACHE_SIZE",

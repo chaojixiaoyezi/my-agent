@@ -23,6 +23,8 @@ from ..workflows.models import redact_bearer_values
 
 SCHEMA = "tool_call_telemetry.v1"
 PARTS = ("data", "telemetry")
+# 追加见证最多核验16 KiB历史字节，新增记录另计，不随账本长度增长。
+_MAX_APPEND_WITNESS_READ_BYTES = 16 * 1024
 
 
 # LLM: 结构化秘密整值替换，字符串先用公共规则脱敏再截断；未知对象不调用 repr。
@@ -70,9 +72,8 @@ def _lock(home):
     return locked_private_directory(home, relative_parts=PARTS, lock_name=".telemetry.lock")
 
 
-# LLM: 仅观察领域锁内no-follow打开的真实单链接普通文件；可选读取写后完整字节供前缀摘要见证核验。
-# 函数用途: 捕获追加前后的准确文件元数据及写后稳定字节快照。
-def _append_stamp(home, *, include_bytes=False):
+# 领域锁内固定no-follow单链接FD；大文件只读头8 KiB、旧尾8 KiB及本次增量。
+def _append_stamp(home, *, include_bytes=False, before_size=0):
     try:
         descriptor = open_readonly_file_beneath(home, (*PARTS, 'tool_calls.jsonl'))
     except FileNotFoundError:
@@ -84,20 +85,36 @@ def _append_stamp(home, *, include_bytes=False):
         stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         if not include_bytes:
             return stamp
-        if info.st_size > 16 * 1024 * 1024:
+        if not 0 <= before_size <= info.st_size:
             return stamp, None
-        chunks = []
-        offset = 0
-        while offset < info.st_size:
-            piece = os.pread(descriptor, min(65536, info.st_size - offset), offset)
-            if not piece:
-                break
-            chunks.append(piece)
-            offset += len(piece)
+
+        def window(start, stop):
+            chunks = []
+            while start < stop:
+                piece = os.pread(descriptor, stop - start, start)
+                if not piece:
+                    return None
+                chunks.append(piece)
+                start += len(piece)
+            return b''.join(chunks)
+
+        if info.st_size <= _MAX_APPEND_WITNESS_READ_BYTES:
+            raw = window(0, info.st_size)
+            if raw is None:
+                return stamp, None
+        else:
+            half = _MAX_APPEND_WITNESS_READ_BYTES // 2
+            tail_start = max(0, before_size - half)
+            head = window(0, min(half, before_size))
+            if head is None:
+                return stamp, None
+            tail = window(tail_start, info.st_size)
+            if tail is None:
+                return stamp, None
+            raw = (head, tail_start, tail)
         verify = os.fstat(descriptor)
         verify_stamp = (verify.st_dev, verify.st_ino, verify.st_size, verify.st_mtime_ns, verify.st_ctime_ns)
-        raw = b''.join(chunks)
-        if verify_stamp != stamp or len(raw) != info.st_size:
+        if verify_stamp != stamp or verify.st_nlink != 1:
             return stamp, None
         return stamp, raw
     finally:
@@ -230,7 +247,9 @@ class ToolTelemetryLedger:
         with _lock(self._home):
             before = _append_stamp(self._home)
             append_text_beneath(self._home, (*PARTS, "tool_calls.jsonl"), line)
-            after, raw_after = _append_stamp(self._home, include_bytes=True)
+            after, raw_after = _append_stamp(
+                self._home, include_bytes=True, before_size=before[2] if before is not None else 0,
+            )
             if before is not None and after is not None and after[2] - before[2] == encoded_len:
                 note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after, raw_after=raw_after)
         return item

@@ -57,16 +57,17 @@ _EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
 _INT64_MAX = 2**63 - 1
 # 投影追加见证按此字节数划分前缀摘要锚点。
 _ANCHOR_BYTES = 1024
+# 追加见证的头尾历史核验窗口各为8 KiB，与领域writer的16 KiB总历史读预算对应。
+_APPEND_WITNESS_WINDOW_BYTES = 8 * 1024
 _PROCESS_MEMOS = OrderedDict()
 _PROCESS_MEMO_LOCK = threading.RLock()
 _PROCESS_ADVANCE_LOCK = threading.RLock()
 _PROCESS_APPENDS = OrderedDict()
 
 
-# LLM: 见证必须由持有领域锁的writer提供写后完整前缀字节并核对ori_spans摘要；前缀被等长改写即拒绝见证。
-# 函数用途: 校验写后前缀与已发布检查点摘要一致后，保存进程内与SQLite持久追加见证。
+# writer持领域锁提供稳定头尾窗口；窗口失配撤销见证，未知前缀仍走预算内完整复核。
 def note_owner_append(home, parts, before, after, *, raw_after=None):
-    if before is None or after is None or before[:2] != after[:2] or before[2] >= after[2]:
+    if before is None or after is None or before[2] >= after[2]:
         return
     key = (str(Path(home).absolute()), tuple(parts))
     verified = False
@@ -860,70 +861,124 @@ class OwnerReadIndex:
         except FileNotFoundError:
             return None
 
-    # LLM: 不为writer创建缓存；必须核对写后前缀字节与检查点全部ori_spans及链式前缀摘要一致才发布见证。
-    # 函数用途: 持久保存经前缀摘要核实的追加见证，拦截before/after窗口内的等长前缀改写。
+    # 只接受本代次、准确字节计数的增量状态和前次写后尾窗摘要；旧格式不免验。
+    def _append_witness_hasher(self, proof, size, through):
+        if (not isinstance(proof, dict) or proof.get('schema') != 'owner_append_windows.v1'
+                or type(proof.get('tail_start')) is not int
+                or proof['tail_start'] != max(0, size - _APPEND_WITNESS_WINDOW_BYTES)
+                or not isinstance(proof.get('tail_digest'), str)
+                or len(proof['tail_digest']) != 64
+                or any(ch not in '0123456789abcdef' for ch in proof['tail_digest'])
+                or through > size):
+            raise ValueError('invalid append window witness')
+        return _ResumableSha256.from_state(proof.get('state'), size - through)
+
+    # 只取窗口内完整锚点；大于窗口的旧span无法安全抽样时拒绝，交回完整分块证明。
+    def _verify_append_windows(self, connection, checkpoint, windows, *, tail_verified=False):
+        for start, stop, raw in windows:
+            if start >= stop:
+                continue
+            spans = connection.execute(
+                'SELECT start,stop,digest FROM ori_spans WHERE sid=? AND generation=?'
+                ' AND start>=? AND start<? AND stop<=? ORDER BY start',
+                (checkpoint['sid'], checkpoint['generation'], start, stop, stop),
+            ).fetchall()
+            # 链式尾摘要已覆盖这段；不足一个锚点时可能没有完整span落在窗口内。
+            if not spans and tail_verified and start > 0 and stop - start < _ANCHOR_BYTES:
+                continue
+            if (not spans or spans[0]['start'] - start >= _ANCHOR_BYTES
+                    or (start == 0 and spans[0]['start'] != 0)):
+                return False
+            position = spans[0]['start']
+            for span in spans:
+                if span['start'] != position or not position < span['stop'] <= stop:
+                    return False
+                piece = raw[span['start'] - start:span['stop'] - start]
+                if not hmac.compare_digest(hashlib.sha256(piece).hexdigest(), span['digest']):
+                    return False
+                position = span['stop']
+            if stop - position >= _ANCHOR_BYTES or (stop == checkpoint['through'] and position != stop):
+                return False
+        return True
+
+    # 不创建缓存；核验有界头尾锚点，未索引增量SHA状态和尾窗摘要跨进程持久续接。
     def _record_append_witness(self, parts, before, after, *, raw_after=None):
-        if not isinstance(raw_after, (bytes, bytearray)) or len(raw_after) != after[2] or before[2] > len(raw_after):
+        full = isinstance(raw_after, (bytes, bytearray))
+        if full:
+            if len(raw_after) != after[2] or len(raw_after) > 2 * _APPEND_WITNESS_WINDOW_BYTES:
+                return False
+            head = raw_after
+            tail_start = max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
+            tail = raw_after[tail_start:]
+        elif isinstance(raw_after, tuple) and len(raw_after) == 3:
+            head, tail_start, tail = raw_after
+            if (not isinstance(head, bytes) or not isinstance(tail, bytes)
+                    or type(tail_start) is not int
+                    or len(head) != min(_APPEND_WITNESS_WINDOW_BYTES, before[2])
+                    or tail_start != max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
+                    or len(tail) != after[2] - tail_start):
+                return False
+        else:
+            return False
+        delta = tail[before[2] - tail_start:]
+        if len(delta) != after[2] - before[2]:
             return False
         sid = self._source_id('telemetry', parts)
         with self._database(write=True) as connection:
             connection.execute('BEGIN IMMEDIATE')
+
+            def reject():
+                connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+                connection.commit()
+                return False
+
+            if before[:2] != after[:2] or before[2] >= after[2]:
+                return reject()
             checkpoint = self._checkpoint(connection, sid, 'telemetry', parts)
             if checkpoint is None or checkpoint['through'] > before[2]:
-                connection.rollback()
-                return False
+                return reject()
             base = [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp'])]
             value = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('append:' + sid,)).fetchone()
-            previous = json.loads(value[0]) if value is not None else None
-            chained = (
-                isinstance(previous, list)
-                and len(previous) == 5
-                and isinstance(previous[4], str)
-                and len(previous[4]) == 64
-                and all(ch in '0123456789abcdef' for ch in previous[4])
-                and previous[:3] == base
-                and previous[3] == list(before)
-            )
-            if checkpoint['stamp'] != before and not chained:
-                connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
-                connection.commit()
-                return False
-            spans = connection.execute(
-                'SELECT start,stop,digest FROM ori_spans WHERE sid=? AND generation=? ORDER BY start',
-                (sid, checkpoint['generation']),
-            ).fetchall()
-            pos = 0
-            for span in spans:
-                start, stop, digest = span['start'], span['stop'], span['digest']
-                if start != pos or stop > checkpoint['through']:
-                    connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
-                    connection.commit()
-                    return False
-                if not hmac.compare_digest(hashlib.sha256(raw_after[start:stop]).hexdigest(), digest):
-                    connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
-                    connection.commit()
-                    return False
-                pos = stop
-            if pos != checkpoint['through']:
-                connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
-                connection.commit()
-                return False
-            if chained:
-                before_digest = hashlib.sha256(raw_after[:before[2]]).hexdigest()
-                if not hmac.compare_digest(before_digest, previous[4]):
-                    connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
-                    connection.commit()
-                    return False
-            after_digest = hashlib.sha256(raw_after).hexdigest()
+            try:
+                previous = json.loads(value[0]) if value is not None else None
+                if checkpoint['stamp'] == before:
+                    if not full and checkpoint['through'] != before[2]:
+                        return reject()
+                    hasher = _ResumableSha256()
+                    if full:
+                        hasher.update(raw_after[checkpoint['through']:before[2]])
+                else:
+                    if (not isinstance(previous, list) or len(previous) != 5
+                            or previous[:3] != base or previous[3] != list(before)):
+                        return reject()
+                    hasher = self._append_witness_hasher(previous[4], before[2], checkpoint['through'])
+                    digest = hashlib.sha256(tail[:before[2] - tail_start]).hexdigest()
+                    if not hmac.compare_digest(digest, previous[4]['tail_digest']):
+                        return reject()
+            except (ValueError, TypeError):
+                return reject()
+            through = checkpoint['through']
+            windows = ([(0, through, raw_after)] if full else
+                       [(0, min(len(head), through), head),
+                        (tail_start, min(through, before[2]), tail)])
+            if not self._verify_append_windows(
+                connection, checkpoint, windows,
+                tail_verified=not full and checkpoint['stamp'] != before,
+            ):
+                return reject()
+            hasher.update(delta)
+            next_start = max(0, after[2] - _APPEND_WITNESS_WINDOW_BYTES)
+            witness = dict(schema='owner_append_windows.v1', state=hasher.to_state(),
+                           tail_start=next_start,
+                           tail_digest=hashlib.sha256(tail[next_start - tail_start:]).hexdigest())
             connection.execute(
                 'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                ('append:' + sid, _json([*base, list(after), after_digest])),
+                ('append:' + sid, _json([*base, list(after), witness])),
             )
             connection.commit()
             return True
 
-    # LLM: 只有经写后ori_spans前缀摘要核实的5字段追加见证可免重复读盘；旧4字段见证一律降级走分块重验。
-    # 函数用途: 判断检查点到当前来源是否存在已验证前缀完整性的可信追加见证。
+    # 进程链或新格式持久见证必须绑定准确来源stamp；旧格式、坏摘要状态回退完整证明。
     def _witnessed_append(self, connection, checkpoint, observed):
         key = (str(self._home), tuple(json.loads(checkpoint['parts'])))
         with _PROCESS_MEMO_LOCK:
@@ -940,14 +995,13 @@ class OwnerReadIndex:
                 proof = json.loads(saved[0])
             except (ValueError, TypeError):
                 raise _Issue('corrupt_append_witness') from None
-            return (
-                isinstance(proof, list)
-                and len(proof) == 5
-                and isinstance(proof[4], str)
-                and len(proof[4]) == 64
-                and all(ch in '0123456789abcdef' for ch in proof[4])
-                and proof[:4] == [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp']), list(observed)]
-            )
+            if (isinstance(proof, list) and len(proof) == 5
+                    and proof[:4] == [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp']), list(observed)]):
+                try:
+                    self._append_witness_hasher(proof[4], observed[2], checkpoint['through'])
+                    return True
+                except (ValueError, TypeError):
+                    return False
         return False
 
     # LLM: 持久续点绑定当前generation、through和来源stamp；支持保存span内增量摘要状态供冷进程小预算续跑。
@@ -964,7 +1018,7 @@ class OwnerReadIndex:
             ('proof:' + checkpoint['sid'], value),
         )
 
-    # LLM: 每一未见证的已发布字节均参与摘要复核，见证本身必须在写后核实前缀ori_spans摘要；共享hasher锁内复制。
+    # LLM: 未见证的已发布字节逐块完整复核；见证只认可领域锁内写后的有界头尾核验，共享hasher锁内复制。
     # 函数用途: 有界、可跨实例且可跨冷进程地核验检查点的完整已验证前缀。
     def _prove_prefix(self, connection, descriptor, checkpoint, observed, budget):
         sid = checkpoint["sid"]
@@ -1404,6 +1458,8 @@ class OwnerReadIndex:
                     updated["sealed"], updated["complete"],
                 ),
             )
+            # 水位和代次已在同一事务更新，旧基线追加状态不再有效。
+            connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + updated['sid'],))
             connection.commit()
         except BaseException:
             connection.rollback()

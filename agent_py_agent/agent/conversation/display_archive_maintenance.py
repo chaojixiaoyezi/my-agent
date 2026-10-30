@@ -10,6 +10,7 @@ import stat
 import time
 import uuid
 from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
 
 from ..common.nofollow_fs import open_directory_beneath
@@ -28,6 +29,10 @@ from .display_archive import (
 _PAGE_NAME = re.compile(r"(?:0|[1-9][0-9]*)\.json\Z")
 # 展示归档维护将保留天数换算为秒所用的每日秒数。
 _DISPLAY_ARCHIVE_DAY_SECONDS = 86400
+# 每个处理名额最多枚举16个目录项，跳过与非UUID名称同样消耗扫描预算。
+_DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES = 16
+# 小批维护至少允许枚举64项，避免少量未到期归档挡住本批有效工作。
+_DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES = 64
 
 
 # LLM: 维护只接受Store或明确的会话存储根；不猜Home路径，根缺失不新建。
@@ -212,16 +217,16 @@ def _compact(fd, manifest):
     return True
 
 
-# LLM: 只枚举直接UUID目录；持根锁逐档失败隔离，不吞计数，不在缺根时创建目录。
-# 函数用途: 对一批合格归档执行显式维护并返回整数统计。
+# 扫描项数与成功处理数分别有界；跳过、错误和非UUID也不能导致无限枚举。
 def _maintain(value, maximum, action):
     result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0}
     if maximum == 0:
         return result
+    scan_budget = max(_DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES, maximum * _DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES)
     try:
         with _locked_root(_root(value)) as root:
             with os.scandir(root) as entries:
-                for entry in entries:
+                for entry in islice(entries, scan_budget):
                     if not _ARCHIVE_ID.fullmatch(entry.name):
                         continue
                     if result["compacted"] + result["expired"] + result["removed"] >= maximum:

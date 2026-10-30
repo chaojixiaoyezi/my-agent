@@ -4,7 +4,7 @@
 - `agent_py_agent/agent/settings/deployment_policy.py`、`agent_py_agent/agent/settings/model_credentials.py`：宿主部署守卫策略（`deployment_policy.json`）与模型凭据分离加载，移除 `config.py` 对 `cli` 的反向导入（`sol-3`）。
 - `agent_py_agent/agent/memory_store/generation_manifest.py`、`agent_py_agent/agent/memory_store/read_index.py`、`agent_py_agent/agent/memory_store/reference_pins.py`：Memory 代际清单（`memory_generation.json`）、可丢弃 SQLite FTS5 派生读索引与跨代引用 pin 契约（`sol-4` / `sol-5`）。
 - `agent_py_agent/agent/local_storage/owner_read_index.py`：Owner 级分块摘要验证与增量读索引（含 5 字段写后前缀摘要见证与大 span 可序列化 SHA-256 跨进程续跑，`sol-8`）。
-- `agent_py_agent/agent/conversation/display_archive_maintenance.py`：展示流与归档日志有界维护（保护活动 writer 与 0600 权限，`sol-10`）。
+- `agent_py_agent/agent/conversation/display_archive_maintenance.py`、`agent_py_agent/tests/test_display_archive_maintenance.py`：展示流与归档日志有界维护与总扫描目录上限单测（保护活动 writer 与 0600 权限，`sol-10`）。
 - `agent_py_agent/agent/subagents/services/persistence/locator_hygiene.py`：子代理定位器卫生检查与孤儿归档（`sol-11`）。
 - `agent_py_agent/agent/conversation/background_process_owner.py`：TUI 后台进程观察面板按当前会话/owner 严格过滤与 3 处“后台进程观察刷新失败”根因修复（`sol-14`）。
 

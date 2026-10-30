@@ -1726,9 +1726,8 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
     for source in sources:
         watch_pin_source(source)
     root = store.manifest()
-    sources.extend(path.parent / item["path"] for item in (root or {}).get("segments", ()))
-    for source in sources:
-        watch_pin_source(source)
+    for segment in (path.parent / item["path"] for item in (root or {}).get("segments", ())):
+        watch_pin_source(segment)
     committed = store.events(root=root)
     if committed is not None:
         events = committed

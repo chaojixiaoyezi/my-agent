@@ -285,7 +285,7 @@ def test_restart_cursor_tracks_nested_lexical_paths(tmp_path):
 def test_sort_preparation_is_budgeted_and_resumable(tmp_path, monkeypatch):
     for index in range(1400):
         (tmp_path / f'{index:04d}').write_bytes(b'x')
-    original = quota.os.scandir
+    original = quota._quota_scandir
     visited = []
 
     # LLM: 包装真实scandir且保留context退出关闭；不篡改顺序或扫描结果。
@@ -319,7 +319,7 @@ def test_sort_preparation_is_budgeted_and_resumable(tmp_path, monkeypatch):
             visited.append(entry.name)
             return entry
 
-    monkeypatch.setattr(quota.os, 'scandir', CountingScan)
+    monkeypatch.setattr(quota, '_quota_scandir', CountingScan)
     first = _reconcile(tmp_path, max_entries=1, max_ms=1000)
     assert len(visited) <= 1024
     assert first['complete'] is False and first['scanned_entries'] <= 1
@@ -335,7 +335,7 @@ def test_sort_preparation_is_budgeted_and_resumable(tmp_path, monkeypatch):
 def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_path, monkeypatch, cookie_block):
     if cookie_block is not None:
         _buffer_directory_cookies(monkeypatch, cookie_block)
-    original_scandir = quota.os.scandir
+    original_scandir = quota._quota_scandir
     raw_scandir_count = [0]
 
     class TransparentCountingScan:
@@ -357,7 +357,7 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
             raw_scandir_count[0] += 1
             return entry
 
-    monkeypatch.setattr(quota.os, 'scandir', TransparentCountingScan)
+    monkeypatch.setattr(quota, '_quota_scandir', TransparentCountingScan)
     roots = [tmp_path / f'owner-{idx:02d}' for idx in range(2)]
     for root in roots:
         root.mkdir()
@@ -491,7 +491,7 @@ def test_buffered_cookie_replay_gets_full_fresh_time_budget(tmp_path, monkeypatc
     for scan in quota._QUOTA_SCANS.values():
         scan["iterator"].close()
     quota._QUOTA_SCANS.clear()
-    original_scan, original_time = quota.os.scandir, quota.time
+    original_scan, original_time = quota._quota_scandir, quota.time
     clock = [0.0]
 
     class TimedScan:
@@ -513,7 +513,7 @@ def test_buffered_cookie_replay_gets_full_fresh_time_budget(tmp_path, monkeypatc
             clock[0] += 0.001  # 枚举本身消耗时间，不能只模拟 deadline 检查开销。
             return entry
 
-    monkeypatch.setattr(quota.os, "scandir", TimedScan)
+    monkeypatch.setattr(quota, "_quota_scandir", TimedScan)
     monkeypatch.setattr(quota, "time", SimpleNamespace(time=original_time.time, monotonic=lambda: clock[0]))
     try:
         result = _reconcile(root, max_entries=256, max_ms=10)
@@ -535,7 +535,7 @@ def _buffer_directory_cookies(monkeypatch, block_size):
     """真实 DirEntry/统计不变，仅模拟 glibc 整块预读期间保持不变的目录 cookie。"""
     import stat
 
-    real_scan, real_open, real_seek = quota.os.scandir, quota.open_directory_beneath, quota.os.lseek
+    real_scan, real_open, real_seek = quota._quota_scandir, quota.open_directory_beneath, quota.os.lseek
     states = {}
     cookie_base = 9030876314358498251
 
@@ -585,4 +585,51 @@ def _buffer_directory_cookies(monkeypatch, block_size):
 
     monkeypatch.setattr(quota, 'open_directory_beneath', open_dir)
     monkeypatch.setattr(quota.os, 'lseek', seek)
-    monkeypatch.setattr(quota.os, 'scandir', scan)
+    monkeypatch.setattr(quota, '_quota_scandir', scan)
+
+
+@pytest.mark.parametrize('files', [256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize('clear_cache', [False, True])
+def test_reconciliation_enumerates_flat_directory_once(tmp_path, files, clear_cache, monkeypatch):
+    for index in range(files):
+        (tmp_path / f'{index:05d}').write_bytes(b'x')
+    original = quota._quota_scandir
+    enumerated = [0]
+
+    class CountingScan:
+        def __init__(self, fd):
+            self.scan = original(fd)
+
+        def __enter__(self):
+            self.scan.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.scan.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.scan)
+            enumerated[0] += 1
+            return entry
+
+        def __getattr__(self, name):
+            return getattr(self.scan, name)
+
+    monkeypatch.setattr(quota, '_quota_scandir', CountingScan)
+    reports = []
+    for _ in range(150):
+        if clear_cache:
+            for current in quota._QUOTA_SCANS.values():
+                current['iterator'].close()
+            quota._QUOTA_SCANS.clear()
+        reports.append(_reconcile(tmp_path, max_entries=128, max_ms=20))
+        assert reports[-1]['scanned_entries'] <= 128
+        if reports[-1]['complete']:
+            break
+    assert reports[-1]['complete'], reports[-1]
+    assert reports[-1]['used_bytes'] == reports[-1]['inode_count'] == files
+    assert enumerated[0] == sum(row['enumerated_entries'] for row in reports)
+    assert enumerated[0] <= files + 5, (files, enumerated[0])

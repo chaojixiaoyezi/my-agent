@@ -3,6 +3,8 @@
 # 模块用途: 复用唯一owner配额和锁序，C只收紧实际出生来源。
 from __future__ import annotations
 
+import base64
+import ctypes
 import json
 import math
 import os
@@ -14,6 +16,8 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -52,6 +56,18 @@ _QUOTA_SCAN_CACHE_SIZE = 16
 _QUOTA_SCAN_CURSOR_TTL_SECONDS = 3600
 # 配额字典序扫描每批最多保留的排序候选目录项数。
 _QUOTA_SORT_BATCH_ENTRIES = 128
+# 单目录排序候选缓存上限；更大目录才回退到多遍有界选择。
+_QUOTA_MAX_CACHED_DIR_ENTRIES = 65536
+# 持久目录批次的名称总上限，避免续点账本无限增长。
+_QUOTA_MAX_PERSISTED_DIR_ENTRIES = 4096
+# 权威准入最多核对这些目录的无链接元数据。
+_QUOTA_MAX_TRACKED_DIRS = 256
+# 权威准入最多核对这些普通文件，超过上限不授权旧账增长。
+_QUOTA_MAX_TRACKED_FILES = 2048
+# 原生目录读取缓冲固定32KiB；未消费记录随prep持久化，不在重启时重新枚举。
+_QUOTA_DIR_BUFFER_BYTES = 32768
+# 仅传递同次前台生成器的观察容器，不携带权限或跨调用缓存。
+_QUOTA_SNAPSHOT_STATE = ContextVar('quota_snapshot_state', default=None)
 
 
 # LLM: 原配额写者在owner锁内解释append字节，不预先读取大小，保持批量写原子准入语义。
@@ -203,6 +219,7 @@ class OwnerQuotaAdmission:
         self._before = {}
         self._before_inodes = {}
         self._reservation = uuid.uuid4().hex
+        self._authoritative_baseline = False
 
     # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
     # 函数用途: 计算本批增长并在写入前持久预留。
@@ -237,12 +254,22 @@ class OwnerQuotaAdmission:
                 raise OwnerQuotaUnavailable('hardlinked target growth requires inode replacement')
         root = self._enforcer.owner_root
         ledger = _read_quota_ledger(root)
-        total, count, complete = _bounded_quota_snapshot(root, max_entries=128, max_ms=10)
-        if not complete and final > replaced:
+        snapshot = {}
+        token = _QUOTA_SNAPSHOT_STATE.set(snapshot)
+        try:
+            total, count, complete = _bounded_quota_snapshot(root, max_entries=128, max_ms=10)
+        finally:
+            _QUOTA_SNAPSHOT_STATE.reset(token)
+        # 同一准入分阶段调用时先结算上阶段；其它遗留预留仍不得当成干净基线。
+        if not complete and self._before:
+            self.commit_delta()
+            ledger = _read_quota_ledger(root)
+        authoritative = not complete and _verified_quota_baseline(root, ledger)
+        if not complete and not authoritative and final > replaced:
             ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
             _write_quota_ledger(root, ledger)
             raise OwnerQuotaUnavailable('owner usage reconciliation pending; growth refused')
-        used = total if complete else max(ledger['used_bytes'], self._enforcer.max_bytes)
+        used = total if complete else ledger['used_bytes'] if authoritative else max(ledger['used_bytes'], self._enforcer.max_bytes)
         projection = OwnerQuotaProjection(
             used_bytes=used,
             projected_bytes=max(0, used - replaced + final),
@@ -256,6 +283,10 @@ class OwnerQuotaAdmission:
             ledger['reservations'] = {}
             self._before = {path: _logical_file_size(path) for path in self._before}
             self._before_inodes = {path: int(path.is_file()) for path in self._before}
+            ledger['reconcile_cursor'] = _quota_baseline_cursor(root, ledger, snapshot)
+        elif not authoritative:
+            ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+        self._authoritative_baseline = complete or authoritative
         for path, size in current_sizes.items():
             self._before.setdefault(path, size)
             self._before_inodes.setdefault(path, int(path.is_file()))
@@ -264,7 +295,8 @@ class OwnerQuotaAdmission:
             'paths': [str(path.relative_to(root)) for path in self._before]}
         ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
         ledger['revision'] += 1
-        ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+        if self._authoritative_baseline:
+            ledger['reconcile_cursor']['ledger_revision'] = ledger['revision']
         _write_quota_ledger(root, ledger)
         return projection
 
@@ -282,6 +314,12 @@ class OwnerQuotaAdmission:
         ledger['reservations'].pop(self._reservation, None)
         ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
         ledger['revision'] += 1
+        cursor = ledger.get('reconcile_cursor')
+        if ledger.get('dirty_since') is None and not ledger['reservations'] and isinstance(cursor, dict) and cursor.get('complete') is True:
+            if _refresh_quota_baseline(root, cursor, self._before):
+                cursor['ledger_revision'] = ledger['revision']
+            else:
+                ledger['dirty_since'] = time.time()
         _write_quota_ledger(root, ledger)
 
         self._before.clear()
@@ -669,6 +707,194 @@ def _write_quota_ledger(root, ledger):
     write_bytes_atomic_beneath(root, (_QUOTA_LEDGER,), encoded)
 
 
+# LLM: 元数据仅描述真实扫描观察；超过跟踪上限仍能统计，但不能据此授权旧账增长。
+# 函数用途: 收集有界目录指纹、文件指纹和目录名称集合。
+def _capture_quota_metadata(state, parts, info, name=None):
+    if state is None or state.get('metadata_complete', True) is False:
+        return
+    state['metadata_complete'] = True
+    directories = state.setdefault('dir_stamps', {})
+    files = state.setdefault('file_stamps', {})
+    names = state.setdefault('dir_names', {})
+    rel = '/'.join(parts)
+    if name is None:
+        stamp = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
+        if (rel not in directories and len(directories) >= _QUOTA_MAX_TRACKED_DIRS
+                or rel and rel in directories and directories[rel] != stamp):
+            state['metadata_complete'] = False
+            return
+        directories.setdefault(rel, stamp)
+        names.setdefault(rel, {})
+        return
+    if not parts and name in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock'):
+        return
+    directory_names = names.setdefault(rel, {})
+    directory_names[name] = True
+    if sum(map(len, names.values())) > _QUOTA_MAX_PERSISTED_DIR_ENTRIES:
+        state['metadata_complete'] = False
+        return
+    if info is not None and stat.S_ISREG(info.st_mode):
+        key = '/'.join((*parts, name))
+        if key not in files and len(files) >= _QUOTA_MAX_TRACKED_FILES:
+            state['metadata_complete'] = False
+            return
+        stamp = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        if key in files and files[key] != stamp:
+            state['metadata_complete'] = False
+        files[key] = stamp
+
+
+# LLM: 持久化只复制完整的有界观察；缺字段和旧游标都不能成为授权证明。
+# 函数用途: 提取可重启的基线元数据。
+def _quota_metadata_payload(state):
+    if state.get('metadata_complete') is not True:
+        return {'metadata_complete': False}
+    return {key: deepcopy(state[key]) for key in ('metadata_complete', 'dir_stamps', 'file_stamps', 'dir_names')}
+
+
+# LLM: 小owner完整扫描也发布同样的基线，便于受控写入跨过128项门槛。
+# 函数用途: 为前台全量小快照生成权威游标。
+def _quota_baseline_cursor(root, ledger, state):
+    identity = root.stat(follow_symlinks=False)
+    return {'complete': True, 'ledger_revision': ledger['revision'],
+            'root_dev': identity.st_dev, 'root_ino': identity.st_ino,
+            **_quota_metadata_payload(state)}
+
+
+# LLM: 所有持久路径必须是owner内的真实相对组件；不能让坏游标越界或跟随链接。
+# 函数用途: 校验元数据键和目录候选名称。
+def _valid_quota_parts(parts):
+    return (isinstance(parts, (tuple, list)) and len(parts) <= 64
+            and all(isinstance(p, str) and p and '/' not in p and '\x00' not in p and p not in ('.', '..') for p in parts))
+
+
+# LLM: 原子账本替换必改root时间戳；root须核名称全集及所有文件指纹，不用mtime代替文件内容新鲜度。
+# 函数用途: 有界nofollow核验目录身份、命名空间及普通文件的大小和时间指纹。
+def _verify_quota_metadata(root, cursor):
+    try:
+        dirs, files, names = (cursor[key] for key in ('dir_stamps', 'file_stamps', 'dir_names'))
+        if (cursor.get('metadata_complete') is not True or not isinstance(dirs, dict)
+                or not 0 < len(dirs) <= _QUOTA_MAX_TRACKED_DIRS or '' not in dirs
+                or not isinstance(files, dict) or len(files) > _QUOTA_MAX_TRACKED_FILES
+                or not isinstance(names, dict) or set(names) != set(dirs)
+                or any(not isinstance(row, dict) for row in names.values())
+                or sum(map(len, names.values())) > _QUOTA_MAX_PERSISTED_DIR_ENTRIES):
+            return False
+        for rel, stamp in dirs.items():
+            parts = rel.split('/') if rel else []
+            if (not _valid_quota_parts(parts) or not isinstance(stamp, list) or len(stamp) != 4
+                    or any(type(v) is not int or v < 0 for v in stamp)
+                    or any(not _valid_quota_parts((name,)) for name in names[rel])):
+                return False
+            fd = open_directory_beneath(root, tuple(parts), require_dir_fd=True)
+            try:
+                info = os.fstat(fd)
+                observed = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
+                if observed[:2] != stamp[:2] or rel and observed != stamp:
+                    return False
+                if not rel:
+                    actual = set()
+                    with os.scandir(fd) as entries:
+                        for entry in entries:
+                            if entry.name not in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock'):
+                                actual.add(entry.name)
+                                if len(actual) > len(names[rel]):
+                                    return False
+                    if actual != set(names[rel]):
+                        return False
+            finally:
+                os.close(fd)
+        for rel, stamp in files.items():
+            parts = rel.split('/')
+            if (not _valid_quota_parts(parts) or not parts or not isinstance(stamp, list) or len(stamp) != 5
+                    or any(type(v) is not int or v < 0 for v in stamp)):
+                return False
+            info = _quota_sorted_stat(root, tuple(parts[:-1]), parts[-1])
+            if not stat.S_ISREG(info.st_mode) or [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns] != stamp:
+                return False
+        return True
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return False
+
+
+# LLM: 孤儿预留、dirty、修订或root不符均拒绝；缓存或不完整扫描不能替代磁盘验证。
+# 函数用途: 判断完整旧账是否仍可安全地用于当前增长准入。
+def _verified_quota_baseline(root, ledger):
+    cursor = ledger.get('reconcile_cursor')
+    if (ledger.get('dirty_since') is not None or ledger.get('reservations')
+            or not isinstance(cursor, dict) or cursor.get('complete') is not True
+            or cursor.get('ledger_revision') != ledger['revision']):
+        return False
+    try:
+        info = root.stat(follow_symlinks=False)
+        if (info.st_dev, info.st_ino) != (cursor.get('root_dev'), cursor.get('root_ino')):
+            return False
+        return _verify_quota_metadata(root, cursor)
+    except OSError:
+        return False
+
+
+# LLM: 只刷新本事务声明的叶和父目录；核对其它文件，并核对变化目录名称，防顺手洗白外部写入。
+# 函数用途: 按真实落盘状态维护连续受控写入的可信基线。
+def _refresh_quota_baseline(root, cursor, paths):
+    if cursor.get('metadata_complete') is not True:
+        return False
+    updated = deepcopy(cursor)
+    try:
+        affected = {''}
+        for path in paths:
+            parts = path.relative_to(root).parts
+            for depth in range(len(parts)):
+                parent = parts[:depth]
+                rel = '/'.join(parent)
+                affected.add(rel)
+                fd = open_directory_beneath(root, parent, require_dir_fd=True)
+                try:
+                    info = os.fstat(fd)
+                finally:
+                    os.close(fd)
+                if rel not in updated['dir_stamps']:
+                    updated['dir_names'][rel] = {}
+                updated['dir_stamps'][rel] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
+                if depth:
+                    updated['dir_names']['/'.join(parent[:-1])][parent[-1]] = True
+            parent = '/'.join(parts[:-1])
+            try:
+                info = _quota_sorted_stat(root, parts[:-1], parts[-1])
+            except FileNotFoundError:
+                info = None
+            rel = '/'.join(parts)
+            updated['file_stamps'].pop(rel, None)
+            if info is None:
+                updated['dir_names'][parent].pop(parts[-1], None)
+            else:
+                updated['dir_names'][parent][parts[-1]] = True
+                if stat.S_ISREG(info.st_mode):
+                    updated['file_stamps'][rel] = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        for rel in affected:
+            fd = open_directory_beneath(root, tuple(rel.split('/')) if rel else (), require_dir_fd=True)
+            try:
+                with os.scandir(fd) as entries:
+                    expected = set(updated['dir_names'][rel])
+                    actual = set()
+                    for entry in entries:
+                        if not rel and entry.name in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock'):
+                            continue
+                        actual.add(entry.name)
+                        if len(actual) > len(expected):
+                            return False
+                    if actual != expected:
+                        return False
+            finally:
+                os.close(fd)
+        if not _verify_quota_metadata(root, updated):
+            return False
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return False
+    cursor.update(updated)
+    return True
+
+
 # LLM: FD逐层nofollow，不以路径别名扫描外部；每条目录项都消耗预算，深度超过64关闭式拒绝。
 # 函数用途: 惰性枚举owner的普通文件字节和inode，不生成全目录列表。
 def _quota_entries(root, parts=()):
@@ -676,6 +902,8 @@ def _quota_entries(root, parts=()):
         raise OwnerQuotaUnavailable('quota traversal depth exceeded')
     descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     try:
+        state = _QUOTA_SNAPSHOT_STATE.get()
+        _capture_quota_metadata(state, parts, os.fstat(descriptor))
         with os.scandir(descriptor) as entries:
             for entry in entries:
                 if not parts and entry.name in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock'):
@@ -684,8 +912,11 @@ def _quota_entries(root, parts=()):
                 try:
                     info = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
+                    if state is not None:
+                        state['metadata_complete'] = False
                     yield (0, 0)
                     continue
+                _capture_quota_metadata(state, parts, info, entry.name)
                 yield (info.st_size, 1) if stat.S_ISREG(info.st_mode) else (0, 0)
                 if stat.S_ISDIR(info.st_mode):
                     try:
@@ -699,10 +930,11 @@ def _quota_entries(root, parts=()):
 # LLM: 一次全新有限核对只用于小owner准入；超预算关闭迭代器，不把未读完的总量当权威。
 # 函数用途: 至多读max_entries个目录项并返回是否准确读到末尾。
 def _bounded_quota_snapshot(root, *, max_entries, max_ms):
-    iterator = _quota_entries(root)
+    iterator = None
     total, count = 0, 0
     deadline = time.monotonic() + max_ms / 1000
     try:
+        iterator = _quota_entries(root)
         for _ in range(max_entries):
             if time.monotonic() >= deadline:
                 break
@@ -712,9 +944,15 @@ def _bounded_quota_snapshot(root, *, max_entries, max_ms):
                 return total, count, True
             total += size
             count += files
+        if time.monotonic() < deadline:
+            try:
+                next(iterator)
+            except StopIteration:
+                return total, count, True
         return total, count, False
     finally:
-        iterator.close()
+        if iterator is not None:
+            iterator.close()
 
 
 # LLM: 后台账仍是观察而非准入证明；最多16个LRU扫描，每个暂停扫描至多持一个目录流及绑定FD，重启沿路径合计恢复。
@@ -742,7 +980,10 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             cursor = recovered or {}
             prep = cursor.get('prep') if isinstance(cursor.get('prep'), dict) else None
             replay_skip = int(prep.get('block_skip', 0)) if prep is not None else 0
-            state = {'prep': dict(prep) if prep is not None else None}
+            state = {'prep': deepcopy(prep), **_quota_metadata_payload(cursor)}
+            if not cursor:
+                state.pop('metadata_complete', None)
+            state['dir_batches'] = deepcopy(cursor.get('dir_batch', {}))
             scan = {'iterator': _sorted_quota_entries(root, after=cursor.get('last_relpath', ''), state=state),
                     'revision': ledger['revision'], 'last_relpath': cursor.get('last_relpath', ''),
                     'used': cursor.get('partial_used_bytes', 0), 'inodes': cursor.get('partial_inode_count', 0),
@@ -791,9 +1032,16 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             'last_relpath': scan['last_relpath'], 'partial_used_bytes': scan['used'],
             'partial_inode_count': scan['inodes'], 'started_at': scan['started_at'],
             'ledger_revision': ledger['revision'], 'root_dev': identity.st_dev, 'root_ino': identity.st_ino}
+        cursor_payload.update(_quota_metadata_payload(scan['state']))
         prep_state = scan.get('state', {}).get('prep') if isinstance(scan.get('state'), dict) else None
         if not complete and isinstance(prep_state, dict):
             cursor_payload['prep'] = prep_state
+        batches = deepcopy(scan['state'].get('dir_batches', {}))
+        for rel, batch in batches.items():
+            prefix = rel + '/' if rel else ''
+            batch['names'] = [name for name in batch['names'] if prefix + name > scan['last_relpath']]
+        if not complete and sum(len(batch['names']) for batch in batches.values()) <= _QUOTA_MAX_PERSISTED_DIR_ENTRIES:
+            cursor_payload['dir_batch'] = deepcopy(batches)
         ledger['reconcile_cursor'] = cursor_payload
         if complete:
             ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'], dirty_since=None,
@@ -823,12 +1071,21 @@ def _valid_quota_prep_cursor(prep):
             or not isinstance(after, str) or type(enumerated) is not int or enumerated <= 0
             or type(dir_offset) is not int or dir_offset < 0
             or type(block_skip) is not int or not 0 <= block_skip <= enumerated
-            or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH_ENTRIES
-            or any(not isinstance(n, str) or not n or n <= after for n in names)
+            or not isinstance(names, list) or len(names) > _QUOTA_MAX_CACHED_DIR_ENTRIES
+            or any(not _valid_quota_parts((n.rstrip('/'),)) or n <= after for n in names)
             or names != sorted(set(names))
-            or not isinstance(dir_id, list) or len(dir_id) != 2
+            or not isinstance(dir_id, list) or len(dir_id) != 4
             or any(type(v) is not int or v < 0 for v in dir_id)):
         return False
+    pending = prep.get('native_pending')
+    if pending is not None:
+        if not isinstance(pending, str) or len(pending) > (_QUOTA_DIR_BUFFER_BYTES + 2) // 3 * 4:
+            return False
+        try:
+            if len(base64.b64decode(pending, validate=True)) > _QUOTA_DIR_BUFFER_BYTES or block_skip:
+                return False
+        except ValueError:
+            return False
     return True
 
 
@@ -859,11 +1116,116 @@ def _resumable_quota_cursor(root, ledger):
         return None
     if 'prep' in cursor and cursor['prep'] is not None and not _valid_quota_prep_cursor(cursor['prep']):
         return None
+    batches = cursor.get('dir_batch', {})
+    if not isinstance(batches, dict) or len(batches) > 65:
+        return None
+    total_names = 0
+    for rel, batch in batches.items():
+        if not isinstance(batch, dict) or not _valid_quota_parts(batch.get('parts')) or rel != '/'.join(batch['parts']):
+            return None
+        names, identity = batch.get('names'), batch.get('dir_id')
+        if (not isinstance(names, list) or names != sorted(set(names))
+                or any(not _valid_quota_parts((n.rstrip('/'),)) for n in names)
+                or not isinstance(identity, list) or len(identity) != 4
+                or any(type(v) is not int or v < 0 for v in identity)):
+            return None
+        prefix = rel + '/' if rel else ''
+        if any(prefix + name <= last for name in names):
+            return None
+        total_names += len(names)
+    if total_names > _QUOTA_MAX_PERSISTED_DIR_ENTRIES:
+        return None
     info = root.stat(follow_symlinks=False)
     return cursor if (info.st_dev, info.st_ino) == (cursor['root_dev'], cursor['root_ino']) else None
 
 
-# LLM: 每层只保留最小128个名字；每个真实枚举（含恢复片重读项）均交回预算门，完整枚举完才发表排序批次。
+# LLM: 只读POSIX目录流的公开dirent64布局，不访问CPython对象内存；未消费缓冲可持久化，避免冷恢复重放。
+# 类用途: 在64位Linux/macOS上提供等同scandir的惰性名称枚举及准确逐项偏移。
+class _QuotaDirectoryStream:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+        self.pending = b''
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.operation = getattr(self.libc, '__getdirentries64' if sys.platform == 'darwin' else 'getdents64')
+        argument_types = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+        if sys.platform == 'darwin':
+            argument_types.append(ctypes.POINTER(ctypes.c_longlong))
+        self.operation.argtypes = argument_types
+        self.operation.restype = ctypes.c_ssize_t
+        self.buffer = ctypes.create_string_buffer(_QUOTA_DIR_BUFFER_BYTES)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def __iter__(self):
+        return self
+
+    def checkpoint(self):
+        return {'pending': base64.b64encode(self.pending).decode('ascii'),
+                'offset': _safe_dir_lseek(self.descriptor, 0, os.SEEK_CUR)}
+
+    def restore(self, pending):
+        self.pending = base64.b64decode(pending, validate=True)
+
+    def __next__(self):
+        while True:
+            if not self.pending:
+                args = [self.descriptor, self.buffer, len(self.buffer)]
+                if sys.platform == 'darwin':
+                    base = ctypes.c_longlong()
+                    args.append(ctypes.byref(base))
+                count = self.operation(*args)
+                if count < 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error))
+                if not count:
+                    raise StopIteration
+                self.pending = self.buffer.raw[:count]
+            # 仅解析已复制且有界的字节串，不解引用dirent或CPython对象内存。
+            name_offset = 21 if sys.platform == 'darwin' else 19
+            type_offset = 20 if sys.platform == 'darwin' else 18
+            record_length = int.from_bytes(self.pending[16:18], sys.byteorder)
+            if not name_offset < record_length <= len(self.pending):
+                raise OwnerQuotaUnavailable('invalid quota directory record')
+            record, self.pending = self.pending[:record_length], self.pending[record_length:]
+            raw = record[name_offset:]
+            if b'\x00' not in raw:
+                raise OwnerQuotaUnavailable('unterminated quota directory name')
+            name = os.fsdecode(raw.split(b'\x00', 1)[0])
+            if name in ('.', '..'):
+                continue
+            return _QuotaDirectoryEntry(name, record[type_offset], self.descriptor)
+
+
+# LLM: d_type未知时才做nofollow stat；不持有新FD，不跟随符号链接。
+# 类用途: 为排序准备暴露目录项名称和目录判定。
+@dataclass
+class _QuotaDirectoryEntry:
+    name: str
+    kind: int
+    descriptor: int
+
+    def is_dir(self, *, follow_symlinks=False):
+        if follow_symlinks or self.kind == 0:
+            return stat.S_ISDIR(os.stat(self.name, dir_fd=self.descriptor, follow_symlinks=follow_symlinks).st_mode)
+        return self.kind == 4
+
+
+# LLM: 仅已知64位dirent64平台使用逐项内核续点；其它平台保留scandir的有界块重放协议。
+# 函数用途: 打开真实惰性目录枚举器，不在预算门外做列表化。
+def _quota_scandir(descriptor):
+    if ctypes.sizeof(ctypes.c_void_p) == 8 and sys.platform in ('darwin', 'linux'):
+        try:
+            return _QuotaDirectoryStream(descriptor)
+        except AttributeError:
+            pass
+    return os.scandir(descriptor)
+
+
+# LLM: 单遍准备最多65536个候选并缓存，仍逐项交回预算门；超限才回退到多遍有界选择。
 #   暂停记录当前getdirentries块起点偏移与候选集，恢复时校验目录身份并从块起点继续有界枚举。
 # 函数用途: 可暂停且可跨缓存淘汰有界恢复地准备排序候选，避免大目录在切片重启后原地踏步或超预算。
 def _quota_sorted_names(root, parts, after, state=None):
@@ -872,24 +1234,45 @@ def _quota_sorted_names(root, parts, after, state=None):
     descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     try:
         dir_stat = os.fstat(descriptor)
-        dir_id = [dir_stat.st_dev, dir_stat.st_ino]
+        dir_id = [dir_stat.st_dev, dir_stat.st_ino, dir_stat.st_mtime_ns, dir_stat.st_ctime_ns]
+        _capture_quota_metadata(state, parts, dir_stat)
+        batches = state.setdefault('dir_batches', {}) if isinstance(state, dict) else {}
+        key = '/'.join(parts)
+        cached = batches.get(key)
+        # root的时间戳被每片账本原子替换扰动；缓存只作枚举加速，准入另核root名称全集和文件指纹。
+        def same_directory(saved):
+            return saved == dir_id or not parts and isinstance(saved, list) and saved[:2] == dir_id[:2]
+
+        if cached is not None and same_directory(cached.get('dir_id')):
+            remaining = [name for name in cached['names'] if name > after]
+            cached['names'] = remaining
+            return remaining[:_QUOTA_SORT_BATCH_ENTRIES]
         prep = state.get('prep') if isinstance(state, dict) else None
+        pending = None
         if (isinstance(prep, dict) and tuple(prep.get('parts', ())) == parts
-                and prep.get('after') == after and prep.get('dir_id') == dir_id):
+                and prep.get('after') == after and same_directory(prep.get('dir_id'))):
             names = list(prep.get('names', ()))
+            overflow = prep.get('overflow', False)
             raw_count = int(prep.get('enumerated', 0))
             resume_offset = int(prep.get('dir_offset', 0))
             replay_remaining = int(prep.get('block_skip', 0))
+            pending = prep.get('native_pending')
             if resume_offset > 0:
                 _safe_dir_lseek(descriptor, resume_offset, os.SEEK_SET)
         else:
             names = []
+            overflow = False
             raw_count = 0
             replay_remaining = 0
         last_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
         block_pos = last_pos
         block_skip = 0
-        with os.scandir(descriptor) as entries:
+        with _quota_scandir(descriptor) as entries:
+            if pending is not None:
+                restore = getattr(entries, 'restore', None)
+                if not callable(restore):
+                    raise OwnerQuotaUnavailable('quota directory cursor backend unavailable')
+                restore(pending)
             for entry in entries:
                 cur_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
                 if cur_pos != last_pos:
@@ -902,22 +1285,33 @@ def _quota_sorted_names(root, parts, after, state=None):
                     yield None
                     continue
                 name = entry.name + ('/' if entry.is_dir(follow_symlinks=False) else '')
-                if name > after and (len(names) < _QUOTA_SORT_BATCH_ENTRIES or name < names[-1]):
+                _capture_quota_metadata(state, parts, None, entry.name)
+                if name > after:
+                    if len(names) >= _QUOTA_MAX_CACHED_DIR_ENTRIES:
+                        overflow = True
                     idx = bisect.bisect_left(names, name)
                     if idx == len(names) or names[idx] != name:
                         names.insert(idx, name)
-                        if len(names) > _QUOTA_SORT_BATCH_ENTRIES:
+                        if len(names) > _QUOTA_MAX_CACHED_DIR_ENTRIES:
                             names.pop()
                 raw_count += 1
                 if isinstance(state, dict):
                     state['prep'] = {
                         'parts': list(parts), 'after': after, 'enumerated': raw_count,
-                        'dir_offset': block_pos, 'block_skip': block_skip, 'names': list(names), 'dir_id': dir_id,
+                        'dir_offset': block_pos, 'block_skip': block_skip,
+                        'names': names, 'dir_id': dir_id,
+                        'overflow': overflow,
                     }
+                    checkpoint = getattr(entries, 'checkpoint', None)
+                    if callable(checkpoint):
+                        point = checkpoint()
+                        state['prep'].update(dir_offset=point['offset'], block_skip=0, native_pending=point['pending'])
                 yield None
             if isinstance(state, dict):
                 state['prep'] = None
-            return names
+            if not overflow:
+                batches[key] = {'parts': list(parts), 'dir_id': dir_id, 'names': names}
+            return names[:_QUOTA_SORT_BATCH_ENTRIES]
     finally:
         os.close(descriptor)
 
@@ -965,9 +1359,12 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None):
             try:
                 info = _quota_sorted_stat(root, parts, name.rstrip('/'))
             except FileNotFoundError:
+                if isinstance(state, dict):
+                    state['metadata_complete'] = False
                 if relpath > after:
                     yield relpath, 0, 0
                 continue
+            _capture_quota_metadata(state, parts, info, name.rstrip('/'))
             if relpath > after:
                 control = not parts and name in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock')
                 regular = stat.S_ISREG(info.st_mode) and not control

@@ -29,7 +29,7 @@ from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_fold
 from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_request_path
 from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.local_storage import LocalStore
-from agent_py_agent.agent.memory_store import JsonlMemory
+from agent_py_agent.agent.memory_store import JsonlMemory, MemoryRecord
 from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.local_doctor import build_local_doctor_report, rebuild_local_store
@@ -387,7 +387,118 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
 
         doctor = build_local_doctor_report(agent)
         assert doctor["memory_count"] == 1
-        assert any(item["name"] == "memory_index" for item in doctor["checks"])
+        assert next(item for item in doctor["checks"] if item["name"] == "memory_index")["ok"] is True
+
+
+@pytest.fixture
+def memory_doctor_agent(tmp_path):
+    """诊断与重建只使用本例隔离 owner 的真实正式库和 SQLite。"""
+    return SimpleAgent(AgentConfig(
+        model_backend="echo",
+        my_agent_home=str(tmp_path / "home"),
+        memory_path="memory.jsonl",
+        gateway_workspace="gateway",
+        subagent_workspace="subs",
+        local_store_path="local_store/local.db",
+        local_store_files_dir="local_store/files",
+        local_store_events_path="local_store/events.jsonl",
+    ), tmp_path)
+
+
+def test_local_doctor_memory_index_stays_healthy_after_repeated_rebuild(memory_doctor_agent):
+    agent = memory_doctor_agent
+    saved = agent.memory.add("user", "完整同步的正式记忆", kind="fact")
+    index = MemoryReadIndex(agent.memory.path)
+    for _ in range(2):
+        result = rebuild_local_store(agent, sources={"memory"})
+        assert result["memory_indexed"] == 1
+        candidates, coverage = index.query("完整同步", limit=1)
+        assert coverage["status"] == "complete"
+        assert [record.entry_id for record in index.resolve(candidates)] == [saved.entry_id]
+        doctor = build_local_doctor_report(agent)
+        check = next(item for item in doctor["checks"] if item["name"] == "memory_index")
+        assert check["ok"] is True
+        assert check["severity"] == "ok"
+        assert check["details"]["coverage"] == index.coverage()
+        assert check["details"]["memory_indexed"] == 1
+        assert "MemoryReadIndex" in check["message"]
+        assert result["source_counts"].get("memory", 0) == 0
+        assert doctor["source_counts"].get("memory", 0) == 0
+        assert not any("local-rebuild" in suggestion for suggestion in doctor["suggestions"])
+
+
+@pytest.mark.parametrize("state", ["missing", "partial", "stale", "unavailable", "wrong_owner"])
+def test_local_doctor_memory_index_reports_unhealthy_real_coverage(memory_doctor_agent, state):
+    agent = memory_doctor_agent
+    saved = agent.memory.add("user", "诊断前的正式记忆", kind="fact")
+    agent.memory.migrate_tiers()
+    index = MemoryReadIndex(agent.memory.path)
+    if state == "partial":
+        agent.memory.add("user", "尚未索引的第二条记忆", kind="fact")
+        assert agent.memory.rebuild_read_index(batch_size=1)["status"] == "partial"
+    elif state != "missing":
+        assert rebuild_local_store(agent, sources={"memory"})["memory_indexed"] == 1
+        before = index.coverage()
+        assert before["status"] == "complete"
+        if state == "stale":
+            agent.memory.replace(saved.entry_id, "同条数但已换代的新正文", expected_version=saved.version)
+            assert index.store.manifest()["generation"] > before["generation"]
+        elif state == "unavailable":
+            with sqlite3.connect(index.path) as connection:
+                connection.execute("UPDATE metadata SET value='invalid-json' WHERE key='watermark'")
+        else:
+            with sqlite3.connect(index.path) as connection:
+                row = connection.execute("SELECT value FROM metadata WHERE key='watermark'").fetchone()
+                watermark = {**json.loads(row[0]), "owner": "another-owner"}
+                connection.execute("UPDATE metadata SET value=? WHERE key='watermark'", (json.dumps(watermark),))
+    coverage = index.coverage()
+    assert coverage["status"] == (state if state in {"partial", "unavailable"} else "missing")
+    # 播种历史旧副本，让旧条数恰好相等；它不能为新索引授予健康状态。
+    for record in agent.memory.all():
+        agent.local_store.upsert_record(source_type="memory", source_id=record.entry_id,
+                                       title="历史旧投影", content=record.content)
+    assert agent.local_store.source_counts()["memory"] == len(agent.memory.all())
+    raw = index.path.read_bytes() if index.path.exists() else None
+    doctor = build_local_doctor_report(agent)
+    check = next(item for item in doctor["checks"] if item["name"] == "memory_index")
+    assert check["ok"] is False
+    assert check["severity"] == "P1"
+    assert check["details"]["coverage"] == coverage
+    assert any("local-rebuild --source memory" in suggestion for suggestion in doctor["suggestions"])
+    assert (index.path.read_bytes() if index.path.exists() else None) == raw
+
+
+def test_local_doctor_memory_index_reports_unmigrated_source(memory_doctor_agent):
+    agent = memory_doctor_agent
+    record = MemoryRecord("user", "升级前尚未建索引的记忆", kind="fact", entry_id="legacy-fact")
+    agent.memory.path.write_text(record.to_json() + "\n", encoding="utf-8")
+    index = MemoryReadIndex(agent.memory.path)
+    assert index.coverage()["status"] == "unmigrated"
+    doctor = build_local_doctor_report(agent)
+    check = next(item for item in doctor["checks"] if item["name"] == "memory_index")
+    assert check["ok"] is False
+    assert check["details"]["coverage"]["status"] == "unmigrated"
+    assert doctor["memory_count"] == 1
+    assert any("local-rebuild --source memory" in suggestion for suggestion in doctor["suggestions"])
+    assert not index.path.exists()
+    assert index.store.manifest() is None
+
+
+def test_local_doctor_memory_index_requires_coverage_even_for_empty_generation(memory_doctor_agent):
+    agent = memory_doctor_agent
+    record = agent.memory.add("user", "删除后为空的正式代次", kind="fact")
+    agent.memory.remove(record.entry_id, expected_version=record.version)
+    index = MemoryReadIndex(agent.memory.path)
+    assert index.coverage()["status"] == "missing"
+    doctor = build_local_doctor_report(agent)
+    check = next(item for item in doctor["checks"] if item["name"] == "memory_index")
+    assert doctor["memory_count"] == 0
+    assert doctor["source_counts"].get("memory", 0) == 0
+    assert check["ok"] is False
+    assert any("local-rebuild --source memory" in suggestion for suggestion in doctor["suggestions"])
+    assert rebuild_local_store(agent, sources={"memory"})["memory_indexed"] == 0
+    rebuilt = build_local_doctor_report(agent)
+    assert next(item for item in rebuilt["checks"] if item["name"] == "memory_index")["ok"] is True
 
 
 def _perf_e_event_store(tmp_path, coordinator):
