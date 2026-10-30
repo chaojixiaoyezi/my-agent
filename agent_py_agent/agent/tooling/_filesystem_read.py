@@ -233,7 +233,7 @@ class FileSystemTool(BaseTool):
             candidate = self.workspace_root / candidate
         try:
             candidate = candidate.resolve(strict=False)
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             raise ValueError("路径解析失败，请检查路径是否有效。") from exc
         decision = self.check_path_access(candidate)
         if decision.allowed:

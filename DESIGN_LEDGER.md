@@ -9499,3 +9499,35 @@ Owner 墙继续采用原有收紧方向的配置回退，不能把请求漏传�
    - **设计方向（Level 0 极简寻址目录 + Level 1 按需展开 + 提示词去重）**：
      - **Level 0（常驻 System Prompt，极简一行式寻址表）**：只保留一张高密度“内部能力与工具寻址索引”（某类内部事态归哪个工具/哪个 `self_map` 分区管，包含本次新增的 `/new`、多通道告警切换、多级压缩比例治理、跨实例单向推送等入口），消灭同义反复叮嘱与大段重复规则，反压初始上下文体积；
      - **Level 1（按需读取）**：仅当用户涉及对应内部管理动作时，Agent 通过 `self_map(section=...)` / `tool_search` 按需拉取该模块的精确状态与操作 schema，平时零额外 Token 开销。
+
+
+## 2026-10-29 TUI 与 Gateway 高 CPU 占用及高闲置唤醒（Idle Wakeups）放大 Bug 专项治理（待实现）
+
+状态：已通过真机进程剖析与 `sample` 内核调用栈采样完成根因定位，独立立项待实现（纯内部运行时与 TUI 渲染/轮询退避优化，不改变外部业务语义、无需新增外部接口）。
+
+1. **问题 1：TUI 运行等待期 `4Hz` 动画刷新击穿整帧缓存 + 全量用户消息索引重算 + 单帧 3 次 `create_content`（导致每个忙 TUI 空转占 `20%～25% CPU`、`27～38` 次闲置唤醒/秒）**
+   - **根因定位**：
+     1. `_refresh_loop`（`agent_py_agent/cli/chat_parts/tui_threading.py:18, 811-826`）在回合运行期间每 `0.25s`（`4Hz`）调用 `app.invalidate()`；而 `tui_render_context_key`（`tui_block_renderer.py:328-380`）包含每帧递增的 `context.spinner_index` 与思考耗时动画键，导致 `_frame_key`（`tui_view.py:218, 1240-1258`）在 `TuiFrameProvider.frame()` 中每秒 4 次缓存失效；
+     2. 每次 `_frame_key` 失效时，`TuiFrameProvider.frame()`（`tui_view.py:242`）都会无条件重跑 `_user_turn_line_index`（`tui_view.py:122-143`），对会话全部历史 `user` 块逐一执行 `_single_line_user_summary`（`tui_view.py:105-118`：终端控制字符正则清洗 + `_graphemes` 分词 + 逐字素 `wcswidth` 宽度计算），且 `render_tui_snapshot`（`tui_block_renderer.py:696, 702`）每秒 4 次通过 `SafeFormattedLines.join` 与 `prefix_offsets + tuple(...)` 拼接复制上万行历史 `prefix_lines`；
+     3. `_TuiStickyUserWindow.write_to_screen`（`tui_view.py:887-908`）在同一帧绘制中先在 `L897` 调用一次 `control.create_content(width, height)`，判断顶栏可见后在 `L902` 调用第二次 `control.create_content(width, body_height)`，随后 `L907` 的 `super().write_to_screen` 内部又调用第三次 `create_content`，导致每帧重复 3 次构造 `UIContent` 与行元组转换。
+   - **修复方案**：
+     1. **缓存 `_user_turn_line_index` 与单行用户摘要**：在 `TuiFrameProvider` 中按 `(snapshot.stable_blocks, snapshot.active_blocks, rendered.block_line_offsets, normalized_width)` 缓存 `_user_turn_line_index` 结果，仅当消息块或行偏移真正变化时重算，底部 spinner 动画帧直接 O(1) 复用；
+     2. **消除 `_TuiStickyUserWindow.write_to_screen` 单帧三次 `create_content` 重复调用**：在 `TuiTranscriptControl.create_content` 中对同 `(frame, width, height, cursor_line, follow, selection)` 做单帧 memo 复用，使同一轮 `write_to_screen` 探测与绘制共享同一个 `UIContent`；
+     3. **无流式增量时的动画刷新频率退避**：当处于纯等待远端模型思考/工具执行阶段（周期内无新块/流式字符变更）时，将 `_refresh_loop` 的周期从 `0.25s`（`4Hz`）平滑退避至 `0.5s～1.0s`（有新事件发布时由 `state_store.subscribe(provider.invalidate)` 立即 0 延迟重绘）。
+2. **问题 2：前台回合运行期 `_background_notice_loop` 误加速至 `1.0s` + 无差别高频重扫 `list_background_processes` 目录（16 个忙 TUI 每秒向 Gateway 制造 16 次 HTTP 请求与 16 次本地扫盘）**
+   - **根因定位**：
+     1. `_background_notice_loop`（`tui_threading.py:238-256`）将 `foreground_running or background_active` 合并判断，导致只要前台回合在跑（哪怕已经有 `poll_gateway_chunks` 在实时流式读取当前回合），后台通知线程也从 `5.0s` 加速到 `1.0s` 轮询 Gateway `POST /client/notices`；
+     2. 每次后台通知轮询都会调用 `_refresh_background_watch`（`tui_threading.py:869-913`），在 `L896` 无条件执行 `list_background_processes(Path(home), thread_id=thread_id)` 扫描磁盘 `process_sessions` 目录——即便当前既未打开后台进程观察页（`background_watch_active == False`），也没有任何活跃后台进程（`background_process_count == 0`）；
+     3. `poll_gateway_chunks`（`gateway_client.py:195-241`）在每次 `activity_paths` 心跳续租更新（`deadline > previous_deadline`）时都将 `active` 判为 `True`（`L234`），导致即便 `chunk_offset == previous_offset`（没有任何新输出字节）也重置 `poll_interval = 0.1s`（`10Hz`）。
+   - **修复方案**：
+     1. **解耦 `foreground_running` 与后台通知 `1.0s` 轮询**：当仅有 `foreground_running == True` 而 `background_active == False`（无活跃后台子代理/任务/受管进程且未打开观察页）时，`_background_notice_loop` 维持 `3.0s～5.0s` 低频同步；
+     2. **空闲会话跳过 `list_background_processes` 高频扫盘**：当 `background_watch_active == False` 且上一帧 `active_count == 0` 时，基于目录 `(mtime_ns, size)` 轻量签名短路跳过全目录 JSON 解析，直到目录变化或打开观察页；
+     3. **`poll_gateway_chunks` 按真实新字节输出退避**：仅当 `chunk_offset != previous_offset`（真正收到新流式输出）时保持 `0.1s` 高响应，纯心跳等待期平滑退避至 `0.25s～0.5s`。
+3. **问题 3：Gateway 单进程 `107` 线程 GIL 惊群（`91%` 采样卡在 `take_gil`）+ `0.001s` 忙等超时 + `/client/notices` 每秒重复全量扫盘（导致 Gateway 达 `141.3% CPU` 与 `7,658` 次闲置唤醒/秒）**
+   - **根因定位**：
+     1. `multiprocess_native_runtime.py:183`、`multiprocess_native_executor_lane.py:161`、`multiprocess_native_host_lane.py:213` 在 `serve_once(receive_timeout=0.1)` 循环尾部均写有 `self._stop.wait(0.001)`（`1ms` 等待），且 `multiprocess_native_executor_client.py:416, 529`、`mcp_transport.py:276`、`process_output_capture.py:74` 存在 `0.01s`（`100Hz`）高频轮询等待；
+     2. `http_handlers.py:1787-1817` 在处理 `POST /client/notices` 时，每次请求均同步重跑 `conversation_agent_activity`（扫描 subagent/goal/task 存储）与 `execution_target_payload`（扫描 `requests/processing` 与 `inbox` 目录），无跨请求短窗口缓存；
+     3. 16 路并发请求 + HTTP 线程 + 原生通道消费线程在单 Gateway 进程内膨胀至 `107` 个线程，高频定时器唤醒引发严重 Python GIL 抢锁风暴（`sample 67127` 中 `906 / 998` 次 `pthread_cond_wait` 位于 `take_gil`）。
+   - **修复方案**：
+     1. **移除 `multiprocess_native_*` 无意义的每轮 `0.001s` 等待并收敛 `0.01s` 轮询退避**：`serve_once` 本身已具备 `receive_timeout=0.1` 阻塞接收，正常循环无需额外 `self._stop.wait(0.001)`（或仅在让锁需求下用 `time.sleep(0)` / 事件通知）；将 `multiprocess_native_executor_client.py:416, 529` 的 `0.01s` 轮询改为指数退避（`0.005s -> 0.05s`）或完成事件唤醒；
+     2. **为 `/client/notices` 的 `conversation_agent_activity` 与 `execution_target_payload` 增加基于版本/目录 `mtime_ns` 的轻量秒级缓存（TTL `0.5s～1.0s`）**，消除 16 个 TUI 并发轮询时的重复磁盘遍历与 GIL 争用。

@@ -262,7 +262,7 @@ class PathAccessPolicy:
     def check(self, path: str | Path) -> PathAccessDecision:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
         # H2：宿主托管存储（插件安装库、包库）不随 owner 墙、Full Access 或数据根豁免开放，最先判定。
         store = self._host_managed_store_of(resolved)
@@ -294,7 +294,7 @@ class PathAccessPolicy:
     def host_write_decision(self, path: str | Path) -> PathAccessDecision:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
         if self.agent_home_root is None:
             return PathAccessDecision(True)
@@ -375,7 +375,7 @@ class PathAccessPolicy:
     def host_managed_store(self, path: str | Path) -> Path | None:
         try:
             resolved = Path(path).expanduser().resolve(strict=False)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return None
         return self._host_managed_store_of(resolved)
 
@@ -513,7 +513,7 @@ def _normalized_root(value: object) -> Path | None:
         return None
     try:
         return Path(text).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return None
 
 
@@ -522,7 +522,7 @@ def _normalized_root(value: object) -> Path | None:
 def _current_user_home() -> Path | None:
     try:
         return Path.home().resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return None
 
 
@@ -534,7 +534,7 @@ def _my_agent_home_root() -> Path | None:
     raw = os.environ.get("MY_AGENT_HOME", "").strip() or "~/.my-agent"
     try:
         return Path(os.path.expandvars(raw)).expanduser().resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return None
 
 
@@ -1058,7 +1058,7 @@ def _uninheritable_root_forms() -> frozenset[str]:
     for item in UNINHERITABLE_ROOT_DIRS:
         try:
             forms.add(str(Path(item).resolve(strict=False)))
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             continue
     return frozenset(forms)
 
