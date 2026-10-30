@@ -1,3 +1,29 @@
+## 2026-10-29 e905-sol-13 R2：默认布局冷转与封板测试缺口
+
+来源：`fix-e905-sol-13-r2.md`及Opus F1/F2/F3、Astra-1/Astra-2 B1复核；起点`89d4870c0`。主代理直接修改，不派生子代理，不部署或启停服务。
+
+- `ConversationStorage`/`ConversationStore`接收`compact_root`；解析顺序是提交显式根→构造注入→标准`workspace/runtime/workspaces/<scope>/conversations`回到owner的compact→其它同级夹具回退。SimpleAgent构造与Compact候选CAS显式透传writer同根，不新建存储权威。
+- 冷转先恢复prepared并核真实消息边界、字节/行数阈值，再读冷检查点与封印carried metadata；达到阈值而冷副本缺失/无效统一报`DataCorruptionError`。原获胜CAS保持成功，仅为同head保存`compact_transcript_maintenance`的pending/error_type/checkpoint_id；小会话不产生虚假维护待办。
+- 新测试使用真实SimpleAgent的非同级默认布局与writer/CAS，核清单、热文件物理收缩、冷行by-id及完整原字节回读。缺失、坏JSON和内容身份损坏三分支核结构化维护事实；未达阈值不读副本。另测解析优先级与只读构造无目录副作用。
+- 工具防线沿真实live writer/CAS提交129条工具，最早ref已离开128热窗口，再经`prepare_conversation_context`重入；断言真实领域异常`ConversationCompactError.code == 'COMPACT_SOURCE_CHANGED'`且类级`ImmutableJsonIndex.items`调用次数为0。仓库不存在任务文案所称`CompactPreparationFailure`类，不编造异常别名。
+- 两条独立pin回归分别使用另一线程的completed链接、原线程active链接但`active_task_ids=()`漂移；同时直接核pin与真实不冷转。原终态同线程正例保留，不放宽保守条件。
+- 补provider测试模块/已改定义中文双注释，并澄清Gateway force=False排除本请求中段、force=True保留同请求已完成检查点但剥离未提交尾部；原水合密文一致性与不兼容后端断言不变。
+
+红绿：先新增回归，修复前真实默认布局清单不存在、缺失副本无维护事实、坏JSON/身份损坏只记OSError，均实际复现。首轮跨线程测试误用了复用绑定的get_or_create，已改为真实create建立独立线程，保留首轮失败证据。最终指定6组测试、静态门、注释核验及变异结果见本轮DONE及`/tmp/pytest_cache_sol13_r2_fix/`，不以旧64项结果冒充当前验证。
+
+复现（工作树根）：
+```bash
+PYTHONPATH=/tmp/wt-e905-sol-13 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -o addopts="" \
+  agent_py_agent/tests/test_compact_remote_provider.py::test_transcript_compaction_stores_the_item_and_incompatible_backends_see_through_it \
+  agent_py_agent/tests/test_gateway_conversation_compact.py::test_forced_compact_includes_completed_checkpoint_from_same_gateway_request \
+  agent_py_agent/tests/test_compact_checkpoint_64k_seek.py \
+  agent_py_agent/tests/test_transcript_cold_rotation.py \
+  agent_py_agent/tests/test_million_compact_scalability.py \
+  agent_py_agent/tests/test_compact_source_consistency.py \
+  -q --tb=short -o cache_dir=/tmp/pytest_cache_sol13_r2_fix --basetemp=/tmp/pytest_cache_sol13_r2_fix/tmp
+```
+其后按任务运行完整Ruff、导入边界、doc sync（base `4bea324e3`）、diff及clean-package；未运行全仓pytest。组件结果不等于实际百万物理历史、连续10k真实消息、严格20ms、Linux/Windows或真实Gateway/provider端到端验收。
+
 ## 2026-10-29 e905-sol-13 R1：覆盖、增量扫描与冷热预算返修
 
 来源：完整读取 `fix-e905-sol-13-r1.md`、Astra-1/Astra-2 原复核；工作树 `/tmp/wt-e905-sol-13`，起点 `f74d1161e`。

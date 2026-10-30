@@ -1,4 +1,4 @@
-# LLM: 读口冻结canonical布局；写口仅在原消息锁及获胜线程CAS后冷转，清单不授予摘要覆盖权。
+# LLM: 读口冻结canonical布局；写口仅在原消息锁及获胜线程CAS后冷转；达阈值时冷副本缺失/无效显式报损坏，清单不授予覆盖权。
 # 模块用途: 提供冷热消息扫描、完整行分页、幂等查找及耐久分卷转换和prepared恢复。
 from __future__ import annotations
 
@@ -599,30 +599,19 @@ def cold_message_lookup(path: Path, key: str, *, reader=None):
     return entry, address
 
 
-# LLM: 仅原线程CAS成功后、持消息锁调用；检查点四元边界、thread scope及精确覆盖都成立才可物理冷转。
+# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再按宿主compact根校验冷副本，缺失/无效抛DataCorruptionError留待维护。
 # 对非终态、活动索引或未知任务保守pin；终态任务仍须被本次thread摘要精确覆盖，原字节保存在冷段。
 # 函数用途: 将已覆盖且无活跃任务pin的前缀冷存，保留边界本行及全部迟到尾部。
-def rotate_committed_transcript(storage, thread):
+def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | None = None):
     from ..common.nofollow_fs import write_bytes_atomic_beneath, write_text_atomic_beneath
     from .compact_checkpoint import _cold_checkpoint
     from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
-    from .compact_summary_view import _IndexedMessageCoverage
+    from .compact_summary_view import _IndexedMessageCoverage, _validated_carried_metadata
     from .message_selection import _validated_positions, message_position_index
     from .store_io import ImmutableJsonIndex
 
     path = storage.message_path(thread.thread_id)
     if not path.exists() or not thread.compact_checkpoint_id:
-        return
-    compact_root = storage.root.parent / 'compact'
-    row = _cold_checkpoint(compact_root, thread.thread_id, thread.compact_checkpoint_id)
-    if (row is None or row.get('schema') != 'conversation_compact_checkpoint.v3'
-            or CompactScope.from_dict(row['scope']) != THREAD_COMPACT_SCOPE
-            or row.get('source_kind') not in {'transcript', 'transcript_and_tool_archive'}
-            or row['generation'] != thread.compact_generation
-            or row['source_end_message_id'] != thread.compacted_through_message_id
-            or row['source_end_byte_offset'] != thread.compacted_through_byte_offset
-            or row['summary_sha256'] != hashlib.sha256(thread.summary.encode('utf-8')).hexdigest()
-            or 'carried_view' not in row):
         return
     recover_transcript_transition(path)
     before = transcript_manifest(path)
@@ -637,8 +626,21 @@ def rotate_committed_transcript(storage, thread):
     count = sum(position.address.offset < cut for position in positions.entries)
     if not cut or (cut < TRANSCRIPT_ROTATE_BYTES and count < TRANSCRIPT_ROTATE_ROWS):
         return
+    compact_root = storage.resolve_compact_root(compact_root)
+    try:
+        row = _cold_checkpoint(compact_root, thread.thread_id, thread.compact_checkpoint_id)
+        if (row is None or row.get('schema') != 'conversation_compact_checkpoint.v3'
+                or CompactScope.from_dict(row['scope']) != THREAD_COMPACT_SCOPE
+                or row.get('source_kind') not in {'transcript', 'transcript_and_tool_archive'}
+                or row['generation'] != thread.compact_generation
+                or row['source_end_message_id'] != thread.compacted_through_message_id
+                or row['source_end_byte_offset'] != thread.compacted_through_byte_offset
+                or row['summary_sha256'] != hashlib.sha256(thread.summary.encode('utf-8')).hexdigest()):
+            raise ValueError('committed cold checkpoint does not match thread head')
+        meta = _validated_carried_metadata(row)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise DataCorruptionError('committed cold compact checkpoint is missing or invalid') from exc
     coverage_index = ImmutableJsonIndex(compact_root, ('evidence', thread.thread_id, 'indexes'))
-    meta = row['carried_view']
     coverage = _IndexedMessageCoverage(meta['recent_messages'], coverage_index, meta['messages'], meta['message_count'])
     task_pins = {}
     with path.open('rb') as handle:

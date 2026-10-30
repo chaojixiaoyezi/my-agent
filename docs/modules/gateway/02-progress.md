@@ -1,3 +1,9 @@
+## 2026-10-29 e905-sol-13 R2：默认会话布局冷转收口（分支候选，未部署）
+
+SimpleAgent将owner的compact根注入会话存储，Compact提交再显式传递同根。冷转不再假设会话库和compact同级；先核真实边界与阈值，再验证冷副本及carried metadata。达到阈值但副本缺失/无效只留下结构化维护pending，已提交摘要不回滚。新增真实默认布局与故障回归、窗口外工具重复来源以及独立任务pin测试；验证口径与局限见[TESTS](../../../TESTS.md)R2小节。
+
+当前文档树没有单独的`docs/modules/conversation/`，会话提交接线随本Gateway模块记录，不为此次路径修复新增空模块。Gateway选择器force两种口径的注释现已明确，业务断言不变；未声称线上链路或原百万规模目标已验收。
+
 ## 2026-10-29 e905-sol-13：Gateway 压缩来源与主历史种子选择规则对齐（分支已实现，待集成）
 
 - `gateway_parts/request_context.py::_load_gateway_compact_context` 将 `selector_factory` 统一收敛到 `history_projection.history_row_selected`，使自动预检与延迟压缩（`defer_compact=True`）排除后台审计、非聊天记录及当前请求中段行，与 `_gateway_history_source` 主种子逐 ID 对齐，消除 `COMPACT_SOURCE_CHANGED`；显式 `force=True` 强制压缩继续保留同请求内已完成检查点并由 `_without_current_request_suffix` 剥离未提交尾部用户输入。

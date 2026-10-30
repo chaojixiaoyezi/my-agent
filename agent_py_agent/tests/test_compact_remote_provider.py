@@ -1,3 +1,5 @@
+# LLM: 假后端和临时会话存储验证远端压缩协议、外置引用水合及兼容性；所有请求均截获，不联网或读取真实凭据。
+# 模块用途: 检查服务端压缩项的收发、持久化和换后端后的透明回读，不代表线上供应商验收。
 """服务端压缩（compact_remote，2026-10-08，07）：Responses 后端发触发项/解析压缩项、远端助手的预算与回退、检查点与视图的
 兼容性判断、主请求前缀发压缩项、live 摘要执行器走远端。全部用假后端，不联网。"""
 from __future__ import annotations
@@ -209,6 +211,8 @@ def _thread(tmp_path, backend, count=8):
     return agent, thread
 
 
+# LLM: 临时库真实writer/CAS接受内联或外置引用；resolver水合密文必须一致，不兼容后端不得隐藏原来源，假后端不联网。
+# 函数用途: 验证服务端压缩项存下后可准确读回，换后端时原文重新可见。
 def test_transcript_compaction_stores_the_item_and_incompatible_backends_see_through_it(tmp_path, monkeypatch):
     backend = SimpleNamespace(name="openai_responses", model_name="gpt-6.1-sol", max_tokens=2_000, api_base="https://chatgpt.com/backend-api/codex",
                               supports_remote_compaction=lambda: True,

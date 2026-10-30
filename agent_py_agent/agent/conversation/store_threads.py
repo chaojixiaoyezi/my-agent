@@ -505,8 +505,8 @@ class ThreadStore:
 
         return self.update_atomic(thread_id, apply)
 
-    # LLM: 唯一CAS推进提交链；闲置按append锁→线程锁核指纹及活动代；普通提交只保存摘要前消息观察供去重，不加新CAS。
-    # 函数用途: 原子提交摘要及工具收缩；获胜thread提交可在原锁内无损冷转原始消息，不另建提交权威。
+    # LLM: 唯一CAS推进提交链；闲置按append锁→线程锁核指纹及活动代；冷转透传显式compact根，失败只给同head写维护事实。
+    # 函数用途: 原子提交摘要及工具收缩；获胜thread可在原锁内冷转原文，维护失败不回滚摘要或另建提交权威。
     def update_compact_state(
         self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
         active_loaded_tool_names: tuple[str, ...] | None = None, now: float | None = None,
@@ -515,6 +515,7 @@ class ThreadStore:
         expected_user_activity_generation: int | None = None,
         expected_message_tail: dict[str, Any] | None = None,
         idle_compact: bool = False,
+        compact_root: str | Path | None = None,
     ) -> ConversationThread:
         """原子推进摘要检查点；获胜后可把精确覆盖的消息前缀无损移到冷段。"""
         if type(commit.publish_thread_view) is not bool:
@@ -608,7 +609,7 @@ class ThreadStore:
             updated = self.update_atomic(thread_id, apply)
             if commit.publish_thread_view:
                 try:
-                    rotate_committed_transcript(self.storage, updated)
+                    rotate_committed_transcript(self.storage, updated, compact_root=compact_root)
                 except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
                     # 已发布CAS不可伪装失败；热文件或prepared布局仍完整可读，显式留下维护待重试事实。
                     error_type = type(exc).__name__

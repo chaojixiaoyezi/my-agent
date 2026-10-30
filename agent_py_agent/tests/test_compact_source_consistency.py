@@ -1,5 +1,5 @@
-# LLM: 使用临时owner真实writer/CAS和不可变索引验证覆盖消费者；禁止用小窗口冒充完整历史。
-# 模块用途: 回归超过近期窗口的重复来源、视图比较和工具增量消费。
+# LLM: 使用临时owner真实writer/CAS和不可变索引验证覆盖消费者及prepare工具防线；禁止用小窗口冒充历史或按yield数量漏计枚举。
+# 模块用途: 回归超过近期窗口的消息/工具重复来源、视图比较与增量消费。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -180,3 +180,55 @@ def test_tool_inequality_includes_cold_root(tmp_path):
     same = roots[0] == roots[1]
     assert not same
     assert roots[0] != roots[1]
+
+
+# LLM: 真实live writer/CAS提交129条工具，最早引用已离开128热窗口；真实prepare须拒绝重复来源且绝不枚举冷表。
+# 函数用途: 为工具重复防线补独立回归，防止只查近期窗口或关掉guard后仍全绿。
+def test_old_covered_tool_is_rejected_without_index_enumeration(compact_case, monkeypatch):
+    from agent_py_agent.agent.conversation.active_turn_compact import CarriedToolCompactSource
+    from agent_py_agent.agent.conversation.compact import (
+        ConversationCompactOptions,
+        ConversationCompactSource,
+        prepare_conversation_context,
+    )
+    from agent_py_agent.agent.conversation.live_tool_compact import (
+        LiveToolCompactBinding,
+        LiveToolCompactCommitRequest,
+        commit_live_tool_compact,
+    )
+
+    case = compact_case
+    scope = CompactScope(kind='turn', turn_id='guard-turn')
+    refs = tuple({'run_id': 'r', 'attempt_id': 'a', 'turn_id': 't', 'call_id': str(i)} for i in range(129))
+    thread = commit_live_tool_compact(case.agent,
+        LiveToolCompactBinding(store=case.store, thread=case.store.threads.require(case.thread_id), scope=scope),
+        LiveToolCompactCommitRequest(summary='已覆盖129条工具', source_tool_call_ids=tuple(ref['call_id'] for ref in refs),
+            retained_tool_call_ids=(), projected_tokens_before=900, projected_tokens_after=300, policy=case.policy,
+            request_id='request', attempt_id='attempt', source_tool_refs=refs))
+    view = resolve_compact_summary_view(case.agent, thread, scope)
+    assert isinstance(view.source_tool_refs, _IndexedToolCoverage)
+    assert len(view.source_tool_refs) == 129
+    assert refs[0] not in tuple.__iter__(view.source_tool_refs)
+    calls = []
+    original = ImmutableJsonIndex.items
+
+    # LLM: 统计调用本身而非yield条数；原索引结果不替换，零调用断言能发现空表枚举。
+    # 函数用途: 捕获来源校验和视图重载中任何全表读取。
+    def counted(self, reference):
+        calls.append(reference)
+        return original(self, reference)
+
+    # LLM: 正常重复来源必须在投影或摘要之前拒绝；若guard被移除则显式失败，不把其它异常当拒绝通过。
+    # 函数用途: 确认拒绝来自真实来源防线而不是预算或假后端。
+    def unexpected_projection(_view):
+        pytest.fail('重复工具来源不得进入请求投影')
+
+    monkeypatch.setattr(ImmutableJsonIndex, 'items', counted)
+    source = ConversationCompactSource(thread, (), case.policy, {}, compact_context=AppliedCompactContext(thread.thread_id, scope, view))
+    tools = CarriedToolCompactSource(source_records=(dict(refs[0], output='旧工具正文'),), retained_records=(),
+        source_tool_refs=(refs[0],), retained_tool_refs=())
+    with pytest.raises(ConversationCompactError) as failure:
+        prepare_conversation_context(case.agent, case.store, thread, options=ConversationCompactOptions(
+            source=source, force=True, request_projector=unexpected_projection, tool_source=tools))
+    assert failure.value.code == 'COMPACT_SOURCE_CHANGED'
+    assert calls == []

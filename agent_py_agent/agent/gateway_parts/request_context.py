@@ -364,7 +364,7 @@ def _load_gateway_thread(
 # LLM: Gateway预检与压缩共用已登记的请求中断；用户停止原样透传，压缩失败保留自己的类型化错误码，不得误报成会话记录损坏。
 # 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
 # defer只读固定完整尾界的范围来源；逐行selector不得重排行，错误保留原因，普通入口沿同一来源压缩。
-# Compact与主种子使用同一个history_row_selected；不得把后台审计、非聊天或当前请求中段加入覆盖。
+# Compact与主种子共用history_row_selected，排除后台审计/非聊天；force=False排除当前请求中段，force=True保留同请求已完成检查点并剥离未提交尾部。
 # 函数用途: 加载同源历史并冻结给自动压缩；可延后准备，停止与坏原文不降级为空。
 def _load_gateway_compact_context(
     inputs: GatewayConversationLoadRequest,

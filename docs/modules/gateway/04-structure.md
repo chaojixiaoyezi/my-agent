@@ -1,3 +1,9 @@
+## 2026-10-29 e905-sol-13 R2：冷检查点根与消息冷转接线
+
+- `SimpleAgent.__init__`→`ConversationStore`→`ConversationStorage`保存唯一owner compact根；`_commit_compact_candidate`→`ThreadStore.update_compact_state`→`rotate_committed_transcript`显式传同一个`_compact_root`。只读打开不为该根创建目录，默认嵌套布局可由存储解析，旧同级夹具保持兼容。
+- `rotate_committed_transcript`在原消息锁与获胜CAS后先恢复布局、核虚拟边界与阈值；需冷转时才核已提交冷副本的schema/scope/source_kind/generation/消息边界/摘要封印和carried metadata。缺失或无效统一为`DataCorruptionError`，由原线程层只给同head记pending维护事实，不新增CAS提交权威或撤销已发布摘要。
+- `request_context._load_gateway_compact_context`的注释明确force=False排除当前请求中段，force=True保留同请求已完成检查点并剥离未提交尾部，过滤器实现不变。相关测试与未验证边界见[TESTS](../../../TESTS.md)R2小节。
+
 ## 2026-10-29 e905-sol-13：Gateway 压缩历史选择器与主种子同源结构
 
 - `gateway_parts/request_context.py::_load_gateway_compact_context` 通过 `partial(history_projection.history_row_selected, current_request_id="" if force else inputs.request_id, work_scope=work_scope)` 构造 `selector_factory`，与 `_gateway_history_source` 共用唯一单行过滤规则，保证 `capture_transcript_prefix` 校验时主种子与 `compact_source.messages` 前缀严格一致。

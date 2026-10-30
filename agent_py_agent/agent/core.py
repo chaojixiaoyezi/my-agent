@@ -8,7 +8,7 @@
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
 # LLM: 记忆真实构造叶与嵌入工厂已纯提取；本模块保原字段赋值顺序、startup快照和curator后半段，不能借此接冷HTTP。
 # LLM: 普通 MCP 的管理员全盘免确认只在 registry 每调用读取原 owner 模式并核当前有效边界，不从配置字符串独自签权。
-# 模块用途: 装配当前owner的模型、工具、记忆、会话及单向推送宿主；不从模型参数恢复节点凭据或来源权限。
+# 模块用途: 装配当前owner的模型、工具、记忆、会话及统一compact根、单向推送宿主；不从模型参数恢复节点凭据或来源权限。
 
 from __future__ import annotations
 
@@ -477,8 +477,8 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
-    # LLM: 保持W原bootstrap及owner初始化顺序；defer仅透传实例MCP构造策略，默认eager、不修改配置或子worker策略。
-    # 函数用途: 按真实owner装配代理，可为外层控制面延后普通MCP连接，原工作区与孤儿消费者接线保持。
+    # LLM: 保持W原bootstrap及owner初始化顺序；会话库显式绑定owner_compact_dir，defer仅透传实例MCP策略，默认eager、不修改配置或子worker策略。
+    # 函数用途: 按真实owner装配代理及统一冷检查点路径，可为控制面延后普通MCP连接，原工作区与孤儿消费者接线保持。
     def __init__(
         self,
         config: AgentConfig,
@@ -548,6 +548,7 @@ class SimpleAgent(
 
         self.conversation_store = ConversationStore(
             paths["conversation_workspace"], model_default=lambda: default_model_profile_id(self),
+            compact_root=self.home_paths.owner_compact_dir,
         )
         _wire_memory_curator(self, config)
         self.collaboration_store = CollaborationStore(paths["collaboration_workspace"])

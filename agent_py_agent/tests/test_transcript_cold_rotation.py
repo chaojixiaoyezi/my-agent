@@ -1,5 +1,5 @@
-# LLM: 只使用pytest临时owner与真实会话存储；种子及Compact必须选择同一组规范行，不能放松来源一致性检查。
-# 模块用途: 回归历史冷热读取及Gateway Compact对背景审计、非聊天和本请求记录的隔离。
+# LLM: 只用pytest临时owner与真实会话存储；默认嵌套布局、显式compact根及维护失败均走writer/CAS，不放松来源一致性。
+# 模块用途: 回归默认布局冷转、坏冷副本维护、任务保守pin及Gateway历史选源隔离。
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -89,9 +89,9 @@ def test_gateway_prefix_keeps_real_source_change_guard(compact_case, monkeypatch
         assert list(prefix(source.messages)) == list(history)
 
 
-# LLM: 真实writer/CAS之后才检查冷转；阈值降低只缩小样本，不替换存储、覆盖和游标算法。
-# 函数用途: 构造含旧展示行、精确幂等键和保留尾部的完整线程提交。
-def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=None, task_id=None):
+# LLM: 真实writer/CAS之后才检查冷转；阈值只缩小样本，before_commit仅在测试副本注入冷副本故障，不替换覆盖或游标算法。
+# 函数用途: 构造含旧展示行、精确幂等键和保留尾部的完整线程提交，可在发布前损坏冷副本以验证维护事实。
+def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=None, task_id=None, before_commit=None):
     from agent_py_agent.agent.conversation import compact_checkpoint as checkpoints
     from agent_py_agent.agent.conversation import message_scan
     from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
@@ -116,6 +116,8 @@ def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=No
         projected_tokens_before=900, projected_tokens_after=300, policy=case.policy, forced=False,
         scope=scope or THREAD_COMPACT_SCOPE, provider_compaction=provider,
     ))
+    if before_commit is not None:
+        before_commit(checkpoint_id)
     thread = case.store.threads.update_compact_state(case.thread_id, commit=ConversationCompactCommit(
         summary='已覆盖旧行', operation_evidence={}, checkpoint_id=checkpoint_id,
         compacted_through_message_id=messages[-2].message_id, compacted_through_byte_offset=boundary,
@@ -189,7 +191,7 @@ def test_local_scope_does_not_rotate_thread_prefix(compact_case, monkeypatch, ki
     assert not path.with_suffix('.manifest.json').exists() and path.read_bytes() == original
 
 
-# LLM: 在清单读取和热文件打开之间真实轮转，模拟另一提交者；不替换原读取、位置计算或冷转实现。
+# LLM: 在清单读取和热文件打开之间真实轮转；临时延迟器接收新增compact根keyword，不替换原读取、位置或冷转实现。
 # 函数用途: 防止并发冷热切换把旧清单与新热文件拼成错误的逻辑快照。
 @pytest.mark.parametrize('entrypoint', ['reader', 'complete_offset', 'history', 'forward_page',
                                       'byte_offset', 'after_id', 'tail_marker'])
@@ -197,7 +199,7 @@ def test_read_snapshot_survives_rotation_between_manifest_and_open(compact_case,
     from agent_py_agent.agent.conversation import message_scan
 
     rotate = message_scan.rotate_committed_transcript
-    monkeypatch.setattr(message_scan, 'rotate_committed_transcript', lambda *_args: None)
+    monkeypatch.setattr(message_scan, 'rotate_committed_transcript', lambda *_args, **_kwargs: None)
     thread, messages, original, path = _commit_rotation(compact_case, monkeypatch)
     monkeypatch.setattr(message_scan, 'rotate_committed_transcript', rotate)
     expected_marker = compact_case.store.messages.tail_marker_report(thread.thread_id)
@@ -343,13 +345,13 @@ def test_provider_switch_restores_uncovered_cold_source(compact_case, monkeypatc
     source.messages.validate()
 
 
-# LLM: 只在冷查询完成后注入一次真实轮转，原查找与热索引都照常执行；不能把存在的消息当成无错误未命中。
+# LLM: 只在冷查询后注入一次真实轮转；临时延迟器接收compact根keyword，原查找与热索引照常，不能把存在消息当未命中。
 # 函数用途: 防止冷热两阶段ID查询在交接窗口静默丢失目标。
 def test_by_id_retries_rotation_after_cold_lookup(compact_case, monkeypatch):
     from agent_py_agent.agent.conversation import message_scan, store_messages
 
     rotate = message_scan.rotate_committed_transcript
-    monkeypatch.setattr(message_scan, 'rotate_committed_transcript', lambda *_args: None)
+    monkeypatch.setattr(message_scan, 'rotate_committed_transcript', lambda *_args, **_kwargs: None)
     thread, messages, _original, _path = _commit_rotation(compact_case, monkeypatch)
     monkeypatch.setattr(message_scan, 'rotate_committed_transcript', rotate)
     lookup, switched = store_messages.cold_message_lookup, []
@@ -423,3 +425,141 @@ def test_missing_hot_file_is_not_empty_history(compact_case, monkeypatch, entryp
             thread.thread_id, limit=0 if entrypoint == 'recent_all' else 1,
         )
     assert errors
+
+
+# LLM: 真正构造SimpleAgent默认非同级目录；只用临时home、离线后端与原writer/CAS，不能让同级夹具掩盖路径错误。
+# 函数用途: 验证默认部署的会话库提交确实冷转、热文件收缩且公开接口能读回冷行。
+def test_default_simple_agent_layout_rotates_committed_transcript(compact_case, tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, my_agent_home=str(tmp_path / 'home')), tmp_path / 'project')
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({'canonical_user_id': 'local'})
+    case = SimpleNamespace(agent=agent, store=store, thread_id=thread.thread_id, policy=compact_case.policy)
+    root, compact_root = store.storage.root, agent.home_paths.owner_compact_dir
+    assert root.parent.parent.name == 'workspaces'
+    assert root.parents[2].name == 'runtime' and root.parents[3].name == 'workspace'
+    assert compact_root == root.parents[3].parent / 'compact'
+    assert compact_root != root.parent / 'compact'
+    committed, messages, original, path = _commit_rotation(case, monkeypatch)
+    assert path.with_suffix('.manifest.json').exists()
+    assert len(path.read_bytes()) < len(original)
+    assert messages[0].message_id.encode() not in path.read_bytes()
+    found, errors = store.messages.by_id_report(thread.thread_id, messages[0].message_id)
+    assert not errors and found == messages[0]
+    from agent_py_agent.agent.conversation.message_scan import TranscriptReader
+
+    with TranscriptReader(path) as reader:
+        assert reader.read() == original
+    assert committed.compact_generation == 1
+    assert 'compact_transcript_maintenance' not in committed.metadata
+
+
+# LLM: 仅破坏临时owner内writer刚写的冷副本；CAS仍须成功，维护失败必须结构化且不移动热文件。
+# 函数用途: 覆盖缺失、坏JSON及内容身份损坏，防止静默跳过冷转或把已提交摘要误报失败。
+@pytest.mark.parametrize('damage', ['missing', 'invalid_json', 'identity'])
+def test_invalid_committed_cold_copy_records_pending_maintenance(compact_case, monkeypatch, damage):
+    import hashlib
+    import json
+
+    case = compact_case
+
+    # LLM: 只在真实writer返回后、CAS之前破坏冷副本；不修改热账本或伪造维护返回值。
+    # 函数用途: 稳定制造已达到冷转阈值但副本不可用的提交。
+    def damage_copy(checkpoint_id):
+        name = hashlib.sha256(checkpoint_id.encode()).hexdigest() + '.checkpoint.json'
+        copy = case.agent.home_paths.owner_compact_dir / 'archive' / case.thread_id / name
+        assert copy.exists()
+        if damage == 'missing':
+            copy.rename(copy.with_suffix('.missing-test'))
+        elif damage == 'invalid_json':
+            copy.write_bytes(b'not-json\n')
+        else:
+            row = json.loads(copy.read_bytes())
+            row['generation'] += 1
+            copy.write_text(json.dumps(row) + '\n')
+
+    updated, _messages, original, path = _commit_rotation(case, monkeypatch, before_commit=damage_copy)
+    assert updated.compact_generation == 1 and updated.summary == '已覆盖旧行'
+    assert case.store.threads.require(case.thread_id) == updated
+    assert updated.metadata['compact_transcript_maintenance'] == {
+        'status': 'pending', 'error_type': 'DataCorruptionError', 'checkpoint_id': updated.compact_checkpoint_id,
+    }
+    assert path.read_bytes() == original and not path.with_suffix('.manifest.json').exists()
+
+
+# LLM: 未达双阈值时不需要冷检查点；仅调整测试阈值，不跳过真实边界计算、writer或CAS。
+# 函数用途: 防止小型会话因缺冷副本产生虚假的维护待办。
+def test_below_rotation_threshold_does_not_require_cold_copy(compact_case, monkeypatch):
+    import hashlib
+
+    from agent_py_agent.agent.conversation import message_scan
+
+    # LLM: 副本缺失与大阈值同时发生；如果先读副本再判断阈值，本测试应失败。
+    # 函数用途: 将小样本保留在无需冷转的范围内。
+    def remove_copy(checkpoint_id):
+        name = hashlib.sha256(checkpoint_id.encode()).hexdigest() + '.checkpoint.json'
+        copy = compact_case.agent.home_paths.owner_compact_dir / 'archive' / compact_case.thread_id / name
+        copy.rename(copy.with_suffix('.missing-test'))
+        monkeypatch.setattr(message_scan, 'TRANSCRIPT_ROTATE_BYTES', 10**9)
+
+    updated, _messages, original, path = _commit_rotation(compact_case, monkeypatch, before_commit=remove_copy)
+    assert path.read_bytes() == original and not path.with_suffix('.manifest.json').exists()
+    assert 'compact_transcript_maintenance' not in updated.metadata
+
+
+# LLM: 终态TaskLink的线程不符独立于active_task_ids；直接核pin与真实冷转，不能借缺失链接分支过关。
+# 函数用途: 确认另一线程的completed链接仍保守保留本线程原文。
+def test_completed_task_link_from_other_thread_still_pins(compact_case, monkeypatch):
+    from agent_py_agent.agent.conversation.message_scan import _entry_has_task_pin
+
+    case = compact_case
+    other = case.store.threads.create(canonical_user_id='other')
+    case.store.tasks.bind({'thread_id': other.thread_id, 'task_id': 'foreign-task', 'status': 'completed'})
+    assert case.store.tasks.load('foreign-task').thread_id == other.thread_id != case.thread_id
+    updated, rows, original, path = _commit_rotation(case, monkeypatch, task_id='foreign-task')
+    assert updated.active_task_ids == ()
+    assert _entry_has_task_pin(case.store.storage, updated, rows[0], {}) is True
+    assert path.read_bytes() == original and not path.with_suffix('.manifest.json').exists()
+
+
+# LLM: 原链接保持active但显式漂移活动索引为空；状态判断必须独自生效，不让active_task_ids掩盖回退。
+# 函数用途: 验证非终态任务即使不在活动索引也不能冷转。
+def test_active_task_with_empty_active_index_still_pins(compact_case, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.message_scan import _entry_has_task_pin
+
+    case = compact_case
+    case.store.tasks.bind({'thread_id': case.thread_id, 'task_id': 'drifted-task', 'status': 'active'})
+    case.store.threads.update_atomic(case.thread_id, lambda current: replace(current, active_task_ids=()))
+    assert case.store.tasks.load('drifted-task').status == 'active'
+    updated, rows, original, path = _commit_rotation(case, monkeypatch, task_id='drifted-task')
+    assert updated.active_task_ids == ()
+    assert _entry_has_task_pin(case.store.storage, updated, rows[0], {}) is True
+    assert path.read_bytes() == original and not path.with_suffix('.manifest.json').exists()
+
+
+# LLM: 只读构造不建目录；解析优先级为调用显式根、构造注入、默认嵌套推导、同级夹具回退，均不得写冷库。
+# 函数用途: 固定两层显式路径的覆盖顺序和默认/临时布局兼容合同。
+@pytest.mark.parametrize('layout', ['default', 'sibling', 'shallow', 'near_match'])
+def test_compact_root_resolution_precedence_without_initialization(tmp_path, layout):
+    from pathlib import Path
+
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+
+    roots = {
+        'default': tmp_path / 'owner/workspace/runtime/workspaces/default/conversations',
+        'sibling': tmp_path / 'conversations',
+        'shallow': Path('conversations'),
+        'near_match': tmp_path / 'owner/not-workspace/runtime/workspaces/default/conversations',
+    }
+    root = roots[layout]
+    expected = tmp_path / 'owner/compact' if layout == 'default' else root.parent / 'compact'
+    assert ConversationStorage(root, initialize=False).resolve_compact_root() == expected
+    store = ConversationStore(root, initialize=False, compact_root=str(tmp_path / 'injected'))
+    assert store.storage.resolve_compact_root() == tmp_path / 'injected'
+    assert store.storage.resolve_compact_root(str(tmp_path / 'override')) == tmp_path / 'override'
+    assert list(tmp_path.iterdir()) == []
