@@ -388,8 +388,8 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: 显式用户总结只提候选待本人确认；自主后台仍按开关及核验晋升，不把模型声明当证明或绕CAS/guard。
-    # 函数用途: 解析总结，复用同族候选，或按机器验证事实晋升正式Skill。
+    # LLM: 显式总结或目录失败只提案；Verify不占原短门，写入重新核来源，归属/CAS/guard/配额始终保留。
+    # 函数用途: 解析精确候选并按机器验证发布owner learned方法，不冒充用户确认。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
@@ -408,9 +408,15 @@ class SkillLearningService:
             verifier = getattr(self.runtime, 'promotion_verifier', None)
             if verifier is None or verifier in (builtin_machine_verifier, default_machine_promotion_verifier):
                 verifier = partial(verify_machine_candidate, store=self.store)
-            with gateway_short_transaction("skill_learning_propose"):
-                return propose_or_promote_skill(self.store, publish,
-                    verifier=verifier, autonomous_verified=(self.settings.autonomous_verified and request.get('requested_by') != 'user'))
+            # LLM: 回调仅本次同步使用，Verify结束后重进原来源门，不缓存授权或callable用于恢复。
+            # 函数用途: 在准备完成后执行准确来源的短写入。
+            def commit(operation):
+                with gateway_short_transaction("skill_learning_propose"):
+                    return operation()
+
+            return propose_or_promote_skill(self.store, publish, verifier=verifier, commit=commit,
+                autonomous_verified=(self.settings.autonomous_verified and request.get('requested_by') != 'user'
+                                     and not request.get('_learning_catalog_unavailable')))
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:
@@ -439,9 +445,14 @@ class SkillLearningService:
                                           str(request.get("request_key") or event.request_key))
 
 
-# LLM: 实际来源未知必须原对象上抛；普通快照读取失败（例如Skill总闸配置损坏）保持原空索引降级：
-#   发布侧仍会检查 learned/<name> 目录与登记表，不会覆盖任何文件。
-# 函数用途: 取当前快照的 Skill 条目。
+# LLM: 此类仅标记宿主快照失败，不作为模型输入或可持久化授权；与成功但空目录区分。
+# 类用途: 在总结材料中保留目录重名保护不完整的事实。
+class _UnavailableSkillEntries(tuple):
+    pass
+
+
+# LLM: 真实执行未知原样抛；普通目录失败可降为候选，但不能用空taken_names自动发布遮蔽内置/共享方法。
+# 函数用途: 读取完整名字保护来源，显式标记普通快照读取失败。
 def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
     try:
         snapshot = provider()
@@ -449,7 +460,7 @@ def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
         raise
     except Exception:  # noqa: BLE001 - 快照不可用不能阻断学习，重名检查退回到磁盘与登记表。
-        return ()
+        return _UnavailableSkillEntries()
     return tuple(getattr(snapshot, "entries", ()) or ())
 
 
@@ -458,6 +469,8 @@ def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
 #   读取登记表；登记表损坏时抛 SkillLearningStoreError，由 run_pending 记 failed 且保留请求。
 # 函数用途: 组装一次总结调用的材料。
 def _material(store: SkillLearningStore, request: dict[str, object], entries: tuple[object, ...]) -> SkillLearningMaterial:
+    if isinstance(entries, _UnavailableSkillEntries):
+        request = {**request, '_learning_catalog_unavailable': True}
     registry = store.load_registry()
     existing = tuple(
         {

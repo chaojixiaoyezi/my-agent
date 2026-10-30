@@ -73,10 +73,10 @@ def rank_packages_for_context(packages, *, workbench_id='', domain='', workspace
     return sorted(packages, key=score, reverse=True)
 
 
-# LLM: owner 必须来自原宿主解析器；这里只读安装声明，不读取全部文件正文，错误由 SkillsService 单独记录。
-# 函数用途: 列出本 owner 当前已启用的独立能力包，旧 v3 随包 Skill 仍走原 plugin_roots。
+# LLM: owner来自原宿主解析器，普通owner也只查本人private安装；每次读取仍经原activation前后复核。
+# 函数用途: 列出当前用户已启用的私有能力包，不借管理员身份读取他人安装。
 def enabled_capability_packages(owner) -> tuple[CapabilityPackageSnapshot, ...]:
-    if owner is None or owner.identity != OwnerIdentity.local_main():
+    if owner is None:
         return ()
     store = PluginInstallStore(owner)
     return tuple(_package_snapshot(store, entry) for entry in store.snapshot()
