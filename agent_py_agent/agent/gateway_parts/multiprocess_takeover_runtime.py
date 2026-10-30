@@ -832,15 +832,23 @@ def _blocked(reason) -> dict:
     return {"status": "blocked", "reason": reason, "error_code": "OWNER_PARTITION_QUARANTINED"}
 
 
-# LLM: 此选择只服务原恢复metadata回调，实际旧源来自P1完整四绑定；ordinary restamp仍按原P3 route，缺claim不补grant。
+# LLM: 此选择只服务原恢复metadata回调，先以nofollow单链接字节门拒绝硬链接/软链接别名，再从P1完整四绑定或运输来源定位旧域。
 # 函数用途: 不让已补章P3覆盖原execution来源，每次重读同request和原P1来准备fresh P2。
 def _processing_request_target(controller, gate, path, ownership):
+    from ..common.nofollow_fs import read_bytes_beneath
     from .io import read_json_file_report
     from .multiprocess_processing_recovery import original_processing_target
 
     try:
+        rel = path.relative_to(gate.paths.root).parts
+        if read_bytes_beneath(gate.paths.root, rel, max_bytes=16 * 1024 * 1024, require_dir_fd=True) is None:
+            return None
         report = read_json_file_report(path, context="gateway.processing_recovery.target")
         if report.load_error is not None or report.payload.get("id") != path.stem or not ownership:
+            return None
+        if report.payload.get("status") == "pending" and (
+            (gate.paths.inbox / path.name).exists() or (gate.paths.terminal / path.name).exists()
+        ):
             return None
         return original_processing_target(controller.targets, report.payload, owner_digest(ownership[0]))
     except (OSError, ValueError, TypeError, KeyError):

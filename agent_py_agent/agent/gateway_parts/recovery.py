@@ -1056,7 +1056,7 @@ def _provider_transient_requeue_locked(
     return True
 
 
-# LLM: 重排请求的字段构造保持纯函数：status/priority/退避/恢复标记一次写全，lease 字段全部清掉；
+# LLM: 重排请求的字段构造保持纯函数：status/priority/退避/恢复标记与正MP运输来源一次写全，lease 字段全部清掉；
 #   不读文件、不写盘，便于单测与审阅。
 # 函数用途: 生成重排后要写回 inbox 的请求 payload。
 def _provider_transient_requeued_payload(
@@ -1085,6 +1085,16 @@ def _provider_transient_requeued_payload(
             },
         }
     )
+    if isinstance(fresh.get("route"), dict) and dead_attempt_id:
+        requeued["queue_transport_source"] = {
+            "schema_version": "gateway_queue_transport_source.v1",
+            "window": "requeue",
+            "request_id": request_id,
+            "execution_attempt_id": dead_attempt_id,
+            "lease_owner": str(fresh.get("lease_owner") or "").strip(),
+            "lease_epoch": int(fresh.get("lease_epoch") or 0),
+            "route": dict(fresh["route"]),
+        }
     for key in (
         "execution_attempt_id",
         "lease_owner",
@@ -1900,8 +1910,8 @@ def _requeue_current_processing_locked(paths, claim, not_before_at):
 
 
 
-# LLM: 调用方确持原T；保持原attempt/epoch/heartbeat CAS及guidance→写入→rename顺序；source属原指纹，缺省也不得补值，不以TTL取得停止权。
-# 函数用途: 在原短门内重排同一个已核准停止的请求，不创建新执行或释放P3。
+# LLM: 调用方确持原T；保持原attempt/epoch/heartbeat CAS及guidance→写入运输来源→rename顺序；source属原指纹，缺省也不得补值，不以TTL取得停止权。
+# 函数用途: 在原短门内重排同一个已核准停止的请求并固化运输半态来源，不创建新执行或释放P3。
 def _requeue_stale_processing_locked(paths, request_path, payload, context):
     request_id = request_path.stem
     fresh = _fresh_matching_stale_payload(request_path, payload, context)
@@ -1932,6 +1942,16 @@ def _requeue_stale_processing_locked(paths, request_path, payload, context):
             ),
         }
     )
+    if isinstance(fresh.get("route"), dict) and dead_attempt_id:
+        requeued["queue_transport_source"] = {
+            "schema_version": "gateway_queue_transport_source.v1",
+            "window": "requeue",
+            "request_id": request_id,
+            "execution_attempt_id": dead_attempt_id,
+            "lease_owner": str(fresh.get("lease_owner") or "").strip(),
+            "lease_epoch": int(fresh.get("lease_epoch") or 0),
+            "route": dict(fresh["route"]),
+        }
     for key in (
         "execution_attempt_id",
         "lease_owner",

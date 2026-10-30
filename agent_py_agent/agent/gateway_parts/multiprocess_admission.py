@@ -1,13 +1,5 @@
-# LLM: B1b P3 的 C 侧持久准入：单一临界区里先把预留原子写+fsync 持久化，再发布可认领的盖章路由；
-#   占用只认还没释放的预留，释放只凭规范终态（线程返回、目录移动、responses 投影都不算）。
-#   mc3-p3-align：会话键统一走 mc1 冻结投影（MC4-1502），预留结构写 v2、v1 旧记录照常可读（读旧写新）；
-#   跨代转换只走共同授权门（接手证明 + 屏障结果 + 持锁 C 上下文），自动路径跨代一律拒绝。
-#   mc2 review26：released 缓存核五元身份/ctime/racy；每 gate 首写整链 fsync；v1 回退仅在迁移适配层。
-#   默认单进程（count=0）不经过本模块：工厂函数立即返回 None，不读状态、不建目录、零 I/O。
-#   管理员版本只消费首次prepared内的冻结值，不独立读绑定文件，不在route发表时改写完整metadata或指纹。
-#   已有输入回执时先核原prepared归属和完整摘要，再写预留；旧无回执路径不伪造新身份凭据。
-# LLM: cold C的真实ControlPlane仅准元数据，原prepared身份核实后拒C route，不建P3或claim；实际Agent gate/Count0与原终态、配额、同Root短门不变。
-#   ordinary新建/同代补齐只在末发表消费原retain绑定的Root门，与stop线性化；共用恢复/终态链不改。
+# LLM: B1b P3 的 C 侧持久准入：单一临界区里先把预留原子写+fsync 持久化，再发布可认领的盖章路由；占用只认未释放预留，释放只凭规范终态。
+#   跨代转换只走共同授权门（接手证明 + 屏障结果 + 持锁 C 上下文），pending 运输半态在重盖章前先核 inbox/terminal 同名冲突。
 # 模块用途: 提供原准入预留、盖章、规范终态释放和认领校验；新责任遵守原Root关闭门，控制面不充当业务Agent。
 from __future__ import annotations
 
@@ -1171,8 +1163,8 @@ def coordinator_admission_gate(agent, paths, context, observer=None):
     return gate
 
 
-# LLM: 原T内仅recovery实际issued回调消费，旧P1绑定/完整P2和P3owner/session精确复核；终态只续metadata不改canonical/P3生命周期。
-# 函数用途: 为已补章的原processing或终态待投影提供同源短提交，ordinary restamp不使用本分支。
+# LLM: 原T内仅recovery实际issued回调消费，旧P1绑定/运输半态来源、完整P2和P3 owner/session精确复核；pending同名inbox/terminal冲突在重盖章前拒绝。
+# 函数用途: 为已补章的原processing、运输半态或终态待投影提供同源短提交，ordinary restamp不使用本分支。
 def _processing_recovery_decision_locked(gate, path, ownership, authority):
     from .multiprocess_processing_recovery import processing_authority_rejection
     from .multiprocess_records import _canonical_terminal
@@ -1182,6 +1174,10 @@ def _processing_recovery_decision_locked(gate, path, ownership, authority):
     if report.load_error is not None or current.get("id") != path.stem:
         return _blocked("request_identity_conflict")
     if path.parent not in (gate.paths.processing, gate.paths.terminal):
+        return _blocked("processing_recovery_path_conflict")
+    if current.get("status") == "pending" and (
+        (gate.paths.inbox / path.name).exists() or (gate.paths.terminal / path.name).exists()
+    ):
         return _blocked("processing_recovery_path_conflict")
     record = _read_reservation(reservation_file(gate.paths, path.stem))
     if not isinstance(record, dict) or session_scope_for_request(current) != ownership[1]:
