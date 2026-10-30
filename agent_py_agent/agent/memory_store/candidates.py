@@ -302,7 +302,7 @@ class CandidateService:
     def observe(self, observation: CandidateObservation) -> MemoryCandidate:
         return self.observe_many([observation])[0]
 
-    # LLM: Batch observations validate completely before one locked replacement; callers must not emulate atomicity with loops.
+    # LLM: 批观察全部验证后才在同一锁内替换账本；调用方不得用逐条调用冒充批次原子性。
     # 函数用途: 原子写入一批候选，任一条非法时整个批次不改变 candidates.jsonl。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
     # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
@@ -760,7 +760,7 @@ def _observation_index(rows: list[MemoryCandidate]) -> dict[str, set[int]]:
     return result
 
 
-# LLM: 冲突检查先于共享索引变更；稳定来源别名允许补run但不混淆已知不同run，模型观察键不加票。
+# LLM: 冲突检查先于共享索引变更；跨引用别名以历史来源为锚收敛，补run不混淆已知异run，引用及学习权威不改写。
 # 函数用途: 按结构化来源合并单条观察，供批提交与可跳冲突预演复用。
 def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared):
     normalized, candidate_id, observation_key = prepared
@@ -775,11 +775,10 @@ def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared
     if (source_index is not None and result[source_index].candidate_type in {"lesson", "hot_rule"}
             and _same_candidate_identity(result[source_index], normalized)):
         existing = result[source_index]
-        current_sources = set().union(*_observation_sources(existing))
         incoming_sources = _observation_sources(normalized)
-        new_sources = [sorted(group) for group in incoming_sources if not _source_aliases_overlap(group, current_sources)]
+        new_sources = [sorted(group) for group in _new_observation_sources(existing, incoming_sources)]
         if incoming_sources or normalized.link_candidate_id:
-            # 已有来源任一别名命中即同一次观察；新来源键由宿主计算，不信模型observation_id。
+            # 只为未与历史来源连通的组生成新观察键，不信模型observation_id。
             observation_key = (hashlib.sha256(json.dumps([candidate_id, sorted(new_sources)], sort_keys=True).encode()).hexdigest()
                                if new_sources else existing.observation_keys[0])
     if bindings.conflicts(normalized):
@@ -1342,22 +1341,47 @@ def _source_alias_contexts(refs):
     return contexts
 
 
-# LLM: 相同类别/稳定ID才关联；已知run优先于历史空run，避免补全后旧通配符继续吞异run，原始引用不改写。
-# 函数用途: 判断新来源是否已出现，避免仅补执行元数据使重复证据虚增票数。
-def _source_aliases_overlap(incoming, existing):
+# LLM: 仅计数投影先沿明确历史run收敛，再容历史空run匹配；不按共同run关联、不写回真实引用或学习覆盖。
+# 函数用途: 排除同批多跳补全的旧观察，返回真正独立的新来源组。
+def _new_observation_sources(existing, incoming):
+    seen = set().union(*_observation_sources(existing))
+    pending = list(incoming)
+    for allow_unqualified in (False, True):
+        while pending:
+            remaining = []
+            for group in pending:
+                contexts = _matching_source_contexts(group, seen, allow_unqualified=allow_unqualified)
+                if contexts:
+                    seen.update((kind, context, value) for kind, run, value in group
+                        for context in contexts if not run or run == context)
+                else:
+                    remaining.append(group)
+            if len(remaining) == len(pending):
+                break
+            pending = remaining
+    return pending
+
+
+# LLM: 相同类别/稳定ID才关联；已知run优先于历史空run，缺run组只传播命中的上下文，不把空通配符传给新别名。
+# 函数用途: 为同次执行的别名补全取得已见运行上下文，明确异run不命中。
+def _matching_source_contexts(incoming, existing, *, allow_unqualified):
     contexts = {}
     for kind, run, value in existing:
         contexts.setdefault((kind, value), set()).add(run)
+    matched = set()
     for kind, run, value in incoming:
         runs = contexts.get((kind, value), set())
-        known_runs = runs - {""}
-        if runs and (not run or run in known_runs or not known_runs):
-            return True
-    return False
+        qualified = runs - {""}
+        if not qualified and allow_unqualified:
+            qualified = runs
+        if not run:
+            matched.update(qualified)
+        elif run in qualified or "" in qualified:
+            matched.add(run)
+    return matched
 
 
-# LLM: This check only reopens a structurally missing-evidence candidate after exact references
-# have been merged. Cryptographic/message/tool verification remains exclusively in PromotionService.
+# LLM: 仅在精确引用合并后重新开放结构缺证据的候选；密码学、消息及工具证据核验仍由PromotionService独占。
 # 函数用途: 判断候选是否已补齐与来源类型匹配的最小结构化引用，以便自动重试而不是永久卡住。
 def _candidate_has_structural_evidence(candidate: object) -> bool:
     origin = str(getattr(candidate, "origin", "") or "").strip().lower()

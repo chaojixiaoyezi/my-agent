@@ -1,10 +1,8 @@
-
+# LLM: 默认策略是新 owner 的机器配置起点；字段变更必须同步迁移、CLI 中文说明与策略测试，不从正文推导权限例外。
+# 模块用途: 生成 owner 首次初始化的权限、配额、留存、Memory、Skill 和工具策略 JSON，不在此写入文件。
 from __future__ import annotations
 
 """Owner 权限、配额、Memory retention、Skill 与工具策略默认值。"""
-
-# LLM: seed payload 是新 owner 的机器配置起点；字段变更必须同步 migration、CLI 中文说明和策略测试。
-# 模块用途: 生成首次初始化时写入 owner home 的结构化策略 JSON。
 
 # LLM: 权限 seed 只定义通用边界，不从提示词或用户正文推导例外。
 # 函数用途: 返回新 owner 的默认文件、网络、shell 和子代理权限。

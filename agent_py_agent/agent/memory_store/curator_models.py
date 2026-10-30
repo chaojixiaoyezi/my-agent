@@ -1,9 +1,8 @@
+# LLM: 后台模型只能生成 CuratorExtraction；运行、游标、租约、状态和 ID 均由宿主持有，不由模型自报取得权威。
+# 模块用途: 统一 Curator 配置、持久状态及严格模型输出合同，避免不同供应商产生第二套记忆字段与游标语义。
 from __future__ import annotations
 
 """Memory Curator 的配置、durable state 和严格模型输出合同。"""
-
-# LLM: 后台模型只能生成 CuratorExtraction；run/cursor/lease/status/id 都由宿主结构持有。
-# 模块用途: 防止提示词正文或不同 provider 产生第二套记忆字段和游标语义。
 
 import hashlib
 import json

@@ -1,9 +1,8 @@
+# LLM: 本模块只读类型化策略、会话、任务及子代理状态和文件事实，不执行删除；来源或状态未知时必须保守保护并报告错误。
+# 模块用途: 为每个 owner 生成可在执行前重验证的留存 dry-run 计划，统一保护引用与恢复材料。
 from __future__ import annotations
 
 """Memory v2 retention 的只读扫描与计划生成。"""
-
-# LLM: 本模块只能读取 typed policy、ConversationThread、task/subagent state 和文件元数据；不得执行删除。
-# 模块用途: 为每个 owner 构造可重验证的 retention dry-run 计划，并在坏状态时关闭式报告错误。
 
 import hashlib
 import io
@@ -109,7 +108,7 @@ def build_retention_plan(
     )
 
 
-# LLM: One scan context carries typed policy and shared fail-closed errors across all categories.
+# LLM: 一次扫描上下文为所有类别共享同一类型化策略与关闭式错误集合，不能各自放宽失败规则。
 # 类用途: 汇总一次只读 retention 计划所需的 owner、策略、会话根和扫描时间。
 @dataclass
 class _RetentionScanContext:
@@ -120,7 +119,7 @@ class _RetentionScanContext:
     now: datetime
     errors: list[MemoryRetentionError] = field(default_factory=list)
 
-    # LLM: Legal-hold task IDs are normalized once and reused by every scanner.
+    # LLM: 法律保留任务 ID 从已解析策略转成统一集合，供所有扫描器按精确身份复用。
     # 函数用途: 返回禁止清理的任务编号集合。
     @property
     def held_task_ids(self) -> frozenset[str]:
@@ -155,7 +154,7 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     return actions
 
 
-# LLM: Runtime artifacts with task/conversation authority share the same legal-hold and terminal-state inputs.
+# LLM: 依赖任务或会话权威的运行产物共用同一法律保留和终态输入，不能单独按文件年龄授权清理。
 # 函数用途: 汇总工具正文、子代理临时目录、候选和完整会话动作。
 def _protected_runtime_actions(
     context: _RetentionScanContext,
@@ -1315,7 +1314,7 @@ def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path,
     return tuple(dict.fromkeys(result))
 
 
-# LLM: Proof fields bind a plan action to exact authority/source snapshots for apply-time revalidation.
+# LLM: 证明字段把规划动作绑定到精确权威与来源快照，供执行时重新验证，不能凭动作类别猜证据。
 # 类用途: 聚合 retention 动作的状态权威、指纹、记录编号、截止时间和关联路径。
 @dataclass(frozen=True)
 class _ActionProof:
@@ -1328,7 +1327,7 @@ class _ActionProof:
     related_paths: tuple[Path, ...] = ()
 
 
-# LLM: The action helper generates one stable ID and prevents scanners from defining competing idempotency semantics.
+# LLM: 动作构造器统一生成稳定 ID，防止各扫描器自行定义互相冲突的幂等语义。
 # 函数用途: 将基础动作字段与可重验证证据组合成完整 retention 动作。
 def _action(
     *,

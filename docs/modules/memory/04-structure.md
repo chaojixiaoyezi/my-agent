@@ -1,3 +1,7 @@
+## 2026-10-29 e905 sol-5 R2：候选来源别名连通投影
+
+`candidates.py::_merge_indexed_observation` 将本次稳定来源组交给 `_new_observation_sources`，以已有来源为锚迭代传播可关联别名；`_matching_source_contexts` 只传播匹配的运行上下文，已知 run 优先于历史空 run。仅未连通的组进入新观察键，未改 `CandidateObservation`、真实引用合并或学习覆盖合同；没有新增事实源、配置和正式记忆跨引用接口。原先只检查每个 incoming group 对历史并集的单步判重已替换。
+
 ## 2026-10-27 CI 全绿收敛：候选兼容读取、晋升补全与大索引流式过滤结构
 
 - `memory_store/_candidate_read_compat.py` 与 `candidates.py`：封装未覆盖 `_load_unlocked` 时的五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离。

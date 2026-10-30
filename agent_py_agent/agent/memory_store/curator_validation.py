@@ -1,10 +1,8 @@
+# LLM: 本模块供 Curator 调用方校验模型提案与计算宿主游标；只绑定当前 owner 的冻结输入证据，不接受模型自授权身份，不执行文件或网络 IO，不产生持久化副作用。
+# 模块用途: 在 Curator 提交前验证证据、规范引用并计算连续处理前缀；模型 Schema 仅为形状门，写入与事务由调用方负责。
 from __future__ import annotations
 
 """Curator 模型输出的宿主证据验证与精确游标计算。"""
-
-# LLM: Provider Schema is only a shape gate; this module binds every claimed identity to the
-# current owner input snapshot and computes cursors without trusting model suggestions.
-# 模块用途: 防伪造 user/tool 引用、规范化证据，并只越过连续 processed 前缀。
 
 import hashlib
 import json
@@ -24,20 +22,17 @@ from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
 
 
-# LLM: Provider evidence failures expose one stable persisted error code while retaining a
-# non-content detail code in-process for diagnostics and tests.
+# LLM: 模型证据失败对外只暴露稳定持久化错误码；进程内另留不含正文的明细码供诊断与测试使用。
 # 类用途: 区分严格 JSON Schema 错误与引用、状态或覆盖证明错误。
 class CuratorEvidenceError(ValueError):
-    # LLM: Only the stable top-level code is printable/persistable; detail_code contains no
-    # provider text and is limited to a host-authored enum-like diagnostic.
+    # LLM: 只允许打印或持久化稳定顶层码；detail_code 限于宿主编写的枚举式诊断，不包含供应商正文。
     # 函数用途: 创建不泄露正文的 Curator 证据错误。
     def __init__(self, detail_code: str) -> None:
         super().__init__("CURATOR_EVIDENCE_INVALID")
         self.detail_code = str(detail_code or "evidence_invalid")
 
 
-# LLM: One immutable result keeps cursor maps and processed counts from different validation
-# passes from being mixed during commit.
+# LLM: 用一个不可变结果绑定同轮校验的游标映射与处理数，防止提交时混入不同校验轮次的数据。
 # 类用途: 表示宿主根据输入顺序计算出的下一游标与实际推进数量。
 @dataclass(frozen=True)
 class CuratorCursorAdvance:
@@ -190,9 +185,6 @@ def _observed_target_version(observation: object, batch: CuratorInputBatch) -> i
     return version if type(version) is int and version > 0 else None
 
 
-# LLM: Daily user/tool origins must carry the same canonical evidence standard as candidates;
-# entering a non-authoritative daily ledger never relaxes provenance.
-# 函数用途: 验证并替换一条 Daily 草稿的引用。
 # LLM: Daily 工具引用只保留成功终态；失败/超时/取消/unknown 的引用剔除但不阻断整批(经历仍记 summary)。
 # 函数用途: 对 Daily 草稿的 tool_refs 做容错 canonicalization，成功终态保留、非成功剔除。
 def _daily_tool_refs_tolerant(
@@ -217,6 +209,8 @@ def _daily_tool_refs_tolerant(
     return canonical
 
 
+# LLM: Daily 仍须绑定当前批次的规范证据；工具引用容错剔除不成功项，但用户/工具来源声明及至少一条证据的要求不能放宽。
+# 函数用途: 校验日报草稿来源并以宿主引用补全身份、时间及证据列表。
 def _validated_daily(
     draft: object,
     *,
@@ -354,8 +348,7 @@ def _require_complete_candidate_refs(observation, resolved) -> None:
         raise CuratorEvidenceError("candidate_evidence_unresolved")
 
 
-# LLM: Artifact identities come only from the frozen owner audit batch; provider text cannot add
-# another path or ref to this exact lookup.
+# LLM: 产物身份仅来自冻结的 owner 审计批次；供应商正文不能向精确查找表添加路径或引用。
 # 函数用途: 构造当前批次 artifact_ref 到正式 audit 输入的映射。
 def _artifacts_by_ref(batch: CuratorInputBatch) -> dict[str, CuratorAuditInput]:
     artifacts: dict[str, CuratorAuditInput] = {}
@@ -366,23 +359,20 @@ def _artifacts_by_ref(batch: CuratorInputBatch) -> dict[str, CuratorAuditInput]:
     return artifacts
 
 
-# LLM: Runtime IDs are derived only from canonicalized message/tool/artifact refs; when a Daily
-# summary spans more than one identity the field stays empty instead of guessing one.
+# LLM: 运行身份只从规范化消息、工具和产物引用推导；日报涉及多个身份时保留空字段，不猜选其中一个。
 # 函数用途: 返回引用中唯一的非空结构化字段值。
 def _single_reference_value(refs: list[dict[str, object]], key: str) -> str:
     values = _reference_values(refs, key)
     return values[0] if len(values) == 1 else ""
 
 
-# LLM: Candidate task/run provenance follows canonical evidence order and deduplicates exact IDs;
-# provider output has no source_task_ids/source_run_ids field to forge.
+# LLM: 候选任务与运行来源沿规范证据顺序按精确 ID 去重；模型输出不开放 source_task_ids/source_run_ids 供其伪造。
 # 函数用途: 从一组宿主引用提取稳定非空字段列表。
 def _reference_values(refs: list[dict[str, object]], key: str) -> list[str]:
     return normalize_string_list([ref.get(key) for ref in refs])
 
 
-# LLM: Daily partition time is the earliest canonical evidence time, not a provider-selected day;
-# input timestamps are normalized to UTC before comparison.
+# LLM: 日报分区取规范证据的最早时间，不由模型选日期；输入时间先归一到 UTC 再比较。
 # 函数用途: 为一条 Daily 草稿推导稳定 created_at。
 def _earliest_reference_time(refs: list[dict[str, object]]) -> str:
     values = [
@@ -427,9 +417,8 @@ def _canonical_artifact_refs(
     return canonical
 
 
-# LLM: Provider observation_id is advisory only; the host hashes canonical evidence plus typed
-#   subject/scope/action and the normalized content hash (memory_content_hash, the same normalization
-#   stable_candidate_id uses). 用户 2026-10-02 拍板第 6 条：同一来源、同一主题、内容不同的是不同观察，各存一条
+# LLM: 模型 observation_id 仅供参考；宿主对规范证据、类型化主题/范围/动作及内容指纹求哈希，内容使用与 stable_candidate_id 相同的 memory_content_hash 归一规则。
+#   用户 2026-10-02 拍板第 6 条：同一来源、同一主题、内容不同的是不同观察，各存一条
 #   （“我对花生过敏，也对芒果过敏”不再塌成一条）；规范化后内容相同的才是同一观察、照旧合并。
 #   代价：同一条未声明已处理的消息被安全重放时，模型换了说法会多出一条候选（候选编号本来就含内容，
 #   所以不会把出现次数虚增到原候选上）。改动须同步 test_curator_observation_identity.py。
@@ -468,17 +457,14 @@ def _canonical_observation_id(
     return "curator-observation-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
 
-# LLM: The Curator cannot self-assert reviewed or subagent provenance; those origins enter only
-# through their dedicated host-side CandidateService adapters.
+# LLM: Curator 不能自行声明 reviewed 或 subagent 来源；这些来源只能经专用宿主 CandidateService 适配器进入。
 # 函数用途: 限制后台模型可声明的来源类别。
 def _require_curator_origin(origin: object) -> None:
     if str(origin or "").strip().lower() not in CURATOR_MODEL_ORIGINS:
         raise CuratorEvidenceError("host_owned_origin")
 
 
-# LLM: Every input must not be claimed both processed and unresolved; cursor advancement is
-# guaranteed only by the continuous processed prefix, so omitted claims just stop the cursor
-# before them (safe replay) and out-of-scope claims never participate in advancement.
+# LLM: 同一输入不能同时声明已处理和未解决；游标只越过连续已处理前缀，漏报在该处停住以便重放，越界声明不参与推进。
 # 函数用途: 核对模型处理声明无矛盾,游标防漏由连续前缀机制单独承担。
 def _validate_processed_refs(
     extraction: CuratorExtraction,
@@ -494,8 +480,7 @@ def _validate_processed_refs(
         raise CuratorEvidenceError("processed_and_unresolved_overlap")
 
 
-# LLM: The strict schema keeps provider compatibility by declaring both nullable stream IDs;
-# host validation enforces the semantic XOR so one unresolved row cannot cover two inputs.
+# LLM: 严格 Schema 为兼容供应商同时声明两个可空流 ID；宿主执行语义异或，禁止一条未解决记录覆盖两项输入。
 # 函数用途: 确保每条 unresolved 引用恰好指向一条 message 或一条 audit 事件。
 def _validate_unresolved_ref_shape(refs: object) -> None:
     for ref in normalize_reference_list(refs):
@@ -505,8 +490,7 @@ def _validate_unresolved_ref_shape(refs: object) -> None:
             raise CuratorEvidenceError("unresolved_ref_not_xor")
 
 
-# LLM: The provider selects message_id only; the host supplies one exact continuous quote and
-# full-content hash from ConversationStore, eliminating provider-authored evidence text.
+# LLM: 模型只选择 message_id；宿主从 ConversationStore 补入精确连续引文与全文哈希，不采用模型编写的证据正文。
 # 函数用途: 将模型 message refs 替换成带宿主 quote/hash 的 canonical owner refs。
 # 宽容语义:出界/线程不匹配的引用剔除(不 raise),与 _daily_tool_refs_tolerant 对齐——
 # 单条证据引用幻觉不连坐整批(真机 2026-08-09:deepseek-v4-flash 在 candidate 里编造
@@ -527,8 +511,7 @@ def _canonical_message_refs(
     return canonical
 
 
-# LLM: Tool evidence status comes only from owner audit; a model-supplied success string cannot
-# override failed, timeout, cancelled, or unknown-effect records.
+# LLM: 工具证据状态只取 owner 审计；模型提供的成功字符串不能覆盖失败、超时、取消或副作用未知的记录。
 # 函数用途: 将 tool refs 绑定到当前 owner audit 事件。
 # 宽容语义:出界引用剔除(不 raise),与 _daily_tool_refs_tolerant 对齐;非成功终态在
 # require_success 下同样剔除。剔除后若无任何证据,调用方按 candidate_without_evidence
@@ -558,8 +541,7 @@ def _canonical_tool_refs(
     return canonical
 
 
-# LLM: Identity resolution accepts exact event/call/operation keys only and never searches
-# preview text or timestamps.
+# LLM: 身份解析只接受精确事件、调用或操作键，不搜索预览正文或时间戳。
 # 函数用途: 根据结构化工具身份查找当前 audit 输入。
 def _tool_source(
     ref: dict[str, object],
@@ -574,8 +556,7 @@ def _tool_source(
     )
 
 
-# LLM: Cursor advancement follows only continuous processed prefixes per stream; unresolved
-# input and everything after it remain eligible for safe replay.
+# LLM: 每条流的游标只按连续已处理前缀推进；未解决输入及其后续内容保留以供安全重放。
 # 函数用途: 根据验证后的处理声明计算 host-owned 下一游标。
 def next_cursors(
     current_message_cursors: dict[str, str],
@@ -603,8 +584,7 @@ def next_cursors(
     return CuratorCursorAdvance(cursors, audit_cursor, advanced_messages, advanced_audit)
 
 
-# LLM: Per-thread order is inherited from ConversationStore typed reads rather than timestamp
-# comparison.
+# LLM: 各线程顺序继承 ConversationStore 的类型化读取顺序，不通过比较时间戳重排。
 # 函数用途: 推进每个线程的连续消息前缀及已核验的排除消息前缀。
 def _advance_message_cursors(
     current: dict[str, str],
@@ -629,8 +609,7 @@ def _advance_message_cursors(
     return cursors, advanced
 
 
-# LLM: Audit order is the collector's canonical daily-file/line append order, never a timestamp
-# sort guessed by the model.
+# LLM: 审计顺序采用收集器规定的日期文件与行追加顺序，不采用模型猜测的时间戳排序。
 # 函数用途: 推进 audit 的连续 processed 前缀。
 def _advance_audit_cursor(
     current: str,
@@ -647,8 +626,7 @@ def _advance_audit_cursor(
     return cursor, advanced
 
 
-# LLM: Reference coverage uses exact non-empty IDs only; no coercion from content or list
-# position is permitted.
+# LLM: 引用覆盖只认精确非空 ID，不允许从正文或列表位置强行推导身份。
 # 函数用途: 提取 processed/unresolved 引用身份集合。
 def _ref_ids(refs: object, key: str) -> set[str]:
     return {

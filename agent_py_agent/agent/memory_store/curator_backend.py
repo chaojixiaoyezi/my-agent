@@ -1,9 +1,8 @@
+# LLM: 后台模型只接收提示词与 Schema，锚点 ID 仅用于候选链接；沿既有有界运输门调用，退出未确认或原运输未结时不得重试或改签。
+# 模块用途: 构造无工具 Curator 请求并严格解析提取结果，保持缩批、游标及原调用归属，不新增执行或发布许可。
 from __future__ import annotations
 
 """Memory Curator 的无工具结构化模型调用。"""
-
-# LLM: 后台模型只接收prompt/schema，锚点candidate_id仅可填入输出link_candidate_id；原运输scope实际发出前复核，退出未确认和原typed未结不能重试或改签，缩批/游标及F2归属保持。
-# 模块用途: 构造与严格schema一致的非权威历史提示，沿原有界调用和运输门提取CuratorExtraction，不新增执行或发布许可。
 
 import contextvars
 import json
@@ -279,8 +278,7 @@ def fit_batch_to_input_budget(
     return fitted, (warning,)
 
 
-# LLM: Timeout budget grows with the actual prompt so that long ingest (novel/長文 bulk load)
-# gets enough wall-clock budget on slow providers, while short inputs keep the configured base.
+# LLM: 超时预算随实际提示词大小增长，使小说或长文导入在慢供应商上有足够时间；短输入维持配置的基础预算。
 # 函数用途: 按输入规模自适应放大模型调用超时(每 chars_per_unit 字符追加一个基础预算,封顶 max_multiplier 倍)。
 def adaptive_timeout_seconds(
     base_timeout: int,
@@ -522,8 +520,7 @@ next_cursor 必须完整包含 per_thread_cursors 和 last_audit_event_id；per_
 """
 
 
-# LLM: Prompt enums are rendered from canonical host constants so an Anthropic-compatible
-# prompt-only structured call cannot drift from the validator.
+# LLM: 提示词枚举从规范宿主常量渲染，使仅通过提示词约束的 Anthropic 兼容结构化调用不偏离校验器。
 # 函数用途: 把一个机器枚举渲染为稳定、紧凑的提示词列表。
 def _enum_values(values: Collection[str]) -> str:
     return "|".join(sorted(str(value) for value in values))

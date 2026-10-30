@@ -608,3 +608,106 @@ def test_ambiguous_alias_chain_does_not_guess_run(tmp_path):
     persisted = module.CandidateService(path).get(row.candidate_id)
     assert persisted.source_tool_refs == [*refs, *replay.source_tool_refs]
     assert not persisted.source_artifact_refs
+
+
+# LLM: 真实observe及跨实例重读验证旧单端引用后补跨容器别名链；引用原文不改，同run不等于同来源。
+# 函数用途: 覆盖普通合并/显式链接、有无run、反向引用顺序及真正独立执行的计票。
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("run", ["", "r1"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_backfilled_cross_reference_alias_chain_counts_once(tmp_path, linked, run, reverse):
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    path = tmp_path / "candidates.jsonl"
+    context = {"run_id": run} if run else {}
+    original = {"operation_id": "op", **context}
+    base = CandidateObservation(candidate_type="lesson", content="核对真实来源后再计票",
+        subject_key="backfill.identity", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target="lesson", source_tool_refs=(original,))
+    first = module.CandidateService(path).observe(base)
+    operation_call = {"operation_id": "op", "tool_call_id": "call", **context}
+    call_artifact = {"call_id": "call", "artifact_id": "artifact", **context}
+    tool, artifact = (call_artifact, operation_call) if reverse else (operation_call, call_artifact)
+    enriched = replace(base, content="同一经验的改述" if linked else base.content,
+        link_candidate_id=first.candidate_id if linked else "", observation_id="enriched",
+        source_tool_refs=(tool,), source_artifact_refs=(artifact,))
+    merged = module.CandidateService(path).observe(enriched)
+    persisted = module.CandidateService(path).get(first.candidate_id)
+    assert merged.candidate_id == first.candidate_id and merged.content == first.content
+    assert original in persisted.source_tool_refs and tool in persisted.source_tool_refs
+    assert artifact in persisted.source_artifact_refs
+    assert (merged.occurrence_count, persisted.occurrence_count) == (1, 1)
+    independent = replace(enriched, source_tool_refs=({"operation_id": "other-op", **context},),
+        source_artifact_refs=({"artifact_id": "other-artifact", **context},))
+    assert module.CandidateService(path).observe(independent).occurrence_count == 2
+    assert module.CandidateService(path).observe(enriched).occurrence_count == 2
+
+
+# LLM: 同run无稳定别名连接的两个artifact必须独立；不能用run粗合并掩盖跨引用补全缺陷。
+# 函数用途: 为普通合并和显式链接保留独立产物计票对照。
+@pytest.mark.parametrize("linked", [False, True])
+def test_unconnected_artifacts_in_same_run_remain_independent(tmp_path, linked):
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    path = tmp_path / "candidates.jsonl"
+    base = CandidateObservation(candidate_type="lesson", content="独立来源独立计票",
+        subject_key="independent.artifacts", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target="lesson",
+        source_artifact_refs=({"artifact_id": "a", "run_id": "r"},))
+    first = module.CandidateService(path).observe(base)
+    second = replace(base, source_artifact_refs=({"artifact_id": "b", "run_id": "r"},),
+        content="另一次观察的改述" if linked else base.content,
+        link_candidate_id=first.candidate_id if linked else "")
+    merged = module.CandidateService(path).observe(second)
+    assert merged.occurrence_count == 2
+    assert module.CandidateService(path).get(first.candidate_id).occurrence_count == 2
+
+
+# LLM: 只有与历史来源连通的稳定别名才能消票；长链顺序反转仍应收敛，额外不连通组必须新增一票。
+# 函数用途: 防止只按输入顺序向前传播一次而漏掉多跳补全或吞掉同批新来源。
+@pytest.mark.parametrize("reverse", [False, True])
+def test_backfilled_alias_chain_reaches_fixed_point(tmp_path, reverse):
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    path = tmp_path / "candidates.jsonl"
+    base = CandidateObservation(candidate_type="lesson", content="完整核对多跳引用",
+        subject_key="long.chain", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target="lesson", source_tool_refs=({"operation_id": "op"},))
+    first = module.CandidateService(path).observe(base)
+    refs = [{"operation_id": "op", "call_id": "call"},
+        {"tool_call_id": "call", "artifact_id": "artifact"},
+        {"artifact_id": "artifact", "artifact_ref": "ref"}]
+    enriched = replace(base, source_tool_refs=tuple(reversed(refs) if reverse else refs))
+    assert module.CandidateService(path).observe(enriched).occurrence_count == 1
+    assert module.CandidateService(path).get(first.candidate_id).occurrence_count == 1
+    with_new = replace(enriched, source_tool_refs=(*enriched.source_tool_refs, {"artifact_id": "independent"}))
+    assert module.CandidateService(path).observe(with_new).occurrence_count == 2
+
+
+# LLM: 已知历史run锚点应先决定缺run别名的补全；同批新run不能靠先遍历抢占历史空run来源。
+# 函数用途: 复现独审发现的顺序依赖，覆盖两种排列、跨引用容器及显式链接，并验证真实重读。
+@pytest.mark.parametrize("new_first", [False, True])
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("split_fields", [False, True])
+def test_known_run_backfill_precedes_unqualified_alias_match(tmp_path, new_first, linked, split_fields):
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    path = tmp_path / "candidates.jsonl"
+    original = ({"operation_id": "op"}, {"call_id": "c1", "run_id": "r1"})
+    base = CandidateObservation(candidate_type="lesson", content="先核对明确的历史来源",
+        subject_key="qualified.anchor", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target="lesson", source_tool_refs=original)
+    first = module.CandidateService(path).observe(base)
+    new_run = {"operation_id": "op", "call_id": "c2", "run_id": "r2"}
+    old_backfill = {"operation_id": "op", "call_id": "c1", "run_id": "r1"}
+    refs = (new_run, old_backfill) if new_first else (old_backfill, new_run)
+    artifact = {"call_id": "c2", "artifact_id": "a2", "run_id": "r2"}
+    enriched = replace(base, content="相同主题的改述" if linked else base.content,
+        link_candidate_id=first.candidate_id if linked else "",
+        source_tool_refs=(refs[0],) if split_fields else refs,
+        source_artifact_refs=(refs[1], artifact) if split_fields else (artifact,))
+    merged = module.CandidateService(path).observe(enriched)
+    persisted = module.CandidateService(path).get(first.candidate_id)
+    assert original[0] in persisted.source_tool_refs and original[1] in persisted.source_tool_refs
+    assert (merged.occurrence_count, persisted.occurrence_count) == (2, 2)
+    assert module.CandidateService(path).observe(enriched).occurrence_count == 2

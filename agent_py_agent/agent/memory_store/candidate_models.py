@@ -1,3 +1,5 @@
+# LLM: 所有候选入口必须先转为本模块的结构化对象；候选只是待审核提议，不是长期事实，不得另建状态或晋升状态协议。
+# 模块用途: 为后台策展、子代理、迁移及管理员审核统一候选结构、枚举、稳定身份和严格解析。
 from __future__ import annotations
 
 """统一记忆候选的版本化数据合同。
@@ -5,9 +7,6 @@ from __future__ import annotations
 候选是“值得审核的提议”，不是长期事实。这个模块只定义结构、枚举、稳定身份和
 严格解析；不负责模型调用、正式晋升或 Persona 写入。
 """
-
-# LLM: 所有候选入口必须先变成这里的结构化对象；禁止在别处另建 status/promotion_status。
-# 模块用途: 给后台策展、子代理、迁移和管理员审核提供同一 Candidate Schema。
 
 import hashlib
 import json

@@ -1,6 +1,6 @@
-"""M5：坏指纹、读取竞态、引用保护及配额扫描的回归合同。"""
 # LLM: 只在pytest临时home运行真实保留/配额链；故障注入不替换授权或删除CAS，禁止访问真实owner。
 # 模块用途: 覆盖M5误删反例、引用与回收宽限保护、流式读取和展示缓存不绕过配额。
+"""M5：坏指纹、读取竞态、引用保护及配额扫描的回归合同。"""
 from __future__ import annotations
 
 import errno
@@ -24,6 +24,8 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
 
 
+# LLM: 已晋升候选冷详情仍须保护其证据；冷源损坏时关闭相关清理，完好时仍清理无引用对照文件，不能全停冒充保护。
+# 函数用途: 验证冷候选证据在真实引用扫描、规划及执行中的保护与坏源失败边界。
 @pytest.mark.parametrize("damage", [False, True])
 def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, damage):
     from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
@@ -60,6 +62,8 @@ def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, 
     assert control.exists() is damage
 
 
+# LLM: 真实运行账的检查点与增量跨日期形成恢复链；旧分片必须保留且无引用对照分片可回收，不能损坏日志可读性。
+# 函数用途: 验证版本化 Curator 游标分片跨日被引用保护。
 def test_r2_versioned_curator_shards_are_pinned_across_days(tmp_path):
     from agent_py_agent.agent.memory_store.curator_run_log import (
         _CURSOR_CHECKPOINT,

@@ -1,3 +1,13 @@
+## 2026-10-29 e905 sol-5 R2：候选观察跨引用别名链补全
+
+来源：`report-rereview-e905-sol-5-astra1.md` 的 F1 与确认后的 `fix-e905-sol-5-r2.md`。旧观察只有 operation，后续同批补 operation→call、call→artifact 时，不能将同次执行重复计票。
+
+- `test_opt_memory_obligations.py` 新增普通合并/显式链接、有无 run、反向容器顺序、多跳固定点、同批独立来源及不同 artifact 同 run 对照；均走真实候选账本并核对跨实例重读、引用保真。
+- 红例：首批新增 12 项中 10 失败、2 对照通过；失败实值为 `(2, 2)` 而非 `(1, 1)`。初修后该文件 73 项通过；独审再补 8 个已知 run/历史空 run 排列用例，先 4F/4P，再修为明确历史 run 优先传播。最终该文件 81 项通过；不是通过降低断言、skip 或合并整个 run 来消除失败。
+- 修复只改变计数别名投影，不改真实证据、学习覆盖、正式晋升、状态机或锁；Curator 中文注释检查须覆盖完整分支改动文件的全部 AST 定义，不限最后一次提交。
+- 最终聚焦组合（R1 六文件及 `test_memory_curator.py`）321P，0F/E/skip；额外六文件核心回归 237P/3F，三个 persona/SOUL 节点与真正原基线记录同名，不能登记全回归全绿。Ruff、导入边界、doc-sync、diff、clean-package、20 文件 compileall 及整文件 AST 中文注释审计通过（20 模块、82 类、666 函数，缺口 0）；注释专属 18 文件 AST 与非注释 token 等价。
+- 复现：工作树根执行 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_memory_obligations.py -q --tb=short -o addopts= --basetemp=.pytest_cache/sol5-r2-repro-tmp`。完整组合命令、XML 和失败边界见本轮 DONE；首次独审 P2 由主代理实测修正，未将旧审查报告包装成最终独立批准。本节不宣称生产或跨平台验收。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

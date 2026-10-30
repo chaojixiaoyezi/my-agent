@@ -1,10 +1,8 @@
+# LLM: 只执行同锁生成的类型化留存动作，逐目标复核策略、法律保留、引用、指纹、状态与截止时间；原短提交门的执行未知不能洗成动作失败。
+# 模块用途: 执行候选及文件留存清理，记录可恢复回收与无正文审计，并保护快照清单引用及目标 CAS。
 from __future__ import annotations
 
 """Memory v2 retention 计划的重验证与执行。"""
-
-# LLM: main快照/清单引用与目标CAS保留；原callback逐写短门，实际未知/策略变化不洗成动作失败。
-#   apply 只能执行刚在同一锁内生成的 typed actions；每个目标仍需 fingerprint/status/cutoff 二次核验。
-# 模块用途: 安全删除文件、清理终态候选和快照清单；执行前重核引用与指纹，并记录可恢复回收及无正文审计。
 
 import json
 import os

@@ -146,8 +146,7 @@ class RejectingMessageEvidenceVerifier:
         return None
 
 
-# LLM: The dependency object lists every canonical authority used by promotion and replaces a
-# wide constructor; it contains no alternate persistence callbacks.
+# LLM: 依赖对象列明晋升使用的全部规范权威以代替宽构造器，不包含替代持久化回调。
 # 类用途: 汇总 Candidate、长期记忆、Persona、lesson、HOT 与证据核验器。
 @dataclass(frozen=True)
 class MemoryPromotionDependencies:
@@ -163,8 +162,7 @@ class MemoryPromotionDependencies:
     exclusion_store: object | None = None
 
 
-# LLM: Threshold policy is immutable and separate from repositories so tests/config cannot mix
-# a lesson threshold into HOT behavior accidentally.
+# LLM: 重复门槛策略不可变且独立于仓库，避免配置或测试把 lesson 门槛误用于 HOT。
 # 类用途: 保存 lesson/HOT 重复证据门槛。
 @dataclass(frozen=True)
 class MemoryPromotionPolicy:
@@ -172,12 +170,10 @@ class MemoryPromotionPolicy:
     hot_min_occurrences: int = 3
 
 
-# LLM: This adapter prefers the runtime gate ledger and uses the canonical owner tool-output
-# index only for exact legacy call identities that predate operation_id in raw audit rows.
+# LLM: 此适配器优先读取运行门账本；只有原审计早于 operation_id 字段的精确旧调用身份才回退到规范 owner 工具输出索引。
 # 类用途: 按 owner/run/operation 或唯一的 run/call 归档核验工具成功终态。
 class LocalStoreToolEvidenceVerifier:
-    # LLM: owner_id is the immutable verification wall; owner_root is read-only and may expose
-    # only canonical blobs/tool_outputs indexes for legacy evidence completion.
+    # LLM: owner_id 是不可变核验边界；owner_root 只读，仅从规范 blobs/tool_outputs 索引补全旧证据。
     # 函数用途: 初始化工具账本与 owner 私有归档的只读 Memory 适配器。
     def __init__(
         self,
@@ -194,8 +190,7 @@ class LocalStoreToolEvidenceVerifier:
             else None
         )
 
-    # LLM: Candidate status/effect fields are advisory. Exact ledger evidence wins; the archive
-    # fallback requires one unique run/call/tool identity plus typed succeeded operation facts.
+    # LLM: 候选的状态与副作用字段仅供参考，精确账本证据优先；归档回退必须匹配唯一运行/调用/工具身份及类型化成功操作事实。
     # LLM: C实际LocalStore连接出生native不得被宽catch变成缺证据，普通读取失败仍原fallback，不新增证据状态。
     # 函数用途: 核验原工具终态，保实际来源拒绝对象与原档案回退边界。
     def verify(self, ref: dict[str, object]) -> VerifiedToolEvidence | None:
@@ -219,8 +214,7 @@ class LocalStoreToolEvidenceVerifier:
             return _verified_runtime_gate_record(self.owner_id, ref, record)
         return self._verify_owner_tool_archive(ref, run_id=run_id)
 
-    # LLM: Legacy raw audit rows may omit operation_id even though the owner tool index retained
-    # it. Resolve only a single exact invocation identity; ambiguity and malformed JSON fail closed.
+    # LLM: 旧原始审计可能缺 operation_id 而 owner 工具索引仍保留；只解析唯一精确调用身份，歧义或坏 JSON 均保守拒绝。
     # 函数用途: 从 owner 工具输出索引补核验旧 run/call/tool 引用。
     def _verify_owner_tool_archive(
         self,
@@ -277,8 +271,7 @@ class LocalStoreToolEvidenceVerifier:
         )
 
 
-# LLM: The adapter explicitly migrates legacy ledger terminal label "done" to canonical
-# ToolResult label "succeeded"; no other aliases or prose are accepted.
+# LLM: 适配器只显式把旧账本终态 done 迁移为规范 ToolResult 终态 succeeded，不接受其他别名或正文推断。
 # 函数用途: 将一条 runtime gate 记录投影成 Memory 的规范工具证据。
 def _verified_runtime_gate_record(
     owner_id: str,
@@ -802,6 +795,7 @@ def _ensure_not_excluded(service: MemoryPromotionService, candidate: MemoryCandi
         raise _PromotionBlocked(candidate.status, code)
 
 
+# LLM: 接线学习排除仓库时只按最新结构化名单与来源判定；读取失败保守阻断，不从正文猜测来源或绕过现有 policy 锁。
 # 函数用途: 读最新名单并判定一条候选是否命中；返回稳定原因码或空串。
 def _learning_exclusion_block(
     service: MemoryPromotionService, candidate: MemoryCandidate
@@ -847,8 +841,7 @@ def _commit_target_blocked(
         raise
 
 
-# LLM: Persona adoption trusts only canonical verifier output and exact structured parameters;
-# candidate prose, model status words, and semantic similarity never authorize reuse.
+# LLM: 复用人格写入只信规范核验器输出与精确结构化参数；候选正文、模型状态词和语义相似都不能授权复用。
 # 函数用途: 判断核验后的工具证据是否为目标人格文件的成功 add。
 def _is_successful_persona_add(
     verified: VerifiedToolEvidence,
@@ -892,8 +885,7 @@ def _promotion_precheck_code(candidate: MemoryCandidate, automatic: bool) -> str
 # LLM: 不解析聊天意图；消费宿主来源及typed verifier，自动仅审核结构化合格快照，人工仍走原精确审核。
 # 类用途: 唯一执行候选审核及long_term、Persona、lesson与HOT归档，保原安全门和仓库。
 class MemoryPromotionService(_PromotionCommitMixin):
-    # LLM: Construction accepts one authority bundle and one policy object, preventing partial
-    # alternative wiring while preserving rejecting verifier defaults.
+    # LLM: 构造只接受一组权威依赖与一份策略，防止部分替代接线，并保留默认拒绝核验器。
     # LLM: coordinator_io仅原policy锁出生/实际native透传策略，不保存source，不改review/promote/condense/费用或锁序。
     # 函数用途: 用真实领域对象装配原晋升服务，C每次末写仍靠当次原scope。
     def __init__(
@@ -1398,6 +1390,7 @@ class _PromotionConflict(RuntimeError):
 # LLM: 提交失败已落状态迁移的载体；只携带稳定 status 与原因码。
 # 类用途: 让主流程把 blocked/门槛失败转成 MemoryPromotionResult，不吞回退路径。
 class _PromotionBlocked(RuntimeError):
+    # LLM: 此异常只运输已迁移状态及稳定原因码，不执行额外状态变更，不携带候选正文。
     # 函数用途: 构造一次已迁移状态的晋升阻断。
     def __init__(self, status: str, reason_code: str) -> None:
         self.status = status

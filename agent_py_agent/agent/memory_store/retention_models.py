@@ -1,9 +1,8 @@
+# LLM: 留存决策必须取自 v2 类型化策略、结构化状态和文件事实；自然语言原因仅供展示，不授权删除。
+# 模块用途: 定义保留期、严格策略解析、幂等动作身份及管理员可读的无正文执行报告。
 from __future__ import annotations
 
 """Memory v2 保留策略、计划动作和报告的数据合同。"""
-
-# LLM: 所有 retention 决策必须由 v2 typed policy、结构化状态和文件事实产生；自然语言原因只用于展示。
-# 模块用途: 定义默认天数、严格策略解析、幂等动作身份和管理员可读取的执行报告。
 
 import hashlib
 import json
@@ -183,7 +182,7 @@ class MemoryRetentionReport:
     def ok(self) -> bool:
         return not self.errors
 
-    # LLM: legacy callers may display load_errors, but authority remains typed errors and同一 Service；这不是第二套错误状态。
+    # LLM: 旧调用方可展示 load_errors，但权威仍是同一服务的类型化 errors；此属性不是第二套错误状态。
     # 函数用途: 为现有 home maintenance/doctor 调用方提供只读错误投影。
     @property
     def load_errors(self) -> tuple[dict[str, str], ...]:

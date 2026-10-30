@@ -1,9 +1,8 @@
+# LLM: 本模块只读权威经历并生成预览；临时关系注释绑定来源和正式版本，锚点复用权威范围键，不写游标、不推断候选、不复制工具大输出。
+# 模块用途: 把精确消息与审计游标后的新事件及同范围只读锚点整理为后台模型的有界 JSON 输入。
 from __future__ import annotations
 
 """从 ConversationStore 与 owner audit 增量构造有界 Curator 输入。"""
-
-# LLM: 本模块只读权威经历并生成预览；临时关系注释绑定来源和正式版本，锚点复用权威范围键，不写cursor、不推断候选、不复制工具大输出。
-# 模块用途: 把精确message/audit游标后的新事件和同范围只读锚点整理为后台模型的有限JSON输入。
 
 import hashlib
 import json
@@ -51,8 +50,7 @@ class CuratorMessageInput:
     # LLM: 消息所属线程的宿主来源投影（收集时读取，供候选来源判定用）；缺字段的旧线程为空（未知）。
     thread_source: dict[str, object] = field(default_factory=dict)
 
-    # LLM: Runtime IDs come only from structured ConversationStore metadata; the Gateway's
-    # canonical gateway_request_id is normalized to request_id without inferring from prose.
+    # LLM: 运行 ID 只取 ConversationStore 结构化元数据；Gateway 的 gateway_request_id 归一为 request_id，不从正文推断。
     # 函数用途: 生成可由宿主核验的消息证据引用并规范化 Gateway 请求编号。
     def ref(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -122,8 +120,7 @@ class CuratorAuditInput:
     # 宿主在收集时冻结，不进入ref/to_model，不允许提取模型提交该字段。
     learning_source: dict[str, object] = field(default_factory=dict)
 
-    # LLM: Event type plus both tool identity fields come from the owner audit row; an
-    # assistant round with status=ok must never become a tool reference merely by ID lookup.
+    # LLM: 事件类型与两个工具身份字段均取自 owner 审计行；status=ok 的助手轮次不能仅凭 ID 查找就成为工具引用。
     # 函数用途: 判断这是否是一条具有完整宿主身份的真实工具调用事件。
     def is_tool_call(self) -> bool:
         tool_name = self.tool_name.strip().lower()
@@ -133,9 +130,7 @@ class CuratorAuditInput:
             and bool(self.tool_call_id.strip())
         )
 
-    # LLM: tool_success is the canonical ToolResult.ok projected by the host archive. A known
-    # unknown/not_started effect always fails closed; formal promotion still rechecks the
-    # authoritative operation ledger before any long-term write.
+    # LLM: tool_success 是宿主归档投影的规范 ToolResult.ok；副作用为 unknown/not_started 时保守拒绝，正式晋升写入长期记忆前仍须复核操作权威账。
     # 函数用途: 判断工具事件能否作为 Curator 的成功工具证据。
     def is_verified_success(self) -> bool:
         return (
@@ -294,16 +289,14 @@ def attach_candidate_anchors(batch, candidates):
     return replace(batch, candidate_anchors=tuple(anchors))
 
 
-# LLM: This adapter reads only bounded metadata from the existing runtime-memory control plane;
-# it never reads artifact bodies and never treats output-index status as execution authority.
+# LLM: 此适配器只从既有运行记忆控制面读取有界元数据；不读产物正文，也不把输出索引状态视为执行权威。
 # 类用途: 从当前 owner 的规范 tool-output 索引补全 Curator 的 artifact 引用、哈希和大小。
 @dataclass(frozen=True)
 class CuratorToolReferenceSource:
     owner_root: Path
     query: ToolReferenceQuery
 
-    # LLM: Exact structured run/call identity is required and every returned path must remain
-    # inside this owner root, preventing one owner's index from introducing another owner's ref.
+    # LLM: 必须提供精确结构化运行与调用身份，返回路径必须位于当前 owner 根内，禁止索引引入其他 owner 的引用。
     #   批量契约：一次调用对全部 run 只查一遍（读取器每批只 glob、只顺序扫描一次索引）；
     #   整批失败时给每个 run 复制同类型错误——旧路径里每个 run 的独立查询都会在同一个
     #   确定性原因上失败，逐条等价。
@@ -656,8 +649,7 @@ def _audit_input(payload: dict[str, object]) -> CuratorAuditInput:
     )
 
 
-# LLM: Enrichment is keyed only by exact run_id/tool_call_id and copies no status, operation, or
-# output text, so it cannot upgrade an audit event into successful tool evidence.
+# LLM: 补全仅按精确 run_id/tool_call_id 匹配，不复制状态、操作或输出正文，不能把普通审计事件升级为成功工具证据。
 # 函数用途: 把规范 tool-output artifact 元数据合并到对应 Curator audit 事件。
 def _enrich_audit_artifact_refs(
     events: list[CuratorAuditInput],
@@ -680,8 +672,7 @@ def _enrich_audit_artifact_refs(
     return enriched
 
 
-# LLM: Artifact enrichment must not silently exceed the same model-input budget used before the
-# lookup; trimming preserves the audit append-order prefix required by cursor advancement.
+# LLM: 产物补全后仍须遵守查找前同一模型输入预算；截取必须保留审计追加顺序的前缀以维持游标推进规则。
 # 函数用途: 在补全 artifact 元数据后重新施加 audit 字符预算。
 def _fit_audit_budget(
     events: list[CuratorAuditInput],
@@ -699,8 +690,7 @@ def _fit_audit_budget(
     return selected
 
 
-# LLM: Only exact scalar artifact metadata leaves the control plane; parameters, source input,
-# summaries, and any embedded output fields are intentionally discarded.
+# LLM: 只允许精确的产物标量元数据离开控制面；参数、来源输入、摘要和内嵌输出字段均丢弃。
 # 函数用途: 校验并压缩一条 tool-output 索引记录。
 def _bounded_tool_output_ref(
     row: dict[str, object],
@@ -734,8 +724,7 @@ def _bounded_tool_output_ref(
     }
 
 
-# LLM: Hash normalization validates the full digest instead of accepting a model-like label or
-# truncated value as durable artifact identity.
+# LLM: 哈希归一必须校验完整摘要，不能把模型式标签或截断值当成持久产物身份。
 # 函数用途: 规范化 tool-output SHA-256 为统一的 sha256: 前缀格式。
 def _normalized_sha256(value: object) -> str:
     text = str(value or "").strip().lower()
@@ -746,8 +735,7 @@ def _normalized_sha256(value: object) -> str:
     return f"sha256:{text}"
 
 
-# LLM: Tool-reference diagnostics contain only type/run/line metadata and never leak the bad
-# ledger row or artifact content into Curator state and run logs.
+# LLM: 工具引用诊断仅保留类型与运行等元数据，不把坏账本行或产物正文泄露到 Curator 状态和运行日志。
 # 函数用途: 生成稳定的 tool-output 引用读取错误。
 def _tool_reference_error(exc: BaseException, *, run_id: str) -> dict[str, object]:
     return {
