@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 import subprocess
 import sys
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -19,11 +21,16 @@ from threading import RLock
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import locked_json_path, read_json_object_report
-from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
+from ..common.nofollow_fs import (
+    open_directory_beneath,
+    read_bytes_beneath,
+    write_bytes_atomic_beneath,
+)
 from ..common.owner_write_errors import (
     LocalControlCoordinatorUnavailable,
     OwnerManagementIngressUnavailable,
 )
+from ..contracts.optimization_contracts import require_schema_generation
 
 _QUOTA_LOCK_BASENAME = ".owner-quota"
 # 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
@@ -34,8 +41,16 @@ _DISPLAY_USAGE_TTL_SECONDS = 5.0
 _DISPLAY_USAGE_CACHE_MAX_ENTRIES = 256
 _DISPLAY_USAGE_CACHE: OrderedDict[Path, tuple[tuple[int, ...], float, int]] = OrderedDict()
 _DISPLAY_USAGE_LOCK = RLock()
+_QUOTA_LEDGER = '.owner-quota-ledger.json'
+_QUOTA_SCANS: OrderedDict = OrderedDict()
+_QUOTA_SCANS_LOCK = RLock()
+_QUOTA_SCAN_CACHE_SIZE = 16
+_QUOTA_SCAN_CURSOR_TTL = 3600
+_QUOTA_SORT_BATCH = 128
 
 
+# LLM: 原配额写者在owner锁内解释append字节，不预先读取大小，保持批量写原子准入语义。
+# 类用途: 描述一个owner文件的删除、替换或追加目标。
 @dataclass(frozen=True)
 class OwnerQuotaChange:
     """One owner-scoped file size change evaluated under the quota lock.
@@ -50,6 +65,8 @@ class OwnerQuotaChange:
     append: bool = False
 
 
+# LLM: 此值只表示同次锁内准入计算，不可当跨事务或后台扫描后的长期授权。
+# 类用途: 返回当前用量、预期用量及owner上限。
 @dataclass(frozen=True)
 class OwnerQuotaProjection:
     used_bytes: int
@@ -57,6 +74,8 @@ class OwnerQuotaProjection:
     max_bytes: int
 
 
+# LLM: 权威用量或策略读取不可靠时关闭式拒绝增长，不能降级成无限配额。
+# 类用途: 区分无法安全判定配额与已经确定超额。
 class OwnerQuotaUnavailable(RuntimeError):
     """The authoritative owner quota or current usage could not be read safely."""
 
@@ -140,7 +159,11 @@ class OwnerQuotaLockContention(OwnerQuotaUnavailable):
     """The owner quota lock is temporarily held elsewhere; a retry may succeed."""
 
 
+# LLM: 仅携同次锁内投影，不记录用户正文；调用方应保留非增长修复入口。
+# 类用途: 告知当前写入将超过磁盘配额。
 class OwnerQuotaExceeded(RuntimeError):
+    # LLM: 保存准确投影供结构化处理，异常文本只包含字节统计，不改变账本。
+    # 函数用途: 构造带用量详情的超额异常。
     def __init__(self, projection: OwnerQuotaProjection):
         self.projection = projection
         super().__init__(
@@ -151,6 +174,8 @@ class OwnerQuotaExceeded(RuntimeError):
         )
 
 
+# LLM: 准入只做128项/10ms有界鲜活核对，不把展示缓存或后台旧账当成封闭写域证明。
+# 类用途: 在原owner锁内预留增长，退出时按实际字节结算，包括失败后的部分写入。
 class OwnerQuotaAdmission:
     """One owner-quota critical section shared by a whole durable mutation.
 
@@ -165,10 +190,17 @@ class OwnerQuotaAdmission:
     it writes, without estimating from stale pre-lock state.
     """
 
+    # LLM: 生命周期严格局限一次原owner锁，预留ID不跨线程共享。
+    # 函数用途: 创建本次准入的前像和预留容器。
     def __init__(self, enforcer: OwnerQuotaEnforcer, *, enabled: bool) -> None:
         self._enforcer = enforcer
         self.enabled = bool(enabled)
+        self._before = {}
+        self._before_inodes = {}
+        self._reservation = uuid.uuid4().hex
 
+    # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
+    # 函数用途: 计算本批增长并在写入前持久预留。
     def check(self, changes: Iterable[OwnerQuotaChange]) -> OwnerQuotaProjection | None:
         if not self.enabled:
             return None
@@ -176,7 +208,6 @@ class OwnerQuotaAdmission:
         if not relevant:
             return None
         try:
-            used = _owner_usage_bytes_for_admission(self._enforcer.owner_root)
             current_sizes = {path: _logical_file_size(path) for path in relevant}
         except (OSError, RuntimeError, ValueError) as exc:
             raise OwnerQuotaUnavailable("owner disk usage is unavailable") from exc
@@ -191,6 +222,22 @@ class OwnerQuotaAdmission:
             )
             for path, change in relevant.items()
         )
+        for path, change in relevant.items():
+            try:
+                info = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            desired = current_sizes[path] + (change.final_size or 0) if change.append else (change.final_size or 0)
+            if info.st_nlink > 1 and desired > current_sizes[path]:
+                raise OwnerQuotaUnavailable('hardlinked target growth requires inode replacement')
+        root = self._enforcer.owner_root
+        ledger = _read_quota_ledger(root)
+        total, count, complete = _bounded_quota_snapshot(root, max_entries=128, max_ms=10)
+        if not complete and final > replaced:
+            ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+            _write_quota_ledger(root, ledger)
+            raise OwnerQuotaUnavailable('owner usage reconciliation pending; growth refused')
+        used = total if complete else max(ledger['used_bytes'], self._enforcer.max_bytes)
         projection = OwnerQuotaProjection(
             used_bytes=used,
             projected_bytes=max(0, used - replaced + final),
@@ -198,7 +245,47 @@ class OwnerQuotaAdmission:
         )
         if projection.projected_bytes > projection.max_bytes and projection.projected_bytes > used:
             raise OwnerQuotaExceeded(projection)
+        if complete:
+            ledger.update(used_bytes=total, inode_count=count, dirty_since=None)
+            # 所有正规写者都持同一owner锁；拿到锁时旧预留只可能是退出未确认的遗留。
+            ledger['reservations'] = {}
+            self._before = {path: _logical_file_size(path) for path in self._before}
+            self._before_inodes = {path: int(path.is_file()) for path in self._before}
+        for path, size in current_sizes.items():
+            self._before.setdefault(path, size)
+            self._before_inodes.setdefault(path, int(path.is_file()))
+        delta = max(0, final - replaced)
+        ledger['reservations'][self._reservation] = {'bytes': delta, 'expires_at': time.time() + 300,
+            'paths': [str(path.relative_to(root)) for path in self._before]}
+        ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
+        ledger['revision'] += 1
+        ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+        _write_quota_ledger(root, ledger)
         return projection
+
+    # LLM: 即使业务抛异常也核实际大小；读回失败保留预留和dirty，不能伪造abort成功。
+    # 函数用途: 以真实文件差值结算本次预留，不把预计final_size当实际写入。
+    def commit_delta(self):
+        if not self.enabled or not self._before:
+            return
+        root = self._enforcer.owner_root
+        ledger = _read_quota_ledger(root)
+        delta = sum(_logical_file_size(path) - before for path, before in self._before.items())
+        ledger['used_bytes'] = max(0, ledger['used_bytes'] + delta)
+        ledger['inode_count'] = max(0, ledger['inode_count'] + sum(
+            int(path.is_file()) - self._before_inodes[path] for path in self._before))
+        ledger['reservations'].pop(self._reservation, None)
+        ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
+        ledger['revision'] += 1
+        _write_quota_ledger(root, ledger)
+
+        self._before.clear()
+        self._before_inodes.clear()
+
+    # LLM: abort仍须读回，异常不是零副作用证明。
+    # 函数用途: 撤销未使用预留并结算可能已写部分。
+    def abort_reservation(self):
+        self.commit_delta()
 
 
 # LLM: 唯一 owner 配额锁始终先于领域文件锁；非阻塞模式不授予绕锁权限，等待选择不改变持久策略。
@@ -236,8 +323,14 @@ class OwnerQuotaEnforcer:
             return
         options = {} if not self.coordinator_io else {"coordinator_io": True}
         with _locked_owner_quota(self._lock_anchor, blocking=blocking, **options):
-            yield OwnerQuotaAdmission(self, enabled=True)
+            admission = OwnerQuotaAdmission(self, enabled=True)
+            try:
+                yield admission
+            finally:
+                admission.commit_delta()
 
+    # LLM: 共用原admission锁和退出结算；业务异常也必须核实际落盘差额。
+    # 函数用途: 为已知变更批次预留配额并在离开时结算。
     @contextmanager
     def reserve(self, changes: Iterable[OwnerQuotaChange]) -> Iterator[OwnerQuotaProjection | None]:
         with self.admission() as admission:
@@ -245,6 +338,8 @@ class OwnerQuotaEnforcer:
             yield projection
 
 
+# LLM: 无Agent的正式写入口仍读同一quota.json，坏策略关闭式拒绝；缺显式限额沿原默认无限。
+# 函数用途: 为确认回调等非Agent入口创建规范配额门。
 def owner_quota_enforcer_from_policy(
     owner_root: str | Path,
     *,
@@ -382,6 +477,8 @@ def _directory_regular_bytes(owner_root: Path, base: Path, names: list[str]) -> 
     return total
 
 
+# LLM: 仅Linux调用系统find并限制15秒；非支持平台返回None，真实扫描故障拒绝，不使用展示缓存。
+# 函数用途: 为需要精确扫描的原调用方统计普通文件字节，不跟随符号链接。
 def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
     if not sys.platform.startswith("linux"):
         return None
@@ -437,6 +534,8 @@ def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
         raise OwnerQuotaUnavailable("owner disk usage scan returned invalid data") from exc
 
 
+# LLM: 只处理当前owner规范路径；控制账及锁不得作为免费payload目标，追加合并不改变原批次计费语义。
+# 函数用途: 去重并校验同一批配额变更，拒绝控制文件覆盖与混合写入。
 def _normalized_owner_changes(
     owner_root: Path,
     changes: Iterable[OwnerQuotaChange],
@@ -444,6 +543,8 @@ def _normalized_owner_changes(
     normalized: dict[Path, OwnerQuotaChange] = {}
     for change in changes:
         path = Path(change.path).expanduser().resolve(strict=False)
+        if path in (owner_root / _QUOTA_LEDGER, owner_root / (_QUOTA_LOCK_BASENAME + '.lock')):
+            raise OwnerQuotaUnavailable('quota control metadata is not a payload target')
         try:
             path.relative_to(owner_root)
         except ValueError:
@@ -471,6 +572,8 @@ def _normalized_owner_changes(
     return normalized
 
 
+# LLM: 只stat叶元数据且不跟随链接；并发消失按零，其他IO错误不得伪装成未写入。
+# 函数用途: 在准入与结算时读取单个普通文件的逻辑字节数。
 def _logical_file_size(path: Path) -> int:
     try:
         info = path.stat(follow_symlinks=False)
@@ -521,3 +624,340 @@ __all__ = [
 # 函数用途: 为C配额锁打开/创建/收紧FD，锁等待不入Root。
 def _coordinator_quota_birth(operation):
     return execute_global_write(operation, require_scope=True)
+
+
+# LLM: 控制账与原配额锁为固定大小系统元数据，不计用户payload；除此之外trash/归档/硬链接都计费。
+# 函数用途: 读取唯一增量账；坏账/高代际不允许重置为零。
+def _read_quota_ledger(root):
+    raw = read_bytes_beneath(root, (_QUOTA_LEDGER,), max_bytes=1_048_576, require_dir_fd=True)
+    if raw is None:
+        return {'schema_generation': 1, 'used_bytes': 0, 'reserved_bytes': 0, 'inode_count': 0,
+                'revision': 0, 'reservations': {}, 'dirty_since': time.time(), 'reconcile_cursor': {}}
+    try:
+        row = json.loads(raw)
+        require_schema_generation(row)
+        for key in ('used_bytes', 'reserved_bytes', 'inode_count', 'revision'):
+            if type(row[key]) is not int or row[key] < 0:
+                raise ValueError('invalid quota count')
+        if not isinstance(row['reservations'], dict) or len(row['reservations']) > 128:
+            raise ValueError('invalid quota reservations')
+        for reservation in row['reservations'].values():
+            if (type(reservation.get('bytes')) is not int or reservation['bytes'] < 0
+                    or type(reservation.get('expires_at')) not in (int, float)
+                    or not math.isfinite(reservation['expires_at'])):
+                raise ValueError('invalid quota reservation')
+        if sum(item['bytes'] for item in row['reservations'].values()) != row['reserved_bytes']:
+            raise ValueError('quota reservation total mismatch')
+        return row
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise OwnerQuotaUnavailable('quota ledger corrupt') from exc
+
+
+# LLM: 原owner锁已持有，原子私有写与R1校验，不增加第二配额策略。
+# 函数用途: 持久保存预留、计数与可重启扫描的观察游标。
+def _write_quota_ledger(root, ledger):
+    require_schema_generation(ledger)
+    encoded = json.dumps(ledger, sort_keys=True, allow_nan=False).encode()
+    if len(encoded) > 1_048_576:
+        raise OwnerQuotaUnavailable('quota ledger too large')
+    write_bytes_atomic_beneath(root, (_QUOTA_LEDGER,), encoded)
+
+
+# LLM: FD逐层nofollow，不以路径别名扫描外部；每条目录项都消耗预算，深度超过64关闭式拒绝。
+# 函数用途: 惰性枚举owner的普通文件字节和inode，不生成全目录列表。
+def _quota_entries(root, parts=()):
+    if len(parts) > 64:
+        raise OwnerQuotaUnavailable('quota traversal depth exceeded')
+    descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    try:
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if not parts and entry.name in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock'):
+                    yield (0, 0)
+                    continue
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    yield (0, 0)
+                    continue
+                yield (info.st_size, 1) if stat.S_ISREG(info.st_mode) else (0, 0)
+                if stat.S_ISDIR(info.st_mode):
+                    try:
+                        yield from _quota_entries(root, (*parts, entry.name))
+                    except FileNotFoundError:
+                        continue
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 一次全新有限核对只用于小owner准入；超预算关闭迭代器，不把未读完的总量当权威。
+# 函数用途: 至多读max_entries个目录项并返回是否准确读到末尾。
+def _bounded_quota_snapshot(root, *, max_entries, max_ms):
+    iterator = _quota_entries(root)
+    total, count = 0, 0
+    deadline = time.monotonic() + max_ms / 1000
+    try:
+        for _ in range(max_entries):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                size, files = next(iterator)
+            except StopIteration:
+                return total, count, True
+            total += size
+            count += files
+        return total, count, False
+    finally:
+        iterator.close()
+
+
+# LLM: 后台账仍是观察而非准入证明；最多16个LRU扫描，每个暂停扫描至多持一个目录流及绑定FD，重启沿路径合计恢复。
+#   原owner写revision变化、root身份变化或一小时过期即重扫，异常不得发布complete或清孤儿预留。
+# 函数用途: 按目录项/时间预算续扫owner，完成后回收孤儿预留并记录准确观察用量。
+def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, blocking=True):
+    if (type(max_entries) is not int or not 0 < max_entries <= 100000
+            or type(max_ms) not in (int, float) or not math.isfinite(max_ms) or max_ms <= 0):
+        raise ValueError('invalid quota reconciliation budget')
+    root = Path(owner_root).expanduser().resolve(strict=False)
+    with _locked_quota_scan_cache(blocking=blocking), _locked_owner_quota(root / _QUOTA_LOCK_BASENAME, blocking=blocking):
+        ledger = _read_quota_ledger(root)
+        key = (os.getpid(), str(root))
+        scan = _QUOTA_SCANS.get(key)
+        recovered = _resumable_quota_cursor(root, ledger)
+        if scan is not None and (scan['revision'] != ledger['revision'] or recovered is None
+                                 or scan['epoch'] != recovered['epoch']):
+            scan['iterator'].close()
+            del _QUOTA_SCANS[key]
+            scan = None
+        if scan is None:
+            cursor = recovered or {}
+            prep = cursor.get('prep') if isinstance(cursor.get('prep'), dict) else None
+            state = {'prep': dict(prep) if prep is not None else None}
+            scan = {'iterator': _sorted_quota_entries(root, after=cursor.get('last_relpath', ''), state=state),
+                    'revision': ledger['revision'], 'last_relpath': cursor.get('last_relpath', ''),
+                    'used': cursor.get('partial_used_bytes', 0), 'inodes': cursor.get('partial_inode_count', 0),
+                    'scanned': cursor.get('scanned', 0), 'epoch': cursor.get('epoch', uuid.uuid4().hex),
+                    'started_at': cursor.get('started_at', time.time()), 'state': state}
+            _QUOTA_SCANS[key] = scan
+        _QUOTA_SCANS.move_to_end(key)
+        while len(_QUOTA_SCANS) > _QUOTA_SCAN_CACHE_SIZE:
+            _, expired = _QUOTA_SCANS.popitem(last=False)
+            expired['iterator'].close()
+        complete, scanned, enumerated = False, 0, 0
+        enumeration_budget = max(1024, max_entries * 4)
+        deadline = time.monotonic() + max_ms / 1000
+        try:
+            while scanned < max_entries and enumerated < enumeration_budget and time.monotonic() < deadline:
+                try:
+                    entry = next(scan['iterator'])
+                except StopIteration:
+                    complete = True
+                    break
+                if entry is None:
+                    enumerated += 1
+                    continue
+                relpath, size, count = entry
+                scan['used'] += size
+                scan['inodes'] += count
+                scan['scanned'] += 1
+                scan['last_relpath'] = relpath
+                scanned += 1
+        except BaseException:
+            scan['iterator'].close()
+            _QUOTA_SCANS.pop(key, None)
+            raise
+        identity = root.stat(follow_symlinks=False)
+        cursor_payload = {
+            'epoch': scan['epoch'], 'scanned': scan['scanned'], 'complete': complete,
+            'last_relpath': scan['last_relpath'], 'partial_used_bytes': scan['used'],
+            'partial_inode_count': scan['inodes'], 'started_at': scan['started_at'],
+            'ledger_revision': ledger['revision'], 'root_dev': identity.st_dev, 'root_ino': identity.st_ino}
+        prep_state = scan.get('state', {}).get('prep') if isinstance(scan.get('state'), dict) else None
+        if not complete and isinstance(prep_state, dict):
+            cursor_payload['prep'] = prep_state
+        ledger['reconcile_cursor'] = cursor_payload
+        if complete:
+            ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'], dirty_since=None,
+                          reservations={}, reserved_bytes=0)
+            scan['iterator'].close()
+            _QUOTA_SCANS.pop(key, None)
+        else:
+            ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+        _write_quota_ledger(root, ledger)
+        return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
+                'used_bytes': ledger['used_bytes'],
+                'inode_count': ledger['inode_count'], 'cursor': ledger['reconcile_cursor']}
+
+
+# LLM: 验证排序准备阶段持久状态的结构、深度、候选上限与单调顺序；损坏即拒绝使用。
+# 函数用途: 校验未完成目录枚举批次的持久恢复字段。
+def _valid_quota_prep_cursor(prep):
+    if not isinstance(prep, dict):
+        return False
+    parts, after, enumerated = prep.get('parts'), prep.get('after'), prep.get('enumerated')
+    names, dir_id = prep.get('names'), prep.get('dir_id')
+    dir_offset = prep.get('dir_offset', 0)
+    if (not isinstance(parts, list) or len(parts) > 64
+            or any(not isinstance(p, str) or not p or '/' in p or p in ('.', '..') for p in parts)
+            or not isinstance(after, str) or type(enumerated) is not int or enumerated <= 0
+            or type(dir_offset) is not int or dir_offset < 0
+            or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH
+            or any(not isinstance(n, str) or not n or n <= after for n in names)
+            or names != sorted(set(names))
+            or not isinstance(dir_id, list) or len(dir_id) != 2
+            or any(type(v) is not int or v < 0 for v in dir_id)):
+        return False
+    return True
+
+
+# LLM: 安全读取或设置目录FD的内核偏移，不支持目录seek时回退到0且不抛异常。
+# 函数用途: 为大目录跨缓存淘汰恢复提供有界内核目录块定位。
+def _safe_dir_lseek(fd, pos, whence):
+    try:
+        return max(0, int(os.lseek(fd, pos, whence)))
+    except OSError:
+        return 0
+
+
+# LLM: 只恢复未过期、同root身份及同写revision的完整游标；旧格式缺部分统计须重扫，不猜累计值。
+# 函数用途: 验证持久续点可用性，防止LRU淘汰或重启丢失可信扫描进度。
+def _resumable_quota_cursor(root, ledger):
+    cursor = ledger.get('reconcile_cursor', {})
+    if not isinstance(cursor, dict) or cursor.get('complete') is not False:
+        return None
+    counts = ('scanned', 'partial_used_bytes', 'partial_inode_count', 'ledger_revision', 'root_dev', 'root_ino')
+    if any(type(cursor.get(key)) is not int or cursor[key] < 0 for key in counts):
+        return None
+    last, started, epoch = cursor.get('last_relpath'), cursor.get('started_at'), cursor.get('epoch')
+    if (not isinstance(last, str) or last.startswith('/') or any(p in ('.', '..') for p in last.split('/'))
+            or not isinstance(epoch, str) or not epoch or len(epoch) > 128
+            or type(started) not in (float, int) or not math.isfinite(started)
+            or not 0 <= time.time() - started <= _QUOTA_SCAN_CURSOR_TTL
+            or cursor['ledger_revision'] != ledger['revision']):
+        return None
+    if 'prep' in cursor and cursor['prep'] is not None and not _valid_quota_prep_cursor(cursor['prep']):
+        return None
+    info = root.stat(follow_symlinks=False)
+    return cursor if (info.st_dev, info.st_ino) == (cursor['root_dev'], cursor['root_ino']) else None
+
+
+# LLM: 每层只保留最小128个名字；每个真实枚举（含恢复片重读项）均交回预算门，完整枚举完才发表排序批次。
+#   暂停记录当前getdirentries块起点偏移与候选集，恢复时校验目录身份并从块起点继续有界枚举。
+# 函数用途: 可暂停且可跨缓存淘汰有界恢复地准备排序候选，避免大目录在切片重启后原地踏步或超预算。
+def _quota_sorted_names(root, parts, after, state=None):
+    import bisect
+
+    descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    try:
+        dir_stat = os.fstat(descriptor)
+        dir_id = [dir_stat.st_dev, dir_stat.st_ino]
+        prep = state.get('prep') if isinstance(state, dict) else None
+        if (isinstance(prep, dict) and tuple(prep.get('parts', ())) == parts
+                and prep.get('after') == after and prep.get('dir_id') == dir_id):
+            names = list(prep.get('names', ()))
+            raw_count = int(prep.get('enumerated', 0))
+            resume_offset = int(prep.get('dir_offset', 0))
+            if resume_offset > 0:
+                _safe_dir_lseek(descriptor, resume_offset, os.SEEK_SET)
+        else:
+            names = []
+            raw_count = 0
+        last_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
+        block_pos = last_pos
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                cur_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
+                if cur_pos != last_pos:
+                    block_pos = last_pos
+                    last_pos = cur_pos
+                name = entry.name + ('/' if entry.is_dir(follow_symlinks=False) else '')
+                if name > after and (len(names) < _QUOTA_SORT_BATCH or name < names[-1]):
+                    idx = bisect.bisect_left(names, name)
+                    if idx == len(names) or names[idx] != name:
+                        names.insert(idx, name)
+                        if len(names) > _QUOTA_SORT_BATCH:
+                            names.pop()
+                raw_count += 1
+                if isinstance(state, dict):
+                    state['prep'] = {
+                        'parts': list(parts), 'after': after, 'enumerated': raw_count,
+                        'dir_offset': block_pos, 'names': list(names), 'dir_id': dir_id,
+                    }
+                yield None
+            if isinstance(state, dict):
+                state['prep'] = None
+            return names
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 每个叶stat以原root逐层nofollow重开，返回前关闭FD；并发消失不计，权限/链接错误继续上抛。
+# 函数用途: 取得一个排序候选的真实普通文件元数据，不跟随符号链接。
+def _quota_sorted_stat(root, parts, name):
+    descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    try:
+        return os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 持久last_relpath为完整字典序键，恢复只进入可能包含后继的子树；深度64和每层128名字有界。
+#   排序准备逐项yield供时间/枚举预算中断；重启跳过旧键不重复计费，时间预算仍不抢占单个系统调用。
+# 函数用途: 为后台配额生成确定性续扫项，同时保持前台原有小目录扫描算法不变。
+def _sorted_quota_entries(root, parts=(), *, after='', state=None):
+    if len(parts) > 64:
+        raise OwnerQuotaUnavailable('quota traversal depth exceeded')
+    prefix = '/'.join(parts) + '/' if parts else ''
+    remaining = after[len(prefix):] if after.startswith(prefix) else ''
+    sub_name, sep, _ = remaining.partition('/')
+    if sep == '/' and sub_name:
+        try:
+            info = _quota_sorted_stat(root, parts, sub_name)
+        except FileNotFoundError:
+            info = None
+        if info is not None and stat.S_ISDIR(info.st_mode):
+            try:
+                yield from _sorted_quota_entries(root, (*parts, sub_name), after=after, state=state)
+            except FileNotFoundError:
+                pass
+        last_name = sub_name + '/'
+    else:
+        last_name = remaining
+    while True:
+        names = yield from _quota_sorted_names(root, parts, last_name, state=state)
+        if not names:
+            return
+        for name in names:
+            relpath = '/'.join((*parts, name))
+            if relpath <= after and not (name.endswith('/') and after.startswith(relpath)):
+                continue
+            try:
+                info = _quota_sorted_stat(root, parts, name.rstrip('/'))
+            except FileNotFoundError:
+                if relpath > after:
+                    yield relpath, 0, 0
+                continue
+            if relpath > after:
+                control = not parts and name in (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock')
+                regular = stat.S_ISREG(info.st_mode) and not control
+                yield relpath, max(0, info.st_size) if regular else 0, int(regular)
+            if stat.S_ISDIR(info.st_mode):
+                try:
+                    yield from _sorted_quota_entries(root, (*parts, name.rstrip('/')), after=after, state=state)
+                except FileNotFoundError:
+                    continue
+        if len(names) < _QUOTA_SORT_BATCH:
+            return
+        last_name = names[-1]
+
+
+# LLM: 必须先于各owner锁，所有后台扫描共享同一短片；非阻塞获取失败不接触扫描器和持久账。
+# 函数用途: 防不同owner线程同时推进或关闭同一个缓存生成器。
+@contextmanager
+def _locked_quota_scan_cache(*, blocking):
+    if not _QUOTA_SCANS_LOCK.acquire(blocking=blocking):
+        raise OwnerQuotaLockContention('quota scan cache is busy')
+    try:
+        yield
+    finally:
+        _QUOTA_SCANS_LOCK.release()

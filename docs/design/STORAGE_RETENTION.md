@@ -1,5 +1,25 @@
 # 产品持久数据的保留策略（盘点与方案，部分落地）
 
+## 2026-10-29 e905 sol-2 Round 2 修复状态
+
+当前默认维护已消除 owner 类别的悬空绑定：配额对账和 Gateway 终态副本封存仍由原领域入口执行；其他由专门模块负责的类别执行显式、有界的 `preserve_only` 锚点元数据核验。核验不递归、不读取内容、不删除；回执 `complete=True` 只表示该次保留检查结束，同时明确 `content_verified=False`、`deleted_items=0`。host 级 `global_indexes` 仅标记 `coordinator_deferred`，不借 owner 身份越权处理。
+
+调度片在适配器动作前、返回回执提交游标前复核规范 maintenance 状态的 `(schema_generation, maintenance_epoch)`，最终状态落盘再 CAS；状态保持未知字段，成功提交递增 epoch。与原维护锁配合，不代表所有业务领域写者已采用统一新事务。C/W、坏策略及 legal hold 原拒绝/延期规则不变。
+
+配额后台缓存改为 16 owner 有界 LRU；未完成游标保存确定性相对路径、部分累计值、epoch、起始时间、根身份和修订。内存淘汰/重启可从有效游标恢复，完成才发布最终统计。默认入口可设置配额条目/毫秒预算，缺省 256 项/10 ms；时间仍为合作式预算，排序可能重新枚举目录，不能声称慢文件系统调用有硬截止。归档默认依旧保留 canonical 松散原件，不批准生产删除。
+
+十二文件聚焦回归与严格门禁见 `TESTS.md` Round 2。下方 Round 1 的“单扫描栈/其余未绑定”是历史状态，本节替代该部分；大 owner verified-delta、全写者 fencing、全 reader 切换、跨机协调、生产端到端验收仍未完成或未验证。
+
+## 2026-10-29 e905 sol-2 Round 1 局部状态补充
+
+本段只描述当前候选工作树，不改变下文历史盘点或原领域删除权威。`home_retention.py` 已登记 31 类 `StorageKind` 元数据；`owner_maintenance.py` 的调度片接收显式 adapter，按 item/byte/deadline 分配剩余额度，已确认提交才推进来源游标，未知效果停止同拍，未绑定类别明确保留为 partial。普通默认维护周期现接入**两个真实 adapter**：原 owner 配额锁下的有界后台对账、原 Gateway 请求结算门下的旧终态副本封存。其余 29 类未接齐，C/W transition 没有逐写新协议时明确延期，不旁路原权限。
+
+原 `maintenance.json` 保留未知扩展及 R1 检查；只有已接线 adapter 的待续责任触发下一拍，单纯未接线仍报告 partial、但不制造立即忙循环。legal hold 不封存，坏策略不执行这两个新写者。原保留策略、引用保护、请求权限及 transition/CAS 不由登记表替代。
+
+Gateway 段/manifest/SQLite 定位与 JSON fallback 已有局部实现，但默认 `remove_loose=False`：**保留全部原件，不减少生产 canonical inode**，全 reader 尚未切换，不批准低层删除 API 用于生产。配额预留/实际结算和后台观察账已实现，但大 owner 的前台新鲜核对超预算仍拒绝增长，不能把后台旧账当任意外部写者闭合证明。时间/字节仍是合作式预算，原维护前置阶段、去重/磁盘慢调用、跨进程恢复和严格总预算尚未闭合，测试通过不证明全部增长目录已有有界清理。没有对生产 home 运行维护、迁移或升级 R2。
+
+RD-01 的未接线 `common/rotating_log.py` 和专用测试已物理退役，历史表格里提到该模块仅为当时盘点证据，不是当前入口。详细验证、强杀/坏索引/并发链接替换等未验证范围见 `TESTS.md` 同日 Round 1 节。
+
 状态：**部分落地**（2026-09-29 按 R4 上线后的代码与生产首跑核对，见第 8 节；第 1–7 节保留 09-28 的原始盘点，不逐段改写）。本文最初只做只读盘点和方案方向，不改产品代码。盘点基于 main `54880f8e9` 的源码，测量对象是本机生产 home
 （`~/.my-agent`，2026-09-28 下午数据盘写满后）。
 
@@ -168,7 +188,7 @@
 2. **只追加的日志与索引，按段轮转或整理压缩**。
    - 适用于 `global_index/*.jsonl`、`local_store/events.jsonl`、`gateway_requests.jsonl`、`blobs/tool_outputs/index.jsonl`、审计日志。
    - 做法：写满或过期就切段；索引类定期按“当前有效行”重写。`home-index-rebuild` 已有的压缩逻辑可以挪进维护线程，
-     `common/rotating_log.py` 可以接到 `gateway.log`。
+     Gateway日志应沿现有logging与维护入口使用专用适配；`common/rotating_log.py`未接入生产，已在2026-10-29 e905 RD-01退役，不再建议接回。
 3. **每请求、每运行的快照与记录，终态后按天数保留**。
    - 适用于上下文快照、`runtime_facts`、Gateway 的 `done/terminal/failed/responses`、`agents/`、`runs/`、子代理 `daily/`。
    - 规则：终态后过 N 天清理，N 走配置，并且只清没有被结构化引用的项（被任务、线程、pin 或 refs 引用的保留），

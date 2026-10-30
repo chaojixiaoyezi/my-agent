@@ -116,7 +116,7 @@ from .operations import (
     holder_is_alive,
 )
 from .run_creation import RunCreation, create_run_chain
-from .schema import RuntimeSchemaMixin, runtime_db_path
+from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_path
 
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
 BINDING_ACTIVE = "ACTIVE"
@@ -177,6 +177,8 @@ def _quiescent_nonterminal_agent_runs(conn: sqlite3.Connection, agents: list[sql
     return quiescent
 
 
+# LLM: RuntimeDB 恢复门只识别原结构状态集合；未知 run 或 unknown attempt 必须阻断续接，不能根据模型文字推断可恢复。
+# 函数用途: 给主/子代理续跑检查返回明确阻塞原因，合法状态返回空字符串。
 def _main_agent_recovery_reason(run_status: str, attempt_status: str) -> str:
     normalized_run = str(run_status or "")
     if normalized_run not in RUN_STATUS_LEGACY_CREATED and \
@@ -187,6 +189,7 @@ def _main_agent_recovery_reason(run_status: str, attempt_status: str) -> str:
     return ""
 
 
+# LLM: RuntimeDB 恢复只以 metadata 中可解析的正 PID 作为进入死亡证明的前提；存在 PID 本身不证明死亡或允许接管。
 # 函数用途: 判断 attempt metadata 里是否记了正整数 runner_pid（有身份才能走进程死亡证明）。
 def _runner_pid_recorded(metadata_json: object) -> bool:
     meta = _json_object(metadata_json)
@@ -196,6 +199,7 @@ def _runner_pid_recorded(metadata_json: object) -> bool:
         return False
 
 
+# LLM: RuntimeDB metadata 容错解析只产生字典，不写回损坏记录；恢复调用方仍须独立检查身份和状态，不能将空字典作为授权。
 # 函数用途: 把 metadata_json 解析成字典；坏 JSON 或非对象按空字典。
 def _json_object(value: object) -> dict[str, Any]:
     try:
@@ -302,9 +306,7 @@ def _unstarted_cancellation_payload(raw: str | bytes, tool: str) -> str | bytes:
     return json.dumps(payload, ensure_ascii=False)
 
 
-# LLM: Manual and typed active-turn recovery must share this one unknown->recovered CAS.  The
-# caller owns effect verification; this helper only performs the exact current-attempt transition,
-# run repair, lock release and append-only event in the caller's transaction.
+# LLM: RuntimeDB 手工与活动回合恢复共用 unknown→recovered CAS；调用方先核副作用，此处仅在原事务更新准确 current、修复 run、释放锁并追加事件。
 # 函数用途: 在副作用已经由上层结构化核对后，原子恢复当前 unknown 执行轮并释放执行锁。
 def _recover_unknown_attempt_conn(
     repository: Any,
@@ -376,8 +378,7 @@ def _recover_unknown_attempt_conn(
     }
 
 
-# LLM: Active-turn archive facts are untrusted projections until matched to RuntimeDB rows; keep
-# normalization limited to the two fields used by that comparison and discard empty identities.
+# LLM: RuntimeDB 活动回合归档在与权威行匹配前仍是不可信投影；仅规范化操作状态/类型并丢弃空 ID，不扩大恢复证据字段。
 # 函数用途: 规范化同一回合工具归档里的操作 ID、终态和工具名，供事务核对使用。
 def _normalize_recorded_operation_facts(
     facts_by_id: dict[str, dict[str, str]],
@@ -392,9 +393,7 @@ def _normalize_recorded_operation_facts(
     }
 
 
-# LLM: Exact task+run equality is the anti-confusion boundary for automatic active-turn recovery;
-# never fall back to the newest task run, thread id, prompt text, or an unrelated main row.
-# Read PID/start metadata from that same current attempt, never from a sibling or stale generation.
+# LLM: RuntimeDB 自动恢复必须精确匹配 task+run 及其 current attempt 的 PID/start，不回退到最新任务、线程、提示正文或兄弟代次。
 # 函数用途: 读取精确 task/run 的根执行轮和同一 current attempt 的进程凭据，供原子恢复核对。
 def _exact_active_turn_run(
     conn: sqlite3.Connection,
@@ -415,9 +414,7 @@ def _exact_active_turn_run(
     ).fetchone()
 
 
-# LLM: A settled database outcome is not enough for model continuation: every started success or
-# failure must also have its exact durable carried record. CLAIMED+never-started is the sole safe
-# omission and is cancelled only after the whole preflight passes.
+# LLM: RuntimeDB 工具已结算仍不足以续跑，所有已启动成功/失败操作须有准确耐久归档；仅从未启动的 CLAIMED 可缺档，完整预检后才取消。
 # 函数用途: 核对旧执行轮所有工具终态和耐久归档，返回可恢复性与安全取消数量。
 def _active_turn_operation_recovery_report(
     conn: sqlite3.Connection,
@@ -472,8 +469,7 @@ def _active_turn_operation_recovery_report(
     }
 
 
-# LLM: Mutation state is independent of tool terminality; a DIRTY or MUTATING scope keeps the
-# generic unknown hard stop even when every handler row and archive record otherwise matches.
+# LLM: RuntimeDB 资源 mutation 独立于工具终态；即使归档全匹配，DIRTY/MUTATING 仍须保留 unknown 硬停，不能自动重放。
 # 函数用途: 列出指定旧执行轮仍不稳定的资源修改，空列表才允许自动恢复。
 def _uncertain_attempt_mutation_ids(
     conn: sqlite3.Connection,
@@ -487,8 +483,7 @@ def _uncertain_attempt_mutation_ids(
     return [str(item["mutation_id"] or "") for item in rows]
 
 
-# LLM: Both unknown recovery and previously-unknown cancellation need the same read-only proof,
-# in the caller's existing transaction; return operation facts unchanged when all resources are stable.
+# LLM: RuntimeDB unknown 恢复和曾 unknown 后被取消的回合共用原事务只读证明；资源全部稳定才返回工具报告，不改运行账。
 # 函数用途: 先核工具归档，再核资源稳定性，共用副作用安全闸而不重放或改写运行账。
 def _active_turn_effect_recovery_report(
     conn: sqlite3.Connection, attempt_id: str, recorded: dict[str, dict[str, str]],
@@ -531,12 +526,14 @@ class RuntimeRepository(
             self._init_runtime_schema()
 
     # ------------------------------------------------------------------ 事务
+    # LLM: 原独立连接/提交/回滚寿命不变；首写由原库写锁后同事务代际核验保护，显式BEGIN也走同一栅栏。
+    # 函数用途: 为多实体操作提供不可被并发升级穿透的写事务。
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """多实体权威写入的原子事务（A.9：ConversationTaskLink 需同事务）。"""
         conn = self._runtime_connect()
         try:
-            yield conn
+            yield RuntimeWriteFence(conn) if not self.read_only else conn
             conn.commit()
         except Exception:
             conn.rollback()
@@ -661,6 +658,8 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: RuntimeDB 按准确 task_id 查权威行，不创建业务记录；连接模式由仓储决定，缺失返回 None 不能误当已完成。
+    # 函数用途: 读取一个任务登记，供任务链和授权调用方继续核验。
     def get_task(self, task_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
@@ -668,6 +667,8 @@ class RuntimeRepository(
             ).fetchone()
 
     # -------------------------------------------------------------- TaskRun
+    # LLM: RuntimeDB 创建 TaskRun 会生成 ID、插入并提交，再回读权威行；生命周期/owner 准入由外层负责，修改须联查 AgentRun 创建。
+    # 函数用途: 为既有任务新建一次执行总账并保存初始状态与元数据。
     def create_task_run(
         self,
         *,
@@ -690,12 +691,16 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: RuntimeDB 精确读取 TaskRun，缺失保持 None；不得用最新行或 task-only 查询替代本入口的执行身份。
+    # 函数用途: 按执行总账 ID 取回一条记录，不修改任务状态。
     def get_task_run(self, task_run_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
                 "SELECT * FROM task_runs WHERE task_run_id = ?", (task_run_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB 返回指定任务全部 TaskRun 并按创建时间排序；这是历史查询而非可恢复性判断，调用方须再核终态/current。
+    # 函数用途: 列出一个任务历次执行总账，不写入数据库。
     def task_runs_for_task(self, task_id: str) -> list[sqlite3.Row]:
         with self._runtime_connection() as conn:
             rows = conn.execute(
@@ -704,8 +709,7 @@ class RuntimeRepository(
             ).fetchall()
         return list(rows)
 
-    # LLM: Recovery callers may inspect only still-open TaskRuns; returning canonical rows
-    # avoids rescanning historical terminal runs or deriving openness from status aliases.
+    # LLM: RuntimeDB 恢复候选仅按 closed_at=0 查询规范 TaskRun；不从状态别名推断未结束，避免重扫终态历史。
     # 函数用途: 列出尚未写入 closed_at 的执行总账，供启动/发现层幂等补齐终态。
     def open_task_runs(self, *, limit: int = 0) -> list[sqlite3.Row]:
         normalized_limit = max(0, int(limit or 0))
@@ -719,6 +723,8 @@ class RuntimeRepository(
         return list(rows)
 
     # ------------------------------------------------------------ AgentRun
+    # LLM: RuntimeDB 新 AgentRun 以空 current 和初始 epoch 入库并提交；父为空表示根，只有后续 create_attempt 才获取执行权。
+    # 函数用途: 创建主代理或子代理的逻辑执行节点，不启动 runner 或工具。
     def create_agent_run(
         self,
         *,
@@ -749,12 +755,16 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: RuntimeDB 以规范 agent_run_id 读取唯一节点，缺失返回 None；修改须保持调用方准确执行链而非投影身份。
+    # 函数用途: 读取一个逻辑代理节点的状态与 current 指针。
     def get_agent_run(self, agent_run_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
                 "SELECT * FROM agent_runs WHERE agent_run_id = ?", (agent_run_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB 用既有 run_id 对账 AgentRun，不按线程或文本猜身份；查询本身不赋予该 run 写入权限。
+    # 函数用途: 把外层 runner 的 run_id 映射到权威逻辑代理行。
     def agent_run_for_run_id(self, run_id: str) -> sqlite3.Row | None:
         """按既有 subagent run_id 找权威 AgentRun（新旧对账键，B.6 重算链路）。"""
         with self._runtime_connection() as conn:
@@ -762,8 +772,7 @@ class RuntimeRepository(
                 "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
 
-    # LLM: Reuse the exact current-attempt CAS used by owner-local active-turn recovery;
-    # unavailable PID/start identity must leave the row untouched, not guess from age.
+    # LLM: RuntimeDB 启动恢复复用 owner 活动回合的 current CAS；PID/start 身份不可核实则保持原行，不能以年龄推断死亡。
     # 函数用途: 启动时统一调和已经证实进程死亡的运行轮，与按用户恢复保持同一判断和写入路径。
     def recover_stale_attempts(self, *, now: float | None = None) -> list[str]:
         """RUN-01（2026-08-15 C1 真机实证）：普通 CLI run 崩溃后悬挂 attempt 的调和。
@@ -955,7 +964,8 @@ class RuntimeRepository(
                                                    settled_by="gateway_maintenance", automatic=True)
         return {"recovered": recovered, "settled": settled, "released_locks": locks}
 
-    # LLM: This is the only automatic exception to the generic UNKNOWN hard stop.  It accepts
+    # LLM: RuntimeDB 仅本入口允许凭准确 task/run、完整工具归档与稳定资源自动恢复 UNKNOWN；保留以下逐项合同并联查活动回合恢复测试。
+    # This is the only automatic exception to the generic UNKNOWN hard stop.  It accepts
     # two exact durable identities plus a complete operation-record projection, then proves in
     # one transaction that no handler outcome or mutation is uncertain.  Never broaden it to a
     # task-only match, model text, error strings, PID age, or a best-effort archive scan.
@@ -1065,7 +1075,8 @@ class RuntimeRepository(
             )
             return {**result, "status": "recovered" if result.get("recovered") else "blocked"}
 
-    # LLM: This upgrade repair trusts only the current_attempt pointer, never PID age or model
+    # LLM: RuntimeDB 换代修复仅信 current 指针，按原 UNKNOWN/DIRTY 路径清理非 current；无候选先只读返回，不能用年龄或模型文字授予执行权。
+    # This upgrade repair trusts only the current_attempt pointer, never PID age or model
     # prose. A non-current pending/running row has no execution authority and must use the same
     # UNKNOWN/DIRTY cleanup as live takeover. Owner supervision calls this as an idempotent no-op;
     # precheck read-only first so steady-state ticks do not acquire BEGIN IMMEDIATE or scan full tables.
@@ -1201,6 +1212,8 @@ class RuntimeRepository(
         )
         return True
 
+    # LLM: RuntimeDB 沿 AgentRun→TaskRun 查权威 task_id；不存在返回空，不从文件投影或模型输出回填 runner 身份。
+    # 函数用途: 将 runner 的 run_id 关联到所属任务，供身份绑定使用。
     def task_id_for_run_id(self, run_id: str) -> str:
         """授权门同款 JOIN：run_id → 权威链 task_id（runner 身份回填用）。"""
         with self._runtime_connection() as conn:
@@ -1215,6 +1228,8 @@ class RuntimeRepository(
             ).fetchone()
         return str(row["task_id"]) if row is not None else ""
 
+    # LLM: RuntimeDB 仅列准确 TaskRun 下的全部 AgentRun；排序不等于 current 或终态优先，调用方独立核树状态。
+    # 函数用途: 按创建顺序读取一次执行的代理节点集合。
     def agent_runs_for_task_run(self, task_run_id: str) -> list[sqlite3.Row]:
         with self._runtime_connection() as conn:
             rows = conn.execute(
@@ -1223,6 +1238,8 @@ class RuntimeRepository(
             ).fetchall()
         return list(rows)
 
+    # LLM: RuntimeDB 按任务链读取最新 main 根节点以复用原树，不按 Gateway/后台 run_id 拼第二棵树；返回值仍须通过 current/锁门。
+    # 函数用途: 找出某个任务所属的主代理根节点，供续跑及终态核对。
     def main_agent_run_for_task(self, task_id: str) -> sqlite3.Row | None:
         """task 的 role='main' root AgentRun（终态/锁过滤的权威锚点）。
 
@@ -1278,7 +1295,8 @@ class RuntimeRepository(
             "attempt_status": str(row["attempt_status"] or ""),
         }
 
-    # LLM: Subagent orphan recovery must consult this projection before it
+    # LLM: RuntimeDB 子代理孤儿恢复在启动前读取本阻塞投影，最终仍以 create_attempt 事务为权威；已知 unknown 不得报告复活或占 runner 槽。
+    # Subagent orphan recovery must consult this projection before it
     # schedules a replacement worker. The transactional create_attempt gate
     # remains the final authority; this read-side check prevents known-invalid
     # starts from being reported as revived or consuming a runner slot.
@@ -1312,9 +1330,7 @@ class RuntimeRepository(
         }
 
     # ---------------------------------------------------------- AgentAttempt
-    # LLM: A delegated child is registered as pending before any worker owns it.
-    # Activation must reuse that exact current generation, install the execution
-    # lock, and replace registration metadata with the real runner identity.
+    # LLM: RuntimeDB 委派子节点先登记 pending；激活须复用准确 current 代次，在同事务安装执行锁、替换真实 runner 身份并追加事件。
     # 函数用途: 在同一事务里把已登记但未启动的子代理 attempt 激活为真实运行态。
     def _activate_pending_attempt_conn(
         self,
@@ -1504,7 +1520,8 @@ class RuntimeRepository(
             )
         return superseded_ids
 
-    # LLM: An explicit external input may reserve the next turn for one existing
+    # LLM: RuntimeDB 显式外部输入仅能为既有非终态代理预留 pending；此处写账不启动，生命周期与 owner 准入仍由外层核验，唯一激活在 create_attempt。
+    # An explicit external input may reserve the next turn for one existing
     # nonterminal logical agent while no runner owns execution. This method only
     # creates/reuses a pending attempt; create_attempt(reuse_pending=True) remains
     # the sole activation edge that acquires the execution lock. Callers must
@@ -1566,8 +1583,7 @@ class RuntimeRepository(
                 attempt_id=pending_attempt_id or new_id("attempt_id"),
             )
 
-    # LLM: The writer transaction must read the run pointer and pointed attempt
-    # together. Missing pointers are corruption/conflict, never an empty agent.
+    # LLM: RuntimeDB 排队写事务必须一起读取 run 指针及其准确 attempt；缺失是损坏/冲突，不得视作空闲代理。
     # 函数用途: 在排队事务中读取同一 AgentRun 的 current pointer 和执行轮。
     def _load_pending_attempt_source_conn(
         self,
@@ -1594,9 +1610,7 @@ class RuntimeRepository(
             )
         return run, current
 
-    # LLM: Reuse is allowed only for one unstarted current pending row. Running,
-    # unknown, nonterminal or still-locked predecessors fail closed before any
-    # generation is inserted.
+    # LLM: RuntimeDB 仅复用未启动 current pending；running、unknown、其它非终态及仍持锁的前轮必须在插入代次前拒绝。
     # 函数用途: 校验旧执行轮是否允许续接；已有 pending 直接复用，其它冲突明确拒绝。
     def _validate_pending_attempt_transition_conn(
         self,
@@ -1646,8 +1660,7 @@ class RuntimeRepository(
             )
         return None
 
-    # LLM: Insertion and current-pointer CAS share the same immediate writer
-    # transaction. Events describe the committed generation and never trigger it.
+    # LLM: RuntimeDB pending 插入与 current CAS 共用同一立即写事务；事件只描述已提交代次，不作为启动触发器。
     # attempt_id 由原统一生成器铸造，可在外层锁定新旧回合前分配；本事务才使其成为执行账事实。
     # 函数用途: 原子插入下一 pending attempt、切换 current pointer 并记录排队事件。
     def _insert_pending_attempt_conn(
@@ -2009,6 +2022,8 @@ class RuntimeRepository(
     def _start_token(self) -> str:
         return _proc_start_time(os.getpid()) or ""
 
+    # LLM: RuntimeDB 接管仅接受 holder_is_alive 的 PID/start 死亡判据，lease 年龄单独不足；now 保留稳定签名，修改须联查活持主反例。
+    # 函数用途: 判断执行锁旧持主是否已经确定死亡，本函数不释放或转移锁。
     def _lock_is_takeoverable(self, lock: sqlite3.Row, now: float) -> bool:
         """R1-03 锁接管判定：持主已确认死亡即可立即接管。
 
@@ -2044,6 +2059,8 @@ class RuntimeRepository(
         return not self._lock_is_takeoverable(
             lock, now if now is not None else time.time())
 
+    # LLM: RuntimeDB 在调用方原事务中只追加 runtime_events，不自行提交；必须绑定准确 attempt/run，不能以事件文字驱动状态。
+    # 函数用途: 将一次状态变化的结构化事实写入追加式事件账。
     def _append_event_conn(
         self,
         conn: sqlite3.Connection,
@@ -2065,12 +2082,16 @@ class RuntimeRepository(
              json.dumps(payload or {}, ensure_ascii=False), time.time()),
         )
 
+    # LLM: RuntimeDB 精确读取 attempt 行，含历史代次；读取到记录不代表 current，执行或回写前仍须核指针。
+    # 函数用途: 按 attempt_id 查一轮执行的状态和元数据。
     def get_attempt(self, attempt_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
                 "SELECT * FROM agent_attempts WHERE attempt_id = ?", (attempt_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB current 只由 agent_runs.current_attempt_id 的 JOIN 决定，不按时间选择最新 attempt；缺失保持 None。
+    # 函数用途: 读取某个逻辑代理当前指向的准确执行轮。
     def current_attempt(self, agent_run_id: str) -> sqlite3.Row | None:
         """agent_runs.current_attempt_id 指向的 attempt 行（F.6 验证用）。"""
         with self._runtime_connection() as conn:
@@ -2084,9 +2105,7 @@ class RuntimeRepository(
             ).fetchone()
         return row
 
-    # LLM: Runner result projection must commit only against the exact current
-    # attempt and its typed run/attempt statuses; callers must not infer authority
-    # from the filesystem task projection or model-authored text.
+    # LLM: RuntimeDB runner 结果回写须核准确 current、代次和结构化 run/attempt 状态；文件投影和模型正文不能授予提交权。
     # 函数用途: 查询某次子代理回写是否仍属于当前执行轮。
     def runner_result_commit_authority(
         self,
@@ -2130,6 +2149,8 @@ class RuntimeRepository(
             ),
         }
 
+    # LLM: RuntimeDB 全部历史 attempt 按 generation 排序返回，不过滤为可执行集合；恢复调用方必须再核 current 和副作用。
+    # 函数用途: 列出一个逻辑代理的历次执行轮，供审计与对账。
     def attempts_for_run(self, agent_run_id: str) -> list[sqlite3.Row]:
         with self._runtime_connection() as conn:
             rows = conn.execute(
@@ -2139,6 +2160,8 @@ class RuntimeRepository(
         return list(rows)
 
     # ----------------------------------------------------------- Delegation
+    # LLM: RuntimeDB 委托写入前须 child_attempt_id 等于 child 的 current；插入不可变委托并更新 child 关联后提交，不在此生成子执行轮。
+    # 函数用途: 为已登记执行轮的子代理保存父子委托关系和授予范围。
     def create_delegation(
         self,
         *,
@@ -2187,12 +2210,16 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: RuntimeDB 按准确 delegation_id 读取不可变委托，缺失不回退到父/子最新记录；调用方仍须核当前执行链。
+    # 函数用途: 取得一条委托关系及其原始授权范围。
     def get_delegation(self, delegation_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
                 "SELECT * FROM delegations WHERE delegation_id = ?", (delegation_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB 仅按 child_agent_run_id 查原委托，不派生额外权限；修改须同步子代理授权链与 current 核验测试。
+    # 函数用途: 查出某个子代理所属的父子委托记录。
     def delegation_for_child(self, child_agent_run_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
@@ -2201,6 +2228,8 @@ class RuntimeRepository(
             ).fetchone()
 
     # ------------------------------------------------------ WorkspaceBinding
+    # LLM: RuntimeDB 同 owner、digest 及写根集合可复用 ACTIVE binding，否则插入并提交新绑定；此处不签发目录授权或迁移 claims。
+    # 函数用途: 保存执行轮的工作区根集合与 epoch，供沙箱和授权门查询。
     def create_binding(
         self,
         *,
@@ -2262,12 +2291,16 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: RuntimeDB 精确读绑定行，含被替代记录；读到行不等于 ACTIVE，消费方仍须检查状态与 epoch。
+    # 函数用途: 按 binding_id 取得工作区绑定详情。
     def get_binding(self, binding_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
                 "SELECT * FROM workspace_bindings WHERE binding_id = ?", (binding_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB 查询原 AgentRun 的最高 epoch ACTIVE 绑定，不借其它 run 或旧绑定兜底，缺失保留 None。
+    # 函数用途: 给授权检查读取当前有效的工作区绑定。
     def binding_for_run(self, agent_run_id: str) -> sqlite3.Row | None:
         """agent_run 当前 ACTIVE binding（B.5 授权查询用）。"""
         with self._runtime_connection() as conn:
@@ -2281,6 +2314,8 @@ class RuntimeRepository(
                 (agent_run_id,),
             ).fetchone()
 
+    # LLM: RuntimeDB 此查询故意不筛 ACTIVE，授权门用它区分从未绑定与已被替代；不得以最新绑定存在就放行。
+    # 函数用途: 读取逻辑代理最后一次绑定，包括已撤销或迁移的记录。
     def latest_binding_for_run(self, agent_run_id: str) -> sqlite3.Row | None:
         """agent_run 最近一次 binding（不分状态）。
 
@@ -2298,6 +2333,8 @@ class RuntimeRepository(
                 (agent_run_id,),
             ).fetchone()
 
+    # LLM: RuntimeDB 以 ACTIVE+expected_epoch CAS 替代旧绑定，并同事务递增关联 run 的 epoch 后提交；claims 迁移仍由外层沙箱编排。
+    # 函数用途: 使旧工作区绑定失效并更新栅栏代次，阻止旧执行轮继续写入。
     def supersede_binding(
         self,
         *,
@@ -2339,6 +2376,8 @@ class RuntimeRepository(
         return new_epoch
 
     # ------------------------------------------------------------ RootClaims
+    # LLM: RuntimeDB 写根声明先规范化并检查相等/父子/samefile 重叠，冲突统一抛 ROOT_CLAIM_CONFLICT；规范化可短暂创建卷探针，成功会提交声明。
+    # 函数用途: 为绑定登记独占物理写根，防止两个执行链同时占用重叠目录。
     def claim_root(
         self,
         *,
@@ -2388,12 +2427,16 @@ class RuntimeRepository(
         assert row is not None
         return row
 
+    # LLM: RuntimeDB 精确读取 root claim，缺失返回 None；声明记录不替代原 owner、attempt 和 binding 栅栏核验。
+    # 函数用途: 按 claim_id 查询物理写根的占用登记。
     def get_claim(self, claim_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
                 "SELECT * FROM root_claims WHERE claim_id = ?", (claim_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB 查询根声明复用写入时的物理规范化，可能创建/清理大小写探针；别名归一不扩大权限，修改须联查根冲突测试。
+    # 函数用途: 用实际根路径查询它是否已被声明，支持符号链接和大小写别名。
     def claim_for_root(self, root_path: str) -> sqlite3.Row | None:
         # 与 claim_root 同一规范化：库里存 canonical，查询别名（大小写/
         # symlink 拼写）必须归一后才能命中自己刚写入的行。
@@ -2403,6 +2446,8 @@ class RuntimeRepository(
                 "SELECT * FROM root_claims WHERE root_path = ?", (canonical,)
             ).fetchone()
 
+    # LLM: RuntimeDB 只列指定 binding 的已有 claims，不转移或删除；迁移者必须在原事务边界核验活动操作和 epoch。
+    # 函数用途: 读取一个工作区绑定持有的全部物理写根登记。
     def claims_for_binding(self, binding_id: str) -> list[sqlite3.Row]:
         with self._runtime_connection() as conn:
             rows = conn.execute(
@@ -2411,9 +2456,7 @@ class RuntimeRepository(
         return list(rows)
 
     # -------------------------------------------------------- Run 级终态
-    # LLM: A model/tool execution slice can finish while its logical task remains
-    # resumable. Close only the exact current attempt and keep AgentRun created;
-    # a later typed wake must call create_attempt to regain tool authority.
+    # LLM: RuntimeDB 只关闭准确 current 执行片段、取消未启动工具并释放本轮执行锁，保持 AgentRun 可续；后续结构化 wake 必须经 create_attempt 重获权限。
     # 函数用途: 结束一次可续跑的执行片段，释放本轮工具权限但不宣告整个任务完成。
     def settle_agent_attempt(
         self,
@@ -2700,7 +2743,8 @@ class RuntimeRepository(
             )
         return {"settled": True, "closed_at": now}
 
-    # LLM: Conversation completion may close a TaskRun only after every AgentRun in its
+    # LLM: RuntimeDB 仅在主根终态且整树终态/静止后关闭 TaskRun；静止只取 attempt 与锁事实，可由后续 create_attempt 重开，禁止读取模型正文判结案。
+    # Conversation completion may close a TaskRun only after every AgentRun in its
     # exact tree is terminal or quiescent; the root AgentRun status supplies the execution
     # outcome and must itself be terminal. Quiescence is decided by
     # _quiescent_nonterminal_agent_runs from runtime facts only (attempt terminal, no exec
@@ -2821,6 +2865,8 @@ class RuntimeRepository(
                 return "failed"
         return "done"
 
+    # LLM: RuntimeDB 只将 running attempt CAS 为 unknown 并追加事件，不释放执行锁、不改 run/task，也不触发续跑；写入失败返回 False 仍保守停手。
+    # 函数用途: 为执行者死亡且结果不明的单轮执行记录未知终态，等待显式恢复。
     def _mark_attempt_unknown(
         self, attempt_id: str, agent_run_id: str, *, reason: str, operator: str
     ) -> bool:
@@ -2859,6 +2905,8 @@ class RuntimeRepository(
         except Exception:  # noqa: BLE001 标记尽力而为, 不改变 fail-closed 语义
             return False
 
+    # LLM: RuntimeDB 孤儿候选需锁超宽限、run 合法非终态且 PID/start 持主死亡；查询不回收，调用回收入口时仍须复核。
+    # 函数用途: 列出可能遗留的执行锁，供恢复器逐条核对，不把租约过期当死亡。
     def find_orphaned_attempts(
         self,
         *,
@@ -2896,6 +2944,8 @@ class RuntimeRepository(
                 orphans.append(lock)
         return orphans
 
+    # LLM: RuntimeDB 显式孤儿回收重复核持主死亡；未知外部副作用或工具结果只追加阻塞事件并标 unknown 保锁，已知终态才复用 settle_agent_run 收口。
+    # 函数用途: 安全处理一轮孤儿执行，结果不可核实时停止自动回收而保留恢复证据。
     def reclaim_orphaned_attempt(
         self,
         attempt_id: str,
@@ -3153,6 +3203,8 @@ class RuntimeRepository(
                 "SELECT * FROM wake_queue WHERE wake_id = ?", (wake_id,)
             ).fetchone()
 
+    # LLM: RuntimeDB 在原连接事务中选 due pending 并标 claimed、写五分钟租约后提交；不是删除，也不代表 runner 已启动，修改须联查消费失败重试。
+    # 函数用途: 领取一批到期唤醒字条，留在库中直到完成或释放。
     def pop_due_wakes(self, *, now: float, limit: int = 64) -> list[dict[str, Any]]:
         """取出到期的待醒字条(CAS 标 claimed, 防双叫); 只索引查询不翻目录。
 
@@ -3186,6 +3238,8 @@ class RuntimeRepository(
                 item["lease_until"] = lease_until
             return popped
 
+    # LLM: RuntimeDB 完成 wake 会按 ID 删除并提交，调用方先证明已启动/确认终结；删除结果不等于任务成功。
+    # 函数用途: 移除已处理的持久唤醒字条，返回是否实际删除。
     def complete_wake(self, wake_id: str) -> bool:
         """字条处理完毕(任务已拉起/已确认终结)——删除该行(终态无保留价值)。"""
         with self._runtime_connection() as conn:
@@ -3195,6 +3249,8 @@ class RuntimeRepository(
             conn.commit()
             return cursor.rowcount > 0
 
+    # LLM: RuntimeDB 仅将 claimed wake 退回 pending，持久化重试点、次数与截断错误后提交；不丢字条，不自动调度本次执行。
+    # 函数用途: 处理失败或限流后归还唤醒字条，供后续按退避时间重试。
     def release_wake(
         self,
         wake_id: str,
@@ -3217,6 +3273,8 @@ class RuntimeRepository(
             conn.commit()
             return cursor.rowcount > 0
 
+    # LLM: RuntimeDB 回收已过租约 claimed wake，写 pending、次数和一秒后重试点并提交；无候选不写，不重放模型或工具。
+    # 函数用途: 将崩溃消费者遗留的唤醒字条重新放回等待队列。
     def reclaim_expired_wakes(self, *, now: float) -> int:
         """WK-INT: 崩溃/卡死回收——claimed 但 lease 过期的行回 pending 重试。"""
         current = float(now)
@@ -3257,6 +3315,8 @@ class RuntimeRepository(
             ).fetchone()
         return bool(row[0]) if row is not None else True
 
+    # LLM: RuntimeDB 按 root_task_id 删除该任务全部 wake 并提交，不区分 pending/claimed；调用方须先通过终止或接管准入。
+    # 函数用途: 清掉已终止任务的后续唤醒字条，返回实际删除行数。
     def cancel_wakes_for_task(self, root_task_id: str) -> int:
         """任务终止/接管时清掉它的全部字条, 返回删除行数。"""
         with self._runtime_connection() as conn:
@@ -3267,6 +3327,8 @@ class RuntimeRepository(
             conn.commit()
             return int(cursor.rowcount or 0)
 
+    # LLM: RuntimeDB 对账查询只投影 pending 行并受 limit 限制，不证明均已到期、也不领取；消费应走原 due 入口。
+    # 函数用途: 读取待唤醒字条清单，供等待名单与任务档案对账。
     def list_pending_wakes(self, *, limit: int = 1000) -> list[dict[str, Any]]:
         """当前待醒字条清单(对账用: 同步"等待者名单"与任务档案)。"""
         with self._runtime_connection() as conn:
@@ -3276,6 +3338,8 @@ class RuntimeRepository(
             ).fetchall()
             return [dict(row) for row in rows]
 
+    # LLM: RuntimeDB 按 claimed 与 woke_at 超时投影候选，不自行删除或证明任务死亡；消费者仍须查准确任务状态。
+    # 函数用途: 找出领取后长时间未完成的唤醒字条，供对账修复检查。
     def stale_wakes(self, *, now: float, woke_timeout_seconds: float) -> list[dict[str, Any]]:
         """claimed 超过超时仍未 complete 的字条(叫了没人干完)——僵尸候补,
         消费者逐条核任务档案后清行。WK-INT: 状态机化后 claimed 取代 woke。"""
@@ -3288,6 +3352,8 @@ class RuntimeRepository(
             return [dict(row) for row in rows]
 
     # -------------------------------------------------------- RuntimeEvents
+    # LLM: RuntimeDB 公共事件入口独立插入并提交 append-only 事件，再回读结构化结果；必须由调用方提供真实 attempt/run 绑定，正文不驱动状态。
+    # 函数用途: 保存一条可追溯到执行轮的运行事件，并返回事件投影。
     def append_event(
         self,
         *,
@@ -3319,6 +3385,8 @@ class RuntimeRepository(
             conn.commit()
         return conn_row_to_event(self._fetch_event(event_id))
 
+    # LLM: RuntimeDB 只按准确 event_id 读取事件行，缺失保持 None；与 append_event 的提交后回读配套，不自行补写。
+    # 函数用途: 取得已保存的单条权威事件原始数据库行。
     def _fetch_event(self, event_id: str) -> sqlite3.Row | None:
         with self._runtime_connection() as conn:
             return conn.execute(
@@ -3422,6 +3490,8 @@ class RuntimeRepository(
         return [conn_row_to_event(row) for row in rows]
 
 
+# LLM: RuntimeDB 事件投影保留 seq 和准确执行身份并解析 payload JSON；要求非空合法行，损坏应传播而不伪造空事件。
+# 函数用途: 将事件数据库行转换为供调用方读取的字典，不修改原账。
 def conn_row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "seq": row["seq"],
@@ -3450,17 +3520,23 @@ def _plugin_gate_decision(row: sqlite3.Row) -> dict[str, Any]:
     return decision
 
 
+# LLM: RuntimeDB binding 不属于框架七类 ID，使用无前缀随机 UUID；只生成标识，不创建绑定或授予目录权。
+# 函数用途: 为新工作区绑定生成独立 ID，避免与执行链 ID 混淆。
 def _binding_id() -> str:
     # binding 不在 B.1 七类内（B.1 只列 run/task/taskrun/agentrun/attempt/session/
     # delegation），用无前缀 uuid 防与框架 ID 混淆。
     return uuid.uuid4().hex
 
 
+# LLM: RuntimeDB 根集合序列化只去空白、滤空与排序，不解析物理路径、不去重；修改须同步 binding digest/复用比较合同。
+# 函数用途: 将可读写根列表转换为稳定顺序的 JSON 文本。
 def _sorted_roots_json(roots: list[str] | None) -> str:
     """根集合规范化 JSON：排序后序列化（D.6 digest 比较与顺序无关）。"""
     return json.dumps(sorted(str(r).strip() for r in (roots or []) if str(r).strip()), ensure_ascii=False)
 
 
+# LLM: RuntimeDB 根声明规范化解析物理路径并实测卷大小写语义，探测可创建临时文件；失败保持保守拼写，不可替代路径授权核验。
+# 函数用途: 把同一物理写根的路径别名归一，供占用冲突比较。
 def _canonical_root_path(root_path: str) -> str:
     """root claim 规范化：realpath（symlink 别名）+ 大小写别名归一。
 
@@ -3478,6 +3554,8 @@ def _canonical_root_path(root_path: str) -> str:
     return str(path)
 
 
+# LLM: RuntimeDB 在最近现存祖先写入随机探针并用大写别名检测，finally 尽力删除；写入失败返回 False，修改须联查跨平台根别名测试。
+# 函数用途: 实测目标所在卷是否忽略大小写，不以操作系统名称猜测。
 def _fs_is_case_insensitive(path: Path) -> bool:
     """实测 path 所在文件系统是否大小写不敏感（macOS 默认卷 / Windows）。
 
@@ -3505,6 +3583,8 @@ def _fs_is_case_insensitive(path: Path) -> bool:
     return same
 
 
+# LLM: RuntimeDB 对已规范化根检查相等、父子与 samefile 别名；文件系统探测失败只放弃 samefile 项，不从字符串推导额外写权。
+# 函数用途: 判断两个物理写根是否占用同一片目录区域。
 def _roots_overlap(canonical: str, other: str) -> bool:
     """两规范化写根是否重叠（测试 5）：相等/父子包含/samefile 别名。"""
     if not other:

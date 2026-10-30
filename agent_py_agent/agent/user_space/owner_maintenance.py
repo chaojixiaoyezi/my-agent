@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,8 +25,9 @@ from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
+from ..contracts.optimization_contracts import require_schema_generation
 from .home_layout import MyAgentHomePaths
-from .home_retention import OwnerRetentionPlan, apply_owner_retention
+from .home_retention import OwnerRetentionPlan, apply_owner_retention, maintenance_fence
 
 # 维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。
 _DEFAULT_INTERVAL_SECONDS = 86_400
@@ -115,6 +117,8 @@ class OwnerMaintenanceResult:
         return payload
 
 
+# LLM: 原关闭/间隔规则优先；已提交partial沿同一maintenance.json下一拍续作，不重新等待整周期。
+# 函数用途: 判断原维护是否到期，包含有游标的未完成片。
 def owner_maintenance_due(
     owner_home: str | Path,
     *,
@@ -134,6 +138,10 @@ def owner_maintenance_due(
         _maintenance_state_path(home),
         context="owner_maintenance.state",
     ).payload
+    maintenance_fence(marker)
+    maintenance_fence(marker.get('storage_maintenance', {}))
+    if marker.get('maintenance_partial') is True:
+        return True
     last_attempt = _timestamp(marker.get("last_attempt_at"))
     current = float(now if now is not None else time.time())
     return last_attempt <= 0 or current - last_attempt >= interval
@@ -153,6 +161,8 @@ def run_owner_retention_if_due(
     commit_transition=None,
     expected_policy_fingerprint=None,
     expected_state_fingerprint=None,
+    quota_max_ms: float = 10,
+    quota_max_entries: int = 256,
 ) -> OwnerMaintenanceResult:
     from ..gateway_parts.multiprocess_mode import current_worker_partition
     from ..gateway_parts.request_entry_admission import require_request_execution
@@ -175,6 +185,9 @@ def run_owner_retention_if_due(
     with locked_json_path(state_path):
         if not owner_maintenance_due(home.owner_home_dir, now=current):
             return OwnerMaintenanceResult(False, "not_due")
+        previous = read_json_object_report(state_path, context="owner_maintenance.state").payload
+        maintenance_fence(previous)
+        maintenance_fence(previous.get('storage_maintenance', {}))
         retention = apply_owner_retention(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
@@ -200,16 +213,14 @@ def run_owner_retention_if_due(
         local_events = (_maintain_local_store_events(home, now=current)
                         if retention.applied and not retention.legal_hold else
                         {"executed": False, "reason": "legal_hold" if retention.legal_hold else "retention_refused"})
-        previous = read_json_object_report(
-            state_path,
-            context="owner_maintenance.state",
-        ).payload
         effects = {"text_vector_cache_reclaimed": dropped_cache_keys,
                    "derived_records_pruned": derived_prune,
                    "text_vector_cache_reclaim_error": reclaim_error,
                    "indexes_compacted": compacted, "indexes_compact_failed": compact_failed,
                    "memory_archive_permissions": permissions, "run_closeout_backfill": run_closeout_backfill,
-                   "local_store_events_maintenance": local_events}
+                   "local_store_events_maintenance": local_events,
+                   "storage_maintenance": run_owner_storage_maintenance_slice(home, previous, retention, now=current,
+                       quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, state_locked=True)}
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
@@ -310,10 +321,23 @@ def _cleanup_owner_runtime(home: MyAgentHomePaths, *, now: float, commit_transit
 
 # LLM: caller已持原maintenance锁；仍写原唯一schema/状态口径，不把局部成功变成新许可或第二账。
 # 函数用途: 用原保留回执和附加维护事实更新同一个maintenance.json。
+# LLM: R1先核header，未知扩展保真；partial只由已确认的领域回执派生，不能被日周期吞掉。
+# 函数用途: 在原状态写者内保存扩展、来源游标及下一拍责任。
 def _write_maintenance_result(state_path, retention, previous, current, effects):
+    from .home_retention import maintenance_fence, require_maintenance_fence
+
+    require_schema_generation(previous)
+    expected = maintenance_fence(previous)
+    canonical = read_json_object_report(state_path, context='owner_maintenance.fence').payload
+    require_maintenance_fence(canonical, expected)
     fields = _outcome_fields(retention, previous, current)
-    payload = {"schema_version": "owner-maintenance.v1", "last_attempt_at": current, **fields,
+    payload = {**previous, "schema_generation": 1, "maintenance_epoch": expected[1] + 1,
+               "schema_version": "owner-maintenance.v1", "last_attempt_at": current, **fields,
                "load_errors": list(retention.load_errors), "legal_hold": retention.legal_hold, **effects}
+    if isinstance(effects.get('storage_maintenance'), dict):
+        storage = effects['storage_maintenance']
+        payload['maintenance_partial'] = storage.get('continuation_pending', storage['partial'])
+        payload['storage_maintenance'] = {**storage, 'maintenance_epoch': expected[1] + 1}
     write_json_file_atomic_unlocked(state_path, payload)
     return OwnerMaintenanceResult(True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
         isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"])
@@ -447,6 +471,8 @@ def _apply_outcome(retention: OwnerRetentionPlan) -> str:
     return "applied" if retention.applied else "refused"
 
 
+# LLM: 所有普通与transition维护写者共用此路径，不能另建epoch账本。
+# 函数用途: 返回owner维护唯一状态文件位置。
 def _maintenance_state_path(owner_home: Path) -> Path:
     return owner_home / "data" / "maintenance.json"
 
@@ -551,6 +577,8 @@ def _real_owner_directory(home: MyAgentHomePaths | Path, directory: Path) -> boo
     return directory.is_dir()
 
 
+# LLM: 无效间隔沿原每日默认，0仍表示禁用维护；不改变原配置口径。
+# 函数用途: 解析非负维护间隔。
 def _positive_interval(value: object) -> int:
     try:
         parsed = int(value)
@@ -559,6 +587,8 @@ def _positive_interval(value: object) -> int:
     return max(0, parsed)
 
 
+# LLM: 历史缺失或非法时间按0，仅用于到期判断，不授予清理权限。
+# 函数用途: 读取兼容旧状态的非负时间戳。
 def _timestamp(value: object) -> float:
     try:
         return max(0.0, float(value or 0.0))
@@ -574,3 +604,193 @@ __all__ = [
     "reclaim_owner_orphan_lock_files",
     "maybe_run_cli_owner_maintenance",
 ]
+
+
+# LLM: 本函数只编排原领域已提交回执，不创建删除权威；调用方仍走原request/owner/transition并写同一maintenance.json。
+# 函数用途: 按item、字节、时间预算推进登记类别，未接线与未知结果保留为partial。
+def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: int = 512,
+                                  max_bytes: int = 8 * 1024 * 1024, max_seconds: float = 0.05,
+                                  should_yield=None, read_fence=None) -> dict:
+    import math
+
+    from .home_retention import maintenance_fence, require_maintenance_fence, storage_kind_registry
+
+    require_schema_generation(previous)
+    expected_fence = maintenance_fence(previous)
+    if read_fence is not None:
+        require_maintenance_fence(read_fence(), expected_fence)
+    kinds = {kind.kind: kind for kind in storage_kind_registry()}
+    if any(key not in kinds for key in adapters):
+        raise ValueError('unknown_storage_kind')
+    if (type(max_items) is not int or type(max_bytes) is not int
+            or max_items < 0 or max_bytes < 0
+            or type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or max_seconds < 0):
+        raise ValueError('invalid_maintenance_budget')
+    state = deepcopy(previous)
+    cursors = state.setdefault('cursors', {})
+    errors, completed = [], []
+    missing = [key for key in kinds if not callable(adapters.get(key))]
+    saved_pending = state.get('pending_kinds')
+    if saved_pending is not None and (not isinstance(saved_pending, list)
+            or any(key not in kinds for key in saved_pending)):
+        raise ValueError('invalid_maintenance_pending_kinds')
+    pending = set(saved_pending if saved_pending else adapters) & set(adapters)
+    items, size = 0, 0
+    deadline = time.monotonic() + max_seconds if max_seconds else None
+    partial = False
+    ordered = tuple(kinds)
+    next_kind = state.get('next_kind', ordered[0])
+    if next_kind not in kinds:
+        raise ValueError('invalid_maintenance_kind_cursor')
+    start = ordered.index(next_kind)
+    for offset in range(len(ordered)):
+        index = (start + offset) % len(ordered)
+        key = ordered[index]
+        adapter = adapters.get(key)
+        if not callable(adapter) or key not in pending:
+            continue
+        if ((max_items and items >= max_items) or (max_bytes and size >= max_bytes)
+                or (deadline is not None and time.monotonic() >= deadline)
+                or (should_yield is not None and should_yield())):
+            partial = True
+            next_kind = key
+            break
+        budget = {'items': max_items - items if max_items else None,
+                  'bytes': max_bytes - size if max_bytes else None, 'deadline': deadline}
+        next_kind = ordered[(index + 1) % len(ordered)]
+        try:
+            if read_fence is not None:
+                require_maintenance_fence(read_fence(), expected_fence)
+            receipt = adapter(deepcopy(cursors.get(key, {})), budget)
+            if (not isinstance(receipt, dict) or not isinstance(receipt.get('cursor'), dict)
+                    or type(receipt.get('complete')) is not bool
+                    or any(type(receipt.get(field)) is not int or receipt[field] < 0 for field in ('items', 'bytes'))):
+                raise ValueError('invalid_storage_maintenance_receipt')
+            # 领域已确认提交后才发布来源位置；若返回前失败，旧游标仍承担恢复责任。
+            if read_fence is not None:
+                require_maintenance_fence(read_fence(), expected_fence)
+            cursors[key] = deepcopy(receipt['cursor'])
+            items += receipt['items']
+            size += receipt['bytes']
+            if receipt['complete']:
+                completed.append(key)
+                pending.discard(key)
+            else:
+                partial = True
+        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            code = getattr(exc, 'code', '')
+            if isinstance(exc, ValueError) and exc.args == ('MAINTENANCE_FENCE_CONFLICT',):
+                code = 'MAINTENANCE_FENCE_CONFLICT'
+            errors.append({'kind': key, 'error_type': type(exc).__name__, 'error_code': code,
+                           'side_effects_unknown': True})
+            partial = True
+            # 失败前可能已消耗额度；未知效果不能视为零并重新分给后续类别。
+            break
+    state.update({'schema_generation': 1, 'partial': partial or bool(pending) or bool(errors) or bool(missing),
+                  'items': items, 'bytes': size, 'errors': errors, 'completed': completed,
+                  'unbound_kinds': missing, 'next_kind': next_kind,
+                  'pending_kinds': [key for key in kinds if key in pending]})
+    return state
+
+
+# LLM: 原维护入口与唯一状态承接真实领域回执；C/W尚无逐写适配协议时只报告延期，不旁路原transition。
+#   默认只发布副本，依赖原件存在性的读口切换未闭合前禁止删除；未知kind保持partial但不制造忙循环。
+# 函数用途: 在普通维护周期分批核配额并安全封存旧回执，明确保留未接线和延期责任。
+def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coordinator=False,
+                                        quota_max_ms=10, quota_max_entries=256, state_locked=False):
+    import math
+
+    from ..gateway_parts.owner_retention import seal_gateway_receipts_slice
+    from ..gateway_parts.paths import gateway_paths_from_root
+    from .home_retention import (
+        maintenance_fence,
+        preservation_receipt,
+        require_maintenance_fence,
+        storage_kind_registry,
+    )
+    from .owner_quota import OwnerQuotaLockContention, reconcile_owner_quota_slice
+    from .runtime_paths import runtime_paths_for_agent
+
+    if (type(quota_max_entries) is not int or quota_max_entries <= 0
+            or type(quota_max_ms) not in (int, float) or not math.isfinite(quota_max_ms) or quota_max_ms <= 0):
+        raise ValueError('invalid_quota_maintenance_budget')
+
+    original = previous.get('storage_maintenance', {})
+    require_schema_generation(original)
+    if coordinator or retention.load_errors or (not retention.applied and not retention.legal_hold):
+        state = run_storage_maintenance_slice(original, {})
+        state.update(continuation_pending=False, deletion_enabled=False,
+                     deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
+        return state
+    if not state_locked:
+        with locked_json_path(_maintenance_state_path(home.owner_home_dir)):
+            return run_owner_storage_maintenance_slice(home, previous, retention, now=now,
+                quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, state_locked=True)
+
+    expected = maintenance_fence(previous)
+
+    # LLM: caller已持原maintenance锁；每次读取原canonical文件二元组，不将旧游标充当租约。
+    # 函数用途: 给统一框架提供动作前/提交前的实时CAS来源。
+    def read_fence():
+        return read_json_object_report(_maintenance_state_path(home.owner_home_dir),
+                                      context='owner_maintenance.adapter_fence').payload
+
+    require_maintenance_fence(read_fence(), expected)
+    root = runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace']
+    paths = gateway_paths_from_root(root)
+
+    # LLM: 只扫描元数据，沿原quota锁非阻塞获取，避免maintenance→quota与既有quota→JSON锁序死锁。
+    # 函数用途: 把有界配额对账的真实位置和完成事实交给原维护状态。
+    def quota_step(cursor, budget):
+        remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
+        try:
+            report = reconcile_owner_quota_slice(home.owner_home_dir, max_entries=min(quota_max_entries, budget['items']),
+                                                 max_ms=min(quota_max_ms, remaining_ms), blocking=False)
+        except OwnerQuotaLockContention:
+            return {'cursor': {**cursor, 'complete': False, 'deferred_reason': 'quota_busy'},
+                    'complete': False, 'items': 0, 'bytes': 0}
+        return {'cursor': report['cursor'], 'complete': report['complete'],
+                'items': report['scanned_entries'], 'bytes': 0}
+
+    # LLM: legal_hold不发布或删除回执；canonical根必须在当前owner且祖先均为真实目录，冷owner不创建Gateway。
+    # 函数用途: 在剩余预算内封存已结算旧终态，保留所有松散原件供未迁移读者使用。
+    def receipt_step(cursor, budget):
+        if retention.legal_hold:
+            return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'legal_hold'},
+                    'complete': True, 'items': 0, 'bytes': 0}
+        if not _real_owner_directory(home, paths.terminal):
+            return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'no_safe_gateway_terminal'},
+                    'complete': True, 'items': 0, 'bytes': 0}
+        remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
+        report = seal_gateway_receipts_slice(paths, before=now - 7 * 86400, max_entries=budget['items'],
+                                            max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=False)
+        position = {'complete': report['complete'], 'errors': report['errors'],
+                    'reader_cutover_required': True, 'archived_requests': report['archived_requests']}
+        return {'cursor': position, 'complete': report['complete'],
+                'items': report['scanned_entries'], 'bytes': report['bytes']}
+
+    # LLM: 每种原领域均显式绑定；除两个实际写适配器外只核规范锚点并保留，不复制领域清理器。
+    # 函数用途: 固定本类别元数据，避免闭包误用最后一个类别。
+    def preserve_adapter(kind):
+        # LLM: 不写领域存储；完整回执只表示本拍保留核验，不表示正文或引用已全量验证。
+        # 函数用途: 在统一预算及CAS保护下执行一次只读锚点核验。
+        def step(cursor, budget):
+            return preservation_receipt(kind, home, cursor, budget)
+        return step
+
+    adapters = {kind.kind: preserve_adapter(kind) for kind in storage_kind_registry()
+                if kind.kind not in {'cache_tmp_trash', 'gateway_terminal'}}
+    adapters.update(cache_tmp_trash=quota_step, gateway_terminal=receipt_step)
+    original = {**original, 'schema_generation': expected[0], 'maintenance_epoch': expected[1]}
+    if not original.get('continuation_pending', False):
+        original.pop('pending_kinds', None)
+    state = run_storage_maintenance_slice(original, adapters, max_items=quota_max_entries + len(adapters),
+        max_seconds=max(0.1, quota_max_ms / 1000 + 0.05), read_fence=read_fence)
+    state['coordinator_deferred'] = ['global_indexes']
+    state['continuation_pending'] = bool(state['errors']) or any(
+        key != 'global_indexes' for key in state['pending_kinds'])
+    state['deletion_enabled'] = False
+    return state

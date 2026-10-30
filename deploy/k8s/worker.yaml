@@ -43,6 +43,8 @@ spec:
             - { name: FEISHU_APP_ID, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_id } } }
             - { name: FEISHU_APP_SECRET, valueFrom: { secretKeyRef: { name: my-agent-feishu, key: app_secret } } }
             - { name: WORKER_CONCURRENCY, value: "4" }
+            # 与Pod的120秒grace配对：应用排空110秒，保留10秒退出/租约恢复收尾。
+            - { name: WORKER_DRAIN_SECONDS, value: "110" }
           resources:
             requests: { cpu: "500m", memory: "512Mi" }
             limits: { cpu: "2", memory: "1Gi" }

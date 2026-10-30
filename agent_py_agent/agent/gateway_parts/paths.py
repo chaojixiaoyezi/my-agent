@@ -60,12 +60,17 @@ class GatewayPaths:
     def supervisor_service(self) -> Path:
         return self.root / "supervisor_service.json"
 
-    # LLM: Terminal request authority is derived from the Gateway root so existing constructors
-    # remain compatible; done/failed directories are only outcome projections.
+    # LLM: Gateway 终态权威路径由原 root 派生以保持构造兼容；done/failed 只是结果投影，修改须联查终态读取与归档。
     # 函数用途: 返回按请求 ID 唯一保存完整最终答复的终态目录。
     @property
     def terminal(self) -> Path:
         return self.root / "requests" / "terminal"
+
+    # LLM: 分段根只从当前Gateway根派生，不改变owner或提供归档删除许可。
+    # 函数用途: 返回终态分段文件的唯一目录。
+    @property
+    def receipt_archive(self) -> Path:
+        return self.root / 'archive'
 
 
 # LLM: 纯路径容器不创建文件；适配器队列不与Gateway请求目录混用。
@@ -87,8 +92,7 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
     return gateway_paths_from_root(agent.root / agent.config.gateway_workspace)
 
 
-# LLM: Owner-scoped agents may execute a request claimed from the base Gateway. Callers holding an
-# authoritative queue path must rebuild paths from that queue root instead of the agent home.
+# LLM: Gateway 的 owner 代理可能处理基础网关领取的请求；已有权威队列路径时须沿该队列 root 构造，不能改用代理 home 另猜归属。
 # 函数用途: 根据已经确认的 Gateway 根目录构造完整路径合同。
 def gateway_paths_from_root(root: Path) -> GatewayPaths:
     root = Path(root)

@@ -16,6 +16,86 @@
 - 既有 `test_audit_source_worker.py::test_new_source_worker_does_not_inherit_sibling_goal_file_hints` 在本轮修复前实红：兄弟`web.md`进入`required_read_paths`；修复后原断言不变。新增权限、预设/旧快照和提示测试均保存红绿XML于工作树`.pytest_cache/sol1-r2-*.xml`。
 
 复现：工作树根运行 `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_tool_surface_slimming.py agent_py_agent/tests/test_opt_surface_contracts.py agent_py_agent/tests/test_session_search_tool.py agent_py_agent/tests/test_audit_source_worker.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_resolve_capability_requests_tool.py -q --tb=short`；另跑Ruff、导入边界、`check_doc_sync.py --base 4bea324e3`及diff check。最终数量与提交绑定在指定DONE交接，不用本条目声称全仓、真实后台、部署或跨平台已验证。
+## 2026-10-29 e905 sol-2 Round 2：多 owner 续扫、维护 CAS 与门禁修复
+
+来源：`fix-e905-sol-2-r2.md`、`report-rereview-e905-sol-2-astra1.md`；本轮增量基点 `ec7217e44`，文档同步比较基线 `4bea324e3`。下方 Round 1 小节保留历史，以本节说明当前候选的变化；不代表原存储治理整席或生产上线完成。
+
+- B01：后台配额扫描使用最多 16 个 owner 的 LRU；持久化字典序 `last_relpath`、累计字节/inode/scanned、epoch、起始时间、根身份及账本修订。淘汰或清空缓存后从未过期且修订匹配的续点恢复；完成才发布最终合计。排序每层只留 128 个候选，枚举准备逐项受时间及 `max(1024, 4*max_entries)` 原始枚举额度约束；每个挂起扫描最多持有一个目录流及其绑定 FD，深度上限 64；单次文件系统调用仍是合作式时间预算，不宣称慢磁盘硬实时或封闭写域 verified-delta。
+- B02：默认周期覆盖全部登记类别；配额对账、Gateway 副本封存仍是原领域的两个实际推进入口。专门模块负责的类别绑定有界 `preserve_only` 锚点元数据核验，明确 `content_verified=False`、不递归读取/删除内容；`complete` 仅表示该次保留核验完成。host 范围的 `global_indexes` 明确 `coordinator_deferred`，不冒充 owner 扫描。动作前、回执提交游标前及最终状态落盘均核对 `schema_generation/maintenance_epoch`；冲突拒绝推进，保留旧游标。并未封闭仓库所有业务写者。
+- B04：默认入口可显式传 `quota_max_ms/quota_max_entries`，默认仍为 10 ms/256 项。归档幂等测试在充足预算下最多推进八拍后再验证次日无重复段；单独的小预算测试必须返回真实 partial，未放宽该断言。
+- B03/B05：补充本分支全部改动 Python 文件的中文模块/定义双层注释；Gateway 进展、结构及存储保留文档同步说明真实实现范围与欠账。
+
+新回归：`test_owner_quota_incremental_recovery.py` 覆盖 A/B 各 300 个 1 字节文件、A/B/A/B 交替（含每拍清空缓存）第二轮各得 300 字节/300 inode、嵌套字典序续扫和有界 LRU；`test_opt_maintenance_registry.py` 覆盖默认绑定、跨类别 generation/epoch 冲突和最终状态 CAS；`test_gateway_receipt_archive.py` 分开验证幂等与小预算待续。对应缺陷测试已先失败后通过。独立静态审查另发现排序准备无界、旧 complete 掩盖新周期未执行、非法 epoch 拒绝过晚及祖先链接替换竞态；五项补充回归先全红，再于三文件 70 项回归通过。修正增加持久 `pending_kinds` 周期责任、维护动作前完整头校验及 FD-relative 锚点核验，并额外覆盖默认入口新周期零工作仍待续。
+
+当前组合验证：十二文件 **189 passed，0 failures/errors/skipped**；Ruff `All checks passed!`、import boundaries `[]`、文档 `DOC_SYNC_PASS`、diff 检查及 clean package 均退出 0。独立脚本核对基线至当前的 19 个 Python 文件、494 个定义、19 个模块头，双层中文缺失及纯英文 `LLM:` 均 0。纯注释子补丁 5 个 Python 文件与前像 AST 等价，未改变行为。
+
+一次组合首跑在增强祖先竞态探针后为 188 通过/1 失败：透明 `os.stat` 包装改变了函数身份，被真实 `supports_dir_fd` 能力探测拒绝。只在测试中先断言原 stat 确有 dir_fd 能力，再将透明包装的身份映射加入同一能力集合；没有修改产品安全探测或放宽原父 inode 断言。重跑同一十二文件入口及后续全部门禁通过。
+
+复现（工作树根；缓存/测试 owner 外置，`PYTHONPATH` 指当前源码根）：
+
+```bash
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_maintenance_registry.py agent_py_agent/tests/test_shutdown_total_deadline.py agent_py_agent/tests/test_config_migration_transaction.py agent_py_agent/tests/test_gateway_receipt_archive.py agent_py_agent/tests/test_owner_quota_incremental_recovery.py agent_py_agent/tests/test_private_writes_batch3.py agent_py_agent/tests/test_owner_quota.py agent_py_agent/tests/test_gateway_owner_retention.py agent_py_agent/tests/test_gateway_owner_maintenance.py agent_py_agent/tests/test_queue_worker.py agent_py_agent/tests/test_runtime_db.py agent_py_agent/tests/test_runtime_schema.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol2_fix2
+ruff check --no-cache agent_py_agent scripts
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_import_boundaries.py --json
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_doc_sync.py --base 4bea324e3
+git diff --check
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_clean_package.py .
+```
+
+测试使用临时 owner，无生产维护、部署或删除。完整 R1 原语、所有业务写者 fencing、大 owner 增长准入、全 reader 切换及生产删除仍未验证/未完成。极大单目录在排序准备中被反复淘汰/每拍重启可能重做尚未持久化的选名阶段，不能承诺该极端情形每拍都有路径推进；LRU/重启不丢已持久化合计，但不等于慢 I/O 硬截止或无限故障下保证收敛。
+
+## 2026-10-29 e905 sol-2 Round 1：事务栅栏、故障日志和受保护维护接线
+
+来源：`continue-sol-2-c2.md`、`report-review-e905-sol-2-astra2.md`，续作工作树 `/tmp/wt-e905-sol-2`；以 `c4e9527af` 为本轮差异基点。下一个同日小节保留第一阶段历史，涉及“尚未实现”的旧结论以本节实际范围为准；仍不是原任务整席完成。
+
+- B1/C2-2：claim、complete/fail 异常和确认返回 False 立即输出结构化 ERROR，而非等停机才看到 pending。日志只含类型、阶段、message_id、attempt，不含 payload、token、异常正文或 traceback；不清 pending、不把确认故障转成业务 fail。新回归在原实现无日志时先失败。
+- B2/F1：Runtime 借用与显式 transaction 通过 `RuntimeWriteFence` 在首写前 `BEGIN IMMEDIATE → 同事务核 schema_generation`；物理连接工厂和缓存类型不变。真实第二连接升级后，旧 create_task/transaction、带前导分号的 execute/cursor/executemany 均拒写，数据库没有旧写者行。任意 Python 连接 API 的完整封闭未实现，不能当全局 R1 发布许可。
+- F3：Gateway 直接写的当前 header 读取使用 nonblocking/no-follow FD、普通文件核验和 1 MiB 上限，拒绝 EACCES 及读中换 inode，真实 FIFO 子进程不会挂住；不将未知前像当空 JSON 覆盖。原锁之外不合作写者的全部替换竞态未证明闭合。
+- 配额：准入用 128 项/10 ms 新鲜核对取代旧热路径整树扫描；原锁内预留，退出按实际字节/inode 结算；后台分片恢复遗留预留。只保留一个串行扫描栈，淘汰/异常关闭，深度超过 64 或目录读取错误不发布 complete。大 owner 超出前台核对预算仍拒绝增长，**后台完成并不构成封闭写域许可**；不是完整 verified-delta 配额上线。
+- 配置：显式 `migrate_configuration` 在原配置锁内精确私有备份、保留未知字段、验证、原子替换和交换后确认失败回滚。未接生产 CLI，不是进程崩溃恢复日志；真实断电、强杀及多进程全链未验证。
+- Gateway：新增有界候选分片、不可变段/manifest/SQLite 定位和原 JSON 读口 fallback，测试覆盖发布故障、manifest 中断重试、再次变活保护。默认维护 **remove_loose=False**，仅副本封存、保留 canonical；低层显式删除 API 仅在临时目录验证，不批准生产删除。全 reader 切换、索引重建、所有崩溃窗口和跨重启公平性未完成。
+- 真实默认周期：原 `run_owner_retention_if_due` 接入配额对账和 Gateway 副本封存两个 adapter；同一 maintenance.json 保存游标，legal hold 不封存，坏策略/C-W transition 路径明确延期而不越权写入，未绑定类别保持 partial 但不单凭未绑定强制立即重跑。其余 29 类未接齐，原维护全部阶段的硬时间/字节预算也未闭合。
+
+验证命令（工作树根；不安装、不关闭沙箱、不修改生产 home）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_maintenance_registry.py agent_py_agent/tests/test_shutdown_total_deadline.py agent_py_agent/tests/test_config_migration_transaction.py agent_py_agent/tests/test_gateway_receipt_archive.py agent_py_agent/tests/test_owner_quota_incremental_recovery.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol2 --junitxml=/tmp/sol2-c2-focus-final.xml
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_private_writes_batch3.py agent_py_agent/tests/test_owner_quota.py agent_py_agent/tests/test_gateway_owner_retention.py agent_py_agent/tests/test_gateway_owner_maintenance.py agent_py_agent/tests/test_queue_worker.py agent_py_agent/tests/test_runtime_db.py agent_py_agent/tests/test_runtime_schema.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol2_r1_fix --junitxml=/tmp/sol2-c2-extra.xml
+ruff check --no-cache agent_py_agent scripts
+python3 -B scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+两批退出 0；JUnit 实际解析为 **89 + 79 = 168 测试，0 failure/error/skipped**。全范围 Ruff `All checks passed!`、导入边界 `[]`，diff 检查通过。AST 差异核对 14 个改动模块头、114 个新增/修改定义及 3 个嵌入式子进程定义，双层中文注释缺口 0。
+
+本次首跑 89 项中两项信号测试在进入 handler 前因 `PYTHONSAFEPATH=1`、未显式指定源码根而报 `ModuleNotFoundError`，不是业务排空失败；修正自有子进程 PYTHONPATH 后重跑原入口，保留真实 30 秒和 2.2 秒断言。未禁用 PYTHONSAFEPATH 或放宽断言。pytest 退出清理还出现其他临时垃圾目录 `Directory not empty` 警告；没有隐去警告或越界清理，也不把它归因于沙箱。
+
+独立复核均限内联方案/片段，未独立跑完整分支。已处理分号、不可读 header、inode 换入、配额栈/深度等意见；真实硬链接测试因本机 link 明确 EPERM，仅有 nlink 元数据注入验证，不能外推真实硬链接。归档祖先目录并发替换、慢存储严格预算、quota_busy 重试退避、完整索引损坏重建等仍待专项证明。未运行完整 serve、Kubernetes、Linux/Windows、生产迁移或全量仓库测试；原宽门禁的历史失败没有被本轮聚焦通过覆盖。
+
+## 2026-10-29 e905 sol-2：第一阶段局部实现与续办交接（历史记录，不是整席完成）
+
+来源：`task-e905-sol-2.md` 与 `continue-e905-sol-2.md`；唯一工作树 `/tmp/wt-e905-sol-2`，分支 `opt-e905/sol-2`，基线 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。续办要求提交现有改动；本节不将聚焦测试通过外推为原任务全部功能已实现。
+
+- Worker：池、心跳和 reaper 共用单一 monotonic drain deadline；停止新领取但保留在途线程/claim，完成或失败确认未知不能报告 drained，也不把完成确认异常改写成业务 fail。入口按实际 unfinished 非零退出，部署样例应用 110 秒与 Pod 120 秒宽限配对。
+- R1 局部：新增 `optimization_contracts.py` 的版本栅栏及深复制 `_extra_fields` 往返；接到 Gateway 两种直接 JSON 写入/更新、Runtime 可写连接检查及维护状态入口。维护状态保留未知键。**尚未覆盖所有领域 DTO、写者、header stamping 及升级事务竞争，不代表全局 R1 可上线。**
+- 维护局部：31 类 `StorageKind` 元数据与显式 resolver 合同，预算调度片保存已确认游标、轮转避免饿死，异常后停止本片，拒绝非法/非有限预算；partial 状态允许下一拍续作。**真实领域 resolver/adapter 和默认 CLI/Gateway 调用尚未接齐，现有测试用假 adapter 验证框架，不证明 31 类实际完成清理。**
+- RD-01：无生产调用的 `common/rotating_log.py` 与其专用测试物理退役；对应私有写性质迁到真实 Gateway history append/同 ID replace，验证 0600/0700、内容与幂等性。RD-14 的本地停止逻辑已替换；其他删除项未因替代尚未落地而盲删。
+- 未实现：增量配额预留账、后台分批对账、Gateway 终态分段封存、全部删除清单、checkout verified-delta。`io/storage_transaction.py`、`owner_read_index.py`、`distributed_lock.py` 未列入第 2 节精确写集，未越界新建或删除，交集成者协调。
+
+续办单指定的以下命令于当前代码运行退出 0；另一次同四文件只收集确认 **58 个节点**。默认 addopts 隐藏汇总，运行日志为 `job-1793284190545299000.log`，全部进度到 `[100%]`。同一代码此前五文件组合（加 `test_queue_worker.py`）JUnit 为 **62 测试、0 失败/错误/跳过**；只复用该有效结果，不重新把旧产物说成新一轮执行。
+
+```bash
+python3 -B -m pytest agent_py_agent/tests/test_opt_maintenance_registry.py agent_py_agent/tests/test_config_migration_transaction.py agent_py_agent/tests/test_shutdown_total_deadline.py agent_py_agent/tests/test_private_writes_batch3.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol2
+ruff check --no-cache agent_py_agent scripts
+python3 -B scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+Ruff 输出 `All checks passed!`，导入边界输出 `[]`。新增测试覆盖真实临时 SQLite、真实线程和两个自有子进程：真实 SIGTERM 后 30 秒 handler 先 complete 再退出；2.2 秒 grace 超时非零退出、等待期间真实续租、进程退出后由原 `recover_stale` 和 `QueueWorker` 恢复完成。**未验证完整 `serve()` 的 sandbox/数据库角色装配、容器、Linux/Windows、外部用户链路。**
+
+开发阶段按红绿方式覆盖 R1 拒写、确认异常、RD-01 物理退役、维护预算及公平性；独审指出的未知效果后重复分配预算/非有限预算已用新增回归先失败再修正。独审只针对提供的代码片段，不是完整分支批准。
+
+原任务宽选择门禁 **未通过**：先因缺少已声明开发依赖中断收集，隔离环境补齐后长跑发现多处失败/错误并被停止；首错诊断运行 34 通过后失败于 `test_admin_self_gateway_diagnostics.py` 的真实 shell 用例。进一步观察到 `return_code=71`、`sandbox-exec: sandbox_apply: Operation not permitted`，仅此失败有明确沙箱拒绝证据；没有基线对照，不能说全部失败既有，也没有禁用沙箱或跳过失败项来造绿。续办改用上述聚焦门禁，不宣称原宽门禁通过。按续办要求提交前移除工作树临时缓存/隔离环境，原始输出由工具运行记录保留，缓存内 XML 不随提交分发。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 

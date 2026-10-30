@@ -1,3 +1,36 @@
+## 2026-10-29 存储治理 R2：原权威、封存读口与维护责任
+
+当前为未生产部署的 R2 修复源码候选。本节区分已实现的配额恢复/维护栅栏与未完成的 writer/reader 切换，不将文档或注释审计视作运行验收。
+
+### 终态副本：原请求锁核验，段与索引负责定位
+
+1. `GatewayPaths.terminal` 从原 Gateway 根派生 `requests/terminal`；`done`/`failed` 仍是结果投影。`seal_gateway_receipts_slice` 仅扫描该根终态目录，候选读取在 `processing_metadata_scope` 的原请求转换边界内执行。`_receipt_bundle` 核规范 schema、准确请求号、指纹、关闭 phase、可信完成时间、投影标记及未结保护字段；活跃、未知、年轻或无法核实的对象不封存。
+2. 归档组包含存在的 canonical、done/failed、response、投影完成标记及对应 chunk 原始字节。单文件上限 1 MiB；切片按目录项/单调时间/原文字节预算推进，编码后段另受 8 MiB 上限约束。这些是当前实现的读取与准入边界，不把“扫描结束”解释成所有终态均可安全删除。
+3. `_publish_receipt_segment` 将多请求合成 `archive/receipts-seg-<序号>.jsonl`。每条记录保存相对路径、请求号、原文字节的 base64 与 SHA256；段发布后更新 `receipts-manifest.json`，最后在一次 SQLite 事务中发布 `receipts-index.sqlite3` 的偏移/长度/摘要。多文件发表不等于跨文件原子事务；失败须保留原件和错误，不能称整组已完成删除。
+4. `lookup_sealed_receipt` 先验证相对路径和有界索引字段，再沿同根目录 FD no-follow 读取准确片段，核记录路径及正文 hash。manifest 已存在但索引缺失/损坏不能降级成“没有历史”。`read_json_file_report` 在热文件缺失时借 `lookup_gateway_receipt_bytes` 识别原规范布局回读，不重新制造热文件；并非所有直接文件读者或目录枚举者都已迁移。
+5. 普通 owner 维护固定 `remove_loose=False`，以副本方式归档，发布 `deletion_enabled=False` 和读口切换欠账。只有显式删除路径才会在重新进入原请求锁、重核保护事实、全部原文及索引读回一致后尝试移除；此分支存在不表示默认维护可删除，默认保留原件的边界保持。
+
+### 写前 header：有界读取不等于任意 JSON 入口安全
+
+`write_json_file_atomic` 与 `update_json_file_atomic` 在原 per-path 事务中调用 `_read_json_dict_unlocked_report`，用 `O_NOFOLLOW`/`O_NONBLOCK` 打开目标，`fstat` 确认普通文件后最多读 1 MiB，再比对读前/后及当前路径的版本。这样 FIFO 等特殊文件不能因读 header 卡住写者，变化或超限不能降级覆盖未知 header。`require_schema_generation` 在业务 updater 前检查旧值，并检查新值后才提交；更高代际沿 `STORE_SCHEMA_NEWER` 拒写。
+
+`blocking=False` 只选择原非阻塞锁入口，`deadline` 只约束 IO 步骤，不授予执行身份或跳过 CAS。报告型读口继续保留 `lock_busy` 与 `load_error` 区分。普通展示读口、日志尾读以及其它模块的 JSON reader 各有原合同，不因这里改进就宣称全仓 no-follow/nonblocking 已覆盖。
+
+### 多 owner：分页发现与每 owner 原状态分工
+
+- `_GatewayOwnerMaintenanceController.tick` 先处理已加载实例的安全恢复，非紧急维护保留单调启动保护；其后维护基础 owner，再沿 `discover_owner_home_page` 的 `OwnerWakeCursor` 处理一页 scoped owner。只解析规范 home，不为冷 owner 构造 Agent；原 stop_event、退避与隔离错误保持。
+- `run_storage_maintenance_slice` 只编排 `storage_kind_registry` 中真实领域 adapter；`cursors` 与 `next_kind` 由已返回的结构化回执推进。items、bytes、deadline、主动让位都能导致 partial；未接线类别列入 `unbound_kinds`，错误可能已产生副作用时停止重分配本拍预算。每 owner 预算与发现页上限共同限制工作量，不是全体 owner 或单次整拍的完成证明。
+- `run_owner_storage_maintenance_slice` 普通分支绑定全登记类别：配额对账与终态副本两个实际推进入口，其余专门模块类别为显式 `preserve_only` 锚点元数据核验；host `global_indexes` 为 `coordinator_deferred`。锚点父目录绑定 no-follow FD，叶 stat 不跟链接；`complete` 不代表正文核验或清理许可。原 `maintenance.json.storage_maintenance` 保存 `cursors/next_kind/pending_kinds`，区分前周期完成与本周期未执行，避免旧 complete 吞掉真实待续。动作前、游标发表前及最终状态落盘复核 `schema_generation/maintenance_epoch`，坏维护头在任何领域动作前拒绝。默认配额预算 256 项/10 ms，可显式覆盖；法律保留及坏策略原边界不变。
+- C/W `run_with_transition` 先固定原状态完整字节及策略指纹，每写沿原 transition→state 锁→领域步骤，最终同一文件 CAS。存储 adapter 尚缺对应逐写协议时，`coordinator=True` 明确返回 `coordinator_adapter_protocol_required`；这不阻断原已接入的 runtime 安全清理，也不新增绕过原 claim 的后台 writer。
+
+### 配额：策略权威、观察账本与写域闭合分开
+
+`owner_quota.py` 保留唯一 quota 策略与 owner quota→领域/JSON 锁序；`.owner-quota-ledger.json` 是用量、预留与对账观察账，不是第二份策略。`reconcile_owner_quota_slice` 在原锁内按目录项/时间预算扫描元数据，记录 `reconcile_cursor` 及 revision/dirty；不稳定目录 offset 不是重启后的权威位置，展示 TTL 缓存也不参与写入准入。
+
+R2 使用最多 16 个 owner 扫描的 LRU，未完成游标持久保存 `last_relpath/scanned/partial_used_bytes/partial_inode_count/epoch`、起始时间、根身份及 revision；缓存丢失后恢复有效续点，过期/修订变化重扫，完成才发布合计并处理遗留预留。每层排序保留最多 128 个候选，准备阶段逐项让回时间及 `max(1024,4*max_entries)` 枚举预算；挂起只保留当前目录流，淘汰关闭，单个系统调用仍不可抢占。其准确验证状态以组合源码和根记录为准。所有跨域 writer 尚未统一接入，后台扫描完成/账本 clean 仅是观察事实，不能代替封闭写域证明或为未登记写入放行。不得据此在生产删除事实源、重置未知预留或扩张 owner 范围。
+
+本轮未生产部署；生产多 owner 长期推进、正 C/W 存储维护、全部 reader 切换、全部跨域 writer 及跨平台行为未在本节验收。测试结果只引用根目录 [TESTS](../../../TESTS.md)，不从实现存在推导通过。
+
 ## 2026-10-28 Wave 9 A1 Round 2：单向推送接线与隔离
 
 - `http_routes.py` / `http_service.py` 将 `POST /remote-agent/push` 分派给 `remote_push_service.handle_remote_push`，其余路由携带push Token立即拒绝。`authenticate_push` 核独立Token的SHA256验证器、目标owner/action/IP、准确原文HMAC和时间窗；`consume_push_nonce` 在独立锁下耐久防重放。`accept_remote_push` 先保存prepared短回执，再经 `enqueue_remote_push`、`write_gateway_request_once`、`prepare_coordinator_input` 沿原T→C末门一次提交，不新增执行队列。

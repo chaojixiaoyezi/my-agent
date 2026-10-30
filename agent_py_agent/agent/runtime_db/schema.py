@@ -20,11 +20,13 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 
@@ -32,6 +34,8 @@ from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 RUNTIME_DB_FILENAME = "runtime.db"
 
 
+# LLM: RuntimeDB 路径唯一落点由 owner home 与固定库名构成，本函数不建库、不迁移；修改须同步 repository 与连接入口。
+# 函数用途: 得到本人运行数据库的规范路径。
 def runtime_db_path(home_root: Path) -> Path:
     """owner home 根 → 权威库路径。"""
     return Path(home_root) / RUNTIME_DB_FILENAME
@@ -405,6 +409,8 @@ _RUNTIME_MIGRATION_SQL = (
 )
 
 
+# LLM: RuntimeDB 迁移仅对内部固定表名查询 PRAGMA 元数据，操作失败返回 False；不接受外部表名，不在此执行 DDL 或提交。
+# 函数用途: 检查旧数据库是否已经包含某列，供幂等迁移决定是否补列。
 def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
         return any(
@@ -413,6 +419,134 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
         )
     except sqlite3.OperationalError:
         return False
+
+
+# LLM: metadata是原runtime.db唯一header；只查询，不建表，不将忙或坏库当代际0。先发R1到所有写者后才允许提升代际。
+# 函数用途: 每次借用可写连接前拒绝较新存储，旧库缺header按0处理。
+def require_runtime_schema_generation(conn: sqlite3.Connection) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone() is None:
+        return
+    row = conn.execute("SELECT value FROM metadata WHERE key='schema_generation'").fetchone()
+    if row is not None:
+        value = row[0]
+        if not isinstance(value, str) or not value.isdecimal():
+            raise ValueError('STORE_SCHEMA_INVALID')
+        require_schema_generation({'schema_generation': int(value)})
+
+
+# LLM: 只包一次领域借用，不改变物理连接类型/缓存所有权；写锁与header核验同事务，拒绝隐式提交脚本绕过栅栏。
+# 类用途: 让所有原Runtime写者在首写前原子核验代际，纯查询不占写锁。
+class RuntimeWriteFence:
+    # LLM: 生命周期由原connection上下文负责，不在构造阶段抢写锁。
+    # 函数用途: 为当前借用绑定原始连接。
+    def __init__(self, connection):
+        self._connection = connection
+
+    # LLM: SQL分类只放行明确只读入口，其余保守获取写锁；不支持任意脚本拆分或迁移重解释。
+    # 函数用途: 在任何可能写入的SQL之前，用同一写事务重核代际。
+    def _prepare(self, sql):
+        statement = re.sub(r'\A(?:\s+|;+|--[^\n]*(?:\n|$)|/\*.*?\*/)*', '', sql, flags=re.S)
+        command = statement.split(None, 1)[0].rstrip(';').upper() if statement.strip() else ''
+        if command in {'', 'SELECT', 'EXPLAIN', 'VALUES', 'COMMIT', 'END', 'ROLLBACK'}:
+            return None
+        if command == 'PRAGMA' and re.match(r'PRAGMA\s+(?:\w+\.)?(?:table_info|table_xinfo|index_list|index_info|foreign_key_list)\s*\(', statement, re.I):
+            return None
+        if not self._connection.in_transaction:
+            cursor = self._connection.execute('BEGIN IMMEDIATE')
+            try:
+                require_runtime_schema_generation(self._connection)
+            except BaseException:
+                self._connection.rollback()
+                raise
+            if command == 'BEGIN':
+                return cursor
+        return None
+
+    # LLM: 每次提交/回滚后下一首写重新走栅栏；业务参数原样传给SQLite。
+    # 函数用途: 在原execute入口保护事务开头。
+    def execute(self, sql, parameters=()):
+        cursor = self._prepare(sql)
+        return _RuntimeFenceCursor(self, cursor if cursor is not None else self._connection.execute(sql, parameters))
+
+    # LLM: 批写与单写共享同一个写锁和header，不能按行重借库。
+    # 函数用途: 保护原executemany入口。
+    def executemany(self, sql, parameters):
+        self._prepare(sql)
+        return _RuntimeFenceCursor(self, self._connection.executemany(sql, parameters))
+
+    # LLM: sqlite executescript会先隐式提交，不能保留同事务核验；原Runtime调用方没有该入口。
+    # 函数用途: 明确拒绝能够绕开事务边界的脚本执行。
+    def executescript(self, script):
+        raise ValueError('runtime executescript bypasses generation transaction fence')
+
+    # LLM: 手工游标仍走同一栅栏，不暴露游标connection作为旁路。
+    # 函数用途: 返回保护后的原游标。
+    def cursor(self, *args, **kwargs):
+        return _RuntimeFenceCursor(self, self._connection.cursor(*args, **kwargs))
+
+    # LLM: 保持原提交/回滚/trace等接口和lease有效性检查，不接管物理关闭。
+    # 函数用途: 透传非SQL连接接口。
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    # LLM: row_factory设置仍由原lease记录恢复，不扩大缓存寿命。
+    # 函数用途: 透传原行工厂读取。
+    @property
+    def row_factory(self):
+        return self._connection.row_factory
+
+    # LLM: 设置委托原连接/lease，归还仍按既有协议恢复。
+    # 函数用途: 保留原行工厂设置接口。
+    @row_factory.setter
+    def row_factory(self, value):
+        self._connection.row_factory = value
+
+
+# LLM: 只封装SQL执行与connection属性，其余游标事实来自原SQLite/lease。
+# 类用途: 防手工游标绕过首写核验。
+class _RuntimeFenceCursor:
+    # LLM: 物理游标仍由原连接所有者负责回收。
+    # 函数用途: 记录游标及所属代际栅栏。
+    def __init__(self, connection, cursor):
+        self.connection = connection
+        self._cursor = cursor
+
+    # LLM: 获取写锁后才交给原游标执行；BEGIN已由栅栏执行时不重复嵌套。
+    # 函数用途: 保护手工游标单条SQL。
+    def execute(self, sql, parameters=()):
+        cursor = self.connection._prepare(sql)
+        if cursor is None:
+            self._cursor.execute(sql, parameters)
+        else:
+            cursor.close()
+        return self
+
+    # LLM: 同一事务保护整批写入，参数迭代器不提前消耗。
+    # 函数用途: 保护手工游标批量SQL。
+    def executemany(self, sql, parameters):
+        self.connection._prepare(sql)
+        self._cursor.executemany(sql, parameters)
+        return self
+
+    # LLM: 与连接脚本入口同样拒绝隐式提交，不模拟SQL解析器。
+    # 函数用途: 禁止手工游标脚本绕过栅栏。
+    def executescript(self, script):
+        return self.connection.executescript(script)
+
+    # LLM: fetch/描述/close沿原游标生命周期执行。
+    # 函数用途: 透传原游标读取接口。
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    # LLM: 不复制结果集，不延长原游标寿命。
+    # 函数用途: 保留游标逐行遍历接口。
+    def __iter__(self):
+        return self
+
+    # LLM: 行内容与异常均由原游标返回。
+    # 函数用途: 读取原游标下一行。
+    def __next__(self):
+        return next(self._cursor)
 
 
 # LLM: RuntimeSchemaMixin 只向前补当前仍被消费的列；禁止为了清理旧库而
@@ -467,6 +601,8 @@ class RuntimeSchemaMixin:
         # schema 阶段建索引会因列缺失失败；CREATE IF NOT EXISTS 幂等）。
         RuntimeSchemaMixin._execute_runtime_schema(conn, _RUNTIME_MIGRATION_SQL)
 
+    # LLM: RuntimeDB 在调用方同一 schema 事务逐条执行固定 SQL，不使用会隐式提交的 executescript；失败必须由原事务回滚。
+    # 函数用途: 执行建表及迁移语句，保持 schema 初始化的原子提交边界。
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
         for statement in statements:
@@ -483,6 +619,12 @@ class RuntimeSchemaMixin:
         timeout = 0.0 if existing_only else 30.0
         conn = sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=sqlite_connection_factory())
         conn.row_factory = sqlite3.Row
+        if not read_only:
+            try:
+                require_runtime_schema_generation(conn)
+            except BaseException:
+                conn.close()
+                raise
         conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
         if not read_only and not existing_only:
             try:
@@ -500,9 +642,11 @@ class RuntimeSchemaMixin:
         if getattr(self, "existing_only", False):
             conn = self._runtime_connect()
             try:
-                yield conn
+                yield conn if getattr(self, 'read_only', False) else RuntimeWriteFence(conn)
             finally:
                 conn.close()
             return
         with scoped_connection(self.db_path, getattr(self, "read_only", False), self._runtime_connect) as conn:
-            yield conn
+            if not getattr(self, 'read_only', False):
+                require_runtime_schema_generation(conn)
+            yield conn if getattr(self, 'read_only', False) else RuntimeWriteFence(conn)
