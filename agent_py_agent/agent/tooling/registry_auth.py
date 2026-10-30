@@ -78,10 +78,12 @@ def registry_auth_error_code(tool_name: str, context: ToolAuthContext) -> str:
     return ""
 
 
+# LLM: 快照和展示求交共用规范授权名，旧目录映射同时保留catalog动作令牌；不生成或改写schema，无IO。
+# 函数用途: 将显式白名单归一成集合，保留未限制与空授权的区别，避免模型投影丢失旧目录入口。
 def allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
-    return {str(item) for item in allowed_tools if str(item).strip()}
+    return set(canonical_discovery_grants([str(item) for item in allowed_tools if str(item).strip()]))
 
 
 def _tool_auth_error(tool_name: str, context: ToolAuthContext) -> str:

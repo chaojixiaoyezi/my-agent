@@ -199,9 +199,7 @@ def _indexed_item_params(
     return CreateRunParams(**{**run_params.__dict__, "agent_name": task_name})
 
 
-# LLM: Single-child and batch creation share one sibling ordinal allocator.
-# Explicit custom names remain untouched; only system placeholder names receive
-# the stable suffix used by TUI/Web human-readable control surfaces.
+# LLM: 消费调用方分配的同父兄弟编号；系统占位名生成谱系名，显式批量仅给尚无尾号的自定义名追加编号，无IO。
 # 函数用途: 给单个补派的系统默认名称续上同一父级的历史编号，避免每批都显示同名 worker。
 def _indexed_agent_name(agent_name: str, *, role: str, index: int, require_index: bool = False) -> str:
     name = str(agent_name or "").strip()

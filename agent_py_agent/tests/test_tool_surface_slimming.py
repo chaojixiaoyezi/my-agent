@@ -78,6 +78,49 @@ def test_catalog_only_persisted_allowlist_rebuild_and_disable(agent, tmp_path, o
         fresh.tools.disabled_tool_names.remove(disabled)
 
 
+# LLM: 真实保存授权并用全新Agent重建runner上下文和原生模型工具表；仅声明本地协议，不探测或请求provider。
+# 函数用途: 旧目录和规范窄授权保留可调用的catalog入口，完整授权仍有search，展示不得改宽快照。
+@pytest.mark.parametrize('grants,actions', [
+    (['list_tools', 'read_file'], ['catalog']),
+    (['tool_search', 'tool_search:catalog', 'read_file'], ['catalog']),
+    (['tool_search', 'read_file'], ['search', 'catalog']),
+])
+def test_reloaded_allowlist_reaches_native_model_tools(agent, tmp_path, grants, actions):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.native_tool_protocol import resolve_native_tools
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ProviderToolCapability,
+        ToolProtocolSnapshot,
+    )
+
+    task = agent.subagents.create_run(goal='核对重载后的模型目录入口', role='worker', allowed_tools=grants)
+    # 明确保存旧版/规范字段，模拟历史落盘；不宣称执行过两个版本的在线升级。
+    agent.subagents.save(replace(task, allowed_tools=grants))
+    fresh = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
+    assert fresh.subagents.load(task.id).allowed_tools == grants
+    context = fresh.subagents.runner_context.build_execution_context(task.id)
+    snapshot = fresh.tools.runtime_snapshot(allowed_tools=context.allowed_tools, run_id=task.id)
+    runtime = snapshot.runtime('tool_search')
+    assert runtime is not None
+    assert runtime.model_spec.input_schema['properties']['action']['enum'] == actions
+    protocol = ToolProtocolSnapshot(task.id, 'native', ProviderToolCapability(
+        provider='echo', endpoint='local://echo', model='echo', stream=False, native_supported=True,
+        evidence='local-schema-regression-no-provider-request'))
+    params = SimpleNamespace(tool_protocol_snapshot=protocol, tool_runtime_snapshot=snapshot,
+        allowed_tools=context.allowed_tools, loaded_tool_names=set(), live_archive_state={})
+    native = resolve_native_tools(fresh, params) or []
+    names = [tool['name'] for tool in native]
+    assert set(names) == {'read_file', 'tool_search'}
+    assert names.count('tool_search') == 1
+    search = next(tool for tool in native if tool['name'] == 'tool_search')
+    assert search['input_schema']['properties']['action']['enum'] == actions
+    assert runtime.model_spec.input_schema['properties']['action']['enum'] == actions
+    if actions == ['catalog']:
+        assert 'tool_search:catalog' in snapshot.allowed_tools
+        assert_catalog_only(snapshot, tmp_path)
+
+
 # LLM: 公共规范search授权不应被本次最窄迁移误变成catalog；显式旧grant在全权父下仍仅catalog。
 # 函数用途: 避免修复把所有子代理发现能力直接关掉，或把显式旧grant丢失。
 @pytest.mark.parametrize('grant', ['tool_search', 'list_tools'])

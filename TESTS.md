@@ -1,3 +1,12 @@
+## 2026-10-29 e905 sol-1 R3：旧白名单的真实原生模型投影返修
+
+来源：`fix-e905-sol-1-r3.md`，起点`1132a3f35`。旧记录的快照已正确收窄为catalog，但原生模型入口再按未归一的list_tools白名单求交，导致目录定义丢失。`allowed_tool_set`复用现有规范授权转换，同时保留catalog限制令牌；展示仍直接读取冻结快照schema，不生成完整search定义。另将`_indexed_agent_name`契约注释改为准确中文。
+
+- `test_tool_surface_slimming.py::test_reloaded_allowlist_reaches_native_model_tools`：真实manager保存旧/规范字段→全新SimpleAgent重载→build_execution_context→真实resolve_native_tools。旧目录、规范catalog和完整search三对照；断言read_file/tool_search定义、精确动作枚举及快照不变，窄授权另走真实执行器核对search拒绝。
+- 修复前旧记录一例业务断言失败、两个规范对照通过；修复后须重跑同一入口。仅声明本地原生协议，不请求provider，不声称真实在线升级或后台模型验收。
+
+复现：工作树根运行 `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_tool_surface_slimming.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol1_fix3`。全分支新增/修改定义的中文双层注释及任务门禁、实际测试路径差异与最终结果见指定DONE交接，未以本条目宣称全仓通过。
+
 ## 2026-10-29 e905 sol-1 R2：生产目录权限与Audit读取边界返修
 
 来源：`fix-e905-sol-1-r2.md`及Astra-1补充插话，起点`39e6db87f`。修复目录动作令牌在正式角色归一化/递归调度中丢失、旧授权预设覆盖、旧父快照缺动作证据扩权，以及Audit批量解析忽略关闭goal文件提示。提示语统一规范mode/catalog，默认收起以search能力为前提，公开目录过滤内部令牌。没有新配置或依赖。

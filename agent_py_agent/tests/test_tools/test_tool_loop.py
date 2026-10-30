@@ -1,3 +1,5 @@
+# LLM: 验证工具循环执行、子代理派工去重、最大轮数收口、工具授权过滤与安全能力授权的回归契约。
+# 模块用途: 覆盖 execute_tool_loop、execute_one_tool_call 与编排工具在受控夹具下的完整闭环测试。
 """LLM: tests for tool loop, delegation, max rounds, allowlists, and security grants.
 
 给人看的解释：
@@ -1236,6 +1238,8 @@ def test_gateway_wait_receipt_is_model_written_from_structured_facts():
         assert "任务已转到后台" not in result.response
 
 
+# LLM: 验证 create_subagents 规范 items 输入允许显式外部输出目录并保持宿主自动启动回执契约。
+# 函数用途: 确认局部非托管模式下传入显式 output_files 时可正常创建子代理并写入 output_files 属性。
 def test_create_subagents_accepts_explicit_external_write_target_and_auto_starts(monkeypatch):
     """LLM: explicit user output dirs are allowed and creation uses host-owned auto-start."""
     monkeypatch.setattr(
@@ -1264,9 +1268,13 @@ def test_create_subagents_accepts_explicit_external_write_target_and_auto_starts
             agent.tools,
             "create_subagents",
             {
-                "goal": "创建一个 txt 文件",
-                "allowed_tools": ["read_file", "write_file"],
-                "output_files": [str(external_dir / "result.txt")],
+                "items": [
+                    {
+                        "goal": "创建一个 txt 文件",
+                        "allowed_tools": ["read_file", "write_file"],
+                        "output_files": [str(external_dir / "result.txt")],
+                    }
+                ],
             },
             call_id="create-external-output-subagent",
         )
