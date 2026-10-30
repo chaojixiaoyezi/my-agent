@@ -796,9 +796,11 @@ def _valid_quota_prep_cursor(prep):
         return False
     parts, after, enumerated = prep.get('parts'), prep.get('after'), prep.get('enumerated')
     names, dir_id = prep.get('names'), prep.get('dir_id')
+    dir_offset = prep.get('dir_offset', 0)
     if (not isinstance(parts, list) or len(parts) > 64
             or any(not isinstance(p, str) or not p or '/' in p or p in ('.', '..') for p in parts)
             or not isinstance(after, str) or type(enumerated) is not int or enumerated <= 0
+            or type(dir_offset) is not int or dir_offset < 0
             or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH
             or any(not isinstance(n, str) or not n or n <= after for n in names)
             or names != sorted(set(names))
@@ -806,6 +808,15 @@ def _valid_quota_prep_cursor(prep):
             or any(type(v) is not int or v < 0 for v in dir_id)):
         return False
     return True
+
+
+# LLM: 安全读取或设置目录FD的内核偏移，不支持目录seek时回退到0且不抛异常。
+# 函数用途: 为大目录跨缓存淘汰恢复提供有界内核目录块定位。
+def _safe_dir_lseek(fd, pos, whence):
+    try:
+        return max(0, int(os.lseek(fd, pos, whence)))
+    except OSError:
+        return 0
 
 
 # LLM: 只恢复未过期、同root身份及同写revision的完整游标；旧格式缺部分统计须重扫，不猜累计值。
@@ -830,9 +841,9 @@ def _resumable_quota_cursor(root, ledger):
     return cursor if (info.st_dev, info.st_ino) == (cursor['root_dev'], cursor['root_ino']) else None
 
 
-# LLM: 每层只保留最小128个名字；每个真实枚举先交回预算门，完整枚举完才发表排序批次。
-#   暂停只持当前目录流及其绑定FD，恢复时校验目录身份并跳过已计入prep的枚举前缀。
-# 函数用途: 可暂停且可跨缓存淘汰恢复地准备排序候选，避免大目录在切片重启后原地踏步。
+# LLM: 每层只保留最小128个名字；每个真实枚举（含恢复片重读项）均交回预算门，完整枚举完才发表排序批次。
+#   暂停记录当前getdirentries块起点偏移与候选集，恢复时校验目录身份并从块起点继续有界枚举。
+# 函数用途: 可暂停且可跨缓存淘汰有界恢复地准备排序候选，避免大目录在切片重启后原地踏步或超预算。
 def _quota_sorted_names(root, parts, after, state=None):
     import bisect
 
@@ -843,15 +854,22 @@ def _quota_sorted_names(root, parts, after, state=None):
         prep = state.get('prep') if isinstance(state, dict) else None
         if (isinstance(prep, dict) and tuple(prep.get('parts', ())) == parts
                 and prep.get('after') == after and prep.get('dir_id') == dir_id):
-            skip_remaining = int(prep.get('enumerated', 0))
             names = list(prep.get('names', ()))
-            raw_count = skip_remaining
+            raw_count = int(prep.get('enumerated', 0))
+            resume_offset = int(prep.get('dir_offset', 0))
+            if resume_offset > 0:
+                _safe_dir_lseek(descriptor, resume_offset, os.SEEK_SET)
         else:
-            skip_remaining = 0
             names = []
             raw_count = 0
+        last_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
+        block_pos = last_pos
         with os.scandir(descriptor) as entries:
             for entry in entries:
+                cur_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
+                if cur_pos != last_pos:
+                    block_pos = last_pos
+                    last_pos = cur_pos
                 name = entry.name + ('/' if entry.is_dir(follow_symlinks=False) else '')
                 if name > after and (len(names) < _QUOTA_SORT_BATCH or name < names[-1]):
                     idx = bisect.bisect_left(names, name)
@@ -859,14 +877,11 @@ def _quota_sorted_names(root, parts, after, state=None):
                         names.insert(idx, name)
                         if len(names) > _QUOTA_SORT_BATCH:
                             names.pop()
-                if skip_remaining > 0:
-                    skip_remaining -= 1
-                    continue
                 raw_count += 1
                 if isinstance(state, dict):
                     state['prep'] = {
                         'parts': list(parts), 'after': after, 'enumerated': raw_count,
-                        'names': list(names), 'dir_id': dir_id,
+                        'dir_offset': block_pos, 'names': list(names), 'dir_id': dir_id,
                     }
                 yield None
             if isinstance(state, dict):

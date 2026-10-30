@@ -329,22 +329,48 @@ def test_sort_preparation_is_budgeted_and_resumable(tmp_path, monkeypatch):
     assert second['cursor']['scanned'] > first['cursor']['scanned']
 
 
-# LLM: 大目录排序准备阶段若发生跨进程重启或LRU缓存淘汰，必须从持久prep状态继续推进并最终收敛。
-# 函数用途: 覆盖1400文件每片清缓存及17个owner超过LRU容量的轮转收敛合同。
-def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_path):
+# LLM: 大目录排序准备阶段若发生跨进程重启或LRU缓存淘汰，必须从持久prep状态有界继续推进并最终收敛。
+# 函数用途: 覆盖1400文件每片清缓存（含透明scandir枚举预算守恒）及17个owner超过LRU容量的完整收敛合同。
+def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_path, monkeypatch):
+    original_scandir = quota.os.scandir
+    raw_scandir_count = [0]
+
+    class TransparentCountingScan:
+        def __init__(self, fd):
+            self.it = original_scandir(fd)
+
+        def __enter__(self):
+            self.it.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.it.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.it)
+            raw_scandir_count[0] += 1
+            return entry
+
+    monkeypatch.setattr(quota.os, 'scandir', TransparentCountingScan)
     roots = [tmp_path / f'owner-{idx:02d}' for idx in range(2)]
     for root in roots:
         root.mkdir()
         for index in range(1400):
             (root / f'{index:04d}').write_bytes(b'x')
     epochs = {}
-    for _ in range(20):
+    for _ in range(30):
         all_done = True
         for root in roots:
             for scan in quota._QUOTA_SCANS.values():
                 scan['iterator'].close()
             quota._QUOTA_SCANS.clear()
+            raw_scandir_count[0] = 0
             result = _reconcile(root, max_entries=256, max_ms=1000)
+            assert raw_scandir_count[0] == result['enumerated_entries']
+            assert raw_scandir_count[0] <= 1024
             epochs.setdefault(root, result['cursor']['epoch'])
             assert result['cursor']['epoch'] == epochs[root]
             if not result['complete']:
@@ -362,12 +388,20 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
         for index in range(1200):
             (root / f'{index:04d}').write_bytes(b'x')
     lru_epochs = {}
-    for _ in range(3):
+    for _ in range(25):
+        all_done = True
         for root in lru_roots:
+            raw_scandir_count[0] = 0
             result = _reconcile(root, max_entries=256, max_ms=1000)
+            assert raw_scandir_count[0] == result['enumerated_entries']
+            assert raw_scandir_count[0] <= 1024
             lru_epochs.setdefault(root, result['cursor']['epoch'])
             assert result['cursor']['epoch'] == lru_epochs[root]
+            if not result['complete']:
+                all_done = False
+        if all_done:
+            break
     for root in lru_roots:
         ledger = json.loads((root / '.owner-quota-ledger.json').read_text())
-        assert ledger['reconcile_cursor']['scanned'] >= 128
-        assert ledger['reconcile_cursor']['partial_used_bytes'] >= 128
+        assert ledger['reconcile_cursor']['complete'] is True
+        assert ledger['used_bytes'] == ledger['inode_count'] == 1200
