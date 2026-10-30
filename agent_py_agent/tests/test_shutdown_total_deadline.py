@@ -2,14 +2,23 @@
 # 模块用途: 防止多个线程各耗一次timeout以及活线程被丢弃后误报成功。
 from __future__ import annotations
 
+import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueConfig
 from agent_py_agent.agent.queue_worker import WorkerPool
 from agent_py_agent.agent.storage_backend import StorageBackend
+
+
+# LLM: 显式钉住当前工作树，不依赖cwd隐式导入、旧editable包或关闭PYTHONSAFEPATH；只改变自有测试子进程环境。
+# 函数用途: 让信号测试子进程实际运行本工作树的Worker组件。
+def _worker_subprocess_environment():
+    root = Path(__file__).resolve().parents[2]
+    return {**os.environ, 'PYTHONPATH': str(root) + os.pathsep + str(root / 'agent_py_agent')}
 
 
 # LLM: 假线程精确消耗传入join预算，时钟由调用显式推进，不代替真实在途测试。
@@ -195,8 +204,9 @@ result=drain_worker_components(pool,reaper,timeout=110)
 print(json.dumps({'drain':result.to_dict(),'queue':q.stats()}),flush=True)
 raise SystemExit(0 if result.drained else 1)
 '''
-    process = subprocess.Popen([sys.executable, '-c', code, str(tmp_path / 'thirty.db')],
-        cwd=Path(__file__).resolve().parents[2], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = subprocess.Popen([sys.executable, '-B', '-c', code, str(tmp_path / 'thirty.db')],
+        cwd=Path(__file__).resolve().parents[2], env=_worker_subprocess_environment(),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     readers = ThreadPoolExecutor(max_workers=1)
     try:
         assert readers.submit(process.stdout.readline).result(timeout=15).strip() == 'HANDLER_STARTED'
@@ -256,8 +266,9 @@ result=drain_worker_components(pool,reaper,timeout=2.2)
 print(json.dumps(result.to_dict()),flush=True)
 raise SystemExit(0 if result.drained else 1)
 '''
-    process = subprocess.Popen([sys.executable, '-c', code, str(path)],
-        cwd=Path(__file__).resolve().parents[2], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = subprocess.Popen([sys.executable, '-B', '-c', code, str(path)],
+        cwd=Path(__file__).resolve().parents[2], env=_worker_subprocess_environment(),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     readers = ThreadPoolExecutor(max_workers=1)
     try:
         assert readers.submit(process.stdout.readline).result(timeout=15).strip() == 'HANDLER_STARTED'
@@ -284,3 +295,32 @@ raise SystemExit(0 if result.drained else 1)
     assert QueueWorker(queue, seen.append).run_once() is True
     assert seen == [{'value': 7}]
     assert queue.stats().get('completed') == 1
+
+
+# LLM: 真实SQLite领取后只注入原确认/claim故障；不调用stop/wait也须立即有脱敏结构化诊断。
+# 函数用途: 防止后台消费者把异常只留在pending而静默退出。
+@pytest.mark.parametrize('stage', ['claim', 'complete', 'false_ack'])
+def test_queue_worker_pending_failure_is_logged_without_wait(tmp_path, monkeypatch, caplog, stage):
+    import logging
+
+    from agent_py_agent.agent.queue_worker import QueueWorker
+    queue = IngressQueue(StorageBackend.for_path(tmp_path / 'diagnostic.db'), QueueConfig(lane_cap=50))
+    queue.ensure_schema()
+    queue.enqueue('diagnostic-event', 'lane', {'secret': 'must-not-log-payload'})
+
+    # LLM: 异常正文故意含敏感样本，诊断只能保留类型和阶段而非正文/trace。
+    # 函数用途: 模拟数据库操作失败或确认未命中。
+    def failed(*args, **kwargs):
+        if stage == 'false_ack':
+            return False
+        raise OSError('must-not-log-error')
+
+    monkeypatch.setattr(queue, 'claim' if stage == 'claim' else 'complete', failed)
+    worker = QueueWorker(queue, lambda payload: None)
+    with caplog.at_level(logging.ERROR):
+        worker.run_once()
+    records = [record for record in caplog.records if getattr(record, 'event', '') == 'queue_worker_settlement_unknown']
+    assert len(records) == 1 and records[0].phase == 'settlement_unknown'
+    assert records[0].error_type == ('UnconfirmedAcknowledgment' if stage == 'false_ack' else 'OSError')
+    assert 'must-not-log' not in caplog.text and records[0].exc_info is None
+    assert worker.in_flight['phase'] == 'settlement_unknown'

@@ -67,6 +67,12 @@ class GatewayPaths:
     def terminal(self) -> Path:
         return self.root / "requests" / "terminal"
 
+    # LLM: 分段根只从当前Gateway根派生，不改变owner或提供归档删除许可。
+    # 函数用途: 返回终态分段文件的唯一目录。
+    @property
+    def receipt_archive(self) -> Path:
+        return self.root / 'archive'
+
 
 # LLM: 纯路径容器不创建文件；适配器队列不与Gateway请求目录混用。
 # 类用途: 保存适配器文件协议的各目录位置。

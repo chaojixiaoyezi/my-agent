@@ -201,15 +201,20 @@ def read_json_file(path: Path) -> dict:
 
 # LLM: 可选False只透传原gateway读锁，忙仍保原lock_busy分类；默认等待、JSON校验和错误报告不变，不能把busy当缺失/损坏。
 # 函数用途: 原JSON读取仍保报告分类；可选预算在拿锁和读取后核，不把过期当空。
+# LLM: 热文件缺失时只查询已提交不可变段，不重建热文件；损坏归档不能洗成不存在。
+# 函数用途: 沿同一原JSON读口透明回读封存的请求或答复。
 def read_json_file_report(path: Path, *, context: str = "gateway.json.read", blocking: bool = True, deadline: float | None = None) -> GatewayJsonReadReport:
     check_io_deadline(deadline)
-    if not path.exists():
-        return GatewayJsonReadReport({})
-
     try:
-        with _locked_json_path(path, blocking=blocking):
-            check_io_deadline(deadline)
-            payload = json.loads(path.read_text(encoding="utf-8"))
+        if not path.exists():
+            archived = lookup_gateway_receipt_bytes(path)
+            if archived is None:
+                return GatewayJsonReadReport({})
+            payload = json.loads(archived)
+        else:
+            with _locked_json_path(path, blocking=blocking):
+                check_io_deadline(deadline)
+                payload = json.loads(path.read_text(encoding="utf-8"))
     except (BlockingIOError, InterruptedError) as exc:
         # LLM: BlockingIOError/InterruptedError 都是 OSError 子类，必须在下面的 catch-all 之前单独
         #   识别：锁忙（含身份核对重试耗尽）要保持“可重试的锁失败”语义，调用方按锁失败处理，
@@ -228,6 +233,22 @@ def read_json_file_report(path: Path, *, context: str = "gateway.json.read", blo
             context,
         ),
     )
+
+
+# LLM: 只由已知Gateway队列/response布局定位同根段库，不扫描其他owner，也不创建缺失根。
+# 函数用途: 对已封存的规范文件路径提供精确字节读口。
+def lookup_gateway_receipt_bytes(path: Path) -> bytes | None:
+    from .owner_retention import lookup_sealed_receipt
+    from .paths import gateway_paths_from_root
+
+    path = Path(path)
+    if path.parent.name == 'responses':
+        root = path.parent.parent
+    elif path.parent.parent.name == 'requests' and path.parent.name in ('terminal', 'done', 'failed', 'completed', 'cancelled') or path.parent.name == 'terminal_complete' and path.parent.parent.name == 'projection_state':
+        root = path.parent.parent.parent
+    else:
+        return None
+    return lookup_sealed_receipt(gateway_paths_from_root(root), str(path.relative_to(root)))
 
 
 def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> dict:
@@ -317,15 +338,28 @@ def _skip_write_is_safe(path: Path, read_version: os.stat_result | None) -> bool
 # LLM: 内容去重需要区分"合法旧内容"与"缺失/损坏/非对象"：只有前者能作为跳过写入的依据，
 #   后者必须照常写回（修复语义）。按bytes解码保留CRLF，避免通用换行把不同字节误判相同；非法 UTF-8 与旧行为
 #   一致地上抛，不在此处吞掉。
-# 函数用途: 读回路径上的 JSON 对象、是否"存在且可正常解析为对象"，以及磁盘原文。
+#   首先nonblocking/nofollow打开并核实FD普通文件，最多1MiB；超限或特殊文件拒写，不能以缺失降级覆盖未知header。
+# 函数用途: 有界读回路径上的 JSON 对象、是否"存在且可正常解析为对象"，以及磁盘原文。
 def _read_json_dict_unlocked_report(path: Path) -> tuple[dict, bool, str, os.stat_result | None]:
     try:
-        with path.open("rb") as handle:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        with os.fdopen(fd, 'rb') as handle:
             before = os.fstat(handle.fileno())
-            raw_text = handle.read().decode("utf-8")
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError('gateway JSON target is not a regular file')
+            limit = 1024 * 1024
+            if before.st_size > limit:
+                raise ValueError('gateway JSON header exceeds bounded read limit')
+            raw = handle.read(limit + 1)
+            if len(raw) > limit:
+                raise ValueError('gateway JSON header exceeds bounded read limit')
+            raw_text = raw.decode('utf-8')
             after = os.fstat(handle.fileno())
+            if (_json_file_version(before) != _json_file_version(after)
+                    or _json_file_version(after) != _json_file_version(os.lstat(path))):
+                raise ValueError('gateway JSON source changed during header read')
         current = json.loads(raw_text)
-    except (OSError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}, False, "", None
     if not isinstance(current, dict):
         return {}, False, raw_text, after

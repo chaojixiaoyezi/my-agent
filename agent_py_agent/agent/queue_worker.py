@@ -2,6 +2,7 @@
 # 模块用途: 管理并发消费者、持续在途心跳和可再次等待的结构化排空结果。
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from agent_py_agent.agent.ingress_queue import ClaimedMessage, IngressQueue
 
 Handler = Callable[[dict], None]
+_LOGGER = logging.getLogger(__name__)
 
 
 # LLM: 只投影实际alive线程及同一monotonic截止时刻，不把停止请求视为持久任务完成。
@@ -99,7 +101,7 @@ class QueueWorker:
         with self._gate:
             return self._executing
 
-    # LLM: 成功领取后必须沿_process执行原完成/失败写入，空队列不产生任务状态。
+    # LLM: 成功领取后必须沿_process执行原完成/失败写入，空队列不产生任务状态；未知结果立即脱敏日志，不等stop/wait。
     # 函数用途: 领取并处理最多一条消息。
     def run_once(self) -> bool:
         with self._gate:
@@ -117,15 +119,27 @@ class QueueWorker:
             with self._gate:
                 self._pending = {'message_id': msg.id, 'attempt': msg.attempts, 'phase': 'processing'}
             self._process(msg)
+            if self.in_flight is not None:
+                self._log_pending('UnconfirmedAcknowledgment')
             return True
         except Exception as exc:
             with self._gate:
                 self._pending = {**(self._pending or {}), 'phase': 'settlement_unknown', 'error_type': type(exc).__name__}
                 self._stop.set()
+            self._log_pending(type(exc).__name__)
             return True
         finally:
             with self._gate:
                 self._executing = False
+
+    # LLM: 只记录类型/阶段/消息ID与attempt；不含payload、claim token、异常正文或traceback，不改变持久确认事实。
+    # 函数用途: 在无人等待的后台消费者退出前输出机器可读故障诊断。
+    def _log_pending(self, error_type: str) -> None:
+        pending = self.in_flight or {}
+        _LOGGER.error('queue_worker_settlement_unknown', extra={
+            'event': 'queue_worker_settlement_unknown', 'phase': pending.get('phase'),
+            'message_id': pending.get('message_id'), 'attempt': pending.get('attempt'),
+            'error_type': error_type})
 
     # LLM: 心跳覆盖handler与complete/fail；finally等待心跳真正退出，池的alive判断包含这段清理。
     # 函数用途: 执行一条消息并提交原队列结果。

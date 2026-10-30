@@ -1,10 +1,14 @@
 # 产品持久数据的保留策略（盘点与方案，部分落地）
 
-## 2026-10-29 e905 sol-2 局部状态补充
+## 2026-10-29 e905 sol-2 Round 1 局部状态补充
 
-本段只描述当前候选工作树，不改变下文历史盘点或原领域删除权威。`home_retention.py` 已登记 31 类 `StorageKind` 元数据；`owner_maintenance.py` 的调度片接收显式 adapter，按 item/byte/deadline 分配剩余额度，已确认提交才推进来源游标，未知效果停止同拍，未绑定类别明确保留为 partial。该框架**尚未与 31 类真实 resolver/adapter 及默认 CLI/Gateway 周期接通**；时间/字节是交给领域的合作式预算，不能强制抢占超预算 adapter，测试通过不证明全部增长目录已有有界清理。
+本段只描述当前候选工作树，不改变下文历史盘点或原领域删除权威。`home_retention.py` 已登记 31 类 `StorageKind` 元数据；`owner_maintenance.py` 的调度片接收显式 adapter，按 item/byte/deadline 分配剩余额度，已确认提交才推进来源游标，未知效果停止同拍，未绑定类别明确保留为 partial。普通默认维护周期现接入**两个真实 adapter**：原 owner 配额锁下的有界后台对账、原 Gateway 请求结算门下的旧终态副本封存。其余 29 类未接齐，C/W transition 没有逐写新协议时明确延期，不旁路原权限。
 
-原 `maintenance.json` 写入保留未知扩展并增加局部 schema_generation 检查，partial 不再受完整日周期等待；原保留策略、引用保护、请求权限及 transition/CAS 不由登记表替代。Gateway 终态分段封存、增量配额账及后台对账未实现，也没有对生产 home 运行维护或迁移。RD-01 的未接线 `common/rotating_log.py` 和专用测试已物理退役，历史表格里提到该模块仅为当时盘点证据，不是当前入口。详细验证与限制见 `TESTS.md` 同日 e905 节。
+原 `maintenance.json` 保留未知扩展及 R1 检查；只有已接线 adapter 的待续责任触发下一拍，单纯未接线仍报告 partial、但不制造立即忙循环。legal hold 不封存，坏策略不执行这两个新写者。原保留策略、引用保护、请求权限及 transition/CAS 不由登记表替代。
+
+Gateway 段/manifest/SQLite 定位与 JSON fallback 已有局部实现，但默认 `remove_loose=False`：**保留全部原件，不减少生产 canonical inode**，全 reader 尚未切换，不批准低层删除 API 用于生产。配额预留/实际结算和后台观察账已实现，但大 owner 的前台新鲜核对超预算仍拒绝增长，不能把后台旧账当任意外部写者闭合证明。时间/字节仍是合作式预算，原维护前置阶段、去重/磁盘慢调用、跨进程恢复和严格总预算尚未闭合，测试通过不证明全部增长目录已有有界清理。没有对生产 home 运行维护、迁移或升级 R2。
+
+RD-01 的未接线 `common/rotating_log.py` 和专用测试已物理退役，历史表格里提到该模块仅为当时盘点证据，不是当前入口。详细验证、强杀/坏索引/并发链接替换等未验证范围见 `TESTS.md` 同日 Round 1 节。
 
 状态：**部分落地**（2026-09-29 按 R4 上线后的代码与生产首跑核对，见第 8 节；第 1–7 节保留 09-28 的原始盘点，不逐段改写）。本文最初只做只读盘点和方案方向，不改产品代码。盘点基于 main `54880f8e9` 的源码，测量对象是本机生产 home
 （`~/.my-agent`，2026-09-28 下午数据盘写满后）。

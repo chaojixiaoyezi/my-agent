@@ -1,14 +1,17 @@
-## 2026-10-29 e905 sol-2：局部代码地图（未完成整席接线）
+## 2026-10-29 e905 sol-2：Round 1 局部代码地图（未完成整席接线）
 
 - `agent_py_agent/agent/contracts/optimization_contracts.py`：R1 版本拒写、未知字段深复制往返合同；当前只有部分原写入口采用。
-- `agent_py_agent/agent/gateway_parts/io.py`、`runtime_db/schema.py`：原 JSON 锁/SQLite 入口增加局部 schema_generation 检查，不建立第二存储权威。
+- `agent_py_agent/agent/gateway_parts/io.py`、`runtime_db/schema.py`、`runtime_db/repository.py`：有界 no-follow JSON header 读取、原 SQLite 首写事务同锁核验；保留原物理连接工厂，不建立第二存储权威。
 - `agent_py_agent/agent/user_space/home_retention.py`：保留原延迟 Memory facade，新增 31 类元数据及显式 resolver 合同；没有全套生产 resolver。
-- `agent_py_agent/agent/user_space/owner_maintenance.py`、`owner_maintenance_transition.py`：原维护状态保真与代际检查；新增预算/游标调度片尚未绑定默认领域 adapter，不能当成 31 类统一维护已投产。
-- `agent_py_agent/agent/queue_worker.py`、`worker_entry.py`、`deploy/k8s/worker.yaml`：共享 drain deadline、真实 unfinished/确认未知、停止准入及 110/120 秒样例配对。
-- `agent_py_agent/tests/test_config_migration_transaction.py`、`test_opt_maintenance_registry.py`、`test_shutdown_total_deadline.py`：分别验证局部 R1/实际私有写、维护框架、真实线程和自有 SIGTERM 子进程；名称不表示完整配置迁移或 storage transaction 已实现。
+- `agent_py_agent/agent/user_space/owner_maintenance.py`、`owner_maintenance_transition.py`：原状态保真与代际检查；普通默认周期绑定配额对账/Gateway 副本封存两个真实 adapter；legal hold、坏策略、C/W 延期与未接线状态明确，不能当成 31 类统一维护已投产。
+- `agent_py_agent/agent/user_space/owner_quota.py`：原 owner 锁内的预留/实际结算及有界前台核对、后台扫描栈；未形成大 owner 的封闭写域增长许可。
+- `agent_py_agent/agent/gateway_parts/owner_retention.py`、`paths.py`：分段副本/索引及规范读口定位；默认保留松散原件，所有 reader 尚未完成切换，不能启用生产删除。
+- `agent_py_agent/agent/settings/config_migration.py`：显式 JSON 配置备份/验证/交换/失败回滚；未接生产 CLI 或强杀恢复日志。
+- `agent_py_agent/agent/queue_worker.py`、`worker_entry.py`、`deploy/k8s/worker.yaml`：共享 drain deadline、真实 unfinished/确认未知、即时脱敏错误日志、停止准入及 110/120 秒样例配对。
+- `agent_py_agent/tests/test_config_migration_transaction.py`、`test_opt_maintenance_registry.py`、`test_shutdown_total_deadline.py`、`test_owner_quota_incremental_recovery.py`、`test_gateway_receipt_archive.py`：验证上述局部真实组件与临时目录维护；不是全局原语或生产端到端验收。
 - `agent_py_agent/agent/common/rotating_log.py`、`agent_py_agent/tests/test_rotating_log.py`：RD-01 已物理退役，不再作为推荐扩展点。
 
-未实现：增量配额、Gateway 分段终态封存、完整原语与全清单收敛。测试、局限和交接条件见 `TESTS.md` 的同日 e905 节；没有部署或生产清理。
+未完成：完整 R1/统一事务原语、大 owner verified-delta、全 reader 切换和安全删除、其余真实 adapter 与全清单收敛。测试、局限和交接条件见 `TESTS.md` 的同日 Round 1 节；没有部署或生产清理。
 
 ## 2026-10-28 Wave 9 A1：跨实例单向事件推送（源码候选）
 

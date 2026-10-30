@@ -116,7 +116,7 @@ from .operations import (
     holder_is_alive,
 )
 from .run_creation import RunCreation, create_run_chain
-from .schema import RuntimeSchemaMixin, runtime_db_path
+from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_path
 
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
 BINDING_ACTIVE = "ACTIVE"
@@ -531,12 +531,14 @@ class RuntimeRepository(
             self._init_runtime_schema()
 
     # ------------------------------------------------------------------ 事务
+    # LLM: 原独立连接/提交/回滚寿命不变；首写由原库写锁后同事务代际核验保护，显式BEGIN也走同一栅栏。
+    # 函数用途: 为多实体操作提供不可被并发升级穿透的写事务。
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """多实体权威写入的原子事务（A.9：ConversationTaskLink 需同事务）。"""
         conn = self._runtime_connect()
         try:
-            yield conn
+            yield RuntimeWriteFence(conn) if not self.read_only else conn
             conn.commit()
         except Exception:
             conn.rollback()

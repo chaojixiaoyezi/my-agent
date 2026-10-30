@@ -216,7 +216,8 @@ def run_owner_retention_if_due(
                    "text_vector_cache_reclaim_error": reclaim_error,
                    "indexes_compacted": compacted, "indexes_compact_failed": compact_failed,
                    "memory_archive_permissions": permissions, "run_closeout_backfill": run_closeout_backfill,
-                   "local_store_events_maintenance": local_events}
+                   "local_store_events_maintenance": local_events,
+                   "storage_maintenance": run_owner_storage_maintenance_slice(home, previous, retention, now=current)}
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
@@ -325,7 +326,8 @@ def _write_maintenance_result(state_path, retention, previous, current, effects)
     payload = {**previous, "schema_generation": 1, "schema_version": "owner-maintenance.v1", "last_attempt_at": current, **fields,
                "load_errors": list(retention.load_errors), "legal_hold": retention.legal_hold, **effects}
     if isinstance(effects.get('storage_maintenance'), dict):
-        payload['maintenance_partial'] = effects['storage_maintenance']['partial']
+        storage = effects['storage_maintenance']
+        payload['maintenance_partial'] = storage.get('continuation_pending', storage['partial'])
     write_json_file_atomic_unlocked(state_path, payload)
     return OwnerMaintenanceResult(True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
         isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"])
@@ -657,4 +659,61 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
     state.update({'schema_generation': 1, 'partial': partial or bool(errors) or bool(missing),
                   'items': items, 'bytes': size, 'errors': errors, 'completed': completed,
                   'unbound_kinds': missing, 'next_kind': next_kind})
+    return state
+
+
+# LLM: 原维护入口与唯一状态承接真实领域回执；C/W尚无逐写适配协议时只报告延期，不旁路原transition。
+#   默认只发布副本，依赖原件存在性的读口切换未闭合前禁止删除；未知kind保持partial但不制造忙循环。
+# 函数用途: 在普通维护周期分批核配额并安全封存旧回执，明确保留未接线和延期责任。
+def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coordinator=False):
+    from ..gateway_parts.owner_retention import seal_gateway_receipts_slice
+    from ..gateway_parts.paths import gateway_paths_from_root
+    from .owner_quota import OwnerQuotaLockContention, reconcile_owner_quota_slice
+    from .runtime_paths import runtime_paths_for_agent
+
+    original = previous.get('storage_maintenance', {})
+    require_schema_generation(original)
+    if coordinator or retention.load_errors or (not retention.applied and not retention.legal_hold):
+        state = run_storage_maintenance_slice(original, {})
+        state.update(continuation_pending=False, deletion_enabled=False,
+                     deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
+        return state
+    root = runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace']
+    paths = gateway_paths_from_root(root)
+
+    # LLM: 只扫描元数据，沿原quota锁非阻塞获取，避免maintenance→quota与既有quota→JSON锁序死锁。
+    # 函数用途: 把有界配额对账的真实位置和完成事实交给原维护状态。
+    def quota_step(cursor, budget):
+        remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
+        try:
+            report = reconcile_owner_quota_slice(home.owner_home_dir, max_entries=budget['items'],
+                                                 max_ms=min(10, remaining_ms), blocking=False)
+        except OwnerQuotaLockContention:
+            return {'cursor': {**cursor, 'complete': False, 'deferred_reason': 'quota_busy'},
+                    'complete': False, 'items': 0, 'bytes': 0}
+        return {'cursor': report['cursor'], 'complete': report['complete'],
+                'items': report['scanned_entries'], 'bytes': 0}
+
+    # LLM: legal_hold不发布或删除回执；canonical根必须在当前owner且祖先均为真实目录，冷owner不创建Gateway。
+    # 函数用途: 在剩余预算内封存已结算旧终态，保留所有松散原件供未迁移读者使用。
+    def receipt_step(cursor, budget):
+        if retention.legal_hold:
+            return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'legal_hold'},
+                    'complete': True, 'items': 0, 'bytes': 0}
+        if not _real_owner_directory(home, paths.terminal):
+            return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'no_safe_gateway_terminal'},
+                    'complete': True, 'items': 0, 'bytes': 0}
+        remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
+        report = seal_gateway_receipts_slice(paths, before=now - 7 * 86400, max_entries=budget['items'],
+                                            max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=False)
+        position = {'complete': report['complete'], 'errors': report['errors'],
+                    'reader_cutover_required': True, 'archived_requests': report['archived_requests']}
+        return {'cursor': position, 'complete': report['complete'],
+                'items': report['scanned_entries'], 'bytes': report['bytes']}
+
+    adapters = {'cache_tmp_trash': quota_step, 'gateway_terminal': receipt_step}
+    state = run_storage_maintenance_slice(original, adapters, max_items=256, max_seconds=0.1)
+    state['continuation_pending'] = bool(state['errors']) or any(
+        not state['cursors'].get(key, {}).get('complete', False) for key in adapters)
+    state['deletion_enabled'] = False
     return state
