@@ -354,7 +354,7 @@ class MemoryGenerationStore:
                 "expected_tombstones": expected_tombstones,
                 "newly_removed": visible_before.intersection(removed)}
 
-    # LLM: 原锁内双CAS根/墓碑再核峰值；屏障先行根失败或根提交后GC失败均须报告准确partial，不回滚永久账。
+    # LLM: 原锁内双CAS根/墓碑再核峰值；永久账字节未变则不重写其身份，屏障先行失败保准确partial且不回滚。
     # 函数用途: 提交准备好的同代字节；中断留下的未引用分片不可见，删除屏障失败关闭。
     def publish(self, plan, *, write, admission=None, commit=None, redact=None):
         from ..user_space.owner_quota import OwnerQuotaChange
@@ -378,7 +378,8 @@ class MemoryGenerationStore:
             write(path, raw)
         # 独立屏障先于正文清理；根发表失败也不得从旧代召回已明确遗忘的内容。
         try:
-            if plan["has_tombstones"]:
+            if plan["has_tombstones"] and read_text_beneath(
+                    self.path.parent, (self.tombstones.path.name,)) != plan["tombstone_text"]:
                 write(self.tombstones.path, plan["tombstone_text"])
             write(self.manifest_path, plan["root_text"])
         except Exception as exc:

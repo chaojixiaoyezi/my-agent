@@ -1,5 +1,5 @@
 """仅维护路径使用的正式事件语义校验与读取证据；普通召回兼容读不受影响。"""
-# LLM: 严格维护共用权威读取证据；quota→policy→formal内恢复首次根，并幂等接续GC/旧文件marker收尾。
+# LLM: 严格维护共用权威读取证据；无根恢复先压实历史，所有发表均在marker前验根，原锁内幂等接续收尾。
 # 模块用途: 校验维护源、迁移冷热代次及擦除遗忘副本，失败保留清理责任。
 import json
 import math
@@ -159,7 +159,7 @@ def migrate_tiers(memory, *, dry_run=False, retier=False):
             return {**preview, **result}
 
 
-# LLM: 新分片/墓碑/根复用原writer与C末门；根发表后继续marker收尾，错误准确报告本轮已提交。
+# LLM: 新分片/墓碑/根复用原writer与C末门；根发表后验证可读再写marker，失败保留legacy及本轮已提交事实。
 # 函数用途: 提交冷热代次，并将旧单文件降为阻止旧写者混写的schema标记。
 def publish_tier_generation(memory, records, *, admission=None, commit=None, redact_contents=None,
                             max_chars=None, quarantine=None):
@@ -187,7 +187,7 @@ def publish_tier_generation(memory, records, *, admission=None, commit=None, red
                                   formal_memory_changed=True, commit=commit)
 
 
-# LLM: 调用方持quota→policy→formal；仅核当前根并补GC/marker，不生成代次或业务墓碑，native错误原样透传。
+# LLM: 调用方持quota→policy→formal；无论是否重复GC均先验根再写marker，不生成代次/墓碑，native原样透传。
 # 函数用途: 在首次发表或重启后完成同一根的收尾，重复失败不能假报迁移成功。
 def finish_tier_generation(memory, root, *, admission=None, collect=True, formal_memory_changed=False, commit=None):
     from ..common.nofollow_fs import read_text_beneath
@@ -202,9 +202,9 @@ def finish_tier_generation(memory, root, *, admission=None, collect=True, formal
     try:
         if store.manifest() != root:
             raise ValueError("MEMORY_GENERATION_CONFLICT")
+        # 首次发表已做GC也不能省略校验：不可读的新根不得成为抹除legacy原文的许可。
+        store.events(root)
         if collect:
-            # 清除旧正文前必须确认已发表权威完整，不能将损坏的新根当作擦除旧文件的许可。
-            store.events(root)
             store.collect_unreferenced(root, commit=commit)
         marker = json.dumps({"schema_version": GENERATION_SCHEMA, "manifest": store.manifest_path.name}) + "\n"
         if read_text_beneath(memory.path.parent, (memory.path.name,)) != marker:
@@ -266,7 +266,7 @@ def restore_tier_records(memory, records):
             return publish_tier_generation(memory, [*current.values(), *tombstones.values()], admission=admission)
 
 
-# LLM: quota→policy→formal锁内修复墓碑先行的无根/旧根；外层传入仍持有的准入，绝不重取quota锁。
+# LLM: 原quota→policy→formal锁内先压实无根legacy为唯一现态再发表；保留历史hash和永久屏障，不重取quota锁。
 # 函数用途: 清除内部历史分片中的已删正文，并丢弃含旧正文的派生SQLite。
 def purge_tier_copies(memory, *, admission=None):
     from ..common.nofollow_fs import NoFollowPathError, read_text_beneath
@@ -283,7 +283,8 @@ def purge_tier_copies(memory, *, admission=None):
             return
         if root is None:
             events = jsonl._strict_memory_events(memory.path, require_source=True)
-            publish_tier_generation(memory, events, admission=admission)
+            current = jsonl._compact_memory_events(events, {})
+            publish_tier_generation(memory, current, admission=admission)
             root = store.manifest()
         elif any(store.tombstones.excludes(str(row.get("entry_id") or ""), jsonl.memory_content_hash(str(row.get("content") or "")), records=blocked)
                for segment in root["segments"] for row in store.segment_rows(segment)):

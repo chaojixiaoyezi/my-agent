@@ -1,3 +1,8 @@
+## 2026-10-29 e905-sol-4：记忆代际目录清单、旧版归并恢复与检索控制源修订快照结构
+
+- `memory_store/generation_manifest.py`：定义 `MemoryTierGenerationManifest`、`TierGenerationState` 与 `publish_tier_generation` / `tier_records_for_search`，通过原子临时文件与目录级 fsync 维护 `hot` / `warm` / `cold` 三层代际清单与磁盘配额裁剪。
+- `memory_store/_jsonl_maintenance.py` 与 `jsonl.py`：在旧版无清单库触发迁移时，若存在多版本更新或墓碑事件则先调用 `_write_compacted_memory(..., publish_generation=False)` 归并活动快照，再发布 `warm` 代际并在 `store.events(root)` 完整无损时写入 `.legacy_flat_migrated`；`jsonl.py::_search_authority_revision` 绑定 `path`、`tombstones_path`、`forgetting_events_path` 与 `generation_manifest_path` 的文件五元组，守护无锁向量召回一致性。
+
 ## 2026-10-27 CI 全绿收敛：候选兼容读取、晋升补全与大索引流式过滤结构
 
 - `memory_store/_candidate_read_compat.py` 与 `candidates.py`：封装未覆盖 `_load_unlocked` 时的五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离。

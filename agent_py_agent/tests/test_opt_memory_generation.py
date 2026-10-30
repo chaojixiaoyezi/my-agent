@@ -1322,3 +1322,183 @@ def test_r2_public_search_empty_hits_respects_authority_scan_budget(tmp_path, mo
     assert all_counts == [], f"公共入口额外全库读取：{all_counts}"
     assert len(scans) == 1 and scans[0]["partial"]
     assert scans[0]["scanned_records"] == 3
+
+
+# LLM: 使用真实add/replace历史和仅根writer失败的remove；双次重启purge核全文、元数据、hash和永久账身份。
+# 函数用途: 防止无根恢复将多个活版本当快照发表，或为同一删除重写永久账与增加代次。
+def test_r3_rootless_purge_compacts_survivor_history(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    deleted = memory.add_record(MemoryRecord("user", "PRIVATE-R3-DELETE-A", entry_id="A"))
+    first = memory.add_record(MemoryRecord("user", "R3-LIVE-B-v1", entry_id="B",
+        tags=["保留标签"], attributes={"origin": "user_explicit", "extra": {"keep": True}},
+        _extra_fields={"future_field": ["保留扩展"]}))
+    memory.apply_batch([dict(action="replace", entry_id="B", expected_version=first.version,
+        content="R3-LIVE-B-v2", source="test:r3-replace")])
+    expected = asdict(next(row for row in memory.all() if row.entry_id == "B"))
+    assert expected["version"] == 2
+    assert jsonl.memory_content_hash(first.content) in expected["removed_content_hashes"]
+    store = MemoryGenerationStore(memory.path)
+    assert store.manifest() is None
+    writer = jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 分片与永久账仍真实落盘，只中断首次根发表，观察正式删除的部分提交。
+    # 函数用途: 留下必须从legacy历史恢复的合法故障前像。
+    def fail_root(path, raw, **kwargs):
+        if path == store.manifest_path:
+            raise OSError("r3 root writer failure")
+        return writer(path, raw, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_root)
+        with pytest.raises(RemovalCleanupError) as error:
+            memory.remove("A", source="test:r3-forget")
+        assert error.value.formal_memory_changed
+    assert store.manifest() is None
+    ledger = store.tombstones.path.read_bytes()
+    ledger_stat = store.tombstones.path.stat()
+    tombstone = asdict(JsonlMemory(memory.path).committed_removal_record("A"))
+    repaired = None
+    for _ in range(2):
+        reopened = JsonlMemory(memory.path)
+        assert [asdict(row) for row in reopened.all()] == [expected]
+        reopened.purge_removed_indexes("A")
+        root = store.manifest()
+        assert root is not None
+        if repaired is None:
+            repaired = root
+        assert root == repaired and root["generation"] == 1
+        assert [asdict(row) for row in JsonlMemory(memory.path).all()] == [expected]
+        assert [row.entry_id for row in store.events(root) if row.action != "remove"] == ["B"]
+        assert store.tombstones.path.read_bytes() == ledger
+        stamp = store.tombstones.path.stat()
+        assert (stamp.st_dev, stamp.st_ino) == (ledger_stat.st_dev, ledger_stat.st_ino)
+        assert asdict(reopened.committed_removal_record("A")) == tombstone
+        assert all(deleted.content.encode() not in path.read_bytes()
+                   for path in tmp_path.rglob("*") if path.is_file())
+
+
+# LLM: 真实发表后仅令权威校验失败；此时根已提交但legacy原文必须仍在，不伪造读回成功。
+# 函数用途: 保证collect=False的首次发表也在覆盖marker之前校验正式根。
+def test_r3_first_publish_validates_authority_before_legacy_marker(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add("user", "R3-KEEP-LEGACY-UNTIL-VALIDATED")
+    before = memory.path.read_bytes()
+    events = MemoryGenerationStore.events
+
+    # LLM: 仍允许prepare读取无根旧库，只拒绝已经发表的根，隔离marker前的必要验证点。
+    # 函数用途: 模拟新根不可读且保留可恢复的legacy原文。
+    def reject_published(self, root=None, **kwargs):
+        if self.manifest() is not None:
+            raise ValueError("MEMORY_GENERATION_UNREADABLE")
+        return events(self, root, **kwargs)
+
+    monkeypatch.setattr(MemoryGenerationStore, "events", reject_published)
+    with pytest.raises(RemovalCleanupError) as error:
+        memory.migrate_tiers()
+    assert error.value.formal_memory_changed
+    assert memory.path.read_bytes() == before
+
+
+# LLM: 向量命中由真实VectorStore产生；交错真实写入及墓碑超预算，公开search不得回传旧正文或记旧访问。
+# 函数用途: 覆盖legacy/generation与词面融合两路，同时约束漂移重读有界且没有all旁路。
+@pytest.mark.parametrize("action", ["remove", "replace", "remove_root_failure"])
+@pytest.mark.parametrize("migrated,lexical,limited", [
+    (False, False, False), (True, False, False), (True, True, False), (True, False, True)])
+def test_r3_public_search_revalidates_after_vector_hits(tmp_path, monkeypatch, action, migrated, lexical, limited):
+    from agent_py_agent.agent.memory_store import _jsonl_indexing, jsonl
+    from agent_py_agent.agent.retrieval.vector_store import VectorStore
+
+    # LLM: 固定二维本地向量以获得真实命中，不访问远程嵌入或伪造VectorHit。
+    # 类用途: 让确定性交错测试只改变权威事实而非相似度。
+    class Embedder:
+        # LLM: 无网络与磁盘副作用，所有输入共享一个合法向量空间。
+        # 函数用途: 为写入和查询提供可重复的单位向量。
+        def embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl", embedder=Embedder())
+    original = memory.add_record(MemoryRecord("user", "target old apple orchard", entry_id="target"))
+    if limited:
+        for index in range(4):
+            memory.add_record(MemoryRecord("user", f"budget filler {index}", entry_id=f"filler-{index}"))
+        monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_RECORDS", 3)
+    if migrated:
+        memory.migrate_tiers()
+        assert memory.rebuild_read_index()["status"] == "complete"
+    query = "apple" if lexical else "火星葡萄"
+    if not lexical:
+        assert memory.search_report(query)[0] == []
+    store = memory._vector_store()
+    search, scan = VectorStore.search, _jsonl_indexing.bounded_authority_records
+    scans, observed_hits = [], []
+    writer = JsonlMemory(memory.path)
+    atomic_write = jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 只拒绝manifest写，永久账真实先行；用来验证根指纹未变也不能漏掉永久屏障漂移。
+    # 函数用途: 制造已生效删除但根未发表的合法部分提交。
+    def fail_manifest(path, raw, **kwargs):
+        if path.name == memory.path.name + ".manifest.json":
+            raise OSError("r3 semantic removal root failure")
+        return atomic_write(path, raw, **kwargs)
+
+    # LLM: 不替换真实检索结果；仅在其返回与产品核验之间执行同owner合法正式写入。
+    # 函数用途: 精确重现语义快照在查询期间失效的窗口。
+    def interleave(self, vector, **kwargs):
+        hits = search(self, vector, **kwargs)
+        if self is store:
+            assert any(hit.metadata.get("entry_id") == "target" for hit in hits)
+            observed_hits.extend(hits)
+            if limited:
+                # 永久账新增四个真实墓碑，严格超过同一个三条预算；屏障未核全必须拒绝一切旧候选。
+                writer.apply_batch([dict(action="remove", entry_id=f"filler-{index}") for index in range(4)])
+            if action == "remove_root_failure":
+                from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+
+                with monkeypatch.context() as fault:
+                    fault.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_manifest)
+                    with pytest.raises(RemovalCleanupError) as error:
+                        writer.remove("target")
+                    assert error.value.formal_memory_changed
+            elif action == "remove":
+                writer.remove("target")
+            else:
+                writer.apply_batch([dict(action="replace", entry_id="target", expected_version=original.version,
+                    content="target fresh apple harvest")])
+        return hits
+
+    # LLM: 只观察实际reader回执，不伪造扫描结果；每次读取须遵守原条数和字节硬限。
+    # 函数用途: 检查一次初始扫描及最多一次漂移重读。
+    def observe_scan(*args, **kwargs):
+        records, facts = scan(*args, **kwargs)
+        scans.append(facts)
+        return records, facts
+
+    # LLM: 公共search不允许通过all取得无限快照；写者为独立实例，不受此断言影响。
+    # 函数用途: 将无界语义复核旁路变为明确失败。
+    def forbid_all():
+        pytest.fail("公共search不能恢复无界all")
+
+    monkeypatch.setattr(VectorStore, "search", interleave)
+    monkeypatch.setattr(_jsonl_indexing, "bounded_authority_records", observe_scan)
+    monkeypatch.setattr(memory, "all", forbid_all)
+    result = memory.search(query)
+    assert observed_hits
+    if action != "replace" or limited:
+        assert result == []
+        assert "target" not in memory._pending_access
+    else:
+        [current] = writer.all()
+        assert [asdict(row) for row in result] == [asdict(current)]
+        assert current.content != original.content and current.version == original.version + 1
+    assert len(scans) == 2
+    if limited:
+        assert scans[-1]["partial"] and scans[-1]["scanned_records"] == 3
+    assert all(facts["scanned_records"] <= jsonl._AUTHORITY_SCAN_MAX_RECORDS
+               and facts["scanned_bytes"] <= jsonl._AUTHORITY_SCAN_MAX_BYTES for facts in scans)

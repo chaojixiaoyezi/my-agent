@@ -1,3 +1,25 @@
+## 2026-10-29 e905 sol-4 Round 3：无根历史恢复与语义查询后权威复核
+
+来源：`fix-e905-sol-4-r3.md` 及两份 Astra 三审报告，从 `5024d1e78` 修复；不部署、不操作生产记忆。
+
+- 无根但已有永久墓碑时，复用 `_compact_memory_events` 折叠合法 add/replace/touch 历史，再按当前永久 ID/hash 屏障发表；存活事实保留最新正文、版本、元数据与历史 hash。双次重启/purge 不增代，同字节永久账不重写 inode。首次发表即使已做 GC，也必须通过 `store.events(root)` 才允许用 schema marker 覆盖 legacy 原文。
+- 公共 `search()` 在短 formal 锁内将初始有界快照绑定到 legacy、旧墓碑、manifest、永久墓碑四个控制文件物理指纹；网络嵌入和向量读取在锁外。返回及登记访问前重新持原 formal 锁：无漂移复用原快照，漂移最多增加一次 `1000` 条 / `2 MiB` 的有界权威扫描，按当前 ID 刷新全部融合候选的正文/版本，未覆盖或已删候选丢弃。保持原候选排名，不声称刷新后的新正文重新计算过语义相似度。没有恢复 `all()`，也没有无限重读。
+- 真实 `VectorStore.search()` 返回命中后，分别交错真实 remove、replace，以及仅根 writer 失败但永久屏障已生效的 remove；覆盖未迁移库、已迁移库及含词面候选的融合。删除不返回旧正文、不登记失效访问；替换返回权威最新正文/版本。另保留既有三个零命中预算回归，核无漂移仍只一次扫描。
+- 双层中文注释区分 legacy 无删除压实与 generation 永久屏障→根→GC/验根/marker 顺序，明确根失败可为部分提交、重试负责清理，而非“失败必然零写入”。
+- 独审后追加真实永久墓碑账超过三条扫描预算的删除/替换交错，核漂移重读 `partial=True`、未核全屏障时空结果、无失效访问、最多两次扫描；不是仅以扫描参数存在来证明预算行为。
+
+复现（仓库根；任务单的 `test_memory_condense.py` / `test_wave5_memory_v2.py` 在本树不存在，使用两份上游终审实际执行的对应文件，不创建替代测试）：
+
+```bash
+mkdir -p /tmp/pytest_cache_sol4_r3_fix
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_memory_generation.py agent_py_agent/tests/test_memory_condense_v2.py agent_py_agent/tests/test_memory_jsonl_and_hybrid_wave5.py agent_py_agent/tests/test_memory_semantic_recall.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol4_r3_fix --basetemp=/tmp/pytest_cache_sol4_r3_fix/tmp
+ruff check --no-cache agent_py_agent scripts
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_import_boundaries.py --json
+git diff --check 4bea324e3..HEAD
+```
+
+完整验证输出、红绿过程、独立复核及精确提交见 `DONE-e905-sol-4.md` 的 Round 3 Fixes。以上为临时本地库入口和确定性交错，不替代远程嵌入、生产用户入口、多进程压力、断电或跨平台验收。
+
 ## 2026-10-29 e905 sol-4 Round 2：删除屏障、故障收尾及搜索预算
 
 来源：`fix-e905-sol-4-r2.md` 与 Astra-1/Astra-2 二轮复核；从 `e4d1a8cef53420c8bfaf06ee6157e86853219898` 修复，不部署、不操作生产记忆。

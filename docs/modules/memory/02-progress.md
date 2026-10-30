@@ -1,3 +1,8 @@
+## 2026-10-29 e905-sol-4：三级显式代际目录、旧版扁平记忆自动收敛与检索控制源修订围栏（分支已实现，待集成）
+
+- `memory_store/generation_manifest.py`、`_jsonl_maintenance.py` 与 `jsonl.py`：引入 `MemoryTierGenerationManifest` 显式代际清单（`hot` / `warm` / `cold`），自动将未迁移的旧版扁平 JSONL 归并收敛至 `warm` 代际并校验全量事件完整性后落盘迁移标记；按配额与遗忘策略执行 `warm -> cold` 降级与超限裁剪，保留 `pinned` / `important` 置顶豁免。
+- `memory_store/jsonl.py`：`_search_authority_revision` 汇总正式库路径、墓碑、遗忘账本与代际清单四路控制源五元组版本事实，在 `VectorStore.search()` 向量检索前后执行双重快照比对，并发变更时回退最新权威快照过滤，杜绝陈旧召回复活已遗忘/已墓碑记录。
+
 ## 2026-10-27 CI 全绿收敛：记忆候选兼容读口、自动晋升补全与产物大索引流式过滤
 
 - `memory_store/candidates.py` 与 `_candidate_read_compat.py`：保留完整五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离，兼容对 `_load_unlocked` 的测试覆盖。
