@@ -1,5 +1,5 @@
-# LLM: W only transports resources and consumes original C facts; no W Popen, P1 writes or ACK write permission.
-# 模块用途: Serialized native executor RPC and W-owned Popen-compatible standard streams.
+# LLM: W仅运输资源并消费原C事实，不授予W创建进程、写P1或写ACK的权限，原内核对端校验和执行围栏保持。
+# 模块用途: 串行管理原生执行器RPC，提供W持有的兼容Popen标准流。
 from __future__ import annotations
 
 import json
@@ -352,8 +352,8 @@ def _write_context(fd, data, deadline):
                 continue
 
 
-# LLM: pid is informational only; polling and signals always go through C's original process-token RPC.
-# 类用途: Keep W's PIPE parents and Popen waiting semantics without creating a W subprocess.
+# LLM: pid仅供展示，轮询和信号始终通过原C进程令牌RPC；等待退避不得改变初次poll与管道EOF合同。
+# 类用途: 保留W的管道父端及Popen等待语义，不在W中创建子进程。
 class NativeExecutorProcess:
     # LLM: Created only after exact C start/finish; owns W PIPE parents, not C process or P1 authority.
     # 函数用途: 保存C进程定位与W标准流，初始化一次通信状态。
@@ -394,12 +394,13 @@ class NativeExecutorProcess:
     def poll(self):
         return self._poll()
 
-    # LLM: Wait on C facts without W waitpid; waiting budget and bounded RPC transport budget are separate.
+    # LLM: 原C查询与执行等待预算分开；零超时仍先查一次，随后只睡正剩余预算，有界退避不发信号或重启。
     # 函数用途: 轮询原C事实直至退出，超时不重启进程。
     def wait(self, timeout=None):
         self._require_original()
         deadline = None if timeout is None else time.monotonic() + _seconds(timeout)
         first = True
+        sleep_step = 0.005
         while True:
             remaining = None if deadline is None else deadline - time.monotonic()
             if not first and remaining is not None and remaining <= 0:
@@ -413,7 +414,8 @@ class NativeExecutorProcess:
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 raise subprocess.TimeoutExpired(self.args, timeout)
-            time.sleep(0.01 if remaining is None else min(0.01, remaining))
+            time.sleep(sleep_step if remaining is None else min(sleep_step, remaining))
+            sleep_step = 0.05 if sleep_step >= 0.02 else sleep_step * 2
 
     # LLM: Validate signum then ask original C by token; informational pid grants no signal authority.
     # 函数用途: 将合法信号交原C执行，不在W按正文PID发信号。
@@ -485,7 +487,7 @@ class NativeExecutorProcess:
             )
         return data
 
-    # LLM: Timeout is a waiting fact, not a restart or signal; later communicate joins the same pipe pumps.
+    # LLM: 零超时也先查询原C；退出且管道EOF才完成，退避只夹正剩余预算，超时保留原字节及pump供后续接续。
     # 函数用途: 一次启动标准流通信，可在超时后继续等待同一进程和管道。
     def communicate(self, input=None, timeout=None):
         self._require_original()
@@ -510,11 +512,12 @@ class NativeExecutorProcess:
                     thread = threading.Thread(target=self._writer, args=(input,), daemon=True)
                     self._threads.append(thread)
                     thread.start()
+            first, sleep_step = True, 0.005
             while True:
                 live = any(t.is_alive() for t in self._threads)
                 remaining = None if deadline is None else deadline - time.monotonic()
                 # Preserve partial bytes even in text mode, matching TimeoutExpired.
-                if remaining is not None and remaining <= 0 and (live or self.returncode is None):
+                if not first and remaining is not None and remaining <= 0 and (live or self.returncode is None):
                     raise subprocess.TimeoutExpired(
                         self.args,
                         timeout,
@@ -522,11 +525,13 @@ class NativeExecutorProcess:
                         stderr=self._output("stderr", text=False),
                     )
                 rc = self._poll()
+                first = False
                 if not live and rc is not None:
                     break
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is None or remaining > 0:
-                    time.sleep(0.01 if remaining is None else min(0.01, remaining))
+                    time.sleep(sleep_step if remaining is None else min(sleep_step, remaining))
+                    sleep_step = 0.05 if sleep_step >= 0.02 else sleep_step * 2
             if self._errors:
                 raise self._errors[0]
             return self._output("stdout", text=True), self._output("stderr", text=True)

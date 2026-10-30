@@ -1,4 +1,5 @@
-# LLM: 管理入口只解析轻上下文，真实执行仍构造Agent；Count0清理保原责任，GIL间隔只在执行入口调整，不在import时改变解释器。
+# LLM: 管理入口只解析轻上下文；自举隔离外来同名包根，子进程使用安全cwd与PYTHONSAFEPATH，原执行责任不变。
+# 模块用途: 管理Gateway生命周期和安全代码路径，不部署或切换用户代码。
 
 
 from __future__ import annotations
@@ -200,7 +201,7 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
         "task_continuation": "owner_scoped_event_driven",
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
-        "user_inflight_limit": max(1, int(getattr(config, "gateway_user_inflight_limit", 8) or 8)),
+        "user_inflight_limit": max(1, int(getattr(config, "gateway_user_inflight_limit", 50) or 50)),
         "global_inflight_limit": max(1, int(getattr(config, "gateway_global_inflight_limit", 500) or 500)),
         "config_path": str(context.config_path),
         "model_name": str(getattr(config, "model_name", "") or ""),
@@ -234,7 +235,7 @@ def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | N
         "task_continuation": "owner_scoped_event_driven",
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
-        "user_inflight_limit": max(1, int(getattr(config, "gateway_user_inflight_limit", 8) or 8)),
+        "user_inflight_limit": max(1, int(getattr(config, "gateway_user_inflight_limit", 50) or 50)),
         "global_inflight_limit": max(1, int(getattr(config, "gateway_global_inflight_limit", 500) or 500)),
         "config_path": str(context.config_path),
         "model_name": str(getattr(config, "model_name", "") or ""),
@@ -303,12 +304,16 @@ def _gateway_popen_options() -> tuple[int, bool]:
     return 0, True
 
 
+# LLM: 只影响新Gateway子进程；复制环境不污染父进程，cwd锁到原状态根，不从调用者源码目录抢先导入。
+# 函数用途: 用安全Python搜索路径拉起后台Gateway，日志和原进程组配置保持。
 def _spawn_gateway_process(paths, command: list[str], *, cwd: Path):
     creationflags, start_new_session = _gateway_popen_options()
+    environment = {**os.environ, "PYTHONSAFEPATH": "1"}
     with paths.log.open("ab") as log_file:
         return subprocess.Popen(
             command,
-            cwd=cwd,
+            cwd=paths.root,
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -502,7 +507,7 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
     print(
         "[gateway-run] "
-        f"status=running pid={pid} inflight_limits=user:{max(1, int(getattr(agent.config, 'gateway_user_inflight_limit', 8) or 8))}"
+        f"status=running pid={pid} inflight_limits=user:{max(1, int(getattr(agent.config, 'gateway_user_inflight_limit', 50) or 50))}"
         f"/global:{max(1, int(getattr(agent.config, 'gateway_global_inflight_limit', 500) or 500))} "
         f"http_port={http_port}",
         flush=True,
@@ -1170,10 +1175,27 @@ def _preflight_required_local_credential(agent) -> None:
         raise GatewayLocalCredentialRequired(exc.reason_code) from None
 
 
-# LLM: 服务进程入口先写托管标记，再创建 Agent/线程/工具；所有子进程继承它，生命周期命令据此拒绝自停。
+# LLM: 当前已导入安装根为唯一包根；仅移除包含同名包的外来路径，保留一般依赖，不清sys.modules或加载新代码。
+# 函数用途: 清理Gateway延迟导入前可能被cwd或PYTHONPATH混入的另一份源码。
+def _isolate_gateway_package_path() -> None:
+    installed = Path(__file__).resolve().parents[2]
+    retained = []
+    for entry in sys.path:
+        try:
+            root = Path(entry or os.curdir).resolve()
+            if root != installed and (root / "agent_py_agent").is_dir():
+                continue
+        except (OSError, ValueError, TypeError):
+            pass
+        retained.append(entry)
+    sys.path[:] = retained
+
+
+# LLM: 先清外来包根再写托管标记及构造Agent；不纠正已经被上层错误导入的包，子进程另以安全环境阻止cwd抢先。
 #   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
 # 函数用途: 从公开YAML选择拓扑；两种模式均先持同一生命周期锁，再构造业务和启动服务。
 def cmd_gateway_run(args) -> int:
+    _isolate_gateway_package_path()
     from .common import frozen_gateway_arguments
 
     args = frozen_gateway_arguments(args)

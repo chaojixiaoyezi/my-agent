@@ -19,6 +19,19 @@ SimpleAgent将owner的compact根注入会话存储，Compact提交再显式传�
 ## 2026-10-29 e905-sol-13：Gateway 压缩来源与主历史种子选择规则对齐（分支已实现，待集成）
 
 - `gateway_parts/request_context.py::_load_gateway_compact_context` 将 `selector_factory` 统一收敛到 `history_projection.history_row_selected`，使自动预检与延迟压缩（`defer_compact=True`）排除后台审计、非聊天记录及当前请求中段行，与 `_gateway_history_source` 主种子逐 ID 对齐，消除 `COMPACT_SOURCE_CHANGED`；显式 `force=True` 强制压缩继续保留同请求内已完成检查点并由 `_without_current_request_suffix` 剥离未提交尾部用户输入。
+## 2026-10-29 e905 sol-14 Round 1：观察兼容与通知状态（本地部分交付）
+
+- 历史 v1 空 home 在规范 owner 回验及原生格式校验后只读兼容；跨 owner、现代格式缺 home 及多链接继续拒绝。新启动在任何副作用前拒绝不完整 home。
+- 通知信封分离 snapshot_ok/binding_state/failure_kind；面板按完整 scope 保存可信帧和瞬态次数，旧代/换线程不发表，第三次瞬态提示去重且不续期；硬拒绝清帧，冷 owner 无 root 不再返回成功空绑定。
+- 规范存储终态 TTL 沿原维护入口，TUI 不隐式维护或删除。生产历史 34 条保留，指定只读投影成功。真实 TTY 与生产加载效果未验证。
+- 正 MP 运输来源 R1 尚未补齐；真实 publisher 的硬链接 EPERM 阻止业务红绿验证，新增用例不代表修复完成。指定组合的十个完成事件失败已在真正基线复现，整单未全绿、不可签收为全部完成。准确结果见 [TESTS](../../../TESTS.md)。
+
+## 2026-10-29 e905 sol-14：唤醒与重启修复（本地候选，未部署）
+
+- 默认单用户准入及缺省回退统一 50；WebSocket 同名多值头不再通过 Mapping.items 触发异常。
+- CPU 优化限展示缓存和有界等待：保留 1ms lane 公平让出、1/5 秒通知发现、reset 代次和终态尾流，不做跨请求 notices TTL。
+- 新恢复分支辨认 pending-in-processing 运输半态，原锁内比完整快照和指纹，禁止覆盖 pending/terminal；不重算预算，正 MP 仍要求原恢复来源。
+- 前台插话仅在真实目标完全缺失时使用已提交请求 ID，已有 request/task 目标优先，等待准入不允许覆盖它，claim 仍由宿主复核；安全自举不把调用者源码 cwd 带入子进程。生产 CPU 与真实发布解释器启动未验证。
 
 ## 2026-10-28 Wave 9 A1 Round 2：单向远端推送（本地候选，未部署）
 

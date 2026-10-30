@@ -39,6 +39,21 @@ R2 使用最多 16 个 owner 扫描的 LRU，未完成游标持久保存 `last_r
 ## 2026-10-29 e905-sol-13：Gateway 压缩历史选择器与主种子同源结构
 
 - `gateway_parts/request_context.py::_load_gateway_compact_context` 通过 `partial(history_projection.history_row_selected, current_request_id="" if force else inputs.request_id, work_scope=work_scope)` 构造 `selector_factory`，与 `_gateway_history_source` 共用唯一单行过滤规则，保证 `capture_transcript_prefix` 校验时主种子与 `compact_source.messages` 前缀严格一致。
+## 2026-10-29 e905 sol-14 Round 1：只读观察与范围围栏
+
+- `background_process_owner.canonical_observation_owner_id` 从完整 local/provider home 后缀推导候选根，经原 resolver 回验；不使用最近同名祖先，不扫描、不物化目录。
+- `background_process_view` 的 list/inspect 可选 `expected_owner_id` 每次在缓存前核对当前上下文；旧 v1 兼容仅改观察归属，不改原生执行 reader，也不授予控制权。
+- `http_handlers` 通知响应携带独立机器状态；`tui_threading._BackgroundPollReport` 固定本次 context，刷新在原锁内校验及初始化范围，IO 保持锁外，发表与成功/异常清理出口再核对完整 scope；已有 scope 只校验、不重认领。`chat_client_context` 不将结构化快照失败误升级为权限失信。
+- `background_process_launch.validate_launch_owner_scopes` 在启动两入口的副作用前核对两份 scope；终态 TTL 仍只由 `ProcessSessionStore` 原维护负责，观察没有隐式删除。
+- `recovery` 正 MP 运输来源仍是未完成项，不把本次观察修复当作恢复协议已补齐。见 [进度](02-progress.md) 与 [TESTS](../../../TESTS.md)。
+
+## 2026-10-29 e905 sol-14：展示缓存与原队列恢复结构
+
+- `tui_view`：每块摘要缓存、稳定元组索引和副作用后 UIContent 单槽缓存；完整来源行计算不改。
+- `tui_threading` / `gateway_client`：可唤醒静默退避、原通知游标/reset 校验、可见 chunk 与续租分离；插话保留条件绑定同一前台 durable 请求。
+- `multiprocess_native_executor_client` / `mcp_transport`：初次 poll、EOF 和取消分类不变，仅限制后续等待到剩余预算。
+- `recovery._finish_interrupted_queue_move`：在原 `recover_stale_processing` 与 `processing_metadata_scope` 中完成半途运输；终态先走原补投影，冲突保留文件并报告，不授予新执行权限。
+- `gateway_process`：子进程复制环境加 PYTHONSAFEPATH，cwd 固定原状态根；入口只清外来同名包搜索路径，不能纠正上层已经导入的错误包。
 
 ## 2026-10-28 Wave 9 A1 Round 2：单向推送接线与隔离
 

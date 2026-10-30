@@ -34,6 +34,18 @@ BACKGROUND_START_SETTLE_SECONDS = 0.5
 LAUNCH_SPEC_SCHEMA = "background_process_launch.v6"
 
 
+# LLM: 仅新启动准入调用；不收紧历史validator，可信home不得从cwd补造，共享MCP的业务空字段不参与此门。
+# 函数用途: 在日志、预留和进程副作用前拒绝缺失、非规范或互相冲突的owner路径。
+def validate_launch_owner_scopes(access: ProcessAccessScope, execution: ProcessExecutionScope) -> None:
+    homes = (access.owner_home, execution.owner_home)
+    if any(type(value) is not str or not value or value.strip() != value for value in homes):
+        raise ValueError("managed background owner home required")
+    if any(not Path(value).is_absolute() or str(Path(value).resolve()) != value for value in homes):
+        raise ValueError("managed background owner home must be canonical")
+    if homes[0] != homes[1]:
+        raise ValueError("managed background owner home conflict")
+
+
 # LLM: 参数来自已授权宿主，env 不写磁盘；stdio 绑定 launcher，显式保留只控制记录裁剪，不改变执行归属或进程寿命。
 # 类用途: 汇总一次托管启动的命令、归属、字节通道和权限，启动前拒绝相互矛盾的寿命或输出设置。
 @dataclass(frozen=True)
@@ -59,9 +71,10 @@ class BackgroundLaunchRequest:
     listen_scope: str = DEFAULT_LISTEN_SCOPE
     listen_scope_enforce: bool = True
 
-    # LLM: 零期限不限制寿命；保留策略须为宿主布尔值，共享资源附原激活引用，不能以展示字段跳过复查；监听范围只认 loopback/lan。
+    # LLM: 先纯校验owner路径再验寿命/通道；历史读取不受影响，共享资源仍附原激活引用，不以展示字段跳过复查。
     # 函数用途: 在创建记录前验证寿命、管道、保留策略、监听范围与可信激活引用；任务启动不加载插件存储。
     def __post_init__(self) -> None:
+        validate_launch_owner_scopes(self.access_scope, self.execution_scope)
         object.__setattr__(self, "listen_scope", normalize_listen_scope(self.listen_scope))
         if type(self.listen_scope_enforce) is not bool:
             raise ValueError("managed background listen scope enforcement flag invalid")

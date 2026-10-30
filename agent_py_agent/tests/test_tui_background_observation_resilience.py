@@ -1,5 +1,5 @@
 # LLM: 仅用临时owner、真实导航器和确定性故障边界测试；不启动进程、改权限或消费通知。
-# 模块用途: 守住目录四次尝试、同scope瞬态宽限及权限/归属硬错误的失败关闭。
+# 模块用途: 守住目录重试、面板同完整scope瞬态宽限及权限/归属硬错误，主页面可信瞬态保持安静。
 from __future__ import annotations
 
 import errno
@@ -155,13 +155,16 @@ def test_started_scan_missing_on_retry_is_not_initial_empty(tmp_path, monkeypatc
 
 
 # LLM: 明确code的锁竞争或不完整快照只允许同scope已验证帧静默两次；第三次告警，成功恢复后重新计数。
-# 函数用途: 核对新增两种瞬态错误的完整连续失败与恢复周期。
+# 函数用途: 在真实打开的观察面板核对两次宽限、第三次单次告警和恢复周期。
 @pytest.mark.parametrize("code", ["LOCK_TIMEOUT", "SNAPSHOT_PARSE_INCOMPLETE"])
 @pytest.mark.parametrize("error", [None, "OSError"])
 def test_verified_frame_tolerates_two_lock_or_parse_failures(tmp_path, monkeypatch, code, error):
     agent, nav, runtime, response = watch_fixture(tmp_path, monkeypatch)
     good = response["value"]
     tui_threading._sync_background_watch(agent, nav)
+    assert nav.move_selection(1) and nav.enter_selected()
+    runtime = nav.active_runtime()
+    monkeypatch.setattr(bg, "inspect_background_process", lambda *a, **kw: good["items"][0])
     old = nav._background_rows
     response["value"] = {"projection_ok": False, "errors": [{"error_code": code, "error": error}]}
     for count in (1, 2):
@@ -177,7 +180,7 @@ def test_verified_frame_tolerates_two_lock_or_parse_failures(tmp_path, monkeypat
 
 
 # LLM: 瞬态code不能借用另一scope或尚未验证的旧帧；实际scope解析失败仍失败关闭，不按code粉饰。
-# 函数用途: 防止新增瞬态集合扩大旧帧的归属范围。
+# 函数用途: 防止瞬态跨scope借旧帧，主页面正常未取得结果静默，真实scope错误仍告警。
 @pytest.mark.parametrize("code", ["LOCK_TIMEOUT", "SNAPSHOT_PARSE_INCOMPLETE"])
 @pytest.mark.parametrize("switch", ["first", "thread", "owner", "scope_error"])
 def test_lock_or_parse_failure_never_borrows_another_scope(tmp_path, monkeypatch, code, switch):
@@ -190,7 +193,8 @@ def test_lock_or_parse_failure_never_borrows_another_scope(tmp_path, monkeypatch
         agent.home_paths.owner_home_dir = tmp_path / "other"
     response["value"] = {"projection_ok": False, "errors": [{"error_code": code}]}
     tui_threading._sync_background_watch(agent, nav, scope_error=switch == "scope_error")
-    assert "观察刷新失败" in runtime.notice()
+    assert ("观察刷新失败" in runtime.notice()) if switch == "scope_error" else runtime.notice() == ""
+    assert "保留" not in runtime.notice()
     assert nav._background_rows == () and nav.snapshot().background_process_count == 0
     assert nav._background_watch_valid_scope is None
     assert nav._bg_watch_consecutive_transient_failures == 0
@@ -233,19 +237,23 @@ def test_hard_security_error_discards_verified_frame(tmp_path, monkeypatch, fail
 # LLM: 写真实兼容格式进程JSON，经原list/reader建立有效帧；终态待通知只用于展示，不启动进程或消费通知。
 # 函数用途: 为owner错配回归准备真实磁盘记录、导航和一条已验证活动观察行。
 def real_owner_watch(tmp_path):
-    root = tmp_path / "workspace/runtime/processes/sessions"
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+    owner = resolve_owner_home(tmp_path, OwnerIdentity.local_main())
+    home = owner.home_dir
+    root = home / "workspace/runtime/processes/sessions"
     root.mkdir(parents=True)
     path = root / "bg-real-owner.json"
     payload = {"session_id": "bg-real-owner", "status": "exited", "command": "real reader fixture",
-               "execution_scope": {"owner_home": str(tmp_path), "owner_id": "owner-one", "thread_id": "thread-one"},
+               "execution_scope": {"owner_home": str(home), "owner_id": owner.owner_id, "thread_id": "thread-one"},
                "completion_target": {"thread_id": "thread-one", "task_id": "task-one"}}
     path.write_text(json.dumps(payload))
     runtime = TuiRuntime("real-owner-reader")
     nav = TuiAgentNavigationState(runtime)
-    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path), thread_id="thread-one")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home, owner_id=owner.owner_id), thread_id="thread-one")
     assert tui_threading._sync_background_watch(agent, nav)
     assert len(nav._background_rows) == 1 and nav.snapshot().background_process_count == 1
-    assert nav._background_watch_valid_scope == (str(tmp_path), "thread-one")
+    assert nav._background_watch_valid_scope == (str(home.resolve()), owner.owner_id, "", "thread-one", 0)
     return agent, nav, path, payload
 
 
@@ -295,13 +303,13 @@ def test_real_owner_mismatch_list_revokes_prior_frame(tmp_path, damage):
     agent, nav, path, payload = real_owner_watch(tmp_path)
     damage_real_owner(payload, tmp_path, damage)
     path.write_text(json.dumps(payload))
-    result = bg.list_background_processes(tmp_path, thread_id="thread-one")
+    result = bg.list_background_processes(agent.home_paths.owner_home_dir, thread_id="thread-one")
     assert result["projection_ok"] is False and result["unrelated_errors"] == []
     tui_threading._sync_background_watch(agent, nav)
     assert_real_owner_denied(nav)
     assert result["errors"][0]["error_code"] == "OWNER_MISMATCH"
     assert result["errors"][0]["reason_code"] == "OWNER_MISMATCH"
-    snapshot = bg._file_snapshot(path.parent, payload["session_id"], tmp_path)
+    snapshot = bg._file_snapshot(path.parent, payload["session_id"], agent.home_paths.owner_home_dir)
     assert snapshot.error_code == "OWNER_MISMATCH"
 
 
@@ -367,7 +375,7 @@ def test_real_ordinary_value_error_does_not_become_owner_refusal(tmp_path, monke
     else:
         payload["pid"] = "invalid"
         path.write_text(json.dumps(payload))
-        result = bg.list_background_processes(tmp_path, thread_id="thread-one")
+        result = bg.list_background_processes(agent.home_paths.owner_home_dir, thread_id="thread-one")
         assert result["errors"][0]["error"] == "ValueError"
         assert not result["errors"][0].get("error_code") and not result["errors"][0].get("reason_code")
     tui_threading._sync_background_watch(agent, nav)
@@ -410,10 +418,10 @@ def test_summary_exception_keeps_real_owner_rejection_codes(tmp_path, monkeypatc
     def summary_revalidates_owner(root, valid_payload):
         damage_real_owner(payload, tmp_path, "foreign_home")
         path.write_text(json.dumps(payload))
-        return summary(root, bg._read_session(root, valid_payload["session_id"], tmp_path))
+        return summary(root, bg._read_session(root, valid_payload["session_id"], _agent.home_paths.owner_home_dir))
 
     monkeypatch.setattr(bg, "_summary", summary_revalidates_owner)
-    result = bg.list_background_processes(tmp_path, thread_id="thread-one")
+    result = bg.list_background_processes(_agent.home_paths.owner_home_dir, thread_id="thread-one")
     assert not result["projection_ok"] and result["unrelated_errors"] == []
     assert result["errors"][0]["error_code"] == "OWNER_MISMATCH"
     assert result["errors"][0]["reason_code"] == "OWNER_MISMATCH"

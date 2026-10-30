@@ -1,4 +1,4 @@
-# LLM: 供应商拒绝诊断只从 typed HTTP 事实构造：状态码、白名单响应头、响应体安全摘要。
+# LLM: 供应商拒绝诊断只从typed HTTP事实构造，多值Headers读raw_items，仍只保留白名单与安全摘要。
 #   绝不记录请求头、cookie、完整响应头、认证信息或正文原文；白名单之外的头一律不记（见下方常量）。
 #   正文摘要与白名单头值都先过全局凭据清洗（服务端可能在错误正文或头值里回显请求密钥）再截断；
 #   头集合有条数与总量上限，超出时丢弃尾部并记 headers_truncated。判定只按状态码和白名单头，
@@ -91,11 +91,13 @@ def _rejection_header_candidates(items: object) -> list[tuple[str, object]]:
     return fixed + prefixed
 
 
-# LLM: 兼容 email.message.Message 与普通映射（两者都有 items()）；大小写不敏感、前缀匹配；不引入别的来源。
+# LLM: 多值Headers优先raw_items，避免无关重复Cookie在Mapping.items里抛错；普通映射仍走items。
 #   条数与总字符都有上限，超出丢弃并在诊断里记 headers_truncated（结构化标记，不靠文案）。
 # 函数用途: 从响应头里挑出白名单内的安全子集（名字小写、值已折叠截断），并报告是否发生截断。
 def rejection_headers(headers: object) -> tuple[dict[str, str], bool]:
-    items = headers.items() if callable(getattr(headers, "items", None)) else ()
+    # 多值Headers的Mapping.items会抛异常，原始键值对才能保留重复头。
+    raw_items = getattr(headers, "raw_items", None)
+    items = raw_items() if callable(raw_items) else headers.items() if callable(getattr(headers, "items", None)) else ()
     selected: dict[str, str] = {}
     truncated = False
     total_chars = 0
@@ -111,10 +113,12 @@ def rejection_headers(headers: object) -> tuple[dict[str, str], bool]:
     return selected, truncated
 
 
-# LLM: 只按名字取原始头值（大小写不敏感），给 content-type 这类专用字段用；不放进白名单集合。
+# LLM: 优先遍历多值原始头；只按指定名字取首值，不记录Cookie或扩大白名单。
 # 函数用途: 从响应头里取一个指定头名的原始值；缺失返回空串。
 def _raw_header(headers: object, wanted: str) -> str:
-    items = headers.items() if callable(getattr(headers, "items", None)) else ()
+    # 多值Headers的Mapping.items会抛异常，原始键值对才能保留重复头。
+    raw_items = getattr(headers, "raw_items", None)
+    items = raw_items() if callable(raw_items) else headers.items() if callable(getattr(headers, "items", None)) else ()
     for raw_name, raw_value in items:
         if str(raw_name or "").strip().lower() == wanted:
             return str(raw_value or "")

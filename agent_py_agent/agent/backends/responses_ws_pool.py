@@ -1,5 +1,4 @@
-# LLM: Process-local Responses-only cache; keys bind host owner/thread, model, credential fingerprint, provider and exact endpoint.
-#   Idle entries NEVER own provider leases. State eviction/reset revokes in-flight returns by object identity.
+# LLM: 仅进程内Responses缓存，键绑定宿主owner/线程、模型、凭据指纹、服务商和准确端点；空闲项不持租约，按对象身份撤销迟到归还。
 # 模块用途: 保存有界会话亲和状态与空闲WebSocket，主动TTL回收，不持久化秘密或历史。
 from __future__ import annotations
 
@@ -64,7 +63,7 @@ class ConnectionEntry:
             pass
 
 
-# LLM: Only idle sockets live in this lock-protected LRU; a single daemon timer closes expired descriptors without further requests.
+# LLM: 加锁LRU仅持有空闲连接，唯一后台定时器关闭过期描述符；捕获响应头须保留原state身份围栏。
 # 类用途: 为Responses维护有容量和空闲寿命上限的进程内连接池。
 class ResponsesSessionPool:
     # LLM: No worker thread starts until a scoped state exists; no filesystem, credentials, or provider calls during construction.
@@ -130,12 +129,13 @@ class ResponsesSessionPool:
         for victim in victims:
             victim.discard()
 
-    # LLM: Header writes are identity-checked; a late HTTP response cannot resurrect a reset or evicted session.
+    # LLM: 多值Headers遍历raw_items避免重复Cookie抛错；路由头仍必须唯一且同代，迟到响应不能复活旧会话。
     # 函数用途: 只记住合法的服务端路由状态，不保存完整响应头。
     def capture(self, key, state: SessionState | None, headers) -> None:
         if state is None or headers is None:
             return
-        values = [value for name, value in headers.items() if name.lower() == "x-codex-turn-state"]
+        pairs = headers.raw_items() if callable(getattr(headers, "raw_items", None)) else headers.items()
+        values = [value for name, value in pairs if name.lower() == "x-codex-turn-state"]
         if len(values) != 1 or not isinstance(values[0], str):
             return
         value = values[0]

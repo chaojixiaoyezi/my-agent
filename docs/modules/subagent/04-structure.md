@@ -12,6 +12,16 @@
 - `core.py::_build_subagent_manager` 只绑定原 `capability_config_for_paths` 的 root/准确覆盖路径读口；`manager_no_progress_attempt_limit` 为真实 prepare、恢复编排与树扫描读取当前有效配置。没有新增配置文件、第二份状态权威或热重载快照；0 不通过 `or` 回退成 4，坏配置不默用默认自动启动。
 - `services/recovery/orchestrator.py::_strategy_snapshot` 同时服务正式报告和原 JSONL 账本，保留 `no_progress_unknown_count`；缓存 stat/解析/复制仍在锁外，locator/canonical 双信任龄及发布前复核防止新 canonical 借旧 locator 命中。源码候选，尚未部署。
 - `services/recovery/modes.py::RecoveryMode.MANUAL_REVIEW_UNKNOWN_HISTORY` 精确映射原人工复核动作；策略先核完整历史，填 `blocked_by`，既不进入重跑/接管集合，也不把未知错误当作 `NO_PROGRESS_LIMIT_REACHED`。
+## 2026-10-29 e905 sol-14 Round 1：摘要标量准入
+
+- `services/persistence/service.py::_validated_run_summary` 只接受精确 str 的 id/root_id/status（id非空），以及精确 int/float 的有限时间，避免 bool、子类型或可变引用穿透 frozen DTO。
+- `list_run_summaries_report` 在原逐条异常边界内构造验证后的摘要；坏记录形成 load_errors，健康摘要仍零整任务 deepcopy，不改变原 reader、指纹、负缓存与排序。
+
+## 2026-10-29 e905 sol-14：不可变摘要查询结构
+
+- `SubAgentRunSummary` 只含 id/root_id/status/updated_at/created_at；`SubAgentRunSummariesReport` 每次提供独立结果和错误列表。
+- `SubAgentPersistenceService.list_run_summaries_report` 复用 `_cached_run_ref` 的原新鲜度检查，不返回私有任务对象；`SubAgentManager` 薄转发，`background_context._task_context_ids` 接入。
+- 不添加跨请求任务集合缓存，不改变调度权威、完整 `list_runs` / `load` 返回副本与原故障语义。
 
 ## 2026-10-28 Wave 8：子代理公开索引重建服务与同 Owner Worker 单次构造结构
 

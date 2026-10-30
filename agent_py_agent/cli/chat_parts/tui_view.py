@@ -117,11 +117,12 @@ def _single_line_user_summary(text: str, width: int) -> str:
     return "".join(parts) + "…"
 
 
-# LLM: 普通视图按真实offset；完整原文保留全历史用户目标，窗口只补物理首行，续页不能冒充另一回合或制造全局行号。
+# LLM: 普通视图按真实offset并可注入摘要缓存；完整原文仍只认source_row=0，续页不能冒充新回合。
 # 函数用途: 合成用户消息导航索引，明确区分窗口内的物理行和窗口外的块锚点。
 def _user_turn_line_index(
     snapshot: TuiViewSnapshot, frame: TuiRenderFrame, width: int,
     *, complete_turns: tuple[TuiUserTurnLine, ...] | None = None,
+    summary_for: Callable[[Any, int], str] | None = None,
 ) -> tuple[TuiUserTurnLine, ...]:
     starts = frame.block_line_offsets
     if frame.line_origins:
@@ -138,7 +139,8 @@ def _user_turn_line_index(
             continue
         seen.add(key)
         block = users[key]
-        summary = _single_line_user_summary(block.text or block.detail or block.title or "（无文字消息）", width)
+        summary = (summary_for(block, width) if summary_for is not None else
+                   _single_line_user_summary(block.text or block.detail or block.title or "（无文字消息）", width))
         result.append(TuiUserTurnLine(key, start, summary))
     return tuple(sorted(result, key=lambda row: row.start_line))
 
@@ -146,7 +148,7 @@ def _user_turn_line_index(
 # LLM: 仅缓存当前snapshot/context的帧、用户行索引和块键；索引取最终排版坐标，不能从正文猜角色或写入模型历史。
 # 类用途: 让正文和底栏共享画面；活动增量不让每个控件重复遍历全部稳定历史。
 class TuiFrameProvider:
-    # LLM: context_factory显式提供width→context；完整用户索引强持一组冻结来源与宽度，不缓存整段排版或跨来源复用。
+    # LLM: 强持当前来源及静态布局；摘要按块单槽校验原文字段和宽度，不跨store复用或缓存多代正文。
     # 函数用途: 创建共享帧和轻量用户块索引缓存，并订阅typed state store更新。
     def __init__(
         self,
@@ -164,6 +166,10 @@ class TuiFrameProvider:
         self._cached_key: tuple[Any, ...] | None = None
         self._cached_frame: TuiRenderFrame | None = None
         self._cached_user_turn_lines: tuple[TuiUserTurnLine, ...] = ()
+        self._user_summaries: dict[str, tuple[tuple, str]] = {}
+        self._summary_sources: tuple[object, object] = (None, None)
+        self._stable_user_ids: set[str] = set()
+        self._normal_index_sources: tuple = ()
         self._cached_block_positions: dict[str, int] = {}
         self._complete_index_sources: tuple[object, object, int] = (None, None, 0)
         self._complete_index: tuple[dict[str, int], tuple[TuiUserTurnLine, ...]] = ({}, ())
@@ -177,7 +183,7 @@ class TuiFrameProvider:
         if self.transcript_state is not None:
             self.transcript_state.set_invalidate_callback(self.invalidate)
 
-    # LLM: 视图导航只能替换当前可见的 typed store 并清空两类用户提问索引；已订阅的 store 保持订阅，展开态冻结快照重绑到新 store，权威状态仍留在原运行时。
+    # LLM: 切换typed store时清摘要、强引用布局及两类索引；订阅和冻结重绑不改变原运行时权威状态。
     # 函数用途: 进入或返回代理详情时一起切换正文来源和详细模式快照，不能留下另一代理的旧画面。
     def set_state_store(self, state_store: TuiStateStore) -> None:
         if not isinstance(state_store, TuiStateStore):
@@ -188,6 +194,10 @@ class TuiFrameProvider:
             self.state_store = state_store
             self._cached_key = None
             self._cached_user_turn_lines = ()
+            self._user_summaries.clear()
+            self._summary_sources = (None, None)
+            self._stable_user_ids.clear()
+            self._normal_index_sources = ()
             self._cached_block_positions = {}
             self._complete_index_sources = (None, None, 0)
             self._complete_index = ({}, ())
@@ -199,7 +209,7 @@ class TuiFrameProvider:
             state_store.subscribe(self.invalidate)
         self.invalidate()
 
-    # LLM: frame key覆盖原版本字段；完整用户索引从冻结块建一次，窗口外只持锚点，至多四页排版与索引同代发表。
+    # LLM: 索引与最终帧同代发表；普通模式仅在静态布局及活动用户坐标不变时复用，完整窗口保留来源行算法。
     # 函数用途: 返回共享帧和用户索引，保留有界完整原文窗口及实时健康提示。
     def frame(self, width: int) -> TuiRenderFrame:
         normalized_width = max(1, int(width or 1))
@@ -239,20 +249,68 @@ class TuiFrameProvider:
                 preserve_footer=context.background_sync_failed,
             )
         rendered = sanitize_tui_render_frame(rendered)
-        user_lines = _user_turn_line_index(snapshot, rendered, normalized_width, complete_turns=complete_turns)
         with self._lock:
+            self._prune_user_summaries(snapshot)
+            sources = self._normal_user_index_sources(snapshot, rendered, context) if complete_turns is None and not rendered.line_origins else ()
+            previous = self._normal_index_sources
+            reuse = (sources and previous and sources[0] is previous[0] and sources[1] is previous[1]
+                     and sources[2:] == previous[2:])
+            user_lines = self._cached_user_turn_lines if reuse else _user_turn_line_index(
+                snapshot, rendered, normalized_width, complete_turns=complete_turns, summary_for=self._user_summary,
+            )
+            self._normal_index_sources = sources
             self._cached_key = key
             self._cached_frame = rendered
             self._cached_user_turn_lines = user_lines
             self._cached_block_positions = block_positions
         return rendered
 
-    # LLM: 按与原文分页相同的typed块顺序建立元数据索引；同冻结tuple/宽度只建一次，不渲染页、不读取归档或live新增块。
+    # LLM: 调用方持provider锁；稳定来源未变时只剪枝活动尾部，不能在动画拍扫描全部历史。
+    # 函数用途: 丢弃已经离开当前显示源的用户摘要。
+    def _prune_user_summaries(self, snapshot: TuiViewSnapshot) -> None:
+        if snapshot.stable_blocks is self._summary_sources[0] and snapshot.active_blocks is self._summary_sources[1]:
+            return
+        active_ids = {block.block_id for block in snapshot.active_blocks if block.role == "user"}
+        if snapshot.stable_blocks is not self._summary_sources[0]:
+            self._stable_user_ids = {block.block_id for block in snapshot.stable_blocks if block.role == "user"}
+            self._user_summaries = {key: value for key, value in self._user_summaries.items()
+                                    if key in self._stable_user_ids or key in active_ids}
+        else:
+            for block in self._summary_sources[1] or ():
+                if block.role == "user" and block.block_id not in active_ids and block.block_id not in self._stable_user_ids:
+                    self._user_summaries.pop(block.block_id, None)
+        self._summary_sources = (snapshot.stable_blocks, snapshot.active_blocks)
+
+    # LLM: 调用方持provider锁；原文字段及规范宽度共同失效，不能只据block_id沿用改写前摘要。
+    # 函数用途: 单槽复用用户消息的一行摘要。
+    def _user_summary(self, block, width: int) -> str:
+        key = (block.block_id, block.text, block.detail, block.title, width)
+        cached = self._user_summaries.get(block.block_id)
+        if cached is None or cached[0] != key:
+            cached = (key, _single_line_user_summary(block.text or block.detail or block.title or "（无文字消息）", width))
+            self._user_summaries[block.block_id] = cached
+        return cached[1]
+
+    # LLM: 静态prefix强身份覆盖排版上下文；活动块须排在稳定块之后，否则稳定用户坐标可能变化，必须退回精确算法。
+    # 函数用途: 只核有界活动尾部，不遍历或哈希大offset/origin元组。
+    def _normal_user_index_sources(self, snapshot, frame, context) -> tuple:
+        prefix = self.block_cache.stable_prefix(snapshot.stable_blocks, context)
+        if len(prefix.line_ends) != len(snapshot.stable_blocks):
+            return ()
+        active = snapshot.active_blocks
+        if prefix.sort_keys and any((block.created_seq, block.updated_seq, block.block_id) <= prefix.sort_keys[-1] for block in active):
+            return ()
+        offsets = dict(frame.block_line_offsets[-len(active):]) if active else {}
+        return (snapshot.stable_blocks, prefix, context.width,
+                tuple((block, offsets.get(block.block_id)) for block in active if block.role == "user"))
+
+    # LLM: 按原文typed块顺序建索引并复用单块摘要；同冻结tuple/宽度只建一次，窗口外仍只持锚点。
     # 函数用途: 缓存全历史用户块顺序和摘要，让跨四页窗口仍可定位上一条消息。
     def _complete_user_index(
         self, snapshot: TuiViewSnapshot, width: int,
     ) -> tuple[dict[str, int], tuple[TuiUserTurnLine, ...]]:
         with self._lock:
+            self._prune_user_summaries(snapshot)
             if (snapshot.stable_blocks is self._complete_index_sources[0]
                     and snapshot.active_blocks is self._complete_index_sources[1]
                     and width == self._complete_index_sources[2]):
@@ -262,7 +320,7 @@ class TuiFrameProvider:
             positions = {block.block_id: index for index, block in enumerate(blocks)}
             users = tuple(TuiUserTurnLine(
                 block.block_id, None,
-                _single_line_user_summary(block.text or block.detail or block.title or "（无文字消息）", width), index,
+                self._user_summary(block, width), index,
             ) for index, block in enumerate(blocks) if block.role == "user")
             self._complete_index_sources = (snapshot.stable_blocks, snapshot.active_blocks, width)
             self._complete_index = (positions, users)
@@ -337,6 +395,7 @@ def _switch_transcript_control_store(
         )
         control._state_store = state_store
         control._pending_reading_anchor = None
+        control._content_memo = None
         control._last_reading_frame = None
         (
             control.follow,
@@ -364,7 +423,7 @@ def _switch_transcript_control_store(
 # LLM: TuiTranscriptControl 只投影 provider transcript 行并维护可视 cursor anchor；它不复制 transcript 字符串。
 # 类用途: 给 Window 提供有界正文、阅读位置、follow-tail 和直接移动视口的滚动。
 class TuiTranscriptControl(UIControl):
-    # LLM: 光标只为渲染锚点；计数缓存强持当前stable/active两个tuple，仅源身份变化时重算，不保存业务状态。
+    # LLM: 计数缓存强持当前源；单槽UIContent保存副作用后状态，不持多代画面或业务状态。
     # 函数用途: 初始化滚动、选区与只读消息ID缓存，不发起模型或文件读取。
     def __init__(self, provider: TuiFrameProvider) -> None:
         self.provider = provider
@@ -388,6 +447,7 @@ class TuiTranscriptControl(UIControl):
         self._last_lines: tuple[FormattedLine, ...] = ()
         self._pending_reading_anchor: ReadingAnchor | None = None
         self._last_reading_frame: TuiRenderFrame | None = None
+        self._content_memo: tuple | None = None
         self._lock = threading.Lock()
 
     # LLM: 数据源切换仅按精确 typed store 保存视口状态、恢复已访问页面，并允许首次访问的子代理详情页锚定在提示词边界；选区坐标严禁跨代理共享。
@@ -419,10 +479,14 @@ class TuiTranscriptControl(UIControl):
             self._counted_sources = (snapshot.stable_blocks, snapshot.active_blocks)
             return self._counted_ids
 
-    # LLM: 原frame/补行/锚点规则不变；保存tuple子类身份以省整段复制，消息ID与滚动共用同一源身份memo。
+    # LLM: 同frame强身份及副作用后状态命中单槽；H和H-1分开，命中不再补行或统计ID，锚点副作用只做一次。
     # 函数用途: 生成合法行访问器，复用安全行组且保留阅读位置与选区。
     def create_content(self, width: int, height: int) -> UIContent:
         frame = self.provider.frame(width)
+        with self._lock:
+            memo = self._content_memo
+            if memo is not None and memo[0] is frame and memo[1] == self._content_state(width, height):
+                return memo[2]
         line_count = scrollable_line_count(frame, max(1, height), self.provider.transcript_state)
         lines = _pad_transcript_lines(frame.transcript_lines, line_count)
         visible_block_ids = self._visible_message_block_ids(self.provider.state_store.snapshot())
@@ -457,14 +521,22 @@ class TuiTranscriptControl(UIControl):
                 self._refresh_unseen_locked(visible_block_ids)
             cursor_line = max(0, self.cursor_line)
             selection = self._selection
-        return UIContent(
-            get_line=lambda index: _prompt_toolkit_line(
-                _decorate_selection(lines[index], index, selection)
-            ),
-            line_count=len(lines),
-            cursor_position=Point(x=0, y=cursor_line),
-            show_cursor=False,
-        )
+            content = UIContent(
+                get_line=lambda index: _prompt_toolkit_line(
+                    _decorate_selection(lines[index], index, selection)
+                ),
+                line_count=len(lines),
+                cursor_position=Point(x=0, y=cursor_line),
+                show_cursor=False,
+            )
+            self._content_memo = (frame, self._content_state(width, height), content)
+            return content
+
+    # LLM: 调用方持control锁；键只含视口状态及同源强引用，不包含整帧等值比较或大集合哈希。
+    # 函数用途: 记录决定内容与阅读副作用的当前状态。
+    def _content_state(self, width: int, height: int) -> tuple:
+        return (self.provider.state_store, width, height, self.cursor_line, self.follow, self._selection,
+                self._pending_reading_anchor, self._unseen_baseline, self._unseen_block_ids)
 
     # LLM: 不可聚焦的普通 Window 无法可靠从旧内部滚动值推断新恢复页面的顶行；本回调只根据当前 control 的 typed 锚点与渲染高度计算顶行。
     # 函数用途: 每帧把主/子代理各自的滚动锚点落实到真实 Window，跟随时固定在页底。
@@ -616,10 +688,11 @@ class TuiTranscriptControl(UIControl):
         top = next((start for page, start, _count in frame.detail_page_offsets if page == state.complete_page), 0)
         self.jump_to(top + self._last_render_height - 1)
 
-    # LLM: 延迟到下一真实布局高度再恢复位置；只影响本视口，不改变另一代理或输入焦点。
+    # LLM: 显式恢复立即废弃内容memo，下一真实高度才落实锚点；不改变另一代理或输入焦点。
     # 函数用途: 为模式切换记录待恢复的阅读位置。
     def restore_reading_anchor(self, anchor: ReadingAnchor | None) -> None:
         with self._lock:
+            self._content_memo = None
             self.follow = False
             self._pending_reading_anchor = anchor
             self._last_reading_frame = None

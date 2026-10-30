@@ -59,7 +59,7 @@ def _rejection(payload, phase):
     return RequestExecutionContextUnavailable("original_processing_recovery_source_required")
 
 
-# LLM: 长P2观察在原controller内且T外；callback只有原issued/P3末门可进入，P3已补章后拒仍占用，不rollback/假not_started。
+# LLM: 长P2观察在原controller内且T外；冷C启动时确保绑定原执行端口校验器，callback只有原issued/P3末门可进入，P3已补章后拒仍占用。
 # 函数用途: 原链确定stale后，核真实旧域停止和运行库，再消费原预算/CAS动作。
 def recover_stale_processing(paths, request_path, payload, context, operation):
     if not processing_recovery_required(context, payload):
@@ -69,6 +69,16 @@ def recover_stale_processing(paths, request_path, payload, context, operation):
     if (type(gate) is not PersistentAdmission or type(controller) is not CoordinatorTakeover
             or gate.paths != paths or gate.agent is not context.agent or not controller.active()):
         raise _rejection(payload, "processing_recovery.source")
+    from ..common.request_execution_ports import bind_request_context_rejection
+    from .request_transactions import (
+        missing_request_context_rejection,
+        require_original_request_write_source,
+    )
+
+    bind_request_context_rejection(
+        missing_request_context_rejection,
+        source_validator=require_original_request_write_source,
+    )
     ownership = _frozen_ownership(payload, gate)
     committed = []
 
@@ -245,9 +255,19 @@ class OriginalProcessingRecoverySource:
         return self._store
 
 
-# LLM: 运行库成功查到同一个持久task/run/attempt才可消费其block=None；缺binding/库/行/外owner都拒，绝不补当前代次。
+# LLM: 运行库成功查到同一个持久task/run/attempt才可消费其block=None；初次认领运输半态验证零run，缺binding/库/行/外owner都拒，绝不补当前代次。
 # 函数用途: 读同冻结owner原RuntimePolicy，保持unknown必须显式处置的原合同。
 def _require_runtime_policy(source):
+    if (_complete_transport_source(source.payload, source.payload["route"]["owner_sha"])
+            and source.payload["queue_transport_source"]["window"] == "claim"):
+        db_file = runtime_db_path(source.home.home_dir)
+        if not db_file.is_file():
+            raise ValueError("processing_runtime_db_unavailable")
+        repository = RuntimeRepository(db_file, read_only=True)
+        if (repository.get_task("gateway:" + source.payload["id"]) is not None
+                or repository.get_agent_run(source.payload["id"]) is not None):
+            raise ValueError("processing_runtime_unexpected_claim_binding")
+        return
     binding = gateway_runtime_authority(source.payload, source.payload["id"])
     if not binding:
         raise ValueError("processing_runtime_binding_unavailable")
@@ -452,28 +472,84 @@ def _receipt_peer(payload, owner):
     return (provider, channel, principal, metadata.get("chat_id"), conversation.get("channel_conversation_id"))
 
 
-# LLM: P3路由只是可改代运输；原P1四绑定唯一命中后仍核完整scope全部记录和旧N，不用子集/JSON生成P2或当前执行权。
-# 函数用途: 每轮从规范P1找到仍属于同原claim的完整旧执行域；缺失、多代或坏源均拒绝。
+# LLM: P3路由只是可改代运输；原P1四绑定或运输半态来源唯一命中后仍核完整scope全部记录和旧N，不用子集/JSON生成P2或当前执行权。
+# 函数用途: 每轮从规范P1找到仍属于同原claim或同原运输窗口的完整旧执行域；缺失、多代或坏源均拒绝。
 def original_processing_target(targets, payload, owner_sha):
     from .multiprocess_takeover_ledger import read_ledger_scope
 
-    if not _complete_processing_claim(payload):
+    if _complete_processing_claim(payload):
+        window = "execution"
+        attempt_id = payload["execution_attempt_id"]
+        epoch = payload["lease_epoch"]
+        source_route = None
+    elif _complete_transport_source(payload, owner_sha):
+        transport = payload["queue_transport_source"]
+        window = transport["window"]
+        attempt_id = transport.get("execution_attempt_id")
+        epoch = transport["lease_epoch"]
+        source_route = transport["route"]
+    else:
         raise ValueError("original_processing_claim_required")
     found = []
     for target in targets:
         if owner_sha not in target.scope["owner_shas"]:
             continue
+        if window == "claim":
+            role, index = ("C", None) if source_route.get("worker") == "C" else ("W", source_route.get("worker"))
+            if (target.scope["c_run_id"] != source_route.get("c_run_id")
+                    or target.scope["role"] != role
+                    or target.scope["worker_index"] != index):
+                continue
+            report = read_ledger_scope(target.ledger, target.scope)
+            if report["failures"]:
+                raise ValueError("original_processing_executor_source_unreadable")
+            found.append(target)
+            continue
         report = read_ledger_scope(target.ledger, target.scope)
         if report["failures"]:
             raise ValueError("original_processing_executor_source_unreadable")
         if any(row["request_id"] == payload["id"]
-               and row["execution_attempt_id"] == payload["execution_attempt_id"]
-               and row["lease_epoch"] == payload["lease_epoch"]
+               and row["execution_attempt_id"] == attempt_id
+               and row["lease_epoch"] == epoch
                and row["owner_sha"] == owner_sha for row in report["records"]):
             found.append(target)
     if len(found) != 1:
         raise ValueError("original_processing_executor_source_ambiguous")
     return found[0]
+
+
+# LLM: 仅校验认领或重排运输窗口写下的原始来源投影，绝不伪造执行claim或放宽租约/owner匹配。
+# 函数用途: 判断processing或inbox中的pending请求是否携带完整可核验的运输来源。
+def _complete_transport_source(payload, owner_sha=None):
+    if (not isinstance(payload, dict) or payload.get("status") != "pending"
+            or "execution_attempt_id" in payload or "lease_owner" in payload):
+        return False
+    source = payload.get("queue_transport_source")
+    route = payload.get("route")
+    source_route = source.get("route") if isinstance(source, dict) else None
+    if (not isinstance(source, dict) or not isinstance(route, dict) or not isinstance(source_route, dict)
+            or source.get("schema_version") != "gateway_queue_transport_source.v1"
+            or type(payload.get("id")) is not str or not payload["id"]
+            or source.get("request_id") != payload["id"]
+            or type(source.get("lease_epoch")) is not int
+            or source["lease_epoch"] != int(payload.get("lease_epoch") or 0)
+            or {k: v for k, v in source_route.items() if k != "c_run_id"} != {k: v for k, v in route.items() if k != "c_run_id"}
+            or type(source_route.get("c_run_id")) is not str or not source_route["c_run_id"]):
+        return False
+    if owner_sha is not None and (route.get("owner_sha") != owner_sha or source_route.get("owner_sha") != owner_sha):
+        return False
+    window = source.get("window")
+    if window == "claim":
+        return (source["lease_epoch"] >= 0 and "runtime_authority" not in payload
+                and "conversation_claim" not in payload and "active_turn_recovery" not in payload)
+    if window == "requeue":
+        marker = payload.get("active_turn_recovery")
+        return (type(source.get("execution_attempt_id")) is str and bool(source["execution_attempt_id"])
+                and source.get("lease_owner") == source["execution_attempt_id"]
+                and source["lease_epoch"] >= 1
+                and isinstance(marker, dict)
+                and marker.get("dead_execution_attempt_id") == source["execution_attempt_id"])
+    return False
 
 
 # LLM: 此四元组只匹配原P1和持久claim，不能独自许可恢复；字符串/整数类型必须原样，不补字段或清洗别名。
@@ -504,8 +580,8 @@ def processing_authority_rejection(gate, record, payload, ownership, authority):
         return "original_processing_executor_source_unavailable"
 
 
-# LLM: 每个真实metadata提交末核原P3/claim/runtime/thread同源；canonical仅允许原终态投影，不给JSON新执行/模型/工具权。
-# 函数用途: 拒绝来源文件、原占位或已捕获绑定在短门前变化。
+# LLM: 每个真实metadata提交末核原P3/claim/运输来源/runtime/thread同源；canonical仅允许原终态投影，不给JSON新执行/模型/工具权。
+# 函数用途: 拒绝来源文件、运输半态来源、原占位或已捕获绑定在短门前变化。
 def _require_published_recovery_binding(source):
     from .multiprocess_admission import _read_reservation, reservation_file
     from .multiprocess_records import _canonical_terminal
@@ -520,7 +596,7 @@ def _require_published_recovery_binding(source):
         path = paths.terminal / path.name
     report = read_json_file_report(path, context="gateway.processing_recovery.source.readback")
     actual = report.payload
-    keys = ("id", "execution_attempt_id", "lease_epoch", "lease_owner", "runtime_authority", "conversation_claim")
+    keys = ("id", "execution_attempt_id", "lease_epoch", "lease_owner", "runtime_authority", "conversation_claim", "queue_transport_source")
     if report.load_error is not None or any(actual.get(k) != source.payload.get(k) for k in keys):
         raise ValueError("original_processing_claim_changed")
     if record["route"] != source.payload["route"] or actual.get("route") != source.payload["route"]:
@@ -533,7 +609,7 @@ def _require_published_recovery_binding(source):
         raise ValueError("original_processing_reservation_unavailable")
 
 
-# LLM: 覆盖只定位原旧责任、不签stopped/P2；原claim/P3完整对应唯一P1全scope才避免把已补章占位误判无来源，fresh P2仍核全旧域。
+# LLM: 覆盖只定位原旧责任、不签stopped/P2；原claim/运输半态与P3完整对应唯一P1全scope才避免把已补章占位误判无来源，fresh P2仍核全旧域。
 # 函数用途: 新C丢失旧内存摘要后，只读辨认同一原占位仍有规范P1来源；坏/缺/多源保持unknown。
 def original_claim_covers_reservation(paths, record, targets):
     from ..common.nofollow_fs import read_bytes_beneath
@@ -546,6 +622,13 @@ def original_claim_covers_reservation(paths, record, targets):
         if content is None:
             content = read_bytes_beneath(paths.root, (*paths.terminal.relative_to(paths.root).parts, rid + ".json"),
                                          max_bytes=16 * 1024 * 1024, require_dir_fd=True)
+        if content is None:
+            inbox_content = read_bytes_beneath(paths.root, (*paths.inbox.relative_to(paths.root).parts, rid + ".json"),
+                                               max_bytes=16 * 1024 * 1024, require_dir_fd=True)
+            if inbox_content is not None:
+                candidate = json.loads(inbox_content)
+                if _complete_transport_source(candidate, record.get("owner_sha")):
+                    content = inbox_content
         if content is None:
             return False
         payload = json.loads(content)

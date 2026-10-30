@@ -7,7 +7,7 @@
 # 控制 workspace 沿持久输入保存，共用宿主权限门；HTTP 投影不自行判定目录权限。
 # 首次受理在完整prepared摘要之前冻结owner/IM快照；已有回执重放不热读绑定，C只沿原lease和constructor配置来源。
 # 冷C历史仅复用认证owner的原只读Store与同一分页叶子；读取前后核原HTTP来源，不扩其他client或补业务Agent。
-# 模块用途: 接收Gateway HTTP输入；两控制入口共用C模型元数据、管理和远端分派，普通远端先由C初始化owner再转W，会话与展示保持原结构化结果。
+# 模块用途: 接收Gateway HTTP输入；原控制来源不变，通知快照独立报告绑定可信度与机器原因，不按文案裁决安全。
 from __future__ import annotations
 
 from ..common.json_io import write_private_json_file_atomic_no_newline
@@ -111,6 +111,8 @@ from .request_client import GatewayAskExecutionOptions
 from .response_renderer import read_gateway_terminal_envelope_report
 
 
+# LLM: 结果读取只携认证所得用户与原权限对象，冻结容器不创建授权；修改同步结果ACL测试。
+# 类用途: 保存一次结果请求的精确身份和权限，避免多个读取出口各自猜测范围。
 @dataclass(frozen=True)
 class _ResultAccessContext:
 
@@ -119,6 +121,8 @@ class _ResultAccessContext:
     permission: Any
 
 
+# LLM: 保留原认证/解析请求上下文，字段不是新的owner或执行授权；调用方仍走原准入门。
+# 类用途: 在HTTP提交链路中传递原请求正文、身份和路径信息。
 @dataclass(frozen=True)
 class _AskRequestContext:
 
@@ -179,6 +183,8 @@ def _request_channel(handler) -> tuple[str, str]:
     return mw.extract_identity(handler.headers, _handler_peer_ip(handler))
 
 
+# LLM: 只消费既有permission与payload归属，不从正文猜权限；跨用户放行仍限原管理员能力。
+# 函数用途: 在HTTP返回前核对结果是否属于当前用户或其已有全用户读取范围。
 def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:
     if permission is None or permission.can_access_all_users:
         return True
@@ -266,11 +272,15 @@ def handle_status(handler, server) -> None:
     handler._send_json(200, response)
 
 
+# LLM: 兼容原仅需字典的只读入口；诊断完整性由_read_state_report保存，不恢复或重写状态。
+# 函数用途: 为旧状态消费者读取Gateway状态对象。
 def _read_state(state_path) -> dict:
     state, _ = _read_state_report(state_path)
     return state
 
 
+# LLM: 文件缺失与坏JSON分开报告；只读状态，不创建目录或把解析失败改成健康状态。
+# 函数用途: 读取Gateway状态及结构化错误，供HTTP展示实际可用性。
 def _read_state_report(state_path) -> tuple[dict, dict[str, Any] | None]:
     if not state_path.exists():
         return {}, None
@@ -286,6 +296,8 @@ def _read_state_report(state_path) -> tuple[dict, dict[str, Any] | None]:
     )
 
 
+# LLM: 复用runtime_error_report保留原类型和上下文，不解析异常文案裁决安全或修改状态。
+# 函数用途: 为状态读取失败附上可复核路径诊断。
 def _state_load_error(state_path, exc: BaseException) -> dict[str, Any]:
     report = runtime_error_report(exc, context="gateway.http_state.read")
     report["path"] = str(state_path)
@@ -611,6 +623,8 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
     return True
 
 
+# LLM: 只读取原访问上下文的全用户能力，调用者不得用此投影创建权限或替代身份认证。
+# 函数用途: 统一判断结果读取是否沿原管理员范围允许跨用户查看。
 def _all_user_access(access: _ResultAccessContext) -> bool:
     return access.permission is None or access.permission.can_access_all_users
 
@@ -712,11 +726,15 @@ def _can_read_finished_request(paths, access: _ResultAccessContext) -> _Finished
     return _FinishedRequestAccess.ALLOWED if found_request else _FinishedRequestAccess.NOT_FOUND
 
 
+# LLM: 旧字典读口沿同一report实现，不吞写回或恢复动作，完整诊断消费者应使用report入口。
+# 函数用途: 兼容只需HTTP结果对象的既有调用方。
 def _read_payload(path) -> dict:
     payload, _ = _read_payload_report(path, context="gateway.http_payload.read")
     return payload
 
 
+# LLM: JSON根必须为对象，IO/编码/解析错误保留诊断；本函数只读，不授权文件来源。
+# 函数用途: 读取HTTP结果文件并同时返回真实结构化读取错误。
 def _read_payload_report(path, *, context: str) -> tuple[dict, dict[str, Any] | None]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -731,6 +749,8 @@ def _read_payload_report(path, *, context: str) -> tuple[dict, dict[str, Any] | 
     )
 
 
+# LLM: 原runtime错误结构加准确路径，不按异常正文改变权限、任务状态或重试路线。
+# 函数用途: 构造结果文件读取失败的统一诊断。
 def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any]:
     report = runtime_error_report(exc, context=context)
     report["path"] = str(path)
@@ -1702,8 +1722,28 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
     )
 
 
-# LLM: 热/冷通知投影共用只读绑定解析，错误不能和正常无线程混淆；异常由调用方转成失败快照。
-# 函数用途: 读取精确会话线程，遇索引损坏明确失败，不创建线程或恢复存储。
+# LLM: 热/冷共用原异常/结构化错误分类，不解析正文；只有明确权限或owner码可升级为安全拒绝。
+# 函数用途: 为通知产生点保留机器可判定的失败种类，未知错误保持原调用阶段的保守分类。
+def _gateway_notice_failure_kind(error, default="corrupt_or_unknown"):
+    import errno
+
+    if isinstance(error, Mapping):
+        values = [error.get("error_code"), error.get("reason_code")]
+        number = error.get("errno")
+        permission = error.get("error") == "PermissionError"
+    else:
+        values = [getattr(error, "error_code", None), getattr(error, "reason_code", None)]
+        number = error.errno if isinstance(error, OSError) else None
+        permission = isinstance(error, PermissionError)
+    if "OWNER_MISMATCH" in values:
+        return "owner_mismatch"
+    if permission or "PERMISSION_DENIED" in values or (type(number) is int and number in {errno.EACCES, errno.EPERM}):
+        return "permission_denied"
+    return getattr(error, "failure_kind", default)
+
+
+# LLM: 热/冷通知投影共用只读绑定解析，错误不能和正常无线程混淆；异常附机器分类由调用方输出。
+# 函数用途: 读取精确会话线程，遇索引损坏或非法线程明确失败，不创建线程或恢复存储。
 def _resolve_gateway_notice_thread(store: object, scope: GatewayControlScope) -> object | None:
     thread, load_error = store.threads.resolve_report(
         channel=str(scope.channel or "").strip(),
@@ -1711,16 +1751,19 @@ def _resolve_gateway_notice_thread(store: object, scope: GatewayControlScope) ->
         channel_user_id=str(scope.user_id or "").strip(),
     )
     if load_error is not None:
-        raise LookupError("thread index unavailable")
+        error = LookupError("thread index unavailable")
+        error.failure_kind = _gateway_notice_failure_kind(load_error, "binding_invalid")
+        raise error
+    if thread is not None:
+        value = getattr(thread, "thread_id", None)
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise LookupError("thread identity invalid")
     return thread
 
 
-# LLM: The canonical thread owns task candidates while each typed task link
-# owns its lifecycle. The response adds a bounded direct-child display
-# projection from canonical runs; neither notices nor that projection can
-# create task state, authorize work, retry, or decide completion. Process-stream identity is
-# echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 投影线程身份、正文与执行绑定；空闲不依赖活动claim，解析损坏不冒充正常空态，轮询不初始化owner。
+# LLM: 规范线程持有任务候选，每个类型化任务链接负责自己的生命周期。响应从规范run添加有界直属子任务显示投影；
+# 通知及投影都不能创建任务状态、授权工作、重试或决定完成。进程流身份和事件序列共同回显，与持久消息字节游标独立。
+# 函数用途: 投影线程身份、正文与执行绑定及独立失败原因；消息页失败不伪报绑定失信，轮询不初始化owner。
 def read_gateway_client_notices(
     agent: object,
     *,
@@ -1742,14 +1785,16 @@ def read_gateway_client_notices(
             after,
             event_after,
             error="conversation_id required",
+            binding_state="invalid", failure_kind="binding_invalid",
         )
     try:
         owner_agent = resolve_loaded_gateway_scope_agent(agent, scope)
-    except Exception:
+    except Exception as exc:
         return _empty_gateway_notice_response(
             after,
             event_after,
             error="owner scope unavailable",
+            binding_state="invalid", failure_kind=_gateway_notice_failure_kind(exc, "binding_invalid"),
         )
     if owner_agent is None:
         return _read_cold_owner_notice_projection(
@@ -1766,6 +1811,7 @@ def read_gateway_client_notices(
             after,
             event_after,
             error="conversation store unavailable",
+            failure_kind="corrupt_or_unknown",
         )
     try:
         thread = _resolve_gateway_notice_thread(store, scope)
@@ -1774,6 +1820,7 @@ def read_gateway_client_notices(
             after,
             event_after,
             error=f"thread resolve failed: {exc}",
+            binding_state="invalid", failure_kind=_gateway_notice_failure_kind(exc, "binding_invalid"),
         )
     if thread is None:
         return _empty_gateway_notice_response(
@@ -1803,6 +1850,9 @@ def read_gateway_client_notices(
     )
     payload = {
         "ok": notices_ok,
+        "snapshot_ok": notices_ok,
+        "binding_state": "confirmed",
+        "failure_kind": "" if notices_ok else "corrupt_or_unknown",
         "thread_id": thread_id,
         "notices": notices,
         "cursor": cursor,
@@ -1820,12 +1870,9 @@ def read_gateway_client_notices(
     return payload
 
 
-# LLM: A cold owner must remain cold, but committed assistant notices cannot disappear after a
-# Gateway restart. Resolve one authenticated owner home, inspect only the finite canonical store
-# layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
-# state. Volatile activity and approval state intentionally remain empty until the owner is loaded;
-# an echoed stream cursor keeps the client unchanged until a new real stream exists.
-# 函数用途: 冷用户只读恢复精确线程；任一候选解析损坏即失败，不能用旧库掩盖损坏，不拉起Agent。
+# LLM: 冷owner保持未加载，但已提交通知不能因Gateway重启丢失。只解析已认证home，检查有限规范存储布局，
+# 恢复最新精确通道绑定；不构造Agent/backend/tool。加载前易失活动和审批保持空，回显旧流游标直到新真实流存在。
+# 函数用途: 冷用户只读恢复精确线程；owner/索引错误独立拒绝，消息页失败保留可信线程，不拉起Agent。
 def _read_cold_owner_notice_projection(
     base_agent: object,
     *,
@@ -1851,21 +1898,30 @@ def _read_cold_owner_notice_projection(
     home_paths = getattr(base_agent, "home_paths", None)
     home_root = getattr(home_paths, "root", None)
     if home_root is None:
+        payload["ok"] = False
+        payload["snapshot_ok"] = False
+        payload["binding_state"] = "unavailable"
+        payload["failure_kind"] = "corrupt_or_unknown"
         return payload
     try:
         owner = resolve_gateway_scope_owner(base_agent, scope)
         owner_home = resolve_owner_home(home_root, owner).home_dir
-    except Exception:
-        return payload
+    except Exception as exc:
+        return _empty_gateway_notice_response(after, event_after, binding_state="invalid",
+            failure_kind=_gateway_notice_failure_kind(exc, "binding_invalid"), error="owner scope unavailable")
 
     candidates: list[tuple[float, str, object, object]] = []
     resolve_failed = False
+    resolve_failure_kind = "binding_invalid"
     for store_root in existing_conversation_store_roots(owner_home):
         try:
             store = ConversationStore(store_root, initialize=False)
             thread = _resolve_gateway_notice_thread(store, scope)
-        except Exception:
+        except Exception as exc:
             resolve_failed = True
+            kind = _gateway_notice_failure_kind(exc, "binding_invalid")
+            if resolve_failure_kind not in {"permission_denied", "owner_mismatch"}:
+                resolve_failure_kind = kind
             continue
         if thread is None:
             continue
@@ -1879,6 +1935,9 @@ def _read_cold_owner_notice_projection(
         )
     if resolve_failed:
         payload["ok"] = False
+        payload["snapshot_ok"] = False
+        payload["binding_state"] = "invalid"
+        payload["failure_kind"] = resolve_failure_kind
         payload["error"] = "thread resolve failed"
         return payload
     if not candidates:
@@ -1887,12 +1946,15 @@ def _read_cold_owner_notice_projection(
     _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     payload["thread_id"] = thread_id
+    payload["binding_state"] = "confirmed"
     notices, cursor, notices_ok = read_background_response_page(
         store, thread_id, after=after, include_foreground=display.foreground_messages,
         include_display_checkpoints=display.display_checkpoints,
     )
     if not notices_ok:
         payload["ok"] = False
+        payload["snapshot_ok"] = False
+        payload["failure_kind"] = "corrupt_or_unknown"
         payload["error"] = "notices read failed"
         return payload
     payload["notices"] = notices
@@ -1900,10 +1962,8 @@ def _read_cold_owner_notice_projection(
     return payload
 
 
-# LLM: Empty/error snapshots share one stable transport shape so clients never
-# infer missing approval/activity fields. Empty projections echo the process cursor without
-# claiming a new stream or creating task state.
-# 函数用途: 构造无线程或读取失败的空快照，显式空thread_id避免客户端把空闲当成范围错误。
+# LLM: 空或失败快照共享稳定传输形状，客户端无需猜测缺失审批及活动字段；空投影回显进程游标，不声明新流或创建任务状态。
+# 函数用途: 构造无线程或失败快照，保留独立机器原因，未知旧错误不得假装是正常空绑定。
 def _empty_gateway_notice_response(
     after: int,
     event_after: int,
@@ -1912,9 +1972,14 @@ def _empty_gateway_notice_response(
     event_stream_id: str = "",
     error: str = "",
     agent_activity: Mapping[str, object] | None = None,
+    binding_state: str | None = None,
+    failure_kind: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "ok": bool(ok),
+        "snapshot_ok": bool(ok),
+        "binding_state": binding_state if binding_state is not None else "empty" if ok else "unavailable",
+        "failure_kind": failure_kind if failure_kind is not None else "" if ok else "corrupt_or_unknown",
         "thread_id": "",
         "notices": [],
         "cursor": after,
@@ -2278,6 +2343,8 @@ def _http_idempotent_request_identity(
     return request_id, hashlib.sha256(input_json.encode("utf-8")).hexdigest()
 
 
+# LLM: 会话投影只来自原HTTP认证/请求上下文，不创建canonical线程或替代owner解析。
+# 函数用途: 将一次提交的通道和显示会话字段交给原会话绑定链路。
 def _http_conversation_payload(context: _AskRequestContext) -> dict:
     conversation_id = _http_conversation_id(context.body)
     return {
@@ -2288,6 +2355,8 @@ def _http_conversation_payload(context: _AskRequestContext) -> dict:
     }
 
 
+# LLM: 沿既有字段优先级获取显示会话标识，default仅为原协议默认名，不证明canonical线程身份。
+# 函数用途: 统一读取请求正文或metadata中的显示会话编号。
 def _http_conversation_id(body: dict) -> str:
     if value := _first_conversation_id(body):
         return value
@@ -2297,6 +2366,8 @@ def _http_conversation_id(body: dict) -> str:
     return "default"
 
 
+# LLM: 只实现现有HTTP字段适配，不从标识或正文推出owner和权限；修改同步会话兼容测试。
+# 函数用途: 按固定协议顺序取首个非空显示会话字段。
 def _first_conversation_id(payload: dict) -> str:
     for key in ("conversation_id", "session_id", "thread_id", "channel_conversation_id"):
         value = str(payload.get(key) or "").strip()
@@ -2329,6 +2400,8 @@ def handle_stop(handler, server) -> None:
     handler._send_json(200, {"status": "stopping"})
 
 
+# LLM: 必须先经过原管理员认证，响应只投影既有跨通道绑定，不创建会话或执行任务。
+# 函数用途: 返回指定会话的已绑定通道和主通道信息。
 def handle_session_channels(handler, server) -> None:
     from ..auth.middleware import require_admin_handler
 
@@ -2347,6 +2420,8 @@ def handle_session_channels(handler, server) -> None:
     handler._send_json(200, {"session_id": session_id, "bound_channels": bound, "primary_channel": primary})
 
 
+# LLM: 管理员认证和原body检查先于跨通道绑定写入，不能从请求正文或展示字段授予权限。
+# 函数用途: 将经授权的通道绑定请求交给原cross_channel服务并回传结果。
 def handle_session_bind(handler, server) -> None:
     from ..auth.middleware import require_admin_handler
 
@@ -2370,6 +2445,8 @@ def handle_session_bind(handler, server) -> None:
     handler._send_json(200, {"success": success, "session_id": session_id, "channel": body["channel"]})
 
 
+# LLM: 只解析原JSON请求，坏JSON发送原400响应后终止该绑定链路，不修复或猜测参数。
+# 函数用途: 读取跨通道绑定正文并统一处理JSON格式错误。
 def _read_bind_body(handler) -> dict | None:
     try:
         return handler._read_json()
@@ -2378,6 +2455,8 @@ def _read_bind_body(handler) -> dict | None:
         return None
 
 
+# LLM: 摘要只在原管理员认证与查询服务就绪后读取，不用展示结果改变权限、任务或生命周期。
+# 函数用途: 向管理员返回现有查询服务提供的运行摘要，缺服务明确返回错误。
 def handle_admin_summary(handler, server) -> None:
     from ..auth.middleware import require_admin_handler
 

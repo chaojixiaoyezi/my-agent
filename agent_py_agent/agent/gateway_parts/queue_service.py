@@ -304,16 +304,16 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
                 from .multiprocess_coordinator_claim import coordinator_claim_scope
 
                 claim_scopes.enter_context(coordinator_claim_scope(paths, request_path, coordinator_snapshot))
-            try:
-                request_path.replace(processing_path)
-            except OSError as exc:
-                _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
-                return None
             report = read_json_file_report(
-                processing_path,
+                request_path,
                 context="gateway.claim.request.read",
             )
             if report.load_error is not None or not report.payload:
+                try:
+                    request_path.replace(processing_path)
+                except OSError as exc:
+                    _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
+                    return None
                 _report_gateway_side_effect_error(
                     "claim_gateway_request",
                     request_path.stem,
@@ -321,9 +321,17 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
                 )
                 claim = GatewayClaim(processing_path, processing_path.stem, "", 0, "")
             else:
+                transport_payload = report.payload
                 try:
-                    claimed_payload = _gateway_claim_payload(
+                    transport_payload = _gateway_claim_transport_payload(
                         report.payload,
+                        processing_path,
+                    )
+                    if transport_payload is not report.payload:
+                        write_json_file_atomic(request_path, transport_payload)
+                    request_path.replace(processing_path)
+                    claimed_payload = _gateway_claim_payload(
+                        transport_payload,
                         processing_path,
                     )
                     write_json_file_atomic(processing_path, claimed_payload)
@@ -336,6 +344,8 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
                     try:
                         if processing_path.exists() and not request_path.exists():
                             processing_path.replace(request_path)
+                        if transport_payload is not report.payload and request_path.exists():
+                            write_json_file_atomic(request_path, report.payload)
                     except OSError as rollback_exc:
                         _report_gateway_side_effect_error(
                             "rollback_gateway_request_claim",
@@ -359,13 +369,30 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
     return claim
 
 
-# LLM: Inbox-to-processing and the immutable execution fence are one T-locked transition. The
-# provider worker never observes an unfenced processing row that recovery could reclaim first.
+# LLM: 在进入正式执行围栏写入前先固化原路由运输来源，供跨代恢复核验旧域责任；Count0无route字段时不改写载荷。
+# 函数用途: 为认领搬运窗口中的请求写入可核验的原始路由运输来源。
+def _gateway_claim_transport_payload(payload: dict, processing_path: Path) -> dict:
+    route = payload.get("route")
+    if not isinstance(route, dict):
+        return payload
+    transported = dict(payload)
+    transported["queue_transport_source"] = {
+        "schema_version": "gateway_queue_transport_source.v1",
+        "window": "claim",
+        "request_id": processing_path.stem,
+        "lease_epoch": _gateway_claim_epoch(payload),
+        "route": dict(route),
+    }
+    return transported
+
+
+# LLM: inbox到processing搬运与不可变执行围栏同属一把T锁事务；正式写入执行围栏时同步清除运输半态标记，联动claim_request与恢复测试。
 # 函数用途: 为刚认领的请求写入唯一执行 ID、递增租约代次并开始首个心跳时间。
 def _gateway_claim_payload(payload: dict, processing_path: Path) -> dict:
     from .daemon_metadata import build_process_identity
 
     claimed = dict(payload)
+    claimed.pop("queue_transport_source", None)
     identity_error = _gateway_request_identity_error(payload, processing_path)
     now = time.time()
     try:

@@ -239,6 +239,16 @@ class SubAgentManager(SubagentKernelMixin):
     def list_runs_report(self):
         return self.persistence.list_runs_report()
 
+    # LLM: 摘要沿原持久化指纹逐文件复核，仅含不可变标量；不暴露可变任务或改变完整list_runs的隔离合同。
+    # 函数用途: 让后台身份查询不必深拷贝每条历史子代理记录。
+    def list_run_summaries(self):
+        return self.persistence.list_run_summaries()
+
+    # LLM: 轻摘要和逐条读取故障一起转交，调用方不能把错误当健康空集。
+    # 函数用途: 返回实时子代理摘要及坏账信息。
+    def list_run_summaries_report(self):
+        return self.persistence.list_run_summaries_report()
+
     # LLM: 只转发原持久化选择扫描；回调只读私有任务，返回命中副本，不缓存跨阶段结果。
     # 函数用途: 为巡检返回满足条件的实时任务副本。
     def list_runs_selected(self, predicate: Callable[[SubAgentTask], bool] | None = None) -> list[SubAgentTask]:

@@ -483,7 +483,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 每用户「小坑」=单用户同时在飞上限(防一个用户独吞把别人饿死);
     # 全局「大坑」=总在飞上限(高天花板,超出留在 pending 排队、不拒不崩)。
     # 都是先设的限制值(不是吞吐目标),按机器/模型承载力调。执行线程按需起、用后驻留复用。
-    gateway_user_inflight_limit: int = 8
+    gateway_user_inflight_limit: int = 50
     gateway_global_inflight_limit: int = 500
     # Gateway同时在途的不同Owner数量上限；0跟随owner_agent_pool_max_agents，实际准入由Gateway消费。
     gateway_owner_inflight_limit: int = 0

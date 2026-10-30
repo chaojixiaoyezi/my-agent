@@ -1,9 +1,5 @@
-# LLM: 原load与显式workspace reader共用同一canonical解析/normalizer，不初始化manager、不复制任务schema或查找器。
-# 模块用途: 给无Agent的已认证领域读取原子任务，原写入和投影流程保持。
-# LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
-# 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
-# LLM: 正负缓存每次核locator指纹和目标存在性；只读predicate锁外筛选私有引用，只有命中项复制，错误仍保留。
-# 模块用途: 保存子代理任务与派生视图，在保持实时逐文件核验时减少历史巡检解析和复制。
+# LLM: 原load与轻摘要共用canonical reader及指纹；正MP沿原请求短事务限制既有写者，正负缓存每次核locator指纹和目标存在性。
+# 模块用途: 维护原子子代理任务读写与派生视图，隔离坏摘要并在保持实时逐文件核验时减少历史巡检解析和复制。
 """Persistence service for SubAgentManager task records.
 
 Saves are split into two phases. The canonical task-local state is written first
@@ -17,6 +13,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -117,6 +114,47 @@ class SubAgentListRunsReport:
     load_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
+# LLM: 摘要仅包含持久任务原有标量，frozen不借用任何可变字段，身份不能由路径或文案推断。
+# 类用途: 给后台谱系与状态查询返回无需深拷贝的运行摘要。
+@dataclass(frozen=True)
+class SubAgentRunSummary:
+    id: str
+    root_id: str
+    status: str
+    updated_at: float
+    created_at: float
+
+
+# LLM: 独立列表与错误容器只属于本次查询；每个摘要不可变，坏记录仍有结构化报告。
+# 类用途: 将轻摘要和读取失败一起返回，避免把坏账当无任务。
+@dataclass(frozen=True)
+class SubAgentRunSummariesReport:
+    runs: list[SubAgentRunSummary] = field(default_factory=list)
+    load_errors: list[dict[str, Any]] = field(default_factory=list)
+
+
+# LLM: 仅摘要投影调用此纯校验；严格内置类型排除容器、bool及可变子类，不转换坏值，不修改缓存或完整读取器。
+# 函数用途: 验证身份、非空状态和有限数值时间后构造轻摘要，让坏字段沿扫描器原逐条 load_errors 返回。
+def _validated_run_summary(task: SubAgentTask) -> SubAgentRunSummary:
+    run_id, root_id, status = task.id, task.root_id, task.status
+    updated_at, created_at = task.updated_at, task.created_at
+    for name, value in (("id", run_id), ("root_id", root_id), ("status", status)):
+        if type(value) is not str:
+            raise ValueError(f"子代理摘要字段 {name} 必须是字符串")
+    validate_opaque_id(run_id, kind="summary.id")
+    # 旧任务允许没有显式根关系；非空根仍沿原拒绝式身份规则，不从路径补造。
+    if root_id:
+        validate_opaque_id(root_id, kind="summary.root_id")
+    if not status.strip():
+        raise ValueError("子代理摘要字段 status 必须是非空字符串")
+    for name, value in (("updated_at", updated_at), ("created_at", created_at)):
+        if type(value) not in (int, float):
+            raise ValueError(f"子代理摘要字段 {name} 必须是有限数值")
+        if type(value) is float and not math.isfinite(value):
+            raise ValueError(f"子代理摘要字段 {name} 必须是有限数值")
+    return SubAgentRunSummary(run_id, root_id, status, updated_at, created_at)
+
+
 # LLM: Canonical root verification accepts either the explicit root relation or the root run
 # itself. It never derives lineage from names, descriptions, paths, or status prose.
 # 函数用途: 复核索引选出的 run 确实属于指定根任务，防止陈旧查询行串树。
@@ -190,8 +228,8 @@ def _list_runs_for_root_report(
     return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
 
 
-# LLM: canonical文件仍是权威；锁外核双文件指纹与各自信任龄，公开副本经同一恢复坏账校验。
-# 类用途: 管理子代理持久化与实时列表筛选；复制优化不跨轮冻结任务集合。
+# LLM: canonical文件仍是权威；完整列表保深副本，轻摘要先严格校验标量，私有引用仅供只读筛选，原指纹/负缓存/粗mtime门保持。
+# 类用途: 管理子代理持久化与实时列表筛选，隔离坏摘要且不跨轮冻结任务集合。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
 
@@ -237,6 +275,29 @@ class SubAgentPersistenceService:
         """Scan the workspace for subagent task records."""
 
         return self.list_runs_report().runs
+
+    # LLM: 轻查询仍逐文件复核原指纹/负缓存，不返回私有任务引用或递归副本，也不缓存跨轮结果。
+    # 函数用途: 返回标量运行摘要，供后台仅收集身份时避免复印全部任务内容。
+    def list_run_summaries(self) -> list[SubAgentRunSummary]:
+        return self.list_run_summaries_report().runs
+
+    # LLM: 使用原locator、错误报告、缓存淘汰和排序；冷/热私有引用均须严格验证五字段后才投影，不转换或复制整任务。
+    # 函数用途: 扫描实时轻摘要并将坏字段隔离到该条错误，保留跨进程更新和删除的即时可见性。
+    def list_run_summaries_report(self) -> SubAgentRunSummariesReport:
+        runs, errors, seen = [], [], set()
+        for task_file in sorted(self.workspace.glob("*/task.json")):
+            run_id = task_file.parent.name
+            seen.add(run_id)
+            try:
+                task = self._cached_run_ref(run_id, task_file)
+                runs.append(_validated_run_summary(task))
+            except Exception as exc:
+                report = runtime_error_report(exc, context="subagents.load")
+                report.update(run_id=run_id, path=str(task_file))
+                errors.append(report)
+        self._evict_run_cache(seen)
+        runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
+        return SubAgentRunSummariesReport(runs, errors)
 
     # LLM: 默认列表复用同一逐文件扫描器且不筛选，保持每条返回深副本和原load_errors合同。
     # 函数用途: 读取全部任务及逐文件错误，不引入跨阶段快照或TTL。

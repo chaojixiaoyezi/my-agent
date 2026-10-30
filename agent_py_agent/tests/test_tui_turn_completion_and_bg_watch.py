@@ -1214,7 +1214,7 @@ def test_confirmed_local_scope_projection_failure_keeps_same_thread_frame(tmp_pa
     assert _sync_background_watch(agent, nav, session_id="display-one", runtime=runtime)
     assert nav.snapshot().background_process_count == 1 and "line-two" in _watch_frame_text(nav)
     assert "仅保留同会话上次结果" in nav.active_runtime().notice()
-    assert nav._background_watch_scope == (str(home), "thread-one")
+    assert nav._background_watch_scope == (str(home.resolve()), None, "display-one", "thread-one", 0)
     assert _files(tmp_path) == before
 
 
@@ -1306,7 +1306,7 @@ def test_c4_gateway_idle_thread_projection_and_session_reset(tmp_path, monkeypat
     for _ in range(2):
         assert _consume_background_notices(agent, "display-one", runtime, [None], set(), [0], nav)
         assert nav.snapshot().background_process_count == 1
-        assert nav._background_watch_scope == (str(home), "thread-one")
+        assert nav._background_watch_scope == (str(home.resolve()), None, "display-one", "thread-one", 0)
         assert runtime.notice() == ""
     response.pop("thread_id")
     monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("切会话不得复用旧thread"))
@@ -1390,9 +1390,10 @@ def test_c4_gateway_corrupt_binding_is_not_a_successful_empty_snapshot(tmp_path,
     assert payload.get("error") and _files(tmp_path) == before
 
 
-# LLM: 首次失败会清掉导航范围，但最近已确认的Gateway线程仍是本会话事实，不能下一轮静默吞错。
-# 函数用途: 验证已绑定主页面连续运输失败仍保持范围失信提示，而不读取任何进程。
-def test_c4_gateway_bound_scope_failures_keep_warning(tmp_path, monkeypatch):
+# LLM: 运输失败不抹掉同代可信绑定；真实binding-invalid/owner拒绝仍立即清帧，不按error文案裁决。
+# 函数用途: 更正原锁死的范围失信断言，分别验证主页面运输静默和真正安全拒绝。
+@pytest.mark.parametrize("failure", ["transport", "binding", "owner"])
+def test_c4_gateway_bound_scope_failures_keep_warning(tmp_path, monkeypatch, failure):
     from types import SimpleNamespace
 
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
@@ -1405,12 +1406,19 @@ def test_c4_gateway_bound_scope_failures_keep_warning(tmp_path, monkeypatch):
     runtime = TuiRuntime("bound-failure")
     nav = TuiAgentNavigationState(runtime)
     assert _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav)
+    old_scope = nav._background_watch_scope
     payload["ok"] = False
+    payload["failure_kind"] = {"transport": "transport_transient", "binding": "binding_invalid", "owner": "owner_mismatch"}[failure]
+    payload["binding_state"] = "unavailable" if failure == "transport" else "invalid"
     monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("失败快照不得读取进程"))
     for _ in range(2):
         assert not _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav)
-        assert nav.snapshot().background_process_count == 0
-        assert "会话范围未确认" in runtime.notice()
+        if failure == "transport":
+            assert nav.snapshot().background_process_count == 1 and nav._background_watch_scope == old_scope
+            assert runtime.notice() == ""
+        else:
+            assert nav.snapshot().background_process_count == 0 and nav._background_watch_scope is None
+            assert ("会话范围未确认" if failure == "binding" else "权限或归属校验失败") in runtime.notice()
 
 
 # LLM: 通知阶段的一次性解析异常不能被finally第二次成功解析成正常空会话；保留原异常与明确提示。
@@ -1743,7 +1751,7 @@ def test_b1_tui_notice_recovers_after_unrelated_orphan_isolated(tmp_path):
     assert "观察刷新失败" in runtime.notice()
     old = time.time() - 120
     os.utime(broken, (old, old))
-    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert not _sync_background_watch(agent, navigation, runtime=runtime)
     assert "观察刷新失败" in runtime.notice()
     broken.write_text(json.dumps({"session_id": broken.stem, "schema": "invalid", "thread_id": "other-thread"}))
     assert _sync_background_watch(agent, navigation, runtime=runtime)
