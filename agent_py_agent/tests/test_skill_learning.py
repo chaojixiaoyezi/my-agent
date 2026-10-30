@@ -928,14 +928,13 @@ def test_c6_overflow_refill_at_full_real_owner_quota(tmp_path):
     quota.write_text(json.dumps(settings))
     owner = ctx.home.owner_home_dir
     ledger_path = owner / '.owner-quota-ledger.json'
-    control_bytes = ledger_path.stat().st_size if ledger_path.exists() else 0
-    used = owner_logical_usage_bytes(owner, exact=True) - control_bytes
+    used = owner_logical_usage_bytes(owner, exact=True)
     assert used < 1024 * 1024
     (owner / "quota-fill.bin").write_bytes(b"x" * (1024 * 1024 - used))
-    assert owner_logical_usage_bytes(owner, exact=True) - control_bytes == 1024 * 1024
+    assert owner_logical_usage_bytes(owner, exact=True) == 1024 * 1024
     assert store.pending_requests(refill=True) == [source]
     assert source.read_bytes() == content and store.overflow_requests() == []
-    assert owner_logical_usage_bytes(owner, exact=True) == 1024 * 1024 + ledger_path.stat().st_size
+    assert owner_logical_usage_bytes(owner, exact=True) == 1024 * 1024
     ledger = json.loads(ledger_path.read_text())
     assert ledger['used_bytes'] == 1024 * 1024
     assert ledger['reservations'] == {} and ledger['reserved_bytes'] == 0

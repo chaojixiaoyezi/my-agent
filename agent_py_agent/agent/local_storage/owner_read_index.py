@@ -59,6 +59,8 @@ _INT64_MAX = 2**63 - 1
 _ANCHOR_BYTES = 1024
 # 追加见证的头尾历史核验窗口各为8 KiB，与领域writer的16 KiB总历史读预算对应。
 _APPEND_WITNESS_WINDOW_BYTES = 8 * 1024
+# 旧前缀不超过2 MiB时writer整读并核验全部锚点，任意偏移的等长改写都撤销见证；更大账本才退回头中尾窗口。
+_APPEND_WITNESS_FULL_PREFIX_BYTES = 256 * _APPEND_WITNESS_WINDOW_BYTES
 _PROCESS_MEMOS = OrderedDict()
 _PROCESS_MEMO_LOCK = threading.RLock()
 _PROCESS_ADVANCE_LOCK = threading.RLock()
@@ -917,11 +919,14 @@ class OwnerReadIndex:
             full = isinstance(raw_after, (bytes, bytearray))
             mid = None
             if full:
-                if len(raw_after) != after[2] or len(raw_after) > 2 * _APPEND_WITNESS_WINDOW_BYTES:
+                if len(raw_after) != after[2] or before[2] > _APPEND_WITNESS_FULL_PREFIX_BYTES:
                     return reject()
                 head = raw_after
                 tail_start = max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
                 tail = raw_after[tail_start:]
+            elif before[2] <= _APPEND_WITNESS_FULL_PREFIX_BYTES:
+                # 可整读核验的前缀不接受抽样窗口，防止旧writer降级留下窗口外盲区。
+                return reject()
             elif isinstance(raw_after, tuple) and len(raw_after) in (3, 5):
                 if len(raw_after) == 5:
                     head, mid_start, mid, tail_start, tail = raw_after

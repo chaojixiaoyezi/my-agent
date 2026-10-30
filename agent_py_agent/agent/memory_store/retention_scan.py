@@ -1676,8 +1676,7 @@ class _PinDigestReader(io.RawIOBase):
         self.verified = False
         state["cycle_verified"] = set()
         state["next_slice"] = 0
-        state["post_completed_pass"] = None
-        state["post_completed_cycle"] = None
+        state["post_scope"] = None
 
     # LLM: 只读包装器，不改变FD身份。
     # 函数用途: 告知缓冲包装器可以读取。
@@ -1726,7 +1725,8 @@ class _PinDigestReader(io.RawIOBase):
         self.verified = True
 
 
-# LLM: 预验partial禁止打开解析器；目标复核只容同inode非缩短的打开前追加并重置来源，解析流与读后都须验证。
+# LLM: 读前预验partial禁止打开解析器；post阶段已有完整基线时可重解析，由流式切片比对保证正文等于基线。
+#   目标复核只容同inode非缩短的打开前追加并重置来源，解析流与读后都须验证。
 # 函数用途: 流式严格读取pin来源，防止把旧解析结果与读后新摘要组成缓存。
 def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
     try:
@@ -1740,7 +1740,8 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
         raise OSError("pin source is not a regular file")
     watch_pin_source(path)
     sources = reference_pins._SOURCES.get()
-    if sources is not None and path in sources and not reference_pins._is_complete_stamp(sources[path]):
+    if (sources is not None and path in sources and not reference_pins._is_complete_stamp(sources[path])
+            and reference_pins._RESUMABLE_DIGESTS.get(path, {}).get("phase") != "post"):
         raise reference_pins._PartialPinVerification("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
     raw = _fingerprint_source(path)
     try:
@@ -1775,6 +1776,7 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
         raw.close()
     if _file_identity(before) != _file_identity(path.stat(follow_symlinks=False)):
         raise _PinReadChanged(11, "pin source changed while reading", str(path))
+    reference_pins.recheck_pin_sources((path,))
     watch_pin_source(path)
 
 
@@ -1833,6 +1835,8 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
             events.extend(store.tombstones.load().values())
         except (ValueError, TypeError, OverflowError) as exc:
             raise ValueError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE") from exc
+    # 生成清单与墓碑存储读取不经_pin_rows（墓碑加载还会复读旧墓碑），读后观察须尽量实际复读。
+    reference_pins.recheck_pin_sources(sources)
     for source in sources:
         watch_pin_source(source)
     for record in _materialize_memory_events(events, include_expired=True):

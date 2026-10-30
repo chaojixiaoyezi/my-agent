@@ -506,9 +506,9 @@ def test_reconciled_growth_beyond_legacy_tracking_limits_and_fast_admission(tmp_
     original_verify, original_stat = quota._verify_quota_metadata, quota._quota_sorted_stat
     calls = {'verify': 0, 'stat': 0}
 
-    def verify(*args):
+    def verify(*args, **kwargs):
         calls['verify'] += 1
-        return original_verify(*args)
+        return original_verify(*args, **kwargs)
 
     def child_stat(*args):
         calls['stat'] += 1
@@ -552,3 +552,200 @@ def test_reconciled_nested_batch_keeps_algebraic_baseline(tmp_path):
     ledger = json.loads((tmp_path / '.owner-quota-ledger.json').read_text())
     assert ledger['used_bytes'] == 164 and ledger['inode_count'] == 161
     assert quota._verified_quota_baseline(tmp_path, ledger)
+
+
+def _grow_once(quota, root, name='managed', *, max_bytes=1 << 40, extra=None):
+    enforcer = quota.OwnerQuotaEnforcer(root, max_bytes=max_bytes)
+    with enforcer.reserve([quota.OwnerQuotaChange(root / name, 1, append=True)]):
+        with (root / name).open('ab') as stream:
+            stream.write(b'y')
+        if extra is not None:
+            extra()
+
+
+def test_usage_and_reconcile_exclude_control_runtime_and_empty_lock_files(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    files = {
+        'payload': b'1234', 'billed.lock': b'12345', '.owner-quota-ledger.json': b'{' * 4096,
+        '.owner-quota.lock': b'', 'scheduler/store.json.lock': b'',
+        'workspace/runtime/services/gateway/gateway.log': b'g' * 50, 'data/telemetry/tool_calls.jsonl': b't' * 60,
+        'cache/owner_read_index.sqlite3': b'i' * 70, 'cache/owner_read_index.sqlite3-wal': b'w' * 80,
+    }
+    for relative, payload in files.items():
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_bytes(payload)
+    assert quota.owner_logical_usage_bytes(tmp_path) == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 9
+    assert quota._native_regular_file_usage_bytes(tmp_path) in (None, 9)
+    (tmp_path / '.owner-quota-ledger.json').unlink()
+    result = _finish_reconcile(tmp_path)
+    assert result['used_bytes'] == 9 and result['inode_count'] == 2
+    assert quota._verify_quota_metadata(tmp_path, result['cursor'])
+
+
+def test_runtime_and_lock_sidecar_writes_keep_reconciled_baseline(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(160):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    for directory in ('scheduler', 'data/telemetry', 'workspace/runtime/services/gateway', 'cache'):
+        (tmp_path / directory).mkdir(parents=True)
+    _finish_reconcile(tmp_path)
+    store = tmp_path / 'scheduler' / 'store.json'
+    ledger_path = tmp_path / '.owner-quota-ledger.json'
+    for turn in range(3):
+        _grow_once(quota, tmp_path, 'scheduler/store.json',
+                   extra=lambda: (tmp_path / 'scheduler' / 'store.json.lock').touch())
+        with (tmp_path / 'data/telemetry/tool_calls.jsonl').open('ab') as stream:
+            stream.write(b'{"a":1}\n')
+        (tmp_path / 'workspace/runtime/services/gateway/gateway_heartbeat.json').write_text(str(turn))
+        (tmp_path / 'cache/owner_read_index.sqlite3-wal').write_bytes(b'w' * (turn + 1))
+        ledger = json.loads(ledger_path.read_text())
+        assert ledger['dirty_since'] is None and quota._verified_quota_baseline(tmp_path, ledger)
+    assert store.stat().st_size == 3 and json.loads(ledger_path.read_text())['used_bytes'] == 163
+    (tmp_path / 'scheduler' / 'store.json.lock').write_bytes(b'pid')
+    with pytest.raises(quota.OwnerQuotaUnavailable, match='reconciliation pending'):
+        _grow_once(quota, tmp_path)
+
+
+def test_commit_detects_undeclared_entry_created_inside_reservation(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(200):
+        (tmp_path / f'pad-{index:04d}').write_bytes(b'x')
+    _finish_reconcile(tmp_path)
+    _grow_once(quota, tmp_path, 'declared', max_bytes=1_048_576,
+               extra=lambda: (tmp_path / 'undeclared').write_bytes(b'z' * 2_097_152))
+    assert json.loads((tmp_path / '.owner-quota-ledger.json').read_text())['dirty_since'] is not None
+    with pytest.raises(quota.OwnerQuotaUnavailable, match='reconciliation pending'):
+        _grow_once(quota, tmp_path, 'declared', max_bytes=1_048_576)
+    _finish_reconcile(tmp_path)
+    with pytest.raises(quota.OwnerQuotaExceeded):
+        _grow_once(quota, tmp_path, 'declared', max_bytes=1_048_576)
+
+
+def test_reconciled_growth_beyond_four_thousand_directories(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(4100):
+        directory = tmp_path / 'data' / f'w{index:05d}'
+        directory.mkdir(parents=True)
+        (directory / 'row.jsonl').write_bytes(b'x')
+    while not (result := quota.reconcile_owner_quota_slice(tmp_path, max_entries=4096, max_ms=5000))['complete']:
+        pass
+    assert result['used_bytes'] == 4100 and result['cursor']['metadata_complete'] is True
+    for turn in range(3):
+        _grow_once(quota, tmp_path)
+    ledger = json.loads((tmp_path / '.owner-quota-ledger.json').read_text())
+    assert ledger['used_bytes'] == 4103 and ledger['dirty_since'] is None
+    assert quota._verified_quota_baseline(tmp_path, ledger)
+
+
+def test_steady_state_admission_stat_work_is_bounded(tmp_path, monkeypatch):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(3000):
+        (tmp_path / f'{index:05d}').write_bytes(b'x')
+    while not quota.reconcile_owner_quota_slice(tmp_path, max_entries=4096, max_ms=5000)['complete']:
+        pass
+    _grow_once(quota, tmp_path)
+    calls = {'stat': 0}
+    real_scandir = os.scandir
+
+    class Entry:
+        def __init__(self, entry):
+            self._entry = entry
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+        def stat(self, *args, **kwargs):
+            calls['stat'] += 1
+            return self._entry.stat(*args, **kwargs)
+
+    class Entries:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def __iter__(self):
+            return (Entry(entry) for entry in self._inner)
+
+    monkeypatch.setattr(os, 'scandir', lambda *args, **kwargs: Entries(real_scandir(*args, **kwargs)))
+    _grow_once(quota, tmp_path)
+    monkeypatch.undo()
+    assert calls['stat'] <= quota._QUOTA_VERIFY_BUDGET_ENTRIES
+    assert json.loads((tmp_path / '.owner-quota-ledger.json').read_text())['used_bytes'] == 3002
+
+
+def test_warm_reconcile_enumerates_large_flat_directory_once(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(5000):
+        (tmp_path / f'{index:05d}').write_bytes(b'x')
+    enumerated = 0
+    while True:
+        result = quota.reconcile_owner_quota_slice(tmp_path, max_entries=128, max_ms=1000)
+        enumerated += result['enumerated_entries']
+        if result['complete']:
+            break
+    assert result['used_bytes'] == 5000 and enumerated <= 5000 + 8
+
+
+def test_controlled_writes_during_pass_keep_epoch_and_exact_totals(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(600):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    (tmp_path / 'sub').mkdir()
+    _finish_reconcile(tmp_path)
+    first = quota.reconcile_owner_quota_slice(tmp_path, max_entries=64, max_ms=1000)
+    assert not first['complete'] and first['cursor']['last_relpath'] > '0000'
+    _grow_once(quota, tmp_path, '0000')
+    _grow_once(quota, tmp_path, '!early')
+    _grow_once(quota, tmp_path, 'sub/late')
+    _grow_once(quota, tmp_path, 'zzz')
+    while not (result := quota.reconcile_owner_quota_slice(tmp_path, max_entries=64, max_ms=1000))['complete']:
+        assert result['cursor']['epoch'] == first['cursor']['epoch']
+    assert result['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 604
+    assert result['inode_count'] == 603
+    assert quota._verify_quota_metadata(tmp_path, result['cursor'])
+
+
+def test_reservation_left_by_crash_during_pass_restarts_it(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(600):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    _finish_reconcile(tmp_path)
+    first = quota.reconcile_owner_quota_slice(tmp_path, max_entries=64, max_ms=1000)
+    path = tmp_path / '.owner-quota-ledger.json'
+    ledger = json.loads(path.read_text())
+    ledger.update(reservations={'crashed': {'bytes': 1, 'expires_at': 1, 'paths': ['0000']}}, reserved_bytes=1,
+                  revision=ledger['revision'] + 1)
+    ledger['reconcile_cursor']['ledger_revision'] = ledger['revision']
+    path.write_text(json.dumps(ledger))
+    with open(tmp_path / '0000', 'ab') as stream:
+        stream.write(b'crash')
+    restarted = quota.reconcile_owner_quota_slice(tmp_path, max_entries=64, max_ms=1000)
+    assert restarted['cursor']['epoch'] != first['cursor']['epoch'] and restarted['cursor']['orphans'] == ['crashed']
+    result = _finish_reconcile(tmp_path)
+    ledger = json.loads(path.read_text())
+    assert result['used_bytes'] == 605 and not ledger['reservations'] and ledger['dirty_since'] is None
+
+
+def test_runtime_exclusions_match_host_layout():
+    from agent_py_agent.agent import path_access_policy
+    from agent_py_agent.agent.local_storage import owner_read_index
+    from agent_py_agent.agent.observability import telemetry_ledger
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    assert owner_read_index._DB_PARTS in quota._QUOTA_RUNTIME_FILES
+    assert telemetry_ledger.PARTS in quota._QUOTA_RUNTIME_DIRS
+    assert ('workspace', 'runtime', 'services') in path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS

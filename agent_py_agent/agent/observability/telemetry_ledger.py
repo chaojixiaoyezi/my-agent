@@ -20,12 +20,17 @@ from agent_py_agent.agent.common.nofollow_fs import (
 )
 
 from ..common.log_redaction import redact_sensitive_value
-from ..local_storage.owner_read_index import OwnerReadIndex, note_owner_append, require_complete
+from ..local_storage.owner_read_index import (
+    _APPEND_WITNESS_FULL_PREFIX_BYTES,
+    OwnerReadIndex,
+    note_owner_append,
+    require_complete,
+)
 from ..workflows.models import redact_bearer_values
 
 SCHEMA = "tool_call_telemetry.v1"
 PARTS = ("data", "telemetry")
-# 追加见证最多核验16 KiB历史字节，新增记录另计，不随账本长度增长。
+# 大于2 MiB的账本追加见证最多核验16 KiB头中尾历史窗口字节（<=2 MiB旧前缀整读核验全部锚点），新增记录另计。
 _MAX_APPEND_WITNESS_READ_BYTES = 16 * 1024
 
 
@@ -74,7 +79,7 @@ def _lock(home):
     return locked_private_directory(home, relative_parts=PARTS, lock_name=".telemetry.lock")
 
 
-# 领域锁内固定no-follow单链接FD；大文件只读头4 KiB、中4 KiB、旧尾8 KiB及本次增量。
+# 领域锁内固定no-follow单链接FD；旧前缀<=2 MiB整读供全部锚点核验，更大账本只读头4 KiB、中4 KiB、旧尾8 KiB及本次增量。
 def _append_stamp(home, *, include_bytes=False, before_size=0):
     try:
         descriptor = open_readonly_file_beneath(home, (*PARTS, 'tool_calls.jsonl'))
@@ -100,7 +105,10 @@ def _append_stamp(home, *, include_bytes=False, before_size=0):
                 start += len(piece)
             return b''.join(chunks)
 
-        if info.st_size <= _MAX_APPEND_WITNESS_READ_BYTES:
+        if before_size <= _APPEND_WITNESS_FULL_PREFIX_BYTES:
+            # 锁外异常增长不整读，交由增量长度核对撤销见证。
+            if info.st_size - before_size > _APPEND_WITNESS_FULL_PREFIX_BYTES:
+                return stamp, None
             raw = window(0, info.st_size)
             if raw is None:
                 return stamp, None

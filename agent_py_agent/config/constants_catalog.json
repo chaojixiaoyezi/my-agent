@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1256,
+  "count": 1260,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -6121,7 +6121,7 @@
       "value": 16384,
       "unit": "字节",
       "category": "上限预算",
-      "description": "追加见证最多核验16 KiB历史字节，新增记录另计，不随账本长度增长。"
+      "description": "大于2 MiB的账本追加见证最多核验16 KiB头中尾历史窗口字节（<=2 MiB旧前缀整读核验全部锚点），新增记录另计。"
     },
     {
       "name": "_DEFAULT_MAX_AGENT_COUNT",
@@ -8953,7 +8953,23 @@
       "value": 65536,
       "unit": "条",
       "category": "上限预算",
-      "description": "单目录排序候选缓存上限；更大目录才回退到多遍有界选择。"
+      "description": "进程内单目录排序候选窗口上限；热缓存一遍枚举即可覆盖，更大目录才回退到多遍有界选择。"
+    },
+    {
+      "name": "_QUOTA_MAX_CACHED_NAME_BYTES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "进程内单目录排序候选窗口的名称总字节上限，与条数上限一起约束每个缓存扫描器的内存。"
+    },
+    {
+      "name": "_QUOTA_MAX_METADATA_BYTES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 655360,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "逐目录摘要表的估算持久字节上限；超过即不再逐目录核验，改由受控写代次与后台对账维持（账本总上限1MiB）。"
     },
     {
       "name": "_QUOTA_MAX_PERSISTED_DIR_ENTRIES",
@@ -8964,20 +8980,20 @@
       "description": "持久目录批次的名称总上限，避免续点账本无限增长。"
     },
     {
-      "name": "_QUOTA_MAX_TRACKED_DIRS",
+      "name": "_QUOTA_MAX_PERSISTED_NAME_BYTES",
       "file": "agent_py_agent/agent/user_space/owner_quota.py",
-      "value": 256,
-      "unit": "个目录",
+      "value": 196608,
+      "unit": "字节",
       "category": "上限预算",
-      "description": "权威准入最多核对这些目录的无链接元数据。"
+      "description": "持久目录批次与排序准备的名称总字节上限。"
     },
     {
-      "name": "_QUOTA_MAX_TRACKED_FILES",
+      "name": "_QUOTA_ROOT_STAMP_CACHE_SIZE",
       "file": "agent_py_agent/agent/user_space/owner_quota.py",
-      "value": 2048,
-      "unit": "个文件",
-      "category": "上限预算",
-      "description": "权威准入最多核对这些普通文件，超过上限不授权旧账增长。"
+      "value": 256,
+      "unit": "个",
+      "category": "其它",
+      "description": "进程内最多记住这么多owner在本进程写账本后的root目录戳；淘汰只失去结算时免扫root的优化。"
     },
     {
       "name": "_QUOTA_SCAN_CACHE_SIZE",
@@ -8990,10 +9006,10 @@
     {
       "name": "_QUOTA_SCAN_CURSOR_TTL_SECONDS",
       "file": "agent_py_agent/agent/user_space/owner_quota.py",
-      "value": 3600,
+      "value": 86400,
       "unit": "秒",
       "category": "其它",
-      "description": "持久配额续扫游标允许恢复的最长存活秒数。"
+      "description": "持久配额续扫游标允许恢复的最长存活秒数；与默认每日维护周期一致，大owner对账跨小时仍可续扫。"
     },
     {
       "name": "_QUOTA_SORT_BATCH_ENTRIES",
@@ -9002,6 +9018,22 @@
       "unit": "条",
       "category": "其它",
       "description": "配额字典序扫描每批最多保留的排序候选目录项数。"
+    },
+    {
+      "name": "_QUOTA_VERIFY_BUDGET_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 256,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "准入与结算只逐项核验不超过这么多目录项的目录；轮转窗口每次准入也只花这么多额度，更大目录交后台对账。"
+    },
+    {
+      "name": "_QUOTA_VERIFY_OPEN_COST_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 16,
+      "unit": "条",
+      "category": "其它",
+      "description": "核验一个目录时每层nofollow打开按这么多次lstat计入额度；打开比单项lstat贵一个数量级。"
     },
     {
       "name": "_MAX_FACT_FILE_BYTES",

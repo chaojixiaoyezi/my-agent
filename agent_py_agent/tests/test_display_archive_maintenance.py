@@ -278,3 +278,108 @@ def test_scan_budget_keeps_existing_multiplier_on_fresh_and_resumed_scans(tmp_pa
             store, now=2_000_000_000.0, min_age_days=100000, max_archives=maximum)
         assert result['scanned'] == result['skipped'] == budget
         assert result['errors'] == result['compacted'] == 0
+
+
+# 模拟新进程：关闭并丢弃进程内活迭代器与内存游标，只剩父目录游标文件。
+def _fresh_process():
+    live = getattr(maintenance, '_live_scans', {})
+    with maintenance._scan_cursor_lock:
+        for scans, _, _ in live.values():
+            scans.close()
+        live.clear()
+        maintenance._scan_cursors.clear()
+
+
+def _young_archives(root, count, now):
+    root.mkdir()
+    for number in range(count):
+        archive_id = f'{number:032x}'
+        directory = root / archive_id
+        directory.mkdir()
+        manifest = dict(schema=archive.DISPLAY_ARCHIVE_SCHEMA, archive_id=archive_id,
+                        thread_id='thread-test', page_count=1, row_count=1, char_count=1)
+        (directory / 'manifest.json').write_text(json.dumps(manifest))
+        os.utime(directory / 'manifest.json', (now, now))
+
+
+# 同进程续扫接着读活迭代器，每次调用实际枚举不超过预算，不随游标偏移线性增长；一轮内每档恰检查一次。
+def test_resumed_scan_enumeration_stays_within_budget_per_call(tmp_path, monkeypatch):
+    root = tmp_path / 'display_archives'
+    now = 2_000_000_000.0
+    _young_archives(root, 300, now)
+    original, counts, visited = os.scandir, [], []
+    original_manifest = maintenance._manifest
+
+    class Observed:
+        def __init__(self, target):
+            self.entries = original(target)
+
+        def __enter__(self):
+            self.entries.__enter__()
+            return self
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.entries)
+            counts[-1] += 1
+            return entry
+
+        def __exit__(self, *args):
+            return self.entries.__exit__(*args)
+
+    def observe(fd, archive_id):
+        visited.append(archive_id)
+        return original_manifest(fd, archive_id)
+
+    monkeypatch.setattr(maintenance.os, 'scandir', lambda target: Observed(target))
+    monkeypatch.setattr(maintenance, '_manifest', observe)
+    for _ in range(10):
+        counts.append(0)
+        result = maintenance.prune_expired_display_archives(tmp_path, now=now, max_archives=1)
+        assert result['scanned'] == result['skipped'] == 64 and result['errors'] == 0
+    assert counts == [64] * 10
+    assert len(set(visited[:300])) == 300 and visited[300:] == visited[:340]
+
+
+# 每轮新进程只能靠父目录游标文件续扫：80档、每轮1个名额也必须全部合页，且归档目录里不出现游标文件。
+def test_fresh_process_rounds_resume_from_persisted_cursor(tmp_path):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    compacted = 0
+    for _ in range(85):
+        _fresh_process()
+        result = maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=0, max_archives=1)
+        assert result['errors'] == 0 and result['scanned'] <= 64
+        compacted += result['compacted']
+    assert compacted == 80
+    assert all((directory / 'pages_bundle.json').is_file() for _, directory in ordered)
+    assert {path.name for path in (tmp_path / 'display_archives').iterdir()} == {ref['archive_id'] for ref, _ in ordered}
+    saved = json.loads((tmp_path / maintenance._CURSOR_FILE).read_text())
+    identity = [(tmp_path / 'display_archives').stat().st_dev, (tmp_path / 'display_archives').stat().st_ino]
+    assert all(value[:2] == identity for value in saved.values())
+
+
+# 父目录游标损坏或被换成链接时只放弃跨进程续点：不跟随链接、不改链接目标，维护照常且不计错误。
+@pytest.mark.parametrize('damage', ['corrupt', 'symlink', 'other_root'])
+def test_persisted_cursor_damage_falls_back_without_following_links(tmp_path, damage):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    cursor = tmp_path / maintenance._CURSOR_FILE
+    outside = tmp_path / 'outside.json'
+    outside.write_text('{"keep":true}')
+    if damage == 'corrupt':
+        cursor.write_text('{broken')
+    elif damage == 'symlink':
+        cursor.symlink_to(outside)
+    else:
+        operation = 'compact_display_archives.<locals>.action'
+        cursor.write_text(json.dumps({operation: [0, 0, 70]}))
+    _fresh_process()
+    result = maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=0, max_archives=1)
+    assert result['errors'] == 0 and result['compacted'] == result['scanned'] == 1
+    assert (ordered[0][1] / 'pages_bundle.json').is_file()
+    assert outside.read_text() == '{"keep":true}'
+    if damage == 'symlink':
+        assert cursor.is_symlink()
+    else:
+        assert json.loads(cursor.read_text())['compact_display_archives.<locals>.action'][2] == 1

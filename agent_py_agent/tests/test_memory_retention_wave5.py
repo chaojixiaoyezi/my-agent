@@ -1366,8 +1366,12 @@ def test_r5_hot_large_source_mid_build_rewrite_never_publishes_stale_pins(
 
     monkeypatch.setattr(scan, "_fingerprint_source", opened)
     snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    hot = path.stat().st_ctime_ns
     published = []
-    for _ in range(24):
+    for index in range(24):
+        if index == 12:
+            # 单个current读不完全片的热源只能在滑出粗时钟窗口后，由冷期全量post跨current收敛发布。
+            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot + 3_000_000_000)
         errors = []
         try:
             pins, complete = snapshot.current(errors)
@@ -1376,12 +1380,15 @@ def test_r5_hot_large_source_mid_build_rewrite_never_publishes_stale_pins(
             assert snapshot.value is None
             continue
         assert changed and complete and pins.protects(target, [])
-        published.append(pins)
+        published.append(index)
         break
     assert changed and published, "stable rewritten source must eventually publish its actual pins"
+    # 600KiB三片可在同一current内读完，热期即可发布；更大的热源热期内必须一直失败关闭。
+    assert (published[0] < 12) is (size_kib == 600)
     if timing in {"before_parse", "during_parse"}:
         assert stream_rejected, "stream verification must reject mismatch before JSON parsing returns"
-    # 再走真实plan/apply；计划可看到旧引用，但执行时同一竞态不能回收新引用目标。
+    # 再走真实plan/apply；恢复热期时钟，计划可看到旧引用，但执行时同一竞态不能回收新引用目标。
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot)
     path.write_text(payload)
     reference_pins._RESUMABLE_DIGESTS.pop(path, None)
     changed.clear()
@@ -1468,8 +1475,8 @@ def test_r5_hot_source_current_read_bytes_strictly_bounded_to_one_mib(tmp_path, 
         assert not opens and parser_bytes[0] == 0
 
 
-# LLM: 多来源进度可交错但不能让已完成post的来源每轮重开，导致全源永远无法同时完成。
-# 函数用途: 验证多个大源的pending可收敛，且续验不会重复解析。
+# LLM: 多来源进度可交错但不能让已完成post的来源每轮重开，导致全源永远无法同时完成；单轮读不完的热源先失败关闭。
+# 函数用途: 验证多个大源的pending可收敛（热期单轮或冷却后跨轮），且续验不会重复解析。
 @pytest.mark.parametrize("sizes", [(600, 600), (1100, 1100), (1100, 2048)])
 def test_r5_multiple_hot_sources_pending_finishes_without_reparsing(tmp_path, monkeypatch, sizes):
     from agent_py_agent.agent.memory_store import reference_pins
@@ -1479,6 +1486,8 @@ def test_r5_multiple_hot_sources_pending_finishes_without_reparsing(tmp_path, mo
     prefix = '{"thread_id":"u","summary":"'
     second.write_text(prefix + "s" * (sizes[1] * 1024 - len(prefix) - 2) + '"}')
     _freeze_pin_file_stat(monkeypatch, second)
+    settled = max(first.stat().st_ctime_ns, second.stat().st_ctime_ns) + 3_000_000_000
+    hot_publishable = max(sizes) <= 600
     original, parsed = json.load, []
 
     # LLM: 计数真实线程解析，不能用构建器调用次数代替实际正文消费。
@@ -1491,7 +1500,11 @@ def test_r5_multiple_hot_sources_pending_finishes_without_reparsing(tmp_path, mo
 
     monkeypatch.setattr(json, "load", loaded)
     snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
-    for _ in range(24):
+    for index in range(24):
+        if index == 8:
+            # 热期8轮内读不完全片的来源必须已进入pending且未发布；冷却后才可跨current累积post。
+            assert snapshot.pending is not None
+            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
         pending, count = snapshot.pending is not None, len(parsed)
         try:
             pins, complete = snapshot.current([])
@@ -1500,6 +1513,7 @@ def test_r5_multiple_hot_sources_pending_finishes_without_reparsing(tmp_path, mo
             assert snapshot.value is None
         else:
             assert complete and not pins.protects(target, [])
+            assert (index < 8) is hot_publishable
             break
         finally:
             if pending:
@@ -1558,9 +1572,11 @@ def test_r5_pending_does_not_accept_replaced_digest_state(tmp_path, monkeypatch)
     assert complete and pins.protects(target, []), "old pending pins adopted a replacement digest baseline"
 
 
-# LLM: 超过单轮1MiB快照预算的热源在未完成全部切片前必须失败关闭，下一轮可续完成并捕获1.2MiB处改写。
+# LLM: 超过单轮1MiB快照预算的热源热期必须一直失败关闭；冷却后冷期post可续完成，并捕获热期1.2MiB处改写。
 # 函数用途: 验证超1MiB热源的分轮失败关闭可续验证与超远偏移等长改写检测。
-def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complete(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complete(tmp_path, monkeypatch, rewrite):
+    from agent_py_agent.agent.memory_store import reference_pins
     from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
 
     home, _, _ = runtime(tmp_path)
@@ -1584,21 +1600,150 @@ def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complet
     assert path.stat().st_size > 1500 * 1024
     assert payload.index("pin-a.jsonl") > 1200 * 1024
     _freeze_pin_file_stat(monkeypatch, path)
+    hot = path.stat().st_ctime_ns
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot)
     snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
-    # 第 1 轮仅核验前 4 片（<= 1 MiB），剩余切片未核完必须失败关闭。
-    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
-        snapshot.current(errors)
-    # 完成读前剩余切片后仍须完整读后验证，全部完成之前不得放行。
+    # 每轮最多核 4 片（<= 1 MiB），热期读后验证只认本轮读到的片，读不完全部切片就一直失败关闭。
+    for _ in range(8):
+        with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+            snapshot.current(errors)
+    assert snapshot.pending is not None and snapshot.value is None
+    if rewrite:
+        # 热期在 1.2 MiB 偏移处做stat不可见的等长原地改写，热期仍不得放行。
+        rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl")
+        assert len(rewritten) == len(payload)
+        path.write_text(rewritten)
+        for _ in range(4):
+            with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+                snapshot.current(errors)
+    # 冷却后冷期post从头跨轮核完全部切片才发布；热期改写必被冷期全片比对检出并重建。
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot + 3_000_000_000)
     errors = []
-    first, complete = _r5_finish_verification(snapshot, errors)
-    assert complete and not errors and not first.protects(target, errors)
-    # 在 1.2 MiB 偏移处做等长原地改写：下轮先因超过 1 MiB 复核预算失败关闭，再于续验轮检出并重建。
-    rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl")
-    assert len(rewritten) == len(payload)
-    path.write_text(rewritten)
-    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
-        snapshot.current(errors)
-    errors = []
-    second, complete = _r5_finish_verification(snapshot, errors)
-    assert complete and not errors and second is not first and second.protects(target, errors)
+    pins, complete = _r5_finish_verification(snapshot, errors)
+    assert complete and not errors and pins.protects(target, errors) is rewrite
+
+
+# LLM: 粗时钟下读后post已核过某片、整轮未完时再等长改写该片；热期不得用跨current旧片发布旧pins，单轮读不完的源冷却后才发布且须保护新引用。
+# 函数用途: 回归R5-F01单源读后窗口，覆盖热期单轮可完成(600KiB)与须冷却(2MiB)两种来源。
+@pytest.mark.parametrize("size_kib", [600, 2048])
+def test_r6_rewrite_of_post_verified_slice_never_publishes_stale_pins(tmp_path, monkeypatch, size_kib):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, size_kib, 100)
+    hot = path.stat().st_ctime_ns
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    fired, published = False, None
+    for index in range(24):
+        if index == 12:
+            # 热期逐轮滚动复核已发现改写并重解析，待发布pins已保护pin-b，只是尚未发布。
+            assert snapshot.pending is not None and snapshot.pending[0][0].protects(target, [])
+            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot + 3_000_000_000)
+        state = reference_pins._RESUMABLE_DIGESTS.get(path, {})
+        if (not fired and state.get("phase") == "post" and 0 in state.get("cycle_verified", ())
+                and len(state["cycle_verified"]) < state["total_slices"]):
+            # 第0片已在读后阶段核过、整轮未完：原地等长把pin-a改成pin-b，stat冻结不可见。
+            path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+            fired = True
+        try:
+            pins, complete = snapshot.current([], target=target)
+        except OSError as exc:
+            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            assert snapshot.value is None
+            continue
+        assert fired and complete and pins.protects(target, []), "published pins missed the post-window rewrite"
+        published = index
+        break
+    assert fired and published is not None
+    assert (published < 12) is (size_kib == 600)
+
+
+# LLM: 较短来源已在某轮完成post、较长来源仍pending时改写较短来源；后续发布不得复用其跨current的旧完成结果。
+# 函数用途: 回归R5-F01多源post完成复用，发布结果必须保护改写后的新引用。
+def test_r6_completed_post_of_one_source_is_not_reused_while_another_is_pending(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, first, target, payload = _r5_hot_thread(tmp_path, monkeypatch, 600, 100)
+    second = first.with_name("u.json")
+    prefix = '{"thread_id":"u","summary":"'
+    second.write_text(prefix + "s" * (2048 * 1024 - len(prefix) - 2) + '"}')
+    _freeze_pin_file_stat(monkeypatch, second)
+    settled = max(first.stat().st_ctime_ns, second.stat().st_ctime_ns) + 3_000_000_000
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    fired = False
+    for index in range(32):
+        if index == 16:
+            monkeypatch.setattr(reference_pins.time, "time_ns", lambda: settled)
+        short = reference_pins._RESUMABLE_DIGESTS.get(first, {})
+        long = reference_pins._RESUMABLE_DIGESTS.get(second, {})
+        if (not fired and snapshot.pending is not None and short.get("phase") == "post"
+                and len(short.get("cycle_verified", ())) == short.get("total_slices")
+                and long.get("phase") == "post" and len(long.get("cycle_verified", ())) < long.get("total_slices", 0)):
+            first.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+            fired = True
+        try:
+            pins, complete = snapshot.current([])
+        except OSError as exc:
+            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            assert snapshot.value is None
+            continue
+        assert fired and complete and pins.protects(target, []), "stale completed post result was reused"
+        assert index >= 16
+        break
+    else:
+        pytest.fail("multi-source verification never published after settling")
+
+
+# LLM: 正式记忆旧格式路径对同一<=256KiB热源有显式watch、_pin_rows读前读后、显式读后与最终复核；外加重试也不得每current超过1MiB摘要读取。
+# 函数用途: 回归R5-F06小文件分支绕过共享预算，同时确认读后复核仍实际读取且结果完整。
+@pytest.mark.parametrize("racing", [False, True])
+def test_r6_small_hot_formal_source_shares_one_mib_digest_budget(tmp_path, monkeypatch, racing):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "fact", attributes={"source_refs": [str(control)], "note": "n" * 250000})
+    assert 240 * 1024 < memory.path.stat().st_size <= 256 * 1024
+    _freeze_pin_file_stat(monkeypatch, memory.path)
+    hot = memory.path.stat().st_ctime_ns
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: hot)
+    identity = memory.path.stat().st_dev, memory.path.stat().st_ino
+    digest_bytes, original_read = [0], os.read
+
+    # LLM: 只计被测正式记忆FD的真实返回字节，解析流不经os.read。
+    # 函数用途: 观察每次current的小文件摘要读取量。
+    def read(fd, size):
+        raw = original_read(fd, size)
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == identity:
+            digest_bytes[0] += len(raw)
+        return raw
+
+    monkeypatch.setattr(os, "read", read)
+    if racing:
+        # 另一来源每次打开都被追加，迫使构建走满重试；正式记忆仍不得因重试反复整读。
+        racer = old_file(home.owner_memory_curator_runs_dir / "racing.jsonl")
+        original_source = scan._fingerprint_source
+
+        def opened(source):
+            raw = original_source(source)
+            if source == racer:
+                with racer.open("ab") as writer:
+                    writer.write(b"{}\n")
+            return raw
+
+        monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    for _ in range(3):
+        digest_bytes[0] = 0
+        errors = []
+        try:
+            pins, complete = snapshot.current(errors)
+        except OSError as exc:
+            assert racing and "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+        else:
+            assert not racing and complete and not errors and not pins.protects(target, errors)
+        # 每current至少实际读一次（发布前最终复核），总量不超过每源1MiB。
+        assert memory.path.stat().st_size <= digest_bytes[0] <= 1_048_576

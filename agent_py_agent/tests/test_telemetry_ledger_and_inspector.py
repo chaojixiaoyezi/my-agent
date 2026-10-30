@@ -158,7 +158,9 @@ def test_r1_repeated_append_io_and_rewrite_breaks_witness(tmp_path, monkeypatch)
         assert page['coverage']['status'] == 'complete'
         reader_offsets = [offset for side, offset, size in reads if side == 'reader' and size]
         assert reader_offsets and min(reader_offsets) >= prior
-        assert sum(size for _, _, size in reads) <= 20 * 1024, reads
+        assert sum(size for side, _, size in reads if side != 'writer') <= 20 * 1024, reads
+        # 旧前缀不超过2 MiB时writer只整读一遍追加后文件，核验全部锚点。
+        assert sum(size for side, _, size in reads if side == 'writer') == path.stat().st_size, reads
     path.write_bytes(path.read_bytes().replace(b'"c0"', b'"cX"', 1))
     ledger.record_tool_call(call(104))
     changed = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1)
@@ -844,9 +846,67 @@ def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch,
     _assert_append_rejects_rewrite(tmp_path, monkeypatch, damage)
 
 
-@pytest.mark.parametrize('damage,frozen_clock', [('indexed_quarter', False), ('indexed_middle', True)])
+@pytest.mark.parametrize('damage,frozen_clock', [('indexed_quarter', False), ('indexed_middle', True),
+                                                 ('indexed_quarter', True)])
 def test_r5_append_fd_stamp_and_frozen_middle(tmp_path, monkeypatch, damage, frozen_clock):
     _assert_append_rejects_rewrite(tmp_path, monkeypatch, damage, frozen_clock=frozen_clock)
+
+
+# 追加之后、写后读窗之前的锁内等长改写：旧前缀<=2 MiB时整读核验，任意偏移都撤销见证并换代。
+@pytest.mark.parametrize('offset_kib', [0, 256, 300, 512, 1000])
+def test_r6_rewrite_between_append_and_witness_read_is_rejected(tmp_path, monkeypatch, offset_kib):
+    import sqlite3
+
+    from agent_py_agent.agent.observability import telemetry_ledger as module
+
+    ledger, path, first = _large_telemetry_case(tmp_path, size=1024 * 1024)
+    for number in range(1, 4):
+        ledger.record_tool_call(call(number))
+    offset = path.read_bytes().find(b'"c0"', offset_kib * 1024)
+    assert offset >= offset_kib * 1024
+    original = module._append_stamp
+
+    def rewrite_then_stamp(home, *, include_bytes=False, before_size=0):
+        if include_bytes:
+            with path.open('r+b') as stream:
+                stream.seek(offset)
+                stream.write(b'"cX"')
+        return original(home, include_bytes=include_bytes, before_size=before_size)
+
+    monkeypatch.setattr(module, '_append_stamp', rewrite_then_stamp)
+    ledger.record_tool_call(call(4))
+    monkeypatch.setattr(module, '_append_stamp', original)
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ori_meta WHERE key LIKE 'append:%'").fetchone()[0] == 0
+    for _ in range(32):
+        changed = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1)
+        if changed['coverage']['status'] == 'complete':
+            break
+    assert changed['coverage']['status'] == 'complete', changed['coverage']
+    assert changed['view']['generation'] != first['view']['generation']
+    assert changed['total_count'] == 1028 and ledger.get_tool_call('cX') is not None
+
+
+# 可整读核验的前缀只接受整读见证；旧writer式抽样窗口一律撤销，不能降级回窗口外盲区。
+def test_r6_window_witness_is_rejected_for_full_prefix_ledger(tmp_path):
+    import sqlite3
+
+    from agent_py_agent.agent.local_storage import owner_read_index as index_module
+    from agent_py_agent.agent.observability.telemetry_ledger import _append_stamp
+
+    ledger, path, _ = _large_telemetry_case(tmp_path, size=64 * 1024)
+    before = _append_stamp(tmp_path)
+    ledger.record_tool_call(call(1))
+    after, raw = _append_stamp(tmp_path, include_bytes=True, before_size=before[2])
+    assert isinstance(raw, bytes) and len(raw) == after[2]
+    tail_start = before[2] - 8 * 1024
+    mid_start = before[2] // 2
+    windows = (raw[:4096], mid_start, raw[mid_start:mid_start + 4096], tail_start, raw[tail_start:])
+    key = ('data', 'telemetry', 'tool_calls.jsonl')
+    index_module.note_owner_append(tmp_path, key, before, after, raw_after=windows)
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ori_meta WHERE key LIKE 'append:%'").fetchone()[0] == 0
+    assert (str(tmp_path.absolute()), key) not in index_module._PROCESS_APPENDS
 
 
 # 窗口外改写只能靠真实FD元数据挡住；冻结时间的中段改写则必须靠字节窗口挡住。

@@ -36,9 +36,12 @@ _DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES = 16
 # 小批维护至少允许枚举64项，避免少量未到期归档挡住本批有效工作。
 _DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES = 64
 
-# 只保留有限个目录/操作的内存进度，不向归档目录写游标文件。
+# 只保留有限个目录/操作的内存进度；新进程从归档根父目录的游标文件恢复，不向归档目录写游标文件。
 _scan_cursors: OrderedDict[tuple[int, int, str], int] = OrderedDict()
+# 续扫中的目录迭代器只在本进程有效，位置须与_scan_cursors一致才可接着读，避免每次重开后从头丢弃旧项。
+_live_scans: OrderedDict[tuple[int, int, str], tuple[ExitStack, object, int]] = OrderedDict()
 _scan_cursor_lock = RLock()
+_CURSOR_FILE = ".display_archives.cursor.json"
 
 
 # LLM: 维护只接受Store或明确的会话存储根；不猜Home路径，根缺失不新建。
@@ -224,64 +227,145 @@ def _compact(fd, manifest):
 
 
 # LLM: 只检查当前窗口内的目录项，沿原dirfd与逐档错误合同处理；成功名额耗尽后不多取下一项。
-# 函数用途: 扫描一个有界窗口并返回实际检查数及是否达到处理上限。
+#   续扫迭代器可能给出已被删除的旧名，按已枚举计入预算但不算检查或错误。
+# 函数用途: 扫描一个有界窗口，返回实际枚举数、是否达到处理上限及已消失项数。
 def _scan_entries(root, entries, budget, maximum, action, result):
-    inspected = 0
+    inspected = vanished = 0
     for entry in islice(entries, budget):
         inspected += 1
         if not _ARCHIVE_ID.fullmatch(entry.name):
             continue
-        result["scanned"] += 1
-        fd = None
         try:
             fd = _open_directory(root, entry.name)
+        except FileNotFoundError:
+            vanished += 1
+            continue
+        except OSError:
+            result["scanned"] += 1
+            result["errors"] += 1
+            continue
+        result["scanned"] += 1
+        try:
             key = action(root, fd, entry.name)
             result[key or "skipped"] += 1
         except (OSError, ValueError, KeyError, DisplayArchiveError):
             result["errors"] += 1
         finally:
-            if fd is not None:
-                os.close(fd)
+            os.close(fd)
         if result["compacted"] + result["expired"] + result["removed"] >= maximum:
-            return inspected, True
-    return inspected, False
+            return inspected, True, vanished
+    return inspected, False, vanished
 
 
-# LLM: 原根flock保护同目录维护；内存游标按真实根inode及操作隔离，回绕共用检查预算，LRU最多128项。
-# 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档。
+# LLM: 迭代器用独立打开的目录描述，不复制持flock的根FD，跨调用保留也不延长维护锁；ExitStack承担scandir关闭责任。
+# 函数用途: 为已锁归档根打开一个可跨调用续读的目录迭代器。
+def _open_scan(root):
+    descriptor = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=root)
+    scans = ExitStack()
+    try:
+        entries = iter(scans.enter_context(os.scandir(descriptor)))
+    except BaseException:
+        scans.close()
+        raise
+    finally:
+        os.close(descriptor)
+    return scans, entries
+
+
+# LLM: 游标只写归档根父目录下的普通单链接点文件，且父目录中的display_archives须仍是已锁根inode；坏、缺或身份不符一律视为0。
+#   保存失败只放弃跨进程续点，不改变本次维护结果，也不向归档目录写任何文件。
+# 函数用途: 为新进程读取（offset为None）或保存某维护操作的续扫偏移。
+def _persisted_cursor(root_path, root_info, operation, offset=None):
+    identity = [int(root_info.st_dev), int(root_info.st_ino)]
+    try:
+        parent = open_directory_beneath(root_path.parent, (), require_dir_fd=True)
+    except (OSError, ValueError):
+        return 0
+    try:
+        current = os.stat(root_path.name, dir_fd=parent, follow_symlinks=False)
+        if [current.st_dev, current.st_ino] != identity:
+            return 0
+        try:
+            saved, _ = _read(parent, _CURSOR_FILE, 4096)
+        except (FileNotFoundError, ValueError):
+            saved = {}
+        value = saved.get(operation)
+        loaded = (value[2] if isinstance(value, list) and len(value) == 3 and value[:2] == identity
+                  and type(value[2]) is int and value[2] >= 0 else 0)
+        if offset is None or offset == loaded:
+            return loaded
+        saved[operation] = [*identity, offset]
+        _replace(parent, _CURSOR_FILE, json.dumps(saved, separators=(",", ":")).encode())
+        return offset
+    except (OSError, ValueError):
+        return 0
+    finally:
+        os.close(parent)
+
+
+# LLM: 原根flock保护同目录维护；游标按真实根inode及操作隔离，同进程保留活迭代器续读，每个枚举项都计入预算，回绕共用同一预算。
+#   内存LRU最多128项、活迭代器最多8个；活迭代器缺失（新进程或被淘汰）时按游标一次性重放前缀后再续扫。
+# 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档，也不让续扫代价随偏移线性增长。
 def _maintain(value, maximum, action):
     result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0}
     if maximum == 0:
         return result
     scan_budget = max(_DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES, maximum * _DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES)
+    root_path = _root(value)
     try:
-        with _locked_root(_root(value)) as root:
+        with _locked_root(root_path) as root:
             root_info = os.fstat(root)
             # 两个闭包都名为action，限定名才区分合页和TTL；身份取已锁住的FD，不重走路径。
-            cursor_key = (int(root_info.st_dev), int(root_info.st_ino), action.__qualname__)
+            operation = action.__qualname__
+            cursor_key = (int(root_info.st_dev), int(root_info.st_ino), operation)
             with _scan_cursor_lock:
-                offset = _scan_cursors.get(cursor_key, 0)
-            with ExitStack() as scans:
-                entries = scans.enter_context(os.scandir(root))
-                if offset and sum(1 for _ in islice(entries, offset)) < offset:
-                    # 目录缩短到游标之前时重开，不把空尾部当作完整的一轮检查。
-                    offset = 0
-                    entries = scans.enter_context(os.scandir(root))
-                inspected, hit_limit = _scan_entries(root, entries, scan_budget, maximum, action, result)
-            next_offset = max(0, offset + inspected - result["removed"])
-            if inspected < scan_budget and not hit_limit:
-                next_offset = 0
-                if offset:
-                    removed_before_wrap = result["removed"]
-                    with os.scandir(root) as entries:
-                        wrapped, _ = _scan_entries(
-                            root, entries, min(offset, scan_budget - inspected), maximum, action, result)
-                    next_offset = max(0, wrapped - (result["removed"] - removed_before_wrap))
+                offset = _scan_cursors.get(cursor_key)
+                live = _live_scans.pop(cursor_key, None)
+            if live is not None and live[2] != offset:
+                live[0].close()
+                live = None
+            if offset is None:
+                offset = _persisted_cursor(root_path, root_info, operation)
+            scans, entries = live[:2] if live is not None else (None, None)
+            try:
+                if scans is None:
+                    scans, entries = _open_scan(root)
+                    if offset and sum(1 for _ in islice(entries, offset)) < offset:
+                        # 目录缩短到游标之前时重开，不把空尾部当作完整的一轮检查。
+                        scans.close()
+                        offset = 0
+                        scans, entries = _open_scan(root)
+                inspected, hit_limit, vanished = _scan_entries(root, entries, scan_budget, maximum, action, result)
+                position = max(0, offset + inspected - result["removed"] - vanished)
+                if inspected < scan_budget and not hit_limit:
+                    # 走到目录尾：关闭旧迭代器，从头只补到本次起点，回绕与正常检查共用本次预算。
+                    scans.close()
+                    scans, position = None, 0
+                    if offset:
+                        removed_before_wrap = result["removed"]
+                        limit = min(offset, scan_budget - inspected)
+                        scans, entries = _open_scan(root)
+                        wrapped, hit_limit, vanished = _scan_entries(root, entries, limit, maximum, action, result)
+                        position = max(0, wrapped - (result["removed"] - removed_before_wrap) - vanished)
+                        if wrapped < limit and not hit_limit:
+                            scans.close()
+                            scans, position = None, 0
+            except BaseException:
+                if scans is not None:
+                    scans.close()
+                raise
             with _scan_cursor_lock:
-                _scan_cursors[cursor_key] = next_offset
+                _scan_cursors[cursor_key] = position
                 _scan_cursors.move_to_end(cursor_key)
                 while len(_scan_cursors) > 128:
-                    _scan_cursors.popitem(last=False)
+                    evicted = _live_scans.pop(_scan_cursors.popitem(last=False)[0], None)
+                    if evicted is not None:
+                        evicted[0].close()
+                if scans is not None:
+                    _live_scans[cursor_key] = (scans, entries, position)
+                    while len(_live_scans) > 8:
+                        _live_scans.popitem(last=False)[1][0].close()
+            _persisted_cursor(root_path, root_info, operation, position)
     except FileNotFoundError:
         pass
     except (OSError, ImportError):
