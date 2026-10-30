@@ -1,3 +1,10 @@
+## 2026-10-29 e905-sol-4：代际清单、遗忘恢复与检索权威复核（分支已实现，待集成）
+
+- `generation_manifest.py::MemoryGenerationStore` 的 manifest 指向 active/cold 分片，`StorageTombstones` 按永久 ID/hash 屏障排除已遗忘事实；`JsonlMemory` 只读权威读取/检索热路径不物理删文件。GC、历史明文擦除和派生索引失效由显式维护与删除恢复承担，逻辑不可见不代表物理清理完成。
+- `_jsonl_maintenance.py::purge_tier_copies` 在 quota→policy→formal 锁内清 pending tombstone 残留，透传已有 admission；无根时严格读 legacy 并用 `_compact_memory_events` 保留存活事实最新版本后发表首根。首次与重启收尾均先验 `store.events(root)` 才能用 schema marker 覆盖 legacy；失败保留 cleanup pending，重试不重放业务删除，同字节永久账不改 inode。
+- `jsonl.py::search` 在短 formal 锁内绑定 legacy、旧墓碑、manifest、永久墓碑四个控制文件指纹，嵌入/向量调用在锁外。返回及登记访问前重新同锁核验；无漂移复用快照，漂移最多另做一次原行数/字节预算扫描，刷新正文/版本并丢弃已删或未覆盖候选，不回退 `all()`、不重新排名。
+- 有界读取的 partial/continuation 只表达本次覆盖；游标绑定根 operation_id 与分片位置，不是删除完成或恢复旧正文的许可，也不在 search 内无限追扫。删除恢复依精确 entry/version/source 墓碑及候选 CAS 接续原清理责任/回执，不生成新删除。
+
 ## 2026-10-27 CI 全绿收敛：记忆候选兼容读口、自动晋升补全与产物大索引流式过滤
 
 - `memory_store/candidates.py` 与 `_candidate_read_compat.py`：保留完整五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离，兼容对 `_load_unlocked` 的测试覆盖。

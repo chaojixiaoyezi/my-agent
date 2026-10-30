@@ -1,3 +1,10 @@
+## 2026-10-29 e905-sol-4：记忆代际目录清单、旧版归并恢复与检索控制源修订快照结构
+
+- `generation_manifest.py` 的真实类型为 `MemoryGenerationStore`、`StorageTombstones`、`MemoryPolicyV2`、`ContextBudget`；manifest 保存 generation/operation_id 与 active/cold 分片描述。`publish` 先提交永久屏障再发表根，根失败可能已部分提交；同字节永久账跳过重写，物理 GC 由 `collect_unreferenced` 在维护路径负责。
+- `JsonlMemory` 只读热路径不物理删文件。`_jsonl_maintenance.py::purge_tier_copies` 在 quota→policy→formal 内清 pending tombstone 历史明文及派生 SQLite，接续已有 admission；无根 legacy 先 `_compact_memory_events(events, {})` 再 `publish_tier_generation`。`finish_tier_generation` 必须先验当前根完整事件，再按需 GC 和写 legacy schema marker；不是 `.legacy_flat_migrated` 旁路。
+- `jsonl.py::_search_authority_revision` 对 legacy、旧墓碑、manifest、永久墓碑取 nofollow stat 指纹；公共 search 初始短锁取快照，锁外嵌入/向量，末端短锁复核并登记访问。漂移最多一次额外有界扫描，未覆盖候选拒绝，排名保留而非重新计算新正文相似度。
+- `_jsonl_indexing.py::bounded_authority_records` 返回 partial 与 `continuation={operation_id, cursor}`；cursor 是分片序号/偏移，仅表示扫描位置，不持久化成删除回执，不在 search 中无限追扫。`promotion_remove_recovery.py` 以精确 entry/version/source 和候选 CAS 在 quota→policy→candidate→formal 链接续旧清理；失败仍报 `REMOVE_CLEANUP_PENDING`，成功仅补旧回执，不重放业务删除或复活记录。
+
 ## 2026-10-27 CI 全绿收敛：候选兼容读取、晋升补全与大索引流式过滤结构
 
 - `memory_store/_candidate_read_compat.py` 与 `candidates.py`：封装未覆盖 `_load_unlocked` 时的五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离。

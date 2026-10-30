@@ -1,4 +1,4 @@
-# LLM: 只凭正式删除墓碑接续清理，不重放正式写入；原记录缺失或IO错误不能假判清理成功。
+# LLM: 只凭正式删除墓碑接续清理，不重放业务写入；quota→policy→candidate→formal锁序贯穿恢复。
 # 模块用途: 在重启和故障后收拾已删除记忆的候选与派生残留。
 """只凭正式删除墓碑修复候选和派生层收尾，不重放任何正式写入。"""
 from dataclasses import dataclass
@@ -55,13 +55,16 @@ def _legacy_removal_hashes(service, candidate) -> set[str]:
             and (row.target_entry_version is None or row.target_entry_version <= candidate.target_entry_version)))}
 
 
-# LLM: quota→候选CAS→精确当前墓碑；候选和派生清理失败皆报告旧责任，恢复不授予新写入或依赖晋升开关。
+# LLM: quota→policy→候选CAS→formal；已有admission透传全部清理，恢复不授予新业务删除。
 # 函数用途: 恢复删除的全部隐私清理责任，连已标记但遗留索引的旧记录也补清。
 def recover_committed_remove(service, candidate, reviewer) -> str:
+    from .jsonl import _managed_policy_scope
+
     if not _removal_candidate(candidate):
         return ''
     enforcer = service.long_term.quota_enforcer or service.persona.quota_enforcer
-    with enforcer.admission() as admission, service.candidates.locked_snapshot(candidate):
+    with (enforcer.admission() as admission, _managed_policy_scope(service.persona.owner_home),
+          service.candidates.locked_snapshot(candidate)):
         hashes = service.long_term.committed_removal_hashes(candidate.target_entry_id,
             candidate.target_entry_version, f'candidate:{candidate.candidate_id}')
         if hashes is None:
@@ -73,10 +76,10 @@ def recover_committed_remove(service, candidate, reviewer) -> str:
             return _finish_removal_receipt(service, candidate, admission, reviewer)
 
 
-# LLM: 仅由已持admission、候选CAS锁并核对精确墓碑的恢复入口调用；失败由外层归为旧清理责任。
+# LLM: 仅由已持quota/policy/候选CAS且核对精确墓碑的恢复入口调用；准入传至派生清理，不能再取quota锁。
 # 函数用途: 清掉删除后的派生索引与关联候选正文。
 def _purge_removal_history(service, candidate, admission, hashes) -> None:
-    service.long_term.purge_removed_indexes(candidate.target_entry_id)
+    service.long_term.purge_removed_indexes(candidate.target_entry_id, _admission=admission)
     history = set(hashes) or _legacy_removal_hashes(service, candidate)
     service.candidates.redact_content_admitted(admission, {
         'content_hashes': history, 'exclude_candidate_ids': {candidate.candidate_id},
