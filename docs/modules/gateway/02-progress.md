@@ -1,3 +1,16 @@
+## 2026-10-29 存储治理 R2：回执副本分段、读写栅栏与有界维护（源码候选，未生产部署）
+
+本节记录当前 R2 修复候选及尚未闭合的边界，不是生产发布或整席验收回执。配额恢复使用 16 owner LRU 与持久字典序续点，已补交替及清缓存恢复回归；排序准备也逐项受时间/枚举额度限制。准确组合版本和验证结果见根目录 `TESTS.md`，不把组件测试外推生产。
+
+- **Gateway 终态副本分段归档**：`gateway_parts/owner_retention.py::seal_gateway_receipts_slice` 在原请求转换锁内检查规范终态、不可变请求指纹、投影完成标记、完成时间及未结投递等保护事实，排除 inbox/processing 中的请求。按目录项、时间、字节预算收集准确原文，发布私有不可变 JSONL 段、manifest，再由 SQLite 索引发布相对路径/偏移/长度/摘要定位。索引是定位投影，不取代原终态合同；错误保留 `complete=False` 与可能已有副作用的事实，不写成空成功。
+- **默认只存副本，不删除原件**：普通 owner 维护显式传 `remove_loose=False`，状态保留 `deletion_enabled=False`、`reader_cutover_required=True`。辅助归档函数自身的默认参数不等于生产维护删除许可；显式删除支路另有同一请求锁内的原文及索引读回复核。仅 `read_json_file_report` 的热文件缺失分支和 `lookup_gateway_receipt_bytes` 等读口接了封存回读，依赖文件存在性、目录枚举及其它直接读取者的全量切换尚未完成，不能宣称可删除全部松散事实源。
+- **JSON header 安全读与代际拒写**：`gateway_parts/io.py::_read_json_dict_unlocked_report` 在原写事务内用 no-follow/nonblocking 打开，先以 FD 确认普通文件，再按最多 1 MiB 读取，并复核读前、读后及当前路径版本。特殊文件、超限和读取中变化不能当作缺失覆盖。原写口在 updater 前及提交前核 `schema_generation`，更高代际拒绝；非阻塞取锁失败仍分类为竞争，不绕过锁、不假报写入成功。这是写前 header 保护，不代表所有 JSON 读口都已经具备同一安全合同。
+- **多 owner 有界维护**：原 `cli/gateway_loops.py::_GatewayOwnerMaintenanceController` 保留启动保护、安全恢复独立执行、基础 owner 加 scoped owner 分页及停止/退避机制，不为维护创建冷 Agent。每个 owner 的原 `maintenance.json` 承接存储类别游标、下一类别、完成回执、未接线类别及错误；预算耗尽只延期，未完整覆盖不能记为全完成。分页与每 owner 切片不是全体 owner 已完成的证明，也不承诺整拍严格墙钟上界。
+- **配额对账与未完成写域**：`owner_quota.py::reconcile_owner_quota_slice` 是原 owner 锁内的有界元数据对账口，账本记录观察计数、预留、revision、dirty 与来源游标。展示缓存不参与准入；后台观察不证明所有写者已纳入配额事务。进程重启、跨 owner 轮换、结构变化和在途预留的正确恢复属于 R2 修复/复核范围，未以本节宣称全部完成。跨域 writer 尚未全部接入，不能把账本 clean 或扫描完成外推为封闭写域、全系统精确配额。
+- **C/W 明确延期**：`owner_maintenance_transition.py` 仍沿原 claim 的逐写门、策略指纹和 `maintenance.json` 完整字节 CAS；存储归档/配额适配在 `coordinator=True` 时报告 `coordinator_adapter_protocol_required`，不旁路 T→原 state 锁→领域锁，不把长扫描塞进短提交窗口。法律保留、来源损坏及未接线类别继续保留，不据 partial 自动建立第二执行队列。
+
+结构、读口与状态所有权见 [04-structure](04-structure.md)。生产 Gateway、正多进程 C/W 存储适配、真实多 owner 长期推进、跨平台和跨域 writer 全覆盖均未由本节验证；本轮未生产部署。
+
 ## 2026-10-28 Wave 9 A1 Round 2：单向远端推送（本地候选，未部署）
 
 - `gateway_parts/remote_push_service.py` 承接唯一 `POST /remote-agent/push`。独立push Token仅允许目标owner的事件入队，时间窗/HMAC、跨进程nonce及持久业务幂等先于原Gateway输入T→C提交；回执不含消息正文，`run_id`仅指排队请求，不证明模型执行完成。其他路由不接受push Token作为读取或控制身份。

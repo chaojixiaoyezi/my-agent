@@ -178,9 +178,12 @@ def test_quota_hardlinked_growth_does_not_underreserve(tmp_path, monkeypatch):
             pytest.fail('hardlink aliases were not charged')
 
 
-# LLM: 每个暂停的递归生成器可能持有多层目录FD，不能只按32个owner限制而积累几千FD。
-# 函数用途: 验证跨owner切换先关闭旧扫描，进程只保留一个后台扫描栈。
+# LLM: 多owner缓存必须有界且按LRU关闭淘汰迭代器；两个owner不能相互淘汰。
+# 函数用途: 验证第十七个owner到来后最早扫描栈被关闭。
 def test_quota_scan_cache_evicts_and_closes_previous_stack(tmp_path):
+    for value in quota._QUOTA_SCANS.values():
+        value['iterator'].close()
+    quota._QUOTA_SCANS.clear()
     first, second = tmp_path / 'one', tmp_path / 'two'
     for root in (first, second):
         (root / 'nested' / 'deep').mkdir(parents=True)
@@ -188,7 +191,13 @@ def test_quota_scan_cache_evicts_and_closes_previous_stack(tmp_path):
     _reconcile(first, max_entries=1, max_ms=1000)
     old = next(value['iterator'] for key, value in quota._QUOTA_SCANS.items() if key[1] == str(first))
     _reconcile(second, max_entries=1, max_ms=1000)
-    assert len(quota._QUOTA_SCANS) <= 1
+    assert old.gi_frame is not None
+    for index in range(15):
+        root = tmp_path / f'extra-{index}'
+        root.mkdir()
+        (root / 'data').write_bytes(b'x')
+        _reconcile(root, max_entries=1, max_ms=1000)
+    assert len(quota._QUOTA_SCANS) == 16
     assert old.gi_frame is None
 
 
@@ -224,3 +233,97 @@ def test_quota_scan_error_keeps_reservation_and_closes_stack(tmp_path, monkeypat
         _reconcile(tmp_path, max_entries=1000, max_ms=1000)
     assert json.loads(path.read_text()) == ledger
     assert all(key[1] != str(tmp_path) for key in quota._QUOTA_SCANS)
+
+
+# LLM: 两个真实owner交替不能重置epoch；清空缓存模拟新进程仍须恢复原持久路径与部分合计。
+# 函数用途: 固定复现A/B各300字节在第二轮完成的收敛合同。
+@pytest.mark.parametrize('clear_cache', [False, True])
+def test_alternating_owners_resume_and_converge_second_round(tmp_path, clear_cache):
+    roots = [tmp_path / name for name in ('A', 'B')]
+    for root in roots:
+        root.mkdir()
+        for index in range(300):
+            (root / f'{index:03d}').write_bytes(b'x')
+    first = [_reconcile(root, max_entries=256, max_ms=1000) for root in roots]
+    assert all(not row['complete'] for row in first)
+    if clear_cache:
+        for scan in quota._QUOTA_SCANS.values():
+            scan['iterator'].close()
+        quota._QUOTA_SCANS.clear()
+    second = [_reconcile(root, max_entries=256, max_ms=1000) for root in roots]
+    for before, result in zip(first, second, strict=True):
+        assert result['complete'] is True
+        assert result['used_bytes'] == result['inode_count'] == 300
+        assert result['cursor']['epoch'] == before['cursor']['epoch']
+        assert result['cursor']['scanned'] > before['cursor']['scanned']
+        assert result['cursor']['last_relpath'] > before['cursor']['last_relpath']
+
+
+# LLM: 相对路径顺序包含斜杠与目录同前缀文件，重启后不能重复累计或跳过同前缀子树。
+# 函数用途: 验证嵌套目录的字典序恢复与持久部分合计。
+def test_restart_cursor_tracks_nested_lexical_paths(tmp_path):
+    for name in ('a', 'a-'):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / 'inside').write_bytes(b'ab')
+    (tmp_path / 'a.').write_bytes(b'xyz')
+    result = _reconcile(tmp_path, max_entries=2, max_ms=1000)
+    epoch = result['cursor']['epoch']
+    for _ in range(20):
+        if result['complete']:
+            break
+        for scan in quota._QUOTA_SCANS.values():
+            scan['iterator'].close()
+        quota._QUOTA_SCANS.clear()
+        result = _reconcile(tmp_path, max_entries=2, max_ms=1000)
+        assert result['cursor']['epoch'] == epoch
+    assert result['complete']
+    assert (result['used_bytes'], result['inode_count']) == (7, 3)
+
+
+# LLM: 排序准备也必须可暂停，不能先枚举完整大目录再假称只扫描一个项；每次原始枚举都有预算。
+# 函数用途: 统计真实scandir取项，复现小预算背后的无界排序工作。
+def test_sort_preparation_is_budgeted_and_resumable(tmp_path, monkeypatch):
+    for index in range(1400):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    original = quota.os.scandir
+    visited = []
+
+    # LLM: 包装真实scandir且保留context退出关闭；不篡改顺序或扫描结果。
+    # 类用途: 精确记录排序准备实际读取多少目录项。
+    class CountingScan:
+        # LLM: 只保存真实迭代器，关闭仍交原context负责。
+        # 函数用途: 初始化取项计数器。
+        def __init__(self, fd):
+            self.scan = original(fd)
+
+        # LLM: 返回惰性包装器，不预先枚举整个目录。
+        # 函数用途: 进入真实扫描context。
+        def __enter__(self):
+            self.scan.__enter__()
+            return self
+
+        # LLM: 关闭真实scandir，异常也不能泄漏FD。
+        # 函数用途: 退出扫描context。
+        def __exit__(self, *args):
+            return self.scan.__exit__(*args)
+
+        # LLM: 迭代不创建任何额外目录内容。
+        # 函数用途: 返回自身迭代协议。
+        def __iter__(self):
+            return self
+
+        # LLM: 每次仅转发一个真实目录项并记账，不替换业务元数据。
+        # 函数用途: 观察实际枚举工作量。
+        def __next__(self):
+            entry = next(self.scan)
+            visited.append(entry.name)
+            return entry
+
+    monkeypatch.setattr(quota.os, 'scandir', CountingScan)
+    first = _reconcile(tmp_path, max_entries=1, max_ms=1000)
+    assert len(visited) <= 1024
+    assert first['complete'] is False and first['scanned_entries'] <= 1
+    assert first['enumerated_entries'] == len(visited)
+    second = _reconcile(tmp_path, max_entries=256, max_ms=1000)
+    assert second['cursor']['epoch'] == first['cursor']['epoch']
+    assert second['cursor']['scanned'] > first['cursor']['scanned']

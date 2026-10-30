@@ -34,6 +34,8 @@ from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 RUNTIME_DB_FILENAME = "runtime.db"
 
 
+# LLM: RuntimeDB 路径唯一落点由 owner home 与固定库名构成，本函数不建库、不迁移；修改须同步 repository 与连接入口。
+# 函数用途: 得到本人运行数据库的规范路径。
 def runtime_db_path(home_root: Path) -> Path:
     """owner home 根 → 权威库路径。"""
     return Path(home_root) / RUNTIME_DB_FILENAME
@@ -407,6 +409,8 @@ _RUNTIME_MIGRATION_SQL = (
 )
 
 
+# LLM: RuntimeDB 迁移仅对内部固定表名查询 PRAGMA 元数据，操作失败返回 False；不接受外部表名，不在此执行 DDL 或提交。
+# 函数用途: 检查旧数据库是否已经包含某列，供幂等迁移决定是否补列。
 def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
         return any(
@@ -597,6 +601,8 @@ class RuntimeSchemaMixin:
         # schema 阶段建索引会因列缺失失败；CREATE IF NOT EXISTS 幂等）。
         RuntimeSchemaMixin._execute_runtime_schema(conn, _RUNTIME_MIGRATION_SQL)
 
+    # LLM: RuntimeDB 在调用方同一 schema 事务逐条执行固定 SQL，不使用会隐式提交的 executescript；失败必须由原事务回滚。
+    # 函数用途: 执行建表及迁移语句，保持 schema 初始化的原子提交边界。
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
         for statement in statements:

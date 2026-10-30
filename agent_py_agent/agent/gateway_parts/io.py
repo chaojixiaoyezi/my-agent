@@ -91,8 +91,7 @@ _GATEWAY_REQUEST_FINGERPRINT_KEYS = (
 )
 
 
-# LLM: The process-local history index is only a performance cache. Canonical terminal archives
-# remain authority, and file mtime/size invalidates the cache after any other process writes.
+# LLM: Gateway 历史索引仅为进程内缓存，终态规范归档仍是权威；外部写入以 mtime/size 使缓存失效，修改须联查历史修复测试。
 # 类用途: 缓存某个请求 ID 在历史投影中的完整正文、出现次数和冲突情况。
 @dataclass(frozen=True)
 class _GatewayHistoryIndexEntry:
@@ -101,6 +100,8 @@ class _GatewayHistoryIndexEntry:
     conflict: bool = False
 
 
+# LLM: Gateway JSON 读口用独立字段区分正文、读取错误与暂时锁忙；调用方不得把竞争误判为缺失或损坏。
+# 类用途: 返回一次 JSON 读取的正文和错误分类，供状态读取与队列调用方决定是否重试。
 @dataclass(frozen=True)
 class GatewayJsonReadReport:
     payload: dict
@@ -110,9 +111,7 @@ class GatewayJsonReadReport:
     lock_busy: bool = False
 
 
-# LLM: The request fingerprint covers authenticated owner, conversation, prompt, task, and all
-# execution-affecting options including immutable input_media refs, excluding mutable lease/status/projection fields. The filename
-# request id is supplied by the caller and overrides any untrusted payload alias.
+# LLM: Gateway 指纹包含 owner、会话、提示、任务及不可变媒体引用等执行选项，不含可变租约/状态/投影；以调用方文件名 ID 覆盖正文别名，修改须联查幂等入队。
 # 函数用途: 计算 Gateway 请求不可变身份与执行内容的稳定指纹。
 def gateway_request_fingerprint(payload: dict, request_id: str) -> str:
     canonical_id = str(request_id or "").strip()
@@ -131,8 +130,7 @@ def gateway_request_fingerprint(payload: dict, request_id: str) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-# LLM: Persisted fingerprints are immutable authority. Missing legacy values may be explicitly
-# materialized by the caller, but a present value/schema must match a fresh canonical recomputation.
+# LLM: Gateway 已存指纹及 schema 必须匹配规范重算；旧记录缺值可由调用方显式补齐，不允许把冲突记录当旧格式重写。
 # 函数用途: 校验已保存的 Gateway 请求指纹，并返回当前正确值。
 def validated_gateway_request_fingerprint(payload: dict, request_id: str) -> str:
     expected = gateway_request_fingerprint(payload, request_id)
@@ -174,6 +172,7 @@ def write_json_file_atomic(path: Path, payload: dict, *, blocking: bool = True, 
         write_private_json_file_atomic_no_newline_unlocked(path, payload, sort_keys=True, **options)
 
 
+# LLM: Gateway 临时文件清理只吞 OSError，不影响替换首因；调用方负责确定该路径确为自身暂存文件。
 # 函数用途: 尽力删除临时文件；删除失败不影响已经完成或即将重试的替换。
 def _unlink_tmp_file(tmp: Path) -> None:
     try:
@@ -182,6 +181,8 @@ def _unlink_tmp_file(tmp: Path) -> None:
         pass
 
 
+# LLM: Gateway 替换辅助入口仅对 PermissionError 作八次递增短等待；成功会移动暂存文件，耗尽传播原异常，不扩大重试类型。
+# 函数用途: 将临时文件替换到目标，遇短暂权限占用时重试，最终失败仍由调用方处理。
 def _replace_with_retry(tmp: Path, path: Path) -> None:
     last_error: OSError | None = None
     for attempt in range(8):
@@ -195,6 +196,8 @@ def _replace_with_retry(tmp: Path, path: Path) -> None:
         raise last_error
 
 
+# LLM: Gateway 简化读口仅投影报告 payload，错误细分由 read_json_file_report 提供；需要区分缺失/锁忙的调用方不可依赖空字典。
+# 函数用途: 读取热 JSON 或已封存回执正文，不向调用方返回诊断字段。
 def read_json_file(path: Path) -> dict:
     return read_json_file_report(path).payload
 
@@ -251,14 +254,15 @@ def lookup_gateway_receipt_bytes(path: Path) -> bytes | None:
     return lookup_sealed_receipt(gateway_paths_from_root(root), str(path.relative_to(root)))
 
 
+# LLM: Gateway 读取错误沿通用运行错误报告附加目标路径，只构造诊断、不写文件；保持 context 与异常分类供上层识别。
+# 函数用途: 为 JSON 读取失败生成包含文件位置的结构化错误。
 def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> dict:
     report = runtime_error_report(exc, context=context)
     report["path"] = str(path)
     return report
 
 
-# LLM: require_existing closes move/update races for queue records while preserving the
-# create-or-update behavior used by conversation and collaboration state files.
+# LLM: Gateway 队列更新以 require_existing 拒绝已移走的记录；会话和协作状态仍可显式创建或更新，不能将两种合同混用。
 #   读-改-写整段在同一把锁内完成，落盘走私有原子写（目录 0700、文件 0600、存量宽权限下次写入收紧）。
 #   内容去重（E3 返工 / mc4-501）：旧文件存在且能正常解析为对象时，把 updater 结果用与写入原语
 #   完全相同的序列化转成文本，与磁盘原文逐字相同才跳过——比较对象是原始文本，不依赖 Python 深度
@@ -372,6 +376,8 @@ def _json_file_version(info: os.stat_result) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+# LLM: Gateway updater 在当前字典的浅副本上执行，必须返回 dict；此辅助函数不落盘，但回调自身副作用仍由调用方负责。
+# 函数用途: 调用 JSON 更新器并检查返回类型，避免将非对象写成队列状态。
 def _updated_json_dict(updater: Callable[[dict], dict], current: dict) -> dict:
     updated = updater(dict(current))
     if not isinstance(updated, dict):
@@ -409,8 +415,7 @@ def locked_file_transition(path: Path, *, blocking: bool = True):
         yield
 
 
-# LLM: Read-only status paths may probe an active transaction without queueing behind provider IO.
-# A False result grants no authority to mutate; callers must return the last atomic receipt.
+# LLM: Gateway 只读状态探测不能排队等待供应商 IO；返回 False 时无修改权，只能保留或重放已有原子回执。
 #   common包装强引用覆盖整个等待/释放窗口，OS句柄关闭异常也必须归还线程锁。
 # 函数用途: 尝试领取逻辑文件事务锁，锁正被使用时立即返回 False 而不是阻塞。
 @contextmanager
@@ -452,8 +457,7 @@ def _release_transition_file_handle(file_handle, os_lock_acquired: bool) -> None
         file_handle.close()
 
 
-# LLM: Every processing/inbox/terminal transition and active-turn ingress for one request must
-# share this lock. The digest keeps untrusted request ids out of filenames without losing identity.
+# LLM: Gateway 同一请求的入队、执行、终态转换及活动回合入口共用此锁；摘要隔离不可信 ID，修改须联查回合转换调用方。
 # 函数用途: 取得并持有某个 Gateway 回合唯一的跨进程状态转换锁。
 @contextmanager
 def gateway_turn_transition(paths: GatewayPaths, request_id: str):
@@ -466,8 +470,7 @@ def gateway_turn_transition(paths: GatewayPaths, request_id: str):
         yield
 
 
-# LLM: Non-blocking probes use the exact same hashed T-lock path as blocking turn transitions;
-# failure to acquire can only preserve/replay an existing fact, never authorize a state change.
+# LLM: Gateway 非阻塞探测必须与阻塞转换共用同一摘要 T 锁路径；取锁失败只能保留或重放事实，不授予状态变更权。
 # 函数用途: 非阻塞尝试取得某个 Gateway 回合的跨进程状态转换锁。
 @contextmanager
 def try_gateway_turn_transition(paths: GatewayPaths, request_id: str):
@@ -547,9 +550,7 @@ def _open_private_lock_descriptor(lock_path: Path) -> int:
     return open_private_lock_beneath_tightened(anchor, (*missing, lock_path.name))
 
 
-# LLM: POSIX flock and Windows byte-range locking implement the same blocking cross-process
-# transition. A platform without either primitive fails closed because process-local locking cannot
-# uphold the Gateway exactly-once contract.
+# LLM: Gateway 以 POSIX flock 或 Windows 字节锁实现同一阻塞跨进程边界；无可用原语必须拒绝，不能退为仅线程锁而破坏单次执行合同。
 # 函数用途: 跨平台独占当前 lock 文件，直到同路径的另一个进程释放事务。
 def _flock_exclusive(handle) -> None:
     if fcntl is not None:
@@ -568,8 +569,7 @@ def _flock_exclusive(handle) -> None:
     raise RuntimeError("cross-process file locking is unavailable on this platform")
 
 
-# LLM: A non-blocking probe distinguishes live ownership from an abandoned executing receipt.
-# Unexpected POSIX lock errors still raise; only contention returns False.
+# LLM: Gateway 非阻塞锁探测区分活跃占用与遗留回执；仅明确锁竞争返回 False，其它系统错误传播，修改须联查回执恢复。
 # 函数用途: 尝试取得 OS 文件锁并返回是否成功，不等待另一个进程释放。
 def _try_flock_exclusive(handle) -> bool:
     if fcntl is not None:
@@ -592,8 +592,7 @@ def _try_flock_exclusive(handle) -> bool:
     raise RuntimeError("cross-process file locking is unavailable on this platform")
 
 
-# LLM: Unlock mirrors the primitive selected by acquisition and always targets byte zero on
-# Windows; callers invoke it from finally so exceptions cannot leak ownership.
+# LLM: Gateway 解锁必须对应取锁平台原语，Windows 固定字节零；调用方在 finally 中执行，不能因业务异常泄漏锁所有权。
 # 函数用途: 释放当前 lock 文件的跨进程独占锁。
 def _flock_unlock(handle) -> None:
     if fcntl is not None:
@@ -604,8 +603,7 @@ def _flock_unlock(handle) -> None:
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-# LLM: msvcrt locks a byte range rather than an inode. Each lock file therefore owns one durable
-# sentinel byte, created before the first acquisition and never used as business data.
+# LLM: Gateway 的 Windows 锁依赖固定字节而非 inode；首次取锁前可写入哨兵字节，不得把锁文件当业务正文，修改须联查 Windows 锁测试。
 # 函数用途: 确保 Windows byte-range lock 有固定的第 0 字节可锁。
 def _ensure_windows_lock_byte(handle) -> None:
     handle.seek(0, 2)
@@ -615,8 +613,7 @@ def _ensure_windows_lock_byte(handle) -> None:
     handle.seek(0)
 
 
-# LLM: Only explicit lock-contention errors mean another process owns the transaction. Invalid
-# handles, disk faults, and unsupported operations must propagate instead of masquerading as busy.
+# LLM: Gateway 仅将明确 errno/winerror 锁竞争码视作占用；坏句柄、磁盘故障及不支持操作不得伪装为 busy。
 # 函数用途: 判断一次跨平台文件锁失败是否只是“锁正被其他进程占用”。
 def _is_file_lock_contention(exc: OSError) -> bool:
     contention_errnos = {errno.EACCES, errno.EAGAIN}
@@ -757,8 +754,7 @@ def _remove_orphan_lock_file(lock_path: Path, *, current: float | None = None) -
 STREAM_CHUNK_READ_MAX_BYTES = 8 * 1024 * 1024
 
 
-# LLM: Streaming JSONL readers may observe a writer between payload bytes and its trailing newline.
-# Only newline-terminated rows advance the byte cursor; trailing partial UTF-8 stays for the next poll.
+# LLM: Gateway JSONL 读者可遇写入中的半行；仅 LF 终结的完整行推进字节游标，尾部半个 UTF-8 留待下轮，修改须联查流式读取测试。
 # 函数用途: 从字节游标读取一批完整 UTF-8 行，保留尚未写完的最后一行而不误报或丢失。
 def read_complete_utf8_rows(
     path: Path,
@@ -789,6 +785,8 @@ def read_complete_utf8_rows(
     return tuple(rows), start + len(complete), decode_error
 
 
+# LLM: Gateway PID 读取仅解析文件整数，缺失或非法返回零；不证明进程存活，也不据此授予停止或回收权。
+# 函数用途: 从 PID 文件取得数字，读不到时给状态展示返回零。
 def read_pid(path: Path) -> int:
 
     try:
@@ -797,6 +795,8 @@ def read_pid(path: Path) -> int:
         return 0
 
 
+# LLM: Gateway 日志展示读口整文件读取并容错解码，OSError 返回空列表；非正行数返回全文，不可误作有界安全正文读口。
+# 函数用途: 提取日志最后若干行，供诊断展示，不改变日志文件。
 def tail_lines(path: Path, line_count: int) -> list[str]:
 
     try:
@@ -816,6 +816,8 @@ def new_gateway_request_id() -> str:
     return f"{GATEWAY_REQUEST_ID_PREFIX}{int(time.time())}-{uuid.uuid4().hex}"
 
 
+# LLM: Gateway 响应路径由已核验 request_id 与当前 paths 拼接，此处不验证身份、不建目录；调用方必须先守住请求归属和 ID 合同。
+# 函数用途: 取得某个请求在 responses 目录中的 JSON 文件路径。
 def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
 
     return paths.responses / f"{request_id}.json"
@@ -865,6 +867,8 @@ def gateway_request_counts(paths: GatewayPaths, *, include_archives: bool = True
     return counts
 
 
+# LLM: Gateway 队列年龄只以 mtime 提供状态观测，不读正文、不授予调度或恢复权；修改字段须联查 heartbeat/status 消费方。
+# 函数用途: 展示等待队列和执行队列中最老文件的年龄。
 def gateway_queue_ages(paths: GatewayPaths) -> dict[str, float]:
     """结构化队列年龄观测：最老 pending 等待秒数与最老 processing lease 年龄。
 
@@ -872,6 +876,8 @@ def gateway_queue_ages(paths: GatewayPaths) -> dict[str, float]:
     不参与任何调度或恢复决策。"""
     now = time.time()
 
+    # LLM: Gateway 年龄观测复用外层同一 now；目录或 stat 失败保守返回零，不将展示值作为租约失效证明。
+    # 函数用途: 读取目录中 JSON 的最早修改时间并换算秒数，不写入队列。
     def oldest_age(path: Path) -> float:
         try:
             mtimes = [item.stat().st_mtime for item in path.glob("*.json") if item.is_file()]
@@ -949,8 +955,7 @@ def write_gateway_request_once(paths: GatewayPaths, payload: dict, *, commit_tra
     return gateway_response_path(paths, receipt.request_id), created
 
 
-# LLM: The digest is a structured ingress fact written by the HTTP/client builder. Absence is
-# represented explicitly so legacy random-id requests can never compare equal to idempotent input.
+# LLM: Gateway 客户端输入摘要来自 HTTP/客户端结构化 metadata；缺值保持空，旧随机请求不能借缺值与幂等输入判等。
 # 函数用途: 读取一次幂等 Gateway 请求的稳定输入指纹。
 def _gateway_client_input_digest(payload: dict) -> str:
     metadata = payload.get("metadata")
@@ -958,13 +963,13 @@ def _gateway_client_input_digest(payload: dict) -> str:
     return str(metadata.get("client_input_digest") or "").strip()
 
 
+# LLM: Gateway 历史兼容写口委托唯一去重实现，可能追加或原子修复磁盘历史；不返回是否写入，修改须联查 once 入口。
+# 函数用途: 将请求历史同步到可重建的历史投影，按请求号去重。
 def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
     append_gateway_history_once(paths, payload)
 
 
-# LLM: History is a rebuildable projection keyed by canonical request id. One global transition
-# lock plus an mtime-invalidated in-process index makes normal appends O(1) after one file scan;
-# conflicting/duplicate rows are atomically replaced by the canonical payload.
+# LLM: Gateway 历史按规范请求号维护可重建投影；全局事务锁与版本缓存保护追加，冲突/重复行以规范正文原子替换，非终态权威。
 #   落盘走私有追加/原子重写（0600/0700），存量宽权限历史下次写入即收紧；内容逐字节不变。
 # 函数用途: 按请求 ID 最多保留一条准确历史记录，并返回本次是否实际写入或修复。
 def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
@@ -1062,8 +1067,7 @@ def _cache_gateway_history_snapshot(key: str, stamp: tuple[int, int], lines: lis
             total -= removed[0][1]
 
 
-# LLM: mtime and size detect writes from other Gateway processes without making this cache a
-# cross-process authority.
+# LLM: Gateway 历史缓存以 mtime/size 感知其它进程写入，仅作失效提示；不得将缓存戳当跨进程状态或执行授权。
 # 函数用途: 返回历史文件当前缓存校验戳，不存在时用零值。
 def _gateway_history_stamp(path: Path) -> tuple[int, int]:
     try:

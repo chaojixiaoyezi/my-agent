@@ -1,3 +1,11 @@
+## 2026-10-29 e905 sol-2：Round 2 修复地图
+
+- `agent_py_agent/agent/user_space/owner_quota.py`：16 owner LRU、确定性路径续点、持久部分合计及过期/修订校验；完成后发布最终观察账，仍不等同封闭写域增长许可。
+- `agent_py_agent/agent/user_space/home_retention.py`：全部登记类别的显式保留核验锚点、`schema_generation/maintenance_epoch` 栅栏合同；核验仅元数据、不读取正文、不删除。
+- `agent_py_agent/agent/user_space/owner_maintenance.py`：原锁内默认周期绑定、动作/游标/最终状态 CAS、可选配额预算；`global_indexes` 明确 host 协调延期，其他专门模块的保留核验不冒称实际清理。
+- `agent_py_agent/tests/test_owner_quota_incremental_recovery.py`、`test_opt_maintenance_registry.py`、`test_gateway_receipt_archive.py`：交替及缓存丢失恢复、跨类别冲突、绑定与幂等/真实 partial 回归。
+- `docs/modules/gateway/02-progress.md`、`04-structure.md`、`docs/design/STORAGE_RETENTION.md`：同步终态回执副本归档、安全 header 读取、多 owner 维护与未验证边界。下方 Round 1 地图保留历史，当前范围见本节及 `TESTS.md` Round 2。
+
 ## 2026-10-29 e905 sol-2：Round 1 局部代码地图（未完成整席接线）
 
 - `agent_py_agent/agent/contracts/optimization_contracts.py`：R1 版本拒写、未知字段深复制往返合同；当前只有部分原写入口采用。

@@ -1,3 +1,31 @@
+## 2026-10-29 e905 sol-2 Round 2：多 owner 续扫、维护 CAS 与门禁修复
+
+来源：`fix-e905-sol-2-r2.md`、`report-rereview-e905-sol-2-astra1.md`；本轮增量基点 `ec7217e44`，文档同步比较基线 `4bea324e3`。下方 Round 1 小节保留历史，以本节说明当前候选的变化；不代表原存储治理整席或生产上线完成。
+
+- B01：后台配额扫描使用最多 16 个 owner 的 LRU；持久化字典序 `last_relpath`、累计字节/inode/scanned、epoch、起始时间、根身份及账本修订。淘汰或清空缓存后从未过期且修订匹配的续点恢复；完成才发布最终合计。排序每层只留 128 个候选，枚举准备逐项受时间及 `max(1024, 4*max_entries)` 原始枚举额度约束；每个挂起扫描最多持有一个目录流及其绑定 FD，深度上限 64；单次文件系统调用仍是合作式时间预算，不宣称慢磁盘硬实时或封闭写域 verified-delta。
+- B02：默认周期覆盖全部登记类别；配额对账、Gateway 副本封存仍是原领域的两个实际推进入口。专门模块负责的类别绑定有界 `preserve_only` 锚点元数据核验，明确 `content_verified=False`、不递归读取/删除内容；`complete` 仅表示该次保留核验完成。host 范围的 `global_indexes` 明确 `coordinator_deferred`，不冒充 owner 扫描。动作前、回执提交游标前及最终状态落盘均核对 `schema_generation/maintenance_epoch`；冲突拒绝推进，保留旧游标。并未封闭仓库所有业务写者。
+- B04：默认入口可显式传 `quota_max_ms/quota_max_entries`，默认仍为 10 ms/256 项。归档幂等测试在充足预算下最多推进八拍后再验证次日无重复段；单独的小预算测试必须返回真实 partial，未放宽该断言。
+- B03/B05：补充本分支全部改动 Python 文件的中文模块/定义双层注释；Gateway 进展、结构及存储保留文档同步说明真实实现范围与欠账。
+
+新回归：`test_owner_quota_incremental_recovery.py` 覆盖 A/B 各 300 个 1 字节文件、A/B/A/B 交替（含每拍清空缓存）第二轮各得 300 字节/300 inode、嵌套字典序续扫和有界 LRU；`test_opt_maintenance_registry.py` 覆盖默认绑定、跨类别 generation/epoch 冲突和最终状态 CAS；`test_gateway_receipt_archive.py` 分开验证幂等与小预算待续。对应缺陷测试已先失败后通过。独立静态审查另发现排序准备无界、旧 complete 掩盖新周期未执行、非法 epoch 拒绝过晚及祖先链接替换竞态；五项补充回归先全红，再于三文件 70 项回归通过。修正增加持久 `pending_kinds` 周期责任、维护动作前完整头校验及 FD-relative 锚点核验，并额外覆盖默认入口新周期零工作仍待续。
+
+当前组合验证：十二文件 **189 passed，0 failures/errors/skipped**；Ruff `All checks passed!`、import boundaries `[]`、文档 `DOC_SYNC_PASS`、diff 检查及 clean package 均退出 0。独立脚本核对基线至当前的 19 个 Python 文件、494 个定义、19 个模块头，双层中文缺失及纯英文 `LLM:` 均 0。纯注释子补丁 5 个 Python 文件与前像 AST 等价，未改变行为。
+
+一次组合首跑在增强祖先竞态探针后为 188 通过/1 失败：透明 `os.stat` 包装改变了函数身份，被真实 `supports_dir_fd` 能力探测拒绝。只在测试中先断言原 stat 确有 dir_fd 能力，再将透明包装的身份映射加入同一能力集合；没有修改产品安全探测或放宽原父 inode 断言。重跑同一十二文件入口及后续全部门禁通过。
+
+复现（工作树根；缓存/测试 owner 外置，`PYTHONPATH` 指当前源码根）：
+
+```bash
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_maintenance_registry.py agent_py_agent/tests/test_shutdown_total_deadline.py agent_py_agent/tests/test_config_migration_transaction.py agent_py_agent/tests/test_gateway_receipt_archive.py agent_py_agent/tests/test_owner_quota_incremental_recovery.py agent_py_agent/tests/test_private_writes_batch3.py agent_py_agent/tests/test_owner_quota.py agent_py_agent/tests/test_gateway_owner_retention.py agent_py_agent/tests/test_gateway_owner_maintenance.py agent_py_agent/tests/test_queue_worker.py agent_py_agent/tests/test_runtime_db.py agent_py_agent/tests/test_runtime_schema.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol2_fix2
+ruff check --no-cache agent_py_agent scripts
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_import_boundaries.py --json
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_doc_sync.py --base 4bea324e3
+git diff --check
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_clean_package.py .
+```
+
+测试使用临时 owner，无生产维护、部署或删除。完整 R1 原语、所有业务写者 fencing、大 owner 增长准入、全 reader 切换及生产删除仍未验证/未完成。极大单目录在排序准备中被反复淘汰/每拍重启可能重做尚未持久化的选名阶段，不能承诺该极端情形每拍都有路径推进；LRU/重启不丢已持久化合计，但不等于慢 I/O 硬截止或无限故障下保证收敛。
+
 ## 2026-10-29 e905 sol-2 Round 1：事务栅栏、故障日志和受保护维护接线
 
 来源：`continue-sol-2-c2.md`、`report-review-e905-sol-2-astra2.md`，续作工作树 `/tmp/wt-e905-sol-2`；以 `c4e9527af` 为本轮差异基点。下一个同日小节保留第一阶段历史，涉及“尚未实现”的旧结论以本节实际范围为准；仍不是原任务整席完成。

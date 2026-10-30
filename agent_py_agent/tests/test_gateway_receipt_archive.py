@@ -167,15 +167,16 @@ def test_default_owner_maintenance_runs_protected_storage_adapters(tmp_path, hol
     marker = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     storage = marker.get('storage_maintenance', {})
     assert {'gateway_terminal', 'cache_tmp_trash'} <= set(storage.get('cursors', {}))
-    assert storage['partial'] and storage['unbound_kinds']
+    assert storage['unbound_kinds'] == []
+    assert storage['coordinator_deferred'] == ['global_indexes']
     assert (home.owner_home_dir / '.owner-quota-ledger.json').is_file()
     assert bool(list((paths.root / 'archive').glob('receipts-seg-*.jsonl'))) is not hold
     assert (paths.terminal / 'request-a.json').exists()
     assert (paths.responses / 'request-a.json').exists()
 
 
-# LLM: 不删除原件的默认维护仍须幂等；不因未接线类别重复创建同一归档。
-# 函数用途: 验证真实维护重跑不重复发布相同前像，未接线不触发立即忙循环。
+# LLM: 配额首次扫描用显式有界预算推进，完成后仍核归档幂等和原周期不忙循环。
+# 函数用途: 验证真实维护可收敛且下一周期不会重复发布同一终态副本。
 def test_default_maintenance_archive_is_idempotent_without_busy_partial(tmp_path):
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_maintenance import (
@@ -187,13 +188,24 @@ def test_default_maintenance_archive_is_idempotent_without_busy_partial(tmp_path
     home = ensure_my_agent_home(tmp_path / 'home')
     paths = gateway_paths_from_root(runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace'])
     _settled(paths)
-    for now in (2_000_000, 2_086_401):
-        assert run_owner_retention_if_due(home, now=now, include_global_indexes=False).ran
+    for tick in range(8):
+        now = 2_000_000 + tick
+        assert run_owner_retention_if_due(home, now=now, include_global_indexes=False,
+            quota_max_ms=1000, quota_max_entries=4096).ran
+        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+        if not state['maintenance_partial']:
+            break
+    assert state['maintenance_partial'] is False
+    assert state['storage_maintenance']['continuation_pending'] is False
+    assert run_owner_retention_if_due(home, now=2_086_401, include_global_indexes=False,
+        quota_max_ms=1000, quota_max_entries=4096).ran
     manifest = json.loads((paths.root / 'archive' / 'receipts-manifest.json').read_text())
     assert manifest['segment_count'] == 1
     state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     assert state['storage_maintenance']['partial'] is True
     assert state['maintenance_partial'] is False
+    assert state['storage_maintenance']['cursors']['gateway_terminal']['archived_requests'] == 0
+    assert state['storage_maintenance']['continuation_pending'] is False
     assert not owner_maintenance_due(home.owner_home_dir, now=2_086_402)
 
 
@@ -217,3 +229,18 @@ def test_storage_maintenance_defers_without_authorized_adapter_protocol(tmp_path
     assert result['partial'] and result['unbound_kinds']
     assert result['continuation_pending'] is False and result['deletion_enabled'] is False
     assert not (home.owner_home_dir / '.owner-quota-ledger.json').exists()
+
+
+# LLM: 单片不足必须保留待续责任，不能为幂等测试变绿把真实partial改成完成。
+# 函数用途: 用一项预算确定性触发默认维护配额未完成。
+def test_default_maintenance_small_quota_budget_reports_partial(tmp_path):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    assert run_owner_retention_if_due(home, now=2_000_000, include_global_indexes=False,
+        quota_max_entries=1, quota_max_ms=1000).ran
+    state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+    assert state['maintenance_partial'] is True
+    assert state['storage_maintenance']['continuation_pending'] is True
+    assert state['storage_maintenance']['cursors']['cache_tmp_trash']['complete'] is False
