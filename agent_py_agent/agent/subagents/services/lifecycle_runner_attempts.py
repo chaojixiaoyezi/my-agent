@@ -1,7 +1,7 @@
 # LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
 # 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
-# LLM: 子代理换轮在原创建锁内使用 canonical run/attempt；插话只按已确认失效身份改绑，联测恢复资格与 UNKNOWN。
-# 模块用途: 协调执行轮的领取、恢复和精确放弃，保持运行账本、任务与插话身份一致。
+# LLM: 子代理换轮在原创建锁内复核canonical坏历史，拒绝先于DB激活/关联恢复；reducer再次核验，联测准入与UNKNOWN。
+# 模块用途: 协调执行轮的领取、恢复和精确放弃，坏账不能靠恢复指令或用户停止资格绕过。
 from __future__ import annotations
 
 from ...common.request_execution_ports import gateway_short_transaction
@@ -23,17 +23,26 @@ from ..recovery_eligibility import user_stopped_run_is_resumable
 from .recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
+    manager_no_progress_attempt_limit,
+    recovery_count,
 )
 
 
+# LLM: 原启动边界的类型化拒绝，继承准确身份冲突合同；批次只捕获本类生成未应用记录，不吞其它冲突。
+# 类用途: 明确表示坏恢复历史需要人工复核，不允许预留或激活执行轮。
+class RunnerRecoveryHistoryUnknownError(RuntimeConflictError):
+    reason = "recovery_history_unknown"
+
+
 # LLM: 原创建锁覆盖 canonical 复读、准确激活和投影；文件消费与活动指针同次 mutate，先核对身份才可恢复链接与 Goal。
-# 函数用途: 在同一短事务里准备新执行轮和恢复目标，避免取消或插话在换代中间插入。
+# 函数用途: 用原配置阈值生成恢复指令，在同一短事务里准备执行轮和恢复目标，避免取消或插话换代竞态。
 # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
 # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def prepare_runner_attempt(
     manager: object, run_id: str, *, retry_reason: str = "",
     expected_attempt_id: str | None = None,
 ) -> SubAgentTask:
+    no_progress_limit = manager_no_progress_attempt_limit(manager)
     with gateway_short_transaction('child_attempt_prepare'):
         with manager.creation_guard():
             task = manager.load(run_id)
@@ -41,7 +50,7 @@ def prepare_runner_attempt(
             _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
             previous = f"{task.status}/{task.failure_type or 'none'}"
             strategy = build_subagent_recovery_strategy(
-                SubagentRecoveryStrategyRequest(task=task)
+                SubagentRecoveryStrategyRequest(task=task, no_progress_attempt_limit=no_progress_limit)
             )
             attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task, expected_attempt_id)
             if resumable_user_stop:
@@ -93,13 +102,17 @@ def prepare_runner_attempt(
             return task
 
 
-# LLM: 终态资格只是接纳前提，不代替 DB 精确 pending 检查；拒绝使用冲突类型，旧 worker 不发布结果。
-# 函数用途: 检查任务生命周期是否仍允许启动，保留来源工作者的原结构化门。
+# LLM: 预留和激活在原写边界共用纯计数校验；坏账先于任何状态写入拒绝，用户停止只放宽终态，不覆盖坏账或准确attempt门。
+# 函数用途: 检查最新canonical是否仍允许启动；坏历史抛类型化冲突，原生命周期和来源工作者门继续生效。
 def _assert_runner_attempt_start_allowed(
     task: SubAgentTask,
     *,
     resumable_user_stop: bool,
 ) -> None:
+    if recovery_count(task, "recovery_history_unknown_count"):
+        raise RunnerRecoveryHistoryUnknownError(
+            f"runner attempt requires recovery history review: run_id={task.id}"
+        )
     if (
         task_status_in(task.status, SUBAGENT_RECOVERY_CLOSED_STATUSES)
         and not resumable_user_stop

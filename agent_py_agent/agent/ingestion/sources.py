@@ -1,5 +1,5 @@
-# LLM: 多来源共用原 DrainResult；最近真实请求的 query_evidence 只作为回执，不改变游标/请求/权限。
-# 模块用途: 按原声明来源边界拉取记录并如实携带瞬时查询观察。
+# LLM: 多来源共用原DrainResult；文件采样直接使用有预算的drain_file_source，不保留无人调用的包装入口。
+# 模块用途: 按声明边界拉取完整记录，携带真实查询观察，不改变请求或权限。
 """多形态数据源:file、poll、cursor 与 prepare 现场学习 adapter 的统一 drain 入口。
 
 四种进数据方式的源侧支撑:
@@ -440,18 +440,6 @@ def _line_event(text: str) -> dict:
     return {"line": text}
 
 
-def sample_file_lines(
-    path: Path,
-    count: int,
-    *,
-    delimiter: bytes = b"\n",
-) -> tuple[list[dict], str]:
-    """file 源从文件头按同一记录边界只读取样，不动正式游标。"""
-    budget = DrainBudget(max_events=count, page_limit=count, deadline=time.time() + 15)
-    drain = drain_file_source(path, 0, 0, budget, delimiter=delimiter)
-    return [event for _seq, event in drain.events], drain.error
-
-
 def file_record_delimiter(state) -> bytes:
     envelope = (
         state.source_envelope
@@ -594,6 +582,5 @@ __all__ = [
     "file_record_delimiter",
     "load_file_fragment",
     "persist_file_fragment",
-    "sample_file_lines",
     "source_kind",
 ]

@@ -22,6 +22,7 @@ from ...subagents.models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
     PROVIDER_SUPPLY_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
+    SUBAGENT_RETRYABLE_FAILURE_STATUSES,
     TaskStatus,
     known_failure_type,
     task_has_status,
@@ -29,6 +30,11 @@ from ...subagents.models import (
 )
 from ...subagents.recovery_eligibility import user_stopped_run_is_resumable
 from ...subagents.runner_session_liveness import has_fresh_runner_session
+from ...subagents.services.recovery.strategy import (
+    SubagentRecoveryStrategyRequest,
+    _no_progress_fuse,
+    recovery_count,
+)
 from .dispatch_record import RunnerDispatchRecordParams
 from .dispatch_record import runner_dispatch_record as _runner_dispatch_record
 from .worker import RunSubagentWorkerParams, _run_subagent_worker
@@ -38,13 +44,14 @@ if TYPE_CHECKING:
 
 
 # LLM: runner_retry_limit 是普通失败后还能自动重跑几次（0 = 不重跑）；只有调度入口按配置
-#   runner_failure_retry_limit 传入，规划、能力清扫等默认策略只接续不重跑。临时供应失败另走独立上限。
-# 类用途: 保存一次候选挑选的普通重试上限、后台启动标识与部署守卫策略快照。
+#   runner_failure_retry_limit传入；no_progress_attempt_limit由生产调用方传能力配置，0关闭，None仅兼容纯函数策略默认值。
+# 类用途: 保存一次候选挑选的普通重试上限、后台启动标识、部署守卫策略快照与无进展上限。
 @dataclass(frozen=True)
 class RunnerCandidatePolicy:
     runner_retry_limit: int = 0
     background_launch_id: str = ""
     runtime_guard_policy: RuntimeGuardPolicy | None = None
+    no_progress_attempt_limit: int | None = None
 
 
 # LLM: 已传入的策略原样复用；未传入时构造不允许普通失败重跑的默认策略，不读取任务或启动 runner。
@@ -131,35 +138,42 @@ def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = 
     return runtime_guard_int("provider_transient_redispatch_limit", 8, policy=runtime_policy)
 
 
-# LLM: 这是同一 run 自动重跑的唯一计数闸：已重跑次数（runner_attempts - 1）达到上限即停；
-#   临时供应失败取 max(普通上限, provider_transient_redispatch_limit)，可恢复的用户停止直接返回续跑标签。
-#   返回空串表示不重跑，非空串只作记录标签；此函数不修改尝试次数。
-# 函数用途: 判断一个失败的 run 还能不能自动再跑一次，能的话给出“第几次重跑”的说明。
-def _runner_retry_reason(task: SubAgentTask, runner_retry_limit: int, *, runtime_policy: RuntimeGuardPolicy | None = None) -> str:
+# LLM: 读取统一验证后的计数，坏账即拒绝，干净旧记录保守迁移；正常切片不耗失败额度，0仅关闭无进展熔断。
+# 函数用途: 判断一个失败的run还有没有真实重试额度。
+def _runner_retry_reason(
+    task: SubAgentTask,
+    runner_retry_limit: int,
+    *,
+    runtime_policy: RuntimeGuardPolicy | None = None,
+    no_progress_attempt_limit: int | None = None,
+) -> str:
 
     if user_stopped_run_is_resumable(task):
         return "reason_code=conversation_user_stop; mode=same_run_resume"
     failure_type = _runner_failure_type(task)
-    effective_max = max(max(0, int(runner_retry_limit or 0)), _provider_supply_retry_limit(failure_type, runtime_policy=runtime_policy))
-    retryable_statuses = frozenset({
-        TaskStatus.BLOCKED.value,
-        TaskStatus.FAILED.value,
-        TaskStatus.TIMEOUT.value,
-    })
-    if not task_status_in(task.status, retryable_statuses):
+    if (recovery_count(task, "recovery_history_unknown_count") or 0) > 0:
         return ""
+    effective_max = max(
+        max(0, int(runner_retry_limit or 0)),
+        _provider_supply_retry_limit(failure_type, runtime_policy=runtime_policy),
+    )
+    limit = (SubagentRecoveryStrategyRequest(task).no_progress_attempt_limit
+             if no_progress_attempt_limit is None else no_progress_attempt_limit)
+    if _no_progress_fuse(task, limit):
+        return ""
+    if not task_status_in(task.status, SUBAGENT_RETRYABLE_FAILURE_STATUSES):
+        return ""
+    if failure_type == "host_shutdown_interrupted" and getattr(task, "_extra_fields", {}).get("recovery_safe_resume") is True:
+        return "reason_code=host_shutdown_interrupted; mode=same_run_resume"
     if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
         return ""
-    retries = _retry_count_after_initial_attempt(max(0, int(task.runner_attempts or 0)))
+    counter = "provider_retry_count" if failure_type in PROVIDER_SUPPLY_FAILURE_TYPES else "failure_retry_count"
+    retries = recovery_count(task, counter)
+    if retries is None or (recovery_count(task, "recovery_history_unknown_count") or 0) > 0:
+        return ""
     if retries >= effective_max:
         return ""
     return f"failure_type={failure_type}; retry={retries + 1}/+{effective_max}"
-
-
-# LLM: 首次执行不算重跑，将总尝试次数减一并收紧到非负数；只做计数换算，不消耗或修改预算。
-# 函数用途: 为自动重试上限比较取得已发生的重跑次数。
-def _retry_count_after_initial_attempt(attempts: int) -> int:
-    return max(0, int(attempts) - 1)
 
 
 # LLM: 只检查已完成任务的输出补丁，按输入顺序返回 ID；可能读取输出 JSON，但不审阅、应用补丁或改状态。
@@ -279,8 +293,7 @@ def _limit_items(items: list, limit: int) -> list:
     return list(items)[:limit]
 
 
-# LLM: 统一门禁先核查来源岗位、类型化直系子级等待、执行轮和心跳，再排除终态、通道损坏及能力阻塞。
-#   阻塞、失败和超时按授权或重试策略放行；正常等待子级不是孤儿，任务文案和进度清单不参与判定。
+# LLM: 唯一候选门先拒坏恢复账，再按显式配置检查无进展熔断；真实等孩子不是孤儿，不读正文/进度猜资格。
 # 函数用途: 判断一个子代理 run 能否被启动或恢复，并排除正常等孩子的父级。
 def _is_dispatch_runner_candidate(
     task: SubAgentTask,
@@ -289,6 +302,8 @@ def _is_dispatch_runner_candidate(
 ) -> bool:
 
     effective_policy = candidate_policy(policy)
+    if (recovery_count(task, "recovery_history_unknown_count") or 0) > 0:
+        return False
     if not _source_worker_dispatch_allowed(task):
         return False
     from ...subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
@@ -317,9 +332,23 @@ def _is_dispatch_runner_candidate(
     if task_has_status(task, TaskStatus.BLOCKED):
         if _blocked_after_capability_grant(task):
             return True
-        return bool(_runner_retry_reason(task, effective_policy.runner_retry_limit, runtime_policy=effective_policy.runtime_guard_policy))
+        return bool(
+            _runner_retry_reason(
+                task,
+                effective_policy.runner_retry_limit,
+                runtime_policy=effective_policy.runtime_guard_policy,
+                no_progress_attempt_limit=effective_policy.no_progress_attempt_limit,
+            )
+        )
     if task_status_in(task.status, {TaskStatus.FAILED.value, TaskStatus.TIMEOUT.value}):
-        return bool(_runner_retry_reason(task, effective_policy.runner_retry_limit, runtime_policy=effective_policy.runtime_guard_policy))
+        return bool(
+            _runner_retry_reason(
+                task,
+                effective_policy.runner_retry_limit,
+                runtime_policy=effective_policy.runtime_guard_policy,
+                no_progress_attempt_limit=effective_policy.no_progress_attempt_limit,
+            )
+        )
     # 续派候选兜底：PLANNING/PENDING 同为"待启动 runner"的可派工态(对齐 state_machine.DISPATCHABLE_STATES)。
     # PENDING 是子代理被 background 启动后 runner 进程被回收(orphan)留下的停滞孤儿态——原先只认 PLANNING,
     # 导致这类孤儿永不被续派、多子代理任务死循环卡死。正在启动中的 PENDING 已被本函数开头的

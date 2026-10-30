@@ -1,3 +1,5 @@
+# LLM: adapter测试保留来源位置去重及原始事件合同；harvest checkpoint严格区分来源字段与持久宿主控制信息。
+# 模块用途: 验证来源适配、checkpoint运输和跨拍重启去重，不把宿主调度元数据误判为来源进度。
 from __future__ import annotations
 
 import json
@@ -527,6 +529,8 @@ def test_opaque_checkpoint_shares_the_harvest_commit_and_rollback_boundary(tmp_p
     assert restored.cursor == 10
 
 
+# LLM: 重叠页必须按来源位置去重而非正文合并，原cursor/spool/raw断言保持；宿主控制须完整且重载前后一致。
+# 函数用途: 验证跨拍和重启去重，同时严格检查来源checkpoint及宿主持久调度合同。
 def test_adapter_record_keys_deduplicate_overlap_across_cycles_and_restart(
     monkeypatch,
     tmp_path: Path,
@@ -587,7 +591,14 @@ def test_adapter_record_keys_deduplicate_overlap_across_cycles_and_restart(
     assert state.cursor == 2
     assert state.spool_seq == 2
     assert state.totals["source_duplicates"] == 1
-    assert state.source_checkpoint == {"overlap_start": 100}
+    assert {key: value for key, value in state.source_checkpoint.items() if key != "_host_harvest"} == {
+        "overlap_start": 100,
+    }
+    control = state.source_checkpoint["_host_harvest"]
+    assert type(control["next_due_at"]) is float
+    assert 0 < control["next_due_at"] < float("inf")
+    assert control == {"error_backoff_seconds": 0.0, "next_due_at": control["next_due_at"],
+                       "partial": False, "stop_reason": "source_end"}
     assert unseen_source_record_keys(
         state,
         ["source-position:one", "source-position:two", "source-position:three"],
@@ -595,11 +606,22 @@ def test_adapter_record_keys_deduplicate_overlap_across_cycles_and_restart(
 
     restored = load_state(tmp_path, state.watch_id)
     assert restored is not None
+    assert restored.source_checkpoint == state.source_checkpoint
+    assert restored.source_checkpoint["_host_harvest"] == control
     assert hv._harvest_cycle(restored, lambda _request: (True, {}, "")) is True
     assert restored.cursor == 3
     assert restored.spool_seq == 3
     assert restored.totals["source_duplicates"] == 3
-    assert restored.source_checkpoint == {"overlap_start": 100}
+    assert {key: value for key, value in restored.source_checkpoint.items() if key != "_host_harvest"} == {
+        "overlap_start": 100,
+    }
+    control = restored.source_checkpoint["_host_harvest"]
+    assert type(control["next_due_at"]) is float
+    assert 0 < control["next_due_at"] < float("inf")
+    assert control == {"error_backoff_seconds": 0.0, "next_due_at": control["next_due_at"],
+                       "partial": False, "stop_reason": "source_end"}
+    reloaded = load_state(tmp_path, restored.watch_id)
+    assert reloaded.source_checkpoint == restored.source_checkpoint
     rows = [
         json.loads(line)
         for line in hv.spool_path(restored).read_text(encoding="utf-8").splitlines()

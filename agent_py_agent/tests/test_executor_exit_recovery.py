@@ -1,3 +1,5 @@
+# LLM: 在临时RuntimeDB与受控执行区间验证exact退出事实，不碰真实网关/owner；UNKNOWN始终优先。
+# 模块用途: 覆盖子代理退出收口、宿主中断安全接续及效果未知反例。
 from __future__ import annotations
 
 import json
@@ -250,3 +252,23 @@ def test_host_shutdown_mark_only_touches_its_own_running_executor(tmp_path):
     finally:
         release.set()
         worker.join(5)
+
+
+# LLM: 沿真实退出服务、RuntimeDB和canonical提交验证安全证据；无标记或未知效果绝不进入安全续作分支。
+# 函数用途: 防止安全中断只新增一个永远不会置位的标记，或错误重放未知工具。
+@pytest.mark.parametrize(("marked", "uncertain"), [(True, False), (False, False), (True, True)])
+def test_executor_safe_interruption_dispatch_proof(tmp_path, marked, uncertain):
+    from agent_py_agent.agent.agent_core.runner.dispatch import _runner_retry_reason
+
+    running = _running(tmp_path)
+    manager, task, _attempt, _run = running
+    finish = _executor_taken_by_process_exit(running, marked=marked, uncertain=uncertain)
+    try:
+        recover_exited_runner(manager, manager.load(task.id))
+    finally:
+        finish()
+    task = manager.load(task.id)
+    reason = _runner_retry_reason(task, 1)
+    assert ("mode=same_run_resume" in reason) == (marked and not uncertain)
+    if uncertain:
+        assert not reason

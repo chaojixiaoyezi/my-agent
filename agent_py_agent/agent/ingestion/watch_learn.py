@@ -1,3 +1,5 @@
+# LLM: sample只描述本次有限读取；后页错误与partial必须随统计及配置回执保真，不冒充全源覆盖。
+# 模块用途: 提供取样统计与配置能力，保留实际读取范围、错误和停止原因。
 """watch_stream 的「学判据」层:sample(抓样本+字段分布)与 configure(灌判据 spec)。
 
 learn → configure → monitor 里,learn 由模型干:sample 给它原始样本(截断)+ 全样本
@@ -57,24 +59,29 @@ AUDIT_SAMPLE_GUIDANCE = (
 )
 
 
+# LLM: 部分成功保存本次统计；0条失败只更新覆盖/错误，保留旧fields及其原取样时间，不推进正式游标。
+# 函数用途: 返回带完整性回执的取样结果，失败不伪装成来源没有数据。
 def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> ToolHandlerOutcome:
     """抓一批原始样本(从源滚动缓冲最旧处顺读,不动盯守游标),给模型学判据。
     每字段取值分布同时缓存进 watch 状态(configure 校验 target 频次的样本证据)。
     file 源=读文件头 N 行;poll 源=原样查一次接口包成单条样本;cursor 源=翻页顺读。"""
     count = _sample_count(params)
-    events, error, error_code = _sample_events(fetch_json, state, count)
-    if error and not events:
-        return _err(f"取样失败: {error}", error_code or "NETWORK_REQUEST_FAILED")
+    events, error, error_code, coverage = _sample_events(fetch_json, state, count)
     stats = _field_stats(events)
     if not state.audit_guarantee:
         with state.lock:
-            state.last_sample_digest = _sample_cache(len(events), stats)
+            digest = dict(state.last_sample_digest) if error and not events else _sample_cache(len(events), stats)
+            state.last_sample_digest = {**digest, "sample_coverage": coverage, "error": error, "error_code": error_code}
             persist_state(state)
     payload = {
         "ok": True,
         "action": "sample",
         "watch_id": state.watch_id,
         "sampled_events": len(events),
+        "partial": coverage["completeness"] == "partial",
+        "sample_coverage": coverage,
+        "error": error,
+        "error_code": error_code,
         "source_envelope": public_source_envelope(state.source_envelope),
         "current_spec": (
             None
@@ -87,27 +94,32 @@ def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> Tool
     }
     if not state.audit_guarantee and state.judgment_note:
         payload["judgment_note"] = state.judgment_note
+    if error and not events:
+        payload["ok"] = False
+        return ToolHandlerOutcome(_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False),
+                                  error_code=error_code or "NETWORK_REQUEST_FAILED", result_envelope=payload)
     return _ok(payload)
 
 
-def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict], str, str]:
+# LLM: 三种源复用原drain，不清除后页错误；requested表示本次取样目标，不是全源总量。
+# 函数用途: 把原读取结果与其实际覆盖事实一起交给取样层。
+def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict], str, str, dict]:
     """按源类型取样;返回 (events, error, error_code)。"""
     from .sources import (
+        drain_file_source,
         drain_poll_source,
         file_path_of,
         file_record_delimiter,
-        sample_file_lines,
         source_kind,
     )
 
     kind = source_kind(state.source_url, state.source_mode)
+    budget = DrainBudget(max_events=count, page_limit=min(state.tuning.page_limit, count),
+                         deadline=time.time() + _SAMPLE_FETCH_SECONDS)
     if kind == "file":
-        events, error = sample_file_lines(
-            file_path_of(state.source_url),
-            count,
-            delimiter=file_record_delimiter(state),
-        )
-        return events, error, "NETWORK_REQUEST_FAILED" if error else ""
+        drain = drain_file_source(file_path_of(state.source_url), 0, 0, budget,
+                                  delimiter=file_record_delimiter(state))
+        return _sample_observation(drain, count, kind)
     if kind == "poll":
         # 快照接口:样本=当下这一份响应(节拍闸不拦 sample,学判据要现货)。
         drain = drain_poll_source(
@@ -117,12 +129,7 @@ def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict
             due=True,
             source_envelope=dict(state.source_envelope),
         )
-        return [event for _seq, event in drain.events], drain.error, drain.error_code
-    budget = DrainBudget(
-        max_events=count,
-        page_limit=min(state.tuning.page_limit, count),
-        deadline=time.time() + _SAMPLE_FETCH_SECONDS,
-    )
+        return _sample_observation(drain, count, kind)
     drain = drain_source(
         fetch_json,
         state.source_url,
@@ -134,13 +141,35 @@ def _sample_events(fetch_json, state: WatchState, count: int) -> tuple[list[dict
             else None
         ),
     )
-    return [event for _seq, event in drain.events], drain.error, drain.error_code
+    return _sample_observation(drain, count, kind)
+
+
+# LLM: 完整性只对本次取样目标成立；无EOF且未够数必为partial，错误码保留，未知错误不猜可重试性。
+# 函数用途: 统一生成可回读的样本覆盖、停止原因及来源位置。
+def _sample_observation(drain, count, kind):
+    from ..contracts.error_taxonomy import error_contract
+
+    events = [event for _seq, event in drain.events]
+    code = drain.error_code or ("NETWORK_REQUEST_FAILED" if drain.error else "")
+    complete = not drain.error and (drain.reached_end or len(events) >= count)
+    stop = ("source_error" if drain.error else "requested_count" if len(events) >= count
+            else "source_end" if drain.reached_end else "budget_exhausted")
+    contract = error_contract(code) if code else None
+    retryable = contract.retryable if contract is not None and contract.code == code else None
+    coverage = {"scope": "sample_only", "requested": count, "returned": len(events),
+                "completeness": "complete" if complete else "partial", "stop_reason": stop,
+                "reached_end": bool(drain.reached_end), "error_code": code, "retryable": retryable,
+                "source_boundary": {"kind": kind, "cursor": drain.cursor,
+                                    "checkpoint": drain.source_checkpoint, "pages": drain.pages}}
+    return events, drain.error, code, coverage
 
 
 # 判断笔记最多 2000 字符：判读理由精简落盘。
 _JUDGMENT_NOTE_CAP_CHARS = 2000
 
 
+# LLM: 沿原配置校验及持久化；回执只复述产生本次统计的取样覆盖，不把partial提升为全源结论。
+# 函数用途: 保存结构判据并保留样本证据的适用范围。
 def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolHandlerOutcome:
     """校验并灌入模型学出的判据 spec:引擎立即按 spec 盯,spec 随 watch 持久化。
     judgment_note(可选)= 轻量记忆:用户教的"这个来源/这类事怎么看"原文(样品说明/
@@ -182,6 +211,7 @@ def configure_spec(state: WatchState, params: dict[str, Any]) -> ToolHandlerOutc
         "watch_id": state.watch_id,
         "spec": dict(state.source_spec) if state.source_spec else None,
         "guidance": CONFIGURE_GUIDANCE,
+        "sample_coverage": state.last_sample_digest.get("sample_coverage"),
     }
     if state.judgment_note:
         payload["judgment_note"] = state.judgment_note

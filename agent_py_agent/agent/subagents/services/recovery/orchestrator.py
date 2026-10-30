@@ -1,4 +1,6 @@
 
+# LLM: 恢复编排沿原canonical任务与账本，只从组合根能力配置读阈值，正式回执保留未知观察事实。
+# 模块用途: 生成或执行原子代理恢复步骤，记录同源策略快照而不建立新权威。
 from __future__ import annotations
 
 import time
@@ -14,6 +16,7 @@ from .strategy import (
     SubagentRecoveryStrategy,
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
+    manager_no_progress_attempt_limit,
 )
 
 SCHEMA_VERSION = "subagent_recovery_orchestration.v1"
@@ -80,6 +83,8 @@ class SubAgentRecoveryOrchestrator:
         return report
 
 
+# LLM: 一次请求只读一次有效配置阈值，0关闭；坏配置向上传递，不以默认阈值偷偷生成自动恢复建议。
+# 函数用途: 从规范任务加载恢复策略并保留加载错误。
 def _strategies_for_request(
     manager: Any,
     request: RecoveryOrchestrationRequest,
@@ -87,6 +92,7 @@ def _strategies_for_request(
     load_errors: list[dict[str, object]] = []
     if request.strategies:
         return list(request.strategies)[: _positive_limit(request.max_items)], load_errors
+    no_progress_limit = manager_no_progress_attempt_limit(manager)
     run_ids = [item for item in request.run_ids if item]
     if not run_ids:
         run_ids, recoverable_errors = _recoverable_run_ids(manager, _positive_limit(request.max_items))
@@ -106,7 +112,9 @@ def _strategies_for_request(
             load_errors.append(_runtime_load_error(exc, "subagent_recovery_orchestration.load_task", run_id=run_id))
             continue
         strategies.append(
-            build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task, all_tasks=all_tasks))
+            build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(
+                task=task, all_tasks=all_tasks, no_progress_attempt_limit=no_progress_limit,
+            ))
         )
     return strategies, load_errors
 
@@ -284,6 +292,8 @@ def _append_ledger(manager: Any, report: RecoveryOrchestrationReport) -> None:
         append_private_jsonl_records(path, [payload], sort_keys=True)
 
 
+# LLM: 正式报告与JSONL恢复账本共用这一只读投影，未知观察不能在裁剪时丢失或冒称无进展。
+# 函数用途: 保存恢复动作所依据的现场与观察完整性。
 def _strategy_snapshot(strategy: SubagentRecoveryStrategy) -> dict[str, object]:
     """Small immutable breadcrumb for debugging why a recovery action was chosen."""
 
@@ -297,6 +307,7 @@ def _strategy_snapshot(strategy: SubagentRecoveryStrategy) -> dict[str, object]:
         "child_run_ids": list(strategy.child_run_ids),
         "leadership_recovery": strategy.leadership_recovery,
         "no_progress_fuse": strategy.no_progress_fuse,
+        "no_progress_unknown_count": strategy.no_progress_unknown_count,
     }
 
 

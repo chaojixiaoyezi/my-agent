@@ -1,3 +1,5 @@
+# LLM: 使用受控来源验证真实线程和事务；普通窗口不注入人工上界，末拍须补拉并如实记录无界partial。
+# 模块用途: 验证后台采集连续性、背压、窗口补拉收尾及重启续作。
 """后台连续摄取(harvester)钉子(§8-1 加难实锤:900 条/秒 + 源端滚动缓冲 ~6 分钟淘汰,
 模型研判期间无人拉流 → 淘汰即永久丢,命中全集中在早期序号)。
 
@@ -240,6 +242,8 @@ def test_close_stops_harvester_thread(owner_home):
     assert _wait_until(lambda: not handle.thread.is_alive(), timeout=10.0)
 
 
+# LLM: 不为普通来源人工注入finalization_boundary，实际收割线程须在到点补拉后退出。
+# 函数用途: 验证普通窗口结束后不会因缺少源端数字上界卡住。
 def test_window_complete_stops_harvester(owner_home, monkeypatch):
     source = _FakeSource()
     source.feed(10)
@@ -252,6 +256,8 @@ def test_window_complete_stops_harvester(owner_home, monkeypatch):
     assert _wait_until(lambda: not handle.thread.is_alive(), timeout=10.0)
 
 
+# LLM: 无人工上界的普通游标源也必须执行末次有界补拉；结束后不得继续采新数据。
+# 函数用途: 验证积压补拉、完成标记持久化及停止后的游标不变。
 def test_window_deadline_commits_one_final_cursor_catch_up(owner_home):
     source = _FakeSource()
     source.feed(10)
@@ -260,6 +266,7 @@ def test_window_deadline_commits_one_final_cursor_catch_up(owner_home):
     state = _state(owner_home, opened["watch_id"])
     handle = hv.harvesters.get_live(state.watch_id)
     assert handle is not None
+    assert _wait_until(lambda: state.cursor == 10)
     handle.stop_event.set()
     assert _wait_until(lambda: not handle.thread.is_alive(), timeout=10.0)
 
@@ -640,6 +647,8 @@ def test_ready_notification_rearms_when_ack_catches_prior_watermark(owner_home, 
     assert notifications == [5, 2]
 
 
+# LLM: 空来源不注入数字上界；无界末拍完成标记必须先耐久提交再通知。
+# 函数用途: 验证普通窗口收尾通知恰好一次且与磁盘提交一致。
 def test_harvester_notifies_once_after_final_boundary_commit(owner_home, monkeypatch):
     source = _FakeSource()
     tool = _tool(owner_home, source)

@@ -5,6 +5,13 @@
 - `orchestration/create_payload.py::_merge_item_required_read_paths` 在规范items解析时关闭Audit目标路径推断，后续原创建manifest和runner精确读门继续消费结构化显式输入。
 - `tooling/registry_auth.py::snapshot_search_can_load` 由registry实际可见定义和self_context展示共用；catalog-only下不默认收起已授权工具。`tool_catalog_result` 仅过滤公开归档中的内部令牌，宿主执行快照仍保留它。
 - `capability/session_history_read.py` 的继续读取/浏览提示与 `conversation/compact_landmarks.py` 的召回示例使用规范v2模式；不会建立另一套消息存储、权限账或恢复入口。
+## 2026-10-29 e905 sol-6 Round 1：恢复计数与配置读取结构
+
+- `services/recovery/strategy.py::recovery_counters` 为原 canonical 扩展字段提供唯一完整元组校验；`services/persistence/service.py` 在反序列化时即调用，dispatch 与恢复读取同一规范计数，不等下一次 save 才发现坏账。字段及干净 legacy 迁移见[详细合同](../../design/SUBAGENT_RECOVERY_HARVEST.md)。
+- `models.py::SUBAGENT_RETRYABLE_FAILURE_STATUSES` 仅统一 BLOCKED/FAILED/TIMEOUT 的失败族，失败类型、能力阻塞、显式停止及准确 attempt 门保持原位。普通/provider retry、宿主已证实无进展与观察未知分别累计，`runner_attempts` 仍属审计/CAS。
+- `core.py::_build_subagent_manager` 只绑定原 `capability_config_for_paths` 的 root/准确覆盖路径读口；`manager_no_progress_attempt_limit` 为真实 prepare、恢复编排与树扫描读取当前有效配置。没有新增配置文件、第二份状态权威或热重载快照；0 不通过 `or` 回退成 4，坏配置不默用默认自动启动。
+- `services/recovery/orchestrator.py::_strategy_snapshot` 同时服务正式报告和原 JSONL 账本，保留 `no_progress_unknown_count`；缓存 stat/解析/复制仍在锁外，locator/canonical 双信任龄及发布前复核防止新 canonical 借旧 locator 命中。源码候选，尚未部署。
+- `services/recovery/modes.py::RecoveryMode.MANUAL_REVIEW_UNKNOWN_HISTORY` 精确映射原人工复核动作；策略先核完整历史，填 `blocked_by`，既不进入重跑/接管集合，也不把未知错误当作 `NO_PROGRESS_LIMIT_REACHED`。
 
 ## 2026-10-28 Wave 8：子代理公开索引重建服务与同 Owner Worker 单次构造结构
 

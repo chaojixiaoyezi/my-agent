@@ -1,4 +1,6 @@
 
+# LLM: 巡检共享canonical恢复投影，只用宿主no_progress_count判断熔断，不把审计attempt当失败。
+# 模块用途: 生成子代理巡检问题与恢复建议。
 from __future__ import annotations
 
 """due-check issue builders for subagent board service.
@@ -46,7 +48,11 @@ from ...policies import (
     _is_active,
     _make_due_issue,
 )
-from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
+from ..recovery.strategy import (
+    SubagentRecoveryStrategyRequest,
+    build_subagent_recovery_strategy,
+    recovery_count,
+)
 
 
 # LLM: 一次巡检的只读阈值快照；0 关闭对应检查。字段只增不猜：新增阈值要从 CapabilityConfig 在用字段经 due_check_settings 传入。
@@ -160,6 +166,8 @@ def _check_status_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: 只投影strategy已证实的无进展失败累计，不说成连续切片；未知观察另在恢复回执呈现。
+# 函数用途: 展示无进展熔断、阈值及恢复引用。
 def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int):
     """Check whether repeated recovery attempts must stop automatic retry."""
     if attempt_limit <= 0:
@@ -180,7 +188,7 @@ def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int
                 "P0",
                 ISSUE_NO_PROGRESS_FUSE,
                 (
-                    f"任务已连续尝试 {ctx.task.runner_attempts} 次，达到无进展熔断阈值 {attempt_limit}；"
+                    f"自上次已证实字节推进以来累计无进展失败 {recovery_count(ctx.task, 'no_progress_count')} 次，达到熔断阈值 {attempt_limit}；"
                     "停止自动重试和扩容，改为汇总 refs 后等待父级/用户决策。"
                 ),
                 ACTION_STOP_NO_PROGRESS_AND_ESCALATE,

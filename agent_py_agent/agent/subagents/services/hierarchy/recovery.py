@@ -1,4 +1,6 @@
 
+# LLM: 树恢复只读原canonical任务，策略阈值每请求从组合根配置读口取得，禁止暗用另一默认值。
+# 模块用途: 为整棵子代理树投影同源恢复决策，不启动或接管任务。
 from __future__ import annotations
 
 """Hierarchy recovery decisions using canonical TaskStatus facts."""
@@ -22,7 +24,11 @@ from ...policies import (
     ISSUE_RUN_TIMEOUT,
     _is_active,
 )
-from ..recovery.strategy import SubagentRecoveryStrategyRequest, build_subagent_recovery_strategy
+from ..recovery.strategy import (
+    SubagentRecoveryStrategyRequest,
+    build_subagent_recovery_strategy,
+    manager_no_progress_attempt_limit,
+)
 
 RECOVERY_STATUSES = SUBAGENT_FAILURE_STATUSES
 
@@ -108,10 +114,13 @@ class SubAgentHierarchyRecoveryService:
         )
 
 
+# LLM: 一次树扫描复用同一个能力配置阈值，0不得被默认4覆盖；不改变原树遍历与上限。
+# 函数用途: 把规范任务树转换为阈值一致的恢复节点。
 def _scan_tree(manager: Any, request: HierarchyRecoveryRequest) -> list[HierarchyRecoveryNode]:
     tasks = _load_tree_tasks(manager, request)
     task_index = {task.id: task for task in tasks}
-    return [_node_from_task(task, request, task_index=task_index) for task in tasks]
+    limit = manager_no_progress_attempt_limit(manager)
+    return [_node_from_task(task, request, task_index=task_index, no_progress_attempt_limit=limit) for task in tasks]
 
 
 def _load_tree_tasks(manager: Any, request: HierarchyRecoveryRequest) -> list[SubAgentTask]:
@@ -144,14 +153,17 @@ def _visible_nodes(
     return [node for node in scanned if node.run_id == request.root_run_id or node.run_id in candidate_ids]
 
 
+# LLM: 节点投影沿调用方本请求的有效阈值，保留原状态、refs、父子关系和推荐动作。
+# 函数用途: 为一个规范任务生成树恢复节点。
 def _node_from_task(
     task: SubAgentTask,
     request: HierarchyRecoveryRequest,
     *,
     task_index: dict[str, SubAgentTask] | None = None,
+    no_progress_attempt_limit: int | None = None,
 ) -> HierarchyRecoveryNode:
     reason = _recovery_reason(task, request, task_index=task_index)
-    strategy = _recovery_strategy_for_task(task, reason)
+    strategy = _recovery_strategy_for_task(task, reason, no_progress_attempt_limit=no_progress_attempt_limit)
     return HierarchyRecoveryNode(
         run_id=task.id,
         parent_id=task.parent_id,
@@ -179,10 +191,15 @@ def _node_from_task(
     )
 
 
-def _recovery_strategy_for_task(task: SubAgentTask, reason: str):
+# LLM: 有恢复理由才计算策略，生产显式传入配置阈值；None仅兼容独立纯函数旧调用。
+# 函数用途: 为树节点构造同源恢复策略。
+def _recovery_strategy_for_task(task: SubAgentTask, reason: str, *, no_progress_attempt_limit: int | None = None):
     if not reason:
         return None
-    return build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(task=task))
+    request = SubagentRecoveryStrategyRequest(task=task)
+    if no_progress_attempt_limit is not None:
+        request = SubagentRecoveryStrategyRequest(task=task, no_progress_attempt_limit=no_progress_attempt_limit)
+    return build_subagent_recovery_strategy(request)
 
 
 def _context_bundle_ref(task: SubAgentTask) -> str:

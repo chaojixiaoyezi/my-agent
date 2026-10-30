@@ -1,3 +1,5 @@
+# LLM: 模式为精确恢复协议；坏恢复账走独立人工复核，不冒充缺refs、已知无进展或可自动续派。
+# 模块用途: 定义子代理恢复模式和原动作映射，不授予执行权限。
 """Structured recovery mode enum.
 
 Recovery dispatch accepts only the explicit protocol modes below.
@@ -11,6 +13,8 @@ from enum import Enum
 from ....contracts.recovery import RecoveryAction
 
 
+# LLM: 新增unknown-history只投影到原MANUAL_REVIEW动作，自动重跑/接管集合不扩张。
+# 类用途: 区分宿主可验证的恢复模式及不能自动执行的复核原因。
 class RecoveryMode(str, Enum):
     """Canonical recovery mode for subagent failure/stall handling.
 
@@ -24,6 +28,7 @@ class RecoveryMode(str, Enum):
     RERUN_FROM_CHECKPOINT = "rerun_from_checkpoint"
     CLOSED = "closed"
     MANUAL_REVIEW_MISSING_REFS = "manual_review_missing_recovery_refs"
+    MANUAL_REVIEW_UNKNOWN_HISTORY = "manual_review_unknown_recovery_history"
 
     def to_action(self) -> str:
         """Return the RecoveryAction value for this mode."""

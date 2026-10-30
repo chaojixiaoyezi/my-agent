@@ -205,6 +205,42 @@ python3 scripts/check_clean_package.py .
 - 修复只改变计数别名投影，不改真实证据、学习覆盖、正式晋升、状态机或锁；Curator 中文注释检查须覆盖完整分支改动文件的全部 AST 定义，不限最后一次提交。
 - 最终聚焦组合（R1 六文件及 `test_memory_curator.py`）321P，0F/E/skip；额外六文件核心回归 237P/3F，三个 persona/SOUL 节点与真正原基线记录同名，不能登记全回归全绿。Ruff、导入边界、doc-sync、diff、clean-package、20 文件 compileall 及整文件 AST 中文注释审计通过（20 模块、82 类、666 函数，缺口 0）；注释专属 18 文件 AST 与非注释 token 等价。
 - 复现：工作树根执行 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_memory_obligations.py -q --tb=short -o addopts= --basetemp=.pytest_cache/sol5-r2-repro-tmp`。完整组合命令、XML 和失败边界见本轮 DONE；首次独审 P2 由主代理实测修正，未将旧审查报告包装成最终独立批准。本节不宣称生产或跨平台验收。
+## 2026-10-29 e905 sol-6 Round 2：坏恢复历史必须在实际写门拒绝
+
+来源：`fix-e905-sol-6-r2.md` 与 Astra-1/c16 二审 R1。起点 `a28d45d12442befdf05fc236eb75db5025068257`，原基线 `4bea324e3`；不部署、不启停真实服务。
+
+- `test_opt_recovery_counters.py` 新增实际准入回归：真实 create → prepare → FAILED/result 后，只将测试 canonical 的 `provider_retry_count` 改为布尔值 true。显式 include/typed rerun 与普通候选选中后变坏均必须零入队、零新增预留，返回 `manual_review_unknown_recovery_history` 未应用记录；原 canonical 字节及旧启动历史严格不变。
+- 独立覆盖显式恢复候选、直接 reserve/prepare、预留后变坏，以及批次复读→预留和 load→canonical reducer 两种确定性交错。外层放行不能遮住内层缺口；锁内同源纯计数校验抛类型化冲突，不以空 retry reason 或指令正文作判断。
+- 正向保留首次启动、正常失败重试、结构化 conversation_user_stop 同 run 恢复；原 legacy、0/10/2 配置、BLOCKED 普通/provider 及 exact-attempt 回归继续执行。用户停止正向输入是结构化夹具，不声称运行完整会话停止链。
+- 初轮有效红测中的入队/候选/直接启动断言失败；旧启动记录本就存在，拒绝后应严格保留而非要求删除；首次绿测据此暴露的夹具误断言改成精确历史等值，并继续核整个 canonical 字节不变，不放宽坏账准入断言。
+
+复现：从工作树根运行 `PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_recovery_counters.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol6_r2_fix`。最终十文件、相邻回归、注释清单及实际结果见 `DONE-e905-sol-6.md` 的 Round 2；不将局部结果外推到真实 Gateway/模型、RuntimeDB 全调度、外部来源或跨平台 E2E。
+
+## 2026-10-29 e905 sol-6 Round 1：恢复预算、首次只读坏账与采集边界
+
+来源：`fix-e905-sol-6-r1.md` 与 `steer-c15-sol6-f5.md`；基于 `ee2113192c28cd7cf7d89f8528458d3a27551565` 继续返工，原任务基线为 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。目标分支 `opt-e905/sol-6`，不推送、部署、启停真实服务。
+
+- F1/F2/F3/Astra-2 F5：真实 prepare + result 提交制造 BLOCKED 解析失败和供应断供，守住普通/provider 预算；旧相邻派发测试不改断言。只读 load 覆盖 bool/负数/非整数/部分字段/矛盾总和/缺原始 attempts；读前后 canonical 字节不变。干净 legacy 全缺字段按保守 total-1 迁移并在正常保存时写结构化来源，不能把坏账当旧格式。
+- F4/F5/F6/F8：未知观察独立记账，正式恢复报告与原恢复 JSONL 保留；所有生产派发构造、真实启动 preflight、树恢复及编排阈值一致，0 不被默认 4 覆盖。通过真实组合根和临时准确覆盖配置测试 0/10/2，读取实际 prepare 后指令，不调用模型。累计文案、宿主关闭注释及 canonical 扩展字段设计同步。
+- F7/F9：locator/canonical 双 mtime 信任龄；根匹配回退沿原 strip 规则。
+- F10/F11/F13：恢复原有三条无人工上界窗口 fixture；无界 cursor/adapter 必须实际最终补拉后 partial/unbounded 收口，错误不假完成。显式 ordinal 上界继续单测；首次冻结前大小不同的文件原子换代、冻结后换源以及入口/WAL 跨 deadline 两种次序分别验证，不能越过冻结目标或回退已提交游标。
+- F12/F14/F15/F16：非截止背压在 lease/WAL 前返回，截止后仍正退避；空失败样本保留旧 fields；drain/inline 更新来源 checkpoint 时严格保留宿主控制字段且不接纳来源伪造控制；adapter 完整合同断言同时保留全部原去重/游标/spool/raw 记录断言；删除死采样包装，测试真实 drain 原语。
+
+复评补强：坏账已有有效 refs 时，策略与正式编排/原账本必须返回准确的 unknown-history 人工复核原因，不得仍建议自动派发，也不得冒充无进展熔断。20 个只读坏账参数化用例先全部失败后修正；保留 load 前后 canonical 字节不变。用户停止旧夹具保留 99 次审计次数和全部原恢复断言，改为先构造完整既存 canonical 历史再正常 load/save，额外断言无坏账；不以一次 save 跳 99 轮制造 unknown，更不放开生产坏账门。
+
+当前候选的实际结果：指定 10 文件 `.pytest_cache/r1-final-required-v2.xml` 为 **224 passed**；额外 8 文件 `.pytest_cache/r1-final-extra.xml` 为 **167 passed**，合计 **391 项**，两批均 0 failure/error/skip。首次合并指定套件为 223 通过/1 失败，唯一失败即上述停止夹具，修正输入后重跑同一完整入口。计数均由 JUnit 解析核对。AST 双层注释盘点相对本轮起点为 29 模块/98 个改动定义，原指定基线为 30 模块/141 个定义，均无缺口；记录在 `.pytest_cache/r1-final-comment-inventory.json`。独立最终复评仅静态核对四项指定风险，未发现阻止本轮收口的问题，不冒称其独立运行了测试。
+
+复现（工作树根执行；相关结果以最后交接报告的当前版本 JUnit 为准）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_opt_recovery_counters.py agent_py_agent/tests/test_opt_harvest_resume.py agent_py_agent/tests/test_config_cache_resource_budget.py agent_py_agent/tests/test_executor_exit_recovery.py agent_py_agent/tests/test_ingestion_harvester.py agent_py_agent/tests/test_ingestion_watch_learn.py agent_py_agent/tests/test_subagent_recovery_strategy.py agent_py_agent/tests/test_runner_dispatch.py agent_py_agent/tests/test_runner_dispatch_candidates.py agent_py_agent/tests/test_subagent_incomplete_continuation.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_subagent_recovery_orchestrator.py agent_py_agent/tests/test_subagent_hierarchy_recovery.py agent_py_agent/tests/test_source_adapter.py agent_py_agent/tests/test_ingestion_sources.py agent_py_agent/tests/test_watch_audit_guarantee.py agent_py_agent/tests/test_watch_spool_takeover.py agent_py_agent/tests/test_ingestion_full_read.py agent_py_agent/tests/test_watch_judge_backpressure.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base HEAD
+git diff --check
+```
+
+受控临时源/本地生命周期测试不等于真实 Gateway 重启接续、外部 cursor/adapter 网络、跨机器或 Windows 验收；未跑全仓 pytest。不删除、skip 或放宽坏账/边界/去重断言来做绿；独立复核结果及红绿证据留在交接报告。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 

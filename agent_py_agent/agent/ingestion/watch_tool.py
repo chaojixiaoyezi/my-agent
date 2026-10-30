@@ -1,5 +1,5 @@
-# LLM: watch_stream 来源 HTTP 共用 web_fetch 逐跳 pin；所有秘密只在原owner/执行/read范围核验后注入，收割不能借最新前台身份。
-# 模块用途: 提供持久数据流盯守与收割；真实网络出口逐次检查网络权和凭据，不向模型或spool保存秘密回显。
+# LLM: watch_stream HTTP共用原网络/凭据闸；inline吸收仅替换来源checkpoint，原宿主边界与退避不得被覆盖。
+# 模块用途: 提供持久流盯守与收割入口，保持网络权限和宿主控制元数据隔离。
 """watch_stream 工具:高吞吐数据流的盯守摄取入口(open/pull/status/close/list)。
 
 pull 是长轮询:块内持续「拉流→喂引擎」直到出现候选或等待额度用完——游标始终追平
@@ -2820,14 +2820,16 @@ def _collection_window_is_open(state: WatchState) -> bool:
     )
 
 
-# LLM: 聚合只携带最近实际查询，未到 poll 节拍不虚构新观察；不新增 WatchState 持久字段。
-# 函数用途: 吸收原 drain 的已提交位置与本次回执事实。
+# LLM: 聚合只携带最近实际查询，未到poll节拍不虚构观察；来源checkpoint不能抹除或改写原_host_harvest。
+# 函数用途: 吸收drain提交位置并深拷贝保留宿主边界和节拍。
 def _absorb_drain(state: WatchState, drain, aggregate: dict[str, Any]) -> None:
+    from .harvester import _merge_harvest_checkpoint
+
     state.last_error = ""
     state.last_error_code = ""
     state.cursor = drain.cursor
     if isinstance(getattr(drain, "source_checkpoint", None), dict):
-        state.source_checkpoint = deepcopy(drain.source_checkpoint)
+        state.source_checkpoint = _merge_harvest_checkpoint(state, drain.source_checkpoint)
     # file 源:aux_cursor=读后行号(轮转重读会回落,正确);其余源恒 0=不变。
     state.line_cursor = int(getattr(drain, "aux_cursor", 0) or 0)
     if float(getattr(drain, "fetched_at", 0.0) or 0.0) > 0:

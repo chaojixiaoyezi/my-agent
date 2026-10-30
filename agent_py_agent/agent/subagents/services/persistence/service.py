@@ -15,6 +15,7 @@ as warnings instead of corrupting or blocking the canonical save.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -29,6 +30,7 @@ from ....common.json_io import (
     read_json_object_report,
     write_private_json_file_atomic,
 )
+from ....common.nofollow_fs import read_bytes_beneath
 from ....common.opaque_id import validate_opaque_id
 from ....common.request_execution_ports import gateway_short_transaction
 from ....common.value_parsing import sequence_strings
@@ -38,8 +40,11 @@ from ....runtime_errors import runtime_error_report
 from ...model_capabilities import capability_request_requires_parent_resolution
 from ...models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
+    PROVIDER_SUPPLY_FAILURE_TYPES,
+    RETRYABLE_RUNNER_FAILURE_TYPES,
     SUBAGENT_FAILED_RESULT_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    SUBAGENT_RETRYABLE_FAILURE_STATUSES,
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
@@ -66,6 +71,7 @@ from ..agent_run_state import (
     build_agent_state_locator,
     build_owner_agent_projection,
     canonical_state_path_from_payload,
+    is_agent_state_locator,
     read_agent_state_payload,
     write_agent_run_state,
 )
@@ -74,6 +80,7 @@ from ..output_alignment import (
     record_locked_files_change,
     sanitize_self_locked_delivery_targets,
 )
+from ..recovery.strategy import RECOVERY_COUNTER_NAMES, recovery_counters
 from ..takeover.readiness import write_takeover_readiness_files
 from ..task_workspace_adapter import sync_task_workspace_fields
 from .model_normalizers import (
@@ -125,8 +132,7 @@ def _canonical_runs_for_root(
     ]
 
 
-# LLM: This adapter keeps indexed selection outside the persistence class size budget. Managed
-# lookup failures remain explicit, while local-unmanaged callers intentionally use canonical scan.
+# LLM: 索引只挑候选，canonical核根；无索引回退同样规范化ID空白，不引入第二种根匹配语义。
 # 函数用途: 实现按根任务的“索引选 ID、文件复核”读取，并返回结构化错误。
 def _list_runs_for_root_report(
     service: SubAgentPersistenceService,
@@ -142,10 +148,8 @@ def _list_runs_for_root_report(
     local_store = getattr(service.manager, "local_store", None)
     tree_reader = getattr(local_store, "list_agent_tree", None)
     if not callable(tree_reader):
-        report = service.list_runs_report()
-        return SubAgentListRunsReport(
-            runs=_canonical_runs_for_root(report.runs, root_id),
-            load_errors=report.load_errors,
+        return service.list_runs_selected_report(
+            lambda task: bool(_canonical_runs_for_root([task], root_id)),
         )
 
     try:
@@ -186,7 +190,7 @@ def _list_runs_for_root_report(
     return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
 
 
-# LLM: canonical文件仍是权威；公开列表只返回副本，私有引用仅供只读predicate，原指纹/负缓存/粗mtime门保持。
+# LLM: canonical文件仍是权威；锁外核双文件指纹与各自信任龄，公开副本经同一恢复坏账校验。
 # 类用途: 管理子代理持久化与实时列表筛选；复制优化不跨轮冻结任务集合。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
@@ -199,7 +203,7 @@ class SubAgentPersistenceService:
     _MAX_RUN_CACHE_ITEM_BYTES = 256 * 1024
     _MAX_NEGATIVE_RUN_CACHE_ENTRIES = 4096
 
-    # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
+    # LLM: 解析、目标stat和复制在锁外；锁只保护有界缓存，canonical与locator共同决定失效。
     # projection may share it, but callers always receive deep copies and canonical files remain
     # authoritative across processes.
     # 缺失canonical仅缓存稳定locator的指纹与既有reader解析路径，不保存正文或新的状态权威。
@@ -211,6 +215,7 @@ class SubAgentPersistenceService:
         # 其余情况同时核对 inode、大小和 ctime，避免只看 mtime 漏掉原子替换。
         # 命中后仍只 stat；返回 deepcopy 副本，调用方修改不会污染缓存对象。
         self._run_cache: dict[str, tuple[tuple[int, int, int, int, int], SubAgentTask]] = {}
+        self._run_cache_canonical: dict[str, tuple[Path, tuple]] = {}
         self._missing_canonical_cache: dict[str, tuple[tuple[int, int, int, int, int], Path]] = {}
         self._run_cache_lock = threading.RLock()
 
@@ -331,52 +336,77 @@ class SubAgentPersistenceService:
 
     _DEFAULT_CACHED_RUN_COPY = _cached_run_copy
 
-    # LLM: 锁内核五元指纹、负缓存、粗mtime窗口和容量预算；引用仅可只读，不对外返回或原地修改。
-    # 函数用途: 取得本次新鲜度核验后的私有任务快照，让筛选和复制都能移到锁外。
+    # LLM: stat/解析在锁外，命中/发布同时核locator与canonical年龄和指纹；引用不可改，年轻canonical绝不复用。
+    # 函数用途: 核对locator和canonical后复用快照，不让慢磁盘占住其它run的缓存锁。
     def _cached_run_ref(self, run_id: str, task_file: Path) -> SubAgentTask:
+        stat = task_file.stat()
+        signature = cache_stat_signature(stat)
         with self._run_cache_lock:
-            stat = task_file.stat()
-            signature = cache_stat_signature(stat)
-            within_budget = stat.st_size <= self._MAX_RUN_CACHE_ITEM_BYTES
-            if not within_budget:
-                self._run_cache.pop(run_id, None)
             cached = self._run_cache.get(run_id)
-            if cached is not None and cached[0] == signature:
-                task = cached[1]
-            else:
-                missing = self._missing_canonical_cache.get(run_id)
-                if missing is not None:
-                    if missing[0] == signature and not missing[1].exists():
-                        raise FileNotFoundError(f"子代理记录不存在: {run_id}")
-                    self._missing_canonical_cache.pop(run_id, None)
-                mtime_age_seconds = _now() - stat.st_mtime_ns / 1e9
+            target = self._run_cache_canonical.get(run_id)
+            missing = self._missing_canonical_cache.get(run_id)
+        age = _now() - stat.st_mtime_ns / 1e9
+        if missing is not None and missing[0] == signature and not missing[1].exists():
+            raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+        if cached is not None and cached[0] == signature and target is not None:
+            try:
+                canonical_stat = target[0].stat()
+                unchanged = (cache_stat_signature(canonical_stat) == target[1]
+                             and _now() - canonical_stat.st_mtime_ns / 1e9 >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS)
+            except OSError:
+                unchanged = False
+            if unchanged and age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                return cached[1]
+        canonical = None
+        before = None
+        if stat.st_size <= self._MAX_RUN_CACHE_ITEM_BYTES:
+            payload = json.loads(task_file.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                canonical = canonical_state_path_from_payload(payload) or task_file
                 try:
-                    task = self.load(run_id)
-                except FileNotFoundError as exc:
-                    if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
-                        self._cache_missing_canonical(
-                            run_id, task_file, signature,
-                            canonical_path=getattr(exc, "canonical_path", None),
-                        )
-                    raise
-                # 同时检查canonical物理大小，不能通过小locator常驻超大任务对象。
-                canonical_workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
-                if canonical_workspace:
-                    try:
-                        canonical_size = (Path(canonical_workspace) / "canonical_state.json").stat().st_size
-                    except OSError:
-                        canonical_size = 0
-                    if canonical_size > self._MAX_RUN_CACHE_ITEM_BYTES:
-                        within_budget = False
-                if within_budget and mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
-                    if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
-                        self._run_cache.pop(next(iter(self._run_cache)), None)
-                    self._run_cache[run_id] = (signature, task)
-                else:
-                    self._run_cache.pop(run_id, None)
+                    before = canonical.stat()
+                except FileNotFoundError:
+                    if is_agent_state_locator(payload):
+                        if age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                            self._cache_missing_canonical(run_id, task_file, signature, canonical_path=canonical)
+                        raise FileNotFoundError(f"canonical subagent state missing for locator: {canonical}") from None
+        try:
+            task = self.load(run_id)
+        except FileNotFoundError as exc:
+            with self._run_cache_lock:
+                self._run_cache.pop(run_id, None)
+                self._run_cache_canonical.pop(run_id, None)
+            if age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                self._cache_missing_canonical(
+                    run_id, task_file, signature,
+                    canonical_path=getattr(exc, "canonical_path", None),
+                )
+            raise
+        cacheable = False
+        if canonical is not None and before is not None:
+            try:
+                cacheable = (before.st_size <= self._MAX_RUN_CACHE_ITEM_BYTES
+                             and cache_stat_signature(canonical.stat()) == cache_stat_signature(before)
+                             and cache_stat_signature(task_file.stat()) == signature
+                             and age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS
+                             and _now() - before.st_mtime_ns / 1e9 >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS)
+            except OSError:
+                pass
+        with self._run_cache_lock:
+            self._missing_canonical_cache.pop(run_id, None)
+            if cacheable:
+                if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
+                    evicted = next(iter(self._run_cache))
+                    self._run_cache.pop(evicted, None)
+                    self._run_cache_canonical.pop(evicted, None)
+                self._run_cache[run_id] = (signature, task)
+                self._run_cache_canonical[run_id] = (canonical, cache_stat_signature(before))
+            else:
+                self._run_cache.pop(run_id, None)
+                self._run_cache_canonical.pop(run_id, None)
         return task
 
-    # LLM: 生产调用已持缓存锁并核旧mtime；仅复用reader核验的Path，旧三参数调用仍沿原解析器，独立预算可缩小。
+    # LLM: 路径解析和存在性检查在锁外；只复用原reader核验的Path，锁内仅发布有界负缓存。
     # 函数用途: 为稳定直达的缺失canonical建有界负缓存；传入已解析路径时不重读locator，探测失败不掩盖原错误。
     def _cache_missing_canonical(
         self, run_id: str, task_file: Path, signature: tuple[int, int, int, int, int],
@@ -398,20 +428,21 @@ class SubAgentPersistenceService:
                     return
             if canonical.exists():
                 return
-            if (
-                run_id not in self._missing_canonical_cache
-                and len(self._missing_canonical_cache) >= self._MAX_NEGATIVE_RUN_CACHE_ENTRIES
-            ):
-                self._missing_canonical_cache.pop(next(iter(self._missing_canonical_cache)), None)
-            self._missing_canonical_cache[run_id] = (signature, canonical)
+            with self._run_cache_lock:
+                if (
+                    run_id not in self._missing_canonical_cache
+                    and len(self._missing_canonical_cache) >= self._MAX_NEGATIVE_RUN_CACHE_ENTRIES
+                ):
+                    self._missing_canonical_cache.pop(next(iter(self._missing_canonical_cache)), None)
+                self._missing_canonical_cache[run_id] = (signature, canonical)
         except (OSError, TypeError, ValueError):
             return
 
-    # LLM: 淘汰与精确ID读取共锁；锁外复制持有已取快照的强引用，移除缓存条目不会破坏该次返回。
+    # LLM: 正负缓存及canonical指纹同锁同淘汰；锁外复制持有快照引用，移除不破坏本次返回。
     # 函数用途: 同步清理已删除locator的正负缓存；其它run仍存在时也不能留下陈旧缺失项。
     def _evict_run_cache(self, seen: set[str]) -> None:
         with self._run_cache_lock:
-            for cache in (self._run_cache, self._missing_canonical_cache):
+            for cache in (self._run_cache, self._missing_canonical_cache, self._run_cache_canonical):
                 for stale in [rid for rid in cache if rid not in seen]:
                     cache.pop(stale, None)
 
@@ -535,7 +566,7 @@ def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
     return workspace / (Path(task_dir).name if task_dir else "unknown-run") / ".canonical_state.guard"
 
 
-# LLM: Call only while holding .canonical_state.guard. This is the common commit tail for legacy
+# LLM: 原canonical guard内的唯一提交尾部，同时按精确启动/结算边沿更新恢复计数；重复保存不重复计数。
 # full-state save and typed mutate: it increments the host revision once, preserves hierarchy and
 # takeover projections, sanitizes locks, writes canonical state, then refreshes derived views.
 # 函数用途: 在已持有权威锁时完成一次子代理状态提交，并统一递增版本和刷新派生投影。
@@ -554,12 +585,100 @@ def _persist_task_inside_guard(
     sanitize_self_locked_delivery_targets(task, now)
     record_locked_files_change(task, previous_locked, now)
     try:
-        existing_revision = int(service.load(task.id).state_revision or 0)
+        previous = service.load(task.id)
+        existing_revision = int(previous.state_revision or 0)
     except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        previous = None
         existing_revision = 0
+    _update_recovery_counters(task, previous, service.manager)
     task.state_revision = max(existing_revision, int(task.state_revision or 0)) + 1
     task_dir, owner_projection = _prepare_and_write_state(service, task)
     sync_derived_projections(service.manager, task, task_dir, owner_projection)
+
+
+# LLM: 最多16件/1MiB，nofollow限定任务域；返回逐路径内容指纹/缺失null，异常或超预算返回None，不把部分集合当进展。
+# 函数用途: 用真实产物字节版本生成宿主进展证据，防止仅改进度文字解除熔断。
+def _recovery_progress_fingerprint(task: SubAgentTask) -> dict[str, str | None] | None:
+    root_text = str(task.task_workspace_dir or "")
+    if not root_text:
+        return None
+    root = Path(root_text)
+    rows = {}
+    remaining = 1024 * 1024
+    refs = sorted(set(task.artifact_refs or []))
+    if len(refs) > 16:
+        return None
+    for raw in refs:
+        if remaining <= 0:
+            return None
+        try:
+            path = Path(raw)
+            relative = path.relative_to(root) if path.is_absolute() else path
+            content = read_bytes_beneath(root, relative.parts, max_bytes=min(256 * 1024, remaining), require_dir_fd=True)
+            if content is None:
+                rows[str(relative)] = None
+                continue
+            rows[str(relative)] = hashlib.sha256(content).hexdigest()
+            remaining -= len(content)
+        except (OSError, ValueError, TypeError):
+            return None
+    return rows
+
+
+# LLM: 原提交门消费统一校验快照；BLOCKED同样扣失败预算；未知观察单独可见，不制造进展或无进展证据。
+# 函数用途: 从真实attempt开始/收口边沿维护失败重试与无进展次数，保留原审计attempt和CAS。
+def _update_recovery_counters(task: SubAgentTask, previous: SubAgentTask | None, manager: Any) -> None:
+    source = previous if previous is not None else task
+    old_attempts = max(0, int(previous.runner_attempts or 0)) if previous is not None else 0
+    current_attempts = max(0, int(task.runner_attempts or 0))
+    counters = recovery_counters(source)
+    previous_extra = getattr(previous, "_extra_fields", {}) if previous is not None else {}
+    extra = dict(getattr(task, "_extra_fields", {}))
+    safe_resume = previous_extra.get("recovery_safe_resume") is True
+    if previous is not None:
+        failure = str(previous.failure_type or "")
+        if task.runner_active_attempt_id and task.runner_active_attempt_id != previous.runner_active_attempt_id:
+            extra["recovery_progress_baseline"] = _recovery_progress_fingerprint(task)
+            extra["recovery_progress_baseline_attempt_id"] = task.runner_active_attempt_id
+        starting = (bool(task.runner_active_attempt_id) and not previous.runner_active_attempt_id
+                    and task_status_in(previous.status, SUBAGENT_RETRYABLE_FAILURE_STATUSES))
+        if starting and failure in RETRYABLE_RUNNER_FAILURE_TYPES:
+            key = "provider_retry_count" if failure in PROVIDER_SUPPLY_FAILURE_TYPES else "failure_retry_count"
+            counters[key] += 1
+        settled = current_attempts - old_attempts
+        if settled == 1:
+            fingerprint = _recovery_progress_fingerprint(task)
+            baseline = previous_extra.get("recovery_progress_baseline")
+            # 引用集合变化只能标未知；同一集合内产物消失也不是正向内容推进。
+            observed = (isinstance(fingerprint, dict) and isinstance(baseline, dict)
+                        and fingerprint.keys() == baseline.keys()
+                        and all(value is None or (isinstance(value, str) and len(value) == 64
+                                and all(char in "0123456789abcdef" for char in value)) for value in baseline.values())
+                        and previous_extra.get("recovery_progress_baseline_attempt_id") == previous.runner_active_attempt_id)
+            advanced = observed and any(value is not None and value != baseline[path]
+                                        for path, value in fingerprint.items())
+            if advanced:
+                counters["no_progress_count"] = 0
+            elif (observed and task.failure_type in RETRYABLE_RUNNER_FAILURE_TYPES
+                  and task.failure_type not in PROVIDER_SUPPLY_FAILURE_TYPES
+                  and task_status_in(task.status, SUBAGENT_RETRYABLE_FAILURE_STATUSES)):
+                counters["no_progress_count"] += 1
+            if not observed:
+                counters["no_progress_unknown_count"] += 1
+            safe_resume = False
+            if task.failure_type == FailureType.HOST_SHUTDOWN_INTERRUPTED.value and previous.runner_active_attempt_id:
+                from ....runtime_db.executor_liveness import exited_attempt_facts
+
+                facts = exited_attempt_facts(getattr(manager, "runtime_db", None), task.id, previous.runner_active_attempt_id)
+                safe_resume = bool(facts and facts.get("host_shutdown") is True and facts.get("uncertain_effects") is False)
+        elif settled > 1:
+            counters["recovery_history_unknown_count"] += settled
+            safe_resume = False
+        if starting:
+            safe_resume = False
+    extra.update(counters)
+    extra["recovery_safe_resume"] = safe_resume
+    task._extra_fields = extra
 
 
 def _canonical_state_ref_from_payload(payload: dict[str, Any]) -> str:
@@ -633,6 +752,8 @@ def _directory_id_for_task(service: SubAgentPersistenceService, task: SubAgentTa
     return directory_id_for_opaque(task.id, kind="run_id")
 
 
+# LLM: 详细状态只写原canonical；未来字段仅补充已知schema之外的键，不允许覆盖权限或身份字段。
+# 函数用途: 沿原事务准备并保存完整状态、未知字段及派生定位记录。
 def _prepare_and_write_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -667,6 +788,10 @@ def _prepare_and_write_state(
     write_failure_handoff(task)
     write_checkpoint_output_files(task, checkpoint_artifacts)
     state = build_agent_run_state(task)
+    # 未识别的未来字段只允许补空位，绝不能覆盖当前模型身份、权限及生命周期字段。
+    extra = getattr(task, "_extra_fields", {})
+    if extra:
+        state.payload.update(copy.deepcopy({key: value for key, value in extra.items() if key not in state.payload}))
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
     locator_dir = service.workspace / _directory_id_for_task(service, task)
@@ -911,6 +1036,8 @@ def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAg
 #   活动诊断只允许专属窄 mutation 更新，full save 始终保留 canonical 版本。
 #   显式文件模式还按预留/消费身份保留生命周期，防止结果计数尚未增长时旧快照清掉新启动。
 # 函数用途: 保留并发授权、活动提醒与文件启动事实，阻止旧副本回滚执行状态。
+# LLM: CAS合并沿用canonical版本优先规则，未知扩展与runner快照同步保真，不让旧写入洗掉新字段。
+# 函数用途: 合并并发授权、执行状态及未知任务字段。
 def _merge_concurrent_capability_and_runner_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -927,6 +1054,13 @@ def _merge_concurrent_capability_and_runner_state(
     incoming_required_paths = list(task.context_manifest.required_read_paths)
     incoming_hint_paths = list(task.context_manifest.hint_read_paths)
     incoming_updated_at = float(task.updated_at or 0.0)
+    incoming_extra = getattr(task, "_extra_fields", {})
+    existing_extra = getattr(existing, "_extra_fields", {})
+    task._extra_fields = (
+        {**copy.deepcopy(existing_extra), **copy.deepcopy(incoming_extra)}
+        if int(task.state_revision or 0) >= int(existing.state_revision or 0)
+        else copy.deepcopy(existing_extra)
+    )
 
     existing_runner_is_newer = int(existing.runner_attempts or 0) > int(
         task.runner_attempts or 0
@@ -943,6 +1077,7 @@ def _merge_concurrent_capability_and_runner_state(
     if replaced:
         for item in fields(task):
             setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
+        task._extra_fields = copy.deepcopy(existing_extra)
     if service.manager.runtime_db is None:
         preserve_background_start(task, existing)
         task.runner_abandoned_attempt_ids = _unique_strings([
@@ -1099,6 +1234,8 @@ def _merge_capability_requests(
 # 已关闭记录整份拷回时，只有 _closed_record_appends 白名单里的接替关系（新的 superseded_by 及随它按 id 新增的
 # TakeoverRecord）可以单调追加并继续落盘；其余字段一律以磁盘上的已关闭状态为准。
 # 函数用途: 防止已完成、已取消、已放弃或已接管的子代理被旧线程写回运行中，同时让调用者立刻看到真实终态；返回 True 表示本次不写盘。
+# LLM: 较新的终态恢复时同时复制未知扩展，不允许旧执行器覆盖已关闭的canonical事实。
+# 函数用途: 恢复较新关闭快照并保留扩展字段。
 def _restore_newer_closed_state(
     service: SubAgentPersistenceService,
     task: SubAgentTask,
@@ -1121,6 +1258,7 @@ def _restore_newer_closed_state(
     appends = _closed_record_appends(existing, task)
     for item in fields(task):
         setattr(task, item.name, copy.deepcopy(getattr(existing, item.name)))
+    task._extra_fields = copy.deepcopy(getattr(existing, "_extra_fields", {}))
     for name, value in appends.items():
         setattr(task, name, value)
     return not appends
@@ -1287,11 +1425,15 @@ def load_subagent_task(workspace: Path, run_id: str) -> SubAgentTask:
         raise FileNotFoundError(f"子代理记录不存在: {run_id}")
     return task_from_payload(_read_state_payload(path))
 
-# LLM: 仅原canonical载荷进入同一nested模型/运行身份规范化；本函数无初始化和写入，须与原读写回归同验。
-# 函数用途: 将原子任务载荷恢复为正式SubAgentTask，不维护第二schema。
+# LLM: 原始counter组在首次load即校验；缺失总次数不能被dataclass默认0遮住；纯读不写盘，旧记录迁移留结构化依据。
+# 函数用途: 恢复正式SubAgentTask并保留未来代际数据，不让旧schema读写抹字段。
 def task_from_payload(data: dict[str, Any]) -> SubAgentTask:
     """Build a normalized task from a canonical state payload."""
 
+    missing_attempts = "runner_attempts" not in data and any(name in data for name in RECOVERY_COUNTER_NAMES)
+    legacy_counters = not any(name in data for name in (*RECOVERY_COUNTER_NAMES, "no_progress_unknown_count"))
+    extra = {key: value for key, value in data.items() if key not in _field_names(SubAgentTask)}
+    extra = copy.deepcopy(extra) if extra else {}
     data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
     data["capability_requests"] = [
         _normalize_nested_model(CapabilityRequest, item)
@@ -1331,4 +1473,12 @@ def task_from_payload(data: dict[str, Any]) -> SubAgentTask:
         normalize_security_signal(item) for item in data.get("security_signals", []) if isinstance(item, dict)
     ]
     data["runtime_identity"] = normalize_runtime_identity(data.get("runtime_identity"))
-    return SubAgentTask(**data)
+    task = SubAgentTask(**data)
+    task._extra_fields = extra
+    counters = recovery_counters(task)
+    if missing_attempts:
+        counters["recovery_history_unknown_count"] = max(1, counters["recovery_history_unknown_count"])
+    if legacy_counters and not counters["recovery_history_unknown_count"] and task.runner_attempts:
+        extra["recovery_counter_migration"] = {"source": "legacy_total_attempts", "runner_attempts": task.runner_attempts}
+    extra.update(counters)
+    return task

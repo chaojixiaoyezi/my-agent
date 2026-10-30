@@ -5,6 +5,18 @@
 - Audit规范items解析尊重 `_include_goal_file_hints=False`，结构化 `audit_source_id` 同样禁止从目标文字扩读。来源manifest中的显式输入不丢失，兄弟来源文件不进入精确读边界。
 - 目录归档不投影内部令牌；只有真实search动作可用时才默认收起工具。历史工具和压缩召回提示迁为显式mode，长消息续读保留原thread_id；帮助、交付提示和记忆目录指针同步迁移。
 - 回归覆盖真实创建、递归、全新Agent重载、执行器拒绝及带manager的能力裁决；仅后台启动替代，不表示真实模型、生产Audit、Gateway重启或跨平台端到端已验证。完整验证结果及复现见本轮交接和[TESTS](../../../TESTS.md)。
+## 2026-10-29 e905 sol-6 Round 2：实际坏账准入关闭（源码候选，未部署）
+
+- c16 R1 的显式坏账及普通过期候选在入队前结构化拒绝；原锁内预留和最终激活复核 canonical，不以空 retry reason 或模型指令代替写门。
+- 拒绝不改坏账、不删除历史启动、不产生新的 pending/active；首次启动、合法失败重试和明确停止后的同 run 恢复继续保留。具体类型、边界和复现见[恢复与采集合同](../../design/SUBAGENT_RECOVERY_HARVEST.md)及根 `TESTS.md` Round 2。真实 Gateway/RuntimeDB 全调度、模型和跨平台 E2E 未验证。
+
+## 2026-10-29 e905 sol-6 Round 1：恢复预算与首次只读坏账（源码候选，未部署）
+
+- BLOCKED 的可重试失败与 FAILED/TIMEOUT 共用记账状态集；普通失败、供应类失败与总审计 attempts 分开，正常切片不消费失败预算。
+- 干净 legacy 在只读加载时保守派生预算，正常保存才记结构化迁移；布尔/负数/非整数、部分字段、缺原始 attempts 或矛盾总和首次读取即标 unknown，候选不能先派后验。
+- 有效 refs 也不能覆盖坏恢复历史：策略和正式编排返回准确 unknown-history 人工复核模式及 blocked_by，不再错误宣告系统将自动续跑；未知不冒充无进展熔断。
+- 无进展为宿主证实的失败累计，不把观察未知或正常切片说成连续失败；未知次数进入正式恢复报告/原账本。派发、真实启动 preflight、树和编排读取同一能力阈值，0 关闭熔断；配置来源沿组合根绑定，不从工作区猜路径。
+- 缓存要求 locator 与 canonical 双信任龄，未知顶层字段保真和根匹配 strip 保持。验证及复现见根 `TESTS.md`，字段和边界见[恢复与采集合同](../../design/SUBAGENT_RECOVERY_HARVEST.md)。真实 Gateway 重启、外部来源网络和跨平台 E2E 未验证。
 
 ## 2026-10-28 Wave 8：子代理公开索引重建入口与同 Owner Worker 延迟/借用 MCP（已实现）
 

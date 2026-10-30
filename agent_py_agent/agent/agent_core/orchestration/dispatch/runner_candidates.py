@@ -1,4 +1,4 @@
-# LLM: 候选挑选只用 runner/dispatch 的唯一候选闸；普通失败的重跑次数由调用方按配置 runner_failure_retry_limit 传入。只读。
+# LLM: 普通候选沿runner/dispatch唯一闸，显式恢复回退同样校验canonical计数；用户停止不覆盖坏账，读取不授实际启动权。只读。
 # 模块用途: 按派工上下文（显式 include、恢复指令或全部任务）挑出可以启动或重跑的子代理 run。
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from ....subagents.models import (
 )
 from ....subagents.recovery_eligibility import user_stopped_run_is_resumable
 from ....subagents.services.recovery.modes import is_rerun_mode, recovery_mode_from_protocol_value
+from ....subagents.services.recovery.strategy import recovery_count
 from ...runner.dispatch import (
     RunnerCandidatePolicy,
     _dispatch_runner_candidates,
@@ -21,18 +22,21 @@ from .runner_selection import requested_include_ids
 
 
 # LLM: runner_retry_limit 来自配置 runner_failure_retry_limit（普通失败后最多重跑几次，0 = 不重跑）；
-#   显式 include 的恢复派工另走恢复指令判定。只挑候选，不改任务、不启动 runner。
+#   无进展阈值由生产调用方传能力配置，0关闭；显式include恢复另走原判定，不启动runner。
 # 函数用途: 按本次派工上下文挑出可以启动或重跑的子代理 run。
 def _runner_candidates_for_context(
     tasks: list,
     ctx: DispatchContext,
     runner_retry_limit: int,
-    *, runtime_policy=None,
+    *,
+    runtime_policy=None,
+    no_progress_attempt_limit: int | None = None,
 ) -> list:
     policy = RunnerCandidatePolicy(
         runner_retry_limit=runner_retry_limit,
         background_launch_id=ctx.background_launch_id,
         runtime_guard_policy=runtime_policy,
+        no_progress_attempt_limit=no_progress_attempt_limit,
     )
     if requested_include_ids(ctx):
         candidates = _included_normal_runner_tasks(
@@ -101,9 +105,11 @@ def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 
-# LLM: 可恢复的用户停止直接放行；其余只接受阻塞或失败态，排除终局熔断、损坏通道和未关闭的能力申请或缺口。
-# 函数用途: 为显式恢复候选判定某个任务是否允许重新执行。
+# LLM: 显式include/typed rerun不是坏账覆盖授权；先核同源计数，再保留用户停止和原能力/终态门，不写状态。
+# 函数用途: 判断指定run能否显式恢复；不能把已识别的坏历史作为普通恢复候选。
 def _can_rerun_from_recovery_instruction(task: object) -> bool:
+    if recovery_count(task, "recovery_history_unknown_count"):
+        return False
     if user_stopped_run_is_resumable(task):
         return True
     recoverable_statuses = frozenset({TaskStatus.BLOCKED.value, TaskStatus.FAILED.value})
