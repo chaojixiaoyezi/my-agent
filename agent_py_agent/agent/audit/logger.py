@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import append_private_jsonl_records, path_thread_lock
 from ..common.nofollow_fs import ensure_private_dir
 from ..runtime_errors import runtime_error_report
 from .paths import resolve_audit_paths
@@ -67,15 +70,29 @@ def _redact_audit_details(details: dict) -> dict:
 # 类用途: 以原格式记录审计，按显式参数选择是否等待同一文件锁。
 class AuditLogger:
 
-    def __init__(self, config: AgentConfig, local_store: LocalStore | None = None):
+    def __init__(
+        self,
+        config: AgentConfig,
+        local_store: LocalStore | None = None,
+        *,
+        root: Path | str | None = None,
+    ):
         self.config = config
         self._local_store = local_store
         self.enabled = _audit_enabled(config)
-        paths = resolve_audit_paths(config)
+        paths = resolve_audit_paths(config, root=root)
         self._audit_root = paths.root
         self._audit_file = paths.log_file
+        self._trusted_root = (
+            Path(os.path.abspath(os.path.expanduser(os.fspath(root))))
+            if root is not None
+            else None
+        )
         if self.enabled:
-            ensure_private_dir(self._audit_root)
+            if self._trusted_root is not None:
+                ensure_private_dir(self._audit_root, canonical_root=self._trusted_root)
+            else:
+                ensure_private_dir(self._audit_root)
 
     def _generate_entry_id(self) -> str:
         """生成条目 ID:秒级戳(可读/可排序)+ UUID4(122 位,无碰撞)。
@@ -128,10 +145,47 @@ class AuditLogger:
     # LLM: 字节/脱敏/路径不变，只透传原append锁参数；锁忙不能假称已留审计。
     # 函数用途: 以原格式私有追加审计事实。
     def _write_to_file(self, entry: AuditEntry, *, blocking: bool = True) -> None:
-        # H5:裸 open("a")+write 无锁,两线程/进程并发 log 会行内交错出半行 JSON。
-        # 改走私有追加(threading.Lock + fcntl.flock LOCK_EX 双层不变),文件 0600、父目录 0700,
-        # 已有宽权限审计文件下次写入即收紧。格式不变:ensure_ascii=False、不排序键、一行一条
-        # (append_private_jsonl_records 默认 sort_keys=False),与原 json.dumps(...) 完全一致。
+        if self._trusted_root is not None:
+            from .query import (
+                UnsafeAuditPathError,
+                _audit_append_lock,
+                _audit_lock_key_path,
+                _audit_parent_current,
+                _audit_regular,
+            )
+
+            ensure_private_dir(self._audit_root, canonical_root=self._trusted_root)
+            handle = path_thread_lock(_audit_lock_key_path(self._audit_file, self._trusted_root))
+            if not handle.lock.acquire(blocking=blocking):
+                raise BlockingIOError("共享文件线程锁繁忙")
+            try:
+                with _audit_append_lock(
+                    None,
+                    self._audit_file.name,
+                    path=self._audit_file,
+                    trusted_root=self._trusted_root,
+                    blocking=blocking,
+                ) as (parent, root):
+                    _audit_parent_current(self._audit_file, root, parent)
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+                    try:
+                        fd = os.open(self._audit_file.name, flags, 0o600, dir_fd=parent)
+                    except OSError as exc:
+                        import errno
+
+                        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                            raise UnsafeAuditPathError("unsafe audit path") from exc
+                        raise
+                    try:
+                        _audit_regular(os.fstat(fd))
+                        os.fchmod(fd, 0o600)
+                        blob = (json.dumps(entry.to_dict(), ensure_ascii=False, sort_keys=False) + "\n").encode("utf-8")
+                        os.write(fd, blob)
+                    finally:
+                        os.close(fd)
+            finally:
+                handle.lock.release()
+            return
         append_private_jsonl_records(self._audit_file, [entry.to_dict()], sort_keys=False, blocking=blocking)
 
     def _write_to_local_store(self, entry: AuditEntry) -> None:

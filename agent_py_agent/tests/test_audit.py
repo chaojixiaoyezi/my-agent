@@ -892,5 +892,62 @@ def test_r1_retention_plan_parent_replacement_is_rejected(tmp_path):
     assert sorted(item.name for item in foreign.iterdir()) == ['audit.jsonl']
 
 
+# LLM: 等待线程锁期间若父目录被移出可信根并替换为软链，清理获锁后必须拒绝且不得在外移目录留下旁锁。
+# 函数用途: 覆盖线程锁等待窗口内的父目录外移竞态及AuditLogger显式root统一锁协议。
+def test_r2_retention_parent_moved_while_waiting_on_thread_lock(tmp_path, monkeypatch):
+    import threading
+
+    from agent_py_agent.agent.audit import query as module
+    from agent_py_agent.agent.common.json_io import path_thread_lock
+
+    owner = tmp_path / 'owner'
+    path = owner / 'data' / 'audit' / 'audit.jsonl'
+    path.parent.mkdir(parents=True)
+    original = b'{"timestamp":0}\n'
+    path.write_bytes(original)
+    config = SimpleNamespace(audit_log_path='data/audit', audit_enabled=True)
+    query = AuditQuery(config, root=owner)
+
+    orig_key_fn = module._audit_lock_key_path
+    lock_key = orig_key_fn(path, owner)
+    handle = path_thread_lock(lock_key)
+    at_lock_gate = threading.Event()
+    errors = []
+
+    def wrapped_key_fn(p, r=None):
+        res = orig_key_fn(p, r)
+        at_lock_gate.set()
+        return res
+
+    monkeypatch.setattr(module, '_audit_lock_key_path', wrapped_key_fn)
+
+    def run_cleanup():
+        try:
+            query.cleanup_old_entries(days=1)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with handle.lock:
+        worker = threading.Thread(target=run_cleanup, daemon=True)
+        worker.start()
+        assert at_lock_gate.wait(3)
+        time.sleep(0.02)
+        foreign = tmp_path / 'foreign'
+        path.parent.rename(foreign)
+        path.parent.symlink_to(foreign, target_is_directory=True)
+    worker.join(3)
+    monkeypatch.undo()
+    assert not worker.is_alive()
+    assert len(errors) == 1 and getattr(errors[0], 'reason_code', None) == 'unsafe_audit_path'
+    assert (foreign / 'audit.jsonl').read_bytes() == original
+    assert sorted(item.name for item in foreign.iterdir()) == ['audit.jsonl']
+
+    with pytest.raises(OSError):
+        AuditLogger(config, root=owner).log(
+            LogParams(action=AuditAction.QUERY, user_id='u', channel='chat', target_type='task', target_id='t')
+        )
+    assert sorted(item.name for item in foreign.iterdir()) == ['audit.jsonl']
+
+
 if __name__ == "__main__":
     unittest.main()

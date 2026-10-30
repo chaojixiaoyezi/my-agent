@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import math
 import os
@@ -240,19 +241,22 @@ class AuditQuery:
     def recent_users(self, limit: int = 10) -> list[dict[str, Any]]:
         return require_complete(self.recent_users_report(limit))['value']
 
-    # LLM: 默认永久保留；从可信根逐段nofollow后取得原路径线程锁及同名flock，所有文件操作锚定该父FD。
-    # 函数用途: 安全裁剪已证明过期的审计记录，不把未知或I/O错误算作删除。
+    # LLM: 默认永久保留；先无副作用预检并关闭FD，再取线程锁与可信根flock，获锁后重开父FD并规划应用。
+    # 函数用途: 安全裁剪已证明过期的审计记录，等待锁期间绝不持有旧父FD或在根外创建旁锁。
     def cleanup_old_entries(self, days: int = 0) -> int:
         if days <= 0:
             return 0
         try:
-            with _audit_parent(self._audit_file, self._trusted_root) as (parent, root):
+            with _audit_parent(self._audit_file, self._trusted_root) as (check_parent, _check_root):
+                _audit_regular(os.stat(self._audit_file.name, dir_fd=check_parent, follow_symlinks=False))
+            handle = path_thread_lock(_audit_lock_key_path(self._audit_file, self._trusted_root))
+            with handle.lock, _audit_append_lock(
+                None, self._audit_file.name, path=self._audit_file, trusted_root=self._trusted_root,
+            ) as (parent, root):
                 _audit_regular(os.stat(self._audit_file.name, dir_fd=parent, follow_symlinks=False))
-                handle = path_thread_lock(self._audit_file)
-                with handle.lock, _audit_append_lock(parent, self._audit_file.name):
-                    plan = _plan_audit_retention(self._audit_file, cutoff_time=time.time() - days * 86400,
-                                                 parent_fd=parent, trusted_root=root)
-                    return _apply_audit_retention_unlocked(plan, parent_fd=parent)
+                plan = _plan_audit_retention(self._audit_file, cutoff_time=time.time() - days * 86400,
+                                             parent_fd=parent, trusted_root=root)
+                return _apply_audit_retention_unlocked(plan, parent_fd=parent)
         except FileNotFoundError:
             return 0
 
@@ -273,6 +277,20 @@ class _AuditRetentionPlan:
 # 类用途: 为审计路径边界失败提供稳定的结构化诊断。
 class UnsafeAuditPathError(OSError):
     reason_code = 'unsafe_audit_path'
+
+
+# LLM: 只解析可信根自身真实路径，不跟随其下任何子路径符号链接，保证线程锁键稳定且不越界。
+# 函数用途: 计算writer与cleaner共用的规范路径线程锁键。
+def _audit_lock_key_path(path, trusted_root=None):
+    abs_path = Path(os.path.abspath(path))
+    if trusted_root is not None:
+        abs_root = Path(os.path.abspath(trusted_root))
+        try:
+            rel = abs_path.relative_to(abs_root)
+            return Path(os.path.realpath(abs_root)) / rel
+        except ValueError:
+            pass
+    return abs_path
 
 
 # LLM: 根由调用方显式传入；旧私有入口无root时从文件系统根逐段验证，不把最近已存在父目录当可信锚点。
@@ -301,33 +319,73 @@ def _audit_regular(info):
         raise UnsafeAuditPathError('unsafe audit path')
 
 
-# LLM: 沿原json_io旁锁命名和flock协议；只相对已验证父FD创建，锁叶被替换或改成别名时拒绝。
-# 函数用途: 安全取得与logger兼容的审计追加锁并保证释放。
+# LLM: 显式可信root存在且目标位于子目录时，旁锁直接锚定在可信root FD下，绝不在可搬移子目录内创建旁锁；
+#   取得flock后重新从可信根逐段nofollow打开并校验父目录FD，再交由调用方读写。
+# 函数用途: 安全取得与logger统一的审计排他锁并返回获锁后新验证的(parent_fd, root)。
 @contextmanager
-def _audit_append_lock(parent, name):
-    lock_name = name + '.lock'
+def _audit_append_lock(parent, name, *, path=None, trusted_root=None, blocking=True):
+    abs_path = Path(os.path.abspath(path)) if path is not None else None
+    if abs_path is not None:
+        with _audit_parent(abs_path, trusted_root) as (pre_parent, root):
+            rel_parts = abs_path.relative_to(root).parts
+    else:
+        root = Path(os.path.abspath(trusted_root)) if trusted_root is not None else None
+        rel_parts = (name,)
+    use_root_lock = trusted_root is not None and len(rel_parts) > 1
+    if use_root_lock:
+        try:
+            lock_dir = open_directory_beneath(root, (), require_dir_fd=True)
+        except NoFollowPathError as exc:
+            raise UnsafeAuditPathError('unsafe audit path') from exc
+        digest = hashlib.sha256('/'.join(rel_parts).encode('utf-8')).hexdigest()[:16]
+        lock_name = f'.audit-{digest}.lock'
+        close_lock_dir = True
+    elif parent is not None:
+        if abs_path is not None:
+            _audit_parent_current(abs_path, root, parent)
+        lock_dir = parent
+        lock_name = name + '.lock'
+        close_lock_dir = False
+    else:
+        try:
+            lock_dir = open_directory_beneath(root, rel_parts[:-1], require_dir_fd=True)
+        except NoFollowPathError as exc:
+            raise UnsafeAuditPathError('unsafe audit path') from exc
+        lock_name = name + '.lock'
+        close_lock_dir = True
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0)
     try:
-        descriptor = os.open(lock_name, flags, 0o600, dir_fd=parent)
-    except OSError as exc:
-        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-            raise UnsafeAuditPathError('unsafe audit path') from exc
-        raise
-    try:
-        _audit_regular(os.fstat(descriptor))
-        os.fchmod(descriptor, 0o600)
-        _flock_descriptor(descriptor)
         try:
-            current = os.stat(lock_name, dir_fd=parent, follow_symlinks=False)
-            _audit_regular(current)
-            held = os.fstat(descriptor)
-            if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
-                raise BlockingIOError('audit append lock changed')
-            yield
+            descriptor = os.open(lock_name, flags, 0o600, dir_fd=lock_dir)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise UnsafeAuditPathError('unsafe audit path') from exc
+            raise
+        try:
+            _audit_regular(os.fstat(descriptor))
+            os.fchmod(descriptor, 0o600)
+            _flock_descriptor(descriptor, blocking=blocking)
+            try:
+                current = os.stat(lock_name, dir_fd=lock_dir, follow_symlinks=False)
+                _audit_regular(current)
+                held = os.fstat(descriptor)
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                    raise BlockingIOError('audit append lock changed')
+                if abs_path is not None and parent is None:
+                    with _audit_parent(abs_path, trusted_root) as (verified_parent, verified_root):
+                        _audit_parent_current(abs_path, verified_root, verified_parent)
+                        yield verified_parent, verified_root
+                else:
+                    if abs_path is not None and parent is not None:
+                        _audit_parent_current(abs_path, root, parent)
+                    yield parent, root
+            finally:
+                _funlock_descriptor(descriptor)
         finally:
-            _funlock_descriptor(descriptor)
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        if close_lock_dir:
+            os.close(lock_dir)
 
 
 # LLM: 同叶generation不能替代祖先验证；重新从原可信根打开后比对父inode，不通过新路径跟随软链。

@@ -12,6 +12,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import struct
 import threading
 import time
 from collections import OrderedDict
@@ -49,24 +50,118 @@ _PROCESS_ADVANCE_LOCK = threading.RLock()
 _PROCESS_APPENDS = OrderedDict()
 
 
-# LLM: 见证只由持有领域追加锁的writer发布；派生库写失败不影响事实提交，未知写者仍复核全部分块。
-# 函数用途: 保存有界进程追加链并尽力持久化已有检查点的准确衔接见证。
-def note_owner_append(home, parts, before, after):
-    if before is None or before[:2] != after[:2] or before[2] >= after[2]:
+# LLM: 见证必须由持有领域锁的writer提供写后完整前缀字节并核对ori_spans摘要；前缀被等长改写即拒绝见证。
+# 函数用途: 校验写后前缀与已发布检查点摘要一致后，保存进程内与SQLite持久追加见证。
+def note_owner_append(home, parts, before, after, *, raw_after=None):
+    if before is None or after is None or before[:2] != after[:2] or before[2] >= after[2]:
         return
     key = (str(Path(home).absolute()), tuple(parts))
+    verified = False
+    try:
+        verified = bool(
+            OwnerReadIndex(home)._record_append_witness(
+                tuple(parts), before, after, raw_after=raw_after,
+            )
+        )
+    except (_Issue, OSError, sqlite3.Error, ValueError, TypeError):
+        verified = False
     with _PROCESS_MEMO_LOCK:
+        if not verified:
+            _PROCESS_APPENDS.pop(key, None)
+            return
         chain = _PROCESS_APPENDS.pop(key, ())
         if not chain or chain[-1][1] != before:
             chain = ()
         _PROCESS_APPENDS[key] = (*chain[-127:], (before, after))
         while len(_PROCESS_APPENDS) > _MAX_MEMO_ENTRIES:
             _PROCESS_APPENDS.popitem(last=False)
-    try:
-        OwnerReadIndex(home)._record_append_witness(tuple(parts), before, after)
-    except (_Issue, OSError, sqlite3.Error, ValueError, TypeError):
-        # 见证只是可删重建的加速信息；失败后读侧仍通过完整分块复核，绝不撤销已追加事实。
-        pass
+
+_SHA256_INIT = (
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+    0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+)
+_SHA256_K = (
+    0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
+    0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3, 0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
+    0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC, 0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
+    0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7, 0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967,
+    0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13, 0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85,
+    0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3, 0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
+    0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5, 0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
+    0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208, 0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2,
+)
+
+
+# LLM: 按FIPS 180-4处理64字节分组，供跨进程可续前缀分块摘要计算使用。
+# 函数用途: 更新SHA-256的8个32位状态字。
+def _sha256_compress(state, block):
+    mv = memoryview(block)
+    h0, h1, h2, h3, h4, h5, h6, h7 = state
+    for offset in range(0, len(mv), 64):
+        w = list(struct.unpack(">16I", mv[offset:offset + 64])) + [0] * 48
+        for idx in range(16, 64):
+            s0 = ((w[idx - 15] >> 7) | (w[idx - 15] << 25)) ^ ((w[idx - 15] >> 18) | (w[idx - 15] << 14)) ^ (w[idx - 15] >> 3)
+            s1 = ((w[idx - 2] >> 17) | (w[idx - 2] << 15)) ^ ((w[idx - 2] >> 19) | (w[idx - 2] << 13)) ^ (w[idx - 2] >> 10)
+            w[idx] = (w[idx - 16] + s0 + w[idx - 7] + s1) & 0xFFFFFFFF
+        a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
+        for idx in range(64):
+            s1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))
+            ch = (e & f) ^ ((~e) & g)
+            t1 = (h + s1 + ch + _SHA256_K[idx] + w[idx]) & 0xFFFFFFFF
+            s0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))
+            maj = (a & b) ^ (a & c) ^ (b & c)
+            t2 = (s0 + maj) & 0xFFFFFFFF
+            h, g, f, e, d, c, b, a = g, f, e, (d + t1) & 0xFFFFFFFF, c, b, a, (t1 + t2) & 0xFFFFFFFF
+        h0 = (h0 + a) & 0xFFFFFFFF
+        h1 = (h1 + b) & 0xFFFFFFFF
+        h2 = (h2 + c) & 0xFFFFFFFF
+        h3 = (h3 + d) & 0xFFFFFFFF
+        h4 = (h4 + e) & 0xFFFFFFFF
+        h5 = (h5 + f) & 0xFFFFFFFF
+        h6 = (h6 + g) & 0xFFFFFFFF
+        h7 = (h7 + h) & 0xFFFFFFFF
+    return [h0, h1, h2, h3, h4, h5, h6, h7]
+
+
+# LLM: 仅保存8个uint32状态字、已处理字节数与不足64字节尾块，支持大span在冷进程小预算下持久续算。
+# 类用途: 提供与hashlib.sha256逐位一致且可安全JSON序列化的增量摘要器。
+class _ResumableSha256:
+    def __init__(self, state=None, count=0, tail=b""):
+        self._state = list(state) if state is not None else list(_SHA256_INIT)
+        self._count = int(count)
+        self._tail = bytes(tail)
+
+    def copy(self):
+        return _ResumableSha256(self._state, self._count, self._tail)
+
+    def update(self, data):
+        buf = self._tail + bytes(data)
+        self._count += len(data)
+        cut = (len(buf) // 64) * 64
+        if cut:
+            self._state = _sha256_compress(self._state, buf[:cut])
+        self._tail = buf[cut:]
+
+    def hexdigest(self):
+        pad = self._tail + b"\x80"
+        pad += b"\x00" * ((56 - len(pad)) % 64) + struct.pack(">Q", self._count * 8)
+        return "".join(f"{word:08x}" for word in _sha256_compress(list(self._state), pad))
+
+    def to_state(self):
+        return [list(self._state), self._count, self._tail.hex()]
+
+    @classmethod
+    def from_state(cls, raw, expected_count):
+        if (not isinstance(raw, list) or len(raw) != 3
+                or not isinstance(raw[0], list) or len(raw[0]) != 8
+                or any(type(w) is not int or not 0 <= w <= 0xFFFFFFFF for w in raw[0])
+                or type(raw[1]) is not int or raw[1] != expected_count
+                or not isinstance(raw[2], str) or len(raw[2]) >= 128):
+            raise ValueError("invalid resumable sha256 state")
+        tail = bytes.fromhex(raw[2])
+        if len(tail) != expected_count % 64:
+            raise ValueError("invalid resumable sha256 tail length")
+        return cls(raw[0], raw[1], tail)
 
 _FIELDS = {
     "telemetry": {
@@ -752,32 +847,67 @@ class OwnerReadIndex:
         except FileNotFoundError:
             return None
 
-    # LLM: 不为writer创建缓存；在短事务内把领域锁内的准确stamp链绑定到已有检查点。
-    # 函数用途: 持久保存每源唯一追加见证，支持不同写读进程的增量路径。
-    def _record_append_witness(self, parts, before, after):
+    # LLM: 不为writer创建缓存；必须核对写后前缀字节与检查点全部ori_spans及链式前缀摘要一致才发布见证。
+    # 函数用途: 持久保存经前缀摘要核实的追加见证，拦截before/after窗口内的等长前缀改写。
+    def _record_append_witness(self, parts, before, after, *, raw_after=None):
+        if not isinstance(raw_after, (bytes, bytearray)) or len(raw_after) != after[2] or before[2] > len(raw_after):
+            return False
         sid = self._source_id('telemetry', parts)
         with self._database(write=True) as connection:
             connection.execute('BEGIN IMMEDIATE')
             checkpoint = self._checkpoint(connection, sid, 'telemetry', parts)
-            if checkpoint is None:
+            if checkpoint is None or checkpoint['through'] > before[2]:
                 connection.rollback()
-                return
+                return False
             base = [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp'])]
             value = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('append:' + sid,)).fetchone()
             previous = json.loads(value[0]) if value is not None else None
-            if checkpoint['stamp'] != before and not (
-                isinstance(previous, list) and previous[:3] == base and previous[3:] == [list(before)]
-            ):
-                connection.rollback()
-                return
+            chained = (
+                isinstance(previous, list)
+                and len(previous) in (4, 5)
+                and previous[:3] == base
+                and previous[3] == list(before)
+            )
+            if checkpoint['stamp'] != before and not chained:
+                connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+                connection.commit()
+                return False
+            spans = connection.execute(
+                'SELECT start,stop,digest FROM ori_spans WHERE sid=? AND generation=? ORDER BY start',
+                (sid, checkpoint['generation']),
+            ).fetchall()
+            pos = 0
+            for span in spans:
+                start, stop, digest = span['start'], span['stop'], span['digest']
+                if start != pos or stop > checkpoint['through']:
+                    connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+                    connection.commit()
+                    return False
+                if not hmac.compare_digest(hashlib.sha256(raw_after[start:stop]).hexdigest(), digest):
+                    connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+                    connection.commit()
+                    return False
+                pos = stop
+            if pos != checkpoint['through']:
+                connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+                connection.commit()
+                return False
+            if chained and len(previous) == 5 and isinstance(previous[4], str):
+                before_digest = hashlib.sha256(raw_after[:before[2]]).hexdigest()
+                if not hmac.compare_digest(before_digest, previous[4]):
+                    connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+                    connection.commit()
+                    return False
+            after_digest = hashlib.sha256(raw_after).hexdigest()
             connection.execute(
                 'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                ('append:' + sid, _json([*base, list(after)])),
+                ('append:' + sid, _json([*base, list(after), after_digest])),
             )
             connection.commit()
+            return True
 
-    # LLM: 只有精确匹配的领域锁内追加链可免扫历史，未知写者必须验证全部持久分块。
-    # 函数用途: 判断检查点到当前来源是否存在完整可信追加见证。
+    # LLM: 只有经写后ori_spans前缀摘要核实的追加见证可免重复读盘，篡改前缀必须回退完整分块核验。
+    # 函数用途: 判断检查点到当前来源是否存在已验证前缀完整性的可信追加见证。
     def _witnessed_append(self, connection, checkpoint, observed):
         key = (str(self._home), tuple(json.loads(checkpoint['parts'])))
         with _PROCESS_MEMO_LOCK:
@@ -794,22 +924,29 @@ class OwnerReadIndex:
                 proof = json.loads(saved[0])
             except (ValueError, TypeError):
                 raise _Issue('corrupt_append_witness') from None
-            return proof == [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp']), list(observed)]
+            return (
+                isinstance(proof, list)
+                and len(proof) in (4, 5)
+                and proof[:4] == [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp']), list(observed)]
+            )
         return False
 
-    # LLM: 持久续点只保存完整核实的分块边界，不序列化hashlib对象或凭尾窗信任历史。
-    # 函数用途: 保存当前来源stamp对应的有限分块证明水位。
-    def _save_proof(self, connection, checkpoint, observed, position):
+    # LLM: 持久续点绑定当前generation、through和来源stamp；支持保存span内增量摘要状态供冷进程小预算续跑。
+    # 函数用途: 保存当前来源stamp对应的有限分块证明水位与可选块内摘要状态。
+    def _save_proof(self, connection, checkpoint, observed, position, mid_span=None):
         if connection.execute('PRAGMA query_only').fetchone()[0]:
             return
-        value = _json([checkpoint['generation'], checkpoint['through'], list(observed), position])
+        payload = [checkpoint['generation'], checkpoint['through'], list(observed), position]
+        if mid_span is not None:
+            payload.append(mid_span)
+        value = _json(payload)
         connection.execute(
             'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
             ('proof:' + checkpoint['sid'], value),
         )
 
-    # LLM: 每一未见证的已发布字节均参与摘要复核，共享可变hasher始终在锁内复制后使用。
-    # 函数用途: 有界、可续地核验一个检查点的完整已验证前缀。
+    # LLM: 每一未见证的已发布字节均参与摘要复核，见证本身必须在写后核实前缀ori_spans摘要；共享hasher锁内复制。
+    # 函数用途: 有界、可跨实例且可跨冷进程地核验检查点的完整已验证前缀。
     def _prove_prefix(self, connection, descriptor, checkpoint, observed, budget):
         sid = checkpoint["sid"]
         generation = checkpoint["generation"]
@@ -829,9 +966,27 @@ class OwnerReadIndex:
             if saved is not None:
                 try:
                     proof = json.loads(saved[0])
-                    if (proof[:3] == [generation, target, list(observed)]
+                    if (isinstance(proof, list) and len(proof) in (4, 5)
+                            and proof[:3] == [generation, target, list(observed)]
                             and type(proof[3]) is int and 0 <= proof[3] <= target):
                         position = proof[3]
+                        if len(proof) == 5 and proof[4] is not None:
+                            mid = proof[4]
+                            if (not isinstance(mid, list) or len(mid) != 4
+                                    or type(mid[0]) is not int or type(mid[1]) is not int
+                                    or not 0 <= mid[0] < position < mid[1] <= target
+                                    or not isinstance(mid[2], str) or len(mid[2]) != 64):
+                                raise ValueError("invalid mid-span proof")
+                            span_row = connection.execute(
+                                """SELECT start,stop,digest FROM ori_spans
+                                   WHERE sid=? AND generation=? AND start=?""",
+                                (sid, generation, mid[0]),
+                            ).fetchone()
+                            if (span_row is None or span_row["stop"] != mid[1]
+                                    or span_row["digest"] != mid[2]):
+                                raise ValueError("mismatched mid-span proof")
+                            span_start, span_stop, digest = mid[0], mid[1], mid[2]
+                            hasher = _ResumableSha256.from_state(mid[3], position - span_start)
                 except (ValueError, TypeError, IndexError):
                     raise _Issue('corrupt_prefix_proof') from None
         else:
@@ -841,7 +996,9 @@ class OwnerReadIndex:
             if budget.remaining <= 0 or time.monotonic() >= budget.deadline:
                 state = (position, span_start, span_stop, digest, hasher)
                 self._memo_put(key, state)
-                self._save_proof(connection, checkpoint, observed, position if hasher is None else span_start)
+                mid_span = ([span_start, span_stop, digest, hasher.to_state()]
+                            if hasher is not None else None)
+                self._save_proof(connection, checkpoint, observed, position, mid_span)
                 return None
             if hasher is None:
                 span = connection.execute(
@@ -854,12 +1011,14 @@ class OwnerReadIndex:
                 span_start, span_stop, digest = (
                     span["start"], span["stop"], span["digest"],
                 )
-                hasher = hashlib.sha256()
+                hasher = _ResumableSha256()
             data = budget.read(descriptor, position, span_stop - position)
             if not data:
                 state = (position, span_start, span_stop, digest, hasher)
                 self._memo_put(key, state)
-                self._save_proof(connection, checkpoint, observed, position if hasher is None else span_start)
+                mid_span = ([span_start, span_stop, digest, hasher.to_state()]
+                            if hasher is not None else None)
+                self._save_proof(connection, checkpoint, observed, position, mid_span)
                 return None
             hasher.update(data)
             position += len(data)

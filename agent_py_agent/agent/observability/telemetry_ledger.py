@@ -70,18 +70,36 @@ def _lock(home):
     return locked_private_directory(home, relative_parts=PARTS, lock_name=".telemetry.lock")
 
 
-# LLM: 仅观察领域锁内no-follow打开的真实文件，不凭路径stat接受软链接或多链接来源。
-# 函数用途: 捕获可与读索引检查点精确衔接的追加边界。
-def _append_stamp(home):
+# LLM: 仅观察领域锁内no-follow打开的真实单链接普通文件；可选读取写后完整字节供前缀摘要见证核验。
+# 函数用途: 捕获追加前后的准确文件元数据及写后稳定字节快照。
+def _append_stamp(home, *, include_bytes=False):
     try:
         descriptor = open_readonly_file_beneath(home, (*PARTS, 'tool_calls.jsonl'))
     except FileNotFoundError:
-        return None
+        return (None, None) if include_bytes else None
     try:
         info = os.fstat(descriptor)
         if info.st_nlink != 1:
-            return None
-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            return (None, None) if include_bytes else None
+        stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if not include_bytes:
+            return stamp
+        if info.st_size > 16 * 1024 * 1024:
+            return stamp, None
+        chunks = []
+        offset = 0
+        while offset < info.st_size:
+            piece = os.pread(descriptor, min(65536, info.st_size - offset), offset)
+            if not piece:
+                break
+            chunks.append(piece)
+            offset += len(piece)
+        verify = os.fstat(descriptor)
+        verify_stamp = (verify.st_dev, verify.st_ino, verify.st_size, verify.st_mtime_ns, verify.st_ctime_ns)
+        raw = b''.join(chunks)
+        if verify_stamp != stamp or len(raw) != info.st_size:
+            return stamp, None
+        return stamp, raw
     finally:
         os.close(descriptor)
 
@@ -208,12 +226,13 @@ class ToolTelemetryLedger:
             raise ValueError("args_summary must be a dict")
         item.args_summary = _sanitize(item.args_summary)
         line = _encode(item.to_dict())
+        encoded_len = len(line.encode('utf-8'))
         with _lock(self._home):
             before = _append_stamp(self._home)
             append_text_beneath(self._home, (*PARTS, "tool_calls.jsonl"), line)
-            after = _append_stamp(self._home)
-            if before is not None and after is not None and after[2] - before[2] == len(line.encode('utf-8')):
-                note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after)
+            after, raw_after = _append_stamp(self._home, include_bytes=True)
+            if before is not None and after is not None and after[2] - before[2] == encoded_len:
+                note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after, raw_after=raw_after)
         return item
 
     # LLM: 空字符串和None保持未指定口径，非空owner只匹配完全相同身份。

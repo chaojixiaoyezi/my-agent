@@ -444,7 +444,7 @@ def test_r1_cold_process_prefix_resume(tmp_path):
 from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
 i=OwnerReadIndex(sys.argv[1])
 v=i.advance('telemetry',('data','telemetry','tool_calls.jsonl'),max_bytes=4096)
-print(json.dumps({'status':v['status'],'reason':v['reason'],'through':v['through']}))
+print(json.dumps(v))
 '''
     observations = []
     for _ in range(12):
@@ -495,3 +495,81 @@ def test_r1_historical_overflow_is_structured_for_public_list(tmp_path):
     with pytest.raises(OwnerReadUnavailable) as caught:
         ledger.query_tool_calls()
     assert caught.value.coverage['reason'] == 'integer_out_of_range'
+
+
+# LLM: 在遥测writer进入领域锁后、实际追加写入前的精确窗口内等长改写历史前缀，读索引不得免验跳过。
+# 函数用途: 实测追加窗口内等长前缀改写触发旧generation失效与完整重投影。
+def test_r2_equal_length_prefix_rewrite_during_telemetry_append_invalidates_generation(tmp_path, monkeypatch):
+    from agent_py_agent.agent.observability import telemetry_ledger as telemetry_mod
+    from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    for idx in range(10):
+        ledger.record_tool_call(dict(call_id=f'call-{idx}', tool_name='read'))
+    old_page = ledger.query_tool_calls_page()
+    old_view = old_page['view']
+    assert old_view['status'] == 'complete' and old_page['total_count'] == 10
+
+    real_append = telemetry_mod.append_text_beneath
+    path = tmp_path / 'data' / 'telemetry' / 'tool_calls.jsonl'
+
+    def corrupting_append(home, parts, line):
+        raw = path.read_bytes()
+        assert b'"call-0"' in raw
+        path.write_bytes(raw.replace(b'"call-0"', b'"call-X"', 1))
+        return real_append(home, parts, line)
+
+    monkeypatch.setattr(telemetry_mod, 'append_text_beneath', corrupting_append)
+    ledger.record_tool_call(dict(call_id='call-10', tool_name='read'))
+    monkeypatch.undo()
+
+    new_page = ledger.query_tool_calls_page()
+    new_view = new_page['view']
+    assert new_view['status'] == 'complete'
+    assert new_view['generation'] != old_view['generation']
+    assert ledger.query_tool_calls_page(view=old_view)['coverage']['status'] == 'unavailable'
+    assert len(ledger.query_tool_calls(tool_name='read')) == 11
+    assert ledger.get_tool_call('call-X') is not None
+
+
+# LLM: 升级前已存在的64KiB单条大span在冷进程4096字节预算下必须通过可序列化摘要状态逐拍推进完成。
+# 函数用途: 验证旧版大span在无进程内memo的独立子进程小预算下仍能收敛至complete。
+def test_r2_cold_process_oversized_legacy_span_resume(tmp_path):
+    import hashlib
+    import sqlite3
+    import subprocess
+    import sys
+
+    path = source(tmp_path, 60)
+    first = OwnerReadIndex(tmp_path).advance('telemetry', PARTS)
+    assert first['status'] == 'complete' and first['through'] > 16384
+    raw_prefix = path.read_bytes()[:first['through']]
+    db_path = tmp_path / 'cache' / 'owner_read_index.sqlite3'
+    with sqlite3.connect(db_path) as conn:
+        sid, gen = conn.execute('SELECT sid, generation FROM ori_sources').fetchone()
+        conn.execute('DELETE FROM ori_spans WHERE sid=? AND generation=?', (sid, gen))
+        conn.execute(
+            'INSERT INTO ori_spans(sid,generation,start,stop,digest) VALUES (?,?,?,?,?)',
+            (sid, gen, 0, len(raw_prefix), hashlib.sha256(raw_prefix).hexdigest()),
+        )
+        conn.execute('DELETE FROM ori_meta WHERE key=?', ('proof:' + sid,))
+        conn.commit()
+    with path.open('a') as stream:
+        stream.write(json.dumps(row(60)) + '\n')
+    script = '''import json,sys
+from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
+i=OwnerReadIndex(sys.argv[1])
+v=i.advance('telemetry',('data','telemetry','tool_calls.jsonl'),max_bytes=4096)
+c=i.query(v)['total_count'] if v['status']=='complete' else None
+print(json.dumps({'status':v['status'],'reason':v['reason'],'through':v['through'],'total_count':c}))
+'''
+    observations = []
+    for _ in range(15):
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(tmp_path)],
+                                check=True, capture_output=True, text=True, timeout=30)
+        observations.append(json.loads(result.stdout))
+        if observations[-1]['status'] == 'complete':
+            break
+    assert observations[-1]['status'] == 'complete', observations
+    assert len(observations) > 2
+    assert observations[-1]['total_count'] == 61
