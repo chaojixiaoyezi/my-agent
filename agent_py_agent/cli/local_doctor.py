@@ -67,20 +67,23 @@ def _check_local_store_open(checks: list[dict], stats: dict) -> None:
     )
 
 
-def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count: int, memory_indexed: int) -> None:
-    memory_ok = memory_count == memory_indexed
+# LLM: coverage由正式读索引按当前来源签名、owner及代次核验；此处只展示事实，不修复或恢复旧正文投影。
+# 函数用途: 仅将完整同步的正式记忆读索引判为健康，并为未同步状态提示显式重建。
+def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count: int, coverage: dict) -> None:
+    memory_ok = coverage["status"] == "complete"
+    memory_indexed = coverage.get("indexed_records")
     _add_doctor_check(
         checks,
         DoctorCheckRequest(
             name="memory_index",
             ok=memory_ok,
             severity="P1",
-            message=f"JSONL 记忆 {memory_count} 条，LocalStore memory 索引 {memory_indexed} 条。",
-            details={"memory_jsonl": memory_count, "memory_indexed": memory_indexed},
+            message=f"正式记忆 {memory_count} 条，MemoryReadIndex 已覆盖 {memory_indexed if memory_indexed is not None else '未知'} 条，coverage={coverage['status']}。",
+            details={"memory_jsonl": memory_count, "memory_indexed": memory_indexed, "coverage": coverage},
         ),
     )
     if not memory_ok:
-        suggestions.append("运行 `my-agent local-rebuild --source memory` 补齐记忆索引。")
+        suggestions.append("运行 `my-agent local-rebuild --source memory` 追平正式记忆读索引；coverage=complete 后恢复健康。")
 
 
 def _check_content_files(checks: list[dict], suggestions: list[str], missing_files: list, limit: int) -> None:
@@ -179,6 +182,8 @@ def _check_doctor_paths(checks: list[dict], agent: SimpleAgent, stats: dict, pat
         )
 
 
+# LLM: 正式记忆覆盖沿领域健康快照消费MemoryReadIndex，LocalStore仅描述工作区来源；不隐式推进索引。
+# 函数用途: 汇总当前工作区和owner正式记忆的真实健康事实及修复建议。
 def build_local_doctor_report(
     agent: SimpleAgent,
     *,
@@ -193,16 +198,16 @@ def build_local_doctor_report(
     stats = agent.local_store.stats()
     source_counts = agent.local_store.source_counts()
     memory_count = _memory_record_count(agent)
-    memory_indexed = source_counts.get("memory", 0)
+    memory_coverage = agent.memory.runtime_snapshot().get("read_index_coverage", {"status": "unavailable"})
     _check_local_store_open(checks, stats)
     _check_doctor_paths(checks, agent, stats, paths)
-    _check_memory_index(checks, suggestions, memory_count, memory_indexed)
+    _check_memory_index(checks, suggestions, memory_count, memory_coverage)
     missing_files = agent.local_store.missing_content_files(limit=limit)
     _check_content_files(checks, suggestions, missing_files, limit)
     counts = gateway_request_counts(paths)
     _check_gateway_queue(checks, suggestions, GatewayQueueCheckContext(paths, counts, agent))
     _check_work_orders(checks, suggestions, agent, limit)
-    if stats["record_count"] == 0 and (memory_count or agent.subagents.list_runs() or any(counts.values())):
+    if stats["record_count"] == 0 and (agent.subagents.list_runs() or any(counts.values())):
         suggestions.append("LocalStore 为空但磁盘上已有事实源，建议运行 `my-agent local-rebuild`。")
     ok = all(item["ok"] for item in checks)
     return {
