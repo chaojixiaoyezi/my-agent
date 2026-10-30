@@ -573,3 +573,58 @@ print(json.dumps({'status':v['status'],'reason':v['reason'],'through':v['through
     assert observations[-1]['status'] == 'complete', observations
     assert len(observations) > 2
     assert observations[-1]['total_count'] == 61
+
+
+# LLM: 旧版无前缀摘要的4字段追加见证在升级后不得免验跳过，必须回退分块重验并发现历史前缀等长改写。
+# 函数用途: 验证残留4字段旧追加见证不会把等长篡改前缀后的过期投影报告为complete。
+def test_r3_legacy_four_field_append_witness_requires_prefix_reverification(tmp_path):
+    from agent_py_agent.agent.local_storage import owner_read_index as ori_mod
+    from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+
+    for name, keep_legacy_witness in (('control', False), ('legacy_four_field', True)):
+        owner_dir = tmp_path / name
+        owner_dir.mkdir(parents=True, exist_ok=True)
+        ledger = ToolTelemetryLedger(owner_dir)
+        for idx in range(4):
+            ledger.record_tool_call(dict(call_id=f'call-{idx}', tool_name='read'))
+        old_page = ledger.query_tool_calls_page()
+        old_view = old_page['view']
+        assert old_view['status'] == 'complete' and old_page['total_count'] == 4
+
+        path = owner_dir / 'data' / 'telemetry' / 'tool_calls.jsonl'
+        raw = path.read_bytes()
+        assert b'"call-0"' in raw
+        path.write_bytes(raw.replace(b'"call-0"', b'"call-X"', 1))
+        ledger.record_tool_call(dict(call_id='call-4', tool_name='read'))
+        observed_stamp = list(ori_mod._stamp(path.lstat()))
+
+        idx_obj = ori_mod.OwnerReadIndex(owner_dir)
+        with idx_obj._database(write=True) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            sid, gen, through, raw_stamp = conn.execute(
+                'SELECT sid, generation, through, stamp FROM ori_sources'
+            ).fetchone()
+            checkpoint_stamp = json.loads(raw_stamp)
+            if keep_legacy_witness:
+                legacy_proof = json.dumps([gen, int(through), checkpoint_stamp, observed_stamp])
+                conn.execute(
+                    'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                    ('append:' + sid, legacy_proof),
+                )
+            else:
+                conn.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
+            conn.commit()
+
+        with ori_mod._PROCESS_MEMO_LOCK:
+            ori_mod._PROCESS_MEMOS.clear()
+            ori_mod._PROCESS_APPENDS.clear()
+
+        fresh_ledger = ToolTelemetryLedger(owner_dir)
+        new_page = fresh_ledger.query_tool_calls_page()
+        new_view = new_page['view']
+        assert new_view['status'] == 'complete'
+        assert new_view['generation'] != old_view['generation']
+        assert fresh_ledger.query_tool_calls_page(view=old_view)['coverage']['status'] == 'unavailable'
+        assert fresh_ledger.get_tool_call('call-0') is None
+        assert fresh_ledger.get_tool_call('call-X') is not None
+        assert new_page['total_count'] == 5
