@@ -81,10 +81,10 @@ def test_search_and_view_cover_all_three_sources(tmp_path, monkeypatch):
 
 
 def test_running_value_reads_the_runtime_capability_file():
-    """running_value 对 capability 键从随包文件读默认（没给 capability_path 时回落登记默认）；只读来源固定随包值。"""
+    """running_value 对 capability 键从随包文件读默认（没给 capability_path 时回落登记默认）；runtime_guard 无冻结快照时返回 unknown。"""
     reg = parameter_registry()
     assert running_value(reg["capability_candidate_limit"]) == 5
-    assert running_value(reg["repeat_fail_threshold"]) == 10
+    assert running_value(reg["repeat_fail_threshold"]) == "unknown"
     assert running_value(reg["max_tokens"], SimpleNamespace(max_tokens=999)) == 999
 
 

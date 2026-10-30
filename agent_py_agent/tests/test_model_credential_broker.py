@@ -22,12 +22,15 @@ def test_provider_import_uses_env_reference_without_copying_value():
     assert "environment-fixture" not in repr(result) and "original-static-fixture" not in repr(result)
 
 
-# LLM: 环境为空不能覆盖原静态配置；两者都没有则保留未配置，不能替用户选择凭据。
+# LLM: 环境为空不能覆盖原静态配置；同时保留显式环境引用供后续迟到环境变量解析，两者都没有则保留未配置。
 # 函数用途: 验证空环境与未配置状态的导入语义。
 def test_empty_environment_preserves_static_credential():
     from agent_py_agent.agent.settings.model_credentials import legacy_provider_credential
 
-    assert legacy_provider_credential("static-fixture", "E905_FIXTURE_KEY", environ={}) == {"api_key": "static-fixture"}
+    assert legacy_provider_credential("static-fixture", "E905_FIXTURE_KEY", environ={}) == {
+        "api_key": "static-fixture",
+        "api_key_ref": "env:E905_FIXTURE_KEY",
+    }
     assert legacy_provider_credential("", "", environ={}) == {"api_key": ""}
 
 

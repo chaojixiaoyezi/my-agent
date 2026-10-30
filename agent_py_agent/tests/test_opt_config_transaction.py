@@ -17,7 +17,7 @@ def test_config_common_exact_fourteen():
     assert registry_module.COMMON_KEYS == (
         "max_tokens", "request_timeout", "model_reasoning_effort", "memory_compact_trigger_percent",
         "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled", "enable_self_learning",
-        "enable_subagents", "max_subagents", "tool_shell_timeout", "tool_output_externalize_min_chars",
+        "enable_subagents", "max_subagents", "tool_shell_timeout", "tool_http_timeout",
         "timezone", "tui_mouse_capture_default",
     )
 
@@ -217,7 +217,7 @@ def test_config_settings_guard_show_uses_deployment_source(tmp_path):
     config = SimpleNamespace(my_agent_home=str(tmp_path), config_path=str(neighbor))
     command = SimpleNamespace(operation="show", value="show repeat_fail_threshold")
     text = run_settings_control(config, command)
-    assert "当前运行值：7" in text and "99" not in text
+    assert "当前运行值：unknown" in text and "99" not in text
     assert "deployment_policy.json" in text and "runtime_guard_config.yaml" not in text
     assert "随包默认、不可覆盖" not in text and "部署" in text
 
