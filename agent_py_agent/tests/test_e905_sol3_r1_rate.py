@@ -307,6 +307,8 @@ def test_empty_boundary_record_cannot_shadow_persisted_runtime_ledger_history(tm
                 "total_failures": 0,
                 "last_failure_at": 0.0,
                 "last_success_at": 0.0,
+                "retry_after_until": _clock_now() - 20.0,
+                "circuit_state": "closed",
             }
         ],
     }

@@ -162,7 +162,12 @@ def circuit_decision(
     if record.circuit_state != _OPEN and record.consecutive_failures < threshold:
         return None
     retry_after_until = record.retry_after_until
-    if retry_after_until <= 0 and record.last_failure_at > 0:
+    if record.last_failure_at > 0 and record.consecutive_failures >= threshold:
+        retry_after_until = max(
+            retry_after_until,
+            record.last_failure_at + backoff_seconds(policy, record.consecutive_failures),
+        )
+    elif retry_after_until <= 0 and record.last_failure_at > 0:
         retry_after_until = record.last_failure_at + backoff_seconds(policy, record.consecutive_failures)
     retry_after = retry_after_seconds(retry_after_until, facts.now)
     if retry_after <= 0:

@@ -919,6 +919,18 @@ def _merge_rate_limit_row_pair(
         _rate_limit_float(first.get("last_success_at")),
         _rate_limit_float(second.get("last_success_at")),
     )
+    if "retry_after_until" in first or "retry_after_until" in second:
+        merged["retry_after_until"] = max(
+            _rate_limit_float(first.get("retry_after_until")),
+            _rate_limit_float(second.get("retry_after_until")),
+        )
+    if (
+        str(first.get("circuit_state") or "").strip().lower() == "open"
+        or str(second.get("circuit_state") or "").strip().lower() == "open"
+    ):
+        merged["circuit_state"] = "open"
+    else:
+        merged.pop("circuit_state", None)
     return merged
 
 
