@@ -1,4 +1,4 @@
-# LLM: 权限、Schema、搜索和执行共用快照；来源合同与语法开关由宿主注入，展示投影不热改共享工具或身份。
+# LLM: 权限、Schema、搜索和执行共用快照；仅有search动作才默认收起工具，目录归档不展示内部授权令牌，不热改身份。
 # 模块用途: 装配同源声明和可选反馈的工具并交给唯一执行器，沿原目录与搜索展示工具。
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ from .models import (
     ToolRuntimePolicy,
     ToolRuntimeSnapshot,
 )
-from .registry_auth import CATALOG_ONLY_TOOL_GRANT, allowed_tool_set
+from .registry_auth import CATALOG_ONLY_TOOL_GRANT, allowed_tool_set, snapshot_search_can_load
 from .registry_bootstrap import build_tool_retriever, register_base_tools
 from .registry_workspace import effective_registry_cwd
 from .runtime_contracts import ToolCall, ToolResult
@@ -243,7 +243,7 @@ class ToolRegistryParams:
     permission_state_reader: Callable[[], dict[str, object]] | None = None
 
 
-# LLM: 目录与搜索共用请求的权限快照；完整归档及有界现场视图同源，只读且不更新发现账或加载schema。
+# LLM: 目录与搜索共用请求快照；归档只投影规范工具名，动作令牌留在宿主权限里，不更新发现账或加载schema。
 # 函数用途: 为tool_search的catalog动作生成本人可见工具、不可用原因及执行边界。
 def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
     from .self_context import registry_self_context
@@ -253,6 +253,8 @@ def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
     if provider is not None:
         self_context.update(provider(snapshot, context))
     payload = tool_manifest_payload(snapshot)
+    if isinstance(payload.get("allowed_tools"), list):
+        payload["allowed_tools"] = [name for name in payload["allowed_tools"] if name != CATALOG_ONLY_TOOL_GRANT]
     payload["self_context"] = self_context
     payload["permission_mode"] = self_context["permissions"]["mode"]
     payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
@@ -338,8 +340,8 @@ class ToolSearchTool(BaseTool):
     ) -> ToolHandlerOutcome:
         return self._execute_snapshot(params, context.runtime_snapshot, context)
 
-    # LLM: query/names 至少一项且各自合法；实际名字只在当前快照解析，搜索不能授予权限。
-    # 函数用途: 校验批量名称、类别和查询上限后，生成同源加载回执。
+    # LLM: catalog只接受action且不加载；search需query/names之一并校验类别和上限，只解析当前授权快照，不能授予权限。
+    # 函数用途: 按动作分别返回只读目录或同源搜索加载回执，拒绝混用参数。
     def _execute_snapshot(
         self,
         params: dict[str, Any],
@@ -603,14 +605,13 @@ def _bounded_manifest_core(result: dict[str, object], size: Callable[[object], i
     return bounded_manifest_core(result, _LIVE_LIST_TOOLS_MAX_BYTES)
 
 
-# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；显式授权仍可折叠，但无可用搜索入口时必须全部直出。
+# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；只有search/load可用才折叠，catalog-only必须直出已授权工具。
 # 函数用途: 生成稳定前缀的原生工具序列，授权只限范围，不替代发现入口和真实加载事实。
 def _ordered_model_visible_specs(registry: Any, snapshot: ToolRuntimeSnapshot, specs: list[ToolModelSpec],
                                  allowed_tools: list[str] | None, loaded_tool_names: Collection[str] | None):
     from .tool_search_state import ordered_tool_names
 
-    search = snapshot.runtime("tool_search")
-    if (search is None or not search.exposure.model_visible or not search.availability.available
+    if (not snapshot_search_can_load(snapshot)
             or not any(spec.name == "tool_search" for spec in specs)):
         return specs
     extra_deferred, _declared = _extra_deferred_names(registry, snapshot, allowed_tools)
@@ -1418,7 +1419,7 @@ def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) ->
         )
 
 
-# LLM: 自适应折叠不覆盖调用方显式工具表；不改后台预载或原默认折叠策略，发现入口缺失时放弃额外折叠。
+# LLM: 自适应折叠不覆盖显式工具表；没有search动作或搜索类别被收起时放弃折叠，不能依赖catalog找回Schema。
 # 函数用途: 当原发现入口被既有目录设置收起时放弃额外折叠，避免把直接工具隐藏后无法找回。
 def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
                                  allowed_tools: list[str] | None = None) -> frozenset[str]:
@@ -1426,13 +1427,13 @@ def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categor
     if not names or allowed_tools is not None or snapshot.allowed_tools is not None:
         return frozenset()
     search = snapshot.runtime("tool_search")
-    if search is None or search.model_spec.category in deferred_categories:
+    if not snapshot_search_can_load(snapshot) or search.model_spec.category in deferred_categories:
         return frozenset()
     return names
 
 
 # LLM: 工具自己声明的默认收起（ToolModelHints.default_deferred）只在开关打开、且原 tool_search
-#   在本快照里可用、模型可见、没被类别收起时生效，否则返回空集——宁可多展示，也不能把工具藏到找不回来。发现入口永不收起。
+#   在本快照具备search动作、可用、模型可见、没被类别收起时生效，否则返回空集——不能把工具藏到找不回来。发现入口永不收起。
 #   后台授权闭包不再决定前台展示；后台按结构化唤醒预载，其余允许工具仍能通过搜索找回。
 #   只读快照，不改注册表、授权或 snapshot_hash；改判定要同步 test_tool_default_deferral。
 # 函数用途: 算出本轮因工具声明而默认收起的工具名，供可见 Schema、收起搜索范围和目录索引共用。
@@ -1441,7 +1442,7 @@ def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories:
     if not enabled:
         return frozenset()
     search = snapshot.runtime("tool_search")
-    if (search is None or not search.availability.available or not search.exposure.model_visible
+    if (not snapshot_search_can_load(snapshot)
             or search.model_spec.category in deferred_categories):
         return frozenset()
     return frozenset(

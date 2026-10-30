@@ -1,5 +1,5 @@
-# LLM: 自身发现只投影宿主owner、actor与冻结边界；插件cwd读根与内置读门分别标来源，不读配置正文或产生授权。
-# 模块用途: 为 list_tools 和 /status 提供同源、无秘密的本人身份及执行边界说明。
+# LLM: 自身发现只投影宿主owner、actor与冻结边界；目录只读者的已授权工具不投影为收起，不读配置正文或产生授权。
+# 模块用途: 为tool_search目录和/status提供同源、无秘密的身份及执行边界说明。
 from __future__ import annotations
 
 from ..conversation.host_actor import HostActorError, resolve_host_actor
@@ -12,16 +12,17 @@ from .models import (
     ToolInvocationContext,
     ToolRuntimeSnapshot,
 )
+from .registry_auth import snapshot_search_can_load
 
 
-# LLM: 展示只认冻结的类别/默认开关、额外收起及加载声明；显式授权无预载子集时直出，加载仍与公开权限求交。
+# LLM: 展示只认冻结类别/默认开关及加载事实；无search动作或显式授权无预载时全部直出，不能把目录工具当作加载入口。
 #   不读取registry的实时分类或默认开关，也不据此改变真实工具注册、Schema或执行权限。
 # 函数用途: 从同一工具快照及已有加载事实生成稳定的公开展开名称集合。
 def _snapshot_model_names(snapshot: ToolRuntimeSnapshot, loaded=()) -> set[str]:
     names = {runtime.model_spec.name for runtime in snapshot.runtimes if runtime.exposure.model_visible}
     specs = {spec.name: spec for spec in snapshot.specs if spec.name in names}
     search = snapshot.runtime('tool_search')
-    if (search is None or not search.availability.available or not search.exposure.model_visible
+    if (not snapshot_search_can_load(snapshot)
             or (snapshot.allowed_tools is not None and not snapshot.preloaded_tool_names)):
         return names
     categories = set(snapshot.deferred_categories)

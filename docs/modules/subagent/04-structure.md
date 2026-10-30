@@ -1,3 +1,11 @@
+## 2026-10-29 e905 sol-1 R2：发现授权和恢复读取结构
+
+- `tooling/registry_auth.py::canonical_discovery_grants` 是旧目录grant的规范归一入口；`orchestration/tool_grants.py` 在预设合并前调用，`role_contracts.py::_tools_within_creation_scope` 合并宿主父快照的名字及动作grant后再收窄，`services/hierarchy/tool_policy.py` 对显式/继承两种递归授权保留同一令牌。
+- `subagents/capability_scope.py::_direct_parent_available_tools` 先核真实父运行上下文，父记录不可用时才读取与父边匹配的创建快照。旧v1缺 `tool_grants` 或缺完整动作证据时，工具名不再充当search授权。
+- `orchestration/create_payload.py::_merge_item_required_read_paths` 在规范items解析时关闭Audit目标路径推断，后续原创建manifest和runner精确读门继续消费结构化显式输入。
+- `tooling/registry_auth.py::snapshot_search_can_load` 由registry实际可见定义和self_context展示共用；catalog-only下不默认收起已授权工具。`tool_catalog_result` 仅过滤公开归档中的内部令牌，宿主执行快照仍保留它。
+- `capability/session_history_read.py` 的继续读取/浏览提示与 `conversation/compact_landmarks.py` 的召回示例使用规范v2模式；不会建立另一套消息存储、权限账或恢复入口。
+
 ## 2026-10-28 Wave 8：子代理公开索引重建服务与同 Owner Worker 单次构造结构
 
 - `services/indexing/service.py::SubAgentIndexingService.rebuild_subagent_index`：将 CLI `local_doctor` 重建索引所需的终态过期跳过（复用 `services/persistence/projections.py::_task_projection_expired`）与任务索引写入收拢为正式服务方法，CLI 仅保留文件源扫描与结果展示。

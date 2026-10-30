@@ -2,7 +2,7 @@
 #   只从本次被压缩的原始行与上一代摘要里已有的备份行里选，不从模型摘要正文提升；运行时判定仍只读结构化账本。
 #   预算按 token 计，随模型窗口放大（窗口 10%，不超过配置上限 compact_landmark_max_tokens），用户原话优先、最新优先；
 #   放不下的那条用户原话保留头尾、截掉中间并标明原长度。每条带 message_id，放不下的用户消息编号列在 omitted 行，
-#   回查说明（compact_recall_hint_enabled 且本 agent 注册了 session_search）告诉模型用 session_search 按编号分段读回原文。
+#   回查说明保留message_id编号指引，并在compact_recall_hint_enabled且注册session_search时给出显式mode的规范JSON。
 #   内存合同：第一遍流式读取只保留编号与整行 token 数，挑选后第二遍按下标只读入被选中的行，不让全部原文同时驻留。
 #   格式变化须同步 compact.py 的调用与候选容量收缩、semantic_summary_text 的剥离，以及 test_compact_landmarks.py。
 # 模块用途: 生成、继承和剥离压缩摘要里的原话备份段，并给出本段实际占用的 token，供压缩候选超出目标时收缩。
@@ -25,8 +25,11 @@ _HEADER_LINES = (
 )
 _RECALL_LINE = (
     "- recall: every compacted message keeps its exact original text in this conversation's transcript; "
-    'call session_search with message_id="<id>" (pass offset to continue a long message) to read one, '
-    "or current_thread=true to search or page through this conversation"
+    'to read message_id="<id>", '
+    'call session_search {"mode":"message","message_id":"<message_id>","offset":0} '
+    '(continue with the returned next_offset), '
+    '{"mode":"around","around_id":"<around_id>"} for an indexed anchor, '
+    'or {"mode":"thread_browse"} to page through this conversation'
 )
 _OMITTED_PREFIX = "- omitted_user_messages: "
 # compact 地标：默认最大 20000 tokens 的裁剪窗口。

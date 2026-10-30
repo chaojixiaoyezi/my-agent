@@ -1,4 +1,4 @@
-# LLM: 规范输入显式mode，旧优先级只在v1夹具验证；真实owner索引、task_ref和游标语义不得缩水。
+# LLM: 规范输入显式mode，提示示例须原样执行；旧优先级仅在v1夹具验证，保留owner索引、task_ref和游标语义。
 # 模块用途: 回归历史工具的字段声明、检索、锚点和最近列表及不可用失败。
 """session_search 工具钉子(输出仍沿discover/scroll/browse旧协议)。
 
@@ -485,3 +485,63 @@ class TestUnavailableStore:
         result = tool.execute({"mode": "search", "query": "x"})
         assert result.ok is False
         assert result.error_code == "TOOL_UNAVAILABLE"
+
+
+# LLM: 真实canonical会话和索引，原样提取回执JSON执行，不替提示补mode；消息继续读取必须确实返回对应原文。
+# 函数用途: 覆盖message丢失、长消息续读及thread_browse首末页的提示下一跳。
+@pytest.mark.parametrize('case', ['missing', 'continuation', 'browse_first', 'browse_last', 'explicit_thread'])
+def test_canonical_history_response_hints_are_executable(tmp_path, case):
+    import re
+
+    from agent_py_agent.tests.test_session_history_read import _owner
+
+    owner = _owner(tmp_path)
+    params = {'mode': 'message', 'message_id': 'missing'}
+    if case == 'continuation':
+        params.update(message_id=owner.rows[0].message_id, max_chars=200)
+    elif case == 'explicit_thread':
+        # 分页必须继续明确指定的其它本人会话，不能静默回到当前会话。
+        message = owner.store.messages.append({'thread_id': owner.other.thread_id, 'role': 'user', 'content': '其它会话原文' * 100})
+        params.update(message_id=message.message_id, thread_id=owner.other.thread_id, max_chars=200)
+    elif case.startswith('browse'):
+        params = {'mode': 'thread_browse', 'limit': 1 if case == 'browse_first' else 20}
+    tool = SessionSearchTool(owner.agent)
+    page = _payload(tool.execute(params))
+    calls = [json.loads(match.group()) for match in re.finditer(r'\{[^{}]+\}', page['hint'])]
+    assert calls, page['hint']
+    for call in calls:
+        assert 'mode' in call
+        follow = _payload(tool.execute(call))
+        if call['mode'] == 'message':
+            assert follow['found'] is True
+            row, errors = owner.store.messages.by_id_report(follow['thread_id'], call['message_id'])
+            assert not errors and row is not None
+            assert follow['content'] == row.content[follow['offset']:follow['offset'] + len(follow['content'])]
+        if case in {'continuation', 'explicit_thread'}:
+            assert follow['offset'] == page['next_offset']
+            assert follow['thread_id'] == page['thread_id']
+            assert follow['content']
+        if call['mode'] == 'thread_browse' and 'cursor' in call:
+            assert call['cursor'] == page['older_cursor']
+
+
+# LLM: 压缩召回说明给出合法v2 JSON模板；仅把示例中的定位符换成本临时库真实ID，不增加mode或字段。
+# 函数用途: 证明压缩地标的message、around和thread_browse示例照做可达。
+def test_compact_landmark_recall_examples_execute(tmp_path):
+    import re
+
+    from agent_py_agent.agent.conversation.compact_landmarks import _RECALL_LINE
+    from agent_py_agent.tests.test_session_history_read import _owner
+
+    owner = _owner(tmp_path)
+    text = _RECALL_LINE.replace('<message_id>', owner.rows[0].message_id).replace('<around_id>', owner.agent.local_store.list_recent(limit=1)[0].id)
+    calls = [json.loads(match.group()) for match in re.finditer(r'\{[^{}]+\}', text)]
+    assert {call.get('mode') for call in calls} == {'message', 'around', 'thread_browse'}
+    for call in calls:
+        follow = _payload(SessionSearchTool(owner.agent).execute(call))
+        if call['mode'] == 'message':
+            assert follow['found'] and follow['content']
+        elif call['mode'] == 'around':
+            assert follow['count'] > 0
+        else:
+            assert follow['messages']

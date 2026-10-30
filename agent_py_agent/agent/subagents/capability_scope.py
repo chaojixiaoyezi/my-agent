@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..contracts.gates.command_policy import command_source_too_large
-from ..tooling.registry_auth import CATALOG_ONLY_TOOL_GRANT, snapshot_tool_grants
+from ..tooling.registry_auth import (
+    CATALOG_ONLY_TOOL_GRANT,
+    creation_snapshot_tool_grants,
+    snapshot_tool_grants,
+)
 from .model_capabilities import CapabilityRequest
 from .model_task import SubAgentTask
 from .utils import _merge_list
@@ -278,8 +282,8 @@ def direct_parent_tool_authority(
     )
 
 
-# LLM: 硬授权/语义路由/MCP精确别名共用直属父事实；catalog令牌不能授完整tool_search；同一owner禁用及快照失败仍拒绝。
-# 函数用途: 读取直属父级当前真实工具集合，并返回来源与失败码供上层结构化记录。
+# LLM: 真实父记录优先，可信创建快照回退与角色归一共用动作证据转换；旧v1缺失动作证据时拒绝完整发现且给结构化原因。
+# 函数用途: 读取直属父级真实工具与动作上界，防止旧快照在恢复能力申请时扩权。
 def _direct_parent_available_tools(
     agent_or_manager: Any,
     task: SubAgentTask,
@@ -311,10 +315,13 @@ def _direct_parent_available_tools(
     else:
         creation_snapshot = task_creation_tool_authority(task)
         if creation_snapshot:
-            available = set(creation_snapshot["available_tool_names"])
-            available.update(creation_snapshot.get("tool_grants", []))
+            available = set(creation_snapshot_tool_grants(creation_snapshot))
+            grants = creation_snapshot.get("tool_grants")
             source = "parent_creation_runtime_snapshot"
             error_code = ""
+            if ("tool_search" in creation_snapshot["available_tool_names"]
+                    and (not isinstance(grants, list) or not {"tool_search", CATALOG_ONLY_TOOL_GRANT}.intersection(grants))):
+                error_code = "PARENT_TOOL_ACTION_EVIDENCE_MISSING"
         elif parent_run_id:
             # 有委派边却缺失可信父证据时拒绝新增授权，不能把owner全权冒充父级上界。
             available = set()

@@ -1,3 +1,11 @@
+## 2026-10-29 e905 sol-1 R2：目录动作约束穿过真实创建与恢复
+
+- 修复真实 `CreateSubagentsTool.execute_scoped` 之后的角色归一化和层级递归调度：规范工具名与内部 `tool_search:catalog` 动作约束共同保存，显式工具和默认角色不能把只读目录放宽为搜索。旧 `list_tools` 记录显式迁为规范目录授权，保留目录可用性。
+- 显式旧grant先固定窄意图再合并coding/read_only预设；完整search正例继续可用。能力申请优先读取真实父记录；旧v1创建快照只有名字、缺少动作证据时拒绝新增search并返回 `PARENT_TOOL_ACTION_EVIDENCE_MISSING`；父证据完全缺失的拒绝不变。
+- Audit规范items解析尊重 `_include_goal_file_hints=False`，结构化 `audit_source_id` 同样禁止从目标文字扩读。来源manifest中的显式输入不丢失，兄弟来源文件不进入精确读边界。
+- 目录归档不投影内部令牌；只有真实search动作可用时才默认收起工具。历史工具和压缩召回提示迁为显式mode，长消息续读保留原thread_id；帮助、交付提示和记忆目录指针同步迁移。
+- 回归覆盖真实创建、递归、全新Agent重载、执行器拒绝及带manager的能力裁决；仅后台启动替代，不表示真实模型、生产Audit、Gateway重启或跨平台端到端已验证。完整验证结果及复现见本轮交接和[TESTS](../../../TESTS.md)。
+
 ## 2026-10-28 Wave 8：子代理公开索引重建入口与同 Owner Worker 延迟/借用 MCP（已实现）
 
 - `subagents/services/indexing/service.py` 新增公开 `SubAgentIndexingService.rebuild_subagent_index` 方法，统一封装 30 天终态 TTL 过滤与 `manager_index` 重建，供 `cli/local_doctor.py` 直接调用，移除对 `local_storage.records._task_projection_expired` 私有符号的跨层依赖。

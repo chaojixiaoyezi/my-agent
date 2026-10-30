@@ -2,10 +2,11 @@
 #   会话身份：thread_id 参数只在读取单条消息时可显式给出，它是不可信的模型输入：先按 opaque ID 拒绝式校验（不含路径
 #   分隔、点段或绝对路径），再必须是本 owner 会话库里已存在的会话，否则拒绝，绝不拼出指向其它 owner 的路径；
 #   其余一律取宿主运行上下文里的可信会话，并在结果里用 scope_resolution 说明来源。长消息按字符游标分段返回，任何一次调用的输出都有上限。
-#   新增字段或模式须同步 session_search_tool 的 schema、说明与 test_session_history_read.py。
+#   返回提示提供显式mode的规范JSON并保留读取线程和游标；新增字段须同步session_search_tool及相关历史回归。
 # 模块用途: 让模型在上下文被压缩后，按消息编号分段读回原话，或按页浏览当前会话的全部用户与助手消息。
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..common.opaque_id import OpaqueIdError, validate_path_segment
@@ -131,7 +132,7 @@ def _bounded_int(value: object, default: int, low: int, high: int) -> int:
     return max(low, min(parsed, high))
 
 
-# LLM: 先裁决owner/thread再按canonical字节地址定位；offset/max_chars仍是Unicode字符而非物理字节，next_offset空表示结束。
+# LLM: 先裁决owner/thread再读canonical；字符分页提示带mode、message_id和原显式thread_id，缺消息只给合法本会话浏览入口。
 # 函数用途: 从已授权会话的单条原话按字符分页，不因底层seek优化改变分页口径。
 def read_conversation_message(agent: object, message_id: str, params: dict[str, object]) -> dict[str, Any]:
     thread_id, resolution = read_thread_scope(agent, params)
@@ -139,24 +140,27 @@ def read_conversation_message(agent: object, message_id: str, params: dict[str, 
     if entry is None:
         return {"mode": "read", "found": False, "thread_id": thread_id, "message_id": message_id,
                 "scope_resolution": resolution,
-                "hint": "该会话里没有这条消息；可用 current_thread=true 浏览或检索拿到正确的 message_id。"}
+                "hint": '该会话里没有这条消息；可用 session_search {"mode":"thread_browse"} 浏览当前会话拿到正确的 message_id。'}
     text = message_text(entry)
     offset = _bounded_int(params.get("offset"), 0, 0, len(text))
     size = _bounded_int(params.get("max_chars"), READ_DEFAULT_CHARS, READ_MIN_CHARS, READ_MAX_CHARS)
     chunk = text[offset:offset + size]
     end = offset + len(chunk)
+    next_params = {"mode": "message", "message_id": entry.message_id, "offset": end}
+    if params.get("thread_id"):
+        next_params["thread_id"] = thread_id
     return {
         "mode": "read", "found": True, "thread_id": thread_id, "message_id": entry.message_id,
         "role": entry.role, "when": round(float(entry.created_at or 0.0), 3), "total_chars": len(text),
         "offset": offset, "content": chunk, "next_offset": end if end < len(text) else None,
         "complete": end >= len(text), "scope_resolution": resolution,
-        "hint": "已读到结尾。" if end >= len(text) else f"未读完：用 offset={end} 继续读取下一段。",
+        "hint": "已读到结尾。" if end >= len(text) else "未读完：用 session_search " + json.dumps(next_params, ensure_ascii=False) + " 继续读取下一段。",
     }
 
 
 # LLM: 按 canonical 文件倒序分页；cursor 必须是上一页返回的 older_cursor（完整行边界），否则按无效游标拒绝。
-#   只返回编号、角色、时间、长度和短预览，读全文走 message_id 模式；不写任何状态。
-# 函数用途: 按页浏览当前会话的用户与助手消息（current_thread 且不带 query 的模式）。
+#   只返回编号和有界预览；下一跳JSON明确message/thread_browse模式及真实游标，不写任何状态。
+# 函数用途: 按规范thread_browse模式浏览当前会话，给出可直接执行的原文及翻页调用。
 def browse_current_thread(agent: object, params: dict[str, object], limit: int) -> dict[str, Any]:
     thread_id, source = trusted_thread(agent)
     require_current_thread(thread_id, source)
@@ -169,12 +173,18 @@ def browse_current_thread(agent: object, params: dict[str, object], limit: int) 
         raise SessionHistoryRefusal("TOOL_INVALID_ARGUMENTS", "无法按这个游标读取会话记录",
                                     "不传 cursor 从最新一页开始，或使用上一页返回的 older_cursor。")
     rows = [row for row in page.rows if visible_conversation_row(row)]
+    hint = "按时间正序列出本页消息。" if page.before else "已到会话开头。"
+    if rows:
+        hint += "读取原文用 session_search " + json.dumps({"mode": "message", "message_id": rows[0].message_id}, ensure_ascii=False) + "。"
+    if page.before:
+        hint += "翻到更早一页用 session_search " + json.dumps({"mode": "thread_browse", "cursor": page.before}, ensure_ascii=False) + "。"
+    elif not rows:
+        hint += '当前无可见消息；可用 session_search {"mode":"thread_browse"} 重新浏览。'
     return {
         "mode": "thread_browse", "thread_id": thread_id, "messages": [_browse_item(row) for row in rows],
         "count": len(rows), "older_cursor": page.before or None,
         "scope_resolution": {"thread_source": source, "current_thread_id": thread_id},
-        "hint": ("按时间正序列出本页消息；用 message_id 读取全文，用 older_cursor 翻到更早一页。"
-                 if page.before else "已到会话开头；用 message_id 读取任意一条的全文。"),
+        "hint": hint,
     }
 
 

@@ -1,5 +1,4 @@
-# LLM: 层级调度孙代理的工具只能在父级已过滤快照内收窄；缺省候选含 capability_request 与 record_lesson，
-#   父级没有的工具不会因缺省候选而出现。改候选须同步 hierarchy 调度测试。
+# LLM: 层级调度只在父授权内收窄，同时迁移旧目录名并继承动作令牌；候选默认值不能增加父级工具或放宽search。
 # 模块用途: 为层级调度生成的下级代理计算不超过父级上界的工具集合。
 from __future__ import annotations
 
@@ -8,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from ....tooling.registry_auth import CATALOG_ONLY_TOOL_GRANT, canonical_discovery_grants
 from ....tooling.write_boundary import WRITE_TOOL_ORDER
 from ...role_templates import (
     AGENT_PROGRESS_TOOLS,
@@ -109,12 +109,18 @@ def _coordinator_tools(tools: list[str], *, parent_tools: list[str]) -> list[str
     return _inherited_tools(tools, parent_tools)
 
 
+# LLM: 父级工具及动作限制同时求交；显式tool_search不覆盖父目录令牌，旧list_tools也须规范化而不是丢失目录。
+# 函数用途: 为递归派工保留可持久化的最窄工具授权，不读自然语言或改运行记录。
 def _inherited_tools(tools: list[str], parent_tools: list[str]) -> list[str]:
-    parent_scope = set(parent_tools)
-    return [tool for tool in _clean_tools(tools) if tool in parent_scope]
+    parent_scope = set(_clean_tools(parent_tools))
+    inherited = [tool for tool in _clean_tools(tools) if tool in parent_scope
+        or (tool == CATALOG_ONLY_TOOL_GRANT and "tool_search" in parent_scope)]
+    if "tool_search" in inherited and CATALOG_ONLY_TOOL_GRANT in parent_scope and CATALOG_ONLY_TOOL_GRANT not in inherited:
+        inherited.append(CATALOG_ONLY_TOOL_GRANT)
+    return inherited
 
 
-# LLM: This seam delegates retirement and normalization to the single domain helper.
-# 函数用途: 清理层级调度输入中的工具名并剔除旧控制入口。
+# LLM: 先过原角色退休过滤，再复用发现授权归一；在默认候选混入完整工具名前保留旧目录窄意图，无副作用。
+# 函数用途: 清理递归工具输入并迁移旧目录授权，避免升级记录丢工具或扩权。
 def _clean_tools(value: object) -> list[str]:
-    return active_model_subagent_tools(value)
+    return canonical_discovery_grants(active_model_subagent_tools(value))

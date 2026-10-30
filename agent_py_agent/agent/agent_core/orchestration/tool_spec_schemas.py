@@ -1,4 +1,4 @@
-# LLM: schema 与创建参数解析保持一致；model 只允许公开引用，不能通过工具传递端点或凭据；
+# LLM: 派工schema顶层仅batch_summary和items，每项独立持有goal及可选媒体字段；model只允许公开引用，不接端点或凭据；
 #   effort 的八档枚举直接取唯一换算表，由宿主按模型声明降档，不能携带任何供应商原始字段。
 # 模块用途: 声明派工和权限工具的结构字段，模型与档位字段可选且不扩大 owner 边界。
 """Native tool_use input-schema fragments for orchestration tools.
@@ -45,8 +45,8 @@ _CREATE_INPUT_MEDIA_ITEM_SCHEMA: dict[str, Any] = {
 }
 
 
-# LLM: 顶层与 items[] 共用同一份 item 字段；input_media 为真时两层都多 input_media_refs，为假时与原 schema 逐字节一致。
-# 函数用途: 按开关生成 create_subagents 的参数形状（顶层 + 批量项）。
+# LLM: 顶层只返回batch_summary与items；input_media开关仅控制item内input_media_refs，无顶层派工字段或默认值广播。
+# 函数用途: 生成规范批量派工参数，每项自带goal，可选媒体只挂当前item。
 def create_parameter_schema(*, input_media: bool = False) -> dict[str, Any]:
     item_schema = {**_CREATE_ITEM_PARAMETER_SCHEMA, **(_CREATE_INPUT_MEDIA_ITEM_SCHEMA if input_media else {})}
     return {

@@ -1,4 +1,6 @@
 
+# LLM: 创建角色只提供默认候选；最终工具和动作约束都受宿主父快照收窄，限制令牌必须保留到落盘。
+# 模块用途: 合并子代理角色和展示元数据，同时守住父级工具及只读目录上界。
 """模块用途: 在创建子代理时应用角色模板中的工具和展示元数据。
 
 LLM: 角色模板可以缩小工具能力并提供模型提示，但不得再生成 acceptance_checks 或
@@ -61,9 +63,14 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     )
 
 
-# LLM: create_policy 持久化的直属父快照是上界，角色默认不能在最终服务归一化时重新增加父已缺少的业务工具。
-# 函数用途: 在准备与正式提交共用角色入口再次收紧父目录，保留已由宿主复核的子代理专属控制工具。
+# LLM: 父快照缺tool_grants时仅保留目录；复用动作证据转换收窄角色默认，限制不是新工具，子级窄意图和父级收窄均保留，无IO。
+# 函数用途: 正式归一化时同时守住父工具集合及目录动作上界，不让落盘丢失限制。
 def _tools_within_creation_scope(tools, attributes):
+    from ..tooling.registry_auth import (
+        CATALOG_ONLY_TOOL_GRANT,
+        canonical_discovery_grants,
+        creation_snapshot_tool_grants,
+    )
     from .capability_scope import DIRECT_PARENT_TOOL_AUTHORITY_ATTR
     from .role_templates import CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL
 
@@ -73,8 +80,14 @@ def _tools_within_creation_scope(tools, attributes):
     names = value.get("available_tool_names")
     if not isinstance(names, list):
         return []
-    available = {*names, CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL}
-    return [name for name in tools or [] if name in available]
+    parent_scope = creation_snapshot_tool_grants(value)
+    available = {*parent_scope, CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL}
+    if "tool_search" in available:
+        available.add(CATALOG_ONLY_TOOL_GRANT)
+    narrowed = [name for name in canonical_discovery_grants(tools or []) if name in available]
+    if "tool_search" in narrowed and CATALOG_ONLY_TOOL_GRANT in parent_scope and CATALOG_ONLY_TOOL_GRANT not in narrowed:
+        narrowed.append(CATALOG_ONLY_TOOL_GRANT)
+    return narrowed
 
 
 def _default_template_role(role: str) -> str | None:

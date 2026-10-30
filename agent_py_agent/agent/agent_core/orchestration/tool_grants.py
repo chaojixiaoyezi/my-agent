@@ -1,4 +1,4 @@
-# LLM: 直属子代理工具预设的唯一来源；record_lesson 与 capability_request 同属父子控制面，读写两种预设都默认带上，
+# LLM: 直属工具预设合并前先冻结显式旧目录的动作上界；record_lesson 与 capability_request 同属父子控制面，
 #   实际可见仍经 active_model_subagent_tools、owner 禁用表与注册表快照收窄。改预设须同步工具常量与派工测试。
 # 模块用途: 定义直属子代理的 coding/read_only 工具预设，并把显式授权与预设合并成 child 工具快照。
 from __future__ import annotations
@@ -12,6 +12,7 @@ from ...subagents.role_templates import (
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
 )
+from ...tooling.registry_auth import canonical_discovery_grants
 from ...tooling.write_boundary import WRITE_TOOL_ORDER
 
 CODING_SUBAGENT_TOOLS = [
@@ -49,13 +50,12 @@ READ_ONLY_SUBAGENT_TOOLS = [
 _CODING_TOOL_PRESETS = {"coding"}
 
 
-# LLM: All ordinary and exact child grants pass the canonical retired-control
-# filter; persisted explicit names cannot resurrect deleted model tools.
-# 函数用途: 根据显式参数和预设生成 child 工具快照，并剔除旧巡检/推动入口。
+# LLM: 先规范化显式发现grant再合并预设；目录令牌不得被预设补入的tool_search覆盖，精确Audit仍取宿主scope，无IO。
+# 函数用途: 按真实显式意图和预设生成子代理授权，保持退休过滤及只读目录限制。
 def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
-    allowed_tools = active_model_subagent_tools(
+    allowed_tools = canonical_discovery_grants(active_model_subagent_tools(
         string_list(params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)
-    )
+    ))
     # LLM: Internal Audit source phases use an exact host-derived grant.  The
     # expected set comes from their typed attributes rather than the caller's
     # list, and is validated again at the final execution seam.

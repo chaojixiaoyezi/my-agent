@@ -1,3 +1,13 @@
+## 2026-10-29 e905 sol-1 R2：生产目录权限与Audit读取边界返修
+
+来源：`fix-e905-sol-1-r2.md`及Astra-1补充插话，起点`39e6db87f`。修复目录动作令牌在正式角色归一化/递归调度中丢失、旧授权预设覆盖、旧父快照缺动作证据扩权，以及Audit批量解析忽略关闭goal文件提示。提示语统一规范mode/catalog，默认收起以search能力为前提，公开目录过滤内部令牌。没有新配置或依赖。
+
+- `test_tool_surface_slimming.py`：真实scoped创建→子runner上下文递归派孙→全新Agent读取canonical→真实执行器与manager能力裁决；另测预设合并、旧v1动作证据、完整search正例、目录归档、首轮可见定义、自查投影、帮助及记忆指针。独审指出旧v1快照在最终角色归一仍扩权，缺失/空tool_grants的两个正式创建回归先红，再复用统一快照转换修正；直接核对canonical保存并覆盖递归重载。
+- `test_session_search_tool.py`：从真实回执和压缩召回说明取原样JSON照做，检查原文确实读回、续读offset和显式thread_id不丢失、浏览游标真实有效。后台启动为唯一派工替身，不表示真实模型或生产Audit验收。
+- 既有 `test_audit_source_worker.py::test_new_source_worker_does_not_inherit_sibling_goal_file_hints` 在本轮修复前实红：兄弟`web.md`进入`required_read_paths`；修复后原断言不变。新增权限、预设/旧快照和提示测试均保存红绿XML于工作树`.pytest_cache/sol1-r2-*.xml`。
+
+复现：工作树根运行 `PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_tool_surface_slimming.py agent_py_agent/tests/test_opt_surface_contracts.py agent_py_agent/tests/test_session_search_tool.py agent_py_agent/tests/test_audit_source_worker.py agent_py_agent/tests/test_subagent_capability_request_tool.py agent_py_agent/tests/test_resolve_capability_requests_tool.py -q --tb=short`；另跑Ruff、导入边界、`check_doc_sync.py --base 4bea324e3`及diff check。最终数量与提交绑定在指定DONE交接，不用本条目声称全仓、真实后台、部署或跨平台已验证。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

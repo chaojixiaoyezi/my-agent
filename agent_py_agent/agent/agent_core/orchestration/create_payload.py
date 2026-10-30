@@ -1,4 +1,4 @@
-# LLM: 创建回执从 canonical 复读发布后的状态，不能依赖创建快照被控制域原地修改；联测取消与启动并发，不改执行权。
+# LLM: 创建回执读canonical状态；解析独立items时尊重宿主关闭goal提示及Audit来源隔离，不从目标文字增加精确读取范围。
 # 模块用途: 组装子代理派工条目和父级回执，不替父级决定分工或等待时机。
 
 from __future__ import annotations
@@ -451,7 +451,8 @@ def _create_item_params(
     return merged
 
 
-# 顶层 required_read_paths 不自动复制到每个 worker，避免把一组输入清单误变成所有子代理的读提示。
+# LLM: 顶层清单不广播；显式False或结构化Audit来源均禁止从goal抽路径，其余显式输入保持，纯参数合并无写入。
+# 函数用途: 合并当前item的必读资料，不让兄弟来源文件从目标文字进入精确读边界。
 def _merge_item_required_read_paths(
     merged: dict[str, object],
     base_params: dict[str, object],
@@ -462,7 +463,8 @@ def _merge_item_required_read_paths(
             _shared_directive_pack_paths(base_params.get("context_packs")),
             string_list(merged.get("required_read_paths"), TOOL_TEXT_LIST_OPTIONS),
             _item_manifest_required_read_paths(merged.get("context_manifest")),
-            _existing_goal_file_refs(goal, output_refs=params_output_refs(merged)),
+            (_existing_goal_file_refs(goal, output_refs=params_output_refs(merged))
+             if merged.get("_include_goal_file_hints") is not False and not merged.get("audit_source_id") else []),
         ]
     )
     if refs:

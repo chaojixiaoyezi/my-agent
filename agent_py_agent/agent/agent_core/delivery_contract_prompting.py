@@ -1,4 +1,6 @@
 
+# LLM: 交付合同只提供模型软指导，工具发现走规范catalog入口，不把文案转成宿主验收或额外授权。
+# 模块用途: 渲染交付目标、开工和恢复提示，不代替真实执行及证据检查。
 from __future__ import annotations
 
 import json
@@ -117,6 +119,8 @@ def _artifact_guidance_lines(contract: dict[str, object]) -> list[str]:
     return lines
 
 
+# LLM: 仅渲染结构化开工参考；缺工具信息引导只读catalog，不直接执行、物化或裁定完成。
+# 函数用途: 生成交付开工提示及规范工具目录用法。
 def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
     bootstrap = contract.get("bootstrap_contract")
     if not isinstance(bootstrap, dict):
@@ -132,7 +136,7 @@ def _bootstrap_guidance_lines(contract: dict[str, object]) -> list[str]:
         lines.append("- 阶段目标可以先写草稿或最小有效骨架，后续再根据证据和验证结果持续修订。")
     if actions:
         lines.extend(_startup_action_lines(actions))
-    lines.append("- 如果暂时不确定具体工具，可以先 list_tools 一次，再按任务进展选择检索、写入或构建工具。")
+    lines.append('- 如果暂时不确定具体工具，可以先 tool_search(action="catalog") 一次，再按任务进展选择检索、写入或构建工具。')
     return lines
 
 

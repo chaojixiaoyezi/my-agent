@@ -1,4 +1,4 @@
-# LLM: 公共命令目录只拥有声明、词法边界和展示事实；调用方仍负责身份、权限、控制回执及副作用。
+# LLM: 公共命令目录只拥有声明、词法边界和展示事实；帮助用规范catalog入口，调用方仍负责权限、控制及副作用。
 #   /effort 帮助列出用户八档，实际可发送值仍归 reasoning_control 的唯一换算表。
 # 模块用途: 统一 TUI/IM 命令目录；/new 只切会话不停止后台，用户管理与插件保留各自鉴权。
 
@@ -425,7 +425,7 @@ def command_access_error(spec: CommandSpec, context: CommandAccessContext, actio
     return ""
 
 
-# LLM: 只投影公共目录和权限声明；能力详情引导到原只读发现工具，管理员子动作按结构字段过滤。
+# LLM: 只投影公共目录和权限声明；能力自查引导tool_search的catalog动作，管理员子动作仍按结构字段过滤。
 # 函数用途: 生成本身份的简明帮助或单项说明，未解锁只列基础入口。
 def render_command_help(context: CommandAccessContext, topic: str = "") -> str:
     topic = topic.strip().lstrip("/")
@@ -446,7 +446,7 @@ def render_command_help(context: CommandAccessContext, topic: str = "") -> str:
     if context.locked:
         lines.append("请在机器人私聊中设置或验证个人解锁密码后继续任务。")
     elif not topic:
-        lines.append("想了解助手当前能力或失败原因，可请它用 list_tools 自查；具体工具由 tool_search 按需加载。")
+        lines.append('想了解助手当前能力或失败原因，可请它用 tool_search(action="catalog") 自查；具体工具由 tool_search 按需加载。')
     return "\n".join(lines)
 _CONVERSATION_MATCHERS = tuple(
     (

@@ -1,4 +1,4 @@
-# LLM: 只列已绑定记忆组件类型和规范路径，不读取事实/候选/聊天/Persona正文，不遍历账本计数。
+# LLM: 只列已绑定组件及规范路径；历史指针使用显式thread_browse模式，不读取正文或遍历账本计数。
 # 模块用途: 登记记忆、Persona和学习组件的安全元信息、数量未知原因及原读入口。
 from ..tooling.self_map_registry import SectionDescriptor, SectionProjection, map_item, next_read
 from ..user_space.self_map_paths import location_items
@@ -10,7 +10,7 @@ def register_memory_section(registry):
     registry.register(SectionDescriptor("memory", "记忆与人格", 70, memory_projection, "记忆组件、正式记忆位置及人格入口"))
 
 
-# LLM: 子/隔离不增owner读权；管理员摘要直接给规范正式位置，不读正文计数，组件数不是正式事实数。
+# LLM: 子/隔离不增owner读权；历史next_read明确规范mode，管理员只列正式位置且不读正文计数。
 # 函数用途: 展示合法组件、正式数量未知原因和权威位置，不调用写侧或检索。
 def memory_projection(context):
     if context.child or context.context_scope in {"task_local", "control_plane", "isolated"}:
@@ -22,7 +22,7 @@ def memory_projection(context):
         items.extend(map_item(target, name, fields={"count": None, "next_read": next_read("update_persona", {"target": target, "action": "list"})})
                      for target, name in (("user", "用户画像"), ("agents", "工作约定"), ("soul", "人格语气")))
     if "session_search" in context.snapshot.available_tool_names:
-        items.append(map_item("archive", "历史与归档", fields={"count": None, "next_read": next_read("session_search", {"current_thread": True})}))
+        items.append(map_item("archive", "历史与归档", fields={"count": None, "next_read": next_read("session_search", {"mode": "thread_browse"})}))
     items.extend(_source_rule_metadata(context))
     if context.admin:
         items.extend(map_item(name, name, fields={"count": None, "bound": getattr(context.agent, attr, None) is not None})

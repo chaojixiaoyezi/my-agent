@@ -1,4 +1,4 @@
-# LLM: 回归真实派工授权投影、规范宿主caller和会话回执下一跳；模型/后台启动不作验收，无外部网络。
+# LLM: 回归真实创建/递归/重载的目录动作授权、规范宿主caller及提示下一跳；后台启动替身不作真实模型验收，无外部网络。
 # 模块用途: 防止目录动作跨代扩权、Audit旧输入及历史工具提示重新引入旧协议。
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ def assert_catalog_only(snapshot, tmp_path):
     assert runtime.model_spec.input_schema['properties']['action']['enum'] == ['catalog']
 
 
-# LLM: 真正经过父快照绑定和create_run_params默认角色求交，两轮形成子/孙；不以手工拼子权限冒充派生。
-# 函数用途: 默认角色加回tool_search也不能扩大catalog-only父级动作范围。
+# LLM: 仅测试父快照绑定和参数装配，不涵盖正式创建、持久化或递归调度；完整链路另有生产入口回归。
+# 函数用途: 核对参数装配层的角色默认值不扩大catalog-only父级动作范围。
 def test_catalog_only_survives_child_and_grandchild_creation(agent, tmp_path):
     snapshot = agent.tools.runtime_snapshot(allowed_tools=['list_tools', 'create_subagents', 'read_file'], run_id='root')
     assert_catalog_only(snapshot, tmp_path)
@@ -239,3 +239,302 @@ def test_history_success_hints_execute_against_real_store(tmp_path, mode, query)
         assert follow.ok, (call, follow.error_code, follow.output)
         if call['mode'] == 'message':
             assert json.loads(follow.output)['found'] is True
+
+
+# LLM: 只替代后台启动；实际走scoped工具、角色归一、manager保存、runner递归调度及全新Agent重载，无外部模型。
+# 函数用途: 同时锁住第一代落盘和显式/继承两种孙代理的目录限制及真实父记录能力申请。
+@pytest.mark.parametrize('explicit', [True, False])
+@pytest.mark.parametrize('legacy_record', [False, True])
+@pytest.mark.parametrize('full_parent', [False, True])
+def test_production_catalog_scope_spawn_reload_and_capability(agent, tmp_path, monkeypatch, explicit, legacy_record, full_parent):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.orchestration import lifecycle
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.agent.subagents.capability_scope import direct_parent_tool_authority
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+
+    monkeypatch.setattr(lifecycle, 'auto_start_tasks',
+        lambda _agent, _tasks, _params, **_kw: {'status': 'not_needed', 'run_ids': []})
+    root = agent.tools.runtime_snapshot(allowed_tools=['tool_search' if full_parent else 'list_tools', 'create_subagents', 'read_file'], run_id='root')
+    first = {'goal': '协调只读核对', 'role': 'coordinator'}
+    if full_parent:
+        first.update(allowed_tools=['list_tools', 'create_subagents', 'read_file'], tool_preset='read_only')
+    created = CreateSubagentsTool(agent).execute_scoped(
+        {'items': [first]}, ToolInvocationContext(root))
+    assert created.ok, created.output
+    child_id, = json.loads(created.output)['created_run_ids']
+    child = agent.subagents.load(child_id)
+    if legacy_record:
+        # 仅此变体显式模拟旧版落盘字段，不宣称执行过跨版本升级；普通变体绝不手工拼造子代理权限。
+        agent.subagents.save(replace(child, allowed_tools=['list_tools', 'create_subagents', 'read_file']))
+    fresh = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
+    child = fresh.subagents.load(child_id)
+    child_context = fresh.subagents.runner_context.build_execution_context(child_id)
+    child_snapshot = fresh.tools.runtime_snapshot(allowed_tools=child_context.allowed_tools, run_id=child_id)
+    item = {'goal': '核对目录，显式授权' if explicit else '核对目录，继承授权'}
+    if explicit:
+        item['allowed_tools'] = ['tool_search', 'read_file']
+    previous = set_current_subagent_context(fresh, run_id=child_id, task_attributes=child.attributes)
+    try:
+        created = CreateSubagentsTool(fresh).execute_scoped({'items': [item]}, ToolInvocationContext(child_snapshot))
+    finally:
+        restore_current_subagent_context(fresh, previous)
+    assert created.ok, created.output
+    grand_id, = json.loads(created.output)['created_run_ids']
+    restored = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
+    for run_id in (child_id, grand_id):
+        stored = restored.subagents.load(run_id)
+        if run_id == grand_id or not legacy_record:
+            assert 'list_tools' not in stored.allowed_tools
+            assert {'tool_search', 'tool_search:catalog'} <= set(stored.allowed_tools)
+        context = restored.subagents.runner_context.build_execution_context(run_id)
+        snapshot = restored.tools.runtime_snapshot(allowed_tools=context.allowed_tools, run_id=run_id)
+        assert_catalog_only(snapshot, tmp_path)
+    grand = restored.subagents.load(grand_id)
+    assert grand.parent_id == child_id
+    decision = direct_parent_tool_authority(restored, grand, ['tool_search'])
+    assert decision.authority_source == 'parent_run_execution_context'
+    assert decision.grantable_tools == ()
+    assert decision.unavailable_tools == ('tool_search',)
+
+
+# LLM: 走真实快照与首轮原生定义投影；目录不能加载时，已授权默认收起工具不能失去可见定义。
+# 函数用途: 验证目录只读者仍能直接看见本夹具里实际就绪的默认收起工具。
+@pytest.mark.parametrize('preloaded', [False, True])
+def test_catalog_only_keeps_authorized_deferred_tools_visible(agent, preloaded):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.tooling.self_context import _snapshot_model_names
+
+    allowed = ['list_tools', 'read_file', 'schedule', 'send_message', 'memory_search']
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=allowed)
+    if preloaded:
+        snapshot = replace(snapshot, preloaded_tool_names=('read_file',))
+    expected = {runtime.model_spec.name for runtime in snapshot.runtimes if runtime.model_spec.hints.default_deferred}
+    # 本夹具未绑定消息/记忆服务，不能把它们的不可用误报成默认折叠；schedule必须实际就绪且被检查。
+    assert 'schedule' in expected
+    visible = {spec.name for spec in agent.tools.specs_for_snapshot(snapshot)}
+    assert {'tool_search', 'read_file', *expected} <= visible
+    assert {'tool_search', 'read_file', *expected} <= _snapshot_model_names(snapshot)
+
+
+# LLM: 使用真实catalog handler并检查完整归档正文而非live摘要；令牌留在宿主快照，不进入用户目录。
+# 函数用途: 防止内部动作限制名被误当成可调用工具暴露。
+def test_catalog_archive_omits_internal_action_grants(agent):
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=['list_tools', 'read_file'])
+    result = agent.tools.tools['tool_search'].execute_scoped({'action': 'catalog'}, ToolInvocationContext(snapshot))
+    assert result.ok, result.output
+    payload = json.loads(result.output)
+    assert 'tool_search' in payload['allowed_tools']
+    assert 'tool_search:catalog' not in result.output
+    assert 'tool_search:catalog' in snapshot.allowed_tools
+
+
+# LLM: 模型派Audit叶时宿主禁用提示在后续准备层才出现，规范解析必须提前按结构化source_id挡住goal文件提示。
+# 函数用途: 显式False和Audit来源均不从自然语言扩大required_read_paths，普通派工仍保留原提示行为。
+@pytest.mark.parametrize('scope', [{'_include_goal_file_hints': False}, {'audit_source_id': 'source-a'}, {}])
+def test_item_goal_path_hints_respect_structured_scope(tmp_path, scope):
+    from agent_py_agent.agent.agent_core.orchestration.create_payload import (
+        create_items_from_params,
+    )
+
+    own = tmp_path / 'own.md'
+    sibling = tmp_path / 'sibling.md'
+    own.write_text('own')
+    sibling.write_text('sibling')
+    items = create_items_from_params({'items': [{'goal': f'参考 {sibling}',
+        'context_manifest': {'required_read_paths': [str(own)]}, **scope}]})
+    assert not isinstance(items, str), items
+    refs = items[0].params['required_read_paths']
+    assert str(own) in refs
+    assert (str(sibling) in refs) is (not scope)
+
+
+# LLM: 必经真实预设合并、创建策略和正式角色归一；只读旧grant不能被read_only/coding默认发现工具冲宽。
+# 函数用途: 保留显式目录动作来源，兼顾完整search正例与内部窄令牌。
+@pytest.mark.parametrize('preset', ['read_only', 'coding'])
+@pytest.mark.parametrize('grants', [['list_tools'], ['tool_search:catalog'], ['tool_search'], ['list_tools', 'tool_search']])
+def test_explicit_discovery_scope_survives_preset_and_normalization(agent, tmp_path, preset, grants):
+    from agent_py_agent.agent.agent_core.orchestration.tool_grants import subagent_allowed_tools
+    from agent_py_agent.agent.subagents.services.base import SubAgentBaseService
+
+    raw = {'goal': '核对显式发现权限', 'allowed_tools': grants, 'tool_preset': preset}
+    merged = subagent_allowed_tools(raw)
+    with bind_creation_tool_authority(agent.tools.runtime_snapshot(run_id='root')):
+        params = create_run_params(agent, raw, raw['goal'], merged)
+    normalized = SubAgentBaseService(agent.subagents)._normalized_create_params(params)
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=normalized.allowed_tools)
+    if 'tool_search' not in grants:
+        assert_catalog_only(snapshot, tmp_path)
+    else:
+        assert snapshot.runtime('tool_search').model_spec.input_schema['properties']['action']['enum'] == ['search', 'catalog']
+
+
+# LLM: 旧v1只有工具名不是search动作证据；真实裁决后用执行器验证合并授权不能放大原目录权限。
+# 函数用途: 缺失/空动作证据必须拒绝，明确完整grant仍可授予；本例父记录确实不存在。
+@pytest.mark.parametrize('evidence', [None, [], ['tool_search'], ['tool_search', 'tool_search:catalog']])
+@pytest.mark.parametrize('child_grants', [['list_tools'], ['tool_search', 'tool_search:catalog']])
+def test_legacy_parent_snapshot_requires_action_evidence(agent, tmp_path, evidence, child_grants):
+    from agent_py_agent.agent.subagents.capability_scope import (
+        DIRECT_PARENT_TOOL_AUTHORITY_ATTR,
+        direct_parent_tool_authority,
+    )
+
+    snapshot = {'schema_version': 'direct_parent_tool_authority.v1', 'parent_run_id': 'missing-parent',
+        'available_tool_names': ['read_file', 'tool_search']}
+    if evidence is not None:
+        snapshot['tool_grants'] = evidence
+    task = SimpleNamespace(parent_id='missing-parent', allowed_tools=child_grants,
+        attributes={DIRECT_PARENT_TOOL_AUTHORITY_ATTR: snapshot})
+    decision = direct_parent_tool_authority(agent, task, ['tool_search'])
+    assert decision.authority_source == 'parent_creation_runtime_snapshot'
+    if evidence == ['tool_search']:
+        assert decision.grantable_tools == ('tool_search',)
+    else:
+        assert decision.grantable_tools == ()
+        if not evidence:
+            assert decision.snapshot_error_code == 'PARENT_TOOL_ACTION_EVIDENCE_MISSING'
+        allowed = [*child_grants, *decision.grantable_tools]
+        assert_catalog_only(agent.tools.runtime_snapshot(allowed_tools=allowed), tmp_path)
+
+
+# LLM: 递归策略的补充正反例；全权父下显式旧目录仍窄，显式完整search仍宽，不以全部关闭发现来修复扩权。
+# 函数用途: 核对两种角色在完整父授权下保留子级显式发现动作意图。
+@pytest.mark.parametrize('role', ['worker', 'coordinator'])
+@pytest.mark.parametrize('grant', ['list_tools', 'tool_search', 'tool_search:catalog'])
+def test_hierarchy_keeps_explicit_discovery_intent_under_full_parent(agent, tmp_path, role, grant):
+    from agent_py_agent.agent.subagents.services.hierarchy.tool_policy import (
+        ToolPolicyRequest,
+        scheduled_child_tools,
+    )
+
+    tools = scheduled_child_tools(ToolPolicyRequest(parent_tools=['tool_search', 'read_file', 'create_subagents'],
+        spec=SimpleNamespace(allowed_tools=[grant, 'read_file'], role=role), extra_write_roots=[], role=role))
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=tools)
+    if grant != 'tool_search':
+        assert_catalog_only(snapshot, tmp_path)
+    else:
+        runtime = snapshot.runtime('tool_search')
+        call = ToolCall(call_id='full-search', tool_name='tool_search', arguments={'action': 'search', 'names': ['read_file']},
+            source_protocol='native', schema_hash=runtime.model_spec.schema_hash, run_id='full', turn_id='t', attempt_id='a')
+        result = ToolExecutor().execute(ToolExecutorRequest(call=call, runtime_snapshot=snapshot,
+            workspace_root=tmp_path, operation_store_required=False)).result
+        assert result.ok, result.output
+        assert json.loads(result.output)['loaded_for_next_model_call'] == ['read_file']
+
+
+# LLM: 旧v1快照经真实manager角色归一落盘，再从全新Agent派孙并重载；只替代后台启动，canonical与真实执行都核动作证据。
+# 函数用途: 复现并锁住缺失/空证据的正式创建扩权，递归显式及继承两路均保目录，完整证据可实际搜索。
+@pytest.mark.parametrize('evidence', [None, [], ['tool_search'], ['tool_search', 'tool_search:catalog']])
+@pytest.mark.parametrize('explicit', [False, True])
+def test_legacy_creation_snapshot_is_narrowed_before_canonical_save(agent, tmp_path, monkeypatch, evidence, explicit):
+    from agent_py_agent.agent.agent_core.orchestration import lifecycle
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.agent.subagents.capability_scope import DIRECT_PARENT_TOOL_AUTHORITY_ATTR
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+
+    monkeypatch.setattr(lifecycle, 'auto_start_tasks',
+        lambda _agent, _tasks, _params, **_kw: {'status': 'not_needed', 'run_ids': []})
+    parent = agent.subagents.create_run(goal='真实完整父记录', role='coordinator',
+        allowed_tools=['tool_search', 'create_subagents', 'read_file'])
+    scope = {'schema_version': 'direct_parent_tool_authority.v1', 'parent_run_id': parent.id,
+        'available_tool_names': ['tool_search', 'create_subagents', 'read_file']}
+    if evidence is not None:
+        scope['tool_grants'] = evidence
+    task = agent.subagents.create_run(params=CreateRunParams(goal='旧创建快照恢复正式归一', thought='', plan=[],
+        role='coordinator', parent_id=parent.id, root_id=parent.id, depth=1,
+        allowed_tools=['tool_search', 'create_subagents', 'read_file'], attributes={DIRECT_PARENT_TOOL_AUTHORITY_ATTR: scope}))
+    fresh = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
+    saved = fresh.subagents.load(task.id)
+    assert 'list_tools' not in saved.allowed_tools
+    assert ('tool_search:catalog' in saved.allowed_tools) is (evidence != ['tool_search'])
+    context = fresh.subagents.runner_context.build_execution_context(task.id)
+    snapshot = fresh.tools.runtime_snapshot(allowed_tools=context.allowed_tools, run_id=task.id)
+    if evidence != ['tool_search']:
+        assert_catalog_only(snapshot, tmp_path)
+    item = {'goal': '旧创建快照的后代不得扩权'}
+    if explicit:
+        item['allowed_tools'] = ['tool_search', 'read_file']
+    previous = set_current_subagent_context(fresh, run_id=task.id, task_attributes=saved.attributes)
+    try:
+        created = CreateSubagentsTool(fresh).execute_scoped({'items': [item]}, ToolInvocationContext(snapshot))
+    finally:
+        restore_current_subagent_context(fresh, previous)
+    assert created.ok, created.output
+    grand_id, = json.loads(created.output)['created_run_ids']
+    restored = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
+    for run_id in (task.id, grand_id):
+        stored = restored.subagents.load(run_id)
+        assert 'list_tools' not in stored.allowed_tools
+        assert ('tool_search:catalog' in stored.allowed_tools) is (evidence != ['tool_search'])
+        context = restored.subagents.runner_context.build_execution_context(run_id)
+        snapshot = restored.tools.runtime_snapshot(allowed_tools=context.allowed_tools, run_id=run_id)
+        if evidence != ['tool_search']:
+            assert_catalog_only(snapshot, tmp_path)
+        else:
+            runtime = snapshot.runtime('tool_search')
+            assert runtime.model_spec.input_schema['properties']['action']['enum'] == ['search', 'catalog']
+            call = ToolCall(call_id='legacy-full-' + run_id, tool_name='tool_search',
+                arguments={'action': 'search', 'names': ['read_file']}, source_protocol='native',
+                schema_hash=runtime.model_spec.schema_hash, run_id=run_id, turn_id='t', attempt_id='a')
+            result = ToolExecutor().execute(ToolExecutorRequest(call=call, runtime_snapshot=snapshot,
+                workspace_root=tmp_path, operation_store_required=False)).result
+            assert result.ok, result.output
+            assert json.loads(result.output)['loaded_for_next_model_call'] == ['read_file']
+
+
+# LLM: 渲染真实开工合同与/help后只提取其规范catalog动作；经真实执行器执行，不用退役工具名或只测字符串存在。
+# 函数用途: 防止面向模型和用户的帮助仍教list_tools，并证明推荐目录入口可执行。
+@pytest.mark.parametrize('source', ['delivery', 'command_help'])
+def test_tool_discovery_guidance_executes_catalog(agent, tmp_path, source):
+    import re
+
+    from agent_py_agent.agent.agent_core.delivery_contract_prompting import (
+        render_delivery_contract_section,
+    )
+    from agent_py_agent.agent.command_catalog import CommandAccessContext, render_command_help
+
+    if source == 'delivery':
+        text = render_delivery_contract_section({'bootstrap_contract': {'materialization_targets': [{'workspace_relative_path': 'output/result.md'}]}})
+    else:
+        text = render_command_help(CommandAccessContext(surface='tui', is_admin=True, private_chat=True))
+    assert 'list_tools' not in text
+    actions = re.findall(r'tool_search\(action="([^"]+)"\)', text)
+    assert actions == ['catalog']
+    snapshot = agent.tools.runtime_snapshot()
+    runtime = snapshot.runtime('tool_search')
+    call = ToolCall(call_id=source, tool_name='tool_search', arguments={'action': actions[0]}, source_protocol='native',
+        schema_hash=runtime.model_spec.schema_hash, run_id='guidance', turn_id='t', attempt_id='a')
+    result = ToolExecutor().execute(ToolExecutorRequest(call=call, runtime_snapshot=snapshot,
+        workspace_root=tmp_path, operation_store_required=False)).result
+    assert result.ok, result.output
+
+
+# LLM: 直接消费记忆目录领域投影的原始next_read，不依赖展示层重写补mode；实际读取可信当前canonical会话。
+# 函数用途: 验证self_map历史归档指针是可执行的规范thread_browse参数。
+def test_memory_directory_next_read_executes(tmp_path):
+    from agent_py_agent.agent.capability.self_map_memory import memory_projection
+    from agent_py_agent.tests.test_session_history_read import _owner
+
+    owner = _owner(tmp_path)
+    projection = memory_projection(SimpleNamespace(child=False, context_scope='owner', admin=False,
+        snapshot=SimpleNamespace(available_tool_names={'session_search'}), agent=owner.agent))
+    item, = projection.items
+    next_read = item['next_read']
+    assert next_read['tool'] == 'session_search'
+    assert next_read['arguments'] == {'mode': 'thread_browse'}
+    result = SessionSearchTool(owner.agent).execute(next_read['arguments'])
+    assert result.ok, result.output
+    assert json.loads(result.output)['messages']
