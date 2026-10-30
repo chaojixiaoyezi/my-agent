@@ -1,4 +1,5 @@
 # LLM: 仅维护owner直接子代理投影，不删除locator目标或canonical工作区；活跃/欠账/未知一律保留。
+# LLM: 发现与签名共用工作区选路规则，分页游标与累计正事实共用内存生命周期；不改变维护删除协议。
 # 模块用途: 显式调用的孤儿删除与七日瘦身、三十日归档服务；不自行启动后台或接入生产清理。
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -33,7 +35,7 @@ _SCRATCH = frozenset({"events.jsonl", "heartbeats.jsonl", "heartbeat.json", "hea
 _METADATA = frozenset({"state.json", "workspace_locator.json", "refs.json", "subagent_compact.json"})
 _INTERNAL_LOCKS = frozenset(f"{name}.lock" for name in _METADATA)
 _SCAN_LOCK = threading.RLock()
-_SCANS: OrderedDict[tuple[str, str], tuple[int, Any]] = OrderedDict()
+_SCANS: OrderedDict[tuple[str, str], tuple[tuple[int, int], Any, bool]] = OrderedDict()
 _MAINTENANCE_BOUNDARY: ContextVar[dict | None] = ContextVar("projection_maintenance_boundary", default=None)
 
 
@@ -53,9 +55,9 @@ def read_projection_object(path: Path, *, optional: bool = False) -> dict[str, A
     return value
 
 
-# LLM: 只接受明示绝对工作区路径；缺失以stat的FileNotFound为准，权限错误不能被exists吞成孤儿。
-# 函数用途: 检查locator或旧投影的工作区是否确已消失，不读取或删除目标内容。
-def projection_workspace_missing(run_dir: Path, payload: dict[str, Any]) -> bool:
+# LLM: locator优先于payload且字段优先序固定；发现、分类与缓存签名共用选择/校验，不读目标内容也不授删除权。
+# 函数用途: 从投影中选出唯一明示绝对工作区路径，未声明时返回None。
+def projection_workspace_path(run_dir: Path, payload: dict[str, Any]) -> Path | None:
     locator = read_projection_object(run_dir / "workspace_locator.json", optional=True)
     for source in (locator, payload):
         for key in ("workspace_root", "task_root", "subagent_root", "task_workspace_dir", "agent_run_workspace_dir"):
@@ -67,11 +69,20 @@ def projection_workspace_missing(run_dir: Path, payload: dict[str, Any]) -> bool
             path = Path(value)
             if not path.is_absolute() or ".." in path.parts or len(path.parts) <= 1:
                 raise ValueError("工作区必须是绝对非根路径")
-            try:
-                path.stat()
-            except FileNotFoundError:
-                return True
-            return False
+            return path
+    return None
+
+
+# LLM: 共用选路后仅FileNotFound证明目标消失；权限与解析错误继续向调用方传播，不能被exists吞成孤儿。
+# 函数用途: 检查所选locator或旧投影工作区是否确已消失，不读取或删除目标内容。
+def projection_workspace_missing(run_dir: Path, payload: dict[str, Any]) -> bool:
+    path = projection_workspace_path(run_dir, payload)
+    if path is None:
+        return False
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
     return False
 
 
@@ -121,28 +132,39 @@ def _runtime_file_facts(db: Path, run_id: str, payload: dict[str, Any]) -> tuple
         return status, pending
 
 
-# LLM: scandir流式预算涵盖非目录项，保留有界LRU迭代器避免反复从头；目录换inode即重开且不跟链接。
-# 函数用途: 为发现和维护各自提供至多max_dirs个目录项的公平分页，不落磁盘游标。
-def agent_projection_page(owner_home: Path, max_dirs: int, *, purpose: str) -> tuple[list[Path], bool]:
+# LLM: 游标、目录身份和本轮正事实共用一个LRU条目；穷尽、换身份、淘汰或观察异常一起关闭，安静单页不占缓存。
+# 函数用途: 在同一锁内枚举并观察至多max_dirs项，返回目录页、穷尽标志和整轮累计正事实；不写磁盘。
+def agent_projection_page(owner_home: Path, max_dirs: int, *, purpose: str,
+                          observe: Callable[[Path], bool] | None = None) -> tuple[list[Path], bool, bool]:
     root = owner_home / "agents"
-    if root.is_symlink() or not root.is_dir() or max_dirs <= 0:
-        return [], True
     with _SCAN_LOCK:
         key = (str(root), purpose)
-        inode = root.stat().st_ino
         cached = _SCANS.pop(key, None)
-        if cached and cached[0] != inode:
+        if root.is_symlink() or not root.is_dir() or max_dirs <= 0:
+            if cached:
+                cached[1].close()
+            return [], True, False
+        info = root.stat()
+        identity = info.st_dev, info.st_ino
+        if cached and cached[0] != identity:
             cached[1].close()
             cached = None
         entries = cached[1] if cached else os.scandir(root)
-        batch = list(islice(entries, max_dirs))
+        positive = cached[2] if cached else False
+        try:
+            batch = list(islice(entries, max_dirs))
+            runs = [Path(entry.path) for entry in batch if entry.is_dir(follow_symlinks=False)]
+            positive = positive or (observe is not None and any(observe(run) for run in runs))
+        except BaseException:
+            entries.close()
+            raise
         if len(batch) < max_dirs:
             entries.close()
         else:
-            _SCANS[key] = (inode, entries)
+            _SCANS[key] = (identity, entries, positive)
         while len(_SCANS) > 32:
             _SCANS.popitem(last=False)[1][1].close()
-        return [Path(entry.path) for entry in batch if entry.is_dir(follow_symlinks=False)], len(batch) < max_dirs
+        return runs, len(batch) < max_dirs, positive
 
 
 # LLM: 调用路径必须是owner/agents的直接实目录；读取整棵投影前拒绝逃逸和链接。
@@ -744,7 +766,7 @@ def _restore_projection(boundary):
     os.fsync(boundary["agents"])
 
 
-# LLM: 仅显式调用执行；预算扫描、dry-run纯读，保护优先；compact/归档先耐久后删，逐目录失败隔离不谎报成功。
+# LLM: 仅显式调用执行；维护分页不观察唤醒正事实，忽略独立累计位；dry-run纯读，compact/归档先耐久后删。
 # 函数用途: 清理孤儿投影，七日删中间件，三十日合并归档；绝不删除工作区或唯一报告。
 def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = None, remove_dangling_orphans: bool = True,
                                      slim_after_days: float = 7.0, archive_after_days: float = 30.0,
@@ -760,7 +782,7 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
               "slimmed_dirs": 0, "archived_dirs": 0, "would_remove_dirs": 0, "would_slim_dirs": 0,
               "would_archive_dirs": 0, "protected_dirs": 0, "errors": [], "dry_run": dry_run}
     try:
-        page, _complete = agent_projection_page(owner_home, max_dirs, purpose="preview" if dry_run else "maintenance")
+        page, _complete, _positive = agent_projection_page(owner_home, max_dirs, purpose="preview" if dry_run else "maintenance")
     except OSError as exc:
         report["errors"].append({"run_id": "", "error_type": type(exc).__name__})
         return report

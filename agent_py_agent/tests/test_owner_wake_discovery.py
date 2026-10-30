@@ -1498,3 +1498,139 @@ def test_r1_agents_signature_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "stat", observe)
     discovery._owner_fact_signature(home)
     assert len(visits) <= 2
+
+
+# LLM: 使用真实目录枚举确定首页位置，默认预算不改生产常量；只在临时owner中写入RUNNING或closeout事实。
+# 函数用途: 构造恰好超过一页且正事实在首页的投影，返回其真实状态文件。
+def _r2_positive_scan_home(tmp_path, budget, closeout):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "busy"
+    for index in range((budget or discovery._SUBAGENT_SCAN_MAX_DIRS) + 1):
+        _write_run(home, f"run-{index}", "DONE")
+    with os.scandir(home / "agents") as entries:
+        state = Path(next(entries).path) / "state.json"
+    state.write_text(json.dumps({"status": "DONE" if closeout else "RUNNING",
+                                 "runtime_closeout_pending": closeout}))
+    return home, state
+
+
+# LLM: 不替代分页器、谓词或磁盘状态；32个已穷尽安静owner不能淘汰忙owner尚未读完的正事实。
+# 函数用途: 覆盖缩小及真实默认预算下RUNNING和closeout的跨owner尾页回归。
+@pytest.mark.parametrize("budget", [2, None], ids=["small", "default"])
+@pytest.mark.parametrize("closeout", [False, True], ids=["running", "closeout"])
+def test_r2_positive_scan_survives_32_quiet_owners(tmp_path, monkeypatch, budget, closeout):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    if budget is not None:
+        monkeypatch.setattr(discovery, "_SUBAGENT_SCAN_MAX_DIRS", budget)
+    home, state = _r2_positive_scan_home(tmp_path, budget, closeout)
+    original = state.read_bytes()
+    assert discovery._has_unfinished_subagent_run(home) is True
+    for index in range(32):
+        quiet = tmp_path / f"quiet-{index}"
+        _write_run(quiet, "settled", "DONE")
+        assert discovery._has_unfinished_subagent_run(quiet) is False
+    assert state.read_bytes() == original
+    assert discovery._has_unfinished_subagent_run(home) is True
+    # 扫描结束后的下一轮不应永久黏住旧正事实。
+    state.write_text('{"status":"DONE"}')
+    assert discovery._has_unfinished_subagent_run(home) is True  # 尚未穷尽，保守未知。
+    assert discovery._has_unfinished_subagent_run(home) is False
+
+
+# LLM: 只固定缓存准入成本阈值并隔离软事实，快路径与真实二次探测都必须保住同一次分页的正事实。
+# 函数用途: 从真实owner外层入口验证32个安静owner交错后的两条成本分支。
+@pytest.mark.parametrize("threshold", [float("inf"), 0], ids=["cheap", "reprobe"])
+@pytest.mark.parametrize("closeout", [False, True], ids=["running", "closeout"])
+def test_r2_outer_fact_survives_quiet_owner_interleaving(tmp_path, monkeypatch, threshold, closeout):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    monkeypatch.setattr(discovery, "_SUBAGENT_SCAN_MAX_DIRS", 2)
+    monkeypatch.setattr(discovery, "_FACT_MIN_CACHED_SECONDS", threshold)
+    monkeypatch.setattr(discovery, "_owner_has_soft_facts", lambda *a, **k: False)
+    home, _state = _r2_positive_scan_home(tmp_path, 2, closeout)
+    assert discovery._has_unfinished_subagent_run(home)
+    for index in range(32):
+        quiet = tmp_path / f"quiet-{index}"
+        _write_run(quiet, "settled", "DONE")
+        assert not discovery._has_unfinished_subagent_run(quiet)
+    assert discovery._owner_fact_kind(home) == "hard"
+
+
+# LLM: 阈值零确保真实none缓存已准入；不改签名/叶谓词/状态读取，locator或所选工作区恢复必须立即变hard。
+# 函数用途: 复现R2-F1及locator不变、仅原路径恢复存在的同源变体。
+@pytest.mark.parametrize("change", ["locator", "workspace", "payload_workspace"])
+def test_r2_workspace_readset_invalidates_none_cache(tmp_path, monkeypatch, change):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    monkeypatch.setattr(discovery, "_FACT_MIN_CACHED_SECONDS", 0)
+    monkeypatch.setattr(discovery, "_owner_has_soft_facts", lambda *a, **k: False)
+    home = tmp_path / "home"
+    _write_run(home, "orphan", "RUNNING")
+    run = home / "agents/orphan"
+    workspace = tmp_path / "missing-workspace"
+    locator = run / "workspace_locator.json"
+    if change == "payload_workspace":
+        state = json.loads((run / "state.json").read_text())
+        state["task_root"] = str(workspace)
+        (run / "state.json").write_text(json.dumps(state))
+    else:
+        locator.write_text(json.dumps({"workspace_root": str(workspace)}))
+    state_before = (run / "state.json").read_bytes()
+    assert discovery._owner_fact_kind(home) == "none"
+    assert discovery._cached_owner_fact_kind(str(home)).kind == "none"
+    if change == "locator":
+        workspace = tmp_path / "existing-workspace"
+        workspace.mkdir()
+        locator.write_text(json.dumps({"workspace_root": str(workspace)}))
+    else:
+        workspace.mkdir()
+    assert (run / "state.json").read_bytes() == state_before
+    assert discovery._owner_fact_kind(home) == "hard"
+    assert discovery._has_unfinished_subagent_run(home) is True
+
+
+# LLM: 孤儿过滤同时读canonical和存量data库，任一真实新登记都必须使否定缓存失效；不模拟SQLite结果。
+# 函数用途: 核对新增runtime读源的签名覆盖，防止只修locator后仍漏唤醒。
+@pytest.mark.parametrize("relative", ["runtime.db", "data/runtime.db"])
+def test_r2_runtime_readset_invalidates_none_cache(tmp_path, monkeypatch, relative):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    monkeypatch.setattr(discovery, "_FACT_MIN_CACHED_SECONDS", 0)
+    monkeypatch.setattr(discovery, "_owner_has_soft_facts", lambda *a, **k: False)
+    home = tmp_path / "home"
+    _write_run(home, "orphan", "RUNNING")
+    (home / "agents/orphan/workspace_locator.json").write_text(
+        json.dumps({"workspace_root": str(tmp_path / "deleted")}))
+    assert discovery._owner_fact_kind(home) == "none"
+    assert discovery._cached_owner_fact_kind(str(home)).kind == "none"
+    path = home / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    repo = RuntimeRepository(path)
+    repo.record_run_creation(owner_id="local/main", goal="g", run_id="orphan")
+    assert discovery._owner_fact_kind(home) == "hard"
+
+
+# LLM: 缺失转为NotADirectory必须绕过旧none缓存；只变更owner外的临时父路径，不模拟stat或清缓存。
+# 函数用途: 验证签名与业务对工作区不可判读错误保持相同保守语义。
+def test_r2_workspace_error_cannot_reuse_missing_cache(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    monkeypatch.setattr(discovery, "_FACT_MIN_CACHED_SECONDS", 0)
+    monkeypatch.setattr(discovery, "_owner_has_soft_facts", lambda *a, **k: False)
+    home = tmp_path / "home"
+    _write_run(home, "orphan", "RUNNING")
+    parent = tmp_path / "workspace-parent"
+    parent.mkdir()
+    locator = home / "agents/orphan/workspace_locator.json"
+    locator.write_text(json.dumps({"workspace_root": str(parent / "workspace")}))
+    before = locator.read_bytes()
+    assert discovery._owner_fact_kind(home) == "none"
+    assert discovery._cached_owner_fact_kind(str(home)).kind == "none"
+    parent.rmdir()
+    parent.write_text("not-a-directory")
+    assert locator.read_bytes() == before
+    assert discovery._has_unfinished_subagent_run(home) is True
+    assert discovery._owner_fact_kind(home) == "hard"
