@@ -1,3 +1,16 @@
+## 2026-10-29 e905-sol-13 R1：覆盖、增量扫描与冷热预算返修
+
+来源：完整读取 `fix-e905-sol-13-r1.md`、Astra-1/Astra-2 原复核；工作树 `/tmp/wt-e905-sol-13`，起点 `f74d1161e`。
+
+- 301条消息回归先复现实际重复来源漏拦和反向交集丢旧ID，改用精确Set协议及本轮候选membership；持久视图按根/近期窗口/总数比较，不枚举冷索引。
+- 129条工具覆盖的真实恢复与native刷新先复现全量展开；恢复仅查询当前records/IR，真实刷新从原CAS绑定的head恢复封印根和完整元数据（包含首次空视图），来源校验同样不建历史全集。独立定向复核后另将重复追加改变窗口、tuple继承的不等比较做成先红回归并修复；比较仍按任务规定的根/近期窗口/总数，不以全表逻辑比较代替。内置反向`candidates.isdisjoint(coverage)`不能被Python反射协议接管，实际消费者不用此方向。
+- 检查点暖缓存后改坏首字节再追加的反例先红；增量缓存绑定前4KiB及前次64KiB尾指纹，失配回退严格解析。固定锚不宣称证明任意未选中中段未改。
+- 已完成/失败任务在精确覆盖后允许冷转，活跃/中断/未知任务保守pin；保留原TaskLink权威及完整冷段。恰好2MiB候选先复现错误接受，写侧及维护均改为严格小于预算；少于32行的大摘要组合仍按累计字节收缩，旧head可冷恢复。
+- 延续已修的同代reader握手、prepared恢复、visitor业务异常原样传播及公开冷热by-id回归；同步注释说明真实读写副作用。
+- 增加高代次合成head与真实64层最坏深度节点的load/commit/selection访问量及本机耗时上界断言。不是百万物理冷链/真实百万次压缩，也不把本机1秒稳定门禁冒称严格20ms或Linux结论；各入口实测值保存在JUnit属性。
+
+复现：工作树根，显式 `PYTHONPATH=/tmp/wt-e905-sol-13 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_compact_checkpoint_64k_seek.py agent_py_agent/tests/test_transcript_cold_rotation.py agent_py_agent/tests/test_million_compact_scalability.py agent_py_agent/tests/test_compact_source_consistency.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol13_r1fix`；静态门禁 `ruff check --no-cache agent_py_agent scripts`、`python3 -B scripts/check_import_boundaries.py --json`、`git diff --check`。最终实测结果见交接，不用较早绿灯覆盖之后的变更。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

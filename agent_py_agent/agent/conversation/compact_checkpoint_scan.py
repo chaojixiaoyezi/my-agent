@@ -30,6 +30,7 @@ class _CheckpointIndex:
     resume_from: int
     complete: bool
     tail_digest: bytes
+    head_digest: bytes
     validator: object = None
 
 
@@ -119,7 +120,15 @@ def _scan_index(handle, stamp, cached, validator=None):
                 offsets.popitem(last=False)
                 complete = False
         resume = stamp[2] if raw.endswith(b'\n') else offset
-    return _CheckpointIndex(stamp, offsets, resume, complete, _tail_digest(handle, stamp[2]), validator)
+    return _CheckpointIndex(stamp, offsets, resume, complete, _tail_digest(handle, stamp[2]),
+                            _head_digest(handle, stamp[2]), validator)
+
+
+# LLM: 头锚和前次尾锚共同绑定已验证边界；固定窗口不宣称证明任意中段未改，选中行仍单独核SHA。
+# 函数用途: 读取已验证前缀最前4KiB指纹，增长时发现旧头损坏即回退严格扫描。
+def _head_digest(handle, through):
+    handle.seek(0)
+    return hashlib.sha256(handle.read(min(4096, through))).digest()
 
 
 # LLM: 尾锚只作快速否定，不宣称证明全部旧前缀；所选旧行仍逐字节复核，读取量与历史长度无关。
@@ -165,6 +174,7 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
         if cached is not None and (
             cached.stamp[:2] != stamp[:2] or cached.stamp[2] > through
             or _tail_digest(handle, cached.stamp[2]) != cached.tail_digest
+            or _head_digest(handle, cached.stamp[2]) != cached.head_digest
             or (validator is not None and cached.validator is not validator)
         ):
             cached = None

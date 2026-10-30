@@ -2,7 +2,7 @@
 #   回执带引用时，只有每个引用都等于同一四元身份原归档记录自己写下的输出位置（外置全文路径、分页读取的来源引用），
 #   整组才可移入摘要来源。摘要材料始终是模型当时看到的原回执（预览/正文+指针），不按引用去取全文；
 #   指针指向的内容由归档按四元身份保存，压缩后仍可读回。工具自报的其它引用、媒体引用、json/数据块仍保留原位。
-# 模块用途: 纯计算完整工具往返和已覆盖旧快照的退休分区，交回原CarriedToolCompactSource，不读存储或调用摘要器。
+# 模块用途: 计算完整工具往返分区；持久覆盖只按本轮候选精确查询，不枚举旧工具表或调用摘要器。
 from __future__ import annotations
 
 from collections import Counter
@@ -89,8 +89,10 @@ def partition_recovery_tool_source(
     if (not isinstance(records, (list, tuple)) or any(not isinstance(item, dict) for item in records)
             or not isinstance(history, (list, tuple)) or not isinstance(covered_tool_refs, (list, tuple))):
         raise TypeError("工具压缩分区需要原归档、原生历史和覆盖引用序列")
-    covered = {compact_tool_ref_key(ref) for ref in compact_tool_refs(list(covered_tool_refs))}
     base_groups = _analyze_ir_groups(history)
+    query = getattr(covered_tool_refs, 'covered_keys', None)
+    covered = (query((*records, *(ref for group in base_groups for ref in group.refs))) if callable(query)
+               else {compact_tool_ref_key(ref) for ref in compact_tool_refs(list(covered_tool_refs))})
     archive_keys = [compact_tool_ref_key(item) for item in records]
     ambiguous = _ambiguous_keys(archive_keys, [compact_tool_ref_key(ref) for group in base_groups for ref in group.refs])
     orphan_names = _orphan_result_names(history, base_groups)

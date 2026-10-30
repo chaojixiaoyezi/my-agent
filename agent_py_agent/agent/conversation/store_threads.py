@@ -506,7 +506,7 @@ class ThreadStore:
         return self.update_atomic(thread_id, apply)
 
     # LLM: 唯一CAS推进提交链；闲置按append锁→线程锁核指纹及活动代；普通提交只保存摘要前消息观察供去重，不加新CAS。
-    # 函数用途: 原子提交压缩与可选活跃工具收缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
+    # 函数用途: 原子提交摘要及工具收缩；获胜thread提交可在原锁内无损冷转原始消息，不另建提交权威。
     def update_compact_state(
         self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
         active_loaded_tool_names: tuple[str, ...] | None = None, now: float | None = None,
@@ -516,7 +516,7 @@ class ThreadStore:
         expected_message_tail: dict[str, Any] | None = None,
         idle_compact: bool = False,
     ) -> ConversationThread:
-        """Atomically advance one validated summary/checkpoint without touching raw messages."""
+        """原子推进摘要检查点；获胜后可把精确覆盖的消息前缀无损移到冷段。"""
         if type(commit.publish_thread_view) is not bool:
             raise ValueError("compact publication scope must be an explicit boolean")
         if idle_compact and (type(expected_user_activity_generation) is not int or expected_user_activity_generation < 0):

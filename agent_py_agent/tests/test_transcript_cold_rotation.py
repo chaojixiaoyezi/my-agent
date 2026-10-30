@@ -91,7 +91,7 @@ def test_gateway_prefix_keeps_real_source_change_guard(compact_case, monkeypatch
 
 # LLM: 真实writer/CAS之后才检查冷转；阈值降低只缩小样本，不替换存储、覆盖和游标算法。
 # 函数用途: 构造含旧展示行、精确幂等键和保留尾部的完整线程提交。
-def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=None):
+def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=None, task_id=None):
     from agent_py_agent.agent.conversation import compact_checkpoint as checkpoints
     from agent_py_agent.agent.conversation import message_scan
     from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
@@ -102,7 +102,7 @@ def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=No
     for number in range(24):
         messages.append(case.store.messages.append({
             'thread_id': case.thread_id, 'role': 'user', 'content': f'row-{number}:' + '正文' * 100,
-            'metadata': {'dedupe_key': f'key-{number}'},
+            'metadata': {'dedupe_key': f'key-{number}', **({'task_id': task_id} if task_id else {})},
         }))
         if number == 1:
             case.store.messages.append({'thread_id': case.thread_id, 'role': 'display', 'content': 'old-progress'})
@@ -122,6 +122,24 @@ def _commit_rotation(case, monkeypatch, *, scope=None, publish=True, provider=No
         source_messages=23, source_tool_pairs=0, publish_thread_view=publish,
     ), expected_generation=0)
     return thread, messages, original, path
+
+
+# LLM: 使用原TaskLink终态与活动索引；未知、活跃和可恢复中断均保守pin，终态且已覆盖才允许冷转。
+# 函数用途: 防止已结束任务永久阻止线程热文件收敛，也不提前归档未结束任务。
+@pytest.mark.parametrize('status', ['completed', 'failed', 'active', 'interrupted', 'missing'])
+def test_rotation_pins_only_nonterminal_or_unknown_tasks(compact_case, monkeypatch, status):
+    task_id = 'historical-task'
+    if status != 'missing':
+        compact_case.store.tasks.bind({'thread_id': compact_case.thread_id, 'task_id': task_id, 'status': status})
+    thread, messages, original, path = _commit_rotation(compact_case, monkeypatch, task_id=task_id)
+    if status in {'completed', 'failed'}:
+        assert path.with_suffix('.manifest.json').exists()
+        assert len(path.read_bytes()) < len(original)
+        found, errors = compact_case.store.messages.by_id_report(thread.thread_id, messages[0].message_id)
+        assert not errors and found == messages[0]
+    else:
+        assert path.read_bytes() == original
+        assert not path.with_suffix('.manifest.json').exists()
 
 
 # LLM: 冷行必须逐字保留；物理热文件变短不改变公开字节游标、历史、精确来源或旧幂等键。
@@ -215,6 +233,12 @@ def test_read_snapshot_survives_rotation_between_manifest_and_open(compact_case,
         assert not errors and [row.message_id for row in rows] == [row.message_id for row in messages[1:]]
     else:
         assert compact_case.store.messages.tail_marker_report(thread.thread_id) == expected_marker
+
+
+# LLM: 保留R1点名的独立调度入口，直接复用已存在的真实首次分卷反例，不伪造读取或CAS结果。
+# 函数用途: 在manifest读取后、热FD打开前真实分卷，核对完整会话原字节。
+def test_reader_cannot_mix_old_manifest_with_new_hot_inode(compact_case, monkeypatch):
+    test_read_snapshot_survives_rotation_between_manifest_and_open(compact_case, monkeypatch, 'reader')
 
 
 # LLM: 只注入清单耐久写入故障，CAS、分段原字节、追加和恢复仍走产品入口；不是操作系统断电测试。

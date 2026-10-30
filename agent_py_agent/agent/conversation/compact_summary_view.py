@@ -1,6 +1,6 @@
 # LLM: 本模块只读取原 committed checkpoint chain，并携带本次采用的临时视图；提交指针和账本仍是唯一权威。
 # 摘要替代关系沿 summary_base_checkpoint_id，不得把提交链的局部覆盖无条件合并。
-# 模块用途: 缓存稳定文件的完整验链元数据与独立范围视图，保留全部坏行验证及摘要base链语义。
+# 模块用途: 旧格式完整验链，新格式核原head及封印根；按实际摘要base恢复独立范围视图。
 from __future__ import annotations
 
 import hashlib
@@ -8,6 +8,7 @@ import json
 import math
 import threading
 from collections import OrderedDict
+from collections.abc import Set
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -86,7 +87,7 @@ class CompactSummaryView:
     checkpoint_id: str = ""
     summary: str = ""
     operation_evidence: dict[str, object] = field(default_factory=dict)
-    source_message_ids: frozenset[str] = frozenset()
+    source_message_ids: Set[str] = frozenset()
     source_tool_refs: tuple[dict[str, object], ...] = ()
     legacy_message_end_ids: tuple[str, ...] = ()
     generation: int = 0
@@ -270,7 +271,7 @@ def _indexed_rows(chain, scope: CompactScope, backend):
     return by_id, selected
 
 
-# LLM: L1按文件版本完整验链，L2另按scope/backend选择摘要；命中返回deepcopy，文件追加/owner/head变化立即失效。
+# LLM: carried格式核当前head及封印根，旧格式L1完整验链；按scope/backend选摘要，副本不展开历史覆盖。
 # 函数用途: 复用已验证Compact来源，保持摘要base链覆盖和调用方嵌套对象隔离。
 def resolve_compact_summary_view(
     agent: SimpleAgent,
@@ -385,16 +386,22 @@ def _validated_provider_compaction(row: dict[str, object]) -> dict[str, object]:
     return dict(record)
 
 
-# LLM: 底层frozenset只持近期窗口，精确contains查询原封印根；显式全量迭代才读取历史。
+# LLM: 不继承内建frozenset，避免C集合运算绕过精确contains；显式全量迭代才读取历史。
 # 类用途: 保留精确消息覆盖合同而不在每次恢复物化全部历史ID。
-class _IndexedMessageCoverage(frozenset):
+class _IndexedMessageCoverage(Set):
     # LLM: 构造成本只与近期窗口有关；index和ref由已验证检查点传入。
     # 函数用途: 创建有界内存的不可变覆盖投影。
-    def __new__(cls, recent, index, reference, count, checkpoint_id='', lineage=None):
-        result = super().__new__(cls, recent)
-        result.index, result.reference, result.count = index, reference, count
-        result.checkpoint_id, result.lineage = checkpoint_id, lineage
-        return result
+    def __init__(self, recent, index, reference, count, checkpoint_id='', lineage=None):
+        self.recent = tuple(recent)
+        self.recent_set = frozenset(self.recent)
+        self.index, self.reference, self.count = index, reference, count
+        self.checkpoint_id, self.lineage = checkpoint_id, lineage
+
+    # LLM: ABC的显式并/差集结果是独立值集合，不能以单个iterable误调用需要封印根参数的领域构造器。
+    # 函数用途: 保持标准Set结果工厂兼容；只有显式全集运算允许物化历史，热交集仍走候选查询。
+    @classmethod
+    def _from_iterable(cls, values):
+        return frozenset(values)
 
     # LLM: 只接受选中摘要的真实base链根，其它scope/provider不能授予冷前缀覆盖。
     # 函数用途: 以固定深度证明物理归档所依赖的检查点被当前可读摘要继承。
@@ -405,7 +412,7 @@ class _IndexedMessageCoverage(frozenset):
     # LLM: 阴性必须查询精确根，不把窗口外历史误当未覆盖。
     # 函数用途: 以固定深度验证一个消息ID。
     def __contains__(self, identity):
-        if frozenset.__contains__(self, identity):
+        if identity in self.recent_set:
             return True
         return isinstance(identity, str) and self.index.get(self.reference, identity) is True
 
@@ -419,15 +426,32 @@ class _IndexedMessageCoverage(frozenset):
     def __iter__(self):
         return (identity for identity, _ in self.index.items(self.reference))
 
-    # LLM: 比较只按另一显式集合的大小及成员，避免误比较底层近期窗口。
-    # 函数用途: 保持与旧frozenset的值比较合同。
+    # LLM: 两个持久投影按根SHA、近期窗口及总数比较，不读冷索引；显式旧集合按其候选成员核对。
+    # 函数用途: 保持热视图比较为常数上界，同时兼容旧集合断言。
     def __eq__(self, other):
-        return isinstance(other, (set, frozenset)) and len(self) == len(other) and all(item in self for item in other)
+        if isinstance(other, _IndexedMessageCoverage):
+            return self.reference == other.reference and self.recent == other.recent and self.count == other.count
+        return isinstance(other, Set) and len(self) == len(other) and all(item in self for item in other)
+
+    # LLM: 只遍历本轮候选，不枚举self累计覆盖；返回显式交集供调用方消费。
+    # 函数用途: 用精确成员查询实现有界正向交集。
+    def __and__(self, candidates):
+        return frozenset(item for item in candidates if item in self)
+
+    # LLM: 普通set左操作数必须回调本接口，不能由C层近期槽位计算结果。
+    # 函数用途: 保证候选集合在左侧时同样精确。
+    def __rand__(self, candidates):
+        return self.__and__(candidates)
+
+    # LLM: 短路成员查询成本仅与候选数量有关，命中可立即拒绝重复来源。
+    # 函数用途: 判断本轮来源是否与累计覆盖相交。
+    def isdisjoint(self, candidates):
+        return not any(item in self for item in candidates)
 
     # LLM: 副本只复制根及近期ID，不枚举历史；原index是无可变缓存的只读寻址服务。
     # 函数用途: 保持AppliedCompactContext的嵌套对象隔离而不触发历史展开。
     def __deepcopy__(self, memo):
-        return type(self)(tuple(frozenset.__iter__(self)), self.index, deepcopy(self.reference, memo),
+        return type(self)(self.recent, self.index, deepcopy(self.reference, memo),
                           self.count, self.checkpoint_id, deepcopy(self.lineage, memo))
 
 
@@ -467,7 +491,51 @@ class _IndexedToolCoverage(tuple):
     # LLM: 显式比较要求完整序列语义，不按近期tuple内存布局判断相等。
     # 函数用途: 保持旧工具引用tuple的顺序比较。
     def __eq__(self, other):
+        if isinstance(other, _IndexedToolCoverage):
+            return (self.reference == other.reference and self.count == other.count
+                    and tuple(tuple.__iter__(self)) == tuple(tuple.__iter__(other)))
         return isinstance(other, (tuple, list)) and len(self) == len(other) and tuple(self) == tuple(other)
+
+    # LLM: 原生tuple.__ne__只比较近期槽位，必须显式沿用全覆盖相等协议，不能把不同冷根说成相同。
+    # 函数用途: 使工具覆盖的不等比较严格成为相等比较的否定。
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    # LLM: 查询键必须是原四元身份；近期窗口只作快路径，窗口外按封印根精确寻址。
+    # 函数用途: 不展开历史地判断本轮工具是否已被覆盖。
+    def contains_key(self, key):
+        from .compact_tool_identity import TOOL_REF_FIELDS, compact_tool_ref_key
+
+        if key is None:
+            return False
+        if any(compact_tool_ref_key(ref) == key for ref in tuple.__iter__(self)):
+            return True
+        ref = dict(zip(TOOL_REF_FIELDS, key))
+        value = self.index.get(self.reference, json.dumps(ref, sort_keys=True))
+        return value is not None and compact_tool_ref_key(value['ref']) == key
+
+    # LLM: 只读取本轮records/IR候选引用，返回有界相交键集，不访问全表迭代器。
+    # 函数用途: 给恢复分区和来源防线提供精确增量过滤。
+    def covered_keys(self, candidates):
+        from .compact_tool_identity import compact_tool_ref_key
+
+        return {key for ref in candidates if (key := compact_tool_ref_key(ref)) is not None and self.contains_key(key)}
+
+    # LLM: 仅将获胜CAS的本轮增量写成新不可变根，旧根不变；这是运行内派生视图，不另行确认提交。
+    # 函数用途: 原生刷新追加有限工具引用而不把旧覆盖转成tuple。
+    def with_added(self, refs):
+        from .compact_tool_identity import compact_tool_refs
+
+        reference, count = self.reference, self.count
+        recent = {json.dumps(ref, sort_keys=True): ref for ref in tuple.__iter__(self)}
+        for ref in compact_tool_refs(list(refs)):
+            key = json.dumps(ref, sort_keys=True)
+            if self.index.get(reference, key) is not None:
+                continue
+            reference = self.index.put(reference, key, {'ref': ref, 'order': count})
+            count += 1
+            recent[key] = ref
+        return type(self)(tuple(recent.values())[-128:], self.index, reference, count)
 
     # LLM: deepcopy不能走tuple展开协议；只复制近期嵌套字典及封印根。
     # 函数用途: 为本次应用上下文建立独立的有界工具覆盖投影。

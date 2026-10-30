@@ -235,7 +235,7 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
             if name == 'provider_compaction':
                 row['provider_compaction_info'] = {key: payload.get(key) for key in ('protocol', 'endpoint')}
     row["checkpoint_id"] = scoped_compact_checkpoint_id(row)
-    if len((json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n').encode('utf-8')) > min(_CHECKPOINT_ROW_MAX_BYTES, _ACTIVE_CHECKPOINT_BYTE_BUDGET):
+    if len((json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n').encode('utf-8')) >= min(_CHECKPOINT_ROW_MAX_BYTES, _ACTIVE_CHECKPOINT_BYTE_BUDGET):
         raise ValueError('conversation compact checkpoint record exceeds byte budget')
     # 私有追加：0600/0700，存量宽权限 checkpoint 账本下次写入即收紧；内容逐字节不变。
     _save_checkpoint_copy(root, row)
@@ -426,7 +426,7 @@ def _cold_checkpoint(root, thread_id, checkpoint_id):
 
 
 # LLM: 持canonical账本锁；冷副本与冷段先落盘，再原子替换热文件，最后旁车。旁车可重建且不确认提交。
-# 函数用途: 将热账本限制为32至64条并保存真实字节地址、文件身份和归档水位。
+# 函数用途: 同时约束热账本条数与严格小于2MiB的字节数，保存地址、文件身份和归档水位。
 def _maintain_active_checkpoints(root, thread_id, path):
     from .compact_checkpoint_scan import _checkpoint_byte_rows, _parse_row
 
@@ -436,10 +436,10 @@ def _maintain_active_checkpoints(root, thread_id, path):
         rows = [(raw, _parse_row(raw)) for _, raw in _checkpoint_byte_rows(handle, through)]
     rows = [(raw, row) for raw, row in rows if row is not None]
     archived_floor = 0
-    if len(rows) > _ACTIVE_CHECKPOINT_HIGH_WATER or sum(len(raw) for raw, _ in rows) > _ACTIVE_CHECKPOINT_BYTE_BUDGET:
+    if len(rows) > _ACTIVE_CHECKPOINT_HIGH_WATER or sum(len(raw) for raw, _ in rows) >= _ACTIVE_CHECKPOINT_BYTE_BUDGET:
         keep, retained_bytes = 0, 0
         for raw, _row in reversed(rows):
-            if keep >= MAX_ACTIVE_COMPACT_CHECKPOINTS or retained_bytes + len(raw) > _ACTIVE_CHECKPOINT_BYTE_BUDGET:
+            if keep >= MAX_ACTIVE_COMPACT_CHECKPOINTS or retained_bytes + len(raw) >= _ACTIVE_CHECKPOINT_BYTE_BUDGET:
                 break
             keep += 1
             retained_bytes += len(raw)

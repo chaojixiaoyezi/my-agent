@@ -1,5 +1,5 @@
-# LLM: canonical只读扫描；去重索引仅是原append-only合同下的进程内加速，不是持久覆盖证明，调用方持有幂等锁。
-# 模块用途: 提供固定尾界、完整行分页及有界增量幂等查找，不修改历史或线程状态。
+# LLM: 读口冻结canonical布局；写口仅在原消息锁及获胜线程CAS后冷转，清单不授予摘要覆盖权。
+# 模块用途: 提供冷热消息扫描、完整行分页、幂等查找及耐久分卷转换和prepared恢复。
 from __future__ import annotations
 
 import hashlib
@@ -600,8 +600,8 @@ def cold_message_lookup(path: Path, key: str, *, reader=None):
 
 
 # LLM: 仅原线程CAS成功后、持消息锁调用；检查点四元边界、thread scope及精确覆盖都成立才可物理冷转。
-# 对仍携带任务身份的来源保守保留，不把局部/活动工具摘要或调用方字节位置当全线程授权。
-# 函数用途: 将已覆盖且无局部任务引用的消息前缀冷存，保留边界本行及全部迟到尾部。
+# 对非终态、活动索引或未知任务保守pin；终态任务仍须被本次thread摘要精确覆盖，原字节保存在冷段。
+# 函数用途: 将已覆盖且无活跃任务pin的前缀冷存，保留边界本行及全部迟到尾部。
 def rotate_committed_transcript(storage, thread):
     from ..common.nofollow_fs import write_bytes_atomic_beneath, write_text_atomic_beneath
     from .compact_checkpoint import _cold_checkpoint
@@ -640,13 +640,14 @@ def rotate_committed_transcript(storage, thread):
     coverage_index = ImmutableJsonIndex(compact_root, ('evidence', thread.thread_id, 'indexes'))
     meta = row['carried_view']
     coverage = _IndexedMessageCoverage(meta['recent_messages'], coverage_index, meta['messages'], meta['message_count'])
+    task_pins = {}
     with path.open('rb') as handle:
         while handle.tell() < cut:
             raw = handle.readline(cut - handle.tell())
             entry = _message_from_line(raw, thread.thread_id, skip_blank=True)
             if entry is None:
                 continue
-            if any(entry.metadata.get(name) for name in ('task_id', 'conversation_task_id', 'background_task_id')):
+            if _entry_has_task_pin(storage, thread, entry, task_pins):
                 return
             if entry.role in {'user', 'assistant'} and entry.message_id not in coverage:
                 from .models import is_audit_background_transcript_entry
@@ -692,6 +693,26 @@ def rotate_committed_transcript(storage, thread):
     finally:
         os.close(directory)
     write_text_atomic_beneath(path.parent, (path.with_suffix('.manifest.json').name,), json.dumps(after, sort_keys=True) + '\n')
+
+
+# LLM: 原TaskLink及当前线程活动索引是任务生命周期事实；缺失/损坏/错线程均保守保留，不靠消息文字猜终态。
+# 函数用途: 在一次持锁冷转中按准确任务身份缓存pin判断，终态已覆盖历史不永久阻挡分卷。
+def _entry_has_task_pin(storage, thread, entry, pins):
+    from .models import THREAD_TASK_LINK_INACTIVE_STATUSES
+    from .store_tasks import _read_task_link
+
+    for name in ('task_id', 'conversation_task_id', 'background_task_id'):
+        task_id = str(entry.metadata.get(name) or '')
+        if not task_id:
+            continue
+        if task_id not in pins:
+            link, error = _read_task_link(storage.task_path(task_id), task_id)
+            pins[task_id] = (task_id in thread.active_task_ids or error is not None or link is None
+                             or link.thread_id != thread.thread_id
+                             or str(link.status).strip().lower() not in THREAD_TASK_LINK_INACTIVE_STATUSES)
+        if pins[task_id]:
+            return True
+    return False
 
 
 # LLM: 原字节先耐久保存，再更新不可变地址根；首ID/首幂等键不能被后来相同身份覆盖，display也保存原样。

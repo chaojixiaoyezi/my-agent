@@ -567,7 +567,7 @@ def _validated_compact_source_context(
 
     if context.view != resolve_compact_summary_view(agent, thread, context.scope):
         raise ConversationCompactError("Compact source summary changed", code="COMPACT_SOURCE_CHANGED")
-    if set(ids) & context.view.source_message_ids:
+    if any(identity in context.view.source_message_ids for identity in ids):
         raise ConversationCompactError("Compact source repeats covered messages", code="COMPACT_SOURCE_CHANGED")
     return context
 
@@ -581,9 +581,16 @@ def _validate_compact_tool_source(options, context):
     from .compact_tool_identity import compact_tool_ref_key
 
     source = options.tool_source
-    if (not isinstance(source, CarriedToolCompactSource) or options.request_projector is None or context is None
-            or {compact_tool_ref_key(ref) for ref in source.source_tool_refs}
-            & {compact_tool_ref_key(ref) for ref in context.view.source_tool_refs}):
+    if not isinstance(source, CarriedToolCompactSource) or options.request_projector is None or context is None:
+        raise ConversationCompactError("联合压缩来源或完整投影未知", code="COMPACT_SOURCE_CHANGED")
+    coverage = context.view.source_tool_refs
+    contains_key = getattr(coverage, 'contains_key', None)
+    if callable(contains_key):
+        repeated = any(contains_key(compact_tool_ref_key(ref)) for ref in source.source_tool_refs)
+    else:
+        keys = {compact_tool_ref_key(ref) for ref in coverage}
+        repeated = any(compact_tool_ref_key(ref) in keys for ref in source.source_tool_refs)
+    if repeated:
         raise ConversationCompactError("联合压缩来源或完整投影未知", code="COMPACT_SOURCE_CHANGED")
 
 
