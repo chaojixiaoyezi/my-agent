@@ -347,6 +347,50 @@ git diff --check
 ```
 
 宽`-k`同时命中`client`相关测试。已在准确基线源码归档上复现同名5个浏览器/MCP/插件进程失败，未把原因推断为沙箱、未skip/xfail或降低断言；最终当前版本结果与未验证项见本席DONE交接报告。二次Astra独审指出报告硬链接覆盖与可变报告引用风险，分别改为临时文件加`os.replace`和公开报告独立快照；原子替换、目录符号链接拒绝、修改报告后再读的3项聚焦回归通过。真实硬链接集成用例在构造fixture的`os.link`步骤收到`EPERM`，系统临时目录与本工作树缓存内均已观察到；保留该测试为失败，不skip或假称硬链接链路通过，交Linux车道复核。基线临时worktree创建被`.git`写权限拒绝后使用本树缓存内的`git archive`回退，并核对基线parser blob及导入来源；不是拿本分支的早先提交当基线。
+## 2026-10-29 e905 sol-12 Round 2：清理协议强化
+
+来源：`fix-e905-sol-12-r2.md`，起点 `95b52ccba3d5fc7219219a10578361eefabaabd5`。只修改清理脚本、对应测试和本文档；不再次扫描或清理真实 Home，不部署、不推送。
+
+- 删除以**单个候选单元**为事务边界：所有叶子/空目录先隔离并复核，持久写出隔离 `manifest.json`（源路径、隔离名、身份、共享祖先链）并同步文件/目录，随后才删除。首次物理删除成功前（含 checkpoint 后的最后核验）失败均逆序无覆盖恢复；原位被占用时保留双方和 `recovery_required`。部分删除后的异常以 `partial_delete` 及残留恢复坐标记录，不冒充全批回滚；不是多个候选之间的全局原子事务，也不承诺掉电恢复自动化。
+- 输出 FD 由 `_manifest_lock` 持有全扫描/规划/apply/末次保存的非阻塞独占 `flock`。锁冲突立即拒绝并关闭；初始化异常和正常退出均先 `LOCK_UN` 再 `close`，解锁异常也不能漏关闭。
+- 活动路径递归遍历 dict/list/tuple，提取 `_path/_dir/_workspace/_root/_home` 及路径配置节中的字符串。保留产品标量语义，以标准库严格支持 JSON、嵌套简化 YAML、TOML；JSON/块映射重复键、非法行/缩进、空正文、未闭引号、非映射根或不支持的语法拒绝，不把宽松解析器忽略的内容当无引用。选中且存在的配置读取/解析失败直接 `ValueError` 全局中止，执行前再读取也不可被逐单元错误处理吞掉。缺失配置和未知相对运行根继续保守保留 workspace；布尔开关不是字符串路径，不能只因字段名像路径就误判整个默认配置。
+- 默认 schema 为 `my-agent.home_file_slimming_cleanup_manifest.v1`，仍接受 `home-file-slimming.v1` 的归属标识；批准清单支持 `candidates`/`entries`，双字段必须一致。无 schema 的 legacy 顶层严格为四个归属字段和一/两个候选列表；所有候选必须含规范相对 path、合法 category 与 `{"sha256": "64位小写摘要"}` 字典指纹。未知 schema/顶层、错误类型/路径/指纹均 `ValueError`，实际授权仍是当前规划交集。旧版字符串指纹不在新严格格式内，历史批准清单亦不能绕过脚本 SHA 校验，必须重新预演。
+
+回归包括第二文件失败整批恢复/恢复冲突、嵌套目录回滚、持久映射先于第一 unlink、fsync/checkpoint 故障、真实同 inode 第二句柄锁竞争、初始化与退出释放次序、嵌套配置及环境/显式坏配置全局中止、新旧 schema 和 legacy 正反例。原测试 AST 与断言保持不变。首批先红 9 项后整文件 71 项通过；第二批新增 48 项中 44 项先红，4 项是原本已支持的正向/拒绝控制；组合曾暴露默认配置布尔/枚举误当路径，按真实类型修正后 119 项通过。
+
+独立 Astra high 静态复核发现显式批准 `null` 绕过和最后核验的回滚范围遗漏。新增 CLI/库拒绝 `null`、首次删除前校验/冲突/unlink 失败和部分删除残留 6 个反例全部先红；批准默认值改为专用哨兵，删除异常处理以实际成功 syscall 为界。原样重跑后整文件 125 项通过，无失败、错误或跳过。最终提交对应证据及复审范围见外部 DONE 的 Round 2 节。
+
+复现（工作树根；只运行这一份 pytest，不跑全仓）：
+```bash
+PYTHONPATH=/tmp/wt-e905-sol-12 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest /tmp/wt-e905-sol-12/agent_py_agent/tests/test_home_file_slimming_cleanup.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol12_fix2
+ruff check --no-cache /tmp/wt-e905-sol-12/scripts/home_file_slimming_cleanup.py /tmp/wt-e905-sol-12/agent_py_agent/tests/test_home_file_slimming_cleanup.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B /tmp/wt-e905-sol-12/scripts/check_import_boundaries.py --json
+git -C /tmp/wt-e905-sol-12 diff --check 4bea324e3
+```
+
+未验证：真实 Home、Linux/Windows、真实硬链接全链路、掉电/崩溃恢复与线上服务。清单 inode 锁不是跨不同输出文件的 Home 级互斥锁；仍须单执行者及写者协作维护窗口。
+
+## 2026-10-29 e905 sol-12 Round 1：清理隔离与清单身份修复
+
+来源：`fix-e905-sol-12-r1.md` 和 Astra-1/Astra-2 两份独立审查；起点 `e10d64afa843b9aee6d18aa62a145ec6c55a2275`。本轮只在隔离 `/tmp` 样本测试，不再对真实 Home 执行清理，不推送或部署。
+
+- 删除先逐段 nofollow 核对批准摘要里的祖先身份，再 rename 到同文件系统的专属 0700 隔离目录，复核叶子身份（rename 自然改变的 ctime 除外）、原祖先链和隔离链后才能 unlink/rmdir。空目录也走隔离核验，含保护项/新增内容的目录不递归删除。
+- 检查失败原子无覆盖恢复；使用 macOS `renameatx_np(RENAME_EXCL)` / Linux `renameat2(RENAME_NOREPLACE)`，缺能力失败关闭。恢复名被占用时保留隔离条目和新原名，在 `recovery_required` 中记录位置，不以覆盖回退。
+- 清单开始扫描前 nofollow 固定父链并以 O_EXCL/0600 创建；checkpoint 只写同一 FD，核对完整父链、Home 与单链接 inode，替换名和漂移链不能把写入导向别人的文件。原地清单 checkpoint 不承诺断电原子发表。
+- 归档孤儿保留结构化 kind 并复用执行前目标复活检查；固定 tasks 与通用归档缓存入口统一排除当天 ISO/compact 日期。测试全部模块/函数补中文双层注释。
+- Astra-2 F4 同步修复：读取 `MY_AGENT_CONFIG` 选中的真实外部配置，支持显式 `--active-config` / `active_configs` 追加来源；复用产品 `config_io.py` 的简化YAML解析器消费已核验内存快照，解析器摘要绑定审批策略。相对运行路径缺少运行根、选中配置缺失/坏类型/并发变化时 workspace 清理失败关闭，绝对路径按父子关系保留。不从三个猜测目录里“没查到”推断无活动引用。
+
+先红：原 44 项与 10 项新增回归同跑，9 项安全断言失败、45 项通过；覆盖最终 stat 换 inode、父目录迁入 output、清单名晚出现/父链换 Home 链接、归档目标复活、归档两种当天日期缓存与外部活动配置。正常 owner 孤儿复活控制保持通过。继续补隔离 rename 边界的替换/目录迁移、恢复冲突保留、空目录晚出现报告、显式配置和首 fstat 故障 FD 回收。独立复核追加的“合法相对路径/绝对父路径”两例经真实产品路径解析器确认引用后先2失败，再修正结构化路径保护。
+
+复现（从本工作树根）：
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_home_file_slimming_cleanup.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol12_fix1
+ruff check --no-cache agent_py_agent scripts
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_import_boundaries.py --json
+git diff --check 4bea324e3..HEAD
+```
+
+限制：同权限进程恶意修改专属隔离区或已持有 FD 继续写入，不属于仅靠 POSIX 路径核验能提供的全局事务；仍需可信隔离区与维护窗口。中断/断电可能遗留隔离条目，须按回执人工复核，不能自动扩范围清理。Linux原生接口、真实硬链接、真实 Home、部署与用户端到端结果未由本轮样本验证。最终测试/门禁、准确提交和独立复核结论追加在外部 DONE 的 Round 1 Fixes 中。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
