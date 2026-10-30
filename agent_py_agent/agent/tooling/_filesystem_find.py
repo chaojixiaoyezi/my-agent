@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -129,6 +130,25 @@ def _find_snapshot_stale(reason: str, snapshot_id: str = '') -> ToolHandlerOutco
         }})
 
 
+def _find_watch_identity(path: Path) -> tuple[int, ...]:
+    info = _discovery_nofollow_stat(path)
+    base = _discovery_identity(info)
+    if not stat.S_ISDIR(info.st_mode):
+        return base
+    entries_count = 0
+    entries_xor = 0
+    entries_sum = 0
+    with os.scandir(path) as entries:
+        for entry in entries:
+            entries_count += 1
+            digest = int.from_bytes(
+                os.fsencode(entry.name)[:16].ljust(16, b"\x00"), "little"
+            ) ^ int(entry.inode())
+            entries_xor ^= digest
+            entries_sum = (entries_sum + digest) & 0xFFFFFFFFFFFFFFFF
+    return (*base, entries_count, entries_xor, entries_sum)
+
+
 # LLM: 筛选串线单独披露；每个已观察目录及文件仍重核原权限和五元指纹，不能以绑定相等或根mtime替代，I/O在锁外。
 # 函数用途: 在发布或续页前验证冻结清单的来源与权限未观察到变化。
 def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot) -> None:
@@ -147,7 +167,7 @@ def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot
                                     ignored_names=_COMMON_FILE_DISCOVERY_IGNORES)
         if safe is None:
             raise _FindSnapshotStale('permission_or_path_changed')
-        if _discovery_identity(_discovery_nofollow_stat(safe)) != expected:
+        if _find_watch_identity(safe) != expected:
             raise _FindSnapshotStale('source_changed')
     if _find_snapshot_binding(tool, target, request) != snapshot.binding:
         raise _FindSnapshotStale('binding_changed')
@@ -362,7 +382,7 @@ class FindFilesTool(FileSystemTool):
         # 函数用途: 收集来源身份并拒绝已观察到的构建期间漂移。
         def observe(path: Path) -> None:
             nonlocal retained
-            identity = _discovery_identity(_discovery_nofollow_stat(path))
+            identity = _find_watch_identity(path)
             previous = watches.get(path)
             if previous is not None:
                 if previous != identity:

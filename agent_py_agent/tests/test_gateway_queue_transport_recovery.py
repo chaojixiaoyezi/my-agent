@@ -110,6 +110,9 @@ def transport_window(tmp_path, monkeypatch, window):
             yield c
         return
     with recovery_case(tmp_path, monkeypatch) as original:
+        row = read_json_file(original.claim.path)
+        row["lease_process_identity"]["pid"] = 999999999
+        write_json_file_atomic(original.claim.path, row)
         pending = original.gate.paths.inbox / original.claim.path.name
         with monkeypatch.context() as patch:
             crash_move(patch, original.claim.path, pending)
