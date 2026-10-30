@@ -295,3 +295,203 @@ def test_owner_index_tracking_is_bounded_without_forgetting_deletion(tmp_path, m
         paths[0].write_text(json.dumps(row(number)) + '\n')
         index.advance('telemetry', (paths[0].name,))
     assert len(index._revoked) <= 4
+
+
+# LLM: 每次重试都重建对象，预算只能读前缀一部分，必须共享受代次约束的真实证明进度。
+# 函数用途: 防止跨请求前缀验证永远停留在同一检查点。
+def test_r1_new_instances_resume_prefix_proof(tmp_path):
+    path = source(tmp_path, 30)
+    first = OwnerReadIndex(tmp_path).advance('telemetry', PARTS)
+    with path.open('a') as stream:
+        stream.write(json.dumps(row(30)) + '\n')
+    for _ in range(40):
+        index = OwnerReadIndex(tmp_path)
+        view = index.advance('telemetry', PARTS, max_bytes=1024)
+        if view['status'] == 'complete':
+            break
+    assert view['status'] == 'complete', view
+    assert view['generation'] == first['generation']
+    assert index.query(view)['total_count'] == 31
+
+
+# LLM: 清空进程缓存模拟冷重启，已核实完整分块的持久位置不可回退到零。
+# 函数用途: 检验磁盘分块证明续点可以逐拍追平。
+def test_r1_persistent_prefix_progress_survives_memo_loss(tmp_path):
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+
+    path = source(tmp_path, 50)
+    assert OwnerReadIndex(tmp_path).advance('telemetry', PARTS)['status'] == 'complete'
+    with path.open('a') as stream:
+        stream.write(json.dumps(row(50)) + '\n')
+    for _ in range(40):
+        module._PROCESS_MEMOS.clear()
+        index = OwnerReadIndex(tmp_path)
+        view = index.advance('telemetry', PARTS, max_bytes=4096)
+        if view['status'] == 'complete':
+            break
+    assert view['status'] == 'complete', view
+    assert index.query(view)['total_count'] == 51
+
+
+# LLM: 改写位置远离尾窗，必须重新证明旧前缀而不能凭长度增长宣称追加。
+# 函数用途: 保留大源前缀改写及同尺寸改写的世代失效保证。
+def test_r1_rewrite_outside_tail_window_is_not_append(tmp_path):
+    path = source(tmp_path, 500)
+    index = OwnerReadIndex(tmp_path)
+    old = index.advance('telemetry', PARTS)
+    path.write_bytes(path.read_bytes().replace(b'call-0', b'call-X', 1))
+    with path.open('a') as stream:
+        stream.write(json.dumps(row(500)) + '\n')
+    new = index.advance('telemetry', PARTS)
+    assert new['status'] == 'complete'
+    assert new['generation'] != old['generation']
+    assert index.query(old)['coverage']['status'] == 'unavailable'
+    assert index.query(new, filters={'call_id': 'call-X'})['total_count'] == 1
+    same_size = new
+    path.write_bytes(path.read_bytes().replace(b'call-X', b'call-Y', 1))
+    rewritten = index.advance('telemetry', PARTS)
+    assert rewritten['status'] == 'complete'
+    assert rewritten['generation'] != same_size['generation']
+
+
+# LLM: 坏字段类型及超范围整数必须收口为未知，不能漏出绑定异常或精确零。
+# 函数用途: 覆盖历史遥测和使用明细的投影准入。
+def test_r1_projection_rejects_bad_types_and_int64(tmp_path):
+    cases = [('telemetry', {**row(0), 'status': []}),
+             ('telemetry', {**row(0), 'output_bytes': 2**63}),
+             ('usage', {'event': [], 'skill_id': 's', 'at': '', 'date': '', 'source': ''}),
+             ('usage', {'event': 'adopted', 'skill_id': 's', 'at': '', 'date': '', 'source': '', 'chars': 2**63})]
+    for number, (domain, item) in enumerate(cases):
+        home = tmp_path / str(number)
+        home.mkdir()
+        (home / 'source.jsonl').write_text(json.dumps(item) + '\n')
+        index = OwnerReadIndex(home)
+        view = index.advance(domain, ('source.jsonl',))
+        assert view['status'] == 'unavailable'
+        assert view['reason'] in {'invalid_schema', 'integer_out_of_range'}
+        page = index.query(view)
+        assert page['total_count'] is None and page['coverage']['status'] == 'unavailable'
+
+
+# LLM: 真线程同时推进同源，允许明确冲突但最终结果不可丢行或伪造完整零。
+# 函数用途: 覆盖共享证明与检查点发布的并发安全。
+def test_r1_concurrent_advance_is_safe(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = source(tmp_path, 50)
+    assert OwnerReadIndex(tmp_path).advance('telemetry', PARTS)['status'] == 'complete'
+    with path.open('a') as stream:
+        stream.write(json.dumps(row(50)) + '\n')
+    # LLM: 每个工作线程都用独立实例，真实竞争同一个派生数据库。
+    # 函数用途: 执行一拍预算内推进。
+    def advance(_number):
+        return OwnerReadIndex(tmp_path).advance('telemetry', PARTS, max_bytes=1024)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(advance, range(64)))
+    assert all(item['status'] in {'complete', 'partial', 'unavailable'} for item in results)
+    index = OwnerReadIndex(tmp_path)
+    view = index.advance('telemetry', PARTS)
+    assert view['status'] == 'complete', view
+    assert index.query(view)['total_count'] == 51
+
+
+# LLM: 旁听实际SQL而不替换结果，验证续页真正使用seek且完整固定view只计数一次。
+# 函数用途: 比较游标和旧offset并检查绑定、总数缓存及查询计划形状。
+def test_r1_keyset_seek_and_count_cache(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    source(tmp_path, 9)
+    index = OwnerReadIndex(tmp_path)
+    view = index.advance('telemetry', PARTS)
+    original, statements = index._database, []
+    # LLM: 真实连接只加trace回调，SQL和事务保持原样。
+    # 函数用途: 收集本测试执行的分页语句。
+    @contextmanager
+    def traced(**kwargs):
+        with original(**kwargs) as connection:
+            connection.set_trace_callback(statements.append)
+            yield connection
+
+    monkeypatch.setattr(index, '_database', traced)
+    first = index.query(view, limit=3)
+    second = index.query(view, limit=3, after_cursor=first['next_cursor'])
+    third = index.query(view, limit=3, after_cursor=second['next_cursor'])
+    assert [r['call_id'] for r in first['rows'] + second['rows'] + third['rows']] == [f'call-{i}' for i in range(9)]
+    assert first['total_count'] == second['total_count'] == third['total_count'] == 9
+    assert third['next_cursor'] is None
+    assert sum('SELECT COUNT(*)' in sql for sql in statements) == 1
+    assert all(' OFFSET ' not in sql for sql in statements if 'SELECT r.payload' in sql)
+    assert index.query(view, limit=3, offset=3)['rows'] == second['rows']
+    mismatched = index.query(view, limit=3, filters={'status': 'ok'}, after_cursor=first['next_cursor'])
+    assert mismatched['coverage']['reason'] == 'invalid_cursor'
+    assert mismatched['total_count'] is None
+    changed = {**first['next_cursor'], 'keys': [0]}
+    assert index.query(view, after_cursor=changed)['coverage']['reason'] == 'invalid_cursor'
+
+
+# LLM: 每拍独立Python进程，没有可复用hasher或模块缓存，仅依赖SQLite完整分块续点。
+# 函数用途: 验证真实冷进程在有界预算下单调追平。
+def test_r1_cold_process_prefix_resume(tmp_path):
+    import subprocess
+    import sys
+
+    path = source(tmp_path, 30)
+    assert OwnerReadIndex(tmp_path).advance('telemetry', PARTS)['status'] == 'complete'
+    with path.open('a') as stream:
+        stream.write(json.dumps(row(30)) + '\n')
+    script = '''import json,sys
+from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
+i=OwnerReadIndex(sys.argv[1])
+v=i.advance('telemetry',('data','telemetry','tool_calls.jsonl'),max_bytes=4096)
+print(json.dumps({'status':v['status'],'reason':v['reason'],'through':v['through']}))
+'''
+    observations = []
+    for _ in range(12):
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(tmp_path)],
+                                check=True, capture_output=True, text=True, timeout=30)
+        observations.append(json.loads(result.stdout))
+        if observations[-1]['status'] == 'complete':
+            break
+    assert observations[-1]['status'] == 'complete', observations
+    assert len(observations) > 1
+
+
+# LLM: 审计时间并列时的位置必须升序，倒序时间不是把所有排序键一起反转。
+# 函数用途: 验证混合方向seek与旧offset在全部页上的等价性。
+def test_r1_audit_keyset_equal_timestamps(tmp_path):
+    records = [dict(entry_id=str(n), timestamp=float(n // 3), action='read', user_id='u',
+                    channel='c', target_type='t', target_id='x', status='ok') for n in range(9)]
+    (tmp_path / 'audit.jsonl').write_text(''.join(json.dumps(item) + '\n' for item in records))
+    index = OwnerReadIndex(tmp_path)
+    view = index.advance('audit', ('audit.jsonl',))
+    for descending in (False, True):
+        expected = index.query(view, limit=100, descending=descending)['rows']
+        actual, cursor = [], None
+        for _ in range(6):
+            page = index.query(view, limit=2, descending=descending, after_cursor=cursor)
+            assert page['coverage']['status'] == 'complete'
+            actual.extend(page['rows'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+        assert actual == expected
+
+
+# LLM: 坏历史数据既不能导致旧公开列表裸崩，也不能转换成成功空列表。
+# 函数用途: 检验读索引错误通过遥测兼容接口携带coverage。
+def test_r1_historical_overflow_is_structured_for_public_list(tmp_path):
+    import pytest
+
+    from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadUnavailable
+    from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+
+    path = source(tmp_path, 1)
+    path.write_text(json.dumps({**row(0), 'output_bytes': 2**63}) + '\n')
+    ledger = ToolTelemetryLedger(tmp_path)
+    page = ledger.query_tool_calls_page()
+    assert page['coverage']['reason'] == 'integer_out_of_range'
+    assert page['total_count'] is None
+    with pytest.raises(OwnerReadUnavailable) as caught:
+        ledger.query_tool_calls()
+    assert caught.value.coverage['reason'] == 'integer_out_of_range'

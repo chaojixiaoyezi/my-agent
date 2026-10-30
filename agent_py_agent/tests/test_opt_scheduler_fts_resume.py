@@ -438,3 +438,221 @@ def test_fts_revision_large_document_full_and_automatic_resume(tmp_path, monkeyp
     assert completed['job_id'] == before['job_id'] and completed['phase'] == 'complete'
     assert completed['copied'] == 3 and not completed_store._fts_needs_rebuild
     assert _fts_revision_match(completed_store, 'deepbudgetneedle') == {'large'}
+
+
+# LLM: SQL上界固定但首拍必须无下界；仅改真实records的rowid，不向影子手工补数据或用LIKE兜底。
+# 函数用途: 用每拍一行与实际MATCH覆盖负rowid、零和正整数的完整复制及恢复身份。
+def test_fts_r1_first_copy_has_no_lower_bound(tmp_path, monkeypatch):
+    store = _fts_revision_store(tmp_path, count=3)
+    with store._connection() as conn:
+        for index, rid in enumerate((-5, 0, 1)):
+            conn.execute('UPDATE records SET rowid=? WHERE id=?', (rid, f'revision-{index}'))
+        conn.commit()
+    original = store._prepare_fts_rebuild
+    cursors = []
+
+    # LLM: 观察原准备快照，不修改游标或行集合；None只能表示尚未开始，0是合法已提交续点。
+    # 函数用途: 收集首拍及后续拍传入的持久游标和真实选中rowid。
+    def prepare():
+        snapshot = original()
+        if snapshot.mode == 'copy':
+            cursors.append((snapshot.job['cursor'], snapshot.selected))
+        return snapshot
+
+    monkeypatch.setattr(store, '_prepare_fts_rebuild', prepare)
+    job_id = None
+    for expected_rid in (-5, 0, 1):
+        report = store.rebuild_fts_step(max_rows=1, max_ms=1000)
+        job_id = job_id or report['job_id']
+        assert report['job_id'] == job_id and report['status'] == 'partial'
+        assert _fts_revision_job(store)['cursor'] == expected_rid
+    assert cursors == [(None, (-5,)), (-5, (0,)), (0, (1,))]
+    for _ in range(100):
+        report = store.rebuild_fts_step(max_rows=1, max_ms=1000)
+        assert report['job_id'] == job_id
+        if report['status'] == 'complete':
+            break
+    assert report['status'] == 'complete' and report['copied'] == 3
+    for index in range(3):
+        assert _fts_revision_match(store, f'oldneedle{index}') == {f'revision-{index}'}
+    with store._connection() as conn:
+        assert {tuple(row) for row in conn.execute('SELECT rowid,id FROM records_fts')} == {
+            (-5, 'revision-0'), (0, 'revision-1'), (1, 'revision-2')}
+
+
+# LLM: 实际状态机以delta表示基线完成、以map表示发表前；不能伪造不存在的ready_to_swap状态。
+# 函数用途: 只通过公开分批入口到达指定切换边界，失败时明确拒绝继续测试。
+def _fts_r1_reach_boundary(store, phase):
+    for _ in range(100):
+        store.rebuild_fts_step(max_rows=1, max_ms=1000)
+        job = _fts_revision_job(store)
+        if job['phase'] == phase:
+            return job
+        assert job['phase'] != 'complete', 'crossed requested FTS boundary'
+    raise AssertionError(f'did not reach {phase}')
+
+
+# LLM: 正式writer与records触发器产生持久delta；覆盖插入、更新、删除，不手工构造队列或替换数据库结果。
+# 函数用途: 在基线末拍或发表前制造真实业务变化，验证有界排队、同任务恢复及最终MATCH。
+@pytest.mark.parametrize('phase', ['delta', 'map'])
+@pytest.mark.parametrize('change', ['insert', 'update', 'delete'])
+def test_fts_r1_boundary_deltas_survive_until_applied(tmp_path, phase, change):
+    store = _fts_revision_store(tmp_path, count=3)
+    before = _fts_r1_reach_boundary(store, phase)
+    if change == 'delete':
+        assert store.delete_record('revision-0')
+    else:
+        identity = 'inserted' if change == 'insert' else 'revision-0'
+        source = 'new' if change == 'insert' else '0'
+        store.upsert_record(source_type='memory', source_id=source, record_id=identity,
+                            title='changed', content='boundarynewneedle changed body')
+    with store._connection() as conn:
+        queued = [tuple(row) for row in conn.execute('SELECT * FROM maintenance_fts_delta ORDER BY seq')]
+    assert queued
+    report = store.rebuild_fts_step(max_rows=1, max_ms=1000)
+    assert report['job_id'] == before['job_id'] and report['status'] == 'partial'
+    with store._connection() as conn:
+        remaining = [tuple(row) for row in conn.execute('SELECT * FROM maintenance_fts_delta ORDER BY seq')]
+        assert remaining == (queued if phase == 'map' else queued[1:])
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_shadow'").fetchone()
+        assert conn.execute("SELECT value FROM metadata WHERE key='records_fts_rebuild_pending'").fetchone()[0] == 'true'
+    reopened = LocalStore(store.db_path)
+    completed = _fts_revision_job(reopened)
+    assert completed['job_id'] == before['job_id'] and completed['phase'] == 'complete'
+    assert completed['copied'] == (2 if change == 'delete' else 4 if change == 'insert' else 3)
+    if change == 'delete':
+        assert not _fts_revision_match(reopened, 'oldneedle0')
+    else:
+        assert _fts_revision_match(reopened, 'boundarynewneedle') == {identity}
+        assert _fts_revision_match(reopened, 'oldneedle0') == ({'revision-0'} if change == 'insert' else set())
+    assert _fts_revision_match(reopened, 'oldneedle1') == {'revision-1'}
+    with reopened._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM maintenance_fts_delta').fetchone()[0] == 0
+
+
+# LLM: 字节拒绝发生在正文水合前，队列不清且active不换；较大预算重试仍必须消费同一持久任务。
+# 函数用途: 验证发表边界出现大增量时不能用清空delta或忽略预算来宣布完成。
+def test_fts_r1_delta_byte_budget_retains_queue_and_active(tmp_path):
+    store = _fts_revision_store(tmp_path, count=3)
+    before = _fts_r1_reach_boundary(store, 'map')
+    store.upsert_record(source_type='memory', source_id='0', record_id='revision-0',
+                        title='large change', content='budgetdeltaneedle ' * 4096)
+    store.rebuild_fts_step(max_rows=1, max_ms=1000)
+    with store._connection() as conn:
+        queue = [tuple(row) for row in conn.execute('SELECT * FROM maintenance_fts_delta ORDER BY seq')]
+        active = [tuple(row) for row in conn.execute('SELECT * FROM records_fts ORDER BY rowid')]
+    job = _fts_revision_job(store)
+    assert job['phase'] == 'delta' and queue
+    with pytest.raises(maintenance._FtsByteBudget) as caught:
+        store.rebuild_fts_step(max_rows=1, max_bytes=1024, max_ms=1000)
+    assert caught.value.stage == 'body' and caught.value.required_bytes > 1024
+    with store._connection() as conn:
+        assert [tuple(row) for row in conn.execute('SELECT * FROM maintenance_fts_delta ORDER BY seq')] == queue
+        assert [tuple(row) for row in conn.execute('SELECT * FROM records_fts ORDER BY rowid')] == active
+    assert _fts_revision_job(store) == job
+    reopened = LocalStore(store.db_path)
+    assert _fts_revision_job(reopened)['job_id'] == before['job_id']
+    assert _fts_revision_job(reopened)['phase'] == 'complete'
+    assert _fts_revision_match(reopened, 'budgetdeltaneedle') == {'revision-0'}
+
+
+# LLM: 准备后真实writer改变epoch必须保留原CAS失败，绝不能为自动排delta放宽旧快照验证。
+# 函数用途: 在最终map准备与BEGIN之间写入，验证旧快照不发表、delta保留且同入口重试恢复。
+def test_fts_r1_write_after_final_prepare_preserves_cas_and_delta(tmp_path, monkeypatch):
+    store = _fts_revision_store(tmp_path, count=3)
+    before = _fts_r1_reach_boundary(store, 'map')
+    original = store._prepare_fts_rebuild
+    injected = []
+
+    # LLM: 只在实际最终批次后注入一次正式写入，返回原始快照让真实CAS判断变化。
+    # 函数用途: 精确制造门外准备后、门内验证前的业务竞争。
+    def prepare():
+        snapshot = original()
+        if snapshot.mode == 'map' and snapshot.finished and not injected:
+            store.upsert_record(source_type='memory', source_id='0', record_id='revision-0',
+                                title='concurrent', content='finalcasneedle concurrent body')
+            injected.append(True)
+        return snapshot
+
+    monkeypatch.setattr(store, '_prepare_fts_rebuild', prepare)
+    for _ in range(100):
+        try:
+            report = store.rebuild_fts_step(max_rows=1, max_ms=1000)
+        except BlockingIOError as exc:
+            assert str(exc) == 'local_store_rebuild_snapshot_changed'
+            break
+        assert report['status'] != 'complete'
+    else:
+        raise AssertionError('final snapshot CAS did not reject concurrent write')
+    assert injected == [True]
+    with store._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM maintenance_fts_delta').fetchone()[0] > 0
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_shadow'").fetchone()
+    assert _fts_revision_job(store)['phase'] == 'map'
+    assert store.rebuild_fts() == 3
+    assert _fts_revision_job(store)['job_id'] == before['job_id']
+    assert _fts_revision_match(store, 'finalcasneedle') == {'revision-0'}
+
+
+# LLM: 真实最终发表叶必须处于BEGIN IMMEDIATE内，另一连接不能插入窗口写；观测不替代原发表或故障注入。
+# 函数用途: 在最终换名入口同时核对事务、空delta和真实SQLite写锁。
+def test_fts_r1_publish_checks_delta_under_immediate_transaction(tmp_path, monkeypatch):
+    store = _fts_revision_store(tmp_path, count=3)
+    original = maintenance._fts_publish
+    observed = []
+
+    # LLM: 所有真实DDL、事件和完成标志仍由原叶执行；第二连接只尝试写锁并回滚，不改业务数据。
+    # 函数用途: 旁听最终发表的准确观察点，不从启动或SQL日志推断原子性。
+    def publish(current, conn, snapshot):
+        assert current is store and conn.in_transaction
+        assert conn.execute('SELECT COUNT(*) FROM maintenance_fts_delta').fetchone()[0] == 0
+        other = sqlite3.connect(store.db_path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                other.execute('BEGIN IMMEDIATE')
+        finally:
+            other.rollback()
+            other.close()
+        observed.append(True)
+        return original(current, conn, snapshot)
+
+    monkeypatch.setattr(maintenance, '_fts_publish', publish)
+    assert store.rebuild_fts() == 3
+    assert observed == [True]
+
+
+# LLM: 只让原准备器的协作deadline过期，不伪造selected或SQL结果；时间耗尽不能确认任何尚未应用的delta。
+# 函数用途: 验证发表前回退后遇到空时间预算时不清队列、不换表且可通过原入口重试。
+def test_fts_r1_expired_delta_budget_keeps_persistent_progress(tmp_path, monkeypatch):
+    store = _fts_revision_store(tmp_path, count=3)
+    before = _fts_r1_reach_boundary(store, 'map')
+    store.upsert_record(source_type='memory', source_id='0', record_id='revision-0',
+                        title='late', content='timedeltaneedle changed body')
+    store.rebuild_fts_step(max_rows=1, max_ms=1000)
+    original = store._prepare_fts_rebuild
+    job = _fts_revision_job(store)
+    with store._connection() as conn:
+        queue = [tuple(row) for row in conn.execute('SELECT * FROM maintenance_fts_delta ORDER BY seq')]
+    assert job['phase'] == 'delta' and queue
+
+    # LLM: 仍执行原准备与预算判据；ContextVar修改仅活于一次测试调用栈并在finally恢复。
+    # 函数用途: 为真实delta准备制造确定的协作时间耗尽，而不依赖机器速度。
+    def expired_prepare():
+        rows, size, _deadline = maintenance._FTS_BATCH_LIMITS.get()
+        token = maintenance._FTS_BATCH_LIMITS.set((rows, size, maintenance.time.monotonic() - 1))
+        try:
+            return original()
+        finally:
+            maintenance._FTS_BATCH_LIMITS.reset(token)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, '_prepare_fts_rebuild', expired_prepare)
+        result = store.rebuild_fts_step(max_rows=1, max_ms=1000)
+    assert result['status'] == 'partial' and not result['progressed']
+    assert _fts_revision_job(store) == job
+    with store._connection() as conn:
+        assert [tuple(row) for row in conn.execute('SELECT * FROM maintenance_fts_delta ORDER BY seq')] == queue
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_shadow'").fetchone()
+    assert store.rebuild_fts() == 3
+    assert _fts_revision_job(store)['job_id'] == before['job_id']
+    assert _fts_revision_match(store, 'timedeltaneedle') == {'revision-0'}

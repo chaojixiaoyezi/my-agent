@@ -1,6 +1,6 @@
 # LLM: v3候选在原owner账本追加，thread head/CAS仍是唯一提交权威；scope/base/精确覆盖与摘要一起封印，
 # v1/v2仅通过原版本合同读取。局部摘要不能因在同一提交链就扩大适用范围，孤立候选不可用于隐藏来源。
-# 模块用途: 保存双来源恢复点并由原线程CAS确认；读取按同次行地址逐行校验，旧摘要无需全驻留。
+# 模块用途: 保存双来源恢复点并由原线程CAS确认；候选写前按读取端物理行限额准入，旧摘要无需全驻留。
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import append_private_text
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
 from .message_replay import message_rows_iterator
@@ -134,16 +134,35 @@ def _checkpoint_payload(agent, request) -> dict[str, object]:
     }
 
 
-# LLM: 唯一追加路径先落完整候选，head仍由原CAS发布；写失败不生成提交权，orphan不可见。
-# 函数用途: 将内容寻址的候选写入原owner检查点账本，不更新线程。
+# LLM: 候选超限是可诊断的写前拒绝，不是已提交账本损坏；字节数包含UTF8和物理LF，不透露候选正文。
+# 类用途: 为所有检查点writer提供稳定错误码、实测字节数和同读取端限额。
+class CompactCheckpointBudgetError(ValueError):
+    code = 'COMPACT_CHECKPOINT_RECORD_TOO_LARGE'
+
+    # LLM: 错误只保存数字边界；调用方能区分预算拒绝与I/O失败，旧head不受影响。
+    # 函数用途: 构造结构化的候选准入错误。
+    def __init__(self, row_bytes: int, max_row_bytes: int):
+        self.row_bytes = row_bytes
+        self.max_row_bytes = max_row_bytes
+        super().__init__(f'{self.code}: checkpoint physical row is {row_bytes} bytes; limit is {max_row_bytes}')
+
+
+# LLM: 唯一追加路径按原JSON格式一次序列化并先验UTF8+LF字节；超限不创建目录/锁/文件，head仍由原CAS发布。
+# 函数用途: 将同读取端限额内的内容寻址候选写入原owner账本，不更新线程或污染旧head。
 def _append_checkpoint(agent, row: dict[str, object]) -> str:
     home = getattr(agent, "home_paths", None)
     raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
     if not raw_root:
         raise OSError("owner compact directory is unavailable")
     row["checkpoint_id"] = scoped_compact_checkpoint_id(row)
+    from .compact_checkpoint_scan import _CHECKPOINT_ROW_MAX_BYTES
+
+    content = json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n'
+    row_bytes = len(content.encode('utf-8'))
+    if row_bytes > _CHECKPOINT_ROW_MAX_BYTES:
+        raise CompactCheckpointBudgetError(row_bytes, _CHECKPOINT_ROW_MAX_BYTES)
     # 私有追加：0600/0700，存量宽权限 checkpoint 账本下次写入即收紧；内容逐字节不变。
-    append_private_jsonl_records(Path(raw_root) / "conversations" / f"{row['thread_id']}.jsonl", [row], sort_keys=True)
+    append_private_text(Path(raw_root) / "conversations" / f"{row['thread_id']}.jsonl", content)
     return row["checkpoint_id"]
 
 
@@ -286,6 +305,7 @@ def committed_live_tool_compact_source_refs(agent: SimpleAgent, thread: Conversa
 
 
 __all__ = [
+    "CompactCheckpointBudgetError",
     "CompactCheckpointRequest",
     "LiveToolCompactCheckpointRequest",
     "scoped_compact_checkpoint_id",

@@ -1,4 +1,4 @@
-# LLM: 文件发现只准入同策略候选；默认忽略不扩大，原生后端不接收未过滤目录。
+# LLM: 文件发现只准入同策略候选；真实Registry的逐请求复制不得撤销等值权限下的游标，默认忽略不扩大。
 # 模块用途: 验证文件工具读写、发现范围、匹配与上下文行为。
 """LLM: tests for filesystem tools — write boundary, symlink, write/append, replace, search, params.
 
@@ -37,6 +37,50 @@ from .backends import make_tool_registry
 
 def _execute(registry, tool_name, arguments, **kwargs):
     return execute_registry_test_call(registry, tool_name, arguments, **kwargs)
+
+
+# LLM: 使用完整Registry入口与真实请求级复制；保留每次handler避免地址偶然复用，不用同一实例续页代替集成证据。
+# 函数用途: 验证等值新权限对象的跨请求快照续页能完整无漏重交付。
+def test_find_snapshot_survives_registry_request_local_policy_copies(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import registry_invoke
+
+    for index in range(5):
+        (tmp_path / f'{index}.py').write_text('sample')
+    registry = make_tool_registry(tmp_path)
+    original = registry_invoke._request_local_tool_for_invocation
+    handlers = []
+
+    # LLM: 原样调用生产复制入口并持有观察结果，不修改策略、返回值、缓存或游标。
+    # 函数用途: 证明每一页确实经过新的请求级handler和等值权限实例。
+    def observed(*args, **kwargs):
+        scoped = original(*args, **kwargs)
+        if kwargs['request'].tool_name == 'find_files':
+            handlers.append(scoped)
+        return scoped
+
+    monkeypatch.setattr(registry_invoke, '_request_local_tool_for_invocation', observed)
+    params = {'pattern': '*.py', 'snapshot': True, 'limit': 2}
+    first = _execute(registry, 'find_files', params, allowed_tools=['find_files'], call_id='find-page-1')
+    assert first.ok, first.output
+    snapshot = first.metadata['handler_details']['snapshot']
+    assert snapshot['next_cursor']
+    second = _execute(registry, 'find_files', {**params, 'cursor': snapshot['next_cursor']},
+                      allowed_tools=['find_files'], call_id='find-page-2')
+    assert second.ok, second.output
+    second_snapshot = second.metadata['handler_details']['snapshot']
+    assert second_snapshot['snapshot_id'] == snapshot['snapshot_id'] and second_snapshot['next_cursor']
+    third = _execute(registry, 'find_files', {**params, 'cursor': second_snapshot['next_cursor']},
+                     allowed_tools=['find_files'], call_id='find-page-3')
+    assert third.ok, third.output
+    assert third.metadata['handler_details']['snapshot']['snapshot_id'] == snapshot['snapshot_id']
+    assert third.metadata['handler_details']['snapshot']['next_cursor'] == ''
+    assert len(handlers) == 3
+    assert len({id(item) for item in handlers}) == 3
+    assert len({id(item.path_access_policy) for item in handlers}) == 3
+    assert all(item.path_access_policy == handlers[0].path_access_policy for item in handlers)
+    rows = [line for result in (first, second, third) for line in result.output.splitlines()
+            if line.endswith('.py')]
+    assert rows == ['0.py', '1.py', '2.py', '3.py', '4.py']
 
 
 def _write_boundary_test_registry(workspace: Path) -> tuple:

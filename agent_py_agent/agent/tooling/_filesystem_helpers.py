@@ -1,4 +1,4 @@
-# LLM: 文件参数与内部引用共用原owner/path边界；发现候选在目录下降前剪枝，指纹只能否定变化而非制造强快照。
+# LLM: 文件参数与内部引用共用原owner/path边界；发现先剪枝，glob按路径段解释，指纹不能制造强快照。
 # 模块用途: 校验参数、定位可读产物及有界枚举安全文件，不从文档、缓存或忽略参数推导权限。
 from __future__ import annotations
 
@@ -263,14 +263,22 @@ def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_
         scan_state.limit_reason = scan_state.limit_reason or 'filesystem_error'
 
 
-# LLM: 两后端不再各自解释glob；前导双星允许零层目录，匹配始终区分大小写。
-# 函数用途: 对basename和工具显示路径执行同一明确的glob语义。
+# LLM: 两后端共用按段glob；整段双星可在任意位置消费零或多段，普通星号不跨目录，始终区分大小写。
+# 函数用途: 用有界位置集合匹配路径，避免多处双星的指数变体展开或递归回溯。
 def _discovery_matches_glob(display_path: str, basename: str, pattern: str) -> bool:
-    patterns = [pattern]
-    while patterns[-1].startswith('**/'):
-        patterns.append(patterns[-1][3:])
-    return any(fnmatch.fnmatchcase(display_path, item) or fnmatch.fnmatchcase(basename, item)
-               for item in patterns)
+    if '/' not in pattern:
+        return fnmatch.fnmatchcase(basename, pattern)
+    parts = display_path.split('/')
+    positions = {0}
+    for segment in pattern.split('/'):
+        if not positions:
+            return False
+        if segment == '**':
+            positions = set(range(min(positions), len(parts) + 1))
+        else:
+            positions = {index + 1 for index in positions if index < len(parts)
+                         and fnmatch.fnmatchcase(parts[index], segment)}
+    return len(parts) in positions
 
 
 # LLM: 原生程序不得自行遍历未经策略准入的目录；argv保留有帽，触顶是partial而非完整无匹配。

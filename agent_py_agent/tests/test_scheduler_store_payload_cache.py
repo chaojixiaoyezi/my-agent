@@ -376,3 +376,55 @@ def test_cold_payload_singleflight_recovers_after_parse_failure(tmp_path, monkey
         repo._load_store_unlocked()
     assert repo._load_store_unlocked()['jobs'] == {}
     assert len(attempts) == 2
+
+
+# LLM: 当前legacy合同在due_index发现旧owner的store.json后把真实root交给仓库，不存在jobs.json自动迁移方法；不伪造第二套解析器。
+# 函数用途: 经真实旧目录发现与首次公开只读查询，验证缓存可用或拒绝缓存时均读取原store且不返回假空或新建第二份权威。
+@pytest.mark.parametrize('bucket,kind', [('users', 'user'), ('groups', 'group')])
+@pytest.mark.parametrize('entry', ['jobs', 'runs'])
+@pytest.mark.parametrize('cacheable', [True, False])
+def test_first_read_of_discovered_legacy_store_preserves_source(tmp_path, monkeypatch, bucket, kind, entry, cacheable):
+    from agent_py_agent.agent.scheduler.due_index import _discover_legacy_owner_ledgers
+
+    owners = tmp_path / 'owners'
+    root = owners / 'providers' / 'feishu' / bucket / 'legacy-owner' / 'data' / 'scheduler'
+    seed = module.SchedulerRepository(root, owner_provider='feishu', owner_kind=kind,
+                                      owner_id='legacy-owner')
+    job, repeated = seed.create_job(module.SchedulerJobCreateRequest(
+        name='legacy source job', prompt='read original source', thread_id='legacy-thread',
+        schedule={'kind': 'every', 'every_seconds': 600, 'anchor_at': 1000, 'timezone': 'UTC'},
+        now=900))
+    assert not repeated
+    run = seed.reserve_due_runs(now=1000)[0]
+    stamp = time.time_ns() - 5_000_000_000
+    os.utime(seed.store_path, ns=(stamp, stamp))
+    original_bytes = seed.store_path.read_bytes()
+    ledgers = _discover_legacy_owner_ledgers(owners)
+    assert len(ledgers) == 1
+    source = ledgers[0]
+    assert (source.provider, source.owner_kind, source.owner_id, source.path) == (
+        'feishu', kind, 'legacy-owner', seed.store_path)
+    reader = module.SchedulerRepository(source.path.parent, owner_provider=source.provider,
+                                        owner_kind=source.owner_kind, owner_id=source.owner_id)
+    if not cacheable:
+        monkeypatch.setattr(module, '_STORE_PAYLOAD_CACHE_MAX_BYTES', 0)
+    reads, parses = _observe(monkeypatch)
+    load = reader.list_jobs if entry == 'jobs' else reader.active_runs_by_job
+    first, errors = load()
+    assert not errors
+    if entry == 'jobs':
+        assert [row['job_id'] for row in first] == [job['job_id']]
+        first[0]['name'] = 'caller mutation'
+    else:
+        assert first[job['job_id']]['run_id'] == run['run_id']
+        first[job['job_id']]['status'] = 'caller mutation'
+    second, errors = load()
+    assert not errors
+    if entry == 'jobs':
+        assert second[0]['name'] == 'legacy source job'
+    else:
+        assert second[job['job_id']]['status'] == 'queued'
+    assert len(reads) == len(parses) == (1 if cacheable else 2)
+    assert set(reads) == {source.path}
+    assert source.path.read_bytes() == original_bytes
+    assert list(owners.rglob('store.json')) == [source.path]

@@ -692,8 +692,7 @@ class _SchedulerRunOperations:
         run, _error = self._parse_run(store["runs"].get(str(run_id or "")))
         return deepcopy(run) if run is not None else None
 
-    # LLM: Schedule list/get surfaces must project live queued/claimed/running/waiting facts from
-    # the same owner ledger; callers must not infer activity from an empty last_run_at.
+    # LLM: 列表和详情只从同一owner权威账本投影排队、领取、运行及等待事实；不能因last_run_at为空推断没有活动运行。
     # 函数用途: 一次读取当前 owner 的全部在途定时执行，供状态展示区分排队、执行与等待后续事件。
     def active_runs_by_job(self) -> tuple[dict[str, dict[str, object]], list[str]]:
         store = self._store_snapshot(readonly=True)

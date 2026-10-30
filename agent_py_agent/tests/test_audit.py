@@ -725,5 +725,172 @@ def test_retention_serializes_with_logger(tmp_path, monkeypatch):
     assert json.loads(target.read_bytes().split(b'\n')[-2])['entry_id'] == appended[0].entry_id
 
 
+# LLM: 使用与审计相同的owner读投影核验旧明细起点；只改变临时样本，不反写历史来补证明。
+# 函数用途: 缺失summary时，无序号legacy残留必须披露生命周期及明细起点未知。
+@pytest.mark.parametrize('mixed', [False, True])
+def test_r1_usage_legacy_without_summary_cannot_prove_start(tmp_path, mixed):
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    for _ in range(2):
+        usage.record_skill_usage_event(store, event='manual_get', skill_id='builtin:legacy', source='test')
+    path = store.directory / 'usage_ledger.jsonl'
+    retained = json.loads(path.read_text().splitlines()[-1])
+    retained.pop('sequence')
+    rows = [retained]
+    if mixed:
+        rows.append({**retained, 'sequence': 2})
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    (store.directory / 'usage_summary.json').unlink()
+    original = path.read_bytes()
+    report = usage.load_skill_usage_summary_report(store)
+    assert report['coverage']['status'] in {'partial', 'unknown', 'unavailable'}
+    assert report['coverage']['reason'] == 'legacy_history_start_unknown'
+    assert report['coverage']['detail_history']['status'] in {'partial', 'unknown'}
+    assert report['summary'] is None
+    assert path.read_bytes() == original
+    assert not (store.directory / 'usage_summary.json').exists()
+
+
+# LLM: 真空源的完整性不应被legacy拒绝规则一刀切破坏，读口不得创建规范事实。
+# 函数用途: 保护无summary且无明细的首次初始化仍为完整零。
+def test_r1_usage_real_first_empty_is_complete(tmp_path):
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+
+    report = usage.load_skill_usage_summary_report(tmp_path)
+    assert report['coverage']['status'] == 'complete'
+    assert report['coverage']['detail_history']['status'] == 'complete'
+    assert report['summary']['last_sequence'] == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+# LLM: 非哈希类型必须先验型再做集合判断，不能把TypeError作为领域输入协议。
+# 函数用途: 验证使用事件归一化对列表类型给出稳定ValueError。
+@pytest.mark.parametrize('field', ['event', 'kind'])
+def test_r1_usage_normalizer_rejects_non_string_identity(tmp_path, field):
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+
+    values = dict(event='manual_get', kind='skill', skill_id='builtin:bad', source='test')
+    values[field] = []
+    error = None
+    try:
+        usage._usage_row(tmp_path, values)
+    except Exception as caught:
+        error = caught
+    assert isinstance(error, ValueError), type(error).__name__
+
+
+# LLM: SQLite投影使用有符号64位整数，附带writer应写前拒绝不可投影的计数而非污染后续查询。
+# 函数用途: 验证超大chars不落盘，边界内计数仍完整保留。
+@pytest.mark.parametrize('chars', [2**63 - 1, 2**63])
+def test_r1_usage_chars_int64_write_boundary(tmp_path, chars):
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+
+    usage.record_skill_usage_event(tmp_path, event='manual_get', skill_id='builtin:int', source='test', chars=chars)
+    ledger = tmp_path / 'data' / 'skill_learning' / 'usage_ledger.jsonl'
+    if chars == 2**63:
+        assert not ledger.exists()
+    else:
+        assert json.loads(ledger.read_text())['chars'] == chars
+        assert usage.load_skill_usage_summary_report(tmp_path)['coverage']['status'] == 'complete'
+
+
+# LLM: 清理必须从显式owner根逐段拒绝符号链接，外部目录中的账本及锁文件都不能被触碰。
+# 函数用途: 复现data或最终审计目录为链接时，清理不得越根改写或创建旁锁。
+@pytest.mark.parametrize('linked_component', ['data', 'audit'])
+def test_r1_retention_refuses_linked_ancestor_without_foreign_writes(tmp_path, linked_component):
+    home, foreign = tmp_path / 'home', tmp_path / 'foreign'
+    home.mkdir()
+    foreign.mkdir()
+    if linked_component == 'data':
+        (foreign / 'audit').mkdir()
+        (home / 'data').symlink_to(foreign, target_is_directory=True)
+        target = foreign / 'audit' / 'audit.jsonl'
+    else:
+        (home / 'data').mkdir()
+        (home / 'data' / 'audit').symlink_to(foreign, target_is_directory=True)
+        target = foreign / 'audit.jsonl'
+    original = b'{"timestamp":0}\n'
+    target.write_bytes(original)
+    query = AuditQuery(SimpleNamespace(audit_log_path='data/audit'), root=home)
+    error = None
+    try:
+        query.cleanup_old_entries(days=1)
+    except OSError as caught:
+        error = caught
+    assert error is not None, 'cleanup followed an audit ancestor symlink'
+    assert getattr(error, 'reason_code', None) == 'unsafe_audit_path'
+    assert target.read_bytes() == original
+    assert sorted(path.name for path in target.parent.iterdir()) == ['audit.jsonl']
+
+
+# LLM: 固定view的seek页必须与原offset兼容，append后的新事实不应混入旧游标的范围。
+# 函数用途: 对照时间并列审计记录的keyset和offset两种分页。
+def test_r1_audit_keyset_matches_offset_on_fixed_view(tmp_path):
+    path = tmp_path / 'audit.jsonl'
+    base = dict(timestamp=100, action='QUERY', user_id='alice', channel='chat',
+                target_type='task', target_id='t', status='success', details={})
+    path.write_text(''.join(json.dumps({**base, 'entry_id': str(index)}) + '\n' for index in range(7)))
+    query = AuditQuery(SimpleNamespace(audit_log_path=str(path)), root=tmp_path)
+    first = query.query_report(limit=2)
+    assert first.get('next_cursor') is not None
+    with path.open('a') as stream:
+        stream.write(json.dumps({**base, 'entry_id': 'later'}) + '\n')
+    found = [entry.entry_id for entry in first['entries']]
+    cursor = first['next_cursor']
+    while cursor is not None:
+        page = query.query_report(limit=2, after_cursor=cursor, view=first['view'])
+        assert page['coverage']['status'] == 'complete'
+        assert page['total_count'] == 7
+        found.extend(entry.entry_id for entry in page['entries'])
+        cursor = page['next_cursor']
+    offset_rows = []
+    for offset in range(0, 7, 2):
+        page = query.query_report(limit=2, offset=offset, view=first['view'])
+        offset_rows.extend(entry.entry_id for entry in page['entries'])
+    assert found == offset_rows == [str(index) for index in range(7)]
+
+
+# LLM: 无summary的legacy不能经一次正常追加被洗成已证明的lifetime；没有修复授权就保留未知原事实。
+# 函数用途: 防止writer为残余明细补号并生成虚假的完整summary。
+def test_r1_usage_writer_does_not_heal_unknown_legacy_start(tmp_path):
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    usage.record_skill_usage_event(store, event='manual_get', skill_id='legacy', source='test')
+    ledger = store.directory / 'usage_ledger.jsonl'
+    summary = ledger.with_name('usage_summary.json')
+    row = json.loads(ledger.read_text())
+    row.pop('sequence')
+    ledger.write_text(json.dumps(row) + '\n')
+    summary.unlink()
+    before = ledger.read_bytes()
+    usage.record_skill_usage_event(store, event='manual_get', skill_id='next', source='test')
+    assert ledger.read_bytes() == before
+    assert not summary.exists()
+
+
+# LLM: 计划后将原父目录移走并以软链指回同inode，单凭叶generation无法证明安全路径仍在原根下。
+# 函数用途: 真实复现plan/apply之间的祖先替换，拒绝改写外来目录或创建锁和临时文件。
+def test_r1_retention_plan_parent_replacement_is_rejected(tmp_path):
+    from agent_py_agent.agent.audit import query as module
+
+    owner = tmp_path / 'owner'
+    path = owner / 'data' / 'audit' / 'audit.jsonl'
+    path.parent.mkdir(parents=True)
+    original = b'{"timestamp":0}\n'
+    path.write_bytes(original)
+    plan = module._plan_audit_retention(path, cutoff_time=time.time())
+    foreign = tmp_path / 'foreign'
+    path.parent.rename(foreign)
+    path.parent.symlink_to(foreign, target_is_directory=True)
+    with pytest.raises(OSError):
+        module._apply_audit_retention_unlocked(plan)
+    assert (foreign / path.name).read_bytes() == original
+    assert sorted(item.name for item in foreign.iterdir()) == ['audit.jsonl']
+
+
 if __name__ == "__main__":
     unittest.main()

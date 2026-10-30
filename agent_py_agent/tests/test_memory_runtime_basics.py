@@ -1,9 +1,12 @@
+# LLM: 运行真实记忆运行时入口验证建议及持久化边界；建议格式通过不代表canonical CLI路由已接线。
+# 模块用途: 覆盖基础记忆集成、上下文预算和只读compact建议行为。
 """Basic memory runtime integration tests.
 记忆运行时基础集成测试。"""
 
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
@@ -247,8 +250,9 @@ def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
     assert records[-1]["status"] == "done"
 
 
+# LLM: 真实save=False运行仅生成canonical建议，保留原确认/执行/落盘断言，不外推CLI可执行性。
+# 函数用途: 核对my-agent memory compact准确命令分段及无持久化边界。
 def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
-    """LLM: Tests save=False keeps compact read-only while saved runs auto-apply."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend.context_window_tokens = 20
 
@@ -258,7 +262,7 @@ def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
     assert result.memory_compact_status == "forced_compact"
     assert result.memory_compact_trigger_source == "preflight"
     assert result.memory_compact_commands
-    assert "memory-compact" in result.memory_compact_commands[0]
+    assert shlex.split(result.memory_compact_commands[0])[:3] == ["my-agent", "memory", "compact"]
     assert result.memory_compact_auto_status == "needs_user_confirmation"
     assert result.memory_compact_auto_next_action == "ask_user_before_apply"
     assert result.memory_compact_auto_tool_execution == "none"

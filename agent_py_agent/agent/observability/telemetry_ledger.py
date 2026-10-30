@@ -18,7 +18,7 @@ from agent_py_agent.agent.common.nofollow_fs import (
 )
 
 from ..common.log_redaction import redact_sensitive_value
-from ..local_storage.owner_read_index import OwnerReadIndex, require_complete
+from ..local_storage.owner_read_index import OwnerReadIndex, note_owner_append, require_complete
 from ..workflows.models import redact_bearer_values
 
 SCHEMA = "tool_call_telemetry.v1"
@@ -56,7 +56,9 @@ def _sensitive(key, value):
 # LLM: 非有限数和负数在持久化之前拒绝，不静默纠正遥测事实。
 # 函数用途: 校验非负数值。
 def _number(value):
-    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
+    if (type(value) not in (float, int) or value < 0
+            or (type(value) is float and not math.isfinite(value))
+            or (type(value) is int and value > 2**63 - 1)):
         raise ValueError("expected finite nonnegative number")
     return value
 
@@ -66,6 +68,22 @@ def _number(value):
 def _lock(home):
     ensure_private_dir(home / "data" / "telemetry", canonical_root=home)
     return locked_private_directory(home, relative_parts=PARTS, lock_name=".telemetry.lock")
+
+
+# LLM: 仅观察领域锁内no-follow打开的真实文件，不凭路径stat接受软链接或多链接来源。
+# 函数用途: 捕获可与读索引检查点精确衔接的追加边界。
+def _append_stamp(home):
+    try:
+        descriptor = open_readonly_file_beneath(home, (*PARTS, 'tool_calls.jsonl'))
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if info.st_nlink != 1:
+            return None
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    finally:
+        os.close(descriptor)
 
 
 # LLM: 禁止 NaN 持久化，字符串统一 UTF-8；不会自动脱敏非参数业务字段。
@@ -179,7 +197,7 @@ class ToolTelemetryLedger:
         if self._owner_id and item.owner_id not in ("", self._owner_id):
             raise ValueError("owner mismatch")
         item.owner_id = item.owner_id or self._owner_id
-        if item.status not in {"ok", "error", "denied", "timeout"}:
+        if not isinstance(item.status, str) or item.status not in {"ok", "error", "denied", "timeout"}:
             raise ValueError("invalid status")
         for value in (item.started_at, item.ended_at, item.duration_ms, item.output_bytes):
             _number(value)
@@ -191,7 +209,11 @@ class ToolTelemetryLedger:
         item.args_summary = _sanitize(item.args_summary)
         line = _encode(item.to_dict())
         with _lock(self._home):
+            before = _append_stamp(self._home)
             append_text_beneath(self._home, (*PARTS, "tool_calls.jsonl"), line)
+            after = _append_stamp(self._home)
+            if before is not None and after is not None and after[2] - before[2] == len(line.encode('utf-8')):
+                note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after)
         return item
 
     # LLM: 空字符串和None保持未指定口径，非空owner只匹配完全相同身份。
@@ -205,30 +227,32 @@ class ToolTelemetryLedger:
             result['owner_id'] = self._owner_id
         return result
 
-    # LLM: 显式view固定来源代次和through，续页不把新追加混入旧范围。
+    # LLM: 显式view固定来源代次和through；after_cursor绑定同一view及筛选，cursor保留旧偏移合同。
     # 函数用途: 查询带coverage的有限遥测页。
-    def query_tool_calls_page(self, *, limit=100, cursor=0, view=None, **filters):
+    def query_tool_calls_page(self, *, limit=100, cursor=0, view=None, after_cursor=None, **filters):
         selected = self._query_filters(filters)
         if view is None:
             view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
-        return {**self._read_index.query(view, filters=selected, limit=limit, offset=cursor), 'view': view}
+        return {**self._read_index.query(view, filters=selected, limit=limit, offset=cursor,
+                                         after_cursor=after_cursor), 'view': view}
 
     # LLM: 原cursor为过滤后偏移，大页拆成同一固定view的SQL页，未知不转成成功空值。
     # 函数用途: 保持旧list返回合同及明确分页校验。
     def query_tool_calls(self, *, limit=100, cursor=0, **filters):
         if type(limit) is not int or type(cursor) is not int or min(limit, cursor) < 0:
             raise ValueError('invalid pagination')
-        rows, view, remaining = [], None, limit
+        rows, view, remaining, after = [], None, limit, None
         while True:
             page = require_complete(self.query_tool_calls_page(
-                limit=min(remaining, 1000), cursor=cursor, view=view, **filters,
+                limit=min(remaining, 1000), cursor=cursor, view=view, after_cursor=after, **filters,
             ))
             rows.extend(page['rows'])
             view = page['view']
             count = len(page['rows'])
             remaining -= count
-            cursor += count
-            if remaining <= 0 or count == 0:
+            cursor = 0
+            after = page['next_cursor']
+            if remaining <= 0 or count == 0 or after is None:
                 return rows
 
     # LLM: owner过滤先于最后身份选择，其他owner同名调用不能遮蔽本owner。

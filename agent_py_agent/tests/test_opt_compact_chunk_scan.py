@@ -327,3 +327,108 @@ def test_summary_concurrent_first_export_publishes_one_object(monkeypatch):
         result = first.result(timeout=5)
     assert result is second and view.operation_evidence is second
     assert view.operation_evidence['items'] == [1, 2]
+
+
+# LLM: 尾部窗口必须按最近物理记录保留；重复ID更新地址和顺序，容量触顶不保留过时的早期窗口。
+# 函数用途: 独立约束行数与字节两个准入维度的last-wins索引。
+@pytest.mark.parametrize('budget', ['rows', 'bytes'])
+def test_full_offset_index_retains_latest_window(tmp_path, monkeypatch, budget):
+    monkeypatch.setattr(scan, '_CHECKPOINT_OFFSETS', OrderedDict())
+    monkeypatch.setattr(scan, '_CHECKPOINT_INDEX_MAX_ROWS', 2 if budget == 'rows' else 100)
+    if budget == 'bytes':
+        monkeypatch.setattr(scan, '_CHECKPOINT_INDEX_MAX_BYTES', 256 + 2 * (512 + 4))
+    path = tmp_path / 'tail.jsonl'
+    path.write_bytes(b''.join(json.dumps({'checkpoint_id': str(i)}).encode() + b'\n' for i in range(6))
+                     + b'{"checkpoint_id":"4","value":"last"}\n')
+    with path.open('rb', buffering=0) as handle:
+        index = scan._build_index(handle, path.stat().st_size)
+    assert tuple(index.offsets) == ('5', '4')
+    assert index.complete is False
+    with scan.checkpoint_row_lookup(path) as lookup:
+        assert lookup('4') == {'checkpoint_id': '4', 'value': 'last'}
+        assert lookup('0') == {'checkpoint_id': '0'}
+        assert lookup('missing') is None
+
+
+# LLM: 同时覆盖有序字典、dict子类及自定义Mapping；只测试现有公开外壳，不放宽未知对象的拒绝合同。
+# 函数用途: 验证冻结映射保留内容、公开解冻为普通dict且嵌套修改互相隔离。
+@pytest.mark.parametrize('mapping_kind', ['ordered', 'subclass', 'custom'])
+def test_summary_mapping_inputs_freeze_and_thaw_without_data_loss(mapping_kind):
+    from collections import UserDict
+    from copy import deepcopy
+
+    from agent_py_agent.agent.conversation import compact_summary_view as summaries
+    from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
+
+    # LLM: 使用真正dict子类而非替换冻结实现；继承原容器读写语义。
+    # 类用途: 覆盖type(value)精确比较遗漏的兼容输入。
+    class DictSubclass(dict):
+        pass
+
+    factory = {'ordered': OrderedDict, 'subclass': DictSubclass, 'custom': UserDict}[mapping_kind]
+    original = factory({'nested': factory({'items': [1, {'n': 2}]})})
+    view = summaries.CompactSummaryView(operation_evidence=original)
+    snapshot = object.__getattribute__(view, '_snapshot')
+    assert not _contains_mutable_summary(snapshot)
+    with pytest.raises(TypeError):
+        snapshot.values['operation_evidence']['nested']['extra'] = True
+    original['nested']['items'][1]['n'] = 99
+    applied = summaries.AppliedCompactContext('thread-mapping', THREAD_COMPACT_SCOPE, view)
+    copied = deepcopy(view)
+    assert type(view.operation_evidence) is dict
+    assert type(view.operation_evidence['nested']) is dict
+    assert view.operation_evidence == {'nested': {'items': [1, {'n': 2}]}}
+    view.operation_evidence['nested']['items'][1]['n'] = -1
+    assert applied.view.operation_evidence == copied.operation_evidence == {'nested': {'items': [1, {'n': 2}]}}
+
+
+# LLM: 真SQLite地址投影只保存本次固定文件范围；重复ID可能不在尾窗，仍须last-wins并逐行hash复核。
+# 函数用途: 核对批量回源只做一次、真实字节地址正确、同长修改拒绝及临时资源正常/异常均释放。
+@pytest.mark.parametrize('change', [False, True])
+def test_overflow_projection_last_wins_offsets_and_cleanup(tmp_path, monkeypatch, change):
+    import sqlite3
+
+    monkeypatch.setattr(scan, '_CHECKPOINT_OFFSETS', OrderedDict())
+    monkeypatch.setattr(scan, '_CHECKPOINT_INDEX_MAX_ROWS', 1)
+    path = tmp_path / 'overflow.jsonl'
+    old = json.dumps({'checkpoint_id': 'old', 'value': '初始'}, ensure_ascii=False).encode() + b'\r\n'
+    duplicate = json.dumps({'checkpoint_id': 'old', 'value': '最终'}, ensure_ascii=False).encode() + b'\r\n'
+    path.write_bytes(old + duplicate + b'{"checkpoint_id":"tail"}\n')
+    databases, directories = [], []
+    original_connect = scan.sqlite3.connect
+
+    # LLM: 保留真实SQLite连接，只旁听临时投影路径和生命周期，不伪造查询结果。
+    # 函数用途: 证明关闭上下文后连接已关闭且磁盘投影已删除。
+    def connected(database, *args, **kwargs):
+        result = original_connect(database, *args, **kwargs)
+        databases.append(result)
+        directories.append(Path(database).parent)
+        return result
+
+    monkeypatch.setattr(scan.sqlite3, 'connect', connected)
+    with scan.checkpoint_row_lookup(path) as lookup:
+        assert lookup('old') == {'checkpoint_id': 'old', 'value': '最终'}
+        assert lookup('missing') is None
+        assert lookup('old') == {'checkpoint_id': 'old', 'value': '最终'}
+        assert len(databases) == 1
+        if change:
+            with path.open('r+b') as handle:
+                handle.seek(len(old))
+                handle.write(duplicate.replace('最终'.encode(), '改动'.encode()))
+            with pytest.raises(OSError, match='source changed'):
+                lookup('old')
+    assert directories and all(not directory.exists() for directory in directories)
+    for database in databases:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            database.execute('SELECT 1')
+
+
+# LLM: 地址预算溢出不是跳过坏orphan的理由；即使head恰在尾窗也必须先验证整个固定账本。
+# 函数用途: 在极小索引预算下保留损坏候选的严格拒绝行为。
+def test_full_tail_index_does_not_hide_bad_orphan(tmp_path, monkeypatch):
+    monkeypatch.setattr(scan, '_CHECKPOINT_INDEX_MAX_ROWS', 1)
+    path = tmp_path / 'bad-orphan.jsonl'
+    path.write_bytes(b'{"checkpoint_id":"old"}\n{\n{"checkpoint_id":"head"}\n')
+    with pytest.raises(OSError, match='ledger is unreadable'):
+        with scan.checkpoint_row_lookup(path):
+            pass

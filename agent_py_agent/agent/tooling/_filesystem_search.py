@@ -1,5 +1,5 @@
 
-# LLM: 两后端只收命中；正文当前页按文件一次补上下文，预算和源变化必须进入查询覆盖证据。
+# LLM: 发现范围不完整不等于正文消费停止，已准入rg批次仍须交付命中；当前页按文件补上下文，预算和源变化进入覆盖证据。
 #   rg回收有界且kill后必须wait；stdout只由读线程finally关闭，取消回调不得跨线程关闭迭代流。
 # 模块用途: 提供工作区内文本搜索，统一参数说明、ripgrep 快速路径和 Python 后备扫描。
 from __future__ import annotations
@@ -118,14 +118,15 @@ class MalformedRgOutput(Exception):
     pass
 
 
-# LLM: 逐调用状态通过ContextVar隔离；预算和源变化观察不产生路径权限。
-# 类用途: 记录没有 rg 时本轮已扫描多少文件，以及是否触发安全上限。
+# LLM: 逐调用状态通过ContextVar隔离；limited仅披露覆盖，output_stopped才停止协议消费，预算及源变化不产生权限。
+# 类用途: 分别记录候选发现范围、正文消费停止及来源观察事实。
 @dataclass
 class SearchScanState:
     started_at: float
     candidates: int = 0
     limited: bool = False
     limit_reason: str = ""
+    output_stopped: bool = False
     backend: str = "rg"
     read_bytes: int = 0
     rg_stdout_bytes: int = 0
@@ -135,10 +136,11 @@ class SearchScanState:
     sources: dict[Path, tuple[int, ...]] = field(default_factory=dict)
     tool: Any = None
 
-    # LLM: 原因列表有帽；后续命中不能抹去已观察到的失败或变化。
-    # 函数用途: 记录本轮读取预算或来源不完整事实。
+    # LLM: 读取预算或来源失败须停止消费，候选发现仅直接设置limited；原因列表有帽且后续命中不能抹去失败。
+    # 函数用途: 记录正文消费停止，并将原因并入覆盖事实。
     def mark(self, reason: str, *, stale: bool = False) -> None:
         self.limited = True
+        self.output_stopped = True
         self.limit_reason = self.limit_reason or reason
         self.stale = self.stale or stale
         if reason not in self.issues and len(self.issues) < 32:
@@ -937,7 +939,7 @@ def _start_rg_process(
         return None
 
 
-# LLM: 取消原样抛出，普通读失败走原Python后备；所有退出均在读线程finally回收进程并关闭stdout。
+# LLM: 取消原样抛出，普通读失败走原Python后备；只有真实消费停止可接受提前退出，发现partial不能掩盖rg失败。
 # 函数用途: 收集rg命中并保证流和子进程收口，取消回调不碰读线程持有的stdout。
 def _rg_hits_from_process(
     tool: SearchTextTool,
@@ -960,13 +962,13 @@ def _rg_hits_from_process(
                 with contextlib.suppress(OSError):
                     process.stdout.close()
     state = _SEARCH_STATE.get()
-    if stopped_early or return_code == 1 or (state is not None and state.limited):
+    if stopped_early or return_code == 1 or (state is not None and state.output_stopped):
         return hits
     return hits if return_code == 0 else None
 
 
-# LLM: 坏 JSON 必须失败回原 Python 实查；不能把未解析 stdout 的零条当有效 no_matches。
-# 函数用途: 流式读取已声明 rg JSON 协议并保留分页上界。
+# LLM: 坏JSON回原Python实查；发现partial不终止begin/end消费，只有正文预算、源异常或页哨兵可以提前停止。
+# 函数用途: 消费已准入批次的rg命中，保持分页及输出预算而不丢掉候选前缀。
 def _read_rg_hits(
     tool: SearchTextTool,
     process: subprocess.Popen[str],
@@ -986,7 +988,7 @@ def _read_rg_hits(
             raise
         if hit is None:
             state = _SEARCH_STATE.get()
-            if state is not None and state.limited:
+            if state is not None and state.output_stopped:
                 _stop_process(process)
                 return hits, True
             continue
@@ -997,7 +999,7 @@ def _read_rg_hits(
             output_mode=request.output_mode,
         )):
             state = _SEARCH_STATE.get()
-            if state is not None and state.limited:
+            if state is not None and state.output_stopped:
                 _stop_process(process)
                 return hits, True
             continue
@@ -1005,13 +1007,13 @@ def _read_rg_hits(
             _stop_process(process)
             return hits, True
     state = _SEARCH_STATE.get()
-    if state is not None and state.limited:
+    if state is not None and state.output_stopped:
         _stop_process(process)
         return hits, True
     return hits, False
 
 
-# LLM: 取消原样抛出，普通计数失败走原后备；读线程负责finally清理stdout并有界回收进程。
+# LLM: 取消原样抛出，普通计数失败走原后备；发现partial不能掩盖rg失败，读线程finally有界回收进程及管道。
 # 函数用途: 读取rg计数并释放对应进程和管道，不让取消线程关闭正在读取的流。
 def _rg_counts_from_process(
     tool: SearchTextTool,
@@ -1034,13 +1036,13 @@ def _rg_counts_from_process(
                 with contextlib.suppress(OSError):
                     process.stdout.close()
     state = _SEARCH_STATE.get()
-    if return_code == 1 or (state is not None and state.limited):
+    if return_code == 1 or (state is not None and state.output_stopped):
         return counts
     return counts if return_code == 0 else None
 
 
-# LLM: 数量只由有效 rg match 事件累加；解析损坏抛错给原后备执行路径。
-# 函数用途: 从声明 JSON 协议统计匹配文件行数，避免误报正常零结果。
+# LLM: 数量只由有效match累加，发现截断仍消费已准入批次；正文预算或源异常停止，协议损坏回原后备实查。
+# 函数用途: 在输出预算内统计已准入文件行数，并保留范围不完整披露。
 def _read_rg_counts(
     tool: SearchTextTool,
     process: subprocess.Popen[str],
@@ -1063,11 +1065,11 @@ def _read_rg_counts(
                 return counts
             counts[hit.rel] = counts.get(hit.rel, 0) + 1
         state = _SEARCH_STATE.get()
-        if state is not None and state.limited:
+        if state is not None and state.output_stopped:
             _stop_process(process)
             return counts
     state = _SEARCH_STATE.get()
-    if state is not None and state.limited:
+    if state is not None and state.output_stopped:
         _stop_process(process)
     return counts
 

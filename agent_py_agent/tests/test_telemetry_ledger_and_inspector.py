@@ -19,6 +19,147 @@ def call(index=0, **changes):
                 ended_at=10.1 + index, **changes)
 
 
+# LLM: 非哈希状态与超范围整数在writer写前拒绝，错误必须是领域ValueError。
+# 函数用途: 保护SQLite整数域且不留下毒化后续读取的记录。
+@pytest.mark.parametrize('changes', [{'status': []}, {'output_bytes': 2**63}, {'output_bytes': 10**400}])
+def test_r1_writer_type_and_integer_range(tmp_path, changes):
+    ledger = ToolTelemetryLedger(tmp_path)
+    with pytest.raises(ValueError):
+        ledger.record_tool_call(call(**changes))
+    assert ledger.query_tool_calls() == []
+
+
+# LLM: 正常writer追加有准确前后来源stamp见证，不应每次从零读完整历史。
+# 函数用途: 验证新建账本实例在紧缩预算下完成可信增量。
+def test_r1_writer_append_uses_delta_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    for number in range(100):
+        ledger.record_tool_call(call(number))
+    assert ledger.query_tool_calls_page()['coverage']['status'] == 'complete'
+    ledger.record_tool_call(call(100))
+    original = module._Budget
+    # LLM: 只收紧真实读取预算，不能伪造前缀证明或query结果。
+    # 函数用途: 将一次操作最多读取量约束为一条增量记录附近。
+    def tight(*args, **kwargs):
+        return original(max_bytes=1024)
+
+    monkeypatch.setattr(module, '_Budget', tight)
+    reopened = ToolTelemetryLedger(tmp_path)
+    page = reopened.query_tool_calls_page(limit=1, cursor=100)
+    assert page['coverage']['status'] == 'complete', page['coverage']
+    assert page['rows'][0]['call_id'] == 'c100' and page['total_count'] == 101
+
+
+# LLM: 公开分页接收签名seek游标，固定view不能混入后续追加。
+# 函数用途: 对照遥测新seek入口与旧偏移入口。
+def test_r1_telemetry_keyset_page(tmp_path):
+    ledger = ToolTelemetryLedger(tmp_path)
+    for number in range(5):
+        ledger.record_tool_call(call(number))
+    first = ledger.query_tool_calls_page(limit=2)
+    ledger.record_tool_call(call(5))
+    second = ledger.query_tool_calls_page(limit=2, view=first['view'], after_cursor=first['next_cursor'])
+    assert second['rows'] == ledger.query_tool_calls_page(limit=2, cursor=2, view=first['view'])['rows']
+    assert second['total_count'] == 5
+
+
+# LLM: 未见证的手工追加迫使逐块证明，真实公开入口每次新建ledger仍须能推进完成。
+# 函数用途: 覆盖请求生命周期中的紧缩预算恢复活性。
+def test_r1_new_ledger_requests_finish_unwitnessed_prefix(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    for number in range(30):
+        ledger.record_tool_call(call(number))
+    assert ledger.query_tool_calls_page()['coverage']['status'] == 'complete'
+    path = tmp_path / 'data/telemetry/tool_calls.jsonl'
+    record = ledger.get_tool_call('c0')
+    with path.open('a') as stream:
+        stream.write(json.dumps({**record, 'call_id': 'manual'}) + '\n')
+    original = module._Budget
+    # LLM: 不改解析器或来源证明，只收紧实际每请求读取预算。
+    # 函数用途: 使前缀复核必须跨多次真实请求。
+    def tight(*args, **kwargs):
+        return original(max_bytes=1024)
+
+    monkeypatch.setattr(module, '_Budget', tight)
+    for _ in range(40):
+        page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1, cursor=30)
+        if page['coverage']['status'] == 'complete':
+            break
+    assert page['coverage']['status'] == 'complete', page['coverage']
+    assert page['rows'][0]['call_id'] == 'manual' and page['total_count'] == 31
+
+
+# LLM: 写进程与读进程隔离，内存见证不可用时只能依赖精确绑定的SQLite持久见证。
+# 函数用途: 验证正常writer跨进程追加仍只读增量字节。
+def test_r1_durable_append_witness_supports_cold_reader(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    for number in range(100):
+        ledger.record_tool_call(call(number))
+    assert ledger.query_tool_calls_page()['total_count'] == 100
+    code = '''import sys
+from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+ToolTelemetryLedger(sys.argv[1]).record_tool_call(dict(call_id='child',tool_name='read'))
+'''
+    subprocess.run([sys.executable, '-B', '-c', code, str(tmp_path)], check=True, timeout=30)
+    with module._PROCESS_MEMO_LOCK:
+        module._PROCESS_APPENDS.clear()
+        module._PROCESS_MEMOS.clear()
+    original = module._Budget
+    # LLM: 不跳过任何路径验证，只限制读者的真实字节预算以暴露历史重扫。
+    # 函数用途: 为冷读创建一条增量记录级别的预算。
+    def tight(*args, **kwargs):
+        return original(max_bytes=1024)
+
+    monkeypatch.setattr(module, '_Budget', tight)
+    page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1, cursor=100)
+    assert page['coverage']['status'] == 'complete', page['coverage']
+    assert page['rows'][0]['call_id'] == 'child' and page['total_count'] == 101
+
+
+# LLM: 多次正常追加每次只准读新增字节，不能由单次小样本通过掩盖再次全前缀读取。
+# 函数用途: 计量真实读取偏移并检查writer后前缀改写不会被持久见证漏掉。
+def test_r1_repeated_append_io_and_rewrite_breaks_witness(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    for number in range(100):
+        ledger.record_tool_call(call(number))
+    first = ledger.query_tool_calls_page()
+    path = tmp_path / 'data/telemetry/tool_calls.jsonl'
+    reads, original = [], module._Budget.read
+    # LLM: 旁听真实pread边界，不改数据、预算和摘要算法。
+    # 函数用途: 保存实际正文读取起点。
+    def observe(budget, descriptor, offset, maximum):
+        reads.append(offset)
+        return original(budget, descriptor, offset, maximum)
+
+    monkeypatch.setattr(module._Budget, 'read', observe)
+    for number in range(100, 104):
+        prior = path.stat().st_size
+        reads.clear()
+        ledger.record_tool_call(call(number))
+        page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1, cursor=number)
+        assert page['coverage']['status'] == 'complete'
+        assert reads and min(reads) >= prior
+    path.write_bytes(path.read_bytes().replace(b'"c0"', b'"cX"', 1))
+    ledger.record_tool_call(call(104))
+    changed = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1)
+    assert changed['coverage']['status'] == 'complete'
+    assert changed['view']['generation'] != first['view']['generation']
+    assert changed['rows'][0]['call_id'] == 'cX'
+
+
 # LLM: 构造与空查询不应写 owner 数据。
 # 函数用途: 验证空账本是只读的。
 def test_empty_is_read_only(tmp_path):

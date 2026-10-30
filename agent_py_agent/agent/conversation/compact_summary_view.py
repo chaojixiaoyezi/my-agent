@@ -1,6 +1,6 @@
 # LLM: 本模块只读取原 committed checkpoint chain，并携带本次采用的临时视图；提交指针和账本仍是唯一权威。
 # 摘要替代关系沿 summary_base_checkpoint_id，不得把提交链的局部覆盖无条件合并。
-# 模块用途: 缓存深不可变验链和摘要内核，公开按需物化独立容器，保留原完整验证与base语义。
+# 模块用途: 缓存深不可变验链和摘要内核，兼容有序/子类/自定义映射并按需导出独立普通dict，保留base语义。
 from __future__ import annotations
 
 import hashlib
@@ -39,7 +39,7 @@ class _FrozenList(tuple):
     __slots__ = ()
 
 
-# LLM: 只能在锁外复制JSON容器；代理背后的原字典也重新冻结，不能信任外部只读包装。
+# LLM: 锁外递归复制所有Mapping含OrderedDict/子类/自定义映射；代理背后容器也冻结，不能信任外部只读包装。
 # 函数用途: 建立不含可变后代的内部投影，拒绝循环和未知对象。
 def _freeze_json(value, active=None):
     if type(value) in {str, int, float, bool, type(None)}:
@@ -63,7 +63,7 @@ def _freeze_json(value, active=None):
         active.remove(identity)
 
 
-# LLM: 唯一解冻叶只复制请求子图，标量共享，结果绝不指回缓存。
+# LLM: 所有不可变Mapping均解冻为普通dict；只复制请求子图，标量共享，嵌套结果绝不指回缓存。
 # 函数用途: 给旧dict/list/tuple消费者恢复独立内建容器。
 def _thaw_json(value):
     if isinstance(value, Mapping):
@@ -292,8 +292,7 @@ class CompactSummaryView:
                              other._snapshot_for_application().values)
 
 
-# LLM: Applied context is a per-run immutable snapshot of the chosen scope and its summary view;
-# it is never a second checkpoint or a source of authority outside the matching thread.
+# LLM: 本次应用上下文仅固定所选范围及摘要快照；它不是第二份检查点，不能在不匹配线程中产生权威。
 # 类用途: 暂存本次请求实际采用的线程、摘要范围和视图，供历史与工具投影同次复用。
 @dataclass(frozen=True)
 class AppliedCompactContext:

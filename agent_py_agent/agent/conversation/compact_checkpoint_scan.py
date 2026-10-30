@@ -1,13 +1,15 @@
-# LLM: 固定through的64KiB分块扫描只缓存已验证行地址/hash；每次lookup仍核对同FD原字节，坏orphan与超预算行均拒绝。
-# 模块用途: 有界读取检查点账本，不缓存历史正文，不以缓存创建提交或覆盖权威。
+# LLM: 固定through的64KiB扫描完整验证所有行；内存只保留最新地址窗口，溢出按同FD一次批量建磁盘地址投影。
+# 模块用途: 有界读取检查点账本，长链仅常数次流扫且逐行复核原字节，不缓存正文或创造提交权威。
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import sqlite3
+import tempfile
 import threading
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -83,8 +85,8 @@ def _prefix_digest(handle, through):
     return digest
 
 
-# LLM: 构建时就限制行数与保守对象预算；超界仍验证所有行，未记录ID随后常量空间回源。
-# 函数用途: 从固定起点扫描新记录并保留有界last-wins地址。
+# LLM: 行数和字节预算触顶时淘汰最早物理地址；重复ID刷新尾窗，超界仍校验全部行而非找到head即停。
+# 函数用途: 从固定起点扫描新记录并保留最新窗口的有界last-wins地址。
 def _build_index(handle, through, previous=None):
     digest = _prefix_digest(handle, previous.through) if previous is not None else hashlib.sha256()
     if previous is not None and digest.digest() != previous.digest:
@@ -92,7 +94,7 @@ def _build_index(handle, through, previous=None):
         digest = hashlib.sha256()
     if previous is None:
         handle.seek(0)
-    offsets = dict(previous.offsets) if previous is not None else {}
+    offsets = OrderedDict(previous.offsets) if previous is not None else OrderedDict()
     size = previous.size if previous is not None else 256
     complete = previous.complete if previous is not None else True
     terminated = previous.terminated if previous is not None else True
@@ -104,33 +106,51 @@ def _build_index(handle, through, previous=None):
             checkpoint_id = str(row.get('checkpoint_id') or '').strip()
             if checkpoint_id:
                 cost = 512 + len(checkpoint_id) * 4
-                existing = checkpoint_id in offsets
-                if existing or (len(offsets) < _CHECKPOINT_INDEX_MAX_ROWS
-                                and size + cost <= _CHECKPOINT_INDEX_MAX_BYTES):
+                if checkpoint_id in offsets:
+                    offsets.pop(checkpoint_id)
+                    size -= cost
+                while offsets and (len(offsets) >= _CHECKPOINT_INDEX_MAX_ROWS
+                                   or size + cost > _CHECKPOINT_INDEX_MAX_BYTES):
+                    oldest, _address = offsets.popitem(last=False)
+                    size -= 512 + len(oldest) * 4
+                    complete = False
+                if len(offsets) < _CHECKPOINT_INDEX_MAX_ROWS and size + cost <= _CHECKPOINT_INDEX_MAX_BYTES:
                     offsets[checkpoint_id] = start, len(raw), hashlib.sha256(raw).digest()
-                    if not existing:
-                        size += cost
+                    size += cost
                 else:
                     complete = False
         del row, raw
     return _CheckpointIndex(MappingProxyType(offsets), digest.digest(), through, terminated, complete, size)
 
 
-# LLM: 不完整索引的缺ID回读同一FD固定范围；完整hash匹配后才返回last-wins对象，不存历史正文。
-# 函数用途: 在地址预算耗尽时保留原查找合同。
-def _uncached_lookup(handle, index, checkpoint_id):
-    handle.seek(0)
-    digest = hashlib.sha256()
-    selected = None
-    for _start, raw in _checkpoint_byte_rows(handle, index.through):
-        digest.update(raw)
-        row = _parse_row(raw)
-        if row is not None and str(row.get('checkpoint_id') or '').strip() == checkpoint_id:
-            selected = row
-        del row, raw
-    if digest.digest() != index.digest:
-        raise OSError('conversation compact checkpoint source changed during reading')
-    return selected
+# LLM: 首次缺地址仅回扫一次固定through；磁盘只存ID/地址/hash，SQLite页缓存有界且退出即删除，不缓存历史正文。
+# 函数用途: 批量补齐溢出地址，避免长前驱链每缺一个ID就重新全扫；hash不符或建表失败均拒绝恢复。
+@contextmanager
+def _overflow_addresses(handle, index):
+    with tempfile.TemporaryDirectory(prefix='compact-offsets-') as directory:
+        try:
+            with closing(sqlite3.connect(str(Path(directory) / 'offsets.sqlite3'))) as database:
+                database.execute('PRAGMA cache_size=-1024')
+                database.execute('PRAGMA journal_mode=OFF')
+                database.execute('CREATE TABLE offsets (id TEXT PRIMARY KEY, start INTEGER, length INTEGER, digest BLOB)')
+                handle.seek(0)
+                digest = hashlib.sha256()
+                with database:
+                    for start, raw in _checkpoint_byte_rows(handle, index.through):
+                        digest.update(raw)
+                        row = _parse_row(raw)
+                        if row is not None:
+                            checkpoint_id = str(row.get('checkpoint_id') or '').strip()
+                            if checkpoint_id:
+                                database.execute(
+                                    'INSERT OR REPLACE INTO offsets VALUES (?, ?, ?, ?)',
+                                    (checkpoint_id, start, len(raw), hashlib.sha256(raw).digest()))
+                        del row, raw
+                if digest.digest() != index.digest:
+                    raise OSError('conversation compact checkpoint source changed during reading')
+                yield database
+        except sqlite3.Error as exc:
+            raise OSError('conversation compact checkpoint offset projection is unavailable') from exc
 
 # LLM: 保留原JSON对象/UTF8/Unicode空白语义；无LF的完整末行有效，坏orphan也拒绝，不用宽松解码修补。
 # 函数用途: 将一条物理LF记录解析为原对象或空行标记，失败只报告账本不可读。
@@ -177,8 +197,8 @@ def _checkpoint_byte_rows(handle, through):
         yield offset, bytes(pending)
 
 
-# LLM: 全部行先验证；追加只省去已核对前缀的重复解析，未终止末行及损坏前缀强制冷扫。
-# 函数用途: 复用有界地址索引或固定范围回源，保留坏orphan与last-wins合同。
+# LLM: 全部行先验证；尾窗缺地址时最多再扫一次批量投影，资源绑定本次读取并在正常/异常/提前退出时关闭。
+# 函数用途: 复用有界尾窗与临时磁盘地址索引，保留坏orphan、last-wins及同FD逐行hash复核合同。
 @contextmanager
 def checkpoint_row_lookup(path: Path):
     try:
@@ -190,20 +210,29 @@ def checkpoint_row_lookup(path: Path):
             return None
         yield missing
         return
-    with handle:
+    with handle, ExitStack() as resources:
         stamp = cache_stat_signature(os.fstat(handle.fileno()))
         through = stamp[2]
         cached, previous = _cached_index(path, stamp)
         index = cached if cached is not None else _build_index(handle, through, previous)
         if cached is None and cache_stat_signature(os.fstat(handle.fileno())) == stamp:
             _cache_offsets(path, stamp, index)
+        overflow = None
 
-        # LLM: 同一已扫描述符按原字节hash复查选中行，旧代内容变动不能生成覆盖；追加不改变固定范围。
-        # 函数用途: 返回原行的新解析对象，正文只随调用方当前消费而存活；缺ID由链验证器处理。
+        # LLM: 首次缺地址建立一次磁盘投影，后续链查询只做地址查找；同FD/hash拒绝变动，追加不扩大固定范围。
+        # 函数用途: 按真实字节地址返回独立行对象，不保留旧摘要正文；缺ID交给原链验证器处理。
         def lookup(checkpoint_id):
+            nonlocal overflow
             address = index.offsets.get(checkpoint_id)
             if address is None:
-                return None if index.complete else _uncached_lookup(handle, index, checkpoint_id)
+                if index.complete:
+                    return None
+                if overflow is None:
+                    overflow = resources.enter_context(_overflow_addresses(handle, index))
+                address = overflow.execute('SELECT start, length, digest FROM offsets WHERE id = ?',
+                                           (checkpoint_id,)).fetchone()
+                if address is None:
+                    return None
             offset, length, digest = address
             handle.seek(offset)
             raw = handle.read(length)

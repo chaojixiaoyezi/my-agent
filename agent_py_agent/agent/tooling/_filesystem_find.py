@@ -1,5 +1,5 @@
 
-# LLM: live枚举沿原rg/有界后备，显式snapshot冻结实例私有清单；变化检测只提供best_effort一致性，不扩大路径权限。
+# LLM: live枚举沿原rg/有界后备，snapshot按宿主权限值绑定并允许Registry请求级浅拷贝续页；逐页复核只提供best_effort一致性。
 # 模块用途: 按glob查找文件并支持绑定来源的冻结分页，保留取消、覆盖披露与资源回收。
 from __future__ import annotations
 
@@ -58,12 +58,13 @@ _FIND_SNAPSHOT_MAX_CURSORS = 128
 _FIND_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
 
 
-# LLM: 冻结后只保留不可变路径及指纹元组，不是文件系统强快照或执行授权。
+# LLM: 冻结后只保留不可变路径、筛选及权限值指纹元组，不是文件系统强快照或执行授权。
 # 类用途: 保存有界清单的绑定、寿命及真实扫描覆盖。
 @dataclass(frozen=True)
 class _FindSnapshot:
     snapshot_id: str
     binding: tuple
+    filters: tuple[str, bool]
     paths: tuple[Path, ...]
     watches: tuple[tuple[Path, tuple[int, ...]], ...]
     expires_at: float
@@ -84,8 +85,20 @@ class _FindSnapshotLimit(RuntimeError):
     pass
 
 
-# LLM: 绑定只取工具宿主字段及进程身份，模型不能自报owner或权限代次；逐页仍独立核验原策略。
-# 函数用途: 将root、筛选、忽略版本与当前权限身份绑定到同一冻结清单。
+# LLM: 策略字段已由宿主构造规范化，只取不可变值而非请求级对象地址；危险根按集合定序，逐页仍独立授权。
+# 函数用途: 生成跨等值策略实例稳定、任一权限字段变化即不同的值指纹。
+def _find_policy_fingerprint(tool) -> tuple:
+    policy = tool.path_access_policy
+    return (
+        'path_access_policy.v1', policy.mode,
+        tuple(sorted({str(root) for root in policy.dangerous_roots})),
+        str(policy.owner_scope_root) if policy.owner_scope_root is not None else None,
+        str(policy.agent_home_root) if policy.agent_home_root is not None else None,
+    )
+
+
+# LLM: 绑定只取工具宿主字段、权限值和回调身份；模型不能自报owner或权限代次，逐页仍独立核验原策略。
+# 函数用途: 将root、筛选、忽略版本与当前权限值绑定到同一冻结清单。
 def _find_snapshot_binding(tool, target: Path, request) -> tuple:
     check = tool.check_path_access
     resolve = tool.resolve_path
@@ -94,7 +107,7 @@ def _find_snapshot_binding(tool, target: Path, request) -> tuple:
         _discovery_identity(_discovery_nofollow_stat(target))[:2],
         request.pattern, request.include_ignored,
         tuple(sorted(_COMMON_FILE_DISCOVERY_IGNORES)), 'unicode_codepoint.v1',
-        id(tool.path_access_policy),
+        _find_policy_fingerprint(tool),
         tuple(map(str, tool.granted_external_roots)),
         str(tool.workspace_root), tuple(map(str, tool.workspace_roots)),
         str(tool.protected_persona_root),
@@ -116,11 +129,13 @@ def _find_snapshot_stale(reason: str, snapshot_id: str = '') -> ToolHandlerOutco
         }})
 
 
-# LLM: 每个已观察目录及文件都重核原权限和五元指纹，不能只用根mtime；I/O全部在缓存锁外。
+# LLM: 筛选串线单独披露；每个已观察目录及文件仍重核原权限和五元指纹，不能以绑定相等或根mtime替代，I/O在锁外。
 # 函数用途: 在发布或续页前验证冻结清单的来源与权限未观察到变化。
 def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot) -> None:
     if time.monotonic() >= snapshot.expires_at:
         raise _FindSnapshotStale('expired')
+    if (request.pattern, request.include_ignored) != snapshot.filters:
+        raise _FindSnapshotStale('filter_mismatch')
     if _find_snapshot_binding(tool, target, request) != snapshot.binding:
         raise _FindSnapshotStale('binding_changed')
     started = time.monotonic()
@@ -201,7 +216,7 @@ def _build_find_files_model_spec() -> ToolModelSpec:
     )
 
 
-# LLM: 快照与凭证属于当前工具实例，不能跨owner或实例共享；原路径策略仍逐页生效。
+# LLM: 快照凭证仅由注册handler及其请求级浅拷贝共享，不能跨owner或独立注册实例使用；原路径策略仍逐页生效。
 # 类用途: 提供live查找和显式冻结文件路径分页。
 class FindFilesTool(FileSystemTool):
 
@@ -334,7 +349,7 @@ class FindFilesTool(FileSystemTool):
         while len(self._snapshot_cursors) > _FIND_SNAPSHOT_MAX_CURSORS:
             self._snapshot_cursors.popitem(last=False)
 
-    # LLM: 完整构建受文件数、目录项、时间及保留字节预算约束，不用首屏哨兵冒充完整快照。
+    # LLM: 构建固定筛选和权限值绑定，受文件数、目录项、时间及保留字节预算约束，不用首屏哨兵冒充完整快照。
     # 函数用途: 在缓存锁外构建按根相对Unicode路径排序的冻结清单。
     def _build_snapshot(self, target: Path, request: _FindFilesRequest) -> _FindSnapshot:
         binding = _find_snapshot_binding(self, target, request)
@@ -376,6 +391,7 @@ class FindFilesTool(FileSystemTool):
             state.limit_reason = 'manifest_byte_limit'
         snapshot = _FindSnapshot(
             snapshot_id=secrets.token_urlsafe(24), binding=binding,
+            filters=(request.pattern, request.include_ignored),
             paths=tuple(sorted(paths, key=lambda path: path.relative_to(target).as_posix())),
             watches=tuple(watches.items()), expires_at=time.monotonic() + _FIND_SNAPSHOT_TTL_SECONDS,
             scan_exhausted=not state.limited, limit_reason=state.limit_reason, scanned_files=state.candidates)
@@ -518,8 +534,7 @@ def _find_directory_matches(
     return _find_directory_matches_with_python(tool, target, request)
 
 
-# LLM: The fallback walk streams candidates in a stable per-directory order,
-# stops after one page sentinel, and reports objective liveness limits.
+# LLM: 后备遍历按稳定目录序流式交付候选，见当前页哨兵即停止，资源触顶必须明确披露而非宣称无匹配。
 # 函数用途: 在系统没有 rg 时逐个遍历文件；够一页就返回，避免先把整个用户目录装进内存再排序。
 def _find_directory_matches_with_python(
     tool: FindFilesTool,
@@ -590,8 +605,7 @@ def _find_directory_matches_with_rg(
                    limit_reason=state.limit_reason)
 
 
-# LLM: The subprocess receives only typed path/glob arguments and never a shell
-# command. Its lifetime is owned by the current tool cancellation token.
+# LLM: 子进程只接收已经准入的类型化路径，不执行shell命令；其生命周期由当前工具取消令牌负责。
 # 函数用途: 启动不经过 shell 的 rg 文件枚举进程；启动失败时让调用方走 Python 后备。
 def _start_rg_find_process(
     candidates: list[Path],
@@ -623,8 +637,7 @@ def _start_rg_find_process(
         return None
 
 
-# LLM: Output is consumed only to offset+limit+1 and every path is resolved
-# through the canonical access policy before it can reach the model.
+# LLM: 输出只消费至offset+limit+1哨兵；每条路径在交给模型前都必须经过原规范访问策略解析。
 #   读线程finally负责有界回收与关闭stdout，包括BaseException；异步取消不得关闭正在迭代的流。
 #   取消异常原样传递，普通读取异常走Python后备，不重复调用发生异常的检查函数。
 # 函数用途: 读取 rg 的一页文件结果；看到下一页哨兵后立刻结束进程，并保持路径权限校验。
@@ -766,8 +779,7 @@ def _find_directory_empty_result(
     )
 
 
-# LLM: Result metadata distinguishes matches/no-match/incomplete execution and
-# never promotes a liveness cutoff into a repository-level fact.
+# LLM: 结果元数据区分命中、完整无匹配与扫描不完整，资源触顶不能升级为整个仓库不存在文件的结论。
 # 函数用途: 给文件查找结果附上分页、后端和扫描完整性，供模型决定翻页还是缩小范围。
 def _find_result_envelope(result: _FindDirectoryResultRequest) -> dict[str, object]:
     batch = result.batch

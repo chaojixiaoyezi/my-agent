@@ -41,6 +41,32 @@ _MAX_MEMO_ENTRIES = 128
 _MAX_MEMO_BYTES = 32 * 1024 * 1024
 _MAX_TRACKED_SOURCES = 128
 _EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
+_INT64_MAX = 2**63 - 1
+_ANCHOR_BYTES = 1024
+_PROCESS_MEMOS = OrderedDict()
+_PROCESS_MEMO_LOCK = threading.RLock()
+_PROCESS_ADVANCE_LOCK = threading.RLock()
+_PROCESS_APPENDS = OrderedDict()
+
+
+# LLM: 见证只由持有领域追加锁的writer发布；派生库写失败不影响事实提交，未知写者仍复核全部分块。
+# 函数用途: 保存有界进程追加链并尽力持久化已有检查点的准确衔接见证。
+def note_owner_append(home, parts, before, after):
+    if before is None or before[:2] != after[:2] or before[2] >= after[2]:
+        return
+    key = (str(Path(home).absolute()), tuple(parts))
+    with _PROCESS_MEMO_LOCK:
+        chain = _PROCESS_APPENDS.pop(key, ())
+        if not chain or chain[-1][1] != before:
+            chain = ()
+        _PROCESS_APPENDS[key] = (*chain[-127:], (before, after))
+        while len(_PROCESS_APPENDS) > _MAX_MEMO_ENTRIES:
+            _PROCESS_APPENDS.popitem(last=False)
+    try:
+        OwnerReadIndex(home)._record_append_witness(tuple(parts), before, after)
+    except (_Issue, OSError, sqlite3.Error, ValueError, TypeError):
+        # 见证只是可删重建的加速信息；失败后读侧仍通过完整分块复核，绝不撤销已追加事实。
+        pass
 
 _FIELDS = {
     "telemetry": {
@@ -97,7 +123,7 @@ class _Issue(Exception):
         self.status = status
 
 
-# LLM: 所有事实正文读取都经过本预算，包括追加前的完整已验证前缀复核。
+# LLM: 所有事实正文读取都经过本预算；无可信追加见证时复核全部已投影分块。
 # 类用途: 约束一次推进或查询的实际读取量、解码数和墙钟时间。
 class _Budget:
     # LLM: 上限是模块维护边界，调用方只能收紧，不能无限放大。
@@ -175,9 +201,11 @@ def _parts(value):
 def _number(value):
     if (
         type(value) not in (int, float)
-        or not math.isfinite(value) or value < 0
+        or (type(value) is float and not math.isfinite(value)) or value < 0
     ):
         raise _Issue("invalid_schema")
+    if type(value) is int and value > _INT64_MAX:
+        raise _Issue("integer_out_of_range")
     return value
 
 
@@ -286,9 +314,17 @@ class OwnerReadIndex:
             identity = (cls.__module__ + ":" + cls.__qualname__).encode("utf-8")
         return hashlib.sha256(identity).hexdigest()
 
-    # LLM: 锁只拿取引用，不在锁内读取、解析或复制大正文。
+    # LLM: 共享证明取出时锁内复制hasher，释放锁后才读取正文和推进，避免并发修改同一对象。
     # 函数用途: 获取一个有界内存证明或片段。
     def _memo_get(self, key):
+        if key[0] == 'proof':
+            shared = (str(self._home), self._owner_id, key)
+            with _PROCESS_MEMO_LOCK:
+                item = _PROCESS_MEMOS.get(shared)
+                if item is not None:
+                    _PROCESS_MEMOS.move_to_end(shared)
+                    return (*item[:-1], item[-1].copy() if item[-1] is not None else None) if item is not True else True
+            return None
         with self._lock:
             item = self._memo.get(key)
             if item is not None:
@@ -296,9 +332,18 @@ class OwnerReadIndex:
                 return item[0]
         return None
 
-    # LLM: 发布只交换已完成的不可变引用；被淘汰大对象在锁外释放。
+    # LLM: 证明发布时锁内复制hasher；其余大正文仅交换不可变引用并在锁外释放淘汰项。
     # 函数用途: 有界保存片段和可续前缀证明。
     def _memo_put(self, key, value, cost=0):
+        if key[0] == 'proof':
+            shared = (str(self._home), self._owner_id, key)
+            with _PROCESS_MEMO_LOCK:
+                _PROCESS_MEMOS[shared] = ((*value[:-1], value[-1].copy() if value[-1] is not None else None)
+                                           if value is not True else True)
+                _PROCESS_MEMOS.move_to_end(shared)
+                while len(_PROCESS_MEMOS) > _MAX_MEMO_ENTRIES:
+                    _PROCESS_MEMOS.popitem(last=False)
+            return
         discarded = []
         with self._lock:
             old = self._memo.pop(key, None)
@@ -644,7 +689,7 @@ class OwnerReadIndex:
                 self._initialize(connection, binding)
             else:
                 metadata = dict(
-                    connection.execute("SELECT key,value FROM ori_meta").fetchall()
+                    connection.execute("SELECT key,value FROM ori_meta WHERE key IN ('schema','binding')").fetchall()
                 )
                 if metadata != {"schema": _SCHEMA, "binding": binding}:
                     raise _Issue("cache_binding_mismatch")
@@ -707,21 +752,88 @@ class OwnerReadIndex:
         except FileNotFoundError:
             return None
 
-    # LLM: 每一已发布字节均参与摘要复核，不使用仅首尾锚点的追加推断。
+    # LLM: 不为writer创建缓存；在短事务内把领域锁内的准确stamp链绑定到已有检查点。
+    # 函数用途: 持久保存每源唯一追加见证，支持不同写读进程的增量路径。
+    def _record_append_witness(self, parts, before, after):
+        sid = self._source_id('telemetry', parts)
+        with self._database(write=True) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            checkpoint = self._checkpoint(connection, sid, 'telemetry', parts)
+            if checkpoint is None:
+                connection.rollback()
+                return
+            base = [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp'])]
+            value = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('append:' + sid,)).fetchone()
+            previous = json.loads(value[0]) if value is not None else None
+            if checkpoint['stamp'] != before and not (
+                isinstance(previous, list) and previous[:3] == base and previous[3:] == [list(before)]
+            ):
+                connection.rollback()
+                return
+            connection.execute(
+                'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                ('append:' + sid, _json([*base, list(after)])),
+            )
+            connection.commit()
+
+    # LLM: 只有精确匹配的领域锁内追加链可免扫历史，未知写者必须验证全部持久分块。
+    # 函数用途: 判断检查点到当前来源是否存在完整可信追加见证。
+    def _witnessed_append(self, connection, checkpoint, observed):
+        key = (str(self._home), tuple(json.loads(checkpoint['parts'])))
+        with _PROCESS_MEMO_LOCK:
+            chain = _PROCESS_APPENDS.get(key, ())
+            stamp = checkpoint['stamp']
+            for before, after in chain:
+                if before == stamp:
+                    stamp = after
+                    if stamp == observed:
+                        return True
+        saved = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('append:' + checkpoint['sid'],)).fetchone()
+        if saved is not None:
+            try:
+                proof = json.loads(saved[0])
+            except (ValueError, TypeError):
+                raise _Issue('corrupt_append_witness') from None
+            return proof == [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp']), list(observed)]
+        return False
+
+    # LLM: 持久续点只保存完整核实的分块边界，不序列化hashlib对象或凭尾窗信任历史。
+    # 函数用途: 保存当前来源stamp对应的有限分块证明水位。
+    def _save_proof(self, connection, checkpoint, observed, position):
+        if connection.execute('PRAGMA query_only').fetchone()[0]:
+            return
+        value = _json([checkpoint['generation'], checkpoint['through'], list(observed), position])
+        connection.execute(
+            'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+            ('proof:' + checkpoint['sid'], value),
+        )
+
+    # LLM: 每一未见证的已发布字节均参与摘要复核，共享可变hasher始终在锁内复制后使用。
     # 函数用途: 有界、可续地核验一个检查点的完整已验证前缀。
     def _prove_prefix(self, connection, descriptor, checkpoint, observed, budget):
         sid = checkpoint["sid"]
         generation = checkpoint["generation"]
         target = checkpoint["through"]
         key = (
-            "proof", sid, generation, checkpoint["revision"],
+            "proof", sid, generation, checkpoint['validation'],
             observed, target,
         )
+        if self._witnessed_append(connection, checkpoint, observed):
+            return True
         cached = self._memo_get(key)
         if cached is True:
             return True
         if cached is None:
             position, span_start, span_stop, digest, hasher = 0, 0, 0, "", None
+            saved = connection.execute('SELECT value FROM ori_meta WHERE key=?', ('proof:' + sid,)).fetchone()
+            if saved is not None:
+                try:
+                    proof = json.loads(saved[0])
+                    if (proof[:3] == [generation, target, list(observed)]
+                            and type(proof[3]) is int and 0 <= proof[3] <= target):
+                        position = proof[3]
+                except (ValueError, TypeError, IndexError):
+                    raise _Issue('corrupt_prefix_proof') from None
         else:
             position, span_start, span_stop, digest, old_hasher = cached
             hasher = old_hasher.copy() if old_hasher is not None else None
@@ -729,6 +841,7 @@ class OwnerReadIndex:
             if budget.remaining <= 0 or time.monotonic() >= budget.deadline:
                 state = (position, span_start, span_stop, digest, hasher)
                 self._memo_put(key, state)
+                self._save_proof(connection, checkpoint, observed, position if hasher is None else span_start)
                 return None
             if hasher is None:
                 span = connection.execute(
@@ -746,6 +859,7 @@ class OwnerReadIndex:
             if not data:
                 state = (position, span_start, span_stop, digest, hasher)
                 self._memo_put(key, state)
+                self._save_proof(connection, checkpoint, observed, position if hasher is None else span_start)
                 return None
             hasher.update(data)
             position += len(data)
@@ -753,6 +867,7 @@ class OwnerReadIndex:
                 if not hmac.compare_digest(hasher.hexdigest(), digest):
                     return False
                 hasher = None
+        self._save_proof(connection, checkpoint, observed, position)
         self._memo_put(key, True)
         return True
 
@@ -806,6 +921,7 @@ class OwnerReadIndex:
             if (
                 type(values["output_bytes"]) is not int
                 or values["ended_at"] < values["started_at"]
+                or not isinstance(row.get('status', 'ok'), str)
                 or row.get("status", "ok") not in {"ok", "error", "denied", "timeout"}
                 or not isinstance(row.get("args_summary", {}), dict)
             ):
@@ -855,8 +971,10 @@ class OwnerReadIndex:
             values["sequence"] = self._validate_summary(row)
         else:
             if (
-                row.get("event") not in _EVENTS
+                not isinstance(row.get('event'), str)
+                or row.get("event") not in _EVENTS
                 or not isinstance(row.get("skill_id"), str) or not row["skill_id"]
+                or not isinstance(row.get('kind', 'skill'), str)
                 or row.get("kind", "skill") not in {"skill", "capability_package"}
             ):
                 raise _Issue("invalid_schema")
@@ -873,6 +991,11 @@ class OwnerReadIndex:
         for key, kind in _FIELDS[domain].items():
             if kind == "TEXT" and not isinstance(values[key], str):
                 raise _Issue("invalid_schema")
+            if kind == 'INTEGER':
+                if type(values[key]) is not int:
+                    raise _Issue('invalid_schema')
+                if not -2**63 <= values[key] <= _INT64_MAX:
+                    raise _Issue('integer_out_of_range')
         if domain in {"telemetry", "scheduler"}:
             owner = values["owner_id"]
             if self._owner_id and owner not in ("", self._owner_id):
@@ -1016,8 +1139,8 @@ class OwnerReadIndex:
     def _new_spans(self, checkpoint, delta):
         result = []
         start = checkpoint["through"]
-        for offset in range(0, len(delta), _CHUNK):
-            data = delta[offset:offset + _CHUNK]
+        for offset in range(0, len(delta), _ANCHOR_BYTES):
+            data = delta[offset:offset + _ANCHOR_BYTES]
             stop = start + len(data)
             result.append((
                 checkpoint["sid"], checkpoint["generation"],
@@ -1143,6 +1266,16 @@ class OwnerReadIndex:
         self, domain, relative_parts, *, validator=None,
         max_rows=25000, max_bytes=33554432, max_ms=1500,
     ):
+        with _PROCESS_ADVANCE_LOCK:
+            return self._advance(domain, relative_parts, validator=validator,
+                                 max_rows=max_rows, max_bytes=max_bytes, max_ms=max_ms)
+
+    # LLM: 进程内写推进由可重入锁串行；进程间仍以SQLite事务和revision比较发布。
+    # 函数用途: 执行锁内一次真实来源解析及检查点发布。
+    def _advance(
+        self, domain, relative_parts, *, validator=None,
+        max_rows=25000, max_bytes=33554432, max_ms=1500,
+    ):
         budget = _Budget(max_rows, max_bytes, max_ms)
         if domain not in _TABLES:
             raise ValueError("unsupported domain")
@@ -1239,7 +1372,7 @@ class OwnerReadIndex:
                 return self._view(
                     domain, parts, sid, checkpoint, status, reason, observed[2],
                 )
-        except (_Issue, OSError, sqlite3.Error, ValueError) as error:
+        except (_Issue, OSError, sqlite3.Error, ValueError, TypeError, OverflowError) as error:
             status, reason = _failure(error)
             return self._view(
                 domain, parts, sid, checkpoint, status, reason, observed[2],
@@ -1432,10 +1565,60 @@ class OwnerReadIndex:
             rows.append(row)
         return rows
 
-    # LLM: 参数错误不触碰事实或隐藏为零；有效查询的总数只有完整捕获范围才返回整数。
+    # LLM: 排序键只来自固定SQL白名单；审计同时间始终按物理位置升序，不丢掉并列行。
+    # 函数用途: 给分页生成真实排序表达式与各键方向。
+    def _seek_keys(self, domain, descending):
+        if domain == 'audit':
+            return [('r.timestamp', descending), ('r.pos', False)]
+        if domain == 'scheduler':
+            return [("COALESCE(NULLIF(r.ended_at,''),r.created_at)", descending),
+                    ('r.run_id', descending), ('r.pos', descending)]
+        return [('r.pos', descending)]
+
+    # LLM: 游标绑定固定view、owner、来源、代次、水位、规范化过滤SQL及排序，而非调用对象地址。
+    # 函数用途: 构造不可跨范围复用的分页绑定摘要。
+    def _cursor_binding(self, view, extra, args, descending):
+        material = [str(self._home), self._owner_id, view['domain'], view['source_id'],
+                    view['generation'], view['through'], view['captured_status'], extra, args, descending]
+        return hashlib.sha256(_json(material).encode('utf-8')).hexdigest()
+
+    # LLM: 验签后才可使用键；有效签名也必须符合本次字段类型、过滤及排序绑定。
+    # 函数用途: 校验seek游标并生成不依赖OFFSET的词典序范围谓词。
+    def _seek_clause(self, cursor, binding, keys):
+        if cursor is None:
+            return '', []
+        if not isinstance(cursor, dict):
+            raise _Issue('invalid_cursor')
+        try:
+            value = dict(cursor)
+            signature = value.pop('_signature', None)
+            expected = self._sign(value)['_signature']
+            values = value.get('keys')
+            valid = (set(value) == {'cursor_version', 'binding', 'keys'}
+                     and value['cursor_version'] == 1 and value['binding'] == binding
+                     and isinstance(signature, str) and hmac.compare_digest(signature, expected)
+                     and isinstance(values, list) and len(values) == len(keys)
+                     and all(type(v) in (str, int, float) for v in values)
+                     and all(not isinstance(v, float) or math.isfinite(v) for v in values)
+                     and all(not isinstance(v, int) or -2**63 <= v <= _INT64_MAX for v in values))
+        except (ValueError, TypeError, OverflowError):
+            valid = False
+        if not valid:
+            raise _Issue('invalid_cursor')
+        directions = [descending for _expression, descending in keys]
+        if len(set(directions)) == 1:
+            expressions = ','.join(expression for expression, _descending in keys)
+            placeholders = ','.join('?' for _key in keys)
+            operator = '<' if directions[0] else '>'
+            return f' AND ({expressions}){operator}({placeholders})', values
+        # 审计时间倒序、同时间位置正序：首个边界约束让时间索引可执行范围seek。
+        return ' AND r.timestamp<=? AND (r.timestamp<? OR r.pos>?)', [values[0], *values]
+
+    # LLM: 参数错误不触碰事实或隐藏为零；总数按固定view缓存，seek和旧offset分别执行。
     # 函数用途: 查询一个固定 view 的过滤分页。
     def query(
         self, view, *, filters=None, limit=100, offset=0, descending=False,
+        after_cursor=None,
     ):
         if (
             type(limit) is not int or not 0 <= limit <= _MAX_PAGE
@@ -1443,14 +1626,19 @@ class OwnerReadIndex:
             or type(descending) is not bool
         ):
             raise ValueError("invalid pagination")
+        if after_cursor is not None and offset:
+            raise ValueError('after_cursor cannot be combined with offset')
         checked = None
         try:
             checked, _ = self._validate_view(view)
             extra, filter_args = self._filters(checked["domain"], filters)
+            keys = self._seek_keys(checked['domain'], descending)
+            binding = self._cursor_binding(checked, extra, filter_args, descending)
+            seek, seek_args = self._seek_clause(after_cursor, binding, keys)
             with self._reading(checked) as (current, connection, _checkpoint):
                 if connection is None:
                     return {
-                        "rows": [], "total_count": 0,
+                        "rows": [], "total_count": 0, 'next_cursor': None,
                         "coverage": self._coverage(current, "complete", "source_absent"),
                     }
                 table, condition, args = self._visible(current)
@@ -1458,26 +1646,40 @@ class OwnerReadIndex:
                 args.extend(filter_args)
                 total = None
                 if current["captured_status"] == "complete":
-                    total = connection.execute(
-                        f"SELECT COUNT(*) FROM {table} r WHERE {condition}",
-                        args,
-                    ).fetchone()[0]
+                    count_key = ('count', binding)
+                    total = self._memo_get(count_key)
+                    if total is None:
+                        total = connection.execute(
+                            f"SELECT COUNT(*) FROM {table} r WHERE {condition}", args,
+                        ).fetchone()[0]
+                        self._memo_put(count_key, total)
+                selected = ','.join(f'{expression} AS _key{n}' for n, (expression, _direction) in enumerate(keys))
                 cursor = connection.execute(
-                    f"SELECT r.payload FROM {table} r WHERE {condition}"
+                    f"SELECT r.payload,{selected} FROM {table} r WHERE {condition}{seek}"
                     " ORDER BY " + self._order(current["domain"], descending)
-                    + " LIMIT ? OFFSET ?",
-                    [*args, limit, offset],
+                    + (' LIMIT ? OFFSET ?' if offset else ' LIMIT ?'),
+                    [*args, *seek_args, limit + 1, *([offset] if offset else [])],
                 )
-                rows = self._payloads(cursor)
+                records, result_size = [], 0
+                for record in cursor:
+                    result_size += len(record['payload'].encode('utf-8'))
+                    if result_size > _MAX_RESULT:
+                        raise _Issue('result_byte_budget', 'partial')
+                    records.append(record)
+                rows = self._payloads(records[:limit])
+                next_cursor = None
+                if limit and len(records) > limit:
+                    next_cursor = self._sign({'cursor_version': 1, 'binding': binding,
+                        'keys': [records[limit - 1][f'_key{n}'] for n in range(len(keys))]})
                 coverage = self._coverage(
                     current, current["captured_status"],
                     "covered" if total is not None else current["reason"],
                 )
                 result = {
-                    "rows": rows, "total_count": total, "coverage": coverage,
+                    "rows": rows, "total_count": total, "coverage": coverage, 'next_cursor': next_cursor,
                 }
             return result
-        except (_Issue, OSError, sqlite3.Error) as error:
+        except (_Issue, OSError, sqlite3.Error, OverflowError, TypeError) as error:
             status, reason = _failure(error)
             if checked is None:
                 coverage = self._view(
@@ -1485,7 +1687,7 @@ class OwnerReadIndex:
                 )
             else:
                 coverage = self._coverage(checked, status, reason)
-            return {"rows": [], "total_count": None, "coverage": coverage}
+            return {"rows": [], "total_count": None, "coverage": coverage, 'next_cursor': None}
 
     # LLM: 输入只保留本批 ID；超过上限显式拒绝，不构造或复制历史全集。
     # 函数用途: 规范化有界批量查找参数。

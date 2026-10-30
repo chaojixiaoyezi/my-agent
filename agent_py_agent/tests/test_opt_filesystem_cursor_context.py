@@ -1,4 +1,4 @@
-# LLM: 仅用pytest工作区和真实文件工具验证快照及页上下文；不绕过路径策略，不用耗时替代I/O事实。
+# LLM: 仅用pytest工作区和真实文件工具验证快照、glob及页上下文；原生预算测试必须执行真实rg，不绕过路径策略。
 # 模块用途: 防止隐式扩大忽略范围、游标串线，以及逐命中重复扫描日志前缀。
 from __future__ import annotations
 
@@ -78,9 +78,9 @@ def test_find_snapshot_cursor_stable_pages(tmp_path):
     assert rows == ['a/first.py', 'a/second.py', 'b.py', 'z.py']
 
 
-# LLM: 快照源变化必须明确stale，不能静默用旧offset重扫；字段筛选也不能跨cursor改变。
-# 函数用途: 对页间嵌套目录新增和跨筛选复用游标守住拒绝边界。
-def test_find_snapshot_change_and_filter_mismatch_are_stale(tmp_path):
+# LLM: 字段筛选不能跨cursor改变；本测试只消费自己的新鲜游标，不借其他失效分支证明拒绝。
+# 函数用途: 独立验证筛选不匹配的准确失效原因。
+def test_find_snapshot_filter_mismatch_is_stale(tmp_path):
     (tmp_path / 'sub').mkdir()
     for index in range(4):
         (tmp_path / 'sub' / f'{index}.py').write_text('sample')
@@ -92,10 +92,81 @@ def test_find_snapshot_change_and_filter_mismatch_are_stale(tmp_path):
     mismatched = tool.execute({**params, 'pattern': '*.txt', 'cursor': cursor})
     assert not mismatched.ok and mismatched.error_code == 'STALE_VERSION'
     assert mismatched.result_envelope['snapshot']['consistency'] == 'stale'
+    assert mismatched.result_envelope['snapshot']['limit_reason'] == 'filter_mismatch'
+
+
+# LLM: 源变化必须明确stale，不能用已被筛选拒绝撤销的cursor代替来源检测。
+# 函数用途: 用独立新鲜快照验证嵌套目录新增的准确失效原因。
+def test_find_snapshot_source_change_is_stale(tmp_path):
+    (tmp_path / 'sub').mkdir()
+    for index in range(4):
+        (tmp_path / 'sub' / f'{index}.py').write_text('sample')
+    tool = FindFilesTool(tmp_path, max_matches=2)
+    params = {'pattern': '*.py', 'snapshot': True, 'limit': 2}
+    first = tool.execute(params)
+    cursor = (first.result_envelope or {}).get('snapshot', {}).get('next_cursor')
+    assert first.ok and cursor
     (tmp_path / 'sub' / 'new.py').write_text('sample')
     changed = tool.execute({**params, 'cursor': cursor})
     assert not changed.ok and changed.error_code == 'STALE_VERSION'
     assert changed.result_envelope['snapshot']['consistency'] == 'stale'
+    assert changed.result_envelope['snapshot']['limit_reason'] == 'source_changed'
+
+
+# LLM: 权限绑定只许使用宿主规范值，等值新对象和根集合顺序不能撤销同一授权；每个真实策略字段变化仍须失效。
+# 函数用途: 防止用对象地址或遗漏权限字段实现快照绑定。
+def test_find_snapshot_binding_uses_policy_values(tmp_path):
+    from dataclasses import replace
+
+    tool = FindFilesTool(tmp_path, max_matches=2)
+    request = find._find_files_request_from_params({'pattern': '*.py', 'snapshot': True}, 2)
+    original = tool.path_access_policy
+    binding = find._find_snapshot_binding(tool, tmp_path, request)
+    tool.path_access_policy = replace(original)
+    assert tool.path_access_policy == original and tool.path_access_policy is not original
+    assert find._find_snapshot_binding(tool, tmp_path, request) == binding
+    for changed in (
+        replace(original, mode='full' if original.mode != 'full' else 'normal'),
+        replace(original, dangerous_roots=(*original.dangerous_roots, tmp_path / 'denied')),
+        replace(original, owner_scope_root=tmp_path / 'owner'),
+        replace(original, agent_home_root=tmp_path / 'data'),
+    ):
+        tool.path_access_policy = changed
+        assert find._find_snapshot_binding(tool, tmp_path, request) != binding
+    tool.path_access_policy = replace(original, dangerous_roots=tuple(reversed(original.dangerous_roots)))
+    assert find._find_snapshot_binding(tool, tmp_path, request) == binding
+
+
+# LLM: 相同回调与策略值不代表允许重用旧授权；每页仍须真实重核清单路径，拒绝后不能返回旧结果。
+# 函数用途: 验证权限裁决变化即使不改变绑定回调身份也会阻断续页。
+def test_find_snapshot_rechecks_permission_each_page(tmp_path, monkeypatch):
+    for index in range(4):
+        (tmp_path / f'{index}.py').write_text('sample')
+    tool = FindFilesTool(tmp_path, max_matches=2)
+    original = tool.resolve_path
+    denied = set()
+    checked = []
+
+    # LLM: 保留真实路径解析，仅让同一回调在后续页明确拒绝一个已观察文件。
+    # 函数用途: 旁听并模拟动态权限收紧，不伪造游标或来源指纹。
+    def resolve(value):
+        path = original(value)
+        checked.append(path)
+        if path in denied:
+            raise ValueError('permission revoked')
+        return path
+
+    monkeypatch.setattr(tool, 'resolve_path', resolve)
+    params = {'pattern': '*.py', 'snapshot': True, 'limit': 2}
+    first = tool.execute(params)
+    assert first.ok
+    cursor = first.result_envelope['snapshot']['next_cursor']
+    denied.add(tmp_path / '2.py')
+    checked.clear()
+    second = tool.execute({**params, 'cursor': cursor})
+    assert not second.ok and second.error_code == 'STALE_VERSION'
+    assert second.result_envelope['snapshot']['limit_reason'] == 'permission_or_path_changed'
+    assert tmp_path / '2.py' in checked
 
 
 # LLM: 强制原Python匹配后备但不模拟命中；只计真实打开，offset前命中和哨兵不应各自补上下文。
@@ -250,6 +321,102 @@ def test_native_candidate_budget_is_partial(tmp_path, monkeypatch, kind):
     assert not facts['scan_complete']
     assert result.result_envelope['page_window'].get('scan_limit_reason',
         facts.get('scan_limit_reason')) == 'candidate_byte_limit'
+
+
+# LLM: 不模拟rg输出，真实非空候选前缀触顶后仍须搜索已准入文件；总范围保持incomplete而非完整零结果。
+# 函数用途: 同时覆盖正文与计数模式的发现截断和协议消费分离。
+@pytest.mark.parametrize('output_mode', ['content', 'count'])
+def test_rg_keeps_admitted_prefix_hits_after_candidate_limit(tmp_path, monkeypatch, output_mode):
+    assert search.shutil.which('rg'), '该原生回归必须在安装rg的测试车道运行'
+    first = tmp_path / 'a.txt'
+    first.write_text('needle first\nneedle second\n')
+    (tmp_path / 'b.txt').write_text('needle excluded\n')
+    monkeypatch.setattr(helpers, '_DISCOVERY_ARG_MAX_BYTES', len(helpers.os.fsencode(first)) + 64)
+    result = search.SearchTextTool(tmp_path, 20).execute(
+        {'query': 'needle', 'literal': True, 'output_mode': output_mode})
+    assert result.ok
+    envelope = result.result_envelope
+    assert envelope['search_result']['backend'] == 'rg'
+    assert envelope['search_result']['scan_complete'] is False
+    assert envelope['page_window']['scan_limit_reason'] == 'candidate_byte_limit'
+    assert envelope['query_evidence']['coverage'] == 'incomplete'
+    assert envelope['query_evidence']['total_known'] is False
+    assert envelope['query_evidence']['returned_count'] == (2 if output_mode == 'content' else 1)
+    if output_mode == 'content':
+        assert result.output.splitlines()[:2] == ['a.txt:1: needle first', 'a.txt:2: needle second']
+    else:
+        assert result.output.splitlines()[0] == 'a.txt: 2'
+    assert 'b.txt:' not in result.output and 'needle excluded' not in result.output
+
+
+# LLM: 发现partial只能放行已准入前缀，不能放宽真实rg输出及保留字节预算；两种停止事实必须同时保留。
+# 函数用途: 验证范围截断后正文和计数仍在自己的消费预算内停止。
+@pytest.mark.parametrize('output_mode', ['content', 'count'])
+@pytest.mark.parametrize('budget', ['retained', 'stdout'])
+def test_rg_output_budget_still_stops_partial_candidate_stream(tmp_path, monkeypatch, output_mode, budget):
+    assert search.shutil.which('rg'), '该原生回归必须在安装rg的测试车道运行'
+    paths = [tmp_path / f'{name}.txt' for name in ('a', 'b', 'c')]
+    for path in paths:
+        path.write_text('needle first\nneedle second\n')
+    monkeypatch.setattr(helpers, '_DISCOVERY_ARG_MAX_BYTES',
+                        sum(len(helpers.os.fsencode(path)) + 64 for path in paths[:2]))
+    if budget == 'retained':
+        cap = len(str(paths[0]).encode('utf-8')) + 256
+        cap += len('a.txt') + (128 + len('needle first') if output_mode == 'content' else 64)
+        monkeypatch.setattr(search, '_SEARCH_RETAIN_MAX_BYTES', cap)
+    else:
+        monkeypatch.setattr(search, '_SEARCH_RG_MAX_BYTES', 1)
+    result = search.SearchTextTool(tmp_path, 100).execute(
+        {'query': 'needle', 'literal': True, 'output_mode': output_mode})
+    assert result.ok
+    envelope = result.result_envelope
+    facts = envelope['search_result']
+    assert facts['backend'] == 'rg' and not facts['scan_complete']
+    assert envelope['query_evidence']['coverage'] == 'incomplete'
+    assert envelope['page_window']['scan_limit_reason'] == 'candidate_byte_limit'
+    assert 'c.txt:' not in result.output
+    if budget == 'retained':
+        assert envelope['query_evidence']['returned_count'] == 1
+        assert facts['retained_bytes'] <= cap and 'retained_byte_limit' in facts['issues']
+        assert result.output.splitlines()[0] == ('a.txt:1: needle first' if output_mode == 'content' else 'a.txt: 2')
+    else:
+        assert envelope['query_evidence']['returned_count'] == 0
+        assert facts['rg_stdout_bytes'] <= 1 and 'rg_record_or_stdout_limit' in facts['issues']
+
+
+# LLM: 原生和Python入口均与显式正确集合对照，不以两后端共同漏文件冒充glob正确；普通星号不能跨路径段。
+# 函数用途: 验证前导、中间、多处双星的零层及多层目录匹配。
+@pytest.mark.parametrize('backend', ['rg', 'python'])
+@pytest.mark.parametrize('kind', ['find', 'search'])
+@pytest.mark.parametrize(('pattern', 'expected'), [
+    ('src/**/*.ts', ['src/deep/more/nested.ts', 'src/main.ts', 'src/tests/case1.ts',
+                    'src/unit.ts', 'src/x/tests/case22.ts']),
+    ('**/src/**/unit.ts', ['pkg/src/deep/unit.ts', 'src/unit.ts']),
+    ('src/**/tests/**/case?.[tj]s', ['src/tests/case1.ts', 'src/x/tests/y/z/case2.js']),
+    ('src/*/*.ts', ['src/tests/case1.ts']),
+])
+def test_discovery_glob_segments_match_expected_files(tmp_path, monkeypatch, backend, kind, pattern, expected):
+    paths = ['src/main.ts', 'src/unit.ts', 'src/deep/more/nested.ts', 'pkg/src/deep/unit.ts',
+             'src/tests/case1.ts', 'src/x/tests/y/z/case2.js', 'src/x/tests/case22.ts',
+             'other/main.ts', 'src/main.TS']
+    for name in paths:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('needle\n')
+    if backend == 'python':
+        monkeypatch.setattr(find, '_find_directory_matches_with_rg', lambda *_args: None)
+        monkeypatch.setattr(search, '_collect_hits_with_rg', lambda *_args: None)
+    else:
+        assert search.shutil.which('rg'), '该原生回归必须在安装rg的测试车道运行'
+    if kind == 'find':
+        result = FindFilesTool(tmp_path, 30).execute({'pattern': pattern})
+        rows = [line for line in result.output.splitlines() if line in paths]
+    else:
+        result = search.SearchTextTool(tmp_path, 30).execute(
+            {'query': 'needle', 'literal': True, 'file_glob': pattern, 'output_mode': 'line_numbers'})
+        rows = [line.rsplit(':', 1)[0] for line in result.output.splitlines() if line.endswith(':1')]
+    assert result.ok and result.result_envelope['page_window']['complete']
+    assert rows == expected
 
 
 # LLM: 命中收集与上下文补全之间真改文件，既有命中与哨兵仍保留，但来源必须变stale。
