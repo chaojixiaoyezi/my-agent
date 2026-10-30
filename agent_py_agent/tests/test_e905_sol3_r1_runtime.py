@@ -111,3 +111,92 @@ def test_runner_candidate_consumes_frozen_guard(tmp_path, monkeypatch):
     policy = RunnerCandidatePolicy()
     object.__setattr__(policy, "runtime_guard_policy", RuntimeGuardPolicy(provider_transient_redispatch_limit=7))
     assert not _is_dispatch_runner_candidate(task, policy=policy)
+
+
+def test_planner_and_capability_sweep_prefilters_consume_agent_frozen_guard(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
+        _redispatch_stalled_subagents,
+    )
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.service import (
+        update_pending_work_state,
+    )
+    from agent_py_agent.agent.agent_core.planner_service import (
+        PlannerStateParams,
+        _collect_parent_planner_context,
+    )
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    first, other = tmp_path / "configured", tmp_path / "environment"
+    _policy(first, 7)
+    _policy(other, 0)
+    monkeypatch.setenv("MY_AGENT_HOME", str(other))
+    agent = _agent(first, tmp_path / "workspace")
+    # 冻结后把磁盘和环境都改成 0（收紧）或 20（放宽），验证两个真实预筛入口始终只认 agent 冻结额度 7。
+    _policy(first, 0, revision=2)
+    _policy(other, 0, revision=2)
+
+    eligible_task = SimpleNamespace(
+        id="run-eligible",
+        attributes={},
+        status="BLOCKED",
+        failure_type="transient_error",
+        runner_attempts=6,
+        channel_status="",
+        capability_requests=[],
+        capability_gaps=[],
+        runner_active_attempt_id="",
+        runner_session_pid=0,
+        child_ids=[],
+    )
+    exhausted_task = SimpleNamespace(
+        id="run-exhausted",
+        attributes={},
+        status="BLOCKED",
+        failure_type="transient_error",
+        runner_attempts=8,
+        channel_status="",
+        capability_requests=[],
+        capability_gaps=[],
+        runner_active_attempt_id="",
+        runner_session_pid=0,
+        child_ids=[],
+    )
+    monkeypatch.setattr(agent.subagents, "list_runs", lambda: [eligible_task, exhausted_task])
+    monkeypatch.setattr(
+        agent.subagents,
+        "board",
+        SimpleNamespace(
+            build_board=lambda **_kw: {},
+            due_check=lambda **_kw: {},
+            plan_actions=lambda *_a, **_kw: [],
+        ),
+    )
+    _, ctx = _collect_parent_planner_context(
+        agent,
+        PlannerStateParams(cfg=CapabilityConfig(), limit=10, max_runners=10, reviewer="", note=""),
+    )
+    assert [t.id for t in ctx.runner_candidates] == ["run-eligible"]
+
+    _policy(first, 20, revision=3)
+    _policy(other, 20, revision=3)
+    assert update_pending_work_state(agent) is True
+
+    dispatched_ids: list[list[str]] = []
+
+    def _fake_dispatch(router, cfg, *, params):
+        dispatched_ids.append(list(params.include_run_ids or []))
+        return SimpleNamespace(
+            records=[
+                SimpleNamespace(step="runner", action="started", run_id=rid)
+                for rid in (params.include_run_ids or [])
+            ]
+        )
+
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.dispatch.capability_auto_sweep.conversation_lifecycle_decisions",
+        lambda _agent, tasks: {str(t.id): SimpleNamespace(allowed=True) for t in tasks},
+    )
+    monkeypatch.setattr(agent, "dispatch_subagents", _fake_dispatch)
+    started = _redispatch_stalled_subagents(agent)
+    assert started == 1
+    assert dispatched_ids == [["run-eligible"]]

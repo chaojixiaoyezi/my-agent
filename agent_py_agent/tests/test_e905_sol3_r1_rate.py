@@ -275,3 +275,53 @@ def test_large_threshold_shift_keeps_bounded_protective_schedule():
     assert len(merged.backoff_schedule_seconds) <= 2 * len(host.tool_circuit_backoff_seconds)
     for offset, wait in enumerate(host.tool_circuit_backoff_seconds):
         assert backoff_seconds(merged, host.tool_circuit_failure_threshold + offset) >= wait
+
+
+@pytest.mark.parametrize("entry", ["registry", "executor"])
+def test_empty_boundary_record_cannot_shadow_persisted_runtime_ledger_history(tmp_path, entry):
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
+
+    args_hash = tool_arguments_hash({})
+    persisted_records = [
+        SimpleNamespace(
+            tool="rate_probe",
+            args_hash=args_hash,
+            created_at=_clock_now() - 1,
+            updated_at=_clock_now() - 1,
+            status="failed",
+        )
+        for _ in range(3)
+    ]
+    store = SimpleNamespace(list_runtime_gate_ledger=lambda **_kwargs: persisted_records)
+    agent = SimpleNamespace(local_store=store, owner_policy=None, home_paths=None, config=None)
+    raw_boundary = {
+        "tool_rate_limit_policy": {"failure_threshold": 3, "backoff_schedule_seconds": [30]},
+        "tool_rate_limit_records": [
+            {
+                "tool_name": "rate_probe",
+                "args_hash": args_hash,
+                "attempt_timestamps": [],
+                "consecutive_failures": 0,
+                "total_failures": 0,
+                "last_failure_at": 0.0,
+                "last_success_at": 0.0,
+            }
+        ],
+    }
+    merged_boundary = write_boundary_with_runtime_ledger(
+        agent,
+        SimpleNamespace(write_boundary=raw_boundary, run_id="run-rate-shadow"),
+    )
+    result, probe = _execute(
+        tmp_path,
+        entry,
+        _host(tool_circuit_failure_threshold=3, tool_circuit_backoff_seconds=(30,)),
+        merged_boundary["tool_rate_limit_policy"],
+        merged_boundary["tool_rate_limit_records"],
+    )
+    assert result.ok is False
+    assert result.error_code == "TOOL_CIRCUIT_OPEN"
+    assert result.handler_executed is False
+    assert probe.calls == 0

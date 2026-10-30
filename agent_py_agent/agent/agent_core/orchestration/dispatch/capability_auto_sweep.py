@@ -127,6 +127,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
             if not _is_stalled_dispatchable_orphan(
                 task,
                 decisions.get(str(getattr(task, "id", "") or "")),
+                agent=agent,
             ):
                 continue
             recovery_block = _runtime_authority_recovery_block(manager, task)
@@ -171,7 +172,7 @@ def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
     try:
         task = manager.load(key)
         decision = conversation_lifecycle_decisions(agent, [task]).get(key)
-        if not _is_stalled_dispatchable_orphan(task, decision):
+        if not _is_stalled_dispatchable_orphan(task, decision, agent=agent):
             return {"started": 0, "status": "not_needed", "run_ids": []}
         recovery_block = _runtime_authority_recovery_block(manager, task)
         if recovery_block is not None:
@@ -217,10 +218,10 @@ def _split_auto_start_result(result: dict[str, object]) -> tuple[list[str], list
 # Lifetime runner_attempts counts healthy child-wait/guidance slices too, never a recovery budget.
 # Keep live-session, active-attempt and conversation fences; callers additionally check RuntimeDB UNKNOWN.
 # 函数用途: 判断同一 run 能否安全接续；正常等孩子后的第几轮不封顶，真实失败仍走既有重试规则。
-def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
+def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None, *, agent: Any = None) -> bool:
     from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
     from ....subagents.runner_session_liveness import has_fresh_runner_session
-    from ...runner.dispatch import _is_dispatch_runner_candidate
+    from ...runner.dispatch import RunnerCandidatePolicy, _is_dispatch_runner_candidate
 
     if normalize_status(str(getattr(task, "status", "") or "")) not in DISPATCHABLE_STATES:
         return False
@@ -236,7 +237,13 @@ def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
     if decision is None or not decision.allowed:
         return False
     # 复用派工候选判定(launch 防重/open 能力申请/gap/verified 排除),与 dispatch 同一口径。
-    return _is_dispatch_runner_candidate(task)
+    frozen_policy = getattr(agent, "runtime_guard_policy", None) or getattr(
+        getattr(agent, "config", None), "runtime_guard_policy", None
+    )
+    return _is_dispatch_runner_candidate(
+        task,
+        policy=RunnerCandidatePolicy(runtime_guard_policy=frozen_policy),
+    )
 
 
 # LLM: This read-side preflight mirrors the runtime repository's unknown-state
@@ -1281,12 +1288,16 @@ def _redispatch_stalled_subagents(agent: Any) -> int:
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return 0
-    from ...runner.dispatch import _is_dispatch_runner_candidate
+    from ...runner.dispatch import RunnerCandidatePolicy, _is_dispatch_runner_candidate
 
+    frozen_policy = getattr(agent, "runtime_guard_policy", None) or getattr(
+        getattr(agent, "config", None), "runtime_guard_policy", None
+    )
+    candidate_policy = RunnerCandidatePolicy(runtime_guard_policy=frozen_policy)
     tasks = [
         task
         for task in manager.list_runs()
-        if _is_dispatch_runner_candidate(task)
+        if _is_dispatch_runner_candidate(task, policy=candidate_policy)
     ]
     if not tasks:
         return 0
