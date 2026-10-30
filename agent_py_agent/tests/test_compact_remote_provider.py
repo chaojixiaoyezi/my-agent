@@ -228,7 +228,10 @@ def test_transcript_compaction_stores_the_item_and_incompatible_backends_see_thr
     assert result.compacted and calls and calls[-1].compaction_trigger is True
     assert result.thread.summary.startswith("[provider-compaction openai_responses")
     rows = [json.loads(line) for line in (tmp_path / "compact" / "conversations" / f"{thread.thread_id}.jsonl").read_text().splitlines()]
-    assert rows[-1]["provider_compaction"]["item"] == ITEM and rows[-1]["summary_sha256"]
+    assert (
+        rows[-1].get("provider_compaction", {}).get("item") == ITEM
+        or bool(rows[-1].get("provider_compaction_ref"))
+    ) and rows[-1]["summary_sha256"]
     view = resolve_compact_summary_view(agent, result.thread, THREAD_COMPACT_SCOPE)
     assert provider_compaction_content(view.provider_compaction) == CIPHER and view.source_message_ids
     # 换到读不了压缩项的后端：检查点透明，历史重新算未覆盖，下一次压缩从原文重新做

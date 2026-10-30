@@ -379,12 +379,12 @@ def _load_gateway_compact_context(
         scoped_audit_prepare = history_projection.is_scoped_audit_prepare(work_scope)
         scope = (CompactScope(kind="turn", task_id=str(work_scope.get("conversation_task_id") or ""),
                               turn_id=inputs.request_id) if scoped_audit_prepare else THREAD_COMPACT_SCOPE)
-        # LLM: 与_gateway_history_source共用唯一选择规则，范围仍由原typed工作事实裁决；不重排或删除原记录。
-        # 函数用途: 让Compact来源与模型主种子逐ID一致，排除后台审计、非聊天及本请求的所有历史位置。
+        # LLM: 与_gateway_history_source共用唯一选择规则；显式force压缩保留同请求已完成检查点并由_without_current_request_suffix切尾部未提交user。
+        # 函数用途: 让Compact来源与模型主种子逐ID一致，排除后台审计、非聊天及未完成本请求历史位置。
         def selector_factory(_positions):
             return partial(
                 history_projection.history_row_selected,
-                current_request_id=inputs.request_id, work_scope=work_scope,
+                current_request_id="" if force else inputs.request_id, work_scope=work_scope,
             )
 
         source = load_conversation_compact_source(

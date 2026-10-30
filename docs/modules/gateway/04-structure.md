@@ -1,3 +1,7 @@
+## 2026-10-29 e905-sol-13：Gateway 压缩历史选择器与主种子同源结构
+
+- `gateway_parts/request_context.py::_load_gateway_compact_context` 通过 `partial(history_projection.history_row_selected, current_request_id="" if force else inputs.request_id, work_scope=work_scope)` 构造 `selector_factory`，与 `_gateway_history_source` 共用唯一单行过滤规则，保证 `capture_transcript_prefix` 校验时主种子与 `compact_source.messages` 前缀严格一致。
+
 ## 2026-10-28 Wave 9 A1 Round 2：单向推送接线与隔离
 
 - `http_routes.py` / `http_service.py` 将 `POST /remote-agent/push` 分派给 `remote_push_service.handle_remote_push`，其余路由携带push Token立即拒绝。`authenticate_push` 核独立Token的SHA256验证器、目标owner/action/IP、准确原文HMAC和时间窗；`consume_push_nonce` 在独立锁下耐久防重放。`accept_remote_push` 先保存prepared短回执，再经 `enqueue_remote_push`、`write_gateway_request_once`、`prepare_coordinator_input` 沿原T→C末门一次提交，不新增执行队列。

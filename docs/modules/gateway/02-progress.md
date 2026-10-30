@@ -1,3 +1,7 @@
+## 2026-10-29 e905-sol-13：Gateway 压缩来源与主历史种子选择规则对齐（分支已实现，待集成）
+
+- `gateway_parts/request_context.py::_load_gateway_compact_context` 将 `selector_factory` 统一收敛到 `history_projection.history_row_selected`，使自动预检与延迟压缩（`defer_compact=True`）排除后台审计、非聊天记录及当前请求中段行，与 `_gateway_history_source` 主种子逐 ID 对齐，消除 `COMPACT_SOURCE_CHANGED`；显式 `force=True` 强制压缩继续保留同请求内已完成检查点并由 `_without_current_request_suffix` 剥离未提交尾部用户输入。
+
 ## 2026-10-28 Wave 9 A1 Round 2：单向远端推送（本地候选，未部署）
 
 - `gateway_parts/remote_push_service.py` 承接唯一 `POST /remote-agent/push`。独立push Token仅允许目标owner的事件入队，时间窗/HMAC、跨进程nonce及持久业务幂等先于原Gateway输入T→C提交；回执不含消息正文，`run_id`仅指排队请求，不证明模型执行完成。其他路由不接受push Token作为读取或控制身份。
