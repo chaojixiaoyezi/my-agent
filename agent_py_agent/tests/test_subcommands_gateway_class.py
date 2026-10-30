@@ -1,3 +1,5 @@
+# LLM: 以局部 argparse 注册验证网关子命令、默认参数及 handler 接线；只解析参数，不安装、启停或连接真实服务。
+# 模块用途: 回归网关命令注册与参数合同，保留普通 argparse 消费方的独立覆盖。
 """CLI 网关子命令测试。
 
 测试 agent_py_agent/cli/subcommands_gateway.py 中的子命令注册函数。
@@ -292,6 +294,8 @@ class TestGatewayResultCommand:
         assert args.show_prompt is True
 
 
+# LLM: 局部注册必须提供规范 gateway supervisor start/stop 路径、原处理器和显式 timeout；测试不调用进程生命周期操作。
+# 类用途: 验证看门狗规范子命令接线与停止预算，并保留 start-all 参数检查。
 class TestSupervisorSubcommands:
     """测试 supervisor 相关子命令。"""
 

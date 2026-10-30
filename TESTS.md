@@ -1,3 +1,13 @@
+## 2026-10-29 e905 sol-9 R2：配置事实单入口与双层注释补齐
+
+来源：07 `fix-e905-sol-9-r2.md` 与 Astra-1 二审 B1/B2；接 `d67030b01`，全范围注释基线仍为 `4bea324e3`。
+
+- `config_cmd.py` 写前旧值复用 `read_config_fact.user_value`，底层统一去引号和脱敏；不在 CLI 读 raw YAML，不改变参数写入、权限门、空值、具体错误及未知异常传播合同。
+- 新增四个参数化消费方回归，区分普通旧值、无覆盖、空串和零；旧实现四例均失败。保留原真实配置去引号、敏感字段掩码、写失败与全局写门回归，不削弱删除验证器或 manifest。
+- 两份测试模块头与 `TestSupervisorSubcommands` 类补中文双层职责说明；用 AST 按基线区间检查现存改动 Python 模块和新增/修改定义，包含嵌套函数、方法及装饰器。
+
+复现：在工作树根设置 `PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1`，分批运行任务指定六份 pytest，运行 `scripts/verify_optimization_removal.py --worker sol-9 --json`、全范围 Ruff、导入边界和 `git diff --check 4bea324e3..HEAD`。实际结果与删除门尚待项写入本轮 DONE 的 `Round 2 Fixes`，不以结构无失败冒称全分支验收。
+
 ## 2026-10-29 e905 sol-9 R1：CLI 消费方、冻结合同与诊断返工
 
 来源：07 `fix-e905-sol-9-r1.md` 七项要求及 Opus/Astra-1 复核。接 `74c56cf71`；真实检查基线仍为 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。

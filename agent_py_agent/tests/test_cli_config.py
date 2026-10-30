@@ -1,3 +1,5 @@
+# LLM: 使用临时配置验证 typed 服务读写及 CLI 输出合同；覆盖旧值去引号、凭据脱敏、空值和明确权限拒绝，不修改生产配置。
+# 模块用途: 回归配置安全读写、写前值展示及失败回显，确保原子写入、白名单和全局写门不被绕过。
 """config-set / config-get 测试:行级安全写回(保留注释/原子)+ 白名单 + secret 脱敏。
 
 钉死:① 顶层 key 原地替换、注释和其余行不动 ② 整数字段不加引号 ③ 缺失 key 追加 ④ 含引号的值拒绝
@@ -112,6 +114,26 @@ def test_set_previous_value_without_yaml_quotes(tmp_path, capsys, key, old, expe
     if key.endswith("secret"):
         assert old not in out and "newvalue" not in out
     assert load_simple_yaml(p)[key] == "newvalue"
+
+
+# LLM: 仅替换只读配置事实以隔离 CLI 消费方；实际写入仍走 typed 服务，旧值必须使用已脱敏的 user_value 而非直接读 YAML 或默认值。
+# 函数用途: 验证写前展示服从统一配置事实，并区分没有覆盖、空串和数值零。
+@pytest.mark.parametrize("previous,expected", [
+    ("typed_previous", "typed_previous"),
+    (None, "(新增)"),
+    ("", ""),
+    ("0", "0"),
+])
+def test_set_previous_value_uses_typed_config_fact(tmp_path, monkeypatch, capsys, previous, expected):
+    from unittest.mock import Mock
+
+    p = _write_config(tmp_path)
+    fact = Mock(return_value={"user_value": previous})
+    monkeypatch.setattr(C, "read_config_fact", fact)
+    assert C.cmd_config_set(Namespace(key="feishu_app_id", value="newvalue", config=str(p))) == 0
+    assert f"feishu_app_id: {expected} → newvalue" in capsys.readouterr().out
+    fact.assert_called_once_with("feishu_app_id", user_path=p, default_path=C.packaged_config_path())
+    assert load_simple_yaml(p)["feishu_app_id"] == "newvalue"
 
 
 # LLM: 坏端口必须被真实 typed 校验拒绝；输出具体服务原因而非中文兜底，且不改变原文件。

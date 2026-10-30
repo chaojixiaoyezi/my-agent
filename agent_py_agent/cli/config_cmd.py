@@ -18,7 +18,6 @@ from pathlib import Path
 
 from agent_py_agent.agent.common.global_write_guard import GlobalWriteInWorkerError
 from agent_py_agent.agent.settings import load_config
-from agent_py_agent.agent.settings.config_io import load_simple_yaml
 from agent_py_agent.agent.settings.parameter_changes import ChangeOrigin, WritePaths, set_parameter
 from agent_py_agent.agent.settings.user_config_capability import (
     mask_value,
@@ -46,8 +45,8 @@ def add_config_subcommands(sub: argparse._SubParsersAction) -> None:
     getter.set_defaults(func=cmd_config_get)
 
 
-# LLM: 仅五项白名单可写；旧值只读解析后立即脱敏，写入仍经唯一参数服务和全局写门；仅捕获已知门拒绝，未知执行故障不伪报未执行。
-# 函数用途: 展示安全的前后值或中文失败原因，权限拒绝返回结构化非零结果；不直接写 YAML。
+# LLM: 仅五项白名单可写；旧值只取统一配置事实中已解析、已脱敏的 user_value，不能用默认值替代缺失覆盖；写入仍经参数服务和全局写门，仅捕获明确门拒绝。
+# 函数用途: 委托 typed 服务读取写前展示值并写配置和账本，展示安全前后值或具体失败原因；未知故障继续向上传播。
 def cmd_config_set(args) -> int:
     key = str(args.key)
     if key not in _SETTABLE_KEYS:
@@ -58,9 +57,9 @@ def cmd_config_set(args) -> int:
     if not path.exists():
         print(f"❌ 配置文件不存在: {path}")
         return 1
-    # 服务账本中的 previous 已在带 YAML 引号时脱敏，无法还原正确前缀；只读原配置并先解析再脱敏。
-    previous = load_simple_yaml(path).get(key)
-    before = mask_value(key, previous) if previous is not None else "(新增)"
+    # 配置事实已统一去引号并脱敏；只用用户覆盖，不把随包默认值误报成写前旧值。
+    previous = read_config_fact(key, user_path=path, default_path=packaged_config_path())["user_value"]
+    before = previous if previous is not None else "(新增)"
     try:
         report = set_parameter(key, args.value, paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
     except GlobalWriteInWorkerError as exc:
