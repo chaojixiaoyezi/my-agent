@@ -731,11 +731,13 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             scan = None
         if scan is None:
             cursor = recovered or {}
-            scan = {'iterator': _sorted_quota_entries(root, after=cursor.get('last_relpath', '')),
+            prep = cursor.get('prep') if isinstance(cursor.get('prep'), dict) else None
+            state = {'prep': dict(prep) if prep is not None else None}
+            scan = {'iterator': _sorted_quota_entries(root, after=cursor.get('last_relpath', ''), state=state),
                     'revision': ledger['revision'], 'last_relpath': cursor.get('last_relpath', ''),
                     'used': cursor.get('partial_used_bytes', 0), 'inodes': cursor.get('partial_inode_count', 0),
                     'scanned': cursor.get('scanned', 0), 'epoch': cursor.get('epoch', uuid.uuid4().hex),
-                    'started_at': cursor.get('started_at', time.time())}
+                    'started_at': cursor.get('started_at', time.time()), 'state': state}
             _QUOTA_SCANS[key] = scan
         _QUOTA_SCANS.move_to_end(key)
         while len(_QUOTA_SCANS) > _QUOTA_SCAN_CACHE_SIZE:
@@ -765,11 +767,15 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             _QUOTA_SCANS.pop(key, None)
             raise
         identity = root.stat(follow_symlinks=False)
-        ledger['reconcile_cursor'] = {
+        cursor_payload = {
             'epoch': scan['epoch'], 'scanned': scan['scanned'], 'complete': complete,
             'last_relpath': scan['last_relpath'], 'partial_used_bytes': scan['used'],
             'partial_inode_count': scan['inodes'], 'started_at': scan['started_at'],
             'ledger_revision': ledger['revision'], 'root_dev': identity.st_dev, 'root_ino': identity.st_ino}
+        prep_state = scan.get('state', {}).get('prep') if isinstance(scan.get('state'), dict) else None
+        if not complete and isinstance(prep_state, dict):
+            cursor_payload['prep'] = prep_state
+        ledger['reconcile_cursor'] = cursor_payload
         if complete:
             ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'], dirty_since=None,
                           reservations={}, reserved_bytes=0)
@@ -781,6 +787,25 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
                 'used_bytes': ledger['used_bytes'],
                 'inode_count': ledger['inode_count'], 'cursor': ledger['reconcile_cursor']}
+
+
+# LLM: 验证排序准备阶段持久状态的结构、深度、候选上限与单调顺序；损坏即拒绝使用。
+# 函数用途: 校验未完成目录枚举批次的持久恢复字段。
+def _valid_quota_prep_cursor(prep):
+    if not isinstance(prep, dict):
+        return False
+    parts, after, enumerated = prep.get('parts'), prep.get('after'), prep.get('enumerated')
+    names, dir_id = prep.get('names'), prep.get('dir_id')
+    if (not isinstance(parts, list) or len(parts) > 64
+            or any(not isinstance(p, str) or not p or '/' in p or p in ('.', '..') for p in parts)
+            or not isinstance(after, str) or type(enumerated) is not int or enumerated <= 0
+            or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH
+            or any(not isinstance(n, str) or not n or n <= after for n in names)
+            or names != sorted(set(names))
+            or not isinstance(dir_id, list) or len(dir_id) != 2
+            or any(type(v) is not int or v < 0 for v in dir_id)):
+        return False
+    return True
 
 
 # LLM: 只恢复未过期、同root身份及同写revision的完整游标；旧格式缺部分统计须重扫，不猜累计值。
@@ -799,27 +824,53 @@ def _resumable_quota_cursor(root, ledger):
             or not 0 <= time.time() - started <= _QUOTA_SCAN_CURSOR_TTL
             or cursor['ledger_revision'] != ledger['revision']):
         return None
+    if 'prep' in cursor and cursor['prep'] is not None and not _valid_quota_prep_cursor(cursor['prep']):
+        return None
     info = root.stat(follow_symlinks=False)
     return cursor if (info.st_dev, info.st_ino) == (cursor['root_dev'], cursor['root_ino']) else None
 
 
 # LLM: 每层只保留最小128个名字；每个真实枚举先交回预算门，完整枚举完才发表排序批次。
-#   暂停只持当前目录流及其绑定FD，父层名字列表无FD；缓存淘汰/异常会关闭整栈，内存与FD均有界。
-# 函数用途: 可暂停地准备排序候选，避免一次next隐藏整目录无界工作。
-def _quota_sorted_names(root, parts, after):
+#   暂停只持当前目录流及其绑定FD，恢复时校验目录身份并跳过已计入prep的枚举前缀。
+# 函数用途: 可暂停且可跨缓存淘汰恢复地准备排序候选，避免大目录在切片重启后原地踏步。
+def _quota_sorted_names(root, parts, after, state=None):
     import bisect
 
-    names = []
     descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     try:
+        dir_stat = os.fstat(descriptor)
+        dir_id = [dir_stat.st_dev, dir_stat.st_ino]
+        prep = state.get('prep') if isinstance(state, dict) else None
+        if (isinstance(prep, dict) and tuple(prep.get('parts', ())) == parts
+                and prep.get('after') == after and prep.get('dir_id') == dir_id):
+            skip_remaining = int(prep.get('enumerated', 0))
+            names = list(prep.get('names', ()))
+            raw_count = skip_remaining
+        else:
+            skip_remaining = 0
+            names = []
+            raw_count = 0
         with os.scandir(descriptor) as entries:
             for entry in entries:
                 name = entry.name + ('/' if entry.is_dir(follow_symlinks=False) else '')
-                if name > after:
-                    bisect.insort(names, name)
-                    if len(names) > _QUOTA_SORT_BATCH:
-                        names.pop()
+                if name > after and (len(names) < _QUOTA_SORT_BATCH or name < names[-1]):
+                    idx = bisect.bisect_left(names, name)
+                    if idx == len(names) or names[idx] != name:
+                        names.insert(idx, name)
+                        if len(names) > _QUOTA_SORT_BATCH:
+                            names.pop()
+                if skip_remaining > 0:
+                    skip_remaining -= 1
+                    continue
+                raw_count += 1
+                if isinstance(state, dict):
+                    state['prep'] = {
+                        'parts': list(parts), 'after': after, 'enumerated': raw_count,
+                        'names': list(names), 'dir_id': dir_id,
+                    }
                 yield None
+            if isinstance(state, dict):
+                state['prep'] = None
             return names
     finally:
         os.close(descriptor)
@@ -838,14 +889,27 @@ def _quota_sorted_stat(root, parts, name):
 # LLM: 持久last_relpath为完整字典序键，恢复只进入可能包含后继的子树；深度64和每层128名字有界。
 #   排序准备逐项yield供时间/枚举预算中断；重启跳过旧键不重复计费，时间预算仍不抢占单个系统调用。
 # 函数用途: 为后台配额生成确定性续扫项，同时保持前台原有小目录扫描算法不变。
-def _sorted_quota_entries(root, parts=(), *, after=''):
+def _sorted_quota_entries(root, parts=(), *, after='', state=None):
     if len(parts) > 64:
         raise OwnerQuotaUnavailable('quota traversal depth exceeded')
     prefix = '/'.join(parts) + '/' if parts else ''
     remaining = after[len(prefix):] if after.startswith(prefix) else ''
-    last_name = remaining.split('/', 1)[0] if remaining else ''
+    sub_name, sep, _ = remaining.partition('/')
+    if sep == '/' and sub_name:
+        try:
+            info = _quota_sorted_stat(root, parts, sub_name)
+        except FileNotFoundError:
+            info = None
+        if info is not None and stat.S_ISDIR(info.st_mode):
+            try:
+                yield from _sorted_quota_entries(root, (*parts, sub_name), after=after, state=state)
+            except FileNotFoundError:
+                pass
+        last_name = sub_name + '/'
+    else:
+        last_name = remaining
     while True:
-        names = yield from _quota_sorted_names(root, parts, last_name)
+        names = yield from _quota_sorted_names(root, parts, last_name, state=state)
         if not names:
             return
         for name in names:
@@ -864,9 +928,11 @@ def _sorted_quota_entries(root, parts=(), *, after=''):
                 yield relpath, max(0, info.st_size) if regular else 0, int(regular)
             if stat.S_ISDIR(info.st_mode):
                 try:
-                    yield from _sorted_quota_entries(root, (*parts, name.rstrip('/')), after=after)
+                    yield from _sorted_quota_entries(root, (*parts, name.rstrip('/')), after=after, state=state)
                 except FileNotFoundError:
                     continue
+        if len(names) < _QUOTA_SORT_BATCH:
+            return
         last_name = names[-1]
 
 
