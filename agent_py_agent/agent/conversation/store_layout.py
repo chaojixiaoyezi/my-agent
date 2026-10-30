@@ -1,4 +1,4 @@
-# LLM: 会话持久路径在本上下文唯一组装，所有领域必须共用；不持有线程、任务或唤醒业务状态。
+# LLM: 会话持久路径在本上下文唯一组装，所有领域必须共用；compact根优先由宿主注入，不持有线程、任务或唤醒业务状态。
 # 模块用途: 管理原会话目录与读取侧索引，支持无副作用的只读打开，不迁移任何数据格式。
 from __future__ import annotations
 
@@ -30,13 +30,11 @@ def _thread_stem(thread_id: str) -> str:
 # LLM: 目录初始化和路径计算不拥有生命周期；各领域显式接收此上下文，不能另建 canonical 根。
 # 类用途: 为同一会话 Store 提供唯一持久位置和只读扫描投影。
 class ConversationStorage:
-    # LLM: Passive Gateway replay may open an already-existing owner store without creating any
-    # directories. Runtime writers keep the default initialize=True; read-only callers must never
-    # pass initialize=False for a path that has not already been resolved inside an authenticated
-    # owner home.
-    # 函数用途: 建立 canonical 路径与扫描上下文；被动重放只读打开已有目录，不读取配置或密钥。
-    def __init__(self, root: str | Path, *, initialize: bool = True):
+    # LLM: initialize=False仅供已认证owner内的只读重放，不创建目录；写侧保持默认初始化，compact_root只保存宿主路径不读写冷库。
+    # 函数用途: 建立会话路径和扫描上下文，可接收唯一owner compact根，不读取配置或密钥。
+    def __init__(self, root: str | Path, *, initialize: bool = True, compact_root: str | Path | None = None):
         self.root = Path(root)
+        self.compact_root = Path(compact_root) if compact_root is not None else None
         self.threads_dir = self.root / "threads"
         self.messages_dir = self.root / "messages"
         self.model_usage_dir = self.root / "model_usage"
@@ -74,6 +72,18 @@ class ConversationStorage:
         self.indexes = ScanIndexes()
         if initialize:
             self.ensure_dirs()
+
+    # LLM: 显式提交根优先于构造注入；默认工作区布局回到owner/compact，其余同级夹具回退，不建目录或授予路径权限。
+    # 函数用途: 为冷转定位与检查点writer一致的compact根，避免默认嵌套会话库猜错目录。
+    def resolve_compact_root(self, explicit: str | Path | None = None) -> Path:
+        if explicit is not None:
+            return Path(explicit)
+        if self.compact_root is not None:
+            return self.compact_root
+        if (len(self.root.parents) >= 4 and self.root.parent.parent.name == 'workspaces'
+                and self.root.parents[2].name == 'runtime' and self.root.parents[3].name == 'workspace'):
+            return self.root.parents[3].parent / 'compact'
+        return self.root.parent / 'compact'
 
     # LLM: 只创建既有目录集合；被动读取不能调用本入口，不写业务文件。
     # 函数用途: 在可写 Store 初始化时准备原有目录，失败直接暴露给调用方。

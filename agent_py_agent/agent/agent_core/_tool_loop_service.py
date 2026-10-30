@@ -163,6 +163,8 @@ _ORCHESTRATION_TOOLS = {
 }
 
 
+# LLM: 冻结单步输入引用，不额外取得执行权限；由工具轮步进器传给原执行链。
+# 类用途: 携带当前参数、轮数、动作及提示，避免散落位置参数。
 @dataclass(frozen=True)
 class _ToolStepRequest:
     params: ToolLoopExecuteParams
@@ -265,6 +267,8 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     return effective
 
 
+# LLM: 只依据已执行工具、明确空响应及本轮重试次数判断，不发送请求或修改参数。
+# 函数用途: 允许工具已有结果后对一次空模型响应做有界重试。
 def _should_retry_empty_model_response(
     params: ToolLoopExecuteParams,
     exc: Exception,
@@ -277,6 +281,8 @@ def _should_retry_empty_model_response(
     )
 
 
+# LLM: 空响应且有待处理输入时，先丢旧自然回复再沿原邮箱注入本轮，不另开模型调用。
+# 函数用途: 让新会话输入替代不可用的旧响应。
 def _pending_turn_input_supersedes_unusable_response(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -293,6 +299,8 @@ def _pending_turn_input_supersedes_unusable_response(
     return inject_pending_turn_input(agent, params)
 
 
+# LLM: 仅生成提示文本，引用最近已执行工具，不重跑工具或把调用尝试当成成功。
+# 函数用途: 提醒模型复用已完成结果后继续处理空响应。
 def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
     tools = ", ".join(str(item) for item in params.executed_tools[-6:]) or "(none)"
     return "\n".join(
@@ -452,6 +460,8 @@ def _conversation_visible_write_roots(
     return visible
 
 
+# LLM: 仅接受既有序列类型并规范化非空字符串，不消费任意对象迭代器或改变原值。
+# 函数用途: 提取可见名称列表。
 def _string_sequence(value: object) -> list[str]:
     if not isinstance(value, (list, tuple, set)):
         return []
@@ -486,6 +496,8 @@ def _fit_native_ir_to_shared_budget(
 
     calibration = compact_request_calibration_for_request(agent, params, prompt)
 
+    # LLM: 闭包绑定本次校准及参数，仅测量当前模型可见上下文，不提交模型请求。
+    # 函数用途: 给压缩策略提供本次校准后的token估值。
     def estimator() -> int:
         raw = model_visible_context_snapshot(agent, params, prompt).raw_estimated_tokens
         return calibrated_compact_request_tokens(raw, calibration)
@@ -686,6 +698,8 @@ def _native_compact_floor_tokens(
         tool_context=list(params.tool_context),
     )
 
+    # LLM: 只测量隔离probe参数，不改变当前IR或真实运行内工具历史。
+    # 函数用途: 评估工具退休候选的模型可见上下文大小。
     def estimator() -> int:
         return model_visible_context_tokens(agent, probe_params, prompt)
 
@@ -864,6 +878,7 @@ def _summarize_live_compact(
         raise
 
 
+# LLM: 复用原provider字段提取器，不解密、不发送请求或改变计划内容。
 # 函数用途: 取计划里服务端压缩项的密文（没有返回空串），交给 IR 替换与视图刷新。
 def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
     from ..conversation.compact_remote import provider_compaction_content
@@ -965,6 +980,7 @@ def _apply_native_compact_plan(
         _refresh_native_compact_context(
             params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
             provider_compaction=plan.provider_compaction,
+            agent=agent,
         )
         prepare_conversation_method_carry(agent, params, budget_cap=plan.trigger_tokens - after_tokens)
     # 提交视图刷新和方法补带都改变发送材料，完成事件不能沿用候选的旧数字。
@@ -1132,8 +1148,8 @@ def _commit_native_ir_generation(
     )
 
 
-# LLM: A winning CAS fixed the checkpoint. Extend its run-local view from the frozen base/refs;
-# the new current-turn IR summary then replaces only the synthetic old provider-history prefix.
+# LLM: 获胜CAS固定检查点；持久视图沿原head封印根恢复，仅非持久兼容视图派生本轮增量，禁止展开旧覆盖。
+# 当前IR摘要只替代合成的旧provider历史前缀，不将运行内投影作为另一提交权威。
 # 函数用途: 提交后更新同范围视图，并从前置历史移除已由本轮IR替代的旧摘要。
 def _refresh_native_compact_context(
     params: ToolLoopExecuteParams,
@@ -1142,22 +1158,52 @@ def _refresh_native_compact_context(
     summary: str,
     source_refs: tuple[dict[str, str], ...],
     provider_compaction: dict[str, object] | None = None,
+    agent: object | None = None,
 ) -> None:
-    from ..conversation.compact_summary_view import AppliedCompactContext, CompactSummaryView
+    from ..conversation.compact_summary_view import (
+        AppliedCompactContext,
+        CompactSummaryView,
+        _IndexedMessageCoverage,
+        _IndexedToolCoverage,
+        _validated_carried_metadata,
+    )
 
     previous = params.compact_context
     if not isinstance(previous, AppliedCompactContext):
         raise TypeError("Compact 应用上下文类型无效")
     view = previous.view
+    messages, tools, metadata = view.source_message_ids, view.source_tool_refs, {}
+    root = tools.index.root if isinstance(tools, _IndexedToolCoverage) and view.carried_metadata else None
+    if agent is not None:
+        from ..conversation.compact_checkpoint import _compact_root
+
+        root = _compact_root(agent, previous.thread_id)
+    if root is not None:
+        from ..conversation.compact_checkpoint import _cold_checkpoint
+        from ..conversation.store_io import ImmutableJsonIndex
+
+        row = _cold_checkpoint(root, previous.thread_id, str(thread.compact_checkpoint_id))
+        if row is None or row.get('generation') != thread.compact_generation:
+            raise OSError('committed native compact head is missing or mismatched')
+        metadata = _validated_carried_metadata(row)
+        index = ImmutableJsonIndex(root, ('evidence', previous.thread_id, 'indexes'))
+        messages = _IndexedMessageCoverage(metadata['recent_messages'], index, metadata['messages'],
+                                            metadata['message_count'], row['checkpoint_id'], metadata['checkpoint_lineage'])
+        tools = _IndexedToolCoverage(metadata['recent_tools'], index, metadata['tools'], metadata['tool_count'])
+    elif callable(getattr(tools, 'with_added', None)):
+        tools = tools.with_added(source_refs)
+    else:
+        tools = tools + tuple(dict(ref) for ref in source_refs)
     updated_view = CompactSummaryView(
         checkpoint_id=str(getattr(thread, "compact_checkpoint_id", "") or ""),
         summary=str(summary or ""),
         operation_evidence=dict(view.operation_evidence),
-        source_message_ids=view.source_message_ids,
-        source_tool_refs=(*view.source_tool_refs, *(dict(ref) for ref in source_refs)),
+        source_message_ids=messages,
+        source_tool_refs=tools,
         legacy_message_end_ids=view.legacy_message_end_ids,
         generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
         provider_compaction=dict(provider_compaction or {}),
+        carried_metadata=metadata,
     )
     object.__setattr__(params, "compact_context", AppliedCompactContext(
         thread_id=previous.thread_id,
@@ -1784,6 +1830,8 @@ def _ptl_reclaim_oldest(
     return reclaim_oldest_tool_results_for_ptl(params.tool_context) > 0
 
 
+# LLM: 执行期间暂存本轮参数，并在finally恢复先前值；实际调用沿原追踪及权限链执行。
+# 函数用途: 在正确工具轮上下文中运行一条工具调用。
 def execute_one_tool_call(agent, request: ToolCallExecuteParams):
     sentinel = object()
     previous = getattr(agent, "_current_tool_loop_params", sentinel)
@@ -1794,6 +1842,8 @@ def execute_one_tool_call(agent, request: ToolCallExecuteParams):
         _restore_tool_loop_params(agent, previous, sentinel)
 
 
+# LLM: 构造结构化运行请求并登记开始事件，执行权限仍由原工具追踪执行器校验。
+# 函数用途: 将单个规范工具调用交给已有运行链。
 def _execute_scoped_tool_call(agent, request: ToolCallExecuteParams):
     call = request.call
     runtime_request = ToolCallRuntimeRequest(agent, request, call)
@@ -1801,6 +1851,8 @@ def _execute_scoped_tool_call(agent, request: ToolCallExecuteParams):
     return execute_traced_tool_call(runtime_request)
 
 
+# LLM: 精确恢复调用前属性；原本不存在则删除临时值，不遗留跨轮状态。
+# 函数用途: 清理单次工具执行的临时参数绑定。
 def _restore_tool_loop_params(agent, previous: object, sentinel: object) -> None:
     if previous is sentinel:
         try:
@@ -1811,6 +1863,8 @@ def _restore_tool_loop_params(agent, previous: object, sentinel: object) -> None
     agent._current_tool_loop_params = previous
 
 
+# LLM: 只续租本进程已持有的attempt执行锁，代次失配或存储失败不授予新权力，沿原路径静默跳过。
+# 函数用途: 防止长工具轮的合法执行租约自然过期。
 def _renew_exec_lock_if_held(agent, params: ToolLoopExecuteParams) -> None:
     """R1-03 工具循环每轮续租执行权锁（lease 60s，fail-silent）。
 
@@ -1844,6 +1898,8 @@ def _renew_exec_lock_if_held(agent, params: ToolLoopExecuteParams) -> None:
         pass
 
 
+# LLM: 仅当旧自然回复与未处理输入同时存在时丢弃旧展示回复，不确认或消费新输入。
+# 函数用途: 避免把新任务输入留在只展示回执的回合中。
 def _discard_stale_natural_reply_for_pending_turn_input(agent, params: ToolLoopExecuteParams) -> bool:
     """Keep task input out of the presentation-only receipt round."""
     if pending_natural_user_reply(params) is None or not has_pending_turn_input(agent, params):
@@ -1867,6 +1923,8 @@ def _reset_pending_turn_input_invalidations(params: ToolLoopExecuteParams) -> No
         state.pop("_pending_turn_input_invalidations", None)
 
 
+# LLM: 原邮箱判据为准；无输入时重置连续作废计数，有输入仅丢旧自然回复，不擅自提交下一轮。
+# 函数用途: 判断待处理输入是否使旧最终回复失效。
 def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParams) -> bool:
     if not has_pending_turn_input(agent, params):
         _reset_pending_turn_input_invalidations(params)
@@ -2239,6 +2297,8 @@ def _run_tool_round(agent, request: ToolRoundExecutionRequest):
     return request.tool_rounds, final_response
 
 
+# LLM: 有效轮数上限由原参数策略解析；零表示不限，本函数只判断不改变运行状态。
+# 函数用途: 检查当前工具轮数是否已达既有上限。
 def _tool_round_limit_reached(agent, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
     limit = _effective_max_tool_rounds(agent, params)
     return limit > 0 and tool_rounds >= limit
@@ -2604,6 +2664,8 @@ def _soft_hint_after_failures(
     )
 
 
+# LLM: 只按既有错误码前缀选择建议，不把提示文本当成重试授权或自动执行策略。
+# 函数用途: 为连续工具失败提供对应恢复提示。
 def _recovery_hint_for_failure_class(failure_class: str) -> str:
     for prefixes, hint in _RECOVERY_HINT_BY_CODE_PREFIX:
         if failure_class.startswith(prefixes):
@@ -2801,6 +2863,8 @@ def _record_tool_call_ir_if_native(
     )
 
 
+# LLM: 仅序列化传入的结构化进度与错误，不读取文件或替调用方关闭进度项。
+# 函数用途: 将当前任务的进度证据投影为工具上下文文本。
 def _task_local_progress_context(progress: dict[str, object]) -> str:
     load_error = progress.get("load_error")
     status_save_error = progress.get("status_save_error")
@@ -2820,10 +2884,14 @@ def _task_local_progress_context(progress: dict[str, object]) -> str:
     )
 
 
+# LLM: 只检查实际executed_tools记录，不将计划、工具可用性或子代理结果当成已派工。
+# 函数用途: 判断本轮是否确实调用过子代理编排工具。
 def _executed_subagent_orchestration(params: ToolLoopExecuteParams) -> bool:
     return any(str(item or "") in _ORCHESTRATION_TOOLS for item in params.executed_tools or [])
 
 
+# LLM: 从本轮状态取走延后调用，按当前工具/协议快照逐条重建；无效项记原错误，不扩张工具权限。
+# 函数用途: 恢复可继续执行的延后规范工具调用。
 def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list:
     from ..tooling.runtime_contracts import canonical_tool_call_from_persisted_payload
 
@@ -2859,6 +2927,8 @@ def _pop_pending_deferred_tool_calls(params: ToolLoopExecuteParams) -> list:
     return calls
 
 
+# LLM: 复用原提示构建链；构建失败返回空串给既有收尾流程，不发送模型请求。
+# 函数用途: 为清理延后工具调用准备当前提示。
 def _deferred_drain_prompt(agent: object, params: ToolLoopExecuteParams) -> str:
     try:
         return build_tool_loop_prompt(agent, params)

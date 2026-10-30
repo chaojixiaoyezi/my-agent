@@ -1,4 +1,4 @@
-# LLM: 在唯一 canonical 根目录显式组装会话领域；调用方直接使用领域对象，锁、CAS 和原子提交仍归原组件。
+# LLM: 在唯一 canonical 根目录显式组装会话领域并透传owner compact根；调用方直接使用领域对象，锁、CAS 和原子提交仍归原组件。
 # 模块用途: 连接会话持久能力并提供跨领域上下文和旧账维护，不承载插话、任务或消息的底层实现。
 from __future__ import annotations
 
@@ -33,16 +33,17 @@ _LEDGER_GC_RETENTION_SECONDS = 7 * 24 * 3600
 # LLM: 所有领域在唯一 canonical 根目录组装；跨域依赖显式注入，插话通过 guidance 分层组装，不能增加旧 API 转发。
 # 类用途: 组装会话持久能力并提供跨领域上下文读取，保持原目录和线程原子更新边界。
 class ConversationStore:
-    # LLM: initialize=False 保持只读打开；组件初始化不读写账本，线程回调仍使用原跨进程文件锁。
-    # 函数用途: 在同一存储上下文组装各领域及共享时钟，向组件显式提供跨域能力。
+    # LLM: initialize=False保持只读打开；compact_root透传同一存储上下文，组件初始化不读写账本，线程回调仍用原跨进程文件锁。
+    # 函数用途: 在同一会话与冷检查点路径上下文组装各领域及共享时钟，显式提供跨域能力。
     def __init__(
         self,
         root: str | Path,
         *,
         initialize: bool = True,
         model_default: Callable[[], str] | None = None,
+        compact_root: str | Path | None = None,
     ) -> None:
-        self.storage = ConversationStorage(root, initialize=initialize)
+        self.storage = ConversationStorage(root, initialize=initialize, compact_root=compact_root)
         self.threads = ThreadStore(self.storage, model_default=model_default)
         self.messages = MessageStore(
             self.storage, require_thread=self.threads.require,

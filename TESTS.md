@@ -391,6 +391,44 @@ git diff --check 4bea324e3..HEAD
 ```
 
 限制：同权限进程恶意修改专属隔离区或已持有 FD 继续写入，不属于仅靠 POSIX 路径核验能提供的全局事务；仍需可信隔离区与维护窗口。中断/断电可能遗留隔离条目，须按回执人工复核，不能自动扩范围清理。Linux原生接口、真实硬链接、真实 Home、部署与用户端到端结果未由本轮样本验证。最终测试/门禁、准确提交和独立复核结论追加在外部 DONE 的 Round 1 Fixes 中。
+## 2026-10-29 e905-sol-13 R2：默认布局冷转与封板测试缺口
+
+来源：`fix-e905-sol-13-r2.md`及Opus F1/F2/F3、Astra-1/Astra-2 B1复核；起点`89d4870c0`。主代理直接修改，不派生子代理，不部署或启停服务。
+
+- `ConversationStorage`/`ConversationStore`接收`compact_root`；解析顺序是提交显式根→构造注入→标准`workspace/runtime/workspaces/<scope>/conversations`回到owner的compact→其它同级夹具回退。SimpleAgent构造与Compact候选CAS显式透传writer同根，不新建存储权威。
+- 冷转先恢复prepared并核真实消息边界、字节/行数阈值，再读冷检查点与封印carried metadata；达到阈值而冷副本缺失/无效统一报`DataCorruptionError`。原获胜CAS保持成功，仅为同head保存`compact_transcript_maintenance`的pending/error_type/checkpoint_id；小会话不产生虚假维护待办。
+- 新测试使用真实SimpleAgent的非同级默认布局与writer/CAS，核清单、热文件物理收缩、冷行by-id及完整原字节回读。缺失、坏JSON和内容身份损坏三分支核结构化维护事实；未达阈值不读副本。另测解析优先级与只读构造无目录副作用。
+- 工具防线沿真实live writer/CAS提交129条工具，最早ref已离开128热窗口，再经`prepare_conversation_context`重入；断言真实领域异常`ConversationCompactError.code == 'COMPACT_SOURCE_CHANGED'`且类级`ImmutableJsonIndex.items`调用次数为0。仓库不存在任务文案所称`CompactPreparationFailure`类，不编造异常别名。
+- 两条独立pin回归分别使用另一线程的completed链接、原线程active链接但`active_task_ids=()`漂移；同时直接核pin与真实不冷转。原终态同线程正例保留，不放宽保守条件。
+- 补provider测试模块/已改定义中文双注释，并澄清Gateway force=False排除本请求中段、force=True保留同请求已完成检查点但剥离未提交尾部；原水合密文一致性与不兼容后端断言不变。
+
+红绿：先新增回归，修复前真实默认布局清单不存在、缺失副本无维护事实、坏JSON/身份损坏只记OSError，均实际复现。首轮跨线程测试误用了复用绑定的get_or_create，已改为真实create建立独立线程，保留首轮失败证据。最终指定6组测试、静态门、注释核验及变异结果见本轮DONE及`/tmp/pytest_cache_sol13_r2_fix/`，不以旧64项结果冒充当前验证。
+
+复现（工作树根）：
+```bash
+PYTHONPATH=/tmp/wt-e905-sol-13 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -o addopts="" \
+  agent_py_agent/tests/test_compact_remote_provider.py::test_transcript_compaction_stores_the_item_and_incompatible_backends_see_through_it \
+  agent_py_agent/tests/test_gateway_conversation_compact.py::test_forced_compact_includes_completed_checkpoint_from_same_gateway_request \
+  agent_py_agent/tests/test_compact_checkpoint_64k_seek.py \
+  agent_py_agent/tests/test_transcript_cold_rotation.py \
+  agent_py_agent/tests/test_million_compact_scalability.py \
+  agent_py_agent/tests/test_compact_source_consistency.py \
+  -q --tb=short -o cache_dir=/tmp/pytest_cache_sol13_r2_fix --basetemp=/tmp/pytest_cache_sol13_r2_fix/tmp
+```
+其后按任务运行完整Ruff、导入边界、doc sync（base `4bea324e3`）、diff及clean-package；未运行全仓pytest。组件结果不等于实际百万物理历史、连续10k真实消息、严格20ms、Linux/Windows或真实Gateway/provider端到端验收。
+
+## 2026-10-29 e905-sol-13 R1：覆盖、增量扫描与冷热预算返修
+
+来源：完整读取 `fix-e905-sol-13-r1.md`、Astra-1/Astra-2 原复核；工作树 `/tmp/wt-e905-sol-13`，起点 `f74d1161e`。
+
+- 301条消息回归先复现实际重复来源漏拦和反向交集丢旧ID，改用精确Set协议及本轮候选membership；持久视图按根/近期窗口/总数比较，不枚举冷索引。
+- 129条工具覆盖的真实恢复与native刷新先复现全量展开；恢复仅查询当前records/IR，真实刷新从原CAS绑定的head恢复封印根和完整元数据（包含首次空视图），来源校验同样不建历史全集。独立定向复核后另将重复追加改变窗口、tuple继承的不等比较做成先红回归并修复；比较仍按任务规定的根/近期窗口/总数，不以全表逻辑比较代替。内置反向`candidates.isdisjoint(coverage)`不能被Python反射协议接管，实际消费者不用此方向。
+- 检查点暖缓存后改坏首字节再追加的反例先红；增量缓存绑定前4KiB及前次64KiB尾指纹，失配回退严格解析。固定锚不宣称证明任意未选中中段未改。
+- 已完成/失败任务在精确覆盖后允许冷转，活跃/中断/未知任务保守pin；保留原TaskLink权威及完整冷段。恰好2MiB候选先复现错误接受，写侧及维护均改为严格小于预算；少于32行的大摘要组合仍按累计字节收缩，旧head可冷恢复。
+- 延续已修的同代reader握手、prepared恢复、visitor业务异常原样传播及公开冷热by-id回归；同步注释说明真实读写副作用。
+- 增加高代次合成head与真实64层最坏深度节点的load/commit/selection访问量及本机耗时上界断言。不是百万物理冷链/真实百万次压缩，也不把本机1秒稳定门禁冒称严格20ms或Linux结论；各入口实测值保存在JUnit属性。
+
+复现：工作树根，显式 `PYTHONPATH=/tmp/wt-e905-sol-13 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_compact_checkpoint_64k_seek.py agent_py_agent/tests/test_transcript_cold_rotation.py agent_py_agent/tests/test_million_compact_scalability.py agent_py_agent/tests/test_compact_source_consistency.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol13_r1fix`；静态门禁 `ruff check --no-cache agent_py_agent scripts`、`python3 -B scripts/check_import_boundaries.py --json`、`git diff --check`。最终实测结果见交接，不用较早绿灯覆盖之后的变更。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 

@@ -1,144 +1,31 @@
 # LLM: 本模块只读取原 committed checkpoint chain，并携带本次采用的临时视图；提交指针和账本仍是唯一权威。
 # 摘要替代关系沿 summary_base_checkpoint_id，不得把提交链的局部覆盖无条件合并。
-# 模块用途: 缓存深不可变验链和摘要内核，兼容有序/子类/自定义映射并按需导出独立普通dict，保留base语义。
+# 模块用途: 旧格式完整验链，新格式核原head及封印根；按实际摘要base恢复独立范围视图。
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-import sys
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Set
 from contextlib import closing
-from dataclasses import dataclass, field, fields
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
-from .compact_checkpoint import iter_committed_compact_checkpoints
+from ..common.cache_freshness import cache_stat_signature
+from .compact_checkpoint import hydrate_compact_checkpoint, iter_committed_compact_checkpoints
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope, scope_can_inherit
 
 _VERIFIED_CHAINS = OrderedDict()
 _SUMMARY_VIEWS = OrderedDict()
 _SUMMARY_CACHE_LOCK = threading.Lock()
 
-_VIEW_FIELDS = (
-    'checkpoint_id', 'summary', 'operation_evidence', 'source_message_ids',
-    'source_tool_refs', 'legacy_message_end_ids', 'generation', 'provider_compaction',
-)
-_MUTABLE_VIEW_FIELDS = frozenset({'operation_evidence', 'source_tool_refs', 'provider_compaction'})
-_CACHE_ENTRY_LIMIT = 4 * 1024 * 1024
-_CACHE_TOTAL_LIMIT = 16 * 1024 * 1024
-
-
-# LLM: 内核只保留不可变元素，标签用于公开物化时还原原生list。
-# 类用途: 区分原始列表与原始元组的冻结表示。
-class _FrozenList(tuple):
-    __slots__ = ()
-
-
-# LLM: 锁外递归复制所有Mapping含OrderedDict/子类/自定义映射；代理背后容器也冻结，不能信任外部只读包装。
-# 函数用途: 建立不含可变后代的内部投影，拒绝循环和未知对象。
-def _freeze_json(value, active=None):
-    if type(value) in {str, int, float, bool, type(None)}:
-        return value
-    active = set() if active is None else active
-    identity = id(value)
-    if identity in active:
-        raise TypeError('Compact 投影不接受循环容器')
-    active.add(identity)
-    try:
-        if isinstance(value, Mapping):
-            return MappingProxyType({key: _freeze_json(item, active) for key, item in value.items()})
-        if type(value) in {list, _FrozenList}:
-            return _FrozenList(_freeze_json(item, active) for item in value)
-        if type(value) is tuple:
-            return tuple(_freeze_json(item, active) for item in value)
-        if type(value) is frozenset:
-            return frozenset(_freeze_json(item, active) for item in value)
-        raise TypeError('Compact 投影含未知容器')
-    finally:
-        active.remove(identity)
-
-
-# LLM: 所有不可变Mapping均解冻为普通dict；只复制请求子图，标量共享，嵌套结果绝不指回缓存。
-# 函数用途: 给旧dict/list/tuple消费者恢复独立内建容器。
-def _thaw_json(value):
-    if isinstance(value, Mapping):
-        return {key: _thaw_json(item) for key, item in value.items()}
-    if type(value) is _FrozenList:
-        return [_thaw_json(item) for item in value]
-    if type(value) is tuple:
-        return tuple(_thaw_json(item) for item in value)
-    if type(value) is frozenset:
-        return frozenset(_thaw_json(item) for item in value)
-    return value
-
-
-# LLM: 冻结列表虽继承tuple却保留原列表语义；不解冻整图，不让容器类型变更绕过来源校验。
-# 函数用途: 按原容器类型递归比较不可变投影，标量沿用原Python值比较。
-def _frozen_equal(left, right):
-    if left is right:
-        return True
-    if (type(left) is _FrozenList) != (type(right) is _FrozenList):
-        return False
-    if isinstance(left, Mapping) or isinstance(right, Mapping):
-        return (isinstance(left, Mapping) and isinstance(right, Mapping)
-                and left.keys() == right.keys()
-                and all(_frozen_equal(value, right[key]) for key, value in left.items()))
-    if isinstance(left, tuple) or isinstance(right, tuple):
-        return (isinstance(left, tuple) and isinstance(right, tuple) and len(left) == len(right)
-                and all(_frozen_equal(a, b) for a, b in zip(left, right)))
-    return left == right
-
-
-# LLM: 只接收本模块已冻结值；不是提交权威，只是已验证结果的共享内核。
-# 类用途: 保存一份可跨请求共享的不可变摘要字段。
-@dataclass(frozen=True, slots=True)
-class _SummarySnapshot:
-    values: Mapping
-
-
-# LLM: 预算是保守驻留估算而非RSS；固定节点/深度/字节硬界，未知对象拒绝缓存。
-# 函数用途: 在锁外计费图而不repr或JSON序列化完整历史。
-def _cache_resident_cost(key, value):
-    seen = set()
-    total = 256
-
-    # LLM: 不预先列出所有后代；任一预算触顶立即停止，代理背后字典单独预留表成本。
-    # 函数用途: 每个共享对象只计一次并限制递归深度。
-    def walk(node, depth):
-        nonlocal total
-        if depth > 64:
-            return False
-        identity = id(node)
-        if identity in seen:
-            return True
-        seen.add(identity)
-        if len(seen) > 65536:
-            return False
-        total += sys.getsizeof(node)
-        if isinstance(node, MappingProxyType):
-            total += sys.getsizeof({}) + 192 * len(node)
-        if total > _CACHE_ENTRY_LIMIT:
-            return False
-        if isinstance(node, Mapping):
-            return all(walk(k, depth + 1) and walk(v, depth + 1) for k, v in node.items())
-        if isinstance(node, (tuple, list, frozenset)):
-            return all(walk(item, depth + 1) for item in node)
-        if isinstance(node, (_SummarySnapshot, CompactScope)):
-            total += sys.getsizeof(getattr(node, '__dict__', {}))
-            return total <= _CACHE_ENTRY_LIMIT and all(
-                walk(getattr(node, item.name), depth + 1) for item in fields(node))
-        return type(node) in {str, int, float, bool, type(None)}
-
-    return total if walk((key, value), 0) else _CACHE_ENTRY_LIMIT + 1
-
 
 # LLM: 缓存包含owner/原路径/五元组/head/generation；文件追加即换key，即使head没变也不能跳过坏orphan。
-# 函数用途: 从canonical文件事实建立两层缓存共同版本键，近期文件一律不复用。
+# 函数用途: 从canonical文件事实建立两层缓存共同版本键，近期追加立即按新版本复用。
 def _checkpoint_cache_key(agent, thread):
     home = getattr(agent, "home_paths", None)
     root = str(getattr(home, "owner_compact_dir", "") or "").strip()
@@ -149,13 +36,11 @@ def _checkpoint_cache_key(agent, thread):
         stamp = cache_stat_signature(path.stat())
     except FileNotFoundError:
         return None
-    if not cache_entry_trustworthy(stamp[3]):
-        return None
     return ((getattr(thread, "owner_id", ""), getattr(thread, "owner_home", "")), str(path), stamp, thread.thread_id,
             thread.compact_checkpoint_id, int(thread.compact_generation or 0))
 
 
-# LLM: 锁内只取不可变引用和维护LRU；公开返回值由独立外壳按需物化。
+# LLM: 只在锁内操作有界LRU；返回值只供本模块只读消费，公开视图另做deepcopy。
 # 函数用途: 读取一份已验证链或已选范围视图，不进行磁盘I/O。
 def _cached_summary(cache, key):
     if key is None:
@@ -168,26 +53,19 @@ def _cached_summary(cache, key):
     return None
 
 
-# LLM: 每层64项/16MiB，单项4MiB；冻结、计费和退休对象析构均不占LRU锁。
-# 函数用途: 保存有界不可变投影；拒绝缓存不改变本次真实读取结果。
+# LLM: 每层最多64项/16MiB，单项最多4MiB；大小计算在锁外，缓存不能变成无界正文仓库。
+# 函数用途: 保存只读缓存投影并淘汰旧代，不改变原提交账本。
 def _remember_summary(cache, key, value):
     if key is None:
         return
-    if _cache_resident_cost(key, value) > _CACHE_ENTRY_LIMIT:
+    size = len(repr(value).encode("utf-8", "surrogatepass"))
+    if size > 4 * 1024 * 1024:
         return
-    frozen = value if isinstance(value, _SummarySnapshot) else _freeze_json(value)
-    size = _cache_resident_cost(key, frozen)
-    if size > _CACHE_ENTRY_LIMIT:
-        return
-    retired = []
     with _SUMMARY_CACHE_LOCK:
-        previous = cache.pop(key, None)
-        if previous is not None:
-            retired.append(previous)
-        cache[key] = (size, frozen)
+        cache[key] = (size, value)
         cache.move_to_end(key)
-        while len(cache) > 64 or sum(row[0] for row in cache.values()) > _CACHE_TOTAL_LIMIT:
-            retired.append(cache.popitem(last=False))
+        while len(cache) > 64 or sum(row[0] for row in cache.values()) > 16 * 1024 * 1024:
+            cache.popitem(last=False)
 
 
 # LLM: 后端名称/模型外还绑定服务端协议端点，防同名后端换端点复用不可读密文；不把供应商记录当授权。
@@ -202,97 +80,24 @@ if TYPE_CHECKING:
     from .models import ConversationThread
 
 
-# LLM: 公开字段保持原dataclass和内建容器合同，实际共享状态仅在深不可变内核中。
-# 类用途: 为摘要调用方建立独立外壳，按公开访问物化可变字段，不复制未使用的历史图。
-@dataclass(frozen=True, eq=False)
+# LLM: 覆盖 refs 来自选中摘要的 base 链；legacy 消息只有终点，工具缺完整运行身份。
+# 类用途: 把本次请求可用的摘要和精确/旧式覆盖证据交给历史与活动工具投影。
+@dataclass(frozen=True)
 class CompactSummaryView:
     checkpoint_id: str = ""
     summary: str = ""
-    operation_evidence: dict[str, object] = field(default_factory=dict, repr=False)
-    source_message_ids: frozenset[str] = frozenset()
-    source_tool_refs: tuple[dict[str, object], ...] = field(default=(), repr=False)
+    operation_evidence: dict[str, object] = field(default_factory=dict)
+    source_message_ids: Set[str] = frozenset()
+    source_tool_refs: tuple[dict[str, object], ...] = ()
     legacy_message_end_ids: tuple[str, ...] = ()
     generation: int = 0
     # 选中检查点的服务端压缩记录（空字典 = 普通文字摘要）；只有当前后端能读时才会选中带它的检查点。
-    provider_compaction: dict[str, object] = field(default_factory=dict, repr=False)
-    __hash__ = None
-
-    # LLM: 首次构造隔离输入；私有属性不是dataclass字段，asdict/replace仍只消费原公开字段集。
-    # 函数用途: 冻结摘要输入并准备独立的延迟导出容器。
-    def __post_init__(self):
-        values = {name: object.__getattribute__(self, name) for name in _VIEW_FIELDS}
-        values['source_message_ids'] = frozenset(values['source_message_ids'])
-        values['source_tool_refs'] = tuple(values['source_tool_refs'])
-        values['legacy_message_end_ids'] = tuple(values['legacy_message_end_ids'])
-        snapshot = _SummarySnapshot(_freeze_json(values))
-        for name in _VIEW_FIELDS:
-            object.__setattr__(self, name, snapshot.values[name])
-        object.__setattr__(self, '_snapshot', snapshot)
-        object.__setattr__(self, '_exports', {})
-        object.__setattr__(self, '_export_lock', threading.Lock())
-
-    # LLM: 锁外解冻，短锁只发布首个结果；并发读取返回同一导出，不覆盖已经公开的修改。
-    # 函数用途: 只在旧消费者主动读取可变字段时复制该字段。
-    def __getattribute__(self, name):
-        if name in _MUTABLE_VIEW_FIELDS:
-            try:
-                snapshot = object.__getattribute__(self, '_snapshot')
-            except AttributeError:
-                return object.__getattribute__(self, name)
-            exports = object.__getattribute__(self, '_exports')
-            lock = object.__getattribute__(self, '_export_lock')
-            with lock:
-                if name in exports:
-                    return exports[name]
-            value = _thaw_json(snapshot.values[name])
-            with lock:
-                return exports.setdefault(name, value)
-        return object.__getattribute__(self, name)
-
-    # LLM: 只复制固定字段引用，不访问公开属性或遍历refs。
-    # 函数用途: 从已冻结内核建立O(1)独立外壳。
-    @classmethod
-    def _from_snapshot(cls, snapshot):
-        result = object.__new__(cls)
-        for name in _VIEW_FIELDS:
-            object.__setattr__(result, name, snapshot.values[name])
-        object.__setattr__(result, '_snapshot', snapshot)
-        object.__setattr__(result, '_exports', {})
-        object.__setattr__(result, '_export_lock', threading.Lock())
-        return result
-
-    # LLM: 已公开字段可能被任意修改，重新绑定必须捕获；未公开字段原样共享，不假装能追踪外部写入。
-    # 函数用途: 为Applied、deepcopy和值比较固定当前外壳状态。
-    def _snapshot_for_application(self):
-        snapshot = object.__getattribute__(self, '_snapshot')
-        with object.__getattribute__(self, '_export_lock'):
-            exports = tuple(object.__getattribute__(self, '_exports').items())
-        if not exports:
-            return snapshot
-        values = dict(snapshot.values)
-        for name, value in exports:
-            values[name] = _freeze_json(value)
-        return _SummarySnapshot(MappingProxyType(values))
-
-    # LLM: carry等旧消费者仍获得独立可变外壳，未公开冻结历史不用再次遍历。
-    # 函数用途: 兼容deepcopy合同并复用不可变内核。
-    def __deepcopy__(self, memo):
-        result = memo.get(id(self))
-        if result is None:
-            result = type(self)._from_snapshot(self._snapshot_for_application())
-            memo[id(self)] = result
-        return result
-
-    # LLM: 比较实际字段但不触发未公开refs的完整导出，保留原来源变更检测含义。
-    # 函数用途: 维持视图按值比较而非按外壳身份比较。
-    def __eq__(self, other):
-        if type(other) is not type(self):
-            return NotImplemented
-        return _frozen_equal(self._snapshot_for_application().values,
-                             other._snapshot_for_application().values)
+    provider_compaction: dict[str, object] = field(default_factory=dict)
+    carried_metadata: dict[str, object] = field(default_factory=dict, repr=False)
 
 
-# LLM: 本次应用上下文仅固定所选范围及摘要快照；它不是第二份检查点，不能在不匹配线程中产生权威。
+# LLM: Applied context is a per-run immutable snapshot of the chosen scope and its summary view;
+# it is never a second checkpoint or a source of authority outside the matching thread.
 # 类用途: 暂存本次请求实际采用的线程、摘要范围和视图，供历史与工具投影同次复用。
 @dataclass(frozen=True)
 class AppliedCompactContext:
@@ -300,21 +105,21 @@ class AppliedCompactContext:
     scope: CompactScope
     view: CompactSummaryView
 
-    # LLM: 本次覆盖绑定独立外壳，已导出值捕获、未导出内核共享；线程检查与原边界不变。
-    # 函数用途: 校验并固定本次应用视图，避免无条件深复制全部历史。
+    # LLM: Reject wrong types and detach nested ref/evidence dicts from the caller before source
+    # hiding; the thread binding itself is checked at each runtime entry.
+    # 函数用途: 校验线程与视图并复制内部字典，避免调用方随后改动本次覆盖范围。
     def __post_init__(self) -> None:
         if not isinstance(self.thread_id, str) or not self.thread_id.strip():
             raise ValueError("Compact 应用线程身份缺失")
         if not isinstance(self.scope, CompactScope) or not isinstance(self.view, CompactSummaryView):
             raise TypeError("Compact 应用范围或摘要视图类型无效")
-        snapshot = self.view._snapshot_for_application()
-        object.__setattr__(self, "view", CompactSummaryView._from_snapshot(snapshot))
+        object.__setattr__(self, "view", deepcopy(self.view))
 
 
 # LLM: 旧 v1 只有前缀终点，必须在完整 canonical 行内解析，不能在任务筛选后猜边界；新版本只认精确 ID。
 # 函数用途: 计算本次摘要实际替代的消息，缺失旧边界视为读取不完整而不是清空历史。
 def compact_covered_message_ids(view, rows) -> frozenset[str]:
-    covered = set(view.source_message_ids)
+    covered = {row.message_id for row in rows if row.message_id in view.source_message_ids}
     positions = {row.message_id: index for index, row in enumerate(rows)}
     for end in view.legacy_message_end_ids:
         if end not in positions:
@@ -323,7 +128,7 @@ def compact_covered_message_ids(view, rows) -> frozenset[str]:
     return frozenset(covered)
 
 
-# LLM: 冻结L1仅解冻scope子图，磁盘与内核仍走同一版本校验，不放宽持久schema。
+# LLM: v1/v2 的摘要属于全线程，previous 兼任摘要 base；v3 读取严格显式字段。
 # 函数用途: 将一条已提交 checkpoint 解释为其历史版本的摘要范围。
 def _checkpoint_scope(row: dict[str, object]) -> CompactScope:
     schema = row.get("schema")
@@ -332,7 +137,7 @@ def _checkpoint_scope(row: dict[str, object]) -> CompactScope:
     if schema != "conversation_compact_checkpoint.v3":
         raise OSError("conversation compact checkpoint schema is unknown")
     try:
-        return CompactScope.from_dict(_thaw_json(row.get("scope")))
+        return CompactScope.from_dict(row.get("scope"))
     except (TypeError, ValueError) as exc:
         raise OSError("conversation compact checkpoint scope is invalid") from exc
 
@@ -393,11 +198,9 @@ def _validated_v3_sources(row: dict[str, object]) -> tuple[tuple[str, ...], tupl
     return tuple(message_ids), tuple(result)
 
 
-# LLM: L1选择仅在冷边界恢复原行形状，沿原严格校验；旧v2身份仍标legacy，不补全猜测。
+# LLM: 旧 v2 无 run/turn 原始身份，保留原调用和请求证据并标记 legacy，消费者不可精确匹配。
 # 函数用途: 提取一条 checkpoint 自己的覆盖，不把后续提交误认为这条摘要的来源。
 def _row_sources(row: dict[str, object]) -> tuple[tuple[str, ...], tuple[dict[str, object], ...], tuple[str, ...]]:
-    if isinstance(row, MappingProxyType):
-        row = _thaw_json(row)
     schema = row.get("schema")
     if schema == "conversation_compact_checkpoint.v3":
         messages, tools = _validated_v3_sources(row)
@@ -424,7 +227,7 @@ def _row_sources(row: dict[str, object]) -> tuple[tuple[str, ...], tuple[dict[st
 
 
 # LLM: 原reader逆序给出已提交行；先选适用范围，再只沿其显式base寻找当前后端可读摘要。
-# 所有摘要/覆盖仍验证，正文随消费释放；同一文件快照只保留最终采用的一份正文，不能从纯元数据索引恢复正文。
+# 所有摘要/覆盖仍验证，冷证据和密文只在选中后水合；索引不持有未采用的历史载荷。
 # 函数用途: 构造只读摘要基础索引并在扫描中完成换模型后的读取选择，完整验链后才返回。
 def _indexed_rows(chain, scope: CompactScope, backend):
     by_id: dict[str, dict[str, object]] = {}
@@ -434,7 +237,8 @@ def _indexed_rows(chain, scope: CompactScope, backend):
     # provider_compaction（服务端压缩记录，约 2KB）留在索引里：兼容性回退要沿 base 链逐个检查，不能只看选中行。
     keys = ("checkpoint_id", "schema", "generation", "created_at", "scope", "previous_checkpoint_id",
             "summary_base_checkpoint_id", "source_kind", "source_message_ids", "source_tool_refs",
-            "source_end_message_id", "source_tool_call_ids", "request_id", "attempt_id", "provider_compaction")
+            "source_end_message_id", "source_tool_call_ids", "request_id", "attempt_id", "provider_compaction",
+            "operation_evidence_ref", "provider_compaction_ref", "provider_compaction_info", "thread_id")
     for row in chain:
         row_scope = _checkpoint_scope(row)
         _validate_summary(row)
@@ -467,8 +271,8 @@ def _indexed_rows(chain, scope: CompactScope, backend):
     return by_id, selected
 
 
-# LLM: 原完整验链和版本键不变，L1/L2仅保存冻结图；warm返回固定大小独立外壳。
-# 函数用途: 复用已验证摘要，避免热命中深复制全部来源。
+# LLM: carried格式核当前head及封印根，旧格式L1完整验链；按scope/backend选摘要，副本不展开历史覆盖。
+# 函数用途: 复用已验证Compact来源，保持摘要base链覆盖和调用方嵌套对象隔离。
 def resolve_compact_summary_view(
     agent: SimpleAgent,
     thread: ConversationThread,
@@ -476,29 +280,32 @@ def resolve_compact_summary_view(
 ) -> CompactSummaryView:
     if not isinstance(scope, CompactScope):
         raise TypeError("Compact 作用域类型无效")
+    fast = _resolve_carried_view(agent, thread, scope)
+    if fast is not None:
+        return fast
     key = _checkpoint_cache_key(agent, thread)
     backend = getattr(agent, "backend", None)
     view_key = (key, scope, _backend_view_key(backend)) if key is not None else None
     cached = _cached_summary(_SUMMARY_VIEWS, view_key)
     if cached is not None and _checkpoint_cache_key(agent, thread) == key:
-        return CompactSummaryView._from_snapshot(cached)
+        return deepcopy(cached)
     by_id, selected = _summary_selection(agent, thread, scope, backend, key)
     view = _view_from_selected(by_id, selected)
     if key is not None and _checkpoint_cache_key(agent, thread) == key:
-        _remember_summary(_SUMMARY_VIEWS, view_key, view._snapshot_for_application())
+        _remember_summary(_SUMMARY_VIEWS, view_key, deepcopy(view))
     return view
 
 
-# LLM: 冷读完整消费原链并验证全部摘要/base关系，L1只留元数据；热读选中行仍经原lookup逐字节hash核对。
+# LLM: 冷读完整消费原链并验证全部摘要/base关系，L1只留元数据；只水合选中冷载荷，热读仍核原行hash。
 # 函数用途: 分离完整验链和按范围选摘要，避免每个scope重复解析旧链。
 def _summary_selection(agent, thread, scope, backend, key):
     by_id = _cached_summary(_VERIFIED_CHAINS, key)
     if by_id is None:
-        with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
+        with closing(iter_committed_compact_checkpoints(agent, thread, hydrate=False)) as chain:
             by_id, selected = _indexed_rows(chain, scope, backend)
         if key is not None and _checkpoint_cache_key(agent, thread) == key:
             _remember_summary(_VERIFIED_CHAINS, key, by_id)
-        return by_id, selected
+        return by_id, hydrate_compact_checkpoint(agent, selected) if selected is not None else None
     next_base = None
     for row in by_id.values():
         candidate = (row["checkpoint_id"] == next_base if next_base is not None
@@ -512,7 +319,7 @@ def _summary_selection(agent, thread, scope, backend, key):
                 selected = lookup(str(row["checkpoint_id"]))
             if selected is None:
                 raise OSError("conversation compact checkpoint chain is incomplete")
-            return by_id, selected
+            return by_id, hydrate_compact_checkpoint(agent, selected)
         next_base = _summary_base_id(row)
     return by_id, None
 
@@ -557,13 +364,13 @@ def _view_from_selected(by_id, selected):
     )
 
 
-# LLM: provider协议仍接真正dict，只解冻候选小记录，不向旧读取器泄漏冻结代理。
+# LLM: 只比较服务端记录的协议与端点，普通文字摘要可读；选择和base遍历均由同次流式扫描负责。
 # 函数用途: 判断当前后端能否读取一条原检查点，不读取文件或扩大来源覆盖。
 def _checkpoint_is_readable(backend, row):
     from .compact_remote import provider_compaction_compatible
 
-    record = row.get("provider_compaction")
-    return record is None or provider_compaction_compatible(backend, _thaw_json(record))
+    record = row.get('provider_compaction_info', row.get("provider_compaction"))
+    return record is None or provider_compaction_compatible(backend, record)
 
 
 # LLM: 只接受带 item.encrypted_content 字符串的字典；缺失返回空字典，坏形状视为账本损坏（与 summary 校验同一严格度）。
@@ -577,6 +384,284 @@ def _validated_provider_compaction(row: dict[str, object]) -> dict[str, object]:
     if type(record) is not dict or not provider_compaction_content(record):
         raise OSError("conversation compact provider compaction record is invalid")
     return dict(record)
+
+
+# LLM: 不继承内建frozenset，避免C集合运算绕过精确contains；显式全量迭代才读取历史。
+# 类用途: 保留精确消息覆盖合同而不在每次恢复物化全部历史ID。
+class _IndexedMessageCoverage(Set):
+    # LLM: 构造成本只与近期窗口有关；index和ref由已验证检查点传入。
+    # 函数用途: 创建有界内存的不可变覆盖投影。
+    def __init__(self, recent, index, reference, count, checkpoint_id='', lineage=None):
+        self.recent = tuple(recent)
+        self.recent_set = frozenset(self.recent)
+        self.index, self.reference, self.count = index, reference, count
+        self.checkpoint_id, self.lineage = checkpoint_id, lineage
+
+    # LLM: ABC的显式并/差集结果是独立值集合，不能以单个iterable误调用需要封印根参数的领域构造器。
+    # 函数用途: 保持标准Set结果工厂兼容；只有显式全集运算允许物化历史，热交集仍走候选查询。
+    @classmethod
+    def _from_iterable(cls, values):
+        return frozenset(values)
+
+    # LLM: 只接受选中摘要的真实base链根，其它scope/provider不能授予冷前缀覆盖。
+    # 函数用途: 以固定深度证明物理归档所依赖的检查点被当前可读摘要继承。
+    def covers_checkpoint(self, checkpoint_id):
+        return bool(checkpoint_id) and (checkpoint_id == self.checkpoint_id or
+                                       self.index.get(self.lineage, checkpoint_id) is True)
+
+    # LLM: 阴性必须查询精确根，不把窗口外历史误当未覆盖。
+    # 函数用途: 以固定深度验证一个消息ID。
+    def __contains__(self, identity):
+        if identity in self.recent_set:
+            return True
+        return isinstance(identity, str) and self.index.get(self.reference, identity) is True
+
+    # LLM: 计数随根封印，不通过枚举计算。
+    # 函数用途: 返回精确覆盖数量。
+    def __len__(self):
+        return self.count
+
+    # LLM: 全量接口明确按实际历史数量收费，不用于热恢复、每轮选源或deepcopy。
+    # 函数用途: 按需遍历所有历史覆盖ID。
+    def __iter__(self):
+        return (identity for identity, _ in self.index.items(self.reference))
+
+    # LLM: 两个持久投影按根SHA、近期窗口及总数比较，不读冷索引；显式旧集合按其候选成员核对。
+    # 函数用途: 保持热视图比较为常数上界，同时兼容旧集合断言。
+    def __eq__(self, other):
+        if isinstance(other, _IndexedMessageCoverage):
+            return self.reference == other.reference and self.recent == other.recent and self.count == other.count
+        return isinstance(other, Set) and len(self) == len(other) and all(item in self for item in other)
+
+    # LLM: 只遍历本轮候选，不枚举self累计覆盖；返回显式交集供调用方消费。
+    # 函数用途: 用精确成员查询实现有界正向交集。
+    def __and__(self, candidates):
+        return frozenset(item for item in candidates if item in self)
+
+    # LLM: 普通set左操作数必须回调本接口，不能由C层近期槽位计算结果。
+    # 函数用途: 保证候选集合在左侧时同样精确。
+    def __rand__(self, candidates):
+        return self.__and__(candidates)
+
+    # LLM: 短路成员查询成本仅与候选数量有关，命中可立即拒绝重复来源。
+    # 函数用途: 判断本轮来源是否与累计覆盖相交。
+    def isdisjoint(self, candidates):
+        return not any(item in self for item in candidates)
+
+    # LLM: 副本只复制根及近期ID，不枚举历史；原index是无可变缓存的只读寻址服务。
+    # 函数用途: 保持AppliedCompactContext的嵌套对象隔离而不触发历史展开。
+    def __deepcopy__(self, memo):
+        return type(self)(self.recent, self.index, deepcopy(self.reference, memo),
+                          self.count, self.checkpoint_id, deepcopy(self.lineage, memo))
+
+
+# LLM: tuple底层只持近期refs；完整遍历保持旧顺序并显式读取冷索引，热恢复不遍历历史。
+# 类用途: 让精确工具覆盖按需展开，而不在构造摘要视图时累计百万引用。
+class _IndexedToolCoverage(tuple):
+    # LLM: 构造只复制有界近期refs，根由原检查点封印。
+    # 函数用途: 创建兼容原tuple入口的延迟工具引用序列。
+    def __new__(cls, recent, index, reference, count):
+        result = super().__new__(cls, recent)
+        result.index, result.reference, result.count = index, reference, count
+        return result
+
+    # LLM: 完整数量取持久根计数，不通过序列展开推算。
+    # 函数用途: 保留工具覆盖数量合同。
+    def __len__(self):
+        return self.count
+
+    # LLM: 近期仍含全量时直接沿旧顺序，否则显式完整消费者承担冷读取及排序成本。
+    # 函数用途: 无损恢复工具四元身份与原累计顺序。
+    def __iter__(self):
+        if self.count <= tuple.__len__(self):
+            return tuple.__iter__(self)
+        values = sorted((value for _, value in self.index.items(self.reference)), key=lambda value: value['order'])
+        return (value['ref'] for value in values)
+
+    # LLM: contains不能把近期窗口当完整覆盖；精确字典值必须与索引记录相同。
+    # 函数用途: 判断一条完整工具引用是否已覆盖。
+    def __contains__(self, ref):
+        if tuple.__contains__(self, ref):
+            return True
+        if not isinstance(ref, dict):
+            return False
+        value = self.index.get(self.reference, json.dumps(ref, sort_keys=True))
+        return value is not None and value['ref'] == ref
+
+    # LLM: 显式比较要求完整序列语义，不按近期tuple内存布局判断相等。
+    # 函数用途: 保持旧工具引用tuple的顺序比较。
+    def __eq__(self, other):
+        if isinstance(other, _IndexedToolCoverage):
+            return (self.reference == other.reference and self.count == other.count
+                    and tuple(tuple.__iter__(self)) == tuple(tuple.__iter__(other)))
+        return isinstance(other, (tuple, list)) and len(self) == len(other) and tuple(self) == tuple(other)
+
+    # LLM: 原生tuple.__ne__只比较近期槽位，必须显式沿用全覆盖相等协议，不能把不同冷根说成相同。
+    # 函数用途: 使工具覆盖的不等比较严格成为相等比较的否定。
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    # LLM: 查询键必须是原四元身份；近期窗口只作快路径，窗口外按封印根精确寻址。
+    # 函数用途: 不展开历史地判断本轮工具是否已被覆盖。
+    def contains_key(self, key):
+        from .compact_tool_identity import TOOL_REF_FIELDS, compact_tool_ref_key
+
+        if key is None:
+            return False
+        if any(compact_tool_ref_key(ref) == key for ref in tuple.__iter__(self)):
+            return True
+        ref = dict(zip(TOOL_REF_FIELDS, key))
+        value = self.index.get(self.reference, json.dumps(ref, sort_keys=True))
+        return value is not None and compact_tool_ref_key(value['ref']) == key
+
+    # LLM: 只读取本轮records/IR候选引用，返回有界相交键集，不访问全表迭代器。
+    # 函数用途: 给恢复分区和来源防线提供精确增量过滤。
+    def covered_keys(self, candidates):
+        from .compact_tool_identity import compact_tool_ref_key
+
+        return {key for ref in candidates if (key := compact_tool_ref_key(ref)) is not None and self.contains_key(key)}
+
+    # LLM: 仅将获胜CAS的本轮增量写成新不可变根，旧根不变；这是运行内派生视图，不另行确认提交。
+    # 函数用途: 原生刷新追加有限工具引用而不把旧覆盖转成tuple。
+    def with_added(self, refs):
+        from .compact_tool_identity import compact_tool_refs
+
+        reference, count = self.reference, self.count
+        recent = {json.dumps(ref, sort_keys=True): ref for ref in tuple.__iter__(self)}
+        for ref in compact_tool_refs(list(refs)):
+            key = json.dumps(ref, sort_keys=True)
+            if self.index.get(reference, key) is not None:
+                continue
+            reference = self.index.put(reference, key, {'ref': ref, 'order': count})
+            count += 1
+            recent[key] = ref
+        return type(self)(tuple(recent.values())[-128:], self.index, reference, count)
+
+    # LLM: deepcopy不能走tuple展开协议；只复制近期嵌套字典及封印根。
+    # 函数用途: 为本次应用上下文建立独立的有界工具覆盖投影。
+    def __deepcopy__(self, memo):
+        recent = deepcopy(tuple(tuple.__iter__(self)), memo)
+        return type(self)(recent, self.index, deepcopy(self.reference, memo), self.count)
+
+
+# LLM: 目录只能选择原head封印的历史身份；每个地址仍检查ID、generation、scope和时间，不靠最新文件mtime猜。
+# 函数用途: 从固定深度scope/时间目录选择本次适用的最新检查点。
+def _carried_selected_row(agent, head, scope, index, timeline):
+    from .compact_checkpoint import _cold_checkpoint, _compact_root, _scope_key, _timeline_key
+
+    meta = head['carried_view']
+    candidates = []
+    if scope_can_inherit(scope, _checkpoint_scope(head), head['created_at']):
+        candidates.append(head)
+    descriptor = index.get(meta['scope_heads'], _scope_key(scope))
+    if descriptor is not None:
+        candidates.append(_carried_descriptor_row(agent, head, descriptor))
+    if scope.kind == 'task':
+        descriptor = timeline.range_max(meta['thread_timeline'], _timeline_key(scope.created_at))
+        if descriptor is not None:
+            candidates.append(_carried_descriptor_row(agent, head, descriptor))
+    for row in candidates:
+        if not scope_can_inherit(scope, _checkpoint_scope(row), row['created_at']):
+            raise OSError('conversation compact carried directory crosses scope')
+    return max(candidates, key=lambda row: row['generation'], default=None)
+
+
+# LLM: 描述符来自封印根，仅可读取同线程更早检查点；不可沿任意磁盘路径取另一个owner记录。
+# 函数用途: 验证目录值并恢复一条冷检查点。
+def _carried_descriptor_row(agent, head, descriptor):
+    from .compact_checkpoint import _cold_checkpoint, _compact_root
+
+    if (type(descriptor) is not dict or set(descriptor) != {'checkpoint_id', 'generation', 'created_at'}
+            or type(descriptor['generation']) is not int or not 0 < descriptor['generation'] < head['generation']):
+        raise OSError('conversation compact carried descriptor is invalid')
+    row = _cold_checkpoint(_compact_root(agent, head['thread_id']), head['thread_id'], descriptor['checkpoint_id'])
+    if row is None or any(row.get(key) != value for key, value in descriptor.items()):
+        raise OSError('conversation compact carried descriptor mismatches')
+    return row
+
+
+# LLM: 快照必须绑定同一summary_base与scope；本条来源仍按v3完整校验，不能用累计根掩盖坏delta。
+# 函数用途: 校验有界累计视图的结构、计数和近期窗口，不读取历史链。
+def _validated_carried_metadata(row):
+    _validate_summary(row)
+    _validated_v3_sources(row)
+    meta = row.get('carried_view')
+    fields = {'schema', 'base_checkpoint_id', 'scope', 'messages', 'tools', 'message_count', 'tool_count',
+              'recent_messages', 'recent_tools', 'legacy_message_end_ids', 'scope_heads', 'thread_timeline', 'readable_bases'}
+    if (type(meta) is not dict or set(meta) not in (fields, fields | {'checkpoint_lineage'})
+            or meta['schema'] != 'conversation_carried_view.v1'
+            or meta['base_checkpoint_id'] != _summary_base_id(row) or meta['scope'] != row['scope']):
+        raise OSError('conversation compact carried base or scope mismatches')
+    for name, limit in (('recent_messages', 256), ('recent_tools', 128)):
+        if type(meta[name]) is not list or len(meta[name]) > limit:
+            raise OSError('conversation compact carried window exceeds budget')
+    if any(type(meta[name]) is not int or meta[name] < 0 for name in ('message_count', 'tool_count')):
+        raise OSError('conversation compact carried count is invalid')
+    return meta
+
+
+# LLM: 新格式只读取当前head、scope目录、选中行及直接base；旧v3返回None走原完整验证器，不静默迁移坏链。
+# 函数用途: 以固定深度根构建精确但延迟的摘要视图，密文只水合真正选中的记录。
+def _resolve_carried_view(agent, thread, scope):
+    from .compact_checkpoint import (
+        _compact_root,
+        _readability_key,
+        load_latest_committed_compact_checkpoint,
+    )
+    from .store_io import ImmutableJsonIndex
+
+    head = load_latest_committed_compact_checkpoint(agent, thread)
+    if head is None:
+        return CompactSummaryView()
+    if 'carried_view' not in head:
+        return None
+    _validated_carried_metadata(head)
+    root = _compact_root(agent, thread.thread_id)
+    index = ImmutableJsonIndex(root, ('evidence', thread.thread_id, 'indexes'))
+    timeline = ImmutableJsonIndex(root, ('evidence', thread.thread_id, 'timeline'), ordered=True)
+    selected = _carried_selected_row(agent, head, scope, index, timeline)
+    if selected is None:
+        return CompactSummaryView()
+    if 'carried_view' not in selected:
+        return None
+    meta = _validated_carried_metadata(selected)
+    backend = getattr(agent, 'backend', None)
+    if not _checkpoint_is_readable(backend, selected):
+        compatible = []
+        provider_scope = getattr(backend, 'provider_compaction_scope', None)
+        keys = ['*', _readability_key(provider_scope())] if callable(provider_scope) else ['*']
+        for key in keys:
+            descriptor = index.get(meta['readable_bases'], key)
+            if descriptor is not None:
+                compatible.append(_carried_descriptor_row(agent, selected, descriptor))
+        selected = max(compatible, key=lambda row: row['generation'], default=None)
+        if selected is None:
+            return CompactSummaryView()
+        if 'carried_view' not in selected:
+            return None
+        meta = _validated_carried_metadata(selected)
+        if not _checkpoint_is_readable(backend, selected):
+            raise OSError('conversation compact readable base is incompatible')
+    if meta['base_checkpoint_id']:
+        descriptor = {'checkpoint_id': meta['base_checkpoint_id'], 'generation': -1, 'created_at': 0}
+        from .compact_checkpoint import _cold_checkpoint
+
+        base = _cold_checkpoint(root, thread.thread_id, descriptor['checkpoint_id'])
+        if (base is None or base['generation'] >= selected['generation']
+                or not scope_can_inherit(_checkpoint_scope(selected), _checkpoint_scope(base), base['created_at'])):
+            raise OSError('conversation compact summary base crosses scope or is missing')
+    hydrated = hydrate_compact_checkpoint(agent, selected)
+    evidence = hydrated.get('operation_evidence')
+    if type(evidence) is not dict:
+        raise OSError('conversation compact operation evidence is invalid')
+    return CompactSummaryView(
+        checkpoint_id=selected['checkpoint_id'], summary=selected['summary'], operation_evidence=evidence,
+        source_message_ids=_IndexedMessageCoverage(meta['recent_messages'], index, meta['messages'], meta['message_count'],
+                                                  selected['checkpoint_id'], meta.get('checkpoint_lineage')),
+        source_tool_refs=_IndexedToolCoverage(meta['recent_tools'], index, meta['tools'], meta['tool_count']),
+        legacy_message_end_ids=tuple(meta['legacy_message_end_ids']), generation=selected['generation'],
+        provider_compaction=_validated_provider_compaction(hydrated), carried_metadata=deepcopy(meta),
+    )
 
 
 __all__ = ["AppliedCompactContext", "CompactSummaryView", "resolve_compact_summary_view"]

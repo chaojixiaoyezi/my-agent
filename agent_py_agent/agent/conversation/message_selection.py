@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import threading
 from collections import OrderedDict, deque
@@ -16,7 +17,13 @@ from ..runtime_errors import DataCorruptionError
 from .compact_guard import raise_if_compact_interrupted
 from .display_checkpoint import is_display_checkpoint
 from .message_replay import MessageRowAddress, MessageSnapshotRows
-from .message_scan import _dedupe_tail_anchor, _validate_boundary
+from .message_scan import (
+    TranscriptReader,
+    _dedupe_tail_anchor,
+    _message_from_line,
+    _validate_boundary,
+    transcript_manifest,
+)
 from .message_scan import scan_message_snapshot as scan_message_snapshot
 from .models import MessageLogEntry
 from .store_io import json_row, jsonl_error
@@ -221,6 +228,17 @@ def select_message_snapshot(
     path = messages.storage.message_path(thread_id)
     identity = _file_identity(path)
     through, errors = messages.complete_offset_report(thread_id)
+    from .message_scan import transcript_manifest
+
+    manifest = transcript_manifest(path)
+    covers_checkpoint = getattr(exclude_message_ids, 'covers_checkpoint', None)
+    if manifest is not None and not (callable(covers_checkpoint) and covers_checkpoint(manifest.get('checkpoint_id', ''))):
+        return _select_segmented_snapshot(
+            path, thread_id, selector_factory=selector_factory, exclude_message_ids=exclude_message_ids,
+            exclude_through_message_ids=exclude_through_message_ids, retain_limit=retain_limit,
+            interrupt_check=interrupt_check,
+        )
+    through -= manifest['hot_base'] if manifest else 0
     if errors:
         raise OSError("conversation transcript snapshot could not be read reliably")
     if identity != _file_identity(path):
@@ -320,3 +338,84 @@ def _file_identity(path):
         return stat.st_dev, stat.st_ino
     except FileNotFoundError:
         return None
+
+
+# LLM: 只保存原行逻辑地址、布局摘要和热inode，切片/过滤继承原冻结绑定；每次重放都验证实际原字节。
+# 类用途: 在后端或scope回退时透明恢复未覆盖冷消息，不把物理热文件误当完整来源。
+@dataclass(frozen=True, eq=False)
+class _SegmentedMessageSnapshotRows(MessageSnapshotRows):
+    layout_digest: bytes = b''
+
+    # LLM: 允许同布局尾追加，不允许换布局、截短或改写；冷段核完整SHA，所选行再核自己的hash。
+    # 函数用途: 按逻辑地址重放冷热行，正文不驻留在快照对象中。
+    def __iter__(self):
+        raise_if_compact_interrupted(self.interrupt_check)
+        if not self.addresses:
+            return
+        with TranscriptReader(self.path) as reader:
+            stamp = os.fstat(reader.hot.fileno())
+            if (self.identity != (stamp.st_dev, stamp.st_ino)
+                    or self.layout_digest != _layout_digest(reader.manifest) or self.through > reader.end):
+                raise DataCorruptionError('canonical message source changed during replay')
+            _validate_boundary(reader, self.through, reader.end)
+            for address in self.addresses:
+                raise_if_compact_interrupted(self.interrupt_check)
+                reader.seek(address.offset)
+                raw = reader.read(address.length)
+                if hashlib.sha256(raw).digest() != address.digest:
+                    raise DataCorruptionError('canonical message source changed during replay')
+                yield _message_from_line(raw, self.thread_id)
+
+
+# LLM: 布局只作为冻结证明，不授予覆盖；prepared读取器已经归一化为实际inode对应的旧/新布局。
+# 函数用途: 将有界清单压成可复制的布局指纹。
+def _layout_digest(manifest):
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode('utf-8')).digest()
+
+
+# LLM: 只有当前可读摘要不能证明冷前缀已覆盖时才显式扫描；先验全部身份，再执行原factory与精确排除。
+# 函数用途: 为provider/scope切换恢复真实未覆盖历史，返回可反复校验的逻辑地址快照。
+def _select_segmented_snapshot(path, thread_id, *, selector_factory, exclude_message_ids,
+                               exclude_through_message_ids, retain_limit, interrupt_check):
+    with TranscriptReader(path) as reader:
+        stamp = os.fstat(reader.hot.fileno())
+        identity = (stamp.st_dev, stamp.st_ino)
+        layout = _layout_digest(reader.manifest)
+        entries, positions, digest = [], {}, hashlib.sha256()
+        while reader.tell() < reader.end:
+            raise_if_compact_interrupted(interrupt_check)
+            offset = reader.tell()
+            raw = reader.readline()
+            digest.update(raw)
+            row = _message_from_line(raw, thread_id, skip_blank=True)
+            if row is None or is_display_checkpoint(row):
+                continue
+            if not row.message_id or row.message_id in positions:
+                raise DataCorruptionError('canonical message identities are missing or repeated')
+            positions[row.message_id] = len(positions)
+            entries.append(MessageRowAddress(offset, len(raw), hashlib.sha256(raw).digest()))
+        if any(end not in positions for end in exclude_through_message_ids):
+            raise OSError('legacy compact source boundary is missing from canonical history')
+        covered_end = max((positions[end] for end in exclude_through_message_ids), default=-1)
+        predicate = selector_factory(MappingProxyType(positions)) if selector_factory is not None else None
+        if predicate is not None and not callable(predicate):
+            raise TypeError('canonical message selector must be callable')
+        selected = deque(maxlen=retain_limit if retain_limit > 0 else None)
+        for address in entries:
+            raise_if_compact_interrupted(interrupt_check)
+            reader.seek(address.offset)
+            raw = reader.read(address.length)
+            if hashlib.sha256(raw).digest() != address.digest:
+                raise DataCorruptionError('canonical message source changed during selection')
+            row = _message_from_line(raw, thread_id)
+            allowed = predicate(row) if predicate is not None else True
+            if type(allowed) is not bool:
+                raise TypeError('canonical message selector must return bool')
+            if allowed and positions[row.message_id] > covered_end and row.message_id not in exclude_message_ids:
+                selected.append(address)
+        reader.cached = None
+        if (_file_identity(path) != identity or _layout_digest(transcript_manifest(path)) != layout
+                or _prefix_hasher(reader, reader.end).digest() != digest.digest()):
+            raise DataCorruptionError('canonical message source changed during selection')
+        return _SegmentedMessageSnapshotRows(path, thread_id, reader.end, identity, tuple(selected),
+                                             interrupt_check, layout)

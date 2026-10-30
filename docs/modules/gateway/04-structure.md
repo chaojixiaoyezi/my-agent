@@ -30,6 +30,15 @@
 R2 使用最多 16 个 owner 扫描的 LRU，未完成游标持久保存 `last_relpath/scanned/partial_used_bytes/partial_inode_count/epoch`、起始时间、根身份及 revision；缓存丢失后恢复有效续点，过期/修订变化重扫，完成才发布合计并处理遗留预留。每层排序保留最多 128 个候选，准备阶段逐项让回时间及 `max(1024,4*max_entries)` 枚举预算；挂起只保留当前目录流，淘汰关闭，单个系统调用仍不可抢占。其准确验证状态以组合源码和根记录为准。所有跨域 writer 尚未统一接入，后台扫描完成/账本 clean 仅是观察事实，不能代替封闭写域证明或为未登记写入放行。不得据此在生产删除事实源、重置未知预留或扩张 owner 范围。
 
 本轮未生产部署；生产多 owner 长期推进、正 C/W 存储维护、全部 reader 切换、全部跨域 writer 及跨平台行为未在本节验收。测试结果只引用根目录 [TESTS](../../../TESTS.md)，不从实现存在推导通过。
+## 2026-10-29 e905-sol-13 R2：冷检查点根与消息冷转接线
+
+- `SimpleAgent.__init__`→`ConversationStore`→`ConversationStorage`保存唯一owner compact根；`_commit_compact_candidate`→`ThreadStore.update_compact_state`→`rotate_committed_transcript`显式传同一个`_compact_root`。只读打开不为该根创建目录，默认嵌套布局可由存储解析，旧同级夹具保持兼容。
+- `rotate_committed_transcript`在原消息锁与获胜CAS后先恢复布局、核虚拟边界与阈值；需冷转时才核已提交冷副本的schema/scope/source_kind/generation/消息边界/摘要封印和carried metadata。缺失或无效统一为`DataCorruptionError`，由原线程层只给同head记pending维护事实，不新增CAS提交权威或撤销已发布摘要。
+- `request_context._load_gateway_compact_context`的注释明确force=False排除当前请求中段，force=True保留同请求已完成检查点并剥离未提交尾部，过滤器实现不变。相关测试与未验证边界见[TESTS](../../../TESTS.md)R2小节。
+
+## 2026-10-29 e905-sol-13：Gateway 压缩历史选择器与主种子同源结构
+
+- `gateway_parts/request_context.py::_load_gateway_compact_context` 通过 `partial(history_projection.history_row_selected, current_request_id="" if force else inputs.request_id, work_scope=work_scope)` 构造 `selector_factory`，与 `_gateway_history_source` 共用唯一单行过滤规则，保证 `capture_transcript_prefix` 校验时主种子与 `compact_source.messages` 前缀严格一致。
 
 ## 2026-10-28 Wave 9 A1 Round 2：单向推送接线与隔离
 

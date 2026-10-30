@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from ..runtime_errors import DataCorruptionError
+from .message_scan import TranscriptReader, transcript_manifest
 from .models import MessageLogEntry
 from .store_io import complete_jsonl_end
 
@@ -48,9 +50,9 @@ def read_conversation_history_page(
     path: Path, thread_id: str, *, before: int | None = None, limit: int = 80,
 ) -> ConversationHistoryPage:
     try:
-        if not path.exists() and before in (None, 0):
+        if not path.exists() and before in (None, 0) and transcript_manifest(path) is None:
             return ConversationHistoryPage()
-        with path.open("rb") as handle:
+        with TranscriptReader(path) as handle:
             size = handle.seek(0, 2)
             end = complete_jsonl_end(handle, size) if before is None else int(before)
             if end < 0 or end > size:
@@ -76,7 +78,7 @@ def read_conversation_history_page(
                 selected.append(row)
                 start, oldest_group = offset, group
         return ConversationHistoryPage(tuple(reversed(selected)), start, end)
-    except (OSError, ValueError, TypeError, UnicodeError) as exc:
+    except (OSError, ValueError, TypeError, UnicodeError, DataCorruptionError) as exc:
         return ConversationHistoryPage(errors=({
             "error_code": "CLIENT_HISTORY_LOAD_FAILED", "error_type": type(exc).__name__,
         },))

@@ -2,6 +2,7 @@
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
 # 联合候选绑定消息及工具分区，须满足原输入/输出门；备份收缩只用完整同源重测裁决，不以局部相减跳测；取消不提交、不计熔断。
 # 人格缓存面只绑定本次已提交线程，不使用候选代次；与普通提示冻结共享唯一快照。
+# 写检查点与CAS后的冷转显式共用owner compact根；维护失败不能回滚已发布摘要。
 # 模块用途: 复用可容纳主前缀，必超预算时先释放优化再沿原分段恢复；完整原文和 checkpoint/CAS 保持权威。
 
 from __future__ import annotations
@@ -20,7 +21,11 @@ from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .channels import project_user_reply
 from .compact_calibration import CompactRequestCalibration, calibrated_compact_request_tokens
-from .compact_checkpoint import CompactCheckpointRequest, write_compact_checkpoint
+from .compact_checkpoint import (
+    CompactCheckpointRequest,
+    _compact_root,
+    write_compact_checkpoint,
+)
 from .compact_guard import (
     CompactCapacityFacts,
     CompactInterruptCheck,
@@ -567,7 +572,7 @@ def _validated_compact_source_context(
 
     if context.view != resolve_compact_summary_view(agent, thread, context.scope):
         raise ConversationCompactError("Compact source summary changed", code="COMPACT_SOURCE_CHANGED")
-    if set(ids) & context.view.source_message_ids:
+    if any(identity in context.view.source_message_ids for identity in ids):
         raise ConversationCompactError("Compact source repeats covered messages", code="COMPACT_SOURCE_CHANGED")
     return context
 
@@ -581,9 +586,16 @@ def _validate_compact_tool_source(options, context):
     from .compact_tool_identity import compact_tool_ref_key
 
     source = options.tool_source
-    if (not isinstance(source, CarriedToolCompactSource) or options.request_projector is None or context is None
-            or {compact_tool_ref_key(ref) for ref in source.source_tool_refs}
-            & {compact_tool_ref_key(ref) for ref in context.view.source_tool_refs}):
+    if not isinstance(source, CarriedToolCompactSource) or options.request_projector is None or context is None:
+        raise ConversationCompactError("联合压缩来源或完整投影未知", code="COMPACT_SOURCE_CHANGED")
+    coverage = context.view.source_tool_refs
+    contains_key = getattr(coverage, 'contains_key', None)
+    if callable(contains_key):
+        repeated = any(contains_key(compact_tool_ref_key(ref)) for ref in source.source_tool_refs)
+    else:
+        keys = {compact_tool_ref_key(ref) for ref in coverage}
+        repeated = any(compact_tool_ref_key(ref) in keys for ref in source.source_tool_refs)
+    if repeated:
         raise ConversationCompactError("联合压缩来源或完整投影未知", code="COMPACT_SOURCE_CHANGED")
 
 
@@ -1214,8 +1226,8 @@ def _fit_landmarks_to_target(
     return smaller if smaller.tokens < measured.tokens else measured
 
 
-# LLM: checkpoint/generation仍唯一CAS；闲置候选在用户登记短门内复核活动，并传规范消息指纹到原append锁内CAS。
-# 函数用途: 复验实际覆盖及保留来源后沿原CAS提交同一候选，局部范围和原始文件不变。
+# LLM: checkpoint/generation仍唯一CAS；闲置候选在用户登记短门内复核活动；显式传writer同根到获胜后冷转，规范消息指纹仍在原锁内核对。
+# 函数用途: 复验覆盖及保留来源后沿原CAS提交同一候选，局部范围不变，全线程可无损冷转已覆盖原文。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
     candidate: _CompactCandidate,
@@ -1270,6 +1282,8 @@ def _commit_compact_candidate(
     for rows in (candidate.compact_rows, candidate.retained_tail):
         if isinstance(rows, MessageSnapshotRows):
             rows.validate()
+    # 原CAS可能切换热inode；返回尾部须在切换前物化，不能在已提交后重放旧物理地址。
+    retained_tail = tuple(candidate.retained_tail)
     from . import tool_discovery
     selector = tool_discovery.compact_tool_selector(request.thread, request.pending)
     from contextlib import nullcontext
@@ -1299,6 +1313,7 @@ def _commit_compact_candidate(
                                      or request.compact_context.scope.kind == "thread"),
             ),
             expected_generation=request.thread.compact_generation,
+            compact_root=_compact_root(request.agent, request.thread.thread_id),
             active_loaded_tool_names=selector(request.thread),
             active_tool_selector=selector,
             baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
@@ -1309,13 +1324,13 @@ def _commit_compact_candidate(
         )
     return ConversationCompactResult(
         thread=updated,
-        messages=candidate.retained_tail,
+        messages=retained_tail,
         projected_tokens=candidate.projected_tokens_after,
         trigger_tokens=request.policy.trigger_tokens,
         compacted=True,
         request_projection=candidate.request_projection,
         recent_operation_evidence=_recent_operation_evidence(
-            candidate.retained_tail
+            retained_tail
         ),
     )
 
