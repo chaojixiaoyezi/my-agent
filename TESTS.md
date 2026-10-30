@@ -1,3 +1,14 @@
+## 2026-10-29 e905 sol-6 Round 2：坏恢复历史必须在实际写门拒绝
+
+来源：`fix-e905-sol-6-r2.md` 与 Astra-1/c16 二审 R1。起点 `a28d45d12442befdf05fc236eb75db5025068257`，原基线 `4bea324e3`；不部署、不启停真实服务。
+
+- `test_opt_recovery_counters.py` 新增实际准入回归：真实 create → prepare → FAILED/result 后，只将测试 canonical 的 `provider_retry_count` 改为布尔值 true。显式 include/typed rerun 与普通候选选中后变坏均必须零入队、零新增预留，返回 `manual_review_unknown_recovery_history` 未应用记录；原 canonical 字节及旧启动历史严格不变。
+- 独立覆盖显式恢复候选、直接 reserve/prepare、预留后变坏，以及批次复读→预留和 load→canonical reducer 两种确定性交错。外层放行不能遮住内层缺口；锁内同源纯计数校验抛类型化冲突，不以空 retry reason 或指令正文作判断。
+- 正向保留首次启动、正常失败重试、结构化 conversation_user_stop 同 run 恢复；原 legacy、0/10/2 配置、BLOCKED 普通/provider 及 exact-attempt 回归继续执行。用户停止正向输入是结构化夹具，不声称运行完整会话停止链。
+- 初轮有效红测中的入队/候选/直接启动断言失败；旧启动记录本就存在，拒绝后应严格保留而非要求删除；首次绿测据此暴露的夹具误断言改成精确历史等值，并继续核整个 canonical 字节不变，不放宽坏账准入断言。
+
+复现：从工作树根运行 `PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_recovery_counters.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol6_r2_fix`。最终十文件、相邻回归、注释清单及实际结果见 `DONE-e905-sol-6.md` 的 Round 2；不将局部结果外推到真实 Gateway/模型、RuntimeDB 全调度、外部来源或跨平台 E2E。
+
 ## 2026-10-29 e905 sol-6 Round 1：恢复预算、首次只读坏账与采集边界
 
 来源：`fix-e905-sol-6-r1.md` 与 `steer-c15-sol6-f5.md`；基于 `ee2113192c28cd7cf7d89f8528458d3a27551565` 继续返工，原任务基线为 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。目标分支 `opt-e905/sol-6`，不推送、部署、启停真实服务。

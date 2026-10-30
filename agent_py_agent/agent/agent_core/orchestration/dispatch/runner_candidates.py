@@ -1,4 +1,4 @@
-# LLM: 候选挑选只用 runner/dispatch 的唯一候选闸；普通失败的重跑次数由调用方按配置 runner_failure_retry_limit 传入。只读。
+# LLM: 普通候选沿runner/dispatch唯一闸，显式恢复回退同样校验canonical计数；用户停止不覆盖坏账，读取不授实际启动权。只读。
 # 模块用途: 按派工上下文（显式 include、恢复指令或全部任务）挑出可以启动或重跑的子代理 run。
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from ....subagents.models import (
 )
 from ....subagents.recovery_eligibility import user_stopped_run_is_resumable
 from ....subagents.services.recovery.modes import is_rerun_mode, recovery_mode_from_protocol_value
+from ....subagents.services.recovery.strategy import recovery_count
 from ...runner.dispatch import (
     RunnerCandidatePolicy,
     _dispatch_runner_candidates,
@@ -94,7 +95,11 @@ def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 
+# LLM: 显式include/typed rerun不是坏账覆盖授权；先核同源计数，再保留用户停止和原能力/终态门，不写状态。
+# 函数用途: 判断指定run能否显式恢复；不能把已识别的坏历史作为普通恢复候选。
 def _can_rerun_from_recovery_instruction(task: object) -> bool:
+    if recovery_count(task, "recovery_history_unknown_count"):
+        return False
     if user_stopped_run_is_resumable(task):
         return True
     recoverable_statuses = frozenset({TaskStatus.BLOCKED.value, TaskStatus.FAILED.value})

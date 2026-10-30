@@ -1,9 +1,11 @@
-# LLM: 候选在创建锁内接纳，线程池只消费原执行轮；联测取消、重试和并发排队。
-# 模块用途: 组织子代理批次，固定每个工作项的身份并收集正式执行结果。
+# LLM: 候选复读及原锁内接纳均拒绝坏历史，线程池只消费原执行轮；类型化拒绝生成未应用记录，联测取消、重试和排队。
+# 模块用途: 组织子代理批次，固定执行身份；过期坏账候选不得入队或取得启动权。
 from __future__ import annotations
 
 """Runner candidate collection and batch execution for dispatch mixins."""
 
+from ....subagents.services.lifecycle_runner_attempts import RunnerRecoveryHistoryUnknownError
+from ....subagents.services.recovery.strategy import recovery_count
 from ...runner.dispatch import (
     _runner_retry_reason,
     runner_failure_retry_limit,
@@ -37,6 +39,7 @@ from .runner_records import (
     conversation_lifecycle_gate_record,
     dry_runner_record,
     multi_runner_instruction_record,
+    recovery_history_blocked_runner_record,
 )
 from .runner_selection import (
     invalid_include_run_ids_record,
@@ -133,8 +136,8 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
     return merged[:limit]
 
 
-# LLM: 候选接纳只在creation guard内预留准确pending；恢复原因同样读取配置阈值，不暗用4；冻结map缺项即拒绝。
-# 函数用途: 选出可执行的工作并固定轮次，线程池稍后启动仍使用同一身份。
+# LLM: 最新canonical坏历史在入队前硬拒绝；预留口锁内类型化拒绝也转正式记录，不能只重算空retry reason继续；阈值/map合同不变。
+# 函数用途: 复核并固定可执行工作，坏账不入队、不预留且留下未应用记录，正常首次启动不要求retry reason。
 def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: int, runner_candidates: list):
     from ....subagents.runner_start import reserve_runner_start
     from .tool_helpers import _dispatch_capability_config
@@ -158,6 +161,9 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: i
             dry_records.append(conversation_lifecycle_gate_record(agent, ctx, task, decision))
             continue
         before = agent.subagents.load(task.id)
+        if recovery_count(before, "recovery_history_unknown_count"):
+            dry_records.append(recovery_history_blocked_runner_record(agent, ctx, before))
+            continue
         retry_reason = _runner_retry_reason(
             before, runner_retry_limit,
             no_progress_attempt_limit=_dispatch_capability_config(agent).subagent_no_progress_attempt_limit,
@@ -165,11 +171,15 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: i
         if ctx.execution_plan.mutate_state:
             if ctx.should_start_runners:
                 expected = supplied_attempts[task.id] if supplied_attempts is not None else None
-                admitted = reserve_runner_start(
-                    agent.subagents, task.id, expected_attempt_id=expected,
-                    resume_user_stop=task.id in resume_run_ids,
-                    launch_id=ctx.background_launch_id,
-                )
+                try:
+                    admitted = reserve_runner_start(
+                        agent.subagents, task.id, expected_attempt_id=expected,
+                        resume_user_stop=task.id in resume_run_ids,
+                        launch_id=ctx.background_launch_id,
+                    )
+                except RunnerRecoveryHistoryUnknownError:
+                    dry_records.append(recovery_history_blocked_runner_record(agent, ctx, before))
+                    continue
                 admitted_attempts[task.id] = admitted
             pending_runner_jobs.append((task.id, before, retry_reason))
             continue

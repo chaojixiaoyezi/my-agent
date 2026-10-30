@@ -35,6 +35,12 @@ load 只在返回对象中派生字段，不改原文件。下一次正常 canon
 
 坏恢复历史同时阻断策略和正式恢复编排：即使有有效 refs，也返回 `manual_review_unknown_recovery_history`、`blocked_by: [recovery_history_unknown]`，不建议自动续派或接管；`no_progress_fuse` 为 false，不把未知冒充已证无进展。这个坏账门与仅描述产物观察不完整的 `no_progress_unknown_count` 不同，后者本身不制造坏账。已有合法 99 次审计历史仍按原显式停止协议恢复；一次保存跨多个未见 attempt 则如实标未知，不能为兼容测试放开。
 
+### 实际准入与激活写门（Round 2）
+
+坏历史不能只返回空 retry reason 或人工复核指令：显式 include/typed rerun 的回退也读同源 `recovery_count`；批次复读最新 canonical，在入队前拒绝并生成 `action: manual_review_unknown_recovery_history`、`ok: false`、`applied: false` 的原派工记录。批次复读之后历史变坏时，原预留口在 creation guard 内重新核验，并用 `RunnerRecoveryHistoryUnknownError`（`reason: recovery_history_unknown`）拒绝，批次只捕获这一具体冲突，不吞其它身份冲突。
+
+直接 reserve 和 prepare 同样使用原 `_assert_runner_attempt_start_allowed`，坏账拒绝先于 pending/RuntimeDB 激活、会话关联与插话恢复；文件预留 reducer 及最终 canonical 激活 reducer 再核最新记录。拒绝不清零、不取消、不改原 canonical，也不删除已有启动历史。未知历史没有人工覆盖开关；明确用户停止的同 run 恢复只放宽原终态资格，仍须有合法计数。正常首次启动不要求非空 retry reason；已知预算/熔断的显式恢复语义保持原合同，不在本片改成全状态通用重试门。
+
 ### 阈值唯一来源
 
 生产 `RunnerCandidatePolicy` 调用方传入原能力配置的 `subagent_no_progress_attempt_limit`；0 明确关闭无进展熔断，不关闭独立失败重试额度。

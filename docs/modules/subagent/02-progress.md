@@ -1,3 +1,8 @@
+## 2026-10-29 e905 sol-6 Round 2：实际坏账准入关闭（源码候选，未部署）
+
+- c16 R1 的显式坏账及普通过期候选在入队前结构化拒绝；原锁内预留和最终激活复核 canonical，不以空 retry reason 或模型指令代替写门。
+- 拒绝不改坏账、不删除历史启动、不产生新的 pending/active；首次启动、合法失败重试和明确停止后的同 run 恢复继续保留。具体类型、边界和复现见[恢复与采集合同](../../design/SUBAGENT_RECOVERY_HARVEST.md)及根 `TESTS.md` Round 2。真实 Gateway/RuntimeDB 全调度、模型和跨平台 E2E 未验证。
+
 ## 2026-10-29 e905 sol-6 Round 1：恢复预算与首次只读坏账（源码候选，未部署）
 
 - BLOCKED 的可重试失败与 FAILED/TIMEOUT 共用记账状态集；普通失败、供应类失败与总审计 attempts 分开，正常切片不消费失败预算。

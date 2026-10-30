@@ -412,3 +412,242 @@ def test_recovery_config_reaches_real_prepare_and_public_reports(tmp_path, monke
     instruction = started.attributes["runner_recovery_preflight"]["runner_instruction"]
     assert ("不要继续自动重试" in instruction) is fused
     assert bool(_runner_retry_reason(task, 10, no_progress_attempt_limit=limit)) is (not fused)
+
+
+# LLM: 沿真实prepare/result生成一次可重试失败；只写隔离临时目录，不调用模型或启动宿主。
+# 函数用途: 为实际接纳反例准备合法失败历史，避免用手工失败状态替代生命周期。
+def _admission_failed_run(tmp_path):
+    from agent_py_agent.agent.subagents.manager_runner_result_payload import (
+        RecordRunnerResultParams,
+    )
+    from agent_py_agent.agent.subagents.services.lifecycle_runner_attempts import (
+        prepare_runner_attempt,
+    )
+
+    manager = SubAgentManager(tmp_path / "runs")
+    task = manager.create_run(goal="坏历史准入", thought="真实失败后复读", plan=["继续"])
+    started = prepare_runner_attempt(manager, task.id)
+    manager.runner_result.record_runner_result(RecordRunnerResultParams(
+        run_id=task.id, attempt_id=started.runner_active_attempt_id,
+        dry_run=False, ok=False, message="隔离失败", status="FAILED",
+        failure_type="runner_error", turn_end_reason="error",
+    ))
+    task = manager.load(task.id)
+    assert _runner_retry_reason(task, 1)
+    return manager, task
+
+
+# LLM: 只损坏当前测试自己的canonical计数；保留其它字段和原始字节，验证拒绝无写副作用。
+# 函数用途: 重现c16的provider布尔坏账输入，不经save洗写历史。
+def _corrupt_admission_history(task):
+    path = Path(task.agent_run_workspace_dir) / "canonical_state.json"
+    raw = json.loads(path.read_text())
+    raw["provider_retry_count"] = True
+    path.write_text(json.dumps(raw))
+    return path, path.read_bytes()
+
+
+# LLM: 使用真实DispatchContext/执行计划和manager，配置0只关闭无进展熔断，不覆盖坏历史门。
+# 函数用途: 构造普通或显式同run恢复的实际接纳输入。
+def _admission_context(tmp_path, manager, task, *, explicit=False, start=True):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
+        DispatchContext,
+        DispatchExecutionPlan,
+    )
+
+    config = tmp_path / "capability.yaml"
+    config.write_text("subagent_no_progress_attempt_limit: 0\n")
+    agent = SimpleNamespace(subagents=manager, root=tmp_path, capability_config_path=config)
+    ctx = DispatchContext(
+        cfg=None, planner=False, runner_instruction="", max_runners=1, limit=10,
+        reviewer="test", note="", take_over_by="", locked_files=None, router=None,
+        include_run_ids=[task.id] if explicit else [],
+        recovery_mode="rerun_from_checkpoint" if explicit else "",
+        execution_plan=DispatchExecutionPlan.from_parts(mutate_state=True, start_runners=start, max_runners=1),
+    )
+    return agent, ctx
+
+
+# LLM: c16两种输入均复读真实canonical；不让空retry reason伪装首次启动，必须在入队前拒绝且零预留。
+# 函数用途: 钉住显式坏账与普通候选选中后变坏两个实际接纳场景。
+@pytest.mark.parametrize("case", ["explicit", "stale_normal"])
+@pytest.mark.parametrize("start", [True, False])
+def test_unknown_history_actual_admission_rejects_c16_scenarios(tmp_path, case, start):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
+        collect_runner_candidates,
+    )
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_candidates import (
+        _runner_candidates_for_context,
+    )
+
+    manager, task = _admission_failed_run(tmp_path)
+    agent, ctx = _admission_context(tmp_path, manager, task, explicit=case == "explicit", start=start)
+    candidates = _runner_candidates_for_context([task], ctx, 1)
+    assert [item.id for item in candidates] == [task.id]
+    path, original = _corrupt_admission_history(task)
+    if case == "explicit":
+        # 模拟显式include回退曾收到的已损坏快照，独立检验最终接纳，不靠候选修复遮住缺口。
+        candidates = [manager.load(task.id)]
+    records, jobs = collect_runner_candidates(agent, ctx, 1, candidates)
+    assert not jobs, "坏历史不得进入实际待执行队列"
+    assert len(records) == 1
+    assert records[0].action == "manual_review_unknown_recovery_history"
+    assert records[0].ok is False and records[0].applied is False
+    assert ctx.expected_attempt_ids == {}
+    after = manager.load(task.id)
+    assert after.status == "FAILED" and not after.runner_active_attempt_id
+    assert after.attributes.get("background_start") == json.loads(original)["attributes"].get("background_start")
+    assert path.read_bytes() == original
+
+
+# LLM: 显式恢复不能把布尔坏账变成用户覆盖；同run停止资格另有正向回归保护。
+# 函数用途: 确认显式include的候选回退也使用统一坏历史校验。
+def test_unknown_history_explicit_recovery_candidate_is_rejected(tmp_path):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_candidates import (
+        _runner_candidates_for_context,
+    )
+
+    manager, task = _admission_failed_run(tmp_path)
+    agent, ctx = _admission_context(tmp_path, manager, task, explicit=True)
+    path, original = _corrupt_admission_history(task)
+    assert _runner_candidates_for_context([manager.load(task.id)], ctx, 1) == []
+    assert path.read_bytes() == original
+
+
+# LLM: 绕开候选和批次直接调用原预留/激活；异常必须是结构化冲突，原canonical不变且不重开额度。
+# 函数用途: 独立验证内层坏账门，不让外层测试通过遮住实际启动漏洞。
+@pytest.mark.parametrize("boundary", ["reserve", "prepare"])
+def test_unknown_history_direct_start_boundaries_reject(tmp_path, boundary):
+    from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+    from agent_py_agent.agent.subagents.runner_start import reserve_runner_start
+    from agent_py_agent.agent.subagents.services.lifecycle_runner_attempts import (
+        prepare_runner_attempt,
+    )
+
+    manager, task = _admission_failed_run(tmp_path)
+    path, original = _corrupt_admission_history(task)
+    start = reserve_runner_start if boundary == "reserve" else prepare_runner_attempt
+    with pytest.raises(RuntimeConflictError) as caught:
+        start(manager, task.id)
+    assert caught.value.reason == "recovery_history_unknown"
+    assert path.read_bytes() == original
+    assert not manager.load(task.id).runner_active_attempt_id
+
+
+# LLM: 预留成功不授予永久激活权；在排队之后损坏canonical，真实prepare必须重新拒绝且保留pending原事实。
+# 函数用途: 覆盖接纳至激活之间的确定性交错，不冒称生产并发故障率。
+def test_unknown_history_after_reservation_cannot_activate(tmp_path):
+    from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+    from agent_py_agent.agent.subagents.runner_start import reserve_runner_start
+    from agent_py_agent.agent.subagents.services.lifecycle_runner_attempts import (
+        prepare_runner_attempt,
+    )
+
+    manager, task = _admission_failed_run(tmp_path)
+    expected = reserve_runner_start(manager, task.id)
+    path, original = _corrupt_admission_history(task)
+    with pytest.raises(RuntimeConflictError):
+        prepare_runner_attempt(manager, task.id, expected_attempt_id=expected)
+    assert path.read_bytes() == original
+    after = manager.load(task.id)
+    assert after.status == "FAILED" and not after.runner_active_attempt_id
+    assert after.attributes["background_start"]["attempt_id"] == expected
+    assert not after.attributes["background_start"].get("activated_at")
+
+
+# LLM: 第一次启动没有retry reason也合法；已知失败和结构化conversation_user_stop均保留原同run恢复，不用文本猜意图。
+# 函数用途: 防止为了堵坏账而误伤首次启动、正常重试及明确用户停止后的恢复。
+@pytest.mark.parametrize("state", ["new", "failed", "user_stop"])
+def test_valid_history_admission_and_same_run_resume_still_work(tmp_path, state):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
+        collect_runner_candidates,
+    )
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_candidates import (
+        _runner_candidates_for_context,
+    )
+    from agent_py_agent.agent.subagents.services.lifecycle_runner_attempts import (
+        prepare_runner_attempt,
+    )
+
+    if state == "new":
+        manager = SubAgentManager(tmp_path / "runs")
+        task = manager.create_run(goal="首次启动", thought="零历史", plan=["继续"])
+    else:
+        manager, task = _admission_failed_run(tmp_path)
+    if state == "user_stop":
+        # LLM: 仅构造合法结构化用户停止现场；被测对象是恢复接纳，不声称运行了真实会话停止链。
+        # 函数用途: 保留此前失败事实，生成原同run恢复协议要求的停止字段。
+        def stop(current):
+            current.attributes = {**current.attributes, "cancel_subagents": {
+                "reason": "conversation_user_stop", "previous_status": current.status,
+                "previous_failure_type": current.failure_type,
+            }}
+            current.status, current.failure_type = "CANCELLED", "cancelled"
+
+        task = manager.mutate(task.id, stop)
+    agent, ctx = _admission_context(tmp_path, manager, task, explicit=state == "user_stop")
+    candidates = _runner_candidates_for_context([task], ctx, 1)
+    assert [item.id for item in candidates] == [task.id]
+    records, jobs = collect_runner_candidates(agent, ctx, 1, candidates)
+    assert not records and len(jobs) == 1
+    started = prepare_runner_attempt(manager, task.id, expected_attempt_id=ctx.expected_attempt_ids[task.id])
+    assert started.id == task.id and started.status == "RUNNING"
+    assert started.runner_active_attempt_id == ctx.expected_attempt_ids[task.id]
+    assert started._extra_fields["recovery_history_unknown_count"] == 0
+
+
+# LLM: 在批次复读之后、原锁内预留之前插入真实坏账写入；拒绝必须是正式记录，不中断整批或留pending。
+# 函数用途: 防止外层快照校验通过后仍能绕过内层准入。
+def test_unknown_history_between_collection_and_reserve_is_reported(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
+        collect_runner_candidates,
+    )
+    from agent_py_agent.agent.subagents import runner_start
+
+    manager, task = _admission_failed_run(tmp_path)
+    agent, ctx = _admission_context(tmp_path, manager, task)
+    original_reserve = runner_start.reserve_runner_start
+    corrupted = []
+
+    # LLM: 只改变这一准确接缝的输入时序，仍执行原reserve，不替代接纳判断或写盘函数。
+    # 函数用途: 在真实锁内复读之前损坏测试自己的canonical。
+    def corrupt_then_reserve(*args, **kwargs):
+        corrupted.append(_corrupt_admission_history(task))
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(runner_start, "reserve_runner_start", corrupt_then_reserve)
+    records, jobs = collect_runner_candidates(agent, ctx, 1, [task])
+    assert not jobs and len(records) == 1
+    assert records[0].action == "manual_review_unknown_recovery_history"
+    path, original = corrupted[0]
+    assert path.read_bytes() == original
+
+
+# LLM: 只在load校验与canonical reducer之间确定性交错；内层必须独立拒绝，不能靠最外层快照保护。
+# 函数用途: 分别检查文件预留与最终激活的最新canonical写门。
+@pytest.mark.parametrize("boundary", ["reserve", "prepare"])
+def test_unknown_history_at_canonical_reducer_is_rejected(tmp_path, monkeypatch, boundary):
+    from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+    from agent_py_agent.agent.subagents.runner_start import reserve_runner_start
+    from agent_py_agent.agent.subagents.services.lifecycle_runner_attempts import (
+        prepare_runner_attempt,
+    )
+
+    manager, task = _admission_failed_run(tmp_path)
+    original_mutate = manager.mutate
+    corrupted = []
+
+    # LLM: 保持原mutate的锁、复读和提交行为，只在进入它之前写入坏输入。
+    # 函数用途: 钉住外层load正确而reducer收到坏历史的窗口。
+    def corrupt_then_mutate(*args, **kwargs):
+        corrupted.append(_corrupt_admission_history(task))
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "mutate", corrupt_then_mutate)
+    start = reserve_runner_start if boundary == "reserve" else prepare_runner_attempt
+    with pytest.raises(RuntimeConflictError):
+        start(manager, task.id)
+    path, original = corrupted[0]
+    assert path.read_bytes() == original

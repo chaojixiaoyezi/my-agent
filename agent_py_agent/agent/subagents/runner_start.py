@@ -1,5 +1,5 @@
-# LLM: 启动接纳共用 creation guard；受管模式读 RuntimeDB，文件模式读原 canonical。标记写入归 lifecycle 服务，启动留锁外。
-# 模块用途: 预留后台工作将要执行的轮次，并为激活与生命周期标记提供准确身份核对。
+# LLM: 启动接纳共用creation guard；原canonical坏历史先拒绝，文件reducer复核，受管模式才读写RuntimeDB；实际启动留锁外。
+# 模块用途: 预留后台执行轮，守住恢复计数与准确身份，坏账不产生pending或启动标记。
 from __future__ import annotations
 
 from ..runtime_db.operations import RuntimeConflictError
@@ -38,8 +38,8 @@ def existing_runner_launch(manager: object, run_id: str, expected_attempt_id: st
     return True
 
 
-# LLM: supplied ID 是宿主冻结输入，不能改领 current；无输入的正常派工在锁内预留 pending，明确恢复才可接纳 user stop。
-# 函数用途: 给排队工作绑定非空的原执行轮，文件模式与数据库模式各守唯一事实源。
+# LLM: supplied ID不能改领current；锁内复读先拒绝坏历史，文件mutate再核最新值；明确恢复仅放宽user stop终态，不覆盖坏账。
+# 函数用途: 在原写边界给排队工作绑定执行轮；合法时写pending，坏历史不改文件或数据库。
 def reserve_runner_start(
     manager: object, run_id: str, *, expected_attempt_id: str | None = None,
     resume_user_stop: bool = False, launch_id: str = "",
@@ -62,7 +62,15 @@ def reserve_runner_start(
         if repo is None:
             from .file_runner_start import reserve_file_runner_start
 
-            reserved = manager.mutate(run_id, lambda current: reserve_file_runner_start(current, launch_id))
+            # LLM: 原canonical锁内再核计数与停止资格，不能把creation锁前后的旧load当作写权；实际预留仍走原reducer。
+            # 函数用途: 对最新文件任务验证后预留，拒绝时不写启动标记。
+            def reserve(current):
+                _assert_runner_attempt_start_allowed(
+                    current, resumable_user_stop=resume_user_stop and user_stopped_run_is_resumable(current),
+                )
+                reserve_file_runner_start(current, launch_id)
+
+            reserved = manager.mutate(run_id, reserve)
             return str(reserved.attributes["background_start"]["attempt_id"])
         run = repo.agent_run_for_run_id(run_id)
         if run is None:
