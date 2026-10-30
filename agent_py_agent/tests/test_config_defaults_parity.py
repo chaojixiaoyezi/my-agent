@@ -1,3 +1,5 @@
+# LLM: 全字段正式加载值与默认比较保持；额外禁止退役入口残留 YAML，不能靠值白名单隐藏迁出失败。
+# 模块用途: 验证随包默认和代码默认一致，并锁定 v6 模型、决策及旧控制项不再平铺持久化。
 """P7 全量默认值一致性：随包 agent_config.yaml 加载结果必须等于 AgentConfig() 默认值。
 
 来源：三线收口 P7（2026-10-01）。此前只有零星核对（test_config_validation.py、
@@ -68,3 +70,20 @@ def test_whitelist_reason_text_is_kept_in_sync_with_reality():
     names = {item.name for item in fields(AgentConfig)}
     assert set(_VALUE_WHITELIST) <= names, set(_VALUE_WHITELIST) - names
     assert all(str(reason).strip() for reason in _VALUE_WHITELIST.values())
+
+
+# LLM: 旧键只供显式离线迁移，随包模板不再声明另一套模型/决策默认；删除无效控制不能只靠 reader 忽略。
+# 函数用途: 从实际随包 YAML 检查已迁出字段和已删除控制项的物理残留。
+def test_packaged_config_has_no_retired_model_decision_or_control_keys():
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.model_credentials import decision_config_fields
+
+    model = {item.name for item in fields(AgentConfig) if item.metadata.get("model_projection", False)}
+    agent_decision = {key for domain, key in decision_config_fields().values() if domain != "capability"}
+    capability_decision = {key for domain, key in decision_config_fields().values() if domain == "capability"}
+    agent = load_simple_yaml(_PACKAGED)
+    capability = load_simple_yaml(_PACKAGED.with_name("capability_config.yaml"))
+    assert not set(agent) & (model | agent_decision | {"memory_compact_auto_trigger_percent", "cli_audit_cleanup_days"})
+    assert not set(capability) & (capability_decision | {"capability_grant_expires_after_task"})
+    assert not _PACKAGED.with_name("runtime_guard_config.yaml").exists()
+    assert "cli_audit_cleanup_days" not in {item.name for item in fields(AgentConfig)}

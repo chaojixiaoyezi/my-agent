@@ -101,10 +101,6 @@ capability_candidate_limit: 5
 # 主选包与子授权入口装配共用的总 token 预算，包含读取回执；读不完保留准确分页信息，0 仍受模型窗口限制。
 capability_bundle_max_tokens: 3000
 
-# 下发能力是否只在当前任务有效。
-# - true: 推荐默认值，任务结束后收回临时授权，避免污染后续任务。
-# - false: 允许授权跨任务保留，后续需要更强审计。
-capability_grant_expires_after_task: true
 # 单次能力申请最多下发的 Skill 数；按检索顺序选取可信命中，超出的不再下发。0 表示不限制。
 capability_grant_max_skills: 0
 # 单次能力申请最多下发的工具数；规则同上。0 表示不限制。
@@ -194,16 +190,6 @@ plugin_self_install_enabled: false
 # - false: 推荐默认值；只给提示，不替用户点任何东西。
 # 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后下一次读取生效。
 action_candidate_auto_execute_enabled: false
-# 决策能力点默认关闭；observe 也会发请求并产生用量；模式不授予执行权限。
-decision_subagent_model_mode: off
-# 子代理执行模型候选的原模型目录 ID；[] 使用全部当前授权的 agentic 模型。可按用户长期或会话设置覆盖，不按名称猜服务商。
-decision_subagent_model_candidate_profile_ids: []
-# 总开关与本点仍默认关闭。采用时 metadata 只缩减名卡/推荐，progressive 还延迟可选类别的未选中工具。
-# 减量可能改变工作片间的缓存前缀/schema，不能把省输入等同于缓存命中；原工具搜索与执行权限不变。
-decision_skill_tool_context_policy: progressive
-# 可额外收起的工具类别是开放字符串列表；[] 不额外收起。不会修改原 tool_catalog_deferred_categories。
-decision_skill_tool_optional_categories: ["plugins"]
-decision_skill_tool_mode: off  # 技能/工具上下文决策点模式（off/observe/apply）；默认关闭，observe 也会发请求并产生用量
 
 # my-agent 自己调决策等待时间的上下限（秒，整数）。
 # - 只约束 my-agent 通过 user_config 的 decision_patch 调整各 timeout_seconds 字段（通用前台/阶段/后台与各接入点）；

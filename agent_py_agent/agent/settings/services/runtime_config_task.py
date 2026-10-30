@@ -1,4 +1,4 @@
-# LLM: task overlay只有一份路径/合并/规范化算法；正式worker和预览都不修改进程日志级别，脱敏安装保持幂等。
+# LLM: task overlay 只合并 canonical 字段，不使用压缩 setter 补偿；正式 worker 和预览不修改共享日志级别。
 # 模块用途: 投影子代理配置并保留日志脱敏，不让单任务覆盖污染其他owner的logger。
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def apply_task_runtime_config_overlay(
     return config
 
 
-# LLM: 只读原 overlay 并复用优先级；克隆保留宿主来源上界，任务文件的内部字段伪造无效，不改变原无覆盖对象。
+# LLM: 只读原 overlay 并复用优先级；canonical 字段直接 replace，保留宿主上界，任务文件不得伪造内部事实。
 # 函数用途: 为正式 worker 和创建前候选共同投影最终配置，保留模型来源与覆盖警告。
 def project_task_runtime_config_overlay(
     base_config: AgentConfig,
@@ -50,11 +50,6 @@ def project_task_runtime_config_overlay(
     layer = load_runtime_config_layer(path, scope=scope, config_cls=type(base_config))
     effective = merge_runtime_config_layers(base_config, [layer], config_cls=type(base_config))
     config = freeze_managed_secret_environment(replace(freeze_managed_secret_environment(base_config), **effective.values))
-    object.__setattr__(
-        config,
-        "memory_compact_trigger_percent",
-        effective.values["memory_compact_trigger_percent"],
-    )
     config.config_path = base_config.config_path
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)

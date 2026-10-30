@@ -1,3 +1,5 @@
+# LLM: 退役授权开关只能告警，不能恢复原配置写入口。
+# 模块用途: 验证能力配置实例、类型与字段退役。
 """capability_config 模块测试。
 
 测试 CapabilityConfig 数据类和 load_capability_config 函数。
@@ -136,6 +138,8 @@ def test_load_capability_config_path_object(tmp_path):
 
 # ── 配置合并测试 ──────────────────────────────────────────────────────────
 
+# LLM: 已删除的授权开关不再参与配置，保留布尔正常解析和退役键告警的双向断言。
+# 函数用途: 验证布尔覆盖与授权开关退役互不干扰。
 def test_capability_config_boolean_override(tmp_path):
     """测试布尔配置项覆盖。"""
     config_file = tmp_path / "bool.yaml"
@@ -148,7 +152,8 @@ def test_capability_config_boolean_override(tmp_path):
     config = load_capability_config(config_file)
 
     assert config.enable_capability_package_recommendations is False
-    assert config.capability_grant_expires_after_task is False
+    assert not hasattr(config, "capability_grant_expires_after_task")
+    assert any("capability_grant_expires_after_task" in warning for warning in config.config_warnings)
 
 
 def test_capability_config_integer_fields(tmp_path):

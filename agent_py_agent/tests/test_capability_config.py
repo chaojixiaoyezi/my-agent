@@ -1,3 +1,5 @@
+# LLM: 能力参数沿真实加载器验证；已删除的授权过期旋钮不得在 schema 或构造入口复活。
+# 模块用途: 验证能力配置默认值、类型、退役字段与模板。
 """Tests for capability/config.py: capability config loading, defaults, and permission control.
 
 给人看的解释：
@@ -48,6 +50,8 @@ class TestCapabilityConfigDefaults:
         assert config.capability_grant_max_tools == 0
 
 
+# LLM: 退役键只告警，现存键仍按严格类型与默认值读取。
+# 类用途: 验证实际能力配置加载器。
 class TestLoadCapabilityConfig:
     """测试 load_capability_config 配置加载。"""
 
@@ -133,6 +137,8 @@ class TestLoadCapabilityConfig:
         finally:
             path.unlink()
 
+    # LLM: false不能通过已退役键关闭任务授权回收，其他布尔开关依然正常读取。
+    # 函数用途: 验证布尔加载与退役授权键告警。
     def test_load_capability_config_with_booleans(self):
         """验证布尔类型配置项。"""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -145,12 +151,15 @@ class TestLoadCapabilityConfig:
         try:
             config = load_capability_config(path)
             assert config.enable_capability_package_selection is True
-            assert config.capability_grant_expires_after_task is False
+            assert not hasattr(config, "capability_grant_expires_after_task")
+            assert any("capability_grant_expires_after_task" in warning for warning in config.config_warnings)
             assert config.subagent_stream_activity_projection_enabled is False
         finally:
             path.unlink()
 
 
+# LLM: 只验证现存配置及已删除开关的构造拒绝；授权协议事实由真实 grant 服务负责。
+# 类用途: 验证能力配置字段边界。
 class TestCapabilityConfigValidation:
     """测试 CapabilityConfig 字段验证。"""
 
@@ -166,10 +175,13 @@ class TestCapabilityConfigValidation:
         assert config.subagent_heartbeat_timeout == 0
         assert config.subagent_run_timeout == 0
 
+    # LLM: 授权过期是协议事实，不再是可配置布尔；构造旧键必须失败而非悄悄接受。
+    # 函数用途: 验证授权开关从配置 schema 物理删除。
     def test_capability_config_grant_expiration(self):
-        """验证授权过期设置。"""
         config = CapabilityConfig()
-        assert config.capability_grant_expires_after_task is True
+        assert not hasattr(config, "capability_grant_expires_after_task")
+        with pytest.raises(TypeError):
+            CapabilityConfig(capability_grant_expires_after_task=False)
 
 
 class TestCapabilityConfigEdgeCases:

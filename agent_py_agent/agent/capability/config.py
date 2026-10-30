@@ -1,4 +1,4 @@
-# LLM: 子代理权限、凭据默认保留期限、运行投影、整机工具安全阀和包候选的唯一默认配置；新增字段同步随包YAML与测试。
+# LLM: 能力默认只保留实际控制项；决策覆盖归原模型目录，任务结束授权固定到期，不保留无效的关闭开关。
 # 模块用途: 集中读取协作能力设置，同stat文件复用解析且返回隔离副本；缓存不改变路径选择、非法值拒绝或权限。
 from __future__ import annotations
 
@@ -30,11 +30,6 @@ class CapabilityConfig:
     既有额度数字项：0 表示不限制；点位决策等待与模型引用只在决策设置覆盖层按点位设置，默认继承通用值。
     决策关闭由 mode=off 表达，不把零解释为无限等待。"""
 
-    decision_subagent_model_mode: str = "off"
-    decision_subagent_model_candidate_profile_ids: list[str] = field(default_factory=list)
-    decision_skill_tool_mode: str = "off"
-    decision_skill_tool_context_policy: str = "progressive"
-    decision_skill_tool_optional_categories: list[str] = field(default_factory=lambda: ["plugins"])
     # my-agent 经 user_config decision_patch 自调决策等待时间的上下限（整数秒）；0 表示该侧不限制，用户菜单修改不受限。
     decision_agent_timeout_min_seconds: int = 1
     decision_agent_timeout_max_seconds: int = 30
@@ -133,7 +128,6 @@ class CapabilityConfig:
     subagent_failure_split_max_depth: int = 2
     capability_grant_max_skills: int = 0
     capability_grant_max_tools: int = 0
-    capability_grant_expires_after_task: bool = True
     # 加载时累积的告警（已删/未知键等）；只用于诊断展示，不参与路由判断。
     config_warnings: list[str] = field(default_factory=list)
 
@@ -242,8 +236,8 @@ def _copy_capability_config(config: CapabilityConfig) -> CapabilityConfig:
                               if isinstance(value, (list, dict))})
 
 
-# LLM: 原标准库YAML解析及安全开关校验保持；失败不进入成功缓存，不迁移未知或已删字段。
-# 函数用途: 加载原能力配置，已删/未知字段记告警并忽略，非法决策设置仍旧报错。
+# LLM: 原标准库 YAML 与安全开关校验保持；失败不缓存，决策迁移只由显式离线流程执行。
+# 函数用途: 加载正式能力配置，已删/未知字段记告警，不把旧决策变成运行默认。
 def _load_capability_config(config_path: str | Path) -> CapabilityConfig:
     """加载能力路由配置；未知字段只记告警并忽略（与主配置一致），非法值仍报错。"""
 
@@ -251,9 +245,6 @@ def _load_capability_config(config_path: str | Path) -> CapabilityConfig:
     if not path.exists():
         raise FileNotFoundError(f"能力路由配置文件不存在: {path}")
     raw = load_simple_yaml(path)
-    from ..settings.decision_settings_defaults import validate_config_decision_fields
-
-    raw.update(validate_config_decision_fields(raw, domain="capability"))
     allowed = set(CapabilityConfig.__dataclass_fields__.keys())
     # 参数减量的约定：已删的键只告警、不迁移，也不能拦住加载；用户配置里残留旧键是常态。
     config_warnings = [

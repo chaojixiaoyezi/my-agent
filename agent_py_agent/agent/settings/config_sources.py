@@ -16,17 +16,18 @@ INTERNAL_RUNTIME_CONFIG_FIELDS = {
     "config_sources",
     "host_credential_env_names",
     "host_home_snapshot",
+    "runtime_guard_policy",
 }
 
 
-# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# LLM: 宿主专有和模型目录投影均不进入公开键；元数据只限定输入，不签发权限或重建运行秘密。
 # 函数用途: 从配置模型取得对外公开的键，不把内部追踪字段当用户配置。
 def public_config_keys(config_cls: type) -> set[str]:
-    return {item.name for item in fields(config_cls)} - INTERNAL_RUNTIME_CONFIG_FIELDS
+    return {item.name for item in fields(config_cls) if not item.metadata.get("host_only", False)} - INTERNAL_RUNTIME_CONFIG_FIELDS
 
 
-# LLM: 旧比例键只在同一来源未提供新键时迁移，来源优先级不变；用户字段仍排除宿主内部诊断和身份快照。
-# 函数用途: 合并默认、配置文件和环境来源，并兼容旧压缩比例配置。
+# LLM: 只合并正式 schema 的字段，来源优先级不变；退役字段不在运行时转换，用户字段仍排除宿主内部事实。
+# 函数用途: 合并默认、配置文件和环境来源，不隐式执行旧配置迁移。
 def merge_agent_config_sources(
     *,
     config_cls: type,
@@ -36,8 +37,6 @@ def merge_agent_config_sources(
 ) -> EffectiveConfig:
     allowed = public_config_keys(config_cls)
     clean = {key: normalized[key] for key in raw_keys if key in allowed and key in normalized}
-    if "memory_compact_auto_trigger_percent" in clean and "memory_compact_trigger_percent" not in clean:
-        clean["memory_compact_trigger_percent"] = compact_policy_percent(clean["memory_compact_auto_trigger_percent"], 80)
     schema_defaults = _schema_default_values(config_cls, allowed)
     env_values = _env_override_values(clean, schema_defaults)
     layers = [

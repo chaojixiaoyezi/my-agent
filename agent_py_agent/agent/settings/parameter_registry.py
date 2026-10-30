@@ -1,4 +1,5 @@
-# LLM: 参数中心的只读登记表：每个 AgentConfig 字段一条（键、默认值、值类型、中文说明、分类、安全等级、是否脱敏、生效时机）。
+# LLM: 参数中心只读登记：主/能力参数按正式 schema，守卫默认取 typed 部署策略、运行值只取显式或 config 绑定的冻结快照。
+#   无运行快照返回 unknown；磁盘部署策略属于持久事实，由调用方单列并提示重载，不得冒充当前运行值，不读旧守卫 YAML。
 #   说明只取随包 agent_config.yaml：该键正上方的连续注释优先，没有再取该键的行尾注释（与加载器同一引号规则），不在代码里再写一份；
 #   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定（指向类记号只对
 #   非数字参数生效，凭据按键名最后的完整片段认、与回显脱敏同一条规则），
@@ -37,6 +38,42 @@ SAFETY_BOUNDARY = "boundary"
 SOURCE_AGENT = "agent"
 SOURCE_CAPABILITY = "capability"
 SOURCE_RUNTIME_GUARD = "runtime_guard"
+# 守卫各展示入口共用来源说明；参数中心只读不等于完整宿主管理员不能维护部署策略。
+RUNTIME_GUARD_SOURCE_TEXT = (
+    "宿主 config/deployment_policy.json（未配置时用 Python 默认）；"
+    "由完整宿主管理员经部署策略专用入口维护，不接受 owner/task/run YAML 覆盖"
+)
+# 359 决策表的 deployment_only，按 v2 显式把 gateway_user_inflight_limit 留在高级管理员层。
+# 原表 99 项减这一项得到 98；不擅自迁移另一项来凑总数。运行时不依赖任务目录或生成副本。
+DEPLOYMENT_ONLY_KEYS = frozenset({
+    "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",
+    "my_agent_owner_id", "workspace_task_path_template", "memory_path", "local_store_path", "local_store_files_dir",
+    "local_store_events_path", "local_store_fts_enabled", "self_dev_worktree", "protect_running_runtime",
+    "subagent_workspace", "subagent_role_template_dirs", "self_learning_global_daily_limit", "user_id", "auth_enabled",
+    "admin_user_id", "skill_guard_max_files", "skill_guard_max_size_kb", "model_speed_profile_path",
+    "gateway_worker_process_count", "gateway_workspace", "gateway_stop_timeout", "gateway_request_timeout",
+    "gateway_global_inflight_limit", "gateway_owner_inflight_limit", "enable_gateway_memory_diagnostics",
+    "gateway_processing_timeout_seconds", "gateway_request_max_attempts", "sqlite_connection_reuse",
+    "background_tick_cheap_checks", "background_idle_owner_max_backoff_seconds", "background_owner_workers",
+    "background_threads_per_owner", "owner_agent_pool_max_agents", "owner_agent_idle_seconds", "input_media_max_bytes",
+    "input_media_max_files", "input_image_max_pixels", "owner_maintenance_scan_interval_seconds",
+    "gateway_ready_timeout_seconds", "gateway_restart_turn_wait_seconds", "gateway_restart_drain_timeout_seconds",
+    "gateway_restart_force_on_drain_timeout", "gateway_restart_cooldown_seconds", "gateway_port",
+    "gateway_per_user_owner_scoping", "admin_channel_identity_enabled", "gateway_bind_host", "gateway_auth_token",
+    "adapter_workspace", "feishu_app_id", "feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key",
+    "feishu_callback_port", "feishu_connection_mode", "feishu_ws_proxy", "qq_app_id", "qq_app_secret", "session_workspace",
+    "conversation_workspace", "background_claim_ttl_seconds", "collaboration_workspace",
+    "collaboration_auto_dispatch_max_runners", "audit_enabled", "audit_log_path", "daemon_mutate_state",
+    "daemon_start_runners", "daemon_runner_instruction", "lease_stale_without_heartbeat_seconds", "log_level",
+    "extension_plugins", "provider_max_concurrent_requests", "responses_ws_idle_ttl_seconds",
+    "responses_ws_max_idle_connections", "plugin_process_sandbox", "plugin_tool_gate_timeout_ms",
+    "max_parallel_tool_calls_per_owner", "pty_session_idle_timeout_minutes", "owner_default_permission_mode",
+    "tool_approval_timeout_seconds", "feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "feishu_oauth_redirect_uri",
+    "feishu_oauth_scopes", "im_model_cards_enabled", "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
+    "process_session_wait_slice_seconds", "max_parallel_tool_calls_global", "feishu_cloud_verify_sheet_writes_enabled",
+    "decision_agent_timeout_min_seconds", "decision_agent_timeout_max_seconds", "session_pair_hourly_limit",
+})
+STRUCTURED_PARAMETER_KEYS = frozenset({"tool_catalog_categories", "tool_catalog_deferred_categories", "runner_timeout_by_role"})
 # 键名按下划线切成记号，命中任一记号即为安全边界：凭据、权限与审批、管理员、访问与信任名单、网络与外部地址、端口、
 # 请求头与回调、环境变量、锁（含飞书私聊闲置锁定这类访问控制时长）。宁可多拦：边界项只是模型不能改，用户仍可在宿主入口或配置文件里改。
 _BOUNDARY_TOKENS = frozenset({
@@ -54,17 +91,18 @@ _TARGET_TOKENS = frozenset({
     "app", "provider", "prompt", "prompts", "instruction", "audit", "owner",
 })
 # 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率、审计记录保留期
-# （cli_audit_cleanup_days 缩短会提前删掉审计证据）或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
+# 或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
 # 收紧超时是整数，不会命中 plugin 指向记号；显式登记才能防止模型自行放大征询预算。
 _BOUNDARY_NAMES = frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
     # 物理请求资源上限由部署者设置；模型不能把0当作绕过共享并发额度的开关。
     "provider_max_concurrent_requests",
+    "gateway_user_inflight_limit",
     "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "enable_self_map", "gateway_restart_cooldown_seconds",
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
-    "cli_audit_cleanup_days", "plugin_tool_gate_timeout_ms",
+    "plugin_tool_gate_timeout_ms",
     # ptyleak：PTY 空闲兜底阈值是资源保护，模型不能把它调大或关掉（0=不限制），只能用户改配置文件。
     "pty_session_idle_timeout_minutes",
     # B7：M 线事件插件总开关是安全边界，只能用户经 /settings 改；显式列名，不靠键名记号猜。
@@ -78,11 +116,10 @@ _BOUNDARY_NAMES = frozenset({
 # 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。
 # 守卫见 test_parameter_registry：名单里的键必须存在、不能是安全边界项、必须有说明（过渡期例外单独登记）。顺序即展示顺序。
 COMMON_KEYS = (
-    "max_tokens", "request_timeout", "temperature", "model_reasoning_effort",
+    "max_tokens", "request_timeout", "model_reasoning_effort",
     "memory_compact_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
     "enable_self_learning", "enable_subagents", "max_subagents",
-    "tool_shell_timeout", "tool_shell_output_max_chars", "tool_read_max_chars", "tool_list_max_entries",
-    "tool_search_max_matches", "tool_web_max_chars", "tool_http_timeout", "tool_output_externalize_min_chars",
+    "tool_shell_timeout", "tool_http_timeout",
     "timezone", "tui_mouse_capture_default",
 )
 _CATEGORIES = (
@@ -121,11 +158,37 @@ class ParameterSpec:
     # 来源文件（P17，2026-10-01）：agent/capability/runtime_guard；写入口按它选目标文件与回读加载器。
     source: str = SOURCE_AGENT
 
-    # LLM: 参数目录展示与写权限投影；只读目录不授配置写权，联测边界键与随包说明。
-    # 函数用途: 报告参数能否经参数中心写入，管理员强制项不能自助改写。
+    # LLM: 部署项与无 typed writer 项不宣称可写；模型许可还须通过原边界，展示事实不能授予写权。
+    # 函数用途: 报告模型能否实际走参数写入口。
     @property
     def writable(self) -> bool:
-        return self.key not in BOUNDARY_KEYS and (self.safety == SAFETY_FREE or self.key in TUNABLE_KEYS)
+        return bool(self.writer) and self.key not in BOUNDARY_KEYS and (self.safety == SAFETY_FREE or self.key in TUNABLE_KEYS)
+
+    # LLM: 展示层级固定取权威封闭名单，不凭说明、actor 或键名臆测部署权限。
+    # 函数用途: 区分常用、高级和宿主部署参数。
+    @property
+    def tier(self) -> str:
+        if self.source == SOURCE_RUNTIME_GUARD or self.key in DEPLOYMENT_ONLY_KEYS:
+            return "deployment"
+        return "common" if self.common else "advanced"
+
+    # LLM: 仅映射本模块与 parameter_changes 实际实现的路由；其它结构和部署来源没有普通参数 writer。
+    # 函数用途: 返回实际支持的标量或结构化写路线。
+    @property
+    def writer(self) -> str:
+        if self.tier == "deployment":
+            return ""
+        if self.key in STRUCTURED_PARAMETER_KEYS:
+            return "structured"
+        return "scalar" if self.value_type in {"str", "int", "float", "bool"} else ""
+
+    # LLM: 认证用户范围仍只限旧显式白名单，部署层和缺 writer 的值不能用认证作用域绕过。
+    # 函数用途: 投影已认证用户控制入口的可写事实。
+    @property
+    def user_editable(self) -> bool:
+        from .user_config_capability import USER_SETTINGS_BOUNDARY_KEYS
+
+        return bool(self.writer) and (self.writable or self.key in USER_SETTINGS_BOUNDARY_KEYS)
 
 
 # LLM: 显式名单与凭据优先：BOUNDARY_KEYS、_BOUNDARY_NAMES、接口地址与凭据键（is_masked）一定是边界；其余按键名记号判定，
@@ -157,9 +220,6 @@ _EXTRA_FREE_KEYS: dict[str, str] = {
     "subagent_first_token_notice_seconds": "首 token 提醒秒数（0 关闭），纯超时",
     "subagent_stream_idle_notice_seconds": "流静默提醒秒数（0 关闭），纯超时",
     "subagent_tool_wait_notice_seconds": "长工具提醒秒数（0 关闭），纯超时",
-    "decision_agent_timeout_min_seconds": "只约束 my-agent 自调 decision_patch 的等待下限，用户菜单不受限",
-    "decision_agent_timeout_max_seconds": "只约束 my-agent 自调 decision_patch 的等待上限，用户菜单不受限",
-    "session_pair_hourly_limit": "每对会话每小时消息上限（0 不限制），纯频控数量",
 }
 
 
@@ -172,7 +232,7 @@ def _safety_for(source: str, key: str, value_type: str) -> str:
     return SAFETY_FREE if key in _EXTRA_FREE_KEYS else SAFETY_BOUNDARY
 
 
-# LLM: 与 /settings、user_config、命令行 config-get 的回显脱敏同一条判定（user_config_capability.is_credential_key），
+# LLM: 与 /settings、user_config、命令行 my-agent config get 的回显脱敏同一条判定（user_config_capability.is_credential_key），
 #   按完整片段认凭据名，不按子串。
 # 函数用途: 判断一个键的值在回显和账本里是否必须脱敏。
 def is_masked(key: str) -> bool:
@@ -188,6 +248,8 @@ def category_for(key: str) -> str:
 # LLM: 以字段默认值的真实类型为准（bool 先于 int 判断）；默认 None 或工厂值时退回注解文本。只读。
 # 函数用途: 给出参数的值类型名（bool/int/float/str/list/dict/other）。
 def _value_type(default: object, annotation: object) -> str:
+    if isinstance(default, tuple):
+        return "list"
     for name, kind in (("bool", bool), ("int", int), ("float", float), ("str", str), ("list", list), ("dict", dict)):
         if isinstance(default, kind):
             return name
@@ -225,24 +287,20 @@ def _packaged_extra_config_path(source: str) -> Path:
     return packaged_config_path().with_name(f"{source}_config.yaml")
 
 
-# LLM: 另三份配置没有 dataclass 的按 YAML 顶层键登记：说明、默认值、类型都从随包 YAML 取（与主配置同一注释规则）。
-#   这些配置没有加载器元数据键，全部进登记表；effect 统一是重启生效（进程会缓存已加载配置）。
-# 函数用途: 从一份随包 YAML 生成参数登记（runtime_guard 用）。
-def _yaml_source_specs(source: str) -> dict[str, ParameterSpec]:
-    from .config_io import load_simple_yaml
+# LLM: 守卫默认与说明只从 RuntimeGuardPolicy 字段取得，不维护 YAML 第二份定义；显示键不授 owner 覆盖权。
+# 函数用途: 从唯一 typed 宿主策略生成守卫参数的只读投影。
+def _runtime_guard_specs() -> dict[str, ParameterSpec]:
+    from .deployment_policy import RuntimeGuardPolicy
 
-    path = _packaged_extra_config_path(source)
-    descriptions = _descriptions_from_lines(path.read_text(encoding="utf-8").splitlines())
-    values = load_simple_yaml(path)
+    defaults = RuntimeGuardPolicy()
     return {
-        key: ParameterSpec(
-            key=key, default=value, value_type=_value_type(value, type(value)),
-            description=descriptions.get(key, ""), category=category_for(key),
-            safety=_safety_for(source, key, _value_type(value, type(value))),
-            masked=is_masked(key), effect=EFFECT_GATEWAY_RESTART,
-            common=False, unit=unit_for_key(key), source=source,
+        item.name: ParameterSpec(
+            key=item.name, default=getattr(defaults, item.name), value_type=_value_type(getattr(defaults, item.name), item.type),
+            description=item.metadata.get("description", ""), category=category_for(item.name),
+            safety=SAFETY_BOUNDARY, masked=False, effect=EFFECT_GATEWAY_RESTART,
+            common=False, unit=unit_for_key(item.name), source=SOURCE_RUNTIME_GUARD,
         )
-        for key, value in values.items()
+        for item in fields(RuntimeGuardPolicy) if item.init
     }
 
 
@@ -299,18 +357,16 @@ def parameter_registry() -> dict[str, ParameterSpec]:
             owner_module=owner_module, reader=reader,
         )
     registry.update(_capability_specs())
-    registry.update(_yaml_source_specs(SOURCE_RUNTIME_GUARD))
+    registry.update(_runtime_guard_specs())
     return registry
 
 
-# LLM: 只读。展示层问“这个参数现在运行用的值”：主配置用调用方持有的 Gateway 启动配置；capability 读运行时
-#   实际加载的那份文件（capability_path 由调用方按 capability_config_for_agent 同一路径解析，文件不存在时
-#   运行时按默认实例走，这里也回落登记默认）；runtime_guard 运行时只读随包文件、没有用户覆盖层，
-#   所以固定读随包默认。不写文件、不调模型。
-# LLM: 部署字段沿用 configured_home_root 的宿主根优先级（含历史默认值的环境覆盖），忽略 owner capability_path；
-#   无配置对象、非绝对根或坏配置返回 unknown，不从工作目录猜来源，也不冒充默认。
-# 函数用途: 返回一个参数当前的运行值（按来源分派读取）。
-def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None) -> object:
+# LLM: 主配置取调用方持有的启动值；capability 沿原运行路径读取，部署 capability 忽略 owner 路径且缺可信宿主根报 unknown。
+#   runtime_guard 只认显式 policy 或 config.runtime_guard_policy 的 typed 冻结快照，显式对象优先且必须合法；
+#   没快照即 unknown，不重读磁盘或环境，不把 Python 默认当成运行事实。磁盘持久值需由展示层另列并提示重载。
+# 函数用途: 按来源取得参数运行值，守卫缺少冻结快照时明确返回未知。
+def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None,
+                  policy: object | None = None) -> object:
     if spec.source == SOURCE_AGENT:
         return getattr(config, spec.key, spec.default) if config is not None else spec.default
     if spec.source == SOURCE_CAPABILITY:
@@ -338,9 +394,10 @@ def running_value(spec: ParameterSpec, config: object | None = None, *, capabili
         except (OSError, ValueError):
             return spec.default
     if spec.source == SOURCE_RUNTIME_GUARD:
-        from .runtime_guard_config import runtime_guard_data
+        from .deployment_policy import RuntimeGuardPolicy
 
-        return runtime_guard_data().get(spec.key, spec.default)
+        snapshot = policy if policy is not None else getattr(config, "runtime_guard_policy", None)
+        return getattr(snapshot, spec.key, "unknown") if isinstance(snapshot, RuntimeGuardPolicy) else "unknown"
     return spec.default
 
 
@@ -450,6 +507,7 @@ def applied_value_with(key: str, value: object, config: object) -> tuple[object,
 
 __all__ = [
     "COMMON_KEYS",
+    "RUNTIME_GUARD_SOURCE_TEXT",
     "SAFETY_BOUNDARY",
     "SAFETY_FREE",
     "SOURCE_AGENT",

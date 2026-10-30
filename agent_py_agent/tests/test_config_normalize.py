@@ -1,3 +1,5 @@
+# LLM: 公开 YAML 与可持久化字段双向对齐；宿主模型投影不得因保留运行字段而重新进入模板。
+# 模块用途: 验证配置规范化及公开模板完整性。
 """Tests for settings/normalize.py: config normalization and error messages.
 
 给人看的解释：
@@ -259,9 +261,13 @@ class TestNormalizeSubagentAgentConfig:
         assert len(warnings) == 0
 
 
+# LLM: 运行投影和内部字段按真实元数据排除；所有公开字段仍须在模板完整登记。
+# 类用途: 验证规范化与公开模板的一致性。
 class TestNormalizeAgentConfigIntegration:
     """测试 normalize_agent_config 与默认配置样例的一致性。"""
 
+    # LLM: 双向比较所有公开持久字段，不允许为漏项写例外名单；host_only字段反向禁止出现在模板。
+    # 函数用途: 验证默认 YAML 完整且不含退役模型连接。
     def test_default_config_yaml_matches_public_agent_config_fields(self):
         """默认配置样例必须覆盖所有公开配置字段，且不能包含会被忽略的假字段。"""
         config_path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
@@ -270,8 +276,10 @@ class TestNormalizeAgentConfigIntegration:
             "memory_config_warnings",
             "config_warnings",
         } | INTERNAL_RUNTIME_CONFIG_FIELDS
-        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys
+        host_only = {key for key, item in AgentConfig.__dataclass_fields__.items() if item.metadata.get("host_only", False)}
+        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys - host_only
 
+        assert yaml_keys.isdisjoint(host_only)
         assert sorted(config_keys - yaml_keys) == []
         assert sorted(yaml_keys - config_keys) == []
 

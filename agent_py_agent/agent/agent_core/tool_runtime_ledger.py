@@ -852,21 +852,110 @@ def _apply_rate_limit_record(row: dict[str, object], record: object) -> None:
         row["last_success_at"] = timestamp
 
 
+def _rate_limit_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rate_limit_float(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed > 0 else 0.0
+
+
+def _rate_limit_timestamps(value: object) -> list[float]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[float] = []
+    for item in value:
+        ts = _rate_limit_float(item)
+        if ts > 0:
+            result.append(ts)
+    return result
+
+
+def _merge_rate_limit_row_pair(
+    first: Mapping[str, object],
+    second: Mapping[str, object],
+    *,
+    tool: str,
+    args_hash: str,
+) -> dict[str, object]:
+    from collections import Counter
+
+    first_counts = Counter(_rate_limit_timestamps(first.get("attempt_timestamps")))
+    second_counts = Counter(_rate_limit_timestamps(second.get("attempt_timestamps")))
+    merged_timestamps: list[float] = []
+    for ts in sorted(set(first_counts) | set(second_counts)):
+        merged_timestamps.extend([ts] * max(first_counts[ts], second_counts[ts]))
+    merged = dict(first)
+    for key, value in second.items():
+        if key not in merged:
+            merged[key] = value
+    merged["tool_name"] = tool
+    merged["args_hash"] = args_hash
+    merged["attempt_timestamps"] = merged_timestamps
+    merged["consecutive_failures"] = max(
+        _rate_limit_int(first.get("consecutive_failures")),
+        _rate_limit_int(second.get("consecutive_failures")),
+    )
+    merged["total_failures"] = max(
+        _rate_limit_int(first.get("total_failures")),
+        _rate_limit_int(second.get("total_failures")),
+    )
+    merged["last_failure_at"] = max(
+        _rate_limit_float(first.get("last_failure_at")),
+        _rate_limit_float(second.get("last_failure_at")),
+    )
+    merged["last_success_at"] = max(
+        _rate_limit_float(first.get("last_success_at")),
+        _rate_limit_float(second.get("last_success_at")),
+    )
+    if "retry_after_until" in first or "retry_after_until" in second:
+        merged["retry_after_until"] = max(
+            _rate_limit_float(first.get("retry_after_until")),
+            _rate_limit_float(second.get("retry_after_until")),
+        )
+    if (
+        str(first.get("circuit_state") or "").strip().lower() == "open"
+        or str(second.get("circuit_state") or "").strip().lower() == "open"
+    ):
+        merged["circuit_state"] = "open"
+    else:
+        merged.pop("circuit_state", None)
+    return merged
+
+
 def _merged_rate_limit_rows(
     existing: object, persisted: tuple[dict[str, object], ...]
 ) -> tuple[dict[str, object], ...]:
-    rows: list[dict[str, object]] = []
-    seen: set[tuple[str, str]] = set()
+    by_identity: dict[tuple[str, str], dict[str, object]] = {}
     for item in [*(existing if isinstance(existing, (list, tuple)) else ()), *persisted]:
         if not isinstance(item, Mapping):
             continue
         tool = _text(item.get("tool_name") or item.get("tool"))
         args_hash = _text(item.get("args_hash"))
-        if not tool or not args_hash or (tool, args_hash) in seen:
+        if not tool or not args_hash:
             continue
-        seen.add((tool, args_hash))
-        rows.append(dict(item))
-    return tuple(rows)
+        identity = (tool, args_hash)
+        previous = by_identity.get(identity)
+        if previous is None:
+            by_identity[identity] = _merge_rate_limit_row_pair(
+                item, item, tool=tool, args_hash=args_hash
+            )
+        else:
+            by_identity[identity] = _merge_rate_limit_row_pair(
+                previous, item, tool=tool, args_hash=args_hash
+            )
+    return tuple(by_identity.values())
 
 
 def _merged_tool_guardrail_rows(

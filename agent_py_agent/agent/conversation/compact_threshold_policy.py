@@ -1,4 +1,4 @@
-# LLM: 压缩阈值只消费宿主配置、权威治理及线程settings，回合快照沿ContextVar隔离，不保存第二策略账。
+# LLM: 压缩阈值只消费正式新键、权威治理及线程settings，不读退役触发别名；回合快照沿ContextVar隔离，不保存第二策略账。
 # 模块用途: 为CLI、Host及真实压缩提供同一四层比例和回合内冻结边界。
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ _TURN_COMPACT_POLICY = ContextVar("turn_compact_policy", default=None)
 
 
 # LLM: thread只来自已授权Store，home来自宿主；治理地址只取_GovernanceControl.policy_path，损坏或身份拒绝不能降为自治。
+#   只读 memory_compact_trigger_percent，缺失取正式默认80，绝不读取已删除的 auto_trigger_percent 别名。
 # 函数用途: 读取四层比例及三个管理员开关名，返回独立的结构化快照。
 def resolve_thread_compact_policy(agent, thread=None, *, use_frozen=True):
     frozen = _TURN_COMPACT_POLICY.get()
     if use_frozen and frozen is not None and frozen[0] is agent and (thread is None or frozen[1] == thread.thread_id):
         return dict(frozen[2])
     config = getattr(agent, "config", None)
-    admin = getattr(config, "memory_compact_trigger_percent",
-                    getattr(config, "memory_compact_auto_trigger_percent", 80))
+    admin = getattr(config, "memory_compact_trigger_percent", 80)
     forced = compact_admin_forced(config)
     user = {}
     source = (getattr(config, "config_sources", None) or {}).get("memory_compact_trigger_percent", {})

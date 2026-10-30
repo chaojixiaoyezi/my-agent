@@ -1,3 +1,5 @@
+# LLM: capability仍按真实路径读写，守卫只读宿主JSON事实，不能把随包默认说明当成部署权威。
+# 模块用途: 验证参数来源、统一事务及宿主守卫展示。
 """参数中心 P17 修订（2026-10-01）：capability / runtime_guard 两份配置纳入登记表与写入口。
 
 锁定：登记表每条带 source 字段；新来源默认安全边界、capability 的显式 free 名单逐键放行（理由必填）；
@@ -79,10 +81,10 @@ def test_search_and_view_cover_all_three_sources(tmp_path, monkeypatch):
 
 
 def test_running_value_reads_the_runtime_capability_file():
-    """running_value 对 capability 键从随包文件读默认（没给 capability_path 时回落登记默认）；只读来源固定随包值。"""
+    """running_value 对 capability 键从随包文件读默认（没给 capability_path 时回落登记默认）；runtime_guard 无冻结快照时返回 unknown。"""
     reg = parameter_registry()
     assert running_value(reg["capability_candidate_limit"]) == 5
-    assert running_value(reg["repeat_fail_threshold"]) == 10
+    assert running_value(reg["repeat_fail_threshold"]) == "unknown"
     assert running_value(reg["max_tokens"], SimpleNamespace(max_tokens=999)) == 999
 
 
@@ -113,11 +115,14 @@ def test_capability_config_path_for_matches_the_runtime_entry(tmp_path):
 
 # ---- 安全等级：默认边界 + capability 显式 free 名单 ----
 
+# LLM: 决策/授权旧键须退出目录，部署保护参数不能因保留数值类型而获得模型写权。
+# 函数用途: 验证额外来源的边界与明确用户可写名单。
 def test_extra_sources_default_to_boundary_except_the_explicit_free_list():
     """capability 的显式 free 名单（数值上限/展示开关）可改；其余新来源键一律安全边界。"""
     reg = parameter_registry()
-    for key in ("capability_grant_max_skills", "capability_grant_expires_after_task",
-                "decision_subagent_model_mode", "session_messaging_user_enabled",
+    for key in ("capability_grant_expires_after_task", "decision_subagent_model_mode"):
+        assert key not in reg
+    for key in ("capability_grant_max_skills", "session_messaging_user_enabled",
                 "session_task_max_chain_depth", "subagent_failure_auto_split_enabled",
                 # C16：开不开由用户决定，模型不能改（P8/P17 验收后续，2026-10-02）。
                 "enable_capability_package_selection"):
@@ -125,9 +130,9 @@ def test_extra_sources_default_to_boundary_except_the_explicit_free_list():
     for key in ("repeat_fail_threshold", "hard_failure_halt_enabled", "unknown_command_allowlist",
                 "background_max_tool_rounds", "main_agent_auto_resume_attempt_limit"):
         assert not reg[key].writable, key
-    for key in ("capability_candidate_limit", "subagent_heartbeat_timeout",
-                "subagent_no_progress_attempt_limit", "decision_agent_timeout_max_seconds",
-                "session_pair_hourly_limit"):
+    for key in ("decision_agent_timeout_min_seconds", "decision_agent_timeout_max_seconds", "session_pair_hourly_limit"):
+        assert reg[key].tier == "deployment" and not reg[key].writable, key
+    for key in ("capability_candidate_limit", "subagent_heartbeat_timeout", "subagent_no_progress_attempt_limit"):
         assert reg[key].writable, key
 
 
@@ -191,15 +196,18 @@ def test_capability_write_reset_and_revert_chain(tmp_path):
     assert capability_config_for_agent(agent).capability_candidate_limit == 5
 
 
-def test_effective_dispatches_the_loader_per_source(tmp_path):
+# LLM: 使用真实JSON覆盖确认守卫正式回读，而非复制已删除的旧YAML。
+# 函数用途: 验证统一事务按来源调用实际加载器。
+def test_effective_dispatches_the_loader_per_source(tmp_path, monkeypatch):
     """回读加载器按来源分派：capability 用 load_capability_config、runtime_guard 用 policy（键是只读来源，写入口会拒，这里直接验证回读链路本身）。"""
     path = _user(tmp_path)
     _, cap_path = _capability_file(tmp_path)
-    rg_path = tmp_path / "runtime_guard_config.yaml"
-    rg_path.write_text(packaged_config_path().with_name("runtime_guard_config.yaml").read_text(encoding="utf-8"),
-                       encoding="utf-8")
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path))
+    rg_path = tmp_path / "config" / "deployment_policy.json"
+    rg_path.parent.mkdir(exist_ok=True)
+    rg_path.write_text(json.dumps({"schema_version": "deployment-policy.v1", "runtime_guards": {"repeat_fail_threshold": 7}}))
     assert changes._effective(cap_path, "capability_candidate_limit") == 5
-    assert changes._effective(rg_path, "repeat_fail_threshold") == 10
+    assert changes._effective(rg_path, "repeat_fail_threshold") == 7
 
 
 def test_readonly_sources_reject_modification_with_structured_code(tmp_path):
@@ -259,6 +267,8 @@ def test_tool_set_and_revert_for_capability(tmp_path, monkeypatch):
     assert reverted.ok and load_capability_config(cap_path).capability_candidate_limit == 5
 
 
+# LLM: 默认来自Python而非随包YAML；工具展示不能继续承诺“不可覆盖”，宿主管理员存在专用写入口。
+# 函数用途: 验证真实工具的守卫来源和只读说明。
 def test_tool_view_marks_readonly_sources(tmp_path, monkeypatch):
     """user_config view 对 runtime_guard 键标 source_readonly（随包默认、不可覆盖）。"""
     monkeypatch.delenv("MY_AGENT_CONFIG", raising=False)
@@ -266,8 +276,8 @@ def test_tool_view_marks_readonly_sources(tmp_path, monkeypatch):
     tool = UserConfigTool(_main_agent(path))
     for key in ("repeat_fail_threshold",):
         view = json.loads(tool.execute({"action": "view", "key": key}).output)
-        assert view["parameter"]["source_readonly"] == "随包默认、不可覆盖（该配置运行时没有用户覆盖层）"
-        assert view["fact"]["source"] == "packaged_default"
+        assert "部署" in view["parameter"]["source_readonly"] and "随包默认" not in view["parameter"]["source_readonly"]
+        assert view["fact"]["source"] == "python_default"
         assert view["parameter"]["writable"] is False
 
 

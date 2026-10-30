@@ -1,3 +1,5 @@
+# LLM: 决策候选引用和作用范围按原目录校验，不借旧 capability 字段作运行覆盖。
+# 模块用途: 验证决策点位的模型引用、范围和后台预算。
 """决策设置作用范围、历史覆盖清理及原运行入口的离线验证。"""
 from dataclasses import replace
 from types import SimpleNamespace
@@ -75,14 +77,19 @@ def test_subagent_candidate_ids_are_structured_owner_and_thread_settings(configu
     assert execute(host, "read", {"scope": "thread"}, thread_id=thread.thread_id)["effective"]["points"]["subagent_model"]["candidate_profile_ids"] == ["shared:" + key]
 
 
+# LLM: 候选列表从显式原始 YAML 离线导入，非法模型引用仍由同一决策 schema 拒绝。
+# 函数用途: 验证迁移后的候选模型引用校验。
 def test_capability_yaml_candidate_ids_validate_as_model_refs(configured, tmp_path):
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+
     _host, _thread, key = configured
     path = tmp_path / "capability.yaml"
     path.write_text(f'decision_subagent_model_candidate_profile_ids: ["{key}"]\n', encoding="utf-8")
-    assert load_capability_config(path).decision_subagent_model_candidate_profile_ids == [key]
+    assert migrate_legacy_decision_overrides({}, load_simple_yaml(path)) == {"points.subagent_model.candidate_profile_ids": [key]}
     path.write_text('decision_subagent_model_candidate_profile_ids: ["not-a-profile"]\n', encoding="utf-8")
     with pytest.raises(ModelProfileError):
-        load_capability_config(path)
+        migrate_legacy_decision_overrides({}, load_simple_yaml(path))
 
 
 @pytest.mark.parametrize("key,value", [

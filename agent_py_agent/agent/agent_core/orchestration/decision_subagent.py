@@ -1,4 +1,4 @@
-# LLM: 原创建批次只产生 host-owned pending advice；容量/工具未知不冒充可用，绝不修改有效模型。网络仍在 creation_guard 外。
+# LLM: 原创建批次只产生宿主持有的待验证建议；未知容量保留为空，已知小窗口不放大，绝不修改有效模型。网络仍在创建守卫外。
 # 模块用途: 为新孩子批量请求语义建议并复核来源，让原创建入口只在新 thread 保存待首轮验证的建议。
 from __future__ import annotations
 
@@ -133,8 +133,9 @@ def _input_budget(agent: object, params: object, child: SubagentModelInput) -> i
     return None
 
 
-# LLM: 只针对原入口已确认的新任务，逐候选复用模型解析、task overlay 与原出站 cap 判据；构造后端不探针、不读 OAuth token，不应用日志或改变宿主配置。
-# 函数用途: 冻结每个候选的真实配置窗口、可证明输出上限及独立工具支持缺口；0 预留在候选侧表示未知。
+# LLM: 只针对原入口已确认的新任务，逐候选复用模型解析、任务配置投影与原出站上限判据；空窗口表示未知，已知正整数原值保留，不套用默认下限。
+#   构造后端不探针、不读登录令牌，不应用日志或改变宿主配置。
+# 函数用途: 冻结每个候选的真实配置窗口、可证明输出上限及独立工具支持缺口；零输出预留在候选侧表示未知。
 def _candidate_request_limits(agent: object, child: SubagentModelInput, candidates: dict, *, deadline: float) -> dict:
     result = {}
     for profile_id in candidates:
@@ -150,7 +151,7 @@ def _candidate_request_limits(agent: object, child: SubagentModelInput, candidat
             "runtime_config_revision": connection_revision(asdict(config)),
             "model_name": config.model_name,
             "model_backend": config.model_backend,
-            "context_window_tokens": int(config.model_context_window_tokens),
+            "context_window_tokens": None if config.model_context_window_tokens is None else int(config.model_context_window_tokens),
             "output_cap_tokens": cap or None,
             "output_cap_status": "known" if cap else "unknown",
             "output_cap_reason": "original_http_request_cap" if cap else "not_proven_by_original_provider_contract",

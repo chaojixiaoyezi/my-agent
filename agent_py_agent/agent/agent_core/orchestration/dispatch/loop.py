@@ -17,6 +17,8 @@ from .no_progress import DispatchNoProgressTracker
 from .params import DispatchExecutionPlan, DispatchParams, DispatchRuntimePolicy
 
 
+# LLM: 执行计划承载状态写入、启动和并发权限；构造后 max_runners 与计划同步，供循环转换为单轮参数。
+# 类用途: 保存多轮派工的停止上限、执行计划和各阶段选项。
 @dataclass
 class DispatchLoopParams:
 
@@ -33,10 +35,14 @@ class DispatchLoopParams:
     take_over_by: str = ""
     locked_files: list[str] | None = None
 
+    # LLM: 仅回写当前参数对象；调用方单独传入的 max_runners 不能覆盖 execution_plan 的并发值。
+    # 函数用途: 在循环参数初始化后将并发字段同步为执行计划中的值。
     def __post_init__(self) -> None:
         self.max_runners = int(self.execution_plan.max_runners)
 
 
+# LLM: 由循环逐轮累加记录数并在退出时补入待跑统计；读取失败与无待跑工作通过独立错误字段区分。
+# 类用途: 向派工调用方返回执行轮数、停止原因及最终待跑状态。
 @dataclass
 class DispatchLoopReport:
 
@@ -52,6 +58,8 @@ class DispatchLoopReport:
 _DISPATCH_LOOP_PARAM_KEYS = tuple(field.name for field in fields(DispatchLoopParams))
 
 
+# LLM: 已给定的参数对象原样返回，类型错误直接拒绝；否则由运行策略和兼容关键字构造参数，不执行派工。
+# 函数用途: 统一显式参数对象与旧式关键字调用，供循环入口取得完整参数。
 def _coerce_dispatch_loop_params(
     params: DispatchLoopParams | None,
     *,
@@ -97,18 +105,26 @@ def _coerce_dispatch_loop_params(
     )
 
 
+# LLM: 未传值时沿用运行策略；显式值转成非负整数，零由循环解释为不限轮数，转换错误向调用方抛出。
+# 函数用途: 为循环参数构造器解析连续派工轮数上限。
 def _loop_round_limit(policy: DispatchRuntimePolicy, value: int | None) -> int:
     return policy.max_consecutive_rounds if value is None else max(0, int(value))
 
 
+# LLM: 只计算候选并发值，不启动工作；未指定时取策略默认值，显式负数收紧为零。
+# 函数用途: 为循环执行计划解析最多接纳的 runner 数量。
 def _loop_max_runners(policy: DispatchRuntimePolicy, value: int | None) -> int:
     return policy.default_max_runners if value is None else max(0, int(value))
 
 
+# LLM: 未指定时返回运行策略的记录限额，显式值转为非负整数；不读取代理配置或修改派工状态。
+# 函数用途: 为单轮动作处理和审阅阶段解析条数限制。
 def _loop_limit(policy: DispatchRuntimePolicy, value: int | None) -> int:
     return policy.default_limit if value is None else max(0, int(value))
 
 
+# LLM: 优先复用已有计划；兼容 apply 只控制状态写入，新构造的计划明确不启动 runner。
+# 函数用途: 将循环兼容参数转换为供单轮派工使用的执行权限计划。
 def _loop_execution_plan(
     policy: DispatchRuntimePolicy,
     *,
@@ -123,6 +139,8 @@ def _loop_execution_plan(
     )
 
 
+# LLM: 解包路由器和能力配置并委托代理正式入口；是否写状态或启动 runner 由传入执行计划决定。
+# 函数用途: 为多轮循环执行一次子代理派工并返回该轮报告。
 def _run_single_dispatch(agent, routing: tuple[object, object], params: DispatchLoopParams):
     router, capability_config = routing
     return agent.dispatch_subagents(
@@ -132,6 +150,8 @@ def _run_single_dispatch(agent, routing: tuple[object, object], params: Dispatch
     )
 
 
+# LLM: 保留原 execution_plan 和阶段选项，只创建单轮参数容器；循环轮数限制不传给单轮入口。
+# 函数用途: 从循环参数提取 dispatch_subagents 所需的单轮参数。
 def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
     return DispatchParams(
         execution_plan=params.execution_plan,
@@ -147,6 +167,8 @@ def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
     )
 
 
+# LLM: 就地更新累计轮数、记录总数和每轮摘要；成功标志取该轮全部记录的 ok，不改动原单轮报告。
+# 函数用途: 将一次派工结果汇总到循环报告，供最终调用方查看。
 def _append_dispatch_round(report: DispatchLoopReport, dispatch_report, round_num: int) -> None:
     report.rounds_count = round_num
     report.total_records += len(dispatch_report.records)
@@ -171,6 +193,8 @@ def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
     return _coerce_dispatch_loop_params(values["params"], **selected)
 
 
+# LLM: 按计划反复调用正式派工入口，直到无待跑工作、无进展熔断或达到轮数上限；熔断会清理代理待跑标志。
+# 函数用途: 执行有界或不限轮数的子代理派工循环，并返回累计报告与最终候选统计。
 def dispatch_loop(
     agent,
     router: CapabilityRouter,
@@ -229,7 +253,8 @@ def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
         candidates = _dispatch_runner_candidates(
             agent.subagents.list_runs(),
             max_runners=999,
-            policy=RunnerCandidatePolicy(runner_retry_limit=runner_failure_retry_limit(agent.config)),
+            policy=RunnerCandidatePolicy(runner_retry_limit=runner_failure_retry_limit(agent.config),
+                                         runtime_guard_policy=getattr(agent, "runtime_guard_policy", None)),
         )
         return len(candidates), {}
     except Exception as exc:
@@ -239,6 +264,8 @@ def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
         }
 
 
+# LLM: 仅在无进展停止路径尽力清除代理内存标志；赋值失败记录警告后吞掉异常，不修改任务账本。
+# 函数用途: 防止已熔断的派工循环继续以待跑标志触发空转。
 def _clear_pending_work(agent) -> None:
     try:
         agent._has_pending_work = False

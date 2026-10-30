@@ -1,4 +1,4 @@
-# LLM: 运行配置按原来源优先级合并；宿主模型 profile_id 必须随来源保留，让孙代理恢复同一配置。
+# LLM: 运行配置只接收正式字段，按原来源优先级合并；不暗中迁移旧比例，宿主模型身份须随来源保留。
 # 模块用途: 叠加 owner/task/run 的明确配置，不丢失未被覆盖字段的模型身份，也不公开任意元数据。
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ EffectiveConfig so runtime code does not invent a second config hierarchy.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -139,7 +139,7 @@ def merge_runtime_config_layers(
 
     config_type = config_cls or type(base_config)
     allowed = public_config_keys(config_type)
-    values = _base_config_values(base_config, allowed)
+    values = _base_config_values(base_config, allowed, config_cls=config_type)
     sources = _base_config_sources(base_config, values)
     layer_records = list(_base_config_layers(base_config))
     for layer in sorted((item.to_config_layer() for item in layers), key=lambda item: item.priority):
@@ -148,10 +148,11 @@ def merge_runtime_config_layers(
     return EffectiveConfig(values=values, sources=sources, layers=tuple(layer_records))
 
 
-# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
-# 函数用途: 取得基础配置中的公开值，避免复制内部运行状态。
-def _base_config_values(config: object, allowed: set[str]) -> dict[str, Any]:
-    return {key: getattr(config, key) for key in allowed if hasattr(config, key)}
+# LLM: 已冻结目录投影可从 base 只读承运，但不进入允许覆盖键；owner/task 不能注入连接或改变档案身份。
+# 函数用途: 取得可覆盖值与原模型只读投影，保留子孙继承所需的原来源。
+def _base_config_values(config: object, allowed: set[str], *, config_cls: type | None = None) -> dict[str, Any]:
+    projections = {item.name for item in fields(config_cls or type(config)) if item.metadata.get("model_projection", False)}
+    return {key: getattr(config, key) for key in allowed | projections if hasattr(config, key)}
 
 
 # LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
@@ -204,16 +205,12 @@ def _apply_runtime_config_layer(
             sources[key]["compact_admin_default_percent"] = admin_default
 
 
-# LLM: 旧owner YAML比例映射到同一新键；新旧并列时只接受新键作生效比例，仍由原合并函数保留管理员原值。
-# 函数用途: 枚举已允许的运行字段和兼容压缩键。
+# LLM: 只枚举允许字段，旧 YAML 必须显式离线迁移；不凭运行时旧值派生新键。
+# 函数用途: 枚举已允许且非空的运行字段。
 def _runtime_layer_items(layer: ConfigLayer, allowed: set[str]):
     for key, value in dict(layer.values).items():
         if key in allowed and value is not None:
             yield key, value
-            if key == "memory_compact_auto_trigger_percent" and "memory_compact_trigger_percent" not in layer.values:
-                from .config_layers import compact_policy_percent
-
-                yield "memory_compact_trigger_percent", compact_policy_percent(value, 80)
 
 
 # LLM: 来源来自已加载宿主 config，菜单 profile ID 是恢复引用；仅保留声明元数据，不复制未知秘密字段。

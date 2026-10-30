@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from .decision_settings_defaults import (
     POINT_TIMEOUT_FLOOR_SECONDS,
-    decision_config_fields,
     decision_defaults,
 )
 from .decision_settings_schema import (
@@ -24,18 +23,14 @@ def _effective_point_mode(values: dict, point: str) -> str:
     return values[f"points.{point}.mode"] if values["enabled"] else "off"
 
 
-# LLM: 只支持 AgentConfig 所属点，未知配置归属明确拒绝；原开关与覆盖按同一范围表叠加，不调用会读盘的完整投影。
+# LLM: 已登记点位沿同一代码默认与覆盖范围表叠加，不读取旧 config 对象，也不调用会读盘的完整投影。
 # 函数用途: 从宿主已冻结的 owner 设置和刚读出的线程计算开关，不读取候选、凭据或后台配置文件。
 def decision_point_mode_from_read(config: object, owner_settings: dict, thread: object, *, point: str) -> str:
-    from .decision_settings_schema import validate_decision_field
-    from .defaults import default_config_value
-
-    fields = decision_config_fields()
     paths = ("enabled", f"points.{point}.mode")
-    if point not in POINT_RUNTIME_SCOPES or any(fields[path][0] != "agent" for path in paths):
-        raise ModelProfileError("此接入点不能使用 AgentConfig 的只读开关投影。")
-    values = {path: validate_decision_field(path, getattr(config, fields[path][1], default_config_value(fields[path][1])))
-              for path in paths}
+    if point not in POINT_RUNTIME_SCOPES:
+        raise ModelProfileError("此接入点没有登记决策运行范围。")
+    defaults, _ = decision_defaults(None)
+    values = {path: defaults[path] for path in paths}
     layers = [validate_decision_settings(owner_settings)["overrides"]]
     if thread is not None and POINT_RUNTIME_SCOPES[point] == "thread":
         layers.append(validate_decision_settings(thread.decision_settings)["overrides"])

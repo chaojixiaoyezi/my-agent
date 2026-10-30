@@ -1,20 +1,16 @@
-# LLM: 默认值仍归 AgentConfig、CapabilityConfig、MemorySettings；Curator 两点同归 memory，仅映射和读取，不维护第二份默认。
-# 模块用途: 将各模块的决策设置投影成共用服务的字段，并保留默认来源。
+# LLM: v6 决策默认只在本模块定义；正式覆盖归模型目录和线程，不读取旧 Agent/Capability/Memory 平铺值。
+# 模块用途: 为完整投影与零 I/O 开关读取提供同一份严格决策默认。
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping
+from copy import deepcopy
 
-from .decision_settings_schema import (
-    GENERAL_FIELDS,
-    POINTS,
-    decision_point_fields,
-    validate_decision_field,
-)
+from .decision_settings_schema import validate_decision_field
+
+# 旧调用方只能取得显式离线迁移表；运行默认与开关投影均不调用它，不读取旧字段。
+from .model_credentials import decision_config_fields as decision_config_fields
 
 # 点位的单次期限与模型引用只在用户长期设置/会话临时设置里按点位覆盖（TUI 决策菜单“逐接入点设置”、user_config 的
 # decision_patch），配置文件里不再各设一份：默认一律继承通用 timeout/background_timeout 与 profile_id（2026-09-27 参数减量）。
-_OVERRIDE_ONLY_POINT_FIELDS = frozenset({"timeout_seconds", "profile_id"})
 # 选模型两个点位的仓库默认单次期限下限（已定做法 10“前台默认 3 秒，选模型保持 5 秒”）：冷连接下 Jev 实测约 3.2 秒，
 # 按通用 3 秒会超时、保留原模型。
 SELECTION_POINT_TIMEOUT_SECONDS = 5.0
@@ -23,53 +19,37 @@ SELECTION_POINT_TIMEOUT_SECONDS = 5.0
 POINT_TIMEOUT_FLOOR_SECONDS = {"model_selection": SELECTION_POINT_TIMEOUT_SECONDS,
                                "subagent_model": SELECTION_POINT_TIMEOUT_SECONDS}
 
+_DECISION_DEFAULTS = {
+    "enabled": False,
+    "experiment_enabled": False,
+    "observe_sampling_enabled": False,
+    "observe_nonblocking_enabled": False,
+    "timeout_seconds": 3.0,
+    "stage_timeout_seconds": 5.0,
+    "background_timeout_seconds": 4.0,
+    "profile_id": "",
+    "points.model_selection.mode": "off",
+    "points.model_selection.cadence": "every_turn",
+    "points.subagent_model.mode": "off",
+    "points.subagent_model.candidate_profile_ids": [],
+    "points.skill_tool.mode": "off",
+    "points.skill_tool.context_policy": "progressive",
+    "points.skill_tool.optional_categories": ["plugins"],
+    "points.pre_recall.mode": "off",
+    "points.pre_recall.fragment_material": "query_text",
+    "points.recall.mode": "off",
+    "points.curator.mode": "off",
+    "points.curator_relation.mode": "off",
+    "points.external_material_order.mode": "off",
+    "points.planning.mode": "off",
+    "points.delivery_quality.mode": "off",
+    "points.action_candidate.mode": "off",
+    "points.skill_proposal_review.mode": "off",
+}
 
-# LLM: 注册表只确定字段归属；能力点不能混入 AgentConfig，召回前/后及整理/关系点沿原记忆配置，各自独立开关。
-#   点位的 timeout_seconds/profile_id 不映射到任何配置字段（_OVERRIDE_ONLY_POINT_FIELDS），只能由覆盖层设置；
-#   decision_settings_projection 在没有覆盖时按通用字段继承。
-# 函数用途: 返回公共字段路径对应的原配置模块和字段名。
-def decision_config_fields() -> dict[str, tuple[str, str]]:
-    result = {key: ("agent", "decision_" + key) for key in GENERAL_FIELDS}
-    for point in POINTS:
-        domain = "capability" if point in {"subagent_model", "skill_tool"} else "memory" if point in {"pre_recall", "recall", "curator", "curator_relation"} else "agent"
-        prefix = "memory_decision_" if domain == "memory" else "decision_"
-        for field in (name for name in decision_point_fields(point) if name not in _OVERRIDE_ONLY_POINT_FIELDS):
-            result[f"points.{point}.{field}"] = (domain, f"{prefix}{point}_{field}")
-    return result
 
-
-# LLM: 原简化 YAML 把浮点/null 保留为字符串，此处显式转换后使用服务的严格校验，不允许布尔/NaN/零混入。
-# 函数用途: 返回原配置中已填写决策字段的规范值，不修改传入对象。
-def validate_config_decision_fields(values: Mapping, *, domain: str) -> dict:
-    normalized = {}
-    for path, (owner, field) in decision_config_fields().items():
-        if (owner == domain or domain == "agent" and owner == "memory") and field in values:
-            value = values[field]
-            if path.endswith("timeout_seconds") and type(value) is str and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value):
-                value = float(value)
-            normalized[field] = validate_decision_field(path, value)
-    return normalized
-
-
-# LLM: 轻上下文可直接注入 capability_config；否则经 capability_config_for_agent 统一入口读（capability_config_path 或根目录，
-#   缺文件为默认实例）。不能读 capability_router.config：路由器构造时拿的是 AgentConfig，决策字段在那上面永远不存在。
-#   没有 Agent 构造、provider 探测或持久写入。
-# 函数用途: 获取各模块当前默认值和来源；点位的期限与模型引用不在这里，由投影按通用设置继承。
+# LLM: context 保留调用签名但不读取；返回独立列表副本，禁止配置对象、环境或磁盘成为第二份决策默认权威。
+# 函数用途: 返回经正式 schema 验证的代码默认和准确来源，供 owner/thread 层叠加。
 def decision_defaults(context: object) -> tuple[dict, dict]:
-    from ..capability.config import CapabilityConfig
-    from ..capability.runtime_config_reload import capability_config_for_agent
-    from ._memory_types import MemorySettings
-    from .config import AgentConfig
-
-    config = context.config
-    capability = getattr(context, "capability_config", None)
-    if capability is None:
-        capability = capability_config_for_agent(context)
-    defaults = {"agent": AgentConfig(), "capability": CapabilityConfig(), "memory": MemorySettings()}
-    inputs = {"agent": config, "memory": config, "capability": capability or defaults["capability"]}
-    values, sources = {}, {}
-    for path, (domain, field) in decision_config_fields().items():
-        value = getattr(inputs[domain], field, getattr(defaults[domain], field))
-        values[path] = validate_decision_field(path, value)
-        sources[path] = f"{domain}_config.{field}"
-    return values, sources
+    values = {path: validate_decision_field(path, deepcopy(value)) for path, value in _DECISION_DEFAULTS.items()}
+    return values, dict.fromkeys(values, "decision_defaults")

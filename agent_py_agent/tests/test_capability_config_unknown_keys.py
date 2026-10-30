@@ -69,12 +69,15 @@ def test_unknown_key_with_value_still_not_fatal(tmp_path) -> None:
     assert any("totally_unknown_key" in w for w in config.config_warnings)
 
 
+# LLM: 错误值必须在唯一离线迁移 schema 被拒绝，而不是让 YAML 再承接运行决策字段。
+# 函数用途: 验证迁移后的决策模式仍严格校验。
 def test_decision_settings_validation_still_rejects_bad_values(tmp_path) -> None:
-    """真校验不许放宽：仍是当前登记点位的字段，值非法时照旧报错。"""
-    path = _write(tmp_path, "decision_subagent_model_mode: not_a_real_mode\n")
+    """决策真校验迁到离线导入，不能随 YAML 加载恢复第二份运行权威。"""
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+    from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 
-    with pytest.raises(Exception) as excinfo:
-        load_capability_config(path)
+    with pytest.raises(ModelProfileError) as excinfo:
+        migrate_legacy_decision_overrides({}, {"decision_subagent_model_mode": "not_a_real_mode"})
 
     assert "决策模式只能是" in str(excinfo.value)
 

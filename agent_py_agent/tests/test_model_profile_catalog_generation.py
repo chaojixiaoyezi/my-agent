@@ -1,3 +1,5 @@
+# LLM: v6 仍保原代次、原锁与只读迁移语义；只更新当前写出版本，不放松旧目录或失效保护。
+# 模块用途: 验证目录代次、跨重启核验、凭据更新与采用锁。
 """原目录代次的只读迁移、跨重启复核、凭据变化与采用锁测试；全部使用临时假配置。"""
 
 import json
@@ -57,6 +59,8 @@ def _current(host, expected):
         return current
 
 
+# LLM: 普通读取不能写盘，显式初始化才升级代次；新写出版本必须为 v6。
+# 函数用途: 验证旧目录只读与初始化幂等。
 def test_reads_do_not_create_or_upgrade_and_enabled_prepare_is_idempotent(tmp_path):
     host = Host(tmp_path / "config")
     path = model_profiles_path(host.home_paths)
@@ -76,7 +80,7 @@ def test_reads_do_not_create_or_upgrade_and_enabled_prepare_is_idempotent(tmp_pa
     assert model_profile_generation(host, key, initialize=True) == expected
     assert path.read_bytes() == saved
     data, legacy = json.loads(saved), json.loads(before)
-    assert data["schema"] == "owner_model_profiles.v5"
+    assert data["schema"] == "owner_model_profiles.v6"
     assert {k: v for k, v in data.items() if k not in {"schema", "catalog_generation"}} == {
         k: v for k, v in legacy.items() if k != "schema"
     }
@@ -205,6 +209,8 @@ def test_failed_private_save_does_not_publish_generation(tmp_path, monkeypatch):
     data = read_model_profiles(path)
     generation = data["catalog_generation"]
 
+    # LLM: 在实际 replace 边界注入保存异常，目录代次和原字节均不得提前提交。
+    # 函数用途: 模拟模型目录原子替换失败。
     def fail(*args):
         raise OSError("injected save failure")
 
@@ -298,6 +304,8 @@ def test_shared_generation_covers_source_grant_and_local_owner_lock(tmp_path):
     assert model_profile_generation(alice, shared).shared_generation != current.shared_generation
 
 
+# LLM: 普通用户不能升级管理员旧目录；显式管理员准备分别维护来源及发布代次。
+# 函数用途: 验证共享旧代次未知及 v6 显式迁移。
 @pytest.mark.parametrize("old_source,old_grant", [(True, False), (False, True), (True, True)])
 def test_legacy_shared_is_unknown_for_user_and_admin_prepare_migrates(tmp_path, old_source, old_grant):
     admin, alice = admin_host(tmp_path), Host(tmp_path)
@@ -314,7 +322,7 @@ def test_legacy_shared_is_unknown_for_user_and_admin_prepare_migrates(tmp_path, 
     assert (source.read_bytes(), grant.read_bytes()) == before
     expected = model_profile_generation(admin, "shared:" + key, initialize=True)
     assert expected and model_profile_generation(alice, "shared:" + key) == expected
-    assert json.loads(source.read_text())["schema"] == "owner_model_profiles.v5"
+    assert json.loads(source.read_text())["schema"] == "owner_model_profiles.v6"
     assert json.loads(grant.read_text())["schema"] == "shared_model_catalog.v2"
 
 
@@ -346,6 +354,8 @@ def test_bad_shared_generation_is_not_repaired_or_adopted(tmp_path, patch):
     assert path.read_bytes() == before
 
 
+# LLM: 发布失败不能伪造双目录已迁移；来源虽写成 v6，旧发布代次仍应未知。
+# 函数用途: 验证失败事务保留旧授权与可恢复迁移状态。
 def test_failed_shared_save_keeps_old_generation_and_partial_migration_stays_unknown(tmp_path, monkeypatch):
     from agent_py_agent.agent.settings import shared_model_catalog
 
@@ -368,7 +378,7 @@ def test_failed_shared_save_keeps_old_generation_and_partial_migration_stays_unk
         _legacy(grant, "shared_model_catalog.v1")
         with pytest.raises(OSError):
             model_profile_generation(admin, "shared:" + key, initialize=True)
-        assert json.loads(source.read_text())["schema"] == "owner_model_profiles.v5"
+        assert json.loads(source.read_text())["schema"] == "owner_model_profiles.v6"
         assert model_profile_generation(alice, "shared:" + key) is None
     assert model_profile_generation(admin, "shared:" + key, initialize=True) is not None
 

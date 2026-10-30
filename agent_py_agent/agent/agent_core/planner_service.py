@@ -99,6 +99,7 @@ def build_parent_planner_state(
 
 def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStateParams) -> tuple[Any, PlannerInputContext]:
     from .runner.dispatch import (
+        RunnerCandidatePolicy,
         _dispatch_patch_review_run_ids,
         _dispatch_runner_candidates,
         _limit_items,
@@ -109,7 +110,14 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
     board = agent.subagents.board.build_board(options=SubAgentBoardOptions(recent_limit=board_limit))
     due_report = agent.subagents.board.due_check(params=SubAgentDueCheckOptions(config=params.cfg))
     action_plan = agent.subagents.board.plan_actions(params.cfg)
-    runner_candidates = _dispatch_runner_candidates(tasks, params.max_runners)
+    frozen_policy = getattr(agent, "runtime_guard_policy", None) or getattr(
+        getattr(agent, "config", None), "runtime_guard_policy", None
+    )
+    runner_candidates = _dispatch_runner_candidates(
+        tasks,
+        params.max_runners,
+        policy=RunnerCandidatePolicy(runtime_guard_policy=frozen_policy),
+    )
     patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), params.limit)
     active_tasks = _active_planner_tasks(tasks)
     open_requests, open_gaps = _collect_open_capability_items(tasks)

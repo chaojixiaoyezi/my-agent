@@ -96,6 +96,32 @@ Ruff 输出 `All checks passed!`，导入边界输出 `[]`。新增测试覆盖�
 开发阶段按红绿方式覆盖 R1 拒写、确认异常、RD-01 物理退役、维护预算及公平性；独审指出的未知效果后重复分配预算/非有限预算已用新增回归先失败再修正。独审只针对提供的代码片段，不是完整分支批准。
 
 原任务宽选择门禁 **未通过**：先因缺少已声明开发依赖中断收集，隔离环境补齐后长跑发现多处失败/错误并被停止；首错诊断运行 34 通过后失败于 `test_admin_self_gateway_diagnostics.py` 的真实 shell 用例。进一步观察到 `return_code=71`、`sandbox-exec: sandbox_apply: Operation not permitted`，仅此失败有明确沙箱拒绝证据；没有基线对照，不能说全部失败既有，也没有禁用沙箱或跳过失败项来造绿。续办改用上述聚焦门禁，不宣称原宽门禁通过。按续办要求提交前移除工作树临时缓存/隔离环境，原始输出由工具运行记录保留，缓存内 XML 不随提交分发。
+## 2026-10-29 e905 sol-3 Round 1：配置权威消费者与回归迁移
+
+来源：完整阅读 `07-tasks/fix-e905-sol-3-r1.md`、原任务与两份 Astra 审阅报告；仅在 `opt-e905/sol-3` 修复，起点 `a12fe40c503a9daedda608c9076b0a1af6059720`，文档门禁基线 `4bea324e3`。不推送、不部署、不启停服务，不接触真实供应商凭据。
+
+- 构造/重建：真实 `SimpleAgent` 以配置绑定的可信 Home 冻结部署策略；配置根 A 与环境根 B 不同、环境变化、A 损坏均按 A 裁决。复制运行配置后重建刷新 A 的新策略，原实例不漂移。
+- 主恢复与 runner：恢复判断、账本、候选和各分派调用点显式共用冻结策略，不因磁盘或环境变化扩大额度。
+- 限流：通过真实 registry/executor 覆盖零值、窗口、失败阈值、记录容量和绝对失败次数对齐的退避；task boundary 只能收紧宿主保护。
+- 原子提交：注入父目录 `fsync` 异常、错 revision、同版本篡改、回读中移除/改写及非法链接；完整目标确认后区分已替换与耐久未确认，任何成功返回必须核对完整 payload 与目标 revision。
+- 模型入口：TUI/飞书表单未提交字段保留、`off` 与未知窗口往返、同端点 env 凭据来源保留、禁止表单新建 env 引用；mini-YAML 裸空值和零温度、env 迟到解析与历史内联备份；echo 从离线导入经公开目录、选择到解析全链路一致，正式有 Home 不准内存 echo 旁路。
+- 子代理与设置：未知窗口保留 `None`、正小窗口不放大；展示冻结运行值与持久值分开，无快照为未知，HTTP 超时/输出外置阈值层级纠正，旧 compact 键不再读取。
+- 旧 fixture 只迁移到正式 v6 catalog/deployment policy 合同，不恢复已删除平铺入口，不删测、跳过或降低有效业务断言。
+
+新增回归文件：`test_e905_sol3_r1_{runtime,rate,commit,catalog,window,settings}.py`。各组修复前均有真实失败证据；整合后 146 项通过。真实构造/重建专项再次运行 4 项通过。最终原 39 文件及筛选回归以交接单记录的当前版本 JUnit 为准，不用新增专项通过替代整体回归。
+
+复现（工作树根；先准备隔离的临时 `MY_AGENT_HOME`，使用随工作树测试虚拟环境）：
+```bash
+PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 .pytest_cache/e905-venv/bin/python3 -B -m pytest agent_py_agent/tests/test_e905_sol3_r1_*.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol3_fix1
+PYTHONPATH=. PYTHONDONTWRITEBYTECODE=1 .pytest_cache/e905-venv/bin/python3 -B -m pytest agent_py_agent/tests -k 'config or settings or model_catalog or deployment_policy' -q --tb=short -o cache_dir=/tmp/pytest_cache_sol3_fix1
+ruff check --no-cache agent_py_agent scripts
+python3 -B scripts/check_import_boundaries.py --json
+python3 -B scripts/check_doc_sync.py --base 4bea324e3
+git diff --check
+python3 -B scripts/check_clean_package.py .
+```
+
+验证边界：本地真实入口与故障注入不等于真实供应商或飞书平台回调验收；未验证真实断电耐久性。硬链接创建受 `EPERM` 拒绝，多链接门禁用精确目标 FD 元数据注入验证，不冒称真实链接创建成功。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 

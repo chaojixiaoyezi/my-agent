@@ -1,4 +1,4 @@
-# LLM: 默认值须与随包 YAML 一致；主会话沟通开关仅供提示构造消费，B5 超时同步规范化/参数边界，覆盖仍由原 owner/thread 保存。
+# LLM: 默认值须与随包 YAML 一致；压缩比例只保留 canonical 字段，不使用描述符、帧检查或赋值联动；旧来源须显式离线迁移。
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 #   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
@@ -16,12 +16,9 @@ from __future__ import annotations
 这里坚持只用标准库，目的是让项目在 Windows / Linux / macOS 上都能轻装运行。
 """
 
-import dataclasses
 import logging
 import re
-import sys
-from dataclasses import InitVar, dataclass, field
-from dataclasses import replace as _dataclass_replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +34,7 @@ from .defaults import (
     DEFAULT_COMMAND_ACCESS_MODE,
     DEFAULT_MODEL_MAX_TOKENS,
 )
+from .deployment_policy import RuntimeGuardPolicy
 from .gateway_topology import validate_gateway_worker_process_count
 from .memory import normalize_agent_memory_config
 from .normalize import (
@@ -153,6 +151,9 @@ class _HomeProviderConfigFields:
     my_agent_home: str = ""
     host_home_snapshot: ConfiguredHomeSnapshot | None = field(
         default=None, repr=False, compare=False, metadata={"host_only": True})
+    # 宿主构造绑定的只读运行值；配置投影保留对象，不接受用户输入或写回配置。
+    runtime_guard_policy: RuntimeGuardPolicy | None = field(
+        default=None, repr=False, compare=False, metadata={"host_only": True})
     # B 切片：显式执行模式（managed / local_unmanaged）。空 = 未显式指定，
     # 挂载逻辑按有无 owner_home_dir 推断（兼容存量调用）。SimpleAgent 构造
     # 透传给 SubAgentManager（manager._attach_runtime_db 落枚举），让工具
@@ -247,7 +248,7 @@ class _ToolConfigFields:
     tool_catalog_mode: str = "compact"
     tool_catalog_categories: list[str] = field(default_factory=list)
     # Default prompt catalog stays compact: examples and long parameter notes
-    # remain available through list_tools or the recommended-tool details.
+    # 完整目录和示例可经 tool_search(action="catalog") 或推荐工具详情查看。
     tool_catalog_include_examples: bool = False
     # 渐进式披露:这些 category 仍注册，但不进初始模型 schema；通过 tool_search 加载。
     # 递归代理和持续目标控制属于主链，orchestration/goal 默认首轮直出；显式 allowed_tools 的
@@ -293,59 +294,16 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-_DATACLASS_REPLACE_CODES = frozenset(
-    code
-    for code in (
-        getattr(_dataclass_replace, "__code__", None),
-        getattr(getattr(dataclasses, "_replace", None), "__code__", None),
-    )
-    if code is not None
-)
-
-
-# LLM: 仅在dataclasses.replace或copy.replace读取InitVar时从当前线程replace栈帧的changes字典判定新键是否由调用方显式传入；不修改源对象__dict__，也不拦截常规属性读取。
-# 类用途: 为AgentConfig._compact_trigger_previous_auto提供无状态描述符，类级访问返回None，实例级访问返回(源对象旧比例, 新键是否继承自源对象)。
-class _CompactTriggerPrevAutoDescriptor:
-    # LLM: 类访问返回None供dataclass生成默认参数；实例访问只读检查当前线程replace/_replace帧中的changes字典，兼容Python 3.10-3.14，线程安全且无状态残留。
-    # 函数用途: 在dataclasses.replace或copy.replace复制memory_compact_trigger_percent前返回源对象的memory_compact_auto_trigger_percent与新键继承标记。
-    def __get__(
-        self,
-        instance: Any,
-        owner: type | None = None,
-    ) -> tuple[int | None, bool] | None:
-        if instance is None:
-            return None
-        trigger_copied = True
-        frame = sys._getframe(1)
-        while frame is not None:
-            if frame.f_code in _DATACLASS_REPLACE_CODES and (
-                frame.f_locals.get("obj") is instance
-                or frame.f_locals.get("self") is instance
-            ):
-                changes = frame.f_locals.get("changes")
-                if isinstance(changes, dict):
-                    trigger_copied = "memory_compact_trigger_percent" not in changes
-                break
-            frame = frame.f_back
-        return (
-            object.__getattribute__(instance, "memory_compact_auto_trigger_percent"),
-            trigger_copied,
-        )
-
-
-# LLM: 用户默认同步随包配置；沟通软引导只影响主会话提示，联测builder与参数登记；host_only仅宿主冻结，媒体预算和群附件/Curator授权不变。
+# LLM: 用户默认同步随包配置；连接只作 host_only 目录投影，不成为 YAML/owner/task 输入；媒体及群附件授权不变。
 # 类用途: 汇总模型和运行配置；沟通指导可关闭，图片外发有独立开关，有限正时间只提供后续请求默认，不管理阶段时钟。
 # LLM: 宿主拓扑默认0，__post_init__与YAML规范化共用严格判据，replace不得绕过。
 # 类用途: 保存同一配置权威的运行参数和内网白名单；部署拓扑不能由模型或用户会话改写。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
-    # LLM: 构造、replace、YAML共用校验；私有InitVar描述符无状态承运来源对象当前旧比例与显式新键标记，不进入fields/asdict/__dict__及用户配置；独立新比例优先。
-    # 函数用途: 校验部署与白名单，在构造或复制仍等于原旧比例（含夹取后值）且未显式指定新键的配置时同步新比例，不修改来源配置。
-    def __post_init__(
-        self,
-        _compact_trigger_previous_auto: int | tuple[int | None, bool] | None = None,
-    ) -> None:
+    # LLM: 构造和 replace 共用部署校验；不再按历史比例或调用帧推断用户是否显式提供 canonical 字段。
+    # 函数用途: 校验拓扑并清洗私网名单，压缩比例仅使用当前字段。
+    def __post_init__(self) -> None:
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
         values = self.allowed_private_hosts
         self.allowed_private_hosts = (
@@ -353,63 +311,18 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
             if isinstance(values, (list, tuple, set, frozenset))
             else []
         )
-        if isinstance(_compact_trigger_previous_auto, tuple):
-            prev_auto, trigger_copied = _compact_trigger_previous_auto
-        else:
-            prev_auto, trigger_copied = _compact_trigger_previous_auto, True
-        if prev_auto is None:
-            follows_legacy = (
-                self.memory_compact_trigger_percent == 80
-                and self.memory_compact_auto_trigger_percent != 90
-            )
-        else:
-            follows_legacy = (
-                trigger_copied
-                and self.memory_compact_auto_trigger_percent != prev_auto
-                and self.memory_compact_trigger_percent
-                in (80, prev_auto, _normalized_compact_percent(prev_auto))
-            )
-        if follows_legacy:
-            object.__setattr__(
-                self,
-                "memory_compact_trigger_percent",
-                _normalized_compact_percent(self.memory_compact_auto_trigger_percent),
-            )
 
     allowed_private_hosts: list[str] = field(default_factory=list)
 
-    # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
-    decision_enabled: bool = False
-    decision_experiment_enabled: bool = False
-    # observe 采样（默认关）：打开后只作用于 observe 点位——每个点位每自然小时成功调用满 6 次就不再调用决策模型，
-    # 失败和超时不计名额，所以出问题的点位会一直被观察；apply 点位不受影响。
-    decision_observe_sampling_enabled: bool = False
-    # observe 不挡主链路（默认关）：打开后普通会话范围的 observe 点位把决策调用交给后台单 worker 执行，回复不再等待决策模型，
-    # 后台等待上限改用 decision_background_timeout_seconds；apply、实验与用户后台点位不受影响，仍同步等待。
-    decision_observe_nonblocking_enabled: bool = False
     # 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数）：关闭时既不在结果日志记 skipped（原因码、无正文），
     # 也不累计 decision_reach_counts 的到达/未触发原因计数。
     decision_skip_records_enabled: bool = True
-    decision_timeout_seconds: float = 3.0
     # 决策调用复用长连接（仓库默认关，Mac 线上验收后由集成方打开）：打开后同一进程里的决策请求复用已建好的 HTTPS 连接，
     # 省掉每次约 0.9 秒的代理隧道与 TLS 握手；关着就每次新建连接，与改动前逐字节相同。不改请求内容、重试或期限。
     decision_connection_reuse_enabled: bool = False
-    # 同一前台阶段累计等待：2026-10-02 由 4 提到 5 秒，与选模型点位默认 5 秒一致（前台点位实际等待取点位期限与它的较小值）。
-    decision_stage_timeout_seconds: float = 5.0
-    decision_background_timeout_seconds: float = 4.0
-    decision_profile_id: str = ""
-    decision_model_selection_mode: str = "off"
-    # 选模型询问节奏（默认每轮都问）：structure_change 时只在新会话、压缩之后、模型目录或当前模型变化时问决策模型。
-    decision_model_selection_cadence: str = "every_turn"
     # 选模型决策请求里对话摘要（只带语义部分，不带原文锚点段）与当前消息的字符上限；0 表示不截断，截断时如实标注
     # 规划/交付质量/动作候选三个决策点位发给决策模型的当前请求字数预算：更长时取首尾节选并标注；0 表示不截取
     decision_request_max_chars: int = 2000
-    decision_external_material_order_mode: str = "off"
-    decision_planning_mode: str = "off"
-    decision_delivery_quality_mode: str = "off"
-    decision_action_candidate_mode: str = "off"
-    # Skill 提案审核顺序只排 CLI 展示、不授予 Skill/工具权限，且与 enable_self_learning 同属主配置，故不放 CapabilityConfig。
-    decision_skill_proposal_review_mode: str = "off"
     agent_name: str = "myagent"
     # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。
@@ -419,16 +332,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     assistant_progress_updates_enabled: bool = True
     workspace_root: str | list[str] = ""
     # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
-    model_backend: str = ""
+    model_backend: str = field(default="", metadata={"host_only": True, "model_projection": True})
     memory_path: str = ""
-    # 记忆决策默认定义归 MemorySettings；这里镜像供现有 YAML 配置加载与展示。
-    memory_decision_pre_recall_mode: str = "off"
-    # 召回前补充查询的片段材料（默认只给片段文字）：with_new_facts 时宿主先按原检索预检每个片段能新增的正式事实，
-    # 把条数与摘要交给决策模型，补不出新事实的片段不给选，全都补不出就不调用；每个片段多一次查询嵌入。
-    memory_decision_pre_recall_fragment_material: str = "query_text"
-    memory_decision_recall_mode: str = "off"
-    memory_decision_curator_mode: str = "off"
-    memory_decision_curator_relation_mode: str = "off"
     memory_top_k: int = 5
     auto_save_memory: bool = True
     # 记忆语义召回(检索拓宽 #1,默认关=现状纯关键词):开后记忆召回在关键词(FTS5/BM25)外再加一路
@@ -444,10 +349,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
-    # replace 先读取此 InitVar 描述符以在复制 memory_compact_trigger_percent 前无状态判定新键是否由调用方显式传入。
-    _compact_trigger_previous_auto: InitVar[int | tuple[int | None, bool] | None] = (
-        _CompactTriggerPrevAutoDescriptor()
-    )
     # 四层策略的管理员默认；用户/会话覆盖另存，强制开关仅由管理员全局来源设置。
     memory_compact_trigger_percent: int = 80
     force_compact_trigger_percent: bool = False
@@ -456,7 +357,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_idle_seconds: int = 7200
     # 每个维护拍最多检查的会话数；0关闭该维护拍，不扫描或迁移线程。
     memory_compact_idle_max_per_tick: int = 2
-    memory_compact_auto_trigger_percent: int = 90
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。
     memory_compact_auto_trigger_max_tokens: int = 300_000
     # 校准比值跨会话沿用：开着时成功调用写 owner data/context/calibration.json，线程观测对不上时按比值折算；关掉不读不写。
@@ -464,7 +364,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 含图历史的压缩策略：auto 默认走归档引用（视觉能力事实接入后按事实选择随图摘要）；archived_refs 固定归档引用；off 保持从首个媒体回合起保护全部后缀。
     compact_media_policy: str = "auto"
     # 当前模型声明的输入模态（如 text、image、video），来自模型档案的 input_modalities；空表示未知，压缩策略会用一次结构化视觉探针判断，不按模型名猜。
-    model_input_modalities: list[str] = field(default_factory=list)
+    model_input_modalities: list[str] = field(default_factory=list, metadata={"host_only": True, "model_projection": True})
     # 压缩摘要末尾“原话备份”（用户原话优先、最新优先，放不下的那条保留头尾）最多占多少 token；实际上限还不超过模型窗口的 10%。0 表示不附原话，只保留被省略消息的编号与回查说明。
     compact_landmark_max_tokens: int = 20000
     # 压缩摘要末尾是否告诉模型：被压缩的原话仍在会话记录里，可用 session_search 按 message_id 分段读回（本 agent 注册了 session_search 时才附）。
@@ -693,18 +593,18 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     lease_stale_without_heartbeat_seconds: int = 300
     log_level: str = "info"
     extension_plugins: list[str] = field(default_factory=list)
-    api_base: str = ""
-    api_key: str = field(default="", metadata={"credential_environment_source": True})
-    api_key_env: str = "AGENT_API_KEY"
+    api_base: str = field(default="", metadata={"host_only": True, "model_projection": True})
+    api_key: str = field(default="", metadata={"credential_environment_source": True, "host_only": True, "model_projection": True})
+    api_key_env: str = field(default="", metadata={"host_only": True, "model_projection": True})
     # 显式兼容头只影响模型请求；认证由 api_key 负责，会话头由宿主逐会话生成。
-    model_custom_headers: dict[str, str] = field(default_factory=dict)
-    model_session_header: str = ""
+    model_custom_headers: dict[str, str] = field(default_factory=dict, metadata={"host_only": True, "model_projection": True})
+    model_session_header: str = field(default="", metadata={"host_only": True, "model_projection": True})
     # 仅由 /model 的可信 owner 解析填充；OAuth token 不进入运行快照，禁止手填跨用户路径。
-    model_auth_ref: dict[str, str] = field(default_factory=dict)
-    model_name: str = ""
+    model_auth_ref: dict[str, str] = field(default_factory=dict, metadata={"host_only": True, "model_projection": True})
+    model_name: str = field(default="", metadata={"host_only": True, "model_projection": True})
     request_timeout: int = 240
     # 单槽位/繁忙模型的额外排队预算，仅加到首事件等待；0 不额外等待，健康流仍无总墙钟限制。
-    model_queue_wait_seconds: float = 0.0
+    model_queue_wait_seconds: float = field(default=0.0, metadata={"host_only": True, "model_projection": True})
     # 每进程每HTTP origin的物理请求上限；0关闭，只按可信owner轮转，不跨进程计额。
     provider_max_concurrent_requests: int = 0
     # Responses会话WebSocket的空闲存活秒数与进程内空闲连接池容量；任一值为0即关闭复用。
@@ -712,28 +612,28 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     responses_ws_max_idle_connections: int = 32
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     # 模型上下文窗口：空 = 用服务商元数据/探测，都拿不到按 128000；填数字 = 就用这个数（原 model_context_window_explicit 已并入）。
-    model_context_window_tokens: int | None = None
+    model_context_window_tokens: int | None = field(default=None, metadata={"host_only": True, "model_projection": True})
     # 采样温度：空 = 不发送，用服务商默认；填数字 = 发送（原 model_temperature_explicit 已并入）。
-    temperature: str | None = None
+    temperature: str | None = field(default=None, metadata={"host_only": True, "model_projection": True})
     # top_p 留空不覆盖普通模型；已核对的 DeepSeek V4 Flash 使用供应商采样默认。
-    top_p: float | None = None
+    top_p: float | None = field(default=None, metadata={"host_only": True, "model_projection": True})
     # 智能程度（推理强度）全局默认档位 auto/off/low/medium/high/xhigh/max/ultra；会话 /effort 与子代理 effort 可覆盖。
     model_reasoning_effort: str = "auto"
     # 当前模型的思考控制方式 auto/effort/budget/none，通常由 /model 档案带入；auto 只对已核对供应商给默认，其余不发参数。
-    model_reasoning_control: str = "auto"
+    model_reasoning_control: str = field(default="auto", metadata={"host_only": True, "model_projection": True})
     # 当前模型声明的服务商思考档位（如 low/medium/high/xhigh/max/ultra），通常由 /model 档案带入；
     # effort 协议只发声明内的值，留空表示未声明（Responses 沿通用 low/medium/high，Chat/Messages 沿原四档）。
-    model_reasoning_levels: list[str] = field(default_factory=list)
+    model_reasoning_levels: list[str] = field(default_factory=list, metadata={"host_only": True, "model_projection": True})
     # 当前模型能不能在 input 里追加 configuration_update 项改思考档位（OpenAI GPT-6 系列的 Responses 接口）：
     # auto = 按已核对的模型名前缀 gpt-6 判断，on/off = 档案显式声明。压缩降档只在支持时才用这个项。
-    model_reasoning_update_items: str = "auto"
+    model_reasoning_update_items: str = field(default="auto", metadata={"host_only": True, "model_projection": True})
     # /effort 设成 auto 以外的档位、而当前模型未声明思考控制方式且解析为不支持时，宿主是否在后台自动检测一次（9 次短请求）。
     reasoning_control_auto_probe: bool = True
     # 「只思考被输出上限截断」的续跑给紧邻那一次调用降一档思考强度（max→high→medium），打破"继续展开推理"
     # 的循环；只影响那一次调用，不改会话或用户设置。关 = 完全按原提示与原档位续跑。
     model_truncation_thinking_downgrade: bool = True
     # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。
-    model_structured_output: str = "auto"
+    model_structured_output: str = field(default="auto", metadata={"host_only": True, "model_projection": True})
     # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native
     # 工具循环；普通单次聊天不额外创建主动缓存，兼容端点不支持时可显式关闭。
     anthropic_prompt_cache_enabled: bool = True
@@ -744,7 +644,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 已结束工具回合在这段缓存热期内保留更完整的有界投影，过期后才切换为短折叠。
     # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
     conversation_terminal_tool_hot_tail_seconds: int = 300
-    cli_audit_cleanup_days: int = 90
     config_warnings: list[str] = field(default_factory=list)
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -767,36 +666,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
             "sources": dict(self.config_sources),
         }
 
-    # LLM: 旧键变化只同步默认或仍等于旧值（含夹取后值）的新比例；同值重赋不覆盖独立新比例。
-    # 函数用途: 保留独立新比例，并在动态修改旧压缩比例字段时同步仍跟随旧键的新比例值。
-    def __setattr__(self, name: str, value: Any) -> None:
-        was_initialized = "memory_compact_auto_trigger_percent" in self.__dict__
-        prev_auto = self.__dict__.get("memory_compact_auto_trigger_percent", 90)
-        current_trigger = self.__dict__.get("memory_compact_trigger_percent", 80)
-        object.__setattr__(self, name, value)
-        if (
-            was_initialized
-            and name == "memory_compact_auto_trigger_percent"
-            and value != prev_auto
-            and current_trigger in (80, prev_auto, _normalized_compact_percent(prev_auto))
-        ):
-            object.__setattr__(
-                self,
-                "memory_compact_trigger_percent",
-                _normalized_compact_percent(value),
-            )
-
-
-# LLM: 委托compact_policy_percent将旧压缩比例规范化到50..95有效区间，非法类型回退80。
-# 函数用途: 计算旧压缩比例对应的规范化新比例数值，供构造、replace与属性赋值判据共用。
-def _normalized_compact_percent(value: object) -> int:
-    from .config_layers import compact_policy_percent
-
-    return int(compact_policy_percent(value, 80) or 80)
-
-
-# LLM: 原YAML决策严格校验保持；两个管理员强制别名由规范化转换成唯一字段，不当未知键忽略。
-# 函数用途: 加载原部署配置与来源，拒绝无效决策字段，不创建 Agent 或发网络请求。
+# LLM: 只加载正式部署字段；旧决策不在此转换或提供默认，管理员强制别名仍沿原可信配置规范化。
+# 函数用途: 加载部署配置与来源，不隐式导入模型目录或发网络请求。
 def load_config(config_path: str | Path) -> AgentConfig:
 
     path = Path(config_path)
@@ -807,10 +678,6 @@ def load_config(config_path: str | Path) -> AgentConfig:
         from .memory import normalize_memory_settings
 
         raw["force_compact_trigger_percent"] = normalize_memory_settings(raw)[0].force_compact_trigger_percent
-    from .decision_settings_defaults import validate_config_decision_fields
-
-    raw.update(validate_config_decision_fields(raw, domain="agent"))
-
     # 先做类型验证和默认值归一（在过滤未知 key 之前）
     normalized, config_warnings = normalize_agent_config(raw)
 
@@ -829,11 +696,6 @@ def load_config(config_path: str | Path) -> AgentConfig:
         path=path,
     )
     config = AgentConfig(**effective.values)
-    object.__setattr__(
-        config,
-        "memory_compact_trigger_percent",
-        effective.values["memory_compact_trigger_percent"],
-    )
     config.config_path = resolved_path
     config.config_warnings = config_warnings
     config.config_sources = effective.sources

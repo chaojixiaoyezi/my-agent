@@ -92,7 +92,7 @@ def _subscription_row(item: dict) -> dict | None:
     return row
 
 
-# LLM: 短测复用可信 owner 解析与正式认证后端；仅完整正文算连接可用，不能宣称任务/Plus/Pro 权益已全部验证。
+# LLM: 短测沿正式连接快照，包括准确环境来源；仅完整正文算基本调用成功，不能外推完整任务或订阅权益。
 # 函数用途: 使用已保存配置发一个问候并返回耗时、少量正文和 token 数，不保存聊天历史。
 def _probe(agent: object, data: dict, profile_id: str) -> dict:
     if profile_id not in data["profiles"]:
@@ -101,7 +101,7 @@ def _probe(agent: object, data: dict, profile_id: str) -> dict:
 
     row = _resolved_profile(agent, data, profile_id)
     # 输出上限沿用正式请求的值（后端工厂按窗口夹取），短测才能发现供应商不接受这个上限的情况。
-    config = replace(agent.config, **row, api_key_env="", request_timeout=60, stream_enabled=True)
+    config = replace(agent.config, **row, request_timeout=60, stream_enabled=True)
     backend = get_backend(config.model_backend, config)
     started = time.monotonic()
     response = backend.generate("你好，请简短回复一句问候。")
@@ -113,13 +113,15 @@ def _probe(agent: object, data: dict, profile_id: str) -> dict:
             "message": "已收到正常回复；仅证明基本调用可用，未执行任务。" if ok else "请求已结束，但未得到完整文字回复；不能标记通过。"}
 
 
-# LLM: 身份来自已认证 owner，共享 probe 只读取已发布的完整快照，纳入相同秘密脱敏；不落盘临时连接数据。
+# LLM: 身份来自已认证 owner；网络前固定环境凭据的请求/脱敏快照，绝不把展开值落盘，失效引用明确失败。
 #   discover 可带未保存的 connection（新增模型先拉列表再保存），该连接同样纳入报错脱敏。
 # 函数用途: 在不持有配置文件锁的情况下进行一次用户明确要求的目录/连接测试。
 def execute_provider_network(agent: object, data: dict, operation: str, payload: dict) -> dict:
     identity = str(payload.get("session_id") or payload.get("conversation_id") or "model-menu")
     if operation == "probe" and shared_profile_key(payload.get("profile_id")):
         data = _shared_probe_data(agent, data, str(payload["profile_id"]))
+    target = data["profiles"].get(str(payload.get("profile_id") or ""), {}).get("provider_id") if operation == "probe" else payload.get("provider_id")
+    data = _network_credential_snapshot(data, provider_ids={str(target)} if target else set())
     started = time.monotonic()
     model = data["profiles"].get(str(payload.get("profile_id") or ""), {})
     try:
@@ -191,15 +193,34 @@ def _provider_message(exc: Exception, data: dict) -> str:
     return _redact_network_text(text, data)[:500]
 
 
-# LLM: 成功回复和异常诊断复用同一秘密清洗，包含本次共享模型的私有快照；不把快照保存或公开。
+# LLM: 成功回复和异常诊断复用同一秘密清洗，包含当前环境值和请求前固定快照；不把快照保存或公开。
 # 函数用途: 清除上游回显的 API Key、所有自定义请求头值和控制字符。
 def _redact_network_text(text: str, data: dict) -> str:
     from ..common.log_redaction import redact_sensitive_text
+    from .model_credentials import provider_api_key
 
     for row in data["providers"].values():
-        secrets = [row["api_key"], *row["custom_headers"].values(),
+        secrets = [provider_api_key(row), *row["custom_headers"].values(),
                    *[row.get("auth", {}).get(key, "") for key in ("access_token", "refresh_token", "client_secret")]]
         for secret in secrets:
             if secret:
                 text = text.replace(secret, "[已隐藏]")
     return "".join(char for char in redact_sensitive_text(text) if ord(char) >= 32)
+
+
+# LLM: 只解析本次明确选中的连接；无关失效草稿不阻止请求，不修改 catalog 输入，固定实际请求值供脱敏共用。
+# 函数用途: 将已保存环境引用展开为一次请求的内存数据，引用失效就阻止发请求。
+def _network_credential_snapshot(data: dict, *, provider_ids: set[str]) -> dict:
+    from .model_credentials import provider_api_key
+
+    providers = {}
+    for key, original in data["providers"].items():
+        row = dict(original)
+        if key in provider_ids and row.get("api_key_ref"):
+            actual = provider_api_key(row)
+            if not actual:
+                raise ModelProfileError("服务商环境凭据不可用，未发送请求。", reason="credential_missing")
+            row.pop("api_key_ref")
+            row["api_key"] = actual
+        providers[key] = row
+    return {**data, "providers": providers}

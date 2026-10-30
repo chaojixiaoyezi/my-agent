@@ -1,180 +1,75 @@
-
-# LLM: 守卫配置按stat在进程内最多缓存64项原始字典；原路径、OSError与覆盖层语义保持，不写配置或缓存调用方policy。
-# 模块用途: 提供共享守卫策略及其来源，每次返回隔离值，配置改变立即重新解析。
+# LLM: 守卫默认值及校验唯一归 DeploymentPolicy；此读口只从宿主 JSON 冻结 typed 快照，旧 YAML/缓存/吞错分支已结束。
+# 模块用途: 为现有运行调用方提供同一部署策略的只读访问与准确来源，不创建第二份配置权威。
 from __future__ import annotations
 
-import threading
 import time
-from collections import OrderedDict
-from copy import deepcopy
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from .config_io import load_simple_yaml
-
-DEFAULT_RUNTIME_GUARD_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "runtime_guard_config.yaml"
-_RUNTIME_GUARD_RAW_CACHE: OrderedDict[tuple[str, int, int, int, int, int], dict[str, Any]] = OrderedDict()
-_RUNTIME_GUARD_RAW_CACHE_LOCK = threading.RLock()
-# 运行时防护原始配置缓存的最大条目数。
-_RUNTIME_GUARD_RAW_CACHE_MAX_SIZE = 64
-
-
-@dataclass(frozen=True)
-class RuntimeGuardPolicy:
-    schema_version: str = "runtime_guard_policy.v1"
-    source_path: str = ""
-    loaded_at: float = 0.0
-    values: dict[str, object] = field(default_factory=dict)
-    sources: dict[str, str] = field(default_factory=dict)
-
-    def int_value(self, key: str, default: int = 0) -> int:
-        try:
-            return max(0, int(self.values.get(key, default)))
-        except (TypeError, ValueError):
-            return max(0, int(default))
-
-    def bool_value(self, key: str, default: bool = False) -> bool:
-        value = self.values.get(key, default)
-        if isinstance(value, bool):
-            return value
-        normalized = str(value or "").strip().lower()
-        if normalized in {"1", "true"}:
-            return True
-        if normalized in {"0", "false"}:
-            return False
-        return default
-
-    def float_tuple_value(self, key: str, default: tuple[float, ...]) -> tuple[float, ...]:
-        value = self.values.get(key, default)
-        if not isinstance(value, list | tuple):
-            return default
-        parsed = _float_tuple(value)
-        return parsed or default
-
-    def snapshot(self, *, task_id: str = "", run_id: str = "") -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "task_id": task_id,
-            "run_id": run_id,
-            "source_path": self.source_path,
-            "loaded_at": self.loaded_at,
-            "values": dict(self.values),
-            "sources": dict(self.sources),
-        }
+from ..user_space.home_layout import MyAgentHomePaths, home_paths
+from .deployment_policy import (
+    DeploymentPolicyError,
+    RuntimeGuardPolicy,
+    deployment_policy_path,
+    load_deployment_policy,
+)
 
 
-def runtime_guard_data(
-    path: Path | str | None = None,
-    *,
-    policy: RuntimeGuardPolicy | None = None,
-) -> dict[str, object]:
+# LLM: 显式宿主根来自启动解析；路径参数仅核对唯一来源，根与路径对象冲突直接拒绝，不接受任务临时覆盖。
+# 函数用途: 从受信宿主策略生成隔离的运行守卫快照，损坏配置直接报错。
+def runtime_guard_policy(path: Path | str | None = None, *,
+                         trusted_host_paths: MyAgentHomePaths | None = None,
+                         home_root: Path | str | None = None) -> RuntimeGuardPolicy:
+    paths = trusted_host_paths if trusted_host_paths is not None else home_paths(home_root)
+    if home_root is not None and paths.root != home_paths(home_root).root:
+        raise DeploymentPolicyError("deployment_policy_source_invalid")
+    canonical = deployment_policy_path(paths)
+    if path is not None and Path(path).expanduser().resolve() != canonical.resolve():
+        raise DeploymentPolicyError("deployment_policy_source_invalid")
+    deployment = load_deployment_policy(trusted_host_paths=paths)
+    policy = deployment.runtime_guards
+    configured = set(deployment.to_dict().get("runtime_guards", {}))
+    object.__setattr__(policy, "_source_path", str(canonical))
+    object.__setattr__(policy, "_loaded_at", time.time())
+    object.__setattr__(policy, "_configured_fields", tuple(sorted(configured)))
+    return policy
+
+
+# LLM: 值字典从 frozen typed 对象按需生成，不缓存或维护一份可变策略。
+# 函数用途: 给原审计及序列消费者返回独立的守卫值投影。
+def runtime_guard_data(path: Path | str | None = None, *, policy: RuntimeGuardPolicy | None = None) -> dict[str, object]:
     return _effective_policy(path=path, policy=policy).values
 
 
-# LLM: 只复用同版本原始配置，overrides/时间/来源每次新建；OSError保持空原始策略，不拿旧成功内容兜底。
-# 函数用途: 读取共享守卫配置并合成本次独立策略，调用方覆盖不会污染其它请求。
-def runtime_guard_policy(
-    path: Path | str | None = None,
-    *,
-    overrides: dict[str, object] | None = None,
-) -> RuntimeGuardPolicy:
-    config_path = _config_path(path)
-    try:
-        data = _runtime_guard_raw(config_path)
-    except OSError:
-        data = {}
-    values = data if isinstance(data, dict) else {}
-    merged = {**values, **(overrides or {})}
-    sources = {key: str(config_path) for key in values}
-    sources.update(dict.fromkeys(overrides or {}, "runtime_override"))
-    return RuntimeGuardPolicy(
-        source_path=str(config_path),
-        loaded_at=time.time(),
-        values=merged,
-        sources=sources,
-    )
-
-
-# LLM: stat失败沿原OSError向上传递；RLock覆盖冷解析，失败不入LRU，存浅字典但输出深复制避免嵌套共享。
-# 函数用途: 复用未变化的守卫文件正文，保留64项上限与即时磁盘失效。
-def _runtime_guard_raw(config_path: Path) -> dict[str, Any]:
-    st = config_path.stat()
-    key = (str(config_path), int(st.st_dev), int(st.st_ino), int(st.st_size),
-           int(st.st_mtime_ns), int(st.st_ctime_ns))
-    with _RUNTIME_GUARD_RAW_CACHE_LOCK:
-        if key in _RUNTIME_GUARD_RAW_CACHE:
-            _RUNTIME_GUARD_RAW_CACHE.move_to_end(key)
-            return deepcopy(_RUNTIME_GUARD_RAW_CACHE[key])
-        loaded = load_simple_yaml(config_path)
-        if not isinstance(loaded, dict):
-            return loaded
-        _RUNTIME_GUARD_RAW_CACHE[key] = dict(loaded)
-        if len(_RUNTIME_GUARD_RAW_CACHE) > _RUNTIME_GUARD_RAW_CACHE_MAX_SIZE:
-            _RUNTIME_GUARD_RAW_CACHE.popitem(last=False)
-        return deepcopy(loaded)
-
-
-def runtime_guard_int(
-    key: str,
-    default: int = 0,
-    *,
-    path: Path | str | None = None,
-    policy: RuntimeGuardPolicy | None = None,
-) -> int:
+# LLM: 真实字段严格取 typed 值；代码内部退役键仅沿原默认，不接文件中的未知键。
+# 函数用途: 保留整数读口，统一消费宿主冻结的守卫快照。
+def runtime_guard_int(key: str, default: int = 0, *, path: Path | str | None = None,
+                      policy: RuntimeGuardPolicy | None = None) -> int:
     return _effective_policy(path=path, policy=policy).int_value(key, default)
 
 
-def runtime_guard_bool(
-    key: str,
-    default: bool = False,
-    *,
-    path: Path | str | None = None,
-    policy: RuntimeGuardPolicy | None = None,
-) -> bool:
+# LLM: 只接受已校验的真实 bool，不把外部字符串猜成授权开关。
+# 函数用途: 保留布尔读口，统一消费宿主冻结的守卫快照。
+def runtime_guard_bool(key: str, default: bool = False, *, path: Path | str | None = None,
+                       policy: RuntimeGuardPolicy | None = None) -> bool:
     return _effective_policy(path=path, policy=policy).bool_value(key, default)
 
 
-def runtime_guard_float_tuple(
-    key: str,
-    default: tuple[float, ...],
-    *,
-    path: Path | str | None = None,
-    policy: RuntimeGuardPolicy | None = None,
-) -> tuple[float, ...]:
+# LLM: 元组已在 typed 构造校验；显式空序列不能被默认序列替代。
+# 函数用途: 为原重试调用方读取冻结的有限数字序列。
+def runtime_guard_float_tuple(key: str, default: tuple[float, ...], *, path: Path | str | None = None,
+                              policy: RuntimeGuardPolicy | None = None) -> tuple[float, ...]:
     return _effective_policy(path=path, policy=policy).float_tuple_value(key, default)
 
 
-def _effective_policy(
-    *,
-    path: Path | str | None = None,
-    policy: RuntimeGuardPolicy | None = None,
-) -> RuntimeGuardPolicy:
+# LLM: 已冻结快照直接复用；没有快照才读唯一宿主策略，错误不得被吞成默认。
+# 函数用途: 统一原各类守卫读取入口。
+def _effective_policy(*, path: Path | str | None = None, policy: RuntimeGuardPolicy | None = None) -> RuntimeGuardPolicy:
     if policy is not None:
+        if not isinstance(policy, RuntimeGuardPolicy):
+            raise DeploymentPolicyError()
         return policy
     return runtime_guard_policy(path)
 
 
-def _config_path(path: Path | str | None = None) -> Path:
-    return Path(path).expanduser() if path else DEFAULT_RUNTIME_GUARD_CONFIG_PATH
-
-
-def _float_tuple(value: list | tuple) -> tuple[float, ...]:
-    parsed: list[float] = []
-    for item in value:
-        try:
-            parsed.append(float(item))
-        except (TypeError, ValueError):
-            continue
-    return tuple(parsed)
-
-
-__all__ = [
-    "DEFAULT_RUNTIME_GUARD_CONFIG_PATH",
-    "RuntimeGuardPolicy",
-    "runtime_guard_bool",
-    "runtime_guard_data",
-    "runtime_guard_float_tuple",
-    "runtime_guard_int",
-    "runtime_guard_policy",
-]
+__all__ = ["RuntimeGuardPolicy", "runtime_guard_bool", "runtime_guard_data", "runtime_guard_float_tuple",
+           "runtime_guard_int", "runtime_guard_policy"]
