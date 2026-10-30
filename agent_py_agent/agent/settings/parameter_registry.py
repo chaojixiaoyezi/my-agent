@@ -1,4 +1,5 @@
-# LLM: 参数中心只读登记：主/能力参数按正式 schema，运行守卫只从 typed 部署策略取默认，不读旧守卫 YAML。
+# LLM: 参数中心只读登记：主/能力参数按正式 schema，守卫默认取 typed 部署策略、运行值只取显式或 config 绑定的冻结快照。
+#   无运行快照返回 unknown；磁盘部署策略属于持久事实，由调用方单列并提示重载，不得冒充当前运行值，不读旧守卫 YAML。
 #   说明只取随包 agent_config.yaml：该键正上方的连续注释优先，没有再取该键的行尾注释（与加载器同一引号规则），不在代码里再写一份；
 #   说明为空的字段只允许留在 test_parameter_registry 的基线名单里。安全等级按显式名单与键名记号结构化判定（指向类记号只对
 #   非数字参数生效，凭据按键名最后的完整片段认、与回显脱敏同一条规则），
@@ -37,6 +38,11 @@ SAFETY_BOUNDARY = "boundary"
 SOURCE_AGENT = "agent"
 SOURCE_CAPABILITY = "capability"
 SOURCE_RUNTIME_GUARD = "runtime_guard"
+# 守卫各展示入口共用来源说明；参数中心只读不等于完整宿主管理员不能维护部署策略。
+RUNTIME_GUARD_SOURCE_TEXT = (
+    "宿主 config/deployment_policy.json（未配置时用 Python 默认）；"
+    "由完整宿主管理员经部署策略专用入口维护，不接受 owner/task/run YAML 覆盖"
+)
 # 359 决策表的 deployment_only，按 v2 显式把 gateway_user_inflight_limit 留在高级管理员层。
 # 原表 99 项减这一项得到 98；不擅自迁移另一项来凑总数。运行时不依赖任务目录或生成副本。
 DEPLOYMENT_ONLY_KEYS = frozenset({
@@ -113,7 +119,7 @@ COMMON_KEYS = (
     "max_tokens", "request_timeout", "model_reasoning_effort",
     "memory_compact_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
     "enable_self_learning", "enable_subagents", "max_subagents",
-    "tool_shell_timeout", "tool_output_externalize_min_chars",
+    "tool_shell_timeout", "tool_http_timeout",
     "timezone", "tui_mouse_capture_default",
 )
 _CATEGORIES = (
@@ -355,14 +361,12 @@ def parameter_registry() -> dict[str, ParameterSpec]:
     return registry
 
 
-# LLM: 只读。展示层问“这个参数现在运行用的值”：主配置用调用方持有的 Gateway 启动配置；capability 读运行时
-#   实际加载的那份文件（capability_path 由调用方按 capability_config_for_agent 同一路径解析，文件不存在时
-#   运行时按默认实例走，这里也回落登记默认）；runtime_guard 只读宿主 deployment_policy.json 与 Python 默认。
-#   显式 config 的宿主根不明或坏策略返回 unknown，不转读当前目录或 owner 文件。不写文件、不调模型。
-# LLM: 部署字段沿用 configured_home_root 的宿主根优先级（含历史默认值的环境覆盖），忽略 owner capability_path；
-#   无配置对象、非绝对根或坏配置返回 unknown，不从工作目录猜来源，也不冒充默认。
-# 函数用途: 返回一个参数当前的运行值（按来源分派读取）。
-def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None) -> object:
+# LLM: 主配置取调用方持有的启动值；capability 沿原运行路径读取，部署 capability 忽略 owner 路径且缺可信宿主根报 unknown。
+#   runtime_guard 只认显式 policy 或 config.runtime_guard_policy 的 typed 冻结快照，显式对象优先且必须合法；
+#   没快照即 unknown，不重读磁盘或环境，不把 Python 默认当成运行事实。磁盘持久值需由展示层另列并提示重载。
+# 函数用途: 按来源取得参数运行值，守卫缺少冻结快照时明确返回未知。
+def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None,
+                  policy: object | None = None) -> object:
     if spec.source == SOURCE_AGENT:
         return getattr(config, spec.key, spec.default) if config is not None else spec.default
     if spec.source == SOURCE_CAPABILITY:
@@ -390,19 +394,10 @@ def running_value(spec: ParameterSpec, config: object | None = None, *, capabili
         except (OSError, ValueError):
             return spec.default
     if spec.source == SOURCE_RUNTIME_GUARD:
-        from ..user_space.home_layout import home_paths
-        from ..user_space.home_root import configured_home_root
-        from .deployment_policy import DeploymentPolicyError, load_deployment_policy
+        from .deployment_policy import RuntimeGuardPolicy
 
-        if config is None:
-            return spec.default
-        root = configured_home_root(config)
-        if not root or not Path(root).expanduser().is_absolute():
-            return "unknown"
-        try:
-            return getattr(load_deployment_policy(trusted_host_paths=home_paths(root)).runtime_guards, spec.key)
-        except (OSError, DeploymentPolicyError):
-            return "unknown"
+        snapshot = policy if policy is not None else getattr(config, "runtime_guard_policy", None)
+        return getattr(snapshot, spec.key, "unknown") if isinstance(snapshot, RuntimeGuardPolicy) else "unknown"
     return spec.default
 
 
@@ -512,6 +507,7 @@ def applied_value_with(key: str, value: object, config: object) -> tuple[object,
 
 __all__ = [
     "COMMON_KEYS",
+    "RUNTIME_GUARD_SOURCE_TEXT",
     "SAFETY_BOUNDARY",
     "SAFETY_FREE",
     "SOURCE_AGENT",

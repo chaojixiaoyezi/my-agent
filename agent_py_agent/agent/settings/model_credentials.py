@@ -21,8 +21,8 @@ def provider_environment_name(reference: object) -> str:
     return reference[4:]
 
 
-# LLM: 运行时只解析 provider 自己的单个引用，空环境不转读静态凭据或其他来源；不落盘、不打印秘密。
-# 函数用途: 为实际请求获取 provider 的唯一凭据值，保留原静态记录的文本语义。
+# LLM: 运行时只解析 provider 自己的单个引用，非空环境优先，暂空仅可用同记录历史内联后备；不读其他来源或落盘。
+# 函数用途: 为实际请求取得当前凭据，环境迟到无需重迁移，缺失由解析调用方明确报未就绪。
 def provider_api_key(provider: Mapping, *, environ: Mapping | None = None) -> str:
     import os
 
@@ -31,10 +31,10 @@ def provider_api_key(provider: Mapping, *, environ: Mapping | None = None) -> st
         return provider.get("api_key", "")
     environment = os.environ if environ is None else environ
     value = environment.get(name, "")
-    return value.strip() if type(value) is str else ""
+    return value.strip() if type(value) is str and value.strip() else provider.get("api_key", "")
 
 
-# LLM: 仅显式离线迁移使用，environ 由宿主提供；非空环境只存引用且不保留未采用的静态值，不建新仓库。
+# LLM: 仅显式离线迁移使用，environ 由宿主提供；合法环境名即保留引用，暂空可存历史静态后备，不建新仓库。
 # 函数用途: 把原静态值与环境名称转换为可以存回原 provider 的凭据字段。
 def legacy_provider_credential(inline: str, environment_name: str, *, environ: Mapping) -> dict:
     from .model_provider_schema import ModelProfileError
@@ -47,6 +47,7 @@ def legacy_provider_credential(inline: str, environment_name: str, *, environ: M
         value = environ.get(name, "")
         if type(value) is str and value.strip():
             return {"api_key": "", "api_key_ref": "env:" + name}
+        return {"api_key": inline, "api_key_ref": "env:" + name}
     return {"api_key": inline}
 
 
@@ -105,6 +106,7 @@ def migrate_legacy_decision_overrides(agent_values: dict, capability_values: dic
 def _legacy_model_records(raw: dict, *, provider_id: str, environ: Mapping) -> tuple[dict, dict] | None:
     from .model_provider_schema import ModelProfileError, validate_model, validate_provider
 
+    raw = _decode_legacy_model_values(raw)
     if raw.get("model_backend") == "echo":
         if any(raw.get(key) for key in ("api_key_env", "model_custom_headers", "model_session_header")):
             raise ModelProfileError("离线模型不能包含环境凭据或网络请求头配置。")
@@ -133,6 +135,17 @@ def _legacy_model_records(raw: dict, *, provider_id: str, environ: Mapping) -> t
     if window == [] or type(window) is int and window == 0 or type(window) is str and window.strip() in {"", "0", "null"}:
         model["model_context_window_tokens"] = None
     return provider, validate_model(model)
+
+
+# LLM: 唯一离线解码器只归一旧简化配置的空表示；不改输入、不吞非空列表，零采样必须保持为数值。
+# 函数用途: 将旧标量的空列表、空串和空值恢复为各字段的缺省语义，供后续正式校验。
+def _decode_legacy_model_values(raw: dict) -> dict:
+    defaults = {"api_key": "", "api_key_env": "", "api_base": "", "model_backend": "", "model_name": "",
+                "model_context_window_tokens": None, "temperature": None, "top_p": None,
+                "model_queue_wait_seconds": None, "model_custom_headers": {}, "model_session_header": "",
+                "model_reasoning_control": "", "model_reasoning_update_items": "", "model_structured_output": ""}
+    return {key: defaults[key] if key in defaults and value in (None, [], "") else value
+            for key, value in raw.items()}
 
 
 # LLM: 仅完整宿主管理员显式离线调用；不删除旧源、不新建凭据仓库，目录锁内检查真实代次，当前用户选择和决策覆盖优先。

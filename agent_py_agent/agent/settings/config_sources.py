@@ -16,6 +16,7 @@ INTERNAL_RUNTIME_CONFIG_FIELDS = {
     "config_sources",
     "host_credential_env_names",
     "host_home_snapshot",
+    "runtime_guard_policy",
 }
 
 

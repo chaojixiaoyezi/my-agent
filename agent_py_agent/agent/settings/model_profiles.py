@@ -54,13 +54,11 @@ class SelectedModelRead:
     decision_settings: dict
 
 
-# LLM: 缺模型只清除目录投影，保留其它偏好和宿主秘密擦洗上界；不读磁盘或制造可调用连接。
-# 函数用途: 生成真实未配置载体，显式 echo 调试保持原对象。
+# LLM: 正式有 Home 的模型选择只能走 v6 目录，缺模型不保留内存 echo；纯内存测试桩仅在下方无 Home 显式分支保留。
+# 函数用途: 清除全部连接投影并保留非模型偏好及秘密擦洗上界，不制造可调用后端。
 def _unconfigured_model_projection(base_config):
     from .secret_ref import freeze_managed_secret_environment
 
-    if getattr(base_config, "model_backend", "") == "echo":
-        return base_config
     defaults = type(base_config)()
     empty = {item.name: getattr(defaults, item.name) for item in fields(defaults) if item.metadata.get("model_projection", False)}
     config = replace(freeze_managed_secret_environment(base_config), **empty)
@@ -255,25 +253,19 @@ def model_profile_generation_guard(agent: object, expected: ModelProfileGenerati
 
 
 # LLM: available 保持聊天可选语义，available_for 显式声明用途；OAuth 不暴露 token，不能误选 decision。
-#   默认行窗口按 context_window_or_default 展示；输入模态仅复制显式部署配置，空为未知，不能由型号或工具协议推导。
+#   正式默认只能是目录引用或管理员初始共享，不公开平铺部署连接或内存 echo 作为选择旁路。
 # 函数用途: 提供模型和服务商的脱敏列表及原输入模态声明；决策配置可管理，但不会进入普通聊天的可选集合。
 def public_model_profiles(data: dict, config: object) -> dict:
-    from .defaults import context_window_or_default
     from .model_oauth_schema import has_credential
 
-    default = {key: getattr(config, key, "") for key in ("model_backend", "model_name")}
-    default["model_context_window_tokens"] = context_window_or_default(config)
-    default["input_modalities"] = list(getattr(config, "model_input_modalities", ()) or ())
-    configured = bool(default["model_backend"] and default["model_name"] and getattr(config, "api_base", ""))
     rows = []
-    if configured or default["model_backend"] == "echo":
-        rows.append({"id": "default", **default, "api_base": "（使用显式部署配置）",
-                     "model_name": default["model_name"] or "echo（离线调试）",
-                     "has_key": bool(getattr(config, "api_key", "")), "available": True, "available_for": ["agentic"]})
     for profile_id, row in data["profiles"].items():
         provider = data["providers"][row["provider_id"]]
-        available = bool(row["enabled"] and provider["enabled"] and has_credential(provider)
-                         and row["capability"] in provider["capabilities"])
+        try:
+            resolved_model(data, profile_id, capability=row["capability"])
+            available = True
+        except ModelProfileError:
+            available = False
         rows.append({"id": profile_id, **row, "api_base": provider["api_base"],
                      "provider_name": provider["display_name"], "has_key": bool(provider["api_key"]),
                      "auth_mode": provider.get("auth", {}).get("mode", "api_key"),
@@ -456,10 +448,14 @@ def selected_model_config(agent: object, *, profile_id: str | None = None, capab
     )
 
 
-# LLM: 目录、捕获、共享与凭据沿原算法；无目录选择就未配置，不回落部署连接；显式 echo 保持离线调试。
+# LLM: 正式目录、捕获、共享与凭据沿唯一算法；只有单元测试显式传入无 Home 的内存 echo 才原样返回，不是正式目录旁路。
 # 函数用途: 从真实配置和owner home解析指定用途的模型档案，保持默认选择与读取捕获语义。
 def selected_model_config_for_resources(base_config: object, home_paths: object, *,
                                         profile_id: str | None = None, capability: str = "agentic"):
+    if home_paths is None:
+        if profile_id not in (None, "default") or capability != "agentic":
+            raise ModelProfileError("无 Home 的内存测试桩不能引用正式模型目录。", reason="profile_not_found")
+        return base_config if getattr(base_config, "model_backend", "") == "echo" else _unconfigured_model_projection(base_config)
     data = read_model_profiles(model_profiles_path(home_paths))
     selected = data["selected"] if profile_id is None else profile_id
     captured = _SELECTED_MODEL_READ.get()
@@ -481,9 +477,9 @@ def selected_model_config_for_resources(base_config: object, home_paths: object,
     return config
 
 
-# LLM: 管理员 default 表示未选目录模型，只有显式 echo 保留；普通用户的管理员初始模型仍按原共享引用解析。
-#   撤销共享会同次清除初始模型（回到部署配置）；原模型被删时由共享解析明确报错。共享目录损坏同样报错，不猜。只读。
-# 函数用途: 从原Agent委托显式home纯叶，保管理员初始模型和部署默认的原判断。
+# LLM: 管理员 default 表示尚未选择目录模型，不回落内存 echo；普通用户的初始模型仍按管理员显式共享解析。
+#   撤销共享会清除初始引用并回到未配置；原模型被删或目录损坏均明确报错。只读。
+# 函数用途: 从原代理委托显式目录解析叶，保留管理员初始共享与未配置边界。
 def _default_for_owner(agent: object) -> str:
     return _default_for_owner_for_home(agent.home_paths)
 

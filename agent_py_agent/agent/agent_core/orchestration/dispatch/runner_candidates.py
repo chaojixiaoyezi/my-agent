@@ -27,10 +27,12 @@ def _runner_candidates_for_context(
     tasks: list,
     ctx: DispatchContext,
     runner_retry_limit: int,
+    *, runtime_policy=None,
 ) -> list:
     policy = RunnerCandidatePolicy(
         runner_retry_limit=runner_retry_limit,
         background_launch_id=ctx.background_launch_id,
+        runtime_guard_policy=runtime_policy,
     )
     if requested_include_ids(ctx):
         candidates = _included_normal_runner_tasks(
@@ -48,6 +50,8 @@ def _runner_candidates_for_context(
     )
 
 
+# LLM: 只从显式指定且通过统一候选门禁的任务中按请求顺序截取；非正 max_runners 不产生候选。
+# 函数用途: 为指定 run ID 的普通派工应用本次 runner 数量上限。
 def _included_normal_runner_tasks(
     tasks: list,
     ctx: DispatchContext,
@@ -57,6 +61,8 @@ def _included_normal_runner_tasks(
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 
+# LLM: 以现有任务建立 ID 索引，按显式请求顺序读取并调用统一候选门禁；缺失任务忽略，不改任务状态。
+# 函数用途: 返回派工请求指定且满足普通启动或重试策略的任务。
 def _requested_candidate_tasks(
     tasks: list,
     ctx: DispatchContext,
@@ -74,12 +80,16 @@ def _requested_candidate_tasks(
     ]
 
 
+# LLM: 必须同时存在显式 run ID 和协议解析后的重跑模式；普通指令文本不能触发恢复路径。
+# 函数用途: 让候选接纳阶段识别用户明确指定的恢复派工。
 def _is_explicit_recovery_dispatch(ctx: DispatchContext) -> bool:
     if not requested_include_ids(ctx):
         return False
     return is_rerun_mode(recovery_mode_from_protocol_value(getattr(ctx, "recovery_mode", "")))
 
 
+# LLM: 按请求顺序筛选可由恢复指令重跑的现存任务，并截取数量上限；只生成候选，不重置或启动任务。
+# 函数用途: 在显式恢复派工没有普通候选时提供专用恢复候选列表。
 def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
     requested = requested_include_ids(ctx)
     by_id = {str(getattr(task, "id", "") or ""): task for task in tasks}
@@ -91,6 +101,8 @@ def _included_recovery_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
     return selected[: max(0, int(ctx.max_runners or 0))]
 
 
+# LLM: 可恢复的用户停止直接放行；其余只接受阻塞或失败态，排除终局熔断、损坏通道和未关闭的能力申请或缺口。
+# 函数用途: 为显式恢复候选判定某个任务是否允许重新执行。
 def _can_rerun_from_recovery_instruction(task: object) -> bool:
     if user_stopped_run_is_resumable(task):
         return True
@@ -108,6 +120,8 @@ def _can_rerun_from_recovery_instruction(task: object) -> bool:
     return True
 
 
+# LLM: 先按模型枚举归一化失败类型，再识别接管链耗尽和无进展熔断；不根据自由文本推断终局状态。
+# 函数用途: 阻止显式恢复路径绕过任务的终局恢复熔断标记。
 def _terminal_recovery_code_present(task: object) -> bool:
     failure_type = known_failure_type(getattr(task, "failure_type", ""))
     terminal_codes = {

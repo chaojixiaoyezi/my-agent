@@ -34,6 +34,7 @@ from .defaults import (
     DEFAULT_COMMAND_ACCESS_MODE,
     DEFAULT_MODEL_MAX_TOKENS,
 )
+from .deployment_policy import RuntimeGuardPolicy
 from .gateway_topology import validate_gateway_worker_process_count
 from .memory import normalize_agent_memory_config
 from .normalize import (
@@ -149,6 +150,9 @@ DEFAULT_SYSTEM_PROMPT = (
 class _HomeProviderConfigFields:
     my_agent_home: str = ""
     host_home_snapshot: ConfiguredHomeSnapshot | None = field(
+        default=None, repr=False, compare=False, metadata={"host_only": True})
+    # 宿主构造绑定的只读运行值；配置投影保留对象，不接受用户输入或写回配置。
+    runtime_guard_policy: RuntimeGuardPolicy | None = field(
         default=None, repr=False, compare=False, metadata={"host_only": True})
     # B 切片：显式执行模式（managed / local_unmanaged）。空 = 未显式指定，
     # 挂载逻辑按有无 owner_home_dir 推断（兼容存量调用）。SimpleAgent 构造

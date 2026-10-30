@@ -114,7 +114,7 @@ def validate_provider_id(value: object) -> str:
     return value
 
 
-# LLM: secret/ref 互斥且同归 provider；环境引用只由离线迁移建立，普通表单写门在操作层，不从型号猜用途。
+# LLM: 环境引用与历史内联后备同归 provider，不能与 OAuth 混用；引用只由离线迁移建立，普通表单写门在操作层。
 # 函数用途: 检查服务商的明确用途和连接配置；允许无密钥保存草稿，发请求前另行检查。
 def validate_provider(value: object) -> dict:
     if not isinstance(value, dict):
@@ -147,8 +147,8 @@ def validate_provider(value: object) -> dict:
         from .model_credentials import provider_environment_name
 
         provider_environment_name(value["api_key_ref"])
-        if key.strip() or value.get("auth"):
-            raise ModelProfileError("服务商只能保存一种凭据来源。")
+        if value.get("auth"):
+            raise ModelProfileError("环境凭据引用不能与 OAuth 登录混用。")
         result["api_key_ref"] = value["api_key_ref"]
     if value.get("auth"):
         from .model_oauth_schema import stored_oauth
@@ -172,7 +172,7 @@ def _offline_provider(value: dict) -> dict:
             "enabled": value.get("enabled", True), "capabilities": ["agentic"], "custom_headers": {}, "session_header": ""}
 
 
-# LLM: Shared pure validation rejects bool before float conversion; callers keep their own fallback/formatting.
+# LLM: 共享纯校验在数值转换前拒绝布尔值；离线旧空列表只由迁移解码器归一，不放宽在线结构校验。
 # 函数用途: 统一解析0至2的有限温度，空值不发送，非法值抛模型配置错误。
 def parse_temperature(value: object) -> float | None:
     if value is None or value == "":
@@ -199,6 +199,8 @@ def validate_model(value: object) -> dict:
     if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 for c in name):
         raise ModelProfileError("模型名称不能为空或包含控制字符。")
     window = value.get("model_context_window_tokens")
+    if window == "":
+        window = None
     if window is not None and (isinstance(window, bool) or not str(window).isascii()
                                or not str(window).isdigit() or not 1 <= int(window) <= 2**31 - 1):
         raise ModelProfileError("上下文窗口须留空或填写 1 至 2147483647 之间的整数 tokens。")
@@ -388,10 +390,14 @@ def validate_model_profile(value: object) -> dict:
     model = validate_model({**value, "provider_id": "validation"})
     provider = validate_provider({"display_name": model["model_name"], "capabilities": [model["capability"]], **value,
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
-    if not provider["api_key"] and provider.get("transport") != "offline":
+    if not provider["api_key"] and not provider.get("api_key_ref") and provider.get("transport") != "offline":
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
     row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "reasoning_levels", "reasoning_update_items", "structured_output") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
+    if provider.get("api_key_ref"):
+        row["api_key_ref"] = provider["api_key_ref"]
+    if provider.get("transport") == "offline":
+        row["transport"] = "offline"
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
     if provider["session_header"]:

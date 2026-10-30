@@ -41,7 +41,7 @@ def execute_orphan_source(agent, ref):
 
         return {**result, "outcome": "pending" if orphan_has_work(asdict(task)) else "handled"}
     runner = _run_subagent_worker(RunSubagentWorkerParams(agent.config, agent.root, task.id, "", False, 0, True,
-        _runner_retry_reason(task, runner_failure_retry_limit(agent.config)),
+        _runner_retry_reason(task, runner_failure_retry_limit(agent.config), runtime_policy=agent.runtime_guard_policy),
         timeout_seconds=get_task_timeout(task, 0, agent.config), local_store=agent.local_store,
         backend_override=getattr(agent, "_subagent_worker_backend_override", None), request_transport=transport))
     return {**result, "run_id": runner.run_id, "status": runner.status, "ok": runner.ok}

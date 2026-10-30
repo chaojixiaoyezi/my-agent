@@ -160,7 +160,7 @@ def model_configuration_card(reference, scope_label, public=None):
                'input_type': 'password' if name == 'api_key' else 'text'}
         if name != 'api_key':
             row['default_value'] = (', '.join(validate_input_modalities(public.get(name)))
-                                    if name == 'input_modalities' else str(public.get(name, '')))
+                                    if name == 'input_modalities' else '' if public.get(name) is None else str(public.get(name, '')))
         inputs.append(row)
     return {'config': {'wide_screen_mode': True, 'update_multi': True, 'enable_forward': False},
             'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': scope_label + '\n密钥不进入聊天、模型或记忆。'
@@ -393,10 +393,7 @@ def _save_model_form(host, row, fields, *, blocking=True):
                 form['model_custom_headers'] = provider['custom_headers']
             if provider.get('session_header'):
                 form['model_session_header'] = provider['session_header']
-        if not form['api_key']:
-            if form['api_base'].rstrip('/') != provider['api_base']:
-                raise ValueError('修改接口地址必须重新输入密钥')
-            form['api_key'] = provider['api_key']
+        # 密钥留空不把服务端来源放回表单；原目录锁内由唯一操作层核对端点并保留 api_key/api_key_ref。
     with model_profile_write_check(check):
         execute_model_profile_operation(host, 'save_profile' if row['profile_id'] else 'add',
                                         {'profile_id': profile_id, 'profile': form, 'editing': bool(row['profile_id'])},

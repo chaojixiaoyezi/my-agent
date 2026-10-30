@@ -2,7 +2,8 @@ from __future__ import annotations
 
 """Let the main agent read and change its own user-tunable configuration, with honest provenance."""
 
-# LLM: 这个工具解决的真机问题是"用户问能不能改 compact 阈值，模型直接答'我没有权限'"——模型既不知道
+# LLM: 守卫来源统一说明宿主部署策略，运行值只从绑定的冻结快照读取，持久事实不冒充当前运行事实。
+#   这个工具解决的真机问题是"用户问能不能改 compact 阈值，模型直接答'我没有权限'"——模型既不知道
 #   用户配置在哪，也没有任何入口，于是凭空断言。这里给出结构化事实：生效值、来源（用户配置 vs 随包默认）、
 #   白名单可改项、安全边界不可改项及原因、保存位置与生效时机。
 #   决策覆盖沿原设置服务；模型只读/撤销实验许可，建立许可必须是宿主显式用户控制，身份不取模型参数。
@@ -20,6 +21,7 @@ from ..settings.parameter_changes import (
     set_parameter,
 )
 from ..settings.parameter_registry import (
+    RUNTIME_GUARD_SOURCE_TEXT,
     applied_value,
     parameter_registry,
     running_value,
@@ -231,7 +233,7 @@ class UserConfigTool(BaseTool):
                 },
                 "key": {
                     "type": "string",
-                    "description": "配置键名，例如 memory_compact_auto_trigger_percent。",
+                    "description": "配置键名，例如 memory_compact_trigger_percent。",
                 },
                 "value": {
                     "type": "string",
@@ -314,6 +316,7 @@ class UserConfigTool(BaseTool):
 
     # LLM: 用户配置路径取当前进程实际加载的配置文件（见 user_config_path）；参数事实来自参数中心登记表。
     #   capability 键的读取（read_config_fact）与运行值（_spec_view）都按运行时实际路径走，不拿用户配置同目录猜。
+    #   守卫 fact 单列为持久部署策略，parameter.running_value 才是冻结运行值，无快照明确未知。
     # 函数用途: 单键先给事实与参数，只有无键读取才附全量能力目录，避免有界预览丢失结果。
     def _view(self, key: str) -> ToolHandlerOutcome:
         user_path = user_config_path(getattr(self._agent, "config", None))
@@ -331,6 +334,9 @@ class UserConfigTool(BaseTool):
             if spec is not None:
                 payload["parameter"] = _spec_view(spec, getattr(self._agent, "config", None),
                                                   capability_path=capability_path)
+                if spec.source == "runtime_guard":
+                    payload["fact"].update({"value_basis": "persistent_deployment_policy",
+                                             "effect_note": "持久部署策略值；待重载生效，当前运行值见 parameter。"})
         else:
             payload["capability"] = capability_summary()
         payload = {**{name: payload[name] for name in ("fact", "parameter") if name in payload}, **payload}
@@ -479,13 +485,15 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     return report
 
 
-# LLM: 显式完整回执有路径才正式加载磁盘；无路径取当前运行配置或AgentConfig默认值，仍沿原running_value/mask_value。
+# LLM: 完整回执有路径才正式加载磁盘；守卫始终显式传原运行配置的冻结快照，不把磁盘重新加载的配置对象冒充运行快照。
+#   无路径取当前运行配置或AgentConfig默认值，仍沿原running_value/mask_value，缺快照如实未知。
 # 函数用途: 构造完整脱敏配置，不在能力配置已保存后因load_config(None)抛出错误。
 def _full_config_receipt(user_path, capability_path, *, agent_config=None):
     from ..settings.config import AgentConfig, load_config
 
     config = load_config(user_path) if user_path is not None else (agent_config if agent_config is not None else AgentConfig())
-    return {key: mask_value(key, running_value(spec, config, capability_path=capability_path))
+    return {key: mask_value(key, running_value(spec, config, capability_path=capability_path,
+                                               policy=getattr(agent_config, "runtime_guard_policy", None)))
             for key, spec in parameter_registry().items()}
 
 
@@ -510,8 +518,8 @@ def _spec_metadata(spec: object) -> dict[str, object]:
 # LLM: 值一律经 mask_value 脱敏；brief 用于搜索列表，说明截到 160 字。common 标出参数中心的常用层级（COMMON_KEYS），
 #   只用于推荐，不影响能否修改。登记了派生规则的参数另给 applied_value/applied_rule
 #   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。capability 键运行值按运行时路径读；
-#   runtime_guard 只读随包并标 source_readonly。只读。
-# LLM: 部署字段标明唯一宿主来源与只读边界，运行值不读取 owner capability_path，也不因展示授予修改权限。
+#   runtime_guard 只取冻结快照并标 source_readonly；缺快照必须给 unknown 和结构化状态，不把持久文件值冒充运行值。
+#   部署字段标明唯一宿主来源与只读边界，运行值不读取 owner capability_path，也不因展示授予修改权限。
 # 函数用途: 投影参数事实，搜索列表只带派生值，单键查看再给完整派生规则。
 def _spec_view(spec: object, config: object, *, brief: bool = False,
                capability_path: object | None = None) -> dict[str, object]:
@@ -519,11 +527,11 @@ def _spec_view(spec: object, config: object, *, brief: bool = False,
     deployment = spec.key in DEPLOYMENT_CAPABILITY_KEYS
     description = str(spec.description)
     readonly = spec.source == "runtime_guard"
+    running = running_value(spec, config, capability_path=capability_path)
     view = {
         "key": spec.key, "category": spec.category, "writable": spec.writable, "common": spec.common,
         "value_type": spec.value_type, "source": "deployment_capability" if deployment else spec.source,
-        "running_value": mask_value(spec.key, running_value(spec, config, capability_path=capability_path))
-        if config is not None else "",
+        "running_value": mask_value(spec.key, running) if config is not None or readonly else "",
         "default": mask_value(spec.key, spec.default),
         "description": description[:160] + ("…" if brief and len(description) > 160 else "") if brief else description,
     }
@@ -531,7 +539,10 @@ def _spec_view(spec: object, config: object, *, brief: bool = False,
         view["source_scope"] = "deployment"
         view["source_readonly"] = "宿主部署配置，只读；owner 局部配置不能覆盖，模型和 /settings 不修改此字段。"
     if readonly:
-        view["source_readonly"] = "随包默认、不可覆盖（该配置运行时没有用户覆盖层）"
+        view["source_readonly"] = RUNTIME_GUARD_SOURCE_TEXT
+        view["running_value_status"] = "unknown" if running == "unknown" else "frozen_snapshot"
+        view["running_value_note"] = ("缺少冻结运行快照；持久部署策略值待重载生效，不能据此确认当前运行值。"
+                                       if running == "unknown" else "当前冻结运行快照；磁盘持久策略变化需重载后生效。")
     if not brief:
         view.update({"safety": spec.safety, "effect_when": spec.effect, **_spec_metadata(spec)})
     applied = applied_value(spec.key, config)

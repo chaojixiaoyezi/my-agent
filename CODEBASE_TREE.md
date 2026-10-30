@@ -2781,6 +2781,12 @@ agent_py_agent/
 |   |-- test_parameter_changes.py      # 参数中心写入：按类型写入并真正生效、拒绝不改文件、回读不一致回滚、记录与回滚链、user_config 工具
 |   |-- test_config_write_permissions.py # 配置/账本写回保留原权限（600 不被放宽）、参数中心新建文件 0600、配置写回不用固定 .tmp 名
 |   |-- test_parameter_sources.py      # 参数中心来源维度 P17：四来源 search/view、运行值真实读文件与 owner 覆盖值、capability 写运行时文件且运行时入口读到新值、文件缺失时新建、只读来源 PARAMETER_SOURCE_READ_ONLY 拒绝、回读失败恢复/删除、边界拒绝、user_config 工具链路
+|   |-- test_e905_sol3_r1_runtime.py   # R1：真实构造/重建的可信Home冻结、主恢复账本与runner额度同快照
+|   |-- test_e905_sol3_r1_rate.py      # R1：真实registry/executor限流只收紧，零值、容量和失败次数退避对齐
+|   |-- test_e905_sol3_r1_commit.py    # R1：部署策略提交状态、完整payload/revision回读与并发篡改拒绝
+|   |-- test_e905_sol3_r1_catalog.py   # R1：TUI/飞书v6字段保留、离线空值/env迟到与echo目录链路
+|   |-- test_e905_sol3_r1_window.py    # R1：子代理未知/混合/正小窗口不丢失决策建议
+|   |-- test_e905_sol3_r1_settings.py  # R1：冻结运行值与持久策略分离、来源文案/层级/旧键退出
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、常用/全部两种视图、完整修改与回滚流程
 |   |-- test_plugins_chat_control.py   # IM 插件公共解析、共享服务、权限错误码、启用确认和持久控制重放
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置

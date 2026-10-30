@@ -102,7 +102,10 @@ _GENERATION_BACKENDS = [("openai_compatible", "OpenAI 风格（Chat Completions�
 #   用途标签、输入模态、思考控制、结构化输出的语义见 _edit_model 注释；决策模型不建这些控件。
 # 类用途: 持有一个生成模型编辑表单的高级字段，并把它们整理成 save_model 的字段。
 class _GenerationFields:
+    # LLM: 未提供编辑控件的推理更新开关仍按原字段保存，不能因打开表单重置关闭状态。
+    # 函数用途: 创建高级控件并保留当前表单未暴露的模型能力字段。
     def __init__(self, data: dict, backend: str):
+        self.reasoning_update_items = data.get("reasoning_update_items", "auto")
         self.backend = RadioList(_GENERATION_BACKENDS, default=backend, select_on_focus=True)
         self.temperature, self.top_p = _field(data.get("temperature", "")), _field(data.get("top_p", ""))
         self.queue = _field(data.get("model_queue_wait_seconds", ""))
@@ -123,12 +126,14 @@ class _GenerationFields:
             Label("服务商支持的思考档位（可选，逗号分隔，如 low, medium, high；Responses 接口用它对应 /effort，留空=未声明）"), self.levels,
             Label("结构化输出（记忆整理等后台调用的输出格式；不确定就选自动）"), self.structured])
 
+    # LLM: 控件值和未暴露的原开关一并提交，服务端仍按存在性合并和校验。
     # 函数用途: 把高级字段整理成 save_model 的 profile 字段（取值合法性由服务端校验）。
     def values(self) -> dict:
         return {"model_backend": self.backend.current_value, "capability": self.capability.current_value,
                 "temperature": self.temperature.text, "top_p": self.top_p.text, "model_queue_wait_seconds": self.queue.text,
                 "usage_tags": self.usage.text, "input_modalities": self.modalities.text, "reasoning_levels": self.levels.text,
-                "reasoning_control": self.reasoning.current_value, "structured_output": self.structured.current_value}
+                "reasoning_control": self.reasoning.current_value, "structured_output": self.structured.current_value,
+                "reasoning_update_items": self.reasoning_update_items}
 
 
 # LLM: 编辑保留原用途/协议；decision 不发送生成采样字段和用途标签，保存无网络，同步用途表单回归。
@@ -145,7 +150,7 @@ async def _edit_model(app, agent, session: str, provider_id: str, row: dict | No
         return ""
     is_decision = backend == "typesafe_decision"
     name = _field(data.get("model_name", ""))
-    window = _field(data.get("model_context_window_tokens") or 128000)
+    window = _field("" if data.get("model_context_window_tokens") is None else data["model_context_window_tokens"])
     enabled = Checkbox("启用模型", checked=data.get("enabled", True))
     extra = None if is_decision else _GenerationFields(data, backend)
     notice = Label("")

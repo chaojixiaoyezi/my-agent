@@ -1,13 +1,10 @@
-# LLM: 公开配置三个写入口在验证、读盘或新建前消费原全局拒门；owner私有档案/决策及共用账本不加此门，同步全局写边界测试。
-# 模块用途: 受限进程先拒绝；标量与三项 typed 结构共用路径锁、CAS、正式预检、精确回滚和台账事务。
-# LLM: 参数中心唯一的写入口：写用户配置文件（当前进程实际加载的配置，见 user_config_capability.user_config_path），
-#   以及白名单里的模型档案字段（PROFILE_FIELDS，经 model_profiles 唯一的锁内保存入口，记在该用户档案旁的 .changes.jsonl，
-#   与配置账本同一格式、同一脱敏与回滚规则）。配置写入按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config
-#   回读核对，不一致就恢复原文件并报错；每次写入追加一条
-#   账本（用户配置旁的 settings-changes.jsonl，保留最近 500 条）。模型始终不能写边界；仅已认证用户 /settings 可在限定作用域
-#   修改 USER_SETTINGS_BOUNDARY_KEYS，set/reset/revert 共用校验。列表/映射与随包默认 YAML 拒绝。副作用：改写用户配置与账本。
-#   gateway_parts/settings_control_service.py、user_config_capability.set_tunable_value 与 settings/reasoning_probe.py。
-# 模块用途: 让用户与 my-agent 修改参数、恢复默认、查看修改记录并按编号回滚。
+# LLM: 参数中心只写登记了 writer 的用户参数；标量及三项 typed 结构统一走路径锁、CAS、正式预检、回读与配置/台账回滚。
+#   set/reset/revert 在验证和 I/O 前消费全局拒门；宿主部署项（含 runtime_guard）不写 owner 局部覆盖，守卫由部署策略专用入口维护。
+#   v6 模型连接和选择不再由普通平铺参数修改；PROFILE_FIELDS 仍沿原模型目录的锁内保存和旁置台账，不扩大字段名单。
+#   模型不能写安全边界，仅已认证 /settings 的限时作用域可修改 USER_SETTINGS_BOUNDARY_KEYS；actor 字符串不授权。
+#   配置台账保留最近500条且统一脱敏，三项结构按 STRUCTURED_PARAMETER_KEYS 校验，其余无 writer 的结构与随包 YAML 拒绝。
+#   有改写配置、模型目录和台账副作用；修改须同步 parameter_registry、user_config_tool、settings_control_service 及事务回归。
+# 模块用途: 统一参数修改、恢复默认、历史和回滚，同时严格区分用户参数、模型目录和宿主部署策略。
 from __future__ import annotations
 
 import json
@@ -90,7 +87,7 @@ class ChangeOrigin:
 
 # LLM: 写入口要写哪个文件由参数来源决定：agent 主配置写在用户配置（user_path），capability 写在运行时实际读取的
 #   那份文件（capability_path，由调用方按 capability_config_for_agent 同一路径解析，不是用户配置同目录）。
-#   runtime_guard 运行时没有用户覆盖层，写入口整体拒绝，不在这里给路径。
+#   runtime_guard 属宿主部署策略，参数中心拒绝，不在这里提供 owner 覆盖路径。
 # 类用途: 一次参数修改可能涉及的各来源文件路径。
 @dataclass(frozen=True)
 class WritePaths:
@@ -150,8 +147,7 @@ def _target(user_path: Path | None) -> Path:
 # LLM: 按参数来源给写入目标。agent 主配置必须已存在；capability 写运行时实际读取的那份文件
 #   （agent.capability_config_path 或 default_capability_config_path(agent.root)，由调用方解析传入），
 #   文件不存在时允许新建（运行时读不到时按默认实例走，所以建好文件后重启就能读到）。runtime_guard
-#   运行时没有用户覆盖层，写什么都不会生效，这里直接拒绝，不给目标路径。
-# LLM: 宿主部署字段无参数中心写目标，显式拒绝；不可写成 owner 局部覆盖后假报已经生效。
+#   只由宿主 deployment policy 专用入口维护，参数中心不得写 owner 局部覆盖后假报已经生效。
 # 函数用途: 按参数来源给出实际写入目标（主配置=用户配置文件，capability=运行时读取的文件）。
 def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
     from ..capability.runtime_config_reload import DEPLOYMENT_CAPABILITY_KEYS
@@ -175,12 +171,12 @@ def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
         return target
     raise ParameterChangeError(
         "PARAMETER_SOURCE_READ_ONLY",
-        f"'{spec.source}' 配置运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索，不能修改。")
+        f"'{spec.source}' 属于宿主部署策略，由完整宿主管理员经专用部署入口维护；参数中心只能查看和搜索，不接受 owner/task/run 覆盖。")
 
 
 # LLM: 先查登记表，再查边界：BOUNDARY_KEYS 给出原因原样回显；其余边界项给统一原因。只有可信用户命令作用域且在
 #   用户白名单（USER_SETTINGS_BOUNDARY_KEYS）里的边界项可由用户写；模型的 set/reset/revert 一律按边界拒绝。
-#   运行时没有覆盖层的来源（runtime_guard）先于安全边界拒绝，原因要结构化（PARAMETER_SOURCE_READ_ONLY）。
+#   宿主部署层（含 runtime_guard）先于安全边界拒绝，返回 PARAMETER_SOURCE_READ_ONLY；不能谎称部署策略不可维护。
 # 函数用途: 取出一个可写参数的登记信息，不可写时拒绝。
 def _writable_spec(key: str) -> ParameterSpec:
     spec = parameter_registry().get(str(key or "").strip())
@@ -189,7 +185,8 @@ def _writable_spec(key: str) -> ParameterSpec:
     if spec.tier == "deployment":
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",
-            f"'{spec.key}' 属于 {spec.source} 配置：运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索。")
+            f"'{spec.key}' 属于宿主部署配置（{spec.source}），须由完整宿主管理员经对应部署入口维护；"
+            "参数中心只能查看和搜索，不接受 owner/task/run 局部覆盖。")
     if not spec.writer:
         raise ParameterChangeError("PARAMETER_STRUCTURED", "没有支持该类型的参数 writer，不能修改。")
     user_allowed = _USER_SETTINGS_WRITE.get() and spec.user_editable
@@ -268,6 +265,7 @@ def _render_structured(key: str, value: object) -> tuple[object, str]:
         raise ParameterChangeError("PARAMETER_INVALID", f"'{key}' 结构或类型无效，没有写入。") from None
 
 
+# LLM: 只校验候选数值，不夹取或写入；保持布尔与数字的正式解析边界，小数必须有限。
 # 函数用途: 解析整数或小数参数；默认值非负时拒绝负数，小数拒绝 NaN/无穷。
 def _render_number(spec: ParameterSpec, text: str) -> tuple[object, str]:
     try:
@@ -378,11 +376,13 @@ def _config_transaction(spec, paths, rendered, origin, *, action, expected=_UNSP
                 _LOCKED_LEDGER.reset(token)
 
 
+# LLM: 台账沿用户配置同目录唯一定位，不按 actor 或来源另建影子账本，不创建文件。
 # 函数用途: 账本路径：用户配置文件旁的 settings-changes.jsonl。
 def ledger_path(user_config: Path) -> Path:
     return Path(user_config).with_name(LEDGER_NAME)
 
 
+# LLM: 记账共用 _append_record 的脱敏、锁与保留策略，不在参数来源间分叉账本事务。
 # 函数用途: 追加一条用户配置参数的修改记录（账本在用户配置旁）并返回它。副作用：追加账本。
 def _record(path: Path, spec: ParameterSpec, row: _ChangeRow) -> dict[str, object]:
     return _append_record(ledger_path(path), spec.key, row, spec.masked)
@@ -428,6 +428,8 @@ def _receipt(path: Path, spec: ParameterSpec, entry: dict[str, object], actual: 
     }
 
 
+# LLM: 保留服务结构化错误码；边界原因只作回显，不据此授权、重试或推断提交状态。
+# 函数用途: 将可预期参数修改错误转换成统一失败回执。
 def _failure(error: ParameterChangeError) -> dict[str, object]:
     report: dict[str, object] = {"ok": False, "code": error.code, "error": str(error)}
     if error.code == "PARAMETER_BOUNDARY":

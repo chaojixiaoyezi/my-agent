@@ -2,6 +2,7 @@
 #   本机 local/main（已绑定管理员身份的 IM 私聊也解析到这里），因为全局参数对整个 Gateway 生效且含本机路径。读写统一走参数中心
 #   （parameter_registry / parameter_changes），actor 记为 chat；回执经 mask_value 脱敏。普通异常不承诺“没有改动”。
 #   用户专属边界写作用域只在完整管理员身份校验后开启，模型工具不能借 actor 或回滚绕过。
+#   守卫来源统一为宿主部署策略；当前运行值只取 config 绑定的冻结快照，持久磁盘值单列，缺快照明确未知。
 #   改动须同步 control_commands._settings_command、command_catalog 的 settings 条目、TUI control_runtime 的文本还原与本地拒绝，
 #   以及 test_settings_chat_control.py。不带参数只列参数中心的常用层级（COMMON_KEYS），/settings all 才列全部。
 # 模块用途: 让管理员在 TUI 和 IM 里查看常用或全部参数，查找、查看、修改、恢复默认、查看记录并回滚参数。
@@ -27,6 +28,7 @@ from ..settings.parameter_changes import (
     user_settings_write_scope,
 )
 from ..settings.parameter_registry import (
+    RUNTIME_GUARD_SOURCE_TEXT,
     SOURCE_CAPABILITY,
     SOURCE_RUNTIME_GUARD,
     ParameterSpec,
@@ -176,6 +178,8 @@ def _profile_text(config: object, home_paths: object, key: str, describe: object
     return "\n" + "\n".join(lines)
 
 
+# LLM: 用户配置路径只来自正式运行配置解析；缺失时报可预期错误，不猜工作目录或创建文件。
+# 函数用途: 为设置读写确定已经加载的用户配置路径。
 def _user_path(config: object):
     path = user_config_path(config)
     if path is None:
@@ -220,8 +224,8 @@ def _brief(description: str) -> str:
     return head if len(head) <= _BRIEF_MAX_CHARS else head[:_BRIEF_MAX_CHARS] + "…"
 
 
-# LLM: 显示 Gateway 启动配置里的当前运行值；用户配置改过就注明默认值，改了还没重启就注明“发 /restart 后生效”。
-#   capability 键按运行时路径读（capability_path），runtime_guard 只读随包并标注。值都经 mask_value 脱敏。只读。
+# LLM: 显示启动配置里的当前值；用户配置改过注明默认值，没重启注明生效时机；守卫只读冻结快照，缺快照明确未知。
+#   capability 键按运行时路径读（capability_path），值都经 mask_value 脱敏。只读。
 # 函数用途: 把一个常用参数排成一行中文。
 def _common_line(spec: ParameterSpec, config: object, stored: dict, capability_path: Path | None = None) -> str:
     running = running_value(spec, config, capability_path=capability_path)
@@ -230,7 +234,7 @@ def _common_line(spec: ParameterSpec, config: object, stored: dict, capability_p
         marks += f"（改过，默认 {_value(spec, spec.default)}）"
     if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(running):
         marks += f"（已改成 {_value(spec, stored[spec.key])}，发 /restart 后生效）"
-    note = "（宿主部署策略；未配置时用 Python 默认）" if spec.source == SOURCE_RUNTIME_GUARD else ""
+    note = _runtime_guard_note(spec, running)
     return f"- {spec.key} = {_value(spec, running)}{marks}{note}：{_brief(spec.description)}"
 
 
@@ -312,16 +316,26 @@ def _category_lines(registry: dict[str, ParameterSpec], config: object, changed:
 
 
 # LLM: 值经 _value（凭据仍脱敏）；［安全边界］只看登记表的 writable，不按说明文字判断。
-#   capability 键运行值按运行时路径读；runtime_guard 只读随包并标注。只读。
+#   capability 沿实际路径，runtime_guard 仅展示冻结快照或未知，不以持久磁盘值冒充当前运行值。只读。
 # 函数用途: 把一个参数排成全部视图里的一行：当前运行值，改过标［改过］，不能在这里改标［安全边界］。
 def _all_line(spec: ParameterSpec, config: object, changed: set[str],
               capability_path: Path | None = None) -> str:
     marks = ("［改过］" if spec.key in changed else "") + ("" if spec.writable else "［安全边界］")
-    note = "（宿主部署策略；未配置时用 Python 默认）" if spec.source == SOURCE_RUNTIME_GUARD else ""
-    return f"- {spec.key} = {_value(spec, running_value(spec, config, capability_path=capability_path))}{marks}{note}"
+    running = running_value(spec, config, capability_path=capability_path)
+    return f"- {spec.key} = {_value(spec, running)}{marks}{_runtime_guard_note(spec, running)}"
 
 
-# LLM: 搜索沿真实参数目录及来源，部署守卫标注宿主策略，不把邻接 YAML 当权威。
+# LLM: 只解释结构化运行快照是否存在；不读取磁盘、不用自然语言决定权限，持久值只能在详情里另列。
+# 函数用途: 为各设置展示视图标明冻结运行值或缺少快照的未知状态。
+def _runtime_guard_note(spec: ParameterSpec, running: object) -> str:
+    if spec.source != SOURCE_RUNTIME_GUARD:
+        return ""
+    if running == "unknown":
+        return "（缺少冻结运行快照，当前运行值未知；持久部署策略值待重载生效）"
+    return "（当前冻结运行快照；持久部署策略变化需重载后生效）"
+
+
+# LLM: 搜索沿真实参数目录及来源，部署守卫只读冻结运行快照或明确未知，不把邻接 YAML 或新磁盘值当运行权威。
 # 函数用途: /settings search <关键词> —— 按参数名与中文说明找参数。
 def _search(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     found = search_parameters(argument, limit=10)
@@ -331,8 +345,8 @@ def _search(config: object, argument: str, *, capability_path: Path | None = Non
     for spec in found:
         flag = "可改" if spec.writable else "安全边界"
         summary = spec.description[:60] + ("…" if len(spec.description) > 60 else "")
-        note = "（宿主部署策略；未配置时用 Python 默认）" if spec.source == SOURCE_RUNTIME_GUARD else ""
-        lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running_value(spec, config, capability_path=capability_path))}{note}："
+        running = running_value(spec, config, capability_path=capability_path)
+        lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running)}{_runtime_guard_note(spec, running)}："
                      f"{summary or '（没有说明）'}")
     return "\n".join(lines)
 
@@ -363,6 +377,7 @@ def _internal(_config: object, argument: str, *, capability_path: Path | None = 
 
 # LLM: config 是 Gateway 启动配置，所以登记了派生规则的参数（如 max_tokens、推理强度）按默认模型算实际效果，并注明
 #   /model 切换过的会话可能不同；用户专属边界项只展示用户命令可改，不改变登记表的模型权限。只读。
+#   守卫运行值只取绑定的冻结快照，持久部署策略事实另外标示并提示重载；无快照不以磁盘值冒充“当前运行值”。
 # 函数用途: /settings show <参数名> —— 说明、默认值、当前运行值、实际效果（有派生规则时）、用户配置里的值与能否修改。
 def _show(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     spec = parameter_registry().get(argument)
@@ -371,10 +386,13 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
     path = _user_path(config)
     stored = load_simple_yaml(path) if path.is_file() else {}
     override = _override_text(spec, stored, capability_path)
+    persistent_lines = []
     if spec.source == SOURCE_RUNTIME_GUARD:
         fact = read_config_fact(spec.key, user_path=path, default_path=path, config=config)
         override = {"deployment_policy": "不适用（宿主部署策略有显式覆盖）", "python_default": "不适用（Python 默认）"}.get(
             fact["source"], "未验证（缺少可信宿主策略）")
+        persistent_lines = [f"持久部署策略值：{fact['effective']}（待重载生效；与当前冻结运行值独立）"
+                            if fact["source"] != "unknown" else "持久部署策略值：unknown（未验证，宿主策略读取失败或来源不明）"]
     writable = _writable_text(spec)
     if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
         writable = f"安全边界，仅用户经 /settings 修改，模型不能改；{effect_text(spec.effect)}"
@@ -382,34 +400,33 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
     applied_line = ([f"实际效果：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
                     if applied is not None else [])
     # 元数据行只在有值时显示：来源文件（非主配置）、单位、范围、归属模块、主要读取方。
-    metadata_lines = (["来源：宿主 config/deployment_policy.json（未配置时用 Python 默认）"] if spec.source == SOURCE_RUNTIME_GUARD
+    metadata_lines = ([f"来源：{RUNTIME_GUARD_SOURCE_TEXT}"] if spec.source == SOURCE_RUNTIME_GUARD
                       else [f"来源：{spec.source}_config.yaml"] if spec.source != "agent" else [])
     metadata_lines += [line for field, label in (("unit", "单位"), ("range", "范围"),
                                                  ("owner_module", "归属模块"), ("reader", "读取方"))
                        if (line := _metadata_line(spec, field, label))]
-    # 运行时没有覆盖层的来源（runtime_guard）只能看随包默认，修改会走只读拒绝。
-    readonly_note = ("（宿主部署策略，不读取 owner/task/run YAML）"
-                     if spec.source == SOURCE_RUNTIME_GUARD else "")
+    # 当前运行值只取启动/重载时绑定的冻结快照；持久部署策略单列，普通参数写入口仍只读拒绝。
+    running = running_value(spec, config, capability_path=capability_path)
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
         f"说明：{spec.description or '（没有说明）'}",
-        f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, running_value(spec, config, capability_path=capability_path))}"
-        f"{readonly_note}；用户配置里：{override}",
+        f"默认值：{_value(spec, spec.default)}；当前运行值：{_value(spec, running)}"
+        f"{_runtime_guard_note(spec, running)}；用户配置里：{override}",
+        *persistent_lines,
         *metadata_lines,
         *applied_line,
         f"能否修改：{writable}",
     ])
 
 
-# LLM: 与 set/reset/revert 被拒时同一句说法（_writable_spec 的 PARAMETER_SOURCE_READ_ONLY），
-#   P18 验收发现 show 原来 fallback 到“只能由用户在宿主入口或配置文件里改”，
-#   但 runtime_guard 没有用户覆盖层，两个说法对不上，这里统一。
+# LLM: 参数中心拒绝部署来源写入，不代表宿主管理员不能维护 deployment policy；与 _writable_spec 同一权限边界。
 # 函数用途: 生成 show 里“能否修改”一行的文字。
 def _writable_text(spec: ParameterSpec) -> str:
     if spec.writable:
         return f"可以修改，{effect_text(spec.effect)}"
     if spec.source == SOURCE_RUNTIME_GUARD:
-        return "不能在这里修改：由完整宿主管理员通过部署策略专用写入口维护，不接受 owner/task/run 覆盖。"
+        return ("不能在这里修改：属于 runtime_guard 配置（宿主部署策略），参数中心只能查看和搜索；"
+                "由完整宿主管理员通过部署策略专用写入口维护，不接受 owner/task/run 覆盖。")
     if spec.tier == "deployment":
         return "不能在这里修改：仅部署配置，需使用对应的宿主部署入口。"
     if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
@@ -438,6 +455,8 @@ def _metadata_line(spec: object, field: str, label: str) -> str:
     return f"{label}：{value}" if value else ""
 
 
+# LLM: 只信写服务的结构化 ok，失败按其公开说明抛可预期错误，不从回执文案猜提交状态。
+# 函数用途: 将参数中心的失败结果转成设置控制错误。
 def _checked(report: dict[str, object]) -> dict[str, object]:
     if not report.get("ok"):
         raise SettingsControlError(str(report.get("error") or "没有执行。"))
@@ -483,6 +502,7 @@ def _history_line(item: dict[str, object]) -> str:
             f"{item.get('action')}：{before} → {after}（{item.get('actor')}）")
 
 
+# LLM: 历史只读原统一参数台账，经 _history_line 再脱敏；无记录不推断没有发生过其它来源的修改。
 # 函数用途: /settings history [参数名] —— 最近 20 条修改记录（最新在前）。
 def _history(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     items = parameter_history(user_path=_user_path(config), key=argument, limit=_LIST_LIMIT_COUNT)

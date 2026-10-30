@@ -1,4 +1,4 @@
-# LLM: 候选在创建锁内接纳，线程池只消费原执行轮；联测取消、重试和并发排队。
+# LLM: 合并普通与协作候选，经会话门禁和限流后委托统一 runner 执行；真正启动时先预留执行轮，顺序和并发路径都复用该身份。
 # 模块用途: 组织子代理批次，固定每个工作项的身份并收集正式执行结果。
 from __future__ import annotations
 
@@ -46,6 +46,8 @@ from .runner_selection import (
 )
 
 
+# LLM: 缺少代理、派工上下文或参数即拒绝；复制已有记录进入批次，执行后将有效指令回写派工上下文。
+# 函数用途: 为单轮派工组织 runner 阶段上下文并返回累积执行记录。
 def run_dispatch_runner_stage(
     agent=None,
     *,
@@ -87,7 +89,8 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     if selection_record is not None:
         records.append(selection_record)
         return records
-    runner_candidates = _runner_candidates_for_context(scoped_tasks, ctx, runner_retry_limit)
+    runner_candidates = _runner_candidates_for_context(
+        scoped_tasks, ctx, runner_retry_limit, runtime_policy=getattr(agent, "runtime_guard_policy", None))
     collaboration_report = collaboration_request_runner_candidates_report(agent, scoped_tasks)
     collaboration_candidates = collaboration_report.candidates
     if collaboration_report.load_errors:
@@ -114,6 +117,8 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     return _run_runner_jobs_with_limit(agent, ctx, batch)
 
 
+# LLM: 按主列表优先的顺序合并，以非空 run ID 去重；非正限额表示不截断，不修改输入列表或任务。
+# 函数用途: 将协作候选与普通候选合成有序、限额内的派工列表。
 def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> list:
     merged = []
     seen: set[str] = set()
@@ -152,7 +157,7 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: i
             dry_records.append(conversation_lifecycle_gate_record(agent, ctx, task, decision))
             continue
         before = agent.subagents.load(task.id)
-        retry_reason = _runner_retry_reason(before, runner_retry_limit)
+        retry_reason = _runner_retry_reason(before, runner_retry_limit, runtime_policy=getattr(agent, "runtime_guard_policy", None))
         if ctx.execution_plan.mutate_state:
             if ctx.should_start_runners:
                 expected = supplied_attempts[task.id] if supplied_attempts is not None else None
@@ -178,6 +183,8 @@ def _run_runner_jobs_with_limit(agent, ctx: DispatchContext, batch: RunnerBatchC
     return run_runner_batch(agent, batch)
 
 
+# LLM: 读取代理启动速率和角色限额，委托限流器返回允许的原工作项；这里不启动 runner，也不重领执行轮。
+# 函数用途: 在批次执行前按启动速率及角色配额裁剪待跑工作。
 def _limited_runner_jobs(agent, pending_runner_jobs: list) -> list:
     _, _, runner_start_rate = resolve_runner_config(agent.config, len(pending_runner_jobs))
     result = limit_runner_jobs(
@@ -188,6 +195,8 @@ def _limited_runner_jobs(agent, pending_runner_jobs: list) -> list:
     return result.allowed_jobs
 
 
+# LLM: 仅当多项工作共享非空指令时追加防误用记录并清空批次指令；单任务或空指令不受影响。
+# 函数用途: 防止同一条可能针对单个任务的 runner 指令被广播到多个任务。
 def _guard_multi_runner_instruction(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> None:
     if len(batch.pending_runner_jobs) <= 1 or not str(batch.effective_runner_instruction or "").strip():
         return
@@ -196,6 +205,8 @@ def _guard_multi_runner_instruction(agent, ctx: DispatchContext, batch: RunnerBa
     batch.effective_runner_instruction = ""
 
 
+# LLM: 非字典配置视为空限制；角色名转字符串，限额转非负整数，无法转换的条目跳过，不回写配置。
+# 函数用途: 为批次限流器生成标准化的角色并发配额映射。
 def _runner_role_limits(config) -> dict[str, int]:
     raw = getattr(config, "runner_role_limits", {}) or {}
     if not isinstance(raw, dict):
@@ -209,6 +220,8 @@ def _runner_role_limits(config) -> dict[str, int]:
     return limits
 
 
+# LLM: 从代理配置解析超时和并发并写入批次上下文；只有允许启动且并发大于一才走并行，否则逐项委托。
+# 函数用途: 为已接纳的工作选择并行或顺序 runner 执行入口。
 def run_runner_batch(agent, ctx: RunnerBatchContext) -> list:
     runner_timeout_seconds, runner_concurrency, _ = resolve_runner_config(
         agent.config, len(ctx.pending_runner_jobs)
@@ -267,6 +280,8 @@ def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
     return ctx.records
 
 
+# LLM: 用执行前后快照和真实结果追加派工记录；实际启动失败时调用失败处理器，可能更新后续工作的有效指令。
+# 函数用途: 为并行和顺序路径统一记录单项执行结果并承接失败后的批次处理。
 def _append_runner_record(
     agent,
     ctx: RunnerBatchContext,

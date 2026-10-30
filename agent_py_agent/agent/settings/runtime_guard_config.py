@@ -14,11 +14,14 @@ from .deployment_policy import (
 )
 
 
-# LLM: 路径参数仅核对宿主唯一来源，不能从任意 JSON 的父目录反推 host；不接受 owner/task/run 临时覆盖。
+# LLM: 显式宿主根来自启动解析；路径参数仅核对唯一来源，根与路径对象冲突直接拒绝，不接受任务临时覆盖。
 # 函数用途: 从受信宿主策略生成隔离的运行守卫快照，损坏配置直接报错。
 def runtime_guard_policy(path: Path | str | None = None, *,
-                         trusted_host_paths: MyAgentHomePaths | None = None) -> RuntimeGuardPolicy:
-    paths = trusted_host_paths if trusted_host_paths is not None else home_paths()
+                         trusted_host_paths: MyAgentHomePaths | None = None,
+                         home_root: Path | str | None = None) -> RuntimeGuardPolicy:
+    paths = trusted_host_paths if trusted_host_paths is not None else home_paths(home_root)
+    if home_root is not None and paths.root != home_paths(home_root).root:
+        raise DeploymentPolicyError("deployment_policy_source_invalid")
     canonical = deployment_policy_path(paths)
     if path is not None and Path(path).expanduser().resolve() != canonical.resolve():
         raise DeploymentPolicyError("deployment_policy_source_invalid")

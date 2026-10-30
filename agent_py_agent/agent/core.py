@@ -144,8 +144,8 @@ from .tooling.skill_summarize_tool import SkillSummarizeTool
 from .tooling.user_config_tool import UserConfigTool
 from .user_space.approval_mode import is_permission_admin
 from .user_space.home_indexes import register_owner_ref
-from .user_space.home_layout import ensure_my_agent_home
-from .user_space.home_root import configured_home_root
+from .user_space.home_layout import ensure_my_agent_home, home_paths
+from .user_space.home_root import ConfiguredHomeSnapshot, configured_home_root
 from .user_space.owner_access import (
     is_local_admin_owner,
     owner_hidden_host_roots,
@@ -849,7 +849,7 @@ def _build_tool_embedder(agent: object):
         return None
 
 
-# LLM: 最早W身份与C原workspace tuple门先于所有副作用，随后沿main原secret/模型ledger/运行根顺序；root创建留给唯一Home初始化之后，不授P3/P5或启动模型/线程。
+# LLM: 最早身份与工作区门先于副作用；按可信启动配置冻结宿主根并显式加载守卫，重建时仍沿该根重新加载，不读另一环境根。
 # 函数用途: 准备Agent构造期配置与宿主运行基础并设置原模型环境；只保存请求root，避免在规范Home/owner私有初始化前创建其父链。
 def _initialize_agent_construction(agent, config: AgentConfig, root, worker_bootstrap, workspace_roots):
     from .gateway_parts.multiprocess_worker_agent import (
@@ -864,9 +864,14 @@ def _initialize_agent_construction(agent, config: AgentConfig, root, worker_boot
     if worker_bootstrap is not None:
         agent._gateway_worker_partition = worker_bootstrap.launch.partition
     config = freeze_managed_secret_environment(config)
+    host = home_paths(configured_home_root(config))
+    frozen_guard = runtime_guard_policy(home_root=host.root)
+    config = replace(config, my_agent_home=str(host.root),
+                     host_home_snapshot=ConfiguredHomeSnapshot(host.root, str(host.root)),
+                     runtime_guard_policy=frozen_guard)
     agent.config = config
     _export_model_endpoint_env(config)
-    agent.runtime_guard_policy = runtime_guard_policy()
+    agent.runtime_guard_policy = frozen_guard
     # 同一 owner 的 Gateway/后台 worker 会并发共用 agent；启动时只建一份线程安全
     # 模型调用账本，避免首次并发请求各建一份后互相覆盖。
     agent._model_call_ledger = ModelCallLedger()

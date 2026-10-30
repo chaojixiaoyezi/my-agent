@@ -1,11 +1,11 @@
-# LLM: 唯一部署策略只认宿主解析的 Home；默认值只在 typed Python，JSON 只留显式覆盖，不回读旧 YAML。
-# 模块用途: 定义并严格解析宿主守卫、缓存、查询与排空预算，提供脱敏错误和稀疏持久快照。
+# LLM: 唯一部署策略只认宿主 Home；JSON 只留显式覆盖；提交后必须核完整目标，已替换与目录耐久性未确认不得混淆。
+# 模块用途: 严格解析部署预算并提供稀疏持久快照、脱敏错误与可区分的提交确认状态。
 from __future__ import annotations
 
 import json
 import math
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
-from functools import cache, lru_cache
+from functools import cache
 from pathlib import Path
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
@@ -25,6 +25,22 @@ class DeploymentPolicyError(ValueError):
     def __init__(self, reason: str = "deployment_policy_invalid") -> None:
         super().__init__("部署策略无效或不可用，未采用其它配置来源。")
         self.reason = reason
+
+
+# LLM: committed=True 只说明安全回读确认完整目标；None 表示未知而非未写入；异常均不承诺耐久性，不携带路径或正文。
+# 类用途: 区分目标已确认但刷盘未确认与目标无法确认的部署策略提交异常。
+class DeploymentPolicyCommitError(DeploymentPolicyError):
+    # LLM: expected_revision 是本次目标新版本，不是调用者的旧 CAS 版本；未知阶段不能按异常文案猜测替换是否发生。
+    # 函数用途: 保存安全的提交状态属性及固定原因码，提醒调用方核实后再更新。
+    def __init__(self, *, expected_revision: int, committed: bool | None) -> None:
+        reason = "deployment_policy_durability_unconfirmed" if committed is True else "deployment_policy_commit_unconfirmed"
+        super().__init__(reason)
+        self.committed = committed
+        self.unconfirmed = True
+        self.durability_confirmed = False
+        self.expected_revision = expected_revision
+        self.args = (("部署策略目标内容已确认，但耐久性未确认，请勿盲目重试。" if committed is True
+                      else "部署策略提交状态未确认，请核实目标内容后再更新。"),)
 
 
 # LLM: 所有嵌套策略在直接构造和 JSON 解析时都走同一严格校验；冻结对象不携带第二份可变字典。
@@ -308,7 +324,23 @@ def _merge_changes(current: dict, changes: dict) -> dict:
     return result
 
 
-# LLM: 完整管理员及全局写者拒门先于 I/O；锁内核 revision，按真实写入格式核字节上限后才提交0600稀疏配置。
+# LLM: 复用有界 no-follow 快照读及唯一严格解码器；读前后核完整目录链和叶身份，缺失绝不采用安装默认值。
+# 函数用途: 在原锁内确认完整目标及新版本，读中移除、原位篡改或任何不一致均给出未知提交回执。
+def _confirm_deployment_policy_commit(*, trusted_host_paths: MyAgentHomePaths, payload: dict) -> DeploymentPolicy:
+    try:
+        raw = read_bytes_beneath(trusted_host_paths.root, ("config", "deployment_policy.json"),
+                                 max_bytes=_MAX_DEPLOYMENT_POLICY_SOURCE_BYTES, require_dir_fd=True, snapshot_retries=1)
+        if raw is None:
+            raise DeploymentPolicyError()
+        confirmed = deployment_policy_from_dict(json.loads(raw.decode("utf-8"), object_pairs_hook=_json_object))
+        if confirmed.revision != payload["revision"] or confirmed.to_dict() != payload:
+            raise DeploymentPolicyError()
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        raise DeploymentPolicyCommitError(expected_revision=payload["revision"], committed=None) from None
+    return confirmed
+
+
+# LLM: 身份拒门先于 I/O；锁内核旧版本及完整回读目标；写入错误后先核实内容，已提交也不能冒称目录耐久性成功。
 # 函数用途: 经同一部署策略写入器应用稀疏变更，拒绝并发覆盖和普通 owner 写入。
 def update_deployment_policy(*, trusted_host_paths: MyAgentHomePaths, expected_revision: int, changes: dict) -> DeploymentPolicy:
     from ..common.global_write_guard import require_global_writer
@@ -341,5 +373,9 @@ def update_deployment_policy(*, trusted_host_paths: MyAgentHomePaths, expected_r
         encoded = (serialize_private_json_no_newline(payload) + "\n").encode("utf-8")
         if len(encoded) > _MAX_DEPLOYMENT_POLICY_SOURCE_BYTES:
             raise DeploymentPolicyError("deployment_policy_size_exceeded")
-        write_private_json_file_atomic_unlocked(path, payload)
-        return load_deployment_policy(trusted_host_paths=trusted_host_paths)
+        try:
+            write_private_json_file_atomic_unlocked(path, payload)
+        except OSError:
+            _confirm_deployment_policy_commit(trusted_host_paths=trusted_host_paths, payload=payload)
+            raise DeploymentPolicyCommitError(expected_revision=policy.revision, committed=True) from None
+        return _confirm_deployment_policy_commit(trusted_host_paths=trusted_host_paths, payload=payload)
