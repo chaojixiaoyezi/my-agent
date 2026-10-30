@@ -864,7 +864,10 @@ class OwnerReadIndex:
             previous = json.loads(value[0]) if value is not None else None
             chained = (
                 isinstance(previous, list)
-                and len(previous) in (4, 5)
+                and len(previous) == 5
+                and isinstance(previous[4], str)
+                and len(previous[4]) == 64
+                and all(ch in '0123456789abcdef' for ch in previous[4])
                 and previous[:3] == base
                 and previous[3] == list(before)
             )
@@ -892,7 +895,7 @@ class OwnerReadIndex:
                 connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
                 connection.commit()
                 return False
-            if chained and len(previous) == 5 and isinstance(previous[4], str):
+            if chained:
                 before_digest = hashlib.sha256(raw_after[:before[2]]).hexdigest()
                 if not hmac.compare_digest(before_digest, previous[4]):
                     connection.execute('DELETE FROM ori_meta WHERE key=?', ('append:' + sid,))
@@ -906,7 +909,7 @@ class OwnerReadIndex:
             connection.commit()
             return True
 
-    # LLM: 只有经写后ori_spans前缀摘要核实的追加见证可免重复读盘，篡改前缀必须回退完整分块核验。
+    # LLM: 只有经写后ori_spans前缀摘要核实的5字段追加见证可免重复读盘；旧4字段见证一律降级走分块重验。
     # 函数用途: 判断检查点到当前来源是否存在已验证前缀完整性的可信追加见证。
     def _witnessed_append(self, connection, checkpoint, observed):
         key = (str(self._home), tuple(json.loads(checkpoint['parts'])))
@@ -926,7 +929,10 @@ class OwnerReadIndex:
                 raise _Issue('corrupt_append_witness') from None
             return (
                 isinstance(proof, list)
-                and len(proof) in (4, 5)
+                and len(proof) == 5
+                and isinstance(proof[4], str)
+                and len(proof[4]) == 64
+                and all(ch in '0123456789abcdef' for ch in proof[4])
                 and proof[:4] == [checkpoint['generation'], checkpoint['through'], list(checkpoint['stamp']), list(observed)]
             )
         return False
