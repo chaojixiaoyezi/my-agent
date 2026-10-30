@@ -292,10 +292,8 @@ class JsonlMemoryDependencies:
 
 
 
-# LLM: This mixin owns authoritative JSONL mutations; recall/index behavior is composed separately below.
-# 类用途: 初始化长期记忆并实现新增、替换、删除、批量提交和 legacy 清除。
-# LLM: C仅保存IO bool，不保存source/callback；原正式事实、缓存与pending仍同实例，构造次序保持。
-# 类用途: 绑定唯一JSONL和原检索依赖，不增加另一记忆状态。
+# LLM: C仅保存IO bool，不保存source/callback；原正式事实、缓存与pending仍同实例，构造次序保持；本mixin负责权威JSONL写操作，检索与索引在下文组合。
+# 类用途: 绑定唯一JSONL和原检索依赖，初始化长期记忆并实现新增、替换、删除、批量提交和legacy清除。
 class _JsonlMemoryIdentityMixin:
     """JSONL-backed memory store with optional LocalStore indexing.
 
