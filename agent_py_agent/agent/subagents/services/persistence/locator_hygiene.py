@@ -30,6 +30,7 @@ from ....runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from ....runtime_db.schema import runtime_db_path
 
 TERMINAL_STATUSES = frozenset({"DONE", "COMPLETED", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT"})
+# 子代理孤儿定位目录被判定可回收前必须等待的宽限秒数。
 ORPHAN_GRACE_SECONDS = 3600.0
 _SCRATCH = frozenset({"events.jsonl", "heartbeats.jsonl", "heartbeat.json", "heartbeat", "snapshots", "tmp"})
 _METADATA = frozenset({"state.json", "workspace_locator.json", "refs.json", "subagent_compact.json"})

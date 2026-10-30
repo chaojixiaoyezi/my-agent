@@ -961,7 +961,7 @@
       "value": 16777216,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "审计保留清理单次最多读取的源文件字节数。"
     },
     {
       "name": "_AUDIT_RETENTION_ROW_MAX_BYTES",
@@ -969,7 +969,7 @@
       "value": 1048576,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "审计保留清理允许读取的单条记录最大字节数。"
     },
     {
       "name": "MAX_RESULT_BYTES",
@@ -2839,25 +2839,25 @@
       "name": "MAX_ACTIVE_COMPACT_CHECKPOINTS",
       "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
       "value": 32,
-      "unit": "",
+      "unit": "个检查点",
       "category": "上限预算",
-      "description": ""
+      "description": "活动检查点账本整理后最多保留的检查点数。"
     },
     {
       "name": "_ACTIVE_CHECKPOINT_BYTE_BUDGET",
       "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
       "value": 2097152,
-      "unit": "",
+      "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "活动检查点账本整理与单行写入共用的字节预算。"
     },
     {
-      "name": "_ACTIVE_CHECKPOINT_HIGH_WATER",
+      "name": "_ACTIVE_CHECKPOINT_HIGH_WATER_COUNT",
       "file": "agent_py_agent/agent/conversation/compact_checkpoint.py",
       "value": 64,
-      "unit": "",
+      "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "活动检查点条数超过此水位时触发账本整理。"
     },
     {
       "name": "_MAX_COLD_PAYLOAD_BYTES",
@@ -2865,7 +2865,7 @@
       "value": 67108864,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单份检查点冷证据或供应商记录允许保存的最大字节数。"
     },
     {
       "name": "_CHECKPOINT_CHUNK_BYTES",
@@ -2873,7 +2873,7 @@
       "value": 65536,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "检查点流每次分块读取的最大字节数。"
     },
     {
       "name": "_CHECKPOINT_ROW_MAX_BYTES",
@@ -2881,15 +2881,15 @@
       "value": 8388608,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "检查点流允许解析的单行最大字节数。"
     },
     {
       "name": "_MAX_CACHED_OFFSETS",
       "file": "agent_py_agent/agent/conversation/compact_checkpoint_scan.py",
       "value": 131072,
-      "unit": "",
+      "unit": "个偏移量",
       "category": "上限预算",
-      "description": ""
+      "description": "进程内所有检查点缓存合计最多保留的行偏移量数。"
     },
     {
       "name": "_DEFAULT_MAX_TOKENS",
@@ -3292,12 +3292,12 @@
       "description": "展示归档单页最大 256000 字节：控制分页存储体积。"
     },
     {
-      "name": "_DAY",
+      "name": "_DISPLAY_ARCHIVE_DAY_SECONDS",
       "file": "agent_py_agent/agent/conversation/display_archive_maintenance.py",
       "value": 86400,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "展示归档维护将保留天数换算为秒所用的每日秒数。"
     },
     {
       "name": "HOST_NOTICE_LIMIT_COUNT",
@@ -3433,15 +3433,15 @@
       "value": 1048576,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "活动会话转录中可冷转前缀达到此字节数时触发轮转。"
     },
     {
       "name": "TRANSCRIPT_ROTATE_ROWS",
       "file": "agent_py_agent/agent/conversation/message_scan.py",
       "value": 128,
-      "unit": "",
+      "unit": "行",
       "category": "其它",
-      "description": ""
+      "description": "活动会话转录中可冷转前缀达到此消息行数时触发轮转。"
     },
     {
       "name": "_MAX_DEDUPE_INDEX_FILES",
@@ -3465,7 +3465,7 @@
       "value": 1048576,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "会话转录封存段的目标字节上限，完整消息行不拆分。"
     },
     {
       "name": "_LIGHT_FIELDS_MAX_BYTES",
@@ -4425,7 +4425,7 @@
       "value": 1048576,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "终态回执归档单个源文件允许读取的最大字节数。"
     },
     {
       "name": "_RECEIPT_MAX_SEGMENT_BYTES",
@@ -4433,7 +4433,7 @@
       "value": 8388608,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "终态回执单个不可变归档段允许累积的最大字节数。"
     },
     {
       "name": "_APPROVAL_POLL_SECONDS",
@@ -5353,23 +5353,15 @@
       "value": 1024,
       "unit": "字节",
       "category": "其它",
-      "description": ""
-    },
-    {
-      "name": "_CHUNK",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 65536,
-      "unit": "",
-      "category": "其它",
-      "description": ""
+      "description": "投影追加见证按此字节数划分前缀摘要锚点。"
     },
     {
       "name": "_INT64_MAX",
       "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
       "value": 9223372036854775807,
-      "unit": "",
+      "unit": "整数",
       "category": "上限预算",
-      "description": ""
+      "description": "SQLite 有符号六十四位整数的最大值，属于类型边界而非可调配额。"
     },
     {
       "name": "_MAX_BATCH_IDS",
@@ -5377,23 +5369,7 @@
       "value": 4096,
       "unit": "个",
       "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "_MAX_DB",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 134217728,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "_MAX_DOCUMENT",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 8388608,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "description": "投影批量查询一次最多接收的记录身份数量。"
     },
     {
       "name": "_MAX_MEMO_BYTES",
@@ -5401,7 +5377,7 @@
       "value": 33554432,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "进程内投影源备忘缓存允许保留的总字节数。"
     },
     {
       "name": "_MAX_MEMO_ENTRIES",
@@ -5409,47 +5385,71 @@
       "value": 128,
       "unit": "条",
       "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "_MAX_PAGE",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 1000,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "_MAX_READ",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 33554432,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "_MAX_RESULT",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 16777216,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
-    },
-    {
-      "name": "_MAX_ROW",
-      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
-      "value": 1048576,
-      "unit": "",
-      "category": "上限预算",
-      "description": ""
+      "description": "进程内投影源备忘缓存最多保留的条目数。"
     },
     {
       "name": "_MAX_TRACKED_SOURCES",
       "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
       "value": 128,
-      "unit": "",
+      "unit": "个来源",
       "category": "上限预算",
-      "description": ""
+      "description": "单次投影推进最多跟踪的源身份数量。"
+    },
+    {
+      "name": "_OWNER_INDEX_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "投影源文件每次分块读取的最大字节数。"
+    },
+    {
+      "name": "_OWNER_INDEX_MAX_DB_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 134217728,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "owner 只读投影数据库允许占用的最大字节数。"
+    },
+    {
+      "name": "_OWNER_INDEX_MAX_DOCUMENT_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单份投影文档允许解析的最大字节数。"
+    },
+    {
+      "name": "_OWNER_INDEX_MAX_PAGE_ROWS",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 1000,
+      "unit": "行",
+      "category": "上限预算",
+      "description": "投影查询单页允许返回的最大记录行数。"
+    },
+    {
+      "name": "_OWNER_INDEX_MAX_READ_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 33554432,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单次投影源扫描允许读取的最大字节数。"
+    },
+    {
+      "name": "_OWNER_INDEX_MAX_RESULT_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "一次投影查询结果允许累计的最大字节数。"
+    },
+    {
+      "name": "_OWNER_INDEX_MAX_ROW_BYTES",
+      "file": "agent_py_agent/agent/local_storage/owner_read_index.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条投影源记录允许解析的最大字节数。"
     },
     {
       "name": "DERIVED_RECORD_TTL_SECONDS",
@@ -5977,15 +5977,15 @@
       "value": 2097152,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "正式记忆权威记录一次有界核验最多读取的字节数。"
     },
     {
       "name": "_AUTHORITY_SCAN_MAX_RECORDS",
       "file": "agent_py_agent/agent/memory_store/jsonl.py",
       "value": 1000,
-      "unit": "",
+      "unit": "条",
       "category": "上限预算",
-      "description": ""
+      "description": "正式记忆权威记录一次有界核验最多扫描的记录条数。"
     },
     {
       "name": "_SOURCE_SNAPSHOT_CACHE_COUNT",
@@ -6167,9 +6167,9 @@
       "name": "_SUBAGENT_SCAN_MAX_DIRS",
       "file": "agent_py_agent/agent/owner_wake_discovery.py",
       "value": 5000,
-      "unit": "",
+      "unit": "个目录",
       "category": "上限预算",
-      "description": "每次发现最多检查5000个目录项；跨轮内存迭代器避免大目录反复从头扫描。"
+      "description": "owner 唤醒发现单次查询子代理投影时允许扫描的最大目录数。"
     },
     {
       "name": "AGENTS_PROTECTION_CONFIG_MAX_BYTES",
@@ -7105,7 +7105,7 @@
       "value": 1048576,
       "unit": "字节",
       "category": "比例阈值",
-      "description": ""
+      "description": "配置迁移读取、变换及回滚前像允许处理的最大字节数。"
     },
     {
       "name": "SELECTION_POINT_TIMEOUT_SECONDS",
@@ -7153,7 +7153,7 @@
       "value": 1048576,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "部署策略源文件允许安全读取的最大字节数。"
     },
     {
       "name": "BROWSER_LOGIN_SECONDS",
@@ -7417,7 +7417,7 @@
       "value": 3600.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "子代理孤儿定位目录被判定可回收前必须等待的宽限秒数。"
     },
     {
       "name": "MAX_PROJECTION_LEDGER_LINE_COUNT",
@@ -7505,23 +7505,23 @@
       "value": 4194304,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "文件查找快照允许保留的最大字节数。"
     },
     {
       "name": "_FIND_SNAPSHOT_MAX_CACHED",
       "file": "agent_py_agent/agent/tooling/_filesystem_find.py",
       "value": 4,
-      "unit": "",
+      "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "文件查找器进程内最多保留的目录快照数量。"
     },
     {
       "name": "_FIND_SNAPSHOT_MAX_CURSORS",
       "file": "agent_py_agent/agent/tooling/_filesystem_find.py",
       "value": 128,
-      "unit": "",
+      "unit": "个游标",
       "category": "上限预算",
-      "description": ""
+      "description": "文件查找器最多保留的快照分页游标数量。"
     },
     {
       "name": "_FIND_SNAPSHOT_TTL_SECONDS",
@@ -7529,7 +7529,7 @@
       "value": 60.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "文件查找快照及其分页续点允许复用的存活秒数。"
     },
     {
       "name": "_DISCOVERY_ARG_MAX_BYTES",
@@ -7537,7 +7537,7 @@
       "value": 196608,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "文件发现命令参数允许累计的最大字节数，避免超过系统参数上限。"
     },
     {
       "name": "_FALLBACK_SCAN_MAX_FILES",
@@ -7601,7 +7601,7 @@
       "value": 262144,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "文件搜索允许处理的单行最大字节数。"
     },
     {
       "name": "_SEARCH_READ_MAX_BYTES",
@@ -7609,7 +7609,7 @@
       "value": 16777216,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "后备文件搜索单次允许读取的源文件总字节数。"
     },
     {
       "name": "_SEARCH_RETAIN_MAX_BYTES",
@@ -7617,7 +7617,7 @@
       "value": 4194304,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "单次文件搜索允许保留在结果中的最大字节数。"
     },
     {
       "name": "_SEARCH_RG_MAX_BYTES",
@@ -7625,7 +7625,7 @@
       "value": 33554432,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "ripgrep 搜索单次允许读取的标准输出总字节数。"
     },
     {
       "name": "_SEARCH_RG_RECORD_MAX_BYTES",
@@ -7633,7 +7633,7 @@
       "value": 2097152,
       "unit": "字节",
       "category": "上限预算",
-      "description": ""
+      "description": "ripgrep 搜索允许解析的单条结构化输出最大字节数。"
     },
     {
       "name": "_MAX_OWNERS_COUNT",
@@ -8801,7 +8801,7 @@
       "value": 5,
       "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "记忆体检抽查近期归档时最多读取的归档文件数量。"
     },
     {
       "name": "COMPACT_COOLDOWN_SECONDS",
@@ -8905,23 +8905,23 @@
       "value": 16,
       "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "进程内配额续扫缓存最多保留的活跃 owner 扫描器数量。"
     },
     {
-      "name": "_QUOTA_SCAN_CURSOR_TTL",
+      "name": "_QUOTA_SCAN_CURSOR_TTL_SECONDS",
       "file": "agent_py_agent/agent/user_space/owner_quota.py",
       "value": 3600,
-      "unit": "",
+      "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "持久配额续扫游标允许恢复的最长存活秒数。"
     },
     {
-      "name": "_QUOTA_SORT_BATCH",
+      "name": "_QUOTA_SORT_BATCH_ENTRIES",
       "file": "agent_py_agent/agent/user_space/owner_quota.py",
       "value": 128,
-      "unit": "",
+      "unit": "条",
       "category": "其它",
-      "description": ""
+      "description": "配额字典序扫描每批最多保留的排序候选目录项数。"
     },
     {
       "name": "_MAX_FACT_FILE_BYTES",

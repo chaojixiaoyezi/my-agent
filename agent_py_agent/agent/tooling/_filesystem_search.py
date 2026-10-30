@@ -147,10 +147,15 @@ class SearchScanState:
             self.issues.append(reason)
 
 
+# 后备文件搜索单次允许读取的源文件总字节数。
 _SEARCH_READ_MAX_BYTES = 16 * 1024 * 1024
+# 单次文件搜索允许保留在结果中的最大字节数。
 _SEARCH_RETAIN_MAX_BYTES = 4 * 1024 * 1024
+# 文件搜索允许处理的单行最大字节数。
 _SEARCH_LINE_MAX_BYTES = 256 * 1024
+# ripgrep 搜索单次允许读取的标准输出总字节数。
 _SEARCH_RG_MAX_BYTES = 32 * 1024 * 1024
+# ripgrep 搜索允许解析的单条结构化输出最大字节数。
 _SEARCH_RG_RECORD_MAX_BYTES = 2 * 1024 * 1024
 _SEARCH_STATE: ContextVar[SearchScanState | None] = ContextVar('filesystem_search_state', default=None)
 

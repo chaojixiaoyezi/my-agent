@@ -16,6 +16,7 @@ from agent_py_agent.agent.capability.skill_learning_publish import (
     SkillLearningGateError,
     remove_learned_skill,
 )
+from agent_py_agent.agent.tooling.versioned_input_decoder import decode_tool_input
 from agent_py_agent.tests.test_background_tool_approval import background
 from agent_py_agent.tests.test_skill_learning import NAME, _output, _publish_first, _runtime
 
@@ -154,6 +155,8 @@ def test_background_learning_is_explicit_and_global_reservations_are_atomic(tmp_
     assert sum(decisions)==3
 
 
+# LLM: 直接handler使用规范action；采用仍须真实当前claim，不能恢复旧operation业务分支。
+# 函数用途: 验证模型只能登记采用且关闭自学习后不可写账。
 def test_feedback_tool_only_records_model_adoption_for_current_claim(background,monkeypatch):
     from types import SimpleNamespace
 
@@ -172,12 +175,12 @@ def test_feedback_tool_only_records_model_adoption_for_current_claim(background,
     snapshot = agent.skills_service.snapshot_for(force_reload=True)
     monkeypatch.setattr(skill_feedback_tool,'_snapshot_for',lambda _agent:snapshot)
     tool = skill_feedback_tool.SkillFeedbackTool(agent)
-    assert tool.execute({'operation':'adopted','skill_id':f'owner:{NAME}'}).ok
+    assert tool.execute({'action':'adopted','skill_id':f'owner:{NAME}'}).ok
     observation = store.load_registry().skills[NAME].maintenance['observations'][0]
     assert observation['authority']=='model' and observation['run_id']==background.task_id
-    assert not tool.execute({'operation':'effective','skill_id':f'owner:{NAME}'}).ok
+    assert not tool.execute({'action':'effective','skill_id':f'owner:{NAME}'}).ok
     agent.config.enable_self_learning=False
-    assert not tool.execute({'operation':'adopted','skill_id':f'owner:{NAME}'}).ok
+    assert not tool.execute({'action':'adopted','skill_id':f'owner:{NAME}'}).ok
 
 
 # LLM: 真实登记、候选与队列都只放tmp owner；模型没有run或发布权也应能只读查询。
@@ -197,8 +200,8 @@ def _feedback_status_case(tmp_path):
     return ctx, SkillFeedbackTool(agent), proposal.reason
 
 
-# LLM: effect必须在handler前按两种参数别名裁决；不能把action=adopted当只读。
-# 函数用途: 验证空参/状态schema可调用，采用无论用哪个参数名都保持写入级别。
+# LLM: 旧参数仅由显式v1解码器在effect前转换；不能把未解码的operation当规范业务输入。
+# 函数用途: 验证唯一action声明及规范化后采用的写入级别。
 @pytest.mark.parametrize('params,effect', [({}, 'read_only'), ({'operation': 'status'}, 'read_only'),
     ({'action': 'status'}, 'read_only'), ({'operation': 'adopted'}, 'mutating'), ({'action': 'adopted'}, 'mutating')])
 def test_feedback_status_schema_and_action_effects(params, effect):
@@ -209,20 +212,25 @@ def test_feedback_status_schema_and_action_effects(params, effect):
     )
 
     assert SkillFeedbackTool.model_spec.input_schema['required'] == []
+    assert set(SkillFeedbackTool.model_spec.input_schema['properties']) == {'action', 'skill_id'}
     assert set(SkillFeedbackTool.model_spec.input_schema['properties']['action']['enum']) == {'status', 'adopted'}
-    assert tool_effect_for_runtime_policy(SkillFeedbackTool.runtime_policy, params) == effect
+    original = dict(params)
+    name, canonical = decode_tool_input('skill_feedback', params, version=1)
+    assert name == 'skill_feedback' and params == original and 'operation' not in canonical
+    assert tool_effect_for_runtime_policy(SkillFeedbackTool.runtime_policy, canonical) == effect
     assert SkillFeedbackTool.runtime_policy.idempotency_policy == IdempotencyPolicy('operation')
 
 
 # LLM: 查询不要求自学习开关或任务快照授权；比较实际文件字节确保不确认、消费或发布候选。
-# 函数用途: 检查默认/两参数名全景状态、计数口径和可复制命令。
+# 函数用途: 检查默认/规范及显式v1归一后的全景状态、计数口径和可复制命令。
 @pytest.mark.parametrize('params', [{}, {'operation': 'status'}, {'action': 'status'}])
 @pytest.mark.parametrize('enabled', [False, True])
 def test_feedback_status_panorama_is_readonly(tmp_path, params, enabled):
     ctx, tool, proposal_id = _feedback_status_case(tmp_path)
     tool.agent.config.enable_self_learning = enabled
     before = {str(p): p.read_bytes() for p in ctx.home.owner_home_dir.rglob('*') if p.is_file()}
-    outcome = tool.execute(params)
+    _name, canonical = decode_tool_input('skill_feedback', params, version=1)
+    outcome = tool.execute(canonical)
     assert outcome.ok, outcome.output
     result = json.loads(outcome.output)
     assert result['self_learning_enabled'] is enabled and result['learned_skills_count'] == 1
@@ -262,7 +270,7 @@ def test_feedback_status_accepts_other_snapshot_sources_without_adoption(tmp_pat
     _ctx, tool, _proposal_id = _feedback_status_case(tmp_path)
     entry = SimpleNamespace(stable_id=f'{source}:method', name='method', source=source)
     tool.agent._current_skill_snapshot = SimpleNamespace(resolve=lambda _ref: entry)
-    result = tool.execute({'operation': 'status', 'skill_id': entry.stable_id})
+    result = tool.execute({'action': 'status', 'skill_id': entry.stable_id})
     assert result.ok, result.output
     assert json.loads(result.output) == {'ok': True, 'skill_id': entry.stable_id, 'name': 'method', 'source': source,
         'status': 'active_builtin_or_shared', 'note': '该技能为内置或共享技能，非本身份自学习生成'}
@@ -270,14 +278,33 @@ def test_feedback_status_accepts_other_snapshot_sources_without_adoption(tmp_pat
     assert not tool.execute({'action': 'adopted', 'skill_id': entry.stable_id}).ok
 
 
-# LLM: 缺字段与别名冲突必须在写入前明确拒绝，未知操作不能退回status或采用。
-# 函数用途: 验证采用必填和互斥参数的可理解错误。
-@pytest.mark.parametrize('params,message', [({'action': 'adopted'}, 'operation=adopted 时必须提供 skill_id'),
-    ({'operation': 'status', 'action': 'adopted'}, 'operation 与 action'), ({'operation': 'effective'}, 'status / adopted')])
+# LLM: 规范handler只接受action，旧字段不能成为隐式别名；缺字段与非法动作都须在写入前拒绝。
+# 函数用途: 验证当前参数名的可理解错误，不把未知操作退回status或采用。
+@pytest.mark.parametrize('params,message', [({'action': 'adopted'}, 'action=adopted 时必须提供 skill_id'),
+    ({'operation': 'status', 'action': 'adopted'}, '仅支持action、skill_id'), ({'action': 'effective'}, 'status / adopted')])
 def test_feedback_invalid_actions_are_explicit(tmp_path, params, message):
-    _ctx, tool, _proposal_id = _feedback_status_case(tmp_path)
+    ctx, tool, _proposal_id = _feedback_status_case(tmp_path)
+    before = {p: p.read_bytes() for p in ctx.home.owner_home_dir.rglob('*') if p.is_file()}
     result = tool.execute(params)
     assert not result.ok and message in result.output
+    assert {p: p.read_bytes() for p in ctx.home.owner_home_dir.rglob('*') if p.is_file()} == before
+
+
+# LLM: 即便两动作值相同，规范handler也拒绝旧字段；提前校验不得取得写claim或触碰业务存储。
+# 函数用途: 钉住旧参数只可经宿主v1边界迁移，不能在业务层隐式兼容。
+@pytest.mark.parametrize('params', [
+    {'operation': 'status'}, {'operation': 'adopted', 'skill_id': f'owner:{NAME}'},
+    {'operation': 'status', 'action': 'status'},
+])
+def test_feedback_canonical_handler_rejects_legacy_fields_before_storage(params):
+    from agent_py_agent.agent.capability.skill_feedback_tool import SkillFeedbackTool
+
+    tool = SkillFeedbackTool(SimpleNamespace())
+    validation = tool.validate_invocation(params, None)
+    assert not validation.ok and validation.effect_outcome == 'not_started'
+    result = tool.execute(params)
+    assert not result.ok and result.error_code == 'SKILL_FEEDBACK_UNAVAILABLE'
+    assert '仅支持action、skill_id' in result.output
 
 
 # LLM: 可选c6读口不改变状态报告或发布权；统计失败不把成功采用误报失败。
@@ -286,13 +313,14 @@ def test_feedback_status_includes_optional_usage_summary(tmp_path, monkeypatch):
     from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
     _ctx, tool, _proposal_id = _feedback_status_case(tmp_path)
     monkeypatch.setattr(SkillLearningStore, 'usage_summary', lambda _store: {'totals': {'effective_uses': 2}}, raising=False)
-    result = tool.execute({'operation': 'status'})
+    result = tool.execute({'action': 'status'})
     assert result.ok and json.loads(result.output)['skill_usage']['totals']['effective_uses'] == 2
 
 
-# LLM: 沿真实background claim登记采用，别名不绕过scope或owner/version核验；可选统计异常不影响采用原账。
-# 函数用途: 验证adopted别名、可选使用记账和失效claim拒绝。
-def test_feedback_adopted_alias_preserves_claim_and_optional_usage(background, monkeypatch):
+# LLM: 旧采用由可信v1上下文在effect/claim前解码；规范v2与旧v1都沿真实background claim写同一账。
+# 函数用途: 验证两协议采用的模型authority、可选使用记账和失效claim拒绝。
+@pytest.mark.parametrize('input_version', [1, 2])
+def test_feedback_adopted_alias_preserves_claim_and_optional_usage(background, monkeypatch, input_version):
     from agent_py_agent.agent.capability import skill_feedback_tool
     from agent_py_agent.agent.capability.skill_learning_prompt import parse_skill_learning_decision
     from agent_py_agent.agent.capability.skill_learning_publish import (
@@ -310,8 +338,15 @@ def test_feedback_adopted_alias_preserves_claim_and_optional_usage(background, m
     usages = []
     monkeypatch.setattr(SkillLearningStore, 'record_skill_usage', lambda _store, **kwargs: usages.append(kwargs), raising=False)
     tool = skill_feedback_tool.SkillFeedbackTool(agent)
-    result = tool.execute({'action': 'adopted', 'skill_id': f'owner:{NAME}'})
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    key = 'operation' if input_version == 1 else 'action'
+    result = execute_registry_test_call(agent.tools, 'skill_feedback', {key: 'adopted', 'skill_id': f'owner:{NAME}'},
+        run_id=background.task_id, register_with=agent, trusted_run_context={'tool_input_version': input_version},
+        call_id='feedback-adopted')
     assert result.ok, result.output
+    if input_version == 1:
+        assert result.metadata['input_migration']['action'] == 'adopted'
     assert len(usages) == 1 and usages[0]['event'] == 'adopted' and usages[0]['skill_id'] == f'owner:{NAME}'
     assert store.load_registry().skills[NAME].maintenance['observations'][0]['authority'] == 'model'
     agent._current_run_params = SimpleNamespace(run_id='stale', task_id='stale', task_attributes={})
@@ -381,22 +416,25 @@ def test_feedback_adopted_records_public_usage_hook_after_claim(background, monk
 
 
 # LLM: 使用真实工具执行器和原注册清单，验证修复覆盖schema、调用前检查与handler，不只直接调execute。
-# 函数用途: 验证默认与别名状态经正式工具链执行，采用缺编号返回清晰领域错误。
+# 函数用途: 验证默认/规范状态与宿主v1旧状态经正式工具链执行，采用缺编号返回清晰错误。
 @pytest.mark.parametrize('params', [{}, {'operation': 'status'}, {'action': 'status'}])
 def test_feedback_status_through_canonical_executor(background, params):
     from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
     agent = background.agent
+    input_version = 1 if 'operation' in params else 2
     result = execute_registry_test_call(agent.tools, 'skill_feedback', params, run_id=background.task_id,
-                                        register_with=agent, call_id='feedback-status')
+        register_with=agent, call_id='feedback-status', trusted_run_context={'tool_input_version': input_version})
     assert result.ok, result.output
+    if input_version == 1:
+        assert result.metadata['input_migration']['action'] == 'status'
     assert 'learned_skills_count' in result.output and 'pending_learning_proposals_count' in result.output
     missing = execute_registry_test_call(agent.tools, 'skill_feedback', {'action': 'adopted'}, run_id=background.task_id,
                                          register_with=agent, call_id='feedback-missing-id')
-    assert not missing.ok and 'operation=adopted 时必须提供 skill_id' in missing.output
+    assert not missing.ok and 'action=adopted 时必须提供 skill_id' in missing.output
 
 
 # LLM: 使用真实检索结果和原state锁/配额检查，只包装观察点计数，不替换使用台账写入。
-# 函数用途: 守住一批搜索命中只领取一次锁、扫描一次配额并保存一次双文件。
+# 函数用途: 守住一批搜索命中只领取一次锁、做一次有界鲜活核对并保存一次双文件。
 def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, monkeypatch):
     from contextlib import contextmanager
 
@@ -411,6 +449,8 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     (store.skills_root.parent / 'quota.json').write_text('{"max_disk_mb": 1024}')
     observed = {'locks': 0, 'scans': 0, 'saves': 0}
     state_lock, save = SkillLearningStore.state_lock, usage._save_usage
+    snapshot = owner_quota._bounded_quota_snapshot
+    snapshots = []
 
     # LLM: 保留原owner配额→state锁顺序及真实admission，退出也走原上下文。
     # 函数用途: 统计这次搜索实际进入使用事务的次数。
@@ -420,11 +460,18 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
         with state_lock(self) as admission:
             yield admission
 
-    # LLM: 用同一精确逻辑扫描替代平台分派，仍统计原准入真正要求的全目录扫描次数。
-    # 函数用途: 观察配额扫描，不绕过空间限制。
-    def counted_scan(root):
+    # LLM: 包装原鲜活核对而不模拟扫描结果；原128项/10ms预算和未完成拒绝仍由产品判定。
+    # 函数用途: 观察实际配额准入的有界扫描及完成状态。
+    def counted_scan(root, *, max_entries, max_ms):
         observed['scans'] += 1
-        return owner_quota.owner_logical_usage_bytes(root)
+        result = snapshot(root, max_entries=max_entries, max_ms=max_ms)
+        snapshots.append((root, max_entries, max_ms, result))
+        return result
+
+    # LLM: 旧全树扫描已退出准入主链；若批量记账回退到该入口，直接暴露而不伪造返回值。
+    # 函数用途: 防止一次批量使用记录重新触发全owner目录遍历。
+    def forbid_full_scan(root):
+        raise AssertionError('usage admission requested a full owner scan')
 
     # LLM: 双文件写入继续使用原函数，统计批处理提交次数与每个检查路径。
     # 函数用途: 验证一批事件只保存一次。
@@ -433,13 +480,18 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
         return save(*args)
 
     monkeypatch.setattr(SkillLearningStore, 'state_lock', counted_lock)
-    monkeypatch.setattr(owner_quota, '_owner_usage_bytes_for_admission', counted_scan)
+    monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', counted_scan)
+    monkeypatch.setattr(owner_quota, '_owner_usage_bytes_for_admission', forbid_full_scan)
     monkeypatch.setattr(usage, '_save_usage', counted_save)
     result = SkillSearchTool(fixture.agent).execute({'action': 'search', 'query': 'entry', 'limit': 20})
     assert result.ok, result.output
     matches = json.loads(result.output)['matches']
     assert len(matches) >= 3
     assert observed == {'locks': 1, 'scans': 1, 'saves': 1}
+    assert len(snapshots) == 1
+    root, max_entries, max_ms, (_bytes, _inodes, complete) = snapshots[0]
+    assert root == fixture.agent.home_paths.owner_home_dir
+    assert (max_entries, max_ms, complete) == (128, 10, True)
     summary = usage.load_skill_usage_summary(store)
     assert summary['totals']['manual_search'] == len(matches)
     assert summary['totals']['effective_uses'] == 0

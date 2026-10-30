@@ -43,7 +43,7 @@ def _feedback_operation(params):
     if not isinstance(params.get('skill_id', ''), str):
         raise _FeedbackArgumentsError('skill_id 必须为字符串。')
     if operation == 'adopted' and not params.get('skill_id', '').strip():
-        raise _FeedbackArgumentsError('operation=adopted 时必须提供 skill_id')
+        raise _FeedbackArgumentsError('action=adopted 时必须提供 skill_id')
     return operation
 
 

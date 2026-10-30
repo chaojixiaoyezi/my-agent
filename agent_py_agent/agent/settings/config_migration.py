@@ -11,6 +11,7 @@ from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
 from ..contracts.optimization_contracts import decode_versioned_record, require_schema_generation
 
+# 配置迁移读取、变换及回滚前像允许处理的最大字节数。
 _MAX_CONFIGURATION_BYTES = 1_048_576
 
 

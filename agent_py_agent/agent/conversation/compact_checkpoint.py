@@ -25,9 +25,13 @@ from .message_replay import message_rows_iterator
 from .models import ConversationThread, MessageLogEntry
 
 _COLD_PAYLOAD_FIELDS = ('operation_evidence', 'provider_compaction')
+# 单份检查点冷证据或供应商记录允许保存的最大字节数。
 _MAX_COLD_PAYLOAD_BYTES = 64 * 1024 * 1024
+# 活动检查点账本整理后最多保留的检查点数。
 MAX_ACTIVE_COMPACT_CHECKPOINTS = 32
-_ACTIVE_CHECKPOINT_HIGH_WATER = 64
+# 活动检查点条数超过此水位时触发账本整理。
+_ACTIVE_CHECKPOINT_HIGH_WATER_COUNT = 64
+# 活动检查点账本整理与单行写入共用的字节预算。
 _ACTIVE_CHECKPOINT_BYTE_BUDGET = 2 * 1024 * 1024
 
 if TYPE_CHECKING:
@@ -436,7 +440,7 @@ def _maintain_active_checkpoints(root, thread_id, path):
         rows = [(raw, _parse_row(raw)) for _, raw in _checkpoint_byte_rows(handle, through)]
     rows = [(raw, row) for raw, row in rows if row is not None]
     archived_floor = 0
-    if len(rows) > _ACTIVE_CHECKPOINT_HIGH_WATER or sum(len(raw) for raw, _ in rows) >= _ACTIVE_CHECKPOINT_BYTE_BUDGET:
+    if len(rows) > _ACTIVE_CHECKPOINT_HIGH_WATER_COUNT or sum(len(raw) for raw, _ in rows) >= _ACTIVE_CHECKPOINT_BYTE_BUDGET:
         keep, retained_bytes = 0, 0
         for raw, _row in reversed(rows):
             if keep >= MAX_ACTIVE_COMPACT_CHECKPOINTS or retained_bytes + len(raw) >= _ACTIVE_CHECKPOINT_BYTE_BUDGET:

@@ -28,7 +28,9 @@ from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..contracts.optimization_contracts import require_schema_generation
 from ..runtime_errors import DataCorruptionError
 
+# 终态回执归档单个源文件允许读取的最大字节数。
 _RECEIPT_MAX_FILE_BYTES = 1_048_576
+# 终态回执单个不可变归档段允许累积的最大字节数。
 _RECEIPT_MAX_SEGMENT_BYTES = 8 * 1_048_576
 _RECEIPT_SCANS: OrderedDict = OrderedDict()
 

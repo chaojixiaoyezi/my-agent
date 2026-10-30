@@ -27,6 +27,7 @@ _CJK = re.compile(r"[\u4e00-\u9fff]")
 
 # 单位推导：常数名结尾后缀 → 中文单位；长后缀优先，推不出记空（表示没有单位或不适用）。
 _UNIT_SUFFIXES = (
+    ("_BYTE_BUDGET", "字节"),
     ("_SECONDS", "秒"),
     ("_SECOND", "秒"),
     ("_MILLISECONDS", "毫秒"),
@@ -50,6 +51,14 @@ _UNIT_SUFFIXES = (
     ("_TURNS", "轮"),
     ("_FILES", "个文件"),
     ("_ENTRIES", "条"),
+    ("_ROWS", "行"),
+    ("_RECORDS", "条"),
+    ("_CHECKPOINTS", "个检查点"),
+    ("_OFFSETS", "个偏移量"),
+    ("_CURSORS", "个游标"),
+    ("_DIRS", "个目录"),
+    ("_SOURCES", "个来源"),
+    ("_CACHED", "个"),
     ("_PATHS", "个路径"),
     ("_IDS", "个"),
     ("_PROPOSALS", "个提案"),
@@ -122,11 +131,13 @@ def _is_protocol_constant(name: str) -> bool:
     return any(marker in upper for marker in _PROTOCOL_MARKERS) or upper.endswith("_TYPE")
 
 
-# LLM: 只按名字最后一个完整记号匹配；长后缀优先（_SECONDS 在 _SECOND 前、_MILLISECONDS 在 _MS 前），
-#   推不出返回空串，不猜别名（与参数登记表的 unit_for_key 同一思路）。
+# LLM: 按明确量纲后缀匹配，字节预算优先；INT64_MAX 标为整数类型边界，不作字节或数量阈值猜测。
+#   未注明量纲的普通 BUDGET 仍返回空串；目录只是展示投影，不改变运行时常数或协议排除规则。
 # 函数用途: 从常数名后缀推导单位（秒/毫秒/字符/字节/tokens/百分比等）。
 def unit_for_name(name: str) -> str:
     stripped = str(name or "").lstrip("_")
+    if stripped == "INT64_MAX":
+        return "整数"
     for suffix, unit in _UNIT_SUFFIXES:
         if stripped.endswith(suffix):
             return unit

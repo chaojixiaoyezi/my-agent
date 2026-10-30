@@ -26,7 +26,9 @@ if TYPE_CHECKING:
 from .logger import AuditAction, AuditEntry
 from .paths import resolve_audit_paths
 
+# 审计保留清理单次最多读取的源文件字节数。
 _AUDIT_RETENTION_MAX_BYTES = 16 * 1024 * 1024
+# 审计保留清理允许读取的单条记录最大字节数。
 _AUDIT_RETENTION_ROW_MAX_BYTES = 1024 * 1024
 
 

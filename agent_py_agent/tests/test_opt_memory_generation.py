@@ -1,7 +1,9 @@
 # LLM: 只使用临时正式库，验证同代冷热分层、墓碑恢复和派生索引，不读取生产数据。
 # 模块用途: 为长期记忆库存预算替代拒写硬帽提供回归证据。
 import json
+import os
 from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
@@ -1032,13 +1034,25 @@ def test_r2_positive_quota_remember_remove_and_prepared_recovery(tmp_path, recov
     import subprocess
     import sys
 
-    script = ("import faulthandler; from pathlib import Path; "
-              "from agent_py_agent.tests.test_opt_memory_generation import _r2_quota_remove_worker; "
-              "faulthandler.dump_traceback_later(3); "
-              f"_r2_quota_remove_worker(Path({str(tmp_path)!r}), {recovery!r}); "
-              "faulthandler.cancel_dump_traceback_later()")
+    # 仅固定独立子进程中 quota 模块的时间视图；真实扫描、128 项预算和配额计算不变。
+    # 这条用例守锁重入及删除恢复，不把繁忙机器的 10ms 调度延迟当业务失败。
+    script = f'''
+import faulthandler
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from agent_py_agent.agent.user_space import owner_quota
+from agent_py_agent.tests.test_opt_memory_generation import _r2_quota_remove_worker
+clock = SimpleNamespace(monotonic=lambda: 0.0, time=time.time, sleep=time.sleep)
+faulthandler.dump_traceback_later(3)
+with patch.object(owner_quota, "time", clock):
+    _r2_quota_remove_worker(Path({str(tmp_path)!r}), {recovery!r})
+faulthandler.cancel_dump_traceback_later()
+'''
     try:
-        result = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=15)
+        result = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=15,
+                                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])})
     except subprocess.TimeoutExpired as exc:
         pytest.fail(f"正数配额真实删除未退出，调用栈：{exc.stderr!r}")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1149,7 +1163,8 @@ def interrupted(src, dst, **kwargs):
 json_io._replace_with_retry = interrupted
 JsonlMemory(Path({str(memory.path)!r})).migrate_tiers()
 '''
-    process = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=15)
+    process = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=15,
+                             env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])})
     assert process.returncode == 73, process.stderr
     store = MemoryGenerationStore(memory.path)
     [temporary] = list(store.directory.glob("*/*.tmp"))

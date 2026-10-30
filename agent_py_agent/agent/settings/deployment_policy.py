@@ -14,6 +14,7 @@ from ..common.nofollow_fs import read_bytes_beneath
 from ..user_space.home_layout import MyAgentHomePaths
 
 _SCHEMA = "deployment-policy.v1"
+# 部署策略源文件允许安全读取的最大字节数。
 _MAX_DEPLOYMENT_POLICY_SOURCE_BYTES = 1024 * 1024
 
 

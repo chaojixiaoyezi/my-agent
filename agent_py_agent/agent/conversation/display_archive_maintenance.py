@@ -26,7 +26,8 @@ from .display_archive import (
 )
 
 _PAGE_NAME = re.compile(r"(?:0|[1-9][0-9]*)\.json\Z")
-_DAY = 86400
+# 展示归档维护将保留天数换算为秒所用的每日秒数。
+_DISPLAY_ARCHIVE_DAY_SECONDS = 86400
 
 
 # LLM: 维护只接受Store或明确的会话存储根；不猜Home路径，根缺失不新建。
@@ -251,7 +252,7 @@ def compact_display_archives(store_or_root, *, now: float | None = None, min_age
     # 函数用途: 判断单档年龄后执行合页。
     def action(root, fd, archive_id):
         manifest, metadata = _manifest(fd, archive_id)
-        if manifest.get("expired") is True or metadata.st_mtime > now - min_age_days * _DAY:
+        if manifest.get("expired") is True or metadata.st_mtime > now - min_age_days * _DISPLAY_ARCHIVE_DAY_SECONDS:
             return None
         return "compacted" if _compact(fd, manifest) else None
     return _maintain(store_or_root, max_archives, action)
@@ -271,12 +272,12 @@ def prune_expired_display_archives(store_or_root, *, now: float | None = None, t
             manifest, metadata = _manifest(fd, archive_id)
         except FileNotFoundError:
             # 进程在最后unlink/rmdir之间崩溃时仅剩空目录；另保留完整存根期限，不能删新producer。
-            if not os.listdir(fd) and os.fstat(fd).st_mtime <= now - remove_expired_dirs_after_days * _DAY:
+            if not os.listdir(fd) and os.fstat(fd).st_mtime <= now - remove_expired_dirs_after_days * _DISPLAY_ARCHIVE_DAY_SECONDS:
                 _remove_directory(root, fd, archive_id)
                 return "removed"
             return None
         expired = manifest.get("expired") is True
-        if not expired and metadata.st_mtime > now - ttl_days * _DAY:
+        if not expired and metadata.st_mtime > now - ttl_days * _DISPLAY_ARCHIVE_DAY_SECONDS:
             return None
         payloads = []
         for name in os.listdir(fd):
@@ -293,7 +294,7 @@ def prune_expired_display_archives(store_or_root, *, now: float | None = None, t
         os.fsync(fd)
         expired_at = manifest.get("expired_at")
         if (expired and type(expired_at) in (int, float) and math.isfinite(expired_at)
-                and expired_at <= now - remove_expired_dirs_after_days * _DAY
+                and expired_at <= now - remove_expired_dirs_after_days * _DISPLAY_ARCHIVE_DAY_SECONDS
                 and os.listdir(fd) == ["manifest.json"]):
             _unlink(fd, "manifest.json", metadata)
             try:

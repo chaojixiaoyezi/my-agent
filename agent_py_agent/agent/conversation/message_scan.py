@@ -18,8 +18,11 @@ from .display_checkpoint import is_display_checkpoint
 from .models import MessageLogEntry
 from .store_io import complete_jsonl_end
 
+# 活动会话转录中可冷转前缀达到此字节数时触发轮转。
 TRANSCRIPT_ROTATE_BYTES = 1024 * 1024
+# 活动会话转录中可冷转前缀达到此消息行数时触发轮转。
 TRANSCRIPT_ROTATE_ROWS = 128
+# 会话转录封存段的目标字节上限，完整消息行不拆分。
 _TRANSCRIPT_SEGMENT_BYTES = 1024 * 1024
 
 # 消息去重索引最多缓存的线程文件数量。

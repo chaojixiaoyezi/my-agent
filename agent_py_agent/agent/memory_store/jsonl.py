@@ -1108,7 +1108,9 @@ class _JsonlMemorySearchMixin:
                 not active_records and not scanned["partial"], active_records)
 
 
+# 正式记忆权威记录一次有界核验最多扫描的记录条数。
 _AUTHORITY_SCAN_MAX_RECORDS = 1000
+# 正式记忆权威记录一次有界核验最多读取的字节数。
 _AUTHORITY_SCAN_MAX_BYTES = 2 * 1024 * 1024
 
 

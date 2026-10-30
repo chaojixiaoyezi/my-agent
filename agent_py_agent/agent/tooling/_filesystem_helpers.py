@@ -29,6 +29,7 @@ _MAX_WRITE_TEXT_CHARS = 1_000_000
 _FALLBACK_SCAN_MAX_FILES = 20_000
 # 无 ripgrep 时后备遍历最多 10 秒：超时标不完整，保护 Gateway 不被大目录占住。
 _FALLBACK_SCAN_MAX_SECONDS = 10.0
+# 文件发现命令参数允许累计的最大字节数，避免超过系统参数上限。
 _DISCOVERY_ARG_MAX_BYTES = 192 * 1024
 _INTERNAL_AGENT_STATUS_FILES = frozenset(
     {

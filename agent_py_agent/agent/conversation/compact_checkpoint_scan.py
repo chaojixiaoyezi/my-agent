@@ -16,8 +16,11 @@ from ..common.cache_freshness import cache_stat_signature
 
 _CHECKPOINT_OFFSETS = OrderedDict()
 _CHECKPOINT_OFFSETS_LOCK = threading.Lock()
+# 检查点流每次分块读取的最大字节数。
 _CHECKPOINT_CHUNK_BYTES = 65536
+# 检查点流允许解析的单行最大字节数。
 _CHECKPOINT_ROW_MAX_BYTES = 8 * 1024 * 1024
+# 进程内所有检查点缓存合计最多保留的行偏移量数。
 _MAX_CACHED_OFFSETS = 131072
 
 

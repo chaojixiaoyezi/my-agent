@@ -1656,8 +1656,8 @@ class _PinReadChanged(OSError):
     pass
 
 
-# LLM: 正常读须完整代次一致；目标复核只容同inode在open前追加，以打开后FD为新起点，首末变化/缩短仍拒绝。
-# 函数用途: 流式严格读取pin来源；提前停止者须close，函数不创建锁或写文件。
+# LLM: 解析前后均监视内容代次；目标复核仅容同inode打开前追加，以FD为新起点，首末变化/缩短仍拒绝。
+# 函数用途: 流式严格读取pin来源，防止把旧解析结果与读后新摘要组成缓存。
 def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
     try:
         before = path.stat(follow_symlinks=False)
@@ -1668,6 +1668,7 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
         return
     if not stat.S_ISREG(before.st_mode):
         raise OSError("pin source is not a regular file")
+    watch_pin_source(path)
     with io.TextIOWrapper(_fingerprint_source(path), encoding="utf-8") as source:
         opened = os.fstat(source.fileno())
         if target_pin_read_enabled() and (before.st_dev, before.st_ino, before.st_mode) == (
@@ -1712,8 +1713,8 @@ def trash_payload_pinned(pins: _RetentionPins, container: Path, errors: list[Mem
         return True
 
 
-# LLM: 正式记忆复用原物化的版本/墓碑语义；坏schema拒绝，已删除记录不保留旧引用。
-# 函数用途: 收集仍有效正式记忆的来源引用。
+# LLM: 正式记忆复用原物化和maintenance校验；省略或零expiry永久有效，坏类型/非有限/负值拒绝。
+# 函数用途: 收集仍有效正式记忆引用，不把合法永久事件误判坏源。
 def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> None:
     from ._jsonl_maintenance import require_maintenance_event
     from .generation_manifest import MemoryGenerationStore
@@ -1739,9 +1740,6 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
                 for row in _pin_rows(source):
                     record = _memory_record_from_obj(row)
                     require_maintenance_event(record)
-                    # 省略 expiry 的旧事件仍永久有效；显式值必须有限且为正。
-                    if row.get("expires_at") is not None and record.expires_at <= 0:
-                        raise ValueError("formal pin expiry must be positive")
                     if source == path:
                         events.append(record)
             events.extend(store.tombstones.load().values())

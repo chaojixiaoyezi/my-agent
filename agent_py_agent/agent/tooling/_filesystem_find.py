@@ -54,9 +54,13 @@ from .models import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# 文件查找快照及其分页续点允许复用的存活秒数。
 _FIND_SNAPSHOT_TTL_SECONDS = 60.0
+# 文件查找器进程内最多保留的目录快照数量。
 _FIND_SNAPSHOT_MAX_CACHED = 4
+# 文件查找器最多保留的快照分页游标数量。
 _FIND_SNAPSHOT_MAX_CURSORS = 128
+# 文件查找快照允许保留的最大字节数。
 _FIND_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
 
 

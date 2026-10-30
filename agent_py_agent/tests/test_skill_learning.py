@@ -636,7 +636,7 @@ def test_c6_feedback_store_hooks_expose_usage_in_status(tmp_path):
     assert callable(getattr(ctx.store, "usage_summary", None))
     ctx.store.record_skill_usage(event="adopted", skill_id="owner:test-method", source="owner", task_id="task-adopted")
     tool = SkillFeedbackTool(SimpleNamespace(home_paths=ctx.home, config=SimpleNamespace(enable_self_learning=False)))
-    result = tool.execute({"operation": "status"})
+    result = tool.execute({"action": "status"})
     assert result.ok, result.output
     overview = json.loads(result.output)
     assert overview["skill_usage"]["totals"]["adopted"] == 1
@@ -905,10 +905,15 @@ def test_c6_usage_legacy_ahead_summary_does_not_poison_future_events(tmp_path, c
     assert "SKILL_USAGE_RECORD_UNAVAILABLE" in caplog.text
 
 
-# LLM: 真实1MiB owner配额已经用满，跨目录移动无净增长；目标写和源删除必须在同一原admission核算。
-# 函数用途: 验证满配额时溢出请求仍可通过生产pending_requests回填，且内容与最终用量不变。
+# LLM: 1MiB业务payload配额不含原控制账；只扣准确控制文件的实测大小，不放宽普通文件计费或增长拒绝。
+# 函数用途: 验证满配额时回填无净增长、控制账结算准确且新增一字节仍被拒绝。
 def test_c6_overflow_refill_at_full_real_owner_quota(tmp_path):
-    from agent_py_agent.agent.user_space.owner_quota import owner_logical_usage_bytes
+    from agent_py_agent.agent.user_space.owner_quota import (
+        OwnerQuotaChange,
+        OwnerQuotaExceeded,
+        owner_logical_usage_bytes,
+        owner_quota_enforcer_from_policy,
+    )
 
     ctx = _runtime(tmp_path)
     store = ctx.store
@@ -921,13 +926,26 @@ def test_c6_overflow_refill_at_full_real_owner_quota(tmp_path):
     settings = json.loads(quota.read_text())
     settings["max_disk_mb"] = 1
     quota.write_text(json.dumps(settings))
-    used = owner_logical_usage_bytes(ctx.home.owner_home_dir)
+    owner = ctx.home.owner_home_dir
+    ledger_path = owner / '.owner-quota-ledger.json'
+    control_bytes = ledger_path.stat().st_size if ledger_path.exists() else 0
+    used = owner_logical_usage_bytes(owner, exact=True) - control_bytes
     assert used < 1024 * 1024
-    (ctx.home.owner_home_dir / "quota-fill.bin").write_bytes(b"x" * (1024 * 1024 - used))
-    assert owner_logical_usage_bytes(ctx.home.owner_home_dir) == 1024 * 1024
+    (owner / "quota-fill.bin").write_bytes(b"x" * (1024 * 1024 - used))
+    assert owner_logical_usage_bytes(owner, exact=True) - control_bytes == 1024 * 1024
     assert store.pending_requests(refill=True) == [source]
     assert source.read_bytes() == content and store.overflow_requests() == []
-    assert owner_logical_usage_bytes(ctx.home.owner_home_dir) == 1024 * 1024
+    assert owner_logical_usage_bytes(owner, exact=True) == 1024 * 1024 + ledger_path.stat().st_size
+    ledger = json.loads(ledger_path.read_text())
+    assert ledger['used_bytes'] == 1024 * 1024
+    assert ledger['reservations'] == {} and ledger['reserved_bytes'] == 0
+    extra = owner / 'one-extra-byte.bin'
+    with pytest.raises(OwnerQuotaExceeded) as denied:
+        with owner_quota_enforcer_from_policy(owner).reserve([OwnerQuotaChange(extra, 1)]):
+            extra.write_bytes(b'x')
+    assert denied.value.projection.used_bytes == 1024 * 1024
+    assert denied.value.projection.projected_bytes == 1024 * 1024 + 1
+    assert not extra.exists() and source.read_bytes() == content
 
 
 # LLM: 使用生产请求schema与明确FIFO文件名，只搭建两区磁盘状态，不替换待测发现、消费或恢复函数。

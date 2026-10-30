@@ -363,9 +363,9 @@ def test_compact_two_layers_scope_backend_and_deepcopy(tmp_path, monkeypatch):
 
     # LLM: 生成器完整转交原reader，坏行和验链均不绕过。
     # 函数用途: 计数L1冷读次数。
-    def scanned(*args):
+    def scanned(*args, hydrate: bool = False):
         calls.append(True)
-        yield from original(*args)
+        yield from original(*args, hydrate=hydrate)
 
     monkeypatch.setattr(summaries, "iter_committed_compact_checkpoints", scanned)
     view = summaries.resolve_compact_summary_view(agent, thread, scope)

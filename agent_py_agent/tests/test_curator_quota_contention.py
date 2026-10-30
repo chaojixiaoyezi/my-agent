@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import select
 import subprocess
 import sys
@@ -70,6 +71,8 @@ def test_quota_lock_contention_is_busy_or_waits_then_succeeds(tmp_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        # safe_path 模式不自动导入 cwd；固定到本次工作树，不读环境里的旧安装。
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
     )
     try:
         assert select.select([child.stdout], [], [], 10)[0]
@@ -97,12 +100,16 @@ def test_quota_policy_unavailable_is_failure_not_busy(tmp_path):
 # LLM: 存储错误（用量扫描 OSError）同样必须失败，且不得被归成模型失败或 busy。
 def test_quota_scan_storage_error_is_failure_not_model_failure(tmp_path, monkeypatch):
     service = _service_at(tmp_path)
-    _attach_quota(service, tmp_path)
+    quota = _attach_quota(service, tmp_path)
+    scanned_roots = []
 
     def fail(root):
+        scanned_roots.append(root)
         raise OSError('synthetic owner usage scan failure')
 
-    monkeypatch.setattr(oq, '_owner_usage_bytes_for_admission', fail)
+    # 准入已改走有界扫描；旧全树扫描注入点不再被生产调用。
+    monkeypatch.setattr(oq, '_quota_entries', fail)
     result = service.run(reason='admin')
+    assert scanned_roots == [quota.owner_root]
     assert result.status == 'failed', result
     assert result.failure_code != 'CURATOR_MODEL_FAILED'

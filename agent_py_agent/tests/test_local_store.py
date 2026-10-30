@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.agent_core.models import AgentRunResult
+from agent_py_agent.agent.backends.base import EchoBackend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     AdapterPaths,
@@ -29,6 +30,7 @@ from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_r
 from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.memory_store import JsonlMemory
+from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.local_doctor import build_local_doctor_report, rebuild_local_store
 
@@ -177,7 +179,13 @@ def test_jsonl_memory_can_backfill_existing_records():
         store = LocalStore(root / "local.db")
         memory = JsonlMemory(memory_path, local_store=store)
         assert memory.index_all() == 1
-        assert store.stats()["record_count"] == 1
+        # 正式记忆只补建 owner 内读索引，不恢复已退役的工作区正文副本。
+        index = MemoryReadIndex(memory_path)
+        candidates, coverage = index.query("补建", limit=1)
+        assert coverage["status"] == "complete"
+        assert len(candidates) == 1
+        assert index.resolve(candidates)[0].role == "assistant"
+        assert store.stats()["record_count"] == 0
         assert memory.search("补建", top_k=1)[0].role == "assistant"
 
 
@@ -224,6 +232,8 @@ def test_gateway_request_indexes_logs_to_local_store():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        # 显式注入无网络测试后端；空模型目录在生产中仍必须拒绝执行。
+        agent.backend = EchoBackend()
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
@@ -256,6 +266,8 @@ def test_gateway_request_writes_runtime_fact_when_saved():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        # 显式注入无网络测试后端；空模型目录在生产中仍必须拒绝执行。
+        agent.backend = EchoBackend()
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
@@ -295,6 +307,7 @@ def test_gateway_request_can_override_resume_context():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        agent.backend = EchoBackend()
         agent.run("gateway README 恢复开关任务", save=True)
         paths = gateway_paths(agent)
         _, request_path, _ = submit_gateway_ask(
@@ -332,6 +345,7 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        agent.backend = EchoBackend()
         agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="fact")
         task = agent.subagents.create_run(
             goal="local-rebuild 子代理索引测试",
@@ -355,7 +369,13 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         )
 
         counts = result["source_counts"]
-        assert counts["memory"] == 1
+        assert result["memory_indexed"] == 1
+        index = MemoryReadIndex(agent.memory.path)
+        candidates, coverage = index.query("重建测试记忆", limit=1)
+        assert coverage["status"] == "complete"
+        assert len(candidates) == 1
+        assert "local-rebuild" in index.resolve(candidates)[0].content
+        assert counts.get("memory", 0) == 0
         assert counts["gateway_request"] >= 1
         assert counts["subagent_run"] == 1
         assert (
@@ -941,10 +961,17 @@ def _r3_owner_store(tmp_path, layout):
 # 函数用途: 验证普通和transition两种维护周期确实裁剪已存在的owner事件库。
 @pytest.mark.parametrize("layout", ["data", "workspace"])
 @pytest.mark.parametrize("transition", [False, True])
-def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, layout, transition):
+def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, monkeypatch, layout, transition):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space import owner_maintenance, owner_quota
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
 
+    # 本例验证裁剪与周期节流；不要让机器调度把小库变成应立即续扫的 partial。
+    clock = SimpleNamespace(monotonic=lambda: 0.0, time=time.time, sleep=time.sleep)
+    monkeypatch.setattr(owner_maintenance, "time", clock)
+    monkeypatch.setattr(owner_quota, "time", clock)
     home, store = _r3_owner_store(tmp_path, layout)
     options = {"include_global_indexes": False}
     if transition:
@@ -957,6 +984,7 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, lay
     effect = marker.get("local_store_events_maintenance", {})
     assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5000
     assert len(store.events_path.read_bytes().splitlines()) == 20005
+    assert marker["maintenance_partial"] is False
     assert run_owner_retention_if_due(home, now=200_001, **options).status == "not_due"
     with sqlite3.connect(store.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005

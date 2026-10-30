@@ -99,6 +99,7 @@ def test_first_open_same_session_concurrently_creates_one_thread(tmp_path):
 
 def test_work_slice_snapshot_and_default_nested_scope_are_stable(tmp_path, monkeypatch):
     host = host_with_store(tmp_path)
+    deployment_config, deployment_backend = host.config, host.backend
     monkeypatch.setattr("agent_py_agent.agent.backends.get_backend", lambda kind, cfg: SimpleNamespace(name=cfg.model_name))
     a, b = add(host, model_name="A")[0], add(host, model_name="B")[0]
     row = execute_local_model_operation(host, "s", "select", {"profile_id": a})
@@ -114,9 +115,22 @@ def test_work_slice_snapshot_and_default_nested_scope_are_stable(tmp_path, monke
     assert active_thread_model_name(host, thread_id) == ""
     execute_local_model_operation(host, "s", "select", {"profile_id": "default"})
     with selected_model_scope(host, thread_id=thread_id):
+        snapshot_config, snapshot_backend = host.config, host.backend
+        # 有 Home 的 default 未配置时不回落部署连接；嵌套调用必须保留本片的空模型快照。
+        assert (host.config.model_backend, host.config.model_name, host.config.api_key) == ("", "", "")
         execute_model_profile_operation(host, "set_default", {"profile_id": b})
         with selected_model_scope(host):
-            assert host.config.model_name == "deployment-model"
+            assert host.config is snapshot_config and host.backend is snapshot_backend
+            assert host.prompts.config is snapshot_config
+            assert (host.config.model_backend, host.config.model_name, host.config.api_key) == ("", "", "")
+        assert thread_model_profile_id(host, thread_id) == "default"
+    # default 的未配置投影不热改原始部署依赖；只有新的独立工作片采用更新后的 owner 默认。
+    assert host.config is deployment_config and host.backend is deployment_backend
+    assert host.prompts.config is deployment_config
+    assert host.config.model_name == "deployment-model"
+    assert default_model_profile_id(host) == b
+    with selected_model_scope(host):
+        assert host.config.model_name == "B"
 
 
 def test_selection_clears_stale_usage_without_modifying_history_or_compact(tmp_path):

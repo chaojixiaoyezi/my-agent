@@ -1039,6 +1039,7 @@ def _blocked_subagent_is_quiescent(owner_home: Path, run_id: str, payload: dict[
 
 
 # 每次发现最多检查5000个目录项；跨轮内存迭代器避免大目录反复从头扫描。
+# owner 唤醒发现单次查询子代理投影时允许扫描的最大目录数。
 _SUBAGENT_SCAN_MAX_DIRS = 5000
 
 

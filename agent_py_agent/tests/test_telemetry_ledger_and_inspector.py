@@ -160,8 +160,8 @@ def test_r1_repeated_append_io_and_rewrite_breaks_witness(tmp_path, monkeypatch)
     assert changed['rows'][0]['call_id'] == 'cX'
 
 
-# LLM: 构造与空查询不应写 owner 数据。
-# 函数用途: 验证空账本是只读的。
+# LLM: 仅在临时 owner 的真实账本核验显式筛选，未知关键字不能改变查询身份。
+# 函数用途: 验证分页过滤、返回合同和错误参数拒绝。
 def test_r2_telemetry_page_explicit_filters_and_unknown_rejection(tmp_path):
     import inspect
 
@@ -193,6 +193,8 @@ def test_r2_telemetry_page_explicit_filters_and_unknown_rejection(tmp_path):
                for name, parameter in signature.parameters.items() if name != 'self')
 
 
+# LLM: 构造与空查询不应写 owner 数据。
+# 函数用途: 验证空账本是只读的。
 def test_empty_is_read_only(tmp_path):
     ledger = ToolTelemetryLedger(tmp_path, owner_id="one")
     assert ledger.query_tool_calls() == []

@@ -133,7 +133,7 @@ def test_generation_formal_pins_invalidate_same_apply_snapshot(tmp_path):
 
 
 @pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
-@pytest.mark.parametrize("damage", ["unknown-action", "negative-expiry", "nan-expiry", "zero-expiry"])
+@pytest.mark.parametrize("damage", ["unknown-action", "negative-expiry", "nan-expiry", "inf-expiry", "bool-expiry", "text-expiry"])
 def test_legacy_semantic_corruption_blocks_retention(tmp_path, source, damage):
     from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
     from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
@@ -151,7 +151,8 @@ def test_legacy_semantic_corruption_blocks_retention(tmp_path, source, damage):
     if damage == "unknown-action":
         row["action"] = "bogus"
     else:
-        row["expires_at"] = {"negative-expiry": -1, "nan-expiry": float("nan"), "zero-expiry": 0}[damage]
+        row["expires_at"] = {"negative-expiry": -1, "nan-expiry": float("nan"),
+                             "inf-expiry": float("inf"), "bool-expiry": True, "text-expiry": "later"}[damage]
     path.write_text(json.dumps(row) + "\n")
     errors = []
     _, complete = scan.current_retention_pins(home, (), errors, now=NOW)
@@ -187,13 +188,19 @@ def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version
     assert [action for action in service.plan(now=NOW).actions if action.path == target]
 
 
+# LLM: 只冻结指定路径与其打开FD；不改内容或时间流，供同tick读写反例复用。
+# 函数用途: 模拟文件系统在一次粗时钟片内报告同样元数据。
 def _freeze_pin_file_stat(monkeypatch, path):
     fixed = path.stat(follow_symlinks=False)
     original_stat, original_fstat = Path.stat, os.fstat
 
+    # LLM: 只替换指定路径，其余参数和文件仍交原实现。
+    # 函数用途: 固定被测路径的stat观察。
     def frozen_stat(self, *args, **kwargs):
         return fixed if self == path else original_stat(self, *args, **kwargs)
 
+    # LLM: 仅相同dev/ino的真实FD冻结，不把其他句柄冒充目标。
+    # 函数用途: 固定被测文件的FD元数据。
     def frozen_fstat(fd):
         current = original_fstat(fd)
         return fixed if (current.st_dev, current.st_ino) == (fixed.st_dev, fixed.st_ino) else current
@@ -260,6 +267,357 @@ def test_legacy_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, 
     errors = []
     pins, complete = snapshot.current(errors)
     assert complete and not errors and pins.protects(target, errors)
+
+
+# LLM: 零有效期遵循正式写入的永久语义；实际plan/apply都要保护证据而非全局停清理。
+# 函数用途: 验证legacy正式事件与删除账接受显式零expiry。
+@pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
+@pytest.mark.parametrize("expiry", [0, 0.0])
+def test_legacy_zero_expiry_is_permanent(tmp_path, source, expiry):
+    from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
+
+    home, _, service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "permanent.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "unreferenced.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "permanent", attributes={"source_refs": [str(target)]})
+    row = json.loads(memory.path.read_text().splitlines()[0])
+    path = memory.path if source == "formal" else _tombstone_path(memory.path)
+    if source == "legacy-tombstone":
+        row.update(action="remove", content="", entry_id="unrelated-deletion", attributes=None)
+    path.write_text(json.dumps({**row, "expires_at": expiry}) + "\n")
+    errors = []
+    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert complete and not errors and pins.protects(target, errors)
+    report = service.apply(now=NOW)
+    assert report.ok and target.exists() and not control.exists()
+
+
+# LLM: 来源真实迁移成generation；分别破坏不同权威源，实际apply不得移动受保护目标。
+# 函数用途: 将generation坏源保护纳入正式回归。
+@pytest.mark.parametrize("damage", ["manifest", "missing-segment", "segment", "storage-tombstone", "legacy-tombstone"])
+def test_generation_pin_corruption_blocks_plan_and_apply(tmp_path, damage):
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+    from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
+
+    home, candidates, service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "generation-source.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "generation fact", attributes={"source_refs": ["other-evidence"]})
+    memory.migrate_tiers()
+    store = MemoryGenerationStore(memory.path)
+    manifest = store.manifest()
+    assert manifest and manifest["segments"]
+    old_plan = service.plan(now=NOW)
+    assert old_plan.ok and [item for item in old_plan.actions if item.path == target]
+    if damage == "manifest":
+        store.manifest_path.write_text("{bad")
+    elif damage in {"segment", "missing-segment"}:
+        segment = memory.path.parent / manifest["segments"][0]["path"]
+        if damage == "missing-segment":
+            segment.unlink()
+        else:
+            segment.write_text(segment.read_text().replace("fact", "fakt"))
+    else:
+        path = store.tombstones.path if damage == "storage-tombstone" else _tombstone_path(memory.path)
+        path.write_text("{bad\n")
+    plan = service.plan(now=NOW)
+    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in plan.errors)
+    assert not [item for item in plan.actions if item.path == target]
+    report = apply.execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=NOW)
+    assert any(
+        error.error_code == "MEMORY_RETENTION_ACTION_FAILED"
+        and "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in error.message
+        for error in report.errors
+    )
+    assert next(item for item in report.actions if item.path == target).status == "failed"
+    assert target.exists()
+
+
+# LLM: 目录元数据冻结但新增线程及引用均真实；必须重建pin，不能由无关文件变化代替触发。
+# 函数用途: 守护同tick新线程引用的缓存失效。
+def test_same_tick_new_thread_invalidates_pin_snapshot(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "daily.jsonl", '{"event_id":"daily-id"}\n')
+    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
+    old_file(directory / "a.json", json.dumps({"thread_id": "a", "status": "active"}))
+    _freeze_pin_file_stat(monkeypatch, directory)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    first, complete = snapshot.current(errors)
+    assert complete and not errors and not first.protects(target, errors)
+    (directory / "new.json").write_text(json.dumps({"thread_id": "new", "status": "active",
+                                                  "source_refs": [{"event_id": "daily-id"}]}))
+    second, complete = snapshot.current(errors)
+    assert complete and not errors and second is not first and second.protects(target, errors)
+
+
+# LLM: 大于旧16MiB门的真实稀疏文件仍须流式校验，冻结元数据不能隐藏等长原地变化。
+# 函数用途: 验证大来源不会退回只看stat且单次读块有界。
+def test_fresh_large_pin_source_is_streamed_and_detects_same_tick_rewrite(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.reference_pins import source_stamp
+
+    path = tmp_path / "large.jsonl"
+    with path.open("wb") as output:
+        output.truncate(17 * 1024 * 1024)
+    _freeze_pin_file_stat(monkeypatch, path)
+    original_read, reads = os.read, []
+
+    # LLM: 保留实际字节，观测被测文件读取是否分块而不是整本分配。
+    # 函数用途: 记录系统读取请求大小。
+    def read(fd, size):
+        reads.append(size)
+        return original_read(fd, size)
+
+    monkeypatch.setattr(os, "read", read)
+    before = source_stamp(path)
+    with path.open("r+b") as output:
+        output.seek(-1, os.SEEK_END)
+        output.write(b"x")
+    after = source_stamp(path)
+    assert before[:6] == after[:6] and before != after
+    assert reads and max(reads) <= 64 * 1024
+
+
+# LLM: 将真实文件代次移到规范2秒窗口之外；冷文件的重验证只能查元数据，不重读正文。
+# 函数用途: 用读取次数而非易抖动耗时约束多动作保留成本。
+def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monkeypatch):
+    import time
+
+    from agent_py_agent.agent.conversation.models import ConversationThread
+
+    home, _, service = runtime(tmp_path)
+    directory = Path(home.owner_home_dir) / "conversations/threads"
+    directory.mkdir(parents=True)
+    identities = set()
+    source_paths = set()
+    for index in range(20):
+        path = directory / f"t{index:04d}.json"
+        thread = ConversationThread(thread_id=path.stem, canonical_user_id="owner", updated_at=NOW.timestamp(),
+                                    summary="s" * 200000)
+        path.write_text(json.dumps(thread.to_dict()))
+        identities.add(path.stat().st_ino)
+        source_paths.add(path)
+        old_file(home.owner_memory_daily_dir / f"old-{index}.jsonl")
+    later = time.time_ns() + 3_000_000_000
+    monkeypatch.setattr(time, "time_ns", lambda: later)
+    original_read, reads = os.read, []
+
+    # LLM: 只统计所建线程正文的OS读取，实际保留和JSON解析链不被替换。
+    # 函数用途: 检测每动作重复的来源hash读取。
+    def read(fd, size):
+        if os.fstat(fd).st_ino in identities:
+            reads.append(size)
+        return original_read(fd, size)
+
+    monkeypatch.setattr(os, "read", read)
+    original_object, parsed = scan._pin_object, []
+
+    # LLM: 统计真实线程对象解析，防止只停hash却为每个动作重解析全部线程的假优化。
+    # 函数用途: 给冷源成本合同同时约束内容解析次数。
+    def pin_object(path):
+        if path in source_paths:
+            parsed.append(path)
+        return original_object(path)
+
+    monkeypatch.setattr(scan, "_pin_object", pin_object)
+    report = service.apply(now=NOW)
+    assert report.ok
+    assert len([item for item in report.actions if item.category == "daily" and item.status == "trashed"]) == 20
+    assert not reads, "settled thread content must not be rehashed per retention action"
+    assert set(parsed) == source_paths and len(parsed) <= 4 * len(source_paths)
+
+
+# LLM: 热源缓存只能省hash，仍须逐次核真实字节；相同stat下改写必须重建引用视图。
+# 函数用途: 防止2秒窗口内不变线程重复做昂贵摘要，同时守住冻结stat的改写。
+def test_recent_thread_digest_is_reused_but_equal_length_changes_are_not(tmp_path, monkeypatch):
+    import gc
+
+    from agent_py_agent.agent.memory_store import reference_pins
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
+    path = old_file(directory / "t.json", json.dumps({"thread_id": "t", "updated_at": NOW.timestamp(),
+        "summary": "s" * 200000, "source_refs": [str(control)]}))
+    _freeze_pin_file_stat(monkeypatch, path)
+    original_hash, large_chunks = hashlib.blake2b, []
+    original_open, descriptors = reference_pins.open_readonly_file_beneath, []
+
+    # LLM: 观察真实nofollow文件入口，返回原FD以验证复核复用与对象销毁后的清理。
+    # 函数用途: 记录线程源描述符的实际打开次数。
+    def opened(root, parts):
+        descriptor = original_open(root, parts)
+        if Path(root) / parts[0] == path:
+            descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(reference_pins, "open_readonly_file_beneath", opened)
+    original_read, read_bytes = os.read, [0]
+
+    # LLM: 只计活跃线程FD的实际读取字节，不把调用了current当成读回成功。
+    # 函数用途: 证明热源省hash时仍真实逐块核对正文。
+    def read(descriptor, size):
+        raw = original_read(descriptor, size)
+        if descriptor in descriptors:
+            read_bytes[0] += len(raw)
+        return raw
+
+    monkeypatch.setattr(os, "read", read)
+
+    # LLM: 代理实际hash对象，既不替代摘要也不漏掉其他hash方法。
+    # 类用途: 观察大正文块被实际hash的次数。
+    class ObservedHash:
+        # LLM: 保存原hash对象，不复制正文。
+        # 函数用途: 准备观察真实摘要更新。
+        def __init__(self, *args, **kwargs):
+            self.value = original_hash(*args, **kwargs)
+
+        # LLM: 只观察大块更新，其余更新和算法保持原实现。
+        # 函数用途: 区分目录小条目摘要和线程大正文摘要。
+        def update(self, raw):
+            if len(raw) >= 64000:
+                large_chunks.append(len(raw))
+            self.value.update(raw)
+
+        # LLM: 未观察的hash接口均原样转发。
+        # 函数用途: 保留真实hash返回合同。
+        def __getattr__(self, name):
+            return getattr(self.value, name)
+
+    monkeypatch.setattr(hashlib, "blake2b", ObservedHash)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    first, complete = snapshot.current(errors)
+    assert complete and not errors and not first.protects(target, errors)
+    initial_chunks = len(large_chunks)
+    assert initial_chunks
+    for _ in range(5):
+        before_bytes = read_bytes[0]
+        assert snapshot.current(errors)[0] is first
+        assert read_bytes[0] > before_bytes
+    assert len(large_chunks) == initial_chunks
+    assert len(descriptors) == 1
+    path.write_text(path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
+    second, complete = snapshot.current(errors)
+    assert complete and not errors and second is not first and second.protects(target, errors)
+    del snapshot
+    gc.collect()
+    for descriptor in descriptors:
+        with pytest.raises(OSError) as error:
+            os.fstat(descriptor)
+        assert error.value.errno == errno.EBADF
+
+
+# LLM: 热源转冷仍须最后比对真实字节；同tick变化才重建，未变化不得因跨时钟片而失败。
+# 函数用途: 验证跨2秒窗口时仍可靠地识别是否有新引用。
+@pytest.mark.parametrize("changed", [False, True])
+def test_recent_pin_snapshot_is_rebuilt_after_settling(tmp_path, monkeypatch, changed):
+    import time
+
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "fact", attributes={"source_refs": [str(control)]})
+    _freeze_pin_file_stat(monkeypatch, memory.path)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    first, complete = snapshot.current(errors)
+    assert complete and not errors and not first.protects(target, errors)
+    if changed:
+        memory.path.write_text(memory.path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
+    later = time.time_ns() + 3_000_000_000
+    monkeypatch.setattr(time, "time_ns", lambda: later)
+    second, complete = snapshot.current(errors)
+    assert complete and not errors and second.protects(target, errors) is changed
+    assert (second is not first) is changed
+
+
+# LLM: 通用pin解析期间真实改写引用但冻结stat；读后才登记来源会把旧pins和新摘要错误配对。
+# 函数用途: 验证线程/策展源都具备读前读后的内容代次门。
+@pytest.mark.parametrize("kind", ["thread", "curator"])
+def test_generic_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
+    path = directory / "t.json" if kind == "thread" else home.owner_memory_curator_runs_dir / "run.jsonl"
+    row = {"thread_id": "t", "updated_at": NOW.timestamp(), "mutation_probe": True, "source_refs": [str(control)]}
+    old_file(path, json.dumps(row) + "\n")
+    _freeze_pin_file_stat(monkeypatch, path)
+    original, changed = scan._RetentionPins.collect, []
+    original_load = json.load
+
+    # LLM: 对JSON线程在实际解析完成、生成器尚未登记读后摘要时改写，不以collect之后替代读中竞态。
+    # 函数用途: 注入线程解析返回与来源登记之间的等长改写。
+    def loaded(source, *args, **kwargs):
+        result = original_load(source, *args, **kwargs)
+        if kind == "thread" and isinstance(result, dict) and result.get("mutation_probe") and not changed:
+            changed.append(path)
+            path.write_text(path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
+        return result
+
+    # LLM: 保留真实引用收集，仅在首个完整顶层行已消费后改写同一文件。
+    # 函数用途: 精确落在解析行返回与读后来源登记之间制造竞态。
+    def collect(pins, value, source, *, reference=False):
+        result = original(pins, value, source, reference=reference)
+        if kind == "curator" and source == path and isinstance(value, dict) and value.get("mutation_probe") and not changed:
+            changed.append(path)
+            path.write_text(path.read_text().replace("pin-a.jsonl", "pin-b.jsonl"))
+        return result
+
+    monkeypatch.setattr(scan._RetentionPins, "collect", collect)
+    monkeypatch.setattr(json, "load", loaded)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current(errors)
+    assert changed == [path] and snapshot.value is None
+    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
+    errors = []
+    pins, complete = snapshot.current(errors)
+    assert complete and not errors and pins.protects(target, errors)
+
+
+# LLM: 小预算和空源分别压体积及条目上限；新一轮来源集合不得滞留已删除路径，外层上下文须恢复。
+# 函数用途: 验证临时正文缓存和FD缓存有界且不跨snapshot/owner泄漏。
+@pytest.mark.parametrize("payload_size", [0, 600])
+def test_pin_source_cache_bounds_and_rebuild_cleanup(tmp_path, monkeypatch, payload_size):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, _ = runtime(tmp_path)
+    paths = [old_file(home.owner_memory_curator_runs_dir / f"run-{index}.jsonl",
+                     json.dumps({"summary": "s" * payload_size}) + "\n" if payload_size else "")
+             for index in range(140)]
+    monkeypatch.setattr(reference_pins, "_MAX_PIN_SOURCE_DIGEST_BYTES", 1024)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    assert snapshot.current(errors)[1] and not errors
+    assert len(snapshot.contents["files"]) <= 128 and len(snapshot.contents["fds"]) <= 128
+    assert snapshot.contents["bytes"] <= 4096
+    assert snapshot.contents["bytes"] == sum(item[3] for item in snapshot.contents["files"].values())
+    other_home, _, _ = runtime(tmp_path / "other")
+    other = reference_pins.ReferencePinSnapshot(other_home, (), NOW, scan.current_retention_pins)
+    assert other.current(errors)[1] and other.contents is not snapshot.contents
+    assert not set(paths).intersection(other.contents["files"])
+    for path in paths:
+        path.unlink()
+    assert snapshot.current(errors)[1] and not errors
+    assert not set(paths).intersection(snapshot.contents["files"])
+    assert reference_pins._SOURCE_CONTENTS.get() is None and reference_pins._SOURCES.get() is None
+    home.owner_memory_long_term_jsonl.write_text("{bad\n")
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current(errors)
+    assert reference_pins._SOURCE_CONTENTS.get() is None and reference_pins._SOURCES.get() is None
 
 
 # LLM: 仅准备超期测试文件，不修改真实用户数据。

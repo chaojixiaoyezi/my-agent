@@ -30,19 +30,32 @@ from ..common.nofollow_fs import (
 _SCHEMA = "owner_read_index.v1"
 _DB_NAME = "owner_read_index.sqlite3"
 _DB_PARTS = ("cache", _DB_NAME)
-_MAX_DB = 128 * 1024 * 1024
-_MAX_READ = 32 * 1024 * 1024
-_MAX_ROW = 1024 * 1024
-_MAX_DOCUMENT = 8 * 1024 * 1024
-_MAX_RESULT = 16 * 1024 * 1024
-_CHUNK = 64 * 1024
+# owner 只读投影数据库允许占用的最大字节数。
+_OWNER_INDEX_MAX_DB_BYTES = 128 * 1024 * 1024
+# 单次投影源扫描允许读取的最大字节数。
+_OWNER_INDEX_MAX_READ_BYTES = 32 * 1024 * 1024
+# 单条投影源记录允许解析的最大字节数。
+_OWNER_INDEX_MAX_ROW_BYTES = 1024 * 1024
+# 单份投影文档允许解析的最大字节数。
+_OWNER_INDEX_MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
+# 一次投影查询结果允许累计的最大字节数。
+_OWNER_INDEX_MAX_RESULT_BYTES = 16 * 1024 * 1024
+# 投影源文件每次分块读取的最大字节数。
+_OWNER_INDEX_CHUNK_BYTES = 64 * 1024
+# 投影批量查询一次最多接收的记录身份数量。
 _MAX_BATCH_IDS = 4096
-_MAX_PAGE = 1000
+# 投影查询单页允许返回的最大记录行数。
+_OWNER_INDEX_MAX_PAGE_ROWS = 1000
+# 进程内投影源备忘缓存最多保留的条目数。
 _MAX_MEMO_ENTRIES = 128
+# 进程内投影源备忘缓存允许保留的总字节数。
 _MAX_MEMO_BYTES = 32 * 1024 * 1024
+# 单次投影推进最多跟踪的源身份数量。
 _MAX_TRACKED_SOURCES = 128
 _EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
+# SQLite 有符号六十四位整数的最大值，属于类型边界而非可调配额。
 _INT64_MAX = 2**63 - 1
+# 投影追加见证按此字节数划分前缀摘要锚点。
 _ANCHOR_BYTES = 1024
 _PROCESS_MEMOS = OrderedDict()
 _PROCESS_MEMO_LOCK = threading.RLock()
@@ -223,12 +236,12 @@ class _Issue(Exception):
 class _Budget:
     # LLM: 上限是模块维护边界，调用方只能收紧，不能无限放大。
     # 函数用途: 初始化一次操作的资源预算。
-    def __init__(self, max_rows=25000, max_bytes=_MAX_READ, max_ms=1500):
+    def __init__(self, max_rows=25000, max_bytes=_OWNER_INDEX_MAX_READ_BYTES, max_ms=1500):
         for value in (max_rows, max_bytes, max_ms):
             if type(value) is not int or value <= 0:
                 raise ValueError("budgets must be positive integers")
         self.max_rows = min(max_rows, 25000)
-        self.remaining = min(max_bytes, _MAX_READ)
+        self.remaining = min(max_bytes, _OWNER_INDEX_MAX_READ_BYTES)
         self.deadline = time.monotonic() + min(max_ms, 5000) / 1000
         self.decoded = 0
         self.read_bytes = 0
@@ -246,7 +259,7 @@ class _Budget:
     def read(self, descriptor, offset, maximum):
         if self.remaining <= 0 or time.monotonic() >= self.deadline:
             return b""
-        size = min(maximum, self.remaining, _CHUNK)
+        size = min(maximum, self.remaining, _OWNER_INDEX_CHUNK_BYTES)
         if size <= 0:
             return b""
         data = os.pread(descriptor, size, offset)
@@ -619,7 +632,7 @@ class OwnerReadIndex:
         self._private(held)
         if (held.st_dev, held.st_ino) != expected[:2]:
             raise _Issue("cache_changed")
-        if held.st_size > _MAX_DB:
+        if held.st_size > _OWNER_INDEX_MAX_DB_BYTES:
             raise _Issue("cache_size_limit")
         current_parents = self._directories(("cache",))
         if current_parents != parents:
@@ -722,7 +735,7 @@ class OwnerReadIndex:
                 descriptor = open_readonly_file_beneath(self._home, _DB_PARTS)
             held = os.fstat(descriptor)
             self._private(held)
-            if held.st_size > _MAX_DB:
+            if held.st_size > _OWNER_INDEX_MAX_DB_BYTES:
                 raise _Issue("cache_size_limit")
             self._reject_sidefiles()
             expected = _stamp(held)
@@ -768,7 +781,7 @@ class OwnerReadIndex:
             connection.set_progress_handler(progress, 1000)
             if hasattr(connection, "setlimit"):
                 connection.setlimit(
-                    sqlite3.SQLITE_LIMIT_LENGTH, _MAX_DOCUMENT + 65536,
+                    sqlite3.SQLITE_LIMIT_LENGTH, _OWNER_INDEX_MAX_DOCUMENT_BYTES + 65536,
                 )
                 connection.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
             if write:
@@ -791,7 +804,7 @@ class OwnerReadIndex:
             if write:
                 page_size = connection.execute("PRAGMA page_size").fetchone()[0]
                 connection.execute(
-                    "PRAGMA max_page_count=" + str(_MAX_DB // page_size)
+                    "PRAGMA max_page_count=" + str(_OWNER_INDEX_MAX_DB_BYTES // page_size)
                 )
             self._check_database(descriptor, cache_fd, parents, expected)
             yield connection
@@ -1194,7 +1207,7 @@ class OwnerReadIndex:
             size = len(payload.encode("utf-8"))
         except (ValueError, TypeError, RecursionError):
             raise _Issue("invalid_schema") from None
-        if size > (_MAX_DOCUMENT if document else _MAX_ROW):
+        if size > (_OWNER_INDEX_MAX_DOCUMENT_BYTES if document else _OWNER_INDEX_MAX_ROW_BYTES):
             raise _Issue("record_size_limit")
         return payload, typed
 
@@ -1212,7 +1225,7 @@ class OwnerReadIndex:
         cached = self._memo_get(key)
         buffer = bytearray(cached if isinstance(cached, bytes) else b"")
         target = observed[2]
-        maximum = _MAX_DOCUMENT if document else _MAX_ROW
+        maximum = _OWNER_INDEX_MAX_DOCUMENT_BYTES if document else _OWNER_INDEX_MAX_ROW_BYTES
         if document and target > maximum:
             raise _Issue("document_size_limit")
         if start + len(buffer) > target:
@@ -1719,7 +1732,7 @@ class OwnerReadIndex:
             if not isinstance(payload, str):
                 raise _Issue("corrupt_cached_payload")
             size += len(payload.encode("utf-8"))
-            if size > _MAX_RESULT:
+            if size > _OWNER_INDEX_MAX_RESULT_BYTES:
                 raise _Issue("result_byte_budget", "partial")
             try:
                 row = json.loads(payload, parse_constant=_reject_constant)
@@ -1786,7 +1799,7 @@ class OwnerReadIndex:
         after_cursor=None,
     ):
         if (
-            type(limit) is not int or not 0 <= limit <= _MAX_PAGE
+            type(limit) is not int or not 0 <= limit <= _OWNER_INDEX_MAX_PAGE_ROWS
             or type(offset) is not int or not 0 <= offset <= 10_000_000
             or type(descending) is not bool
         ):
@@ -1828,7 +1841,7 @@ class OwnerReadIndex:
                 records, result_size = [], 0
                 for record in cursor:
                     result_size += len(record['payload'].encode('utf-8'))
-                    if result_size > _MAX_RESULT:
+                    if result_size > _OWNER_INDEX_MAX_RESULT_BYTES:
                         raise _Issue('result_byte_budget', 'partial')
                     records.append(record)
                 rows = self._payloads(records[:limit])
@@ -1864,7 +1877,7 @@ class OwnerReadIndex:
         for value in ids:
             if not isinstance(value, str):
                 raise ValueError("each id must be a string")
-            if len(value) > _MAX_ROW:
+            if len(value) > _OWNER_INDEX_MAX_ROW_BYTES:
                 raise ValueError("id too large")
             if value not in seen:
                 seen.add(value)
@@ -1949,7 +1962,7 @@ class OwnerReadIndex:
                             if not isinstance(payload, str):
                                 raise _Issue("corrupt_cached_payload")
                             size += len(payload.encode("utf-8"))
-                            if size > _MAX_RESULT:
+                            if size > _OWNER_INDEX_MAX_RESULT_BYTES:
                                 raise _Issue("result_byte_budget", "partial")
                             try:
                                 row = json.loads(
@@ -2110,7 +2123,7 @@ class OwnerReadIndex:
                         item['failed'] = item['calls'] - item['succeeded']
                         item['success_rate'] = item['succeeded'] / item['calls']
                         size += len(_json([name, item]).encode('utf-8'))
-                        if size > _MAX_RESULT:
+                        if size > _OWNER_INDEX_MAX_RESULT_BYTES:
                             raise _Issue('result_byte_budget', 'partial')
                         value['tools'][name] = item
                         value['total_calls'] += item['calls']
@@ -2163,7 +2176,7 @@ class OwnerReadIndex:
                     for record in cursor:
                         row = dict(record)
                         size += len(_json(row).encode('utf-8'))
-                        if size > _MAX_RESULT:
+                        if size > _OWNER_INDEX_MAX_RESULT_BYTES:
                             raise _Issue('result_byte_budget', 'partial')
                         if recent_limit is not None:
                             value.append(row)

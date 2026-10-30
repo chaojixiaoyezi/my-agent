@@ -331,6 +331,7 @@ def _temporary_grants_payload(home: MyAgentHomePaths) -> dict[str, Any]:
 __all__ = ["build_home_doctor_report", "DoctorService"]
 
 
+# 记忆体检抽查近期归档时最多读取的归档文件数量。
 MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT = 5
 
 # LLM: 接受字典、带 to_dict 的对象、数据类或普通值；只转换展示形状，不更改警告语义或执行修复。

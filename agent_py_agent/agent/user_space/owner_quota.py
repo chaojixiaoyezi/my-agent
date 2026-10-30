@@ -46,9 +46,12 @@ _DISPLAY_USAGE_LOCK = RLock()
 _QUOTA_LEDGER = '.owner-quota-ledger.json'
 _QUOTA_SCANS: OrderedDict = OrderedDict()
 _QUOTA_SCANS_LOCK = RLock()
+# 进程内配额续扫缓存最多保留的活跃 owner 扫描器数量。
 _QUOTA_SCAN_CACHE_SIZE = 16
-_QUOTA_SCAN_CURSOR_TTL = 3600
-_QUOTA_SORT_BATCH = 128
+# 持久配额续扫游标允许恢复的最长存活秒数。
+_QUOTA_SCAN_CURSOR_TTL_SECONDS = 3600
+# 配额字典序扫描每批最多保留的排序候选目录项数。
+_QUOTA_SORT_BATCH_ENTRIES = 128
 
 
 # LLM: 原配额写者在owner锁内解释append字节，不预先读取大小，保持批量写原子准入语义。
@@ -716,7 +719,9 @@ def _bounded_quota_snapshot(root, *, max_entries, max_ms):
 
 # LLM: 后台账仍是观察而非准入证明；最多16个LRU扫描，每个暂停扫描至多持一个目录流及绑定FD，重启沿路径合计恢复。
 #   原owner写revision变化、root身份变化或一小时过期即重扫，异常不得发布complete或清孤儿预留。
-# 函数用途: 按目录项/时间预算续扫owner，完成后回收孤儿预留并记录准确观察用量。
+# max_ms 约束 replay_skip 前缀重放完成后的本片新增扫描工作，不是整次调用的墙钟上限。
+# 重放仍受 enumeration_budget（含已持久前缀的一次额外额度）约束，并至少推进一个新位置后检查时间，避免恢复饥饿。
+# 函数用途: 有界续扫 owner；完成后回收孤儿预留并记录准确观察用量。
 def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, blocking=True):
     if (type(max_entries) is not int or not 0 < max_entries <= 100000
             or type(max_ms) not in (int, float) or not math.isfinite(max_ms) or max_ms <= 0):
@@ -818,7 +823,7 @@ def _valid_quota_prep_cursor(prep):
             or not isinstance(after, str) or type(enumerated) is not int or enumerated <= 0
             or type(dir_offset) is not int or dir_offset < 0
             or type(block_skip) is not int or not 0 <= block_skip <= enumerated
-            or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH
+            or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH_ENTRIES
             or any(not isinstance(n, str) or not n or n <= after for n in names)
             or names != sorted(set(names))
             or not isinstance(dir_id, list) or len(dir_id) != 2
@@ -849,7 +854,7 @@ def _resumable_quota_cursor(root, ledger):
     if (not isinstance(last, str) or last.startswith('/') or any(p in ('.', '..') for p in last.split('/'))
             or not isinstance(epoch, str) or not epoch or len(epoch) > 128
             or type(started) not in (float, int) or not math.isfinite(started)
-            or not 0 <= time.time() - started <= _QUOTA_SCAN_CURSOR_TTL
+            or not 0 <= time.time() - started <= _QUOTA_SCAN_CURSOR_TTL_SECONDS
             or cursor['ledger_revision'] != ledger['revision']):
         return None
     if 'prep' in cursor and cursor['prep'] is not None and not _valid_quota_prep_cursor(cursor['prep']):
@@ -897,11 +902,11 @@ def _quota_sorted_names(root, parts, after, state=None):
                     yield None
                     continue
                 name = entry.name + ('/' if entry.is_dir(follow_symlinks=False) else '')
-                if name > after and (len(names) < _QUOTA_SORT_BATCH or name < names[-1]):
+                if name > after and (len(names) < _QUOTA_SORT_BATCH_ENTRIES or name < names[-1]):
                     idx = bisect.bisect_left(names, name)
                     if idx == len(names) or names[idx] != name:
                         names.insert(idx, name)
-                        if len(names) > _QUOTA_SORT_BATCH:
+                        if len(names) > _QUOTA_SORT_BATCH_ENTRIES:
                             names.pop()
                 raw_count += 1
                 if isinstance(state, dict):
@@ -972,7 +977,7 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None):
                     yield from _sorted_quota_entries(root, (*parts, name.rstrip('/')), after=after, state=state)
                 except FileNotFoundError:
                     continue
-        if len(names) < _QUOTA_SORT_BATCH:
+        if len(names) < _QUOTA_SORT_BATCH_ENTRIES:
             return
         last_name = names[-1]
 
