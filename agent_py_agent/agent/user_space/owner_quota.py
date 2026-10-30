@@ -39,7 +39,9 @@ _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 _DISPLAY_USAGE_TTL_SECONDS = 5.0
 # 仅用量展示缓存最多保留的目录统计条数，不参与写入配额准入。
 _DISPLAY_USAGE_CACHE_MAX_ENTRIES = 256
-_DISPLAY_USAGE_CACHE: OrderedDict[Path, tuple[tuple[int, ...], float, int]] = OrderedDict()
+_DISPLAY_USAGE_CACHE: OrderedDict[
+    Path, tuple[tuple[int, int, int, int, tuple[str, ...]], float, int]
+] = OrderedDict()
 _DISPLAY_USAGE_LOCK = RLock()
 _QUOTA_LEDGER = '.owner-quota-ledger.json'
 _QUOTA_SCANS: OrderedDict = OrderedDict()
@@ -436,13 +438,14 @@ def _owner_usage_bytes_for_admission(root: str | Path) -> int:
     return owner_logical_usage_bytes(owner_root, exact=True)
 
 
-# LLM: 只缓存单目录直接文件总数；目录身份/mtime/ctime或TTL失效即重算，权限错误不回旧值。
+# LLM: 只缓存单目录直接文件总数；目录身份/时间、已遍历文件名或TTL失效即重算，权限错误不回旧值。
 # 函数用途: 为展示档案目录复用短期统计；exact调用方不使用缓存。
 def _directory_usage_bytes(owner_root: Path, base: Path, names: list[str], *, cached: bool) -> int:
     if not cached:
         return _directory_regular_bytes(owner_root, base, names)
     info = base.stat(follow_symlinks=False)
-    key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+    names_key = tuple(sorted(names))
+    key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, names_key)
     now = time.monotonic()
     with _DISPLAY_USAGE_LOCK:
         entry = _DISPLAY_USAGE_CACHE.get(base)
@@ -451,7 +454,7 @@ def _directory_usage_bytes(owner_root: Path, base: Path, names: list[str], *, ca
             return entry[2]
     total = _directory_regular_bytes(owner_root, base, names)
     after = base.stat(follow_symlinks=False)
-    if key == (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+    if key == (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns, names_key):
         with _DISPLAY_USAGE_LOCK:
             _DISPLAY_USAGE_CACHE[base] = (key, now, total)
             _DISPLAY_USAGE_CACHE.move_to_end(base)

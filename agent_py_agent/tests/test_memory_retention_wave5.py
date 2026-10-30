@@ -410,18 +410,21 @@ def test_deleted_formal_memory_releases_pin(tmp_path):
     assert [a for a in service.plan(now=NOW).actions if a.path == path]
 
 
-# LLM: 两次真实展示统计之间不改目录，新增文件后必须失效缓存。
-# 函数用途: 验证展示档案热扫描减少stat且识别新文件。
+# LLM: 仅固定目标目录stat模拟ext4同tick；文件字节和遍历仍真实，新增/删除必须失效、乱序文件名仍命中。
+# 函数用途: 验证展示档案热扫描减少stat且不漏掉同一时钟tick内的文件增删。
 def test_display_archive_observation_cache_is_bounded_and_invalidated(tmp_path, monkeypatch):
     from agent_py_agent.agent.user_space import owner_quota as quota
 
     root = tmp_path / "owner"
     path = old_file(root / "memory_archive/display_archives/2026-01-01/a.txt", "1234")
     original, calls = Path.stat, []
+    directory_info = original(path.parent, follow_symlinks=False)
 
     # LLM: 观察真实stat调用；不替换字节数或准入结果。
     # 函数用途: 统计热目录是否重复逐文件stat。
     def tracked(self, *args, **kwargs):
+        if self == path.parent:
+            return directory_info
         if self == path:
             calls.append(self)
         return original(self, *args, **kwargs)
@@ -431,8 +434,16 @@ def test_display_archive_observation_cache_is_bounded_and_invalidated(tmp_path, 
     calls.clear()
     assert quota.owner_logical_usage_bytes(root) == 4
     assert not calls
-    old_file(path.parent / "b.txt", "567")
+    extra = old_file(path.parent / "b.txt", "567")
+    info = path.parent.stat(follow_symlinks=False)
+    assert (info.st_mtime_ns, info.st_ctime_ns) == (directory_info.st_mtime_ns, directory_info.st_ctime_ns)
     assert quota.owner_logical_usage_bytes(root) == 7
+    assert calls
+    calls.clear()
+    assert quota._directory_usage_bytes(root, path.parent, ["b.txt", "a.txt"], cached=True) == 7
+    assert not calls
+    extra.unlink()
+    assert quota.owner_logical_usage_bytes(root) == 4
     assert calls
 
 
