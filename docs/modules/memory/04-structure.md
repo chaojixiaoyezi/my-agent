@@ -1,3 +1,10 @@
+## 2026-10-29 e905 sol-5 R3：共享留存引用视图与子证据保护
+
+- `retention_scan.py::_collect_retention_actions` 一次构建严格 pin 投影，传给 task tmp、run scratch、按龄文件及 trash 规划；仅保留一份来源错误且保持原类别错误顺序，不新增持久权威。
+- `scratch_tree_pinned` 是规划/执行共享判据：核对所属任务/运行结构化 ID、scratch 根及快照中的所有子成员；任一命中即保护整棵。`retention_apply.py::_clear_scratch` 在当前库存与策略/状态重核后，每动作调用一次 `ReferencePinSnapshot.current`；下一动作仍逐源检查代次，变化重建。成员的 nofollow 打开、指纹与 FD 当前位置复核独立保留，不把批复核声称为跨进程全局原子性。
+- `curator_inputs.py::attach_candidate_anchors` 经 `_add_anchor_scope` 复用唯一 `canonical_scope_key`；只捕获该校验的 `ValueError` 并跳过当前非法范围，不吞仓库/执行故障、不改游标、不将坏 ID 降成更宽范围。
+- `promotion.py` 正式提交/恢复合同未改写；消费者测试仅推进测试时钟越过持久退避，严格核对义务、恢复、身份拒绝与坏权威异常。当前模块和测试分支证据见根 [TESTS](../../../TESTS.md)，未新增事实库、配置项、外部服务或发布动作。
+
 ## 2026-10-29 e905 sol-5 R2：候选来源别名连通投影
 
 `candidates.py::_merge_indexed_observation` 将本次稳定来源组交给 `_new_observation_sources`，以已有来源为锚迭代传播可关联别名；`_matching_source_contexts` 只传播匹配的运行上下文，已知 run 优先于历史空 run。仅未连通的组进入新观察键，未改 `CandidateObservation`、真实引用合并或学习覆盖合同；没有新增事实源、配置和正式记忆跨引用接口。原先只检查每个 incoming group 对历史并集的单步判重已替换。

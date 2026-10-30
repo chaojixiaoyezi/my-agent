@@ -258,19 +258,19 @@ class CuratorInputBatch:
         return sum(1 for item in self.messages if item.role == "user")
 
 
-# LLM: 会话和项目键复用scope_contract，与候选持久化保持一致；task别名归一为project，不从正文扩域。每scope/type最多3条、总计12条。
+# LLM: 复用规范scope合同；非法宿主ID只跳过该范围，不扩大权限或阻断其它合法范围，每类每范围三条且总计十二条。
 # 函数用途: 按本批宿主结构化范围提供可精确链接的lesson/HOT锚点，避免同一经验因范围键漂移而反复新建。
 def attach_candidate_anchors(batch, candidates):
     scopes = {("personal", "personal"), ("global", "global")}
     for message in batch.messages:
         if message.thread_id:
-            scopes.add(("session", canonical_scope_key("session", message.thread_id)))
+            _add_anchor_scope(scopes, "session", message.thread_id)
         task_id = str(message.metadata.get("task_id") or "")
         if task_id:
-            scopes.add(("project", canonical_scope_key("project", task_id)))
+            _add_anchor_scope(scopes, "project", task_id)
     for event in batch.audit_events:
         if event.task_id:
-            scopes.add(("project", canonical_scope_key("project", event.task_id)))
+            _add_anchor_scope(scopes, "project", event.task_id)
     anchors, counts = [], {}
     rows = candidates.readonly_rows(statuses={"pending_review", "approved", "observed", "blocked_missing_evidence"})
     for row in sorted(rows, key=lambda item: (item.last_observed_at, item.candidate_id), reverse=True):
@@ -287,6 +287,16 @@ def attach_candidate_anchors(batch, candidates):
         if len(anchors) >= 12:
             break
     return replace(batch, candidate_anchors=tuple(anchors))
+
+
+# LLM: 只捕获规范scope校验的值错误；单条脏ID不能变为个人/全局范围，也不吞其它仓库或执行异常。
+# 函数用途: 安全收集一个合法范围，非法或空前缀仅跳过当前条目。
+def _add_anchor_scope(scopes, scope_type, value):
+    try:
+        key = canonical_scope_key(scope_type, value)
+    except ValueError:
+        return
+    scopes.add((scope_type, key))
 
 
 # LLM: 此适配器只从既有运行记忆控制面读取有界元数据；不读产物正文，也不把输出索引状态视为执行权威。

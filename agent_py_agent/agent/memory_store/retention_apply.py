@@ -51,6 +51,7 @@ from .retention_scan import (
     paths_fingerprint,
     runtime_terminal,
     scratch_inventory,
+    scratch_tree_pinned,
     security_audit_content,
     security_audit_paths,
     task_scratch_unlocked,
@@ -316,15 +317,15 @@ def _apply_action(
     raise ValueError(f"unsupported retention operation: {action.operation}")
 
 
-# LLM: pin投影按源代次重核；坏源、根或任一子证据引用均保护整棵scratch，不解析正文猜权威。
-# 函数用途: 在规划后及每个删除前检查当前证据保护。
-def _scratch_is_unpinned(home, action, now, roots, snapshot):
+# LLM: 每个动作仅重核一次全源代次；坏源、所属身份或任一子证据命中均保护整棵，不放宽完整性门。
+# 函数用途: 为本次scratch动作检查同规划口径的完整证据保护。
+def _scratch_is_unpinned(home, action, now, roots, snapshot, members, task, state):
     errors = []
     pins, complete = (snapshot.current(errors, target=action.path) if snapshot is not None else
                       current_retention_pins(home, roots, errors, now=now))
     if not complete:
         complete = pins.complete_for(action.path, errors)
-    return complete and not pins.protects(action.path, errors)
+    return complete and not scratch_tree_pinned(pins, action.path, members, errors, task_root=task, state=state)
 
 
 # LLM: 重新从owner逐段nofollow定位父链，对比已开FD与当前位置inode；只能缩小竞态窗口，不授予发布互斥锁。
@@ -338,7 +339,7 @@ def _scratch_directory_still_at(owner, parts, descriptor):
         os.close(current)
 
 
-# LLM: scratch仅接受规范tmp/runs；逐次重核policy/DB/状态/指纹/pins及FD当前位置，移出即停，不声称全局原子性。
+# LLM: scratch按动作复核策略/状态/指纹及pin代次，每次实际删除仍重核FD当前位置；不声称跨进程发表原子性。
 # 函数用途: 只删已验证且无引用的旧普通文件和空子目录，保留output/inputs和新证据。
 def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot=None):
     if action.cutoff_timestamp is None:
@@ -354,6 +355,12 @@ def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot
         if (len(parts) != 3 or parts[-1] != "tmp" or policy.task_tmp_idle_days <= 0
                 or not task_scratch_unlocked(home, action.path.parent, policy.legal_hold_task_ids, now)):
             return replace(action, status="state_changed")
+        task = action.path.parent
+        authority = task / "work/state.json"
+        report = read_json_object_report(authority, context="memory_retention.task_scratch") if authority.exists() else None
+        if report is not None and report.load_error:
+            return replace(action, status="state_changed")
+        state = report.payload if report is not None else {}
     elif action.category == "run_scratch":
         authority = action.authority_path
         if authority is None or file_fingerprint(authority) != action.authority_fingerprint:
@@ -375,10 +382,10 @@ def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot
     else:
         return replace(action, status="state_changed")
     try:
-        if not _scratch_is_unpinned(home, action, now, allowed_external_roots, pin_snapshot):
-            return replace(action, status="state_changed")
         digest, members = scratch_inventory(action.path, action.cutoff_timestamp)
         if digest != action.source_fingerprint:
+            return replace(action, status="state_changed")
+        if not _scratch_is_unpinned(home, action, now, allowed_external_roots, pin_snapshot, members, task, state):
             return replace(action, status="state_changed")
         # 从owner根逐段nofollow打开，避免中间目录被换成链接后误删兄弟输入/输出。
         root_parts = action.path.relative_to(Path(home.owner_home_dir)).parts
@@ -395,8 +402,7 @@ def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot
 
                 if _file_identity(observed) != expected:
                     return replace(action, status="state_changed")
-                if (not _scratch_is_unpinned(home, action, now, allowed_external_roots, pin_snapshot)
-                        or not _scratch_directory_still_at(Path(home.owner_home_dir), root_parts + parts[:-1], descriptor)):
+                if not _scratch_directory_still_at(Path(home.owner_home_dir), root_parts + parts[:-1], descriptor):
                     return replace(action, status="state_changed")
                 os.unlink(parts[-1], dir_fd=descriptor)
             finally:
@@ -409,8 +415,7 @@ def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot
                     observed = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
                     if not stat.S_ISDIR(observed.st_mode) or (observed.st_dev, observed.st_ino) != expected[:2]:
                         return replace(action, status="state_changed")
-                    if (not _scratch_is_unpinned(home, action, now, allowed_external_roots, pin_snapshot)
-                            or not _scratch_directory_still_at(Path(home.owner_home_dir), root_parts + parts[:-1], descriptor)):
+                    if not _scratch_directory_still_at(Path(home.owner_home_dir), root_parts + parts[:-1], descriptor):
                         return replace(action, status="state_changed")
                     os.rmdir(parts[-1], dir_fd=descriptor)
                 finally:

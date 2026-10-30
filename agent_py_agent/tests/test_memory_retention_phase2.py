@@ -298,15 +298,16 @@ def test_move_after_per_member_open_preserves_output(tmp_path, monkeypatch, dire
     assert not [a for a in report.actions if a.category == "task_tmp" and a.status == "deleted"]
 
 
-# LLM: 两个真实Daily动作之间首次发表state；不得重新生成计划掩盖缓存漏监视。
+# LLM: 两个真实Daily动作之间首次发表tasks或runs状态；不得重新生成计划掩盖缓存漏监视。
 # 函数用途: 锁定已有work首次state写入后下一动作重建pins。
-def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("namespace", ["tasks", "runs"])
+def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monkeypatch, namespace):
     from agent_py_agent.agent.memory_store import retention_apply as apply
 
     home, _candidates, service = runtime(tmp_path)
     first = old_file(home.owner_memory_daily_dir / "a-first.jsonl")
     second = old_file(home.owner_memory_daily_dir / "b-pinned.jsonl")
-    work = home.owner_tasks_dir / "2026-10-01/sample/work"
+    work = Path(home.owner_home_dir) / namespace / "2026-10-01/sample/work"
     work.mkdir(parents=True)
     original = apply._apply_action
     published = []
@@ -515,3 +516,168 @@ def test_internal_directory_names_are_legal_task_names(tmp_path, task_name):
     assert not any(action.path == target for action in service.plan(now=NOW).actions)
     execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=NOW)
     assert target.exists()
+
+
+# LLM: 只计数原严格扫描器的调用，保留真实引用读取与所有规划结果，不改变完整性门。
+# 函数用途: 验证同一次规划只构建一次共享pin视图。
+def test_plan_builds_reference_pins_once(tmp_path, monkeypatch):
+    home, _candidates, service = runtime(tmp_path)
+    old_file(home.owner_tasks_dir / "2026-10-01/sample/tmp/x")
+    original, calls = scan.current_retention_pins, []
+
+    # LLM: 原扫描完整执行，额外记录次数用于防止按类别重复解析与重复报错。
+    # 函数用途: 观察本次规划的pin构建次数。
+    def counted(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(scan, "current_retention_pins", counted)
+    plan = service.plan(now=NOW)
+    assert any(action.category == "task_tmp" for action in plan.actions)
+    assert len(calls) == 1
+
+
+# LLM: 使用真实删除与快照，只观察代次复核入口；文件数不能放大全源代次扫描次数。
+# 函数用途: 验证每个scratch动作只复核一次来源代次而非逐子文件复核。
+@pytest.mark.parametrize("kind", ["task_tmp", "run_scratch"])
+def test_scratch_revalidates_pin_generation_once_per_action(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    if kind == "task_tmp":
+        root = home.owner_tasks_dir / "2026-10-01/sample/tmp"
+    else:
+        task = Path(home.owner_home_dir) / "runs/2026-10-01/run-1"
+        old_file(task / "work/state.json", json.dumps({"task_id": "task-1", "run_id": "run-1",
+            "status": "DONE", "updated_at": NOW.timestamp() - 20 * 86400}))
+        root = task / "tmp"
+    for number in range(32):
+        old_file(root / "nested" / f"{number}.bin")
+    plan = service.plan(now=NOW)
+    assert len([action for action in plan.actions if action.path == root]) == 1
+    original, calls = ReferencePinSnapshot.current, []
+
+    # LLM: 真实快照仍验证全部来源，计数不得替代原执行结果断言。
+    # 函数用途: 记录单个动作触发的来源代次复核。
+    def counted(self, *args, **kwargs):
+        calls.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReferencePinSnapshot, "current", counted)
+    report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
+    assert next(action for action in report.actions if action.path == root).status == "deleted"
+    assert not list(root.iterdir())
+    assert len(calls) == 1
+
+
+# LLM: 归档由真实外置器产生，候选只带运行和调用ID、不带路径；旧计划必须重核后保留整棵证据。
+# 函数用途: 验证七天后按ID引用的运行工具索引与外置信封仍可供晋升核验。
+@pytest.mark.parametrize("late", [False, True])
+@pytest.mark.parametrize("owner_identity", [False, True])
+def test_id_only_tool_evidence_pins_run_scratch(tmp_path, late, owner_identity):
+    from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+        ExternalizeToolOutputRequest,
+        externalize_tool_output_record,
+    )
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.memory_store.promotion import LocalStoreToolEvidenceVerifier
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    task = Path(home.owner_home_dir) / "runs/2026-10-01/run-1"
+    old_file(task / "work/state.json", json.dumps({"task_id": "task-1", "run_id": "run-1",
+        "status": "DONE", "updated_at": NOW.timestamp() - 20 * 86400}))
+    # 异名运行仍能在规范索引中精确核验，迫使清理器检查子文件而不只匹配父目录ID。
+    run_id = "run-1" if owner_identity else "archived-run"
+    record = externalize_tool_output_record(ExternalizeToolOutputRequest(
+        root=task / "work", tool="read_file", call_id="call-proof", output='{"proof":"retained"}',
+        ok=True, run_id=run_id, task_id="task-1", force_externalize=True,
+        result_envelope={"tool_execution": {"handler_executed": True, "duration_ms": 3},
+            "tool_operation": {"operation_id": "op-proof", "status": "succeeded"}}))
+    root = task / "work/blobs/tool_outputs"
+    envelope = Path(record["output_path"])
+    index = root / "index.jsonl"
+    old_file(root / "control.bin", "unreferenced sibling")
+    for path in root.rglob("*"):
+        if path.is_file():
+            os.utime(path, (1, 1))
+    ref = {"owner_id": "owner-1", "run_id": run_id, "tool_call_id": "call-proof", "tool_name": "read_file"}
+    verifier = LocalStoreToolEvidenceVerifier(object(), owner_id="owner-1", owner_root=home.owner_home_dir)
+    verified = verifier.verify(ref)
+    assert verified is not None and verified.successful
+    before = {path: path.read_bytes() for path in (index, envelope, root / "control.bin")}
+    plan = service.plan(now=NOW)
+    assert any(action.path == root and action.category == "run_scratch" for action in plan.actions)
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="仅ID引用也必须保留真实工具证据",
+        subject_key="scratch.id.evidence", scope=MemoryScope("personal", "personal"),
+        origin="tool_verified", promotion_target="lesson", source_tool_refs=(ref,)))
+    candidates.transition(row.candidate_id, "approved", reviewer="test")
+    errors = []
+    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert complete and not errors
+    assert pins.protects(index, []) and pins.protects(envelope, [])
+    assert not pins.protects(root, []), "fixture must not accidentally contain a directory path pin"
+    if not late:
+        plan = service.plan(now=NOW)
+        assert not any(action.path == root for action in plan.actions)
+    report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
+    assert not any(action.path == root and action.status == "deleted" for action in report.actions)
+    assert {path: path.read_bytes() for path in before} == before
+    verified = verifier.verify(ref)
+    assert verified is not None and verified.successful
+
+
+# LLM: 候选仅保存调用ID，证据身份只在子JSON中；不能把目录根无路径引用误判为整棵可删。
+# 函数用途: 验证task临时目录的按内容ID引用在新旧计划中都保护兄弟文件。
+@pytest.mark.parametrize("late", [False, True])
+def test_id_only_task_tmp_member_protects_whole_tree(tmp_path, late):
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    root = home.owner_tasks_dir / "2026-10-01/sample/tmp"
+    evidence = old_file(root / "nested/proof.json", json.dumps({"artifact_id": "artifact-proof"}))
+    control = old_file(root / "a-control.bin", "whole tree must survive")
+    plan = service.plan(now=NOW)
+    assert any(action.path == root for action in plan.actions)
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="任务子证据按ID保护",
+        subject_key="scratch.task.id", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target="lesson", evidence_refs=({"artifact_id": "artifact-proof"},)))
+    candidates.transition(row.candidate_id, "approved", reviewer="test")
+    if not late:
+        plan = service.plan(now=NOW)
+        assert not any(action.path == root for action in plan.actions)
+    execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
+    assert json.loads(evidence.read_text()) == {"artifact_id": "artifact-proof"}
+    assert control.read_text() == "whole tree must survive"
+
+
+# LLM: 异常类型前缀仅跳过该范围，不影响同消息其它合法范围或批内有效锚点，不写游标。
+# 函数用途: 验证一条脏宿主ID不会使整批锚点收集抛错或扩域。
+@pytest.mark.parametrize("source", ["thread", "message_task", "audit_task"])
+@pytest.mark.parametrize("bad", ["session:", "project:task:x", "company:wrong"])
+def test_curator_skips_invalid_anchor_scope_without_losing_valid_scopes(tmp_path, source, bad):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.memory_store.curator_inputs import (
+        CuratorInputBatch,
+        attach_candidate_anchors,
+    )
+
+    _home, candidates, _service = runtime(tmp_path)
+    rows = [candidates.observe(CandidateObservation(candidate_type="lesson", content=f"合法锚点{scope}",
+        subject_key=f"anchor.{scope}", scope=MemoryScope(scope, key), origin="model_inferred", promotion_target="lesson"))
+        for scope, key in (("personal", "personal"), ("session", "session:valid-thread"), ("project", "project:valid-task"))]
+    messages = [SimpleNamespace(thread_id="valid-thread", metadata={"task_id": "task:valid-task"})]
+    events = []
+    if source == "audit_task":
+        events.append(SimpleNamespace(task_id=bad))
+    else:
+        messages.append(SimpleNamespace(thread_id=bad if source == "thread" else "valid-thread",
+            metadata={"task_id": bad if source == "message_task" else "task:valid-task"}))
+    batch = CuratorInputBatch(messages=tuple(messages), audit_events=tuple(events))
+    result = attach_candidate_anchors(batch, candidates)
+    assert {anchor["candidate_id"] for anchor in result.candidate_anchors} == {row.candidate_id for row in rows}
+    assert result.messages == batch.messages and result.audit_events == batch.audit_events

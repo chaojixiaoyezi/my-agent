@@ -126,7 +126,7 @@ class _RetentionScanContext:
         return frozenset(self.policy.legal_hold_task_ids)
 
 
-# LLM: 所有类别只为同一 retention 计划提案；快照和清单必须同批计算引用，不得另写清理状态。
+# LLM: 所有类别共用一次严格pin构建及其错误集合；目标分域仍沿原完整性门，不新增清理权威。
 # 函数用途: 按任务保护关系组合会话、候选、运行记录、回收站与过期快照/工具清单的清理动作。
 def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
     task_actions, selected_task_roots = _task_actions(
@@ -136,11 +136,15 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
         now=context.now,
         errors=context.errors,
     )
+    pin_errors: list[MemoryRetentionError] = []
+    protection = current_retention_pins(context.home, context.conversation_roots, pin_errors, now=context.now)
     actions = list(task_actions)
-    actions.extend(_task_tmp_actions(context, selected_task_roots))
-    actions.extend(_run_scratch_actions(context, selected_task_roots))
+    actions.extend(_task_tmp_actions(context, selected_task_roots, protection))
+    actions.extend(_run_scratch_actions(context, selected_task_roots, protection))
     actions.extend(_protected_runtime_actions(context, selected_task_roots))
-    actions.extend(_aged_file_actions(context, selected_task_roots))
+    # 保留原类别错误顺序：任务权威错误在前，统一来源错误只发表一次。
+    context.errors.extend(pin_errors)
+    actions.extend(_aged_file_actions(context, selected_task_roots, protection))
     actions.extend(_context_bundle_actions(context))
     actions.extend(
         _trash_actions(
@@ -149,6 +153,7 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
             now=context.now,
             errors=context.errors,
             conversation_roots=context.conversation_roots,
+            protection=protection,
         )
     )
     return actions
@@ -191,15 +196,16 @@ def _protected_runtime_actions(
     return actions
 
 
-# LLM: 引用来源读全才规划Daily/Compact/Curator；Daily/Compact沿原trash_file合同，不直接删除。
+# LLM: 消费同次规划的严格pin快照；引用来源读全才规划Daily/Compact/Curator，保留原回收合同。
 # 函数用途: 汇总按龄动作并保护引用；安全审计按记录计龄，原始audit继续禁止删除。
 def _aged_file_actions(
     context: _RetentionScanContext,
     selected_task_roots: frozenset[Path],
+    protection: tuple[_RetentionPins, bool],
 ) -> list[MemoryRetentionAction]:
     home = context.home
     policy = context.policy
-    pins, complete = current_retention_pins(home, context.conversation_roots, context.errors, now=context.now)
+    pins, complete = protection
     categories = (
         # LLM: audit 类别本次一律跳过。类别名与实际数据不符——O/audit/*.jsonl 是主代理每轮的记忆归档
         #   原始事件，Curator 要读，不是审计日志；直接删不可恢复。等存储登记表定了语义再处理
@@ -721,15 +727,15 @@ def task_scratch_unlocked(home, task_root, held, now):
     return True
 
 
-# LLM: 只允许tasks/<date>/<task>/tmp；规划消费严格pin，坏源或任一子证据引用保护整棵，policy零关闭。
+# LLM: 只允许规范任务临时目录；复用同次规划pin，所属任务或子证据命中即保护整棵，坏源仍关闭。
 # 函数用途: 规划三日闲置任务临时文件和空目录回收。
-def _task_tmp_actions(context, excluded):
+def _task_tmp_actions(context, excluded, protection):
     days = context.policy.task_tmp_idle_days
     if days <= 0:
         return []
     cutoff = context.now.timestamp() - days * _DAY_SECONDS
     actions = []
-    pins, complete = current_retention_pins(context.home, context.conversation_roots, context.errors, now=context.now)
+    pins, complete = protection
     if not complete and not pins.complete_for(Path(context.home.owner_tasks_dir), context.errors):
         return []
     for root in _fixed_depth_paths(Path(context.home.owner_tasks_dir), "tmp", context.errors):
@@ -741,6 +747,10 @@ def _task_tmp_actions(context, excluded):
             continue
         try:
             digest, members = scratch_inventory(root, cutoff)
+            state_path = root.parent / "work/state.json"
+            state = _read_state(state_path, context.errors, code="MEMORY_RETENTION_TASK_STATE_INVALID") if state_path.exists() else {}
+            if state is None or scratch_tree_pinned(pins, root, members, context.errors, task_root=root.parent, state=state):
+                continue
         except OSError:
             continue
         if members:
@@ -750,16 +760,16 @@ def _task_tmp_actions(context, excluded):
     return actions
 
 
-# LLM: runs仅DB/状态证实终态且pin完整无子证据引用才清scratch，保留运行档案与output/inputs。
+# LLM: runs仅终态且共享pin完整才规划；所属运行/任务ID或任何子证据引用都保护整棵scratch。
 # 函数用途: 将旧RUNNING档案的tmp/中间工具产物接入原留存计划。
-def _run_scratch_actions(context, excluded):
+def _run_scratch_actions(context, excluded, protection):
     days = context.policy.tmp_days
     if days <= 0:
         return []
     cutoff = context.now.timestamp() - days * _DAY_SECONDS
     actions = []
     runs = Path(context.home.owner_home_dir) / "runs"
-    pins, complete = current_retention_pins(context.home, context.conversation_roots, context.errors, now=context.now)
+    pins, complete = protection
     if not complete and not pins.complete_for(runs, context.errors):
         return []
     for authority in _fixed_depth_paths(runs, "work/state.json", context.errors):
@@ -781,6 +791,8 @@ def _run_scratch_actions(context, excluded):
                 continue
             try:
                 digest, members = scratch_inventory(scratch, cutoff)
+                if scratch_tree_pinned(pins, scratch, members, context.errors, task_root=root, state=row):
+                    continue
             except OSError:
                 continue
             if members:
@@ -790,6 +802,15 @@ def _run_scratch_actions(context, excluded):
                         authority_status=terminal[0], record_id=str(row.get("run_id") or root.name),
                         source_fingerprint=digest, cutoff_timestamp=cutoff)))
     return actions
+
+
+# LLM: 扫描与执行共用同一判据；只认结构化所属ID及原pins保护，不解析正文猜引用，调用者须先核完整性。
+# 函数用途: 所属任务或任一子成员受保护时保留整棵scratch及其未引用兄弟文件。
+def scratch_tree_pinned(pins, root, members, errors, *, task_root, state):
+    identities = {task_root.name, str(state.get("task_id") or ""), str(state.get("run_id") or "")}
+    identities.discard("")
+    return bool(identities.intersection(pins.ids) or pins.protects(root, errors)
+                or any(pins.protects(root / relative, errors) for relative, _identity in members))
 
 
 # LLM: 只枚举规范根下state，显式发现错误交调用方记录或上抛，不能把不可读当缺失。
@@ -1230,7 +1251,7 @@ def _expired_file_actions(
     return actions
 
 
-# LLM: purge只接受moved_at；全局竞态可作一次目标FD快照复核，来源坏或相关引用仍保留，不能直接忽略complete。
+# LLM: purge只接受moved_at并复用规划pin；目标FD复核仍要求全源稳定，坏源或相关引用绝不放行。
 # 函数用途: 规划回收站最终删除，保留宽限期内重新被引用的材料。
 def _trash_actions(
     *,
@@ -1239,6 +1260,7 @@ def _trash_actions(
     now: datetime,
     errors: list[MemoryRetentionError],
     conversation_roots: tuple[Path, ...] = (),
+    protection: tuple[_RetentionPins, bool] | None = None,
 ) -> list[MemoryRetentionAction]:
     root = Path(home.owner_trash_dir)
     if days <= 0 or not root.exists():
@@ -1246,7 +1268,6 @@ def _trash_actions(
     cutoff = now.timestamp() - days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     retention_root = root / "retention"
-    protection = None
     for tombstone in sorted(retention_root.glob("*/*/tombstone.json")) if retention_root.exists() else ():
         report = read_json_object_report(tombstone, context="memory_retention.trash_tombstone")
         moved = _timestamp(report.payload.get("moved_at")) if report.load_error is None else None
