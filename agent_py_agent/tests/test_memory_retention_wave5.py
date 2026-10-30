@@ -107,6 +107,31 @@ def runtime(tmp_path):
     return home, candidates, MemoryRetentionService(home_paths=home, candidates=candidates)
 
 
+def test_generation_formal_pins_invalidate_same_apply_snapshot(tmp_path):
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    first = memory.add("user", "fact", attributes={"source_refs": ["evidence-before"]})
+    memory.remove(first.entry_id)
+    builds = []
+
+    def builder(*args, **kwargs):
+        builds.append(True)
+        return scan.current_retention_pins(*args, **kwargs)
+
+    snapshot = ReferencePinSnapshot(home, (), NOW, builder)
+    errors = []
+    old = snapshot.current(errors)
+    assert old[1] and not errors and len(builds) == 1
+    assert snapshot.current(errors) is old
+    target = old_file(home.owner_memory_daily_dir / "new-generation-evidence.jsonl")
+    memory.add("user", "new fact", attributes={"source_refs": [str(target)]})
+    pins, complete = snapshot.current(errors)
+    assert complete and not errors and len(builds) == 2
+    assert pins.protects(target, errors)
+
+
 # LLM: 仅准备超期测试文件，不修改真实用户数据。
 # 函数用途: 写入文件并把修改时间设为过期。
 def old_file(path, text="{}\n"):

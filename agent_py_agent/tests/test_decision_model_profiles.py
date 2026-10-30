@@ -52,7 +52,7 @@ def test_decision_roundtrip_secrets_and_generation_separation(tmp_path):
                    lambda: resolved_model(data, key, require_enabled=False)):
         with pytest.raises(ModelProfileError, match="用途"):
             action()
-    assert selected_model_config(host) is host.config
+    assert selected_model_config(host).model_backend == ""
 
 
 def test_same_name_decision_does_not_make_child_generation_ambiguous(tmp_path):

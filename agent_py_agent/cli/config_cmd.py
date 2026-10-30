@@ -18,7 +18,12 @@ from pathlib import Path
 
 from agent_py_agent.agent.common.global_write_guard import GlobalWriteInWorkerError
 from agent_py_agent.agent.settings import load_config
-from agent_py_agent.agent.settings.parameter_changes import ChangeOrigin, WritePaths, set_parameter
+from agent_py_agent.agent.settings.parameter_changes import (
+    ChangeOrigin,
+    WritePaths,
+    cli_deployment_write_scope,
+    set_parameter,
+)
 from agent_py_agent.agent.settings.user_config_capability import (
     mask_value,
     packaged_config_path,
@@ -61,7 +66,8 @@ def cmd_config_set(args) -> int:
     previous = read_config_fact(key, user_path=path, default_path=packaged_config_path())["user_value"]
     before = previous if previous is not None else "(新增)"
     try:
-        report = set_parameter(key, args.value, paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
+        with cli_deployment_write_scope():
+            report = set_parameter(key, args.value, paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
     except GlobalWriteInWorkerError as exc:
         print(json.dumps({"ok": False, "code": exc.error_code,
                           "error": "当前受限进程没有写入全局配置的权限。", "executed": False}, ensure_ascii=False))

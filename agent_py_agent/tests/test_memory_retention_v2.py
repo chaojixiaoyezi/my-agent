@@ -466,6 +466,13 @@ def test_hard_delete_scrubs_authority_indexes_candidate_and_not_conversation(tmp
     conversation.write_text("用户历史真实消息\n", encoding="utf-8")
     conversation_before = conversation.read_bytes()
     record_id = local.make_record_id("memory", record.entry_id)
+    local.upsert_record(
+        source_type="memory",
+        source_id=record.entry_id,
+        title=record.kind,
+        content=record.content,
+        metadata={"kind": record.kind, "tags": record.tags or []},
+    )
     assert local.get_record(record_id) is not None
     assert record.entry_id in VectorStore(
         home.owner_memory_long_term_dir / "memory_vectors.json"
@@ -491,7 +498,12 @@ def test_hard_delete_scrubs_authority_indexes_candidate_and_not_conversation(tmp
     redacted = candidates.get(candidate.candidate_id)
     assert redacted.content == ""
     assert redacted.content_hash
-    assert "remove" in home.owner_memory_long_term_jsonl.read_text(encoding="utf-8")
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    store = MemoryGenerationStore(home.owner_memory_long_term_jsonl)
+    tombstones = store.tombstones.load()
+    assert record.entry_id in tombstones and tombstones[record.entry_id].action == "remove"
+    assert all(event.action == "remove" for event in store.events())
     assert content not in home.owner_memory_long_term_jsonl.read_text(encoding="utf-8")
     assert content not in home.owner_memory_ops_jsonl.read_text(encoding="utf-8")
     assert conversation.read_bytes() == conversation_before

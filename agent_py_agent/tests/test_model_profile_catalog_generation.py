@@ -86,6 +86,42 @@ def test_reads_do_not_create_or_upgrade_and_enabled_prepare_is_idempotent(tmp_pa
     }
 
 
+def test_startup_does_not_overwrite_migrated_catalog_that_temporarily_fails_validation(tmp_path, caplog):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    config = AgentConfig(my_agent_home=str(tmp_path / "home"))
+    agent = SimpleAgent(config, tmp_path)
+    key, _ = add(agent)
+    op(agent, "set_default", {"profile_id": key})
+    path = model_profiles_path(agent.home_paths)
+    _legacy(path, "owner_model_profiles.v4")
+    legacy = json.loads(path.read_text())
+    legacy["profiles"][key]["model_context_window_tokens"] = -1
+    path.write_text(json.dumps(legacy))
+    damaged = path.read_bytes()
+    restarted = SimpleAgent(config, tmp_path)
+    with pytest.raises(ModelProfileError):
+        selected_model_config(restarted)
+    assert path.read_bytes() == damaged and "catalog_invalid" in caplog.text
+    legacy["profiles"][key]["model_context_window_tokens"] = 96000
+    path.write_text(json.dumps(legacy))
+    repaired = path.read_bytes()
+    SimpleAgent(config, tmp_path)
+    assert path.read_bytes() == repaired
+
+
+def test_endpoint_change_requires_explicit_rekey_and_leaves_catalog_unchanged(tmp_path):
+    host = Host(tmp_path)
+    key, _ = add(host)
+    path = model_profiles_path(host.home_paths)
+    before = path.read_bytes()
+    with pytest.raises(ModelProfileError):
+        op(host, "save_provider", {"provider_id": "provider-" + key, "editing": True,
+                                  "provider": {"api_base": "https://new.example.test/v1"}})
+    assert path.read_bytes() == before
+
+
 def test_generation_is_serializable_and_stable_in_new_process(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host, model_custom_headers={"X-Private": "fake-private-header"})
@@ -117,7 +153,10 @@ def test_every_provider_change_invalidates_pending(tmp_path, field, value):
     host = Host(tmp_path)
     key, _ = add(host)
     expected = model_profile_generation(host, key)
-    op(host, "save_provider", {"provider_id": "provider-" + key, "editing": True, "provider": {field: value}})
+    provider = {field: value}
+    if field == "api_base":
+        provider["api_key"] = "explicit-new-endpoint-fixture"
+    op(host, "save_provider", {"provider_id": "provider-" + key, "editing": True, "provider": provider})
     assert not _current(host, expected)
 
 

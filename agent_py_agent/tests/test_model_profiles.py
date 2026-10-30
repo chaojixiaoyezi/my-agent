@@ -57,7 +57,9 @@ def test_private_profile_roundtrip_and_default(tmp_path):
     key, result = add(host)
     assert "secret" not in json.dumps(result)
     assert result["selected"] == "default"
-    assert selected_model_config(host) is host.config
+    unconfigured = selected_model_config(host)
+    assert (unconfigured.model_backend, unconfigured.model_name, unconfigured.api_key) == ("", "", "")
+    assert host.config.model_name == "deployment-model"
     result = execute_model_profile_operation(host, "set_default", {"profile_id": key})
     assert result["selected"] == key
     cfg = selected_model_config(host)
@@ -67,6 +69,30 @@ def test_private_profile_roundtrip_and_default(tmp_path):
     assert stat.S_IMODE(model_profiles_path(host.home_paths).stat().st_mode) == 0o600
     assert stat.S_IMODE(model_profiles_path(host.home_paths).parent.stat().st_mode) == 0o700
     assert not list(model_profiles_path(host.home_paths).parent.glob(".models-*"))
+
+
+@pytest.mark.parametrize("injected", [False, True])
+def test_empty_catalog_never_falls_back_but_preserves_explicit_injected_backend(tmp_path, injected):
+    from agent_py_agent.agent.backends import get_backend
+    from agent_py_agent.agent.backends.errors import ModelNotConfiguredError
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), model_backend="echo"), tmp_path)
+    backend = get_backend("echo", agent.config)
+    if injected:
+        agent.backend = backend
+    with selected_model_scope(agent):
+        assert agent.config.model_backend == "" and agent.config.model_name == ""
+        if injected:
+            assert agent.backend is backend and agent.backend.generate("offline").text
+        else:
+            with pytest.raises(ModelNotConfiguredError):
+                agent.backend.generate("must not fall back")
+    if injected:
+        key, _ = add(agent)
+        execute_model_profile_operation(agent, "set_default", {"profile_id": key})
+        with selected_model_scope(agent):
+            assert agent.config.model_name == "MiniMax-M2.7" and agent.backend is not backend
 
 
 # LLM: v6 允许 1..4095 真窗口，非法值测试改覆盖上溢，不删除原边界防线。
@@ -288,10 +314,13 @@ def test_root_and_nested_creation_bind_the_same_explicit_model(tmp_path):
     assert specs[0].attributes["host_model_profile.v1"] == expected
     invalid = _hierarchy_child_specs(agent, {"children": [raw, {"goal": "检查输出", "model": "missing"}]}, tool_name="create_subagents")
     assert invalid.ok is False and invalid.effect_outcome == "not_started"
-    items = create_items_from_params({"model": "model-B", "items": [{"goal": "A"}, {"goal": "B", "model": profile_id}]})
+    assert isinstance(create_items_from_params({"model": "model-B", "items": [{"goal": "A"}]}), str)
+    items = create_items_from_params({"items": [{"goal": "A", "model": "model-B"}, {"goal": "B", "model": profile_id}]})
+    assert isinstance(items, list)
     assert [item.params["model"] for item in items] == ["model-B", profile_id]
     props = build_create_subagents_model_spec().input_schema["properties"]
-    assert props["model"]["type"] == props["items"]["items"]["properties"]["model"]["type"] == "string"
+    assert "model" not in props
+    assert props["items"]["items"]["properties"]["model"]["type"] == "string"
 
 
 def test_different_child_models_do_not_share_creation_guard_identity():
@@ -406,7 +435,7 @@ def test_selected_model_survives_real_transport_guard_thread(tmp_path, monkeypat
 
 # LLM: 策展是后台消费者，必须走 owner 选中的 profile，而不是部署占位默认（echo/gpt-4o-mini）；
 # 这条回归防止再次把占位模型当成真实模型、让抽取永远过不了 schema。
-# 函数用途: 验证策展后端按 owner 选择解析 provider/model，profile 缺失时回落基础 config。
+# 函数用途: 验证策展后端按 owner 选择解析 provider/model，未选择时不得回落部署连接。
 def test_curator_backend_follows_owner_selected_profile(tmp_path):
     from agent_py_agent.agent.core import _build_memory_curator_backend
     from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig
@@ -415,10 +444,13 @@ def test_curator_backend_follows_owner_selected_profile(tmp_path):
     placeholder = AgentConfig(model_backend="echo", model_name="gpt-4o-mini")
     curator_config = MemoryCuratorConfig.from_agent_config(placeholder)
 
-    # 未选择 profile 时按 owner 自己的 config（部署默认）解析，不静默换模型
+    # 未选目录模型就是未配置，部署 echo 也不能充当正式目录旁路。
     fallback_backend, provider, model = _build_memory_curator_backend(host, placeholder, curator_config)
-    assert (provider, model) == ("echo", "deployment-model")
-    assert getattr(fallback_backend, "name", "") == "echo"
+    assert (provider, model) == ("", "")
+    from agent_py_agent.agent.backends.errors import ModelNotConfiguredError
+
+    with pytest.raises(ModelNotConfiguredError):
+        fallback_backend.generate("must not use deployment fallback")
 
     key, _result = add(host)
     # 不依赖具体 operation 名（不同分支的模型菜单操作集不同）：直接把 store 的 selected 指到该 profile。

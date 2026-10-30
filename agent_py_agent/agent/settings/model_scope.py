@@ -156,9 +156,19 @@ def prepare_model_dependencies(agent: object, model_config: object, *, inherited
     config = permission_config(model_config, agent.home_paths, inherited=inherited)
     prompts = copy(agent.prompts)
     prompts.config = config
+    default_backend = getattr(agent, "_default_constructed_backend", None)
+    preserve_injected_backend = (
+        getattr(model_config, "model_backend", "") in ("", "unconfigured")
+        and default_backend is not None
+        and agent.backend is not default_backend
+    )
     values = {
         "config": config,
-        "backend": agent.backend if model_config is agent.config else _profile_backend(agent, config),
+        "backend": (
+            agent.backend
+            if (model_config is agent.config or preserve_injected_backend)
+            else _profile_backend(agent, config)
+        ),
         "prompts": prompts,
     }
     if isinstance(getattr(type(agent), "tools", None), ModelScopedAttribute):

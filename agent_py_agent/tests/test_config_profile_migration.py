@@ -41,7 +41,8 @@ def test_config_profile_empty_selection_does_not_fall_back_to_deployment(tmp_pat
     assert resolved.model_backend == "" and resolved.model_name == "" and resolved.api_key == ""
     assert base.api_key == "retired-static-fixture"
     echo = AgentConfig(model_backend="echo")
-    assert selected_model_config_for_resources(echo, home).model_backend == "echo"
+    assert selected_model_config_for_resources(echo, None).model_backend == "echo"
+    assert selected_model_config_for_resources(echo, home).model_backend == ""
 
 
 # LLM: 固定假地址与假密钥，只生成纯数据，不建后端、不联网、不读取真实配置。

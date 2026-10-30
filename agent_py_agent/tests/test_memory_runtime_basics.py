@@ -57,6 +57,16 @@ def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
     return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
 
 
+def _offline_agent(config: AgentConfig, workspace: Path) -> SimpleAgent:
+    """显式离线测试后端走构造后注入；不让空 owner 目录重新回落部署 echo。"""
+    from agent_py_agent.agent.backends import get_backend
+
+    instance = SimpleAgent(config, workspace)
+    assert config.model_backend == "echo"
+    instance.backend = get_backend("echo", config)
+    return instance
+
+
 class RuntimeOverflowBackend:
     name = "runtime-overflow"
 
@@ -149,7 +159,7 @@ class NeverCalledBackend:
 
 def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
     """LLM: Tests runtime injects only formal routed lesson through the one Memory envelope."""
-    agent = SimpleAgent(
+    agent = _offline_agent(
         AgentConfig(
             model_backend="echo",
             memory_rule_routing_mode="soft",
@@ -171,7 +181,7 @@ def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
 
 def test_run_writes_raw_archive_when_saved(tmp_path):
     """LLM: Tests that agent.run() writes raw archive events when save=True."""
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
 
     result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
@@ -193,7 +203,7 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
 
 
 def test_saved_empty_model_response_is_archived_without_empty_long_term_memory(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     service = FinalizationService(agent)
 
     archived = service._archive_run_if_needed(
@@ -221,7 +231,7 @@ def test_saved_empty_model_response_is_archived_without_empty_long_term_memory(t
 
 
 def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(
             tmp_path,
             model_backend="echo",
@@ -253,7 +263,7 @@ def test_provider_saved_run_writes_only_owner_task_workspace(tmp_path):
 # LLM: 真实save=False运行仅生成canonical建议，保留原确认/执行/落盘断言，不外推CLI可执行性。
 # 函数用途: 核对my-agent memory compact准确命令分段及无持久化边界。
 def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run("请生成足够长的 compact 提示触发内容", save=False)
@@ -273,7 +283,7 @@ def test_run_surfaces_compact_suggestion_without_persistence(tmp_path):
 
 
 def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend = RuntimeOverflowBackend()
 
     result = agent.run("普通短任务，但后端报告上下文溢出", save=False)
@@ -289,7 +299,7 @@ def test_run_context_overflow_uses_same_compact_cycle_even_below_threshold(tmp_p
 
 
 def test_run_context_error_uses_same_compact_cycle(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
     backend = RaisingContextBackend()
     agent.backend = backend
 
@@ -302,7 +312,7 @@ def test_run_context_error_uses_same_compact_cycle(tmp_path):
 
 
 def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
     backend = NeverCalledBackend()
     agent.backend = backend
 
@@ -315,7 +325,7 @@ def test_run_preflights_prompt_over_context_before_provider_call(tmp_path):
 
 
 def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         AgentConfig(model_backend="echo", prompt_files=[]),
         tmp_path,
     )
@@ -338,7 +348,7 @@ def test_run_uses_provider_usage_for_active_compact_budget_not_cumulative(tmp_pa
 
 
 def test_active_compact_budget_excludes_full_archive_tool_history(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     service = FinalizationService(agent)
     archive_tool_calls = [
         {
@@ -367,7 +377,7 @@ def test_active_compact_budget_excludes_full_archive_tool_history(tmp_path):
 
 def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
     """LLM: Tests that save=False remains a hard persistence boundary for auto compact apply."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
     agent.backend.context_window_tokens = 20
 
     result = agent.run(
@@ -388,7 +398,7 @@ def test_run_no_save_blocks_persistent_auto_compact_apply(tmp_path):
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
     """LLM: Tests that agent.run() with save=False does not write any raw archive files."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run("不要归档这轮对话", save=False)
 
@@ -400,7 +410,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
 def test_run_no_save_does_not_write_runtime_fact(tmp_path):
     """LLM: Tests that save=False does not write runtime fact sources."""
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",
@@ -423,7 +433,7 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
 def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
     tmp_path,
 ) -> None:
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(tmp_path, model_backend="echo"),
         tmp_path,
     )
@@ -462,7 +472,7 @@ def test_run_no_save_still_persists_thread_model_usage_without_runtime_archive(
 
 def test_wake_turn_usage_row_names_the_models_it_actually_called(tmp_path) -> None:
     # 唤醒回合沿用前台请求的 request_id，落盘是同一累计账的增量；模型身份必须按本行调用记，不能被前台行“减掉”。
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.backend = SequenceUsageBackend([{"input_tokens": 100, "output_tokens": 10}])
     agent.backend.model_name = "usage-model-a"  # 真实后端都带 model_name，调用登记取它当模型身份
     thread = agent.conversation_store.threads.get_or_create({"canonical_user_id": "local-wake-usage", "now": 10.0})
@@ -489,7 +499,7 @@ def test_wake_turn_usage_row_names_the_models_it_actually_called(tmp_path) -> No
 
 
 def test_saved_run_runtime_fact_keeps_delivery_contract_outputs(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     requested = tmp_path / "requested-output" / "report.md"
     contract = {
         "schema_version": "delivery_contract.v1",
@@ -528,7 +538,7 @@ def test_saved_run_runtime_fact_keeps_delivery_contract_outputs(tmp_path):
 
 
 def test_saved_run_runtime_fact_keeps_target_coverage_contract(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     contract = {
         "schema_version": "delivery_contract.v1",
         "artifacts": [
@@ -571,7 +581,7 @@ def test_saved_run_runtime_fact_keeps_target_coverage_contract(tmp_path):
 
 def test_auto_resume_context_is_disabled_by_default(tmp_path):
     """LLM: Tests that auto resume context is disabled by default in agent config."""
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 恢复上下文任务", save=True)
 
     result = agent.run("继续 README", save=False)
@@ -582,7 +592,7 @@ def test_auto_resume_context_is_disabled_by_default(tmp_path):
 
 def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
     """LLM: Tests that ordinary 'continue working' phrasing does not leak old CLI task memory."""
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
         tmp_path,
     )
@@ -601,7 +611,7 @@ def test_continue_inside_new_cli_task_does_not_resume_old_task(tmp_path):
 
 def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
     """LLM: Tests that auto resume context injects recovery context in always mode."""
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(
             tmp_path,
             model_backend="echo",
@@ -624,7 +634,7 @@ def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
 
 def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
     """LLM: Tests that auto resume context can be enabled per-run with resume_context=True."""
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 临时恢复开关任务", save=True, request_id="request-auto-override")
 
     result = agent.run("继续 README", save=False, resume_context=True)
@@ -636,7 +646,7 @@ def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
 
 def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
     """LLM: Tests that auto resume context can be disabled per-run with resume_context=False override."""
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
         tmp_path,
     )

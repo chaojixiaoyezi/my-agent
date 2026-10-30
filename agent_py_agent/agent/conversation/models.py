@@ -5,6 +5,7 @@
 # 模块用途: 保存会话、消息、任务继任、目录绑定及分叉谱系；旧记录不推导继任或执行授权。
 from __future__ import annotations
 
+import hashlib
 import math
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -582,6 +583,10 @@ class ConversationThread:
         payload["channel_bindings"] = [item.to_dict() for item in self.channel_bindings]
         payload["task_ids"] = list(self.task_ids)
         payload["active_task_ids"] = list(self.active_task_ids)
+        # 只把相同摘要存为同一线程头内的内容引用；逻辑证据与 checkpoint 账本不变。
+        evidence = payload["compact_operation_evidence"]
+        if len(self.summary) > 1024 and evidence.get("summary") == self.summary:
+            evidence["summary"] = {"$thread_summary_sha256": hashlib.sha256(self.summary.encode("utf-8")).hexdigest()}
         for key in ("conversation_methods", "loaded_tool_names", "learning_source"):
             if not getattr(self, key):
                 payload.pop(key, None)
@@ -600,6 +605,15 @@ class ConversationThread:
         active_task_ids = data.get("active_task_ids")
         task_ids = data.get("task_ids")
         metadata = data.get("metadata")
+        summary = str(data.get("summary") or "")
+        raw_evidence = data.get("compact_operation_evidence")
+        evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
+        reference = evidence.get("summary")
+        if isinstance(reference, dict) and "$thread_summary_sha256" in reference:
+            expected = {"$thread_summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest()}
+            if reference != expected:
+                raise ValueError("compact evidence summary reference does not match thread summary")
+            evidence["summary"] = summary
         return cls(
             thread_id=str(data.get("thread_id") or ""),
             canonical_user_id=str(data.get("canonical_user_id") or ""),
@@ -611,7 +625,7 @@ class ConversationThread:
             decision_settings=decision_settings,
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),
-            summary=str(data.get("summary") or ""),
+            summary=summary,
             compacted_through_message_id=str(
                 data.get("compacted_through_message_id") or ""
             ),
@@ -640,11 +654,7 @@ class ConversationThread:
                 if isinstance(data.get("compact_vision_failed_generation"), int) else -1
             ),
             **_thread_provider_fields(data),
-            compact_operation_evidence=(
-                data.get("compact_operation_evidence")
-                if isinstance(data.get("compact_operation_evidence"), dict)
-                else {}
-            ),
+            compact_operation_evidence=evidence,
             verbose_level=_verbose_level(data.get("verbose_level")),
             reasoning_effort=normalize_reasoning_level(data.get("reasoning_effort")),
             pending_host_notices=_pending_host_notices(data.get("pending_host_notices")),

@@ -729,9 +729,11 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             scan['iterator'].close()
             del _QUOTA_SCANS[key]
             scan = None
+        replay_skip = 0
         if scan is None:
             cursor = recovered or {}
             prep = cursor.get('prep') if isinstance(cursor.get('prep'), dict) else None
+            replay_skip = int(prep.get('block_skip', 0)) if prep is not None else 0
             state = {'prep': dict(prep) if prep is not None else None}
             scan = {'iterator': _sorted_quota_entries(root, after=cursor.get('last_relpath', ''), state=state),
                     'revision': ledger['revision'], 'last_relpath': cursor.get('last_relpath', ''),
@@ -745,6 +747,9 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             expired['iterator'].close()
         complete, scanned, enumerated = False, 0, 0
         enumeration_budget = max(1024, max_entries * 4)
+        # 重放也计入枚举；旧前缀吃满普通预算时，额外只给该持久前缀一次重放额度。
+        replay_allowance = replay_skip if replay_skip >= enumeration_budget else 0
+        enumeration_budget += replay_allowance
         deadline = time.monotonic() + max_ms / 1000
         try:
             while scanned < max_entries and enumerated < enumeration_budget and time.monotonic() < deadline:
@@ -785,6 +790,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
         _write_quota_ledger(root, ledger)
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
+                'replay_allowance': replay_allowance,
                 'used_bytes': ledger['used_bytes'],
                 'inode_count': ledger['inode_count'], 'cursor': ledger['reconcile_cursor']}
 
@@ -797,10 +803,12 @@ def _valid_quota_prep_cursor(prep):
     parts, after, enumerated = prep.get('parts'), prep.get('after'), prep.get('enumerated')
     names, dir_id = prep.get('names'), prep.get('dir_id')
     dir_offset = prep.get('dir_offset', 0)
+    block_skip = prep.get('block_skip', 0)
     if (not isinstance(parts, list) or len(parts) > 64
             or any(not isinstance(p, str) or not p or '/' in p or p in ('.', '..') for p in parts)
             or not isinstance(after, str) or type(enumerated) is not int or enumerated <= 0
             or type(dir_offset) is not int or dir_offset < 0
+            or type(block_skip) is not int or not 0 <= block_skip <= enumerated
             or not isinstance(names, list) or len(names) > _QUOTA_SORT_BATCH
             or any(not isinstance(n, str) or not n or n <= after for n in names)
             or names != sorted(set(names))
@@ -857,19 +865,28 @@ def _quota_sorted_names(root, parts, after, state=None):
             names = list(prep.get('names', ()))
             raw_count = int(prep.get('enumerated', 0))
             resume_offset = int(prep.get('dir_offset', 0))
+            replay_remaining = int(prep.get('block_skip', 0))
             if resume_offset > 0:
                 _safe_dir_lseek(descriptor, resume_offset, os.SEEK_SET)
         else:
             names = []
             raw_count = 0
+            replay_remaining = 0
         last_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
         block_pos = last_pos
+        block_skip = 0
         with os.scandir(descriptor) as entries:
             for entry in entries:
                 cur_pos = _safe_dir_lseek(descriptor, 0, os.SEEK_CUR)
                 if cur_pos != last_pos:
                     block_pos = last_pos
                     last_pos = cur_pos
+                    block_skip = 0
+                block_skip += 1
+                if replay_remaining:
+                    replay_remaining -= 1
+                    yield None
+                    continue
                 name = entry.name + ('/' if entry.is_dir(follow_symlinks=False) else '')
                 if name > after and (len(names) < _QUOTA_SORT_BATCH or name < names[-1]):
                     idx = bisect.bisect_left(names, name)
@@ -881,7 +898,7 @@ def _quota_sorted_names(root, parts, after, state=None):
                 if isinstance(state, dict):
                     state['prep'] = {
                         'parts': list(parts), 'after': after, 'enumerated': raw_count,
-                        'dir_offset': block_pos, 'names': list(names), 'dir_id': dir_id,
+                        'dir_offset': block_pos, 'block_skip': block_skip, 'names': list(names), 'dir_id': dir_id,
                     }
                 yield None
             if isinstance(state, dict):

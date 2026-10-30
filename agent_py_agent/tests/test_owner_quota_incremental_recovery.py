@@ -331,7 +331,10 @@ def test_sort_preparation_is_budgeted_and_resumable(tmp_path, monkeypatch):
 
 # LLM: 大目录排序准备阶段若发生跨进程重启或LRU缓存淘汰，必须从持久prep状态有界继续推进并最终收敛。
 # 函数用途: 覆盖1400文件每片清缓存（含透明scandir枚举预算守恒）及17个owner超过LRU容量的完整收敛合同。
-def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cookie_block", [None, 1363], ids=["native", "linux-buffered-cookie"])
+def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_path, monkeypatch, cookie_block):
+    if cookie_block is not None:
+        _buffer_directory_cookies(monkeypatch, cookie_block)
     original_scandir = quota.os.scandir
     raw_scandir_count = [0]
 
@@ -358,9 +361,10 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
     roots = [tmp_path / f'owner-{idx:02d}' for idx in range(2)]
     for root in roots:
         root.mkdir()
+        assert _reconcile(root, max_entries=256, max_ms=1000)['complete']
         for index in range(1400):
             (root / f'{index:04d}').write_bytes(b'x')
-    epochs = {}
+    epochs, progress = {}, {}
     for _ in range(30):
         all_done = True
         for root in roots:
@@ -368,13 +372,21 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
                 scan['iterator'].close()
             quota._QUOTA_SCANS.clear()
             raw_scandir_count[0] = 0
+            before = json.loads((root / '.owner-quota-ledger.json').read_text())['reconcile_cursor']
+            skip = before.get('prep', {}).get('block_skip', 0)
+            allowance = skip if skip >= 1024 else 0
             result = _reconcile(root, max_entries=256, max_ms=1000)
             assert raw_scandir_count[0] == result['enumerated_entries']
-            assert raw_scandir_count[0] <= 1024
+            assert raw_scandir_count[0] <= 1024 + allowance
+            assert result['replay_allowance'] == allowance
             epochs.setdefault(root, result['cursor']['epoch'])
             assert result['cursor']['epoch'] == epochs[root]
             if not result['complete']:
                 all_done = False
+                cursor = result['cursor']
+                point = (cursor['last_relpath'], cursor.get('prep', {}).get('enumerated', 0))
+                assert root not in progress or point > progress[root]
+                progress[root] = point
         if all_done:
             break
     for root in roots:
@@ -385,6 +397,7 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
     lru_roots = [tmp_path / f'lru-{idx:02d}' for idx in range(17)]
     for root in lru_roots:
         root.mkdir()
+        assert _reconcile(root, max_entries=256, max_ms=1000)['complete']
         for index in range(1200):
             (root / f'{index:04d}').write_bytes(b'x')
     lru_epochs = {}
@@ -392,9 +405,12 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
         all_done = True
         for root in lru_roots:
             raw_scandir_count[0] = 0
+            before = json.loads((root / '.owner-quota-ledger.json').read_text())['reconcile_cursor']
+            skip = before.get('prep', {}).get('block_skip', 0)
+            allowance = skip if skip >= 1024 else 0
             result = _reconcile(root, max_entries=256, max_ms=1000)
             assert raw_scandir_count[0] == result['enumerated_entries']
-            assert raw_scandir_count[0] <= 1024
+            assert raw_scandir_count[0] <= 1024 + allowance
             lru_epochs.setdefault(root, result['cursor']['epoch'])
             assert result['cursor']['epoch'] == lru_epochs[root]
             if not result['complete']:
@@ -405,3 +421,60 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
         ledger = json.loads((root / '.owner-quota-ledger.json').read_text())
         assert ledger['reconcile_cursor']['complete'] is True
         assert ledger['used_bytes'] == ledger['inode_count'] == 1200
+
+
+def _buffer_directory_cookies(monkeypatch, block_size):
+    """真实 DirEntry/统计不变，仅模拟 glibc 整块预读期间保持不变的目录 cookie。"""
+    import stat
+
+    real_scan, real_open, real_seek = quota.os.scandir, quota.open_directory_beneath, quota.os.lseek
+    states = {}
+    cookie_base = 9030876314358498251
+
+    def open_dir(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        states[fd] = {"cookie": 0}
+        return fd
+
+    def seek(fd, offset, whence):
+        if fd not in states or not stat.S_ISDIR(quota.os.fstat(fd).st_mode):
+            return real_seek(fd, offset, whence)
+        if whence == quota.os.SEEK_SET:
+            assert offset == 0 or offset >= cookie_base
+            states[fd]["cookie"] = offset
+        else:
+            assert whence == quota.os.SEEK_CUR and offset == 0
+        return states[fd]["cookie"]
+
+    class BufferedScan:
+        def __init__(self, fd):
+            with real_scan(fd) as rows:
+                self.rows = sorted(rows, key=lambda row: row.name)
+            self.state = states[fd]
+            cookie = self.state["cookie"]
+            self.index = 0 if cookie == 0 else cookie - cookie_base
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.index >= len(self.rows):
+                raise StopIteration
+            row = self.rows[self.index]
+            self.index += 1
+            end = min(((self.index - 1) // block_size + 1) * block_size, len(self.rows))
+            self.state["cookie"] = cookie_base + end
+            return row
+
+    def scan(fd):
+        return BufferedScan(fd) if fd in states else real_scan(fd)
+
+    monkeypatch.setattr(quota, 'open_directory_beneath', open_dir)
+    monkeypatch.setattr(quota.os, 'lseek', seek)
+    monkeypatch.setattr(quota.os, 'scandir', scan)

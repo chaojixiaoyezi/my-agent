@@ -80,6 +80,29 @@ def test_cmd_config_set_feishu_ok_and_masks_secret(tmp_path, capsys) -> None:
     assert load_simple_yaml(p)["feishu_app_secret"] == "supersecretvalue"  # 但真值确实写进去了
 
 
+def test_cli_deployment_write_scope_never_leaks_to_parameter_center(tmp_path):
+    from agent_py_agent.agent.settings.parameter_changes import (
+        ChangeOrigin,
+        WritePaths,
+        cli_deployment_write_scope,
+        set_parameter,
+    )
+
+    path = _write_config(tmp_path)
+    before = path.read_bytes()
+    for phase in ("before", "after-cli", "after-exception"):
+        result = set_parameter("feishu_app_id", "not-authorized", paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
+        assert result["ok"] is False and result["code"] == "PARAMETER_SOURCE_READ_ONLY"
+        if phase == "before":
+            assert path.read_bytes() == before
+            assert C.cmd_config_set(Namespace(key="feishu_app_id", value="explicit-cli", config=str(path))) == 0
+        elif phase == "after-cli":
+            with pytest.raises(RuntimeError, match="scope exit"):
+                with cli_deployment_write_scope():
+                    raise RuntimeError("scope exit")
+    assert load_simple_yaml(path)["feishu_app_id"] == "explicit-cli"
+
+
 def test_cmd_config_get_masks_and_handles_missing(tmp_path, capsys) -> None:
     p = _write_config(tmp_path)
     set_simple_yaml_value(p, "feishu_app_secret", "abcdef123456")

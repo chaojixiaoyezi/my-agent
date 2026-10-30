@@ -1715,15 +1715,31 @@ def trash_payload_pinned(pins: _RetentionPins, container: Path, errors: list[Mem
 # LLM: 正式记忆复用原物化的版本/墓碑语义；坏schema拒绝，已删除记录不保留旧引用。
 # 函数用途: 收集仍有效正式记忆的来源引用。
 def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> None:
-    from .jsonl import _materialize_memory_events, _memory_record_from_obj
+    from .generation_manifest import MemoryGenerationStore
+    from .jsonl import _materialize_memory_events, _memory_record_from_obj, _tombstone_path
 
     path = Path(home.owner_memory_long_term_jsonl)
-    events = []
-    for row in _pin_rows(path):
-        record = _memory_record_from_obj(row)
-        if record is None:
-            raise ValueError("formal pin source schema is invalid")
-        events.append(record)
+    store = MemoryGenerationStore(path)
+    sources = [path, store.manifest_path, store.tombstones.path, _tombstone_path(path)]
+    for source in sources:
+        watch_pin_source(source)
+    root = store.manifest()
+    sources.extend(path.parent / item["path"] for item in (root or {}).get("segments", ()))
+    for source in sources:
+        watch_pin_source(source)
+    committed = store.events(root=root)
+    if committed is not None:
+        events = committed
+    else:
+        events = []
+        for row in _pin_rows(path):
+            record = _memory_record_from_obj(row)
+            if record is None:
+                raise ValueError("formal pin source schema is invalid")
+            events.append(record)
+        events.extend(store.tombstones.load().values())
+    for source in sources:
+        watch_pin_source(source)
     for record in _materialize_memory_events(events, include_expired=True):
         if not record.expires_at or record.expires_at > now.timestamp():
             pins.collect({"source": record.source, "attributes": record.attributes}, path)

@@ -60,6 +60,7 @@ _BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外
 # 可经参数中心修改并记账的模型档案字段（其余字段只能在 /model 里编辑）；取值由档案 schema（validate_model）校验。
 PROFILE_FIELDS = frozenset({"reasoning_control"})
 _USER_SETTINGS_WRITE: ContextVar[bool] = ContextVar("user_settings_write", default=False)
+_CLI_DEPLOYMENT_WRITE: ContextVar[bool] = ContextVar("cli_deployment_write", default=False)
 _LOCKED_LEDGER: ContextVar[Path | None] = ContextVar("config_transaction_ledger", default=None)
 _UNSPECIFIED = object()
 
@@ -75,6 +76,17 @@ def user_settings_write_scope():
         yield
     finally:
         _USER_SETTINGS_WRITE.reset(token)
+
+
+# LLM: 仅限本地 CLI config-set 宿主部署白名单入口进入；参数中心与模型工具不得使用该作用域。
+# 函数用途: 允许 CLI 显式宿主配置维护命令写入 agent_config.yaml 中的白名单部署项。
+@contextmanager
+def cli_deployment_write_scope():
+    token = _CLI_DEPLOYMENT_WRITE.set(True)
+    try:
+        yield
+    finally:
+        _CLI_DEPLOYMENT_WRITE.reset(token)
 
 
 # LLM: 谁发起、为什么；actor 用固定短标签（model / chat / cli / test），reason 只给人看、截断后记账，不参与任何判断。
@@ -182,15 +194,16 @@ def _writable_spec(key: str) -> ParameterSpec:
     spec = parameter_registry().get(str(key or "").strip())
     if spec is None:
         raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
-    if spec.tier == "deployment":
+    cli_allowed = _CLI_DEPLOYMENT_WRITE.get() and spec.source == SOURCE_AGENT
+    if spec.tier == "deployment" and not cli_allowed:
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",
             f"'{spec.key}' 属于宿主部署配置（{spec.source}），须由完整宿主管理员经对应部署入口维护；"
             "参数中心只能查看和搜索，不接受 owner/task/run 局部覆盖。")
-    if not spec.writer:
+    if not spec.writer and not cli_allowed:
         raise ParameterChangeError("PARAMETER_STRUCTURED", "没有支持该类型的参数 writer，不能修改。")
     user_allowed = _USER_SETTINGS_WRITE.get() and spec.user_editable
-    if not spec.writable and not user_allowed:
+    if not spec.writable and not user_allowed and not cli_allowed:
         reason = BOUNDARY_KEYS.get(spec.key, _BOUNDARY_REASON)
         raise ParameterChangeError("PARAMETER_BOUNDARY", f"'{spec.key}' 属于安全边界，不能由模型自行修改：{reason}")
     return spec

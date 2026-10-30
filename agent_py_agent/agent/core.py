@@ -544,6 +544,7 @@ class SimpleAgent(
         )
         self.prompts.capability_router = self.capability_router
         self.backend = get_backend(config.model_backend, config)
+        self._default_constructed_backend = self.backend
         from .settings.thread_model_selection import default_model_profile_id
 
         self.conversation_store = ConversationStore(

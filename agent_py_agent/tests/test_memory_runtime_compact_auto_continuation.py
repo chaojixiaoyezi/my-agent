@@ -569,7 +569,9 @@ def test_compact_deferred_record_is_not_counted_as_progress() -> None:
 
 def test_run_auto_compact_apply_continues_once_after_continue_packet(tmp_path):
     """LLM: Tests saved auto compact apply performs one guarded continuation turn."""
-    agent = SimpleAgent(
+    from agent_py_agent.tests.test_memory_runtime_basics import _offline_agent
+
+    agent = _offline_agent(
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
