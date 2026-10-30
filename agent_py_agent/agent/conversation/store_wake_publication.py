@@ -1,9 +1,11 @@
-# LLM: 有稳定去重键的发布以原 dedupe 文件冻结完整信号和观察；同锁先修原发布再准入下一代。
+# LLM: 有稳定去重键的发布以原dedupe文件冻结信号；POSIX祖先目录共享锁与owner维护排他锁覆盖准备、安装及失败重放。
 #   本模块只管理发布安装，不消费唤醒、不运行模型、不扫描另一个队列；查询绝不修账。
 # 模块用途: 让唤醒与观察在文件半写后重试同一份内容，避免重发、丢观察或把坏账当空账。
 from __future__ import annotations
 
 import json
+import os
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from ..common.json_io import (
     write_private_json_file_atomic,
     write_private_json_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import open_directory_beneath
 from ..common.opaque_id import validate_opaque_id
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
@@ -23,6 +26,25 @@ from .wake_poison import WAKE_STATUS_FAILED_PERMANENTLY
 
 _SCHEMA = "wake_dedupe.v2"
 _LEGACY_SCHEMA = "wake_dedupe.v1"
+
+
+# LLM: 发布先按根到叶对现有祖先目录持SH；任何祖先owner的维护EX均互斥，不靠路径形状猜owner或创建全局锁文件。
+# 函数用途: 覆盖完整发布与重放事务，非阻塞锁忙在任何prepared写入前抛错并关闭全部FD。
+@contextmanager
+def _publication_guard(root: Path, *, blocking: bool):
+    if os.name != "posix":
+        # 非POSIX保持原发布；维护端本来就要求fcntl，不能在不支持的平台执行删除。
+        yield
+        return
+    import fcntl
+
+    resolved = Path(root).resolve(strict=True)
+    with ExitStack() as stack:
+        for path in (*reversed(resolved.parents), resolved):
+            descriptor = open_directory_beneath(path, (), require_dir_fd=True)
+            stack.callback(os.close, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_SH | (0 if blocking else fcntl.LOCK_NB))
+        yield
 
 
 # LLM: 原文件通过原子替换发布，查询可直接读完整快照；不创建锁文件，只有不存在才是空账。
@@ -190,7 +212,7 @@ def _install(storage: ConversationStorage, path: Path, record: dict[str, Any], *
     return observation, installed
 
 
-# LLM: 相同键的判断、预留和安装共用原 dedupe 锁；prepared 重试永不跨代，published handled 才按策略新发。
+# LLM: owner祖先共享锁先于原dedupe锁，判断/预留/安装及prepared重试全程互斥维护；锁忙不能写半条发布或假报成功。
 # 函数用途: 发布或恢复一个有稳定键的信号及观察，返回原内容，不新增后台恢复服务。
 # LLM: 非阻塞只透传同一原锁；prepared/installed/published顺序不变，paired半提交保原账而非假原子成功。
 # 函数用途: C可立即拒绝发布锁忙，后续仍重放原同键内容。
@@ -199,7 +221,7 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
     if type(retain_handled) is not bool:
         raise ValueError("wake retain_handled must be boolean")
     path = storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key)
-    with locked_file_transition(path, blocking=blocking):
+    with _publication_guard(storage.root, blocking=blocking), locked_file_transition(path, blocking=blocking):
         record = _read_record(path)
         if record is not None and record.get("schema_version") == _LEGACY_SCHEMA:
             record = _migrate_legacy(storage, record, signal, paired=observation is not None, retain_handled=retain_handled)
