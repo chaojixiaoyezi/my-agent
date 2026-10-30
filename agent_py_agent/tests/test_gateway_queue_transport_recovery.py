@@ -69,7 +69,7 @@ def claim_window(tmp_path, monkeypatch):
     row["status"] = "pending"
     write_json_file_atomic(pending, row)
     with monkeypatch.context() as patch:
-        patch.setattr(queue_service, "_gateway_claim_payload", crash_claim)
+        crash_after_move(patch, pending, paths.processing / pending.name)
         with pytest.raises(QueueCrash):
             queue_service.claim_request(paths, pending)
     monkeypatch.setattr(p2, "observe_processes", stopped_processes)
@@ -79,10 +79,20 @@ def claim_window(tmp_path, monkeypatch):
                           path=paths.processing / pending.name, pending=pending)
 
 
-# LLM: 只在原claim写围栏前退出，不返回伪造claim。
-# 函数用途: 制造认领窗口的原控制流中断。
-def crash_claim(*_args):
-    raise QueueCrash()
+# LLM: 仅在目标请求真实从inbox rename到processing刚完成的瞬间立即抛出退出异常，验证最早processing后像已带queue_transport_source。
+# 函数用途: 模拟首次认领rename刚落地但尚未进入_gateway_claim_payload时的进程崩溃。
+def crash_after_move(monkeypatch, source, target):
+    original = Path.replace
+
+    # LLM: 先执行真实Path.replace完成物理搬运，再对目标请求立即中断，不影响原子临时文件写入。
+    # 函数用途: 在真实rename完成后立即触发测试崩溃。
+    def interrupted(path, dest):
+        result = original(path, dest)
+        if path == source and Path(dest) == target:
+            raise QueueCrash()
+        return result
+
+    monkeypatch.setattr(Path, "replace", interrupted)
 
 
 # LLM: 合成停止输入不代真实主机进程观察；原P2 verifier及证据写读回仍实际运行。
