@@ -1148,3 +1148,141 @@ def test_stat_failure_during_age_filter_is_diagnosed(tmp_path, monkeypatch):
     report = service.plan(now=NOW)
     assert any(e.path == str(target) for e in report.errors)
     assert not [a for a in report.actions if a.path == target]
+
+
+# LLM: 17MiB稠密热文件单次source_stamp读取与hash均不得超过256KiB上限。
+# 函数用途: 复现并验证超大稠密热来源的单次256KiB读取与摘要预算硬门。
+def test_r4_dense_large_hot_pin_source_respects_256k_read_and_hash_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    path = tmp_path / "dense-17m.jsonl"
+    path.write_bytes(b"a" * (17 * 1024 * 1024))
+    _freeze_pin_file_stat(monkeypatch, path)
+    target_ino = path.stat().st_ino
+    original_read, original_hash = os.read, hashlib.blake2b
+    read_bytes, hash_bytes, max_chunk = [0], [0], [0]
+
+    def counted_read(fd, size):
+        raw = original_read(fd, size)
+        if os.fstat(fd).st_ino == target_ino:
+            read_bytes[0] += len(raw)
+            max_chunk[0] = max(max_chunk[0], len(raw))
+        return raw
+
+    class CountedHash:
+        def __init__(self, *args, **kwargs):
+            self.inner = original_hash(*args, **kwargs)
+
+        def update(self, data):
+            hash_bytes[0] += len(data)
+            return self.inner.update(data)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    monkeypatch.setattr(os, "read", counted_read)
+    monkeypatch.setattr(hashlib, "blake2b", CountedHash)
+    first = reference_pins.source_stamp(path)
+    first_read, first_hash = read_bytes[0], hash_bytes[0]
+    assert 0 < first_read <= 256 * 1024
+    assert 0 < first_hash <= 256 * 1024
+    second = reference_pins.source_stamp(path)
+    second_read = read_bytes[0] - first_read
+    second_hash = hash_bytes[0] - first_hash
+    assert 0 < second_read <= 256 * 1024
+    assert 0 < second_hash <= 256 * 1024
+    assert max_chunk[0] <= 64 * 1024
+    assert first[:6] == second[:6]
+
+
+# LLM: 超过256KiB的600KiB热源在400KiB预算外位置发生等长改写时，热复核与冷却后复核均必须检出。
+# 函数用途: 证明不会只抽样前256KiB而漏掉中间400KiB偏移处的新增引用。
+@pytest.mark.parametrize("settle_after_rewrite", [False, True])
+def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
+    tmp_path, monkeypatch, settle_after_rewrite
+):
+    import time
+
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
+    # 将 source_refs 放在 400 KiB 偏移之后（超出首 256 KiB 切片窗口）。
+    prefix = "p" * (400 * 1024)
+    suffix = "q" * (180 * 1024)
+    payload = (
+        '{"thread_id":"t","updated_at":'
+        + str(NOW.timestamp())
+        + ',"summary":"'
+        + prefix
+        + '","source_refs":["'
+        + str(control)
+        + '"],"note":"'
+        + suffix
+        + '"}\n'
+    )
+    path = old_file(directory / "t.json", payload)
+    assert path.stat().st_size > 580 * 1024
+    assert payload.index("pin-a.jsonl") > 400 * 1024
+    _freeze_pin_file_stat(monkeypatch, path)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    first, complete = snapshot.current(errors)
+    assert complete and not errors and not first.protects(target, errors)
+    rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl")
+    assert len(rewritten) == len(payload)
+    path.write_text(rewritten)
+    if settle_after_rewrite:
+        later = time.time_ns() + 3_000_000_000
+        monkeypatch.setattr(time, "time_ns", lambda: later)
+    second, complete = snapshot.current(errors)
+    assert complete and not errors and second is not first and second.protects(target, errors)
+
+
+# LLM: 超过单轮1MiB快照预算的热源在未完成全部切片前必须失败关闭，下一轮可续完成并捕获1.2MiB处改写。
+# 函数用途: 验证超1MiB热源的分轮失败关闭可续验证与超远偏移等长改写检测。
+def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complete(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
+    prefix = "p" * (1200 * 1024)
+    suffix = "q" * (300 * 1024)
+    payload = (
+        '{"thread_id":"t","updated_at":'
+        + str(NOW.timestamp())
+        + ',"summary":"'
+        + prefix
+        + '","source_refs":["'
+        + str(control)
+        + '"],"note":"'
+        + suffix
+        + '"}\n'
+    )
+    path = old_file(directory / "t.json", payload)
+    assert path.stat().st_size > 1500 * 1024
+    assert payload.index("pin-a.jsonl") > 1200 * 1024
+    _freeze_pin_file_stat(monkeypatch, path)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    # 第 1 轮仅核验前 4 片（<= 1 MiB），剩余切片未核完必须失败关闭。
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current(errors)
+    # 第 2 轮从断点续验剩余切片，完成全片验证后放行。
+    errors = []
+    first, complete = snapshot.current(errors)
+    assert complete and not errors and not first.protects(target, errors)
+    # 在 1.2 MiB 偏移处做等长原地改写：下轮先因超过 1 MiB 复核预算失败关闭，再于续验轮检出并重建。
+    rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl")
+    assert len(rewritten) == len(payload)
+    path.write_text(rewritten)
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current(errors)
+    errors = []
+    second, complete = snapshot.current(errors)
+    assert complete and not errors and second is not first and second.protects(target, errors)
+
