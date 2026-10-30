@@ -52,6 +52,7 @@ from .background_process_launch import (
     BackgroundLaunchError,
     BackgroundLaunchRequest,
     start_background_process,
+    validate_launch_owner_scopes,
 )
 from .listen_scope import DEFAULT_LISTEN_SCOPE, LISTEN_SCOPES, normalize_listen_scope
 from .models import (
@@ -1381,7 +1382,7 @@ class ShellTool(BaseTool):
             sandbox_protected_paths,
         )
 
-    # LLM: 先预留真实执行归属，spawn 带同一宿主擦洗上界；取消只影响交接前，日志与进程交接仍由 host 独占。
+    # LLM: 先纯校验新启动owner再建日志/预留；spawn带原宿主擦洗上界，取消只影响交接前，资源仍由host独占。
     # 函数用途: 启动可跨工作片管理的后台命令，返回稳定句柄及真实启动或清理结果。
     def _start_background_command(
         self, command: str, target: Path, sandbox_roots: _ShellSandboxRoots,
@@ -1390,6 +1391,8 @@ class ShellTool(BaseTool):
         listen_scope: str = DEFAULT_LISTEN_SCOPE,
     ) -> ToolHandlerOutcome:
         try:
+            execution_scope = execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home)
+            validate_launch_owner_scopes(access_scope, execution_scope)
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
                                             self.protected_persona_root, *sandbox_roots[:2],
                                             SandboxWriteProtection(tuple(sandbox_roots[2] or ()), getattr(self, "_sandbox_forbidden_write_roots", ())),

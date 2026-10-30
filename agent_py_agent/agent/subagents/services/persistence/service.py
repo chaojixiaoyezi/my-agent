@@ -1,5 +1,5 @@
-# LLM: 原load与轻摘要共用canonical reader及指纹；摘要仅含不可变标量，完整读取仍返回独立副本，不增状态权威。
-# 模块用途: 给无Agent的已认证领域读取原子任务，原写入和投影流程保持。
+# LLM: 原load与轻摘要共用canonical reader及指纹；摘要逐字段拒绝坏类型后才投影不可变标量，完整读取仍保深副本和原兼容，不增状态权威。
+# 模块用途: 给已认证领域读取原子任务，隔离坏摘要字段，保留原写入、缓存和完整任务读取流程。
 # LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
 # 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
 # LLM: 正负缓存每次核locator指纹和目标存在性；只读predicate锁外筛选私有引用，只有命中项复制，错误仍保留。
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -129,6 +130,28 @@ class SubAgentRunSummariesReport:
     load_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
+# LLM: 仅摘要投影调用此纯校验；严格内置类型排除容器、bool及可变子类，不转换坏值，不修改缓存或完整读取器。
+# 函数用途: 验证身份、非空状态和有限数值时间后构造轻摘要，让坏字段沿扫描器原逐条 load_errors 返回。
+def _validated_run_summary(task: SubAgentTask) -> SubAgentRunSummary:
+    run_id, root_id, status = task.id, task.root_id, task.status
+    updated_at, created_at = task.updated_at, task.created_at
+    for name, value in (("id", run_id), ("root_id", root_id), ("status", status)):
+        if type(value) is not str:
+            raise ValueError(f"子代理摘要字段 {name} 必须是字符串")
+    validate_opaque_id(run_id, kind="summary.id")
+    # 旧任务允许没有显式根关系；非空根仍沿原拒绝式身份规则，不从路径补造。
+    if root_id:
+        validate_opaque_id(root_id, kind="summary.root_id")
+    if not status.strip():
+        raise ValueError("子代理摘要字段 status 必须是非空字符串")
+    for name, value in (("updated_at", updated_at), ("created_at", created_at)):
+        if type(value) not in (int, float):
+            raise ValueError(f"子代理摘要字段 {name} 必须是有限数值")
+        if type(value) is float and not math.isfinite(value):
+            raise ValueError(f"子代理摘要字段 {name} 必须是有限数值")
+    return SubAgentRunSummary(run_id, root_id, status, updated_at, created_at)
+
+
 # LLM: Canonical root verification accepts either the explicit root relation or the root run
 # itself. It never derives lineage from names, descriptions, paths, or status prose.
 # 函数用途: 复核索引选出的 run 确实属于指定根任务，防止陈旧查询行串树。
@@ -205,8 +228,8 @@ def _list_runs_for_root_report(
     return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
 
 
-# LLM: canonical文件仍是权威；公开列表只返回副本，私有引用仅供只读predicate，原指纹/负缓存/粗mtime门保持。
-# 类用途: 管理子代理持久化与实时列表筛选；复制优化不跨轮冻结任务集合。
+# LLM: canonical文件仍是权威；完整列表保深副本，轻摘要先严格校验标量，私有引用仅供只读筛选，原指纹/负缓存/粗mtime门保持。
+# 类用途: 管理子代理持久化与实时列表筛选，隔离坏摘要且不跨轮冻结任务集合。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
 
@@ -257,8 +280,8 @@ class SubAgentPersistenceService:
     def list_run_summaries(self) -> list[SubAgentRunSummary]:
         return self.list_run_summaries_report().runs
 
-    # LLM: 使用与完整列表相同的locator、错误报告、缓存淘汰和排序；读取锁内引用只投影标量，不修改任务。
-    # 函数用途: 扫描实时轻摘要及坏行，保留跨进程更新和文件删除的即时可见性。
+    # LLM: 使用原locator、错误报告、缓存淘汰和排序；冷/热私有引用均须严格验证五字段后才投影，不转换或复制整任务。
+    # 函数用途: 扫描实时轻摘要并将坏字段隔离到该条错误，保留跨进程更新和删除的即时可见性。
     def list_run_summaries_report(self) -> SubAgentRunSummariesReport:
         runs, errors, seen = [], [], set()
         for task_file in sorted(self.workspace.glob("*/task.json")):
@@ -266,7 +289,7 @@ class SubAgentPersistenceService:
             seen.add(run_id)
             try:
                 task = self._cached_run_ref(run_id, task_file)
-                runs.append(SubAgentRunSummary(task.id, task.root_id, task.status, task.updated_at, task.created_at))
+                runs.append(_validated_run_summary(task))
             except Exception as exc:
                 report = runtime_error_report(exc, context="subagents.load")
                 report.update(run_id=run_id, path=str(task_file))

@@ -1,3 +1,11 @@
+## 2026-10-29 e905 sol-14 Round 1：只读观察与范围围栏
+
+- `background_process_owner.canonical_observation_owner_id` 从完整 local/provider home 后缀推导候选根，经原 resolver 回验；不使用最近同名祖先，不扫描、不物化目录。
+- `background_process_view` 的 list/inspect 可选 `expected_owner_id` 每次在缓存前核对当前上下文；旧 v1 兼容仅改观察归属，不改原生执行 reader，也不授予控制权。
+- `http_handlers` 通知响应携带独立机器状态；`tui_threading._BackgroundPollReport` 固定本次 context，刷新在原锁内校验及初始化范围，IO 保持锁外，发表与成功/异常清理出口再核对完整 scope；已有 scope 只校验、不重认领。`chat_client_context` 不将结构化快照失败误升级为权限失信。
+- `background_process_launch.validate_launch_owner_scopes` 在启动两入口的副作用前核对两份 scope；终态 TTL 仍只由 `ProcessSessionStore` 原维护负责，观察没有隐式删除。
+- `recovery` 正 MP 运输来源仍是未完成项，不把本次观察修复当作恢复协议已补齐。见 [进度](02-progress.md) 与 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-29 e905 sol-14：展示缓存与原队列恢复结构
 
 - `tui_view`：每块摘要缓存、稳定元组索引和副作用后 UIContent 单槽缓存；完整来源行计算不改。

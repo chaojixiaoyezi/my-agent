@@ -1,3 +1,8 @@
+## 2026-10-29 e905 sol-14 Round 1：摘要标量准入
+
+- `services/persistence/service.py::_validated_run_summary` 只接受精确 str 的 id/root_id/status（id非空），以及精确 int/float 的有限时间，避免 bool、子类型或可变引用穿透 frozen DTO。
+- `list_run_summaries_report` 在原逐条异常边界内构造验证后的摘要；坏记录形成 load_errors，健康摘要仍零整任务 deepcopy，不改变原 reader、指纹、负缓存与排序。
+
 ## 2026-10-29 e905 sol-14：不可变摘要查询结构
 
 - `SubAgentRunSummary` 只含 id/root_id/status/updated_at/created_at；`SubAgentRunSummariesReport` 每次提供独立结果和错误列表。

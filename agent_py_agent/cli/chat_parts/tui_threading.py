@@ -1,6 +1,6 @@
 # LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
 # 过程轮询按流身份与序号一起确认；换进程只重基易失游标，不重置 canonical 消息位置。
-# 模块用途: 低频刷新后台通知与当前会话只读进程观察；仅同scope已验证帧容忍两次瞬态错误，空新会话不扫owner。
+# 模块用途: 低频刷新后台通知与当前会话只读观察；快照新鲜度独立于可信绑定，完整同范围旧帧仅作陈旧展示。
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 
 from .tui_identity_window import TuiIdentityWindow
 from .tui_params import StartWorkerParams, WorkerConfigParams
@@ -37,6 +39,62 @@ _BG_WATCH_TRANSIENT_ERRNOS = frozenset({errno.ENOENT, getattr(errno, "ESTALE", e
 _TRANSIENT_BACKGROUND_VIEW_ERRORS = frozenset({"DIRECTORY_CHANGED_DURING_READ", "LOCK_TIMEOUT", "SNAPSHOT_PARSE_INCOMPLETE"})
 _HARD_BACKGROUND_VIEW_ERRORS = frozenset({"PERMISSION_DENIED", "OWNER_MISMATCH"})
 _BG_WATCH_PERMISSION_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
+
+
+# LLM: 本轮报告只携原解析器的事实及易失上下文，不构造第二线程权威或执行权限；外层始终返回bool。
+# 类用途: 分别记录通知快照是否成功、绑定可信度和机器可判定的失败原因。
+@dataclass
+class _BackgroundPollReport:
+    context: tuple
+    snapshot_ok: bool = False
+    binding_state: str = "unavailable"
+    failure_kind: str = "corrupt_or_unknown"
+    thread_id: str | None = None
+
+
+# LLM: 只取宿主home_paths、显示会话与原reset代次；不从命令、记录、日志或cwd推owner。
+# 函数用途: 冻结同一轮观察可保留旧帧的完整上下文，不包含任何控制授权。
+def _background_watch_context(agent, session_id, runtime):
+    paths = getattr(agent, "home_paths", None)
+    home = getattr(paths, "owner_home_dir", None)
+    return (str(Path(home).resolve()) if home else "", getattr(paths, "owner_id", None),
+            session_id, getattr(runtime, "conversation_reset_generation", 0))
+
+
+# LLM: reset代次与owner/session均须未变；新请求标记只淘汰旧请求，不成为canonical线程来源。
+# 函数用途: 在任何迟到结果发表前复核本轮仍属于当前显示上下文。
+def _background_poll_current(agent, runtime, report):
+    return (report.context == _background_watch_context(agent, report.context[2], runtime)
+            and getattr(runtime, "_background_watch_poll_context", report.context) == report.context)
+
+
+# LLM: 硬拒绝优先于瞬态；仅原异常类型、errno和HTTP状态可决定分类，未知异常不按文案降级。
+# 函数用途: 将真实运输异常区分为权限拒绝、可信短暂故障或未知损坏。
+def _background_poll_failure(error):
+    if _background_watch_hard_projection(error):
+        return _background_watch_security_kind(error)
+    if isinstance(error, HTTPError):
+        return ("permission_denied" if error.code in {401, 403} else
+                "transport_transient" if error.code in {408, 429, 502, 503, 504} else "corrupt_or_unknown")
+    if isinstance(error, URLError):
+        return _background_poll_failure(error.reason)
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return "transport_transient"
+    return "corrupt_or_unknown"
+
+
+# LLM: 仅精确owner机器码区分owner拒绝与权限拒绝，混合/坏形状不降低原硬拒绝等级。
+# 函数用途: 在已确认硬拒绝后保留准确的安全失败种类。
+def _background_watch_security_kind(value):
+    if isinstance(value, BaseException):
+        value = {"error_code": getattr(value, "error_code", None), "reason_code": getattr(value, "reason_code", None)}
+    if isinstance(value, Mapping):
+        errors = value.get("errors")
+        entries = (value, *(errors if isinstance(errors, (list, tuple)) else ()))
+        if any(isinstance(item, Mapping) and any(item.get(key) == "OWNER_MISMATCH"
+               for key in ("error_code", "reason_code")) for item in entries):
+            return "owner_mismatch"
+    return "permission_denied"
 
 
 # LLM: 仅代表本次投影全部错误均已结构化确认瞬态；不携正文、权限或第二份进程快照。
@@ -87,10 +145,12 @@ def _background_watch_transient_projection(errors: object) -> bool:
 
 
 # LLM: scope变更、未确认和/new仅清易失观察资格，不改进程状态或消费通知。
-# 函数用途: 丢弃已验证旧帧资格和连续瞬态计数。
+# 函数用途: 丢弃已验证旧帧资格、陈旧标记、连续瞬态计数和观察提示去重键。
 def _reset_background_watch_cache(navigation: object) -> None:
     navigation._background_watch_valid_scope = None
     navigation._bg_watch_consecutive_transient_failures = 0
+    navigation._background_watch_stale = False
+    navigation._background_watch_warning_key = None
 
 
 # LLM: config factory 透传同一 queue/refs/runtime/local_run_ref；不得复制状态或创建第二个控制句柄。
@@ -181,6 +241,7 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
 #   达到次数门槛、且距上次成功超过时间门槛才对外报未同步；一旦成功立即清零并刷新成功时刻。
 # 类用途: 保存后台通知循环的去抖状态，判定本轮是否应发布同步状态。
 class _NoticeWarnDebounce:
+    # LLM: 仅初始化本循环的易失计数与monotonic基准，不发布提示或改变通知退避合同。
     # 函数用途: 建立失败计数与成功时刻基准。
     def __init__(self) -> None:
         self.consecutive_failures = 0
@@ -416,8 +477,8 @@ def _run_background_notice_loop(
             debounce.last_success_at = time.monotonic()
 
 
-# LLM: 先消费canonical快照；解析异常显式传给观察同步，不能因finally重读成功变成正常空态，原异常继续退避。
-# 函数用途: 同步原通知后刷新同会话进程投影；消费抛错仍清旧观察，不借显示session_id猜线程。
+# LLM: 报告独立保存快照和绑定事实；只有解析阶段能标invalid，其他异常保留原传播/退避，旧代finally零发表。
+# 函数用途: 同步原通知后按面板状态刷新同范围观察，对外仍返回原bool。
 def _consume_background_notices(
     agent: object,
     session_id: str,
@@ -432,37 +493,43 @@ def _consume_background_notices(
     event_cursor = event_cursor_ref if event_cursor_ref is not None else [0]
     store = getattr(agent, "conversation_store", None)
     snapshot_ok = False
-    scope_error = False
+    report = _begin_background_poll(agent, session_id, tui_runtime, agent_navigation)
     try:
         if store is None:
             snapshot_ok = _consume_gateway_background_snapshot(
-                agent,
-                session_id,
-                tui_runtime,
-                app_ref,
-                seen,
-                event_cursor,
-                agent_navigation,
+                agent, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, report,
             )
         else:
             snapshot_ok = _consume_local_background_snapshot(
-                agent,
-                store,
-                session_id,
-                tui_runtime,
-                app_ref,
-                seen,
-                event_cursor,
-                agent_navigation,
+                agent, store, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, report,
             )
-    except Exception:
-        scope_error = True
+    except Exception as exc:
+        if report.binding_state != "invalid":
+            report.failure_kind = _background_poll_failure(exc)
+            if report.failure_kind in {"permission_denied", "owner_mismatch"}:
+                report.binding_state = "invalid"
         raise
     finally:
-        # 通知消费可能在解析本地绑定时抛错；仍清观察，原异常继续交给外层退避。
-        if _sync_background_watch(agent, agent_navigation, session_id=session_id, runtime=tui_runtime, snapshot_ok=snapshot_ok, scope_error=scope_error) and app_ref and app_ref[0] is not None:
+        report.snapshot_ok = snapshot_ok
+        if _sync_background_watch(agent, agent_navigation, session_id=session_id, runtime=tui_runtime,
+                                  snapshot_ok=snapshot_ok, poll_report=report) and app_ref and app_ref[0] is not None:
             app_ref[0].invalidate()
     return snapshot_ok
+
+
+# LLM: 请求起点只登记易失上下文；新owner/session/reset不得借旧Gateway binding，响应仍需原代次锁复核。
+# 函数用途: 在IO前冻结完整范围，切owner/session/reset先清旧展示和自身提示，再淘汰旧绑定。
+def _begin_background_poll(agent, session_id, runtime, navigation=None):
+    with getattr(runtime, "_lock", nullcontext()):
+        report = _BackgroundPollReport(_background_watch_context(agent, session_id, runtime))
+        runtime._background_watch_poll_context = report.context
+        if getattr(runtime, "_background_watch_gateway_context", None) != report.context:
+            runtime._background_watch_gateway_binding = (session_id, "")
+        scope = getattr(navigation, "_background_watch_scope", None)
+        reader = getattr(navigation, "active_runtime", None)
+        if scope is not None and (len(scope) != 5 or (*scope[:3], scope[4]) != report.context) and callable(reader):
+            _clear_background_watch(navigation, reader())
+        return report
 
 
 # LLM: 真实runtime的锁与reset、快照提交共用；无锁旧显示替身沿原协议兼容，不另造锁，锁内不做IO。
@@ -476,7 +543,7 @@ def _capture_background_poll_state(tui_runtime, event_cursor):
 
 # LLM: 认证消息页与独立过程流分开消费；起始采样及提交均与reset共锁，消息页请求在锁外。
 # 同代消息位置不回退，过程序号仅在换流时重基；类型化活动只影响轮询频率，坏响应沿原退避且保留显示。
-# 函数用途: 同步当前会话线程和执行绑定，再按canonical顺序收消息；线程投影只供观察、不改变控制目标。
+# 函数用途: 同步当前会话线程和执行绑定，独立报告运输/子视图失败；迟到响应不改绑定、游标或提示。
 def _consume_gateway_background_snapshot(
     agent: object,
     session_id: str,
@@ -485,13 +552,12 @@ def _consume_gateway_background_snapshot(
     seen: set[tuple[str, str]],
     event_cursor: list[int],
     agent_navigation: object | None = None,
+    report: _BackgroundPollReport | None = None,
 ) -> bool:
+    report = report if report is not None else _begin_background_poll(agent, session_id, tui_runtime, agent_navigation)
     fetcher = getattr(agent, "request_background_notices", None)
     if not callable(fetcher):
         return True
-    binding = getattr(tui_runtime, "_background_watch_gateway_binding", None)
-    if binding is None or binding[0] != session_id:
-        tui_runtime._background_watch_gateway_binding = (session_id, "")
     generation, message_after, event_after, event_stream_id = _capture_background_poll_state(tui_runtime, event_cursor)
     try:
         payload = fetcher(
@@ -500,11 +566,18 @@ def _consume_gateway_background_snapshot(
             event_after=event_after,
             event_stream_id=event_stream_id,
         )
-    except Exception:
+    except Exception as exc:
+        report.failure_kind = _background_poll_failure(exc)
+        report.binding_state = "invalid" if report.failure_kind in {"permission_denied", "owner_mismatch"} else "unavailable"
         return False
-    # LLM: 原HTTP调用已结束，只在原代次内发表，避免/new后迟到响应重建旧历史。
+    # LLM: 原HTTP调用已结束，只在原代次和完整上下文内发表，避免/new后迟到响应重建旧历史。
     # 函数用途: 将本次快照交给带reset代次保护的显示提交。
     def publish():
+        if not _background_poll_current(agent, tui_runtime, report):
+            return False
+        _classify_gateway_background_poll(tui_runtime, session_id, payload, report)
+        if report.binding_state == "invalid":
+            return False
         return _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor,
             agent_navigation, payload, message_after)
     apply = getattr(tui_runtime, "apply_conversation_snapshot", None)
@@ -514,13 +587,45 @@ def _consume_gateway_background_snapshot(
         tui_runtime=tui_runtime, expected_generation=generation)
     if view_changed and app_ref[0] is not None:
         app_ref[0].invalidate()
+    report.failure_kind = "" if view_ok else "child_view_only"
+    report.snapshot_ok = view_ok
     return view_ok
 
 
+# LLM: 只消费来源点的机器字段；明确硬拒绝压过瞬态标签，旧服务端未知错误不伪装成可信运输失败。
+# 函数用途: 记录Gateway绑定与快照两个维度，消息页失败仍可保留本次已确认线程。
+def _classify_gateway_background_poll(runtime, session_id, payload, report):
+    if _background_watch_hard_projection(payload):
+        report.binding_state, report.failure_kind = "invalid", _background_watch_security_kind(payload)
+        return
+    if not isinstance(payload, Mapping):
+        return
+    kind = payload.get("failure_kind")
+    kind = kind if isinstance(kind, str) else None
+    binding_state = payload.get("binding_state")
+    binding_state = binding_state if isinstance(binding_state, str) else None
+    if kind in {"permission_denied", "owner_mismatch", "binding_invalid"} or payload.get("binding_state") == "invalid":
+        report.binding_state = "invalid"
+        report.failure_kind = kind if kind in {"permission_denied", "owner_mismatch"} else "binding_invalid"
+        return
+    if payload.get("ok") is True or binding_state in {"confirmed", "empty"}:
+        if not _publish_gateway_background_watch_binding(runtime, session_id, payload):
+            report.binding_state, report.failure_kind = "invalid", "binding_invalid"
+            return
+        thread_id = runtime._background_watch_gateway_binding[1]
+        report.thread_id = thread_id or None
+        report.binding_state = "confirmed" if thread_id else "empty"
+        runtime._background_watch_gateway_context = report.context
+    report.failure_kind = (kind if kind in {"transport_transient", "projection_transient", "child_view_only"}
+                           else "corrupt_or_unknown")
+
+
 # LLM: 同reset代次内发表；空target只保留同一本地durable前台请求旧投影，空闲/换请求仍清除，不保留后台task。
-# 函数用途: 同步已确认会话的消息、过程和显示游标。
+# 函数用途: 沿原控制DTO顺序同步消息和游标；生产调用方先用独立报告拒绝明确坏绑定。
 def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, payload, message_after):
     if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return False
+    if _background_watch_hard_projection(payload) or payload.get("binding_state") == "invalid":
         return False
     target_publisher = getattr(tui_runtime, "publish_execution_target", None)
     if callable(target_publisher):
@@ -585,27 +690,26 @@ def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, 
     return True
 
 
-# LLM: /notices线程只绑定本次session；旧响应只取当轮已校验DTO，不能在切会话取数失败后回退旧DTO。
+# LLM: /notices线程只绑定本次session；缺字段兼容只取当轮payload的DTO，永不回退上轮控制目标；坏类型失败关闭。
 # 函数用途: 保存观察专用线程投影，区分合法空串与损坏身份；不授予控制权、不触发存储读取。
 def _publish_gateway_background_watch_binding(runtime: object, session_id: str, payload: dict) -> bool:
     thread_id = payload.get("thread_id", "")
     target = payload.get("execution_target")
     if "thread_id" not in payload:
-        reader = getattr(runtime, "execution_target", None)
-        current = reader() if callable(reader) else None
-        thread_id = current.get("thread_id", "") if isinstance(current, Mapping) else ""
-    valid = isinstance(thread_id, str)
+        thread_id = target.get("thread_id", "") if isinstance(target, Mapping) else ""
+    valid = (isinstance(thread_id, str) and (not thread_id or thread_id == thread_id.strip())
+             and (target is None or isinstance(target, Mapping)))
     if valid:
         thread_id = thread_id.strip()
-        if "thread_id" in payload and isinstance(target, Mapping) and target.get("thread_id"):
-            valid = target["thread_id"] == thread_id
+        if "thread_id" in payload and isinstance(target, Mapping) and "thread_id" in target:
+            valid = isinstance(target["thread_id"], str) and target["thread_id"] == thread_id
     runtime._background_watch_gateway_binding = (session_id, thread_id if valid else None)
     return valid
 
 
 # LLM: 本地模式只读同一owner的会话账本与过程流；采样和提交与reset共锁，原始整页取数在锁外。
 # 活动计数只控制下次刷新，过程流沿原身份握手且只供显示，不构造第二消息来源。
-# 函数用途: 本地模式先读完整页再按reset代次发表；旧页不能恢复旧显示或覆盖新游标，不改变模型输入。
+# 函数用途: 本地解析绑定后独立拉消息/子视图；坏绑定拒绝，页读取失败不撤销已确认身份，旧页零发表。
 def _consume_local_background_snapshot(
     agent: object,
     store: object,
@@ -615,23 +719,37 @@ def _consume_local_background_snapshot(
     seen: set[tuple[str, str]],
     event_cursor: list[int],
     agent_navigation: object | None = None,
+    report: _BackgroundPollReport | None = None,
 ) -> bool:
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
+    report = report if report is not None else _begin_background_poll(agent, session_id, tui_runtime, agent_navigation)
     generation, message_after, event_after, event_stream_id = _capture_background_poll_state(tui_runtime, event_cursor)
     root = getattr(getattr(store, "storage", None), "root", None)
     if not root:
         return True
-    thread, _thread_error = store.threads.resolve_report(
-        channel=LOCAL_CHAT_CHANNEL,
-        channel_conversation_id=session_id,
-        channel_user_id=LOCAL_AGENT_USER_ID,
-    )
+    try:
+        thread, thread_error = store.threads.resolve_report(
+            channel=LOCAL_CHAT_CHANNEL,
+            channel_conversation_id=session_id,
+            channel_user_id=LOCAL_AGENT_USER_ID,
+        )
+    except Exception as exc:
+        report.binding_state = "invalid"
+        report.failure_kind = _background_watch_security_kind(exc) if _background_watch_hard_projection(exc) else "binding_invalid"
+        raise
+    if thread_error is not None:
+        report.binding_state = "invalid"
+        report.failure_kind = _background_watch_security_kind(thread_error) if _background_watch_hard_projection(thread_error) else "binding_invalid"
+        return False
     if thread is None:
+        report.binding_state, report.failure_kind = "empty", ""
         return True
-    thread_id = str(getattr(thread, "thread_id", "") or "")
-    if not thread_id:
-        return True
+    thread_id = getattr(thread, "thread_id", None)
+    if not isinstance(thread_id, str) or not thread_id or thread_id != thread_id.strip():
+        report.binding_state, report.failure_kind = "invalid", "binding_invalid"
+        return False
+    report.binding_state, report.thread_id = "confirmed", thread_id
     from ...agent.conversation.agent_activity import conversation_agent_activity
 
     activity = conversation_agent_activity(agent, store, thread_id).to_dict()
@@ -658,6 +776,8 @@ def _consume_local_background_snapshot(
     # LLM: 页及审批IO已在锁外完成；回调只投影内存，旧代不得触碰权限面板、显示、去重和游标。
     # 函数用途: 原子发表当前本地快照，reset前启动的读取整页丢弃。
     def publish():
+        if not _background_poll_current(agent, tui_runtime, report):
+            return False
         permission_changed = permission_publisher() if permission_publisher is not None else False
         activity_changed = _publish_background_activity(tui_runtime, activity, agent_navigation=agent_navigation)
         transcript_ok, transcript_changed = _consume_background_transcript_projection(
@@ -685,9 +805,9 @@ def _consume_local_background_snapshot(
         tui_runtime=tui_runtime, expected_generation=generation)
     if view_changed and app_ref[0] is not None:
         app_ref[0].invalidate()
+    report.failure_kind = "" if view_ok else "child_view_only"
+    report.snapshot_ok = view_ok
     return view_ok
-
-
 
 
 # LLM: Gateway 行已绑定 owner；适配器给主/子审批同一精确 POST 回写，未确认的响应保留面板，不能当成批准。
@@ -1036,7 +1156,7 @@ def _refresh_loop(
 __all__ = ["_refresh_loop", "_start_worker_threads"]
 
 
-# LLM: 本地读错必须抛出而正常无线程返回None；Gateway只用本session的通知投影或当轮执行DTO，不猜线程。
+# LLM: 本地读错必须抛出而正常无线程返回None；Gateway只用同owner/session/reset的通知投影，不借旧DTO猜线程。
 # 函数用途: 解析只读观察范围；空会话不等于存储损坏，活动claim消失也不等于线程消失。
 def _background_watch_thread_id(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None) -> str | None:
     store = getattr(agent, "conversation_store", None)
@@ -1048,12 +1168,15 @@ def _background_watch_thread_id(agent: object, navigation: object | None, *, ses
         if load_error is not None:
             raise LookupError("background process conversation scope unavailable")
         value = getattr(thread, "thread_id", None)
-        return value if isinstance(value, str) and value else None
+        if thread is not None and (not isinstance(value, str) or not value or value != value.strip()):
+            raise LookupError("background process conversation scope invalid")
+        return value if thread is not None else None
     root = getattr(navigation, "root_runtime", None) or runtime
     gateway = callable(getattr(agent, "request_background_notices", None))
     if gateway and session_id:
         binding = getattr(root, "_background_watch_gateway_binding", None)
-        if binding is None or binding[0] != session_id:
+        if (binding is None or binding[0] != session_id
+                or getattr(root, "_background_watch_gateway_context", None) != _background_watch_context(agent, session_id, root)):
             return None
         if binding[1] is None:
             raise LookupError("background process conversation scope invalid")
@@ -1071,9 +1194,9 @@ def _background_watch_thread_id(agent: object, navigation: object | None, *, ses
     return None
 
 
-# LLM: 仅绑定owner/thread读列表；权限/owner错误优先显式拒绝，成功完成列表/详情才登记有效帧，未知错误不转瞬态。
-# 函数用途: 刷新本会话概要并区分硬拒绝与瞬态竞争，打开观察页才读取选中日志。
-def _refresh_background_watch(agent: object, navigation: object | None, *, thread_id: str | None = None) -> bool:
+# LLM: 仅绑定完整上下文读列表，宿主owner显式透传；已有scope只可校验丢弃，不重认领。状态变更均在原锁内，IO在锁外并复核范围。
+# 函数用途: 刷新本会话概要与已打开面板详情，成功后更新同范围可信帧。
+def _refresh_background_watch(agent: object, navigation: object | None, *, thread_id: str | None = None, scope: tuple | None = None) -> bool:
     from ...agent.conversation.background_process_view import (
         inspect_background_process,
         list_background_processes,
@@ -1083,24 +1206,34 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
     home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
     if not callable(update):
         return False
-    if not home:
-        if getattr(navigation, "_background_watch_scope", None) is None:
-            _reset_background_watch_cache(navigation)
-            return False
-        raise LookupError("background process owner scope unavailable")
-    if thread_id is None:
-        thread_id = _background_watch_thread_id(agent, navigation)
-    if not thread_id:
-        _reset_background_watch_cache(navigation)
-        navigation._background_watch_scope = None
-        return bool(update([], active_count=0))
-    scope = (str(Path(home)), thread_id)
+    root = getattr(navigation, "root_runtime", None)
+    context = ((*scope[:3], scope[4]) if scope is not None
+               else _background_watch_context(agent, "", root))
     changed = False
-    if getattr(navigation, "_background_watch_scope", None) != scope:
-        changed = bool(update([], active_count=0))
-        navigation._background_watch_scope = scope
-        _reset_background_watch_cache(navigation)
-    result = list_background_processes(Path(home), thread_id=thread_id)
+    with getattr(root, "_lock", nullcontext()):
+        if not _background_poll_current(agent, root, _BackgroundPollReport(context)):
+            return False
+        if scope is not None and getattr(navigation, "_background_watch_scope", None) != scope:
+            return False
+        if not home:
+            if getattr(navigation, "_background_watch_scope", None) is None:
+                _reset_background_watch_cache(navigation)
+                return False
+            raise LookupError("background process owner scope unavailable")
+        if thread_id is None:
+            thread_id = _background_watch_thread_id(agent, navigation)
+        if not thread_id:
+            _reset_background_watch_cache(navigation)
+            navigation._background_watch_scope = None
+            return bool(update([], active_count=0))
+        if scope is None:
+            scope = (*context[:3], thread_id, context[3])
+            if getattr(navigation, "_background_watch_scope", None) != scope:
+                changed = bool(update([], active_count=0))
+                navigation._background_watch_scope = scope
+                _reset_background_watch_cache(navigation)
+    owner_id = getattr(getattr(agent, "home_paths", None), "owner_id", None)
+    result = list_background_processes(Path(home), thread_id=thread_id, expected_owner_id=owner_id)
     if not result["projection_ok"]:
         if _background_watch_hard_projection(result):
             raise PermissionError("background process permission or owner check failed")
@@ -1113,63 +1246,137 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
         selected = view.selected_run_id.removeprefix("bg:")
         for index, row in enumerate(rows):
             if row["session_id"] == selected:
-                rows[index] = inspect_background_process(Path(home), selected, thread_id=thread_id)
-    updated = bool(update(rows, active_count=result["active_count"]))
-    navigation._background_watch_valid_scope = scope
-    navigation._bg_watch_consecutive_transient_failures = 0
-    return updated or changed
+                rows[index] = inspect_background_process(Path(home), selected, thread_id=thread_id, expected_owner_id=owner_id)
+    with getattr(root, "_lock", nullcontext()):
+        if (not _background_poll_current(agent, root, _BackgroundPollReport(context))
+                or getattr(navigation, "_background_watch_scope", None) != scope):
+            return False
+        updated = bool(update(rows, active_count=result["active_count"]))
+        navigation._background_watch_valid_scope = scope
+        navigation._bg_watch_consecutive_transient_failures = 0
+        navigation._background_watch_stale = False
+        navigation._background_watch_warning_key = None
+        return updated or changed
 
 
-# LLM: 列表和详情异常均识别双字段owner拒绝后清帧/资格/预算；普通错误及同scope瞬态合同不变，不看文案。
-# 函数用途: 按canonical线程同步观察，避免列表成功后的详情owner竞态残留旧结果。
-def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False) -> bool:
+# LLM: 快照失败不等于绑定失信；完整scope与原reset锁围住发表及成功/异常出口，迟到结果不得清新线程画面或提示。
+# 函数用途: 独立处理绑定、安全、陈旧帧和面板提示；主聊天页瞬态安静，第三次面板告警不续期。
+def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False, poll_report: _BackgroundPollReport | None = None) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
     if not callable(runtime_reader):
         return False
+    root = getattr(navigation, "root_runtime", None) or runtime
+    report = poll_report if poll_report is not None else _BackgroundPollReport(
+        _background_watch_context(agent, session_id, root), snapshot_ok=snapshot_ok)
+    if not _background_poll_current(agent, root, report):
+        return False
     display_runtime = runtime_reader()
     scope_confirmed = False
+    changed = False
+    scope = None
     try:
-        if scope_error:
-            raise LookupError("background process snapshot parse failed")
-        gateway = callable(getattr(agent, "request_background_notices", None))
-        resolver = getattr(getattr(getattr(agent, "conversation_store", None), "threads", None), "resolve_report", None)
-        thread_id = _background_watch_thread_id(agent, navigation, session_id=session_id, runtime=runtime)
-        if not snapshot_ok:
-            root = getattr(navigation, "root_runtime", None) or runtime
-            binding = getattr(root, "_background_watch_gateway_binding", None)
-            known_gateway = gateway and binding is not None and binding[0] == session_id and bool(binding[1])
-            if not known_gateway and not navigation.snapshot().background_watch_active and not getattr(navigation, "_background_watch_scope", None):
-                return _clear_background_watch(navigation, display_runtime)
-            raise LookupError("background process snapshot unavailable")
-        if thread_id is None:
-            return _clear_background_watch(navigation, display_runtime)
-        scope_confirmed = True
-        changed = _refresh_background_watch(agent, navigation, thread_id=thread_id)
+        if scope_error or report.binding_state == "invalid":
+            if report.failure_kind in {"permission_denied", "owner_mismatch"}:
+                raise PermissionError("background process permission or owner check failed")
+            raise LookupError("background process binding invalid")
+        thread_id = (report.thread_id if report.binding_state == "confirmed" else None
+                     if report.binding_state == "empty" else
+                     _background_watch_thread_id(agent, navigation, session_id=session_id, runtime=root))
+        with getattr(root, "_lock", nullcontext()):
+            if not _background_poll_current(agent, root, report):
+                return False
+            display_runtime = runtime_reader()
+            if not hasattr(navigation, "_background_watch_valid_scope"):
+                _reset_background_watch_cache(navigation)
+            prior = getattr(navigation, "_background_watch_scope", None)
+            if prior is not None and (len(prior) != 5 or (*prior[:3], prior[4]) != report.context):
+                changed = _clear_background_watch(navigation, display_runtime)
+            if report.binding_state == "empty" or (thread_id is None and snapshot_ok):
+                return _clear_background_watch(navigation, display_runtime) or changed
+            scope_confirmed = thread_id is not None
+            scope = (*report.context[:3], thread_id, report.context[3]) if thread_id else None
+            if scope is not None and getattr(navigation, "_background_watch_scope", None) != scope:
+                if getattr(navigation, "_background_watch_scope", None) is not None:
+                    changed = _clear_background_watch(navigation, display_runtime) or changed
+                else:
+                    changed = bool(navigation.update_background_watch_rows([], active_count=0)) or changed
+                navigation._background_watch_scope = scope if snapshot_ok else None
+            if not snapshot_ok:
+                return _background_watch_unavailable(navigation, display_runtime, report.failure_kind, changed=changed)
+        changed = _refresh_background_watch(agent, navigation, thread_id=thread_id, scope=scope) or changed
     except Exception as exc:
-        hard_error = _background_watch_hard_projection(exc)
-        if hard_error or not scope_confirmed or isinstance(exc, LookupError):
-            navigation.update_background_watch_rows([], active_count=0)
-            navigation._background_watch_scope = None
-            _reset_background_watch_cache(navigation)
-            message = ("后台进程观察刷新失败；权限或归属校验失败，已暂停显示" if hard_error else
-                       "后台进程观察刷新失败；会话范围未确认，已暂停显示")
-        else:
+        with getattr(root, "_lock", nullcontext()):
+            if not _background_poll_current(agent, root, report):
+                return False
+            if scope is not None and getattr(navigation, "_background_watch_scope", None) != scope:
+                return False
+            display_runtime = runtime_reader()
+            hard_error = _background_watch_hard_projection(exc)
+            if hard_error or not scope_confirmed or isinstance(exc, LookupError):
+                changed = bool(navigation.update_background_watch_rows([], active_count=0)) or changed
+                navigation._background_watch_scope = None
+                warning_key = getattr(navigation, "_background_watch_warning_key", None)
+                _reset_background_watch_cache(navigation)
+                navigation._background_watch_warning_key = warning_key
+                if root is not None:
+                    root._background_watch_gateway_binding = (session_id, "")
+                kind = "permission_denied" if hard_error else "binding_invalid"
+                message = ("后台进程观察刷新失败；权限或归属校验失败，已暂停显示" if hard_error else
+                           "后台进程观察刷新失败；会话范围未确认，已暂停显示")
+                return _background_watch_notice(navigation, display_runtime, kind, message) or changed
             transient = isinstance(exc, _BackgroundWatchTransientError) or (
-                type(exc) in {OSError, FileNotFoundError, BlockingIOError} and exc.errno in _BG_WATCH_TRANSIENT_ERRNOS
-            )
-            scope = getattr(navigation, "_background_watch_scope", None)
-            valid_prior = scope is not None and getattr(navigation, "_background_watch_valid_scope", None) == scope
-            if transient and valid_prior:
-                count = getattr(navigation, "_bg_watch_consecutive_transient_failures", 0) + 1
-                navigation._bg_watch_consecutive_transient_failures = count
-                if count <= _BG_WATCH_SILENT_TRANSIENT_FAILURE_COUNT:
-                    return False
-            else:
-                navigation._bg_watch_consecutive_transient_failures = 0
-            message = "后台进程观察刷新失败；仅保留同会话上次结果"
-        display_runtime.set_notice(message, duration_seconds=6, notice_kind="background_watch_error")
+                type(exc) in {OSError, FileNotFoundError, BlockingIOError} and exc.errno in _BG_WATCH_TRANSIENT_ERRNOS)
+            return _background_watch_unavailable(navigation, display_runtime,
+                "projection_transient" if transient else "corrupt_or_unknown", changed=changed)
+    with getattr(root, "_lock", nullcontext()):
+        if not _background_poll_current(agent, root, report):
+            return False
+        if scope is not None and getattr(navigation, "_background_watch_scope", None) != scope:
+            return False
+        return runtime_reader().clear_notice(expected_kind="background_watch_error") or changed
+
+
+# LLM: 提示去重依机器事件和完整范围，不按文案判状态；其它功能的有效提示优先，不覆盖/清除其kind。
+# 函数用途: 每个观察故障只发布一次六秒提示，重复失败不延长截止时间。
+def _background_watch_notice(navigation, runtime, kind, message):
+    with getattr(runtime, "_lock", nullcontext()):
+        key = (getattr(navigation, "_background_watch_scope", None), kind)
+        if getattr(navigation, "_background_watch_warning_key", None) == key:
+            return False
+        if runtime.notice() and getattr(runtime, "_notice_kind", "") != "background_watch_error":
+            return False
+        navigation._background_watch_warning_key = key
+        runtime.set_notice(message, duration_seconds=6, notice_kind="background_watch_error")
         return True
-    return display_runtime.clear_notice(expected_kind="background_watch_error") or changed
+
+
+# LLM: 只保留完整同范围已验证帧；无帧不声称保留，未知损坏不冒充瞬态，宽限仅用于已打开面板。
+# 函数用途: 标记观察未刷新，面板两次宽限第三次提示，主页面运输/投影/子视图瞬态保持安静。
+def _background_watch_unavailable(navigation, runtime, kind, *, changed=False):
+    scope = getattr(navigation, "_background_watch_scope", None)
+    valid = scope is not None and getattr(navigation, "_background_watch_valid_scope", None) == scope
+    transient = kind in {"transport_transient", "projection_transient", "child_view_only"}
+    panel = navigation.snapshot().background_watch_active
+    navigation._background_watch_stale = True
+    if transient and valid:
+        count = getattr(navigation, "_bg_watch_consecutive_transient_failures", 0) + 1
+        navigation._bg_watch_consecutive_transient_failures = count
+        if not panel or count <= _BG_WATCH_SILENT_TRANSIENT_FAILURE_COUNT:
+            if not panel:
+                changed = runtime.clear_notice(expected_kind="background_watch_error") or changed
+            return changed
+    else:
+        navigation._bg_watch_consecutive_transient_failures = 0
+        if not panel and (transient or (not valid and scope is None)):
+            if scope is None:
+                navigation._background_watch_scope = None
+            warning = getattr(navigation, "_background_watch_warning_key", None)
+            if warning is None or warning[1] not in {"permission_denied", "binding_invalid"}:
+                changed = runtime.clear_notice(expected_kind="background_watch_error") or changed
+            return changed
+    message = ("后台进程观察刷新失败；仅保留同会话上次结果（尚未刷新）" if valid else
+               "后台进程观察刷新失败；暂未取得结果，暂无有效结果")
+    return _background_watch_notice(navigation, runtime, "transient" if transient else kind, message) or changed
 
 
 # LLM: 只清观察帧/资格/瞬态计数与同kind提示，不能清掉其它错误或读取全owner进程作为空态回退。

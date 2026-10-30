@@ -1,5 +1,4 @@
-# LLM: Process-local Responses-only cache; keys bind host owner/thread, model, credential fingerprint, provider and exact endpoint.
-#   Idle entries NEVER own provider leases. State eviction/reset revokes in-flight returns by object identity.
+# LLM: 仅进程内Responses缓存，键绑定宿主owner/线程、模型、凭据指纹、服务商和准确端点；空闲项不持租约，按对象身份撤销迟到归还。
 # 模块用途: 保存有界会话亲和状态与空闲WebSocket，主动TTL回收，不持久化秘密或历史。
 from __future__ import annotations
 

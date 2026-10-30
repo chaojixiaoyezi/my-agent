@@ -28,6 +28,7 @@ from ..common.nofollow_fs import (
 from ..tooling.process_registry import process_registry
 from ..tooling.process_session_records import validate_process_record, validate_session_id
 from ..tooling.process_session_store import process_session_store_root
+from .background_process_owner import canonical_observation_owner_id
 from .process_events import _managed_instance_still_live
 
 _TERMINAL = frozenset({"exited", "failed", "killed", "completed", "not_started"})
@@ -119,11 +120,17 @@ class BackgroundProcessDetail(BackgroundProcessSummary):
     log_tail: tuple[str, ...] = ()
 
 
-# LLM: owner拒绝在静态和动态概要两条出口保留双字段；严格归属隔离不变，普通ValueError不升级，不泄漏异常正文。
+# LLM: 显式owner上下文每次在缓存前回验；缓存接受条件只依赖home的唯一规范身份，拒绝在静态/动态出口均保留双字段。
 # 函数用途: 返回本范围进程及结构化诊断，让真实owner错配能触发消费端清帧。
-def list_background_processes(owner_home: Path, *, thread_id: str | None = None, active_only: bool = False) -> dict[str, object]:
+def list_background_processes(owner_home: Path, *, thread_id: str | None = None, active_only: bool = False,
+                              expected_owner_id: str | None = None) -> dict[str, object]:
     home = Path(owner_home).expanduser().absolute()
     items, errors, unrelated_errors = [], [], []
+    if expected_owner_id is not None and (type(expected_owner_id) is not str or not expected_owner_id
+            or canonical_observation_owner_id(home) != expected_owner_id):
+        return {"items": [], "active_count": 0, "total": 0, "projection_ok": False,
+                "errors": [{"error_code": "OWNER_MISMATCH", "reason_code": "OWNER_MISMATCH"}],
+                "unrelated_errors": [], "unscoped_error_count": 0}
     now = time.time()
     for root, snapshot in _owner_session_snapshots(home):
         if snapshot.error:
@@ -423,11 +430,15 @@ def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | No
     return bool(threads or owners and str(home.resolve()) not in owners)
 
 
-# LLM: 先校验session与owner；显式指定thread_id时严格要求同线程匹配并在存活探针/日志读取前拒绝跨线程或无归属记录。
+# LLM: 显式owner每次先回验；详情不借缓存，随后严格同线程匹配，在存活探针/日志读取前拒绝跨范围记录。
 # 函数用途: 在可选当前会话范围内只读查看后台进程，日志仍限制路径和字节数。
-def inspect_background_process(owner_home: Path, session_id: str, *, thread_id: str | None = None, tail_lines: int = 80) -> dict[str, object]:
+def inspect_background_process(owner_home: Path, session_id: str, *, thread_id: str | None = None, tail_lines: int = 80,
+                               expected_owner_id: str | None = None) -> dict[str, object]:
     selected = validate_session_id(session_id)
     home = Path(owner_home).expanduser().absolute()
+    if expected_owner_id is not None and (type(expected_owner_id) is not str or not expected_owner_id
+            or canonical_observation_owner_id(home) != expected_owner_id):
+        raise _OwnerMismatchError("observation owner context mismatch")
     for root in _session_directories(home):
         try:
             payload = _read_session(root, selected, home)
@@ -470,15 +481,18 @@ def _read_session_payload(root: Path, session_id: str) -> object:
     return json.loads(raw)
 
 
-# LLM: 原接受/拒绝范围不变；先完成可读取owner声明的校验，普通scope/属性错误延后，不能遮盖明确owner拒绝。
+# LLM: 只允许已绑定v1的access缺省home延后至完整schema验证；其它显式空home、坏类型和owner冲突继续先拒绝。
 # 函数用途: 精确区分owner归属拒绝与其它元数据错误，供列表和详情共享。
-def _validate_session_attribution(payload: dict, *, home: Path | None = None) -> None:
+def _validate_session_attribution(payload: dict, *, home: Path | None = None, legacy_empty_home: bool = False) -> None:
     invalid_scope = any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in _SCOPE_FIELDS)
     invalid_attribution = False
     for name in ("access_scope", "execution_scope", "activation_scope"):
         scope = payload.get(name)
         if isinstance(scope, dict) and (
-            scope.get("owner_home") == "" or name == "activation_scope" and scope.get("owner_id") == ""
+            ((scope.get("owner_home") == "" or payload.get("schema") in {
+                "managed_process_session.v2", "managed_process_session.v3", "managed_process_session.v4"
+            } and scope.get("owner_home") is None) and not (name == "access_scope" and legacy_empty_home))
+            or name == "activation_scope" and scope.get("owner_id") == ""
         ):
             raise _OwnerMismatchError("invalid_session_attribution")
     claims = {key: set() for key in _ATTRIBUTION_FIELDS}
@@ -513,15 +527,26 @@ def _validate_session_attribution(payload: dict, *, home: Path | None = None) ->
         raise ValueError("conflicting_session_attribution")
 
 
-# LLM: schema前后均校验归属和home；明确跨owner不能被坏schema降级，普通元数据错误不升级，列表/详情同链。
+# LLM: 规范home唯一身份绑定冷热缓存；v1只读豁免须原始owner/线程严格有效且原生全记录通过，不补写或升级执行权限。
 # 函数用途: 验证真实或待缓存元数据，并将跨owner错配显式传给上层。
 def _validate_session_payload(payload: object, selected: str, home: Path) -> dict:
     if not isinstance(payload, dict) or payload.get("session_id") != selected:
         raise ValueError("process session identity mismatch")
-    _validate_session_attribution(payload, home=home)
+    expected = canonical_observation_owner_id(home)
+    access = payload.get("access_scope")
+    legacy_default = (payload.get("schema") == "managed_process_session.v1" and isinstance(access, dict)
+                      and access.get("owner_home") in (None, ""))
+    if legacy_default:
+        owner, thread = access.get("owner_id"), access.get("conversation_id")
+        if (not expected or owner != expected or type(thread) is not str or not thread
+                or thread.strip() != thread):
+            raise _OwnerMismatchError("legacy observation owner unproven")
+    _validate_session_attribution(payload, home=home, legacy_empty_home=legacy_default)
+    if expected and any(scope.get("owner_id") not in (None, "", expected) for scope in _raw_record_scopes(payload)):
+        raise _OwnerMismatchError("process owner identity mismatch")
     if payload.get("schema"):
         payload = validate_process_record(payload)
-        _validate_session_attribution(payload, home=home)
+        _validate_session_attribution(payload, home=home, legacy_empty_home=legacy_default)
     return payload
 
 

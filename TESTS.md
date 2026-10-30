@@ -1,3 +1,20 @@
+## 2026-10-29 e905 sol-14 Round 1：历史观察兼容、轮询状态与标量隔离（部分交付）
+
+来源：`fix-e905-sol-14-r1.md`、后台观察 BG-1/BG-2/BG-3 审计及首审 R1/R2/R3，累计基线 `4bea324e3`。本节覆盖并修正下方初版的完成口径；未部署、未推送、未重启服务。
+
+- BG-1：只从完整规范 home 布局经原 resolver 回验 owner（允许身份恰为 `owners`）；历史 v1 缺省/空 home 仅在原生格式、owner 与非空 conversation 精确归属成立时只读兼容，按线程过滤。v2–v4 缺 home、跨 owner、symlink/hardlink 继续拒绝，不把观察兼容扩大为执行授权。新启动在日志、持久化及 spawn 前校验两份 scope 的规范非空 home。
+- BG-2：快照成功与绑定确认独立；机器原因区分瞬态、硬拒绝与未知坏账。完整 scope 含 home/owner/session/thread/reset 代次，IO 前后拒绝旧代及换线程结果；暂态主聊天安静、同 scope 旧帧保留，打开面板连续第三次仅提示一次六秒且不续期；硬拒绝立即清帧，不覆盖其它功能提示。冷 owner 缺 root 明确失败，不冒充成功空绑定。
+- BG-3：沿原规范根 `ProcessSessionStore` 的终态 TTL、激活/待通知/保留保护及 CAS/nofollow 门维护；观察不调用维护、不隐式删历史记录。本轮未扩展旧根清理，也未执行生产清理。
+- R2：摘要 id/root_id/status 必须为严格字符串（id 非空），时间必须为精确 int/float 且有限，拒绝 bool、容器、坏值及子类型；坏字段逐条进入 load_errors，冷/热缓存不泄漏可变引用，正常摘要保持零整任务 deepcopy。
+- R3：中文模块头和改动定义双层注释经累计 AST 扫描；包括装饰器、嵌套定义及前置注释，不把未修改后代当作本轮改动。
+- **R1 正 MP 仍未完成**：新增 `test_gateway_queue_transport_recovery.py` 保留真实安全原语与正反例，没有 skip/xfail。claim/requeue 定向运行在原 generation publisher 的真实 `os.link` 返回 EPERM，未到业务断言，不能算红绿证据；运输来源产品代码尚未补齐，不可据其它绿色测试签收整单。需要可运行真实硬链接的同源受控入口继续。
+
+当前目标树指定八文件加新兼容/状态/标量三文件，JUnit `tmp/r1-lock-final.xml`：**1322 项，1311 通过、10 失败、1 跳过**。新增三文件分别 34/46/110 项全通过。十个失败均在 `test_process_completion_events.py`，在真正基线 `4bea324e3209ef9b9ecc39b6c2378bacc078b374` 的独立 detached worktree 复现，失败节点集合完全一致；其中两个进程出生令牌为空，八个 managed 夹具部分绑定。基线对照不等于指定门禁全绿。
+
+独审提出入口检查后的锁外写入窗口已先用两个 reset/换线程节点复现断言红灯，再将初始化状态变更收回原锁内；已有 scope 仅核验、不重认领。随后两个列表 IO 中换线程的成功/权限异常节点分别复现误清新提示/新帧，补齐 `_sync` 成功与异常出口的 scope 围栏，四个节点在最终组合中全部通过。累计 AST 中文双层注释检查为 31 模块、213 函数、25 类，缺口及非中文均为零。
+
+复现：树根使用任务单原八文件 pytest 命令，缓存及 basetemp 在 `/tmp/pytest_cache_sol14_r1_fix`；追加 `test_background_watch_legacy_owner.py`、`test_background_watch_poll_states.py`、`test_subagent_summary_scalar_isolation.py` 并加 `--junitxml=tmp/r1-lock-final.xml`。MP 独立复现：同样环境运行 `test_gateway_queue_transport_recovery.py -k two_restarts`，不替换 `os.link`。全范围 Ruff 与 import boundaries 已通过。真实生产旧记录仅执行指定 `list_background_processes`：projection_ok=True、errors=[]，34 条记录的 inode/mtime/ctime/SHA256 前后一致。真实 TTY、多终端和生产已加载版本未验证。
+
 ## 2026-10-29 e905 sol-14：CPU 唤醒与 Gateway 六项缺陷
 
 来源：`task-e905-sol-14-cpu-wakeups.md`、`audit-and-fix-e905-sol-14-gateway-bugs.md`、`steer-sol-14-bug6.md`，基线 `4bea324e3`；不部署、不推送、不重启用户服务。

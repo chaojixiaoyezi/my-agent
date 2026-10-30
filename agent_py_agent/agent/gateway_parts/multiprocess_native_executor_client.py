@@ -1,5 +1,5 @@
-# LLM: W only transports resources and consumes original C facts; no W Popen, P1 writes or ACK write permission.
-# 模块用途: Serialized native executor RPC and W-owned Popen-compatible standard streams.
+# LLM: W仅运输资源并消费原C事实，不授予W创建进程、写P1或写ACK的权限，原内核对端校验和执行围栏保持。
+# 模块用途: 串行管理原生执行器RPC，提供W持有的兼容Popen标准流。
 from __future__ import annotations
 
 import json

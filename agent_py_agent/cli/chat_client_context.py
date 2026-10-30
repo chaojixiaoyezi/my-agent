@@ -1,3 +1,5 @@
+# LLM: 本模块只运输原认证Gateway合同，不构造业务Agent；通知以机器状态区分快照失败与绑定拒绝，不能解析文案。
+# 模块用途: 提供轻量聊天客户端和原HTTP读写运输；凭据、控制DTO、游标和owner来源保持宿主权威。
 from __future__ import annotations
 
 import json
@@ -167,6 +169,8 @@ def _with_client_identity(
 class GatewayChatClientAgent:
     gateway_client_only = True
 
+    # LLM: 只接宿主解析的配置、owner路径和工作区，不能初始化业务Agent或派生额外权限。
+    # 函数用途: 构造轻量客户端的界面元数据与HTTP访问上下文，不启动模型或后台服务。
     def __init__(
         self,
         args,
@@ -304,8 +308,8 @@ class GatewayChatClientAgent:
         )
         return body or {"ok": False, "error_code": "GATEWAY_UNAVAILABLE", "message": "完整原文暂时不可读取。"}
 
-    # LLM: canonical 游标不随进程流重置；显式声明能按请求去重前台消息，旧客户端不被强发未知用户事件；五秒预算容忍短暂Gateway繁忙。
-    # 函数用途: 显式声明前台和检查点能力；五秒内沿同一持久游标补过程，失败不清空已有显示。
+    # LLM: canonical游标不随进程流重置；401/403优先硬拒绝，已知繁忙状态才是瞬态，未知旧响应不解析文案猜身份。
+    # 函数用途: 五秒预算拉取通知并保留HTTP机器原因，失败不改控制DTO、游标或已有显示。
     def request_background_notices(
         self,
         session_id: str,
@@ -315,7 +319,7 @@ class GatewayChatClientAgent:
         event_stream_id: str = "",
     ) -> dict[str, object]:
         # 给 Gateway 短暂繁忙留五秒；仍无响应就交给 TUI 退避，不让每个窗口长期占住连接。
-        _status, body = self.post_gateway_json(
+        status, body = self.post_gateway_json(
             "/client/notices",
             {
                 "after": max(0, int(after or 0)),
@@ -328,8 +332,18 @@ class GatewayChatClientAgent:
             },
             timeout=5.0,
         )
-        return body or {
+        if status in {401, 403}:
+            return {**body, "ok": False, "binding_state": "invalid", "failure_kind": "permission_denied"}
+        kind = body.get("failure_kind")
+        kind = kind if isinstance(kind, str) else None
+        if status in {408, 429, 502, 503, 504} and kind not in {"permission_denied", "owner_mismatch", "binding_invalid"}:
+            return {**body, "ok": False, "binding_state": "unavailable", "failure_kind": "transport_transient"}
+        if body:
+            return body if 200 <= status < 300 else {**body, "ok": False}
+        return {
             "ok": False,
+            "binding_state": "unavailable",
+            "failure_kind": "corrupt_or_unknown",
             "notices": [],
             "cursor": after,
             "transcript_events": [],
@@ -554,7 +568,7 @@ class GatewayChatClientAgent:
 
 # LLM: 薄/完整客户端共用原 JSON 写传输；身份沿显式 owner/原配置解析器，凭据在 try 前读取，不自动重试；
 #   开关关时凭据不可用降级为不带凭据继续发送，开关开时异常只带原因码和处置提示。
-# 函数用途: 在原 Gateway 地址带身份和单个 token 发送请求。
+# 函数用途: 在原Gateway地址发送一次认证请求；真实超时/连接异常保留机器原因，未知错误不伪装瞬态。
 def post_gateway_json(
     agent: object, path: str, payload: dict[str, object], *, timeout: float,
 ) -> tuple[int, dict[str, object]]:
@@ -574,7 +588,14 @@ def post_gateway_json(
             status = int(response.status)
     except urllib.error.HTTPError as exc:
         return _http_error_json(exc)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+    except (urllib.error.URLError, OSError) as exc:
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, PermissionError):
+            return 0, {"ok": False, "binding_state": "invalid", "failure_kind": "permission_denied"}
+        if isinstance(reason, (TimeoutError, ConnectionError)):
+            return 0, {"ok": False, "binding_state": "unavailable", "failure_kind": "transport_transient"}
+        return 0, {}
+    except (json.JSONDecodeError, ValueError):
         return 0, {}
     return status, body if isinstance(body, dict) else {}
 
