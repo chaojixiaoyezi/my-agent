@@ -29,9 +29,6 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install -e ".[dev]"
 
-      - name: Check doc sync
-        run: python3 scripts/check_doc_sync.py
-
       - name: Check Python syntax
         run: python3 -m compileall -q agent_py_agent scripts
 

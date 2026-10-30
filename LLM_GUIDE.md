@@ -1067,23 +1067,12 @@ my-agent/                          ← 项目根目录
 
 ## 编码规范
 
-### 注释格式（两层注释）
+### 注释格式（单层清晰中文注释，双层注释硬门已于 2026-10-29 退役）
 
-```python
-# LLM: technical summary of the contract, side effects and invariants.
-# 函数用途: 人能看懂的用途、调用时机和修改注意事项。
-def example(...):
-    ...
-```
-
-- 每个功能代码里的 module / class / function / method 都要有这类双层注释。
-- module 使用 `模块用途:`，class 使用 `类用途:`，function 和 method 使用 `函数用途:`。
-- class / def 有装饰器时，注释放在第一行装饰器上方。
-- `LLM:` 给后续模型读，写清 contract / invariant / side effects / caller expectations。
-- `模块用途:`、`函数用途:` 或 `类用途:` 给人读，用大白话说明用途、调用入口、修改时要检查什么。
-- 有副作用的函数必须写清：会不会写文件、调用 API、启动进程、改状态。
-- 测试函数不强求长注释。
-- 批量补注释后必须跑 `compileall`、`ruff check agent_py_agent scripts`、导入边界和带实际基线的文档同步；语法位置、装饰器位置与真实职责说明必须正确。代码尺寸数值门于 2026-10-28 退役，不再运行尺寸 checker、维护报告或 baseline；本文件中此前的严格尺寸门通过记录仅保留当时历史事实。
+- 关键 module / class / function / method 建议写一条清晰、自然的中文注释或 docstring，说明真实用途、契约边界和副作用（如是否写文件、调用 API、启动进程、改状态）。
+- 2026-10-29 起，不再强制每个函数都带 `# LLM:` + `# 函数用途:` 两行固定前缀标签，也不将其作为复核或提交的硬阻塞项；存量双层注释保留即可。
+- 测试函数不强求注释。
+- 代码尺寸数值门于 2026-10-28 退役，双层注释硬门与 `scripts/check_doc_sync.py` 机械打卡硬门于 2026-10-29 退役；本文件中此前的历史记录仅保留当时事实。
 
 ### 测试要求
 

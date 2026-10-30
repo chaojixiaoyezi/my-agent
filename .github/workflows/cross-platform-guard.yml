@@ -50,8 +50,5 @@ jobs:
           agent_py_agent/tests/test_subagent_manager_core.py
           -q
 
-      - name: Check docs sync
-        run: python scripts/check_doc_sync.py
-
       - name: Check formatting whitespace
         run: git diff --check

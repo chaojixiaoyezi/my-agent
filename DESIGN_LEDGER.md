@@ -1,3 +1,14 @@
+## 2026-10-29 e905 完整优化包（sol-1..sol-14）统一集成与三个形式主义硬门退役（已集成）
+
+- **14 分支并行攻坚与双席位封板（`sol-1` .. `sol-14`）**：
+  - `sol-1`..`sol-12`：完成工具面收敛（`self_map` 并入 `tool_search(action="catalog")`）、Owner 配额内核块偏移有界恢复与 31 类保留注册表、配置与模型凭据/部署策略解耦、Memory 代际清单与可丢弃 FTS5 读索引、跨代引用 pin 与回收安全门、子代理未知恢复历史硬准入拦截、自学习发布锁与旧 glibc 兼容清理、Owner 分块读索引（5 字段前缀摘要见证 + 可续跑 SHA-256）与审计 `trusted_root` 锁序、24 根规范 CLI 与统一 `DoctorService`、展示流/归档日志有界维护、Wake 游标正事实绑定与子代理 locator 卫生、以及 31 类保留策略批量审批/提交契约。
+  - `sol-13`（万轮连续工作与百万次 Compact 零退化架构 + 修复 `COMPACT_SOURCE_CHANGED`）：热检查点账本实施有界轮转（32 条 / 2MiB）与冷归档寻址（`owner_compact_dir/archive` & `evidence`），累计消息/工具覆盖切换为固定深度 `ImmutableJsonIndex`（`_IndexedMessageCoverage` / `_IndexedToolCoverage`），消除 `COMPACT_SOURCE_CHANGED` 误报并支撑万轮对话与百万次 Compact $O(1)$ 热路径。
+  - `sol-14`（TUI / Gateway 降负与后台进程观察修复）：修复 TUI 空闲轮询风暴与 Gateway 全表扫描，修复 6 项 Gateway/TUI 状态同步缺陷及 3 处 TUI 底部“后台进程观察刷新失败”报错。
+- **三个形式主义硬门正式退役（2026-10-29 用户拍板）**：
+  1. 退役 `# LLM:` + `# 函数用途:` / `# 类用途:` / `# 模块用途:` 双层注释格式硬门，关键代码保留单层清晰中文注释或 docstring 即可。
+  2. 退役 `scripts/check_doc_sync.py` 机械打卡硬门（强制每个 `.py` diff 必须新增 `#` 注释行、强制每次改动必改 `02-progress.md` / `04-structure.md`），CLI 默认改为非阻塞提示（`DOC_SYNC_ADVISORY`），并从 `.github/workflows/{lint,cross-platform-guard}.yml` 移除硬拦截步骤。
+  3. 退役多分支并行开发时分片分支强制打卡公共台账（`TESTS.md` / `DESIGN_LEDGER.md`）的要求，统一在集成阶段按需更新。
+
 ## 2026-10-29 e905 sol-6 Round 1：恢复预算与采集边界修复（源码候选，未部署）
 
 来源：`07-tasks/fix-e905-sol-6-r1.md`、F1–F16 与 Astra-2 F5。普通/provider 重试与审计 attempts 分离，BLOCKED 失败同源扣账；干净 legacy 显式结构化迁移，损坏元组首次只读 load 即 fail-closed。无进展为宿主证实的失败累计，观察未知单列，并在正式恢复回执/原账本保留；阈值 0 关闭，派发、启动 preflight、树与恢复编排共用原能力配置来源。

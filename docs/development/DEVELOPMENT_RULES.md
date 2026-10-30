@@ -168,7 +168,7 @@ before changing code.
 
 - 文件、函数、类、Mixin 和参数的数量或行数不作为提交门；按调用路径、职责边界、状态所有权和排查成本决定拆分或合并。
 - 仅当参数有真实共同语义、快照或生命周期责任时才引入类型化 bundle，不为凑数量增加包装、空转发或新的阈值。
-- 继续通过 `scripts/check_import_boundaries.py`、`ruff check`、带实际基线的 `scripts/check_doc_sync.py`、`scripts/check_clean_package.py` 和相关合同回归核验；UTF-8/AST、星号导入、命名与分发边界检查不退役。
+- 继续通过 `scripts/check_import_boundaries.py`、`ruff check`、`scripts/check_clean_package.py`、`git diff --check` 和相关合同回归核验；UTF-8/AST、星号导入、命名与分发边界检查不退役。2026-10-29 起双层注释格式硬门与 `scripts/check_doc_sync.py` 机械打卡硬门退役。
 
 ## 4.1 Bundle Interface Standard / 统一 Bundle 接口规范
 

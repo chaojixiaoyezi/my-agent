@@ -242,19 +242,25 @@ def evaluate_sync(changes: list[str], diffs_by_path: dict[str, str]) -> list[str
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check code/docs/comment sync for known modules.")
+    parser = argparse.ArgumentParser(description="Advisory check for code/docs/comment sync.")
     parser.add_argument("--staged", action="store_true", help="Check only staged changes.")
     parser.add_argument("--base", default="HEAD", help="Git base for unstaged+staged diff checks.")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero when advisory items are found.")
     args = parser.parse_args(argv)
 
     changes = changed_paths(staged=args.staged, base=args.base)
     diffs = {path: changed_diff(path, staged=args.staged, base=args.base) for path in changes}
     problems = evaluate_sync(changes, diffs)
     if problems:
-        print("DOC_SYNC_FAIL")
+        if args.strict:
+            print("DOC_SYNC_FAIL")
+            for problem in problems:
+                print(f"- {problem}")
+            return 1
+        print("DOC_SYNC_ADVISORY")
         for problem in problems:
             print(f"- {problem}")
-        return 1
+        return 0
     print("DOC_SYNC_PASS")
     return 0
 
