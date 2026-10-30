@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol
@@ -53,7 +53,11 @@ from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from ..conversation.learning_source import projection_is_learnable
 from ..io.cursor_cache import CursorCache, file_stamp
 from ..user_space.owner_policy import read_learning_exclusions
-from ..user_space.owner_quota import OwnerQuotaAdmission
+from ..user_space.owner_quota import (
+    OwnerQuotaAdmission,
+    OwnerQuotaExceeded,
+    OwnerQuotaLockContention,
+)
 from .candidate_models import (
     MemoryCandidate,
     MemoryScope,
@@ -142,8 +146,7 @@ class RejectingMessageEvidenceVerifier:
         return None
 
 
-# LLM: The dependency object lists every canonical authority used by promotion and replaces a
-# wide constructor; it contains no alternate persistence callbacks.
+# LLM: 依赖对象列明晋升使用的全部规范权威以代替宽构造器，不包含替代持久化回调。
 # 类用途: 汇总 Candidate、长期记忆、Persona、lesson、HOT 与证据核验器。
 @dataclass(frozen=True)
 class MemoryPromotionDependencies:
@@ -159,8 +162,7 @@ class MemoryPromotionDependencies:
     exclusion_store: object | None = None
 
 
-# LLM: Threshold policy is immutable and separate from repositories so tests/config cannot mix
-# a lesson threshold into HOT behavior accidentally.
+# LLM: 重复门槛策略不可变且独立于仓库，避免配置或测试把 lesson 门槛误用于 HOT。
 # 类用途: 保存 lesson/HOT 重复证据门槛。
 @dataclass(frozen=True)
 class MemoryPromotionPolicy:
@@ -168,12 +170,10 @@ class MemoryPromotionPolicy:
     hot_min_occurrences: int = 3
 
 
-# LLM: This adapter prefers the runtime gate ledger and uses the canonical owner tool-output
-# index only for exact legacy call identities that predate operation_id in raw audit rows.
+# LLM: 此适配器优先读取运行门账本；只有原审计早于 operation_id 字段的精确旧调用身份才回退到规范 owner 工具输出索引。
 # 类用途: 按 owner/run/operation 或唯一的 run/call 归档核验工具成功终态。
 class LocalStoreToolEvidenceVerifier:
-    # LLM: owner_id is the immutable verification wall; owner_root is read-only and may expose
-    # only canonical blobs/tool_outputs indexes for legacy evidence completion.
+    # LLM: owner_id 是不可变核验边界；owner_root 只读，仅从规范 blobs/tool_outputs 索引补全旧证据。
     # 函数用途: 初始化工具账本与 owner 私有归档的只读 Memory 适配器。
     def __init__(
         self,
@@ -190,8 +190,7 @@ class LocalStoreToolEvidenceVerifier:
             else None
         )
 
-    # LLM: Candidate status/effect fields are advisory. Exact ledger evidence wins; the archive
-    # fallback requires one unique run/call/tool identity plus typed succeeded operation facts.
+    # LLM: 候选的状态与副作用字段仅供参考，精确账本证据优先；归档回退必须匹配唯一运行/调用/工具身份及类型化成功操作事实。
     # LLM: C实际LocalStore连接出生native不得被宽catch变成缺证据，普通读取失败仍原fallback，不新增证据状态。
     # 函数用途: 核验原工具终态，保实际来源拒绝对象与原档案回退边界。
     def verify(self, ref: dict[str, object]) -> VerifiedToolEvidence | None:
@@ -215,8 +214,7 @@ class LocalStoreToolEvidenceVerifier:
             return _verified_runtime_gate_record(self.owner_id, ref, record)
         return self._verify_owner_tool_archive(ref, run_id=run_id)
 
-    # LLM: Legacy raw audit rows may omit operation_id even though the owner tool index retained
-    # it. Resolve only a single exact invocation identity; ambiguity and malformed JSON fail closed.
+    # LLM: 旧原始审计可能缺 operation_id 而 owner 工具索引仍保留；只解析唯一精确调用身份，歧义或坏 JSON 均保守拒绝。
     # 函数用途: 从 owner 工具输出索引补核验旧 run/call/tool 引用。
     def _verify_owner_tool_archive(
         self,
@@ -273,8 +271,7 @@ class LocalStoreToolEvidenceVerifier:
         )
 
 
-# LLM: The adapter explicitly migrates legacy ledger terminal label "done" to canonical
-# ToolResult label "succeeded"; no other aliases or prose are accepted.
+# LLM: 适配器只显式把旧账本终态 done 迁移为规范 ToolResult 终态 succeeded，不接受其他别名或正文推断。
 # 函数用途: 将一条 runtime gate 记录投影成 Memory 的规范工具证据。
 def _verified_runtime_gate_record(
     owner_id: str,
@@ -798,6 +795,7 @@ def _ensure_not_excluded(service: MemoryPromotionService, candidate: MemoryCandi
         raise _PromotionBlocked(candidate.status, code)
 
 
+# LLM: 接线学习排除仓库时只按最新结构化名单与来源判定；读取失败保守阻断，不从正文猜测来源或绕过现有 policy 锁。
 # 函数用途: 读最新名单并判定一条候选是否命中；返回稳定原因码或空串。
 def _learning_exclusion_block(
     service: MemoryPromotionService, candidate: MemoryCandidate
@@ -843,8 +841,7 @@ def _commit_target_blocked(
         raise
 
 
-# LLM: Persona adoption trusts only canonical verifier output and exact structured parameters;
-# candidate prose, model status words, and semantic similarity never authorize reuse.
+# LLM: 复用人格写入只信规范核验器输出与精确结构化参数；候选正文、模型状态词和语义相似都不能授权复用。
 # 函数用途: 判断核验后的工具证据是否为目标人格文件的成功 add。
 def _is_successful_persona_add(
     verified: VerifiedToolEvidence,
@@ -888,8 +885,7 @@ def _promotion_precheck_code(candidate: MemoryCandidate, automatic: bool) -> str
 # LLM: 不解析聊天意图；消费宿主来源及typed verifier，自动仅审核结构化合格快照，人工仍走原精确审核。
 # 类用途: 唯一执行候选审核及long_term、Persona、lesson与HOT归档，保原安全门和仓库。
 class MemoryPromotionService(_PromotionCommitMixin):
-    # LLM: Construction accepts one authority bundle and one policy object, preventing partial
-    # alternative wiring while preserving rejecting verifier defaults.
+    # LLM: 构造只接受一组权威依赖与一份策略，防止部分替代接线，并保留默认拒绝核验器。
     # LLM: coordinator_io仅原policy锁出生/实际native透传策略，不保存source，不改review/promote/condense/费用或锁序。
     # 函数用途: 用真实领域对象装配原晋升服务，C每次末写仍靠当次原scope。
     def __init__(
@@ -971,8 +967,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
             rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=limit)
             return tuple(self.promote(row.candidate_id, automatic=True) for row in rows)
 
-    # LLM: 来源/证据/权威先核；治理阻断登记原审核队列，不改变候选状态，正式写前仍锁内复核。
-    # 函数用途: 准备默认落点与批准，兼容显式旧补全覆盖；精确恢复旧提交并登记治理责任。
+    # LLM: 来源/证据/权威/自动政策先核；准备失败同正式提交登记义务，未知执行异常原样传播不自动重放。
+    # 函数用途: 准备默认落点与批准，持久保留通过核门后被暂态存储或CAS阻断的提交责任。
     def _promote_snapshot(
         self,
         candidate_id: str,
@@ -995,6 +991,9 @@ class MemoryPromotionService(_PromotionCommitMixin):
         early_result = _promotion_precheck(candidate, automatic)
         if early_result is not None:
             return early_result
+        if (automatic and candidate.commit_obligation and candidate.obligation_retry_after
+                and datetime.fromisoformat(candidate.obligation_retry_after) > datetime.now(timezone.utc)):
+            return MemoryPromotionResult(candidate_id, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF")
         evidence_code = self._verify_evidence(candidate)
         if evidence_code:
             return self._block_missing_evidence(candidate, reviewer, evidence_code)
@@ -1009,11 +1008,16 @@ class MemoryPromotionService(_PromotionCommitMixin):
             if policy_code:
                 _register_automatic_governance_review(self, candidate, policy_code)
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
-            candidate = self._apply_automatic_policy(candidate, reviewer)
+            try:
+                candidate = self._apply_automatic_policy(candidate, reviewer)
+            except _UNCERTAIN_PROMOTION_ERRORS:
+                raise
+            except CandidateStateChangedError:
+                return _defer_promotion_failure(self, candidate, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+            except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+                return _defer_promotion_failure(self, candidate, _recoverable_promotion_reason(exc))
         if candidate.status != "approved":
             return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
-        if _promotion_target(candidate) == "long_term":
-            _register_condense_debt(self.long_term, self.candidates, self.coordinator_io)
         return _commit_promotion_result(self, candidate, reviewer, confirmed)
 
     # LLM: 默认同次CAS补落点并批准；显式旧fill覆盖先消费其真实结果，不替它改写none，仍须完整快照CAS。
@@ -1386,6 +1390,7 @@ class _PromotionConflict(RuntimeError):
 # LLM: 提交失败已落状态迁移的载体；只携带稳定 status 与原因码。
 # 类用途: 让主流程把 blocked/门槛失败转成 MemoryPromotionResult，不吞回退路径。
 class _PromotionBlocked(RuntimeError):
+    # LLM: 此异常只运输已迁移状态及稳定原因码，不执行额外状态变更，不携带候选正文。
     # 函数用途: 构造一次已迁移状态的晋升阻断。
     def __init__(self, status: str, reason_code: str) -> None:
         self.status = status
@@ -1408,13 +1413,15 @@ __all__ = [
 ]
 
 
-# LLM: 仅分类失败转回执；最终治理阻断在退出业务锁后登记原待审队列，不伪装已晋升或提交成功。
-# 函数用途: 把提交与清理的不同终态转换为准确晋升回执。
+# LLM: 正式提交前治理标记也受暂态失败处理；未知异常不得转义务重放，CAS不覆盖新终态。
+# 函数用途: 把提交与清理的不同终态转换为准确回执，并持久保留已核候选的履约退避。
 def _commit_promotion_result(service, candidate, reviewer, confirmed):
     from ._jsonl_indexing import RemovalCleanupError
 
     candidate_id = candidate.candidate_id
     try:
+        if _promotion_target(candidate) == "long_term":
+            _register_condense_debt(service.long_term, service.candidates, service.coordinator_io)
         outcome, promoted = service._commit_with_conflict_handling(
             candidate, reviewer, confirmed
         )
@@ -1425,14 +1432,51 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
         return MemoryPromotionResult(candidate_id, False, candidate.status, "REMOVE_CLEANUP_PENDING",
                                      formal_memory_changed=exc.formal_memory_changed)
     except _PromotionBlocked as exc:
+        if exc.status == candidate.status and candidate.status == "approved":
+            result = _defer_promotion_failure(service, candidate, exc.reason_code)
+        else:
+            result = MemoryPromotionResult(candidate_id, False, exc.status, exc.reason_code)
         _register_automatic_governance_review(service, candidate, exc.reason_code)
-        return MemoryPromotionResult(
-            candidate.candidate_id,
-            False,
-            exc.status,
-            exc.reason_code,
-        )
+        return result
+    except _UNCERTAIN_PROMOTION_ERRORS:
+        raise
+    except CandidateStateChangedError:
+        return _defer_promotion_failure(service, candidate, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+    except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+        return _defer_promotion_failure(service, candidate, _recoverable_promotion_reason(exc))
     return service._finalize_promotion(promoted, reviewer, outcome)
+
+
+# LLM: 仅按异常类型分类已确认可恢复的失败，不从异常文字或超时推断执行状态；未知类型由调用方先排除。
+# 函数用途: 为批准准备和正式写入返回一致的IO、锁及容量退避原因。
+def _recoverable_promotion_reason(error):
+    if isinstance(error, OwnerQuotaExceeded):
+        return "PROMOTION_CAPACITY_BLOCKED"
+    if isinstance(error, (OwnerQuotaLockContention, BlockingIOError)):
+        return "PROMOTION_LOCK_BLOCKED"
+    return "PROMOTION_IO_BLOCKED"
+
+
+# LLM: 先CAS旧核验快照；竞争后只对当前自动候选重新核全部门并单次CAS登记退避，不推进状态或重放正式写。
+# 函数用途: 持久化准备及提交失败的义务；新终态或不再合格的快照保持原样，持续写失败则明确外抛。
+def _defer_promotion_failure(service, candidate, reason):
+    try:
+        saved = service.candidates.defer_commit(candidate, reason)
+    except CandidateStateChangedError:
+        current = service.candidates.get(candidate.candidate_id)
+        changed = MemoryPromotionResult(candidate.candidate_id, False, current.status,
+                                        "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+        if (current.status not in {"pending_review", "approved"}
+                or _AUTOMATIC_PROMOTION.get() != (id(service), candidate.candidate_id)
+                or _promotion_precheck(current, True) is not None
+                or service._verify_evidence(current)
+                or _absolute_authority_block(replace(current, promotion_target=_promotion_target(current)))
+                or _automatic_policy_block(replace(current, promotion_target=_promotion_target(current)),
+                                           owner_home=service.persona.owner_home)):
+            return changed
+        service.candidates.defer_commit(current, reason)
+        return changed
+    return MemoryPromotionResult(candidate.candidate_id, False, saved.status, reason)
 
 
 # LLM: 只准确policy锁FD出生，原scope每次核当前来源；不保存callback或扩大权限。

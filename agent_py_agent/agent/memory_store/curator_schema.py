@@ -1,45 +1,38 @@
+# LLM: Schema 构造独立于解析和运行时，各供应商共用同一严格合同；候选链接只选择已有锚点，不产生新的身份或权威。
+# 模块用途: 构造 Curator 严格输出 Schema 并递归校验模型响应，不授予工具或记忆写入权限。
 from __future__ import annotations
 
 """Memory Curator provider 结构化输出 Schema 构造器。"""
-
-# LLM: Schema construction is isolated from parsing/runtime so every provider receives one
-# immutable contract without growing the Curator service into a second protocol layer.
-# 模块用途: 分段构造递归 strict 的 Curator JSON Schema，避免各 provider 出现字段分叉。
 
 from collections.abc import Collection
 from typing import Any
 
 
-# LLM: The provider selects only message_id; role, exact bounded quote, hash, runtime IDs, and
-# every other authoritative field are always projected from ConversationStore by the host.
+# LLM: 模型只能选 message_id；角色、精确有界引文、哈希、运行 ID 等权威字段始终由宿主从 ConversationStore 投影。
 # 函数用途: 构造模型可提交的单字段消息引用。
 def _message_reference_schema() -> dict[str, Any]:
     return _strict_object({"message_id": {"type": "string"}})
 
 
-# LLM: An audit event_id is sufficient to bind tool status/call/operation/artifact metadata; the
-# model must not repeat or forge those canonical fields in its response.
+# LLM: 审计 event_id 足以绑定工具状态、调用、操作和产物元数据；模型不得在响应中重复填写或伪造这些规范字段。
 # 函数用途: 构造最小工具事件引用。
 def _tool_reference_schema() -> dict[str, Any]:
     return _strict_object({"event_id": {"type": "string"}})
 
 
-# LLM: Artifact identity is selected by exact input artifact_ref, while size/hash/path remain
-# host-owned projections from the corresponding audit event.
+# LLM: 产物身份按输入中精确 artifact_ref 选择，大小、哈希和路径仍由宿主从对应审计事件投影。
 # 函数用途: 构造最小大内容引用。
 def _artifact_reference_schema() -> dict[str, Any]:
     return _strict_object({"artifact_ref": {"type": "string"}})
 
 
-# LLM: Processed declarations carry only their stream identity; they cannot smuggle evidence or
-# content fields into cursor validation.
+# LLM: 已处理声明只携带所属流的身份，不能向游标验证夹带证据或正文字段。
 # 函数用途: 构造 processed message/audit 的单字段严格引用。
 def _processed_reference_schema(key: str) -> dict[str, Any]:
     return _strict_object({key: {"type": "string"}})
 
 
-# LLM: An unresolved item must name exactly one stream at host validation time; both nullable
-# fields remain present so strict providers do not need a provider-specific oneOf dialect.
+# LLM: 宿主校验时每条未解决项必须恰指一条流；两个可空字段仍完整声明，避免依赖供应商特有的 oneOf 方言。
 # 函数用途: 构造 unresolved message/audit 引用。
 def _unresolved_reference_schema() -> dict[str, Any]:
     nullable_string = {"type": ["string", "null"]}
@@ -51,8 +44,7 @@ def _unresolved_reference_schema() -> dict[str, Any]:
     )
 
 
-# LLM: Every Curator object is closed and requires its complete declared field set, even when a
-# nullable value is intentionally empty.
+# LLM: 每个 Curator 对象都拒绝额外字段并要求完整声明字段集，即使某个可空值有意留空也不能省略键。
 # 函数用途: 统一构造递归 strict 的对象 Schema。
 def _strict_object(properties: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -63,7 +55,7 @@ def _strict_object(properties: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# LLM: Scope is a typed host-validated object; applies/excludes text never expands its key.
+# LLM: 范围是由宿主验证的类型化对象；适用或排除条件的文字不能扩大其范围键。
 # 函数用途: 构造 Candidate scope 的严格字段和枚举。
 def _scope_schema() -> dict[str, Any]:
     nullable_string = {"type": ["string", "null"]}
@@ -88,8 +80,7 @@ def _scope_schema() -> dict[str, Any]:
     )
 
 
-# LLM: Daily drafts expose summary/reference fields only and omit every host-owned ordering
-# identity so a model cannot choose sequence, event_id, or curator_run_id.
+# LLM: 日报草稿只开放摘要与引用字段，不开放宿主排序身份，模型不能选择序号、event_id 或 curator_run_id。
 # 函数用途: 构造 DailyMemoryEvent 草稿的严格 Schema。
 def _daily_schema(
     message_reference: dict[str, Any],
@@ -114,9 +105,8 @@ def _daily_schema(
     return _strict_object(properties)
 
 
-# LLM: Candidate Schema contains proposal fields only; candidate_id/status/reviewer remain
-# exclusively host-owned regardless of model or provider.
-# 函数用途: 构造统一候选观察的严格 Schema。
+# LLM: 候选Schema仅含提案字段；link_candidate_id只能选择输入已有锚点，candidate_id、状态和审核者仍由宿主独占，须同步检查提示字段清单。
+# 函数用途: 构造统一候选观察及可空锚点链接的严格Schema，不向模型开放候选身份或状态写入权。
 def _candidate_schema(
     message_reference: dict[str, Any],
     tool_reference: dict[str, Any],
@@ -144,14 +134,14 @@ def _candidate_schema(
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "proposed_action": {"type": "string", "enum": sorted(actions)},
         "target_entry_id": nullable_string,
+        "link_candidate_id": nullable_string,
         "conflicts_with": strings,
         "promotion_target": {"type": "string", "enum": sorted(promotion_targets)},
     }
     return _strict_object(properties)
 
 
-# LLM: The top-level builder takes version/enums from the canonical models module, avoiding
-# duplicated business constants and circular imports.
+# LLM: 顶层构造器接收规范模型模块提供的版本和枚举，避免重复业务常量与循环导入。
 # 函数用途: 组装所有 provider 共用的 Curator strict response Schema。
 def build_curator_response_schema(
     *,
@@ -208,6 +198,7 @@ def build_curator_response_schema(
 #   test_curator_failure_attribution.py。
 # 类用途: 标记“模型输出哪一项不合格”，不带任何正文。
 class CuratorOutputViolation(ValueError):
+    # LLM: 保持原 ValueError 消息及分类不变；违规码与路径由宿主校验器提供，不把模型正文当作诊断权威。
     # 函数用途: 保存原消息、违规码和字段路径。
     def __init__(self, message: str, *, code: str, path: str) -> None:
         super().__init__(message)
@@ -215,8 +206,7 @@ class CuratorOutputViolation(ValueError):
         self.violation_path = path
 
 
-# LLM: Anthropic-compatible providers may only receive the schema through the prompt, so the
-# host must enforce the exact same recursive contract instead of filling omitted fields.
+# LLM: Anthropic 兼容供应商可能只通过提示词收到 Schema；宿主必须执行相同递归规则，不能替模型填补漏字段。
 # 函数用途: 依据 Curator 自有 JSON Schema 校验一次 provider 输出，拒绝缺字段、额外字段和坏类型。
 def validate_curator_response_payload(
     payload: object,
@@ -225,8 +215,7 @@ def validate_curator_response_payload(
     _validate_schema_node(payload, schema, path="$", depth=0)
 
 
-# LLM: This deliberately supports only keywords emitted by this module; accepting an unknown
-# schema keyword would make the host validator silently weaker than the provider contract.
+# LLM: 仅支持本模块构造的 Schema 关键字；未知关键字必须报错，不能使宿主校验静默弱于供应商约束。
 # 函数用途: 递归核对 object/array/string/number/null、enum、required 和数值上下界。
 def _validate_schema_node(
     value: object,
@@ -271,8 +260,7 @@ def _validate_schema_node(
         _validate_number_bounds(value, schema, path=path)
 
 
-# LLM: Strict objects require every nullable property to be present and reject every undeclared
-# property; this mirrors structured-output providers exactly.
+# LLM: 严格对象要求可空属性也必须有键，且拒绝全部未声明属性，与结构化输出供应商的规则一致。
 # 函数用途: 校验一个 Curator JSON 对象的字段全集并递归验证属性。
 def _validate_schema_object(
     value: dict[object, object],
@@ -310,15 +298,14 @@ def _validate_schema_object(
         )
 
 
-# LLM: JSON booleans are not numbers here even though Python bool subclasses int; nullable
-# fields match only an explicit null member.
+# LLM: 即使 Python 的 bool 继承 int，JSON 布尔值也不能匹配数字；可空字段仅在显式包含 null 类型时接受空值。
 # 函数用途: 判断一个 JSON 值是否满足 schema type 或联合 type。
 def _schema_type_matches(value: object, expected: object) -> bool:
     choices = expected if isinstance(expected, list) else [expected]
     return any(_single_schema_type_matches(value, item) for item in choices)
 
 
-# LLM: Type matching stays closed over the types emitted by build_curator_response_schema.
+# LLM: 类型匹配只接受 build_curator_response_schema 实际生成的类型，未知类型必须报错。
 # 函数用途: 匹配一个基础 JSON Schema 类型。
 def _single_schema_type_matches(value: object, expected: object) -> bool:
     if expected == "object":
@@ -334,8 +321,7 @@ def _single_schema_type_matches(value: object, expected: object) -> bool:
     raise RuntimeError(f"unsupported curator schema type: {expected}")
 
 
-# LLM: Confidence bounds are host-enforced even when a provider ignores JSON Schema numeric
-# constraints.
+# LLM: 即使供应商忽略 JSON Schema 数值约束，置信度上下界仍由宿主强制执行。
 # 函数用途: 校验 number 的 minimum/maximum。
 def _validate_number_bounds(
     value: int | float,
@@ -349,8 +335,7 @@ def _validate_number_bounds(
         raise CuratorOutputViolation(f"curator response field {path} is above maximum", code="above_maximum", path=path)
 
 
-# LLM: Model cursor output is advisory and structurally bounded; host calculation remains
-# authoritative after exact processed/unresolved coverage validation.
+# LLM: 模型游标输出只作有界建议；处理与未解决声明经过宿主校验后，最终游标仍以宿主计算为准。
 # 函数用途: 构造 next_cursor 的严格 Schema。
 def _cursor_schema() -> dict[str, Any]:
     cursor_item = {

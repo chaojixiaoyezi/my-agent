@@ -1,3 +1,5 @@
+# LLM: 只操作pytest临时owner，沿真实plan/apply核验策略、候选、引用与可恢复回收；不清理真实记忆。
+# 模块用途: 保护Memory v2留存的原有安全合同，义务候选不得被普通过期规则误删。
 from __future__ import annotations
 
 import json
@@ -28,11 +30,17 @@ NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
 OLD = "2024-01-01T00:00:00+00:00"
 
 
+# LLM: 测试向量仅按输入长度确定性生成，不调用模型或网络，不承担正式语义嵌入能力。
+# 类用途: 为硬删除回归提供可重现的本地向量生成器。
 class _Embedder:
+    # LLM: 每条输入恰好返回一个固定维度向量，只用于触发真实向量索引写入与清除链路。
+    # 函数用途: 按文本长度构造两维测试向量。
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[1.0, float(len(text) % 7)] for text in texts]
 
 
+# LLM: 所有仓库限于 pytest 临时 home；候选、正式记忆及留存服务使用真实领域对象，不替换执行安全门。
+# 函数用途: 装配临时 owner 的候选库、长期库与留存服务。
 def _runtime(tmp_path: Path, *, conversation_roots: tuple[Path, ...] = ()):
     home = ensure_my_agent_home(tmp_path / "home")
     candidates = CandidateService(home.owner_memory_candidates_jsonl)
@@ -50,6 +58,8 @@ def _runtime(tmp_path: Path, *, conversation_roots: tuple[Path, ...] = ()):
     return home, candidates, long_term, service
 
 
+# LLM: 只修改传入临时 home 的策略夹具；非法值有意保留给真实策略解析器拒绝，不在测试助手中纠正。
+# 函数用途: 合并策略覆盖字段并写回测试 retention.json。
 def _set_policy(home, **updates: object) -> dict[str, object]:
     payload = json.loads(home.owner_retention_json.read_text(encoding="utf-8"))
     payload.update(updates)
@@ -60,6 +70,8 @@ def _set_policy(home, **updates: object) -> dict[str, object]:
     return payload
 
 
+# LLM: 状态、更新时间和工具输出均为临时任务的显式夹具，不能凭文件年龄替代任务终态权威。
+# 函数用途: 创建带状态、业务结果及可选工具正文的任务目录。
 def _task(
     root: Path,
     task_id: str,
@@ -87,6 +99,8 @@ def _task(
     return task_root
 
 
+# LLM: 仅为传入测试路径写文件并设置旧 mtime，不处理真实 owner 文件或推断保留授权。
+# 函数用途: 创建一个便于留存规划命中的过期文件。
 def _old_file(path: Path, content: str = "old") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -94,6 +108,8 @@ def _old_file(path: Path, content: str = "old") -> Path:
     return path
 
 
+# LLM: 先经真实观察与审核状态机拒绝候选，再把临时账本更新时间设旧；不替代生产删除或资格判断。
+# 函数用途: 准备一条可用于保留策略与隐私删除测试的陈旧拒绝候选。
 def _reject_old_candidate(candidates: CandidateService):
     candidate = candidates.observe(
         CandidateObservation(
@@ -119,6 +135,8 @@ def _reject_old_candidate(candidates: CandidateService):
     return old
 
 
+# LLM: 用真实 ConversationStore 写入带结构化用户与时间的临时会话，不直接伪造会话索引。
+# 函数用途: 创建一条用户历史消息并返回存储、线程与消息身份。
 def _conversation(root: Path, *, user: str, at: float):
     store = ConversationStore(root)
     thread = store.threads.get_or_create(
@@ -141,10 +159,14 @@ def _conversation(root: Path, *, user: str, at: float):
     return store, store.threads.load(thread.thread_id), message
 
 
+# LLM: 按真实字节取快照，缺文件记 None，不以元数据相同冒充内容未变。
+# 函数用途: 记录一组路径的内容以验证规划入口只读。
 def _state(paths: list[Path]) -> dict[Path, bytes | None]:
     return {path: path.read_bytes() if path.is_file() else None for path in paths}
 
 
+# LLM: 默认策略取自真实初始化文件，并通过真实只读规划核验，不在测试中复制替代解析规则。
+# 函数用途: 验证 Memory v2 默认版本与各类必需保留期。
 def test_retention_v2_default_policy_has_all_required_periods(tmp_path: Path):
     home, _candidates, _long_term, service = _runtime(tmp_path)
     policy = json.loads(home.owner_retention_json.read_text(encoding="utf-8"))
@@ -161,6 +183,8 @@ def test_retention_v2_default_policy_has_all_required_periods(tmp_path: Path):
     assert service.plan(now=NOW).ok is True
 
 
+# LLM: 同一临时文件树先比较规划前后字节，再执行真实清理；活跃、法律保留及原始 audit 必须保留，不能全停假通过。
+# 函数用途: 验证只读规划与跨候选、会话、任务、工具及归档的实际回收行为。
 def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: Path):
     conversation_root = (
         tmp_path
@@ -282,6 +306,8 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     assert all(action.status in {"deleted", "trashed"} for action in applied.actions)
 
 
+# LLM: 全局法律保留必须使规划无动作、执行不进入清理，且测试原件保留。
+# 函数用途: 验证 legal_hold 在真实 plan/apply 两端生效。
 def test_global_legal_hold_prevents_every_retention_action(tmp_path: Path):
     home, _candidates, _long_term, service = _runtime(tmp_path)
     old_audit = _old_file(home.owner_audit_dir / "2024-01-01.jsonl", "{}\n")
@@ -297,6 +323,8 @@ def test_global_legal_hold_prevents_every_retention_action(tmp_path: Path):
     assert old_audit.exists()
 
 
+# LLM: 策略级损坏应拒绝整份执行，单个任务状态损坏仅隔离其子树；两者不能混成同一种全停或全放行。
+# 函数用途: 验证非法策略关闭式失败与坏任务子树隔离。
 def test_corrupt_policy_fails_closed_but_single_bad_task_is_isolated(tmp_path: Path):
     home, _candidates, _long_term, service = _runtime(tmp_path)
     old_audit = _old_file(home.owner_audit_dir / "2024-01-01.jsonl", "{}\n")
@@ -330,6 +358,8 @@ def test_corrupt_policy_fails_closed_but_single_bad_task_is_isolated(tmp_path: P
     assert old_audit.exists()
 
 
+# LLM: 在真实规划后、执行前把任务重新置为 RUNNING，旧终态证明必须失效且工具恢复材料不能被删除。
+# 函数用途: 验证执行端重新核对计划后变化的任务权威状态。
 def test_apply_revalidates_terminal_state_changed_after_plan(
     tmp_path: Path,
     monkeypatch,
@@ -347,6 +377,8 @@ def test_apply_revalidates_terminal_state_changed_after_plan(
     state_path = task / "work" / "state.json"
     original = retention_module.execute_retention_plan
 
+    # LLM: 只在执行接缝前真实改写测试任务状态，随后仍调用原执行器，不替换其状态与指纹复核。
+    # 函数用途: 制造任务从已完成变为运行中的规划后竞争。
     def _change_then_execute(**kwargs):
         state_path.write_text(
             json.dumps(
@@ -372,6 +404,8 @@ def test_apply_revalidates_terminal_state_changed_after_plan(
     assert (task / "work" / "blobs" / "tool_outputs" / "large.txt").exists()
 
 
+# LLM: 工具正文的旧 mtime 不得越过父任务非终态保护，真实规划与执行均不得删除恢复材料。
+# 函数用途: 验证运行中任务始终保护过期工具输出。
 def test_nonterminal_task_protects_tool_outputs_even_when_files_are_old(tmp_path: Path):
     home, _candidates, _long_term, service = _runtime(tmp_path)
     task = _task(home.owner_tasks_dir, "running-task", "RUNNING", OLD)
@@ -387,6 +421,8 @@ def test_nonterminal_task_protects_tool_outputs_even_when_files_are_old(tmp_path
     assert output.exists()
 
 
+# LLM: 使用真实长期库、SQLite 与向量索引验证硬删除；候选正文须脱敏，但用户历史会话必须逐字保留。
+# 函数用途: 验证正式记忆隐私删除清除各权威副本及索引，不误删会话原文。
 def test_hard_delete_scrubs_authority_indexes_candidate_and_not_conversation(tmp_path: Path):
     home = ensure_my_agent_home(tmp_path / "home")
     candidates = CandidateService(home.owner_memory_candidates_jsonl)
@@ -461,7 +497,7 @@ def test_hard_delete_scrubs_authority_indexes_candidate_and_not_conversation(tmp
     assert conversation.read_bytes() == conversation_before
 
 
-# LLM: 只在临时账本设置测试时钟；覆盖全部合法状态、严格三十天边界及未满保留期，不接触生产候选。
+# LLM: 只在临时账本设置观察及更新时间；覆盖全部合法状态和三十天边界，不把新观察伪装成陈旧草稿。
 # 函数用途: 准备陈旧与活跃候选并返回按保留策略应清理的精确集合。
 def _retention_drafts(candidates):
     specs = [(status, 31) for status in sorted(CANDIDATE_STATUSES)]
@@ -472,13 +508,14 @@ def _retention_drafts(candidates):
         for index in range(len(specs))
     ])
     rows = [replace(row, status=status, updated_at=(NOW - timedelta(days=age)).isoformat(),
+                     last_observed_at=(NOW - timedelta(days=age)).isoformat(),
                     status_history=[{**row.status_history[-1], "status": status}],
                     promoted_at=OLD if status == "promoted" else row.promoted_at,
                     promotion_ref="fixture:promoted" if status == "promoted" else row.promotion_ref)
             for row, (status, age) in zip(observed, specs, strict=True)]
     candidates.path.write_text("".join(json.dumps(row.to_record()) + "\n" for row in rows), encoding="utf-8")
     old_ids = {row.candidate_id for row, (status, age) in zip(rows, specs, strict=True)
-               if status != "promoted" and age > 30}
+               if status not in {"promoted", "approved"} and age > 30}
     return rows, old_ids
 
 
@@ -514,7 +551,7 @@ def test_candidate_retention_apis_clean_old_drafts_and_protect_promoted(tmp_path
     assert candidates.get(promoted).status == "promoted"
 
 
-# LLM: 新增可清理状态带正式目标版本约束时，只脱敏并转终态；重复清理仍保留原绑定，不能重授权旧证据。
+# LLM: 陈旧观察带正式目标版本约束时，只脱敏并转终态；重复清理仍保原绑定，不重新授权旧证据。
 # 函数用途: 验证陈旧待审候选保留合法可读的证据墓碑。
 @pytest.mark.parametrize("status", ["pending_review", "approved", "blocked_missing_evidence", "blocked_conflict", "observed"])
 def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
@@ -525,12 +562,17 @@ def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
         subject_key="retention.bound", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson"))
     bindings = [{"key": ["memory-old", "message", "thread-old", "message-old"], "version": 1}]
-    old = replace(row, status=status, updated_at=OLD, target_evidence_bindings=bindings,
+    old = replace(row, status=status, updated_at=OLD, last_observed_at=OLD, target_evidence_bindings=bindings,
                   source_message_refs=[{"thread_id": "thread-old", "message_id": "message-old"}],
                   status_history=[{**row.status_history[-1], "status": status}])
     old = replace(old, learning_source_coverage=initial_source_coverage(old))
     candidates.path.write_text(json.dumps(old.to_record()) + "\n", encoding="utf-8")
     applied = service.apply(now=NOW)
+    if status == "approved":
+        assert applied.ok and not applied.actions
+        assert candidates.get(row.candidate_id).content == old.content
+        assert candidates.get(row.candidate_id).commit_obligation
+        return
     assert applied.ok and [action.record_id for action in applied.actions] == [row.candidate_id]
     tombstone = candidates.get(row.candidate_id)
     assert tombstone.status == "superseded" and tombstone.content == ""
@@ -558,14 +600,14 @@ def test_retention_draft_change_after_plan_is_preserved(tmp_path):
     assert candidates.path.read_bytes() == before
 
 
-# LLM: 真实审核故意发生在 apply 已读快照、删除尚未取锁的窗口；不用假指纹掩盖真实 TOCTOU。
+# LLM: 陈旧观察上的真实审核发生在apply已读快照、删除尚未取锁的窗口；不伪造指纹掩盖TOCTOU。
 # 函数用途: 证明刚获批并变新的候选不能被旧保留计划删除。
 def test_retention_skips_candidate_updated_between_unlocked_read_and_locked_delete(tmp_path, monkeypatch):
     _home, candidates, _memory, service = _runtime(tmp_path)
     row = candidates.observe(CandidateObservation(candidate_type="lesson", content="刚获批的经验必须保留",
         subject_key="retention.atomic", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson"))
-    candidates.path.write_text(json.dumps(replace(row, updated_at=OLD).to_record()) + "\n", encoding="utf-8")
+    candidates.path.write_text(json.dumps(replace(row, updated_at=OLD, last_observed_at=OLD).to_record()) + "\n", encoding="utf-8")
     plan = service.plan(now=NOW)
     assert [action.record_id for action in plan.actions] == [row.candidate_id]
     original = candidates.delete_terminal
@@ -615,6 +657,8 @@ def test_retention_atomic_snapshot_skip_does_not_block_unchanged_candidates(tmp_
     assert remaining[changed.candidate_id].content == changed.content
 
 
+# LLM: 每个真实读取入口都先冷后热并监视 deepcopy，不能靠预热或改写结果隐藏全账本复制。
+# 函数用途: 验证候选统计、读取、保留规划及排除标记不复制整本候选。
 @pytest.mark.parametrize("operation", ["stats", "get", "list", "readonly", "retention", "plan", "exclusions"])
 def test_perf_e_cold_candidate_readers_do_not_copy_ledger(tmp_path, monkeypatch, operation):
     from copy import deepcopy
@@ -627,6 +671,8 @@ def test_perf_e_cold_candidate_readers_do_not_copy_ledger(tmp_path, monkeypatch,
     rows, old_ids = _retention_drafts(candidates)
     copies = []
 
+    # LLM: 仅记录复制对象规模后调用原 deepcopy，不修改返回对象或绕过调用方的隔离语义。
+    # 函数用途: 观察候选读取链路是否发生全表复制。
     def copy_spy(value):
         copies.append(len(value) if isinstance(value, (list, tuple)) else 1)
         return deepcopy(value)
@@ -659,6 +705,8 @@ def test_perf_e_cold_candidate_readers_do_not_copy_ledger(tmp_path, monkeypatch,
         assert copies == []
 
 
+# LLM: 同一代账本重复 get 必须复用 ID 索引；计数真实属性访问而非仅比较耗时。
+# 函数用途: 验证热 get 不逐条扫描候选 ID。
 def test_perf_e_candidate_get_uses_same_generation_id_index(tmp_path, monkeypatch):
     from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
 
@@ -668,6 +716,8 @@ def test_perf_e_candidate_get_uses_same_generation_id_index(tmp_path, monkeypatc
     candidates.get(target)
     original, lookups = MemoryCandidate.__getattribute__, []
 
+    # LLM: 只计 candidate_id 的真实读取，其他属性和取值语义全部透传原实现。
+    # 函数用途: 统计热 get 访问候选身份的次数。
     def tracked(row, name):
         if name == "candidate_id":
             lookups.append(True)
@@ -678,25 +728,39 @@ def test_perf_e_candidate_get_uses_same_generation_id_index(tmp_path, monkeypatc
     assert len(lookups) <= 2, len(lookups)
 
 
+# LLM: 只读借用必须尊重实例及子类的既有 load/list 覆盖，并仅调用一次，不能绕过扩展接缝。
+# 函数用途: 验证 readonly_rows 对四种仓库读取覆盖保持兼容。
 @pytest.mark.parametrize("override", ["load_instance", "load_subclass", "list_instance", "list_subclass"])
 def test_perf_e_readonly_rows_preserves_override(tmp_path, monkeypatch, override):
     _home, candidates, _memory, _service = _runtime(tmp_path)
     rows, _ = _retention_drafts(candidates)
     expected, calls = rows[:1], []
 
+    # LLM: 返回固定的临时候选投影并记录一次调用，不读取或改写生产账本。
+    # 函数用途: 充当被覆盖的候选底层读取入口。
     def load():
         calls.append("load")
         return expected
 
+    # LLM: 保存真实传入筛选参数并返回测试集合，供外层断言确认只读入口未绕过 list 覆盖。
+    # 函数用途: 充当可观察的候选列表覆盖实现。
     def listed(**kwargs):
         calls.append(kwargs)
         return expected
 
+    # LLM: 只覆盖既有底层读取扩展点，其他候选行为仍由原 CandidateService 提供。
+    # 类用途: 验证只读借用兼容子类加载覆盖。
     class Loaded(CandidateService):
+        # LLM: 委托测试 load 并保留其调用记录，不自行构造第二份仓库状态。
+        # 函数用途: 提供子类的底层读取覆盖。
         def _load_unlocked(self):
             return load()
 
+    # LLM: 仅替换 list 扩展点，保持真实服务的其余方法用于验证兼容分发。
+    # 类用途: 验证只读借用兼容子类列表覆盖。
     class Listed(CandidateService):
+        # LLM: 原样传递关键字参数给测试列表实现，不静默丢弃过滤条件。
+        # 函数用途: 提供子类的列表读取覆盖。
         def list(self, **kwargs):
             return listed(**kwargs)
 
@@ -711,6 +775,8 @@ def test_perf_e_readonly_rows_preserves_override(tmp_path, monkeypatch, override
     assert len(calls) == 1
 
 
+# LLM: 坏 JSON、坏 Schema 与重复身份均须由真实只读仓库拒绝，即使筛选集合为空也不能跳过完整性校验。
+# 函数用途: 验证 readonly_rows 对三种账本损坏关闭式失败。
 @pytest.mark.parametrize("bad_kind", ["json", "schema", "duplicate"])
 def test_perf_e_readonly_rows_rejects_corruption(tmp_path, bad_kind):
     from agent_py_agent.agent.memory_store.candidates import CandidateStoreCorruptError
@@ -726,6 +792,8 @@ def test_perf_e_readonly_rows_rejects_corruption(tmp_path, bad_kind):
         reader(statuses=set())
 
 
+# LLM: 真实批量合并只应一次构建查找索引；重复观察保持出现次数，不靠删记录或放宽结果断言达成性能目标。
+# 函数用途: 验证候选批量观察避免逐输入全表扫描。
 def test_perf_e_observe_batch_builds_lookup_indexes_once(tmp_path, monkeypatch):
     from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
     from agent_py_agent.agent.memory_store.candidates import merge_candidate_observations
@@ -737,6 +805,8 @@ def test_perf_e_observe_batch_builds_lookup_indexes_once(tmp_path, monkeypatch):
     rows = candidates.observe_many(seeds)
     original, reads = MemoryCandidate.__getattribute__, []
 
+    # LLM: 记录真实候选 ID 属性访问并委托原实现，不影响合并身份或出现次数。
+    # 函数用途: 统计批量合并构建与查找身份索引的读取规模。
     def tracked(row, name):
         if name == "candidate_id":
             reads.append(True)
@@ -749,6 +819,8 @@ def test_perf_e_observe_batch_builds_lookup_indexes_once(tmp_path, monkeypatch):
     assert all(row.occurrence_count == 1 for row in committed)
 
 
+# LLM: 旧文件可删除，但新鲜祖先与规范 tmp/cache 根必须保留，不能把文件年龄扩张成目录删除权。
+# 函数用途: 验证删除旧临时文件后不会清除新鲜父链。
 @pytest.mark.parametrize("category", ["tmp", "cache"])
 def test_perf_e_retention_preserves_fresh_deleted_file_ancestors(tmp_path, category):
     home, _candidates, _memory, service = _runtime(tmp_path)
@@ -762,6 +834,8 @@ def test_perf_e_retention_preserves_fresh_deleted_file_ancestors(tmp_path, categ
     assert root.is_dir()
 
 
+# LLM: 旧空目录只要存在新鲜祖先就受保护；无保护兄弟目录必须被清理，防止全停假绿。
+# 函数用途: 验证空目录清扫逐层核对祖先年龄。
 @pytest.mark.parametrize("category", ["tmp", "cache"])
 @pytest.mark.parametrize("fresh_depth", [0, 1])
 def test_perf_e_sweep_preserves_old_empty_dirs_beneath_fresh_ancestor(tmp_path, category, fresh_depth):
@@ -783,6 +857,8 @@ def test_perf_e_sweep_preserves_old_empty_dirs_beneath_fresh_ancestor(tmp_path, 
     assert not sibling.exists()
 
 
+# LLM: 真实删除入口在目录时间恰等于 cutoff 时仍允许删除空子目录，但规范根始终保留。
+# 函数用途: 锁定空目录年龄边界为包含等号。
 def test_perf_e_empty_directory_cutoff_is_inclusive(tmp_path):
     from agent_py_agent.agent.memory_store.retention_apply import _remove_empty_ephemeral_dir
 
@@ -795,6 +871,8 @@ def test_perf_e_empty_directory_cutoff_is_inclusive(tmp_path):
     assert root.is_dir() and not target.exists()
 
 
+# LLM: 只删除旧空普通目录；新鲜、非空、符号链接及链接外目标必须保留，不能跟随链接越界清理。
+# 函数用途: 验证 tmp/cache 空目录清扫的年龄、空目录与 nofollow 边界。
 @pytest.mark.parametrize("category", ["tmp", "cache"])
 def test_perf_e_retention_prunes_only_aged_empty_dirs_without_following_links(tmp_path, category):
     home, _candidates, _memory, service = _runtime(tmp_path)
@@ -815,6 +893,8 @@ def test_perf_e_retention_prunes_only_aged_empty_dirs_without_following_links(tm
     assert all(path.exists() for path in (root, fresh, occupied, external / "old-empty", root / "link"))
 
 
+# LLM: 全局法律保留也覆盖附带空目录清扫，不能在未执行留存动作时偷偷删除空目录。
+# 函数用途: 验证 legal_hold 保护旧空临时目录。
 def test_perf_e_legal_hold_does_not_prune_empty_directories(tmp_path):
     home, _candidates, _memory, service = _runtime(tmp_path)
     stale = home.owner_tmp_dir / "held"
@@ -825,6 +905,8 @@ def test_perf_e_legal_hold_does_not_prune_empty_directories(tmp_path):
     assert stale.is_dir()
 
 
+# LLM: 脱敏终态的未接受重放不能占用新观察键，否则会错误吞掉不同主题的独立观察。
+# 函数用途: 验证候选合并保留旧脱敏行并接纳同键的真正独立主题。
 def test_perf_e_redacted_candidate_does_not_occupy_unaccepted_observation_key(tmp_path):
     from agent_py_agent.agent.memory_store.candidates import merge_candidate_observations
 

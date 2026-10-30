@@ -1,10 +1,8 @@
-
+# LLM: 默认策略是新 owner 的机器配置起点；字段变更必须同步迁移、CLI 中文说明与策略测试，不从正文推导权限例外。
+# 模块用途: 生成 owner 首次初始化的权限、配额、留存、Memory、Skill 和工具策略 JSON，不在此写入文件。
 from __future__ import annotations
 
 """Owner 权限、配额、Memory retention、Skill 与工具策略默认值。"""
-
-# LLM: seed payload 是新 owner 的机器配置起点；字段变更必须同步 migration、CLI 中文说明和策略测试。
-# 模块用途: 生成首次初始化时写入 owner home 的结构化策略 JSON。
 
 # LLM: 权限 seed 只定义通用边界，不从提示词或用户正文推导例外。
 # 函数用途: 返回新 owner 的默认文件、网络、shell 和子代理权限。
@@ -31,12 +29,13 @@ def default_quota_payload() -> dict[str, object]:
 
 
 # LLM: retention v2 key 是唯一运行合同；旧 raw_days/task_completed_days 只能经显式 Memory migration 转换。
-# 函数用途: 返回完整会话、审计、Daily、工具输出、候选、Curator、Compact 和任务默认保留期。
+# 函数用途: 返回各类别默认保留期；安全审计独立180天，不授权删除原始策展audit。
 def default_retention_payload() -> dict[str, object]:
     return {
         "schema_version": "my-agent.memory-retention.v2",
         "conversation_days": 365,
         "audit_days": 180,
+        "security_audit_days": 180,
         "daily_days": 365,
         "tool_output_days_after_terminal": 30,
         "rejected_candidate_days": 30,
@@ -46,6 +45,7 @@ def default_retention_payload() -> dict[str, object]:
         "subagent_scratch_days": 30,
         "cache_days": 30,
         "tmp_days": 7,
+        "task_tmp_idle_days": 3,
         "trash_days": 30,
         "legal_hold": False,
         "legal_hold_task_ids": [],

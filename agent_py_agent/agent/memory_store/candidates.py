@@ -12,6 +12,7 @@ import json
 import os
 import pickle
 import re
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
@@ -72,6 +73,14 @@ from .scope_contract import canonical_scope_key
 # 保留清理只认合法的未晋升状态；扫描、执行与仓库删除共用同一集合，promoted 永不参与。
 RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
 
+
+# LLM: 扫描、执行及锁内仓库末门共用；approved及任何提交义务不受年龄覆盖。
+# 函数用途: 唯一裁定一个候选是否可按龄清理。
+def candidate_retention_eligible(candidate):
+    return (candidate.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
+            and candidate.status != "approved" and not candidate.commit_obligation
+            and not _is_binding_tombstone(candidate))
+
 # 记忆候选列表缓存最多跟踪的文件路径数。
 _CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
 # 记忆候选列表缓存允许占用的最大总字节数。
@@ -83,7 +92,7 @@ _CANDIDATE_STAMP_DIGEST_CACHE: OrderedDict[
 ] = OrderedDict()
 _CandidateStatStamp = tuple[int, int, int, int, int]
 _CANDIDATE_LOAD_CACHE: OrderedDict[
-    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...], dict[str, MemoryCandidate]]
+    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...], dict[str, MemoryCandidate], int]
 ] = OrderedDict()
 _CANDIDATE_LOAD_CACHE_LOCK = threading.Lock()
 # 旧注入点仅在显式替换时接管冷读；正常路径保持M1同FD流式解析。
@@ -136,19 +145,45 @@ def _drop_candidate_load_cache(path: Path) -> None:
         _CANDIDATE_STAMP_DIGEST_CACHE.pop(str(path), None)
 
 
-# LLM: 写侧先归一化owned副本，只读解析独占模型可接管；同代ID索引与元组原子发表/驱逐，最多8路径128MiB。
-# 函数用途: 缓存严格读验证且磁盘代次稳定的候选及其ID索引，不以写侧副本代替读验证。
-def _remember_candidate_load(path, probe, records, *, copy_records: bool = True):
+# LLM: 只读模型直接接管，不复制整账本；锁外计量原行/索引及条目元数据，锁内加容器开销，超额不入驻。
+# 函数用途: 缓存严格读验证的同代候选及ID索引，保持最多8路径、128MiB实际对象预算。
+def _remember_candidate_load(path, probe, records):
     if probe is None or _candidate_load_stamp(path) != probe[0]:
         return
-    snapshot = deepcopy(tuple(records)) if copy_records else tuple(records)
+    snapshot = tuple(records)
     by_id = {row.candidate_id: row for row in snapshot}
+    key, stamp = str(path), probe[0][:4]
+    retained = _candidate_retained_bytes((key, stamp, probe[1], snapshot, by_id, 0)) + 64
     with _CANDIDATE_LOAD_CACHE_LOCK:
-        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot, by_id)
+        _CANDIDATE_LOAD_CACHE.pop(str(path), None)
+        if retained > _CANDIDATE_LOAD_CACHE_MAX_BYTES:
+            return
+        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot, by_id, retained)
         _CANDIDATE_LOAD_CACHE.move_to_end(str(path))
         while (len(_CANDIDATE_LOAD_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS
-               or sum(entry[0][1] for entry in _CANDIDATE_LOAD_CACHE.values()) > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
+               or sys.getsizeof(_CANDIDATE_LOAD_CACHE) + sum(entry[4] for entry in _CANDIDATE_LOAD_CACHE.values())
+               > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
             _CANDIDATE_LOAD_CACHE.popitem(last=False)
+
+
+# LLM: 迭代计量只跟随候选JSON容器和实例字典，共享对象按身份去重，不计类全局或调用方栈。
+# 函数用途: 计算缓存实际保留的对象树大小，避免拿文件长度代替内存用量。
+def _candidate_retained_bytes(value):
+    total, seen, pending = 0, set(), [value]
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+        elif isinstance(item, MemoryCandidate):
+            pending.append(vars(item))
+    return total
 
 
 # LLM: 校验磁盘探针与缓存摘要完全一致才返回只读元组；不一致时可驱逐旧缓存，调用方负责深复制输出。
@@ -190,7 +225,7 @@ def _borrow_candidate_readonly_rows(service: CandidateService) -> tuple[MemoryCa
         return cached
     probe, records = service._parse_candidate_ledger_unlocked()
     snapshot = tuple(records)
-    _remember_candidate_load(service.path, probe, snapshot, copy_records=False)
+    _remember_candidate_load(service.path, probe, snapshot)
     return snapshot
 
 
@@ -267,7 +302,7 @@ class CandidateService:
     def observe(self, observation: CandidateObservation) -> MemoryCandidate:
         return self.observe_many([observation])[0]
 
-    # LLM: Batch observations validate completely before one locked replacement; callers must not emulate atomicity with loops.
+    # LLM: 批观察全部验证后才在同一锁内替换账本；调用方不得用逐条调用冒充批次原子性。
     # 函数用途: 原子写入一批候选，任一条非法时整个批次不改变 candidates.jsonl。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
     # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
@@ -422,6 +457,8 @@ class CandidateService:
                     cold_detail_ref="",
                     target_evidence_bindings=binding_history(current),
                     status=target,
+                    commit_obligation=(target == "approved" or current.commit_obligation)
+                        and target not in {"rejected", "withdrawn", "promoted"},
                     reviewer=actor,
                     review_note=str(review_note or "").strip(),
                     updated_at=now,
@@ -468,6 +505,23 @@ class CandidateService:
         expected = candidate_id if isinstance(candidate_id, MemoryCandidate) else self.get(candidate_id)
         target = effective_promotion_target(expected.promotion_target, expected.origin, expected.candidate_type)
         return self.transition(expected, "approved", reviewer=reviewer, review_note=reason, promotion_target=target)
+
+    # LLM: 在所有正式锁释放后按完整快照CAS记履约退避；不覆盖并发批准、拒绝或成功终态。
+    # 函数用途: 把暂时提交失败留在唯一候选账本，保留证据供后续安全重试。
+    def defer_commit(self, expected: MemoryCandidate, reason: str) -> MemoryCandidate:
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
+            rows = self._load_unlocked()
+            index = _candidate_index(rows, expected.candidate_id)
+            if rows[index] != expected:
+                raise CandidateStateChangedError(rows[index].status)
+            if expected.status in TERMINAL_CANDIDATE_STATUSES:
+                return expected
+            now = datetime.now(timezone.utc)
+            rows[index] = replace(expected, commit_obligation=True, obligation_blocked_reason=reason,
+                obligation_retry_after=(now + timedelta(minutes=5)).isoformat())
+            _write_candidates_unlocked(self.path, rows, admission=admission,
+                **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return rows[index]
 
     # LLM: 正式落点提交成功后才能标 promoted；失败时保留 approved 供安全重试。
     # 函数用途: 记录唯一 PromotionService 已完成的正式引用。
@@ -570,15 +624,15 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
-    # LLM: 此入口仅规划合法未晋升候选，禁止为归档暗中写盘；终态维护由执行delete_terminal负责。
-    # 函数用途: 不复制全账本地规划过期候选ID，不执行删除。
+    # LLM: 未终态按最后观察计龄，审核更新时间不冒充新证据；此入口只规划不删除。
+    # 函数用途: 规划真正陈旧候选ID，保护最近再次观察到的候选。
     def retention_candidates(self, *, before: datetime) -> list[str]:
         cutoff = before.astimezone(timezone.utc)
         result: list[str] = []
         for item in self.readonly_rows(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
-            if _is_binding_tombstone(item):
+            if not candidate_retention_eligible(item):
                 continue
-            if datetime.fromisoformat(item.updated_at) < cutoff:
+            if datetime.fromisoformat(candidate_retention_time(item)) < cutoff:
                 result.append(item.candidate_id)
         return result
 
@@ -614,8 +668,7 @@ class CandidateService:
                     if expected is None:
                         continue
                     if (current is not None and _candidate_snapshot_matches(self.path, current, expected)
-                            and current.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
-                            and not _is_binding_tombstone(current)):
+                            and candidate_retention_eligible(current)):
                         continue
                     ids.remove(cid)
                     if skipped_state_changed is not None:
@@ -623,7 +676,7 @@ class CandidateService:
             if not ids:
                 return 0
             for item in candidates:
-                if item.candidate_id in ids and item.status not in RETENTION_ELIGIBLE_CANDIDATE_STATUSES:
+                if item.candidate_id in ids and not _is_binding_tombstone(item) and not candidate_retention_eligible(item):
                     raise CandidateTransitionError(
                         f"candidate {item.candidate_id} is not retention-eligible"
                     )
@@ -646,15 +699,14 @@ class CandidateService:
         options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
         return locked_json_path(self.path, **options)
 
-    # LLM: 写侧始终取得可修改的独立模型；热快照深复制，冷解析以copy_records=True隔离缓存，不向写方借缓存对象。
-    # 函数用途: 在原文件锁内加载可安全修改的候选列表。
+    # LLM: 热缓存只复制写方所需的独占模型；冷解析直接归写方，不再为了缓存复制整账本。
+    # 函数用途: 在原文件锁内取得可安全修改的候选列表，读侧缓存由只读解析独立建立。
     def _load_unlocked(self) -> list[MemoryCandidate]:
         probe = _candidate_load_probe(self.path)
         cached = _cached_candidate_rows(self.path, probe, evict_on_miss=True)
         if cached is not None:
             return list(deepcopy(cached))
-        probe, records = self._parse_candidate_ledger_unlocked()
-        _remember_candidate_load(self.path, probe, records, copy_records=True)
+        _probe, records = self._parse_candidate_ledger_unlocked()
         return records
 
     # LLM: 持原锁逐行严格解析；同FD流式摘要不保留整表原文/字典，归一化改变时不复用旧原行。
@@ -668,6 +720,14 @@ class CandidateService:
 # 类用途: 表示一条观察撞上了已有观察身份、但类型化主题不同。
 class CandidateIdentityConflictError(ValueError):
     pass
+
+
+# LLM: 终态沿更新时间；未终态优先宿主最后观察时间，旧行缺字段才逐级回退，不解析正文。
+# 函数用途: 为扫描、执行复核和仓库清理提供同一个候选计龄基准。
+def candidate_retention_time(candidate):
+    if candidate.status in TERMINAL_CANDIDATE_STATUSES:
+        return candidate.updated_at or candidate.created_at
+    return candidate.last_observed_at or candidate.updated_at or candidate.created_at
 
 
 # LLM: 两个提交入口共用纯合并；先按规范证据及精确目标校验版本，再按候选/观察身份合并。
@@ -700,10 +760,27 @@ def _observation_index(rows: list[MemoryCandidate]) -> dict[str, set[int]]:
     return result
 
 
-# LLM: 全部冲突检查及新模型构造先于共享索引变更；拒绝项不留下观察键、候选行或目标绑定。
-# 函数用途: 将单条已规范观察成功合入现有索引，供批提交与可跳冲突预演复用。
+# LLM: 冲突检查先于共享索引变更；跨引用别名以历史来源为锚收敛，补run不混淆已知异run，引用及学习权威不改写。
+# 函数用途: 按结构化来源合并单条观察，供批提交与可跳冲突预演复用。
 def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared):
     normalized, candidate_id, observation_key = prepared
+    if normalized.link_candidate_id:
+        linked = by_id.get(normalized.link_candidate_id)
+        if (linked is None or result[linked].status in TERMINAL_CANDIDATE_STATUSES
+                or result[linked].candidate_type not in {"lesson", "hot_rule"}
+                or not _same_candidate_identity(result[linked], normalized)):
+            raise CandidateIdentityConflictError("candidate link is not in the same typed scope")
+        candidate_id = normalized.link_candidate_id
+    source_index = by_id.get(candidate_id)
+    if (source_index is not None and result[source_index].candidate_type in {"lesson", "hot_rule"}
+            and _same_candidate_identity(result[source_index], normalized)):
+        existing = result[source_index]
+        incoming_sources = _observation_sources(normalized)
+        new_sources = [sorted(group) for group in _new_observation_sources(existing, incoming_sources)]
+        if incoming_sources or normalized.link_candidate_id:
+            # 只为未与历史来源连通的组生成新观察键，不信模型observation_id。
+            observation_key = (hashlib.sha256(json.dumps([candidate_id, sorted(new_sources)], sort_keys=True).encode()).hexdigest()
+                               if new_sources else existing.observation_keys[0])
     if bindings.conflicts(normalized):
         raise CandidateIdentityConflictError("candidate evidence cannot refresh target observation version")
     positions = sorted(by_observation.get(observation_key, ()))
@@ -835,7 +912,8 @@ def _promoted_rows(candidates, index, review):
     current = rows[index]
     now = utc_now_iso()
     if current.status != "promoted":
-        rows[index] = replace(current, status="promoted", reviewer=str(reviewer or "promotion-service").strip(),
+        rows[index] = replace(current, status="promoted", commit_obligation=False,
+            obligation_blocked_reason="", obligation_retry_after="", reviewer=str(reviewer or "promotion-service").strip(),
             review_note=str(review_note or "").strip(), promoted_at=now,
             promotion_ref=str(promotion_ref).strip(), updated_at=now,
             status_history=[*current.status_history,
@@ -1070,6 +1148,7 @@ def _new_candidate(
         learning_source=source_coverage_projection(coverage),
         learning_source_coverage=coverage,
         status=status,
+        commit_obligation=observation.origin == "user_explicit",
         reviewer="candidate-service" if status.startswith("blocked_") else "",
         review_note=_initial_review_note(status),
         created_at=now,
@@ -1090,12 +1169,13 @@ def _rejected_draft(current: MemoryCandidate) -> bool:
             and not current.content_redacted_at and not current.promotion_ref)
 
 
-# LLM: 首拒草稿仅用新证据重建；拒绝历史及旧来源—目标版本约束保留，旧引用/覆盖不贡献晋升资格。
-# 函数用途: 用独立新观察重新申请同一候选，避免一次失败证据永久污染后续合法重试。
+# LLM: 首拒草稿仅用新证据重建；未知字段独占保真，拒绝历史与版本约束保留，旧引用不贡献资格。
+# 函数用途: 用新观察重新申请同一候选，同时完整保留其未来合同和拒绝审计。
 def _retry_rejected_draft(current: MemoryCandidate, observation: CandidateObservation,
                           observation_key: str) -> MemoryCandidate:
     fresh = _new_candidate(observation, current.candidate_id, observation_key)
     return replace(fresh, created_at=current.created_at,
+                   _extra_fields=deepcopy(current._extra_fields),
                    target_evidence_bindings=binding_history(current),
                    promotion_exclusion=current.promotion_exclusion,
                    status_history=[*current.status_history, *fresh.status_history])
@@ -1127,6 +1207,8 @@ def _merge_candidate(
     merged = replace(
         current,
         origin=resolved_origin,
+        commit_obligation=(current.commit_obligation or resolved_origin == "user_explicit")
+            and current.status not in {"promoted", "rejected", "withdrawn"},
         # 未知引用不能继承另一条可学消息的资格；人工入口无投影语义单独保留。
         learning_source=source_coverage_projection(coverage),
         learning_source_coverage=coverage,
@@ -1177,14 +1259,18 @@ def _merge_candidate(
     return merged
 
 
-# LLM: A model label alone cannot rewrite provenance; correction requires the current candidate
-# to be blocked with no matching refs and the incoming origin to carry its own canonical refs.
-# 函数用途: 在缺证据终态下裁决能否把误标的 user_explicit/tool_verified 来源纠正为有真实引用的新来源。
+# LLM: 标签不能自证权威；仅用结构化引用的新来源修复非终态推断，正式回查仍由晋升服务负责。
+# 函数用途: 决定补充用户或工具引用后能否恢复正确来源并重新走自动晋升门。
 def _resolved_blocked_origin(
     current: MemoryCandidate,
     observation: CandidateObservation,
 ) -> str:
     incoming = str(observation.origin or "").strip().lower()
+    if current.origin == "model_inferred" and current.status not in TERMINAL_CANDIDATE_STATUSES:
+        if incoming == "user_explicit" and observation.source_message_refs:
+            return incoming
+        if incoming == "tool_verified" and observation.source_tool_refs:
+            return incoming
     if (
         current.status != "blocked_missing_evidence"
         or incoming == current.origin
@@ -1199,8 +1285,103 @@ def _resolved_blocked_origin(
     return current.origin
 
 
-# LLM: This check only reopens a structurally missing-evidence candidate after exact references
-# have been merged. Cryptographic/message/tool verification remains exclusively in PromotionService.
+# LLM: 同条引用的operation/call/artifact_ref/artifact_id为别名组；有稳定ref时禁止退化为run级去重。
+# 函数用途: 提取独立来源及计数别名投影，不更改真实证据或其学习覆盖。
+def _observation_sources(subject):
+    groups = []
+    for ref in subject.source_message_refs:
+        if ref.get("message_id"):
+            groups.append(frozenset({("message", str(ref.get("thread_id") or ""), str(ref["message_id"]))}))
+    refs = (*subject.source_tool_refs, *subject.source_artifact_refs)
+    contexts = _source_alias_contexts(refs)
+    for ref in refs:
+        keys = _source_ref_aliases(ref)
+        run = str(ref.get("run_id") or "")
+        runs = {run} if run else set().union(*(contexts.get(key, set()) for key in keys)) or {""}
+        aliases = frozenset((kind, context, value) for kind, value in keys for context in runs)
+        if aliases:
+            groups.append(aliases)
+    if not groups:
+        groups.extend(frozenset({("run", "", str(value))}) for value in subject.source_run_ids)
+    if not groups:
+        groups.extend(frozenset({("task", "", str(value))}) for value in subject.source_task_ids)
+    return groups
+
+
+# LLM: 只提取稳定的同次执行关联键，run单独保留上下文；不同artifact不能凭同run关联。
+# 函数用途: 统一工具与产物的别名类别，并兼容call/tool_call同名键。
+def _source_ref_aliases(ref):
+    return frozenset(("call" if name in {"call_id", "tool_call_id"} else name, str(ref[name]))
+                     for name in ("operation_id", "tool_call_id", "call_id", "artifact_ref", "artifact_id")
+                     if ref.get(name))
+
+
+# LLM: 只投影计数等价类；缺run的同组键共享已观察上下文，歧义保守合票，不伪造证据、学习资格或正式权威。
+# 函数用途: 让混合/链式历史空run别名收敛，避免单个遗留通配符吞新运行或重放虚增票。
+def _source_alias_contexts(refs):
+    contexts, pending = {}, []
+    for ref in refs:
+        aliases = _source_ref_aliases(ref)
+        run = str(ref.get("run_id") or "")
+        if run:
+            for alias in aliases:
+                contexts.setdefault(alias, set()).add(run)
+        elif aliases:
+            pending.append(aliases)
+    changed = True
+    while changed:
+        changed = False
+        for aliases in pending:
+            runs = set().union(*(contexts.get(alias, set()) for alias in aliases))
+            for alias in aliases:
+                known = contexts.setdefault(alias, set())
+                if not runs.issubset(known):
+                    known.update(runs)
+                    changed = True
+    return contexts
+
+
+# LLM: 仅计数投影先沿明确历史run收敛，再容历史空run匹配；不按共同run关联、不写回真实引用或学习覆盖。
+# 函数用途: 排除同批多跳补全的旧观察，返回真正独立的新来源组。
+def _new_observation_sources(existing, incoming):
+    seen = set().union(*_observation_sources(existing))
+    pending = list(incoming)
+    for allow_unqualified in (False, True):
+        while pending:
+            remaining = []
+            for group in pending:
+                contexts = _matching_source_contexts(group, seen, allow_unqualified=allow_unqualified)
+                if contexts:
+                    seen.update((kind, context, value) for kind, run, value in group
+                        for context in contexts if not run or run == context)
+                else:
+                    remaining.append(group)
+            if len(remaining) == len(pending):
+                break
+            pending = remaining
+    return pending
+
+
+# LLM: 相同类别/稳定ID才关联；已知run优先于历史空run，缺run组只传播命中的上下文，不把空通配符传给新别名。
+# 函数用途: 为同次执行的别名补全取得已见运行上下文，明确异run不命中。
+def _matching_source_contexts(incoming, existing, *, allow_unqualified):
+    contexts = {}
+    for kind, run, value in existing:
+        contexts.setdefault((kind, value), set()).add(run)
+    matched = set()
+    for kind, run, value in incoming:
+        runs = contexts.get((kind, value), set())
+        qualified = runs - {""}
+        if not qualified and allow_unqualified:
+            qualified = runs
+        if not run:
+            matched.update(qualified)
+        elif run in qualified or "" in qualified:
+            matched.add(run)
+    return matched
+
+
+# LLM: 仅在精确引用合并后重新开放结构缺证据的候选；密码学、消息及工具证据核验仍由PromotionService独占。
 # 函数用途: 判断候选是否已补齐与来源类型匹配的最小结构化引用，以便自动重试而不是永久卡住。
 def _candidate_has_structural_evidence(candidate: object) -> bool:
     origin = str(getattr(candidate, "origin", "") or "").strip().lower()

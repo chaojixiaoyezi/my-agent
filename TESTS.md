@@ -162,6 +162,49 @@ python3 -B scripts/check_clean_package.py .
 
 验证边界：本地真实入口与故障注入不等于真实供应商或飞书平台回调验收；未验证真实断电耐久性。硬链接创建受 `EPERM` 拒绝，多链接门禁用精确目标 FD 元数据注入验证，不冒称真实链接创建成功。
 精确提交、JUnit、红绿对照及独立静态复核边界以本轮 `DONE-e905-sol-4.md` 为准；定向临时库验证不代生产/跨平台/全仓验收。物理配额不够暂存峰值时仍诚实拒绝，未承诺满额或磁盘真实耗尽时自动恢复。
+## 2026-10-29 e905 sol-5 R3：留存引用保护与消费者合同收口
+
+来源：`fix-e905-sol-5-r3.md` 与 Opus 终审报告 B1/B2/B3/N1/N2；起点 `974c69567`，完整分支基线 `4bea324e3`。主代理直接实现，未派生子代理，不改真实用户数据、不推送或部署。
+
+- B1/N1：一次规划只调用一次严格 pin 构建，task tmp、run scratch、按龄文件和 trash 共用；来源错误只发表一次且保留原错误顺序。原 `test_owner_maintenance.py` 完全不改，原隔离错误数与错误码顺序断言恢复。执行按 scratch 动作复核全源代次，不按成员重复全源扫描；32 文件加子目录的测试实测从 34 次降到 1 次。每次实际 unlink/rmdir 的 nofollow/FD 位置和身份检查仍保留。首次 RUNNING state 发表使下一动作失效的回归同时覆盖 tasks、runs 两种规范布局。
+- B3：规划和执行共用 `scratch_tree_pinned`，所属 run/task ID、根路径或任一子成员 ID/路径受保护，就跳过整棵 scratch。真实外置器构造规范 run 工具索引及信封，候选只带 run/call、不带路径；新规划与旧计划执行均保留索引、信封和未引用兄弟，晋升工具证据核验前后都为成功。另覆盖父运行 ID 不匹配而必须检查子文件的情况、task tmp 的 artifact ID 内容命中，以及原坏源关闭回归；未放宽完整性门。
+- B2：原 22 个失败消费者同步新合同。首次回执 I/O 失败严格断言 `PROMOTION_IO_BLOCKED`、approved、耐久履约义务和重试时间；只推进晋升模块测试时钟越过退避，不改候选。恢复严格核对 `UPDATE_COMMIT_RECOVERED`、终态、义务清除和正式字节不变；七种正式条目篡改必须返回精确身份拒绝码及 `blocked_conflict`，不能退避空过。正式/墓碑损坏保留原 `MemoryAuthorityCorruptError` 合同，并同时核对恢复函数和公开晋升入口的 `.code == MEMORY_AUTHORITY_UNREADABLE`、approved 及文件不变；不把该异常伪写成新增结构化返回。CLI doctor 核对候选 schema v3。
+- N2：实际入口 `attach_candidate_anchors` 对单个非法 scope ID 只跳过该范围；合法 task 别名、其它消息/事件范围和锚点继续处理，不改游标或扩域。
+- 红绿：原消费者组合实测 23F/17P；新行为首跑捕获规划 3 次构建、逐动作 34 次复核、task 子证据误删和脏 scope 异常。run 归档夹具初次缺少完整执行元数据，4 项停在前置核验，未算有效产品红例；补完整 `duration_ms` 后四项均在错误规划/删除断言失败，再修复转绿。中途维护测试还抓到错误顺序变化，恢复原顺序后通过，未改原预期。
+- 最终指定十文件 **406 passed，0 failures / errors / skipped**，35.40s；JUnit 为 `.pytest_cache/sol5-r3-fix/final.xml`。分支全部 22 个改动 Python 文件的整文件审计为 22 模块、84 类、709 函数，中文双层注释缺口 0、英文 LLM 标签行 0。原有效断言保留，无删测、skip、xfail。
+
+复现（工作树根）：
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest \
+  agent_py_agent/tests/test_opt_memory_obligations.py \
+  agent_py_agent/tests/test_memory_curator_candidate_links.py \
+  agent_py_agent/tests/test_memory_retention_phase2.py \
+  agent_py_agent/tests/test_memory_retention_v2.py \
+  agent_py_agent/tests/test_security_audit_retention_policy.py \
+  agent_py_agent/tests/test_memory_retention_wave5.py \
+  agent_py_agent/tests/test_memory_curator.py \
+  agent_py_agent/tests/test_owner_maintenance.py \
+  agent_py_agent/tests/test_memory_promotion.py \
+  agent_py_agent/tests/test_memory_admin_cli_v2.py \
+  -q --tb=short -o addopts="" -o cache_dir=/tmp/pytest_cache_sol5_r3_fix
+ruff check --no-cache agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base 4bea324e3
+git diff --check
+python3 scripts/check_clean_package.py .
+```
+
+本节只覆盖本轮定向门，不代表全仓、Linux/Windows、真实 Curator 模型、生产迁移或跨进程发表/删除原子性通过。未重新运行旧交接的额外六文件或 110 文件消费者组合，不用历史同名失败豁免当前验证。按动作复核不是与不协作外部写者的全局锁；别名跨观察顺序、长链性能、旧扁平目录识别等报告剩余项未在本轮扩大实现。
+
+## 2026-10-29 e905 sol-5 R2：候选观察跨引用别名链补全
+
+来源：`report-rereview-e905-sol-5-astra1.md` 的 F1 与确认后的 `fix-e905-sol-5-r2.md`。旧观察只有 operation，后续同批补 operation→call、call→artifact 时，不能将同次执行重复计票。
+
+- `test_opt_memory_obligations.py` 新增普通合并/显式链接、有无 run、反向容器顺序、多跳固定点、同批独立来源及不同 artifact 同 run 对照；均走真实候选账本并核对跨实例重读、引用保真。
+- 红例：首批新增 12 项中 10 失败、2 对照通过；失败实值为 `(2, 2)` 而非 `(1, 1)`。初修后该文件 73 项通过；独审再补 8 个已知 run/历史空 run 排列用例，先 4F/4P，再修为明确历史 run 优先传播。最终该文件 81 项通过；不是通过降低断言、skip 或合并整个 run 来消除失败。
+- 修复只改变计数别名投影，不改真实证据、学习覆盖、正式晋升、状态机或锁；Curator 中文注释检查须覆盖完整分支改动文件的全部 AST 定义，不限最后一次提交。
+- 最终聚焦组合（R1 六文件及 `test_memory_curator.py`）321P，0F/E/skip；额外六文件核心回归 237P/3F，三个 persona/SOUL 节点与真正原基线记录同名，不能登记全回归全绿。Ruff、导入边界、doc-sync、diff、clean-package、20 文件 compileall 及整文件 AST 中文注释审计通过（20 模块、82 类、666 函数，缺口 0）；注释专属 18 文件 AST 与非注释 token 等价。
+- 复现：工作树根执行 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_memory_obligations.py -q --tb=short -o addopts= --basetemp=.pytest_cache/sol5-r2-repro-tmp`。完整组合命令、XML 和失败边界见本轮 DONE；首次独审 P2 由主代理实测修正，未将旧审查报告包装成最终独立批准。本节不宣称生产或跨平台验收。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 

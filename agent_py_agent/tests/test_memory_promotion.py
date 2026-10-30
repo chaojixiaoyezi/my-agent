@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,8 @@ import pytest
 from agent_py_agent.tests.test_memory_promotion_v2 import _explicit, _runtime
 
 
+# LLM: 故障后先越过真实退避截止时间，再从原恢复和公开晋升入口核对坏权威；禁止篡改候选以绕过退避。
+# 函数用途: 验证正式文件或墓碑损坏时报告精确错误码且候选与全部权威字节不变。
 @pytest.mark.parametrize("source", ["formal", "tombstones"])
 @pytest.mark.parametrize("action", ["replace", "merge"])
 @pytest.mark.parametrize("bad", [b"{broken\n", b"[]\n", b"\xff\n"])
@@ -23,9 +26,14 @@ def test_r2_interrupted_update_rejects_corrupt_authority(tmp_path, monkeypatch, 
     with path.open("ab") as stream:
         stream.write(bad)
     before = path.read_bytes(), service.candidates.path.read_bytes()
-    with pytest.raises(MemoryAuthorityCorruptError, match="MEMORY_AUTHORITY_UNREADABLE"):
+    with pytest.raises(MemoryAuthorityCorruptError, match="MEMORY_AUTHORITY_UNREADABLE") as caught:
         recover_committed_update(service, candidate, "test-recovery")
-    assert service.candidates.get(candidate.candidate_id).status == "approved"
+    assert caught.value.code == "MEMORY_AUTHORITY_UNREADABLE"
+    with pytest.raises(MemoryAuthorityCorruptError, match="MEMORY_AUTHORITY_UNREADABLE") as caught:
+        service.promote(candidate.candidate_id, automatic=True)
+    assert caught.value.code == "MEMORY_AUTHORITY_UNREADABLE"
+    saved = service.candidates.get(candidate.candidate_id)
+    assert saved.status == "approved" and saved.commit_obligation
     assert (path.read_bytes(), service.candidates.path.read_bytes()) == before
 
 
@@ -167,8 +175,8 @@ def test_m2_uncertain_batch_skips_condense_and_keeps_durable_obligation(tmp_path
     assert json.loads(marker.read_text())["pending"] is True
 
 
-# LLM: 先经真实正式库写入replace，再只在候选终态落盘边界故障；不伪造已提交记录。
-# 函数用途: 得到正式写成功、候选仍approved的可重复恢复案例。
+# LLM: 正式写真实执行，仅在终态回执处注入IO故障；要求原服务保存履约义务并返回阻塞码，再只推进测试时钟。
+# 函数用途: 得到正式写成功、候选仍批准且已越过五分钟退避的恢复案例。
 def _interrupted_update(tmp_path, monkeypatch, action):
     service, store, thread = _runtime(tmp_path)
     old = _explicit(service, store, thread, content="更新之前的明确事实")
@@ -184,16 +192,42 @@ def _interrupted_update(tmp_path, monkeypatch, action):
 
     with monkeypatch.context() as fault:
         fault.setattr(service.candidates, "mark_promoted_admitted", fail)
-        with pytest.raises(OSError, match="fixture candidate receipt"):
-            service.promote(candidate.candidate_id, automatic=True)
+        result = service.promote(candidate.candidate_id, automatic=True)
+        assert result.promoted is False
+        assert result.reason_code == "PROMOTION_IO_BLOCKED" and result.status == "approved"
     assert service.candidates.mark_promoted_admitted == original
-    assert service.candidates.get(candidate.candidate_id).status == "approved"
+    saved = service.candidates.get(candidate.candidate_id)
+    assert saved.status == "approved" and saved.commit_obligation
+    assert saved.obligation_blocked_reason == "PROMOTION_IO_BLOCKED"
+    retry_after = datetime.fromisoformat(saved.obligation_retry_after)
+    assert retry_after > datetime.now(timezone.utc)
     assert service.long_term.all()[0].version == target.version + 1
+    _advance_obligation_clock(monkeypatch, retry_after)
     return service, candidate, target
 
 
-# LLM: 隔离真实仓库上的定向回归，不改变权限、原断言或生产输入。
-# 函数用途: 精确更新重试只补回执不重写正式库。
+# LLM: 仅替换晋升模块时钟，候选与正式账本原字节保留；恢复/拒绝路径必须实际超过持久退避截止时间。
+# 函数用途: 把测试时钟推进到履约重试截止后一秒，不等待墙钟或篡改责任记录。
+def _advance_obligation_clock(monkeypatch, retry_after):
+    from agent_py_agent.agent.memory_store import promotion
+
+    due = retry_after + timedelta(seconds=1)
+
+    # LLM: 继承标准日期解析且仅冻结当前时钟，生产状态机和证据校验仍真实执行。
+    # 类用途: 提供超过原五分钟退避窗口的确定性测试时钟。
+    class AfterRetryClock(datetime):
+        # LLM: 只在本测试的晋升模块生效，支持原调用的时区参数且不改系统时钟。
+        # 函数用途: 返回重试截止后一秒的当前时间。
+        @classmethod
+        def now(cls, tz=None):
+            return due.astimezone(tz) if tz is not None else due.replace(tzinfo=None)
+
+    monkeypatch.setattr(promotion, "datetime", AfterRetryClock)
+    assert promotion.datetime.now(timezone.utc) > retry_after
+
+
+# LLM: 首次阻塞和退避由真实夹具验证；到期恢复必须补终态并清义务，不重写正式条目。
+# 函数用途: 验证精确提交恢复码、正式版本与文件字节均符合合同。
 @pytest.mark.parametrize("action", ["replace", "merge"])
 def test_m2_exact_committed_update_retry_completes_without_formal_rewrite(tmp_path, monkeypatch, action):
     service, candidate, target = _interrupted_update(tmp_path, monkeypatch, action)
@@ -203,12 +237,14 @@ def test_m2_exact_committed_update_retry_completes_without_formal_rewrite(tmp_pa
     assert result.reason_code == "UPDATE_COMMIT_RECOVERED"
     assert result.formal_memory_changed is False
     assert service.long_term.path.read_bytes() == before
-    assert service.candidates.get(candidate.candidate_id).status == "promoted"
+    saved = service.candidates.get(candidate.candidate_id)
+    assert saved.status == "promoted" and not saved.commit_obligation
+    assert not saved.obligation_retry_after and not saved.obligation_blocked_reason
     assert service.long_term.all()[0].version == target.version + 1
 
 
-# LLM: 隔离真实仓库上的定向回归，不改变权限、原断言或生产输入。
-# 函数用途: 不同归属或元数据不能冒认旧更新。
+# LLM: 先真实提交中断并推进五分钟退避，再篡改唯一正式库；必须走身份拒绝而非退避空过。
+# 函数用途: 验证不同归属或元数据不能冒认旧更新，拒绝码和冲突终态均严格核对。
 @pytest.mark.parametrize("field,value", [("source", "candidate:someone-else"), ("version", 3), ("kind", "event"),
                                          ("tags", ["other"]), ("attributes", {}), ("expires_at", 99.0),
                                          ("content", "不一样的事实")])
@@ -217,7 +253,13 @@ def test_m2_update_retry_never_adopts_other_identity_or_metadata(tmp_path, monke
     rows = [json.loads(line) for line in service.long_term.path.read_text().splitlines()]
     rows[-1][field] = value
     service.long_term.path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    assert service.promote(candidate.candidate_id, automatic=True).promoted is False
+    before = service.long_term.path.read_bytes()
+    result = service.promote(candidate.candidate_id, automatic=True)
+    assert result.promoted is False
+    assert result.reason_code in {"TARGET_ENTRY_STALE_OBSERVATION", "TARGET_ENTRY_NOT_IN_SAME_SUBJECT_SCOPE"}
+    assert result.status == "blocked_conflict"
+    assert service.candidates.get(candidate.candidate_id).status == "blocked_conflict"
+    assert service.long_term.path.read_bytes() == before
 
 
 # LLM: 隔离真实仓库上的定向回归，不改变权限、原断言或生产输入。

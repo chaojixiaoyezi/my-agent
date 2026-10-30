@@ -1,10 +1,8 @@
+# LLM: 只执行同锁生成的类型化留存动作，逐目标复核策略、法律保留、引用、指纹、状态与截止时间；原短提交门的执行未知不能洗成动作失败。
+# 模块用途: 执行候选及文件留存清理，记录可恢复回收与无正文审计，并保护快照清单引用及目标 CAS。
 from __future__ import annotations
 
 """Memory v2 retention 计划的重验证与执行。"""
-
-# LLM: main快照/清单引用与目标CAS保留；原callback逐写短门，实际未知/策略变化不洗成动作失败。
-#   apply 只能执行刚在同一锁内生成的 typed actions；每个目标仍需 fingerprint/status/cutoff 二次核验。
-# 模块用途: 安全删除文件、清理终态候选和快照清单；执行前重核引用与指纹，并记录可恢复回收及无正文审计。
 
 import json
 import os
@@ -18,8 +16,10 @@ from typing import Any
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     append_private_jsonl_records,
+    locked_json_path,
     read_json_object_report,
     write_private_json_file_atomic,
+    write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import NoFollowPathError, ensure_private_dir, open_directory_beneath
 from ..common.request_execution_ports import (
@@ -33,8 +33,9 @@ from .candidate_models import MemoryCandidate
 from .candidates import (
     RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
     CandidateService,
-    _is_binding_tombstone,
+    candidate_retention_eligible,
 )
+from .reference_pins import ReferencePinSnapshot
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -42,10 +43,18 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    _load_policy,
+    _runtime_unlocked,
     current_retention_pins,
     current_tool_manifest_references,
     file_fingerprint,
     paths_fingerprint,
+    runtime_terminal,
+    scratch_inventory,
+    scratch_tree_pinned,
+    security_audit_content,
+    security_audit_paths,
+    task_scratch_unlocked,
     trash_payload_pinned,
     tree_fingerprint,
     valid_fingerprint,
@@ -58,7 +67,7 @@ from .retention_transition import RetentionPolicyChangedError
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # LLM: 仅已通过策略/法律保留的executor追加tmp/cache空目录清扫；扫描门外，每次rmdir仍沿原transition核权。
 # LLM: 本次now沿候选phase/actions透传到原删除提交，冷归档年龄不得另取真实墙钟；CAS及原短门保持。
-# 函数用途: 统一按本次时钟执行保留计划和过期目录清扫，返回原动作状态及错误。
+# 函数用途: 统一执行保留计划；同阶段引用视图按源代次复核后复用，保留原动作状态与错误。
 def execute_retention_plan(
     *,
     home: object,
@@ -71,6 +80,7 @@ def execute_retention_plan(
 ) -> MemoryRetentionReport:
     results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan, now=now), commit_transition)
     manifest_references = None
+    pin_snapshot = ReferencePinSnapshot(home, allowed_external_roots, now, current_retention_pins)
     for action in plan.actions:
         if action.operation == "candidate_delete":
             continue
@@ -83,6 +93,7 @@ def execute_retention_plan(
                 now=now,
                 allowed_external_roots=allowed_external_roots,
                 manifest_references=manifest_references,
+                pin_snapshot=pin_snapshot,
             ), commit_transition)
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError, RetentionPolicyChangedError):
@@ -201,10 +212,11 @@ def _apply_candidate_actions(
         if record is None:
             results.append(replace(action, status="missing"))
             continue
-        updated = _timestamp(record.updated_at)
+        from .candidates import candidate_retention_time
+
+        updated = _timestamp(candidate_retention_time(record))
         eligible = bool(
-            record.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
-            and not _is_binding_tombstone(record)
+            candidate_retention_eligible(record)
             and updated is not None
             and action.cutoff_timestamp is not None
             and updated < action.cutoff_timestamp
@@ -240,10 +252,10 @@ def _apply_candidate_actions(
     return results, errors
 
 
-# LLM: 所有动作先拒绝无效摘要；Daily/Compact/Curator及trash永久删除前重核引用，来源不可读直接拒绝。
+# LLM: 所有动作先拒绝无效摘要；scratch/Daily/Compact/Curator及trash执行前重核引用，不可读直接拒绝。
 #   operation是宿主枚举；清单仍复核快照阶段后的引用，不信旧规划。
 # LLM: tmp/cache文件确已删除才按同一action cutoff清空过期祖先，沿规范根的nofollow目录句柄rmdir，不删根或跨链接。
-# 函数用途: 分派并复核保留动作，文件删除后仅尝试清理未变新且已空的父目录。
+# 函数用途: 分派动作并复核当前源代次；安全审计仅按原追加锁整理记录，不用旧规划替代执行检查。
 def _apply_action(
     *,
     home: object,
@@ -251,14 +263,33 @@ def _apply_action(
     now: datetime,
     allowed_external_roots: tuple[Path, ...],
     manifest_references: tuple[frozenset[str], bool] | None = None,
+    pin_snapshot: ReferencePinSnapshot | None = None,
 ) -> MemoryRetentionAction:
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
     if not valid_fingerprint(action.source_fingerprint):
         return replace(action, status="state_changed")
+    if action.operation == "scratch_clear":
+        return _clear_scratch(home, action, now, allowed_external_roots=allowed_external_roots,
+                              pin_snapshot=pin_snapshot)
+    if action.operation == "security_audit_compact":
+        if action.path not in security_audit_paths(home) or action.cutoff_timestamp is None:
+            return replace(action, status="state_changed")
+        with locked_json_path(action.path):
+            if file_fingerprint(action.path) != action.source_fingerprint:
+                return replace(action, status="state_changed")
+            content, removed = security_audit_content(action.path, action.cutoff_timestamp)
+            if file_fingerprint(action.path) != action.source_fingerprint:
+                return replace(action, status="state_changed")
+            if removed:
+                write_private_text_file_atomic_unlocked(action.path, content)
+        return replace(action, status="compacted" if removed else "state_changed")
     if action.category in {"daily", "compact", "curator_run", "trash"}:
         pin_errors: list[MemoryRetentionError] = []
-        pins, complete = current_retention_pins(home, allowed_external_roots, pin_errors, now=now)
+        pins, complete = (pin_snapshot.current(pin_errors, target=action.path if action.category == "trash" else None) if pin_snapshot is not None else
+                          current_retention_pins(home, allowed_external_roots, pin_errors, now=now))
+        if action.category == "trash" and not complete:
+            complete = pins.complete_for(action.path, pin_errors)
         if not complete:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         protected = (trash_payload_pinned(pins, action.path, pin_errors) if action.category == "trash"
@@ -284,6 +315,114 @@ def _apply_action(
     if action.operation == "conversation_trash":
         return _trash_conversation(home=home, action=action, now=now)
     raise ValueError(f"unsupported retention operation: {action.operation}")
+
+
+# LLM: 每个动作仅重核一次全源代次；坏源、所属身份或任一子证据命中均保护整棵，不放宽完整性门。
+# 函数用途: 为本次scratch动作检查同规划口径的完整证据保护。
+def _scratch_is_unpinned(home, action, now, roots, snapshot, members, task, state):
+    errors = []
+    pins, complete = (snapshot.current(errors, target=action.path) if snapshot is not None else
+                      current_retention_pins(home, roots, errors, now=now))
+    if not complete:
+        complete = pins.complete_for(action.path, errors)
+    return complete and not scratch_tree_pinned(pins, action.path, members, errors, task_root=task, state=state)
+
+
+# LLM: 重新从owner逐段nofollow定位父链，对比已开FD与当前位置inode；只能缩小竞态窗口，不授予发布互斥锁。
+# 函数用途: 防止拿到目录句柄后目录已被移出scratch，仍沿旧FD删除output文件。
+def _scratch_directory_still_at(owner, parts, descriptor):
+    current = open_directory_beneath(owner, parts, require_dir_fd=True)
+    try:
+        before, after = os.fstat(descriptor), os.fstat(current)
+        return stat.S_ISDIR(before.st_mode) and (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+    finally:
+        os.close(current)
+
+
+# LLM: scratch按动作复核策略/状态/指纹及pin代次，每次实际删除仍重核FD当前位置；不声称跨进程发表原子性。
+# 函数用途: 只删已验证且无引用的旧普通文件和空子目录，保留output/inputs和新证据。
+def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot=None):
+    if action.cutoff_timestamp is None:
+        return replace(action, status="state_changed")
+    policy, error = _load_policy(Path(home.owner_retention_json))
+    if error is not None or policy is None or policy.legal_hold or not _runtime_unlocked(home, now):
+        return replace(action, status="state_changed")
+    if action.category == "task_tmp":
+        try:
+            parts = action.path.relative_to(Path(home.owner_tasks_dir)).parts
+        except ValueError:
+            return replace(action, status="state_changed")
+        if (len(parts) != 3 or parts[-1] != "tmp" or policy.task_tmp_idle_days <= 0
+                or not task_scratch_unlocked(home, action.path.parent, policy.legal_hold_task_ids, now)):
+            return replace(action, status="state_changed")
+        task = action.path.parent
+        authority = task / "work/state.json"
+        report = read_json_object_report(authority, context="memory_retention.task_scratch") if authority.exists() else None
+        if report is not None and report.load_error:
+            return replace(action, status="state_changed")
+        state = report.payload if report is not None else {}
+    elif action.category == "run_scratch":
+        authority = action.authority_path
+        if authority is None or file_fingerprint(authority) != action.authority_fingerprint:
+            return replace(action, status="state_changed")
+        task = authority.parent.parent
+        runs = Path(home.owner_home_dir) / "runs"
+        relative = task.relative_to(runs)
+        if len(relative.parts) not in {1, 2} or action.path not in {task / "tmp", task / "work/tmp", task / "work/blobs/tool_outputs"}:
+            return replace(action, status="state_changed")
+        report = read_json_object_report(authority, context="memory_retention.run_scratch")
+        if report.load_error or report.payload.get("task_id") in policy.legal_hold_task_ids or policy.tmp_days <= 0:
+            return replace(action, status="state_changed")
+        state = report.payload
+        status = str(state.get("status") or "").upper()
+        terminal = ((status, _timestamp(state.get("updated_at"))) if status in TASK_TERMINAL_STATUSES
+                    else runtime_terminal(home, task, state, now) if status == "RUNNING" else None)
+        if terminal is None or terminal[1] is None or terminal[1] >= action.cutoff_timestamp:
+            return replace(action, status="state_changed")
+    else:
+        return replace(action, status="state_changed")
+    try:
+        digest, members = scratch_inventory(action.path, action.cutoff_timestamp)
+        if digest != action.source_fingerprint:
+            return replace(action, status="state_changed")
+        if not _scratch_is_unpinned(home, action, now, allowed_external_roots, pin_snapshot, members, task, state):
+            return replace(action, status="state_changed")
+        # 从owner根逐段nofollow打开，避免中间目录被换成链接后误删兄弟输入/输出。
+        root_parts = action.path.relative_to(Path(home.owner_home_dir)).parts
+        fd = open_directory_beneath(Path(home.owner_home_dir), root_parts, require_dir_fd=True)
+        os.close(fd)
+        for relative, expected in members:
+            parts = Path(relative).parts
+            if stat.S_ISDIR(expected[-1]):
+                continue
+            descriptor = open_directory_beneath(Path(home.owner_home_dir), root_parts + parts[:-1], require_dir_fd=True)
+            try:
+                observed = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+                from .retention_scan import _file_identity
+
+                if _file_identity(observed) != expected:
+                    return replace(action, status="state_changed")
+                if not _scratch_directory_still_at(Path(home.owner_home_dir), root_parts + parts[:-1], descriptor):
+                    return replace(action, status="state_changed")
+                os.unlink(parts[-1], dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
+        for relative, expected in sorted(members, key=lambda item: len(Path(item[0]).parts), reverse=True):
+            if stat.S_ISDIR(expected[-1]):
+                parts = Path(relative).parts
+                descriptor = open_directory_beneath(Path(home.owner_home_dir), root_parts + parts[:-1], require_dir_fd=True)
+                try:
+                    observed = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+                    if not stat.S_ISDIR(observed.st_mode) or (observed.st_dev, observed.st_ino) != expected[:2]:
+                        return replace(action, status="state_changed")
+                    if not _scratch_directory_still_at(Path(home.owner_home_dir), root_parts + parts[:-1], descriptor):
+                        return replace(action, status="state_changed")
+                    os.rmdir(parts[-1], dir_fd=descriptor)
+                finally:
+                    os.close(descriptor)
+        return replace(action, status="deleted")
+    except (OSError, NoFollowPathError):
+        return replace(action, status="state_changed")
 
 
 # LLM: 只有计划和当前摘要均合法且相等才允许unlink；mtime仍须早于cutoff。

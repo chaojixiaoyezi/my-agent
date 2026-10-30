@@ -1,9 +1,8 @@
+# LLM: 后台模型只能生成 CuratorExtraction；运行、游标、租约、状态和 ID 均由宿主持有，不由模型自报取得权威。
+# 模块用途: 统一 Curator 配置、持久状态及严格模型输出合同，避免不同供应商产生第二套记忆字段与游标语义。
 from __future__ import annotations
 
 """Memory Curator 的配置、durable state 和严格模型输出合同。"""
-
-# LLM: 后台模型只能生成 CuratorExtraction；run/cursor/lease/status/id 都由宿主结构持有。
-# 模块用途: 防止提示词正文或不同 provider 产生第二套记忆字段和游标语义。
 
 import hashlib
 import json
@@ -392,6 +391,10 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
         payload = {**payload, **{key: _EMPTY_FIELD_DEFAULT[key] for key in missing}}
+    # v3既有输出没有链接字段；仅补空值，不能替模型选择锚点。
+    if isinstance(payload.get("candidates"), list):
+        payload["candidates"] = [dict(item, link_candidate_id=item.get("link_candidate_id"))
+            if isinstance(item, dict) else item for item in payload["candidates"]]
     validate_curator_response_payload(payload, curator_response_schema())
     return CuratorExtraction(
         daily_events=tuple(_parse_daily_draft(item) for item in _object_array(payload, "daily_events")),
@@ -465,6 +468,7 @@ def _parse_candidate_observation(payload: dict[str, object]) -> CandidateObserva
         conflicts_with=tuple(_short_string_array(payload, "conflicts_with")),
         promotion_target=str(payload.get("promotion_target") or "long_term"),
         observation_id=str(payload.get("observation_id") or ""),
+        link_candidate_id=str(payload.get("link_candidate_id") or ""),
     )
 
 

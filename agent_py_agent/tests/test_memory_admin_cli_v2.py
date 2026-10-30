@@ -1,3 +1,5 @@
+# LLM: 仅在pytest临时owner调用真实管理命令；探针替代模型服务，不改真实配置、权限或长期记忆。
+# 模块用途: 验证候选、策展、迁移、留存及诊断命令共用规范服务与当前候选版本。
 from __future__ import annotations
 
 import json
@@ -20,16 +22,24 @@ from agent_py_agent.cli import memory_admin_commands
 from agent_py_agent.cli.parser import build_parser
 
 
+# LLM: 只保存测试观察到的请求参数，不调用模型、不写游标或伪造真实执行证据。
+# 类用途: 为管理命令提供可核对请求顺序的策展服务替身。
 class _CuratorProbe:
+    # LLM: 借用当前临时owner的Daily仓库，不自行创建其它来源。
+    # 函数用途: 初始化策展请求与强制运行参数记录。
     def __init__(self, daily_store: DailyMemoryStore) -> None:
         self.daily_store = daily_store
         self.reasons: list[str] = []
         self.force_values: list[bool] = []
 
+    # LLM: 仅记录调用原因并返回测试回执，不触发后台任务。
+    # 函数用途: 模拟策展请求登记。
     def request(self, reason: str) -> dict[str, object]:
         self.reasons.append(reason)
         return {"requested": True, "reason": reason, "pending_reasons": [reason]}
 
+    # LLM: 不访问模型或网络；返回明确的测试运行记录供命令序列断言。
+    # 函数用途: 记录策展执行参数并返回固定成功结果。
     def run(self, *, reason: str, force: bool = False) -> CuratorRunResult:
         self.reasons.append(reason)
         self.force_values.append(force)
@@ -41,6 +51,8 @@ class _CuratorProbe:
             model="probe-model",
         )
 
+    # LLM: 只展示探针保存的状态，不构成真实模型服务可用性证据。
+    # 函数用途: 提供管理诊断需要的策展元数据。
     def status(self) -> dict[str, object]:
         return {
             "enabled": True,
@@ -50,6 +62,8 @@ class _CuratorProbe:
         }
 
 
+# LLM: 依赖全部绑定当前临时owner，真实候选及正式仓库沿原配额与证据合同运行。
+# 函数用途: 组装可执行管理命令的隔离测试代理。
 def _agent(tmp_path: Path) -> SimpleNamespace:
     home = ensure_my_agent_home(tmp_path / "home")
     workspace = tmp_path / "workspace"
@@ -97,6 +111,8 @@ def _agent(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+# LLM: 仅替换代理构造器，解析和分派使用真实命令树，返回原退出码与标准输出。
+# 函数用途: 执行一条JSON模式的记忆管理命令并读回结果。
 def _run_json(monkeypatch, capsys, agent: SimpleNamespace, *argv: str) -> tuple[int, dict]:
     monkeypatch.setattr(memory_admin_commands, "make_agent", lambda _args: agent)
     args = build_parser().parse_args(["memory", *argv, "--json"])
@@ -104,6 +120,8 @@ def _run_json(monkeypatch, capsys, agent: SimpleNamespace, *argv: str) -> tuple[
     return code, json.loads(capsys.readouterr().out)
 
 
+# LLM: 通过真实候选观察入口创建当前临时owner记录，不直接写正式库。
+# 函数用途: 准备待人工审核的长期事实候选。
 def _candidate(agent: SimpleNamespace):
     return agent.memory_candidates.observe(
         CandidateObservation(
@@ -118,6 +136,8 @@ def _candidate(agent: SimpleNamespace):
     )
 
 
+# LLM: 只解析真实命令与帮助文本，不运行任何外部服务或持久修改。
+# 函数用途: 验证管理命令层级和中文候选状态说明。
 def test_memory_admin_parser_exposes_one_nested_chinese_command_tree(capsys) -> None:
     parser = build_parser()
     args = parser.parse_args(["memory", "candidates", "list"])
@@ -131,6 +151,8 @@ def test_memory_admin_parser_exposes_one_nested_chinese_command_tree(capsys) -> 
     assert "blocked_missing_evidence=缺少证据" in help_text.replace("\n", "")
 
 
+# LLM: 列表、人工批准和晋升使用同一临时owner的规范服务，不放宽正式提交证据门。
+# 函数用途: 验证命令完成从待审候选到正式记忆的完整状态转换。
 def test_candidate_list_review_and_promote_share_canonical_services(
     tmp_path: Path,
     monkeypatch,
@@ -172,6 +194,8 @@ def test_candidate_list_review_and_promote_share_canonical_services(
     assert [record.content for record in agent.memory.all()] == ["用户个人开发电脑使用 macOS。"]
 
 
+# LLM: 请求和执行由同一个策展探针观察，必须先登记管理员原因再运行。
+# 函数用途: 验证手动策展命令的原因与强制参数透传。
 def test_curator_admin_run_persists_fixed_reason_before_same_service_run(
     tmp_path: Path,
     monkeypatch,
@@ -186,6 +210,8 @@ def test_curator_admin_run_persists_fixed_reason_before_same_service_run(
     assert agent.memory_curator.force_values == [True]
 
 
+# LLM: 诊断必须展示当前候选版本；留存和迁移默认只预演，所有原只读断言保留。
+# 函数用途: 验证管理命令复用规范服务并报告候选第三版合同。
 def test_retention_migration_and_doctor_use_v2_services(
     tmp_path: Path,
     monkeypatch,
@@ -205,12 +231,14 @@ def test_retention_migration_and_doctor_use_v2_services(
 
     code, doctor = _run_json(monkeypatch, capsys, agent, "doctor")
     assert code == 0
-    assert doctor["candidate"]["schema_version"] == "my-agent.memory-candidate.v2"
+    assert doctor["candidate"]["schema_version"] == "my-agent.memory-candidate.v3"
     assert doctor["curator"]["provider"] == "probe-provider"
     assert doctor["migration"]["applied"] is False
     assert doctor["retention"]["applied"] is False
 
 
+# LLM: 仅显式执行参数允许对临时owner写入迁移标记和留存审计，不影响真实数据。
+# 函数用途: 验证迁移与留存的执行子命令确实进入应用模式。
 def test_migration_apply_and_retention_apply_are_explicit_subcommands(
     tmp_path: Path,
     monkeypatch,

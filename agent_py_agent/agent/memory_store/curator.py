@@ -64,6 +64,7 @@ from .curator_inputs import (
     CuratorInputBatch,
     CuratorMessageSource,
     CuratorToolReferenceSource,
+    attach_candidate_anchors,
     collect_curator_inputs,
 )
 from .curator_models import (
@@ -127,15 +128,13 @@ _REASON_PRIORITY = (
 )
 
 
-# LLM: Input authority damage is distinct from provider/schema failure and always blocks cursor
-# advancement.
+# LLM: 输入权威损坏与供应商或 Schema 失败须分开分类；输入无法安全读取时始终阻止游标推进。
 # 类用途: 表示 ConversationStore、audit 或正式记忆输入无法安全读取。
 class CuratorInputError(RuntimeError):
     pass
 
 
-# LLM: Runtime identity is immutable for a service instance and appears in every result/audit;
-# model switches therefore remain explicit without changing schema.
+# LLM: 服务实例的运行身份不可变，并出现在每份结果与审计中；模型切换必须显式可见，无需改变 Schema。
 # 类用途: 保存 Curator 实际 provider、model、owner 与时区。
 @dataclass(frozen=True)
 class MemoryCuratorIdentity:
@@ -176,8 +175,7 @@ class MemoryCuratorDependencies:
     learning_exclusions_revision: Callable[[], int] | None = None
 
 
-# LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
-# later mutable state accidentally.
+# LLM: 运行上下文把已领取的租约与运行前游标快照绑定，避免辅助函数误用后续可变状态。
 # 类用途: 保存一次 Curator lease 运行的宿主身份和旧状态。
 @dataclass(frozen=True)
 class _RunContext:
@@ -208,8 +206,7 @@ class _PrecollectedBatch:
 # 不直接读写 Daily/Candidate。
 # 类用途: 提供 Curator 触发登记、到期调度与失败结果构造。
 class _CuratorLifecycleMixin:
-    # LLM: Triggers persist only a reason; compact/task/channel paths never call the model or
-    # write Daily/long-term synchronously.
+    # LLM: 触发只持久化原因；compact、任务与通道入口不在此同步调用模型或写入日报及长期记忆。
     # 函数用途: 幂等登记一次统一后台策展请求。
     def request(self, reason: str) -> dict[str, object]:
         state = self.state_store.request(reason)
@@ -265,8 +262,7 @@ class _CuratorLifecycleMixin:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
         return self._result(status="not_due", reason="interval")
 
-    # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
-    # without deleting the reason or skipping input. 退避时长与 owner_wake_discovery 共用
+    # LLM: 冷却只约束已持久化的失败待办请求；限制供应商重试但不删触发原因、不跳过输入。退避时长与 owner_wake_discovery 共用
     # curator_failure_retry_seconds：普通失败沿维护周期（30–300 秒），CURATOR_MODEL_NOT_CONFIGURED 等一小时，
     # 两处必须同源，否则发现层会在 curator 仍退避时反复重建 owner 实例（2026-09-26 真机）。
     # 函数用途: 判断 pending reason 现在执行还是等待失败退避；没配模型的 owner 每小时最多试一次。
@@ -466,8 +462,7 @@ class _CuratorLifecycleMixin:
                 failure_code=failure_code,
             )
 
-    # LLM: A recovery error before lease acquisition cannot safely mutate state or fabricate a
-    # run ID; the pending durable request remains available for operator repair/retry.
+    # LLM: 领取租约前的恢复错误不能安全改写状态或虚构运行 ID；持久待办请求保留给运维修复与重试。
     # 函数用途: 返回未取得 lease 时的稳定失败结果。
     def _unleased_failure(self, reason: str, failure_code: str) -> CuratorRunResult:
         return CuratorRunResult(
@@ -479,7 +474,7 @@ class _CuratorLifecycleMixin:
             failure_code=failure_code,
         )
 
-    # LLM: Simple non-running results share one enum validation and never synthesize a run ID.
+    # LLM: 未实际运行的结果共用同一枚举校验，绝不合成运行 ID。
     #   诊断 warning（如名单不可读）要能随非运行结果返回，调用方不必从日志猜原因（mc4-3106）。
     # 函数用途: 构造 disabled、busy 或 not_due 结果。
     def _result(
@@ -523,6 +518,7 @@ class _CuratorExecutionMixin:
             )
         # 按会话的主代理模型挑出这一次处理的那组会话；没有路由时全批照旧。
         batch = _apply_route(context, batch, self.dependencies.model_router)
+        batch = attach_candidate_anchors(batch, self.candidate_service)
         context.route["batch_thread_ids"] = tuple(dict.fromkeys(item.thread_id for item in batch.messages))
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
@@ -749,6 +745,7 @@ class _CuratorExecutionMixin:
 #   命中名单只做结构化判定，不阻断策展主链；Execution 只调用本类方法拿结果。
 # 类用途: 提供 Curator 的学习排除名单读取、标记同步与候选过滤。
 class _CuratorExclusionMixin:
+    # LLM: 只按结构化学习排除名单同步既有待定候选；不可读保留 None 的关闭式语义，不从正文推导排除关系。
     # 函数用途: 读取名单并同步历史待定候选的排除标记，返回 (排除集合或 None, 警告)。
     def _prepare_exclusion_context(self) -> tuple[frozenset[str] | None, tuple[str, ...]]:
         excluded_ids, warnings = self._learning_exclusions_for_run()
@@ -1141,8 +1138,7 @@ class _CuratorRunMixin:
             tool_verifier=self.dependencies.tool_evidence_verifier)
 
 
-# LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
-# compact, task completion, and lifecycle signals.
+# LLM: Gateway 维护、CLI、compact、任务完成及生命周期信号共用此唯一后台记忆提取服务，不另建提取链。
 # 类用途: 执行一个 owner 的增量 Daily/Candidate 策展闭环。
 class MemoryCuratorService(
     _CuratorRunMixin,
@@ -1151,8 +1147,7 @@ class MemoryCuratorService(
     _CuratorPromotionMixin,
     _CuratorLifecycleMixin,
 ):
-    # LLM: Construction wires existing canonical services and creates only a transaction
-    # coordinator; it starts no thread, daemon, or second scheduler.
+    # LLM: 构造只接线既有规范服务并建立事务协调器，不启动线程、守护进程或第二个调度器。
     # 函数用途: 初始化唯一 Curator 服务及其可恢复提交器。
     def __init__(
         self,
@@ -1190,9 +1185,8 @@ class MemoryCuratorService(
             run_log=self.run_log,
         )
 
-    # LLM: Status exposes configuration and durable health only; no prompt, response, formal
-    # memory, candidate body, or user content is returned.
-    # 函数用途: 为 CLI/doctor 返回 Curator 当前配置与 state。
+    # LLM: 人工恢复必须同时核对隔离副本完整性与成功审计游标；验证失败拒绝写入，成功后先恢复状态再移除隔离哨兵并如实记录审计是否写成。
+    # 函数用途: 从权威成功审计链重建损坏状态，提供 CLI 显式人工恢复入口。
     def recover(self) -> dict[str, object]:
         """人工恢复通道(CLI memory curator recover): 凭权威审计链重建 state 解除隔离。
 
@@ -1331,6 +1325,8 @@ class MemoryCuratorService(
             "evidence": _recover_evidence_summary(evidence),
         }
 
+    # LLM: 状态入口只暴露配置和持久健康，不返回提示词、模型响应、正式记忆、候选或用户正文。
+    # 函数用途: 为 CLI/doctor 读取 Curator 当前配置与 state。
     def status(self) -> dict[str, object]:
         state = self.state_store.load()
         return {
@@ -1501,8 +1497,7 @@ def _fill_candidate_promotion_authority(item: object) -> object:
     return replace(item, promotion_mode=host_promotion_mode(item))
 
 
-# LLM: Lease recovery metadata is copied from the host-generated lease only and never inferred
-# from provider output or timestamps.
+# LLM: 租约恢复元数据只复制宿主生成的租约，不从供应商输出或时间戳推断。
 # 函数用途: 构造一次已获取 lease 的运行上下文。
 def _run_context(
     reason: str,
@@ -1521,8 +1516,7 @@ def _run_context(
     )
 
 
-# LLM: Successful audit includes counts/cursors and recovery IDs only; extracted content remains
-# solely in Daily/Candidate authorities. 诊断类 warning（名单不可读等）必须写进持久 run audit，
+# LLM: 成功审计只含计数、游标与恢复 ID；提炼正文只存于 Daily/Candidate 权威。诊断类 warning（名单不可读等）必须写进持久 run audit，
 # 不能只出现在内存结果里，否则事后审计看不到原因（mc4-3106）。
 # 函数用途: 构造整批事务内的最终成功 run audit。
 def _successful_run_record(
@@ -1560,9 +1554,6 @@ def _successful_run_record(
     )
 
 
-# LLM: 损坏 run_id 由原文件 sha256 派生, 首次(算文件)与重复(读哨兵)取值一致,
-# 保证同一损坏的重复维护 tick 落幂等审计, 不伪造自愈成功。
-# 函数用途: 从隔离元数据派生稳定损坏 run_id。
 # LLM: 恢复时的 state 重建语义复杂(权威链覆盖游标/审计、lease 绝不接管、副本不可解析时计数从
 #   审计链累计), 抽成模块级函数让 recover 保持可读; 失败返回 None 由调用方拒绝恢复。
 # 函数用途: 由副本与权威链重建恢复后的 MemoryCuratorState; 非法时返回 None。
@@ -1619,6 +1610,8 @@ def _recover_evidence_summary(evidence: dict[str, object]) -> dict[str, object]:
     }
 
 
+# LLM: 原文件摘要足够完整时派生稳定损坏运行 ID，保证重复隔离审计幂等；摘要不足时生成新 UUID，不伪造已有稳定身份。
+# 函数用途: 从隔离元数据生成损坏运行的审计编号。
 def _corrupt_run_id(quarantine: dict[str, object]) -> str:
     digest = str(quarantine.get("original_sha256") or "")
     if len(digest) < 16:
@@ -1757,6 +1750,8 @@ def _attempt_shape_warnings(
     return tuple(warnings)
 
 
+# LLM: 失败审计绑定已领取租约和旧游标，不伪造处理推进；仅携带有界尝试形状及已脱敏诊断，正文不进入运行账。
+# 函数用途: 构造失败运行记录，并将尝试与诊断编码进既有 warnings 字段。
 def _failed_run_record(
     context: _RunContext,
     *,
@@ -1826,7 +1821,7 @@ def _cursor_payload(cursors: dict[str, str], audit_event_id: str, relevant_threa
     return project_cursor_payload(cursors, audit_event_id, relevant_thread_ids)
 
 
-# LLM: Failure taxonomy contains stable codes only; classification reads exception types, never text.
+# LLM: 优先按异常类型归类稳定失败码；输入和校验错误仅保留既有 CURATOR_ 前缀宿主码，其余回退固定码，不把任意错误正文持久化为分类。
 # 供应商调用阶段的 ValueError/TypeError 已由 extract_with_retries 包成 CuratorModelCallError,
 # 归 CURATOR_MODEL_FAILED;裸 ValueError 只剩宿主解析/校验失败,仍归 CURATOR_SCHEMA_INVALID。
 # ModelNotConfiguredError(owner 没选模型)是永久配置错误,归 CURATOR_MODEL_NOT_CONFIGURED,由退避函数走一小时档,
@@ -1856,8 +1851,7 @@ def _failure_code(exc: BaseException) -> str:
     return "CURATOR_MODEL_FAILED"
 
 
-# LLM: Input load errors retain only their existing stable code and never include damaged row
-# content in state or run audit.
+# LLM: 输入读取错误只保留既有稳定码，不把损坏行正文写入状态或运行审计。
 # 函数用途: 汇总增量输入读取失败码。
 def _load_error_code(errors: tuple[dict[str, object], ...]) -> str:
     for error in errors:
@@ -1867,16 +1861,14 @@ def _load_error_code(errors: tuple[dict[str, object], ...]) -> str:
     return "CURATOR_INPUT_READ_FAILED"
 
 
-# LLM: Pending priority is one fixed host order shared by every trigger source, not array timing
-# or natural-language importance.
+# LLM: 所有触发源共用宿主固定优先序，不按数组时序或自然语言重要性选择待办。
 # 函数用途: 选择下一次运行的最高优先级 reason。
 def _pending_reason(reasons: list[str]) -> str:
     return next((reason for reason in _REASON_PRIORITY if reason in reasons), "")
 
 
 # LLM: Interval elapsed共用curator_due纯时间窗；这里仍要求真实batch输入，metadata mtime不能替代采集。
-# LLM: Interval due requires actual unprocessed message/audit input and uses a timezone-aware
-# durable success timestamp. 被整窗排除的 audit 窗口只剩 skipped_audit_cursor 作输入证据，也
+# LLM: 间隔到期还必须有实际未处理消息或审计输入，并使用带时区的持久成功时间。被整窗排除的 audit 窗口只剩 skipped_audit_cursor 作输入证据，也
 # 必须算「有输入」：否则游标停摆，只能等每日收尾才越过（mc4-3105）。
 # 函数用途: 判断增量输入是否达到时间触发条件。
 def _interval_due(
@@ -1895,7 +1887,7 @@ def _interval_due(
     return interval_elapsed(state, now, interval_seconds)
 
 
-# LLM: Finalize date is written only by a successful daily_finalize transaction and derives from the acquired run clock.
+# LLM: 收尾日期只由成功的 daily_finalize 事务写入，并取自已领取运行的时钟，不能另读墙钟。
 # 函数用途: 按本次 lease 的结构化开始时间生成每日收尾日期，测试/重放不读取另一时钟。
 def _finalize_date(reason: str, timezone_name: str, *, started_at: str) -> str:
     if reason != "daily_finalize":

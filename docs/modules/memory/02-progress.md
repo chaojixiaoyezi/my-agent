@@ -4,6 +4,15 @@
 - `_jsonl_maintenance.py::purge_tier_copies` 在 quota→policy→formal 锁内清 pending tombstone 残留，透传已有 admission；无根时严格读 legacy 并用 `_compact_memory_events` 保留存活事实最新版本后发表首根。首次与重启收尾均先验 `store.events(root)` 才能用 schema marker 覆盖 legacy；失败保留 cleanup pending，重试不重放业务删除，同字节永久账不改 inode。
 - `jsonl.py::search` 在短 formal 锁内绑定 legacy、旧墓碑、manifest、永久墓碑四个控制文件指纹，嵌入/向量调用在锁外。返回及登记访问前重新同锁核验；无漂移复用快照，漂移最多另做一次原行数/字节预算扫描，刷新正文/版本并丢弃已删或未覆盖候选，不回退 `all()`、不重新排名。
 - 有界读取的 partial/continuation 只表达本次覆盖；游标绑定根 operation_id 与分片位置，不是删除完成或恢复旧正文的许可，也不在 search 内无限追扫。删除恢复依精确 entry/version/source 墓碑及候选 CAS 接续原清理责任/回执，不生成新删除。
+## 2026-10-29 e905 sol-5 R3：留存阻断项与消费者合同（分支候选）
+
+按终审 B1/B2/B3/N1/N2 收口：规划共享一次严格 pin 视图及来源错误；scratch 每动作复核来源代次，逐文件 FD 位置检查保持。规划和执行统一保护所属 run/task 身份及任何被引用子成员，真实仅 ID 引用的外置信封和工具索引在清理前后核验保持成功。首次 RUNNING state 发表的失效测试覆盖 tasks/runs 两种布局，坏源、legal hold、活锁和旧计划重核门保持。
+
+晋升消费者测试同步耐久履约义务及五分钟退避，身份篡改必须越过退避并严格拒绝；坏权威仍以原类型化异常返回精确错误码，approved 和权威字节不变；doctor 对齐候选 v3。Curator 只跳过非法 scope 的当前范围，合法锚点保留。指定十文件最终 406P、0F/E/skip，完整分支 22 Python 文件整文件中文双层注释缺口 0。复现、红绿与未验证边界见根 [TESTS](../../../TESTS.md)；不是合入、发布或全仓验收声明。
+
+## 2026-10-29 e905 sol-5 R2：跨引用补全重复计票修复（分支候选）
+
+候选旧单端引用与本次 operation→call→artifact 链按稳定别名连通性合票，多跳反向输入迭代至固定点；先沿明确历史 run 收敛，再处理空 run，明确不同 run 不合并，不同 artifact 不能仅凭共同 run 合票。原始证据和学习来源覆盖不改写，正式晋升仍走原核验。首批 12 项先 10F/2P，独审追加 8 个排列先 4F/4P；最终候选义务文件 81P、含 Curator 的聚焦组合 321P，严格门与全文注释审计通过。额外核心 237P/3F 保留失败；完整证据及复核边界见本轮交接，不外推上线状态。Curator 模块及完整分支范围补齐中文双层注释。
 
 ## 2026-10-27 CI 全绿收敛：记忆候选兼容读口、自动晋升补全与产物大索引流式过滤
 
