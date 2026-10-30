@@ -137,21 +137,28 @@ def test_r1_repeated_append_io_and_rewrite_breaks_witness(tmp_path, monkeypatch)
         ledger.record_tool_call(call(number))
     first = ledger.query_tool_calls_page()
     path = tmp_path / 'data/telemetry/tool_calls.jsonl'
-    reads, original = [], module._Budget.read
-    # LLM: 旁听真实pread边界，不改数据、预算和摘要算法。
-    # 函数用途: 保存实际正文读取起点。
-    def observe(budget, descriptor, offset, maximum):
-        reads.append(offset)
-        return original(budget, descriptor, offset, maximum)
+    reads, original, phase = [], module.os.pread, ['writer']
+    source_identity = (path.stat().st_dev, path.stat().st_ino)
+    # 直接旁听pread，写端自行读取也必须计入预算。
+    def observe(descriptor, maximum, offset):
+        raw = original(descriptor, maximum, offset)
+        info = module.os.fstat(descriptor)
+        side = phase[0] if (info.st_dev, info.st_ino) == source_identity else 'metadata'
+        reads.append((side, offset, len(raw)))
+        return raw
 
-    monkeypatch.setattr(module._Budget, 'read', observe)
+    monkeypatch.setattr(module.os, 'pread', observe)
     for number in range(100, 104):
         prior = path.stat().st_size
         reads.clear()
+        phase[0] = 'writer'
         ledger.record_tool_call(call(number))
+        phase[0] = 'reader'
         page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1, cursor=number)
         assert page['coverage']['status'] == 'complete'
-        assert reads and min(reads) >= prior
+        reader_offsets = [offset for side, offset, size in reads if side == 'reader' and size]
+        assert reader_offsets and min(reader_offsets) >= prior
+        assert sum(size for _, _, size in reads) <= 20 * 1024, reads
     path.write_bytes(path.read_bytes().replace(b'"c0"', b'"cX"', 1))
     ledger.record_tool_call(call(104))
     changed = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1)
@@ -776,3 +783,184 @@ def test_indexed_telemetry_absence_and_partial_are_distinct(tmp_path):
     view = ledger._read_index.advance('telemetry', ('data', 'telemetry', 'tool_calls.jsonl'), max_rows=1)
     report = ledger.query_tool_calls_page(view=view)
     assert report['coverage']['status'] == 'partial' and report['total_count'] is None
+
+
+# 固定1024字节一行，批量夹具不经过被测writer，初始化成本不混入追加I/O。
+def _large_telemetry_case(home, *, size=8 * 1024 * 1024):
+    from agent_py_agent.agent.observability.telemetry_ledger import ToolCallRecord, _encode
+
+    ledger = ToolTelemetryLedger(home)
+    ledger.record_tool_call(call(0))
+    path = home / 'data/telemetry/tool_calls.jsonl'
+    line = _encode(ToolCallRecord('c0', 'read').to_dict()).encode()
+    line = b' ' * (1024 - len(line)) + line
+    path.write_bytes(line * (size // 1024))
+    assert path.stat().st_size == size
+    for _ in range(32):
+        first = ledger.query_tool_calls_page(limit=1)
+        if first['coverage']['status'] == 'complete':
+            break
+    assert first['coverage']['status'] == 'complete', first['coverage']
+    assert first['total_count'] == size // 1024
+    return ledger, path, first
+
+
+# 同时计量writer和冷实例reader的真实pread，不能只看_Budget或累计平均值。
+def test_r4_eight_mib_append_writer_and_reader_io_is_bounded(tmp_path, monkeypatch):
+    import os
+
+    ledger, path, first = _large_telemetry_case(tmp_path)
+    reads, original, phase = [], os.pread, ['writer']
+    source_identity = (path.stat().st_dev, path.stat().st_ino)
+
+    def observe(descriptor, maximum, offset):
+        raw = original(descriptor, maximum, offset)
+        info = os.fstat(descriptor)
+        side = phase[0] if (info.st_dev, info.st_ino) == source_identity else 'metadata'
+        reads.append((side, offset, len(raw)))
+        return raw
+
+    monkeypatch.setattr(os, 'pread', observe)
+    for number in range(1, 5):
+        prior = path.stat().st_size
+        reads.clear()
+        phase[0] = 'writer'
+        ledger.record_tool_call(call(number))
+        delta = path.stat().st_size - prior
+        phase[0] = 'reader'
+        page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1, cursor=8191 + number)
+        assert page['coverage']['status'] == 'complete', page['coverage']
+        assert page['view']['generation'] == first['view']['generation']
+        assert page['total_count'] == 8192 + number
+        assert page['rows'][0]['call_id'] == f'c{number}'
+        assert sum(size for _, _, size in reads) <= 20 * 1024, reads
+        assert sum(size for side, _, size in reads if side == 'writer') <= 16 * 1024 + delta
+        assert all(offset >= prior for side, offset, size in reads if side == 'reader' and size)
+
+
+# 先积累未索引追加，再在writer锁内篡改头部、已索引尾部或未索引尾部。
+@pytest.mark.parametrize('damage', ['head', 'indexed_tail', 'pending_tail', 'replacement'])
+def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch, damage):
+    from agent_py_agent.agent.observability import telemetry_ledger as module
+
+    ledger, path, first = _large_telemetry_case(tmp_path, size=1024 * 1024)
+    for number in range(1, 4):
+        ledger.record_tool_call(call(number))
+    original = module.append_text_beneath
+
+    def corrupt(home, parts, line):
+        raw = path.read_bytes()
+        if damage == 'replacement':
+            replacement = path.with_suffix('.replacement')
+            replacement.write_bytes(raw.replace(b'"c0"', b'"cX"', 1))
+            replacement.replace(path)
+        else:
+            offset = (raw.find(b'"c0"') if damage == 'head' else
+                      raw.rfind(b'"c0"') if damage == 'indexed_tail' else raw.rfind(b'"c3"'))
+            assert offset >= 0
+            with path.open('r+b') as stream:
+                stream.seek(offset)
+                stream.write(b'"cX"')
+        return original(home, parts, line)
+
+    monkeypatch.setattr(module, 'append_text_beneath', corrupt)
+    ledger.record_tool_call(call(4))
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ori_meta WHERE key LIKE 'append:%'").fetchone()[0] == 0
+    proofs, original_prove = [], module.OwnerReadIndex._prove_prefix
+
+    def prove(index, *args, **kwargs):
+        proofs.append(True)
+        return original_prove(index, *args, **kwargs)
+
+    monkeypatch.setattr(module.OwnerReadIndex, '_prove_prefix', prove)
+    # 撤销见证后的全前缀复核允许分拍，不能把既有1500ms预算放大或绕过。
+    for _ in range(32):
+        changed = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1)
+        if changed['coverage']['status'] == 'complete':
+            break
+    assert changed['coverage']['status'] == 'complete', changed['coverage']
+    assert changed['total_count'] == 1028
+    assert ledger.get_tool_call('cX') is not None
+    if damage != 'replacement':
+        assert proofs, '见证撤销后必须实际走预算内的完整前缀复核'
+    if damage == 'pending_tail':
+        # 只改未索引尾部不污染旧前缀，复核后可保留原代次与固定旧view。
+        assert changed['view']['generation'] == first['view']['generation']
+        old = ledger.query_tool_calls_page(view=first['view'])
+        assert old['coverage']['status'] == 'complete' and old['total_count'] == 1024
+        assert ledger.get_tool_call('c3') is None
+    else:
+        assert changed['view']['generation'] != first['view']['generation']
+        assert ledger.query_tool_calls_page(view=first['view'])['coverage']['status'] == 'unavailable'
+
+
+# 连续多次写入不推进读水位，随后清空进程缓存，仍须靠持久见证只读增量。
+def test_r4_chained_append_witness_survives_cold_reader(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import sqlite3
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+
+    _, path, first = _large_telemetry_case(tmp_path, size=1024 * 1024)
+    code = '''import sys
+from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
+ledger = ToolTelemetryLedger(sys.argv[1])
+for number in range(1, 31):
+    ledger.record_tool_call(dict(call_id=f'c{number}', tool_name='read'))
+'''
+    subprocess.run([sys.executable, '-B', '-c', code, str(tmp_path)], check=True, timeout=30)
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        saved = connection.execute("SELECT value FROM ori_meta WHERE key LIKE 'append:%'").fetchone()
+        assert saved is not None, '跨越8 KiB未索引尾部后，追加见证丢失'
+        proof = json.loads(saved[0])
+    with path.open('rb') as stream:
+        stream.seek(first['view']['through'])
+        delta = stream.read()
+    assert len(delta) > 8192
+    hasher = module._ResumableSha256.from_state(proof[4]['state'], len(delta))
+    assert hasher.hexdigest() == hashlib.sha256(delta).hexdigest()
+    with module._PROCESS_MEMO_LOCK:
+        module._PROCESS_APPENDS.clear()
+        module._PROCESS_MEMOS.clear()
+    original = module._Budget
+
+    def tight(*args, **kwargs):
+        return original(max_bytes=16 * 1024)
+
+    monkeypatch.setattr(module, '_Budget', tight)
+    page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=30, cursor=1024)
+    assert page['coverage']['status'] == 'complete', page['coverage']
+    assert page['view']['generation'] == first['view']['generation']
+    assert page['total_count'] == 1054
+    assert [row['call_id'] for row in page['rows']] == [f'c{number}' for number in range(1, 31)]
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ori_meta WHERE key LIKE 'append:%'").fetchone()[0] == 0
+
+
+# 追加已成功后，见证短读只能丢弃加速证明，不能把业务写入改报失败。
+def test_r4_short_witness_read_preserves_successful_append(tmp_path, monkeypatch):
+    import os
+
+    ledger, path, first = _large_telemetry_case(tmp_path, size=64 * 1024)
+    original, short_reads = os.pread, []
+    identity = (path.stat().st_dev, path.stat().st_ino)
+
+    def short_read(descriptor, maximum, offset):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == identity and not short_reads:
+            short_reads.append(offset)
+            return b''
+        return original(descriptor, maximum, offset)
+
+    monkeypatch.setattr(os, 'pread', short_read)
+    assert ledger.record_tool_call(call(1)).call_id == 'c1'
+    page = ToolTelemetryLedger(tmp_path).query_tool_calls_page(limit=1, cursor=64)
+    assert short_reads and page['coverage']['status'] == 'complete'
+    assert page['view']['generation'] == first['view']['generation']
+    assert page['total_count'] == 65 and page['rows'][0]['call_id'] == 'c1'
