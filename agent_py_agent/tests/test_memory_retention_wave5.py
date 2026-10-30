@@ -132,6 +132,99 @@ def test_generation_formal_pins_invalidate_same_apply_snapshot(tmp_path):
     assert pins.protects(target, errors)
 
 
+@pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
+@pytest.mark.parametrize("damage", ["unknown-action", "negative-expiry", "nan-expiry", "zero-expiry"])
+def test_legacy_semantic_corruption_blocks_retention(tmp_path, source, damage):
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+    from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
+
+    home, _, service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "still-referenced.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "still important", attributes={"source_refs": [str(target)]})
+    assert MemoryGenerationStore(memory.path).manifest() is None
+    row = json.loads(memory.path.read_text().splitlines()[0])
+    path = memory.path
+    if source == "legacy-tombstone":
+        path = _tombstone_path(path)
+        row.update(action="remove", content="", entry_id="unrelated-deletion", attributes=None)
+    if damage == "unknown-action":
+        row["action"] = "bogus"
+    else:
+        row["expires_at"] = {"negative-expiry": -1, "nan-expiry": float("nan"), "zero-expiry": 0}[damage]
+    path.write_text(json.dumps(row) + "\n")
+    errors = []
+    _, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert not complete
+    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
+    assert not [action for action in service.plan(now=NOW).actions if action.path == target]
+    report = service.apply(now=NOW)
+    assert target.exists()
+    assert not [action for action in report.actions if action.path == target and action.status == "trashed"]
+
+
+@pytest.mark.parametrize("version", [1, 3])
+def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version):
+    from agent_py_agent.agent.memory_store.jsonl import (
+        _tombstone_path,
+        read_memory_records_from_path,
+    )
+
+    home, _, service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "deleted-source.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "deleted fact", attributes={"source_refs": [str(target)]})
+    row = json.loads(memory.path.read_text().splitlines()[0])
+    row["version"] = version
+    memory.path.write_text(json.dumps(row) + "\n")
+    # 旧删除账也永久屏蔽同 ID；不能靠放在 hot 文件末尾或提高版本复活。
+    tombstone = {**row, "action": "remove", "content": "", "version": 2, "attributes": None}
+    _tombstone_path(memory.path).write_text(json.dumps(tombstone) + "\n")
+    assert read_memory_records_from_path(memory.path) == []
+    errors = []
+    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert complete and not errors and not pins.protects(target, errors)
+    assert [action for action in service.plan(now=NOW).actions if action.path == target]
+
+
+@pytest.mark.parametrize("source", ["formal", "legacy-tombstone"])
+def test_legacy_pin_source_mid_read_change_is_not_cached(tmp_path, monkeypatch, source):
+    from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
+    from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
+    from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "source.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "active fact", attributes={"source_refs": [str(target)]})
+    row = json.loads(memory.path.read_text().splitlines()[0])
+    path = memory.path
+    if source == "legacy-tombstone":
+        path = _tombstone_path(path)
+        row.update(action="remove", content="", entry_id="unrelated-deletion", attributes=None)
+        path.write_text(json.dumps(row) + "\n")
+    changed = []
+    original_load = StorageTombstones.load
+
+    def change_after_read(store, *args, **kwargs):
+        records = original_load(store, *args, **kwargs)
+        if store.memory_path == memory.path and not changed:
+            changed.append(path)
+            path.write_text(json.dumps({**row, "version": 2}) + "\n")
+        return records
+
+    monkeypatch.setattr(StorageTombstones, "load", change_after_read)
+    snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    errors = []
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current(errors)
+    assert changed == [path] and snapshot.value is None
+    assert any(error.error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" for error in errors)
+    errors = []
+    pins, complete = snapshot.current(errors)
+    assert complete and not errors and pins.protects(target, errors)
+
+
 # LLM: 仅准备超期测试文件，不修改真实用户数据。
 # 函数用途: 写入文件并把修改时间设为过期。
 def old_file(path, text="{}\n"):

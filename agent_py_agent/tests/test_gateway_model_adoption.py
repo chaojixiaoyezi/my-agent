@@ -562,3 +562,25 @@ def test_known_chat_protocol_uses_actual_provider_projection(tmp_path, monkeypat
     assert [row[0]["model"] for row in business] == ["candidate-large"]
     assert "system" not in business[0][0]
     assert bool(probes) == tools
+
+
+def test_gateway_refresh_to_unconfigured_default_never_sends_old_model(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.errors import ModelNotConfiguredError
+
+    fixture = actual_request(tmp_path, mode="off", tools=True)
+    original_backend = fixture.agent.backend
+    material = fixture.agent.home_paths.owner_home_dir / "material.txt"
+    material.write_text("only synthetic input")
+
+    def choose_default(_wire):
+        if len(business) == 1:
+            model_profiles.execute_model_profile_operation(
+                fixture.agent, "select", {"profile_id": "default"}, thread_id=fixture.thread_id,
+            )
+
+    business, _ = fake_http(monkeypatch, fixture, on_business=choose_default, use_tool=True, read_path=material)
+    with pytest.raises(ModelNotConfiguredError):
+        request_execution._run_gateway_ask(fixture.context)
+    assert [wire["model"] for wire, _ in business] == ["original-model"]
+    assert fixture.agent.conversation_store.threads.require(fixture.thread_id).model_profile_id == "default"
+    assert fixture.agent.backend is original_backend and _HOST.get() is None

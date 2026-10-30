@@ -91,3 +91,27 @@ def test_duplicate_evidence_is_lossless_without_mutating_logical_input():
     payload["summary"] = "changed independently"
     with pytest.raises(ValueError, match="summary reference"):
         ConversationThread.from_dict(payload)
+
+
+@pytest.mark.parametrize("summary,deduplicated", [
+    ("a" * 1024, False), ("a" * 1025, True),
+    ("鲸" * 341, False), ("鲸" * 400, True),
+    ("🐋" * 256, False), ("🐋" * 257, True),
+], ids=["ascii-1024", "ascii-1025", "cjk-1023", "cjk-1200", "emoji-1024", "emoji-1028"])
+def test_duplicate_summary_threshold_is_utf8_bytes(summary, deduplicated):
+    import hashlib
+    import json
+
+    from agent_py_agent.agent.conversation.models import ConversationThread
+
+    evidence = {"summary": summary, "operations": [{"id": "preserve"}]}
+    thread = ConversationThread("thread", "owner", summary=summary, compact_operation_evidence=evidence)
+    payload = json.loads(json.dumps(thread.to_dict(), ensure_ascii=False))
+    expected = {"$thread_summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest()} if deduplicated else summary
+    assert payload["compact_operation_evidence"]["summary"] == expected
+    assert thread.compact_operation_evidence == evidence == {"summary": summary, "operations": [{"id": "preserve"}]}
+    assert ConversationThread.from_dict(payload).compact_operation_evidence == evidence
+    if deduplicated:
+        payload["summary"] = "tampered"
+        with pytest.raises(ValueError, match="summary reference"):
+            ConversationThread.from_dict(payload)

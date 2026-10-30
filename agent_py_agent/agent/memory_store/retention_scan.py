@@ -1715,6 +1715,7 @@ def trash_payload_pinned(pins: _RetentionPins, container: Path, errors: list[Mem
 # LLM: 正式记忆复用原物化的版本/墓碑语义；坏schema拒绝，已删除记录不保留旧引用。
 # 函数用途: 收集仍有效正式记忆的来源引用。
 def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> None:
+    from ._jsonl_maintenance import require_maintenance_event
     from .generation_manifest import MemoryGenerationStore
     from .jsonl import _materialize_memory_events, _memory_record_from_obj, _tombstone_path
 
@@ -1732,12 +1733,20 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
         events = committed
     else:
         events = []
-        for row in _pin_rows(path):
-            record = _memory_record_from_obj(row)
-            if record is None:
-                raise ValueError("formal pin source schema is invalid")
-            events.append(record)
-        events.extend(store.tombstones.load().values())
+        try:
+            # 墓碑合并前逐行验证，不能让较新有效墓碑掩盖较旧坏行。
+            for source in (path, _tombstone_path(path)):
+                for row in _pin_rows(source):
+                    record = _memory_record_from_obj(row)
+                    require_maintenance_event(record)
+                    # 省略 expiry 的旧事件仍永久有效；显式值必须有限且为正。
+                    if row.get("expires_at") is not None and record.expires_at <= 0:
+                        raise ValueError("formal pin expiry must be positive")
+                    if source == path:
+                        events.append(record)
+            events.extend(store.tombstones.load().values())
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE") from exc
     for source in sources:
         watch_pin_source(source)
     for record in _materialize_memory_events(events, include_expired=True):

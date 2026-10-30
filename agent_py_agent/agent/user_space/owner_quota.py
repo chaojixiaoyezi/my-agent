@@ -755,7 +755,10 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
         enumeration_budget += replay_allowance
         deadline = time.monotonic() + max_ms / 1000
         try:
-            while scanned < max_entries and enumerated < enumeration_budget and time.monotonic() < deadline:
+            while scanned < max_entries and enumerated < enumeration_budget:
+                # 已计费前缀重放完并推进至少一个新位置后才检查时间；总枚举额度不变。
+                if (scanned or enumerated > replay_skip) and time.monotonic() >= deadline:
+                    break
                 try:
                     entry = next(scan['iterator'])
                 except StopIteration:

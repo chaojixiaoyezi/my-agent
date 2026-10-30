@@ -146,6 +146,13 @@ def model_selection_metadata(agent: object) -> dict:
     return asdict(selection)
 
 
+def _raw_instance_backend(agent: object):
+    # 活动作用域的投影不是显式注入；读取实例原值，普通替身仍沿属性协议。
+    if isinstance(getattr(type(agent), "backend", None), ModelScopedAttribute):
+        return agent.__dict__.get("backend")
+    return getattr(agent, "backend", None)
+
+
 # LLM: 使用原后端缓存和权限视图构造依赖；可以读宿主设置并创建连接对象，但不探针、不发网络、不准备工具或改变 Agent。
 # 函数用途: 为当前模型或一个明确候选准备同源依赖；不支持 descriptor 的适配器保持未知。
 def prepare_model_dependencies(agent: object, model_config: object, *, inherited: bool = False) -> ModelScopeDependencies | None:
@@ -157,16 +164,18 @@ def prepare_model_dependencies(agent: object, model_config: object, *, inherited
     prompts = copy(agent.prompts)
     prompts.config = config
     default_backend = getattr(agent, "_default_constructed_backend", None)
+    raw_backend = _raw_instance_backend(agent)
     preserve_injected_backend = (
         getattr(model_config, "model_backend", "") in ("", "unconfigured")
         and default_backend is not None
-        and agent.backend is not default_backend
+        and raw_backend is not None
+        and raw_backend is not default_backend
     )
     values = {
         "config": config,
         "backend": (
-            agent.backend
-            if (model_config is agent.config or preserve_injected_backend)
+            raw_backend if preserve_injected_backend
+            else agent.backend if model_config is agent.config
             else _profile_backend(agent, config)
         ),
         "prompts": prompts,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import secrets
@@ -142,7 +143,7 @@ def _find_watch_identity(path: Path) -> tuple[int, ...]:
         for entry in entries:
             entries_count += 1
             digest = int.from_bytes(
-                os.fsencode(entry.name)[:16].ljust(16, b"\x00"), "little"
+                hashlib.blake2b(os.fsencode(entry.name), digest_size=16).digest(), "little"
             ) ^ int(entry.inode())
             entries_xor ^= digest
             entries_sum = (entries_sum + digest) & 0xFFFFFFFFFFFFFFFF

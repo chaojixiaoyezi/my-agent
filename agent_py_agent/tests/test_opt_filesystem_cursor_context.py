@@ -78,6 +78,36 @@ def test_find_snapshot_cursor_stable_pages(tmp_path):
     assert rows == ['a/first.py', 'a/second.py', 'b.py', 'z.py']
 
 
+# 冻结完整目录 stat，改名只变第 16 字节后的后缀且保留 inode。
+def test_find_snapshot_long_prefix_rename_with_frozen_directory_stat_is_stale(tmp_path, monkeypatch):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    for name in ("a.py", "b.py", "c.py", "abcdefghijklmnop_old.txt"):
+        (sub / name).write_text("source")
+    original_stat = find._discovery_nofollow_stat
+    frozen = {path: original_stat(path) for path in (tmp_path, sub)}
+
+    def same_tick(path):
+        return frozen[path] if path in frozen else original_stat(path)
+
+    monkeypatch.setattr(find, "_discovery_nofollow_stat", same_tick)
+    tool = FindFilesTool(tmp_path, max_matches=1)
+    params = {"pattern": "*.py", "snapshot": True, "limit": 1}
+    first = tool.execute(params)
+    assert first.ok
+    cursor = first.result_envelope["snapshot"]["next_cursor"]
+    assert cursor
+    old, new = sub / "abcdefghijklmnop_old.txt", sub / "abcdefghijklmnop_new.txt"
+    inode = old.stat().st_ino
+    identity = find._find_watch_identity(sub)
+    old.rename(new)
+    assert new.stat().st_ino == inode
+    assert find._find_watch_identity(sub) != identity
+    changed = tool.execute({**params, "cursor": cursor})
+    assert not changed.ok and changed.error_code == "STALE_VERSION"
+    assert changed.result_envelope["snapshot"]["limit_reason"] == "source_changed"
+
+
 # LLM: 字段筛选不能跨cursor改变；本测试只消费自己的新鲜游标，不借其他失效分支证明拒绝。
 # 函数用途: 独立验证筛选不匹配的准确失效原因。
 def test_find_snapshot_filter_mismatch_is_stale(tmp_path):

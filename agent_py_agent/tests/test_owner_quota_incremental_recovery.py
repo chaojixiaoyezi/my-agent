@@ -423,6 +423,56 @@ def test_large_directory_sort_preparation_converges_across_cache_eviction(tmp_pa
         assert ledger['used_bytes'] == ledger['inode_count'] == 1200
 
 
+@pytest.mark.parametrize("evict", [False, True], ids=["retained-control", "evicted-contract"])
+@pytest.mark.parametrize("tick_seconds", [0.00004, 0.025], ids=["default-slice", "already-expired"])
+def test_buffered_cookie_progress_with_default_time_slice(tmp_path, monkeypatch, evict, tick_seconds):
+    from types import SimpleNamespace
+
+    _buffer_directory_cookies(monkeypatch, 1363)
+    root = tmp_path / "quota"
+    root.mkdir()
+    assert _reconcile(root, max_entries=256, max_ms=1000)["complete"]
+    for index in range(1400):
+        (root / f"{index:04d}").write_bytes(b"x")
+    result = _reconcile(root, max_entries=256, max_ms=1000)
+    assert result["cursor"]["prep"]["block_skip"] == 1024
+    epoch = result["cursor"]["epoch"]
+    real_time = quota.time
+    ticks = [0.0]
+
+    def monotonic():
+        ticks[0] += tick_seconds
+        return ticks[0]
+
+    monkeypatch.setattr(quota, "time", SimpleNamespace(time=real_time.time, monotonic=monotonic))
+    try:
+        for _ in range(5):
+            before = result["cursor"]
+            point = (before["last_relpath"], before.get("prep", {}).get("enumerated", 0))
+            skip = before.get("prep", {}).get("block_skip", 0) if evict else 0
+            allowance = skip if skip >= 1024 else 0
+            if evict:
+                for current in quota._QUOTA_SCANS.values():
+                    current["iterator"].close()
+                quota._QUOTA_SCANS.clear()
+            result = _reconcile(root)  # 不提高默认的 128 项 / 20ms 预算。
+            cursor = result["cursor"]
+            assert cursor["epoch"] == epoch
+            assert (cursor["last_relpath"], cursor.get("prep", {}).get("enumerated", 0)) > point
+            assert result["replay_allowance"] == allowance
+            assert result["enumerated_entries"] <= 1024 + allowance
+            assert result["scanned_entries"] <= 128
+            persisted = json.loads((root / ".owner-quota-ledger.json").read_text())
+            assert persisted["reconcile_cursor"] == cursor
+            if result["complete"]:
+                assert result["used_bytes"] == result["inode_count"] == 1400
+                break
+    finally:
+        for current in quota._QUOTA_SCANS.values():
+            current["iterator"].close()
+        quota._QUOTA_SCANS.clear()
+
+
 def _buffer_directory_cookies(monkeypatch, block_size):
     """真实 DirEntry/统计不变，仅模拟 glibc 整块预读期间保持不变的目录 cookie。"""
     import stat

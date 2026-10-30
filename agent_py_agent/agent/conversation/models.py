@@ -585,8 +585,10 @@ class ConversationThread:
         payload["active_task_ids"] = list(self.active_task_ids)
         # 只把相同摘要存为同一线程头内的内容引用；逻辑证据与 checkpoint 账本不变。
         evidence = payload["compact_operation_evidence"]
-        if len(self.summary) > 1024 and evidence.get("summary") == self.summary:
-            evidence["summary"] = {"$thread_summary_sha256": hashlib.sha256(self.summary.encode("utf-8")).hexdigest()}
+        if evidence.get("summary") == self.summary:
+            summary_bytes = self.summary.encode("utf-8")
+            if len(summary_bytes) > 1024:
+                evidence["summary"] = {"$thread_summary_sha256": hashlib.sha256(summary_bytes).hexdigest()}
         for key in ("conversation_methods", "loaded_tool_names", "learning_source"):
             if not getattr(self, key):
                 payload.pop(key, None)

@@ -107,7 +107,12 @@ def test_nested_profile_resolution_uses_deployment_defaults(tmp_path):
     with selected_model_scope(host, thread_id=thread["thread_id"]):
         assert float(host.config.temperature) == 0.12
         assert selected_model_config(host, profile_id=b).temperature == original_temperature
-        assert selected_model_config(host, profile_id="default").model_name == "deployment-model"
+        # 数值参数可以继承部署默认值，空目录 default 不能继承部署模型或凭据。
+        unconfigured = selected_model_config(host, profile_id="default")
+        assert (unconfigured.model_backend, unconfigured.model_name, unconfigured.api_key) == ("", "", "")
+        assert host.config.model_name == "A"
+    assert host.config.model_name == "deployment-model"
+    assert host.config.temperature == original_temperature
 
 
 def test_model_selection_time_is_bound_to_selection_transaction(tmp_path):

@@ -95,6 +95,50 @@ def test_empty_catalog_never_falls_back_but_preserves_explicit_injected_backend(
             assert agent.config.model_name == "MiniMax-M2.7" and agent.backend is not backend
 
 
+@pytest.mark.parametrize("injected", [False, True])
+def test_nested_unconfigured_scope_uses_raw_backend_not_active_profile(tmp_path, injected):
+    from agent_py_agent.agent.backends import get_backend
+    from agent_py_agent.agent.backends.base import UnconfiguredBackend
+    from agent_py_agent.agent.backends.errors import ModelNotConfiguredError
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.model_scope import (
+        model_dependencies_scope,
+        prepare_model_dependencies,
+    )
+
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home")), tmp_path)
+    original = agent.backend
+    fake_backend = get_backend("echo", agent.config)
+    first, _ = add(agent, model_name="model-A")
+    second, _ = add(agent, model_name="model-B")
+    execute_model_profile_operation(agent, "set_default", {"profile_id": first})
+    with selected_model_scope(agent):
+        first_backend = agent.backend
+        assert first_backend is not original
+        second_dependencies = prepare_model_dependencies(agent, selected_model_config(agent, profile_id=second))
+        with model_dependencies_scope(agent, second_dependencies):
+            second_backend = agent.backend
+            assert second_backend is not first_backend and agent.config.model_name == "model-B"
+            if injected:
+                # 赋值只改变实例依赖，活动 B 作用域仍投影 B；不能把 B 当成这次注入。
+                agent.backend = fake_backend
+            assert agent.backend is second_backend
+            assert agent.__dict__["backend"] is (fake_backend if injected else original)
+            config = selected_model_config(agent, profile_id="default")
+            assert config.model_backend == ""
+            dependencies = prepare_model_dependencies(agent, config)
+            with model_dependencies_scope(agent, dependencies):
+                if injected:
+                    assert agent.backend is fake_backend and agent.backend.generate("offline").text
+                else:
+                    assert isinstance(agent.backend, UnconfiguredBackend)
+                    with pytest.raises(ModelNotConfiguredError):
+                        agent.backend.generate("must not reuse model B")
+            assert agent.backend is second_backend
+        assert agent.backend is first_backend
+    assert agent.backend is (fake_backend if injected else original)
+
+
 # LLM: v6 允许 1..4095 真窗口，非法值测试改覆盖上溢，不删除原边界防线。
 # 函数用途: 检查非法档案被拒绝且错误不回显秘密。
 @pytest.mark.parametrize("values", [
