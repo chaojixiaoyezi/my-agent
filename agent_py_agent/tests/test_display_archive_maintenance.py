@@ -1,6 +1,7 @@
 """显式维护的扫描预算：跳过、错误和非UUID目录均不可无限枚举。"""
 import json
 import os
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
@@ -82,3 +83,198 @@ def test_success_limit_and_zero_budget_keep_archive_contract(tmp_path):
 def test_invalid_batch_limit_is_rejected(tmp_path, maximum):
     with pytest.raises(ValueError):
         maintenance.compact_display_archives(tmp_path, max_archives=maximum)
+
+
+def _ordered_archives(tmp_path, count):
+    """真实 producer 建档后按实际枚举顺序选前缀，不假定文件系统按创建顺序返回。"""
+    store = SimpleNamespace(storage=SimpleNamespace(root=tmp_path), threads=SimpleNamespace(load=lambda _: True))
+    refs = [archive.archive_display_rows(SimpleNamespace(conversation_store=store),
+            thread_id='thread-test', rows=[{'text': f'归档-{number}'}]) for number in range(count)]
+    root = tmp_path / 'display_archives'
+    by_id = {ref['archive_id']: ref for ref in refs}
+    with os.scandir(root) as entries:
+        ordered = [(by_id[entry.name], root / entry.name) for entry in entries]
+    for _, directory in ordered:
+        os.utime(directory / 'manifest.json', (2_000_000_000.0 - 2 * 86400,) * 2)
+    return store, ordered
+
+
+def test_compact_display_archives_rotates_past_scan_budget_without_starvation(tmp_path):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    before = [archive.read_display_archive_page(store, ref, 0) for ref, _ in ordered]
+    compacted = 0
+    for _ in range(85):
+        result = maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=0, max_archives=1)
+        assert result['errors'] == 0 and result['compacted'] <= 1 and result['scanned'] <= 64
+        compacted += result['compacted']
+        if compacted == 80:
+            break
+    assert compacted == 80
+    assert all((directory / 'pages_bundle.json').is_file() for _, directory in ordered)
+    assert not any((directory / '0.json').exists() for _, directory in ordered)
+    assert [archive.read_display_archive_page(store, ref, 0) for ref, _ in ordered] == before
+    assert len(list((tmp_path / 'display_archives').iterdir())) == 80
+
+
+def test_prune_expired_archives_rotates_past_pinned_prefix(tmp_path):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    pinned = {ref['archive_id'] for ref, _ in ordered[:64]}
+    originals = [(directory / 'manifest.json').read_bytes() for _, directory in ordered[:64]]
+    expired = 0
+    for _ in range(20):
+        result = maintenance.prune_expired_display_archives(
+            store, now=2_000_000_000.0, ttl_days=1, max_archives=1, pinned_archive_ids=pinned)
+        assert result['errors'] == 0 and result['expired'] <= 1 and result['scanned'] <= 64
+        expired += result['expired']
+    assert expired == 16
+    assert all(json.loads((directory / 'manifest.json').read_text())['expired'] for _, directory in ordered[64:])
+    assert not any((directory / '0.json').exists() for _, directory in ordered[64:])
+    assert [(directory / 'manifest.json').read_bytes() for _, directory in ordered[:64]] == originals
+    assert all((directory / '0.json').exists() for _, directory in ordered[:64])
+    removed = 0
+    for _ in range(20):
+        result = maintenance.prune_expired_display_archives(
+            store, now=2_000_000_000.0 + 31 * 86400, ttl_days=1, max_archives=1, pinned_archive_ids=pinned)
+        assert result['errors'] == 0 and result['removed'] <= 1 and result['scanned'] <= 64
+        removed += result['removed']
+    assert removed == 16
+    assert not any(directory.exists() for _, directory in ordered[64:])
+    assert {path.name for path in (tmp_path / 'display_archives').iterdir()} == pinned
+
+
+@pytest.mark.parametrize('operation', ['compact', 'prune'])
+def test_maintenance_reaches_collectible_archive_150_of_200(tmp_path, operation):
+    store, ordered = _ordered_archives(tmp_path, 200)
+    now = 2_000_000_000.0
+    for _, directory in ordered:
+        os.utime(directory / 'manifest.json', (now,) * 2)
+    _, target = ordered[149]
+    os.utime(target / 'manifest.json', (now - 2 * 86400,) * 2)
+    pinned = {ref['archive_id'] for ref, _ in ordered[:64]}
+    results = []
+    for _ in range(4):
+        if operation == 'compact':
+            result = maintenance.compact_display_archives(store, now=now, max_archives=1)
+        else:
+            result = maintenance.prune_expired_display_archives(
+                store, now=now, ttl_days=1, max_archives=1, pinned_archive_ids=pinned)
+        assert result['errors'] == 0 and result['scanned'] <= 64
+        results.append(result)
+        if result['compacted'] + result['expired']:
+            break
+    assert sum(result['compacted'] + result['expired'] for result in results) == 1
+    assert len(results) == 3
+    assert not (target / '0.json').exists()
+    if operation == 'compact':
+        assert (target / 'pages_bundle.json').is_file()
+    else:
+        assert json.loads((target / 'manifest.json').read_text())['expired'] is True
+    assert all((directory / '0.json').is_file() for _, directory in ordered[:64])
+    assert len(list((tmp_path / 'display_archives').iterdir())) == 200
+
+
+def test_rotating_scan_wraps_with_one_shared_inspection_budget(tmp_path, monkeypatch):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    original_manifest, visited = maintenance._manifest, []
+
+    def observe(fd, archive_id):
+        visited.append(archive_id)
+        return original_manifest(fd, archive_id)
+
+    monkeypatch.setattr(maintenance, '_manifest', observe)
+    assert maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=100000, max_archives=1)['scanned'] == 64
+    visited.clear()
+    result = maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=100000, max_archives=1)
+    assert result['scanned'] == result['skipped'] == 64
+    assert visited == [ref['archive_id'] for ref, _ in ordered[64:] + ordered[:48]]
+
+    for _, directory in ordered:
+        os.utime(directory / 'manifest.json', (2_000_000_000.0,) * 2)
+    os.utime(ordered[3][1] / 'manifest.json', (2_000_000_000.0 - 2 * 86400,) * 2)
+    result = maintenance.compact_display_archives(store, now=2_000_000_000.0, max_archives=1)
+    assert result['compacted'] == 1 and result['scanned'] == 36
+    assert (ordered[3][1] / 'pages_bundle.json').is_file()
+    visited.clear()
+    maintenance.compact_display_archives(store, now=2_000_000_000.0, max_archives=1)
+    assert visited[0] == ordered[4][0]['archive_id']
+    assert len(visited) == 64
+
+
+def test_rotating_scan_restarts_after_directory_shrinks_past_cursor(tmp_path):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    assert maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=100000, max_archives=1)['scanned'] == 64
+    for _, directory in ordered[10:]:
+        for leaf in directory.iterdir():
+            leaf.unlink()
+        directory.rmdir()
+    result = maintenance.compact_display_archives(store, now=2_000_000_000.0, max_archives=1)
+    assert result['errors'] == 0 and result['compacted'] == result['scanned'] == 1
+    assert (ordered[0][1] / 'pages_bundle.json').is_file()
+
+
+def test_scan_cursors_are_isolated_by_directory_and_operation(tmp_path):
+    store, ordered = _ordered_archives(tmp_path / 'first', 80)
+    assert maintenance.compact_display_archives(store, now=2_000_000_000.0, max_archives=1)['compacted'] == 1
+    pinned = {ref['archive_id'] for ref, _ in ordered[:64]}
+    result = maintenance.prune_expired_display_archives(
+        store, now=2_000_000_000.0, ttl_days=1, max_archives=1, pinned_archive_ids=pinned)
+    assert result['expired'] == 0 and result['scanned'] == result['skipped'] == 64
+    other_store, other_ordered = _ordered_archives(tmp_path / 'second', 2)
+    result = maintenance.compact_display_archives(other_store, now=2_000_000_000.0, max_archives=1)
+    assert result['compacted'] == result['scanned'] == 1
+    assert (other_ordered[0][1] / 'pages_bundle.json').is_file()
+    assert (other_ordered[1][1] / '0.json').is_file()
+
+
+def test_rotating_scan_adjusts_cursor_for_removal_during_wrap(tmp_path):
+    store, ordered = _ordered_archives(tmp_path, 80)
+    now = 2_000_000_000.0
+    assert maintenance.prune_expired_display_archives(store, now=now, ttl_days=1)['expired'] == 80
+    pinned = {ref['archive_id'] for ref, _ in ordered}
+    result = maintenance.prune_expired_display_archives(
+        store, now=now + 31 * 86400, max_archives=1, pinned_archive_ids=pinned)
+    assert result['scanned'] == result['skipped'] == 64
+    pinned.difference_update(ref['archive_id'] for ref, _ in ordered[:2])
+    result = maintenance.prune_expired_display_archives(
+        store, now=now + 31 * 86400, max_archives=1, pinned_archive_ids=pinned)
+    assert result['removed'] == 1 and result['scanned'] == 17 and result['errors'] == 0
+    assert not ordered[0][1].exists()
+    assert ordered[1][1].is_dir()
+    result = maintenance.prune_expired_display_archives(
+        store, now=now + 31 * 86400, max_archives=1, pinned_archive_ids=pinned)
+    assert result['removed'] == result['scanned'] == 1 and result['errors'] == 0
+    assert not ordered[1][1].exists()
+    assert {path.name for path in (tmp_path / 'display_archives').iterdir()} == pinned
+
+
+def test_scan_cursor_cache_is_bounded_and_refreshes_recent_directories(tmp_path, monkeypatch):
+    cursors = OrderedDict()
+    monkeypatch.setattr(maintenance, '_scan_cursors', cursors)
+    roots = []
+    for number in range(129):
+        root = tmp_path / str(number) / 'display_archives'
+        root.mkdir(parents=True)
+        roots.append(root)
+    for root in roots[:128]:
+        assert maintenance.compact_display_archives(root, max_archives=1)['errors'] == 0
+    keys = list(cursors)
+    assert len(keys) == 128
+    maintenance.compact_display_archives(roots[0], max_archives=1)
+    assert next(reversed(cursors)) == keys[0]
+    maintenance.compact_display_archives(roots[-1], max_archives=1)
+    assert len(cursors) == 128 and keys[0] in cursors and keys[1] not in cursors
+    assert all(offset == 0 for offset in cursors.values())
+    before = list(cursors.items())
+    assert maintenance.compact_display_archives(roots[1], max_archives=0)['scanned'] == 0
+    assert list(cursors.items()) == before
+    assert not any(list(root.iterdir()) for root in roots)
+
+
+@pytest.mark.parametrize(('maximum', 'budget'), [(1, 64), (5, 80)])
+def test_scan_budget_keeps_existing_multiplier_on_fresh_and_resumed_scans(tmp_path, maximum, budget):
+    store, _ = _ordered_archives(tmp_path, 100)
+    for _ in range(2):
+        result = maintenance.compact_display_archives(
+            store, now=2_000_000_000.0, min_age_days=100000, max_archives=maximum)
+        assert result['scanned'] == result['skipped'] == budget
+        assert result['errors'] == result['compacted'] == 0

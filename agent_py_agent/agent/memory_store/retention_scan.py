@@ -20,6 +20,7 @@ from typing import Any
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
 from ..conversation.models import ConversationThread
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
+from . import reference_pins
 from .candidate_models import MemoryCandidate
 from .candidates import (
     RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
@@ -1656,7 +1657,76 @@ class _PinReadChanged(OSError):
     pass
 
 
-# LLM: 解析前后均监视内容代次；目标复核仅容同inode打开前追加，以FD为新起点，首末变化/缩短仍拒绝。
+# LLM: 借用真实二进制源，仅对解析已读取的字节做切片摘要；不额外读文件，不把读前完成当作读后完成。
+# 类用途: 比对JSON解析流和完整预验基线，抓住预验后或读中的粗时钟改写。
+class _PinDigestReader(io.RawIOBase):
+    # LLM: 基线来自该路径同代完整预验，解析开始即清空post进度，外层拥有原reader的关闭责任。
+    # 函数用途: 准备不持有正文副本的流式摘要器。
+    def __init__(self, path, raw, state):
+        super().__init__()
+        self.path, self.raw, self.state = path, raw, state
+        self.baseline = state["baseline"]
+        budget = state["budget"]
+        tail = min(reference_pins._PIN_SOURCE_CHUNK_BYTES, budget, max(1, budget // 4))
+        self.slice_size = max(1, budget - tail)
+        self.body_size = max(0, state["stamp"][3] - tail)
+        self.position, self.slices = 0, []
+        self.body_hash = hashlib.blake2b(digest_size=16)
+        self.tail_hash = hashlib.blake2b(digest_size=16)
+        self.verified = False
+        state["cycle_verified"] = set()
+        state["next_slice"] = 0
+        state["post_completed_pass"] = None
+        state["post_completed_cycle"] = None
+
+    # LLM: 只读包装器，不改变FD身份。
+    # 函数用途: 告知缓冲包装器可以读取。
+    def readable(self):
+        return True
+
+    # LLM: 返回底层真实FD供_pin_rows首末验证。
+    # 函数用途: 保留FD身份检查入口。
+    def fileno(self):
+        return self.raw.fileno()
+
+    # LLM: 每次只消费包装器请求的实际字节，跨片处拆摘要，EOF必须与预验全片/尾部一致。
+    # 函数用途: 在正常解析读取中流式校验，不另开来源或重复读取正文。
+    def readinto(self, buffer):
+        raw = self.raw.read1(len(buffer))
+        if not raw:
+            self.verify()
+            return 0
+        buffer[:len(raw)] = raw
+        offset = 0
+        while offset < len(raw):
+            if self.position < self.body_size:
+                boundary = min(self.body_size, (self.position // self.slice_size + 1) * self.slice_size)
+                count = min(len(raw) - offset, boundary - self.position)
+                self.body_hash.update(raw[offset:offset + count])
+                self.position += count
+                if self.position == boundary:
+                    self.slices.append(self.body_hash.digest())
+                    self.body_hash = hashlib.blake2b(digest_size=16)
+            else:
+                count = len(raw) - offset
+                self.tail_hash.update(raw[offset:])
+                self.position += count
+            offset += count
+        return len(raw)
+
+    # LLM: 只有真实EOF及全部切片相等才接受解析流，变化清掉全局切片状态并走原有有界竞态重试。
+    # 函数用途: 禁止旧解析结果与新来源摘要配对。
+    def verify(self):
+        if self.verified:
+            return
+        if (self.position != self.state["stamp"][3]
+                or (tuple(self.slices), self.tail_hash.digest()) != self.baseline):
+            reference_pins._RESUMABLE_DIGESTS.pop(self.path, None)
+            raise _PinReadChanged(11, "pin source changed while reading", str(self.path))
+        self.verified = True
+
+
+# LLM: 预验partial禁止打开解析器；目标复核只容同inode非缩短的打开前追加并重置来源，解析流与读后都须验证。
 # 函数用途: 流式严格读取pin来源，防止把旧解析结果与读后新摘要组成缓存。
 def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
     try:
@@ -1669,21 +1739,40 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
     if not stat.S_ISREG(before.st_mode):
         raise OSError("pin source is not a regular file")
     watch_pin_source(path)
-    with io.TextIOWrapper(_fingerprint_source(path), encoding="utf-8") as source:
-        opened = os.fstat(source.fileno())
+    sources = reference_pins._SOURCES.get()
+    if sources is not None and path in sources and not reference_pins._is_complete_stamp(sources[path]):
+        raise reference_pins._PartialPinVerification("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
+    raw = _fingerprint_source(path)
+    try:
+        opened = os.fstat(raw.fileno())
         if target_pin_read_enabled() and (before.st_dev, before.st_ino, before.st_mode) == (
                 opened.st_dev, opened.st_ino, opened.st_mode) and opened.st_size >= before.st_size:
-            before = opened
+            if _file_identity(before) != _file_identity(opened):
+                before = opened
+                reference_pins.rebaseline_watched_pin_source(path)
+                if sources is not None and not reference_pins._is_complete_stamp(sources.get(path)):
+                    raise reference_pins._PartialPinVerification("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         if _file_identity(before) != _file_identity(opened):
             raise _PinReadChanged(11, "pin source changed before reading", str(path))
-        is_jsonl = jsonl if jsonl is not None else path.suffix == ".jsonl"
-        rows = (json.loads(line) for line in source if line.strip()) if is_jsonl else (json.load(source),)
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError("pin source contains non-object rows")
-            yield row
-        if _file_identity(before) != _file_identity(os.fstat(source.fileno())):
-            raise _PinReadChanged(11, "pin source changed while reading", str(path))
+        state = reference_pins._RESUMABLE_DIGESTS.get(path, {})
+        verifier = None
+        if (before.st_size > reference_pins._MAX_PIN_SOURCE_DIGEST_BYTES and state.get("baseline") is not None
+                and state["stamp"] == reference_pins._metadata_stamp(opened)):
+            verifier = _PinDigestReader(path, raw, state)
+        reader = io.BufferedReader(verifier) if verifier is not None else raw
+        with io.TextIOWrapper(reader, encoding="utf-8") as source:
+            is_jsonl = jsonl if jsonl is not None else path.suffix == ".jsonl"
+            rows = (json.loads(line) for line in source if line.strip()) if is_jsonl else (json.load(source),)
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("pin source contains non-object rows")
+                yield row
+            if verifier is not None:
+                verifier.verify()
+            if _file_identity(before) != _file_identity(os.fstat(source.fileno())):
+                raise _PinReadChanged(11, "pin source changed while reading", str(path))
+    finally:
+        raw.close()
     if _file_identity(before) != _file_identity(path.stat(follow_symlinks=False)):
         raise _PinReadChanged(11, "pin source changed while reading", str(path))
     watch_pin_source(path)
@@ -1827,12 +1916,13 @@ def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[M
     return _RetentionPins(Path(home.owner_home_dir), complete=False, target_rebuild=rebuild), False
 
 
-# LLM: 单次流式读取仍严格校验全部来源；并发代次错误交外层有界重试，其余错误立即关闭相关引用域。
+# LLM: 每次重试/目标重建先重置观察集合但保留摘要预算；预验partial同坏源一样关闭，代次竞态仍交外层重试。
 # 函数用途: 构建一份完整的临时引用投影，不物化JSONL大正文。
 def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: list[MemoryRetentionError],
                                  *, now: datetime) -> tuple[_RetentionPins, bool]:
     pins = _RetentionPins(Path(home.owner_home_dir))
     try:
+        reference_pins.reset_watched_pin_sources(home)
         policy, error = _load_policy(Path(home.owner_retention_json))
         if error is not None or policy is None or policy.legal_hold:
             raise ValueError("pin protection policy is unavailable or held")

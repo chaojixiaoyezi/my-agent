@@ -838,9 +838,22 @@ def test_r4_eight_mib_append_writer_and_reader_io_is_bounded(tmp_path, monkeypat
         assert all(offset >= prior for side, offset, size in reads if side == 'reader' and size)
 
 
-# 先积累未索引追加，再在writer锁内篡改头部、已索引尾部或未索引尾部。
-@pytest.mark.parametrize('damage', ['head', 'indexed_tail', 'pending_tail', 'replacement'])
+# 先积累未索引追加，再在writer锁内篡改头、中、尾或替换文件。
+@pytest.mark.parametrize('damage', ['head', 'indexed_middle', 'indexed_middle_fixed', 'indexed_tail', 'pending_tail', 'replacement'])
 def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch, damage):
+    _assert_append_rejects_rewrite(tmp_path, monkeypatch, damage)
+
+
+@pytest.mark.parametrize('damage,frozen_clock', [('indexed_quarter', False), ('indexed_middle', True)])
+def test_r5_append_fd_stamp_and_frozen_middle(tmp_path, monkeypatch, damage, frozen_clock):
+    _assert_append_rejects_rewrite(tmp_path, monkeypatch, damage, frozen_clock=frozen_clock)
+
+
+# 窗口外改写只能靠真实FD元数据挡住；冻结时间的中段改写则必须靠字节窗口挡住。
+def _assert_append_rejects_rewrite(tmp_path, monkeypatch, damage, *, frozen_clock=False):
+    import os
+
+    from agent_py_agent.agent.local_storage import owner_read_index as index_module
     from agent_py_agent.agent.observability import telemetry_ledger as module
 
     ledger, path, first = _large_telemetry_case(tmp_path, size=1024 * 1024)
@@ -849,6 +862,7 @@ def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch,
     original = module.append_text_beneath
 
     def corrupt(home, parts, line):
+        frozen = path.stat()
         raw = path.read_bytes()
         if damage == 'replacement':
             replacement = path.with_suffix('.replacement')
@@ -856,12 +870,39 @@ def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch,
             replacement.replace(path)
         else:
             offset = (raw.find(b'"c0"') if damage == 'head' else
+                      raw.find(b'"c0"', len(raw) // 2) if damage == 'indexed_middle' else
+                      512 * 1024 + raw[:1024].find(b'"c0"') if damage == 'indexed_middle_fixed' else
+                      raw.find(b'"c0"', len(raw) // 4) if damage == 'indexed_quarter' else
                       raw.rfind(b'"c0"') if damage == 'indexed_tail' else raw.rfind(b'"c3"'))
             assert offset >= 0
             with path.open('r+b') as stream:
                 stream.seek(offset)
                 stream.write(b'"cX"')
-        return original(home, parts, line)
+        if not frozen_clock:
+            # 显式拉开mtime，避免依赖本机文件系统的时钟分辨率。
+            os.utime(path, ns=(frozen.st_atime_ns, frozen.st_mtime_ns + 1_000_000_000))
+            return original(home, parts, line)
+        real_stat, real_fstat, samples = os.stat, os.fstat, []
+
+        def freeze(info):
+            if (info.st_dev, info.st_ino) != (frozen.st_dev, frozen.st_ino):
+                return info
+            samples.append(info.st_size)
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith('st_')}
+            fields.update(st_mtime_ns=frozen.st_mtime_ns, st_ctime_ns=frozen.st_ctime_ns)
+            return SimpleNamespace(**fields)
+
+        def frozen_stat(*args, **kwargs):
+            return freeze(real_stat(*args, **kwargs))
+
+        with monkeypatch.context() as clock:
+            clock.setattr(os, 'stat', frozen_stat)
+            clock.setattr(os, 'fstat', lambda fd: freeze(real_fstat(fd)))
+            # stat替身仍支持dir_fd，不能无意把POSIX测试切到portable路径。
+            clock.setattr(os, 'supports_dir_fd', {*os.supports_dir_fd, frozen_stat})
+            result = original(home, parts, line)
+        assert samples, '冻结时钟必须实际覆盖目标FD采样'
+        return result
 
     monkeypatch.setattr(module, 'append_text_beneath', corrupt)
     ledger.record_tool_call(call(4))
@@ -869,6 +910,7 @@ def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch,
 
     with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
         assert connection.execute("SELECT COUNT(*) FROM ori_meta WHERE key LIKE 'append:%'").fetchone()[0] == 0
+    assert (str(tmp_path.absolute()), ('data', 'telemetry', 'tool_calls.jsonl')) not in index_module._PROCESS_APPENDS
     proofs, original_prove = [], module.OwnerReadIndex._prove_prefix
 
     def prove(index, *args, **kwargs):
@@ -895,6 +937,59 @@ def test_r4_append_windows_reject_rewrite_and_replacement(tmp_path, monkeypatch,
     else:
         assert changed['view']['generation'] != first['view']['generation']
         assert ledger.query_tool_calls_page(view=first['view'])['coverage']['status'] == 'unavailable'
+
+
+# 无效、缺失或非增长见证必须同时撤销数据库和进程内的旧加速链。
+@pytest.mark.parametrize('invalid', ['none', 'no_growth', 'short_full', 'bad_three', 'bad_five'])
+def test_r5_invalid_append_witness_revokes_previous(tmp_path, invalid):
+    import sqlite3
+
+    from agent_py_agent.agent.local_storage import owner_read_index as module
+    from agent_py_agent.agent.observability.telemetry_ledger import _append_stamp
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    ledger.record_tool_call(call(0))
+    assert ledger.query_tool_calls_page()['coverage']['status'] == 'complete'
+    before = _append_stamp(tmp_path)
+    ledger.record_tool_call(call(1))
+    after, raw = _append_stamp(tmp_path, include_bytes=True, before_size=before[2])
+    key = (str(tmp_path.absolute()), ('data', 'telemetry', 'tool_calls.jsonl'))
+    assert key in module._PROCESS_APPENDS
+    if invalid == 'no_growth':
+        before = after
+    raw = {'none': None, 'no_growth': raw, 'short_full': b'',
+           'bad_three': (b'', 0, b''), 'bad_five': (b'', 0, b'', 0, b'')}[invalid]
+    module.note_owner_append(tmp_path, key[1], before, after, raw_after=raw)
+    assert key not in module._PROCESS_APPENDS
+    with sqlite3.connect(tmp_path / 'cache/owner_read_index.sqlite3') as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ori_meta WHERE key LIKE 'append:%'").fetchone()[0] == 0
+
+
+# 两条追加路径均须在第一次write之前发表准确FD stamp，不把其它上下文的结果混进来。
+@pytest.mark.parametrize('portable', [False, True])
+def test_r5_append_captures_prewrite_fd_stamp(tmp_path, monkeypatch, portable):
+    from contextvars import Context
+
+    from agent_py_agent.agent.common import nofollow_fs as module
+
+    assert callable(getattr(module, 'last_append_pre_stamp', None))
+    path = tmp_path / 'append.txt'
+    path.write_text('before')
+    info = path.stat()
+    expected = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    original, observed = module.os.write, []
+
+    def observe(fd, payload):
+        observed.append(module.last_append_pre_stamp())
+        return original(fd, payload)
+
+    if portable:
+        monkeypatch.setattr(module, '_supports_dir_fd', lambda: False)
+    monkeypatch.setattr(module.os, 'write', observe)
+    Context().run(module.append_text_beneath, tmp_path, ('append.txt',), 'after')
+    assert observed == [expected]
+    assert path.read_text() == 'beforeafter'
+    assert Context().run(module.last_append_pre_stamp) is None
 
 
 # 连续多次写入不推进读水位，随后清空进程缓存，仍须靠持久见证只读增量。

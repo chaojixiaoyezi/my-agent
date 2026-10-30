@@ -12,8 +12,10 @@ from typing import Any
 
 from agent_py_agent.agent.common.directory_lock import locked_private_directory
 from agent_py_agent.agent.common.nofollow_fs import (
+    _LAST_APPEND_PRE_STAMP,
     append_text_beneath,
     ensure_private_dir,
+    last_append_pre_stamp,
     open_readonly_file_beneath,
 )
 
@@ -72,7 +74,7 @@ def _lock(home):
     return locked_private_directory(home, relative_parts=PARTS, lock_name=".telemetry.lock")
 
 
-# 领域锁内固定no-follow单链接FD；大文件只读头8 KiB、旧尾8 KiB及本次增量。
+# 领域锁内固定no-follow单链接FD；大文件只读头4 KiB、中4 KiB、旧尾8 KiB及本次增量。
 def _append_stamp(home, *, include_bytes=False, before_size=0):
     try:
         descriptor = open_readonly_file_beneath(home, (*PARTS, 'tool_calls.jsonl'))
@@ -103,15 +105,20 @@ def _append_stamp(home, *, include_bytes=False, before_size=0):
             if raw is None:
                 return stamp, None
         else:
-            half = _MAX_APPEND_WITNESS_READ_BYTES // 2
-            tail_start = max(0, before_size - half)
-            head = window(0, min(half, before_size))
+            head_len = min(4096, before_size)
+            mid_start = max(0, min(before_size - 4096, ((before_size // 2) // 1024) * 1024 - 1024))
+            mid_len = min(4096, max(0, before_size - mid_start))
+            tail_start = max(0, before_size - _MAX_APPEND_WITNESS_READ_BYTES // 2)
+            head = window(0, head_len)
             if head is None:
+                return stamp, None
+            mid = window(mid_start, mid_start + mid_len)
+            if mid is None:
                 return stamp, None
             tail = window(tail_start, info.st_size)
             if tail is None:
                 return stamp, None
-            raw = (head, tail_start, tail)
+            raw = (head, mid_start, mid, tail_start, tail)
         verify = os.fstat(descriptor)
         verify_stamp = (verify.st_dev, verify.st_ino, verify.st_size, verify.st_mtime_ns, verify.st_ctime_ns)
         if verify_stamp != stamp or verify.st_nlink != 1:
@@ -246,11 +253,17 @@ class ToolTelemetryLedger:
         encoded_len = len(line.encode('utf-8'))
         with _lock(self._home):
             before = _append_stamp(self._home)
+            _LAST_APPEND_PRE_STAMP.set(None)
             append_text_beneath(self._home, (*PARTS, "tool_calls.jsonl"), line)
+            pre_stamp = last_append_pre_stamp()
             after, raw_after = _append_stamp(
                 self._home, include_bytes=True, before_size=before[2] if before is not None else 0,
             )
-            if before is not None and after is not None and after[2] - before[2] == encoded_len:
+            if before is not None:
+                # 元数据或增量不符只撤销加速见证，已完成的业务追加不改报失败。
+                if (after is None or after[2] - before[2] != encoded_len
+                        or (pre_stamp is not None and pre_stamp != before)):
+                    raw_after = None
                 note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after, raw_after=raw_after)
         return item
 

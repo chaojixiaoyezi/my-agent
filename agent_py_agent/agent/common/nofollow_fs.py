@@ -11,7 +11,17 @@ from __future__ import annotations
 import os
 import secrets
 import stat
+from contextvars import ContextVar
 from pathlib import Path
+
+_LAST_APPEND_PRE_STAMP: ContextVar[tuple[int, int, int, int, int] | None] = ContextVar(
+    "nofollow_last_append_pre_stamp", default=None,
+)
+
+
+# 仅供同一调用上下文读取实际追加FD的写前观察，不授予路径或内容可信性。
+def last_append_pre_stamp() -> tuple[int, int, int, int, int] | None:
+    return _LAST_APPEND_PRE_STAMP.get()
 
 
 # LLM: All structural failures use one typed OS error so callers can fail closed without parsing text.
@@ -52,6 +62,12 @@ def append_text_beneath(
             relative_parts[-1],
             os.O_WRONLY | os.O_APPEND | os.O_CREAT,
             file_mode,
+        )
+        pre_info = os.fstat(descriptor)
+        _LAST_APPEND_PRE_STAMP.set(
+            (int(pre_info.st_dev), int(pre_info.st_ino), int(pre_info.st_size),
+             int(pre_info.st_mtime_ns), int(pre_info.st_ctime_ns))
+            if pre_info.st_nlink == 1 else None
         )
         payload = text.encode("utf-8")
         view = memoryview(payload)
@@ -821,6 +837,12 @@ def _append_text_portable(
         file_mode,
     )
     try:
+        pre_info = os.fstat(descriptor)
+        _LAST_APPEND_PRE_STAMP.set(
+            (int(pre_info.st_dev), int(pre_info.st_ino), int(pre_info.st_size),
+             int(pre_info.st_mtime_ns), int(pre_info.st_ctime_ns))
+            if pre_info.st_nlink == 1 else None
+        )
         payload = text.encode("utf-8")
         os.write(descriptor, payload)
         os.fsync(descriptor)
@@ -904,6 +926,7 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 __all__ = [
     "NoFollowPathError",
     "append_text_beneath",
+    "last_append_pre_stamp",
     "ensure_private_dir",
     "create_private_file_beneath",
     "resolve_existing_symlink_anchor",

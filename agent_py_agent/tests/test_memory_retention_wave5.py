@@ -1229,7 +1229,11 @@ def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
     _freeze_pin_file_stat(monkeypatch, path)
     snapshot = ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
     errors = []
-    first, complete = snapshot.current(errors)
+    # 读前/读后共需六片，不能恢复旧的每watch四片预算来让这一轮直接通过。
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current(errors)
+    assert snapshot.value is None and snapshot.pending is not None
+    first, complete = _r5_finish_verification(snapshot, errors)
     assert complete and not errors and not first.protects(target, errors)
     rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl")
     assert len(rewritten) == len(payload)
@@ -1237,8 +1241,321 @@ def test_r4_beyond_256k_offset_equal_length_rewrite_detected_hot_and_settled(
     if settle_after_rewrite:
         later = time.time_ns() + 3_000_000_000
         monkeypatch.setattr(time, "time_ns", lambda: later)
-    second, complete = snapshot.current(errors)
+    else:
+        with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+            snapshot.current(errors)
+        assert snapshot.value is None
+    second, complete = _r5_finish_verification(snapshot, errors)
     assert complete and not errors and second is not first and second.protects(target, errors)
+
+
+# LLM: 仅预算待续可失败关闭，必须在有限轮数内恢复；不会吞掉最终失败或把complete断言改成仅存在。
+# 函数用途: 为新双阶段预算合同完成有界续验，逐轮确保未发布不完整快照。
+def _r5_finish_verification(snapshot, errors):
+    for _ in range(8):
+        errors.clear()
+        try:
+            result = snapshot.current(errors)
+        except OSError as exc:
+            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            assert snapshot.value is None
+            continue
+        assert result[1] and not errors
+        return result
+    pytest.fail("stable source did not finish bounded verification")
+
+
+# LLM: 夹具只写临时线程；固定真实inode的粗时钟观察，并精确控制引用偏移与总字节数。
+# 函数用途: 构造可复现中段等长改写的大热来源。
+def _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib=300):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    prefix = '{"thread_id":"t","summary":"' + "p" * (offset_kib * 1024)
+    prefix += '","source_refs":["' + str(control) + '"],"note":"'
+    payload = prefix + "q" * (size_kib * 1024 - len(prefix.encode()) - 3) + '"}\n'
+    directory = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads"
+    path = old_file(directory / "t.json", payload)
+    assert path.stat().st_size == size_kib * 1024
+    assert offset_kib * 1024 < payload.index("pin-a.jsonl") < (offset_kib + 1) * 1024
+    fixed = path.stat()
+    _freeze_pin_file_stat(monkeypatch, path)
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: fixed.st_ctime_ns)
+    return home, service, path, target, payload
+
+
+# LLM: 两个接缝都走真实解析、快照和apply；冻结stat不能让旧pins取得完整授权，稳定后须可恢复。
+# 函数用途: 覆盖解析前/后中段改写，防止尾片捷径发布旧引用或误回收新证据。
+@pytest.mark.parametrize("size_kib", [600, 1100, 2048])
+@pytest.mark.parametrize("offset_kib", [300, 400])
+@pytest.mark.parametrize("timing", ["before_parse", "during_parse", "after_parse"])
+def test_r5_hot_large_source_mid_build_rewrite_never_publishes_stale_pins(
+    tmp_path, monkeypatch, size_kib, offset_kib, timing
+):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, service, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib)
+    for index in range(24):
+        old_file(home.owner_memory_daily_dir / f"a-drive-{index:02d}.jsonl")
+    changed, parsed, stream_rejected = [], [], []
+    original_watch, original_load = scan.watch_pin_source, json.load
+
+    # LLM: 真实JSON加载返回后仅记接缝，不改变解析结果或complete门。
+    # 函数用途: 标记即将执行读后来源检查。
+    def loaded(source, *args, **kwargs):
+        try:
+            result = original_load(source, *args, **kwargs)
+        except scan._PinReadChanged:
+            stream_rejected.append(True)
+            raise
+        if isinstance(result, dict) and result.get("thread_id") == "t" and reference_pins._SOURCES.get() is not None:
+            parsed.append(True)
+        return result
+
+    # LLM: 原地等长写入只发生一次；分别落在完整读前观察后和真实解析后的读后观察前。
+    # 函数用途: 注入不能由stat识别的中段引用改写。
+    def watched(source):
+        sources = reference_pins._SOURCES.get()
+        if source == path and timing == "after_parse" and parsed:
+            if not changed and sources is not None and reference_pins._is_complete_stamp(sources.get(path)):
+                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+                changed.append(True)
+            parsed.clear()
+        result = original_watch(source)
+        sources = reference_pins._SOURCES.get()
+        if source == path and timing == "before_parse" and not changed and sources is not None:
+            stamp = sources.get(path)
+            if stamp is not None and reference_pins._is_complete_stamp(stamp):
+                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+                changed.append(True)
+        return result
+
+    monkeypatch.setattr(json, "load", loaded)
+    monkeypatch.setattr(scan, "watch_pin_source", watched)
+    original_source = scan._fingerprint_source
+
+    # LLM: 真实第一块已交给解析流后改写后续切片，FD/stat均不变，必须由流摘要而非路径身份发现。
+    # 类用途: 注入JSON读取途中的同代中段变化。
+    class MidReadSource:
+        # LLM: 不替换内容或描述符，只借用真实源。
+        # 函数用途: 保存实际reader。
+        def __init__(self, raw):
+            self.raw = raw
+
+        # LLM: 非读取接口全部透传。
+        # 函数用途: 保留原始reader生命周期与FD接口。
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        # LLM: 仅当前snapshot的第一次真实分块读取触发改写，不在plan阶段提前注入。
+        # 函数用途: 精确制造解析中途的内容竞态。
+        def read1(self, size=-1):
+            raw = self.raw.read1(size)
+            if raw and not changed and reference_pins._SOURCES.get() is not None:
+                path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+                changed.append(True)
+            return raw
+
+    # LLM: 只包被测文件，其它读取和授权链保持真实。
+    # 函数用途: 将读中故障注入接到实际JSON解析入口。
+    def opened(source):
+        raw = original_source(source)
+        return MidReadSource(raw) if source == path and timing == "during_parse" else raw
+
+    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    published = []
+    for _ in range(24):
+        errors = []
+        try:
+            pins, complete = snapshot.current(errors)
+        except OSError as exc:
+            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            assert snapshot.value is None
+            continue
+        assert changed and complete and pins.protects(target, [])
+        published.append(pins)
+        break
+    assert changed and published, "stable rewritten source must eventually publish its actual pins"
+    if timing in {"before_parse", "during_parse"}:
+        assert stream_rejected, "stream verification must reject mismatch before JSON parsing returns"
+    # 再走真实plan/apply；计划可看到旧引用，但执行时同一竞态不能回收新引用目标。
+    path.write_text(payload)
+    reference_pins._RESUMABLE_DIGESTS.pop(path, None)
+    changed.clear()
+    parsed.clear()
+    stream_rejected.clear()
+    report = service.apply(now=NOW)
+    assert changed and target.exists()
+    assert not any(item.path == target and item.status == "trashed" for item in report.actions)
+    if timing in {"before_parse", "during_parse"}:
+        assert stream_rejected
+
+
+# LLM: OS摘要读取与C层解析读取分别计数；预验partial禁止打开解析器，解析流不占额外摘要预算。
+# 函数用途: 验证每current统一1MiB摘要硬门，防止17MiB来源每次partial被重复解析。
+@pytest.mark.parametrize("size_kib", [200, 600, 2048, 17 * 1024])
+def test_r5_hot_source_current_read_bytes_strictly_bounded_to_one_mib(tmp_path, monkeypatch, size_kib):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, path, _, _ = _r5_hot_thread(tmp_path, monkeypatch, size_kib, 100)
+    identity = path.stat().st_dev, path.stat().st_ino
+    digest_bytes, parser_bytes, opens = [0], [0], []
+    original_read, original_source = os.read, scan._fingerprint_source
+
+    # LLM: 统计真实返回字节而非请求长度，只计被测来源。
+    # 函数用途: 观察摘要FD读取。
+    def read(fd, size):
+        raw = original_read(fd, size)
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == identity:
+            digest_bytes[0] += len(raw)
+        return raw
+
+    # LLM: 透传真实reader，防止仅计os.read漏掉json.load的C层全文件读取。
+    # 类用途: 统计实际解析流字节。
+    class ParserReader:
+        # LLM: 借用实际源，不复制或伪造字节。
+        # 函数用途: 保存真实读取器。
+        def __init__(self, raw):
+            self.raw = raw
+
+        # LLM: 其余接口全交原对象。
+        # 函数用途: 保留关闭、fileno等合同。
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        # LLM: 不忽略read(-1)导致的整文件读取。
+        # 函数用途: 统计JSON解析实际字节。
+        def read(self, size=-1):
+            raw = self.raw.read(size)
+            parser_bytes[0] += len(raw)
+            return raw
+
+        # LLM: 流式读取仍取真实read1返回量。
+        # 函数用途: 统计文本包装器的分块读取。
+        def read1(self, size=-1):
+            raw = self.raw.read1(size)
+            parser_bytes[0] += len(raw)
+            return raw
+
+    # LLM: partial须在打开解析器前关闭，不能靠丢弃解析结果掩盖无界读取。
+    # 函数用途: 断言解析入口已有完整预验，随后包装真实reader。
+    def opened(source):
+        raw = original_source(source)
+        if source != path:
+            return raw
+        stamp = reference_pins._SOURCES.get().get(path)
+        assert reference_pins._is_complete_stamp(stamp), "partial source was opened for parsing"
+        opens.append(path)
+        return ParserReader(raw)
+
+    monkeypatch.setattr(os, "read", read)
+    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    for _ in range(4):
+        digest_bytes[0] = parser_bytes[0] = 0
+        try:
+            snapshot.current([])
+        except OSError as exc:
+            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+        assert 0 < digest_bytes[0] <= 1_048_576
+        if not parser_bytes[0]:
+            assert digest_bytes[0] + parser_bytes[0] <= 1_048_576
+    if size_kib == 17 * 1024:
+        assert not opens and parser_bytes[0] == 0
+
+
+# LLM: 多来源进度可交错但不能让已完成post的来源每轮重开，导致全源永远无法同时完成。
+# 函数用途: 验证多个大源的pending可收敛，且续验不会重复解析。
+@pytest.mark.parametrize("sizes", [(600, 600), (1100, 1100), (1100, 2048)])
+def test_r5_multiple_hot_sources_pending_finishes_without_reparsing(tmp_path, monkeypatch, sizes):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, first, target, payload = _r5_hot_thread(tmp_path, monkeypatch, sizes[0])
+    second = first.with_name("u.json")
+    prefix = '{"thread_id":"u","summary":"'
+    second.write_text(prefix + "s" * (sizes[1] * 1024 - len(prefix) - 2) + '"}')
+    _freeze_pin_file_stat(monkeypatch, second)
+    original, parsed = json.load, []
+
+    # LLM: 计数真实线程解析，不能用构建器调用次数代替实际正文消费。
+    # 函数用途: 观察pending续验是否重复加载JSON。
+    def loaded(source, *args, **kwargs):
+        row = original(source, *args, **kwargs)
+        if isinstance(row, dict) and row.get("thread_id") in {"t", "u"}:
+            parsed.append(row["thread_id"])
+        return row
+
+    monkeypatch.setattr(json, "load", loaded)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    for _ in range(24):
+        pending, count = snapshot.pending is not None, len(parsed)
+        try:
+            pins, complete = snapshot.current([])
+        except OSError as exc:
+            assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+            assert snapshot.value is None
+        else:
+            assert complete and not pins.protects(target, [])
+            break
+        finally:
+            if pending:
+                assert len(parsed) == count, "pending must advance digests without parsing again"
+    else:
+        pytest.fail("stable multiple-source post verification never converged")
+    assert set(parsed) == {"t", "u"}
+
+
+# LLM: 解析后的待验源滑出热窗口仍须把剩余切片验完，不能把冷元数据当完成证明或重读正文。
+# 函数用途: 验证pending热转冷安全收敛。
+def test_r5_pending_hot_source_settles_without_reparse(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, path, target, _ = _r5_hot_thread(tmp_path, monkeypatch, 2048)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    for _ in range(8):
+        with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+            snapshot.current([])
+        if snapshot.pending is not None:
+            break
+    assert snapshot.pending is not None and snapshot.value is None
+    later = reference_pins.time.time_ns() + 3_000_000_000
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: later)
+    original = scan._fingerprint_source
+
+    # LLM: 待验期来源必须只走摘要，不允许重新打开JSON解析器。
+    # 函数用途: 把热转冷pending的重复解析变成明确失败。
+    def opened(source):
+        assert source != path, "settling pending source was reparsed"
+        return original(source)
+
+    monkeypatch.setattr(scan, "_fingerprint_source", opened)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and not pins.protects(target, [])
+    assert len(snapshot.sources[path]) == 6
+
+
+# LLM: 全局LRU状态可被回收并被另一snapshot重建，pending不能仅凭重置为零的generation接受另一份解析基线。
+# 函数用途: 验证切片状态替换不会使旧待发布pins嫁接到新内容。
+def test_r5_pending_does_not_accept_replaced_digest_state(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, 600)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current([])
+    assert snapshot.pending is not None
+    # 模拟LRU回收；另一份快照在相同冻结stat下完整读取新内容并重建全局摘要状态。
+    reference_pins._RESUMABLE_DIGESTS.pop(path)
+    path.write_text(payload.replace("pin-a.jsonl", "pin-b.jsonl"))
+    other = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    other_pins, complete = _r5_finish_verification(other, [])
+    assert complete and other_pins.protects(target, [])
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and pins.protects(target, []), "old pending pins adopted a replacement digest baseline"
 
 
 # LLM: 超过单轮1MiB快照预算的热源在未完成全部切片前必须失败关闭，下一轮可续完成并捕获1.2MiB处改写。
@@ -1272,9 +1589,9 @@ def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complet
     # 第 1 轮仅核验前 4 片（<= 1 MiB），剩余切片未核完必须失败关闭。
     with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
         snapshot.current(errors)
-    # 第 2 轮从断点续验剩余切片，完成全片验证后放行。
+    # 完成读前剩余切片后仍须完整读后验证，全部完成之前不得放行。
     errors = []
-    first, complete = snapshot.current(errors)
+    first, complete = _r5_finish_verification(snapshot, errors)
     assert complete and not errors and not first.protects(target, errors)
     # 在 1.2 MiB 偏移处做等长原地改写：下轮先因超过 1 MiB 复核预算失败关闭，再于续验轮检出并重建。
     rewritten = payload.replace("pin-a.jsonl", "pin-b.jsonl")
@@ -1283,6 +1600,5 @@ def test_r4_oversized_hot_pin_source_fails_closed_until_resumable_slices_complet
     with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
         snapshot.current(errors)
     errors = []
-    second, complete = snapshot.current(errors)
+    second, complete = _r5_finish_verification(snapshot, errors)
     assert complete and not errors and second is not first and second.protects(target, errors)
-

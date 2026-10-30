@@ -97,7 +97,7 @@ def _open_source_descriptor(path, stamp, cache):
     return descriptor, retained
 
 
-# LLM: 单次系统读取严格限制在 _MAX_PIN_SOURCE_DIGEST_BYTES 内；超限热源走可续切片+尾部双校验，未完切片标partial。
+# LLM: 每片最多256KiB，同current共用四片预算；切片或尾部变化清空旧周期与解析基线，禁止拼接不同内容代次。
 # 函数用途: 对超出单次预算的热文件按有界切片递增验证，任何已验切片或尾部变化立即推进代次。
 def _resumable_file_digest(path, stamp, cache, *, advance=True):
     budget = max(1, int(_MAX_PIN_SOURCE_DIGEST_BYTES))
@@ -118,13 +118,21 @@ def _resumable_file_digest(path, stamp, cache, *, advance=True):
             "next_slice": 0,
             "cycle_verified": set(),
             "generation": 0,
-            "completed_pass": None,
+            "phase": "pre",
+            "baseline": None,
+            "post_completed_pass": None,
+            "post_completed_cycle": None,
         }
         _RESUMABLE_DIGESTS[path] = state
         while len(_RESUMABLE_DIGESTS) > _MAX_RESUMABLE_DIGEST_ENTRIES:
             _RESUMABLE_DIGESTS.popitem(last=False)
     else:
         _RESUMABLE_DIGESTS.move_to_end(path)
+    if cache is not None:
+        reads = cache.setdefault("slice_reads", {})
+        if reads.get(path, 0) >= 4:
+            return ("partial", state["generation"])
+        reads[path] = reads.get(path, 0) + 1
     slice_index = (state["next_slice"] if advance else max(0, state["next_slice"] - 1)) % total_slices
     slice_start = slice_index * slice_budget
     slice_len = max(0, min(slice_budget, body_limit - slice_start))
@@ -172,10 +180,12 @@ def _resumable_file_digest(path, stamp, cache, *, advance=True):
                    and state["slice_digests"][slice_index] != slice_digest))
     if changed:
         state["generation"] += 1
-        for idx in range(total_slices):
-            if idx not in state["cycle_verified"]:
-                state["slice_digests"][idx] = None
-        state["completed_pass"] = None
+        state["slice_digests"] = [None] * total_slices
+        state["cycle_verified"] = set()
+        state["phase"] = "pre"
+        state["baseline"] = None
+        state["post_completed_pass"] = None
+        state["post_completed_cycle"] = None
     state["tail_digest"] = tail_digest
     state["slice_digests"][slice_index] = slice_digest
     state["cycle_verified"].add(slice_index)
@@ -268,35 +278,47 @@ def _is_complete_stamp(stamp):
     return stamp is None or len(stamp) == 6 or not (isinstance(stamp[6], tuple) and stamp[6][0] == "partial")
 
 
-# LLM: 快照复核对超出单次256KiB的热源推进最多4片（1MiB）可续校验；超1MiB未完本轮返回partial并失败关闭。
-# 函数用途: 在有界累计预算内完成或续推大热源的全部切片核验。
+# LLM: 每current每源最多四片；完整post结果只在同current或同一未发布pending周期复用，发布后下一current重开。
+# 函数用途: 在共享1MiB预算内推进解析前后两阶段验证，绝不以尾片代替全片。
 def _verify_complete_file_digest(path, stamp):
     if stamp[3] <= _MAX_PIN_SOURCE_DIGEST_BYTES:
         return _file_digest(path, stamp)
     cache, _ = _cached_source_body(path, stamp)
     state = _RESUMABLE_DIGESTS.get(path)
-    sources = _SOURCES.get()
-    pass_token = id(sources) if sources is not None else None
-    if state is not None and state["stamp"] == stamp and len(state["cycle_verified"]) == state["total_slices"]:
-        if pass_token is not None and state.get("completed_pass") == pass_token and state["total_slices"] > 4:
-            _resumable_file_digest(path, stamp, cache, advance=False)
-            if len(state["cycle_verified"]) == state["total_slices"] and None not in state["slice_digests"]:
-                return ("complete", state["generation"], tuple(state["slice_digests"]), state["tail_digest"])
+    pass_token = cache.get("pass_token") if cache is not None else None
+    cycle = cache.get("verification_cycle") if cache is not None else None
+    if state is not None and state["phase"] == "post" and len(state["cycle_verified"]) == state["total_slices"]:
+        if ((pass_token is not None and state.get("post_completed_pass") is pass_token)
+                or (cycle is not None and state.get("post_completed_cycle") is cycle)):
+            return ("complete", state["generation"], *state["baseline"])
         state["cycle_verified"] = set()
         state["next_slice"] = 0
-        state["completed_pass"] = None
-    if cache is not None and path in cache.get("partial_exhausted", ()):
-        return ("partial", state["generation"] if state else 0)
-    result = None
+        state["post_completed_pass"] = None
+        state["post_completed_cycle"] = None
+    result = ("partial", state["generation"] if state else 0)
     for _ in range(4):
+        if cache is not None and cache["slice_reads"].get(path, 0) >= 4:
+            break
+        was_post = state is not None and state["phase"] == "post"
         result = _resumable_file_digest(path, stamp, cache)
-        if not (isinstance(result, tuple) and result[0] == "partial"):
-            current_state = _RESUMABLE_DIGESTS.get(path)
-            if current_state is not None and pass_token is not None:
-                current_state["completed_pass"] = pass_token
-            return result
-    if cache is not None:
-        cache.setdefault("partial_exhausted", set()).add(path)
+        state = _RESUMABLE_DIGESTS[path]
+        if was_post and state["phase"] != "post":
+            raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
+        if result[0] == "complete":
+            if state["phase"] == "pre":
+                state["baseline"] = (tuple(state["slice_digests"]), state["tail_digest"])
+                state["phase"] = "post"
+                state["cycle_verified"] = set()
+                state["next_slice"] = 0
+                state["post_completed_pass"] = None
+                state["post_completed_cycle"] = None
+            else:
+                state["post_completed_pass"] = pass_token
+                state["post_completed_cycle"] = cycle
+            return ("complete", state["generation"], *state["baseline"])
+    if state is not None and state["phase"] == "post":
+        # pending持有原解析基线，不能仅凭可被LRU重置的generation接受另一snapshot重建的状态。
+        return ("partial", state["generation"], state["baseline"])
     return result
 
 
@@ -399,66 +421,121 @@ def _matching_stamp(path, current, previous):
     return matched
 
 
-# LLM: 逐源重核并只更新经全量内容验证的热转冷观察；遇到partial或变化立即停止，不改变pin投影。
-# 函数用途: 验证全源稳定并归一化已经沉降的来源代次。
+# LLM: partial只可续同元数据、同内容代次的post阶段；变化抛错，热转冷须全量比对后才移除热摘要。
+# 函数用途: 逐源推进读后验证，未完成时更新待续观察而不发布pins。
 def _refresh_sources(sources):
-    for path, previous in sources.items():
-        if not _is_complete_stamp(previous):
-            return False
+    complete = True
+    for path, previous in list(sources.items()):
         current = _watched_source_stamp(path)
-        if not _matching_stamp(path, current, previous):
-            return False
+        settled = current is not None and len(current) == 6 and previous is not None and len(previous) == 7
+        if settled and stat.S_ISREG(current[2]) and isinstance(previous[6], tuple):
+            current = (*current, _verify_complete_file_digest(path, current))
+        if not _is_complete_stamp(previous) or not _is_complete_stamp(current):
+            if not _same_post_generation(path, current, previous):
+                raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
+            complete = complete and _is_complete_stamp(current)
+        elif not _matching_stamp(path, current, previous):
+            raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
+        if settled and _is_complete_stamp(current):
+            current = current[:6]
+            _RESUMABLE_DIGESTS.pop(path, None)
         sources[path] = current
-    return True
+    return complete
 
 
-# LLM: 只在本次严格pin扫描上下文记录源，不同代使快照立即失效；同轮已耗尽预算的partial源保持待续验态。
+# LLM: partial也携带原解析基线；同stat/generation的LRU替换仍须基线相同，不能将新内容摘要嫁接到旧pins。
+# 函数用途: 识别预算耗尽而非真实来源变化。
+def _same_post_generation(path, current, previous):
+    state = _RESUMABLE_DIGESTS.get(path, {})
+    return (current is not None and previous is not None and len(current) == len(previous) == 7
+            and current[:6] == previous[:6] and isinstance(current[6], tuple) and isinstance(previous[6], tuple)
+            and state.get("phase") == "post" and state.get("baseline") is not None
+            and current[6][1] == previous[6][1] == state["generation"]
+            and (previous[6][2] == state["baseline"] if not _is_complete_stamp(previous)
+                 else previous[6][2:] == state["baseline"]))
+
+
+# LLM: 同轮post验证未完可降为partial，但元数据/内容代次变化必须抛错，不能跳过读后观察。
 # 函数用途: 将文件或发现目录加入当前引用视图的失效监测。
 def watch_pin_source(path):
     sources = _SOURCES.get()
     if sources is not None:
         path = Path(path)
-        if path in sources and not _is_complete_stamp(sources[path]):
-            return
         stamp = _watched_source_stamp(path)
-        if path in sources and not _matching_stamp(path, stamp, sources[path]):
-            raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
+        if path in sources:
+            previous = sources[path]
+            if not _is_complete_stamp(stamp) or not _is_complete_stamp(previous):
+                if not _same_post_generation(path, stamp, previous):
+                    raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
+            elif not _matching_stamp(path, stamp, previous):
+                raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
         sources[path] = stamp
+
+
+# LLM: 仅重置本次扫描的观察集合，不重置current摘要预算；重试和目标重建共用该入口。
+# 函数用途: 丢弃失败尝试的旧来源并重新绑定owner与策略。
+def reset_watched_pin_sources(home):
+    sources = _SOURCES.get()
+    if isinstance(sources, dict):
+        sources.clear()
+        watch_pin_source(home.owner_home_dir)
+        watch_pin_source(home.owner_retention_json)
+
+
+# LLM: 仅在调用方已验证同inode非缩短的目标FD起点时使用，不解除读中变化或JSON损坏检查。
+# 函数用途: 将允许的打开前追加重新登记为本次来源起点。
+def rebaseline_watched_pin_source(path):
+    sources = _SOURCES.get()
+    if sources is not None:
+        sources.pop(Path(path), None)
+        watch_pin_source(path)
 
 
 # LLM: 对象仅在一次apply内使用；旧视图必须逐源重核，变化/错误完整重建且保留原complete门，不跨owner缓存。
 # 类用途: 在同阶段复用引用解析结果，保留执行前新引用与坏源的关闭式防线。
 class ReferencePinSnapshot:
-    # LLM: 构造不读写文件；builder为原严格扫描，临时块对照只属于该snapshot且有总字节上限。
+    # LLM: 构造不读写文件；待发布pins与来源成对暂存，临时块对照与FD只属于该snapshot。
     # 函数用途: 绑定本次owner和严格扫描器，准备有界热源块缓存。
     def __init__(self, home, roots, now, builder):
         self.home, self.roots, self.now, self.builder = home, roots, now, builder
         self.sources, self.value = {}, None
-        self.contents = {"files": {}, "fds": {}, "bytes": 0, "partial_exhausted": set()}
+        self.pending = None
+        self.contents = {"files": {}, "fds": {}, "bytes": 0, "slice_reads": {}}
         weakref.finalize(self, _close_source_descriptors, self.contents["fds"])
 
-    # LLM: 块对照上下文只在该snapshot调用栈生效，退出包括异常均恢复，不成为全局内容缓存。
+    # LLM: 每current重置预算/pass，pending只续同一未发布周期；已发布视图下一current必须重开内容验证。
     # 函数用途: 在本次引用复核中启用有界热源字节对照。
     def current(self, errors, *, target=None):
-        self.contents["partial_exhausted"] = set()
+        self.contents["slice_reads"] = {}
+        self.contents["pass_token"] = object()
+        if self.pending is None:
+            self.contents["verification_cycle"] = object()
         token = _SOURCE_CONTENTS.set(self.contents)
         try:
             return self._current(errors, target=target)
         finally:
-            self.contents["partial_exhausted"] = set()
             _SOURCE_CONTENTS.reset(token)
 
-    # LLM: 代次变或时钟回拨重建，热转冷可续验证真实内容；坏源/读中变化/未完切片不得放行。
-    # 函数用途: 逐源重核并返回完整pins，冷源不重复解析或hash。
+    # LLM: 只有全源完成读后验证才发布；pending仅续验不重解析，真实变化丢弃旧pins，重建不重置预算。
+    # 函数用途: 逐源重核或续验暂存结果，冷源仍只查元数据。
     def _current(self, errors, *, target=None):
-        try:
-            if self.value is not None and _refresh_sources(self.sources):
+        previous = self.pending or ((self.value, self.sources) if self.value is not None else None)
+        if previous is not None:
+            result, sources = previous
+            self.value = None
+            self.pending = None
+            try:
+                stable = _refresh_sources(sources)
+            except OSError:
+                stable = None
+            if stable:
+                self.sources, self.value = sources, result
                 return self.value
-        except _PartialPinVerification:
-            raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE") from None
-        except OSError:
-            pass
+            if stable is False and _post_verification_pending(sources):
+                self.pending = (result, dict(sources))
+                raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         self.value = None
+        self.contents["verification_cycle"] = object()
         _close_source_descriptors(self.contents["fds"])
         self.contents["files"].clear()
         self.contents["bytes"] = 0
@@ -470,14 +547,25 @@ class ReferencePinSnapshot:
             result = self.builder(self.home, self.roots, errors, now=self.now)
             if target is not None and not result[1] and result[0].complete_for(target, errors):
                 result = (result[0], True)
-            try:
-                stable = _refresh_sources(sources)
-            except OSError:
-                stable = False
+            stable = None
+            if result[1]:
+                try:
+                    stable = _refresh_sources(sources)
+                except OSError:
+                    pass
         finally:
             _SOURCES.reset(token)
         self.sources = sources
         self.value = result if stable and result[1] else None
+        if stable is False and result[1] and _post_verification_pending(sources):
+            self.pending = (result, dict(sources))
         if self.value is None:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         return self.value
+
+
+# LLM: 只允许全源读取成功且唯一欠账为同代post切片的结果暂存；预验partial不能携带已解析pins。
+# 函数用途: 区分可以续验的待发布结果与必须重建的不完整来源。
+def _post_verification_pending(sources):
+    partial = [path for path, stamp in sources.items() if not _is_complete_stamp(stamp)]
+    return bool(partial) and all(_RESUMABLE_DIGESTS.get(path, {}).get("phase") == "post" for path in partial)

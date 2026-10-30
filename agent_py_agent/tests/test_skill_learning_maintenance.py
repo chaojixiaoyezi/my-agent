@@ -1,6 +1,8 @@
 import json
+import logging
 import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -569,6 +571,82 @@ def test_c4r_search_matches_quota_scan_budget_exhaustion_skips_usage_write(tmp_p
     assert (usage.__name__, logging.WARNING, 'SKILL_USAGE_RECORD_UNAVAILABLE') in caplog.record_tuples
     assert saves == ['attempted']
     assert {path: path.read_bytes() if path.exists() else None for path in paths} == before
+
+
+# LLM: 固定配额时钟隔离128项预算；搜索、准入、分片对账与连续双文件写入均走真实链路。
+# 函数用途: 验证条目预算耗尽只告警不落半账，对账完成后两批搜索可连续记账且配额保持干净。
+def test_c4r_search_matches_quota_entry_budget_exhaustion_and_reconciled_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+    from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
+    from agent_py_agent.agent.user_space import owner_quota
+    from agent_py_agent.tests.test_conversation_method_carry import method_fixture
+
+    fixture = method_fixture(tmp_path, count=3)
+    store = SkillLearningStore.for_home(fixture.agent.home_paths)
+    (store.skills_root.parent / 'quota.json').write_text('{"max_disk_mb": 1024}', encoding='utf-8')
+    monkeypatch.setattr(owner_quota, 'time', SimpleNamespace(**{
+        **owner_quota.time.__dict__, 'monotonic': lambda: 100.0,
+    }))
+    owner_home = fixture.agent.home_paths.owner_home_dir
+    pad = owner_home / 'entry_budget_pad'
+    pad.mkdir()
+    for number in range(200):
+        (pad / f'{number:04d}').write_bytes(b'x')
+    ledger_path = store.directory / 'usage_ledger.jsonl'
+    summary_path = store.directory / 'usage_summary.json'
+    quota_path = owner_home / '.owner-quota-ledger.json'
+    snapshot = owner_quota._bounded_quota_snapshot
+    snapshots = []
+
+    # LLM: 不替换枚举或扫描结果，仅保留原有128项/10ms参数并记录真实返回值。
+    # 函数用途: 证明本次拒绝来自未完成的有界配额扫描。
+    def counted_scan(root, *, max_entries, max_ms):
+        assert root == owner_home and (max_entries, max_ms) == (128, 10)
+        result = snapshot(root, max_entries=max_entries, max_ms=max_ms)
+        snapshots.append(result)
+        return result
+
+    monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', counted_scan)
+    tool = SkillSearchTool(fixture.agent)
+    warning = (usage.__name__, logging.WARNING, 'SKILL_USAGE_RECORD_UNAVAILABLE')
+    with caplog.at_level(logging.WARNING, logger=usage.__name__):
+        result = tool.execute({'action': 'search', 'query': 'entry', 'limit': 20})
+    assert result.ok, result.output
+    assert [row['package_id'] for row in json.loads(result.output)['matches']] == ['entry-0', 'entry-1', 'entry-2']
+    assert len(snapshots) == 1
+    _total, count, complete = snapshots[0]
+    assert complete is False and count <= 128
+    assert warning in caplog.record_tuples
+    assert not ledger_path.exists() and not summary_path.exists()
+    assert json.loads(quota_path.read_text(encoding='utf-8'))['dirty_since'] is not None
+
+    # 真实对账必须推进到完成；设上限让恢复停滞直接失败，而不是挂住测试。
+    for _ in range(20):
+        report = owner_quota.reconcile_owner_quota_slice(owner_home, max_entries=128, max_ms=1000)
+        if report['complete'] is True:
+            break
+    else:
+        pytest.fail('owner quota reconciliation did not complete within 20 slices')
+    assert json.loads(quota_path.read_text(encoding='utf-8'))['dirty_since'] is None
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=usage.__name__):
+        for _ in range(2):
+            result = tool.execute({'action': 'search', 'query': 'entry', 'limit': 20})
+            assert result.ok, result.output
+            assert [row['package_id'] for row in json.loads(result.output)['matches']] == ['entry-0', 'entry-1', 'entry-2']
+            assert warning not in caplog.record_tuples
+            assert json.loads(quota_path.read_text(encoding='utf-8'))['dirty_since'] is None
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding='utf-8').splitlines()]
+    assert len(rows) == 6
+    assert [row['sequence'] for row in rows] == list(range(1, 7))
+    assert [row['skill_id'] for row in rows] == ['entry-0', 'entry-1', 'entry-2'] * 2
+    assert all(row['event'] == 'manual_search' for row in rows)
+    summary = json.loads(summary_path.read_text(encoding='utf-8'))
+    assert summary['last_sequence'] == summary['totals']['manual_search'] == 6
 
 
 # LLM: 公开批量接口须保留原四类事件和序号口径；空批次不能创建目录，坏批次不能写部分记录。

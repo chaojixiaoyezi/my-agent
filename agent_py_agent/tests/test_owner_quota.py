@@ -408,7 +408,10 @@ def test_reconciled_finite_owner_allows_consecutive_growth(tmp_path, files):
     assert json.loads((tmp_path / '.owner-quota-ledger.json').read_text())['used_bytes'] == files + 5
 
 
-@pytest.mark.parametrize('mutation', ['create', 'unlink', 'append', 'nested-append', 'symlink'])
+@pytest.mark.parametrize('mutation', [
+    'create', 'unlink', 'append', 'nested-append', 'symlink',
+    'symlink-to-file', 'symlink-to-dir', 'nested-symlink-to-file',
+])
 def test_unmanaged_changes_invalidate_reconciled_growth(tmp_path, mutation):
     from agent_py_agent.agent.user_space import owner_quota as quota
 
@@ -416,6 +419,9 @@ def test_unmanaged_changes_invalidate_reconciled_growth(tmp_path, mutation):
         (tmp_path / f'{index:04d}').write_bytes(b'x')
     (tmp_path / 'nested').mkdir()
     (tmp_path / 'nested' / 'data').write_bytes(b'x')
+    link = tmp_path / ('nested/link' if mutation.startswith('nested-') else 'link')
+    if 'symlink-to-' in mutation:
+        link.symlink_to('/dev/null')
     _finish_reconcile(tmp_path)
     target = tmp_path / 'managed'
     enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1_048_576)
@@ -427,6 +433,13 @@ def test_unmanaged_changes_invalidate_reconciled_growth(tmp_path, mutation):
         path = tmp_path / ('0000' if mutation == 'append' else 'nested/data')
         with path.open('ab') as stream:
             stream.write(b'external')
+    elif 'symlink-to-' in mutation:
+        link.unlink()
+        if mutation == 'symlink-to-dir':
+            link.mkdir()
+            (link / 'untracked').write_bytes(b'external')
+        else:
+            link.write_bytes(b'external')
     else:
         (tmp_path / '0000').unlink()
         (tmp_path / '0000').symlink_to('/dev/null')
@@ -473,3 +486,69 @@ def test_bounded_snapshot_detects_eof_at_exact_entry_budget(tmp_path):
     (tmp_path / 'overflow').write_bytes(b'xx')
     total, count, complete = quota._bounded_quota_snapshot(tmp_path, max_entries=128, max_ms=1000)
     assert not complete and count == 128 and 128 <= total <= 129
+
+
+@pytest.mark.parametrize('layout', ['flat-2100', 'dirs-300'])
+def test_reconciled_growth_beyond_legacy_tracking_limits_and_fast_admission(tmp_path, monkeypatch, layout):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    files = 2100 if layout == 'flat-2100' else 300
+    for index in range(files):
+        parent = tmp_path if layout == 'flat-2100' else tmp_path / f'd{index:04d}'
+        parent.mkdir(exist_ok=True)
+        (parent / f'f{index:04d}').write_bytes(b'x')
+    result = _finish_reconcile(tmp_path)
+    ledger_path = tmp_path / '.owner-quota-ledger.json'
+    ledger = json.loads(ledger_path.read_text())
+    assert result['complete'] and ledger['dirty_since'] is None
+    assert ledger['reconcile_cursor']['metadata_complete'] is True
+    assert ledger_path.stat().st_size < 65536
+    original_verify, original_stat = quota._verify_quota_metadata, quota._quota_sorted_stat
+    calls = {'verify': 0, 'stat': 0}
+
+    def verify(*args):
+        calls['verify'] += 1
+        return original_verify(*args)
+
+    def child_stat(*args):
+        calls['stat'] += 1
+        return original_stat(*args)
+
+    monkeypatch.setattr(quota, '_verify_quota_metadata', verify)
+    monkeypatch.setattr(quota, '_quota_sorted_stat', child_stat)
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1_048_576)
+    target = tmp_path / 'managed'
+    for turn in range(3):
+        with enforcer.reserve([quota.OwnerQuotaChange(target, 1, append=True)]) as projection:
+            assert projection.used_bytes == files + turn
+            with target.open('ab') as stream:
+                stream.write(b'y')
+        ledger = json.loads(ledger_path.read_text())
+        assert ledger['used_bytes'] == files + turn + 1
+        assert ledger['dirty_since'] is None and not ledger['reservations']
+        assert ledger_path.stat().st_size < 65536
+    assert calls['verify'] == 3  # 结算不能再跑一次整树验证。
+    assert calls['stat'] <= 12  # nofollow重开仅限声明路径，不逐个重开全部文件。
+
+
+def test_reconciled_nested_batch_keeps_algebraic_baseline(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(160):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    _finish_reconcile(tmp_path)
+    first, second = tmp_path / 'new/deep/a', tmp_path / 'new/deep/b'
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1_048_576)
+    with enforcer.admission() as admission:
+        admission.check([quota.OwnerQuotaChange(first, 3), quota.OwnerQuotaChange(second, 4)])
+        first.parent.mkdir(parents=True)
+        first.write_bytes(b'123')
+        second.write_bytes(b'1234')
+        admission.check([quota.OwnerQuotaChange(first, 1, append=True)])
+        with first.open('ab') as stream:
+            stream.write(b'5')
+    with enforcer.reserve([quota.OwnerQuotaChange(second, None)]):
+        second.unlink()
+    ledger = json.loads((tmp_path / '.owner-quota-ledger.json').read_text())
+    assert ledger['used_bytes'] == 164 and ledger['inode_count'] == 161
+    assert quota._verified_quota_baseline(tmp_path, ledger)

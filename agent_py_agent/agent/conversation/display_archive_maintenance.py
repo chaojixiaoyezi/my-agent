@@ -9,9 +9,11 @@ import re
 import stat
 import time
 import uuid
-from contextlib import contextmanager
+from collections import OrderedDict
+from contextlib import ExitStack, contextmanager
 from itertools import islice
 from pathlib import Path
+from threading import RLock
 
 from ..common.nofollow_fs import open_directory_beneath
 from .display_archive import (
@@ -33,6 +35,10 @@ _DISPLAY_ARCHIVE_DAY_SECONDS = 86400
 _DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES = 16
 # 小批维护至少允许枚举64项，避免少量未到期归档挡住本批有效工作。
 _DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES = 64
+
+# 只保留有限个目录/操作的内存进度，不向归档目录写游标文件。
+_scan_cursors: OrderedDict[tuple[int, int, str], int] = OrderedDict()
+_scan_cursor_lock = RLock()
 
 
 # LLM: 维护只接受Store或明确的会话存储根；不猜Home路径，根缺失不新建。
@@ -217,7 +223,32 @@ def _compact(fd, manifest):
     return True
 
 
-# 扫描项数与成功处理数分别有界；跳过、错误和非UUID也不能导致无限枚举。
+# LLM: 只检查当前窗口内的目录项，沿原dirfd与逐档错误合同处理；成功名额耗尽后不多取下一项。
+# 函数用途: 扫描一个有界窗口并返回实际检查数及是否达到处理上限。
+def _scan_entries(root, entries, budget, maximum, action, result):
+    inspected = 0
+    for entry in islice(entries, budget):
+        inspected += 1
+        if not _ARCHIVE_ID.fullmatch(entry.name):
+            continue
+        result["scanned"] += 1
+        fd = None
+        try:
+            fd = _open_directory(root, entry.name)
+            key = action(root, fd, entry.name)
+            result[key or "skipped"] += 1
+        except (OSError, ValueError, KeyError, DisplayArchiveError):
+            result["errors"] += 1
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if result["compacted"] + result["expired"] + result["removed"] >= maximum:
+            return inspected, True
+    return inspected, False
+
+
+# LLM: 原根flock保护同目录维护；内存游标按真实根inode及操作隔离，回绕共用检查预算，LRU最多128项。
+# 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档。
 def _maintain(value, maximum, action):
     result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0}
     if maximum == 0:
@@ -225,23 +256,32 @@ def _maintain(value, maximum, action):
     scan_budget = max(_DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES, maximum * _DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES)
     try:
         with _locked_root(_root(value)) as root:
-            with os.scandir(root) as entries:
-                for entry in islice(entries, scan_budget):
-                    if not _ARCHIVE_ID.fullmatch(entry.name):
-                        continue
-                    if result["compacted"] + result["expired"] + result["removed"] >= maximum:
-                        break
-                    result["scanned"] += 1
-                    fd = None
-                    try:
-                        fd = _open_directory(root, entry.name)
-                        key = action(root, fd, entry.name)
-                        result[key or "skipped"] += 1
-                    except (OSError, ValueError, KeyError, DisplayArchiveError):
-                        result["errors"] += 1
-                    finally:
-                        if fd is not None:
-                            os.close(fd)
+            root_info = os.fstat(root)
+            # 两个闭包都名为action，限定名才区分合页和TTL；身份取已锁住的FD，不重走路径。
+            cursor_key = (int(root_info.st_dev), int(root_info.st_ino), action.__qualname__)
+            with _scan_cursor_lock:
+                offset = _scan_cursors.get(cursor_key, 0)
+            with ExitStack() as scans:
+                entries = scans.enter_context(os.scandir(root))
+                if offset and sum(1 for _ in islice(entries, offset)) < offset:
+                    # 目录缩短到游标之前时重开，不把空尾部当作完整的一轮检查。
+                    offset = 0
+                    entries = scans.enter_context(os.scandir(root))
+                inspected, hit_limit = _scan_entries(root, entries, scan_budget, maximum, action, result)
+            next_offset = max(0, offset + inspected - result["removed"])
+            if inspected < scan_budget and not hit_limit:
+                next_offset = 0
+                if offset:
+                    removed_before_wrap = result["removed"]
+                    with os.scandir(root) as entries:
+                        wrapped, _ = _scan_entries(
+                            root, entries, min(offset, scan_budget - inspected), maximum, action, result)
+                    next_offset = max(0, wrapped - (result["removed"] - removed_before_wrap))
+            with _scan_cursor_lock:
+                _scan_cursors[cursor_key] = next_offset
+                _scan_cursors.move_to_end(cursor_key)
+                while len(_scan_cursors) > 128:
+                    _scan_cursors.popitem(last=False)
     except FileNotFoundError:
         pass
     except (OSError, ImportError):

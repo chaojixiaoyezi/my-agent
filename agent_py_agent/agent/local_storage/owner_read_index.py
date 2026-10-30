@@ -65,9 +65,9 @@ _PROCESS_ADVANCE_LOCK = threading.RLock()
 _PROCESS_APPENDS = OrderedDict()
 
 
-# writer持领域锁提供稳定头尾窗口；窗口失配撤销见证，未知前缀仍走预算内完整复核。
+# writer持领域锁提供稳定历史窗口；任何无效见证均撤销旧链，未知前缀仍走预算内完整复核。
 def note_owner_append(home, parts, before, after, *, raw_after=None):
-    if before is None or after is None or before[2] >= after[2]:
+    if before is None or after is None:
         return
     key = (str(Path(home).absolute()), tuple(parts))
     verified = False
@@ -901,28 +901,8 @@ class OwnerReadIndex:
                 return False
         return True
 
-    # 不创建缓存；核验有界头尾锚点，未索引增量SHA状态和尾窗摘要跨进程持久续接。
+    # 核验有界历史锚点，未索引增量SHA状态和尾窗摘要跨进程续接；所有拒绝均持久撤销旧见证。
     def _record_append_witness(self, parts, before, after, *, raw_after=None):
-        full = isinstance(raw_after, (bytes, bytearray))
-        if full:
-            if len(raw_after) != after[2] or len(raw_after) > 2 * _APPEND_WITNESS_WINDOW_BYTES:
-                return False
-            head = raw_after
-            tail_start = max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
-            tail = raw_after[tail_start:]
-        elif isinstance(raw_after, tuple) and len(raw_after) == 3:
-            head, tail_start, tail = raw_after
-            if (not isinstance(head, bytes) or not isinstance(tail, bytes)
-                    or type(tail_start) is not int
-                    or len(head) != min(_APPEND_WITNESS_WINDOW_BYTES, before[2])
-                    or tail_start != max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
-                    or len(tail) != after[2] - tail_start):
-                return False
-        else:
-            return False
-        delta = tail[before[2] - tail_start:]
-        if len(delta) != after[2] - before[2]:
-            return False
         sid = self._source_id('telemetry', parts)
         with self._database(write=True) as connection:
             connection.execute('BEGIN IMMEDIATE')
@@ -933,6 +913,36 @@ class OwnerReadIndex:
                 return False
 
             if before[:2] != after[:2] or before[2] >= after[2]:
+                return reject()
+            full = isinstance(raw_after, (bytes, bytearray))
+            mid = None
+            if full:
+                if len(raw_after) != after[2] or len(raw_after) > 2 * _APPEND_WITNESS_WINDOW_BYTES:
+                    return reject()
+                head = raw_after
+                tail_start = max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
+                tail = raw_after[tail_start:]
+            elif isinstance(raw_after, tuple) and len(raw_after) in (3, 5):
+                if len(raw_after) == 5:
+                    head, mid_start, mid, tail_start, tail = raw_after
+                    if (not isinstance(mid, bytes) or type(mid_start) is not int
+                            or not 0 <= mid_start <= before[2]
+                            or len(mid) != min(4096, max(0, before[2] - mid_start))):
+                        return reject()
+                    head_limit = 4096
+                else:
+                    head, tail_start, tail = raw_after
+                    head_limit = _APPEND_WITNESS_WINDOW_BYTES
+                if (not isinstance(head, bytes) or not isinstance(tail, bytes)
+                        or type(tail_start) is not int
+                        or len(head) != min(head_limit, before[2])
+                        or tail_start != max(0, before[2] - _APPEND_WITNESS_WINDOW_BYTES)
+                        or len(tail) != after[2] - tail_start):
+                    return reject()
+            else:
+                return reject()
+            delta = tail[before[2] - tail_start:]
+            if len(delta) != after[2] - before[2]:
                 return reject()
             checkpoint = self._checkpoint(connection, sid, 'telemetry', parts)
             if checkpoint is None or checkpoint['through'] > before[2]:
@@ -961,6 +971,8 @@ class OwnerReadIndex:
             windows = ([(0, through, raw_after)] if full else
                        [(0, min(len(head), through), head),
                         (tail_start, min(through, before[2]), tail)])
+            if mid is not None:
+                windows.append((mid_start, min(through, mid_start + len(mid)), mid))
             if not self._verify_append_windows(
                 connection, checkpoint, windows,
                 tail_verified=not full and checkpoint['stamp'] != before,

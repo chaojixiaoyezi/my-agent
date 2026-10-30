@@ -633,3 +633,129 @@ def test_reconciliation_enumerates_flat_directory_once(tmp_path, files, clear_ca
     assert reports[-1]['used_bytes'] == reports[-1]['inode_count'] == files
     assert enumerated[0] == sum(row['enumerated_entries'] for row in reports)
     assert enumerated[0] <= files + 5, (files, enumerated[0])
+
+
+@pytest.mark.parametrize('clear_cache', [False, True])
+def test_reconcile_many_subdirectories_prunes_empty_batches_and_converges(tmp_path, clear_cache):
+    for index in range(100):
+        directory = tmp_path / f'd{index:03d}'
+        directory.mkdir()
+        for name in ('a', 'b'):
+            (directory / name).write_bytes(b'x')
+    epoch = None
+    for turn in range(10):
+        if clear_cache:
+            for scan in quota._QUOTA_SCANS.values():
+                scan['iterator'].close()
+            quota._QUOTA_SCANS.clear()
+        result = _reconcile(tmp_path, max_entries=128, max_ms=1000)
+        cursor = result['cursor']
+        epoch = epoch or cursor['epoch']
+        assert cursor['epoch'] == epoch
+        batches = cursor.get('dir_batch', {})
+        assert len(batches) <= 65
+        assert all(batch['names'] and (not rel or cursor['last_relpath'].startswith(rel + '/'))
+                   for rel, batch in batches.items())
+        if result['complete']:
+            break
+    assert result['complete'] and turn + 1 <= 4
+    assert result['used_bytes'] == result['inode_count'] == 200
+    assert result['cursor']['metadata_complete'] is True
+
+
+def test_reconcile_long_filenames_cold_eviction_stays_within_ledger_cap(tmp_path, monkeypatch):
+    for index in range(5000):
+        (tmp_path / (f'{index:05d}-' + 'a' * 179)).write_bytes(b'')
+    original_checkpoint = quota._QuotaDirectoryStream.checkpoint
+    checkpoints = []
+
+    def checkpoint(stream):
+        checkpoints.append(True)
+        return original_checkpoint(stream)
+
+    monkeypatch.setattr(quota._QuotaDirectoryStream, 'checkpoint', checkpoint)
+    point, epoch = (-1, '', -1), None
+    for _ in range(6):
+        for scan in quota._QUOTA_SCANS.values():
+            scan['iterator'].close()
+        quota._QUOTA_SCANS.clear()
+        checkpoints.clear()
+        result = _reconcile(tmp_path, max_entries=256, max_ms=1000)
+        cursor = result['cursor']
+        epoch = epoch or cursor['epoch']
+        assert cursor['epoch'] == epoch
+        assert (tmp_path / '.owner-quota-ledger.json').stat().st_size < 512 * 1024
+        # 排序准备也受预算约束：前几片推进枚举续点，准备完成后才推进计费路径。
+        current = (cursor['scanned'], cursor['last_relpath'], cursor.get('prep', {}).get('enumerated', 0))
+        assert current > point
+        point = current
+        assert len(checkpoints) <= 1
+        names = cursor.get('prep', {}).get('names', [])
+        names += [name for batch in cursor.get('dir_batch', {}).values() for name in batch['names']]
+        assert len(names) <= 4096
+        assert sum(len(name.encode('utf-8')) for name in names) <= 196608
+    assert cursor['scanned'] > 0 and cursor['last_relpath']
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_bounded_name_windows_finish_after_overflow_and_cold_truncation(tmp_path, nested):
+    roots = [tmp_path]
+    if nested:
+        child = tmp_path / '!child'
+        child.mkdir()
+        roots.append(child)
+    for root in roots:
+        for index in range(1200):
+            (root / (f'{index:05d}-' + '汉' * 70)).write_bytes(b'x')
+    for _ in range(60):
+        for scan in quota._QUOTA_SCANS.values():
+            scan['iterator'].close()
+        quota._QUOTA_SCANS.clear()
+        result = _reconcile(tmp_path, max_entries=256, max_ms=1000)
+        assert (tmp_path / '.owner-quota-ledger.json').stat().st_size < 1_048_576
+        if result['complete']:
+            break
+    assert result['complete']
+    assert result['used_bytes'] == result['inode_count'] == 1200 * len(roots)
+    assert quota._verify_quota_metadata(tmp_path, result['cursor'])
+
+
+def test_reconcile_thirty_thousand_files_uses_compact_metadata(tmp_path):
+    for index in range(30000):
+        (tmp_path / f'{index:05d}').write_bytes(b'x')
+    for _ in range(80):
+        for scan in quota._QUOTA_SCANS.values():
+            scan['iterator'].close()
+        quota._QUOTA_SCANS.clear()
+        result = _reconcile(tmp_path, max_entries=4096, max_ms=1000)
+        assert (tmp_path / '.owner-quota-ledger.json').stat().st_size < 512 * 1024
+        if result['complete']:
+            break
+    assert result['complete'] and result['used_bytes'] == result['inode_count'] == 30000
+    assert result['cursor']['metadata_complete'] is True
+    assert set(result['cursor']['dir_stamps']) == {''}
+    assert 'file_stamps' not in result['cursor'] and 'dir_names' not in result['cursor']
+    assert quota._verify_quota_metadata(tmp_path, result['cursor'])
+
+
+def test_legacy_partial_metadata_is_rebuilt_without_trusting_four_field_stamps(tmp_path):
+    for index in range(160):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    result = _reconcile(tmp_path, max_entries=32, max_ms=1000)
+    assert not result['complete']
+    path = tmp_path / '.owner-quota-ledger.json'
+    ledger = json.loads(path.read_text())
+    cursor = ledger['reconcile_cursor']
+    cursor['dir_stamps'] = {rel: stamp[:4] for rel, stamp in cursor['dir_stamps'].items()}
+    cursor.update(file_stamps={}, dir_names={'': {}})
+    path.write_text(json.dumps(ledger))
+    for scan in quota._QUOTA_SCANS.values():
+        scan['iterator'].close()
+    quota._QUOTA_SCANS.clear()
+    for _ in range(10):
+        result = _reconcile(tmp_path, max_entries=32, max_ms=1000)
+        if result['complete']:
+            break
+    assert result['complete'] and result['used_bytes'] == result['inode_count'] == 160
+    assert result['cursor']['metadata_complete'] is True
+    assert quota._verify_quota_metadata(tmp_path, result['cursor'])
