@@ -1,4 +1,6 @@
 
+# LLM: 模型恢复沿原显式场景和筛选范围，不因改路由增加请求或重放权限。
+# 模块用途: 提供真实模型场景的任务建立与规范归档恢复。
 from __future__ import annotations
 
 from typing import Any
@@ -6,7 +8,7 @@ from typing import Any
 """implements the real-model recovery scenario that verifies a real API round-trip survives cross-day resume.
 
 给人看的解释：
-这个文件验证用真实模型 API 跑一轮子代理后，memory-resume 能找回真实响应内容。
+这个文件验证用真实模型 API 跑一轮子代理后，memory archive resume 能找回真实响应内容。
 比 stub 后端测试更接近真实使用场景。
 """
 
@@ -107,6 +109,8 @@ def _scenario_summary_preview(text: str, limit: int = 200) -> str:
     return preview
 
 
+# LLM: 保留原显式模型场景授权和任务范围，仅迁规范计划提示。
+# 函数用途: 建立原模型恢复任务并登记规范计划文案。
 def _real_model_recovery_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -124,7 +128,7 @@ def _real_model_recovery_setup(args):
     task = agent.subagents.create_run(
         goal="real model recovery smoke test: read README and wait for closeout",
         thought="verify real model API round-trip survives cross-day recovery.",
-        plan=["runner reads README.md via real model", "write structured result", "simulate cross-day", "memory-resume recovers task fact sources"],
+        plan=["runner reads README.md via real model", "write structured result", "simulate cross-day", "memory archive resume recovers task fact sources"],
         allowed_tools=["read_file"],
         acceptance_checks=["must have read_file evidence", "recovery must recommend task fact sources", "caller decides closeout after recovery"],
     )
@@ -150,6 +154,8 @@ def _real_model_recovery_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
+# LLM: 保留原run_id、时间筛选和失败回执，不重放模型或创建替代任务。
+# 函数用途: 用规范归档入口恢复原任务事实。
 def _real_model_recovery_resume(paths, agent, task, loaded):
     _append_parent_subagent_cross_day_resume_clues(Path(agent.home_paths.owner_home_dir), loaded)
     reloaded_agent = load_scenario_agent(paths.config)
@@ -162,7 +168,7 @@ def _real_model_recovery_resume(paths, agent, task, loaded):
     resume = run_scenario_subprocess(
         scenario_command(
             paths,
-            "memory-resume",
+            "memory", "archive", "resume",
             "parent subagent cross-day resume",
             "--run-id",
             task.id,
@@ -178,7 +184,7 @@ def _real_model_recovery_resume(paths, agent, task, loaded):
     try:
         resume_payload = json.loads(resume.stdout)
     except json.JSONDecodeError as exc:
-        resume_payload = {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}
+        resume_payload = {"ok": False, "error": f"memory archive resume JSON parse failed: {exc}", "stdout": resume.stdout}
     return resume_payload
 
 

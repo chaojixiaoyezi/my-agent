@@ -894,6 +894,28 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-10-29 e905 sol-9：CLI 24 根与诊断收敛（开发分支，未部署）
+
+```text
+|-- agent_py_agent/
+|   |-- cli/
+|   |   |-- argv_compat_v1.py # 根输入历史路径解码、规范树注册与内置命名空间保留
+|   |   |-- parser.py # 唯一规范解析树的装配入口
+|   |   |-- memory_admin_commands.py # 统一Doctor参数、只读工厂注入与输出
+|   |   `-- memory_commands/__init__.py # 记忆命令导出；不再导出旧Doctor
+|   `-- agent/user_space/home_doctor.py # DoctorService统一runtime/memory/all只读聚合
+|-- scripts/
+|   |-- optimization_removal_manifest.json # 删除责任、规范根及永久冻结CLI合同清单
+|   |-- verify_optimization_removal.py # 唯一结构删除门，区分欠账与行为待验
+|   |-- audit_code_removal.py # 旧脚本名委托同一删除门，不另建宽松规则
+|   |-- performance_review_probe.py # 当前进程parser构建的时间与峰值内存观察
+|   `-- benchmark_config_policy.py # 隔离配置加载样本及输入摘要，不回显配置值
+|-- docs/history/CLI_REFERENCE_V1.md # 历史只读手册，不是新调用依据
+`-- CLI_REFERENCE.md # 当前规范CLI及仍有效的Slash/身份/模型控制说明
+```
+
+已删除 `agent_py_agent/cli/memory_doctor.py` 与 `agent_py_agent/cli/memory_commands/memory_doctor_cmd.py`，不再作为文件树存续入口。该增量描述源码职责，不表示真实服务或已安装运行包已经切换。
+
 ### 2026-10-28 Wave 9 B4：中途Compact续跑直接回归（本地候选）
 
 ```text
@@ -1388,6 +1410,13 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### e905 sol-9 CLI 与诊断（2026-10-29）
+
+- `cli/argv_compat_v1.py`：仅根输入解码旧路径并复用唯一规范树；业务参数不重解释，扩展不得借历史名字覆盖内置节点。24 根目录见 [CLI Reference](CLI_REFERENCE.md#24-个规范根)。
+- `agent/user_space/home_doctor.py::DoctorService`：承接已删除两份 CLI Doctor 的只读聚合；`cli/memory_admin_commands.py` 仅注入原工厂并格式化。all 的公共字段稳定保留两侧子键，不据值相等改形状。
+- `scripts/verify_optimization_removal.py` 与 manifest：负责结构证据、冻结合同与未完成分类；结构通过不代表真实业务通过。`audit_code_removal.py` 只委托此门。
+- 两个性能 Probe：只观察当前 parser 构建或隔离配置加载，不证明完整用户链路、跨机性能或部署。历史手册保留原文，当前用户入口和有效锚点在根手册维护。
 
 ### Wave 9 B4 中途Compact续跑（2026-10-28，本地候选）
 

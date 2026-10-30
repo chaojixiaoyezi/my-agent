@@ -1,0 +1,2163 @@
+2026-10-17 F3整合候选：正count内部协调入口的`/agents`与`/memory candidates`已共用原真人预览/准确nonce确认；群成员不能确认别人的预览，跨owner仍守原管理员/Full Access与明确target。旧未就绪描述为历史阶段，候选尚待统一验收与发行，日常默认Count0保持。
+
+2026-10-17 F3候选：冷协调进程的`/agents`共用原查看、预览及`confirm <准确预览编号>`；同消息重放不重复写，不同群成员不能确认别人的预览。显式跨owner仍须完整管理员身份及Full Access。当前只规则领域已组合，记忆冷入口仍未就绪，尚未发行。
+
+# CLI Reference v1（历史只读）
+
+本文保存 e905 收敛前的完整手册，仅供历史合同与迁移核对。旧平铺名称不是当前注册入口，不要据此生成新调用。
+当前命令、作用域、退出码与版本输入兼容规则，以仓库根的 [CLI_REFERENCE.md](../../CLI_REFERENCE.md) 和真实 `--help` 为准。
+
+这份文档是 `my-agent` 的命令行参数手册。日常快速确认可以用：
+
+```powershell
+my-agent --help
+my-agent <command> --help
+```
+
+## 人工规则与记忆候选控制（组合候选，未发布）
+
+以下是当前 F4/F5 独立组合候选的显式控制语法。终端 direct、Gateway 和 IM 共用原服务，控制本身不调用模型；部署版本须另核，尚未声称真实飞书租户验收完成。普通用户操作本人 owner，群用户保留当前 HostActor/会话边界；不新增全机管理员门或监控 grant。
+
+| 命令 | 行为与边界 |
+| --- | --- |
+| `/agents show`、`/agents refresh` | 查看当前规则来源/状态；按原刷新点处理，不凭配置宣称正文实时新鲜 |
+| `/agents source local <绝对路径>` | 预览切换到本人有权读取的本地来源；配置不增加路径权限 |
+| `/agents source url <https地址>` | 预览只读远端来源；网络来源默认关闭，开启仍受原网络权限，未作真实网络验收 |
+| `/agents reset` | 预览恢复本人默认来源 |
+| `/agents write "完整规则正文\n下一行"` | 使用 JSON 字符串完整预览拟写内容，保留换行与尾空白；模型不能代填确认权 |
+| `/agents confirm <预览编号>`、`/agents receipt <预览编号>` | 由原预览的本人、当前会话确认一次，或只读查回执；来源/正文/权限变化要求重核，unknown 不重放 |
+| `/agents owner <规范owner> <上述操作>` | 显式跨 owner 入口，仅原完整本机管理员且 Full Access 可用；目标选择不改变 actor |
+| `/memory candidates`、`/memory candidates list [起始序号]` | 查看本人唯一候选库元信息，每页 20 条；正式内容尚未保存 |
+| `/memory candidates show <候选ID>` | 查看可安全完整显示的候选内容及范围、动作、目标版本 |
+| `/memory candidates preview <候选ID>` | 创建 600 秒有效的精确预览，返回可复制的 confirm/reject/cancel/receipt 命令 |
+| `/memory candidates confirm <预览编号>` | 确认该完整版本，沿原 review/promote(false)、目标 CAS 和证据门正式提交 |
+| `/memory candidates reject <预览编号>` | 走原候选状态机拒绝，不提交正式内容 |
+| `/memory candidates cancel <预览编号>` | 取消该预览，候选保持原状态 |
+| `/memory candidates receipt <预览编号>` | 只读该预览当前结果；未知不能借新消息重复执行 |
+
+实际操作先发送 `/memory candidates`，复制候选 ID 发 `preview`，核对正文、范围和目标，再复制该预览返回的完整确认命令；不要自己编造预览编号。确认绑定 owner、actor、channel、conversation/thread、完整候选记录 SHA 与目标版本，换人、换群话题、过期或候选变化均需原门复核。超过 12 KiB 或会被现有脱敏/用户投影改变的候选不提供 IM 确认，明确要求受控本机完整核验，不能用摘要批准另一正文。
+
+**IM 只开放 `/memory candidates` 子树。** 裸 `/memory [查询内容]` 仍仅终端搜索正式记忆；原本机 `my-agent memory candidates review/promote` 管理命令保留，但不把它们当成普通 IM 用户的可执行入口。AGENTS 始终走 `/agents`，Skill 沿原 `/skills` 用户确认与 CAS。`consumed_unknown` 表示运输已受理但业务结果未确认，应核原回执/候选/正式内容，不重新提交。
+
+`self_map` 是模型可按权限发现的只读工具，没有新增 `/self_map` 斜杠命令。可直接问“你现在有哪些能力”，模型经总览、领域、准确条目和 cursor 逐步读取；工具参数及 unknown/partial 边界见[自我目录](../design/SELF_MAP.md)。原 `/help memory`、`/help agents` 从同一 command_catalog 展示已实现的控制语法，不从文档文字签发权限。
+
+## 安装与入口
+
+在仓库根目录安装本地开发版本：
+
+```powershell
+cd C:\Users\41542\Desktop\my_agent\simple-python-agent-v0.3
+python -m pip install -e .
+```
+
+安装后直接运行：
+
+```powershell
+my-agent
+my-agent --plain
+my-agent --help
+```
+
+如果还没有安装，也可以用模块入口：
+
+```powershell
+python -m agent_py_agent --help
+```
+
+## 顶层参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--config <path>` | `agent_py_agent/config/agent_config.yaml` | 指定主配置文件，控制模型后端、API base、API key 环境变量名、记忆路径、工具开关和 subagent workspace。 |
+| `--plain` | `false` | 使用普通终端聊天模式，不进入应用内滚动历史界面。 |
+| `-h`, `--help` | - | 显示帮助。 |
+
+## 运行形态
+
+| 形态 | 命令 | 是否常驻 | 是否调用真实 API |
+| --- | --- | --- | --- |
+| 默认入口 / 应用内聊天 | `my-agent` | 前台应用界面 + 后台 gateway | 是，由后台 gateway 调用 |
+| 普通终端聊天 | `my-agent --plain` | 前台 chat + 后台 gateway | 是，由后台 gateway 调用 |
+| 全局状态 | `my-agent status` | 否 | 否 |
+| 最近事件 | `my-agent timeline` | 否 | 否 |
+| 查看帮助 | `my-agent --help` | 否 | 否 |
+| 单轮对话 | `my-agent run "任务"` | 否 | 是，取决于配置的模型后端 |
+| 交互聊天 | `my-agent chat` | 前台交互 | 是，用户发送消息时调用 |
+| gateway 客户端聊天 | `my-agent chat --gateway` | 前台客户端，后台 gateway 执行 | 是，由后台 gateway 调用 |
+| 一轮父代理调度 | `my-agent subagents-dispatch` | 否 | 否，默认 dry-run |
+| 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --start-runners` |
+| 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
+| 配置驱动前台 daemon | `my-agent daemon` | 前台常驻 | 取决于 `daemon_*` 配置 |
+| 后台 gateway | `my-agent gateway start` | 后台常驻 | 取决于 `daemon_*` 配置 |
+| gateway 客户端请求 | `my-agent gateway ask "任务"` | 否，投递到后台 gateway | 是，由后台 gateway 调用 |
+| 真实 runner 调度 | `my-agent subagents-dispatch --apply --start-runners` | 否 | 是 |
+| 隔离全流程测试 | `my-agent scenario-test` | 临时启动并停止 gateway | 是，除非加 `--dry-run` |
+| 主代理基础 E2E | `my-agent real-e2e --workspace ./.e2e --json` | 否 | 否；真实模型用例会明确跳过，产物可用 `--artifact` 验收 |
+| 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
+
+当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会走轻量新会话入口，自动确保 gateway 存活，然后进入 `chat --gateway`；它不会扫描整台机器的历史任务，也不会询问是否批量恢复。恢复旧会话必须显式使用 `my-agent resume <session_id>`。默认配置路径先读取进程环境 `MY_AGENT_CONFIG`，未设置时才使用随包 `agent_config.yaml`；显式 `--config` 始终优先，因此常驻 Gateway、裸 TUI 与以后 IM/Web 入口可以共享同一部署配置。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](../design/GATEWAY_DESIGN.md)。
+
+## 聊天内控制命令
+
+这些命令在本地聊天和 Feishu 使用同一程序控制语义。命令由系统在模型之前解析，不写入对话记录，
+也不让模型判断是否执行；不支持的 `/XXXX` 会直接报错，不会变成普通聊天：
+
+| 命令 | 作用 | 持久范围 |
+| --- | --- | --- |
+| `/sessions` | 按更新时间列出当前 owner 最近 10 个会话，标记当前会话，并给出精确 `my-agent resume <session_id>` 命令。 | 只读；不扫描其他 owner，不在运行中原地替换整套 TUI 状态。 |
+| `/status` | 立即显示当前任务、时长、排队、子代理、模型及可用的 compact/verbose 状态。 | 只读，不保存；不显示引导历史。 |
+| `/btw <补充要求>` | 给当前正在运行的任务补充一次要求；若模型正在生成，旧动作会先作废。 | 仅当前 request，投递一次后结束；不会进入下一任务。 |
+| `/stop` | 停止当前轮、暂停当前持续目标并回收活跃子代理；需要继续目标时显式恢复。没有运行中的回合时，停止本会话遗留的受管后台进程（例如被 `/interrupt` 的任务留下的），回执列出 pid 与所属 task/run；本会话仍在运行的审计等任务不受影响。 | 保留 transcript、工作区、compact 和 memory，不停止 Gateway 服务。 |
+| `/interrupt` | 主代理中断当前轮；已有 active Goal 时沿原调度安全续接，不等同暂停目标。中断后 24 小时内再发消息仍接着原任务（同一任务目录和进度），超过 24 小时没回来，任务按原规则收成取消。没有运行中的回合时什么都不停（遗留后台进程用 `/stop` 收）。 | 保留目标、任务身份和会话；无 active Goal 时不创建续跑。 |
+| `/recover [recorded\|confirmed_noop\|abandoned]` | 上一轮执行中断、结果未确认（报 `ACTIVE_TURN_OUTCOME_UNCERTAIN` 或 `RUN_RECOVERY_REQUIRED`）时使用：不带参数只列出未确认的工具操作；核对外部事实后带处置值显式解除阻塞，下一条消息接着原任务继续。主链不阻塞时也会列出本会话子代理（例如被强杀的子代理）留下的未知执行轮，恰好一条时可以同样处置。 | 只作用于当前会话的工作任务及本会话未关的子代理执行轮；处置写进运行库 `attempt_recovered` 事件；不重放旧操作，不改聊天记录。仅 Gateway 模式。 |
+| `/restart [<原因>]` | 管理员安全重启 Gateway：先停领新请求、等在跑的回合结束，再等执行中的工具跑完后换新进程；期间的消息排队，重启后自动处理。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；冷却中或同一会话短时间内重复重启会被拒。仅 Gateway 模式。 |
+| `/endtask [<任务ID> [confirm]]` | 管理员处理卡在等待中的定时会话任务：不带参数列出等待中的定时执行、能否结束及后续工作事实码；`/endtask <任务ID>` 只读预览（同样写明后续工作事实码）；`/endtask <任务ID> confirm` 把会话任务记为 cancelled，并立即结算它堵住的定时执行，定时任务按计划起新一轮运行。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；只处理“定时执行 waiting、会话任务 active、执行树没有未结束的执行”的任务，其余一律拒绝且不改动；不改运行库、不重做未确认的操作。仅 Gateway 模式。 |
+| `/wakes [quarantined]`、`/wakes replay <唤醒ID> [confirm]` | 管理员查看反复失败、已结案不再自动领取的后台唤醒：`/wakes` 列出结构化行（ID、会话、reason、原因码、次数、结案时间、已重放次数）；`/wakes replay <唤醒ID>` 只读预览重放会做什么；带 `confirm` 按原 ID 和原内容放回待处理队列、失败计数清零。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；已归档、读不出、待处理队列已有同 ID、对应的会话任务或会话消息已结束的，一律拒绝且不改动。仅 Gateway 模式。 |
+| `/model [<编号>\|default <编号>]` | 飞书不带参数发送本会话模型选择卡，可向原操作者私发新增/编辑表单；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 群中私人表单仍配置原群的模型，供该群执行使用；表单密钥不进入聊天/模型，旧卡与异值重放拒绝；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
+| `/schedule [job01]`、`/schedule history job01` | 查看本人监控、规则与最近运行；编号沿当前 owner 唯一匹配。 | 群按原可信创建人；不借其他成员或管理员身份。 |
+| `/schedule delete job01` | 删除本人的监控，关闭未来并沿原 task/run 整树取消当前轮。 | 保留历史与产物；取消未确认/坏记录如实提示，B 不可删 A。 |
+| `/schedule execution job01`、`/schedule cancel job01`、`/schedule recover job01` | 查看执行、只取消当前或核对死亡/等待收口。 | cancel 保留未来计划；recover 不重放未知业务或创建替代任务。 |
+| `/schedule takeover job01` | 绑定管理员私人 IM 接管本人 TUI 监控的未来通知。 | 原 owner/来源/创建人不变；已预留运行不改目标，群入口不授予本机权限。 |
+| `/admin <管理员密码>`、`/admin status`、`/admin logout` | 仅 IM 一对一私聊：用本机设置的管理员密码把本私聊绑定为管理员，之后按本机主用户 local/main 运行；`status` 查看、`logout` 解除。 | 绑定写 `config/admin-channel-identities.json`；密码不进回执、记录和日志；群聊与本机终端拒绝。仅 Gateway 模式。 |
+| `/approve <管理员密码>` | 仅已绑定管理员的 IM 私聊：批准本会话当前唯一等待确认的工具操作，只批准这一次。 | 写原 permission bridge 的精确决定文件；没有或多于一个待决时拒绝。 |
+| `/deny` | 仅 IM 私聊：拒绝本会话当前唯一等待确认的工具操作，不需要密码。 | 同上；终端里请直接在审批面板中选择。 |
+| `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
+| `/verbose [off|on|stream|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
+| `/effort [auto\|off\|low\|medium\|high\|max\|default]` | 查看或设置本会话的智能程度（推理强度）。TUI 里单独输入 `/effort` 会打开档位菜单（上下键选、回车设置、Esc 不改）；查看回执末尾列出可选档位。回执说明在当前模型上的实际效果：按档位发送、按思考预算发送，或“不支持调节、本设置暂不改变请求”；`default` 清除本会话设置、回到全局默认 `model_reasoning_effort`。子代理可在 `create_subagents` 用 `effort` 单独指定，省略则继承当前档位。当前模型未声明思考控制方式且解析为不支持时，设成 auto 以外的档位会在后台自动检测一次（开关 `reasoning_control_auto_probe`），`/effort` 查看进度与结论。 | 写当前 thread 的 `reasoning_effort`；自动检测时后台发 9 次短请求。仅 Gateway 模式。 |
+| `/effort probe` | 在后台检测当前模型是否真的支持按档位调节智能程度（同一道短题按低 / 最高 / 不带参数各发 3 次，比较用量里的 token），确认支持就把模型档案的思考控制改为按档位发送。结论会在同一会话下一条回复顶部提示一次（`/effort` 看过就不再提示）。 | 后台发 9 次短请求；可能写本人模型档案或（仅管理员、部署默认模型）全局配置，并记账。仅 Gateway 模式。 |
+| `/effort revert <编号>` | 撤销一次由检测写入的模型档案修改（编号至少 6 位，见检测结果里的提示）。 | 写本人模型档案与档案账本。仅 Gateway 模式。 |
+| `/audit [时长] <任务>` | 以结构化保证档启动一个新任务。 | `/audit` 前缀不进入模型，只有任务正文进入正常 turn。 |
+| `/experiment observe skill_tool <时长> <HTTP次数> <输入token上限> <任务>` | 只为本轮授权一次有预算、只观察的决策实验，然后照常执行任务。 | 参数冻结进本次请求，只有任务正文进入模型；授权绑定本轮 thread/run/attempt/request 与当前模型账，重放不再授权。 |
+
+`/experiment` 说明（Gateway 模式）：时长支持 `s/m/h/d`（例如 `10m`），HTTP 次数和输入 token 上限须为正整数，
+目前只开放 `observe` 与 `skill_tool`。前提是决策总开关与 `experiment_enabled` 均已开启、该接入点普通模式为 `off`；
+否则本轮只提示“未建立授权（原因码）”并照常执行任务，不发送实验请求。每次实验请求前按最终请求字节计算
+**经验输入上界**（`empirical:jev_wire_bytes.v1`，不是供应商保证），超出标定范围或剩余预算就不发送；实验结果只记录、
+永不采用，也不改变模型看到的工具和 Skill 展示。撤销沿 `user_config` 的 `decision_experiment_revoke`。
+本地直连 TUI 与后台执行不建立实验授权。
+
+`/recover` 的三个处置值：`recorded` 表示已核实操作生效并记下，`confirmed_noop` 表示已核实操作没有生效，
+`abandoned` 表示不再核对、接受未知后果。三者都只经 `RuntimeRepository.recover_attempt_unknown` 把 unknown
+执行轮改为 recovered、run 复原为 created 并释放该轮执行锁；区别只记录在事件里。系统不会自动重做那条操作，
+模型在下一轮看到的仍是原会话历史。执行链状态不是“执行中断造成的 unknown”时，`/recover` 拒绝处理并提示查看运行诊断。
+主链阻塞时 `/recover` 只处理主链；主链不阻塞时处理本会话子代理：同时有多条待核对时拒绝并列出编号（暂不支持指定目标）。
+子代理恢复后，如果它已被其它子代理接替，运行记录收口为取消；没被接替的留给主代理决定是否续跑。
+
+`/endtask` 说明（Gateway 模式，仅管理员）：定时运行里的工具操作结果未知时，模型工作片会停下，但会话任务仍是 active；定时层把这次运行停在 waiting 等后续事件，没有后续事件时它不会自己结算，同一定时任务也不再派发新运行（2026-09-28 两个会话因此停住）。`/endtask` 先按结构化事实核对：定时账本里这条运行是 waiting、会话任务链接是 active、运行库里这个任务整棵执行树（含子代理）没有未结束的 attempt；运行库读不到时按“无法确认”拒绝。确认结束只写两处：会话任务按 `expected_status=active` 改为 `cancelled`，再对同一任务调 `reconcile_waiting_run`；结算没成时定时层每轮的批量对账会再收口。未确认的工具操作保持原状、不会被重做，它们在外部是否生效需要人工核对。结束任务也不会停止它启动的受管后台命令，这些命令结束后的完成通知会落到已取消的任务上；预览和确认结果都会写明这一点。拒绝时的错误码（`END_TASK_*`）都登记在 `ERROR_CONTRACTS`，带恢复建议。列表每行和预览都附“后续工作事实码”，说明它为什么还在等：与定时执行收口用同一个判定（`scheduler_service.follow_up`），列出存在的事实码（如 `pending_wakes`、`open_subagents`、`active_goal`），读不出的项目写成“项目:错误码”（如 `pending_wakes:data_parse:JSONDecodeError`），没有任何事实写“无”；`active_goal`、`pending_guidance`、`enabled_progress_policy` 后面固定加“（宽限期内才算）”——定时执行收口过了宽限期就不再把它们算作后续工作，免得被读成“还会自己推进”；只显示事实码，不带任务正文。
+
+`/wakes` 说明（Gateway 模式，仅管理员）：后台唤醒同因失败满 5 次（或总计 12 次）会结案为 failed_permanently，不再自动领取（唤醒毒丸，见 `docs/design/WAKE_POISON_PILL.md`）。`/wakes` 列出已结案的唤醒，每行只有结构化字段；原因码后面带中文短说明，认不出的新码只显示原码。`/wakes replay <唤醒ID>` 预览：说明为什么结案、此前重放过几次、确认后会发生什么；`/wakes replay <唤醒ID> confirm` 才重放：按原 ID 和冻结内容放回待处理队列、失败计数清零，这次的结案记录留档到 `replayed/`；如果还是同一原因失败，满 5 次会再次结案，不会自己复活。拒绝码 `WAKE_REPLAY_*` 与 `WAKE_OPS_ADMIN_ONLY` 都登记在 `ERROR_CONTRACTS`：已归档（结案满 14 天移进 `quarantine/archive/`）、信封或结案记录读不出、待处理队列已有同 ID、对应的会话任务已是终态或会话消息回执已是 consumed/rejected（这时应重新派活，而不是重放）。`/status` 在有已结案唤醒时多一行「已结案的后台唤醒：N 条」。
+
+`/admin`、`/approve`、`/deny` 说明：先在本机运行 `my-agent admin-password set` 设置管理员密码，再在飞书里与机器人的
+一对一私聊中发送 `/admin <密码>`。绑定只按渠道和用户 ID 精确匹配，群聊永远不匹配；10 分钟内错 5 次会锁定该身份 10 分钟，
+拒绝文案不区分原因。绑定后，需要确认的工具会在聊天里提示“代理请求：…。回复 /approve <管理员密码> 允许本次，/deny 拒绝。”。
+适配器不把这三条命令写进持久入站队列，Gateway 回执只存 `/admin ******`、`/approve ******`。飞书会保留原消息，
+发送后请撤回。终端（TUI/plain）本来就是管理员，会本地拒绝这三条命令，不发送也不保存。
+开关 `admin_channel_identity_enabled`，设计见 [IM 管理员身份](../design/ADMIN_CHANNEL_IDENTITY.md)。
+
+`/btw` 不再用于查看或永久追加 prompt，`/btw-clear` 已移除。`/stop` 会作废当前 turn 尚未消费的
+引导，但保留已经写入的聊天和工作现场；停止后可以直接用普通自然语言补充，再说“继续”。
+Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命周期命令，与聊天
+`/stop` 不同。
+
+## 插件命令入口
+
+面向用户的完整用法（命令清单、`/plugins info` 四段、样例插件与写插件技能、屏幕观察只看档、G2b 本机凭据开关、锁与私有文件口径）见 [插件与安全开关使用说明](../guides/PLUGIN_GUIDE.md)。
+
+公共目录使用 `/plugins [管理动作]` 与 `/plugins@<插件ID> [动作] [参数]`。安装、列表、信息、请求查询、配置、启停、调用和卸载已有本地源码，尚未发布部署；已安装版本能力以 STATUS 为准。
+`/plugins configure <插件ID> --file ./settings.json` 从授权路径读取完整 JSON，严格按插件设置声明验证，保存在用户私有目录，保持插件停用。
+配置不是增量补丁；值不进入公共目录或工具回执。`/plugins status <原请求编号>` 可在来源删除后查询原结果，超时不自动重送。
+`/plugins install` 与 `/plugins update` 的包路径若是相对路径，按当前会话的工作区根解析（TUI 标题栏显示的目录），不是终端所在目录；找不到时回执会写明按哪个目录解析、可改用绝对路径；路径在当前身份可访问范围之外（WorkspaceOnly 下 owner 目录之外）单独报“未获授权”，包内容不合规单独报“格式无效”，三者不再共用一句文案。
+`/plugins update <插件ID> <新包路径>` 用同一插件 ID 的新版本本地包替换已停用插件：配置结构不变时保留私有配置（结果 `settings_restored=true`），变化则清空并提示先 configure 再 enable；已启用插件要先 disable，新包 ID 不一致或同包分别报错或不变。不做双版本切换与 rollback。
+管理动作（install、configure、enable、disable、remove、update，以及查询管理请求的 status）只对管理员开放；普通用户执行时在任何写入之前被拒，回执写“当前身份没有插件管理权限。”并另起一行“错误码：PLUGIN_PERMISSION_DENIED”。所有执行前被拒（rejected）的插件命令都会附这行错误码，执行后的失败与成功文案不变；经 Gateway 时日志另记一行 `PLUGIN_COMMAND_REJECTED error_code=… action=… request_id=…`（只含码、子命令名和请求编号，不含命令原文或路径）。
+my-agent 自己做的包（learnpack）：`/plugins confirm <单号>` 执行她给的待确认安装单（只执行一次、只认最新一行，回执写明装的是哪一版）；`/plugins revert <包名>` 先预览会退到她做的哪一版，再照回执发 `/plugins revert <包名> <版本摘要>` 才执行。两者都只对管理员开放，TUI 与 IM 同一入口。
+能力包专用入口 `/plugins#[包名] [查看|启用|停用|删除|退回 [版本摘要]|安装 <单号>]`：不带包名列出全部能力包并标出 my-agent 自己做的；启用/停用/删除等同对应的 `/plugins` 管理动作（沿用本次请求编号与目录版本），退回与安装分别复用 `/plugins revert`、`/plugins confirm`；与 `/plugins@` 互不串，TUI 补全在包名后补中文动作词。
+`/help` 与补全读取同一声明；补全只填入，`/plugins@` 后直接填写 ID，不插入空格。新目录 v3 要求客户端与 Gateway 同版，过期输入须重新查看再确认。
+未知或异常后缀不会转为普通聊天、运行中插话、Shell 或停止操作。完整实际 TUI 装卸验收仍待完成，见 [插件设计](../design/PLUGIN_LIFECYCLE.md)。
+
+## 常用命令
+
+安全检查一轮 watch：
+
+```powershell
+my-agent subagents-dispatch --watch --max-cycles 1 --interval 0 --max-runners 0
+```
+
+持续巡检但不写回、不调用 runner：
+
+```powershell
+my-agent subagents-dispatch --watch --interval 30
+```
+
+持续巡检，并在有待处理事项时唤醒父代理 LLM planner：
+
+```powershell
+my-agent subagents-dispatch --watch --planner --interval 30
+```
+
+按配置启动前台 daemon：
+
+```powershell
+my-agent daemon
+```
+
+默认启动体验：
+
+```powershell
+my-agent
+```
+
+等价于：自动启动后台 gateway，然后进入 `my-agent chat --gateway`。退出 chat 不会关闭 gateway，后续还可以继续 `my-agent` 或 `my-agent chat --gateway` 接回去。
+
+手动管理后台 gateway：
+
+```powershell
+my-agent gateway start
+my-agent gateway status
+my-agent gateway ask "继续推进当前任务"
+my-agent gateway stop
+```
+
+查看全局状态和最近事件：
+
+```powershell
+my-agent status
+my-agent timeline --limit 20
+my-agent timeline --source-type gateway_request --details
+```
+
+持续巡检并允许真实推进 runner：
+
+```powershell
+my-agent subagents-dispatch --watch --planner --apply --start-runners --interval 30 --max-runners 1
+```
+
+跑一轮可观察的隔离全流程测试：
+
+```powershell
+my-agent scenario-test
+```
+
+它会新建临时 fixture 工作区，经过 `gateway ask` 让主代理派工，再执行真实 runner 和父代理验收。所有 memory、subagent、gateway 和写文件工具都被 `workspace_root` 关在临时目录里。
+
+停止前台 watch：
+
+```text
+Ctrl+C
+```
+
+## 聊天 TUI 快捷键（2026-08-17 对齐 会话运行时 界面）
+
+| 按键 | 作用 |
+|---|---|
+| `Enter` | 发送 |
+| `↑/↓` | 输入有字时按屏幕折行移动；输入为空且正文停在旧消息时，`↓` 先回到最新消息；已在底部时选择子代理或浏览输入历史 |
+| `PageUp/PageDown`、鼠标滚轮 | 对话流翻页；离开底部后新消息不会抢走阅读位置 |
+| `Ctrl+Home/Ctrl+End` | 跳到当前主代理或子代理正文的最早/最新消息 |
+| `Enter`（选中子代理） | 进入该子代理视图，查看与主代理同格式的思考、工具和消息 |
+| `Ctrl+G` | 从子代理视图返回主代理；不会停止子代理 |
+| `Esc` | 主代理中断当前轮（active Goal 可安全续接）；子代理保留停止行为。暂停主目标用 `/stop` 或 `/goal pause` |
+| `Ctrl+C` | 复制当前正文选区；没有选区时按既有打断/退出规则处理 |
+| `Ctrl+D` | 空输入时双击退出；输入有字时保持向前删除 |
+| `Ctrl+L` | 清屏（只清显示，历史保留） |
+| `Ctrl+O` | 展开/收起当前主代理或子代理的详细工具输出，不切换代理视角 |
+| `Ctrl+T` | 展开/收起完整任务清单 |
+| `F6` | 切换应用鼠标模式和终端原生拖选/复制模式 |
+| `Alt+R` | 切换 `/verbose` 详细档位（对齐 会话运行时 raw output 切换） |
+| `Ctrl+R` | 历史搜索（prompt_toolkit 内建） |
+
+界面视觉对齐 会话运行时：顶部状态行 `my-agent · <模型> · <工作目录> · <活动/耗时> · ⟿ 上下文`，
+用户行 `> ` 青色、助手 marker `⏺` magenta、统计行 `⟿` 灰色（配色见
+会话运行时-rs/tui/styles.md 同款约定）。
+
+## 命令总览
+
+| 命令 | 用途 | 写文件 | 真实 API |
+| --- | --- | --- | --- |
+| `status` | 查看 gateway、LocalStore、subagent 和最近事件总览 | 否 | 否 |
+| `timeline` | 查看本地事实源最近事件 | 否 | 否 |
+| `run` | 运行一次智能体对话 | 默认写运行归档与恢复事实；不自动写正式长期记忆，可用 `--no-save` 关闭本次运行归档 | 是，除非配置 echo 后端 |
+| `remember` | 通过统一 Candidate/Promotion 主链保存用户明确确认的具体事实、事件或项目知识 | 是 | 否 |
+| `memory` | 统一管理 Candidate、后台 Curator、Retention、Doctor 与 Migration | 取决于子命令；list/status/plan 默认只读 | Curator run 可能调用后台模型 |
+| `skills` | `learned` 查看、回滚或删除自动总结的 Skill；`proposals` 查看、确认或拒绝子代理经验 Skill 提案 | list/show 只读；learned revert/remove 写 `skills/learned/` 与 `data/skill_learning/`；proposals confirm 写 `skills/lesson-*` 与提案文件；reject 只写提案文件 | 否 |
+| `memory-list` | 列出最近记忆 | 否 | 否 |
+| `memory-search` | 搜索记忆 | 否 | 否 |
+| `home-status` | 查看 `~/.my-agent` 入口文件、关键目录和轻量计数 | 否 | 否 |
+| `home-migrate` | 预览或复制旧 home 数据到当前 owner home | `--apply` 时写 | 否 |
+| `home-retention` | 预览或执行当前 owner home 的过期文件清理 | `--apply` 时删除过期文件并写审计 | 否 |
+| `runtime-stale-attempts` | 列出没有进程身份、无法自动判死的悬挂运行轮；`--settle` 按阈值显式结清为 unknown | `--settle` 时写运行库 | 否 |
+| `admin-password` | 设置、查看或清除本机管理员密码（IM 私聊 `/admin` 绑定和 `/approve` 审批时校验） | `set`/`clear` 写 `config/admin-password.json` | 否 |
+| `admin-identities` | 列出或解除已绑定为管理员的 IM 私聊身份 | `remove` 写 `config/admin-channel-identities.json` | 否 |
+| `home-index-rebuild` | 预览或重建 owner/task/run/agent 全局轻量索引 | `--apply` 时追加索引行 | 否 |
+| `memory-daily-list` | 直接查看 home daily memory 按天流水 | 否 | 否 |
+| `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
+| `guidance-send` | 给运行中的主代理、子代理、任务或协作 case 追加一条软提示 | 是，只写 guidance 账本 | 否 |
+| `memory-doctor` | 诊断 memory 配置、路由索引和归档目录 | 否 | 否 |
+| `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
+| `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
+| `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
+| `task-workspace-list` | 查看 home tasks 任务工作区 | 否 | 否 |
+| `context-bundle` | 查看最新主代理上下文包、scope、自检和工具/运行合同 | 否 | 否 |
+| `contracts` | 查看合同 finding 状态 | 只读 | 否 |
+| `real-e2e` | 运行主代理基础 E2E 矩阵，并可验收真实产物 | 写报告 JSON | 否；当前不会自动调用模型 |
+| `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
+| `memory-fact-write` | 写入用户确认的 compact resume 补全事实源 | 是 | 否 |
+| `memory-compact` | 预演 memory compact 计划；`--apply` 生成非破坏性恢复产物 | `--apply` 时写 | 否 |
+| `local-store-status` | 查看本地事实源状态 | 否 | 否 |
+| `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
+| `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
+| `local-doctor` | 诊断 LocalStore、gateway 队列和 subagent 文件事实源 | 可选 `--repair` | 否 |
+| `local-rebuild` | 从 memory/gateway/subagent 文件事实源重建 LocalStore | 是 | 否 |
+| `logs` | log analysis 状态、文件导入和安全查询入口 | status/query 只读；ingest 写 log analysis 数据目录 | 否 |
+| `chat` | 启动交互循环 | Gateway 模式写 ConversationStore/audit；默认另写运行归档，`--no-save` 只关闭运行归档；不自动写正式长期记忆 | 是；加 `--gateway` 时由后台 gateway 调用 |
+| `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
+| `subagents` | 查看 subagent 看板 | 否 | 否 |
+| `subagents-due-check` | 巡检 subagent 风险 | 写全局 due-check 报告 | 否 |
+| `subagents-budget` | 汇总 subagent runner 调用、工具轮数和 token 粗估 | 写预算 JSON/Markdown 报告 | 否 |
+| `subagents-probe` | 检查 subagent 通道健康 | 写 probe 报告和单任务记录 | 否 |
+| `subagents-plan-actions` | 根据 due-check 生成动作计划 | 写 action plan 报告 | 否 |
+| `subagents-apply-actions` | dry-run 或执行低风险动作 | `--apply` 时写回任务和审计日志 | 否 |
+| `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
+| `subagents-leadership-recovery-plan` | 预览批量 coordinator 挂掉后的 leader 分摊接管计划 | 写 dry-run 计划报告 | 否 |
+| `subagents-leadership-recovery-apply` | 按显式 child 子集重挂到新 leader | `--apply` 时只移动指定 child 子树 | 否 |
+| `subagents-hierarchy` | 预览或显式创建 child/grandchild subagent run | `--apply` 时创建下一层任务 | 否 |
+| `subagents-recovery-tree` | 查询 root subagent 的多层恢复交接包 | 否，只输出 refs-only 恢复线索 | 否 |
+| `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
+| `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
+| `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
+| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --start-runners` 会调用模型 |
+| `background-main-agent` | 本地长期主代理线程、定时汇报和后台唤醒命令 | message/bind-task/observe 会写长期会话账本；tick/service 会唤醒后台主代理 | tick/service 可能调用模型 |
+| `collaboration` | 查看和推进通用多代理协作 case/request/evidence 状态 | update-status/update-request 会写协作账本 | 否 |
+| `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
+| `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
+| `real-e2e` | 跑主代理基础确定性矩阵，并把指定产物交给 Artifact Acceptance 验收 | 写 refs-first 报告 | 否；真实模型产物由外部真实 run 生成后用 `--artifact` 接入 |
+| `gateway` | 管理后台 gateway 进程 | 写 gateway pid/state/heartbeat/log | 取决于配置 |
+| `adapter` | 外部聊天工具 / TUI 适配器入口 | 写 adapter inbox/outbox | 由后台 gateway 调用 |
+| `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
+| `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
+| `subagent` | 查看单个 subagent 详情 | 否 | 否 |
+| `audit-log` | 查询审计日志 | `--cleanup` 时写回 | 否 |
+| `update` | 自更新；受管安装使用 `update --package <新包.run>`，开发源码入口按原 git/pip 更新 | 否 | 否 |
+| `config-set` | 设置一个配置项(白名单内,如飞书凭证),保留注释原子写回 | 是(写配置文件) | 否 |
+| `config-get` | 读取一个配置项当前值(敏感字段脱敏) | 否 | 否 |
+
+## `status`
+
+```powershell
+my-agent status
+my-agent status --recent --limit 10
+my-agent status --json
+```
+
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+
+`Takeover View` 会列出可接管 run、failure handoff ref、takeover readiness ref 和 recommended read order；它只读取恢复索引，不展开 artifact 正文。若 run 携带隔离元数据，还会显示 principal、conversation、memory namespace 和 config scope 摘要；这些字段只是审计线索，不代表员工长期记忆已启用，也不代表允许写全局配置。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--limit <n>` | `5` | 最多显示多少条 hot/recent/timeline 项。 |
+| `--recent` | `false` | 额外显示最近子代理列表。 |
+| `--json` | `false` | 输出机器可读 JSON，方便后续 TUI/聊天工具复用。 |
+
+显示进行中任务摘要：
+- gateway 是否存活
+- 活跃子代理任务数
+- 遗留的 processing 请求数
+- 最近 3 个任务的 ID、目标、状态
+
+`status` 是用户显式执行的只读诊断，始终显示这份摘要，不修改任务、attempt 或队列状态。崩溃调和由单 Gateway 的启动恢复和后台 runner supervision 负责。
+
+Gateway 段在计数大于 0 时多一行 `unidentified_stale_attempts=N`（`--json` 为 `gateway.unidentified_stale_attempts`）：没有进程身份、启动恢复不能自动判死的悬挂运行轮数量，只投影 Gateway 启动写进 state 的计数，用 `my-agent runtime-stale-attempts [--settle]` 查看或显式结清。
+
+Gateway 未运行且停机时还有受管后台进程在跑时，多一行 `background_sessions_after_stop=N`（`--json` 为 `gateway.surviving_background_sessions`）：这些进程按设计跨 Gateway 存活，明细在 Gateway 事件 `gateway_background_sessions_surviving`，停止用 TUI `/stop` 或 `background_process list/stop`。
+
+## `timeline`
+
+```powershell
+my-agent timeline --limit 20
+my-agent timeline --source-type gateway_request
+my-agent timeline --event-type gateway_request_completed --details
+```
+
+显示 LocalStore 最近事件。它更像“发生了什么”的时间线，而 `local-search` 更像“按关键词找资料”。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--limit <n>` | `20` | 最多显示多少条事件。 |
+| `--source-type <type>` | - | 按来源过滤，例如 `gateway_request`、`subagent_run`、`subagent_runner_result`。 |
+| `--event-type <type>` | - | 按事件类型过滤，例如 `gateway_request_completed`、`subagent_run_saved`。 |
+| `--details` | `false` | 显示事件 payload 摘要。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `run`
+
+```powershell
+my-agent run "总结这个项目" --no-save
+```
+
+默认保存时，`run` 会写运行经历归档、轻量 `memory/hooks/YYYY-MM-DD.jsonl` recovery snapshot 和运行恢复事实；有结构化任务时还会写 task workspace。它不会把普通 user/assistant 正文写进正式长期记忆。`--no-save` 关闭这些本次运行归档及持久化 Compact；它不删除或绕过由 Gateway 入口独立维护的 ConversationStore 与 audit。
+
+非完成收口（未完成/预算耗尽/不可续跑族）的任务不会死：用 `run --resume <任务 ID 或任务目录>` 从持久事实源恢复同一任务继续（与 会话运行时 resume / 轻量运行时 --continue 对齐），此时可省略 `prompt`。
+
+如果把 `memory_resume_auto_context_mode` 设为 `trigger`（消息里带 run/request/subagent/gwreq 这类结构化编号时）或 `always`（每轮），`run/chat/gateway` 会尝试读取归档和任务事实源，并把一段短小 `Recovery Brief` 注入本轮 prompt。默认 `off`，避免普通请求被恢复检索拖慢；单次运行可加 `--resume-context` 临时打开。
+
+`run` 结束状态行会显示粗略 token 估算，例如 `prompt_tokens≈...`、`inject_tokens≈...`、`resume_tokens≈...`。这是保守估算，不是模型厂商 tokenizer 的精确计费值。
+
+| 参数 | 说明 |
+| --- | --- |
+| `prompt` | 用户任务或问题；`--resume` 续跑已有任务时可省略。 |
+| `--inject <text>` | 动态注入 prompt，可多次传入。 |
+| `--prompt-file <path>` | 加载额外动态 prompt 文件，可多次传入。 |
+| `--save` | 保存本次运行归档与恢复事实；不会把普通对话直接写入正式长期记忆。 |
+| `--no-save` | 不保存本次运行归档；Gateway 的 ConversationStore 与 audit 仍按入口合同记录。 |
+| `--show-prompt` | 打印最终拼装后的 prompt。 |
+| `--resume <task>` | 续跑已存在的任务（任务 ID 或任务目录路径），与 会话运行时 resume / 轻量运行时 --continue 对齐；续跑时省略 `prompt`。 |
+| `--delivery-contract-file <path>` | 读取结构化交付合同 JSON，供主代理按机器字段验收产物，不把合同塞进用户 prompt。 |
+| `--resume-context` | 本次请求临时启用恢复上下文注入，不用改配置文件。 |
+| `--no-resume-context` | 本次请求临时关闭恢复上下文注入。 |
+
+## `remember`
+
+```powershell
+my-agent remember "项目 moneywise 使用 Python 3.14" --kind project
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `content` | 必填，要长期保存的具体事实、事件或项目知识。 |
+| `--kind <kind>` | 正式知识类型：`fact`=事实（默认）、`event`=事件、`project`=项目知识；用户画像或偏好走 `update_persona`，lesson 走统一 Candidate/Promotion 链。 |
+
+代理侧对应两个模型工具：
+- `remember`：写入或列出正式长期记忆。
+- `memory_search`：只读检索，默认关闭，开关 `enable_memory_search_tool`，只能由你经 `/settings` 或配置文件打开，重启 Gateway 生效。
+  - 打开后，自动召回漏掉某个事实时，主会话代理可以按你本人和本轮适用范围查一次。
+  - 返回条目编号、类型、更新时间和前 300 字摘录，并写明这次走的是语义还是关键词检索。
+  - 它不写、不删、不改记忆，结果不进自动召回；子代理回合和记忆总闸关闭时不可用。
+
+## `memory`
+
+```powershell
+my-agent memory candidates list --status pending_review
+my-agent memory candidates review <candidate_id> --decision approve --reviewer admin
+my-agent memory candidates promote <candidate_id> --reviewer admin
+my-agent memory curator status --json
+my-agent memory curator run --json
+my-agent memory retention plan --json
+my-agent memory retention apply --json
+my-agent memory doctor --json
+my-agent memory migrate --json
+my-agent memory migrate --apply --json
+```
+
+这是 Memory v2 唯一管理员命令树。旧 `learn` 与 `subagents-memory-gate` 已删除；旧
+`data/learning_drafts` 和 task-local `memory_gate` 只由一次性 `memory migrate` 读取，不再作为生产状态机。
+
+### `memory candidates`
+
+| 子命令或参数 | 中文说明 |
+| --- | --- |
+| `list` | 从当前 owner 的唯一 `memory/candidates.jsonl` 列出候选；`--status` 可重复传入，`--limit 0` 表示不限。 |
+| `review <candidate_id>` | 按精确 ID 审核；`--decision` 可选 `approve`（批准）、`reject`（拒绝）、`reopen`（阻塞态退回待审）、`expire`（过期）、`supersede`（被替代）。 |
+| `--proposed-action` | 修正正式动作：`add` 新增、`replace` 替换、`remove` 删除、`merge` 合并、`none` 不处理。 |
+| `--target-entry-id` | replace/remove/merge 或 HOT 的精确正式目标 ID，不能按正文模糊选择。 |
+| `--promotion-target` | 正式落点：`long_term` 长期事实、`user` 用户画像、`lesson` 教训、`hot` 高频规则、`soul` AI 人格、`agents` 合作约定、`none` 不晋升。 |
+| `promote <candidate_id>` | 经唯一 PromotionService 核验证据、scope 与冲突后晋升；批准状态不等于已落盘。 |
+| `--automatic` | 使用 `conservative_v1` 自动策略，不会放宽证据、冲突或 Persona 确认边界。 |
+| `--confirmed` | 表示当前受保护 Persona 操作已确认；候选本身仍必须有用户明确来源。 |
+
+候选状态：`observed`=已观察，`pending_review`=待审核，`approved`=已批准，`promoted`=已晋升，
+`rejected`=已拒绝，`superseded`=已被替代，`expired`=已过期，
+`blocked_missing_evidence`=缺少证据，`blocked_conflict`=存在冲突。
+
+### `memory curator`
+
+- `status`：查看当前 provider/model、增量游标、pending reason、active lease、累计数量和最近错误码。
+- `run`：先持久化 `admin` reason，再由同一 CuratorService 立即尝试一个有界批次。
+- `--force`：即使配置关闭也执行一次；仍遵守严格 Schema、证据、lease 和无工具权限边界。
+
+### `memory retention`
+
+- `plan`：严格只读，不创建 trash 或审计，也不修改任何文件。
+- `apply`：锁内重新计划并逐项重验证后执行；legal hold、非终态任务、损坏状态或 fingerprint 变化会关闭式阻断删除。
+
+### `memory doctor` 与 `memory migrate`
+
+- `doctor`：只读汇总 Candidate、Curator、routing、migration 和 retention 健康；`--index` 可指定 routing index。
+- `migrate`：默认 dry-run；`--apply` 才会先生成完整备份/manifest，再迁移并写 schema marker；失败会回滚。
+- 所有子命令可加 `--json` 输出稳定机器字段；普通输出提供中文标题，字段完整解释见 `docs/modules/memory/05-memory-v2-layout.md`。
+
+## `skills`
+
+```powershell
+my-agent skills learned list
+my-agent skills learned show <name> --json
+my-agent skills learned revert <name>
+my-agent skills learned remove <name>
+my-agent skills proposals list
+my-agent skills proposals list --status pending_confirmation --json
+my-agent skills proposals show <proposal_id>
+my-agent skills proposals confirm <proposal_id> --expected-revision 1
+my-agent skills proposals reject <proposal_id> --expected-revision 1 --json
+```
+
+TUI 与 IM（飞书等）里用聊天命令做同样的事：`/skills`、`/skills proposals [all]`、`/skills show <提案编号>`、
+`/skills confirm <提案编号> <版本>`、`/skills reject <提案编号> <版本>`、`/skills learned`、`/skills learned show|revert|remove <名称>`。
+提案编号可用至少 6 位前缀；确认、拒绝必须带当前版本号。
+
+### 参数中心：`/settings`（TUI 与 IM，管理员）
+
+所有参数只在一个登记表里定义（说明取自随包 `agent_config.yaml` 的注释），修改写入当前加载的用户配置，重启 Gateway 后生效：
+
+- `/settings`：只列常用参数（21 项，平时要调的基本都在这里）的当前值、是否改过、一句说明；改了还没重启的注明“发 /restart 后生效”，常用以外改过的只报个数，并说明一共多少项、看全部用 `/settings all`。
+- `/settings all`：全部参数——总数、可改范围、用户配置位置、与默认值不同的个数、最近修改，再按分类列出每个参数的当前值，改过的标［改过］、不能在这里改的标［安全边界］。IM 里内容较长时会自动分成几条消息。
+- `/settings search <关键词>`：按参数名或中文说明找参数；`/settings show <参数名>`：说明、默认值、当前值、能否修改。
+- `/settings set <参数名> <值>`：修改非安全参数（按类型校验，写后用正式加载回读核对，不一致就恢复原文件），记入修改记录。
+- `/settings reset <参数名>`：删除覆盖恢复默认；`/settings history [参数名]`：修改记录；`/settings revert <记录编号>`：回滚一次修改。
+
+凭据、权限、身份、路径、外部地址、会运行代码的服务与插件等属于安全边界，不能在这里改；凭据类只记脱敏值、不能回滚。
+my-agent 通过 `user_config` 工具（search/view/set/reset/history/revert）使用同一套规则；search 与 view 结果里的 `common` 标出常用参数。
+
+### `skills learned`：自动总结的 Skill
+
+配置 `enable_self_learning: true` 后，主代理正常完成、且本轮工具轮数达到 `self_learning_min_tool_rounds`（默认 6）
+的任务，会在当前 owner 的 `data/skill_learning/requests/` 登记一条有界学习请求（用户输入与最终回复各截 3000 字并脱敏，
+工具轨迹最多 80 条）。Gateway 后台记忆整理车道用 owner 当前选定的模型判断是否值得沉淀：值得就新建或更新
+`skills/learned/<名字>/SKILL.md`，下一轮 Skill 快照即可看到 `owner:<名字>`（category `learned`）。
+不需要逐条确认（用户 2026-09-26 决定），发布前必须通过自动闸门：输出合同、与任何来源的 Skill 重名、删过的名字、
+数量上限 `self_learning_max_skills`、脱敏、frontmatter 解析往返、`agent_generated` 安全扫描；更新只针对本轮
+`skill_search get` 读过、登记在册且你没改过的自学 Skill。每天每个 owner 最多 `self_learning_daily_limit` 次总结调用。
+没有任何模型可调用的管理工具。
+
+| 子命令或参数 | 中文说明 |
+| --- | --- |
+| `list` | 列出自动总结的 Skill（名字、版本、状态、更新时间、路径），以及待处理请求数和今日调用次数。状态：`active` 生效中，`user_modified` 你改过（自动流程不再更新），`missing` 文件已不存在。 |
+| `show <name>` | 查看登记信息、来源运行和最近 20 条账本事件（`published`/`updated`/`skipped`/`rejected`/`failed`/`dropped`/`reverted`/`removed` 与结果码）。 |
+| `revert <name>` | 退回上一个版本（每个 Skill 保留最近 5 个版本全文）；只有第 1 版时等同 `remove`；你改过的 Skill 拒绝（`SKILL_LEARNING_USER_MODIFIED`）。 |
+| `remove <name>` | 把整个 `skills/learned/<name>/` 移到 `data/skill_learning/removed/` 归档，从登记表去掉，名字加入禁用名单，以后不再自动新建同名 Skill。 |
+| `--json` | 输出稳定机器字段：成功含 `code`，失败含 `error_code`（如 `SKILL_LEARNING_NOT_LEARNED`、`SKILL_LEARNING_USER_MODIFIED`、`SKILL_LEARNING_VERSION_MISSING`、`SKILL_LEARNING_REGISTRY_CORRUPT`）；退出码成功为 0、失败为 1。 |
+
+账本 `data/skill_learning/ledger.jsonl` 只记结构化字段与有界原因，不含 Skill 正文或对话内容；
+常见拒绝码：`SKILL_LEARNING_OUTPUT_INVALID`、`SKILL_LEARNING_NAME_TAKEN`、`SKILL_LEARNING_NAME_BLOCKED`、
+`SKILL_LEARNING_LIMIT_REACHED`、`SKILL_LEARNING_GUARD_BLOCKED`、`SKILL_LEARNING_TARGET_USER_OWNED`；
+发布时做过脱敏的事件带 `SKILL_LEARNING_REDACTED`。
+
+### `skills proposals`：子代理经验提案
+
+配置 `enable_self_learning: true` 后，带精确任务/运行来源的子代理 lesson 会在当前 owner 的
+`data/skill_proposals/<proposal_id>.json` 生成提案，并立即以 `confirmed_by=auto` 走下面 `confirm` 的同一复核链自动安装
+（用户 2026-09-26 决定不逐条审批）；复核被拒的提案保持待确认。提案写明来源任务与运行、触发原因
+（`subagent_lesson_candidate`）、拟保存内容（完整 SKILL.md 草稿）和适用场景。开关关闭后，遗留提案仍可查看、确认或拒绝。
+没有任何模型可调用的确认工具。
+
+| 子命令或参数 | 中文说明 |
+| --- | --- |
+| `list` | 按创建时间列出当前 owner 的提案；目录不存在时返回空列表且不创建目录。 |
+| `--status <status>` | 按状态过滤：`pending_confirmation`=待确认，`committed`=已确认并安装，`rejected`=已拒绝。 |
+| `show <proposal_id>` | 查看一条提案的全部待核对事实和草稿正文，并给出带当前版本号的确认命令。 |
+| `confirm <proposal_id>` | 确认并安装：在 owner 锁内复核提案仍待确认、版本号、草稿 hash、来源候选仍存在且未脱敏/未改写/未被拒绝、目标 `skills/lesson-*` 不存在，再经 frontmatter 解析与 `agent_generated` 安全扫描（caution/dangerous 一律拒绝，不能强制）后原子安装，提案版本加一并记为 `committed`。 |
+| `reject <proposal_id>` | 拒绝提案：只把提案版本加一并记为 `rejected`，不写任何 Skill；同一候选内容之后不会再生成新提案。 |
+| `--expected-revision <N>` | confirm/reject 必填，填你查看时的提案版本号；与当前版本不一致或提案已处理时拒绝操作。 |
+| `--json` | 输出稳定机器字段：成功含 `code`，失败含 `error_code`（如 `SKILL_PROPOSAL_REVISION_MISMATCH`、`SKILL_PROPOSAL_TARGET_EXISTS`、`SKILL_PROPOSAL_SOURCE_CHANGED`、`SKILL_PROPOSAL_GUARD_BLOCKED`）；退出码成功为 0、失败为 1。 |
+
+任何确认失败都不会写入目标 Skill，提案保持待确认；确认成功后，下一轮 Skill 快照即可看到 `owner:lesson-*`，
+已开始的回合沿用自己的旧快照。
+
+可选审核顺序（默认关闭）：在用户长期决策设置里把 `skill_proposal_review` 设为 `apply`（YAML
+`decision_skill_proposal_review_mode`，或 TUI `/model` → 选择模型 → 决策模型 → 用户长期设置 → 逐接入点设置 → “Skill 提案审核顺序（用户长期）”）并开启决策总开关后，
+`list` 遇到 2—30 条待确认提案时会请决策模型给出审核先后：待确认提案按“建议优先审核 → 普通 → 建议稍后/可能与其他提案重复”
+重排（同组保持创建顺序，已确认/已拒绝的条目位置不动），列表首行下多一行说明，条目后附 `〔建议优先审核〕` 这类标签；
+`--json` 多一个 `review_order` 块（别名、proposal_id、suggestion、label 与 `status: applied`）。这只是展示顺序，
+不会替你确认或拒绝任何提案。`observe` 只发请求不改输出；关闭、提案少于 2 条、请求失败、超时、冷却或列表在等待期间变化时，
+输出与未开启时完全相同。发给决策模型的只有提案别名、来源计数和脱敏后的描述、适用场景与经验摘录，不含提案编号或路径。
+
+## `memory-list`
+
+```powershell
+my-agent memory-list --limit 20
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--limit <n>` | `20` | 最多显示条数。 |
+
+## `memory-search`
+
+```powershell
+my-agent memory-search "表格" --limit 5
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | - | 必填，搜索关键词。 |
+| `--limit <n>` | `5` | 最多显示条数。 |
+
+## `home-status`
+
+```powershell
+my-agent home-status
+my-agent home-status --json
+```
+
+查看当前配置解析出的 `~/.my-agent` 家目录状态，包括 `SOUL.md`、`USER.md`、`AGENTS.md`、`memory.md` 是否存在，`memory/daily`、`tasks`、`scripts`、`role_templates`、`workflows` 等关键目录是否存在，以及 daily 文件数和 task workspace 数量。它只读目录结构，不调用模型、不扫描产物正文。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `home-migrate`
+
+```powershell
+my-agent home-migrate
+my-agent home-migrate --apply --json
+```
+
+预览或执行旧 home 数据到当前 owner home 的非破坏性迁移。默认只列计划；`--apply` 只复制旧 `memory/daily`、`memory/raw` 和 `tasks` 到 owner home，目标已存在就跳过，不删除、不覆盖旧文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--apply` | `false` | 执行复制；不传时只 dry-run 预览。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `home-retention`
+
+```powershell
+my-agent home-retention
+my-agent home-retention --apply --json
+```
+
+预览或执行当前 owner home 的保留策略清理。默认只列出过期候选；`--apply` 才会删除过期文件，并把清理结果写入 owner audit log。0 天保留策略表示不清理。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--apply` | `false` | 实际删除过期文件；不传时只 dry-run 预览。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `home-index-rebuild`
+
+```powershell
+my-agent home-index-rebuild
+my-agent home-index-rebuild --apply --json
+```
+
+预览或执行 owner/task/run/agent 全局轻量索引重建。默认只扫描 owner home 正文并输出计划；`--apply` 才追加新的 global index 行。它不删除旧索引、不修改任务正文、不调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--apply` | `false` | 实际追加重建索引行；不传时只 dry-run 预览。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `runtime-stale-attempts`
+
+```powershell
+my-agent runtime-stale-attempts
+my-agent runtime-stale-attempts --settle --older-than-days 7 --json
+```
+
+列出 owner 权威运行库里仍为 running/created、但 metadata 没有记录 `runner_pid` 的运行轮：这类行来自旧版本，进程死亡证明永远碰不到它们，Gateway 启动时会把数量写进状态与 `gateway_stale_attempts_reconciled` 事件，但不会自动判死（同一 owner 库可能被别的运行版本写入）。确认没有别的运行版本还在用它们后，加 `--settle` 把开始于阈值之前的行记为 unknown 终态（不是成功或失败），metadata 记 `recovery_reason=no_runner_identity`、`settled_by=explicit_control`。有进程身份的行不受影响，仍走原进程死亡证明。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--settle` | `false` | 实际结清；不传时只列出。 |
+| `--older-than-days` | `1` | 只结清开始时间早于这么多天前的运行轮；最小 0。 |
+| `--json` | `false` | 输出机器可读 JSON（含 `settled_agent_run_ids` 与 `remaining`）。 |
+
+## `admin-password`
+
+```powershell
+my-agent admin-password set
+my-agent admin-password status --json
+my-agent admin-password clear
+```
+
+只在配置的 base owner 为本机主用户（local/main）时运行，否则以 2 退出。`set` 用无回显输入读两次密码，两次一致且满足
+至少 8 个字符、首尾无空白、不含控制字符时，保存到 `<my_agent_home>/config/admin-password.json`（文件 0600、目录 0700）。
+文件只存 scrypt 参数、盐和派生值，重新设置会换新盐。`status` 只显示是否已设置、更新时间和已绑定身份数，不输出散列。
+`clear` 只删除密码文件，已绑定的 IM 身份保持不变；之后 `/admin` 与 `/approve` 一律验证不通过。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | `status` 输出机器可读 JSON（`configured`、`state`、`updated_at`、`bound_identities`）。 |
+
+## `admin-identities`
+
+```powershell
+my-agent admin-identities list
+my-agent admin-identities remove feishu:ou_xxx
+```
+
+列出或解除 `/admin` 绑定的 IM 私聊身份（`<my_agent_home>/config/admin-channel-identities.json`）。身份写成
+`渠道:用户ID`；`remove` 按精确匹配删除一条，不存在时返回 1。同样只在 local/main 配置下运行。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | `list` 输出机器可读 JSON（`identities` 列表含 `identity` 与 `bound_at`）。 |
+
+## `memory-daily-list`
+
+```powershell
+my-agent memory-daily-list "表格" --date 2026-05-13
+my-agent memory-daily-list --date 2026-05-13 --actor user --event-type conversation --json
+```
+
+直接查看当前 owner 的 `memory/daily/YYYY-MM-DD.jsonl` Daily v2 经历摘要。该命令只读严格 v2 记录，旧 `role/kind/content` Daily 镜像必须先经 `memory migrate`，不会被兼容双读；Daily 也不会因此成为正式长期记忆或 Prompt 召回来源。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 可选搜索关键词；为空时列出匹配日期、角色和类型的记录。 |
+| `--date <YYYY-MM-DD>` | - | 只查看某一天的 daily memory 文件。 |
+| `--actor <actor>` | 空 | 按经历主体精确过滤：`user` 用户、`main_agent` 主代理、`subagent` 子代理、`tool` 工具、`system` 系统。 |
+| `--event-type <type>` | 空 | 按经历类型精确过滤：`conversation` 对话、`decision` 决定、`task_progress` 任务进展、`tool_result` 工具结果、`lesson` 教训、`todo` 待办、`summary` 摘要、`warning` 警告、`error` 错误。 |
+| `--limit <n>` | `50` | 最多显示多少条记录。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-route`
+
+```powershell
+my-agent memory-route "上下文压缩前要不要读长期规则"
+my-agent memory-route "memory index" --index memory/routing/INDEX.md --mode strict --limit 5 --auto-read-limit 2
+my-agent memory-route --validate --json
+my-agent memory-route "任务恢复规则" --json
+```
+
+按长期规则路由索引预览查询会命中哪些 authority 文件。默认索引是工作区下的 `memory/routing/INDEX.md`；索引不存在时不会崩溃，会输出清楚的诊断信息。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | - | 可选，要路由的查询或用户任务；配合 `--validate` 时可以省略。 |
+| `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
+| `--mode <mode>` | 配置 `memory_rule_routing_mode` | 路由模式，可选 `off`、`soft`、`strict`。 |
+| `--validate` | `false` | 只校验 route index 的重复关键词、冲突关键词、死链和非法 `inject_mode`。 |
+| `--limit <n>` | `5` | 最多显示多少条命中 route；`0` 表示不截断。 |
+| `--auto-read-limit <n>` | 配置 `memory_rule_auto_read_limit` | 最多升级多少条规则路径到 required/candidate。 |
+| `--json` | `false` | 输出机器可读 JSON，包含 `matches`、`required_read_paths`、`candidate_paths` 和诊断信息。 |
+
+## `guidance-send`
+
+```powershell
+my-agent guidance-send --run-id <run_id> "这里补一句自然语言提醒"
+my-agent guidance-send --thread-id <thread_id> "下次回复时注意用户刚补充的要求"
+```
+
+`guidance-send` 是运行中补充提示的 CLI 入口。它只把一句自然语言写进 guidance 账本，让目标代理下一轮读取；不会直接推进、验收、改状态或调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `message` | - | 必填，要追加的自然语言提示。 |
+| `--run-id <id>` | 空 | 目标代理 run_id，常用于点名主代理、子代理或孙代理。 |
+| `--thread-id <id>` | 空 | 目标长期会话 thread_id。 |
+| `--task-id <id>` | 空 | 目标任务 id。 |
+| `--case-id <id>` | 空 | 目标协作 case id。 |
+| `--target-type <type>` | 空 | 开放目标类型，常见 `agent_run`、`thread`、`task`、`case`。 |
+| `--target-id <id>` | 空 | 与 `--target-type` 配套的目标 id。 |
+| `--sender <name>` | `cli_user` | 发送者标记。 |
+| `--priority <level>` | `normal` | 软优先级，只用于提示排序或展示。 |
+| `--delivery <mode>` | `next_turn` | 投递提示，默认下一轮读取。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-doctor`
+
+```powershell
+my-agent memory-doctor
+my-agent memory-doctor --index memory/routing/INDEX.md
+my-agent memory-doctor --json
+```
+
+诊断 memory 配置和文件骨架：显示 memory 配置的 effective values、配置回退 warnings、home runtime 入口文件/目录状态、路由索引是否存在、routes 加载和校验结果，以及 `memory/hooks`、`memory/raw` 目录的文件数、最近文件和 hook retention 配置。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
+| `--json` | `false` | 输出机器可读 JSON，包含 `home`、`warnings`、`routing.routes` 和 archive 目录状态。 |
+
+## `memory-archive-list`
+
+```powershell
+my-agent memory-archive-list
+my-agent memory-archive-list --layer raw --limit 20
+my-agent memory-archive-list --layer raw --level 3 --json
+my-agent memory-archive-list --date 2026-04-30 --json
+```
+
+列出 `memory/raw` 和 `memory/hooks` 里的最近归档记录。它只读 JSONL，不调用模型；输出会标明 layer、记录 ID、run/request/session、文件路径和行号。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--layer <layer>` | `all` | 查看哪一层归档，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只查看某一天的归档文件。 |
+| `--level <0|1|2|3>` | - | 只查看指定 `archive_level` 的记录。 |
+| `--limit <n>` | `20` | 最多显示多少条记录。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-archive-search`
+
+```powershell
+my-agent memory-archive-search "README" --speaker tool
+my-agent memory-archive-search --run-id subagent-xxx --status ok --json
+my-agent memory-archive-search "继续" --since 2026-04-30 --layer raw
+```
+
+按关键词和结构化字段搜索 `memory/raw` / `memory/hooks`。这层是恢复线索，不是任务最终事实源；查到线索后仍应继续读任务目录、LocalStore 记录或 authority 文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 搜索关键词，可不传，只用字段过滤。 |
+| `--layer <layer>` | `all` | 搜索哪一层归档，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只搜索某一天。 |
+| `--since <time>` | - | 只看此时间之后的记录，支持 ISO 时间或日期。 |
+| `--until <time>` | - | 只看此时间之前的记录，支持 ISO 时间或日期。 |
+| `--session-id <id>` | - | 按 session_id 精确过滤。 |
+| `--request-id <id>` | - | 按 request_id 精确过滤。 |
+| `--run-id <id>` | - | 按 run_id 精确过滤。 |
+| `--task-id <id>` | - | 按 task_id 精确过滤。 |
+| `--speaker <name>` | - | 按 speaker 精确过滤，如 `user`、`assistant`、`tool`。 |
+| `--target <name>` | - | 按 target 精确过滤。 |
+| `--action <name>` | - | 按 action 精确过滤，如 `message`、`response`、`tool_call`。 |
+| `--status <status>` | - | 按 status 精确过滤，如 `ok`、`failed`。 |
+| `--tool-name <name>` | - | 按工具名精确过滤。 |
+| `--source <source>` | - | 按来源精确过滤，如 `run`、`gateway`、`subagent`。 |
+| `--limit <n>` | `20` | 最多显示多少条记录。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-resume`
+
+```powershell
+my-agent memory-resume "继续 README 那个任务"
+my-agent memory-resume --run-id subagent-xxx --json
+my-agent memory-resume --request-id gwreq-xxx --limit 10
+my-agent memory-resume "继续" --context-only
+my-agent memory-resume --from-compact apply-xxx --context-only
+```
+
+从归档线索、LocalStore 检索结果、旧 subagent 任务目录和 home task workspace 中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md`，或 `~/.my-agent/tasks/<date>/<task>/work/state.json` / `work/timeline.jsonl` 等权威文件后再继续。
+
+`--context-only` 只打印稳定格式的 `Recovery Brief` 文本块，不打印外层说明。这个输出适合复制给真实环境测试、人工 handoff，后续也可以作为自动上下文注入的复用入口。
+
+`--from-compact <apply_id>` 会改走 compact apply 恢复路径，只读读取 `memory-compact --apply` 生成的 metadata、apply bundle、restore refs、work state snapshot、compact context 和 self-check，输出 `Compact Resume Context`、consistency report、action guard、continue packet、推荐读取路径和下一步动作。它不会自动执行工具，也不会修改任务或子代理文件；`--compact-owner-type/--compact-owner-id` 只是给未来子代理会话压缩预留 owner 字段。
+
+compact 恢复输出还会包含 `compact_resume_handoff` 和 `compact_continue_packet`：handoff 稳定展示目标、当前阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态；continue packet 则给手动/半自动/未来自动流程一个机器可读的继续契约。`--context-only` 打印的 `Compact Resume Context` 也会分节包含这些内容，适合复制给新会话或其他 agent 接手。
+
+`--compact-resume-mode auto` 会启用 Action Guard：refs 或 self-check 这类恢复事实源损坏时会返回非 0，防止无人值守状态继续偏航。字段齐全、refs 存在且 self-check 通过时会返回 `allow_automated_continue` / `allowed_to_continue=true`，continue packet 会标记 `ready_to_continue=true`，但仍标记 `automatic_tool_execution=none`，表示只允许后续策略接着判断，不会由 resume 命令直接跑工具。普通任务缺 acceptance、constraints、latest tests 或 next_step 只作为缺失备注提示，不阻断自动续接。默认 `manual` 只生成恢复材料和人工确认提示。
+
+缺 work state 字段时，compact 恢复输出会包含 `completion_prompt`。这会给出可复制的“验收条件/约束/测试”模板和建议命令；模板本身不会自动写文件。用户确认这些事实后，可以用 `memory-fact-write` 写入 scope 内的 `runtime_facts/<fact_id>/task.json`，再重新按同一个 request/session/task/run scope 执行 `memory-compact --apply`。
+
+普通 `run` 在上下文风险达到阈值时会额外打印 `compact_suggestion` 和 `compact_auto`。`compact_suggestion` 给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact` 的建议命令；`compact_auto` 显示自动协调器当前停在 `needs_user_confirmation`、`blocked_after_action_guard`、`ready_after_action_guard` 等哪一步，并显示 `apply_id` / `continue_ready`。保存型运行默认会自动做非破坏性 apply + auto resume + guard/packet，并在 guard 放行后继续同一个任务；`save=false` 只返回 plan，不写 apply 产物。
+
+JSON 输出里会额外包含 `brief`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `latest_user_intent` | 最近能恢复出的用户意图。 |
+| `latest_assistant_action` | 最近能恢复出的助手动作。 |
+| `related_ids` | 关联的 session/request/run/task ID，方便下一轮精确恢复。 |
+| `likely_task_statuses` | 从任务目录读出的状态摘要；没有任务目录时不会凭 archive 猜。 |
+| `recommended_read_paths` | 必读事实源路径。 |
+| `authority_note` | 提醒 archive/local 只是恢复线索，任务文件才是当前事实源。 |
+| `context_block` | 稳定格式的恢复文本块，后续可用于人工 handoff 或自动注入。 |
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 恢复关键词，可不传，只用 request/run/session 等字段过滤。 |
+| `--layer <layer>` | `all` | 从哪一层归档找线索，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只看某一天。 |
+| `--since <time>` | - | 只看此时间之后的归档线索。 |
+| `--until <time>` | - | 只看此时间之前的归档线索。 |
+| `--session-id <id>` | - | 按 session_id 精确过滤。 |
+| `--request-id <id>` | - | 按 request_id 精确过滤。 |
+| `--run-id <id>` | - | 按 run_id 精确过滤。 |
+| `--task-id <id>` | - | 按 task_id 精确过滤。 |
+| `--speaker <name>` | - | 按 speaker 精确过滤。 |
+| `--target <name>` | - | 按 target 精确过滤。 |
+| `--action <name>` | - | 按 action 精确过滤。 |
+| `--status <status>` | - | 按 status 精确过滤。 |
+| `--tool-name <name>` | - | 按工具名精确过滤。 |
+| `--source <source>` | - | 按来源精确过滤。 |
+| `--limit <n>` | `20` | 最多显示多少条线索。 |
+| `--from-compact <apply_id-or-path>` | - | 从某次非破坏性 compact apply 恢复上下文，可传 apply_id 或产物路径。 |
+| `--compact-resume-mode <manual|auto>` | `manual` | compact 恢复守门模式；`auto` 字段缺失会阻断，字段齐全时只返回允许继续的机器信号。 |
+| `--compact-owner-type <type>` | `main_agent` | compact owner 类型；`subagent_run` / `subagent_session` 会只读解析 task-local run workspace refs。 |
+| `--compact-owner-id <id>` | 空 | compact owner 标识；子代理 owner 通常传 run_id，不会写主 memory 或自动执行工具。 |
+| `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `task-workspace-list`
+
+```powershell
+my-agent task-workspace-list --date 2026-05-13
+my-agent task-workspace-list "购物网站" --json
+```
+
+列出当前 `owner_home/tasks/{date}/{task_slug}/` 下的主代理任务目录。任务根目录只分两块：`output/` 是可复制走的最终交付物，`work/` 是状态、日志、compact、子代理账本和草稿等过程材料。命令会展示 `work/state.json`、`work/timeline.jsonl`、`work/task.yaml`、`output/`、`work/runtime/`、`work/agents/` 等引用，帮助恢复和前端调试；不会读取产物正文，也不会调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 可选关键词，可匹配 task_id、task_name、run_id、request_id 或目录 slug。 |
+| `--date <YYYY-MM-DD>` | - | 只查看某一天的任务目录。 |
+| `--limit <n>` | `50` | 最多显示多少个任务。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-artifact-read`
+
+```powershell
+my-agent memory-artifact-read C:\repo\memory_archive\artifacts\tool_outputs\read_file-call-abc.json
+my-agent memory-artifact-read <sha256> --offset 4000 --max-chars 2000 --json
+my-agent memory-artifact-read <call_id> --max-chars 0
+```
+
+显式读取已经外置的 tool-output artifact 正文。这个命令只信任 `memory_archive/artifacts/tool_outputs/index.jsonl` 里的登记记录；`artifact_ref` 可以是登记过的 path、sha256 或 call_id。普通文件路径即使存在，也不会被当成 artifact 读取。
+
+默认只读前 4000 个字符；`--offset` 可以从正文中间继续读，`--max-chars 0` 表示读取完整正文。JSON 输出会包含 `content_hash_verified=true`、`reads_artifact_body=true`、`truncated`、`content_offset` 和 `content_max_chars`，方便接管者确认这次确实是显式读取。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `artifact_ref` | 必填 | 来自恢复包、manifest 或 tool output index 的 artifact path/hash/call_id。 |
+| `--offset` | `0` | 从正文第几个字符开始读取。 |
+| `--max-chars` | `4000` | 最多读取多少字符；`0` 表示读取全部。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-fact-write`
+
+```powershell
+my-agent memory-fact-write --fact-id request-xxx --acceptance "pytest passes" --constraint "do not touch user config" --latest-test "python3 -m pytest -q"
+my-agent memory-fact-write --from-compact apply-xxx --acceptance "..." --constraint "..." --latest-test "..." --json
+```
+
+把用户已经确认的 compact resume 补全事实写入 `memory_archive/runtime_facts/<fact_id>/task.json`。它用于半自动 compact 闭环：`memory-resume --from-compact --compact-resume-mode auto` 如果因为缺 `acceptance`、`constraints`、`latest_tests` 阻断，先让用户补齐事实，再写入这个事实源，然后重新执行同一 scope 的 `memory-compact --apply`。
+
+这个命令只保存显式传入的事实，不解析模型回复，不猜验收条件。`--from-compact` 只用于读取目标、下一步和 scope；如果没有传 `--fact-id`，命令会优先从 compact scope 中选择 `request_id`、`session_id`、`task_id`、`run_id` 作为事实源目录名。为了让后续 apply 能读到它，重新 compact 时要使用同一个 scope，例如同一个 `--request-id`。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--fact-id <id>` | - | 事实源目录名；通常使用 request_id/session_id/task_id/run_id。 |
+| `--from-compact <apply_id>` | - | 可选：从 compact apply 的 handoff 读取目标、下一步和 scope。 |
+| `--goal <text>` | - | 可选：当前任务目标；未传时尝试从 compact handoff 读取。 |
+| `--next-action <text>` | 可重复 | 恢复后的下一步动作。 |
+| `--acceptance <text>` | 可重复 | 用户确认的验收条件。 |
+| `--constraint <text>` | 可重复 | 用户确认的约束或禁止事项。 |
+| `--latest-test <text>` | 可重复 | 最近已跑或必须跑的测试状态。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `context-bundle`
+
+```powershell
+my-agent context-bundle latest
+my-agent context-bundle latest --json
+```
+
+只读查看最新 `Main Agent Context Bundle v1`。它不会调用模型，也不会写文件。这个命令用于确认最近一次主代理保存型 run 的任务卡是否存在、scope 是否正确、自检是否通过，以及 RunScope、ToolManifest、Acceptance Contract 和 prompt budget 当前是什么。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `latest` | - | 查看最新主代理上下文包。 |
+| `--json` | `false` | 输出机器可读 JSON，方便前端或调试脚本读取。 |
+
+## `real-e2e`
+
+```powershell
+my-agent real-e2e --workspace .\.real-e2e --json
+my-agent real-e2e --workspace .\.real-e2e --artifact .\outputs\index.html --json
+my-agent real-e2e --workspace .\.real-e2e --real-task-suite --real-task-max-workers 4 --json
+my-agent real-e2e --workspace .\.real-e2e --run-real-tasks --real-task-case furniture_homepage_html --real-task-base-config .\agent_py_agent\config\agent_config.yaml --json
+my-agent real-e2e --workspace .\.real-e2e --revalidate-real-task-report .\.real-e2e\main_agent_real_task_execution\execution_report.json --json
+my-agent real-e2e --workspace .\.real-e2e --resume-real-task-recovery-packet .\.real-e2e\main_agent_real_task_execution\furniture_homepage_html\recovery_packet.json --json
+my-agent real-e2e --workspace .\.real-e2e --report .\reports\real-e2e.json
+```
+
+运行主代理基础验收矩阵。当前命令默认只跑不调用模型的确定性用例：工具失败分类、大输出 artifact refs、确定性 E2E matrix；需要真实模型的用例会明确标记 `SKIPPED`，不会把“没跑”说成通过。
+
+如果已经用真实模型生成了产物，可以把文件路径传给 `--artifact`。命令会调用 Artifact Acceptance（产物验收）统一检查 HTML、JSON、CSV、XLSX、PDF 和未知格式的基础质量，并把 findings（问题清单）写进报告。它不展开大文件正文，只写路径、类型和结构化问题。
+
+如果要准备多主代理真实任务测试，可以加 `--real-task-suite`。命令会生成家具 HTML、购物网站、GitHub 升星 XLSX、DeepSeek 论文翻译 PDF 等任务的 `prompt.md`、`acceptance.json`、`expected_artifacts.json` 和 `suite_report.json`，并给每个任务分配 worker slot（工位）和 timeout（超时）。默认仍然只生成计划，不自动调用模型。
+
+如果要真的启动这些主代理任务，必须显式加 `--run-real-tasks`。执行器会给每个 case 写独立 `config.yaml`、`command.json`、`stdout.txt`、`stderr.txt`、`acceptance_report.json` 和专属 workspace，并按 `--real-task-max-workers` 并发启动，报告里会写 `concurrency` 说明请求并发和实际并发。执行成功不等于任务成功：runner 会继续按 `expected_artifacts.json` 验收产物，缺文件或机器验收失败都会让 case 失败。没有传 `--real-task-base-config` 时使用离线 echo 配置，适合 CI 和调试；要烧真实 API，必须显式传真实配置文件。
+
+如果真实任务已经跑完，只想重新检查产物，可以用 `--revalidate-real-task-report` 指向之前的 `execution_report.json`。它不会重启主代理，也不会重新调用模型，只会按 report 里的 refs 回到 task workspace 和 expected artifact 合同重新验收。
+
+如果某个真实任务 case 中途失败，但已经留下 `recovery_packet.json`，可以传 `--resume-real-task-recovery-packet` 按同一个 case 的恢复包续跑。它会复用原 task workspace、acceptance 合同和 artifact refs，不会重新生成一套平行任务目录。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--workspace <path>` | 当前目录 `.my-agent-real-e2e` | E2E 工作区；命令会把报告和确定性测试证据写到这里。 |
+| `--report <path>` | `<workspace>/real_e2e_report.json` | 报告输出路径。 |
+| `--artifact <path>` | 可重复 | 额外验收真实任务产物。适合先让模型生成文件，再用机器验收确认。 |
+| `--include-real-model` | `false` | 预留真实模型用例标记；当前不会自动发起模型调用。 |
+| `--real-task-suite` | `false` | 生成主代理真实任务批量测试计划。报告只放 refs，不内联任务 prompt 或大产物正文。 |
+| `--run-real-tasks` | `false` | 显式执行真实任务套件；默认关闭，避免普通验证意外调用模型或长期占用进程。 |
+| `--real-task-case <case_id>` | 可重复 | 只计划/执行指定 case，例如 `furniture_homepage_html`。不传则覆盖全部默认 case。 |
+| `--real-task-base-config <path>` | 空 | 执行真实任务使用的基础配置文件；为空时使用离线 echo 配置，传真实配置才会调用真实模型。 |
+| `--real-task-prompt-override <case_id=prompt_file>` | 可重复 | 用外部 prompt 文件覆盖指定真实任务 case 的初始提示词；只接受结构化 `case_id=路径`，不从自然语言猜 case。 |
+| `--revalidate-real-task-report <path>` | 空 | 只读复验已有真实任务执行报告；不启动模型进程，只重新跑产物验收。 |
+| `--resume-real-task-recovery-packet <path>` | 空 | 按已有 `recovery_packet.json` 续跑同一个真实任务 case，复用原 task workspace 和验收合同。 |
+| `--real-task-max-workers <n>` | `4` | 真实任务计划/执行的最大并发工位。 |
+| `--real-task-timeout <seconds>` | `480` | 真实任务执行的单任务超时秒数；超时会写结构化失败和 stderr/stdout refs。 |
+| `--json` | `false` | 输出完整机器可读 JSON。 |
+
+## `memory-compact`
+
+```powershell
+my-agent memory-compact
+my-agent memory-compact --session-id sess-xxx --json
+my-agent memory-compact --request-id gwreq-xxx --limit 0
+my-agent memory-compact --apply
+my-agent memory-compact --apply --main-context-bundle-ref ~/.my-agent/memory_archive/snapshots/context_bundles/2026-05-17/example.json
+```
+
+预演上下文压缩计划。默认 dry-run 会扫描 `memory/raw`、`memory/hooks`、`memory_archive/snapshots` 和 `memory_archive/tokens`，汇总可压缩线索、权威 snapshot、token ledger、风险提示和下一步建议，不删除、不覆盖、不重写任何归档文件。
+
+`--apply` 当前是非破坏性 apply：会生成 compact context、metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 append-only ledger。它只建立恢复入口，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--dry-run` | `true` | 只生成计划，不修改文件；当前唯一支持模式。 |
+| `--apply` | `false` | 生成非破坏性 compact apply 产物；失败时返回非 0 并写 self-check failed 报告。 |
+| `--layer <layer>` | `all` | 扫描哪一层归档，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只扫描某一天。 |
+| `--since <time>` | - | 只看此时间之后的归档线索。 |
+| `--until <time>` | - | 只看此时间之前的归档线索。 |
+| `--session-id <id>` | - | 按 session_id 精确过滤 archive、snapshot 和 token ledger。 |
+| `--request-id <id>` | - | 按 request_id 精确过滤 archive 和 snapshot。 |
+| `--run-id <id>` | - | 按 run_id 精确过滤 archive 和 snapshot。 |
+| `--task-id <id>` | - | 按 task_id 精确过滤 archive 和 snapshot。 |
+| `--main-context-bundle-ref <path>` | 自动读取 latest | 显式指定主代理 context bundle；scope 不匹配时仍保留引用但记录 warning。未显式指定时会自动读取 latest，并在 scope 不匹配时跳过绑定，避免串任务。 |
+| `--level <0|1|2|3>` | - | 只扫描指定 `archive_level` 的 raw/hook 记录。 |
+| `--limit <n>` | `50` | 最多纳入多少条归档记录；`0` 表示不限。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `local-store-status`
+
+```powershell
+my-agent local-store-status
+```
+
+显示本地事实源当前状态，包括 SQLite 数据库路径、正文文件目录、审计 JSONL 路径、FTS5 是否可用、记录数和事件数。
+
+这条命令不会调用模型，也不会写业务记录；它只会在启动 agent 时确保本地事实源结构存在。
+
+## `local-search`
+
+```powershell
+my-agent local-search "表格" --source-type memory --limit 5
+my-agent local-search "gateway 日志" --source-type gateway_request
+my-agent local-search "某个子任务目标" --source-type subagent_run
+```
+
+搜索本地事实源。它会优先走 SQLite FTS5；如果当前 Python/SQLite 不支持 FTS5，或某次查询被 FTS5 语法拒绝，会自动退回普通 LIKE 检索。
+
+当前已经写入本地事实源的主要来源：
+
+| source_type | 内容 |
+| --- | --- |
+| `memory` | 用户/助手记忆 |
+| `gateway_request` | gateway ask 的提交、处理、完成/失败摘要 |
+| `gateway_event` | gateway 启动、停止、失败、清理等生命周期事件 |
+| `subagent_run` | 子代理工单当前状态、目标、证据和能力请求摘要 |
+| `subagent_work_log` | 单个子代理 `WORK_LOG.md` 追加项 |
+| `subagent_runner_result` | runner dry-run / execute 结果 |
+| `subagent_execution_context` | 子代理执行上下文生成记录 |
+| `subagent_acceptance_review` | 父代理验收记录 |
+| `subagent_patch_review` | patch 审核记录 |
+| `subagent_dispatch` | 父代理调度单条动作 |
+| `subagent_dispatch_report` | 最近一次 dispatch 汇总报告 |
+| `subagent_dispatch_watch` | watch 循环记录 |
+| `parent_planner` | 父代理 planner 决策记录 |
+| `subagent_capability_route` | 能力请求路由记录 |
+| `subagent_action_apply` | action apply 记录 |
+| `subagent_channel_probe` | 子代理通道健康检查记录 |
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | - | 必填，搜索关键词。 |
+| `--limit <n>` | `5` | 最多显示条数。 |
+| `--source-type <type>` | - | 只搜索某类来源，例如 `memory`、`gateway_request`、`subagent_run`。 |
+| `--visibility <value>` | - | 只搜索某种可见性，默认不过滤。第一版常见值是 `private`。 |
+| `--preview-chars <n>` | `500` | 每条命中最多打印多少正文字符；`-1` 表示完整打印。 |
+
+## `local-index-memory`
+
+```powershell
+my-agent local-index-memory
+```
+
+把已有 `memory_path` 里的 JSONL 记忆补建到 SQLite/FTS5 本地事实源。升级到这版之后可以先跑一次，后续新记忆会自动双写：JSONL 保留原始流水，SQLite/FTS5 负责检索。
+
+## `local-doctor`
+
+```powershell
+my-agent local-doctor
+my-agent local-doctor --json
+my-agent local-doctor --repair
+```
+
+诊断本地事实源和文件账本是否一致：SQLite 是否可打开、记忆 JSONL 是否已索引、LocalStore 正文文件是否缺失、gateway processing 是否超时、subagent 工单是否缺关键文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | 输出机器可读 JSON。 |
+| `--repair` | `false` | 处理超过 `gateway_processing_timeout_seconds` 的 processing 请求：未超尝试次数则退回 pending，超过则写 failed response 并归档。 |
+| `--limit <n>` | `20` | 每类问题最多显示多少条。 |
+
+## `local-rebuild`
+
+```powershell
+my-agent local-rebuild
+my-agent local-rebuild --source memory
+my-agent local-rebuild --source gateway --source subagent
+my-agent local-rebuild --reset
+```
+
+从磁盘事实源重建 LocalStore 索引。默认重建 `memory`、`gateway`、`subagent` 和 `fts`。`--reset` 会先清空 LocalStore 的 records/events/FTS，再从 JSONL、gateway 队列/响应、subagent 工单目录重新索引；它不会删除原始 memory、gateway、subagent 文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--source <name>` | `all` | 只重建指定来源，可多次传入；可选 `all`、`memory`、`gateway`、`subagent`、`fts`。 |
+| `--reset` | `false` | 先清空 LocalStore records/events/FTS 再重建。 |
+
+## `resume`
+
+```powershell
+my-agent resume <session_id>
+```
+
+显式连接指定会话继续交流（fail-closed：会话不存在或 ID 无效时直接报错退出，绝不静默新建会话）。与 `chat --session-id` 的区别：chat 是隐式恢复（fail-open 会新建会话），`resume` 是显式命令。
+
+| 参数 | 说明 |
+| --- | --- |
+| `session_id` | 要恢复的会话 ID（如 `sess_1712_abcd1234`）。 |
+| `--inject <text>` | 启动时注入 prompt，可多次传入。 |
+| `--prompt-file <path>` | 启动时加载额外 prompt 文件，可多次传入。 |
+| `--memory-limit <n>` | 交互中 `/memory` 默认显示条数；默认读配置。 |
+| `--no-save` | 关闭本次运行归档与持久化 Compact；Gateway 模式仍记录 ConversationStore/审计。 |
+
+## `chat`
+
+```powershell
+my-agent chat
+my-agent gateway start
+my-agent chat --gateway
+```
+
+默认 `my-agent chat` 与裸命令 `my-agent` 都使用后台 gateway，当前 chat 只是客户端。只有开发调试时显式传 `--direct`，才在当前前台进程调用模型。这样退出 chat 后，gateway 仍可继续常驻；后续 TUI/聊天工具也会走同一条通道。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--inject <text>` | - | 启动时注入 prompt，可多次传入。 |
+| `--prompt-file <path>` | - | 启动时加载额外 prompt 文件，可多次传入。 |
+| `--memory-limit <n>` | `5` | 交互中 `/memory` 默认显示条数。 |
+| `--no-save` | `false` | 只关闭本次运行归档与持久化 Compact；Gateway 模式的 ConversationStore/audit 仍照常记录，不会直接写正式长期记忆。 |
+| `--gateway` | `true` | 普通聊天消息投递给后台 gateway。 |
+| `--direct` | `false` | 开发调试时绕过 gateway，在当前前台进程调用模型。 |
+| `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式连续无请求租约或流式活动后停止等待的秒数；仍在工作的长任务会继续等待。 |
+| `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
+| `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
+
+**随 Gateway 升级原地切换**：部署新版 Gateway 后，正在运行的 TUI 每隔几秒比对 Gateway 状态文件里的 `runtime_prefix` 与自己的安装；不是同一安装且当前空闲（没有进行中的回合、排队、待审批，输入框为空，没在看菜单、翻历史或看子代理）时，在同一个终端里原地换成 Gateway 同版的 `my-agent`：不退出全屏、不闪回 shell，底部显示“正在切换到新版本…”约一两秒后以同一段对话继续，期间按下的键保留。正在忙时只在底部提示。开关 `tui_follow_gateway_upgrade`（默认开），从源码 venv 起 TUI 调试时可关；Windows 只提示重开。2026-09-25 之前启动的 TUI 没有这个能力，需要手动重开一次。
+
+终端原 `/memory` 查询、`/remember` 和 `/subagents` 仍按各自现有入口处理；`/agents` 与 `/memory candidates` 是显式结构化控制，direct 或 Gateway 都复用原预览/持久回执服务。普通自然语言才进入模型，`--gateway` 模式下沿原 request/response；裸 `/memory` 查询不宣称在 IM 可执行。
+
+chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就是说，只有当主配置把 `memory_resume_auto_context_mode` 设为 `trigger` 或 `always` 时，普通消息才会自动注入 `Recovery Brief`；默认 `off`，不查、不注入。
+
+普通自然语言进入模型后，主代理可以调用三个编排工具：
+
+| 工具 | 作用 | 风险边界 |
+| --- | --- | --- |
+| `create_subagents` | 创建一个或多个子代理工单，并默认后台启动 | 不同步等待子代理完成；只有 `defer_start=true` 才只登记不启动 |
+| `inspect_agent_tree` | 读取主/子/孙代理树状态 | 只读；返回 liveness、progress、evidence 三层状态，不调度、不验收 |
+| `subagent_board` | 读取当前子代理看板 | 只读 |
+| `dispatch_subagents` | 给运行中的子代理追加提示、推进、补救或指定重跑 | 普通状态查看不需要它；真实执行仍需要 `dry_run=false` 或明确目标运行参数 |
+
+因此你可以在 chat 里说“拆给几个子代理分别做这些事”。默认创建后会后台开跑，父代理会先拿到 run_id 和状态，不会等所有子代理完成才继续说话。后续查看用 `inspect_agent_tree` / `subagent_board`；确实要催某几个、补救卡住项或追加提示时再用 `dispatch_subagents`。
+
+## `spawn-subagents`
+
+```powershell
+my-agent spawn-subagents "开发一个可验收的功能" --count 2
+my-agent spawn-subagents "真实层级 E2E 主节点任务" --count 1 --role coordinator --agent-name root-coordinator
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `goal` | - | 必填，要拆分的目标。 |
+| `--count <n>` | `3` | 子代理数量。 |
+| `--role <role>` | `worker` | 显式创建角色。普通拆分保持 `worker`；真实层级 E2E 可用 `coordinator` 创建只负责调度下层的 root。 |
+| `--agent-name <name>` | `""` | 显式 agent 名称，常用于 root/coordinator E2E，例如 `root-coordinator`。 |
+
+## `subagents`
+
+```powershell
+my-agent subagents --limit 20
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--all` | `false` | 显示全部记录，而不是默认红灯/最近记录。 |
+| `--status <status>` | - | 按状态过滤，如 `BLOCKED`、`DONE`、`TAKEN_OVER`。 |
+| `--owner <owner>` | - | 按 `owner`、`supervisor` 或 `final_owner` 过滤。 |
+| `--root-id <id>` | - | 按根任务 ID 过滤。 |
+| `--limit <n>` | `20` | 最多显示多少条。 |
+
+输出会包含 `Shared Progress` 和 `Takeover View`：前者显示 root task 聚合计数，接管视图显示恢复入口 refs 和推荐读取顺序。完整 artifact 正文不会自动进入看板。
+
+## `subagents-due-check`
+
+```powershell
+my-agent subagents-due-check --limit 20
+my-agent subagents-due-check --root-id <root_run_id> --all
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--root-id <root_run_id>` | 空 | 只巡检指定 root subagent 任务树；适合真实 E2E 多棵树共用一个 workspace 时降噪。 |
+| `--all` | `false` | 显示全部问题，而不是按 limit 截断。 |
+| `--limit <n>` | `20` | 最多显示多少条问题。 |
+
+## `subagents-budget`
+
+```powershell
+my-agent subagents-budget
+my-agent subagents-budget --root-id <root_run_id> --max-model-calls 80 --max-tool-rounds 200
+my-agent subagents-budget --root-id <root_run_id> --max-prompt-response-tokens 500000 --include-dry-runs --json
+```
+
+这个命令只读取 runner 结果引用和 prompt/response 文件大小，用来估算一棵真实 E2E 树的模型调用、工具轮数和粗略 token 预算。它不会展开 artifact 正文，也不会改变任务状态；适合在 3、5、10、1/4/16/48 这类多代理压测后快速确认调用没有失控。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--root-id <root_run_id>` | 空 | 只统计指定 root subagent 任务树；为空时统计当前 workspace 里所有可读 runner 记录。 |
+| `--max-model-calls <n>` | `0` | 模型调用数阈值；`0` 表示不检查。超过时写入 `exceeded`，但不阻断执行。 |
+| `--max-tool-rounds <n>` | `0` | 工具轮数阈值；`0` 表示不检查。 |
+| `--max-prompt-response-tokens <n>` | `0` | prompt+response 粗略 token 阈值；按文件字节数估算，`0` 表示不检查。 |
+| `--include-dry-runs` | `false` | 把 dry-run prompt 也计入预算记录；默认只看真实 runner 结果。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+输出位置：
+
+```text
+agent_py_agent/data/subagents/subagent_run_budget.json
+agent_py_agent/data/subagents/SUBAGENT_RUN_BUDGET.md
+```
+
+## `subagents-probe`
+
+```powershell
+my-agent subagents-probe --limit 20
+my-agent subagents-probe <run_id>
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 可选，指定子代理运行 ID；不传则检查最近记录。 |
+| `--limit <n>` | `20` | 不指定 `run_id` 时最多检查多少条。 |
+
+## `subagents-plan-actions`
+
+```powershell
+my-agent subagents-plan-actions --limit 20
+my-agent subagents-plan-actions --root-id <root_run_id> --all
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--all` | `false` | 显示全部动作，而不是按 limit 截断。 |
+| `--limit <n>` | `20` | 最多显示多少条动作。 |
+| `--root-id <id>` | - | 只为指定 root subagent 任务树生成动作计划，适合多棵真实 E2E 树共用 workspace 时降噪。 |
+
+## `subagents-apply-actions`
+
+```powershell
+my-agent subagents-apply-actions --dry-run
+my-agent subagents-apply-actions --apply --action reopen_for_evidence
+my-agent subagents-apply-actions --apply --action recover_coordinator_leadership --run-id <stale_root> --take-over-by <leader_run_id>
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--dry-run` | 默认模式 | 只预览动作，不修改记录。 |
+| `--apply` | `false` | 真正执行低风险动作。 |
+| `--action <name>` | - | 只处理指定动作，如 `reopen_for_evidence`。 |
+| `--run-id <id>` | - | 只处理指定子代理运行 ID，可多次传入。 |
+| `--limit <n>` | `20` | 最多处理多少条动作。 |
+| `--take-over-by <name>` | - | 接管/领导权恢复动作的接管者；`recover_coordinator_leadership` 要求这里是现有 leader run ID，并会把旧 coordinator 的直接子任务重挂到该 leader。 |
+| `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
+
+## `subagents-workflow-plan`
+
+```powershell
+my-agent subagents-workflow-plan "开发一个可验收的功能"
+my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id single_worker_verified --output-dir .agent/workflow-previews --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `goal` | - | 必填，待路由的父任务目标。 |
+| `--template-id <id>` | - | 强制使用指定 workflow 模板做预览。 |
+| `--task-type <id>` | - | 结构化任务类型，例如 `code_or_bugfix` 或 `quality_deliverable`；用于模板路由，不从 goal 自然语言猜。 |
+| `--risk-tags <tags>` | - | 逗号分隔的结构化风险标签，写入 dry-run 预览供审计。 |
+| `--output-dir <path>` | - | 显式写出 JSON / Markdown dry-run 预览，不创建 subagent。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `subagents-leadership-recovery-plan`
+
+```powershell
+my-agent subagents-leadership-recovery-plan --root-id <root_run_id> --leader <leader_run_id>
+my-agent subagents-leadership-recovery-plan --root-id <root_run_id> --leader <leader_a> --leader <leader_b> --max-children-per-leader 3 --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定 heartbeat timeout 等巡检阈值。 |
+| `--root-id <id>` | - | 必填，只规划这一棵 root subagent 任务树。 |
+| `--leader <id>` | - | 必填，候选新 leader run ID；可多次传入。 |
+| `--max-children-per-leader <n>` | `3` | 每个 leader 最多接多少个直接孩子；`0` 表示不限制。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+该命令只做 dry-run：它会读取 due-check 里的 `coordinator_heartbeat_stale` 问题，把失联 coordinator 的直接孩子按容量分给候选 leader，并写出 `subagent_leadership_recovery_plan.json` / `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`。当前不会改 `parent_id`、不会标记旧 coordinator，也不会自动执行 future command；真正分批 apply 入口是后续阶段。
+
+## `subagents-leadership-recovery-apply`
+
+```powershell
+my-agent subagents-leadership-recovery-apply --coordinator <old_coord> --leader <new_leader> --child-run-id <child>
+my-agent subagents-leadership-recovery-apply --apply --root-id <root_run_id> --coordinator <old_coord> --leader <new_leader> --child-run-id <child_a> --child-run-id <child_b>
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--dry-run` | 默认模式 | 只预览，不修改任务树。 |
+| `--apply` | `false` | 真正重挂指定 child 子树。 |
+| `--root-id <id>` | - | 可选，限制 coordinator / leader / child 必须属于同一 root。 |
+| `--coordinator <id>` | - | 必填，旧 coordinator run ID。 |
+| `--leader <id>` | - | 必填，新 leader run ID，必须存在且不能是失败/超时/断通道状态。 |
+| `--child-run-id <id>` | - | 必填，要移动的直接 child run ID；可多次传入。 |
+| `--max-children-per-leader <n>` | `0` | 可选容量上限；非 0 时会阻断超过 leader 直接 child 容量的 apply。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+安全边界：只移动 `--child-run-id` 明确列出的直接孩子；如果 child 已经不在旧 coordinator 下、root 不匹配、leader 不健康或容量超限，整次 apply 会被阻断，不会产生部分移动。移动成功后会递归刷新后代 depth；旧 coordinator 没有剩余孩子时才标记为 `TAKEN_OVER`。
+
+## `subagents-hierarchy`
+
+```powershell
+my-agent subagents-hierarchy <run_id> --child reporter:reporter-a:"write report"
+my-agent subagents-hierarchy <run_id> --child checker:checker-a:"check report" --apply --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 必填，父级 subagent 运行 ID。 |
+| `--child <role:agent:goal>` | - | 待创建子任务，格式 `ROLE:AGENT_NAME:GOAL`；可多次传入。 |
+| `--apply` | `false` | 真正创建 child runs；默认只预览。 |
+| `--requested-by <name>` | `parent` | 调度请求来源，用于审计摘要。 |
+| `--max-children <n>` | `0` | 父级最多 child 数；0 表示不限制。 |
+| `--max-depth <n>` | `2` | 允许创建的最大层级深度。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `subagents-recovery-tree`
+
+```powershell
+my-agent subagents-recovery-tree <run_id>
+my-agent subagents-recovery-tree <run_id> --hide-healthy --json
+my-agent subagents-recovery-tree <run_id> --capability-config config/capability_config.yaml
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 必填，根 subagent 运行 ID。 |
+| `--capability-config <path>` | `config/capability_config.yaml` | 提供 heartbeat/run timeout 阈值，用于把 stale `RUNNING` 后代列入恢复候选。 |
+| `--hide-healthy` | `false` | 只展示 root 和需要恢复的节点，减少上下文体积。 |
+| `--requested-by <name>` | `parent` | 查询请求来源，用于审计摘要。 |
+| `--max-nodes <n>` | `200` | 最多扫描多少个子树节点。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `subagents-route-capabilities`
+
+```powershell
+my-agent subagents-route-capabilities --dry-run
+my-agent subagents-route-capabilities --apply --skill-dir .\skills
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--dry-run` | 默认模式 | 只预览路由，不生成 grant/gap。 |
+| `--apply` | `false` | 真正生成 capability grant 或 gap。 |
+| `--run-id <id>` | - | 只处理指定子代理运行 ID，可多次传入。 |
+| `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
+| `--limit <n>` | `20` | 最多处理多少条 request。 |
+
+## `subagents-tests`
+
+```powershell
+my-agent subagents-tests <run_id>
+my-agent subagents-tests <run_id> --re-run --timeout 120
+```
+
+默认只读取并展示该 run 的 `reports/test_execution.json` 摘要，不会重新执行测试，也不会读取任何 artifact 正文。显式传 `--re-run` 后，命令会按 `output.json` 里的 `tests` 执行 allowlist 内验证，并写回 `test_execution.json` 和 `test_execution.md`。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 子代理运行 ID。 |
+| `--re-run` | `false` | 显式重新执行 `output.json.tests` 并写入真实执行报告。 |
+| `--timeout <seconds>` | `120` | 重跑时单条测试的超时秒数。 |
+
+## `subagents-patches`
+
+```powershell
+my-agent subagents-patches --dry-run
+my-agent subagents-patches --review-apply --reviewer parent
+my-agent subagents-patches --apply-dry-run --run-id <run_id>
+my-agent subagents-patches --apply --run-id <run_id> --reviewer parent
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--dry-run` | 默认模式 | 只生成 patch 审核报告，不修改记录。 |
+| `--review-apply` | `false` | 写回 patch 审核状态，但不真正 apply 文件。 |
+| `--apply-dry-run` | `false` | 展示将要 apply 的 diff，不真正写文件。 |
+| `--apply` | `false` | 真正 apply `write_file` patch、跑 allowlist 测试并记录审计日志。 |
+| `--run-id <id>` | - | 只审核指定子代理运行 ID，可多次传入。 |
+| `--limit <n>` | `20` | 最多处理多少条记录。 |
+| `--reviewer <name>` | `parent` | 审核者标识。 |
+| `--note <text>` | - | 写入 patch 审核记录的备注。 |
+
+## `subagents-dispatch`
+
+```powershell
+my-agent subagents-dispatch
+my-agent subagents-dispatch --apply
+my-agent subagents-dispatch --apply --start-runners
+my-agent subagents-dispatch --watch --planner --interval 30
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--dry-run` | 默认模式 | 只生成调度报告，不修改记录。 |
+| `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
+| `--start-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
+| `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
+| `--workflow-mode <off\|plan\|auto>` | `off` | dispatch 前对父任务执行 workflow 规划；`plan` 只写计划，`auto` 还会自动派出 workflow worker 子工单。 |
+| `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
+| `--limit <n>` | `20` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
+| `--watch` | `false` | 持续循环执行 dispatch。 |
+| `--advance` | `false` | watch 模式显式推进 dispatch；不传时只读观察代理树，避免后台观察误触发调度。 |
+| `--interval <seconds>` | `30.0` | watch 模式每轮间隔秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
+| `--max-cycles <n>` | `0` | watch 模式最多循环次数，`0` 表示持续运行。 |
+| `--force-lock` | `false` | 兼容旧命令；空/坏元数据会自然重写，但内核确认仍被持有的锁不能强抢。 |
+| `--reviewer <name>` | `parent-dispatch` | patch/acceptance 审核者标识。 |
+| `--note <text>` | - | 写入调度关联审核记录的备注。 |
+| `--instruction <text>` | - | 给本轮 runner 的额外指令。 |
+| `--background-launch-id <id>` | - | 内部字段：`create_subagents` 后台启动时写回任务树生命周期，普通用户不需要手填。 |
+| `--expected-attempt <run> <attempt>` | - | 内部宿主参数：可逐项重复，运输本批预留的非空执行轮；必须与 `--run-id` 完整对应，只供一次真实派工使用，不能与 `--watch` 混用。普通用户无需手填，停止或换代后的旧身份会被拒绝。 |
+| `--workspace-root <path>` | - | 内部字段：后台自动 dispatch 继承父代理当前工作区，普通用户不需要手填。 |
+| `--max-cards <n>` | `0` | runner 最多注入多少张能力卡，`0` 表示不限制。 |
+| `--no-probe` | `false` | 执行 runner 前不做通道健康检查。 |
+| `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
+| `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
+| `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
+
+dispatch 输出位置：
+
+```text
+agent_py_agent/data/subagents/subagent_dispatch_report.json
+agent_py_agent/data/subagents/SUBAGENT_DISPATCH.md
+```
+
+watch 输出位置：
+
+```text
+agent_py_agent/data/subagents/subagent_dispatch_watch_heartbeat.json
+agent_py_agent/data/subagents/subagent_dispatch_watch_report.json
+agent_py_agent/data/subagents/SUBAGENT_DISPATCH_WATCH.md
+agent_py_agent/data/subagents/subagent_dispatch_watch_log.jsonl
+agent_py_agent/data/subagents/DISPATCH_WATCH_LOG.md
+```
+
+watch 模式不会在 watch 层重新运行 auto-policy；watch record 的 evidence 只指向本轮 dispatch JSON/Markdown，后续沿 dispatch record 里的 ref 查看单个 run 的 policy audit。
+
+planner 输出位置：
+
+```text
+agent_py_agent/data/subagents/parent_planner_report.json
+agent_py_agent/data/subagents/PARENT_PLANNER.md
+agent_py_agent/data/subagents/parent_planner_prompt.md
+agent_py_agent/data/subagents/parent_planner_response.md
+agent_py_agent/data/subagents/parent_planner_log.jsonl
+agent_py_agent/data/subagents/PARENT_PLANNER_LOG.md
+```
+
+## `daemon`
+
+```powershell
+my-agent daemon
+```
+
+`daemon` 是配置驱动的前台常驻入口，等价于按 `agent_config.yaml` 的 `daemon_*` 配置调用 `subagents-dispatch --watch ...`。它不是后台 service，终端关闭或 `Ctrl+C` 后会停止。
+
+常用覆盖：
+
+```powershell
+my-agent daemon --apply --start-runners
+my-agent daemon --max-cycles 1 --interval 0 --no-planner
+```
+
+| 参数 | 默认值来源 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--dry-run` | 覆盖 `daemon_mutate_state` | 只生成报告，不写回。 |
+| `--apply` | 覆盖 `daemon_mutate_state` | 写回低风险动作和审计日志。 |
+| `--start-runners` | 覆盖 `daemon_start_runners` | 配合 apply 调用真实模型执行 runner。 |
+| `--no-start-runners` | 覆盖 `daemon_start_runners` | 不调用真实模型执行 runner。 |
+| `--planner` | 代码默认 `true` | 启用父代理 LLM planner。 |
+| `--no-planner` | 代码默认 `true` | 关闭父代理 LLM planner。 |
+| `--interval <seconds>` | 代码默认 `30` | 每轮调度结束后的等待秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
+| `--max-runners <n|auto>` | 代码默认 `1` | 每轮最多推进多少个 runner；`auto` 映射为保守值 1；`0` 表示不执行 runner。 |
+| `--limit <n>` | 代码默认 `0` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
+| `--max-cycles <n>` | 代码默认 `0` | 最多循环次数，`0` 表示持续运行。 |
+| `--force-lock` | - | 兼容旧命令；不能抢占内核确认仍被持有的 watch lock。 |
+| `--reviewer <name>` | 代码默认 `parent-daemon` | patch/acceptance 审核者标识。 |
+| `--note <text>` | - | 写入调度关联审核记录的备注。 |
+| `--instruction <text>` | `daemon_runner_instruction` | 给 runner 的额外指令。 |
+| `--max-cards <n>` | 代码默认 `0` | runner 最多注入多少张能力卡；`0` 表示不限制。 |
+| `--no-probe` | 代码默认 `true`（做检查） | 执行 runner 前不做通道健康检查。 |
+| `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
+| `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
+| `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
+
+默认配置位置：
+
+```yaml
+# 子代理默认像“不同记忆/权限的主代理”一样工作。
+# 默认只保留少量用户能理解的入口，细节由系统和 LLM 判断。
+enable_subagents: true
+max_subagents: 50
+subagent_workspace: "data/subagents"
+subagent_role_template_dirs: []
+subagent_debug_trace_level: 0
+
+# 未来 gateway 调度策略：auto 表示由主代理/调度器自适应
+runner_concurrency: "auto"
+runner_start_rate: "auto"
+runner_timeout_seconds: "auto"
+runner_failure_retry_limit: 1
+
+# 前台 daemon 只保留三个配置项；间隔、runner 数、条数、循环次数、能力卡数、planner/探针开关、审核者都是 cli/daemon.py 里的代码常量，
+# 单次启动用命令行参数覆盖（参数减量第 3 批 B 组，2026-09-27）
+daemon_mutate_state: true
+daemon_start_runners: true
+daemon_runner_instruction: ""
+```
+
+`runner_failure_retry_limit: 1` 表示子代理 runner 临时失败后最多自动重跑 1 次；`0` 表示不自动重跑，写更大的数字就多给几次机会（2026-09-27 起这是唯一的重跑次数设置，原 `runner_failure_policy` 与守卫文件里的两个重派上限已并入）。自动重跑只覆盖 runner 自身错误、结构化输出解析失败、工具结果丢失、模型服务临时出错或超时这类可恢复问题；限流、断供这类临时供应问题另按 `runtime_guard_config.yaml` 的 `provider_transient_redispatch_limit` 取更大的上限。`runner_concurrency` 写数字是同时运行上限，`0` 表示不限制，`auto` 为 8。
+
+## `scenario-test`
+
+```powershell
+my-agent scenario-test
+my-agent scenario-test --workspace .\tmp-scenarios --count 2 --max-runners 2
+my-agent scenario-test --case verification
+my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case gateway-cross-day-resume
+my-agent scenario-test --case gateway-delayed-response
+my-agent scenario-test --case gateway-multi-worker
+my-agent scenario-test --case gateway-stale-lease
+my-agent scenario-test --case gateway-processing-stop
+my-agent scenario-test --case parent-subagent-cross-day-resume
+my-agent scenario-test --case real-model-recovery
+my-agent scenario-test --case real-model-recovery-multi-round
+my-agent scenario-test --case runner-retry
+my-agent scenario-test --case all --count 1
+my-agent scenario-test --direct
+my-agent scenario-test --dry-run
+my-agent scenario-test --direct --count 10 --max-runners 10 --runner-concurrency 5 --runner-start-rate 10
+```
+
+`scenario-test` 是专门给我们观察全流程用的隔离测试入口。默认流程是：
+
+```text
+新建临时 fixture -> 写隔离配置 workspace_root -> 启动临时 gateway
+-> gateway ask 触发主代理创建子代理 -> dispatch 执行真实 runner
+-> 父代理验收 -> 输出看板和 SCENARIO_SUMMARY
+```
+
+它每次都会在父目录下新建一个 `scenario-*` 子目录，不会复用当前开发仓库的数据目录。默认 `--case happy` 会调用真实 API：主代理派工走一次模型，runner 也会走真实模型。只想看调度计划时用 `--dry-run`。
+
+`--case` 可以切换坏天气场景：
+
+| case | 说明 | 是否调用真实 API |
+| --- | --- | --- |
+| `happy` | gateway ask -> 主代理派工 -> runner 写文件 -> 父代理验收 | 是 |
+| `verification` | 构造“模型声称写了 artifact 但文件不存在”的伪完成记录，确认验收必须拒绝 | 否 |
+| `gateway-restart` | 模拟旧 gateway 崩溃时遗留的 `processing` 请求，确认重启恢复会退回 `pending` | 否 |
+| `gateway-cross-day-resume` | 启动真实后台 gateway，投递一次 ask，再模拟跨天线索，确认 `memory-resume` 能读回 request/response JSON | 取决于配置；echo 后端不调用 |
+| `gateway-delayed-response` | 模拟 response 已经落盘但 pending 请求副本迟到，确认 worker 只归档请求、不重复调用模型 | 否 |
+| `gateway-multi-worker` | 启动两个 request worker 并发抢占多条 pending 请求，确认每条只完成一次、不重复归档 | 否 |
+| `gateway-stale-lease` | 模拟 worker 中断留下的旧 `processing` lease，确认恢复会重排并由 worker 完成请求 | 否 |
+| `gateway-processing-stop` | 模拟 worker 已领任务并正在调模型时 gateway stop/restart，确认重启后不卡死、不丢请求、不留半截 JSON | 否 |
+| `parent-subagent-cross-day-resume` | 跑一次真实 subagent runner 工具回合，模拟跨天线索，确认 `memory-resume` 能回到 task fact sources | 否 |
+| `real-model-recovery` | 用真实 API 跑一次 subagent，验证 `memory-resume` 能找回真实模型响应内容 | 是 |
+| `real-model-recovery-multi-round` | 用真实 API 跑多轮工具调用（read_file + search_text），验证 `memory-resume` 能找回每轮 evidence 和 output.json | 是 |
+| `runner-retry` | 模拟 runner 第一次模型调用失败，确认下一轮 dispatch 会有限重试并完成验收 | 否 |
+| `all` | 依次跑 `verification`、`gateway-restart`、`gateway-cross-day-resume`、`gateway-delayed-response`、`gateway-multi-worker`、`gateway-stale-lease`、`parent-subagent-cross-day-resume`、`runner-retry`、`happy` | `happy` 会调用 |
+
+子代理自然回复不再解析旧结果块，因此旧 `structured-repair` 场景已移除，参数解析会拒绝该名称。
+这些诊断场景的成功与否须查看实际结果，不能替代真实 TUI 验收；runner 重试场景已有的收口断言失败仍保留。
+
+| 参数 | 说明 |
+| --- | --- |
+| `--capability-config <path>` | 能力路由配置文件路径，默认使用 `config/capability_config.yaml`。 |
+| `--case <name>` | 场景类型，默认 `happy`。 |
+| `--workspace <path>` | 保存场景测试结果的父目录；不传则使用系统临时目录。 |
+| `--count <n>` | 本场景创建多少个子代理，默认 `2`。 |
+| `--max-runners <n>` | 每轮最多推进多少个 runner，默认 `2`。 |
+| `--max-cycles <n>` | 最多执行多少轮 dispatch，默认 `3`。 |
+| `--timeout <seconds>` | gateway ask 等待响应的秒数，默认 `300`。 |
+| `--runner-concurrency <value>` | 仅本次场景测试覆盖 `runner_concurrency`，用于真实并发压测；例如 `5`。不传则走真实配置。 |
+| `--runner-start-rate <value>` | 仅本次场景测试覆盖 `runner_start_rate`，用于限制本轮最多启动多少 runner；例如 `10`。不传则走真实配置。 |
+| `--model-request-timeout <seconds>` | 仅本次场景测试覆盖模型 `request_timeout`，用于压测慢模型或快速暴露超时恢复。 |
+| `--dry-run` | 只调度不执行真实 runner API；主代理/gateway 派工仍可能调用模型。 |
+| `--planner` | dispatch 时启用父代理 planner。 |
+| `--direct` | 不经过 gateway，直接用当前进程跑主代理派工；排查 gateway 时不要加。 |
+| `--skill-dir <path>` | 额外 skill 目录，可多次传入。 |
+
+关键输出：
+
+| 输出 | 说明 |
+| --- | --- |
+| `run_root` | 本次测试的总目录。 |
+| `fixture_root` | 被测隔离项目目录，文件工具只能在这里读写。 |
+| `scenario_outputs/*.md` | runner 写出的证据报告。 |
+| `scenario_summary.json` / `SCENARIO_SUMMARY.md` | 本次测试摘要。 |
+
+## `gateway`
+
+宿主配置中的`gateway_worker_process_count`控制公开启动拓扑，默认`0`为原单进程，正整数走原多进程入口。数量只在YAML修改，不能通过聊天、HTTP参数或private Namespace覆盖；`true`、负数、小数、字符串和空值均拒绝。`--config`选定文件也随`gateway install`进入原服务argv，监护和接班仍读同一文件。
+
+运行中数量与配置不同，`start`和`restart`（含`--force`）先以`GATEWAY_TOPOLOGY_CHANGE_REQUIRED`拒绝，不把“旧进程已运行”称为新拓扑生效。停机后发现MP事实，Count0以`GATEWAY_REVERSE_MIGRATION_UNSUPPORTED`或`GATEWAY_STANDALONE_SOURCE_UNPROVEN`拒绝，不能删marker、补身份或改JSON绕过。旧Count0→N的版本化迁移尚未实现；现有home不能仅改正数就宣称已开启。先等待受支持的迁移片验收，保留原文件。
+
+`gateway status`分别展示`configured_worker_process_count`与`observed_state_worker_count`；后者仅是已读state投影，未知为null，不能把配置目标当已运行数量或就绪证明。
+
+Count0现在也持canonical生命周期锁；停机state保留真实启动身份和有限观察，`standalone_shutdown_observation.complete=false`不等于MP closure或迁移许可。原三循环`drain_complete`的历史口径未扩大。此处为候选语义说明，不代表真实公开配置或发行已通过。
+
+```powershell
+my-agent gateway start
+my-agent gateway status
+my-agent gateway stop
+my-agent gateway restart
+my-agent gateway logs
+my-agent gateway ask "帮我检查当前任务状态"
+my-agent gateway result <request_id>
+```
+
+由 Gateway 托管的工具进程（例如代理在对话里通过 `run_command` 执行命令）运行 `gateway stop`、`gateway restart`
+或 `gateway start --force` 时，如果要停的正是托管它的那台 Gateway，命令直接拒绝并以 2 退出，不写停止请求：
+停掉它会切断正在执行这条命令的对话回合，回合结果将无法确认。判断依据是 Gateway 服务进程启动时写进自身环境、
+由所有子进程继承的 `MY_AGENT_HOSTING_GATEWAY_PID`；其他 home 或端口的 Gateway 进程号不同，照常可停。
+直接 kill 进程号或调用 HTTP `POST /stop` 不经过这道检查。确实需要重启时，管理员会话里的代理改用 `restart_gateway` 工具，
+用户可以直接发 `/restart`。
+
+安全重启（`restart_gateway` 工具与 `/restart` 共用）：只写一份重启请求就返回。Gateway 随后分两段排空：先停领新请求、等本进程在跑的回合结束
+（上限 `gateway_restart_turn_wait_seconds`，默认 300 秒）；再让新的有副作用工具停在开跑之前、等执行中的工具跑完
+（上限 `gateway_restart_drain_timeout_seconds`，默认 600 秒，0 不限；超时就取消这次重启、照常服务，并通知发起的会话）。
+排空完成后由新进程接班：停在半路的回合立即续跑、排在重启期间的新消息前面，发起的会话会收到“重启已完成”的通知。
+由 systemd/launchd 托管时改为以退出码 75 交给服务管理器拉起。两次重启至少间隔 `gateway_restart_cooldown_seconds`（默认 30 秒），
+同一会话 10 分钟内最多安排 3 次。`restart_gateway` 只注册给本机管理员的主会话代理（`enable_gateway_restart_tool` 可关闭），
+按危险动作审批：完全访问模式直接执行，其它模式弹确认。重启进度可在 HTTP `/status` 的 `restart_drain` 字段查看。
+终端的 `my-agent gateway restart` 默认也走安全重启：写一份请求后等新进程就绪并打印新旧进程号；冷却中、被取消或等待超时以 2 退出。
+加 `--force` 才是原来的先停后起（停止超时强制终止，在跑的回合会被切断）。Gateway 没在运行时两者都直接启动。
+排空期间 TUI 页脚会提示“Gateway 正在安全重启……新消息会排队”，排队中的消息会带上结构化等待事实，客户端不会把它当成超时。
+
+`gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。当前 request worker pool 已有保守第一版，默认 1 个 worker；runner 并发也只在显式配置 `runner_concurrency` 为数字时启用。它还不是多机器组织 gateway。
+
+先把它理解成三层：
+
+```text
+gateway start/stop/status/logs  管后台进程活不活
+gateway ask/result              给后台进程发消息、拿结果
+gateway run                     内部调试入口，平时不用直接敲
+```
+
+`ask/result` 是保留给开发和调试的本地入口。以后接微信、飞书、Telegram、Web TUI 时，聊天工具会替你调用同一套 gateway 请求协议；普通用户只需要在聊天工具里发消息，gateway 做完后自动回复。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `start` | 启动后台 gateway；已运行时默认不重复启动。 |
+| `status` | 读取 pid、state 和 heartbeat，显示是否存活。 |
+| `stop` | 写 stop request，等待后台 gateway 在调度轮次之间正常退出。 |
+| `restart` | 先 stop 再 start。 |
+| `logs` | 显示 gateway 日志尾部。 |
+| `ask` | 把一条聊天/任务请求写入本地 inbox，由后台 gateway 调用模型处理。 |
+| `result` | 根据 request id 读取 `ask --no-wait` 留下的响应。 |
+| `run` | 内部/调试命令，前台运行 gateway 循环；通常由 `start` 调用。 |
+| `supervisor-start` | 启动看门狗进程，自动监控并重启崩溃的 gateway。 |
+| `supervisor-stop` | 停止看门狗进程。 |
+| `supervisor-status` | 查看 supervisor 和 gateway 状态。 |
+| `start-all` | 一键启动 gateway（带 supervisor）+ 所有适配器。 |
+| `install` | 安装系统服务（Linux systemd 或 macOS launchd），开机自启。 |
+| `uninstall` | 卸载系统服务。 |
+
+### `gateway ask` 的两种用法
+
+同步用法：发消息，然后当前终端一直等到结果回来。
+
+```powershell
+my-agent gateway ask "总结一下当前项目状态"
+```
+
+适合短任务、确认 gateway 能否正常调用模型、或者临时让后台主代理回答一句话。
+普通 `gateway ask` 默认写入本地 `gateway-cli/default` 会话；同一 owner/workspace
+下的后续 ask 会通过结构化 conversation task link 找到活跃任务树和 task output/work，
+不会靠自然语言猜“刚刚那个任务”。
+
+异步用法：只发任务，不等结果。
+
+```powershell
+my-agent gateway ask "跑一轮完整检查" --no-wait
+```
+
+它会返回类似：
+
+```text
+queued request_id=gwreq-1777442684-0b7ac8cb
+```
+
+之后再查：
+
+```powershell
+my-agent gateway result gwreq-1777442684-0b7ac8cb
+```
+
+适合比较长的任务。这个设计也是未来聊天工具“先回复已收到，做完再回你”的基础。
+
+常用参数：
+
+| 子命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `start` | `--force` | 如果已有 gateway 在跑，先尝试停止再启动。 |
+| `start` | `--force-lock` | 兼容传给 daemon；不会抢占真实活锁。 |
+| `stop` | `--timeout <seconds>` | 等待正常停止的秒数，默认使用 `gateway_stop_timeout`。 |
+| `stop` | `--kill` | 超时后强制终止进程。 |
+| `stop` | `--reason <text>` | 写入 stop request 的原因。 |
+| `restart` | `--timeout <seconds>` | 等待正常停止的秒数。 |
+| `restart` | `--force` | 停止超时后强制终止旧进程。 |
+| `restart` | `--force-lock` | 重启后兼容传给 daemon；不会抢占真实活锁。 |
+| `logs` | `--lines <n>` | 显示最后多少行日志，`0` 表示全部。 |
+| `run` | `--workspace-root <path>` | 内部字段：`start` 把父进程当前工作区传给后台 gateway，普通用户不需要手填。 |
+| `ask` | `--inject <text>` | 给本次 gateway 请求动态注入 prompt，可多次传入。 |
+| `ask` | `--prompt-file <path>` | 给本次请求追加 prompt 文件，可多次传入。 |
+| `ask` | `--no-save` | 只关闭本次运行归档与持久化 Compact；ConversationStore/audit 仍按 Gateway 合同记录，不会直接写正式长期记忆。 |
+| `ask` | `--show-prompt` | 响应返回时打印最终 prompt。 |
+| `ask` | `--timeout <seconds>` | 等待后台响应的秒数，默认使用 `gateway_request_timeout`。 |
+| `ask` | `--no-wait` | 只投递请求并立即返回 request id。 |
+| `ask` | `--json` | 输出完整响应 JSON。 |
+| `ask` | `--resume-context` | 本次 gateway 请求临时启用恢复上下文注入。 |
+| `ask` | `--no-resume-context` | 本次 gateway 请求临时关闭恢复上下文注入。 |
+| `result` | `--show-prompt` | 打印响应 JSON 中保存的最终 prompt。 |
+| `result` | `--json` | 输出完整响应 JSON。 |
+| `run` | daemon 同名参数 | 内部调试用，支持 `--max-cycles 1 --interval 0 --no-planner` 这类安全验证。 |
+
+### 请求文件流转
+
+当前实现以文件队列为主事实源，方便跨平台排查和恢复。gateway 运行时另有可选本机 HTTP 控制服务骨架；它不替代 `requests/*` 和 `responses/*` 文件事实源，也还不是完整 WebSocket / 多租户远端 gateway。
+
+```text
+ask 写入 pending -> gateway worker 加 lease 并移到 processing -> 模型处理 -> 写 responses -> 原请求移到 done/failed
+```
+
+如果 gateway 意外退出，重启时会把 `processing` 里没处理完且未超尝试次数的请求退回 `pending`。运行中如果 processing 超过 `gateway_processing_timeout_seconds`，也会按 `gateway_request_max_attempts` 自动重排或归档到 `failed`。
+
+gateway 控制面配置：
+
+```yaml
+gateway_workspace: "data/gateway"
+gateway_stop_timeout: 20
+gateway_request_timeout: 300
+gateway_processing_timeout_seconds: 900
+gateway_request_max_attempts: 2
+```
+
+恢复上下文自动注入配置：
+
+```yaml
+memory_resume_auto_context_mode: "off"      # off / trigger / always
+```
+
+默认文件：
+
+```text
+agent_py_agent/data/gateway/gateway.pid
+agent_py_agent/data/gateway/gateway_state.json
+agent_py_agent/data/gateway/gateway_heartbeat.json
+agent_py_agent/data/gateway/gateway_stop.request
+agent_py_agent/data/gateway/gateway.log
+agent_py_agent/data/gateway/requests/pending/<request_id>.json
+agent_py_agent/data/gateway/requests/processing/<request_id>.json
+agent_py_agent/data/gateway/requests/done/<request_id>.json
+agent_py_agent/data/gateway/requests/failed/<request_id>.json
+agent_py_agent/data/gateway/responses/<request_id>.json
+agent_py_agent/data/gateway/gateway_requests.jsonl
+```
+
+## `adapter`
+
+当前提供两类入口：文件协议 adapter，以及 QQ/飞书通道 adapter 的启动、状态和停止命令。文件协议仍是最容易接入外部工具或 TUI 的稳定最小协议。
+
+```powershell
+my-agent adapter file
+my-agent adapter file --watch
+my-agent adapter file --root /tmp/my-agent-adapter
+my-agent adapter start --channel feishu --daemon
+my-agent adapter start --channel qq
+my-agent adapter status
+my-agent adapter stop
+```
+
+外部聊天工具或 TUI 可以把消息 JSON 写进 adapter inbox，adapter 会投递到 gateway，再把响应写到 outbox。
+
+输入 JSON 支持这些字段：
+
+```json
+{
+  "id": "msg-1",
+  "conversation_id": "conv-1",
+  "user": "user-1",
+  "text": "帮我看一下当前任务状态",
+  "no_save": false
+}
+```
+
+默认目录：
+
+```text
+agent_py_agent/data/adapters/file/inbox/<message_id>.json
+agent_py_agent/data/adapters/file/processing/<message_id>.json
+agent_py_agent/data/adapters/file/done/<message_id>.json
+agent_py_agent/data/adapters/file/failed/<message_id>.json
+agent_py_agent/data/adapters/file/outbox/<message_id>.json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--root <path>` | `adapter_workspace` | 适配器根目录。 |
+| `--inbox <path>` | `<root>/inbox` | 覆盖 inbox 目录。 |
+| `--outbox <path>` | `<root>/outbox` | 覆盖 outbox 目录。 |
+| `--watch` | `false` | 持续轮询 inbox。 |
+| `--once` | `false` | 只处理当前已有消息后退出。 |
+| `--poll-interval <seconds>` | `1.0` | watch 模式轮询间隔。 |
+| `--limit <n>` | `20` | 每轮最多处理多少条消息，`0` 表示不限制。 |
+| `--timeout <seconds>` | `gateway_request_timeout` | 等待 gateway 响应的秒数。 |
+| `--no-start-gateway` | `false` | 不自动启动 gateway，未运行时直接失败。 |
+
+通道 adapter 子命令：
+
+| 子命令 | 说明 |
+| --- | --- |
+| `start --channel <name>` | 启动指定通道适配器，支持 `feishu` / `qq` / `all`。 |
+| `start --daemon` | 后台守护进程模式运行，写入 PID 文件。 |
+| `start --pid-file <path>` | 指定 PID 文件路径。 |
+| `status` | 查看通道适配器状态。 |
+| `stop` | 停止所有通道适配器。 |
+
+## `subagent-context`
+
+```powershell
+my-agent subagent-context <run_id>
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 必填，子代理运行 ID。 |
+| `--max-cards <n>` | `0` | 最多注入多少张能力卡，`0` 表示不限制。 |
+
+## `subagent-run`
+
+```powershell
+my-agent subagent-run <run_id>
+my-agent subagent-run <run_id> --execute
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 必填，子代理运行 ID。 |
+| `--dry-run` | 默认模式 | 只生成 prompt 和报告，不调用模型。 |
+| `--execute` | `false` | 真正调用模型执行，可能消耗 API。 |
+| `--instruction <text>` | - | 给本次 runner 的额外指令。 |
+| `--max-cards <n>` | `0` | 最多注入多少张能力卡，`0` 表示不限制。 |
+| `--no-probe` | `false` | 执行前不做通道健康检查。 |
+
+## TUI `/model`
+
+在 TUI 输入 `/model`，顶层五项：新增模型、选择模型（对话模型 / 决策模型 / 向量模型）、管理已有模型、连接测试、默认模型与共享。
+「新增模型」先选类型（OpenAI Chat、Anthropic、OpenAI Responses、登录账号、Jev 决策）；OpenAI Chat 再选用途「对话（默认）」或「Embedding」。
+之后填接口地址和密钥（请求头、会话头在「高级」，OpenCode Go 有一键模板），点「拉取模型列表」后勾选要用的模型（可多选）一次保存；拉不到列表时可手动填模型名。选择「Embedding」时，服务商能力和模型用途同次保存，回执提示到「选择模型」→「向量模型」选用并重启 Gateway。
+「登录账号」里 ChatGPT 订阅会直接打开浏览器登录（SSH 等环境退回设备码），登录回来同样勾选模型；通用登录可填写 Client ID、
+设备码/令牌端点、Scope、Audience 与 Client Secret，必须由服务商支持设备码流程。不自动选型号，不借用其他应用的登录。
+取消登录与退出账号分开，OAuth 账号不跨用户共享。详见 [模型账号登录](../design/MODEL_OAUTH.md)。
+模型编辑还可填写额外排队预算秒数，留空继承、默认 0；只延长首事件等待，不延长输出上限。
+对话/工具模型还可填写可选的用途标签（逗号分隔的小写英文标识，如 long_document, low_cost）；只供决策模型比较候选时参考，不改变路由或权限，决策模型不填写。还可填写可选的输入模态（如 text, image）：含图历史压缩时据此决定能否随图摘要；留空表示未知，宿主会用一次结构化视觉探针判断，不按模型名猜。
+Tab/Shift+Tab 切换表单字段，保存后回到菜单，再选择该模型启用；返回/退出/Esc 不保存尚未提交的草稿。
+菜单中的 Esc 不停止代理。保存只验证格式，不代表接口连通；密钥以掩码显示，不进入聊天/输入历史。
+配置按用户保存，后续主工作片采用选择，运行中的工作片和已有 child 保持原模型。
+也可以直接对代理说“帮我加一个模型 / 把默认模型换成 X / 测一下这个模型能不能用”：主会话代理通过 `manage_models` 工具执行同一套操作，
+密钥只作为参数传一次、回执不回显；删除服务商会弹统一审批确认。开关 `enable_model_profile_tool`，详见 [/model 设计](../design/TUI_MODEL_PROFILES.md)。
+
+IM（如飞书）和 TUI 都可以用文字形式选模型：发送 `/model` 列出当前会话模型、新会话默认和带编号的可选模型，
+`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。可选模型只有自己保存的模型、
+显式部署配置和管理员在「默认模型与共享」里开放的模型（管理员指定了其他用户的初始模型时，「默认」一行就是它）；聊天里不能新增模型、不收发密钥，也不显示接口地址。
+会话一旦用过某个模型就固定下来，改新会话默认不会改变已打开的会话，所以 IM 用户第一次使用时要对当前会话发 `/model <编号>`；
+管理员在「默认模型与共享 → 其他用户的初始模型」指定了模型时，没自己选过模型的用户直接用它，不用再发。
+
+## `bench-model`
+
+```powershell
+my-agent bench-model
+my-agent bench-model --show
+my-agent bench-model --profile /path/to/profile.json
+```
+
+运行模型速度基准测试或查看已有速度模型。速度模型用于动态计算 runner 超时时间。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--show` | `false` | 只查看已有速度模型，不运行测试。 |
+| `--profile <path>` | `data/model_speed_profile.json` | 速度模型文件路径。 |
+
+示例输出：
+
+```
+Backend: anthropic_compatible
+Model: claude-sonnet-4-20250514
+Tested at: 2026-05-02T10:00:00Z
+Interpolation: log_linear
+
+Samples:
+  Input  1000,  Output  500:  10.0s (150 tok/s)
+  Input  5000,  Output  500:  20.0s (275 tok/s)
+  Input 10000,  Output  500:  35.0s (300 tok/s)
+  Input 50000,  Output  500:  82.0s (616 tok/s)
+  Input 100000,  Output  500: 153.0s (676 tok/s)
+
+Speed model saved to: data/model_speed_profile.json
+```
+
+## `subagent`
+
+```powershell
+my-agent subagent <run_id>
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `run_id` | 必填，子代理运行 ID。 |
+
+## 配置文件
+
+主配置：
+
+```text
+agent_py_agent/config/agent_config.yaml
+```
+
+能力路由配置：
+
+```text
+agent_py_agent/config/capability_config.yaml
+```
+
+API key 默认从 `AGENT_API_KEY` 环境变量读取。PowerShell 示例：
+
+```powershell
+$env:AGENT_API_KEY="你的 key"
+```
+
+## `task-lookup`
+
+查询单个任务详情，跨会话可用。
+
+```powershell
+my-agent task-lookup <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-list`
+
+列出任务列表，支持按用户和状态过滤。
+
+```powershell
+my-agent task-list
+my-agent task-list --user-id admin --status RUNNING --limit 20
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--user-id` | 当前用户 | 按用户 ID 过滤 |
+| `--status` | 全部 | 按状态过滤，如 PLANNING/RUNNING/DONE |
+| `--limit` | 50 | 最多显示多少条 |
+
+## `task-show`
+
+显示单个任务详情。
+
+```powershell
+my-agent task-show <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-abandon`
+
+标记任务为 ABANDONED，Dispatch 不再调度。
+
+```powershell
+my-agent task-abandon <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-pause`
+
+暂停任务，可用 `task-resume` 恢复。
+
+```powershell
+my-agent task-pause <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-resume`
+
+恢复已暂停的任务。
+
+```powershell
+my-agent task-resume <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-search`
+
+搜索任务，支持模糊描述。
+
+```powershell
+my-agent task-search "gateway"
+my-agent task-search --query "修复"
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--query` | 是 | 搜索关键词或模糊描述 |
+
+## `adapter`
+
+外部通道适配器（飞书/QQ/文件）。
+
+```powershell
+my-agent adapter start --channel feishu
+my-agent adapter start --channel qq
+my-agent adapter start --channel all
+my-agent adapter start --daemon
+my-agent adapter status
+my-agent adapter stop
+```
+
+子命令：
+
+| 子命令 | 说明 |
+|--------|------|
+| `start --channel <name>` | 启动指定通道适配器（feishu/qq/all） |
+| `start --daemon` | 后台守护进程模式运行，写入 PID 文件 |
+| `start --pid-file <path>` | 指定 PID 文件路径 |
+| `status` | 查看通道适配器状态 |
+| `status --pid-file <path>` | 指定 PID 文件路径 |
+| `stop` | 停止所有通道适配器 |
+| `stop --pid-file <path>` | 指定 PID 文件路径 |
+| `stop --timeout <seconds>` | 等待优雅停止的超时秒数 |
+| `file` | 文件协议适配器（inbox JSON → gateway → outbox JSON） |
+
+## `audit-log`
+
+查询审计日志，支持按用户、动作、目标过滤，显示最近活跃用户和摘要统计。
+
+```powershell
+my-agent audit-log
+my-agent audit-log --user admin --action create_task --limit 50
+my-agent audit-log --target-type task --offset 10
+my-agent audit-log --recent-users --limit 10
+my-agent audit-log --summary
+my-agent audit-log --cleanup --days 90
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--user <id>` | 全部 | 按用户 ID 过滤 |
+| `--action <name>` | 全部 | 按动作类型过滤，如 `create_task`、`access_denied` |
+| `--target <id>` | 全部 | 按目标 ID 过滤 |
+| `--target-type <type>` | 全部 | 按目标类型过滤，如 `task` |
+| `--status <status>` | 全部 | 按状态过滤，如 `success`、`denied` |
+| `--limit <n>` | `100` | 最多显示条数 |
+| `--offset <n>` | `0` | 分页偏移 |
+| `--recent-users` | `false` | 显示最近活跃用户列表 |
+| `--summary` | `false` | 显示审计统计摘要 |
+| `--cleanup` | `false` | 清理旧审计条目 |
+| `--days <n>` | `90` | cleanup 时清理多少天前的记录 |
+
+## `update`
+
+自更新命令(像 通道运行时 update):从当前 git 检出拉最新代码并刷新依赖,普通用户/agent 一条命令就能升级。
+
+```powershell
+my-agent update            # 拉取最新代码 + pip 刷依赖
+my-agent update --check    # 只检查有没有更新,不实际改动
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--check` | `false` | 只 fetch 并报告落后远端多少提交,不执行 pull / 装依赖 |
+
+行为约定:
+
+- 仅对 **git 检出安装**(install.sh 的 git clone 路径)有效;pip 包或本地源码(rsync)安装会给出明确指引而不瞎跑。
+- `update` 走 `git pull --ff-only origin`——origin 指向哪个可达 remote(GitHub / Gitee / 局域网)就从哪更新,不绑死某个托管。
+- 拉取失败(本地有改动 / 分叉)或依赖刷新失败都返回非 0 并提示手动处理,不会留下半更新的静默状态。
+
+## `config-set` / `config-get`
+
+让普通用户或 agent 用一条命令可靠地设 / 读配置项(尤其飞书通道凭证),不必手撕带注释的简化 yaml。
+写回是**行级原地替换**:只动目标顶层 key 那一行,保留注释和其余配置,临时文件 + 原子替换落盘。
+
+```powershell
+my-agent config-set feishu_app_id cli_xxx       # 设置(白名单内字段)
+my-agent config-set feishu_app_secret <secret>  # 敏感字段:写入成功,回显脱敏
+my-agent config-get feishu_app_id               # 读取当前值(敏感字段脱敏)
+```
+
+| 位置参数 | 说明 |
+|------|------|
+| `key` | 配置键名,如 `feishu_app_id` |
+| `value` | 要设置的值(仅 `config-set`) |
+
+约定:
+
+- **白名单**:当前只允许设置飞书通道字段(`feishu_app_id` / `feishu_app_secret` / `feishu_verification_token` / `feishu_encrypt_key` / `feishu_callback_port`)。其他字段(尤其 path/access 等安全相关项)请手动编辑配置,防误改。
+- **脱敏**:secret / token / encrypt_key 等敏感字段回显一律打码,不把明文打回终端或日志。
+- **不写坏**:值含引号或换行时拒绝写入(这套"够用版" yaml 不解析转义),提示手动编辑。
+- 这是"小白 CLI 对话 → my-agent 自助接飞书"的关键一环:agent 用 shell 调 `config-set` 把用户给的凭证可靠写进配置,再 `adapter start --channel feishu` 起通道。
+
+## 安全约定
+
+- 默认调度命令都是 dry-run，先写报告，不修改任务。
+- `subagent-run --execute` 会调用真实 API。
+- `subagents-dispatch --apply --start-runners` 会调用真实 API。
+- `subagents-dispatch --planner` 在 gate 发现有待处理事项时会调用父代理 LLM。
+- `--start-runners` 必须和 `--apply` 一起使用。
+- `--watch` 是前台常驻，终端关闭或 `Ctrl+C` 后进程停止。
+- 旧 `--force-lock` 参数仅保留命令兼容；当前锁由内核描述符判活，空/坏文件不会形成残留锁，真实活锁不能强抢。

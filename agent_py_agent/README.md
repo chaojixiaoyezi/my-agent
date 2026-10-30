@@ -26,7 +26,7 @@ my-agent chat
 my-agent gateway start
 my-agent chat --gateway
 my-agent gateway ask "你好"
-my-agent scenario-test
+my-agent dev scenario-test
 ```
 
 完整参数手册见仓库根目录的 [CLI_REFERENCE.md](../CLI_REFERENCE.md)。
@@ -41,44 +41,43 @@ my-agent scenario-test
 python3 -m agent_py_agent --help
 ```
 
-主要命令：
+当前开发分支内置 CLI 已收敛为 24 个规范根；这不代表运行包已经升级。主要命令（完整根目录与参数见 [CLI Reference](../CLI_REFERENCE.md#24-个规范根)）：
 
 ```text
 run                         运行一次智能体对话
 status                      查看 gateway、LocalStore、subagent 和最近事件总览
 timeline                    查看本地事实源最近事件
 chat                        启动交互循环
-remember                    手动写入记忆
-memory-list                 列出最近记忆
-memory-search               搜索记忆
-local-store-status          查看 SQLite/FTS5 本地事实源状态
-local-search                搜索本地事实源
-local-index-memory          把旧 JSONL 记忆补建到本地事实源
-local-doctor                诊断 LocalStore / gateway / subagent 文件账本一致性
-local-rebuild               从文件事实源重建 LocalStore
-spawn-subagents             创建子代理工单
-subagents                   查看子代理红绿灯看板
-subagent                    查看单个子代理详情
-subagents-due-check         巡检子代理问题
-subagents-probe             检查子代理通道健康
-subagents-plan-actions      根据 due-check 生成动作计划
-subagents-apply-actions     dry-run 或 apply 低风险动作
-subagents-route-capabilities 路由 open capability request
-subagents-acceptance        验收等待验收的子代理
-subagents-patches           审核 runner 输出里的 patch 记录
-subagents-dispatch          执行一轮父代理调度
-scenario-test               隔离跑 gateway/派工/runner/验收全流程
-real-e2e                    跑主代理基础验收矩阵，必要时生成真实任务批量测试计划
+memory remember             手动写入记忆
+memory list                 列出最近记忆
+memory search               搜索记忆
+memory doctor               统一只读 Memory / runtime 诊断
+local-store status          查看 SQLite/FTS5 本地事实源状态
+local-store search          搜索本地事实源
+local-store index-memory    把旧 JSONL 记忆补建到本地事实源
+local-store doctor          诊断 LocalStore / gateway / subagent 文件账本一致性
+local-store rebuild         从文件事实源重建 LocalStore
+subagents create            创建子代理工单
+subagents list              查看子代理红绿灯看板
+subagents show              查看单个子代理详情
+subagents due-check         巡检子代理问题
+subagents probe             检查子代理通道健康
+subagents actions plan      根据 due-check 生成动作计划
+subagents actions apply     dry-run 或 apply 低风险动作
+subagents route-capabilities 路由 open capability request
+subagents patches           审核 runner 输出里的 patch 记录
+subagents dispatch          执行一轮父代理调度
+dev scenario-test           隔离跑 gateway/派工/runner/验收全流程
 gateway                     管理后台 gateway，并向 gateway 投递请求
 adapter                     外部聊天工具 / TUI 文件适配器
-subagent-context            生成单个子代理执行上下文
-subagent-run                按执行上下文运行子代理 runner
+subagents context           生成单个子代理执行上下文
+subagents run               按执行上下文运行子代理 runner
 ```
 
 ## 隔离全流程观察
 
 ```bash
-python3 -m agent_py_agent scenario-test
+python3 -m agent_py_agent dev scenario-test
 ```
 
 这条命令会创建临时 fixture 项目，把 `workspace_root` 指过去，然后走：
@@ -88,7 +87,7 @@ gateway ask -> 主代理 create_subagents 创建并后台启动 -> tree/refs -> 
 ```
 
 所有 memory、subagent、gateway 和文件工具写入都在临时目录里，不会碰当前开发仓库。
-`create_subagents` 的自动启动会对本批 run_id 跑一轮精确 `subagents-dispatch --apply --start-runners`，不复用 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。
+`create_subagents` 的自动启动仍消费持久 argv `subagents-dispatch --apply --start-runners`，不复用 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。这是消费者迁移前不可移除的冻结合同，不是新调用建议；人工调用使用 `subagents dispatch`。
 
 ## 普通运行
 
@@ -150,7 +149,7 @@ python3 -m agent_py_agent chat --gateway
 /prompt-file <路径>    增加动态 prompt 文件
 /show-prompt <问题>    显示最终 prompt 并回答
 /exit                 退出
-/logout               退出
+/admin logout         撤销本人 IM 管理员绑定，不退出界面
 ```
 
 模型响应期间可以继续输入，新的请求会进入后台队列。
@@ -162,19 +161,19 @@ python3 -m agent_py_agent chat --gateway
 手动写入：
 
 ```bash
-python3 -m agent_py_agent remember "我喜欢清晰的表格" --kind preference
+python3 -m agent_py_agent memory remember "我喜欢清晰的表格" --kind preference
 ```
 
 列出最近记忆：
 
 ```bash
-python3 -m agent_py_agent memory-list --limit 20
+python3 -m agent_py_agent memory list --limit 20
 ```
 
 搜索记忆：
 
 ```bash
-python3 -m agent_py_agent memory-search "表格" --limit 5
+python3 -m agent_py_agent memory search "表格" --limit 5
 ```
 
 记忆默认保存在：
@@ -192,20 +191,20 @@ python3 -m agent_py_agent memory-search "表格" --limit 5
 它包含 SQLite 数据库、正文文件目录和追加式审计 JSONL。fresh install 下，新记忆、会话、协作和子代理账本都写当前 owner home；repo 内 `data/*` 不再作为普通运行事实源。配置里显式改成非默认运行路径时会按配置落盘。常用维护命令：
 
 ```bash
-python3 -m agent_py_agent local-store-status
-python3 -m agent_py_agent local-index-memory
-python3 -m agent_py_agent local-doctor
-python3 -m agent_py_agent local-rebuild
-python3 -m agent_py_agent local-search "表格" --source-type memory
-python3 -m agent_py_agent local-search "gateway 日志" --source-type gateway_request
-python3 -m agent_py_agent local-search "子代理目标" --source-type subagent_run
+python3 -m agent_py_agent local-store status
+python3 -m agent_py_agent local-store index-memory
+python3 -m agent_py_agent local-store doctor
+python3 -m agent_py_agent local-store rebuild
+python3 -m agent_py_agent local-store search "表格" --source-type memory
+python3 -m agent_py_agent local-store search "gateway 日志" --source-type gateway_request
+python3 -m agent_py_agent local-store search "子代理目标" --source-type subagent_run
 python3 -m agent_py_agent status
 python3 -m agent_py_agent timeline --limit 20
 ```
 
 gateway request、gateway 生命周期事件、subagent 工单、runner 结果、验收、patch 审核、dispatch、watch、planner、能力路由和通道探测也会写入本地事实源。
 `status` 看当前总览；`timeline` 看最近事件。
-`local-doctor` 查本地账本是否一致；`local-rebuild` 从 memory、gateway、subagent 文件事实源补建 LocalStore。
+`local-store doctor` 查本地账本是否一致；`local-store rebuild` 从 memory、gateway、subagent 文件事实源补建 LocalStore。`/logout` 与裸 `logout` 不再退出；退出界面使用 `/exit`，与管理员撤销严格区分。
 
 这个目录默认被 Git 忽略。
 
@@ -250,16 +249,16 @@ subagent runner 会使用 `allowed_tools` 白名单：
 创建工单：
 
 ```bash
-python3 -m agent_py_agent spawn-subagents "实现一个功能并验收" --count 2
+python3 -m agent_py_agent subagents create "实现一个功能并验收" --count 2
 ```
 
 查看看板：
 
 ```bash
-python3 -m agent_py_agent subagents
-python3 -m agent_py_agent subagents --all
-python3 -m agent_py_agent subagents --status BLOCKED
-python3 -m agent_py_agent subagents --root-id <root_run_id>
+python3 -m agent_py_agent subagents list
+python3 -m agent_py_agent subagents list --all
+python3 -m agent_py_agent subagents list --status BLOCKED
+python3 -m agent_py_agent subagents list --root-id <root_run_id>
 ```
 
 `--root-id`、`--status`、`--owner` 会在生成看板时直接收窄范围；终端输出、
@@ -268,91 +267,81 @@ python3 -m agent_py_agent subagents --root-id <root_run_id>
 查看单个 run：
 
 ```bash
-python3 -m agent_py_agent subagent <run_id>
+python3 -m agent_py_agent subagents show <run_id>
 ```
 
 巡检：
 
 ```bash
-python3 -m agent_py_agent subagents-due-check
+python3 -m agent_py_agent subagents due-check
 ```
 
 通道探测：
 
 ```bash
-python3 -m agent_py_agent subagents-probe <run_id>
+python3 -m agent_py_agent subagents probe <run_id>
 ```
 
 动作计划：
 
 ```bash
-python3 -m agent_py_agent subagents-plan-actions
+python3 -m agent_py_agent subagents actions plan
 ```
 
 低风险动作 dry-run：
 
 ```bash
-python3 -m agent_py_agent subagents-apply-actions --dry-run
+python3 -m agent_py_agent subagents actions apply --dry-run
 ```
 
 低风险动作 apply：
 
 ```bash
-python3 -m agent_py_agent subagents-apply-actions --apply --action reopen_for_evidence --run-id <run_id>
+python3 -m agent_py_agent subagents actions apply --apply --action reopen_for_evidence --run-id <run_id>
 ```
 
 能力路由 dry-run：
 
 ```bash
-python3 -m agent_py_agent subagents-route-capabilities --dry-run
+python3 -m agent_py_agent subagents route-capabilities --dry-run
 ```
 
 能力路由 apply：
 
 ```bash
-python3 -m agent_py_agent subagents-route-capabilities --apply
+python3 -m agent_py_agent subagents route-capabilities --apply
 ```
 
-验收 dry-run：
-
-```bash
-python3 -m agent_py_agent subagents-acceptance --dry-run
-```
-
-验收 apply：
-
-```bash
-python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
-```
+产物与执行结束事实由宿主账本交回父级，父级结合真实证据复核，不再推荐旧的独立验收命令。
 
 patch 审核 dry-run：
 
 ```bash
-python3 -m agent_py_agent subagents-patches --dry-run
+python3 -m agent_py_agent subagents patches --dry-run
 ```
 
 patch 审核 apply：
 
 ```bash
-python3 -m agent_py_agent subagents-patches --apply --run-id <run_id>
+python3 -m agent_py_agent subagents patches --apply --run-id <run_id>
 ```
 
 父代理调度 dry-run：
 
 ```bash
-python3 -m agent_py_agent subagents-dispatch --dry-run
+python3 -m agent_py_agent subagents dispatch --dry-run
 ```
 
 父代理调度 apply：
 
 ```bash
-python3 -m agent_py_agent subagents-dispatch --apply
+python3 -m agent_py_agent subagents dispatch --apply
 ```
 
 真正调用 runner 模型：
 
 ```bash
-python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
+python3 -m agent_py_agent subagents dispatch --apply --execute-runners
 ```
 
 后台 gateway：
@@ -404,7 +393,7 @@ shell 直接碰三份人格文件都会在任务晋升前被拒，并明确报�
 前台 watch 调试入口：
 
 ```bash
-python3 -m agent_py_agent daemon
+python3 -m agent_py_agent subagents daemon
 ```
 
 `daemon` 只从 `agent_config.yaml` 读取 `daemon_mutate_state` / `daemon_start_runners` / `daemon_runner_instruction`；每轮间隔、每轮 runner 数、记录条数、循环次数、能力卡数、planner/探针开关和审核者标识是 `cli/daemon.py` 里的代码常量，单次启动用命令行参数覆盖。模型根据可独立的工作项自主决定本批子代理数量；当前 root 可用槽位、可选单次限制、每任务、每 owner 和全局并发上限依次取严格最小值。请求超限时整批拒绝，不静默截断或创建一半。默认 `max_subagents=8`、`subagent_hierarchy_max_children_per_tool_call=0`，即只用八个 root 会话槽位而不再额外限制单批为四个；`task_max_subagents=0` 也表示该维度不额外收紧，不取消 owner/并发安全上限。runner 并发、超时和启动速率默认走 `auto`；`--max-cycles 0` 表示持续运行，`--limit 0` 表示不限制记录条数。
@@ -412,31 +401,31 @@ python3 -m agent_py_agent daemon
 宿主内部恢复/观察循环（不是模型工具）：
 
 ```bash
-python3 -m agent_py_agent subagents-dispatch --watch --planner --interval 30
+python3 -m agent_py_agent subagents dispatch --watch --planner --interval 30
 ```
 
 安全跑一轮 watch：
 
 ```bash
-python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
+python3 -m agent_py_agent subagents dispatch --watch --max-cycles 1 --interval 0
 ```
 
 生成执行上下文：
 
 ```bash
-python3 -m agent_py_agent subagent-context <run_id>
+python3 -m agent_py_agent subagents context <run_id>
 ```
 
 runner dry-run：
 
 ```bash
-python3 -m agent_py_agent subagent-run <run_id>
+python3 -m agent_py_agent subagents run <run_id>
 ```
 
 runner 真执行：
 
 ```bash
-python3 -m agent_py_agent subagent-run <run_id> --execute
+python3 -m agent_py_agent subagents run <run_id> --execute
 ```
 
 ## Subagent Runner 结束协议
@@ -490,9 +479,9 @@ export AGENT_API_KEY="你的 key"
 ```bash
 python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py
 python3 -m agent_py_agent --help
-python3 -m agent_py_agent subagent-run --help
-python3 -m agent_py_agent subagents-patches --help
-python3 -m agent_py_agent subagents-dispatch --help
+python3 -m agent_py_agent subagents run --help
+python3 -m agent_py_agent subagents patches --help
+python3 -m agent_py_agent subagents dispatch --help
 ```
 
 注意：完整 `agent_py_agent/tests/run_tests.py` 是当前标准收口冒烟，会使用真实 API，并用临时配置隔离 memory 和 subagent 测试数据。

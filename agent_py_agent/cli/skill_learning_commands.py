@@ -69,14 +69,16 @@ def add_learned_skill_subcommands(areas: argparse._SubParsersAction) -> None:
         parser.set_defaults(func=handler)
 
     proposals = actions.add_parser("proposals", help="列出待确认的学习候选")
-    proposals.add_argument("--json", action="store_true")
-    proposals.set_defaults(func=cmd_learning_proposals)
-    for action in ("proposal-show", "confirm", "reject"):
-        candidate = actions.add_parser(action, help="查看、确认或拒绝学习候选")
+    proposal_actions = proposals.add_subparsers(dest="proposal_action", required=True)
+    proposal_list = proposal_actions.add_parser("list", help="列出待确认的学习候选")
+    proposal_list.add_argument("--json", action="store_true")
+    proposal_list.set_defaults(func=cmd_learning_proposals, skills_learned_action="proposals")
+    for action in ("show", "confirm", "reject"):
+        candidate = proposal_actions.add_parser(action, help="查看、确认或拒绝学习候选")
         candidate.add_argument("proposal_id")
-        candidate.add_argument("--revision", type=int, required=action != "proposal-show")
+        candidate.add_argument("--revision", type=int, required=action != "show")
         candidate.add_argument("--json", action="store_true")
-        candidate.set_defaults(func=cmd_learning_proposals)
+        candidate.set_defaults(func=cmd_learning_proposals, skills_learned_action="proposal-show" if action == "show" else action)
 
 
 # LLM: 只读列出，不创建目录。
@@ -242,4 +244,5 @@ def cmd_learning_proposals(args):
         row = resolve_learning_proposal(context.store,selected.proposal_id,selected.revision,decision=action,guard_config=context.config,actor_id="local-cli")
         return {"ok":True,"proposal":row}
 
-    return _run(args,"skills learned "+args.skills_learned_action,operation)
+    action = {"proposals": "list", "proposal-show": "show"}.get(args.skills_learned_action, args.skills_learned_action)
+    return _run(args, "skills learned proposals " + action, operation)

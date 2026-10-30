@@ -1,3 +1,5 @@
+# LLM: Home维护测试仅使用临时owner；规范建议只解析验证，不在诊断用例执行清理。
+# 模块用途: 验证原Home维护合同及规范诊断建议。
 from __future__ import annotations
 
 import json
@@ -28,6 +30,8 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
     return code, json.loads(captured.out)
 
 
+# LLM: 保留原悬空索引与保留候选断言；生成的新建议须由真实规范parser接受，不执行handler。
+# 函数用途: 验证诊断建议使用规范入口且不丢失原清理/重建语义。
 def test_home_doctor_reports_dangling_index_and_retention_advice(tmp_path: Path) -> None:
     from agent_py_agent.agent.user_space.home_doctor import build_home_doctor_report
     from agent_py_agent.agent.user_space.home_indexes import TaskIndexRef, register_task_ref
@@ -51,8 +55,13 @@ def test_home_doctor_reports_dangling_index_and_retention_advice(tmp_path: Path)
     assert any(item["kind"] == "dangling_index" for item in report["findings"])
     assert report["repair_plan"]["auto_repair_count"] >= 2
     commands = {item["command"] for item in report["repair_plan"]["auto_repair"]}
-    assert "my-agent home-index-rebuild --apply" in commands
-    assert "my-agent home-retention --apply" in commands
+    assert "my-agent home index rebuild --apply" in commands
+    assert "my-agent home retention --apply" in commands
+    from agent_py_agent.cli.parser import build_parser
+    for command in commands:
+        args = build_parser().parse_args(command.split()[1:])
+        assert args.apply is True
+        assert args.func.__name__ in {"cmd_home_index_rebuild", "cmd_home_retention"}
 
 
 def test_home_doctor_reports_backup_requests_and_grants(tmp_path: Path) -> None:

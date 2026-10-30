@@ -1,10 +1,12 @@
 
+# LLM: 场景必须显式调用才运行测试Gateway；只迁移恢复argv，保留原事实源与断言。
+# 模块用途: 执行原Gateway跨天恢复场景。
 from __future__ import annotations
 
-"""implements the gateway cross-day resume scenario that verifies memory-resume recovers gateway JSON facts.
+"""implements the gateway cross-day resume scenario that verifies memory archive resume recovers gateway JSON facts.
 
 给人看的解释：
-这个文件验证 gateway 请求跨天后能被 memory-resume 命令找回。
+这个文件验证 gateway 请求跨天后能被 memory archive resume 命令找回。
 先真正发一个 gateway 请求，再模拟隔天恢复场景。
 """
 
@@ -71,13 +73,15 @@ def _gateway_request_fact_path(gpaths, request_id: str, gateway_payload: dict) -
     return candidates[0]
 
 
+# LLM: 使用原隔离场景目录和过滤参数，保留子进程失败传播。
+# 函数用途: 调用规范恢复子进程并解析原JSON。
 def _run_cross_day_resume(paths, request_id):
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     resume = run_scenario_subprocess(
         scenario_command(
-            paths, "memory-resume", "gateway cross-day resume",
+            paths, "memory", "archive", "resume", "gateway cross-day resume",
             "--request-id", request_id,
             "--since", "2026-04-29", "--until", "2026-04-30", "--json",
         ),
@@ -86,7 +90,7 @@ def _run_cross_day_resume(paths, request_id):
     try:
         return json.loads(resume.stdout), resume.returncode
     except json.JSONDecodeError as exc:
-        return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
+        return {"ok": False, "error": f"memory archive resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,8 @@ def _verify_cross_day_resume(request: CrossDayResumeVerifyRequest):
     )
 
 
+# LLM: 仅显式场景入口执行测试进程，不因更改帮助或计划文案运行真实服务。
+# 函数用途: 按原顺序运行跨天场景并核对请求事实与恢复断言。
 def run_scenario_gateway_cross_day_resume_case(args) -> int:
 
     paths = create_scenario_workspace(args)
@@ -137,7 +143,7 @@ def run_scenario_gateway_cross_day_resume_case(args) -> int:
         response_path=response_path,
     )
 
-    print_scenario_step(3, "Run memory-resume against the real gateway request id")
+    print_scenario_step(3, "Run memory archive resume against the real gateway request id")
     resume_payload, returncode = _run_cross_day_resume(paths, request_id)
 
     final_ok = _verify_cross_day_resume(

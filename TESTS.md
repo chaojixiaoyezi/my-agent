@@ -269,6 +269,71 @@ git diff --check 4bea324e3..HEAD
 macOS JUnit：`/tmp/pytest_cache_sol7_r3_fix/gates-final.xml`；原探针：同目录 `probe-final.xml`。Linux、注释及汇总证据：`/Users/xiaoyezi/.my-agent/owners/local/main/tasks/2026-10-29/学习发布二轮修复/fix-r3/tmp/` 下的 `linux-final/repro.log`、`linux-final/repro.xml`、`comment-audit.json`、`verification-summary.json`。容器和原探针命令保持任务单原入口，容器额外传入上述 `linux-final` 输出目录。
 
 未跑全仓 pytest，未推送、部署或启停生产服务。上述结果不代表 Gateway/IM、多身份、跨机、Windows 或断电恢复验收；同 UID 绕过锁持续篡改不在原事务保证内，pending 未新增自动消费者。
+## 2026-10-29 e905 sol-9 R2：配置事实单入口与双层注释补齐
+
+来源：07 `fix-e905-sol-9-r2.md` 与 Astra-1 二审 B1/B2；接 `d67030b01`，全范围注释基线仍为 `4bea324e3`。
+
+- `config_cmd.py` 写前旧值复用 `read_config_fact.user_value`，底层统一去引号和脱敏；不在 CLI 读 raw YAML，不改变参数写入、权限门、空值、具体错误及未知异常传播合同。
+- 新增四个参数化消费方回归，区分普通旧值、无覆盖、空串和零；旧实现四例均失败。保留原真实配置去引号、敏感字段掩码、写失败与全局写门回归，不削弱删除验证器或 manifest。
+- 两份测试模块头与 `TestSupervisorSubcommands` 类补中文双层职责说明；用 AST 按基线区间检查现存改动 Python 模块和新增/修改定义，包含嵌套函数、方法及装饰器。
+
+复现：在工作树根设置 `PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1`，分批运行任务指定六份 pytest，运行 `scripts/verify_optimization_removal.py --worker sol-9 --json`、全范围 Ruff、导入边界和 `git diff --check 4bea324e3..HEAD`。实际结果与删除门尚待项写入本轮 DONE 的 `Round 2 Fixes`，不以结构无失败冒称全分支验收。
+
+## 2026-10-29 e905 sol-9 R1：CLI 消费方、冻结合同与诊断返工
+
+来源：07 `fix-e905-sol-9-r1.md` 七项要求及 Opus/Astra-1 复核。接 `74c56cf71`；真实检查基线仍为 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。
+
+- 普通 argparse 消费方改用 `gateway supervisor start/stop`，保留原 handler、超时预算和退出码断言，不恢复平铺注册；顶层目录用 SUPPRESS 避免被子解析器覆盖。冻结快照中仅 supervisor 的目录默认值由 null 修正为 SUPPRESS，并有规范/旧路径显式目录回归；这是本轮明确要求的缺陷修复，不是放宽冻结比较。
+- 内置装配与扩展阶段分离，退休名/规范名/重复名在返回 parser 前拒绝；合成组中文帮助、复用节点 description 和真实子解析器帮助分组元数据均恢复。
+- manifest 新增永久 `frozen_cli_cross_version` 表，独立测试逐项锁定安装器五类调用和后台 dispatch 的 argv、handler 与参数；不依赖产品映射表反推期望，不随普通 v1 别名退役。
+- 独立复核后补强两处测试：后台 dispatch 采用真实生产者参数形状，锁定 config/workspace、执行开关、预算、launch、重复 run 和双值 expected-attempt；配置失败直接断言服务的具体整数校验原因，避免中文兜底也通过。
+- 配置旧值先按原 YAML 读取语义去引号再脱敏，打印中文失败原因，空串显示未设置；仅已知全局写门拒绝转结构化非零。Doctor all.common 固定四字段的 runtime/memory 双键，新增真实 parser→Agent→DoctorService 临时 owner 回归；默认与 v1 原视图保持。
+- 恢复有效 CLI 章节、跨文档锚点和模型/插件/会话/身份说明，同步记忆模块、文件树和设计账；替换机械双层注释及 parser 英文模块注释。
+
+红测：原局部消费方 10/10 失败；扩展/目录/帮助/冻结合同文件 191 项中 14 失败；配置/聚合红测 23 项中 10 失败，真实 Doctor CLI 两项中一项失败。首次整合 382 项中仅子进程导入检查失败：当时 PYTHONSAFEPATH=1 且 PYTHONPATH 未设，`find_spec('agent_py_agent')` 返回 None。后续只显式设置本工作树 PYTHONPATH，不取消 safe_path、不修改测试。最终结果见本轮 DONE。
+
+在工作树根复现（独立进程也从此树导入；只跑明确列出的测试）：
+
+```sh
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
+  agent_py_agent/tests/test_opt_cli_contracts.py agent_py_agent/tests/test_cli_parser.py \
+  agent_py_agent/tests/test_subcommands_basic_class.py agent_py_agent/tests/test_subcommands_gateway_class.py \
+  agent_py_agent/tests/test_adapter_daemon.py agent_py_agent/tests/test_home_doctor.py \
+  agent_py_agent/tests/test_memory_v2_cli.py agent_py_agent/tests/test_cli_config.py \
+  agent_py_agent/tests/test_memory_doctor_class.py agent_py_agent/tests/test_memory_commands_cli.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base 4bea324e3
+git diff --check 4bea324e3..HEAD
+```
+
+不运行全仓测试，不启动/停止生产服务，不修改真实 owner 配置；解析与临时 owner 验证不代表安装器升级回滚、launchd/systemd、真实 OAuth/IM 或部署已经验证。
+
+## 2026-10-29 e905 sol-9：规范CLI、统一诊断与删除门
+
+来源：07 的 `task-e905-sol-9.md` v2（291行）及总规划4.2；工作树 `/tmp/wt-e905-sol-9`，分支 `opt-e905/sol-9`，真实基线 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。只改本分支；不推送、部署、修改真实owner数据或安装系统服务。
+
+- 内置70根/144旧路径接入唯一24根规范树，根输入纯解码；保留原扩展接口但拒绝占用规范根的别名。独审发现的分组帮助、动态子命令和别名污染4个反例已先跑红再修复；不通过删除有效扩展制造24根。
+- 真实守护入口从指定基线提取并冻结参数、默认值和handler，不捏造不存在的runtime模块。DoctorService统一在 `agent/user_space/home_doctor.py`，删除两份CLI旧聚合模块；默认memory保持原字段，runtime隔离，all的公共投影只输出一次。平铺v1输入仍固定退出0，规范诊断按原健康条件返回0/1。
+- `/logout`与裸logout歧义拒绝；明确`/exit`和v1输入`/quit`保留，`/admin logout`管理员撤销及MCP标准`list_tools`原测试保留。
+- 配置CLI保留原五键白名单，读写委托现有typed参数服务；统一追加三条跨域错误分类，不代替其他席位触发点接线。
+- 删除门保留全部383项、185项本任务配额、跨线实现责任与60项 `deferred_dynamic_check`。未知领域语义明确欠账，不把单席结构通过外推全仓完成。请求ID中的`subagent-run:`不是CLI调用，只按准确AST字段上下文保留。
+- Probe只测真实进程内parser构建/显式配置加载，保存样本及源码/输入摘要；不声称端到端、服务启动或跨机器性能。历史手册移到 `docs/history/CLI_REFERENCE_V1.md`，新手册只展示当前规范树。
+
+复现（必须从工作树根，用本树本地venv补齐测试依赖，不改全局环境）：
+```bash
+PATH="$PWD/.venv/bin:$PATH" python3 -m pytest agent_py_agent/tests -k "cli or command_catalog or control_commands or doctor" -q --tb=short
+PATH="$PWD/.venv/bin:$PATH" python3 -m pytest agent_py_agent/tests/test_opt_cli_contracts.py agent_py_agent/tests/test_opt_cross_domain_faults.py agent_py_agent/tests/test_performance_review_probe_contract.py agent_py_agent/tests/test_admin_identity_gateway.py agent_py_agent/tests/test_computer_use_observation_tools.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/verify_optimization_removal.py --worker sol-9 --json
+python3 scripts/verify_optimization_removal.py --worker all --json
+python3 scripts/performance_review_probe.py --iterations 3 --warmup 1 --json
+python3 scripts/benchmark_config_policy.py --config <隔离配置路径> --iterations 3 --warmup 1 --json
+git diff --check
+```
+
+宽`-k`同时命中`client`相关测试。已在准确基线源码归档上复现同名5个浏览器/MCP/插件进程失败，未把原因推断为沙箱、未skip/xfail或降低断言；最终当前版本结果与未验证项见本席DONE交接报告。二次Astra独审指出报告硬链接覆盖与可变报告引用风险，分别改为临时文件加`os.replace`和公开报告独立快照；原子替换、目录符号链接拒绝、修改报告后再读的3项聚焦回归通过。真实硬链接集成用例在构造fixture的`os.link`步骤收到`EPERM`，系统临时目录与本工作树缓存内均已观察到；保留该测试为失败，不skip或假称硬链接链路通过，交Linux车道复核。基线临时worktree创建被`.git`写权限拒绝后使用本树缓存内的`git archive`回退，并核对基线parser blob及导入来源；不是拿本分支的早先提交当基线。
 
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 

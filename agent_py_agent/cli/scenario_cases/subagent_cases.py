@@ -1,11 +1,13 @@
 
+# LLM: 场景保持原任务及持久request_id命名空间，只迁恢复CLI与计划文案。
+# 模块用途: 提供原父子代理跨天恢复场景及辅助函数。
 from __future__ import annotations
 
 """implements parent-subagent cross-day resume scenario and shared recovery helpers for subagent tasks.
 
 给人看的解释：
 这个文件包含子代理跨天恢复场景测试和共用的恢复辅助函数。
-验证子代理执行结果能被 memory-resume 命令正确找回。
+验证子代理执行结果能被 memory archive resume 命令正确找回。
 """
 
 import json
@@ -188,6 +190,8 @@ def _append_subagent_snapshot(root: Path, task) -> None:
     )
 
 
+# LLM: 保留原测试任务身份与执行权限，计划提示只使用规范恢复入口。
+# 函数用途: 建立原父子代理场景任务。
 def _parent_subagent_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -206,7 +210,7 @@ def _parent_subagent_setup(args):
     task = agent.subagents.create_run(
         goal="parent/subagent 跨天恢复演练：读取 README 后等待父级恢复收口",
         thought="验证真实 runner 写回后，隔天恢复必须回到子代理任务事实源。",
-        plan=["runner 读取 README.md", "写回结构化结果", "模拟跨天恢复", "memory-resume 找回任务事实源"],
+        plan=["runner 读取 README.md", "写回结构化结果", "模拟跨天恢复", "memory archive resume 找回任务事实源"],
         allowed_tools=["read_file"],
         acceptance_checks=["必须有 read_file 证据", "恢复时必须推荐任务事实源", "父级恢复后再决定是否收口"],
     )
@@ -231,13 +235,15 @@ def _parent_subagent_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
+# LLM: 恢复仍绑定原任务和时间过滤，子进程沿原失败传播规则返回。
+# 函数用途: 为原子代理任务执行规范归档恢复。
 def _run_subagent_resume(paths, task):
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     resume = run_scenario_subprocess(
         scenario_command(
-            paths, "memory-resume", "parent subagent cross-day resume",
+            paths, "memory", "archive", "resume", "parent subagent cross-day resume",
             "--run-id", task.id,
             "--since", "2026-04-29", "--until", "2026-04-30", "--json",
         ),
@@ -246,7 +252,7 @@ def _run_subagent_resume(paths, task):
     try:
         return json.loads(resume.stdout), resume.returncode
     except json.JSONDecodeError as exc:
-        return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
+        return {"ok": False, "error": f"memory archive resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
 
 
 def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResults, task, expected_reads):
@@ -274,6 +280,8 @@ def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResult
     )
 
 
+# LLM: 仅显式运行原隔离场景，保留任务事实源检查，不扩充写入或重放权。
+# 函数用途: 执行原父子代理跨天场景并核对恢复证据。
 def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
 
     paths, agent, backend, task, loaded, runner = _parent_subagent_setup(args)
@@ -284,7 +292,7 @@ def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
     reloaded_task = reloaded_agent.subagents.load(task.id)
     print(f"reloaded_status={reloaded_task.status} task_dir={reloaded_task.task_dir}")
 
-    print_scenario_step(4, "Run memory-resume and require task fact-source reads")
+    print_scenario_step(4, "Run memory archive resume and require task fact-source reads")
     resume_payload, returncode = _run_subagent_resume(paths, task)
 
     expected_reads = [

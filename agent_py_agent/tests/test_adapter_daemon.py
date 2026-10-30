@@ -199,15 +199,15 @@ def test_adapter_stop_budgets_and_outcomes(tmp_path, monkeypatch, outcomes, code
         remove.assert_not_called()
 
 
-# LLM: 使用真实argparse到handler接线；省略timeout传None后由handler采用25秒，显式非零覆盖保持。
-# 函数用途: 验证supervisor-stop默认/显式预算与成功失败返回码，不停止真实服务。
+# LLM: 普通argparse局部注册规范路径到原handler；省略timeout传None后采用25秒，显式非零覆盖保持。
+# 函数用途: 验证gateway supervisor stop默认/显式预算与成功失败返回码，不停止真实服务。
 @pytest.mark.parametrize("timeout_args,budget", [([], 25.0), (["--timeout", "0"], 25.0),
     (["--timeout", "10"], 10.0), (["--timeout", "30.5"], 30.5)])
 @pytest.mark.parametrize("stopped,code", [(True, 0), (False, 2)])
 def test_supervisor_stop_parser_to_handler_budget(monkeypatch, timeout_args, budget, stopped, code):
     parser = argparse.ArgumentParser()
     add_gateway_subcommands(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(["gateway", "supervisor-stop", *timeout_args])
+    args = parser.parse_args(["gateway", "supervisor", "stop", *timeout_args])
     agent, paths = object(), object()
     make_agent, gateway_paths, stop = Mock(return_value=agent), Mock(return_value=paths), Mock(return_value=stopped)
     monkeypatch.setattr(supervisor, "make_agent", make_agent)

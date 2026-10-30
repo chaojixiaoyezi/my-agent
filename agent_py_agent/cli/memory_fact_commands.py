@@ -1,4 +1,6 @@
 
+# LLM: 事实保存沿原证据与作用域门；后续建议仅生成规范命令，不自动执行Compact或恢复。
+# 模块用途: 保存原任务事实并提供规范后续指令。
 from __future__ import annotations
 
 """CLI entrypoint for approved compact completion facts."""
@@ -116,13 +118,15 @@ def _fact_next_actions(args, compact_payload: dict[str, Any]) -> list[str]:
     return [next_step] if next_step else []
 
 
+# LLM: 保留原参数和事实ID，仅迁移后续建议，不自动执行副作用。
+# 函数用途: 生成写事实后的规范Compact与恢复指令。
 def _fact_write_next_commands(args, fact_id: str) -> list[str]:
     if not fact_id:
         return []
-    command = f"my-agent memory-compact --apply --request-id {fact_id}"
+    command = f"my-agent memory compact --apply --request-id {fact_id}"
     if getattr(args, "from_compact", ""):
         command += "  # or rerun the original compact scope if it used session/task/run filters"
-    return [command, "my-agent memory-resume --from-compact <new_apply_id> --compact-resume-mode auto"]
+    return [command, "my-agent memory archive resume --from-compact <new_apply_id> --compact-resume-mode auto"]
 
 
 def _args_list(args, name: str) -> list[str]:

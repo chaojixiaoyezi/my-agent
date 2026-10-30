@@ -1,3 +1,5 @@
+# LLM: 使用临时配置验证 typed 服务读写及 CLI 输出合同；覆盖旧值去引号、凭据脱敏、空值和明确权限拒绝，不修改生产配置。
+# 模块用途: 回归配置安全读写、写前值展示及失败回显，确保原子写入、白名单和全局写门不被绕过。
 """config-set / config-get 测试:行级安全写回(保留注释/原子)+ 白名单 + secret 脱敏。
 
 钉死:① 顶层 key 原地替换、注释和其余行不动 ② 整数字段不加引号 ③ 缺失 key 追加 ④ 含引号的值拒绝
@@ -94,3 +96,102 @@ def test_cmd_config_set_file_missing(tmp_path, capsys) -> None:
     rc = C.cmd_config_set(Namespace(key="feishu_app_id", value="x", config=str(tmp_path / "nope.yaml")))
     assert rc == 1
     assert "不存在" in capsys.readouterr().out
+
+
+# LLM: 临时配置真实经过参数写服务，旧值去除 YAML 外层引号后才脱敏；不读取生产配置。
+# 函数用途: 回归普通键和密钥旧值的展示与实际落盘。
+@pytest.mark.parametrize("key,old,expected", [
+    ("feishu_app_id", "cli_old_id", "cli_old_id"),
+    ("feishu_app_secret", "oldsecret", "old***"),
+])
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_set_previous_value_without_yaml_quotes(tmp_path, capsys, key, old, expected, quote):
+    p = tmp_path / "config.yaml"
+    p.write_text(f"{key}: {quote}{old}{quote}\n", encoding="utf-8")
+    assert C.cmd_config_set(Namespace(key=key, value="newvalue", config=str(p))) == 0
+    out = capsys.readouterr().out
+    assert f"{key}: {expected} →" in out
+    if key.endswith("secret"):
+        assert old not in out and "newvalue" not in out
+    assert load_simple_yaml(p)[key] == "newvalue"
+
+
+# LLM: 仅替换只读配置事实以隔离 CLI 消费方；实际写入仍走 typed 服务，旧值必须使用已脱敏的 user_value 而非直接读 YAML 或默认值。
+# 函数用途: 验证写前展示服从统一配置事实，并区分没有覆盖、空串和数值零。
+@pytest.mark.parametrize("previous,expected", [
+    ("typed_previous", "typed_previous"),
+    (None, "(新增)"),
+    ("", ""),
+    ("0", "0"),
+])
+def test_set_previous_value_uses_typed_config_fact(tmp_path, monkeypatch, capsys, previous, expected):
+    from unittest.mock import Mock
+
+    p = _write_config(tmp_path)
+    fact = Mock(return_value={"user_value": previous})
+    monkeypatch.setattr(C, "read_config_fact", fact)
+    assert C.cmd_config_set(Namespace(key="feishu_app_id", value="newvalue", config=str(p))) == 0
+    assert f"feishu_app_id: {expected} → newvalue" in capsys.readouterr().out
+    fact.assert_called_once_with("feishu_app_id", user_path=p, default_path=C.packaged_config_path())
+    assert load_simple_yaml(p)["feishu_app_id"] == "newvalue"
+
+
+# LLM: 坏端口必须被真实 typed 校验拒绝；输出具体服务原因而非中文兜底，且不改变原文件。
+# 函数用途: 验证参数写失败保留错误码和人可读说明。
+def test_set_invalid_port_prints_reason(tmp_path, capsys):
+    p = _write_config(tmp_path)
+    before = p.read_bytes()
+    assert C.cmd_config_set(Namespace(key="feishu_callback_port", value="not-a-port", config=str(p))) == 1
+    out = capsys.readouterr().out
+    assert "PARAMETER_INVALID" in out
+    assert "'feishu_callback_port' 取值不合法：必须是正整数" in out
+    assert p.read_bytes() == before
+
+
+# LLM: 使用独立随包默认替身区分空串、非空默认值及数值零，不调用真实用户配置。
+# 函数用途: 保留 config get 空串未设置展示并防止零值误判。
+@pytest.mark.parametrize("user_line,default_line,expected", [
+    ("", 'feishu_encrypt_key: ""\n', "(未设置) feishu_encrypt_key"),
+    ('feishu_encrypt_key: ""\n', 'feishu_encrypt_key: "default-key"\n', "(未设置) feishu_encrypt_key"),
+    ("", 'feishu_encrypt_key: "default-key"\n', "feishu_encrypt_key: def***"),
+    ("feishu_callback_port: 0\n", "", "feishu_callback_port: 0"),
+])
+def test_get_empty_string_compat(tmp_path, monkeypatch, capsys, user_line, default_line, expected):
+    p = tmp_path / "user.yaml"
+    p.write_text(user_line, encoding="utf-8")
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text(default_line, encoding="utf-8")
+    monkeypatch.setattr(C, "packaged_config_path", lambda: defaults)
+    key = "feishu_callback_port" if "callback_port" in user_line else "feishu_encrypt_key"
+    assert C.cmd_config_get(Namespace(key=key, config=str(p))) == 0
+    assert capsys.readouterr().out.strip() == expected
+
+
+# LLM: 注入正式写门的受限事实且自动恢复；拒绝前后配置与参数账本都不得变化。
+# 函数用途: 验证 worker/executor 权限拒绝返回结构化非零结果。
+@pytest.mark.parametrize("restricted", ["worker", "executor"])
+def test_set_global_writer_denial(tmp_path, monkeypatch, capsys, restricted):
+    import json
+
+    from agent_py_agent.agent.common import global_write_guard as guard
+    p = _write_config(tmp_path)
+    before = p.read_bytes()
+    monkeypatch.setattr(guard, "_restricted_writer", lambda: object() if restricted == "worker" else None)
+    monkeypatch.setattr(guard, "_restricted_executor", restricted == "executor")
+    assert C.cmd_config_set(Namespace(key="feishu_app_id", value="new", config=str(p))) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] is False and report["executed"] is False
+    assert report["code"] == "GLOBAL_WRITE_IN_" + restricted.upper()
+    assert "权限" in report["error"]
+    assert p.read_bytes() == before
+    assert not (p.parent / "settings-changes.jsonl").exists()
+
+
+# LLM: 未知异常可能发生于写入后；不得用权限兜底将它谎报为未执行。
+# 函数用途: 确保未知服务故障仍传给上层而非被吞掉。
+def test_set_unknown_service_error_is_not_denial(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    p = _write_config(tmp_path)
+    monkeypatch.setattr(C, "set_parameter", Mock(side_effect=RuntimeError("result unknown")))
+    with pytest.raises(RuntimeError, match="result unknown"):
+        C.cmd_config_set(Namespace(key="feishu_app_id", value="new", config=str(p)))

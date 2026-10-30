@@ -14,6 +14,12 @@
 ## 2026-10-29 e905 sol-5 R2：候选来源别名连通投影
 
 `candidates.py::_merge_indexed_observation` 将本次稳定来源组交给 `_new_observation_sources`，以已有来源为锚迭代传播可关联别名；`_matching_source_contexts` 只传播匹配的运行上下文，已知 run 优先于历史空 run。仅未连通的组进入新观察键，未改 `CandidateObservation`、真实引用合并或学习覆盖合同；没有新增事实源、配置和正式记忆跨引用接口。原先只检查每个 incoming group 对历史并集的单步判重已替换。
+## 2026-10-29 e905 sol-9：诊断聚合与规范命令结构（开发分支，未部署）
+
+- `cli/parser.py` 装配唯一规范解析树；`cli/argv_compat_v1.py` 在根输入边界解码旧路径并把原注册器接入 24 根，不扫描业务正文作命令转换。规范用法见 [CLI Reference](../../../CLI_REFERENCE.md)。
+- `agent/user_space/home_doctor.py::DoctorService` 是 runtime/memory/all 的唯一聚合服务，按 owner、验证根、索引与范围区分请求缓存，返回深拷贝；runtime 保留原 Home/路由健康条件，memory 保留候选、策展、迁移与保留期只读工厂。
+- `cli/memory_admin_commands.py` 负责 CLI 参数、工厂注入、文本/JSON 格式及原失败传播；`cli/memory_commands/__init__.py` 已移除旧 Doctor 导出。两份旧 CLI Doctor 模块已删除，不继续作为职责或常数来源。
+- all 的 `common` 各公共字段固定保留 `runtime` / `memory` 子键，相同值也不折叠；不同根和范围不互相覆盖。不预设诊断字段值，不把只读报告当配置实际读取方、修复执行或部署证明。
 
 ## 2026-10-27 CI 全绿收敛：候选兼容读取、晋升补全与大索引流式过滤结构
 
@@ -374,7 +380,7 @@ _MESSAGE_PREVIEW_CHARS/_MAX_LIST_ITEM_CHARS/_MAX_SUMMARY_CHARS/_MAX_HOT_RULE_CHA
 ## P10 第四批常数整改（2026-10-02，ds1，待集成）
 
 `cli/memory_archive_commands.py::_CLI_MEMORY_ARCHIVE_COUNT`（memory-archive 默认最多返回 20 条）、
-`cli/memory_commands/memory_doctor_cmd.py::MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`（doctor 列出最近 5 个归档文件）、
+`agent/user_space/home_doctor.py::MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`（doctor 列出最近 5 个归档文件，e905 统一诊断后迁入）、
 `cli/memory_commands/memory_query_cmd.py::_CLI_MEMORY_ROUTE_COUNT`（memory-route 默认最多返回 5 条）；
 数值不变，随包目录投影与源码一致。
 
@@ -494,11 +500,11 @@ memory_archive 与 `cli/memory_archive_commands.py` 的常数改名/补说明：
 
 ## 记忆诊断回显的配置名单
 
-`cli/memory_doctor.py` 与 `cli/memory_commands/memory_doctor_cmd.py` 的 `_memory_config_payload` / `_build_archive_doctor` 只回显
+`agent/user_space/home_doctor.py` 的 `_memory_config_payload` / `_build_archive_doctor` 只回显
 `AgentConfig` 上真实存在的 Memory 字段；名单与 `settings/_memory_types.MemorySettings` 同步删减（2026-09-27 去掉
 `memory_hook_retention_days`、`memory_rule_receipt_enabled`）。doctor 不是配置的读取方证据：只在这里出现的字段视为无读取方。
-doctor 列出最近多少个归档文件自参数减量第 3 批（2026-09-27）起是 `memory_doctor_cmd.MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_LIMIT`（5），
-旧入口 `cli/memory_doctor.py` 从那里 import，只定义一次；配置项 `memory_doctor_recent_archive_file_limit` 已删除。
+doctor 最近归档数量当前统一为 `agent/user_space/home_doctor.py::MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT`（5）；
+旧 CLI Doctor 模块已删除，不再 import 或定义副本；配置项 `memory_doctor_recent_archive_file_limit` 已删除。
 
 child历史说明在不展示正文时不再提前读取完整来源或计算展示窗口，保留原线程说明及核验；三文件31项通过。三宿主seed物化峰值已定位，后续延后/释放尚未实施，12.4未完成。
 

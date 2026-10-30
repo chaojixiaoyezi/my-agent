@@ -1,3 +1,5 @@
+# LLM: 使用隔离夹具保留原诊断断言，不操作真实用户数据。
+# 模块用途: 验证迁到规范服务的诊断辅助函数。
 """memory_doctor 模块测试。
 
 测试 cmd_memory_doctor、_build_routing_doctor、_build_archive_doctor、_archive_dir_payload 等函数。
@@ -11,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_py_agent.cli.memory_doctor import (
+from agent_py_agent.agent.user_space.home_doctor import (
     _archive_dir_payload,
     _archive_file_payload,
     _build_archive_doctor,

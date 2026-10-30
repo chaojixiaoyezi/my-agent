@@ -38,7 +38,7 @@ class CommandSpec:
 
 COMMAND_CATALOG = (
     CommandSpec("users", "/users [list|info|create|password|enable|disable]",
-        "管理本地普通用户（创建用户名密码、重置密码、启停与查看，仅管理员）", aliases=("user",),
+        "管理本地普通用户（创建用户名密码、重置密码、启停与查看，仅管理员）",
         help_variants=(
             ("/users list", "列出所有本地普通用户及其状态、Owner ID（管理员，TUI/IM 可用）"),
             ("/users info <用户名>", "查看指定本地普通用户的详情、密码状态与配额控制"),
@@ -252,7 +252,6 @@ COMMAND_CATALOG = (
         "查看或切换详细过程显示",
         help_variants=(("/verbose stream", "同一条短过程消息原地更新，默认最多 100 字符；完成后另发完整结果"),
                        ("/verbose on", "逐步展示工具进展"), ("/verbose off", "关闭详细过程，长工具仍给极简状态与更新时间")),
-        aliases=("v",),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(\S+))?\s*$",
     ),
@@ -314,7 +313,7 @@ COMMAND_CATALOG = (
         conversation_suffix=r"(?:\s+(.*))?$",
     ),
     CommandSpec("expand", "/expand [last|编号]", "展开一条已折叠的助手回复", submit_on_enter=True),
-    CommandSpec("exit", "/exit", "退出聊天界面", aliases=("logout", "quit"), submit_on_enter=True),
+    CommandSpec("exit", "/exit", "退出聊天界面", submit_on_enter=True),
     CommandSpec("memory", "/memory candidates [list|show|preview|confirm|reject|cancel|receipt]", "人工审核本人记忆候选",
         submit_on_enter=True, conversation_suffix=r"\s+(candidates(?:\s+.*)?)\s*$",
         help_variants=(("/memory candidates preview <候选ID>", "完整预览后按预览编号confirm、reject或cancel，正式保存只认当前本人确认"),
@@ -428,7 +427,7 @@ def command_access_error(spec: CommandSpec, context: CommandAccessContext, actio
 # LLM: 只投影公共目录和权限声明；能力自查引导tool_search的catalog动作，管理员子动作仍按结构字段过滤。
 # 函数用途: 生成本身份的简明帮助或单项说明，未解锁只列基础入口。
 def render_command_help(context: CommandAccessContext, topic: str = "") -> str:
-    topic = topic.strip().lstrip("/")
+    topic = decode_slash_v1_input("/" + topic.strip().lstrip("/")).lstrip("/") if topic.strip() else ""
     selected = COMMAND_INDEX.get(topic) if topic else None
     if topic and (selected is None or command_access_error(selected, context)):
         return "当前身份或入口没有这个可用命令。输入 /help 查看列表。"
@@ -466,9 +465,19 @@ _NAMESPACE_COMMANDS = tuple(spec for spec in COMMAND_CATALOG if spec.namespace_s
 _SYSTEM_SLASH = re.compile(r"^/([a-z][a-z0-9_-]*)(?:\s|$)", re.IGNORECASE)
 
 
+# LLM: 仅发布N的三个精确Slash旧名在输入边界转换；不进入规范目录，也不解码logout或扩展自然语言。
+# 函数用途: 把仍承诺的user/v/quit输入转换为规范名称，保留正文与大小写边界。
+def decode_slash_v1_input(raw: str) -> str:
+    match = _SYSTEM_SLASH.match(raw)
+    names = {"user": "users", "v": "verbose", "quit": "exit"}
+    name = match.group(1).casefold() if match is not None else ""
+    return "/" + names[name] + raw[match.end(1):] if name in names else raw
+
+
 # LLM: 只返回规范名和原捕获正文，不执行 shlex、路径转换或正文修饰；Goal/Audit 的语义仍归会话模块。
 # 函数用途: 按目录中的既有语法匹配会话命令，保留无空格 Compact、多行和显式别名行为。
 def match_conversation_command(raw: str) -> tuple[str, str | None] | None:
+    raw = decode_slash_v1_input(raw)
     for spec, pattern in _CONVERSATION_MATCHERS:
         match = pattern.match(raw)
         if match is not None:
@@ -479,7 +488,7 @@ def match_conversation_command(raw: str) -> tuple[str, str | None] | None:
 # LLM: 这里只认消息开头的协议标记；保留插件后缀大小写且捕获异常 ID，避免错误命令落入模型或插话。
 # 函数用途: 给所有入口提供统一的系统命令判据；普通文件路径和正文内斜杠不命中。
 def system_slash_command_name(text: object) -> str:
-    raw = str(text or "").strip()
+    raw = decode_slash_v1_input(str(text or "").strip())
     for spec in _NAMESPACE_COMMANDS:
         if any(raw.lower().startswith("/" + spec.name + separator) for separator in spec.namespace_separators):
             head = raw.split(maxsplit=1)[0]
@@ -504,4 +513,6 @@ def sensitive_command_name(text: object) -> str:
 # LLM: 此错误只负责未知核心命令；插件参数结果归 plugin_commands，不能再增加第二套命名空间文案。
 # 函数用途: 为未知系统命令生成中文提示，不尝试任何执行或聊天回退。
 def unavailable_command_message(name: str) -> str:
+    if name.casefold().lstrip("/") == "logout":
+        return "logout 含义不明确：退出界面请用 /exit；解除管理员认证请用 /admin logout。本次未执行任何动作。"
     return f"不支持的系统命令：/{name}。输入 /help 查看当前界面支持的命令。"
