@@ -1,4 +1,5 @@
-
+# LLM: 延续包投影原事实与guard；canonical救援文案不能变成自动执行权限或改写历史动作。
+# 模块用途: 生成机器可读的压缩延续包，不自动执行工具。
 from __future__ import annotations
 
 """machine-readable continuation packet for manual, semi-auto, and auto compact resume."""
@@ -207,6 +208,8 @@ def _lineage_payload(value: Any) -> dict[str, Any]:
     }
 
 
+# LLM: guard仍决定允许与阻塞分支；文案不参与状态判定。
+# 函数用途: 生成恢复说明，阻塞时提供canonical补救入口。
 def _resume_instructions(guard: dict[str, Any]) -> list[str]:
     if guard.get("allowed_to_continue"):
         return [
@@ -219,7 +222,7 @@ def _resume_instructions(guard: dict[str, Any]) -> list[str]:
     return [
         "Stop automated continuation.",
         "Fill missing work-state facts or inspect consistency_report before continuing.",
-        "Rerun memory-compact --apply and memory-resume after facts are complete.",
+        "Rerun my-agent memory compact --apply and my-agent memory archive resume after facts are complete.",
     ]
 
 

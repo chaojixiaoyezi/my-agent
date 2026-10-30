@@ -1,3 +1,5 @@
+# LLM: 真实child和Compact链只用本地fake；发现能力使用self_map而非过期工具白名单。
+# 模块用途: 验证同业务turn的能力展示、恢复和canonical发现入口。
 """child 同一业务 turn 的原展示载体：真实运行、快照和 Compact，供应商仅用本地 fake。"""
 from contextlib import nullcontext
 from dataclasses import asdict
@@ -30,6 +32,7 @@ from agent_py_agent.tests.test_tool_presentation_projection import (
 @pytest.fixture
 def capability_host(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F811
     agent = _agent(tmp_path, context_tokens=1_000_000)
+    self_map = agent.tools.tools["self_map"]
     # PTL 重试上限已是读取点旁的具名常量（agent_core.tool_context.ptl_retry.DEFAULT_PTL_RETRY_MAX_COUNT），
     # 不再是 AgentConfig 字段，这里不再需要关掉它。
     registry, _, first, second, _ = tool_surface
@@ -39,6 +42,7 @@ def capability_host(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     agent.current_skill_snapshot = lambda: catalog.snapshot
     agent.skill_snapshot_for_run_scope = lambda _: catalog.snapshot
     registry.register(SkillSearchTool(agent))
+    registry.register(self_map)
     backend = _OverflowThenCompleteChildBackend()
     backend.model_name = "test-model"
     backend.context_window_tokens = 1_000_000
@@ -76,10 +80,19 @@ def capture_host_runs(monkeypatch, agent):
 # 函数用途: 建立 canonical child，并在原启动前固定旧历史的预期投影供摘要覆盖复核。
 def child_task(fixture, *, prior=True):
     task = fixture.agent.subagents.create_run(goal="核对来源后汇报事实", role="worker",
-        allowed_tools=[fixture.first.model_spec.name, fixture.second.model_spec.name, "skill_search", "tool_search", "list_tools"])
+        allowed_tools=[fixture.first.model_spec.name, fixture.second.model_spec.name, "skill_search", "tool_search", "self_map"])
     if prior:
         fixture.prior_messages = append_prior_turn(fixture.agent, task.agent_thread_id)
     return task
+
+
+# LLM: 检查真实registry及任务allowlist，不能只替换一段未接线的字符串。
+# 函数用途: 验证compact子任务继承可用的self_map发现工具。
+def test_child_compact_discovery_uses_registered_self_map(capability_host):
+    assert "self_map" in capability_host.agent.tools.tools
+    task = child_task(capability_host, prior=False)
+    assert "self_map" in task.allowed_tools
+    assert "list_tools" not in task.allowed_tools
 
 
 # LLM: 预期历史在业务前由 canonical store 冻结；backend.generate 的 messages 尚未由 provider builder 追加独立 prompt，须完整比较而非剥掉末行。

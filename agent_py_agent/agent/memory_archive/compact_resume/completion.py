@@ -1,4 +1,5 @@
-
+# LLM: 补全提示仅描述缺失事实；命令迁移保留scope转义和空列表语义。
+# 模块用途: 生成半自动恢复的补全提示，不写事实或执行命令。
 from __future__ import annotations
 
 """semi-auto completion prompt helpers for compact resume."""
@@ -71,6 +72,8 @@ def _prompt_template(fields: list[dict[str, str]]) -> str:
     return "\n".join(lines).rstrip()
 
 
+# LLM: 替换完整命令路径，保留事实写入入口、scope转义及无缺项时空列表合同。
+# 函数用途: 缺事实时提供补全、重新apply和恢复的canonical命令。
 def _suggested_commands(request: CompactCompletionPromptRequest, missing: list[str]) -> list[str]:
     if not missing:
         return []
@@ -80,8 +83,8 @@ def _suggested_commands(request: CompactCompletionPromptRequest, missing: list[s
     return [
         f"my-agent memory-fact-write{fact_flag} --from-compact {request.apply_id} "
         '--acceptance "..." --constraint "..." --latest-test "..."',
-        f"my-agent memory-compact --apply{scope_flags}",
-        "my-agent memory-resume --from-compact <new_apply_id> --compact-resume-mode auto",
+        f"my-agent memory compact --apply{scope_flags}",
+        "my-agent memory archive resume --from-compact <new_apply_id> --compact-resume-mode auto",
     ]
 
 

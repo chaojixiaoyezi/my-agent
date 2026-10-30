@@ -1,4 +1,5 @@
-
+# LLM: 计划只读来源并生成canonical建议；不修改历史消息、元数据或操作权限。
+# 模块用途: 预演记忆压缩范围、风险与恢复建议，不执行apply。
 from __future__ import annotations
 
 """dry-run planning for memory compact without mutating archive files.
@@ -243,6 +244,8 @@ def _risk_notes(archive: dict[str, Any], snapshots: dict[str, Any], tokens: dict
     return risks
 
 
+# LLM: 只替换本次新生成的建议，风险、原档保留和Doctor前置合同不变。
+# 函数用途: 为压缩预演列出检查与恢复入口，不执行命令。
 def _recommended_actions(
     archive: dict[str, Any],
     snapshots: dict[str, Any],
@@ -251,13 +254,13 @@ def _recommended_actions(
 ) -> list[str]:
     actions = ["Review this dry-run plan before enabling compact apply."]
     if archive["record_count"]:
-        actions.append("Keep original raw/hook files until memory-resume is verified after compact.")
+        actions.append("Keep original raw/hook files until my-agent memory archive resume is verified after compact.")
     if snapshots["file_count"]:
         actions.append("Use latest compression snapshots as the first recovery anchor.")
     if tokens["ledger_count"]:
         actions.append("Use token ledgers to choose compact thresholds before automatic compaction.")
     if risks:
-        actions.append("Run memory-doctor and local-doctor before applying compact.")
+        actions.append("Run my-agent memory doctor and local-doctor before applying compact.")
     return actions
 
 

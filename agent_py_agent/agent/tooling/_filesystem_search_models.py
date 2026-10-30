@@ -1,6 +1,5 @@
 
-# LLM: This module is the canonical typed search request and matcher contract;
-# rg and Python fallback must interpret every field identically.
+# LLM: 搜索请求与匹配合同唯一；候选文件由共同发现策略准入，不能由两后端另行解释忽略规则。
 # 模块用途: 解析本地文本搜索参数，并为快速路径与后备路径提供一致的匹配规则。
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ from ._filesystem_helpers import (
     _optional_path,
     _text_param,
 )
-from ._filesystem_read import _COMMON_FILE_DISCOVERY_IGNORES
 
 
 @dataclass(frozen=True)
@@ -116,21 +114,16 @@ def search_request_from_params(params: dict[str, Any], max_matches: int) -> Sear
     )
 
 
-def path_has_ignored_part(item: Path, root: Path) -> bool:
-    try:
-        rel = item.relative_to(root)
-    except ValueError:
-        return False
-    return any(part in _COMMON_FILE_DISCOVERY_IGNORES for part in rel.parts[:-1])
-
-
-def rg_args(rg_path: str, target: Path, request: SearchRequest) -> list[str]:
+# LLM: 只收宿主准入的显式文件，不把glob/gitignore解释再交给rg；禁配置、禁follow。
+# 函数用途: 为共同策略筛出的文件构造原生文本匹配参数。
+def rg_args(rg_path: str, targets: list[Path], request: SearchRequest) -> list[str]:
     args = [
         rg_path,
         "--json",
         "--line-number",
         "--color=never",
         "--hidden",
+        "--no-ignore",
         "--no-config",
         "--no-messages",
         "--no-follow",
@@ -145,12 +138,7 @@ def rg_args(rg_path: str, target: Path, request: SearchRequest) -> list[str]:
         args.append("--fixed-strings")
     if request.ignore_case:
         args.append("--ignore-case")
-    if request.file_glob:
-        args.extend(["--glob", request.file_glob])
-    if not request.include_ignored:
-        for ignored in sorted(_COMMON_FILE_DISCOVERY_IGNORES):
-            args.extend(["--glob", f"!{ignored}/**", "--glob", f"!**/{ignored}/**"])
-    args.extend(["--", request.query, str(target)])
+    args.extend(["--", request.query, *(str(path) for path in targets)])
     return args
 
 

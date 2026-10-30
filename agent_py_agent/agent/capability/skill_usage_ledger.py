@@ -1,4 +1,4 @@
-# LLM: 使用台账只保存身份与计数，不存方法正文；独立于学习开关，所有异常只能软降级。
+# LLM: 使用台账只保存身份与INT64计数，写失败只告警；无历史起点证明时读取不得补造lifetime完整性。
 # 模块用途: 统一记录 owner 的人工检索、读取、宿主注入与采用事实。
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from ..common.nofollow_fs import (
     unlink_file_beneath,
     write_text_atomic_beneath,
 )
+from ..local_storage.owner_read_index import OwnerReadIndex, OwnerReadUnavailable, require_complete
 from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_learning_store import SkillLearningStore
 
@@ -23,6 +24,7 @@ USAGE_EVENTS = ("manual_search", "manual_get", "host_injected", "adopted")
 MAX_USAGE_LEDGER_EVENTS = 2000
 KEEP_USAGE_LEDGER_EVENTS = 1000
 _CONTEXT_DEFAULTS = {"request_id": "", "thread_id": "", "task_id": "", "chars": 0}
+_INT64_MAX = 2**63 - 1
 
 
 # LLM: Store传params，旧调用方的显式关键字覆盖同名项；归一后复用批量口校验/事务，记录异常只warning。
@@ -71,17 +73,113 @@ def _record_usage_rows(store, events: list[dict]) -> None:
         _save_usage(store, admission, rows, summary)
 
 
-# LLM: 只读恢复已写明细尚未写汇总的事件，不创建目录或保存恢复状态；故障不影响报告主入口。
-# 函数用途: 读取 owner 使用汇总，失败时返回空计数。
+# LLM: 生命周期权威仍是原summary；未知不能转成空计数，原writer不依赖此读取口。
+# 函数用途: 保持完整成功时的原字典，失败时抛带coverage的异常。
 def load_skill_usage_summary(store_or_home) -> dict:
+    report = load_skill_usage_summary_report(store_or_home)
+    if report['coverage']['status'] != 'complete':
+        logging.getLogger(__name__).warning("SKILL_USAGE_SUMMARY_UNAVAILABLE")
+    return require_complete(report)['summary']
+
+
+# LLM: 只绑定Store原owner根，不从ledger父目录猜归属；构造不落盘。
+# 函数用途: 为同一Store复用纯派生读索引。
+def _usage_read_index(store):
+    index = getattr(store, '_usage_read_index', None)
+    if index is None:
+        index = OwnerReadIndex(store.skills_root.parent)
+        store._usage_read_index = index
+    return index
+
+
+# LLM: 明细不超过原writer保留上限，不扩大预算或重建丢失历史。
+# 函数用途: 固定view分页取得供原replay校验的有界最近明细。
+def _indexed_usage_rows(index, view):
+    first = require_complete(index.query(view, limit=1000))
+    total = first['total_count']
+    if total > MAX_USAGE_LEDGER_EVENTS:
+        raise OwnerReadUnavailable({'status': 'partial', 'reason': 'usage_detail_budget',
+                                    'source': first['coverage']})
+    if total == 0 and view.get('through', 0) > 0:
+        raise OwnerReadUnavailable({'status': 'unavailable', 'reason': 'missing_usage_projection',
+                                    'source': first['coverage']})
+    rows = first['rows']
+    while len(rows) < total:
+        page = require_complete(index.query(view, limit=min(1000, total - len(rows)), offset=len(rows)))
+        if not page['rows']:
+            raise OwnerReadUnavailable({'status': 'unavailable', 'reason': 'missing_usage_projection',
+                                        'source': page['coverage']})
+        rows.extend(page['rows'])
+    return rows
+
+
+# LLM: summary为lifetime基线；无summary的无序号legacy明细不能证明起点，保持partial且不补号反证完整或反写事实。
+# 函数用途: 返回使用汇总及独立的来源、生命周期和明细覆盖状态。
+def load_skill_usage_summary_report(store_or_home) -> dict:
+    sources = {}
     try:
         store = _usage_store(store_or_home)
-        summary = _read_summary(store)
+        index = _usage_read_index(store)
+        parts = store.directory.relative_to(store.skills_root.parent).parts
+        summary_view = index.advance('usage', (*parts, 'usage_summary.json'))
+        sources['summary'] = summary_view
+        projected = index.query(summary_view, limit=1)
+        sources['summary'] = projected['coverage']
+        require_complete(projected)
+        present = bool(projected['rows'])
+        if not present and projected['coverage'].get('reason') != 'source_absent':
+            raise ValueError('missing summary projection')
+        summary = projected['rows'][0] if present else _empty_summary()
+        detail_view = index.advance('usage', (*parts, 'usage_ledger.jsonl'))
+        sources['ledger'] = detail_view
+        rows = _indexed_usage_rows(index, detail_view)
+        if not present and any('sequence' not in row for row in rows):
+            raise OwnerReadUnavailable({
+                'status': 'partial', 'reason': 'legacy_history_start_unknown',
+                'scope': 'lifetime_summary',
+                'detail_history': {'status': 'unknown', 'reason': 'legacy_history_start_unknown'},
+            })
+        numbered = next(((position, row['sequence']) for position, row in enumerate(rows)
+                         if 'sequence' in row), None)
+        if not present and numbered is not None and numbered[1] != numbered[0] + 1:
+            raise OwnerReadUnavailable({'status': 'unavailable', 'reason': 'missing_lifetime_summary'})
+        if (not isinstance(summary, dict) or not isinstance(summary.get('totals'), dict)
+                or not isinstance(summary.get('by_skill'), dict)
+                or not isinstance(summary.get('daily_history'), dict)):
+            raise ValueError('invalid usage summary')
+        _summary_sequence(summary)
+        _normalize_by_skill(summary)
+        _replay_usage_rows(summary, rows)
         _prune_daily(summary)
-        return summary
-    except Exception:  # noqa: BLE001 - 报告必须能在统计文件不可读时继续。
-        logging.getLogger(__name__).warning("SKILL_USAGE_SUMMARY_UNAVAILABLE")
-        return _empty_summary()
+        # 两来源均在全部处理结束后重新校验，替换或删除不能被早先读取掩盖。
+        for name, view in (('summary', summary_view), ('ledger', detail_view)):
+            check = index.query(view, limit=0)
+            sources[name] = check['coverage']
+            require_complete(check)
+        sequences = [row['sequence'] for row in rows]
+        complete_history = ((not sequences and summary['last_sequence'] == 0)
+                            or bool(sequences) and sequences[0] == 1
+                            and sequences[-1] == summary['last_sequence']
+                            and all(right == left + 1 for left, right in zip(sequences, sequences[1:])))
+        return {'summary': summary, 'coverage': {
+            'status': 'complete', 'reason': 'summary_and_retained_replay',
+            'scope': 'lifetime_summary', 'sources': sources,
+            'detail_history': {'status': 'complete' if complete_history else 'partial',
+                               'reason': 'covered' if complete_history else 'retained_or_missing_detail'},
+        }}
+    except OwnerReadUnavailable as error:
+        return {'summary': None, 'coverage': {
+            'status': error.coverage.get('status', 'unavailable'),
+            'reason': error.coverage.get('reason', 'usage_read_unavailable'),
+            'failure': error.coverage, 'sources': sources,
+            **{key: error.coverage[key] for key in ('scope', 'detail_history') if key in error.coverage},
+        }}
+    except Exception as error:  # noqa: BLE001 - 读取保留未知，不修复规范来源。
+        return {'summary': None, 'coverage': {
+            'status': 'unavailable',
+            'reason': 'io_error' if isinstance(error, OSError) else 'invalid_usage_state',
+            'sources': sources,
+        }}
 
 
 # LLM: Agent 优先取当前 owner 的 home_paths；不能用 cwd、全局 home 或学习开关决定归属。
@@ -96,12 +194,13 @@ def _usage_store(value) -> SkillLearningStore:
     return SkillLearningStore(root / "data" / "skill_learning", root / "skills")
 
 
-# LLM: 只消费归一事件字典并拒绝未知上下文键；保留省略与显式None区别，不把query、正文或异常文本抄到账本。
+# LLM: 先验事件和种类为字符串再判断成员，chars限制非负INT64；保留省略与None差别，不落query、正文或异常文本。
 # 函数用途: 生成一行有 UTC 日期和有界关联标识的使用记录。
 def _usage_row(agent, params: dict) -> dict:
     event, skill_id, source = params["event"], params["skill_id"], params["source"]
     kind = params.get("kind", "skill")
-    if event not in USAGE_EVENTS or kind not in {"skill", "capability_package"} or not skill_id:
+    if (not isinstance(event, str) or event not in USAGE_EVENTS
+            or not isinstance(kind, str) or kind not in {"skill", "capability_package"} or not skill_id):
         raise ValueError("invalid usage identity")
     context = {key: value for key, value in params.items() if key not in {"event", "skill_id", "source", "kind"}}
     if set(context) - set(_CONTEXT_DEFAULTS):
@@ -112,7 +211,7 @@ def _usage_row(agent, params: dict) -> dict:
     if "thread_id" not in context:
         values["thread_id"] = attrs.get("conversation_thread_id", "")
     chars = values.pop("chars")
-    if type(chars) is not int or chars < 0:
+    if type(chars) is not int or not 0 <= chars <= _INT64_MAX:
         raise ValueError("invalid usage chars")
     at = datetime.now(timezone.utc).isoformat()
     return {"at": at, "date": at[:10], "event": event, "skill_id": str(skill_id)[:512],
@@ -161,17 +260,20 @@ def _empty_summary() -> dict:
     return {"totals": _empty_counts(), "by_skill": {}, "daily_history": {}, "last_sequence": 0}
 
 
-# LLM: 生命周期计数取原汇总；先合并旧by_skill前缀键再补水位后明细，迁移不改总数、水位或日期，不在只读口落盘。
+# LLM: 生命周期计数取原汇总；缺失汇总且legacy无序号时拒绝写入恢复，不通过一次追加为残余历史补造完整证明。
 # 函数用途: 加载汇总并检查基本结构，拒绝损坏状态被新事件覆盖。
 def _read_summary(store, rows: list | None = None) -> dict:
     text = _read_usage_text(store, "usage_summary.json")
+    rows = _ledger_rows(store) if rows is None else rows
+    if text is None and any('sequence' not in row for row in rows):
+        raise ValueError('legacy_history_start_unknown')
     summary = json.loads(text) if text is not None else _empty_summary()
     if (not isinstance(summary, dict) or not isinstance(summary.get("totals"), dict)
             or not isinstance(summary.get("by_skill"), dict) or not isinstance(summary.get("daily_history"), dict)):
         raise ValueError("invalid usage summary")
     _summary_sequence(summary)
     _normalize_by_skill(summary)
-    _replay_usage_rows(summary, _ledger_rows(store) if rows is None else rows)
+    _replay_usage_rows(summary, rows)
     return summary
 
 

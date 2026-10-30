@@ -1,12 +1,18 @@
+# LLM: FTS维护使用真实临时SQLite验证返回数、完成键和MATCH；其它既有维护单元测试保持不变。
+# 模块用途: 验证分批FTS重建、统计、重置和完整性检查。
 """本地存储维护测试 - maintenance.py FTS 重建、统计、重置、完整性检查。"""
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.local_storage.store import LocalStore
 
+
+# LLM: 不把旧单次commit次数当分批状态机的业务合同，保留真实结果和完成标记覆盖。
+# 类用途: 检查FTS关闭、空库及有记录重建。
 class TestRebuildFts:
     """rebuild_fts FTS5 索引重建测试。"""
 
@@ -15,43 +21,35 @@ class TestRebuildFts:
         store = make_fake_store_func(fts_available=False)
         assert store.rebuild_fts() == 0
 
-    def test_rebuild_fts_empty_records(self, make_fake_store_func, mock_db_conn):
-        """验证空记录时返回 0。"""
-        store = make_fake_store_func(mock_conn=mock_db_conn)
+    # LLM: 真实空库也须走影子发表并原子写完成键，而不是Mock返回0。
+    # 函数用途: 验证空记录重建的业务结果及耐久完成状态。
+    def test_rebuild_fts_empty_records(self, tmp_path):
+        store = LocalStore(tmp_path / 'empty.sqlite3')
+        assert store.fts_available
         result = store.rebuild_fts()
         assert result == 0
-        assert mock_db_conn.method_calls[-2][0] == "execute"
-        assert mock_db_conn.method_calls[-2].args[1] == ("records_fts_rebuild_pending", "false")
-        assert mock_db_conn.method_calls[-1] == call.commit()
-        mock_db_conn.commit.assert_called_once_with()
+        with store._connection() as conn:
+            assert conn.execute("SELECT value FROM metadata WHERE key='records_fts_rebuild_pending'").fetchone()[0] == 'false'
+            assert conn.execute('SELECT phase FROM maintenance_fts_job WHERE slot=1').fetchone()[0] == 'complete'
+            assert conn.execute('SELECT COUNT(*) FROM records_fts').fetchone()[0] == 0
         assert store._fts_needs_rebuild is False
 
-    def test_rebuild_fts_with_records(self, make_fake_store_func):
-        """验证有记录时重建并返回数量。"""
-        from unittest.mock import MagicMock
-        store = make_fake_store_func(fts_available=True)
-        mock_result = MagicMock()
-        mock_result.fetchall.return_value = [
-            {"id": "r1", "title": "Title 1", "content_path": "p1"},
-            {"id": "r2", "title": "Title 2", "content_path": "p2"},
-        ]
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value = mock_result
-
-        class ConnCtx:
-            def __enter__(self):
-                return mock_conn
-            def __exit__(self, *args):
-                pass
-
-        store._connection = lambda: ConnCtx()
+    # LLM: 原两记录数量和完成键合同仍在，额外检查实际FTS MATCH及重开后的持久状态。
+    # 函数用途: 验证真实正文和影子重建结果一致。
+    def test_rebuild_fts_with_records(self, tmp_path):
+        store = LocalStore(tmp_path / 'records.sqlite3')
+        assert store.fts_available
+        for index in range(2):
+            store.upsert_record(source_type='memory', source_id=f'source-{index}',
+                                title=f'Title {index}', content=f'needle body {index}')
         result = store.rebuild_fts()
         assert result == 2
-        assert mock_conn.method_calls[-2][0] == "execute"
-        assert mock_conn.method_calls[-2].args[1] == ("records_fts_rebuild_pending", "false")
-        assert mock_conn.method_calls[-1] == call.commit()
-        mock_conn.commit.assert_called_once_with()
+        with store._connection() as conn:
+            assert conn.execute("SELECT value FROM metadata WHERE key='records_fts_rebuild_pending'").fetchone()[0] == 'false'
+            assert conn.execute("SELECT COUNT(*) FROM records_fts WHERE records_fts MATCH 'needle'").fetchone()[0] == 2
         assert store._fts_needs_rebuild is False
+        reopened = LocalStore(store.db_path)
+        assert len(reopened._search_fts('needle', limit=10, source_type=None, visibility=None)) == 2
 
 
 class TestReset:

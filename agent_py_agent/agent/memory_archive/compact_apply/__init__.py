@@ -1,4 +1,5 @@
-
+# LLM: apply保持原非破坏性落盘与自检；只迁移新输入默认actor，不改历史metadata或v1。
+# 模块用途: 将压缩计划保存为恢复产物与账本，保留原归档和快照。
 from __future__ import annotations
 
 from ...common.json_io import append_private_text, jsonl_lines, write_private_text_file_atomic
@@ -54,12 +55,14 @@ COMPACT_SELF_CHECK_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_self_check
 COMPACT_SELF_CHECK_FAILURE_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_self_check_failure")
 
 
+# LLM: 默认actor标识新入口，显式传入值原样保留；仅apply_memory_compact负责落盘。
+# 类用途: 收集非破坏性压缩apply的输入。
 @dataclass(frozen=True)
 class MemoryCompactApplyOptions:
     """Bundle inputs for non-destructive compact apply."""
 
     plan_options: MemoryCompactPlanOptions
-    actor: str = "memory-compact"
+    actor: str = "my-agent memory compact"
     main_context_bundle_ref: str = ""
     main_context_bundle_ref_explicit: bool = False
 

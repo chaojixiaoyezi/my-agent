@@ -1,7 +1,8 @@
-
+# LLM: 恢复读取原apply事实并执行原guard；名称迁移不改历史v1、refs或状态判定。
+# 模块用途: 从canonical压缩apply产物构建恢复上下文，不执行业务工具。
 from __future__ import annotations
 
-"""manual resume support for memory-compact --apply artifacts."""
+"""manual resume support for my-agent memory compact --apply artifacts."""
 
 from dataclasses import dataclass, field
 from pathlib import Path

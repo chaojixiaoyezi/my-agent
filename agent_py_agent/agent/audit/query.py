@@ -1,20 +1,33 @@
-
-
+# LLM: 审计只投影显式可信root内权威路径，coverage未知不能转成成功空记录。
+# 模块用途: 提供审计固定分页、SQL统计及共用原追加锁的安全保留叶。
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
+import math
+import os
+import secrets
+import stat
 import time
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import jsonl_lines
+from ..common.cache_freshness import cache_stat_signature
+from ..common.json_io import _flock_descriptor, _funlock_descriptor, path_thread_lock
+from ..common.nofollow_fs import NoFollowPathError, open_directory_beneath
+from ..local_storage.owner_read_index import OwnerReadIndex, require_complete
 
 if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 from .logger import AuditAction, AuditEntry
-from .paths import AuditPaths, resolve_audit_paths
+from .paths import resolve_audit_paths
+
+_AUDIT_RETENTION_MAX_BYTES = 16 * 1024 * 1024
+_AUDIT_RETENTION_ROW_MAX_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -69,51 +82,6 @@ def _normalize_query_params(
     )
 
 
-def _iter_audit_dicts(path: Path):
-    try:
-        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-        lines = jsonl_lines(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return
-    for line in lines:
-        data = _parse_audit_line(line)
-        if data is not None:
-            yield data
-
-
-def _parse_audit_line(line: str) -> dict[str, Any] | None:
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _audit_entry_matches(data: dict[str, Any], params: AuditQueryParams, action_str: str | None) -> bool:
-    if params.user_id and data.get("user_id") != params.user_id:
-        return False
-    if action_str and data.get("action") != action_str:
-        return False
-    if params.target_id and data.get("target_id") != params.target_id:
-        return False
-    if params.target_type and data.get("target_type") != params.target_type:
-        return False
-    if params.status and data.get("status") != params.status:
-        return False
-    return _timestamp_matches(data.get("timestamp", 0), params)
-
-
-def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
-    if params.start_time and timestamp < params.start_time:
-        return False
-    if params.end_time and timestamp > params.end_time:
-        return False
-    return True
-
-
 # LLM: 运行时权威审计路径（可能带后缀）与配置里的 audit_log_path 语义相同，所以用同一个解析器；
 #   这是一个只暴露 audit_log_path 的最小适配器，不引入第二套路径规则。
 # 类用途: 把运行时权威审计路径包装成 resolve_audit_paths 认识的配置形状。
@@ -123,6 +91,8 @@ class _RuntimeAuditPathConfig:
         self.audit_log_path = str(audit_log_path)
 
 
+# LLM: owner只能由可信调用方传入，不从配置路径或来源父目录猜测。
+# 类用途: 绑定审计路径并提供带coverage的索引查询。
 class AuditQuery:
 
     # LLM: root 是调用方的 canonical 基准（owner home）；给了它，配置里的相对路径就不再随进程 cwd 漂移。
@@ -151,7 +121,22 @@ class AuditQuery:
             paths = resolve_audit_paths(config, root=root)
         self._audit_root = paths.root
         self._audit_file = paths.log_file
+        self._trusted_root = Path(os.path.abspath(os.path.expanduser(os.fspath(root)))) if root is not None else None
+        self._read_index = None
+        self._read_parts = None
+        self._index_reason = 'trusted_root_required'
+        if root is not None:
+            home = Path(os.path.abspath(os.path.expanduser(os.fspath(root))))
+            source = Path(os.path.abspath(os.fspath(self._audit_file)))
+            try:
+                self._read_parts = source.relative_to(home).parts
+            except ValueError:
+                self._index_reason = 'source_outside_trusted_root'
+            else:
+                self._read_index = OwnerReadIndex(home)
 
+    # LLM: 旧接口不能表达未知总数，仅完整报告构造原结果类型。
+    # 函数用途: 保持原参数及完整成功时的AuditQueryResult。
     def query(
         self,
         params: AuditQueryParams | None = None,
@@ -178,124 +163,334 @@ class AuditQuery:
             limit=limit,
             offset=offset,
         )
-        start_query = time.time()
-        if not self._audit_file.exists():
-            return AuditQueryResult(entries=[], total_count=0, query_time_ms=0)
-
-        action_str = (
-            params.action.value if isinstance(params.action, AuditAction) else params.action
-        )
-        entries = [
-            AuditEntry.from_dict(data)
-            for data in _iter_audit_dicts(self._audit_file)
-            if _audit_entry_matches(data, params, action_str)
-        ]
-        entries.sort(key=lambda e: e.timestamp, reverse=True)
-        total = len(entries)
-        entries = entries[params.offset : params.offset + params.limit]
-        query_time_ms = (time.time() - start_query) * 1000
+        report = require_complete(self.query_report(params))
         return AuditQueryResult(
-            entries=entries,
-            total_count=total,
-            query_time_ms=query_time_ms,
+            entries=report['entries'], total_count=report['total_count'],
+            query_time_ms=report['query_time_ms'],
         )
 
+    # LLM: 未提供可信root或来源在根外时不读取也不创建缓存。
+    # 函数用途: 捕获固定审计view或明确的不可用原因。
+    def _capture_view(self):
+        if self._read_index is None:
+            return {'status': 'unavailable', 'reason': self._index_reason}
+        return self._read_index.advance('audit', self._read_parts)
+
+    # LLM: 时间相等仍按物理顺序，seek绑定固定view和过滤；旧offset仅首拍使用，内部续页不重复COUNT或偏移扫描。
+    # 函数用途: 返回审计条目、总数、coverage和下一页游标，不扩大固定through范围。
+    def query_report(self, params=None, *, view=None, after_cursor=None, **kwargs):
+        params = _normalize_query_params(params, **kwargs)
+        if (type(params.limit) is not int or type(params.offset) is not int
+                or min(params.limit, params.offset) < 0):
+            raise ValueError('invalid pagination')
+        if after_cursor is not None and params.offset:
+            raise ValueError('after_cursor and offset are mutually exclusive')
+        started = time.perf_counter()
+        view = self._capture_view() if view is None else view
+        if self._read_index is None:
+            return {'entries': [], 'total_count': None, 'query_time_ms': 0,
+                    'coverage': self._capture_view(), 'view': view, 'next_cursor': None}
+        action = params.action.value if isinstance(params.action, AuditAction) else params.action
+        filters = {key: value for key, value in {
+            'user_id': params.user_id, 'action': action, 'target_id': params.target_id,
+            'target_type': params.target_type, 'status': params.status,
+        }.items() if value}
+        if params.start_time:
+            filters['since'] = params.start_time
+        if params.end_time:
+            filters['until'] = params.end_time
+        entries, offset, remaining = [], params.offset, params.limit
+        cursor = after_cursor
+        while True:
+            page = self._read_index.query(view, filters=filters, limit=min(remaining, 1000),
+                                          offset=offset, descending=True, after_cursor=cursor)
+            entries.extend(AuditEntry.from_dict(row) for row in page['rows'])
+            count = len(page['rows'])
+            remaining -= count
+            cursor = page['next_cursor']
+            offset = 0
+            if (page['coverage']['status'] != 'complete' or remaining <= 0
+                    or count == 0 or cursor is None):
+                return {'entries': entries, 'total_count': page['total_count'],
+                        'query_time_ms': (time.perf_counter() - started) * 1000,
+                        'coverage': page['coverage'], 'view': view, 'next_cursor': cursor}
+
+    # LLM: 不可用来源不生成零摘要，用户过滤在固定SQL内执行。
+    # 函数用途: 返回带coverage的审计统计。
+    def summary_report(self, user_id=None, *, view=None):
+        view = self._capture_view() if view is None else view
+        if self._read_index is None:
+            return {'value': None, 'coverage': self._capture_view()}
+        return self._read_index.audit_rollup(view, user_id=user_id)
+
+    # LLM: 成功字典只代表完整覆盖，调用方可捕获异常coverage展示未知。
+    # 函数用途: 保持原审计摘要接口。
     def summary(self, user_id: str | None = None) -> dict[str, Any]:
-        if not self._audit_file.exists():
-            return {
-                "user_id": user_id,
-                "total_actions": 0,
-                "by_action": {},
-                "by_status": {},
-                "last_action_time": 0,
-            }
+        return require_complete(self.summary_report(user_id))['value']
 
-        action_counts: dict[str, int] = {}
-        status_counts: dict[str, int] = {}
-        last_action_time = 0.0
+    # LLM: 用户最后活动同时间时以首次出现物理顺序排序。
+    # 函数用途: 返回带coverage的有限最近用户列表。
+    def recent_users_report(self, limit=10, *, view=None):
+        view = self._capture_view() if view is None else view
+        if self._read_index is None:
+            return {'value': None, 'coverage': self._capture_view()}
+        return self._read_index.audit_rollup(view, recent_limit=limit)
 
-        for data in _iter_audit_dicts(self._audit_file):
-            if user_id and data.get("user_id") != user_id:
-                continue
-            action = data.get("action", "UNKNOWN")
-            status = data.get("status", "UNKNOWN")
-            timestamp = data.get("timestamp", 0)
-            action_counts[action] = action_counts.get(action, 0) + 1
-            status_counts[status] = status_counts.get(status, 0) + 1
-            if timestamp > last_action_time:
-                last_action_time = timestamp
-
-        return {
-            "user_id": user_id,
-            "total_actions": sum(action_counts.values()),
-            "by_action": action_counts,
-            "by_status": status_counts,
-            "last_action_time": last_action_time,
-        }
-
+    # LLM: 部分观察不返回成功空列表，未知通过结构异常传播。
+    # 函数用途: 保持原最近用户列表接口。
     def recent_users(self, limit: int = 10) -> list[dict[str, Any]]:
-        if not self._audit_file.exists():
-            return []
+        return require_complete(self.recent_users_report(limit))['value']
 
-        user_last_time: dict[str, float] = {}
-
-        for data in _iter_audit_dicts(self._audit_file):
-            user = data.get("user_id", "unknown")
-            timestamp = data.get("timestamp", 0)
-            if user not in user_last_time or timestamp > user_last_time[user]:
-                user_last_time[user] = timestamp
-
-        # 按最后活动时间排序
-        sorted_users = sorted(user_last_time.items(), key=lambda x: x[1], reverse=True)
-
-        return [
-            {"user_id": user, "last_action_time": last_time}
-            for user, last_time in sorted_users[:limit]
-        ]
-
-    # LLM: 审计保留期清理的唯一入口：删除早于 days 天的审计条目并原子替换文件（写文件副作用）。days <= 0 表示永久保留，
-    #   直接返回 0、不碰文件；旧实现的截止时间是“现在减 0 天”，会把全部审计删光（2026-09-27 修正）。
-    #   调用方：cli/audit_log_cmd 的 --cleanup（配置 cli_audit_cleanup_days 或 --days）；改动须同步 test_audit.py。
-    # 函数用途: 按保留天数清理旧审计记录，返回删除条数；保留期为 0 时一条都不删。
-    def cleanup_old_entries(self, days: int = 90) -> int:
-        """清理旧审计条目."""
+    # LLM: 默认永久保留；先无副作用预检并关闭FD，再取线程锁与可信根flock，获锁后重开父FD并规划应用。
+    # 函数用途: 安全裁剪已证明过期的审计记录，等待锁期间绝不持有旧父FD或在根外创建旁锁。
+    def cleanup_old_entries(self, days: int = 0) -> int:
         if days <= 0:
-            # 保留期 <= 0 按“永久保留”处理，不删除任何记录。
             return 0
-        if not self._audit_file.exists():
-            return 0
-        cutoff_time = time.time() - (days * 24 * 60 * 60)
-        temp_file = self._audit_file.with_suffix(".tmp")
-        deleted_count = self._cleanup_entries(cutoff_time, temp_file)
-        if deleted_count > 0:
-            temp_file.replace(self._audit_file)
-        return deleted_count
-
-    def _cleanup_entries(self, cutoff_time: float, temp_file: Path) -> int:
-        """Clean up entries older than cutoff_time; return deleted count."""
-        deleted_count = 0
         try:
-            # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-            lines = jsonl_lines(self._audit_file.read_text(encoding="utf-8"))
-            kept_lines, deleted_count = _cleanup_audit_lines(lines, cutoff_time)
-            temp_file.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
-        except OSError:
-            if temp_file.exists():
-                temp_file.unlink()
+            with _audit_parent(self._audit_file, self._trusted_root) as (check_parent, _check_root):
+                _audit_regular(os.stat(self._audit_file.name, dir_fd=check_parent, follow_symlinks=False))
+            handle = path_thread_lock(_audit_lock_key_path(self._audit_file, self._trusted_root))
+            with handle.lock, _audit_append_lock(
+                None, self._audit_file.name, path=self._audit_file, trusted_root=self._trusted_root,
+            ) as (parent, root):
+                _audit_regular(os.stat(self._audit_file.name, dir_fd=parent, follow_symlinks=False))
+                plan = _plan_audit_retention(self._audit_file, cutoff_time=time.time() - days * 86400,
+                                             parent_fd=parent, trusted_root=root)
+                return _apply_audit_retention_unlocked(plan, parent_fd=parent)
+        except FileNotFoundError:
             return 0
-        return deleted_count
 
 
-def _cleanup_audit_lines(lines: list[str], cutoff_time: float) -> tuple[list[str], int]:
-    kept_lines = []
-    deleted_count = 0
-    for line in lines:
-        data = _parse_audit_line(line)
-        if data is not None and data.get("timestamp", 0) >= cutoff_time:
-            kept_lines.append(line.strip())
-        else:
-            deleted_count += 1
-    return kept_lines, deleted_count
+# LLM: 计划只在本次原append锁内消费，绑定准确文件与五元generation，不能作为授权或持久事实。
+# 类用途: 保存审计保留字节及已证实的删除计数。
+@dataclass(frozen=True)
+class _AuditRetentionPlan:
+    path: Path
+    generation: tuple[int, int, int, int, int]
+    kept_bytes: bytes
+    deleted_count: int
+    trusted_root: Path
+    parent_identity: tuple[int, int]
+
+
+# LLM: 拒绝时只暴露固定原因码，不携带外来正文；该错误不能伪装为已清理零条。
+# 类用途: 为审计路径边界失败提供稳定的结构化诊断。
+class UnsafeAuditPathError(OSError):
+    reason_code = 'unsafe_audit_path'
+
+
+# LLM: 只解析可信根自身真实路径，不跟随其下任何子路径符号链接，保证线程锁键稳定且不越界。
+# 函数用途: 计算writer与cleaner共用的规范路径线程锁键。
+def _audit_lock_key_path(path, trusted_root=None):
+    abs_path = Path(os.path.abspath(path))
+    if trusted_root is not None:
+        abs_root = Path(os.path.abspath(trusted_root))
+        try:
+            rel = abs_path.relative_to(abs_root)
+            return Path(os.path.realpath(abs_root)) / rel
+        except ValueError:
+            pass
+    return abs_path
+
+
+# LLM: 根由调用方显式传入；旧私有入口无root时从文件系统根逐段验证，不把最近已存在父目录当可信锚点。
+# 函数用途: 逐段nofollow打开审计父目录并在所有退出分支释放FD。
+@contextmanager
+def _audit_parent(path, trusted_root=None):
+    path = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(trusted_root)) if trusted_root is not None else Path(path.anchor)
+    try:
+        parts = path.relative_to(root).parts
+        if not parts:
+            raise UnsafeAuditPathError('unsafe audit path')
+        descriptor = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+    except (NoFollowPathError, ValueError) as exc:
+        raise UnsafeAuditPathError('unsafe audit path') from exc
+    try:
+        yield descriptor, root
+    finally:
+        os.close(descriptor)
+
+
+# LLM: nofollow本身不拒绝硬链；源和旁锁必须为单链接普通文件，检查在任何改权限或写入前执行。
+# 函数用途: 拒绝软链、特殊文件及硬链别名。
+def _audit_regular(info):
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise UnsafeAuditPathError('unsafe audit path')
+
+
+# LLM: 显式可信root存在且目标位于子目录时，旁锁直接锚定在可信root FD下，绝不在可搬移子目录内创建旁锁；
+#   取得flock后重新从可信根逐段nofollow打开并校验父目录FD，再交由调用方读写。
+# 函数用途: 安全取得与logger统一的审计排他锁并返回获锁后新验证的(parent_fd, root)。
+@contextmanager
+def _audit_append_lock(parent, name, *, path=None, trusted_root=None, blocking=True):
+    abs_path = Path(os.path.abspath(path)) if path is not None else None
+    if abs_path is not None:
+        with _audit_parent(abs_path, trusted_root) as (pre_parent, root):
+            rel_parts = abs_path.relative_to(root).parts
+    else:
+        root = Path(os.path.abspath(trusted_root)) if trusted_root is not None else None
+        rel_parts = (name,)
+    use_root_lock = trusted_root is not None and len(rel_parts) > 1
+    if use_root_lock:
+        try:
+            lock_dir = open_directory_beneath(root, (), require_dir_fd=True)
+        except NoFollowPathError as exc:
+            raise UnsafeAuditPathError('unsafe audit path') from exc
+        digest = hashlib.sha256('/'.join(rel_parts).encode('utf-8')).hexdigest()[:16]
+        lock_name = f'.audit-{digest}.lock'
+        close_lock_dir = True
+    elif parent is not None:
+        if abs_path is not None:
+            _audit_parent_current(abs_path, root, parent)
+        lock_dir = parent
+        lock_name = name + '.lock'
+        close_lock_dir = False
+    else:
+        try:
+            lock_dir = open_directory_beneath(root, rel_parts[:-1], require_dir_fd=True)
+        except NoFollowPathError as exc:
+            raise UnsafeAuditPathError('unsafe audit path') from exc
+        lock_name = name + '.lock'
+        close_lock_dir = True
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0)
+    try:
+        try:
+            descriptor = os.open(lock_name, flags, 0o600, dir_fd=lock_dir)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise UnsafeAuditPathError('unsafe audit path') from exc
+            raise
+        try:
+            _audit_regular(os.fstat(descriptor))
+            os.fchmod(descriptor, 0o600)
+            _flock_descriptor(descriptor, blocking=blocking)
+            try:
+                current = os.stat(lock_name, dir_fd=lock_dir, follow_symlinks=False)
+                _audit_regular(current)
+                held = os.fstat(descriptor)
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+                    raise BlockingIOError('audit append lock changed')
+                if abs_path is not None and parent is None:
+                    with _audit_parent(abs_path, trusted_root) as (verified_parent, verified_root):
+                        _audit_parent_current(abs_path, verified_root, verified_parent)
+                        yield verified_parent, verified_root
+                else:
+                    if abs_path is not None and parent is not None:
+                        _audit_parent_current(abs_path, root, parent)
+                    yield parent, root
+            finally:
+                _funlock_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if close_lock_dir:
+            os.close(lock_dir)
+
+
+# LLM: 同叶generation不能替代祖先验证；重新从原可信根打开后比对父inode，不通过新路径跟随软链。
+# 函数用途: 拒绝规划或应用期间发生的审计父目录替换。
+def _audit_parent_current(path, root, parent, expected=None):
+    held = os.fstat(parent)
+    identity = (held.st_dev, held.st_ino)
+    with _audit_parent(path, root) as (current, _root):
+        observed = os.fstat(current)
+        if (observed.st_dev, observed.st_ino) != identity or (expected is not None and expected != identity):
+            raise BlockingIOError('audit parent changed')
+    return identity
+
+
+# LLM: 只有可解码对象的有限数值时间戳才可删除，其余字节保持原样，bool不当数值。
+# 函数用途: 判断一条物理LF记录是否已证明过期。
+def _audit_row_expired(raw_line, cutoff_time):
+    try:
+        row = json.loads(raw_line.decode('utf-8'))
+        timestamp = row.get('timestamp') if isinstance(row, dict) else None
+        return type(timestamp) in (int, float) and math.isfinite(timestamp) and timestamp < cutoff_time
+    except (UnicodeError, ValueError, OverflowError, RecursionError):
+        return False
+
+
+# LLM: 不吞I/O错误或删除UTF8坏行；祖先逐段验证，来源始终相对同一父FD，源generation和父身份均封入计划。
+# 函数用途: 以物理LF规划安全审计保留。
+def _plan_audit_retention(path, *, cutoff_time, parent_fd=None, trusted_root=None):
+    path = Path(os.path.abspath(path))
+    if parent_fd is None:
+        with _audit_parent(path, trusted_root) as (parent, root):
+            return _plan_audit_retention(path, cutoff_time=cutoff_time, parent_fd=parent, trusted_root=root)
+    identity = _audit_parent_current(path, trusted_root, parent_fd)
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise UnsafeAuditPathError('unsafe audit path') from exc
+        raise
+    try:
+        before = os.fstat(descriptor)
+        _audit_regular(before)
+        if before.st_size > _AUDIT_RETENTION_MAX_BYTES:
+            raise OSError('audit retention byte budget exceeded')
+        generation = cache_stat_signature(before)
+        kept = []
+        deleted_count = 0
+        consumed = 0
+        with os.fdopen(descriptor, 'rb', closefd=False) as source:
+            while raw_line := source.readline(min(_AUDIT_RETENTION_ROW_MAX_BYTES,
+                                                  _AUDIT_RETENTION_MAX_BYTES - consumed) + 1):
+                consumed += len(raw_line)
+                if consumed > _AUDIT_RETENTION_MAX_BYTES or len(raw_line) > _AUDIT_RETENTION_ROW_MAX_BYTES:
+                    raise OSError('audit retention byte budget exceeded')
+                if _audit_row_expired(raw_line, cutoff_time):
+                    deleted_count += 1
+                else:
+                    kept.append(raw_line)
+        after = cache_stat_signature(os.fstat(descriptor))
+        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        _audit_regular(current)
+        _audit_parent_current(path, trusted_root, parent_fd, identity)
+        if generation != after or after != cache_stat_signature(current):
+            raise BlockingIOError('安全审计文件在规划期间发生变化')
+    finally:
+        os.close(descriptor)
+    return _AuditRetentionPlan(path, generation, b''.join(kept), deleted_count, trusted_root, identity)
+
+
+# LLM: 调用方持原线程锁和同名flock；复核父身份及源generation，在同父FD写私有临时文件并替换，不重新跟随路径。
+# 函数用途: 应用已证明的安全审计保留计划，零删除不创建tmp。
+def _apply_audit_retention_unlocked(plan, *, parent_fd=None):
+    if plan is None or not plan.deleted_count:
+        return 0
+    if parent_fd is None:
+        with _audit_parent(plan.path, plan.trusted_root) as (parent, _root):
+            return _apply_audit_retention_unlocked(plan, parent_fd=parent)
+    _audit_parent_current(plan.path, plan.trusted_root, parent_fd, plan.parent_identity)
+    current = os.stat(plan.path.name, dir_fd=parent_fd, follow_symlinks=False)
+    _audit_regular(current)
+    if cache_stat_signature(current) != plan.generation:
+        raise BlockingIOError('安全审计文件在应用前发生变化')
+    name = '.' + plan.path.name + '.' + secrets.token_hex(16) + '.tmp'
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent_fd)
+    try:
+        with os.fdopen(descriptor, 'wb') as output:
+            output.write(plan.kept_bytes)
+            output.flush()
+            os.fsync(output.fileno())
+        _audit_parent_current(plan.path, plan.trusted_root, parent_fd, plan.parent_identity)
+        current = os.stat(plan.path.name, dir_fd=parent_fd, follow_symlinks=False)
+        _audit_regular(current)
+        if cache_stat_signature(current) != plan.generation:
+            raise BlockingIOError('安全审计文件在应用前发生变化')
+        os.replace(name, plan.path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+    return plan.deleted_count
 
 
 __all__ = ["AuditQuery", "AuditQueryResult"]
