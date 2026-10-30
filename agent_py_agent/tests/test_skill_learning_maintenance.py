@@ -433,8 +433,8 @@ def test_feedback_status_through_canonical_executor(background, params):
     assert not missing.ok and 'action=adopted 时必须提供 skill_id' in missing.output
 
 
-# LLM: 使用真实检索结果和原state锁/配额检查，只包装观察点计数，不替换使用台账写入。
-# 函数用途: 守住一批搜索命中只领取一次锁、做一次有界鲜活核对并保存一次双文件。
+# LLM: 仅固定配额模块的单调时钟，真实枚举、state锁、准入与双文件写入不变；成功计数在保存返回后累加。
+# 函数用途: 确定性验证一批搜索命中只做一次准入事务，并核对实际落盘与连续身份记录。
 def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, monkeypatch):
     from contextlib import contextmanager
 
@@ -447,6 +447,7 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     fixture = method_fixture(tmp_path, count=3)
     store = SkillLearningStore.for_home(fixture.agent.home_paths)
     (store.skills_root.parent / 'quota.json').write_text('{"max_disk_mb": 1024}')
+    monkeypatch.setattr(owner_quota, 'time', SimpleNamespace(**{**vars(time), 'monotonic': lambda: 100.0}))
     observed = {'locks': 0, 'scans': 0, 'saves': 0}
     state_lock, save = SkillLearningStore.state_lock, usage._save_usage
     snapshot = owner_quota._bounded_quota_snapshot
@@ -473,11 +474,12 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     def forbid_full_scan(root):
         raise AssertionError('usage admission requested a full owner scan')
 
-    # LLM: 双文件写入继续使用原函数，统计批处理提交次数与每个检查路径。
-    # 函数用途: 验证一批事件只保存一次。
+    # LLM: 双文件写入继续使用原函数；异常不得被记为已完成保存，原返回值和异常保持。
+    # 函数用途: 只统计实际成功返回的批处理保存。
     def counted_save(*args):
+        result = save(*args)
         observed['saves'] += 1
-        return save(*args)
+        return result
 
     monkeypatch.setattr(SkillLearningStore, 'state_lock', counted_lock)
     monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', counted_scan)
@@ -495,10 +497,78 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     summary = usage.load_skill_usage_summary(store)
     assert summary['totals']['manual_search'] == len(matches)
     assert summary['totals']['effective_uses'] == 0
+    saved_summary = json.loads((store.directory / 'usage_summary.json').read_text())
+    assert saved_summary['totals'] == summary['totals']
+    assert saved_summary['last_sequence'] == len(matches)
     rows = [json.loads(line) for line in (store.directory / 'usage_ledger.jsonl').read_text().splitlines()]
     assert [row['sequence'] for row in rows] == list(range(1, len(matches) + 1))
     assert all(row['request_id'] == fixture.params.request_id for row in rows)
     assert all(row['thread_id'] == fixture.link.thread_id for row in rows)
+
+
+# LLM: 真实枚举首项后推进11ms，原128项/10ms准入自行拒绝增长；辅助记账故障不改变搜索结果。
+# 函数用途: 验证预算耗尽时返回完整搜索命中并告警，且不留下半批usage记录或汇总。
+def test_c4r_search_matches_quota_scan_budget_exhaustion_skips_usage_write(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_py_agent.agent.capability import skill_usage_ledger as usage
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+    from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
+    from agent_py_agent.agent.user_space import owner_quota
+    from agent_py_agent.tests.test_conversation_method_carry import method_fixture
+
+    fixture = method_fixture(tmp_path, count=3)
+    store = SkillLearningStore.for_home(fixture.agent.home_paths)
+    (store.skills_root.parent / 'quota.json').write_text('{"max_disk_mb": 1024}')
+    paths = [store.directory / name for name in ('usage_ledger.jsonl', 'usage_summary.json')]
+    before = {path: path.read_bytes() if path.exists() else None for path in paths}
+    clock = [100.0]
+    entries, snapshot, save = owner_quota._quota_entries, owner_quota._bounded_quota_snapshot, usage._save_usage
+    pulled, closed, snapshots, saves = [], [], [], []
+
+    # LLM: 每个目录项仍来自原nofollow迭代器，只在真实首项已读出后推进测试时钟；关闭行为也继续原实现。
+    # 函数用途: 精确模拟首项I/O耗尽10ms预算而不伪造扫描结果。
+    def delayed_entries(root, parts=()):
+        iterator = entries(root, parts)
+        try:
+            for row in iterator:
+                pulled.append(row)
+                clock[0] = 100.011
+                yield row
+        finally:
+            iterator.close()
+            closed.append(True)
+
+    # LLM: 保留真实扫描和预算判定，仅记录调用参数及完成标志。
+    # 函数用途: 确认确实命中原有界扫描的未完成分支。
+    def counted_scan(root, *, max_entries, max_ms):
+        result = snapshot(root, max_entries=max_entries, max_ms=max_ms)
+        snapshots.append((root, max_entries, max_ms, result[2]))
+        return result
+
+    # LLM: 保存必须调用原函数，只有成功返回才标记完成；准入异常继续传播给原软失败边界。
+    # 函数用途: 区分保存尝试与真正提交。
+    def counted_save(*args):
+        saves.append('attempted')
+        result = save(*args)
+        saves.append('completed')
+        return result
+
+    monkeypatch.setattr(owner_quota, 'time', SimpleNamespace(**{**vars(time), 'monotonic': lambda: clock[0]}))
+    monkeypatch.setattr(owner_quota, '_quota_entries', delayed_entries)
+    monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', counted_scan)
+    monkeypatch.setattr(usage, '_save_usage', counted_save)
+    with caplog.at_level(logging.WARNING, logger=usage.__name__):
+        result = SkillSearchTool(fixture.agent).execute({'action': 'search', 'query': 'entry', 'limit': 20})
+    assert result.ok, result.output
+    matches = json.loads(result.output)['matches']
+    assert len(matches) >= 3
+    assert {f'entry-{index}' for index in range(3)} <= {match.get('package_id') for match in matches}
+    assert snapshots == [(fixture.agent.home_paths.owner_home_dir, 128, 10, False)]
+    assert len(pulled) == 1 and closed == [True]
+    assert (usage.__name__, logging.WARNING, 'SKILL_USAGE_RECORD_UNAVAILABLE') in caplog.record_tuples
+    assert saves == ['attempted']
+    assert {path: path.read_bytes() if path.exists() else None for path in paths} == before
 
 
 # LLM: 公开批量接口须保留原四类事件和序号口径；空批次不能创建目录，坏批次不能写部分记录。
