@@ -217,24 +217,30 @@ def _resumable_file_digest(path, stamp, cache, *, advance=True):
 
 # LLM: 每次仍沿nofollow实际读完整小文件；相同块只省hash，非省读取。单文件块缓存<=256KiB，总量<=4倍，超额走有界可续切片。
 #   首尾FD/路径不一致拒绝；最多读初始大小加一块，兼容粗时钟copyout的旧size，不允许持续增长造成无界读取。
+#   precharged表示调用方已按stamp大小预扣：超出原大小的探测读取只用本源剩余预算并按实读补记，余额恰为原大小时由读后fstat识别增长。
 # 函数用途: 流式验证热源实际字节，只为内容改变的块链重新计算摘要。
-def _file_digest(path, stamp):
+def _file_digest(path, stamp, *, precharged=False):
     cache, cached = _cached_source_body(path, stamp)
     if stamp[3] > _MAX_PIN_SOURCE_DIGEST_BYTES:
         result = _resumable_file_digest(path, stamp, cache)
         return result if result is not None else ("partial", _RESUMABLE_DIGESTS[path]["generation"])
+    limit = stamp[3] + _PIN_SOURCE_CHUNK_BYTES
+    spent = cache.setdefault("digest_bytes", {}) if precharged else None
+    if spent is not None:
+        limit = min(limit, stamp[3] + max(0, 4 * _MAX_PIN_SOURCE_DIGEST_BYTES - spent.get(path, 0)))
     remember = (cache is not None and (cached is not None or len(cache["files"]) < 128)
                 and stamp[3] <= _MAX_PIN_SOURCE_DIGEST_BYTES
                 and cache["bytes"] + (0 if cached is not None else stamp[3]) <= 4 * _MAX_PIN_SOURCE_DIGEST_BYTES)
     blocks = [] if remember else None
     descriptor, retained = _open_source_descriptor(path, stamp, cache)
+    size = 0
     try:
         opened = os.fstat(descriptor)
         if _metadata_stamp(opened) != stamp or opened.st_nlink != 1:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
         os.lseek(descriptor, 0, os.SEEK_SET)
         digest = None if cached is not None else hashlib.blake2b(digest_size=16)
-        remaining, index, size = stamp[3] + _PIN_SOURCE_CHUNK_BYTES, 0, 0
+        remaining, index = limit, 0
         while remaining:
             raw = os.read(descriptor, min(remaining, _PIN_SOURCE_CHUNK_BYTES, _MAX_PIN_SOURCE_DIGEST_BYTES))
             if not raw:
@@ -254,7 +260,7 @@ def _file_digest(path, stamp):
                     blocks = None
             index += 1
         after = os.fstat(descriptor)
-        if not remaining or _metadata_stamp(after) != stamp or after.st_nlink != 1:
+        if (not remaining and size > stamp[3]) or _metadata_stamp(after) != stamp or after.st_nlink != 1:
             raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
     except BaseException:
         if retained:
@@ -264,6 +270,8 @@ def _file_digest(path, stamp):
     finally:
         if not retained:
             os.close(descriptor)
+        if spent is not None and size > stamp[3]:
+            spent[path] = spent.get(path, 0) + size - stamp[3]
     if _metadata_stamp(path.stat(follow_symlinks=False)) != stamp:
         raise OSError("MEMORY_RETENTION_PIN_SOURCE_CHANGED")
     if digest is None and index != len(cached[2]):
@@ -291,6 +299,7 @@ def _is_complete_stamp(stamp):
 
 
 # LLM: 同current内未被解析标记的重复监视复用小文件摘要；解析后复读须给发布前最终复核留足一读，否则沿用旧摘要交最终复核，首读或stamp变化超额失败关闭。
+#   预扣原大小后实际读取另受剩余预算封顶，并发增长不会使真实读取超过每源1MiB。
 # 函数用途: 让<=256KiB热源的读前、读后与最终复核共用每源1MiB预算，不因重复watch或重试反复整读。
 def _budgeted_small_digest(path, stamp, cache):
     if cache is None:
@@ -304,17 +313,25 @@ def _budgeted_small_digest(path, stamp, cache):
     elif not _charge_digest_bytes(cache, path, stamp[3]):
         raise _PartialPinVerification("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
     recheck.discard(path)
-    digest = _file_digest(path, stamp)
+    digest = _file_digest(path, stamp, precharged=True)
     verified[path] = (stamp, digest)
     return digest
 
 
-# LLM: 解析器读完来源后调用；只标记本current缓存，不读文件、不改来源观察集合。
-# 函数用途: 要求这些来源的下一次监视尽量实际复读，保留读后改写的逐源诊断。
+# LLM: 解析器读完来源后调用，即解析边界；小文件标记本current下次监视尽量实际复读，大文件同代post进度一律作废，
+#   解析前或解析中核过的片不能充当读后验证。不读文件、不改来源观察集合。
+# 函数用途: 让不经流式摘要的解析入口（墓碑、清单、分片、策略、冷详情）与_pin_rows一样，读后验证全部发生在解析之后。
 def recheck_pin_sources(paths):
     cache = _SOURCE_CONTENTS.get()
     if cache is not None:
-        cache.setdefault("recheck", set()).update(Path(path) for path in paths)
+        paths = [Path(path) for path in paths]
+        cache.setdefault("recheck", set()).update(paths)
+        for path in paths:
+            state = _RESUMABLE_DIGESTS.get(path)
+            if state is not None and state["phase"] == "post":
+                state["cycle_verified"] = set()
+                state["next_slice"] = 0
+                state["post_scope"] = None
 
 
 # LLM: 热源同tick等长改写stat不可见，post只认同一current内读到的片，跨调用旧片一律重核，单轮读不完全片就保持partial；

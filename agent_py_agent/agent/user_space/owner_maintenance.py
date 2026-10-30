@@ -31,6 +31,14 @@ from .home_retention import OwnerRetentionPlan, apply_owner_retention, maintenan
 
 # 维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。
 _DEFAULT_INTERVAL_SECONDS = 86_400
+# 配额账干净且上一轮已走完时，每拍配额对账默认最多处理的目录项数。
+_QUOTA_STEADY_MAX_ENTRIES = 256
+# 配额账干净且上一轮已走完时，每拍配额对账默认的扫描时间额度（毫秒）。
+_QUOTA_STEADY_MAX_MS = 10
+# 配额账缺失、脏或一轮未走完时的追赶额度：每拍至少处理这么多目录项，大owner在游标存活期内走完一轮。
+_QUOTA_CATCH_UP_MAX_ENTRIES = 1024
+# 配额追赶期每拍的扫描时间额度下限（毫秒）。
+_QUOTA_CATCH_UP_MAX_MS = 40
 
 
 # LLM: 只登记本owner使用<数据扩展名>.lock协议的私有目录；不递归、不包含local_users/operations或逻辑锁目录。
@@ -161,8 +169,8 @@ def run_owner_retention_if_due(
     commit_transition=None,
     expected_policy_fingerprint=None,
     expected_state_fingerprint=None,
-    quota_max_ms: float = 10,
-    quota_max_entries: int = 256,
+    quota_max_ms: float | None = None,
+    quota_max_entries: int | None = None,
 ) -> OwnerMaintenanceResult:
     from ..gateway_parts.multiprocess_mode import current_worker_partition
     from ..gateway_parts.request_entry_admission import require_request_execution
@@ -696,13 +704,61 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
     return state
 
 
-# LLM: 原维护入口与唯一状态承接真实领域回执；C/W尚无逐写适配协议时只报告延期，不旁路原transition。
-#   默认只发布副本，依赖原件存在性的读口切换未闭合前禁止删除；未知kind保持partial但不制造忙循环。
-# 函数用途: 在普通维护周期分批核配额并安全封存旧回执，明确保留未接线和延期责任。
-def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coordinator=False,
-                                        quota_max_ms=10, quota_max_entries=256, state_locked=False):
+# LLM: 调用方显式给出的额度原样使用；只有缺省额度随账本状态在稳态与追赶期之间切换。
+# 函数用途: 解析并校验本拍配额对账的目录项与时间额度。
+def _quota_maintenance_budget(home, quota_max_entries, quota_max_ms):
     import math
 
+    from .owner_quota import owner_quota_reconcile_pending
+
+    if quota_max_entries is None or quota_max_ms is None:
+        catch_up = owner_quota_reconcile_pending(home.owner_home_dir)
+        if quota_max_entries is None:
+            quota_max_entries = _QUOTA_CATCH_UP_MAX_ENTRIES if catch_up else _QUOTA_STEADY_MAX_ENTRIES
+        if quota_max_ms is None:
+            quota_max_ms = _QUOTA_CATCH_UP_MAX_MS if catch_up else _QUOTA_STEADY_MAX_MS
+    if (type(quota_max_entries) is not int or quota_max_entries <= 0
+            or type(quota_max_ms) not in (int, float) or not math.isfinite(quota_max_ms) or quota_max_ms <= 0):
+        raise ValueError('invalid_quota_maintenance_budget')
+    return quota_max_entries, quota_max_ms
+
+
+# LLM: 配额对账只读元数据并在原配额锁内写配额账，不删除任何owner内容，因此不随保留策略不安全而停摆；
+#   沿原quota锁非阻塞获取，避免maintenance→quota与既有quota→JSON锁序死锁。C/W必须经原transition提交，非C/W需已持原state锁。
+# 函数用途: 在保留或回执适配被延期时仍推进一片配额对账，返回不含目录表的简短回执。
+def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, state_locked, max_entries, max_ms):
+    from .owner_quota import (
+        OwnerQuotaLockContention,
+        OwnerQuotaUnavailable,
+        reconcile_owner_quota_slice,
+    )
+
+    if coordinator and commit_transition is None:
+        return {'complete': False, 'deferred_reason': 'coordinator_adapter_protocol_required'}
+    if not coordinator and not state_locked:
+        return {'complete': False, 'deferred_reason': 'retention_not_safe'}
+
+    # 函数用途: 执行一片非阻塞配额对账。
+    def operation():
+        return reconcile_owner_quota_slice(home.owner_home_dir, max_entries=max_entries, max_ms=max_ms,
+                                           blocking=False)
+    try:
+        report = commit_transition(operation) if coordinator else operation()
+    except OwnerQuotaLockContention:
+        return {'complete': False, 'deferred_reason': 'quota_busy'}
+    except OwnerQuotaUnavailable:
+        return {'complete': False, 'deferred_reason': 'quota_unavailable'}
+    return {'complete': report['complete'], 'scanned_entries': report['scanned_entries'],
+            'used_bytes': report['used_bytes'], 'inode_count': report['inode_count']}
+
+
+# LLM: 原维护入口与唯一状态承接真实领域回执；C/W尚无逐写适配协议时只报告延期，不旁路原transition。
+#   默认只发布副本，依赖原件存在性的读口切换未闭合前禁止删除；未知kind保持partial但不制造忙循环。
+#   延期路径仍推进一片配额对账（C/W经原transition，普通维护经已持state锁），一轮未走完时保留待续，让配额收敛不依赖保留策略是否可用。
+# 函数用途: 在普通维护周期分批核配额并安全封存旧回执，明确保留未接线和延期责任。
+def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coordinator=False,
+                                        quota_max_ms=None, quota_max_entries=None, state_locked=False,
+                                        commit_transition=None):
     from ..gateway_parts.owner_retention import seal_gateway_receipts_slice
     from ..gateway_parts.paths import gateway_paths_from_root
     from .home_retention import (
@@ -714,15 +770,17 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     from .owner_quota import OwnerQuotaLockContention, reconcile_owner_quota_slice
     from .runtime_paths import runtime_paths_for_agent
 
-    if (type(quota_max_entries) is not int or quota_max_entries <= 0
-            or type(quota_max_ms) not in (int, float) or not math.isfinite(quota_max_ms) or quota_max_ms <= 0):
-        raise ValueError('invalid_quota_maintenance_budget')
-
+    quota_max_entries, quota_max_ms = _quota_maintenance_budget(home, quota_max_entries, quota_max_ms)
     original = previous.get('storage_maintenance', {})
     require_schema_generation(original)
     if coordinator or retention.load_errors or (not retention.applied and not retention.legal_hold):
         state = run_storage_maintenance_slice(original, {})
-        state.update(continuation_pending=False, deletion_enabled=False,
+        reconciliation = _deferred_quota_reconciliation(
+            home, coordinator=coordinator, commit_transition=commit_transition,
+            state_locked=state_locked, max_entries=quota_max_entries, max_ms=quota_max_ms)
+        state.update(continuation_pending=reconciliation['complete'] is False and reconciliation.get(
+                         'deferred_reason') not in ('coordinator_adapter_protocol_required', 'retention_not_safe'),
+                     deletion_enabled=False, quota_reconciliation=reconciliation,
                      deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
         return state
     if not state_locked:

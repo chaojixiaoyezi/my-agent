@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1260,
+  "count": 1264,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8906,6 +8906,38 @@
       "unit": "秒",
       "category": "其它",
       "description": "维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。"
+    },
+    {
+      "name": "_QUOTA_CATCH_UP_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
+      "value": 1024,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "配额账缺失、脏或一轮未走完时的追赶额度：每拍至少处理这么多目录项，大owner在游标存活期内走完一轮。"
+    },
+    {
+      "name": "_QUOTA_CATCH_UP_MAX_MS",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
+      "value": 40,
+      "unit": "毫秒",
+      "category": "上限预算",
+      "description": "配额追赶期每拍的扫描时间额度下限（毫秒）。"
+    },
+    {
+      "name": "_QUOTA_STEADY_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
+      "value": 256,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "配额账干净且上一轮已走完时，每拍配额对账默认最多处理的目录项数。"
+    },
+    {
+      "name": "_QUOTA_STEADY_MAX_MS",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
+      "value": 10,
+      "unit": "毫秒",
+      "category": "上限预算",
+      "description": "配额账干净且上一轮已走完时，每拍配额对账默认的扫描时间额度（毫秒）。"
     },
     {
       "name": "_MAINTENANCE_SOURCE_MAX_BYTES",

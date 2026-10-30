@@ -1,12 +1,22 @@
-## 2026-10-30 e905 R6 W1：Owner 配额结构性排除、有界核验与受控写代次（源码候选，未部署）
+## 2026-10-30 e905 R6–R7：Owner 配额、跨代 Pin 读边界、Telemetry 见证阈值与展示归档分时续扫收口（源码候选，未部署）
 
-来源：`07-tasks/opus-r6-w1-quota.md`（R5-Q1..Q4、R5-F03/F04、R4-F01/F03）。只改 `user_space/owner_quota.py` 与其测试/常数目录；不新增配额权威，锁序与账本文件不变。
+来源：`07-tasks/opus-r6-w1-quota.md`、`07-tasks/opus-r6-w2-pins-telemetry-archive.md`、`07-tasks/e905-r7-w1.md`、`07-tasks/e905-r7-w2.md`。覆盖 `user_space/owner_quota.py`、`user_space/owner_maintenance.py`、`user_space/owner_maintenance_transition.py`、`memory_store/reference_pins.py`、`memory_store/retention_scan.py`、`telemetry/telemetry_ledger.py` 与 `conversation/display_archive_maintenance.py` 及其测试/常数目录；不新增权威事实源，锁序与账本文件位置不变。
 
-- **结构性排除（同一口径）**：配额控制账（`.owner-quota-ledger.json`、`.owner-quota.lock`）、宿主运行时子树（`workspace/runtime/services`、`data/telemetry`）、可丢弃读索引（`cache/owner_read_index.sqlite3` 及 `-wal/-shm/-journal`）与 0 字节 `*.lock` 锁侧车，在展示用量、原生 find、前台快照、后台对账、逐目录摘要和结算中一律不计、不进摘要、不下钻；`*.lock` 有内容即照常计费。这些路径由宿主在准入外写，模型工具只读（`path_access_policy` 宿主托管存储）；守卫测试把排除表与 `owner_read_index._DB_PARTS`、`telemetry_ledger.PARTS` 绑定。
-- **有界核验**：逐目录七整数摘要（身份、目录时间、计费项数、普通文件字节、64 位可加摘要）按估算持久字节封顶（640KiB），不再按 4096 目录封顶；超容整表作废而不截断。准入先逐项核本次写入路径上不超过 256 项的目录，再按持久轮转位置花完 256 额度（每层打开按 16 计）核其它小目录；更大目录只交后台对账。干净基线已显示超过 128 项时不再做必然读不完的全新快照。结算按声明子项前后贡献增量维护摘要；目录项在事务中有增删且目录不大时按期望摘要重扫一次，root 以本进程账本写后目录戳判断是否只被账本动过，事务内未声明增删当场置脏。
-- **受控写代次与对账不重来**：完整表超容或对账进行中，干净账以“最近一次完整测量 + 只经声明增量变化”为新鲜性证明；未完成的一轮不再置脏。对账进行中的受控写由结算并入持久游标（已走过路径补差额、增删过目录项的名称窗口作废重枚举），本轮不重来；本轮开始后出现的未结算新预留（准入后崩溃）使本轮从头重扫。持久续扫游标存活期改为 86400 秒。
-- **热续扫一遍枚举**：进程内单目录名称窗口放宽到 65536 项/4MiB；持久化时裁到 4096 项/192KiB 并记上界，冷恢复不再收上界以外的名字。
-- **残余边界（未消除，按设计接受）**：大目录（>256 项）内既有文件的准入外原地追加、以及超容 owner 的任何准入外写入，只在下一轮后台对账完成时测出并纠正；准入外写入期间可能短暂超额。冷恢复大平铺目录仍按每 4096 名一遍枚举（N/4096 倍）；对账进行中的受控写会让进程内扫描器改从持久游标续扫。
+- **Owner 配额与维护（`owner_quota.py` / `owner_maintenance.py` / `owner_maintenance_transition.py`）**：
+  - **结构性排除（同一口径）**：配额控制账（`.owner-quota-ledger.json`、`.owner-quota.lock`）、宿主运行时子树（`workspace/runtime/services`、`data/telemetry`）、可丢弃读索引（`cache/owner_read_index.sqlite3` 及 `-wal/-shm/-journal`）与 0 字节 `*.lock` 锁侧车，在展示用量、原生 find、前台快照、后台对账、逐目录摘要和受控结算（`_billed_file_inode`）中一律不计、不进摘要、不下钻；`*.lock` 有内容即照常计费。
+  - **九整数目录行与 0 字节 `.lock` 前台有界核验（`R6-QUOTA-01/02`）**：逐目录摘要升级为 9 整数（`row_format=2`：身份、目录时间、计费项数、普通文件字节、64 位可加摘要、物理目录项数、计费文件数），按估算持久字节封顶（`640 KiB`，滚动基线按目录去重计字节），尺寸判定取 `max(计费项, 物理项)`。前台核验在物理项达 `256`（`_QUOTA_VERIFY_BUDGET_ENTRIES`）时立即停止，大目录转入“目录自身五元 stat $O(1)$ 比对 + 仅对可排除名（`*.lock`、运行时路径）有界 `stat`（上限 256 次）的纯名称计费计数”，使含数千个 0 字节 `.lock` 的目录在单次追加中至多触发 0–1 次 `entry.stat`；结算按声明前后增量算术更新，不在前台全量重扫大目录。
+  - **游标空闲存活期、子目录单次打开与追赶期维护额度（`R6-Q1`）**：持久续扫游标 `TTL=86400s` 按距上次切片推进的空闲时间（`now - updated_at`）而非整轮起始时间（`started_at`）判定，持续推进的跨天大目录扫描不重置 `epoch`；子目录 FD 供名称准备与首窗 `stat` 共用且缓存 `libc` `getdirentries` 绑定，深层目录树单拍（`256` 项 / `10ms`）吞吐提升约 2.5 倍；维护默认配额额度在账本缺失、置脏或一轮未完成时升至追赶档（`1024` 项 / `40ms`），稳态回落 `256` 项 / `10ms`；保留策略 `load_errors` / `retention_not_safe`（已持维护 `state_locked`）与 `coordinator` 模式（经原 `commit_transition`）均继续推进配额对账切片。
+  - **大目录与进行中对账的准入外写入检测及收尾补扫（`R6-Q2`）**：`>256` 项大目录通过目录戳比对 + 纯名称计费计数在下一次受控增长时即时拦下准入外新建/删除文件；对账进行中（`complete=False`）按本轮已完成行 + 上一轮未扫到行的滚动基线核验；整轮完成发布前对本轮已扫过但目录戳随后变化的目录做有界（`4096` 项操作）漂移补扫并结算子树增删。
+  - **配额残余边界**：`>256` 项大目录内既有文件的准入外原位追加或同数量替换不在前台逐项重扫，由当前未扫到分片或下一轮后台对账收敛；完成前漂移补扫以 `4096` 项操作封顶；冷恢复超大平铺目录仍按每 `4096` 名一遍枚举。
+- **跨代引用 Pin 摘要预算与解析边界（`reference_pins.py` / `retention_scan.py`）**：
+  - **全量读口解析边界重置（`R6-PIN-01`）**：`recheck_pin_sources()` 同时作为大文件（`>256 KiB`）与小文件的解析完成边界，在解析完成后清空该源此前积累的 `post` 阶段切片进度，仅允许解析完成后读取的切片满足 `post` 校验；覆盖全部绕过 `_PinDigestReader` 的读口（`StorageTombstones.load()` 含旧格式回退重读、正式 `generation_manifest`、代际 `segments`、`retention_policy` 与候选 `cold_details`）。
+  - **小源并发追加的 OS 实读字节硬上限（`R6-PIN-02`）**：`_file_digest(..., precharged=True)` 在已预扣 `stamp[3]` 的基础上，将探测并发追加的额外读取严格限制在单源剩余预算（`_MAX_SOURCE_DIGEST_BYTES_PER_PASS = 1 MiB`）内，并在 `finally` 中按真实 `os.read` 字节补记账；当第 4 次读取剩余预算恰好等于文件尺寸时读取停在预期末尾并由 `os.fstat(fd)` 捕获追加，单次 `current()` 对同一源的真实 `os.read` 字节严格 `<= 1,048,576 B`。
+  - **Pin 残余边界**：持续高频改写且 `>832 KiB` 的热源在写入静默（脱离 2 秒热窗口）前保持 fail-closed `complete=False`（不发布陈旧快照、不放行删除）。
+- **Telemetry 账本追加见证（`telemetry_ledger.py`）**：
+  - `<= 2 MiB`（`_FULL_PREFIX_VERIFY_MAX_BYTES`）的账本在追加前做全前缀 SHA-256 校验，消除 `1 MiB..2 MiB` 区间内原位等长改写的漏检盲区；`> 2 MiB` 账本采用 `4 KiB` 头 + 3 个均匀分布内部 `4 KiB` 窗口 + `4 KiB` 尾（共 `20 KiB`）采样见证，粗粒度时间戳文件系统的超大账本中间未采样字节仍为概率见证。
+- **展示归档分时续扫与游标整数边界（`display_archive_maintenance.py`）**：
+  - **128 槽位分时复用与禁中途驱逐（`R6-ARCH-01` / `R6-A1`）**：进程内活 `scandir` 迭代器上限设为 `128`（不跨调用持有目录锁 FD），禁止在一轮扫描中途驱逐在途迭代器；槽位满时新键仅在当前预算窗口（`max(1, max_archives) * 64`）内做单窗无状态扫描且不移动游标，在途槽位完成一轮或闲置超 `2 * 活跃键数` 次调用后让出；同进程迭代器异常丢失时从 `0` 重开新一轮而不做无预算前缀重放，使同进程任意调用的原始 `scandir` 枚举严格 `<= 64`。
+  - **持久化游标上界校验与跨进程边界（`R6-ARCH-02`）**：持久化游标 `offset` 强制校验 `0 <= offset < sys.maxsize`（布尔值与超界大整数均视为损坏游标归零恢复）；新进程首次恢复或闲置回收后重开仍需重放一次已持久化的前缀偏移（`os.scandir` 不支持内核偏移 seek）。
 
 ## 2026-10-29 e905 完整优化包（sol-1..sol-14）统一集成与三个形式主义硬门退役（已集成）
 

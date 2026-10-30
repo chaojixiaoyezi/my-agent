@@ -7,11 +7,12 @@ import math
 import os
 import re
 import stat
+import sys
 import time
 import uuid
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
-from itertools import islice
+from itertools import count, islice
 from pathlib import Path
 from threading import RLock
 
@@ -40,6 +41,10 @@ _DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES = 64
 _scan_cursors: OrderedDict[tuple[int, int, str], int] = OrderedDict()
 # 续扫中的目录迭代器只在本进程有效，位置须与_scan_cursors一致才可接着读，避免每次重开后从头丢弃旧项。
 _live_scans: OrderedDict[tuple[int, int, str], tuple[ExitStack, object, int]] = OrderedDict()
+# 各目录/操作最近一次维护的调用序号（旧在前），据此清退停止维护的键；名额已满时等待的键令占用者跑完一轮即让出。
+_scan_recent: OrderedDict[tuple[int, int, str], int] = OrderedDict()
+_scan_waiting: set[tuple[int, int, str]] = set()
+_scan_calls = count()
 _scan_cursor_lock = RLock()
 _CURSOR_FILE = ".display_archives.cursor.json"
 
@@ -272,7 +277,7 @@ def _open_scan(root):
     return scans, entries
 
 
-# LLM: 游标只写归档根父目录下的普通单链接点文件，且父目录中的display_archives须仍是已锁根inode；坏、缺或身份不符一律视为0。
+# LLM: 游标只写归档根父目录下的普通单链接点文件，且父目录中的display_archives须仍是已锁根inode；坏、缺、超出sys.maxsize或身份不符一律视为0。
 #   保存失败只放弃跨进程续点，不改变本次维护结果，也不向归档目录写任何文件。
 # 函数用途: 为新进程读取（offset为None）或保存某维护操作的续扫偏移。
 def _persisted_cursor(root_path, root_info, operation, offset=None):
@@ -291,7 +296,7 @@ def _persisted_cursor(root_path, root_info, operation, offset=None):
             saved = {}
         value = saved.get(operation)
         loaded = (value[2] if isinstance(value, list) and len(value) == 3 and value[:2] == identity
-                  and type(value[2]) is int and value[2] >= 0 else 0)
+                  and type(value[2]) is int and 0 <= value[2] <= sys.maxsize else 0)
         if offset is None or offset == loaded:
             return loaded
         saved[operation] = [*identity, offset]
@@ -303,8 +308,26 @@ def _persisted_cursor(root_path, root_info, operation, offset=None):
         os.close(parent)
 
 
+# LLM: 调用序号记录各键最近一次维护；超过活跃键数两倍次调用未再维护即视为闲置，关闭其活迭代器并丢弃内存游标，
+#   回来时按新进程语义从持久游标恢复。轮转维护的键两次调用相隔恰为活跃键数，不会被误清。
+# 函数用途: 让停止维护的目录/操作交还迭代器名额和FD；调用方须持有_scan_cursor_lock。
+def _forget_idle_scans(key):
+    sequence = next(_scan_calls)
+    _scan_recent.pop(key, None)
+    _scan_recent[key] = sequence
+    oldest = sequence - 2 * len(_scan_recent)
+    while next(iter(_scan_recent.values())) < oldest:
+        idle, _ = _scan_recent.popitem(last=False)
+        _scan_cursors.pop(idle, None)
+        _scan_waiting.discard(idle)
+        dropped = _live_scans.pop(idle, None)
+        if dropped is not None:
+            dropped[0].close()
+
+
 # LLM: 原根flock保护同目录维护；游标按真实根inode及操作隔离，同进程保留活迭代器续读，每个枚举项都计入预算，回绕共用同一预算。
-#   内存LRU最多128项、活迭代器最多8个；活迭代器缺失（新进程或被淘汰）时按游标一次性重放前缀后再续扫。
+#   活迭代器最多128个且不因他键到来被中途淘汰；名额满时新键只从目录头查一个预算窗口、不推进游标，占用者走到目录尾时若有人等待即让出。
+#   同进程丢失活迭代器（异常或名额竞争）从头开新一轮不重放；仅本进程首次或闲置清退后按持久游标一次性重放前缀（跨进程无seekdir的代价）。
 # 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档，也不让续扫代价随偏移线性增长。
 def _maintain(value, maximum, action):
     result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0}
@@ -319,13 +342,25 @@ def _maintain(value, maximum, action):
             operation = action.__qualname__
             cursor_key = (int(root_info.st_dev), int(root_info.st_ino), operation)
             with _scan_cursor_lock:
+                _forget_idle_scans(cursor_key)
                 offset = _scan_cursors.get(cursor_key)
                 live = _live_scans.pop(cursor_key, None)
-            if live is not None and live[2] != offset:
-                live[0].close()
-                live = None
-            if offset is None:
-                offset = _persisted_cursor(root_path, root_info, operation)
+                if live is not None and live[2] != offset:
+                    live[0].close()
+                    live = None
+                waiting = live is None and len(_live_scans) >= 128
+                if waiting:
+                    _scan_waiting.add(cursor_key)
+                else:
+                    _scan_waiting.discard(cursor_key)
+            if waiting:
+                # 名额已满：临时迭代器只查目录头一个预算窗口，不改内存或持久游标，等占用者跑完一轮让出。
+                scans, entries = _open_scan(root)
+                with scans:
+                    _scan_entries(root, entries, scan_budget, maximum, action, result)
+                return result
+            if live is None:
+                offset = 0 if offset is not None else _persisted_cursor(root_path, root_info, operation)
             scans, entries = live[:2] if live is not None else (None, None)
             try:
                 if scans is None:
@@ -338,10 +373,10 @@ def _maintain(value, maximum, action):
                 inspected, hit_limit, vanished = _scan_entries(root, entries, scan_budget, maximum, action, result)
                 position = max(0, offset + inspected - result["removed"] - vanished)
                 if inspected < scan_budget and not hit_limit:
-                    # 走到目录尾：关闭旧迭代器，从头只补到本次起点，回绕与正常检查共用本次预算。
+                    # 走到目录尾：关闭旧迭代器；有键等待名额时就此让出，否则从头只补到本次起点，回绕与正常检查共用本次预算。
                     scans.close()
                     scans, position = None, 0
-                    if offset:
+                    if offset and not _scan_waiting:
                         removed_before_wrap = result["removed"]
                         limit = min(offset, scan_budget - inspected)
                         scans, entries = _open_scan(root)
@@ -355,16 +390,17 @@ def _maintain(value, maximum, action):
                     scans.close()
                 raise
             with _scan_cursor_lock:
+                if scans is not None and len(_live_scans) >= 128:
+                    # 并发调用抢满名额时不超额保留，下轮从头开新一轮。
+                    scans.close()
+                    scans, position = None, 0
+                if scans is not None:
+                    _live_scans[cursor_key] = (scans, entries, position)
                 _scan_cursors[cursor_key] = position
                 _scan_cursors.move_to_end(cursor_key)
                 while len(_scan_cursors) > 128:
-                    evicted = _live_scans.pop(_scan_cursors.popitem(last=False)[0], None)
-                    if evicted is not None:
-                        evicted[0].close()
-                if scans is not None:
-                    _live_scans[cursor_key] = (scans, entries, position)
-                    while len(_live_scans) > 8:
-                        _live_scans.popitem(last=False)[1][0].close()
+                    # 只淘汰未持活迭代器的键，占用者的游标须与迭代器一同保留。
+                    del _scan_cursors[next(key for key in _scan_cursors if key not in _live_scans)]
             _persisted_cursor(root_path, root_info, operation, position)
     except FileNotFoundError:
         pass

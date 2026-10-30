@@ -1817,7 +1817,8 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
     for source in sources:
         watch_pin_source(source)
     root = store.manifest()
-    for segment in (path.parent / item["path"] for item in (root or {}).get("segments", ())):
+    segments = [path.parent / item["path"] for item in (root or {}).get("segments", ())]
+    for segment in segments:
         watch_pin_source(segment)
     committed = store.events(root=root)
     if committed is not None:
@@ -1835,8 +1836,9 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
             events.extend(store.tombstones.load().values())
         except (ValueError, TypeError, OverflowError) as exc:
             raise ValueError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE") from exc
-    # 生成清单与墓碑存储读取不经_pin_rows（墓碑加载还会复读旧墓碑），读后观察须尽量实际复读。
-    reference_pins.recheck_pin_sources(sources)
+    # 生成清单、分片与墓碑存储读取不经_pin_rows（墓碑加载还会复读旧墓碑）：此处即解析边界，
+    # 解析前已完成的post进度作废，读后观察与发布前复核须实际复读，分片由发布前复核兜底。
+    reference_pins.recheck_pin_sources([*sources, *segments])
     for source in sources:
         watch_pin_source(source)
     for record in _materialize_memory_events(events, include_expired=True):
@@ -1928,6 +1930,8 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
     try:
         reference_pins.reset_watched_pin_sources(home)
         policy, error = _load_policy(Path(home.owner_retention_json))
+        # 策略读取不经_pin_rows，读完即解析边界，之前核过的大文件post进度不能充当读后验证。
+        reference_pins.recheck_pin_sources((home.owner_retention_json,))
         if error is not None or policy is None or policy.legal_hold:
             raise ValueError("pin protection policy is unavailable or held")
         _formal_memory_pins(home, pins, now)
@@ -1940,8 +1944,11 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
                 raise ValueError("duplicate candidate pin source")
             candidate_ids.add(candidate_id)
             if candidate.cold_detail_ref:
-                watch_pin_source(candidate_path.parent / candidate.cold_detail_ref.partition("#")[0])
+                cold = candidate_path.parent / candidate.cold_detail_ref.partition("#")[0]
+                watch_pin_source(cold)
                 candidate = _hydrate_candidate(candidate_path, candidate)
+                # 冷详情读取同样不经_pin_rows，由发布前复核在解析边界之后重核。
+                reference_pins.recheck_pin_sources((cold,))
                 row = candidate.to_record()
             pins.collect(row, candidate_path)
         _task_reference_pins(home, policy, pins, now)

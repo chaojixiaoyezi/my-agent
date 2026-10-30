@@ -1,6 +1,10 @@
 # LLM: 只在临时owner执行真实配额锁、扫描与文件变更；禁用旧整树入口来证明冷启动不阻塞。
 # 模块用途: 验证增量配额的预算、预留、异常结算和崩溃恢复。
 import json
+import os
+import shutil
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -759,3 +763,424 @@ def test_legacy_partial_metadata_is_rebuilt_without_trusting_four_field_stamps(t
     assert result['complete'] and result['used_bytes'] == result['inode_count'] == 160
     assert result['cursor']['metadata_complete'] is True
     assert quota._verify_quota_metadata(tmp_path, result['cursor'])
+
+
+# LLM: 每个用例从空的进程内扫描缓存开始，别的用例留下的热扫描器不能影响续扫路径。
+# 函数用途: 关闭并清空进程内配额扫描器。
+def _r7_clear_scans():
+    for scan in quota._QUOTA_SCANS.values():
+        scan['iterator'].close()
+    quota._QUOTA_SCANS.clear()
+
+
+# 函数用途: 用给定额度把对账推进到完成并返回最后一片回执。
+def _r7_finish(root, *, max_entries=4096, max_ms=5000):
+    for _ in range(500):
+        report = quota.reconcile_owner_quota_slice(root, max_entries=max_entries, max_ms=max_ms)
+        if report['complete']:
+            return report
+    pytest.fail('quota reconciliation did not finish')
+
+
+# LLM: 走真实reserve与原文件追加；超额与对账待定分别返回，便于断言被拦下的原因。
+# 函数用途: 受控追加一个字节并返回ok/exceeded/refused。
+def _r7_grow(root, name='managed', *, max_bytes=1 << 30):
+    enforcer = quota.OwnerQuotaEnforcer(root, max_bytes=max_bytes)
+    try:
+        with enforcer.reserve([quota.OwnerQuotaChange(root / name, 1, append=True)]):
+            with (root / name).open('ab') as stream:
+                stream.write(b'y')
+    except quota.OwnerQuotaExceeded:
+        return 'exceeded'
+    except quota.OwnerQuotaUnavailable:
+        return 'refused'
+    return 'ok'
+
+
+# 函数用途: 读取持久配额账。
+def _r7_ledger(root):
+    return json.loads((root / '.owner-quota-ledger.json').read_text())
+
+
+# LLM: 只包装os.scandir返回的目录项，统计逐项lstat次数；目录项与结果都来自真实系统调用。
+# 函数用途: 安装逐项stat计数器并返回计数字典。
+def _r7_count_entry_stats(monkeypatch):
+    counts = {'stat': 0}
+    raw = os.scandir
+
+    # 类用途: 转发目录项并统计stat调用。
+    class Entry:
+        def __init__(self, entry):
+            self.entry = entry
+
+        def __getattr__(self, key):
+            return getattr(self.entry, key)
+
+        def stat(self, **kwargs):
+            counts['stat'] += 1
+            return self.entry.stat(**kwargs)
+
+    # 类用途: 转发目录流，逐项包装。
+    class Scan:
+        def __init__(self, scan):
+            self.scan = scan
+
+        def __enter__(self):
+            self.scan.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.scan.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return Entry(next(self.scan))
+
+        def close(self):
+            self.scan.close()
+
+    monkeypatch.setattr(os, 'scandir', lambda *args, **kwargs: Scan(raw(*args, **kwargs)))
+    return counts
+
+
+# LLM: R6-QUOTA-01：5000个空锁不计费但都是物理目录项；1字节追加的前台lstat不得随空锁数增长。
+# 函数用途: 验证基线已记录大量空锁名时，准入与结算的逐项stat不超过一份核验额度。
+@pytest.mark.parametrize('where', ['root', 'subdir'])
+def test_empty_lock_names_keep_foreground_stat_work_bounded(tmp_path, monkeypatch, where):
+    _r7_clear_scans()
+    base = tmp_path if where == 'root' else tmp_path / 'locks'
+    base.mkdir(exist_ok=True)
+    for index in range(200):
+        (base / f'p-{index:04d}').write_bytes(b'x')
+    for index in range(5000):
+        (base / f'{index:05d}.lock').touch()
+    _r7_finish(tmp_path)
+    counts = _r7_count_entry_stats(monkeypatch)
+    assert _r7_grow(tmp_path, str((base / 'p-0000').relative_to(tmp_path))) == 'ok'
+    assert counts['stat'] <= quota._QUOTA_VERIFY_BUDGET_ENTRIES
+    ledger = _r7_ledger(tmp_path)
+    assert ledger['dirty_since'] is None
+    assert (ledger['used_bytes'], ledger['inode_count']) == (201, 200)
+
+
+# LLM: 基线记录时目录还小，之后准入外堆进5000个空锁：前台逐项核验数到额度即停，转名字计数核计费项，不扫完全部目录项。
+# 函数用途: 验证前台在扫描中发现物理项超额时立即停下且不误判脏账。
+def test_lock_names_added_after_baseline_stop_foreground_scan_at_budget(tmp_path, monkeypatch):
+    _r7_clear_scans()
+    for index in range(200):
+        (tmp_path / f'p-{index:04d}').write_bytes(b'x')
+    _r7_finish(tmp_path)
+    for index in range(5000):
+        (tmp_path / f'{index:05d}.lock').touch()
+    counts = _r7_count_entry_stats(monkeypatch)
+    assert _r7_grow(tmp_path, 'p-0000') == 'ok'
+    assert counts['stat'] <= quota._QUOTA_VERIFY_BUDGET_ENTRIES
+    assert _r7_ledger(tmp_path)['dirty_since'] is None
+    monkeypatch.undo()
+    _r7_clear_scans()
+    report = _r7_finish(tmp_path)
+    assert (report['used_bytes'], report['inode_count']) == (201, 200)
+
+
+# LLM: R6-QUOTA-02：结算的inode增减必须与扫描同一排除口径（0字节*.lock不计、有内容即计）。
+# 函数用途: 验证三种锁文件转变后结算账与随后完整对账一致。
+@pytest.mark.parametrize('transition', ['empty_to_nonempty', 'nonempty_to_empty', 'create_empty'])
+@pytest.mark.parametrize('nested', [False, True])
+def test_lock_file_settlement_matches_reconcile(tmp_path, transition, nested):
+    _r7_clear_scans()
+    for index in range(200):
+        (tmp_path / f'p-{index:04d}').write_bytes(b'x')
+    target = tmp_path / 'sub' / 'target.lock' if nested else tmp_path / 'target.lock'
+    target.parent.mkdir(exist_ok=True)
+    if transition == 'empty_to_nonempty':
+        target.write_bytes(b'')
+    elif transition == 'nonempty_to_empty':
+        target.write_bytes(b'abc')
+    _r7_finish(tmp_path)
+    payload = b'hello' if transition == 'empty_to_nonempty' else b''
+    with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1 << 30).reserve([quota.OwnerQuotaChange(target, len(payload))]):
+        target.write_bytes(payload)
+    settled = _r7_ledger(tmp_path)
+    assert (settled['used_bytes'], settled['inode_count']) == (200 + len(payload), 200 + bool(payload))
+    assert settled['dirty_since'] is None
+    _r7_clear_scans()
+    report = _r7_finish(tmp_path)
+    assert (report['used_bytes'], report['inode_count']) == (settled['used_bytes'], settled['inode_count'])
+
+
+# LLM: R6-T1：新owner的全新有界快照仍是128项，但时间额度放宽到50ms，避免并行负载下误判对账待定。
+# 函数用途: 验证前台全新快照使用128项/50ms额度。
+def test_fresh_owner_snapshot_budget_is_128_entries_10_ms(tmp_path, monkeypatch):
+    calls = []
+    original = quota._bounded_quota_snapshot
+
+    # 函数用途: 记录额度并调用原快照。
+    def recorded(root, *, max_entries, max_ms):
+        calls.append((max_entries, max_ms))
+        return original(root, max_entries=max_entries, max_ms=max_ms)
+
+    monkeypatch.setattr(quota, '_bounded_quota_snapshot', recorded)
+    assert _r7_grow(tmp_path) == 'ok'
+    assert calls == [(128, 10)]
+
+
+# LLM: R6-Q2：超过256项的大目录里准入外新建文件，目录戳变化加名字计数在下一次增长时就能发现。
+# 函数用途: 验证大目录（root或子目录）准入外新建文件被下一次增长拦下并置脏，完整对账后计入。
+@pytest.mark.parametrize('where', ['root', 'subdir'])
+def test_out_of_band_file_in_large_directory_is_caught_on_next_growth(tmp_path, where):
+    _r7_clear_scans()
+    big = tmp_path if where == 'root' else tmp_path / 'big'
+    big.mkdir(exist_ok=True)
+    for index in range(301):
+        (big / f'{index:05d}').write_bytes(b'x')
+    _r7_finish(tmp_path)
+    assert _r7_grow(tmp_path) == 'ok'
+    (big / 'oob.bin').write_bytes(b'z' * 4096)
+    assert _r7_grow(tmp_path) == 'refused'
+    assert _r7_ledger(tmp_path)['dirty_since'] is not None
+    report = _r7_finish(tmp_path)
+    assert report['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 301 + 1 + 4096
+
+
+# LLM: 大目录里锁侧车的增删只改目录戳不改计费项数；名字计数核对相符即采纳新目录戳，不能误判脏账。
+# 函数用途: 验证大目录空锁侧车变动与受控新建文件不触发误报。
+def test_lock_sidecar_churn_in_large_directory_keeps_baseline_clean(tmp_path):
+    _r7_clear_scans()
+    big = tmp_path / 'big'
+    big.mkdir()
+    for index in range(301):
+        (big / f'{index:05d}').write_bytes(b'x')
+    _r7_finish(tmp_path)
+    (big / 'store.json.lock').touch()
+    (big / 'other.lock').touch()
+    (big / 'other.lock').unlink()
+    assert _r7_grow(tmp_path, 'big/managed') == 'ok'
+    assert _r7_grow(tmp_path, 'big/managed') == 'ok'
+    ledger = _r7_ledger(tmp_path)
+    assert ledger['dirty_since'] is None and ledger['used_bytes'] == 303
+
+
+# LLM: R6-Q2：对账进行中（游标未完成、账本干净）仍按旧行与本轮新行核验；被写目录的准入外新文件当次拦下，
+#   已走过目录的准入外新文件在本轮发布前的漂移清点里补正，未走到的目录由本轮扫描计入，三者完成后都与实际一致。
+# 函数用途: 验证对账进行中准入外写入的发现与补正。
+@pytest.mark.parametrize('target', ['touched', 'scanned', 'unscanned'])
+def test_out_of_band_write_during_active_pass(tmp_path, target):
+    _r7_clear_scans()
+    for number in range(40):
+        directory = tmp_path / f'd{number:03d}'
+        directory.mkdir()
+        for index in range(10):
+            (directory / f'{index:02d}').write_bytes(b'x')
+    _r7_finish(tmp_path)
+    started = quota.reconcile_owner_quota_slice(tmp_path, max_entries=64, max_ms=5000)
+    assert not started['complete'] and 'd005/' < started['cursor']['last_relpath'] < 'd030'
+    oob = {'touched': 'd039', 'scanned': 'd000', 'unscanned': 'd030'}[target]
+    (tmp_path / oob / 'oob.bin').write_bytes(b'z' * 4096)
+    grown = _r7_grow(tmp_path, 'd039/managed')
+    if target == 'touched':
+        assert grown == 'refused' and _r7_ledger(tmp_path)['dirty_since'] is not None
+    finished = _r7_finish(tmp_path, max_entries=64)
+    assert finished['cursor']['epoch'] == started['cursor']['epoch']
+    assert finished['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 400 + 4096 + (grown == 'ok')
+    assert _r7_ledger(tmp_path)['dirty_since'] is None
+    assert quota._verify_quota_metadata(tmp_path, finished['cursor'])
+
+
+# LLM: 已走过区域里整棵子树被删除或新建，漂移清点要减去旧子树行并有界补扫新子树，发布的总量与目录表都与实际一致。
+# 函数用途: 验证对账走过之后的子树增删在本轮完成时被补正。
+def test_subtree_removed_or_created_after_scan_is_settled(tmp_path):
+    _r7_clear_scans()
+    for number in range(40):
+        directory = tmp_path / f'd{number:03d}'
+        directory.mkdir()
+        for index in range(10):
+            (directory / f'{index:02d}').write_bytes(b'x')
+    _r7_finish(tmp_path)
+    started = quota.reconcile_owner_quota_slice(tmp_path, max_entries=64, max_ms=5000)
+    assert started['cursor']['last_relpath'] > 'd003/'
+    shutil.rmtree(tmp_path / 'd001')
+    (tmp_path / 'd002' / 'new' / 'deeper').mkdir(parents=True)
+    (tmp_path / 'd002' / 'new' / 'deeper' / 'f').write_bytes(b'n' * 7)
+    (tmp_path / 'c000').mkdir()
+    (tmp_path / 'c000' / 'f').write_bytes(b'c' * 11)
+    finished = _r7_finish(tmp_path, max_entries=64)
+    actual = quota.owner_logical_usage_bytes(tmp_path, exact=True)
+    assert finished['used_bytes'] == actual == 390 + 7 + 11
+    assert finished['inode_count'] == 392
+    assert {'c000', 'd002/new', 'd002/new/deeper'} <= set(finished['cursor']['dir_stamps'])
+    assert 'd001' not in finished['cursor']['dir_stamps']
+    assert quota._verify_quota_metadata(tmp_path, finished['cursor'])
+
+
+# LLM: R6-Q1：存活期按最后一次推进计，持续推进的一轮总耗时远超期限也不重来；真正闲置超期的游标才作废。
+# 函数用途: 验证游标闲置期限而非整轮年龄决定是否重扫。
+def test_progressing_pass_outlives_cursor_ttl_but_idle_cursor_restarts(tmp_path, monkeypatch):
+    _r7_clear_scans()
+    for number in range(30):
+        directory = tmp_path / f'd{number:03d}'
+        directory.mkdir()
+        for index in range(10):
+            (directory / f'{index:02d}').write_bytes(b'x')
+    fake = [time.time()]
+    monkeypatch.setattr(quota, 'time', SimpleNamespace(time=lambda: fake[0], monotonic=time.monotonic))
+    monkeypatch.setattr(quota, '_QUOTA_SCAN_CURSOR_TTL_SECONDS', 120)
+    epochs, ticks = set(), 0
+    for ticks in range(1, 200):
+        report = quota.reconcile_owner_quota_slice(tmp_path, max_entries=16, max_ms=5000)
+        epochs.add(report['cursor']['epoch'])
+        fake[0] += 60
+        if report['complete']:
+            break
+    assert report['complete'] and len(epochs) == 1 and ticks * 60 > 120
+    assert report['used_bytes'] == 300
+    first = quota.reconcile_owner_quota_slice(tmp_path, max_entries=16, max_ms=5000)
+    fake[0] += 121
+    second = quota.reconcile_owner_quota_slice(tmp_path, max_entries=16, max_ms=5000)
+    assert second['cursor']['epoch'] != first['cursor']['epoch']
+
+
+# LLM: R6-Q1：每片吞吐由逐目录打开次数决定；子目录打开一次即供排序准备与首个窗口共用，整轮打开数不随文件数增长。
+# 函数用途: 验证嵌套树一整轮的目录打开次数低于目录项数且不超过目录数的两倍。
+def test_nested_tree_pass_opens_each_directory_about_once(tmp_path, monkeypatch):
+    _r7_clear_scans()
+    for top in range(3):
+        for middle in range(40):
+            leaf = tmp_path / 'w' / f'a{top:03d}' / f'b{middle:03d}' / 'c'
+            leaf.mkdir(parents=True)
+            for index in range(3):
+                (leaf / f'f{index}').write_bytes(b'x')
+    directories = sum(1 for path in tmp_path.rglob('*') if path.is_dir()) + 1
+    entries = sum(1 for _ in tmp_path.rglob('*'))
+    opens = [0]
+    original = quota.open_directory_beneath
+
+    # 函数用途: 计数后调用原nofollow逐层打开。
+    def counted(*args, **kwargs):
+        opens[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(quota, 'open_directory_beneath', counted)
+    report = _r7_finish(tmp_path, max_entries=256, max_ms=5000)
+    assert report['used_bytes'] == 360
+    assert opens[0] <= 2 * directories < entries
+
+
+# LLM: 账本缺失、脏或一轮未走完时维护默认额度升到追赶档；账干净且上一轮已走完回到稳态档；调用方显式额度原样使用。
+# 函数用途: 验证维护入口的配额对账额度选择。
+def test_maintenance_quota_budget_catches_up_until_pass_completes(tmp_path):
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    catch_up = (maintenance._QUOTA_CATCH_UP_MAX_ENTRIES, maintenance._QUOTA_CATCH_UP_MAX_MS)
+    steady = (maintenance._QUOTA_STEADY_MAX_ENTRIES, maintenance._QUOTA_STEADY_MAX_MS)
+    assert catch_up[0] >= 1024 and catch_up[1] >= 40 and steady == (256, 10)
+    assert maintenance._quota_maintenance_budget(home, None, None) == catch_up
+    quota.reconcile_owner_quota_slice(home.owner_home_dir, max_entries=1, max_ms=5000)
+    assert maintenance._quota_maintenance_budget(home, None, None) == catch_up
+    _r7_finish(home.owner_home_dir)
+    assert maintenance._quota_maintenance_budget(home, None, None) == steady
+    assert maintenance._quota_maintenance_budget(home, 7, 1000) == (7, 1000)
+    path = home.owner_home_dir / '.owner-quota-ledger.json'
+    ledger = json.loads(path.read_text())
+    ledger['dirty_since'] = 1.0
+    path.write_text(json.dumps(ledger))
+    assert maintenance._quota_maintenance_budget(home, None, None) == catch_up
+    with pytest.raises(ValueError, match='invalid_quota_maintenance_budget'):
+        maintenance._quota_maintenance_budget(home, 0, None)
+
+
+# LLM: R6-Q1：配额对账只写配额账、不删内容，保留策略加载失败或被拒时仍推进一片并回报；一轮未完成保留待续。
+# 函数用途: 验证保留不安全的延期路径仍执行配额对账。
+@pytest.mark.parametrize('reason', ['load_errors', 'refused'])
+def test_quota_reconcile_runs_when_retention_is_not_safe(tmp_path, reason):
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    policy = SimpleNamespace(load_errors=['bad'] if reason == 'load_errors' else [],
+                             applied=reason != 'refused', legal_hold=False)
+    partial = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000,
+                                                              quota_max_entries=1, quota_max_ms=5000, state_locked=True)
+    assert partial['quota_reconciliation']['complete'] is False and partial['continuation_pending'] is True
+    result = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000, state_locked=True)
+    assert result['deferred_reason'] == 'retention_not_safe' and result['deletion_enabled'] is False
+    assert result['quota_reconciliation']['complete'] is True and result['continuation_pending'] is False
+    assert 'cursor' not in result['quota_reconciliation']
+    assert json.loads((home.owner_home_dir / '.owner-quota-ledger.json').read_text())['dirty_since'] is None
+
+
+# LLM: C/W下配额对账必须经原transition提交才写账；没有transition时只报告延期，不写配额账。
+# 函数用途: 验证协调模式的配额对账只走调用方给出的transition。
+def test_coordinator_quota_reconcile_runs_only_through_transition_commit(tmp_path):
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    policy = SimpleNamespace(load_errors=[], applied=True, legal_hold=False)
+    home = ensure_my_agent_home(tmp_path / 'home')
+    committed = []
+
+    # 函数用途: 记录经transition提交的操作并原样执行。
+    def commit(operation):
+        committed.append(operation)
+        return operation()
+
+    result = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000, coordinator=True,
+                                                             commit_transition=commit)
+    assert len(committed) == 1 and result['quota_reconciliation']['complete'] is True
+    assert result['deferred_reason'] == 'coordinator_adapter_protocol_required'
+    other = ensure_my_agent_home(tmp_path / 'other')
+    deferred = maintenance.run_owner_storage_maintenance_slice(other, {}, policy, now=2_000_000, coordinator=True)
+    assert deferred['quota_reconciliation'] == {'complete': False,
+                                                'deferred_reason': 'coordinator_adapter_protocol_required'}
+    assert deferred['continuation_pending'] is False
+    assert not (other.owner_home_dir / '.owner-quota-ledger.json').exists()
+
+
+# LLM: 上一版七整数目录行不能当本版九整数表核验，也不能接着累加；受控写按代次维持，下一轮重建本版表。
+# 函数用途: 验证旧格式目录表的完整游标与进行中游标都安全过渡。
+def test_previous_row_format_is_rebuilt_not_trusted(tmp_path):
+    _r7_clear_scans()
+    for index in range(160):
+        (tmp_path / f'{index:04d}').write_bytes(b'x')
+    _r7_finish(tmp_path)
+    path = tmp_path / '.owner-quota-ledger.json'
+    ledger = json.loads(path.read_text())
+    cursor = ledger['reconcile_cursor']
+    cursor['dir_stamps'] = {rel: row[:7] for rel, row in cursor['dir_stamps'].items()}
+    cursor.pop('row_format')
+    path.write_text(json.dumps(ledger))
+    assert _r7_grow(tmp_path) == 'ok'
+    assert _r7_ledger(tmp_path)['dirty_since'] is None
+    started = quota.reconcile_owner_quota_slice(tmp_path, max_entries=32, max_ms=5000)
+    ledger = json.loads(path.read_text())
+    ledger['reconcile_cursor']['scan_rows'] = {rel: row[:7] for rel, row in started['cursor']['scan_rows'].items()}
+    path.write_text(json.dumps(ledger))
+    _r7_clear_scans()
+    restarted = quota.reconcile_owner_quota_slice(tmp_path, max_entries=32, max_ms=5000)
+    assert restarted['cursor']['epoch'] != started['cursor']['epoch']
+    report = _r7_finish(tmp_path)
+    assert report['used_bytes'] == report['inode_count'] == 161
+    assert report['cursor']['row_format'] == quota._QUOTA_ROW_SCHEMA_VERSION
+    assert quota._verify_quota_metadata(tmp_path, report['cursor'])
+
+
+# LLM: 上一轮目录表恰在字节上限时，新一轮的扫描行与同目录旧行短暂并存不能把表挤爆；走完后仍发布完整的本版目录表。
+# 函数用途: 验证滚动基线下目录表字节按目录去重计数。
+def test_table_at_byte_cap_survives_next_pass(tmp_path, monkeypatch):
+    _r7_clear_scans()
+    for number in range(40):
+        directory = tmp_path / f'd{number:03d}'
+        directory.mkdir()
+        for index in range(3):
+            (directory / f'{index:02d}').write_bytes(b'x')
+    first = _r7_finish(tmp_path)
+    monkeypatch.setattr(quota, '_QUOTA_MAX_METADATA_BYTES',
+                        sum(quota._quota_row_bytes(rel) for rel in first['cursor']['dir_stamps']))
+    second = _r7_finish(tmp_path, max_entries=16)
+    assert second['cursor']['epoch'] != first['cursor']['epoch']
+    assert second['cursor']['metadata_complete'] is True
+    assert set(second['cursor']['dir_stamps']) == set(first['cursor']['dir_stamps'])
+    assert quota._verify_quota_metadata(tmp_path, second['cursor'])

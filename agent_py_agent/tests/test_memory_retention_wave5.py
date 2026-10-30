@@ -1747,3 +1747,153 @@ def test_r6_small_hot_formal_source_shares_one_mib_digest_budget(tmp_path, monke
             assert not racing and complete and not errors and not pins.protects(target, errors)
         # 每current至少实际读一次（发布前最终复核），总量不超过每源1MiB。
         assert memory.path.stat().st_size <= digest_bytes[0] <= 1_048_576
+
+
+# LLM: 用真实schema删除记录填满600KiB永久墓碑，首条屏蔽仍引用目标的正式记忆；改写只把其entry_id等长换掉以解除屏蔽。
+# 函数用途: 构造超出单次预算、须走可续切片的StorageTombstones来源及其同长改写。
+def _r7_large_storage_tombstones(memory, target):
+    from agent_py_agent.agent.memory_store.generation_manifest import (
+        TOMBSTONE_SCHEMA,
+        StorageTombstones,
+    )
+
+    memory.add("user", "fact", attributes={"source_refs": [str(target)]})
+    record = json.loads(memory.path.read_text())
+    entry_id = record["entry_id"]
+    record.update(action="remove", content="", attributes=None)
+    store = StorageTombstones(memory.path)
+    head = json.dumps({"schema_version": TOMBSTONE_SCHEMA, "owner": store.owner}, separators=(",", ":"))[:-1]
+    head += ',"records":{'
+    rows = [json.dumps(entry_id) + ":" + json.dumps(record, separators=(",", ":"))]
+    size = len(head) + len(rows[0]) + 2
+    while True:
+        dummy = f"old-deletion-{len(rows):020d}"
+        row = json.dumps(dummy) + ":" + json.dumps({**record, "entry_id": dummy}, separators=(",", ":"))
+        if size + 1 + len(row) > 600 * 1024:
+            break
+        rows.append(row)
+        size += 1 + len(row)
+    payload = head + ",".join(rows) + "}}"
+    payload += " " * (600 * 1024 - len(payload))
+    store.path.write_text(payload)
+    return store.path, payload, payload.replace(entry_id, "x" * len(entry_id))
+
+
+# LLM: 墓碑存储、生成分片与保留策略都不经_pin_rows流式摘要；前次快照成功或构建失败遗留、本轮读前又核满的post进度，
+#   不能在解析后同tick等长改写时充当读后验证。改写前断言post确已核满，证明旧路径会走到陈旧完整发布。
+# 函数用途: 回归R6-PIN-01，非_pin_rows解析入口在解析边界作废post进度，不发布与新内容不符的完整快照。
+@pytest.mark.parametrize("prior", ["snapshot-success", "build-failure"])
+@pytest.mark.parametrize("source", ["storage-tombstones", "segment", "policy"])
+def test_r7_non_streaming_pin_parse_resets_post_progress(tmp_path, monkeypatch, source, prior):
+    from agent_py_agent.agent.memory_store import reference_pins
+    from agent_py_agent.agent.memory_store.generation_manifest import (
+        MemoryGenerationStore,
+        StorageTombstones,
+    )
+
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    if source == "storage-tombstones":
+        path, payload, rewritten = _r7_large_storage_tombstones(memory, target)
+        owner, name = StorageTombstones, "load"
+    elif source == "segment":
+        for index in range(3):
+            memory.add("user", f"fact {index}", attributes={"source_refs": [f"other-{index}"], "note": "n" * 200000})
+        memory.migrate_tiers()
+        path = memory.path.parent / MemoryGenerationStore(memory.path).manifest()["segments"][0]["path"]
+        payload = path.read_text()
+        rewritten = payload.replace("other-0", "other-x")
+        owner, name = MemoryGenerationStore, "segment_rows"
+    else:
+        path = Path(home.owner_retention_json)
+        payload = path.read_text()
+        payload += " " * (600 * 1024 - len(payload))
+        path.write_text(payload)
+        rewritten = payload.replace('"legal_hold": false', '"legal_hold": true ')
+        owner, name = scan, "_load_policy"
+    assert path.stat().st_size > 256 * 1024 and len(rewritten) == len(payload) and rewritten != payload
+    _freeze_pin_file_stat(monkeypatch, path)
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: path.stat().st_ctime_ns)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    if prior == "build-failure":
+        unrelated = old_file(home.owner_memory_curator_runs_dir / "z-broken.jsonl", "{bad}\n")
+        with pytest.raises(OSError):
+            snapshot.current([])
+        unrelated.write_text("{}\n")
+    else:
+        for _ in range(8):
+            try:
+                assert snapshot.current([])[1]
+                break
+            except OSError:
+                continue
+        else:
+            pytest.fail("unchanged source never published")
+        snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    assert reference_pins._RESUMABLE_DIGESTS[path]["phase"] == "post"
+    original, fired = getattr(owner, name), []
+
+    def parsed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not fired and path.read_text() == payload and (source != "segment" or args[1]["path"] in str(path)):
+            state = reference_pins._RESUMABLE_DIGESTS[path]
+            assert state["phase"] == "post" and len(state["cycle_verified"]) == state["total_slices"]
+            path.write_text(rewritten)
+            fired.append(True)
+        return result
+
+    monkeypatch.setattr(owner, name, parsed)
+    try:
+        pins, complete = snapshot.current([])
+    except OSError as exc:
+        assert "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE" in str(exc)
+    else:
+        fresh, fresh_complete = scan.current_retention_pins(home, (), [], now=NOW)
+        assert complete and fresh_complete and pins.protects(target, []) == fresh.protects(target, []), \
+            "pre-parse post progress was reused after a same-tick rewrite"
+    assert fired
+
+
+# LLM: 262144B正式记忆在同一current第四次摘要读取前被真实追加（不冻结stat，只固定墙钟保持热态）；
+#   实际os.read字节不得超过每源1MiB且记账不少于实读，增长组拒绝发布，无增长组照常发布。
+# 函数用途: 回归R6-PIN-02，小文件摘要的增长探测读取受剩余预算封顶并按实读记账。
+@pytest.mark.parametrize("growth", [0, 32 * 1024, 64 * 1024])
+def test_r7_small_source_growth_probe_never_exceeds_digest_budget(tmp_path, monkeypatch, growth):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    home, _, _ = runtime(tmp_path)
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "fact", attributes={"note": ""})
+    row = json.loads(memory.path.read_text())
+    row["attributes"]["note"] = "n" * (262144 - len(json.dumps(row, separators=(",", ":")).encode()) - 1)
+    raw = (json.dumps(row, separators=(",", ":")) + "\n").encode()
+    assert len(raw) == 262144
+    memory.path.write_bytes(raw)
+    initial = memory.path.stat()
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: initial.st_ctime_ns)
+    original_read, original_fstat = os.read, os.fstat
+    counted, fired = [0], []
+
+    def read(fd, size):
+        info = original_fstat(fd)
+        ours = (info.st_dev, info.st_ino) == (initial.st_dev, initial.st_ino)
+        if ours and growth and not fired and counted[0] == 3 * len(raw) and os.lseek(fd, 0, os.SEEK_CUR) == 0:
+            with memory.path.open("ab") as writer:
+                writer.write(b" " * growth)
+            fired.append(True)
+        data = original_read(fd, size)
+        if ours:
+            counted[0] += len(data)
+        return data
+
+    monkeypatch.setattr(os, "read", read)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    if growth:
+        with pytest.raises(OSError):
+            snapshot.current([])
+    else:
+        assert snapshot.current([])[1]
+    assert bool(fired) is bool(growth)
+    assert counted[0] == 4 * len(raw)
+    assert counted[0] <= snapshot.contents["digest_bytes"][memory.path] <= 1_048_576

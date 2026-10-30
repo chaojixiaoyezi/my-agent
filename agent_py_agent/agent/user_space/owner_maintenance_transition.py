@@ -93,7 +93,8 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
                "local_store_events_maintenance": local_events, "derived_records_pruned": derived_prune,
                "runtime_cleanup": runtime_cleanup,
                "storage_maintenance": run_owner_storage_maintenance_slice(
-                   home, json.loads(before) if before else {}, retention, now=now, coordinator=True)}
+                   home, json.loads(before) if before else {}, retention, now=now, coordinator=True,
+                   commit_transition=commit)}
 
     # LLM: 外层commit已持原state锁且完成字节CAS；仍写唯一原文件，不制造已确认物理退出或新调度事实。
     # 函数用途: 用实际执行结果提交本轮原维护状态。
