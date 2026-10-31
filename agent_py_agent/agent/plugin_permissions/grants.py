@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from ..path_access_policy import PathAccessPolicy
 from ..plugin_activation_record import PluginActivation
 from .paths import permission_paths
 
@@ -28,18 +29,18 @@ class PermissionSelection:
     program_roots: tuple[PermissionPath, ...] = ()
 
 
-# LLM: 与原计划绑定，不由模型提供执行身份；确认前只读取静态事实。
+# LLM: 与原计划绑定，范围上界只接收宿主策略；默认 None 保留旧纯函数调用，生产启用必须注入当前上界。
 # 函数用途: 将明确结构化权限转换为可确认的有限路径，不运行插件。
-def select_permissions(value: object, forbidden_roots=()) -> PermissionSelection:
+def select_permissions(value: object, forbidden_roots=(), *, scope_ceiling: PathAccessPolicy | None = None) -> PermissionSelection:
     if not isinstance(value, dict) or not set(value) <= {"read_roots", "write_roots", "network", "program_roots"}:
         raise ValueError("授权字段无效，桌面能力尚未支持")
     network = value.get("network", False)
     if type(network) is not bool:
         raise ValueError("网络授权必须是布尔值")
     return PermissionSelection(
-        permission_paths(value.get("read_roots", []), forbidden_roots),
-        permission_paths(value.get("write_roots", []), forbidden_roots), network,
-        permission_paths(value.get("program_roots", []), forbidden_roots, program=True),
+        permission_paths(value.get("read_roots", []), forbidden_roots, scope_ceiling=scope_ceiling),
+        permission_paths(value.get("write_roots", []), forbidden_roots, scope_ceiling=scope_ceiling, write=True), network,
+        permission_paths(value.get("program_roots", []), forbidden_roots, program=True, scope_ceiling=scope_ceiling),
     )
 
 

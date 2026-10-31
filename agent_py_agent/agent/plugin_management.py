@@ -42,6 +42,7 @@ from .plugin_permissions.confirmation import (
 )
 from .plugin_permissions.display import permission_listing, permission_summary
 from .plugin_permissions.enable import unconfirmed_reenable_observation
+from .plugin_permissions.paths import host_exclusive_paths
 from .plugin_removal import PLUGIN_REMOVE_TOOL
 from .plugin_remove_tool import PluginRemoveTool
 from .plugin_runtime import plugin_tool_name
@@ -121,9 +122,10 @@ class PluginManagementContext:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     # 唯一宿主部署配置给出的确认期限；不读 owner workspace 局部配置。
     approval_timeout_seconds: int = 1800
+    host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
-# LLM: 冷热共用原权限；未绑定的根Home仅按可信owner补齐，管理员仍须显式标记及完整local/main。
+# LLM: 冷热共用原权限；宿主独占来源只从可信布局及原配置 schema 投影，管理员仍须显式标记及完整 local/main。
 # 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
@@ -180,31 +182,40 @@ def plugin_management_context(
                                    legacy_sandbox_default=bool(getattr(config, "plugin_legacy_sandbox_default", True)),
                                    events_owner_allowed=is_complete_local_admin_owner(home),
                                    host_credential_env_names=managed_secret_environment_names(config),
-                                   approval_timeout_seconds=approval_timeout_seconds)
+                                   approval_timeout_seconds=approval_timeout_seconds,
+                                   host_exclusive_roots=host_exclusive_paths(home, config))
 
 
-# LLM: 老格式授权和环境来源由同一宿主上下文投影；来源只擦洗进程，不改变 v8/legacy 的权限分流。
+# LLM: 当前路径策略沿确认与授权落盘传递；宿主来源复用原声明，不以整个数据根误伤 owner 的业务目录。
 # 函数用途: 为一次启用组装策略输入，避免长参数散在调用点。
 def _enable_policy(context, arguments) -> PluginEnablePolicy:
-    roots = tuple(path for path in (context.owner.root, context.path_policy.agent_home_root) if path)
+    from .user_space.home_layout import home_paths
+
+    home = home_paths_with_owner(home_paths(context.owner.root), context.owner)
+    roots = tuple(dict.fromkeys((*host_exclusive_paths(home), *context.host_exclusive_roots)))
     return PluginEnablePolicy(process_sandbox=context.process_sandbox,
                               events_enabled=context.plugin_events_enabled,
                               events_owner_allowed=context.events_owner_allowed,
                               legacy_arguments=arguments,
                               legacy_sandbox_default=context.legacy_sandbox_default,
-                              legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names)
+                              legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names,
+                              scope_ceiling=context.path_policy)
 
 
-# LLM: 普通owner强制绑定本人home墙、restricted默认与进程沙箱，不因宽配置提权。
-# 函数用途: 归一化插件管理上下文的owner隔离与沙箱约束。
+# LLM: 普通 owner 的管理员 HTTP 角色不能撤墙；保留已有更窄上界，不把窄授权扩大到整个 owner home。
+# 函数用途: 归一化插件管理上下文的 owner 隔离与沙箱约束。
 def _normalize_management_context(context: PluginManagementContext) -> PluginManagementContext:
-    if context.owner.identity == OwnerIdentity.local_main() or context.is_admin:
+    if context.owner.identity == OwnerIdentity.local_main():
         return context
     policy = context.path_policy
-    workspace = context.workspace if context.workspace.is_relative_to(context.owner.home_dir) else context.owner.workspace_dir
-    return replace(context, is_admin=False, process_sandbox=True, legacy_sandbox_default=True, workspace=workspace,
+    scope = policy.owner_scope_root
+    if scope is not None and not (scope.is_relative_to(context.owner.home_dir) or context.owner.home_dir.is_relative_to(scope)):
+        raise ValueError("当前有效范围与 owner home 没有交集")
+    scope = scope if scope is not None and scope.is_relative_to(context.owner.home_dir) else context.owner.home_dir
+    workspace = context.workspace if context.workspace.is_relative_to(scope) else scope
+    return replace(context, process_sandbox=True, legacy_sandbox_default=True, workspace=workspace,
                    path_policy=PathAccessPolicy.from_values(mode=policy.mode, dangerous_roots=policy.dangerous_roots,
-                       owner_scope_root=context.owner.home_dir, agent_home_root=policy.agent_home_root))
+                       owner_scope_root=scope, agent_home_root=context.owner.root))
 
 
 # LLM: 只使用原安装Store/runtime.db；Host字节入口仍核管理上下文，安装默认停用，启停继续原命令审批。

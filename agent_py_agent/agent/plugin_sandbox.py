@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import platform
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .attempt.sandbox import (
@@ -19,11 +19,13 @@ from .attempt.sandbox import (
     AttemptSandboxSpec,
     SandboxReadMode,
     SandboxUnavailableError,
+    _seatbelt_string_literal,
     gateway_bound_ports,
     system_read_roots_for_platform,
 )
 from .gateway_parts.local_client_token import local_client_credential_path
 from .path_access_policy import agent_home_root_for_owner
+from .plugin_permissions.paths import host_exclusive_paths
 from .tooling.sandbox import allowlisted_directory
 
 # 插件数据目录下给沙箱内进程用的临时目录名；TMPDIR 指向它，保证临时文件也落在唯一可写处
@@ -39,6 +41,7 @@ class PluginV8Sandbox:
     network: bool
     hidden_read_root: Path | None
     public_read_roots: tuple[Path, ...] = ()
+    host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
 # LLM: 仅承载宿主核验后的有限读、写、程序根、网络和读模式事实；hide_home 保持 B7 原行为，allowlist 不隐式公开 cwd。
@@ -52,6 +55,7 @@ class PluginRestrictedSandbox:
     network: bool
     hidden_read_root: Path | None
     read_mode: SandboxReadMode = "hide_home"
+    host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
 PluginSandboxPolicy = PluginV8Sandbox | PluginRestrictedSandbox
@@ -66,16 +70,16 @@ class PluginInterpreterPaths:
     realpath: Path | None = None
 
 
-# LLM: None 仅表示旧版宽读；v8 与显式受限策略均汇入同一 builder，隐藏根、有限根和网络事实不从包路径猜测。
+# LLM: None 仅表示旧版宽读；所有模式都从可信 owner 布局屏蔽宿主配置，不能因广范围工作视图公开来源。
 # 函数用途: 为插件进程生成统一 AttemptSandboxSpec，保留旧版宽读兼容分支。
 def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
                         sandbox_policy: PluginSandboxPolicy | None = None) -> AttemptSandboxSpec:
-    credential = local_client_credential_path(agent_home_root_for_owner(owner_home) or owner_home)
+    hidden = _plugin_host_hidden_paths(owner_home)
     if sandbox_policy is None:
         return AttemptSandboxSpec(
             attempt_view=cwd, staging_root=data_dir, shared_workspace=owner_home, owner_home=owner_home,
             extra_write_roots=(data_dir,), implicit_attempt_write_roots=False, read_only_root=True,
-            hidden_paths=(credential, credential.parent),
+            hidden_paths=hidden,
         )
     if isinstance(sandbox_policy, PluginV8Sandbox):
         sandbox_policy = PluginRestrictedSandbox(
@@ -85,13 +89,14 @@ def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
             network=sandbox_policy.network,
             hidden_read_root=sandbox_policy.hidden_read_root,
             read_mode="hide_home",
+            host_exclusive_roots=sandbox_policy.host_exclusive_roots,
         )
     return plugin_restricted_sandbox_spec(
         cwd=cwd, data_dir=data_dir, owner_home=owner_home, policy=sandbox_policy
     )
 
 
-# LLM: 这是候选预检、插件业务连接与面板连接共同使用的受限规格入口；根须已由宿主权限层核验且必须仍存在。
+# LLM: 候选/业务/面板共用可信规范根；HOME 与数据根分离时两处均隐藏，宿主独占来源不能被业务放行覆盖。
 #   目录根只开放该目录；文件型 execute_root 不带父目录；cwd 根覆盖判定与 Attempt.run 共用同一函数。
 # 函数用途: 将有限 R/W/E 根、网络开关和隐藏根投影为跨平台 AttemptSandboxSpec。
 def plugin_restricted_sandbox_spec(
@@ -114,24 +119,44 @@ def plugin_restricted_sandbox_spec(
         if policy.read_mode == "allowlist"
         else ()
     )
-    if hidden_root is not None and any(
-        hidden_root.is_relative_to(Path(root).resolve(strict=True))
-        for root in (*system_roots, *public_roots, *write_roots)
+    private_roots = _plugin_private_roots(owner_home, hidden_root) if policy.read_mode == "hide_home" else ()
+    if any(
+        hidden.is_relative_to(Path(root).resolve(strict=True))
+        for hidden in private_roots for root in (*system_roots, *public_roots, *write_roots)
     ):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_ROOT_COVERS_HIDDEN_ROOT")
     if policy.read_mode == "allowlist" and not allowlisted_directory(
         cwd, (*system_roots, *public_roots, *write_roots)
     ):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
-    credential = local_client_credential_path(agent_home_root_for_owner(owner_home) or owner_home)
+    hidden_paths = tuple(dict.fromkeys((*_plugin_host_hidden_paths(owner_home), *policy.host_exclusive_roots)))
     return AttemptSandboxSpec(
         attempt_view=cwd, staging_root=data_dir, shared_workspace=cwd, owner_home=cwd,
         extra_write_roots=write_roots, implicit_attempt_write_roots=False, read_only_root=True,
-        hidden_paths=(credential, credential.parent), network_access=policy.network,
-        private_read_roots=(hidden_root,) if policy.read_mode == "hide_home" else (),
+        hidden_paths=hidden_paths, network_access=policy.network,
+        private_read_roots=private_roots,
         public_read_roots=public_roots, read_mode=policy.read_mode, system_read_roots=system_roots,
         deny_gateway_ports=gateway_bound_ports(),
     )
+
+
+# LLM: 只投影可信 owner 布局，不从 HOME 或包声明猜数据根，也不创建目录或读取凭据。
+# 函数用途: 给所有插件模式返回统一的宿主独占隐藏路径。
+def _plugin_host_hidden_paths(owner_home: Path) -> tuple[Path, ...]:
+    from .user_space.home_layout import home_paths
+
+    root = agent_home_root_for_owner(owner_home)
+    credential = local_client_credential_path(root or owner_home)
+    sources = host_exclusive_paths(home_paths(root)) if root is not None else ()
+    return tuple(dict.fromkeys((*sources, Path(owner_home) / "config", credential, credential.parent)))
+
+
+# LLM: 可重新放行的隐私底图与最后绝对隐藏的来源分开；已有祖先覆盖时不重复挂载后代。
+# 函数用途: 合并系统 HOME 与可信数据根，避免 HOME/MY_AGENT_HOME 分离漏保护。
+def _plugin_private_roots(owner_home: Path, hidden_home: Path | None) -> tuple[Path, ...]:
+    root = agent_home_root_for_owner(owner_home)
+    candidates = tuple(dict.fromkeys(path for path in (hidden_home, root) if path is not None))
+    return tuple(path for path in candidates if not any(other != path and path.is_relative_to(other) for other in candidates))
 
 
 # LLM: 从 owner 布局、Gateway 进程和固定解释器事实推出唯一 v8 沙箱白名单；任何根或前缀不完整都返回 sandbox_unavailable。
@@ -270,11 +295,30 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
-# LLM: 规格由调用方用 plugin_sandbox_spec 从宿主事实构造后传入（唯一 spec 工厂，避免这里再长一套参数）；
-#   构造 AttemptExecutionSandbox 时做平台就绪自检，不就绪抛 SandboxUnavailableError；只构造参数，不启动进程。
+# LLM: 规格仍只由统一工厂构造；宿主来源最后覆盖业务放行。Linux 无法精确隐藏单文件时失败关闭，不扩大到父目录。
 # 函数用途: 把插件启动命令按给定沙箱规格包进平台沙箱，返回新的完整 argv。
 def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str]:
-    return AttemptExecutionSandbox(spec).build_argv(argv)
+    system = platform.system()
+    directories = tuple(Path(path).resolve() for path in spec.hidden_paths if Path(path).is_dir())
+    if system == "Linux" and any(
+        Path(path).is_file() and not any(Path(path).resolve().is_relative_to(root) for root in directories)
+        for path in spec.hidden_paths
+    ):
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE")
+    command = AttemptExecutionSandbox(spec).build_argv(argv)
+    if system == "Linux":
+        # 公共 hide_home 编译器会重新挂回业务根；宿主独占目录必须在这些挂载之后再次覆盖。
+        overlays = [value for root in dict.fromkeys(directories)
+                    for value in ("--tmpfs", str(root), "--remount-ro", str(root))]
+        position = command.index("--chdir")
+        command[position:position] = overlays
+    elif system == "Darwin":
+        index = command.index("-p") + 1
+        command[index] += "".join(
+            f"\n(deny process-exec (subpath {_seatbelt_string_literal(str(Path(path).resolve()))}))"
+            for path in dict.fromkeys(spec.hidden_paths)
+        )
+    return command
 
 
 # LLM: 只读平台自检结论，不启动插件；开关关闭时恒为空串。供启用与显式调用在建运行/起进程之前结构化拒绝。

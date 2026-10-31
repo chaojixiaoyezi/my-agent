@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
+from ..path_access_policy import PathAccessPolicy
 from ..plugin_activation import PluginActivationRequest, prepare_activation, prepare_release
 from ..plugin_deactivation import deactivate_plugin
 from ..plugin_environment_plan import plan_plugin_environment
@@ -26,6 +27,7 @@ class LegacyEnableContext:
     process_sandbox: bool = False
     legacy_sandbox_default: bool = True
     forbidden_roots: tuple = ()
+    scope_ceiling: PathAccessPolicy | None = field(default=None, kw_only=True)
 
 
 # LLM: 兼容与新授权在同一事实源判断；关闭默认不能把 restricted 变回 wide，不根据字段缺失授兼容。
@@ -49,13 +51,13 @@ def authorization_identity(context: LegacyEnableContext) -> HostCommandIdentity:
     return HostCommandIdentity(request.owner_id, request.actor_id, request.channel, request.thread_id, identity)
 
 
-# LLM: 四维原参数均明确接入；宿主控制根不接受授权，JSON 真值不能替代布尔网络开关。
+# LLM: 四维原参数只在当前宿主上界内取交集；确认参数不能撤掉墙或扩大范围，JSON 真值不能替代布尔网络开关。
 # 函数用途: 冻结管理员的有限路径身份和程序内容，原安装及私有配置不推导授权。
 def enable_selection(context: LegacyEnableContext):
     values = context.arguments
     selected = {key: list(values.get(key) or ()) for key in ("read_roots", "write_roots", "program_roots")}
     selected["network"] = values.get("network", False)
-    return select_permissions(selected, context.forbidden_roots)
+    return select_permissions(selected, context.forbidden_roots, scope_ceiling=context.scope_ceiling)
 
 
 # LLM: 撤旧代是同一管理 handler 的明确子提交，使用不同阶段身份避免 release 回执与新 prepare 冲突，不另建执行账。

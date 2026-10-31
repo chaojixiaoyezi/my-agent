@@ -13,6 +13,7 @@ from .capability_verifier_consent import (
     verifier_confirmation_details,
     verifier_consent_sha256,
 )
+from .path_access_policy import PathAccessPolicy
 from .plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
 from .plugin_activation_record import PluginActivation, plugin_catalog_digest
 from .plugin_content_activation import PluginContentActivation
@@ -79,6 +80,7 @@ class PluginEnablePolicy:
     legacy_sandbox_default: bool = True
     legacy_forbidden_roots: tuple = ()
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    scope_ceiling: PathAccessPolicy | None = field(default=None, kw_only=True)
 
 
 # LLM: 管理候选只消费宿主固定安装快照和结构化策略；启用预检与运行时复用 plugin_sandbox_spec，不另建平台规则。
@@ -351,14 +353,15 @@ def _sandbox_problem(tool) -> str:
     return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir, sandbox_policy=v8_sandbox)
 
 
-# LLM: 老格式 restricted 强制走统一底座（不管 process_sandbox 开关），wide/legacy_compat 维持原开关语义。
+# LLM: restricted 启用预检沿同一上界与来源投影，不能在确认后退回未收窄的路径；wide 保持原开关语义。
 # 函数用途: 老格式插件的启用前沙箱检查；restricted 用固定授权投影的策略做同一就绪门检查。
 def _legacy_sandbox_problem(tool) -> str:
     if tool.grant is None:
         return ""
     if tool.grant["mode"] != "restricted":
         return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir)
-    return plugin_sandbox_problem(True, tool.owner.home_dir, sandbox_policy=policy_from_grant(tool.grant))
+    return plugin_sandbox_problem(True, tool.owner.home_dir, sandbox_policy=policy_from_grant(
+        tool.grant, scope_ceiling=tool.context.scope_ceiling, host_exclusive_roots=tool.context.forbidden_roots))
 
 
 # LLM: 组装 LegacyEnableContext 需要 owner/repo/binding 与沙箱档；收成一份冻结线束避免长参数接口。
@@ -371,12 +374,13 @@ class _LegacyWiring:
     process_sandbox: bool
 
 
-# LLM: 上下文只由管理宿主注入的冻结输入组装；owner/repo/binding 与工具构造参数同源，不重复传参。
+# LLM: 上下文和范围上界只由管理宿主注入；确认字段不能替代或丢弃当前 owner 的有效范围。
 # 函数用途: 把 policy 里的老格式授权输入组装成 LegacyEnableContext。
 def _legacy_context(wiring: _LegacyWiring, policy: PluginEnablePolicy) -> LegacyEnableContext:
     return LegacyEnableContext(wiring.owner, wiring.repository, wiring.binding,
                                dict(policy.legacy_arguments or {}), wiring.process_sandbox,
-                               policy.legacy_sandbox_default, tuple(policy.legacy_forbidden_roots))
+                               policy.legacy_sandbox_default, tuple(policy.legacy_forbidden_roots),
+                               scope_ceiling=policy.scope_ceiling)
 
 
 # LLM: 撤旧校验需要冻结的授权上下文与预测 target；收成一份事实避免长参数接口。
