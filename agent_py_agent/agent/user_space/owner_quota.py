@@ -255,6 +255,7 @@ class OwnerQuotaAdmission:
         self._ledger = None
         self._invalidated = False
         self._pending = None
+        self._snapshot = None
 
     # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
     # 函数用途: 计算本批增长并在写入前持久预留。
@@ -289,6 +290,8 @@ class OwnerQuotaAdmission:
                 raise OwnerQuotaUnavailable('hardlinked target growth requires inode replacement')
         root = self._enforcer.owner_root
         ledger = _read_quota_ledger(root)
+        if self._snapshot is not None:
+            self._resolve_snapshot(ledger)
         # 干净基线已显示超过128项时有界快照必然读不完，直接走基线核验，不再白做一次全新核对。
         complete = False
         snapshot_invalidated = False
@@ -337,33 +340,37 @@ class OwnerQuotaAdmission:
         )
         if projection.projected_bytes > projection.max_bytes and projection.projected_bytes > used:
             raise OwnerQuotaExceeded(projection)
+        rebased = None
         if complete:
-            self._invalidated = False
-            self._before_children.clear()
             ledger.update(used_bytes=total, inode_count=count, dirty_since=None)
             # 所有正规写者都持同一owner锁；拿到锁时旧预留只可能是退出未确认的遗留。
             ledger['reservations'] = {}
-            # 全新快照已计入全部落盘结果，待确认的上阶段结算随前像一起以当前大小重定基准。
-            self._pending = None
-            self._before = {path: _logical_file_size(path) for path in self._before}
-            self._before_inodes = {path: _billed_file_inode(root, path) for path in self._before}
+            # 全新快照已计入全部落盘结果，但上阶段前像、待确认结算与失效只在快照确已发布后才随之以当前大小重定基准：
+            #   写入报错时按读回修订判定，替换前失败仍按旧前像结算，替换后才报错不再叠加同一差额。
+            rebased = ({path: _logical_file_size(path) for path in self._before},
+                       {path: _billed_file_inode(root, path) for path in self._before}, {})
             ledger['reconcile_cursor'] = _quota_baseline_cursor(root, ledger, snapshot)
         elif not authoritative:
             ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
         self._authoritative_baseline = complete or authoritative
+        children = self._before_children if rebased is None else rebased[2]
         for path in relevant:
             parts = path.relative_to(root).parts
             for depth in range(1, len(parts) + 1):
                 child_parts = parts[:depth]
                 key = ('/'.join(child_parts[:-1]), child_parts[-1])
-                if key not in self._before_children:
+                if key not in children:
                     try:
                         info = _quota_sorted_stat(root, child_parts[:-1], child_parts[-1])
                     except FileNotFoundError:
                         before = None
                     else:
                         before = _quota_child_row(child_parts[:-1], child_parts[-1], info)
-                    self._before_children[key] = (before, depth < len(parts))
+                    children[key] = (before, depth < len(parts))
+        if rebased is not None:
+            # 快照未发布时仍按旧前像结算：新路径的目录项前像照常补入，已有的保持本准入开始时的值。
+            for key, row in children.items():
+                self._before_children.setdefault(key, row)
         for path, size in current_sizes.items():
             self._before.setdefault(path, size)
             self._before_inodes.setdefault(path, _billed_file_inode(root, path))
@@ -376,8 +383,27 @@ class OwnerQuotaAdmission:
         cursor = ledger.get('reconcile_cursor')
         if isinstance(cursor, dict) and cursor.get('ledger_revision') == ledger['revision'] - 1:
             cursor['ledger_revision'] = ledger['revision']
+        if rebased is not None:
+            self._snapshot = (ledger['revision'], rebased)
         self._ledger = (ledger, _write_quota_ledger(root, ledger))
+        if rebased is not None:
+            self._resolve_snapshot(ledger)
         return projection
+
+    # LLM: 锁内只有本准入写账本，快照写入报错后修订只会由这次写入推进：读回修订等于快照修订即已发布，前像、待确认结算与
+    #   失效随快照重定基准；仍是快照前修订即未发布，保留旧前像照常结算；其余无法归属，按观察失效置脏交后台对账。
+    # 函数用途: 按锁内读回的账本判定未确认的完整快照是否已发布，并据此决定是否消费上阶段前像。
+    def _resolve_snapshot(self, ledger):
+        revision, (sizes, inodes, children) = self._snapshot
+        self._snapshot = None
+        if ledger['revision'] == revision:
+            self._before.update(sizes)
+            self._before_inodes.update(inodes)
+            self._before_children = children
+            self._pending = None
+            self._invalidated = False
+        elif ledger['revision'] != revision - 1:
+            self._invalidated = True
 
     # LLM: 即使业务抛异常也核实际大小；读回失败保留预留和dirty，不能伪造abort成功。
     #   结算写入报错不证明未替换：保留待确认修订与后像，下次结算锁内读回判定，已发布只补写确认、不再叠加同一差额。
@@ -389,16 +415,42 @@ class OwnerQuotaAdmission:
         # 整个准入持同一owner锁；账本文件身份未变即是本准入刚写的那份，免去一次大账本读取与解析。
         cached, self._ledger = self._ledger, None
         published = False
-        if self._pending is not None:
-            # 锁内只有本准入写账本，待确认期间修订只会由这次结算推进：读回仍是结算前修订即未发布，照常重算；否则已发布或无法归属，不再叠加。
-            ledger = _read_quota_ledger(root)
-            revision, after, after_inodes = self._pending
-            published = ledger['revision'] != revision - 1
-            # 修订对不上，或前像路径在待确认后又有变化，差额无法精确归属：按观察失效置脏，交后台对账重算。
-            if published and (ledger['revision'] != revision
-                              or after != {path: _logical_file_size(path) for path in self._before}
-                              or after_inodes != {path: _billed_file_inode(root, path) for path in self._before}):
-                self._invalidated = True
+        if self._snapshot is not None or self._pending is not None:
+            try:
+                ledger = _read_quota_ledger(root)
+            except BaseException:
+                # 读回失败无法判定是否已发布：待确认路径之后又有变化时，盘上可能是已失准的干净后像，以本次结算后像置脏与失效落盘，
+                #   不再结算差额；路径未变时盘上要么是准确后像、要么仍带本准入预留，快照未确认时同理，都不会放宽增长。
+                if self._pending is not None:
+                    _, after, after_inodes, fallback = self._pending
+                    if ({**self._before, **after} != {path: _logical_file_size(path) for path in self._before}
+                            or {**self._before_inodes, **after_inodes}
+                            != {path: _billed_file_inode(root, path) for path in self._before}):
+                        fallback['dirty_since'] = fallback.get('dirty_since') or time.time()
+                        if isinstance(fallback.get('reconcile_cursor'), dict):
+                            _drop_quota_metadata(fallback['reconcile_cursor'], invalidated=True)
+                        else:
+                            fallback['reconcile_cursor'] = {'complete': False, 'metadata_complete': False,
+                                                            'metadata_invalidated': True}
+                        try:
+                            _write_quota_ledger(root, fallback)
+                        except BaseException:
+                            _write_quota_ledger(root, fallback)
+                raise
+            # 先判定未确认的完整快照：已发布则上阶段待确认结算已被快照吸收，不再按同一修订误判。
+            if self._snapshot is not None:
+                self._resolve_snapshot(ledger)
+            if self._pending is not None:
+                # 锁内只有本准入写账本，待确认期间修订只会由这次结算推进：读回仍是结算前修订即未发布，照常重算；否则已发布或无法归属，不再叠加。
+                revision, after, after_inodes, _ = self._pending
+                published = ledger['revision'] != revision - 1
+                # 修订对不上，或前像路径在待确认后又有变化（待确认路径对照其后像，之后才加入的路径对照其前像），
+                #   差额无法精确归属：按观察失效置脏，交后台对账重算。
+                if published and (ledger['revision'] != revision
+                                  or {**self._before, **after} != {path: _logical_file_size(path) for path in self._before}
+                                  or {**self._before_inodes, **after_inodes}
+                                  != {path: _billed_file_inode(root, path) for path in self._before}):
+                    self._invalidated = True
         elif cached is not None and cached[1] is not None and _quota_ledger_identity(root) == cached[1]:
             ledger = cached[0]
         else:
@@ -410,13 +462,20 @@ class OwnerQuotaAdmission:
             else:
                 ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
         if not self._before or published:
-            # 已发布的后像补写一次即确认；补写再报错仍保留待确认状态与前像，由外层退出重做同一判定。
-            _write_quota_ledger(root, ledger)
-            self._pending = None
-            self._invalidated = False
-            self._before.clear()
-            self._before_inodes.clear()
-            self._before_children.clear()
+            # 已发布的后像补写一次即确认；首次补写报错（含替换前失败）就在本次退出重发同一份确认，dirty/失效照带、不再叠加差额，
+            #   最后一次退出不依赖以后的结算；重发再报错仍保留待确认状态与前像，由外层退出重做同一判定。
+            confirmed = False
+            try:
+                _write_quota_ledger(root, ledger)
+                confirmed = True
+            finally:
+                if not confirmed:
+                    _write_quota_ledger(root, ledger)
+                self._pending = None
+                self._invalidated = False
+                self._before.clear()
+                self._before_inodes.clear()
+                self._before_children.clear()
             return
         self._pending = None
         invalidated_ledger = deepcopy(ledger) if self._invalidated else None
@@ -446,7 +505,7 @@ class OwnerQuotaAdmission:
                         for path in self._before}, self._before_children, root_vouched=root_vouched):
                     ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
                 cursor['ledger_revision'] = ledger['revision']
-            self._pending = (ledger['revision'], after, after_inodes)
+            self._pending = (ledger['revision'], after, after_inodes, ledger)
             _write_quota_ledger(root, ledger)
             self._pending = None
             self._invalidated = False
@@ -1755,6 +1814,9 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
     root = Path(owner_root).expanduser().resolve(strict=False)
     with _locked_quota_scan_cache(blocking=blocking), _locked_owner_quota(root / _QUOTA_LOCK_BASENAME, blocking=blocking):
         ledger = _read_quota_ledger(root)
+        # 本片对账本只整键替换顶层字段、不原地改嵌套值：浅拷贝即锁内可靠前像（原预留、计数与游标），
+        #   供最终checkpoint失败且恢复读也失败时保守落盘，不必每片深拷贝整张目录表。
+        preimage = dict(ledger)
         key = (os.getpid(), str(root))
         scan = _QUOTA_SCANS.get(key)
         previous = ledger.get('reconcile_cursor')
@@ -1914,13 +1976,20 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             scan['iterator'].close()
             _QUOTA_SCANS.pop(key, None)
             if not ledger_written and (scan['state'].get('metadata_invalidated') or scan.get('dirty')):
-                fallback = _read_quota_ledger(root)
+                # checkpoint报错不证明未替换：先读回盘上实际账本标脏；读回也失败时回退锁内前像（保留原预留），失效不随异常丢失。
+                try:
+                    fallback = _read_quota_ledger(root)
+                except BaseException:
+                    fallback = preimage
                 fallback['dirty_since'] = fallback.get('dirty_since') or time.time()
                 if isinstance(fallback.get('reconcile_cursor'), dict):
                     _drop_quota_metadata(fallback['reconcile_cursor'], invalidated=True)
                 else:
                     fallback['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
-                _write_quota_ledger(root, fallback)
+                try:
+                    _write_quota_ledger(root, fallback)
+                except BaseException:
+                    _write_quota_ledger(root, fallback)
             raise
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
                 'settled_entries': settled, 'replay_allowance': replay_allowance,
