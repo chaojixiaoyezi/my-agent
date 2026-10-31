@@ -382,10 +382,15 @@ def _policy_has_due_work(payload, now):
     return payload.get("enabled", True) is True and type(due) in (int, float) and math.isfinite(due) and due <= now
 
 
-# LLM: 仅metadata预筛原v2策略与原maintenance状态；真正执行仍由原claim/逐写原T及固定policy fingerprint裁决。
+# LLM: 仅metadata预筛原v2策略与原maintenance状态（含已提交partial及有限配额账本待续作事实）；真正执行仍由原claim/逐写原T及固定policy fingerprint裁决。
 # 函数用途: 判断一个原owner维护来源是否到期。
 def _maintenance_has_due_work(payload, now):
     from ..memory_store.retention_models import MemoryRetentionPolicy
     from .multiprocess_background_sources import maintenance_due
 
-    return maintenance_due(payload["state"], MemoryRetentionPolicy.from_payload(payload["policy"]), now)
+    return maintenance_due(
+        payload["state"],
+        MemoryRetentionPolicy.from_payload(payload["policy"]),
+        now,
+        quota_pending=bool(payload.get("quota_pending")),
+    )

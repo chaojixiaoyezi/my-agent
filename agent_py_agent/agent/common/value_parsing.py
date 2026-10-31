@@ -136,7 +136,9 @@ def _line_item(line: str, *, strip_bullets: bool) -> str:
 
 
 def _int_value(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
     try:
         return int(value) if value is not None else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default

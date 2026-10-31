@@ -38,7 +38,7 @@ _QUOTA_STEADY_MAX_MS = 10
 # 配额账缺失、脏或一轮未走完时的追赶额度：每拍至少处理这么多目录项，大owner在游标存活期内走完一轮。
 _QUOTA_CATCH_UP_MAX_ENTRIES = 1024
 # 配额追赶期每拍的扫描时间额度下限（毫秒）。
-_QUOTA_CATCH_UP_MAX_MS = 40
+_QUOTA_CATCH_UP_MAX_MS = 100
 
 
 # LLM: 只登记本owner使用<数据扩展名>.lock协议的私有目录；不递归、不包含local_users/operations或逻辑锁目录。

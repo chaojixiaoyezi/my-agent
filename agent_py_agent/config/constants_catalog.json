@@ -8918,7 +8918,7 @@
     {
       "name": "_QUOTA_CATCH_UP_MAX_MS",
       "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
-      "value": 40,
+      "value": 100,
       "unit": "毫秒",
       "category": "上限预算",
       "description": "配额追赶期每拍的扫描时间额度下限（毫秒）。"
@@ -9046,10 +9046,10 @@
     {
       "name": "_QUOTA_SCAN_CURSOR_TTL_SECONDS",
       "file": "agent_py_agent/agent/user_space/owner_quota.py",
-      "value": 86400,
+      "value": 172800,
       "unit": "秒",
       "category": "其它",
-      "description": "持久配额续扫游标允许恢复的最长存活秒数；与默认每日维护周期一致，大owner对账跨小时仍可续扫。"
+      "description": "持久配额续扫游标允许恢复的最长闲置秒数；放宽至两倍日维护周期，避免稍迟的日调度拍次误判未完成游标过期。"
     },
     {
       "name": "_QUOTA_SORT_BATCH_ENTRIES",

@@ -1615,4 +1615,128 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
             skill_refs=[], source_request_id='request:1', now=901))
         assert reused is False and created['name'] == 'job-1'
         assert _r7_ledger(owner)['dirty_since'] is None
-        assert quota._parse_quota_disk_mb('1') == 1 and quota._parse_quota_disk_mb(True) == 0
+        assert (
+            quota._parse_quota_disk_mb('1') == 1
+            and quota._parse_quota_disk_mb(True) == 0
+            and quota._parse_quota_disk_mb(float('inf')) == 0
+        )
+
+
+# LLM: R8-QUOTA-01/02：漂移补扫期间发生真实文件删除竞态或异常时必须保留dirty并拒绝增长；已有大目录漂移补扫的真实scandir迭代必须逐项受单片预算上限约束。
+# 函数用途: 验证漂移补扫异常不发布干净旧账本且已有大目录真实枚举严格遵守切片预算。
+def test_r8_settlement_oserror_keeps_dirty_and_large_dir_rescan_obeys_raw_scandir_budget(tmp_path, monkeypatch):
+    _r7_clear_scans()
+    race_root = tmp_path / 'race_owner'
+    race_root.mkdir()
+    for name, count in (('a', 10), ('z', 200)):
+        sub = race_root / name
+        sub.mkdir()
+        for idx in range(count):
+            (sub / f'{idx:05d}.bin').write_bytes(b'x')
+    assert _r7_finish(race_root)['used_bytes'] == 210
+    partial = quota.reconcile_owner_quota_slice(race_root, max_entries=64, max_ms=5000)
+    assert not partial['complete'] and partial['cursor']['dir_stamps']['a'][7] == 10
+    (race_root / 'a' / 'new-big.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+    victim = race_root / 'a' / '00000.bin'
+    deleted = [False]
+    real_scandir = os.scandir
+
+    # 类用途: 在目标目录项stat前触发一次真实文件删除以复现漂移补扫竞态。
+    class _DeleteBeforeStat:
+        def __init__(self, entry):
+            self.entry = entry
+
+        def __getattr__(self, attr):
+            return getattr(self.entry, attr)
+
+        def stat(self, **kwargs):
+            if self.entry.name == victim.name and not deleted[0]:
+                victim.unlink()
+                deleted[0] = True
+            return self.entry.stat(**kwargs)
+
+    # 类用途: 包装os.scandir迭代器以注入真实删除竞态。
+    class _DeleteRaceScandir:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return _DeleteBeforeStat(next(self.inner))
+
+        def close(self):
+            self.inner.close()
+
+    monkeypatch.setattr(quota, 'os', SimpleNamespace(**{
+        **vars(os), 'scandir': lambda *args, **kwargs: _DeleteRaceScandir(real_scandir(*args, **kwargs))
+    }))
+    _r7_finish(race_root)
+    monkeypatch.setattr(quota, 'os', os)
+    assert deleted[0] is True
+    assert _r7_ledger(race_root)['dirty_since'] is not None
+    with pytest.raises((quota.OwnerQuotaUnavailable, quota.OwnerQuotaExceeded)):
+        with quota.OwnerQuotaEnforcer(race_root, max_bytes=1024 * 1024).reserve(
+            [quota.OwnerQuotaChange(race_root / 'z' / 'managed', 1)]
+        ):
+            (race_root / 'z' / 'managed').write_bytes(b'z')
+    recovered = _r7_finish(race_root)
+    assert recovered['complete'] and recovered['used_bytes'] == 2 * 1024 * 1024 + 209
+    assert _r7_ledger(race_root)['dirty_since'] is None
+
+    _r7_clear_scans()
+    budget_root = tmp_path / 'budget_owner'
+    budget_root.mkdir()
+    for name, count in (('a', 4096), ('z', 600)):
+        sub = budget_root / name
+        sub.mkdir()
+        for idx in range(count):
+            (sub / f'{idx:05d}.bin').write_bytes(b'x')
+    assert _r7_finish(budget_root, max_entries=10000)['used_bytes'] == 4696
+    partial_large = quota.reconcile_owner_quota_slice(budget_root, max_entries=4200, max_ms=5000)
+    assert not partial_large['complete'] and partial_large['cursor']['dir_stamps']['a'][7] == 4096
+    (budget_root / 'a' / 'new.bin').write_bytes(b'y')
+    scandir_count = [0]
+
+    # 类用途: 统计真实os.scandir迭代返回的目录项数。
+    class _ScandirCounter:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.inner.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            item = next(self.inner)
+            scandir_count[0] += 1
+            return item
+
+        def close(self):
+            self.inner.close()
+
+    monkeypatch.setattr(quota, 'os', SimpleNamespace(**{
+        **vars(os), 'scandir': lambda *args, **kwargs: _ScandirCounter(real_scandir(*args, **kwargs))
+    }))
+    for _ in range(40):
+        before = scandir_count[0]
+        report = quota.reconcile_owner_quota_slice(budget_root, max_entries=64, max_ms=5000)
+        assert scandir_count[0] - before <= 1024
+        if report['complete']:
+            break
+    monkeypatch.setattr(quota, 'os', os)
+    assert report['complete'] and report['used_bytes'] == 4697

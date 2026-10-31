@@ -470,3 +470,83 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
         assert observed == {"sql", "lock", "read"}
         with original_connect(store.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM events WHERE event_type='old'").fetchone()[0] == 20005
+
+
+# LLM: R8-MAINT-01：多进程Coordinator发现层必须识别已提交partial与有限配额待续作账本，且稍晚于24小时的日调度不得令活跃配额游标过期重开。
+# 函数用途: 验证生产发现层与transition执行链在日内续作与稍迟日调度下均能收敛配额对账。
+def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monkeypatch):
+    import types
+
+    from agent_py_agent.agent.gateway_parts import (
+        multiprocess_background_discovery as discovery_module,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_discovery import (
+        _maintenance_has_due_work,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_request import (
+        freeze_source,
+        read_source,
+    )
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.user_space import owner_maintenance as m
+    from agent_py_agent.agent.user_space import owner_quota as q
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "isolated-env"))
+    home = ensure_my_agent_home(tmp_path / "host")
+    quota_path = home.owner_home_dir / "quota.json"
+    policy = json.loads(quota_path.read_text())
+    policy["max_disk_mb"] = 64
+    quota_path.write_text(json.dumps(policy))
+    for d in range(500):
+        sub = home.owner_workspace_dir / "tree" / f"d{d:04d}"
+        sub.mkdir(parents=True, exist_ok=True)
+        for f in range(5):
+            (sub / f"f{f}").write_bytes(b"x")
+    clock = [3_000_000_000.0]
+    real_time = q.time
+    monkeypatch.setattr(q, "time", types.SimpleNamespace(time=lambda: clock[0], monotonic=real_time.monotonic))
+
+    def source_payload():
+        ref = freeze_source(
+            home.root, OwnerIdentity.local_main(), home.owner_data_dir / "maintenance.json", "maintenance"
+        )
+        return read_source(home.root, ref)
+
+    config = AgentConfig(
+        my_agent_home=str(home.root),
+        memory_curator_enabled=False,
+        enable_self_learning=False,
+        owner_maintenance_scan_interval_seconds=60,
+        gateway_worker_process_count=1,
+    )
+    discovery = types.SimpleNamespace(
+        control=types.SimpleNamespace(home_root=home.root, config=config),
+        _source_cursors={},
+    )
+    target = types.SimpleNamespace(identity=OwnerIdentity.local_main(), home_dir=home.owner_home_dir)
+    for day in range(3):
+        clock[0] = 3_000_000_000.0 + day * (86400 + 60)
+        assert _maintenance_has_due_work(source_payload(), clock[0]) is True
+        result = m.run_owner_retention_if_due(
+            home,
+            now=clock[0],
+            include_global_indexes=False,
+            commit_transition=lambda operation: operation(),
+        )
+        assert result.ran
+        assert not _maintenance_has_due_work(source_payload(), clock[0] + 60)
+        if day == 0:
+            clock[0] += 60
+            assert _maintenance_has_due_work(source_payload(), clock[0]) is True
+            with monkeypatch.context() as patch:
+                patch.setattr(discovery_module, "time", types.SimpleNamespace(time=lambda: clock[0]))
+                refs = [
+                    ref
+                    for ref in discovery_module.CoordinatorBackgroundRequests._owner_sources(discovery, target)
+                    if ref["kind"] == "maintenance"
+                ]
+            assert len(refs) == 1
+    ledger = json.loads((home.owner_home_dir / ".owner-quota-ledger.json").read_text())
+    assert ledger["reconcile_cursor"]["complete"] is True and ledger["dirty_since"] is None

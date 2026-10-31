@@ -56,19 +56,40 @@ def maintenance_policy(home, max_bytes):
     return policy, hashlib.sha256(raw).hexdigest()
 
 
-# LLM: 原维护state缺失是尚未维护，不是任意损坏的空成功；已有state必须原schema/有限nonnegative时间。
-# 函数用途: 校验原维护状态，并按原typed策略判断是否到期。
-def maintenance_due(state, policy, now):
+# LLM: 原维护state缺失是尚未维护，不是任意损坏的空成功；已有state必须原schema/有限nonnegative时间，
+#   且同时识别已提交的maintenance_partial与有限配额账本待续作状态，使生产C发现层与领域执行层共用同一结构化到期语义。
+# 函数用途: 校验原维护状态，并按原typed策略及未完成片/配额待对账事实判断是否到期。
+def maintenance_due(state, policy, now, *, owner_home=None, quota_pending=False):
+    from ..user_space import owner_quota
+    from ..user_space.home_retention import maintenance_fence
+
     if state:
         if state.get("schema_version") != "owner-maintenance.v1":
             raise ValueError("background_maintenance_state_invalid")
         last = state.get("last_attempt_at")
         if type(last) not in (int, float) or not math.isfinite(last) or last < 0:
             raise ValueError("background_maintenance_state_invalid")
+        partial = state.get("maintenance_partial", False)
+        if type(partial) is not bool:
+            raise ValueError("background_maintenance_state_invalid")
+        storage = state.get("storage_maintenance", {})
+        if type(storage) is not dict:
+            raise ValueError("background_maintenance_state_invalid")
+        maintenance_fence(state)
+        maintenance_fence(storage)
     else:
         last = 0
-    return (policy.maintenance_enabled and policy.maintenance_interval_seconds > 0
-            and (last <= 0 or now - last >= policy.maintenance_interval_seconds))
+        partial = False
+    if not (policy.maintenance_enabled and policy.maintenance_interval_seconds > 0):
+        return False
+    if last <= 0 or now - last >= policy.maintenance_interval_seconds:
+        return True
+    pending = (
+        bool(quota_pending)
+        if owner_home is None
+        else owner_quota.owner_quota_reconcile_pending(owner_home, require_ledger=True)
+    )
+    return (partial or pending) and now > last and owner_quota.time.time() > last
 
 
 # LLM: 复用原严格no-follow普通单链接fd；同一次读取绑定完整字节及mtime，竞态/超预算拒绝，不跟链接或创建来源文件。

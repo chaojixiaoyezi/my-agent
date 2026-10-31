@@ -207,13 +207,15 @@ def read_source(home_root, ref):
         owner = source_owner(ref["owner"])
         canonical_child_source_contract().validate(value, owner_home, ref["source_ref"], _owner_home_result(Path(home_root), owner, owner_home).owner_id)
     if ref["kind"] == "maintenance":
+        from ..user_space.owner_quota import owner_quota_reconcile_pending
         from .multiprocess_background_sources import maintenance_due, maintenance_policy
 
         policy, revision = maintenance_policy(owner_home, _SOURCE_MAX_BYTES)
         if revision != ref["input_revision"]:
             raise BackgroundSourceChanged()
-        maintenance_due(value, policy, 0)
-        return {"state": value, "policy": policy.to_dict()}
+        maintenance_due(value, policy, 0, owner_home=owner_home)
+        return {"state": value, "policy": policy.to_dict(),
+                "quota_pending": owner_quota_reconcile_pending(owner_home, require_ledger=True)}
     _validate_source_payload(ref, value)
     if ref["kind"] == "curator" and curator_input_revision(owner_home) != ref["input_revision"]:
         raise BackgroundSourceChanged()

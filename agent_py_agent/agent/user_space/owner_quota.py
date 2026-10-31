@@ -64,8 +64,8 @@ _QUOTA_SCANS: OrderedDict = OrderedDict()
 _QUOTA_SCANS_LOCK = RLock()
 # 进程内配额续扫缓存最多保留的活跃 owner 扫描器数量。
 _QUOTA_SCAN_CACHE_SIZE = 16
-# 持久配额续扫游标允许恢复的最长存活秒数；与默认每日维护周期一致，大owner对账跨小时仍可续扫。
-_QUOTA_SCAN_CURSOR_TTL_SECONDS = 86400
+# 持久配额续扫游标允许恢复的最长闲置秒数；放宽至两倍日维护周期，避免稍迟的日调度拍次误判未完成游标过期。
+_QUOTA_SCAN_CURSOR_TTL_SECONDS = 172800
 # 配额字典序扫描每批最多保留的排序候选目录项数。
 _QUOTA_SORT_BATCH_ENTRIES = 128
 # 进程内单目录排序候选窗口上限；热缓存一遍枚举即可覆盖，更大目录才回退到多遍有界选择。
@@ -455,13 +455,13 @@ class OwnerQuotaEnforcer:
             yield projection
 
 
-# 函数用途: 按与准入一致的整数口径解析quota.json的max_disk_mb（拒绝布尔值）。
+# 函数用途: 按与准入一致的整数口径解析quota.json的max_disk_mb（拒绝布尔值与溢出）。
 def _parse_quota_disk_mb(raw) -> int:
     if isinstance(raw, bool):
         return 0
     try:
         return max(0, int(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -1532,17 +1532,17 @@ def _settle_quota_pass_drift(root, scan):
     try:
         root_fd = open_directory_beneath(root, (), require_dir_fd=True)
         try:
-            changed = sorted(rel for rel, row in rows.items()
-                             if (not _quota_scan_root_clean(root, scan) if not rel
-                                 else not _quota_stamp_unchanged(root_fd, rel, row)))
+            changed = [(rel, row) for rel, row in sorted(rows.items())
+                       if (not _quota_scan_root_clean(root, scan) if not rel
+                           else not _quota_stamp_unchanged(root_fd, rel, row))]
         finally:
             os.close(root_fd)
         children = {}
         for rel in rows:
             if rel:
                 children.setdefault(rel.rpartition('/')[0], []).append(rel)
-        for rel in changed:
-            if rel not in rows:
+        for rel, expected_row in changed:
+            if rows.get(rel) is not expected_row:
                 continue
             if rel == scan.get('retry_rel'):
                 # 已置脏发布，下一轮从头补正，其余目录不必再重扫。
@@ -1552,6 +1552,7 @@ def _settle_quota_pass_drift(root, scan):
             yield from _rescan_quota_dir(root, rel, rows, children, scan)
             scan['settling_rel'] = None
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        scan['dirty'] = True
         _drop_quota_metadata(state)
         return
     # 补扫的新子树行同样受目录表字节上限约束，超过即整表作废。
@@ -1580,23 +1581,22 @@ def _quota_scan_root_clean(root, scan):
     return scan.get('root_clean', False)
 
 
-# LLM: 目录已不存在或换了身份时由父目录重扫处理。大目录先按名字计数一步核对（与前台同一枚举上限），计费项数不变即采纳
-#   新目录戳、不重扫；行记录超过枚举上限的目录与前台同样留给下一轮扫描。否则先算完本目录新行和新子树，全部成功才一次性替换行并按差额补正总量；中途暂停跨片时只持本目录
-#   一个FD，被关闭或子树中途变化则保持旧行与旧总量，让准入核验与下一轮发现。
+# LLM: 目录已不存在或换了身份时由父目录重扫处理；若轮到自身仍未由父目录消解或中途消失/换身份/子树变化，
+#   则标记本轮dirty，不允许把未完成的补扫发布成干净账本。所有变化目录直接走逐项交还切片额度的重扫循环，
+#   不在后台同步执行未计入切片预算的大目录名字快核；全部成功才一次性替换行并按差额补正总量。
 # 函数用途: 分片重扫一个走过后有增删的目录并维护其子目录行。
 def _rescan_quota_dir(root, rel, rows, children, scan):
     row = rows[rel]
     parts = tuple(rel.split('/')) if rel else ()
     try:
-        if (_quota_row_entries(row) > _QUOTA_VERIFY_BUDGET_ENTRIES
-                and _quota_large_dir_matches(root, rel, row) is not False):
-            return
         descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     except (FileNotFoundError, NotADirectoryError):
+        scan['dirty'] = True
         return
     try:
         info = os.fstat(descriptor)
         if [info.st_dev, info.st_ino] != row[:2]:
+            scan['dirty'] = True
             return
         fresh = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, 0, 0, 0, 0, 0, 0]
         present = {}
@@ -1624,6 +1624,7 @@ def _rescan_quota_dir(root, rel, rows, children, scan):
         if child not in rows or rows[child][:2] != identity:
             subtree = yield from _scan_new_quota_subtree(root, child)
             if subtree is None:
+                scan['dirty'] = True
                 return
             added.append(subtree)
     for child in children.get(rel, ()):
