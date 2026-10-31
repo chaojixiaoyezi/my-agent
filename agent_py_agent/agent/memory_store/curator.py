@@ -238,6 +238,15 @@ class _CuratorLifecycleMixin:
 
         if pending != "pre_compact" and foreground_model_active(self.backend):
             return self._result(status="busy", reason=pending or "interval")
+        # 维护只冷归档已冷却终态详情；pending/approved、人格和正式长期记忆均不参与。
+        # archive-first及原quota→candidate顺序由唯一候选仓库负责，失败不得伪装成not_due。
+        try:
+            with gateway_short_transaction("compact_terminal_candidates"):
+                self.candidate_service.compact_terminal_candidates(now=current)
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            raise CuratorInputError("CURATOR_CANDIDATE_ARCHIVE_FAILED") from exc
         if pending:
             return self._run_pending_when_due(state, pending, current)
         if _daily_finalize_due(state, current, self.config.daily_finalize_hour):

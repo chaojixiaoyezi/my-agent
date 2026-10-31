@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from agent_py_agent.agent.retrieval import text_vector_cache as vectors
 from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
@@ -32,6 +33,7 @@ def _cached_target(path):
 _CRASH = '''
 import os, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[2])
 from agent_py_agent.tests.test_memory_text_cache_removal import _cached_target
 from agent_py_agent.tests.test_memory_remove_shared_content import _remove_request
 from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
@@ -56,7 +58,9 @@ raise AssertionError('crash was not injected')
 # LLM: 真实子进程在墓碑持久化后退出；恢复进程关闭embedding，必须只清孤儿hash并保留活跃对照。
 # 函数用途: 验证崩溃重启后的文本向量清理，不依赖已删除正文或当前模型指纹。
 def test_crash_recovery_removes_text_vectors_without_embedder(tmp_path):
-    crashed = subprocess.run([sys.executable, '-c', _CRASH, str(tmp_path)], capture_output=True, text=True, timeout=30)
+    crashed = subprocess.run([sys.executable, '-c', _CRASH, str(tmp_path), str(Path(__file__).resolve().parents[2])],
+                             capture_output=True, text=True, timeout=30,
+                             cwd=Path(__file__).resolve().parents[2])
     assert crashed.returncode == 73, crashed.stdout + crashed.stderr
     agent = _indexed_agent(tmp_path)
     agent.memory._embedder = None
@@ -96,8 +100,8 @@ def test_text_vector_write_failure_is_cleanup_pending(tmp_path, monkeypatch):
     assert agent.memory.path.read_bytes() == formal
 
 
-# LLM: 当前真实embedder指纹，两条活跃事实共享index_text；正常删除链不能在孤儿回收后再删共享键。
-# 函数用途: 验证保留其它活跃同文事实的文本向量。
+# LLM: 同文永久遗忘合同替代旧“保留同文”断言；必须清共享孤儿键，但保留另一条不同正文的所有模型缓存。
+# 函数用途: 验证同文墓碑的缓存清理及不同正文的保留边界（保留旧节点名供定向CI使用）。
 def test_normal_remove_retains_active_same_text_cache(tmp_path):
     agent = _indexed_agent(tmp_path)
     tool = ConfirmedRememberWorkflow(agent)
@@ -109,9 +113,19 @@ def test_normal_remove_retains_active_same_text_cache(tmp_path):
     key = vectors.text_cache_key(fingerprint, vectors.index_text(first.content, first.attributes))
     assert key == vectors.text_cache_key(fingerprint, vectors.index_text(other.content, other.attributes))
     cache = agent.memory._text_vector_cache()
-    cache.put({key: [0.1, 0.2]})
+    [control] = agent.memory.apply_batch([dict(action='add', content='不同正文的活跃对照', kind='fact')])
+    keep = {vectors.text_cache_key(fp, vectors.index_text(control.content, control.attributes))
+            for fp in (fingerprint, 'previous-model')}
+    cache.put({item: [0.1, 0.2] for item in {key, *keep}})
     _remove_request(agent, 'cache-same-delete')
     payload = json.loads(tool.execute(dict(action='remove', entry_id=first.entry_id, origin='user_explicit')).output)
     assert payload['saved'], payload
-    assert [row.entry_id for row in agent.memory.all()] == [other.entry_id]
-    assert key in json.loads((agent.memory.path.parent / 'memory_text_vectors.json').read_text())
+    assert [row.entry_id for row in agent.memory.all()] == [control.entry_id]
+    assert first.entry_id != other.entry_id
+    assert set(json.loads((agent.memory.path.parent / 'memory_text_vectors.json').read_text())) == keep
+    assert set(agent.memory._vector_store().ids()) == {control.entry_id}
+    from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
+    from agent_py_agent.agent.memory_store.operations import memory_content_hash
+
+    tombstones = StorageTombstones(agent.memory.path)
+    assert tombstones.excludes(other.entry_id, memory_content_hash(other.content))

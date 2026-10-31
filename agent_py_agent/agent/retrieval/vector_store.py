@@ -340,16 +340,23 @@ class VectorStore:
     # LLM: C保持原坏库拒绝/不存在不写；锁等待、刷新和裁决Root外，失败不发布删除成功。
     # 函数用途: 删除精确向量并确认原快照落盘，保原身份。
     def remove(self, id: str) -> bool:
+        return id in self.remove_many([id])
+
+    # LLM: 精确ID集合共用原删除裁决；坏库不能当空库，身份失配不阻挡隐私清理，实际有变化才一次落盘。
+    # 函数用途: 批量删除派生向量并返回真实删除ID，避免每条全快照重写。
+    def remove_many(self, ids: Iterable[str]) -> set[str]:
+        wanted = set(ids)
         with self._lock, self._locked_snapshot():
             self._refresh()
             if not self._readable:
                 raise VectorIdentityError("VECTOR_STORE_UNREADABLE")
-            if id not in self._items:
-                return False
-            items = {key: value for key, value in self._items.items() if key != id}
+            removed = wanted.intersection(self._items)
+            if not removed:
+                return set()
+            items = {key: value for key, value in self._items.items() if key not in removed}
             identity = _normalized_identity((self._header or {}).get("identity"))
             self._write_snapshot(items, identity, self._stored_dim())
-            return True
+            return removed
 
     # LLM: 带身份时身份与 query 维度在同一份快照上裁决，失配抛 VectorIdentityError（调用方退回关键词）；不带身份时沿用
     #   跳过长度不符向量的旧行为。锁内只取快照，打分在锁外。只读，不写盘。
