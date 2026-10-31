@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -1262,38 +1263,130 @@ class RuntimeRepository(
 
     # LLM: 后台调度只能读取此结构化投影决定“保留事件但不自动挂载”；最终执行权
     # 仍由 create_attempt 的同源事务闸裁决，不能把本方法当作执行许可。
-    # 函数用途: 查询某任务主代理是否因 unknown 状态必须等待显式人工恢复。
-    def main_agent_recovery_block_for_task(self, task_id: str) -> dict[str, str] | None:
+    # 函数用途: 查询原恢复事实；健康任务保留旧None接口，版本变化即拒绝旧发现结果。
+    def main_agent_recovery_block_for_task(self, task_id: str, *, expected_revision=None) -> dict | None:
+        eligibility = self.recovery_eligibility_for_task(task_id, expected_revision=expected_revision)
+        return None if eligibility["eligible"] else eligibility
+
+    # LLM: 发现与领取共用同连接投影；版本只取原身份/状态/事件引用，不读取notice或reason正文。
+    # 函数用途: 返回任务恢复资格的完整只读映射，不创建执行权。
+    def recovery_eligibility_for_task(self, task_id: str, *, expected_revision=None) -> dict:
         with self._runtime_connection() as conn:
-            row = conn.execute(
-                "SELECT ar.agent_run_id, ar.status AS run_status, "
-                "ar.current_attempt_id, aa.status AS attempt_status "
-                "FROM agent_runs ar "
-                "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
-                "JOIN tasks t ON t.task_id = tr.task_id "
-                "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
-                "WHERE t.task_id = ? AND ar.role = 'main' "
-                "AND ar.parent_agent_run_id = '' "
-                "ORDER BY ar.created_at DESC LIMIT 1",
-                (str(task_id or ""),),
-            ).fetchone()
-        if row is None:
-            return None
-        reason = _main_agent_recovery_reason(
-            str(row["run_status"] or ""),
-            str(row["attempt_status"] or ""),
-        )
-        if not reason:
-            return None
+            return self._recovery_eligibility_conn(conn, task_id, expected_revision=expected_revision)
+
+    # LLM: 与claim原写入共持RuntimeDB短事务，阻止发现后恢复事实换代；锁不跨模型或心跳。
+    # 函数用途: 在领取原租约前复核来源版本，离开窗口即释放数据库事务。
+    @contextmanager
+    def recovery_claim_scope(self, task_id: str, *, expected_revision=None):
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            yield self._recovery_eligibility_conn(conn, task_id, expected_revision=expected_revision)
+
+    # LLM: 只读取准确task树，不能把同owner另一个待交接任务扩散成owner级阻塞。
+    # 函数用途: 在调用方已有连接内计算同一份恢复事实和稳定版本。
+    def _recovery_eligibility_conn(self, conn, task_id, *, expected_revision=None):
+        task_id = str(task_id or "")
+        row = conn.execute(
+            "SELECT ar.agent_run_id, ar.status AS run_status, ar.current_attempt_id, "
+            "aa.status AS attempt_status, t.thread_id, ar.task_run_id "
+            "FROM agent_runs ar JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
+            "JOIN tasks t ON t.task_id=tr.task_id "
+            "LEFT JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id "
+            "WHERE t.task_id=? AND ar.role='main' AND ar.parent_agent_run_id='' "
+            "ORDER BY ar.created_at DESC LIMIT 1", (task_id,),
+        ).fetchone()
+        facts = dict(row) if row is not None else {}
+        events = self._foreground_recovery_events_conn(conn, task_id=task_id)
+        pending = [event for event in events if not event["delivered_event_id"]]
+        reason = _main_agent_recovery_reason(facts.get("run_status", ""), facts.get("attempt_status", ""))
+        if not reason and pending:
+            reason = "foreground_recovery_handoff_pending"
+        source_revision = hashlib.sha256(json.dumps([facts, [
+            (event["event_id"], event["delivered_event_id"]) for event in events
+        ]], sort_keys=True).encode()).hexdigest()
+        if expected_revision is not None and expected_revision != source_revision:
+            reason = "source_revision_changed"
         return {
             "schema_version": "main-agent-recovery-block.v1",
             "reason": reason,
-            "task_id": str(task_id or ""),
-            "agent_run_id": str(row["agent_run_id"] or ""),
-            "attempt_id": str(row["current_attempt_id"] or ""),
-            "run_status": str(row["run_status"] or ""),
-            "attempt_status": str(row["attempt_status"] or ""),
+            "reason_code": reason or "recovery_eligible",
+            "eligible": not bool(reason),
+            "source_revision": source_revision,
+            "next_check_at": None,
+            "handoff_ref": self._foreground_handoff_ref(pending, facts.get("thread_id", "")) if pending else None,
+            "task_id": task_id,
+            "agent_run_id": str(facts.get("agent_run_id") or ""),
+            "attempt_id": str(facts.get("current_attempt_id") or ""),
+            "run_status": str(facts.get("run_status") or ""),
+            "attempt_status": str(facts.get("attempt_status") or ""),
         }
+
+    # LLM: 原恢复事件与交接确认是权威；旧无ref确认显式按同attempt且在恢复之后适配，不能匹配提示正文。
+    # 函数用途: 读取指定任务或执行轮的原恢复事件及准确确认引用。
+    def _foreground_recovery_events_conn(self, conn, *, task_id=None, attempt_ids=()):
+        if task_id is not None:
+            where, values = "tr.task_id=?", [task_id]
+        elif attempt_ids:
+            where, values = "e.attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")", list(attempt_ids)
+        else:
+            return []
+        return conn.execute(
+            "SELECT e.event_id,e.attempt_id,e.agent_run_id,t.thread_id, "
+            "(SELECT d.event_id FROM runtime_events d WHERE d.attempt_id=e.attempt_id "
+            "AND d.event_type='foreground_recovery_notice_delivered' AND d.rowid>e.rowid "
+            "AND (json_extract(d.payload_json,'$.recovery_event_id')=e.event_id "
+            "OR json_type(d.payload_json,'$.handoff_ref') IS NULL) ORDER BY d.rowid DESC LIMIT 1) AS delivered_event_id "
+            "FROM runtime_events e JOIN agent_runs ar ON ar.agent_run_id=e.agent_run_id "
+            "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id "
+            "WHERE e.event_type='attempt_recovered' "
+            "AND json_extract(e.payload_json,'$.operator')='foreground-user-turn' AND " + where + " ORDER BY e.rowid", values,
+        ).fetchall()
+
+    # LLM: ref绑定原事件集合、线程及结构化版本；不含自然语言内容、不签发独立权限。
+    # 函数用途: 为前台接手边界构造可跨Compact传递的恢复交接引用。
+    @staticmethod
+    def _foreground_handoff_ref(events, thread_id):
+        references = [(event["attempt_id"], event["event_id"]) for event in events]
+        return {"schema_version": "foreground-recovery-handoff.v1", "thread_id": thread_id,
+                "attempt_ids": sorted({item[0] for item in references}),
+                "event_ids": [item[1] for item in references],
+                "source_revision": hashlib.sha256(json.dumps(references).encode()).hexdigest()}
+
+    # LLM: 仅原前台已核principal后调用；每个attempt仍须属于准确线程且已有恢复事件。
+    # 函数用途: 从原事件构造交接引用，失败关闭而非用notice补造。
+    def foreground_recovery_handoff_ref(self, thread_id, attempt_ids):
+        with self._runtime_connection() as conn:
+            events = self._foreground_recovery_events_conn(conn, attempt_ids=attempt_ids)
+        if (not events or {event["attempt_id"] for event in events} != set(attempt_ids)
+                or any(event["thread_id"] != thread_id for event in events)):
+            return None
+        return self._foreground_handoff_ref(events, thread_id)
+
+    # LLM: carried参数必须是原事件的精确引用；改写/删除展示文案不改变准入。
+    # 函数用途: 在接续边界复核交接引用，不能以任意attempt列表绕过恢复阻塞。
+    def foreground_recovery_handoff_valid(self, ref, *, thread_id, attempt_ids):
+        if not isinstance(ref, dict) or not set(attempt_ids).issubset(ref.get("attempt_ids", ())):
+            return False
+        return ref == self.foreground_recovery_handoff_ref(thread_id, ref.get("attempt_ids", ()))
+
+    # LLM: 成功交给模型才追加原恢复事件的确认，不改旧操作结论；同一ref重复确认幂等。
+    # 函数用途: 在原事务写回准确交接结果，过期或跨线程引用拒绝落账。
+    def acknowledge_foreground_recovery_handoff(self, ref, *, delivered_by_attempt_id=""):
+        if not isinstance(ref, dict):
+            return False
+        with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            events = self._foreground_recovery_events_conn(conn, attempt_ids=ref.get("attempt_ids", ()))
+            if (not events or any(event["thread_id"] != ref.get("thread_id") for event in events)
+                    or ref != self._foreground_handoff_ref(events, ref.get("thread_id"))):
+                return False
+            for event in events:
+                if not event["delivered_event_id"]:
+                    self._append_event_conn(conn, event_type="foreground_recovery_notice_delivered",
+                        attempt_id=event["attempt_id"], agent_run_id=event["agent_run_id"],
+                        payload={"handoff_ref": ref, "recovery_event_id": event["event_id"],
+                                 "delivered_by_attempt_id": delivered_by_attempt_id})
+        return True
 
     # LLM: RuntimeDB 子代理孤儿恢复在启动前读取本阻塞投影，最终仍以 create_attempt 事务为权威；已知 unknown 不得报告复活或占 runner 槽。
     # Subagent orphan recovery must consult this projection before it

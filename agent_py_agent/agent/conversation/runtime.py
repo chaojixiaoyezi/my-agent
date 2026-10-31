@@ -469,6 +469,7 @@ class BackgroundRunRequest:
     wake_signal: dict[str, Any] | None = None
     conversation_turn_id: str = field(default_factory=lambda: new_id("background-turn"))
     host_session_task_id: str = ""
+    delivery_context: dict[str, str] | None = field(default=None, kw_only=True)
 
 
 
@@ -857,6 +858,11 @@ class BackgroundMainAgentRuntime:
         # 归属只读声明级事实：外发能力此刻是否可用不改变这条路线欠不欠一次真实外送。
         route_ownership = background_route_ownership(self.channels, channel)
         goal_context = _goal_runtime_context(self.agent, self.store, request)
+        from .background_im_progress import background_delivery_context
+
+        delivery_context = background_delivery_context(self.agent, thread, channel=channel, target=target,
+            owner_thread_id=owner_thread.thread_id, task_id=request.task_id, request=request,
+            idempotency_key=background_delivery_idempotency_key(request))
         execution_result = self._run_agent(
             thread,
             request,
@@ -866,14 +872,6 @@ class BackgroundMainAgentRuntime:
         )
         if required_notice(self.agent, request) is not None:
             return deliver_required_notice(self, request, execution_result)
-        delivery_context = DeliveryContext(
-            channel=channel,
-            target=target,
-            mode="proactive",
-            thread_id=owner_thread.thread_id,
-            task_id=request.task_id,
-            idempotency_key=background_delivery_idempotency_key(request),
-        )
         deliver, delivery_reason = _background_delivery_decision(
             self.agent,
             request,
@@ -943,14 +941,11 @@ class BackgroundMainAgentRuntime:
 
         thread = self.store.threads.require(signal.thread_id)
         owner_thread, channel, target = resolve_delivery(self.agent, thread, request, channel, target)
-        delivery_context = DeliveryContext(
-            channel=channel,
-            target=target,
-            mode="proactive",
-            thread_id=owner_thread.thread_id,
-            task_id=signal.root_task_id,
-            idempotency_key=background_delivery_idempotency_key(request),
-        )
+        from .background_im_progress import background_delivery_context
+
+        delivery_context = background_delivery_context(self.agent, thread, channel=channel, target=target,
+            owner_thread_id=owner_thread.thread_id, task_id=signal.root_task_id, request=request,
+            idempotency_key=background_delivery_idempotency_key(request))
         route_supports_transcript = channel_supports_transcript(self.channels, channel)
         ownership = background_route_ownership(self.channels, channel)
         frozen = frozen_owner_delivery(prepared)
@@ -2030,6 +2025,8 @@ def _supports_builtin_proactive(channel: str) -> bool:
 
 # LLM: 只投影宿主领取参数，委派原 SessionTask ref 随生命周期片传递；不从文本推断或复制任务状态。
 # 函数用途: 构造本片后台请求，保持执行线程、来源与稳定会话任务身份。
+# LLM: 冻结宿主入站投递投影的独立副本，后续调用方改字典不能换话题；旧参数缺省None。
+# 函数用途: 规范后台请求及该片的冻结运输字段。
 def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
     current = now(kwargs.get("now"))
     return BackgroundRunRequest(
@@ -2041,6 +2038,7 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
         now=current,
         wake_signal=wake_signal_payload(kwargs.get("wake_signal")),
         host_session_task_id=str(kwargs.get("host_session_task_id") or ""),
+        delivery_context=dict(kwargs['delivery_context']) if kwargs.get('delivery_context') is not None else None,
     )
 
 
@@ -4090,6 +4088,14 @@ class _BackgroundSchedulerTickMixin:
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:
             return
+        from ..user_space.owner_quota import OwnerQuotaUnavailable
+        from .background_recovery import StorageWaitBackoff
+
+        wait = getattr(self, "_scheduler_storage_wait", None)
+        if wait is None:
+            wait = self._scheduler_storage_wait = StorageWaitBackoff()
+        if not wait.ready(now):
+            return
         try:
             agent = getattr(getattr(self, "runtime", None), "agent", None)
             cheap_checks = self._tick_cheap_checks(agent)
@@ -4099,8 +4105,14 @@ class _BackgroundSchedulerTickMixin:
                 limit=PENDING_WAKE_CONSUME_LIMIT_COUNT,
                 cheap_checks=cheap_checks,
             )
+        except OwnerQuotaUnavailable as exc:
+            if wait.failed(now, exc):
+                _HEARTBEAT_LOGGER.warning("owner scheduler storage_wait", extra={"storage_wait": wait.snapshot()})
         except Exception:
             _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)
+        else:
+            if wait.succeeded():
+                _HEARTBEAT_LOGGER.info("owner scheduler storage_resumed", extra={"storage_wait": wait.snapshot()})
 
 
 @dataclass(frozen=True)
@@ -4891,6 +4903,7 @@ def _background_claim_dependencies(
 ) -> background_claim.BackgroundClaimDependencies:
     from .execution_threads import delegated_turn_id
 
+    repository = getattr(getattr(scheduler.runtime.agent, "subagents", None), "runtime_db", None)
     return background_claim.BackgroundClaimDependencies(
         attempt=attempt,
         claims=scheduler.store.claims,
@@ -4902,6 +4915,7 @@ def _background_claim_dependencies(
             scheduler.runtime.agent, scheduler.store, kwargs,
         ),
         recovery_block=scheduler._recovery_guard.block_for_task,
+        recovery_claim_scope=getattr(repository, "recovery_claim_scope", None),
         source_admission=partial(
             _background_wake_source_admission,
             scheduler.store.wakes.pending_one,

@@ -21,7 +21,7 @@ import stat
 import tempfile
 import time
 import uuid
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -46,6 +46,28 @@ STEADY_STATE_EVENTS_MAX_DELETE = 5000
 # LLM: C仅rebuild与prune_events固定叶闭合，其它维护writer仍各守原真实链；事件只删本批实际DB删除的ID。
 # 类用途: 管理全文索引与有界事件维护，保同库事务、恢复账本和JSONL独有记录。
 class LocalStoreMaintenanceMixin:
+
+    # LLM: 原SQL删除/pending先提交，JSONL按字节推进后才清账；原文件换代重启扫描，重启不丢游标或删除责任。
+    # 函数用途: 后台只推进一拍事件维护，不同步重写无界JSONL，也不执行VACUUM。
+    def prune_events_step(self, *, before: float, keep_last: int = 1000, max_delete: int = 256,
+                          max_bytes: int = 256 * 1024):
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("event scan byte budget must be positive")
+        options = (float(before), max(0, int(keep_last)), max(1, int(max_delete)))
+        # 同类step串行，但不反向持JSONL锁等待SQLite；旧append/显式维护仍用原锁。
+        step_lock = (self._coordinator_events_lock() if self.coordinator_io else
+                     locked_json_path(self.events_path.with_name(self.events_path.name + ".prune")))
+        with step_lock:
+            selected, deleted, targets = _event_step_transaction(self, lambda conn: _event_step_prepare(conn, options))
+            progress = _event_jsonl_step(self, targets, max_bytes)
+        with self._connection() as conn:
+            free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+            pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        return {**_event_prune_result(selected, deleted, progress["removed"]),
+                "partial": not progress["complete"], "cursor": progress["cursor"],
+                "scanned_bytes": progress["scanned_bytes"], "expired_rows": {"deleted": len(deleted)},
+                "free_page_reuse": {"available_pages": free, "page_count": pages},
+                "physical_shrink": {"performed": False, "reason_code": "explicit_maintenance_required"}}
 
     # LLM: 满额pending先恢复且不选新批；删除与pending同事务，原锁序及成功后按ID清账合同不变。
     # 函数用途: 裁剪一批旧事件并恢复上次未完成的JSONL清理，预演不写、失败留下准确恢复ID。
@@ -412,13 +434,134 @@ def _discard_event_temp(temporary, primary):
 # LLM: 只读当前事务中的events；时间相等时沿原timeline的seq定序，不以JSONL、显示时间或条数猜删除集合。
 # 函数用途: 选出不在最新保护窗口内、严格过期且至多max_delete条的事件ID。
 def _select_prunable_event_ids(conn, before: float, keep_last: int, max_delete: int) -> set[str]:
-    total = int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-    if total <= keep_last:
-        return set()
     return {row[0] for row in conn.execute(
         "SELECT event_id FROM events WHERE created_at < ? AND seq NOT IN "
         "(SELECT seq FROM events ORDER BY created_at DESC, seq DESC LIMIT ?) "
         "ORDER BY created_at ASC, seq ASC LIMIT ?", (before, keep_last, max_delete))}
+
+
+# LLM: 同一维护事务端口，不另开写者；C已持events锁，普通模式仍按DB→JSONL锁序。
+# 函数用途: 提交一个可恢复事件维护步骤。
+def _event_step_transaction(store, operation):
+    if store.coordinator_io:
+        return store._coordinator_transaction(operation)
+    with store._connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        result = operation(conn)
+        conn.commit()
+        return result
+
+
+# LLM: 有JSONL游标时绝不扩大目标集合；SQL删除与原pending在同一事务，原断点负责下一拍。
+# 函数用途: 仅在没有未完成流式批次时选择新的一批旧事件。
+def _event_step_prepare(conn, options):
+    pending = _read_pending_event_ids(conn)
+    if conn.execute("SELECT 1 FROM metadata WHERE key='events_prune_cursor'").fetchone() or pending:
+        return 0, set(), pending
+    return _prepare_event_prune(conn, options)
+
+
+# LLM: 原文件版本仅用来拒绝换代；原子追加也重启本轮，不把mtime当作执行权或允许删变更后的文件。
+# 函数用途: 捕获JSONL的准确文件代次。
+def _event_file_revision(path):
+    info = path.stat()
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+# LLM: 临时文件只准原events目录中mkstemp的准确basename，nofollow单链接且0600；坏游标不能指向任意路径。
+# 函数用途: 校验并打开原流式维护的暂存文件。
+def _event_step_temp(store, job):
+    name = job.get("temporary", "")
+    if not isinstance(name, str) or re.fullmatch(r"\.events-prune-[a-zA-Z0-9_-]+\.step", name) is None:
+        raise ValueError("invalid event prune temporary")
+    path = store.events_path.parent / name
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+        os.close(descriptor)
+        raise ValueError("invalid event prune temporary shape")
+    return path, descriptor
+
+
+# LLM: 每次只读取max_bytes；未完整行留在原metadata游标，完整过滤后才原子替换。崩溃重试先截回已提交output位置。
+# 函数用途: 分拍复制原JSONL，保持无关/坏行的原始字节，发表后清除准确pending。
+def _event_jsonl_step(store, targets, max_bytes):
+    result = {"removed": 0, "scanned_bytes": 0, "complete": True, "cursor": {}}
+    if not targets or not store.events_path.exists():
+        _event_step_transaction(store, lambda conn: _event_step_save(conn, None, targets))
+        return result
+    with store._connection() as conn:
+        saved = conn.execute("SELECT value FROM metadata WHERE key='events_prune_cursor'").fetchone()
+    job = json.loads(saved[0]) if saved else {}
+    write = store._local_write if store.coordinator_io else lambda operation: operation()
+    with locked_json_path(store.events_path) if not store.coordinator_io else nullcontext():
+        revision = _event_file_revision(store.events_path)
+        if job and (job.get("revision") != revision or job.get("targets") != sorted(targets)):
+            try:
+                temporary, descriptor = write(lambda: _event_step_temp(store, job))
+            except FileNotFoundError:
+                # 原子发表后、游标确认前崩溃：原pending仍在，按新源幂等重扫，不猜发表成功。
+                pass
+            else:
+                os.close(descriptor)
+                write(lambda: _discard_event_temp(temporary, None))
+            job = {}
+        if not job:
+            descriptor, name = write(lambda: tempfile.mkstemp(prefix=".events-prune-", suffix=".step", dir=store.events_path.parent))
+            os.close(descriptor)
+            job = {"revision": revision, "targets": sorted(targets), "temporary": Path(name).name,
+                   "offset": 0, "output_offset": 0, "tail_hex": "", "removed": 0}
+        temporary, descriptor = write(lambda: _event_step_temp(store, job))
+        with os.fdopen(descriptor, "r+b") as retained, store.events_path.open("rb") as source:
+            source.seek(job["offset"])
+            chunk = source.read(max_bytes)
+            job["offset"] += len(chunk)
+            complete = job["offset"] == revision[2]
+            parts = (bytes.fromhex(job["tail_hex"]) + chunk).split(b"\n")
+            tail = parts.pop()
+            if len(tail) > 8 * 1024 * 1024:
+                raise ValueError("event line exceeds bounded maintenance budget")
+            lines = [part + b"\n" for part in parts]
+            if complete and tail:
+                lines.append(tail)
+                tail = b""
+            kept = []
+            for line in lines:
+                if _pruned_event_line(line, set(targets)):
+                    result["removed"] += 1
+                else:
+                    kept.append(line)
+
+            # 读取/解析在原短门外，末写只处理本批已准备字节。
+            def append():
+                retained.truncate(job["output_offset"])
+                retained.seek(job["output_offset"])
+                retained.writelines(kept)
+                retained.flush()
+                os.fsync(retained.fileno())
+
+            write(append)
+            job.update(output_offset=retained.tell(), tail_hex=tail.hex(), removed=job["removed"] + result["removed"])
+        if _event_file_revision(store.events_path) != revision:
+            raise ValueError("event source changed during bounded scan")
+        if complete:
+            _publish_pruned_event_file(store, temporary)
+            write(lambda: _sync_parent_directory(store.events_path))
+        result.update(scanned_bytes=len(chunk), complete=complete,
+                      cursor={"offset": job["offset"], "source_bytes": revision[2]})
+    # 释放原JSONL锁后才申请SQLite写锁；断在此处仍由旧pending/游标幂等恢复。
+    _event_step_transaction(store, lambda conn: _event_step_save(conn, None if complete else job, targets))
+    return result
+
+
+# LLM: 调用方已释放JSONL锁，同类step仍串行；发表后才清准确pending，不清并发新增目标。
+# 函数用途: 在短SQL事务里发布本拍流式位置或完成确认。
+def _event_step_save(conn, job, targets):
+    if job is None:
+        _clear_pending_event_ids(conn, targets)
+        conn.execute("DELETE FROM metadata WHERE key='events_prune_cursor'")
+    else:
+        conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('events_prune_cursor',?)", (json.dumps(job),))
 
 
 # LLM: 调用方已BEGIN IMMEDIATE；每批900参数兼容SQLite变量上限，删除后重查避免触发器忽略的行被误清JSONL。

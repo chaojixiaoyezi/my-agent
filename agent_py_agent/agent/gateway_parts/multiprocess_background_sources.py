@@ -107,3 +107,22 @@ def learning_registry_snapshot(home, max_bytes):
             or tuple(getattr(before, key) for key in fields) != tuple(getattr(after, key) for key in fields)):
         raise ValueError("background_learning_registry_changed")
     return raw, str(after.st_mtime_ns)
+
+
+# LLM: 原RuntimeDB只读投影；任一健康任务仍可使混合观察候选入队，具体执行由claim同事务再次核验。
+# 函数用途: 为C发现与W执行共用恢复资格，全部待接手时只保留原来源。
+def source_recovery_block(home, kind, payload):
+    from ..runtime_db.repository import RuntimeRepository
+
+    if not (Path(home) / "runtime.db").is_file():
+        return None
+    rows = payload.get("observations", ()) if kind == "observation" else [payload]
+    tasks = {str(row.get("root_task_id") or row.get("task_id") or "") for row in rows}
+    repository = RuntimeRepository(str(Path(home) / "runtime.db"), read_only=True)
+    blocked = []
+    for task in tasks:
+        block = repository.main_agent_recovery_block_for_task(task)
+        if block is None:
+            return None
+        blocked.append(block)
+    return blocked[0] if blocked else None

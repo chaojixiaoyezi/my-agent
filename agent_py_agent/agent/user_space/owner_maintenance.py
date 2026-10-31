@@ -242,18 +242,20 @@ def run_owner_retention_if_due(
 
 # LLM: 所有既存owner库共用发现与显式owner引用保护；C逐叶沿原commit，冷库不创建、单库普通错误隔离，执行未知仍原抛。
 # 函数用途: 在原保留门后裁剪全部派生库，单库回执兼容，多库分列真实结果。
-def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_transition=None) -> dict[str, Any]:
+def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_transition=None, cursor=None) -> dict[str, Any]:
     from ..local_storage.records import owner_protected_ref_ids
 
     paths, errors = _local_store_database_paths(Path(home))
     if not paths:
         return {"executed": False, "reason": "error" if errors else "no_local_store", **({"discovery_errors": errors} if errors else {})}
+    selected, position = _maintenance_store_page(paths, home, cursor)
     protected_refs = owner_protected_ref_ids(Path(home), now.timestamp())
-    results = [_prune_derived_store(path, now=now, protected_refs=protected_refs, commit_transition=commit_transition) for path in paths]
+    results = [_prune_derived_store(path, now=now, protected_refs=protected_refs, commit_transition=commit_transition) for path in selected]
     result = results[0] if len(results) == 1 else {
         "executed": any(item["executed"] for item in results),
-        "stores": [{"database": str(path.relative_to(home)), **item} for path, item in zip(paths, results, strict=True)],
+        "stores": [{"database": str(path.relative_to(home)), **item} for path, item in zip(selected, results, strict=True)],
         "deleted_ids": [value for item in results for value in item.get("deleted_ids", [])]}
+    result.update(_maintenance_store_position(selected, home, results, position))
     if errors:
         result = {**result, "discovery_errors": errors, "counts_complete": False}
     return result
@@ -263,15 +265,18 @@ def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_tran
 # 函数用途: 对一个已存在库执行带owner引用保护的派生TTL，普通故障保留可能部分写入事实。
 def _prune_derived_store(db_path: Path, *, now: datetime, protected_refs=None, commit_transition=None) -> dict[str, Any]:
     try:
+        from contextlib import nullcontext
+
+        from ..common.global_write_commit import global_write_commit_scope
         from ..local_storage import LocalStore
 
-        if commit_transition is None:
-            result = LocalStore(db_path).prune_derived_records(now=now, protected_refs=protected_refs)
-        else:
-            from ..common.global_write_commit import global_write_commit_scope
-
-            with global_write_commit_scope(commit_transition):
-                result = LocalStore(db_path, coordinator_io=True).prune_derived_records(now=now, protected_refs=protected_refs)
+        with global_write_commit_scope(commit_transition) if commit_transition is not None else nullcontext():
+            store = LocalStore(db_path, **({"coordinator_io": True} if commit_transition is not None else {}))
+            with store._connection() as conn:
+                large = conn.execute("SELECT 1 FROM records LIMIT 1 OFFSET 256").fetchone() is not None
+                resumable = conn.execute("SELECT 1 FROM metadata WHERE key='derived_scan_cursor'").fetchone() is not None
+            result = store.prune_derived_records(now=now, protected_refs=protected_refs,
+                **({"max_scan": 256, "max_delete": 256} if large or resumable else {}))
         return {"executed": True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
@@ -355,6 +360,9 @@ def _write_maintenance_result(state_path, retention, previous, current, effects)
         storage = effects['storage_maintenance']
         payload['maintenance_partial'] = storage.get('continuation_pending', storage['partial'])
         payload['storage_maintenance'] = {**storage, 'maintenance_epoch': expected[1] + 1}
+    if any(effects.get(key, {}).get('partial') is True for key in
+           ('derived_records_pruned', 'local_store_events_maintenance')):
+        payload['maintenance_partial'] = True
     write_json_file_atomic_unlocked(state_path, payload)
     # 维护状态在配额准入外写入；写完按当前内容核过data与root目录行并采纳新目录戳（锁忙或核验不过即留给准入核验）。
     refresh_owner_quota_host_rows(state_path.parent.parent, ('data', ''))
@@ -525,7 +533,7 @@ def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float, commit_transition
 #   executed=False表示没有完整返回成功，非未写入证明；异常后的副作用未知及不完整计数须单列。
 #   Home当前没有owner_local_store_dir字段，真实默认库由runtime_paths放在workspace/runtime/workspaces/*/local_store。
 # 函数用途: 在原owner后台周期裁剪既有事件库，把执行或跳过事实交给同一maintenance.json。
-def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_transition=None) -> dict[str, Any]:
+def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_transition=None, cursor=None) -> dict[str, Any]:
     try:
         databases, discovery_errors = _local_store_database_paths(home.owner_home_dir, include_event_files=True)
         if not databases:
@@ -533,8 +541,9 @@ def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_t
                 return {"executed": False, "reason": "error", "counts_complete": False,
                         "error_type": discovery_errors[0]["error_type"], "discovery_errors": discovery_errors}
             return {"executed": False, "reason": "no_local_store"}
+        selected, position = _maintenance_store_page(databases, home.owner_home_dir, cursor)
         results = [_maintain_event_store(path.parent, now=now, commit_transition=commit_transition, db_path=path)
-                   for path in databases]
+                   for path in selected]
         if len(results) == 1:
             summary = results[0]
         else:
@@ -546,7 +555,8 @@ def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_t
                           for key in ("selected", "deleted_db", "deleted_jsonl")},
                        "stores": [{"directory": str(path.parent.relative_to(home.owner_home_dir)),
                                    "database": str(path.relative_to(home.owner_home_dir)), **result}
-                                  for path, result in zip(databases, results, strict=True)]}
+                                  for path, result in zip(selected, results, strict=True)]}
+        summary.update(_maintenance_store_position(selected, home.owner_home_dir, results, position))
         if discovery_errors:
             summary = {**summary, "ok": False, "counts_complete": False, "discovery_errors": discovery_errors}
         return summary
@@ -562,16 +572,34 @@ def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_t
 # 函数用途: 对原库精确文件名推进一批维护，兼容目录旧调用，不误建legacy库的local.db。
 def _maintain_event_store(directory: Path, *, now: float, commit_transition=None, db_path: Path | None = None) -> dict[str, Any]:
     try:
+        from contextlib import nullcontext
+
+        from ..common.global_write_commit import global_write_commit_scope
         from ..local_storage import LocalStore
 
-        if commit_transition is None:
-            result = LocalStore(db_path or directory / "local.db").maintain_events(max_batches=1, before=now)
-        else:
-            from ..common.global_write_commit import global_write_commit_scope
+        with global_write_commit_scope(commit_transition) if commit_transition is not None else nullcontext():
+            store = LocalStore(db_path or directory / "local.db",
+                               **({"coordinator_io": True} if commit_transition is not None else {}))
+            steps = []
+            with store._connection() as conn:
+                resumable = conn.execute("SELECT 1 FROM metadata WHERE key='events_prune_cursor'").fetchone() is not None
+            if resumable or store.events_path.exists() and store.events_path.stat().st_size > 256 * 1024:
+                # 保留原maintain_events故障/观测钩子，只为本Store选择有界底层批次。
+                def bounded(**options):
+                    from ..local_storage.maintenance import (
+                        STEADY_STATE_EVENTS_KEEP_LAST,
+                        STEADY_STATE_EVENTS_MAX_DELETE,
+                    )
 
-            with global_write_commit_scope(commit_transition):
-                store = LocalStore(db_path or directory / "local.db", coordinator_io=True)
-                result = store.maintain_events(max_batches=1, before=now)
+                    report = store.prune_events_step(before=options['before'],
+                        keep_last=STEADY_STATE_EVENTS_KEEP_LAST, max_delete=STEADY_STATE_EVENTS_MAX_DELETE)
+                    steps.append(report)
+                    return report
+
+                store.prune_events_steady_state = bounded
+            result = store.maintain_events(max_batches=1, before=now)
+            if steps:
+                result.update(steps[-1])
         return {"executed": True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
@@ -857,13 +885,26 @@ def _run_quota_continuation_slice(state_path, home, previous, current, *, coordi
                            partial=bool(pending) or bool(storage.get('errors')) or bool(storage.get('unbound_kinds')),
                            continuation_pending=continuation)
 
+    auxiliary = {}
+    if previous.get('apply_outcome') == 'applied' and not previous.get('legal_hold'):
+        for key, operation in (
+            ('derived_records_pruned', lambda cursor: _prune_local_store_derived_records(home.owner_home_dir,
+                now=datetime.fromtimestamp(current, timezone.utc), commit_transition=commit_transition, cursor=cursor)),
+            ('local_store_events_maintenance', lambda cursor: _maintain_local_store_events(home, now=current,
+                commit_transition=commit_transition, cursor=cursor)),
+        ):
+            before = previous.get(key, {})
+            if before.get('partial') is True:
+                auxiliary[key] = operation(before.get('cursor'))
+        continuation = continuation or any(report.get('partial') is True for report in auxiliary.values())
+
     # 函数用途: 校验维护CAS前像并写入配额续扫后的维护状态。
     def finish():
         canonical = read_json_object_report(state_path, context='owner_maintenance.fence').payload
         require_maintenance_fence(canonical, expected)
         payload = {**previous, 'schema_generation': 1, 'maintenance_epoch': expected[1] + 1,
                    'schema_version': 'owner-maintenance.v1', 'maintenance_partial': continuation,
-                   'storage_maintenance': storage}
+                   'storage_maintenance': storage, **auxiliary}
         if runtime_cleanup is not None:
             payload['runtime_cleanup'] = runtime_cleanup
         write_json_file_atomic_unlocked(state_path, payload)
@@ -985,3 +1026,38 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         for key in state['pending_kinds'])
     state['deletion_enabled'] = False
     return state
+
+
+# LLM: 游标仅为本日来源位置，最多选择八个已有库；未完成库单列续作，不把后页漏掉当完成。
+# 函数用途: 在同一maintenance.json轮转库，避免一拍维护全部历史工作区。
+def _maintenance_store_page(paths, home, cursor):
+    position = dict(cursor or {})
+    position['_resuming'] = cursor is not None
+    pending = set(position.get('pending', ()))
+    candidates = [path for path in sorted(paths) if position.get('mode') != 'pending' or str(path.relative_to(home)) in pending]
+    after = position.get('after', '')
+    remaining = [path for path in candidates if str(path.relative_to(home)) > after]
+    if not remaining:
+        remaining = candidates
+    selected = remaining[:8]
+    position['more'] = len(remaining) > len(selected)
+    position['after'] = str(selected[-1].relative_to(home)) if selected else ''
+    return selected, position
+
+
+# LLM: 只按实际partial回执保留欠账；分页结尾转入准确未完库集合，不伪造完成范围。
+# 函数用途: 合并本拍已提交来源位置，供下一拍恢复。
+def _maintenance_store_position(selected, home, results, position):
+    pending = set(position.get('pending', ()))
+    for path, result in zip(selected, results, strict=True):
+        ref = str(path.relative_to(home))
+        if result.get('partial') is True:
+            pending.add(ref)
+        else:
+            pending.discard(ref)
+    more = position.pop('more')
+    if not more:
+        position.update(after='', mode='pending')
+    position['pending'] = sorted(pending)
+    resuming = position.pop('_resuming', False)
+    return {'partial': more or bool(pending), 'cursor': position} if more or pending or resuming else {}

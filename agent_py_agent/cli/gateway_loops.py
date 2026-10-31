@@ -272,6 +272,11 @@ def _wait_after_loop_error(backoff: LoopErrorBackoff, interval: float) -> float:
 # LLM: 所有后台循环共用的出错记账：loop_health 按 loop id 记每一次，backoff 决定这次打不打印，打印本身不会抛。
 # 函数用途: 记一次被守卫接住的异常，并按限流决定是否打印。
 def _note_loop_tick_error(site: _LoopSite, exc: BaseException, backoff: LoopErrorBackoff) -> None:
+    from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
+
+    if isinstance(exc, OwnerQuotaUnavailable):
+        backoff.record_storage_wait(site.context)
+        return
     loop_health.note_loop_error(site.loop, site.context, exc)
     if backoff.record_failure(f"{site.context}:{type(exc).__name__}"):
         _print_gateway_loop_error(site.context, site.worker_id, exc)
@@ -1129,7 +1134,11 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
     # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误按代码常量 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 冷却。
     def _record_thread_failure(self, label: str, thread_id: str, exc: Exception) -> None:
+        from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
+
         self._lane_retry.failed(label, thread_id, exc, delay=BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS)
+        if isinstance(exc, OwnerQuotaUnavailable):
+            return
         _print_gateway_loop_error(
             "gateway_background_main.iteration", f"background-main:{label}:{thread_id}", exc,
         )
@@ -1922,7 +1931,7 @@ class _GatewayOwnerMaintenanceController:
         )
         page = discover_owner_home_page(
             self._base_home.owners_dir,
-            limit=limit,
+            limit=min(limit, 4),
             after_cursor=self._cursor,
         )
         self._cursor = page.next_cursor

@@ -128,6 +128,8 @@ _OWNER_FACT_STATS: dict[str, int] = {
     "racing": 0,
     "unstable": 0,
 }
+_RECOVERY_SOURCE_SCANS: dict[tuple[int, str], Iterator] = {}
+_RECOVERY_SOURCE_SCAN_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -675,8 +677,8 @@ def _owner_has_hard_facts(owner_home: Path, *, deadline_out: list[float] | None 
     from .conversation.process_events import owner_has_pending_process_completions
 
     if any(
-        _has_pending_wake_signal(store_root)
-        or _has_enabled_progress_policy(store_root, deadline_out=deadline_out)
+        _has_pending_wake_signal(store_root, owner_home=owner_home, deadline_out=deadline_out)
+        or _has_enabled_progress_policy(store_root, owner_home=owner_home, deadline_out=deadline_out)
         for store_root in _store_roots(owner_home)
     ):
         return True
@@ -1868,15 +1870,26 @@ def existing_conversation_store_roots(owner_home: str | Path) -> tuple[Path, ...
     return tuple(unique[key] for key in sorted(unique))
 
 
-def _has_pending_wake_signal(store_root: Path) -> bool:
+# LLM: 只读且逐任务过滤，旧无owner调用仍按存在性发布候选；阻塞来源不消费，不阻断健康任务。
+# 函数用途: 有界检查待唤醒来源，未完游标在下一拍续读。
+def _has_pending_wake_signal(store_root: Path, *, owner_home=None, deadline_out=None) -> bool:
     # wake_queue/{urgent,normal} 里的文件即待处理(处理过的会被挪进 handled/)。
     for kind in ("urgent", "normal"):
         directory = store_root / "wake_queue" / kind
         try:
-            with os.scandir(directory) as entries:
-                if any(entry.name.endswith(".json") for entry in entries):
+            if owner_home is None:
+                with os.scandir(directory) as entries:
+                    if any(entry.name.endswith(".json") for entry in entries):
+                        return True
+            for path in _recovery_source_page(directory, deadline_out):
+                if not path.name.endswith(".json"):
+                    continue
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                from .gateway_parts.multiprocess_background_sources import source_recovery_block
+
+                if not isinstance(payload, dict) or source_recovery_block(owner_home, "wake", payload) is None:
                     return True
-        except OSError:
+        except (OSError, ValueError):
             continue
     return False
 
@@ -1885,6 +1898,7 @@ def _has_enabled_progress_policy(
     store_root: Path,
     *,
     deadline_out: list[float] | None = None,
+    owner_home=None,
 ) -> bool:
     """只认「已启用且已到期」的 policy(看 next_due_at,与 runtime._runnable_due_policies 同尺)。
 
@@ -1894,12 +1908,57 @@ def _has_enabled_progress_policy(
     旧实现逐字一致。"""
     now = time.time()
     upcoming: list[float] = []
-    for path in (store_root / "progress_policies").glob("*.json"):
+    directory = store_root / "progress_policies"
+    paths = (directory.glob("*.json") if owner_home is None else _recovery_source_page(directory, deadline_out))
+    for path in paths:
+        if path.suffix != ".json":
+            continue
         if _policy_due(path, now, deadline_out=upcoming):
+            if owner_home is not None:
+                from .gateway_parts.multiprocess_background_sources import source_recovery_block
+
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    if source_recovery_block(owner_home, "policy", payload) is not None:
+                        continue
+                except (OSError, ValueError):
+                    continue
             return True
     if upcoming and deadline_out is not None:
         deadline_out.append(min(upcoming))
     return False
+
+
+# LLM: 查询位置按读取线程隔离，锁内完整取一页后释放；消费者提前return不留下半页，淘汰会关闭FD，不形成执行权。
+# 函数用途: 每个目录每次最多检查64个条目，保证并发读者不会取走彼此候选，未完页一秒内续扫。
+def _recovery_source_page(directory, deadline_out):
+    key = (threading.get_ident(), str(directory))
+    page = []
+    with _RECOVERY_SOURCE_SCAN_LOCK:
+        iterator = _RECOVERY_SOURCE_SCANS.get(key)
+        # 恰好64项的上页可能已到EOF；不让下一拍把这个空尾页当作无活，尚未消耗条目预算时重开一次。
+        for attempt in range(2):
+            if iterator is None:
+                try:
+                    iterator = _RECOVERY_SOURCE_SCANS[key] = os.scandir(directory)
+                except FileNotFoundError:
+                    break
+            for _ in range(64):
+                entry = next(iterator, None)
+                if entry is None:
+                    _RECOVERY_SOURCE_SCANS.pop(key, None)
+                    iterator.close()
+                    iterator = None
+                    break
+                page.append(Path(entry.path))
+            if page or iterator is not None or attempt:
+                break
+        if key in _RECOVERY_SOURCE_SCANS:
+            _add_deadline(deadline_out, time.time() + 1.0)
+        while len(_RECOVERY_SOURCE_SCANS) > 256:
+            old = _RECOVERY_SOURCE_SCANS.pop(next(iter(_RECOVERY_SOURCE_SCANS)))
+            old.close()
+    return tuple(page)
 
 
 def _policy_due(path: Path, now: float, *, deadline_out: list[float] | None = None) -> bool:

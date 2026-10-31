@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol
 
@@ -90,6 +90,7 @@ class BackgroundClaimDependencies:
     attempt: BackgroundClaimAttempt | None = None
     close_out_source: Callable[[dict, str], None] | None = None
     bound_delivery_turn: Callable[[str], str] | None = None
+    recovery_claim_scope: Callable | None = field(default=None, kw_only=True)
 
 
 # LLM: 子代理归属必须来自调用方的 canonical 查询；此回执不调用主模型，也不替孩子续跑。
@@ -157,16 +158,23 @@ def run_claimed(
             str(kwargs.get("thread_id") or ""),
             str(kwargs.get("task_id") or ""),
         )
-        claim = dependencies.claims.acquire(
-            {
-                "thread_id": kwargs.get("thread_id", ""),
-                "claim_scope_id": claim_scope_id,
-                "task_id": kwargs.get("task_id", ""),
-                "reason": kwargs.get("reason", ""),
-                "lease_seconds": dependencies.lease_seconds,
-                "now": kwargs.get("now"),
-            }
-        )
+        # 生产仓储在原事务里重读恢复事实；旧替身/无仓储路径仍走原领取后复核。
+        scope = (dependencies.recovery_claim_scope(task_id,
+            expected_revision=kwargs.get("recovery_source_revision"))
+            if dependencies.recovery_claim_scope is not None else nullcontext(None))
+        with scope as eligibility:
+            if eligibility is not None and not eligibility["eligible"]:
+                return None
+            claim = dependencies.claims.acquire(
+                {
+                    "thread_id": kwargs.get("thread_id", ""),
+                    "claim_scope_id": claim_scope_id,
+                    "task_id": kwargs.get("task_id", ""),
+                    "reason": kwargs.get("reason", ""),
+                    "lease_seconds": dependencies.lease_seconds,
+                    "now": kwargs.get("now"),
+                }
+            )
         if claim is None:
             return None
         if not _attempt_started(dependencies, kwargs, claim_scope_id=claim_scope_id, claim_id=str(claim.get("claim_id") or "")):

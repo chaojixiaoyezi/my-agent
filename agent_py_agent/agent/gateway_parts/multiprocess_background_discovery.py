@@ -8,7 +8,7 @@ import math
 import os
 import threading
 import time
-from bisect import bisect_right
+from itertools import islice
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -259,6 +259,11 @@ class CoordinatorBackgroundRequests:
                     continue
                 if kind == "policy" and not _policy_has_due_work(read_source(self.control.home_root, ref), time.time()):
                     continue
+                if kind in {"wake", "policy", "observation"}:
+                    from .multiprocess_background_sources import source_recovery_block
+
+                    if source_recovery_block(home, kind, read_source(self.control.home_root, ref)) is not None:
+                        continue
                 yield ref
             except (OSError, ValueError, TypeError) as error:
                 from .logging import _report_gateway_side_effect_error
@@ -333,24 +338,57 @@ class CoordinatorBackgroundRequests:
             live[0] = False
 
 
-# LLM: cursor仅为进程内metadata查询位置，绝非处理/授权账；处理完、disabled或坏文件也推进，有限预算不能固定遮挡后页。
-# 函数用途: 每个原来源目录轮转最多64项，重启从头仍会继续后续页，不删除业务历史。
+# LLM: 迭代器仅为进程内查询游标，不是授权或完成账；不再为每页sorted全目录，完成后下轮重建发现新项。
+# 函数用途: 每拍只拉取64个来源，续页不重复扫描历史前缀。
 def _source_page(discovery, folder, pattern):
     cursors = getattr(discovery, "_source_cursors", None)
     if cursors is None:
         cursors = discovery._source_cursors = {}
     key = (str(folder), pattern)
-    paths = sorted(folder.glob(pattern))
-    names = [path.relative_to(folder).as_posix() for path in paths]
-    start = bisect_right(names, cursors.get(key, ""))
-    if start >= len(paths):
-        start = 0
-    page = paths[start:start + 64]
-    if page and start + len(page) < len(paths):
-        cursors[key] = page[-1].relative_to(folder).as_posix()
-    else:
+    iterator = cursors.get(key)
+    if not hasattr(iterator, "__next__"):
+        iterator = cursors[key] = _directory_source_items(folder, pattern)
+    scanned = list(islice(iterator, 64))
+    page = [path for path in scanned if path is not None]
+    if len(scanned) < 64:
         cursors.pop(key, None)
+    if len(cursors) > 1024:
+        stale = cursors.pop(next(iter(cursors)))
+        close = getattr(stale, "close", None)
+        if callable(close):
+            close()
     return page
+
+
+# LLM: 每个目录项都产出一个预算单位，包括未匹配项；不使用会先list整个目录的Path.glob，不跟随目录软链。
+# 函数用途: 保存真实scandir位置，递归历史也在每拍条目预算内续扫。
+def _directory_source_items(folder, pattern):
+    if not isinstance(folder, Path):
+        yield from folder.glob(pattern)
+        return
+    stack = []
+    try:
+        try:
+            stack.append(os.scandir(folder))
+        except FileNotFoundError:
+            return
+        while stack:
+            entry = next(stack[-1], None)
+            if entry is None:
+                stack.pop().close()
+                continue
+            path = Path(entry.path)
+            if '**' in pattern and entry.is_dir(follow_symlinks=False):
+                try:
+                    stack.append(os.scandir(path))
+                except FileNotFoundError:
+                    pass
+            relative = path.relative_to(folder)
+            matches = relative.match(pattern) or pattern.startswith('**/') and relative.match(pattern[3:])
+            yield path if matches and entry.is_file(follow_symlinks=False) else None
+    finally:
+        for iterator in stack:
+            iterator.close()
 
 
 # LLM: 只恢复已校验ref的owner，仍由原controller独立检查；不依赖展示目录或自然语言来源。
