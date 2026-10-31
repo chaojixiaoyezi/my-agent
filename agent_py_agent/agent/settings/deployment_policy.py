@@ -10,6 +10,7 @@ from pathlib import Path
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
+from ..common import nofollow_fs
 from ..common.nofollow_fs import read_bytes_beneath
 from ..user_space.home_layout import MyAgentHomePaths
 
@@ -302,13 +303,22 @@ def _json_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+# LLM: 平台有 dir_fd 时保持原严格 no-follow 链与显式 snapshot 重读；Windows 等无 dir_fd 平台改走同模块逐段 lstat、
+#   拒绝链接与多链接叶的 portable 有界读一次（snapshot 依赖 dir_fd），否则每次构造 Agent 都会失败。缺失语义不变。
+# 函数用途: 有界读取部署策略原始字节，按平台能力选择严格链或 portable 链。
+def _read_deployment_policy_source(trusted_host_paths: MyAgentHomePaths, *, snapshot_retries: int = 0) -> bytes | None:
+    strict = nofollow_fs._supports_dir_fd()
+    return read_bytes_beneath(trusted_host_paths.root, ("config", "deployment_policy.json"),
+                              max_bytes=_MAX_DEPLOYMENT_POLICY_SOURCE_BYTES, require_dir_fd=strict,
+                              snapshot_retries=snapshot_retries if strict else 0)
+
+
 # LLM: no-follow 有界读；唯有不存在可用 typed 默认，损坏/权限/未知版本及解码递归异常都明确失败，不写文件。
 # 函数用途: 加载指定受信宿主的唯一部署策略。
 def load_deployment_policy(*, trusted_host_paths: MyAgentHomePaths) -> DeploymentPolicy:
     deployment_policy_path(trusted_host_paths)
     try:
-        raw = read_bytes_beneath(trusted_host_paths.root, ("config", "deployment_policy.json"),
-                                 max_bytes=_MAX_DEPLOYMENT_POLICY_SOURCE_BYTES, require_dir_fd=True)
+        raw = _read_deployment_policy_source(trusted_host_paths)
         if raw is None:
             return DeploymentPolicy()
         return deployment_policy_from_dict(json.loads(raw.decode("utf-8"), object_pairs_hook=_json_object))
@@ -329,8 +339,7 @@ def _merge_changes(current: dict, changes: dict) -> dict:
 # 函数用途: 在原锁内确认完整目标及新版本，读中移除、原位篡改或任何不一致均给出未知提交回执。
 def _confirm_deployment_policy_commit(*, trusted_host_paths: MyAgentHomePaths, payload: dict) -> DeploymentPolicy:
     try:
-        raw = read_bytes_beneath(trusted_host_paths.root, ("config", "deployment_policy.json"),
-                                 max_bytes=_MAX_DEPLOYMENT_POLICY_SOURCE_BYTES, require_dir_fd=True, snapshot_retries=1)
+        raw = _read_deployment_policy_source(trusted_host_paths, snapshot_retries=1)
         if raw is None:
             raise DeploymentPolicyError()
         confirmed = deployment_policy_from_dict(json.loads(raw.decode("utf-8"), object_pairs_hook=_json_object))

@@ -364,3 +364,23 @@ def test_gateway_header_read_detects_path_replacement(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='changed'):
         io.write_json_file_atomic(path, {'new': 1})
     assert replaced and path.read_bytes() == future
+
+
+# LLM: 按 CPython 3.12 Windows 语义构造同一文件的 FD/路径 stat 视图：fstat 的 st_ctime 为 ChangeTime，lstat 为 CreationTime；
+#   只替换 io 模块看到的平台名，不改真实文件。POSIX 下两视图的 st_ctime 不同仍必须判为变化。
+# 函数用途: 验证 Windows 上 FD/路径版本一致，而 mtime 或 inode 变化仍被识别。
+def test_gateway_json_version_uses_same_source_change_stamp_on_windows(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts import io
+    same = {'st_dev': 7, 'st_ino': 11, 'st_size': 3, 'st_mtime_ns': 500, 'st_birthtime_ns': 100}
+    fd_view = SimpleNamespace(**same, st_ctime_ns=500)
+    path_view = SimpleNamespace(**same, st_ctime_ns=100)
+    rewritten = SimpleNamespace(**{**same, 'st_mtime_ns': 501}, st_ctime_ns=100)
+    replaced = SimpleNamespace(**{**same, 'st_ino': 12}, st_ctime_ns=100)
+    monkeypatch.setattr(io, 'os', SimpleNamespace(name='nt'))
+    assert io._json_file_version(fd_view) == io._json_file_version(path_view)
+    assert io._json_file_version(fd_view) != io._json_file_version(rewritten)
+    assert io._json_file_version(fd_view) != io._json_file_version(replaced)
+    monkeypatch.setattr(io, 'os', SimpleNamespace(name='posix'))
+    assert io._json_file_version(fd_view) != io._json_file_version(path_view)

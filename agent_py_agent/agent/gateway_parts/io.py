@@ -371,9 +371,13 @@ def _read_json_dict_unlocked_report(path: Path) -> tuple[dict, bool, str, os.sta
 
 
 # LLM: 该观测只决定能否省略原写；不授予跨进程事务权，实际写仍由原path锁和原子替换约束。
+#   Windows 的 CPython 3.12+ 中 os.fstat 的 st_ctime 是 ChangeTime，os.stat/os.lstat 却沿用 CreationTime（复制自
+#   st_birthtime），FD 与路径两次观察的 st_ctime 不同源；该平台改取两边同源的 st_birthtime_ns（3.11 无此字段，
+#   其 st_ctime 两边本就同为创建时间）。POSIX 仍比较 st_ctime_ns，不放宽原比较。
 # 函数用途: 比较读取时与跳写前的同一文件版本，发现外部替换或原位修改就照常写回。
 def _json_file_version(info: os.stat_result) -> tuple[int, ...]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    changed = getattr(info, "st_birthtime_ns", info.st_ctime_ns) if os.name == "nt" else info.st_ctime_ns
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, changed)
 
 
 # LLM: Gateway updater 在当前字典的浅副本上执行，必须返回 dict；此辅助函数不落盘，但回调自身副作用仍由调用方负责。

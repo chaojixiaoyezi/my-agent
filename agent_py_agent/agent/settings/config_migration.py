@@ -7,6 +7,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+from ..common import nofollow_fs
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
 from ..contracts.optimization_contracts import decode_versioned_record, require_schema_generation
@@ -22,10 +23,11 @@ class ConfigurationRollbackUnconfirmed(RuntimeError):
 
 
 # LLM: 缺失、坏JSON、链接与超限均拒绝，不能把未知前像当空配置后覆盖。
+#   有 dir_fd 时要求严格链；Windows 等无 dir_fd 平台走同模块拒绝链接的 portable 有界读，与原子写同一平台分支。
 # 函数用途: 有界读取原配置的准确字节。
 def _configuration_bytes(path: Path) -> bytes:
     value = read_bytes_beneath(path.parent, (path.name,), max_bytes=_MAX_CONFIGURATION_BYTES,
-                               require_dir_fd=True)
+                               require_dir_fd=nofollow_fs._supports_dir_fd())
     if value is None:
         raise FileNotFoundError(path)
     return value
@@ -49,7 +51,7 @@ def migrate_configuration(path, transform, validate, *, known_fields=None, targe
             return {'applied': False, 'schema_generation': generation, 'backup_name': None}
         backup_name = f'{path.name}.migration-{hashlib.sha256(before).hexdigest()}.bak'
         backup = read_bytes_beneath(path.parent, (backup_name,), max_bytes=_MAX_CONFIGURATION_BYTES,
-                                   require_dir_fd=True)
+                                   require_dir_fd=nofollow_fs._supports_dir_fd())
         if backup is None:
             write_bytes_atomic_beneath(path.parent, (backup_name,), before)
         elif backup != before:

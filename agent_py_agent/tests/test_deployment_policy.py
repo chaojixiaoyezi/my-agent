@@ -290,3 +290,26 @@ def test_deployment_policy_decoder_recursion_error_is_normalized(tmp_path, monke
         patch.setattr(module.json, "loads", decode_failure)
         with pytest.raises(module.DeploymentPolicyError):
             module.load_deployment_policy(trusted_host_paths=paths)
+
+
+# LLM: 模拟 Windows 没有 dir_fd：缺失仍取 typed 默认，正常文件经 portable 链读回与提交确认；叶为符号链接仍拒绝，不降级跟随。
+# 函数用途: 验证无 dir_fd 平台可加载部署策略，且链接拒绝不放宽。
+def test_deployment_policy_without_dir_fd_uses_portable_chain(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.settings import deployment_policy as module
+
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
+    paths = _home(tmp_path)
+    assert module.load_deployment_policy(trusted_host_paths=paths).revision == 0
+    paths.config_dir.mkdir()
+    payload = {"schema_version": "deployment-policy.v1", "revision": 3}
+    target = paths.config_dir / "deployment_policy.json"
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps(payload))
+    target.symlink_to(elsewhere)
+    with pytest.raises(module.DeploymentPolicyError):
+        module.load_deployment_policy(trusted_host_paths=paths)
+    target.unlink()
+    target.write_text(json.dumps(payload))
+    assert module.load_deployment_policy(trusted_host_paths=paths).revision == 3
+    assert module._confirm_deployment_policy_commit(trusted_host_paths=paths, payload=payload).revision == 3
