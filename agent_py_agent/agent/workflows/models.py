@@ -2,8 +2,10 @@
 # 模块用途: 定义执行记录及新旧字段并存、含渲染输入和条件分支的单节点调试结果。
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import MappingProxyType
 from typing import Any, Literal, get_args
 
 from ..assets.workflow_store import WORKFLOW_ON_ERROR_POLICIES as WORKFLOW_ON_ERROR_POLICIES
@@ -13,6 +15,79 @@ from ..common.log_redaction import redact_sensitive_value
 _BEARER_VALUE = re.compile(r'''(?i)(\bbearer\s+)(?!<redacted\b|\[redacted\])[^\s,;"'<>]+''')
 StepStatus = Literal['pending', 'running', 'succeeded', 'skipped', 'failed',
                      'escalated_recovered', 'paused_for_resume']
+SCRIPT_WORK_CONTEXT_SCHEMA_VERSION = 'script-work-context.v1'
+SCRIPT_OUTPUT_PROTOCOL_VERSION = 'script-output.v1'
+
+
+class ScriptWorkContextError(ValueError):
+    """SDK 的结构化拒绝；不在错误消息中回显宿主环境或上下文正文。"""
+
+    def __init__(self, error_code: str):
+        self.error_code = error_code
+        super().__init__(error_code)
+
+
+@dataclass(frozen=True)
+class ScriptWorkContext:
+    """宿主冻结的只读工作视图，不包含凭证、来源环境名或投递目标。"""
+
+    workspace_root: Path
+    scratch_dir: Path
+    run_id: str = ''
+    task_id: str = ''
+    effective_path_scope: Mapping[str, tuple[Path, ...]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        try:
+            workspace, scratch = Path(self.workspace_root), Path(self.scratch_dir)
+            if not workspace.is_absolute() or not scratch.is_absolute():
+                raise ValueError('absolute paths required')
+            scope = self.effective_path_scope
+            if not isinstance(scope, Mapping) or set(scope) != {'read_roots', 'write_roots'}:
+                raise ValueError('explicit scope required')
+            normalized = {}
+            for key in ('read_roots', 'write_roots'):
+                roots = scope[key]
+                if not isinstance(roots, (tuple, list)) or any(not isinstance(p, (str, Path)) or not Path(p).is_absolute() for p in roots):
+                    raise ValueError('absolute roots required')
+                normalized[key] = tuple(Path(p).resolve(strict=False) for p in roots)
+            if not isinstance(self.run_id, str) or not isinstance(self.task_id, str):
+                raise ValueError('invalid run/task binding')
+            object.__setattr__(self, 'workspace_root', workspace.resolve(strict=False))
+            object.__setattr__(self, 'scratch_dir', scratch.resolve(strict=False))
+            object.__setattr__(self, 'effective_path_scope', MappingProxyType(normalized))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            raise ScriptWorkContextError('SCRIPT_WORK_CONTEXT_INVALID') from None
+
+    def to_dict(self) -> dict[str, Any]:
+        """独立 JSON 投影给宿主启动器冻结；不序列化 MappingProxy 或进程对象。"""
+        return {'schema_version': SCRIPT_WORK_CONTEXT_SCHEMA_VERSION,
+                'workspace_root': str(self.workspace_root), 'scratch_dir': str(self.scratch_dir),
+                'run_id': self.run_id, 'task_id': self.task_id,
+                'effective_path_scope': {key: [str(path) for path in roots]
+                                         for key, roots in self.effective_path_scope.items()}}
+
+
+@dataclass(frozen=True)
+class DeliveryIntent:
+    """仅本地声明 requested；宿主退出校验和原投递账提交后才可能 accepted。"""
+
+    request_key: str
+    message: str = ''
+    output_refs: tuple[str, ...] = ()
+    status: str = field(default='requested', kw_only=True)
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.request_key, str) or not self.request_key.strip()
+                or self.request_key != self.request_key.strip() or len(self.request_key) > 256
+                or any(ord(c) < 32 for c in self.request_key) or not isinstance(self.message, str)
+                or not isinstance(self.output_refs, tuple) or self.status != 'requested'):
+            raise ScriptWorkContextError('SCRIPT_DELIVERY_REQUEST_INVALID')
+        for ref in self.output_refs:
+            if (not isinstance(ref, str) or not ref or ref != ref.strip() or any(ord(c) < 32 for c in ref)
+                    or Path(ref).is_absolute() or PureWindowsPath(ref).drive or ref.startswith(('~', '\\'))
+                    or '..' in ref.replace('\\', '/').split('/') or '://' in ref):
+                raise ScriptWorkContextError('SCRIPT_DELIVERY_REQUEST_INVALID')
 
 
 # LLM: 属性是完整输入合同，dict仅保留前步与非碰撞输入，各视图独立深拷贝。
@@ -49,6 +124,12 @@ class ScriptExecutionResult:
     needs_repair: bool = False
     escalation_context: dict[str, Any] = field(default_factory=dict)
     source_check: dict[str, Any] = field(default_factory=dict)
+    execution_definition_ref: str = field(default='', kw_only=True)
+    workflow_run_id: str = field(default='', kw_only=True)
+    phase: str = field(default='', kw_only=True)
+    effect_outcome: str = field(default='', kw_only=True)
+    breakpoint: dict[str, Any] | None = field(default=None, kw_only=True)
+    confirmed_step_refs: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 # LLM: 仅内存返回，不可进入WorkflowRunStore；step_type保留保存的mode，所有状态新旧别名统一脱敏。
@@ -138,6 +219,11 @@ class WorkflowRunRecord:
     completed_steps: int = 0
     breakpoint: dict[str, Any] | None = None
     ephemeral_debug: bool = False
+    # 执行身份不使用统计 CAS；空值明确表示旧记录没有冻结此事实。
+    execution_definition_ref: str = field(default='', kw_only=True)
+    phase: str = field(default='', kw_only=True)
+    effect_outcome: str = field(default='', kw_only=True)
+    confirmed_step_refs: tuple[str, ...] = field(default=(), kw_only=True)
 
     # LLM: 嵌套步骤、进度和断点一起序列化；旧记录缺字段由默认值兼容，不清除历史失败。
     # 函数用途: 输出完整运行JSON快照。
@@ -148,7 +234,8 @@ class WorkflowRunRecord:
     # 函数用途: 从JSON恢复整个工作流运行记录。
     @classmethod
     def from_dict(cls, value):
-        return cls(**{**payload(value), 'steps': tuple(StepExecutionRecord.from_dict(item) for item in value.get('steps', ()))})
+        return cls(**{**payload(value), 'steps': tuple(StepExecutionRecord.from_dict(item) for item in value.get('steps', ())),
+                      'confirmed_step_refs': tuple(value.get('confirmed_step_refs', ()))})
 
 
 # LLM: 所有跨磁盘和回调边界的 JSON 值均复制，禁止共享可变快照和非 JSON 对象。

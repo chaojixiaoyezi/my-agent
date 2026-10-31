@@ -28,8 +28,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 from .recovery import RecoveryAction
+
+
+class RecoveryBlockReason(str, Enum):
+    """只读恢复投影的结构化拒绝码，不授予重放、领取或清理权。"""
+
+    UNKNOWN = 'RECOVERY_UNKNOWN'
+    AUTHORITY_UNREADABLE = 'RECOVERY_AUTHORITY_UNREADABLE'
+    RUN_UNKNOWN = 'RECOVERY_RUN_UNKNOWN'
+    ATTEMPT_UNKNOWN = 'RECOVERY_ATTEMPT_UNKNOWN'
+    HANDOFF_PENDING = 'RECOVERY_HANDOFF_PENDING'
+    SOURCE_REVISION_CONFLICT = 'RECOVERY_SOURCE_REVISION_CONFLICT'
 
 # LLM: 两种危险删除诊断共享同一软恢复说明；执行权仍由工具可见性、父级 grant 和审批/路径门决定。
 # 配置用途: 告诉模型怎样找到受控回收入口，避免反复寻找不存在的 task_trash 工具。
@@ -61,6 +73,27 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="文件或目录已变化，旧快照及分页游标失效；重新读取目标取得新快照，不重放旧游标或据旧结果执行写入。",
     ),
+    **{reason.value: ErrorContract(
+        code=reason.value, category='state', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='恢复资格未获原权威事实确认；核对源版本、原尝试及交接引用，不解释文案、不重放未知操作，claim 时须重新校验。',
+    ) for reason in RecoveryBlockReason},
+    'SCHEDULER_DEFINITION_GENERATION_CONFLICT': ErrorContract(
+        code='SCHEDULER_DEFINITION_GENERATION_CONFLICT', category='state', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='当前定义已换代；旧运行仅收自身历史，不改新定义的启停、下一次时间、结果、检查点或退避，也不重放已开始的业务。',
+    ),
+    **{code: ErrorContract(
+        code=code, category='contract', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value, recovery_hint=hint,
+    ) for code, hint in (
+        ('SCRIPT_WORK_CONTEXT_MISSING', '宿主没有注入脚本工作上下文；由原启动器绑定规范工作区及有效范围，不使用临时 cwd 猜业务根。'),
+        ('SCRIPT_WORK_CONTEXT_INVALID', '脚本工作上下文版本、路径或范围不合法；修复原宿主冻结输入，不回退当前目录或扩大范围。'),
+        ('SCRIPT_WORKSPACE_PATH_INVALID', 'SDK 只接受有效的工作区相对路径；修正原路径，不用绝对路径或上级跳转绕过。'),
+        ('SCRIPT_DELIVERY_REQUEST_INVALID', '投递意向须有稳定非空 request_key 和原合同产物引用；只构造 requested，不宣称宿主已受理或发送。'),
+        ('HOST_EXCLUSIVE_ROOT_REQUIRED', '宿主来源投影缺少可信规范数据根；由原宿主提供布局，不猜 HOME 或当前目录。'),
+        ('HOST_EXCLUSIVE_SOURCE_INVALID', '宿主配置来源路径不合法；核对原来源引用，不能通过忽略保护路径继续执行。'),
+    )},
     "SCHEDULER_HISTORY_READ_FAILED": ErrorContract(
         code="SCHEDULER_HISTORY_READ_FAILED", category="state", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,

@@ -13,6 +13,33 @@ if TYPE_CHECKING:
     from ...conversation.host_message_context import HostMessageContext
 
 
+@dataclass(frozen=True)
+class RecoveryEligibility:
+    """原恢复事实的只读投影；发现可恢复不等于授予 claim 或执行权。"""
+
+    eligible: bool = False
+    reason_code: str = "RECOVERY_UNKNOWN"
+    source_revision: str | int | None = None
+    next_check_at: float | None = None
+    handoff_ref: str | None = None
+
+    @classmethod
+    def from_block(cls, block: dict[str, Any] | None) -> RecoveryEligibility:
+        """显式适配旧阻塞映射；未知格式 fail-closed，绝不解释 notice/message。"""
+        if block is None:
+            return cls(eligible=True, reason_code="")
+        if not isinstance(block, dict):
+            return cls()
+        reason_code = block.get('reason_code')
+        if not isinstance(reason_code, str) or not reason_code:
+            reason_code = {
+                'authority_state_unreadable': 'RECOVERY_AUTHORITY_UNREADABLE',
+                'unknown_run_status': 'RECOVERY_RUN_UNKNOWN',
+                'attempt_unknown_terminal': 'RECOVERY_ATTEMPT_UNKNOWN',
+            }.get(block.get('reason'), 'RECOVERY_UNKNOWN')
+        return cls(False, reason_code, block.get('source_revision'), block.get('next_check_at'), block.get('handoff_ref'))
+
+
 # LLM: 消息/回合/运行/尝试身份独立；typed媒体/引用及opaque输入source仅本次宿主专有，source不持久化/不继承子任务，原TaskLink/SessionTask仍权威。
 # 类用途: 收拢一次代理调用与宿主专有身份；模型可写属性不作认证来源，不执行模型或写文件。
 @dataclass

@@ -10,7 +10,7 @@ import platform
 import re
 import stat
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -211,16 +211,20 @@ class PathAccessPolicy:
     #   不设 = 本地管理员/单租户原行为(整个 .my-agent 豁免)。
     owner_scope_root: Path | None = None
     agent_home_root: Path | None = None
+    host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True)
 
     # LLM: 配置读取只在构造处发生；配置切换应重建策略，不原地改变已在执行的调用。agent_home_root 同 from_values：拿得到宿主解析出
     #   的数据根（home_paths.root）就传进来，不传才退回环境变量。
     # 函数用途: 从当前配置创建冻结路径策略。
     @classmethod
-    def from_config(cls, config: object | None, *, agent_home_root: object = None) -> PathAccessPolicy:
+    def from_config(cls, config: object | None, *, agent_home_root: object = None,
+                    owner_scope_root: object = None) -> PathAccessPolicy:
+        root = _normalized_root(agent_home_root) if agent_home_root else _my_agent_home_root()
         return cls.from_values(
             mode=getattr(config, "path_access_mode", DEFAULT_PATH_ACCESS_MODE),
             dangerous_roots=getattr(config, "path_dangerous_roots", DEFAULT_DANGEROUS_PATH_ROOTS),
-            agent_home_root=agent_home_root,
+            agent_home_root=root, owner_scope_root=owner_scope_root,
+            host_exclusive_roots=host_exclusive_paths(root, config) if root is not None else (),
         )
 
     # LLM: 当前用户 home 过滤与数据根豁免必须由宿主计算一次；直接恢复协议字段不得再次应用此环境归一化。
@@ -237,6 +241,7 @@ class PathAccessPolicy:
         dangerous_roots: Iterable[object] | None = None,
         owner_scope_root: object = None,
         agent_home_root: object = None,
+        host_exclusive_roots: Iterable[object] = (),
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
@@ -253,7 +258,9 @@ class PathAccessPolicy:
         data_root = _normalized_root(agent_home_root) if agent_home_root else None
         if data_root is None:
             data_root = _home_root_from_owner_scope(scope) if scope else _my_agent_home_root()
-        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope, agent_home_root=data_root)
+        exclusive = tuple(dict.fromkeys(path for value in host_exclusive_roots if (path := _normalized_root(value)) is not None))
+        return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope, agent_home_root=data_root,
+                   host_exclusive_roots=exclusive)
 
     # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
     #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
@@ -305,6 +312,9 @@ class PathAccessPolicy:
     # LLM: H3 凭据只在模式已放行之后才拒（owner 墙、危险根等原拒绝码优先）；判定见 host_credential_for_path，只做路径运算。
     # 函数用途: 目标是宿主凭据时返回 PATH_HOST_CREDENTIAL_BLOCKED，提示改用脱敏的 user_config / manage_models。
     def _host_credential_decision(self, resolved: Path) -> PathAccessDecision:
+        for source in self.host_exclusive_roots:
+            if _host_source_contains(resolved, source):
+                return PathAccessDecision(False, "PATH_HOST_CREDENTIAL_BLOCKED", "宿主专有配置来源不对工作视图开放。", str(source))
         secret = host_credential_for_path(resolved, self.agent_home_root) if self.agent_home_root else None
         if secret is None:
             return PathAccessDecision(True)
@@ -612,6 +622,59 @@ def host_config_root_for_path(path: Path, agent_home_root: Path) -> Path | None:
     return None if home is None else _declared_root_containing(path, home, HOST_CONFIG_OWNER_PARTS)
 
 
+def host_exclusive_paths(home_paths: object, config: object | None) -> tuple[Path, ...]:
+    """仅投影可信布局和原 schema 声明的配置/SecretRef 文件来源，不读正文或猜 HOME。"""
+    raw_root = home_paths if isinstance(home_paths, (str, Path)) else getattr(home_paths, 'root', None)
+    root = _normalized_root(raw_root)
+    if root is None:
+        raise ValueError('HOST_EXCLUSIVE_ROOT_REQUIRED')
+    paths = [*(root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS), root / HOST_SECRET_DIR_NAME]
+    return tuple(dict.fromkeys((*paths, *configured_host_source_paths(config))))
+
+
+def configured_host_source_paths(config: object | None) -> tuple[Path, ...]:
+    """同一来源解析叶；在 SecretRef 解析前冻结文件名，上界随 config replace 保留，不含凭据值。"""
+    paths = []
+    for value in getattr(config, 'host_exclusive_path_roots', ()) or ():
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError('HOST_EXCLUSIVE_SOURCE_INVALID')
+        paths.append(path.resolve(strict=False))
+    config_path = getattr(config, 'config_path', '')
+    if config_path:
+        path = Path(config_path).expanduser()
+        if not path.is_absolute():
+            raise ValueError('HOST_EXCLUSIVE_SOURCE_INVALID')
+        paths.append(path.resolve(strict=False))
+    if is_dataclass(config) and not isinstance(config, type):
+        sources = getattr(config, 'config_sources', {}) or {}
+        for item in fields(config):
+            if not (item.metadata.get('secret_ref') or item.metadata.get('credential_environment_source')):
+                continue
+            source = sources.get(item.name, {}) if isinstance(sources, dict) else {}
+            values = (getattr(config, item.name), source.get('source') if isinstance(source, dict) else None)
+            for value in values:
+                if isinstance(value, str) and value.strip().startswith('file:'):
+                    path = Path(value.strip()[5:].strip()).expanduser()
+                    if not path.is_absolute():
+                        raise ValueError('HOST_EXCLUSIVE_SOURCE_INVALID')
+                    paths.append(path.resolve(strict=False))
+    return tuple(dict.fromkeys(paths))
+
+
+def _host_source_contains(path: Path, source: Path) -> bool:
+    """大小写相似不等于同文件；按真实身份区分敏感卷的业务文件，无法核验时保持拒绝。"""
+    if path.is_relative_to(source):
+        return True
+    if _relative_folded(path, source) is None:
+        return False
+    candidate = Path(*path.parts[:len(source.parts)])
+    try:
+        return candidate.samefile(source)
+    except OSError:
+        return True
+
+
 # LLM: H3 凭据只做路径运算（声明见 HOST_CREDENTIAL_HOME_PARTS）：命中声明位置、数据根 config/ 下的 YAML 配置文件（含备份），
 #   或 owner home 之外名为 secrets 的目录时返回命中的那一层，否则 None。owner home 里是用户自己的工作，不按目录名拦。
 # 函数用途: 判断一个已解析路径是否是宿主凭据。
@@ -861,14 +924,15 @@ class HostSandboxPaths:
 #   生产shell保留具体路径合同，最终Seatbelt编译器再压缩；已知owner不枚举他人，Linux挂载保持具体覆盖。
 # 函数用途: 返回本次新鲜路径快照，或调用方明确选择的Darwin固定拒绝投影。
 def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, system: str | None = None,
-                       *, compact: bool = False) -> HostSandboxPaths:
+                       *, compact: bool = False, config: object | None = None) -> HostSandboxPaths:
     mac = (system or platform.system()).casefold() == "darwin"
     if compact and mac and owner_home is None:
-        return _macos_all_owner_paths(agent_home_root)
+        result = _macos_all_owner_paths(agent_home_root)
+        return replace(result, hidden=tuple(dict.fromkeys((*result.hidden, *host_exclusive_paths(agent_home_root, config)))))
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
     return HostSandboxPaths(
         readonly=_readonly_from_homes(agent_home_root, homes, include_home=owner_home is None),
-        hidden=_hidden_from_homes(homes),
+        hidden=tuple(dict.fromkeys((*_hidden_from_homes(homes), *host_exclusive_paths(agent_home_root, config)))),
         patterns=_patterns_from_homes(homes) if mac else (),
         directory_write_patterns=_patterns_from_homes(homes, directory_operation="write") if mac else (),
         directory_unlink_patterns=_patterns_from_homes(homes, directory_operation="unlink") if mac else (),
@@ -1105,6 +1169,8 @@ __all__ = [
     "granted_external_work_roots",
     "host_config_root_for_path",
     "host_credential_for_path",
+    "host_exclusive_paths",
+    "configured_host_source_paths",
     "host_readonly_paths",
     "host_readonly_patterns",
     "host_state_for_path",

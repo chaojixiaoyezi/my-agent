@@ -723,6 +723,13 @@ class ToolHandlerOutcome:
     failure_stage: str = ""
     # End-to-end registry dispatch duration for this attempt, including pre-handler gates.
     duration_ms: int = 0
+    # 可核实身份与阶段只由实际执行边界提供；保存失败不能清掉已经开始的原操作。
+    operation_id: str = field(default="", kw_only=True)
+    attempt_id: str = field(default="", kw_only=True)
+    workflow_run_id: str = field(default="", kw_only=True)
+    phase: str = field(default="", kw_only=True)
+    component_receipts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
+    diagnostic_ref: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
         self.handler_executed = bool(self.handler_executed)
@@ -906,6 +913,9 @@ class ToolOperationReconciliationContext:
     idempotency_key: str
     idempotency_scope: str
     prior_result: dict[str, Any] = field(default_factory=dict)
+    # 首次消息发送时间，不是上传时间或 handler 开始时间；旧记录缺事实保持 None。
+    first_dispatch_at: float | None = field(default=None, kw_only=True)
+    component_receipts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
 
 
 # LLM: 核对器只能返回约定的机器结论；safe_to_retry 也必须来自已注册 provider 的结构化幂等能力。

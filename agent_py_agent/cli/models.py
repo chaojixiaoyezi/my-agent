@@ -17,6 +17,21 @@ from pathlib import Path
 from typing import Any
 
 from ..agent.conversation.background_shutdown import BackgroundShutdown
+from ..agent.gateway_parts.status_rendering import GatewayReadiness as _GatewayReadiness
+
+
+@dataclass(frozen=True)
+class GatewayReadiness(_GatewayReadiness):
+    """沿原就绪观察增量承运重启结果，不重建生命周期或推断排空成功。"""
+
+    restart_request_id: str = field(default="", kw_only=True)
+    expected_generation: object = field(default=None, kw_only=True)
+    observed_generation: object = field(default=None, kw_only=True)
+    ready_observation: dict[str, Any] | None = field(default=None, kw_only=True)
+    cleanup_result: dict[str, Any] | None = field(default=None, kw_only=True)
+    forced_after_drain_timeout: bool = field(default=False, kw_only=True)
+    unresolved_operation_refs: tuple[str, ...] = field(default=(), kw_only=True)
+    notification_results: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
 
 
 @dataclass

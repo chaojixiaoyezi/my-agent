@@ -9,7 +9,21 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..conversation.channels import ComponentDeliveryReceipt as ComponentDeliveryReceipt
 from .feishu_media import extract_feishu_content
+
+
+@dataclass(frozen=True)
+class ChannelStopResult:
+    """停止请求、真实退出观察和退出未确认分开；本对象本身不停止线程。"""
+
+    status: str = "exit_unconfirmed"
+    generation_ref: object = None
+    reason_code: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in {"stop_requested", "exited", "exit_unconfirmed"}:
+            raise ValueError("invalid channel stop status")
 
 
 # LLM: 这是运输受理回执，不代表模型执行或外部回复成功；WS/webhook 只能据它提交或释放原去重 claim。

@@ -119,6 +119,7 @@ from .memory_store.learning_exclusions import (
     curator_learning_exclusions_revision,
 )
 from .memory_store.migration import MemoryMigrationService
+from .path_access_policy import host_exclusive_paths
 from .prompting_parts import PromptBuilder
 from .runtime_context import ThreadLocalAgentAttribute, current_subagent_run_id
 from .runtime_db.operation_store_selector import select_operation_store
@@ -1019,6 +1020,22 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
+def build_script_work_context(agent: SimpleAgent, *, scratch_dir: Path, run_id: str = '', task_id: str = '',
+                              effective_path_scope: object):
+    """供原脚本启动器冻结真实工作区；scratch 和有效读写范围必须由宿主显式传入。"""
+    from .workflows.models import ScriptWorkContext
+
+    return ScriptWorkContext(workspace_root=agent.effective_workspace_root, scratch_dir=scratch_dir,
+                             run_id=run_id, task_id=task_id, effective_path_scope=effective_path_scope)
+
+
+def _tool_registry_host_exclusive_kwargs(home_paths: object, config: AgentConfig) -> dict[str, object]:
+    """公共合同先行时保持旧注册器构造；新注册字段已落地时转运唯一来源投影。"""
+    if 'host_exclusive_paths' not in ToolRegistryParams.__dataclass_fields__:
+        return {}
+    return {'host_exclusive_paths': host_exclusive_paths(home_paths, config)}
+
+
 # LLM: ToolRegistry唯一装配入口；原defer/owner/凭据/审批不变，动态内网名单缺agent.config时按空集关闭而非异常。
 # 函数用途: 按身份和工作区装配工具及动态内网配置，完整agent与显式配置装配宿主共用原接线。
 # LLM: 只给当前owner工具表注入真实Agent供节点库/源会话读取；推送仍走原Registry审批和出站单向网络门，构造不外发。
@@ -1122,6 +1139,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             permission_state_reader=partial(read_permission_state, agent.home_paths),
             self_context_provider=partial(tool_self_context, agent),
             plugin_gate_reviewer=_build_plugin_gate_reviewer(agent, config),
+            **_tool_registry_host_exclusive_kwargs(agent.home_paths, config),
         )
     )
 

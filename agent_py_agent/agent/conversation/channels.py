@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Protocol
 
 from .user_visible_text import sanitize_user_visible_text
@@ -225,6 +226,14 @@ def redact_delivery_context_identifiers(text: str, context: DeliveryContext) -> 
     )
 
 
+class DeliveryReplyPolicy(str, Enum):
+    """空值沿旧行为；reference 保留引用回复，thread 仅在提供方边界映射话题开关。"""
+
+    INHERIT = ""
+    REFERENCE = "reference"
+    THREAD = "thread"
+
+
 # LLM: 投递上下文只由入站适配器、owner 配置或会话绑定构造；模型输出不得覆盖 channel/target/reply_to。
 # 类用途: 保存一次回复要送往哪里的可信路由，以及回复原消息所需的通道上下文。
 @dataclass(frozen=True)
@@ -240,6 +249,11 @@ class DeliveryContext:
     task_id: str = ""
     # 外部 provider 原生去重只接收程序生成的稳定键；ReplyEnvelope/模型参数不能覆盖。
     idempotency_key: str = ""
+    # 空策略沿旧引用回复；只有 provider 边界将 thread 策略映射成 reply_in_thread。
+    reply_policy: str = field(default="", kw_only=True)
+    provider_thread_id: str = field(default="", kw_only=True)
+    root_id: str = field(default="", kw_only=True)
+    parent_id: str = field(default="", kw_only=True)
 
 
 # LLM: 回复信封只描述用户可见正文与已校验附件，不携带收件人；路由权威必须留在 DeliveryContext。
@@ -251,6 +265,21 @@ class ReplyEnvelope:
     format: str = "markdown"
     # 由工具结果、观察事件或任务账本提供的逻辑引用；DeliveryService 只搬运，不从正文提取。
     evidence_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ComponentDeliveryReceipt:
+    """一个稳定消息组件的提供方事实；上传成功不代表消息已送达。"""
+
+    component_id: str
+    message_key: str
+    first_dispatch_at: float | None = None
+    phase: str = ""
+    effect_outcome: str = "unknown"
+    upload_ref: str | None = None
+    provider_message_id: str | None = None
+    provider_code: str | int | None = None
+    payload_sha256: str = ""
 
 
 # LLM: 投递回执同时记录正文与结构化附件 ID，不能把附件路径拼回 content。
@@ -267,6 +296,10 @@ class DeliveryReceipt:
     attachment_ids: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
     receipt_id: str = ""
+    component_receipts: tuple[ComponentDeliveryReceipt, ...] = field(default=(), kw_only=True)
+    phase: str = field(default="", kw_only=True)
+    effect_outcome: str = field(default="", kw_only=True)
+    provider_code: str | int | None = field(default=None, kw_only=True)
 
 
 # LLM: 后台会话运行时只依赖这一最小投递协议，不能反向依赖网关或某个 provider 实现。
@@ -362,8 +395,10 @@ __all__ = [
     "INTERNAL_SIGNAL_PREFIXES",
     "PROACTIVE_PUSH_CHANNELS",
     "ChannelAttachment",
+    "ComponentDeliveryReceipt",
     "ChannelTargetDecision",
     "DeliveryContext",
+    "DeliveryReplyPolicy",
     "DeliveryReceipt",
     "DeliveryServiceProtocol",
     "FakeDeliveryAdapter",

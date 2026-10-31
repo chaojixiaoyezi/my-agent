@@ -28,6 +28,8 @@ class AssetGrant:
     asset_id: str
     revision: int
     sha256: str
+    # 有值时由资产执行入口比较定义身份；旧 revision/sha256 授权与旧等值规则不变。
+    execution_definition_ref: str = field(default="", kw_only=True)
 
     # LLM: 资产引用只接受固定种类、正修订和完整hash，不接受路径或通配符。
     # 函数用途: 在构造授权投影时拒绝畸形资产许可。

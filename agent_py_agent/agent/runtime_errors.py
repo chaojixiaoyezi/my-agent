@@ -251,7 +251,7 @@ def _host_stopping_report(
 
 # 环境类原因：进程外部条件导致的失败（磁盘满、权限、IO、SQLite 运行期错误如 disk full/locked/unable to open），
 # 不是代码逻辑错误。只看异常类型，不看消息文本，也不特判某个 errno。
-_ENVIRONMENT_CAUSE_TYPES: tuple[type[BaseException], ...] = (OSError, sqlite3.OperationalError)
+_ENVIRONMENT_CAUSE_TYPES: tuple[type[BaseException], ...] = (OSError, sqlite3.Error)
 
 
 # LLM: 本地形状错误（出站协议合同在发送前拦下，请求根本没发出）是请求拒绝的子类，必须先判，不能套"模型服务拒绝了本次请求"
@@ -302,12 +302,20 @@ def _environment_cause(exc: BaseException) -> BaseException | None:
 
 # LLM: 报告与账本共用的环境归因字段：cause_type 是根因类型名，cause_category 是它按 _builtin_category 的类别（OSError/
 #   sqlite3.OperationalError 都是 io）。不改外层 category；没有环境根因返回空字典，调用方 update 即可保持 schema 稳定。
-# 函数用途: 给包装异常补"根因是什么环境错误"两个字段。
-def environment_cause_fields(exc: BaseException) -> dict[str, str]:
+# 函数用途: 投影显式原因链的原生类型和 SQLite 数值码，不解析异常文案，也不改变外层分类。
+def environment_cause_fields(exc: BaseException) -> dict[str, str | int]:
     cause = _environment_cause(exc)
     if cause is None:
         return {}
-    return {"cause_type": cause.__class__.__name__, "cause_category": _builtin_category(cause)}
+    result: dict[str, str | int] = {"cause_type": cause.__class__.__name__, "cause_category": _builtin_category(cause)}
+    if isinstance(cause, sqlite3.Error):
+        code = getattr(cause, 'sqlite_errorcode', None)
+        name = getattr(cause, 'sqlite_errorname', None)
+        if type(code) is int:
+            result['sqlite_error_code'] = code
+        if isinstance(name, str) and name:
+            result['sqlite_error_name'] = name
+    return result
 
 
 def compact_error_message(exc: BaseException, *, max_chars: int = _MAX_ERROR_TEXT_CHARS) -> str:

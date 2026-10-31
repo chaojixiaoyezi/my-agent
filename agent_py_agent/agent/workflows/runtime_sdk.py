@@ -2,11 +2,14 @@
 # 模块用途: 以不可篡改合同提供逻辑代号句柄和参数化SQLite查询。
 from __future__ import annotations
 
+import json
+import os
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
+from pathlib import Path, PureWindowsPath
 
 from ..assets.datasource_store import (
     DatasourceConnectionSpec,
@@ -15,6 +18,15 @@ from ..assets.datasource_store import (
     secret_values,
 )
 from .datasource_runtime import current_datasource_bindings
+from .models import (
+    SCRIPT_OUTPUT_PROTOCOL_VERSION as SCRIPT_OUTPUT_PROTOCOL_VERSION,
+)
+from .models import (
+    SCRIPT_WORK_CONTEXT_SCHEMA_VERSION,
+    DeliveryIntent,
+    ScriptWorkContext,
+    ScriptWorkContextError,
+)
 
 # 可信bootstrap在用户代码之前导入SDK；宿主无run环境时不创建或缓存空上下文。
 current_datasource_bindings()
@@ -24,6 +36,64 @@ _READ_ONLY = 'DATASOURCE_READ_ONLY_VIOLATION'
 _READ_ACTIONS = frozenset(getattr(sqlite3, name) for name in (
     'SQLITE_SELECT', 'SQLITE_READ', 'SQLITE_FUNCTION', 'SQLITE_RECURSIVE', 'SQLITE_TRANSACTION', 'SQLITE_SAVEPOINT'))
 _MUTATING_START = re.compile(r'\A(?:\s|--[^\n]*(?:\n|$)|/\*.*?\*/)*(?:INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|ANALYZE)\b', re.I | re.S)
+
+WORK_CONTEXT_ENV = 'MY_AGENT_SCRIPT_WORK_CONTEXT_JSON'
+WORK_CONTEXT_FILE_ENV = 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE'
+_MAX_WORK_CONTEXT_BYTES = 64 * 1024
+
+
+def get_work_context() -> ScriptWorkContext:
+    """解析宿主注入的显式视图；缺失失败，不以脚本临时 cwd 猜业务根。"""
+    inline = os.environ.get(WORK_CONTEXT_ENV)
+    source = os.environ.get(WORK_CONTEXT_FILE_ENV)
+    if inline is None and source is None:
+        raise ScriptWorkContextError('SCRIPT_WORK_CONTEXT_MISSING')
+    try:
+        if inline is not None and source is not None:
+            raise ValueError('ambiguous source')
+        if source is not None:
+            path = Path(source)
+            if not path.is_absolute():
+                raise ValueError('absolute context source required')
+            with path.open('rb') as stream:
+                raw = stream.read(_MAX_WORK_CONTEXT_BYTES + 1)
+        else:
+            raw = inline.encode('utf-8')
+        if len(raw) > _MAX_WORK_CONTEXT_BYTES:
+            raise ValueError('context too large')
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get('schema_version') != SCRIPT_WORK_CONTEXT_SCHEMA_VERSION:
+            raise ValueError('invalid context schema')
+        return ScriptWorkContext(workspace_root=Path(data['workspace_root']), scratch_dir=Path(data['scratch_dir']),
+                                 run_id=data.get('run_id', ''), task_id=data.get('task_id', ''),
+                                 effective_path_scope=data['effective_path_scope'])
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        raise ScriptWorkContextError('SCRIPT_WORK_CONTEXT_INVALID') from None
+
+
+def resolve_workspace_path(relative_path: str, *, write: bool = False) -> Path:
+    """仅解析，不创建文件；同时检查真实工作区和原读写范围，包括符号链接目标。"""
+    if (not isinstance(relative_path, str) or not relative_path or relative_path != relative_path.strip()
+            or any(ord(c) < 32 for c in relative_path) or Path(relative_path).is_absolute()
+            or PureWindowsPath(relative_path).drive or relative_path.startswith(('~', '\\'))
+            or '..' in relative_path.replace('\\', '/').split('/') or type(write) is not bool):
+        raise ScriptWorkContextError('SCRIPT_WORKSPACE_PATH_INVALID')
+    context = get_work_context()
+    try:
+        path = (context.workspace_root / relative_path).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        raise ScriptWorkContextError('SCRIPT_WORKSPACE_PATH_INVALID') from None
+    if not path.is_relative_to(context.workspace_root):
+        raise ScriptWorkContextError('PATH_OUTSIDE_WORKSPACE')
+    roots = context.effective_path_scope['write_roots' if write else 'read_roots']
+    if not any(path.is_relative_to(root) for root in roots):
+        raise ScriptWorkContextError('PATH_SCOPE_VIOLATION')
+    return path
+
+
+def emit_delivery_request(message: str = '', output_refs: tuple[str, ...] = (), *, request_key: str) -> DeliveryIntent:
+    """构造不可变意向，无 IO 或隐式队列；同 key 同输入得到相同值，由宿主按原 run 幂等受理。"""
+    return DeliveryIntent(request_key=request_key, message=message, output_refs=output_refs)
 
 
 # LLM: 公共句柄只展示脱敏规格，秘密及内部规格不进入repr；不能由句柄绕过query_sql的声明门。

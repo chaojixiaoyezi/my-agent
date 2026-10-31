@@ -22,7 +22,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..path_access_policy import DEFAULT_DANGEROUS_PATH_ROOTS, DEFAULT_PATH_ACCESS_MODE
+from ..path_access_policy import (
+    DEFAULT_DANGEROUS_PATH_ROOTS,
+    DEFAULT_PATH_ACCESS_MODE,
+    configured_host_source_paths,
+)
 from ..user_space.home_root import ConfiguredHomeSnapshot
 from .config_io import load_simple_yaml, parse_scalar
 from .config_sources import (
@@ -301,10 +305,15 @@ class _RuntimeBudgetConfigFields:
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
+    # 只供宿主冻结 SecretRef 文件来源；不接受 YAML、owner/task 参数，也不进入参数中心。
+    host_exclusive_path_roots: tuple[str, ...] = field(default=(), kw_only=True, repr=False,
+                                                     metadata={"host_only": True})
+
     # LLM: 构造和 replace 共用部署校验；不再按历史比例或调用帧推断用户是否显式提供 canonical 字段。
     # 函数用途: 校验拓扑并清洗私网名单，压缩比例仅使用当前字段。
     def __post_init__(self) -> None:
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
+        self.host_exclusive_path_roots = tuple(str(path) for path in configured_host_source_paths(self))
         values = self.allowed_private_hosts
         self.allowed_private_hosts = (
             [item.strip() for item in values if isinstance(item, str) and item.strip()]
@@ -564,6 +573,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     im_stream_preview_max_chars: int = 100
     # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。
     im_stream_heartbeat_seconds: float = 120.0
+    # 可选话题聚合；默认关闭，沿原引用回复，不把 provider topic 当作应用内部 thread_id。
+    im_topic_aggregation_enabled: bool = field(default=False, kw_only=True)
+    # 可选执行事件进度卡片；默认关闭，保持原文本首发与展示类型，不改变任务终态。
+    im_progress_cards_enabled: bool = field(default=False, kw_only=True)
     # 空查询复核只增加共享模型提示，基线由模型在原权限/预算内执行，不启动自动查询或告警。
     query_zero_result_review_enabled: bool = True
     # 仅显式选择 delivery.reply_policy=explicit 的后台任务使用结构化公开回执；旧 always 策略不变。
@@ -700,6 +713,7 @@ def load_config(config_path: str | Path) -> AgentConfig:
     config.config_warnings = config_warnings
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)
+    config.host_exclusive_path_roots = tuple(str(source) for source in configured_host_source_paths(config))
 
     normalize_agent_memory_config(config)
     apply_log_level(config)
