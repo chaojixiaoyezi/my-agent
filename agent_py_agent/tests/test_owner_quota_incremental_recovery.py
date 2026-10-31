@@ -2081,3 +2081,166 @@ def test_r12_invalidated_preimage_and_staged_settlement_errors_preserve_dirty_st
             retry_target.write_bytes(b'z')
     monkeypatch.setattr(quota, '_quota_entries', real_entries)
     assert not retry_target.exists()
+
+
+@pytest.mark.parametrize(
+    'scenario',
+    [
+        'fg_scan_error_unstaged',
+        'fg_scan_error_staged',
+        'fg_checkpoint_error_unstaged',
+        'fg_checkpoint_error_staged',
+        'bg_new_pass_read_error',
+        'bg_hot_read_error',
+    ],
+)
+def test_r13_scan_and_checkpoint_exceptions_preserve_observed_invalidation(
+    tmp_path,
+    monkeypatch,
+    scenario,
+):
+    """R13-QUOTA-01: 前台快照或后台切片观察到目录失效后若在后续目录读取或首个checkpoint抛异常，仍须保留dirty_since与metadata_invalidated。"""
+    _r7_clear_scans()
+    root = tmp_path / 'owner'
+    root.mkdir()
+    for idx in range(22):
+        sub = root / f'a{idx:02d}'
+        sub.mkdir()
+        (sub / '0.bin').write_bytes(b'x')
+    _r7_finish(root)
+    assert _r7_ledger(root)['used_bytes'] == 22
+
+    enforcer = quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024)
+    target_info = (root / 'a16').stat()
+    events = []
+
+    if scenario.startswith('fg_'):
+        staged = scenario.endswith('_staged')
+        mode = 'scan_error' if 'scan_error' in scenario else 'checkpoint_error'
+        existing = root / 'a00' / '0.bin'
+        stage = root / 'a00' / 'stage.bin'
+        real_scandir = os.scandir
+        real_write = quota._write_quota_ledger
+
+        class _Entry:
+            def __init__(self, entry, fd_arg):
+                self._entry = entry
+                self._fd_arg = fd_arg
+
+            def __getattr__(self, name):
+                return getattr(self._entry, name)
+
+            def stat(self, **kwargs):
+                info = os.fstat(self._fd_arg)
+                if (
+                    not events
+                    and self._entry.name == '0.bin'
+                    and (info.st_dev, info.st_ino) == (target_info.st_dev, target_info.st_ino)
+                ):
+                    events.append('filesystem_change')
+                    (root / 'a12' / 'large.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+                    (root / 'a16' / '0.bin').unlink()
+                return self._entry.stat(**kwargs)
+
+        class _Entries:
+            def __init__(self, fd_arg):
+                self._fd_arg = fd_arg
+                self._inner = real_scandir(fd_arg)
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._inner.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if (
+                    mode == 'scan_error'
+                    and events == ['filesystem_change']
+                    and (quota._QUOTA_SNAPSHOT_STATE.get() or {}).get('metadata_invalidated')
+                ):
+                    events.append('readdir_error_after_observed_invalidation')
+                    raise OSError('transient next directory read error')
+                return _Entry(next(self._inner), self._fd_arg)
+
+            def close(self):
+                self._inner.close()
+
+        def _write(root_arg, data):
+            if (
+                mode == 'checkpoint_error'
+                and events == ['filesystem_change']
+                and data.get('dirty_since') is not None
+                and data.get('reconcile_cursor', {}).get('metadata_invalidated')
+            ):
+                events.append('checkpoint_error_before_atomic_replacement')
+                raise OSError('transient ledger checkpoint error')
+            return real_write(root_arg, data)
+
+        with pytest.raises(OSError, match='transient'):
+            with enforcer.admission() as admission:
+                if staged:
+                    admission.check([quota.OwnerQuotaChange(stage, 3)])
+                    stage.write_bytes(b'abc')
+                monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'scandir': _Entries}))
+                monkeypatch.setattr(quota, 'time', SimpleNamespace(**{**vars(quota.time), 'monotonic': lambda: 0.0}))
+                monkeypatch.setattr(quota, '_write_quota_ledger', _write)
+                try:
+                    admission.check([quota.OwnerQuotaChange(existing, 1)])
+                finally:
+                    monkeypatch.undo()
+    else:
+        hot = scenario == 'bg_hot_read_error'
+        if hot:
+            active = quota.reconcile_owner_quota_slice(root, max_entries=8, max_ms=5000)
+            assert not active['complete']
+        fail_info = (root / 'a17').stat()
+        orig_stat = os.stat
+        failed = [False]
+
+        def _stat_func(path_arg, *pos, **kw):
+            fd_arg = kw.get('dir_fd')
+            if fd_arg is not None and path_arg == '0.bin':
+                at = os.fstat(fd_arg)
+                if not events and (at.st_dev, at.st_ino) == (target_info.st_dev, target_info.st_ino):
+                    events.append('filesystem_change')
+                    (root / 'a12' / 'large.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+                    (root / 'a16' / '0.bin').unlink()
+                if events and not failed[0] and (at.st_dev, at.st_ino) == (fail_info.st_dev, fail_info.st_ino):
+                    failed[0] = True
+                    raise OSError('transient background stat failure')
+            return orig_stat(path_arg, *pos, **kw)
+
+        monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'stat': _stat_func}))
+        with pytest.raises(OSError, match='transient background stat failure'):
+            quota.reconcile_owner_quota_slice(root, max_entries=100, max_ms=5000)
+        monkeypatch.undo()
+        assert (os.getpid(), str(root)) not in quota._QUOTA_SCANS
+
+    ledger = _r7_ledger(root)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reconcile_cursor'].get('metadata_complete') is False
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+
+    real_entries = quota._quota_entries
+    delayed = [False]
+
+    def _delayed_entries(owner, parts=()):
+        for item in real_entries(owner, parts):
+            if not delayed[0]:
+                delayed[0] = True
+                quota.time.sleep(0.02)
+            yield item
+
+    retry_target = root / 'a21' / 'retry.bin'
+    monkeypatch.setattr(quota, '_quota_entries', _delayed_entries)
+    with pytest.raises(quota.OwnerQuotaUnavailable):
+        with enforcer.reserve([quota.OwnerQuotaChange(retry_target, 1)]):
+            retry_target.write_bytes(b'z')
+    monkeypatch.setattr(quota, '_quota_entries', real_entries)
+    assert not retry_target.exists()

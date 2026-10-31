@@ -253,6 +253,7 @@ class OwnerQuotaAdmission:
         self._reservation = uuid.uuid4().hex
         self._authoritative_baseline = False
         self._ledger = None
+        self._invalidated = False
 
     # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
     # 函数用途: 计算本批增长并在写入前持久预留。
@@ -297,14 +298,19 @@ class OwnerQuotaAdmission:
                 total, count, complete = _bounded_quota_snapshot(root, max_entries=128, max_ms=10)
             finally:
                 _QUOTA_SNAPSHOT_STATE.reset(token)
-            if snapshot.get('metadata_invalidated'):
-                complete = False
-                snapshot_invalidated = True
-        if snapshot_invalidated:
-            ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
-            if isinstance(ledger.get('reconcile_cursor'), dict):
-                _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
-            _write_quota_ledger(root, ledger)
+                if snapshot.get('metadata_invalidated'):
+                    complete = False
+                    snapshot_invalidated = True
+                    self._invalidated = True
+                    self._ledger = None
+                    ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+                    if isinstance(ledger.get('reconcile_cursor'), dict):
+                        _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
+                    else:
+                        ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
+                    _write_quota_ledger(root, ledger)
+                    if not self._before:
+                        self._invalidated = False
         # 已先持久化观察失效，同一准入分阶段调用时结算上阶段及后续前像读取失败均保留该事实。
         if not complete and self._before:
             self.commit_delta()
@@ -325,6 +331,7 @@ class OwnerQuotaAdmission:
         if projection.projected_bytes > projection.max_bytes and projection.projected_bytes > used:
             raise OwnerQuotaExceeded(projection)
         if complete:
+            self._invalidated = False
             self._before_children.clear()
             ledger.update(used_bytes=total, inode_count=count, dirty_since=None)
             # 所有正规写者都持同一owner锁；拿到锁时旧预留只可能是退出未确认的遗留。
@@ -366,7 +373,7 @@ class OwnerQuotaAdmission:
     # LLM: 即使业务抛异常也核实际大小；读回失败保留预留和dirty，不能伪造abort成功。
     # 函数用途: 以真实文件差值结算本次预留，不把预计final_size当实际写入。
     def commit_delta(self):
-        if not self.enabled or not self._before:
+        if not self.enabled or (not self._before and not self._invalidated):
             return
         root = self._enforcer.owner_root
         # 整个准入持同一owner锁；账本文件身份未变即是本准入刚写的那份，免去一次大账本读取与解析。
@@ -375,32 +382,48 @@ class OwnerQuotaAdmission:
             ledger = cached[0]
         else:
             ledger = _read_quota_ledger(root)
-        after = {path: _logical_file_size(path) for path in self._before}
-        after_inodes = {path: _billed_file_inode(root, path) for path in self._before}
-        delta = sum(after[path] - before for path, before in self._before.items())
-        ledger['used_bytes'] = max(0, ledger['used_bytes'] + delta)
-        ledger['inode_count'] = max(0, ledger['inode_count'] + sum(
-            after_inodes[path] - self._before_inodes[path] for path in self._before))
-        ledger['reservations'].pop(self._reservation, None)
-        ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
-        root_vouched = _quota_root_vouched(root, ledger['revision'])
-        ledger['revision'] += 1
-        cursor = ledger.get('reconcile_cursor')
-        synced = isinstance(cursor, dict) and cursor.get('ledger_revision') == ledger['revision'] - 1
-        if synced and cursor.get('complete') is True:
-            if ledger.get('dirty_since') is None and not ledger['reservations']:
-                if _refresh_quota_baseline(root, cursor, self._before_children, root_vouched=root_vouched):
-                    cursor['ledger_revision'] = ledger['revision']
-                else:
-                    ledger['dirty_since'] = time.time()
-        elif synced and cursor.get('complete') is False:
-            # 进行中的对账不因受控写重来：已扫过的路径补差额，变过目录项的窗口作废重枚举；目录核对不通过即置脏。
-            if not _apply_quota_pass_changes(root, cursor, {
-                    path: (self._before[path], after[path], self._before_inodes[path], after_inodes[path])
-                    for path in self._before}, self._before_children, root_vouched=root_vouched):
-                ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
-            cursor['ledger_revision'] = ledger['revision']
-        _write_quota_ledger(root, ledger)
+        if self._invalidated:
+            ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+            if isinstance(ledger.get('reconcile_cursor'), dict):
+                _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
+            else:
+                ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
+        if not self._before:
+            _write_quota_ledger(root, ledger)
+            self._invalidated = False
+            return
+        try:
+            after = {path: _logical_file_size(path) for path in self._before}
+            after_inodes = {path: _billed_file_inode(root, path) for path in self._before}
+            delta = sum(after[path] - before for path, before in self._before.items())
+            ledger['used_bytes'] = max(0, ledger['used_bytes'] + delta)
+            ledger['inode_count'] = max(0, ledger['inode_count'] + sum(
+                after_inodes[path] - self._before_inodes[path] for path in self._before))
+            ledger['reservations'].pop(self._reservation, None)
+            ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
+            root_vouched = _quota_root_vouched(root, ledger['revision'])
+            ledger['revision'] += 1
+            cursor = ledger.get('reconcile_cursor')
+            synced = isinstance(cursor, dict) and cursor.get('ledger_revision') == ledger['revision'] - 1
+            if synced and cursor.get('complete') is True:
+                if ledger.get('dirty_since') is None and not ledger['reservations']:
+                    if _refresh_quota_baseline(root, cursor, self._before_children, root_vouched=root_vouched):
+                        cursor['ledger_revision'] = ledger['revision']
+                    else:
+                        ledger['dirty_since'] = time.time()
+            elif synced and cursor.get('complete') is False:
+                # 进行中的对账不因受控写重来：已扫过的路径补差额，变过目录项的窗口作废重枚举；目录核对不通过即置脏。
+                if not _apply_quota_pass_changes(root, cursor, {
+                        path: (self._before[path], after[path], self._before_inodes[path], after_inodes[path])
+                        for path in self._before}, self._before_children, root_vouched=root_vouched):
+                    ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+                cursor['ledger_revision'] = ledger['revision']
+            _write_quota_ledger(root, ledger)
+            self._invalidated = False
+        finally:
+            if self._invalidated:
+                _write_quota_ledger(root, ledger)
+                self._invalidated = False
 
         self._before.clear()
         self._before_inodes.clear()
@@ -1771,73 +1794,85 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 scan['scanned'] += 1
                 scan['last_relpath'] = relpath
                 scanned += 1
+            identity = root.stat(follow_symlinks=False)
+            cursor_payload = {
+                'epoch': scan['epoch'], 'scanned': scan['scanned'], 'complete': complete,
+                'last_relpath': scan['last_relpath'], 'partial_used_bytes': scan['used'],
+                'partial_inode_count': scan['inodes'], 'started_at': scan['started_at'], 'updated_at': time.time(),
+                'orphans': scan['orphans'],
+                'ledger_revision': ledger['revision'], 'root_dev': identity.st_dev, 'root_ino': identity.st_ino}
+            if scan['settling'] and not complete:
+                cursor_payload.update(settling=True, settling_rel=scan.get('settling_rel'))
+            cursor_payload.update(_quota_metadata_payload(scan['state']))
+            # 准入核验的轮转位置跨片保留，免得每片都从表头重核同一批目录。
+            if isinstance(previous, dict) and type(previous.get('verify_pos')) is int:
+                cursor_payload['verify_pos'] = previous['verify_pos']
+            prep_state = scan.get('state', {}).get('prep') if isinstance(scan.get('state'), dict) else None
+            if not complete and isinstance(prep_state, dict):
+                checkpoint = scan['state'].get('_checkpoint_fn')
+                if callable(checkpoint):
+                    point = checkpoint()
+                    prep_state.update(dir_offset=point['offset'], block_skip=0, native_pending=point['pending'])
+                cursor_payload['prep'] = _persisted_quota_prep(prep_state)
+            batches = scan['state'].get('dir_batches', {})
+            for rel, batch in list(batches.items()):
+                prefix = rel + '/' if rel else ''
+                batch['names'] = [name for name in batch['names'] if prefix + name > scan['last_relpath']]
+                batch['control_names'] = [name for name in batch.get('control_names', [])
+                                          if prefix + name > scan['last_relpath']]
+                if not batch['names'] or rel and not scan['last_relpath'].startswith(prefix):
+                    del batches[rel]
+            if not complete:
+                persisted, names_count, names_bytes = {}, 0, 0
+                for rel, batch in batches.items():
+                    names = []
+                    for name in batch['names']:
+                        size = len(os.fsencode(name))
+                        if (names_count >= _QUOTA_MAX_PERSISTED_DIR_ENTRIES
+                                or names_bytes + size > _QUOTA_MAX_PERSISTED_NAME_BYTES):
+                            break
+                        names.append(name)
+                        names_count += 1
+                        names_bytes += size
+                    if names:
+                        persisted[rel] = {**batch, 'names': names,
+                                          'overflow': bool(batch.get('overflow')) or len(names) < len(batch['names'])}
+                cursor_payload['dir_batch'] = persisted
+            if scan['state'].get('metadata_invalidated'):
+                scan['dirty'] = True
+            if complete:
+                # 清点放弃过的目录未补正或枚举观察失效，总量照常发布但保持脏，由下一轮补正后才恢复增长。
+                ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'],
+                              dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
+                scan['iterator'].close()
+                _QUOTA_SCANS.pop(key, None)
+            else:
+                if scan.get('dirty'):
+                    ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+                # 账本替换会掩盖本片内root的其它改动，必须在写账本前核对。
+                _quota_scan_root_clean(root, scan)
+            ledger['reconcile_cursor'] = cursor_payload
+        except BaseException:
+            scan['iterator'].close()
+            _QUOTA_SCANS.pop(key, None)
+            if scan['state'].get('metadata_invalidated') or scan.get('dirty'):
+                ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+                if isinstance(ledger.get('reconcile_cursor'), dict):
+                    _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
+                else:
+                    ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
+                _write_quota_ledger(root, ledger)
+            raise
+        try:
+            # 未完成的一轮不改变账本可信度：干净账继续按受控写代次准入，脏账保持脏直到本轮完成。
+            _write_quota_ledger(root, ledger)
+            if not complete and scan['root_clean']:
+                info = root.stat(follow_symlinks=False)
+                scan['root_stamp'] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         except BaseException:
             scan['iterator'].close()
             _QUOTA_SCANS.pop(key, None)
             raise
-        identity = root.stat(follow_symlinks=False)
-        cursor_payload = {
-            'epoch': scan['epoch'], 'scanned': scan['scanned'], 'complete': complete,
-            'last_relpath': scan['last_relpath'], 'partial_used_bytes': scan['used'],
-            'partial_inode_count': scan['inodes'], 'started_at': scan['started_at'], 'updated_at': time.time(),
-            'orphans': scan['orphans'],
-            'ledger_revision': ledger['revision'], 'root_dev': identity.st_dev, 'root_ino': identity.st_ino}
-        if scan['settling'] and not complete:
-            cursor_payload.update(settling=True, settling_rel=scan.get('settling_rel'))
-        cursor_payload.update(_quota_metadata_payload(scan['state']))
-        # 准入核验的轮转位置跨片保留，免得每片都从表头重核同一批目录。
-        if isinstance(previous, dict) and type(previous.get('verify_pos')) is int:
-            cursor_payload['verify_pos'] = previous['verify_pos']
-        prep_state = scan.get('state', {}).get('prep') if isinstance(scan.get('state'), dict) else None
-        if not complete and isinstance(prep_state, dict):
-            checkpoint = scan['state'].get('_checkpoint_fn')
-            if callable(checkpoint):
-                point = checkpoint()
-                prep_state.update(dir_offset=point['offset'], block_skip=0, native_pending=point['pending'])
-            cursor_payload['prep'] = _persisted_quota_prep(prep_state)
-        batches = scan['state'].get('dir_batches', {})
-        for rel, batch in list(batches.items()):
-            prefix = rel + '/' if rel else ''
-            batch['names'] = [name for name in batch['names'] if prefix + name > scan['last_relpath']]
-            batch['control_names'] = [name for name in batch.get('control_names', [])
-                                      if prefix + name > scan['last_relpath']]
-            if not batch['names'] or rel and not scan['last_relpath'].startswith(prefix):
-                del batches[rel]
-        if not complete:
-            persisted, names_count, names_bytes = {}, 0, 0
-            for rel, batch in batches.items():
-                names = []
-                for name in batch['names']:
-                    size = len(os.fsencode(name))
-                    if (names_count >= _QUOTA_MAX_PERSISTED_DIR_ENTRIES
-                            or names_bytes + size > _QUOTA_MAX_PERSISTED_NAME_BYTES):
-                        break
-                    names.append(name)
-                    names_count += 1
-                    names_bytes += size
-                if names:
-                    persisted[rel] = {**batch, 'names': names,
-                                      'overflow': bool(batch.get('overflow')) or len(names) < len(batch['names'])}
-            cursor_payload['dir_batch'] = persisted
-        ledger['reconcile_cursor'] = cursor_payload
-        if scan['state'].get('metadata_invalidated'):
-            scan['dirty'] = True
-        if complete:
-            # 清点放弃过的目录未补正或枚举观察失效，总量照常发布但保持脏，由下一轮补正后才恢复增长。
-            ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'],
-                          dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
-            scan['iterator'].close()
-            _QUOTA_SCANS.pop(key, None)
-        else:
-            if scan.get('dirty'):
-                ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
-            # 账本替换会掩盖本片内root的其它改动，必须在写账本前核对。
-            _quota_scan_root_clean(root, scan)
-        # 未完成的一轮不改变账本可信度：干净账继续按受控写代次准入，脏账保持脏直到本轮完成。
-        _write_quota_ledger(root, ledger)
-        if not complete and scan['root_clean']:
-            info = root.stat(follow_symlinks=False)
-            scan['root_stamp'] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
                 'settled_entries': settled, 'replay_allowance': replay_allowance,
                 'used_bytes': ledger['used_bytes'],
