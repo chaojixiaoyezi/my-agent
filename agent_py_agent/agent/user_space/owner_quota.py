@@ -308,7 +308,13 @@ class OwnerQuotaAdmission:
                         _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
                     else:
                         ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
-                    _write_quota_ledger(root, ledger)
+                    try:
+                        _write_quota_ledger(root, ledger)
+                    except BaseException:
+                        _write_quota_ledger(root, ledger)
+                        if not self._before:
+                            self._invalidated = False
+                        raise
                     if not self._before:
                         self._invalidated = False
         # 已先持久化观察失效，同一准入分阶段调用时结算上阶段及后续前像读取失败均保留该事实。
@@ -392,6 +398,8 @@ class OwnerQuotaAdmission:
             _write_quota_ledger(root, ledger)
             self._invalidated = False
             return
+        invalidated_ledger = deepcopy(ledger) if self._invalidated else None
+        settled = False
         try:
             after = {path: _logical_file_size(path) for path in self._before}
             after_inodes = {path: _billed_file_inode(root, path) for path in self._before}
@@ -418,16 +426,22 @@ class OwnerQuotaAdmission:
                         for path in self._before}, self._before_children, root_vouched=root_vouched):
                     ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
                 cursor['ledger_revision'] = ledger['revision']
+            settled = True
             _write_quota_ledger(root, ledger)
             self._invalidated = False
+            self._before.clear()
+            self._before_inodes.clear()
+            self._before_children.clear()
         finally:
-            if self._invalidated:
+            if settled and self._before:
                 _write_quota_ledger(root, ledger)
                 self._invalidated = False
-
-        self._before.clear()
-        self._before_inodes.clear()
-        self._before_children.clear()
+                self._before.clear()
+                self._before_inodes.clear()
+                self._before_children.clear()
+            elif self._invalidated and invalidated_ledger is not None:
+                _write_quota_ledger(root, invalidated_ledger)
+                self._invalidated = False
 
     # LLM: abort仍须读回，异常不是零副作用证明。
     # 函数用途: 撤销未使用预留并结算可能已写部分。
@@ -1861,17 +1875,30 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                     _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
                 else:
                     ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
-                _write_quota_ledger(root, ledger)
+                try:
+                    _write_quota_ledger(root, ledger)
+                except BaseException:
+                    _write_quota_ledger(root, ledger)
             raise
+        ledger_written = False
         try:
             # 未完成的一轮不改变账本可信度：干净账继续按受控写代次准入，脏账保持脏直到本轮完成。
             _write_quota_ledger(root, ledger)
+            ledger_written = True
             if not complete and scan['root_clean']:
                 info = root.stat(follow_symlinks=False)
                 scan['root_stamp'] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         except BaseException:
             scan['iterator'].close()
             _QUOTA_SCANS.pop(key, None)
+            if not ledger_written and (scan['state'].get('metadata_invalidated') or scan.get('dirty')):
+                fallback = _read_quota_ledger(root)
+                fallback['dirty_since'] = fallback.get('dirty_since') or time.time()
+                if isinstance(fallback.get('reconcile_cursor'), dict):
+                    _drop_quota_metadata(fallback['reconcile_cursor'], invalidated=True)
+                else:
+                    fallback['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
+                _write_quota_ledger(root, fallback)
             raise
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
                 'settled_entries': settled, 'replay_allowance': replay_allowance,

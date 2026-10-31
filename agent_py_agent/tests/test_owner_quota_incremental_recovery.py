@@ -2092,6 +2092,10 @@ def test_r12_invalidated_preimage_and_staged_settlement_errors_preserve_dirty_st
         'fg_checkpoint_error_staged',
         'bg_new_pass_read_error',
         'bg_hot_read_error',
+        'bg_new_pass_checkpoint_error',
+        'bg_hot_checkpoint_error',
+        'bg_new_pass_rename_error_cold',
+        'bg_hot_rename_error_cold',
     ],
 )
 def test_r13_scan_and_checkpoint_exceptions_preserve_observed_invalidation(
@@ -2099,7 +2103,7 @@ def test_r13_scan_and_checkpoint_exceptions_preserve_observed_invalidation(
     monkeypatch,
     scenario,
 ):
-    """R13-QUOTA-01: 前台快照或后台切片观察到目录失效后若在后续目录读取或首个checkpoint抛异常，仍须保留dirty_since与metadata_invalidated。"""
+    """R13-QUOTA-01 & R14-QUOTA-01: 前台快照或后台切片观察到目录失效后若在后续目录读取、最终checkpoint或底层rename抛异常，仍须保留dirty_since与metadata_invalidated。"""
     _r7_clear_scans()
     root = tmp_path / 'owner'
     root.mkdir()
@@ -2194,12 +2198,16 @@ def test_r13_scan_and_checkpoint_exceptions_preserve_observed_invalidation(
                 finally:
                     monkeypatch.undo()
     else:
-        hot = scenario == 'bg_hot_read_error'
+        from agent_py_agent.agent.common import nofollow_fs as nf
+
+        hot = '_hot_' in scenario
         if hot:
             active = quota.reconcile_owner_quota_slice(root, max_entries=8, max_ms=5000)
             assert not active['complete']
         fail_info = (root / 'a17').stat()
         orig_stat = os.stat
+        orig_write = quota._write_quota_ledger
+        orig_rename = os.rename
         failed = [False]
 
         def _stat_func(path_arg, *pos, **kw):
@@ -2210,15 +2218,41 @@ def test_r13_scan_and_checkpoint_exceptions_preserve_observed_invalidation(
                     events.append('filesystem_change')
                     (root / 'a12' / 'large.bin').write_bytes(b'y' * (2 * 1024 * 1024))
                     (root / 'a16' / '0.bin').unlink()
-                if events and not failed[0] and (at.st_dev, at.st_ino) == (fail_info.st_dev, fail_info.st_ino):
+                if (
+                    'read_error' in scenario
+                    and events
+                    and not failed[0]
+                    and (at.st_dev, at.st_ino) == (fail_info.st_dev, fail_info.st_ino)
+                ):
                     failed[0] = True
                     raise OSError('transient background stat failure')
             return orig_stat(path_arg, *pos, **kw)
 
+        def _bg_write(owner_arg, ledger_arg):
+            if (
+                'checkpoint_error' in scenario
+                and not failed[0]
+                and ledger_arg.get('dirty_since') is not None
+                and ledger_arg.get('reconcile_cursor', {}).get('metadata_invalidated')
+            ):
+                failed[0] = True
+                raise OSError('transient background checkpoint failure')
+            return orig_write(owner_arg, ledger_arg)
+
+        def _bg_rename(src_arg, dst_arg, **kw):
+            if 'rename_error' in scenario and events and not failed[0] and dst_arg == quota._QUOTA_LEDGER:
+                failed[0] = True
+                raise OSError('transient background rename failure')
+            return orig_rename(src_arg, dst_arg, **kw)
+
+        nf_os = SimpleNamespace(**{**vars(os), 'rename': _bg_rename, 'supports_dir_fd': os.supports_dir_fd | {_bg_rename}})
         monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'stat': _stat_func}))
-        with pytest.raises(OSError, match='transient background stat failure'):
+        monkeypatch.setattr(quota, '_write_quota_ledger', _bg_write)
+        monkeypatch.setattr(nf, 'os', nf_os)
+        with pytest.raises(OSError, match='transient background'):
             quota.reconcile_owner_quota_slice(root, max_entries=100, max_ms=5000)
         monkeypatch.undo()
+        assert failed[0]
         assert (os.getpid(), str(root)) not in quota._QUOTA_SCANS
 
     ledger = _r7_ledger(root)
@@ -2227,20 +2261,164 @@ def test_r13_scan_and_checkpoint_exceptions_preserve_observed_invalidation(
     assert ledger['reconcile_cursor'].get('metadata_complete') is False
     assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
 
-    real_entries = quota._quota_entries
-    delayed = [False]
-
-    def _delayed_entries(owner, parts=()):
-        for item in real_entries(owner, parts):
-            if not delayed[0]:
-                delayed[0] = True
-                quota.time.sleep(0.02)
-            yield item
-
     retry_target = root / 'a21' / 'retry.bin'
-    monkeypatch.setattr(quota, '_quota_entries', _delayed_entries)
-    with pytest.raises(quota.OwnerQuotaUnavailable):
-        with enforcer.reserve([quota.OwnerQuotaChange(retry_target, 1)]):
-            retry_target.write_bytes(b'z')
-    monkeypatch.setattr(quota, '_quota_entries', real_entries)
+    if scenario.endswith('_cold'):
+        import subprocess
+        import sys
+
+        _r7_clear_scans()
+        repo_root = str(quota.Path(quota.__file__).resolve().parents[3])
+        child_code = """
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from agent_py_agent.agent.user_space import owner_quota as q
+root = Path(sys.argv[2]); target = root / 'a21' / 'retry.bin'
+orig_entries = q._quota_entries
+delayed = [False]
+def _entries(owner, parts=()):
+    for item in orig_entries(owner, parts):
+        if not delayed[0]:
+            delayed[0] = True
+            time.sleep(0.02)
+        yield item
+q._quota_entries = _entries
+try:
+    with q.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024).reserve([q.OwnerQuotaChange(target, 1)]):
+        target.write_bytes(b'z')
+    print(json.dumps({'error': None}))
+except (q.OwnerQuotaUnavailable, q.OwnerQuotaExceeded) as exc:
+    print(json.dumps({'error': type(exc).__name__}))
+"""
+        proc = subprocess.run([sys.executable, '-c', child_code, repo_root, str(root)], check=True, capture_output=True, text=True)
+        assert json.loads(proc.stdout)['error'] == 'OwnerQuotaUnavailable'
+    else:
+        real_entries = quota._quota_entries
+        delayed = [False]
+
+        def _delayed_entries(owner, parts=()):
+            for item in real_entries(owner, parts):
+                if not delayed[0]:
+                    delayed[0] = True
+                    quota.time.sleep(0.02)
+                yield item
+
+        monkeypatch.setattr(quota, '_quota_entries', _delayed_entries)
+        with pytest.raises(quota.OwnerQuotaUnavailable):
+            with enforcer.reserve([quota.OwnerQuotaChange(retry_target, 1)]):
+                retry_target.write_bytes(b'z')
+        monkeypatch.setattr(quota, '_quota_entries', real_entries)
     assert not retry_target.exists()
+
+    for _ in range(3):
+        recovered = _r7_finish(root)
+        if _r7_ledger(root)['dirty_since'] is None:
+            break
+    assert _r7_ledger(root)['dirty_since'] is None
+    assert recovered['used_bytes'] == quota.owner_logical_usage_bytes(root, exact=True)
+
+
+@pytest.mark.parametrize('stage_operation', ['create', 'delete'])
+@pytest.mark.parametrize('inject', [False, True])
+def test_r14_settlement_retry_persistence_is_idempotent_across_outer_exit(
+    tmp_path,
+    monkeypatch,
+    stage_operation,
+    inject,
+):
+    """R14-QUOTA-02: 前台结算写入单次失败后由finally重试落盘成功时，必须清空已消费前像，避免外层退出再次结算同一差额。"""
+    _r7_clear_scans()
+    root = tmp_path / 'owner'
+    root.mkdir()
+    for idx in range(22):
+        sub = root / f'a{idx:02d}'
+        sub.mkdir()
+        (sub / '0.bin').write_bytes(b'x')
+    _r7_finish(root)
+    assert _r7_ledger(root)['used_bytes'] == 22
+
+    enforcer = quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024)
+    stage = root / 'a00' / ('stage.bin' if stage_operation == 'create' else '0.bin')
+    target = root / 'a01' / '0.bin'
+    expected_bytes = 25 if stage_operation == 'create' else 21
+    expected_inodes = 23 if stage_operation == 'create' else 21
+    victim_info = (root / 'a16').stat()
+    orig_scandir = os.scandir
+    orig_write = quota._write_quota_ledger
+    events = []
+    failed = [False]
+
+    class _Entry:
+        def __init__(self, entry, fd_arg):
+            self._entry = entry
+            self._fd_arg = fd_arg
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+        def stat(self, **kwargs):
+            info = os.fstat(self._fd_arg)
+            if (
+                not events
+                and self._entry.name == '0.bin'
+                and (info.st_dev, info.st_ino) == (victim_info.st_dev, victim_info.st_ino)
+            ):
+                events.append('filesystem_change')
+                (root / 'a12' / 'large.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+                (root / 'a16' / '0.bin').unlink()
+            return self._entry.stat(**kwargs)
+
+    class _Entries:
+        def __init__(self, fd_arg):
+            self._fd_arg = fd_arg
+            self._inner = orig_scandir(fd_arg)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._inner.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return _Entry(next(self._inner), self._fd_arg)
+
+        def close(self):
+            self._inner.close()
+
+    def _write(root_arg, data):
+        observed = bool(data.get('reconcile_cursor', {}).get('metadata_invalidated'))
+        if inject and not failed[0] and observed and not data['reservations']:
+            failed[0] = True
+            events.append('settlement_checkpoint_error')
+            raise OSError('transient settlement checkpoint error')
+        return orig_write(root_arg, data)
+
+    error = None
+    try:
+        with enforcer.admission() as admission:
+            admission.check([quota.OwnerQuotaChange(stage, 3 if stage_operation == 'create' else None)])
+            if stage_operation == 'create':
+                stage.write_bytes(b'abc')
+            else:
+                stage.unlink()
+            monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'scandir': _Entries}))
+            monkeypatch.setattr(quota, 'time', SimpleNamespace(**{**vars(quota.time), 'monotonic': lambda: 0.0}))
+            monkeypatch.setattr(quota, '_write_quota_ledger', _write)
+            try:
+                admission.check([quota.OwnerQuotaChange(target, 1)])
+            finally:
+                monkeypatch.undo()
+    except OSError as exc:
+        error = str(exc)
+
+    assert bool(error) == inject
+    ledger = _r7_ledger(root)
+    assert ledger['used_bytes'] == expected_bytes
+    assert ledger['inode_count'] == expected_inodes
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
