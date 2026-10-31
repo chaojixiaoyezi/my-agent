@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
@@ -595,6 +597,8 @@ def _chunkings(draw):
 
 @settings(max_examples=80, deadline=None)
 @given(_chunkings())
+# LLM: 比较输入分块差异而非墙钟差异；两次运行共享固定完成时钟，完整终端文本断言保持不变。
+# 函数用途: 验证任意分块不改变终态语义，避免跨秒完成时间导致假失败。
 def test_stream_chunk_boundaries_do_not_change_terminal_semantics(case) -> None:
     text, chunks = case
 
@@ -610,4 +614,6 @@ def test_stream_chunk_boundaries_do_not_change_terminal_semantics(case) -> None:
             for block in runtime.store.snapshot().stable_blocks
         )
 
-    assert run([text]) == run(chunks)
+    with patch("agent_py_agent.cli.turn_completion.time.time", return_value=1_700_000_000.0), \
+            patch("agent_py_agent.cli.turn_completion.time.monotonic", return_value=42.0):
+        assert run([text]) == run(chunks)

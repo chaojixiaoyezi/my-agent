@@ -78,6 +78,7 @@ def start_tui_gateway_preflight(config: TuiGatewayPreflight) -> threading.Thread
 def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
     alive = False
     error_code = ""
+    diagnostic = {}
     try:
         outcome = wait_for_gateway_readiness(
             config.paths,
@@ -95,9 +96,13 @@ def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
         else:
             # 结构化分型直接成为错误码：超时、进程消退、服务失败、从未启动四者可区分。
             error_code = outcome.reason or "GATEWAY_NOT_READY"
+        diagnostic = {key: value for key in ("request_id", "diagnostic_ref")
+                      if isinstance(value := getattr(outcome, key, None), str)}
     except Exception as exc:  # noqa: BLE001 探活异常必须成为 typed 启动失败而不能杀后台线程
         alive = False
-        error_code = type(exc).__name__
+        error_code = getattr(exc, "error_code", "") or "GATEWAY_PREFLIGHT_FAILED"
+        diagnostic = {key: value for key in ("request_id", "diagnostic_ref")
+                      if isinstance(value := getattr(exc, key, None), str)}
     final_error_code = error_code or ("" if alive else "GATEWAY_NOT_READY")
     _dispatch_to_application_loop(
         config,
@@ -105,6 +110,7 @@ def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
             config,
             alive=bool(alive),
             error_code=final_error_code,
+            **diagnostic,
         ),
     )
 
@@ -149,13 +155,15 @@ def _dispatch_to_application_loop(config: TuiGatewayPreflight, callback: Callabl
     callback()
 
 
-# LLM: 这是 preflight 唯一状态落点；已退出时不发布事件，否则在 loop 更新 runtime/启动 worker 后 invalidate。
+# LLM: 这是 preflight 唯一状态落点；失败引用附在同一 Application 交给外层退出展示，迟到结果不覆盖已退出应用。
 # 函数用途: 落实连接与历史恢复结果，忽略用户退出后才返回的旧结果。
 def _finish_gateway_preflight(
     config: TuiGatewayPreflight,
     *,
     alive: bool,
     error_code: str,
+    request_id: str = "",
+    diagnostic_ref: str = "",
 ) -> None:
     future = getattr(config.application, "future", None)
     if config.stop_event.is_set() or (future is not None and future.done()):
@@ -166,6 +174,10 @@ def _finish_gateway_preflight(
         config.on_ready()
         config.application.invalidate()
         return
+    config.application._my_agent_exit_diagnostic = {
+        "error_code": error_code, **({"request_id": request_id} if request_id else {}),
+        **({"diagnostic_ref": diagnostic_ref} if diagnostic_ref else {}),
+    }
     config.runtime.resolve_connection_check(ok=False, error_code=error_code)
     _publish_gateway_failure(config, error_code)
     config.stop_event.set()

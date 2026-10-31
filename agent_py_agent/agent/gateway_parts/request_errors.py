@@ -21,8 +21,10 @@ from ..backends.reply_diagnostics import public_user_reply_diagnostic
 from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError as RequestExecutionOutcomeUncertainError,
 )
+from ..contracts.error_taxonomy import error_contract
 from ..runtime_errors import runtime_error_report
 from ..turn_end import result_turn_end_reason
+from .loop_health import sqlite_cause_fields
 
 
 class ConversationPersistenceError(RuntimeError):
@@ -313,6 +315,9 @@ def gateway_client_error_message(error_code: object) -> str:
     }
     if code in messages:
         return messages[code]
+    contract = error_contract(code)
+    if contract.code == code:
+        return contract.recovery_hint
     if code.startswith("MODEL_"):
         return "模型本轮响应未完成，具体原因请查看请求诊断；已有工具操作和历史保留。"
     return "任务处理失败，请稍后重试；如持续失败，请查看运行诊断。"
@@ -357,31 +362,51 @@ def gateway_model_response_error_projection(result: object) -> dict:
         "error_code": code,
         "turn_end_reason": end,
         "user_error": gateway_client_error_message(code),
+        **_structured_error_projection(result),
     }
+
+
+# LLM: 仅复制明确结构字段，False/0 也是事实；detail/message 永不参与分类或重试判定。
+# 函数用途: 将已有错误合同及诊断引用原样交给展示层，未知码不被显示表改写。
+def _structured_error_projection(source: object) -> dict:
+    field = source.get if isinstance(source, Mapping) else lambda key: getattr(source, key, None)
+    projection = {key: value for key in ("error_code", "category", "request_id", "diagnostic_ref")
+                  if isinstance(value := field(key), str)}
+    # 无有效错误码等于缺失，不能覆盖调用方已经选定的非空兜底码；其它原生 False/0 仍保留。
+    if not projection.get("error_code", "").strip():
+        projection.pop("error_code", None)
+    if type(value := field("retryable")) is bool:
+        projection["retryable"] = value
+    if type(value := field("retry_after_ms")) is int:
+        projection["retry_after_ms"] = value
+    if isinstance(source, BaseException):
+        projection.update(sqlite_cause_fields(source))
+    return projection
 
 
 # LLM: 仅 typed 请求拒绝追加来源和 HTTP 白名单；不公开 details/body/headers，也不凭文本把主请求归咎子代理。
 #   rejectdiag：只从 typed details 的 rejection_diagnostic 键读已白名单化的拒绝诊断（状态码/白名单头/体量/
 #   摘要/原因码），不透明透传 details；cause_code 是给用户看的可行动方向，判定不读语言。
-# 函数用途: 给当前请求失败补上可见状态码与可能原因，让用户定位这一轮，未知原因仍保持未知。
+# 函数用途: 原样透传已有错误合同与 SQLite 显式根因，再补 typed provider 白名单诊断，不从 detail 猜类别。
 #   空回复错误额外携带已白名单化的诊断，不更改状态/文案，不把其他异常归成空回复。
 def gateway_provider_error_projection(exc: BaseException) -> dict:
+    fields = _structured_error_projection(exc)
     if isinstance(exc, UserReplyUnavailableError):
-        return {"user_reply_diagnostic": public_user_reply_diagnostic(exc.user_reply_diagnostic)}
+        return {**fields, "user_reply_diagnostic": public_user_reply_diagnostic(exc.user_reply_diagnostic)}
     details = getattr(exc, "details", None)
     diagnostic = public_rejection_diagnostic(
         details.get("rejection_diagnostic") if isinstance(details, dict) else None)
     if isinstance(exc, ProviderTransientError) and diagnostic:
         # rejectdiag：429 限流等瞬时族只追加结构化诊断与原因码，不改原有错误文案与恢复语义。
-        projection = {"rejection_diagnostic": diagnostic}
+        projection = {**fields, "rejection_diagnostic": diagnostic}
         if diagnostic.get("cause_code"):
             projection["cause_code"] = diagnostic["cause_code"]
         return projection
     if not isinstance(exc, ProviderRequestRejectedError):
-        return {}
+        return fields
     status = provider_error_http_status(exc)
     message = gateway_client_error_message(exc.error_code)
-    projection = {"error_origin": "model_provider", "user_error": message}
+    projection = {**fields, "error_origin": "model_provider", "user_error": message}
     if status is not None:
         projection["http_status"] = status
         projection["user_error"] = f"模型请求 HTTP {status}：{message}"
@@ -593,6 +618,8 @@ def gateway_owner_scope_error_response(
     }
 
 
+# LLM: 原请求时间与 id 保持；worker 报告只追加明确错误合同与 SQLite 原因，不修改执行或重试状态。
+# 函数用途: 为回合处理器外的 worker 异常构造可诊断的终态响应。
 def gateway_unhandled_worker_error_response(
     request_path: Path,
     request: dict,
@@ -613,7 +640,8 @@ def gateway_unhandled_worker_error_response(
         started_at = float(request.get("lease_started_at") or now)
     except (TypeError, ValueError):
         started_at = now
-    report = runtime_error_report(error, context="gateway.worker.unhandled")
+    fields = _structured_error_projection(error)
+    report = {**runtime_error_report(error, context="gateway.worker.unhandled"), **fields}
     error_code = str(
         getattr(error, "error_code", "") or "GATEWAY_WORKER_UNHANDLED_ERROR"
     )
@@ -631,6 +659,7 @@ def gateway_unhandled_worker_error_response(
         "error": f"{type(error).__name__}: {error}",
         "user_error": gateway_client_error_message(error_code),
         "worker_error": report,
+        **fields,
         "backend": "",
         "used_memories": 0,
         "tool_rounds": 0,

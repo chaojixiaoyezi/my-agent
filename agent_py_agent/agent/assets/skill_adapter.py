@@ -7,6 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from ..capability.skill_snapshot import SkillSnapshotError
 from ..capability.skills import _as_list, skill_catalog_roots, split_skill_frontmatter
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath, write_text_atomic_beneath
@@ -192,7 +193,7 @@ def _catalog_descriptor(path, source, owner_id, include_body):
     return _catalog_projection(descriptor, source, stable_id, sha256(text.encode('utf-8')).hexdigest(), text, include_body)
 
 
-# LLM: 只沿快照read_body取授权版本，不读活动sidecar或重新发现；核对正文hash。
+# LLM: 只沿快照read_body取授权版本并核对hash；typed快照异常保持同一对象，不能把stale包装成missing。
 # 函数用途: 将已启用条目投影为资产，失效快照明确拒读。
 def _snapshot_descriptor(home, snapshot, entry, include_body):
     stable_id = valid_skill_reference(entry.stable_id)
@@ -200,7 +201,7 @@ def _snapshot_descriptor(home, snapshot, entry, include_body):
         raise ValueError('Skill快照身份不一致')
     try:
         text = snapshot.read_body(stable_id)
-    except InterruptedError:
+    except (InterruptedError, SkillSnapshotError):
         raise
     except (OSError, RuntimeError) as exc:
         raise ValueError('已授权Skill快照正文不可读') from exc
