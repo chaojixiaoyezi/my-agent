@@ -1107,7 +1107,8 @@ def test_quota_reconcile_runs_when_retention_is_not_safe(tmp_path, reason):
     partial = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000,
                                                               quota_max_entries=1, quota_max_ms=5000, state_locked=True)
     assert partial['quota_reconciliation']['complete'] is False and partial['continuation_pending'] is True
-    result = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000, state_locked=True)
+    result = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000,
+                                                             quota_max_ms=5000, state_locked=True)
     assert result['deferred_reason'] == 'retention_not_safe' and result['deletion_enabled'] is False
     assert result['quota_reconciliation']['complete'] is True and result['continuation_pending'] is False
     assert 'cursor' not in result['quota_reconciliation']
@@ -1239,14 +1240,21 @@ def test_r8_host_state_writes_keep_directory_baseline_clean(tmp_path, action):
     assert not any(rel.split('/')[0] == 'compact' for rel in report['cursor']['dir_stamps'])
 
 
-# LLM: R7-Q1反向：模型/用户可写目录仍关闭式核验。准入外新文件、带内容的新子目录、宿主状态同名但不在宿主位置的文件
-#   都在下一次增长时拒绝并置脏；准入外新建的空目录不改变计费字节而被采纳，之后往里写准入外内容同样被拦下。
-# 函数用途: 验证非宿主路径的准入外增删仍被前台发现。
-@pytest.mark.parametrize('change', ['file', 'nonempty_dir', 'host_name_elsewhere', 'empty_dir_then_file'])
+# LLM: R7-Q1反向与R8-Q1：模型/用户可写目录（含owner根目录下的.*.tmp文件与目录）仍关闭式核验；
+#   准入外新文件、带内容的新子目录、宿主状态同名但不在宿主位置的文件、以及根目录下的.audit_log.jsonl.*.tmp与.runtime.db*.*.tmp
+#   都在下一次增长时拒绝并置脏；仅宿主只读目录data/下的.maintenance.json.*.tmp豁免；准入外新建的空目录按0字节采纳，
+#   之后往里写准入外内容同样被拦下。
+# 函数用途: 验证非宿主路径与根目录临时名的准入外增删仍被前台关闭式拦截。
+@pytest.mark.parametrize('change', [
+    'file', 'nonempty_dir', 'host_name_elsewhere', 'empty_dir_then_file',
+    'root_plain_file', 'root_audit_tmp_file', 'root_runtime_tmp_file',
+    'root_wal_tmp_file', 'root_audit_tmp_dir', 'data_maint_tmp_file',
+])
 def test_r8_agent_writable_out_of_band_changes_stay_fail_closed(tmp_path, change):
     _r7_clear_scans()
     notes = tmp_path / 'workspace' / 'notes'
     notes.mkdir(parents=True)
+    (tmp_path / 'data').mkdir(exist_ok=True)
     for index in range(3):
         (notes / f'{index}.md').write_bytes(b'n')
     for index in range(200):
@@ -1260,6 +1268,22 @@ def test_r8_agent_writable_out_of_band_changes_stay_fail_closed(tmp_path, change
         (notes / 'sub' / 'oob.bin').write_bytes(b'z' * 4096)
     elif change == 'host_name_elsewhere':
         (notes / 'maintenance.json').write_bytes(b'z' * 4096)
+    elif change == 'root_plain_file':
+        (tmp_path / 'plain.bin').write_bytes(b'z' * 4096)
+    elif change == 'root_audit_tmp_file':
+        (tmp_path / '.audit_log.jsonl.deadbeef.tmp').write_bytes(b'z' * 4096)
+    elif change == 'root_runtime_tmp_file':
+        (tmp_path / '.runtime.db.deadbeef.tmp').write_bytes(b'z' * 4096)
+    elif change == 'root_wal_tmp_file':
+        (tmp_path / '.runtime.db-wal.cafe01.tmp').write_bytes(b'z' * 4096)
+    elif change == 'root_audit_tmp_dir':
+        (tmp_path / '.audit_log.jsonl.d0.tmp').mkdir()
+        (tmp_path / '.audit_log.jsonl.d0.tmp' / 'big').write_bytes(b'z' * 4096)
+    elif change == 'data_maint_tmp_file':
+        (tmp_path / 'data' / '.maintenance.json.deadbeef.tmp').write_bytes(b'z' * 4096)
+        assert _r7_grow(tmp_path, 'workspace/notes/managed') == 'ok'
+        assert _r7_ledger(tmp_path)['dirty_since'] is None
+        return
     else:
         (notes / 'sub').mkdir()
         assert _r7_grow(tmp_path, 'workspace/notes/managed') == 'ok'
@@ -1571,3 +1595,24 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
     assert retention_calls[0] == 2
     if not quota_enabled:
         assert day2_runs == [0]
+    else:
+        from agent_py_agent.agent.scheduler.repository import (
+            SchedulerJobCreateRequest,
+            SchedulerRepository,
+        )
+
+        maint_cursor = state['storage_maintenance'].get('cursors', {}).get('cache_tmp_trash') or {}
+        assert not any(
+            k in maint_cursor
+            for k in ('dir_stamps', 'base_rows', 'scan_rows', 'dir_batch', 'prep', 'orphans')
+        )
+        enforcer = quota.owner_quota_enforcer_from_policy(owner)
+        repository = SchedulerRepository(owner / 'data' / 'scheduler', owner_provider='feishu', owner_kind='user',
+                                         owner_id='u-1', default_timezone='Asia/Shanghai', quota_enforcer=enforcer)
+        created, reused = repository.create_job(SchedulerJobCreateRequest(
+            name='job-1', prompt='execute 1', thread_id='thread-1', source_task_id='task-1',
+            schedule={'kind': 'every', 'every_seconds': 600, 'anchor_at': 1_000}, misfire_grace_seconds=None,
+            skill_refs=[], source_request_id='request:1', now=901))
+        assert reused is False and created['name'] == 'job-1'
+        assert _r7_ledger(owner)['dirty_since'] is None
+        assert quota._parse_quota_disk_mb('1') == 1 and quota._parse_quota_disk_mb(True) == 0

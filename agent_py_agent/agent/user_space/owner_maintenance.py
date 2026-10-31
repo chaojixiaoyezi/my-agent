@@ -734,6 +734,15 @@ def _quota_maintenance_budget(home, quota_max_entries, quota_max_ms):
     return quota_max_entries, quota_max_ms
 
 
+# LLM: maintenance.json只保存配额对账的标量进度与完成标记，不复制可重达数百KB的目录摘要表。
+# 函数用途: 裁剪配额对账游标中的大目录表与批次缓存，供maintenance.json轻量持久化。
+def _compact_quota_maintenance_cursor(cursor):
+    if not isinstance(cursor, dict):
+        return cursor
+    return {k: v for k, v in cursor.items()
+            if k not in ('dir_stamps', 'base_rows', 'scan_rows', 'dir_batch', 'prep', 'orphans')}
+
+
 # LLM: 配额对账只读元数据并在原配额锁内写配额账，不删除任何owner内容，因此不随保留策略不安全而停摆；
 #   沿原quota锁非阻塞获取，避免maintenance→quota与既有quota→JSON锁序死锁。C/W必须经原transition提交，非C/W需已持原state锁。
 # 函数用途: 在保留或回执适配被延期时仍推进一片配额对账，返回不含目录表的简短回执。
@@ -763,7 +772,7 @@ def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, stat
     summary = {'complete': report['complete'], 'scanned_entries': report['scanned_entries'],
                'used_bytes': report['used_bytes'], 'inode_count': report['inode_count']}
     if include_cursor:
-        summary['cursor'] = report['cursor']
+        summary['cursor'] = _compact_quota_maintenance_cursor(report['cursor'])
     return summary
 
 
@@ -933,7 +942,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         except OwnerQuotaLockContention:
             return {'cursor': {**cursor, 'complete': False, 'deferred_reason': 'quota_busy'},
                     'complete': False, 'items': 0, 'bytes': 0}
-        return {'cursor': report['cursor'], 'complete': report['complete'],
+        return {'cursor': _compact_quota_maintenance_cursor(report['cursor']), 'complete': report['complete'],
                 'items': report['scanned_entries'], 'bytes': 0}
 
     # LLM: legal_hold不发布或删除回执；canonical根必须在当前owner且祖先均为真实目录，冷owner不创建Gateway。

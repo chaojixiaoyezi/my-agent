@@ -455,6 +455,16 @@ class OwnerQuotaEnforcer:
             yield projection
 
 
+# 函数用途: 按与准入一致的整数口径解析quota.json的max_disk_mb（拒绝布尔值）。
+def _parse_quota_disk_mb(raw) -> int:
+    if isinstance(raw, bool):
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 # LLM: 无Agent的正式写入口仍读同一quota.json，坏策略关闭式拒绝；缺显式限额沿原默认无限。
 # 函数用途: 为确认回调等非Agent入口创建规范配额门。
 def owner_quota_enforcer_from_policy(
@@ -474,14 +484,10 @@ def owner_quota_enforcer_from_policy(
     root = Path(owner_root).expanduser().resolve(strict=False)
     path = Path(quota_path) if quota_path is not None else root / "quota.json"
     report = read_json_object_report(path, context="owner_policy.quota")
-    raw = report.payload.get("max_disk_mb")
-    try:
-        max_disk_mb = int(raw)
-    except (TypeError, ValueError):
-        max_disk_mb = 0
+    max_disk_mb = _parse_quota_disk_mb(report.payload.get("max_disk_mb"))
     return OwnerQuotaEnforcer(
         root,
-        max_bytes=max(0, max_disk_mb) * 1024 * 1024,
+        max_bytes=max_disk_mb * 1024 * 1024,
         policy_available=report.load_error is None,
     )
 
@@ -883,12 +889,13 @@ def _quota_excluded(parts, name, info):
     return name.endswith('.lock') and stat.S_ISREG(info.st_mode) and info.st_size == 0
 
 
-# LLM: 只看路径、不stat：宿主固定状态文件、其原子写临时名（.<名>.<随机>.tmp），以及宿主子树（含子树根本身）内的一切目录项。
+# LLM: 只看路径、不stat：宿主固定状态文件、宿主只读子目录内的原子写临时名（如data/.maintenance.json.<随机>.tmp），
+#   以及宿主子树（含子树根本身）内的一切目录项；根目录等模型可写位置的临时名不豁免，保持失败关闭。
 # 函数用途: 判断一个目录项是否为宿主在准入外维护、不进目录摘要的状态。
 def _quota_host_managed(parts, name):
     if (parts[0] if parts else name) in _QUOTA_HOST_TREES or (*parts, name) in _QUOTA_HOST_FILES:
         return True
-    if not (name.startswith('.') and name.endswith('.tmp')):
+    if not (parts and name.startswith('.') and name.endswith('.tmp')):
         return False
     return (*parts, name[1:].rpartition('.')[0].rpartition('.')[0]) in _QUOTA_HOST_FILES
 
@@ -1860,7 +1867,7 @@ def _remember_quota_finite_root(root: Path) -> None:
 def owner_quota_enabled(owner_root) -> bool:
     root = Path(owner_root).expanduser().resolve(strict=False)
     raw = read_json_object_report(root / "quota.json", context="owner_policy.quota").payload.get("max_disk_mb")
-    if type(raw) is int and raw > 0:
+    if _parse_quota_disk_mb(raw) > 0:
         return True
     try:
         info = root.stat(follow_symlinks=False)
