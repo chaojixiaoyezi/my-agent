@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -26,11 +26,31 @@ from ..conversation.channels import (
     supports_transcript_delivery,
 )
 from .attachment_content import VerifiedAttachmentContent, verify_attachment_content
-from .registry import ChannelAdapterRegistry, ChannelCapabilities
+from .registry import (
+    ChannelAdapterRegistry,
+    ChannelCapabilities,
+    ComponentDeliveryState,
+    component_delivery_scope,
+    current_component_delivery,
+)
 
 _LOGGER = logging.getLogger(__name__)
 _DELIVERY_MODES = frozenset({"reply", "proactive"})
 _IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
+
+
+@dataclass(frozen=True)
+class ComponentDeliveryReceipt(DeliveryReceipt):
+    component_receipts: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True)
+class ChannelDeliveryContext(DeliveryContext):
+    # W12 公共字段合入前的增量兼容对象；内部 thread_id 始终沿基类原字段。
+    reply_policy: str = field(default='', kw_only=True)
+    provider_thread_id: str = field(default='', kw_only=True)
+    root_id: str = field(default='', kw_only=True)
+    parent_id: str = field(default='', kw_only=True)
 
 
 # LLM: 发送失败记录不含完整收件地址，且按 channel/target/error 去重避免故障风暴淹没日志。
@@ -76,6 +96,11 @@ class DeliveryService:
     # 函数用途: 创建统一投递服务。
     def __init__(self, registry: ChannelAdapterRegistry) -> None:
         self.registry = registry
+        self._host_delivery_store = None
+        if registry.delivery_state_root is not None:
+            from ..adapter.delivery import GatewayReplyDeliveryStore
+
+            self._host_delivery_store = GatewayReplyDeliveryStore(registry.delivery_state_root)
         self._reported_failures: set[tuple[str, str, str]] = set()
         self._lock = threading.Lock()
 
@@ -113,39 +138,84 @@ class DeliveryService:
 
     # LLM: 进度和最终回复共用相同路由/净化/能力前置门；message_id 只可来自 pending 回执，编辑失败不新发替代消息。
     # 函数用途: 首次创建一条进度消息，以后编辑同一条；进度不附路径说明，返回 provider 消息 ID 供原投递账本耐久保存。
-    def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = ""):
-        from .progress import ProgressDeliveryReceipt
+    def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = '',
+                         render_kind: str = 'text', snapshot: dict | None = None, reply_policy: str | None = None):
+        from .progress import ProgressDeliveryReceipt, render_progress_card
 
         prepared = self._prepare(context, envelope, progress=True)
         if isinstance(prepared, DeliveryReceipt):
-            return ProgressDeliveryReceipt(False, message_id, prepared.error_code or "CHANNEL_PROGRESS_REJECTED", "permanent")
+            return ProgressDeliveryReceipt(False, message_id, prepared.error_code or 'CHANNEL_PROGRESS_REJECTED', 'permanent')
         attempt = self._resolve_attempt(context, envelope, prepared)
         if isinstance(attempt, DeliveryReceipt):
-            return ProgressDeliveryReceipt(False, message_id, attempt.error_code, "permanent")
-        if not attempt.capabilities.edit_progress:
-            return ProgressDeliveryReceipt(False, message_id, "CHANNEL_PROGRESS_UNSUPPORTED", "permanent")
+            return ProgressDeliveryReceipt(False, message_id, attempt.error_code, 'permanent')
+        if not attempt.capabilities.edit_progress or render_kind not in {'text', 'card'} or (
+                render_kind == 'card' and getattr(attempt.adapter, 'supports_progress_cards', False) is not True):
+            return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_PROGRESS_UNSUPPORTED', 'permanent')
+        policy = reply_policy if reply_policy is not None else getattr(context, 'reply_policy', '')
+        if policy not in {'', 'reference', 'thread'}:
+            return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_DELIVERY_MODE_INVALID', 'permanent')
+        options = {'render_kind': 'card', 'card': render_progress_card(snapshot or {})} if render_kind == 'card' else {}
+        create_options = {'reply_in_thread': True} if policy == 'thread' and attempt.capabilities.reply_policy else {}
+        state = current_component_delivery()
+        state = state if state is not None else ComponentDeliveryState(reply_policy=str(policy or ''))
+        revision = int((snapshot or {}).get('source_revision') or 0)
+
+        def reconcile_pending():
+            from .registry import provider_replay_allowed
+
+            facts = tuple(state.receipts.values())
+            return render_kind == 'card' and not message_id and bool(facts) and all(
+                fact.phase == 'unknown' and provider_replay_allowed(attempt.adapter, fact) for fact in facts)
+
         try:
             text = attempt.content[-8000:]
-            if message_id:
-                ok = attempt.adapter.edit_progress_message(message_id, text)
-                return ProgressDeliveryReceipt(bool(ok), message_id, "" if ok else "CHANNEL_PROGRESS_EDIT_FAILED")
-            identity = attempt.adapter.start_progress_message(context.target, text,
-                reply_to=context.reply_to, idempotency_key=context.idempotency_key)
-            return ProgressDeliveryReceipt(bool(identity), str(identity or ""), "" if identity else "CHANNEL_PROGRESS_SEND_FAILED")
+            with component_delivery_scope(state):
+                if message_id:
+                    ok = attempt.adapter.edit_progress_message(message_id, text, **options)
+                    return ProgressDeliveryReceipt(bool(ok), message_id, '' if ok else 'CHANNEL_PROGRESS_EDIT_FAILED',
+                        render_kind=render_kind, display_message_id=message_id, source_revision=revision)
+                identity = attempt.adapter.start_progress_message(context.target, text,
+                    reply_to=context.reply_to, idempotency_key=context.idempotency_key, **options, **create_options)
+                return ProgressDeliveryReceipt(bool(identity), str(identity or ''), '' if identity else 'CHANNEL_PROGRESS_SEND_FAILED',
+                    render_kind=render_kind, display_message_id=str(identity or ''), source_revision=revision,
+                    reconcile_pending=not identity and reconcile_pending())
         except Exception:
-            return ProgressDeliveryReceipt(False, message_id, "CHANNEL_PROGRESS_IO_FAILED")
+            return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_PROGRESS_IO_FAILED',
+                render_kind=render_kind, display_message_id=message_id, source_revision=revision,
+                reconcile_pending=reconcile_pending())
 
     # LLM: context 是收件权威、envelope 是内容；任何发送前都校验模式、目标、内部协议和 adapter 能力。
     # 函数用途: 投递一份回复信封并返回不抛异常的结构化回执。
-    def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope) -> DeliveryReceipt:
+    def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope, *,
+                reply_policy: str | None = None, components: ComponentDeliveryState | None = None) -> DeliveryReceipt:
         prepared = self._prepare(context, envelope)
         if isinstance(prepared, DeliveryReceipt):
             return prepared
         attempt = self._resolve_attempt(context, envelope, prepared)
         if isinstance(attempt, DeliveryReceipt):
             return attempt
-        status, error_code = self._safe_deliver(attempt)
-        return replace(prepared.receipt, delivery_status=status, error_code=error_code)
+        state = components if components is not None else current_component_delivery()
+        policy = str(reply_policy if reply_policy is not None else getattr(context, 'reply_policy', '') or '')
+        if policy not in {'', 'reference', 'thread'}:
+            return replace(prepared.receipt, delivery_status='rejected', error_code='CHANNEL_DELIVERY_MODE_INVALID')
+        if state is None and self._host_delivery_store is not None and attempt.capabilities.component_receipts:
+            from ..adapter.delivery import deliver_host_envelope
+
+            key = context.idempotency_key or context.request_id or context.task_id
+            if not key:
+                return replace(prepared.receipt, delivery_status='rejected', error_code='CHANNEL_SEND_FAILED')
+            return deliver_host_envelope(self, self._host_delivery_store,
+                replace(context, idempotency_key=key), envelope, reply_policy=policy)
+        if state is None:
+            state = ComponentDeliveryState(reply_policy=policy)
+        elif policy and state.reply_policy and state.reply_policy != policy:
+            return replace(prepared.receipt, delivery_status='rejected', error_code='CHANNEL_TARGET_INVALID')
+        elif policy:
+            state.reply_policy = policy
+        with component_delivery_scope(state):
+            status, error_code = self._safe_deliver(attempt)
+        return replace(prepared.receipt, delivery_status=status, error_code=error_code,
+            component_receipts=state.snapshot())
 
     # LLM: 只认宿主typed附件并先拒JSON伪造；净化和能力前检不触碰adapter，失败在provider网络副作用前返回。
     # 函数用途: 规范化 context/envelope 并生成待解析投递，进度只做路径净化，最终消息保留说明，或返回无需发送的终态回执。
@@ -253,6 +323,9 @@ class DeliveryService:
                 return "failed", "CHANNEL_SEND_FAILED"
             if not self._send_attachments(attempt):
                 return "failed", "CHANNEL_SEND_FAILED"
+            state = current_component_delivery()
+            if state is not None and any(not item for item in state.receipts.values()):
+                return 'unknown', 'CHANNEL_SEND_FAILED'
             _LOGGER.warning(
                 "NATIVE_CHANNEL_SEND_OK channel=%s target=***%s content_len=%d attachments=%d mode=%s",
                 attempt.context.channel,
@@ -291,6 +364,8 @@ class DeliveryService:
             "conversation_id": attempt.context.conversation_id,
             "projection_status": attempt.projection_status,
             "evidence_refs": list(attempt.envelope.evidence_refs),
+            'reply_policy': (current_component_delivery().reply_policy if current_component_delivery() is not None else ''),
+            **{key: getattr(attempt.context, key, '') for key in ('provider_thread_id', 'root_id', 'parent_id')},
         }
         outgoing = OutgoingMessage(
             channel=attempt.context.channel,
@@ -334,9 +409,15 @@ class DeliveryService:
         *,
         idempotency_key: str,
     ) -> bool:
+        options = {}
+        if attempt.capabilities.reply_policy:
+            state = current_component_delivery()
+            options = {'reply_to': attempt.context.reply_to if attempt.context.mode == 'reply' else '',
+                       'reply_in_thread': True if state is not None and state.reply_policy == 'thread' else None}
         return bool(attempt.adapter.send_attachment_content(
             attempt.context.target, content, idempotency_key=idempotency_key,
-            as_image=Path(content.attachment.path).suffix.lower() in _IMAGE_SUFFIXES and attempt.capabilities.images))
+            as_image=Path(content.attachment.path).suffix.lower() in _IMAGE_SUFFIXES and attempt.capabilities.images,
+            **options))
 
     # LLM: 同类故障只打一条脱敏日志，不能记录完整用户 ID、正文、附件路径或凭据。
     # 函数用途: 去重并记录一次投递失败。
@@ -382,7 +463,7 @@ def _initial_receipt(
     channel: str,
     target: str,
 ) -> DeliveryReceipt:
-    return DeliveryReceipt(
+    return ComponentDeliveryReceipt(
         channel=channel,
         target=target,
         content=str(envelope.content or ""),

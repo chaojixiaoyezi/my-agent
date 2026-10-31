@@ -241,6 +241,7 @@ class FeishuWsClient:
         self.on_card_action: Callable[[dict[str, Any]], None] | None = None
         self._client: Any = None
         self._stopped = False  # close() 置 True:区分"主动停"(退出重连循环)vs"断线"(重连)
+        self._stop_event = threading.Event()
         self._dedup_cap = 2048
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -445,15 +446,20 @@ class FeishuWsClient:
         logger.info("飞书长连接(WebSocket)已启动:主动连飞书网关收消息(免公网/不绑端口)")
         self._client.start()  # 阻塞:内部 wss 长连 + 自动重连
 
-    def close(self) -> None:
+    # LLM: 只发布停止请求，不丢 SDK 句柄；退出由外层线程 join 观察。
+    # 函数用途: 中断重连退避并尽力关闭原 SDK，不声称已退出。
+    def close(self):
+        from ..delivery.registry import ChannelStopResult
+
         """尽力关闭底层 ws(lark 无统一干净 stop;关不掉就靠 daemon 线程随进程退出)。"""
         self._stopped = True  # 让重连循环识别为主动停、退出(而非断线重连)
+        self._stop_event.set()
         inner = self._client
-        self._client = None
         closer = getattr(inner, "stop", None) or getattr(inner, "disconnect", None)
         if callable(closer):
             with contextlib.suppress(Exception):
                 closer()
+        return ChannelStopResult('stop_requested', str(getattr(self, 'generation_ref', '')), 'FEISHU_WS_STOPPED')
 
 
 def run_ws_client_thread(client: FeishuWsClient, on_dead: Callable[[], None]) -> threading.Thread:
@@ -487,7 +493,11 @@ def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> Non
         attempt += 1
         wait = backoff + random.uniform(0, min(backoff, 1.0))
         logger.warning("飞书长连断开(第 %s 次),%.1fs 后进程内重连 error_type=%s", attempt, wait, error_type)
-        time.sleep(wait)
+        if isinstance(client, FeishuWsClient):
+            client._stop_event.wait(wait)
+        else:
+            # 旧嵌入接口没有停止事件，仍保留其可注入等待方式。
+            time.sleep(wait)
         backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
     on_dead()  # 主动停 → 置 _running=False
 

@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ..conversation.channels import ChannelTargetDecision, DeliveryContext
@@ -18,6 +22,109 @@ _LOGGER = logging.getLogger(__name__)
 AdapterFactory = Callable[[], Any | None]
 TargetValidator = Callable[[str, object], ChannelTargetDecision]
 RuntimeHealthProvider = Callable[[], Mapping[str, object]]
+
+
+@dataclass(frozen=True)
+class ChannelStopResult:
+    status: str
+    generation_ref: str = ''
+    reason_code: str = ''
+
+
+@dataclass(frozen=True)
+class ComponentReceipt:
+    component_id: str
+    message_key: str
+    first_dispatch_at: float | None = None
+    phase: str = 'accepted'
+    effect_outcome: str = 'not_started'
+    upload_ref: str | None = None
+    provider_message_id: str | None = None
+    provider_code: int | None = None
+    payload_sha256: str = ''
+
+    def __bool__(self) -> bool:
+        return self.phase == 'send_confirmed' and self.effect_outcome == 'confirmed'
+
+
+# LLM: 普通回复、进度和工具续收共用每个组件的首次发送时间；旧记录缺事实不重发。
+# 函数用途: 只读核对提供方原生幂等窗口，不使用上传开始或 handler 开始时间替代。
+def provider_replay_allowed(provider, receipt: Mapping | ComponentReceipt, *, now: float | None = None) -> bool:
+    enabled = getattr(provider, 'provider_idempotent_delivery', getattr(provider, 'provider_idempotency', False))
+    if enabled is not True:
+        return False
+    key = receipt.message_key if isinstance(receipt, ComponentReceipt) else receipt.get('message_key')
+    if not isinstance(key, str) or not key.strip():
+        return False
+    value = receipt.first_dispatch_at if isinstance(receipt, ComponentReceipt) else receipt.get('first_dispatch_at')
+    if type(value) not in {int, float}:
+        return False
+    window = float(getattr(provider, 'provider_idempotency_window_seconds', 0) or 0)
+    elapsed = (time.time() if now is None else now) - value
+    return elapsed >= 0 and (window <= 0 or elapsed < window)
+
+
+class ComponentDeliveryState:
+    """原 delivery/operation 记录的一次内存工作视图；每次变更先经宿主 sink 落原账。"""
+
+    def __init__(self, receipts=(), *, persist=None, reply_policy: str = ''):
+        self.receipts = {item.component_id: item for item in (
+            value if isinstance(value, ComponentReceipt) else ComponentReceipt(**value) for value in receipts)}
+        self.persist = persist
+        self.reply_policy = reply_policy
+
+    def snapshot(self) -> tuple[dict, ...]:
+        return tuple(asdict(item) for item in self.receipts.values())
+
+    def save(self, receipt: ComponentReceipt) -> ComponentReceipt:
+        updated = {**self.receipts, receipt.component_id: receipt}
+        if self.persist is not None:
+            self.persist(tuple(asdict(item) for item in updated.values()))
+        self.receipts = updated
+        return receipt
+
+    def ensure(self, component_id: str, message_key: str, payload_sha256: str) -> ComponentReceipt:
+        current = self.receipts.get(component_id)
+        if current is not None:
+            if current.message_key != message_key or current.payload_sha256 != payload_sha256:
+                raise ValueError('CHANNEL_SEND_FAILED')
+            return current
+        return self.save(ComponentReceipt(component_id, message_key, payload_sha256=payload_sha256))
+
+    def before_send(self, receipt: ComponentReceipt, provider) -> ComponentReceipt | None:
+        if receipt:
+            return None
+        if receipt.first_dispatch_at is not None or receipt.phase == 'unknown':
+            if not provider_replay_allowed(provider, receipt):
+                self.save(replace(receipt, phase='unknown', effect_outcome='unknown'))
+                return None
+        return self.save(replace(receipt, first_dispatch_at=(
+            time.time() if receipt.first_dispatch_at is None else receipt.first_dispatch_at),
+            phase='unknown', effect_outcome='unknown'))
+
+    def finish(self, receipt: ComponentReceipt, result: dict) -> ComponentReceipt:
+        code = result.get('code') if type(result.get('code')) is int else None
+        data = result.get('data') if isinstance(result.get('data'), dict) else {}
+        return self.save(replace(receipt,
+            phase='send_confirmed' if code == 0 else 'retryable_failed' if code is not None else 'unknown',
+            effect_outcome='confirmed' if code == 0 else 'not_started' if code is not None else 'unknown',
+            provider_message_id=str(data.get('message_id') or '') or None, provider_code=code))
+
+
+_COMPONENT_DELIVERY: ContextVar[ComponentDeliveryState | None] = ContextVar('channel_component_delivery', default=None)
+
+
+def current_component_delivery() -> ComponentDeliveryState | None:
+    return _COMPONENT_DELIVERY.get()
+
+
+@contextmanager
+def component_delivery_scope(state: ComponentDeliveryState):
+    token = _COMPONENT_DELIVERY.set(state)
+    try:
+        yield state
+    finally:
+        _COMPONENT_DELIVERY.reset(token)
 
 
 # LLM: 能力来自 adapter 注册事实，不让模型根据自然语言或方法名猜通道是否支持主动推送和附件。
@@ -38,6 +145,9 @@ class ChannelCapabilities:
     frozen_attachment_content: bool = False
     max_file_bytes: int = 0
     max_image_bytes: int = 0
+    provider_idempotency_window_seconds: float = field(default=0.0, kw_only=True)
+    component_receipts: bool = field(default=False, kw_only=True)
+    reply_policy: bool = field(default=False, kw_only=True)
 
 
 # LLM: health 是 adapter 生命周期/探针写入的结构化事实；configured、binding 不能隐式升级它。
@@ -89,7 +199,8 @@ class ChannelRuntimeSnapshot:
 class ChannelAdapterRegistry:
     # LLM: 每个运行边界持有自己的 registry，adapter 和凭据状态不得跨 owner 隐式共享。
     # 函数用途: 创建空的线程安全通道注册表。
-    def __init__(self, runtime_health_provider: RuntimeHealthProvider | None = None) -> None:
+    def __init__(self, runtime_health_provider: RuntimeHealthProvider | None = None, *, delivery_state_root: Path | None = None) -> None:
+        self.delivery_state_root = delivery_state_root
         self._factories: dict[str, AdapterFactory] = {}
         self._resolved: dict[str, Any | None] = {}
         self._capabilities: dict[str, ChannelCapabilities] = {}
@@ -341,8 +452,13 @@ def build_default_channel_registry(
     runtime_health_provider: RuntimeHealthProvider | None = None,
 ) -> ChannelAdapterRegistry:
     from ..adapter.feishu_media import MAX_FILE_BYTES, MAX_IMAGE_BYTES
+    from ..user_space.home_layout import resolve_my_agent_home
+    from ..user_space.home_root import configured_home_root
+    from ..user_space.owner_resolver import owner_identity_from_config, resolve_owner_home
 
-    registry = ChannelAdapterRegistry(runtime_health_provider)
+    owner = resolve_owner_home(resolve_my_agent_home(configured_home_root(config)), owner_identity_from_config(config))
+    registry = ChannelAdapterRegistry(runtime_health_provider,
+        delivery_state_root=owner.home_dir / 'data' / 'channel-delivery')
     registry.register_factory(
         "feishu",
         lambda: _build_feishu_adapter(config),
@@ -358,6 +474,9 @@ def build_default_channel_registry(
             frozen_attachment_content=True,
             max_file_bytes=MAX_FILE_BYTES,
             max_image_bytes=MAX_IMAGE_BYTES,
+            provider_idempotency_window_seconds=3600.0,
+            component_receipts=True,
+            reply_policy=True,
         ),
         configured=_configured_secret_fields(config, ("feishu_app_id", "feishu_app_secret")),
     )
@@ -380,7 +499,8 @@ def _build_feishu_adapter(config: Any) -> Any | None:
     app_secret = resolve_secret_ref(str(getattr(config, "feishu_app_secret", "") or ""))
     if not app_id or not app_secret:
         return None
-    return FeishuAdapter({"feishu_app_id": app_id, "feishu_app_secret": app_secret})
+    return FeishuAdapter({'feishu_app_id': app_id, 'feishu_app_secret': app_secret,
+        'config_generation': getattr(config, 'config_revision', '')})
 
 
 # LLM: QQ 与飞书共用 registry 工厂合同，缺凭据只返回 None，不尝试访问网络。
@@ -425,6 +545,9 @@ def _infer_capabilities(adapter: Any) -> ChannelCapabilities:
         provider_idempotency=bool(
             getattr(adapter, "provider_idempotent_delivery", False)
         ),
+        provider_idempotency_window_seconds=float(getattr(adapter, 'provider_idempotency_window_seconds', 0) or 0),
+        component_receipts=getattr(adapter, 'supports_component_receipts', False) is True,
+        reply_policy=getattr(adapter, 'supports_reply_policy', False) is True,
     )
 
 

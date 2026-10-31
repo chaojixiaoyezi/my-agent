@@ -172,6 +172,12 @@ class ScaleAgentPool:
         if not conversation_id or not channel_user_id:
             raise ValueError("规模飞书会话缺 conversation_id/channel_user_id，拒绝运行")
         is_group = message.owner_kind == "group"
+        from .session_lock.admission import admission_from_config
+
+        admission = admission_from_config(getattr(self, '_base_config', agent.config),
+            channel_user_id, is_group=is_group)
+        if not admission.allowed:
+            raise RuntimeError(admission.reason_code)
         canonical_user_id = message.owner_id if is_group else channel_user_id
         binding_user_id = message.owner_id if is_group else channel_user_id
         request = {
