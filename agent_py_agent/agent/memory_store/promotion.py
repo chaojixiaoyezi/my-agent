@@ -64,7 +64,13 @@ from .candidate_models import (
     host_promotion_mode,
     normalize_reference_list,
 )
-from .candidates import CandidateService, CandidateStateChangedError
+from .candidates import (
+    PROMOTION_BATCH_MAX_ITEMS,
+    CandidateService,
+    CandidateStateChangedError,
+    _unique_candidate_batch,
+    bounded_candidate_batch,
+)
 from .jsonl import (
     JsonlMemory,
     MemoryLibraryWriteCapExceeded,
@@ -732,7 +738,8 @@ def _commit_with_exclusion_guard(
 
 # LLM: quota→受管policy→学习名单→候选→formal；自动策略锁内重核并贯穿写入，JSONL复用精确活锁。
 # 函数用途: 依目标的原配额策略领取准入，在名单锁内核对并写入正式目标。
-def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool]) -> tuple[_TargetCommit, MemoryCandidate]:
+def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool],
+                     *, complete: bool = True) -> tuple[_TargetCommit, MemoryCandidate]:
     enforcer = service.persona.quota_enforcer
     if _promotion_target(candidate) == "long_term" and service.long_term.quota_enforcer is not None:
         enforcer = service.long_term.quota_enforcer
@@ -742,17 +749,17 @@ def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate
                 code = _managed_learning_policy_block(governance, _promotion_target(candidate))
                 if code:
                     raise _PromotionBlocked(candidate.status, code)
-            return _commit_governed(service, candidate, review, admission)
+            return _commit_governed(service, candidate, review, admission, complete=complete)
 
 
 # LLM: 已持quota和受管policy；复用原名单/candidate/formal事务，不再领准入或治理锁。
 # 函数用途: 在当前治理策略保护下完成原候选正式提交。
-def _commit_governed(service, candidate, review, admission):
+def _commit_governed(service, candidate, review, admission, *, complete: bool = True):
     with _learning_exclusion_scope(service), service.candidates.locked_snapshot(candidate):
         _ensure_not_excluded(service, candidate)
         context = _PromotionWriteContext(*review, admission)
         outcome = _commit_target_blocked(service, candidate, context)
-        promoted = _complete_candidate_commit(service, candidate, context, outcome.reference)
+        promoted = _complete_candidate_commit(service, candidate, context, outcome.reference) if complete else candidate
         return outcome, promoted
 
 
@@ -964,8 +971,60 @@ class MemoryPromotionService(_PromotionCommitMixin):
     # 函数用途: 成批自动晋升只读筛出的候选，整批只做一次总量治理。
     def promote_ready(self, *, limit: int = 32) -> tuple[MemoryPromotionResult, ...]:
         with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
-            rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=limit)
-            return tuple(self.promote(row.candidate_id, automatic=True) for row in rows)
+            size = min(PROMOTION_BATCH_MAX_ITEMS, limit) if limit > 0 else PROMOTION_BATCH_MAX_ITEMS
+            rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=size)
+            return self.promote_batch(rows, reviewer="memory-promotion-service", automatic=True)
+
+    # LLM: 有界完整快照先批量耐久批准，再逐目标沿原quota→policy→candidate→formal提交；最后批量确认终态。
+    # 函数用途: 返回与输入逐项对应的原结果；正式提交/候选回执间断时保留义务，重试沿稳定身份/CAS收口。
+    def promote_batch(self, expected_candidates, *, reviewer, automatic=False, confirmed=False):
+        rows = bounded_candidate_batch(expected_candidates)
+        _unique_candidate_batch(rows)
+        if not str(reviewer or "").strip():
+            raise ValueError("candidate reviewer is required")
+        from ._jsonl_indexing import RemovalCleanupError, vector_index_batch
+
+        with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
+            prepared, results = _prepare_promotion_batch(self, rows, reviewer, automatic)
+            outcomes, deferred, conflicts = {}, {}, []
+            # 向量先批量发表，随后候选终态才可确认；异常退出仍只保留正式事实与原提交责任。
+            with vector_index_batch(self.long_term):
+                for candidate in prepared:
+                    token = _AUTOMATIC_PROMOTION.set((id(self), candidate.candidate_id) if automatic else None)
+                    try:
+                        if _promotion_target(candidate) == "long_term":
+                            _register_condense_debt(self.long_term, self.candidates, self.coordinator_io)
+                        outcome, _ = _commit_admitted(self, candidate, (reviewer, confirmed), complete=False)
+                        outcomes[candidate.candidate_id] = outcome
+                    except _PromotionConflict as exc:
+                        conflicts.append((candidate, "blocked_conflict", {"review_note": exc.reason_code,
+                            "conflicts_with": list(exc.conflicts_with)}))
+                        results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                            "blocked_conflict", exc.reason_code)
+                    except _PromotionBlocked as exc:
+                        deferred[candidate.candidate_id] = exc.reason_code
+                        _register_automatic_governance_review(self, candidate, exc.reason_code)
+                    except (LessonRoutingPendingError, MemoryLibraryWriteCapExceeded) as exc:
+                        code = "LESSON_ROUTING_PENDING" if isinstance(exc, LessonRoutingPendingError) else exc.code
+                        results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                            candidate.status, code, getattr(exc, "promotion_ref", ""),
+                            formal_memory_changed=bool(getattr(exc, "formal_memory_changed", False)))
+                    except RemovalCleanupError as exc:
+                        results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                            candidate.status, "REMOVE_CLEANUP_PENDING", formal_memory_changed=exc.formal_memory_changed)
+                    except _UNCERTAIN_PROMOTION_ERRORS:
+                        raise
+                    except CandidateStateChangedError as exc:
+                        results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                            exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+                    except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+                        deferred[candidate.candidate_id] = _recoverable_promotion_reason(exc)
+                    finally:
+                        _AUTOMATIC_PROMOTION.reset(token)
+            if conflicts:
+                _batch_conflict_receipts(self, conflicts, results, reviewer, deferred=deferred)
+            _finish_promotion_batch(self, prepared, outcomes, deferred, results, reviewer)
+            return tuple(results[row.candidate_id] for row in rows)
 
     # LLM: 来源/证据/权威/自动政策先核；准备失败同正式提交登记义务，未知执行异常原样传播不自动重放。
     # 函数用途: 准备默认落点与批准，持久保留通过核门后被暂态存储或CAS阻断的提交责任。
@@ -1112,6 +1171,143 @@ class MemoryPromotionService(_PromotionCommitMixin):
             status,
             reason_code,
         )
+
+
+# LLM: 与单条同优先级核证、冷却、权威和自动治理；只组织原候选批次，不保存第二份批准状态。
+# 函数用途: 逐项预检后一次落盘批准/证据阻塞，返回可正式提交的耐久快照。
+def _prepare_promotion_batch(service, rows, reviewer, automatic):
+    from .promotion_remove_recovery import recover_committed_update, recover_promotion_result
+
+    changes, ready, results = [], {}, {}
+    for expected in rows:
+        cid = expected.candidate_id
+        try:
+            candidate = service.candidates.get(cid)
+        except KeyError:
+            results[cid] = MemoryPromotionResult(cid, False, "missing", "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+            continue
+        if candidate != expected:
+            results[cid] = MemoryPromotionResult(cid, False, candidate.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+            continue
+        recovery = recover_promotion_result(service, candidate, reviewer)
+        if recovery is None:
+            recovery = recover_committed_update(service, candidate, reviewer)
+        if recovery is not None:
+            results[cid] = recovery
+            continue
+        early = _promotion_precheck(candidate, automatic)
+        if early is not None:
+            results[cid] = early
+            continue
+        if (automatic and candidate.commit_obligation and candidate.obligation_retry_after
+                and datetime.fromisoformat(candidate.obligation_retry_after) > datetime.now(timezone.utc)):
+            results[cid] = MemoryPromotionResult(cid, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF")
+            continue
+        code = service._verify_evidence(candidate)
+        if code:
+            status = "blocked_missing_evidence" if candidate.status in {"pending_review", "approved"} else candidate.status
+            if status != candidate.status:
+                changes.append((candidate, status, {"review_note": code}))
+            results[cid] = MemoryPromotionResult(cid, False, status, code)
+            continue
+        effective = replace(candidate, promotion_target=_promotion_target(candidate))
+        code = _absolute_authority_block(effective)
+        if not code and automatic:
+            code = _automatic_policy_block(effective, owner_home=service.persona.owner_home)
+        if code:
+            if automatic:
+                _register_automatic_governance_review(service, candidate, code)
+            results[cid] = MemoryPromotionResult(cid, False, candidate.status, code)
+            continue
+        if candidate.status == "pending_review" and automatic:
+            changes.append((candidate, "approved", {"promotion_target": effective.promotion_target,
+                "review_note": "owner_autonomous_v1：结构化权威与安全门通过。"}))
+        elif candidate.status == "approved":
+            if candidate.promotion_target in {"", "none"} and effective.promotion_target == "long_term":
+                changes.append((candidate, "approved", {"promotion_target": "long_term"}))
+        else:
+            results[cid] = MemoryPromotionResult(cid, False, candidate.status, "REVIEW_REQUIRED")
+            continue
+        ready[cid] = candidate
+    if changes:
+        try:
+            saved = service.candidates.transition_batch(changes, reviewer=reviewer)
+        except _UNCERTAIN_PROMOTION_ERRORS:
+            raise
+        except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+            reason = _recoverable_promotion_reason(exc)
+            obligations = list(ready.values())
+            saved_obligations = service.candidates.commit_batch(obligations, reviewer=reviewer, promotion_refs={},
+                deferred_reasons={row.candidate_id: reason for row in obligations})
+            for candidate, saved in zip(obligations, saved_obligations, strict=True):
+                code = "CANDIDATE_CHANGED_AFTER_VERIFICATION" if isinstance(saved, Exception) else reason
+                results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                    getattr(saved, "status", candidate.status), code)
+            for candidate, _status, _options in changes:
+                if candidate.candidate_id not in ready:
+                    # 未通过证据门的候选不能新增提交责任，也不能把未落盘的blocked当已保存事实。
+                    current = service.candidates.get(candidate.candidate_id)
+                    results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False, current.status, reason)
+            return (), results
+        for (candidate, _status, _options), updated in zip(changes, saved, strict=True):
+            cid = candidate.candidate_id
+            if isinstance(updated, Exception):
+                results[cid] = MemoryPromotionResult(cid, False, getattr(updated, "status", "missing"),
+                    "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+                ready.pop(cid, None)
+            elif cid in ready:
+                ready[cid] = updated
+    return tuple(ready.values()), results
+
+
+# LLM: 冲突转换仍按同一快照CAS，失败不碰正式目标；并发终态不能被批次冲突覆盖。
+# 函数用途: 批量保存正式目标冲突，并把候选竞争映射回逐项结果。
+def _batch_conflict_receipts(service, changes, results, reviewer, *, deferred):
+    try:
+        saved = service.candidates.transition_batch(changes, reviewer=reviewer)
+    except _UNCERTAIN_PROMOTION_ERRORS:
+        raise
+    except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+        # 冲突尚未落盘，不能回执blocked；同批其他正式成功项仍须继续终态收口。
+        deferred.update(dict.fromkeys((candidate.candidate_id for candidate, _status, _options in changes),
+                                     _recoverable_promotion_reason(exc)))
+        return
+    for (candidate, _status, _options), updated in zip(changes, saved, strict=True):
+        if isinstance(updated, Exception):
+            results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                getattr(updated, "status", "missing"), "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+
+
+# LLM: 目标成功不等于回执成功；落盘失败只为未收口项记退避，不追加正式内容或丢弃同批成功事实。
+# 函数用途: 一次收口所有成功项及暂态失败，精确返回目标引用、实际变更和候选终态。
+def _finish_promotion_batch(service, prepared, outcomes, deferred, results, reviewer):
+    selected = [row for row in prepared if row.candidate_id in outcomes or row.candidate_id in deferred]
+    if not selected:
+        return
+    refs = {cid: outcome.reference for cid, outcome in outcomes.items()}
+    try:
+        saved = service.candidates.commit_batch(selected, reviewer=reviewer, promotion_refs=refs, deferred_reasons=deferred)
+    except _UNCERTAIN_PROMOTION_ERRORS:
+        raise
+    except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+        reason = _recoverable_promotion_reason(exc)
+        deferred = {**deferred, **{row.candidate_id: (
+            "REMOVE_CLEANUP_PENDING" if row.proposed_action == "remove" and _promotion_target(row) == "long_term"
+            else reason) for row in selected if row.candidate_id in outcomes}}
+        saved = service.candidates.commit_batch(selected, reviewer=reviewer, promotion_refs={}, deferred_reasons=deferred)
+        refs = {}
+    for candidate, updated in zip(selected, saved, strict=True):
+        cid = candidate.candidate_id
+        outcome = outcomes.get(cid)
+        if isinstance(updated, Exception):
+            results[cid] = MemoryPromotionResult(cid, False, getattr(updated, "status", "missing"),
+                "CANDIDATE_CHANGED_AFTER_VERIFICATION", outcome.reference if outcome else "",
+                formal_memory_changed=bool(outcome and outcome.changed))
+        elif cid in refs:
+            results[cid] = service._finalize_promotion(updated, reviewer, outcome)
+        else:
+            results[cid] = MemoryPromotionResult(cid, False, updated.status, deferred[cid],
+                outcome.reference if outcome else "", formal_memory_changed=bool(outcome and outcome.changed))
 
 
 # LLM: owner_home由真实Persona仓库注入，只读原宿主治理；原AGENTS/来源/权威/精确目标门不放宽。

@@ -2,7 +2,11 @@
 # 模块用途: 复核冷热索引候选、保留向量CAS并执行删除后的派生正文清理。
 from __future__ import annotations
 
+import os
+import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
@@ -25,6 +29,45 @@ _NATIVE_MEMORY_ERRORS = (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
 
 if TYPE_CHECKING:
     from .jsonl import MemoryRecord
+
+
+@dataclass
+class _VectorIndexBatch:
+    memory: object
+    pid: int = field(default_factory=os.getpid)
+    thread: int = field(default_factory=threading.get_ident)
+    active: bool = True
+    records: dict = field(default_factory=dict)
+
+
+_VECTOR_INDEX_BATCH: ContextVar[_VectorIndexBatch | None] = ContextVar("memory_vector_index_batch", default=None)
+
+
+# LLM: 只复用同memory/进程/线程的活栈；复制Context不延长寿命，最多32条，正式事实仍是唯一权威。
+# 函数用途: 将本批已提交的非删除向量合成一次upsert_many，退出后再允许候选确认终态。
+@contextmanager
+def vector_index_batch(memory):
+    active = _active_vector_batch(memory)
+    if active is not None:
+        yield
+        return
+    batch = _VectorIndexBatch(memory)
+    token = _VECTOR_INDEX_BATCH.set(batch)
+    try:
+        yield
+        if batch.records:
+            memory._index_vectors(list(batch.records.values()))
+    finally:
+        batch.active = False
+        _VECTOR_INDEX_BATCH.reset(token)
+
+
+# LLM: 活上下文不授写权，只在原实例已经完成正式提交后聚合派生索引。
+# 函数用途: 拒绝异线程、旧进程和已退出上下文的向量批次复用。
+def _active_vector_batch(memory):
+    batch = _VECTOR_INDEX_BATCH.get()
+    return batch if (batch is not None and batch.memory is memory and batch.active
+                     and batch.pid == os.getpid() and batch.thread == threading.get_ident()) else None
 
 
 # LLM: 正式提交与派生清理分开报告，不得把待清理隐私副本当完整成功。
@@ -94,9 +137,22 @@ class JsonlMemoryIndexMixin:
                 _purge_removed_indexes(self, removed, admission=_admission)
             except RemovalCleanupError as exc:
                 raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
-        for record in records:
-            if record.action != "remove":
-                self._index_vector(record)
+        active = _active_vector_batch(self)
+        if active is not None:
+            for record in records:
+                if record.action == "remove":
+                    active.records.pop(record.entry_id, None)
+                    continue
+                active.records[record.entry_id] = record
+                if len(active.records) >= 32:
+                    self._index_vectors(list(active.records.values()))
+                    active.records.clear()
+        else:
+            pending = [record for record in records if record.action != "remove"]
+            if len(pending) == 1:
+                self._index_vector(pending[0])
+            else:
+                self._index_vectors(pending)
 
     # LLM: 仅本轮正式删除后的入口，历史恢复不得虚增formal_memory_changed；已有活准入必须透传。
     # 函数用途: 保留删除已提交但隐私清理未完成的回执。
@@ -161,11 +217,21 @@ def _purge_removed_indexes(memory, entry_id: str | set[str], *, admission=None) 
                     memory._vector_store_cache = store
             else:
                 store = VectorStore(memory._vector_store_path())
-        removed_ids = {entry_id} if isinstance(entry_id, str) else entry_id
-        for removed_id in removed_ids:
-            store.remove(removed_id)
+        removed_ids = {entry_id} if isinstance(entry_id, str) else set(entry_id)
+        from .jsonl import _materialize_memory_events, _strict_memory_events
+
+        # 永久正文hash屏障可能同时遮蔽另一个ID；同formal锁内核全库（含过期事实），只清确已无权威引用的向量。
+        with memory._locked_memory():
+            live = {row.entry_id for row in _materialize_memory_events(
+                _strict_memory_events(memory.path), include_expired=True)}
+            removed_ids.update(set(store.ids()) - live)
+            if len(removed_ids) == 1:
+                store.remove(next(iter(removed_ids)))
+            else:
+                store.remove_many(removed_ids)
             if memory.local_store is not None:
-                memory.local_store.delete_record(memory.local_store.make_record_id("memory", removed_id))
+                for removed_id in removed_ids:
+                    memory.local_store.delete_record(memory.local_store.make_record_id("memory", removed_id))
         _purge_text_vector_orphans(memory)
     except Exception as exc:
         if getattr(memory, "coordinator_io", False) and isinstance(exc, _NATIVE_MEMORY_ERRORS):

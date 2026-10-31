@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.agent.local_storage import LocalStore
@@ -35,6 +36,7 @@ def _remove_request(agent, request):
 _CRASH_SHARED = '''
 import json, os, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[2])
 from agent_py_agent.tests.test_memory_remove_shared_content import _indexed_agent, _remove_request
 from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
 from agent_py_agent.agent.memory_store import jsonl
@@ -45,6 +47,10 @@ for subject in ('source.review.a', 'source.review.b'):
     assert result.ok and json.loads(result.output)['saved'], result
 assert len(agent.memory.all()) == 2
 target = next(row for row in agent.memory.all() if row.attributes['subject_key'] == 'source.review.a')
+# 同文永久屏障会隐去同文B；先让B沿真实replace保存不同正文，历史hash仍含A，后续删除B照旧脱敏A候选。
+other = next(row for row in agent.memory.all() if row.entry_id != target.entry_id)
+agent.memory.apply_batch([dict(action='replace', entry_id=other.entry_id, expected_version=other.version,
+                               content='项目使用北京时间展示时间')])
 # 正式写入不再双写旧LocalStore投影；按升级前遗留的真实副本播种A，删除恢复必须擦除它。
 agent.memory.local_store.upsert_record(source_type='memory', source_id=target.entry_id,
                                        title='project:user', content=target.content)
@@ -67,8 +73,8 @@ raise AssertionError(result)
 # LLM: 正式删除A提交后真实退出；B删除脱敏A候选后，仅通过Remember恢复A，不重放正式写入。
 # 函数用途: 相同正文的另一条记忆不能让已删除条目的残留索引失去清理入口。
 def test_other_removal_redaction_does_not_drop_committed_cleanup(tmp_path):
-    crashed = subprocess.run([sys.executable, '-c', _CRASH_SHARED, str(tmp_path)],
-                             capture_output=True, text=True, timeout=30)
+    crashed = subprocess.run([sys.executable, '-c', _CRASH_SHARED, str(tmp_path), str(Path(__file__).resolve().parents[2])],
+                             capture_output=True, text=True, timeout=30, cwd=Path(__file__).resolve().parents[2])
     assert crashed.returncode == 73, crashed.stdout + crashed.stderr
     agent = _indexed_agent(tmp_path)
     tool = ConfirmedRememberWorkflow(agent)

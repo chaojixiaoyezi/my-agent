@@ -1508,23 +1508,32 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
     # 函数用途: 尽力把一条正式记忆写入向量索引，失败进入健康诊断，不回滚正式记忆。
     # LLM: C实际native先抛；上一叶成功后在原document embedding前纯当前校验，网络和原领域锁仍Root外，普通降级保持。
     # 函数用途: 按原文本/身份/费用给已提交记忆写向量投影。
-    @counted_as("memory_write")
     def _index_vector(self, record: MemoryRecord) -> None:
+        self._index_vectors([record])
+
+    # LLM: 每次至多32条embedding，网络仍在formal锁外；空间裁决和逐条版本复核后只批量发表当前事实。
+    # 函数用途: 批量更新正式记忆向量，普通派生失败只记健康诊断，native未知原样传播。
+    @counted_as("memory_write")
+    def _index_vectors(self, records: list[MemoryRecord]) -> None:
+        if not records:
+            return
         try:
             store = self._vector_store()
             if store is None:
                 return
-            # 写侧裁决统一交给 VectorStore.upsert（锁内重读最新快照）：空库由当前身份接管；有向量却没身份、身份不一致、
-            # 维度不符或库读不了都拒绝混写，VectorIdentityError 在下方按 reason 记录降级。
-            # 嵌入与召回同一段索引文本（正文 + keywords_en），条目 text 存的就是它：召回据此判断能否直接复用（S3）。
             from ..retrieval.text_vector_cache import index_text
 
-            text = index_text(record.content, record.attributes)
-            if self.coordinator_io:
-                _coordinator_memory_write(lambda: None)
-            vector = self._embedder.embed([text])[0]
-            if self._write_current_vector(store, record, (vector, text)):
-                self._record_semantic_health("index")
+            for offset in range(0, len(records), 32):
+                batch = records[offset:offset + 32]
+                texts = [index_text(record.content, record.attributes) for record in batch]
+                if self.coordinator_io:
+                    _coordinator_memory_write(lambda: None)
+                with embedding_input_type("db"):
+                    vectors = self._embedder.embed(texts)
+                if len(vectors) != len(batch):
+                    raise ValueError("embedding result count differs from memory batch")
+                if self._write_current_vectors(store, list(zip(batch, vectors, texts, strict=True))):
+                    self._record_semantic_health("index")
         except Exception as exc:
             if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
                 raise
@@ -1536,11 +1545,21 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
     # 函数用途: 在原删除互斥锁内保存仍然有效的向量。
     def _write_current_vector(self, store, record, embedded) -> bool:
         vector, text = embedded
+        return bool(self._write_current_vectors(store, [(record, vector, text)]))
+
+    # LLM: 同一formal锁下只读一次当前逻辑库，逐项核对ID/版本/正文/范围后调用upsert_many；删除先行拒绝旧投影。
+    # 函数用途: 将仍然有效的一批向量作为同一快照发表，返回实际入选条数。
+    def _write_current_vectors(self, store, embedded) -> int:
         with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
-            if not self._projection_is_current(record):
-                return False
-            store.upsert(_record_vec_id(record), vector, text=text, metadata=_record_payload(record))
-        return True
+            current = {row.entry_id: row for row in self._maintenance_records()}
+            rows = []
+            for record, vector, text in embedded:
+                latest = current.get(record.entry_id)
+                if (latest is not None and latest.version == record.version and latest.content == record.content
+                        and latest.attributes == record.attributes):
+                    rows.append((_record_vec_id(record), vector, text, _record_payload(record)))
+            store.upsert_many(rows)
+            return len(rows)
 
     # LLM: 删除只针对精确 entry ID 的派生向量，失败不能使索引获得事实权威。
     # 函数用途: 尽力清除一条已删除记忆的向量项。

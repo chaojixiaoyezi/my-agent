@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,7 @@ from .scope_contract import canonical_scope_key
 
 # 保留清理只认合法的未晋升状态；扫描、执行与仓库删除共用同一集合，promoted 永不参与。
 RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
+PROMOTION_BATCH_MAX_ITEMS = 32
 
 
 # LLM: 扫描、执行及锁内仓库末门共用；approved及任何提交义务不受年龄覆盖。
@@ -441,60 +443,86 @@ class CandidateService:
                 current = _hydrate_candidate(self.path, candidates[index])
                 if expected is not None and current != expected:
                     raise CandidateStateChangedError(current.status)
-                default_repair = (expected is not None and current.status == "approved"
-                    and current.promotion_target in {"", "none"} and promotion_target == "long_term"
-                    and current.origin == "user_explicit" and current.candidate_type in {"long_term_fact", "event", "project", "working_agreement"}
-                    and proposed_action is None and target_entry_id is None and conflicts_with is None)
-                if target == current.status and not default_repair:
+                updated = _transition_candidate(current, target, reviewer=actor, review_note=review_note,
+                    proposed_action=proposed_action, target_entry_id=target_entry_id, conflicts_with=conflicts_with,
+                    promotion_target=promotion_target, snapshot_checked=expected is not None)
+                if updated is current:
                     return current
-                if target != current.status and not candidate_transition_allowed(current.status, target):
-                    raise CandidateTransitionError(
-                        f"candidate transition {current.status} -> {target} is not allowed"
-                    )
-                now = utc_now_iso()
-                updated = replace(
-                    current,
-                    cold_detail_ref="",
-                    target_evidence_bindings=binding_history(current),
-                    status=target,
-                    commit_obligation=(target == "approved" or current.commit_obligation)
-                        and target not in {"rejected", "withdrawn", "promoted"},
-                    reviewer=actor,
-                    review_note=str(review_note or "").strip(),
-                    updated_at=now,
-                    proposed_action=(
-                        str(proposed_action).strip().lower()
-                        if proposed_action is not None
-                        else current.proposed_action
-                    ),
-                    target_entry_id=(
-                        str(target_entry_id or "").strip()
-                        if target_entry_id is not None
-                        else current.target_entry_id
-                    ),
-                    target_entry_version=(
-                        None if target_entry_id is not None and
-                        str(target_entry_id or "").strip() != current.target_entry_id
-                        else current.target_entry_version
-                    ),
-                    conflicts_with=(
-                        normalize_string_list(conflicts_with)
-                        if conflicts_with is not None
-                        else current.conflicts_with
-                    ),
-                    promotion_target=(
-                        str(promotion_target).strip().lower()
-                        if promotion_target is not None
-                        else current.promotion_target
-                    ),
-                    status_history=[
-                        *current.status_history,
-                        _status_event(target, actor=actor, note=review_note, at=now),
-                    ],
-                )
                 candidates[index] = updated
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
                 return updated
+
+    # LLM: 批次最多32条，逐项完整快照CAS；合法转换共用单条状态实现，一次准入/一次耐久替换后才返回成功。
+    # 函数用途: 批量批准或阻塞候选，坏快照只返回该项原异常，不覆盖同批其他合法状态。
+    def transition_batch(self, transitions, *, reviewer: str):
+        changes = bounded_candidate_batch(transitions)
+        actor = str(reviewer or "").strip()
+        if not actor:
+            raise ValueError("candidate reviewer is required")
+        if not changes:
+            return ()
+        _unique_candidate_batch([item[0] for item in changes])
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
+            rows = self._load_unlocked()
+            indices = {row.candidate_id: i for i, row in enumerate(rows)}
+            results, changed = [], False
+            for expected, status, options in changes:
+                try:
+                    index = indices[expected.candidate_id]
+                    current = _hydrate_candidate(self.path, rows[index])
+                    if current != expected:
+                        raise CandidateStateChangedError(current.status)
+                    updated = _transition_candidate(current, status, reviewer=actor,
+                        snapshot_checked=True, **options)
+                    changed |= updated is not current
+                    rows[index] = updated
+                    results.append(updated)
+                except (KeyError, CandidateStateChangedError, CandidateTransitionError) as exc:
+                    results.append(exc)
+            if changed:
+                _write_candidates_unlocked(self.path, rows, admission=admission,
+                    **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return tuple(results)
+
+    # LLM: quota先于candidate；逐项CAS与单条_promoted_rows共用终态及硬删除规则，不新建批次状态账。
+    # 函数用途: 一次耐久提交成功引用及失败退避；写入失败时原approved/commit_obligation保持可恢复。
+    def commit_batch(self, expected_candidates, *, reviewer: str, promotion_refs: dict[str, str],
+                     deferred_reasons: dict[str, str] | None = None):
+        expected_candidates = bounded_candidate_batch(expected_candidates)
+        _unique_candidate_batch(expected_candidates)
+        if not expected_candidates:
+            return ()
+        with _quota_admission(self.quota_enforcer) as admission, candidate_redaction_lock(
+                self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
+            rows, results, hashes = self._load_unlocked(), [], set()
+            indices = {row.candidate_id: i for i, row in enumerate(rows)}
+            changed = False
+            for expected in expected_candidates:
+                try:
+                    index = indices[expected.candidate_id]
+                    current = _hydrate_candidate(self.path, rows[index])
+                    if current != expected:
+                        raise CandidateStateChangedError(current.status)
+                    ref = str(promotion_refs.get(expected.candidate_id) or "").strip()
+                    reason = (deferred_reasons or {}).get(expected.candidate_id, "")
+                    if ref:
+                        _require_promotable_binding(current, ref)
+                        rows[index] = current
+                        rows = _promoted_rows(rows, index, (reviewer, ref, ""))
+                        if current.proposed_action == "remove":
+                            hashes.add(current.content_hash)
+                    elif reason and current.status not in TERMINAL_CANDIDATE_STATUSES:
+                        rows[index] = _deferred_candidate(current, reason)
+                    changed |= rows[index] != current
+                    results.append(rows[index])
+                except (KeyError, CandidateStateChangedError, CandidateTransitionError) as exc:
+                    results.append(exc)
+            if changed or hashes:
+                cold = {"cold_redaction": {"hashes": hashes, "excluded": set(), "reviewer": reviewer,
+                                           "now": utc_now_iso()}} if hashes else {}
+                _write_candidates_unlocked(self.path, rows, admission=admission, **cold,
+                    **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return tuple(results)
 
     # LLM: 仅合并候选批准与默认落点，不授予正式发布权限；snapshot CAS及原状态机/配额/锁仍由transition执行。
     # 函数用途: 给自动晋升调用者提供一次写盘的准备入口，代替补落点后再次批准。
@@ -516,9 +544,7 @@ class CandidateService:
                 raise CandidateStateChangedError(rows[index].status)
             if expected.status in TERMINAL_CANDIDATE_STATUSES:
                 return expected
-            now = datetime.now(timezone.utc)
-            rows[index] = replace(expected, commit_obligation=True, obligation_blocked_reason=reason,
-                obligation_retry_after=(now + timedelta(minutes=5)).isoformat())
+            rows[index] = _deferred_candidate(expected, reason)
             _write_candidates_unlocked(self.path, rows, admission=admission,
                 **({} if not self.coordinator_io else {"coordinator_io": True}))
             return rows[index]
@@ -720,6 +746,58 @@ class CandidateService:
 # 类用途: 表示一条观察撞上了已有观察身份、但类型化主题不同。
 class CandidateIdentityConflictError(ValueError):
     pass
+
+
+# LLM: 迭代器最多消费33项，超界在任何IO之前拒绝，不把无穷输入整表装入内存。
+# 函数用途: 为批准、晋升和终态提交共用固定批次上限。
+def bounded_candidate_batch(items):
+    rows = tuple(islice(iter(items), PROMOTION_BATCH_MAX_ITEMS + 1))
+    if len(rows) > PROMOTION_BATCH_MAX_ITEMS:
+        raise ValueError(f"candidate batch exceeds {PROMOTION_BATCH_MAX_ITEMS} items")
+    return rows
+
+
+# LLM: 批次只认完整候选快照；重复ID不能在同一批借前项审核结果推进第二次。
+# 函数用途: 拒绝无比较令牌或重复身份的批次。
+def _unique_candidate_batch(rows):
+    if any(not isinstance(row, MemoryCandidate) for row in rows):
+        raise TypeError("candidate batch requires MemoryCandidate snapshots")
+    if len({row.candidate_id for row in rows}) != len(rows):
+        raise ValueError("candidate batch requires unique candidate IDs")
+
+
+# LLM: 单条与批次共用原状态图、默认落点修复和义务公式；纯计算，锁/CAS/写盘由调用者承担。
+# 函数用途: 构造一次合法的审核状态变更，不把批准只保留在内存中对外回执。
+def _transition_candidate(current, target_status, *, reviewer, review_note="", proposed_action=None,
+                          target_entry_id=None, conflicts_with=None, promotion_target=None, snapshot_checked=False):
+    target = str(target_status or "").strip().lower()
+    default_repair = (snapshot_checked and current.status == "approved"
+        and current.promotion_target in {"", "none"} and promotion_target == "long_term"
+        and current.origin == "user_explicit" and current.candidate_type in {"long_term_fact", "event", "project", "working_agreement"}
+        and proposed_action is None and target_entry_id is None and conflicts_with is None)
+    if target == current.status and not default_repair:
+        return current
+    if target != current.status and not candidate_transition_allowed(current.status, target):
+        raise CandidateTransitionError(f"candidate transition {current.status} -> {target} is not allowed")
+    now = utc_now_iso()
+    return replace(current, cold_detail_ref="", target_evidence_bindings=binding_history(current), status=target,
+        commit_obligation=(target == "approved" or current.commit_obligation)
+            and target not in {"rejected", "withdrawn", "promoted"},
+        reviewer=reviewer, review_note=str(review_note or "").strip(), updated_at=now,
+        proposed_action=str(proposed_action).strip().lower() if proposed_action is not None else current.proposed_action,
+        target_entry_id=str(target_entry_id or "").strip() if target_entry_id is not None else current.target_entry_id,
+        target_entry_version=(None if target_entry_id is not None and str(target_entry_id or "").strip() != current.target_entry_id
+                              else current.target_entry_version),
+        conflicts_with=normalize_string_list(conflicts_with) if conflicts_with is not None else current.conflicts_with,
+        promotion_target=str(promotion_target).strip().lower() if promotion_target is not None else current.promotion_target,
+        status_history=[*current.status_history, _status_event(target, actor=reviewer, note=review_note, at=now)])
+
+
+# LLM: 失败退避复用原五分钟规则；不推进语义版本或清除待履约责任。
+# 函数用途: 为单条及批次生成同一种持久重试责任。
+def _deferred_candidate(candidate, reason):
+    return replace(candidate, commit_obligation=True, obligation_blocked_reason=reason,
+        obligation_retry_after=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat())
 
 
 # LLM: 终态沿更新时间；未终态优先宿主最后观察时间，旧行缺字段才逐级回退，不解析正文。
@@ -1674,7 +1752,7 @@ def _hydrate_observation_targets(path: Path, rows: list[MemoryCandidate], observ
             for row in rows]
 
 
-# LLM: 按最后变更时间冷却；默认覆盖全部终态，delete_terminal显式只选未晋升终态；负数量阈值拒绝。
+# LLM: 按最后变更时间冷却；只归档现有schema允许cold_detail_ref的三类终态，withdrawn/expired保原热行；负阈值拒绝。
 # 函数用途: 在调用方允许的终态中，选择超过年龄或容量阈值且至少冷却一天的热行。
 def _terminal_compaction_indices(rows, now, cutoff, maximum, *, statuses=frozenset({"promoted", "superseded", "rejected"})):
     if type(maximum) is not int or maximum < 0:
