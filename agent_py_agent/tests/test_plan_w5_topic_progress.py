@@ -134,7 +134,8 @@ def test_b1_twenty_updates_coalesce_into_bounded_patches_of_one_card(tmp_path, m
     assert pending.progress_draft['source_revision'] == 20
     latest = json.loads(patches[-1][2]['content'])
     assert 'invented' not in json.dumps(latest)
-    assert len(latest['body']['elements'][0]['elements'][0]['content'].splitlines()) == 5
+    panel = next(el for el in latest['body']['elements'] if el.get('tag') == 'collapsible_panel')
+    assert len(panel['elements']) == 5
 
 
 def test_b1_unknown_first_send_reconciles_original_key_and_frozen_card_without_replacement(tmp_path, monkeypatch):
@@ -189,7 +190,8 @@ def test_b1_terminal_tool_events_get_one_bounded_same_card_edit_before_final(tmp
     patches = [row for row in case.calls if row[0] == 'PATCH']
     assert len(patches) == 1 and patches[0][1].endswith('/om_card_original')
     card = json.loads(patches[0][2]['content'])
-    assert card['body']['elements'][0]['elements'][0]['content'].count('完成') == 5
+    panel = next(el for el in card['body']['elements'] if el.get('tag') == 'collapsible_panel')
+    assert sum('已完成' in el['text']['content'] for el in panel['elements']) == 5
     assert len(case.logical_cards) == 1 and len(case.finals) == 1
     assert case.store.terminal_receipt('card-request')['disposition'] == 'sent'
 

@@ -140,7 +140,8 @@ class DeliveryService:
     # 函数用途: 首次创建一条进度消息，以后编辑同一条；进度不附路径说明，返回 provider 消息 ID 供原投递账本耐久保存。
     def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = '',
                          render_kind: str = 'text', snapshot: dict | None = None, reply_policy: str | None = None):
-        from .progress import ProgressDeliveryReceipt, render_progress_card
+        from ..adapter.feishu_progress_card import render_progress_card
+        from .progress import ProgressDeliveryReceipt
 
         prepared = self._prepare(context, envelope, progress=True)
         if isinstance(prepared, DeliveryReceipt):
