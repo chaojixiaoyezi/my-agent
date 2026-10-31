@@ -11,10 +11,12 @@ therefore fails closed.
 """
 
 import json
+import math
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..common.heartbeat import process_start_time, start_time_matches
@@ -94,6 +96,9 @@ class ToolOperationRecord:
     updated_at: float = 0.0
     completed_at: float = 0.0
     reconciliation_only: bool = False
+    attempt_id: str = ""
+    first_dispatch_at: float | None = None
+    component_receipts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -160,6 +165,29 @@ class ToolOperationOwnershipError(ToolOperationStateError):
 class LocalStoreToolOperationMixin:
     """Atomic tool-operation claims backed by the owner LocalStore database."""
 
+    # LLM: 只在原 holder/generation 下追加组件事实；事务提交先于外发，重开不能重置首次发送时刻。
+    # 函数用途: 保存原操作的上传/发送回执，不把附件上传当作消息已经尝试发送。
+    def record_tool_operation_dispatch(
+        self, record: ToolOperationRecord, *, component_id: str,
+        first_dispatch_at: float | None = None, receipt: dict[str, Any] | None = None,
+    ) -> ToolOperationRecord:
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _select_operation(conn, record.owner_id, record.run_id, record.operation_id)
+            if (current is None or current.status not in {TOOL_OPERATION_RUNNING, TOOL_OPERATION_UNKNOWN}
+                    or current.holder_id != record.holder_id or current.generation != record.generation):
+                raise ToolOperationOwnershipError("dispatch checkpoint lost holder ownership")
+            updated = merge_tool_operation_dispatch(current, component_id=component_id,
+                first_dispatch_at=first_dispatch_at, receipt=receipt)
+            conn.execute(
+                "UPDATE tool_operations SET first_dispatch_at=?, component_receipts_json=?, updated_at=? "
+                "WHERE owner_id=? AND run_id=? AND operation_id=? AND holder_id=? AND generation=?",
+                (updated.first_dispatch_at, json.dumps(updated.component_receipts, ensure_ascii=False), time.time(),
+                 record.owner_id, record.run_id, record.operation_id, record.holder_id, record.generation),
+            )
+            conn.commit()
+            return updated
+
     def claim_tool_operation(
         self,
         request: ToolOperationClaimRequest,
@@ -172,6 +200,12 @@ class LocalStoreToolOperationMixin:
             if existing is None:
                 unresolved = _select_equivalent_unknown_operation(conn, request)
                 if unresolved is not None:
+                    if unresolved.status == TOOL_OPERATION_RUNNING:
+                        # 终态保存可能失败，行仍 RUNNING；换 call id 不能绕过原占位。
+                        decision = _existing_claim_decision(conn, unresolved, replace(request,
+                            operation_id=unresolved.operation_id, idempotency_key=unresolved.idempotency_key), now)
+                        conn.commit()
+                        return decision
                     conn.commit()
                     return ToolOperationClaim(
                         "unknown",
@@ -592,7 +626,7 @@ def _select_equivalent_unknown_operation(
         WHERE owner_id = ? AND run_id = ? AND task_id = ?
           AND idempotency_scope = 'operation'
           AND idempotency_namespace = ? AND args_hash = ?
-          AND status = 'unknown'
+          AND status IN ('unknown', 'running')
         ORDER BY created_at ASC, operation_id ASC
         LIMIT 1
         """,
@@ -620,10 +654,10 @@ def _insert_running_operation(
             status, holder_id, holder_host, holder_pid,
             holder_process_start_token, generation, lease_expires_at,
             result_json, error_code, unknown_reason,
-            created_at, updated_at, completed_at
+            created_at, updated_at, completed_at, attempt_id
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, 1, ?,
-                '{}', '', '', ?, ?, 0)
+                '{}', '', '', ?, ?, 0, ?)
         """,
         (
             request.owner_id,
@@ -642,6 +676,7 @@ def _insert_running_operation(
             float(request.lease_expires_at),
             now,
             now,
+            request.attempt_id,
         ),
     )
 
@@ -894,7 +929,66 @@ def _record_from_row(row: Any) -> ToolOperationRecord:
         created_at=float(row["created_at"] or 0),
         updated_at=float(row["updated_at"] or 0),
         completed_at=float(row["completed_at"] or 0),
+        attempt_id=str(row["attempt_id"] or ""),
+        first_dispatch_at=checked_first_dispatch_at(row["first_dispatch_at"]),
+        component_receipts=checked_component_receipts(json.loads(row["component_receipts_json"])),
     )
+
+
+# LLM: None 表示旧记录或仅上传；非空时必须是有限正数，不能拿创建/handler 时间猜发送时间。
+# 函数用途: 校验操作账中的原生发送时刻。
+def checked_first_dispatch_at(value: object) -> float | None:
+    if value is None:
+        return None
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise ToolOperationStateError("invalid first_dispatch_at in operation store")
+    return float(value)
+
+
+# LLM: 回执来自原操作账；损坏结构不能当空记录或安全重放依据，返回副本避免核对器改写历史。
+# 函数用途: 读取逐组件事实，保留提供方字段并验证稳定组件身份。
+def checked_component_receipts(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ToolOperationStateError("invalid component_receipts in operation store")
+    seen = set()
+    for item in value:
+        if (not isinstance(item, dict) or not isinstance(item.get("component_id"), str)
+                or not item["component_id"].strip() or item["component_id"] in seen):
+            raise ToolOperationStateError("invalid component identity in operation store")
+        seen.add(item["component_id"])
+        checked_first_dispatch_at(item.get("first_dispatch_at"))
+    return deepcopy(value)
+
+
+# LLM: 仅做原组件的增量合并，不写库或授权；已落账 message_key 和 first_dispatch_at 不得漂移。
+# 函数用途: 让本地与运行库共用同一首次发送和逐组件更新规则。
+def merge_tool_operation_dispatch(
+    record: ToolOperationRecord, *, component_id: str,
+    first_dispatch_at: float | None = None, receipt: dict[str, Any] | None = None,
+) -> ToolOperationRecord:
+    if not isinstance(component_id, str) or not component_id.strip():
+        raise ValueError("dispatch component_id is required")
+    stamp = checked_first_dispatch_at(first_dispatch_at)
+    if receipt is not None and not isinstance(receipt, dict):
+        raise ValueError("dispatch receipt must be an object")
+    components = checked_component_receipts(record.component_receipts)
+    previous = next((item for item in components if item["component_id"] == component_id), None)
+    incoming = deepcopy(receipt or {})
+    if incoming.get("component_id", component_id) != component_id:
+        raise ToolOperationOwnershipError("dispatch component identity changed")
+    # 该时间只能来自发送前的显式 checkpoint 参数，不接受提供方回执覆盖。
+    incoming.pop("first_dispatch_at", None)
+    if previous is None:
+        previous = {"component_id": component_id, "first_dispatch_at": None}
+        components.append(previous)
+    if (previous.get("message_key") and incoming.get("message_key", previous["message_key"])
+            != previous["message_key"]):
+        raise ToolOperationOwnershipError("dispatch message_key changed")
+    first = previous.get("first_dispatch_at")
+    previous.update(incoming)
+    previous["first_dispatch_at"] = first if first is not None else stamp
+    return replace(record, first_dispatch_at=(record.first_dispatch_at
+        if record.first_dispatch_at is not None else stamp), component_receipts=components)
 
 
 def _result_ref(result: dict[str, Any]) -> str:

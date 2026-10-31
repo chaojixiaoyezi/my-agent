@@ -9,13 +9,16 @@ from __future__ import annotations
 建表、打开连接、启用 WAL/外键、处理 FTS5 是否可用，都在这里集中处理。
 """
 
+import os
 import sqlite3
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 from ..common.global_write_commit import execute_global_write
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
+from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 
@@ -195,6 +198,9 @@ _TOOL_OPERATIONS_SQL = (
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
         completed_at REAL NOT NULL DEFAULT 0,
+        attempt_id TEXT NOT NULL DEFAULT '',
+        first_dispatch_at REAL,
+        component_receipts_json TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY(owner_id, run_id, operation_id)
     )
     """,
@@ -206,6 +212,38 @@ _TOOL_OPERATIONS_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_tool_operations_run ON tool_operations(owner_id, run_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_tool_operations_status ON tool_operations(owner_id, status, updated_at)",
 )
+
+
+_TOOL_OPERATION_COLUMN_SQL = (
+    ("attempt_id", "ALTER TABLE tool_operations ADD COLUMN attempt_id TEXT NOT NULL DEFAULT ''"),
+    ("first_dispatch_at", "ALTER TABLE tool_operations ADD COLUMN first_dispatch_at REAL"),
+    ("component_receipts_json", "ALTER TABLE tool_operations ADD COLUMN component_receipts_json TEXT NOT NULL DEFAULT '[]'"),
+)
+
+
+# LLM: 只收紧本库及已存在的 sidecar，主库先以 0600 出生让 SQLite 派生文件继承；不改进程 umask、不删库。
+# 函数用途: 保证本地数据库及 WAL/SHM 私有，缺失附属文件不创建。
+def _private_sqlite_files(path, *, create=False):
+    for suffix in ("", "-wal", "-shm"):
+        target = path.with_name(path.name + suffix)
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        if create and not suffix:
+            flags |= os.O_CREAT
+        try:
+            fd = os.open(target, flags, 0o600)
+        except FileNotFoundError:
+            if create and not suffix:
+                raise
+            continue
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("SQLite storage must be a regular file")
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            else:
+                os.chmod(target, 0o600)
+        finally:
+            os.close(fd)
 
 
 _LOCAL_MIGRATION_SQL = ("ALTER TABLE agent_runs RENAME TO legacy_agent_runs",)
@@ -244,6 +282,7 @@ def _local_schema_fingerprint(enable_fts: bool) -> str:
     return schema_fingerprint((
         _BASE_SCHEMA_SQL, _TASK_REGISTRY_SQL, _CONTROL_PLANE_SQL,
         _RUNTIME_GATE_LEDGER_SQL, _TOOL_OPERATIONS_SQL, _LOCAL_MIGRATION_SQL,
+        _TOOL_OPERATION_COLUMN_SQL,
         enable_fts, _FTS_TABLE_SQL, _FTS_DROP_SQL, _FTS_SCHEMA_VERSION, _FTS_TOKENIZE,
         sqlite3.sqlite_version, _LOCAL_STATE_SQL, _FTS_REBUILD_PENDING_KEY, _FTS_SCHEMA_VERSION_KEY,
     ))
@@ -304,6 +343,10 @@ class LocalStoreSchemaMixin:
         self._execute_schema(conn, _CONTROL_PLANE_SQL)
         self._execute_schema(conn, _RUNTIME_GATE_LEDGER_SQL)
         self._execute_schema(conn, _TOOL_OPERATIONS_SQL)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tool_operations)")}
+        for name, statement in _TOOL_OPERATION_COLUMN_SQL:
+            if name not in columns:
+                conn.execute(statement)
         fts_initialized = not self.enable_fts
         if self.enable_fts:
             fts_initialized = self._init_fts_schema(conn)
@@ -397,16 +440,22 @@ class LocalStoreSchemaMixin:
     def _connect(self) -> sqlite3.Connection:
         if self.coordinator_io:
             return self._local_write(self._connect_coordinator)
+        _private_sqlite_files(self.db_path, create=True)
         conn = sqlite3.connect(self.db_path, timeout=30.0, factory=sqlite_connection_factory())
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000")
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            # 另一个 gateway / CLI 进程短暂持锁时，状态查询不能因为切 WAL 失败而崩。
-            pass
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=30000")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if sqlite_error_details(exc).get("category") not in {"busy", "locked"}:
+                    raise
+            conn.execute("PRAGMA foreign_keys=ON")
+            _private_sqlite_files(self.db_path)
+            return conn
+        except BaseException as exc:
+            _retire_coordinator_connection(conn, exc)
+            raise
 
     # LLM: 显式批次只复用同store、同线程连接；嵌套不关闭外层，各写API原有commit/rollback边界不变，异常也释放。
     # LLM: C分支仅保上下文形状、不登记或复用连接，各操作维持独立短事务，默认batch不变。
@@ -491,6 +540,7 @@ class LocalStoreSchemaMixin:
     # LLM: 调用方已在原末window；无F1 factory/cache/batch，只有原WAL/foreign_keys和零等待参数。
     # 函数用途: 创建C的一条独立短连接，设置失败也关闭本次已打开FD。
     def _connect_coordinator(self):
+        _private_sqlite_files(self.db_path, create=True)
         conn = sqlite3.connect(self.db_path, timeout=0.0)
         primary = None
         try:
@@ -498,9 +548,11 @@ class LocalStoreSchemaMixin:
             conn.execute("PRAGMA busy_timeout=0")
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                if sqlite_error_details(exc).get("category") not in {"busy", "locked"}:
+                    raise
             conn.execute("PRAGMA foreign_keys=ON")
+            _private_sqlite_files(self.db_path)
             return conn
         except BaseException as exc:
             primary = exc

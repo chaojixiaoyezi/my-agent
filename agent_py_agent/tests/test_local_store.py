@@ -698,7 +698,10 @@ def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_pat
     modes = []
 
     def replace(source, destination):
-        modes.append(Path(source).stat().st_mode & 0o777)
+        # os.replace 属于共享模块；这里只观察本用例负责的事件重写，不能把
+        # SQLite/schema 的其它原子替换误算成第二次 JSONL 重写。
+        if Path(destination) == store.events_path:
+            modes.append(Path(source).stat().st_mode & 0o777)
         return actual_replace(source, destination)
 
     if actual_replace is not None:

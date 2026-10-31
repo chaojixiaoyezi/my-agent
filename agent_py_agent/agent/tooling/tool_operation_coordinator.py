@@ -12,10 +12,12 @@ and are deliberately not consulted for execution authority.
 
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
-from contextvars import copy_context
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
@@ -30,6 +32,7 @@ from ..common.request_execution_ports import (
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable, tool_write_claim_scope
 from ..concurrency.restart_gate import tool_execution_admission
+from ..io.sqlite_connection import sqlite_error_details
 from ..local_storage import (
     TOOL_OPERATION_FAILED,
     TOOL_OPERATION_SUCCEEDED,
@@ -94,6 +97,7 @@ class ToolOperationExecutionRequest:
     resource_scopes: tuple[str, ...] = ()
     # seq 245 P2：调用者 attempt 身份透传（来源 = ToolCall.attempt_id）。
     attempt_id: str = ""
+    operation_attempt_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,53 @@ class _ToolOperationClaimAttempt:
     claim: ToolOperationClaim
     holder: ToolOperationHolder
     lease_expires_at: float
+
+
+# 只运输原领取的同步寿命，不是第二份执行权或持久操作账。
+@dataclass
+class _DispatchCheckpoint:
+    request: ToolOperationExecutionRequest
+    record: ToolOperationRecord
+    pid: int
+    thread_id: int
+    allow_dispatch: bool = True
+    active: bool = True
+
+
+_ACTIVE_DISPATCH: ContextVar[_DispatchCheckpoint | None] = ContextVar("original_tool_dispatch", default=None)
+
+
+# LLM: 仅原已领取 handler 寿命内有效；复制 Context 不延寿，外发前必须已成功提交原操作 checkpoint。
+# 函数用途: 向投递叶提供原身份下的上传/首次发送/逐组件回执保存口。
+def record_tool_operation_dispatch(
+    component_id: str, *, receipt: dict[str, Any] | None = None, dispatch_started: bool = True,
+) -> ToolOperationRecord:
+    cell = _ACTIVE_DISPATCH.get()
+    if (cell is None or not cell.active or cell.pid != os.getpid()
+            or cell.thread_id != threading.get_ident()):
+        raise ToolWriteContextUnavailable("original_tool_dispatch_claim_required")
+    if dispatch_started and not cell.allow_dispatch:
+        raise ToolWriteContextUnavailable("reconciliation_cannot_start_dispatch")
+    persist = getattr(cell.request.store, "record_tool_operation_dispatch", None)
+    if not callable(persist):
+        raise ToolWriteContextUnavailable("operation_store_dispatch_checkpoint_missing")
+    cell.record = persist(cell.record, component_id=component_id,
+        first_dispatch_at=time.time() if dispatch_started else None, receipt=receipt)
+    return deepcopy(cell.record)
+
+
+# LLM: 原执行器在 handler 前安装，返回后撤销所有上下文副本；默认工具不调用 checkpoint 就不额外写库。
+# 函数用途: 在一次已领取执行期间临时运输同一持久组件事实。
+@contextmanager
+def _operation_dispatch_scope(request: ToolOperationExecutionRequest, claim: ToolOperationClaim,
+                              *, allow_dispatch: bool = True):
+    cell = _DispatchCheckpoint(request, claim.record, os.getpid(), threading.get_ident(), allow_dispatch=allow_dispatch)
+    token = _ACTIVE_DISPATCH.set(cell)
+    try:
+        yield cell
+    finally:
+        cell.active = False
+        _ACTIVE_DISPATCH.reset(token)
 
 
 # LLM: 领取、执行、结算全程处在重启关口内；只登记工具/操作/run/owner身份，不传参数正文，关门仍等待且中断按未启动收口。
@@ -168,6 +219,20 @@ def _execute_admitted_tool_operation(request: ToolOperationExecutionRequest) -> 
     attempt = _claim_operation(request)
     if isinstance(attempt, ToolHandlerOutcome):
         return attempt
+    if attempt.claim.action == "in_flight" and attempt.claim.record.operation_id != request.operation_id:
+        # 同参并发只阻止新执行，不把两个独立请求改签成同一操作。原占位
+        # 作为阻塞依据单列；保存失败遗留的 RUNNING 仍不能被新 call 绕过。
+        result = _operation_error(request.tool_name, "TOOL_OPERATION_IN_FLIGHT",
+            "同参数操作仍在执行或等待原终态，本次请求未执行，请先核对原操作。")
+        result.effect_outcome = "not_started"
+        result.result_envelope["blocking_operation"] = {
+            "operation_id": attempt.claim.record.operation_id,
+            "attempt_id": attempt.claim.record.attempt_id,
+            "run_id": attempt.claim.record.run_id,
+        }
+        _attach_operation_facts(result, request, status="not_started", action="wait")
+        return apply_tool_execution_facts(result, failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False)
+    request = replace(request, operation_attempt_id=attempt.claim.record.attempt_id or request.attempt_id)
     if attempt.claim.record.operation_id != request.operation_id:
         request = replace(request, operation_id=attempt.claim.record.operation_id,
             idempotency_key=attempt.claim.record.idempotency_key)
@@ -248,6 +313,7 @@ def _claim_operation(
                 status="not_started",
                 action="authority_missing" if authority_missing else "store_unavailable",
                 diagnostic=type(exc).__name__,
+                storage_error=exc,
             )
             return apply_tool_execution_facts(
                 result,
@@ -358,7 +424,14 @@ def _reconcile_unknown_operation(
     attempt = claimed
     claim = attempt.claim
     try:
-        reconciliation = request.reconcile(claim.record)
+        # 核对只能在原核对 holder/generation 内补收据，不能首次发送或重发。
+        # 异常前已经耐久追加的事实仍留在原操作，不因核对失败丢掉。
+        with _operation_dispatch_scope(request, claim, allow_dispatch=False) as dispatch:
+            try:
+                reconciliation = request.reconcile(claim.record)
+            finally:
+                claim = replace(claim, record=dispatch.record)
+                attempt = replace(attempt, claim=claim)
     except Exception as exc:  # noqa: BLE001 - reconciliation is read-only and must fail closed
         raise_if_transport_uncertain(exc)
         if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
@@ -445,6 +518,8 @@ def _settle_reconciled_operation(
     reconciled_result.effect_source_ref = (
         reconciled_result.effect_source_ref or source_ref
     )
+    reconciled_result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
+        component_receipts=deepcopy(claim.record.component_receipts))
     apply_tool_execution_facts(reconciled_result, handler_executed=False)
     if not reconciled_result.ok:
         apply_tool_execution_facts(
@@ -696,6 +771,8 @@ def _unknown_claim_result(
     )
     result.effect_outcome = "not_started"
     result.result_envelope["reported_tool_result"] = _reported_tool_result_facts(prior)
+    result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
+        component_receipts=deepcopy(claim.record.component_receipts))
     result.result_envelope["prior_effect_outcome"] = (
         prior.effect_outcome or claim.record.status
     )
@@ -750,8 +827,10 @@ def _execute_claimed_operation(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
 ) -> ToolHandlerOutcome:
-    with tool_write_claim_scope(request, claim):
+    with tool_write_claim_scope(request, claim), _operation_dispatch_scope(request, claim) as dispatch:
         result = _invoke_with_lease_renewal(request, claim)
+    result.result_envelope.update(first_dispatch_at=dispatch.record.first_dispatch_at,
+        component_receipts=deepcopy(dispatch.record.component_receipts))
     operation_status = _operation_status_for_result(result)
     unknown_reason = ""
     if operation_status == TOOL_OPERATION_UNKNOWN:
@@ -803,6 +882,7 @@ def _execute_claimed_operation(
             status="unknown",
             action="completion_persistence_failed",
             diagnostic=type(exc).__name__,
+            storage_error=exc,
         )
         return result
     if operation_status in {TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED}:
@@ -1265,10 +1345,15 @@ def _attach_operation_facts(
     replayed: bool = False,
     diagnostic: str = "",
     source_ref: str = "",
+    storage_error: BaseException | None = None,
 ) -> None:
     facts: dict[str, object] = {
         "schema_version": "tool_operation.v1",
         "operation_id": request.operation_id,
+        "attempt_id": request.operation_attempt_id or request.attempt_id,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
+        "phase": result.failure_stage or ("execution" if result.handler_executed else "runtime_gate"),
         "result_ref": (
             f"tool-operation://{request.run_id}/{request.operation_id}"
         ),
@@ -1281,11 +1366,16 @@ def _attach_operation_facts(
         facts["diagnostic"] = str(diagnostic)[:240]
     if source_ref:
         facts["reconciliation_source_ref"] = str(source_ref)[:240]
+    if storage_error is not None:
+        details = sqlite_error_details(storage_error)
+        if details:
+            result.result_envelope["storage_error"] = details
     result.result_envelope.setdefault("tool_operation", {}).update(facts)
 
 
 __all__ = [
     "ToolOperationExecutionRequest",
     "execute_tool_operation",
+    "record_tool_operation_dispatch",
     "replay_completed_tool_operation",
 ]
