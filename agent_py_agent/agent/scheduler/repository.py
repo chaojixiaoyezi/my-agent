@@ -27,7 +27,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -62,7 +62,13 @@ from .event_effects import (
 )
 from .event_source_repository import SchedulerEventSourceOperations
 from .event_sources import sync_event_sources
-from .execution_policy import normalize_execution, normalize_precheck
+from .execution_policy import normalize_execution, normalize_execution_target, normalize_precheck
+from .monitor_state import (
+    adapt_definition_generations,
+    definition_generation,
+    run_matches_definition,
+    sync_definition_generations,
+)
 from .notification_binding import normalize_notification_binding
 from .policy import apply_run_policy, normalize_policy
 from .run_preparation import SchedulerRunPreparation
@@ -252,6 +258,7 @@ class SchedulerJobCreateRequest:
     delivery: object = None
     rules: object = None
     creator: object = None
+    execution_target: object = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
@@ -271,6 +278,7 @@ class SchedulerRunFinish:
     error_code: str = ""
     error_message: str = ""
     now: float | None = None
+    model_call_count: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", str(self.status or "").strip().lower())
@@ -288,7 +296,7 @@ class _SchedulerJobOperations:
         request: SchedulerJobCreateRequest,
     ) -> tuple[dict[str, object], bool]:
         current = _now(request.now)
-        normalized = sync_event_sources(_new_job_payload(
+        normalized = sync_definition_generations(_new_job_payload(
             owner=self.owner,
             request=request,
             now=current,
@@ -349,7 +357,7 @@ class _SchedulerJobOperations:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             job = self._require_mutable_job(store, job_id, expected_version)
-            updated = sync_event_sources(_updated_job(job, patch, now=current), job)
+            updated = sync_definition_generations(_updated_job(job, patch, now=current), job)
             from .delivery_policy import validate_repository_delivery
             validate_repository_delivery(self, updated.get("delivery"))
             for rule in updated.get("rules", []):
@@ -384,7 +392,7 @@ class _SchedulerJobOperations:
                     "updated_at": current,
                     "version": int(job["version"]) + 1,
                 }
-                job = sync_event_sources(job, retire=True)
+                job = sync_definition_generations(job, store['jobs'][job_id], retire=True)
                 from .event_source_lifecycle import cancel_retired_event_runs
                 job = cancel_retired_event_runs(store, job, now=current)
                 store["jobs"][job_id] = job
@@ -406,7 +414,7 @@ class _SchedulerJobOperations:
                 from .monitor_state import resume_monitor
                 job = resume_monitor(job, current)
             next_run = float(job["next_run_at"]) if job.get("rules") else _resume_next_run(job, current)
-            updated = sync_event_sources({
+            updated = sync_definition_generations({
                 **job,
                 "status": "active",
                 "next_run_at": next_run,
@@ -489,6 +497,7 @@ class _SchedulerJobOperations:
                     *([deepcopy(previous)] if previous else [])],
                 'delivery': {**normalize_delivery(job.get('delivery')), 'mode': 'origin'},
                 'version': int(job['version']) + 1, 'updated_at': current}
+            updated = sync_definition_generations(updated, job)
             store['jobs'][job_id] = updated
             self._write_store_unlocked(store, admission)
         return deepcopy(updated)
@@ -519,7 +528,7 @@ class _SchedulerJobOperations:
                 "updated_at": current,
                 "version": int(job["version"]) + 1,
             }
-            deleted = sync_event_sources(deleted, retire=True)
+            deleted = sync_definition_generations(deleted, job, retire=True)
             store["jobs"][job_id] = deleted
             cancelled = self._cancel_waiting_runs_unlocked(store, job_id, current, "job_deleted")
             for run_id, raw in list(store['runs'].items()):
@@ -859,6 +868,16 @@ class _SchedulerRunOperations:
             self._record_terminal_unlocked(store, run, terminal, now=current)
             self._write_store_unlocked(store, admission, history_records=[terminal])
         return deepcopy(terminal)
+
+    # LLM: 数字只来自同 run 的原模型账汇总，原 claim CAS 下存历史投影，不作为执行或授权依据。
+    # 函数用途: 在投递冻结或终态前保存本次资产执行的实际模型调用数。
+    def record_target_usage(self, run_id, claim_id, model_call_count):
+        if type(model_call_count) is not int or model_call_count < 0:
+            raise ValueError('模型调用数必须为非负整数')
+        with self._mutation_scope() as (store, admission):
+            run = self._require_claim(store, run_id, claim_id)
+            store['runs'][run_id] = {**run, 'model_call_count': model_call_count}
+            self._write_store_unlocked(store, admission)
 
     # LLM: 正常 claim、waiting 与死亡恢复共用同一终态状态变更；调用方必须先持原锁并证明自己的状态或死亡事实。
     # 函数用途: 移出活动 run 并更新原 job；历史提交仍由同一 _write_store_unlocked 事务入口执行。
@@ -1653,6 +1672,9 @@ class _SchedulerRecordParsing:
             normalize_precheck(raw.get("precheck"))
             normalize_delivery(raw.get("delivery"))
             binding = normalize_notification_binding(raw.get('notification_binding'))
+            normalize_execution_target(raw.get('execution_target'))
+            for rule in raw.get('rules', []):
+                normalize_execution_target(rule.get('execution_target'))
             if binding is not None and binding['owner'] != self.owner:
                 raise ValueError('notification owner')
             pending = raw.get('cancel_pending_run_ids', [])
@@ -1663,7 +1685,7 @@ class _SchedulerRecordParsing:
                 raise ValueError("job version")
             from .event_source_lifecycle import validate_event_job
             validate_event_job(raw)
-            return dict(raw), ""
+            return adapt_definition_generations(raw), ""
         except (TypeError, ValueError, ScheduleValidationError):
             return None, "SCHEDULER_JOB_INVALID"
 
@@ -1699,6 +1721,7 @@ class _SchedulerRecordParsing:
             normalize_delivery(raw.get("delivery"))
             from .event_source_lifecycle import validate_event_run
             validate_event_run(raw)
+            normalize_execution_target(raw.get('execution_target'))
             binding = normalize_notification_binding(raw.get('notification_binding'))
             if binding is not None and binding['owner'] != self.owner:
                 raise ValueError('notification owner')
@@ -1709,6 +1732,10 @@ class _SchedulerRecordParsing:
                 raise ValueError('cancel intent')
             parsed = dict(raw)
             parsed["claim_epoch"] = claim_epoch
+            generation = raw.get('definition_generation', (raw.get('event_source') or {}).get('generation', 1))
+            if type(generation) is not int or generation < 1:
+                raise ValueError('definition generation')
+            parsed['definition_generation'] = generation
             return parsed, ""
         except (TypeError, ValueError):
             return None, "SCHEDULER_RUN_INVALID"
@@ -2607,11 +2634,13 @@ def _new_job_payload(
     if request.rules is not None:
         from .monitor_state import new_monitor
         return new_monitor(owner, request, now)
-    normalized_name, normalized_prompt = _validate_name_prompt(request.name, request.prompt)
+    normalized_name, normalized_prompt = _validate_name_prompt(request.name,
+        request.prompt or (request.name if request.execution_target is not None else ''))
     normalized_schedule = validate_schedule(request.schedule)
     normalized_refs = _normalize_skill_refs(request.skill_refs)
     policy = normalize_policy(request.policy)
     execution = normalize_execution(request.execution)
+    target = normalize_execution_target(request.execution_target)
     if normalized_schedule['kind'] == 'event_source':
         execution = {**execution, 'mode': 'isolated'}
     precheck = normalize_precheck(request.precheck)
@@ -2631,6 +2660,7 @@ def _new_job_payload(
                 "skill_refs": normalized_refs,
                 "policy": policy,
                 "execution": execution,
+                "execution_target": target,
                 "precheck": precheck,
                 "delivery": delivery,
             },
@@ -2649,6 +2679,7 @@ def _new_job_payload(
         "source_thread_id": request.source_thread_id,
         "source_task_id": request.source_task_id,
         "creator": deepcopy(request.creator),
+        "definition_generation": 1,
         "run_count": 0,
         "schedule": normalized_schedule,
         "status": "active",
@@ -2659,6 +2690,7 @@ def _new_job_payload(
         "policy": policy,
         "execution": execution,
         "precheck": precheck,
+        "execution_target": target,
         "consecutive_failures": 0,
         "backoff_until": 0.0,
         "source_request_id": request.source_request_id,
@@ -2711,6 +2743,7 @@ def _updated_job(
         "execution": {**normalize_execution(patch.get("execution") if "execution" in patch else job.get("execution")),
             **({'mode': 'isolated'} if schedule['kind'] == 'event_source' else {})},
         "precheck": normalize_precheck(patch.get("precheck") if "precheck" in patch else job.get("precheck")),
+        "execution_target": normalize_execution_target(patch.get('execution_target') if 'execution_target' in patch else job.get('execution_target')),
         "delivery": normalize_delivery(patch.get("delivery") if "delivery" in patch else job.get("delivery")),
         "updated_at": now,
         "version": int(job["version"]) + 1,
@@ -2734,16 +2767,20 @@ def _reserved_run(
         "run_id": run_id,
         "job_id": str(job["job_id"]),
         "rule_id": str(job.get("rule_id") or ""),
-        "use_llm": job.get("use_llm", True),
+        "use_llm": False if job.get('execution_target') is not None else job.get("use_llm", True),
         "tool": deepcopy(job.get("tool")),
         "creator": deepcopy(job.get("creator")),
         "job_version": int(job["version"]),
+        "definition_generation": definition_generation(job),
+        "definition_status": str(job.get("status") or "active"),
         "owner": deepcopy(job["owner"]),
         "thread_id": f"thread-{run_id}" if execution["mode"] == "isolated" else str(job["thread_id"]),
         "origin_thread_id": str(job.get("source_thread_id") or job["thread_id"]),
         "source_thread_id": str(job.get("source_thread_id") or job["thread_id"]),
         "execution": execution,
         "precheck": deepcopy(job.get("precheck")),
+        "execution_target": deepcopy(job.get('execution_target')),
+        "execution_definition_ref": deepcopy((job.get('execution_target') or {}).get('execution_definition_ref')),
         "delivery": normalize_delivery(job.get("delivery")),
         "notification_binding": deepcopy(normalize_notification_binding(job.get('notification_binding'))),
         "precheck_checkpoint": deepcopy(job.get("precheck_checkpoint")),
@@ -2851,14 +2888,17 @@ def _job_after_run(
     if job.get("rules") is not None:
         from .monitor_state import finish_rule
         return finish_rule(job, run, now)
-    updated = apply_run_policy({
+    updated = {
         **job,
         "last_run_at": now,
         "last_run_status": str(run["status"]),
         "last_error_code": str(run.get("error_code") or ""),
         "updated_at": now,
         "version": int(job["version"]) + 1,
-    }, run, now=now)
+    }
+    if not run_matches_definition(job, run):
+        return updated
+    updated = apply_run_policy(updated, run, now=now)
     observation = run.get("precheck_observation") or {}
     if (run.get("status") == "done" and observation.get("status") == "changed"
             and run.get("precheck") == job.get("precheck")):
@@ -2902,6 +2942,7 @@ def _terminal_run_payload(
         "delivery_reason": result.delivery_reason[:160],
         "error_code": result.error_code[:120],
         "error_message": result.error_message[:500],
+        **({'model_call_count': result.model_call_count} if result.model_call_count is not None else {}),
     }
 
 

@@ -9,8 +9,87 @@ from .rules import normalize_rules
 from .schedule import ScheduleValidationError
 
 _RUNTIME_FIELDS = frozenset({'next_run_at', 'last_run_at', 'last_run_status', 'last_error_code',
-    'run_count', 'consecutive_failures', 'backoff_until', 'precheck_checkpoint', 'result'})
-_ACTION_FIELDS = frozenset({'prompt', 'schedule', 'execution', 'precheck', 'policy'})
+    'run_count', 'consecutive_failures', 'backoff_until', 'precheck_checkpoint', 'result', 'definition_generation'})
+_ACTION_FIELDS = frozenset({'prompt', 'schedule', 'execution', 'execution_target', 'precheck', 'policy'})
+_DEFINITION_FIELDS = ('schedule', 'prompt', 'use_llm', 'tool', 'execution', 'execution_target',
+    'precheck', 'policy', 'delivery', 'enabled', 'depends_on', 'condition', 'skill_refs',
+    'misfire_grace_seconds', 'notification_binding')
+
+
+# LLM: 事件规则唯一权威仍是原 event_source_state.generation；普通旧记录缺字段显式适配为初始代。
+# 函数用途: 统一读取 job/rule 定义身份，拒绝损坏计数，不使用 version 或 claim_epoch。
+def definition_generation(view):
+    if (view.get('schedule') or {}).get('kind') == 'event_source':
+        state = (view.get('event_source_state') or {}).get(str(view.get('rule_id') or view.get('id') or '')) or {}
+        value = state.get('generation', 1)
+    else:
+        value = view.get('definition_generation', 1)
+    if type(value) is not int or value < 1:
+        raise ScheduleValidationError('规则定义代次无效')
+    return value
+
+
+# LLM: 只生成读取适配，不写磁盘；保留原事件 state 的事务内引用，副作用 lease 必须仍写原 store，不能复制脱账。
+# 函数用途: 让旧时间/监控记录明确拥有初始定义身份。
+def adapt_definition_generations(job):
+    result = dict(job)
+    if result.get('rules'):
+        result['rules'] = [dict(rule) for rule in result['rules']]
+    for view in result.get('rules') or [result]:
+        if (view.get('schedule') or {}).get('kind') != 'event_source':
+            view['definition_generation'] = definition_generation(view)
+    return result
+
+
+# LLM: 原事件同步负责退休/取消语义，本函数仅为未覆盖的定义字段推进同一个事件代次；普通规则各自维护唯一代次。
+# 函数用途: 在原仓库写事务内同步新旧定义身份，名称和运行统计不影响定义。
+def sync_definition_generations(job, previous=None, *, retire=False):
+    from .event_sources import sync_event_sources
+
+    result = sync_event_sources(job, previous, retire=retire)
+    old_views = ({r['id']: _view(previous, r) for r in previous['rules']} if previous and previous.get('rules')
+                 else {'': previous} if previous else {})
+    definitions = result.get('rules') or [result]
+    retired = deepcopy((previous or {}).get('definition_generation_tombstones') or {})
+    active_keys = {str(rule.get('id') or '') for rule in definitions}
+    for key, old_view in old_views.items():
+        if key and key not in active_keys and (old_view.get('schedule') or {}).get('kind') != 'event_source':
+            retired[key] = definition_generation(old_view) + 1
+    for rule in definitions:
+        key = str(rule.get('id') or '') if result.get('rules') else ''
+        view = _view(result, rule) if result.get('rules') else result
+        old = old_views.get(key)
+        # 单规则迁入 rule1 时沿用原定义身份，不重置为 1。
+        if old is None and key == 'rule1' and previous and not previous.get('rules'):
+            old = previous
+        changed = bool(old and (any(view.get(k) != old.get(k) for k in _DEFINITION_FIELDS)
+                                or result['status'] != previous['status']))
+        seed = max(retired.pop(key, 1), int((result.get('event_source_state', {}).get(key) or {}).get('generation', 1)))
+        generation = max(seed, definition_generation(old) + int(changed)) if old else seed
+        if (view.get('schedule') or {}).get('kind') == 'event_source':
+            state = result['event_source_state'][key]
+            # 跨类型与删除重建也必须承接旧代下界；最终只写原事件权威计数。
+            if state['generation'] < generation:
+                state.update(generation=generation, pending=[])
+            rule.pop('definition_generation', None)
+        else:
+            rule['definition_generation'] = generation
+    if retired:
+        result['definition_generation_tombstones'] = retired
+    else:
+        result.pop('definition_generation_tombstones', None)
+    return result
+
+
+# LLM: 取消、旧代及暂停前预留只能收历史；暂停后显式手动试跑仍可结算同代策略，但不能恢复计划。
+# 函数用途: 比较冻结 run 的定义来源与当前 job/rule。
+def run_matches_definition(job, run):
+    manual_paused = (job.get('status') == 'paused' and run.get('trigger') == 'manual'
+                     and run.get('definition_status') == 'paused')
+    if (job.get('status') != 'active' and not manual_paused) or not job.get('enabled', True) or run.get('cancel_requested_at'):
+        return False
+    frozen = run.get('definition_generation', (run.get('event_source') or {}).get('generation', 1))
+    return type(frozen) is int and frozen == definition_generation(job)
 
 
 # LLM: 创建仍由原 owner 锁分配 job/alias；旧单规则字段只用于创建基座，复合对象删去重复权威字段。
@@ -24,6 +103,7 @@ def new_monitor(owner, request, now):
         prompt=first['prompt'] or request.name, schedule=first['schedule']), now=now)
     for key in _ACTION_FIELDS:
         base.pop(key, None)
+    base.pop('definition_generation', None)
     base['rules'] = [_initialize_rule(rule, now) for rule in definitions]
     base['monitor_schema'] = 'scheduler_monitor.v1'
     return _project(base)
@@ -74,7 +154,7 @@ def update_monitor(job, patch, now):
     validated = _updated_job(view, {k: v for k, v in patch.items() if k != 'rules'}, now=now)
     result = {**job, **{k: validated[k] for k in ('name', 'delivery', 'skill_refs', 'misfire_grace_seconds')},
               'rules': rules, 'version': int(job['version']) + 1, 'updated_at': now}
-    return _project(result)
+    return _project(sync_definition_generations(result, job))
 
 
 # LLM: 到期只取本监控启用且已到时的规则；每条规则仍走原 claim/失败退避，状态视图不会保存为第二个 job。
@@ -135,7 +215,7 @@ def merge_rule_view(job, view):
     for rule in result['rules']:
         if rule['id'] == view['rule_id']:
             rule.update({k: deepcopy(v) for k, v in view.items() if k in _RUNTIME_FIELDS})
-            if view['status'] == 'paused':
+            if view['status'] == 'paused' and job['status'] == 'active':
                 rule['enabled'] = False
     result.update(version=int(job['version']) + 1, updated_at=view['updated_at'])
     return _project(result)
@@ -158,14 +238,15 @@ def finish_rule(job, run, now):
     from .repository import _job_after_run
 
     candidates = [rule for rule in job['rules'] if rule['id'] == run.get('rule_id')]
-    if not candidates:
+    if not candidates or not run_matches_definition(_view(job, candidates[0]), run):
         return {**job, 'last_run_status': run['status'], 'last_error_code': run.get('error_code', '')}
     view = _view(job, candidates[0])
     view.pop('rules', None)
     updated = _job_after_run(view, run, now=now)
     updated['last_run_at'] = candidates[0].get('last_run_at', 0)
     if run.get('structured_result') is not None and run['status'] == 'done':
-        updated['result'] = {'value': deepcopy(run['structured_result']), 'confirmed_at': now, 'run_id': run['run_id']}
+        updated['result'] = {'value': deepcopy(run['structured_result']), 'confirmed_at': now,
+            'run_id': run['run_id'], 'definition_generation': run.get('definition_generation', 1)}
     result = merge_rule_view(job, updated)
     result.update(last_run_status=run['status'], last_error_code=run.get('error_code', ''))
     return result
@@ -189,14 +270,17 @@ def condition_matches(job, view, now):
     if job.get('rules') is None:
         return True
     rules = {rule['id']: rule for rule in job['rules']}
-    if any(not rules[key].get('result') for key in view['depends_on']):
-        return False
+    for key in view['depends_on']:
+        upstream = rules.get(key)
+        result = upstream.get('result') if upstream else None
+        if not result or result.get('definition_generation') != definition_generation(_view(job, upstream)):
+            return False
     condition = view.get('condition')
     if condition is None:
         return True
     result = rules[condition['rule_id']].get('result')
     age = condition['max_age_seconds']
-    if result is None or (age and now - result['confirmed_at'] > age):
+    if result is None or now < result['confirmed_at'] or (age and now - result['confirmed_at'] > age):
         return False
     from .precheck import _json_pointer
     try:

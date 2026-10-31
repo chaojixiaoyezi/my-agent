@@ -5,11 +5,16 @@ from __future__ import annotations
 from copy import deepcopy
 
 from .delivery_policy import normalize_delivery
-from .execution_policy import normalize_execution, normalize_precheck
+from .execution_policy import (
+    EXECUTION_TARGET_SCHEMA,
+    normalize_execution,
+    normalize_execution_target,
+    normalize_precheck,
+)
 from .policy import normalize_policy
 from .schedule import ScheduleValidationError, validate_schedule
 
-_RULE_FIELDS = frozenset({"id", "name", "enabled", "schedule", "use_llm", "prompt", "tool", "execution", "policy", "precheck", "delivery", "depends_on", "condition"})
+_RULE_FIELDS = frozenset({"id", "name", "enabled", "schedule", "use_llm", "prompt", "tool", "execution", "execution_target", "policy", "precheck", "delivery", "depends_on", "condition"})
 _CONDITION_OPERATORS = frozenset({"eq", "ne", "exists", "truthy"})
 
 
@@ -47,7 +52,10 @@ def _normalize_rule(raw: object) -> dict:
     prompt = raw.get("prompt", "")
     if not isinstance(prompt, str) or len(prompt) > 32000 or (use_llm and not prompt.strip()):
         raise ScheduleValidationError("LLM 规则需要非空 prompt，最多 32000 字符")
-    tool = _normalize_tool(raw.get("tool"), use_llm=use_llm)
+    target = normalize_execution_target(raw.get('execution_target'), require_reference=False)
+    if target is not None and (use_llm or raw.get('tool') is not None):
+        raise ScheduleValidationError('execution_target 使用 use_llm=false，不能同时指定 tool')
+    tool = _normalize_tool(raw.get("tool"), use_llm=use_llm) if target is None else None
     if (raw.get('schedule') or {}).get('kind') == 'event_source' and not use_llm:
         raise ScheduleValidationError('事件订阅条件必须由原 LLM 研判')
     dependencies = raw.get("depends_on", [])
@@ -61,7 +69,7 @@ def _normalize_rule(raw: object) -> dict:
         "execution": normalize_execution(raw.get("execution")), "policy": normalize_policy(raw.get("policy")),
         "precheck": normalize_precheck(raw.get("precheck")),
         "delivery": normalize_delivery(raw["delivery"]) if raw.get("delivery") is not None else None,
-        "depends_on": list(dependencies), "condition": condition}
+        "execution_target": target, "depends_on": list(dependencies), "condition": condition}
 
 
 # LLM: NO 动作保留原工具名和 JSON 参数，不拼 shell、不执行发现；宿主身份参数只能由运行时注入。
@@ -118,7 +126,7 @@ RULES_SCHEMA = {'type':'array','minItems':1,'items':{'type':'object','additional
             'anchor_at':{},'at':{'type':'string'},'expression':{'type':'string'},'timezone':{'type':'string'}},'required':['kind']},
         'prompt':{'type':'string'},'tool':{'type':'object','additionalProperties':False,
             'properties':{'name':{'type':'string'},'arguments':{'type':'object'}},'required':['name','arguments']},
-        'execution':{'type':'object'},'policy':{'type':'object'},'precheck':{'type':['object','null']},
+        'execution':{'type':'object'},'execution_target':EXECUTION_TARGET_SCHEMA,'policy':{'type':'object'},'precheck':{'type':['object','null']},
         'delivery':{'type':['object','null'],'properties':{'mode':{'type':'string','enum':['origin','local','none']}}},
         'depends_on':{'type':'array','items':{'type':'string'}},'condition':{'type':['object','null'],'additionalProperties':False,
             'properties':{'rule_id':{'type':'string'},'pointer':{'type':'string'},'op':{'type':'string','enum':['eq','ne','exists','truthy']},

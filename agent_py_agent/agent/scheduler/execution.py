@@ -2,8 +2,10 @@
 # 模块用途: 冻结规范定时来源并物化独立线程；同通道通知沿显式继任链解析，执行来源不迁移，失败重投不重执业务。
 from __future__ import annotations
 
+import json
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from copy import copy, deepcopy
 from dataclasses import asdict, replace
 
 from .delivery_policy import TARGET_DELIVERY_MODES
@@ -38,6 +40,8 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         if required_notice(agent, _run_request(kwargs)) is not None:
             return dependencies.run_once(kwargs)
         service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
+        if claim.run.get('execution_target') is not None:
+            return execute_scheduled_target(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
         if not claim.run.get("use_llm", True):
             from .tool_work import execute_scheduled_tool
             return execute_scheduled_tool(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
@@ -47,6 +51,117 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         return admission if admission is not False else None
 
     return replace(dependencies, run_once=run_once)
+
+
+# LLM: 原宿主轮内只冻结同工具的数据，不改共享 registry/权限；脚本复用原 ContextVar 快照。
+# 函数用途: 通过原工具执行器运行固定资产，保留审批、取消、归档和 attempt 结算。
+def _execute_target_tool(agent, params, target):
+    from types import SimpleNamespace
+
+    from ..agent_core._tool_loop_service import _record_tool_call
+    from ..agent_core.host_turn_scope import host_turn_scope
+    from ..agent_core.tool_call_runtime import ToolCallRuntimeRequest, execute_traced_tool_call
+    from ..agent_core.tool_loop.round_execution import ToolCallExecuteParams, ToolCallRecordParams
+    from ..agent_core.tool_only_execution import _tool_only_params
+    from ..common.cancellation import CancellationToken
+    from ..concurrency.interrupt import is_interrupted, register_interrupt_callback
+    from ..tooling.runtime_contracts import ToolCall
+    from ..workflows.datasource_runtime import bind_asset_im_notifier, bind_script_execution_record
+    from .execution_policy import ExecutionTargetError, resolve_execution_target
+
+    name = 'workflows' if target['kind'] == 'workflow' else 'scripts'
+    cancellation = CancellationToken(_external_check=is_interrupted)
+    with host_turn_scope(agent, params.root_user_prompt, params, reason='host_tool_work', tool_rounds=1) as turn:
+        bound = turn.params
+        with register_interrupt_callback(cancellation.cancel), ExitStack() as scope:
+            if is_interrupted():
+                raise InterruptedError('定时资产执行已中断')
+            snapshot = agent.tools.runtime_snapshot(allowed_tools=[name], run_id=bound.run_id)
+            runtime = snapshot.runtime(name)
+            if runtime is None:
+                raise ExecutionTargetError('定时执行目标工具当前不可用', error_code='SCHEDULER_EXECUTION_TARGET_UNAVAILABLE')
+            target, definition = resolve_execution_target(agent, target, runtime=runtime)
+            tool = copy(runtime.handler)
+            # 只有 scheduler 冻结的结果出口可通知，不能按当前会话另发一条。
+            tool.im_notifier = None
+            scope.enter_context(bind_asset_im_notifier(tool.owner_home, lambda _notice: 'suppressed'))
+            if target['kind'] == 'workflow':
+                tool.store = SimpleNamespace(owner_home=tool.owner_home,
+                    get_workflow=lambda identifier: deepcopy(definition) if identifier == target['asset_id'] else None)
+            else:
+                scope.enter_context(bind_script_execution_record(tool.owner_home, target['asset_id'], tool._workspace_root(), definition))
+            # 数据绑定在授权之前固定；名称、可用性、schema 和策略原样保留。
+            snapshot = replace(snapshot, runtimes=tuple(replace(item, handler=tool) if item.model_spec.name == name else item
+                for item in snapshot.runtimes))
+            arguments = {'action': 'run', ('workflow_id' if name == 'workflows' else 'script_id'): target['asset_id'],
+                'inputs': deepcopy(target['input_ref']['inputs'])}
+            call = ToolCall(call_id=f'host-tool-{params.request_id}', tool_name=name, arguments=arguments,
+                source_protocol='text', schema_hash=runtime.model_spec.schema_hash,
+                run_id=bound.run_id, turn_id=bound.request_id, attempt_id=bound.attempt_id)
+            loop = _tool_only_params(bound, snapshot, cancellation, name)
+            outputs = []
+            execution = execute_traced_tool_call(ToolCallRuntimeRequest(agent,
+                ToolCallExecuteParams(loop, 1, 1, call, actor='host'), call, outputs.append))
+            _record_tool_call(agent, ToolCallRecordParams(loop, 1, 1, execution.call, execution.result,
+                execution_states=execution.states, actor='host'))
+            if is_interrupted():
+                raise InterruptedError('定时资产执行已中断')
+            turn.runtime_status = 'ok' if execution.result.ok else 'failed'
+            return execution, outputs[-1] if outputs else ''
+
+
+# LLM: 业务仅执行一次，结果/用量先落原 run；欠发只走原 outbox，分析调用数取原模型账而非节点个数。
+# 函数用途: 执行结构化目标并沿现有 TaskLink、终态和冻结通知合同收口。
+def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=None):
+    from ..agent_core.model.call_runtime import model_call_ledger
+    from ..agent_core.runtime.loop_models import RunParams
+    from ..conversation.background_execution import _BackgroundRunControl
+    from ..conversation.runtime import _background_task_attributes, _run_request
+    from ..conversation.task_run_closeout import settle_terminal_task_run
+    from .schedule import ScheduleValidationError
+    from .tool_work import _commit_tool_result
+
+    thread = service.conversation_store.threads.require(claim.run['thread_id'])
+    params = RunParams(request_id=claim.run_id, run_id=claim.run_id, task_id=claim.run_id,
+        source='scheduler_tool', root_user_prompt=claim.run['name'],
+        conversation_task_binding_callback=_BackgroundRunControl(claim.run_id, None),
+        task_attributes=_background_task_attributes(thread.thread_id, _run_request(kwargs), agent, thread=thread),
+        write_boundary={'task_id': claim.run_id})
+    try:
+        execution, output = _execute_target_tool(agent, params, claim.run['execution_target'])
+    except ScheduleValidationError as exc:
+        code = getattr(exc, 'error_code', 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE')
+        ok, output = False, json.dumps({'error_code': code}, ensure_ascii=False)
+    else:
+        ok, code = execution.result.ok, execution.result.error_code or ''
+        if not ok and notify is not None:
+            from ..conversation.host_notification_scope import notification_scope
+            from ..conversation.required_user_action import (
+                freeze_tool_notice,
+                required_action_from_result,
+            )
+            if required_action_from_result(execution.result) is not None:
+                request = _run_request(kwargs)
+                with notification_scope(agent, request):
+                    if freeze_tool_notice(agent, request, execution.result):
+                        return notify(kwargs)
+    usage = model_call_ledger(agent).cumulative_summary(run_id=claim.run_id)
+    count = int(usage['physical_model_attempt_count']) if usage is not None else 0
+    service.repository.record_target_usage(claim.run_id, claim.claim_id, count)
+    if ok:
+        service.repository.record_rule_result(claim.run_id, claim.claim_id, json.loads(output))
+    now = time.time()
+    service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'completed' if ok else 'abandoned',
+        'expected_status': 'active', 'now': now})
+    commit = _commit_tool_result(agent, service, claim, kwargs, output) if ok else None
+    if commit is not None and commit.outbox_frozen:
+        service.park_waiting(claim, response=output, delivery_status=commit.delivery_status, delivery_reason='execution_target_result', now=now)
+        return
+    service.finish(claim, status='done' if ok else 'failed', response=output,
+        delivery_status=commit.delivery_status if commit is not None else 'suppressed',
+        delivery_reason='execution_target_result', error_code=code, model_call_count=count, now=now)
+    service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
+    settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None), service.conversation_store, task_id=claim.run_id)
 
 
 # LLM: 来源按原creator冻结；旧委派work只在原双引用同源且queued未claim时显式规范，owner/topic门不放宽，终态不可复活。
