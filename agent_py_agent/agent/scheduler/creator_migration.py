@@ -11,7 +11,11 @@ _SCHEMA = "scheduler_creator_migration.v1"
 # LLM: 群控制权匹配原工具的准确 channel/actor 协议，local 标记或未知形状不能冒充 IM 创建人。
 # 函数用途: 判断旧记录是否已有合法群创建人；不读取当前会话或推断用户身份。
 def has_creator(repository, job: dict) -> bool:
+    from .creator_access import local_owner_managed
+
     creator = job.get("creator")
+    if repository.owner['provider'] == 'local' and repository.owner['kind'] == 'main':
+        return creator == {'local': True} or local_owner_managed(repository, job)
     return (isinstance(creator, dict) and set(creator) == {"channel", "actor_id"}
         and creator["channel"] == repository.owner["provider"]
         and isinstance(creator["actor_id"], str) and bool(creator["actor_id"]))
@@ -43,15 +47,17 @@ def frozen_creator(repository, conversation_store, job: dict) -> tuple[dict | No
         return None, "SCHEDULER_CREATOR_SOURCE_INVALID"
 
 
-# LLM: 迁移只处理本 group owner 的旧缺失 creator，变更经过原 quota/锁并保留版本 CAS；幂等重试不刷时间。
-# 函数用途: 冷启动补可信旧创建人或记录缺证据原因，不改变任务来源、运行规则与在途执行。
+# LLM: 群仍只从冻结来源补人；local/main 缺创建人只登记原 owner 管理而不编造创建者，原事务内重核且幂等。
+# 函数用途: 冷启动显式迁移旧归属或记录缺证据原因，不改变规则、代次与在途执行。
 def migrate_monitor_creators(repository, conversation_store, *, now: float) -> dict[str, int]:
     result = {"migrated": 0, "unmanaged": 0}
-    if repository.owner["kind"] != "group":
+    local = repository.owner['provider'] == 'local' and repository.owner['kind'] == 'main'
+    if not local and repository.owner["kind"] != "group":
         return result
     jobs, _errors = repository.list_jobs()
-    pending = {job["job_id"]: frozen_creator(repository, conversation_store, job)
-        for job in jobs if not has_creator(repository, job)}
+    pending = {job["job_id"]: ((None, 'SCHEDULER_LEGACY_LOCAL_OWNER') if local
+        else frozen_creator(repository, conversation_store, job))
+        for job in jobs if not has_creator(repository, job) and (not local or job.get('creator') is None)}
     if not pending:
         return result
     with repository._mutation_scope() as (store, admission):
@@ -60,8 +66,8 @@ def migrate_monitor_creators(repository, conversation_store, *, now: float) -> d
             job, _error = repository._parse_job(store["jobs"].get(identifier))
             if job is None or has_creator(repository, job) or job["status"] == "deleted":
                 continue
-            marker = {"schema_version": _SCHEMA, "status": "migrated" if creator else "unmanaged", "reason_code": reason}
-            result["migrated" if creator else "unmanaged"] += 1
+            marker = {"schema_version": _SCHEMA, "status": 'owner_managed' if local else "migrated" if creator else "unmanaged", "reason_code": reason}
+            result["migrated" if creator or local else "unmanaged"] += 1
             previous = job.get("creator_migration") or {}
             if {key: previous.get(key) for key in marker} == marker:
                 continue

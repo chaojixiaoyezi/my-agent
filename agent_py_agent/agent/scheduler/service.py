@@ -311,6 +311,7 @@ class SchedulerService:
         error_code: str = "",
         error_message: str = "",
         now: float | None = None,
+        model_call_count: int | None = None,
     ) -> dict[str, object] | None:
         try:
             return self.repository.finish_run(
@@ -324,6 +325,7 @@ class SchedulerService:
                     error_code=error_code,
                     error_message=error_message,
                     now=now,
+                    model_call_count=model_call_count,
                 ),
             )
         except (SchedulerConflictError, SchedulerNotFoundError):

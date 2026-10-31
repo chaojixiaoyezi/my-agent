@@ -11,6 +11,16 @@ from ..conversation.host_actor import HostActorError
 from ..user_space.identity_store import lookup_provider_identity
 
 
+# LLM: 只有原 local/main owner 的显式迁移可授予同 owner 管理；不把当前操作者补成未知创建者。
+# 函数用途: 识别已迁移、创建人仍未知的本机历史记录。
+def local_owner_managed(repository, job):
+    marker = job.get('creator_migration') or {}
+    return (job.get('owner') == repository.owner and repository.owner.get('provider') == 'local'
+        and repository.owner.get('kind') == 'main' and job.get('creator') is None
+        and marker.get('schema_version') == 'scheduler_creator_migration.v1'
+        and marker.get('status') == 'owner_managed' and marker.get('reason_code') == 'SCHEDULER_LEGACY_LOCAL_OWNER')
+
+
 # LLM: 名字不授权；每个creator仅读原索引，当前飞书群缺名时仅一次完整成员刷新，失败保持未知，不改变creator。
 # 函数用途: 为同owner监控附显示名，必要时有界查原成员接口并补原索引，不查通讯录或跨群合并。
 def creator_display_rows(agent, jobs):
@@ -36,7 +46,10 @@ def creator_display_rows(agent, jobs):
         name = labels[key]
         if key[0] == 'feishu' and not name:
             name = refreshed.get(key[1], '')
-        label = f'{name or "姓名未知"}（{key[0]}:{key[1]}）' if all(key[:2]) else '本机创建者（local）' if creator == {'local': True} else '创建者身份待核验'
+        marker = job.get('creator_migration') or {}
+        label = (f'{name or "姓名未知"}（{key[0]}:{key[1]}）' if all(key[:2]) else '本机创建者（local）'
+            if creator == {'local': True} else '历史创建者未知（本机同 owner 管理）'
+            if marker.get('status') == 'owner_managed' else '创建者身份待核验')
         result.append({**job, 'creator_display': label})
     return result
 

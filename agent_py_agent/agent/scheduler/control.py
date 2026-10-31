@@ -11,13 +11,15 @@ from .repository import SchedulerConflictError
 # LLM: 调用方提供宿主冻结actor与明确动作；原创建者沿旧授权，代清理仅允许当前群成员对已证离群创建者stop/delete，不扩大其它写入。
 # 函数用途: 核对准确owner/原创建者，或已证明离群的必要止损授权；只读查询仅核owner，工具与命令共用。
 def authorize_job(repository, job, actor=None, *, home_root=None, agent=None, operation="manage"):
+    from .creator_access import local_owner_managed
+
     if job.get('owner') != repository.owner:
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
     if operation == 'read':
         return
     creator = job.get('creator')
     local = repository.owner['provider'] == 'local' and repository.owner['kind'] == 'main'
-    if creator == {'local': True} and (local or repository.owner['kind'] == 'user' and actor is None):
+    if (creator == {'local': True} or local_owner_managed(repository, job)) and (local or repository.owner['kind'] == 'user' and actor is None):
         if actor is not None and (actor.owner_id != repository.owner['id'] or home_root is None
                 or find_admin_channel_identity(home_root, actor.channel, actor.actor_id) is None):
             raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')

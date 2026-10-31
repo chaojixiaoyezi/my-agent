@@ -2,7 +2,10 @@
 # 模块用途: 统一IM计划的原聊天、后台位置、隔离、模型和预检合同，不保存凭据或另建来源账。
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from copy import deepcopy
 from dataclasses import replace
 
 from ..capability.config import CapabilityConfig
@@ -33,6 +36,96 @@ PRECHECK_SCHEMA = {
                    "json_pointer": {"type": ["string", "null"], "description": "比较完整工具输出时省略或填 null，不填空字符串。仅当工具输出本身是 JSON 时才使用 RFC 6901 指针；空字符串也要求 JSON。指针不针对工具读取的文件内容。"}},
     "required": ["tool_name", "arguments"],
 }
+
+EXECUTION_TARGET_SCHEMA = {
+    'type': ['object', 'null'], 'additionalProperties': False,
+    'description': '直接执行 workflow/script，不启动外层模型。省略定义引用时宿主固定当前定义；input_ref.inputs 为冻结 JSON 入参。定义变化须显式更新计划，运行统计不会使引用漂移。',
+    'properties': {'kind': {'type': 'string', 'enum': ['workflow', 'script']},
+        'asset_id': {'type': 'string'}, 'execution_definition_ref': {'type': 'object'},
+        'input_ref': {'type': 'object', 'additionalProperties': False,
+            'properties': {'inputs': {'type': 'object'}}, 'required': ['inputs']}},
+    'required': ['kind', 'asset_id'],
+}
+
+
+# LLM: 目标只是原资产的结构化绑定，不提供 owner、路径、凭据或 handler；持久化必须有固定内容身份。
+# 函数用途: 校验可冻结的执行目标与 JSON 入参，null 明确恢复普通提示词执行。
+def normalize_execution_target(value, *, require_reference=True):
+    from ..assets import safe_asset_id
+
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {'kind', 'asset_id', 'execution_definition_ref', 'input_ref'}:
+        raise ScheduleValidationError('execution_target 字段无效')
+    kind, identifier = value.get('kind'), value.get('asset_id')
+    if kind not in {'workflow', 'script'} or not isinstance(identifier, str):
+        raise ScheduleValidationError('execution_target 需要 workflow/script 与准确 asset_id')
+    safe_asset_id(identifier)
+    reference = value.get('execution_definition_ref')
+    if reference is not None:
+        if (not isinstance(reference, dict) or set(reference) != {'schema_version', 'kind', 'asset_id', 'definition_sha256'}
+                or reference.get('schema_version') != 'scheduler_execution_definition.v1'
+                or reference.get('kind') != kind or reference.get('asset_id') != identifier
+                or not isinstance(reference.get('definition_sha256'), str)
+                or len(reference['definition_sha256']) != 64
+                or any(c not in '0123456789abcdef' for c in reference['definition_sha256'])):
+            raise ScheduleValidationError('execution_definition_ref 必须是宿主固定的原资产定义引用')
+    elif require_reference:
+        raise ScheduleValidationError('execution_target 缺少固定 execution_definition_ref')
+    inputs = value.get('input_ref', {'inputs': {}})
+    if not isinstance(inputs, dict) or set(inputs) != {'inputs'} or not isinstance(inputs['inputs'], dict):
+        raise ScheduleValidationError('input_ref 必须提供 inputs JSON 对象')
+    try:
+        json.dumps(inputs, allow_nan=False)
+    except (ValueError, TypeError) as exc:
+        raise ScheduleValidationError('input_ref 必须为有限 JSON') from exc
+    return {'kind': kind, 'asset_id': identifier, 'execution_definition_ref': deepcopy(reference), 'input_ref': deepcopy(inputs)}
+
+
+# LLM: 摘要只排除原资产的运行/展示投影和 CAS；代码、步骤、来源、连接声明及执行开关仍属于固定定义。
+# 函数用途: 从原领域读取的完整定义计算稳定执行引用，不执行或保存资产。
+def execution_definition_ref(kind, asset_id, definition):
+    value = deepcopy(definition.to_dict() if hasattr(definition, 'to_dict') else definition)
+    descriptor = value.get('descriptor', value)
+    for key in ('revision', 'runtime_summary', 'used_by', 'entrypoint_path', 'source_check',
+                'source_system', 'source_binding', 'last_check_result'):
+        descriptor.pop(key, None)
+    digest = hashlib.sha256(json.dumps(value, ensure_ascii=False, allow_nan=False,
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return {'schema_version': 'scheduler_execution_definition.v1', 'kind': kind,
+        'asset_id': asset_id, 'definition_sha256': digest}
+
+
+# LLM: 只从当前原工具快照的同 owner 领域 Store 读取，不按参数或资产投影重建路径；可用不等于执行授权。
+# 函数用途: 固定或复核资产定义引用，返回精确内容快照供同一调用栈消费。
+def resolve_execution_target(agent, value, *, runtime=None):
+    target = normalize_execution_target(value, require_reference=False)
+    if target is None:
+        return None, None
+    name = 'workflows' if target['kind'] == 'workflow' else 'scripts'
+    runtime = runtime or agent.tools.runtime_snapshot(allowed_tools=[name]).runtime(name)
+    if runtime is None:
+        raise ScheduleValidationError('定时执行目标工具当前不可用')
+    tool = runtime.handler
+    if getattr(tool, 'owner_home', None) != agent.home_paths.owner_home_dir:
+        raise ScheduleValidationError('执行目标 owner 不一致')
+    store = tool._store()
+    definition = (store.get_workflow(target['asset_id']) if target['kind'] == 'workflow'
+                  else store.get_script(target['asset_id']))
+    if definition is None:
+        raise ScheduleValidationError('定时执行目标不存在')
+    reference = execution_definition_ref(target['kind'], target['asset_id'], definition)
+    if target['execution_definition_ref'] not in (None, reference):
+        raise ExecutionTargetError('固定资产定义已变化，请显式更新计划', error_code='SCHEDULER_EXECUTION_DEFINITION_STALE')
+    return {**target, 'execution_definition_ref': reference}, definition
+
+
+# LLM: 机器分类只读取类型及错误码，文案仅供解释；继承原校验异常保持工具旧错误出口。
+# 类用途: 区分目标定义漂移与一般输入失败，不从异常正文推导状态。
+class ExecutionTargetError(ScheduleValidationError):
+    def __init__(self, message, *, error_code):
+        super().__init__(message)
+        self.error_code = error_code
 
 
 # LLM: 缺省保持原会话继承行为；固定引用必须是明确档案，不能用可变 default 别名代替固定语义。

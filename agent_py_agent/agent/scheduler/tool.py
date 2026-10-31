@@ -40,9 +40,11 @@ from .event_source_tool import (
 )
 from .execution_policy import (
     EXECUTION_SCHEMA,
+    EXECUTION_TARGET_SCHEMA,
     PRECHECK_SCHEMA,
     normalize_execution,
     normalize_precheck,
+    resolve_execution_target,
     validate_execution_for_agent,
 )
 from .policy import normalize_policy
@@ -126,6 +128,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "rules": RULES_SCHEMA,
                 "rule_id": {"type": "string", "description": "多规则监控 run_now 必须选择准确规则编号。"},
                 "execution": EXECUTION_SCHEMA,
+                "execution_target": EXECUTION_TARGET_SCHEMA,
                 "precheck": PRECHECK_SCHEMA,
                 "delivery": DELIVERY_SCHEMA,
                 "delivery_policy": DELIVERY_SCHEMA,
@@ -394,9 +397,16 @@ class ScheduleTool(BaseTool):
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
         rules = prepared.rules
+        target, _definition = resolve_execution_target(self.agent, params.get('execution_target'))
+        if target is not None:
+            if rules is not None:
+                raise ScheduleValidationError('多规则请在每条规则内指定 execution_target')
+            prompt = prompt or name
         if rules is not None:
             for rule in rules:
                 validate_execution_for_agent(self.agent, rule["execution"])
+                if rule.get('execution_target') is not None:
+                    rule['execution_target'], _definition = resolve_execution_target(self.agent, rule['execution_target'])
         if not name or (rules is None and (not prompt or not str(params.get("schedule_kind") or "").strip())):
             return _error("create 必须提供 name、prompt、schedule_kind", "TOOL_INVALID_ARGUMENTS")
         thread_id, source_task_id = _conversation_scope(self.agent)
@@ -438,6 +448,7 @@ class ScheduleTool(BaseTool):
                 delivery=delivery,
                 rules=rules,
                 creator=creator,
+                execution_target=target,
             )
         )
         return _success(
@@ -449,7 +460,7 @@ class ScheduleTool(BaseTool):
     # 函数用途: 将公开policy别名转换成唯一delivery字段，并在原CAS前验证目标，保留null关闭预检的含义。
     def _update_patch(self, params: dict[str, object], prepared) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
-        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck", "delivery", "rules"):
+        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "execution_target", "precheck", "delivery", "rules"):
             if key in params:
                 patch[key] = params[key]
         delivery = delivery_from_params(params)
@@ -457,8 +468,13 @@ class ScheduleTool(BaseTool):
             patch["delivery"] = validate_delivery_targets(self.agent, delivery)
         if "execution" in patch:
             patch["execution"] = validate_execution_for_agent(self.agent, patch["execution"])
+        if 'execution_target' in patch:
+            patch['execution_target'], _definition = resolve_execution_target(self.agent, patch['execution_target'])
         if "rules" in patch:
             patch["rules"] = prepared.rules
+            for rule in patch['rules']:
+                if rule.get('execution_target') is not None:
+                    rule['execution_target'], _definition = resolve_execution_target(self.agent, rule['execution_target'])
         if "skill_ids" in params:
             refs = _skill_refs(self.agent, params.get("skill_ids"))
             if isinstance(refs, ToolHandlerOutcome):
@@ -673,6 +689,8 @@ def _job_projection(
     payload["name"] = job["name"]
     payload["creator_display"] = job.get("creator_display") or "创建者身份待核验"
     payload["precheck"] = job.get("precheck")
+    payload['execution_target'] = job.get('execution_target')
+    payload['definition_generation'] = job.get('definition_generation')
     payload["skill_refs"] = job.get("skill_refs") or []
     prompt = str(job.get("prompt") or "")
     payload["prompt" if include_prompt else "prompt_preview"] = (
@@ -712,6 +730,10 @@ def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> d
     }
     if not metadata_only:
         payload.update({
+            'execution_target': run.get('execution_target'),
+            'execution_definition_ref': run.get('execution_definition_ref'),
+            'definition_generation': run.get('definition_generation'),
+            'model_call_count': run.get('model_call_count'),
             "delivery_reason": run.get("delivery_reason") or "",
             "error_message": run.get("error_message") or "",
             "response_preview": str(run.get("response") or "")[:500],
