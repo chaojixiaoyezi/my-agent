@@ -2041,11 +2041,11 @@ def test_r12_invalidated_preimage_and_staged_settlement_errors_preserve_dirty_st
         orig_commit = quota.OwnerQuotaAdmission.commit_delta
         failed = [False]
 
-        def _transient_settlement_error(admission):
+        def _transient_settlement_error(admission, **options):
             if not failed[0] and admission._before:
                 failed[0] = True
                 raise OSError('transient settlement read error')
-            return orig_commit(admission)
+            return orig_commit(admission, **options)
 
         with pytest.raises(OSError, match='transient settlement'):
             with enforcer.admission() as admission:
@@ -2393,9 +2393,10 @@ def test_r14_settlement_retry_persistence_is_idempotent_across_outer_exit(
         def close(self):
             self._inner.close()
 
+    # 中间结算写以计入上阶段差额识别（R17起它保留本准入0字节预留标记，不能再按预留为空识别）。
     def _write(root_arg, data):
         observed = bool(data.get('reconcile_cursor', {}).get('metadata_invalidated'))
-        if inject and not failed[0] and observed and not data['reservations']:
+        if inject and not failed[0] and observed and data['used_bytes'] == expected_bytes:
             failed[0] = True
             events.append('settlement_checkpoint_error')
             raise OSError('transient settlement checkpoint error')
@@ -3022,3 +3023,201 @@ def test_r16_snapshot_after_pending_settlement_resolves_both_by_revision(tmp_pat
     assert quota.owner_logical_usage_bytes(root, exact=True) == 83
     assert ledger['dirty_since'] is None
     assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+
+
+# LLM: R17两条恢复路径的共同前置——160个1 B文件，删除一个后第二个check的中间结算与其finally重试都在真实rename后
+#   父目录fsync报错（已发布未确认），调用方按异常恢复原1 B文件；外层admission()退出即最后一次结算。
+#   stat_when给定时，条件成立后对阶段文件的下一次stat报一次模拟EIO；全部模拟I/O错误在冷进程前撤销。
+# 函数用途: 跑一次“中间结算已发布未确认后业务回滚”的准入，返回(外层异常, 故障状态, 阶段stat是否已报错)。
+def _r17_rollback_after_unconfirmed_settlement(root, monkeypatch, plan, *, read_after=None, stat_when=None,
+                                               rollback=True):
+    stage = root / 'a00' / '0.bin'
+    target = root / 'a01' / '0.bin'
+    stat_failed = []
+    real_stat = os.stat
+    error = None
+    with _r16_ledger_faults(root, plan, read_after=read_after) as faults:
+        def _stat(path_arg, *pos, **kw):
+            if stat_when is not None and not stat_failed and path_arg == stage and stat_when(faults):
+                stat_failed.append(True)
+                faults['events'].append('stage-stat')
+                raise OSError(errno.EIO, 'stage metadata read failed')
+            return real_stat(path_arg, *pos, **kw)
+
+        monkeypatch.setattr(os, 'stat', _stat)
+        try:
+            with quota.OwnerQuotaEnforcer(root, max_bytes=160).admission() as admission:
+                admission.check([quota.OwnerQuotaChange(stage, None)])
+                stage.unlink()
+                faults['armed'] = True
+                try:
+                    admission.check([quota.OwnerQuotaChange(target, 1)])
+                except OSError:
+                    if rollback:
+                        stage.write_bytes(b'x')
+                    raise
+        except OSError as exc:
+            error = exc
+        finally:
+            monkeypatch.setattr(os, 'stat', real_stat)
+    return error, faults, bool(stat_failed)
+
+
+@pytest.mark.parametrize('confirm', [('pre',), ('pre', 'pre'), ('pre', 'post'), ('post', 'pre')],
+                         ids=['pre-once', 'pre-twice', 'pre-then-post', 'post-then-pre'])
+def test_r17_final_exit_confirmation_failures_never_leave_clean_undercounted_ledger(tmp_path, monkeypatch, confirm):
+    """R16-QUOTA-02 路径B：中间结算已发布未确认、业务回滚后，外层最后一次确认写及其重试无论在替换前或替换后报错，盘上都不留干净偏低账；两次都在替换前失败时本准入0字节预留标记仍在，冷进程拒绝增长并可收敛。"""
+    root = _r16_owner(tmp_path, 16)
+    plan = ('post', 'post') + confirm
+    error, faults, _ = _r17_rollback_after_unconfirmed_settlement(root, monkeypatch, plan)
+    assert error is not None and faults['events'] == list(plan)
+    assert quota.owner_logical_usage_bytes(root, exact=True) == 160
+    ledger = _r7_ledger(root)
+    # 差额只计一次：盘上是已发布的159 B后像。
+    assert (ledger['used_bytes'], ledger['inode_count']) == (159, 159)
+    invalidated = (ledger['dirty_since'] is not None
+                   and ledger['reconcile_cursor'].get('metadata_invalidated') is True)
+    if confirm == ('pre', 'pre'):
+        assert not invalidated
+        assert len(ledger['reservations']) == 1
+        assert [row['bytes'] for row in ledger['reservations'].values()] == [0]
+        assert ledger['reserved_bytes'] == 0
+    else:
+        assert invalidated and not ledger['reservations'] and ledger['reserved_bytes'] == 0
+    assert _r16_cold_grow(root, 'a02/cold.bin', 160) == 'OwnerQuotaUnavailable'
+    assert not (root / 'a02' / 'cold.bin').exists()
+    ledger = _r16_converge(root)
+    assert (ledger['used_bytes'], ledger['inode_count'], ledger['dirty_since']) == (160, 160, None)
+    assert not ledger['reservations']
+
+
+@pytest.mark.parametrize('stat_error', [False, True], ids=['readback-only', 'readback-then-stage-stat'])
+def test_r17_final_exit_readback_and_stage_stat_failures_persist_invalidation(tmp_path, monkeypatch, stat_error):
+    """R16-QUOTA-02 路径A：外层最后一次退出读回账本报EIO后，恢复分支对阶段文件的大小/inode对照又报错时按无法确认处理：dirty与失效照常落盘、清除本准入预留，再传播原读回异常。"""
+    root = _r16_owner(tmp_path, 16)
+    error, faults, stat_failed = _r17_rollback_after_unconfirmed_settlement(
+        root, monkeypatch, ('post', 'post'), read_after=2,
+        stat_when=(lambda state: state['read_failed']) if stat_error else None)
+    assert stat_failed is stat_error
+    assert faults['events'] == ['post', 'post', 'read'] + (['stage-stat'] if stat_error else [])
+    assert 'ledger read failed' in str(error)
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (159, 159)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    assert _r16_cold_grow(root, 'a02/cold.bin', 160) == 'OwnerQuotaUnavailable'
+    assert not (root / 'a02' / 'cold.bin').exists()
+    ledger = _r16_converge(root)
+    assert (ledger['used_bytes'], ledger['inode_count'], ledger['dirty_since']) == (160, 160, None)
+
+
+@pytest.mark.parametrize('rollback', [False, True], ids=['no-rollback', 'rollback'])
+def test_r17_published_settlement_comparison_stat_failure_persists_invalidation(tmp_path, monkeypatch, rollback):
+    """R16-QUOTA-02 路径A（已发布分支）：外层退出读回成功、判定中间结算已发布后，阶段文件大小/inode对照报错同样无法确认：dirty与失效随确认一并落盘，不再叠加差额。"""
+    root = _r16_owner(tmp_path, 16)
+    error, faults, stat_failed = _r17_rollback_after_unconfirmed_settlement(
+        root, monkeypatch, ('post', 'post'), stat_when=lambda state: len(state['events']) >= 2, rollback=rollback)
+    assert error is not None and stat_failed
+    assert faults['events'] == ['post', 'post', 'stage-stat']
+    actual = quota.owner_logical_usage_bytes(root, exact=True)
+    assert actual == (160 if rollback else 159)
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (159, 159)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    assert _r16_cold_grow(root, 'a02/cold.bin', actual) == 'OwnerQuotaUnavailable'
+    ledger = _r16_converge(root)
+    assert (ledger['used_bytes'], ledger['inode_count'], ledger['dirty_since']) == (actual, actual, None)
+
+
+@pytest.mark.parametrize('confirm', [('pre', 'pre'), ('pre',)], ids=['pre-twice', 'pre-once'])
+def test_r17_no_rollback_final_exit_keeps_exact_counts(tmp_path, monkeypatch, confirm):
+    """R16-QUOTA-02 路径B 对照：未回滚时盘上后像与真实用量一致；最后一次确认两次都在替换前失败只多留0字节标记（冷进程拒绝），一次失败由重试清除标记，均不重复计差额。"""
+    root = _r16_owner(tmp_path, 16)
+    plan = ('post', 'post') + confirm
+    error, faults, _ = _r17_rollback_after_unconfirmed_settlement(root, monkeypatch, plan, rollback=False)
+    assert error is not None and faults['events'] == list(plan)
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (159, 159)
+    assert quota.owner_logical_usage_bytes(root, exact=True) == 159
+    assert ledger['dirty_since'] is None and ledger['reserved_bytes'] == 0
+    assert bool(ledger['reservations']) is (confirm == ('pre', 'pre'))
+    assert _r16_cold_grow(root, 'a02/cold.bin', 160) == (
+        'OwnerQuotaUnavailable' if confirm == ('pre', 'pre') else None)
+    ledger = _r16_converge(root)
+    assert ledger['dirty_since'] is None and not ledger['reservations']
+    assert ledger['used_bytes'] == quota.owner_logical_usage_bytes(root, exact=True)
+
+
+def test_r17_intermediate_settlement_keeps_zero_byte_marker_until_final_exit(tmp_path, monkeypatch):
+    """R16-QUOTA-02 路径B 生命周期：check()内中间结算把本准入预留降为0字节标记留在盘上，基线目录表仍随受控写前进；本准入后续阶段照常按已核验基线准入增长，退出的最后一次结算才清除标记，账本干净且准确。"""
+    root = _r16_owner(tmp_path, 16)
+    stage = root / 'a00' / '0.bin'
+    grown = root / 'a01' / 'grown.bin'
+    written = []
+    real_write = quota._write_quota_ledger
+
+    def _capture(root_arg, ledger_arg):
+        written.append(json.loads(json.dumps(ledger_arg)))
+        return real_write(root_arg, ledger_arg)
+
+    monkeypatch.setattr(quota, '_write_quota_ledger', _capture)
+    with quota.OwnerQuotaEnforcer(root, max_bytes=1024).admission() as admission:
+        admission.check([quota.OwnerQuotaChange(stage, None)])
+        stage.unlink()
+        # max_bytes只有1024：若0字节标记让基线核验失败，used会按上限计并超额。
+        projection = admission.check([quota.OwnerQuotaChange(grown, 3)])
+        grown.write_bytes(b'abc')
+    monkeypatch.undo()
+    assert projection.used_bytes == 159 and projection.projected_bytes == 162
+    own = admission._reservation
+    assert len(written) == 4
+    settlement = written[1]
+    assert (settlement['used_bytes'], settlement['inode_count']) == (159, 159)
+    assert list(settlement['reservations']) == [own] and settlement['reservations'][own]['bytes'] == 0
+    assert settlement['reserved_bytes'] == 0 and settlement['dirty_since'] is None
+    assert settlement['reconcile_cursor']['ledger_revision'] == settlement['revision']
+    assert written[2]['reservations'][own]['bytes'] == 3
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (162, 160)
+    assert ledger['dirty_since'] is None and ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    assert ledger['reconcile_cursor']['ledger_revision'] == ledger['revision']
+    assert ledger['used_bytes'] == quota.owner_logical_usage_bytes(root, exact=True)
+    assert quota._verified_quota_baseline(root, ledger)
+
+
+@pytest.mark.parametrize('refusal', ['exceeded', 'unavailable'])
+def test_r17_final_exit_clears_marker_when_later_check_refuses(tmp_path, monkeypatch, refusal):
+    """R16-QUOTA-02 路径B 生命周期：中间结算之后本阶段check被拒（超额或基线无法核验），前像已清空时外层退出仍清除本准入0字节标记，不留遗留预留。"""
+    root = _r16_owner(tmp_path, 16)
+    stage = root / 'a00' / '0.bin'
+    grown = root / 'a01' / 'grown.bin'
+    if refusal == 'unavailable':
+        monkeypatch.setattr(quota, '_verified_quota_baseline', lambda *_a, **_kw: False)
+    expected = quota.OwnerQuotaExceeded if refusal == 'exceeded' else quota.OwnerQuotaUnavailable
+    with pytest.raises(expected):
+        with quota.OwnerQuotaEnforcer(root, max_bytes=160).admission() as admission:
+            admission.check([quota.OwnerQuotaChange(stage, None)])
+            stage.unlink()
+            admission.check([quota.OwnerQuotaChange(grown, 5)])
+    monkeypatch.undo()
+    assert not grown.exists()
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (159, 159)
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    assert (ledger['dirty_since'] is None) is (refusal == 'exceeded')
+
+
+def test_r17_own_marker_is_excluded_only_for_the_owning_admission(tmp_path):
+    """R16-QUOTA-02 路径B：基线核验只为持同一owner锁的本准入排除它自己的0字节标记；冷进程（不传reservation）或存在其它预留时一律拒绝。"""
+    root = _r16_owner(tmp_path, 16)
+    ledger = quota._read_quota_ledger(root)
+    assert quota._verified_quota_baseline(root, ledger)
+    marker = {'bytes': 0, 'expires_at': time.time() + 300, 'paths': ['a00/0.bin']}
+    ledger['reservations'] = {'own': dict(marker)}
+    assert not quota._verified_quota_baseline(root, ledger)
+    assert quota._verified_quota_baseline(root, ledger, reservation='own')
+    ledger['reservations']['other'] = dict(marker)
+    assert not quota._verified_quota_baseline(root, ledger, reservation='own')

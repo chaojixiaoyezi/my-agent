@@ -256,6 +256,8 @@ class OwnerQuotaAdmission:
         self._invalidated = False
         self._pending = None
         self._snapshot = None
+        # 中间结算只把本准入预留降为0字节标记、不移除：业务仍可能回滚，最后一次退出结算才清除。
+        self._held = False
 
     # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
     # 函数用途: 计算本批增长并在写入前持久预留。
@@ -323,11 +325,13 @@ class OwnerQuotaAdmission:
                         self._invalidated = False
         # 已先持久化观察失效，同一准入分阶段调用时结算上阶段及后续前像读取失败均保留该事实。
         if not complete and self._before:
-            self.commit_delta()
+            self.commit_delta(final=False)
             ledger = _read_quota_ledger(root)
         touched = {'/'.join(path.relative_to(root).parts[:depth])
                    for path in relevant for depth in range(len(path.relative_to(root).parts))}
-        authoritative = not complete and not snapshot_invalidated and _verified_quota_baseline(root, ledger, touched)
+        # 同一准入中间结算留下的0字节标记只拦冷进程，本准入后续阶段照常核验基线。
+        authoritative = not complete and not snapshot_invalidated and _verified_quota_baseline(
+            root, ledger, touched, reservation=self._reservation)
         if not complete and not authoritative and final > replaced:
             ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
             _write_quota_ledger(root, ledger)
@@ -407,9 +411,11 @@ class OwnerQuotaAdmission:
 
     # LLM: 即使业务抛异常也核实际大小；读回失败保留预留和dirty，不能伪造abort成功。
     #   结算写入报错不证明未替换：保留待确认修订与后像，下次结算锁内读回判定，已发布只补写确认、不再叠加同一差额。
+    #   final为False是check()内的中间结算：业务仍可能回滚，盘上保留本准入0字节预留标记让冷进程不信任该账；
+    #   只有准入退出的最后一次结算（final）才移除本准入预留。
     # 函数用途: 以真实文件差值结算本次预留，不把预计final_size当实际写入。
-    def commit_delta(self):
-        if not self.enabled or (not self._before and not self._invalidated):
+    def commit_delta(self, *, final=True):
+        if not self.enabled or (not self._before and not self._invalidated and not (final and self._held)):
             return
         root = self._enforcer.owner_root
         # 整个准入持同一owner锁；账本文件身份未变即是本准入刚写的那份，免去一次大账本读取与解析。
@@ -423,9 +429,18 @@ class OwnerQuotaAdmission:
                 #   不再结算差额；路径未变时盘上要么是准确后像、要么仍带本准入预留，快照未确认时同理，都不会放宽增长。
                 if self._pending is not None:
                     _, after, after_inodes, fallback = self._pending
-                    if ({**self._before, **after} != {path: _logical_file_size(path) for path in self._before}
-                            or {**self._before_inodes, **after_inodes}
-                            != {path: _billed_file_inode(root, path) for path in self._before}):
+                    # 大小或inode对照本身报错同样无法确认，按已变化处理：dirty/失效照常落盘，再传播原读回异常。
+                    try:
+                        unchanged = ({**self._before, **after}
+                                     == {path: _logical_file_size(path) for path in self._before}
+                                     and {**self._before_inodes, **after_inodes}
+                                     == {path: _billed_file_inode(root, path) for path in self._before})
+                    except Exception:
+                        unchanged = False
+                    if not unchanged:
+                        if final:
+                            fallback['reservations'].pop(self._reservation, None)
+                            fallback['reserved_bytes'] = sum(row['bytes'] for row in fallback['reservations'].values())
                         fallback['dirty_since'] = fallback.get('dirty_since') or time.time()
                         if isinstance(fallback.get('reconcile_cursor'), dict):
                             _drop_quota_metadata(fallback['reconcile_cursor'], invalidated=True)
@@ -445,12 +460,18 @@ class OwnerQuotaAdmission:
                 revision, after, after_inodes, _ = self._pending
                 published = ledger['revision'] != revision - 1
                 # 修订对不上，或前像路径在待确认后又有变化（待确认路径对照其后像，之后才加入的路径对照其前像），
-                #   差额无法精确归属：按观察失效置脏，交后台对账重算。
-                if published and (ledger['revision'] != revision
-                                  or {**self._before, **after} != {path: _logical_file_size(path) for path in self._before}
-                                  or {**self._before_inodes, **after_inodes}
-                                  != {path: _billed_file_inode(root, path) for path in self._before}):
-                    self._invalidated = True
+                #   差额无法精确归属：按观察失效置脏，交后台对账重算。对照时大小或inode读取报错同样无法确认，一并置脏落盘。
+                if published:
+                    try:
+                        settled = (ledger['revision'] == revision
+                                   and {**self._before, **after}
+                                   == {path: _logical_file_size(path) for path in self._before}
+                                   and {**self._before_inodes, **after_inodes}
+                                   == {path: _billed_file_inode(root, path) for path in self._before})
+                    except Exception:
+                        settled = False
+                    if not settled:
+                        self._invalidated = True
         elif cached is not None and cached[1] is not None and _quota_ledger_identity(root) == cached[1]:
             ledger = cached[0]
         else:
@@ -464,6 +485,10 @@ class OwnerQuotaAdmission:
         if not self._before or published:
             # 已发布的后像补写一次即确认；首次补写报错（含替换前失败）就在本次退出重发同一份确认，dirty/失效照带、不再叠加差额，
             #   最后一次退出不依赖以后的结算；重发再报错仍保留待确认状态与前像，由外层退出重做同一判定。
+            #   最后一次结算的确认才移除本准入预留：两次确认都在替换前失败时，盘上仍留预留标记，冷进程不会信任偏低的账。
+            if final:
+                ledger['reservations'].pop(self._reservation, None)
+                ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
             confirmed = False
             try:
                 _write_quota_ledger(root, ledger)
@@ -476,6 +501,7 @@ class OwnerQuotaAdmission:
                 self._before.clear()
                 self._before_inodes.clear()
                 self._before_children.clear()
+                self._held = not final
             return
         self._pending = None
         invalidated_ledger = deepcopy(ledger) if self._invalidated else None
@@ -487,13 +513,18 @@ class OwnerQuotaAdmission:
             ledger['inode_count'] = max(0, ledger['inode_count'] + sum(
                 after_inodes[path] - self._before_inodes[path] for path in self._before))
             ledger['reservations'].pop(self._reservation, None)
+            if not final:
+                # 差额已计入used_bytes，标记不再占字节；业务回滚后外层结算在替换前失败时，冷进程见预留即拒绝增长。
+                ledger['reservations'][self._reservation] = {'bytes': 0, 'expires_at': time.time() + 300,
+                    'paths': [str(path.relative_to(root)) for path in self._before]}
             ledger['reserved_bytes'] = sum(row['bytes'] for row in ledger['reservations'].values())
             root_vouched = _quota_root_vouched(root, ledger['revision'])
             ledger['revision'] += 1
             cursor = ledger.get('reconcile_cursor')
             synced = isinstance(cursor, dict) and cursor.get('ledger_revision') == ledger['revision'] - 1
             if synced and cursor.get('complete') is True:
-                if ledger.get('dirty_since') is None and not ledger['reservations']:
+                # 本准入自己的标记不阻止目录表随受控写前进；其它预留仍按遗留处理。
+                if ledger.get('dirty_since') is None and not ledger['reservations'].keys() - {self._reservation}:
                     if _refresh_quota_baseline(root, cursor, self._before_children, root_vouched=root_vouched):
                         cursor['ledger_revision'] = ledger['revision']
                     else:
@@ -512,6 +543,7 @@ class OwnerQuotaAdmission:
             self._before.clear()
             self._before_inodes.clear()
             self._before_children.clear()
+            self._held = not final
         finally:
             if self._pending is not None:
                 _write_quota_ledger(root, ledger)
@@ -520,6 +552,7 @@ class OwnerQuotaAdmission:
                 self._before.clear()
                 self._before_inodes.clear()
                 self._before_children.clear()
+                self._held = not final
             elif self._invalidated and invalidated_ledger is not None:
                 _write_quota_ledger(root, invalidated_ledger)
                 self._invalidated = False
@@ -1403,10 +1436,11 @@ def _verify_quota_metadata(root, cursor, *, touched=(), budget=None, root_vouche
 
 # LLM: 孤儿预留、dirty、修订或root不符均拒绝。有逐目录表就做有界核验，对账进行中也一样（已走完目录用新行、其余用旧行）；
 #   无表（超容、旧格式或首轮扫描）时以受控写代次为新鲜性证明，准入外写入由下一轮对账测出并纠正。
+#   reservation只供持同一owner锁的本准入排除自己中间结算留下的0字节标记；冷进程不传，见任何预留都拒绝。
 # 函数用途: 判断旧账是否仍可安全地用于当前增长准入。
-def _verified_quota_baseline(root, ledger, touched=()):
+def _verified_quota_baseline(root, ledger, touched=(), reservation=None):
     cursor = ledger.get('reconcile_cursor')
-    if (ledger.get('dirty_since') is not None or ledger.get('reservations')
+    if (ledger.get('dirty_since') is not None or (ledger.get('reservations') or {}).keys() - {reservation}
             or not isinstance(cursor, dict) or cursor.get('complete') not in (True, False)
             or cursor.get('metadata_invalidated') is True
             or cursor.get('ledger_revision') != ledger['revision']):
