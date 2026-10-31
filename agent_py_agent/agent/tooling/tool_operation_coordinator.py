@@ -1347,20 +1347,22 @@ def _attach_operation_facts(
     source_ref: str = "",
     storage_error: BaseException | None = None,
 ) -> None:
+    run_id = str(getattr(request, "run_id", None) or "")
+    operation_id = str(getattr(request, "operation_id", None) or "")
     facts: dict[str, object] = {
         "schema_version": "tool_operation.v1",
-        "operation_id": request.operation_id,
-        "attempt_id": request.operation_attempt_id or request.attempt_id,
-        "run_id": request.run_id,
-        "task_id": request.task_id,
+        "operation_id": operation_id,
+        "attempt_id": getattr(request, "operation_attempt_id", None) or getattr(request, "attempt_id", None) or "",
+        "run_id": run_id,
+        "task_id": str(getattr(request, "task_id", None) or ""),
         "phase": result.failure_stage or ("execution" if result.handler_executed else "runtime_gate"),
         "result_ref": (
-            f"tool-operation://{request.run_id}/{request.operation_id}"
+            f"tool-operation://{run_id}/{operation_id}"
         ),
         "status": status,
         "action": action,
         "replayed": replayed,
-        "idempotency_scope": request.idempotency_scope,
+        "idempotency_scope": getattr(request, "idempotency_scope", None),
     }
     if diagnostic:
         facts["diagnostic"] = str(diagnostic)[:240]

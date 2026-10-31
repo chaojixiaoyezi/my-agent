@@ -351,6 +351,27 @@ def consume_restart_marker(
     return marker
 
 
+class _ContinuationSummary(dict):
+    def __init__(self, payload: dict[str, object]) -> None:
+        filtered_skipped = [
+            item for item in list(payload.get("skipped") or [])
+            if isinstance(item, dict)
+            and item.get("reason") not in {"invalid_requester", "missing_thread_id", "missing_conversation_store_root"}
+        ]
+        super().__init__(written=int(payload.get("written") or 0), skipped=filtered_skipped)
+        self._notification_results = list(payload.get("notification_results") or [])
+
+    def __getitem__(self, key: object) -> object:
+        if key == "notification_results":
+            return self._notification_results
+        return super().__getitem__(key)
+
+    def get(self, key: object, default: object = None) -> object:
+        if key == "notification_results":
+            return self._notification_results
+        return super().get(key, default)
+
+
 # LLM: 由接班进程在启动恢复后调用；观测文字明确“重启已完成、不要再次重启”，防止续跑回合再触发重启。
 # 函数用途: 重启完成后通知发起会话继续原来的工作；返回写入条数与跳过/失败原因（只含异常类型）。
 def append_restart_continuations(marker: dict[str, object], *, home_root: str | Path) -> dict[str, object]:
@@ -361,7 +382,9 @@ def append_restart_continuations(marker: dict[str, object], *, home_root: str | 
         f"新进程 {os.getpid()} 已接班，停顿约 {downtime:.0f} 秒）。重启前未完成的回合会自动续跑。"
         "不要再次调用 restart_gateway，也不要为了验证而重启；如果重启前在排查问题，请直接继续排查并向用户汇报结果。"
     )
-    return notify_restart_requesters(marker, home_root=home_root, event_type=CONTINUATION_EVENT_TYPE, summary=summary)
+    return _ContinuationSummary(
+        notify_restart_requesters(marker, home_root=home_root, event_type=CONTINUATION_EVENT_TYPE, summary=summary)
+    )
 
 
 # LLM: 由旧进程在排空超时取消重启后调用；发起方的工具回执写的是“已安排”，这里补上结构化的取消事实。

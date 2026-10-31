@@ -367,8 +367,18 @@ def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -
         new_pid = get_running_pid(paths.pid)
         if new_pid and new_pid != old_pid:
             generation = build_process_identity(new_pid)
-            observation = gateway_readiness(paths, pid=new_pid, process_alive=is_pid_alive(new_pid),
-                expected_generation=generation, restart_request_id=request_id)
+            legacy_unversioned = (
+                generation.get("start_time") is None
+                and "process_identity" not in state
+                and "restart_request_id" not in state
+            )
+            observation = gateway_readiness(
+                paths,
+                pid=new_pid,
+                process_alive=is_pid_alive(new_pid),
+                expected_generation=None if legacy_unversioned else generation,
+                restart_request_id=None if legacy_unversioned else request_id,
+            )
             if observation.ready:
                 print(f"gateway 已安全重启 pid {old_pid} → {new_pid}")
                 return 0
