@@ -54,6 +54,8 @@ _SUBAGENT_SCRATCH_PATHS = (
 _CONTEXT_BUNDLE_SNAPSHOT_DAYS = 30
 # 日期目录里的 latest 副本永远不动：它们是"最近一份快照"的入口，删了会让排查没有起点。
 _CONTEXT_BUNDLE_LATEST_PREFIX = "latest_context_bundle"
+# 最后墓碑发布可能成功后才报fsync错误；此保护件在整个事务已确认后才移除。
+_TRASH_COMMIT_PENDING = ".retention-pending"
 
 
 # LLM: plan纯读取；发现源不可枚举须结构化失败，策略摘要与所有动作经过统一指纹门。
@@ -1257,7 +1259,19 @@ def _expired_file_actions(
     return actions
 
 
-# LLM: purge只接受moved_at并复用规划pin；目标FD复核仍要求全源稳定，坏源或相关引用绝不放行。
+# LLM: 任意类型的pending保护件或读取失败均拒清理；未确认提交不能只靠trashed墓碑取得删除权。
+# 函数用途: 观察回收事务是否仍持有未完成保护，不修改或清理保护件。
+def _trash_transaction_pending(container):
+    try:
+        (container / _TRASH_COMMIT_PENDING).lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+# LLM: purge只接受明确trashed、moved_at及已移除的pending；未知状态或未确认提交先保留，再复核引用。
 # 函数用途: 规划回收站最终删除，保留宽限期内重新被引用的材料。
 def _trash_actions(
     *,
@@ -1279,6 +1293,8 @@ def _trash_actions(
         moved = _timestamp(report.payload.get("moved_at")) if report.load_error is None else None
         if moved is None:
             errors.append(_state_error("MEMORY_RETENTION_TOMBSTONE_INVALID", tombstone))
+            continue
+        if report.payload.get("status") != "trashed" or _trash_transaction_pending(tombstone.parent):
             continue
         if moved < cutoff:
             container = tombstone.parent

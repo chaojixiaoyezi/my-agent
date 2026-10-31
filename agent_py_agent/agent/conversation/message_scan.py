@@ -29,6 +29,8 @@ _TRANSCRIPT_SEGMENT_BYTES = 1024 * 1024
 _MAX_DEDUPE_INDEX_FILES = 64
 # 单个消息文件去重索引最多保留的幂等键数量。
 _MAX_DEDUPE_KEYS_PER_FILE = 16384
+# 显式null是损坏证据，不可与调用方未提供前缀参数混为一谈。
+_TRANSCRIPT_FRONTIER_UNSET = object()
 
 
 # LLM: recent保存首条非display键的精确地址，历史Bloom阳性需回查；64KiB尾锚及完整SHA256防中段改写后增长。
@@ -395,7 +397,71 @@ def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor, *, 
     return digest.hexdigest()
 
 
-# LLM: 消息清单只描述物理冷热分段，不赋予Compact覆盖；pending按热文件inode选择旧/新视图，读口不写修复。
+# LLM: 只封印逻辑布局及已提交前缀；设备号不进入代次摘要，读口不写修复。
+# 函数用途: 计算可跨启动验证的轮转身份，不把物理挂载身份持久化为授权。
+def _transcript_rotation_id(state):
+    names = ('schema', 'thread_id', 'generation', 'checkpoint_id', 'hot_base', 'segment_count',
+             'cold_message_count', 'index', 'chain_sha256', 'boundary_message_id', 'summary_sha256', 'hot_frontier')
+    raw = json.dumps({name: state.get(name) for name in names}, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+# LLM: 只读固定完整行边界，迟到追加不进入摘要；分块读取，不持有全量热正文。
+# 函数用途: 计算热文件已提交字节和行边界的内容证据。
+def _transcript_frontier(handle, through):
+    _validate_boundary(handle, through, handle.seek(0, 2))
+    handle.seek(0)
+    digest, lines, remaining = hashlib.sha256(), 0, through
+    while remaining:
+        block = handle.read(min(65536, remaining))
+        if not block:
+            raise DataCorruptionError('canonical hot transcript is truncated')
+        digest.update(block)
+        lines += block.count(b'\n')
+        remaining -= len(block)
+    return {'bytes': through, 'lines': lines, 'sha256': digest.hexdigest()}
+
+
+# LLM: legacy无前缀证据不能因设备漂移直接重封；沿旧身份门只允许原writer升级，新布局一律验证内容。
+# 函数用途: 核对热文件前缀，允许合法追加但拒绝改写、截断与混代。
+def _transcript_prefix_matches(handle, state, *, frontier=_TRANSCRIPT_FRONTIER_UNSET):
+    proof = frontier
+    if proof is _TRANSCRIPT_FRONTIER_UNSET and state is not None:
+        proof = state.get('hot_frontier', _TRANSCRIPT_FRONTIER_UNSET)
+    if proof is _TRANSCRIPT_FRONTIER_UNSET:
+        expected = state.get('hot_identity') if state else None
+        stamp = os.fstat(handle.fileno())
+        if expected is not None and expected != [stamp.st_dev, stamp.st_ino]:
+            raise DataCorruptionError('legacy transcript lacks a portable integrity frontier')
+        return True
+    if (type(proof) is not dict or type(proof.get('bytes')) is not int or proof['bytes'] < 0
+            or type(proof.get('lines')) is not int or proof['lines'] < 0
+            or type(proof.get('sha256')) is not str or len(proof['sha256']) != 64
+            or any(ch not in '0123456789abcdef' for ch in proof['sha256'])):
+        raise DataCorruptionError('canonical transcript frontier is invalid')
+    try:
+        return _transcript_frontier(handle, proof['bytes']) == proof
+    except DataCorruptionError:
+        return False
+
+
+# LLM: 逻辑代次、边界、索引根与前缀摘要共同封印；保留旧字段，不能单独换generation拼接另一代热尾。
+# 函数用途: 校验一份清单的结构和内容身份，不读写消息文件。
+def _validate_transcript_manifest(state, path):
+    if state is None:
+        return
+    if (type(state) is not dict or state.get('schema') != 'conversation_transcript_segments.v1'
+            or type(state.get('thread_id')) is not str or not state['thread_id']
+            or Path(state['thread_id']).name != state['thread_id'] or state['thread_id'] != path.stem
+            or any(type(state.get(name)) is not int or not 0 <= state[name] < 2 ** 63
+                   for name in ('hot_base', 'segment_count', 'cold_message_count'))):
+        raise ValueError('invalid transcript manifest')
+    if 'hot_frontier' in state or 'rotation_id' in state:
+        if 'hot_frontier' not in state or state.get('rotation_id') != _transcript_rotation_id(state):
+            raise ValueError('transcript logical generation mismatches')
+
+
+# LLM: pending按旧/新已提交前缀选择唯一视图；只在同次打开内比较FD与路径设备号，读口不写修复。
 # 函数用途: 恢复固定大小的消息布局，拒绝不完整或跨线程的清单。
 def transcript_manifest(path: Path):
     from ..common.nofollow_fs import read_bytes_beneath
@@ -406,29 +472,37 @@ def transcript_manifest(path: Path):
     try:
         state = json.loads(raw)
         if state.get('phase') == 'prepared':
-            stamp = path.stat()
-            identity = [stamp.st_dev, stamp.st_ino]
-            if identity == state['old_identity']:
-                state = state['before']
-            elif identity == state['new_identity']:
-                state = state['after']
-            else:
-                raise ValueError('pending transcript identity mismatches')
-        if state is None:
-            return None
-        if (type(state) is not dict or state.get('schema') != 'conversation_transcript_segments.v1'
-                or type(state.get('thread_id')) is not str or not state['thread_id']
-                or Path(state['thread_id']).name != state['thread_id'] or state['thread_id'] != path.stem
-                or any(type(state.get(name)) is not int or not 0 <= state[name] < 2 ** 63
-                       for name in ('hot_base', 'segment_count', 'cold_message_count'))):
-            raise ValueError('invalid transcript manifest')
+            if type(state['after']) is not dict:
+                raise ValueError('pending transcript requires a nonempty new layout')
+            _validate_transcript_manifest(state['before'], path)
+            _validate_transcript_manifest(state['after'], path)
+            with path.open('rb') as handle:
+                stamp = os.fstat(handle.fileno())
+                if 'old_frontier' in state or 'rotation_id' in state['after']:
+                    old = _transcript_prefix_matches(handle, state['before'], frontier=state['old_frontier'])
+                    new = _transcript_prefix_matches(handle, state['after'])
+                    if old == new:
+                        raise ValueError('pending transcript frontiers do not select a unique generation')
+                    state = state['before'] if old else state['after']
+                else:
+                    identity = [stamp.st_dev, stamp.st_ino]
+                    if identity == state['old_identity']:
+                        state = state['before']
+                    elif identity == state['new_identity']:
+                        state = state['after']
+                    else:
+                        raise ValueError('legacy pending transcript lacks a portable integrity frontier')
+                current = path.stat()
+                if (stamp.st_dev, stamp.st_ino) != (current.st_dev, current.st_ino):
+                    raise ValueError('pending transcript replaced during selection')
+        _validate_transcript_manifest(state, path)
         return state
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise DataCorruptionError('canonical transcript segment manifest is invalid') from exc
 
 
-# LLM: writer必须已持原消息锁；回滚只撤销未rename的布局计划，冷孤儿不成为历史；已rename则完成新清单。
-# 函数用途: 在后续追加前收口崩溃留下的冷热文件转换，防止重放阶段覆盖迟到追加。
+# LLM: writer必须已持原消息锁；内容校验后更新物理观察，正常读不写；prepared只完成被前缀选中的布局。
+# 函数用途: 在后续追加前收口冷热转换并平滑更新设备观察，不覆盖迟到追加。
 def recover_transcript_transition(path: Path):
     from ..common.nofollow_fs import read_bytes_beneath, write_text_atomic_beneath
 
@@ -437,21 +511,33 @@ def recover_transcript_transition(path: Path):
     if raw is None:
         return
     state = json.loads(raw)
-    if state.get('phase') != 'prepared':
-        return
     selected = transcript_manifest(path)
+    pending = state.get('phase') == 'prepared'
     if selected is None:
-        # 空旧清单用显式零状态恢复，避免删除事务记录引入额外失败窗。
         selected = {'schema': 'conversation_transcript_segments.v1', 'thread_id': state['after']['thread_id'],
                     'hot_base': 0, 'segment_count': 0, 'cold_message_count': 0,
                     'index': None, 'chain_sha256': hashlib.sha256(b'').hexdigest()}
-    write_text_atomic_beneath(path.parent, (name,), json.dumps(selected, sort_keys=True) + '\n')
+    with path.open('rb') as handle:
+        if not _transcript_prefix_matches(handle, selected):
+            raise DataCorruptionError('canonical hot transcript prefix mismatches')
+        stamp = os.fstat(handle.fileno())
+        identity = [stamp.st_dev, stamp.st_ino]
+        if 'hot_frontier' not in selected:
+            end = complete_jsonl_end(handle, handle.seek(0, 2))
+            selected['hot_frontier'] = _transcript_frontier(handle, end)
+            selected['rotation_id'] = _transcript_rotation_id(selected)
+        current = path.stat()
+        if identity != [current.st_dev, current.st_ino]:
+            raise DataCorruptionError('canonical hot transcript replaced during recovery')
+    selected['hot_identity'] = identity
+    if pending or selected != state:
+        write_text_atomic_beneath(path.parent, (name,), json.dumps(selected, sort_keys=True) + '\n')
 
 
 # LLM: 句柄冻结同次清单、完整尾界及热FD；冷热物理位置对外统一为从会话开始的虚拟字节坐标。
 # 类用途: 为显式历史/分页/来源查询提供可seek的完整会话，不让模型热选源打开冷段。
 class TranscriptReader:
-    # LLM: 默认冻结完整LF尾界；全量读取可显式选择物理EOF以校验半行，冷数据仍延迟读取且不创建索引或锁。
+    # LLM: 默认冻结完整LF尾界；先核逻辑前缀，同次FD/路径复核防打开竞态，不将持久dev/ino当新布局身份。
     # 函数用途: 冻结当前冷热布局及两种尾界，后续轮转不重绑定这个读取快照。
     def __init__(self, path: Path, *, complete_only=True):
         from .store_io import ImmutableJsonIndex
@@ -463,9 +549,13 @@ class TranscriptReader:
             try:
                 current = transcript_manifest(path)
                 stamp = os.fstat(self.hot.fileno())
-                expected = self.manifest.get('hot_identity') if self.manifest else None
-                if current == self.manifest and (expected is None or expected == [stamp.st_dev, stamp.st_ino]):
-                    break
+                located = path.stat()
+                if current == self.manifest and (stamp.st_dev, stamp.st_ino) == (located.st_dev, located.st_ino):
+                    if not _transcript_prefix_matches(self.hot, self.manifest):
+                        raise DataCorruptionError('canonical hot transcript prefix mismatches')
+                    located = path.stat()
+                    if (stamp.st_dev, stamp.st_ino) == (located.st_dev, located.st_ino):
+                        break
             except BaseException:
                 self.hot.close()
                 raise
@@ -606,7 +696,7 @@ def cold_message_lookup(path: Path, key: str, *, reader=None):
     return entry, address
 
 
-# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再按宿主compact根校验冷副本，缺失/无效抛DataCorruptionError留待维护。
+# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再核冷副本；prepared封印旧/新前缀和逻辑代次，设备号仅作观察。
 # 对非终态、活动索引或未知任务保守pin；终态任务仍须被本次thread摘要精确覆盖，原字节保存在冷段。
 # 函数用途: 将已覆盖且无活跃任务pin的前缀冷存，保留边界本行及全部迟到尾部。
 def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | None = None):
@@ -670,6 +760,8 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
     }
     index = ImmutableJsonIndex(path.parent, ('archive', thread.thread_id, 'index'))
     with path.open('rb') as handle:
+        old_frontier = _transcript_frontier(handle, through)
+        handle.seek(0)
         start, lines, length = base, [], 0
         while handle.tell() < cut:
             raw = handle.readline(cut - handle.tell())
@@ -691,8 +783,13 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
     stage = f'.{path.name}.rotation-{after["segment_count"]}.stage'
     write_bytes_atomic_beneath(path.parent, (stage,), tail)
     old_stat, new_stat = path.stat(), path.with_name(stage).stat()
+    with path.with_name(stage).open('rb') as handle:
+        end = complete_jsonl_end(handle, handle.seek(0, 2))
+        after['hot_frontier'] = _transcript_frontier(handle, end)
+    after['rotation_id'] = _transcript_rotation_id(after)
     after['hot_identity'] = [new_stat.st_dev, new_stat.st_ino]
     pending = {'phase': 'prepared', 'before': before, 'after': after,
+               'old_frontier': old_frontier,
                'old_identity': [old_stat.st_dev, old_stat.st_ino], 'new_identity': [new_stat.st_dev, new_stat.st_ino]}
     write_text_atomic_beneath(path.parent, (path.with_suffix('.manifest.json').name,), json.dumps(pending, sort_keys=True) + '\n')
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
