@@ -33,6 +33,9 @@ def execute_restart_control(
             "restart", False, "只有管理员可以重启 Gateway。", error_code="GATEWAY_RESTART_ADMIN_ONLY",
         )
     config = getattr(owner_agent, "config", None)
+    # 只沿 control_service 已解析 owner 的真实 Store 取通知引用，不从命令 value 或元数据补路径。
+    store = getattr(owner_agent, "conversation_store", None)
+    storage_root = getattr(getattr(store, "storage", None), "root", "")
     reason = str(command.value or "").strip() or "管理员使用 /restart"
     result = submit_restart_request(
         paths,
@@ -43,6 +46,7 @@ def execute_restart_control(
             "owner_kind": str(getattr(home, "owner_kind", "") or ""),
             "owner_id": str(getattr(home, "owner_id", "") or ""),
             "thread_id": str(getattr(thread, "thread_id", "") or ""),
+            "conversation_store_root": str(storage_root or ""),
         },
         reason=reason,
         cooldown_seconds=float(getattr(config, "gateway_restart_cooldown_seconds", 30) or 0),

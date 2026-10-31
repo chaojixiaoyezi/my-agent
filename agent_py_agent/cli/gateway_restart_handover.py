@@ -15,6 +15,7 @@ from pathlib import Path
 from ..agent.gateway_parts import is_pid_alive, log_gateway_event, wait_for_pid_exit
 from ..agent.gateway_parts.daemon_control import (
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
+    build_process_identity,
     get_running_pid,
     stop_request_targets_process,
 )
@@ -28,9 +29,11 @@ from ..agent.gateway_parts.restart_service import (
     mark_restart_drained,
     pending_restart_request,
     reset_restart_drain_state,
+    restart_completed_path,
     run_restart_drain,
     submit_restart_request,
 )
+from ..agent.gateway_parts.status_rendering import gateway_readiness
 from .gateway_host_guard import refuse_stopping_hosting_gateway
 from .gateway_service import _get_launchd_label, get_service_name
 from .models import GatewayRunContext
@@ -95,11 +98,10 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     if not result.get("ok"):
         cancel_restart_request(paths, request, result)
         _publish_drain_state(paths, {"phase": "cancelled", "reason": result.get("reason"), "request_id": request_id})
-        notified = {"written": 0, "skipped": []}
         home_root = getattr(getattr(agent, "home_paths", None), "root", None)
-        if result.get("reason") != "stop_requested" and home_root:
-            notified = append_restart_cancellation(request, result, home_root=home_root)
-        log_gateway_event(agent, "gateway_restart_cancelled", {**result, "requesters_notified": notified.get("written", 0)})
+        notified = append_restart_cancellation(request, result, home_root=home_root)
+        log_gateway_event(agent, "gateway_restart_cancelled", {**result,
+            "requesters_notified": notified.get("written", 0), "notification_results": notified["notification_results"]})
         return None
     return _mark_drained_restart(context, request, result)
 
@@ -114,6 +116,9 @@ def _mark_drained_restart(context, request: dict, result: dict) -> dict:
         forced_after_drain_timeout=bool(result.get("forced_after_drain_timeout")),
         executing_tools_at_exit=int(result.get("executing_tools_at_exit") or 0),
         executing_tools=result.get("executing_tools"),
+        unresolved_operation_refs=result.get("unresolved_operation_refs"),
+        cleanup_result={"status": "pending"},
+        old_process_identity=dict(getattr(context, "process_identity", {}) or {}),
     )
     log_gateway_event(context.agent, "gateway_restart_drained", {
         "request_id": str(request.get("request_id") or ""), "active_turns_at_exit": marker.get("active_turns_at_exit"),
@@ -123,6 +128,81 @@ def _mark_drained_restart(context, request: dict, result: dict) -> dict:
            if marker.get("forced_after_drain_timeout") else {}),
     })
     return {"summary": "safe restart drained", "restart": marker}
+
+
+# LLM: 原服务cleanup之后、spawn之前裁决；只更新同request/旧代标记，所有等待已在调用方锁外完成。
+# 函数用途: 区分正常排空、明确强制与意外未排空，把未确认责任完整交给接班回执。
+def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
+    from ..agent.concurrency.restart_gate import executing_tool_snapshot
+
+    refs = list(marker.get("unresolved_operation_refs") or [])
+    for row in [*list(cleanup.get("unresolved_operation_refs") or []),
+                *list(cleanup.get("background_blockers") or []), *executing_tool_snapshot(limit=None)]:
+        if row not in refs:
+            refs.append(row)
+    forced = marker.get("forced_after_drain_timeout") is True and marker.get("operation", "restart") == "restart"
+    clean = cleanup.get("drain_complete") is True and not refs
+    allowed = (clean or forced) and not cleanup.get("cleanup_error")
+    status = ("forced_after_drain_timeout" if forced else "clean_drain") if allowed else "incomplete"
+    result = {**cleanup, "status": status, "handover_allowed": bool(allowed),
+              "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs}
+    identity = marker.get("old_process_identity")
+    binding = ("request_id", "old_pid", "old_process_identity", "old_process_started_at")
+
+    def same_marker(current):
+        return bool(marker.get("request_id")) and all(current.get(key) == marker.get(key) for key in binding)
+
+    def same_state(state):
+        return (bool(identity) and identity == getattr(context, "process_identity", None)
+                and state.get("pid") == marker.get("old_pid")
+                and state.get("process_identity") == identity
+                and state.get("started_at") == marker.get("old_process_started_at"))
+
+    owned = False
+    def update_state(state):
+        nonlocal owned
+        if not same_state(state):
+            return state
+        owned = True
+        fields = {"restart_request_id": marker.get("request_id"), "cleanup_result": result,
+                  "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs}
+        if not result["handover_allowed"]:
+            fields["restart_drain"] = {"phase": "cancelled", "reason": "drain_incomplete",
+                                       "request_id": marker.get("request_id")}
+        return {**state, **fields}
+
+    marker_path = restart_completed_path(context.paths)
+    if not same_marker(read_json_file(marker_path)):
+        result.update(status="incomplete", handover_allowed=False, reason="restart_marker_changed")
+    # 持原生命周期锁先完成state的同代提交；此时磁盘marker仍pending，异常退出不能产生接班许可。
+    update_json_file_atomic(context.paths.state, update_state)
+    if not owned:
+        result.update(status="incomplete", handover_allowed=False, reason="gateway_generation_changed")
+    published = False
+    def publish(current):
+        nonlocal published
+        state = read_json_file(context.paths.state)
+        if not same_marker(current) or not same_state(state) or state.get("cleanup_result") != result:
+            return current
+        published = True
+        return {**current, "cleanup_result": result, "unresolved_operation_refs": refs}
+    if result["handover_allowed"]:
+        # 可消费标记是最后一步；不用“先允许、稍后回滚”跨过崩溃窗口。
+        update_json_file_atomic(marker_path, publish)
+        if not published:
+            result.update(status="incomplete", handover_allowed=False, reason="restart_marker_changed")
+    if not result["handover_allowed"]:
+        home_root = getattr(getattr(context.agent, "home_paths", None), "root", None)
+        notifications = append_restart_cancellation(marker, {"reason": "drain_incomplete"}, home_root=home_root)
+        result["notification_results"] = notifications["notification_results"]
+        update_json_file_atomic(context.paths.state, update_state)
+        update_json_file_atomic(marker_path, lambda current: {
+            **current, "cleanup_result": result, "unresolved_operation_refs": refs} if same_marker(current) else current)
+        # marker换代也必须保留旧请求的原审计事件，不覆盖新代文件来补旧回执。
+        log_gateway_event(context.agent, "gateway_restart_cancelled", {
+            "request_id": marker.get("request_id"), "old_process_identity": identity,
+            "cleanup_result": result, "notification_results": notifications["notification_results"]})
+    return result
 
 
 # LLM: 仅实际同代C按原controller→lease保护取消→state读回→publisher，首次写前核同source；不从业务隔离/closing重签或拒失败元数据。
@@ -220,9 +300,21 @@ def take_restart_marker(paths) -> dict[str, object] | None:
 
 # LLM: 在启动恢复之后调用；续跑通知写进发起会话的持久唤醒，由后台调度按原 owner/thread 权限处理。
 # 函数用途: 记录重启完成事件并通知发起会话“重启已完成、不要再次重启”。
-def announce_restart_completed(agent, marker: dict[str, object], *, requeued: int) -> None:
+def announce_restart_completed(agent, marker: dict[str, object], *, requeued: int,
+                               paths=None, expected_generation=None) -> dict:
+    if paths is None:
+        from ..agent.gateway_parts.paths import gateway_paths
+
+        paths = gateway_paths(agent)
+    observation = gateway_readiness(paths, pid=os.getpid(), expected_generation=expected_generation,
+                                    restart_request_id=str(marker.get("request_id") or ""))
+    receipt = {"ready_observation": observation.ready_observation,
+               "cleanup_result": dict(marker.get("cleanup_result") or {}), "notification_results": []}
+    if not observation.ready:
+        return receipt
     home_root = getattr(getattr(agent, "home_paths", None), "root", None)
-    continuations = append_restart_continuations(marker, home_root=home_root) if home_root else {"written": 0, "skipped": []}
+    continuations = append_restart_continuations(marker, home_root=home_root)
+    receipt["notification_results"] = continuations["notification_results"]
     log_gateway_event(agent, "gateway_restart_completed", {
         "request_id": marker.get("request_id"),
         "old_pid": marker.get("old_pid"),
@@ -230,7 +322,9 @@ def announce_restart_completed(agent, marker: dict[str, object], *, requeued: in
         "requeued_requests": requeued,
         "continuations_written": continuations.get("written", 0),
         "continuations_skipped": continuations.get("skipped", []),
+        **receipt,
     })
+    return receipt
 
 
 # LLM: 终端 `my-agent gateway restart` 的默认路径：Gateway 在跑时写一份 kind=cli 的安全重启请求，按状态文件里的结构化事实
@@ -260,6 +354,8 @@ def safe_restart_from_cli(agent, paths) -> int | None:
     return _wait_for_cli_restart(paths, pid, request_id, budget)
 
 
+# LLM: 新PID只是候选；出生身份由宿主取得，ready必须同时匹配原代次和本次request_id。
+# 函数用途: 复用控制入口同一就绪判据等待接班，取消/失败/缺引用均返回明确失败。
 def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -> int:
     deadline = time.monotonic() + budget
     while time.monotonic() < deadline:
@@ -269,9 +365,16 @@ def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -
             print(f"安全重启已取消（{drain.get('reason')}），Gateway 照常运行；确需立即重启可加 --force。", file=sys.stderr)
             return 2
         new_pid = get_running_pid(paths.pid)
-        if new_pid and new_pid != old_pid and state.get("status") == "running" and int(state.get("pid") or 0) == new_pid:
-            print(f"gateway 已安全重启 pid {old_pid} → {new_pid}")
-            return 0
+        if new_pid and new_pid != old_pid:
+            generation = build_process_identity(new_pid)
+            observation = gateway_readiness(paths, pid=new_pid, process_alive=is_pid_alive(new_pid),
+                expected_generation=generation, restart_request_id=request_id)
+            if observation.ready:
+                print(f"gateway 已安全重启 pid {old_pid} → {new_pid}")
+                return 0
+            if observation.state == "failed" or (state.get("pid") == new_pid and not state.get("restart_request_id")):
+                print("安全重启接班未通过同代就绪检查或缺少重启请求引用。", file=sys.stderr)
+                return 2
         time.sleep(0.5)
     print("等待安全重启超时：Gateway 可能仍在排空，可用 my-agent gateway status 查看。", file=sys.stderr)
     return 2

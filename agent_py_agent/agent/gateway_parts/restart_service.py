@@ -246,7 +246,9 @@ def run_restart_drain(
     _set_phase("exiting", request_id)
     result = {"ok": True, "request_id": request_id, "active_turns_at_exit": turns}
     if not drained:
-        result.update(forced_after_drain_timeout=True, executing_tools_at_exit=executing_tool_count())
+        snapshot = executing_tool_snapshot(limit=None)
+        result.update(forced_after_drain_timeout=True, executing_tools_at_exit=len(snapshot),
+                      executing_tools=snapshot, unresolved_operation_refs=snapshot)
     return result
 
 
@@ -262,6 +264,9 @@ def mark_restart_drained(
     forced_after_drain_timeout: bool = False,
     executing_tools_at_exit: int = 0,
     executing_tools: list[dict[str, object]] | None = None,
+    unresolved_operation_refs: list[dict[str, object]] | None = None,
+    cleanup_result: dict[str, object] | None = None,
+    old_process_identity: dict[str, object] | None = None,
 ) -> dict[str, object]:
     now = time.time()
     marker = {
@@ -273,9 +278,14 @@ def mark_restart_drained(
         "active_turns_at_exit": int(active_turns_at_exit),
     }
     if forced_after_drain_timeout:
-        snapshot = executing_tool_snapshot() if executing_tools is None else list(executing_tools)
+        snapshot = executing_tool_snapshot(limit=None) if executing_tools is None else list(executing_tools)
         marker.update(forced_after_drain_timeout=True, executing_tools_at_exit=int(executing_tools_at_exit),
-                      **({"executing_tools": snapshot} if snapshot else {}))
+                      executing_tools=snapshot,
+                      unresolved_operation_refs=list(unresolved_operation_refs if unresolved_operation_refs is not None else snapshot))
+    if cleanup_result is not None:
+        marker["cleanup_result"] = dict(cleanup_result)
+    if old_process_identity is not None:
+        marker["old_process_identity"] = dict(old_process_identity)
     write_json_file_atomic(restart_completed_path(paths), marker)
     try:
         restart_request_path(paths).unlink()
@@ -326,6 +336,10 @@ def consume_restart_marker(
     old_pid = int(marker.get("old_pid") or 0)
     if old_pid <= 0 or old_pid_alive(old_pid):
         return None
+    cleanup = marker.get("cleanup_result")
+    if isinstance(cleanup, dict) and (cleanup.get("status") not in {"clean_drain", "forced_after_drain_timeout"}
+                                      or cleanup.get("handover_allowed") is not True):
+        return None
     if consume:
         try:
             path.unlink()
@@ -357,7 +371,9 @@ def append_restart_cancellation(
 ) -> dict[str, object]:
     summary = (
         f"Gateway 安全重启已取消（请求 {request.get('request_id') or ''}，原因 {result.get('reason') or ''}，"
-        f"仍在执行的副作用工具 {int(result.get('executing') or 0)} 个）。Gateway 没有重启、照常服务。"
+        f"仍在执行的副作用工具 {int(result.get('executing') or 0)} 个）。"
+        + ("最终收尾未完成，已阻止接班，未确认操作仍保持未知。" if result.get("reason") == "drain_incomplete"
+           else "Gateway 没有重启、照常服务。") +
         "不要立刻重复安排；先告诉用户哪些工作还在跑，由用户决定等它结束后再重启还是放弃。"
     )
     return notify_restart_requesters(request, home_root=home_root, event_type=CANCELLED_EVENT_TYPE, summary=summary)
@@ -371,25 +387,47 @@ def notify_restart_requesters(
 ) -> dict[str, object]:
     from ..conversation.store import ConversationStore
 
-    root = Path(home_root).expanduser().resolve(strict=False)
+    root = Path(home_root).expanduser().resolve(strict=False) if home_root else None
     request_id = str(record.get("request_id") or "")
-    written, skipped = 0, []
-    for requester in [record.get("requester"), *list(record.get("additional_requesters") or [])]:
+    written, skipped, results = 0, [], []
+    for index, requester in enumerate([record.get("requester"), *list(record.get("additional_requesters") or [])]):
+        row = {"requester_index": index, "request_id": request_id, "event_type": event_type,
+               "thread_id": str(requester.get("thread_id") or "") if isinstance(requester, dict) else "",
+               "status": "skipped", "reason": ""}
+        results.append(row)
         if not isinstance(requester, dict):
+            row["reason"] = "invalid_requester"
+            skipped.append({"thread_id": "", "reason": row["reason"]})
             continue
         thread_id = str(requester.get("thread_id") or "")
         raw_root = str(requester.get("conversation_store_root") or "")
         if not thread_id or not raw_root:
+            row["reason"] = "missing_thread_id" if not thread_id else "missing_conversation_store_root"
+            skipped.append({"thread_id": thread_id, "reason": row["reason"]})
             continue
-        store_root = Path(raw_root).expanduser().resolve(strict=False)
+        if root is None:
+            row["reason"] = "missing_home_root"
+            skipped.append({"thread_id": thread_id, "reason": row["reason"]})
+            continue
+        try:
+            store_root = Path(raw_root).expanduser().resolve(strict=False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            row.update(status="failed", reason=type(exc).__name__)
+            skipped.append({"thread_id": thread_id, "reason": row["reason"]})
+            continue
         if root not in store_root.parents or not store_root.is_dir():
-            skipped.append({"thread_id": thread_id, "reason": "store_root_outside_home"})
+            row["reason"] = "store_root_outside_home"
+            skipped.append({"thread_id": thread_id, "reason": row["reason"]})
             continue
         shared = {"thread_id": thread_id, "urgency": "normal",
                   "metadata": {"restart_request_id": request_id, "old_pid": record.get("old_pid") or record.get("target_pid")}}
         try:
             store = ConversationStore(store_root, initialize=False)
             thread = store.threads.load(thread_id)
+            if thread is None:
+                row["reason"] = "thread_not_found"
+                skipped.append({"thread_id": thread_id, "reason": row["reason"]})
+                continue
             meta = thread.metadata if thread is not None and isinstance(thread.metadata, dict) else {}
             if event_type == CANCELLED_EVENT_TYPE and (meta.get("thread_kind") == "scheduled" or thread_id.startswith("thread-srun_")):
                 store.observations.append({**shared, "event_type": event_type, "requires_main_agent": False, "summary": summary})
@@ -400,15 +438,20 @@ def notify_restart_requesters(
                         {**origin_shared, "event_type": event_type, "requires_main_agent": True, "summary": summary},
                         {**origin_shared, "reason": event_type, "summary": summary, "dedupe_key": f"{event_type}:{request_id}"},
                     )
+                    row["wake_thread_id"] = origin_id
+                else:
+                    row["wake_skipped_reason"] = "scheduled_origin_unavailable"
             else:
                 store.wakes.append_observation(
                     {**shared, "event_type": event_type, "requires_main_agent": True, "summary": summary},
                     {**shared, "reason": event_type, "summary": summary, "dedupe_key": f"{event_type}:{request_id}"},
                 )
             written += 1
+            row["status"] = "written"
         except Exception as exc:  # noqa: BLE001 - 单个会话通知失败不能阻止 Gateway 启动或恢复服务
-            skipped.append({"thread_id": thread_id, "reason": type(exc).__name__})
-    return {"written": written, "skipped": skipped}
+            row.update(status="failed", reason=type(exc).__name__)
+            skipped.append({"thread_id": thread_id, "reason": row["reason"]})
+    return {"written": written, "skipped": skipped, "notification_results": results}
 
 
 __all__ = [

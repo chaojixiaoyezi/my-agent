@@ -81,11 +81,11 @@ def executing_tool_count() -> int:
 
 
 # LLM: 同一condition锁内排序并浅拷贝已准入身份，不含工具参数或输出；只供进程级诊断，不持久化、不授予执行权。
-# 函数用途: 返回按准入时刻排序的占门工具清单，默认最多20条，非正上限返回空列表。
-def executing_tool_snapshot(limit: int = 20) -> list[dict[str, object]]:
+# 函数用途: 默认诊断最多20条；交接显式传None保留全部未确认引用，非正上限仍为空。
+def executing_tool_snapshot(limit: int | None = 20) -> list[dict[str, object]]:
     with _condition:
         rows = sorted(_executing_ops.values(), key=lambda row: float(row.get("admitted_at") or 0.0))
-        return [dict(row) for row in rows[:max(0, limit)]]
+        return [dict(row) for row in (rows if limit is None else rows[:max(0, limit)])]
 
 
 # LLM: 超时返回 False，不改变关口状态；timeout 为 None 表示一直等。
