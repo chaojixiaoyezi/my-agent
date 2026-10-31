@@ -63,14 +63,14 @@ _SUMMARY = (
 )
 
 
-# LLM: 正式触发比例与旧自动键都显式设90%，不改默认80%；只替换摘要生成，原边界选择、磁盘归档、checkpoint封印和原子CAS真实执行。
+# LLM: 正式触发比例显式设90%，不改默认80%；只替换摘要生成，原边界选择、磁盘归档、checkpoint封印和原子CAS真实执行。
 # 函数用途: 在临时 home 初始化可追踪停止和摘要调用次数的 carried 压缩环境，不使用网络。
 @pytest.fixture
 def carried_case(tmp_path, monkeypatch):
     config = AgentConfig(
         model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
         max_tokens=64, model_context_window_tokens=10_000,
-        memory_compact_auto_trigger_percent=90, memory_compact_trigger_percent=90,
+        memory_compact_trigger_percent=90,
     )
     config.config_sources = {"model_context_window_tokens": {"source": "test"}}
     agent = SimpleAgent(config, tmp_path)

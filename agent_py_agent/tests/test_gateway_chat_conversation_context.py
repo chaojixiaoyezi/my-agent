@@ -33,6 +33,7 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
     execute_traced_tool_call,
 )
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.common.audit_activation import AUDIT_ATTR, AUDIT_DEADLINE_ATTR
 from agent_py_agent.agent.conversation.audit_lifecycle import (
     audit_scope_payload,
@@ -921,6 +922,8 @@ def test_gateway_run_persists_user_and_assistant_for_next_turn(tmp_path):
         ),
         tmp_path,
     )
+    # 有 Home 时目录未选模型即未配置；构造后显式注入的 echo 后端才在 Gateway 模型作用域里保留。
+    agent.backend = get_backend("echo", agent.config)
     conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_chat1",
@@ -1549,6 +1552,7 @@ def test_gateway_foreground_turn_holds_shared_conversation_execution_lane(tmp_pa
         ),
         tmp_path,
     )
+    agent.backend = get_backend("echo", agent.config)
     conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_single_lane",
@@ -1606,6 +1610,7 @@ def test_gateway_foreground_turn_waits_for_existing_conversation_lane(tmp_path, 
         ),
         tmp_path,
     )
+    agent.backend = get_backend("echo", agent.config)
     conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_lane_wait",
@@ -1693,6 +1698,7 @@ def test_two_gateway_foreground_turns_share_one_lane_and_fresh_history(tmp_path,
         ),
         tmp_path,
     )
+    agent.backend = get_backend("echo", agent.config)
     conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_two_foreground_turns",
@@ -2131,6 +2137,7 @@ def test_gateway_conversation_turns_do_not_leak_into_owner_global_memory(tmp_pat
         ),
         tmp_path,
     )
+    agent.backend = get_backend("echo", agent.config)
     first_conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_chat_a",
@@ -2211,6 +2218,7 @@ def test_gateway_ordinary_chat_accepts_legacy_cleared_goal_tombstone(tmp_path) -
         ),
         tmp_path,
     )
+    agent.backend = get_backend("echo", agent.config)
     conversation = {
         "channel": "feishu",
         "channel_conversation_id": "oc_legacy_goal",
@@ -3243,6 +3251,7 @@ def test_active_goal_without_materialized_workspace_allows_followup_turn(tmp_pat
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[]),
         tmp_path,
     )
+    agent.backend = get_backend("echo", agent.config)
     request = {
         "conversation": {
             "channel": "chat",
@@ -4655,7 +4664,7 @@ def test_editing_old_files_keeps_current_progress_and_old_plan_separate(tmp_path
     try:
         created = TaskProgressTool(agent).execute(
             {
-                "action": "create",
+                "action": "update",
                 "items": [
                     {"id": "q1", "title": "追加 JSON 输出", "status": "in_progress"},
                     {"id": "q2", "title": "补齐测试", "status": "pending"},

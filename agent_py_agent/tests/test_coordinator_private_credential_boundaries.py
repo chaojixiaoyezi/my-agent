@@ -14,6 +14,15 @@ from agent_py_agent.tests.test_coordinator_private_credential_transactions impor
 )
 
 
+# LLM: R16起前台准入只做有界快照、绝不无界全扫；基线未核实时拒绝增长，由后台维护的同一对账切片追平后才放行。
+# 函数用途: 经owner维护所用的对账入口把配额基线追平到完整。
+def _reconcile_owner_quota(home):
+    from agent_py_agent.agent.user_space import owner_quota
+
+    while not owner_quota.reconcile_owner_quota_slice(home, max_entries=4096, max_ms=5000)["complete"]:
+        pass
+
+
 @pytest.mark.parametrize("held", ["quota", "card", "input", "refs", "wake", "audit"])
 def test_original_locks_refuse_immediately_and_replay_only_original_facts(
     tmp_path, monkeypatch, held
@@ -61,6 +70,8 @@ def test_original_locks_refuse_immediately_and_replay_only_original_facts(
             assert json.loads(saved)["status"] == "ready"
             assert input_row["status"] == ("pending" if held == "input" else "ready")
         before_wakes = {wake.wake_signal_id for wake in store.wakes.pending()}
+        if held == "quota":
+            _reconcile_owner_quota(agent.home_paths.owner_home_dir)
         assert post(server, row, body)[1]["ok"] is True
         if held not in {"quota", "card", "audit"}:
             assert path.read_bytes() == saved
@@ -73,6 +84,8 @@ def test_original_locks_refuse_immediately_and_replay_only_original_facts(
         )
 
 
+# LLM: 前台准入不再运行原无界全扫（R16-QUOTA）；基线由对账切片核实后超额仍拒绝，且保留pending、不写卡片。
+# 函数用途: 验证已核实基线上的超额拒绝及前台零全扫。
 def test_enabled_quota_runs_original_strict_scan_and_preserves_pending_on_excess(
     tmp_path, monkeypatch
 ):
@@ -89,10 +102,11 @@ def test_enabled_quota_runs_original_strict_scan_and_preserves_pending_on_excess
         home = agent.home_paths.owner_home_dir
         (home / "quota.json").write_text(json.dumps({"max_disk_mb": 1}))
         (home / "synthetic-quota-data.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+        _reconcile_owner_quota(home)
         monkeypatch.setattr(owner_quota, "_owner_usage_bytes_for_admission", observed)
         before = path.read_bytes()
         status, _result = post(server, row, body)
-        assert status == 503 and calls == [home]
+        assert status == 503 and calls == []
         assert path.read_bytes() == before
         assert (
             json.loads(input_dependency_path(agent, row["input_id"]).read_text())["status"]

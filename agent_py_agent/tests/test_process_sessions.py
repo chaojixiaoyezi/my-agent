@@ -592,11 +592,14 @@ def test_proc_listener_reports_actual_socket_owner_pids(tmp_path: Path) -> None:
 def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_path: Path) -> None:
     """子代理式短命 Python 进程退出后，另一个进程仍能查询并停止同一后台会话。"""
 
+    # 托管后台启动要求访问与执行归属共用同一个规范 owner home（5c029e4fb），启动与跨进程查询都显式带上。
+    owner_home = str((tmp_path / "owner").resolve())
     scope = {
         "owner_id": "owner-cross-process",
         "session_id": "thread-cross-process",
         "root_task_id": "task-cross-process",
         "run_id": "subagent-cross-process",
+        "owner_home": owner_home,
     }
     command = "sleep 20"
     script = "\n".join(
@@ -610,7 +613,7 @@ def test_background_session_outlives_one_shot_launcher_and_is_rehydrated(tmp_pat
             "tool = ShellTool(root)",
             "result = tool._start_background_command(",
             "    command, root, (None, None, None),",
-            "    ProcessAccessScope('owner-cross-process', 'thread-cross-process', ''),",
+            f"    ProcessAccessScope('owner-cross-process', 'thread-cross-process', {owner_home!r}),",
             ")",
             "print(result.output, flush=True)",
             "raise SystemExit(0 if result.ok else 1)",

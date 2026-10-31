@@ -12,7 +12,7 @@ import pytest
 from agent_py_agent.agent.agent_core.tool_loop import round_execution
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
-from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse, get_backend
 from agent_py_agent.agent.contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.core import SimpleAgent
@@ -311,6 +311,10 @@ def _assert_http_events(events, request_id, prompt):
 ])
 def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeypatch, identity, owner):
     agent, paths, server, harness, published, workers = http_gateway
+    # 有 Home 的 owner agent 未选目录模型即未配置（e905 模型目录权威）；在观测探针装上前先取同一常驻 owner agent
+    #   并注入离线 echo 后端，worker 之后的认领、归属解析与插件事件隔离断言不变。
+    owner_agent = request_worker._resolve_request_agent_for_owner(agent, owner)
+    owner_agent.backend = get_backend('echo', owner_agent.config)
     claims, resolved = _observe_http_worker(monkeypatch)
     port = server.server.server_address[1]
     prompt = 'http-private-marker'

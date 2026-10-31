@@ -36,10 +36,10 @@ def _agent(tmp_path, *, kind='main'):
     return agent
 
 
-# LLM: 只解码真实执行器 handler 的短输出，不以产品内部函数替代 scoped 查询。
-# 函数用途: 取得本次 list_tools 实际返回模型的自身事实页。
+# LLM: 只解码真实执行器 handler 的短输出，不以产品内部函数替代 scoped 查询；list_tools 已由 tool_search(action=catalog) 取代。
+# 函数用途: 取得本次 tool_search 目录动作实际返回模型的自身事实页。
 def _discover(agent, **kwargs):
-    result = execute_registry_test_call(agent.tools, 'list_tools', {}, **kwargs)
+    result = execute_registry_test_call(agent.tools, 'tool_search', {'action': 'catalog'}, **kwargs)
     assert result.ok, result.output
     return json.loads(result.metadata['handler_details']['tool_output_policy']['live_prompt_output'])
 
@@ -75,7 +75,7 @@ def test_invalid_owner_policy_and_scoped_directory_do_not_leak_other_tools(tmp_p
     agent = _agent(tmp_path)
     execute_approval_mode_operation(agent.home_paths, 'set', 'ask')
     agent.home_paths.owner_tool_policy_json.write_text('{"secret":"MUST-NOT-LEAK"}')
-    blocked = execute_registry_test_call(agent.tools, 'list_tools', {})
+    blocked = execute_registry_test_call(agent.tools, 'tool_search', {'action': 'catalog'})
     assert not blocked.ok
     assert 'APPROVAL_MODE_UNAVAILABLE' in blocked.output
     assert blocked.metadata['action_decision']['evidence']['failure_stage'] == 'authorization'
@@ -85,11 +85,11 @@ def test_invalid_owner_policy_and_scoped_directory_do_not_leak_other_tools(tmp_p
     agent.tools.disabled_tool_names.add('read_file')
     monkeypatch.setattr(agent.tools.tools['write_file'], 'availability',
                         lambda: ToolAvailability(False, 'TOOL_UNAVAILABLE', '尚未配置'))
-    page = _discover(agent, allowed_tools=['list_tools', 'read_file', 'write_file'])
+    page = _discover(agent, allowed_tools=['tool_search', 'read_file', 'write_file'])
     context = page['self_context']
     assert context['permissions']['mode'] == 'ask'
     states = {item['name']: item for item in context['tool_states']}
-    assert set(states) == {'list_tools', 'read_file', 'write_file'}
+    assert set(states) == {'tool_search', 'read_file', 'write_file'}
     assert states['read_file']['state'] == 'disabled'
     assert states['write_file']['reason'] == '尚未配置'
     assert 'MUST-NOT-LEAK' not in json.dumps(page)
@@ -102,7 +102,7 @@ def test_short_manifest_retains_purpose_and_always_grant_contract(tmp_path):
     monkey_policy = replace(tool.runtime_policy,
         approval_policy=ApprovalPolicy('always', always_effects=('dangerous',), owner_grant_parameters=(('path', ('example',)),)))
     tool.runtime_policy = monkey_policy
-    page = _discover(agent, allowed_tools=['list_tools', 'write_file'])
+    page = _discover(agent, allowed_tools=['tool_search', 'write_file'])
     item = next(item for item in page['tools'] if item['name'] == 'write_file')
     assert item['description']
     assert item['approval_policy']['always_effects'] == ['dangerous']
@@ -153,7 +153,7 @@ def test_fake_llm_uses_real_list_tools_and_receives_owner_facts(tmp_path):
             self.calls += 1
             if self.calls == 1:
                 return ModelResponse(text='', backend=self.name, tool_use_blocks=[{
-                    'id': 'self-discovery', 'name': 'list_tools', 'input': {},
+                    'id': 'self-discovery', 'name': 'tool_search', 'input': {'action': 'catalog'},
                 }])
             self.observed = json.dumps(kwargs.get('messages') or [], ensure_ascii=False)
             return ModelResponse(text='当前本人审批模式是 ask，可以查询当前工具用途和权限边界。', backend=self.name)
@@ -161,7 +161,7 @@ def test_fake_llm_uses_real_list_tools_and_receives_owner_facts(tmp_path):
     backend = Backend()
     agent.backend = backend
     result = agent.run('你目前有哪些能力，为什么有些功能不能用？', params=RunParams(
-        save=False, request_id='discovery', allowed_tools=['list_tools', 'tool_search', 'read_file']))
+        save=False, request_id='discovery', allowed_tools=['tool_search', 'read_file']))
     assert 'ask' in result.response
     assert backend.calls == 2
     assert 'tool-self-context.v1' in backend.observed and 'owner' in backend.observed
@@ -196,13 +196,13 @@ def test_group_actor_and_compact_loaded_state_are_bound_to_current_thread(tmp_pa
     persist_discovered_tools(agent, params, {'tool_round': 1, 'tool_result_envelope': {
         'tool_search': {'loaded_tool_names': ['read_file', 'admin_controls']}}})
     agent.conversation_store.threads.update_atomic(thread.thread_id, lambda value: replace(value, compact_generation=3))
-    facts = _discover(agent, allowed_tools=['list_tools', 'read_file'])['self_context']
+    facts = _discover(agent, allowed_tools=['tool_search', 'read_file'])['self_context']
     assert facts['identity']['actor']['actor_id'] == 'actor-A'
     assert facts['discovery']['loaded_tools'] == ['read_file']
     assert facts['discovery']['persists_across_compact']
     agent._current_run_params = replace(params, host_channel_actor=HostChannelActor(
         'other-owner', thread.thread_id, 'request-X', 'feishu', 'own-chat', 'actor-X'))
-    rejected = _discover(agent, allowed_tools=['list_tools'])['self_context']
+    rejected = _discover(agent, allowed_tools=['tool_search'])['self_context']
     assert rejected['identity']['actor'] is None
     assert rejected['identity']['actor_error_code'] == 'CHANNEL_ACTOR_SCOPE_MISMATCH'
 
@@ -215,7 +215,7 @@ def test_background_defaults_include_self_discovery_but_explicit_scope_stays_exa
 
     for reason in ['subagent_runner_finished', 'thread_goal_continue', 'audit_finding', 'scheduled_progress_report']:
         decision = background_tool_policy_decision(request=BackgroundToolPolicyRequest(reason=reason))
-        assert {'list_tools', 'tool_search', 'request_credentials', 'feishu_cloud', 'send_message', 'web_fetch'} <= set(decision.allowed_tools)
+        assert {'tool_search', 'request_credentials', 'feishu_cloud', 'send_message', 'web_fetch'} <= set(decision.allowed_tools)
     configured = background_tool_policy_decision(SimpleNamespace(background_main_agent_allowed_tools=['read_file']))
     assert configured.allowed_tools == ('read_file',)
     unavailable_route = background_tool_policy_decision(request=BackgroundToolPolicyRequest(proactive_delivery_available=False))
@@ -228,19 +228,19 @@ def test_self_context_reports_child_file_and_network_limits(tmp_path):
         'shell_access_mode': 'restricted', 'read_scope_mode': 'exact', 'allowed_read_roots': [],
         'allowed_write_roots': [], 'effective_permissions': {'network_enabled': False},
     })
-    page = _discover(agent, allowed_tools=['list_tools'], write_boundary=agent._current_run_params.write_boundary)['self_context']
+    page = _discover(agent, allowed_tools=['tool_search'], write_boundary=agent._current_run_params.write_boundary)['self_context']
     assert page['network']['enabled'] is False
     assert page['filesystem']['shell_access_mode'] == 'restricted'
     # 查询本次 executor 的文件上下文已冻结；状态直接调用时也必须保留显式空根。
     from agent_py_agent.agent.tooling.self_context import tool_self_context
-    unscoped = tool_self_context(agent, agent.tools.runtime_snapshot(allowed_tools=['list_tools']))
+    unscoped = tool_self_context(agent, agent.tools.runtime_snapshot(allowed_tools=['tool_search']))
     assert unscoped['filesystem']['read_roots'] == []
     assert unscoped['filesystem']['write_roots'] == []
 
 
 def test_scoped_query_uses_actual_invocation_permissions_without_reading_body(tmp_path):
     agent = _agent(tmp_path)
-    page = _discover(agent, allowed_tools=['list_tools'], write_boundary={
+    page = _discover(agent, allowed_tools=['tool_search'], write_boundary={
         'network_access_mode': 'disabled', 'shell_access_mode': 'restricted',
         'network_scope': ['example.invalid'], 'private_host_field': 'NEVER-EXPOSE',
     })['self_context']

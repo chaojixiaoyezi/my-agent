@@ -36,6 +36,14 @@ jobs:
           # 一致，不能靠 runner 预装，也不能因为缺 optional extra 而把真实测试变成环境失败。
           python3 -m pip install -e ".[dev,secrets,scale]"
 
+      - name: Install ripgrep for native search regressions
+        # 文件发现/搜索的原生回归（test_opt_filesystem_cursor_context.py）必须执行真实 rg；ubuntu runner
+        # 不预装 ripgrep（2026-10-31 CI 实测 shutil.which('rg') 为 None），按声明安装，不在测试里跳过。
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          rg --version
+
       - name: Prepare bubblewrap sandbox on the runner
         # ubuntu-24.04 runner 预装 bwrap，但 AppArmor 默认禁止非特权用户命名空间，sandbox 自检会以
         # BWRAP_ISOLATION_FAILED 失败，run_command 用例随之全部 fail-closed（2026-09-25 线上实测）。

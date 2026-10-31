@@ -86,11 +86,18 @@ def test_default_off_skips_preparation_ledger_and_experiment_writes(running, mon
 
 
 def test_config_flag_yaml_and_dataclass_agree_and_enable_is_not_authorization(running, tmp_path):
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+
     host, _thread, _params = running
-    assert AgentConfig().decision_experiment_enabled is False
+    # 决策默认只归决策代码（a12fe40c5），配置对象不再有实验开关；旧 YAML 只经显式离线迁移转 owner 覆盖。
+    assert decision_defaults(None)[0]["experiment_enabled"] is False
+    assert not hasattr(AgentConfig(), "decision_experiment_enabled")
     path = tmp_path / "config.yaml"
     path.write_text("decision_experiment_enabled: true\n", encoding="utf-8")
-    assert load_config(path).decision_experiment_enabled is True
+    assert not hasattr(load_config(path), "decision_experiment_enabled")
+    assert migrate_legacy_decision_overrides(load_simple_yaml(path), {}) == {"experiment_enabled": True}
     _enabled(running)
     assert _stage(running).error_code == "experiment_authorization_missing"
     assert not hasattr(host, "_model_call_ledger")

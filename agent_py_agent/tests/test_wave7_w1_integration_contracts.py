@@ -301,7 +301,9 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
         'kind': 'capability_package', 'name': 'auto-pkg-1', 'description': '自动能力包',
         'entry_document': 'CAPABILITY.md', 'body': '# 自动能力包\n包含自动提炼的方法。',
     })
-    assert r_skill['executed'] is False and r_skill['checks_executed'] is True and r_skill['contract_valid'] is True
+    # 53645693a 起 Skill 回执就是已落盘的绑定证明：只记静态检查级别，不再附加未经执行的 contract_valid。
+    assert r_skill['executed'] is False and r_skill['checks_executed'] is True
+    assert r_skill['verification_kind'] == 'deterministic_static' and 'contract_valid' not in r_skill
     assert r_pkg['executed'] is False and r_pkg['checks_executed'] is True and r_pkg['contract_valid'] is True
     assert r_script['executed'] is True and r_script['contract_valid'] is True
     assert r_workflow['executed'] is True and r_workflow['contract_valid'] is True
@@ -364,13 +366,16 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     })
     assert fake_receipt_skill is not None and fake_receipt_skill['executed'] is False and fake_receipt_skill['verification_kind'] == 'deterministic_static'
 
-    # R4-2: 同族脚本改名晋升时先查 registry.assets 并复用既有 asset_id，不重复落盘新脚本文件
-    reused_script = promote_verified_asset(owner_home, {
+    # R4-2: 53645693a（e905 DEL-MR-11）起 family 只供推荐：同族改名脚本是另一个精确身份，按自己的规范ID验证落盘，
+    #   不借用既有 asset_id 的身份与回执；原脚本保持不变。
+    renamed_script = promote_verified_asset(owner_home, {
         'kind': 'script', 'name': 'auto-script-1-dup', 'description': '同族改名脚本',
         'code': 'print("{\\"rows\\": 3}")', 'io_contract': {'outputs': ['rows']},
     })
-    assert reused_script is not None and reused_script['asset_id'] == 'auto-script-1' and reused_script.get('reused') is True
-    assert ScriptStore(owner_home).get_script('auto-script-1-dup') is None
+    assert renamed_script is not None and renamed_script['asset_id'] == 'auto-script-1-dup' and not renamed_script.get('reused')
+    assert renamed_script['identity_sha256'] != r_script['identity_sha256']
+    assert ScriptStore(owner_home).get_script('auto-script-1-dup') is not None
+    assert ScriptStore(owner_home).get_script('auto-script-1') is not None
 
     # R5-1: 不兼容 io_contract 的同代码脚本绝不误判为同族复用，验证失败必须返回 None
     assert promote_verified_asset(owner_home, {

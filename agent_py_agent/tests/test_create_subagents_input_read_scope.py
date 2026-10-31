@@ -60,7 +60,7 @@ def test_full_access_parent_cannot_hand_child_an_outside_worktree(tmp_path, monk
     agent, _owner_home = _agent(tmp_path, monkeypatch)
     outside = _outside_worktree(tmp_path)
 
-    result = _create(agent, {"goal": "只读调研 my-agent-self", "input_refs": [str(outside)]})
+    result = _create(agent, {"items": [{"goal": "只读调研 my-agent-self", "input_refs": [str(outside)]}]})
 
     assert result.ok is False
     assert result.reported_error_code == INPUT_PATH_NOT_VISIBLE_ERROR_CODE
@@ -85,12 +85,12 @@ def test_inputs_inside_workspace_or_shared_are_created_normally(tmp_path, monkey
 
     result = _create(
         agent,
-        {
+        {"items": [{
             "goal": "阅读工作区里的规格",
             "input_refs": [str(inside), "notes/relative.md"],
             "required_read_paths": [str(shared)],
             "context_manifest": {"required_read_paths": [str(inside)]},
-        },
+        }]},
     )
 
     assert result.ok is True, result.output
@@ -129,7 +129,7 @@ def test_paths_only_mentioned_in_goal_text_are_never_prechecked(tmp_path, monkey
     outside = _outside_worktree(tmp_path)
     goal = f"请阅读 {outside} 并总结"
 
-    single = _create(agent, {"goal": goal})
+    single = _create(agent, {"items": [{"goal": goal}]})
     batch = _create(agent, {"items": [{"goal": goal}, {"goal": f"对照 {outside} 写结论"}]})
 
     assert single.ok is True, single.output
@@ -143,8 +143,8 @@ def test_nested_child_creation_uses_the_same_precheck(tmp_path, monkeypatch):
     outside = _outside_worktree(tmp_path)
     previous = set_current_subagent_context(agent, run_id=coordinator.id)
     try:
-        rejected = _create(agent, {"goal": "孙代理读墙外", "input_refs": [str(outside)]})
-        accepted = _create(agent, {"goal": "孙代理读工作区", "input_refs": [str(owner_home / "b.md")]})
+        rejected = _create(agent, {"items": [{"goal": "孙代理读墙外", "input_refs": [str(outside)]}]})
+        accepted = _create(agent, {"items": [{"goal": "孙代理读工作区", "input_refs": [str(owner_home / "b.md")]}]})
     finally:
         restore_current_subagent_context(agent, previous)
 
@@ -333,8 +333,8 @@ def test_declared_parent_workspace_is_granted_to_child_and_precheck_agrees(tmp_p
         }
     )
 
-    rejected = _create(agent, {"goal": "读项目和墙外", "input_refs": [str(source), str(outside)]})
-    created = _create(agent, {"goal": "读项目", "input_refs": [str(source), "src/main.py"]})
+    rejected = _create(agent, {"items": [{"goal": "读项目和墙外", "input_refs": [str(source), str(outside)]}]})
+    created = _create(agent, {"items": [{"goal": "读项目", "input_refs": [str(source), "src/main.py"]}]})
 
     assert rejected.ok is False
     refs = json.loads(rejected.output)["invisible_inputs"][0]["invisible_refs"]

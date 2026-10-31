@@ -677,7 +677,7 @@ def test_main_thread_registry_hides_record_lesson_while_child_snapshot_exposes_i
 
     main = registry.runtime_snapshot()
     child = registry.runtime_snapshot(allowed_tools=subagent_allowed_tools({}), run_id="child-1")
-    listed = registry.tools["list_tools"].execute({})
+    listed = registry.tools["tool_search"].execute({"action": "catalog"})
 
     assert RECORD_LESSON_TOOL in registry.tools
     assert RECORD_LESSON_TOOL not in main.available_tool_names

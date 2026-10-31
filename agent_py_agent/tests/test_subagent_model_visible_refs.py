@@ -63,7 +63,7 @@ def test_create_subagents_payload_keeps_current_paths_visible(monkeypatch):
 
     monkeypatch.setattr(background_dispatch, "_start_background_dispatch", fake_background_start)
 
-    result = CreateSubagentsTool(mock_agent).execute({"goal": "整理资料"})
+    result = CreateSubagentsTool(mock_agent).execute({"items": [{"goal": "整理资料"}]})
 
     assert result.ok is True
     assert "[internal_legacy_subagent_path_hidden]" not in result.output

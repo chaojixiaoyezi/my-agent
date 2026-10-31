@@ -40,7 +40,10 @@ def test_only_the_admin_sets_it_and_setting_it_also_shares_the_model(tmp_path):
     assert initial_profile_key(admin.home_paths) == "shared:" + key
     execute_model_profile_operation(admin, "set_initial", {"profile_id": ""})
     assert initial_profile_key(admin.home_paths) == ""
-    assert execute_model_profile_operation(alice, "list", {})["profiles"][0]["id"] == "default"
+    # e905 起部署配置不再提供默认行：清除后普通用户的默认回到未配置，不再展示管理员初始模型。
+    listing = execute_model_profile_operation(alice, "list", {})
+    assert listing["selected"] == "default" and not listing["selection_available"]
+    assert all(row["id"] != "default" for row in listing["profiles"])
 
 
 def test_oauth_models_cannot_become_the_initial_model(tmp_path):
@@ -60,12 +63,14 @@ def test_default_follows_the_initial_model_only_for_other_users(tmp_path):
     admin = admin_host(tmp_path / "config")
     alice = host_with_store(tmp_path)
     key, _ = add(admin, model_name="team-model")
-    assert selected_model_config(alice) is alice.config
+    # e905 起未选模型投影为未配置，不再回到部署配置。
+    unconfigured = selected_model_config(alice)
+    assert (unconfigured.model_backend, unconfigured.model_name) == ("", "")
     set_initial_profile(admin, key)
     config = selected_model_config(alice)
     assert config.model_name == "team-model" and config.api_key == "only-private-secret"
     assert config.config_sources["model_name"]["profile_id"] == "shared:" + key
-    assert selected_model_config(admin) is admin.config  # 管理员自己的默认仍是部署配置
+    assert selected_model_config(admin).model_name == ""  # 管理员自己的默认不跟随初始模型，未选即未配置
     listing = execute_local_model_operation(alice, "im-chat", "list", {})
     default = listing["profiles"][0]
     assert listing["selected"] == "default" and listing["selection_available"] is True
@@ -94,7 +99,8 @@ def test_revoking_the_share_clears_the_initial_model(tmp_path):
     set_initial_profile(admin, key)
     set_shared_profile(admin, key, False)
     assert initial_profile_key(admin.home_paths) == ""
-    assert selected_model_config(alice) is alice.config
+    unconfigured = selected_model_config(alice)
+    assert (unconfigured.model_backend, unconfigured.model_name) == ("", "")
 
 
 def test_deleted_source_fails_loudly_instead_of_switching(tmp_path):

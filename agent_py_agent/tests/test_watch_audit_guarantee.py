@@ -2237,7 +2237,7 @@ def test_audit_large_record_target_is_bounded_by_shared_context_budget(
     )
     tool.agent.config = AgentConfig(
         auto_save_memory=True,
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_trigger_percent=90,
         model_context_window_tokens=10_000,
     )
     tool.agent.backend = SimpleNamespace(
@@ -2309,7 +2309,7 @@ def test_audit_first_batch_uses_explicit_resource_ceiling(
         },
     )
     tool.agent.config = AgentConfig(
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_trigger_percent=90,
         model_context_window_tokens=200_000,
     )
     tool.agent.backend = SimpleNamespace(
@@ -2374,7 +2374,7 @@ def test_audit_timeout_halves_same_inflight_replay_without_dropping_records(
         },
     )
     tool.agent.config = AgentConfig(
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_trigger_percent=90,
         model_context_window_tokens=200_000,
     )
     tool.agent.backend = SimpleNamespace(
@@ -2601,7 +2601,7 @@ def test_audit_sources_have_separate_workers_and_context_budgets(
     )
     first_tool.agent.config = AgentConfig(
         auto_save_memory=True,
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_trigger_percent=90,
         model_context_window_tokens=10_000,
     )
     first_tool.agent.backend = SimpleNamespace(context_window_tokens=10_000, name="fake")
@@ -2810,7 +2810,7 @@ def test_partial_inflight_budget_uses_pending_debt_not_fresh_unread(
         },
     )
     tool.agent.config = AgentConfig(
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_trigger_percent=90,
         model_context_window_tokens=200_000,
     )
     tool.agent.backend = SimpleNamespace(

@@ -29,7 +29,8 @@ def _fixture(tmp_path, *, enabled=True):
 # 函数用途: 创建一位明确包范围的孩子，不手改 canonical 权限或执行状态。
 def _child(agent, *, allowed=None):
     result = CreateSubagentsTool(agent).execute({
-        "goal": "读取已授权故事资料后说明观察", "allowed_skills": ["capability:story-a"] if allowed is None else allowed,
+        "items": [{"goal": "读取已授权故事资料后说明观察",
+                   "allowed_skills": ["capability:story-a"] if allowed is None else allowed}],
         "defer_start": True,
     })
     assert result.ok, result.output

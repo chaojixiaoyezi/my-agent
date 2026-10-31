@@ -13,10 +13,21 @@ import pytest
 from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 from agent_py_agent.agent.local_storage.store import LocalStore
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-from agent_py_agent.tests.support.sqlite_lease_assertions import (
-    assert_reused_lease,
-    physical_connection,
-)
+from agent_py_agent.agent.runtime_db.schema import RuntimeWriteFence
+from agent_py_agent.tests.support import sqlite_lease_assertions
+
+
+# RuntimeDB 写借用外包 RuntimeWriteFence；租期与物理连接身份观察取栅栏内层借用。
+def _lease_layer(conn):
+    return conn._connection if isinstance(conn, RuntimeWriteFence) else conn
+
+
+def physical_connection(conn):
+    return sqlite_lease_assertions.physical_connection(_lease_layer(conn))
+
+
+def assert_reused_lease(current, previous):
+    sqlite_lease_assertions.assert_reused_lease(_lease_layer(current), _lease_layer(previous))
 
 
 @pytest.fixture(params=[RuntimeRepository, LocalStore], ids=["runtime", "local"])

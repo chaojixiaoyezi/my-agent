@@ -260,14 +260,16 @@ def test_provider_transient_retry_delays_allow_empty_config(monkeypatch) -> None
 
 
 def test_provider_transient_retry_delays_use_passed_policy() -> None:
+    from agent_py_agent.agent.settings.deployment_policy import DeploymentPolicyError
     from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
 
-    policy = RuntimeGuardPolicy(
-        values={"provider_transient_auto_resume_delays_seconds": [1, "2.5", "bad", 0, -1]},
-        sources={"provider_transient_auto_resume_delays_seconds": "agent.runtime_guard_policy"},
-    )
+    policy = RuntimeGuardPolicy(provider_transient_auto_resume_delays_seconds=[1, 2.5, 0])
 
     assert provider_transient_auto_resume.provider_transient_retry_delays(policy) == (1.0, 2.5)
+    # typed 快照不再逐项丢弃坏值：非数字或负数在构造时整体拒绝，不能悄悄改变重试档位。
+    for invalid in ([1, "2.5"], [1, "bad"], [1, -1]):
+        with pytest.raises(DeploymentPolicyError):
+            RuntimeGuardPolicy(provider_transient_auto_resume_delays_seconds=invalid)
 
 
 def test_provider_quota_exhaustion_fails_fast_without_retry(monkeypatch) -> None:

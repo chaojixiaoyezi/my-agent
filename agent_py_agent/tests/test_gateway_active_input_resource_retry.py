@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.gateway_parts.multiprocess_active_input import OriginalPendingTurnInput
 from agent_py_agent.agent.gateway_parts.multiprocess_admission import reservation_file
@@ -27,6 +28,8 @@ from agent_py_agent.tests.test_gateway_active_input_transport import (
 
 def test_actual_claimed_pipeline_resumes_after_input_lock_busy(tmp_path, monkeypatch):
     with c_http(tmp_path, monkeypatch) as (agent, backend, gate, control, runtime, server, close):
+        # 有 Home 时目录未选模型即未配置；构造后显式注入的 echo 实例才在模型作用域里保留，下方再替换它的生成入口。
+        agent.backend = get_backend("echo", agent.config)
         code, accepted = request(
             server,
             "POST",

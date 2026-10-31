@@ -31,7 +31,6 @@ from agent_py_agent.agent.conversation.compact_checkpoint import committed_compa
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.compact_summary_view import resolve_compact_summary_view
 from agent_py_agent.agent.conversation.runtime import _run_params
-from agent_py_agent.agent.settings.defaults import effective_max_output_tokens
 from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
 from agent_py_agent.tests.test_background_compact_recovery import _background
 from agent_py_agent.tests.test_mixed_compact_recovery import _wire_from_material
@@ -46,14 +45,11 @@ def _native_ir_attempt(
     tmp_path, monkeypatch, *, backend: str, full_result: str, archive_present: bool = True, pairs: int = 1,
     context_window_tokens: int | None = None,
 ):
+    # 窗口由所选模型档案声明；后端按该档案构造，输出上限与生产同公式由窗口推出。
     agent, store, thread, request, _, sink = _background(
         tmp_path, backend=backend, detached=True, with_history=False,
+        **({} if context_window_tokens is None else {"window": context_window_tokens}),
     )
-    if context_window_tokens is not None:
-        agent.config.model_context_window_tokens = context_window_tokens
-        agent.backend.context_window_tokens = context_window_tokens
-        # 生产里后端总是按自己的窗口构造；构造后才缩窗口时按同一公式重算输出上限，否则沿用大窗口的上限会占满新窗口。
-        agent.backend.max_tokens = effective_max_output_tokens(agent.config)
     request = replace(request, reason="audit_finding")
     agent.config.enable_tools = True
     agent.config.tool_output_preview_chars = 64

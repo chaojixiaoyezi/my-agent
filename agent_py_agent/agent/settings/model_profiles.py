@@ -417,7 +417,10 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str, *, bl
     result["selection_available"] = any(row["id"] == result["selected"] and row.get("available", True)
                                         for row in result["profiles"])
     if not result["selection_available"]:
-        result["warning"] = ("管理员指定的初始模型暂不可用，请在 /model 另选模型；系统没有自动切换到其他模型。"
+        # 共享目录读不出时管理员初始模型无从判定；保留目录不可用提示，不能误报成“尚未配置模型”。
+        result["warning"] = (result["warning"]
+                             if result["selected"] == "default" and result["inventory_status"]["shared"] == "unavailable"
+                             else "管理员指定的初始模型暂不可用，请在 /model 另选模型；系统没有自动切换到其他模型。"
                              if result["selected"] == "default" and initial and not result["can_share"]
                              else "尚未配置模型，请先通过 /model 新增并选择模型。" if result["selected"] == "default"
                              else "本会话选定模型已不可用，请重新选择；系统没有自动切换到其他模型。")

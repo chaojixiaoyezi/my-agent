@@ -53,7 +53,7 @@ def _replace(manager: SubAgentManager, source_id: str, goal: str = "接替旧子
         tools=SimpleNamespace(specs=lambda: []),
     )
     result = CreateSubagentsTool(agent).execute(
-        {"goal": goal, "role": "worker", "replacement_for_run_ids": [source_id], "defer_start": True}
+        {"items": [{"goal": goal, "role": "worker", "replacement_for_run_ids": [source_id]}], "defer_start": True}
     )
     return result, json.loads(result.output)
 

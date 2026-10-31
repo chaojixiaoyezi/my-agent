@@ -82,7 +82,8 @@ def test_tui_menu_add_select_cancel_and_secret_history(tmp_path, monkeypatch, de
                     assert data["providers"][row["provider_id"]]["api_key"] == "only-private-secret"
                     assert row["model_context_window_tokens"] == 96000
                     assert row["model_backend"] == "anthropic_compatible"
-                    assert runtime.store.snapshot().selected_model_name == "deployment-model"
+                    # 新增不等于选中：仍是 default，而 default 已不再投影部署 AgentConfig 的模型，显示为未配置。
+                    assert runtime.store.snapshot().selected_model_name == "未配置模型（/model 配置）"
                     pipe.send_bytes(b"\x1b[B\r")  # 顶层第 2 项「选择模型」
                     await wait_dialog_ready(app, "对话模型（本会话", "打开选择模型二级菜单")
                     pipe.send_bytes(b"\r")  # 对话模型
@@ -133,7 +134,8 @@ def test_saved_model_label_refresh_does_not_change_execution_or_history(tmp_path
     refresh_model_selection(source, "saved-choice", runtime, stopped)
     assert runtime.store.snapshot().selected_model_name == "qwen-test"
     refresh_model_selection(source, "saved-choice", runtime)
-    assert runtime.store.snapshot().selected_model_name == "deployment-model"
+    # 选回 default 时没有可用的 owner 默认模型，不再回显部署模型名。
+    assert runtime.store.snapshot().selected_model_name == "未配置模型（/model 配置）"
 
 
 def test_model_refresh_failure_keeps_last_confirmed_display():

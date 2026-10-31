@@ -44,11 +44,12 @@ def _setup(tmp_path, monkeypatch, remote):
     agent.config.max_tokens = 65536
     agent.config.model_context_window_tokens = 262144
     agent.config.model_reasoning_effort = "high"
-    agent.config.memory_compact_auto_trigger_percent = 40
+    agent.config.memory_compact_trigger_percent = 40
     old = agent.backend
+    # 有 Home 时未选模型投影会清空配置里的模型窗口（e905），回合内窗口只能来自显式注入的后端自身配置。
     agent.backend = OAuthResponsesBackend(BackendOptions(
         api_base="https://chatgpt.example.test/backend-api/codex", api_key="", model_name=old.model_name,
-        max_tokens=65536, reasoning_control="effort", reasoning_levels=("low", "medium", "high"),
+        max_tokens=65536, context_window_tokens=262144, reasoning_control="effort", reasoning_levels=("low", "medium", "high"),
     ), auth_ref={"mode": "chatgpt", "path": "unused", "provider_id": "fake", "generation": "g", "binding": "b"})
     agent.backend.probe_tool_capability = old.probe_tool_capability
     monkeypatch.setattr("agent_py_agent.agent.settings.model_oauth.request_credentials",
@@ -186,7 +187,7 @@ def test_subscription_ws_live_route_and_full_prefix(tmp_path, monkeypatch, remot
 @pytest.mark.parametrize("remote", [True, False], ids=["remote", "text"])
 def test_subscription_ws_preflight_route_and_full_prefix(tmp_path, monkeypatch, remote):
     agent, thread, prior, records = _setup(tmp_path, monkeypatch, remote)
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     for number in range(32):
         agent.conversation_store.messages.append({"thread_id": thread.thread_id,
             "role": "user" if number % 2 == 0 else "assistant", "content": "合成历史" * 1000, "metadata": {}})

@@ -49,14 +49,16 @@ def test_policy_changed_after_actual_borrow_cannot_use_captured_policy(
         assert all(entry.borrowers == 0 for entry in h._entries.values())
 
 
+# LLM: 788f9b847起正式召回的本地检索只读owner内MemoryReadIndex，旧LocalStore不再参与；本地检索后撤权仍须挡住付费查询与flush。
+# 函数用途: 验证实际本地检索之后的撤权不发查询embedding、不写访问。
 def test_query_revocation_after_actual_local_search_stops_paid_query_and_flush(
     tmp_path, monkeypatch
 ):
-    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 
     observed = []
     perform = _LocalControlWriteSource.perform
-    original = LocalStore.search
+    original = MemoryReadIndex.query
 
     def track(source, operation):
         observed.append(source)
@@ -73,12 +75,12 @@ def test_query_revocation_after_actual_local_search_stops_paid_query_and_flush(
         before = domain.long_term.path.read_bytes()
         calls = len(embedder.calls)
 
-        def close_after_search(store, *args, **kwargs):
-            hits = original(store, *args, **kwargs)
+        def close_after_search(index, *args, **kwargs):
+            hits = original(index, *args, **kwargs)
             runtime._closing = True
             return hits
 
-        monkeypatch.setattr(LocalStore, "search", close_after_search)
+        monkeypatch.setattr(MemoryReadIndex, "query", close_after_search)
         status, result = memory_post(server, actor, query="needle")
         assert (
             status == 200

@@ -678,7 +678,19 @@ def test_compact_apply_explicit_context_bundle_ref_records_mismatch_but_keeps_re
     )
 
 
-def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path, capsys) -> None:
+def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path, capsys, monkeypatch) -> None:
+    from agent_py_agent.agent.backends import get_backend
+    from agent_py_agent.cli import local_commands
+
+    # 有 Home 时目录未选模型即未配置，YAML 里的 echo 不穿过模型作用域；CLI 构造的 Agent 须在构造后显式注入离线后端。
+    make_agent = local_commands.make_agent
+
+    def make_echo_agent(args):
+        agent = make_agent(args)
+        agent.backend = get_backend("echo", agent.config)
+        return agent
+
+    monkeypatch.setattr(local_commands, "make_agent", make_echo_agent)
     config_path = tmp_path / "agent_config.yaml"
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"

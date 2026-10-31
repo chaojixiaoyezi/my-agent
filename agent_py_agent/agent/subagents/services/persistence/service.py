@@ -428,7 +428,10 @@ class SubAgentPersistenceService:
                     before = canonical.stat()
                 except FileNotFoundError:
                     if is_agent_state_locator(payload):
-                        if age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                        # 与无路径入口同一守卫：声明目录经符号链接解析到别处时不建负缓存，链接改指后须重新可见。
+                        declared = str(payload.get("agent_run_workspace_dir") or "").strip()
+                        if (age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS
+                                and declared and Path(declared) == canonical.parent):
                             self._cache_missing_canonical(run_id, task_file, signature, canonical_path=canonical)
                         raise FileNotFoundError(f"canonical subagent state missing for locator: {canonical}") from None
         try:

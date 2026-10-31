@@ -11,6 +11,7 @@ from agent_py_agent.agent.backends import (
     ProviderUsageLimitError,
 )
 from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+from agent_py_agent.agent.settings.deployment_policy import DeploymentPolicyError
 from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
 
 
@@ -28,7 +29,7 @@ class _FakeClock:
 
 
 def _policy(**values: object) -> RuntimeGuardPolicy:
-    return RuntimeGuardPolicy(values=values)
+    return RuntimeGuardPolicy(**values)
 
 
 def _prepare(monkeypatch, clock: _FakeClock, *, delays: tuple[float, ...], budget: float) -> list[float]:
@@ -178,19 +179,14 @@ def test_interrupt_during_wait_still_wins_over_budget(monkeypatch) -> None:
 
 
 def test_budget_reads_runtime_guard_policy_and_defaults() -> None:
-    """上限只从运行护栏配置读：缺键回落 1800 秒，坏值、NaN、负数都回落默认；只有 0 表示不限。"""
+    """上限只从运行护栏 typed 快照读：缺省 1800 秒；坏值、NaN、负数在构造快照时整体拒绝，只有 0 表示不限。"""
     assert resume.provider_transient_total_budget_seconds(_policy()) == 1800.0
     assert resume.provider_transient_total_budget_seconds(_policy(
         provider_transient_auto_resume_total_budget_seconds=600)) == 600.0
-    assert resume.provider_transient_total_budget_seconds(_policy(
-        provider_transient_auto_resume_total_budget_seconds="bad")) == 1800.0
-    assert resume.provider_transient_total_budget_seconds(_policy(
-        provider_transient_auto_resume_total_budget_seconds=float("nan"))) == 1800.0
-    assert resume.provider_transient_total_budget_seconds(_policy(
-        provider_transient_auto_resume_total_budget_seconds=-5)) == 1800.0
-    # 9b 终审补（变异 F2）：inf 不能当成“不限”，否则会静默关掉护栏。
-    assert resume.provider_transient_total_budget_seconds(_policy(
-        provider_transient_auto_resume_total_budget_seconds=float("inf"))) == 1800.0
+    # 9b 终审补（变异 F2）：inf 不能当成“不限”，否则会静默关掉护栏；typed 策略连同其它坏值一起拒绝。
+    for invalid in ("bad", float("nan"), -5, float("inf")):
+        with pytest.raises(DeploymentPolicyError):
+            _policy(provider_transient_auto_resume_total_budget_seconds=invalid)
     assert resume.provider_transient_total_budget_seconds(_policy(
         provider_transient_auto_resume_total_budget_seconds=0)) == 0.0
 

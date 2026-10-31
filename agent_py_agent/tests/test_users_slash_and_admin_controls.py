@@ -7,7 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.command_catalog import COMMAND_INDEX, sensitive_command_name
+from agent_py_agent.agent.command_catalog import (
+    COMMAND_INDEX,
+    decode_slash_v1_input,
+    sensitive_command_name,
+    system_slash_command_name,
+)
 from agent_py_agent.agent.conversation.control_commands import (
     control_command_carries_secret,
     parse_conversation_control,
@@ -97,7 +102,11 @@ def test_users_secret_redaction(text, expected):
 def test_users_catalog_and_plugin_visibility():
     assert "users" in COMMAND_INDEX
     assert COMMAND_INDEX["users"].admin_only and COMMAND_INDEX["users"].sensitive_input
-    assert COMMAND_INDEX["user"] is COMMAND_INDEX["users"]
+    # 旧别名 /user 自 74c56cf71 起只在输入边界转换成 /users，不再是规范目录项；路由与敏感输入判定仍是同一命令。
+    assert "user" not in COMMAND_INDEX
+    assert decode_slash_v1_input("/user list") == "/users list"
+    assert system_slash_command_name("/user list") == "users"
+    assert sensitive_command_name("/user password bob") == "users"
     assert COMMAND_INDEX["plugins"].admin_only
 
 

@@ -112,15 +112,16 @@ def test_display_does_not_infer_vision_from_name_or_native_tools(modalities, exp
         assert '输入模态：image' not in text and '纯文本' not in text
 
 
+# LLM: 640e478ee 起正式默认只能是目录引用或管理员初始共享，部署连接不再平铺成 default 行；
+#   部署配置里的型号与模态声明都不能进入选择列表，也不能借型号名推断视觉能力。
+# 函数用途: 验证部署配置的型号、模态与密钥都不出现在 /model 列表及渲染文本中。
 @pytest.mark.parametrize('modalities', [[], ['text'], ['image', 'text']])
 def test_deployment_default_displays_only_actual_config_declaration(tmp_path, monkeypatch, modalities):
     base, _, scope, host, thread = setup(tmp_path, monkeypatch)
     base.config.model_name = 'Vision-native-image'
     base.config.model_input_modalities = modalities
     listing = execute_model_profile_operation(host, 'list', {}, thread_id=thread.thread_id)
-    row = next(row for row in listing['profiles'] if row['id'] == 'default')
-    assert row['input_modalities'] == modalities
-    assert row['input_modalities'] is not modalities
-    expected = ', '.join(modalities) or '未知（未声明）'
-    assert '输入模态：' + expected in model_profile_service.render_model_choices(listing)
+    assert all(row['id'] != 'default' for row in listing['profiles'])
+    text = model_profile_service.render_model_choices(listing)
+    assert 'Vision-native-image' not in text and '输入模态：' not in text
     assert 'deployment-secret' not in json.dumps(listing)

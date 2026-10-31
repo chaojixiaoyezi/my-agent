@@ -13,6 +13,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     GatewayAskParams,
@@ -181,12 +182,15 @@ def test_jsonl_memory_indexes_to_local_store():
 
 
 def test_jsonl_memory_can_backfill_existing_records():
-    """LLM: Verify index_all backfills existing JSONL records into LocalStore.
+    """LLM: Verify index_all backfills existing JSONL records into the owner read index.
 
     新手说明:
-    测试在 JsonlMemory 已有数据但 LocalStore 为空时，
-    调用 index_all 可以把旧记录补建索引到 LocalStore。
+    测试在 JsonlMemory 已有数据时，调用 index_all 可以把旧记录补建到
+    owner 读索引（788f9b847 起正式召回只读该索引）；LocalStore 只留旧副本删除
+    与审计脱敏，不再写入记忆文本投影。
     """
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
+
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         memory_path = root / "memory.jsonl"
@@ -195,7 +199,9 @@ def test_jsonl_memory_can_backfill_existing_records():
         store = LocalStore(root / "local.db")
         memory = JsonlMemory(memory_path, local_store=store)
         assert memory.index_all() == 1
-        assert store.stats()["record_count"] == 1
+        coverage = MemoryReadIndex(memory_path).coverage()
+        assert (coverage["status"], coverage["indexed_records"]) == ("complete", 1)
+        assert store.stats()["record_count"] == 0
         assert memory.search("补建", top_k=1)[0].role == "assistant"
 
 
@@ -255,6 +261,8 @@ def test_gateway_request_indexes_logs_to_local_store():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        # 有 Home 时目录未选模型即未配置；离线 echo 后端须构造后显式注入，才在 Gateway 模型作用域里保留。
+        agent.backend = get_backend("echo", cfg)
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
@@ -293,6 +301,8 @@ def test_gateway_request_writes_runtime_fact_when_saved():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        # 有 Home 时目录未选模型即未配置；离线 echo 后端须构造后显式注入，才在 Gateway 模型作用域里保留。
+        agent.backend = get_backend("echo", cfg)
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
@@ -339,6 +349,8 @@ def test_gateway_request_can_override_resume_context():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        # 有 Home 时目录未选模型即未配置；离线 echo 后端须构造后显式注入，才在 Gateway 模型作用域里保留。
+        agent.backend = get_backend("echo", cfg)
         agent.run("gateway README 恢复开关任务", save=True)
         paths = gateway_paths(agent)
         _, request_path, _ = submit_gateway_ask(

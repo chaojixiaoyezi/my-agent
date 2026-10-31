@@ -8,6 +8,7 @@ run, memory persistence, and subagent workspace file layout.
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 
@@ -24,6 +25,8 @@ def test_run_does_not_auto_save_formal_memory():
             prompt_files=["prompts/default.md"],
         )
         agent = SimpleAgent(cfg, root)
+        # Home 下 echo 配置不跨所选模型作用域；离线后端须构造后显式注入。
+        agent.backend = get_backend("echo", cfg)
         result = agent.run("记住我喜欢表格", inject=["回答要短"])
         assert "echo 后端" in result.response
         assert agent.memory.path.exists()

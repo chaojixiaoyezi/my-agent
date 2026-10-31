@@ -52,7 +52,10 @@ def test_appended_thread_reads_only_anchor_and_tail(tmp_path, monkeypatch):
     settle_files([path])
     counts = observe_reads(monkeypatch, [path])
     assert store.messages.after_report(tid, after_message_id=cursor) == ([new], [])
-    assert counts.bytes <= len(encode_row(rows[-1].to_dict())) + len(encode_row(new.to_dict()))
+    # f74d1161e 起冷热读取器打开时按固定 64KB 倒读块确认完整行末尾（store_io.complete_jsonl_end），与历史长度无关。
+    eof_probe = min(path.stat().st_size, 65536)
+    assert path.stat().st_size > 4 * eof_probe
+    assert counts.bytes <= len(encode_row(rows[-1].to_dict())) + len(encode_row(new.to_dict())) + eof_probe
 
 
 def test_warm_audit_skips_old_shards_and_cursor_prefix(tmp_path, monkeypatch):

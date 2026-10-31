@@ -8,8 +8,8 @@ from agent_py_agent.agent.agent_core import runtime_mixin
 from agent_py_agent.agent.contracts.tool_approval import build_tool_approval_request
 from agent_py_agent.agent.conversation import agent_tool_approval as approval
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+from agent_py_agent.tests.test_approval_retirement_lifecycle import _foreground
 from agent_py_agent.tests.test_approval_waiter_retirement import held_original_lock
-from agent_py_agent.tests.test_tool_approval_foreground_scope import _foreground
 
 
 @pytest.mark.parametrize("actual", [True, False])

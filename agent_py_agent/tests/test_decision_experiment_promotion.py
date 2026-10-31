@@ -206,8 +206,9 @@ def test_user_change_between_read_and_write_is_kept_and_promotion_skips(lane, mo
 
 
 # LLM: 用户在授权之后、回合收尾之前的任何修改（线程层、用户层或默认配置改变有效模式）都让晋升跳过，绝不覆盖。
+#   默认只归决策代码（a12fe40c5），默认变化以替换代码默认表模拟，不再经旧能力配置对象。
 # 函数用途: 施加一种“用户后改”并返回预期的跳过原因。
-def _later_change(lane, case):
+def _later_change(lane, case, monkeypatch):
     thread_id = lane.thread.thread_id
     if case == "thread":
         patch(lane.host, {"points.skill_tool.timeout_seconds": 3}, thread_id=thread_id, scope="thread")
@@ -215,14 +216,16 @@ def _later_change(lane, case):
     if case == "owner":
         patch(lane.host, {"timeout_seconds": 3}, thread_id=thread_id)
         return "settings_changed"
-    lane.host.capability_config.decision_skill_tool_mode = "observe"
+    from agent_py_agent.agent.settings import decision_settings_defaults
+
+    monkeypatch.setitem(decision_settings_defaults._DECISION_DEFAULTS, FIELD, "observe")
     return "point_not_off"
 
 
 @pytest.mark.parametrize("case", ["thread", "owner", "default"])
-def test_any_later_user_change_skips_without_overwrite(lane, case):
+def test_any_later_user_change_skips_without_overwrite(lane, case, monkeypatch):
     turn = ready_turn(lane)
-    reason = _later_change(lane, case)
+    reason = _later_change(lane, case, monkeypatch)
     finish(turn)
     receipt = stored_block(turn)["promotion"]
     assert (receipt["status"], receipt["reason"]) == ("skipped", reason)

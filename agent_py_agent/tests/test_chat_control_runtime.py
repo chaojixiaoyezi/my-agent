@@ -99,8 +99,9 @@ def test_memory_prefix_and_case_survive_catalog_migration(raw, query) -> None:
         )
 
 
+# 74c56cf71 起 logout 与 /admin logout 语义冲突，/logout 与裸 LOGOUT 歧义拒绝、不再退出界面。
 @pytest.mark.parametrize(("raw", "expected"), [
-    ("/EXIT", True), ("/logout", True), ("/QUIT", True), ("LOGOUT", True),
+    ("/EXIT", True), ("/logout", False), ("/QUIT", True), ("LOGOUT", False),
     ("退出", True), ("quit", False), ("/exit extra", False),
 ])
 def test_exit_aliases_keep_their_original_scope(raw, expected) -> None:

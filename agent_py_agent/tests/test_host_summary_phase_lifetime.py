@@ -48,12 +48,18 @@ def _seed_history(store, thread_id: str) -> list[str]:
 # LLM: 解释器自己的字符串驻留表（sys.intern）在测量窗口内扩容时会一次性分配数 MB，与被测链路是否驻留旧历史无关；
 #   是否恰好在窗口内扩容取决于同一进程此前导入与运行过的测试（2026-09-27 全仓分片里技能扫描的 pathlib 驻留路径片段
 #   触发了一次 3.84MB 的扩容）。只扣除“由调用 sys.intern 的那一行分配”的记录，其余一律照算。
+#   同一扩容也会由窗口内首次导入的模块装载代码触发（单文件运行时 Gateway 链懒导入 multiprocess_active_input，
+#   dataclass 生成方法的那行 exec 同样分配 3.84MB），所以只再扣除 importlib 装载帧与 dataclasses 生成方法的 exec 行；
+#   单帧即可判定，不加深 tracemalloc 栈（加深会让三宿主用例慢到超时），请求期分配一律照算。
 # 函数用途: 统计摘要入口仍驻留、且属于被测链路的内存字节数。
 def _run_owned_bytes(snapshot: tracemalloc.Snapshot) -> int:
     total = 0
     for trace in snapshot.traces:
         frame = trace.traceback[-1]
         if "sys.intern(" in linecache.getline(frame.filename, frame.lineno):
+            continue
+        if frame.filename.startswith("<frozen importlib.") or (
+                frame.filename.endswith("dataclasses.py") and "exec(" in linecache.getline(frame.filename, frame.lineno)):
             continue
         total += trace.size
     return total
@@ -103,10 +109,10 @@ def _gateway_host(tmp_path):
             lambda: request_execution._run_gateway_ask(fixture.context).response == "材料核对完成。")
 
 
-# 函数用途: 准备后台宿主。
+# 函数用途: 准备后台宿主；后台请求只认所选模型档案，40k 窗口由档案声明。
 def _background_host(tmp_path):
     agent, _store, thread, request, execution, sink = _background(
-        tmp_path, backend="anthropic_compatible", detached=False)
+        tmp_path, backend="anthropic_compatible", detached=False, window=40_000)
 
     def run() -> bool:
         result = background_execution.run_background_turn_with_compact(
@@ -127,7 +133,7 @@ def _run_host(tmp_path, monkeypatch, host: str):
     agent, thread_id, run = _HOSTS[host](tmp_path)
     agent.config.model_context_window_tokens = 40_000
     agent.backend.context_window_tokens = 40_000
-    agent.config.memory_compact_auto_trigger_percent = 50
+    agent.config.memory_compact_trigger_percent = 50
     agent.config.max_tokens = 1024
     # 构造后才缩窗口与输出上限：按同一公式重算后端的实际发送值，与生产中按该配置构造的后端一致。
     agent.backend.max_tokens = effective_max_output_tokens(agent.config)

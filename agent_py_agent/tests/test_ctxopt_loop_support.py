@@ -72,8 +72,9 @@ def _loaded(monkeypatch, *, prompt="继续核对", source="cli", attrs=None, all
 def test_background_context_preloads_focused_tools_not_permission_ceiling(monkeypatch, allowed):
     loaded = _loaded(monkeypatch, source="background_main_agent", allowed=allowed,
                      attrs={CONVERSATION_BACKGROUND_EVENT_REASON_ATTR: "scheduled_progress_report"})
-    assert {"task_progress", "read_file", "read_artifact", "tool_search", "list_tools"} <= loaded
-    assert "watch_stream" not in loaded and "package_build" not in loaded
+    # 7101c9fa2 起 list_tools 退役为 tool_search 的目录动作，后台预载只保留 tool_search。
+    assert {"task_progress", "read_file", "read_artifact", "tool_search"} <= loaded
+    assert "watch_stream" not in loaded and "package_build" not in loaded and "list_tools" not in loaded
     assert len(loaded) < len(BACKGROUND_CONTINUATION_REQUIRED_TOOLS)
 
 

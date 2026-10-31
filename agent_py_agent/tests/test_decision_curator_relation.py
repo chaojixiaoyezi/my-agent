@@ -316,13 +316,22 @@ def test_owner_only_independent_settings_and_yaml_defaults(tmp_path):
     assert view["effective"]["points"]["curator"]["mode"] == "off"
     with pytest.raises(ModelProfileError):
         patch(host, {field: "apply"}, scope="thread", thread_id=thread.thread_id)
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+
+    # 决策默认只归决策代码（a12fe40c5），配置与记忆设置不再有该点位字段；旧 YAML 只经显式离线迁移转 owner 覆盖。
+    assert decision_defaults(None)[0][field] == "off"
     config = Path(__file__).parents[1] / "config" / "agent_config.yaml"
     for value in (load_config(config), AgentConfig(), normalize_memory_settings()[0]):
-        assert value.memory_decision_curator_relation_mode == "off"
+        assert not hasattr(value, "memory_decision_curator_relation_mode")
         assert not hasattr(value, "memory_decision_curator_relation_timeout_seconds")
     override = tmp_path / "settings.yaml"
     override.write_text("memory_decision_curator_relation_mode: observe\n")
-    assert load_config(override).memory_decision_curator_relation_mode == "observe"
+    stale = load_config(override)
+    assert not hasattr(stale, "memory_decision_curator_relation_mode")
+    assert any("memory_decision_curator_relation_mode" in warning for warning in stale.config_warnings)
+    assert migrate_legacy_decision_overrides(load_simple_yaml(override), {}) == {field: "observe"}
 
 
 @pytest.mark.parametrize("mode", ["observe", "apply"])

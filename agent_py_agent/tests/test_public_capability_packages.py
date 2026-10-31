@@ -122,7 +122,8 @@ def test_public_read_and_child_grant_keep_user_authority_and_exact_version(tmp_p
     user = SimpleAgent(config, owner.workspace_dir)
     result = SkillSearchTool(user).execute({"action": "get", "package_id": "public/shared"})
     assert result.ok, result.output
-    created = CreateSubagentsTool(user).execute({"goal": "读取共享方法", "allowed_skills": ["capability:public/shared"], "defer_start": True})
+    created = CreateSubagentsTool(user).execute(
+        {"items": [{"goal": "读取共享方法", "allowed_skills": ["capability:public/shared"]}], "defer_start": True})
     assert created.ok, created.output
     child = user.subagents.list_runs()[0]
     ref = child.attributes["skill_snapshot_refs"][0]

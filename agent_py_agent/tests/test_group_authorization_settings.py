@@ -279,7 +279,9 @@ def test_inherited_empty_group_thread_initialization_needs_no_manual_grant(tmp_p
     agent.config = AgentConfig(model_backend='echo', my_agent_home=str(agent.home_paths.root))
     assert not source.model_profile_id
     task = SimpleNamespace(attributes={'host_model_profile.v1': {'profile_id': 'default'}}, agent_thread_id=source.thread_id)
-    assert inherited_model_config(agent, task).model_backend == 'echo'
+    # 有 Home 时 default 且无管理员初始共享投影为未配置，echo 配置不再穿过目录作用域。
+    inherited = inherited_model_config(agent, task)
+    assert inherited.model_backend == '' and inherited.config_sources['model_backend']['source'] == 'model_unconfigured'
     saved = agent.conversation_store.threads.load(source.thread_id)
     assert saved.model_profile_id == 'default' and saved.model_selection_source == 'inherited'
     assert not calls

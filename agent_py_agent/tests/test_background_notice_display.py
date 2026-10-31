@@ -1548,9 +1548,10 @@ def test_gateway_notice_snapshot_uses_resolved_owner_and_scope_identity(
     assert snapshot["agent_activity"]["active_task_count"] == 1
 
 
-def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch) -> None:
+def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch, tmp_path: Path) -> None:
     from agent_py_agent.agent.gateway_parts import http_handlers
     from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 
     calls: list[GatewayControlScope] = []
 
@@ -1560,9 +1561,11 @@ def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch) -> No
 
     monkeypatch.setattr(http_handlers, "resolve_loaded_gateway_scope_agent", resolve)
 
+    # 5c029e4fb 起冷投影只读已认证宿主 home；缺 home 时报告 binding unavailable，故这里给出合成宿主根与 owner。
     snapshot = http_handlers.read_gateway_client_notices(
-        SimpleNamespace(),
-        scope=GatewayControlScope("cold-user", "local", "cold-session"),
+        SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path)),
+        scope=GatewayControlScope("cold-user", "local", "cold-session",
+                                  resolved_owner=OwnerIdentity.local_user("cold-user")),
         after=0.0,
         event_after=3000,
         event_stream_id="old-process",

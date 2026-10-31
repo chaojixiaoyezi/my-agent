@@ -504,6 +504,9 @@ class TestDueCheck:
             runner_attempts=4,
             **mixin._build_work_order_paths("stuck_run"),
         )
+        # 熔断只认宿主无进展计数，不再把 runner_attempts 当作无进展次数。
+        task._extra_fields = {"failure_retry_count": 3, "provider_retry_count": 0,
+                              "no_progress_count": 4, "recovery_history_unknown_count": 0}
         task.agent_run_checkpoint_json = str(tmp_path / "stuck_run" / "reports" / "checkpoint.json")
         Path(task.agent_run_checkpoint_json).parent.mkdir(parents=True, exist_ok=True)
         Path(task.agent_run_checkpoint_json).write_text("{}", encoding="utf-8")

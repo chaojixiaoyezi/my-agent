@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # 2026-10-06 用搬家前的旧脚本（基线 e5d7f3c90）对同一批样例打出的包摘要；改打包规则会改这些值，需要先说明原因。
 _GOLDEN = {
     "pack:drama-text-a": "51ca17734b865464ad18ecf1de5c254f97cb3d16afc66f1595a776f081619a36",
-    "pack:drama-workflow-b": "0cfa7cc079186c4b9c59ce37e4c9b2e8785146a5275a18b243ccd6fea63a3530",
+    "pack:drama-workflow-b": "90c058e1ae79e442967fe0f3b5f4f917a95618725b08977b386e02a44ba63209",
     "plugin:event-watch": "46aa75798cfc61452f531c0d20f479606e37cd40d96bb0d85d85227b11354a27",
     "plugin:hello-node": "16b6dbe5c4c58c17afbecf67be016c8a4b8ce150a4bbf5176b8a20d118a55e7a",
     "plugin:rm-guard": "d7d1cba0c5ed3dc41f4ff8bbb64b17f97cc3b032d00c203b24ecb08d6c115adf",

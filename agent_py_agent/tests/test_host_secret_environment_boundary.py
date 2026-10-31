@@ -212,7 +212,9 @@ def test_real_spawn_uses_declared_source_scrub_without_rewriting_host_environmen
     # 环境传递回归隔开平台包装；最终 Linux 验收另用原 bwrap，不用此 seam 冒充沙箱证据。
     monkeypatch.setattr(shell, "_sandbox_exec", lambda command, *a, **k: (["/bin/sh", "-c", command], False))
     monkeypatch.setattr("agent_py_agent.agent.tooling.pty_sessions._sandbox_exec", shell._sandbox_exec)
-    tool = ShellTool(tmp_path, options=ShellToolOptions(host_credential_env_names=frozenset({"CHANNEL_SOURCE"})))
+    # 新后台启动须有规范 owner home（5c029e4fb），不能从 cwd 补造；三种模式共用同一宿主 owner 范围。
+    tool = ShellTool(tmp_path, options=ShellToolOptions(host_credential_env_names=frozenset({"CHANNEL_SOURCE"}),
+                                                        owner_scope_root=str(tmp_path)))
     script = 'import os,json; print(json.dumps({"secret_present":"CHANNEL_SOURCE" in os.environ,"ordinary":os.environ.get("ORDINARY_VALUE")}))'
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
     try:

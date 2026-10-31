@@ -15,6 +15,7 @@ import pytest
 
 import agent_py_agent.agent.agent_core.runtime.loop_support as runtime_loop_support
 import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
@@ -149,6 +150,8 @@ def test_output_token_budget_does_not_trigger_fake_memory_compaction(tmp_path, m
         ),
         tmp_path,
     )
+    # 有 Home 的运行只认 owner 模型目录；显式离线测试后端走构造后注入。
+    agent.backend = get_backend("echo", agent.config)
 
     result = agent.run("这是一段比输出 token 上限更长的输入，但还没到上下文压缩点。", save=False)
     assert result.compression_applied is False

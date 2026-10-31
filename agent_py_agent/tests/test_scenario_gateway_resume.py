@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.subagents import parse_subagent_runner_output
 from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.cli.scenario_cases.real_model_multi_round_case import (
@@ -95,9 +96,46 @@ def _run_offline_scenario_case(tmp_path: Path, capsys, case: str) -> str:
     return output
 
 
-def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, capsys):
+# LLM: 有 Home 的真实 Gateway 进程只认 owner 的 v6 模型目录，部署 echo 不再生效；经正式 add/set_default
+#   给场景 owner 登记显式离线 Echo（不联网），其余场景步骤与断言不变。
+# 函数用途: 在场景创建隔离配置后为其 owner 选好离线模型。
+def _select_offline_echo_model(config_path: Path) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+
+    config = load_config(config_path)
+    paths = home_paths(config.my_agent_home)
+    owner = resolve_owner_home(paths.root, owner_identity_from_config(config))
+    host = SimpleNamespace(config=config, home_paths=home_paths_with_owner(paths, owner))
+    profile_id = str(uuid4())
+    execute_model_profile_operation(host, "add", {"profile_id": profile_id, "profile": {
+        "model_backend": "echo", "model_name": "echo", "transport": "offline"}})
+    execute_model_profile_operation(host, "set_default", {"profile_id": profile_id})
+
+
+def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, capsys, monkeypatch):
     """The scenario case should prove real gateway ask facts can be resumed across days."""
 
+    from agent_py_agent.cli.scenario_cases import gateway_cross_day_case
+
+    original_workspace = gateway_cross_day_case.create_scenario_workspace
+
+    def seeded_workspace(args):
+        paths = original_workspace(args)
+        # 场景配置把 Home 放在隔离 fixture 内；目录必须在 Gateway 进程启动前选好。
+        assert Path(load_config(paths.config).my_agent_home).is_relative_to(tmp_path)
+        _select_offline_echo_model(paths.config)
+        return paths
+
+    monkeypatch.setattr(gateway_cross_day_case, "create_scenario_workspace", seeded_workspace)
     # 该场景用正式认证HTTP ask；先选本机可用端口，仅写入此次临时配置。
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))

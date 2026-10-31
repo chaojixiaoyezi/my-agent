@@ -55,7 +55,7 @@ _CEILING = 6_000
 def _transcript_case(tmp_path, monkeypatch, turns: int):
     config = AgentConfig(
         model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
-        max_tokens=64, model_context_window_tokens=_WINDOW, memory_compact_auto_trigger_percent=90,
+        max_tokens=64, model_context_window_tokens=_WINDOW, memory_compact_trigger_percent=90,
         memory_compact_recovery_target_percent=60,
     )
     config.config_sources = {"model_context_window_tokens": {"source": "test"}}

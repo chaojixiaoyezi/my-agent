@@ -255,13 +255,12 @@ def test_capability_cache_serializes_concurrent_misses(tmp_path, monkeypatch):
 
 
 # LLM: cache替身只隔开其它测试的全局条目，装载与stat仍是真实实现；不新增产品清理API。
-# 函数用途: 验证两个配置缓存均有64项上限，命中会刷新LRU顺序。
-@pytest.mark.parametrize('kind', ['capability', 'guard'])
+#   守卫原始YAML缓存已随 a12fe40c5 退役（每次读受信宿主JSON），只剩能力配置缓存。
+# 函数用途: 验证能力配置缓存有64项上限，命中会刷新LRU顺序。
+@pytest.mark.parametrize('kind', ['capability'])
 def test_config_stat_caches_are_bounded_lru(tmp_path, monkeypatch, kind):
     from agent_py_agent.agent.capability import config as capability
-    from agent_py_agent.agent.settings import runtime_guard_config as guard
-    module, name, load = (capability, '_CAPABILITY_CONFIG_CACHE', capability.load_capability_config) if kind == 'capability' else (
-        guard, '_RUNTIME_GUARD_RAW_CACHE', guard.runtime_guard_policy)
+    module, name, load = capability, '_CAPABILITY_CONFIG_CACHE', capability.load_capability_config
     cache = OrderedDict()
     monkeypatch.setattr(module, name, cache, raising=False)
     paths = [tmp_path / f'config-{index}.yaml' for index in range(65)]
@@ -275,23 +274,38 @@ def test_config_stat_caches_are_bounded_lru(tmp_path, monkeypatch, kind):
     assert str(paths[0]) in {key[0] for key in cache} and str(paths[1]) not in {key[0] for key in cache}
 
 
-# LLM: 缓存只能保存原始配置，不得把一次调用的overrides或返回列表带给下一次调用。
-# 函数用途: 核验守卫原始配置复用、覆盖层隔离、修改失效及OSError原合同。
-def test_runtime_guard_raw_cache_is_fresh_and_isolated(tmp_path, monkeypatch):
+# LLM: a12fe40c5 起守卫只从受信宿主 deployment_policy.json 冻结 typed 快照；旧 YAML 原始缓存与 overrides 入口已退役。
+#   每次读取都是独立快照，返回的值投影不能反写下一次读取，文件修改立即生效，缺失才回 typed 默认。
+# 函数用途: 核验守卫快照新鲜、投影隔离、来源准确，且不再接受运行期覆写或第二个路径来源。
+def test_runtime_guard_raw_cache_is_fresh_and_isolated(tmp_path):
     from agent_py_agent.agent.settings import runtime_guard_config as module
-    path = tmp_path / 'guard.yaml'
-    path.write_text('limit: 7\ndelays: [1, 2]\n')
-    parse = Mock(wraps=module.load_simple_yaml)
-    monkeypatch.setattr(module, 'load_simple_yaml', parse)
-    first = module.runtime_guard_policy(path, overrides={'limit': 9})
-    first.values['delays'].append(99)
-    second = module.runtime_guard_policy(path)
-    assert second.values == {'limit': 7, 'delays': [1, 2]} and parse.call_count == 1
-    assert second.sources['limit'] == str(path) and first.sources['limit'] == 'runtime_override'
-    path.write_text('limit: 8\n')
-    assert module.runtime_guard_policy(path).values == {'limit': 8} and parse.call_count == 2
+    from agent_py_agent.agent.settings.deployment_policy import DeploymentPolicyError
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    paths = home_paths(tmp_path / 'home')
+    paths.config_dir.mkdir(parents=True)
+    path = paths.config_dir / 'deployment_policy.json'
+
+    def write(**guards):
+        path.write_text(json.dumps({'schema_version': 'deployment-policy.v1', 'revision': 1, 'runtime_guards': guards}))
+
+    write(repeat_fail_threshold=7, tool_circuit_backoff_seconds=[1, 2])
+    first = module.runtime_guard_policy(path, trusted_host_paths=paths)
+    projected = first.values
+    projected['repeat_fail_threshold'] = 99
+    assert first.values['repeat_fail_threshold'] == 7
+    second = module.runtime_guard_policy(path, trusted_host_paths=paths)
+    assert second is not first
+    assert (second.repeat_fail_threshold, second.tool_circuit_backoff_seconds) == (7, (1.0, 2.0))
+    assert second.sources['repeat_fail_threshold'] == str(path)
+    assert second.sources['tool_rate_max_calls'] == 'python:RuntimeGuardPolicy'
+    write(repeat_fail_threshold=8)
+    assert module.runtime_guard_policy(path, trusted_host_paths=paths).values['repeat_fail_threshold'] == 8
+    with pytest.raises(TypeError):
+        module.runtime_guard_policy(path, trusted_host_paths=paths, overrides={'repeat_fail_threshold': 3})
+    with pytest.raises(DeploymentPolicyError):
+        module.runtime_guard_policy(tmp_path / 'guard.yaml', trusted_host_paths=paths)
     path.unlink()
-    assert module.runtime_guard_policy(path, overrides={'limit': 3}).values == {'limit': 3}
+    assert module.runtime_guard_policy(path, trusted_host_paths=paths).repeat_fail_threshold == 10
 
 
 # LLM: 没有旧文件时不探测随包源；随包路径函数本身也不再反复realpath。
@@ -428,19 +442,28 @@ def test_legacy_warning_cache_is_bounded_lru(tmp_path, monkeypatch):
 @pytest.mark.parametrize('kind', ['capability', 'guard'])
 def test_config_cache_detects_same_size_edit_with_restored_mtime(tmp_path, kind):
     from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
-    path = tmp_path / 'config.yaml'
-    path.write_text('session_pair_hourly_limit: 11\n')
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    paths = home_paths(tmp_path / 'home')
+    if kind == 'capability':
+        path = tmp_path / 'config.yaml'
+        template = 'session_pair_hourly_limit: {}\n'
+    else:
+        # 守卫只读受信宿主 deployment_policy.json（a12fe40c5），同尺寸原位更新同样必须立即可见。
+        paths.config_dir.mkdir(parents=True)
+        path = paths.config_dir / 'deployment_policy.json'
+        template = '{{"schema_version": "deployment-policy.v1", "runtime_guards": {{"repeat_fail_threshold": {}}}}}'
+    path.write_text(template.format(11))
     before = path.stat()
     if kind == 'capability':
         assert load_capability_config(path).session_pair_hourly_limit == 11
     else:
-        assert runtime_guard_policy(path).values['session_pair_hourly_limit'] == 11
-    path.write_text('session_pair_hourly_limit: 22\n')
+        assert runtime_guard_policy(path, trusted_host_paths=paths).values['repeat_fail_threshold'] == 11
+    path.write_text(template.format(22))
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
     if kind == 'capability':
         assert load_capability_config(path).session_pair_hourly_limit == 22
     else:
-        assert runtime_guard_policy(path).values['session_pair_hourly_limit'] == 22
+        assert runtime_guard_policy(path, trusted_host_paths=paths).values['repeat_fail_threshold'] == 22
 
 
 # LLM: 仅省略路径时沿原随包解析器；不得把此默认入口扩成显式文件缺失的隐式回退。

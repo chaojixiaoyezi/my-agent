@@ -17,6 +17,7 @@ import time
 
 import pytest
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
@@ -45,6 +46,8 @@ _SESSION = "goal-fuse-session"
 def world(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
                                     gateway_per_user_owner_scoping=False), tmp_path / "ws")
+    # 有 Home 时目录未选模型即未配置；构造后显式注入的 echo 后端才在 Gateway/后台模型作用域里保留。
+    agent.backend = get_backend("echo", agent.config)
     paths = gateway_paths(agent)
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)

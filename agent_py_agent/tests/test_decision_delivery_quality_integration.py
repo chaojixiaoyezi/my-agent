@@ -174,15 +174,19 @@ def assert_request_is_bound_and_private(call, params, private_root):
 
 
 def test_config_defaults_are_off_and_thread_scoped(tmp_path):
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
+
     config = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     defaults = AgentConfig()
+    code_defaults, sources = decision_defaults(None)
     for suffix in ("mode", "timeout_seconds", "profile_id"):
         name = f"decision_{module._POINT}_{suffix}"
-        # 点位期限与模型引用只在决策设置覆盖层按点位设置，配置里没有字段（2026-09-27 参数减量）。
-        expected = ("off", "off") if suffix == "mode" else (None, None)
-        assert (getattr(config, name, None), getattr(defaults, name, None)) == expected
-        assert (suffix == "mode") == hasattr(defaults, name)
-        assert decision_field_scopes()[f"points.{module._POINT}.{suffix}"] == ["owner", "thread"]
+        path = f"points.{module._POINT}.{suffix}"
+        # 决策默认只归决策代码（a12fe40c5），配置对象不再有点位字段；点位期限与模型引用只在覆盖层按点位设置（2026-09-27 参数减量）。
+        assert not hasattr(config, name) and not hasattr(defaults, name)
+        assert code_defaults.get(path) == ("off" if suffix == "mode" else None)
+        assert decision_field_scopes()[path] == ["owner", "thread"]
+    assert sources[f"points.{module._POINT}.mode"] == "decision_defaults"
     host = host_at(tmp_path)
     thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
     view = settings(host, "read", {"scope": "thread"}, thread_id=thread.thread_id)

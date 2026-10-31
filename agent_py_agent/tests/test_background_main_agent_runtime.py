@@ -1052,10 +1052,8 @@ def test_internal_background_run_uses_bounded_existing_tool_loop_controls() -> N
     agent = SimpleNamespace(
         config=SimpleNamespace(background_main_agent_allowed_tools=[]),
         runtime_guard_policy=RuntimeGuardPolicy(
-            values={
-                "background_max_tool_rounds": 7,
-                "background_max_tool_calls_per_round": 3,
-            }
+            background_max_tool_rounds=7,
+            background_max_tool_calls_per_round=3,
         ),
         owner_policy=None,
         home_paths=None,
@@ -1092,7 +1090,7 @@ def test_internal_background_run_fallback_allows_a_complete_work_slice() -> None
 
     agent = SimpleNamespace(
         config=SimpleNamespace(background_main_agent_allowed_tools=[]),
-        runtime_guard_policy=RuntimeGuardPolicy(values={}),
+        runtime_guard_policy=RuntimeGuardPolicy(),
         owner_policy=None,
         home_paths=None,
         conversation_store=None,
@@ -1108,7 +1106,8 @@ def test_internal_background_run_fallback_allows_a_complete_work_slice() -> None
         agent,
     )
 
-    assert params.task_attributes["max_tool_rounds"] == 32
+    # typed RuntimeGuardPolicy 总有字段默认（宿主缺省 5000 轮/4 调用），调用点旧的 32 轮缺键回落已不可达。
+    assert params.task_attributes["max_tool_rounds"] == 5000
     assert params.task_attributes["max_tool_calls_per_round"] == 4
 
 

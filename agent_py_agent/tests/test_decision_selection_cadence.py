@@ -75,18 +75,26 @@ def _structure_file(fixture):
     return fixture.agent.home_paths.owner_decision_outcomes_jsonl.with_name("model_selection_structure.json")
 
 
+# LLM: 决策默认唯一归决策代码（a12fe40c5）；旧平铺键退出配置 schema，只经显式离线迁移校验后转成 owner 覆盖。
+# 函数用途: 验证节奏字段登记、默认 every_turn、两值校验，以及旧 YAML 键只告警且迁移时严格拒绝非法值。
 def test_the_cadence_field_is_registered_validated_and_off_by_default(tmp_path):
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+
     assert decision_config_fields()[PATH] == ("agent", "decision_model_selection_cadence")
-    assert AgentConfig().decision_model_selection_cadence == "every_turn"
-    assert load_config(packaged_config_path()).decision_model_selection_cadence == "every_turn"
+    assert decision_defaults(None)[0][PATH] == "every_turn"
+    assert not hasattr(AgentConfig(), "decision_model_selection_cadence")
+    assert not hasattr(load_config(packaged_config_path()), "decision_model_selection_cadence")
     assert validate_decision_field(PATH, "structure_change") == "structure_change"
     for bad in ("weekly", "", True, None):
         with pytest.raises(ModelProfileError):
             validate_decision_field(PATH, bad)
     path = tmp_path / "agent.yaml"
     path.write_text("decision_model_selection_cadence: sometimes\n", encoding="utf-8")
+    assert "unknown config key: 'decision_model_selection_cadence'; ignored" in load_config(path).config_warnings
     with pytest.raises(ModelProfileError):
-        load_config(path)
+        migrate_legacy_decision_overrides(load_simple_yaml(path), {})
 
 
 def test_structure_change_asks_once_then_skips_until_the_structure_changes(tmp_path, monkeypatch):

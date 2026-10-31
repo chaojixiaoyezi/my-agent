@@ -165,8 +165,8 @@ def test_child_compact_and_grandchild_keep_later_canonical_package_grant(tmp_pat
     agent, _store, _entries = _agent(tmp_path)
     _install(agent, "story-c", "未获授权的内部正文")
     refs = {row.package_id: row.to_ref() for row in agent.current_skill_snapshot().packages}
-    result = CreateSubagentsTool(agent).execute({"goal": "先按已授权故事方法整理来源", "allowed_skills": ["capability:story-a"],
-                                                "allowed_tools": ["skill_search"], "defer_start": True})
+    result = CreateSubagentsTool(agent).execute({"items": [{"goal": "先按已授权故事方法整理来源", "allowed_skills": ["capability:story-a"],
+                                                           "allowed_tools": ["skill_search"]}], "defer_start": True})
     assert result.ok, result.output
     task = agent.subagents.list_runs()[0]
     original_refs = list(task.attributes["skill_snapshot_refs"])

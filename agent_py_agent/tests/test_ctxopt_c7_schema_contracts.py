@@ -29,6 +29,19 @@ from agent_py_agent.tests.ctxopt_c7_contract_snapshot import (
     SCHEMA_HASHES as _SCHEMA_HASHES,
 )
 
+# 7101c9fa2 有意收窄：create_subagents 顶层只留 items/batch_summary（items 必填且非空、每项 goal 非空），说明改为
+# “一项或多项统一用items”；task_progress 的 action 枚举去掉 create。以下四项按该提交后的当前生产 spec 重算，其余沿用冻结快照。
+_SCHEMA_HASHES = {
+    **_SCHEMA_HASHES,
+    'create_subagents': '77f0c0e63db4ad09fbbb6546fe1149f33fae53e5fbed29af226d68f3901a9d96',
+    'create_subagents_media': '2e9b70ae7d3a484471e3b9aafcfb3468e8a97990c8e126c7b86b715c778cf309',
+    'task_progress': '28d00d48e4519db2f9fe8a0275104ce7062ebf84cce7af8145ea3fd921adb050',
+}
+_DESCRIPTION_HASHES = {
+    **_DESCRIPTION_HASHES,
+    'create_subagents': 'b653088995df2929e2d41b1e40a9ab6bfd014b46fedd8f86987810da58b29fa9',
+}
+
 
 # LLM: Only instantiate metadata; never execute tools or initialize an owner.
 # 函数用途: 收集本次涉及的原生工具契约。

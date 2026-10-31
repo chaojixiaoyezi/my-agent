@@ -301,7 +301,9 @@ class TestLoadConfig:
 
         try:
             config = load_config(path)
-            assert config.model_backend == "echo"
+            # 模型后端由 v6 model-profiles 目录投影，YAML 写入按未知键忽略并留下诊断。
+            assert config.model_backend == ""
+            assert "unknown config key: 'model_backend'; ignored" in config.config_warnings
             assert config.max_tool_rounds == 10
         finally:
             path.unlink()
@@ -344,7 +346,8 @@ class TestLoadConfig:
 
         try:
             config = load_config(path)
-            assert config.model_backend == "echo"
+            assert config.model_backend == ""
+            assert "unknown config key: 'invalid_field'; ignored" in config.config_warnings
             # invalid_field 应该被忽略
             assert not hasattr(config, "invalid_field") or config.invalid_field is None
         finally:

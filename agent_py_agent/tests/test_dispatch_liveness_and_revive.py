@@ -73,8 +73,11 @@ def _make_child(
     attributes: dict[str, object] | None = None,
 ):
     task = manager.create_run(goal=f"liveness {status}", thought="liveness", plan=["run"], depth=1)
+    # 历史 attempt 逐个结算；ee2113192 起一次跳过多个 attempt 记为未知恢复历史，宿主转人工复核不再自动续跑。
+    for _ in range(attempts):
+        task.runner_attempts += 1
+        manager.save(task)
     task.status = status
-    task.runner_attempts = attempts
     if status == "RUNNING":
         task.runner_active_attempt_id = "attempt-live-1"
     attrs = {**dict(task.attributes or {}), **dict(attributes or {})}

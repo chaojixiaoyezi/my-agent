@@ -34,22 +34,28 @@ from agent_py_agent.agent.conversation.compact_guard import ConversationCompactE
 from agent_py_agent.agent.conversation.compact_summary_view import resolve_compact_summary_view
 from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings import AgentConfig, model_profiles
+from agent_py_agent.tests.test_model_profiles import add
 from agent_py_agent.tests.test_subagent_compact_recovery import _http
 
 
 # LLM: 使用原 SimpleAgent、唯一会话 store 与后台真实入口；无任务场景不伪造任务绑定，只有 HTTP 响应由替身提供。
+#   有 Home 的后台轮只认 v6 目录选中的模型：同一连接经原目录服务新增并设为 owner 默认，窗口只由档案声明。
 # 函数用途: 为普通、拆出或无任务的后台轮建立已结束历史，并返回同一片执行依赖。
-def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = True, taskless: bool = False):
+def _background(tmp_path, *, backend: str, detached: bool, with_history: bool = True, taskless: bool = False,
+                window: int = 200_000):
     api_base = "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
     model_name = "MiniMax-M2.7" if backend == "anthropic_compatible" else "deepseek-v4-flash"
     agent = SimpleAgent(AgentConfig(
         model_backend=backend, model_name=model_name, api_base=api_base,
         api_key="fake-private-key", stream_enabled=False, enable_tools=False,
         my_agent_home=str(tmp_path / "home"),
-        model_context_window_tokens=200_000,
+        model_context_window_tokens=window,
         max_tool_rounds=1,
     ), tmp_path)
+    profile, _ = add(agent, model_backend=backend, model_name=model_name, api_base=api_base,
+                     api_key="fake-private-key", model_context_window_tokens=window)
+    model_profiles.execute_model_profile_operation(agent, "set_default", {"profile_id": profile})
     store = agent.conversation_store
     thread = store.threads.get_or_create({
         "canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "compact-recovery",
@@ -247,13 +253,12 @@ def test_taskless_background_overflow_keeps_first_resolved_request_id(tmp_path, 
 
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
 def test_background_first_request_compacts_after_complete_prepare(tmp_path, monkeypatch, backend):
-    agent, store, thread, request, execution, sink = _background(
-        tmp_path, backend=backend, detached=False,
-    )
     # 窗口只校准测试输入：工具目录随 manage_models（f7029f54c）变长后，15500 装不下压缩后的候选。实测 16000–23000 都能
     # 先触发压缩再装下候选，25000 起不再需要压缩；取中间值给工具目录增减留出余量，断言不放松。完整准备仍须越过触发线，
-    # 摘要后的完整提示则须容纳（见下方候选断言）。
-    agent.config.model_context_window_tokens = 19_500
+    # 摘要后的完整提示则须容纳（见下方候选断言）。窗口由所选模型档案声明。
+    agent, store, thread, request, execution, sink = _background(
+        tmp_path, backend=backend, detached=False, window=19_500,
+    )
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     for role in ("user", "assistant"):
         store.messages.append({
@@ -319,7 +324,7 @@ def test_background_first_request_compacts_after_complete_prepare(tmp_path, monk
     candidate_tokens, _ = projected_model_context_components(projected)
     target = agent.config.model_context_window_tokens * agent.config.memory_compact_recovery_target_percent / 100
     assert candidate_tokens < first_tokens and first_tokens > target
-    assert candidate_tokens < agent.config.model_context_window_tokens * agent.config.memory_compact_auto_trigger_percent / 100
+    assert candidate_tokens < agent.config.model_context_window_tokens * agent.config.memory_compact_trigger_percent / 100
     assert candidate_tokens + agent.backend.max_tokens < agent.config.model_context_window_tokens
     frozen = candidates[-1].request_input
     expected = agent.backend.project_generate_payload(

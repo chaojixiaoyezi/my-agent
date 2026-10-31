@@ -14,6 +14,7 @@ from agent_py_agent.agent.io.sqlite_lease import SQLiteConnectionLease
 from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 from agent_py_agent.agent.local_storage.store import LocalStore
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.runtime_db.schema import RuntimeWriteFence
 
 
 def expected_digest(declaration):
@@ -25,7 +26,9 @@ def construct_store(root, store_type, enabled):
     store = store_type(root / f'{store_type.__name__}.db')
     borrow = store._runtime_connection if store_type is RuntimeRepository else store._connection
     with borrow() as conn:
-        assert isinstance(conn, SQLiteConnectionLease) is enabled
+        # RuntimeDB 写借用外包代际栅栏；租期判定看栅栏内的原借用连接。
+        leased = conn._connection if isinstance(conn, RuntimeWriteFence) else conn
+        assert isinstance(leased, SQLiteConnectionLease) is enabled
         fingerprint = conn.execute("SELECT value FROM metadata WHERE key='sqlite_schema_fingerprint'").fetchone()[0]
         assert len(fingerprint) == 64
     return store_type.__name__

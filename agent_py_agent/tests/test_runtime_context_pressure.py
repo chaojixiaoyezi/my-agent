@@ -289,7 +289,7 @@ def test_preflight_context_pressure_uses_tool_context_window_signal() -> None:
 
 def test_preflight_uses_configured_threshold_without_a_second_ceiling(monkeypatch) -> None:
     agent = SimpleNamespace(
-        config=AgentConfig(auto_save_memory=True, memory_compact_auto_trigger_percent=70),
+        config=AgentConfig(auto_save_memory=True, memory_compact_trigger_percent=70),
         backend=SimpleNamespace(context_window_tokens=1000, name="fake"),
     )
     params = SimpleNamespace(
@@ -394,7 +394,6 @@ def test_configured_250k_and_1m_windows_admit_only_fitting_requests(monkeypatch)
         agent = SimpleNamespace(
             config=AgentConfig(
                 auto_save_memory=True, model_context_window_tokens=window,
-                memory_compact_auto_trigger_percent=90,
                 # 本用例只测按窗口算的请求输入上限；显式不封顶，避免默认 30 万触发线先介入。
                 memory_compact_auto_trigger_max_tokens=0,
             ),
@@ -421,7 +420,6 @@ def test_preflight_native_counts_tool_schemas_before_first_tool_call(monkeypatch
             auto_save_memory=True,
             enable_tools=True,
             model_name="native-test-model",
-            memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=1_000,
         ),
         backend=SimpleNamespace(context_window_tokens=1_000, name="anthropic_compatible"),
@@ -468,7 +466,6 @@ def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeyp
         config=AgentConfig(
             auto_save_memory=True,
             enable_tools=True,
-            memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=128_000,
         ),
         backend=SimpleNamespace(context_window_tokens=128_000, name="fake"),
@@ -541,7 +538,6 @@ def test_unsaved_model_call_keeps_configured_trigger_without_enabling_compact(
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
-            memory_compact_auto_trigger_percent=90,
             model_context_window_tokens=128_000,
         ),
         backend=SimpleNamespace(context_window_tokens=128_000, name="fake"),

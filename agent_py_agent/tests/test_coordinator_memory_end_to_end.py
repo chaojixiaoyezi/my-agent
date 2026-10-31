@@ -203,8 +203,10 @@ def test_nonempty_original_semantic_http_keeps_identity_ranking_and_paid_count(t
         assert not domain.long_term._pending_access
 
 
-def test_actual_http_new_revocation_after_sql_success_blocks_first_paid_embedding(tmp_path, monkeypatch):
-    from agent_py_agent.agent.local_storage import LocalStore
+# LLM: 788f9b847起remember不再写旧LocalStore文本投影；正式写入成功后的新撤权仍须挡在首次付费embedding之前。
+# 函数用途: 验证实际HTTP记忆写在正式提交后撤权时零embedding且首个native同对象保留。
+def test_actual_http_new_revocation_after_formal_success_blocks_first_paid_embedding(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import jsonl
 
     sources, errors = [], []
     perform = _LocalControlWriteSource.perform
@@ -216,15 +218,16 @@ def test_actual_http_new_revocation_after_sql_success_blocks_first_paid_embeddin
             errors.append(error)
             raise
     monkeypatch.setattr(_LocalControlWriteSource, "perform", observe)
-    transaction = LocalStore._coordinator_transaction
+    write = jsonl.write_private_text_file_atomic_unlocked
     with original_case(tmp_path, monkeypatch) as (_agent, _path, row, _body, server, runtime):
         embedder = semantic_provider(server, monkeypatch)
-        def close_after_sql(store, operation, **kwargs):
-            result = transaction(store, operation, **kwargs)
-            runtime._closing = True
+        def close_after_formal(path, raw, **kwargs):
+            result = write(path, raw, **kwargs)
+            if path.name == "memory.jsonl":
+                runtime._closing = True
             return result
-        monkeypatch.setattr(LocalStore, "_coordinator_transaction", close_after_sql)
-        status, result = memory_post(server, row["actor_id"], operation="remember", content="previous SQL success")
+        monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", close_after_formal)
+        status, result = memory_post(server, row["actor_id"], operation="remember", content="previous formal success")
         assert status == 200 and not result["ok"] and not result["records"], result
         assert result["error_code"] == "LocalControlCoordinatorUnavailable" and not embedder.calls
         source = sources[-1]

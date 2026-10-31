@@ -160,7 +160,7 @@ def watch_fixture(tmp_path, monkeypatch):
 
 
 # LLM: 只有同scope已验证帧可静默兜底，第三次仍须告警；errno用于区分原子替换与持久错误。
-# 函数用途: 复现目录换代、记录消失及直接OSError的两次静默与第三次升级。
+# 函数用途: 在真实打开的观察面板复现目录换代、记录消失及直接OSError的两次静默与第三次升级。
 @pytest.mark.parametrize("failure", [
     {"projection_ok": False, "errors": [{"error_code": "DIRECTORY_CHANGED_DURING_READ"}]},
     {"projection_ok": False, "errors": [{"error": "FileNotFoundError", "errno": errno.ENOENT}]},
@@ -168,8 +168,13 @@ def watch_fixture(tmp_path, monkeypatch):
 ])
 def test_same_scope_prior_frame_hides_only_first_two_transient_polls(tmp_path, monkeypatch, failure):
     agent, nav, runtime, response = watch_fixture(tmp_path, monkeypatch)
+    good = response["value"]
     assert tui_threading._sync_background_watch(agent, nav)
     assert nav.snapshot().background_process_count == 1
+    # 主聊天页的可信瞬态保持安静（5c029e4fb），两次宽限与第三次提示只在已打开的观察面板发生。
+    assert nav.move_selection(1) and nav.enter_selected()
+    runtime = nav.active_runtime()
+    monkeypatch.setattr(bg, "inspect_background_process", lambda *a, **kw: good["items"][0])
     response["value"] = failure
     for _ in range(2):
         tui_threading._sync_background_watch(agent, nav)
@@ -181,11 +186,14 @@ def test_same_scope_prior_frame_hides_only_first_two_transient_polls(tmp_path, m
 
 
 # LLM: 一次真正成功才结束连续失败计数并清掉观察专用提示，不清其他kind。
-# 函数用途: 验证瞬态恢复后的新一轮失败重新从零计数。
+# 函数用途: 在已打开的观察面板验证瞬态恢复后的新一轮失败重新从零计数。
 def test_successful_poll_resets_transient_counter_and_own_warning(tmp_path, monkeypatch):
     agent, nav, runtime, response = watch_fixture(tmp_path, monkeypatch)
     good = response["value"]
     tui_threading._sync_background_watch(agent, nav)
+    assert nav.move_selection(1) and nav.enter_selected()
+    runtime = nav.active_runtime()
+    monkeypatch.setattr(bg, "inspect_background_process", lambda *a, **kw: good["items"][0])
     response["value"] = FileNotFoundError(errno.ENOENT, "replacement")
     for _ in range(3):
         tui_threading._sync_background_watch(agent, nav)
@@ -216,7 +224,7 @@ def test_persistent_or_unclassified_error_warns_immediately(tmp_path, monkeypatc
 
 
 # LLM: 未验证过本scope不能静默使用空帧或另一scope的成功结果；范围解析错误仍立即失败关闭。
-# 函数用途: 检查首次失败、owner/thread切换和未知范围不会借用旧缓存。
+# 函数用途: 检查首次失败、owner/thread切换和未知范围不会借用旧缓存；主页面未取得结果静默，scope错误仍告警。
 @pytest.mark.parametrize("switch", ["first", "thread", "owner", "scope_error"])
 def test_transient_fallback_never_crosses_scope_or_uses_unverified_frame(tmp_path, monkeypatch, switch):
     agent, nav, runtime, response = watch_fixture(tmp_path, monkeypatch)
@@ -228,7 +236,8 @@ def test_transient_fallback_never_crosses_scope_or_uses_unverified_frame(tmp_pat
         agent.home_paths.owner_home_dir = tmp_path / "different-owner"
     response["value"] = FileNotFoundError(errno.ENOENT, "replacement")
     tui_threading._sync_background_watch(agent, nav, scope_error=switch == "scope_error")
-    assert "观察刷新失败" in runtime.notice()
+    assert ("观察刷新失败" in runtime.notice()) if switch == "scope_error" else runtime.notice() == ""
+    assert "保留" not in runtime.notice()
     assert nav.snapshot().background_process_count == 0
 
 

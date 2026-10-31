@@ -46,9 +46,13 @@ def test_create_subagent_pins_requested_skill_snapshot(tmp_path: Path) -> None:
     agent, _ = _agent_with_skills(tmp_path)
     result = CreateSubagentsTool(agent).execute(
         {
-            "goal": "使用指定技能完成只读检查",
-            "allowed_skills": ["one"],
-            "tool_preset": "read_only",
+            "items": [
+                {
+                    "goal": "使用指定技能完成只读检查",
+                    "allowed_skills": ["one"],
+                    "tool_preset": "read_only",
+                }
+            ],
             "defer_start": True,
         }
     )
@@ -65,7 +69,7 @@ def test_create_subagents_rejects_unknown_skill_without_partial_create(tmp_path:
     agent, _ = _agent_with_skills(tmp_path)
     result = CreateSubagentsTool(agent).execute(
         {
-            "goal": "批量工作",
+            "batch_summary": "批量工作",
             "items": [
                 {"goal": "有效项", "allowed_skills": ["one"]},
                 {"goal": "无效项", "allowed_skills": ["missing"]},
@@ -82,8 +86,7 @@ def test_runner_skill_tool_sees_only_explicit_snapshot_subset(tmp_path: Path) ->
     agent, _ = _agent_with_skills(tmp_path)
     result = CreateSubagentsTool(agent).execute(
         {
-            "goal": "只使用技能一",
-            "allowed_skills": ["one"],
+            "items": [{"goal": "只使用技能一", "allowed_skills": ["one"]}],
             "defer_start": True,
         }
     )
@@ -111,7 +114,7 @@ def test_runner_skill_tool_sees_only_explicit_snapshot_subset(tmp_path: Path) ->
 def test_runner_skill_snapshot_fails_closed_after_source_changes(tmp_path: Path) -> None:
     agent, skill_root = _agent_with_skills(tmp_path)
     result = CreateSubagentsTool(agent).execute(
-        {"goal": "使用技能一", "allowed_skills": ["one"], "defer_start": True}
+        {"items": [{"goal": "使用技能一", "allowed_skills": ["one"]}], "defer_start": True}
     )
     assert result.ok
     task = agent.subagents.list_runs()[0]
@@ -131,7 +134,7 @@ def test_runner_skill_snapshot_fails_closed_after_source_changes(tmp_path: Path)
 def test_descendant_cannot_expand_parent_skill_scope_and_inherits_hashes(tmp_path: Path) -> None:
     agent, _ = _agent_with_skills(tmp_path)
     result = CreateSubagentsTool(agent).execute(
-        {"goal": "父任务", "allowed_skills": ["one"], "defer_start": True}
+        {"items": [{"goal": "父任务", "allowed_skills": ["one"]}], "defer_start": True}
     )
     assert result.ok
     parent = agent.subagents.list_runs()[0]

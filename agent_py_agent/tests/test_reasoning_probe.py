@@ -341,6 +341,8 @@ def test_probe_that_cannot_record_does_not_start_and_can_be_retried(tmp_path, mo
     assert "已在后台开始检测" in _run(agent, "/effort probe").message and len(jobs) == 1  # 登记已撤销，可以重试
 
 
+# LLM: a12fe40c5 起没有“部署默认模型”：有 Home 时 AgentConfig 里的连接不进模型目录，未选目录模型即未配置。
+#   部署配置里的模型因此既不被检测，也不会触发改全局配置（管理员与否都一样）；/effort 如实说明暂不改变请求，密钥不外泄。
 @pytest.mark.parametrize("admin", [True, False])
 def test_default_model_is_written_to_global_config_only_by_admin(tmp_path, monkeypatch, admin):
     user_config = tmp_path / "desktop.yaml"
@@ -349,18 +351,16 @@ def test_default_model_is_written_to_global_config_only_by_admin(tmp_path, monke
                                     api_key=_KEY, my_agent_home=str(tmp_path / "home"), prompt_files=[],
                                     gateway_per_user_owner_scoping=False, stream_enabled=False,
                                     config_path=str(user_config)), tmp_path / "ws")
-    _Wire(_DEEPSEEK).install(monkeypatch)
+    wire = _Wire(_DEEPSEEK).install(monkeypatch)
     monkeypatch.setattr(probe, "_spawn", lambda target: target())
     monkeypatch.setattr("agent_py_agent.agent.user_space.approval_mode.is_permission_admin", lambda _home: admin)
     _run(agent, "/effort high")
     view = _run(agent, "/effort")
-    written = 'model_reasoning_control: "effort"' in user_config.read_text(encoding="utf-8")
-    assert written is admin
-    if admin:
-        change_id = json.loads(ledger_path(user_config).read_text(encoding="utf-8").splitlines()[-1])["id"]
-        assert f"重启 Gateway 后生效（修改编号 {change_id[:8]}，撤销：/settings revert {change_id[:8]}）" in view.message
-    else:
-        assert "请管理员执行 /settings set model_reasoning_control effort" in view.message
+    assert "model_reasoning_control" not in user_config.read_text(encoding="utf-8")
+    assert not ledger_path(user_config).exists()
+    assert wire.payloads == [] and wire.configs == []  # 未配置的默认不发检测请求
+    assert "当前模型不支持调节智能程度" in view.message and "本设置暂不改变请求" in view.message
+    assert "请管理员执行" not in view.message and "重启 Gateway" not in view.message
     assert _KEY not in view.message + _stored_text(agent)
 
 

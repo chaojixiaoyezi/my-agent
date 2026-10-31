@@ -843,11 +843,16 @@ def native_response_setup(host, ctx, tmp_path, monkeypatch, kind, decision):
     if kind == "model_configuration":
         from agent_py_agent.agent.gateway_parts.model_control_cards import _record_path
         base, owner, scope, model_host, thread = setup(tmp_path / "native-model", monkeypatch)
+        selected = "default"
+        if decision == "select":
+            # e905 起未配置的 default 不是可选模型；先在原 owner 目录登记一台假模型，再由原卡选择它。
+            from agent_py_agent.tests.test_model_profiles import add
+            selected, _ = add(model_host)
         execute_model_text_control(base, parse_conversation_control("/model"), scope)
         if decision == "save":
             from agent_py_agent.tests.test_im_model_cards import submit
             assert submit(base, callback(base))["ok"]
-        body, actor = callback(base, decision=decision, fields={"profile_id": "default"}), "ou_actor"
+        body, actor = callback(base, decision=decision, fields={"profile_id": selected}), "ou_actor"
         if decision == "save":
             body["fields"] = {"model_backend": "openai_compatible", "api_base": "https://example.test/v1",
                 "model_name": "synthetic-private-model", "model_context_window_tokens": "64000", "api_key": "synthetic-private-key"}
@@ -918,7 +923,7 @@ def test_native_input_tickets_commit_original_records(host, oauth_context, tmp_p
         assert row["ciphertext"] and body["fields"]["secret"] not in path.read_text()
         assert backend.context.inputs.read(row["input_id"])["status"] == "ready"
     if kind == "model_configuration" and decision == "select":
-        assert host.store.threads.load(thread).model_profile_id == "default"
+        assert host.store.threads.load(thread).model_profile_id == body["fields"]["profile_id"] != "default"
     if kind == "model_configuration" and decision == "save":
         from agent_py_agent.agent.settings.model_profiles import (
             model_profiles_path,

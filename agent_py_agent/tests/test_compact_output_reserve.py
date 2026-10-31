@@ -54,7 +54,7 @@ def _case(tmp_path, host, backend, large):
     agent.backend.max_tokens = OUTPUT
     if host != "child":
         agent.config.system_prompt += "\n" + requirement
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     for number in range(2):
         agent.conversation_store.messages.append({
             "thread_id": tid, "role": "user" if number == 0 else "assistant",

@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.base import EchoBackend, ModelResponse
 from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
@@ -50,6 +51,8 @@ def gateway(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
                                     gateway_per_user_owner_scoping=False, orphan_supervision_interval_seconds=0),
                         tmp_path / "ws")
+    # Home 下 echo 配置不跨所选模型作用域；脚本化 echo 后端须构造后显式注入。
+    agent.backend = get_backend("echo", agent.config)
     paths = gateway_paths(agent)
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)

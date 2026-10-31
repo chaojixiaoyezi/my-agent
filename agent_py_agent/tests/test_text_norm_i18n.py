@@ -104,14 +104,18 @@ def test_recall_unaffected_for_plain_ascii() -> None:
 
 # ---------- 记忆去重 / 检索(跨书写形式归一) ----------
 
-def test_memory_dedup_collapses_nfd_nfc_content() -> None:
-    from agent_py_agent.agent.memory_store.jsonl import MemoryRecord, _dedupe_memory_records
+# 旧 _dedupe_memory_records 随 788f9b847 的已提交冷热代际一起移除；现在由正式写入口按规范化身份键幂等去重。
+def test_memory_dedup_collapses_nfd_nfc_content(tmp_path) -> None:
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 
-    nfc_rec = MemoryRecord(role="user", content=unicodedata.normalize("NFC", "café 笔记"), created_at=123.0)
-    nfd_rec = MemoryRecord(role="user", content=unicodedata.normalize("NFD", "café 笔记"), created_at=123.0)
-    assert nfc_rec.content != nfd_rec.content  # 原始字节不等
-    deduped = _dedupe_memory_records([nfc_rec, nfd_rec])
-    assert len(deduped) == 1  # NFD/NFC 同一条记忆去重为一(不再重复堆积)
+    nfc_content = unicodedata.normalize("NFC", "café 笔记")
+    nfd_content = unicodedata.normalize("NFD", "café 笔记")
+    assert nfc_content != nfd_content  # 原始字节不等
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    first = memory.add("user", nfc_content)
+    second = memory.add("user", nfd_content)
+    assert second.entry_id == first.entry_id
+    assert len(memory.all()) == 1  # NFD/NFC 同一条记忆去重为一(不再重复堆积)
 
 
 def test_memory_search_recalls_fullwidth_query() -> None:

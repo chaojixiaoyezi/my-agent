@@ -154,6 +154,9 @@ class TestPlanActions:
             runner_attempts=5,
             **mixin._build_work_order_paths("stuck_run"),
         )
+        # 熔断只认宿主无进展计数，不再把 runner_attempts 当作无进展次数。
+        task._extra_fields = {"failure_retry_count": 4, "provider_retry_count": 0,
+                              "no_progress_count": 5, "recovery_history_unknown_count": 0}
         mixin._tasks = [task]
 
         report = mixin.board.plan_actions(CapabilityConfig(subagent_no_progress_attempt_limit=4))

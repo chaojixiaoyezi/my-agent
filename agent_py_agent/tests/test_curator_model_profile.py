@@ -222,6 +222,12 @@ def test_settings_show_reports_id_and_model_for_running_and_saved_references(hos
     _bind(host, "missing-id")
     result = _command(host, monkeypatch, f"/settings show {KEY}")
     assert result.ok and "profile_not_found" in result.message
+    # e905 起本用户默认只来自 v6 模型目录，部署 echo 配置不再充当默认；未选默认如实显示未配置。
+    assert "改用本用户默认模型：未配置" in result.message
+    default_id, _ = _add(host, model_name="deployment-test")
+    execute_model_profile_operation(host, "set_default", {"profile_id": default_id})
+    result = _command(host, monkeypatch, f"/settings show {KEY}")
+    assert result.ok and "profile_not_found" in result.message
     assert "改用本用户默认模型：deployment-test" in result.message
 
 

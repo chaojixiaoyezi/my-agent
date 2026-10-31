@@ -26,6 +26,7 @@ from agent_py_agent.agent.agent_core.tool_guard.identical_failure import (
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.deployment_policy import RuntimeGuardPolicy
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 from agent_py_agent.agent.turn_end import infer_turn_end_reason, should_continue_task
 
@@ -92,7 +93,12 @@ class TestMarkIdenticalFailureHalt:
         assert params.repeated_failure_halt_exhausted is False
 
     def test_disabled_by_zero_threshold_and_also_applies_to_task_local_children(self):
-        assert _feed(_params(threshold=0), [{}] * 30).identical_failure_halt is None
+        # 硬门只有宿主策略 0 才关闭；任务属性 0 不能取消宿主上限（a12fe40c5 typed 部署策略）。
+        host_off = _params(threshold=0)
+        host_off.runtime_guard_policy = RuntimeGuardPolicy(repeated_failure_halt_threshold=0)
+        assert _feed(host_off, [{}] * 30).identical_failure_halt is None
+        task_zero = _feed(_params(threshold=0), [{}] * 30).identical_failure_halt
+        assert task_zero is not None and task_zero.count == RuntimeGuardPolicy().repeated_failure_halt_threshold
         child = _feed(_params(context_scope="task_local"), [{}] * _THRESHOLD)
         assert child.identical_failure_halt is not None and child.identical_failure_halt.count == _THRESHOLD
 

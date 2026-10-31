@@ -153,7 +153,7 @@ def test_unknown_first_request_allows_only_pending_and_explicit_model_skips_jev(
     agent, (a, _), _ = prepared
     monkeypatch.setattr(selection, "_input_budget", unprojected_input_budget)
     seen = provider(monkeypatch, prepared, {"0": a})
-    params = {"goal": "检查材料", **({"model": a} if explicit_model else {})}
+    params = {"items": [{"goal": "检查材料", **({"model": a} if explicit_model else {})}]}
     tasks = created(agent, CreateSubagentsTool(agent).execute(params))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": a if explicit_model else "default"}
     if explicit_model:
@@ -193,8 +193,9 @@ def test_batch_commits_prepared_objects_after_parent_revision_updates(prepared, 
     monkeypatch.setattr(service, "create_run", commit_same)
     seen = provider(monkeypatch, prepared, {"0": a, "1": b}, action=lambda: (
         len(runs) == 2 or pytest.fail("网络前必须准备整批")))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"parent_id": parent.id, "root_id": parent.root_id,
-        "items": [{"goal": "检查甲"}, {"goal": "检查乙"}]}))
+    lineage = {"parent_id": parent.id, "root_id": parent.root_id}
+    tasks = created(agent, CreateSubagentsTool(agent).execute({
+        "items": [{"goal": "检查甲", **lineage}, {"goal": "检查乙", **lineage}]}))
     assert len(runs) == len(committed) == len(tasks) == 2 and len(seen) == 1
     assert all(task is run.task for task, run in zip(committed, runs, strict=True))
     assert [task.id for task in tasks] == [run.run_id for run in runs]
@@ -230,7 +231,7 @@ def test_reuse_discovered_after_jev_keeps_existing_task_and_discards_unpublished
     monkeypatch.setattr(service, "prepare_run", capture)
     seen = provider(monkeypatch, prepared, {"0": a}, action=lambda: elsewhere.append(
         agent.subagents.create_run(params=runs[0].params)))
-    params = {"goal": "检查材料", "context_packs": [_idempotency_pack("inflight-reuse", "report")]}
+    params = {"items": [{"goal": "检查材料", "context_packs": [_idempotency_pack("inflight-reuse", "report")]}]}
     result = CreateSubagentsTool(agent).execute(params)
     assert result.ok, result.output
     assert json.loads(result.output)["reused_run_ids"] == [elsewhere[0].id]
@@ -253,7 +254,7 @@ def test_owner_permission_change_invalidates_prepared_model_suggestion(prepared,
         agent._current_run_params.run_id = parent.id
     provider(monkeypatch, prepared, {"0": a}, action=lambda: setattr(
         agent.subagents, "owner_policy_snapshot", {"tools": {"disabled_tools": ["read_file"]}}))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料", "allowed_tools": ["read_file"]}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料", "allowed_tools": ["read_file"]}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert "read_file" in tasks[0].effective_permissions["disabled_tools"]
     assert advice(agent, tasks[0]) is None
@@ -296,7 +297,7 @@ def test_structured_candidate_scope_only_exposes_selected_profiles(prepared, mon
     agent, (a, b), _ = prepared
     patch(agent, {"points.subagent_model.candidate_profile_ids": [a]})
     seen = provider(monkeypatch, prepared, {"0": a})
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0])["profile_id"] == a
     criteria = seen[0][1]["questions"]["0"]["criteria"]
@@ -308,7 +309,7 @@ def test_candidate_scope_change_during_request_keeps_original(prepared, monkeypa
     patch(agent, {"points.subagent_model.candidate_profile_ids": [a]})
     provider(monkeypatch, prepared, {"0": a}, action=lambda: patch(
         agent, {"points.subagent_model.candidate_profile_ids": [b]}))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0]) is None
 
@@ -324,7 +325,7 @@ def test_candidate_scope_change_before_request_skips_jev(prepared, monkeypatch):
         return original(host, decision)
 
     monkeypatch.setattr(orchestration_tools, "decide_subagent_models", changed_before_send)
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert not seen
 
@@ -343,9 +344,9 @@ def test_each_create_call_counts_one_reach_outcome(prepared, monkeypatch, tmp_pa
     reasons = reach_counter(agent, monkeypatch, "subagent_model", tmp_path)
     seen = provider(monkeypatch, prepared, {"0": a})
     tool = CreateSubagentsTool(agent)
-    created(agent, tool.execute({"goal": "检查甲"}))
-    tool.execute({"goal": "预演", "dry_run": True})
-    assert tool.execute({"goal": " "}).error_code == "TOOL_INVALID_ARGUMENTS", "创建自身校验没过，不进入这个点位"
+    created(agent, tool.execute({"items": [{"goal": "检查甲"}]}))
+    tool.execute({"items": [{"goal": "预演"}], "dry_run": True})
+    assert tool.execute({"items": [{"goal": " "}]}).error_code == "TOOL_INVALID_ARGUMENTS", "创建自身校验没过，不进入这个点位"
     created(agent, tool.execute({"items": [{"goal": "检查乙", "model": a}]}))
     stage_error = SimpleNamespace(error_code="settings_busy", enabled_points=(), deadline=0.0)
     for target, name, replacement in [
@@ -358,9 +359,9 @@ def test_each_create_call_counts_one_reach_outcome(prepared, monkeypatch, tmp_pa
     ]:
         with monkeypatch.context() as scoped:
             scoped.setattr(target, name, replacement)
-            created(agent, tool.execute({"goal": f"检查{name}"}))
+            created(agent, tool.execute({"items": [{"goal": f"检查{name}"}]}))
     patch(agent, {"points.subagent_model.mode": "off"})
-    created(agent, tool.execute({"goal": "检查关闭"}))
+    created(agent, tool.execute({"items": [{"goal": "检查关闭"}]}))
     patch(agent, {"points.subagent_model.mode": "apply"})
     original = selection.decide_subagent_models
 
@@ -370,7 +371,7 @@ def test_each_create_call_counts_one_reach_outcome(prepared, monkeypatch, tmp_pa
 
     with monkeypatch.context() as scoped:
         scoped.setattr(orchestration_tools, "decide_subagent_models", changed_before_send)
-        created(agent, tool.execute({"goal": "检查范围变化"}))
+        created(agent, tool.execute({"items": [{"goal": "检查范围变化"}]}))
     assert len(seen) == 1, "只有第一次真正调用了决策模型"
     assert reasons() == ({"models_given": 1, "configuration_unavailable": 1, "settings_busy": 1, "no_candidates": 1,
                           "nothing_to_ask": 1, "bad_material": 1, "point_off": 1, "candidate_scope_changed": 1}, 1), \
@@ -393,7 +394,7 @@ def test_settings_reads_propagate_user_cancel(prepared, monkeypatch, tmp_path, s
 
     monkeypatch.setattr(selection, "execute_decision_settings_operation", interrupted_read)
     with pytest.raises(InterruptedError):
-        CreateSubagentsTool(agent).execute({"goal": "检查材料"})
+        CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]})
     assert reads[0] == stop_at and not seen and not agent.subagents.list_runs()
     assert reasons() == ({}, 0), "用户停止是机制性退出，不记成设置读不出，也不计入到达"
 
@@ -406,7 +407,7 @@ def test_off_and_observe_keep_original(prepared, monkeypatch, mode):
     if mode == "off":
         monkeypatch.setattr(selection, "_candidates", lambda *_: pytest.fail("off cannot prepare candidates"))
         monkeypatch.setattr(selection, "operation_id", lambda *_: pytest.fail("off cannot create selection identity"))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert len(seen) == (mode == "observe")
     assert advice(agent, tasks[0]) is None
@@ -433,7 +434,7 @@ def test_nonselection_and_bad_child_answer_do_not_discard_sibling(prepared, monk
 def test_authorized_candidate_removed_during_request_is_not_applied(prepared, monkeypatch):
     agent, (a, _), _ = prepared
     provider(monkeypatch, prepared, {"0": a}, action=lambda: execute_model_profile_operation(agent, "delete_model", {"profile_id": a}))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0]) is None
 
@@ -445,7 +446,7 @@ def test_provider_error_preserves_original_and_user_cancel_propagates(prepared, 
         raise ProviderTransientError("offline")
 
     provider(monkeypatch, prepared, {"0": a}, action=fail)
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     from agent_py_agent.agent.conversation import decision_policy
     with decision_policy._LOCK:
@@ -456,14 +457,14 @@ def test_provider_error_preserves_original_and_user_cancel_propagates(prepared, 
 
     provider(monkeypatch, prepared, {"0": a}, action=cancel)
     with pytest.raises(InterruptedError):
-        CreateSubagentsTool(agent).execute({"goal": "另一个任务"})
+        CreateSubagentsTool(agent).execute({"items": [{"goal": "另一个任务"}]})
     assert len(agent.subagents.list_runs()) == 1
 
 
 def test_unknown_external_inputs_remain_unverified_advice(prepared, monkeypatch):
     agent, (a, _), _ = prepared
     seen = provider(monkeypatch, prepared, {"0": a})
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料", "input_refs": ["file:unknown.txt"]}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料", "input_refs": ["file:unknown.txt"]}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0])["status"] == "pending"
     assert len(seen) == 1
@@ -476,7 +477,8 @@ def test_persisted_root_idempotency_replays_without_new_selection(prepared, monk
     )
 
     seen = provider(monkeypatch, prepared, {"0": a})
-    params = {"goal": "检查材料", "context_packs": [_idempotency_pack("selection", "result")], "defer_start": True}
+    params = {"items": [{"goal": "检查材料", "context_packs": [_idempotency_pack("selection", "result")]}],
+              "defer_start": True}
     first = created(agent, CreateSubagentsTool(agent).execute(params))
     replay = CreateSubagentsTool(agent).execute(params)
     assert replay.ok, replay.output
@@ -529,7 +531,7 @@ def test_unscoped_internal_creation_without_tools_snapshot_retains_original(prep
     agent, (a, _), _ = prepared
     agent.config.enable_tools = True
     seen = provider(monkeypatch, prepared, {"0": a})
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查代码", "allowed_tools": ["read_file"]}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查代码", "allowed_tools": ["read_file"]}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert len(seen) == 1 and advice(agent, tasks[0])["status"] == "pending"
 
@@ -548,7 +550,7 @@ def test_real_tool_executor_parent_snapshot_does_not_prove_candidate_tool_suppor
     seen = provider(monkeypatch, prepared, {"0": a})
     tools = {"create_subagents": CreateSubagentsTool(agent), "echo_tool": _CountingTool()}
     execution = execute_canonical_test_call(tmp_path, tools=tools, tool_name="create_subagents",
-        arguments={"goal": "检查材料", "allowed_tools": ["echo_tool"]})
+        arguments={"items": [{"goal": "检查材料", "allowed_tools": ["echo_tool"]}]})
     assert execution.result.status == "succeeded", execution.result
     tasks = agent.subagents.list_runs()
     assert len(tasks) == 1 and tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
@@ -566,7 +568,7 @@ def test_candidate_window_includes_its_own_output_cap(prepared, monkeypatch, inp
     agent.config.max_tokens = 100_000
     monkeypatch.setattr(selection, "_input_budget", lambda *_: input_tokens)
     seen = provider(monkeypatch, prepared, {"0": a if small_fits else b})
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "核对材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "核对材料"}]}))
     criteria = seen[0][1]["questions"]["0"]["criteria"]
     assert a in criteria  # 语义建议不是容量采用，已知数字也不能跳过首轮验证。
     assert criteria[b]["output_cap_tokens"] == 100_000
@@ -582,7 +584,7 @@ def test_candidate_final_config_change_during_jev_invalidates_advice(prepared, m
     agent, (a, _), _ = prepared
     provider(monkeypatch, prepared, {"0": a}, action=lambda: setattr(
         agent.config, changed_field, 2048 if changed_field == "max_tokens" else "修改后的系统提示"))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "核对材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "核对材料"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0]) is None
 
@@ -596,8 +598,8 @@ def test_task_overlay_changed_during_jev_is_reloaded_without_applying_logs(prepa
     monkeypatch.setattr(runtime_config_task, "apply_log_level", lambda *_: pytest.fail("候选预览不能应用全局日志"))
     provider(monkeypatch, prepared, {"0": a}, action=lambda: overlay.write_text(
         "runner_timeout_seconds: 47\n", encoding="utf-8"))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "核对材料",
-        "attributes": {"config_overlay_ref": str(overlay), "config_scope": "run"}}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "核对材料",
+        "attributes": {"config_overlay_ref": str(overlay), "config_scope": "run"}}]}))
     assert tasks[0].runtime_identity.config_overlay_ref == str(overlay)
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0]) is None
@@ -655,7 +657,7 @@ def test_oauth_responses_unknown_output_cap_cannot_be_zero_reserve(prepared, mon
     monkeypatch.setattr(selection, "selected_model_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(model_oauth, "request_credentials", lambda *_: pytest.fail("预览不能读取或刷新认证"))
     seen = provider(monkeypatch, prepared, {"0": a})
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "核对材料"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "核对材料"}]}))
     facts = seen[0][1]["questions"]["0"]["criteria"][a]
     assert facts["output_cap_tokens"] is None and facts["output_cap_status"] == "unknown"
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
@@ -683,7 +685,7 @@ def test_late_consumption_and_changed_settings_cannot_apply(prepared, monkeypatc
     agent, (a, _), _ = prepared
     provider(monkeypatch, prepared, {"0": a},
         action=lambda: monkeypatch.setattr(selection, "time", SimpleNamespace(monotonic=lambda: float("inf"))))
-    tasks = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查迟到结果"}))
+    tasks = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查迟到结果"}]}))
     assert tasks[0].attributes["host_model_profile.v1"] == {"profile_id": "default"}
     assert advice(agent, tasks[0]) is None
 
@@ -693,7 +695,7 @@ def test_owner_scope_and_decision_purpose_never_become_child_candidates(prepared
     stranger = host_at(tmp_path, owner="bob")
     other, _ = add(stranger, model_name="other-owner")
     seen = provider(monkeypatch, prepared, {"0": a})
-    created(agent, CreateSubagentsTool(agent).execute({"goal": "检查候选"}))
+    created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查候选"}]}))
     candidates = set(seen[0][1]["questions"]["0"]["criteria"]) - set(selection._RETAIN_CHOICES)
     assert candidates == {a, b} and other not in candidates
 
@@ -708,15 +710,16 @@ def test_recursive_default_name_fix_does_not_widen_reuse(prepared, monkeypatch, 
     parent = agent.subagents.create_run(goal="负责检查", thought="分工", plan=["检查"], allowed_tools=["create_subagents"])
     agent._current_subagent_run_id = parent.id
     agent._current_run_params.run_id = parent.id
-    params = {"goal": "检查材料"}
+    item = {"goal": "检查材料"}
+    params = {"items": [item]}
     if boundary != "no_contract":
-        params["context_packs"] = [_idempotency_pack("one-contract", "result")]
+        item["context_packs"] = [_idempotency_pack("one-contract", "result")]
     if boundary == "explicit_rename":
-        params["agent_name"] = "agent-d1-worker-1"
+        item["agent_name"] = "agent-d1-worker-1"
     seen = provider(monkeypatch, prepared, {"0": a})
     first = created(agent, CreateSubagentsTool(agent).execute(params))[0]
     if boundary == "explicit_rename":
-        params["agent_name"] = "agent-d1-worker-2"
+        item["agent_name"] = "agent-d1-worker-2"
     elif boundary == "legacy_origin":
         first.attributes.pop("host_agent_name_origin.v1")
         agent.subagents.save(first)
@@ -754,7 +757,7 @@ def test_pending_persists_only_stable_origin_and_reading_never_adopts(prepared, 
 
     agent, (a, _), _ = prepared
     provider(monkeypatch, prepared, {"0": a})
-    task = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))[0]
+    task = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))[0]
     pending = advice(agent, task)
     assert set(pending) == {"schema", "status", "profile_id", "operation_id", "source_owner_ref",
         "source_thread_id", "source_run_id", "source_task_id", "source_owner_revision", "source_thread_revision",
@@ -770,7 +773,7 @@ def test_pending_persists_only_stable_origin_and_reading_never_adopts(prepared, 
     patch(agent, {"enabled": False})
     execute_model_profile_operation(agent, "delete_model", {"profile_id": a})
     assert ensure_subagent_thread(agent.subagents, task).model_profile_id == "default"
-    assert inherited_model_config(agent, task) is before
+    assert inherited_model_config(agent, task) == before  # default每次投影新的未配置副本，按值比较。
     assert advice(agent, task) == pending  # 读取不采用；启动时还要重新核对目录版本、设置和真实请求。
 
 
@@ -783,7 +786,7 @@ def test_explicit_selection_atomically_retires_pending_even_if_same_profile(prep
     agent, (a, b), _ = prepared
     agent.config.config_sources = {"model_name": {"source": "owner_model_profile", "profile_id": b}}
     provider(monkeypatch, prepared, {"0": a})
-    task = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))[0]
+    task = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))[0]
     store = agent.conversation_store.threads
     store.update_atomic(task.agent_thread_id, lambda row: replace(row, metadata={**row.metadata, "other": "keep"},
         provider_context_observation={"count": 10}, model_context_usage={"count": 11}))
@@ -816,10 +819,10 @@ def test_task_attributes_cannot_forge_thread_advice(prepared, monkeypatch, recur
         agent._current_subagent_run_id = parent.id
         agent._current_run_params.run_id = parent.id
     seen = provider(monkeypatch, prepared, {"0": a})
-    task = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料", "attributes": {
+    task = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料", "attributes": {
         SUBAGENT_MODEL_ADVICE_KEY: {"status": "pending", "profile_id": a},
         "host_model_decision.v1": {"status": "applied"}, "host_model_profile.v1": {"profile_id": a},
-    }}))[0]
+    }}]}))[0]
     assert not seen and advice(agent, task) is None
     assert task.attributes["host_model_profile.v1"] == {"profile_id": "default"}
 
@@ -844,7 +847,7 @@ def test_crash_after_thread_creation_retry_cannot_replant_cancelled_pending(prep
 
     monkeypatch.setattr(service, "create_run", capture)
     monkeypatch.setattr(base_service_module, "write_create_run_authority", crash)
-    result = CreateSubagentsTool(agent).execute({"goal": "检查材料"})
+    result = CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]})
     assert not result.ok and not agent.subagents.list_runs()
     run = runs[0]
     pending = advice(agent, run.task)
@@ -880,7 +883,7 @@ def test_settings_and_connections_changed_during_jev_cannot_create_pending(prepa
         changed.append(change)
 
     seen = provider(monkeypatch, prepared, {"0": a}, action=modify)
-    task = created(agent, CreateSubagentsTool(agent).execute({"goal": "检查材料"}))[0]
+    task = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))[0]
     assert changed == [change] and len(seen) == 1 and advice(agent, task) is None
 
 

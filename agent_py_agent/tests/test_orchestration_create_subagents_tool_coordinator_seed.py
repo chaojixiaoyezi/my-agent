@@ -43,14 +43,14 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": (
                 "Create deliverables named requirements/research-brief/implementation/"
                 "README/bug-report/test-report/acceptance-verdict inside the approved root."
             ),
             "role": "coordinator",
             "extra_write_roots": ["/Users/example/my-sample_app/deliverables/role-template"],
-        })
+        }]})
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
@@ -72,10 +72,10 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "Seed one root coordinator. Children must be created by that coordinator.",
             "role": "coordinator",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -108,13 +108,13 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": (
                 "创建 小傻妞-root-coordinator，并让它使用 create_subagents "
                 "继续创建 小小傻妞-child-coordinator；本节点不要写最终产物。"
             ),
             "role": "worker",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -137,11 +137,11 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建第一层 root coordinator。",
             "role": "worker",
             "allowed_tools": ["read_file", "write_file", "create_subagents"],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -168,10 +168,10 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "做 3 个高端现代家具品牌网站首页 HTML 文件。",
             "role": "worker",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -195,12 +195,12 @@ class TestCreateSubagentsToolCoordinatorSeed:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "研究东南亚市场环境，输出国家优先级和证据摘要。",
             "role": "child",
             "agent_name": "小傻妞-市场环境",
             "allowed_tools": ["read_file", "write_file"],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -229,7 +229,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "组织市场研究并汇总评分",
+            "batch_summary": "组织市场研究并汇总评分",
             "items": [{
                 "goal": "研究印尼、泰国、越南市场环境，汇总评分。",
                 "role": "worker",
@@ -268,7 +268,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
 
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({
-            "goal": "组织代理研究市场环境并交付报告",
+            "batch_summary": "组织代理研究市场环境并交付报告",
             "items": [{
                 "goal": (
                     "研究市场环境。每个子代理需要用统一创建入口建立至少2个孙代理负责细分研究，"
@@ -277,8 +277,8 @@ class TestCreateSubagentsToolCoordinatorPlan:
                 "role": "worker",
                 "agent_name": "小傻妞-市场环境",
                 "allowed_tools": ["read_file", "write_file", "create_subagents"],
+                "extra_write_roots": ["/tmp/project/deliverables"],
             }],
-            "extra_write_roots": ["/tmp/project/deliverables"],
         })
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -302,10 +302,10 @@ class TestCreateSubagentsToolCoordinatorPlan:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建第一层 root coordinator，并使用 create_subagents 创建下一层。",
             "role": "小傻妞-root-coordinator",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -328,16 +328,17 @@ class TestCreateSubagentsToolCoordinatorPlan:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建第一层 root coordinator，并使用 create_subagents 创建下一层。",
             "role": "coordinator",
             "agent_name": "小傻妞-root-coordinator",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
         assert params.role == "coordinator"
-        assert params.agent_name == "小傻妞-root-coordinator-1"
+        # 7101c9fa2 起单项也走 items；用户亲自取的单项名字保持原样，只有系统占位名才编号。
+        assert params.agent_name == "小傻妞-root-coordinator"
 
 
 class TestCreateSubagentsLogicalRefScopes:
@@ -367,16 +368,17 @@ class TestCreateSubagentsLogicalRefScopes:
         tool = CreateSubagentsTool(MagicMock())
         policy = tool.runtime_policy
         root = Path("/tmp/lock-logical-root")
-        scopes = authoritative_workspace_scopes(
-            workspace_root=root,
-            write_boundary=None,
-            policy=policy,
-            arguments={
-                "output_files": [str(root / "site" / "index.html")],
-                "input_refs": ["artifact://brief/1"],
-                "replacement_for_run_ids": ["run-1"],
-            },
-        )
+        arguments = {"items": [{
+            "goal": "按简报更新站点",
+            "output_files": [str(root / "site" / "index.html")],
+            "input_refs": ["artifact://brief/1"],
+            "replacement_for_run_ids": ["run-1"],
+        }]}
+        # 7101c9fa2 起静态策略不再按顶层参数取锁；逐项逻辑锁由 claim 前的 effective_resource_scopes 钩子给出。
+        assert authoritative_workspace_scopes(
+            workspace_root=root, write_boundary=None, policy=policy, arguments=arguments,
+        ) == ()
+        scopes = tool.effective_resource_scopes(arguments, None, root)
         assert not any(scope.startswith("workspace:") for scope in scopes)
         assert set(scopes) == {
             "logical:input_refs:artifact://brief/1",
@@ -952,6 +954,8 @@ class TestResourceScopePolicyNormalizationPerSeq269:
             call_id="c-1",
             source_protocol="test",
             arguments={"run_id": "r-1"},
+            # 与真实 ToolCall 对齐：7101c9fa2 起执行器会读宿主输入迁移事实（默认空）。
+            input_migration={},
         )
         request = ToolExecutorRequest(call=call, **vars(request))
         outcome = _invoke_with_operation_policy(

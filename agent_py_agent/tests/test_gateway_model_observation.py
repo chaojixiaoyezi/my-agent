@@ -450,7 +450,11 @@ def test_started_marker_survives_caller_failure_without_second_send(tmp_path, mo
 
 
 def test_original_gateway_runner_settles_decision_usage_once(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends import get_backend
+
     fixture = prepared(tmp_path)
+    # 原 runner 要真实跑完主模型；有 Home 时未选模型即未配置，构造后显式注入离线 echo 才会被保留。
+    fixture.agent.backend = get_backend("echo", fixture.agent.config)
     backend = install_backend(monkeypatch, fixture)
     result = request_execution._handle_gateway_request(fixture.agent, fixture.context.request_path)
     assert result["ok"] is True

@@ -2,7 +2,7 @@
 
 覆盖：私有文件内容相同跳过（inode/mtime 不变）、内容不同照写、损坏/空文件/非对象根/缺失文件
 照写（修复语义）、updater 原地改共享嵌套也照写、force_write 强制写、require_existing 语义不变；
-跳过前的安全状态核对（mc4-502）：0644 仍收紧到 0600、符号链接叶子被替换、硬链接被断开；
+跳过前的安全状态核对（mc4-502）：0644 仍收紧到 0600、符号链接叶子被拒绝（不跟随不改写）、硬链接被断开；
 落盘字节比较（mc4-501）：整数/浮点/布尔/负零等类型更正必须写且读回与返回值一致。
 """
 from __future__ import annotations
@@ -77,17 +77,16 @@ def test_same_content_wide_permissions_still_tightened(tmp_path: Path, write_cou
 
 
 def test_same_content_symlink_leaf_is_replaced(tmp_path: Path, write_counter):
-    # mc4-502：叶子是符号链接时写入会替换链接本身（基线行为）；跳过则链接保留——必须照写。
+    # mc4-502：内容相同也不能借跳写放过符号链接叶子；ec7217e44 起 header 以 nofollow 打开，链接叶子直接拒绝、不跟随也不改写。
     target = tmp_path / "real.json"
     _write_initial(target, {"a": 1})
     link = tmp_path / "link.json"
     link.symlink_to(target)
-    result = update_json_file_atomic(link, lambda current: {"a": 1})
-    assert write_counter[0] == 1
-    assert not link.is_symlink()  # 链接被替换成普通文件
-    assert _read_json(link) == {"a": 1}
+    with pytest.raises(OSError):
+        update_json_file_atomic(link, lambda current: pytest.fail("symlink updater ran"))
+    assert write_counter[0] == 0
+    assert link.is_symlink()  # 链接未被跟随或替换
     assert _read_json(target) == {"a": 1}  # 被指向的文件内容不变
-    assert result == {"a": 1}
 
 
 def test_same_content_hard_link_is_rewritten(tmp_path: Path, write_counter):

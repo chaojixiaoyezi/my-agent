@@ -13,6 +13,7 @@ from agent_py_agent.agent.gateway_parts import request_worker
 from agent_py_agent.agent.gateway_parts.io import read_json_file
 from agent_py_agent.tests.test_approval_retirement_lifecycle import (
     _foreground,
+    _offline_backend,
     approval,
     claim_http_worker_input,
     install_original_approval_loop,
@@ -170,6 +171,7 @@ def test_worker_finish_outer_retains_same_future_p3_and_native(tmp_path, monkeyp
 
     with seed.original_case(tmp_path, monkeypatch) as case:
         agent, _, _, _, server, _ = case
+        _offline_backend(agent)
         binding, _gate = claim_http_worker_input(case, monkeypatch)
         params, store = agent._current_run_params, agent.conversation_store
         old = store.claims.load_report(params.task_attributes['conversation_thread_id'])[0]

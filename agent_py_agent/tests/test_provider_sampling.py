@@ -46,7 +46,10 @@ def test_top_p_config_default_and_yaml_normalization(tmp_path):
     assert load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml").top_p is None
     path = tmp_path / "agent.yaml"
     path.write_text("top_p: 0.97\n", encoding="utf-8")
-    assert load_config(path).top_p == 0.97
+    # 采样参数只属于模型目录（a12fe40c5）：用户配置文件里的 top_p 是宿主专属键，忽略并告警，不进配置。
+    loaded = load_config(path)
+    assert loaded.top_p is None
+    assert "unknown config key: 'top_p'; ignored" in loaded.config_warnings
     normalized, warnings = normalize_agent_config({"top_p": "0.98"})
     assert normalized["top_p"] == 0.98 and not warnings
     normalized, warnings = normalize_agent_config({"top_p": "private-secret"})
@@ -214,7 +217,8 @@ def test_profile_save_clear_and_backend_freeze(tmp_path):
     assert after is not before and after.top_p == 0.98 and before.top_p == 0.97
     assert _profile_backend(host, first) is before
     op(host, "save_model", {"profile_id": key, "editing": True, "profile": {**row, "top_p": ""}})
-    assert selected_model_config(host).top_p == 0.7
+    # 采样只由目录模型决定（a12fe40c5）：清空后保持未声明、不发送，不回落部署配置里的 0.7。
+    assert selected_model_config(host).top_p is None
     assert first.top_p == 0.97
 
 

@@ -329,7 +329,8 @@ def test_history_around_stays_inside_anchor_thread_and_honors_filters(tmp_path):
     rows = store.list_recent(limit=10)
     anchor = next(row for row in rows if row.source_id == "2")
     tool = SessionSearchTool(SimpleNamespace(local_store=store))
-    result = json.loads(tool.execute({"around_id": anchor.id, "window": 10}).output)
+    # session_search 输入须带显式 mode（7101c9fa2），锚点窗口即 around。
+    result = json.loads(tool.execute({"mode": "around", "around_id": anchor.id, "window": 10}).output)
     assert result["context_kind"] == "same_thread_records"
     assert result["thread_id"] == "a"
     assert {row["title"] for row in result["messages"]} == {"0", "2", "4"}

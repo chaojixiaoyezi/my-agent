@@ -2,6 +2,7 @@
 
 import pytest
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.base import EchoBackend, ModelResponse
 from agent_py_agent.agent.backends.request_scope import provider_request_budget
 from agent_py_agent.agent.common.request_execution_ports import (
@@ -40,6 +41,8 @@ def test_actual_finally_closeout_resumes_or_preserves_unknown_and_same_p3(
         server,
         _close,
     ):
+        # 有 Home 时目录未选模型即未配置；构造后显式注入的 echo 实例才在模型作用域里保留，下方再替换它的生成入口。
+        agent.backend = get_backend("echo", agent.config)
         code, accepted = request(
             server,
             "POST",

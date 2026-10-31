@@ -7,6 +7,8 @@ import pytest
 
 from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
 from agent_py_agent.tests.test_memory_remove_crash_recovery import _CRASH_SCRIPT
 from agent_py_agent.tests.test_remember_learning_source_review import _agent
@@ -28,8 +30,10 @@ def test_search_then_crash_remove_recovers_via_remember(tmp_path):
     outcome = ConfirmedRememberWorkflow(agent).execute(dict(action='remove', entry_id=removed.target_entry_id, origin='user_explicit'))
     assert outcome.ok and json.loads(outcome.output)['saved'], outcome
     assert all(not c.content for c in agent.memory_candidates.list())
-    events = [json.loads(row) for row in agent.memory.path.read_text().splitlines()]
-    assert not any(e['action'] == 'touch' and e['entry_id'] == removed.target_entry_id for e in events)
+    # 恢复收尾发表同代根后 memory.jsonl 只剩根标记；已删条目在已提交事实里只能剩墓碑，缓存的访问不得落盘。
+    events = MemoryGenerationStore(agent.memory.path).events()
+    assert events is not None
+    assert [e.action for e in events if e.entry_id == removed.target_entry_id] == ['remove']
 
 
 # LLM: SQLite写行前失败保留实际外置正文；不靠直接伪造路径构造孤儿状态。
@@ -79,11 +83,15 @@ def test_delayed_local_projection_cannot_restore_removed_content(tmp_path):
     memory = JsonlMemory(tmp_path / 'memory.jsonl', local_store=store)
     target = memory.add('user', 'LATE_LOCAL_PRIVATE', kind='fact')
     JsonlMemory(memory.path, local_store=store).remove(target.entry_id)
-    memory._index_record(target)
+    # 文本投影已归owner内读索引且只从已提交事实重建；旧实例补跑投影不能把已删正文写回任何派生库。
+    memory.index_all()
     record_id = store.make_record_id('memory', target.entry_id)
     assert store.get_record(record_id) is None
     path = store._content_file(record_id)
     assert not path.exists() or not path.read_text()
+    read_index = MemoryReadIndex(memory.path).path
+    assert not read_index.exists() or b'LATE_LOCAL_PRIVATE' not in read_index.read_bytes()
+    assert memory.search_report('LATE_LOCAL_PRIVATE', 5)[0] == []
 
 
 # LLM: 删除插在真实单条embedding返回之后，使用独立JsonlMemory实例；向量持久写仍走原入口。

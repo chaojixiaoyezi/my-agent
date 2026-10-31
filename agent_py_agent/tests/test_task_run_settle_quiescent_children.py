@@ -428,12 +428,15 @@ def test_b4_unavailable_runtime_authority_keeps_blocked_child_visible(tmp_path, 
 # LLM: 新attempt通过原协议重开TaskRun；即使state.json字节不变且主库mtime不变，WAL也应立即打破静止缓存。
 # 函数用途: 验证静止owner恢复执行后能马上被直接探针和完整发现入口重新找到。
 def test_b4_new_attempt_reopens_task_and_invalidates_quiet_owner_cache(tmp_path, monkeypatch):
+    from contextlib import closing
+
     from agent_py_agent.agent import owner_wake_discovery as discovery
 
     owners, home, runtime, tree, path = _b4_quiet_owner(tmp_path)
     monkeypatch.setattr(discovery, "_FACT_MIN_CACHED_SECONDS", 0.0)
     state_bytes = path.read_bytes()
-    with runtime._runtime_connection() as anchor:
+    # 领域借用现在包着写代际栅栏，WAL checkpoint 会先被 BEGIN IMMEDIATE 包进事务；锚连接改用原物理连接。
+    with closing(runtime._runtime_connect()) as anchor:
         anchor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         assert discover_wake_pending_owners(owners) == []
         assert discover_wake_pending_owners(owners) == []
@@ -496,13 +499,45 @@ def test_b4_cold_probe_does_not_initialize_or_migrate_legacy_db(tmp_path, layout
     assert not discovery._RUNTIME_REPO_CACHE
 
 
-# LLM: 同时测字母顺序与实际倒序扫描；静止项必须continue，不得提前把owner整体判静止。
+# LLM: 同时测字母顺序与倒序扫描；静止项必须continue，不得提前把owner整体判静止。
+#   分页器按 os.scandir 的目录原序扫描（ext4 哈希序随文件系统而变），这里只把 agents 根的列举固定成名字倒序，
+#   让 z_ 静止项确定先于活跃兄弟被读到；判据和分页逻辑仍走原实现。
 # 函数用途: 验证一个静止子代理不屏蔽同owner下另一棵树的活跃子代理。
 @pytest.mark.parametrize("quiet_name,active_name", [("a_quiescent", "z_active"), ("z_quiescent", "a_active")])
 def test_b4_quiescent_child_before_active_sibling_still_discovers_owner(tmp_path, monkeypatch, quiet_name, active_name):
+    import os
+    from pathlib import Path
+
     from agent_py_agent.agent import owner_wake_discovery as discovery
+    from agent_py_agent.agent.subagents.services.persistence import locator_hygiene
 
     owners, home, runtime, _tree_row, path = _b4_quiet_owner(tmp_path)
+    real_scandir, agents_root = locator_hygiene.os.scandir, home / "agents"
+
+    # LLM: 只给 agents 根返回同一批真实 DirEntry 的名字倒序迭代器，其它路径/FD 原样透传。
+    # 类用途: 提供分页器需要的迭代与 close 接口。
+    class _ReverseNameEntries:
+        def __init__(self, entries):
+            self._entries = iter(sorted(entries, key=lambda entry: entry.name, reverse=True))
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._entries)
+
+        def close(self):
+            self._entries = iter(())
+
+    # LLM: 真实列举后立即关闭原迭代器，不改变目录内容或 DirEntry 的类型判断。
+    # 函数用途: 固定 agents 根的扫描顺序，消除文件系统目录序差异。
+    def reverse_name_scandir(target=".", *args, **kwargs):
+        if isinstance(target, str | os.PathLike) and Path(target) == agents_root:
+            with real_scandir(target) as entries:
+                return _ReverseNameEntries(list(entries))
+        return real_scandir(target, *args, **kwargs)
+
+    monkeypatch.setattr(locator_hygiene.os, "scandir", reverse_name_scandir)
     quiet = home / "agents" / quiet_name / "state.json"
     quiet.parent.mkdir(parents=True)
     path.rename(quiet)

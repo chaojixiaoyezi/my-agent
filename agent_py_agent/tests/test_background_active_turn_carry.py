@@ -61,7 +61,7 @@ from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
     carried_tool_call_records_for_requests,
 )
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
+from agent_py_agent.agent.settings.deployment_policy import RuntimeGuardPolicy
 from agent_py_agent.agent.user_space.run_workspace import run_workspace_owner_home
 
 _FOREGROUND = "gwreq-foreground-1"
@@ -245,7 +245,7 @@ def _wake_params(tmp_path: Path, task_root: Path, *, config: dict | None = None,
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), **(config or {})), tmp_path,
     )
     if guard:
-        agent.runtime_guard_policy = runtime_guard_policy(overrides=guard)
+        agent.runtime_guard_policy = RuntimeGuardPolicy(**guard)
     store = agent.conversation_store
     thread = store.threads.get_or_create({
         "canonical_user_id": "user-1", "channel": "internal", "channel_conversation_id": "thread-wake-error",
@@ -313,14 +313,15 @@ def test_a_legacy_wake_reports_an_unreadable_task_index(tmp_path) -> None:
 
 def test_incomplete_carry_fails_closed_only_for_one_shot_orchestration() -> None:
     incomplete = SimpleNamespace(task_attributes={CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR: _UNREADABLE_OWNER})
-    create = {"tool": "create_subagents", "goal": _CHILD_GOAL}
+    create = {"tool": "create_subagents", "items": [{"goal": _CHILD_GOAL}]}
     batch = {"tool": "create_subagents", "items": [
         {"goal": "甲", "replacement_for_run_ids": ["subagent-old"]}, {"goal": "乙"},
     ]}
 
     assert _one_shot_blocked_by_incomplete_carry(incomplete, create)
     assert _one_shot_blocked_by_incomplete_carry(incomplete, batch)
-    assert not _one_shot_blocked_by_incomplete_carry(incomplete, {**create, "replacement_for_run_ids": ["subagent-old"]})
+    replacement = {"tool": "create_subagents", "items": [{"goal": _CHILD_GOAL, "replacement_for_run_ids": ["subagent-old"]}]}
+    assert not _one_shot_blocked_by_incomplete_carry(incomplete, replacement)
     assert not _one_shot_blocked_by_incomplete_carry(incomplete, {"tool": "read_file", "path": "a.txt"})
     assert not _one_shot_blocked_by_incomplete_carry(SimpleNamespace(task_attributes={}), create)
     assert "replacement_for_run_ids" in ERROR_CONTRACTS["TOOL_ONE_SHOT_HISTORY_INCOMPLETE"].recovery_hint
@@ -367,14 +368,14 @@ def test_compact_retry_keeps_the_first_reads_incomplete_carry(tmp_path, monkeypa
     assert [item.get(CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR) for item in seen] == [_UNREADABLE_OWNER] * 2
 
 
-# 守卫与创建边界同口径（Codex 复核的两个反例）：item 的字段覆盖顶层，接替编号去掉空白后必须非空。
+# 守卫与创建边界同口径（Codex 复核的两个反例）：顶层派工字段不再广播到 items（整批无效即无接替），接替编号去掉空白后必须非空。
 @pytest.mark.parametrize(("carry_incomplete", "payload", "expected_ids", "blocked"), [
     (True, {"goal": "返回一句确认", "replacement_for_run_ids": [" "]}, [[]], True),
     (True, {"replacement_for_run_ids": ["old"], "items": [{"goal": "返回一句确认", "replacement_for_run_ids": []}]},
      [[]], True),
     (True, {"items": [{"replacement_for_run_ids": ["old"]}]}, [[]], True),
     (False, {"goal": "返回一句确认"}, [[]], False),
-    (True, {"replacement_for_run_ids": ["old"], "items": [{"goal": "返回一句确认"}]}, [["old"]], False),
+    (True, {"replacement_for_run_ids": ["old"], "items": [{"goal": "返回一句确认"}]}, [[]], True),
     (True, {"items": [{"goal": "返回一句确认", "replacement_for_run_ids": ["old"]}]}, [["old"]], False),
 ])
 def test_fail_closed_guard_reads_replacements_like_the_creation_boundary(

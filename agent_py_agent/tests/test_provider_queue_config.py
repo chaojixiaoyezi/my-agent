@@ -38,7 +38,8 @@ def test_provider_limit_yaml_is_effective_but_user_config_cannot_change_it(tmp_p
     before = path.read_bytes()
     denied = execute_registry_test_call(agent.tools, 'user_config',
         {'action': 'set', 'key': 'provider_max_concurrent_requests', 'value': '0'})
-    assert not denied.ok and 'PARAMETER_BOUNDARY' in denied.output
+    # 并发上限归宿主部署配置（a12fe40c5），参数中心按只读来源拒绝。
+    assert not denied.ok and 'PARAMETER_SOURCE_READ_ONLY' in denied.output
     assert path.read_bytes() == before and agent.config.provider_max_concurrent_requests == 2
     spec = parameter_registry()['provider_max_concurrent_requests']
     assert not spec.writable and spec.default == 0

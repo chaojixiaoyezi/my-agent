@@ -24,6 +24,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -58,6 +59,7 @@ from agent_py_agent.agent.gateway_parts import control_service, request_context,
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.recovery import terminalize_gateway_request_file
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 from agent_py_agent.cli.gateway_loops import _build_background_scheduler
 
 _SESSION_TASK_LINE = "另一个会话派来一个任务"
@@ -496,6 +498,19 @@ def _agent_config(tmp_path: Path, **owner: str) -> AgentConfig:
     )
 
 
+# LLM: 有 Home 时模型只由 owner 的 v6 目录决定，AgentConfig 里的连接字段不再生效；这里把同一套脚本化连接
+#   （真实 openai_compatible 后端，传输仍由 http.post_json 替身接住）登记成本 owner 的目录模型并设为默认。
+#   initial=True 时传入的是管理员宿主：登记后指定为其他用户（含群）的初始共享模型，群 owner 自己写目录需群授权。
+# 函数用途: 给真实 SimpleAgent 选好脚本化模型，前台与后台回合经 selected_model_scope 解析到同一个目录模型。
+def _select_scripted_model(agent: object, config: AgentConfig, *, initial: bool = False) -> None:
+    profile_id = str(uuid4())
+    execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": {
+        "model_backend": config.model_backend, "model_name": config.model_name, "api_base": config.api_base,
+        "api_key": config.api_key, "model_context_window_tokens": config.model_context_window_tokens,
+    }})
+    execute_model_profile_operation(agent, "set_initial" if initial else "set_default", {"profile_id": profile_id})
+
+
 # 函数用途: 建好某个 agent 的真实 Gateway 请求目录并返回路径。
 def _ready_gateway_paths(agent: SimpleAgent) -> object:
     paths = gateway_paths(agent)
@@ -506,7 +521,9 @@ def _ready_gateway_paths(agent: SimpleAgent) -> object:
 
 # 函数用途: 搭一个真实环境：真实 SimpleAgent、真实 Gateway 路径、三个 chat 会话、Gateway 同款后台调度器。
 def _real_chain(tmp_path: Path, monkeypatch) -> RealChain:
-    agent = SimpleAgent(_agent_config(tmp_path), tmp_path / "root")
+    config = _agent_config(tmp_path)
+    agent = SimpleAgent(config, tmp_path / "root")
+    _select_scripted_model(agent, config)
     wire = ScriptedWire()
     monkeypatch.setattr(http, "post_json", wire)
     chain = RealChain(agent, _ready_gateway_paths(agent), wire, {},
@@ -518,8 +535,10 @@ def _real_chain(tmp_path: Path, monkeypatch) -> RealChain:
 
 # 函数用途: 同一个 home 下另一个普通用户 owner（Gateway 多 owner 的真实形态），用来对照"跨 owner 不列出"。
 def _other_owner_chain(chain: RealChain, tmp_path: Path) -> RealChain:
-    agent = SimpleAgent(_agent_config(tmp_path, my_agent_owner_provider="feishu", my_agent_owner_kind="user",
-                                      my_agent_owner_id="rc-other"), tmp_path / "root-other")
+    config = _agent_config(tmp_path, my_agent_owner_provider="feishu", my_agent_owner_kind="user",
+                           my_agent_owner_id="rc-other")
+    agent = SimpleAgent(config, tmp_path / "root-other")
+    _select_scripted_model(agent, config)
     return RealChain(agent, _ready_gateway_paths(agent), chain.wire, {}, scheduler=None)
 
 

@@ -116,35 +116,48 @@ def test_ordinary_formal_permission_failure_keeps_pending_no_retry(tmp_path, mon
     assert mem._pending_access == {"inactive": 1.0}
 
 
+# LLM: 788f9b847起正式写入后不再写旧LocalStore文本投影；正式提交后的下一原末门拒绝仍须在付费embedding前同对象抛出。
+# 函数用途: 验证正式partial保留、旧SQL投影未被触达且embedding零调用。
 @pytest.mark.parametrize("error_type", SOURCE_TYPES)
-def test_actual_local_sql_native_stops_before_next_embedding_with_formal_partial(tmp_path, monkeypatch, error_type):
+def test_actual_post_formal_native_stops_before_next_embedding_with_formal_partial(tmp_path, monkeypatch, error_type):
     mem, door, embedder = memory(tmp_path, local=True, ops=True, semantic=True)
-    error = error_type("actual SQL writer source rejected")
+    error = error_type("actual post-formal source rejected")
+    sql_calls = []
     original = mem.local_store._coordinator_transaction
-    def reject_at_transaction(operation, **kwargs):
-        # 原真实upsert已准备/写过正文，下一次原事务末门拒绝。
-        door.error = error
-        door.reject_at = door.calls + 1
+    def record_transaction(operation, **kwargs):
+        sql_calls.append(operation)
         return original(operation, **kwargs)
-    monkeypatch.setattr(mem.local_store, "_coordinator_transaction", reject_at_transaction)
+    monkeypatch.setattr(mem.local_store, "_coordinator_transaction", record_transaction)
+    write = jsonl.write_private_text_file_atomic_unlocked
+    def reject_after_formal(path, raw, **kwargs):
+        result = write(path, raw, **kwargs)
+        if path == mem.path:
+            # 正式正文已落盘，下一次原末门拒绝。
+            door.error = error
+            door.reject_at = door.calls + 1
+        return result
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", reject_after_formal)
     with commits.global_write_commit_scope(door), pytest.raises(error_type) as caught:
         mem.add("user", "formal before index")
-    assert caught.value is error and embedder.calls == []
+    assert caught.value is error and embedder.calls == [] and sql_calls == []
     assert mem.all()[0].content == "formal before index"
 
 
-def test_new_revocation_after_sql_success_is_checked_before_document_embedding(tmp_path, monkeypatch):
+# LLM: 正式提交成功后新发生的撤权由document embedding前的原当前核验拦下，不付费、不回滚正式事实。
+# 函数用途: 验证正式成功后的撤权在付费embedding之前生效。
+def test_new_revocation_after_formal_success_is_checked_before_document_embedding(tmp_path, monkeypatch):
     mem, door, embedder = memory(tmp_path, local=True, semantic=True)
-    original = mem.local_store._coordinator_transaction
-    def revoke_after_success(operation, **kwargs):
-        result = original(operation, **kwargs)
-        door.reject_at = door.calls + 1
+    write = jsonl.write_private_text_file_atomic_unlocked
+    def revoke_after_success(path, raw, **kwargs):
+        result = write(path, raw, **kwargs)
+        if path == mem.path:
+            door.reject_at = door.calls + 1
         return result
-    monkeypatch.setattr(mem.local_store, "_coordinator_transaction", revoke_after_success)
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", revoke_after_success)
     with commits.global_write_commit_scope(door), pytest.raises(LocalControlCoordinatorUnavailable) as caught:
-        mem.add("user", "previous SQL success")
+        mem.add("user", "previous formal success")
     assert caught.value is door.error and not embedder.calls
-    assert mem.all()[0].content == "previous SQL success"
+    assert mem.all()[0].content == "previous formal success"
 
 
 def test_query_embedding_current_check_precedes_provider_and_search_not_retried(tmp_path):
@@ -274,38 +287,51 @@ def test_no_embedder_delete_uses_same_c_vector_and_text_cache_objects(tmp_path):
     assert json.loads(cache._path.read_bytes()) == {}
 
 
-@pytest.mark.parametrize("offset", [1, 2, 3])
-def test_condense_archive_before_formal_failure_is_exact_partial(tmp_path, offset):
-    mem, door, _embedder = memory(tmp_path)
-    records = [MemoryRecord("user", "fact-" + str(i), entry_id="entry-" + str(i), created_at=i + 1,
+# LLM: 788f9b847起condense只按字符预算转冷热层，旧archive+删除已退役；正文超预算才发表新代次，拒绝落在根发表之前。
+# 函数用途: 构造超过热库字符预算的旧单文件正式记忆，返回原记录。
+def _over_budget_records(mem):
+    records = [MemoryRecord("user", f"fact-{i}:" + "x" * 3000, entry_id="entry-" + str(i), created_at=i + 1,
         attributes={"origin": "user_explicit" if i == 0 else "reviewed"}) for i in range(8)]
+    assert sum(len(row.content) for row in records) > mem.memory_policy().active_library_max_chars
     mem.path.write_text("".join(row.to_json() + "\n" for row in records), encoding="utf-8")
+    return records
+
+
+# LLM: 冷热分片写入期间的原末门拒绝必须同对象抛出；旧权威文件、可见事实不变，不发表根也不写旧archive。
+# 函数用途: 验证代次根发表前失败的准确partial。
+@pytest.mark.parametrize("offset", [1, 2, 3])
+def test_condense_tier_publish_before_root_failure_is_exact_partial(tmp_path, offset):
+    mem, door, _embedder = memory(tmp_path)
+    records = _over_budget_records(mem)
     before = mem.path.read_bytes()
     door.reject_at = door.calls + offset
     with commits.global_write_commit_scope(door), pytest.raises(LocalControlCoordinatorUnavailable) as caught:
         mem.condense(max_records=4, target_records=2, max_ratio=0.25)
     assert caught.value is door.error and mem.path.read_bytes() == before
-    archive = mem.path.with_name(mem.path.name + ".archive.jsonl")
-    assert archive.exists() is (offset == 3)
-    if archive.exists():
-        assert len(archive.read_text().splitlines()) == 2
-        assert "entry-0" not in archive.read_text()
+    assert not mem.path.with_name(mem.path.name + ".manifest.json").exists()
+    assert not mem.path.with_name(mem.path.name + ".archive.jsonl").exists()
+    assert [(row.entry_id, row.content) for row in mem.all()] == [(row.entry_id, row.content) for row in records]
 
 
-def test_condense_keeps_original_ratio_explicit_and_root_outside_scan(tmp_path, monkeypatch):
+# LLM: 旧ratio/条数参数不再授权删除，转冷不改版本；扫描读取仍在原末门之外进行。
+# 函数用途: 验证condense只转层不遗忘，且读取不进入Root。
+def test_condense_ignores_legacy_ratio_and_keeps_root_outside_scan(tmp_path, monkeypatch):
     mem, door, _embedder = memory(tmp_path)
-    records = [MemoryRecord("user", str(i), entry_id="entry-" + str(i), created_at=i + 1,
-        attributes={"origin": "user_explicit" if i == 0 else "reviewed"}) for i in range(8)]
-    mem.path.write_text("".join(row.to_json() + "\n" for row in records), encoding="utf-8")
-    all_records = mem.all
-    def read():
-        assert not door.inside
-        return all_records()
-    monkeypatch.setattr(mem, "all", read)
+    records = _over_budget_records(mem)
+    reads = []
+    for name in ("all", "active_records"):
+        original = getattr(mem, name)
+        def read(original=original, name=name):
+            assert not door.inside
+            reads.append(name)
+            return original()
+        monkeypatch.setattr(mem, name, read)
     with commits.global_write_commit_scope(door):
-        removed = mem.condense(max_records=4, target_records=2, max_ratio=0.25)
-    assert [row.entry_id for row in removed] == ["entry-1", "entry-2"]
-    assert len(mem.all()) == 6 and mem.all()[0].entry_id == "entry-0"
+        moved = mem.condense(max_records=4, target_records=2, max_ratio=0.25)
+    assert reads and moved and door.calls
+    assert not mem.path.with_name(mem.path.name + ".archive.jsonl").exists()
+    assert {row.entry_id for row in moved} < {row.entry_id for row in mem.all()}
+    assert [(row.entry_id, row.version) for row in mem.all()] == [(row.entry_id, 1) for row in records]
 
 
 def test_default_jsonl_retains_original_virtual_hooks_and_no_new_global_guard(tmp_path, monkeypatch):

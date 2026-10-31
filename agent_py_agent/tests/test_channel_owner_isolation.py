@@ -11,6 +11,7 @@ from agent_py_agent.agent.adapter.manager import ChannelManager, configure_gatew
 from agent_py_agent.agent.adapter.protocol import IncomingMessage
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.capability.channel_message_target import resolve_message_target
 from agent_py_agent.agent.conversation.background_routing import (
     BackgroundRouteDependencies,
@@ -87,6 +88,8 @@ def test_true_http_freezes_distinct_owner_before_queue_and_base_does_not_receive
             assert row['owner_id'] == resolve_owner_home(base.home_paths.root, expected).owner_id
             agent = _resolve_request_agent(base, row)
             assert agent.home_paths.owner_id == row['owner_id'] and agent is not base
+            # 有 Home 的 owner agent 未选目录模型即未配置；注入 echo 让这次合成问候真正执行完（归属判定不变）。
+            agent.backend = get_backend('echo', agent.config)
             assert _process_gateway_request_path(base, paths, paths.inbox/(receipt['request_id']+'.json'), 'owner-test-worker')
             finished = json.loads((paths.done/(receipt['request_id']+'.json')).read_text())
             assert finished['owner_id'] == row['owner_id']

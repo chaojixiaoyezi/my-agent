@@ -130,10 +130,13 @@ def test_user_config_view_and_search_never_show_structured_secrets(tmp_path, mon
 
 def test_settings_overview_show_and_search_never_show_structured_secrets(tmp_path, monkeypatch):
     config = _running(_user_config(tmp_path))
-    for text in ("/settings", "/settings show model_custom_headers", "/settings show mcp_servers",
-                 "/settings search mcp", "/settings search headers"):
+    for text in ("/settings", "/settings show mcp_servers", "/settings search mcp", "/settings search headers"):
         result = _settings(monkeypatch, config, text)
         assert result.ok and not _leaks(result.message), text
+    # 请求头随模型连接设置迁入 v6 模型目录（a12fe40c5）：参数中心不再有该参数，查看也不能回显配置里的旧值。
+    headers = _settings(monkeypatch, config, "/settings show model_custom_headers")
+    assert headers.ok is False and "没有名为 model_custom_headers 的参数" in headers.message
+    assert not _leaks(headers.message)
     assert "{'coder': 600}" in _settings(monkeypatch, config, "/settings show runner_timeout_by_role").message
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import importlib
 import json
 import tracemalloc
 from types import SimpleNamespace
@@ -10,7 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.backends.base import ModelResponse
-from agent_py_agent.agent.conversation import ConversationStore, compact_request_budget
+from agent_py_agent.agent.conversation import (
+    ConversationStore,
+    compact_request_budget,
+    message_scan,
+)
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
     load_conversation_compact_source,
@@ -59,6 +64,22 @@ def _case(tmp_path, count=128):
     return agent, thread, ids, expected.digest(), body_chars
 
 
+# 摘要与冷转路径在调用内惰性导入的生产模块；测量前先导入，模块编译内存不计为来源正文驻留。
+_LAZY_COMPACT_MODULES = (
+    'agent_py_agent.agent.agent_core.provider_transient_auto_resume',
+    'agent_py_agent.agent.backends.http',
+    'agent_py_agent.agent.backends.model_metadata',
+    'agent_py_agent.agent.conversation.compact_checkpoint_scan',
+    'agent_py_agent.agent.conversation.compact_remote',
+    'agent_py_agent.agent.conversation.compact_summary_view',
+    'agent_py_agent.agent.conversation.compact_threshold_policy',
+    'agent_py_agent.agent.conversation.compact_tool_refs',
+    'agent_py_agent.agent.conversation.compact_tool_summary',
+    'agent_py_agent.agent.conversation.run_claim',
+    'agent_py_agent.agent.tooling.operation_verification',
+)
+
+
 @pytest.mark.parametrize('count', [128, 256])
 def test_selected_history_to_summary_commit_releases_source_bodies(tmp_path, monkeypatch, count):
     agent, thread, ids, expected, body_chars = _case(tmp_path, count=count)
@@ -76,7 +97,24 @@ def test_selected_history_to_summary_commit_releases_source_bodies(tmp_path, mon
         resident.append(tracemalloc.get_traced_memory()[0])
         return ModelResponse(text='已完整核对原始材料，保留待办及来源。', backend='fake')
 
+    # LLM: CAS 后的冷转（f74d1161e）按固定冷段分批读写；单独记录其增量峰值，不让段缓冲冒充来源整份驻留，也不替换冷转。
+    # 函数用途: 透传原冷转并记录其前后的 tracemalloc 峰值。
+    original_rotate = message_scan.rotate_committed_transcript
+    rotation = {}
+
+    def measured_rotate(*args, **kwargs):
+        current, rotation['peak_before'] = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        try:
+            return original_rotate(*args, **kwargs)
+        finally:
+            rotation['growth'] = tracemalloc.get_traced_memory()[1] - current
+            tracemalloc.reset_peak()
+
     monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response', generate)
+    monkeypatch.setattr(message_scan, 'rotate_committed_transcript', measured_rotate)
+    for name in _LAZY_COMPACT_MODULES:
+        importlib.import_module(name)
     gc.collect()
     tracemalloc.start()
     try:
@@ -93,8 +131,12 @@ def test_selected_history_to_summary_commit_releases_source_bodies(tmp_path, mon
     chain = committed_compact_checkpoint_chain(agent, result.thread)
     assert len(chain) == 1 and chain[0]['source_message_ids'] == ids
     assert len(source.messages) == len(ids)
-    print(f'source summary body={body_chars} peak={peak} resident={max(resident)} calls={calls}')
+    assert rotation, '提交后必须经原冷转把已覆盖历史转入冷段'
+    peak = max(peak, rotation['peak_before'])
+    print(f'source summary body={body_chars} peak={peak} rotation={rotation["growth"]} resident={max(resident)} calls={calls}')
     assert peak < body_chars // 2, '选中历史或摘要provider正文仍在整份驻留'
+    # 冷转驻留只随单个冷段（读入行与拼接副本）增长，不随来源总量增长。
+    assert rotation['growth'] < 3 * message_scan._TRANSCRIPT_SEGMENT_BYTES < body_chars, '冷转仍整份驻留已覆盖历史'
 
 
 # LLM: 只给原入口传入同次scope和真实provider面，不替换reader/分段器/检查点/CAS；额外参数用于边界控制。

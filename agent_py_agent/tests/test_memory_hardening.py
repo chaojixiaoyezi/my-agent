@@ -17,6 +17,7 @@ from agent_py_agent.agent.local_storage import (
 from agent_py_agent.agent.memory_store import JsonlMemory, MemoryRecord, MemorySubjectConflict
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.memory_store.candidates import CandidateService
+from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.prompting_parts.memory_context import memory_context_text
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
@@ -138,6 +139,11 @@ def test_hard_delete_scrubs_authority_candidates_ops_and_indexes(tmp_path: Path)
         kind="fact",
         attributes={"origin": "user_explicit"},
     )
+    # 正式写入不再双写旧LocalStore投影：按旧库手工播种该副本，并真实追平owner内读索引，删除必须一并清掉两者。
+    local_store.upsert_record(source_type="memory", source_id=added.entry_id, title="fact:user", content=secret)
+    assert memory.index_all() == 1
+    read_index_path = MemoryReadIndex(memory.path).path
+    assert secret.encode("utf-8") in read_index_path.read_bytes()
     local_id = local_store.make_record_id("memory", added.entry_id)
     indexed = local_store.get_record(local_id)
     assert indexed is not None
@@ -161,6 +167,7 @@ def test_hard_delete_scrubs_authority_candidates_ops_and_indexes(tmp_path: Path)
     assert memory.all() == []
     assert local_store.get_record(local_id) is None
     assert not indexed_path.exists() or indexed_path.read_text(encoding="utf-8") == ""
+    assert not read_index_path.exists() or secret.encode("utf-8") not in read_index_path.read_bytes()
     for path in (
         memory.path,
         candidates.path,

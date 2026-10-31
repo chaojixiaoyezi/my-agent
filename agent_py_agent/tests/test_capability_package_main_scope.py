@@ -142,7 +142,7 @@ def test_removed_package_still_allows_real_model_turn_to_close_original_task(tmp
 
 def test_child_remains_strict_after_same_package_is_removed(tmp_path):
     agent, store, entries = _agent(tmp_path)
-    assert CreateSubagentsTool(agent).execute({"goal": "整理已授权资料", "allowed_skills": ["capability:story-a"],
+    assert CreateSubagentsTool(agent).execute({"items": [{"goal": "整理已授权资料", "allowed_skills": ["capability:story-a"]}],
                                                "defer_start": True}).ok
     task = agent.subagents.list_runs()[0]
     _invalidate(agent, store, entries[0], "removed")

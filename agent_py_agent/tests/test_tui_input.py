@@ -2104,8 +2104,11 @@ def test_wp15_goal_modal_mouse_keys_and_single_escape(monkeypatch, keys) -> None
             await wait_app(app, lambda: app.is_running and app.render_counter > 0, '应用首帧')
             editor = asyncio.create_task(tui_goal_editor.open_goal_editor(app, params))
             try:
+                # 合并键绑定按 (焦点窗口, 控件集) 缓存，且沿重绘后才登记的父级收集模态绑定；首帧前按键会把缺少模态 Esc 的
+                # 绑定集缓存下来（CI 慢机上 F6 先于浮层首次重绘到达时稳定复现），所以还要等焦点窗口已登记父级。
                 await wait_app(app, lambda: getattr(app, '_my_agent_goal_editor_open', False)
-                               and app.current_buffer.text == '保留Goal草稿', 'Goal编辑器就绪')
+                               and app.current_buffer.text == '保留Goal草稿'
+                               and app.layout.get_parent(app.layout.current_window) is not None, 'Goal编辑器就绪')
                 processor = app.key_processor
                 for enabled in (False, True):
                     codes = {'escape': Keys.Escape, 'f6': Keys.F6, 'f14': Keys.F14}

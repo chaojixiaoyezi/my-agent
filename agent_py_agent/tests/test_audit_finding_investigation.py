@@ -96,8 +96,10 @@ def test_related_finding_creates_real_audit_descendant_and_reuses_retry(tmp_path
         root_id=audit_id,
     )
     params = {
-        "goal": "沿原始记录核对相关时间线并提交证据",
-        "related_finding_id": "finding-a",
+        "items": [{
+            "goal": "沿原始记录核对相关时间线并提交证据",
+            "related_finding_id": "finding-a",
+        }],
         "defer_start": True,
     }
 
@@ -153,15 +155,13 @@ def test_related_finding_rejects_missing_or_cross_owner_fact(tmp_path):
 
     cross_owner = CreateSubagentsTool(agent).execute(
         {
-            "goal": "核对证据",
-            "related_finding_id": "finding-a",
+            "items": [{"goal": "核对证据", "related_finding_id": "finding-a"}],
             "defer_start": True,
         }
     )
     missing = CreateSubagentsTool(agent).execute(
         {
-            "goal": "核对另一条证据",
-            "related_finding_id": "finding-missing",
+            "items": [{"goal": "核对另一条证据", "related_finding_id": "finding-missing"}],
             "defer_start": True,
         }
     )
@@ -183,13 +183,15 @@ def test_related_finding_rejects_forged_relation_attributes(tmp_path):
 
     result = CreateSubagentsTool(agent).execute(
         {
-            "goal": "核对证据",
-            "attributes": {
-                "audit_finding_relation": {
-                    "schema_version": "audit-finding-investigation.v1",
-                    "finding_id": "finding-a",
-                }
-            },
+            "items": [{
+                "goal": "核对证据",
+                "attributes": {
+                    "audit_finding_relation": {
+                        "schema_version": "audit-finding-investigation.v1",
+                        "finding_id": "finding-a",
+                    }
+                },
+            }],
             "defer_start": True,
         }
     )
@@ -226,8 +228,7 @@ def test_audit_clear_racing_investigation_create_cancels_new_run(
 
     result = CreateSubagentsTool(agent).execute(
         {
-            "goal": "核对证据",
-            "related_finding_id": "finding-a",
+            "items": [{"goal": "核对证据", "related_finding_id": "finding-a"}],
             "defer_start": True,
         }
     )
@@ -254,4 +255,4 @@ def test_create_subagents_schema_exposes_related_finding_id():
 
     schema = build_create_subagents_model_spec().input_schema
 
-    assert schema["properties"]["related_finding_id"]["type"] == "string"
+    assert schema["properties"]["items"]["items"]["properties"]["related_finding_id"]["type"] == "string"

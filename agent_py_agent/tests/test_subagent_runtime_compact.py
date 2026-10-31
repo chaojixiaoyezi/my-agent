@@ -222,7 +222,7 @@ def test_subagent_uses_own_conversation_thread_for_forced_compact_and_retry(
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
             model_context_window_tokens=128_000,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
         ),
         tmp_path,
     )
@@ -302,7 +302,7 @@ def test_subagent_provider_overflow_compacts_unfinished_tool_archive_before_retr
         enable_tools=True, stream_enabled=False, my_agent_home=str(tmp_path / "home"),
         max_tool_rounds=0,
         model_context_window_tokens=128_000,
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_trigger_percent=90,
     ), tmp_path)
     task = agent.subagents.create_run(
         goal="在长工具链发生上下文压力后继续完成子任务",
@@ -430,7 +430,7 @@ def test_subagent_compact_retry_keeps_exact_attempt_authorized_for_later_tools(
             enable_tools=True,
             my_agent_home=str(tmp_path / "home"),
             model_context_window_tokens=128_000,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
         ),
         tmp_path,
     )
@@ -557,7 +557,7 @@ def test_subagent_preflight_compacts_large_completed_history_before_sampling(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
             model_context_window_tokens=64_000,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
         ),
         tmp_path,
     )

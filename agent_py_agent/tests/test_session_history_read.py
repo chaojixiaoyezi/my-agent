@@ -68,7 +68,7 @@ def test_long_message_is_read_back_exactly_in_bounded_chunks(tmp_path):
     message_id = owner.rows[0].message_id
     chunks, offset = [], 0
     while offset is not None:
-        page = _call(owner.agent, message_id=message_id, offset=offset, max_chars=6_000)
+        page = _call(owner.agent, mode="message", message_id=message_id, offset=offset, max_chars=6_000)
         assert page["found"] and page["role"] == "user" and len(page["content"]) <= 6_000
         assert page["total_chars"] == len(_LONG) and page["scope_resolution"]["thread_source"] == "current_runner_context"
         chunks.append(page["content"])
@@ -79,27 +79,34 @@ def test_long_message_is_read_back_exactly_in_bounded_chunks(tmp_path):
 
 def test_read_bounds_offsets_and_projects_assistant_replies(tmp_path):
     owner = _owner(tmp_path)
-    tail = _call(owner.agent, message_id=owner.rows[0].message_id, offset=10**9, max_chars=10**9)
+    tail = _call(owner.agent, mode="message", message_id=owner.rows[0].message_id, offset=10**9, max_chars=READ_MAX_CHARS)
     assert tail["content"] == "" and tail["complete"] is True and tail["offset"] == len(_LONG)
-    tiny = _call(owner.agent, message_id=owner.rows[0].message_id, max_chars=1)
+    tiny = _call(owner.agent, mode="message", message_id=owner.rows[0].message_id, max_chars=READ_MIN_CHARS)
     assert len(tiny["content"]) == READ_MIN_CHARS
-    reply = _call(owner.agent, message_id=owner.rows[1].message_id)
+    # 显式 mode 合同（7101c9fa2）：越界字符数在读盘前按字段组合拒绝，不再静默夹到上下限。
+    for max_chars in (1, 10**9):
+        out_of_range = SessionSearchTool(owner.agent).execute(
+            {"mode": "message", "message_id": owner.rows[0].message_id, "max_chars": max_chars})
+        assert out_of_range.ok is False and out_of_range.error_code == "TOOL_SCHEMA_INVALID_MODE_COMBINATION"
+    reply = _call(owner.agent, mode="message", message_id=owner.rows[1].message_id)
     assert reply["role"] == "assistant" and reply["content"] == "收到，规则已记下。"
-    missing = _call(owner.agent, message_id="msg-not-here")
+    missing = _call(owner.agent, mode="message", message_id="msg-not-here")
     assert missing["found"] is False and "message_id" in missing["hint"]
 
 
 def test_thread_identity_comes_from_the_host_and_explicit_threads_stay_in_the_owner_store(tmp_path):
     owner = _owner(tmp_path, trusted=False)
-    refused = SessionSearchTool(owner.agent).execute({"message_id": owner.rows[0].message_id})
+    refused = SessionSearchTool(owner.agent).execute({"mode": "message", "message_id": owner.rows[0].message_id})
     assert refused.ok is False and refused.error_code == "TOOL_INVALID_ARGUMENTS"
     # 检索结果给出的其它会话编号可以显式读取，结果如实标明来源不是当前会话。
-    other = _call(owner.agent, message_id=owner.rows[4].message_id, thread_id=owner.other.thread_id)
+    other = _call(owner.agent, mode="message", message_id=owner.rows[4].message_id, thread_id=owner.other.thread_id)
     assert other["found"] and other["scope_resolution"] == {
         "thread_source": "explicit_parameter", "current_thread_id": "", "same_as_current": False}
-    # current_thread 只认宿主上下文，没有可信会话时拒绝，不接受模型自报会话。
-    browse = SessionSearchTool(owner.agent).execute({"current_thread": True, "thread_id": owner.other.thread_id})
+    # thread_browse 只认宿主上下文，没有可信会话时拒绝；模型自报的会话编号在字段组合校验处就被拒绝。
+    browse = SessionSearchTool(owner.agent).execute({"mode": "thread_browse"})
     assert browse.ok is False and browse.error_code == "TOOL_INVALID_ARGUMENTS"
+    claimed = SessionSearchTool(owner.agent).execute({"mode": "thread_browse", "thread_id": owner.other.thread_id})
+    assert claimed.ok is False and claimed.error_code == "TOOL_SCHEMA_INVALID_MODE_COMBINATION"
 
 
 def test_explicit_thread_id_cannot_escape_the_owner_store(tmp_path):
@@ -114,11 +121,12 @@ def test_explicit_thread_id_cannot_escape_the_owner_store(tmp_path):
     target = other_store.storage.message_path(other_thread.thread_id).with_suffix("")
     relative = os.path.relpath(target, owner.store.storage.messages_dir)
     for thread_id in (str(target), relative, other_thread.thread_id):
-        result = SessionSearchTool(owner.agent).execute({"message_id": secret.message_id, "thread_id": thread_id})
+        result = SessionSearchTool(owner.agent).execute(
+            {"mode": "message", "message_id": secret.message_id, "thread_id": thread_id})
         assert result.ok is False and result.error_code == "TOOL_INVALID_ARGUMENTS", thread_id
         assert "OWNER_B_ONLY_MARKER" not in str(result.output)
     # 同一 owner 的其它会话照常可读。
-    same = _call(owner.agent, message_id=owner.rows[4].message_id, thread_id=owner.other.thread_id)
+    same = _call(owner.agent, mode="message", message_id=owner.rows[4].message_id, thread_id=owner.other.thread_id)
     assert same["found"] and same["content"] == "别的会话也提到金额保留两位小数。"
     # 存储层同样拒绝路径形态的会话编号（防御纵深）；空编号保持原来的“读不到”。
     for bad in (relative, str(target), "a/b", "..", "thread.x"):
@@ -132,11 +140,11 @@ def test_explicit_thread_id_cannot_escape_the_owner_store(tmp_path):
 def test_reading_original_text_does_not_need_the_derived_index(tmp_path):
     owner = _owner(tmp_path)
     owner.agent.local_store = None
-    page = _call(owner.agent, message_id=owner.rows[3].message_id)
+    page = _call(owner.agent, mode="message", message_id=owner.rows[3].message_id)
     assert page["content"] == "第二条要求：日期写成 YYYY-MM-DD。"
-    listing = _call(owner.agent, current_thread=True)
+    listing = _call(owner.agent, mode="thread_browse")
     assert [item["message_id"] for item in listing["messages"]] == [owner.rows[i].message_id for i in (0, 1, 3)]
-    refused = SessionSearchTool(owner.agent).execute({"query": "金额"})
+    refused = SessionSearchTool(owner.agent).execute({"mode": "search", "query": "金额"})
     assert refused.ok is False and refused.error_code == "TOOL_UNAVAILABLE"
 
 
@@ -147,7 +155,7 @@ def test_current_thread_browse_lists_only_visible_messages_page_by_page(tmp_path
         store.messages.append({"thread_id": thread_id, "role": "user", "content": f"补充要求-{index:02d}"})
     seen, items, cursor, pages = [], {}, None, 0
     while True:
-        page = _call(owner.agent, current_thread=True, limit=10, **({"cursor": cursor} if cursor is not None else {}))
+        page = _call(owner.agent, mode="thread_browse", limit=10, **({"cursor": cursor} if cursor is not None else {}))
         seen = [item["message_id"] for item in page["messages"]] + seen
         items.update({item["message_id"]: item for item in page["messages"]})
         pages += 1
@@ -160,22 +168,23 @@ def test_current_thread_browse_lists_only_visible_messages_page_by_page(tmp_path
     # 过程片段、显示记录不出现；翻页覆盖全部可见消息，顺序为时间正序，不重不漏。
     assert seen == visible and pages > 1
     assert items[owner.rows[0].message_id]["chars"] == len(_LONG)
-    # 单页条数与其它形态同一上限（20），模型要更多就按 older_cursor 翻页。
-    assert len(_call(owner.agent, current_thread=True, limit=50)["messages"]) <= 20
-    bad = SessionSearchTool(owner.agent).execute({"current_thread": True, "cursor": "7"})
-    assert bad.ok is False and bad.error_code == "TOOL_INVALID_ARGUMENTS"
+    # 单页条数与其它形态同一上限（20），模型要更多就按 older_cursor 翻页；越界或非整数游标在读盘前拒绝。
+    assert len(_call(owner.agent, mode="thread_browse", limit=20)["messages"]) <= 20
+    for params in ({"limit": 50}, {"cursor": "7"}):
+        bad = SessionSearchTool(owner.agent).execute({"mode": "thread_browse", **params})
+        assert bad.ok is False and bad.error_code == "TOOL_SCHEMA_INVALID_MODE_COMBINATION", params
 
 
 def test_current_thread_search_never_returns_other_conversations(tmp_path):
     owner = _owner(tmp_path)
-    everywhere = _call(owner.agent, query="金额保留两位小数")
+    everywhere = _call(owner.agent, mode="search", query="金额保留两位小数")
     assert {hit["scope"]["thread_id"] for hit in everywhere["results"]} == {owner.current.thread_id, owner.other.thread_id}
-    mine = _call(owner.agent, query="金额保留两位小数", current_thread=True)
+    mine = _call(owner.agent, mode="thread_search", query="金额保留两位小数")
     assert mine["mode"] == "thread_discover" and mine["results"]
     assert {hit["scope"]["thread_id"] for hit in mine["results"]} == {owner.current.thread_id}
     assert mine["results"][0]["scope"]["message_id"] == owner.rows[0].message_id
     # 命中中段也能找到（全文索引覆盖整条长消息），再用 message_id 读回。
-    middle = _call(owner.agent, query="中段唯一标记", current_thread=True)
+    middle = _call(owner.agent, mode="thread_search", query="中段唯一标记")
     assert [hit["scope"]["message_id"] for hit in middle["results"]] == [owner.rows[0].message_id]
 
 
@@ -201,19 +210,24 @@ def test_thread_filter_applies_before_the_limit_and_in_the_like_fallback(tmp_pat
 
 def test_scroll_window_bounds_each_record_and_points_to_the_full_text(tmp_path):
     owner = _owner(tmp_path)
-    anchor = _call(owner.agent, query="金额保留两位小数", current_thread=True)["results"][0]["around_id"]
-    window = _call(owner.agent, around_id=anchor, window=3)
+    anchor = _call(owner.agent, mode="thread_search", query="金额保留两位小数")["results"][0]["around_id"]
+    window = _call(owner.agent, mode="around", around_id=anchor, window=3)
     long_entry = next(item for item in window["messages"] if item["id"] == anchor)
     assert len(long_entry["content"]) == 2_000 and long_entry["content_truncated"] is True
     assert long_entry["chars"] == len(_LONG) and long_entry["scope"]["message_id"] == owner.rows[0].message_id
     assert "message_id" in window["hint"]
-    # 显式锚点压过 current_thread：带着 current_thread=true 翻看仍是翻看，而不是浏览最新一页。
-    both = _call(owner.agent, around_id=anchor, window=3, current_thread=True)
-    assert both["mode"] == "scroll" and both["messages"] == window["messages"]
+    assert window["mode"] == "scroll"
+    # 显式 mode 合同（7101c9fa2）：around 不接受旧 current_thread 字段，混用在读盘前拒绝，不再猜优先级。
+    both = SessionSearchTool(owner.agent).execute({"mode": "around", "around_id": anchor, "window": 3, "current_thread": True})
+    assert both.ok is False and both.error_code == "TOOL_SCHEMA_INVALID_MODE_COMBINATION"
 
 
 def test_schema_exposes_the_new_modes_with_shared_bounds():
-    schema = build_session_search_model_spec().input_schema["properties"]
-    assert schema["message_id"]["type"] == "string" and schema["current_thread"]["type"] == "boolean"
+    spec = build_session_search_model_spec().input_schema
+    schema = spec["properties"]
+    # 当前会话检索/浏览改为显式 mode（7101c9fa2），不再有 current_thread 布尔开关。
+    assert spec["required"] == ["mode"] and "current_thread" not in schema
+    assert {"message", "thread_search", "thread_browse"} <= set(schema["mode"]["enum"])
+    assert schema["message_id"]["type"] == "string"
     assert (schema["max_chars"]["minimum"], schema["max_chars"]["maximum"]) == (READ_MIN_CHARS, READ_MAX_CHARS)
     assert schema["cursor"]["type"] == "integer" and schema["offset"]["minimum"] == 0

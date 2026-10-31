@@ -44,7 +44,7 @@ def test_items_mode_preserves_absolute_path_dependencies():
     root = "/tmp/project/task18"
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "并行完成数据收集与内容编写",
+        "batch_summary": "并行完成数据收集与内容编写",
         "items": [
             {
                 "goal": f"收集数据，输出到 {root}/data/subagents/data_collection.md",
@@ -72,7 +72,7 @@ def test_researcher_role_gets_web_tools_by_default():
     mock_agent = _mock_items_agent(task_count=1)
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "检索并核验代码项目",
+        "batch_summary": "检索并核验代码项目",
         "items": [
             {
                 "goal": "查 代码平台 项目并用 web_fetch 验证页面可访问。",
@@ -117,14 +117,18 @@ def test_item_covers_lands_in_attributes_and_top_level_not_fanned_out():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _mock_items_agent(task_count=2)
-    result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "并行实现注册登录与全文搜索",
-        "covers": ["req-99"],  # 顶层 covers 不许扇出到每个 item(会造成任一子代理 DONE 全打勾)
-        "items": [
-            {"goal": "实现注册登录模块", "covers": ["req-01"]},
-            {"goal": "实现全文搜索模块"},
-        ],
+    items = [
+        {"goal": "实现注册登录模块", "covers": ["req-01"]},
+        {"goal": "实现全文搜索模块"},
+    ]
+    # 顶层 covers 不许扇出到每个 item(会造成任一子代理 DONE 全打勾)；7101c9fa2 起顶层派工字段整批拒绝、不建子代理。
+    rejected = CreateSubagentsTool(mock_agent).execute({
+        "batch_summary": "并行实现注册登录与全文搜索", "covers": ["req-99"], "items": items,
     })
+    assert rejected.ok is False and rejected.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert "派工字段必须放在各自items内" in rejected.output
+    assert not mock_agent.subagents.create_run.called
+    result = CreateSubagentsTool(mock_agent).execute({"batch_summary": "并行实现注册登录与全文搜索", "items": items})
 
     assert result.ok is True
     calls = mock_agent.subagents.create_run.call_args_list
@@ -136,9 +140,12 @@ def test_single_goal_top_level_covers_lands_in_attributes():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _mock_items_agent(task_count=1)
+    # 7101c9fa2 起单项也必须放进 items 数组；平铺的顶层 goal/covers 整体拒绝、不建子代理。
+    flat = CreateSubagentsTool(mock_agent).execute({"goal": "实现注册登录模块", "covers": ["req-01"]})
+    assert flat.ok is False and "必须提供非空items" in flat.output
+    assert not mock_agent.subagents.create_run.called
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "实现注册登录模块",
-        "covers": ["req-01"],
+        "items": [{"goal": "实现注册登录模块", "covers": ["req-01"]}],
     })
 
     assert result.ok is True

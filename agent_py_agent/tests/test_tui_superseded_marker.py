@@ -45,7 +45,7 @@ def _replaced_rows(tmp_path, status: str) -> tuple[dict[str, object], dict[str, 
         tools=SimpleNamespace(specs=lambda: []),
     )
     result = CreateSubagentsTool(agent).execute(
-        {"goal": "接替旧子代理整理三条要点", "role": "worker", "replacement_for_run_ids": [source.id],
+        {"items": [{"goal": "接替旧子代理整理三条要点", "role": "worker", "replacement_for_run_ids": [source.id]}],
          "defer_start": True}
     )
     replacement_id = json.loads(result.output)["created_run_ids"][0]

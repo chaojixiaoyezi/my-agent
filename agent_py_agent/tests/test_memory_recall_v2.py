@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,7 @@ from agent_py_agent.agent.memory_store.lessons import (
     HotRuleRecord,
     LessonRecord,
 )
+from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.memory_store.recall import (
     MemoryRecallScope,
     hot_memory_records,
@@ -169,8 +172,12 @@ def test_active_allowlist_prevents_stale_text_or_vector_index_resurrection(
         added.content,
         subject_key="preference.theme",
     )
+    # 文本投影现归owner内MemoryReadIndex：删除前建好索引并截下旧候选，删除后让查询仍返回这份陈旧行。
+    assert memory.index_all() == 1
+    stale_rows, stale_coverage = MemoryReadIndex(memory.path).query("蓝色主题", limit=10)
+    assert [row["id"] for row in stale_rows] == [added.entry_id]
     memory.remove(added.entry_id, expected_version=added.version)
-    monkeypatch.setattr(memory, "_search_local_store_report", lambda *_args: ([stale], []))
+    monkeypatch.setattr(MemoryReadIndex, "query", lambda *_args, **_kwargs: (stale_rows, stale_coverage))
     monkeypatch.setattr(memory, "_semantic_records", lambda *_args: [stale])
 
     scope = MemoryRecallScope.from_runtime()
@@ -184,7 +191,7 @@ def test_active_allowlist_prevents_stale_text_or_vector_index_resurrection(
     assert recalled == []
 
 
-def test_subject_and_scope_dedupe_keeps_distinct_scopes(monkeypatch, tmp_path: Path) -> None:
+def test_subject_and_scope_dedupe_keeps_distinct_scopes(tmp_path: Path) -> None:
     records = [
         _record("p-old", "个人设备使用 macOS。", subject_key="device.os", updated_at=1),
         _record("p-new", "个人设备使用 macOS 14。", subject_key="device.os", updated_at=2),
@@ -198,7 +205,9 @@ def test_subject_and_scope_dedupe_keeps_distinct_scopes(monkeypatch, tmp_path: P
         ),
     ]
     memory = JsonlMemory(tmp_path / "memory.jsonl")
-    monkeypatch.setattr(memory, "all", lambda: list(records))
+    # 召回读取有界正式权威而非 all()；新写入会拒绝同subject，故按旧库逐行播种同subject的历史事实。
+    memory.path.write_text("".join(json.dumps(asdict(record), ensure_ascii=False) + "\n" for record in records),
+                           encoding="utf-8")
     scope = MemoryRecallScope.from_runtime(
         task_attributes={"company_id": "company:acme"}
     )

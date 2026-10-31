@@ -189,13 +189,13 @@ class TestJsonlMemoryIndexAll:
     """JsonlMemory.index_all 方法测试。"""
 
     def test_index_all_no_local_store(self, memory: JsonlMemory):
-        """无 LocalStore 时返回 0。"""
+        """无 LocalStore 时仍追平 owner 内读索引，返回已索引条数。"""
         memory.add(role="user", content="test")
         count = memory.index_all()
-        assert count == 0
+        assert count == 1
 
     def test_index_all_with_local_store(self, memory: JsonlMemory):
-        """有 LocalStore 时索引记录。"""
+        """有 LocalStore 时也只索引进 owner 内读索引，不再写旧 LocalStore 投影。"""
         mock_store = MagicMock()
         memory = JsonlMemory(memory.path, local_store=mock_store)
         memory.add(role="user", content="test1")
@@ -205,7 +205,7 @@ class TestJsonlMemoryIndexAll:
         mock_store.reset_mock()
         count = memory.index_all()
         assert count == 2
-        assert mock_store.upsert_record.call_count == 2
+        mock_store.upsert_record.assert_not_called()
 
 
 class TestJsonlMemoryIntegration:

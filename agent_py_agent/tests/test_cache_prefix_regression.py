@@ -32,6 +32,7 @@ from agent_py_agent.tests.test_session_task_real_chain import (  # noqa: E402
     RealChain,
     _agent_config,
     _ready_gateway_paths,
+    _select_scripted_model,
     _text_of,
 )
 
@@ -171,6 +172,7 @@ def _environment(tmp_path: Path, monkeypatch) -> tuple[RealChain, PrefixCacheSim
     # 端点与模型名按真实 DeepSeek 形态设置：思考开关只对已核对端点生效，换成别的地址就绕过了要护栏的那条分支。
     config = replace(config, api_base="https://api.deepseek.com/v1", model_name="deepseek-v4-flash")
     agent = SimpleAgent(config, tmp_path / "root")
+    _select_scripted_model(agent, config)
     simulator = PrefixCacheSimulator()
     scenario = CacheScenarioWire(simulator)
     monkeypatch.setattr(http, "post_json", scenario)

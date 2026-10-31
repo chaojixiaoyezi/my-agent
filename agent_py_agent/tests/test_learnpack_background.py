@@ -32,7 +32,9 @@ def test_the_subagent_integration_continuation_can_build_and_install(tmp_path, m
     request = BackgroundToolPolicyRequest(reason="subagent_runner_finished", config=agent.config)
     decision = background_tool_policy_decision(agent.config, request=request)
     assert decision.profile == "subagent_integration" and set(decision.allowed_tools) >= _PACKAGE_TOOLS
-    assert {"list_tools", "tool_search"} <= set(decision.allowed_tools), "续跑保留当前自我发现入口，目录本身仍不授权"
+    # 7101c9fa2 起自我发现入口只剩 tool_search（list_tools 仅在版本化输入边界折算为它）。
+    assert "tool_search" in decision.allowed_tools and "list_tools" not in decision.allowed_tools, (
+        "续跑保留当前自我发现入口，目录本身仍不授权")
     snapshot = agent.tools.runtime_snapshot(allowed_tools=list(decision.allowed_tools))
     assert all(snapshot.runtime(name) is not None for name in _PACKAGE_TOOLS), "续跑工具快照里两个工具都在"
     lines = background_control_action_lines(agent.config, request=request)

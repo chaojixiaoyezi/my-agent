@@ -130,7 +130,7 @@ def _seed_large_history(store, thread_id: str, task_id: str) -> None:
 def test_goal_wake_whose_compaction_hits_quota_is_usage_limited_with_notice(tmp_path, window) -> None:
     agent = SimpleAgent(AgentConfig(
         enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
-        model_context_window_tokens=window, memory_compact_auto_trigger_percent=50 if window else 90,
+        model_context_window_tokens=window, memory_compact_trigger_percent=50 if window else 90,
     ), tmp_path)
     backend = _WeeklyQuotaBackend()
     agent.backend = backend
@@ -175,7 +175,7 @@ def test_goal_wake_whose_compaction_hits_quota_is_usage_limited_with_notice(tmp_
 def _large_thread_policy(tmp_path, window=0):
     agent = SimpleAgent(
         AgentConfig(enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
-                    model_context_window_tokens=window, memory_compact_auto_trigger_percent=50 if window else 90), tmp_path,
+                    model_context_window_tokens=window, memory_compact_trigger_percent=50 if window else 90), tmp_path,
     )
     agent.backend = _WeeklyQuotaBackend()
     store = agent.conversation_store

@@ -33,10 +33,10 @@ from agent_py_agent.tests.test_subagent_compact_recovery import _http
 
 
 # LLM: 使用真实后台运行准备，给同一请求同时提供已结束历史和原始活动归档；不构造伪造的工具 IR。
-# 函数用途: 建立联合来源的 HTTP 验收材料，并保留另一任务的消息以检查拆出 scope 隔离。
-def _mixed_background(tmp_path, *, backend: str, detached: bool, long_source: bool = False):
+# 函数用途: 建立联合来源的 HTTP 验收材料，并保留另一任务的消息以检查拆出 scope 隔离；其余选项（如档案窗口）原样交给 _background。
+def _mixed_background(tmp_path, *, backend: str, detached: bool, long_source: bool = False, **options):
     agent, store, thread, request, _, sink = _background(
-        tmp_path, backend=backend, detached=detached,
+        tmp_path, backend=backend, detached=detached, **options,
     )
     if detached:
         store.messages.append({
@@ -109,14 +109,15 @@ def test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_fa
 
     agent, store, thread, request, execution, sink, _ = _mixed_background(
         tmp_path, backend="anthropic_compatible", detached=False,
+        window=300_000 if trigger_percent == 90 else 384_000,
     )
     from agent_py_agent.agent.agent_core.runtime import loop_support
     from agent_py_agent.agent.conversation import compact_request_budget
     agent.config.enable_tools = True
-    agent.config.model_context_window_tokens = 300_000 if trigger_percent == 90 else 384_000
-    agent.config.memory_compact_auto_trigger_percent = trigger_percent
+    agent.config.memory_compact_trigger_percent = trigger_percent
     agent.config.memory_compact_auto_trigger_max_tokens = 0
-    agent.backend.max_tokens = 1024
+    # 所选档案的后端按配置构造，输出上限须经配置给出，与生产按该配置构造的后端一致。
+    agent.config.max_tokens = agent.backend.max_tokens = 1024
     old_snapshot = store.messages.append({
         "thread_id": thread.thread_id, "role": "assistant", "content": "a" * 415000,
         "metadata": {"conversation_request_id": "completed-prior-state", "task_id": request.task_id},
@@ -319,9 +320,8 @@ def test_mixed_recovery_commits_both_sources_and_sends_selected_wire(tmp_path, m
 # 函数用途: 在默认提示精简后仍让仅压对话候选超过输入上限，核对联合恢复路径。
 def test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling(tmp_path, monkeypatch):
     agent, store, thread, request, execution, sink, _ = _mixed_background(
-        tmp_path, backend="anthropic_compatible", detached=False, long_source=True,
+        tmp_path, backend="anthropic_compatible", detached=False, long_source=True, window=16_000,
     )
-    agent.config.model_context_window_tokens = 16_000
     agent.config.memory_compact_trigger_percent = 90
     agent.config.system_prompt += "\n" + "a" * 6_000
     agent.config.max_tokens = agent.backend.max_tokens = 1_024

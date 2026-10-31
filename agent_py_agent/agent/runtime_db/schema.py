@@ -498,13 +498,41 @@ class RuntimeWriteFence:
     # 函数用途: 透传原行工厂读取。
     @property
     def row_factory(self):
-        return self._connection.row_factory
+        return _unwrap_fence_row_factory(self._connection.row_factory)
 
-    # LLM: 设置委托原连接/lease，归还仍按既有协议恢复。
+    # LLM: 设置委托原连接/lease，归还仍按既有协议恢复；自定义回调拿栅栏游标，不经回调参数取到lease或物理连接。
     # 函数用途: 保留原行工厂设置接口。
     @row_factory.setter
     def row_factory(self, value):
-        self._connection.row_factory = value
+        self._connection.row_factory = _FenceRowFactory.bind(self, value)
+
+
+# LLM: sqlite3.Row与非callable原样交SQLite；回调参数再包同一栅栏，读取时还原调用方原工厂身份。
+# 类用途: 让行工厂回调拿到的游标与手工游标同样受租期和首写栅栏约束。
+class _FenceRowFactory:
+    # LLM: 只记录栅栏与原回调，不执行回调也不缓存行。
+    # 函数用途: 绑定行转换回调和所属栅栏。
+    def __init__(self, fence, factory):
+        self.fence = fence
+        self.factory = factory
+
+    # LLM: 标准行工厂不改形状，避免改变C接口的sqlite3.Row语义。
+    # 函数用途: 按需为自定义回调包栅栏。
+    @classmethod
+    def bind(cls, fence, factory):
+        if factory is sqlite3.Row or not callable(factory):
+            return factory
+        return cls(fence, factory)
+
+    # LLM: 行数据与回调结果原样返回；游标访问仍由底层lease核租期。
+    # 函数用途: 以栅栏游标调用原行工厂。
+    def __call__(self, cursor, row):
+        return self.factory(_RuntimeFenceCursor(self.fence, cursor), row)
+
+
+# 函数用途: 读取行工厂时还原调用方设置的原回调。
+def _unwrap_fence_row_factory(value):
+    return value.factory if isinstance(value, _FenceRowFactory) else value
 
 
 # LLM: 只封装SQL执行与connection属性，其余游标事实来自原SQLite/lease。
@@ -513,13 +541,20 @@ class _RuntimeFenceCursor:
     # LLM: 物理游标仍由原连接所有者负责回收。
     # 函数用途: 记录游标及所属代际栅栏。
     def __init__(self, connection, cursor):
-        self.connection = connection
+        self._fence = connection
         self._cursor = cursor
+
+    # LLM: 反查连接只返回栅栏本身；先读底层游标connection以核lease租期，过期游标不能借此重新取到连接。
+    # 函数用途: 保留游标反查连接接口而不放大寿命。
+    @property
+    def connection(self):
+        _ = self._cursor.connection
+        return self._fence
 
     # LLM: 获取写锁后才交给原游标执行；BEGIN已由栅栏执行时不重复嵌套。
     # 函数用途: 保护手工游标单条SQL。
     def execute(self, sql, parameters=()):
-        cursor = self.connection._prepare(sql)
+        cursor = self._fence._prepare(sql)
         if cursor is None:
             self._cursor.execute(sql, parameters)
         else:
@@ -529,23 +564,35 @@ class _RuntimeFenceCursor:
     # LLM: 同一事务保护整批写入，参数迭代器不提前消耗。
     # 函数用途: 保护手工游标批量SQL。
     def executemany(self, sql, parameters):
-        self.connection._prepare(sql)
+        self._fence._prepare(sql)
         self._cursor.executemany(sql, parameters)
         return self
 
     # LLM: 与连接脚本入口同样拒绝隐式提交，不模拟SQL解析器。
     # 函数用途: 禁止手工游标脚本绕过栅栏。
     def executescript(self, script):
-        return self.connection.executescript(script)
+        return self._fence.executescript(script)
 
     # LLM: fetch/描述/close沿原游标生命周期执行。
     # 函数用途: 透传原游标读取接口。
     def __getattr__(self, name):
-        return getattr(self._cursor, name)
+        value = getattr(self._cursor, name)
+        return _unwrap_fence_row_factory(value) if name == 'row_factory' else value
 
-    # LLM: 不复制结果集，不延长原游标寿命。
+    # LLM: 公开属性写入交原游标/lease核租期，不能只落在包装对象上；行工厂回调同样包栅栏。
+    # 函数用途: 保留arraysize/row_factory等游标属性设置接口。
+    def __setattr__(self, name, value):
+        if name.startswith('_'):
+            object.__setattr__(self, name, value)
+            return
+        if name == 'row_factory':
+            value = _FenceRowFactory.bind(self._fence, value)
+        setattr(self._cursor, name, value)
+
+    # LLM: 不复制结果集，不延长原游标寿命；开始遍历前由原游标核租期。
     # 函数用途: 保留游标逐行遍历接口。
     def __iter__(self):
+        iter(self._cursor)
         return self
 
     # LLM: 行内容与异常均由原游标返回。

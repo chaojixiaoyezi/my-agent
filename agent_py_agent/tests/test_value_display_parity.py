@@ -2,7 +2,9 @@
 
 背景：mask_value 原为 `str(x or "")`，user_config 的运行值、查看报告、改参回执和 config get 把 False、0 都给成空串，
 /settings 另写了一份布尔、数字特判。现在所有出口共用 mask_value：非凭据的布尔显示 true/false，数字照实显示，
-None、空串、空列表、空映射显示空串，凭据遮住；聊天 /settings 把空串显示成“（空）”，这是唯一的界面差异。
+None、空串、空列表、空映射显示空串，凭据遮住；界面差异只有两处：聊天 /settings 把空串显示成“（空）”，
+config get 对空值打印“(未设置) <键>”（d67030b01 起空串显示未设置）。
+temperature、api_key 已退出用户参数（模型连接设置归模型目录），None 与凭据两行改用仍登记的 max_tool_rounds、feishu_app_secret。
 每一格都走出口的真实代码路径（真实用户配置文件 + load_config）；走不到的格子由测试核对它确实走不到，不许悄悄扩大。
 """
 from __future__ import annotations
@@ -29,11 +31,11 @@ _ROWS = [
     ("false", "enable_self_learning", "false", ("set", "false"), "false"),
     ("true", "enable_self_learning", "true", ("set", "true"), "true"),
     ("zero", "max_parallel_tool_calls", "0", ("set", "0"), "0"),
-    ("none", "temperature", None, ("reset", "0.7"), ""),
+    ("none", "max_tool_rounds", None, ("reset", "7"), ""),
     ("empty_text", "timezone", '""', ("set", ""), ""),
     ("empty_list", "tool_catalog_categories", "[]", None, ""),
     ("empty_map", "runner_timeout_by_role", "{}", None, ""),
-    ("credential", "api_key", '"sk-FAKE-9999"', None, "sk-***"),
+    ("credential", "feishu_app_secret", '"sk-FAKE-9999"', None, "sk-***"),
 ]
 # 走不到的格子：简易 YAML 写不出 None，没写的键 config get 打印“(未设置)”、/settings 显示“未覆盖”；
 # 列表、映射不在聊天里改；凭据是安全边界，不能写。
@@ -101,5 +103,14 @@ def test_every_exit_shows_the_same_text_for_the_same_value(row, tmp_path, monkey
     for exit_name, text in unreachable.items():
         assert text is None or text == f"(未设置) {key}" or str(text).startswith("未覆盖"), (exit_name, text)
     shown = {exit_name: texts[exit_name] for exit_name in _EXITS if exit_name not in unreachable}
-    wanted = {exit_name: (expected or _EMPTY) if exit_name.startswith("settings_") else expected for exit_name in shown}
+    wanted = {exit_name: _wanted_text(exit_name, key, expected) for exit_name in shown}
     assert shown == wanted
+
+
+# 函数用途: 给出某出口对同一值应显示的文字；只有 /settings 与 config get 对空值有各自固定写法。
+def _wanted_text(exit_name: str, key: str, expected: str) -> str:
+    if exit_name.startswith("settings_"):
+        return expected or _EMPTY
+    if exit_name == "config_get" and not expected:
+        return f"(未设置) {key}"
+    return expected

@@ -25,11 +25,19 @@ def _agent(tmp_path: Path) -> SimpleAgent:
     return SimpleAgent(AgentConfig(enable_tools=False, memory_path="m.jsonl"), tmp_path)
 
 
+# LLM: 缓存信任龄同时核 locator 与 canonical 两个文件；只改两者 mtime，不改内容或指纹以外的事实。
+# 函数用途: 把一个子代理的 task.json 及其 canonical_state.json 一起推到粗 mtime 窗口外。
 def _age_task_file(agent: SimpleAgent, run_id: str, age_seconds: int = 10) -> None:
+    from agent_py_agent.agent.subagents.services.agent_run_state import (
+        canonical_state_path_from_payload,
+    )
+
     task_file = agent.subagents.workspace / run_id / "task.json"
-    task_stat = task_file.stat()
+    canonical = canonical_state_path_from_payload(json.loads(task_file.read_text(encoding="utf-8")))
     old_mtime_ns = time.time_ns() - age_seconds * 1_000_000_000
-    os.utime(task_file, ns=(task_stat.st_atime_ns, old_mtime_ns))
+    for path in (task_file, canonical):
+        if path is not None:
+            os.utime(path, ns=(path.stat().st_atime_ns, old_mtime_ns))
 
 
 def test_list_runs_cache_reuses_and_counts_stable(tmp_path: Path) -> None:

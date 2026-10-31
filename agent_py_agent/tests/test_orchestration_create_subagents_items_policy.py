@@ -58,8 +58,11 @@ def _mock_task(index: int):
     return task
 
 
-def test_items_worker_with_dispatch_tools_stays_worker():
+# LLM: v2顶层不再广播allowed_tools；整批继承的派工工具只经真实v1执行器归一出现，宿主记下item未显式请求。
+# 函数用途: 验证批次继承的派工工具与自然语言流水线提示都不能把worker升级成coordinator或下发子代理控制。
+def test_items_worker_with_dispatch_tools_stays_worker(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
     mock_agent = _mock_items_agent()
     mock_agent._current_user_prompt = (
@@ -67,7 +70,8 @@ def test_items_worker_with_dispatch_tools_stays_worker():
         "第三位整合前两位结果生成报告。"
     )
 
-    result = CreateSubagentsTool(mock_agent).execute({
+    result = execute_canonical_test_call(tmp_path, tools={"create_subagents": CreateSubagentsTool(mock_agent)},
+        tool_name="create_subagents", trusted_run_context={"tool_input_version": 1}, arguments={
         "goal": "并行完成数据收集、内容编写与报告整合",
         "items": [
             {
@@ -87,10 +91,10 @@ def test_items_worker_with_dispatch_tools_stays_worker():
             },
         ],
         "allowed_tools": ["read_file", "write_file", "create_subagents", "dispatch_subagents"],
-    })
+    }).result
 
     calls = mock_agent.subagents.create_run.call_args_list
-    assert result.ok is True
+    assert result.ok is True, result.output
     assert [call.kwargs["params"].role for call in calls] == ["worker", "worker", "worker"]
     child_controls = {
         "create_subagents",
@@ -112,7 +116,7 @@ def test_items_path_refs_do_not_persist_hidden_workflow_depends_on():
     mock_agent = _mock_items_agent()
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "并行形成有明确引用的三阶段报告",
+        "batch_summary": "并行形成有明确引用的三阶段报告",
         "items": [
             {
                 "goal": "收集项目基础信息，结果写入 data/subagents/data_collection.md",

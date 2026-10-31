@@ -475,16 +475,23 @@ def test_with_new_facts_on_a_real_store_offers_the_missing_fact_only(prepared, m
 
 def test_fragment_material_is_registered_off_by_default_and_read_through_the_settings_service(tmp_path):
     from agent_py_agent.agent.settings.config import AgentConfig, load_config
-    from agent_py_agent.agent.settings.decision_settings_defaults import decision_config_fields
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.decision_settings_defaults import (
+        decision_config_fields,
+        decision_defaults,
+    )
     from agent_py_agent.agent.settings.decision_settings_schema import validate_decision_field
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
     from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
     from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
     from agent_py_agent.tests.test_decision_settings import host_at, patch
 
     path = "points.pre_recall.fragment_material"
+    # 旧字段名只留作显式离线迁移表；运行默认只归决策代码（a12fe40c5），配置对象不再有该字段。
     assert decision_config_fields()[path] == ("memory", "memory_decision_pre_recall_fragment_material")
-    assert AgentConfig().memory_decision_pre_recall_fragment_material == "query_text"
-    assert load_config(packaged_config_path()).memory_decision_pre_recall_fragment_material == "query_text"
+    assert decision_defaults(None)[0][path] == "query_text"
+    assert not hasattr(AgentConfig(), "memory_decision_pre_recall_fragment_material")
+    assert not hasattr(load_config(packaged_config_path()), "memory_decision_pre_recall_fragment_material")
     for bad in ("always", "", True, None):
         with pytest.raises(ModelProfileError):
             validate_decision_field(path, bad)
@@ -495,7 +502,7 @@ def test_fragment_material_is_registered_off_by_default_and_read_through_the_set
     assert decision_recall._fragment_material(host, stage) == "with_new_facts"
     (tmp_path / "agent.yaml").write_text("memory_decision_pre_recall_fragment_material: maybe\n", encoding="utf-8")
     with pytest.raises(ModelProfileError):
-        load_config(tmp_path / "agent.yaml")
+        migrate_legacy_decision_overrides(load_simple_yaml(tmp_path / "agent.yaml"), {})
 
 
 # 函数用途: 让片段材料设置走真实读取入口，并返回“读取时抛给定错误再跑一次补充查询”的函数。

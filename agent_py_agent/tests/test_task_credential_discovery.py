@@ -364,8 +364,9 @@ def test_other_owner_cannot_share_original_group_private_reference(tmp_path, kin
     if kind == 'user':
         other = _agent(tmp_path / 'other', 'user')
     else:
+        # 换 home 时不能沿用源 Agent 构造期冻结的 host_home_snapshot（640e478ee），交由新构造重新解析。
         other = SimpleAgent(replace(ctx.agent.config, my_agent_home=str(tmp_path / 'other-home'),
-            my_agent_owner_id='oc_other'), tmp_path / 'other-workspace')
+            my_agent_owner_id='oc_other', host_home_snapshot=None), tmp_path / 'other-workspace')
     _active(other)
     rejected, _ = _credential_operation(other, {'operation': 'share', 'credential_ref': reference})
     assert not rejected.ok

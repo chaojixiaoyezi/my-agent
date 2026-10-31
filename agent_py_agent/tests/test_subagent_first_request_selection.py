@@ -427,7 +427,7 @@ def test_first_request_auto_compact_precedes_child_model_adoption(tmp_path, monk
     agent, task, key = _automatic_child(tmp_path, backend=backend, model=model, window=1_000_000)
     agent.config.model_context_window_tokens = 40_000
     agent.backend.context_window_tokens = 40_000
-    agent.config.memory_compact_auto_trigger_percent = 50
+    agent.config.memory_compact_trigger_percent = 50
     agent.config.max_tokens = 1024
     for index in range(12):
         agent.conversation_store.messages.append({
@@ -724,7 +724,8 @@ def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, 
         }})
 
     monkeypatch.setattr(decision_model_call, "invoke_decision_model_call", choose)
-    created = CreateSubagentsTool(agent).execute(request)
+    # items-only 合同：模型给出的派工字段（含伪造 attributes）都放在唯一 item 内。
+    created = CreateSubagentsTool(agent).execute({"items": [request]})
     assert created.ok, created.output
     task = agent.subagents.load(json.loads(created.output)["created_run_ids"][0])
     assert len(decisions) == 1

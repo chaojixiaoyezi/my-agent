@@ -535,14 +535,13 @@ def _fake_provider_http(monkeypatch):
     return business
 
 
-# LLM: 正式触发键及旧自动键显式90%，输出预留仍10000；仅模型及HTTP末端替身，原接受门、观测和CAS不替换。
+# LLM: 正式触发键显式90%，输出预留仍10000；仅模型及HTTP末端替身，原接受门、观测和CAS不替换。
 # 函数用途: 准备具有明确80000输入上限的两回合Gateway校准场景。
 def _gateway_case(tmp_path, monkeypatch, *, ratio):
     fixture = _history_request(tmp_path, mode="disabled", tools=True, original_window=_WINDOW, history_repeat=500)
     agent = fixture.agent
     agent.config.max_tokens = _OUTPUT
     agent.backend.max_tokens = _OUTPUT
-    agent.config.memory_compact_auto_trigger_percent = 90
     agent.config.memory_compact_trigger_percent = 90
     agent.config.system_prompt += "\n" + _REQUIREMENT
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: _SUMMARY_TEXT)

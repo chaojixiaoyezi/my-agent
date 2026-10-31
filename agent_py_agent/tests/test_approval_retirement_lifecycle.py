@@ -7,7 +7,7 @@ import pytest
 from agent_py_agent.agent.agent_core import runtime_mixin
 from agent_py_agent.agent.agent_core.tool_loop import round_execution
 from agent_py_agent.agent.agent_core.tool_only_execution import _tool_only_params
-from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse, get_backend
 from agent_py_agent.agent.common.cancellation import CancellationToken
 from agent_py_agent.agent.conversation import agent_tool_approval as approval
 from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
@@ -16,7 +16,24 @@ from agent_py_agent.agent.tooling.models import ApprovalPolicy, ToolRuntime, Too
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.tests.test_approval_waiter_retirement import held_original_lock
 from agent_py_agent.tests.test_host_command_operation_replay import _CountingTool
-from agent_py_agent.tests.test_tool_approval_foreground_scope import _foreground
+from agent_py_agent.tests.test_tool_approval_foreground_scope import (
+    _foreground as _scope_foreground,
+)
+
+
+# LLM: Home 下 echo AgentConfig 不跨 selected_model_scope；只按构造后注入的离线后端保留，不发网络或改模型目录。
+# 函数用途: 给真实 run/HTTP/W 入口一个显式注入的离线模型，避免未配置模型在合成审批 loop 前失败。
+def _offline_backend(agent):
+    agent.backend = get_backend('echo', agent.config)
+    return agent
+
+
+# LLM: 仍用原前台 claim/writer/RuntimeDB 构造，只追加构造后显式离线后端，不改审批或执行身份。
+# 函数用途: 为本文件及导入方提供可真实进入 Agent.run 的前台世界。
+def _foreground(tmp_path, *, kind='group'):
+    world = _scope_foreground(tmp_path, kind=kind)
+    _offline_backend(world.agent)
+    return world
 
 
 # LLM: 只核本测试实际canonical包与runtime_mixin的file/spec/精确相对叶一致，支持同包.py或.pyc；整个包的外部身份仍由源冻结/包QA来源门核验，不消费PYTHONPATH或扩展测试namespace。
@@ -340,6 +357,7 @@ def test_actual_worker_agent_run_closes_canonical_but_does_not_release_p3(tmp_pa
 
     with seed.original_case(tmp_path, monkeypatch) as case:
         agent, _peer, _credential, _body, server, _runtime = case
+        _offline_backend(agent)
         binding, gate = claim_http_worker_input(case, monkeypatch)
         params, repo, store = agent._current_run_params, agent.subagents.runtime_db, agent.conversation_store
         assert not params.attempt_id  # 旧卡seed只建原任务/会话；本轮W入口才创建实际运行attempt。

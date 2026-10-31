@@ -26,6 +26,9 @@ from agent_py_agent.agent.user_space.owner_resolver import (
 )
 
 _NOW = datetime(2026, 10, 12, 12, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+# 仍受严格校验的能力字段写非法值，使能力配置真正加载失败；a12fe40c5 起决策点位已移出能力配置，
+# 旧键 decision_subagent_model_mode 只告警忽略，不再构成坏配置。
+_BAD_CAPABILITY_YAML = "owner_default_permission_mode: invalid\n"
 
 
 # LLM: 仅用原规范纯路径工厂和 typed scope 生成合成身份，不初始化用户、Store 或 Agent。
@@ -191,7 +194,7 @@ def test_scoped_config_and_capability_are_narrowing_only(tmp_path, monkeypatch, 
     else:
         path = runtime_config_reload.default_capability_config_path(agent.root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("decision_subagent_model_mode: invalid\n" if switch == "bad-capability"
+        path.write_text(_BAD_CAPABILITY_YAML if switch == "bad-capability"
                         else "im_task_delegation_enabled: false\n", encoding="utf-8")
     before = _tree(tmp_path)
     assert _capture(agent, scope)["mode"] == "original"
@@ -264,7 +267,7 @@ def test_legacy_agent_bad_capability_does_not_fall_back_open(tmp_path, monkeypat
     _enable(agent, scope)
     path = runtime_config_reload.default_capability_config_path(agent.root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("decision_subagent_model_mode: invalid\n", encoding="utf-8")
+    path.write_text(_BAD_CAPABILITY_YAML, encoding="utf-8")
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
     monkeypatch.setattr(control_service, "_request_agent_for_scope", lambda _agent, _scope: agent)
     assert im_dispatch_policy.capture_im_dispatch(agent, scope)["mode"] == "original"
@@ -306,7 +309,7 @@ def _real_pool_case(tmp_path, root_setting, owner_setting):
     assert actual == root / "config/capability_config.yaml"
     actual.parent.mkdir(parents=True, exist_ok=True)
     if root_setting is not None:
-        actual.write_text("decision_subagent_model_mode: invalid\n" if root_setting == "bad"
+        actual.write_text(_BAD_CAPABILITY_YAML if root_setting == "bad"
                           else f"im_task_delegation_enabled: {root_setting}\n", encoding="utf-8")
     wrong = agent.home_paths.owner_home_dir / "config/capability_config.yaml"
     wrong.parent.mkdir(parents=True, exist_ok=True)
@@ -338,7 +341,7 @@ def test_cold_capture_matches_actual_explicit_capability_path(tmp_path, monkeypa
     explicit = tmp_path / "explicit/capability.yaml"
     explicit.parent.mkdir()
     if override_setting is not None:
-        explicit.write_text("decision_subagent_model_mode: invalid\n" if override_setting == "bad"
+        explicit.write_text(_BAD_CAPABILITY_YAML if override_setting == "bad"
                             else f"im_task_delegation_enabled: {override_setting}\n", encoding="utf-8")
     agent.capability_config_path = explicit
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)

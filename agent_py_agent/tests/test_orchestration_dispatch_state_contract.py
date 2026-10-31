@@ -80,8 +80,7 @@ def test_create_payload_includes_current_turn_run_state(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
 
     payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "写一个高端现代家具品牌首页 index.html",
-        "role": "worker",
+        "items": [{"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}],
     }).output)
 
     state = payload["current_turn_run_state"]
@@ -142,7 +141,7 @@ def test_dispatch_state_completed_alias_does_not_suggest_closeout():
 
 def test_create_payload_includes_stable_operation_contract(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
-    params = {"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}
+    params = {"items": [{"goal": "写一个高端现代家具品牌首页 index.html", "role": "worker"}]}
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
 
@@ -160,8 +159,7 @@ def test_nested_create_payload_includes_current_turn_run_state(tmp_path):
     agent._current_subagent_run_id = parent.id
 
     payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "写条目卡片组件",
-        "role": "worker",
+        "items": [{"goal": "写条目卡片组件", "role": "worker"}],
     }).output)
 
     state = payload["current_turn_run_state"]

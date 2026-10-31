@@ -36,13 +36,13 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建 index1.html。",
             "role": "worker",
             "extra_write_roots": ["/tmp/project/artifacts"],
             "delegation_constraints": ["working_buttons"],
             "constraint_overrides": ["allow_dead_buttons"],
-        })
+        }]})
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
@@ -66,11 +66,11 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建 index1.html，所有按钮都要有 href 属性或 #锚点。",
             "role": "worker",
             "extra_write_roots": ["/tmp/project/artifacts"],
-        })
+        }]})
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
@@ -93,13 +93,13 @@ class TestCreateSubagentsToolDelegationGuard:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建 index1.html。",
             "role": "worker",
             "extra_write_roots": ["/tmp/project/artifacts"],
             "delegation_constraints": ["verified_images"],
             "constraint_overrides": ["allow_unverified_remote_images"],
-        })
+        }]})
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
@@ -125,10 +125,10 @@ class TestCreateSubagentsToolRawPromptRepair:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "创建 root/coordinator 并让它继续派工。",
             "role": "coordinator",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -152,7 +152,7 @@ class TestCreateSubagentsToolRawPromptRepair:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": (
                 "完成示例站，交付 index.html、items.html、item-detail.html、style.css、app.js，"
                 "文件名不要改，建立 4层链路。"
@@ -165,7 +165,7 @@ class TestCreateSubagentsToolRawPromptRepair:
                 "output.json", "RUNNER_RESULT.md", "execution_context.json",
             ],
             "hierarchy_contracts": ["depth=1 小傻妞-*", "depth=2 小小傻妞-*", "depth=3 小小小傻妞-*", "max_depth=3"],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -190,7 +190,7 @@ class TestCreateSubagentsToolRawPromptRepair:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": (
                 "层级要求：depth=1 用“小傻妞-*”，depth=2 用“小小傻妞-*”，"
                 "depth=3 用“小小的傻妞-*”；本轮 max_depth=3，禁止创建“小小小傻妞-*”节点。"
@@ -203,7 +203,7 @@ class TestCreateSubagentsToolRawPromptRepair:
                 "max_depth=3",
                 "forbidden_depth>=4 小小小小傻妞-*",
             ],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True

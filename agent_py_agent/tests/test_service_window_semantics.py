@@ -189,8 +189,9 @@ def test_create_tool_passes_service_window_into_created_run(monkeypatch, tmp_pat
     created.task_dir = "/tmp/run_w"
     mock_agent.subagents.create_run.return_value = created
     tool = CreateSubagentsTool(mock_agent)
+    # create_subagents 只收 items（7101c9fa2）：派工字段放进各自 item，defer_start 仍是整批启动控制。
     result = tool.execute(
-        {"goal": "盯 2 小时", "long_running": True, "service_window_seconds": 7200, "defer_start": True}
+        {"items": [{"goal": "盯 2 小时", "long_running": True, "service_window_seconds": 7200}], "defer_start": True}
     )
     assert result.ok, result.output
     params = mock_agent.subagents.create_run.call_args.kwargs.get("params")

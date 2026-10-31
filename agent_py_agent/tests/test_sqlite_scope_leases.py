@@ -7,6 +7,7 @@ import pytest
 from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 from agent_py_agent.agent.local_storage.store import LocalStore
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.runtime_db.schema import RuntimeWriteFence
 
 
 @pytest.fixture(params=[RuntimeRepository, LocalStore], ids=['runtime', 'local'])
@@ -22,6 +23,15 @@ def assert_expired(operation):
     with pytest.raises(sqlite3.ProgrammingError) as caught:
         operation()
     assert getattr(caught.value, 'code', None) == 'SQLITE_LEASE_EXPIRED'
+
+
+def assert_rejected(store, entry, operation):
+    # RuntimeDB 写借用经 RuntimeWriteFence 无条件拒绝隐式提交脚本；其余入口仍须结构化报告租期过期。
+    if isinstance(store, RuntimeRepository) and entry == 'executescript':
+        with pytest.raises(ValueError, match='runtime executescript bypasses generation transaction fence'):
+            operation()
+        return
+    assert_expired(operation)
 
 
 def deferred_write(conn):
@@ -85,7 +95,7 @@ def test_all_connection_entries_reject_expired_lease(store, operation):
         with lease(store) as old:
             old.execute('SELECT 1').fetchone()
         with lease(store) as new:
-            assert_expired(lambda: CONNECTION_OPERATIONS[operation](old))
+            assert_rejected(store, operation, lambda: CONNECTION_OPERATIONS[operation](old))
             assert new.execute('SELECT 2').fetchone()[0] == 2
 
 
@@ -116,7 +126,7 @@ def test_all_cursor_entries_reject_expired_lease(store, operation):
             cursor = conn.execute('SELECT 1 UNION ALL SELECT 2')
             saved = cursor.fetchone
         with lease(store) as new:
-            assert_expired(lambda: CURSOR_OPERATIONS[operation](cursor))
+            assert_rejected(store, operation, lambda: CURSOR_OPERATIONS[operation](cursor))
             assert_expired(saved)
             assert new.execute('SELECT 3').fetchone()[0] == 3
 
@@ -125,7 +135,13 @@ def test_live_public_interfaces_preserve_sqlite_semantics(store):
     with sqlite_connection_scope(True), lease(store) as conn:
         conn.row_factory = sqlite3.Row
         assert conn.row_factory is sqlite3.Row
-        conn.executescript('CREATE TABLE lease_rows(value INTEGER);')
+        if isinstance(store, RuntimeRepository):
+            # RuntimeDB 借用拒绝隐式提交脚本；同一建表改走首写前核代际的 execute 入口。
+            with pytest.raises(ValueError, match='runtime executescript bypasses generation transaction fence'):
+                conn.executescript('CREATE TABLE lease_rows(value INTEGER);')
+            conn.execute('CREATE TABLE lease_rows(value INTEGER)')
+        else:
+            conn.executescript('CREATE TABLE lease_rows(value INTEGER);')
         cursor = conn.cursor()
         assert cursor.connection is conn
         assert cursor.executemany('INSERT INTO lease_rows VALUES(?)', [(1,), (2,)]) is cursor
@@ -144,7 +160,10 @@ def test_live_public_interfaces_preserve_sqlite_semantics(store):
 
 def test_disabled_scope_exposes_unwrapped_standard_connection(store):
     with sqlite_connection_scope(False), lease(store) as conn:
-        assert type(conn) is sqlite3.Connection
+        # RuntimeDB 写借用只外包代际栅栏；栅栏内仍是未包租期的标准连接。
+        assert isinstance(conn, RuntimeWriteFence) is isinstance(store, RuntimeRepository)
+        raw = conn._connection if isinstance(conn, RuntimeWriteFence) else conn
+        assert type(raw) is sqlite3.Connection
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute('SELECT 1')
 

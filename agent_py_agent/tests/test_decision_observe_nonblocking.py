@@ -346,10 +346,15 @@ def test_recall_main_chain_keeps_the_original_order_without_waiting(tmp_path, se
     assert [(row["point"], row["blocking"]) for row in rows(host)] == [("recall", False)]
 
 
+# LLM: 决策默认唯一归决策代码（a12fe40c5），AgentConfig 不再有平铺开关；设置服务读取的有效值与代码默认一致。
+# 函数用途: 验证开关是 owner/thread 两层可覆盖的通用布尔字段，默认关闭。
 def test_switch_is_one_general_boolean_field_with_matching_defaults(tmp_path):
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
+
     assert "observe_nonblocking_enabled" in GENERAL_FIELDS and "observe_nonblocking_enabled" in BOOLEAN_FIELDS
     assert decision_field_scopes()["observe_nonblocking_enabled"] == ["owner", "thread"]
-    assert AgentConfig().decision_observe_nonblocking_enabled is False
+    assert decision_defaults(None)[0]["observe_nonblocking_enabled"] is False
+    assert not hasattr(AgentConfig(), "decision_observe_nonblocking_enabled")
     from agent_py_agent.tests.test_decision_settings import host_at
 
     assert settings(host_at(tmp_path), "read", {})["effective"]["observe_nonblocking_enabled"] is False

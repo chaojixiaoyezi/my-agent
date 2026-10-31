@@ -16,6 +16,7 @@ from agent_py_agent.agent.conversation.control_commands import parse_conversatio
 from agent_py_agent.agent.gateway_parts import model_profile_service, private_interaction_service
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.tests.test_im_model_cards import callback, setup
+from agent_py_agent.tests.test_model_profiles import add
 
 
 def test_cli_adapter_uses_same_gateway_port_home_and_configured_token(tmp_path):
@@ -63,9 +64,11 @@ def test_control_http_failure_has_safe_stage_and_code(tmp_path,monkeypatch,failu
 @pytest.mark.parametrize('operation', ['select','set_default','add'])
 @pytest.mark.parametrize('locked', [False,True])
 def test_model_buttons_real_loopback_preserve_owner_and_private_lock(tmp_path,monkeypatch,operation,locked):
-    base,_,scope,_,_=setup(tmp_path,monkeypatch,group=True)
+    base,_,scope,host,_=setup(tmp_path,monkeypatch,group=True)
+    # 未配置的 default 不再是可选模型（e905 目录权威）；选择/设默认需先有一个真实档案。
+    profile_id=add(host)[0] if operation!='add' else ''
     model_profile_service.execute_model_text_control(base,parse_conversation_control('/model'),scope)
-    body=callback(base,decision=operation,fields={'profile_id':'default' if operation!='add' else ''})
+    body=callback(base,decision=operation,fields={'profile_id':profile_id})
     if locked:
         monkeypatch.setattr(private_interaction_service,'private_interaction_lock_error',lambda *a:'IM_PASSWORD_SETUP_REQUIRED')
     received=[]

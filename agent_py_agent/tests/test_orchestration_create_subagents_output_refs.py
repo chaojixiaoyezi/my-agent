@@ -37,7 +37,7 @@ def test_items_mode_payload_rebinds_stale_self_output_run_id(tmp_path):
     mock_agent = _mock_workspace_agent(tmp_path)
 
     result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "收集项目数据",
+        "batch_summary": "收集项目数据",
         "items": [{
             "goal": "收集项目数据。",
             "output_files": [f"data/subagents/{stale_id}/data_collection.md"],
@@ -87,11 +87,11 @@ def test_structured_output_worker_defaults_to_workspace_root():
     mock_task.task_dir = "/tmp/writer_001"
     mock_agent.subagents.create_run.return_value = mock_task
 
-    result = CreateSubagentsTool(mock_agent).execute({
+    result = CreateSubagentsTool(mock_agent).execute({"items": [{
         "goal": "生成一个完整文件。",
         "role": "writer",
         "output_files": ["index.html"],
-    })
+    }]})
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
 
     assert result.ok is True
@@ -210,11 +210,11 @@ def test_repair_file_task_with_output_ref_defaults_to_workspace_root():
     mock_task.task_dir = "/tmp/repair_001"
     mock_agent.subagents.create_run.return_value = mock_task
 
-    result = CreateSubagentsTool(mock_agent).execute({
+    result = CreateSubagentsTool(mock_agent).execute({"items": [{
         "goal": "修复页面内链接问题。",
         "role": "repair",
         "output_files": ["index1.html"],
-    })
+    }]})
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
 
     assert result.ok is True
@@ -228,7 +228,7 @@ def test_repair_task_keeps_host_workspace_without_target_derived_authority(tmp_p
     target = tmp_path / "lab_outputs" / "site-demo" / "index.html"
     report = tmp_path / ".my-agent" / "subagents" / "child-a" / "reports" / "test_execution.json"
 
-    result = CreateSubagentsTool(agent).execute({
+    result = CreateSubagentsTool(agent).execute({"items": [{
         "goal": "修复示例站 index.html 的结构验证问题，并满足 required_dom_ids。",
         "agent_name": "小傻妞-验收修复",
         "role": "worker",
@@ -251,7 +251,7 @@ def test_repair_task_keeps_host_workspace_without_target_derived_authority(tmp_p
             "required_read_paths": [str(report), str(target)],
             "target_artifact_refs": [str(target)],
         },
-    })
+    }]})
     payload = json.loads(result.output)
     task = agent.subagents.load(payload["created_run_ids"][0])
 
@@ -268,12 +268,12 @@ def test_goal_absolute_target_file_normalizes_write_root_to_parent(tmp_path):
     agent = _mock_workspace_agent(tmp_path)
     target = tmp_path / "lab_outputs" / "site-demo" / "index.html"
 
-    result = CreateSubagentsTool(agent).execute({
+    result = CreateSubagentsTool(agent).execute({"items": [{
         "goal": "修复示例站验收失败问题。",
         "agent_name": "小傻妞-修复示例站",
         "role": "worker",
         "extra_write_roots": [str(target)],
-    })
+    }]})
     payload = json.loads(result.output)
     task = agent.subagents.load(payload["created_run_ids"][0])
 
@@ -291,13 +291,13 @@ def test_repair_contract_fields_are_persisted_to_child_context(tmp_path):
     test_ref = str(tmp_path / "reports" / "test_execution.json")
     agent = _mock_workspace_agent(tmp_path)
 
-    result = CreateSubagentsTool(agent).execute({
+    result = CreateSubagentsTool(agent).execute({"items": [{
         "goal": "修复失败报告中的 xlsx 生成问题。",
         "agent_name": "小傻妞-验收修复",
         "role": "worker",
         "required_read_paths": [test_ref],
         "context_packs": [{"kind": "repair_contract", "summary": "同一个 run 内修复、执行、验证"}],
-    })
+    }]})
     payload = json.loads(result.output)
     task = agent.subagents.load(payload["created_run_ids"][0])
 
@@ -342,8 +342,8 @@ def test_generic_worker_without_idempotency_contract_does_not_reuse_by_goal_text
     agent = _mock_workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
 
-    first = json.loads(tool.execute({"goal": "写一个家具品牌首页", "role": "worker"}).output)
-    second = json.loads(tool.execute({"goal": "写一个家具品牌首页", "role": "worker"}).output)
+    first = json.loads(tool.execute({"items": [{"goal": "写一个家具品牌首页", "role": "worker"}]}).output)
+    second = json.loads(tool.execute({"items": [{"goal": "写一个家具品牌首页", "role": "worker"}]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"]
@@ -364,16 +364,16 @@ def test_generic_worker_reuses_structured_idempotency_contract_despite_reworded_
         "scope_refs": ["deliverables/home/index.html"],
     }
 
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "写一个家具品牌首页",
         "role": "worker",
         "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": "继续完成高端家具首页",
         "role": "worker",
         "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
-    }).output)
+    }]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"] == []
@@ -393,19 +393,19 @@ def test_structured_idempotency_does_not_reuse_completed_alias(tmp_path):
         "scope_refs": ["deliverables/home/index.html"],
     }
 
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "写一个家具品牌首页",
         "role": "worker",
         "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
-    }).output)
+    }]}).output)
     child = agent.subagents.load(first["created_run_ids"][0])
     child.status = "COMPLETED"
     agent.subagents.save(child)
-    second = json.loads(tool.execute({
+    second = json.loads(tool.execute({"items": [{
         "goal": "继续完成高端家具首页",
         "role": "worker",
         "context_packs": [{"kind": "idempotency_contract", "contract": contract}],
-    }).output)
+    }]}).output)
 
     assert second["created_run_ids"]
     assert second["reused_run_ids"] == []
@@ -419,18 +419,18 @@ def test_generic_worker_shared_io_remains_metadata_not_identity(tmp_path):
     agent = _mock_workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
 
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "整理第一批项目。",
         "role": "worker",
         "input_refs": [str(tmp_path / "inputs" / "batch4")],
         "output_files": [str(tmp_path / "outputs" / "batch4.md")],
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": "继续处理那一批资料并写报告。",
         "role": "worker",
         "input_refs": [str(tmp_path / "inputs" / "batch4")],
         "output_files": [str(tmp_path / "outputs" / "batch4.md")],
-    }).output)
+    }]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"] != first["created_run_ids"]
@@ -448,7 +448,7 @@ def test_items_without_output_files_keep_business_output_contract_empty(tmp_path
     tool = CreateSubagentsTool(agent)
 
     payload = json.loads(tool.execute({
-        "goal": "并行分析两个项目",
+        "batch_summary": "并行分析两个项目",
         "items": [
             {
                 "goal": "分析 ECC-main 并写报告。",
@@ -504,7 +504,7 @@ def test_background_turn_without_declared_outputs_keeps_output_contract_empty(tm
     payload = json.loads(
         CreateSubagentsTool(agent).execute(
             {
-                "goal": "后台续接时并行分析两部分",
+                "batch_summary": "后台续接时并行分析两部分",
                 "items": [
                     {"goal": "分析第一部分", "agent_name": "first"},
                     {"goal": "分析第二部分", "agent_name": "second"},
@@ -586,11 +586,11 @@ def test_output_prefixed_file_resolves_against_real_host_workspace(tmp_path):
     agent._current_run_task_workspace = str(task_root)
     tool = CreateSubagentsTool(agent)
 
-    payload = json.loads(tool.execute({
+    payload = json.loads(tool.execute({"items": [{
         "goal": "写一份摘要。",
         "role": "worker",
         "output_files": ["output/report.md"],
-    }).output)
+    }]}).output)
 
     output_ref = payload["tasks"][0]["attributes"]["output_files"][0]
     assert output_ref == str((tmp_path / "output" / "report.md").resolve(strict=False))
@@ -609,11 +609,11 @@ def test_explicit_owner_home_output_is_preserved_without_rebasing(tmp_path):
 
     payload = json.loads(
         CreateSubagentsTool(agent).execute(
-            {
+            {"items": [{
                 "goal": f"完成导师计划并保存到 {invented}",
                 "role": "worker",
                 "output_files": [str(invented)],
-            }
+            }]}
         ).output
     )
 
@@ -632,16 +632,16 @@ def test_same_output_without_structured_inputs_stays_two_distinct_runs(tmp_path)
     agent = _mock_workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
 
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "分析项目 A 并追加到总报告。",
         "role": "worker",
         "output_files": [str(tmp_path / "outputs" / "summary.md")],
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": "分析项目 B 并追加到总报告。",
         "role": "worker",
         "output_files": [str(tmp_path / "outputs" / "summary.md")],
-    }).output)
+    }]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"]
@@ -654,16 +654,16 @@ def test_repair_goal_without_contract_does_not_guess_same_target(tmp_path):
     agent = _mock_workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     artifact = tmp_path / "index2.html"
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": f"修复 {artifact} 的 HTML 闭合标签，并验证页面完整。",
         "agent_name": "小傻妞-修复",
         "role": "worker",
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": f"收尾修复文件：{artifact}，确保 </body></html> 是最后内容。",
         "agent_name": "小傻妞-收尾修复",
         "role": "worker",
-    }).output)
+    }]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"]
@@ -675,16 +675,16 @@ def test_repair_goal_without_contract_keeps_different_targets_separate(tmp_path)
 
     agent = _mock_workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": f"修复 {tmp_path / 'index1.html'} 的锚点链接。",
         "agent_name": "小傻妞-修复",
         "role": "worker",
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": f"修复 {tmp_path / 'index2.html'} 的 HTML 闭合标签。",
         "agent_name": "小傻妞-修复",
         "role": "worker",
-    }).output)
+    }]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"]
@@ -744,16 +744,16 @@ def test_nested_create_without_idempotency_contract_does_not_reuse_by_goal_text(
     agent._current_subagent_run_id = parent.id
     tool = CreateSubagentsTool(agent)
 
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "写一个家具品牌首页",
         "role": "worker",
         "agent_name": "小小傻妞-worker",
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": "写一个家具品牌首页",
         "role": "worker",
         "agent_name": "小小傻妞-worker",
-    }).output)
+    }]}).output)
 
     assert first["created_run_ids"]
     assert second["created_run_ids"]
@@ -775,11 +775,11 @@ def _repair_create_params(run_id: str, artifact: str, *, goal: str = "修复最�
             "report_artifact_and_test_refs",
         ],
     }
-    return {
+    return {"items": [{
         "goal": goal,
         "agent_name": "小傻妞-验收修复",
         "role": "worker",
         "required_read_paths": list(contract["required_read_paths"]),
         "context_packs": [{"kind": "repair_contract", "summary": "同一个 run 内修复、执行、验证", "contract": contract}],
         "repair_contract": contract,
-    }
+    }]}

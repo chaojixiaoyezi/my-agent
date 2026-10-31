@@ -18,10 +18,13 @@ COMMAND_CLASSIFICATION_UNKNOWN 进入人工审批 → 但 approval_request 无�
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.tool_guard.agent_budget import (
     check_unknown_command_budget,
 )
 from agent_py_agent.agent.contracts.gates.command_policy import analyze_command
+from agent_py_agent.agent.settings.deployment_policy import DeploymentPolicyError
 from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
 from agent_py_agent.agent.tooling.action_policy import (
     ActionPolicy,
@@ -38,8 +41,9 @@ from agent_py_agent.tests._tool_runtime_harness import (
 _RUN = "run-unknown-budget-test"
 
 
+# RuntimeGuardPolicy 已是 deployment_policy 的 typed 节点，覆盖值按字段名直接构造并走同一严格校验。
 def _runtime_guard(values: dict[str, object] | None) -> RuntimeGuardPolicy:
-    return RuntimeGuardPolicy(values=dict(values or {}))
+    return RuntimeGuardPolicy(**dict(values or {}))
 
 
 def _agent(values: dict[str, object] | None):
@@ -114,13 +118,15 @@ def test_dangerous_command_never_bypasses_allowlist() -> None:
 
 def test_allowlist_helper_parses_values() -> None:
     assert _unknown_command_allowlist(None) == frozenset()
-    assert _unknown_command_allowlist(RuntimeGuardPolicy(values=None)) == frozenset()
+    assert _unknown_command_allowlist(RuntimeGuardPolicy()) == frozenset()
     assert _unknown_command_allowlist(
-        RuntimeGuardPolicy(values={"unknown_command_allowlist": [" go ", "", "go test"]})
+        RuntimeGuardPolicy(unknown_command_allowlist=[" go ", "", "go test"])
     ) == frozenset({"go", "go test"})
-    # 非 list/tuple 类型一律视为未配置
+    # 非 list/tuple 类型一律视为未配置：typed 策略在构造时就拒绝，读口对其它值投影也不当白名单
+    with pytest.raises(DeploymentPolicyError):
+        RuntimeGuardPolicy(unknown_command_allowlist="go")
     assert _unknown_command_allowlist(
-        RuntimeGuardPolicy(values={"unknown_command_allowlist": "go"})
+        SimpleNamespace(values={"unknown_command_allowlist": "go"})
     ) == frozenset()
 
 

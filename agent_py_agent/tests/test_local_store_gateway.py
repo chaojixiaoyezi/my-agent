@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.models import AgentRunResult
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     AdapterPaths,
@@ -46,6 +47,8 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        # 有 Home 时目录未选模型即未配置；离线 echo 后端须构造后显式注入，才在 Gateway 模型作用域里保留。
+        agent.backend = get_backend("echo", cfg)
         agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="fact")
         task = agent.subagents.create_run(
             goal="local-rebuild 子代理索引测试",
@@ -69,7 +72,8 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         )
 
         counts = result["source_counts"]
-        assert counts["memory"] == 1
+        # 788f9b847 起正式记忆只重建 owner 读索引，LocalStore 不再保存记忆文本投影。
+        assert result["memory_indexed"] == 1 and "memory" not in counts
         assert counts["gateway_request"] >= 1
         assert counts["subagent_run"] == 1
         assert (
@@ -81,7 +85,8 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
 
         doctor = build_local_doctor_report(agent)
         assert doctor["memory_count"] == 1
-        assert any(item["name"] == "memory_index" for item in doctor["checks"])
+        memory_index = next(item for item in doctor["checks"] if item["name"] == "memory_index")
+        assert memory_index["ok"] and memory_index["details"]["coverage"]["status"] == "complete"
 
 
 # ── Shared gateway fixture helpers ─────────────────────────────────────────────
@@ -360,6 +365,7 @@ def test_file_adapter_writes_gateway_response_to_outbox():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        agent.backend = get_backend("echo", cfg)
         gpaths = gateway_paths(agent)
         apaths = AdapterPaths(
             root=root / "adapter",

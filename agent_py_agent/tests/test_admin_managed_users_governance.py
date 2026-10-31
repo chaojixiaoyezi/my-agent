@@ -709,8 +709,8 @@ def test_r2_memory_mutations_acquire_quota_before_policy(managed, monkeypatch, o
     assert seen == ["policy"]
 
 
-# LLM: 归档不是授权旁路；锁定条目从选择集排除，管理员整理模式应在归档写前拒绝。
-# 函数用途: 复现浓缩绕过锁与先写archive再拒绝造成的副作用。
+# LLM: 788f9b847后浓缩只按字符预算无损转冷，不再archive+remove；锁定条目固定热层，任何模式都不遗忘或改版本。
+# 函数用途: 验证浓缩不能借转冷绕过管理员锁，也不写旧archive或删除回执；仅管理员整理模式下事实同样完整。
 @pytest.mark.parametrize("mode", ["locked", "admin_only", "autonomous"])
 def test_r2_condense_respects_governance_before_archive(managed, mode):
     from agent_py_agent.agent.user_space.managed_user_governance import _managed_memory_stores
@@ -721,17 +721,16 @@ def test_r2_condense_respects_governance_before_archive(managed, mode):
     memory, _ = _managed_memory_stores(home)
     if mode == "admin_only":
         service.set_policy("alice", {"memory_curate_mode": "admin_only"})
-    before = home.long_term_jsonl.read_bytes()
+    policy = json.loads(home.memory_policy_json.read_text()) if home.memory_policy_json.exists() else {}
+    policy["budget"] = {**policy.get("budget", {}), "active_library_max_chars": 20}
+    home.memory_policy_json.write_text(json.dumps(policy))
+    before = {record.entry_id: (record.content, record.version) for record in memory.all()}
     archive = home.long_term_jsonl.with_name("memory.jsonl.archive.jsonl")
-    if mode == "admin_only":
-        with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
-            memory.condense(max_records=1, target_records=0, max_ratio=1)
-        assert home.long_term_jsonl.read_bytes() == before and not archive.exists()
-    else:
-        removed = memory.condense(max_records=1, target_records=0, max_ratio=1)
-        assert [record.entry_id for record in removed] == [unlocked["entry_id"]]
-        assert [record.entry_id for record in memory.all()] == [locked["entry_id"]]
-        assert locked["content"] not in archive.read_text()
+    removed = memory.condense(max_records=1, target_records=0, max_ratio=1)
+    assert [record.entry_id for record in removed] == [unlocked["entry_id"]]
+    assert [record.entry_id for record in memory.active_records()] == [locked["entry_id"]]
+    assert {record.entry_id: (record.content, record.version) for record in memory.all()} == before
+    assert not archive.exists() and memory.committed_removal_record(unlocked["entry_id"]) is None
 
 
 # LLM: 原迁移接口只按精确版本/hash清除；管理员锁不因备份引用存在而失效。

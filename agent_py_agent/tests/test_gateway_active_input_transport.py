@@ -10,6 +10,7 @@ from importlib import import_module
 import pytest
 
 from agent_py_agent.agent.agent_core.runtime import guidance
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.base import EchoBackend
 from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
@@ -757,6 +758,8 @@ def test_original_claimed_request_pipeline_installs_source_and_consumes_arrival_
         server,
         _close,
     ):
+        # 有 Home 时目录未选模型即未配置；构造后显式注入的 echo 实例才在模型作用域里保留，下方再替换它的生成入口。
+        agent.backend = get_backend("echo", agent.config)
         initial = {
             "goal": "原始合成前台工作，请只说明结果",
             "conversation_id": "active-cid",

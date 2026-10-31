@@ -120,9 +120,9 @@ def test_model_user_config_cannot_write_gate_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_AGENT_CONFIG", str(user))
     host = SimpleNamespace(home_paths=SimpleNamespace(owner_id="local/main", owner_provider="local", owner_kind="main"))
     result = UserConfigTool(host).execute({"action": "set", "key": "plugin_tool_gate_timeout_ms", "value": "10000"})
-    # 工具保留原权限大类，参数中心的精确结构化拒绝码不能在投影中丢失。
+    # 工具保留原权限大类，参数中心的精确结构化拒绝码不能在投影中丢失；gate 预算现为宿主部署项（a12fe40c5）。
     assert not result.ok and result.error_code == "TOOL_PERMISSION_DENIED"
-    assert result.reported_error_code == "PARAMETER_BOUNDARY"
+    assert result.reported_error_code == "PARAMETER_SOURCE_READ_ONLY"
     assert user.read_text() == "{}\n"
 
 

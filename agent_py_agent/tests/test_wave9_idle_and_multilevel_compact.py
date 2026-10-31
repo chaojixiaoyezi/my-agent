@@ -646,6 +646,7 @@ def test_compact_threshold_control_executes_without_summary(conversation, monkey
 
 
 # LLM: 旧YAML只在未明确配置新键时迁移，新旧同时出现以新键为准，不改变本轮冻结对象。
+#   a12fe40c5 起迁移只走显式离线入口 migrate_legacy_compact_layers；运行时 load_config 不再推断旧键，只告警忽略。
 # 函数用途: 防止现有部署压缩配置升级后被默默丢弃。
 @pytest.mark.parametrize("canonical,expected", [(False, 73), (True, 82)])
 def test_legacy_compact_yaml_migration(tmp_path, canonical, expected):
@@ -653,9 +654,15 @@ def test_legacy_compact_yaml_migration(tmp_path, canonical, expected):
         resolve_thread_compact_policy,
     )
     from agent_py_agent.agent.settings.config import load_config
+    from agent_py_agent.agent.settings.config_layers import ConfigLayer
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_compact_layers
 
     path = tmp_path / "agent.yaml"
-    path.write_text("memory_compact_auto_trigger_percent: 73\n" + ("memory_compact_trigger_percent: 82\n" if canonical else ""))
+    values = {"memory_compact_auto_trigger_percent": 73, **({"memory_compact_trigger_percent": 82} if canonical else {})}
+    path.write_text("".join(f"{key}: {value}\n" for key, value in values.items()))
+    assert "unknown config key: 'memory_compact_auto_trigger_percent'; ignored" in load_config(path).config_warnings
+    [migrated] = migrate_legacy_compact_layers([ConfigLayer(str(path), 0, values)])
+    path.write_text("".join(f"{key}: {value}\n" for key, value in migrated.values.items()))
     config = load_config(path)
     assert resolve_thread_compact_policy(SimpleNamespace(config=config))["effective_trigger_percent"] == expected
 

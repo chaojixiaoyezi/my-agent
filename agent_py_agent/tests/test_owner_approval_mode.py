@@ -129,6 +129,9 @@ def test_auto_still_rejects_unavailable_tools_and_invalid_arguments(tmp_path):
 def test_permission_only_scope_keeps_backend_and_restores_snapshot(tmp_path):
     host = Host(tmp_path / "config")
     host.home_paths = owner_home(tmp_path, admin=True)
+    # 未选模型时作用域投影未配置模型；只有构造后显式注入的后端才被保留（同 SimpleAgent 构造标记）。
+    host._default_constructed_backend = host.backend
+    host.backend = SimpleNamespace(name="injected")
     original_config, original_backend = host.config, host.backend
     execute_approval_mode_operation(host.home_paths, "set", "full-access")
     with selected_model_scope(host):

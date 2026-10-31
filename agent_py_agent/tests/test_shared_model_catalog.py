@@ -181,4 +181,6 @@ def test_revoked_legacy_default_can_be_replaced_and_is_not_shown_as_default(tmp_
     assert unavailable["ok"] and not unavailable["selection_available"]
     assert unavailable["selected"] == "shared:" + key
     result = execute_local_model_operation(alice, "one", "select", {"profile_id": "default"})
-    assert result["selection_available"] and result["selected"] == "default"
+    # e905 起默认不再落到部署配置：改选默认被接受，但未配置模型如实不可用，不悄悄换模型。
+    assert result["ok"] and result["selected"] == "default"
+    assert not result["selection_available"] and "尚未配置模型" in result["warning"]

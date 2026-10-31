@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """工具说明精简（只删重复文字）合同单测：字段、类型、枚举、必填和顶层权威说明都不变。
 
-- create_subagents：items[] 里与顶层同名同义的字段只写“同顶层 X。”，本项专属的 goal/description/role、covers 和
-  input_media_refs（第 14 条，开关打开时才有）照旧；开关关闭时说明里不出现 input_media_refs。
+- create_subagents：7101c9fa2 起顶层只剩 items/batch_summary，派工字段只在 items[] 里出现并各带完整说明（不再写
+  “同顶层 X。”）；本项专属的 goal/description 照旧，input_media_refs（第 14 条）只在开关打开时出现。
 - remember：batch 单项的 scope 只写“同顶层 scope。”，结构与顶层 scope 完全一致。
 - user_config：points.<点>.profile_id 只写“同 profile_id”，changes.profile_id 保留完整说明。
 """
@@ -14,10 +14,14 @@ from copy import deepcopy
 import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.tool_spec_data import (
+    _CREATE_INPUT_MEDIA_DETAILS,
     _CREATE_ITEM_PARAMETER_DETAILS,
     _CREATE_PARAMETER_DETAILS,
+    _CREATE_PARAMETERS,
 )
+from agent_py_agent.agent.agent_core.orchestration.tool_spec_schemas import create_parameter_schema
 from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
+    _with_role_template_index,
     build_create_subagents_model_spec,
 )
 from agent_py_agent.agent.capability.memory_tool import build_remember_model_spec
@@ -33,25 +37,26 @@ def _without_descriptions(value):
     return value
 
 
+# LLM: items-only 合同下没有顶层同名字段可指回；每个 item 字段自带完整说明，形状与规范参数 schema 一致。
+# 函数用途: 锁定 create_subagents 模型 schema 的字段集合、说明来源与结构不变。
 @pytest.mark.parametrize("input_media", [False, True])
-def test_create_subagents_items_point_back_to_top_level_without_changing_shapes(input_media):
+def test_create_subagents_items_carry_full_descriptions_without_changing_shapes(input_media):
     spec = build_create_subagents_model_spec(input_media=input_media)
     schema = spec.input_schema
     top = schema["properties"]
     items = top["items"]["items"]["properties"]
+    shapes = create_parameter_schema(input_media=input_media)["items"]["items"]["properties"]
+    full = _with_role_template_index(
+        {**_CREATE_PARAMETERS, **_CREATE_PARAMETER_DETAILS, **(_CREATE_INPUT_MEDIA_DETAILS if input_media else {})}
+    )
+    assert set(top) == {"items", "batch_summary"} and schema["required"] == ["items"]
     assert ("input_media_refs" in json.dumps(schema, ensure_ascii=False)) is input_media, "开关关闭时说明里不出现 input_media_refs"
+    assert set(items) == set(shapes)
     for name, shape in items.items():
-        if name in _CREATE_ITEM_PARAMETER_DETAILS:
-            assert shape["description"] == _CREATE_ITEM_PARAMETER_DETAILS[name]
-            continue
-        if name in {"covers", "input_media_refs"}:
-            assert shape["description"] == top[name]["description"], f"{name} 在 item 里填，保留完整说明"
-            continue
-        reference = f"同顶层 {name}。"
-        full = top[name]["description"]
-        assert shape["description"] == (reference if len(full) > len(reference) else full), name
-        assert _without_descriptions(shape) == _without_descriptions(top[name]), name
-    assert top["covers"]["description"] == _CREATE_PARAMETER_DETAILS["covers"]
+        assert shape["description"] == _CREATE_ITEM_PARAMETER_DETAILS.get(name, full[name]), name
+        assert "同顶层" not in shape["description"], name
+        assert _without_descriptions(shape) == _without_descriptions(shapes[name]), name
+    assert items["covers"]["description"] == _CREATE_PARAMETER_DETAILS["covers"]
     assert top["items"]["items"]["required"] == ["goal"]
 
 

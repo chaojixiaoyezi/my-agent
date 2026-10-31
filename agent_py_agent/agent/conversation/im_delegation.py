@@ -251,14 +251,14 @@ def _start_child(agent, params, task, allowed):
     current = agent._current_run_params
     media = media_for_run(agent, current.host_channel_actor) if current.host_channel_actor is not None else ()
     require_subagent_media(agent, media)
-    arguments = {"goal": task.goal, "allowed_skills": allowed,
+    item = {"goal": task.goal, "allowed_skills": allowed,
         "allowed_tools": leaf_allowed_tools(active_model_subagent_tools(sorted(params.tool_runtime_snapshot.available_tool_names)))}
     if media:
-        arguments['input_media_refs'] = [ref['sha256'] for ref in media]
+        item['input_media_refs'] = [ref['sha256'] for ref in media]
         params = replace(params, task_attributes={**(params.task_attributes or {}), 'input_media': list(media)})
     call = ToolCall(
         call_id=f"host-delegate:{task.task_id}", tool_name="create_subagents",
-        arguments=arguments,
+        arguments={"items": [item]},
         source_protocol=params.tool_protocol_snapshot.source_protocol, schema_hash=runtime.model_spec.schema_hash,
         run_id=params.run_id, turn_id=f"{params.run_id}:host-delegate", attempt_id=params.attempt_id,
     )

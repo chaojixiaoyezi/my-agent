@@ -35,30 +35,34 @@ def _files(tmp_path: Path) -> tuple[Path, Path]:
     packaged = tmp_path / "agent_config.yaml"
     user.write_text("my_agent_home: /tmp/home\n", encoding="utf-8")
     packaged.write_text(
-        "my_agent_home: /tmp/home\nmemory_compact_auto_trigger_percent: 90\n",
+        "my_agent_home: /tmp/home\nmemory_compact_trigger_percent: 90\n",
         encoding="utf-8",
     )
     return user, packaged
 
 
 # LLM: 安全边界必须结构性拒绝，且给出原因——模型不能靠"试试看"绕过。
+#   原因按当前登记表：权限档位是安全边界；模型凭据已迁入模型目录、不再是用户参数；宿主数据根只归部署入口。
 # 函数用途: 验证权限/凭据类键永远不可写。
 def test_boundary_keys_are_never_writable(tmp_path):
     user, _packaged = _files(tmp_path)
-    for key in ("access_mode", "api_key", "my_agent_home"):
+    before = user.read_text(encoding="utf-8")
+    reasons = {"access_mode": "安全边界", "api_key": "没有名为 'api_key' 的参数", "my_agent_home": "宿主部署配置"}
+    for key, reason in reasons.items():
         assert key in BOUNDARY_KEYS
         report = set_tunable_value(key, "full-access", user_path=user)
         assert report["ok"] is False
-        assert "安全边界" in report["error"]
+        assert reason in report["error"], key
+    assert user.read_text(encoding="utf-8") == before
 
 
 # LLM: 白名单内的键要校验取值区间，越界/非数字都必须拒绝并说明合法范围。
 # 函数用途: 验证取值校验。
 def test_tunable_value_is_validated(tmp_path):
     user, _packaged = _files(tmp_path)
-    assert set_tunable_value("memory_compact_auto_trigger_percent", "150", user_path=user)["ok"] is False
-    assert set_tunable_value("memory_compact_auto_trigger_percent", "abc", user_path=user)["ok"] is False
-    report = set_tunable_value("memory_compact_auto_trigger_percent", "80", user_path=user)
+    assert set_tunable_value("memory_compact_trigger_percent", "150", user_path=user)["ok"] is False
+    assert set_tunable_value("memory_compact_trigger_percent", "abc", user_path=user)["ok"] is False
+    report = set_tunable_value("memory_compact_trigger_percent", "80", user_path=user)
     assert report["ok"] is True
     assert report["saved"] == "80"
     assert report["written_value_matches"] is True
@@ -72,14 +76,14 @@ def test_tunable_value_is_validated(tmp_path):
 def test_source_distinguishes_user_and_packaged(tmp_path):
     user, packaged = _files(tmp_path)
     fact = read_config_fact(
-        "memory_compact_auto_trigger_percent", user_path=user, default_path=packaged
+        "memory_compact_trigger_percent", user_path=user, default_path=packaged
     )
     assert fact["source"] == "packaged_default"
     assert fact["user_value"] is None
 
-    set_tunable_value("memory_compact_auto_trigger_percent", "70", user_path=user)
+    set_tunable_value("memory_compact_trigger_percent", "70", user_path=user)
     fact = read_config_fact(
-        "memory_compact_auto_trigger_percent", user_path=user, default_path=packaged
+        "memory_compact_trigger_percent", user_path=user, default_path=packaged
     )
     assert fact["source"] == "user_config"
     assert fact["effective"] == "70"
@@ -89,10 +93,10 @@ def test_source_distinguishes_user_and_packaged(tmp_path):
 # 函数用途: 验证缺用户配置路径时拒绝写入。
 def test_missing_user_path_refuses_write(tmp_path, monkeypatch):
     monkeypatch.delenv("MY_AGENT_CONFIG", raising=False)
-    report = set_tunable_value("memory_compact_auto_trigger_percent", "80", user_path=None)
+    report = set_tunable_value("memory_compact_trigger_percent", "80", user_path=None)
     assert report["ok"] is False
     assert "MY_AGENT_CONFIG" in report["error"]
-    assert "memory_compact_auto_trigger_percent" in TUNABLE_KEYS
+    assert "memory_compact_trigger_percent" in TUNABLE_KEYS
 
 
 def test_original_user_config_decision_actions_share_service_and_cas(tmp_path):
@@ -165,9 +169,12 @@ def test_decision_tool_owner_check_and_unavailable_service_can_be_disabled(tmp_p
 def test_self_service_percent_is_accepted_exactly_when_it_takes_effect():
     """自助修改接受的百分比必须原样生效：与配置解析、运行时夹取三处一致，接受即生效、生效即可接受。"""
     from agent_py_agent.agent.agent_core.runtime import context_compactor
+    from agent_py_agent.agent.settings.config_layers import compact_policy_percent
     from agent_py_agent.agent.settings.memory import normalize_memory_settings
 
-    pairs = {"memory_compact_auto_trigger_percent": context_compactor.compact_trigger_percent,
+    # 退役的 memory_compact_auto_trigger_percent 由 memory_compact_trigger_percent 取代；它在运行时按四层压缩策略
+    # 冻结，夹取口是 compact_policy_percent（管理员默认缺省 80）。
+    pairs = {"memory_compact_trigger_percent": lambda value: compact_policy_percent(value, 80),
              "memory_compact_recovery_target_percent": context_compactor.compact_recovery_target_percent}
     for key, runtime_clamp in pairs.items():
         for value in range(-5, 131):

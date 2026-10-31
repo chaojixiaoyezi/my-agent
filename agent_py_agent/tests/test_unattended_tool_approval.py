@@ -274,7 +274,8 @@ def test_deployment_parameter_projection_ignores_owner_local_and_keeps_writes_bl
         else:
             result = set_parameter(key,'auto' if key == 'owner_default_permission_mode' else '100',
                 paths=WritePaths(None,local),origin=ChangeOrigin('test'))
-        assert not result['ok'] and result['code'] == 'PARAMETER_BOUNDARY'
+        # 宿主部署层先于安全边界拒绝（a12fe40c5），任何作用域都不写 owner 局部覆盖。
+        assert not result['ok'] and result['code'] == 'PARAMETER_SOURCE_READ_ONLY'
     assert (shared.read_bytes(),local.read_bytes()) == original
     assert running_value(spec,None,capability_path=local) == 'unknown'
     shared.write_text('owner_default_permission_mode: broken\n')

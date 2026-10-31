@@ -48,6 +48,16 @@ def _test_config(tmp_path: Path, **kwargs) -> AgentConfig:
     return AgentConfig(my_agent_home=str(tmp_path / "home"), **kwargs)
 
 
+def _offline_agent(config: AgentConfig, workspace: Path) -> SimpleAgent:
+    """显式离线测试后端走构造后注入；不让空 owner 目录重新回落部署 echo。"""
+    from agent_py_agent.agent.backends import get_backend
+
+    instance = SimpleAgent(config, workspace)
+    assert config.model_backend == "echo"
+    instance.backend = get_backend("echo", config)
+    return instance
+
+
 def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
     append_raw_event(
         root,
@@ -212,7 +222,7 @@ def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwre
 
 
 def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         AgentConfig(
             model_backend="echo",
             memory_rule_routing_mode="soft",
@@ -233,7 +243,7 @@ def test_run_injects_only_formal_routed_lesson_in_memory_envelope(tmp_path):
 
 
 def test_run_writes_raw_archive_when_saved(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
 
     result = agent.run("请归档这轮对话", save=True, request_id="req-archive-save")
 
@@ -255,7 +265,7 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
 
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run("不要归档这轮对话", save=False)
 
@@ -266,7 +276,7 @@ def test_run_no_save_does_not_write_raw_archive(tmp_path):
 
 
 def test_run_no_save_does_not_write_runtime_fact(tmp_path):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _offline_agent(AgentConfig(model_backend="echo"), tmp_path)
 
     result = agent.run(
         "子代理已完成，请写恢复锚点",
@@ -287,7 +297,7 @@ def test_run_no_save_does_not_write_runtime_fact(tmp_path):
 
 
 def test_auto_resume_context_is_disabled_by_default(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 恢复上下文任务", save=True)
 
     result = agent.run("继续 README", save=False)
@@ -297,7 +307,7 @@ def test_auto_resume_context_is_disabled_by_default(tmp_path):
 
 
 def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(
             tmp_path,
             model_backend="echo",
@@ -319,7 +329,7 @@ def test_auto_resume_context_injects_when_always_mode_enabled(tmp_path):
 
 
 def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
-    agent = SimpleAgent(_test_config(tmp_path, model_backend="echo"), tmp_path)
+    agent = _offline_agent(_test_config(tmp_path, model_backend="echo"), tmp_path)
     agent.run("README 临时恢复开关任务", save=True, request_id="request-auto-override")
 
     result = agent.run("继续 README", save=False, resume_context=True)
@@ -330,7 +340,7 @@ def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
 
 
 def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(tmp_path, model_backend="echo", memory_resume_auto_context_mode="trigger"),
         tmp_path,
     )
@@ -343,7 +353,7 @@ def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
 
 
 def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(
             tmp_path,
             model_backend="echo",
@@ -379,7 +389,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
 
 
 def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
-    agent = SimpleAgent(
+    agent = _offline_agent(
         _test_config(
             tmp_path,
             model_backend="echo",

@@ -39,9 +39,13 @@ from agent_py_agent.agent.memory_store import jsonl
 agent, target, _, _ = _cached_target(Path(sys.argv[1]))
 _remove_request(agent, 'cache-crash')
 persist = jsonl.write_private_text_file_atomic_unlocked
+removal_written = []
+# 删除墓碑可能先写入独立永久账，再发表正式根；在墓碑落盘后的正式根写完即退出。
 def crash(path, text):
     persist(path, text)
-    if path == agent.memory.path and '"action": "remove"' in text:
+    if '"action": "remove"' in text:
+        removal_written.append(path)
+    if path == agent.memory.path and removal_written:
         os._exit(73)
 jsonl.write_private_text_file_atomic_unlocked = crash
 ConfirmedRememberWorkflow(agent).execute(dict(action='remove', entry_id=target.entry_id, origin='user_explicit'))

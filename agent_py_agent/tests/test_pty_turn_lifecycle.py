@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+from agent_py_agent.agent.backends.factory import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling import pty_sessions as pty
@@ -63,12 +64,21 @@ def _start_session(root, scope: dict, command: str):
     return pty_session_registry.start(command, root, run_scope=scope)
 
 
+# LLM: e905 起 Home 内构造的 AgentConfig 只认 v6 模型目录，未选模型即未配置；测试只需走完回合收口，
+#   构造后显式注入 echo 后端（宿主唯一保留的注入路径），不发真实模型请求。
+# 函数用途: 构造带离线 echo 后端的真实主代理。
+def _echo_agent(root) -> SimpleAgent:
+    agent = SimpleAgent(AgentConfig(), root)
+    agent.backend = get_backend("echo", agent.config)
+    return agent
+
+
 def _long_command() -> str:
     return f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(100000)'"
 
 
 def test_turn_end_reclaims_pty_sessions_of_the_conversation_task(tmp_path, _unsandboxed_spawn):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _echo_agent(tmp_path)
     thread = agent.conversation_store.threads.get_or_create(
         {"channel": "cli", "channel_conversation_id": "c-1", "channel_user_id": "u-1"}
     )
@@ -87,7 +97,7 @@ def test_turn_end_reclaims_pty_sessions_of_the_conversation_task(tmp_path, _unsa
 
 
 def test_task_sweep_reclaims_earlier_runs_of_the_same_task(tmp_path, _unsandboxed_spawn):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _echo_agent(tmp_path)
     thread = agent.conversation_store.threads.get_or_create(
         {"channel": "cli", "channel_conversation_id": "c-1", "channel_user_id": "u-1"}
     )
@@ -105,7 +115,7 @@ def test_task_sweep_reclaims_earlier_runs_of_the_same_task(tmp_path, _unsandboxe
 
 
 def test_turn_end_without_task_identity_falls_back_to_run(tmp_path, _unsandboxed_spawn):
-    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent = _echo_agent(tmp_path)
     session = _start_session(tmp_path, _session_scope(agent, "thread-free", "", "run-free"),
                              _long_command())
     other = _start_session(tmp_path, _session_scope(agent, "thread-free", "", "run-other"),

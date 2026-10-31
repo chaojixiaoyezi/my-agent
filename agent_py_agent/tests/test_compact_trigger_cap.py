@@ -61,55 +61,65 @@ from agent_py_agent.tests.test_subagent_compact_recovery import _http
 WINDOW = 1_000_000
 
 
-# LLM: 构造和动态赋值都走真实AgentConfig；replace不得遗失旧字段派生关系，也不得覆盖独立的新字段。
-# 函数用途: 核对连续修改旧比例及复制配置时仍同步，原配置和显式新比例保持不变。
+# LLM: 旧自动比例已随 a12fe40c5 退役：构造和replace都拒绝旧键；正式比例随复制原样继承，不改源对象也不残留私有来源字段。
+# 函数用途: 核对连续修改正式比例及复制配置时各自独立，原配置保持不变。
 @pytest.mark.parametrize("initial", [70, 85])
-def test_r7_replace_keeps_legacy_trigger_link_without_mutating_source(initial):
+def test_r7_replace_keeps_canonical_trigger_without_mutating_source(initial):
     from dataclasses import asdict, fields
 
-    original = AgentConfig(memory_compact_auto_trigger_percent=initial)
-    assert original.memory_compact_trigger_percent == initial
-    changed = replace(original, memory_compact_auto_trigger_percent=90)
+    with pytest.raises(TypeError):
+        AgentConfig(memory_compact_auto_trigger_percent=initial)
+    original = AgentConfig(memory_compact_trigger_percent=initial)
+    with pytest.raises(TypeError):
+        replace(original, memory_compact_auto_trigger_percent=90)
+    changed = replace(original, memory_compact_trigger_percent=90)
     assert changed.memory_compact_trigger_percent == 90
-    assert original.memory_compact_trigger_percent == original.memory_compact_auto_trigger_percent == initial
-    changed.memory_compact_auto_trigger_percent = 85
-    assert changed.memory_compact_trigger_percent == 85
-    copied = replace(changed, memory_compact_auto_trigger_percent=75)
+    assert original.memory_compact_trigger_percent == initial
+    changed.memory_compact_trigger_percent = 85
+    copied = replace(changed, memory_compact_trigger_percent=75)
     assert copied.memory_compact_trigger_percent == 75
     assert changed.memory_compact_trigger_percent == 85
     assert not any(name.startswith("_compact_trigger_") for name in asdict(copied))
     assert not any(item.name.startswith("_compact_trigger_") for item in fields(copied))
 
 
-# LLM: 旧配置兼容不能取得覆盖管理员新字段的权限；同值重赋保持现行合同。
-# 函数用途: 验证显式新比例在运行期赋值和dataclasses.replace后均不被旧比例覆盖。
+# LLM: 退役旧键不能取得覆盖管理员正式字段的权限；replace直接拒绝，运行期同名普通属性既不联动、也不进入压缩策略或复制结果。
+# 函数用途: 验证显式正式比例在旧名赋值和dataclasses.replace后均不被旧比例覆盖。
 @pytest.mark.parametrize("operation", ["assign", "replace", "same-value"])
 def test_r7_legacy_trigger_changes_preserve_explicit_new_trigger(operation):
-    config = AgentConfig(memory_compact_auto_trigger_percent=70)
-    config.memory_compact_trigger_percent = 75
+    from agent_py_agent.agent.conversation.compact_threshold_policy import (
+        resolve_thread_compact_policy,
+    )
+
+    config = AgentConfig(memory_compact_trigger_percent=75)
     if operation == "replace":
-        result = replace(config, memory_compact_auto_trigger_percent=85)
-    else:
-        config.memory_compact_auto_trigger_percent = 70 if operation == "same-value" else 85
+        with pytest.raises(TypeError):
+            replace(config, memory_compact_auto_trigger_percent=85)
         result = config
+    else:
+        config.memory_compact_auto_trigger_percent = 75 if operation == "same-value" else 85
+        result = replace(config)
+        assert not hasattr(result, "memory_compact_auto_trigger_percent")
     assert result.memory_compact_trigger_percent == 75
+    assert resolve_thread_compact_policy(SimpleNamespace(config=config))["effective_trigger_percent"] == 75
 
 
-# LLM: 联动条件取原对象的新旧字段关系，不限于曾从默认80同步的实例。
-# 函数用途: 验证构造时显式相等的两个比例在复制更新旧键后也联动。
+# LLM: 新旧比例并列不再按相等关系联动：同时给出旧键即被拒绝，只改正式比例的复制不影响源对象。
+# 函数用途: 验证并列旧键被构造拒绝，正式比例复制更新只作用于副本。
 def test_r7_replace_tracks_initially_equal_explicit_triggers():
-    config = AgentConfig(memory_compact_trigger_percent=70, memory_compact_auto_trigger_percent=70)
-    changed = replace(config, memory_compact_auto_trigger_percent=85)
+    with pytest.raises(TypeError):
+        AgentConfig(memory_compact_trigger_percent=70, memory_compact_auto_trigger_percent=70)
+    config = AgentConfig(memory_compact_trigger_percent=70)
+    changed = replace(config, memory_compact_trigger_percent=85)
     assert changed.memory_compact_trigger_percent == 85
-    assert config.memory_compact_trigger_percent == config.memory_compact_auto_trigger_percent == 70
+    assert config.memory_compact_trigger_percent == 70
 
 
-# LLM: 私有复制上下文只能表示当前旧比例，不能把历史同步值当作新字段当前仍受旧键控制的证据。
-# 函数用途: 验证独立赋值后回到历史数值也不会被普通复制或显式复制误覆盖。
+# LLM: 不存在私有复制上下文；旧名只是一条普通实例属性，不能把历史赋值当作正式比例仍受旧键控制的证据。
+# 函数用途: 验证正式比例多次独立赋值后回到历史数值，普通复制或显式复制都不被旧名改写。
 @pytest.mark.parametrize("overrides", [{}, {"memory_compact_trigger_percent": 70}, {"memory_compact_trigger_percent": 65}])
 def test_r7_replace_does_not_revive_stale_trigger_link(overrides):
-    config = AgentConfig(memory_compact_auto_trigger_percent=70)
-    config.memory_compact_trigger_percent = 75
+    config = AgentConfig(memory_compact_trigger_percent=75)
     config.memory_compact_auto_trigger_percent = 85
     config.memory_compact_trigger_percent = 70
     changed = replace(config, **overrides)
@@ -117,7 +127,7 @@ def test_r7_replace_does_not_revive_stale_trigger_link(overrides):
     assert config.memory_compact_trigger_percent == 70
 
 
-# LLM: YAML同时配置显式默认新比例80与旧比例70时，新比例权威优先，且后续克隆不能把80回退成70。
+# LLM: YAML同时配置显式默认正式比例80与退役旧比例70时，旧键按未知键告警忽略，后续克隆不能把80回退成70。
 # 函数用途: 验证load_config加载并经dataclasses.replace克隆后显式80不被旧字段70覆盖。
 def test_r7_yaml_explicit_default_canonical_trigger_survives_replace(tmp_path):
     from agent_py_agent.agent.settings.config import load_config
@@ -129,28 +139,37 @@ def test_r7_yaml_explicit_default_canonical_trigger_survives_replace(tmp_path):
     )
     loaded = load_config(cfg_path)
     assert loaded.memory_compact_trigger_percent == 80
+    assert not hasattr(loaded, "memory_compact_auto_trigger_percent")
+    assert "unknown config key: 'memory_compact_auto_trigger_percent'; ignored" in loaded.config_warnings
     cloned = replace(loaded, log_level="debug")
     assert cloned.memory_compact_trigger_percent == 80
     assert loaded.config_sources["memory_compact_trigger_percent"]["source"] == str(cfg_path.resolve())
 
 
-# LLM: 旧比例先赋值为范围外数值（如40被夹取到50）再改回范围内（如90）或经replace更新时，新比例必须继续联动。
-# 函数用途: 回归验证旧比例经范围夹取后再次修改不会断开与新比例的同步关系。
+# LLM: 正式比例范围外数值（如40）由四层策略夹取到50，之后改回范围内（如90）或经replace更新时，生效比例必须随之更新。
+# 函数用途: 回归验证正式比例经范围夹取后再次修改不会停留在夹取值。
 def test_r8_out_of_range_legacy_trigger_clamped_still_resyncs_on_update():
+    from agent_py_agent.agent.conversation.compact_threshold_policy import (
+        resolve_thread_compact_policy,
+    )
+
+    def effective(config):
+        return resolve_thread_compact_policy(SimpleNamespace(config=config))["effective_trigger_percent"]
+
     cfg = AgentConfig()
-    cfg.memory_compact_auto_trigger_percent = 40
-    assert cfg.memory_compact_trigger_percent == 50
-    cfg.memory_compact_auto_trigger_percent = 90
-    assert cfg.memory_compact_trigger_percent == 90
+    cfg.memory_compact_trigger_percent = 40
+    assert effective(cfg) == 50
+    cfg.memory_compact_trigger_percent = 90
+    assert effective(cfg) == 90
 
-    cfg_replace = AgentConfig(memory_compact_auto_trigger_percent=40)
-    assert cfg_replace.memory_compact_trigger_percent == 50
-    replaced = replace(cfg_replace, memory_compact_auto_trigger_percent=90)
-    assert replaced.memory_compact_trigger_percent == 90
+    cfg_replace = AgentConfig(memory_compact_trigger_percent=40)
+    assert effective(cfg_replace) == 50
+    replaced = replace(cfg_replace, memory_compact_trigger_percent=90)
+    assert effective(replaced) == 90
 
 
-# LLM: 同一replace或任务/环境配置覆盖层同时显式指定新旧比例时，即使新比例等于80或原旧比例值，也必须以显式新比例为准。
-# 函数用途: 回归验证replace与runtime_config_task/runtime_config_env在新旧比例并列时始终保持新键优先。
+# LLM: replace不再接受退役旧键；任务/环境配置覆盖层同时写新旧比例时，旧键按未知运行配置键忽略，即使新比例等于80也以新键为准。
+# 函数用途: 回归验证replace与runtime_config_task/runtime_config_env在新旧比例并列时始终保持新键权威。
 @pytest.mark.parametrize("canonical_target", [70, 75, 80])
 def test_r8_explicit_canonical_trigger_wins_over_co_specified_legacy_in_replace_and_overlays(
     tmp_path,
@@ -170,13 +189,10 @@ def test_r8_explicit_canonical_trigger_wins_over_co_specified_legacy_in_replace_
         encoding="utf-8",
     )
     base = load_config(base_path)
-    direct = replace(
-        base,
-        memory_compact_trigger_percent=canonical_target,
-        memory_compact_auto_trigger_percent=85,
-    )
+    with pytest.raises(TypeError):
+        replace(base, memory_compact_trigger_percent=canonical_target, memory_compact_auto_trigger_percent=85)
+    direct = replace(base, memory_compact_trigger_percent=canonical_target)
     assert direct.memory_compact_trigger_percent == canonical_target
-    assert direct.memory_compact_auto_trigger_percent == 85
 
     overlay_path = tmp_path / f"overlay_{canonical_target}.yaml"
     overlay_path.write_text(
@@ -188,17 +204,17 @@ def test_r8_explicit_canonical_trigger_wins_over_co_specified_legacy_in_replace_
     )
     projected = project_task_runtime_config_overlay(base, task, workspace_root=tmp_path)
     assert projected.memory_compact_trigger_percent == canonical_target
-    assert projected.memory_compact_auto_trigger_percent == 85
+    assert not hasattr(projected, "memory_compact_auto_trigger_percent")
 
     env_applied = apply_runtime_config_environment(
         base,
         env={"MY_AGENT_RUNTIME_CONFIG": str(overlay_path)},
     )
     assert env_applied.memory_compact_trigger_percent == canonical_target
-    assert env_applied.memory_compact_auto_trigger_percent == 85
+    assert not hasattr(env_applied, "memory_compact_auto_trigger_percent")
 
 
-# LLM: replace或copy.replace同时显式传入host_home_snapshot与新旧比例时，不能因跳过前序字段读取而丢失显式新键优先级，且实例__dict__不残留私有临时键。
+# LLM: replace或copy.replace同时显式传入host_home_snapshot与正式比例时，不能丢失显式新键，且实例__dict__不残留私有临时键。
 # 函数用途: 验证无论是否并列覆盖host_home_snapshot，显式memory_compact_trigger_percent在70/80下均保持权威且源对象无状态污染。
 @pytest.mark.parametrize("canonical_target", [70, 80])
 @pytest.mark.parametrize("include_snapshot", [False, True])
@@ -209,14 +225,11 @@ def test_r9_explicit_canonical_independent_of_host_snapshot_and_clean_dict(
     import copy
     from dataclasses import asdict
 
-    cfg = AgentConfig(memory_compact_auto_trigger_percent=70)
+    cfg = AgentConfig(memory_compact_trigger_percent=70)
     base_keys = set(vars(cfg))
     assert "_compact_replace_trigger_copied" not in base_keys
     assert "_compact_trigger_previous_auto" not in base_keys
-    overrides = {
-        "memory_compact_trigger_percent": canonical_target,
-        "memory_compact_auto_trigger_percent": 85,
-    }
+    overrides = {"memory_compact_trigger_percent": canonical_target}
     if include_snapshot:
         overrides["host_home_snapshot"] = None
     result = replace(cfg, **overrides)
@@ -230,8 +243,8 @@ def test_r9_explicit_canonical_independent_of_host_snapshot_and_clean_dict(
     assert set(vars(cfg)) == base_keys
 
 
-# LLM: replace遍历字段期间若有其他线程并发调用configured_home_root或读取源配置属性，不能干扰当前线程replace对继承新键的同步。
-# 函数用途: 使用确定性线程交错验证只读并发访问源AgentConfig不会破坏legacy-only replace的新比例联动。
+# LLM: replace遍历字段期间若有其他线程并发调用configured_home_root或读取源配置属性，不能干扰当前线程replace对正式比例的复制。
+# 函数用途: 使用确定性线程交错验证只读并发访问源AgentConfig不会破坏正式比例的replace结果。
 @pytest.mark.parametrize("concurrent_home_read", [False, True])
 def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
     concurrent_home_read,
@@ -242,13 +255,13 @@ def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
 
     from agent_py_agent.agent.user_space.home_root import configured_home_root
 
-    cfg = AgentConfig(memory_compact_auto_trigger_percent=70)
+    cfg = AgentConfig(memory_compact_trigger_percent=70)
     reached, resume = threading.Event(), threading.Event()
     results, errors = [], []
     paused = False
     replace_loop_code = getattr(dataclasses, "_replace", dataclasses.replace).__code__
 
-    # LLM: 仅在测试线程执行到dataclasses.replace/_replace的InitVar字段时暂停一次，放行主线程执行并发只读访问。
+    # LLM: 仅在测试线程执行到dataclasses.replace/_replace的正式比例字段时暂停一次，放行主线程执行并发只读访问。
     # 函数用途: 为并发replace测试提供确定性的线程交错点。
     def trace(frame, event, arg):
         nonlocal paused
@@ -257,19 +270,19 @@ def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
             and event == "line"
             and frame.f_code is replace_loop_code
             and getattr(frame.f_locals.get("f"), "name", None)
-            == "_compact_trigger_previous_auto"
+            == "memory_compact_trigger_percent"
         ):
             paused = True
             reached.set()
             assert resume.wait(5), "test schedule did not resume"
         return trace
 
-    # LLM: 在受控trace下调用dataclasses.replace仅更新旧比例字段，收集克隆结果或异常。
+    # LLM: 在受控trace下调用dataclasses.replace仅更新正式比例字段，收集克隆结果或异常。
     # 函数用途: 模拟工作线程对共享基础配置执行replace克隆。
     def clone():
         sys.settrace(trace)
         try:
-            results.append(replace(cfg, memory_compact_auto_trigger_percent=85))
+            results.append(replace(cfg, memory_compact_trigger_percent=85))
         except BaseException as exc:
             errors.append(exc)
         finally:
@@ -278,7 +291,7 @@ def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
     worker = threading.Thread(target=clone)
     worker.start()
     try:
-        assert reached.wait(5), "real dataclasses.replace did not reach InitVar"
+        assert reached.wait(5), "real dataclasses.replace did not reach the canonical trigger field"
         if concurrent_home_read:
             assert configured_home_root(cfg, env={}) is None
     finally:
@@ -287,7 +300,6 @@ def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
     assert not worker.is_alive()
     assert not errors
     assert len(results) == 1
-    assert results[0].memory_compact_auto_trigger_percent == 85
     assert results[0].memory_compact_trigger_percent == 85
     assert cfg.memory_compact_trigger_percent == 70
 
@@ -296,7 +308,7 @@ def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
 def _agent(cap, *, percent=90, recovery=60):
     return SimpleNamespace(
         config=SimpleNamespace(
-            memory_compact_auto_trigger_percent=percent,
+            memory_compact_trigger_percent=percent,
             memory_compact_recovery_target_percent=recovery,
             memory_compact_auto_trigger_max_tokens=cap,
         ),
@@ -315,7 +327,7 @@ def test_explicit_zero_keeps_the_policy_uncapped_and_invalid_falls_back_to_defau
     assert _limits(uncapped) == (WINDOW, 90, 900_000, 600_000, 20_000) and uncapped.trigger_capped is False
     default_capped = runtime_compact_policy(_agent(DEFAULT_COMPACT_TRIGGER_MAX_TOKENS))
     missing = runtime_compact_policy(SimpleNamespace(
-        config=SimpleNamespace(memory_compact_auto_trigger_percent=90, memory_compact_recovery_target_percent=60),
+        config=SimpleNamespace(memory_compact_trigger_percent=90, memory_compact_recovery_target_percent=60),
         backend=SimpleNamespace(context_window_tokens=WINDOW),
     ))
     assert _limits(missing) == _limits(default_capped) and missing.trigger_capped is True
@@ -384,7 +396,7 @@ def test_request_preflight_triggers_at_the_cap(monkeypatch, cap):
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True, model_context_window_tokens=WINDOW,
-            memory_compact_auto_trigger_percent=90, memory_compact_auto_trigger_max_tokens=cap,
+            memory_compact_trigger_percent=90, memory_compact_auto_trigger_max_tokens=cap,
         ),
         backend=SimpleNamespace(context_window_tokens=WINDOW, name="fake"),
     )
@@ -408,15 +420,14 @@ def test_request_preflight_triggers_at_the_cap(monkeypatch, cap):
         assert response is None, "不封顶时仍是 90 万触发"
 
 
-# 后台定时回合：窗口 1M、默认 90%，只有上限把触发线压到 17,550（与既有后台用例的触发线相同）时，
+# 后台定时回合：所选档案窗口 1M、默认 80%，只有上限把触发线压到 17,550 时，
 # 首个后台请求前先压缩；不封顶的对照组直接发业务请求、不压缩。
 @pytest.mark.parametrize("cap", [0, 17_550])
 def test_background_scheduled_turn_precheck_compacts_at_the_cap(tmp_path, monkeypatch, cap):
     agent, store, thread, request, execution, sink = _background(
-        tmp_path, backend="openai_compatible", detached=False,
+        tmp_path, backend="openai_compatible", detached=False, window=WINDOW,
     )
     assert request.reason == "scheduled_progress_report"
-    agent.config.model_context_window_tokens = WINDOW
     agent.config.memory_compact_auto_trigger_max_tokens = cap
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     for role in ("user", "assistant"):
@@ -548,7 +559,7 @@ def test_self_service_cap_receipt_says_restart_like_the_percent(tmp_path):
     user.write_text("my_agent_home: /tmp/home\n", encoding="utf-8")
 
     cap = set_tunable_value("memory_compact_auto_trigger_max_tokens", "300000", user_path=user)
-    percent = set_tunable_value("memory_compact_auto_trigger_percent", "80", user_path=user)
+    percent = set_tunable_value("memory_compact_trigger_percent", "80", user_path=user)
 
     assert cap["ok"] is True and cap["saved"] == "300000" and cap["written_value_matches"] is True
     assert cap["effect_text"] == percent["effect_text"] and "重启 Gateway 才生效" in cap["effect_text"]

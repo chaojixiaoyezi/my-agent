@@ -1,6 +1,7 @@
 """普通实际C/W runner与BG安全点；模型边界fake，原core/claim/guidance提交账和来源不替换。"""
 import json
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 
@@ -24,6 +25,7 @@ from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_claim import (
 from agent_py_agent.agent.gateway_parts.queue_service import claim_request
 from agent_py_agent.agent.gateway_parts.request_worker import AdmissionLimits
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.tests.test_background_claim_transport_reference import (
     actual as actual,
@@ -226,6 +228,13 @@ def test_actual_c_bg_compact_keeps_frozen_attempt_and_final_queue(tmp_path, monk
             'model_context_window_tokens': 200_000}))
     monkeypatch.setattr(fixture_module, 'AgentConfig', config)
     with c_http(tmp_path, monkeypatch) as (agent, _backend, gate, _control, _runtime, server, _close):
+        # 有 Home 时模型只由 owner 的 v6 目录决定：把同一套离线 MiniMax 连接登记为目录默认模型，传输仍由 _http 替身接住。
+        profile_id = str(uuid4())
+        execute_model_profile_operation(agent, 'add', {'profile_id': profile_id, 'profile': {
+            'model_backend': 'anthropic_compatible', 'model_name': 'MiniMax-M2.7',
+            'api_base': 'https://api.minimaxi.com/anthropic', 'api_key': 'offline-fake-key',
+            'model_context_window_tokens': 200_000}})
+        execute_model_profile_operation(agent, 'set_default', {'profile_id': profile_id})
         store = agent.conversation_store
         thread = store.threads.get_or_create({'canonical_user_id': 'local-agent', 'channel': 'chat',
             'channel_conversation_id': 'bg-compact', 'channel_user_id': 'local-agent'})

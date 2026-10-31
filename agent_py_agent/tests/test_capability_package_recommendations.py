@@ -250,8 +250,8 @@ def test_frozen_background_resume_projection_never_requeries_or_mutates_pins(tmp
 def test_task_local_recommendations_only_use_canonical_child_grants(tmp_path):
     agent, _store, _entries = _agent(tmp_path)
     _configure(agent)
-    outcome = CreateSubagentsTool(agent).execute({"goal": _QUERY, "allowed_skills": ["capability:story-a"],
-                                                "allowed_tools": ["skill_search"], "defer_start": True})
+    outcome = CreateSubagentsTool(agent).execute({"items": [{"goal": _QUERY, "allowed_skills": ["capability:story-a"],
+                                                            "allowed_tools": ["skill_search"]}], "defer_start": True})
     assert outcome.ok, outcome.output
     child = agent.subagents.list_runs()[0]
     previous = set_current_subagent_context(agent, run_id=child.id, task_attributes=child.attributes)

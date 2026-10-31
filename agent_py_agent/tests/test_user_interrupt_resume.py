@@ -20,6 +20,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -45,6 +46,7 @@ from agent_py_agent.agent.runtime_db.user_interrupt import (
     record_user_interrupt,
 )
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 from agent_py_agent.cli.chat_parts.control_runtime import (
     ChatControlExecution,
     ChatControlState,
@@ -332,14 +334,21 @@ class _Wire:
                 "usage": {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020}}
 
 
+# LLM: 有 Home 的 Gateway 轮只认 v6 目录选中的模型；同一连接经原目录服务新增并设为 owner 默认，只替换传输。
+# 函数用途: 建立走真实模型选择与 OpenAI 兼容后端的 SimpleAgent。
 def _real_agent(tmp_path: Path) -> SimpleAgent:
-    return SimpleAgent(AgentConfig(
-        model_backend="openai_compatible", api_base="http://127.0.0.1:9/v1", model_name="ir-scripted",
-        api_key="ir-fake-key-not-a-credential", stream_enabled=False, model_context_window_tokens=200_000,
+    connection = {"model_backend": "openai_compatible", "api_base": "http://127.0.0.1:9/v1", "model_name": "ir-scripted",
+                  "api_key": "ir-fake-key-not-a-credential", "model_context_window_tokens": 200_000}
+    agent = SimpleAgent(AgentConfig(
+        **connection, stream_enabled=False,
         enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
         gateway_workspace="gateway", orphan_supervision_interval_seconds=0, memory_curator_enabled=False,
         enable_self_learning=False,
     ), tmp_path / "root")
+    profile_id = str(uuid4())
+    assert execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": connection})["ok"]
+    assert execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})["ok"]
+    return agent
 
 
 # 函数用途: 以 TUI 会话身份经真实 worker 入口（request_execution._handle_gateway_request）跑一轮 Gateway ask，

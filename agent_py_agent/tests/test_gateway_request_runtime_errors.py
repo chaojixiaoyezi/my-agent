@@ -512,7 +512,11 @@ def test_invalid_client_workspace_fails_before_model_and_transcript(
 
 
 def test_handle_gateway_request_ignores_orphan_bad_response_projection(tmp_path: Path) -> None:
+    from agent_py_agent.agent.backends import get_backend
+
     agent, paths = _make_agent(tmp_path)
+    # 有 Home 的 Gateway 请求只认模型目录；本例要真实重跑，构造后显式注入离线 echo（未配置作用域只保留注入后端）。
+    agent.backend = get_backend("echo", agent.config)
     request_id = "gw-bad-response"
     request_path = paths.processing / f"{request_id}.json"
     request_path.write_text(

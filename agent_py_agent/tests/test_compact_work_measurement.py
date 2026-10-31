@@ -180,9 +180,11 @@ def install_scan_counters(monkeypatch, counts, count):
 # 函数用途: 在给定行数的合成线程上测一次完整压缩的工作量，并断言各项上限。
 def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_source_bytes: int) -> None:
     agent, thread, path = synthetic_case(tmp_path, count)
+    # 提交后的冷转（f74d1161e）会把已覆盖历史移出热文件，来源大小必须在压缩前量取。
+    source_bytes = path.stat().st_size
     counts = measure_compaction(agent, thread, monkeypatch, rows=count)
     counts['rows'] = count
-    counts['source_bytes'] = path.stat().st_size
+    counts['source_bytes'] = source_bytes
     counts['full_parse_equivalents'] = counts['canonical_json_calls'] / count
     print('COMPACTMEM_MEASUREMENT ' + json.dumps(counts, sort_keys=True))
     assert counts['source_bytes'] > min_source_bytes

@@ -50,8 +50,10 @@ def host(tmp_path, monkeypatch):
     path = tmp_path / "desktop.yaml"
     path.write_text('agent_name: "embedding-selection-test"\n', encoding="utf-8")
     config = load_config(path)
-    config.api_base = CHAT_BASE  # 管理员的默认对话模型就是部署配置
     host = SimpleNamespace(home_paths=home, config=config)
+    # 管理员 default 投影为未配置；默认对话模型须是本人目录里显式选中的档案。
+    chat_id = _add(host, CHAT_BASE, capability="agentic")
+    execute_model_profile_operation(host, "set_default", {"profile_id": chat_id})
     embedding_selection.remember_startup_chat_host(host)  # 组合根启动时记下的默认对话模型主机
     return host
 
@@ -408,7 +410,7 @@ def test_model_cannot_move_the_embedding_provider_to_another_host(host):
     assert _run(tool, action="set_embedding", profile_id=profile_id)[0].ok
     before = _embedding_api_base(host, profile_id)
     outcome, body = _run(tool, action="save_provider", provider_id=_provider_of(host, profile_id), editing=True,
-                         provider={"api_base": OTHER})
+                         provider={"api_base": OTHER, "api_key": SECRET})
     assert _refused(outcome, body) and _embedding_api_base(host, profile_id) == before
     assert embedding_model_config(host, profile_id).api_base == before, "重启后嵌入请求仍去原主机"
 
@@ -440,7 +442,7 @@ def test_running_value_is_protected_even_before_it_is_saved(host):
     profile_id = _add(host)
     host.config.embedding_model_profile = profile_id  # 进程里在用，用户配置里已清空（等重启生效）
     outcome, body = _run(ManageModelsTool(host), action="save_provider", provider_id=_provider_of(host, profile_id),
-                         editing=True, provider={"api_base": OTHER})
+                         editing=True, provider={"api_base": OTHER, "api_key": SECRET})
     assert _refused(outcome, body)
 
 

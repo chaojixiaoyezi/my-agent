@@ -197,7 +197,10 @@ def test_show_reports_the_applied_output_cap_for_the_default_model(monkeypatch, 
 
 
 def test_boundary_and_unexpected_failures_are_reported_honestly(monkeypatch, user_config):
-    boundary = _run(monkeypatch, user_config, "/settings set api_base http://evil.example")
+    # 模型接口地址等连接设置已迁入 v6 模型目录（a12fe40c5），参数中心不再有该参数，不能借 /settings 改写。
+    endpoint = _run(monkeypatch, user_config, "/settings set api_base http://evil.example")
+    assert endpoint.ok is False and "没有名为 'api_base' 的参数" in endpoint.message
+    boundary = _run(monkeypatch, user_config, "/settings set path_access_mode full")
     assert boundary.ok is False and "安全边界" in boundary.message
     shown = _run(monkeypatch, user_config, "/settings show system_prompt")
     assert "不能在这里修改" in shown.message
@@ -262,7 +265,8 @@ def test_all_view_lists_every_parameter_with_changes_and_boundaries(monkeypatch,
     assert shown.ok and len([line for line in lines if line.startswith("- ")]) >= len(listed_parameters())
     assert str(user_config) in shown.message and "最近修改：" in shown.message and "与默认值不同的参数：2 个" in shown.message
     assert "- request_timeout = 300［改过］" in lines and "- dynamic_timeout_min = 30［改过］" in lines
-    assert any(line.startswith("- api_base = ") and line.endswith("［安全边界］") for line in lines)
+    assert any(line.startswith("- path_access_mode = ") and line.endswith("［安全边界］") for line in lines)
+    assert not [line for line in lines if line.startswith("- api_base = ")]  # 连接设置归 v6 模型目录
     headers = [line for line in lines if line.startswith("【")]
     assert any(line.startswith("【模型请求】") for line in headers) and headers[-1].startswith("【其它】")
 
@@ -273,7 +277,7 @@ def test_loader_metadata_is_hidden_from_lists_and_search_but_show_still_works(mo
 
     registry = parameter_registry()
     assert set(registry) >= LOADER_METADATA_KEYS and not LOADER_METADATA_KEYS & set(listed_parameters())
-    assert len(listed_parameters()) == len(registry) - len(LOADER_METADATA_KEYS) - len(MANAGED_ELSEWHERE_KEYS)
+    assert len(listed_parameters()) == len(set(registry) - LOADER_METADATA_KEYS - MANAGED_ELSEWHERE_KEYS)
     summary = capability_summary()
     assert summary["writable_count"] + summary["boundary_count"] == len(listed_parameters())
     assert not LOADER_METADATA_KEYS & {spec.key for spec in search_parameters("config", limit=0)}
@@ -286,12 +290,15 @@ def test_loader_metadata_is_hidden_from_lists_and_search_but_show_still_works(mo
 
 
 def test_managed_elsewhere_values_are_hidden_from_lists_and_search_but_show_still_works(monkeypatch, user_config):
-    """/model 登录生成的 OAuth 运行引用由模型菜单写入、请勿手填：列表和搜索不出现，show 仍能查看且仍是边界。"""
+    """/model 登录生成的 OAuth 运行引用由模型菜单写入、请勿手填：列表和搜索不出现。
+
+    a12fe40c5 起它随模型连接设置迁入 v6 模型目录，不再是 AgentConfig 参数：show 如实报告参数中心没有它。
+    """
     registry = parameter_registry()
-    assert {"model_auth_ref"} == MANAGED_ELSEWHERE_KEYS and set(registry) >= MANAGED_ELSEWHERE_KEYS
+    assert {"model_auth_ref"} == MANAGED_ELSEWHERE_KEYS and not set(registry) & MANAGED_ELSEWHERE_KEYS
     assert not MANAGED_ELSEWHERE_KEYS & set(listed_parameters())
     assert not MANAGED_ELSEWHERE_KEYS & {spec.key for spec in search_parameters("model", limit=0)}
     lines = _run(monkeypatch, user_config, "/settings all").message.splitlines()
     assert not [line for line in lines if line.startswith("- model_auth_ref = ")]
     detail = _run(monkeypatch, user_config, "/settings show model_auth_ref")
-    assert detail.ok and detail.message.startswith("model_auth_ref（") and "不能在这里修改" in detail.message
+    assert detail.ok is False and "没有名为 model_auth_ref 的参数" in detail.message

@@ -4,7 +4,17 @@ import sqlite3
 
 from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-from agent_py_agent.tests.support.sqlite_lease_assertions import assert_reused_lease
+from agent_py_agent.agent.runtime_db.schema import RuntimeWriteFence
+from agent_py_agent.tests.support import sqlite_lease_assertions
+
+
+# RuntimeDB 写借用外包 RuntimeWriteFence；租期与物理连接身份观察取栅栏内层借用。
+def _lease_layer(conn):
+    return conn._connection if isinstance(conn, RuntimeWriteFence) else conn
+
+
+def assert_reused_lease(current, previous):
+    sqlite_lease_assertions.assert_reused_lease(_lease_layer(current), _lease_layer(previous))
 
 
 def test_return_clears_wal_frames_and_restores_business_busy_timeout(tmp_path):
@@ -40,7 +50,10 @@ def test_reader_at_latest_frame_retires_writer_without_busy_wait_or_data_loss(tm
 def _latest_reader_return(repo, reader):
     with sqlite_connection_scope(True):
         with repo._runtime_connection() as writer:
-            writer.executescript('CREATE TABLE latest_rows(value); INSERT INTO latest_rows VALUES(1),(2),(3);')
+            # RuntimeDB 借用拒绝隐式提交脚本；建表与写入经代际栅栏后显式提交，读者仍停在最新帧。
+            writer.execute('CREATE TABLE latest_rows(value)')
+            writer.execute('INSERT INTO latest_rows VALUES(1),(2),(3)')
+            writer.commit()
             statements = []
             writer.set_trace_callback(statements.append)
             cursor = reader.execute('SELECT value FROM latest_rows ORDER BY value')

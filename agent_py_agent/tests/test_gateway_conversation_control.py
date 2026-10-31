@@ -29,7 +29,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
-from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse, get_backend
 from agent_py_agent.agent.common.audit_activation import (
     AUDIT_SOURCE_ID_ATTR,
     AUDIT_SOURCE_OWNER_HOME_ATTR,
@@ -97,9 +97,12 @@ from agent_py_agent.agent.ingestion.watch_state import (
     watch_id_for,
 )
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
+from agent_py_agent.agent.settings.model_scope import selected_model_scope
 from agent_py_agent.agent.subagents.models import TaskStatus
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+from agent_py_agent.tests.test_model_profiles import add as add_model_profile
 
 
 def _request(request_id: str, *, user: str = "u-1", conversation_id: str = "c-1") -> dict:
@@ -2845,6 +2848,9 @@ def test_status_uses_typed_facts_without_guidance_history(tmp_path) -> None:
         ),
         tmp_path,
     )
+    # 有 Home 时 /status 的模型名来自 owner 的 v6 目录（AgentConfig.model_name 不再生效），先选好同名目录模型。
+    profile_id, _ = add_model_profile(agent, model_name="MiniMax-M2.7")
+    execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
@@ -3145,11 +3151,14 @@ def test_context_control_reads_the_same_thread_and_auto_compact_policy(tmp_path)
             # 与系统自身约定一致：max_tokens ≤ window//4（model_profiles 就是这么夹的）。
             # 不夹的话，压缩守卫会判“固定前缀+预留输出装不进 20k 窗口”而 fail-closed。
             max_tokens=4_096,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=80,
             gateway_per_user_owner_scoping=False,
         ),
         tmp_path,
     )
+    # 有 Home 时模型名与窗口来自 owner 的 v6 目录（AgentConfig 的连接字段不再生效），先选好同参数的目录模型。
+    profile_id, _ = add_model_profile(agent, model_name="test-model", model_context_window_tokens=20_000)
+    execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})
     paths = gateway_paths(agent)
     thread = agent.conversation_store.threads.get_or_create(
         {
@@ -3316,11 +3325,13 @@ def test_manual_compact_after_task_head_uses_thread_source_and_replays_receipt(t
     thread_source = load_conversation_compact_source(
         agent, store, local.thread, scope=THREAD_COMPACT_SCOPE,
     )
-    expected_before = compact_module._projected_context_tokens(
-        agent, thread_source.compact_context.view.summary, list(thread_source.messages), "",
-        operation_evidence=thread_source.compact_context.view.operation_evidence,
-        recent_operation_evidence=thread_source.recent_operation_evidence,
-    )
+    # 手动压缩在该会话的模型作用域里估算（提示与工具视图随作用域投影），预期值须在同一作用域里算。
+    with selected_model_scope(agent, thread_id=thread.thread_id):
+        expected_before = compact_module._projected_context_tokens(
+            agent, thread_source.compact_context.view.summary, list(thread_source.messages), "",
+            operation_evidence=thread_source.compact_context.view.operation_evidence,
+            recent_operation_evidence=thread_source.recent_operation_evidence,
+        )
     monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: pytest.fail("手动压缩发送了业务请求"))
     paths = gateway_paths(agent)
     command = _command("/compact")
@@ -3409,6 +3420,8 @@ def test_manual_compact_cas_race_does_not_replace_winning_head(tmp_path, monkeyp
         "thread_id": thread.thread_id, "role": role, "content": f"并发前历史 {role}",
         "channel": "feishu",
     }) for role in ("user", "assistant")]
+    # 有 Home 时目录未选模型即未配置，手动压缩会先失败；显式注入的 echo 后端才在模型作用域里保留。
+    agent.backend = get_backend("echo", agent.config)
     original_commit = compact_module._commit_compact_candidate
     monkeypatch.setattr(compact_module, "_summarize", lambda *_args, **_kwargs: "本次候选摘要")
     monkeypatch.setattr(agent, "run", lambda *_args, **_kwargs: pytest.fail("手动压缩发送了业务请求"))
@@ -4671,6 +4684,8 @@ def test_manual_compact_reports_typed_failure_instead_of_generic_retry(tmp_path)
         # 显式声明一个没按窗口夹取的发送上限：后端上的 max_tokens 就是实际发送值，compact 预算原样使用它。
         # 原来靠“替身没有 max_tokens 时回退到未夹取的配置值”造出这个形态，回退现已按窗口夹取。
         max_tokens = 16_314
+        # 有 Home 时目录未选模型，作用域内配置不带窗口；注入的替身自报 20k 窗口（供应商事实），保持同一形态。
+        context_window_tokens = 20_000
 
         def probe_tool_capability(self):
             return _native_test_capability(self.name, "local://manual-compact-typed-failure")

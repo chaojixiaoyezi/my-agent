@@ -658,7 +658,9 @@ def test_model_less_owner_uses_the_same_default_as_its_main_agent(tmp_path):
     router = _curator_model_router(host, host.config, Config(model_profile=""))
 
     deployment = router(())
-    assert deployment.default.model == selected_model_config(host).model_name == "deployment-model"
+    # e905 起部署里的 echo 配置不再充当默认模型：管理员未指定初始模型时，主代理与记忆整理同为未配置。
+    assert deployment.default.model == selected_model_config(host).model_name == ""
+    assert deployment.default.backend.name == "unconfigured"
     assert deployment.warnings == ("curator_default_model_source:deployment_default",)
     _admin, _team_id, _extra_id, _private_id = _admin_with_shared_models(tmp_path)
     initial = router(())

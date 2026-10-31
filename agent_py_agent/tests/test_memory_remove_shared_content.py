@@ -45,11 +45,18 @@ for subject in ('source.review.a', 'source.review.b'):
     assert result.ok and json.loads(result.output)['saved'], result
 assert len(agent.memory.all()) == 2
 target = next(row for row in agent.memory.all() if row.attributes['subject_key'] == 'source.review.a')
+# 正式写入不再双写旧LocalStore投影；按升级前遗留的真实副本播种A，删除恢复必须擦除它。
+agent.memory.local_store.upsert_record(source_type='memory', source_id=target.entry_id,
+                                       title='project:user', content=target.content)
 _remove_request(agent, 'req-remove-a')
 persist = jsonl.write_private_text_file_atomic_unlocked
+removal_written = []
+# 删除墓碑可能先写入独立永久账，再发表正式根；在墓碑落盘后的正式根写完即退出。
 def interrupted(path, text):
     persist(path, text)
-    if path == agent.memory.path and '"action": "remove"' in text:
+    if '"action": "remove"' in text:
+        removal_written.append(path)
+    if path == agent.memory.path and removal_written:
         os._exit(73)
 jsonl.write_private_text_file_atomic_unlocked = interrupted
 result = tool.execute(dict(action='remove', entry_id=target.entry_id, origin='user_explicit'))

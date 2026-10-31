@@ -75,17 +75,20 @@ def test_parent_runtime_snapshot_is_host_bound_for_every_create_attribute_build(
         bind_creation_tool_authority,
     )
 
+    # 快照按真实执行快照协议提供 runtime()；没有 tool_search 时授权上界即可用工具名（1132a3f35）。
     snapshot = SimpleNamespace(
         run_id="root-turn-1",
         available_tool_names=frozenset({"read_file", "mcp__computer_use__list_windows"}),
         snapshot_hash="sha256:test-parent-snapshot",
         owner_type="main_agent",
+        runtime=lambda _name: None,
     )
     expected = {
         "schema_version": "direct_parent_tool_authority.v1",
         "parent_run_id": "root-turn-1",
         "available_tool_names": ["mcp__computer_use__list_windows", "read_file"],
         "snapshot_hash": "sha256:test-parent-snapshot",
+        "tool_grants": ["mcp__computer_use__list_windows", "read_file"],
         "owner_type": "main_agent",
     }
     raw = {
@@ -120,6 +123,7 @@ def test_create_subagents_scoped_handler_binds_and_resets_parent_authority(monke
         available_tool_names=frozenset({"read_file"}),
         snapshot_hash="sha256:scoped",
         owner_type="main_agent",
+        runtime=lambda _name: None,
     )
     tool = CreateSubagentsTool(SimpleNamespace())
     observed: dict[str, object] = {}
@@ -315,9 +319,10 @@ class TestCreateSubagentsToolExecute:
 
         assert result.ok is False
 
-    def test_count_clone_mode_is_rejected(self):
+    def test_count_clone_mode_is_rejected(self, tmp_path):
         """模型工具不得把同一个可写任务按 count 克隆。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
         mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
@@ -331,12 +336,15 @@ class TestCreateSubagentsToolExecute:
         mock_task.task_dir = "/tmp"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({"goal": "测试", "count": 10})
+        # 7101c9fa2 起 count 不在 items-only schema 内，由真实执行器的 schema 边界在 handler 前拒绝。
+        result = execute_canonical_test_call(
+            tmp_path, tools={"create_subagents": CreateSubagentsTool(mock_agent)},
+            tool_name="create_subagents", arguments={"items": [{"goal": "测试"}], "count": 10},
+        ).result
 
         assert result.ok is False
         assert result.reported_error_code == "TOOL_INVALID_ARGUMENTS"
-        assert "不接受 count" in result.output
+        assert "$.count" in result.output and "未声明字段" in result.output
         assert mock_agent.subagents.create_run.call_count == 0
 
     def test_single_goal_creates_one_child(self):
@@ -354,7 +362,7 @@ class TestCreateSubagentsToolExecute:
         mock_task.task_dir = "/tmp"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "测试"})
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{"goal": "测试"}]})
 
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 1
@@ -391,15 +399,17 @@ class TestCreateSubagentsToolExecute:
 
         result = CreateSubagentsTool(mock_agent).execute(
             {
-                "goal": "持续研判一个来源",
-                "role": "worker",
-                "allowed_tools": ["watch_stream", "run_command", "write_file"],
-                "allowed_skills": ["coding"],
-                "context_packs": [
-                    {"kind": "parent_recent_read", "path": "private.md"}
-                ],
-                "extra_write_roots": ["/tmp/broad-write"],
-                "output_refs": ["output/report.md"],
+                "items": [{
+                    "goal": "持续研判一个来源",
+                    "role": "worker",
+                    "allowed_tools": ["watch_stream", "run_command", "write_file"],
+                    "allowed_skills": ["coding"],
+                    "context_packs": [
+                        {"kind": "parent_recent_read", "path": "private.md"}
+                    ],
+                    "extra_write_roots": ["/tmp/broad-write"],
+                    "output_refs": ["output/report.md"],
+                }],
             }
         )
 
@@ -430,7 +440,7 @@ class TestCreateSubagentsToolExecute:
         mock_agent.subagent_run_ids_for_request.return_value = ["run-active"]
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行核对",
+            "batch_summary": "并行核对",
             "items": [{"goal": "核对接口"}, {"goal": "核对文档"}],
         })
 
@@ -450,21 +460,23 @@ class TestCreateSubagentsToolExecute:
         mock_agent.config.max_subagents = 50
         mock_agent.subagents.list_runs.side_effect = OSError("registry offline")
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "核对接口"})
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{"goal": "核对接口"}]})
 
         assert result.ok is False
         assert result.reported_error_code == "SUBAGENT_CAPACITY_UNAVAILABLE"
         assert result.effect_outcome == "not_started"
         assert mock_agent.subagents.create_run.call_count == 0
 
-    def test_empty_items_with_top_level_goal_falls_through_to_single_goal(self):
+    def test_empty_items_with_top_level_goal_falls_through_to_single_goal(self, tmp_path):
         """空 items + 顶层 goal 落单 goal 模式，而不是报错(B1 真机回归)。
 
         真机 B1:模型把单个子代理规格放顶层(goal),却反射性带了 items:[]。旧逻辑
         直接 TOOL_INVALID_ARGUMENTS,导致 14 次派工全失败、一个子代理都没建出来,
         主代理只能退回独自写。修复后空 items 应被当作"没传 items",用顶层 goal 建一个。
+        7101c9fa2 起这一兼容只在宿主显式 v1 输入边界保留；规范 v2 handler 给出可自纠的 items 报错且不创建。
         """
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+        from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
         mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
@@ -477,10 +489,20 @@ class TestCreateSubagentsToolExecute:
         mock_task.task_dir = "/tmp"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        result = CreateSubagentsTool(mock_agent).execute({"items": [], "goal": "实现用户认证模块"})
+        canonical = CreateSubagentsTool(mock_agent).execute({"items": [], "goal": "实现用户认证模块"})
+        assert canonical.ok is False and canonical.reported_error_code == "TOOL_INVALID_ARGUMENTS"
+        assert "一项也用items数组" in canonical.output
+        assert mock_agent.subagents.create_run.call_count == 0
 
-        assert result.ok is True
+        result = execute_canonical_test_call(
+            tmp_path, tools={"create_subagents": CreateSubagentsTool(mock_agent)},
+            tool_name="create_subagents", arguments={"items": [], "goal": "实现用户认证模块"},
+            trusted_run_context={"tool_input_version": 1},
+        ).result
+
+        assert result.ok is True, result.output
         assert mock_agent.subagents.create_run.call_count == 1
+        assert mock_agent.subagents.create_run.call_args.kwargs["params"].goal == "实现用户认证模块"
 
     def test_items_mode_uses_agent_config_default_when_max_subagents_missing(self):
         """轻量配置对象缺少 max_subagents 时，items 模式使用 AgentConfig 默认值。"""
@@ -500,7 +522,7 @@ class TestCreateSubagentsToolExecute:
         mock_agent.subagents.create_run.return_value = mock_task
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "测试",
+            "batch_summary": "测试",
             "items": [{"goal": f"任务 {index}"} for index in range(60)],
         })
 
@@ -531,7 +553,7 @@ class TestCreateSubagentsToolExecute:
         monkeypatch.setattr(background_dispatch, "_start_background_dispatch", fake_background_start)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "分别整理两份资料",
+            "batch_summary": "分别整理两份资料",
             "items": [{"goal": "整理资料 A"}, {"goal": "整理资料 B"}],
         })
         payload = json.loads(result.output)
@@ -565,7 +587,7 @@ class TestCreateSubagentsToolExecute:
         )
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "分别调研八个项目",
+            "batch_summary": "分别调研八个项目",
             "items": [{"goal": f"调研项目 {index}"} for index in range(8)],
         })
         payload = json.loads(result.output)
@@ -658,7 +680,7 @@ class TestCreateSubagentsToolStartControls:
         mock_agent.tools.specs.return_value = []
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "先登记两个后续任务",
+            "batch_summary": "先登记两个后续任务",
             "items": [{"goal": "后续任务 A"}, {"goal": "后续任务 B"}],
             "defer_start": True,
         })
@@ -708,9 +730,11 @@ class TestCreateSubagentsToolStartControls:
         )
 
         result = CreateSubagentsTool(agent).execute({
-            "goal": "接管旧开发代理继续完成页面",
-            "role": "worker",
-            "replacement_for_run_ids": [source.id],
+            "items": [{
+                "goal": "接管旧开发代理继续完成页面",
+                "role": "worker",
+                "replacement_for_run_ids": [source.id],
+            }],
             "defer_start": True,
         })
         payload = json.loads(result.output)
@@ -742,8 +766,7 @@ class TestCreateSubagentsToolStartControls:
 
         result = CreateSubagentsTool(agent).execute(
             {
-                "goal": "错误跨树接管",
-                "replacement_for_run_ids": [source.id],
+                "items": [{"goal": "错误跨树接管", "replacement_for_run_ids": [source.id]}],
                 "defer_start": True,
             }
         )
@@ -773,8 +796,7 @@ class TestCreateSubagentsToolStartControls:
 
         result = CreateSubagentsTool(agent).execute(
             {
-                "goal": "接管旧任务",
-                "replacement_for_run_ids": [source.id],
+                "items": [{"goal": "接管旧任务", "replacement_for_run_ids": [source.id]}],
             }
         )
         payload = json.loads(result.output)
@@ -809,7 +831,7 @@ class TestCreateSubagentsToolConfigDefaults:
         mock_task.task_dir = "/tmp"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        result = CreateSubagentsTool(mock_agent).execute({"goal": "测试"})
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{"goal": "测试"}]})
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
 
         assert result.ok is True
@@ -837,7 +859,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({"goal": "测试"})
+        result = tool.execute({"items": [{"goal": "测试"}]})
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
@@ -870,7 +892,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        tool.execute({"goal": "测试", "tool_preset": "read_only"})
+        tool.execute({"items": [{"goal": "测试", "tool_preset": "read_only"}]})
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
@@ -897,7 +919,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        tool.execute({"goal": "测试", "tool_preset": "none"})
+        tool.execute({"items": [{"goal": "测试", "tool_preset": "none"}]})
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert "read_file" in call_kwargs["params"].allowed_tools
@@ -920,11 +942,11 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "Seed a root coordinator and let the role template choose tools.",
             "role": "coordinator",
             "tool_preset": "coordinator",
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -948,12 +970,12 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "修复 /tmp/project/artifacts/index2.html 页面。",
             "tool_preset": "frontend-dev",
             "allowed_tools": ["write_file", "read_file", "run_command"],
             "extra_write_roots": ["/tmp/project/artifacts"],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -977,11 +999,11 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "写一个极简单文件。",
             "role": "writer",
             "output_files": ["index.html"],
-        })
+        }]})
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()
@@ -1007,11 +1029,11 @@ class TestCreateSubagentsToolTemplatePolicy:
         mock_agent.subagents.create_run.return_value = mock_task
 
         tool = CreateSubagentsTool(mock_agent)
-        result = tool.execute({
+        result = tool.execute({"items": [{
             "goal": "请在 /tmp/project/deliverables/index1.html 输出完整 HTML，不要写注释。",
             "role": "worker",
             "extra_write_roots": ["/tmp/project/deliverables"],
-        })
+        }]})
 
         assert result.ok is True
         mock_agent.subagents.create_run.assert_called_once()

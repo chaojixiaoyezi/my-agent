@@ -110,6 +110,8 @@ class TestShellToolBasics:
                 {
                     "command": _python_sleep_command(20),
                     "run_in_background": True,
+                    # 新启动的托管后台进程必须带宿主给出的规范 owner home（5c029e4fb），不再从 cwd 补造。
+                    "__run_scope": {"owner_home": str(tmp_path.resolve())},
                 }
             )
         assert result.ok is True

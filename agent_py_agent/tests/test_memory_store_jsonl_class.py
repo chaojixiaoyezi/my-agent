@@ -297,7 +297,7 @@ class TestJsonlMemoryIndexAll:
 
 
 class TestJsonlMemorySourceId:
-    """测试 source_id 生成。"""
+    """测试旧 LocalStore 副本的定位身份：正式写入不再生成投影 source_id，只按稳定 entry_id 清理旧副本。"""
 
     @pytest.fixture
     def memory(self) -> JsonlMemory:
@@ -306,19 +306,18 @@ class TestJsonlMemorySourceId:
         return JsonlMemory(Path(tmpdir) / "memory.jsonl")
 
     def test_source_id_format(self, memory: JsonlMemory) -> None:
-        """测试 source_id 格式。"""
-        record = MemoryRecord(role="user", content="test", kind="note", created_at=1234567890.0)
-        source_id = memory._source_id(record)
-        assert ":" in source_id
-        parts = source_id.split(":")
-        assert len(parts) == 4
-        assert parts[0] == "1234567890.000000"
-        assert parts[1] == "user"
-        assert parts[2] == "note"
+        """测试旧副本删除键是 memory + entry_id，不再按时间/角色/类型拼接，也不新写投影。"""
+        store = MagicMock()
+        memory = JsonlMemory(memory.path, local_store=store)
+        record = memory.add("user", "test", kind="note")
+        memory.remove(record.entry_id, expected_version=record.version)
+        store.make_record_id.assert_any_call("memory", record.entry_id)
+        store.delete_record.assert_any_call(store.make_record_id.return_value)
+        store.upsert_record.assert_not_called()
 
     def test_source_id_stable(self, memory: JsonlMemory) -> None:
-        """测试 source_id 稳定性。"""
-        record = MemoryRecord(role="user", content="stable", kind="note", created_at=1234567890.0)
-        id1 = memory._source_id(record)
-        id2 = memory._source_id(record)
-        assert id1 == id2
+        """测试同一事实跨重新打开保持同一 entry_id，旧副本删除键因此稳定。"""
+        record = memory.add("user", "stable", kind="note")
+        id1 = [row.entry_id for row in JsonlMemory(memory.path).all()]
+        id2 = [row.entry_id for row in JsonlMemory(memory.path).all()]
+        assert id1 == id2 == [record.entry_id]

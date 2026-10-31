@@ -10,13 +10,16 @@ from agent_py_agent.agent.capability.config import CapabilityConfig, load_capabi
 from agent_py_agent.agent.concurrency.interrupt import InterruptHandle
 from agent_py_agent.agent.conversation import decision_policy as policy
 from agent_py_agent.agent.conversation.decision_service import _policy_revision
+from agent_py_agent.agent.settings.config_io import load_simple_yaml
 from agent_py_agent.agent.settings.decision_settings import (
     execute_decision_settings_operation as settings,
 )
+from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
 from agent_py_agent.agent.settings.decision_settings_schema import (
     DecisionSettingsConflict,
     validate_decision_settings,
 )
+from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
 from agent_py_agent.agent.settings.model_profiles import model_profiles_path, read_model_profiles
 from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 from agent_py_agent.agent.tooling.user_config_tool import _decision_change_properties
@@ -42,13 +45,16 @@ def test_defaults_single_registration_yaml_agreement_and_no_persistent_default_c
     row = view["effective"]["points"]["skill_tool"]
     assert row["context_policy"] == "progressive" and row["optional_categories"] == ["plugins"]
     assert row["effective_mode"] == "off" and view["effective"]["enabled"] is False
-    assert view["sources"][POLICY] == "capability_config.decision_skill_tool_context_policy"
+    assert view["sources"][POLICY] == "decision_defaults"
     assert view["field_scopes"][POLICY] == ["owner", "thread"]
     assert all("context_policy" not in data and "optional_categories" not in data for name, data in view["effective"]["points"].items() if name != "skill_tool")
     assert view["overrides"] == {"owner": {}, "thread": {}} and not model_profiles_path(host.home_paths).exists()
+    # 决策默认只归决策代码（a12fe40c5）；随包能力 YAML 与 dataclass 都不再有第二份默认。
+    assert decision_defaults(None)[0][POLICY] == row["context_policy"]
+    assert decision_defaults(None)[0][CATEGORIES] == row["optional_categories"]
     config = load_capability_config(Path(__file__).parents[1] / "config" / "capability_config.yaml")
-    assert config.decision_skill_tool_context_policy == CapabilityConfig().decision_skill_tool_context_policy
-    assert config.decision_skill_tool_optional_categories == CapabilityConfig().decision_skill_tool_optional_categories
+    for name in ("decision_skill_tool_context_policy", "decision_skill_tool_optional_categories"):
+        assert not hasattr(config, name) and not hasattr(CapabilityConfig(), name)
     row["optional_categories"].append("mutated")
     assert settings(host, "read", {})["effective"]["points"]["skill_tool"]["optional_categories"] == ["plugins"]
 
@@ -98,15 +104,17 @@ def test_special_fields_do_not_exist_on_other_points(tmp_path, point):
             patch(host_at(tmp_path), {f"points.{point}.{suffix}": value})
 
 
+# LLM: 旧能力 YAML 只经显式离线迁移转 owner 覆盖（a12fe40c5）；严格数组与 null 拒绝仍由同一决策 schema 执行。
+# 函数用途: 验证旧 YAML 类别数组与策略迁移的严格类型边界。
 def test_yaml_strict_array_and_null_policy_are_not_optional_inheritance(tmp_path):
     path = tmp_path / "capability.yaml"
     path.write_text('decision_skill_tool_optional_categories: ["plugins", "future.category"]\n')
-    assert load_capability_config(path).decision_skill_tool_optional_categories == ["plugins", "future.category"]
+    assert migrate_legacy_decision_overrides({}, load_simple_yaml(path)) == {CATEGORIES: ["plugins", "future.category"]}
     for text in ('decision_skill_tool_optional_categories: "plugins"', 'decision_skill_tool_optional_categories: null',
                  'decision_skill_tool_context_policy: null'):
         path.write_text(text)
         with pytest.raises(ModelProfileError):
-            load_capability_config(path)
+            migrate_legacy_decision_overrides({}, load_simple_yaml(path))
 
 
 @pytest.mark.parametrize("field,value", [(POLICY, "metadata"), (CATEGORIES, ["plugins", "new.category"])])
@@ -192,10 +200,16 @@ def test_shadowed_categories_change_only_cancels_after_thread_reset(tmp_path):
         policy.unregister_active(token, active)
 
 
-def test_default_configuration_change_invalidates_policy_without_faking_persistent_revision(tmp_path):
+# LLM: 唯一默认在决策代码（a12fe40c5），旧能力配置对象上的残留字段不改变策略；代码默认变化仍推进签名而不伪造修订号。
+# 函数用途: 验证默认变化只影响策略签名，持久修订号保持不变。
+def test_default_configuration_change_invalidates_policy_without_faking_persistent_revision(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import decision_settings_defaults
+
     host = host_at(tmp_path)
     original = settings(host, "read", {})
     host.capability_config.decision_skill_tool_context_policy = "metadata"
+    assert _policy_revision(settings(host, "read", {})) == _policy_revision(original)
+    monkeypatch.setitem(decision_settings_defaults._DECISION_DEFAULTS, POLICY, "metadata")
     changed = settings(host, "read", {})
     assert changed["revision"] == original["revision"] == {"owner": 0, "thread": 0}
     assert _policy_revision(changed) != _policy_revision(original)

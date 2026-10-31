@@ -48,7 +48,7 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     first = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
     )
     first_run_ids = set(first["created_run_ids"])
     assert len(first_run_ids) == 3
@@ -56,7 +56,7 @@ def test_items_mode_reuses_existing_contract_children_and_returns_dispatch_contr
         first_run_ids, "PLANNING"
     )
     second = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )
 
     assert second["created_run_ids"] == []
@@ -74,7 +74,7 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path, monk
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     first = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
     )
     done_id, running_id, planning_id = first["created_run_ids"]
     done = agent.subagents.load(done_id)
@@ -88,7 +88,7 @@ def test_reused_done_children_are_excluded_from_dispatch_contract(tmp_path, monk
         run_id: agent.subagents.load(run_id).status for run_id in first["created_run_ids"]
     } == {done_id: "DONE", running_id: "RUNNING", planning_id: "PLANNING"}
     second = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )
 
     first_run_ids = set(first["created_run_ids"])
@@ -111,7 +111,7 @@ def test_reused_running_child_survives_same_mtime_cache_invalidation(tmp_path, m
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     first = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
     )
 
     running_id = first["created_run_ids"][1]
@@ -136,7 +136,7 @@ def test_reused_running_child_survives_same_mtime_cache_invalidation(tmp_path, m
     assert agent.subagents.load(running_id).status == "RUNNING"
 
     second = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )
 
     assert agent.subagents.load(running_id).status == "RUNNING"
@@ -147,12 +147,12 @@ def test_generic_single_worker_reuses_explicit_idempotency_contract(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
-    params = {
+    params = {"items": [{
         "goal": "在 artifacts/index.html 写一个现代家具品牌首页。",
         "role": "worker",
         "extra_write_roots": [str(tmp_path / "artifacts")],
         "context_packs": [_idempotency_pack("site-output", "artifacts/index.html")],
-    }
+    }]}
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
 
@@ -168,20 +168,20 @@ def test_generic_workers_sharing_input_and_output_are_independent(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "写一个现代家具品牌首页。",
         "role": "worker",
         "input_refs": ["brief.md"],
         "output_files": ["artifacts/index.html"],
         "extra_write_roots": [str(tmp_path / "artifacts")],
-    }).output)
-    second = json.loads(tool.execute({
+    }]}).output)
+    second = json.loads(tool.execute({"items": [{
         "goal": "把首页做得更高级，仍然输出同一个文件。",
         "role": "worker",
         "input_refs": ["brief.md"],
         "output_files": ["artifacts/index.html"],
         "extra_write_roots": [str(tmp_path / "artifacts")],
-    }).output)
+    }]}).output)
 
     assert second["created_run_ids"]
     assert second["reused_run_ids"] == []
@@ -201,7 +201,7 @@ def test_five_dispatch_items_keep_their_own_identity_despite_shared_io(tmp_path)
         ],
         {"goal": "开发关卡", "input_refs": ["abc/index.html"], "output_files": ["abc/levels.js"]},
     ]
-    result = CreateSubagentsTool(agent).execute({"goal": "并行开发游戏", "items": items})
+    result = CreateSubagentsTool(agent).execute({"batch_summary": "并行开发游戏", "items": items})
     payload = json.loads(result.output)
 
     assert result.ok, result.output
@@ -219,7 +219,7 @@ def test_identical_ordinary_dispatches_are_not_an_explicit_retry(tmp_path):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     agent = _workspace_agent(tmp_path)
-    params = {"goal": "独立检查实现", "input_refs": ["src/core.py"], "output_files": ["review.md"]}
+    params = {"items": [{"goal": "独立检查实现", "input_refs": ["src/core.py"], "output_files": ["review.md"]}]}
     first = json.loads(CreateSubagentsTool(agent).execute(params).output)
     second = json.loads(CreateSubagentsTool(agent).execute(params).output)
 
@@ -249,7 +249,7 @@ def test_dispatch_operation_replay_preserves_ids_but_new_call_creates_children(t
     else:
         store = LocalStore(tmp_path / "local.db", enable_fts=False)
     params = {
-        "goal": "并行检查实现",
+        "batch_summary": "并行检查实现",
         "items": [
             {"goal": goal, "input_refs": ["src/core.py"], "output_files": ["review.md"]}
             for goal in ("检查正常行为", "检查错误行为")
@@ -280,8 +280,8 @@ def test_generic_default_name_does_not_reuse_different_goal(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({"goal": "写 index1.html", "role": "worker"}).output)
-    second = json.loads(tool.execute({"goal": "写 index2.html", "role": "worker"}).output)
+    first = json.loads(tool.execute({"items": [{"goal": "写 index1.html", "role": "worker"}]}).output)
+    second = json.loads(tool.execute({"items": [{"goal": "写 index2.html", "role": "worker"}]}).output)
 
     assert first["created_run_ids"] != second["created_run_ids"]
     assert second["created_run_ids"] == second["created_run_ids"]
@@ -294,16 +294,16 @@ def test_unfinished_sibling_with_same_declared_output_does_not_claim_file_owners
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "实现参数展开器。",
         "role": "worker",
         "output_files": ["artifacts/params.py"],
-    }).output)
-    second_result = tool.execute({
+    }]}).output)
+    second_result = tool.execute({"items": [{
         "goal": "重新实现同一个参数展开器。",
         "role": "coding",
         "output_files": ["artifacts/params.py"],
-    })
+    }]})
     second = json.loads(second_result.output)
 
     assert second_result.ok is True
@@ -317,7 +317,7 @@ def test_overlapping_items_are_created_as_sample_a_style_shared_workspace_worker
 
     agent = _workspace_agent(tmp_path)
     result = CreateSubagentsTool(agent).execute({
-        "goal": "并行实现两个模块。",
+        "batch_summary": "并行实现两个模块。",
         "items": [
             {"goal": "实现第一版。", "output_files": ["artifacts/shared.py"]},
             {"goal": "实现第二版。", "output_files": ["artifacts/shared.py"]},
@@ -335,13 +335,13 @@ def test_existing_and_batch_output_overlap_remains_coordination_metadata(tmp_pat
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "实现已有模块。",
         "output_files": ["artifacts/existing.py"],
-    }).output)
+    }]}).output)
 
     result = tool.execute({
-        "goal": "并行实现三个独立模块。",
+        "batch_summary": "并行实现三个独立模块。",
         "items": [
             {"goal": "重写已有模块。", "output_files": ["artifacts/existing.py"]},
             {"goal": "实现新模块 A。", "output_files": ["artifacts/shared.py"]},
@@ -361,17 +361,17 @@ def test_explicit_replacement_may_take_over_same_declared_output(tmp_path):
 
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "实现第一版。",
         "role": "worker",
         "output_files": ["artifacts/replacement.py"],
-    }).output)
-    second_result = tool.execute({
+    }]}).output)
+    second_result = tool.execute({"items": [{
         "goal": "接管失败的第一版并修好。",
         "role": "worker",
         "output_files": ["artifacts/replacement.py"],
         "replacement_for_run_ids": first["created_run_ids"],
-    })
+    }]})
     second = json.loads(second_result.output)
 
     assert second_result.ok is True
@@ -386,16 +386,16 @@ def test_background_main_may_add_independent_work_to_active_lineage(tmp_path):
     agent = _workspace_agent(tmp_path)
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "审计 sample_a。",
         "output_files": ["output/sample_a.md"],
-    }).output)
+    }]}).output)
 
     agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
-    result = tool.execute({
+    result = tool.execute({"items": [{
         "goal": "同时审计 sample_b。",
         "output_files": ["output/sample_b.md"],
-    })
+    }]})
     payload = json.loads(result.output)
 
     assert result.ok is True
@@ -410,11 +410,11 @@ def test_background_main_still_reuses_explicit_idempotency_contract(tmp_path):
     agent = _workspace_agent(tmp_path)
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
-    params = {
+    params = {"items": [{
         "goal": "审计 sample_a。",
         "output_files": ["output/sample_a.md"],
         "context_packs": [_idempotency_pack("sample_a-audit", "output/sample_a.md")],
-    }
+    }]}
     first = json.loads(tool.execute(params).output)
 
     agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
@@ -431,14 +431,14 @@ def test_foreground_user_turn_may_add_independent_work_to_active_lineage(tmp_pat
     agent = _workspace_agent(tmp_path)
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "审计 sample_a。",
         "output_files": ["output/sample_a.md"],
-    }).output)
-    second = tool.execute({
+    }]}).output)
+    second = tool.execute({"items": [{
         "goal": "同时审计 sample_b。",
         "output_files": ["output/sample_b.md"],
-    })
+    }]})
 
     assert second.ok is True
     assert json.loads(second.output)["created_run_ids"] != first["created_run_ids"]
@@ -451,27 +451,27 @@ def test_background_main_may_create_after_lineage_ends_or_with_explicit_replacem
     agent = _workspace_agent(tmp_path)
     agent._current_run_params = _run_params("request-1", source="foreground")
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({
+    first = json.loads(tool.execute({"items": [{
         "goal": "审计 sample_a。",
         "output_files": ["output/sample_a.md"],
-    }).output)
+    }]}).output)
     run = agent.subagents.load(first["created_run_ids"][0])
     run.status = "DONE"
     run.verification_status = "VERIFIED"
     agent.subagents.save(run)
 
     agent._current_run_params = _run_params("bg-main-1", source="background_main_agent")
-    after_done = tool.execute({
+    after_done = tool.execute({"items": [{
         "goal": "审计 sample_b。",
         "output_files": ["output/sample_b.md"],
-    })
+    }]})
     assert after_done.ok is True
 
-    replacement = tool.execute({
+    replacement = tool.execute({"items": [{
         "goal": "明确接管仍在执行的 sample_b 审计。",
         "output_files": ["output/sample_b-replacement.md"],
         "replacement_for_run_ids": json.loads(after_done.output)["created_run_ids"],
-    })
+    }]})
     assert replacement.ok is True
     assert len(agent.subagents.list_runs()) == 3
 
@@ -482,7 +482,7 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
     agent = _workspace_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
     first = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_star_data.md")}).output
     )
     for run_id in first["created_run_ids"]:
         task = agent.subagents.load(run_id)
@@ -491,7 +491,7 @@ def test_all_reused_done_children_return_non_dispatch_next_action(tmp_path):
         agent.subagents.save(task)
 
     second = json.loads(
-        tool.execute({"goal": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
+        tool.execute({"batch_summary": "并行生成周度项目报告", "items": _pipeline_items("weekly_data.md")}).output
     )
 
     assert second["pending_start_run_ids"] == [], second["auto_start"]

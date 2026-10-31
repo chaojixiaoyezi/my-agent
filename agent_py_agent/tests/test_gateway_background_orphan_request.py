@@ -28,6 +28,14 @@ from agent_py_agent.tests.test_gateway_background_curator_transactions import (
 from agent_py_agent.tests.test_gateway_orphan_reconciler import _scoped_restart_fixture
 
 
+# LLM: 子代理测试后端覆盖是线程局部属性；有 Home 时 echo 配置不再穿过目录作用域，原 EchoBackend.generate
+#   替身接不住池线程里的 child，须在执行线程内重绑同一个测试后端，再走原生产执行入口。
+# 函数用途: 在线程池线程里绑定 child 测试后端后运行原后台请求。
+def _run_original_in_thread(agent, gate, claim, backend):
+    agent._subagent_worker_backend_override = backend
+    return run_original(agent, gate, claim)
+
+
 def test_original_canonical_orphan_has_production_source_without_c_owner_agent_build(tmp_path):
     base, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = scoped.subagents.create_run(goal="原孤儿合同", thought="实际待派工作", plan=["运行"], depth=1)
@@ -72,7 +80,7 @@ def test_child_network_wait_revocation_refuses_original_result_and_preserves_tra
         p3 = reservation_file(gate.paths, claim.request_id)
         before_p3 = p3.read_bytes()
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(run_original, agent, gate, claim)
+            future = pool.submit(_run_original_in_thread, agent, gate, claim, backend)
             try:
                 assert backend.started.wait(5), future.result(1) if future.done() else "runner_still_inflight"
                 running = agent.subagents.load(run_id)
@@ -175,7 +183,7 @@ def test_timed_child_keeps_original_transport_active_until_actual_model_thread_e
         p3 = reservation_file(gate.paths, claim.request_id)
         before = p3.read_bytes()
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(run_original, agent, gate, claim)
+            future = pool.submit(_run_original_in_thread, agent, gate, claim, backend)
             future.add_done_callback(lambda _done: completed.set())
             try:
                 assert backend.started.wait(5), future.result(1) if future.done() else "child_not_yet_at_provider"
@@ -209,7 +217,7 @@ def test_child_keeps_original_transport_active_until_actual_heartbeat_thread_exi
         p3 = reservation_file(gate.paths, claim.request_id)
         before = p3.read_bytes()
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(run_original, agent, gate, claim)
+            future = pool.submit(_run_original_in_thread, agent, gate, claim, backend)
             future.add_done_callback(lambda _done: completed.set())
             try:
                 assert backend.started.wait(5) and started.wait(5)

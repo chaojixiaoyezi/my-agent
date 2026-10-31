@@ -732,7 +732,7 @@ def _save_transcript_segment(path, manifest, index, start, raw):
     sequence = manifest['segment_count'] + 1
     thread_id = manifest['thread_id']
     write_bytes_atomic_beneath(path.parent, ('archive', thread_id, f'seg-{sequence:020d}.jsonl'), raw)
-    root, offset = manifest['index'], start
+    offset, additions = start, []
     import io
 
     for line in io.BytesIO(raw):
@@ -741,14 +741,13 @@ def _save_transcript_segment(path, manifest, index, start, raw):
         if entry is not None:
             manifest['cold_message_count'] += 1
             address = {'offset': offset, 'length': len(line), 'sha256': hashlib.sha256(line).hexdigest()}
-            keys = [f'id:{entry.message_id}']
+            additions.append((f'id:{entry.message_id}', address))
             dedupe = str(entry.metadata.get('dedupe_key') or '').strip()
             if dedupe and not is_display_checkpoint(entry):
-                keys.append(f'dedupe:{dedupe}')
-            for key in keys:
-                if index.get(root, key) is None:
-                    root = index.put(root, key, address)
+                additions.append((f'dedupe:{dedupe}', address))
         offset += len(line)
+    # 整段一次并入：与逐键“缺才写”同一根，已有身份保留首地址，不为每行复制索引路径。
+    root = index.put_absent(manifest['index'], additions)
     descriptor = {'start': start, 'end': start + len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
     manifest['index'] = index.put(root, f'segment:{sequence}', descriptor)
     manifest['segment_count'] = sequence

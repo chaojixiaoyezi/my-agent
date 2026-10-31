@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.path_access_policy import HOST_STATE_OWNER_DIRS
 from agent_py_agent.agent.plugin_host import capabilities_v2_handlers as caps
@@ -367,8 +368,16 @@ def test_r2_messages_reject_foreign_path_before_reader(case, message_thread, mon
     else:
         monkeypatch.setattr(case.store.storage, "message_path", lambda _: foreign)
     # 确认来源有效，避免用不可解析的假消息掩盖越界读取。
-    rows, errors = case.store.messages.recent_report(message_thread.thread_id, limit=100)
-    assert not errors and rows[0].content == "foreign-private-message"
+    if kind == "parent":
+        # 消息读口按 no-follow 读冷热清单（f74d1161e），父目录被换成链接时存储层自身已拒绝；
+        #   来源有效性改为直接核对重定向目标仍是可解析的外部消息。
+        assert path.resolve() == foreign.resolve()
+        assert json.loads(foreign.read_text())["content"] == "foreign-private-message"
+        with pytest.raises(NoFollowPathError):
+            case.store.messages.recent_report(message_thread.thread_id, limit=100)
+    else:
+        rows, errors = case.store.messages.recent_report(message_thread.thread_id, limit=100)
+        assert not errors and rows[0].content == "foreign-private-message"
     calls, original = [], case.store.messages.recent_report
     monkeypatch.setattr(case.store.messages, "recent_report", lambda *a, **kw: calls.append(a) or original(*a, **kw))
     with pytest.raises(HostAPIError) as error:

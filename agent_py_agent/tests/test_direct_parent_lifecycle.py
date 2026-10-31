@@ -209,9 +209,12 @@ def test_late_child_completion_resumes_same_parent_after_many_work_slices(
     manager, parent, children = _parent_and_children(
         tmp_path, statuses=("RUNNING", "RUNNING"),
     )
-    parent.runner_attempts = 8
-    parent.turn_end_reason = "interrupted"
-    manager.save(parent)
+    # 每个工作片单独结算一次 attempt；ee2113192 起一次跳过多个 attempt 记为未知恢复历史，宿主转人工复核不再自动续跑。
+    for _ in range(8):
+        parent = manager.load(parent.id)
+        parent.runner_attempts += 1
+        parent.turn_end_reason = "interrupted"
+        manager.save(parent)
     mark_parent_waiting_for_direct_children(manager, parent.id, [c.id for c in children])
     started = []
 

@@ -61,11 +61,11 @@ def test_empty_catalog_has_no_placeholder_and_tui_can_open_settings(tmp_path):
     assert runtime.store.snapshot().selected_model_name == "未配置模型（/model 配置）"
 
 
+# 部署连接不再平铺成目录外的“默认”行：列表不发布该行，也就不会伪造密钥存在；显式连接仍原样交给后端工厂。
 def test_explicit_connection_is_preserved_and_key_presence_is_not_faked(tmp_path):
     config = AgentConfig(model_backend="openai_compatible", model_name="chosen-model", api_base="https://example.test/v1")
     result = public_model_profiles(read_model_profiles(tmp_path / "absent.json"), config)
-    row = result["profiles"][0]
-    assert row["model_name"] == "chosen-model" and row["has_key"] is False
+    assert result["selected"] == "default" and result["profiles"] == []
     assert get_backend(config.model_backend, config).model_name == "chosen-model"
 
 

@@ -28,6 +28,7 @@ from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.decision_settings import (
     execute_decision_settings_operation as settings,
 )
+from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
 from agent_py_agent.agent.settings.decision_settings_schema import decision_field_scopes
 from agent_py_agent.agent.tooling import web_fetch_runtime
 from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool
@@ -186,12 +187,14 @@ def test_real_optional_worker_deadline_does_not_cancel_host(prepared, tmp_path, 
 def test_config_defaults_and_original_agent_setting_tool_share_thread_override(tmp_path):
     config = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     defaults = AgentConfig()
+    code_defaults, _ = decision_defaults(None)
     for suffix in ("mode", "timeout_seconds", "profile_id"):
         name = f"decision_{module._POINT}_{suffix}"
-        # 点位期限与模型引用只在决策设置覆盖层按点位设置，配置里没有字段（2026-09-27 参数减量）。
-        expected = ("off", "off") if suffix == "mode" else (None, None)
-        assert (getattr(config, name, None), getattr(defaults, name, None)) == expected
-        assert (suffix == "mode") == hasattr(defaults, name)
+        # 点位期限与模型引用只在决策设置覆盖层按点位设置（2026-09-27 参数减量）；a12fe40c5 起点位模式默认也只归
+        # decision_settings_defaults，配置对象不再带任何平铺决策字段。
+        assert (getattr(config, name, None), getattr(defaults, name, None)) == (None, None)
+        assert not hasattr(defaults, name)
+        assert code_defaults.get(f"points.{module._POINT}.{suffix}") == ("off" if suffix == "mode" else None)
         assert decision_field_scopes()[f"points.{module._POINT}.{suffix}"] == ["owner", "thread"]
     host = host_at(tmp_path)
     key, _ = decision(host)

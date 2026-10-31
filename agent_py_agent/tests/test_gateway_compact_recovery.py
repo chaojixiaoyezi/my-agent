@@ -173,7 +173,7 @@ def test_initial_compact_precedes_model_adoption_and_rejection_baseline(tmp_path
     from agent_py_agent.tests.test_gateway_model_adoption import before_final_check
 
     fixture = _history_request(tmp_path, mode=mode, original_window=100_000, history_repeat=2500)
-    fixture.agent.config.memory_compact_auto_trigger_percent = 50
+    fixture.agent.config.memory_compact_trigger_percent = 50
     decision = install_backend(monkeypatch, fixture)
     prepares, summaries, sends, candidates = [], [], [], []
     original = runtime_mixin._prepare_runtime_context
@@ -233,7 +233,7 @@ def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, mon
 
     fixture = actual_request(tmp_path, original_window=15_000)
     fixture.agent.config.system_prompt += "\n" + "a" * 6_000
-    fixture.agent.config.memory_compact_auto_trigger_percent = 50
+    fixture.agent.config.memory_compact_trigger_percent = 50
     decision = install_backend(monkeypatch, fixture)
     evaluated = []
     original = recovery.PreparedCompactRecovery._automatic_noop

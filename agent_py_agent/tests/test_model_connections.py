@@ -87,7 +87,7 @@ def test_invalid_batches_write_nothing(tmp_path):
         ({"connection": connection(), "models": []}, "至少选择一个模型"),
         ({"connection": connection(), "models": models(*[f"m-{index}" for index in range(201)])}, "最多 200"),
         ({"connection": connection(model_backend="bogus"), "models": models("m-a")}, "接口类型"),
-        ({"connection": connection(), "models": [*models("ok"), *models("bad", window=10)]}, "上下文窗口"),
+        ({"connection": connection(), "models": [*models("ok"), *models("bad", window=0)]}, "上下文窗口"),
         ({"provider_id": "missing", "model_backend": "openai_responses", "models": models("m-a")}, "服务商不存在"),
     ):
         with pytest.raises(ModelProfileError, match=message):

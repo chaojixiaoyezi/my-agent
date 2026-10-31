@@ -1366,6 +1366,7 @@ def _missing_canonical_case(tmp_path, monkeypatch):
 
 
 # LLM: 已确认缺失的规范定位器可负缓存，不能每轮重读同一不存在文件。
+#   ee2113192 起缓存层先解析 locator，规范文件缺失时直接报缺失、不再进入完整 loader，故以 locator 读取次数计重解析。
 # 函数用途: 验证孤儿巡检复用规范位置缺失结果。
 def test_missing_canonical_locator_is_loaded_only_once_across_orphan_scans(tmp_path, monkeypatch):
     case = _missing_canonical_case(tmp_path, monkeypatch)
@@ -1373,7 +1374,7 @@ def test_missing_canonical_locator_is_loaded_only_once_across_orphan_scans(tmp_p
         report = case.service.list_runs_report()
         assert report.runs == []
         assert len(report.load_errors) == 1 and report.load_errors[0]['run_id'] == case.run_id
-    assert case.calls == [case.run_id]
+    assert case.calls == []
     assert len(case.reads) <= 2
 
 
@@ -1386,7 +1387,8 @@ def test_missing_canonical_cache_reloads_when_target_reappears(tmp_path, monkeyp
     case.canonical.write_bytes(case.raw)
     report = case.service.list_runs_report()
     assert report.load_errors == [] and [run.id for run in report.runs] == [case.run_id]
-    assert case.calls == [case.run_id, case.run_id]
+    # 缺失期由 locator 预检报错，只有目标重现后的那次才进入完整 loader。
+    assert case.calls == [case.run_id]
     assert case.run_id not in getattr(case.service, '_missing_canonical_cache', {})
 
 
@@ -1408,7 +1410,7 @@ def test_missing_canonical_cache_invalidates_on_locator_replace_with_old_mtime(t
     report = case.service.list_runs_report()
     assert report.load_errors == []
     assert report.runs[0].goal == 'relocated canonical'
-    assert case.calls == [case.run_id, case.run_id]
+    assert case.calls == [case.run_id]
 
 
 # LLM: 新近缺失仍在保护窗口内，不能过早负缓存并掩盖发表竞态。
@@ -1422,12 +1424,13 @@ def test_recent_missing_canonical_is_not_cached_until_guard_window_expires(tmp_p
     monkeypatch.setattr(persistence_module, '_now', lambda: mtime + guard / 2)
     assert case.service.list_runs_report().load_errors
     assert case.service.list_runs_report().load_errors
-    assert case.calls == [case.run_id, case.run_id]
+    # 缺失由 locator 预检确认（不进完整 loader）；窗口内每轮都重读 locator，过窗后只再读一次即负缓存。
+    assert case.calls == [] and len(case.reads) == 2
     assert case.run_id not in getattr(case.service, '_missing_canonical_cache', {})
     monkeypatch.setattr(persistence_module, '_now', lambda: mtime + guard + 1)
     assert case.service.list_runs_report().load_errors
     assert case.service.list_runs_report().load_errors
-    assert case.calls == [case.run_id] * 3
+    assert case.calls == [] and len(case.reads) == 3
 
 
 # LLM: 定位器删除须精确清理对应负缓存，不依赖其它run是否仍存在。
@@ -1452,6 +1455,9 @@ def test_nonmissing_canonical_errors_never_enter_negative_cache(tmp_path, monkey
     if failure == 'invalid_json':
         case.locator.write_text('{broken', encoding='utf-8')
     else:
+        # 规范文件存在时才越过 locator 缺失预检，让权限错误真正来自完整 loader。
+        case.canonical.write_bytes(case.raw)
+
         # LLM: 合成权限错误不代表文件不存在；不得以负缓存将它固化为缺失。
         # 函数用途: 保留每轮真实错误重试，不把权限失败静默成空任务列表。
         def denied(run_id):
@@ -1461,7 +1467,9 @@ def test_nonmissing_canonical_errors_never_enter_negative_cache(tmp_path, monkey
         monkeypatch.setattr(case.service, 'load', denied)
     assert case.service.list_runs_report().load_errors
     assert case.service.list_runs_report().load_errors
-    assert case.calls == [case.run_id, case.run_id]
+    # 坏 locator 在预检解析时报错、不进 loader；两种错误都每轮重读 locator，不进入负缓存。
+    assert case.calls == ([] if failure == 'invalid_json' else [case.run_id, case.run_id])
+    assert len(case.reads) == 2
     assert case.run_id not in getattr(case.service, '_missing_canonical_cache', {})
 
 

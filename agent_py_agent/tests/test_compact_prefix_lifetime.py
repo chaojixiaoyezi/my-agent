@@ -311,6 +311,8 @@ def test_unsupported_media_does_not_keep_unusable_full_history(tmp_path, monkeyp
         input_media_blocks,
         input_media_root,
     )
+    from agent_py_agent.agent.settings import model_profiles
+    from agent_py_agent.agent.settings.thread_model_selection import thread_model_profile_id
     from agent_py_agent.tests import test_host_summary_phase_lifetime as lifetime
     from agent_py_agent.tests.test_media_compact_preflight import PNG
 
@@ -320,6 +322,12 @@ def test_unsupported_media_does_not_keep_unusable_full_history(tmp_path, monkeyp
     def media_host(path):
         agent, thread_id, run = original_host(path)
         agent.config.model_input_modalities = ["text"]
+        if host != "child":
+            # Gateway/后台请求只认所选模型档案：输入模态须在档案上声明，未声明即未知，不再继承部署配置。
+            model_profiles.execute_model_profile_operation(agent, "save_profile", {
+                "profile_id": thread_model_profile_id(agent, thread_id), "editing": True,
+                "profile": {"input_modalities": ["text"]},
+            })
         agent.config.compact_media_policy = "auto"
         png = path / "lifetime.png"
         png.write_bytes(PNG)

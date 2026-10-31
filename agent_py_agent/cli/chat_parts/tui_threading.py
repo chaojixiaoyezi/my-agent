@@ -1289,6 +1289,10 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
             if not hasattr(navigation, "_background_watch_valid_scope"):
                 _reset_background_watch_cache(navigation)
             prior = getattr(navigation, "_background_watch_scope", None)
+            # 与刷新入口同一规则：未装配owner home且无旧帧时保持静默，不制造新的观察误报。
+            if not report.context[0] and prior is None:
+                _reset_background_watch_cache(navigation)
+                return changed
             if prior is not None and (len(prior) != 5 or (*prior[:3], prior[4]) != report.context):
                 changed = _clear_background_watch(navigation, display_runtime)
             if report.binding_state == "empty" or (thread_id is None and snapshot_ok):

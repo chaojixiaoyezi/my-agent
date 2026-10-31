@@ -1756,7 +1756,7 @@ def test_tool_round_records_deferred_content_tool_when_context_needs_compact():
         live_archive_state={},
     )
     agent = SimpleNamespace(
-        config=SimpleNamespace(memory_compact_auto_trigger_percent=50),
+        config=SimpleNamespace(memory_compact_trigger_percent=50),
         backend=SimpleNamespace(context_window_tokens=1000),
     )
 
@@ -1880,7 +1880,7 @@ def test_tool_round_defers_more_reading_to_compact_when_previous_results_already
         live_archive_state={},
     )
     agent = SimpleNamespace(
-        config=SimpleNamespace(memory_compact_auto_trigger_percent=50),
+        config=SimpleNamespace(memory_compact_trigger_percent=50),
         backend=SimpleNamespace(context_window_tokens=1000),
     )
 

@@ -269,15 +269,18 @@ def test_thirty_long_proposals_pass_the_real_window_gate(tmp_path, monkeypatch, 
 
 
 def test_config_defaults_are_off_and_point_is_owner_only(tmp_path):
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
+
     config = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     defaults = AgentConfig()
+    code_defaults, _sources = decision_defaults(None)
     for suffix in ("mode", "timeout_seconds", "profile_id"):
         name = f"decision_{POINT}_{suffix}"
-        # 点位期限与模型引用只在决策设置覆盖层按点位设置，配置里没有字段（2026-09-27 参数减量）。
-        expected = ("off", "off") if suffix == "mode" else (None, None)
-        assert (getattr(config, name, None), getattr(defaults, name, None)) == expected
-        assert (suffix == "mode") == hasattr(defaults, name)
-        assert decision_field_scopes()[f"points.{POINT}.{suffix}"] == ["owner"]
+        path = f"points.{POINT}.{suffix}"
+        # 决策默认只归决策代码（a12fe40c5），配置对象不再有点位字段；点位期限与模型引用只在覆盖层按点位设置（2026-09-27 参数减量）。
+        assert not hasattr(config, name) and not hasattr(defaults, name)
+        assert code_defaults.get(path) == ("off" if suffix == "mode" else None)
+        assert decision_field_scopes()[path] == ["owner"]
     host = host_at(tmp_path)
     thread = host.conversation_store.threads.get_or_create({"canonical_user_id": "alice", "owner_id": "alice"})
     with pytest.raises(ModelProfileError, match="作用范围"):
@@ -286,7 +289,7 @@ def test_config_defaults_are_off_and_point_is_owner_only(tmp_path):
     row = view["effective"]["points"][POINT]
     assert (row["mode"], row["effective_mode"], row["runtime_scope"], row["timeout_seconds"]) == (
         "off", "off", "owner_background", 4.0)
-    assert view["sources"][f"points.{POINT}.mode"] == f"agent_config.decision_{POINT}_mode"
+    assert view["sources"][f"points.{POINT}.mode"] == "decision_defaults"
     assert view["sources"][f"points.{POINT}.timeout_seconds"].startswith("inherit:background_timeout_seconds:")
     patch(host, {"enabled": True, f"points.{POINT}.mode": "apply"})
     assert settings(host, "read", {})["effective"]["points"][POINT]["effective_mode"] == "apply"

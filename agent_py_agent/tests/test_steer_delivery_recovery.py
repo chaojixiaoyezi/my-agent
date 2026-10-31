@@ -40,7 +40,7 @@ from agent_py_agent.agent.agent_core.tool_stream import (
     LongToolContentAbortPayload,
     LongToolContentStreamAbort,
 )
-from agent_py_agent.agent.backends import ModelResponse, ProviderTransientError
+from agent_py_agent.agent.backends import ModelResponse, ProviderTransientError, get_backend
 from agent_py_agent.agent.backends.base import EchoBackend
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -244,10 +244,13 @@ def test_stream_abort_becomes_a_reply_so_its_steer_is_not_returned(monkeypatch):
     assert returned == ["call-failed"]  # 普通失败才退回
 
 
+# LLM: 有 Home 时 echo 配置过不了 selected_model_scope（目录未选模型即未配置）；只有构造后显式注入的后端会被保留，
+#   所以这里注入一个 echo 实例，用例仍可在 EchoBackend 类上替换生成入口。
 # 函数用途: 建一个带独立 home 与 Gateway 目录的 echo Agent（不按用户分 owner），返回（Agent, Gateway 路径）。
 def _gateway_agent(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
                                     gateway_per_user_owner_scoping=False), tmp_path / "ws")
+    agent.backend = get_backend("echo", agent.config)
     paths = gateway_paths(agent)
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         folder.mkdir(parents=True, exist_ok=True)

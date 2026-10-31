@@ -238,7 +238,7 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
         runner_start_rate="1",
         runner_timeout_seconds="off",
         model_context_window_tokens=200_000,
-        memory_compact_auto_trigger_percent=70,
+        memory_compact_trigger_percent=70,
     )
     monkeypatch.setattr(
         "agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend()
@@ -252,7 +252,7 @@ def test_dispatch_worker_reuses_parent_runtime_context_config(monkeypatch, tmp_p
         captured.append(
             (
                 params.config.model_context_window_tokens,
-                params.config.memory_compact_auto_trigger_percent,
+                params.config.memory_compact_trigger_percent,
                 params.config.runner_timeout_seconds,
             )
         )

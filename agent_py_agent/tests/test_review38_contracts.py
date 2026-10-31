@@ -194,6 +194,8 @@ def test_excluded_gateway_parent_must_not_learn_through_child(env):
 
 def test_deleted_agreement_cannot_revive_from_stale_indexes(env, monkeypatch):
     from agent_py_agent.agent.agent_core.runtime.loop_support import _refresh_recall_candidates
+    from agent_py_agent.agent.memory_store.jsonl import memory_content_hash
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
     from agent_py_agent.agent.memory_store.recall import (
         MemoryRecallScope,
         long_term_record_matches_scope,
@@ -202,7 +204,14 @@ def test_deleted_agreement_cannot_revive_from_stale_indexes(env, monkeypatch):
     assert submit(env, observation(env, t, '约定：提交之前必须核对。')).promoted
     stale = env.service.long_term.all()[0]
     env.service.long_term.remove(stale.entry_id, expected_version=stale.version)
-    monkeypatch.setattr(env.service.long_term, '_search_local_store_report', lambda *args: ([stale], []))
+    # 旧 LocalStore 记忆投影已由 owner 读索引取代（788f9b847）：派生读索引仍给出已删约定的旧坐标时，
+    #   回读当前分片与墓碑必须丢弃它；语义臂的陈旧命中同样不能复活。
+    root = MemoryReadIndex(env.service.long_term.path).store.manifest()
+    assert root is not None
+    stale_hit = {'id': stale.entry_id, 'version': stale.version, 'segment': 0, 'row_no': 0,
+                 'content_hash': memory_content_hash(stale.content), 'operation_id': root['operation_id']}
+    monkeypatch.setattr(MemoryReadIndex, 'query', lambda self, query, *, limit=64: (
+        [stale_hit], {'status': 'complete', 'operation_id': root['operation_id']}))
     monkeypatch.setattr(env.service.long_term, '_semantic_records', lambda *args: [stale])
     scope = MemoryRecallScope.from_runtime()
     assert env.service.long_term.search_scoped('提交核对', 5, lambda row: long_term_record_matches_scope(row, scope)) == []

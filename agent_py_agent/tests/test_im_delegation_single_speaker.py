@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -35,30 +36,39 @@ from agent_py_agent.cli.gateway_loops import _build_background_scheduler
 from agent_py_agent.tests.test_channel_message_tool import _RecordingAdapter
 from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
-from agent_py_agent.tests.test_session_task_real_chain import ScriptedWire, _ready_gateway_paths
+from agent_py_agent.tests.test_session_task_real_chain import (
+    ScriptedWire,
+    _ready_gateway_paths,
+    _select_scripted_model,
+)
+from agent_py_agent.tests.test_shared_model_catalog import admin_host
 
 
 # LLM: 所有Agent/Store/claim/core是真实产品；供应商fake只回普通正文/原probe，IM adapter只记录，不触网络。
 # 函数用途: 建一个本人IM正常任务环境，分别记录真实执行会话与渠道运输。
 def ordinary_chain(tmp_path, monkeypatch, *, owner_kind="user"):
-    agent = SimpleAgent(
-        AgentConfig(
-            model_backend="openai_compatible",
-            api_base="http://127.0.0.1:9/v1",
-            api_key="synthetic-not-credential",
-            model_name="ordinary-offline",
-            stream_enabled=False,
-            model_context_window_tokens=200_000,
-            enable_plugins=False,
-            prompt_files=[],
-            my_agent_home=str(tmp_path / "home"),
-            my_agent_owner_provider="feishu",
-            my_agent_owner_kind=owner_kind,
-            my_agent_owner_id="oc_a" if owner_kind == "group" else "ou_a",
-            gateway_per_user_owner_scoping=False,
-        ),
-        tmp_path / "workspace",
+    config = AgentConfig(
+        model_backend="openai_compatible",
+        api_base="http://127.0.0.1:9/v1",
+        api_key="synthetic-not-credential",
+        model_name="ordinary-offline",
+        stream_enabled=False,
+        model_context_window_tokens=200_000,
+        enable_plugins=False,
+        prompt_files=[],
+        my_agent_home=str(tmp_path / "home"),
+        my_agent_owner_provider="feishu",
+        my_agent_owner_kind=owner_kind,
+        my_agent_owner_id="oc_a" if owner_kind == "group" else "ou_a",
+        gateway_per_user_owner_scoping=False,
     )
+    agent = SimpleAgent(config, tmp_path / "workspace")
+    # 有 Home 时模型只由 owner 的 v6 目录决定：本人 owner 登记自己的默认目录模型；群 owner 写目录需群授权，
+    # 改由同一 home 的管理员登记并指定为初始共享模型（群默认即沿用它）。
+    if owner_kind == "group":
+        _select_scripted_model(admin_host(Path(agent.home_paths.config_dir)), config, initial=True)
+    else:
+        _select_scripted_model(agent, config)
     provider = _RecordingAdapter()
     agent.channel_registry.register_adapter(
         "feishu", provider, capabilities=ChannelCapabilities(text=True, reply=True, proactive=True)
@@ -786,7 +796,7 @@ def test_real_local_agent_typed_nonconversation_keeps_original_child_defaults(tm
     monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *_: {"status": "test-deferred"})
     assert agent.conversation_store.tasks.load("local-task") is None
     assert current_delegated_delivery_task(agent) is None
-    result = CreateSubagentsTool(agent).execute({"goal": "本地普通资料处理"})
+    result = CreateSubagentsTool(agent).execute({"items": [{"goal": "本地普通资料处理"}]})
     assert result.ok, result.output
     child = agent.subagents.list_runs()[0]
     assert "schedule" not in child.allowed_tools

@@ -40,11 +40,11 @@ def test_explicit_coordinator_seed_merges_parent_and_coordinator_tools():
 
     mock_agent = _mock_coordinator_agent()
     tool = CreateSubagentsTool(mock_agent)
-    result = tool.execute({
+    result = tool.execute({"items": [{
         "goal": "Seed one root coordinator.",
         "role": "coordinator",
         "allowed_tools": ["schedule_child_subagents", "run_command", "web_fetch", "write_file"],
-    })
+    }]})
 
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert result.ok is True
@@ -60,13 +60,13 @@ def test_explicit_coordinator_seed_keeps_product_paths_and_write_grants():
 
     mock_agent = _mock_coordinator_agent()
     tool = CreateSubagentsTool(mock_agent)
-    result = tool.execute({
+    result = tool.execute({"items": [{
         "goal": "Coordinate role boundary evidence for /tmp/product-deliverables.",
         "role": "coordinator",
         "agent_name": "root-coordinator",
         "allowed_tools": ["schedule_child_subagents", "write_file"],
         "extra_write_roots": ["/tmp/product-deliverables"],
-    })
+    }]})
 
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert result.ok is True

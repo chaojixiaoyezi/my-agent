@@ -361,7 +361,7 @@ class _LatestUserTaskBackend:
         if self.always_dispatch or _fresh_user_task(messages):
             self.dispatched += 1
             return ModelResponse(text="", backend=self.name, tool_use_blocks=[
-                {"id": "wake-create", "name": "create_subagents", "input": {"goal": _CHILD_GOAL}},
+                {"id": "wake-create", "name": "create_subagents", "input": {"items": [{"goal": _CHILD_GOAL}]}},
             ])
         return ModelResponse(text="收到宿主事件：子代理被授权门拦下，等待用户确认。", backend=self.name)
 
@@ -380,7 +380,7 @@ def _blocked_child_scene(tmp_path, backend, status: str = "BLOCKED"):
     externalize_tool_output_record(ExternalizeToolOutputRequest(
         root=owner, tool="create_subagents", call_id="fg-create", output="created child", ok=True,
         request_id=_REQUEST, run_id=_REQUEST, task_id=_REQUEST, conversation_request_id=_REQUEST, min_chars=0,
-        parameters={"goal": _CHILD_GOAL},
+        parameters={"items": [{"goal": _CHILD_GOAL}]},
         result_envelope={"tool_operation": {"schema_version": "tool_operation.v1", "operation_id": "op-fg-create",
                                             "status": "succeeded", "action": "execute", "replayed": False}},
     ))
@@ -507,10 +507,10 @@ class _ReplaceAfterRejectionBackend:
         if _tool_result_text(messages, "wake-create"):
             return ModelResponse(text="", backend=self.name, tool_use_blocks=[{
                 "id": "wake-replace", "name": "create_subagents",
-                "input": {"goal": "接替已完成的子代理重新整理要点", "replacement_for_run_ids": [self.source_id]},
+                "input": {"items": [{"goal": "接替已完成的子代理重新整理要点", "replacement_for_run_ids": [self.source_id]}]},
             }])
         return ModelResponse(text="", backend=self.name, tool_use_blocks=[
-            {"id": "wake-create", "name": "create_subagents", "input": {"goal": _CHILD_GOAL}},
+            {"id": "wake-create", "name": "create_subagents", "input": {"items": [{"goal": _CHILD_GOAL}]}},
         ])
 
 

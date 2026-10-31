@@ -21,6 +21,7 @@ from agent_py_agent.tests.test_session_task_real_chain import (
     RealChain,
     _agent_config,
     _ready_gateway_paths,
+    _select_scripted_model,
     _text_of,
 )
 
@@ -87,6 +88,7 @@ def _chain(tmp_path, monkeypatch, setup: _Setup) -> tuple[RealChain, _DeferralWi
     config = _agent_config(tmp_path, **setup.owner)
     config.tool_default_deferral_enabled = setup.deferral
     agent = SimpleAgent(config, tmp_path / "root")
+    _select_scripted_model(agent, config)
     wire = _DeferralWire(setup.script)
     monkeypatch.setattr(http, "post_json", wire)
     chain = RealChain(agent, _ready_gateway_paths(agent), wire, {}, scheduler=None)

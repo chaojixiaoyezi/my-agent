@@ -117,7 +117,8 @@ def test_readers_do_not_depend_on_file_walk_order(monkeypatch):
     metadata.field_readers.cache_clear()
     try:
         assert metadata.field_readers() == forward
-        assert forward["api_base"] == ("gateway_parts", "agent/gateway_parts/model_control_cards")
+        # api_base 现为 v6 模型目录投影（a12fe40c5），引用最多的产品文件随之变为目录写入口；期望取自当前产品扫描。
+        assert forward["api_base"] == ("settings", "agent/settings/model_provider_operations")
     finally:
         metadata.field_readers.cache_clear()
 

@@ -16,6 +16,16 @@ from agent_py_agent.agent.memory_archive import (
 from agent_py_agent.agent.settings import AgentConfig
 
 
+def _offline_agent(config: AgentConfig, workspace: Path) -> SimpleAgent:
+    """显式离线测试后端走构造后注入；不让空 owner 目录重新回落部署 echo。"""
+    from agent_py_agent.agent.backends import get_backend
+
+    instance = SimpleAgent(config, workspace)
+    assert config.model_backend == "echo"
+    instance.backend = get_backend("echo", config)
+    return instance
+
+
 def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
     append_raw_event(
         root,
@@ -188,7 +198,7 @@ def _write_cross_day_gateway_archive(
 
 def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     """LLM: Tests that auto resume context recovers cross-day handoff tasks with task fact sources."""
-    agent = SimpleAgent(
+    agent = _offline_agent(
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),
@@ -224,7 +234,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
 
 def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
     """LLM: Tests that auto resume context recovers cross-day gateway requests with gateway fact sources."""
-    agent = SimpleAgent(
+    agent = _offline_agent(
         AgentConfig(
             model_backend="echo",
             my_agent_home=str(tmp_path / "home"),

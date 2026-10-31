@@ -89,10 +89,10 @@ def test_agent_capability_config_missing_file_does_not_accept_mock_cache(tmp_pat
 
 
 def test_agent_capability_config_malformed_file_does_not_accept_mock_cache(tmp_path):
-    # 格式错误仍按原语义返回 None；替身缓存同样不能顶替。
+    # 格式错误仍按原语义返回 None；替身缓存同样不能顶替。已退役键只告警忽略（a12fe40c5），故用现行字段的非法值。
     agent = MagicMock()
     agent.capability_config_path = tmp_path / "bad.yaml"
-    agent.capability_config_path.write_text("decision_subagent_model_mode: bogus\n", encoding="utf-8")
+    agent.capability_config_path.write_text("owner_default_permission_mode: bogus\n", encoding="utf-8")
 
     assert capability_config_for_agent(agent) is None
 
@@ -222,6 +222,7 @@ def test_capability_config_patch_service_applies_safe_patch(tmp_path):
 
 
 def test_capability_config_bool_patch_requires_machine_tokens(tmp_path):
+    # 原 capability_grant_expires_after_task 已退役（a12fe40c5）；换用现行默认 True 的布尔开关验证同一机器令牌规则。
     config_path = tmp_path / "capability_config.yaml"
     _write_config(config_path, run_timeout=900)
 
@@ -229,27 +230,27 @@ def test_capability_config_bool_patch_requires_machine_tokens(tmp_path):
         CapabilityConfigPatchRequest(
             config_path=config_path,
             apply=True,
-            patches=[CapabilityConfigPatch(field="capability_grant_expires_after_task", value="off")],
+            patches=[CapabilityConfigPatch(field="subagent_activity_notices_enabled", value="off")],
         )
     )
 
     assert rejected.ok is False
     assert rejected.applied is False
-    assert rejected.blocked_fields == ["capability_grant_expires_after_task"]
-    assert "capability_grant_expires_after_task" not in config_path.read_text(encoding="utf-8")
+    assert rejected.blocked_fields == ["subagent_activity_notices_enabled"]
+    assert "subagent_activity_notices_enabled" not in config_path.read_text(encoding="utf-8")
 
     applied = apply_capability_config_patch(
         CapabilityConfigPatchRequest(
             config_path=config_path,
             apply=True,
-            patches=[CapabilityConfigPatch(field="capability_grant_expires_after_task", value="false")],
+            patches=[CapabilityConfigPatch(field="subagent_activity_notices_enabled", value="false")],
         )
     )
 
     assert applied.ok is True
     assert applied.applied is True
-    assert applied.changed_fields == ["capability_grant_expires_after_task"]
-    assert "capability_grant_expires_after_task: false" in config_path.read_text(encoding="utf-8")
+    assert applied.changed_fields == ["subagent_activity_notices_enabled"]
+    assert "subagent_activity_notices_enabled: false" in config_path.read_text(encoding="utf-8")
 
 
 def test_capability_config_patch_tool_is_not_model_visible(tmp_path):

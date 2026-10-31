@@ -25,7 +25,7 @@ from agent_py_agent.agent.conversation.native_history import (
 )
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
-from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings import AgentConfig, model_profiles
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 from agent_py_agent.tests.test_gateway_model_adoption import actual_request, fake_http
 
@@ -36,11 +36,19 @@ IMAGE = {"type": "image", "source": {"type": "local_file", "path": "/owner/attac
 WINDOW = 60_000
 
 
+# LLM: 输入模态属于所选模型档案，未声明即未知、不再继承部署配置；只编辑夹具原模型档案的声明，连接与窗口不变。
+# 函数用途: 让 Gateway 夹具当前选中的模型显式声明输入模态。
+def _declare_input_modalities(fixture, modalities):
+    model_profiles.execute_model_profile_operation(fixture.agent, "save_profile", {
+        "profile_id": fixture.original, "editing": True, "profile": {"input_modalities": modalities},
+    })
+
+
 # LLM: 与原 preflight 测试同形：真实配置与策略，只替换文字估算；媒体只以原生历史里的图片块表达。
 # 函数用途: 构造一次 preflight 请求，按参数决定是否带图片、是否持久保存。
 def _preflight(monkeypatch, *, media: bool, save: bool, tokens: int, policy: str = "off"):
     agent = SimpleNamespace(
-        config=AgentConfig(auto_save_memory=True, memory_compact_auto_trigger_percent=50, compact_media_policy=policy),
+        config=AgentConfig(auto_save_memory=True, memory_compact_trigger_percent=50, compact_media_policy=policy),
         backend=SimpleNamespace(context_window_tokens=1_000, name="fake"),
     )
     history = [{"role": "user", "content": [{"type": "text", "text": "看图"}, *([IMAGE] if media else [])]}]
@@ -117,10 +125,10 @@ def test_gateway_media_history_between_trigger_and_window(tmp_path, monkeypatch,
     agent = fixture.agent
     agent.config.compact_media_policy = policy
     # 声明纯文字模态：本测试的假 HTTP 后端不看图，避免片 B 的视觉探针多出请求，业务调用计数保持 1。
-    agent.config.model_input_modalities = ["text"]
+    _declare_input_modalities(fixture, ["text"])
     agent.config.model_context_window_tokens = WINDOW
     agent.backend.context_window_tokens = WINDOW
-    agent.config.memory_compact_auto_trigger_percent = 50
+    agent.config.memory_compact_trigger_percent = 50
     agent.config.max_tokens = 1024
     ids = _seed(agent, fixture.thread_id, case, tmp_path)
     business, _ = fake_http(monkeypatch, fixture)
@@ -174,8 +182,9 @@ def test_frozen_media_prefix_is_sent_unchanged_then_archived(tmp_path, monkeypat
     fixture = actual_request(tmp_path, mode="disabled", original_window=WINDOW)
     agent = fixture.agent
     agent.config.compact_media_policy = policy
-    agent.config.model_input_modalities = modalities
-    agent.config.memory_compact_auto_trigger_percent = 50
+    if modalities is not None:
+        _declare_input_modalities(fixture, modalities)
+    agent.config.memory_compact_trigger_percent = 50
     agent.config.max_tokens = 1024
     ids = _seed(agent, fixture.thread_id, (True, 16), tmp_path)
     frozen = _capture_frozen_wires(monkeypatch, agent)
@@ -215,8 +224,8 @@ def test_supported_media_prefix_over_window_recovers_with_original_source(tmp_pa
             agent = fixture.agent
             assert agent.home_paths.root.resolve() == (root / "my-agent-home").resolve()
             agent.config.compact_media_policy = policy
-            agent.config.model_input_modalities = ["text", "image"]
-            agent.config.memory_compact_auto_trigger_percent = 50
+            _declare_input_modalities(fixture, ["text", "image"])
+            agent.config.memory_compact_trigger_percent = 50
             ids = _seed(agent, fixture.thread_id, (True, 32), root)
             if not freeze:
                 original_surface = compact_request_recovery._transcript_summary_surface

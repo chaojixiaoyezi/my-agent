@@ -102,7 +102,8 @@ def test_default_home_alias_is_frozen_for_original_constructor(tmp_path, monkeyp
         assert control.agent_root == roots[0]
         if real_agent:
             assert made.home_paths.owner_home_dir.is_relative_to(selected)
-            assert made.backend.__class__.__name__ == "EchoBackend"
+            # 有 Home 时管理员 default 投影为未配置模型，YAML 里的 echo 不穿过目录作用域。
+            assert made.backend.__class__.__name__ == "UnconfiguredBackend"
     assert not later.exists()
 
 

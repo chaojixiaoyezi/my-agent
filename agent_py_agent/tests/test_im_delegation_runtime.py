@@ -64,7 +64,9 @@ def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a', promote_ro
 
     control = _BackgroundRunControl(background.request_id, background.conversation_task_binding_callback)
     bind_fixture_control_cleanup(monkeypatch, control)
-    authority = _bind_main_agent_authority(agent, replace(background, run_id="delegate-root",
+    # run_id 沿真实后台装配（派活回合号即会话任务号）：孩子的父边与创建时工具快照的 parent_run_id 必须一致，
+    # 否则能力裁决按"缺可信父快照"拒绝（1132a3f35 起 fail-closed）。
+    authority = _bind_main_agent_authority(agent, replace(background,
         attempt_id="delegate-attempt", root_user_prompt=task.goal, conversation_task_binding_callback=control))
     attrs = authority.task_attributes
     params = ToolLoopExecuteParams(
@@ -317,7 +319,7 @@ def test_manual_child_default_stays_conservative(tmp_path, monkeypatch):
     agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False,
         my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
     monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *_: {"status": "test-deferred"})
-    result = CreateSubagentsTool(agent).execute({'goal': '合成手工任务'})
+    result = CreateSubagentsTool(agent).execute({'items': [{'goal': '合成手工任务'}]})
     assert result.ok, result.output
     assert 'schedule' not in agent.subagents.list_runs()[0].allowed_tools
 

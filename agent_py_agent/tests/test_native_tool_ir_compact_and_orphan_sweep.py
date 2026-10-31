@@ -321,7 +321,7 @@ def test_active_turn_archive_compact_hides_only_committed_source_calls(tmp_path,
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(128_000)
     agent.config.model_context_window_tokens = 128_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     records = [_carried_record(index) for index in range(1, 6)]
@@ -407,7 +407,7 @@ def test_active_turn_archive_interrupt_after_summary_does_not_commit_or_fail(tmp
     backend.generate = generate_then_interrupt
     agent.backend = backend
     agent.config.model_context_window_tokens = 128_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     attrs = {
@@ -564,7 +564,7 @@ def test_conversation_prompt_at_200k_90_percent_uses_shared_native_ir_window(tmp
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(200_000)
     agent.config.model_context_window_tokens = 200_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(
@@ -629,7 +629,7 @@ def test_gpt_reasoning_blocks_do_not_block_in_turn_compaction(tmp_path):
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(200_000)
     agent.config.model_context_window_tokens = 200_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "prompt")
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "local/main", "channel": "test",
@@ -662,7 +662,7 @@ def test_shared_native_window_counts_large_tool_call_arguments(tmp_path):
     agent = _native_agent(tmp_path)
     agent.backend.context_window_tokens = 10_000
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     sink = _ContextCompactionSink()
     params = replace(
@@ -766,7 +766,7 @@ def test_native_window_defers_when_completed_history_alone_reaches_trigger(tmp_p
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -813,7 +813,7 @@ def test_native_window_defers_when_completed_history_consumes_recovery_headroom(
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -875,7 +875,7 @@ def test_native_window_summary_may_replace_latest_pair_to_reach_recovery_target(
 
     agent.backend.generate = thin_summary
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     # 该用例专门验证 live-tool 候选；提高恢复目标，避免基线历史先转交 transcript Compact。
     agent.config.memory_compact_recovery_target_percent = 80
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
@@ -980,7 +980,7 @@ def test_native_window_reclaims_old_runtime_facts_across_two_generations(tmp_pat
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
@@ -1044,7 +1044,7 @@ def test_native_window_floor_keeps_ir_facts_that_live_compact_cannot_delete(tmp_
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
@@ -1100,7 +1100,7 @@ def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 80
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
@@ -1158,7 +1158,7 @@ def test_native_window_summary_removes_covered_assistant_tool_turn_text(tmp_path
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1220,7 +1220,7 @@ def test_native_window_rolls_back_summary_that_still_exceeds_trigger(tmp_path):
     agent.backend = _SummaryBackend(10_000)
     agent.backend.generate = lambda *_args, **_kwargs: SimpleNamespace(text="S" * 12_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     # 该用例专门验证候选回滚；提高恢复目标，确保先进入 live-tool 候选分支。
     agent.config.memory_compact_recovery_target_percent = 80
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
@@ -1278,7 +1278,7 @@ def test_shared_native_window_commits_main_or_child_conversation_compact(
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1367,7 +1367,7 @@ def test_background_main_run_params_commit_live_compact_despite_save_false(tmp_p
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1420,7 +1420,7 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
     agent = _native_agent(tmp_path)
     agent.backend = _EmptySummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1468,7 +1468,7 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
     agent = _native_agent(tmp_path)
     agent.backend.context_window_tokens = 10_000
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1521,7 +1521,7 @@ def test_live_segment_failure_or_run_cancel_never_retires_ir_or_commits(tmp_path
     backend.max_tokens = 128
     agent.backend = backend
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: CacheStructuredPrompt("原稳定前缀", "运行事实"))
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1590,7 +1590,7 @@ def test_persistent_native_interrupt_after_summary_restores_ir_without_failure(t
     backend.generate = generate_then_interrupt
     agent.backend = backend
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1629,7 +1629,7 @@ def test_persistent_native_already_cancelled_never_starts_summary_or_mutation(tm
     backend = _SummaryBackend(10_000)
     agent.backend = backend
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     token = CancellationToken()
     token.cancel("already-stopped")
@@ -1672,7 +1672,7 @@ def test_persistent_native_interrupt_after_ir_mutation_rolls_back_without_failur
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1739,7 +1739,7 @@ def test_persistent_native_interrupt_after_checkpoint_leaves_orphan_without_cas(
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1795,7 +1795,7 @@ def test_persistent_native_window_restores_ir_when_compact_cas_fails(
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -1840,7 +1840,7 @@ def test_shared_native_window_stays_stable_across_repeated_pressure(tmp_path):
     agent = _native_agent(tmp_path)
     agent.backend.context_window_tokens = 20_000
     agent.config.model_context_window_tokens = 20_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     params = replace(
         _params(),
@@ -1873,7 +1873,7 @@ def test_shared_native_window_reuses_semantic_summary_across_repeated_pressure(t
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(20_000)
     agent.config.model_context_window_tokens = 20_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_semantic_summary_enabled = True
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     params = replace(
@@ -1975,7 +1975,7 @@ def test_ptl_loop_helper_native_drops_ir_text_drops_text(tmp_path):
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     params = _params()
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     ir_pairs_before = sum(1 for it in params.tool_ir_history if isinstance(it, ToolResult))
@@ -2009,7 +2009,7 @@ def test_authoritative_no_save_provider_overflow_commits_same_conversation_compa
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
     params = replace(
@@ -2316,7 +2316,7 @@ def test_projection_failure_preserves_native_commit_boundary(
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")
@@ -2373,7 +2373,7 @@ def test_post_commit_context_refresh_failure_keeps_committed_history(tmp_path, m
     agent = _native_agent(tmp_path)
     agent.backend = _SummaryBackend(10_000)
     agent.config.model_context_window_tokens = 10_000
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "base-prompt")
     agent.conversation_store = store
     agent.home_paths = SimpleNamespace(owner_compact_dir=tmp_path / "compact")

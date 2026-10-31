@@ -63,6 +63,10 @@ def reuse_case(tmp_path, monkeypatch, *, decision="approved_session", forced=Fal
     from agent_py_agent.agent.conversation import agent_tool_approval as bridge
     from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
     from agent_py_agent.agent.core import ResolveCapabilityRequestsTool
+    from agent_py_agent.agent.subagents.capability_scope import (
+        DIRECT_PARENT_TOOL_AUTHORITY_ATTR,
+        creation_tool_authority_snapshot,
+    )
     from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityRequestParams
     from agent_py_agent.agent.tooling.mcp_client import MCPToolInfo
     from agent_py_agent.agent.tooling.mcp_registration import build_proxy_tool
@@ -74,6 +78,9 @@ def reuse_case(tmp_path, monkeypatch, *, decision="approved_session", forced=Fal
     tool = build_proxy_tool(SimpleNamespace(is_running=lambda: True), "offline", MCPToolInfo("act", "offline", {"type": "object", "properties": {}}))
     tool.runtime_policy = replace(tool.runtime_policy, approval_policy=ApprovalPolicy("always"))
     agent.tools.register(tool)
+    # 有委派边的孩子只认创建当轮的直属父快照；用真实registry快照记下根父创建它时已持有该MCP工具，不放宽授权上界。
+    parent_authority = creation_tool_authority_snapshot(agent.tools.runtime_snapshot(run_id=child.parent_id))
+    agent.subagents.mutate(child.id, lambda task: task.attributes.update({DIRECT_PARENT_TOOL_AUTHORITY_ATTR: parent_authority}))
     request = agent.subagents.lifecycle.record_capability_request(child.id, RecordCapabilityRequestParams(
         problem="合成 MCP 授权", needed_capability="offline action", capability_type="mcp", requested_mcp_tools=[tool.model_spec.name]))
     assert ResolveCapabilityRequestsTool(agent).execute({"run_id": child.id, "request_id": request.id, "decision": "grant", "reason": "合成同任务授权"}).ok

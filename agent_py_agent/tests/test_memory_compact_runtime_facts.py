@@ -284,7 +284,33 @@ def _write_config(tmp_path: Path) -> Path:
         'local_store_events_path: "local_store/events.jsonl"\n',
         encoding="utf-8",
     )
+    _select_offline_echo_model(config_path)
     return config_path
+
+
+# LLM: 有Home的CLI运行只认owner的v6模型目录，部署echo不再生效；经正式add/set_default登记显式离线Echo。
+# 函数用途: 为临时owner选好离线模型，让真实CLI run既不报未配置也不发网络请求。
+def _select_offline_echo_model(config_path: Path) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from agent_py_agent.agent.settings import load_config
+    from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+
+    config = load_config(config_path)
+    paths = home_paths(config.my_agent_home)
+    owner = resolve_owner_home(paths.root, owner_identity_from_config(config))
+    host = SimpleNamespace(config=config, home_paths=home_paths_with_owner(paths, owner))
+    profile_id = str(uuid4())
+    execute_model_profile_operation(host, "add", {"profile_id": profile_id, "profile": {
+        "model_backend": "echo", "model_name": "echo", "transport": "offline"}})
+    execute_model_profile_operation(host, "set_default", {"profile_id": profile_id})
 
 
 def _workspace(config_path: Path) -> Path:

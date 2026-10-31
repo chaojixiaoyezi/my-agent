@@ -137,11 +137,18 @@ def test_deferred_source_excludes_only_unfinished_current_user_suffix(tmp_path) 
     assert append_gateway_conversation_message(
         agent, request, initial, request_id="gw-current", role="assistant", content="当前阶段答复"
     )
+    # e905-sol-13（f74d1161e/89d4870c0）：普通/延后来源与主历史种子共用 history_row_selected，排除当前请求中段行；
+    # 只有显式 force 压缩保留同请求已完成检查点，并仅剥离未提交的尾部 user 输入。
     completed = gateway_conversation_context(
         GatewayConversationLoadRequest(agent, request, "gw-current", "继续", defer_compact=True)
     )
     assert completed.compact_source is not None
-    assert [row.content for row in completed.compact_source.messages] == [
+    assert [row.content for row in completed.compact_source.messages] == ["旧轮 user", "旧轮 assistant"]
+    forced = gateway_conversation_context(
+        GatewayConversationLoadRequest(agent, request, "gw-current", "继续", defer_compact=True), force_compact=True
+    )
+    assert forced.compact_source is not None
+    assert [row.content for row in forced.compact_source.messages] == [
         "旧轮 user", "旧轮 assistant", "当前待回复输入", "当前阶段答复",
     ]
     direct = load_conversation_compact_source(
@@ -150,7 +157,7 @@ def test_deferred_source_excludes_only_unfinished_current_user_suffix(tmp_path) 
         agent.conversation_store.threads.require(initial.thread_id),
         exclude_request_id="gw-current",
     )
-    assert direct.messages == completed.compact_source.messages
+    assert direct.messages == forced.compact_source.messages
 
 
 def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path) -> None:

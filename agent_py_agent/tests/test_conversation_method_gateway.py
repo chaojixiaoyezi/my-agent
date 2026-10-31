@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from agent_py_agent.agent.agent_core import _tool_loop_service, tool_ir_history
 from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
-from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends import ModelResponse, get_backend
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn
 from agent_py_agent.agent.conversation.compact_checkpoint import (
     CompactCheckpointRequest,
@@ -26,6 +26,8 @@ from agent_py_agent.tests.test_host_notices import _ask, _thread_id
 def _gateway_with_package(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", enable_plugins=True, prompt_files=[],
                                     my_agent_home=str(tmp_path / "home"), gateway_per_user_owner_scoping=False), tmp_path / "ws")
+    # 有 Home 时目录未选模型即未配置；构造后显式注入的后端才在 Gateway 模型作用域里保留，用例再替换它的 generate。
+    agent.backend = get_backend("echo", agent.config)
     package = inspect_plugin_package(content_bundle(files={"CAPABILITY.md": b"GATEWAY_METHOD_ENTRY",
                                                            "methods/detail.md": b"GATEWAY_RESOURCE_BODY"},
                                                      change=lambda row: row.update(plugin_id="carry-gateway")))

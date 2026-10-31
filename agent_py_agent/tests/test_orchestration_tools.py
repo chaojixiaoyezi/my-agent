@@ -40,26 +40,29 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     )
 
     spec = build_create_subagents_model_spec()
-    role_detail = spec.input_schema["properties"]["role"]["description"]
+    item_schema = spec.input_schema["properties"]["items"]["items"]
+    # 7101c9fa2 起角色模板索引只挂在 items[].role，顶层不再有同名重复字段。
+    role_detail = item_schema["properties"]["role"]["description"]
 
     assert "模板位置" not in role_detail
     assert "worker" in role_detail
-    assert "同一模板索引" in spec.input_schema["properties"]["items"]["items"]["properties"]["role"]["description"]
+    assert "可用角色模板索引" in role_detail
+    assert "role" not in spec.input_schema["properties"]
     assert "你是执行子代理" not in role_detail
     assert "count" not in spec.parameter_descriptions
     assert "count" not in spec.input_schema["properties"]
-    assert spec.input_schema["required"] == []
-    assert all('"goal"' in example for example in spec.examples)
-    assert "职责短标题" in spec.parameter_descriptions["description"]
-    item_schema = spec.input_schema["properties"]["items"]["items"]
+    assert "count" not in item_schema["properties"]
+    assert spec.input_schema["required"] == ["items"]
+    assert all('"items"' in example and '"goal"' in example for example in spec.examples)
+    assert "职责短标题" in item_schema["properties"]["description"]["description"]
     assert item_schema["required"] == ["goal"]
     assert list(item_schema["properties"])[:3] == ["goal", "persistent_goal", "covers"]
     assert "承接现有open Todo时在covers复制exact id" in spec.description
     assert "不要因为字段可选而漏掉" in item_schema["properties"]["covers"]["description"]
     assert item_schema["properties"]["description"]["maxLength"] == 240
     assert item_schema["properties"]["output_files"]["type"] == "array"
-    assert "交付身份与协调线索" in spec.parameter_descriptions["output_files"]
-    assert "同批多个 item 可以声明共同 task root" in spec.parameter_descriptions["output_files"]
+    assert "交付身份与协调线索" in item_schema["properties"]["output_files"]["description"]
+    assert "同批多个 item 可以声明共同 task root" in item_schema["properties"]["output_files"]["description"]
     assert "用户明确留给你的职责不可整体转交" in spec.description
     assert "不重复child正在做的工作" in spec.description
     assert "遵守用户对主代理实现范围的限制" in spec.description
@@ -69,11 +72,11 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "明确共同目录、独占范围、交付物与验收" in spec.description
     assert "互不重叠的文件或模块范围" in item_schema["properties"]["goal"]["description"]
     assert "output_files仅为协调线索，不是写集、锁或授权" in spec.description
-    assert "单派用goal，批量用items且每项goal必填" in spec.description
+    assert "一项或多项统一用items，每项goal必填" in spec.description
     assert "没有查询或推进工具" not in spec.description
     assert "不能扩到兄弟目录" not in spec.description
     assert "child沿原owner工作区授权" in spec.description
-    assert "work/child_outputs" not in spec.parameter_descriptions["output_files"]
+    assert "work/child_outputs" not in item_schema["properties"]["output_files"]["description"]
 
 
 def test_create_subagents_inherits_current_task_workspace(tmp_path):
@@ -193,7 +196,7 @@ def test_descendant_create_uses_same_public_tool_and_hierarchy_service():
     ) as nested:
         result = CreateSubagentsTool(agent).execute(
             {
-                "goal": "继续拆分",
+                "batch_summary": "继续拆分",
                 "items": [{"goal": "写模块 A"}, {"goal": "写模块 B"}],
             }
         )
@@ -249,7 +252,7 @@ def test_descendant_create_enforces_same_per_call_limit(tmp_path):
 
     result = CreateSubagentsTool(agent).execute(
         {
-            "goal": "并行处理三个目标",
+            "batch_summary": "并行处理三个目标",
             "items": [
                 {"goal": "目标一"},
                 {"goal": "目标二"},

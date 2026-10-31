@@ -118,14 +118,17 @@ class TestCreateSubagentsItemsMode:
             lambda _agent, ids, **_kw: {"status": "started", "run_ids": ids},
         )
 
+        checks = ["必须有证据", "必须标注未确认信息"]
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行研究市场并形成进入策略",
+            "batch_summary": "并行研究市场并形成进入策略",
             "items": [
-                {"goal": "研究越南市场环境", "description": "调研越南市场", "role": "worker", "agent_name": "小傻妞-市场"},
-                {"goal": "研究竞争格局", "description": "分析竞争格局", "role": "worker", "agent_name": "小傻妞-竞争"},
-                {"goal": "制定进入策略", "description": "制定进入策略", "role": "coordinator", "agent_name": "小傻妞-策略"},
+                {"goal": "研究越南市场环境", "description": "调研越南市场", "role": "worker", "agent_name": "小傻妞-市场",
+                 "acceptance_checks": checks},
+                {"goal": "研究竞争格局", "description": "分析竞争格局", "role": "worker", "agent_name": "小傻妞-竞争",
+                 "acceptance_checks": checks},
+                {"goal": "制定进入策略", "description": "制定进入策略", "role": "coordinator", "agent_name": "小傻妞-策略",
+                 "acceptance_checks": checks},
             ],
-            "acceptance_checks": ["必须有证据", "必须标注未确认信息"],
         })
 
         created_params = [
@@ -162,8 +165,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行完成游戏模块",
-            "description": "超级玛丽游戏并行开发",
+            "batch_summary": "并行完成游戏模块：超级玛丽游戏并行开发",
             "items": [
                 {"goal": "开发游戏核心引擎"},
                 {"goal": "设计前三个关卡", "description": "设计前三个关卡"},
@@ -187,7 +189,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行研究三个市场维度",
+            "batch_summary": "并行研究三个市场维度",
             "items": [
                 {"goal": "市场"},
                 {"goal": "竞争"},
@@ -207,7 +209,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行读取资料并形成证据报告",
+            "batch_summary": "并行读取资料并形成证据报告",
             "items": [
                 {
                     "goal": "读取 README.md 并写证据报告",
@@ -235,7 +237,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行实现两个模块",
+            "batch_summary": "并行实现两个模块",
             "items": [
                 {"goal": "实现指定模块", "output_files": ["src/a.py"]},
                 {"goal": "实现指定模块", "output_files": ["src/b.py"]},
@@ -253,7 +255,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行复刻项目",
+            "batch_summary": "并行复刻项目",
             "items": [
                 {
                     "goal": "创建项目骨架",
@@ -280,7 +282,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent = _agent()
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行编写报告",
+            "batch_summary": "并行编写报告",
             "items": [
                 {"goal": "写报告正文", "output_files": ["replica/report.md"]},
                 {"goal": "写报告结论", "output_files": ["./replica/report.md"]},
@@ -298,7 +300,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行实现相邻模块",
+            "batch_summary": "并行实现相邻模块",
             "items": [
                 {"goal": "实现 core", "output_files": ["replica/internal/core"]},
                 {"goal": "实现 corex", "output_files": ["replica/internal/corex"]},
@@ -318,7 +320,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent = MagicMock()
         mock_agent.config = SimpleNamespace(enable_subagents=True)
         result = CreateSubagentsTool(mock_agent).execute(
-            {"goal": "并行执行一批任务", "items": [{"goal": f"任务 {index}"} for index in range(60)]}
+            {"batch_summary": "并行执行一批任务", "items": [{"goal": f"任务 {index}"} for index in range(60)]}
         )
 
         assert result.ok is False
@@ -337,7 +339,7 @@ class TestCreateSubagentsItemsMode:
         monkeypatch.setattr(orchestration_tools, "external_write_target_error", fake_target_error)
         mock_agent = _agent()
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行研究市场与竞争",
+            "batch_summary": "并行研究市场与竞争",
             "items": [{"goal": "市场"}, {"goal": "竞争", "extra_write_roots": ["/bad"]}],
         })
 
@@ -353,7 +355,7 @@ class TestCreateSubagentsItemsMode:
         for bad_goal in ("", "   ", None):
             mock_agent = _agent()
             result = CreateSubagentsTool(mock_agent).execute({
-                "goal": "并行实现前后端",
+                "batch_summary": "并行实现前后端",
                 "items": [{"goal": "写后端"}, {"goal": bad_goal, "role": "frontend"}],
             })
 
@@ -370,8 +372,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "研究市场并保留子级计划",
-            "plan": "主代理最后输出 final_report.md",
+            "batch_summary": "研究市场并保留子级计划；主代理最后输出 final_report.md",
             "items": [
                 {
                     "goal": "研究市场环境",
@@ -393,7 +394,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "分析市场资料",
+            "batch_summary": "分析市场资料",
             "items": [
                 {
                     "goal": "分析市场资料",
@@ -426,11 +427,11 @@ class TestCreateSubagentsItemsMode:
         mock_task.task_dir = "/tmp/run_1"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        result = CreateSubagentsTool(mock_agent).execute({
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{
             "goal": "研究资料并写摘要",
             "source_refs": ["docs/a.md"],
             "context_pack_refs": ["packs/brief.json"],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -459,7 +460,7 @@ class TestCreateSubagentsItemsMode:
         mock_agent = _agent()
         mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "分析印尼市场",
+            "batch_summary": "分析印尼市场",
             "items": [{
                 "goal": "分析印尼市场",
                 "role": "grandworker",
@@ -486,7 +487,7 @@ class TestCreateSubagentsItemsMode:
         )
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行完成现有计划",
+            "batch_summary": "并行完成现有计划",
             "items": [
                 {"goal": "实现核心", "output_files": ["port/core/"]},
                 {"goal": "实现界面", "output_files": ["port/ui/"]},
@@ -518,7 +519,7 @@ class TestCreateSubagentsItemsMode:
         )
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "创建项目骨架",
+            "batch_summary": "创建项目骨架",
             "items": [{
                 "goal": "创建 src/i18n/ 与 src/config/ 等目录结构",
                 "output_files": ["port/scaffold/"],
@@ -543,7 +544,7 @@ class TestCreateSubagentsItemsMode:
         )
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "完成核心",
+            "batch_summary": "完成核心",
             "items": [{"goal": "在当前工作区实现核心", "covers": ["impl-core"]}],
         })
 
@@ -566,10 +567,10 @@ class TestCreateSubagentsItemsMode:
             ],
         )
 
-        result = CreateSubagentsTool(mock_agent).execute({
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{
             "goal": "返工 Git 输出路径",
             "covers": ["3"],
-        })
+        }]})
         payload = json.loads(result.output)
 
         assert result.ok is False
@@ -594,7 +595,7 @@ class TestCreateSubagentsItemsMode:
         )
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "完成核心",
+            "batch_summary": "完成核心",
             "items": [{
                 "goal": "实现核心",
                 "covers": ["impl-core"],
@@ -621,7 +622,7 @@ class TestCreateSubagentsItemsMode:
         )
 
         result = CreateSubagentsTool(mock_agent).execute({
-            "goal": "并行完成现有计划",
+            "batch_summary": "并行完成现有计划",
             "items": [
                 {
                     "goal": "实现核心",
@@ -652,10 +653,10 @@ class TestCreateSubagentsItemsMode:
             [{"id": "impl-core", "title": "实现核心", "status": "pending"}],
         )
 
-        result = CreateSubagentsTool(mock_agent).execute({
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{
             "goal": "实现核心",
             "output_files": ["port/core/"],
-        })
+        }]})
 
         assert result.ok is True
         assert mock_agent.subagents.create_run.call_count == 1
@@ -672,11 +673,11 @@ class TestCreateSubagentsItemsMode:
             [{"id": "impl-core", "title": "实现核心", "status": "pending"}],
         )
 
-        result = CreateSubagentsTool(mock_agent).execute({
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{
             "goal": "实现核心",
             "covers": ["impl-core"],
             "output_files": ["port/core/"],
-        })
+        }]})
 
         assert result.ok is True
         created = mock_agent.subagents.create_run.call_args.kwargs["params"]
@@ -696,7 +697,7 @@ class TestCreateSubagentsItemsMode:
         result = _nested_create_params(
             mock_agent,
             {
-                "goal": "派孙代理实现核心",
+                "batch_summary": "派孙代理实现核心",
                 "items": [{"goal": "实现核心", "output_files": ["port/core/"]}],
             },
         )
@@ -722,11 +723,11 @@ class TestCreateSubagentsToolGrantProtocol:
         mock_task.task_dir = "/tmp/worker_001"
         mock_agent.subagents.create_run.return_value = mock_task
 
-        result = CreateSubagentsTool(mock_agent).execute({
+        result = CreateSubagentsTool(mock_agent).execute({"items": [{
             "goal": "研究资料并写 output.json",
             "role": "worker",
             "allowed_tools": ["read_file", "list_files"],
-        })
+        }]})
 
         params = mock_agent.subagents.create_run.call_args.kwargs["params"]
         assert result.ok is True
@@ -736,24 +737,34 @@ class TestCreateSubagentsToolGrantProtocol:
         assert "apply_patch" in params.allowed_tools
 
 
-def test_empty_items_list_falls_through_to_single_goal():
-    """模型常反射性带一个空 items:[] 同时把规格放顶层 goal——应落单 goal 模式建出 1 个子代理,
-    而不是 TOOL_INVALID_ARGUMENTS(B1 真机暴露:14 次 create_subagents 因此全失败、子代理一个没派出)。"""
+def test_empty_items_list_falls_through_to_single_goal(tmp_path):
+    """旧协议模型常反射性带一个空 items:[] 同时把规格放顶层 goal——宿主v1输入边界应落单 goal 建出 1 个子代理,
+    而不是 TOOL_INVALID_ARGUMENTS(B1 真机暴露:14 次 create_subagents 因此全失败、子代理一个没派出)。
+    规范v2 handler只收items，这一兼容只在显式v1边界完成；defer_start 不是v1模型字段，省略即默认False。"""
     import json
 
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 
     mock_agent = _agent()
     mock_agent.subagents.create_run.side_effect = _create_run_sequence(mock_agent)
 
-    result = CreateSubagentsTool(mock_agent).execute({
-        "goal": "创建企业级协作平台的基础目录结构与入口文件",
-        "items": [],
-        "output_files": ["platform/__init__.py", "platform/config.py"],
-        "defer_start": False,
-    })
+    result = execute_canonical_test_call(
+        tmp_path, tools={"create_subagents": CreateSubagentsTool(mock_agent)}, tool_name="create_subagents",
+        arguments={
+            "goal": "创建企业级协作平台的基础目录结构与入口文件",
+            "items": [],
+            "output_files": ["platform/__init__.py", "platform/config.py"],
+        },
+        trusted_run_context={"tool_input_version": 1}, operation_store=LocalStore(tmp_path / "ops.db"),
+        operation_store_required=True,
+    ).result
     payload = json.loads(result.output)
 
-    assert result.ok is True
+    assert result.ok is True, result.output
     assert payload["created"] == 1
     assert len(payload["created_run_ids"]) == 1
+    params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+    assert params.goal == "创建企业级协作平台的基础目录结构与入口文件"
+    assert params.attributes["output_files"] == ["platform/__init__.py", "platform/config.py"]

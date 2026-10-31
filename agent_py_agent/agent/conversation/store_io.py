@@ -371,6 +371,46 @@ class ImmutableJsonIndex:
     def put(self, reference, key: str, value):
         return self._put(reference, key, value, self._route(key), 0)
 
+    # LLM: 树形只由键集合决定（叶超8键才分裂且永不合并），整批合并与逐键get/put得到同一根；
+    #   只保存最终节点，不为每个键复制整条路径。已有键与批内重复键保留首值，不覆盖原地址。
+    # 函数用途: 一次插入一批尚不存在的键并返回新根引用。
+    def put_absent(self, reference, items):
+        batch = {}
+        for key, value in items:
+            if key not in batch:
+                batch[key] = (value, self._route(key))
+        return self._merge(reference, batch, 0) if batch else reference
+
+    # LLM: 只复制本批命中的路径；叶分裂与深度上限沿原_put规则，未变子树保留原引用。
+    # 函数用途: 将已路由的一批键并入一个子树。
+    def _merge(self, reference, batch, depth):
+        node = self._load(reference) if reference is not None else {'entries': {}}
+        if 'entries' in node:
+            entries = dict(node['entries'])
+            for key, (value, _route) in batch.items():
+                entries.setdefault(key, value)
+            if reference is not None and len(entries) == len(node['entries']):
+                return reference
+            if len(entries) <= 8:
+                return self._save({'entries': entries})
+            if depth >= 64:
+                raise OSError('immutable index hash collision budget exceeded')
+            groups, children = {}, {}
+            for key, value in entries.items():
+                route = batch[key][1] if key in batch else self._route(key)
+                groups.setdefault(route[depth], {})[key] = (value, route)
+        else:
+            if depth >= 64:
+                raise OSError('immutable index depth exceeds hash width')
+            groups, children = {}, dict(node['children'])
+            for key, item in batch.items():
+                groups.setdefault(item[1][depth], {})[key] = item
+        for digit, group in groups.items():
+            children[digit] = self._merge(children.get(digit), group, depth + 1)
+        if 'children' in node and children == node['children']:
+            return reference
+        return self._save({'children': children})
+
     # LLM: 每次至多访问64个分支加一叶，缺键返回None；坏节点不能当作缺键。
     # 函数用途: 不枚举历史地查询一个准确键。
     def get(self, reference, key: str):

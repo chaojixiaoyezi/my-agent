@@ -82,7 +82,7 @@ def _bind_main_task(agent, task_id="main-task"):
 
 def test_native_creation_and_child_tool_keep_private_packages_scoped(tmp_path):
     agent, store, entries = _agent(tmp_path)
-    result = CreateSubagentsTool(agent).execute({"goal": "按故事包完成只读分析", "allowed_skills": ["capability:story-a"], "defer_start": True})
+    result = CreateSubagentsTool(agent).execute({"items": [{"goal": "按故事包完成只读分析", "allowed_skills": ["capability:story-a"]}], "defer_start": True})
     assert result.ok, result.output
     task = agent.subagents.list_runs()[0]
     assert task.allowed_skills == ["capability:story-a"]
@@ -155,7 +155,7 @@ def test_main_pin_concurrency_keeps_both_packages_and_conflict_preserves_record(
 
 def test_hierarchy_inherits_parent_package_and_rejects_expansion(tmp_path):
     agent, _store, _entries = _agent(tmp_path)
-    result = CreateSubagentsTool(agent).execute({"goal": "父任务", "allowed_skills": ["capability:story-a"], "defer_start": True})
+    result = CreateSubagentsTool(agent).execute({"items": [{"goal": "父任务", "allowed_skills": ["capability:story-a"]}], "defer_start": True})
     assert result.ok
     parent = agent.subagents.list_runs()[0]
     blocked = agent.subagents.hierarchy.schedule_child_runs(params=HierarchyScheduleRequest(parent_run_id=parent.id, child_specs=[HierarchyChildSpec(goal="越权", allowed_skills=["capability:story-b"])], apply=True))
@@ -193,7 +193,7 @@ def test_scheduler_preserves_activation_and_refuses_missing_or_conflicting_ident
 def test_child_consumes_new_canonical_grant_without_stale_run_params_narrowing(tmp_path):
     agent, _store, _entries = _agent(tmp_path)
     refs = {row.stable_id: row.to_ref() for row in agent.current_skill_snapshot().packages}
-    assert CreateSubagentsTool(agent).execute({"goal": "父任务", "allowed_skills": ["capability:story-a"], "defer_start": True}).ok
+    assert CreateSubagentsTool(agent).execute({"items": [{"goal": "父任务", "allowed_skills": ["capability:story-a"]}], "defer_start": True}).ok
     task = agent.subagents.list_runs()[0]
     initial_attrs = dict(task.attributes)
     agent.subagents.lifecycle.record_capability_grant(task.id, params=RecordCapabilityGrantParams(
@@ -224,8 +224,8 @@ def test_malformed_package_task_reference_is_not_silently_discarded(broken):
 def _child_package_request(agent, reference, *, requested_tools=()):
     _bind_main_task(agent)
     created = CreateSubagentsTool(agent).execute({
-        "goal": "阅读已有方法并记录依据", "allowed_skills": [],
-        "tool_preset": "read_only", "defer_start": True,
+        "items": [{"goal": "阅读已有方法并记录依据", "allowed_skills": [], "tool_preset": "read_only"}],
+        "defer_start": True,
     })
     assert created.ok, created.output
     child = agent.subagents.list_runs()[0]

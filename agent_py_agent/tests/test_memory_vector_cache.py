@@ -600,7 +600,7 @@ def test_index_all_reclaims_even_without_local_store(tmp_path) -> None:
     cache.put({"deadbeef:" + "0" * 64: [0.1, 0.2]})
     assert len(cache.keys()) == 2
 
-    assert mem.index_all() == 0  # 没有 LocalStore，没有记录进 FTS
+    assert mem.index_all() == 1  # 没有 LocalStore 也照样追平 owner 内读索引
     assert cache.keys() == [_key(mem, "支付系统迁移计划下季度启动")]  # 但孤儿键仍被回收
 
 

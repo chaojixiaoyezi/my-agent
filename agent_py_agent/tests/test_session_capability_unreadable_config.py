@@ -1,7 +1,7 @@
 """主代理构造时 capability 配置读不了或有非法值也不能崩（ae 复审必须改 2）。
 
 `capability_config_for_agent` 在三种情况下返回 None：文件读不了（没有读权限、路径是目录），以及内容里有非法值
-（决策设置校验抛 ValueError）。缺文件返回默认实例，未知字段只告警。注册会话工具时若直接把返回值传下去，
+（严格校验的部署边界抛 ValueError；决策设置字段已随 a12fe40c5 退役，只按未知键告警）。缺文件返回默认实例，未知字段只告警。注册会话工具时若直接把返回值传下去，
 这几种 owner 一构造主代理就崩：`AttributeError: 'NoneType' object has no attribute 'session_messaging_admin_enabled'`。
 
 修法：core.py 算一次 `capability_config_for_agent(agent) or CapabilityConfig()`，三个会话工具共用。
@@ -41,11 +41,11 @@ def _directory_path(config_dir):
     return path
 
 
-# 函数用途: 写一份带非法决策设置的配置（校验抛 ValueError），文件本身读得出来。
+# 函数用途: 写一份带非法权限模式的配置（严格校验抛 ValueError），文件本身读得出来。
 def _invalid_value(config_dir):
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / "capability_config.yaml"
-    path.write_text("decision_skill_tool_mode: not-a-mode\n", encoding="utf-8")
+    path.write_text("owner_default_permission_mode: not-a-mode\n", encoding="utf-8")
     return path
 
 

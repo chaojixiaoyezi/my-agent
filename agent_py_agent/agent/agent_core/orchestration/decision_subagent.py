@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from types import SimpleNamespace
 
 from ...backends import get_backend
@@ -133,6 +133,13 @@ def _input_budget(agent: object, params: object, child: SubagentModelInput) -> i
     return None
 
 
+# LLM: 版本只取参与配置相等判断的字段；compare=False 的宿主运行值（home 快照、守卫策略）含 Path 等非 JSON 值且不属于连接版本。
+# 函数用途: 生成候选运行配置版本摘要所用的可 JSON 化字段视图。
+def _config_identity(config: object) -> dict:
+    data = asdict(config)
+    return {item.name: data[item.name] for item in fields(config) if item.compare}
+
+
 # LLM: 只针对原入口已确认的新任务，逐候选复用模型解析、任务配置投影与原出站上限判据；空窗口表示未知，已知正整数原值保留，不套用默认下限。
 #   构造后端不探针、不读登录令牌，不应用日志或改变宿主配置。
 # 函数用途: 冻结每个候选的真实配置窗口、可证明输出上限及独立工具支持缺口；零输出预留在候选侧表示未知。
@@ -148,7 +155,7 @@ def _candidate_request_limits(agent: object, child: SubagentModelInput, candidat
         backend = get_backend(config.model_backend, config)
         cap = _known_shared_window_output_reserve(SimpleNamespace(config=config, backend=backend))
         result[profile_id] = {
-            "runtime_config_revision": connection_revision(asdict(config)),
+            "runtime_config_revision": connection_revision(_config_identity(config)),
             "model_name": config.model_name,
             "model_backend": config.model_backend,
             "context_window_tokens": None if config.model_context_window_tokens is None else int(config.model_context_window_tokens),

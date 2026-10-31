@@ -58,7 +58,9 @@ def test_partial_scan_cannot_be_complete_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(fs, '_FALLBACK_SCAN_MAX_FILES', 0)
     result = fs.SearchTextTool(tmp_path, 10).execute({'query': '不存在', 'literal': True})
     facts = result.result_envelope['query_evidence']
-    assert facts['status'] == 'unknown' and facts['coverage'] == 'incomplete'
+    # 扫描被上限截断时如实记为失败观测（a9eda25ef 的 LOCAL_SCAN_INCOMPLETE），绝不能成为完整零结果。
+    assert facts['status'] == 'failed' and facts['error_code'] == 'LOCAL_SCAN_INCOMPLETE'
+    assert facts['coverage'] == 'incomplete' and facts['status'] != 'zero_observed'
     assert not facts['total_known'] and facts['total_count'] is None
 
 

@@ -24,6 +24,7 @@ from agent_py_agent.agent.adapter.manager import (
     _GatewayReplyPollClient,
     _reply_text_with_host_notices,
 )
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends.base import EchoBackend, ModelResponse
 from agent_py_agent.agent.conversation.background_context import _minimal_context_bundle
 from agent_py_agent.agent.conversation.background_transcript import (
@@ -73,10 +74,13 @@ _SESSION = "notice-session"
 _TEXT = "智能程度检测：支持按档位调节"
 
 
+# LLM: 有 Home 时目录未选模型即未配置，echo 配置过不了 selected_model_scope；构造后显式注入的 echo 实例才会保留，
+#   用例仍在 EchoBackend 类上替换生成入口。
 # 函数用途: 建一个带 Gateway 目录的 echo Agent（不按用户分 owner，读写同一个会话存储）。
 def _gateway_agent(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
                                     gateway_per_user_owner_scoping=False), tmp_path / "ws")
+    agent.backend = get_backend("echo", agent.config)
     paths = gateway_paths(agent)
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)

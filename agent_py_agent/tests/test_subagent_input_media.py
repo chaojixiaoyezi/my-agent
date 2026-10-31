@@ -113,12 +113,15 @@ def test_tool_spec_adds_input_media_refs_only_when_switch_is_true(tmp_path):
     off = CreateSubagentsTool(_agent(tmp_path / "off", enabled=False)).model_spec
     on = CreateSubagentsTool(_agent(tmp_path / "on", enabled=True)).model_spec
     assert off.schema_hash == CreateSubagentsTool.model_spec.schema_hash, "关闭时与原说明逐字节一致"
+    # items-only 合同（7101c9fa2）：顶层只有 items/batch_summary，开关只往每个 item 里加 input_media_refs。
     assert "input_media_refs" not in off.input_schema["properties"]
+    assert "input_media_refs" not in off.input_schema["properties"]["items"]["items"]["properties"]
     assert "input_media_refs" not in off.parameter_descriptions
-    assert on.input_schema["properties"]["input_media_refs"]["type"] == "array"
+    assert "input_media_refs" not in on.input_schema["properties"]
     item_props = on.input_schema["properties"]["items"]["items"]["properties"]
+    assert item_props["input_media_refs"]["type"] == "array"
     assert "media_ref" in item_props["input_media_refs"]["description"]
-    assert "不传路径" in on.parameter_descriptions["input_media_refs"]
+    assert "不传路径" in item_props["input_media_refs"]["description"]
     mock_agent = MagicMock()
     assert CreateSubagentsTool(mock_agent).model_spec.schema_hash == off.schema_hash, "MagicMock 不算开"
     main_only = SimpleNamespace(config=SimpleNamespace(subagent_input_media_enabled=True), root=tmp_path / "main-only")
@@ -130,7 +133,7 @@ def test_refs_are_rejected_when_switch_is_off(tmp_path):
     ref = _import_image(agent, tmp_path)
     _bind_current_turn(agent, [ref])
     outcome = orchestration_tools.execute_create_subagents_service(
-        agent, {"goal": "分析这张图", "input_media_refs": [ref["sha256"]]})
+        agent, {"items": [{"goal": "分析这张图", "input_media_refs": [ref["sha256"]]}]})
     assert outcome.ok is False and outcome.error_code == INPUT_MEDIA_DISABLED_ERROR_CODE
     assert outcome.effect_outcome == "not_started" and agent.subagents.list_runs() == []
     assert json.loads(outcome.output)["requested_media_refs"] == [ref["sha256"]]
@@ -257,7 +260,7 @@ def _run_child_with_media(tmp_path: Path, monkeypatch) -> tuple[dict, object, ob
     ref = _import_image(agent, tmp_path)
     _bind_current_turn(agent, [ref])
     outcome = orchestration_tools.execute_create_subagents_service(
-        agent, {"goal": "描述这张图里有什么", "input_media_refs": [ref["sha256"]]})
+        agent, {"items": [{"goal": "描述这张图里有什么", "input_media_refs": [ref["sha256"]]}]})
     assert outcome.ok is True, outcome.output
     bound = agent.subagents.list_runs()[0].attributes["input_media"]
     assert bound == [ref]

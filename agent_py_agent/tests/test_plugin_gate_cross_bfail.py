@@ -345,32 +345,38 @@ def test_plugins_info_shows_declared_capabilities_when_switch_on():
     assert "事件订阅：" in text and "收紧工具：" in text
 
 
-# --- 5. plugin_tool_gate_timeout_ms：管理员可改、模型不可改（B5 参数白名单） ---
+# --- 5. plugin_tool_gate_timeout_ms：宿主部署项，参数中心与模型都不可改（a12fe40c5） ---
 
 
-# LLM: 这个参数登记成边界是为了防模型放大预算；管理员经 /settings 应当能改（调大只会多等，
-#   超时仍收紧成 ask，不会变松）。判据只看 _writable_spec 的两个结构化输入。
-# 函数用途: 断言 gate 预算在管理员白名单里，且管理员作用域可写、模型作用域被边界拒绝。
+# LLM: 这个参数登记成边界是为了防模型放大预算；a12fe40c5 起它归宿主部署配置（DEPLOYMENT_ONLY_KEYS），
+#   管理员 /settings 作用域也只能查看，须由完整宿主管理员经部署入口维护。判据只看 _writable_spec 的结构化拒绝码。
+# 函数用途: 断言 gate 预算是部署层参数，管理员 /settings 与模型作用域都被只读来源拒绝。
 def test_gate_budget_admin_writable_model_denied():
     from agent_py_agent.agent.settings import parameter_changes as changes
+    from agent_py_agent.agent.settings.parameter_registry import parameter_registry
 
     key = "plugin_tool_gate_timeout_ms"
     assert key in changes.USER_SETTINGS_BOUNDARY_KEYS
+    spec = parameter_registry()[key]
+    assert spec.tier == "deployment" and not spec.writable and not spec.user_editable
     token = changes._USER_SETTINGS_WRITE.set(True)  # 管理员 /settings 作用域
     try:
-        spec = changes._writable_spec(key)
+        changes._writable_spec(key)
+    except changes.ParameterChangeError as exc:
+        assert exc.code == "PARAMETER_SOURCE_READ_ONLY"
+    else:  # pragma: no cover - 失败时才走到
+        raise AssertionError("管理员 /settings 作用域也不能写宿主部署项")
     finally:
         changes._USER_SETTINGS_WRITE.reset(token)
-    assert spec.key == key
 
-    # 模型作用域（默认 False）：同一键必须按边界拒绝，模型不能放大预算。
+    # 模型作用域（默认 False）：同一键同样拒绝，模型不能放大预算。
     assert changes._USER_SETTINGS_WRITE.get() is False
     try:
         changes._writable_spec(key)
     except changes.ParameterChangeError as exc:
-        assert exc.code == "PARAMETER_BOUNDARY"
+        assert exc.code == "PARAMETER_SOURCE_READ_ONLY"
     else:  # pragma: no cover - 失败时才走到
-        raise AssertionError("模型作用域必须被边界拒绝")
+        raise AssertionError("模型作用域必须被拒绝")
 
 
 # LLM: 值范围仍是登记的 200–10000；管理员改大只影响等待时长，收紧结论不变（超时仍 ask）。

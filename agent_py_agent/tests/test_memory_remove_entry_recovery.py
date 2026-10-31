@@ -11,6 +11,7 @@ from agent_py_agent.tests.test_remember_learning_source_review import _agent
 
 
 # LLM: 仅在正式文件原子提交后退出；legacy去掉新版计划字段重建旧格式，indexed启用真实LocalStore。
+#   正式写入不再双写LocalStore投影，indexed按升级前遗留的真实SQLite/FTS副本播种被删事实的旧正文。
 # 函数用途: 在独立进程中制造已经提交正式删除但尚未收尾的状态。
 def _crashed_agent(tmp_path, *, legacy=False, indexed=False):
     program = _CRASH_SCRIPT
@@ -33,6 +34,9 @@ def _crashed_agent(tmp_path, *, legacy=False, indexed=False):
     if indexed:
         agent.memory.local_store = LocalStore(tmp_path / 'derived')
     [removed] = [c for c in agent.memory_candidates.list() if c.proposed_action == 'remove']
+    if indexed:
+        agent.memory.local_store.upsert_record(source_type='memory', source_id=removed.target_entry_id,
+                                               title='project:user', content='项目新方案保留两份备份')
     return agent, removed
 
 

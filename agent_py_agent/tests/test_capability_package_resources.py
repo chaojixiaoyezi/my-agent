@@ -148,7 +148,7 @@ def test_resource_read_pins_original_main_task_and_child_keeps_its_scope(tmp_pat
     assert resolve_package_resource(agent, ref_a).data == b"story-a"
     pins = agent.conversation_store.tasks.load("main-task").skill_snapshot_refs
     assert list(pins) == [packages["story-a"].to_ref()]
-    result = CreateSubagentsTool(agent).execute({"goal": "使用已授权包分析材料", "allowed_skills": ["capability:story-a"], "defer_start": True})
+    result = CreateSubagentsTool(agent).execute({"items": [{"goal": "使用已授权包分析材料", "allowed_skills": ["capability:story-a"]}], "defer_start": True})
     assert result.ok, result.output
     task = agent.subagents.list_runs()[0]
     previous = set_current_subagent_context(agent, run_id=task.id, task_attributes=task.attributes)

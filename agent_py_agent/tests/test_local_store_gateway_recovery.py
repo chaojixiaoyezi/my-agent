@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from agent_py_agent.agent.agent_core.models import AgentRunResult
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
     AdapterPaths,
@@ -87,7 +88,10 @@ def _make_recovery_agent(root: Path) -> SimpleAgent:
         gateway_processing_timeout_seconds=1,
         gateway_request_max_attempts=2,
     )
-    return SimpleAgent(cfg, root)
+    agent = SimpleAgent(cfg, root)
+    # 有 Home 时目录未选模型即未配置；离线 echo 后端须构造后显式注入，才在 Gateway 模型作用域里保留。
+    agent.backend = get_backend("echo", cfg)
+    return agent
 
 
 def _ensure_gateway_dirs(paths) -> None:
@@ -478,6 +482,7 @@ def test_file_adapter_writes_gateway_response_to_outbox():
             local_store_events_path="local_store/events.jsonl",
         )
         agent = SimpleAgent(cfg, root)
+        agent.backend = get_backend("echo", cfg)
         gpaths = gateway_paths(agent)
         apaths = AdapterPaths(
             root=root / "adapter",

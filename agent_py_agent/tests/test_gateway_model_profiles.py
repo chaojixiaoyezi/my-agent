@@ -54,7 +54,9 @@ def test_model_api_uses_authenticated_owner_and_does_not_return_secrets(tmp_path
     assert request.reply[0] == 200 and request.reply[1]["ok"]
     assert scopes[-1].user_id == "alice"
     assert "secret" not in json.dumps(request.reply)
-    assert len(execute_model_profile_operation(owners["bob"], "list", {})["profiles"]) == 1
+    # 640e478ee 起列表不再平铺部署 default 行：新增只落在已认证的 alice 目录，bob 目录保持为空。
+    assert [row["id"] for row in execute_model_profile_operation(owners["alice"], "list", {})["profiles"]] == [profile_id]
+    assert execute_model_profile_operation(owners["bob"], "list", {})["profiles"] == []
     denied = Handler({"operation": "select", "conversation_id": "sess-b", "profile_id": profile_id}, "bob")
     model_profile_service.handle_client_models(denied, SimpleNamespace(agent=base))
     assert denied.reply[0] == 400

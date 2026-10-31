@@ -72,27 +72,24 @@ def test_introspection_candidate_replay_is_idempotent(tmp_path: Path) -> None:
     assert len(agent.memory_candidates.list()) == 1
 
 
+# 候选只按独立来源计票：同一 run 的重试只是同一来源的别名，同一根任务下另一个 run 的同类失败才增计。
 def test_independent_attempts_increment_same_candidate(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     task = _task(agent)
+    sibling = agent.subagents.create_run(goal=task.goal, thought="t", plan=["p"], root_id=task.root_id or task.id)
     adapter = agent.subagents.memory_candidates
+    kwargs = {
+        "suggested_params": {"new_timeout_seconds": 120},
+        "failure_type": FailureType.RUNNER_TIMEOUT.value,
+        "confidence": 0.8,
+    }
 
-    first = adapter.record_introspection_lesson(
-        task,
-        suggested_params={"new_timeout_seconds": 120},
-        failure_type=FailureType.RUNNER_TIMEOUT.value,
-        attempts=1,
-        confidence=0.8,
-    )
-    second = adapter.record_introspection_lesson(
-        task,
-        suggested_params={"new_timeout_seconds": 120},
-        failure_type=FailureType.RUNNER_TIMEOUT.value,
-        attempts=2,
-        confidence=0.8,
-    )
+    first = adapter.record_introspection_lesson(task, attempts=1, **kwargs)
+    retry = adapter.record_introspection_lesson(task, attempts=2, **kwargs)
+    second = adapter.record_introspection_lesson(sibling, attempts=1, **kwargs)
 
-    assert first.candidate_id == second.candidate_id
+    assert first.candidate_id == retry.candidate_id == second.candidate_id
+    assert retry.occurrence_count == 1
     assert second.occurrence_count == 2
 
 

@@ -48,6 +48,11 @@ from agent_py_agent.agent.gateway_parts.http_handlers import _public_result
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_worker import _finish_claimed_gateway_request
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.model_profiles import (
+    execute_model_profile_operation,
+    model_profiles_path,
+    read_model_profiles,
+)
 from agent_py_agent.cli.chat_parts import tui_runtime
 from agent_py_agent.tests.test_gateway_safe_restart import _agent as _echo_agent
 
@@ -294,16 +299,26 @@ class _ShutdownWire:
         return _reply(payload, "SR-DONE 续跑完成。", None, seq)
 
 
+# 假线模型在 owner 目录里的固定档案编号（目录只收 UUID）；重建 agent 时据此判断目录已登记。
+_SR_PROFILE_ID = "5e0c1b1e-0000-4000-8000-00000000a5c1"
+
+
 def _real_agent(tmp_path, *, plugin_events_enabled: bool = False) -> SimpleAgent:
-    return SimpleAgent(AgentConfig(
-        model_backend="openai_compatible", api_base="http://127.0.0.1:9/v1", model_name="sr-scripted",
-        api_key="sr-fake-key-not-a-credential", stream_enabled=False, model_context_window_tokens=200_000,
-        enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
+    agent = SimpleAgent(AgentConfig(
+        stream_enabled=False, enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
         gateway_workspace="gateway", orphan_supervision_interval_seconds=0, memory_curator_enabled=False,
         enable_self_learning=False,
         # B5×B7：总开关关着时装配点不接收紧征询；本 helper 默认关，需要征询的用例显式打开。
         plugin_events_enabled=plugin_events_enabled,
     ), tmp_path / "root")
+    # e905 起模型连接只来自 owner 的 v6 目录：登记并选中同一假线模型（http.post_json 由各用例替换，不联网）。
+    #   同一 Home 重建的继任 agent 读到同一目录选择，重启恢复链用的仍是这台假模型。
+    if _SR_PROFILE_ID not in read_model_profiles(model_profiles_path(agent.home_paths))["profiles"]:
+        execute_model_profile_operation(agent, "add", {"profile_id": _SR_PROFILE_ID, "profile": {
+            "model_backend": "openai_compatible", "api_base": "http://127.0.0.1:9/v1", "model_name": "sr-scripted",
+            "api_key": "sr-fake-key-not-a-credential", "model_context_window_tokens": 200_000}})
+        execute_model_profile_operation(agent, "set_default", {"profile_id": _SR_PROFILE_ID})
+    return agent
 
 
 def test_real_chain_refused_turn_resumes_after_restart(tmp_path, monkeypatch):

@@ -67,7 +67,8 @@ def test_model_facing_texts_no_longer_name_the_deleted_keys():
     config = CatalogRenderConfig(mode="compact", offset=0, limit=80, categories=[], include_examples=False,
                                  entry_max_chars=700, show_truncated_notice=True, detail_max_chars=4_000)
     notice = _catalog_page_notice(config, total=90, returned=80)
-    assert "list_tools" in notice and "tool_catalog_" not in notice
+    # 目录分页入口已由 list_tools 收口到 tool_search(action=catalog)（7101c9fa2）。
+    assert "tool_search(action=catalog)" in notice and "list_tools" not in notice and "tool_catalog_" not in notice
     spec = ToolModelSpec(name="demo", description="很长的说明" * 200, input_schema={"type": "object", "properties": {}})
     rendered = [spec.render_catalog_entry(max_chars=40), spec.render_recommended_entry(max_chars=40),
                 spec.render_detail_entry(max_chars=40)]

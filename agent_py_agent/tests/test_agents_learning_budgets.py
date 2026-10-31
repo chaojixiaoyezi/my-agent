@@ -3,8 +3,8 @@ from __future__ import annotations
 """B 路第 3 步：三层预算的行为测试（写入硬上限、注入子预算、索引上限）。
 
 覆盖：
-- 学习库写入硬帽（设计 §3.5.1）：写入后超帽且非净缩减 → 结构化拒绝、文件不变；
-  已超帽文件允许受控净缩减；promotion 把拒绝转成结构化结果码。
+- 学习库写入（788f9b847 起硬帽退役为热工作集预算）：超 20k 的增长不拒写、事实完整、
+  热层仍守预算；已超帽旧文件继续增长与净缩减均放行；promotion 越过旧帽照常晋升。
 - 工作约定注入子预算（设计 §3.5.2）：子预算截断约定条目、不挤占其它长期记忆、总预算仍生效。
 - 可重建导航投影上限（设计 §3.5.3）：行数/字节双帽、最近更新优先、省略标注、lesson 正文不受影响。
 """
@@ -12,8 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-
-import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_support import (
     _FORMAL_MEMORY_BUDGET_CHARS,
@@ -32,7 +30,6 @@ from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.memory_store.jsonl import (
     MEMORY_LIBRARY_WRITE_CAP_CHARS,
     JsonlMemory,
-    MemoryLibraryWriteCapExceeded,
     MemoryRecord,
 )
 from agent_py_agent.agent.memory_store.lessons import (
@@ -82,34 +79,32 @@ def _raw_long_term_line(entry_id: str, content: str) -> str:
     ) + "\n"
 
 
-def test_long_term_write_cap_rejects_growth_and_keeps_file(tmp_path):
+# LLM: 旧20k硬帽已退役为热工作集预算；越帽增长必须写入且不遗忘，超出部分只下沉冷层。
+# 函数用途: 验证越过旧帽的增长不再结构化拒绝，两条事实完整且热层不超预算。
+def test_long_term_write_cap_accepts_growth_and_keeps_active_budget(tmp_path):
     memory = _memory(tmp_path)
     memory.add_record(MemoryRecord(role="user", content="甲" * 19000, kind="fact"))
+    memory.add_record(MemoryRecord(role="user", content="乙" * 2000, kind="fact"))
 
-    with pytest.raises(MemoryLibraryWriteCapExceeded) as excinfo:
-        memory.add_record(MemoryRecord(role="user", content="乙" * 2000, kind="fact"))
-
-    assert excinfo.value.code == "MEMORY_LIBRARY_WRITE_CAP_EXCEEDED"
-    assert excinfo.value.cap_chars == MEMORY_LIBRARY_WRITE_CAP_CHARS
-    assert excinfo.value.before_chars == 19000
-    assert excinfo.value.after_chars == 21000
-    # 拒绝发生在写文件之前：仓库仍只有第一条。
-    assert [record.content for record in memory.all()] == ["甲" * 19000]
+    assert sorted(record.content for record in memory.all()) == ["乙" * 2000, "甲" * 19000]
+    assert sum(len(record.content) for record in memory.active_records()) <= MEMORY_LIBRARY_WRITE_CAP_CHARS
 
 
-def test_long_term_write_cap_allows_net_shrink_on_already_over_cap_file(tmp_path):
+# LLM: 存量旧文件可能已超20k；新合同下增长与净缩减都经正式写链，不能再以帽拒绝清理前的写入。
+# 函数用途: 验证已超旧帽文件继续增长放行且净缩减只删目标条目。
+def test_long_term_write_cap_allows_growth_and_net_shrink_on_already_over_cap_file(tmp_path):
     path = tmp_path / "memory" / "long_term" / "memory.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_raw_long_term_line("memory-over", "丙" * 21000), encoding="utf-8")
     memory = _memory(tmp_path)
 
-    # 已超帽文件上继续增长：拒绝。
-    with pytest.raises(MemoryLibraryWriteCapExceeded):
-        memory.add_record(MemoryRecord(role="user", content="丁" * 100, kind="fact"))
+    # 已超帽旧文件上继续增长：不再拒写。
+    added = memory.add_record(MemoryRecord(role="user", content="丁" * 100, kind="fact"))
+    assert {record.entry_id for record in memory.all()} == {"memory-over", added.entry_id}
 
-    # 受控净缩减放行（清理才能进行）。
+    # 受控净缩减仍放行，只删除目标条目。
     memory.remove("memory-over")
-    assert memory.all() == []
+    assert [record.entry_id for record in memory.all()] == [added.entry_id]
 
 
 def _budget_service(tmp_path):
@@ -152,7 +147,9 @@ def _budget_service(tmp_path):
     return conversations, thread, service
 
 
-def test_promotion_returns_structured_cap_code(tmp_path):
+# LLM: 晋升不再因旧20k硬帽保留候选；越帽事实正式写入，原填充条目不被遗忘。
+# 函数用途: 验证越过旧帽的promotion照常晋升且两条正式记忆均保留。
+def test_promotion_past_legacy_cap_promotes_without_cap_code(tmp_path):
     conversations, thread, service = _budget_service(tmp_path)
     content = "约定：先读任务文件全文再动手。" + "补" * 1900
     message = conversations.messages.append(
@@ -183,11 +180,12 @@ def test_promotion_returns_structured_cap_code(tmp_path):
 
     result = confirm_candidate(service, candidate.candidate_id)
 
-    assert result.promoted is False
-    assert result.reason_code == "MEMORY_LIBRARY_WRITE_CAP_EXCEEDED"
-    # 候选保持原状态、不丢弃；仓库没有被写入第二条。
-    assert service.candidates.get(candidate.candidate_id).status == "approved"
-    assert [record.entry_id for record in service.long_term.all()] == ["memory-filler"]
+    assert result.promoted is True and result.formal_memory_changed is True
+    assert result.reason_code == "PROMOTED"
+    assert service.candidates.get(candidate.candidate_id).status == "promoted"
+    entry_ids = [record.entry_id for record in service.long_term.all()]
+    assert entry_ids[0] == "memory-filler" and len(entry_ids) == 2
+    assert result.promotion_ref.endswith("#" + entry_ids[1])
 
 
 # ---------------------------------------------------------------- 层 2：注入子预算

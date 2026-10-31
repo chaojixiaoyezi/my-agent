@@ -5,6 +5,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.settings import AgentConfig
@@ -88,6 +89,8 @@ def test_saved_run_creates_home_task_workspace(tmp_path: Path):
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    # 有 Home 时目录未选模型即未配置；离线 echo 后端须构造后显式注入，才在所选模型作用域里保留。
+    agent.backend = get_backend("echo", cfg)
 
     agent.run("做一个示例网站", request_id="req-1", run_id="run-1", task_id="示例网站 E2E")
 
@@ -121,6 +124,7 @@ def test_saved_run_uses_opaque_identity_when_only_machine_ids_are_available(tmp_
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     agent.run("分析多个项目源码并写一份中文报告", request_id="gw-123", run_id="run-456")
 
@@ -146,6 +150,7 @@ def test_same_prompt_new_run_keeps_independent_identity_and_timeline(tmp_path: P
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     prompt = "分析 all-agent 项目并写中文报告"
     agent.run(prompt, request_id="req-one", run_id="run-one")
@@ -180,6 +185,7 @@ def test_same_task_resume_keeps_canonical_run_and_refreshes_request_without_losi
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     prompt = "持续维护同一个项目"
     agent.run(prompt, request_id="req-one", run_id="run-one", task_id="goal-one")
@@ -241,6 +247,7 @@ def test_workspace_identity_does_not_reuse_old_state_json(tmp_path: Path):
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     agent.run("分析 all-agent 项目并写中文报告", request_id="req-one", run_id="run-one")
 
@@ -260,6 +267,7 @@ def test_long_project_prompt_labels_archive_without_selecting_its_path(tmp_path:
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     prompt = (
         f"认真阅读 {tmp_path / 'references' / 'all-agent'} 下面的项目，"
@@ -305,6 +313,8 @@ def test_two_provider_owners_write_separate_task_workspaces(tmp_path: Path):
         repo,
     )
 
+    for agent in (feishu, wechat):
+        agent.backend = get_backend("echo", agent.config)
     feishu.run("整理飞书任务", request_id="req-f", run_id="run-f", task_id="任务A")
     wechat.run("整理微信任务", request_id="req-w", run_id="run-w", task_id="任务A")
 
@@ -325,6 +335,7 @@ def test_saved_run_writes_main_context_bundle_v1(tmp_path: Path):
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     result = agent.run(
         "做一个示例网站", request_id="req-ctx", run_id="run-ctx", task_id="主代理任务"
@@ -377,6 +388,7 @@ def test_no_save_run_keeps_main_context_bundle_ephemeral(tmp_path: Path):
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     result = agent.run(
         "临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断"
@@ -398,6 +410,7 @@ def test_task_local_run_does_not_inject_main_context_bundle(tmp_path: Path):
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     result = agent.run(
         "隔离任务",
@@ -421,6 +434,7 @@ def test_no_save_run_does_not_create_task_workspace_or_daily_memory(tmp_path: Pa
         my_agent_home=str(home), memory_path="memory.jsonl", prompt_files=[]
     )
     agent = SimpleAgent(cfg, repo)
+    agent.backend = get_backend("echo", cfg)
 
     agent.run("临时诊断", save=False, request_id="req-nosave", run_id="run-nosave", task_id="诊断")
 

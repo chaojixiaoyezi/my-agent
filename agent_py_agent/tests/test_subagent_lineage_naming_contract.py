@@ -31,7 +31,7 @@ def test_top_level_items_get_fixed_lineage_names(tmp_path):
 
     agent = _create_agent(tmp_path)
     payload = json.loads(CreateSubagentsTool(agent).execute({
-        "goal": "并行编写并测试首页",
+        "batch_summary": "并行编写并测试首页",
         "items": [
             {"goal": "写首页", "role": "worker"},
             {"goal": "测试首页", "role": "tester"},
@@ -50,7 +50,7 @@ def test_later_top_level_batch_continues_sibling_ordinals(tmp_path):
     first = json.loads(
         tool.execute(
             {
-                "goal": "先完成核心模块",
+                "batch_summary": "先完成核心模块",
                 "items": [
                     {"goal": "写核心", "role": "worker"},
                     {"goal": "测核心", "role": "tester"},
@@ -61,7 +61,7 @@ def test_later_top_level_batch_continues_sibling_ordinals(tmp_path):
     second = json.loads(
         tool.execute(
             {
-                "goal": "再完成界面模块",
+                "batch_summary": "再完成界面模块",
                 "items": [
                     {"goal": "写界面", "role": "worker"},
                     {"goal": "测界面", "role": "tester"},
@@ -85,8 +85,8 @@ def test_later_single_children_share_the_batch_sibling_ordinal(tmp_path):
 
     agent = _create_agent(tmp_path)
     tool = CreateSubagentsTool(agent)
-    first = json.loads(tool.execute({"goal": "补齐第一个缺口"}).output)
-    second = json.loads(tool.execute({"goal": "补齐第二个缺口"}).output)
+    first = json.loads(tool.execute({"items": [{"goal": "补齐第一个缺口"}]}).output)
+    second = json.loads(tool.execute({"items": [{"goal": "补齐第二个缺口"}]}).output)
 
     run_ids = [*first["created_run_ids"], *second["created_run_ids"]]
     names = [agent.subagents.load(run_id).agent_name for run_id in run_ids]
@@ -101,7 +101,7 @@ def test_one_item_later_batch_keeps_the_shared_sibling_ordinal(tmp_path):
     first = json.loads(
         tool.execute(
             {
-                "goal": "先做两个模块",
+                "batch_summary": "先做两个模块",
                 "items": [
                     {"goal": "写核心", "role": "worker"},
                     {"goal": "写界面", "role": "worker"},
@@ -112,7 +112,7 @@ def test_one_item_later_batch_keeps_the_shared_sibling_ordinal(tmp_path):
     second = json.loads(
         tool.execute(
             {
-                "goal": "返工一个模块",
+                "batch_summary": "返工一个模块",
                 "items": [{"goal": "补齐界面", "role": "worker"}],
             }
         ).output
@@ -134,7 +134,7 @@ def test_one_item_batch_preserves_an_explicit_display_name(tmp_path):
     payload = json.loads(
         CreateSubagentsTool(agent).execute(
             {
-                "goal": "补齐界面",
+                "batch_summary": "补齐界面",
                 "items": [
                     {
                         "goal": "补齐界面",

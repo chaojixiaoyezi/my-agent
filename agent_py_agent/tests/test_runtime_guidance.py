@@ -46,7 +46,7 @@ from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     _native_provider_messages,
 )
-from agent_py_agent.agent.backends import ModelResponse, ProviderResponseError
+from agent_py_agent.agent.backends import ModelResponse, ProviderResponseError, get_backend
 from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
 from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
@@ -383,6 +383,8 @@ def test_two_real_agent_runs_do_not_cross_prompt_task_or_workspace(tmp_path, mon
         ),
         tmp_path / "repo",
     )
+    # 有 Home 时目录未选模型即未配置；构造后显式注入的 echo 后端才在 run 的模型作用域里保留。
+    agent.backend = get_backend("echo", agent.config)
     barrier = threading.Barrier(2)
     observed: dict[str, tuple[str, str, str, str]] = {}
     failures: list[BaseException] = []

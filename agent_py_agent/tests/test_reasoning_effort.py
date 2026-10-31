@@ -447,5 +447,6 @@ def test_orchestration_native_schema_has_all_eight_levels():
     )
 
     expected = ["auto", "off", "low", "medium", "high", "xhigh", "max", "ultra"]
-    assert _CREATE_PARAMETER_SCHEMA["effort"]["enum"] == expected
+    # items-only 合同（7101c9fa2）：顶层不再有派工字段，effort 只在每个 item 内。
+    assert "effort" not in _CREATE_PARAMETER_SCHEMA
     assert _CREATE_PARAMETER_SCHEMA["items"]["items"]["properties"]["effort"]["enum"] == expected

@@ -38,9 +38,11 @@ def test_explicit_coordinator_product_delivery_uses_output_files_without_extra_w
     tool = CreateSubagentsTool(mock_agent)
     result = tool.execute(
         {
-            "goal": "交付示例网站。",
-            "output_files": ["build/index.html", "build/style.css", "build/app.js"],
-            "role": "coordinator",
+            "items": [{
+                "goal": "交付示例网站。",
+                "output_files": ["build/index.html", "build/style.css", "build/app.js"],
+                "role": "coordinator",
+            }],
         }
     )
 

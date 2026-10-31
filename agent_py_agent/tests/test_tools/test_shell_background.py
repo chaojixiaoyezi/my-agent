@@ -24,6 +24,7 @@ from agent_py_agent.agent.tooling.process_registry import (
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
+    ShellToolOptions,
     _wants_background,
 )
 from agent_py_agent.agent.tooling.shell_syntax import contains_unmanaged_background_operator
@@ -31,6 +32,12 @@ from agent_py_agent.tests._tool_runtime_harness import (
     canonical_test_call,
     runtime_snapshot_for_tools,
 )
+
+
+# LLM: 5c029e4fb 起托管后台启动只认宿主给出的可信 owner home，不从 cwd 补造；后台用例按宿主装配传入 owner 根。
+# 函数用途: 建一个带 owner 根的 ShellTool，让后台启动走与宿主相同的准入。
+def _owned_shell(tmp_path: Path) -> ShellTool:
+    return ShellTool(tmp_path, options=ShellToolOptions(owner_scope_root=str(tmp_path)))
 
 
 def _background_policy_decision(tmp_path: Path, command: str, *, approval_mode: str = "ask"):
@@ -76,7 +83,7 @@ def test_managed_background_still_rejects_destructive_command(tmp_path):
 
 
 def test_background_start_returns_session_handle_and_output_file(tmp_path):
-    res = ShellTool(tmp_path).execute(
+    res = _owned_shell(tmp_path).execute(
         {"command": "echo started; sleep 1; echo done", "run_in_background": True}
     )
     assert res.ok
@@ -101,7 +108,7 @@ def test_background_does_not_block(tmp_path):
     子进程跑 15 秒（非纯 sleep，避免被 wait 引导拦），用例结束时经登记表杀掉。
     """
     process_registry.clear()
-    res = ShellTool(tmp_path).execute(
+    res = _owned_shell(tmp_path).execute(
         {"command": 'python3 -c "import time; time.sleep(15); print(1)"', "run_in_background": True}
     )
     assert res.ok, res.output
@@ -117,7 +124,7 @@ def test_background_does_not_block(tmp_path):
 
 
 def test_background_immediate_success_returns_terminal_result(tmp_path):
-    res = ShellTool(tmp_path).execute(
+    res = _owned_shell(tmp_path).execute(
         {"command": "printf immediate-ok", "run_in_background": True}
     )
 
@@ -130,7 +137,7 @@ def test_background_immediate_success_returns_terminal_result(tmp_path):
 
 
 def test_background_immediate_failure_is_not_reported_started(tmp_path):
-    res = ShellTool(tmp_path).execute(
+    res = _owned_shell(tmp_path).execute(
         {
             "command": 'python3 -c "import sys; print(\'startup-boom\'); sys.exit(23)"',
             "run_in_background": True,
@@ -147,7 +154,7 @@ def test_background_immediate_failure_is_not_reported_started(tmp_path):
 
 
 def test_background_records_registry(tmp_path):
-    ShellTool(tmp_path).execute({"command": "echo hi", "run_in_background": True})
+    _owned_shell(tmp_path).execute({"command": "echo hi", "run_in_background": True})
     registry = tmp_path / ".background_jobs" / "registry.jsonl"
     assert registry.exists()
     row = json.loads(registry.read_text(encoding="utf-8").splitlines()[0])
@@ -253,7 +260,7 @@ def test_fd_redirect_remains_valid_in_foreground(tmp_path):
 
 def test_structured_background_process_remains_managed_after_execute_returns(tmp_path):
     process_registry.clear()
-    res = ShellTool(tmp_path).execute(
+    res = _owned_shell(tmp_path).execute(
         {
             "command": 'python3 -c "import time; time.sleep(10)"',
             "run_in_background": True,
