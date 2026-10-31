@@ -281,7 +281,7 @@ def test_scan_budget_keeps_existing_multiplier_on_fresh_and_resumed_scans(tmp_pa
         assert result['errors'] == result['compacted'] == 0
 
 
-# 模拟新进程：关闭并丢弃进程内活迭代器与内存游标，只剩父目录游标文件。
+# 模拟新进程：关闭并丢弃进程内活迭代器、内存游标、最近维护与等待记录，只剩父目录游标文件。
 def _fresh_process():
     live = getattr(maintenance, '_live_scans', {})
     with maintenance._scan_cursor_lock:
@@ -289,6 +289,8 @@ def _fresh_process():
             scans.close()
         live.clear()
         maintenance._scan_cursors.clear()
+        getattr(maintenance, '_scan_recent', {}).clear()
+        getattr(maintenance, '_scan_waiting', set()).clear()
 
 
 def _young_archives(root, count, now):
@@ -552,3 +554,62 @@ def test_out_of_range_persisted_cursor_offset_is_treated_as_damaged(tmp_path, of
     result = maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)
     assert result["scanned"] == result["skipped"] == 64 and result["errors"] == 0
     assert json.loads(cursor.read_text())[operation] == [info.st_dev, info.st_ino, 64]
+
+
+# LLM: 同进程续扫异常丢失活迭代器后，128个非占用新键经内存游标LRU挤掉其偏移；该键仍在最近维护记录内，
+#   回来须从头开新一轮，不得按持久游标重放192项前缀（持久游标只服务新进程或闲置清退后）。
+# 函数用途: 回归R7-ARCH-01，同进程I/O恢复叠加游标LRU淘汰时不重放持久前缀。
+def test_known_root_restarts_without_persisted_replay_after_cursor_eviction(tmp_path, _r7_observed, monkeypatch):
+    calls, _ = _r7_observed
+    root = _r7_filler_root(tmp_path / "recovering" / "display_archives", 320)
+    info = root.stat()
+    operation = "compact_display_archives.<locals>.action"
+    key = (info.st_dev, info.st_ino, operation)
+    for _ in range(3):
+        calls.append(0)
+        assert maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)["errors"] == 0
+    assert calls == [64] * 3 and maintenance._scan_cursors[key] == 192
+    original = maintenance._scan_entries
+
+    def broken(*args):
+        monkeypatch.setattr(maintenance, "_scan_entries", original)
+        raise OSError("scan failed")
+
+    monkeypatch.setattr(maintenance, "_scan_entries", broken)
+    calls.append(0)
+    assert maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)["errors"] == 1
+    for index in range(128):
+        other = _r7_filler_root(tmp_path / str(index) / "display_archives", 1)
+        calls.append(0)
+        assert maintenance.compact_display_archives(other, now=_R7_NOW, max_archives=1)["errors"] == 0
+    assert key in maintenance._scan_recent and key not in maintenance._scan_cursors and key not in maintenance._live_scans
+    assert json.loads((tmp_path / "recovering" / maintenance._CURSOR_FILE).read_text())[operation][2] == 192
+    calls.append(0)
+    assert maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)["errors"] == 0
+    assert calls[-1] == 64 and maintenance._scan_cursors[key] == 64
+
+
+# LLM: 128个占位根维护一次后停止，新根持续到来（每轮两个只维护一次的空目录）；闲置窗口至多256次调用，一次性新键不能把阈值无限推远：
+#   停止的占位者终被清退，常维护的根取得名额扫完整轮；最近记录有界，空目录头一窗即走完不滞留等待。
+# 函数用途: 回归R7-ARCH-02闲置阈值随新键自我放宽导致名额被停止维护的根永久占用。
+def test_stopped_holders_are_released_while_one_shot_roots_keep_arriving(tmp_path, _r7_observed):
+    calls, seen = _r7_observed
+    holders = [_r7_filler_root(tmp_path / f"holder-{index}" / "display_archives", 65) for index in range(128)]
+    for root in holders:
+        calls.append(0)
+        assert maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)["errors"] == 0
+    victim = _r7_filler_root(tmp_path / "victim" / "display_archives", 100)
+    calls.append(0)
+    assert maintenance.compact_display_archives(victim, now=_R7_NOW, max_archives=1)["errors"] == 0
+    assert len(maintenance._live_scans) == 128 and len(maintenance._scan_waiting) == 1
+    for step in range(200):
+        for index in range(2):
+            transient = _r7_filler_root(tmp_path / f"transient-{step}-{index}" / "display_archives", 0)
+            calls.append(0)
+            assert maintenance.compact_display_archives(transient, now=_R7_NOW, max_archives=1)["errors"] == 0
+        calls.append(0)
+        assert maintenance.compact_display_archives(victim, now=_R7_NOW, max_archives=1)["errors"] == 0
+        assert len(maintenance._scan_recent) <= 257 and len(maintenance._scan_waiting) <= 1
+    holder_inodes = {root.stat().st_ino for root in holders}
+    assert len(seen[victim.stat().st_ino]) == 100 and max(calls) == 64
+    assert not [key for key in maintenance._live_scans if key[1] in holder_inodes]

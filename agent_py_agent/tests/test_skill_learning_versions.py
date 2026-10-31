@@ -1,4 +1,6 @@
+import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +28,14 @@ def _update(ctx, run='run-2', body=BODY+'\n额外核对行数。'):
     ctx.backend.responses.append(_output('update',update_target=NAME,body=body))
     ctx.service.enqueue_from_finalize(_ctx(run,archive_tool_calls=used))
     return ctx.service.run_pending()
+
+
+# LLM: owner配额小快照带10ms墙钟额度；固定配额模块的单调钟，让真实准入只由128项额度决定，不随机器负载抖动。
+# 函数用途: 为本文件所有真实配额准入固定小快照时钟。
+@pytest.fixture(autouse=True)
+def _pinned_quota_snapshot_clock(monkeypatch):
+    from agent_py_agent.agent.user_space import owner_quota
+    monkeypatch.setattr(owner_quota, "time", SimpleNamespace(**{**vars(time), "monotonic": lambda: 100.0}))
 
 
 def test_update_after_revert_rejects_stale_summary_and_preserves_history(tmp_path):

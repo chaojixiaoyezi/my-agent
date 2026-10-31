@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +26,14 @@ from agent_py_agent.agent.capability.skill_learning_publish import (
     SkillLearningGateError,
 )
 from agent_py_agent.tests.test_skill_learning import BODY, NAME, _ctx, _output, _runtime
+
+
+# LLM: owner配额小快照带10ms墙钟额度；固定配额模块的单调钟，让真实准入只由128项额度决定，不随机器负载抖动。
+# 函数用途: 为本文件所有真实配额准入固定小快照时钟。
+@pytest.fixture(autouse=True)
+def _pinned_quota_snapshot_clock(monkeypatch):
+    from agent_py_agent.agent.user_space import owner_quota
+    monkeypatch.setattr(owner_quota, "time", SimpleNamespace(**{**vars(time), "monotonic": lambda: 100.0}))
 
 
 def test_real_service_drafts_only_and_requires_exact_user_confirmation(tmp_path):
@@ -917,6 +926,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from agent_py_agent.agent.capability import skill_learning_proposals as proposals
 from agent_py_agent.agent.common.json_io import locked_json_path
 from agent_py_agent.agent.user_space import owner_quota
@@ -924,6 +934,7 @@ from agent_py_agent.tests.test_skill_learning import _runtime
 from agent_py_agent.tests.test_skill_learning_confirmation import _draft
 root, role, operation, identifier = json.loads(sys.argv[1])
 root = Path(root)
+owner_quota.time = SimpleNamespace(**{**vars(time), 'monotonic': lambda: 100.0})
 store = _runtime(root).store
 ready, waiting = root / 'holder-ready', root / 'writer-waiting'
 if role == 'holder':

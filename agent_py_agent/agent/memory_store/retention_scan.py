@@ -483,15 +483,20 @@ def _symlink_error(path: Path) -> MemoryRetentionError:
 def _load_policy(
     path: Path,
 ) -> tuple[MemoryRetentionPolicy | None, MemoryRetentionError | None]:
-    report = read_json_object_report(path, context="memory_retention.policy")
-    if report.load_error is not None:
-        return None, MemoryRetentionError(
-            "MEMORY_RETENTION_POLICY_UNREADABLE",
-            str(path),
-            str(report.load_error.get("error_type") or "unreadable JSON"),
-        )
+    # 只读一次原始字节并交引用快照绑定，解析的正是被比对的字节；缺失/坏JSON/非对象分类同read_json_object_report。
     try:
-        return MemoryRetentionPolicy.from_payload(report.payload), None
+        body = path.read_bytes() if path.exists() else None
+    except OSError as exc:
+        return None, MemoryRetentionError("MEMORY_RETENTION_POLICY_UNREADABLE", str(path), type(exc).__name__)
+    reference_pins.record_parsed_pin_bytes(path, body)
+    try:
+        payload = json.loads(body.decode("utf-8")) if body is not None else {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"JSON root is {type(payload).__name__}, expected object")
+    except ValueError as exc:
+        return None, MemoryRetentionError("MEMORY_RETENTION_POLICY_UNREADABLE", str(path), type(exc).__name__)
+    try:
+        return MemoryRetentionPolicy.from_payload(payload), None
     except (TypeError, ValueError) as exc:
         return None, MemoryRetentionError(
             "MEMORY_RETENTION_POLICY_INVALID",
@@ -1657,26 +1662,15 @@ class _PinReadChanged(OSError):
     pass
 
 
-# LLM: 借用真实二进制源，仅对解析已读取的字节做切片摘要；不额外读文件，不把读前完成当作读后完成。
-# 类用途: 比对JSON解析流和完整预验基线，抓住预验后或读中的粗时钟改写。
+# LLM: 借用真实二进制源，仅对解析已读取的字节做摘要；不额外读文件，不把读前完成当作读后完成。
+# 类用途: 比对JSON解析流和读前观察（小文件整份、大文件切片），抓住预验后或读中的粗时钟改写。
 class _PinDigestReader(io.RawIOBase):
-    # LLM: 基线来自该路径同代完整预验，解析开始即清空post进度，外层拥有原reader的关闭责任。
+    # LLM: 绑定来自该路径读前观察，post进度由解析后recheck作废，外层拥有原reader的关闭责任。
     # 函数用途: 准备不持有正文副本的流式摘要器。
-    def __init__(self, path, raw, state):
+    def __init__(self, path, raw, binding):
         super().__init__()
-        self.path, self.raw, self.state = path, raw, state
-        self.baseline = state["baseline"]
-        budget = state["budget"]
-        tail = min(reference_pins._PIN_SOURCE_CHUNK_BYTES, budget, max(1, budget // 4))
-        self.slice_size = max(1, budget - tail)
-        self.body_size = max(0, state["stamp"][3] - tail)
-        self.position, self.slices = 0, []
-        self.body_hash = hashlib.blake2b(digest_size=16)
-        self.tail_hash = hashlib.blake2b(digest_size=16)
+        self.path, self.raw, self.binding = path, raw, binding
         self.verified = False
-        state["cycle_verified"] = set()
-        state["next_slice"] = 0
-        state["post_scope"] = None
 
     # LLM: 只读包装器，不改变FD身份。
     # 函数用途: 告知缓冲包装器可以读取。
@@ -1688,7 +1682,7 @@ class _PinDigestReader(io.RawIOBase):
     def fileno(self):
         return self.raw.fileno()
 
-    # LLM: 每次只消费包装器请求的实际字节，跨片处拆摘要，EOF必须与预验全片/尾部一致。
+    # LLM: 每次只消费包装器请求的实际字节交绑定摘要，EOF必须与读前观察一致。
     # 函数用途: 在正常解析读取中流式校验，不另开来源或重复读取正文。
     def readinto(self, buffer):
         raw = self.raw.read1(len(buffer))
@@ -1696,31 +1690,15 @@ class _PinDigestReader(io.RawIOBase):
             self.verify()
             return 0
         buffer[:len(raw)] = raw
-        offset = 0
-        while offset < len(raw):
-            if self.position < self.body_size:
-                boundary = min(self.body_size, (self.position // self.slice_size + 1) * self.slice_size)
-                count = min(len(raw) - offset, boundary - self.position)
-                self.body_hash.update(raw[offset:offset + count])
-                self.position += count
-                if self.position == boundary:
-                    self.slices.append(self.body_hash.digest())
-                    self.body_hash = hashlib.blake2b(digest_size=16)
-            else:
-                count = len(raw) - offset
-                self.tail_hash.update(raw[offset:])
-                self.position += count
-            offset += count
+        self.binding.update(raw)
         return len(raw)
 
-    # LLM: 只有真实EOF及全部切片相等才接受解析流，变化清掉全局切片状态并走原有有界竞态重试。
+    # LLM: 只有真实EOF及长度、整份摘要或全部切片相等才接受解析流，变化清掉切片状态并走原有有界竞态重试。
     # 函数用途: 禁止旧解析结果与新来源摘要配对。
     def verify(self):
         if self.verified:
             return
-        if (self.position != self.state["stamp"][3]
-                or (tuple(self.slices), self.tail_hash.digest()) != self.baseline):
-            reference_pins._RESUMABLE_DIGESTS.pop(self.path, None)
+        if not self.binding.matches():
             raise _PinReadChanged(11, "pin source changed while reading", str(self.path))
         self.verified = True
 
@@ -1755,11 +1733,8 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
                     raise reference_pins._PartialPinVerification("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         if _file_identity(before) != _file_identity(opened):
             raise _PinReadChanged(11, "pin source changed before reading", str(path))
-        state = reference_pins._RESUMABLE_DIGESTS.get(path, {})
-        verifier = None
-        if (before.st_size > reference_pins._MAX_PIN_SOURCE_DIGEST_BYTES and state.get("baseline") is not None
-                and state["stamp"] == reference_pins._metadata_stamp(opened)):
-            verifier = _PinDigestReader(path, raw, state)
+        binding = reference_pins.ParsedPinBytes(path)
+        verifier = _PinDigestReader(path, raw, binding) if binding.bound else None
         reader = io.BufferedReader(verifier) if verifier is not None else raw
         with io.TextIOWrapper(reader, encoding="utf-8") as source:
             is_jsonl = jsonl if jsonl is not None else path.suffix == ".jsonl"
@@ -1947,7 +1922,8 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
                 cold = candidate_path.parent / candidate.cold_detail_ref.partition("#")[0]
                 watch_pin_source(cold)
                 candidate = _hydrate_candidate(candidate_path, candidate)
-                # 冷详情读取同样不经_pin_rows，由发布前复核在解析边界之后重核。
+                # 冷详情读取不经_pin_rows：按热行sha256内容寻址选版本（信封摘要由候选读取器校验），解析结果不随字节代次变化；
+                # 读后仍由发布前复核在解析边界之后重核。
                 reference_pins.recheck_pin_sources((cold,))
                 row = candidate.to_record()
             pins.collect(row, candidate_path)

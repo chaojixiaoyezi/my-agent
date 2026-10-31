@@ -308,14 +308,15 @@ def _persisted_cursor(root_path, root_info, operation, offset=None):
         os.close(parent)
 
 
-# LLM: 调用序号记录各键最近一次维护；超过活跃键数两倍次调用未再维护即视为闲置，关闭其活迭代器并丢弃内存游标，
-#   回来时按新进程语义从持久游标恢复。轮转维护的键两次调用相隔恰为活跃键数，不会被误清。
-# 函数用途: 让停止维护的目录/操作交还迭代器名额和FD；调用方须持有_scan_cursor_lock。
+# LLM: 调用序号记录各键最近一次维护；超过活跃键数两倍（至多256）次调用未再维护即视为闲置，关闭其活迭代器并丢弃内存游标与等待，
+#   回来时按新进程语义从持久游标恢复。窗口封顶使一次性新键不能把阈值无限推远、让停止维护的占用者永久占槽；
+#   轮转维护不超过256个键时两次调用相隔不足窗口，不会被误清。
+# 函数用途: 让停止维护的目录/操作交还迭代器名额和FD，返回该键此前是否仍是本进程活跃键；调用方须持有_scan_cursor_lock。
 def _forget_idle_scans(key):
     sequence = next(_scan_calls)
-    _scan_recent.pop(key, None)
+    known = _scan_recent.pop(key, None) is not None
     _scan_recent[key] = sequence
-    oldest = sequence - 2 * len(_scan_recent)
+    oldest = sequence - 2 * min(len(_scan_recent), 128)
     while next(iter(_scan_recent.values())) < oldest:
         idle, _ = _scan_recent.popitem(last=False)
         _scan_cursors.pop(idle, None)
@@ -323,11 +324,13 @@ def _forget_idle_scans(key):
         dropped = _live_scans.pop(idle, None)
         if dropped is not None:
             dropped[0].close()
+    return known
 
 
 # LLM: 原根flock保护同目录维护；游标按真实根inode及操作隔离，同进程保留活迭代器续读，每个枚举项都计入预算，回绕共用同一预算。
 #   活迭代器最多128个且不因他键到来被中途淘汰；名额满时新键只从目录头查一个预算窗口、不推进游标，占用者走到目录尾时若有人等待即让出。
-#   同进程丢失活迭代器（异常或名额竞争）从头开新一轮不重放；仅本进程首次或闲置清退后按持久游标一次性重放前缀（跨进程无seekdir的代价）。
+#   同进程丢失活迭代器（异常、名额竞争或内存游标LRU淘汰）从头开新一轮不重放；仅本进程首次或闲置清退后按持久游标一次性重放前缀（跨进程无seekdir的代价）。
+#   等待键的目录头一窗走到目录尾即已完整查过一轮，退出等待，不再令占用者让出。
 # 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档，也不让续扫代价随偏移线性增长。
 def _maintain(value, maximum, action):
     result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0}
@@ -342,7 +345,7 @@ def _maintain(value, maximum, action):
             operation = action.__qualname__
             cursor_key = (int(root_info.st_dev), int(root_info.st_ino), operation)
             with _scan_cursor_lock:
-                _forget_idle_scans(cursor_key)
+                known = _forget_idle_scans(cursor_key)
                 offset = _scan_cursors.get(cursor_key)
                 live = _live_scans.pop(cursor_key, None)
                 if live is not None and live[2] != offset:
@@ -357,10 +360,13 @@ def _maintain(value, maximum, action):
                 # 名额已满：临时迭代器只查目录头一个预算窗口，不改内存或持久游标，等占用者跑完一轮让出。
                 scans, entries = _open_scan(root)
                 with scans:
-                    _scan_entries(root, entries, scan_budget, maximum, action, result)
+                    inspected, hit_limit, _ = _scan_entries(root, entries, scan_budget, maximum, action, result)
+                if inspected < scan_budget and not hit_limit:
+                    with _scan_cursor_lock:
+                        _scan_waiting.discard(cursor_key)
                 return result
             if live is None:
-                offset = 0 if offset is not None else _persisted_cursor(root_path, root_info, operation)
+                offset = 0 if offset is not None or known else _persisted_cursor(root_path, root_info, operation)
             scans, entries = live[:2] if live is not None else (None, None)
             try:
                 if scans is None:

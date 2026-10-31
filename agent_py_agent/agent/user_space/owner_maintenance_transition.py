@@ -29,7 +29,8 @@ def _state_bytes(home):
 # 函数用途: 沿原活scope逐步提交维护并最终CAS同一状态，不新增维护账或权限来源。
 # LLM: 在runtime清理等任何领域动作前核准确CAS前像的代际及epoch，不能等最终写回才拒绝坏维护头。
 # 函数用途: 先验证原状态版本，再沿原逐写门运行已有维护。
-def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None):
+def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None,
+                        quota_max_ms=None, quota_max_entries=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
         _backfill_hung_runs,
@@ -37,7 +38,9 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         _maintain_local_store_events,
         _maintenance_state_path,
         _prune_local_store_derived_records,
+        _quota_only_continuation_due,
         _reclaim_text_vector_cache_orphans,
+        _run_quota_continuation_slice,
         _tighten_archive_permissions,
         _write_maintenance_result,
         owner_maintenance_due,
@@ -74,6 +77,10 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     runtime_cleanup = _cleanup_owner_runtime(home, now=now, commit_transition=commit)
     if not owner_maintenance_due(home.owner_home_dir, now=now):
         return OwnerMaintenanceResult(False, "not_due")
+    if _quota_only_continuation_due(home.owner_home_dir, header, now):
+        return _run_quota_continuation_slice(
+            path, home, header, now, coordinator=True, commit_transition=commit,
+            runtime_cleanup=runtime_cleanup, quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
     retention = apply_owner_retention(home, now=datetime.fromtimestamp(now, timezone.utc),
         commit_transition=commit, expected_policy_fingerprint=policy)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
@@ -94,7 +101,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
                "runtime_cleanup": runtime_cleanup,
                "storage_maintenance": run_owner_storage_maintenance_slice(
                    home, json.loads(before) if before else {}, retention, now=now, coordinator=True,
-                   commit_transition=commit)}
+                   quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, commit_transition=commit)}
 
     # LLM: 外层commit已持原state锁且完成字节CAS；仍写唯一原文件，不制造已确认物理退出或新调度事实。
     # 函数用途: 用实际执行结果提交本轮原维护状态。

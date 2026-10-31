@@ -1897,3 +1897,197 @@ def test_r7_small_source_growth_probe_never_exceeds_digest_budget(tmp_path, monk
     assert bool(fired) is bool(growth)
     assert counted[0] == 4 * len(raw)
     assert counted[0] <= snapshot.contents["digest_bytes"][memory.path] <= 1_048_576
+
+
+# LLM: 解析器实际读取期间来源是等长瞬时内容B、返回前即恢复A，且冻结该inode的stat；读后复读与发布前复核只见A，须由解析字节绑定识破。
+#   ABA所在current必须失败关闭，之后无改写的current在有限轮内恢复发布并保护目标；策略A为法律保留，任何轮都不得发布。
+# 函数用途: 回归R7-PIN-ABA，永久墓碑、旧墓碑、根清单与保留策略的非流式解析均绑定实际解析字节（含>256KiB切片来源）。
+@pytest.mark.parametrize(("source", "size_kib"), [
+    ("storage-tombstones", 64), ("storage-tombstones", 600), ("legacy-tombstones", None),
+    ("manifest", None), ("policy", 64), ("policy", 600)])
+def test_r8_non_streaming_parse_aba_never_publishes_transient_bytes(tmp_path, monkeypatch, source, size_kib):
+    from agent_py_agent.agent.memory_store import reference_pins
+    from agent_py_agent.agent.memory_store.generation_manifest import (
+        MemoryGenerationStore,
+        StorageTombstones,
+    )
+    from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
+
+    reference_pins._RESUMABLE_DIGESTS.clear()
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "still-referenced.jsonl")
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    owner, name = StorageTombstones, "load"
+    if source == "storage-tombstones":
+        path, transient, payload = _r7_large_storage_tombstones(memory, target)
+        if size_kib == 64:
+            document = json.loads(transient)
+            first = next(iter(document["records"]))
+            document["records"] = {first: document["records"][first]}
+            transient = json.dumps(document, separators=(",", ":"))
+            transient += " " * (64 * 1024 - len(transient))
+            payload = transient.replace(first, "x" * len(first))
+    elif source == "legacy-tombstones":
+        memory.add("user", "fact", attributes={"source_refs": [str(target)]})
+        record = json.loads(memory.path.read_text())
+        record.update(action="remove", content="", attributes=None)
+        path = _tombstone_path(memory.path)
+        transient = json.dumps(record) + "\n"
+        payload = " " * (len(transient) - 1) + "\n"
+    elif source == "manifest":
+        memory.add("user", "fact", attributes={"source_refs": [str(target)]})
+        memory.migrate_tiers()
+        path = MemoryGenerationStore(memory.path).manifest_path
+        payload = path.read_text()
+        document = json.loads(payload)
+        assert document["segments"]
+        document["segments"] = []
+        transient = json.dumps(document)
+        transient += " " * (len(payload) - len(transient))
+        owner, name = MemoryGenerationStore, "manifest"
+    else:
+        path = Path(home.owner_retention_json)
+        transient = path.read_text()
+        transient += " " * (size_kib * 1024 - len(transient))
+        payload = transient.replace('"legal_hold": false', '"legal_hold": true ')
+        owner, name = scan, "_load_policy"
+    assert len(transient) == len(payload) and transient != payload
+    path.write_text(payload)
+    fixed = path.stat()
+    _freeze_pin_file_stat(monkeypatch, path)
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: fixed.st_ctime_ns)
+    original, fired = getattr(owner, name), []
+
+    def transient_parse(*args, **kwargs):
+        if fired:
+            return original(*args, **kwargs)
+        path.write_text(transient)
+        try:
+            fired.append(original(*args, **kwargs))
+            return fired[0]
+        finally:
+            path.write_text(payload)
+
+    monkeypatch.setattr(owner, name, transient_parse)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current([])
+    assert fired and path.read_text() == payload
+    if source == "policy":
+        assert fired[0][0].legal_hold is False
+        for _ in range(4):
+            with pytest.raises(OSError):
+                snapshot.current([])
+        return
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and pins.protects(target, [])
+
+
+# LLM: <=256KiB线程来源经_pin_rows流式解析；解析流读到等长瞬时B、EOF或关闭时即恢复A，读后复读只见A。
+# 函数用途: 回归同类ABA在小文件流式解析上的缺口，发布的pins只能来自读前已核内容A。
+@pytest.mark.parametrize("coarse", [False, True], ids=["native-stat", "coarse-stat"])
+def test_r8_small_streaming_pin_source_binds_parsed_bytes(tmp_path, monkeypatch, coarse):
+    from agent_py_agent.agent.memory_store import reference_pins
+
+    reference_pins._RESUMABLE_DIGESTS.clear()
+    home, _, _ = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin-b.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "pin-a.jsonl")
+    path = home.owner_workspace_dir / "runtime/workspaces/demo/conversations/threads/t.json"
+    payload = json.dumps({"thread_id": "t", "source_refs": [str(target)], "summary": "s" * 1000})
+    transient = payload.replace(str(target), str(control))
+    old_file(path, payload)
+    fixed = path.stat()
+    if coarse:
+        _freeze_pin_file_stat(monkeypatch, path)
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: fixed.st_ctime_ns)
+    original, fired = scan._fingerprint_source, []
+
+    # LLM: 只包装首个解析流，读到EOF、整读或关闭即恢复A，其余属性交原reader。
+    # 类用途: 让解析器读到瞬时B而读后观察只见A。
+    class RestoreAtEof:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def __getattr__(self, attribute):
+            return getattr(self.raw, attribute)
+
+        def read1(self, size=-1):
+            data = self.raw.read1(size)
+            if not data:
+                path.write_text(payload)
+            return data
+
+        def read(self, size=-1):
+            data = self.raw.read(size)
+            path.write_text(payload)
+            return data
+
+        def close(self):
+            self.raw.close()
+            path.write_text(payload)
+
+    def transient_source(source):
+        if source != path or fired:
+            return original(source)
+        path.write_text(transient)
+        fired.append(True)
+        return RestoreAtEof(original(source))
+
+    monkeypatch.setattr(scan, "_fingerprint_source", transient_source)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert fired and path.read_text() == payload
+    assert complete and pins.protects(target, []) and not pins.protects(control, [])
+
+
+# LLM: 冷详情由candidates.py候选读取器解析（不属本轮文件），按热行引用的sha256内容寻址选版本并校验信封摘要；
+#   解析期间换成等长篡改正文或重算摘要的另一版本只能失败关闭，之后恢复发布仍保护冷证据而非替换路径。
+# 函数用途: 证明冷详情经内容寻址绑定，ABA无法发布与读前内容不符的pins。
+@pytest.mark.parametrize("rehash", [False, True])
+def test_r8_cold_detail_parse_aba_is_bound_by_content_address(tmp_path, monkeypatch, rehash):
+    from agent_py_agent.agent.memory_store import reference_pins
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    reference_pins._RESUMABLE_DIGESTS.clear()
+    home, candidates, _ = runtime(tmp_path)
+    evidence = old_file(home.owner_memory_daily_dir / "cold-evidence-a.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "cold-evidence-b.jsonl")
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="已晋升的归档事实",
+        subject_key="r8.cold", scope=MemoryScope("personal", "personal"), origin="model_inferred",
+        promotion_target="lesson", evidence_refs=[{"path": str(evidence)}]))
+    candidates.transition(row.candidate_id, "approved", reviewer="test")
+    row = candidates.mark_promoted(row.candidate_id, reviewer="test", promotion_ref="memory/lessons/r8")
+    candidates.path.write_text(json.dumps(replace(row, updated_at="2020-01-01T00:00:00+00:00").to_record()) + "\n")
+    assert candidates.compact_terminal_candidates(now=NOW) == 1
+    path = next((candidates.path.parent / "candidates_archive").glob("*.jsonl"))
+    payload = path.read_text()
+    transient = payload.replace(evidence.name, control.name)
+    if rehash:
+        envelope = json.loads(transient)
+        material = {key: envelope[key] for key in ("owner_root", "candidate_id", "record")}
+        digest = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        transient = transient.replace(envelope["sha256"], digest)
+    assert len(transient) == len(payload) and transient != payload
+    fixed = path.stat()
+    _freeze_pin_file_stat(monkeypatch, path)
+    monkeypatch.setattr(reference_pins.time, "time_ns", lambda: fixed.st_ctime_ns)
+    original, fired = scan._hydrate_candidate, []
+
+    def transient_hydrate(*args):
+        if fired:
+            return original(*args)
+        path.write_text(transient)
+        fired.append(True)
+        try:
+            return original(*args)
+        finally:
+            path.write_text(payload)
+
+    monkeypatch.setattr(scan, "_hydrate_candidate", transient_hydrate)
+    snapshot = reference_pins.ReferencePinSnapshot(home, (), NOW, scan.current_retention_pins)
+    with pytest.raises(OSError, match="MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"):
+        snapshot.current([])
+    assert fired and path.read_text() == payload
+    pins, complete = _r5_finish_verification(snapshot, [])
+    assert complete and pins.protects(evidence, []) and not pins.protects(control, [])

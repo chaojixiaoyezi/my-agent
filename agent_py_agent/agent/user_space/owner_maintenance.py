@@ -126,12 +126,15 @@ class OwnerMaintenanceResult:
 
 
 # LLM: 原关闭/间隔规则优先；已提交partial沿同一maintenance.json下一拍续作，不重新等待整周期。
-# 函数用途: 判断原维护是否到期，包含有游标的未完成片。
+#   建过配额账（受有限配额准入）的owner账脏或一轮未走完时同样下一拍续作对账，不让一次准入外写入拒绝增长一整天。
+# 函数用途: 判断原维护是否到期，包含有游标的未完成片与待追赶的配额对账。
 def owner_maintenance_due(
     owner_home: str | Path,
     *,
     now: float | None = None,
 ) -> bool:
+    from .owner_quota import owner_quota_reconcile_pending
+
     home = Path(owner_home)
     policy = read_json_object_report(
         home / "retention.json",
@@ -148,7 +151,7 @@ def owner_maintenance_due(
     ).payload
     maintenance_fence(marker)
     maintenance_fence(marker.get('storage_maintenance', {}))
-    if marker.get('maintenance_partial') is True:
+    if marker.get('maintenance_partial') is True or owner_quota_reconcile_pending(home, require_ledger=True):
         return True
     last_attempt = _timestamp(marker.get("last_attempt_at"))
     current = float(now if now is not None else time.time())
@@ -185,7 +188,8 @@ def run_owner_retention_if_due(
 
         return run_with_transition(home, current, commit_transition,
             expected_policy_fingerprint=expected_policy_fingerprint,
-            expected_state_fingerprint=expected_state_fingerprint)
+            expected_state_fingerprint=expected_state_fingerprint,
+            quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
     if not owner_maintenance_due(home.owner_home_dir, now=current):
         return OwnerMaintenanceResult(False, "not_due")
     state_path = _maintenance_state_path(home.owner_home_dir)
@@ -196,6 +200,10 @@ def run_owner_retention_if_due(
         previous = read_json_object_report(state_path, context="owner_maintenance.state").payload
         maintenance_fence(previous)
         maintenance_fence(previous.get('storage_maintenance', {}))
+        if _quota_only_continuation_due(home.owner_home_dir, previous, current):
+            return _run_quota_continuation_slice(
+                state_path, home, previous, current,
+                quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
         retention = apply_owner_retention(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
@@ -333,6 +341,7 @@ def _cleanup_owner_runtime(home: MyAgentHomePaths, *, now: float, commit_transit
 # 函数用途: 在原状态写者内保存扩展、来源游标及下一拍责任。
 def _write_maintenance_result(state_path, retention, previous, current, effects):
     from .home_retention import maintenance_fence, require_maintenance_fence
+    from .owner_quota import refresh_owner_quota_host_rows
 
     require_schema_generation(previous)
     expected = maintenance_fence(previous)
@@ -347,6 +356,8 @@ def _write_maintenance_result(state_path, retention, previous, current, effects)
         payload['maintenance_partial'] = storage.get('continuation_pending', storage['partial'])
         payload['storage_maintenance'] = {**storage, 'maintenance_epoch': expected[1] + 1}
     write_json_file_atomic_unlocked(state_path, payload)
+    # 维护状态在配额准入外写入；写完按当前内容核过data与root目录行并采纳新目录戳（锁忙或核验不过即留给准入核验）。
+    refresh_owner_quota_host_rows(state_path.parent.parent, ('data', ''))
     return OwnerMaintenanceResult(True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
         isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"])
 
@@ -704,15 +715,15 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
     return state
 
 
-# LLM: 调用方显式给出的额度原样使用；只有缺省额度随账本状态在稳态与追赶期之间切换。
+# LLM: 调用方显式给出的额度原样使用；只有已开启有限配额的owner随账本状态在稳态与追赶期之间切换。
 # 函数用途: 解析并校验本拍配额对账的目录项与时间额度。
 def _quota_maintenance_budget(home, quota_max_entries, quota_max_ms):
     import math
 
-    from .owner_quota import owner_quota_reconcile_pending
+    from .owner_quota import owner_quota_enabled, owner_quota_reconcile_pending
 
     if quota_max_entries is None or quota_max_ms is None:
-        catch_up = owner_quota_reconcile_pending(home.owner_home_dir)
+        catch_up = owner_quota_enabled(home.owner_home_dir) and owner_quota_reconcile_pending(home.owner_home_dir)
         if quota_max_entries is None:
             quota_max_entries = _QUOTA_CATCH_UP_MAX_ENTRIES if catch_up else _QUOTA_STEADY_MAX_ENTRIES
         if quota_max_ms is None:
@@ -726,7 +737,8 @@ def _quota_maintenance_budget(home, quota_max_entries, quota_max_ms):
 # LLM: 配额对账只读元数据并在原配额锁内写配额账，不删除任何owner内容，因此不随保留策略不安全而停摆；
 #   沿原quota锁非阻塞获取，避免maintenance→quota与既有quota→JSON锁序死锁。C/W必须经原transition提交，非C/W需已持原state锁。
 # 函数用途: 在保留或回执适配被延期时仍推进一片配额对账，返回不含目录表的简短回执。
-def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, state_locked, max_entries, max_ms):
+def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, state_locked, max_entries, max_ms,
+                                   include_cursor=False):
     from .owner_quota import (
         OwnerQuotaLockContention,
         OwnerQuotaUnavailable,
@@ -748,13 +760,118 @@ def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, stat
         return {'complete': False, 'deferred_reason': 'quota_busy'}
     except OwnerQuotaUnavailable:
         return {'complete': False, 'deferred_reason': 'quota_unavailable'}
-    return {'complete': report['complete'], 'scanned_entries': report['scanned_entries'],
-            'used_bytes': report['used_bytes'], 'inode_count': report['inode_count']}
+    summary = {'complete': report['complete'], 'scanned_entries': report['scanned_entries'],
+               'used_bytes': report['used_bytes'], 'inode_count': report['inode_count']}
+    if include_cursor:
+        summary['cursor'] = report['cursor']
+    return summary
+
+
+# LLM: 日周期尚未到期且已有上一拍完整保留头与storage_maintenance状态时返回True；到日周期仍走完整维护。
+# 函数用途: 判断当前维护触发是否属于同一日周期内的存储/配额续扫。
+def _quota_only_continuation_due(owner_home: Path, previous: dict[str, Any], current: float) -> bool:
+    policy = read_json_object_report(owner_home / "retention.json", context="owner_maintenance.policy").payload
+    if not bool(policy.get("maintenance_enabled", True)):
+        return False
+    interval = _positive_interval(policy.get("maintenance_interval_seconds"))
+    last_attempt = _timestamp(previous.get("last_attempt_at"))
+    if interval <= 0 or last_attempt <= 0 or current - last_attempt >= interval:
+        return False
+    if previous.get("apply_outcome") not in ("applied", "refused", "legal_hold"):
+        return False
+    return isinstance(previous.get("storage_maintenance"), dict)
+
+
+# LLM: 在日周期内仅推进配额对账或剩余storage_maintenance适配器并刷新宿主目录行，不重跑apply_owner_retention与七项日维护步骤。
+# 函数用途: 执行日周期内的轻量续扫片并原子更新maintenance.json。
+def _run_quota_continuation_slice(state_path, home, previous, current, *, coordinator=False,
+                                  commit_transition=None, runtime_cleanup=None,
+                                  quota_max_ms=None, quota_max_entries=None):
+    from types import SimpleNamespace
+
+    from .home_retention import maintenance_fence, require_maintenance_fence
+    from .owner_quota import owner_quota_enabled, refresh_owner_quota_host_rows
+
+    raw_entries, raw_ms = quota_max_entries, quota_max_ms
+    explicit_quota_budget = raw_entries is not None or raw_ms is not None
+    track_quota = explicit_quota_budget or owner_quota_enabled(home.owner_home_dir)
+    storage = deepcopy(previous.get('storage_maintenance', {}))
+    require_schema_generation(previous)
+    require_schema_generation(storage)
+    expected = maintenance_fence(previous)
+    require_maintenance_fence(storage, expected)
+    quota_only = (
+        previous.get('maintenance_partial') is not True
+        or storage.get('deferred_reason') in ('retention_not_safe', 'coordinator_adapter_protocol_required')
+        or (not storage.get('errors')
+            and set(storage.get('unbound_kinds') or ()) <= {'global_indexes'}
+            and set(storage.get('pending_kinds') or ()) <= {'cache_tmp_trash'})
+    )
+    if not quota_only:
+        retention_stub = SimpleNamespace(
+            load_errors=tuple(previous.get('load_errors') or ()),
+            legal_hold=bool(previous.get('legal_hold', False)),
+            applied=previous.get('apply_outcome') == 'applied',
+        )
+        storage = run_owner_storage_maintenance_slice(
+            home, previous, retention_stub, now=current, coordinator=coordinator,
+            quota_max_ms=raw_ms, quota_max_entries=raw_entries,
+            state_locked=not coordinator, commit_transition=commit_transition)
+        continuation = bool(storage.get('continuation_pending', storage.get('partial', False)))
+        storage = {**storage, 'maintenance_epoch': expected[1] + 1}
+    else:
+        quota_max_entries, quota_max_ms = _quota_maintenance_budget(home, raw_entries, raw_ms)
+        report = _deferred_quota_reconciliation(
+            home, coordinator=coordinator, commit_transition=commit_transition,
+            state_locked=not coordinator, max_entries=quota_max_entries, max_ms=quota_max_ms,
+            include_cursor=not storage.get('deferred_reason'))
+        continuation = (track_quota and report['complete'] is False
+                        and report.get('deferred_reason') not in (
+                            'coordinator_adapter_protocol_required', 'retention_not_safe'))
+        if storage.get('deferred_reason'):
+            storage.update(maintenance_epoch=expected[1] + 1, continuation_pending=continuation,
+                           quota_reconciliation=report)
+        else:
+            cursor = report.pop('cursor', None)
+            cursors = storage.setdefault('cursors', {})
+            if isinstance(cursor, dict):
+                cursors['cache_tmp_trash'] = cursor
+            elif 'deferred_reason' in report:
+                cursors['cache_tmp_trash'] = {**cursors.get('cache_tmp_trash', {}), 'complete': False,
+                                              'deferred_reason': report['deferred_reason']}
+            pending = [key for key in storage.get('pending_kinds') or () if key != 'cache_tmp_trash']
+            if not report['complete']:
+                pending.append('cache_tmp_trash')
+            storage.update(maintenance_epoch=expected[1] + 1, items=int(report.get('scanned_entries', 0)), bytes=0,
+                           completed=['cache_tmp_trash'] if report['complete'] else [],
+                           pending_kinds=pending,
+                           partial=bool(pending) or bool(storage.get('errors')) or bool(storage.get('unbound_kinds')),
+                           continuation_pending=continuation)
+
+    # 函数用途: 校验维护CAS前像并写入配额续扫后的维护状态。
+    def finish():
+        canonical = read_json_object_report(state_path, context='owner_maintenance.fence').payload
+        require_maintenance_fence(canonical, expected)
+        payload = {**previous, 'schema_generation': 1, 'maintenance_epoch': expected[1] + 1,
+                   'schema_version': 'owner-maintenance.v1', 'maintenance_partial': continuation,
+                   'storage_maintenance': storage}
+        if runtime_cleanup is not None:
+            payload['runtime_cleanup'] = runtime_cleanup
+        write_json_file_atomic_unlocked(state_path, payload)
+        refresh_owner_quota_host_rows(state_path.parent.parent, ('data', ''))
+        return OwnerMaintenanceResult(
+            True, str(previous.get('status') or 'success'), None,
+            apply_outcome=str(previous.get('apply_outcome') or ''),
+            isolated_error_count=int(previous.get('isolated_error_count') or 0),
+            failed_action_count=int(previous.get('failed_action_count') or 0))
+
+    return commit_transition(finish) if coordinator else finish()
 
 
 # LLM: 原维护入口与唯一状态承接真实领域回执；C/W尚无逐写适配协议时只报告延期，不旁路原transition。
 #   默认只发布副本，依赖原件存在性的读口切换未闭合前禁止删除；未知kind保持partial但不制造忙循环。
-#   延期路径仍推进一片配额对账（C/W经原transition，普通维护经已持state锁），一轮未走完时保留待续，让配额收敛不依赖保留策略是否可用。
+#   延期路径仍推进一片配额对账（C/W经原transition，普通维护经已持state锁），已开启有限配额或显式传入配额额度时，
+#   一轮未走完保留待续；配额关闭的owner不因对账未完把维护标成每拍待续。
 # 函数用途: 在普通维护周期分批核配额并安全封存旧回执，明确保留未接线和延期责任。
 def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coordinator=False,
                                         quota_max_ms=None, quota_max_entries=None, state_locked=False,
@@ -767,9 +884,15 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         require_maintenance_fence,
         storage_kind_registry,
     )
-    from .owner_quota import OwnerQuotaLockContention, reconcile_owner_quota_slice
+    from .owner_quota import (
+        OwnerQuotaLockContention,
+        owner_quota_enabled,
+        reconcile_owner_quota_slice,
+    )
     from .runtime_paths import runtime_paths_for_agent
 
+    raw_entries, raw_ms = quota_max_entries, quota_max_ms
+    track_quota = raw_entries is not None or raw_ms is not None or owner_quota_enabled(home.owner_home_dir)
     quota_max_entries, quota_max_ms = _quota_maintenance_budget(home, quota_max_entries, quota_max_ms)
     original = previous.get('storage_maintenance', {})
     require_schema_generation(original)
@@ -778,7 +901,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         reconciliation = _deferred_quota_reconciliation(
             home, coordinator=coordinator, commit_transition=commit_transition,
             state_locked=state_locked, max_entries=quota_max_entries, max_ms=quota_max_ms)
-        state.update(continuation_pending=reconciliation['complete'] is False and reconciliation.get(
+        state.update(continuation_pending=track_quota and reconciliation['complete'] is False and reconciliation.get(
                          'deferred_reason') not in ('coordinator_adapter_protocol_required', 'retention_not_safe'),
                      deletion_enabled=False, quota_reconciliation=reconciliation,
                      deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
@@ -786,7 +909,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     if not state_locked:
         with locked_json_path(_maintenance_state_path(home.owner_home_dir)):
             return run_owner_storage_maintenance_slice(home, previous, retention, now=now,
-                quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, state_locked=True)
+                quota_max_ms=raw_ms, quota_max_entries=raw_entries, state_locked=True)
 
     expected = maintenance_fence(previous)
 
@@ -849,6 +972,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         max_seconds=max(0.1, quota_max_ms / 1000 + 0.05), read_fence=read_fence)
     state['coordinator_deferred'] = ['global_indexes']
     state['continuation_pending'] = bool(state['errors']) or any(
-        key != 'global_indexes' for key in state['pending_kinds'])
+        key != 'global_indexes' and (key != 'cache_tmp_trash' or track_quota)
+        for key in state['pending_kinds'])
     state['deletion_enabled'] = False
     return state

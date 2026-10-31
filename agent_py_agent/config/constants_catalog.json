@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1264,
+  "count": 1265,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8978,6 +8978,14 @@
       "unit": "字节",
       "category": "其它",
       "description": "原生目录读取缓冲固定32KiB；未消费记录随prep持久化，不在重启时重新枚举。"
+    },
+    {
+      "name": "_QUOTA_LARGE_DIR_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 65536,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "前台按名字核对大目录时至多枚举的目录项数；行记录已超过它的目录不核、留给后台对账，行内而实际超过即判不通过。"
     },
     {
       "name": "_QUOTA_MAX_CACHED_DIR_ENTRIES",

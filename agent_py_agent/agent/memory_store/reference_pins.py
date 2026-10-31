@@ -334,6 +334,79 @@ def recheck_pin_sources(paths):
                 state["post_scope"] = None
 
 
+# LLM: 解析器实际消费的字节按读前观察同一口径摘要（小文件整份、大文件切片+尾片），只hash内存不发起读取、不扣1MiB预算；
+#   读后复读只能证明磁盘仍是A，同tick A→B→A改写下须由此证明解析的不是B。未观察路径或快照外不绑定；冷源无同stat切片状态时只核长度。
+# 类用途: 把流式_pin_rows与非流式策略、墓碑、清单、分片解析绑定到读前已核的内容代次。
+class ParsedPinBytes:
+    # LLM: 只取当前观察集合内的读前stamp与同stat切片状态，构造不读文件、不改进度。
+    # 函数用途: 按来源大小准备与读前摘要相同的切片布局。
+    def __init__(self, path):
+        self.path = Path(path)
+        sources = _SOURCES.get()
+        self.bound = sources is not None and self.path in sources
+        self.stamp = sources[self.path] if self.bound else None
+        state = _RESUMABLE_DIGESTS.get(self.path)
+        self.state = state if state is not None and self.stamp is not None and state["stamp"] == self.stamp[:6] else None
+        budget = self.state["budget"] if self.state is not None else 0
+        tail = min(_PIN_SOURCE_CHUNK_BYTES, budget, max(1, budget // 4))
+        self.slice_size = max(1, budget - tail)
+        self.body_size = max(0, self.stamp[3] - tail) if self.state is not None else 0
+        self.size, self.slices = 0, []
+        self.body_hash = hashlib.blake2b(digest_size=16)
+        self.tail_hash = hashlib.blake2b(digest_size=16)
+
+    # LLM: 跨片处拆摘要；小文件body为0，全部字节进整份摘要，与_file_digest同值。
+    # 函数用途: 累计解析器已读到的一段实际字节。
+    def update(self, raw):
+        offset = 0
+        while self.bound and offset < len(raw):
+            if self.size < self.body_size:
+                boundary = min(self.body_size, (self.size // self.slice_size + 1) * self.slice_size)
+                count = min(len(raw) - offset, boundary - self.size)
+                self.body_hash.update(raw[offset:offset + count])
+                if self.size + count == boundary:
+                    self.slices.append(self.body_hash.digest())
+                    self.body_hash = hashlib.blake2b(digest_size=16)
+            else:
+                count = len(raw) - offset
+                self.tail_hash.update(raw[offset:])
+            self.size += count
+            offset += count
+
+    # LLM: 缺失/存在、长度及每个已知切片和尾片都须与读前一致；热大源丢失同stat切片状态无从比对即失败关闭，失配清掉切片状态。
+    # 函数用途: 判断解析字节是否就是读前观察的内容代次。
+    def matches(self, present=True):
+        if not self.bound:
+            return True
+        stamp = self.stamp
+        if stamp is None or not present:
+            matched = stamp is None and not present
+        elif self.size != stamp[3]:
+            matched = False
+        elif len(stamp) == 7 and isinstance(stamp[6], bytes):
+            matched = self.tail_hash.digest() == stamp[6]
+        elif self.state is not None:
+            slices, tail = self.state["baseline"] or (self.state["slice_digests"], self.state["tail_digest"])
+            matched = (tail in (None, self.tail_hash.digest())
+                       and all(want in (None, got) for want, got in zip(slices, self.slices)))
+        else:
+            matched = len(stamp) == 6
+        if not matched:
+            _RESUMABLE_DIGESTS.pop(self.path, None)
+        return matched
+
+
+# LLM: data为解析器刚读入内存的完整字节，None表示读取时缺失；解析器照常返回，不符时把该源观察改为空摘要代次，
+#   任何磁盘内容（16字节摘要/切片元组/缺失）都无法与之相等，读后观察或发布前复核必然失配并失败关闭。
+# 函数用途: 绑定一次性读入后解析的pin来源。
+def record_parsed_pin_bytes(path, data):
+    binding = ParsedPinBytes(path)
+    if data is not None:
+        binding.update(data)
+    if not binding.matches(data is not None):
+        _SOURCES.get()[binding.path] = (*(binding.stamp or (0,) * 6)[:6], b"")
+
+
 # LLM: 热源同tick等长改写stat不可见，post只认同一current内读到的片，跨调用旧片一律重核，单轮读不完全片就保持partial；
 #   转冷后任何写入都推进stat，冷期核过的片才可跨current累积。全部读取共用每源1MiB字节预算。
 # 函数用途: 推进解析前后两阶段验证，绝不以早先调用核过的片或尾片代替发布前读到的全片。

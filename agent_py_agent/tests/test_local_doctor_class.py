@@ -114,6 +114,10 @@ def _mock_agent_for_doctor(tmp_path, cfg: DoctorMockConfig | None = None):
     mock_agent.root = tmp_path
     mock_agent.local_store.missing_content_files.return_value = cfg.missing_files or []
     mock_agent.subagents.list_runs.return_value = cfg.subagent_runs or []
+    # 正式读索引覆盖事实由 runtime_snapshot 提供；默认替身给出与正式记忆条数一致的完整覆盖。
+    mock_agent.memory.runtime_snapshot.return_value = {
+        "read_index_coverage": {"status": "complete", "indexed_records": cfg.memory_count},
+    }
     return mock_agent
 
 
@@ -382,6 +386,7 @@ def test_build_status_suggestions_no_timeline():
 def test_build_local_doctor_report_empty_local_store_with_sources(tmp_path):
     """测试本地存储为空但有其他来源时的建议。"""
     mock_agent = _mock_agent_for_doctor(tmp_path, DoctorMockConfig(source_counts={}, subagent_runs=[MagicMock()]))
+    mock_agent.local_store.stats.return_value["record_count"] = 0
     result = _build_doctor_report_with_mocks(mock_agent, tmp_path, request_counts={"pending": 1}, memory_count=10)
     assert any("local-rebuild" in s for s in result["suggestions"])
 

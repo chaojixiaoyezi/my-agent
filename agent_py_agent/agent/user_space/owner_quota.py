@@ -54,6 +54,12 @@ _QUOTA_CONTROL_NAMES = (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock')
 _QUOTA_RUNTIME_DIRS = frozenset({('workspace', 'runtime', 'services'), ('data', 'telemetry')})
 # 宿主可丢弃读索引（local_storage.owner_read_index的cache库）及SQLite伴随文件，同样在准入外写入。
 _QUOTA_RUNTIME_FILES = frozenset(('cache', 'owner_read_index.sqlite3' + suffix) for suffix in ('', '-wal', '-shm', '-journal'))
+# 宿主在准入外维护的owner状态文件（运行库及SQLite伴随文件、审计日志、维护状态）：照常计费，但不进目录摘要，
+#   宿主自己的写入不被前台核验当成准入外篡改；准入外的字节变化由后台对账计入。
+_QUOTA_HOST_FILES = frozenset({*(('runtime.db' + suffix,) for suffix in ('', '-wal', '-shm', '-journal')),
+                               ('audit_log.jsonl',), ('data', 'maintenance.json')})
+# 宿主在准入外维护的整棵owner子树（对话压缩归档）：同样照常计费、不进目录摘要。
+_QUOTA_HOST_TREES = frozenset({'compact'})
 _QUOTA_SCANS: OrderedDict = OrderedDict()
 _QUOTA_SCANS_LOCK = RLock()
 # 进程内配额续扫缓存最多保留的活跃 owner 扫描器数量。
@@ -76,11 +82,15 @@ _QUOTA_MAX_METADATA_BYTES = 655360
 _QUOTA_VERIFY_BUDGET_ENTRIES = 256
 # 核验一个目录时每层nofollow打开按这么多次lstat计入额度；打开比单项lstat贵一个数量级。
 _QUOTA_VERIFY_OPEN_COST_ENTRIES = 16
-# 逐目录摘要行格式代次：2为九整数行（含物理目录项与计费普通文件数）；其它代次的表不用于核验，进行中的一轮从头重扫。
-_QUOTA_ROW_SCHEMA_VERSION = 2
+# 前台按名字核对大目录时至多枚举的目录项数；行记录已超过它的目录不核、留给后台对账，行内而实际超过即判不通过。
+_QUOTA_LARGE_DIR_MAX_ENTRIES = 65536
+# 逐目录摘要行格式代次：3为十整数行（含物理目录项、计费普通文件数与需lstat定性的计费项数），摘要不含宿主状态；
+#   其它代次的表不用于核验，进行中的一轮从头重扫。
+_QUOTA_ROW_SCHEMA_VERSION = 3
 # 进程内最多记住这么多owner在本进程写账本后的root目录戳；淘汰只失去结算时免扫root的优化。
 _QUOTA_ROOT_STAMP_CACHE_SIZE = 256
 _QUOTA_ROOT_STAMPS: OrderedDict = OrderedDict()
+_QUOTA_FINITE_ROOTS: OrderedDict = OrderedDict()
 _QUOTA_ROOT_STAMPS_LOCK = RLock()
 _QUOTA_HASH_MASK = (1 << 64) - 1
 # 原生目录读取缓冲固定32KiB；未消费记录随prep持久化，不在重启时重新枚举。
@@ -413,6 +423,8 @@ class OwnerQuotaEnforcer:
         self.policy_available = bool(policy_available)
         self.coordinator_io = coordinator_io
         self._lock_anchor = self.owner_root / _QUOTA_LOCK_BASENAME
+        if self.max_bytes > 0:
+            _remember_quota_finite_root(self.owner_root)
 
     # LLM: 默认阻塞保持既有调用合同；限时准备可选择立即拒绝竞争，但仍须在同一锁内检查和执行完整写入。
     # LLM: C只透传锁出生策略，原quota锁仍跨领域/同步embedding；max_bytes<=0不添scan或新限制。
@@ -871,6 +883,22 @@ def _quota_excluded(parts, name, info):
     return name.endswith('.lock') and stat.S_ISREG(info.st_mode) and info.st_size == 0
 
 
+# LLM: 只看路径、不stat：宿主固定状态文件、其原子写临时名（.<名>.<随机>.tmp），以及宿主子树（含子树根本身）内的一切目录项。
+# 函数用途: 判断一个目录项是否为宿主在准入外维护、不进目录摘要的状态。
+def _quota_host_managed(parts, name):
+    if (parts[0] if parts else name) in _QUOTA_HOST_TREES or (*parts, name) in _QUOTA_HOST_FILES:
+        return True
+    if not (name.startswith('.') and name.endswith('.tmp')):
+        return False
+    return (*parts, name[1:].rpartition('.')[0].rpartition('.')[0]) in _QUOTA_HOST_FILES
+
+
+# LLM: 与_quota_excluded同口径：这些名字是否排除取决于类型或大小，其余名字（控制账、宿主状态之外）一律计费。
+# 函数用途: 判断一个目录项是否必须lstat才能确定计不计费。
+def _quota_name_needs_stat(parts, name):
+    return name.endswith('.lock') or (*parts, name) in _QUOTA_RUNTIME_DIRS or (*parts, name) in _QUOTA_RUNTIME_FILES
+
+
 # LLM: 与扫描同一口径：只有不跟随链接的普通文件且不属结构性排除（如0字节*.lock）才计1个inode。
 # 函数用途: 返回受控写入目标在结算口径下的计费inode数。
 def _billed_file_inode(root, path):
@@ -882,16 +910,16 @@ def _billed_file_inode(root, path):
     return int(stat.S_ISREG(info.st_mode) and not _quota_excluded(parts[:-1], parts[-1], info))
 
 
-# LLM: 排除项贡献为零；其余子项计1项、普通文件字节、64位摘要以及是否计费普通文件。
+# LLM: 排除项与宿主状态贡献为零；其余子项计1项、普通文件字节、64位摘要、是否计费普通文件以及是否需lstat才能定性。
 # 函数用途: 返回一个子项对所在目录摘要的加法贡献。
 def _quota_child_row(parts, name, info):
-    if _quota_excluded(parts, name, info):
-        return (0, 0, 0, 0)
+    if _quota_excluded(parts, name, info) or _quota_host_managed(parts, name):
+        return (0, 0, 0, 0, 0)
     reg_bytes, digest = _quota_child_digest(name, info)
-    return (1, reg_bytes, digest, int(stat.S_ISREG(info.st_mode)))
+    return (1, reg_bytes, digest, int(stat.S_ISREG(info.st_mode)), int(_quota_name_needs_stat(parts, name)))
 
 
-# LLM: 键按JSON转义计长，九个整数加分隔符按典型112字节估；只用于给目录表封顶，极端大数撑过1MiB时由写账本兜底放弃整表。
+# LLM: 键按JSON转义计长，十个整数加分隔符按典型112字节估；只用于给目录表封顶，极端大数撑过1MiB时由写账本兜底放弃整表。
 # 函数用途: 估算一行目录摘要的持久字节。
 def _quota_row_bytes(rel):
     return len(json.dumps(rel)) + 112
@@ -915,12 +943,13 @@ def _drop_quota_metadata(state):
         state.pop(key, None)
 
 
-# LLM: 每目录一行九整数：身份与目录时间、计费项数、普通文件字节、可加摘要、物理目录项数、计费普通文件数。
+# LLM: 每目录一行十整数：身份与目录时间、计费项数、普通文件字节、可加摘要、物理目录项数、计费普通文件数、需lstat定性的计费项数。
 #   扫描中的目录先记在scan_rows，整目录走完才并入dir_stamps；再次打开同一目录只核身份，目录时间保留首次打开值，
 #   让发布完整对账前的漂移清点发现期间的增删。三张表合计按估算持久字节封顶，超过即整表作废，回到受控写代次。
+#   宿主子树内的目录不建行：其内容照常计费，但随宿主保留策略增删，不参与前台核验。
 # 函数用途: 收集每目录摘要，不保留逐文件名称和指纹。
 def _capture_quota_metadata(state, parts, info, name=None):
-    if state is None or state.get('metadata_complete', True) is False:
+    if state is None or state.get('metadata_complete', True) is False or parts and parts[0] in _QUOTA_HOST_TREES:
         return
     state['metadata_complete'] = True
     scanning = state.setdefault('scan_rows', {})
@@ -938,7 +967,7 @@ def _capture_quota_metadata(state, parts, info, name=None):
                 _drop_quota_metadata(state)
                 return
             state['metadata_bytes'] = size
-        scanning[rel] = [*stamp, 0, 0, 0, 0, 0]
+        scanning[rel] = [*stamp, 0, 0, 0, 0, 0, 0]
         return
     row = scanning.get(rel)
     if row is None:
@@ -947,12 +976,13 @@ def _capture_quota_metadata(state, parts, info, name=None):
     row[7] += 1
     if info is None:
         return
-    count, reg_bytes, digest, files = _quota_child_row(parts, name, info)
+    count, reg_bytes, digest, files, needs_stat = _quota_child_row(parts, name, info)
     if count:
         row[4] += 1
         row[5] += reg_bytes
         row[6] = (row[6] + digest) & _QUOTA_HASH_MASK
         row[8] += files
+        row[9] += needs_stat
 
 
 # LLM: 目录全部子项走完后，本轮新行替换上一轮旧行，旧行同时退出滚动基线。
@@ -990,7 +1020,7 @@ def _quota_baseline_cursor(root, ledger, state):
             **_quota_metadata_payload(state)}
 
 
-# LLM: 只有本行格式的完整表才能用于核验；旧七整数表、超容、首轮扫描尚无root行时返回None，按受控写代次维持。
+# LLM: 只有本行格式的完整表才能用于核验；旧格式表、超容、首轮扫描尚无root行时返回None，按受控写代次维持。
 #   对账进行中时，已走完目录用本轮新行，其余目录用上一轮仍随受控写维护的旧行；结构损坏返回空表让核验失败。
 # 函数用途: 取得游标中可用于核验的逐目录表视图（行对象与游标共享）。
 def _quota_cursor_table(cursor):
@@ -1014,9 +1044,9 @@ def _valid_quota_parts(parts):
 
 
 # LLM: 坏行一律视为核验失败而不是跳过。
-# 函数用途: 校验一行持久目录摘要是九个非负整数。
+# 函数用途: 校验一行持久目录摘要是十个非负整数。
 def _valid_quota_row(row):
-    return isinstance(row, list) and len(row) == 9 and all(type(value) is int and value >= 0 for value in row)
+    return isinstance(row, list) and len(row) == 10 and all(type(value) is int and value >= 0 for value in row)
 
 
 # 函数用途: 校验一张持久目录表的键与行。
@@ -1032,9 +1062,11 @@ def _quota_row_entries(row):
     return max(row[4], row[7])
 
 
-# LLM: 单目录nofollow打开并逐项lstat。身份必须一致；目录时间可以不同（锁侧车、原子替换都会改），但排除项之外的
-#   项数、普通文件字节与摘要必须与期望完全相等，出现的子目录必须已有摘要行。前台传cap：物理目录项超过cap立即停下
-#   返回None交大目录核对，空锁名再多也不放大前台lstat。通过后采纳当前目录戳、物理项数与普通文件数。
+# LLM: 单目录nofollow打开并逐项lstat（宿主状态按名字跳过，不stat）。身份必须一致；目录时间可以不同（锁侧车、原子替换、
+#   宿主状态写入都会改），但排除项与宿主状态之外的项数、普通文件字节与摘要必须与期望完全相等。出现的子目录必须已有摘要行，
+#   唯一例外是准入外新建、确实为空的子目录：它不改变计费字节与inode，期望不含它时连同空行一起采纳，此后像其它目录一样核验。
+#   前台传cap：物理目录项超过cap立即停下返回None交大目录核对，空锁名再多也不放大前台lstat。
+#   通过后采纳当前目录戳、项数与摘要、物理项数、普通文件数与需lstat定性项数。
 # 函数用途: 核验一个目录的直接子项与期望摘要一致。
 def _verify_quota_dir(root, rel, row, table, expected=None, cap=None):
     parts = rel.split('/') if rel else []
@@ -1046,58 +1078,97 @@ def _verify_quota_dir(root, rel, row, table, expected=None, cap=None):
         info = os.fstat(descriptor)
         if [info.st_dev, info.st_ino] != row[:2]:
             return False
-        count = reg_total = acc = files = physical = 0
+        count = reg_total = acc = files = named = physical = 0
+        adopted, adopted_digest = {}, 0
         with os.scandir(descriptor) as entries:
             for entry in entries:
                 physical += 1
                 if cap is not None and physical > cap:
                     row[7] = max(row[7], physical)
                     return None
-                if not parts and entry.name in _QUOTA_CONTROL_NAMES:
+                if not parts and entry.name in _QUOTA_CONTROL_NAMES or _quota_host_managed(parts, entry.name):
                     continue
                 child = entry.stat(follow_symlinks=False)
-                added, reg_bytes, digest, is_file = _quota_child_row(parts, entry.name, child)
+                added, reg_bytes, digest, is_file, needs_stat = _quota_child_row(parts, entry.name, child)
                 if not added:
                     continue
                 count += 1
-                if count > target[0]:
-                    return False
-                if stat.S_ISDIR(child.st_mode) and (f'{rel}/{entry.name}' if rel else entry.name) not in table:
+                child_rel = f'{rel}/{entry.name}' if rel else entry.name
+                if stat.S_ISDIR(child.st_mode) and child_rel not in table:
+                    stamp = _quota_empty_dir_stamp(root, (*parts, entry.name), child)
+                    if stamp is None:
+                        return False
+                    adopted[child_rel] = stamp
+                    adopted_digest = (adopted_digest + digest) & _QUOTA_HASH_MASK
+                if count - len(adopted) > target[0]:
                     return False
                 reg_total += reg_bytes
                 acc = (acc + digest) & _QUOTA_HASH_MASK
                 files += is_file
-        if [count, reg_total, acc] != target:
+                named += needs_stat
+        # 新空目录可能已由上次核验并入期望（其空行未能持久）；两种口径之一相等即通过。
+        if [count, reg_total, acc] != target and (
+                not adopted or [count - len(adopted), reg_total, (acc - adopted_digest) & _QUOTA_HASH_MASK] != target):
             return False
         row[:4] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
-        row[7], row[8] = physical, files
+        row[4:10] = [count, reg_total, acc, physical, files, named]
+        for child_rel, stamp in adopted.items():
+            table[child_rel] = [*stamp, 0, 0, 0, 0, 0, 0]
         return True
     finally:
         os.close(descriptor)
 
 
-# LLM: 大目录不逐项lstat：只读名字统计物理项；名字可能属排除的（*.lock、运行时路径、root控制账）最多lstat额度个，
-#   其余一律计费。计费项数落在可能区间外即判定有准入外增删；相符才采纳新目录戳。同数替换与原位追加仍交后台对账。
-# 函数用途: 以名字计数核对一个大目录的计费目录项数。
-def _quota_large_dir_matches(root, rel, row, expected):
+# LLM: 准入外新建的空目录不改变计费字节与inode：nofollow打开核对仍是同一目录且没有任何目录项，返回打开时的目录戳
+#   供父目录采纳空行（其后新增内容会改变这个戳并被核出）；打不开、身份不符或非空返回None，按准入外增删处理。
+# 函数用途: 判断一个尚无摘要行的子目录是否为可采纳的空目录。
+def _quota_empty_dir_stamp(root, parts, info):
+    try:
+        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    except OSError:
+        return None
+    try:
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            return None
+        with os.scandir(descriptor) as entries:
+            if next(entries, None) is not None:
+                return None
+        return [current.st_dev, current.st_ino, current.st_mtime_ns, current.st_ctime_ns]
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 大目录不逐项lstat：只读名字，持锁时间不随单目录规模增长。行记录已超过_QUOTA_LARGE_DIR_MAX_ENTRIES项的目录
+#   前台无法在上限内核对，返回None不核也不采纳目录戳，留给后台对账（与原位追加同属披露残留）；行在上限内而实际枚举超过上限
+#   即不通过。root控制账与宿主状态不计；名字即可定性的计费项数须与行中(计费项数-需lstat定性项数)相等。需lstat定性的候选
+#   不超过额度时全部lstat，计费数须与行相等；超过额度时只有行记录其计费数为0才抽查额度个且须全不计费，否则计费数无法在
+#   额度内证明，一律不通过。通过才采纳新目录戳与物理项数；同数替换、原位追加与抽查之外候选的新内容仍交后台对账。
+# 函数用途: 以名字计数核对一个大目录的计费目录项数，无法在上限内核对时返回None。
+def _quota_large_dir_matches(root, rel, row):
+    if _quota_row_entries(row) > _QUOTA_LARGE_DIR_MAX_ENTRIES:
+        return None
     parts = tuple(rel.split('/')) if rel else ()
     descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     try:
         info = os.fstat(descriptor)
         if [info.st_dev, info.st_ino] != row[:2]:
             return False
-        physical, definite, candidates = 0, 0, []
+        physical, named, candidates = 0, 0, []
         with os.scandir(descriptor) as entries:
             for entry in entries:
                 physical += 1
+                if physical > _QUOTA_LARGE_DIR_MAX_ENTRIES:
+                    return False
                 name = entry.name
-                if not parts and name in _QUOTA_CONTROL_NAMES:
+                if not parts and name in _QUOTA_CONTROL_NAMES or _quota_host_managed(parts, name):
                     continue
-                if (name.endswith('.lock') or (*parts, name) in _QUOTA_RUNTIME_DIRS
-                        or (*parts, name) in _QUOTA_RUNTIME_FILES):
+                if _quota_name_needs_stat(parts, name):
                     candidates.append(name)
                 else:
-                    definite += 1
+                    named += 1
+        if named != row[4] - row[9] or len(candidates) > _QUOTA_VERIFY_BUDGET_ENTRIES and row[9]:
+            return False
         billed = 0
         for name in candidates[:_QUOTA_VERIFY_BUDGET_ENTRIES]:
             try:
@@ -1105,8 +1176,7 @@ def _quota_large_dir_matches(root, rel, row, expected):
             except FileNotFoundError:
                 continue
             billed += not _quota_excluded(parts, name, child)
-        low = definite + billed
-        if not low <= expected <= low + max(0, len(candidates) - _QUOTA_VERIFY_BUDGET_ENTRIES):
+        if billed != row[9]:
             return False
         row[:4] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         row[7] = physical
@@ -1142,7 +1212,10 @@ def _verify_quota_entry(root, root_fd, rel, row, table, root_vouched):
     unchanged = root_vouched if not rel else _quota_stamp_unchanged(root_fd, rel, row)
     if unchanged:
         return 1
-    return _QUOTA_VERIFY_BUDGET_ENTRIES if _quota_large_dir_matches(root, rel, row, row[4]) else None
+    matched = _quota_large_dir_matches(root, rel, row)
+    if matched is None:
+        return 1
+    return _QUOTA_VERIFY_BUDGET_ENTRIES if matched else None
 
 
 # LLM: budget=None逐目录全量核验，只供测试与诊断。准入传budget：先核本次写入路径上的目录，余下额度按持久位置轮转核
@@ -1222,14 +1295,14 @@ def _quota_declared_rows(root, dirs, before_children, *, limit=None, create=True
     for rel, children in grouped.items():
         parts = tuple(rel.split('/')) if rel else ()
         row = list(dirs[rel]) if rel in dirs else None
-        if row is None and not create:
+        if row is None and not create or parts and parts[0] in _QUOTA_HOST_TREES:
             continue
         descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
         try:
             info = os.fstat(descriptor)
             stamp = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
             if row is None:
-                row, vouched = [*stamp, 0, 0, 0, 0, 0], False
+                row, vouched = [*stamp, 0, 0, 0, 0, 0, 0], False
             elif not _valid_quota_row(row) or row[:2] != stamp[:2]:
                 raise ValueError('quota directory identity changed')
             else:
@@ -1250,7 +1323,8 @@ def _quota_declared_rows(root, dirs, before_children, *, limit=None, create=True
                         row[5] += sign * contribution[1]
                         row[6] = (row[6] + sign * contribution[2]) & _QUOTA_HASH_MASK
                         row[8] += sign * contribution[3]
-                if min(row[4], row[5], row[8]) < 0:
+                        row[9] += sign * contribution[4]
+                if min(row[4], row[5], row[8], row[9]) < 0:
                     raise ValueError('quota directory summary underflow')
             if limit is None:
                 row[:4] = stamp
@@ -1275,7 +1349,7 @@ def _quota_mismatched_rows(root, changed, table, root_vouched):
                 if not result:
                     failed.add(rel)
                 continue
-        if not _quota_large_dir_matches(root, rel, row, row[4]):
+        if _quota_large_dir_matches(root, rel, row) is False:
             failed.add(rel)
     return failed
 
@@ -1311,13 +1385,15 @@ def _refresh_quota_baseline(root, cursor, before_children, *, root_vouched):
 #   完整行（本轮已走完的新行与尚未走到的旧行）按声明前后贡献全额补差并像完整基线一样核对；核对不通过的目录把目录时间清零，
 #   让发布前的漂移清点必然重扫补正，并返回False由调用方置脏。扫描中的目录行只补已走过的子项，保留首次打开时的目录戳。
 #   没有旧基线时只给已走过的新建目录补行；正在扫描的目录不另建完整行，由扫描行走完后接替。
+#   枚举已走完、正在清点漂移时所有路径都按已走过处理，不再有后续枚举替它计入。
 # 函数用途: 把一次已结算的声明变更并入进行中的对账游标。
 def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouched):
     last = cursor.get('last_relpath')
     if not isinstance(last, str):
         return True
+    settling = cursor.get('settling') is True
     for path, (before, after, before_inode, after_inode) in paths.items():
-        if '/'.join(path.relative_to(root).parts) <= last:
+        if settling or '/'.join(path.relative_to(root).parts) <= last:
             cursor['partial_used_bytes'] = max(0, int(cursor.get('partial_used_bytes', 0)) + after - before)
             cursor['partial_inode_count'] = max(0, int(cursor.get('partial_inode_count', 0)) + after_inode - before_inode)
     tracked = (cursor.get('metadata_complete') is True and cursor.get('row_format') == _QUOTA_ROW_SCHEMA_VERSION
@@ -1330,7 +1406,8 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
         changed = _quota_declared_rows(root, table, before_children)
         partial = _quota_declared_rows(root, scanning, before_children, limit=last, create=False)
         rows = {rel: value for rel, value in changed.items()
-                if tracked and (rel in table or rel not in scanning and ('' in table or rel and rel + '/' <= last))}
+                if tracked and (rel in table or rel not in scanning
+                                and ('' in table or rel and (settling or rel + '/' <= last)))}
         failed = _quota_mismatched_rows(root, rows, table, root_vouched)
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         _drop_quota_metadata(cursor)
@@ -1347,7 +1424,7 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
         for rel, (row, _vouched, _dentries) in rows.items():
             if rel in failed:
                 row[2] = row[3] = 0
-            if rel in fresh or rel not in base and rel and rel + '/' <= last:
+            if rel in fresh or rel not in base and rel and (settling or rel + '/' <= last):
                 fresh[rel] = row
             else:
                 base[rel] = row
@@ -1360,6 +1437,7 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
 
 
 # LLM: FD逐层nofollow，不以路径别名扫描外部；每条目录项都消耗预算，深度超过64关闭式拒绝；排除项不计也不进入。
+#   宿主状态随宿主生命周期增删，扫描中途消失只少计，不作废目录表。
 # 函数用途: 惰性枚举owner的普通文件字节和inode，不生成全目录列表。
 def _quota_entries(root, parts=()):
     if len(parts) > 64:
@@ -1377,7 +1455,7 @@ def _quota_entries(root, parts=()):
                 try:
                     info = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
-                    if state is not None:
+                    if state is not None and not _quota_host_managed(parts, entry.name):
                         _drop_quota_metadata(state)
                     yield (0, 0)
                     continue
@@ -1390,7 +1468,7 @@ def _quota_entries(root, parts=()):
                     try:
                         yield from _quota_entries(root, (*parts, entry.name))
                     except FileNotFoundError:
-                        if state is not None:
+                        if state is not None and not _quota_host_managed(parts, entry.name):
                             _drop_quota_metadata(state)
                         continue
         _finish_quota_dir(state, parts)
@@ -1426,11 +1504,14 @@ def _bounded_quota_snapshot(root, *, max_entries, max_ms):
             iterator.close()
 
 
-# LLM: 一轮走完时，本轮已计入的目录若在走过之后又有增删（目录戳与首次打开时不同），按当前内容重扫其直接子项并补正总量
-#   与目录行：消失或换身份的子目录减去整棵子树行，新出现的子目录有界补扫。root目录戳因账本替换必变；大目录先按名字计数，
-#   计费项数不变不重扫。上一轮留下而本轮未走到的旧行（目录已不存在）直接丢弃。清点按目录项额度封顶，超出的目录留给
-#   准入核验与下一轮；任何意外错误放弃整张目录表，回到受控写代次，不发布半张表。
-# 函数用途: 在发布完整对账前补正走过之后发生的准入外增删。
+# LLM: 一轮枚举走完时，本轮已计入的目录若在走过之后又有增删（目录戳与首次打开时不同），按当前内容重扫其直接子项并补正
+#   总量与目录行：消失或换身份的子目录减去整棵子树行，新出现的子目录补扫。root目录戳因账本替换必变，只在本轮连续推进中
+#   不能证明它只被本进程写账本改动时才重扫。上一轮留下而本轮未走到的旧行（目录已不存在）直接丢弃。
+#   每轮只建一次清点生成器：首步逐行比目录戳（行数受目录表字节上限约束）；之后重扫的每个目录项、补扫的每个排序项都交还
+#   一次对账片，受本片条目与时间额度约束，额度用尽即暂停到下一片续作，单片工作不随漂移规模增长。已重扫完的目录换上新戳，
+#   冷恢复后不再重扫；重扫到一半遇冷恢复的目录不再从头重扫，本轮照常发布但置脏，由下一轮正常扫描补正，避免反复冷恢复时
+#   永远走不完。任何意外错误放弃整张目录表，回到受控写代次，不发布半张表。
+# 函数用途: 在发布完整对账前分片补正走过之后发生的准入外增删。
 def _settle_quota_pass_drift(root, scan):
     state = scan['state']
     if state.get('metadata_complete') is not True:
@@ -1445,17 +1526,24 @@ def _settle_quota_pass_drift(root, scan):
         root_fd = open_directory_beneath(root, (), require_dir_fd=True)
         try:
             changed = sorted(rel for rel, row in rows.items()
-                             if not rel or not _quota_stamp_unchanged(root_fd, rel, row))
+                             if (not _quota_scan_root_clean(root, scan) if not rel
+                                 else not _quota_stamp_unchanged(root_fd, rel, row)))
         finally:
             os.close(root_fd)
         children = {}
         for rel in rows:
             if rel:
                 children.setdefault(rel.rpartition('/')[0], []).append(rel)
-        budget = [_QUOTA_VERIFY_BUDGET_ENTRIES * _QUOTA_VERIFY_OPEN_COST_ENTRIES]
         for rel in changed:
-            if rel in rows and budget[0] > 0:
-                _rescan_quota_dir(root, rel, rows, children, scan, budget)
+            if rel not in rows:
+                continue
+            if rel == scan.get('retry_rel'):
+                # 已置脏发布，下一轮从头补正，其余目录不必再重扫。
+                scan['dirty'] = True
+                break
+            scan['settling_rel'] = rel
+            yield from _rescan_quota_dir(root, rel, rows, children, scan)
+            scan['settling_rel'] = None
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         _drop_quota_metadata(state)
         return
@@ -1465,17 +1553,36 @@ def _settle_quota_pass_drift(root, scan):
     state.pop('metadata_bytes', None)
 
 
-# LLM: 目录已不存在或换了身份时由父目录重扫处理；超出剩余额度的目录不动。先算完本目录新行和新子树，全部成功才一次性
-#   替换行并按差额补正总量，中途额度用尽则保持旧行，让准入核验与下一轮发现。
-# 函数用途: 重扫一个走过后有增删的目录并维护其子目录行。
-def _rescan_quota_dir(root, rel, rows, children, scan, budget):
+# LLM: root目录戳因每片账本原子替换必变。本进程连续推进同一轮时记下每次写账本后的root戳，片首、清点与写账本前都核对
+#   root只被本进程写账本改动过（新一轮首片以扫描首次打开root时的行戳为准）；任一次不符、冷恢复或续扫都按有准入外增删处理，
+#   清点照常重扫root。核对与账本改名之间的窗口内的增删会并入账本写入，与准入的root戳链同一口径。
+# 函数用途: 判断本轮扫描期间root目录项是否只被本进程写账本改动。
+def _quota_scan_root_clean(root, scan):
+    if scan.get('root_clean'):
+        expected = scan.get('root_stamp')
+        if expected is None:
+            state = scan['state']
+            row = (state.get('scan_rows') or {}).get('') or (state.get('dir_stamps') or {}).get('')
+            expected = row[:4] if row else None
+        try:
+            info = root.stat(follow_symlinks=False)
+        except OSError:
+            info = None
+        scan['root_clean'] = info is not None and expected == [info.st_dev, info.st_ino, info.st_mtime_ns,
+                                                               info.st_ctime_ns]
+    return scan.get('root_clean', False)
+
+
+# LLM: 目录已不存在或换了身份时由父目录重扫处理。大目录先按名字计数一步核对（与前台同一枚举上限），计费项数不变即采纳
+#   新目录戳、不重扫；行记录超过枚举上限的目录与前台同样留给下一轮扫描。否则先算完本目录新行和新子树，全部成功才一次性替换行并按差额补正总量；中途暂停跨片时只持本目录
+#   一个FD，被关闭或子树中途变化则保持旧行与旧总量，让准入核验与下一轮发现。
+# 函数用途: 分片重扫一个走过后有增删的目录并维护其子目录行。
+def _rescan_quota_dir(root, rel, rows, children, scan):
     row = rows[rel]
     parts = tuple(rel.split('/')) if rel else ()
-    if _quota_row_entries(row) > budget[0]:
-        return
-    budget[0] -= _quota_dir_cost(rel, row)
     try:
-        if _quota_row_entries(row) > _QUOTA_VERIFY_BUDGET_ENTRIES and _quota_large_dir_matches(root, rel, row, row[4]):
+        if (_quota_row_entries(row) > _QUOTA_VERIFY_BUDGET_ENTRIES
+                and _quota_large_dir_matches(root, rel, row) is not False):
             return
         descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     except (FileNotFoundError, NotADirectoryError):
@@ -1484,21 +1591,23 @@ def _rescan_quota_dir(root, rel, rows, children, scan, budget):
         info = os.fstat(descriptor)
         if [info.st_dev, info.st_ino] != row[:2]:
             return
-        fresh = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, 0, 0, 0, 0, 0]
+        fresh = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, 0, 0, 0, 0, 0, 0]
         present = {}
         with os.scandir(descriptor) as entries:
             for entry in entries:
+                yield None
                 fresh[7] += 1
-                if not parts and entry.name in _QUOTA_CONTROL_NAMES:
+                if not parts and entry.name in _QUOTA_CONTROL_NAMES or _quota_host_managed(parts, entry.name):
                     continue
                 child = entry.stat(follow_symlinks=False)
-                count, reg_bytes, digest, files = _quota_child_row(parts, entry.name, child)
+                count, reg_bytes, digest, files, needs_stat = _quota_child_row(parts, entry.name, child)
                 if not count:
                     continue
                 fresh[4] += 1
                 fresh[5] += reg_bytes
                 fresh[6] = (fresh[6] + digest) & _QUOTA_HASH_MASK
                 fresh[8] += files
+                fresh[9] += needs_stat
                 if stat.S_ISDIR(child.st_mode):
                     present[f'{rel}/{entry.name}' if rel else entry.name] = [child.st_dev, child.st_ino]
     finally:
@@ -1506,7 +1615,7 @@ def _rescan_quota_dir(root, rel, rows, children, scan, budget):
     added = []
     for child, identity in present.items():
         if child not in rows or rows[child][:2] != identity:
-            subtree = _scan_new_quota_subtree(root, child, budget)
+            subtree = yield from _scan_new_quota_subtree(root, child)
             if subtree is None:
                 return
             added.append(subtree)
@@ -1525,24 +1634,22 @@ def _rescan_quota_dir(root, rel, rows, children, scan, budget):
     rows[rel] = fresh
 
 
-# LLM: 走过之后新出现的子目录沿前台同一有界枚举补扫并收集其目录行；补扫额度用尽或子树中途变化返回None。
-# 函数用途: 计算一棵对账走过后才出现的子树的字节、inode与目录行。
-def _scan_new_quota_subtree(root, rel, budget):
+# LLM: 走过之后新出现的子目录沿后台同一排序枚举补扫并收集其目录行，逐项交还对账片（显式传观察容器，可跨片暂停）；
+#   子树中途消失或变化返回None。
+# 函数用途: 分片计算一棵对账走过后才出现的子树的字节、inode与目录行。
+def _scan_new_quota_subtree(root, rel):
     state, used, inodes = {}, 0, 0
-    token = _QUOTA_SNAPSHOT_STATE.set(state)
-    iterator = _quota_entries(root, tuple(rel.split('/')))
+    iterator = _sorted_quota_entries(root, tuple(rel.split('/')), state=state)
     try:
-        for size, files in iterator:
-            budget[0] -= 1
-            if budget[0] < 0:
-                return None
-            used += size
-            inodes += files
+        for entry in iterator:
+            yield None
+            if entry is not None:
+                used += entry[1]
+                inodes += entry[2]
     except (FileNotFoundError, NotADirectoryError):
         return None
     finally:
         iterator.close()
-        _QUOTA_SNAPSHOT_STATE.reset(token)
     if state.get('metadata_complete') is not True or state.get('scan_rows'):
         return None
     return used, inodes, state.get('dir_stamps') or {}
@@ -1552,7 +1659,7 @@ def _scan_new_quota_subtree(root, rel, budget):
 #   受控写由结算并入持久游标，进程内扫描器见到新revision即改从持久游标续扫；root身份变化、游标闲置超期或本轮开始后
 #   出现未结算的新预留（准入后崩溃的孤儿）即从头重扫，异常不得发布complete或清孤儿预留。
 #   同revision的热续扫只核epoch、root身份与闲置期限，不再逐行校验本进程上一片刚写下的目录表。
-#   新一轮以上一份可信目录表为滚动基线，走完前未走到的目录仍可被准入核验；走完时先清点走过之后的漂移再发布。
+#   新一轮以上一份可信目录表为滚动基线，走完前未走到的目录仍可被准入核验；枚举走完时先分片清点走过之后的漂移再发布。
 # max_ms 约束 replay_skip 前缀重放完成后的本片新增扫描工作，不是整次调用的墙钟上限。
 # 重放仍受 enumeration_budget（含已持久前缀的一次额外额度）约束，并至少推进一个新位置后检查时间，避免恢复饥饿。
 # 函数用途: 有界续扫 owner；完成后回收孤儿预留并记录准确观察用量。
@@ -1581,33 +1688,47 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             state = {'prep': deepcopy(prep), **(_quota_metadata_payload(cursor) if cursor
                                                 else _quota_pass_baseline(ledger))}
             state['dir_batches'] = deepcopy(cursor.get('dir_batch', {}))
-            scan = {'iterator': _sorted_quota_entries(root, after=cursor.get('last_relpath', ''), state=state),
-                    'revision': ledger['revision'], 'last_relpath': cursor.get('last_relpath', ''),
+            scan = {'revision': ledger['revision'], 'last_relpath': cursor.get('last_relpath', ''),
                     'orphans': cursor.get('orphans', sorted(ledger['reservations'])),
                     'used': cursor.get('partial_used_bytes', 0), 'inodes': cursor.get('partial_inode_count', 0),
                     'scanned': cursor.get('scanned', 0), 'epoch': cursor.get('epoch', uuid.uuid4().hex),
-                    'started_at': cursor.get('started_at', time.time()), 'state': state}
+                    'started_at': cursor.get('started_at', time.time()), 'state': state,
+                    'settling': cursor.get('settling') is True, 'root_clean': not cursor, 'root_stamp': None,
+                    'retry_rel': cursor.get('settling_rel')}
+            # 枚举已走完、正在清点漂移的一轮直接续清点，不再重放已走完的枚举。
+            scan['iterator'] = (_settle_quota_pass_drift(root, scan) if scan['settling'] else
+                                _sorted_quota_entries(root, after=scan['last_relpath'], state=state))
             _QUOTA_SCANS[key] = scan
+        else:
+            _quota_scan_root_clean(root, scan)
         _QUOTA_SCANS.move_to_end(key)
         while len(_QUOTA_SCANS) > _QUOTA_SCAN_CACHE_SIZE:
             _, expired = _QUOTA_SCANS.popitem(last=False)
             expired['iterator'].close()
-        complete, scanned, enumerated = False, 0, 0
+        complete, scanned, enumerated, settled = False, 0, 0, 0
         enumeration_budget = max(1024, max_entries * 4)
         # 重放也计入枚举；旧前缀吃满普通预算时，额外只给该持久前缀一次重放额度。
         replay_allowance = replay_skip if replay_skip >= enumeration_budget else 0
         enumeration_budget += replay_allowance
         deadline = time.monotonic() + max_ms / 1000
         try:
-            while scanned < max_entries and enumerated < enumeration_budget:
+            while scanned < max_entries and enumerated + settled < enumeration_budget:
                 # 已计费前缀重放完并推进至少一个新位置后才检查时间；总枚举额度不变。
-                if (scanned or enumerated > replay_skip) and time.monotonic() >= deadline:
+                if (scanned or settled or enumerated > replay_skip) and time.monotonic() >= deadline:
                     break
                 try:
                     entry = next(scan['iterator'])
                 except StopIteration:
-                    complete = True
-                    break
+                    if scan['settling']:
+                        complete = True
+                        break
+                    # 枚举走完后每轮只建一次漂移清点，清点逐项交还本片额度，余下的下一片续作。
+                    scan['settling'] = True
+                    scan['iterator'] = _settle_quota_pass_drift(root, scan)
+                    continue
+                if entry is None and scan['settling']:
+                    settled += 1
+                    continue
                 if entry is None:
                     enumerated += 1
                     if replay_skip > 0 and enumerated == replay_skip:
@@ -1620,8 +1741,6 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 scan['scanned'] += 1
                 scan['last_relpath'] = relpath
                 scanned += 1
-            if complete:
-                _settle_quota_pass_drift(root, scan)
         except BaseException:
             scan['iterator'].close()
             _QUOTA_SCANS.pop(key, None)
@@ -1633,6 +1752,8 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             'partial_inode_count': scan['inodes'], 'started_at': scan['started_at'], 'updated_at': time.time(),
             'orphans': scan['orphans'],
             'ledger_revision': ledger['revision'], 'root_dev': identity.st_dev, 'root_ino': identity.st_ino}
+        if scan['settling'] and not complete:
+            cursor_payload.update(settling=True, settling_rel=scan.get('settling_rel'))
         cursor_payload.update(_quota_metadata_payload(scan['state']))
         # 准入核验的轮转位置跨片保留，免得每片都从表头重核同一批目录。
         if isinstance(previous, dict) and type(previous.get('verify_pos')) is int:
@@ -1670,14 +1791,21 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             cursor_payload['dir_batch'] = persisted
         ledger['reconcile_cursor'] = cursor_payload
         if complete:
-            ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'], dirty_since=None,
-                          reservations={}, reserved_bytes=0)
+            # 清点放弃过的目录未补正，总量照常发布但保持脏，由下一轮补正后才恢复增长。
+            ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'],
+                          dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
             scan['iterator'].close()
             _QUOTA_SCANS.pop(key, None)
+        else:
+            # 账本替换会掩盖本片内root的其它改动，必须在写账本前核对。
+            _quota_scan_root_clean(root, scan)
         # 未完成的一轮不改变账本可信度：干净账继续按受控写代次准入，脏账保持脏直到本轮完成。
         _write_quota_ledger(root, ledger)
+        if not complete and scan['root_clean']:
+            info = root.stat(follow_symlinks=False)
+            scan['root_stamp'] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
-                'replay_allowance': replay_allowance,
+                'settled_entries': settled, 'replay_allowance': replay_allowance,
                 'used_bytes': ledger['used_bytes'],
                 'inode_count': ledger['inode_count'], 'cursor': ledger['reconcile_cursor']}
 
@@ -1713,16 +1841,73 @@ def _quota_pass_baseline(ledger):
     return state if _quota_metadata_bytes(state) <= _QUOTA_MAX_METADATA_BYTES else {}
 
 
-# LLM: 只读账本，不取锁；缺账、坏账、脏账或对账一轮尚未走完都算待对账，供维护在追赶期放大单片额度。
-# 函数用途: 判断owner配额账是否仍需追赶对账。
-def owner_quota_reconcile_pending(owner_root):
+# LLM: 登记本进程曾以正限额构造过配额准入器的owner根身份，供无quota.json或测试夹具识别有限配额。
+# 函数用途: 记住当前owner根目录启用过有限配额准入。
+def _remember_quota_finite_root(root: Path) -> None:
+    try:
+        info = root.stat(follow_symlinks=False)
+    except OSError:
+        return
+    with _QUOTA_ROOT_STAMPS_LOCK:
+        _QUOTA_FINITE_ROOTS[root] = (info.st_dev, info.st_ino)
+        _QUOTA_FINITE_ROOTS.move_to_end(root)
+        while len(_QUOTA_FINITE_ROOTS) > _QUOTA_ROOT_STAMP_CACHE_SIZE:
+            _QUOTA_FINITE_ROOTS.popitem(last=False)
+
+
+# LLM: quota.json的max_disk_mb>0或本进程对该root身份建过有限配额准入器时视为配额开启；关闭时不触发每拍追赶。
+# 函数用途: 判断owner是否启用了有限磁盘配额。
+def owner_quota_enabled(owner_root) -> bool:
     root = Path(owner_root).expanduser().resolve(strict=False)
+    raw = read_json_object_report(root / "quota.json", context="owner_policy.quota").payload.get("max_disk_mb")
+    if type(raw) is int and raw > 0:
+        return True
+    try:
+        info = root.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    with _QUOTA_ROOT_STAMPS_LOCK:
+        return _QUOTA_FINITE_ROOTS.get(root) == (info.st_dev, info.st_ino)
+
+
+# LLM: 只读账本，不取锁；缺账、坏账、脏账或对账一轮尚未走完都算待对账，供维护在追赶期放大单片额度。
+#   require_ledger时只认可已开启有限配额且可读的已有账：未开启配额、缺账与坏账都不触发每拍维护续作。
+# 函数用途: 判断owner配额账是否仍需追赶对账。
+def owner_quota_reconcile_pending(owner_root, *, require_ledger=False):
+    root = Path(owner_root).expanduser().resolve(strict=False)
+    if require_ledger and (not os.path.lexists(root / _QUOTA_LEDGER) or not owner_quota_enabled(root)):
+        return False
     try:
         ledger = _read_quota_ledger(root)
     except (OSError, RuntimeError, ValueError):
-        return True
+        return not require_ledger
     cursor = ledger.get('reconcile_cursor')
     return ledger.get('dirty_since') is not None or not isinstance(cursor, dict) or cursor.get('complete') is not True
+
+
+# LLM: 宿主在准入外写完状态文件后调用。只在非阻塞配额锁下、对干净同步的完整目录表做一次有界核验（先核给定目录，
+#   余下额度照常轮转），全部通过才写回采纳的新目录戳，让后续准入在大目录上仍走O(1)目录戳比较。无账时不建锁文件；
+#   锁忙、脏账、无表或核验不通过都不改账，留给准入核验与对账。
+# 函数用途: 宿主写完状态文件后刷新所在目录的配额目录行，返回是否写回。
+def refresh_owner_quota_host_rows(owner_root, rels):
+    root = Path(owner_root).expanduser().resolve(strict=False)
+    if not os.path.lexists(root / _QUOTA_LEDGER):
+        return False
+    try:
+        with _locked_owner_quota(root / _QUOTA_LOCK_BASENAME, blocking=False):
+            ledger = _read_quota_ledger(root)
+            cursor = ledger.get('reconcile_cursor')
+            if (ledger.get('dirty_since') is not None or ledger.get('reservations')
+                    or not isinstance(cursor, dict) or cursor.get('complete') is not True
+                    or cursor.get('ledger_revision') != ledger['revision'] or not _quota_cursor_table(cursor)):
+                return False
+            if not _verify_quota_metadata(root, cursor, touched=tuple(rels), budget=_QUOTA_VERIFY_BUDGET_ENTRIES,
+                                          root_vouched=_quota_root_vouched(root, ledger['revision'])):
+                return False
+            _write_quota_ledger(root, ledger)
+            return True
+    except (OwnerQuotaUnavailable, OSError):
+        return False
 
 
 # LLM: 进程内窗口可到65536项；持久化只保留最小的前缀并记下上界，冷恢复继续枚举时不再收上界以外的名字，
@@ -1789,7 +1974,8 @@ def _safe_dir_lseek(fd, pos, whence):
 
 # LLM: 只恢复闲置未超期、同root身份及同写revision的完整游标；旧格式缺部分统计须重扫，不猜累计值。
 #   本轮开始后新出现的预留只能是准入后崩溃的孤儿，其落盘差额未并入游标，必须从头重扫。
-#   目录表必须是本行格式：旧七整数行不能接着累加九整数摘要；正在扫描的目录行须恰好覆盖续点所在路径上的各级目录。
+#   目录表必须是本行格式：旧格式行不能接着累加本格式摘要；正在扫描的目录行须恰好覆盖续点所在路径上的各级目录，
+#   枚举已走完、正在清点漂移的游标则不得留有扫描中的目录行。
 # 函数用途: 验证持久续点可用性，防止LRU淘汰或重启丢失可信扫描进度。
 def _resumable_quota_cursor(root, ledger):
     cursor = ledger.get('reconcile_cursor', {})
@@ -1813,9 +1999,16 @@ def _resumable_quota_cursor(root, ledger):
                 > _QUOTA_MAX_METADATA_BYTES):
             return None
         components = last.rstrip('/').split('/') if last else []
-        open_dirs = {'/'.join(components[:depth]) for depth in range(len(components))}
-        if not open_dirs <= set(tables[2]) or any(rel and last != rel and not last.startswith(rel + '/')
-                                                  for rel in tables[2]):
+        # 宿主子树内的目录不建扫描行，续点落在其中时只要求root扫描行。
+        depth = 1 if components and components[0] in _QUOTA_HOST_TREES else len(components)
+        open_dirs = {'/'.join(components[:index]) for index in range(depth)}
+        if cursor.get('settling') is True:
+            pending = cursor.get('settling_rel')
+            if tables[2] or pending is not None and not (
+                    isinstance(pending, str) and _valid_quota_parts(pending.split('/') if pending else [])):
+                return None
+        elif not open_dirs <= set(tables[2]) or any(rel and last != rel and not last.startswith(rel + '/')
+                                                    for rel in tables[2]):
             return None
     if 'prep' in cursor and cursor['prep'] is not None and not _valid_quota_prep_cursor(cursor['prep']):
         return None
@@ -2081,7 +2274,7 @@ def _quota_sorted_stat(root, parts, name):
 # LLM: 持久last_relpath为完整字典序键，恢复只进入可能包含后继的子树；深度64和每层128名字有界。
 #   排序准备逐项yield供时间/枚举预算中断；重启跳过旧键不重复计费，时间预算仍不抢占单个系统调用。
 #   同一窗口只打开目录一次再逐名lstat；进入子目录前关闭本层FD，子目录打开一次即供其排序准备与首个窗口共用，暂停时至多持一个目录FD。
-#   目录走完才把扫描行并入完整表。
+#   目录走完才把扫描行并入完整表。宿主状态中途消失只少计，不作废目录表。
 # 函数用途: 为后台配额生成确定性续扫项，同时保持前台原有小目录扫描算法不变。
 def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=None):
     try:
@@ -2102,8 +2295,8 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
                     descended = True
                 except FileNotFoundError:
                     pass
-            # 续点所在目录已消失或被替换时其扫描行不再完整，整表作废。
-            if not descended and isinstance(state, dict):
+            # 续点所在目录已消失或被替换时其扫描行不再完整，整表作废；宿主子树不建行，随宿主增删不影响目录表。
+            if not descended and isinstance(state, dict) and not _quota_host_managed(parts, sub_name):
                 _drop_quota_metadata(state)
             last_name = sub_name + '/'
         else:
@@ -2123,7 +2316,7 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
                 try:
                     info = os.stat(name.rstrip('/'), dir_fd=descriptor, follow_symlinks=False)
                 except FileNotFoundError:
-                    if isinstance(state, dict):
+                    if isinstance(state, dict) and not _quota_host_managed(parts, name.rstrip('/')):
                         _drop_quota_metadata(state)
                     if relpath > after:
                         yield relpath, 0, 0
@@ -2142,7 +2335,7 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
                             root, child_parts, after=after, state=state,
                             descriptor=open_directory_beneath(root, child_parts, require_dir_fd=True))
                     except FileNotFoundError:
-                        if isinstance(state, dict):
+                        if isinstance(state, dict) and not _quota_host_managed(parts, child_parts[-1]):
                             _drop_quota_metadata(state)
                         continue
             # 字节上限或持久化裁剪可产生不足128项的窗口；短窗口不等于整个目录已读完。

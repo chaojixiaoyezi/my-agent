@@ -18,6 +18,7 @@ from ..common.nofollow_fs import (
     read_bytes_beneath,
     read_text_beneath,
 )
+from .reference_pins import record_parsed_pin_bytes
 
 GENERATION_SCHEMA = "memory-generation.v1"
 TOMBSTONE_SCHEMA = "storage-tombstones.v1"
@@ -116,7 +117,7 @@ class StorageTombstones:
         self.path = self.memory_path.with_name(self.memory_path.name + ".storage_tombstones.json")
         self.owner = hashlib.sha256(str(self.memory_path.absolute()).encode()).hexdigest()
 
-    # LLM: 永久账叠加旧墓碑且不回滚hash；可共用调用方的字节/记录预算，未读完整不得返回部分屏障。
+    # LLM: 永久账叠加旧墓碑且不回滚hash；可共用调用方的字节/记录预算，未读完整不得返回部分屏障；引用快照内两账解析字节须等于读前观察。
     # 函数用途: 读取并验证永久删除记录。
     def load(self, *, max_bytes=None, on_read=None, _read=None, on_record=None):
         from ._jsonl_maintenance import require_maintenance_event
@@ -124,6 +125,7 @@ class StorageTombstones:
 
         body = (_read(self.path) if _read is not None else
                 read_bytes_beneath(self.path.parent, (self.path.name,), max_bytes=max_bytes))
+        record_parsed_pin_bytes(self.path, body)
         used = len(body or b"")
         if on_read is not None:
             on_read(used)
@@ -151,6 +153,7 @@ class StorageTombstones:
         legacy = _tombstone_path(self.memory_path)
         body = (_read(legacy) if _read is not None else read_bytes_beneath(legacy.parent, (legacy.name,),
                 max_bytes=None if max_bytes is None else max_bytes - used))
+        record_parsed_pin_bytes(legacy, body)
         if on_read is not None:
             on_read(len(body or b""))
         text = body.decode("utf-8") if body is not None else None
@@ -209,11 +212,12 @@ class MemoryGenerationStore:
         self.directory = self.path.with_name(self.path.name + ".generations")
         self.tombstones = StorageTombstones(self.path)
 
-    # LLM: nofollow读取且强校验owner/schema/分片相对路径；降级可复用同一预算reader，不接受外部owner清单。
+    # LLM: nofollow读取且强校验owner/schema/分片相对路径；降级可复用同一预算reader，不接受外部owner清单；引用快照内解析字节须等于读前观察。
     # 函数用途: 读取同代根清单，首次旧库返回None。
     def manifest(self, *, max_bytes=None, on_read=None, _read=None):
         body = (_read(self.manifest_path) if _read is not None else
                 read_bytes_beneath(self.path.parent, (self.manifest_path.name,), max_bytes=max_bytes))
+        record_parsed_pin_bytes(self.manifest_path, body)
         if on_read is not None:
             on_read(len(body or b""))
         raw = body.decode("utf-8") if body is not None else None
@@ -236,10 +240,12 @@ class MemoryGenerationStore:
             names.add(item["path"])
         return root
 
-    # LLM: 每个分片最多1000条；校验整个分片hash后才反序列化，未发表分片从不进入读取。
+    # LLM: 每个分片最多1000条；校验整个分片hash后才反序列化，未发表分片从不进入读取；引用快照内解析字节须等于读前观察。
     # 函数用途: 读取并验证根清单精确引用的一个分片。
     def segment_rows(self, segment):
-        raw = read_text_beneath(self.path.parent, tuple(Path(segment["path"]).parts))
+        body = read_bytes_beneath(self.path.parent, tuple(Path(segment["path"]).parts))
+        record_parsed_pin_bytes(self.path.parent / segment["path"], body)
+        raw = body.decode("utf-8") if body is not None else None
         if raw is None or hashlib.sha256(raw.encode("utf-8")).hexdigest() != segment["sha256"]:
             raise ValueError("MEMORY_GENERATION_UNREADABLE")
         rows = [json.loads(line) for line in raw.split("\n") if line]
