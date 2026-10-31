@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -143,12 +144,23 @@ def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, lin
     return None
 
 
+# LLM: 所有标量入口共用字符范围；错误不含候选值，不在编码失败后才发现部分字段已写入。
+# 函数用途: 拒绝控制字符、Unicode 行分隔符和不能编码成 UTF-8 的代理码点。
+def validate_config_scalar_text(value: str) -> None:
+    if any(ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f or 0xd800 <= ord(ch) <= 0xdfff
+           or ch in "\u2028\u2029" for ch in value):
+        raise ValueError("配置标量含不支持的控制字符或编码字符。")
+
+
+# LLM: 保留旧整数渲染合同；字符校验必须先于任何写入，不回显非法值。
+# 函数用途: 为旧标量调用方生成简化 YAML 文本。
 def _format_yaml_scalar(value: str) -> str:
     """把字符串值格式化成 mini-yaml 标量:纯整数原样;其余双引号包裹。
 
     含双/单引号或换行的值会写坏这套"够用版"yaml(parse_scalar 只剥外层引号、不解析转义),
     直接拒绝并让调用方提示手动编辑——宁可不写,也不写出半个坏配置。
     """
+    validate_config_scalar_text(value)
     if value != "" and value.lstrip("-").isdigit():
         return value
     if '"' in value or "'" in value or "\n" in value:
@@ -170,17 +182,22 @@ def _replace_top_level_line(lines: list[str], key: str, new_line: str) -> str | 
     return None
 
 
+# LLM: 旧单值调用保留签名和返回值，候选构造复用事务的重复键/多行/字符拒绝，不供多字段事务调用。
+# 函数用途: 校验完整候选后一次原子写回，保留原文件的 BOM、换行和无关字节。
 def set_simple_yaml_value(path: Path, key: str, value: str) -> tuple[str | None, str]:
     """把顶层 key 设为 value,保留注释与其余行(标准库,无 PyYAML)。返回 (旧值文本或 None, 新行)。
 
     找不到该顶层 key 则在末尾追加。写回走"同目录临时文件 + 原子替换",避免写一半把配置文件弄残。
     """
-    new_line = f"{key}: {_format_yaml_scalar(value)}"
-    lines = path.read_text(encoding="utf-8-sig").splitlines()
-    old = _replace_top_level_line(lines, key, new_line)
-    if old is None:
-        lines.append(new_line)
-    _write_config_lines(path, lines)
+    rendered = _format_yaml_scalar(value)
+    new_line = f"{key}: {rendered}"
+    original = path.read_bytes()
+    candidate, _ = render_config_change(original, key, rendered)
+    old = next((line.split(":", 1)[1].strip() for line in original.decode("utf-8-sig").splitlines()
+                if _is_top_level_key_line(line, key)), None)
+    if parse_simple_yaml_text(candidate.decode("utf-8-sig")).get(key) != parse_scalar(rendered):
+        raise ValueError("配置候选编解码不一致，没有写入。")
+    write_config_bytes_atomic_unlocked(path, candidate)
     return old, new_line
 
 
@@ -280,8 +297,10 @@ def unset_simple_yaml_value(path: Path, key: str) -> str | None:
 # LLM: 纯编辑保留无关字节、注释、BOM、CRLF；重复目标键拒绝；仅已登记结构 writer 可替换多行列表，未知缩进映射拒绝。
 # 函数用途: 生成一次顶层配置变更及其可回滚旧值，不触碰磁盘。
 def render_config_change(original: bytes, key: str, rendered: str | None, *, structured: bool = False) -> tuple[bytes, str | None]:
-    if rendered is not None and any(mark in rendered for mark in ("\n", "\r")):
-        raise ValueError("配置值不能包含换行")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        raise ValueError("配置键格式无效。")
+    if rendered is not None:
+        validate_config_scalar_text(rendered)
     text = original.decode("utf-8-sig")
     bom = b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b""
     lines = text.splitlines(keepends=True)
