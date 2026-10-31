@@ -1954,3 +1954,130 @@ def test_r11_foreground_snapshot_invalidation_never_falls_back_to_stale_ledger(
     assert _r7_ledger(root)['dirty_since'] is None
     assert _r7_ledger(root)['reconcile_cursor'].get('metadata_complete') is True
     assert not _r7_ledger(root)['reconcile_cursor'].get('metadata_invalidated')
+
+
+# LLM: 前台快照观察到失效后必须先持久化dirty与metadata_invalidated检查点，再执行上阶段结算或前像读取。
+# 函数用途: 回归测试R12-QUOTA-01前像读取异常与分阶段结算异常均不会丢失已观察到的快照失效状态。
+@pytest.mark.parametrize('failure_mode', ['preimage_stat_error', 'prior_stage_settlement_error'])
+def test_r12_invalidated_preimage_and_staged_settlement_errors_preserve_dirty_state(
+    tmp_path,
+    monkeypatch,
+    failure_mode,
+):
+    root = tmp_path / 'owner'
+    root.mkdir()
+    for idx in range(22):
+        sub = root / f'a{idx:02d}'
+        sub.mkdir()
+        (sub / '0.bin').write_bytes(b'x')
+    assert _r7_finish(root)['used_bytes'] == 22
+
+    real_scandir = os.scandir
+    target_info = (root / 'a16').stat()
+    triggered = [False]
+
+    class _Entry:
+        def __init__(self, entry, fd_arg):
+            self._entry = entry
+            self._fd_arg = fd_arg
+
+        def __getattr__(self, name: str):
+            return getattr(self._entry, name)
+
+        def stat(self, **kwargs):
+            info = os.fstat(self._fd_arg)
+            if (
+                not triggered[0]
+                and self._entry.name == '0.bin'
+                and (info.st_dev, info.st_ino) == (target_info.st_dev, target_info.st_ino)
+            ):
+                triggered[0] = True
+                (root / 'a12' / 'large.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+                (root / 'a16' / '0.bin').unlink()
+            return self._entry.stat(**kwargs)
+
+    class _Scandir:
+        def __init__(self, fd_arg):
+            self._fd_arg = fd_arg
+            self._inner = real_scandir(fd_arg)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._inner.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return _Entry(next(self._inner), self._fd_arg)
+
+        def close(self):
+            self._inner.close()
+
+    enforcer = quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024)
+    if failure_mode == 'preimage_stat_error':
+        existing = root / 'a00' / '0.bin'
+        monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'scandir': _Scandir}))
+        monkeypatch.setattr(quota, 'time', SimpleNamespace(**{**vars(quota.time), 'monotonic': lambda: 0.0}))
+
+        def _fail_stat(*_a, **_kw):
+            raise OSError('transient preimage read error')
+
+        monkeypatch.setattr(quota, '_quota_sorted_stat', _fail_stat)
+        with pytest.raises(OSError, match='transient preimage'):
+            with enforcer.reserve([quota.OwnerQuotaChange(existing, 1)]):
+                raise AssertionError('should not enter body')
+        monkeypatch.undo()
+    else:
+        staged = root / 'a00' / 'stage.bin'
+        target = root / 'a21' / 'new.bin'
+        orig_commit = quota.OwnerQuotaAdmission.commit_delta
+        failed = [False]
+
+        def _transient_settlement_error(admission):
+            if not failed[0] and admission._before:
+                failed[0] = True
+                raise OSError('transient settlement read error')
+            return orig_commit(admission)
+
+        with pytest.raises(OSError, match='transient settlement'):
+            with enforcer.admission() as admission:
+                admission.check([quota.OwnerQuotaChange(staged, 3)])
+                staged.write_bytes(b'abc')
+                monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'scandir': _Scandir}))
+                monkeypatch.setattr(quota, 'time', SimpleNamespace(**{**vars(quota.time), 'monotonic': lambda: 0.0}))
+                monkeypatch.setattr(quota.OwnerQuotaAdmission, 'commit_delta', _transient_settlement_error)
+                admission.check([quota.OwnerQuotaChange(target, 1)])
+        monkeypatch.undo()
+        assert failed[0]
+        assert not target.exists()
+        assert _r7_ledger(root)['used_bytes'] == 25
+
+    assert triggered[0]
+    ledger = _r7_ledger(root)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reconcile_cursor'].get('metadata_complete') is False
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+
+    # 后续增长请求即使前台10ms快照超时，也必须因已持久化的dirty_since与metadata_invalidated被拒绝。
+    real_entries = quota._quota_entries
+    delayed = [False]
+
+    def _delayed_entries(owner, parts=()):
+        for item in real_entries(owner, parts):
+            if not delayed[0]:
+                delayed[0] = True
+                quota.time.sleep(0.02)
+            yield item
+
+    retry_target = root / 'a21' / 'retry.bin'
+    monkeypatch.setattr(quota, '_quota_entries', _delayed_entries)
+    with pytest.raises(quota.OwnerQuotaUnavailable):
+        with enforcer.reserve([quota.OwnerQuotaChange(retry_target, 1)]):
+            retry_target.write_bytes(b'z')
+    monkeypatch.setattr(quota, '_quota_entries', real_entries)
+    assert not retry_target.exists()

@@ -300,14 +300,15 @@ class OwnerQuotaAdmission:
             if snapshot.get('metadata_invalidated'):
                 complete = False
                 snapshot_invalidated = True
-        # 同一准入分阶段调用时先结算上阶段；其它遗留预留仍不得当成干净基线。
-        if not complete and self._before:
-            self.commit_delta()
-            ledger = _read_quota_ledger(root)
         if snapshot_invalidated:
             ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
             if isinstance(ledger.get('reconcile_cursor'), dict):
                 _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
+            _write_quota_ledger(root, ledger)
+        # 已先持久化观察失效，同一准入分阶段调用时结算上阶段及后续前像读取失败均保留该事实。
+        if not complete and self._before:
+            self.commit_delta()
+            ledger = _read_quota_ledger(root)
         touched = {'/'.join(path.relative_to(root).parts[:depth])
                    for path in relevant for depth in range(len(path.relative_to(root).parts))}
         authoritative = not complete and not snapshot_invalidated and _verified_quota_baseline(root, ledger, touched)
