@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 import threading
 import time
 
@@ -44,7 +45,7 @@ def evaluate_dispatcher_stall(snapshot: dict[str, object], *, now: float | None 
 
 
 # LLM: 只记类型名、脱敏并截断后的消息、上下文和时间，不存异常对象（避免引用链把线程栈和 agent 留在内存里）；
-#   消息会进心跳文件与 /status，所以先过 redact_sensitive_text。包装异常带显式环境根因时补 cause_type/cause_category。
+#   消息先过 redact_sensitive_text；显式 SQLite 原因链还保留原生类型和数值码，不从消息猜测。
 # 函数用途: 把一个异常压成可 JSON 序列化、可对外展示的小记录。
 def _error_record(context: str, exc: BaseException) -> dict:
     return {
@@ -53,7 +54,28 @@ def _error_record(context: str, exc: BaseException) -> dict:
         "message": redact_sensitive_text(str(exc))[:500],
         "at": time.time(),
         **environment_cause_fields(exc),
+        **sqlite_cause_fields(exc),
     }
+
+
+# LLM: 只沿显式 __cause__ 查原生 sqlite3.Error，兼容无数值属性的解释器；不读 __context__，有环即停。
+# 函数用途: 为健康摘要和请求错误出口提供相同 SQLite 原因投影，不改变外层错误分类。
+def sqlite_cause_fields(exc: BaseException) -> dict[str, object]:
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, sqlite3.Error):
+            fields = {"cause_type": type(current).__name__, "cause_category": "io"}
+            code = getattr(current, "sqlite_errorcode", None)
+            name = getattr(current, "sqlite_errorname", None)
+            if type(code) is int:
+                fields["cause_sqlite_errorcode"] = code
+            if isinstance(name, str):
+                fields["cause_sqlite_errorname"] = name
+            return fields
+        current = current.__cause__
+    return {}
 
 
 # LLM: 所有写入都在同一把锁内；snapshot 返回带派生字段（dispatcher_alive/dispatcher_state）的扁平副本，键名带

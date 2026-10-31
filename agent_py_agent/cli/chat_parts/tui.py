@@ -163,18 +163,22 @@ def _tui_control_state(params: TuiHandleCommandParams) -> ChatControlState:
         )
 
 
-# LLM: 所有退出路径先停止本客户端的刷新/轮询，再清终端；异常不能跳过停止信号，不取消 Gateway 持久任务。
-# 函数用途: 运行界面并在 finally 释放客户端活动；正常退出保存会话并打印恢复命令。
+# LLM: 所有退出路径先停止客户端并清终端，再向真实控制台打印诊断；不能把错误写进即将销毁的 TUI sink。
+# 函数用途: 运行界面并释放客户端活动；只有零退出码才保存会话并打印正常恢复提示。
 def _run_tui_loop(ctx: TuiLoopContext) -> int:
     from .rendering import set_tui_output_sink
 
     result = 0
+    failure = None
     try:
         with patch_stdout():
             app_result = ctx.app.run(pre_run=ctx.pre_run)
             result = int(app_result or 0)
     except (EOFError, KeyboardInterrupt):
         pass
+    except Exception as exc:
+        failure = exc
+        raise
     finally:
         ctx.stop_event.set()
         ctx.refresh_stop.set()
@@ -188,12 +192,30 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
         title_controller = getattr(ctx.app, "_my_agent_title_controller", None)
         if title_controller is not None:
             title_controller.clear(ctx.app.output)
+        if failure is not None:
+            _print_tui_failure(ctx.app, exit_code=1, error=failure)
+    if result != 0:
+        _print_tui_failure(ctx.app, exit_code=result)
+        return result
     ctx.session_manager.touch_session(ctx.current_session_id, channel="chat")
     _cprint(
         "\n已退出界面；会话与 Gateway 后台任务已保留。\n"
         f"恢复：my-agent resume {ctx.current_session_id}"
     )
     return result
+
+
+# LLM: 只投影原异常或 preflight 留下的结构化引用；不展示异常正文，不把会话编号冒充 request_id。
+# 函数用途: 打印真实非零退出码和可核对诊断，异常仍由原调用方处理。
+def _print_tui_failure(app: object, *, exit_code: int, error: BaseException | None = None) -> None:
+    import json
+
+    facts = getattr(app, "_my_agent_exit_diagnostic", {})
+    facts = facts if isinstance(facts, dict) else {}
+    diagnostic = {key: value for key in ("error_code", "request_id", "diagnostic_ref")
+                  if isinstance(value := getattr(error, key, facts.get(key)), str) and value}
+    diagnostic.setdefault("error_code", "TUI_APPLICATION_ERROR" if error is not None else "TUI_NONZERO_EXIT")
+    _cprint("\n界面异常退出：" + json.dumps({"exit_code": exit_code, **diagnostic}, ensure_ascii=False))
 
 
 # LLM: 只在 Gateway 模式启动；空闲判定复用 TUI 既有的结构化引用（运行/排队计数、审批协调器、输入框与焦点、导航深度、

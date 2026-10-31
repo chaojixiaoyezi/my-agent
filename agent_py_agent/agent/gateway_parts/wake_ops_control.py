@@ -119,7 +119,7 @@ def _refusal(code: str, wake_signal_id: str, store: object, signal: WakeSignal |
     return ConversationControlResult(_KIND, False, text.format(id=wake_signal_id, domain=domain, code=code), error_code=code)
 
 
-# LLM: 只展示结构化字段（ID、会话、reason、原因码、次数、时间、重放次数），不展示摘要、metadata 或错误消息。
+# LLM: 只展示结构化身份/原因/诊断引用、次数与时间，last_error 的 message 永不显示。
 # 函数用途: 生成重放预览：这条唤醒是什么、为什么结案、确认后会发生什么。
 def _render_plan(signal: WakeSignal, record: dict[str, Any]) -> str:
     facts = record.get("quarantine") if isinstance(record.get("quarantine"), dict) else {}
@@ -127,14 +127,15 @@ def _render_plan(signal: WakeSignal, record: dict[str, Any]) -> str:
     return "\n".join((
         f"唤醒 {signal.wake_signal_id}｜会话 {signal.thread_id}｜{signal.reason}",
         f"结案原因：{_reason_text(str(decision.get('reason_code') or ''))}；{_counts_text(decision)}；"
-        f"结案于 {_clock(_number(facts.get('quarantined_at')))}；此前重放 {_replay_count(record)} 次。",
+        f"结案于 {_clock(_number(facts.get('quarantined_at')))}；此前重放 {_replay_count(record)} 次。"
+        f"{_diagnostic_text(_wake_diagnostics(record))}",
         "确认后：按原 ID 和原内容放回待处理队列，失败计数清零，这次的结案记录留档到 replayed/。"
         "如果还是同一原因失败，满 5 次会再次结案，不会自己复活。",
         f"确认请输入 /wakes replay {signal.wake_signal_id} confirm",
     ))
 
 
-# LLM: 行来自 attempts.quarantined()（已排除归档与重放留档），按结案时间倒序最多列 _QUARANTINED_LIST_LIMIT_COUNT 条；读不出的只报条数与位置。
+# LLM: 列表来自原 quarantined 投影；仅为最多30条可见记录沿 replay_source 补缺失诊断，不读取/展示正文。
 # 函数用途: 生成已结案唤醒的列表文字。
 def _render_list(store: object) -> str:
     rows, errors = store.wakes.attempts.quarantined()
@@ -142,7 +143,14 @@ def _render_list(store: object) -> str:
         return "没有已结案的后台唤醒。"
     rows = sorted(rows, key=lambda row: _number(row.get("quarantined_at")), reverse=True)
     lines = [f"已结案的后台唤醒 {len(rows)} 条（反复失败后不再自动领取；超过 14 天的会移进归档）："]
-    lines.extend(_row_line(row) for row in rows[:_QUARANTINED_LIST_LIMIT_COUNT])
+    for row in rows[:_QUARANTINED_LIST_LIMIT_COUNT]:
+        diagnostics = _wake_diagnostics(row)
+        source = getattr(store.wakes.attempts, "replay_source", None)
+        if source is not None and not all(key in diagnostics for key in ("error_code", "diagnostic_ref")):
+            code, record = source(row.get("wake_signal_id"))
+            if not code:
+                diagnostics = {**_wake_diagnostics(record), **diagnostics}
+        lines.append(_row_line({**row, **diagnostics}))
     if len(rows) > _QUARANTINED_LIST_LIMIT_COUNT:
         lines.append(f"……另有 {len(rows) - _QUARANTINED_LIST_LIMIT_COUNT} 条没有列出。")
     if errors:
@@ -152,12 +160,31 @@ def _render_list(store: object) -> str:
     return "\n".join(lines)
 
 
-# LLM: 只用 attempts.quarantined() 投影出来的结构化字段，不读摘要或 metadata。
+# LLM: 只用列表与原结案记录已有结构字段，原因码保留；诊断引用不授予重放权。
 # 函数用途: 把列表里的一条结案记录格式化成一行。
 def _row_line(row: dict[str, Any]) -> str:
     return (f"- {row.get('wake_signal_id')}｜会话 {row.get('thread_id')}｜{row.get('reason')}｜"
             f"{_reason_text(str(row.get('reason_code') or ''))}｜{_counts_text(row)}｜"
-            f"结案 {_clock(_number(row.get('quarantined_at')))}｜已重放 {row.get('replay_count') or 0} 次")
+            f"结案 {_clock(_number(row.get('quarantined_at')))}｜已重放 {row.get('replay_count') or 0} 次"
+            f"{_diagnostic_text(row)}")
+
+
+# LLM: 只取原记录白名单字符串，兼容现有扁平列表和 quarantine/decision/last_error；不解析 message。
+# 函数用途: 读取原结案记录中已存在的错误码与诊断引用。
+def _wake_diagnostics(record: dict) -> dict:
+    facts = record.get("quarantine")
+    facts = facts if isinstance(facts, dict) else record
+    sources = (facts.get("last_error"), facts.get("decision"), facts, record)
+    return {key: value for source in sources if isinstance(source, dict)
+            for key in ("reason_code", "error_code", "diagnostic_ref")
+            if isinstance(value := source.get(key), str) and value}
+
+
+# LLM: JSON 编码引用中的控制字符；仅用于展示，不改变原结构字段或结案状态。
+# 函数用途: 追加可对账的错误码与诊断引用，不显示私有错误正文。
+def _diagnostic_text(facts: dict) -> str:
+    return "".join(f"｜{key}={json.dumps(facts[key], ensure_ascii=False)}"
+                   for key in ("error_code", "diagnostic_ref") if facts.get(key))
 
 
 # LLM: 开放集合：已知码带中文说明，已知前缀（admission:、error:）带类别说明，其余只显示原码。

@@ -444,10 +444,9 @@ class _TuiBackgroundActivityController:
         with self._owner._lock:
             return self._state.count > 0
 
-    # LLM: Count, one focused-agent row, and direct-child rows share one display
-    # projection. A valid zero count retains terminal rows for read-only
-    # navigation; only a zero count with no agent rows removes the block.
-    # 函数用途: 根据 canonical 主任务和直属子代理快照开始、更新或收起底部 Working 区，并保留已结束代理供查看。
+    # LLM: Count, focused-agent row and children share one display projection, not task authority.
+    # Compact retires both top-level and nested cached usage, including no-change heartbeats.
+    # 函数用途: 更新 Working 区；跨 Compact 边界先退休旧数值，避免心跳复活前台已清除的上下文。
     def update(
         self,
         active_task_count: int,
@@ -458,9 +457,18 @@ class _TuiBackgroundActivityController:
         block_id = f"background-activity:{owner.session_id}"
         with owner._lock:
             current = self._state
-            current = replace(current, compact_count=max(current.compact_count, owner.store.snapshot().status.compact_count))
+            store_generation = owner.store.snapshot().status.compact_count
+            generation = max(
+                store_generation,
+                _nonnegative_int(snapshot.get("compact_count")) if isinstance(snapshot, Mapping) else 0,
+            )
+            if generation > current.compact_count:
+                current = replace(
+                    current, compact_count=generation, context_usage=None,
+                    main_activity={key: value for key, value in current.main_activity.items() if key != "context_usage"},
+                )
             next_state = _next_background_activity_state(current, count, snapshot)
-            if next_state == current:
+            if next_state == self._state:
                 return False
             # 从动画态切入静止终态时，再排一帧给刷新线程。即时 store
             # invalidate 仍是主链；这一帧只防止终态事件恰好撞上渲染收尾而留屏。
@@ -474,11 +482,14 @@ class _TuiBackgroundActivityController:
             else:
                 kind, phase = "background_activity_completed", "completed"
             self._state = next_state
+            payload = _background_activity_payload(next_state)
+            if generation > store_generation and "context_usage" not in payload:
+                payload["context_usage_cleared"] = True
             owner._publish(
                 kind,
                 phase,
                 block_id,
-                _background_activity_payload(next_state),
+                payload,
                 request_id=f"background:{owner.session_id}",
             )
             if not next_state.visible():
@@ -572,9 +583,8 @@ _GOAL_ACTIVITY_FIELDS = frozenset(
 )
 
 
-# LLM: Poll snapshots are normalized as one frame. Missing fields retain active
-# values only where the prior contract did; invalid subagent/progress projections
-# cannot clear a known-good frame.
+# LLM: Poll snapshots are normalized as one frame; stale Compact counts also gate nested usage.
+# Missing fields retain active values; invalid child/progress projections cannot clear a valid frame.
 # 函数用途: 整理同一轮询帧，旧 Compact 代的迟到数字不覆盖当前快照，空闲数字不扩大活动谓词。
 def _next_background_activity_state(
     current: _TuiBackgroundActivityState,
@@ -596,6 +606,8 @@ def _next_background_activity_state(
         if main_value is not None
         else current.main_activity if count > 0 else {}
     )
+    if snapshot.get("compact_count") is not None and _nonnegative_int(snapshot["compact_count"]) < current.compact_count:
+        main_activity = {key: value for key, value in main_activity.items() if key != "context_usage"}
     if snapshot.get("goal_projection_ok", True) is not False and snapshot.get(
         "goals"
     ) is not None:
@@ -1434,7 +1446,7 @@ class _TuiSessionRuntimeMixin(
         with self._lock:
             return True if generation != self.conversation_reset_generation else publish()
 
-    # LLM: 只能在/new服务端成功后调用；transport session_id保持同一chat，不取消任务、进程或监控，只发布显示事件。
+    # LLM: 只能在/new服务端成功后调用；同锁清空前后台显示缓存，保留controller实例，不取消业务任务或改变transport session_id。
     # 函数用途: 清空旧历史游标与显示投影，新会话继续使用原终端通道。
     def publish_conversation_reset(self, thread_id: str) -> JournalAppendResult:
         with self._lock:
@@ -1451,6 +1463,7 @@ class _TuiSessionRuntimeMixin(
             self._execution_target = None
             self._pending_steers.clear()
             self._queued_prompts.clear()
+            self._background_activity._state = _TuiBackgroundActivityState()
             return self._publish("conversation_reset", "completed", f"new:{thread_id}", {"thread_id": thread_id})
 
     # LLM: 仅将后台完整读取结果投影为 UI 健康事件；重复结果不写 journal，不改 Gateway/turn/队列状态。
@@ -1832,7 +1845,7 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
 class TuiTurnEventAdapter:
     # LLM: adapter只记当前显示block/完整committed候选、工具卡与续跑代次；raw只计量，候选不授状态/权限或跨segment保存。
     # defer_assistant_display 只改变显式 show-prompt 的展示顺序，不改变终态 response 或会话保存。
-    # 函数用途: 初始化一个尚未开始的回合 adapter，并设置回答是否等最终 prompt 后再显示。
+    # 函数用途: 固定原会话显示代次并初始化回合，重置后旧adapter不得把上下文数值写进新线程。
     def __init__(
         self,
         runtime: TuiRuntime,
@@ -1842,6 +1855,7 @@ class TuiTurnEventAdapter:
     ) -> None:
         self.runtime = runtime
         self.request_id = request_id
+        self._conversation_reset_generation = runtime.conversation_reset_generation
         self.turn_block_id = f"turn:{request_id}"
         self.thinking_block_id = f"thinking:{request_id}:0"
         self._thinking_active = False
@@ -2145,14 +2159,21 @@ class TuiTurnEventAdapter:
             self._thinking_text = ""
             return True
 
-    # LLM: Context usage is a status-only typed projection. It must not create transcript blocks,
-    # parse labels, or retain any provider-visible content beyond the numeric whitelist.
-    # 函数用途: 接收本地模型调用产生的实时上下文快照并刷新输入框上方状态条。
+    # LLM: 只投影白名单数值；在runtime同一把锁内核会话/Compact代次并同步后台缓存，旧代事件不改任何显示。
+    # 函数用途: 刷新实时Context，并让缺少新数值的后续心跳沿用本次快照而非旧会话数值。
     def write_context_usage(self, usage: Mapping[str, object]) -> bool:
         payload = _tui_context_usage_payload(usage)
         if not payload:
             return False
-        with self._lock:
+        with self.runtime._lock:
+            if self._conversation_reset_generation != self.runtime.conversation_reset_generation:
+                return False
+            state = self.runtime._background_activity._state
+            generation = max(state.compact_count, self.runtime.store.snapshot().status.compact_count)
+            incoming_generation = usage.get("compact_generation")
+            if type(incoming_generation) is int and incoming_generation < generation:
+                return False
+            self.runtime._background_activity._state = replace(state, compact_count=generation, context_usage=dict(payload))
             self.runtime._publish(
                 "status_updated",
                 "updated",
@@ -2573,7 +2594,7 @@ class TuiTurnEventAdapter:
         self.runtime._publish(kind, phase, self.turn_block_id, {"completion": asdict(completion)}, request_id=self.request_id)
 
 
-# LLM: 旧model_delta仍是未提交raw，只计量；完整正文仅由原committed事件展示，不能因typed kind自证公开资格。
+# LLM: 旧model_delta仍是未提交raw，只计量；完整正文仅由原committed事件展示。Compact边界与会话代次校验同锁。
 # 函数用途: 按结构化 kind 将一条 Gateway 事件交给当前回合的唯一 typed 入口。
 def _consume_gateway_turn_event(
     adapter: TuiTurnEventAdapter,
@@ -2642,13 +2663,16 @@ def _consume_gateway_turn_event(
         generation = _nonnegative_int(payload.get("compact_generation"))
         if generation <= 0:
             return False
-        adapter.runtime._publish(
-            "compact_boundary",
-            "completed",
-            f"compact:{adapter.request_id}:{generation}",
-            {"compact_generation": generation},
-            request_id=adapter.request_id,
-        )
+        with adapter.runtime._lock:
+            if adapter._conversation_reset_generation != adapter.runtime.conversation_reset_generation:
+                return False
+            adapter.runtime._publish(
+                "compact_boundary",
+                "completed",
+                f"compact:{adapter.request_id}:{generation}",
+                {"compact_generation": generation},
+                request_id=adapter.request_id,
+            )
         return True
     if kind == "turn_resumed":
         return _close_resumed_turn_generation(adapter, payload)
