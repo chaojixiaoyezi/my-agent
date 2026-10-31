@@ -5,6 +5,7 @@
 # 模块用途: 防止 tick 持续出错时每 0.2 秒打一条错误日志把磁盘再写满（2026-09-28 事故链的后半段）。
 from __future__ import annotations
 
+import logging
 import math
 
 # 连续出错的退避：0.2 秒起步翻倍，封顶 30 秒；打印限流：同种错误第 1 次打，之后每 10 次打 1 次。
@@ -33,6 +34,7 @@ class LoopErrorBackoff:
         self._print_every = max(1, int(print_every))
         self._consecutive = 0
         self._seen: dict[str, int] = {}
+        self._storage_wait_count = 0
 
     # LLM: 返回值就是"这次要不要打印"的裁决；调用方不得自己再数。连续次数无上界，delay 用 cap 封顶。
     # 函数用途: 记一次失败，返回这种错误这次该不该打印。
@@ -45,8 +47,21 @@ class LoopErrorBackoff:
     # LLM: 成功既清连续计数也清"已见错误"表：下一段故障的第一条一定会打出来。
     # 函数用途: 记一次成功，退避与限流都归零。
     def record_success(self) -> None:
+        if self._storage_wait_count:
+            logging.getLogger(__name__).info("gateway storage_resumed", extra={"wait_count": self._storage_wait_count})
+            self._storage_wait_count = 0
         self._consecutive = 0
         self._seen.clear()
+
+    # LLM: 复用原指数退避；只记录首次与恢复，累计次数随原loop保存，不打印异常正文。
+    # 函数用途: 记录结构化storage_wait，保留原调度来源。
+    def record_storage_wait(self, kind: str) -> None:
+        self.record_failure(kind)
+        self._storage_wait_count += 1
+        if self._storage_wait_count == 1:
+            logging.getLogger(__name__).warning("gateway storage_wait", extra={
+                "reason_code": "owner_quota_unavailable", "wait_count": self._storage_wait_count,
+                "retry_after_seconds": self.delay(), "context": kind})
 
     # LLM: 纯读取，保原指数与封顶；用浮点缩放避免数千次失败后巨大整数转换溢出，再次杀死错误处理循环。
     # 函数用途: 计算当前等待时间；无失败或零基数返回零，超过浮点范围直接沿原上限等待。

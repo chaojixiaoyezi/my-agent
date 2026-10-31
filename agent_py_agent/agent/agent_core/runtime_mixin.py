@@ -18,7 +18,7 @@ import os
 import sys
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -299,6 +299,7 @@ class SimpleAgentRuntimeMixin:
 class _ForegroundRecoveryRunParams(RunParams):
     compact_continuation_injection: str = ""
     foreground_recovery_attempt_ids: tuple[str, ...] = ()
+    foreground_recovery_handoff_ref: dict | None = field(default=None, kw_only=True)
 
 
 # LLM: 核实提示只投影工具名、状态、开始时间及operation_id，不带参数和结果；inject才是本版本模型真实消费者。
@@ -409,7 +410,7 @@ def _foreground_recovery_pending_for_principal(agent, repo, row, params: RunPara
 
 # LLM: 仅gateway首片且非Compact才按原CAS弃置未知阻塞，先取未结操作再恢复；不改操作结论、不重放、不替后台放行。
 #   子链只取显式当前线程未关TaskRun的unknown投影；任何恢复拒绝仍失败关闭，不宣称已解阻。
-#   已提交但未交接的核实要求从审计重建；无提示的后台仍拒绝，已有提示的同片Compact可原样携带。
+#   已提交未交接的责任从原事件重建；同片Compact只携精确handoff_ref，不根据提示文字准入。
 #   关闭配置、宿主回执和唤醒事件不处置未知；每个目标单独复核原principal，不能借同群同线程扩权。
 # 函数用途: 让用户新消息接手核实中断操作，沿原权威入口恢复当前主链及本线程未知子链。
 def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: RunParams) -> RunParams:
@@ -419,24 +420,29 @@ def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: Run
     )
     from ..runtime_db.operations import RuntimeRecoveryRequiredError
 
-    notice = str(getattr(params, "compact_continuation_injection", "") or "")
     attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+
+    # 原事件引用才是接手事实；inject与说明文案仅供模型阅读。
+    def carried_handoff(pending):
+        return repo.foreground_recovery_handoff_valid(
+            getattr(params, "foreground_recovery_handoff_ref", None),
+            thread_id=thread_id, attempt_ids=pending,
+        )
+
     if (str(getattr(params, "source", "") or "") != "gateway"
             or int(getattr(params, "continuation_seq", 0) or 0) != 0
             or int(getattr(params, "compact_auto_continue_depth", 0) or 0) != 0
             or not bool(getattr(getattr(agent, "config", None), "foreground_unknown_auto_recover", True))
             or "host_im_task_ack" in attrs or params.turn_trigger is not None):
         pending = _pending_foreground_recovery_attempts(repo, row, params)
-        carried = (bool(notice) and notice in (params.inject or [])
-                   and set(pending).issubset(getattr(params, "foreground_recovery_attempt_ids", ())))
-        if pending and not carried:
+        if pending and not carried_handoff(pending):
             raise RuntimeRecoveryRequiredError("恢复核实提示尚未交接，请由用户新消息接手")
         return params
     current = dict(row) if row is not None else {}
     attempt_id = str(current.get("current_attempt_id") or "")
     attempt = repo.get_attempt(attempt_id) if attempt_id else None
     main_unknown = current.get("status") == "unknown" or (attempt is not None and attempt["status"] == "unknown")
-    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     children = unknown_child_attempts_for_thread(repo, thread_id) if thread_id else []
     targets = ([(attempt_id, None)] if main_unknown and attempt_id else [])
     targets.extend((target.attempt_id, target) for target in children)
@@ -461,15 +467,18 @@ def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: Run
         recovered.append(previous_attempt_id)
     # 在子链扫描和恢复之后读取审计，接住同principal在扫描期间已经提交的恢复。
     pending = _foreground_recovery_pending_for_principal(agent, repo, row, params)
-    carried = (bool(notice) and notice in (params.inject or [])
-               and set(pending).issubset(getattr(params, "foreground_recovery_attempt_ids", ())))
-    if not recovered and (not pending or carried):
+    if not recovered and (not pending or carried_handoff(pending)):
         return params
     for previous_attempt_id in pending:
         if previous_attempt_id not in recovered:
             operations.extend(repo.unsettled_attempt_operations(previous_attempt_id))
+    attempts = tuple(dict.fromkeys([*pending, *recovered]))
+    handoff_ref = repo.foreground_recovery_handoff_ref(thread_id, attempts)
+    if handoff_ref is None:
+        raise RuntimeRecoveryRequiredError("恢复交接来源已变化，未创建新执行轮")
     return replace(_foreground_recovery_params(params, operations),
-                   foreground_recovery_attempt_ids=tuple(dict.fromkeys([*pending, *recovered])))
+                   foreground_recovery_attempt_ids=attempts,
+                   foreground_recovery_handoff_ref=handoff_ref)
 
 
 # LLM: 只在原执行和保存成功返回ok后追加交接确认；不改旧tool_operations结论，写确认失败保留pending并不盖住业务结果。
@@ -480,13 +489,10 @@ def _acknowledge_foreground_recovery_notice(agent, params: RunParams, result) ->
         return
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     try:
-        for attempt_id in attempts:
-            attempt = repo.get_attempt(attempt_id)
-            repo.append_event(
-                event_type="foreground_recovery_notice_delivered", attempt_id=attempt_id,
-                agent_run_id=str(attempt["agent_run_id"]),
-                payload={"delivered_by_attempt_id": params.attempt_id},
-            )
+        repo.acknowledge_foreground_recovery_handoff(
+            getattr(params, "foreground_recovery_handoff_ref", None),
+            delivered_by_attempt_id=params.attempt_id,
+        )
     except Exception:  # noqa: BLE001 交接确认失败仅保留下一轮核实，不能推翻模型实际返回结果
         logging.getLogger(__name__).warning("核实提示交接确认未保存，下次前台回合将再次核实。")
 

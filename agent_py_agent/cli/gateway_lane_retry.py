@@ -21,6 +21,7 @@ from ..agent.backends.errors import (
 from ..agent.conversation.compact_guard import is_provider_quota_failure
 from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.settings.thread_model_selection import is_model_configuration_unavailable
+from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
 
 # 环境级故障暂停后的探测间隔：首次 60 秒，每次探测再失败翻倍，封顶 900 秒。安全兜底用内部常量，不进配置。
 LANE_ENVIRONMENT_PROBE_BASE_SECONDS = 60.0
@@ -39,6 +40,8 @@ class _LaneFailure:
     waiting_for_environment: bool = False
     probe_interval: float = 0.0
     fingerprint: str | None = None
+    waiting_for_storage: bool = False
+    wait_count: int = 0
 
 
 # LLM: worker 写入和 planner 读取共用短锁；配置与指纹读取在锁外，不能堵住其它用户或正在慢流的模型。
@@ -60,6 +63,9 @@ class BackgroundLaneRetry:
             if key not in self._failures and len(self._failures) >= 1024:
                 self._failures.pop(next(iter(self._failures)))
             self._failures[key] = row
+        if row.waiting_for_storage and row.wait_count == 1:
+            _log_lane_event("storage_wait", key, {"wait_count": row.wait_count,
+                "next_check_at": row.retry_at, "error_type": type(exc).__name__})
         if row.waiting_for_environment:
             _log_lane_event("lane_environment_paused", key, {
                 "probe_in_seconds": row.probe_interval,
@@ -119,6 +125,8 @@ class BackgroundLaneRetry:
             row = self._failures.pop((owner, thread_id), None)
         if row is not None and row.waiting_for_environment:
             _log_lane_event("lane_environment_resumed", (owner, thread_id), {"reason": "probe_succeeded"})
+        if row is not None and row.waiting_for_storage:
+            _log_lane_event("storage_resumed", (owner, thread_id), {"wait_count": row.wait_count})
 
     # LLM: 只补偿当前 owner 的候选数量，避免被跳过的旧会话遮住健康会话。
     # 函数用途: 给调度规划提供冷却条目数，不泄露错误或配置内容。
@@ -142,6 +150,10 @@ class BackgroundLaneRetry:
 # 函数用途: 根据上一条记录和本次异常算出这条车道新的失败记录。
 def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -> _LaneFailure:
     now = time.monotonic()
+    if isinstance(exc, OwnerQuotaUnavailable):
+        count = previous.wait_count + 1 if previous is not None and previous.waiting_for_storage else 1
+        interval = min(30.0, 2.0 ** min(count - 1, 5))
+        return _LaneFailure(now + interval, False, waiting_for_storage=True, wait_count=count)
     if is_model_configuration_unavailable(exc):
         return _LaneFailure(0.0, True)
     if not (is_provider_environment_fault(exc) or is_provider_quota_failure(exc)):

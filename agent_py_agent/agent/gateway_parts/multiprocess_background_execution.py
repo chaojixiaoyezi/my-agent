@@ -418,10 +418,15 @@ def _execute_maintenance(agent, ref):
 # 函数用途: 在准确运输执行域内推进原后台会话消费者，不复制唤醒或另建调度器状态账。
 def _execute_wake(agent, ref):
     from ..conversation.runtime import BackgroundMainAgentRuntime, BackgroundMainAgentScheduler
+    from .multiprocess_background_sources import source_recovery_block
 
     actual = Path(agent.conversation_store.storage.root).relative_to(agent.home_paths.owner_home_dir).as_posix()
     if actual != ref["store_ref"]:
         raise ValueError("background_source_store_mismatch")
+    block = source_recovery_block(agent.home_paths.owner_home_dir, ref["kind"], read_source(agent.home_paths.root, ref))
+    if block is not None:
+        return {"source_kind": ref["kind"], "source_id": ref["source_id"], "outcome": "pending",
+                "report_count": 0, "recovery_eligibility": block}
     runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store, channels=agent.delivery_service)
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": agent.conversation_store})
     reports = scheduler.tick_thread(ref["thread_id"])
@@ -466,7 +471,9 @@ def requeue_pending_background_request(response, agent):
         return False
     transition = GatewayActiveTurnTransition(claim.path, claim.request_id, claim.execution_attempt_id)
     paths = gateway_paths_from_root(claim.path.parent.parent.parent)
-    return requeue_current_processing_request(paths, claim, transition, not_before_at=time.time() + 1.0)
+    # 人工接手不应每秒重建消费者；不消费来源、也不挡同owner其它已就绪请求。
+    delay = 30.0 if result.get("recovery_eligibility") or result.get("status") == "storage_wait" else 1.0
+    return requeue_current_processing_request(paths, claim, transition, not_before_at=time.time() + delay)
 
 
 # LLM: 原P5/短T先于ProcessSession事务；完整snapshot仍匹配才发布原Wake和notice，自写revision不反当外来源漂移。

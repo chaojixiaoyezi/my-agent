@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
 
 from ..common.agent_time import now as display_now
 from ..delivery import DeliveryContext, ReplyEnvelope
@@ -12,6 +12,54 @@ from .execution_threads import EXECUTION_ORIGIN_KEY, IM_TASK_EXECUTION_KEY, exec
 from .tool_approval_scope import tool_approval_scope, tool_approval_scope_is_current
 
 _KEY='host_progress_delivery.v1'
+
+_TOPIC_FIELDS = ('reply_to', 'reply_policy', 'provider_thread_id', 'root_id', 'parent_id')
+
+
+# LLM: 仅扩展原DeliveryContext运输字段；不解释策略、不授owner身份，W12补齐原类型后直接使用原类型。
+# 类用途: 在共享投递协议接线前兼容携带冻结话题，不把提供方线程当内部线程。
+@dataclass(frozen=True, kw_only=True)
+class _TopicDeliveryContext(DeliveryContext):
+    reply_policy: str = ''
+    provider_thread_id: str = ''
+    root_id: str = ''
+    parent_id: str = ''
+
+
+# LLM: 只读独立执行线程的入站冻结投影及当前wake/request运输副本，不读最近聊天绑定；多副本冲突拒绝，目标仍由原路由核验。
+# 函数用途: 为进度、最终回复和缓存补投构造同一话题上下文，旧消息维持缺省引用行为。
+def background_delivery_context(agent, thread, *, channel, target, task_id='', idempotency_key='', request=None,
+                                owner_thread_id=None):
+    snapshots = []
+    if EXECUTION_ORIGIN_KEY in getattr(thread, 'metadata', {}):
+        snapshots.append(thread.metadata.get('delivery_context'))
+    if request is not None:
+        snapshots.append(getattr(request, 'delivery_context', None))
+        wake = getattr(request, 'wake_signal', None) or {}
+        snapshots.append((wake.get('metadata') or {}).get('delivery_context'))
+    frozen = {}
+    for snapshot in snapshots:
+        if snapshot is None:
+            continue
+        if not isinstance(snapshot, dict):
+            raise ValueError('invalid frozen background delivery context')
+        for key in (*_TOPIC_FIELDS, 'channel', 'target', 'conversation_id', 'request_id'):
+            if key not in snapshot:
+                continue
+            value = snapshot[key]
+            if not isinstance(value, str) or key in frozen and frozen[key] != value:
+                raise ValueError('conflicting frozen background delivery context')
+            frozen[key] = value
+    if frozen.get('channel', channel) != channel or frozen.get('target', target) != target:
+        raise ValueError('frozen background delivery route mismatch')
+    options = {key: frozen[key] for key in _TOPIC_FIELDS if key in frozen}
+    context_type = DeliveryContext
+    if any(key not in {item.name for item in fields(DeliveryContext)} for key in options):
+        context_type = _TopicDeliveryContext
+    return context_type(channel=channel, target=target, mode='proactive',
+        thread_id=thread.thread_id if owner_thread_id is None else owner_thread_id,
+        task_id=task_id, idempotency_key=idempotency_key,
+        conversation_id=frozen.get('conversation_id', ''), request_id=frozen.get('request_id', ''), **options)
 
 
 # LLM: 进度外发只读精确根任务的活动调度run冻结策略；不读当前job或正文，错ID/线程不能冒认普通委派。
@@ -59,8 +107,9 @@ class BackgroundIMProgress:
 
         target = binding_delivery_target(binding['channel'], binding['actor_id'], binding['conversation_id'],
             group='/groups/' in str(self.origin.owner_id or ''))
-        self.context=DeliveryContext(channel=binding['channel'],target=target,
-            thread_id=self.origin.thread_id,task_id=self.scope.root_task_id,mode='proactive',idempotency_key='progress:'+self.scope.root_task_id)
+        self.context=background_delivery_context(agent, self.execution, channel=binding['channel'], target=target,
+            owner_thread_id=self.origin.thread_id, task_id=self.scope.root_task_id,
+            idempotency_key='progress:'+self.scope.root_task_id)
         self.interval=min(120,max(1,interval))
         self.thread=threading.Thread(target=self._loop,name='im-task-progress',daemon=True)
         self.thread.start()
