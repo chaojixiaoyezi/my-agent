@@ -12,6 +12,7 @@ from ..plugin_environment_plan import PluginEnvironmentPlan
 from ..plugin_installation import PluginInstallationError
 from ..plugin_runtime_facts import PluginRuntimeError, verified_runtime_command
 from ..plugin_sandbox import PluginRestrictedSandbox
+from .grants import select_permissions
 from .paths import permission_paths
 from .state import canonical_permission_json, legacy_permissions
 
@@ -121,14 +122,19 @@ def _restricted_permissions(grant) -> dict:
     return permissions
 
 
-# LLM: 隐藏 Gateway 用户家目录，与 v8 共用同一底座语义；这里只投影策略，不生成平台规则。
+# LLM: 与确认共用原选择器复核有效范围；数据根保护统一由沙箱工厂从可信布局补齐，不依赖 HOME 猜测。
 # 函数用途: 从已复核的固定授权生成 B7 受限策略，供启动施加与启用预检共用。
-def policy_from_grant(grant) -> PluginRestrictedSandbox:
+def policy_from_grant(grant, *, scope_ceiling=None, host_exclusive_roots=()) -> PluginRestrictedSandbox:
     permissions = _restricted_permissions(grant)
+    if scope_ceiling is not None:
+        values = {key: [row["path"] for row in permissions[key]] for key in ("read_roots", "write_roots", "program_roots")}
+        permissions = asdict(select_permissions({**values, "network": permissions["network"]},
+                                               host_exclusive_roots, scope_ceiling=scope_ceiling))
     return PluginRestrictedSandbox(
         read_roots=tuple(Path(row["path"]) for row in permissions["read_roots"]),
         write_roots=tuple(Path(row["path"]) for row in permissions["write_roots"]),
         execute_roots=tuple(Path(row["path"]) for row in permissions["program_roots"]),
         network=permissions["network"],
         hidden_read_root=Path.home(),
+        host_exclusive_roots=tuple(host_exclusive_roots),
     )
