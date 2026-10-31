@@ -117,6 +117,8 @@ class GatewayReadiness:
     started_at: float
     observed_at: float
     load_errors: dict[str, dict] = field(default_factory=dict)
+    ready_observation: dict[str, object] = field(default_factory=dict)
+    cleanup_result: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: 有界等待的结构化结局；last 保留最后一次观测，timeout 时用 last.state 区分"仍在启动"与
@@ -143,6 +145,9 @@ class _GatewayRecordFacts:
     started_at: float = 0.0
     ready: bool = False
     load_errors: dict[str, dict] = field(default_factory=dict)
+    generation: object = None
+    restart_request_id: str = ""
+    cleanup_result: dict[str, object] = field(default_factory=dict)
 
 
 # 日志采样最多 64 KiB：状态面板预览够用，避免整份日志进渲染。
@@ -555,7 +560,10 @@ def _record_is_current_generation(payload: dict, not_before: float, *, tolerance
 #   分支也能做代际校验；旧格式（无 started_at）按"无法证明陈旧"接受，保持向后兼容。
 #   本函数不写文件、不改发布顺序。
 # 函数用途: 汇总某个 PID 在当前代次下的 Gateway 状态记录事实，供就绪判据与启动诊断复用。
-def _gateway_record_facts(paths: GatewayPaths, pid: int, not_before: float) -> _GatewayRecordFacts:
+def _gateway_record_facts(
+    paths: GatewayPaths, pid: int, not_before: float, *,
+    expected_generation: object = None, restart_request_id: str | None = None,
+) -> _GatewayRecordFacts:
     facts = _GatewayRecordFacts()
     for source, path, context in (
         (_GATEWAY_SOURCE_STATE, paths.state, "gateway.readiness.state.read"),
@@ -569,6 +577,12 @@ def _gateway_record_facts(paths: GatewayPaths, pid: int, not_before: float) -> _
             continue
         if not_before > 0 and not _record_is_current_generation(payload, not_before):
             continue
+        # 严格接班不兼容猜代次：沿原 process_identity / c_run_id / started_at 比对，缺引用也拒绝。
+        generation = payload.get("process_identity", payload.get("c_run_id", payload.get("started_at")))
+        if expected_generation is not None and generation != expected_generation:
+            continue
+        if restart_request_id is not None and payload.get("restart_request_id") != restart_request_id:
+            continue
         status = str(payload.get("status") or "")
         if facts.source and not _record_replaces(source, status, facts.source, facts.status):
             continue
@@ -578,6 +592,9 @@ def _gateway_record_facts(paths: GatewayPaths, pid: int, not_before: float) -> _
             started_at=_float_value(payload.get("started_at")),
             ready=status == _GATEWAY_RUNNING_STATUS,
             load_errors=facts.load_errors,
+            generation=generation,
+            restart_request_id=str(payload.get("restart_request_id") or ""),
+            cleanup_result=dict(payload["cleanup_result"]) if isinstance(payload.get("cleanup_result"), dict) else {},
         )
     return facts
 
@@ -669,9 +686,12 @@ def gateway_readiness(
     pid: int | None = None,
     not_before: float = 0.0,
     process_alive: bool | None = None,
+    expected_generation: object = None,
+    restart_request_id: str | None = None,
 ) -> GatewayReadiness:
     resolved_pid, alive = _resolve_readiness_process(paths, pid, process_alive)
-    facts = _gateway_record_facts(paths, resolved_pid or 0, _generation_anchor(paths, not_before))
+    facts = _gateway_record_facts(paths, resolved_pid or 0, _generation_anchor(paths, not_before),
+        expected_generation=expected_generation, restart_request_id=restart_request_id)
     state, reason = _readiness_state(alive, facts)
     return GatewayReadiness(
         state=state,
@@ -684,6 +704,10 @@ def gateway_readiness(
         started_at=facts.started_at,
         observed_at=time.time(),
         load_errors=dict(facts.load_errors),
+        ready_observation={"state": state, "reason": reason, "pid": resolved_pid,
+            "generation": facts.generation, "restart_request_id": facts.restart_request_id,
+            "source": facts.source, "started_at": facts.started_at},
+        cleanup_result=dict(facts.cleanup_result),
     )
 
 

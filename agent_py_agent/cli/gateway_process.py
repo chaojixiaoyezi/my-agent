@@ -75,7 +75,12 @@ from ..agent.gateway_parts.http_service import (
     prepare_local_client_credential,
     start_http_server,
 )
-from ..agent.gateway_parts.io import read_json_file, read_json_file_report, write_json_file_atomic
+from ..agent.gateway_parts.io import (
+    read_json_file,
+    read_json_file_report,
+    update_json_file_atomic,
+    write_json_file_atomic,
+)
 
 # LLM: 就绪判据只有一份实现，位于 agent.gateway_parts.status_rendering：state/heartbeat 任一匹配 PID、
 #   且记录属于本次 spawn 的那一代（not_before − 容差）、且 status=running 才算就绪。这里只导入转发，
@@ -98,6 +103,7 @@ from .gateway_loops import (
 from .gateway_restart_handover import (
     announce_restart_completed,
     drain_for_requested_restart,
+    finalize_restart_cleanup,
     hand_over_to_successor,
     safe_restart_from_cli,
     take_restart_marker,
@@ -117,6 +123,8 @@ from .models import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_UNSET_RESTART_MARKER = object()
 
 
 # LLM: Gateway启动前的进程级调度提示，不改变业务预算/线程顺序；不支持此API时继续原流程，联测两入口。
@@ -399,14 +407,14 @@ def _unidentified_stale_attempts(repo: object) -> list[str]:
 
 # LLM: setup先拒绝重叠活代再恢复持久请求；starting沿原路径原子发布，原安全重启标记仍先于恢复消费。
 # 函数用途: 先阻止两个 Gateway 重叠运行，再创建目录、调和崩溃遗留（安全重启接班时立即续跑）并写入 starting 状态。
-def _cmd_gateway_run_setup(agent, paths):
+def _cmd_gateway_run_setup(agent, paths, *, context=None, restart_marker=_UNSET_RESTART_MARKER):
     pid = os.getpid()
     existing_pid = get_running_pid(paths.pid)
     if existing_pid and existing_pid != pid:
         raise RuntimeError(f"gateway already running pid={existing_pid}")
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
-    restart_marker = take_restart_marker(paths)
+    restart_marker = take_restart_marker(paths) if restart_marker is _UNSET_RESTART_MARKER else restart_marker
     recovery = recover_gateway_processing_requests(
         paths,
         startup=True,
@@ -430,7 +438,9 @@ def _cmd_gateway_run_setup(agent, paths):
             "recovered_stale_attempts": attempt_recovery["count"],
             "stale_attempt_recovery_error": attempt_recovery["error"],
             "unidentified_stale_attempts": len(attempt_recovery["unidentified"]),
-            "started_at": time.time(),
+            "started_at": context.process_started_at if context is not None else time.time(),
+            "process_identity": dict(context.process_identity) if context is not None else build_process_identity(),
+            **_restart_state_fields(restart_marker),
         },
     )
     if attempt_recovery["count"] or attempt_recovery["error"] or attempt_recovery["unidentified"]:
@@ -439,8 +449,6 @@ def _cmd_gateway_run_setup(agent, paths):
             "gateway_stale_attempts_reconciled",
             attempt_recovery,
         )
-    if restart_marker is not None:
-        announce_restart_completed(agent, restart_marker, requeued=requeued)
     print(f"[gateway-run] status=starting pid={pid}", flush=True)
     log_gateway_event(
         agent,
@@ -460,9 +468,20 @@ def _cmd_gateway_run_setup(agent, paths):
     return requeued, pid
 
 
+# LLM: 仅运输原重启请求和最终cleanup，不以投影生成新的代次或执行许可。
+# 函数用途: 在starting/running回执里保留同一份接班裁决。
+def _restart_state_fields(marker) -> dict:
+    if not marker:
+        return {}
+    return {"restart_request_id": str(marker.get("request_id") or ""),
+        "cleanup_result": dict(marker.get("cleanup_result") or {}),
+        "forced_after_drain_timeout": bool(marker.get("forced_after_drain_timeout")),
+        "unresolved_operation_refs": list(marker.get("unresolved_operation_refs") or [])}
+
+
 # LLM: 入口先调GIL，Count0保原三循环/端口顺序；实际control才走原C设施producer，不以字符串或None Agent制造就绪。
 # 函数用途: 启动本代请求、后台和心跳循环，协调者的原资源由独立同生命周期入口保留。
-def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
+def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=None):
     _tune_gateway_gil_switch_interval()
     if getattr(request.context, "control_plane", None) is not None:
         from .gateway_coordinated_run import start_coordinated_loops
@@ -490,20 +509,34 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         args=(context, paths, stop_event),
         daemon=True,
     )
-    request_thread.start()
     background_thread = threading.Thread(
         target=_gateway_background_main_loop,
         args=(context, stop_event),
         daemon=True,
     )
-    background_thread.start()
     pid = os.getpid()
-    http_server = _start_gateway_http(agent, paths, http_port)
+    http_server = None
     # 就绪信号只能在这里之后发：heartbeat 一旦写了 "running"，父进程 start
     # 就认定网关就绪。若在 HTTP bind 之前启动 heartbeat 线程，绑定失败崩溃时
     # start 会对一个已死的网关谎报成功（旧时序：heartbeat 先写 running，再 bind）。
-    heartbeat_thread.start()
-    write_json_file_atomic(paths.state, _build_run_state(request, pid))
+    try:
+        request_thread.start()
+        background_thread.start()
+        http_server = _start_gateway_http(agent, paths, http_port)
+        heartbeat_thread.start()
+        state = {**_build_run_state(request, pid), **_restart_state_fields(restart_marker)}
+        if not _commit_gateway_state(paths, state, context=context, pid=pid, replace=True):
+            raise RuntimeError("gateway startup generation changed")
+        if restart_marker is not None:
+            receipt = announce_restart_completed(agent, restart_marker, requeued=request.requeued,
+                paths=paths, expected_generation=context.process_identity)
+            if receipt is not None:
+                _commit_gateway_state(paths, receipt, context=context, pid=pid)
+    except BaseException:
+        # HTTP单次启动失败时仍收回已出生的循环；完成通知只能在本代ready之后调用。
+        _cmd_gateway_run_cleanup(GatewayRunCleanupRequest(context, pid, stop_event, heartbeat_thread,
+            request_thread, background_thread, http_server, termination_status="failed", termination_reason="startup_failed"))
+        raise
     log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
     print(
         "[gateway-run] "
@@ -513,6 +546,27 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
         flush=True,
     )
     return stop_event, heartbeat_thread, request_thread, background_thread, http_server
+
+
+# LLM: 原state文件事务内比较本代身份；迟到终态只被拒绝，不触碰新代状态或发完成事件。
+# 函数用途: 用原代次引用保护生命周期末写，兼容无context的旧调用。
+def _commit_gateway_state(paths, payload: dict, *, context=None, pid=None, replace=False) -> bool:
+    committed = False
+    def update(current):
+        nonlocal committed
+        if pid is not None and current.get("pid") not in (None, pid):
+            return current
+        if context is not None:
+            expected = dict(context.process_identity or {})
+            if current.get("process_identity") and current["process_identity"] != expected:
+                return current
+            started = float(context.process_started_at or 0)
+            if started and current.get("started_at") and float(current["started_at"]) != started:
+                return current
+        committed = True
+        return {**({} if replace else current), **payload}
+    update_json_file_atomic(paths.state, update)
+    return committed
 
 
 # LLM: G4：绑定失败时注销 _cmd_gateway_run_threads 预登记的端口（否则漏给同进程后续的模型命令沙箱）；
@@ -654,7 +708,15 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
     from ..agent.conversation.background_shutdown import model_shutdown_blockers
 
     background_blockers.extend(model_shutdown_blockers())
-    drain_complete = not alive_threads and not background_blockers
+    from ..agent.concurrency.restart_gate import executing_tool_snapshot
+    from ..agent.gateway_parts.request_worker import admission
+
+    unresolved_refs = executing_tool_snapshot(limit=None)
+    foreground = admission.snapshot()
+    if foreground.get("total"):
+        unresolved_refs.append({"reason": "foreground_turn_unsettled", "ref": "gateway_admission",
+                                "count": int(foreground["total"])})
+    drain_complete = not alive_threads and not background_blockers and not unresolved_refs
     host_shutdown_executors = _mark_host_shutdown_executors(request)
     surviving_background_sessions = _record_surviving_background_sessions(request)
     _flush_decision_reach_counts(request)
@@ -668,12 +730,11 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         _gateway_context_process_identity(request.context),
         process_started_at=request.context.process_started_at,
     )
-    _write_gateway_heartbeat(
-        paths,
-        request.context.agent,
-        status=request.termination_status,
-        pid=request.pid,
-    )
+    state_path = getattr(paths, "state", None)
+    current = read_json_file(state_path) if state_path is not None else {}
+    if (current.get("pid") in (None, request.pid) and
+            (not current.get("process_identity") or current.get("process_identity") == request.context.process_identity)):
+        _write_gateway_heartbeat(paths, request.context.agent, status=request.termination_status, pid=request.pid)
     cleanup_payload = {
         "status": "cleanup",
         "pid": request.pid,
@@ -682,6 +743,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "drain_complete": drain_complete,
         "alive_threads": alive_threads,
         "background_blockers": background_blockers,
+        "unresolved_operation_refs": unresolved_refs,
         "interrupted_model_calls": interrupted_model_calls,
         "host_shutdown_executors": host_shutdown_executors,
         "surviving_background_sessions": surviving_background_sessions,
@@ -748,14 +810,12 @@ def _record_surviving_background_sessions(request: GatewayRunCleanupRequest) -> 
 # LLM: 停机 state 已由 termination 记录写好；这里只把停机后仍存活的后台会话数并进 state.json 供 my-agent status 投影，
 #   不改 status/termination 字段，不写会话明细（明细在 gateway_background_sessions_surviving 事件里）。
 # 函数用途: 把"停机后还有 N 条后台进程在跑"写进 Gateway 状态文件。
-def _record_surviving_background_sessions_state(paths: GatewayPaths, cleanup: dict[str, object]) -> None:
-    prior = read_json_file(paths.state)
+def _record_surviving_background_sessions_state(paths: GatewayPaths, cleanup: dict[str, object], *, context=None) -> None:
     payload = {
-        **prior,
         "surviving_background_sessions": int(cleanup.get("surviving_background_sessions") or 0),
         "updated_at": time.time(),
     }
-    write_json_file_atomic(paths.state, payload)
+    _commit_gateway_state(paths, payload, context=context, pid=cleanup.get("pid"))
 
 
 # LLM: The context identity is captured before startup mutations. Tests/legacy embedders that did
@@ -1016,7 +1076,8 @@ def _record_gateway_service_termination(
     else:
         if context is not None:
             payload.update(worker_count=0)
-        write_json_file_atomic(paths.state, payload)
+        if not _commit_gateway_state(paths, payload, context=context, pid=pid, replace=True):
+            return
     event = "gateway_run_failed" if failed else "gateway_run_stopped"
     if agent is not None or context is None or getattr(context, "control_plane", None) is None:
         log_gateway_event(agent, event, payload)
@@ -1030,8 +1091,12 @@ def _gateway_termination_identity_fields(paths: GatewayPaths, context: GatewayRu
     report = read_json_file_report(paths.state, context="gateway.diagnostics.termination.read")
     state = report.payload or {}
     if (report.load_error is None and state.get("process_identity") == identity
-            and state.get("pid") == identity.get("pid") and state.get("diagnostic_sigusr1") is True):
-        fields["diagnostic_sigusr1"] = True
+            and state.get("pid") == identity.get("pid")):
+        if state.get("diagnostic_sigusr1") is True:
+            fields["diagnostic_sigusr1"] = True
+        # failed/stopped仍要绑定原重启请求，避免严格readiness把明确失败误投影成starting。
+        fields.update({key: state[key] for key in ("restart_request_id", "cleanup_result",
+            "forced_after_drain_timeout", "unresolved_operation_refs") if key in state})
     return fields
 
 
@@ -1042,21 +1107,22 @@ def _record_gateway_drain_failure(
     agent: object,
     pid: int,
     cleanup: dict[str, object],
+    *,
+    context=None,
 ) -> None:
-    prior = read_json_file(paths.state)
     payload = {
-        **prior,
         "status": "failed",
         "pid": pid,
         "error_code": "GATEWAY_DRAIN_INCOMPLETE",
         "termination_kind": "drain_incomplete",
         "termination_reason": "gateway worker threads did not stop within the drain deadline",
         "alive_threads": list(cleanup.get("alive_threads") or []),
+        "cleanup_result": dict(cleanup),
         "updated_at": time.time(),
         "exit_code": 2,
     }
-    write_json_file_atomic(paths.state, payload)
-    log_gateway_event(agent, "gateway_run_failed", payload)
+    if _commit_gateway_state(paths, payload, context=context, pid=pid):
+        log_gateway_event(agent, "gateway_run_failed", payload)
 
 
 # LLM: 发布沿原状态路径原子替换，事件语义不变，不签排空完成。
@@ -1065,8 +1131,8 @@ def _record_gateway_run_interrupted(paths, agent, pid: int, *, context: GatewayR
     payload = {"status": "interrupted", "pid": pid, "stopped_at": time.time()}
     if context is not None:
         payload.update(_gateway_termination_identity_fields(paths, context))
-    write_json_file_atomic(paths.state, payload)
-    log_gateway_event(agent, "gateway_run_interrupted", payload)
+    if _commit_gateway_state(paths, payload, context=context, pid=pid, replace=True):
+        log_gateway_event(agent, "gateway_run_interrupted", payload)
 
 
 # LLM: 错误沿原事件口记录，state原子发布避免读者观察半截JSON。
@@ -1075,8 +1141,8 @@ def _record_gateway_run_failed(paths, agent, pid: int, exc: Exception, *, contex
     payload = {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()}
     if context is not None:
         payload.update(_gateway_termination_identity_fields(paths, context))
-    write_json_file_atomic(paths.state, payload)
-    log_gateway_event(agent, "gateway_run_failed", payload)
+    if _commit_gateway_state(paths, payload, context=context, pid=pid, replace=True):
+        log_gateway_event(agent, "gateway_run_failed", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1240,11 +1306,17 @@ def _run_standalone_gateway(args, lifecycle) -> int:
     except (GatewayLocalCredentialRequired, AuthConfigurationError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    requeued, pid = _cmd_gateway_run_setup(agent, paths)
+    restart_marker = take_restart_marker(paths)
+    requeued, pid = _cmd_gateway_run_setup(agent, paths, context=run_context, restart_marker=restart_marker)
     http_port = getattr(agent.config, "gateway_port", 0) or 0
-    stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
-        GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
-    )
+    try:
+        stop_event, heartbeat_thread, request_thread, background_thread, http_server = _cmd_gateway_run_threads(
+            GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port),
+            **({"restart_marker": restart_marker} if restart_marker is not None else {}),
+        )
+    except Exception as exc:
+        _record_gateway_run_failed(paths, agent, pid, exc, context=run_context)
+        return 2
 
     previous_signal_handlers = _install_gateway_signal_handlers(paths, _gateway_context_process_identity(run_context))
     exit_code = 0
@@ -1252,9 +1324,11 @@ def _run_standalone_gateway(args, lifecycle) -> int:
     termination_reason = "gateway run ended before termination was classified"
     termination_kind = ""
     cleanup_report: dict[str, object] = {}
+    planned_marker = None
     try:
         report = _run_gateway_service_loop(run_context)
         termination = _classify_gateway_service_return(run_context, report)
+        planned_marker = report.get("restart") if isinstance(report, dict) else None
         termination_kind = termination.kind
         termination_status = termination.status
         termination_reason = termination.reason
@@ -1288,21 +1362,38 @@ def _run_standalone_gateway(args, lifecycle) -> int:
                     termination_reason=termination_reason,
                 )
             )
+        except Exception as exc:
+            # 清理自身失败不能沿显式强制策略放行；保留未知引用，仍进入最终incomplete裁决。
+            from ..agent.concurrency.restart_gate import executing_tool_snapshot
+
+            stop_event.set()
+            termination_status, termination_reason, exit_code = "failed", "cleanup_failed", 2
+            cleanup_report = {"status": "cleanup", "pid": pid, "drain_complete": False,
+                "cleanup_error": type(exc).__name__, "alive_threads": [],
+                "unresolved_operation_refs": executing_tool_snapshot(limit=None)}
         finally:
             _restore_gateway_signal_handlers(previous_signal_handlers)
-    if not bool(cleanup_report.get("drain_complete")):
-        _record_gateway_drain_failure(paths, agent, pid, cleanup_report)
+    handover_result = finalize_restart_cleanup(run_context, planned_marker, cleanup_report) if planned_marker else None
+    if handover_result is not None:
+        cleanup_report = {**cleanup_report, "cleanup_result": handover_result}
+    if ((not bool(cleanup_report.get("drain_complete")) or
+            (handover_result is not None and not handover_result.get("handover_allowed")))
+            and not (handover_result and handover_result.get("handover_allowed"))):
+        _record_gateway_drain_failure(paths, agent, pid, handover_result or cleanup_report, context=run_context)
+        exit_code = 2
+    if handover_result is not None and not handover_result.get("handover_allowed"):
         exit_code = 2
     if cleanup_report.get("surviving_background_sessions"):
-        _record_surviving_background_sessions_state(paths, cleanup_report)
-    if termination_status == "stopped" and exit_code == 0:
+        _record_surviving_background_sessions_state(paths, cleanup_report, context=run_context)
+    if (termination_status == "stopped" and exit_code == 0 and cleanup_report.get("drain_complete")
+            and not (handover_result and handover_result.get("forced_after_drain_timeout"))):
         from ..agent.gateway_parts.standalone_lifecycle import record_standalone_stop_observation
 
         record_standalone_stop_observation(lifecycle, run_context, cleanup_report)
         from ..agent.gateway_parts.standalone_stop import record_standalone_stop
 
         record_standalone_stop(run_context, lifecycle, cleanup_report)
-    if termination_kind == "planned_restart":
+    if termination_kind == "planned_restart" and exit_code == 0 and handover_result and handover_result.get("handover_allowed"):
         command = _gateway_start_command(_gateway_start_options_from_args(args, workspace_root=agent.root))
         exit_code = hand_over_to_successor(
             run_context,
