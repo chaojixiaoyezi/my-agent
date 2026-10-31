@@ -296,6 +296,8 @@ class OwnerQuotaAdmission:
                 total, count, complete = _bounded_quota_snapshot(root, max_entries=128, max_ms=10)
             finally:
                 _QUOTA_SNAPSHOT_STATE.reset(token)
+            if snapshot.get('metadata_invalidated'):
+                complete = False
         # 同一准入分阶段调用时先结算上阶段；其它遗留预留仍不得当成干净基线。
         if not complete and self._before:
             self.commit_delta()
@@ -943,9 +945,11 @@ def _quota_metadata_bytes(state):
     return size
 
 
-# 函数用途: 放弃逐目录表，回到受控写代次与对账维持可信。
-def _drop_quota_metadata(state):
+# 函数用途: 放弃逐目录表；并发删除或目录换身份导致的观察失效额外标记metadata_invalidated。
+def _drop_quota_metadata(state, *, invalidated=False):
     state['metadata_complete'] = False
+    if invalidated:
+        state['metadata_invalidated'] = True
     for key in ('dir_stamps', 'base_rows', 'scan_rows', 'metadata_bytes'):
         state.pop(key, None)
 
@@ -966,7 +970,7 @@ def _capture_quota_metadata(state, parts, info, name=None):
         row = scanning.get(rel)
         if row is not None:
             if row[:2] != stamp[:2]:
-                _drop_quota_metadata(state)
+                _drop_quota_metadata(state, invalidated=True)
             return
         if rel not in (state.get('base_rows') or {}) and rel not in (state.get('dir_stamps') or {}):
             size = _quota_metadata_bytes(state) + _quota_row_bytes(rel)
@@ -978,7 +982,7 @@ def _capture_quota_metadata(state, parts, info, name=None):
         return
     row = scanning.get(rel)
     if row is None:
-        _drop_quota_metadata(state)
+        _drop_quota_metadata(state, invalidated=True)
         return
     row[7] += 1
     if info is None:
@@ -1009,7 +1013,10 @@ def _finish_quota_dir(state, parts):
 # 函数用途: 提取可重启的基线元数据。
 def _quota_metadata_payload(state):
     if state.get('metadata_complete') is not True:
-        return {'metadata_complete': False}
+        payload = {'metadata_complete': False}
+        if state.get('metadata_invalidated') is True:
+            payload['metadata_invalidated'] = True
+        return payload
     payload = {'metadata_complete': True, 'row_format': _QUOTA_ROW_SCHEMA_VERSION,
                'dir_stamps': {rel: list(row) for rel, row in (state.get('dir_stamps') or {}).items()}}
     for key in ('base_rows', 'scan_rows'):
@@ -1276,6 +1283,7 @@ def _verified_quota_baseline(root, ledger, touched=()):
     cursor = ledger.get('reconcile_cursor')
     if (ledger.get('dirty_since') is not None or ledger.get('reservations')
             or not isinstance(cursor, dict) or cursor.get('complete') not in (True, False)
+            or cursor.get('metadata_invalidated') is True
             or cursor.get('ledger_revision') != ledger['revision']):
         return False
     try:
@@ -1417,7 +1425,7 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
                                 and ('' in table or rel and (settling or rel + '/' <= last)))}
         failed = _quota_mismatched_rows(root, rows, table, root_vouched)
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
-        _drop_quota_metadata(cursor)
+        _drop_quota_metadata(cursor, invalidated=True)
         cursor.update(dir_batch={}, prep=None)
         return False
     batches = cursor.get('dir_batch') if isinstance(cursor.get('dir_batch'), dict) else {}
@@ -1440,7 +1448,7 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
         if _quota_metadata_bytes(cursor) > _QUOTA_MAX_METADATA_BYTES:
             _drop_quota_metadata(cursor)
         cursor.pop('metadata_bytes', None)
-    return not failed
+    return not failed and not cursor.get('metadata_invalidated')
 
 
 # LLM: FD逐层nofollow，不以路径别名扫描外部；每条目录项都消耗预算，深度超过64关闭式拒绝；排除项不计也不进入。
@@ -1463,7 +1471,7 @@ def _quota_entries(root, parts=()):
                     info = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     if state is not None and not _quota_host_managed(parts, entry.name):
-                        _drop_quota_metadata(state)
+                        _drop_quota_metadata(state, invalidated=True)
                     yield (0, 0)
                     continue
                 _capture_quota_metadata(state, parts, info, entry.name)
@@ -1476,7 +1484,7 @@ def _quota_entries(root, parts=()):
                         yield from _quota_entries(root, (*parts, entry.name))
                     except FileNotFoundError:
                         if state is not None and not _quota_host_managed(parts, entry.name):
-                            _drop_quota_metadata(state)
+                            _drop_quota_metadata(state, invalidated=True)
                         continue
         _finish_quota_dir(state, parts)
     finally:
@@ -1522,9 +1530,12 @@ def _bounded_quota_snapshot(root, *, max_entries, max_ms):
 def _settle_quota_pass_drift(root, scan):
     state = scan['state']
     if state.get('metadata_complete') is not True:
+        if state.get('metadata_invalidated'):
+            scan['dirty'] = True
         return
     if state.get('scan_rows'):
-        _drop_quota_metadata(state)
+        scan['dirty'] = True
+        _drop_quota_metadata(state, invalidated=True)
         return
     rows = state.setdefault('dir_stamps', {})
     state.pop('base_rows', None)
@@ -1553,7 +1564,7 @@ def _settle_quota_pass_drift(root, scan):
             scan['settling_rel'] = None
     except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         scan['dirty'] = True
-        _drop_quota_metadata(state)
+        _drop_quota_metadata(state, invalidated=True)
         return
     # 补扫的新子树行同样受目录表字节上限约束，超过即整表作废。
     if _quota_metadata_bytes(state) > _QUOTA_MAX_METADATA_BYTES:
@@ -1702,7 +1713,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                     'scanned': cursor.get('scanned', 0), 'epoch': cursor.get('epoch', uuid.uuid4().hex),
                     'started_at': cursor.get('started_at', time.time()), 'state': state,
                     'settling': cursor.get('settling') is True, 'root_clean': not cursor, 'root_stamp': None,
-                    'retry_rel': cursor.get('settling_rel')}
+                    'retry_rel': cursor.get('settling_rel'), 'dirty': cursor.get('metadata_invalidated') is True}
             # 枚举已走完、正在清点漂移的一轮直接续清点，不再重放已走完的枚举。
             scan['iterator'] = (_settle_quota_pass_drift(root, scan) if scan['settling'] else
                                 _sorted_quota_entries(root, after=scan['last_relpath'], state=state))
@@ -1798,13 +1809,17 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                                       'overflow': bool(batch.get('overflow')) or len(names) < len(batch['names'])}
             cursor_payload['dir_batch'] = persisted
         ledger['reconcile_cursor'] = cursor_payload
+        if scan['state'].get('metadata_invalidated'):
+            scan['dirty'] = True
         if complete:
-            # 清点放弃过的目录未补正，总量照常发布但保持脏，由下一轮补正后才恢复增长。
+            # 清点放弃过的目录未补正或枚举观察失效，总量照常发布但保持脏，由下一轮补正后才恢复增长。
             ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'],
                           dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
             scan['iterator'].close()
             _QUOTA_SCANS.pop(key, None)
         else:
+            if scan.get('dirty'):
+                ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
             # 账本替换会掩盖本片内root的其它改动，必须在写账本前核对。
             _quota_scan_root_clean(root, scan)
         # 未完成的一轮不改变账本可信度：干净账继续按受控写代次准入，脏账保持脏直到本轮完成。
@@ -1998,6 +2013,12 @@ def _resumable_quota_cursor(root, ledger):
             or type(started) not in (float, int) or not math.isfinite(started)
             or not _quota_cursor_active(cursor)
             or cursor['ledger_revision'] != ledger['revision']):
+        return None
+    if cursor.get('metadata_complete') not in (True, False):
+        return None
+    if 'metadata_invalidated' in cursor and (
+            not isinstance(cursor['metadata_invalidated'], bool)
+            or cursor['metadata_invalidated'] and cursor.get('metadata_complete') is not False):
         return None
     if cursor.get('metadata_complete') is True:
         tables = [cursor.get(name, {}) for name in ('dir_stamps', 'base_rows', 'scan_rows')]
@@ -2305,7 +2326,7 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
                     pass
             # 续点所在目录已消失或被替换时其扫描行不再完整，整表作废；宿主子树不建行，随宿主增删不影响目录表。
             if not descended and isinstance(state, dict) and not _quota_host_managed(parts, sub_name):
-                _drop_quota_metadata(state)
+                _drop_quota_metadata(state, invalidated=True)
             last_name = sub_name + '/'
         else:
             last_name = remaining
@@ -2321,11 +2342,12 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
                     continue
                 if descriptor is None:
                     descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+                    _capture_quota_metadata(state, parts, os.fstat(descriptor))
                 try:
                     info = os.stat(name.rstrip('/'), dir_fd=descriptor, follow_symlinks=False)
                 except FileNotFoundError:
                     if isinstance(state, dict) and not _quota_host_managed(parts, name.rstrip('/')):
-                        _drop_quota_metadata(state)
+                        _drop_quota_metadata(state, invalidated=True)
                     if relpath > after:
                         yield relpath, 0, 0
                     continue
@@ -2344,7 +2366,7 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
                             descriptor=open_directory_beneath(root, child_parts, require_dir_fd=True))
                     except FileNotFoundError:
                         if isinstance(state, dict) and not _quota_host_managed(parts, child_parts[-1]):
-                            _drop_quota_metadata(state)
+                            _drop_quota_metadata(state, invalidated=True)
                         continue
             # 字节上限或持久化裁剪可产生不足128项的窗口；短窗口不等于整个目录已读完。
             if len(names) < _QUOTA_SORT_BATCH_ENTRIES and not window_overflow:

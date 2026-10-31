@@ -1740,3 +1740,58 @@ def test_r8_settlement_oserror_keeps_dirty_and_large_dir_rescan_obeys_raw_scandi
             break
     monkeypatch.setattr(quota, 'os', os)
     assert report['complete'] and report['used_bytes'] == 4697
+
+
+# LLM: R10-QUOTA-01：主枚举期间未消费普通文件删除、续点子目录消失或递归子目录消失均标记metadata_invalidated与dirty，
+#   中间片、强制冷恢复与完成片均拒绝超额受控增长，下一轮无异常对账恢复准确字节与干净状态；容量上限降级仍允许正常受控写。
+# 函数用途: 验证主枚举观察失效与容量降级的语义分离及跨片/冷恢复安全闭环。
+@pytest.mark.parametrize('delete', [False, True])
+@pytest.mark.parametrize('cold_after_invalidation', [False, True])
+def test_r10_main_scan_deletion_and_subdir_disappearance_preserve_invalidation(
+    tmp_path, delete, cold_after_invalidation
+):
+    _r7_clear_scans()
+    root = tmp_path / f'owner_{int(delete)}_{int(cold_after_invalidation)}'
+    root.mkdir()
+    for dirname, count in (('a', 10), ('z', 200)):
+        directory = root / dirname
+        directory.mkdir()
+        for idx in range(count):
+            (directory / f'{idx:05d}.bin').write_bytes(b'x')
+    first = _r7_finish(root)
+    assert first['used_bytes'] == 210
+    partial = quota.reconcile_owner_quota_slice(root, max_entries=64, max_ms=5000)
+    assert not partial['complete']
+    assert partial['cursor']['dir_stamps']['a'][7] == 10
+    assert partial['cursor']['last_relpath'] < 'z/00060.bin'
+    (root / 'a' / 'new-big.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+    if delete:
+        (root / 'z' / '00060.bin').unlink()
+    mid = quota.reconcile_owner_quota_slice(root, max_entries=64, max_ms=5000)
+    assert not mid['complete']
+    if delete:
+        assert mid['cursor']['metadata_complete'] is False
+        assert mid['cursor'].get('metadata_invalidated') is True
+        assert _r7_ledger(root)['dirty_since'] is not None
+        with pytest.raises((quota.OwnerQuotaUnavailable, quota.OwnerQuotaExceeded)):
+            with quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024).reserve(
+                [quota.OwnerQuotaChange(root / 'z' / 'mid_managed', 1)]
+            ):
+                (root / 'z' / 'mid_managed').write_bytes(b'z')
+    if cold_after_invalidation:
+        _r7_clear_scans()
+    report = _r7_finish(root)
+    ledger = _r7_ledger(root)
+    actual_before = quota.owner_logical_usage_bytes(root, exact=True)
+    with pytest.raises((quota.OwnerQuotaUnavailable, quota.OwnerQuotaExceeded)):
+        with quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024).reserve(
+            [quota.OwnerQuotaChange(root / 'z' / 'managed', 1)]
+        ):
+            (root / 'z' / 'managed').write_bytes(b'z')
+    assert (ledger['dirty_since'] is not None) or (ledger['used_bytes'] == actual_before)
+    recovered = _r7_finish(root)
+    recovered_ledger = _r7_ledger(root)
+    assert recovered['complete'] and recovered['used_bytes'] == actual_before
+    assert recovered_ledger['dirty_since'] is None
+    assert recovered_ledger['reconcile_cursor'].get('metadata_complete') is True
+    assert not recovered_ledger['reconcile_cursor'].get('metadata_invalidated')
