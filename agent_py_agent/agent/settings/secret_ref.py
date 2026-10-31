@@ -22,23 +22,33 @@ _ENV_PREFIX = "env:"
 _FILE_PREFIX = "file:"
 
 
-# LLM: 只按显式 env/file 来源解析；读取失败返回空给原缺凭据合同，不执行命令或打印明文。
-# 函数用途: 让宿主用环境变量或文件提供密钥，普通文本保持原样。
-def resolve_secret_ref(value: str) -> str:
+# LLM: 只保存稳定错误码；禁止把来源路径、环境值或底层解码异常写进公开错误。
+# 类用途: 表示显式指定的新凭据来源当前不可用。
+class SecretRefError(ValueError):
+    code = "CONFIG_SOURCE_UNAVAILABLE"
+
+
+# LLM: 只读唯一显式来源；旧调用仍返回空表示缺凭据，事务用 required=True 在提交前显式拒绝，不回退旧来源。
+# 函数用途: 解析受管密钥引用，可选择要求新来源准备成功。
+def resolve_secret_ref(value: str, *, required: bool = False) -> str:
     """把密钥引用解析成实际值。``env:NAME`` / ``file:/path`` / 普通字符串(原样)。
     解析失败(env 未设 / 文件读不到)返回空串,由上层按"凭据缺失"处理。"""
     if not isinstance(value, str):
         return value
     stripped = value.strip()
-    if stripped.startswith(_ENV_PREFIX):
-        return os.environ.get(stripped[len(_ENV_PREFIX):].strip(), "")
-    if stripped.startswith(_FILE_PREFIX):
-        path = stripped[len(_FILE_PREFIX):].strip()
-        try:
-            return Path(path).expanduser().read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
-    return value  # 普通值原样返回(不 strip,保持现状行为)
+    if not is_secret_ref(stripped):
+        return value  # 普通值原样返回，不 strip，也不执行其它取密钥方式。
+    try:
+        if stripped.startswith(_ENV_PREFIX):
+            resolved = os.environ.get(_environment_reference_name(stripped), "")
+        else:
+            path = stripped[len(_FILE_PREFIX):].strip()
+            resolved = Path(path).expanduser().read_text(encoding="utf-8").strip() if path else ""
+    except (OSError, ValueError, RuntimeError):
+        resolved = ""
+    if required and not resolved.strip():
+        raise SecretRefError("配置引用的凭据来源不可用，没有切换来源。") from None
+    return resolved
 
 
 # LLM: 与 resolver 共用前缀语法，只做引用类型识别，不证明凭据有效或授予读取权。

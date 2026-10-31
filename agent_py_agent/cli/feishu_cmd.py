@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import tempfile
+from dataclasses import fields
 from pathlib import Path
 
 from agent_py_agent.agent.adapter.feishu_app_registration import (
@@ -24,9 +26,24 @@ from agent_py_agent.agent.adapter.feishu_app_registration import (
     FeishuRegistrationError,
     register_feishu_app_by_scan,
 )
-from agent_py_agent.agent.settings.config_io import set_simple_yaml_value
+from agent_py_agent.agent.common.global_write_guard import (
+    GlobalWriteInWorkerError,
+    require_global_writer,
+)
+from agent_py_agent.agent.settings.config import load_config
+from agent_py_agent.agent.settings.config_io import validate_config_scalar_text
+from agent_py_agent.agent.settings.parameter_changes import (
+    ChangeOrigin,
+    WritePaths,
+    cli_deployment_write_scope,
+    ledger_path,
+    set_feishu_connection,
+)
+from agent_py_agent.agent.settings.secret_ref import resolve_secret_ref
 
 
+# LLM: 新 CAS 选项默认不提供，既有手动凭据/扫码命令形状与 parser 分派不变。
+# 函数用途: 注册飞书接入选项，不执行配置或网络操作。
 def add_feishu_subcommands(sub: argparse._SubParsersAction) -> None:
     feishu = sub.add_parser("feishu", help="飞书接入:扫码自助建应用 / 设凭据并连接")
     feishu_sub = feishu.add_subparsers(dest="feishu_command")
@@ -36,6 +53,7 @@ def add_feishu_subcommands(sub: argparse._SubParsersAction) -> None:
     connect.add_argument("--scan", action="store_true", help="扫码自助建应用(飞书自动建并回传密钥)")
     connect.add_argument("--app-id", help="直接提供 feishu app_id")
     connect.add_argument("--app-secret", help="直接提供 feishu app_secret")
+    connect.add_argument("--expected-revision", help="只在配置 SHA-256 版本仍一致时提交")
     connect.add_argument(
         "--domain", choices=["feishu", "lark"], default="feishu", help="域名:feishu(国内)/lark(国际)"
     )
@@ -65,11 +83,44 @@ def _on_qr(begin: BeginResult, qr_ascii: str) -> None:
     print(f"\n等待扫码授权中(最多 {begin.expire_in}s)…\n")
 
 
+# LLM: 导出只是配置的显式副本，不是第二权威源；禁止覆盖配置、账本及正在使用或准备的新凭据文件。
+# 函数用途: 在事务前及导出前核对密钥导出路径和别名，不创建任何文件。
+def _secret_export_target(config_path: Path, path: str, *, references=()) -> Path:
+    target = Path(path).expanduser()
+    config = load_config(config_path)
+    protected = [config_path, ledger_path(config_path)]
+    refs = [getattr(config, item.name) for item in fields(config) if item.metadata.get("secret_ref")]
+    for ref in (*refs, *references):
+        if isinstance(ref, str) and ref.strip().startswith("file:"):
+            protected.append(Path(ref.strip()[5:].strip()).expanduser())
+    if target.is_symlink() or any(target.resolve() == item.resolve()
+                                  or target.exists() and item.exists() and target.samefile(item) for item in protected):
+        raise ValueError("密钥导出目标不能覆盖配置、账本或凭据来源。")
+    return target
+
+
+# LLM: 原地导出使用从出生起0600的同目录临时文件；不跟随叶链接，失败清临时文件且不打印凭据。
+# 函数用途: 原子保存显式导出的 systemd 环境文件，不能在 chmod 之前暴露明文。
 def _write_secret_env(path: str, app_id: str, app_secret: str) -> None:
-    p = Path(path)
+    require_global_writer("global_config")
+    for value in (app_id, app_secret):
+        validate_config_scalar_text(value)
+        if '"' in value or "\\" in value:
+            raise ValueError("密钥含环境文件不支持的字符，没有导出。")
+    p = Path(path).expanduser()
+    if p.is_symlink():
+        raise ValueError("密钥导出不接受符号链接。")
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(f'FEISHU_APP_ID="{app_id}"\nFEISHU_APP_SECRET="{app_secret}"\n', encoding="utf-8")
-    os.chmod(p, 0o600)
+    fd, name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=p.parent)
+    stage = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f'FEISHU_APP_ID="{app_id}"\nFEISHU_APP_SECRET="{app_secret}"\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(stage, p)
+    finally:
+        stage.unlink(missing_ok=True)
 
 
 def _restart_services() -> bool:
@@ -86,18 +137,25 @@ def _restart_services() -> bool:
     return ok
 
 
+# LLM: 取得凭据后只调用统一候选事务；失败不输出候选值，不导出密钥或重启；成功值取正式回读回执。
+# 函数用途: 原子提交飞书凭据与连接模式，再按用户显式选项导出或重启服务。
 def cmd_feishu_connect(args) -> int:
+    try:
+        require_global_writer("global_config")
+    except GlobalWriteInWorkerError as error:
+        print(f"❌ [{error.error_code}] 当前执行权限不允许修改宿主配置。")
+        return 1
     # 1) 取得凭据:扫码 or 直接给
     if args.scan:
         try:
             result: AppRegistrationResult = register_feishu_app_by_scan(
                 domain=args.domain, on_qr=_on_qr
             )
-        except FeishuRegistrationError as exc:
-            print(f"❌ 扫码建应用失败:{exc}")
+        except FeishuRegistrationError:
+            print("❌ [FEISHU_REGISTRATION_FAILED] 扫码建应用失败，未写入配置。")
             return 1
-        except Exception as exc:  # 网络/解析等
-            print(f"❌ 扫码建应用出错:{exc}")
+        except Exception:  # 网络/解析错误可能包含凭据，公开回执不能拼接底层正文。
+            print("❌ [FEISHU_REGISTRATION_FAILED] 扫码建应用出错，未写入配置。")
             return 1
         app_id, app_secret, domain, open_id = (
             result.app_id, result.app_secret, result.domain, result.open_id,
@@ -117,14 +175,36 @@ def cmd_feishu_connect(args) -> int:
     if not cfg.exists():
         print(f"❌ 配置文件不存在:{cfg}")
         return 1
-    set_simple_yaml_value(cfg, "feishu_app_id", app_id)
-    set_simple_yaml_value(cfg, "feishu_app_secret", app_secret)
-    set_simple_yaml_value(cfg, "feishu_connection_mode", "long_connection")
-    print(f"✅ 凭据写入配置 {cfg}(app_id={app_id} secret={_mask(app_secret)} 长连接模式)")
+    if args.secret_file:
+        try:
+            _secret_export_target(cfg, args.secret_file, references=(app_id, app_secret))
+        except (OSError, ValueError):
+            print("❌ [CONFIG_PATH_INVALID] 密钥导出路径无效，没有写入配置。")
+            return 1
+    try:
+        with cli_deployment_write_scope():
+            report = set_feishu_connection(app_id, app_secret, paths=WritePaths(
+                cfg, expected_revision=getattr(args, "expected_revision", None)), origin=ChangeOrigin("cli", "feishu connect"))
+    except GlobalWriteInWorkerError as error:
+        print(f"❌ [{error.error_code}] 当前执行权限不允许修改宿主配置。")
+        return 1
+    if not report["ok"]:
+        print(f"❌ [{report['code']}] {report['error']}")
+        return 1
+    readback = {item["key"]: item["effective"] for item in report["changes"]}
+    print(f"✅ 凭据写入配置 {cfg}(app_id={readback['feishu_app_id']} "
+          f"secret={readback['feishu_app_secret']} mode={readback['feishu_connection_mode']})")
 
     # 3) 可选:写部署密钥 env 文件
     if args.secret_file:
-        _write_secret_env(args.secret_file, app_id, app_secret)
+        try:
+            exported = _secret_export_target(cfg, args.secret_file)
+            loaded = load_config(cfg)
+            _write_secret_env(str(exported), resolve_secret_ref(loaded.feishu_app_id, required=True),
+                              resolve_secret_ref(loaded.feishu_app_secret, required=True))
+        except (OSError, ValueError):
+            print("❌ [SECRET_EXPORT_FAILED] 配置已提交，但密钥文件导出失败；未重启服务。")
+            return 1
         print(f"✅ 凭据写入密钥文件 {args.secret_file}(600)")
 
     # 4) 可选:重启服务连上

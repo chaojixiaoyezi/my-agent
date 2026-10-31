@@ -14,7 +14,7 @@ import re
 import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -27,7 +27,12 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
-from .config_io import parse_scalar, render_config_change, write_config_bytes_atomic_unlocked
+from .config_io import (
+    parse_scalar,
+    render_config_change,
+    validate_config_scalar_text,
+    write_config_bytes_atomic_unlocked,
+)
 from .parameter_registry import (
     SOURCE_AGENT,
     SOURCE_CAPABILITY,
@@ -221,6 +226,11 @@ def _writable_spec(key: str) -> ParameterSpec:
 def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
     if spec.key in STRUCTURED_PARAMETER_KEYS:
         return _render_structured(spec.key, value)
+    if isinstance(value, str):
+        try:
+            validate_config_scalar_text(value)
+        except ValueError:
+            raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 含不支持的控制字符或编码字符，没有写入。") from None
     text = str(value if value is not None else "").strip()
     if spec.key in TUNABLE_KEYS:
         ok, error, normalized = TUNABLE_KEYS[spec.key].validate(value)
@@ -334,48 +344,89 @@ def _validated_candidate(path: Path, key: str, candidate: bytes) -> object:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(candidate)
-        return _effective(stage, key)
+        actual = _effective(stage, key)
+        _validate_secret_source(key, actual)
+        return actual
     finally:
         stage.unlink(missing_ok=True)
 
 
-# LLM: 协作 writer 共享原路径锁；显式 revision 冲突不写；异常时分别恢复两份原字节，恢复故障不能短路另一份，须报告未恢复对象。
-# 函数用途: 为 set/reset/revert 执行唯一的配置与台账事务，回执只报告正式回读结果。
-def _config_transaction(spec, paths, rendered, origin, *, action, expected=_UNSPECIFIED, reverts=""):
-    path = _write_target(spec, paths)
-    if path.is_symlink():
+# LLM: 凭据字段只认原 schema 的 SecretRef metadata；先核新来源，不把引用当密钥写入第二个库，也不读旧来源兜底。
+# 函数用途: 在候选预检及正式回读时确认新凭据目标可用，失败只给稳定脱敏错误。
+def _validate_secret_source(key: str, actual: object) -> None:
+    from .config import AgentConfig
+    from .secret_ref import SecretRefError, resolve_secret_ref
+
+    if any(item.name == key and item.metadata.get("secret_ref") for item in fields(AgentConfig)):
+        try:
+            resolve_secret_ref(actual, required=True)
+        except SecretRefError as error:
+            raise ParameterChangeError(error.code, str(error)) from None
+
+
+# LLM: 原单项调用与追加批次共享路径锁->账本锁、一次候选发布、CAS及两份原字节恢复；旧调用返回字段不变。
+# 函数用途: 为单值和多字段配置变更执行唯一事务，回执只报告完整候选的正式回读结果。
+def _config_transaction(spec, paths, rendered, origin, *, action, expected=_UNSPECIFIED, reverts="", updates=()):
+    source_path = _write_target(spec, paths)
+    if source_path.is_symlink():
         raise ParameterChangeError("CONFIG_PATH_INVALID", "不向符号链接配置写入。")
-    path = path.resolve()
+    path = source_path.resolve()
     with locked_json_path(path):
-        if path.is_symlink():
+        if source_path.is_symlink() or source_path.resolve() != path or path.is_symlink():
             raise ParameterChangeError("CONFIG_PATH_INVALID", "配置目标已改变。")
         existed = path.is_file()
         original = path.read_bytes() if existed else b""
         revision = sha256(original).hexdigest()
         if paths.expected_revision is not None and paths.expected_revision != revision:
             raise ParameterChangeError("CONFIG_REVISION_CONFLICT", "配置版本已变化，请重新读取后修改。")
-        candidate, previous = render_config_change(original, spec.key, rendered, structured=spec.key in STRUCTURED_PARAMETER_KEYS)
-        if rendered is None and previous is None:
-            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有覆盖，已经是默认值。")
-        staged = _validated_candidate(path, spec.key, candidate)
-        if expected is not _UNSPECIFIED and not _same(expected, staged):
-            raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE", f"'{spec.key}' 正式预检与目标不一致，没有写入。")
+        requested = ((spec, rendered, expected), *updates)
+        if len({item.key for item, _, _ in requested}) != len(requested):
+            raise ParameterChangeError("CONFIG_INVALID", "配置批次含重复目标，没有写入。")
+        candidate, prepared = original, []
+        for item, value, wanted in requested:
+            if _write_target(item, paths).resolve() != path:
+                raise ParameterChangeError("CONFIG_INVALID", "配置批次不能跨来源文件，没有写入。")
+            try:
+                candidate, previous = render_config_change(candidate, item.key, value, structured=item.key in STRUCTURED_PARAMETER_KEYS)
+            except ValueError:
+                raise ParameterChangeError("CONFIG_INVALID", "配置候选无效或目标键重复，没有写入。") from None
+            if value is None and previous is None:
+                raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{item.key}' 没有覆盖，已经是默认值。")
+            prepared.append((item, value, wanted, previous))
+        staged = []
+        for item, _, wanted, _ in prepared:
+            loaded = _validated_candidate(path, item.key, candidate)
+            if wanted is not _UNSPECIFIED and not _same(wanted, loaded):
+                raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE", f"'{item.key}' 正式预检与目标不一致，没有写入。")
+            staged.append(loaded)
         if (path.read_bytes() if path.exists() else b"") != original:
             raise ParameterChangeError("CONFIG_REVISION_CONFLICT", "预检期间配置发生变化，没有覆盖。")
         ledger_base = paths.user_path if paths.user_path is not None else path
         ledger = ledger_path(Path(ledger_base)).resolve()
         with locked_json_path(ledger):
+            # 账本锁可能等待；冲突必须发生在发布及恢复边界之外，不能把并发新版本恢复成旧字节。
+            if source_path.is_symlink() or source_path.resolve() != path or path.is_symlink():
+                raise ParameterChangeError("CONFIG_PATH_INVALID", "配置目标已改变。")
+            if (path.read_bytes() if path.exists() else b"") != original:
+                raise ParameterChangeError("CONFIG_REVISION_CONFLICT", "等待账本期间配置发生变化，没有覆盖。")
             ledger_existed = ledger.is_file()
             ledger_before = ledger.read_bytes() if ledger_existed else b""
             token = _LOCKED_LEDGER.set(ledger)
             try:
                 write_config_bytes_atomic_unlocked(path, candidate)
-                actual = _effective(path, spec.key)
-                if not _same(staged, actual):
-                    raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE", "正式回读与候选不一致，恢复原文件。")
-                row = _ChangeRow(action, previous, rendered, origin, reverts=reverts)
-                entry = _record(Path(ledger_base), spec, row)
-                return {**_receipt(path, spec, entry, actual), "previous_revision": revision,
+                actual_values = []
+                for (item, _, _, _), loaded in zip(prepared, staged):
+                    actual = _effective(path, item.key)
+                    if not _same(loaded, actual):
+                        raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE", "正式回读与候选不一致，恢复原文件。")
+                    _validate_secret_source(item.key, actual)
+                    actual_values.append(actual)
+                reports = []
+                for (item, value, _, previous), actual in zip(prepared, actual_values):
+                    row = _ChangeRow(action, previous, value, origin, reverts=reverts)
+                    entry = _record(Path(ledger_base), item, row)
+                    reports.append(_receipt(path, item, entry, actual))
+                return {**reports[0], **({"changes": reports} if updates else {}), "previous_revision": revision,
                         "revision": sha256(candidate).hexdigest()}
             except BaseException as original_error:
                 failures = []
@@ -472,8 +523,30 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
         return _config_transaction(spec, paths, rendered, origin, action="set", expected=expected)
     except ParameterChangeError as error:
         return _failure(error)
-    except (OSError, ValueError) as error:
-        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+    except (OSError, ValueError):
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
+
+
+# LLM: 仅本地 CLI 的短作用域允许调用；保留 config-set 的五键白名单，连接模式是固定派生项而不是任意部署写权限。
+# 函数用途: 将飞书凭据和长连接模式作为同一批候选原子提交，返回正式回读和脱敏账本回执。
+def set_feishu_connection(app_id: str, app_secret: str, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer("global_config")
+
+    try:
+        app_spec = _writable_spec("feishu_app_id")
+        secret_spec = _writable_spec("feishu_app_secret")
+        mode_spec = parameter_registry()["feishu_connection_mode"]
+        app_expected, app_rendered = _render(app_spec, app_id)
+        secret_expected, secret_rendered = _render(secret_spec, app_secret)
+        mode_expected, mode_rendered = _render(mode_spec, "long_connection")
+        return _config_transaction(app_spec, paths, app_rendered, origin, action="set", expected=app_expected,
+                                   updates=((secret_spec, secret_rendered, secret_expected),
+                                            (mode_spec, mode_rendered, mode_expected)))
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError):
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
 
 
 # LLM: 参数中心新建的配置文件可能放凭据类键（capability 来源也会走到这里），一律以 0600 新建；已存在就报错交给调用方，
@@ -509,8 +582,8 @@ def reset_parameter(key: object, *, paths: WritePaths, origin: ChangeOrigin) -> 
         return _config_transaction(spec, paths, None, origin, action="reset")
     except ParameterChangeError as error:
         return _failure(error)
-    except (OSError, ValueError) as error:
-        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+    except (OSError, ValueError):
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
 
 
 # LLM: 记账用的文本：None 表示“默认值/没有覆盖”，原样保留；其余一律结构脱敏。
@@ -564,8 +637,8 @@ def revert_change(change_id: str, *, paths: WritePaths, origin: ChangeOrigin) ->
         return _revert_entry(paths, entry, origin)
     except ParameterChangeError as error:
         return _failure(error)
-    except (OSError, ValueError) as error:
-        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", f"写入失败：{error}"))
+    except (OSError, ValueError):
+        return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
 
 
 # LLM: 回滚单条记录的核心写入：先把当前配置值写回 previous（或删除覆盖行），再用正式加载器回读核对。
@@ -711,5 +784,6 @@ __all__ = [
     "revert_change",
     "revert_profile_change",
     "set_parameter",
+    "set_feishu_connection",
     "set_profile_field",
 ]
