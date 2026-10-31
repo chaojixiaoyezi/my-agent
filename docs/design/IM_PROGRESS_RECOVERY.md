@@ -1,5 +1,16 @@
 # IM 进度恢复合同
 
+## 2026-10-31 W0/W2/W5/W6 落地边界
+
+- **原话题聚合**：`ChannelManager` 先在 `GatewayIngressStore` 持久受理，再由原 worker 提交 Gateway。原 `PendingGatewayReply` 冻结 `reply_policy`、供应商 `provider_thread_id/root_id/parent_id` 与入站 `message_id`；内部会话编号与供应商话题编号不可混用。进度首发、同卡编辑和最终正文沿原回复锚点，不因当前配置变化改绑话题，不新建队列。
+- **草稿与真实回执**：`progress_draft.py` 在原 pending 内保存展示消息身份、源 revision、步骤及组件首次 dispatch/供应商回执；Card 2.0 首发后只编辑同一个确认 ID。未知首发只在原生幂等窗口内用相同 key 和冻结内容对账；未知、展示失败或编辑失败不表示任务失败，也不能自动替换新卡。最终消息沿自己的稳定 key 与组件账收口。
+- **有界阶段投影**：`delivery/execution_view.py` 与 `adapter/feishu_progress_card.py` 已实现纯投影。只消费结构化真实工具事件；模型宣称完成不产生步骤。保留 `call_id` 顺序、阶段、ok/handler_executed、耗时与引用；迟到 started 不覆盖已确认终态。未知总数仍未知，长标签及最终 JSON 字节预算有界，卡片默认折叠；投影不能授予 claim、重放或权限。
+- **实际接线与来源边界**：历史 W0 卡片链失败定位到兼容 renderer；上游 `7fa990672` 已把 `DeliveryService.deliver_progress()` 接入 `adapter/feishu_progress_card.py`，同一外发 JSON 等值断言复测通过，W0 未修改生产代码或用 monkeypatch 补接。原始 Gateway 进度轮询仍用 W5 `project_execution_steps()`；W0 在拉取网络替身侧用真实 W6 通用投影构造公开批次，验证它经原草稿、worker、投递服务和实际 renderer 到 provider 边界，不代表生产轮询已改用 W6 通用投影。当前六节点全通过，同时核对步骤身份/终态/revision、原话题路由、创建→编辑→最终正文顺序及确切业务正文；不证明真实飞书显示或网络可达。
+- **前台恢复交接**：`ForegroundRecoveryHandoffRef` 的落地形式是 `foreground-recovery-handoff.v1`：同 thread、attempt_ids、原恢复 event_ids 与 source_revision 的结构化字典，由 RuntimeRepository 原事件重建并校验，随 `_ForegroundRecoveryRunParams` 传递。不是说明文案，也不是重新执行旧操作的许可证。unknown 与 pending_handoff 期间后台原来源保留；准确原发起人的前台接手成功确认后才解除屏障。同 owner 的健康任务仍可独立 claim。
+- **接班观察点**：W0 在临时文件、真实 RuntimeRepository/会话账本上验证排空门、cleanup 标记、原请求重排、同代 ready 后通知和交接引用重读。提供方、进程存活观察与模型结果使用测试替身；真实换进程、真实飞书和线上模型端到端均未验证。
+
+以下保留原 R01/R02 恢复合同，不把历史本地结论升级为真实 IM 验收。
+
 2026-10-14，R01/R02 本地实现，真实 IM 验收仍待主线。
 
 默认 120 秒心跳与 100 字预览不变。心跳来自真实工具/model 请求的 monotonic 经过时间，不调用 LLM。关闭或取消沿原观察资格立即失权；单次 sink 故障不再终止线程，按原间隔恢复，连续三次失败才停止，成功清零。沿 OpenAI Agents Python sandbox retry 的有界尝试/成功复位思想，不引入其依赖或请求重试。

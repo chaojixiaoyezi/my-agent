@@ -1,3 +1,24 @@
+## 2026-10-31 W0–W12 全局收口代码地图
+
+本轮长期维护入口增量如下；文件存在、纯函数验收和真实通道接线分别记账，不相互代替。
+
+```text
+agent_py_agent/
+|-- agent/
+|   |-- session_lock/
+|   |   `-- admission.py  # W5 会话锁准入辅助；复用原锁门，不以重连或停止回执扩大准入
+|   |-- adapter/
+|   |   |-- progress_draft.py  # W5 原 pending 中的同消息进度草稿、游标与话题身份
+|   |   `-- feishu_progress_card.py  # W6 飞书 Card JSON 2.0 纯渲染，折叠阶段与最终 JSON 字节预算
+|   `-- delivery/
+|       |-- execution_view.py  # W6 通用有界执行视图，只取结构化工具事实，不从正文推断完成
+|       `-- progress.py  # W5 进度回执与保留的兼容 renderer；实际卡片投递现已消费 W6 renderer
+`-- tests/
+    `-- test_plan_w0_integration.py  # 四条跨片组合链，临时真实账本、假提供方和可控时钟
+```
+
+关键文件说明：`session_lock/admission.py` 不持有第二份会话锁状态；`delivery/execution_view.py` 不执行工具、不授认领资格；`adapter/feishu_progress_card.py` 不发送、不改任务状态。W0 先发现实际投递仍消费旧 renderer；上游 `7fa990672` 已把 `DeliveryService.deliver_progress()` 接入 W6 renderer。未修改这条等值断言，当前六节点全通过，外发卡片确与同一持久草稿的 W6 投影一致；Gateway 原始进度轮询仍沿 W5 `project_execution_steps()`，不可扩大为该处已改用 W6 通用投影。这里只证明本地真实组件到假提供方边界，不证明真实飞书显示或网络可达。测试范围与状态见 [TESTS](TESTS.md)，文件唯一写者见 [WORKSTREAMS](docs/WORKSTREAMS.md)。
+
 ## 2026-10-29 e905 完整优化包（sol-1..sol-14）统一集成代码地图
 
 - `agent_py_agent/agent/tooling/versioned_input_decoder.py`：显式 schema 版本输入解码器与移除计划台账，`self_map` 收敛至 `tool_search(action="catalog")`（`sol-1`）。

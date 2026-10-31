@@ -1,3 +1,43 @@
+## 2026-10-31 W0–W12 分片回归与四条跨片闭环
+
+来源：`07-tasks/plan-w0.md`。W0 只新增 `test_plan_w0_integration.py`，其余套件保持原样。任务书称“共 16 个”，当前实际文件清点为 **18 个（含 W0）**：W5、W6、W7、W8 含后补的专项套件，全部登记如下，不能为凑旧计数遗漏文件。表内路径均在 `agent_py_agent/tests/`。
+
+| 文件 | 覆盖范围 |
+|---|---|
+| `test_plan_w0_integration.py` | W12/W5/W6 持久受理→原话题单卡→最终回执；W12/W1/W2 排空接班→请求重排与恢复引用；W12/W2/W3/W4 恢复屏障与健康批次/SQLite 维护；W12/W7/W8 workflow 回执与定义代次 |
+| `test_plan_w1_lifecycle.py` | starting 不误报 ready、准确代次与原请求、cleanup/强制未结责任及通知去重 |
+| `test_plan_w2_recovery_budget.py` | unknown/pending_handoff、恢复 source_revision/领取复核、存储等待与分拍维护预算 |
+| `test_plan_w3_memory_batch.py` | 候选批次两次 flush、正式记忆与 obligation 守恒、局部失败、幂等重试与向量批量 |
+| `test_plan_w4_storage_errors.py` | SQLite 原生错误码、真实锁竞争、有界重试/连接退役、操作与组件 dispatch 事实 |
+| `test_plan_w5_channel_lifecycle.py` | 飞书真实退出观察、共享连接关闭、受理去重及重连/锁门边界 |
+| `test_plan_w5_host_delivery.py` | 宿主投递意图、原 envelope/组件身份、冻结字节和外发未知续收 |
+| `test_plan_w5_topic_progress.py` | 原话题锚点、同卡合并编辑、未知首发原 key 对账与最终回复不被展示故障吞掉 |
+| `test_plan_w6_error_projection.py` | 错误阶段/结构化原因在 TUI、请求和健康投影中保持一致，不按文案猜原因 |
+| `test_plan_w6_execution_card_projection.py` | 真实工具事件、有序终态、未知结果、默认折叠与多字节 JSON 严格字节预算 |
+| `test_plan_w7_execution_receipts.py` | 执行定义身份、阶段回执/成功前缀、发表故障、取消与原运行续接 |
+| `test_plan_w7_workspace.py` | 脚本业务工作区与 scratch 分离、可信工作上下文及路径范围 |
+| `test_plan_w8_definition_generation.py` | 定义代次、旧结果不污染新计划/依赖/退避、事件代次和删除重建 |
+| `test_plan_w8_schedule_target.py` | 公开 workflow/script 目标、冻结资产快照、原工具执行、结构化结果与实际模型调用数 |
+| `test_plan_w9_transcript_retention.py` | 转录消息稳定身份、重复/旧记录适配与保留账本资格 |
+| `test_plan_w10_config_entries.py` | 配置入口唯一权威、秘密引用及多字段变更一致性 |
+| `test_plan_w11_plugin_scope.py` | 插件启用作用域、授权合并、路径与 sandbox 裁决 |
+| `test_plan_w12_public_interfaces.py` | 公共接口位置/JSON 兼容、恢复资格、投递/执行字段、脚本 SDK 工作上下文及来源隔离 |
+
+**当前 W0 观察结果：6 节点，6 通过、0 失败、0 error、0 skip，生产基线 `7fa990672`。** 历史 5 通过、1 失败暴露了实际投递仍使用 W5 兼容 renderer；上游接线修复后保留原外发 JSON 等值断言复测通过，没有 skip/xfail、删除断言、伪造 DTO 或 monkeypatch 接线。卡片链另核对原步骤身份/终态/revision、创建→编辑→最终文本顺序及确切业务正文。原请求接班、unknown/pending_handoff 两种健康维护链及当前/迟到两种工作流代次节点通过；自动前置 fixture 校验主要真实组件均从当前工作树导入。W7 语义 hash 与 W8 带 schema 冻结引用分别对应同一执行前定义；`last_run_*` 是真实完成诊断，下一计划/result/checkpoint/backoff 才受定义代次门保护。
+
+运行目录必须是工作树根；**所有 Python/pytest 命令必须显式隔离 HOME 与 MY_AGENT_HOME**。先确认解释器的 `agent_py_agent` 来源在当前工作树，不使用部署包或其它 checkout。单个套件使用下列命令中的准确文件名替换 W0；完整分片集合用已清点的 `test_plan_w*.py` glob：
+
+```bash
+HOME=/tmp/my-agent-home-w0 MY_AGENT_HOME=/tmp/my-agent-home-w0 /Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest agent_py_agent/tests/test_plan_w0_integration.py -q --tb=short
+HOME=/tmp/my-agent-home-w0 MY_AGENT_HOME=/tmp/my-agent-home-w0 /Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest agent_py_agent/tests/test_plan_w*.py -q --tb=short
+ruff check agent_py_agent scripts
+HOME=/tmp/my-agent-home-w0 MY_AGENT_HOME=/tmp/my-agent-home-w0 python3 scripts/check_import_boundaries.py --json
+git diff --check
+HOME=/tmp/my-agent-home-w0 MY_AGENT_HOME=/tmp/my-agent-home-w0 python3 scripts/check_clean_package.py .
+```
+
+可选 `--junitxml=/tmp/my-agent-home-w0/w0-integration.xml` 将本次结构化计数留在隔离测试根；本轮实际运行 W0 单套，登记的完整 18 套命令不表示已执行。当前六节点结果不能外推全仓、双平台或真实飞书/真实进程接班。卡片创建/编辑的精确次数只约束此无故障确定性场景，不证明崩溃窗口或跨重启 exactly-once；W6 长文本/折叠/字节预算边界由专项套件覆盖，不能仅凭共享 renderer 的等值断言宣称已验。规定静态门均须单独通过，且只能提交 W0 六个白名单文件。
+
 ## 2026-10-29 e905 sol-1 R3：旧白名单的真实原生模型投影返修
 
 来源：`fix-e905-sol-1-r3.md`，起点`1132a3f35`。旧记录的快照已正确收窄为catalog，但原生模型入口再按未归一的list_tools白名单求交，导致目录定义丢失。`allowed_tool_set`复用现有规范授权转换，同时保留catalog限制令牌；展示仍直接读取冻结快照schema，不生成完整search定义。另将`_indexed_agent_name`契约注释改为准确中文。

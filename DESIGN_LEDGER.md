@@ -1,3 +1,28 @@
+## 2026-10-31 全局架构收口与 12 分片并行落地（W1-W12）
+
+来源：`07-tasks/plan-w0.md` 与 W1–W12 分片任务书；起始观察为 `plan/w0@6af0a1437`，当前本地验收基线为上游接线修复后的 `7fa990672`。下表“已落地”指分片实现已存在于当前集成源码，**不代替逐链验收，也不代表真实环境验证或部署完成**。
+
+| 分片 | 已落地的职责与边界 | 实现状态 |
+|---|---|---|
+| W1 | 生命周期排空、最终 cleanup 裁决与同 request/代次就绪后通知；强制超时不抹未确认责任 | 已落地 |
+| W2 | 恢复资格、领取时版本复核、前台接手引用与分拍扫描/维护预算；未知任务不阻塞同 owner 健康任务 | 已落地（当前集成快照） |
+| W3 | 候选批量晋升、先持久 approved/obligation 再正式写入，批内局部失败与重试幂等 | 已落地 |
+| W4 | SQLite 作用域租约、结构化错误分类、连接退役及原操作/组件发送账本 | 已落地 |
+| W5 | 飞书持久关闭、入站受理、单卡草稿、原话题冻结路由与组件级投递回执 | 已落地；实际卡片入口已接 W6 renderer |
+| W6 | 错误投影、通用有界执行视图与 Card JSON 2.0 字节预算纯渲染 | 已落地；卡片投递接线本地验收通过 |
+| W7 | 工作流阶段/定义/成功前缀回执、返回侧取消、原运行恢复与可信脚本工作区 | 已落地 |
+| W8 | 定时定义代次、旧结果门控、冻结 workflow/script 执行目标与原 scheduler 收口 | 已落地 |
+| W9 | 转录扫描的消息身份与保留账本解耦，保留原引用与删除资格 | 已落地 |
+| W10 | 配置入口与两端唯一权威表、秘密引用与变更一致性 | 已落地 |
+| W11 | 插件启用作用域、grant/path/sandbox 的原权限裁决 | 已落地 |
+| W12 | 公共接口增量兼容、结构化错误及恢复/投递/执行字段冻结 | 已落地 |
+
+W0 新增四条组合链（六个测试节点）：受理→进度卡→话题最终投递；负载排空→同代接班→原请求与前台恢复责任重读；unknown/pending_handoff 屏障→健康 claim→候选批次与有界 SQLite 维护；workflow 定时目标→真实工作流执行→回执与新旧定义代次收口。当前结果为 **6 通过、0 失败、0 error、0 skip**。历史观察曾为 5 通过、1 失败，定位到 `DeliveryService.deliver_progress()` 仍使用兼容 renderer；上游 `7fa990672` 修复实际入口后，同一等值断言复测通过。W0 未修改生产代码、未用 monkeypatch 补接，且另加原步骤身份/终态/revision、外发顺序和最终正文的独立断言。当前集成批次的组合验收与全局文档收口完成；W2 后续分支尖端的独立待集成差异见唯一写者清单，不冒充所有分片最新尖端均已合并。
+
+接口名称以实际公共合同为准：任务书的 `ForegroundRecoveryHandoffRef` 对应 `foreground-recovery-handoff.v1` 字典及原恢复事件；`WorkflowExecutionReceipt` 对应 `WorkflowRunRecord` 的增量字段和 `run_store.execution_receipt()`；渠道结果/状态使用 `DeliveryReceipt`、`ProgressDeliveryReceipt` 与 `ChannelRuntimeSnapshot`，定时目标使用 `execution_target` 的规范映射。不新造同义 DTO 或第二套账。W7 语义 hash 与 W8 带 schema 的定义快照引用各按同一执行前定义核验，不把两个不同格式直接比较。
+
+本地测试使用临时目录、假提供方和时钟；未启动/停止真实 Gateway、未连接飞书、未调用在线模型。详见 [IM 进度恢复边界](docs/design/IM_PROGRESS_RECOVERY.md)、[测试登记](TESTS.md) 与 [唯一写者清单](docs/WORKSTREAMS.md)。
+
 ## 2026-10-30 e905 R6–R10：Owner 配额、跨代 Pin 解析字节绑定、Telemetry 见证阈值与展示归档分时续扫收口（源码候选，未部署）
 
 来源：`07-tasks/opus-r6-w1-quota.md`、`07-tasks/opus-r6-w2-pins-telemetry-archive.md`、`07-tasks/e905-r7-w1.md`、`07-tasks/e905-r7-w2.md`、`07-tasks/e905-r8-w1.md`、`07-tasks/e905-r8-w2.md`。覆盖 `user_space/owner_quota.py`、`user_space/owner_maintenance.py`、`user_space/owner_maintenance_transition.py`、`gateway_parts/multiprocess_background_sources.py`、`gateway_parts/multiprocess_background_request.py`、`gateway_parts/multiprocess_background_discovery.py`、`memory_store/reference_pins.py`、`memory_store/generation_manifest.py`、`memory_store/retention_scan.py`、`observability/telemetry_ledger.py`、`local_storage/owner_read_index.py` 与 `conversation/display_archive_maintenance.py` 及其测试/常数目录；不新增权威事实源，锁序与账本文件位置不变。
