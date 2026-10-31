@@ -1795,3 +1795,162 @@ def test_r10_main_scan_deletion_and_subdir_disappearance_preserve_invalidation(
     assert recovered_ledger['dirty_since'] is None
     assert recovered_ledger['reconcile_cursor'].get('metadata_complete') is True
     assert not recovered_ledger['reconcile_cursor'].get('metadata_invalidated')
+
+    # 续点子目录在冷恢复前消失：同样标记metadata_invalidated与dirty并拒绝超额受控增长。
+    if delete and cold_after_invalidation:
+        _r7_clear_scans()
+        sub_root = tmp_path / 'subdir_vanish'
+        sub_root.mkdir()
+        for name, count in (('a', 10), ('m_sub', 80), ('z', 80)):
+            d = sub_root / name
+            d.mkdir()
+            for idx in range(count):
+                (d / f'{idx:05d}.bin').write_bytes(b'x')
+        assert _r7_finish(sub_root)['used_bytes'] == 170
+        p1 = quota.reconcile_owner_quota_slice(sub_root, max_entries=64, max_ms=5000)
+        assert not p1['complete'] and p1['cursor']['last_relpath'].startswith('m_sub/')
+        (sub_root / 'a' / 'big.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+        for item in (sub_root / 'm_sub').iterdir():
+            item.unlink()
+        (sub_root / 'm_sub').rmdir()
+        _r7_clear_scans()
+        done = _r7_finish(sub_root)
+        assert done['complete']
+        assert _r7_ledger(sub_root)['dirty_since'] is not None
+        assert done['cursor'].get('metadata_invalidated') is True
+        with pytest.raises((quota.OwnerQuotaUnavailable, quota.OwnerQuotaExceeded)):
+            with quota.OwnerQuotaEnforcer(sub_root, max_bytes=1024 * 1024).reserve(
+                [quota.OwnerQuotaChange(sub_root / 'z' / 'managed', 1)]
+            ):
+                (sub_root / 'z' / 'managed').write_bytes(b'z')
+        rec = _r7_finish(sub_root)
+        assert rec['used_bytes'] == quota.owner_logical_usage_bytes(sub_root, exact=True)
+        assert _r7_ledger(sub_root)['dirty_since'] is None
+
+
+# LLM: R11-QUOTA-01：小owner前台有界快照(_bounded_quota_snapshot)遇到并发删除触发metadata_invalidated时，
+#   严禁回退到旧干净账本放行超额增长，必须立即将dirty与metadata_invalidated持久化到账本/游标并同步到热续扫状态；
+#   非增长修复仍允许执行且保持dirty，下一轮对账收敛后恢复正常准入。
+# 函数用途: 验证前台快照观察失效不回退旧账本、热续扫同步与非增长修复语义。
+@pytest.mark.parametrize('invalidate', [False, True])
+def test_r11_foreground_snapshot_invalidation_never_falls_back_to_stale_ledger(
+    tmp_path, monkeypatch, invalidate
+):
+    _r7_clear_scans()
+    root = tmp_path / f'fg_owner_{int(invalidate)}'
+    root.mkdir()
+    for idx in range(22):
+        d = root / f'a{idx:02d}'
+        d.mkdir()
+        (d / '0.bin').write_bytes(b'x')
+    first = _r7_finish(root)
+    assert first['used_bytes'] == 22
+    assert _r7_ledger(root)['dirty_since'] is None
+
+    if invalidate:
+        real_scandir = os.scandir
+        triggered = [False]
+
+        class _FgRaceEntry:
+            def __init__(self, entry, parent_fd):
+                self._entry = entry
+                self._parent_fd = parent_fd
+
+            def __getattr__(self, name):
+                return getattr(self._entry, name)
+
+            def stat(self, **kwargs):
+                if not triggered[0] and self._entry.name == '0.bin':
+                    try:
+                        parent_info = os.fstat(self._parent_fd)
+                        target_info = (root / 'a16').stat()
+                        if (parent_info.st_dev, parent_info.st_ino) == (
+                            target_info.st_dev,
+                            target_info.st_ino,
+                        ):
+                            triggered[0] = True
+                            (root / 'a12' / 'big.bin').write_bytes(b'y' * (2 * 1024 * 1024))
+                            (root / 'a16' / '0.bin').unlink()
+                    except OSError:
+                        pass
+                return self._entry.stat(**kwargs)
+
+        class _FgRaceScandir:
+            def __init__(self, inner, fd_arg):
+                self._inner = inner
+                self._fd_arg = fd_arg if isinstance(fd_arg, int) else -1
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._inner.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return _FgRaceEntry(next(self._inner), self._fd_arg)
+
+            def close(self):
+                self._inner.close()
+
+        monkeypatch.setattr(
+            quota,
+            'os',
+            SimpleNamespace(
+                **{
+                    **vars(os),
+                    'scandir': lambda fd, *a, **kw: _FgRaceScandir(real_scandir(fd, *a, **kw), fd),
+                }
+            ),
+        )
+
+    target = root / 'a21' / 'new.bin'
+    enforcer = quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024)
+    if not invalidate:
+        with enforcer.reserve([quota.OwnerQuotaChange(target, 1)]):
+            target.write_bytes(b'z')
+        assert _r7_ledger(root)['used_bytes'] == 23
+        assert _r7_ledger(root)['dirty_since'] is None
+        return
+
+    with pytest.raises(quota.OwnerQuotaUnavailable):
+        with enforcer.reserve([quota.OwnerQuotaChange(target, 1)]):
+            target.write_bytes(b'z')
+    assert not target.exists()
+    ledger = _r7_ledger(root)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_complete') is False
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+
+    # 快照未完成/失效期间，非增长修复仍允许执行，且保持dirty与metadata_invalidated。
+    (root / 'a17' / 'tmp.bin').write_bytes(b'x')
+    triggered[0] = False
+    orig_stat = _FgRaceEntry.stat
+
+    def _stat_unlink_tmp(self, **kwargs):
+        if not triggered[0] and self._entry.name == 'tmp.bin':
+            triggered[0] = True
+            try:
+                (root / 'a17' / 'tmp.bin').unlink()
+            except OSError:
+                pass
+        return orig_stat(self, **kwargs)
+
+    _FgRaceEntry.stat = _stat_unlink_tmp
+    existing = root / 'a00' / '0.bin'
+    with enforcer.reserve([quota.OwnerQuotaChange(existing, 1)]):
+        existing.write_bytes(b'w')
+    monkeypatch.setattr(quota, 'os', os)
+    ledger_after_repair = _r7_ledger(root)
+    assert ledger_after_repair['dirty_since'] is not None
+    assert ledger_after_repair['reconcile_cursor'].get('metadata_invalidated') is True
+
+    # 下一轮完整对账恢复精确用量并清除dirty。
+    recovered = _r7_finish(root)
+    assert recovered['used_bytes'] == 2 * 1024 * 1024 + 21
+    assert _r7_ledger(root)['dirty_since'] is None
+    assert _r7_ledger(root)['reconcile_cursor'].get('metadata_complete') is True
+    assert not _r7_ledger(root)['reconcile_cursor'].get('metadata_invalidated')
