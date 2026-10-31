@@ -43,8 +43,10 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    _TRASH_COMMIT_PENDING,
     _load_policy,
     _runtime_unlocked,
+    _trash_transaction_pending,
     current_retention_pins,
     current_tool_manifest_references,
     file_fingerprint,
@@ -441,7 +443,74 @@ def _delete_file(action: MemoryRetentionAction) -> MemoryRetentionAction:
     return replace(action, status="deleted")
 
 
-# LLM: task/tool/subagent的权威状态、目录及计划摘要均须合法不变，坏成员不可漂白为组合摘要。
+# LLM: 首墓碑只清理本次mkdir成功的空容器；已有目录或并发出现的文件必须保留。
+# 函数用途: 建立moving记录，首次写入失败时只尝试原子rmdir，不递归删除。
+def _begin_trash(destination, *, action, payload, now):
+    ensure_private_dir(destination.parent)
+    destination.mkdir(mode=0o700)
+    try:
+        _write_tombstone(destination, action=action, payload=payload, now=now, status="moving")
+    except Exception:
+        _prune_empty_directory(destination)
+        raise
+    # 在移动任何源数据之前耐久留下保护；之后即使trashed已发布但fsync报错也不能被清理。
+    write_private_text_file_atomic_unlocked(destination / _TRASH_COMMIT_PENDING, action.action_id + "\n")
+
+
+# LLM: final墓碑写入成功且确认返回后才移除保护；unlink最后执行，失败保守进入补偿，崩溃残留只会多保留。
+# 函数用途: 完成本次回收提交，不把墓碑replace后的异常误当成仍保留旧moving。
+def _commit_trash(destination, *, action, payload, now):
+    _write_tombstone(destination, action=action, payload=payload, now=now, status="trashed")
+    (destination / _TRASH_COMMIT_PENDING).unlink()
+
+
+# LLM: shutil.move只在原rename抛OSError后调用此回调；重新抛原异常，不进入复制或删除源文件。
+# 函数用途: 禁止单文件搬移隐式退化成跨卷复制，并保留EXDEV/权限错误的原始分类。
+def _refuse_retention_copy(source, destination):
+    raise
+
+
+# LLM: 目录一律原子replace；普通文件沿既有move入口但关闭copy回退，两者EXDEV均保持源不变。
+# 函数用途: 搬移回收payload或补偿原件，不启用跨卷复制模式。
+def _move_retention_payload(source, target):
+    if source.is_dir():
+        os.replace(source, target)
+    else:
+        shutil.move(str(source), str(target), copy_function=_refuse_retention_copy)
+
+
+# LLM: 补偿不能覆盖重新出现的源路径；逐件尽力恢复，任何失败都保留目标副本和未完成状态。
+# 函数用途: 逆序还原本次确已原子移走的文件，返回是否全部补偿成功。
+def _rollback_retention_moves(moved):
+    restored = True
+    for source, target in reversed(moved):
+        try:
+            if not target.exists():
+                restored = restored and source.exists()
+                continue
+            if source.exists():
+                restored = False
+                continue
+            ensure_private_dir(source.parent)
+            _move_retention_payload(target, source)
+        except Exception:
+            restored = False
+    return restored
+
+
+# LLM: 仅全部补偿成功才移除自有容器；补偿失败保留payload和pending，即使墓碑仍为trashed也不能清理。
+# 函数用途: 收口失败事务，留下不会被按龄清理的可恢复材料。
+def _finish_failed_trash(destination, *, action, payload, now, restored):
+    if restored:
+        shutil.rmtree(destination, ignore_errors=True)
+        return
+    try:
+        _write_tombstone(destination, action=action, payload=payload, now=now, status="recovery_required")
+    except Exception:
+        pass
+
+
+# LLM: task/tool/subagent的权威状态、目录及摘要均须不变；同卷原子移动，EXDEV拒绝且补偿失败保留payload。
 # 函数用途: 将一棵过期目录连同 tombstone 安全移动。
 def _trash_tree(
     *,
@@ -454,22 +523,21 @@ def _trash_tree(
     if not _authority_still_eligible(action) or not _fingerprint_matches(action.source_fingerprint, tree_fingerprint(action.path)):
         return replace(action, status="state_changed")
     destination = _validated_destination(home, action)
-    destination.mkdir(parents=True, exist_ok=False)
     payload = destination / "payload"
-    _write_tombstone(destination, action=action, payload=payload, now=now, status="moving")
+    _begin_trash(destination, action=action, payload=payload, now=now)
+    moved = []
     try:
-        shutil.move(str(action.path), str(payload))
-        _write_tombstone(destination, action=action, payload=payload, now=now, status="trashed")
+        _move_retention_payload(action.path, payload)
+        moved.append((action.path, payload))
+        _commit_trash(destination, action=action, payload=payload, now=now)
     except Exception:
-        if payload.exists() and not action.path.exists():
-            action.path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(payload), str(action.path))
-        shutil.rmtree(destination, ignore_errors=True)
+        _finish_failed_trash(destination, action=action, payload=payload, now=now,
+                             restored=_rollback_retention_moves(moved))
         raise
     return replace(action, status="trashed")
 
 
-# LLM: 单文件摘要必须为合法小写64hex且当前值相等；原trash_file两阶段墓碑和回滚合同不变。
+# LLM: 单文件摘要必须合法且相等；首次墓碑失败只删自有空目录，移动不复制，补偿失败保留payload。
 #   没有authority状态文件可核对，按"计划时字节指纹 + cutoff"重验证；
 #   文件在 plan 之后被改过或变新都跳过（state_changed）。移走最后一个文件后顺手删空的父目录
 #   （仅空目录，沿用 home_layout._remove_dir_if_empty 的口径），例如快照的日期目录。
@@ -490,18 +558,17 @@ def _trash_file(
     ):
         return replace(action, status="state_changed")
     destination = _validated_destination(home, action)
-    destination.mkdir(parents=True, exist_ok=False)
     payload = destination / "payload"
-    _write_tombstone(destination, action=action, payload=payload, now=now, status="moving")
+    _begin_trash(destination, action=action, payload=payload, now=now)
+    moved = []
     try:
-        shutil.move(str(action.path), str(payload))
+        _move_retention_payload(action.path, payload)
+        moved.append((action.path, payload))
         _prune_empty_directory(action.path.parent)
-        _write_tombstone(destination, action=action, payload=payload, now=now, status="trashed")
+        _commit_trash(destination, action=action, payload=payload, now=now)
     except Exception:
-        if payload.exists() and not action.path.exists():
-            action.path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(payload), str(action.path))
-        shutil.rmtree(destination, ignore_errors=True)
+        _finish_failed_trash(destination, action=action, payload=payload, now=now,
+                             restored=_rollback_retention_moves(moved))
         raise
     return replace(action, status="trashed")
 
@@ -600,7 +667,32 @@ def _delete_tree(action: MemoryRetentionAction) -> MemoryRetentionAction:
     return replace(action, status="deleted")
 
 
-# LLM: Conversation在原thread锁内重验合法单文件/组合摘要、active task、时间及索引，坏成员拒绝移动。
+# LLM: 回调锁内暂存删除增量，原子更新确认返回才进入已提交补偿日志；未知提交不能自动复活并发删除。
+# 函数用途: 删除指向被回收会话的索引项，并留下本事务的增量补偿日志。
+def _remove_conversation_index(path, thread_id, removed):
+    pending = {}
+
+    def remove(current):
+        pending.update({key: value for key, value in current.items() if str(value) == thread_id})
+        return {key: value for key, value in current.items() if str(value) != thread_id}
+
+    update_json_file_atomic(path, remove)
+    removed.update(pending)
+
+
+# LLM: 在原索引原子回调内只补缺失键；并发新增项与重新绑定的同名键均保留。
+# 函数用途: 用删除增量恢复会话路由，不覆盖任何并发索引更新。
+def _restore_conversation_index(path, removed):
+    if not removed:
+        return
+
+    def restore(current):
+        return {**{key: value for key, value in removed.items() if key not in current}, **current}
+
+    update_json_file_atomic(path, restore)
+
+
+# LLM: Conversation在原thread锁内重验摘要、active task、时间；移动及索引增量独立补偿，失败保留副本。
 # 函数用途: 将一个过期 ConversationStore thread 及附属文件移入同一回收容器。
 def _trash_conversation(
     *,
@@ -630,21 +722,14 @@ def _trash_conversation(
             _assert_safe_target(path, (root,))
         bindings_path = root / "channel_bindings.json"
         latest_path = root / "user_latest_threads.json"
-        bindings = _read_index(bindings_path)
-        latest = _read_index(latest_path)
+        _read_index(bindings_path)
+        _read_index(latest_path)
+        removed_bindings, removed_latest = {}, {}
+        index_update_pending = False
         destination = _validated_destination(home, action)
-        # 落点目录逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir）。
-        ensure_private_dir(destination.parent)
-        destination.mkdir(mode=0o700)
         payload_root = destination / "payload"
         moved: list[tuple[Path, Path]] = []
-        _write_tombstone(
-            destination,
-            action=action,
-            payload=payload_root,
-            now=now,
-            status="moving",
-        )
+        _begin_trash(destination, action=action, payload=payload_root, now=now)
         try:
             for source in action.related_paths:
                 if not source.exists():
@@ -652,45 +737,27 @@ def _trash_conversation(
                 relative = source.relative_to(root)
                 target = payload_root / relative
                 ensure_private_dir(target.parent)
-                shutil.move(str(source), str(target))
+                _move_retention_payload(source, target)
                 moved.append((source, target))
-            update_json_file_atomic(
-                bindings_path,
-                lambda current: {
-                    key: value
-                    for key, value in current.items()
-                    if str(value) != thread.thread_id
-                },
-            )
-            update_json_file_atomic(
-                latest_path,
-                lambda current: {
-                    key: value
-                    for key, value in current.items()
-                    if str(value) != thread.thread_id
-                },
-            )
-            _write_tombstone(
-                destination,
-                action=action,
-                payload=payload_root,
-                now=now,
-                status="trashed",
-            )
+            index_update_pending = True
+            _remove_conversation_index(bindings_path, thread.thread_id, removed_bindings)
+            _remove_conversation_index(latest_path, thread.thread_id, removed_latest)
+            index_update_pending = False
+            _commit_trash(destination, action=action, payload=payload_root, now=now)
         except Exception:
-            for source, target in reversed(moved):
-                if target.exists():
-                    ensure_private_dir(source.parent)
-                    shutil.move(str(target), str(source))
-            # 回滚写回同样走私有原子写（0600/0700），存量宽权限索引下次写入即收紧；内容逐字节不变。
-            write_private_json_file_atomic(bindings_path, bindings)
-            write_private_json_file_atomic(latest_path, latest)
-            shutil.rmtree(destination, ignore_errors=True)
+            restored = _rollback_retention_moves(moved)
+            restored = restored and not index_update_pending
+            for index_path, removed in ((bindings_path, removed_bindings), (latest_path, removed_latest)):
+                try:
+                    _restore_conversation_index(index_path, removed)
+                except Exception:
+                    restored = False
+            _finish_failed_trash(destination, action=action, payload=payload_root, now=now, restored=restored)
             raise
     return replace(action, status="trashed")
 
 
-# LLM: 权威文件必须有合法且不变摘要，状态仍须为原terminal且时间早于cutoff；不可读不等于missing。
+# LLM: 权威文件必须有合法且不变摘要；trash只有明确trashed才能永久删除，moving/recovery_required永远不按龄放行。
 # 函数用途: 重验证 task/subagent/tombstone 权威状态。
 def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
     authority = action.authority_path
@@ -702,9 +769,12 @@ def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
     if report.load_error is not None:
         return False
     if action.category == "trash":
+        if _trash_transaction_pending(action.path):
+            return False
         timestamp = _timestamp(report.payload.get("moved_at"))
         return bool(
-            timestamp is not None
+            report.payload.get("status") == "trashed"
+            and timestamp is not None
             and action.cutoff_timestamp is not None
             and timestamp < action.cutoff_timestamp
         )
