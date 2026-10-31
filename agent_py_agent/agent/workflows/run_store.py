@@ -9,9 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from threading import local
 
+from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
 from ..common.nofollow_fs import list_names_beneath as list_dir_names_beneath
+from ..concurrency.interrupt import is_interrupted
 from .models import (
     WorkflowRunRecord,
     payload,
@@ -20,6 +22,60 @@ from .models import (
 )
 
 _HELD_LOCKS = local()
+
+
+# LLM: 仅投影同一原运行事实；兼容公共DTO增量字段尚未集成的读者，不建立第二个运行账或状态机。
+# 函数用途: 给原记录附上实际阶段、定义引用与已确认成功前缀，返回可序列化回执。
+def execution_receipt(record, *, phase=None, effect_outcome=None, definition_ref=None):
+    for name, value in (('phase', phase), ('effect_outcome', effect_outcome), ('execution_definition_ref', definition_ref)):
+        if value is not None:
+            setattr(record, name, value)
+    confirmed = []
+    for step in record.steps:
+        if step.status not in ('succeeded', 'escalated_recovered', 'skipped'):
+            break
+        try:
+            payload(step)
+        except (TypeError, ValueError, OverflowError):
+            break
+        confirmed.append(step.step_id)
+    record.confirmed_step_refs = tuple(confirmed)
+    return {name: getattr(record, name, default) for name, default in (
+        ('workflow_run_id', ''), ('execution_definition_ref', ''), ('phase', ''),
+        ('effect_outcome', ''), ('confirmed_step_refs', ()), ('breakpoint', None))}
+
+
+# LLM: 旧DTO上的增量属性不由dataclasses.replace携带；只复制同一原运行的回执，不创造执行事实。
+# 函数用途: 替换运行字段时保留定义身份与已记录执行阶段，兼容W12正式字段。
+def replace_run_record(record, **changes):
+    updated = replace(record, **changes)
+    for name in ('phase', 'effect_outcome', 'execution_definition_ref'):
+        if name not in changes and hasattr(record, name):
+            setattr(updated, name, getattr(record, name))
+    execution_receipt(updated)
+    return updated
+
+
+# LLM: 原DTO与新增执行字段一起进入原run.json；不从展示文案恢复执行事实。
+# 函数用途: 序列化原运行和阶段回执。
+def _run_payload(record):
+    return {**payload(record), **execution_receipt(record)}
+
+
+# LLM: 已开始后的失败携同一个record与cause，工具不得根据ValueError/OSError重新猜是否执行。
+# 类用途: 将步骤/终态发表失败的原运行回执交给工具和调用方，不触发脚本重跑。
+class WorkflowExecutionError(RuntimeError):
+    # LLM: 错误包装不得再次依赖坏步骤可序列化；降级回执仍来自原run和已确认前缀。
+    # 函数用途: 给异常出口保留完整记录，坏输出时提供可安全传递的最小回执。
+    def __init__(self, record, error):
+        super().__init__(str(error))
+        self.record = record
+        try:
+            self.receipt = _run_payload(record)
+        except (TypeError, ValueError, OverflowError):
+            self.receipt = {'workflow_id': record.workflow_id, 'status': record.status,
+                'needs_repair': record.needs_repair, **execution_receipt(record)}
+        self.error_code = 'WORKFLOW_EXECUTION_FAILED'
 
 
 # LLM: RuntimeError是新执行锁合同；同时保留旧引擎调用方捕获ValueError的兼容性。
@@ -32,6 +88,11 @@ class _RunBusy(RuntimeError, ValueError):
 # 函数用途: 将结构化记录以0600原子写入账本。
 def _write_json(root, parts, value):
     raw = json.dumps(redact_bearer_values(payload(value)), ensure_ascii=False, indent=2, allow_nan=False)
+    if parts[-1] == 'run.json' and value.get('status') == 'succeeded':
+        # 序列化和步骤写入也可能耗时；在真实终态写入口再核同一停止事实。
+        raise_if_cancelled()
+        if is_interrupted():
+            raise InterruptedError('workflow interrupted')
     write_text_atomic_beneath(root, parts, raw + '\n')
 
 
@@ -39,7 +100,12 @@ def _write_json(root, parts, value):
 # 函数用途: 恢复强类型运行记录，不重复维护步骤字段和状态枚举。
 def _decode_run(data):
     values = {key: value for key, value in data.items() if key in WorkflowRunRecord.__dataclass_fields__}
-    return WorkflowRunRecord.from_dict(values)
+    record = WorkflowRunRecord.from_dict(values)
+    for name in ('phase', 'effect_outcome', 'execution_definition_ref'):
+        if name in data:
+            setattr(record, name, data[name])
+    execution_receipt(record)
+    return record
 
 
 # LLM: 运行编号先单段验证，正文IO不能依赖safe_path预检；锁与数据分工，根路径只取宿主构造参数。
@@ -121,7 +187,7 @@ class WorkflowRunStore:
             parts = ('data', 'workflow_runs', record.workflow_run_id, 'run.json')
             raw = read_text_beneath(self.owner_home, parts)
             data = json.loads(raw) if raw is not None else {}
-            data.update(payload(record))
+            data.update(_run_payload(record))
             if workflow_snapshot is not None:
                 data['workflow_snapshot'] = payload(workflow_snapshot)
             for step in record.steps:
@@ -136,10 +202,12 @@ class WorkflowRunStore:
             if step_record.step_id not in {step.step_id for step in record.steps}:
                 raise ValueError('运行中不存在该步骤')
             self._write_step(workflow_run_id, step_record)
-            record = replace(record, current_step_id=step_record.step_id,
+            record = replace_run_record(record, current_step_id=step_record.step_id,
                              steps=tuple(step_record if s.step_id == step_record.step_id else s for s in record.steps))
             data = self._read(workflow_run_id, 'run.json')
-            data.update(payload(record))
+            execution_receipt(record, phase='step_publish', effect_outcome=(
+                'unknown' if step_record.status not in ('pending', 'running') else getattr(record, 'effect_outcome', 'not_started')))
+            data.update(_run_payload(record))
             _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
             return record
 

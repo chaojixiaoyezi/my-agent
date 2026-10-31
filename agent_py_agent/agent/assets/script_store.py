@@ -13,7 +13,13 @@ from . import (
     positive_timeout,
     safe_asset_id,
 )
-from .descriptor import AssetDescriptor, EvaluatedCandidate, RuntimeSummary, clean_json
+from .descriptor import (
+    AssetDescriptor,
+    EvaluatedCandidate,
+    RuntimeSummary,
+    clean_json,
+    execution_definition_ref,
+)
 
 
 # LLM: 参数只是脚本执行声明，不授予解释器或网络权限；安全单叶也不能以大小写别名覆写权威元数据。
@@ -116,9 +122,10 @@ class ScriptStore(_AssetStore):
         code = self._text(script_id, options["entrypoint"])
         if code is None:
             raise ValueError("脚本代码文件缺失")
-        return descriptor.to_dict() | options | {"code": code, "entrypoint_path": str(
+        record = descriptor.to_dict() | options | {"code": code, "entrypoint_path": str(
             self.owner_home / "scripts" / script_id / options["entrypoint"],
         )}
+        return {**record, 'execution_definition_ref': execution_definition_ref(record)}
 
     # LLM: 缺记录是正常查询结果，但更新必须显式失败；不隐式新建空脚本。
     # 函数用途: 锁内为写操作取得已存在脚本。

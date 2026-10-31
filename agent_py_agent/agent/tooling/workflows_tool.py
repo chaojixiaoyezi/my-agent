@@ -10,6 +10,7 @@ from ..assets.skill_adapter import get_owner_skill_descriptor, list_owner_skill_
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..capability.skills import split_skill_frontmatter
 from ..workflows.models import redact_bearer_values
+from ..workflows.run_store import WorkflowExecutionError
 from .models import BaseTool
 from .scripts_tool import (
     _dispatch,
@@ -110,7 +111,8 @@ class WorkflowsTool(BaseTool):
     # LLM: Owner与项目/快照/模型提供者仅由可信宿主注入，模型实参不能替换；无分析器不注入假实现。
     # 函数用途: 固定当前Owner及运行时依赖，构造阶段不执行资产。
     def __init__(self, owner_home: Path, *, store=None, engine=None, analysis_handler=None,
-                 workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None, im_notifier=None):
+                 workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None, im_notifier=None,
+                 runner_options_provider=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
@@ -119,6 +121,17 @@ class WorkflowsTool(BaseTool):
         self.workspace_root_provider = workspace_root_provider
         self.skill_snapshot_provider = skill_snapshot_provider
         self.workspace_root = workspace_root
+        self.runner_options_provider = runner_options_provider
+
+    # LLM: 每次run/resume冻结当前宿主上下文，缓存engine不能把上一运行身份交给新脚本；显式注入执行器保持原样。
+    # 函数用途: 给本次默认执行器配置可信脚本范围和宿主来源屏蔽。
+    def _execution_engine(self):
+        engine = self._engine()
+        if self.engine is None and self.runner_options_provider is not None:
+            from ..workflows.script_runner import ScriptRunner
+            engine.runner = ScriptRunner(self.owner_home, workspace_root=self._skill_options()['workspace_root'],
+                                         **self.runner_options_provider())
+        return engine
 
     # LLM: None表示无快照，空受限快照仍原样传递；项目只来自宿主且每次读取，不缓存其它Owner权限。
     # 函数用途: 取得可信宿主当前的技能发现范围。
@@ -172,6 +185,9 @@ class WorkflowsTool(BaseTool):
             return _outcome('workflows', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('workflows', exc)
+        except WorkflowExecutionError as exc:
+            return _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
+                            effect_outcome=exc.receipt['effect_outcome'], failure_stage='execution')
         except (ValueError, KeyError, TypeError) as exc:
             if str(exc).startswith('ASSET_REVISION_CONFLICT:'):
                 return _outcome('workflows', {'error_code': 'ASSET_REVISION_CONFLICT', 'error': str(exc)},
@@ -186,7 +202,7 @@ class WorkflowsTool(BaseTool):
         action = params['action']
         if action == 'resume':
             options = {'allow_script_drift': params['allow_script_drift']} if 'allow_script_drift' in params else {}
-            return _plain(self._engine().resume_workflow_run(params['workflow_run_id'], params.get('from_step_id'),
+            return _plain(self._execution_engine().resume_workflow_run(params['workflow_run_id'], params.get('from_step_id'),
                 patched_step_output=params.get('patched_step_output'), updated_data_sources=params.get('updated_data_sources'),
                 resolution_origin=params.get('resolution_origin'), **options))
         if action == 'inspect_run':
@@ -211,7 +227,7 @@ class WorkflowsTool(BaseTool):
         if action == 'preview':
             return self._preview(definition, params.get('inputs', {}))
         if action == 'run':
-            return _plain(self._engine().run_workflow(_plain(definition), params.get('inputs', {})))
+            return _plain(self._execution_engine().run_workflow(_plain(definition), params.get('inputs', {})))
         raise ValueError('未知工作流action')
 
     # LLM: 只读定义与已授权Skill，不执行脚本/模型、不创建run账本；每项正文经脱敏后最多200字。

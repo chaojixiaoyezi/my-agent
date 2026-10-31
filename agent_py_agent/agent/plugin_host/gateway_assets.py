@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 
+from ..assets.descriptor import execution_definition_ref
 from ..assets.script_store import ScriptStore
 from ..assets.workflow_store import WorkflowStore
 from ..tooling.sandbox import SandboxUnavailable
@@ -40,10 +41,16 @@ def _script_fingerprint(
         raise HostAPIError("ASSET_NOT_FOUND", 404)
     rev = _asset_revision(record.get("metadata"), record.get("version"))
     code_digest = hashlib.sha256(str(record["code"]).encode("utf-8")).hexdigest()
-    stable = {k: v for k, v in record.items() if k not in {"entrypoint_path", "runtime_summary"}}
-    record_digest = hashlib.sha256(canonical_json(stable).encode("utf-8")).hexdigest()
+    record_digest = execution_definition_ref(record, kind='script')
     candidate = AssetGrant("script", script_id, rev, record_digest)
-    grant = candidate if candidate in allowed_assets else AssetGrant("script", script_id, rev, code_digest)
+    legacy = AssetGrant("script", script_id, rev, code_digest)
+    grant = next((item for item in allowed_assets if item.kind == 'script' and item.asset_id == script_id
+        and getattr(item, 'execution_definition_ref', '') == record_digest), None)
+    if grant is None:
+        grant = candidate if candidate in allowed_assets else legacy if legacy in allowed_assets else candidate
+        if 'execution_definition_ref' in AssetGrant.__dataclass_fields__ and grant not in allowed_assets:
+            from dataclasses import replace
+            grant = replace(grant, execution_definition_ref=record_digest)
     return grant, record_digest
 
 
@@ -56,13 +63,7 @@ def _script_grant(home, script_id: str, allowed_assets: tuple[AssetGrant, ...] =
 # LLM: 固定覆盖描述符（不含运行统计）、步骤与正文，不随兼容授权模式缩减校验范围。
 # 函数用途: 计算工作流完整执行定义的规范化SHA-256摘要。
 def _workflow_execution_digest(raw: dict) -> str:
-    descriptor = raw.get("descriptor") or {}
-    stable = {
-        "descriptor": {k: v for k, v in descriptor.items() if k != "runtime_summary"},
-        "steps": raw.get("steps"),
-        "body_markdown": raw.get("body_markdown", ""),
-    }
-    return hashlib.sha256(canonical_json(stable).encode("utf-8")).hexdigest()
+    return execution_definition_ref(raw, kind='workflow')
 
 
 # LLM: 从规范化工作流字典计算摘要并比对已授权列表，保证Store定义与运行快照采用同一版本算法。
@@ -75,9 +76,17 @@ def _workflow_grant_from_raw(
     digest = _workflow_execution_digest(raw)
     body_digest = hashlib.sha256(canonical_json(raw["steps"]).encode("utf-8")).hexdigest()
     candidate = AssetGrant("workflow", workflow_id, rev, body_digest)
+    pinned = next((item for item in allowed_assets if item.kind == 'workflow' and item.asset_id == workflow_id
+        and getattr(item, 'execution_definition_ref', '') == digest), None)
+    if pinned is not None:
+        return pinned
     if candidate in allowed_assets:
         return candidate
-    return AssetGrant("workflow", workflow_id, rev, digest)
+    grant = AssetGrant("workflow", workflow_id, rev, digest)
+    if 'execution_definition_ref' in AssetGrant.__dataclass_fields__ and grant not in allowed_assets:
+        from dataclasses import replace
+        grant = replace(grant, execution_definition_ref=digest)
+    return grant
 
 
 # LLM: 仅读取目标Owner私有WorkflowStore（禁用全局extra_roots），摘要覆盖完整步骤与正文。

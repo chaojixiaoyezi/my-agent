@@ -19,7 +19,11 @@ from pathlib import Path
 
 from ..assets.datasource_store import redact_datasource_values
 from ..assets.delivery_contracts import AssetDisabledError
-from ..assets.descriptor import access_target_requires_network
+from ..assets.descriptor import (
+    access_target_requires_network,
+    execution_definition_ref,
+    output_contract_fields,
+)
 from ..assets.script_store import ScriptStore
 from ..attempt.sandbox import (
     AttemptExecutionSandbox,
@@ -38,6 +42,8 @@ from .models import ScriptExecutionResult, payload, safe_path
 MAX_OUTPUT_BYTES = 1024 * 1024
 # 原生工作流步骤回执保留的输出预览最大字符数。
 PREVIEW_CHARS = 4096
+_TIMING_FIELDS = ('configuration_load_ms', 'directory_discovery_ms', 'environment_setup_ms',
+                  'process_start_ms', 'execution_ms')
 _JSON_OUTPUT_TYPES = {
     'string': (str,), 'integer': (int,), 'number': (int, float),
     'boolean': (bool,), 'object': (dict,), 'array': (list,), 'null': (type(None),),
@@ -54,6 +60,7 @@ def _init_guard():
     read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
     write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
     denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
+    exclusive_roots = tuple(Path(p) for p in cfg.get("host_exclusive_paths", ()))
     allow_net = bool(cfg.get("network_access", False))
     denied_ports = {int(p) for p in cfg.get("denied_ports", ()) if int(p) > 0}
     block_subproc = bool(cfg.get("block_subprocess", False))
@@ -85,6 +92,8 @@ def _init_guard():
     # LLM: 已解析的路径只消费冻结根，不重复跟随lstat允许观察的symlink叶节点。
     # 函数用途: 执行私有读取限制的纯路径裁决。
     def _check_read_target(target, raw):
+        if _under(target, exclusive_roots):
+            raise perm_err(eacces, "Permission denied", str(raw))
         if _under(target, denied_roots) and not _under(target, read_roots):
             raise perm_err(eacces, "Permission denied", str(raw))
 
@@ -97,7 +106,7 @@ def _init_guard():
     # 函数用途: 检查一次文件修改。
     def _check_write(raw):
         target = _resolve(raw)
-        if not _under(target, write_roots):
+        if _under(target, exclusive_roots) or not _under(target, write_roots):
             raise perm_err(eacces, "Permission denied", str(raw))
 
     # LLM: 仅从内核FD路径表还原dir_fd真实目录；未知或非整数FD一律拒绝，不信任调用方传入的相对父目录。
@@ -382,11 +391,16 @@ def _network_access(metadata, override):
 
 # LLM: 从宿主副本清洗凭据，仅添加引用占位符；工作目录、HOME与TMPDIR均指向本次冻结目录。
 # 函数用途: 准备脚本输入和不携带宿主密钥的环境。
-def _environment(metadata, folder, input_json, sources):
-    environment = scrub_subprocess_env(dict(os.environ))
+def _environment(metadata, folder, input_json, sources, *, host_credential_env_names=frozenset(), work_context=None):
+    environment = scrub_subprocess_env(dict(os.environ), host_credential_env_names=host_credential_env_names)
+    # 不继承另一运行或操作者环境伪造的工作上下文；只有本启动器可注入当前冻结值。
+    for key in ('MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE'):
+        environment.pop(key, None)
     environment.update(PYTHONIOENCODING='utf-8', PAGER='cat', GIT_PAGER='cat', HOME=str(folder), TMPDIR=str(folder),
                        MY_AGENT_SCRIPT_INPUT_JSON=input_json,
                        MY_AGENT_DATA_SOURCES_JSON=json.dumps(sources, ensure_ascii=False, allow_nan=False))
+    if work_context is not None:
+        environment['MY_AGENT_SCRIPT_WORK_CONTEXT_JSON'] = json.dumps(work_context, ensure_ascii=False, allow_nan=False)
     for ref in metadata.get('credential_refs', ()):
         if ref.get('credential_id') and ref.get('target'):
             environment['CREDENTIAL_REF_' + ref['credential_id'].upper()] = ref['target']
@@ -445,8 +459,13 @@ def _execute(command, folder, environment, input_json, timeout, capture):
     with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         stdin.write(input_json.encode('utf-8'))
         stdin.seek(0)
+        launching = time.monotonic()
         process = subprocess.Popen(command, cwd=folder, env=environment, stdin=stdin,
                                    stdout=stdout, stderr=stderr, start_new_session=os.name == 'posix')
+        running = time.monotonic()
+        capture['started'] = True
+        capture['phase'] = 'started'
+        capture.setdefault('timings', dict.fromkeys(_TIMING_FIELDS, 0.0))['process_start_ms'] += (running - launching) * 1000
         deadline, error = time.monotonic() + timeout, ''
         try:
             while process.poll() is None:
@@ -461,6 +480,7 @@ def _execute(command, folder, environment, input_json, timeout, capture):
             capture['error_code'] = error
             cleanup = _cleanup_process(process)
             capture.update(cleanup_error=cleanup, exit_code=process.returncode)
+            capture['timings']['execution_ms'] += (time.monotonic() - running) * 1000
         if os.fstat(stdout.fileno()).st_size + os.fstat(stderr.fileno()).st_size > MAX_OUTPUT_BYTES:
             error = error or 'SCRIPT_OUTPUT_LIMIT'
         capture['error_code'] = error
@@ -490,21 +510,7 @@ def _check_json_depth(text):
 # LLM: 只接受JSON类型名，可空与字段存在性分开处理，不隐式增加必选字段。
 # 函数用途: 校验输出声明并返回必选字段、可空字段和类型表。
 def _output_contract_fields(contract):
-    if not isinstance(contract, dict):
-        raise ValueError('输出合同必须为对象')
-    expected = contract.get('expected_output_keys', contract.get('outputs', ()))
-    nullable = contract.get('nullable_outputs', ())
-    output_types = contract.get('output_types', {})
-    if not isinstance(expected, (list, tuple)) or not all(isinstance(key, str) for key in expected):
-        raise ValueError('必选输出字段必须为字符串列表')
-    if not isinstance(nullable, (list, tuple)) or not all(isinstance(key, str) for key in nullable):
-        raise ValueError('可空输出字段必须为字符串列表')
-    if not isinstance(output_types, dict) or any(
-        not isinstance(key, str) or not isinstance(name, str) or name not in _JSON_OUTPUT_TYPES
-        for key, name in output_types.items()
-    ):
-        raise ValueError('输出类型必须为字段名到JSON类型名的对象')
-    return expected, nullable, output_types
+    return output_contract_fields(contract)
 
 
 # LLM: 正常与恢复输出共用严格校验；bool不是数字，显式nullable只豁免null值。
@@ -528,6 +534,44 @@ def parse_script_output(stdout, contract):
         if type(output[key]) not in _JSON_OUTPUT_TYPES[name]:
             return output, 'SCRIPT_OUTPUT_TYPE_MISMATCH'
     return output, ''
+
+
+# LLM: 新控制字段仅在显式协议中解析；旧业务JSON即使含delivery_intents也原样保留；全批先验再有任何受理。
+# 函数用途: 解开版本化结果，校验业务IO和不可变投递意向，不发送消息或登记成功。
+def _parse_result_envelope(stdout, contract):
+    try:
+        _check_json_depth(stdout)
+        value = json.loads(stdout)
+    except (ValueError, TypeError, RecursionError):
+        return {}, (), 'SCRIPT_INVALID_JSON'
+    if not isinstance(value, dict) or 'protocol_version' not in value:
+        output, error = parse_script_output(stdout, contract)
+        return output, (), error
+    if (value.get('protocol_version') != 'script-output.v1'
+            or set(value) - {'protocol_version', 'result', 'delivery_intents'}
+            or not isinstance(value.get('result'), dict)
+            or not isinstance(value.get('delivery_intents', []), list)):
+        return {}, (), 'SCRIPT_INVALID_JSON'
+    output, error = parse_script_output(json.dumps(value['result'], allow_nan=False), contract)
+    if error:
+        return output, (), error
+    intents = {}
+    for intent in value.get('delivery_intents', []):
+        if (not isinstance(intent, dict) or set(intent) - {'request_key', 'message', 'output_refs', 'status'}
+                or not isinstance(intent.get('request_key'), str) or not intent['request_key'].strip()
+                or not isinstance(intent.get('message', ''), str) or intent.get('status', 'requested') != 'requested'
+                or not isinstance(intent.get('output_refs', []), (list, tuple))):
+            return output, (), 'SCRIPT_INVALID_JSON'
+        refs = intent.get('output_refs', [])
+        if any(not isinstance(ref, str) or not ref or Path(ref).is_absolute()
+               or '..' in Path(ref).parts or '\\' in ref for ref in refs):
+            return output, (), 'SCRIPT_INVALID_JSON'
+        normalized = {'request_key': intent['request_key'], 'message': intent.get('message', ''),
+                      'output_refs': list(dict.fromkeys(refs)), 'status': 'requested'}
+        if intent['request_key'] in intents and intents[intent['request_key']] != normalized:
+            return output, (), 'SCRIPT_INVALID_JSON'
+        intents[intent['request_key']] = normalized
+    return output, tuple(intents.values()), ''
 
 
 # LLM: 共享前缀保留别名与realpath；runner跳过缺失目录，额外请求其原有解释器安装根。
@@ -591,6 +635,10 @@ class ScriptRunner:
         public_read_roots: tuple[str | Path, ...] = (),
         restrict_to_roots: bool = False,
         workspace_root: str | Path | None = None,
+        work_context=None,
+        host_credential_env_names: frozenset[str] = frozenset(),
+        host_exclusive_paths: tuple[str | Path, ...] = (),
+        delivery_handler=None,
     ):
         self.owner_home = Path(owner_home).absolute()
         self.scripts_root = self.owner_home / 'scripts'
@@ -599,12 +647,85 @@ class ScriptRunner:
         self.public_read_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in public_read_roots)
         self.restrict_to_roots = bool(restrict_to_roots)
         self.workspace_root = Path(workspace_root).absolute() if workspace_root is not None else None
+        self.work_context = payload(work_context) if work_context is not None else None
+        self.host_credential_env_names = frozenset(host_credential_env_names)
+        self.host_exclusive_paths = tuple(Path(path).expanduser().resolve(strict=False) for path in host_exclusive_paths)
+        self.delivery_handler = delivery_handler
+
+    # LLM: 只消费构造期宿主冻结的workspace和scope；scratch由本次实际目录覆盖，身份不来自业务inputs。
+    # 函数用途: 投影只读SDK工作上下文，无工作区时不伪造cwd作为工作区。
+    def _work_context(self, folder):
+        if self.workspace_root is None:
+            if self.work_context is not None:
+                raise ValueError('工作上下文缺少宿主workspace_root')
+            return None
+        workspace = self.workspace_root.resolve(strict=False)
+        context = payload(self.work_context or {})
+        if context.get('workspace_root') and Path(context['workspace_root']).resolve(strict=False) != workspace:
+            raise ValueError('工作上下文workspace_root与宿主不一致')
+        scope = context.get('effective_path_scope', {
+            'read_roots': [str(path) for path in dict.fromkeys((workspace, *self.public_read_roots, *self.extra_write_roots))],
+            'write_roots': [str(path) for path in self.extra_write_roots]})
+        if not isinstance(scope, dict) or set(scope) != {'read_roots', 'write_roots'}:
+            raise ValueError('工作上下文路径范围无效')
+        for roots in scope.values():
+            if not isinstance(roots, (list, tuple)) or any(not isinstance(path, str) or not Path(path).is_absolute() for path in roots):
+                raise ValueError('工作上下文路径范围必须为绝对路径列表')
+        return {'schema_version': 'script-work-context.v1', 'workspace_root': str(workspace),
+            'scratch_dir': str(folder.resolve(strict=False)), 'run_id': context.get('run_id', ''),
+            'task_id': context.get('task_id', ''), 'effective_path_scope': scope}
+
+    # LLM: 仅消费本次IO声明的引用，并从原产物账核对ready/hash/归属；真实受理必须由宿主原投递入口返回operation引用。
+    # 函数用途: 在正常退出且全批有效后交接请求，不把requested或上传完成伪装成sent。
+    def _admit_delivery(self, intents, output, metadata, context, *, receipts=None):
+        if not intents:
+            return ()
+        from ..artifacts.registry import resolve_artifact_record_report
+        from ..conversation.channels import ChannelAttachment
+        from ..delivery.attachment_content import verify_attachment_content
+
+        if not context or not context.get('run_id') or not callable(self.delivery_handler):
+            raise ValueError('投递意向缺少宿主原运行或投递入口')
+        declared = set()
+        for key in output_contract_fields(metadata.get('io_contract', {}))[0]:
+            value = output.get(key)
+            declared.update([value] if isinstance(value, str) else [item for item in value if isinstance(item, str)]
+                            if isinstance(value, list) else [])
+        checked = []
+        for intent in intents:
+            attachments = []
+            for ref in intent['output_refs']:
+                if ref not in declared:
+                    raise ValueError('投递引用未在本次输出合同中声明')
+                report = resolve_artifact_record_report(self.workspace_root, ref)
+                row = report.record
+                if report.errors or row is None or row.status != 'ready':
+                    raise ValueError('投递引用未命中已登记ready产物')
+                attachment = ChannelAttachment(row.artifact_id, row.path, Path(row.path).name,
+                    row.kind, row.sha256, row.size_bytes, str(self.owner_home))
+                verify_attachment_content(attachment)
+                attachments.append(attachment)
+            checked.append((intent, tuple(attachments)))
+        receipts = receipts if receipts is not None else []
+        for intent, attachments in checked:
+            receipt = self.delivery_handler(run_id=context['run_id'], task_id=context.get('task_id', ''),
+                request_key=intent['request_key'], message=intent['message'], attachments=attachments)
+            if (not isinstance(receipt, dict) or not receipt.get('operation_ref')
+                    or receipt.get('status') not in ('accepted', 'sent', 'unknown', 'partial', 'failed')):
+                raise ValueError('宿主投递入口未返回原操作回执')
+            receipts.append(payload(receipt))
+        return tuple(receipts)
 
     # LLM: workspace由构造器冻结并透传Store；禁用闸先于进程和数据源，执行仍使用Owner与原沙箱边界。
     # 函数用途: 冻结代码、绑定声明连接、构造沙箱命令并清理临时秘密。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
+        capture = capture if capture is not None else {}
+        timings = capture.setdefault('timings', dict.fromkeys(_TIMING_FIELDS, 0.0))
+        clock = time.monotonic()
         _, metadata = load_script(self.owner_home, script_id, workspace_root=self.workspace_root)
+        capture['definition_ref'] = execution_definition_ref(metadata, kind='script')
+        output_contract_fields(metadata.get('io_contract', {}))
         if metadata.get('enabled', True) is False:
             raise AssetDisabledError('script', script_id)
         interpreter = metadata.get('interpreter', 'python3')
@@ -623,6 +744,8 @@ class ScriptRunner:
             raise ValueError('脚本超时必须为 (0, 3600] 秒')
         sources = payload(metadata.get('data_sources', {}) if override_data_sources is None else override_data_sources)
         input_json = json.dumps(payload(inputs), ensure_ascii=False, allow_nan=False)
+        timings['configuration_load_ms'] += (time.monotonic() - clock) * 1000
+        clock = time.monotonic()
         root = self.owner_home / 'data' / 'script_exec'
         ensure_private_dir(root, canonical_root=self.owner_home)
         folder = Path(tempfile.mkdtemp(prefix=f'{script_id}_', dir=root))
@@ -633,7 +756,10 @@ class ScriptRunner:
                                       metadata['code'], file_mode=0o700)
             net_allowed = _network_access(metadata, network_access)
             denied_ports = gateway_bound_ports()
-            env = _environment(metadata, folder, input_json, sources)
+            context = self._work_context(folder)
+            capture['work_context'] = context
+            env = _environment(metadata, folder, input_json, sources,
+                host_credential_env_names=self.host_credential_env_names, work_context=context)
             ds_runtime = ScriptDatasourceRuntime(self.owner_home, metadata, folder, env, timeout,
                 capture if capture is not None else {}, workspace_root=self.workspace_root)
             private_roots = _script_private_roots(self.owner_home, self.workspace_root) if self.restrict_to_roots else ()
@@ -647,11 +773,13 @@ class ScriptRunner:
                     public_read_roots=tuple(dict.fromkeys((*runtime_read_roots, *self.public_read_roots, *ds_runtime.read_roots))),
                     private_read_roots=private_roots,
                     write_scope_denied_roots=private_roots,
+                    hidden_paths=self.host_exclusive_paths,
                     implicit_attempt_write_roots=True,
                     network_access=net_allowed, deny_gateway_ports=denied_ports if net_allowed else ()))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     applied_sandbox = True
-            if self.restrict_to_roots and interpreter == 'python3':
+            guarded = (self.restrict_to_roots or bool(self.host_exclusive_paths)) and interpreter == 'python3'
+            if guarded:
                 guard = safe_path(folder, '_sandbox_guard.py')
                 write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, guard.name),
                                           _PYTHON_GUARD_CODE, file_mode=0o700)
@@ -660,6 +788,7 @@ class ScriptRunner:
                     'read_roots': [str(p) for p in (resolved_folder, *runtime_read_roots, *self.public_read_roots, *self.extra_write_roots, *ds_runtime.read_roots)],
                     'write_roots': [str(p) for p in (resolved_folder, *self.extra_write_roots, *ds_runtime.write_roots, Path('/dev'))],
                     'denied_roots': [str(p) for p in private_roots],
+                    'host_exclusive_paths': [str(p) for p in self.host_exclusive_paths],
                     'network_access': net_allowed,
                     'denied_ports': list(denied_ports),
                     'block_subprocess': not applied_sandbox,
@@ -667,9 +796,12 @@ class ScriptRunner:
                 command = [executable, '-I', '-B', str(guard), str(entrypoint)]
             elif self.restrict_to_roots and not applied_sandbox:
                 raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
-            command = ds_runtime.wrap_command(command, interpreter, guarded=self.restrict_to_roots)
+            command = ds_runtime.wrap_command(command, interpreter, guarded=bool(guarded))
+            timings['environment_setup_ms'] += (time.monotonic() - clock) * 1000
+            clock = time.monotonic()
             if applied_sandbox:
                 command = sandbox.build_argv(command)
+            timings['directory_discovery_ms'] += (time.monotonic() - clock) * 1000
             yield metadata, sources, (command, str(folder), env, input_json, timeout)
         finally:
             try:
@@ -686,7 +818,8 @@ class ScriptRunner:
             raise ValueError('record_summary必须是布尔值')
         started_at, timer = time.time(), time.monotonic()
         metadata, sources, output, stdout, stderr, error, exit_code = {}, {}, {}, '', '', '', None
-        cleanup, capture, execution_error = {}, {}, {}
+        cleanup, capture, execution_error = {}, {'phase': 'preflight', 'timings': dict.fromkeys(_TIMING_FIELDS, 0.0)}, {}
+        delivery_receipts = []
         try:
             inputs = payload({} if inputs is None else inputs)
             with self._prepare(script_id, inputs, timeout_seconds, override_data_sources, network_access, capture=capture) as prepared:
@@ -698,9 +831,12 @@ class ScriptRunner:
             if not error and exit_code != 0:
                 error = 'SCRIPT_EXIT_NONZERO'
             if not error:
-                output, error = parse_script_output(stdout, metadata.get('io_contract', {}))
+                capture['phase'] = 'finalize'
+                output, intents, error = _parse_result_envelope(stdout, metadata.get('io_contract', {}))
             if cleanup:
                 error = error or 'SCRIPT_CLEANUP_ERROR'
+            if not error:
+                self._admit_delivery(intents, output, metadata, capture.get('work_context'), receipts=delivery_receipts)
         except SandboxUnavailableError:
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -729,6 +865,12 @@ class ScriptRunner:
         result = ScriptExecutionResult(script_id, not error, exit_code, elapsed, started_at, ended_at,
                                        output, stdout[:PREVIEW_CHARS], stderr[:PREVIEW_CHARS], error,
                                        bool(error), redact_sensitive_value(context) if error else {})
+        result.phase = capture['phase'] if error else 'terminal'
+        result.effect_outcome = ('unknown' if cleanup or delivery_receipts else 'failed') if capture.get('started') and error else (
+            'confirmed' if not error else 'not_started')
+        result.execution_definition_ref = capture.get('definition_ref', '')
+        result.preparation_timings = capture['timings']
+        result.delivery_receipts = tuple(delivery_receipts)
         if record_summary:
             _record_summary(self.owner_home, result)
         return result

@@ -15,11 +15,16 @@ from typing import Literal
 
 from ..assets import canonical_skill_name
 from ..assets.delivery_contracts import AssetDisabledError
+from ..assets.descriptor import execution_definition_ref
 from ..assets.script_store import ScriptStore
 from ..assets.skill_adapter import get_owner_skill_descriptor
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
+from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
+from ..concurrency.interrupt import is_interrupted
 from .datasource_runtime import (
+    _preflight_failure,
+    bind_script_execution_record,
     bind_script_workspace,
     emit_asset_im_notification,
     run_script_with_datasources,
@@ -35,10 +40,23 @@ from .models import (
     skill_sequence,
 )
 from .models import redact_bearer_values as redact_sensitive_value
-from .run_store import WorkflowRunStore
+from .run_store import (
+    WorkflowExecutionError,
+    WorkflowRunStore,
+    execution_receipt,
+    replace_run_record,
+)
 from .script_runner import ScriptRunner, _EntrypointMissing, load_script, parse_script_output
 
 SUCCESS = ('succeeded', 'escalated_recovered', 'skipped')
+
+
+# LLM: 读取同一当前回合令牌和线程停止事实；不自行建控制状态，不改已持久提交的历史成功。
+# 函数用途: 在步骤业务输出和运行终态发表前拒绝已接受的停止。
+def _check_stop():
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError('workflow interrupted')
 
 
 # LLM: 定义恢复与refs派生只走资产层权威API，路径安全仍由引擎和Store检查。
@@ -59,6 +77,24 @@ def _definition(home, value, workspace_root=None):
 def _pending(spec):
     return StepExecutionRecord(spec['step_id'], spec.get('name', spec['step_id']), spec['mode'],
                                'pending', 0, 0, 0, False, script_id=spec.get('script_id', ''))
+
+
+# LLM: 新快照只比执行内容身份；旧无ref快照仍严格比较原pin，不把未知旧定义静默升级。
+# 函数用途: 在恢复和逐步执行门中区分统计CAS与真实定义漂移。
+def _same_pin(first, second):
+    if first and second and first.get('execution_definition_ref'):
+        return (first.get('script_id'), first['execution_definition_ref'], first.get('source_scope')) == (
+            second.get('script_id'), second.get('execution_definition_ref'), second.get('source_scope'))
+    return first == second
+
+
+# LLM: 本次代码与CAS读取来自同一冻结record；统计更新不能在第二次读取中制造假的版本不一致。
+# 函数用途: 从原资产快照生成数据源旧门所需读取令牌及新执行身份。
+def _script_pin(script_id, row):
+    return {'script_id': script_id, 'revision': row.get('revision', 0),
+        'code_sha256': hashlib.sha256(row['code'].encode('utf-8')).hexdigest(),
+        'source_scope': row.get('source_scope', 'owner'),
+        'execution_definition_ref': execution_definition_ref(row, kind='script')}
 
 
 # LLM: 生命周期持有冻结定义、版本和断点合同，步骤调度由子类_drive提供，不建立另一执行器。
@@ -88,7 +124,9 @@ class _WorkflowRunLifecycle:
                                    steps=tuple(_pending(spec) for spec in definition['steps']),
                                    inputs=payload({} if inputs is None else inputs))
         definition['_frozen_scripts'] = self._script_pins(definition['steps'])
-        record = replace(record, workflow_name=descriptor['name'], total_steps=len(definition['steps']))
+        record = replace_run_record(record, workflow_name=descriptor['name'], total_steps=len(definition['steps']))
+        execution_receipt(record, phase='preflight', effect_outcome='not_started',
+                          definition_ref=execution_definition_ref(definition, kind='workflow'))
         self.store.create_run(record, definition)
         with self.store.execution_lock(record.workflow_run_id):
             return self._drive(record, definition, 0)
@@ -110,9 +148,6 @@ class _WorkflowRunLifecycle:
                 raise ValueError('恢复步骤不存在')
             start = ids.index(from_step_id) if from_step_id is not None else next(
                 (i for i, step in enumerate(record.steps) if step.status not in SUCCESS), len(ids))
-            if (start == len(ids) and ids and record.status == 'failed'
-                    and (record.breakpoint or {}).get('error_code') == 'WORKFLOW_OUTPUT_CONTRACT_VIOLATION'):
-                start -= 1
             if any(step.status not in SUCCESS for step in record.steps[:start]):
                 raise ValueError('不能跳过未成功的前序步骤')
             repaired = None
@@ -133,9 +168,9 @@ class _WorkflowRunLifecycle:
                 return record
             steps = record.steps[:start] + ((repaired,) if repaired else ()) + tuple(
                 _pending(spec) for spec in definition['steps'][start + bool(repaired):])
-            record = replace(record, steps=steps, status='running', ended_at=0, failed_step_id='',
+            record = replace_run_record(record, steps=steps, status='running', ended_at=0, failed_step_id='',
                              needs_repair=False, current_step_id='', final_output={}, resumed_from_step_id=ids[start] if start < len(ids) else '')
-            record = replace(record, breakpoint=None)
+            record = replace_run_record(record, breakpoint=None)
             if repaired:
                 self.store.save_step_result(workflow_run_id, repaired)
             self.store.save_run(record)
@@ -158,32 +193,10 @@ class _WorkflowRunLifecycle:
                 continue
             try:
                 row = self._script_metadata(spec['script_id'])
-                pins[spec['step_id']] = {'script_id': spec['script_id'], 'revision': row.get('revision', 0),
-                    'code_sha256': hashlib.sha256(row['code'].encode('utf-8')).hexdigest(),
-                    'source_scope': row.get('source_scope', 'owner'),
-                    'runtime_run_count': row.get('runtime_summary', {}).get('run_count', 0)}
+                pins[spec['step_id']] = _script_pin(spec['script_id'], row)
             except (OSError, ValueError, KeyError):
                 pins[spec['step_id']] = {'script_id': spec['script_id'], 'revision': None, 'code_sha256': '', 'source_scope': 'missing'}
         return pins
-
-    # LLM: 仅接受一次原Store摘要推进，代码/来源不变且revision/run_count精确+1；只更新权威run内嵌pin，不创建修复旁件。
-    # 函数用途: 推进本次执行自己的摘要版本，避免正常恢复误报漂移。
-    def _advance_summary_pin(self, run, definition, spec):
-        frozen = definition.get('_frozen_scripts', {})
-        previous = frozen.get(spec['step_id'], {})
-        current = self._script_pins([spec]).get(spec['step_id'], {})
-        revision = previous.get('revision')
-        if not isinstance(revision, int):
-            return
-        identity = ('script_id', 'code_sha256', 'source_scope')
-        if (current.get('revision') != revision + 1
-                or current.get('runtime_run_count') != previous.get('runtime_run_count', 0) + 1
-                or any(current.get(key) != previous.get(key) for key in identity)):
-            return
-        for key, pin in tuple(frozen.items()):
-            if pin == previous:
-                frozen[key] = dict(current)
-        self.store.save_run(run, definition)
 
     # LLM: 非漂移故障可修复当前依赖及后缀中完全相同原pin的同版本复用；其它后续/确认断点仍核原pin，前缀不变。
     # 函数用途: 接纳当前故障资产修复，拦截其它后续漂移，仅在核验通过后发表新pin。
@@ -195,10 +208,10 @@ class _WorkflowRunLifecycle:
         if target and target.needs_repair and target.error_code != 'SCRIPT_REVISION_DRIFT' and target.step_id in current:
             previous, replacement = frozen.get(target.step_id), current[target.step_id]
             repaired = {key for key, value in current.items() if key == target.step_id
-                        or previous and frozen.get(key) == previous and value == replacement}
-        changed = next((key for key, value in current.items() if key not in repaired and frozen.get(key) != value), None)
+                        or previous and _same_pin(frozen.get(key), previous) and _same_pin(value, replacement)}
+        changed = next((key for key, value in current.items() if key not in repaired and not _same_pin(frozen.get(key), value)), None)
         if changed is None or allow:
-            approved = {key: value for key, value in current.items() if (allow or key in repaired) and frozen.get(key) != value}
+            approved = {key: value for key, value in current.items() if (allow or key in repaired) and not _same_pin(frozen.get(key), value)}
             if approved:
                 definition['_frozen_scripts'] = {**frozen, **approved}
                 self._save_definition(record, definition)
@@ -208,7 +221,7 @@ class _WorkflowRunLifecycle:
                        error_message='依赖脚本版本已变化，需显式allow_script_drift确认', ended_at=time.time(),
                        status='paused_for_resume', needs_repair=True)
         steps = record.steps[:index] + (step,) + record.steps[index + 1:]
-        blocked = replace(record, steps=steps, status='paused_for_resume', needs_repair=True, current_step_id=changed,
+        blocked = replace_run_record(record, steps=steps, status='paused_for_resume', needs_repair=True, current_step_id=changed,
                           failed_step_id=changed, ended_at=time.time(), breakpoint=self._breakpoint(step, index))
         self.store.save_run(blocked)
         self._notify_breakpoint(blocked)
@@ -234,7 +247,7 @@ class _WorkflowRunLifecycle:
     # LLM: 显式类型合同或完全空输出按成功步骤合并值校验，不采纳失败/跳过输出；旧非空无类型合同保持兼容。
     # 函数用途: 更新进度、构造断点并核工作流合同，保留末步真实final_output。
     def _finalize_record(self, record, definition):
-        record = replace(record, workflow_name=definition['descriptor']['name'], total_steps=len(record.steps),
+        record = replace_run_record(record, workflow_name=definition['descriptor']['name'], total_steps=len(record.steps),
                          completed_steps=sum(step.status in SUCCESS for step in record.steps))
         error = ''
         if record.status == 'succeeded':
@@ -247,16 +260,16 @@ class _WorkflowRunLifecycle:
             if contract.get('output_types') or not merged_outputs:
                 _, error = parse_script_output(json.dumps(merged_outputs), contract)
         if error:
-            record = replace(record, status='failed', needs_repair=True,
+            record = replace_run_record(record, status='failed', needs_repair=True,
                 current_step_id=record.steps[-1].step_id if record.steps else '',
                 failed_step_id=record.steps[-1].step_id if record.steps else '')
         if record.status not in ('failed', 'paused_for_resume'):
-            return replace(record, breakpoint=None)
+            return replace_run_record(record, breakpoint=None)
         index = next((i for i, step in enumerate(record.steps) if step.step_id == record.current_step_id), max(len(record.steps) - 1, 0))
         step = record.steps[index] if record.steps else StepExecutionRecord('', '工作流输出', '', 'failed', 0, record.ended_at, 0, False)
         if error:
             step = replace(step, needs_repair=True, error_code='WORKFLOW_OUTPUT_CONTRACT_VIOLATION', error_message=error)
-        return replace(record, breakpoint=self._breakpoint(step, index))
+        return replace_run_record(record, breakpoint=self._breakpoint(step, index))
 
 # LLM: 复用原执行链；debug显式副作用许可与内存标志由调用方传入，不能从config/mock授予权限。
 # 类用途: 执行正式工作流，或默认只预览一个节点而不改变正式运行、资产修订及外部业务。
@@ -345,7 +358,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 if current is not None and current.descriptor.scope_layer != 'owner':
                     return
             summary = WorkflowStore(self.owner_home).record_run_summary
-            error = next((f'{s.error_code}: {s.error_message}' for s in record.steps if s.step_id == record.failed_step_id), '')
+            breakpoint = record.breakpoint or {}
+            error = ': '.join(str(breakpoint[key]) for key in ('error_code', 'error_message') if breakpoint.get(key))
+            if not error:
+                error = next((f'{s.error_code}: {s.error_message}' for s in record.steps if s.step_id == record.failed_step_id), '')
             summary(record.workflow_id, record.status, record.duration_ms,
                     datetime.fromtimestamp(record.ended_at, timezone.utc).isoformat(), last_error=error)
         except Exception:
@@ -354,49 +370,120 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # LLM: 失败/暂停在真实步骤停住，结算前核最终合同并保存断点；中断仍先落盘再抛，通知不修改运行事实。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
+        state = {'record': record, 'phase': 'preflight', 'started': bool(start), 'committed': False}
+        try:
+            return self._drive_steps(record, definition, start, execution_state=state)
+        except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
+            current = self._committed_record(state)
+            if current is None:
+                current = self._pause_failed_run(state, definition, exc, interrupted=True)
+            exc.record = current
+            exc.receipt = WorkflowExecutionError(current, exc).receipt
+            raise
+        except Exception as exc:
+            committed = self._committed_record(state)
+            if committed is not None:
+                return committed
+            current = self._pause_failed_run(state, definition, exc)
+            raise WorkflowExecutionError(current, exc) from exc
+
+    # LLM: 原原子写可能已提交但ACK失败；只以同一RunStore完整回读确认，观察失败不能用暂停覆盖可能已提交的终态。
+    # 函数用途: 核实原终态提交事实，区别真正未提交和提交结果未知。
+    def _committed_record(self, state):
+        if state['committed']:
+            return state['record']
+        if state['phase'] != 'terminal':
+            return None
+        try:
+            persisted = self.store.load_run(state['record'].workflow_run_id)
+            if payload(persisted) == payload(state['record']) and execution_receipt(persisted) == execution_receipt(state['record']):
+                return persisted
+        except Exception:
+            state['commit_observation_unknown'] = True
+        return None
+
+    # LLM: 只修复原run的发表事实，已经成功的步骤不倒改；保存失败仍携原ID和安全最小回执。
+    # 函数用途: 统一收口执行异常和取消，保留成功前缀并尽力保存可恢复暂停。
+    def _pause_failed_run(self, state, definition, error, *, interrupted=False):
+        current = state['record']
+        steps = tuple(replace(step, status='paused_for_resume', needs_repair=True, ended_at=time.time())
+                      if step.status == 'running' else step for step in current.steps)
+        breakpoint = {'error_code': 'WORKFLOW_PAUSED' if interrupted else 'WORKFLOW_EXECUTION_FAILED',
+                      'error_message': str(error), 'phase': state['phase'], 'can_resume': True}
+        current = replace_run_record(current, steps=steps, status='paused_for_resume', needs_repair=True,
+            ended_at=time.time(), completed_steps=sum(step.status in SUCCESS for step in steps), breakpoint=breakpoint)
+        execution_receipt(current, phase=state['phase'],
+            effect_outcome='unknown' if state['started'] else 'not_started',
+            definition_ref=execution_definition_ref(definition, kind='workflow'))
+        if state.get('commit_observation_unknown'):
+            current.breakpoint['can_resume'] = False
+        else:
+            try:
+                self.store.save_run(current)
+            except Exception:
+                current.breakpoint['can_resume'] = False
+        for hook in (self._notify_breakpoint, self._record_summary):
+            try:
+                hook(current)
+            except Exception:
+                # 附属通知和统计不得遮蔽原取消或执行异常。
+                pass
+        return current
+
+    # LLM: execution_state只属于本次调用栈，发表异常沿原run保存成功前缀，不在engine实例上放跨运行可变状态。
+    # 函数用途: 执行原顺序步骤并在每个IO边界更新当前事实。
+    def _drive_steps(self, record, definition, start, *, execution_state=None):
+        state = execution_state
         timer = time.monotonic()
         outputs = {s.step_id: payload(s.output_snapshot) for s in record.steps[:start] if s.status in SUCCESS and s.status != 'skipped'}
         for spec in definition['steps'][start:]:
             step = replace(_pending(spec), status='running', started_at=time.time(), input_snapshot=payload(record.inputs))
+            state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             clock = time.monotonic()
+            state.update(record=record)
             try:
+                _check_stop()
                 condition = spec.get('condition')
                 if condition and output_value(condition, outputs, record.inputs) != condition['equals']:
                     step.status = 'skipped'
                 else:
+                    state.update(record=record, phase='started', started=True)
                     self._perform(step, spec, outputs, definition, record)
-            except (KeyboardInterrupt, SystemExit):
-                step = replace(step, status='paused_for_resume', needs_repair=True, ended_at=time.time(),
-                               duration_ms=(time.monotonic() - clock) * 1000)
-                record = self.store.save_step_result(record.workflow_run_id, step)
-                record = replace(record, status='paused_for_resume', needs_repair=True, failed_step_id=step.step_id,
-                                 ended_at=time.time(), duration_ms=record.duration_ms + (time.monotonic() - timer) * 1000,
-                                 final_output=next(reversed(outputs.values()), {}))
-                record = self._finalize_record(record, definition)
-                self.store.save_run(record)
-                self._notify_breakpoint(record)
-                self._record_summary(record)
+                _check_stop()
+            except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError):
+                step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
+                state['record'] = replace_run_record(record,
+                    steps=tuple(step if item.step_id == step.step_id else item for item in record.steps))
                 raise
             except Exception as exc:
                 step.status, step.error_code, step.error_message = 'failed', step.error_code or getattr(exc, 'error_code', 'STEP_EXECUTION_ERROR'), str(exc)
                 step.needs_repair = True
             step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
+            record = replace_run_record(record, steps=tuple(step if item.step_id == step.step_id else item for item in record.steps))
+            state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             if step.status in ('failed', 'paused_for_resume'):
                 if not step.needs_repair and step.output_snapshot:
                     outputs[step.step_id] = payload(step.output_snapshot)
-                record = replace(record, status=step.status, needs_repair=step.needs_repair,
+                record = replace_run_record(record, status=step.status, needs_repair=step.needs_repair,
                                  current_step_id=step.step_id, failed_step_id=step.step_id if step.needs_repair else '')
                 break
             if step.status != 'skipped':
                 outputs[step.step_id] = payload(step.output_snapshot)
         else:
-            record = replace(record, status='succeeded', needs_repair=False, current_step_id='', failed_step_id='')
-        record = replace(record, ended_at=time.time(), duration_ms=record.duration_ms + (time.monotonic() - timer) * 1000,
+            record = replace_run_record(record, status='succeeded', needs_repair=False, current_step_id='', failed_step_id='')
+        record = replace_run_record(record, ended_at=time.time(), duration_ms=record.duration_ms + (time.monotonic() - timer) * 1000,
                          final_output=next(reversed(outputs.values()), {}))
+        state.update(record=record, phase='finalize')
         record = self._finalize_record(record, definition)
+        _check_stop()
+        execution_receipt(record, phase='finalize' if record.breakpoint else 'terminal',
+            effect_outcome='confirmed' if record.status == 'succeeded' else 'failed',
+            definition_ref=execution_definition_ref(definition, kind='workflow'))
+        state.update(record=record, phase='terminal')
         self.store.save_run(record)
+        state.update(record=record, committed=True)
         if record.breakpoint:
             self._notify_breakpoint(record)
         self._record_summary(record)
@@ -413,6 +500,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.needs_repair = True
             return
         for key, reference in spec.get('inputs_map', {}).items():
+            if (record.mode in ('llm_skill_analysis', 'llm_prompt', 'hybrid') and isinstance(reference, dict)
+                    and reference.get('step_id') == '$inputs' and 'key' in reference
+                    and reference['key'] not in run.inputs and 'fallback' not in reference):
+                raise KeyError(f"分析输入缺失: {reference['key']}")
             record.input_snapshot[key] = output_value(reference, outputs, run.inputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
         if run.ephemeral_debug and spec.get('condition'):
             condition = spec['condition']
@@ -532,12 +623,18 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         options = {'override_data_sources': payload(sources)} if sources or definition.get('_override_data_sources') else {}
         if not record_summary:
             options['options'] = {'record_summary': False}
-        result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
-            runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
-            expected_script_pin=definition.get('_frozen_scripts', {}).get(spec['step_id']), **options)
-        if record_summary:
-            self._advance_summary_pin(run, definition, spec)
+        frozen = definition.get('_frozen_scripts', {}).get(spec['step_id'])
+        metadata = self._script_metadata(record.script_id)
+        current = _script_pin(record.script_id, metadata)
+        if frozen is not None and not _same_pin(frozen, current):
+            result = _preflight_failure(record.script_id, metadata, 'SCRIPT_REVISION_DRIFT', {})
         else:
+            # 同一记录经内容门后冻结交原数据源门；当前CAS只是该旧门的读取一致性令牌，不再作为执行身份。
+            with bind_script_execution_record(self.owner_home, record.script_id, self.workspace_root, metadata):
+                result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
+                    runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
+                    expected_script_pin=current, **options)
+        if not record_summary:
             record.escalation_result['debug_logs'] = [text for text in
                 (result.stdout_preview, result.stderr_preview) if text]
         record.output_snapshot, record.error_code = payload(result.output_data), result.error_code
@@ -617,7 +714,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.error_code, record.error_message = 'ANALYZER_UNAVAILABLE', '未提供真实技能分析回调'
             return
         record.llm_involved = record.llm_involved or getattr(self.analysis_handler, 'llm_involved', True) is not False
-        output = payload(self.analysis_handler(payload(spec), context, resolved))
+        _check_stop()
+        output = self.analysis_handler(payload(spec), context, resolved)
+        _check_stop()
+        output = payload(output)
         if not isinstance(output, dict):
             raise ValueError('分析回调必须返回 JSON 对象')
         record.output_snapshot = output

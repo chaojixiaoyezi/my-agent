@@ -2,6 +2,8 @@
 # 模块用途: 定义资产描述符、来源投影与CAS版本，并独立校验完整定义输入，保留存量JSON读取兼容性。
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from dataclasses import asdict, dataclass, field, fields
@@ -208,9 +210,49 @@ class IOContract(_Record):
     # 函数用途: 在保存之前拒绝无效输出类型合同。
     def __post_init__(self):
         super().__post_init__()
-        supported = {'string', 'integer', 'number', 'boolean', 'object', 'array', 'null'}
-        if any(value not in supported for value in self.output_types.values()):
-            raise ValueError('输出类型必须是JSON类型名')
+        output_contract_fields(self.to_dict())
+
+
+# LLM: 构造、旧记录解析和执行预检共用此纯规则；旧expected_output_keys仅作显式旧字段适配，不接受两份冲突声明。
+# 函数用途: 规范必选/可空输出及JSON类型，任何不支持的形状都在执行之前拒绝。
+def output_contract_fields(contract):
+    if not isinstance(contract, dict):
+        raise ValueError('输出合同必须为对象')
+    expected = contract.get('outputs', contract.get('expected_output_keys', ()))
+    if 'expected_output_keys' in contract and 'outputs' in contract and contract['expected_output_keys'] != contract['outputs']:
+        raise ValueError('输出合同声明冲突')
+    nullable = contract.get('nullable_outputs', ())
+    types = contract.get('output_types', {})
+    for values in (expected, nullable):
+        if not isinstance(values, (list, tuple)) or not all(isinstance(key, str) and key.strip() for key in values):
+            raise ValueError('输出字段必须为非空字符串列表')
+    supported = {'string', 'integer', 'number', 'boolean', 'object', 'array', 'null'}
+    if not isinstance(types, dict) or any(not isinstance(key, str) or not key.strip()
+            or not isinstance(value, str) or value not in supported for key, value in types.items()):
+        raise ValueError('输出类型必须为字段名到JSON类型名的对象')
+    return expected, nullable, types
+
+
+# LLM: CAS、统计、展示、来源路径及候选观察不决定执行语义；代码与权威IO/访问/执行参数/依赖必须全部进入规范hash。
+# 函数用途: 为脚本和工作流生成与存储修订分离的执行内容身份，不读取文件或使用调用者提供的旧指纹。
+def execution_definition_ref(value, *, kind=None):
+    descriptor = value.get('descriptor', value)
+    selected = {key: descriptor[key] for key in
+        ('id', 'kind', 'owner_id', 'access_targets', 'credential_refs', 'io_contract', 'enabled') if key in descriptor}
+    sources = descriptor.get('data_sources', ())
+    selected['data_sources'] = (sources if isinstance(sources, dict) else
+        [{key: item for key, item in source.items() if key != 'evaluated_candidates'} for source in sources])
+    selected['kind'] = kind or descriptor.get('kind')
+    if selected['kind'] == 'script':
+        selected.update({key: value[key] for key in
+            ('code', 'entrypoint', 'interpreter', 'timeout_seconds', 'access_contract') if key in value})
+    elif selected['kind'] == 'workflow':
+        selected['steps'] = [{key: item for key, item in step.items() if key != 'name'} for step in value.get('steps', ())]
+        selected['enabled'] = value.get('enabled', descriptor.get('enabled', True))
+    else:
+        raise ValueError('执行内容身份只适用于脚本与工作流')
+    raw = json.dumps(selected, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 # LLM: 依赖引用仅为各kind安全ID；可选skill_dir只保存原目录名作展示，不能授路径权限，空值不输出。

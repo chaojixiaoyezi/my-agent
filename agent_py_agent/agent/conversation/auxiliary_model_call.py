@@ -28,7 +28,9 @@ from ..backends import ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
 from ..backends.provider_headers import provider_runtime_scope
 from ..backends.response_completion import has_reasoning_content
+from ..common.cancellation import raise_if_cancelled
 from ..common.request_execution_ports import raise_if_transport_uncertain
+from ..concurrency.interrupt import is_interrupted
 from ..contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFirstTokenParams,
@@ -100,6 +102,9 @@ class AuxiliaryModelCallRequest:
 # LLM: 只进行一次逻辑分派，后端仍拥有内部 schema/传输重试；不把一次分派宣称成一次 HTTP，旧 generate 不改。
 # 函数用途: 调用普通或结构化辅助模型并沿原账统计；失败与取消仍传播，观察者不能改变结果。
 def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> object:
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError('auxiliary model interrupted')
     agent = request.agent
     backend = getattr(agent, "backend", None)
     method = "generate_structured" if request.response_schema is not None else "generate"
@@ -115,6 +120,9 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         response = _invoke_auxiliary_generate(request, generate, _AuxiliaryCallRef(
             ledger=ledger, call_id=call_id, timeouts=_auxiliary_timeout_plan(request, input_tokens),
         ))
+        raise_if_cancelled()
+        if is_interrupted():
+            raise InterruptedError('auxiliary model interrupted')
         record_model_call_finished(ledger, call_id, response)
     except Exception as exc:
         _record_auxiliary_failure(ledger, _AuxiliaryFailureCall(
@@ -129,6 +137,9 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     except Exception:
         pass
     _record_auxiliary_cost(request, response)
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError('auxiliary model interrupted')
     return response
 
 
