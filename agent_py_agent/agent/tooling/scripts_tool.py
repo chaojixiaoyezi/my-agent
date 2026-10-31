@@ -65,6 +65,11 @@ def _validate(tool, params):
         except (TypeError, ValueError) as exc:
             return _outcome(name, {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
     action = params['action']
+    descriptor = params.get('descriptor')
+    if (name == 'scripts' and isinstance(descriptor, dict) and 'kind' in descriptor
+            and descriptor['kind'] != 'script'):
+        return _outcome(name, {'error': '脚本kind冲突', 'expected_kind': 'script',
+            'provided_kind': descriptor['kind']}, False, 'TOOL_INVALID_ARGUMENTS')
     key = 'script_id' if name == 'scripts' else 'workflow_id'
     required = [] if action == 'list' else [key]
     if action in ('resume', 'inspect_run'):
@@ -85,7 +90,12 @@ def _validate(tool, params):
 # LLM: 仅供Store内部继承字段，不脱敏或序列化；展示必须另经_plain，避免把脱敏代码写回磁盘。
 # 函数用途: 无损取得领域对象、dataclass或原字典的数据。
 def _raw(value):
-    return value.to_dict() if hasattr(value, 'to_dict') else asdict(value) if is_dataclass(value) else value
+    data = value.to_dict() if hasattr(value, 'to_dict') else asdict(value) if is_dataclass(value) else value
+    if (isinstance(data, dict) and not isinstance(value, dict)
+            and ('workflow_run_id' in data or 'exit_code' in data and 'output_data' in data)):
+        data.update({name: getattr(value, name) for name in ('execution_definition_ref', 'workflow_run_id',
+            'phase', 'effect_outcome', 'confirmed_step_refs', 'preparation_timings', 'delivery_receipts') if hasattr(value, name)})
+    return data
 
 
 # LLM: 只用于模型可见投影，保留领域版本字段并共用有限JSON安全codec，不能作为更新的旧值。
@@ -97,14 +107,23 @@ def _plain(value):
 # LLM: 两工具共用错误出口；明确提交后读回事实优先于异常类型，进程清理未确认仍保留unknown。
 # 函数用途: 将动作结果转换为宿主结果，运行失败也附完整业务回执与精确副作用状态。
 def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage=''):
+    if isinstance(data, dict) and data.get('effect_outcome'):
+        effect_outcome = data['effect_outcome']
     if not ok and not effect_outcome:
         cleanup_unverified = isinstance(data, dict) and (
             bool((data.get('escalation_context') or {}).get('cleanup_error'))
             or any(bool((s.get('escalation_result') or {}).get('cleanup_error')) for s in data.get('steps') or () if isinstance(s, dict))
         )
         effect_outcome = 'unknown' if cleanup_unverified else ('not_started' if code == 'TOOL_INVALID_ARGUMENTS' else 'failed')
-    return ToolHandlerOutcome(name, ok, json.dumps(_plain(data), ensure_ascii=False), error_code=code,
-                              effect_outcome='' if ok else effect_outcome, failure_stage=failure_stage)
+    plain = _plain(data)
+    outcome = ToolHandlerOutcome(name, ok, json.dumps(plain, ensure_ascii=False), error_code=code,
+        result_envelope=plain if isinstance(plain, dict) else {},
+        effect_outcome='' if ok else effect_outcome, failure_stage=failure_stage)
+    if isinstance(plain, dict):
+        for field_name in ('workflow_run_id', 'phase', 'execution_definition_ref', 'confirmed_step_refs'):
+            if field_name in plain:
+                setattr(outcome, field_name, plain[field_name])
+    return outcome
 
 
 # LLM: 只接Store提交后typed异常；业务stage精确保留，宿主阶段沿既有execution枚举，不越界扩通用模型。
@@ -149,12 +168,13 @@ class ScriptsTool(BaseTool):
     # LLM: Store/runner和项目范围只由宿主注入；动态provider每次读取，模型参数不授予路径权限。
     # 函数用途: 固定Owner并保存显式领域依赖。
     def __init__(self, owner_home: Path, *, store=None, runner=None, workspace_root=None,
-                 workspace_root_provider=None, im_notifier=None):
+                 workspace_root_provider=None, im_notifier=None, runner_options_provider=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, runner)
         self.store, self.runner, self.im_notifier = store, runner, im_notifier
         self.workspace_root, self.workspace_root_provider = workspace_root, workspace_root_provider
+        self.runner_options_provider = runner_options_provider
 
     # LLM: 只使用宿主提供的项目；无显式项目时兼容已绑定runner范围，不从脚本元数据恢复权限。
     # 函数用途: 获取当前操作使用的项目根。
@@ -217,8 +237,12 @@ class ScriptsTool(BaseTool):
             return self._sources(params, old)
         if action == 'run':
             from ..workflows.datasource_runtime import run_script_with_datasources
+            runner = self.runner
+            if runner is None and self.runner_options_provider is not None:
+                from ..workflows.script_runner import ScriptRunner
+                runner = ScriptRunner(self.owner_home, workspace_root=self._workspace_root(), **self.runner_options_provider())
             return _plain(run_script_with_datasources(self.owner_home, script_id, params.get('inputs', {}),
-                runner=self.runner, workspace_root=self._workspace_root(),
+                runner=runner, workspace_root=self._workspace_root(),
                 timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
         raise ValueError('未知脚本action')
 

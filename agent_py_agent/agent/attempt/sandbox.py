@@ -87,6 +87,7 @@ class SandboxHostPolicy:
     network_access: bool = True
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     full_access_other_owner_homes: str = field(default="read_only", kw_only=True)
+    host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
 class SandboxUnavailableError(SandboxUnavailable):
@@ -892,19 +893,26 @@ def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
              *((spec.staging_root,) if spec.implicit_attempt_write_roots else ()))}
     markers = {parent / ".git" for root in roots for parent in (root, *root.parents)
                if (parent / ".git").exists() or (parent / ".git").is_symlink()}
+    visited: set[Path] = set()
+    discoveries: dict[Path, tuple[Path | None, list[Path]]] = {}
     for root in sorted(roots):
         pending = deque([(root, 0)])
-        visited: set[Path] = set()
-        while pending and len(visited) < 128:
+        traversed: set[Path] = set()
+        while pending and len(traversed) < 128:
             directory, depth = pending.popleft()
             actual = directory.resolve(strict=False)
-            if actual in visited:
+            if actual in traversed:
                 continue
-            visited.add(actual)
-            marker, children = _macos_git_scan_directory(directory, descend=depth < 3)
+            traversed.add(actual)
+            if actual not in visited:
+                # 单次调用缓存列名；嵌套显式根可复用已有发现继续其更深范围，不缓存跨调用事实。
+                discoveries[actual] = _macos_git_scan_directory(directory, descend=True)
+                visited.add(actual)
+            marker, children = discoveries[actual]
             if marker is not None:
                 markers.add(marker)
-            pending.extend((child, depth + 1) for child in children)
+            if depth < 3:
+                pending.extend((child, depth + 1) for child in children)
     return tuple(sorted(markers))
 
 

@@ -13,7 +13,7 @@ from . import (
     safe_asset_id,
     valid_skill_reference,
 )
-from .descriptor import AssetDescriptor, _Record
+from .descriptor import AssetDescriptor, _Record, execution_definition_ref
 
 WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid",
                        "http_request", "script_transform", "condition", "tool_call", "llm_prompt", "subworkflow",
@@ -82,6 +82,12 @@ class WorkflowDefinition(_Record):
     @classmethod
     def from_any(cls, value):
         return cls.from_dict(value.to_dict() if isinstance(value, WorkflowDefinition) else value)
+
+    # LLM: 每次从权威定义重新计算，统计及显示字段不能污染内容身份；不保存第二份可写版本。
+    # 函数用途: 提供工作流的稳定执行引用。
+    @property
+    def execution_definition_ref(self):
+        return execution_definition_ref(self.to_dict())
 
 
 # LLM: steps保留来源精确引用，AssetRefs.skills只放规范裸名称；陈旧派生值不沿用且不授予权限。

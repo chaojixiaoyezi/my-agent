@@ -146,6 +146,7 @@ class ShellToolOptions:
     sandbox_boundary_facts: bool = True
     # 仅宿主装配PTY空闲分钟数；None供直接调用继承注册表默认，0仅关闭本工具新建会话的空闲回收。
     pty_session_idle_timeout_minutes: float | None = None
+    host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
 # LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
@@ -790,7 +791,7 @@ def _sandbox_exec(
         private_read_roots=tuple(
             Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
         ) if owner_text else (),
-        hidden_paths=host_paths.hidden,
+        hidden_paths=tuple(dict.fromkeys((*host_paths.hidden, *host_policy.host_exclusive_paths))),
         protected_write_patterns=host_paths.patterns,
         protected_directory_write_patterns=host_paths.directory_write_patterns,
         protected_directory_unlink_patterns=host_paths.directory_unlink_patterns,
@@ -1110,6 +1111,7 @@ class ShellTool(BaseTool):
         self.host_private_roots = tuple(str(root) for root in options.host_private_roots if str(root or "").strip())
         self.full_access_other_owner_homes = options.full_access_other_owner_homes
         self.host_credential_env_names = frozenset(options.host_credential_env_names)
+        self.host_exclusive_paths = tuple(Path(path).expanduser().resolve(strict=False) for path in options.host_exclusive_paths)
         self.artifact_backup_root = (
             Path(options.artifact_backup_root).expanduser().resolve(strict=False)
             if options.artifact_backup_root is not None
@@ -1398,7 +1400,8 @@ class ShellTool(BaseTool):
                                             SandboxWriteProtection(tuple(sandbox_roots[2] or ()), getattr(self, "_sandbox_forbidden_write_roots", ())),
                                             host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True),
                                                                           self.host_credential_env_names,
-                                                                          full_access_other_owner_homes=self.full_access_other_owner_homes))
+                                                                          full_access_other_owner_homes=self.full_access_other_owner_homes,
+                                                                          host_exclusive_paths=self.host_exclusive_paths))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
@@ -2225,7 +2228,8 @@ def _run_attempt_sandboxed_shell_command(
         sandbox_read_roots,
         SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
         host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names,
-                                      full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only")),
+                                      full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only"),
+                                      host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ())),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
     completed = None

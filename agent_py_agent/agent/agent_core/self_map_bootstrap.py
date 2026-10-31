@@ -5,6 +5,7 @@ import json
 
 from ..capability.self_map_memory import register_memory_section
 from ..capability.self_map_skills import register_skill_section
+from ..common.cancellation import raise_if_cancelled
 from ..common.strict_json import load_strict_json
 from ..concurrency.interrupt import is_interrupted
 from ..conversation.auxiliary_model_call import (
@@ -37,6 +38,7 @@ def _workflow_analysis_handler(agent):
     # LLM: Skill与来源是数据而非授权，使用完整隔离上下文；取消、坏JSON和工具调用都不得变成成功。
     # 函数用途: 在原运行身份下分析一个步骤并返回严格业务JSON对象。
     def analyze(spec, context, resolved_ids):
+        raise_if_cancelled()
         if is_interrupted():
             raise InterruptedError('workflow analysis interrupted')
         params = getattr(agent, '_current_run_params', None)
@@ -62,6 +64,9 @@ def _workflow_analysis_handler(agent):
             task_id=str(getattr(params, 'task_id', '') or ''),
             thread_id=str(attributes.get('conversation_thread_id') or ''), purpose='workflow_analysis',
         ))
+        raise_if_cancelled()
+        if is_interrupted():
+            raise InterruptedError('workflow analysis interrupted')
         if (getattr(response, 'truncated', False) or getattr(response, 'tool_use_blocks', None)
                 or getattr(response, 'tool_protocol_violations', None)
                 or getattr(response, 'runtime_status', 'ok') not in ('', 'ok')):
@@ -72,6 +77,9 @@ def _workflow_analysis_handler(agent):
         result = load_strict_json(text)
         if not isinstance(result, dict):
             raise ValueError('workflow analyzer must return a JSON object')
+        raise_if_cancelled()
+        if is_interrupted():
+            raise InterruptedError('workflow analysis interrupted')
         return result
 
     return analyze
@@ -87,6 +95,29 @@ def _active_agent_workspace_root(agent):
         if cwd:
             return cwd
     return getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None))
+
+
+# LLM: 配置来源只经中央投影；当前run及有效路径沿原运行边界，不接受脚本或工具实参声明身份。
+# 函数用途: 为本次脚本冻结工作区、来源擦洗和原宿主投递端口；缺公共投影时明确失败关闭。
+def _script_runtime_options(agent):
+    from ..path_access_policy import host_exclusive_paths
+    from ..settings.secret_ref import managed_secret_environment_names
+    from .tool_runtime_ledger import write_boundary_with_runtime_ledger
+
+    params = getattr(agent, '_current_run_params', None)
+    boundary = write_boundary_with_runtime_ledger(agent, params) if params is not None else {}
+    boundary = boundary or {}
+    workspace = _active_agent_workspace_root(agent)
+    context = None
+    if workspace is not None:
+        context = {'workspace_root': str(workspace), 'run_id': str(getattr(params, 'run_id', '') or ''),
+            'task_id': str(getattr(params, 'task_id', '') or ''), 'effective_path_scope': {
+                'read_roots': list(boundary.get('allowed_read_roots', [str(workspace)])),
+                'write_roots': list(boundary.get('allowed_write_roots', []))}}
+    return {'work_context': context,
+        'host_credential_env_names': managed_secret_environment_names(agent.config),
+        'host_exclusive_paths': host_exclusive_paths(agent.home_paths, agent.config),
+        'delivery_handler': getattr(agent, 'script_delivery_handler', None)}
 
 
 # LLM: 仅投递至当前Owner已绑定且支持proactive的同一渠道；无通道返回no_channel，发送异常或失败返回unavailable。
@@ -115,14 +146,16 @@ def register_self_map(agent):
         owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
         if owner_home is not None:
             ws_provider = functools.partial(_active_agent_workspace_root, agent)
+            runner_options = functools.partial(_script_runtime_options, agent)
             im_notifier = functools.partial(_agent_im_notifier, agent)
-            agent.tools.register(ScriptsTool(owner_home, workspace_root_provider=ws_provider, im_notifier=im_notifier))
+            agent.tools.register(ScriptsTool(owner_home, workspace_root_provider=ws_provider, im_notifier=im_notifier,
+                                             runner_options_provider=runner_options))
             agent.tools.register(DatasourcesTool(owner_home, workspace_root_provider=ws_provider))
             agent.tools.register(WorkflowsTool(owner_home,
                 workspace_root_provider=ws_provider,
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
                 analysis_handler=_workflow_analysis_handler(agent),
-                im_notifier=im_notifier))
+                im_notifier=im_notifier, runner_options_provider=runner_options))
             if is_permission_admin(getattr(agent, 'home_paths', None)):
                 agent.tools.register(RuntimeGovernanceTool(agent, is_admin=True))
     if not getattr(agent.config, "enable_self_map", True):
