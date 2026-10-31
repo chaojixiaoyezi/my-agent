@@ -583,7 +583,7 @@ def _maintain_event_store(directory: Path, *, now: float, commit_transition=None
             steps = []
             with store._connection() as conn:
                 resumable = conn.execute("SELECT 1 FROM metadata WHERE key='events_prune_cursor'").fetchone() is not None
-            if resumable or store.events_path.exists() and store.events_path.stat().st_size > 256 * 1024:
+            if resumable or store.events_path.exists() and store.events_path.stat().st_size > 4 * 1024 * 1024:
                 # 保留原maintain_events故障/观测钩子，只为本Store选择有界底层批次。
                 def bounded(**options):
                     from ..local_storage.maintenance import (

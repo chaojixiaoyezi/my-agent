@@ -27,7 +27,8 @@ from typing import Any
 from ..command_catalog import sensitive_command_name
 from ..common.authenticated_http import open_authenticated_request
 from ..conversation.host_notices import with_host_notice_lines
-from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
+from ..delivery import ChannelAdapterRegistry, DeliveryService, ReplyEnvelope
+from ..delivery.service import ChannelDeliveryContext as DeliveryContext
 from ..gateway_parts.client_credentials import GatewayClientCredentials, gateway_client_credentials
 from ..gateway_parts.local_client_token import LocalClientCredentialError
 from ..user_space.home_layout import home_paths
@@ -196,14 +197,22 @@ def _deliver_gateway_message(
     if not adapter_available:
         logger.error(f"找不到 channel={msg.channel} 的适配器")
         return False
+    from ..conversation.channels import binding_delivery_target
+
+    metadata = msg.metadata or {}
     context = DeliveryContext(
         channel=msg.channel,
-        target=msg.user_id,
+        target=binding_delivery_target(msg.channel, msg.user_id, msg.conversation_id,
+            group=metadata.get('feishu_chat_type') == 'group'),
         mode="reply",
         conversation_id=msg.conversation_id,
         reply_to=msg.message_id,
         progress_handle=handle,
         request_id=request_id,
+        reply_policy=str(metadata.get('reply_policy') or ''),
+        provider_thread_id=str(metadata.get('feishu_thread_id') or ''),
+        root_id=str(metadata.get('feishu_root_id') or ''),
+        parent_id=str(metadata.get('feishu_parent_id') or ''),
         idempotency_key=(
             str(idempotency_key or "").strip()
             or _gateway_delivery_key(
@@ -226,6 +235,9 @@ def _pending_gateway_message(pending: PendingGatewayReply) -> IncomingMessage:
         content="",
         message_id=pending.message_id,
         conversation_id=pending.conversation_id,
+        metadata={'reply_policy': pending.reply_policy, 'feishu_chat_type': pending.channel_chat_type,
+            'feishu_chat_id': pending.channel_chat_id, 'feishu_thread_id': pending.provider_thread_id,
+            'feishu_root_id': pending.root_id, 'feishu_parent_id': pending.parent_id},
     )
 
 
@@ -322,6 +334,9 @@ def _gateway_ask_payload(msg: IncomingMessage, *, input_media: tuple[dict, ...] 
         metadata["channel_chat_type"] = chat_type
     if chat_id:
         metadata["channel_chat_id"] = chat_id
+    for source, target in (('feishu_thread_id', 'provider_thread_id'), ('feishu_root_id', 'root_id'), ('feishu_parent_id', 'parent_id')):
+        if incoming_metadata.get(source):
+            metadata[target] = incoming_metadata[source]
     quoted = incoming_metadata.get('quoted_message_references')
     if (isinstance(quoted, dict) and quoted.get('schema') == 'quoted_message_references.v1'
             and quoted.get('channel') == msg.channel == 'feishu' and chat_type == 'group'
@@ -538,6 +553,17 @@ class _ChannelIngressCoordinator:
         if record.kind == 'observation':
             from .channel_observations import submit_channel_observation
             return submit_channel_observation(self._manager, record.gateway_payload)
+        # 入站与队列执行有时间差，业务提交前从原 Store 再查一次，不能沿用受理时的放行结论。
+        if record.channel == 'feishu':
+            from ..session_lock.admission import check_session_admission
+
+            adapter = self._manager._adapters.get(record.channel)
+            metadata = record.metadata
+            admission = check_session_admission(getattr(adapter, '_unlock', None), record.user_id,
+                is_group=metadata.get('feishu_chat_type') == 'group',
+                enabled=getattr(adapter, '_session_lock_enabled', True))
+            if not admission.allowed:
+                raise RuntimeError(admission.reason_code)
         try:
             submission = self._manager._submit_gateway_payload(
                 record.gateway_payload,
@@ -615,6 +641,10 @@ class _ChannelIngressCoordinator:
     def handoff_reply(self, record: GatewayIngressRecord) -> None:
         submission = _gateway_ingress_submission(record)
         channel_chat_type, channel_chat_id = _gateway_ingress_channel_identity(record)
+        route_facts = {'reply_policy': str(record.metadata.get('reply_policy') or ''),
+            'provider_thread_id': str(record.metadata.get('feishu_thread_id') or ''),
+            'root_id': str(record.metadata.get('feishu_root_id') or ''),
+            'parent_id': str(record.metadata.get('feishu_parent_id') or '')}
         if submission.status == "control":
             _validate_control_receipt_submission(submission)
             request_id = submission.request_id or submission.target_turn_id
@@ -632,6 +662,7 @@ class _ChannelIngressCoordinator:
                 progress_handle=record.progress_handle,
                 watch_kind="control_receipt",
                 created_at=record.created_at,
+                **route_facts,
             )
         else:
             pending = PendingGatewayReply(
@@ -645,6 +676,7 @@ class _ChannelIngressCoordinator:
                 progress_handle=record.progress_handle,
                 watch_kind=_gateway_submission_watch_kind(submission),
                 created_at=record.created_at,
+                **route_facts,
             )
         current, created = self._manager._reply_delivery.enqueue(pending)
         if created or (
@@ -788,7 +820,7 @@ class _GatewayReplyPollClient:
             for event in source_events
             if isinstance(event, dict) and (rendered := _render_gateway_progress(event))
         ]
-        from .progress_draft import GatewayProgressBatch
+        from .progress_draft import GatewayProgressBatch, project_execution_steps
 
         mode = "stream" if any(isinstance(event, dict) and event.get("level") in {"stream", "minimal"} for event in events or []) else "append"
         limits = [event.get("preview_max_chars") for event in source_events if isinstance(event, dict)
@@ -796,7 +828,10 @@ class _GatewayReplyPollClient:
         updates = [event.get("updated_at") for event in source_events if isinstance(event, dict) and isinstance(event.get("updated_at"), str)]
         return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode,
                                     any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
-                                    limits[-1] if limits else None, updates[-1] if updates else "")
+                                    limits[-1] if limits else None, updates[-1] if updates else "",
+                                    steps=project_execution_steps(source_events, request_id=pending.request_id),
+                                    render_kind=getattr(self, 'progress_render_kind', 'text'),
+                                    source_revision=max(pending.progress_cursor, int(body.get('next') or 0)))
 
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，
     #   开关关时降级为不带凭据；远端瞬时状态仍等待。
@@ -973,6 +1008,8 @@ class ChannelManager:
         delivery_state_dir: Path | None = None,
         delivery_poll_interval: float = 1.0,
         stream_preview_max_chars: int = 100,
+        reply_policy: str = '',
+        progress_render_kind: str = 'text',
     ) -> None:
         self._adapters: dict[str, BaseChannelAdapter] = {}
         self._inbound_media_agent: object | None = None
@@ -981,7 +1018,11 @@ class ChannelManager:
         self.gateway_port = gateway_port
         self._session_channel_file: Path | None = None  # 用于持久化活跃通道
         self._lifecycle_started = False
+        if reply_policy not in {'', 'reference', 'thread'} or progress_render_kind not in {'text', 'card'}:
+            raise ValueError('CHANNEL_DELIVERY_MODE_INVALID')
+        self._reply_policy = reply_policy
         self._reply_poll_client = _GatewayReplyPollClient(gateway_port)
+        self._reply_poll_client.progress_render_kind = progress_render_kind
         self._poll_gateway_once = self._reply_poll_client.poll_response
         self._poll_gateway_progress = self._reply_poll_client.poll_progress
         self._poll_gateway_input_receipt = self._reply_poll_client.poll_input_receipt
@@ -1097,16 +1138,17 @@ class ChannelManager:
     # 函数用途: 停止恢复线程和所有已注册通道，不删除未完成工作。
     # LLM: 仅停止本管理器原通道/worker，错误只记类型，不回显provider/认证响应。
     # 函数用途: 沿原顺序收尾通道与线程，不改变pending投递事实。
-    def stop_all(self) -> None:
+    def stop_all(self):
         """停止所有已注册的适配器。"""
         self._lifecycle_started = False
         # 先停唯一投递线程，再断开通道；未完成记录仍在磁盘，下次 start_all 会继续。
         self._delivery_worker.stop()
+        from ..delivery.registry import ChannelStopResult
+
+        results = {}
         for adapter in self._adapters.values():
-            if not adapter.running:
-                continue
             try:
-                adapter.stop()
+                result = adapter.stop()
             except Exception as exc:
                 self._delivery_registry.mark_health(
                     adapter.adapter_name,
@@ -1115,12 +1157,20 @@ class ChannelManager:
                     error_code="CHANNEL_ADAPTER_STOP_FAILED",
                 )
                 logger.error('停止适配器 channel=%s error_type=%s', adapter.adapter_name, type(exc).__name__)
+                results[adapter.adapter_name] = ChannelStopResult('exit_unconfirmed',
+                    str(getattr(adapter, '_generation_ref', '')), 'CHANNEL_ADAPTER_STOP_FAILED')
                 continue
+            # 旧 void 协议无退出观察，不能升级为 exited；注册仍保留本代适配器。
+            result = result if isinstance(result, ChannelStopResult) else ChannelStopResult(
+                'exit_unconfirmed', str(getattr(adapter, '_generation_ref', '')), 'CHANNEL_ADAPTER_STOP_FAILED')
+            results[adapter.adapter_name] = result
             self._delivery_registry.mark_health(
                 adapter.adapter_name,
-                "stopped",
+                "stopped" if result.status == 'exited' else 'unhealthy',
                 checked_at=_utc_now_iso(),
+                error_code=result.reason_code,
             )
+        return results
 
     # LLM: adapter 进程状态文件只能序列化 registry 的脱敏快照，不复制另一套状态判断。
     # 函数用途: 返回所有已注册通道的生命周期和能力状态，供跨进程能力诊断读取。
@@ -1144,6 +1194,9 @@ class ChannelManager:
             if sensitive_command_name(msg.content):
                 return self._route_sensitive_command(msg)
             metadata = dict(getattr(msg, 'metadata', {}) or {})
+            metadata.pop('reply_policy', None)
+            if self._reply_policy:
+                metadata['reply_policy'] = self._reply_policy
             if self._inbound_media_agent is not None:
                 from ..gateway_parts.request_owner_binding import (
                     REQUEST_OWNER_KEY,

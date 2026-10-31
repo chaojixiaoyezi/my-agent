@@ -24,6 +24,20 @@ def resolve_message_target(agent: object, channel: str = "") -> tuple[str, str, 
         owner_root = None
     if owner_root is None:
         return "", "", None, "CHANNEL_ADAPTER_UNAVAILABLE"
+    # 有宿主冻结的原 run 绑定时优先使用它；不读取最近会话或最新绑定。
+    current = getattr(agent, '_current_run_params', None)
+    actor = getattr(current, 'host_channel_actor', None)
+    if actor is not None:
+        from ..conversation.channels import binding_delivery_target
+        from ..conversation.host_actor import HostChannelActor
+
+        if not isinstance(actor, HostChannelActor) or actor.owner_id != getattr(home, 'owner_id', ''):
+            return '', '', owner_root, 'CHANNEL_TARGET_OUT_OF_SCOPE'
+        if requested and requested != actor.channel:
+            return '', '', owner_root, 'CHANNEL_TARGET_OUT_OF_SCOPE'
+        target = binding_delivery_target(actor.channel, actor.actor_id, actor.conversation_id,
+            group=getattr(home, 'owner_kind', '') == 'group')
+        return actor.channel, target, owner_root, '' if target else 'CHANNEL_TARGET_INVALID'
     if provider != "local":
         if requested and requested != provider:
             return "", "", owner_root, "CHANNEL_TARGET_OUT_OF_SCOPE"

@@ -202,6 +202,27 @@ class SendMessageTool(BaseTool):
             return ToolOperationReconciliation(
                 reason="provider_idempotency_unavailable"
             )
+        from ..adapter.delivery import GatewayReplyDeliveryStore
+        from ..delivery.registry import provider_replay_allowed
+
+        facts = context.prior_result.get('component_receipts')
+        if not facts and _owner_root is not None and capabilities.component_receipts:
+            store = GatewayReplyDeliveryStore(_owner_root / 'data' / 'channel-delivery')
+            stable_id = 'host-delivery:' + context.idempotency_key
+            terminal = store.terminal_receipt(stable_id)
+            record = next((row for row in store.pending() if row.stable_id == stable_id), None)
+            frozen = terminal if terminal is not None else ({'channel': record.channel, 'target': record.user_id,
+                **record.dispatch} if record is not None else {})
+            if frozen and (frozen.get('channel'), frozen.get('target')) != (provider, target):
+                return ToolOperationReconciliation(reason='provider_target_binding_changed')
+            facts = frozen.get('component_receipts')
+        if capabilities.provider_idempotency_window_seconds > 0 or capabilities.component_receipts:
+            if not isinstance(facts, (tuple, list)) or not facts:
+                return ToolOperationReconciliation(reason='provider_first_dispatch_unavailable')
+            if not all(isinstance(row, dict) and (row.get('phase') == 'send_confirmed' or
+                    row.get('first_dispatch_at') is None and row.get('phase') in {'accepted', 'upload_confirmed'} or
+                    provider_replay_allowed(capabilities, row)) for row in facts):
+                return ToolOperationReconciliation(reason='provider_replay_window_expired_or_unknown')
         return ToolOperationReconciliation(
             outcome="safe_to_retry",
             source_ref=f"channel_capability:{provider}:provider_idempotency.v1",
@@ -272,7 +293,7 @@ class SendMessageTool(BaseTool):
         if isinstance(receipt, ToolHandlerOutcome):
             return receipt
         if receipt.delivery_status != "sent":
-            return _error(
+            failure = _error(
                 "消息或附件没有成功送达当前聊天通道",
                 receipt.error_code or "CHANNEL_SEND_FAILED",
                 effect_outcome=(
@@ -283,6 +304,8 @@ class SendMessageTool(BaseTool):
                 ),
                 effect_source_ref=f"delivery_receipt:{receipt.delivery_status or 'unknown'}",
             )
+            failure.result_envelope['component_receipts'] = list(getattr(receipt, 'component_receipts', ()))
+            return failure
         from ..ingestion.harvester import record_audit_delivery_refs
 
         reported_refs = record_audit_delivery_refs(
@@ -299,6 +322,7 @@ class SendMessageTool(BaseTool):
             evidence_refs=evidence_refs,
             reported_refs=reported_refs,
         )
+        payload['component_receipts'] = list(getattr(receipt, 'component_receipts', ()))
         return _success_result(
             provider,
             message,
@@ -350,6 +374,12 @@ def _deliver_with_scheduler_scope(agent, delivery, context, envelope):
 
     try:
         with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind='delivery'):
+            if delivery.registry.capabilities_for(context.channel).component_receipts:
+                from ..adapter.delivery import GatewayReplyDeliveryStore, deliver_host_envelope
+
+                root = Path(agent.home_paths.owner_home_dir)
+                return deliver_host_envelope(delivery, GatewayReplyDeliveryStore(root / 'data' / 'channel-delivery'),
+                    context, envelope)
             return delivery.deliver(context, envelope)
     except SchedulerEffectRejected as exc:
         return _error('原监控已停止或来源不可核验，消息未发送', exc.error_code,

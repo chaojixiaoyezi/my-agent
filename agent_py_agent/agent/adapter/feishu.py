@@ -12,7 +12,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +53,60 @@ _FEIHSU_API_BASE = "https://open.feishu.cn/open-apis"
 # 幂等发送最多尝试 3 次：飞书接口偶发网络错误时重发，靠 message_id 去重防止重复投递。
 _FEISHU_IDEMPOTENT_SEND_ATTEMPT_COUNT = 3
 _FEISHU_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+
+@dataclass
+class _TokenRefresh:
+    token: str | None = None
+    expires_at: float = 0.0
+    retry_at: float = 0.0
+    inflight: bool = False
+    done: threading.Event = field(default_factory=threading.Event)
+
+
+_TOKEN_REFRESH_LOCK = threading.Lock()
+_TOKEN_REFRESHES: dict[tuple[str, str], _TokenRefresh] = {}
+
+
+@dataclass
+class _SharedConnection:
+    home: str
+    ready: threading.Event = field(default_factory=threading.Event)
+    adapters: weakref.WeakSet = field(default_factory=weakref.WeakSet)
+    client: Any = None
+    thread: Any = None
+    failed: bool = False
+    stopping: bool = False
+    closer: Any = None
+    closing_started: threading.Event = field(default_factory=threading.Event)
+
+
+_CONNECTIONS_LOCK = threading.Lock()
+_CONNECTIONS: dict[tuple[str, str], _SharedConnection] = {}
+
+
+# LLM: 同key共享运输采用全组停止；全局锁内只发布停止事实和唯一closer，调用方必须在锁外启动/等待。
+# 函数用途: 让所有共享成员及新实例看到同一关闭屏障，不能因执行线程先退出就遗失SDK关闭责任。
+def _reserve_shared_connection_stop(shared: _SharedConnection):
+    with _CONNECTIONS_LOCK:
+        shared.stopping = True
+        start_closer = shared.closer is None
+        if start_closer:
+            def close_shared():
+                try:
+                    shared.client.close()
+                except Exception as exc:
+                    logger.warning('停止共享飞书运输失败 error_type=%s', type(exc).__name__)
+
+            shared.closer = threading.Thread(target=close_shared, daemon=True)
+        for member in tuple(shared.adapters):
+            if getattr(member, '_shared_connection', None) is shared:
+                member._running = False
+                member._stop_event.set()
+                member._ws_client, member._ws_thread = shared.client, shared.thread
+                member._closing_thread = shared.closer
+                member._closing_started = shared.closing_started
+        return shared.closer, start_closer, shared.closing_started
 
 
 # LLM: 标准 API 出站共用此入口；GET 不携带请求体，POST/PUT 仍发送 JSON，凭据只进认证头，不作为正文或日志。
@@ -143,19 +199,32 @@ def _message_body(
     return body
 
 
-def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -> bool:
-    """渲染 + 发(send(msg_type, content_json)→响应);post 富文本被判格式错则剥 markdown 回落 text 重发。"""
+def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]], *,
+                        component_id: str = '', message_key: str = '', provider=None):
+    """每段发送先提交原组件事实，未知响应不改正文或幂等键重发。"""
+    from ..delivery.registry import current_component_delivery
+
     msg_type, content_json = build_outbound_payload(text)
+    state = current_component_delivery() if component_id else None
+    receipt = None
+    if state is not None:
+        receipt = state.ensure(component_id, message_key, hashlib.sha256(text.encode()).hexdigest())
+        if receipt:
+            return receipt
+        prepared = state.before_send(receipt, provider)
+        if prepared is None:
+            return state.receipts[component_id]
+        receipt = prepared
     result = send(msg_type, content_json)
-    if result.get("code") == 0:
-        return True
-    if msg_type == "post":
-        fallback = json.dumps({"text": strip_markdown_to_plain_text(text)}, ensure_ascii=False)
-        result = send("text", fallback)
-        if result.get("code") == 0:
-            return True
+    if result.get('code') == 0:
+        return state.finish(receipt, result) if state is not None else True
+    if msg_type == 'post' and type(result.get('code')) is int:
+        fallback = json.dumps({'text': strip_markdown_to_plain_text(text)}, ensure_ascii=False)
+        result = send('text', fallback)
+        if result.get('code') == 0:
+            return state.finish(receipt, result) if state is not None else True
     logger.error('飞书发送失败 provider_code=%s', result.get('code') if type(result.get('code')) is int else None)
-    return False
+    return state.finish(receipt, result) if state is not None else False
 
 
 # LLM: 地址来自原owner/origin投影；内部topic必须先由授权绑定选basechat，运输不自行剥topic借权，不回落管理员。
@@ -174,41 +243,26 @@ def _message_send_path(target: str) -> str:
 # LLM: 普通发送按准确接收编号构造一次逻辑消息，markdown 回落仍共用原 uuid；不能改变投递目标。
 # 函数用途: 向用户或原群发送渲染后的文字。
 def _send_feishu_rendered(
-    user_id: str,
-    text: str,
-    token: str,
-    uuid_value: str = "",
-) -> bool:
-    """普通发送一条(markdown→post/否则 text;post 格式错回落 text)。"""
+    user_id: str, text: str, token: str, uuid_value: str = '', *,
+    component_id: str = '', provider=None,
+):
+    """普通文字沿原渲染发送，可选记录同一分片的提供方事实。"""
     return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api_with_retry(
-        "POST", _message_send_path(user_id),
-        _message_body(
-            receive_id=user_id,
-            msg_type=mt,
-            content=cj,
-            uuid_value=uuid_value,
-        ),
-        token,
-    ))
+        'POST', _message_send_path(user_id),
+        _message_body(receive_id=user_id, msg_type=mt, content=cj, uuid_value=uuid_value), token),
+        component_id=component_id, message_key=uuid_value, provider=provider)
 
 
 def _reply_feishu_rendered(
-    reply_to: str,
-    text: str,
-    token: str,
-    uuid_value: str = "",
-) -> bool:
-    """引用回复某条消息(渲染 + /reply 端点;post 格式错回落)。"""
+    reply_to: str, text: str, token: str, uuid_value: str = '', *,
+    reply_in_thread: bool | None = None, component_id: str = '', provider=None,
+):
+    """所有分片共用原锚点；话题策略只在提供方边界映射。"""
     return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api_with_retry(
-        "POST",
-        f"/im/v1/messages/{reply_to}/reply",
-        {
-            "msg_type": mt,
-            "content": cj,
-            **({"uuid": uuid_value} if uuid_value else {}),
-        },
-        token,
-    ))
+        'POST', f'/im/v1/messages/{reply_to}/reply',
+        {'msg_type': mt, 'content': cj, **({'uuid': uuid_value} if uuid_value else {}),
+         **({'reply_in_thread': reply_in_thread} if reply_in_thread is not None else {})}, token),
+        component_id=component_id, message_key=uuid_value, provider=provider)
 
 
 def _edit_feishu_rendered(message_id: str, text: str, token: str) -> bool:
@@ -254,19 +308,34 @@ def _send_feishu_media(
     content: dict[str, str],
     token: str,
     uuid_value: str = "",
+    *, reply_to: str = '', reply_in_thread: bool | None = None,
+    component_receipt=None, provider=None,
 ) -> bool:
     """发图片/文件/音视频消息(content 含 image_key/file_key)。"""
+    from ..delivery.registry import current_component_delivery
+
+    state = current_component_delivery() if component_receipt is not None else None
+    if state is not None:
+        if component_receipt:
+            return component_receipt
+        prepared = state.before_send(component_receipt, provider)
+        if prepared is None:
+            return state.receipts[component_receipt.component_id]
+        component_receipt = prepared
+    body = _message_body(receive_id=user_id, msg_type=msg_type,
+        content=json.dumps(content, ensure_ascii=False), uuid_value=uuid_value)
+    if reply_to:
+        body.pop('receive_id', None)
+    if reply_in_thread is not None:
+        body['reply_in_thread'] = reply_in_thread
     result = _feishu_msg_api_with_retry(
         "POST",
-        _message_send_path(user_id),
-        _message_body(
-            receive_id=user_id,
-            msg_type=msg_type,
-            content=json.dumps(content, ensure_ascii=False),
-            uuid_value=uuid_value,
-        ),
+        f'/im/v1/messages/{reply_to}/reply' if reply_to else _message_send_path(user_id),
+        body,
         token,
     )
+    if state is not None:
+        return state.finish(component_receipt, result)
     if result.get("code") == 0:
         return True
     logger.error('飞书媒体消息发送失败 provider_code=%s', result.get('code') if type(result.get('code')) is int else None)
@@ -447,6 +516,8 @@ def _password_operator_mismatch_response() -> dict[str, Any]:
 # LLM: 私聊认证和原解锁队列是唯一受理事实；服务不可读返回 retryable，只有保留消息或稳定拒绝才完成运输受理。
 # 函数用途: 复用原密码门，区分待解锁、已放行与认证暂不可用，不让运输提前吞掉消息。
 def _session_message_lock_disposition(adapter: Any, msg: IncomingMessage) -> FeishuEventDisposition | None:
+    from ..session_lock import admission
+
     chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
     if chat_type == "group" or not getattr(adapter, "_session_lock_enabled", True):
         return None
@@ -458,7 +529,9 @@ def _session_message_lock_disposition(adapter: Any, msg: IncomingMessage) -> Fei
         user_id = str(getattr(msg, "user_id", "") or "")
         if not user_id:
             return FeishuEventDisposition('ignored', 'FEISHU_EVENT_INVALID')
-        status = unlock.status(user_id, is_group=False)
+        status = admission.check_session_admission(unlock, user_id)
+        if not status.allowed and not (status.locked or status.requires_password_setup):
+            return FeishuEventDisposition('retryable', status.reason_code)
         mode = "set" if status.requires_password_setup else "unlock"
         from ..conversation.control_commands import parse_conversation_control
 
@@ -582,12 +655,66 @@ def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
 def _start_feishu_long_connection(adapter: Any) -> None:
     from .feishu_ws import FeishuWsClient, run_ws_client_thread
 
-    adapter._ws_client = FeishuWsClient(
-        app_id=adapter.app_id, app_secret=adapter.app_secret,
-        on_payload=adapter._handle_feishu_event, ws_proxy=adapter.ws_proxy,
-    )
-    adapter._ws_client.on_card_action = adapter._handle_card_action if adapter.my_agent_home else None
-    adapter._ws_thread = run_ws_client_thread(adapter._ws_client, lambda: setattr(adapter, "_running", False))
+    key = (adapter.app_id, adapter.config_generation)
+    with _CONNECTIONS_LOCK:
+        shared = _CONNECTIONS.get(key)
+        if shared is not None and shared.stopping:
+            if not shared.closing_started.is_set() or shared.closer is None or shared.closer.is_alive() or (
+                    shared.thread is None or shared.thread.is_alive()):
+                raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+            _CONNECTIONS.pop(key)
+            shared = None
+        if shared is not None and shared.ready.is_set() and (shared.failed or (
+                shared.thread is not None and not shared.thread.is_alive())):
+            _CONNECTIONS.pop(key)
+            shared = None
+        leader = shared is None
+        if shared is None:
+            shared = _SharedConnection(adapter.my_agent_home)
+            _CONNECTIONS[key] = shared
+        if shared.home != adapter.my_agent_home:
+            raise RuntimeError('CHANNEL_ADAPTER_START_FAILED')
+        if shared.client is not None and getattr(shared.client, '_stopped', False):
+            raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+        adapter._shared_connection = shared
+        shared.adapters.add(adapter)
+    if leader:
+        # 发布与观察原连接句柄，不持全局缓存锁做网络、close 或 join。
+        def on_payload(payload):
+            with _CONNECTIONS_LOCK:
+                consumers = tuple(shared.adapters)
+            results = [item._handle_feishu_event(payload) for item in consumers if not item._stop_event.is_set()]
+            if not results or any(result.status == 'retryable' for result in results):
+                return FeishuEventDisposition('retryable', 'FEISHU_INGRESS_UNAVAILABLE')
+            return FeishuEventDisposition('accepted' if any(result.status == 'accepted' for result in results) else 'ignored')
+
+        def on_dead():
+            with _CONNECTIONS_LOCK:
+                consumers = tuple(shared.adapters)
+            for item in consumers:
+                if item._ws_client is shared.client:
+                    item._running = False
+
+        try:
+            shared.client = FeishuWsClient(app_id=adapter.app_id, app_secret=adapter.app_secret,
+                on_payload=on_payload, ws_proxy=adapter.ws_proxy)
+            shared.client.generation_ref = adapter._generation_ref
+            shared.client.on_card_action = adapter._handle_card_action if adapter.my_agent_home else None
+            adapter._ws_client = shared.client
+            shared.thread = run_ws_client_thread(shared.client, on_dead)
+        except BaseException:
+            shared.failed = True
+            raise
+        finally:
+            shared.ready.set()
+    elif not shared.ready.wait(5.0):
+        raise RuntimeError('CHANNEL_ADAPTER_START_FAILED')
+    with _CONNECTIONS_LOCK:
+        if shared.stopping:
+            raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+        if shared.failed:
+            raise RuntimeError('CHANNEL_ADAPTER_START_FAILED')
+        adapter._ws_client, adapter._ws_thread = shared.client, shared.thread
     logger.info("飞书适配器已启动(长连接 WS 模式,免公网/不绑端口)")
 
 
@@ -596,6 +723,10 @@ def _start_feishu_long_connection(adapter: Any) -> None:
 def _feishu_runtime_health(adapter: Any) -> dict[str, str]:
     checked_at = datetime.now(timezone.utc).isoformat()
     if not adapter.running:
+        retained = any(getattr(adapter, field, None) is not None for field in ('_ws_thread', '_server_thread', '_closing_thread'))
+        requested = adapter._stop_event.is_set() and (adapter._ws_client is not None or adapter._server is not None)
+        if retained or requested:
+            return {'state': 'unhealthy', 'error_code': 'CHANNEL_ADAPTER_STOP_FAILED', 'checked_at': checked_at}
         return {"state": "stopped", "error_code": "CHANNEL_ADAPTER_NOT_RUNNING", "checked_at": checked_at}
     if not adapter._is_long_connection():
         return {"state": "healthy", "error_code": "", "checked_at": checked_at}
@@ -627,6 +758,9 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
     adapter_name = "feishu"
     supports_edit_progress = True
     supports_control_cards = True
+    supports_progress_cards = True
+    supports_component_receipts = True
+    supports_reply_policy = True
 
     # LLM: 创建原通道状态、认证服务和有界待送队列；显式关闭与初始化失败分开，不把未知状态当作认证成功。
     # 函数用途: 初始化飞书接入、引用文字/附件开关与私聊密码门，不启动消息服务或发送网络请求。
@@ -642,6 +776,11 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
 
         self.app_id = config.get("feishu_app_id", "")
         self.app_secret = config.get("feishu_app_secret", "")
+        # 未显式给代次的旧构造按有效配置摘要共享；摘要不进入用户回执。
+        self.config_generation = str(config.get('config_generation') or config.get('feishu_config_generation')
+            or hashlib.sha256(json.dumps([self.app_id, self.app_secret, config.get('feishu_ws_proxy', '')]).encode()).hexdigest())
+        self._generation_ref = f'{self.config_generation}:0'
+        self._generation_counter = 0
         self.verification_token = config.get("feishu_verification_token", "")
         self.encrypt_key = config.get("feishu_encrypt_key", "")
         # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL.md(与网关同一根)。
@@ -670,6 +809,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
 
         self._tenant_access_token: str | None = None
         self._token_expires_at: float = 0
+        self._token_generation_key = (self.app_id, self.config_generation)
 
         # 个人私聊会话锁默认开启；显式 false 才关闭。首次私聊要求设置密码，
         # 未设置密码也暂存原消息；群聊不受个人锁影响。初始化失败不允许私聊越过认证门。
@@ -707,12 +847,27 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         with self._lock:
             if self._running:
                 return
+            if any(thread is not None and thread.is_alive() for thread in (
+                    self._ws_thread, self._server_thread, getattr(self, '_closing_thread', None))):
+                raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+            if getattr(self, '_closing_thread', None) is not None and not self._closing_started.is_set():
+                raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+            if self._stop_event.is_set() and (self._ws_client is not None and self._ws_thread is None or
+                    self._server is not None and self._server_thread is None):
+                raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+            self._closing_thread = None
+            self._generation_counter += 1
+            self._generation_ref = f'{self.config_generation}:{self._generation_counter}'
             self._stop_event.clear()
-            if self._is_long_connection():
-                self._start_long_connection()
-            else:
-                self._start_webhook_server()
             self._running = True
+            try:
+                if self._is_long_connection():
+                    self._start_long_connection()
+                else:
+                    self._start_webhook_server()
+            except BaseException:
+                self._running = False
+                raise
 
     def _is_long_connection(self) -> bool:
         return self.connection_mode in ("long_connection", "longconn", "ws", "websocket")
@@ -751,16 +906,59 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
             logger.error('飞书回调服务器异常退出(通道已死,需重启) error_type=%s', type(exc).__name__)
             self._running = False
 
-    def stop(self) -> None:
-        if not self._running:
-            return
+    # LLM: 锁内仅固定本代句柄和停止事实；退出观察在锁外，未退出保留旧代责任。
+    # 函数用途: 有界请求停止并返回真实退出回执，不把关闭请求冒充线程退出。
+    def stop(self, *, timeout: float = 5.0):
+        from ..delivery.registry import ChannelStopResult
+
         with self._lock:
             self._running = False
             self._stop_event.set()
-            self._shutdown_server_async()  # webhook 模式关 HTTP server(长连模式 _server=None,空操作)
-            self._join_server_thread()
-            self._stop_ws_client()  # 长连模式:尽力关闭 ws 客户端(lark 无干净 stop,daemon 线程随进程退出)
-            logger.info("飞书适配器已停止")
+            client, ws_thread = self._ws_client, self._ws_thread
+            server, server_thread = self._server, self._server_thread
+            generation = self._generation_ref
+            shared = getattr(self, '_shared_connection', None)
+            if client is not None and shared is not None and shared.client is client:
+                closer, start_closer, closing_started = _reserve_shared_connection_stop(shared)
+            else:
+                # 非共享运输仍在本代锁内固定唯一关闭责任，启动和等待均留在锁外。
+                start_closer = False
+                closer = getattr(self, '_closing_thread', None)
+                if closer is None and (client is not None or server is not None):
+                    def close_handles():
+                        try:
+                            if client is not None:
+                                client.close()
+                            if server is not None:
+                                server.shutdown()
+                                server.server_close()
+                        except Exception as exc:
+                            logger.warning('停止飞书运输失败 error_type=%s', type(exc).__name__)
+                    closer = threading.Thread(target=close_handles, daemon=True)
+                    self._closing_thread = closer
+                    self._closing_started = threading.Event()
+                    start_closer = True
+                closing_started = getattr(self, '_closing_started', None)
+        deadline = time.monotonic() + max(0.0, timeout)
+        if start_closer:
+            closer.start()
+            closing_started.set()
+        ready = closer is None or closing_started is None or closing_started.wait(max(0.0, deadline - time.monotonic()))
+        threads = (closer, ws_thread, server_thread)
+        for thread in threads:
+            if thread is closer and not ready:
+                continue
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        exited = ready and all(thread is None or not thread.is_alive() for thread in threads)
+        if client is not None and ws_thread is None or server is not None and server_thread is None:
+            exited = False  # 只有关闭请求，没有执行线程的退出观察，不能宣称已退出。
+        with self._lock:
+            if exited and generation == self._generation_ref:
+                self._ws_client = self._ws_thread = self._server = self._server_thread = None
+                self._closing_thread = None
+        return ChannelStopResult('exited' if exited else 'stop_requested' if timeout <= 0 else 'exit_unconfirmed',
+            generation, '' if exited else 'CHANNEL_ADAPTER_STOP_FAILED')
 
     def _stop_ws_client(self) -> None:
         client, self._ws_client = self._ws_client, None
@@ -864,6 +1062,9 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
             idempotency_key = str(
                 (message.metadata or {}).get("delivery_idempotency_key") or ""
             )
+            from ..delivery.registry import current_component_delivery
+
+            state = current_component_delivery()
             results = [
                 _send_feishu_rendered(
                     user_id,
@@ -874,6 +1075,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
                         component="message",
                         index=index,
                     ),
+                    **({'component_id': f'text:{index}', 'provider': self} if state is not None else {}),
                 )
                 for index, piece in enumerate(pieces)
             ]
@@ -887,6 +1089,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         message_id: str,
         text: str,
         idempotency_key: str = "",
+        *, reply_in_thread: bool | None = None,
     ) -> bool:
         """引用回复某条消息；长结果逐片引用，任一片失败则整体失败。"""
         token = self._get_tenant_access_token()
@@ -896,6 +1099,9 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         # 却把整篇长报告一次交给 Feishu API，否则长任务已经完成仍会在最后一步投递失败。
         pieces = split_message(text)
         results = []
+        from ..delivery.registry import current_component_delivery
+
+        state = current_component_delivery()
         for index, piece in enumerate(pieces):
             uuid_value = _feishu_request_uuid(
                 idempotency_key,
@@ -908,16 +1114,22 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
                     piece,
                     token,
                     uuid_value,
+                    **({'reply_in_thread': reply_in_thread} if reply_in_thread is not None else {}),
+                    **({'component_id': f'text:{index}', 'provider': self} if state is not None else {}),
                 )
                 if uuid_value
-                else _reply_feishu_rendered(message_id, piece, token)
+                else _reply_feishu_rendered(message_id, piece, token,
+                    **({'reply_in_thread': reply_in_thread} if reply_in_thread is not None else {}),
+                    **({'component_id': f'text:{index}', 'provider': self} if state is not None else {}))
             )
         return all(results)
 
     # LLM: 首次进度固定 text 类型并使用稳定 provider uuid，返回真实 message_id；不拆片、不唤醒会话、不伪造成功 ID。
     # 函数用途: 创建可反复编辑的一条进度消息，后续统一投递服务用此 ID 更新同一条。
-    def start_progress_message(self, user_id: str, text: str, *, reply_to: str = "", idempotency_key: str = "") -> str:
-        return _start_feishu_progress(self, user_id, text, reply_to=reply_to, idempotency_key=idempotency_key)
+    def start_progress_message(self, user_id: str, text: str, *, reply_to: str = '', idempotency_key: str = '',
+                               reply_in_thread: bool | None = None, render_kind: str = 'text', card: dict | None = None) -> str:
+        return _start_feishu_progress(self, user_id, text, reply_to=reply_to, idempotency_key=idempotency_key,
+            reply_in_thread=reply_in_thread, render_kind=render_kind, card=card)
 
     # LLM: 原生卡片不回落文本；目标是宿主解析的个人或原群身份，uuid 幂等；回执仅含真实身份或安全平台错误事实。
     # 函数用途: 发送原生控制卡，返回消息/聊天 ID 或明确拒绝诊断，不返回供应商正文。
@@ -926,10 +1138,16 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
 
     # LLM: 进度始终使用首次创建的 text 类型，不能根据候选出现 Markdown/表格而改变消息类型；只编辑原 ID。
     # 函数用途: 更新原文本进度窗口，普通富文本订正仍由 edit_message 保持已有语义。
-    def edit_progress_message(self, message_id: str, text: str) -> bool:
+    def edit_progress_message(self, message_id: str, text: str, *, render_kind: str = 'text', card: dict | None = None) -> bool:
         token = self._get_tenant_access_token()
         if not token:
             return False
+        if render_kind == 'card':
+            if not isinstance(card, dict):
+                return False
+            result = _feishu_msg_api('PATCH', f'/im/v1/messages/{message_id}',
+                {'content': json.dumps(card, ensure_ascii=False)}, token)
+            return result.get('code') == 0
         result = _feishu_msg_api("PUT", f"/im/v1/messages/{message_id}",
             {"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)}, token)
         return result.get("code") == 0
@@ -989,18 +1207,48 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
     # 函数用途: 按原周期获取飞书token，失败明确不可发送。
     def _get_tenant_access_token(self) -> str | None:
         now = time.time()
-        if self._tenant_access_token and now < self._token_expires_at - 60:
+        key = (self.app_id, self.config_generation)
+        if key == self._token_generation_key and self._tenant_access_token and now < self._token_expires_at - 60:
             return self._tenant_access_token
-
+        with _TOKEN_REFRESH_LOCK:
+            state = _TOKEN_REFRESHES.setdefault(key, _TokenRefresh())
+            if state.token and now < state.expires_at - 60:
+                self._tenant_access_token, self._token_expires_at = state.token, state.expires_at
+                self._token_generation_key = key
+                return state.token
+            if now < state.retry_at:
+                return None
+            leader = not state.inflight
+            if leader:
+                state.inflight = True
+                state.done.clear()
+        if not leader:
+            if not state.done.wait(11.0):
+                return None
+            if key != (self.app_id, self.config_generation):
+                return None
+            self._tenant_access_token, self._token_expires_at = state.token, state.expires_at
+            self._token_generation_key = key
+            return state.token
+        token, expires_at = None, 0.0
         try:
             result = self._request_tenant_access_token()
             if result.get("code") == 0:
-                self._tenant_access_token = result.get("tenant_access_token", "")
-                self._token_expires_at = now + result.get("expire", 7200)
-                return self._tenant_access_token
+                token = str(result.get('tenant_access_token') or '') or None
+                expires_at = time.time() + float(result.get('expire', 7200))
         except Exception as exc:
             logger.error('获取飞书 token 失败 error_type=%s', type(exc).__name__)
-        return None
+        finally:
+            with _TOKEN_REFRESH_LOCK:
+                state.token, state.expires_at = token, expires_at
+                state.retry_at = 0 if token else time.time() + 1.0
+                state.inflight = False
+                state.done.set()
+        if key != (self.app_id, self.config_generation):
+            return None
+        self._tenant_access_token, self._token_expires_at = token, expires_at
+        self._token_generation_key = key
+        return token
 
     # LLM: 应用凭据仅发原固定认证目标且拒绝HTTP跳转，原token响应只供本adapter内存缓存。
     # 函数用途: 用原超时申请宿主token，不记录或导出凭据正文。
@@ -1105,26 +1353,45 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
 
 # LLM: 首次进度固定 text 类型并沿真实 API/稳定 uuid 创建；响应 ID 是唯一后续编辑身份，无 fallback 或新会话唤醒。
 # 函数用途: 执行飞书首次草稿创建并返回真实 message_id；适配器类保留公共入口，发送实现在本模块集中维护。
-def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, reply_to: str, idempotency_key: str) -> str:
+def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, reply_to: str, idempotency_key: str,
+                           reply_in_thread: bool | None = None, render_kind: str = 'text', card: dict | None = None) -> str:
     token = adapter._get_tenant_access_token()
     if not token:
         return ""
     identities = []
+    from ..delivery.registry import current_component_delivery
+
+    state = current_component_delivery()
+    content = json.dumps(card if render_kind == 'card' else {'text': text}, ensure_ascii=False)
+    if render_kind not in {'text', 'card'} or render_kind == 'card' and not isinstance(card, dict):
+        return ''
+    uuid_value = _feishu_request_uuid(idempotency_key, component='progress', index=0)
+    receipt = None
+    if state is not None:
+        receipt = state.ensure('progress:0', uuid_value, hashlib.sha256(content.encode()).hexdigest())
+        if receipt:
+            return str(receipt.provider_message_id or '')
+        receipt = state.before_send(receipt, adapter)
+        if receipt is None:
+            return ''
 
     # LLM: 渲染回落仍复用同一逻辑 uuid；只读取供应商成功响应的 message_id，不根据请求推导。
     # 函数用途: 发送一种已渲染格式并记下真实消息身份。
     def send(msg_type: str, content: str) -> dict[str, Any]:
-        uuid_value = _feishu_request_uuid(idempotency_key, component="progress", index=0)
         body = {"msg_type": msg_type, "content": content, "uuid": uuid_value}
+        if reply_in_thread is not None:
+            body['reply_in_thread'] = reply_in_thread
         path = f"/im/v1/messages/{reply_to}/reply" if reply_to else _message_send_path(user_id)
         if not reply_to:
             body["receive_id"] = user_id
         result = _feishu_msg_api_with_retry("POST", path, body, token)
+        if state is not None:
+            state.finish(receipt, result)
         if result.get("code") == 0:
             identities.append(str((result.get("data") or {}).get("message_id") or ""))
         return result
 
-    send("text", json.dumps({"text": text}, ensure_ascii=False))
+    send('interactive' if render_kind == 'card' else 'text', content)
     return next((identity for identity in identities if identity), "")
 
 

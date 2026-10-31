@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 from ..delivery.attachment_content import VerifiedAttachmentContent
@@ -11,7 +12,8 @@ from .feishu_media import MAX_FILE_BYTES, MAX_IMAGE_BYTES, file_message_type, fi
 
 # LLM: 正式Delivery只给已核验content；发送前再核同bytes的原size/hash，不读取元数据path或接受任意JSON blob。
 # 函数用途: 将原授权目标与冻结附件组成原multipart/消息API请求，保留文件名/类型/稳定uuid。
-def _send_frozen_feishu_attachment(adapter, target, item, idempotency_key, as_image):
+def _send_frozen_feishu_attachment(adapter, target, item, idempotency_key, as_image, *,
+                                  reply_to='', reply_in_thread=None):
     from .feishu import _feishu_request_uuid, _send_feishu_media, _upload_feishu_bytes
 
     if (not isinstance(item, VerifiedAttachmentContent) or type(item.content) is not bytes
@@ -24,10 +26,26 @@ def _send_frozen_feishu_attachment(adapter, target, item, idempotency_key, as_im
         return False
     kind = 'image' if as_image else 'file'
     fields = {'image_type': 'message'} if as_image else {'file_type': file_upload_type(Path(name)), 'file_name': name}
-    key = _upload_feishu_bytes(item.content, name, kind, fields, token)
+    from ..delivery.registry import current_component_delivery
+
+    state = current_component_delivery()
+    receipt = None
+    if state is not None:
+        receipt = state.ensure(f'attachment:{idempotency_key or item.attachment.artifact_id}',
+            _feishu_request_uuid(idempotency_key, component=kind, index=0), item.attachment.sha256)
+        if receipt:
+            return receipt
+    key = receipt.upload_ref if receipt is not None else None
+    if not key:
+        # 上传确认先落原组件账；first_dispatch_at 不包括这段耗时。
+        key = _upload_feishu_bytes(item.content, name, kind, fields, token)
+        if key and state is not None:
+            receipt = state.save(replace(receipt, phase='upload_confirmed', upload_ref=key))
     return bool(key) and _send_feishu_media(target, 'image' if as_image else file_message_type(Path(name)),
         {'image_key' if as_image else 'file_key': key}, token,
-        _feishu_request_uuid(idempotency_key, component=kind, index=0))
+        _feishu_request_uuid(idempotency_key, component=kind, index=0),
+        **({'reply_to': reply_to, 'reply_in_thread': reply_in_thread} if reply_to or reply_in_thread is not None else {}),
+        **({'component_receipt': receipt, 'provider': adapter} if state is not None else {}))
 
 
 # LLM: 能力显式声明供原registry推导；每次upload的字节仍必须来自Delivery的owner/hash核验。
@@ -39,5 +57,7 @@ class FeishuAttachmentMixin:
 
     # LLM: 消费Delivery已核同一hash的不可变bytes，不能从metadata/path或模型字段再次读文件。
     # 函数用途: 上传冻结附件并发回原授权目标，保留图片/音视频/文件路由与原稳定uuid。
-    def send_attachment_content(self, user_id, content, *, idempotency_key='', as_image=False) -> bool:
-        return _send_frozen_feishu_attachment(self, user_id, content, idempotency_key, as_image)
+    def send_attachment_content(self, user_id, content, *, idempotency_key='', as_image=False,
+                                reply_to='', reply_in_thread=None):
+        return _send_frozen_feishu_attachment(self, user_id, content, idempotency_key, as_image,
+            reply_to=reply_to, reply_in_thread=reply_in_thread)

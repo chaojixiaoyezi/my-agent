@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 
 # LLM: mode 是 Gateway 明确投影的结构字段，不能从进度正文解析；旧回调 tuple 沿原 append 行为。
@@ -17,6 +17,9 @@ class GatewayProgressBatch:
     replace_content: bool = False
     preview_max_chars: int | None = None
     updated_at: str = ""
+    steps: tuple[dict, ...] = field(default=(), kw_only=True)
+    render_kind: str = field(default='text', kw_only=True)
+    source_revision: int = field(default=0, kw_only=True)
 
     # LLM: 旧 tuple 解包只投影消息和游标；新的 stream mode 由 worker 显式读取。
     # 函数用途: 保持原 poll_progress 调用方可以解包批次。
@@ -27,20 +30,29 @@ class GatewayProgressBatch:
 
 # LLM: mode/ID沿原记录；新批次先脱敏再在页脚预算内按完整行裁剪，单行保留尾部语义；冻结dispatch与final全文不改。
 # 函数用途: 去除增量旧时间戳并合并发送一条有界进度，失败沿原dispatch恢复，不另建预览。
-def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch):
+def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch, *, force: bool = False):
     draft = dict(record.progress_draft)
+    # 首发类型先冻结到原 pending；旧 message_id 没有类型字段时只能继续 text。
+    render_kind = str(draft.get('render_kind') or ('text' if draft.get('message_id') else batch.render_kind))
     if draft.get("disabled"):
         return worker._commit_progress(record, batch.next_cursor)
-    if not record.dispatch and time.time() < float(draft.get("retry_at") or 0):
+    if not record.dispatch and not draft.get('reconcile_pending') and render_kind == 'card' and batch.next_cursor <= record.progress_cursor and (
+            batch.source_revision <= int(draft.get('source_revision') or 0)):
+        return record
+    if not force and not record.dispatch and time.time() < float(draft.get("retry_at") or 0):
         return record
     if record.dispatch:
         text = str(draft.get("content") or "")
         next_cursor = int(record.dispatch["next_cursor"])
+    elif draft.get('reconcile_pending'):
+        # 原 key 对应的卡片结构、revision 和正文全部冻结；身份核实后再合入新事件。
+        text = str(draft.get('content') or '')
+        next_cursor = int(draft.get('frozen_next_cursor', record.progress_cursor))
     else:
         elapsed = time.time() - float(draft.get("sent_at") or 0)
-        if 0 <= elapsed < 1.0:
+        if not force and 0 <= elapsed < 1.0:
             return record
-        if not batch.messages:
+        if not batch.messages and not (render_kind == 'card' and batch.steps):
             return worker._commit_progress(record, batch.next_cursor) if batch.next_cursor != record.progress_cursor else record
         prefix = "" if batch.replace_content else str(draft.get("content") or "")
         if not batch.replace_content:
@@ -65,6 +77,17 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
         text = tail + footer[-limit:]
         next_cursor = batch.next_cursor
         draft.update(mode="stream", content=text)
+        if render_kind == 'card':
+            steps = {str(row['step_id']): dict(row) for row in draft.get('steps', ()) if isinstance(row, dict) and row.get('step_id')}
+            for row in batch.steps:
+                if isinstance(row, dict) and row.get('step_id'):
+                    steps[str(row['step_id'])] = dict(row)
+            draft.update(steps=list(steps.values())[-50:], truncated=draft.get('truncated', False) or len(steps) > 50,
+                source_revision=max(int(draft.get('source_revision') or 0), batch.source_revision or batch.next_cursor))
+            if not text:
+                text = '执行记录更新'
+                draft['content'] = text
+        draft['render_kind'] = render_kind
         updated = replace(record, progress_draft=draft)
         record = worker.store.commit_claim(record, updated, owner=worker._claim_owner, epoch=record.claim_epoch, release=False)
         if record is None:
@@ -76,13 +99,24 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
 # LLM: 原 pending 提供可信回复路由与已发送 ID；所有净化、目标校验和 provider 调用留在唯一 DeliveryService。
 # 函数用途: 将原进度账的消息身份与内容交给统一渠道服务，不启动另一会话。
 def send_gateway_draft(service: object, pending: object, text: str):
-    from ..delivery import DeliveryContext, ReplyEnvelope
+    from ..delivery import ReplyEnvelope
+    from ..delivery.service import ChannelDeliveryContext as DeliveryContext
 
     context = DeliveryContext(channel=pending.channel, target=pending.user_id, mode="reply",
         reply_to=pending.message_id, request_id=pending.request_id,
-        idempotency_key=str(pending.dispatch.get("message_key") or ""))
+        idempotency_key=str(pending.dispatch.get("message_key") or ""),
+        reply_policy=pending.reply_policy, provider_thread_id=pending.provider_thread_id,
+        root_id=pending.root_id, parent_id=pending.parent_id)
+    options = {}
+    draft = pending.progress_draft
+    if draft.get('render_kind') == 'card':
+        options = {'render_kind': 'card', 'snapshot': {'request_id': pending.request_id,
+            'source_revision': draft.get('source_revision', pending.progress_cursor),
+            'steps': draft.get('steps', ()), 'truncated': draft.get('truncated', False)}}
+    if pending.reply_policy:
+        options['reply_policy'] = pending.reply_policy
     return service.deliver_progress(context, ReplyEnvelope(content=text),
-        message_id=str(pending.progress_draft.get("message_id") or ""))
+        message_id=str(draft.get('display_message_id') or draft.get("message_id") or ""), **options)
 
 
 # LLM: 保留原 on/full 的独立进度身份，stream 才使用可编辑草稿；两条展示分支共享原外发状态机和 DeliveryService。
@@ -95,3 +129,29 @@ def send_gateway_progress(manager: object, pending: object, text: str):
     return manager._send_gateway_reply(_pending_gateway_message(pending), pending.request_id, text,
         idempotency_key=_gateway_delivery_key(message_id=pending.message_id, request_id=pending.request_id,
             phase="progress", progress_cursor=pending.progress_cursor))
+
+
+def project_execution_steps(events, *, request_id: str) -> tuple[dict, ...]:
+    """保留真实结构工具事件；模型说明、自然语言状态和正文不产生执行步骤。"""
+    from ..conversation.channels import project_host_paths_for_channel, project_user_reply
+
+    steps = []
+    for event in events:
+        if not isinstance(event, dict) or event.get('kind') in {'assistant_commentary', 'model_liveness', 'model_delta', 'model_draft'}:
+            continue
+        tool = event.get('tool') or event.get('tool_name')
+        phase = event.get('phase')
+        identity = event.get('call_id')
+        if not identity and type(event.get('round')) is int and type(event.get('call_index')) is int:
+            identity = f"{request_id}:{event['round']}:{event['call_index']}"
+        if not isinstance(tool, str) or not isinstance(phase, str) or not identity:
+            continue
+        row = {'step_id': str(identity)[:256], 'tool_name': tool[:96], 'phase': phase[:64],
+            'label': project_host_paths_for_channel(project_user_reply(tool).content, 'feishu')[:160]}
+        for key in ('ok', 'handler_executed'):
+            if type(event.get(key)) is bool:
+                row[key] = event[key]
+        if type(event.get('duration_ms')) is int and event['duration_ms'] >= 0:
+            row['duration_ms'] = event['duration_ms']
+        steps.append(row)
+    return tuple(steps)

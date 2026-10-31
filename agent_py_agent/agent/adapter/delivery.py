@@ -28,7 +28,7 @@ _DEFAULT_CLAIM_TTL_SECONDS = 120.0
 # 既保留"还在失败"的可观测性，又不把日志刷爆。
 _LOOP_ERROR_LOG_INTERVAL_SECONDS = 60.0
 _PENDING_WATCH_KINDS = frozenset(
-    {"input_receipt", "request_result", "control_receipt"}
+    {"input_receipt", "request_result", "control_receipt", "host_delivery"}
 )
 _CONTROL_RECEIPT_STATES = frozenset(
     {"prepared", "claimed", "executing", "completed", "terminal_unknown"}
@@ -104,11 +104,15 @@ def _delivery_adapter(callback: object, channel: str) -> object | None:
 # LLM: provider 去重可能只有有限窗口；时间倒退或超过首次 dispatch 的窗口都不能盲目重发。
 # 函数用途: 核对原标记是否仍可用渠道稳定键安全重放。
 def _provider_replay_allowed(adapter: object, marker: dict[str, object]) -> bool:
-    if getattr(adapter, "provider_idempotent_delivery", False) is not True:
-        return False
-    window = float(getattr(adapter, "provider_idempotency_window_seconds", 0.0) or 0.0)
-    elapsed = time.time() - float(marker.get("started_at") or 0.0)
-    return elapsed >= 0 and (window <= 0 or elapsed < window)
+    from ..delivery.registry import provider_replay_allowed
+
+    components = marker.get('component_receipts')
+    if isinstance(components, (list, tuple)) and components:
+        return all(isinstance(item, dict) and (
+            item.get('phase') == 'send_confirmed' or
+            (item.get('first_dispatch_at') is None and item.get('phase') in {'accepted', 'upload_confirmed'}) or
+            provider_replay_allowed(adapter, item, now=time.time())) for item in components)
+    return provider_replay_allowed(adapter, marker, now=time.time())
 
 
 # LLM: message key 复用 manager 的既有结构生成器，不带 claim_epoch；epoch 只用于本地栅栏。
@@ -129,6 +133,9 @@ def _dispatch_marker(record: PendingGatewayReply, text: str, message: tuple[str,
         ),
         "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "started_at": record.dispatch.get("started_at", time.time()),
+        'first_dispatch_at': record.dispatch.get('first_dispatch_at', time.time()) if not record.dispatch else record.dispatch.get('first_dispatch_at'),
+        'component_receipts': list(record.dispatch.get('component_receipts',
+            record.progress_draft.get('component_receipts', ()) if phase == 'progress' and record.progress_draft.get('reconcile_pending') else ())),
     }
 
 
@@ -144,6 +151,12 @@ def _terminal_claim_receipt(record: PendingGatewayReply, disposition: str, reaso
         "claim_epoch": record.claim_epoch,
         "message_sequence": str(record.dispatch.get("message_sequence") or ""),
         "message_key": str(record.dispatch.get("message_key") or ""),
+        'component_receipts': list(record.dispatch.get('component_receipts', ())),
+        'channel': record.channel, 'target': record.user_id, 'reply_to': record.message_id,
+        'conversation_id': record.conversation_id,
+        'reply_policy': record.reply_policy,
+        'payload_sha256': record.dispatch.get('payload_sha256', ''),
+        'progress_draft': dict(record.progress_draft),
     }
     if reason:
         receipt["reason"] = str(reason)
@@ -254,6 +267,10 @@ class PendingGatewayReply:
     claim_epoch: int = 0
     claim_expires_at: float = 0.0
     dispatch: dict[str, object] = field(default_factory=dict)
+    reply_policy: str = field(default='', kw_only=True)
+    provider_thread_id: str = field(default='', kw_only=True)
+    root_id: str = field(default='', kw_only=True)
+    parent_id: str = field(default='', kw_only=True)
 
     # LLM: watch_kind 是结构化监听阶段；dispatch 身份损坏必须拒绝，不能丢掉外发意图后重新发送。
     # 函数用途: 在持久化或轮询前校验监听阶段、原路由和外发身份。
@@ -331,6 +348,10 @@ class PendingGatewayReply:
             claim_epoch=max(0, int(data.get("claim_epoch") or 0)),
             claim_expires_at=max(0.0, float(data.get("claim_expires_at") or 0.0)),
             dispatch=data.get("dispatch", {}),
+            reply_policy=str(data.get('reply_policy') or ''),
+            provider_thread_id=str(data.get('provider_thread_id') or ''),
+            root_id=str(data.get('root_id') or ''),
+            parent_id=str(data.get('parent_id') or ''),
         )
 
     # LLM: Control operations are keyed by their independent operation receipt, never by the target
@@ -1190,22 +1211,43 @@ class _GatewayReplyDispatchWorkerMixin:
             epoch=record.claim_epoch, release=False,
         )
 
-    # LLM: callback 不持 store 锁且异常不回显正文；已知 ID 编辑沿原 claim 有界恢复，未知首发不重发，BaseException 保留原冻结意图。
+    # LLM: callback 不持 store 锁；已知 ID 编辑有界恢复，未知卡片仅在提供方窗口内沿原键续收，BaseException 保留原冻结意图。
     # 函数用途: 先写外发意图，再调用原渠道 callback，返回实际使用的 claim 快照。
     def _dispatch_message(self, record: PendingGatewayReply, text: str, message: tuple[str, int]) -> tuple[PendingGatewayReply | None, bool]:
         started = self._start_dispatch(record, text, message)
         if started is None:
             return None, False
+        from ..delivery.registry import ComponentDeliveryState, component_delivery_scope
+
+        def persist_components(receipts):
+            nonlocal started
+            marker = {**started.dispatch, 'component_receipts': list(receipts)}
+            first = [row['first_dispatch_at'] for row in receipts if row.get('first_dispatch_at') is not None]
+            if first:
+                marker['first_dispatch_at'] = min(first)
+            committed = self.store.commit_claim(started, replace(started, dispatch=marker),
+                owner=self._claim_owner, epoch=started.claim_epoch, release=False)
+            if committed is None:
+                raise RuntimeError('CHANNEL_SEND_FAILED')
+            started = committed
+
+        components = ComponentDeliveryState(started.dispatch.get('component_receipts', ()), persist=persist_components,
+            reply_policy=str(getattr(started, 'reply_policy', '') or ''))
         try:
-            result = self._dispatch_callback(message[0])(started, text)
+            with component_delivery_scope(components):
+                result = self._dispatch_callback(message[0])(started, text)
             from ..delivery.progress import ProgressDeliveryReceipt
 
             if isinstance(result, ProgressDeliveryReceipt):
                 identity = result.message_id or str(started.progress_draft.get("message_id") or "")
                 failures = 0 if result.ok else int(started.progress_draft.get("failures") or 0) + 1
-                recoverable = bool(identity) and result.failure_kind != "permanent" and failures < 3
+                reconcile_pending = not identity and result.reconcile_pending and failures < 3
+                recoverable = (bool(identity) or reconcile_pending) and result.failure_kind != "permanent" and failures < 3
                 updated = replace(started, progress_draft={**started.progress_draft,
                     "message_id": identity, "disabled": not result.ok and not recoverable,
+                    'display_message_id': identity, 'render_kind': started.progress_draft.get('render_kind', result.render_kind),
+                    'component_receipts': list(components.snapshot()),
+                    'reconcile_pending': reconcile_pending, 'frozen_next_cursor': message[1],
                     "failures": failures, "failure_kind": result.failure_kind,
                     "error_code": result.error_code, "sent_at": time.time(),
                     "retry_at": 0 if result.ok else time.time() + min(30, 2 ** failures)})
@@ -1363,6 +1405,8 @@ class GatewayReplyDeliveryWorker(
     # LLM: 外发意图在新 claim 后、所有轮询/渠道副作用前对账；旧进程未知时 claim 已短路。
     # 函数用途: 沿唯一 worker 入口恢复旧意图，再处理输入、控制或最终消息。
     def _process_record(self, record: PendingGatewayReply, now: float) -> int:
+        if record.watch_kind == 'host_delivery':
+            return 0  # 显式宿主投递只由原操作续收，不让 IM watcher 猜测正文或自动重发。
         if self._stop.is_set() or record.next_delivery_at > now:
             return 0
         claimed = self.store.claim(
@@ -1398,6 +1442,18 @@ class GatewayReplyDeliveryWorker(
         if quarantined:
             return None
         if response is not None and not claimed.dispatch:
+            if claimed.progress_draft.get('render_kind') == 'card' and claimed.progress_draft.get('message_id'):
+                try:
+                    progressed = self._deliver_available_progress(claimed, final_update=True)
+                except GatewayReplyQuarantineError as exc:
+                    self._terminalize_quarantine(claimed, reason=exc.reason,
+                        denial_code=exc.denial_code, category=exc.category)
+                    return None  # 权限/绑定隔离不是可忽略的展示故障。
+                except Exception:
+                    progressed = claimed  # 展示末批读取失败不改变最终业务结果。
+                if progressed is None:
+                    return None  # 失去 claim 时仍不能用旧快照发送最终回复。
+                claimed = progressed
             return claimed, response
         progressed, quarantined = self._quarantine_aware(
             self._deliver_available_progress, claimed, "progress"
@@ -1418,6 +1474,7 @@ class GatewayReplyDeliveryWorker(
     def _deliver_available_progress(
         self,
         record: PendingGatewayReply,
+        *, final_update: bool = False,
     ) -> PendingGatewayReply | None:
         if self._poll_progress is None or self._deliver_progress is None:
             return record
@@ -1427,10 +1484,10 @@ class GatewayReplyDeliveryWorker(
             batch = self._poll_progress(record)
             from .progress_draft import GatewayProgressBatch, deliver_stream_progress
 
-            if (isinstance(batch, GatewayProgressBatch) and batch.mode == "stream") or record.progress_draft.get("mode") == "stream":
+            if (isinstance(batch, GatewayProgressBatch) and (batch.mode == "stream" or batch.render_kind == 'card')) or record.progress_draft.get("mode") == "stream":
                 if not isinstance(batch, GatewayProgressBatch):
                     batch = GatewayProgressBatch(tuple(batch[0]), batch[1], "stream")
-                return deliver_stream_progress(self, record, batch)
+                return deliver_stream_progress(self, record, batch, force=final_update)
             messages, next_cursor = batch
         except GatewayReplyQuarantineError:
             raise
@@ -1554,6 +1611,7 @@ def _ensure_same_pending_route(
         current.conversation_id,
         current.channel_chat_type,
         current.channel_chat_id,
+        current.reply_policy, current.provider_thread_id, current.root_id, current.parent_id,
     )
     candidate_route = (
         candidate.stable_id,
@@ -1566,6 +1624,7 @@ def _ensure_same_pending_route(
         candidate.conversation_id,
         candidate.channel_chat_type,
         candidate.channel_chat_id,
+        candidate.reply_policy, candidate.provider_thread_id, candidate.root_id, candidate.parent_id,
     )
     if current_route != candidate_route or not target_matches or not watch_matches:
         raise ValueError(
@@ -1599,6 +1658,56 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def deliver_host_envelope(service, store, context, envelope, *, reply_policy: str = ''):
+    """显式宿主/工具投递复用原 pending/sent、claim 与分组件 CAS，不另起消费队列。"""
+    from ..delivery.service import ComponentDeliveryReceipt
+
+    payload = json.dumps({'content': envelope.content, 'format': envelope.format,
+        'attachments': [(item.artifact_id, item.sha256, item.size_bytes) for item in envelope.attachments],
+        'evidence_refs': envelope.evidence_refs}, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    stable_id = 'host-delivery:' + context.idempotency_key
+    base = ComponentDeliveryReceipt(context.channel, context.target, envelope.content,
+        thread_id=context.thread_id, task_id=context.task_id, delivery_status='unknown',
+        receipt_id=stable_id)
+    terminal = store.terminal_receipt(stable_id)
+    if terminal is not None:
+        same = (terminal.get('channel'), terminal.get('target'), terminal.get('reply_to'),
+            terminal.get('conversation_id'), terminal.get('reply_policy'), terminal.get('payload_sha256')) == (
+            context.channel, context.target, context.reply_to, context.conversation_id, reply_policy, digest)
+        return replace(base, delivery_status='sent' if same and terminal.get('disposition') == 'sent' else 'unknown',
+            component_receipts=tuple(terminal.get('component_receipts') or ()))
+    pending = PendingGatewayReply(stable_id, context.channel, context.target, context.reply_to,
+        conversation_id=context.conversation_id, watch_kind='host_delivery', created_at=time.time(),
+        reply_policy=reply_policy, progress_draft={'host_payload_sha256': digest})
+    current, _created = store.put_if_absent(pending)
+    if current is None or current.progress_draft.get('host_payload_sha256') != digest:
+        return base
+    receipts = []
+
+    def send(record, _text):
+        receipt = service.deliver(context, envelope, reply_policy=reply_policy)
+        receipts.append(receipt)
+        return receipt.delivery_status == 'sent'
+
+    send.delivery_adapter = service.registry.adapter_for(context.channel)
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda _: None, deliver_response=send)
+    claimed = store.claim(current, owner=worker._claim_owner, now=time.time(), ttl=worker._claim_ttl)
+    if claimed is None:
+        return replace(base, component_receipts=tuple(current.dispatch.get('component_receipts') or ()))
+    claimed, _count = worker._reconcile_dispatch(claimed)
+    if claimed is None:
+        return replace(base, component_receipts=tuple(current.dispatch.get('component_receipts') or ()))
+    started, sent = worker._dispatch_message(claimed, payload, ('final', 0))
+    if started is not None:
+        if sent:
+            worker._record_sent(started)
+        else:
+            worker._dispatch_failed(started)
+        base = replace(base, component_receipts=tuple(started.dispatch.get('component_receipts') or ()))
+    return receipts[-1] if receipts else base
 
 
 __all__ = [
