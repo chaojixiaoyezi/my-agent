@@ -254,6 +254,7 @@ class OwnerQuotaAdmission:
         self._authoritative_baseline = False
         self._ledger = None
         self._invalidated = False
+        self._pending = None
 
     # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
     # 函数用途: 计算本批增长并在写入前持久预留。
@@ -342,6 +343,8 @@ class OwnerQuotaAdmission:
             ledger.update(used_bytes=total, inode_count=count, dirty_since=None)
             # 所有正规写者都持同一owner锁；拿到锁时旧预留只可能是退出未确认的遗留。
             ledger['reservations'] = {}
+            # 全新快照已计入全部落盘结果，待确认的上阶段结算随前像一起以当前大小重定基准。
+            self._pending = None
             self._before = {path: _logical_file_size(path) for path in self._before}
             self._before_inodes = {path: _billed_file_inode(root, path) for path in self._before}
             ledger['reconcile_cursor'] = _quota_baseline_cursor(root, ledger, snapshot)
@@ -377,6 +380,7 @@ class OwnerQuotaAdmission:
         return projection
 
     # LLM: 即使业务抛异常也核实际大小；读回失败保留预留和dirty，不能伪造abort成功。
+    #   结算写入报错不证明未替换：保留待确认修订与后像，下次结算锁内读回判定，已发布只补写确认、不再叠加同一差额。
     # 函数用途: 以真实文件差值结算本次预留，不把预计final_size当实际写入。
     def commit_delta(self):
         if not self.enabled or (not self._before and not self._invalidated):
@@ -384,7 +388,18 @@ class OwnerQuotaAdmission:
         root = self._enforcer.owner_root
         # 整个准入持同一owner锁；账本文件身份未变即是本准入刚写的那份，免去一次大账本读取与解析。
         cached, self._ledger = self._ledger, None
-        if cached is not None and cached[1] is not None and _quota_ledger_identity(root) == cached[1]:
+        published = False
+        if self._pending is not None:
+            # 锁内只有本准入写账本，待确认期间修订只会由这次结算推进：读回仍是结算前修订即未发布，照常重算；否则已发布或无法归属，不再叠加。
+            ledger = _read_quota_ledger(root)
+            revision, after, after_inodes = self._pending
+            published = ledger['revision'] != revision - 1
+            # 修订对不上，或前像路径在待确认后又有变化，差额无法精确归属：按观察失效置脏，交后台对账重算。
+            if published and (ledger['revision'] != revision
+                              or after != {path: _logical_file_size(path) for path in self._before}
+                              or after_inodes != {path: _billed_file_inode(root, path) for path in self._before}):
+                self._invalidated = True
+        elif cached is not None and cached[1] is not None and _quota_ledger_identity(root) == cached[1]:
             ledger = cached[0]
         else:
             ledger = _read_quota_ledger(root)
@@ -394,12 +409,17 @@ class OwnerQuotaAdmission:
                 _drop_quota_metadata(ledger['reconcile_cursor'], invalidated=True)
             else:
                 ledger['reconcile_cursor'] = {'complete': False, 'metadata_complete': False, 'metadata_invalidated': True}
-        if not self._before:
+        if not self._before or published:
+            # 已发布的后像补写一次即确认；补写再报错仍保留待确认状态与前像，由外层退出重做同一判定。
             _write_quota_ledger(root, ledger)
+            self._pending = None
             self._invalidated = False
+            self._before.clear()
+            self._before_inodes.clear()
+            self._before_children.clear()
             return
+        self._pending = None
         invalidated_ledger = deepcopy(ledger) if self._invalidated else None
-        settled = False
         try:
             after = {path: _logical_file_size(path) for path in self._before}
             after_inodes = {path: _billed_file_inode(root, path) for path in self._before}
@@ -426,15 +446,17 @@ class OwnerQuotaAdmission:
                         for path in self._before}, self._before_children, root_vouched=root_vouched):
                     ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
                 cursor['ledger_revision'] = ledger['revision']
-            settled = True
+            self._pending = (ledger['revision'], after, after_inodes)
             _write_quota_ledger(root, ledger)
+            self._pending = None
             self._invalidated = False
             self._before.clear()
             self._before_inodes.clear()
             self._before_children.clear()
         finally:
-            if settled and self._before:
+            if self._pending is not None:
                 _write_quota_ledger(root, ledger)
+                self._pending = None
                 self._invalidated = False
                 self._before.clear()
                 self._before_inodes.clear()

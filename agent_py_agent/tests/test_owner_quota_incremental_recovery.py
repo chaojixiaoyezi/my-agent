@@ -1,13 +1,17 @@
 # LLM: 只在临时owner执行真实配额锁、扫描与文件变更；禁用旧整树入口来证明冷启动不阻塞。
 # 模块用途: 验证增量配额的预算、预留、异常结算和崩溃恢复。
+import errno
 import json
 import os
 import shutil
+import stat
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common import nofollow_fs
 from agent_py_agent.agent.user_space import owner_quota as quota
 
 
@@ -2422,3 +2426,310 @@ def test_r14_settlement_retry_persistence_is_idempotent_across_outer_exit(
     assert ledger['dirty_since'] is not None
     assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
     assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+
+
+# LLM: 只包装nofollow_fs对owner根目录下账本的真实rename与父目录fsync：'post'让rename真实发布后fsync报错，
+#   'pre'在rename前报错，None照常；布防后按账本发布次序消费计划，作用域由调用方覆盖到外层退出。
+# 函数用途: 安装账本发布故障计划并返回布防开关与已注入事件。
+@contextmanager
+def _r15_ledger_publication_faults(root, plan):
+    identity = root.stat()
+    state = {'armed': False, 'attempt': 0, 'fail_fsync': False, 'events': []}
+    real_rename, real_fsync = os.rename, os.fsync
+
+    def _is_root(fd):
+        info = os.fstat(fd)
+        return stat.S_ISDIR(info.st_mode) and (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino)
+
+    def _rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        kind = None
+        if state['armed'] and dst == '.owner-quota-ledger.json' and dst_dir_fd is not None and _is_root(dst_dir_fd):
+            kind = plan[state['attempt']] if state['attempt'] < len(plan) else None
+            state['attempt'] += 1
+            if kind == 'pre':
+                state['events'].append('pre')
+                raise OSError(errno.EIO, 'ledger rename failed before publication')
+        real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        state['fail_fsync'] = kind == 'post'
+
+    def _fsync(fd):
+        if state['fail_fsync'] and _is_root(fd):
+            state['fail_fsync'] = False
+            state['events'].append('post')
+            raise OSError(errno.EIO, 'parent directory fsync failed after ledger rename')
+        return real_fsync(fd)
+
+    original = nofollow_fs.os
+    # 包装仍执行真实dir_fd rename，特性探测保持原结果。
+    nofollow_fs.os = SimpleNamespace(**{**vars(os), 'rename': _rename, 'fsync': _fsync,
+                                        'supports_dir_fd': os.supports_dir_fd | {_rename}})
+    try:
+        yield state
+    finally:
+        nofollow_fs.os = original
+
+
+# 函数用途: 建立16目录×10个1字节文件的owner并由后台对账完成干净基线。
+def _r15_owner(tmp_path):
+    _r7_clear_scans()
+    root = tmp_path / 'owner'
+    for d in range(16):
+        sub = root / f'a{d:02d}'
+        sub.mkdir(parents=True)
+        for f in range(10):
+            (sub / f'{f}.bin').write_bytes(b'x')
+    _r7_finish(root)
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count'], ledger['dirty_since']) == (160, 160, None)
+    return root
+
+
+# LLM: 首个check准入并真实改动阶段文件，布防后第二个check触发上阶段结算；异常与外层退出都在注入作用域内。
+# 函数用途: 跑一次两阶段准入并返回捕获的OSError（无则None）。
+def _r15_two_stage(root, faults, stage_operation, *, on_error=None):
+    stage = root / 'a00' / ('stage.bin' if stage_operation == 'create' else '0.bin')
+    target = root / 'a01' / '0.bin'
+    try:
+        with quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024).admission() as admission:
+            admission.check([quota.OwnerQuotaChange(stage, 3 if stage_operation == 'create' else None)])
+            if stage_operation == 'create':
+                stage.write_bytes(b'abc')
+            else:
+                stage.unlink()
+            faults['armed'] = True
+            try:
+                admission.check([quota.OwnerQuotaChange(target, 1)])
+            except OSError:
+                if on_error is not None:
+                    on_error(admission)
+                raise
+            target.write_bytes(b'z')
+    except OSError as exc:
+        return exc
+    return None
+
+
+@pytest.mark.parametrize('plan', [(), ('post',), ('post', 'post'), ('post', 'post', 'post'),
+                                  ('pre', 'pre'), ('post', 'pre'), ('pre', 'post')])
+@pytest.mark.parametrize('stage_operation', ['create', 'delete'])
+def test_r15_unconfirmed_settlement_publication_is_applied_exactly_once(tmp_path, stage_operation, plan):
+    """R15-QUOTA-01: 结算账本替换前或替换后连续报错、外层退出再结算时，同一阶段差额只计一次，可信账本准确且冷进程不越额放行。"""
+    root = _r15_owner(tmp_path)
+    expected = (163, 161) if stage_operation == 'create' else (159, 159)
+    with _r15_ledger_publication_faults(root, plan) as faults:
+        error = _r15_two_stage(root, faults, stage_operation)
+    assert faults['events'] == list(plan)
+    assert (error is not None) == bool(plan)
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == expected
+    assert quota.owner_logical_usage_bytes(root, exact=True) == expected[0]
+    assert ledger['dirty_since'] is None
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    if plan == ('post', 'post'):
+        import subprocess
+        import sys
+
+        _r7_clear_scans()
+        repo_root = str(quota.Path(quota.__file__).resolve().parents[3])
+        child_code = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from agent_py_agent.agent.user_space import owner_quota as q
+root = Path(sys.argv[2]); target = root / 'a02' / 'cold.bin'
+try:
+    with q.OwnerQuotaEnforcer(root, max_bytes=int(sys.argv[3])).reserve([q.OwnerQuotaChange(target, 1)]):
+        target.write_bytes(b'c')
+    print(json.dumps({'error': None}))
+except (q.OwnerQuotaUnavailable, q.OwnerQuotaExceeded) as exc:
+    print(json.dumps({'error': type(exc).__name__}))
+"""
+        proc = subprocess.run([sys.executable, '-c', child_code, repo_root, str(root), str(expected[0])],
+                              check=True, capture_output=True, text=True)
+        assert json.loads(proc.stdout)['error'] == 'OwnerQuotaExceeded'
+    # 可信账即准确账：用量恰为上限时不得再放行增长。
+    assert _r7_grow(root, 'a02/cold.bin', max_bytes=expected[0]) == 'exceeded'
+
+
+@pytest.mark.parametrize('stage_operation', ['create', 'delete'])
+def test_r15_settlement_that_never_publishes_keeps_growth_refused_until_reconcile(tmp_path, stage_operation):
+    """R15-QUOTA-01: 结算与外层退出的写入全在替换前失败时，旧账保留本准入预留行，冷准入拒绝增长，后台对账后恢复准确。"""
+    root = _r15_owner(tmp_path)
+    with _r15_ledger_publication_faults(root, ('pre',) * 4) as faults:
+        error = _r15_two_stage(root, faults, stage_operation)
+    assert error is not None and faults['events'] == ['pre'] * 4
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (160, 160)
+    assert len(ledger['reservations']) == 1
+    assert _r7_grow(root, 'a02/cold.bin') == 'refused'
+    _r7_finish(root)
+    ledger = _r7_ledger(root)
+    expected = (163, 161) if stage_operation == 'create' else (159, 159)
+    assert (ledger['used_bytes'], ledger['inode_count']) == expected
+    assert ledger['dirty_since'] is None and not ledger['reservations']
+
+
+@pytest.mark.parametrize('stage_operation', ['create', 'delete'])
+def test_r15_unconfirmed_settlement_keeps_observed_invalidation(tmp_path, monkeypatch, stage_operation):
+    """R15-QUOTA-01: 阶段结算前已有前台观察失效、结算替换后又连续报错时，外层退出只确认一次，dirty与失效标记照常落盘并可收敛。"""
+    _r7_clear_scans()
+    root = tmp_path / 'owner'
+    for idx in range(22):
+        (root / f'a{idx:02d}').mkdir(parents=True)
+        (root / f'a{idx:02d}' / '0.bin').write_bytes(b'x')
+    _r7_finish(root)
+    stage = root / 'a00' / ('stage.bin' if stage_operation == 'create' else '0.bin')
+    target = root / 'a01' / '0.bin'
+    victim = (root / 'a16').stat()
+    orig_scandir = os.scandir
+    raced = []
+
+    class _Entry:
+        def __init__(self, entry, fd_arg):
+            self._entry = entry
+            self._fd_arg = fd_arg
+
+        def __getattr__(self, name):
+            return getattr(self._entry, name)
+
+        def stat(self, **kwargs):
+            info = os.fstat(self._fd_arg)
+            if not raced and self._entry.name == '0.bin' and (info.st_dev, info.st_ino) == (victim.st_dev, victim.st_ino):
+                raced.append('deleted')
+                (root / 'a16' / '0.bin').unlink()
+            return self._entry.stat(**kwargs)
+
+    class _Entries:
+        def __init__(self, fd_arg):
+            self._fd_arg = fd_arg
+            self._inner = orig_scandir(fd_arg)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._inner.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return _Entry(next(self._inner), self._fd_arg)
+
+        def close(self):
+            self._inner.close()
+
+    error = None
+    # 第一次布防后的账本发布是前台失效标记，照常落盘；随后的结算写入与finally重试都在替换后报错。
+    with _r15_ledger_publication_faults(root, (None, 'post', 'post')) as faults:
+        try:
+            with quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024).admission() as admission:
+                admission.check([quota.OwnerQuotaChange(stage, 3 if stage_operation == 'create' else None)])
+                if stage_operation == 'create':
+                    stage.write_bytes(b'abc')
+                else:
+                    stage.unlink()
+                faults['armed'] = True
+                monkeypatch.setattr(quota, 'os', SimpleNamespace(**{**vars(os), 'scandir': _Entries}))
+                monkeypatch.setattr(quota, 'time', SimpleNamespace(**{**vars(quota.time), 'monotonic': lambda: 0.0}))
+                try:
+                    admission.check([quota.OwnerQuotaChange(target, 1)])
+                finally:
+                    monkeypatch.undo()
+        except OSError as exc:
+            error = exc
+    assert raced and error is not None and faults['events'] == ['post', 'post']
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == ((25, 23) if stage_operation == 'create' else (21, 21))
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    # 小owner的全新快照本可完整放行；拖慢首个目录项让快照读不完，增长只能回落到旧账，必须被拒。
+    real_entries = quota._quota_entries
+    delayed = [False]
+
+    def _delayed_entries(owner, parts=()):
+        for item in real_entries(owner, parts):
+            if not delayed[0]:
+                delayed[0] = True
+                quota.time.sleep(0.02)
+            yield item
+
+    monkeypatch.setattr(quota, '_quota_entries', _delayed_entries)
+    assert _r7_grow(root, 'a02/cold.bin') == 'refused'
+    monkeypatch.setattr(quota, '_quota_entries', real_entries)
+    for _ in range(3):
+        _r7_finish(root)
+        if _r7_ledger(root)['dirty_since'] is None:
+            break
+    ledger = _r7_ledger(root)
+    assert ledger['dirty_since'] is None
+    assert ledger['used_bytes'] == quota.owner_logical_usage_bytes(root, exact=True)
+
+
+def test_r15_change_after_unconfirmed_publication_is_invalidated_not_guessed(tmp_path):
+    """R15-QUOTA-01: 已发布未确认的结算之后业务又回滚了阶段文件，差额无法归属时不重算叠加，改置脏与失效交后台对账。"""
+    root = _r15_owner(tmp_path)
+    stage = root / 'a00' / 'stage.bin'
+    with _r15_ledger_publication_faults(root, ('post', 'post')) as faults:
+        error = _r15_two_stage(root, faults, 'create', on_error=lambda admission: stage.unlink())
+    assert error is not None and faults['events'] == ['post', 'post']
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (163, 161)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    assert _r7_grow(root, 'a02/cold.bin') == 'refused'
+    for _ in range(3):
+        _r7_finish(root)
+        if _r7_ledger(root)['dirty_since'] is None:
+            break
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count'], ledger['dirty_since']) == (160, 160, None)
+
+
+def test_r15_retried_check_confirms_published_settlement_once(tmp_path):
+    """R15-QUOTA-01: 结算替换后连续报错时，同一准入内重试check先读回确认已发布的后像，不再叠加，后续阶段照常结算。"""
+    root = _r15_owner(tmp_path)
+    stage = root / 'a00' / 'stage.bin'
+    target = root / 'a01' / '0.bin'
+    with _r15_ledger_publication_faults(root, ('post', 'post')) as faults:
+        with quota.OwnerQuotaEnforcer(root, max_bytes=1024 * 1024).admission() as admission:
+            admission.check([quota.OwnerQuotaChange(stage, 3)])
+            stage.write_bytes(b'abc')
+            faults['armed'] = True
+            with pytest.raises(OSError):
+                admission.check([quota.OwnerQuotaChange(target, 1)])
+            admission.check([quota.OwnerQuotaChange(target, 2)])
+            target.write_bytes(b'zz')
+    assert faults['events'] == ['post', 'post']
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (164, 161)
+    assert ledger['dirty_since'] is None
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+
+
+def test_r15_pending_settlement_survives_readback_failure_until_outer_exit(tmp_path, monkeypatch):
+    """R15-QUOTA-01: 待确认结算读回失败时保留待确认状态与前像，外层退出再读回确认，不漏记也不重记。"""
+    root = _r15_owner(tmp_path)
+    real_read = quota._read_quota_ledger
+
+    def _confirm_fails_then_exit(admission):
+        def _unreadable(root_arg):
+            raise quota.OwnerQuotaUnavailable('quota ledger temporarily unreadable')
+        monkeypatch.setattr(quota, '_read_quota_ledger', _unreadable)
+        try:
+            with pytest.raises(quota.OwnerQuotaUnavailable):
+                admission.commit_delta()
+        finally:
+            monkeypatch.setattr(quota, '_read_quota_ledger', real_read)
+
+    with _r15_ledger_publication_faults(root, ('post', 'post')) as faults:
+        error = _r15_two_stage(root, faults, 'delete', on_error=_confirm_fails_then_exit)
+    assert error is not None and faults['events'] == ['post', 'post']
+    ledger = _r7_ledger(root)
+    assert (ledger['used_bytes'], ledger['inode_count']) == (159, 159)
+    assert ledger['dirty_since'] is None
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+    assert _r7_grow(root, 'a02/cold.bin', max_bytes=159) == 'exceeded'
