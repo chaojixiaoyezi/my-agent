@@ -12,7 +12,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .sqlite_connection import TrackedSQLiteConnection
+from .sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from .sqlite_lease import SQLiteConnectionLease
 
 # 一个 WAL 库约三个句柄；每作用域八条仅限制闲置缓存，不是进程上限，也不限制在用的嵌套短连接。
@@ -129,7 +129,8 @@ def _acquire_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], co
 # LLM: 归还也先核 PID/Thread；非创建者只结束本地借用，不能操作继承连接或把创建者缓存改为空闲。
 #   原线程正常归还不提交，先前中断不能被退役 close 的后续中断覆盖。
 # 函数用途: 回滚遗留事务后标为空闲，失败连接永不复用。
-def _release_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], entry: _ConnectionEntry) -> None:
+def _release_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], entry: _ConnectionEntry,
+                   *, error: BaseException | None = None) -> None:
     if not _scope_owned(scope):
         return
     try:
@@ -138,12 +139,25 @@ def _release_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], en
         if not isinstance(entry.conn, TrackedSQLiteConnection):
             _discard_entry(scope, key)
             return
+        # 业务捕获的语句错误也不能洗掉物理连接的失效事实。普通业务 ValueError
+        # 若回滚成功仍可复用，保留既有事务契约；SQLite 异常/中断则保守退役。
+        if (getattr(entry.conn, "_lease_error", None) is not None or isinstance(error, sqlite3.Error)
+                or (error is not None and not isinstance(error, Exception))):
+            _discard_entry(scope, key)
+            return
         entry.conn.close_lease_cursors()
         if _file_identity(key[2]) != entry.file_identity:
             _discard_entry(scope, key)
             return
         entry.in_use = False
-    except Exception:  # noqa: BLE001 退役坏连接，不覆盖原业务结果
+    except Exception as cleanup_error:  # noqa: BLE001 退役坏连接，不覆盖原业务结果
+        if sqlite_error_details(cleanup_error).get("category") == "structural":
+            if error is not None:
+                object.__setattr__(error, "sqlite_cleanup_error", cleanup_error)
+            # 即使随后 close 再中断，也保住最早的结构错误；正文有首因时外层
+            # 仍抛原对象，其结构化 cleanup_error 可供同一错误诊断口读取。
+            _cleanup_preserving_error(lambda: _discard_entry(scope, key), cleanup_error)
+            raise
         _discard_entry(scope, key)
     except BaseException as exc:
         _cleanup_preserving_error(lambda: _discard_entry(scope, key), exc)
@@ -264,7 +278,7 @@ def _scope_connection(scope: _ConnectionScope, key: tuple[int, int, Path, bool],
         body_error = exc
         raise
     finally:
-        _cleanup_preserving_error(lambda: _release_entry(scope, key, entry), body_error)
+        _cleanup_preserving_error(lambda: _release_entry(scope, key, entry, error=body_error), body_error)
 
 
 # LLM: 调用方工厂负责访问模式和 PRAGMA；完整身份键仅在原进程/线程的显式作用域内使用。

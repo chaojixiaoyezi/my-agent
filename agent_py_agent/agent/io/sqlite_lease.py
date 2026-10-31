@@ -61,7 +61,16 @@ class _SQLiteLeaseAccess:
     # 函数用途: 为已声明的SQLite方法执行租期检查和真实调用。
     def _call(self, name: str, arguments: tuple = ()):
         self._lease._check_active()
-        value = getattr(self._target, name)(*arguments)
+        try:
+            value = getattr(self._target, name)(*arguments)
+        except StopIteration:
+            raise
+        except BaseException as exc:
+            # fetch/自定义 cursor 工厂也可能在延迟读取时失败；不能仅跟踪 execute。
+            recorder = getattr(self._lease._target, "record_lease_error", None)
+            if recorder is not None:
+                recorder(exc)
+            raise
         if not isinstance(value, sqlite3.Cursor):
             return value
         if value is self._target:
@@ -208,5 +217,4 @@ class SQLiteCursorLease(_SQLiteStatementLease):
     # LLM: 延迟生成器恢复后也必须核租期，不能用已归还游标继续读取或持有 WAL 语句。
     # 函数用途: 在本次借用仍有效时读取下一行。
     def __next__(self):
-        self._lease._check_active()
-        return next(self._target)
+        return self._call('__next__')

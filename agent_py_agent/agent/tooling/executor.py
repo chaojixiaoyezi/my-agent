@@ -10,7 +10,8 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 from ..common.cancellation import CancellationToken
+from ..io.sqlite_connection import sqlite_error_details
 from ..local_storage import ToolOperationRecord
 from ..plugin_events.decision_ledger import PLUGIN_GATE_DECISION_EVIDENCE_KEY
 from ..plugin_events.points import EventPointContext
@@ -667,7 +669,16 @@ def _require_operation_authority(
     if check is None:
         return None
     try:
-        check()
+        # 只在 handler 之前重读同一不可变身份，最多三次、合计 15ms 退避。
+        # LOCKED 须先结束同连接冲突，结构损坏须停机；两者都不在这里盲重试。
+        for attempt in range(3):
+            try:
+                check()
+                break
+            except Exception as exc:
+                if sqlite_error_details(exc).get("category") != "busy" or attempt == 2:
+                    raise
+                time.sleep((0.005, 0.010)[attempt])
         return None
     except AuthorityContextMissing as exc:
         return apply_tool_execution_facts(
@@ -691,6 +702,7 @@ def _require_operation_authority(
                 error_code="TOOL_OPERATION_STORE_UNAVAILABLE",
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
+                result_envelope={"storage_error": sqlite_error_details(exc)},
             ),
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
@@ -875,7 +887,15 @@ def _operation_reconciler(
     runtime: ToolRuntime,
     call: ToolCall,
 ) -> Callable[[ToolOperationRecord], ToolOperationReconciliation]:
+    # 原公共 DTO 由 W12 独占：旧合同经 prior_result 增量携带事实；公共字段
+    # 已落地时同时填入同名字段，不造影子 DTO，也不以 handler_started_at 补时间。
     def reconcile(record: ToolOperationRecord) -> ToolOperationReconciliation:
+        dispatch_facts = {
+            "first_dispatch_at": record.first_dispatch_at,
+            "component_receipts": deepcopy(record.component_receipts),
+            "attempt_id": record.attempt_id,
+        }
+        optional = {item.name for item in fields(ToolOperationReconciliationContext)}
         return runtime.handler.reconcile_operation(
             call.arguments,
             ToolOperationReconciliationContext(
@@ -889,7 +909,8 @@ def _operation_reconciler(
                 idempotency_scope=(
                     record.idempotency_scope or runtime.runtime_policy.idempotency_policy.scope
                 ),
-                prior_result=dict(record.result or {}),
+                prior_result={**deepcopy(record.result or {}), **dispatch_facts},
+                **{key: value for key, value in dispatch_facts.items() if key in optional},
             ),
         )
 

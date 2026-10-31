@@ -33,11 +33,12 @@ import sqlite3
 import stat
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ..common.strict_json import load_strict_json
+from ..io.sqlite_connection import sqlite_error_details
 from ..local_storage.tool_operations import (
     TOOL_OPERATION_CANCELLED,
     TOOL_OPERATION_FAILED,
@@ -54,6 +55,9 @@ from ..local_storage.tool_operations import (
     ToolOperationRecord,
     ToolOperationReopenRequest,
     ToolOperationStateError,
+    checked_component_receipts,
+    checked_first_dispatch_at,
+    merge_tool_operation_dispatch,
     tool_operation_host_id,
 )
 from .operations import (
@@ -112,6 +116,45 @@ class ManagedOperationStore:
 
     def __init__(self, repo: object | None) -> None:
         self._repo = repo
+
+    # LLM: 原行/holder/generation/attempt/epoch 共同 CAS；首次发送先提交到原 outcome_json，重开不得重置。
+    # 函数用途: 在运行库保存逐组件发送事实，不另建账本，也不把上传时刻算作发送时刻。
+    def record_tool_operation_dispatch(
+        self, record: ToolOperationRecord, *, component_id: str,
+        first_dispatch_at: float | None = None, receipt: dict[str, Any] | None = None,
+    ) -> ToolOperationRecord:
+        if self._repo is None:
+            raise AuthorityContextMissing("MANAGED run 无权威库（repo 缺失）")
+        with self._repo._runtime_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT op.*, ar.run_id AS _run_id, ar.workspace_epoch AS _current_epoch, "
+                "t.owner_id AS _owner_id FROM tool_operations op "
+                "JOIN agent_runs ar ON ar.agent_run_id=op.agent_run_id "
+                "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
+                "JOIN tasks t ON t.task_id=tr.task_id WHERE op.operation_id=?", (record.operation_id,),
+            ).fetchone()
+            if row is None:
+                raise ToolOperationOwnershipError("dispatch checkpoint lost holder ownership")
+            payload = _checked_operation_payload(row["outcome_json"])
+            current = _record_from_row(row, owner_id=row["_owner_id"], run_id=row["_run_id"])
+            if (current.owner_id != record.owner_id or current.run_id != record.run_id
+                    or current.attempt_id != record.attempt_id or current.holder_id != record.holder_id
+                    or current.generation != record.generation
+                    or current.status not in {TOOL_OPERATION_RUNNING, TOOL_OPERATION_UNKNOWN}
+                    or int(payload.get("workspace_epoch") or 0) != int(row["_current_epoch"])
+                    or (current.reconciliation_only and first_dispatch_at is not None)):
+                raise ToolOperationOwnershipError("dispatch checkpoint lost holder ownership")
+            from .operation_reconciliation_authority import assert_reconciliation_completion
+            assert_reconciliation_completion(conn, row, payload)
+            updated = merge_tool_operation_dispatch(current, component_id=component_id,
+                first_dispatch_at=first_dispatch_at, receipt=receipt)
+            payload.update(first_dispatch_at=updated.first_dispatch_at, component_receipts=updated.component_receipts)
+            conn.execute("UPDATE tool_operations SET outcome_json=?, updated_at=? WHERE operation_id=? "
+                "AND tool_operation_generation=?", (json.dumps(payload, ensure_ascii=False), time.time(),
+                record.operation_id, record.generation))
+            conn.commit()
+            return updated
 
     # ------------------------------------------------------------- authority 门
     # LLM: 默认分支是原 preclaim 运行权检查；显式 claim/scopes 只读核对同一持有者和锁，不为调用方补新代次。
@@ -234,6 +277,20 @@ class ManagedOperationStore:
                 return decision
             from .operation_reconciliation_authority import equivalent_managed_unknown
             unresolved = equivalent_managed_unknown(conn, run['agent_run_id'], request)
+            if unresolved is None and request.idempotency_scope == "operation":
+                # 保存失败会留下 EXECUTING 而非 UNKNOWN；同输入新 call 也必须
+                # 复用原占位判定，不能在旧操作尚未确定时再次进入 handler。
+                unresolved = conn.execute(
+                    "SELECT * FROM tool_operations WHERE agent_run_id=? AND operation_type=? "
+                    "AND status IN ('CLAIMED', 'EXECUTING') "
+                    "AND json_extract(outcome_json, '$.idempotency_scope')='operation' "
+                    "AND json_extract(outcome_json, '$.idempotency_namespace')=? "
+                    "AND json_extract(outcome_json, '$.args_hash')=? ORDER BY created_at, operation_id LIMIT 1",
+                    (run["agent_run_id"], request.tool, request.idempotency_namespace, request.args_hash),
+                ).fetchone()
+                if unresolved is not None:
+                    request = replace(request, operation_id=str(unresolved["operation_id"]),
+                        idempotency_key=str(_outcome_payload(unresolved).get("idempotency_key") or ""))
             if unresolved is not None:
                 decision = _existing_operation_decision(conn, unresolved, request, now)
                 conn.commit()
@@ -303,6 +360,9 @@ class ManagedOperationStore:
             # 故障（下一个 except）才可 UNKNOWN。
             raise
         except Exception as exc:
+            # 已知结构损坏后只允许原连接清理，不再打开同库补 UNKNOWN，更不能清空重建。
+            if sqlite_error_details(exc).get("category") == "structural":
+                raise
             _mark_settle_failure(
                 self._repo,
                 request.operation_id,
@@ -1474,6 +1534,10 @@ def _settle_operation_via_repo(
                 f"settle 拒绝: operation {operation_id} workspace_epoch 已翻新"
                 f"(claim epoch={claim_epoch}, 当前={row['_current_epoch']})"
             )
+        # 终态结果不能用较早的回读覆盖已提交的组件 checkpoint。
+        for key in ("first_dispatch_at", "component_receipts"):
+            if key in payload:
+                details[key] = payload[key]
         updated = conn.execute(
             """
             UPDATE tool_operations
@@ -1826,6 +1890,9 @@ def _record_from_row(
         updated_at=float(row["updated_at"] or 0),
         completed_at=float(row["settled_at"] or 0),
         reconciliation_only=payload.get("reconciliation_only") is True,
+        attempt_id=str(row["attempt_id"] or ""),
+        first_dispatch_at=checked_first_dispatch_at(payload.get("first_dispatch_at")),
+        component_receipts=checked_component_receipts(payload.get("component_receipts", [])),
     )
 
 

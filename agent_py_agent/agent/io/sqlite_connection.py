@@ -7,13 +7,40 @@ import sqlite3
 from weakref import WeakSet
 
 
+# LLM: 仅消费 SQLite 异常的原生数值主码，缺码不解析文案；供只读重试与结构故障诊断共用。
+# 函数用途: 保留数据库错误码和类别，不推断业务是否执行或重建数据库。
+def sqlite_error_details(error: BaseException, *, include_cleanup: bool = True) -> dict[str, object]:
+    details: dict[str, object] = {}
+    if isinstance(error, sqlite3.Error):
+        code = getattr(error, "sqlite_errorcode", None)
+        primary = code & 0xFF if type(code) is int else None
+        category = {5: "busy", 6: "locked", 11: "structural", 26: "structural"}.get(primary, "other")
+        name = getattr(error, "sqlite_errorname", None)
+        details = {"exception_type": type(error).__name__, "sqlite_errorcode": code if type(code) is int else None,
+                   "sqlite_primary_code": primary, "sqlite_errorname": name if isinstance(name, str) else None,
+                   "category": category}
+    cleanup = getattr(error, "sqlite_cleanup_error", None) if include_cleanup else None
+    if isinstance(cleanup, sqlite3.Error) and cleanup is not error:
+        secondary = sqlite_error_details(cleanup, include_cleanup=False)
+        details.setdefault("exception_type", type(error).__name__)
+        details["cleanup_error"] = secondary
+        # 业务首因仍原样保留；清理已证明库损坏时，不能再按先前 BUSY 重试。
+        if secondary.get("category") == "structural":
+            details["category"] = "structural"
+    return details
+
+
 # LLM: 直接 cursor.execute 的 DDL 没有 total_changes 增量；语句执行时记录结构化结果类型，游标被 GC 也不丢写入标记。
 # 类用途: 为连接记录需要收口 WAL 的语句，不解析 SQL 文本。
 class _TrackedSQLiteCursor(sqlite3.Cursor):
     # LLM: SQLite 的 description 为 None 表示无结果列；事务与参数仍完全交标准库。
     # 函数用途: 执行 SQL 并记录可能写库的语句。
     def execute(self, sql, parameters=()):
-        result = super().execute(sql, parameters)
+        try:
+            result = super().execute(sql, parameters)
+        except BaseException as exc:
+            self.connection.record_lease_error(exc)
+            raise
         self.connection._checkpoint_needed |= self.description is None
         return result
 
@@ -21,13 +48,21 @@ class _TrackedSQLiteCursor(sqlite3.Cursor):
     # 函数用途: 执行批量 SQL 并通知连接收口 WAL。
     def executemany(self, sql, parameters):
         self.connection._checkpoint_needed = True
-        return super().executemany(sql, parameters)
+        try:
+            return super().executemany(sql, parameters)
+        except BaseException as exc:
+            self.connection.record_lease_error(exc)
+            raise
 
     # LLM: 脚本可能含隐式提交和 DDL，不能只依赖 total_changes。
     # 函数用途: 执行脚本并保守记录写入。
     def executescript(self, sql):
         self.connection._checkpoint_needed = True
-        return super().executescript(sql)
+        try:
+            return super().executescript(sql)
+        except BaseException as exc:
+            self.connection.record_lease_error(exc)
+            raise
 
 
 # LLM: 保持 sqlite3.Connection 类型与提交语义；弱引用避免长回合累积游标，清理失败由作用域退役整条连接。
@@ -41,6 +76,14 @@ class TrackedSQLiteConnection(sqlite3.Connection):
         self._lease_cursors: WeakSet[sqlite3.Cursor] = WeakSet()
         self._checkpoint_needed = False
         self._checkpoint_changes = 0
+        self._lease_error: BaseException | None = None
+
+    # LLM: 首个语句异常即使被业务捕获也保留到归还，作用域只回滚并退役，不重试语句或隐式提交。
+    # 函数用途: 标记本次物理连接不能再次借出。
+    def record_lease_error(self, error: BaseException) -> None:
+        self._ensure_cursor_tracking()
+        if self._lease_error is None:
+            self._lease_error = error
 
     # LLM: 即使调用方提供游标工厂也纳入跟踪；游标仍由 SQLite 执行，不改变 SQL 或参数。
     # 函数用途: 创建并登记一条可能占用读锁的语句。
