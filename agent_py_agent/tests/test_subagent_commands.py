@@ -125,13 +125,13 @@ class TestCmdSubagentsDueCheck:
         mock_report = MagicMock()
         mock_report.summary = {"total": 0}
         mock_report.issues = []
-        mock_agent.subagents.write_due_check.return_value = mock_report
+        mock_agent.subagents.board.write_due_check.return_value = mock_report
 
         with patch("agent_py_agent.cli._inspection.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli._inspection.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_due_check(args)
             assert result == 0
-            params = mock_agent.subagents.write_due_check.call_args.kwargs["params"]
+            params = mock_agent.subagents.board.write_due_check.call_args.kwargs["params"]
             assert params.root_id == "root-a"
 
 
@@ -154,7 +154,7 @@ class TestCmdSubagentsBudget:
 
         mock_agent = MagicMock()
         mock_agent.subagents.workspace = tmp_path
-        mock_agent.subagents.write_run_budget_report.return_value = SubagentRunBudgetReport(
+        mock_agent.subagents.budget.write_run_budget_report.return_value = SubagentRunBudgetReport(
             generated_at=1.0,
             root_id="root-a",
             totals={"model_calls": 3, "tool_rounds": 4, "prompt_response_token_estimate": 1000},
@@ -166,7 +166,7 @@ class TestCmdSubagentsBudget:
             result = cmd_subagents_budget(args)
 
         assert result == 0
-        params = mock_agent.subagents.write_run_budget_report.call_args.kwargs["params"]
+        params = mock_agent.subagents.budget.write_run_budget_report.call_args.kwargs["params"]
         assert params.root_id == "root-a"
         assert params.max_model_calls == 12
         assert params.max_tool_rounds == 20
@@ -188,7 +188,7 @@ class TestCmdSubagentsProbe:
         mock_report = MagicMock()
         mock_report.summary = {"total": 0}
         mock_report.results = []
-        mock_agent.subagents.write_channel_probe_report.return_value = mock_report
+        mock_agent.subagents.channel_probe.write_channel_probe_report.return_value = mock_report
 
         with patch("agent_py_agent.cli._inspection.make_agent", return_value=mock_agent):
             result = cmd_subagents_probe(args)
@@ -533,6 +533,116 @@ class TestCmdSubagentRun:
         assert worker_params.instruction == "继续"
         assert worker_params.timeout_seconds == 0.05
         mock_agent.run_subagent.assert_not_called()
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["canonical", "compat"])
+@pytest.mark.parametrize("command", ["due-check", "probe", "budget"])
+@pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
+def test_diagnostic_real_parser_and_real_services(tmp_path, monkeypatch, capsys, legacy, command, populated):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.cli import _inspection
+    from agent_py_agent.cli.parser import build_parser
+
+    manager = SubAgentManager(tmp_path / "workspace")
+    if populated:
+        manager.create_run(goal="diagnostic fixture", role="worker")
+    monkeypatch.setattr(_inspection, "make_agent", lambda args: SimpleNamespace(subagents=manager))
+    argv = [f"subagents-{command}"] if legacy else ["subagents", command]
+    if command == "budget":
+        argv += ["--json"]
+    args = build_parser().parse_args(argv)
+    assert args.func(args) == 0
+    output = capsys.readouterr().out
+    basename = {"due-check": "due_check", "probe": "channel_probe", "budget": "run_budget"}[command]
+    report = json.loads((manager.workspace / f"subagent_{basename}.json").read_text())
+    assert isinstance(report, dict) and report
+    if command == "budget":
+        assert json.loads(output) == report
+    elif command == "probe":
+        assert report["summary"]["total"] == int(populated)
+        assert "SUBAGENT CHANNEL PROBE" in output
+    else:
+        assert "SUBAGENT DUE CHECK" in output
+
+
+@pytest.mark.parametrize("command", ["probe", "due-check"])
+def test_diagnostic_json_handler_with_already_parsed_namespace(tmp_path, monkeypatch, capsys, command):
+    """只验 handler 的 JSON 边界；parser --json 注册缺口另交总控，不伪装端到端。"""
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.cli import _inspection
+    from agent_py_agent.cli.parser import build_parser
+
+    manager = SubAgentManager(tmp_path / "workspace")
+    monkeypatch.setattr(_inspection, "make_agent", lambda args: SimpleNamespace(subagents=manager))
+    args = build_parser().parse_args(["subagents", command])
+    args.json = True
+    assert args.func(args) == 0
+    assert isinstance(json.loads(capsys.readouterr().out), dict)
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["canonical", "compat"])
+@pytest.mark.parametrize("command", ["due-check", "budget"])
+def test_diagnostic_real_parser_filters_out_unrelated_root(tmp_path, monkeypatch, capsys, legacy, command):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.cli import _inspection
+    from agent_py_agent.cli.parser import build_parser
+
+    manager = SubAgentManager(tmp_path / "workspace")
+    selected = manager.create_run(goal="selected root", role="worker")
+    unrelated = manager.create_run(goal="unrelated root", role="worker")
+
+    def broken(current):
+        current.status = "RUNNING"
+        current.channel_status = "BROKEN"
+
+    for task in (selected, unrelated):
+        manager.mutate(task.id, broken)
+        # 历史执行计量夹具，不启动 runner、模型或通知运输。
+        Path(task.runner_result_json).write_text(json.dumps({
+            "run_id": task.id, "status": "DONE", "dry_run": False, "tool_rounds": 3,
+        }))
+    monkeypatch.setattr(_inspection, "make_agent", lambda args: SimpleNamespace(subagents=manager))
+    argv = [f"subagents-{command}"] if legacy else ["subagents", command]
+    argv += ["--root-id", selected.id]
+    if command == "budget":
+        argv += ["--json"]
+    args = build_parser().parse_args(argv)
+    assert args.func(args) == 0
+    capsys.readouterr()
+    filename = "subagent_due_check.json" if command == "due-check" else "subagent_run_budget.json"
+    report = json.loads((manager.workspace / filename).read_text())
+    records = report["issues" if command == "due-check" else "records"]
+    assert records and {row["run_id"] for row in records} == {selected.id}
+    if command == "budget":
+        assert report["root_id"] == selected.id and report["totals"]["runs"] == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_probe_unknown_run_id_is_a_valid_empty_report(tmp_path, monkeypatch, capsys, legacy):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.cli import _inspection
+    from agent_py_agent.cli.parser import build_parser
+
+    manager = SubAgentManager(tmp_path / "workspace")
+    monkeypatch.setattr(_inspection, "make_agent", lambda args: SimpleNamespace(subagents=manager))
+    argv = ["subagents-probe"] if legacy else ["subagents", "probe"]
+    args = build_parser().parse_args([*argv, "missing-run"])
+    assert args.func(args) == 0
+    capsys.readouterr()
+    report = json.loads((manager.workspace / "subagent_channel_probe.json").read_text())
+    assert report["summary"] == {"total": 0} and report["results"] == []
 
 
 class TestCmdSubagentDetail:

@@ -21,13 +21,16 @@ def cmd_subagents_due_check(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     options = _subagents_due_check_options(args, agent=agent)
-    report = agent.subagents.write_due_check(
+    report = agent.subagents.board.write_due_check(
         params=SubAgentDueCheckOptions(
             config=capability_config,
             write_report=True,
             root_id=options.root_id,
         ),
     )
+    if getattr(args, "json", False) is True:
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+        return 0
     issues = report.issues if options.all else report.issues[: options.limit]
     print("SUBAGENT DUE CHECK")
     print(f"total_issues={report.summary.get('total', 0)}")
@@ -51,9 +54,12 @@ def cmd_subagents_probe(args) -> int:
 
     agent = make_agent(args)
     options = _subagents_probe_options(args, agent=agent)
-    report = agent.subagents.write_channel_probe_report(
+    report = agent.subagents.channel_probe.write_channel_probe_report(
         params=SubAgentChannelProbeOptions(run_ids=options.run_ids, limit=options.limit),
     )
+    if getattr(args, "json", False) is True:
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+        return 0
     print("SUBAGENT CHANNEL PROBE")
     print(f"total={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -74,7 +80,7 @@ def cmd_subagents_probe(args) -> int:
 
 def cmd_subagents_budget(args) -> int:
     agent = make_agent(args)
-    report = agent.subagents.write_run_budget_report(
+    report = agent.subagents.budget.write_run_budget_report(
         params=SubagentRunBudgetRequest(
             manager=agent.subagents,
             root_id=str(getattr(args, "root_id", "") or ""),
