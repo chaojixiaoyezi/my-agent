@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1265,
+  "count": 1270,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -114,6 +114,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "飞书远端身份查询结果的缓存有效秒数。"
+    },
+    {
+      "name": "MAX_CARD_JSON_BYTES",
+      "file": "agent_py_agent/agent/adapter/feishu_progress_card.py",
+      "value": 28000,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "比渠道 30KB 限制留余量；同时按 ASCII 转义的保守序列化体积核对，中文和控制字符不能穿透预算。"
     },
     {
       "name": "MAX_VISIBLE_DEPTH",
@@ -3940,6 +3948,22 @@
       "description": "2026-09-28 参数减量从配置降为常量（值不变）。"
     },
     {
+      "name": "MAX_EXECUTION_STEPS_COUNT",
+      "file": "agent_py_agent/agent/delivery/execution_view.py",
+      "value": 100,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "进度卡片执行投影最多保留的步骤数。"
+    },
+    {
+      "name": "MAX_LABEL_BYTES",
+      "file": "agent_py_agent/agent/delivery/execution_view.py",
+      "value": 240,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个步骤标签的最大字节数，超出即截断。"
+    },
+    {
       "name": "MODEL_SELECTION_PROMPT_MAX_CHARS",
       "file": "agent_py_agent/agent/gateway_model_observation.py",
       "value": 4000,
@@ -5746,6 +5770,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "候选证据引用最多 4096 字节：ref 过长视为异常，防止坏快照入库。"
+    },
+    {
+      "name": "PROMOTION_BATCH_MAX_COUNT",
+      "file": "agent_py_agent/agent/memory_store/candidates.py",
+      "value": 32,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单批候选审核/晋升/终态提交最多处理的条数。"
     },
     {
       "name": "_CANDIDATE_FAST_STAT_PROBE_MIN_BYTES",
@@ -9130,6 +9162,14 @@
       "unit": "秒",
       "category": "超时",
       "description": "准入 slot 等待超时秒数；超时按拒绝处理，避免请求无限排队。"
+    },
+    {
+      "name": "_MAX_WORK_CONTEXT_BYTES",
+      "file": "agent_py_agent/agent/workflows/runtime_sdk.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "脚本工作上下文 JSON 的最大字节数。"
     },
     {
       "name": "MAX_OUTPUT_BYTES",
