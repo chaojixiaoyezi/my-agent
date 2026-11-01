@@ -2,6 +2,7 @@
 # 模块用途: 提供工作流CRUD、绑定与运行；直接使用纯schema及资产完整定义构造，不接管执行协议。
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 from ..assets import AssetPostCommitReadbackError
@@ -123,12 +124,14 @@ class WorkflowsTool(BaseTool):
         self.workspace_root = workspace_root
         self.runner_options_provider = runner_options_provider
 
-    # LLM: 每次run/resume冻结当前宿主上下文，缓存engine不能把上一运行身份交给新脚本；显式注入执行器保持原样。
+    # LLM: 每次run/resume冻结当前宿主上下文到本次浅拷贝engine，整次调用只用它；缓存engine仅共享RunStore/回调/解析器，
+    #   不承载任一调用的runner，等待中的运行不会改用后启动运行的身份或路径范围；显式注入执行器保持原样。
     # 函数用途: 给本次默认执行器配置可信脚本范围和宿主来源屏蔽。
     def _execution_engine(self):
         engine = self._engine()
         if self.engine is None and self.runner_options_provider is not None:
             from ..workflows.script_runner import ScriptRunner
+            engine = copy.copy(engine)
             engine.runner = ScriptRunner(self.owner_home, workspace_root=self._skill_options()['workspace_root'],
                                          **self.runner_options_provider())
         return engine
