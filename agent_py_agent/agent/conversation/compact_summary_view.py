@@ -119,12 +119,27 @@ class AppliedCompactContext:
 # LLM: 旧 v1 只有前缀终点，必须在完整 canonical 行内解析，不能在任务筛选后猜边界；新版本只认精确 ID。
 # 函数用途: 计算本次摘要实际替代的消息，缺失旧边界视为读取不完整而不是清空历史。
 def compact_covered_message_ids(view, rows) -> frozenset[str]:
-    covered = {row.message_id for row in rows if row.message_id in view.source_message_ids}
-    positions = {row.message_id: index for index, row in enumerate(rows)}
-    for end in view.legacy_message_end_ids:
-        if end not in positions:
-            raise OSError("legacy compact source boundary is missing from canonical history")
-        covered.update(row.message_id for row in rows[:positions[end] + 1])
+    from .message_replay import message_rows_iterator
+
+    covered: set[str] = set()
+    boundaries = set(view.legacy_message_end_ids)
+    missing = boundaries.copy()
+    pending_prefix: set[str] = set()
+    # 每条消息只读一次；legacy 的每个终点只合并上个终点之后的新前缀。
+    # 重复终点仍按原“最后一次出现”的位置覆盖，不以滑窗丢掉早期来源。
+    with message_rows_iterator(rows) as iterator:
+        for row in iterator:
+            identity = row.message_id
+            if identity in view.source_message_ids:
+                covered.add(identity)
+            if boundaries:
+                pending_prefix.add(identity)
+                if identity in boundaries:
+                    missing.discard(identity)
+                    covered.update(pending_prefix)
+                    pending_prefix.clear()
+    if missing:
+        raise OSError("legacy compact source boundary is missing from canonical history")
     return frozenset(covered)
 
 
@@ -547,7 +562,7 @@ class _IndexedToolCoverage(tuple):
 # LLM: 目录只能选择原head封印的历史身份；每个地址仍检查ID、generation、scope和时间，不靠最新文件mtime猜。
 # 函数用途: 从固定深度scope/时间目录选择本次适用的最新检查点。
 def _carried_selected_row(agent, head, scope, index, timeline):
-    from .compact_checkpoint import _cold_checkpoint, _compact_root, _scope_key, _timeline_key
+    from .compact_checkpoint import _scope_key, _timeline_key
 
     meta = head['carried_view']
     candidates = []

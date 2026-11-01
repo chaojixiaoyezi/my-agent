@@ -1272,18 +1272,19 @@ def _completed_turn_native_messages(
     return strip_orphaned_tool_blocks(AnthropicMessageAdapter().to_provider_messages(history))
 
 
-# LLM: 生命周期唤醒片的后台上下文注入（LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES）只服务本片，按 IR 类型与宿主来源
+# LLM: 生命周期唤醒片的后台上下文注入只服务本片，按 IR 类型与宿主来源家族
 #   排除；宿主事件、工具往返和其它快照照常保存，普通回合原样返回。不改原 IR，纯计算。
 # 函数用途: 选出本回合要写进会话历史、供后续回合重放的原生 IR，避免数万字的注入在之后每一轮重复出现。
 def _replayable_turn_history(history: list[object], trigger: object) -> list[object]:
     from ...backends.tool_ir import RuntimeFactsTurn
-    from .turn_trigger import LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES, lifecycle_wake_trigger
+    from ...prompting_parts.runtime_injection import is_runtime_injection_source
+    from .turn_trigger import lifecycle_wake_trigger
 
     if lifecycle_wake_trigger(trigger) is None:
         return history
     return [
         item for item in history
-        if not (isinstance(item, RuntimeFactsTurn) and item.source in LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES)
+        if not (isinstance(item, RuntimeFactsTurn) and is_runtime_injection_source(item.source))
     ]
 
 

@@ -26,6 +26,10 @@ from ...conversation.session_messaging import (
     SESSION_MESSAGE_ORIGIN_KIND,
     SESSION_TASK_ORIGIN_KIND,
 )
+from ...prompting_parts.runtime_injection import (
+    RUNTIME_DIRECT_CHILDREN_SOURCE,
+    RuntimeInjectionFragment,
+)
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
@@ -54,23 +58,19 @@ def refresh_runtime_direct_children_snapshot(agent: object, params: object) -> b
     runtime_injections = getattr(params, "runtime_injections", None)
     if not isinstance(runtime_injections, list):
         return False
-    snapshot = _render_runtime_direct_children(agent, params)
+    snapshot = RuntimeInjectionFragment(_render_runtime_direct_children(agent, params) or None, RUNTIME_DIRECT_CHILDREN_SOURCE)
     indexes = [
         index
         for index, item in enumerate(runtime_injections)
-        if str(item or "").startswith(_DIRECT_CHILDREN_MARKER)
+        if isinstance(item, RuntimeInjectionFragment) and item.source == RUNTIME_DIRECT_CHILDREN_SOURCE
     ]
     previous = list(runtime_injections)
-    if snapshot:
-        if indexes:
-            runtime_injections[indexes[0]] = snapshot
-            for index in reversed(indexes[1:]):
-                runtime_injections.pop(index)
-        else:
-            runtime_injections.append(snapshot)
-    else:
-        for index in reversed(indexes):
+    if indexes:
+        runtime_injections[indexes[0]] = snapshot
+        for index in reversed(indexes[1:]):
             runtime_injections.pop(index)
+    else:
+        runtime_injections.append(snapshot)
     return runtime_injections != previous
 
 
@@ -244,7 +244,8 @@ def _has_unseen_direct_child_result(agent: object, params: object) -> bool:
     injections = getattr(params, "runtime_injections", None)
     if not isinstance(injections, list):
         return False
-    previous = next((item for item in injections if str(item).startswith(_DIRECT_CHILDREN_MARKER)), "")
+    previous = next((item.text for item in injections
+        if isinstance(item, RuntimeInjectionFragment) and item.source == RUNTIME_DIRECT_CHILDREN_SOURCE), None)
     return bool(previous and _render_runtime_direct_children(agent, params) != previous)
 
 
@@ -252,10 +253,12 @@ def _has_unseen_direct_child_result(agent: object, params: object) -> bool:
 # 函数用途: 等待登记使用上轮确实看过的孩子状态，避免把模型回答之后才到的结果误算为已读。
 def observed_direct_children(params: object) -> dict[str, dict[str, object]]:
     for item in getattr(params, "runtime_injections", ()) or ():
-        if not isinstance(item, str) or not item.startswith(_DIRECT_CHILDREN_MARKER):
+        if not isinstance(item, RuntimeInjectionFragment) or item.source != RUNTIME_DIRECT_CHILDREN_SOURCE:
             continue
+        if item.text is None:
+            return {}
         try:
-            payload = json.loads(item.split("\n", 2)[2])
+            payload = json.loads(item.text.split("\n", 2)[2])
         except (ValueError, IndexError):
             return {}
         if not isinstance(payload, dict) or payload.get("schema_version") != "runtime-direct-children.v1":

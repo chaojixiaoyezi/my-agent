@@ -15,7 +15,7 @@ from __future__ import annotations
 - 已经有工具记录时，最后放工具记录和继续指令，让模型从最新工具结果往下走
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,6 +31,12 @@ from ..task_progress_guidance import (
 from ..user_space.approval_mode import is_permission_admin
 from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
+from .runtime_injection import (
+    InjectionValue,
+    freeze_runtime_injections,
+    runtime_injection_sections,
+    runtime_injection_texts,
+)
 from .thread_persona import (
     RenderedPersonaSections,
     ThreadPersonaScope,
@@ -94,7 +100,7 @@ class PromptBuildRequest:
 
     user_prompt: str
     memories: list[MemoryRecord]
-    inject: list[str] | None = None
+    inject: list[InjectionValue] | None = None
     prompt_files: list[str] | None = None
     tools: ToolSections | None = None
     system_prompt_override: str | None = None
@@ -111,7 +117,7 @@ class PromptBuildRequest:
 class _PromptBuildFields:
     user_prompt: str
     memories: list[MemoryRecord] | None
-    inject: list[str] | None
+    inject: list[InjectionValue] | None
     prompt_files: list[str] | None
     tools: ToolSections | None
     system_prompt_override: str | None
@@ -129,7 +135,7 @@ class PromptRenderInput:
     owner_scope: str
     dynamic: str
     workspace_context: str
-    injection_fragments: tuple[str, ...]
+    injection_fragments: tuple[InjectionValue, ...]
     tool_catalog: str
     recommendations: str
     execution_facts: str
@@ -140,17 +146,18 @@ class PromptRenderInput:
     turn_trigger: object | None = None
     persona_updates: str = ""
     deployment_context: str = ""
+    prompt_runtime_snapshots_enabled: bool = True
 
     # LLM: 冻结调用方容器，片段包括空串和内嵌换行；不得按正文去重或猜测历史来源。
     # 函数用途: 避免准备完成后修改原注入列表影响当前请求，只有新候选可以显式替换片段。
     def __post_init__(self) -> None:
-        object.__setattr__(self, "injection_fragments", tuple(self.injection_fragments))
+        object.__setattr__(self, "injection_fragments", freeze_runtime_injections(self.injection_fragments))
 
     # LLM: 只从唯一片段元组派生原 join 字节；不读状态、不做缓存或有副作用的准备。
     # 函数用途: 向文本与原生 renderer 提供原有合并文本，保留分段前的模型输入格式。
     @property
     def injected(self) -> str:
-        return "\n".join(self.injection_fragments)
+        return "\n".join(runtime_injection_texts(self.injection_fragments))
 
 
 # LLM: builder 可供并发请求复用；准备阶段只采集本次材料，纯格式化共享 render_prepared_prompt，不在实例挂临时状态。
@@ -220,7 +227,7 @@ class PromptBuilder:
         memories: list[MemoryRecord] | None = None,
         *,
         request: PromptBuildRequest | None = None,
-        inject: list[str] | None = None,
+        inject: list[InjectionValue] | None = None,
         prompt_files: list[str] | None = None,
         tools: ToolSections | None = None,
         system_prompt_override: str | None = None,
@@ -274,7 +281,8 @@ class PromptBuilder:
         deployment_context = _deployment_context() if self_development else ""
         persona, updates = _thread_persona_context(self, request, task_local)
         dynamic = _dynamic_prompt_text(self, request, persona)
-        injection_fragments = tuple(request.inject or ())
+        injection_fragments = request.inject if request.inject is not None else ()
+        snapshots_enabled = bool(getattr(self.config, "prompt_runtime_snapshots_enabled", True))
         workspace_context = (
             _workspace_context_text(self)
             if request.workspace_context_override is None
@@ -305,6 +313,7 @@ class PromptBuilder:
             turn_trigger=request.turn_trigger,
             persona_updates=updates,
             deployment_context=deployment_context,
+            prompt_runtime_snapshots_enabled=snapshots_enabled,
         )
 
     # LLM: 仅当home_context_enabled启用且存在owner路径或人格仓库时只读加载人格片段，忽略user_prompt文本内容。
@@ -367,8 +376,9 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
             ),
             volatile_sections=_native_cache_volatile_sections(
                 memory_text=prepared.memory_text, tool_recommendations=prepared.recommendations,
-                workspace_context=prepared.workspace_context, injected=prepared.injected,
+                workspace_context=prepared.workspace_context, injection_fragments=prepared.injection_fragments,
                 execution_facts=prepared.execution_facts,
+                prompt_runtime_snapshots_enabled=prepared.prompt_runtime_snapshots_enabled,
             ) + _volatile_prompt_updates(prepared),
             canonical_user_turn=current_turn_text(prepared.user_prompt, prepared.turn_trigger),
         )
@@ -412,14 +422,18 @@ def _native_cache_volatile_sections(
     memory_text: str,
     tool_recommendations: str,
     workspace_context: str,
-    injected: str,
+    injection_fragments: tuple[InjectionValue, ...],
     execution_facts: str,
+    prompt_runtime_snapshots_enabled: bool,
 ) -> tuple[tuple[str, str], ...]:
+    runtime = runtime_injection_sections(injection_fragments) if prompt_runtime_snapshots_enabled else (
+        ("prompt.runtime_injection", "# Runtime Injection\n" + ("\n".join(runtime_injection_texts(injection_fragments)) or "（无）")),
+    )
     return (
         ("prompt.related_memory", f"# Related Memory\n{memory_text}"),
         ("prompt.tool_recommendations", tool_recommendations),
         ("prompt.workspace", f"# Workspace Context\n{workspace_context}"),
-        ("prompt.runtime_injection", f"# Runtime Injection\n{injected or '（无）'}"),
+        *runtime,
         ("prompt.execution", f"{execution_facts}\n"),
     )
 

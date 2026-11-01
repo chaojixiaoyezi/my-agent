@@ -32,6 +32,7 @@ from ..conversation.compact_provider_surface import ConversationCompactProviderS
 from ..conversation.compact_tool_summary import sent_retained_ir
 from ..prompting_parts.builder import PromptBuilder, PromptRenderInput, render_prepared_prompt
 from ..prompting_parts.cache_layout import prompt_cache_layout
+from ..prompting_parts.runtime_injection import replace_runtime_injection_text
 from .model.context_pressure import (
     frozen_compact_request_calibration,
     invalidate_provider_context_observation,
@@ -525,7 +526,8 @@ def replace_recovery_history(params, frozen, *, history_seed, injection: str, in
     injections, fragments = list(params.runtime_injections), list(frozen.prompt_input.injection_fragments)
     if injection_index < 0 or injection_index >= len(injections) or injection_index >= len(fragments):
         raise ConversationCompactError("恢复注入位置未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-    injections[injection_index] = fragments[injection_index] = injection
+    injections[injection_index] = replace_runtime_injection_text(injections[injection_index], injection)
+    fragments[injection_index] = replace_runtime_injection_text(fragments[injection_index], injection)
     history = tuple(item for item in frozen.tool_ir_history if not (
         history_seed is not None and isinstance(item, CompactionSummary) and item.source == "applied_compact"
     ))
