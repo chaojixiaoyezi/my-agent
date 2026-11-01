@@ -1,6 +1,7 @@
 # LLM: 所有安装/用户均为临时资料；真实回环HTTP不替换生产组合根。
 # 模块用途: 回归生产Gateway接线及A/C工具资产合同。
 import json
+import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -288,6 +289,8 @@ def test_cold_binding_cannot_construct_business_invoker(production_host):
 
 # LLM: 生产组合公开的execute.script必须接入真实ScriptStore和ScriptRunner，缺失资产返回404而非503未知结局。
 # 函数用途: 验证生产HTTP下未注册脚本明确拒绝与已注册脚本真实执行闭环。
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="原生脚本沙箱只支持 macOS/Linux")
+@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if sys.platform == "darwin" else ("linux_bwrap_network",)))
 def test_production_gateway_script_asset_read_and_execution(tmp_path):
     import hashlib
     from types import SimpleNamespace
@@ -497,6 +500,8 @@ def test_production_workflow_resume_snapshot_and_step_script_fence(tmp_path):
 
 # LLM: 验证已注册脚本执行严格限制在目标Owner已授权read_roots与write_roots内。
 # 函数用途: 回归execute.script对业务根外同Owner私有目录读写的强制拒绝。
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="原生脚本沙箱只支持 macOS/Linux")
+@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if sys.platform == "darwin" else ("linux_bwrap_network",)))
 def test_production_script_enforces_business_read_and_write_roots(tmp_path):
     import hashlib
     from types import SimpleNamespace
