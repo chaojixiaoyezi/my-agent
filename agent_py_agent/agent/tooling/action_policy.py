@@ -111,6 +111,9 @@ class ActionPolicyRequest:
     now: float = 0.0
     require_model_visibility: bool = True
     admin_full_access: bool = False
+    # 只能由原宿主执行链传入；不从ToolCall.arguments或角色/目录投影恢复。
+    business_actor: object | None = field(default=None, kw_only=True, repr=False, compare=False)
+    business_context: object | None = field(default=None, kw_only=True, repr=False, compare=False)
 
 
 # LLM: 先执行客观安全门，再考虑可选确认；返回结构化事实供唯一执行器消费，不在这里运行 handler。
@@ -133,6 +136,10 @@ class ActionPolicy:
         schema_decision = _schema_decision(call, runtime)
         if schema_decision is not None:
             return schema_decision
+
+        business_decision = _business_scope_decision(request, runtime)
+        if business_decision is not None:
+            return business_decision
 
         effect, command = _resolved_effect(call, runtime)
         required_decision = _required_action_decision(request, runtime, effect)
@@ -274,6 +281,37 @@ def _schema_decision(call: ToolCall, runtime: ToolRuntime) -> ActionDecision | N
         stage="validation",
         evidence=evidence,
     )
+
+
+# LLM: 业务门只收窄原授权；旧无上下文调用无新读取/导入。校验在effect/claim/handler前，不能替代后续原路径、审批和工具门。
+# 函数用途: 从真实native handler或宿主typed context重新核验当次业务范围，不用展示标签授予执行权。
+def _business_scope_decision(request: ActionPolicyRequest, runtime: ToolRuntime) -> ActionDecision | None:
+    native = runtime.model_spec.name == 'business_spaces'
+    if not native and request.business_context is None and request.business_actor is None:
+        return None
+    from ..conversation.business_access import BusinessError
+    from ..conversation.business_context import revalidate_business_context
+
+    try:
+        handler = runtime.handler
+        if native:
+            from .business_spaces_tool import BusinessSpacesTool
+
+            if type(handler) is not BusinessSpacesTool:
+                raise BusinessError('ACTOR_REQUIRED')
+            handler.authorize_invocation(request.call.arguments)
+        if request.business_context is not None or request.business_actor is not None:
+            actor = request.business_actor if request.business_actor is not None else handler.actor if native else None
+            revalidate_business_context(actor=actor, context=request.business_context)
+            if native:
+                sid = request.call.arguments.get('params', {}).get('space_id')
+                if sid is not None and sid != request.business_context.space_id:
+                    raise BusinessError('SPACE_SCOPE_MISMATCH')
+    except BusinessError as error:
+        return _deny(error.code, stage='authorization', evidence={'business_scope_checked': True})
+    except (OSError, ValueError, TypeError):
+        return _deny('HOST_NOT_READY', stage='authorization', evidence={'business_scope_checked': False})
+    return None
 
 
 # LLM: ActionPolicy 必须既保留 command analysis 证据，又使用全局唯一 effect resolver。
