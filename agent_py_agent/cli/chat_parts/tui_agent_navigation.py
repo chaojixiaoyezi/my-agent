@@ -89,6 +89,11 @@ class TuiAgentNavigationSnapshot:
     background_process_count: int = 0
     background_watch_active: bool = False
     can_send_input: bool = True
+    active_thread_id: str = ""
+    business_list_active: bool = False
+    business_agents_enabled: bool = False
+    background_agent_count: int | None = None
+    background_agent_running_count: int | None = None
 
 
 # LLM: This immutable projection is the only normalized input accepted by the child
@@ -136,6 +141,88 @@ class TuiAgentNavigationState:
         self._typed_final_response_request_ids: set[str] = set()
         self._view_change: Callable[[TuiRuntime], None] | None = None
         self._lock = threading.RLock()
+        self.business_agents = None
+        self._business_loading: set[str] = set()
+        self._business_messages: dict[str, set[str]] = {}
+
+    def update_business_agents(self, projection) -> None:
+        """业务名册仅为显示投影；thread_id 不进入原 run 控制链。"""
+        with self._lock:
+            self.business_agents = projection
+            if projection.read_denied:
+                for key, runtime in self._runtimes.items():
+                    if key.startswith('business:') and key != 'business:agents':
+                        runtime.publish_conversation_reset(key.removeprefix('business:'))
+                self._business_messages.clear()
+            if self._path and self._path[-1] == 'business:agents':
+                self._publish_business_locked()
+            page = self._path[-1] if self._path else ''
+            thread_id = page.removeprefix('business:') if page.startswith('business:') and page != 'business:agents' else ''
+            runtime = self._active_runtime_locked()
+        if thread_id and not projection.read_denied:
+            self._load_business_conversation(thread_id, runtime)
+        self.root_runtime.store.invalidate()
+
+    def _publish_business_locked(self) -> None:
+        runtime = self._runtime_for_locked('business:agents')
+        selected = self._selected_by_parent.get('business:agents', '')
+        block_id = 'business:team-list'
+        exists = any(block.block_id == block_id for block in runtime.store.snapshot().active_blocks)
+        runtime._publish('background_activity_updated' if exists else 'background_activity_started',
+                         'updated' if exists else 'started', block_id,
+                         {'source_kind': 'business_agents', 'display': {'lines': self.business_agents.lines(selected)}})
+
+    def _enter_business_selected(self) -> bool:
+        with self._lock:
+            if self.business_agents is None:
+                return False
+            page = self._path[-1] if self._path else ''
+            selected = self._selected_by_parent.get(page if page == 'business:agents' else '', '')
+            if page != 'business:agents' and (page or selected != 'business:agents'):
+                return False
+            thread_id = ''
+            if page == 'business:agents':
+                row = next((row for row in self.business_agents.rows if 'business:' + row['agent_id'] == selected), None)
+                if row is None:
+                    return False
+                thread_id = row.get('thread_id', row['agent_id'])
+                self._path.append('business:' + thread_id)
+            else:
+                self._path.append('business:agents')
+                self._publish_business_locked()
+            runtime, callback = self._active_runtime_locked(), self._view_change
+        if callback is not None:
+            callback(runtime)
+        if thread_id:
+            self._load_business_conversation(thread_id, runtime)
+        runtime.store.invalidate()
+        return True
+
+    def _load_business_conversation(self, thread_id: str, runtime: TuiRuntime) -> None:
+        with self._lock:
+            if thread_id in self._business_loading:
+                return
+            self._business_loading.add(thread_id)
+        projection = self.business_agents
+
+        def load():
+            try:
+                result = projection.conversation(thread_id)
+                with self._lock:
+                    seen = self._business_messages.setdefault(thread_id, set())
+                    for row in result['items']:
+                        if row['message_id'] not in seen:
+                            runtime.write_console(str(row.get('role', '未知')) + '：' + str(row.get('text', '')))
+                            seen.add(row['message_id'])
+                runtime.set_notice('会话覆盖：' + str(result['coverage']) + ' · Ctrl+G 返回', duration_seconds=4)
+            except Exception:
+                runtime.set_notice('完整会话读取失败；覆盖未知，Ctrl+G 返回', duration_seconds=4)
+            finally:
+                with self._lock:
+                    self._business_loading.discard(thread_id)
+                runtime.store.invalidate()
+
+        threading.Thread(target=load, name='tui-business-history', daemon=True).start()
 
     # LLM: 只更新有界显示行，不发信号、不改变运行；旧选择按准确 session 身份保留。
     # 函数用途: 刷新后台驻留徽标和已经打开的实时观察页。
@@ -243,13 +330,14 @@ class TuiAgentNavigationState:
             return False
         with self._lock:
             watching = bool(self._path and self._path[-1] == "bg:watch")
-            parent = "bg:watch" if watching else self._active_run_id_locked()
+            listing = bool(self._path and self._path[-1] == 'business:agents')
+            parent = 'business:agents' if listing else "bg:watch" if watching else self._active_run_id_locked()
             ids = self._selection_ids_locked(parent)
             if not ids:
                 return False
             selected = self._selected_by_parent.get(parent, "")
             if selected not in ids:
-                index = 0 if step > 0 or ids[0].startswith("bg:") else len(ids) - 1
+                index = 0 if step > 0 or ids[0].startswith(("bg:", 'business:')) else len(ids) - 1
             else:
                 index = max(0, min(len(ids) - 1, ids.index(selected) + step))
             self._selected_by_parent[parent] = ids[index]
@@ -258,12 +346,19 @@ class TuiAgentNavigationState:
             runtime = self._active_runtime_locked()
             if watching:
                 self._publish_watch_locked()
+            if listing:
+                self._publish_business_locked()
         runtime.store.invalidate()
         return True
 
     # LLM: Enter 只接受已登记的准确选择，bg:watch 始终走独立展示分支，不把输入正文或进程 ID 当 run_id。
     # 函数用途: 展开 Goal、只读后台观察或子代理；后台页不请求代理详情。
     def enter_selected(self) -> bool:
+        with self._lock:
+            if self._path and self._path[-1].startswith('business:') and self._path[-1] != 'business:agents':
+                return False
+        if self._enter_business_selected():
+            return True
         with self._lock:
             if self._path and self._path[-1] == "bg:watch":
                 self._publish_watch_locked()
@@ -310,6 +405,16 @@ class TuiAgentNavigationState:
     # typed rows already observed on the descendant page.
     # 函数用途: 用 Ctrl+G、Alt+左箭头或 `/back` 返回上一层，并先修正已知的过期子代理展示状态。
     def back(self) -> bool:
+        with self._lock:
+            business = bool(self._path and self._path[-1].startswith('business:'))
+            if business:
+                self._path.pop()
+                runtime, callback = self._active_runtime_locked(), self._view_change
+        if business:
+            if callback is not None:
+                callback(runtime)
+            runtime.store.invalidate()
+            return True
         reconcile_rows: tuple[dict[str, object], ...] | None = None
         with self._lock:
             if self._expanded_goal_id:
@@ -360,11 +465,16 @@ class TuiAgentNavigationState:
             row = dict(self._rows_by_run.get(active, {})) if active else {}
             status = str(row.get("status") or "").strip().upper()
             watching = bool(self._path and self._path[-1] == "bg:watch")
+            page = self._path[-1] if self._path else ''
+            listing = page == 'business:agents'
+            thread_id = page.removeprefix('business:') if page.startswith('business:') and not listing else ''
+            if thread_id and self.business_agents is not None:
+                row = next((row for row in self.business_agents.rows if row.get('thread_id', row['agent_id']) == thread_id), {})
             return TuiAgentNavigationSnapshot(
                 active_run_id=active,
                 active_name=str(row.get("name") or row.get("role") or active or "main"),
                 active_status=status,
-                selected_run_id=self._selected_by_parent.get("bg:watch" if watching else active, ""),
+                selected_run_id=self._selected_by_parent.get('business:agents' if listing else "bg:watch" if watching else active, ""),
                 expanded_goal_id=self._expanded_goal_id,
                 depth=len(self._path),
                 terminal=bool(active and status in _TERMINAL_AGENT_STATUSES),
@@ -372,7 +482,12 @@ class TuiAgentNavigationState:
                 active_failure_label=str(row.get("failure_label") or "").strip(),
                 background_process_count=self._background_count,
                 background_watch_active=watching,
-                can_send_input=not watching,
+                can_send_input=not watching and not listing and not (thread_id and self.business_agents and self.business_agents.read_denied),
+                active_thread_id=thread_id,
+                business_list_active=listing,
+                business_agents_enabled=self.business_agents is not None,
+                background_agent_count=self.business_agents.count if self.business_agents else None,
+                background_agent_running_count=self.business_agents.running_count if self.business_agents else None,
             )
 
     # LLM: The active runtime is a display store selected by the view stack; it
@@ -477,7 +592,7 @@ class TuiAgentNavigationState:
     # LLM: 活动代理身份仅来自视图栈；后台观察页必须返回空值，防止误请求代理控制接口。
     # 函数用途: 返回当前真实代理身份；后台观察页没有代理控制目标。
     def _active_run_id_locked(self) -> str:
-        return self._path[-1] if self._path and self._path[-1] != "bg:watch" else ""
+        return self._path[-1] if self._path and self._path[-1] != "bg:watch" and not self._path[-1].startswith('business:') else ""
 
     # LLM: 根页面按后台入口、Goal、直属子代理排序；后台页只有进程选择，这一顺序不改变生命周期。
     # 函数用途: 后台入口优先于 Goal/子代理，后台页内部只选择各进程。
@@ -485,7 +600,11 @@ class TuiAgentNavigationState:
         parent = str(parent_run_id or "").strip()
         if parent == "bg:watch":
             return [f"bg:{row['session_id']}" for row in self._background_rows]
+        if parent == 'business:agents':
+            return ['business:' + row['agent_id'] for row in self.business_agents.rows] if self.business_agents else []
         ids = list(self._goal_rows) if not parent else list(self._child_goal_rows.get(parent, {}))
+        if not parent and self.business_agents is not None:
+            ids.insert(0, 'business:agents')
         if not parent and self._background_count:
             ids.insert(0, "bg:watch")
         ids.extend(

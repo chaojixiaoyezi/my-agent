@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <!-- 由认证宿主注入 CSRF；空值不表示通过认证，禁止把密钥固化到页面。 -->
+  <meta name="csrf-token" content="">
+  <meta name="referrer" content="same-origin">
+  <title>业务空间 · 工作台</title>
+  <style>
+    :root{color-scheme:light;--ink:#242d43;--muted:#66718a;--line:#e2e6ef;--accent:#5d59b3;--soft:#f3f1fc;--bg:#f6f7fb}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 system-ui,-apple-system,"PingFang SC",sans-serif}
+    header{padding:28px max(24px,calc((100vw - 1440px)/2));background:#fff;border-bottom:1px solid var(--line)}
+    .heading{display:flex;align-items:center;gap:14px}.mark{font-size:22px;color:var(--accent);background:var(--soft);border:1px solid #e2dcf6;border-radius:12px;padding:8px 14px}
+    h1{font-size:24px;margin:0;font-weight:650;letter-spacing:.02em}header p{margin:4px 0 12px;color:var(--muted)}
+    .topbar,.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.topbar{margin-top:16px}.tag{color:#5a4f93;background:var(--soft);border:1px solid #e4dff4;border-radius:20px;padding:2px 10px;font-size:12px}
+    main{max-width:1488px;margin:24px auto;padding:0 24px 40px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;align-items:start}
+    section{background:#fff;border:1px solid var(--line);border-radius:15px;padding:22px;min-width:0}section:focus-within{border-color:#b8afd9}
+    .section-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}.number{font-size:12px;background:#f1f3f8;border:1px solid var(--line);color:var(--muted);padding:2px 7px;border-radius:6px}
+    h2{font-size:17px;margin:0;letter-spacing:.02em}h3{font-size:14px;margin:18px 0 8px}.muted,small{font-size:13px;color:var(--muted)}
+    button,input,textarea,select{font:inherit;border:1px solid #d6dbe7;border-radius:8px;background:#fff;color:var(--ink);padding:8px 11px;max-width:100%}
+    button{cursor:pointer;font-size:13px;transition:background .15s,transform .1s}button:hover{background:#f4f3fb}button:active{transform:scale(.98)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.primary:hover{background:#504b9c}
+    :focus-visible{outline:2px solid #8179c4;outline-offset:2px}textarea{width:100%;resize:vertical;min-height:108px;line-height:1.6}input{width:100%;margin:4px 0}select{min-width:130px}label{display:block;font-size:13px;color:var(--muted);margin-top:10px}.row input{flex:1;min-width:100px;width:auto}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.55;color:#48556d;background:#f8f9fc;border:1px solid #edf0f6;padding:10px;border-radius:7px;max-height:280px;overflow:auto}
+    details{padding:8px 0;border-bottom:1px solid #edf0f5}summary{cursor:pointer;font-size:13px;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;font-size:13px;margin-top:12px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 6px}th{font-weight:500;color:var(--muted)}tbody tr{cursor:pointer}tbody tr:hover{background:var(--soft)}
+    #connection{font-size:13px;margin-top:12px;color:#6a538e}#events{padding-left:20px;font-size:12px;max-height:200px;overflow:auto;overflow-wrap:anywhere}video,img,audio{width:100%;max-height:340px;border-radius:8px}footer{max-width:1440px;margin:0 auto 30px;padding:0 24px;color:var(--muted);font-size:12px}
+    @media(max-width:1120px){main{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:720px){main{grid-template-columns:1fr;padding:0 14px;gap:14px}header{padding:20px}section{padding:18px}h1{font-size:21px}}
+    @media(prefers-reduced-motion:reduce){button{transition:none}}
+  </style>
+  <script defer src="app.js"></script>
+</head>
+<body>
+<header>
+  <div class="heading"><span class="mark" aria-hidden="true">◈</span><div><h1>业务空间</h1><p>从想法到交付，把资料、团队和执行放在同一个空间。</p></div><span class="tag">参考消费界面</span></div>
+  <div class="topbar"><label for="space">当前空间</label><select id="space" aria-label="当前业务空间"><option value="">未连接</option></select><button id="connect" class="primary">连接当前认证 API</button><button id="refresh">刷新事实</button></div>
+  <p id="connection" role="status" aria-live="polite">未连接 · 数量、费用和执行状态未知；页面不包含演示记录。</p>
+</header>
+<main>
+  <section data-panel="controller" aria-labelledby="controller-title">
+    <div class="section-head"><span class="number">01</span><h2 id="controller-title">主控输入</h2></div>
+    <p class="muted">任务提交到当前空间的主控服务。受理不等于执行完成；重复操作前先核对原回执。</p>
+    <label for="instruction">这次想完成什么</label><textarea id="instruction" placeholder="描述目标、所用资料和期望交付，不需要指定机器路径。"></textarea>
+    <div class="row"><button id="submit" class="primary">提交任务</button><button id="observe">连接只读观察</button><button id="stop-observe">断开观察</button></div>
+    <pre id="controller-result" aria-live="polite">尚无任务回执</pre>
+    <h3>事件与补拉</h3><p id="observation-state" class="muted">覆盖未知 · POST NDJSON；断流从 events.list 补拉</p><ol id="events"></ol>
+    <details><summary>原始用量事实（未知不计为零）</summary><pre id="usage-data">未知</pre></details>
+  </section>
+  <section data-panel="materials" aria-labelledby="materials-title">
+    <div class="section-head"><span class="number">02</span><h2 id="materials-title">作品资料</h2></div>
+    <div id="materials-data" class="muted">未连接 · 由 assets.list 获取资料</div>
+    <h3>上传原始媒体</h3><p class="muted">通过认证文件服务上传，只登记产物版本，不自动采纳资料或执行文件。未知结果保留原幂等键。</p>
+    <label for="media-file">选择文件</label><input id="media-file" type="file"><button id="upload">上传到当前空间</button><pre id="upload-result">尚无上传回执</pre>
+  </section>
+  <section data-panel="packages" aria-labelledby="packages-title">
+    <div class="section-head"><span class="number">03</span><h2 id="packages-title">能力包 / 流程</h2></div>
+    <div id="packages-data" class="muted">未连接 · 当前空间挂载来自 spaces.packages.list</div>
+    <h3>流程</h3><p id="workflow-coverage" class="muted">覆盖未知 · 点击名称读取准确对象的详情</p>
+    <table><thead><tr><th>名称</th><th>关联空间</th></tr></thead><tbody id="workflows-data"></tbody></table>
+    <label for="workflow-number">流程编号（绑定对象，不随排序改变）</label><input id="workflow-number" type="number" min="1">
+    <label for="workflow-inputs">运行参数 JSON</label><textarea id="workflow-inputs">{}</textarea><button id="workflow-run">执行选定流程</button><pre id="workflow-detail">尚未读取详情</pre>
+  </section>
+  <section data-panel="team" aria-labelledby="team-title">
+    <div class="section-head"><span class="number">04</span><h2 id="team-title">后台团队</h2></div>
+    <div id="team-data" class="muted">未连接 · 职责 / 模型 / 当前工作 / 阻塞未知</div>
+    <label for="agent-id">准确后台 Agent 引用</label><input id="agent-id" autocomplete="off">
+    <label for="team-message">补充消息</label><textarea id="team-message" placeholder="只发往这里明确选择的 Agent"></textarea>
+    <div class="row"><button id="team-send">发送消息</button><button id="team-tree">按需读取子树</button></div><pre id="team-result">尚无团队回执</pre>
+    <p class="muted">组织管理边和运行父子边保持原协议，不把团队人数当作运行中的模型槽。</p>
+  </section>
+  <section data-panel="executions" aria-labelledby="executions-title">
+    <div class="section-head"><span class="number">05</span><h2 id="executions-title">执行记录</h2></div>
+    <div id="executions-data" class="muted">未连接 · 由 executions.list 获取记录</div>
+    <label for="log-ref">日志引用（不是文件路径）</label><input id="log-ref" autocomplete="off"><button id="read-log">按需读取日志</button><pre id="execution-detail">没有读取日志正文</pre>
+  </section>
+  <section data-panel="delivery" aria-labelledby="delivery-title">
+    <div class="section-head"><span class="number">06</span><h2 id="delivery-title">产物 / 审核 / 发布</h2></div>
+    <div id="artifacts-data" class="muted">未连接 · 由 artifacts.list 获取版本</div>
+    <label for="artifact-id">产物引用</label><input id="artifact-id"><label for="version-ref">准确版本引用</label><input id="version-ref"><button id="preview-artifact">认证预览 / 下载</button><div id="media-preview"></div>
+    <h3>待审核事项</h3><div id="approvals-data" class="muted">未知 · 审批仍须原用户票据与当前权限</div>
+    <label for="approval-id">审批引用</label><input id="approval-id"><label for="response-ticket">本次宿主响应票据</label><input id="response-ticket" type="password" autocomplete="off">
+    <label for="decision">决定</label><select id="decision"><option value="denied">拒绝</option><option value="approved">批准</option></select><button id="approval-decide">提交明确决定</button><pre id="approval-result">尚无审批回执</pre>
+    <p class="muted">发布由已配置且已批准的流程执行；在流程区选定准确对象运行。这里不伪造“已发布”，不另造发布 API。</p>
+  </section>
+</main>
+<footer>需要由 W13 认证宿主同源托管并注入 CSRF。静态页面打开不代表领域服务可用；真实领域、媒体权限与最终端到端验收由后续集成完成。</footer>
+</body>
+</html>

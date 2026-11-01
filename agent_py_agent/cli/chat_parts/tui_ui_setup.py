@@ -188,6 +188,11 @@ def _make_render_context_factory(
             ),
             background_process_count=getattr(navigation_snapshot, "background_process_count", 0),
             background_watch_active=getattr(navigation_snapshot, "background_watch_active", False),
+            business_agents_enabled=getattr(navigation_snapshot, 'business_agents_enabled', False),
+            background_agent_count=getattr(navigation_snapshot, 'background_agent_count', None),
+            background_agent_running_count=getattr(navigation_snapshot, 'background_agent_running_count', None),
+            business_list_active=getattr(navigation_snapshot, 'business_list_active', False),
+            business_thread_active=bool(getattr(navigation_snapshot, 'active_thread_id', '')),
         )
 
     return make_context
