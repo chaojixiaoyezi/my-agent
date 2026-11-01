@@ -130,8 +130,8 @@ def _mark_drained_restart(context, request: dict, result: dict) -> dict:
     return {"summary": "safe restart drained", "restart": marker}
 
 
-# LLM: 原服务cleanup之后、spawn之前裁决；只更新同request/旧代标记，所有等待已在调用方锁外完成。
-# 函数用途: 区分正常排空、明确强制与意外未排空，把未确认责任完整交给接班回执。
+# LLM: 原服务cleanup之后、spawn之前裁决；只更新同request/旧代标记，所有等待已在调用方锁外完成；关口前停住的前台回合只入continuation_refs，不豁免其它阻塞。
+# 函数用途: 区分正常排空、续跑交接、明确强制与意外未排空，把未确认责任完整交给接班回执，停在关口前的回合交接班续跑。
 def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
     from ..agent.concurrency.restart_gate import executing_tool_snapshot
 
@@ -140,12 +140,18 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
                 *list(cleanup.get("background_blockers") or []), *executing_tool_snapshot(limit=None)]:
         if row not in refs:
             refs.append(row)
+    # Turns parked at the closed tool gate are continuation work for the successor, not unresolved operations.
+    continuation = [row for row in refs if isinstance(row, dict)
+                    and row.get("reason") == "foreground_turn_unsettled" and row.get("ref") == "gateway_admission"]
+    refs = [row for row in refs if row not in continuation]
     forced = marker.get("forced_after_drain_timeout") is True and marker.get("operation", "restart") == "restart"
-    clean = cleanup.get("drain_complete") is True and not refs
+    settled = not cleanup.get("alive_threads") and not cleanup.get("background_blockers")
+    clean = not refs and (cleanup.get("drain_complete") is True or (bool(continuation) and settled))
     allowed = (clean or forced) and not cleanup.get("cleanup_error")
     status = ("forced_after_drain_timeout" if forced else "clean_drain") if allowed else "incomplete"
     result = {**cleanup, "status": status, "handover_allowed": bool(allowed),
-              "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs}
+              "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs,
+              "continuation_refs": continuation}
     identity = marker.get("old_process_identity")
     binding = ("request_id", "old_pid", "old_process_identity", "old_process_started_at")
 
