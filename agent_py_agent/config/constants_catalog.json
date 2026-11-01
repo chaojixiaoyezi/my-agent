@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1270,
+  "count": 1271,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8994,6 +8994,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "仅用量展示可短期复用碎片目录统计；权威写入准入绝不读取这个缓存。"
+    },
+    {
+      "name": "_FOREGROUND_SCAN_MAX_MS",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 2500.0,
+      "unit": "毫秒",
+      "category": "上限预算",
+      "description": "前台快照仍限128项；墙钟预算容纳繁忙主机数百毫秒的调度暂停，超时仍拒绝未知用量增长。"
     },
     {
       "name": "_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS",

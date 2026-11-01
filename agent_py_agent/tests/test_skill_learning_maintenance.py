@@ -463,7 +463,7 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
         with state_lock(self) as admission:
             yield admission
 
-    # LLM: 包装原鲜活核对而不模拟扫描结果；原128项/10ms预算和未完成拒绝仍由产品判定。
+    # LLM: 包装原鲜活核对而不模拟扫描结果；128项/2500ms预算和未完成拒绝仍由产品判定。
     # 函数用途: 观察实际配额准入的有界扫描及完成状态。
     def counted_scan(root, *, max_entries, max_ms):
         observed['scans'] += 1
@@ -495,7 +495,7 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     assert len(snapshots) == 1
     root, max_entries, max_ms, (_bytes, _inodes, complete) = snapshots[0]
     assert root == fixture.agent.home_paths.owner_home_dir
-    assert (max_entries, max_ms, complete) == (128, 10, True)
+    assert (max_entries, max_ms, complete) == (128, 2500.0, True)
     summary = usage.load_skill_usage_summary(store)
     assert summary['totals']['manual_search'] == len(matches)
     assert summary['totals']['effective_uses'] == 0
@@ -508,7 +508,7 @@ def test_c4r_search_matches_use_one_joint_quota_scan_and_state_lock(tmp_path, mo
     assert all(row['thread_id'] == fixture.link.thread_id for row in rows)
 
 
-# LLM: 真实枚举首项后推进11ms，原128项/10ms准入自行拒绝增长；辅助记账故障不改变搜索结果。
+# LLM: 真实枚举首项后推进2501ms，耗尽128项/2500ms准入预算；辅助记账故障不改变搜索结果。
 # 函数用途: 验证预算耗尽时返回完整搜索命中并告警，且不留下半批usage记录或汇总。
 def test_c4r_search_matches_quota_scan_budget_exhaustion_skips_usage_write(tmp_path, monkeypatch, caplog):
     import logging
@@ -529,13 +529,13 @@ def test_c4r_search_matches_quota_scan_budget_exhaustion_skips_usage_write(tmp_p
     pulled, closed, snapshots, saves = [], [], [], []
 
     # LLM: 每个目录项仍来自原nofollow迭代器，只在真实首项已读出后推进测试时钟；关闭行为也继续原实现。
-    # 函数用途: 精确模拟首项I/O耗尽10ms预算而不伪造扫描结果。
+    # 函数用途: 精确模拟首项I/O耗尽2500ms预算而不伪造扫描结果。
     def delayed_entries(root, parts=()):
         iterator = entries(root, parts)
         try:
             for row in iterator:
                 pulled.append(row)
-                clock[0] = 100.011
+                clock[0] = 102.501
                 yield row
         finally:
             iterator.close()
@@ -566,7 +566,7 @@ def test_c4r_search_matches_quota_scan_budget_exhaustion_skips_usage_write(tmp_p
     matches = json.loads(result.output)['matches']
     assert len(matches) >= 3
     assert {f'entry-{index}' for index in range(3)} <= {match.get('package_id') for match in matches}
-    assert snapshots == [(fixture.agent.home_paths.owner_home_dir, 128, 10, False)]
+    assert snapshots == [(fixture.agent.home_paths.owner_home_dir, 128, 2500.0, False)]
     assert len(pulled) == 1 and closed == [True]
     assert (usage.__name__, logging.WARNING, 'SKILL_USAGE_RECORD_UNAVAILABLE') in caplog.record_tuples
     assert saves == ['attempted']
@@ -601,10 +601,10 @@ def test_c4r_search_matches_quota_entry_budget_exhaustion_and_reconciled_recover
     snapshot = owner_quota._bounded_quota_snapshot
     snapshots = []
 
-    # LLM: 不替换枚举或扫描结果，仅保留原有128项/10ms参数并记录真实返回值。
+    # LLM: 不替换枚举或扫描结果，仅检查128项/2500ms参数并记录真实返回值。
     # 函数用途: 证明本次拒绝来自未完成的有界配额扫描。
     def counted_scan(root, *, max_entries, max_ms):
-        assert root == owner_home and (max_entries, max_ms) == (128, 10)
+        assert root == owner_home and (max_entries, max_ms) == (128, 2500.0)
         result = snapshot(root, max_entries=max_entries, max_ms=max_ms)
         snapshots.append(result)
         return result
