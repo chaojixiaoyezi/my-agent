@@ -794,8 +794,8 @@ def test_incident_term_rechecks_identity_after_unregistered_diagnostics(incident
     assert ("TERM", 12345) not in case.events and ("KILL", 12345) not in case.events
 
 
-# LLM: 串联真实注册公告及终态写入，cleanup未完成时诊断handler仍在；OS及日志边界替身。
-# 函数用途: 复现停止已受理但排空卡住时丢栈公告的问题。
+# LLM: 同代终态保留诊断到cleanup末；异代state及公告归后继所有，旧代不得覆盖或据此发信号；OS及日志边界替身。
+# 函数用途: 验证终态、诊断发送及最终注销始终遵守进程代际归属。
 @pytest.mark.parametrize("mode", ["normal", "interrupted", "failed"])
 @pytest.mark.parametrize("same_generation", [True, False])
 def test_incident_termination_retains_diagnostics_until_cleanup_finishes(incident_gateway, monkeypatch, mode, same_generation):
@@ -806,14 +806,21 @@ def test_incident_termination_retains_diagnostics_until_cleanup_finishes(inciden
     monkeypatch.setattr(signal, "signal", lambda *a: None)
     monkeypatch.setattr(gp.faulthandler, "enable", lambda **k: None)
     monkeypatch.setattr(gp.faulthandler, "register", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(gp.faulthandler, "unregister", lambda *a: None, raising=False)
-    monkeypatch.setattr(gp, "log_gateway_event", lambda *a: None)
+    unregister, log_event = MagicMock(), MagicMock()
+    monkeypatch.setattr(gp.faulthandler, "unregister", unregister, raising=False)
+    monkeypatch.setattr(gp, "log_gateway_event", log_event)
     context = SimpleNamespace(process_identity=case.identity, process_started_at=1, control_plane=None)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
+    successor_state = {
+        "pid": 12345,
+        "process_identity": {**case.identity, "start_time": "other"},
+        "started_at": context.process_started_at,
+        "status": "running",
+        "diagnostic_sigusr1": True,
+    }
     try:
         if not same_generation:
-            case.paths.state.write_text(json.dumps({"pid": 12345, "process_identity": {
-                **case.identity, "start_time": "other"}, "diagnostic_sigusr1": True}), encoding="utf-8")
+            case.paths.state.write_text(json.dumps(successor_state), encoding="utf-8")
         if mode == "normal":
             termination = gp._GatewayServiceTermination("stopped", "stop_requested", "test", "test", 0)
             gp._record_gateway_service_termination(case.paths, object(), 12345, termination, context=context)
@@ -821,11 +828,26 @@ def test_incident_termination_retains_diagnostics_until_cleanup_finishes(inciden
             gp._record_gateway_run_interrupted(case.paths, object(), 12345, context=context)
         else:
             gp._record_gateway_run_failed(case.paths, object(), 12345, RuntimeError("test"), context=context)
-        assert bool(json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1")) is same_generation
+        state = json.loads(case.paths.state.read_text(encoding="utf-8"))
+        # 标记属于state记录的那一代；后继的true不能被旧代清除，也不能授权旧代发栈信号。
+        assert state["diagnostic_sigusr1"] is True
+        if same_generation:
+            assert state["pid"] == 12345 and state["process_identity"] == case.identity
+            assert state["started_at"] == context.process_started_at
+            assert state["status"] == ("stopped" if mode == "normal" else mode)
+            log_event.assert_called_once()
+        else:
+            assert state == successor_state
+            log_event.assert_not_called()
         sv._capture_unresponsive_gateway_diagnostics(case.supervisor, 12345, case.identity)
         assert ((signal.SIGUSR1, 12345) in case.events) is same_generation
     finally:
         gp._restore_gateway_signal_handlers(previous)
+    unregister.assert_called_once_with(signal.SIGUSR1)
+    restored = json.loads(case.paths.state.read_text(encoding="utf-8"))
+    assert restored == ({**state, "diagnostic_sigusr1": False} if same_generation else successor_state)
+    sv._capture_unresponsive_gateway_diagnostics(case.supervisor, 12345, case.identity)
+    assert case.events.count((signal.SIGUSR1, 12345)) == int(same_generation)
 
 
 # LLM: 仅持续健康运行满600秒才重置重启预算，未满窗口保留已耗次数防震荡。
