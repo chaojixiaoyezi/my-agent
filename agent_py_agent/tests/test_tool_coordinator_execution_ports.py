@@ -309,13 +309,15 @@ def test_canonical_transport_subclass_cannot_enter_busy_retry(tmp_path, monkeypa
     assert _record(store).status == "running" and _record(store).generation == 1
 
 
+# LLM: 领取后请求会绑定原操作 attempt；续租和 handler 必须共用这个归一化请求与 claim，typed 异常仍保原对象。
+# 函数用途: 验证真实续租线程保留同一执行来源，不把调用前输入对象的地址当成合同。
 def test_actual_renewal_thread_returns_typed_error_and_preserves_same_context(
     tmp_path, monkeypatch, managed_case, actual_error, c_actual,
 ):
     gate, claim, agent = c_actual
     store, attempt_id = managed_case
     original = store.renew_tool_operation_lease
-    seen, entered = [], threading.Event()
+    seen, handler_contexts, entered = [], [], threading.Event()
     selected = None
 
     def renew(**values):
@@ -328,6 +330,9 @@ def test_actual_renewal_thread_returns_typed_error_and_preserves_same_context(
         raise actual_error
 
     def invoke():
+        cell = transport._CLAIM.get()
+        assert cell is not None
+        handler_contexts.append(cell.value[:2])
         assert entered.wait(3)
         return ToolHandlerOutcome("counting_write", True, "handler-complete")
 
@@ -341,8 +346,14 @@ def test_actual_renewal_thread_returns_typed_error_and_preserves_same_context(
         with pytest.raises(type(actual_error)) as raised:
             coordinator.execute_tool_operation(request)
         assert raised.value is actual_error and vars(actual_error) == before
-    assert len(seen) == 1 and not seen[0][0].is_alive()
-    assert seen[0][1][0] is request and seen[0][1][1].action == "execute"
+    assert len(seen) == len(handler_contexts) == 1 and not seen[0][0].is_alive()
+    renewal_request, renewal_claim = seen[0][1]
+    handler_request, handler_claim = handler_contexts[0]
+    assert renewal_request == replace(request, operation_attempt_id=attempt_id)
+    assert renewal_request.operation_attempt_id == renewal_claim.record.attempt_id == attempt_id
+    assert renewal_request is handler_request
+    assert renewal_claim is handler_claim and renewal_claim.action == "execute"
+    assert request.operation_attempt_id == ""
     assert seen[0][2] is selected
     assert _record(store).status == "running" and _record(store).generation == 1
 
