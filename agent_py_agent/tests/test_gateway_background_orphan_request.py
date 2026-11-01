@@ -203,19 +203,62 @@ def test_mp_old_source_ttl_with_live_or_unknown_identity_never_grants_dead_or_ch
         assert backend.calls == 0
 
 
+# LLM: 测试必须把供应商物理阻塞放在原runner线程，不能把墙钟guard取消或夹具自动放行误当原线程退出。
+# 函数用途: 核对原TIMEOUT先落地，但原运输在实际模型线程释放并退出前不得封口。
 def test_timed_child_keeps_original_transport_active_until_actual_model_thread_exits(tmp_path, monkeypatch):
     import threading
 
-    timed, completed = threading.Event(), threading.Event()
+    from agent_py_agent.agent.agent_core.runner import worker
+    from agent_py_agent.agent.backends.base import ModelResponse
+
+    timed, completed, model_exited = threading.Event(), threading.Event(), threading.Event()
+    runner_threads, model_threads = [], []
+    original_worker = worker._run_bound_subagent_worker
+
+    # LLM: 仅关闭本测试worker的模型墙钟guard，让物理阻塞留在原runner；原attempt、runner超时和运输收口不变。
+    # 函数用途: 固定本测试的模型执行方式，并保存原runner线程引用。
+    def observe_worker(actual_worker, params):
+        # 正值会另开guard线程，取消50ms后runner可先退出，不能用于验证原runner的物理join。
+        actual_worker.config.request_timeout = 0
+        run_subagent = actual_worker.run_subagent
+
+        # LLM: 仍调用同一真实worker方法，不替换runner结果、取消或join。
+        # 函数用途: 在真实执行线程进入时记下线程对象。
+        def observe_runner(*args, **kwargs):
+            runner_threads.append(threading.current_thread())
+            return run_subagent(*args, **kwargs)
+
+        monkeypatch.setattr(actual_worker, "run_subagent", observe_runner)
+        return original_worker(actual_worker, params)
+
+    monkeypatch.setattr(worker, "_run_bound_subagent_worker", observe_worker)
     with curator_case(tmp_path, monkeypatch, source_kind="orphan") as (agent, _, backend, gate, claim, _):
         agent.config.runner_timeout_by_role = {"*": "1.0"}
+
+        # LLM: 只替换测试供应商I/O；必须由本测试finally显式放行，不受共享后端五秒自解锁影响。
+        # 函数用途: 保留真实模型线程阻塞，记录其物理退出时点。
+        def block_model(prompt, **kwargs):
+            backend.calls += 1
+            model_threads.append(threading.current_thread())
+            backend.started.set()
+            try:
+                backend.release.wait()
+                return ModelResponse(text="材料检查已完成。", backend="echo")
+            finally:
+                model_exited.set()
+
+        monkeypatch.setattr(backend, "generate", block_model)
         result_type = type(agent.subagents.runner_result)
         original = result_type.record_runner_result
+
+        # LLM: 只有真实结果门成功写入原TIMEOUT后才通知，不伪造超时或跳过原attempt fence。
+        # 函数用途: 等待本次执行轮实际记录超时结果。
         def observe(service, params):
             result = original(service, params)
             if params.status == "TIMEOUT":
                 timed.set()
             return result
+
         monkeypatch.setattr(result_type, "record_runner_result", observe)
         p3 = reservation_file(gate.paths, claim.request_id)
         before = p3.read_bytes()
@@ -225,6 +268,9 @@ def test_timed_child_keeps_original_transport_active_until_actual_model_thread_e
             try:
                 assert backend.started.wait(5), future.result(1) if future.done() else "child_not_yet_at_provider"
                 assert timed.wait(5), "original_timeout_attempt_fence_must_really_run"
+                assert len(runner_threads) == len(model_threads) == 1
+                assert model_threads == runner_threads, "blocking_provider_must_run_on_original_runner_thread"
+                assert not model_exited.is_set() and model_threads[0].is_alive()
                 assert not completed.wait(0.2), "actual_model_thread_is_still_inflight_not_a_drained_transport"
                 with gateway_turn_transition(gate.paths, claim.request_id):
                     assert read_json_file(claim.path)["status"] == "processing"
@@ -232,6 +278,7 @@ def test_timed_child_keeps_original_transport_active_until_actual_model_thread_e
             finally:
                 backend.release.set()
             response = future.result(5)
+        assert model_exited.is_set() and not model_threads[0].is_alive()
         assert response["ok"] and backend.calls == 1
         assert response["background_result"]["status"] == "TIMEOUT"
 
