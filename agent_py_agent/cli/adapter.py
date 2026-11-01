@@ -280,8 +280,8 @@ def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
         gateway_port=agent.config.gateway_port,
         delivery_state_dir=Path(gpaths.root) / "channel-delivery",
         stream_preview_max_chars=agent.config.im_stream_preview_max_chars,
-        reply_policy='thread' if agent.config.im_topic_aggregation_enabled else '',
-        progress_render_kind='card' if agent.config.im_progress_cards_enabled else 'text',
+        reply_policy='thread' if getattr(agent.config, 'im_topic_aggregation_enabled', False) else '',
+        progress_render_kind='card' if getattr(agent.config, 'im_progress_cards_enabled', False) else 'text',
     )
     from ..agent.adapter.manager import configure_gateway_client
 

@@ -143,8 +143,13 @@ def _control(root, port, options: _ControlOptions | None = None):
 
 
 def _im_manager(root, port, *, require_credential=False):
+    from agent_py_agent.tests.test_adapter_manager import DummyAdapter
+
     manager = ChannelManager(gateway_port=port)
     manager._reply_poll_client.credentials = GatewayClientCredentials(root)
+    adapter = DummyAdapter()
+    adapter.adapter_name = "feishu"
+    manager.register_adapter(adapter)
     return manager
 
 
