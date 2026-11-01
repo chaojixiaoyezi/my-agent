@@ -195,8 +195,10 @@ def plugin_data_dir(owner, plugin_id: str):
 
 
 # LLM: v8 权限、解释器及沙箱能力来自固定安装快照；任何不完整规格都在启动前拒绝，不能退回普通沙箱。
+#   就绪门与实际启动消费同一份宿主独占来源，不另算第二套隐藏集合。
 # 函数用途: 为插件连接构造 v8 沙箱规格，旧版插件返回 None 以保留原平台沙箱行为。
-def _plugin_v8_sandbox(owner, installation: PluginInstallation, command: str) -> PluginV8Sandbox | None:
+def _plugin_v8_sandbox(owner, installation: PluginInstallation, command: str,
+                       host_exclusive_roots: tuple[Path, ...] = ()) -> PluginV8Sandbox | None:
     permissions = installation.manifest.permissions
     if permissions is None:
         return None
@@ -208,7 +210,7 @@ def _plugin_v8_sandbox(owner, installation: PluginInstallation, command: str) ->
         owner.home_dir, network=bool(permissions.network), interpreter=interpreter)
     if problem:
         raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
-    problem = plugin_sandbox_problem(True, owner.home_dir, sandbox_policy=v8)
+    problem = plugin_sandbox_problem(True, owner.home_dir, sandbox_policy=v8, host_exclusive_roots=host_exclusive_roots)
     if problem:
         raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
     return v8
@@ -216,8 +218,9 @@ def _plugin_v8_sandbox(owner, installation: PluginInstallation, command: str) ->
 
 # LLM: 受限策略与 v8 共用同一就绪门：网络 true 在 Linux 需要端口隔离，平台沙箱不可用一律拒绝，不退回无沙箱。
 # 函数用途: 老格式 restricted 在构造与启动前确认统一沙箱底座可用。
-def _require_legacy_policy_ready(owner, policy) -> None:
-    problem = plugin_sandbox_problem(True, owner.home_dir, sandbox_policy=policy)
+def _require_legacy_policy_ready(owner, policy, host_exclusive_roots: tuple[Path, ...] = ()) -> None:
+    problem = plugin_sandbox_problem(True, owner.home_dir, sandbox_policy=policy,
+                                     host_exclusive_roots=host_exclusive_roots)
     if problem:
         raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
 
@@ -231,10 +234,14 @@ class PluginMCPClient(MCPStdioClient):
 #   process_sandbox=True（配置 plugin_process_sandbox）时启动命令套进平台沙箱，只可写数据目录，TMPDIR 指向其中的 .tmp；
 #   v8 无视该开关强制沙箱、按清单断网、隐藏 Gateway 家目录，只放行插件目录与安装前缀；
 #   沙箱不可用时这里抛 SandboxUnavailable，调用方应先用 plugin_sandbox_problem 结构化拒绝。
+#   host_exclusive_roots 是宿主冻结的可信来源（含配置外部 file: 凭据），只进隐藏规格，不进插件 argv、env 或公开结果。
     # 函数用途: 将已准备的插件环境（Python 或 v6 随包文件）接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
     def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None,
-                 process_sandbox: bool = False, host_credential_env_names: frozenset[str] = frozenset()):
+                 process_sandbox: bool = False, host_credential_env_names: frozenset[str] = frozenset(),
+                 host_exclusive_roots: tuple[Path, ...] = ()):
         self.runtime_repo = runtime_repo
+        # 首次启动与重连都只用构造时冻结的这份来源集合；重连沿 _source_sandbox_spec，不重新推导。
+        self._host_exclusive_roots = tuple(Path(path) for path in (host_exclusive_roots or ()))
         activation = installation.activation
         if activation is None or activation.phase not in {"preparing", "active"}:
             raise ValueError("插件没有可启动的固定激活")
@@ -260,10 +267,12 @@ class PluginMCPClient(MCPStdioClient):
         if process_sandbox or v8_permissions is not None or legacy_policy is not None:
             os.close(open_directory_beneath(owner.root, (*data_dir.relative_to(owner.root).parts, SANDBOX_TMP_DIRECTORY),
                                             create=True))
-            policy = _plugin_v8_sandbox(owner, installation, command) if v8_permissions is not None else legacy_policy
+            policy = (_plugin_v8_sandbox(owner, installation, command, self._host_exclusive_roots)
+                      if v8_permissions is not None else legacy_policy)
             if legacy_policy is not None:
-                _require_legacy_policy_ready(owner, legacy_policy)
-            spec = plugin_sandbox_spec(cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=policy)
+                _require_legacy_policy_ready(owner, legacy_policy, self._host_exclusive_roots)
+            spec = plugin_sandbox_spec(cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=policy,
+                                       host_exclusive_roots=self._host_exclusive_roots)
             self._source_sandbox_spec = spec
             command, *args = sandboxed_plugin_argv([command, *args], spec)
             sandbox_env = {"TMPDIR": str(data_dir / SANDBOX_TMP_DIRECTORY)}

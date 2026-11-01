@@ -71,10 +71,12 @@ class PluginInterpreterPaths:
 
 
 # LLM: None 仅表示旧版宽读；所有模式都从可信 owner 布局屏蔽宿主配置，不能因广范围工作视图公开来源。
+#   host_exclusive_roots 是宿主冻结的配置来源（含 HOME/数据根之外的 file: 凭据），各分支都与布局、策略来源合并隐藏。
 # 函数用途: 为插件进程生成统一 AttemptSandboxSpec，保留旧版宽读兼容分支。
 def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
-                        sandbox_policy: PluginSandboxPolicy | None = None) -> AttemptSandboxSpec:
-    hidden = _plugin_host_hidden_paths(owner_home)
+                        sandbox_policy: PluginSandboxPolicy | None = None,
+                        host_exclusive_roots: tuple[Path, ...] = ()) -> AttemptSandboxSpec:
+    hidden = tuple(dict.fromkeys((*_plugin_host_hidden_paths(owner_home), *host_exclusive_roots)))
     if sandbox_policy is None:
         return AttemptSandboxSpec(
             attempt_view=cwd, staging_root=data_dir, shared_workspace=owner_home, owner_home=owner_home,
@@ -92,7 +94,8 @@ def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
             host_exclusive_roots=sandbox_policy.host_exclusive_roots,
         )
     return plugin_restricted_sandbox_spec(
-        cwd=cwd, data_dir=data_dir, owner_home=owner_home, policy=sandbox_policy
+        cwd=cwd, data_dir=data_dir, owner_home=owner_home, policy=sandbox_policy,
+        host_exclusive_roots=host_exclusive_roots,
     )
 
 
@@ -100,7 +103,8 @@ def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
 #   目录根只开放该目录；文件型 execute_root 不带父目录；cwd 根覆盖判定与 Attempt.run 共用同一函数。
 # 函数用途: 将有限 R/W/E 根、网络开关和隐藏根投影为跨平台 AttemptSandboxSpec。
 def plugin_restricted_sandbox_spec(
-    *, cwd: Path, data_dir: Path, owner_home: Path, policy: PluginRestrictedSandbox
+    *, cwd: Path, data_dir: Path, owner_home: Path, policy: PluginRestrictedSandbox,
+    host_exclusive_roots: tuple[Path, ...] = (),
 ) -> AttemptSandboxSpec:
     if type(policy.network) is not bool:
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_NETWORK_INVALID")
@@ -129,7 +133,8 @@ def plugin_restricted_sandbox_spec(
         cwd, (*system_roots, *public_roots, *write_roots)
     ):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
-    hidden_paths = tuple(dict.fromkeys((*_plugin_host_hidden_paths(owner_home), *policy.host_exclusive_roots)))
+    hidden_paths = tuple(dict.fromkeys((*_plugin_host_hidden_paths(owner_home), *policy.host_exclusive_roots,
+                                        *host_exclusive_roots)))
     return AttemptSandboxSpec(
         attempt_view=cwd, staging_root=data_dir, shared_workspace=cwd, owner_home=cwd,
         extra_write_roots=write_roots, implicit_attempt_write_roots=False, read_only_root=True,
@@ -295,15 +300,23 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+# LLM: Linux 隐藏只能覆盖目录；不在任一隐藏目录内的单文件来源无法精确隔离，调用方须拒绝，不能丢弃或扩成父目录。
+#   启动包装与启动前预检共用这一判定，预检通过的规格在启动时不会因同一缺口改判。
+# 函数用途: 判断隐藏路径里是否有 Linux 目录覆盖无法精确隐藏的单文件。
+def _unisolated_host_file(hidden_paths: tuple[Path, ...]) -> bool:
+    directories = tuple(Path(path).resolve() for path in hidden_paths if Path(path).is_dir())
+    return any(
+        Path(path).is_file() and not any(Path(path).resolve().is_relative_to(root) for root in directories)
+        for path in hidden_paths
+    )
+
+
 # LLM: 规格仍只由统一工厂构造；宿主来源最后覆盖业务放行。Linux 无法精确隐藏单文件时失败关闭，不扩大到父目录。
 # 函数用途: 把插件启动命令按给定沙箱规格包进平台沙箱，返回新的完整 argv。
 def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str]:
     system = platform.system()
     directories = tuple(Path(path).resolve() for path in spec.hidden_paths if Path(path).is_dir())
-    if system == "Linux" and any(
-        Path(path).is_file() and not any(Path(path).resolve().is_relative_to(root) for root in directories)
-        for path in spec.hidden_paths
-    ):
+    if system == "Linux" and _unisolated_host_file(spec.hidden_paths):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE")
     command = AttemptExecutionSandbox(spec).build_argv(argv)
     if system == "Linux":
@@ -324,9 +337,11 @@ def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str
 # LLM: 只读平台自检结论，不启动插件；开关关闭时恒为空串。供启用与显式调用在建运行/起进程之前结构化拒绝。
 # 函数用途: 沙箱开关打开时检查本机沙箱是否可用，不可用返回原因码 sandbox_unavailable。
 # LLM: 启用策略按类型结构化传入，网络与受限根检查不读取展示文本；候选、业务和面板最终使用同一规格工厂。
+#   宿主来源与实际启动同集合进入预检规格；Linux 无法精确隐藏其中单文件时在任何副作用前拒绝，不等启动时才失败。
 # 函数用途: 沙箱启用时检查平台能力；网络端口隔离不可用或规格缺失时返回结构化原因。
 def plugin_sandbox_problem(
-    enabled: bool, owner_home: Path, *, sandbox_policy: PluginSandboxPolicy | None = None
+    enabled: bool, owner_home: Path, *, sandbox_policy: PluginSandboxPolicy | None = None,
+    host_exclusive_roots: tuple[Path, ...] = (),
 ) -> str:
     if not enabled:
         return ""
@@ -334,9 +349,19 @@ def plugin_sandbox_problem(
         return "gateway_port_isolation_unavailable"
     try:
         spec = plugin_sandbox_spec(
-            cwd=owner_home, data_dir=owner_home, owner_home=owner_home, sandbox_policy=sandbox_policy
+            cwd=owner_home, data_dir=owner_home, owner_home=owner_home, sandbox_policy=sandbox_policy,
+            host_exclusive_roots=host_exclusive_roots,
         )
         AttemptExecutionSandbox(spec).require_ready()
     except SandboxUnavailableError:
         return "sandbox_unavailable"
+    if platform.system() == "Linux" and _unisolated_host_file(spec.hidden_paths):
+        return "host_exclusive_file_isolation_unavailable"
     return ""
+
+
+# LLM: 没有宿主来源（未经可信配置的直接构造）时不附加参数，原两参预检调用与客户端工厂参数形状不变；
+#   有来源时原样转交，预检规格与实际客户端消费同一集合。空集合与省略等价，不改变任何隐藏结果。
+# 函数用途: 为不带受限策略的预检调用及客户端工厂组装宿主独占来源参数。
+def host_source_arguments(host_exclusive_roots: tuple[Path, ...]) -> dict[str, tuple[Path, ...]]:
+    return {"host_exclusive_roots": tuple(host_exclusive_roots)} if host_exclusive_roots else {}

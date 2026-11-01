@@ -47,6 +47,7 @@ from .plugin_sandbox import (
     PLUGIN_GATEWAY_PORT_ISOLATION_ERROR_CODE,
     PluginInterpreterPaths,
     PluginV8Sandbox,
+    host_source_arguments,
     plugin_sandbox_problem,
     plugin_v8_sandbox_options,
 )
@@ -70,6 +71,7 @@ from .user_space.owner_resolver import OwnerIdentity
 # LLM: B7 启用策略：process_sandbox 来自配置 plugin_process_sandbox；events_enabled 是 M 线总开关；
 #   events_owner_allowed 是当前 owner 是否本机管理员。三项都是宿主裁决的结构化事实，打包传给启用工具，避免参数过多。
 #   老格式授权输入与 host 默认继承擦洗来源同份承运，来源不入授权账，不改变显式插件凭据语义。
+#   host_exclusive_roots 只由管理宿主从可信配置注入，供预检与候选客户端隐藏同一来源集合，不展示、不入授权账。
 # 类用途: 承载一次插件启用的安全策略判定输入。
 @dataclass(frozen=True)
 class PluginEnablePolicy:
@@ -81,6 +83,7 @@ class PluginEnablePolicy:
     legacy_forbidden_roots: tuple = ()
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     scope_ceiling: PathAccessPolicy | None = field(default=None, kw_only=True)
+    host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
 # LLM: 管理候选只消费宿主固定安装快照和结构化策略；启用预检与运行时复用 plugin_sandbox_spec，不另建平台规则。
@@ -100,6 +103,8 @@ class PluginEnableTool(BaseTool):
         self.installation, self.catalog_revision = installation, catalog_revision
         self.events_enabled, self.events_owner_allowed = policy.events_enabled, policy.events_owner_allowed
         self.host_credential_env_names = policy.host_credential_env_names
+        # 宿主独占来源在这里冻结，不依赖只有老格式才有的 context；v8 与宽读候选同样消费。
+        self.host_exclusive_roots = tuple(Path(path) for path in policy.host_exclusive_roots)
         # v8 事件/收紧插件（permissions 非空）强制进沙箱，不管全局 plugin_process_sandbox 开没开（B7 安全底座）。
         self._is_v8 = installation is not None and installation.manifest.permissions is not None
         # v1–v6 可执行包（permissions 为空、不是内容包）：宿主冻结的授权输入在这里组装成原授权上下文。
@@ -248,7 +253,8 @@ class PluginEnableTool(BaseTool):
     def _candidate(self, operation, installation):
         self._require_authorization()
         client = PluginMCPClient(self.owner, installation, process_sandbox=self.process_sandbox,
-                                 host_credential_env_names=self.host_credential_env_names)
+                                 host_credential_env_names=self.host_credential_env_names,
+                                 host_exclusive_roots=self.host_exclusive_roots)
         try:
             self._require_authorization()
             transport = client.start()
@@ -349,19 +355,24 @@ def _sandbox_problem(tool) -> str:
         if problem:
             return problem
     if v8_sandbox is None:
-        return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir)
-    return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir, sandbox_policy=v8_sandbox)
+        return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir,
+                                      **host_source_arguments(tool.host_exclusive_roots))
+    return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir, sandbox_policy=v8_sandbox,
+                                  host_exclusive_roots=tool.host_exclusive_roots)
 
 
 # LLM: restricted 启用预检沿同一上界与来源投影，不能在确认后退回未收窄的路径；wide 保持原开关语义。
+#   三种模式都与 _candidate 的实际客户端消费同一份宿主独占来源，预检规格与启动规格一致。
 # 函数用途: 老格式插件的启用前沙箱检查；restricted 用固定授权投影的策略做同一就绪门检查。
 def _legacy_sandbox_problem(tool) -> str:
     if tool.grant is None:
         return ""
     if tool.grant["mode"] != "restricted":
-        return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir)
+        return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir,
+                                      **host_source_arguments(tool.host_exclusive_roots))
     return plugin_sandbox_problem(True, tool.owner.home_dir, sandbox_policy=policy_from_grant(
-        tool.grant, scope_ceiling=tool.context.scope_ceiling, host_exclusive_roots=tool.context.forbidden_roots))
+        tool.grant, scope_ceiling=tool.context.scope_ceiling, host_exclusive_roots=tool.context.forbidden_roots),
+        host_exclusive_roots=tool.host_exclusive_roots)
 
 
 # LLM: 组装 LegacyEnableContext 需要 owner/repo/binding 与沙箱档；收成一份冻结线束避免长参数接口。

@@ -56,6 +56,7 @@ from .plugin_runtime_facts import (
 from .plugin_sandbox import (
     PLUGIN_GATEWAY_PORT_ISOLATION_ERROR_CODE,
     PluginInterpreterPaths,
+    host_source_arguments,
     plugin_sandbox_problem,
     plugin_v8_sandbox_options,
 )
@@ -187,6 +188,7 @@ def plugin_management_context(
 
 
 # LLM: 当前路径策略沿确认与授权落盘传递；宿主来源复用原声明，不以整个数据根误伤 owner 的业务目录。
+#   上下文里的配置来源同时交给预检与候选客户端隐藏，三种启动模式不在确认后丢失外部 file: 来源。
 # 函数用途: 为一次启用组装策略输入，避免长参数散在调用点。
 def _enable_policy(context, arguments) -> PluginEnablePolicy:
     from .user_space.home_layout import home_paths
@@ -199,7 +201,7 @@ def _enable_policy(context, arguments) -> PluginEnablePolicy:
                               legacy_arguments=arguments,
                               legacy_sandbox_default=context.legacy_sandbox_default,
                               legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names,
-                              scope_ceiling=context.path_policy)
+                              scope_ceiling=context.path_policy, host_exclusive_roots=context.host_exclusive_roots)
 
 
 # LLM: 普通 owner 的管理员 HTTP 角色不能撤墙；保留已有更窄上界，不把窄授权扩大到整个 owner home。
@@ -414,6 +416,7 @@ class PluginManagement:
         return PluginInvocation(entry, name, arguments)
 
     # LLM: 业务沙箱按安装清单构造，不沿用用户确认前的猜测；任何解释器或网络隔离缺口都在起进程前返回原因。
+    #   预检与 execute_plugin_invocation 的实际客户端消费同一份上下文宿主来源。
     # 函数用途: 为当前固定安装版本核对运行时、v8 权限与平台沙箱能力。
     def _business_sandbox_problem(self, entry) -> str:
         is_v8 = entry.manifest.permissions is not None
@@ -434,9 +437,11 @@ class PluginManagement:
             if problem:
                 return problem
         sandbox_enabled = self.context.process_sandbox or is_v8
+        roots = self.context.host_exclusive_roots
         if v8_sandbox is None:
-            return plugin_sandbox_problem(sandbox_enabled, self.context.owner.home_dir)
-        return plugin_sandbox_problem(sandbox_enabled, self.context.owner.home_dir, sandbox_policy=v8_sandbox)
+            return plugin_sandbox_problem(sandbox_enabled, self.context.owner.home_dir, **host_source_arguments(roots))
+        return plugin_sandbox_problem(sandbox_enabled, self.context.owner.home_dir, sandbox_policy=v8_sandbox,
+                                      host_exclusive_roots=roots)
 
     # LLM: 仅 v8 的解释器入口需绑定已激活环境和指纹；其他入口仍走通用运行时检查，不执行插件代码。
     # 函数用途: 从可信激活记录取解释器命令或返回不可用原因。

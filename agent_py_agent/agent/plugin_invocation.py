@@ -72,7 +72,8 @@ def execute_plugin_invocation(
                 raise ValueError("原插件调用选择已变化")
             token.raise_if_cancelled()
             client = PluginMCPClient(context.owner, selected.installation, process_sandbox=context.process_sandbox,
-                                     host_credential_env_names=context.host_credential_env_names)
+                                     host_credential_env_names=context.host_credential_env_names,
+                                     host_exclusive_roots=context.host_exclusive_roots)
             client.require_settled_previous_resources()
             callbacks.enter_context(token.register_callback(client.stop))
             with bind_cancellation_token(token):

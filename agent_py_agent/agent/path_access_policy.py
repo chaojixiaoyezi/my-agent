@@ -641,7 +641,7 @@ def configured_host_source_paths(config: object | None) -> tuple[Path, ...]:
             raise ValueError('HOST_EXCLUSIVE_SOURCE_INVALID')
         paths.append(path.resolve(strict=False))
     config_path = getattr(config, 'config_path', '')
-    if config_path:
+    if isinstance(config_path, (str, Path)) and str(config_path):
         path = Path(config_path).expanduser()
         if not path.is_absolute():
             raise ValueError('HOST_EXCLUSIVE_SOURCE_INVALID')
