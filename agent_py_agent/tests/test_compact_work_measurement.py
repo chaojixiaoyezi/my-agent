@@ -27,7 +27,8 @@ from agent_py_agent.agent.conversation.history_index import ensure_thread_histor
 from agent_py_agent.agent.local_storage import LocalStore
 
 
-def synthetic_case(root, count):
+def synthetic_case(root, count, *, tool_result_bytes: int = 1024):
+    """批量构造真实 JSONL 和搜索索引；默认小结果供其它合同测试继续复用。"""
     store = ConversationStore(root / 'conversation')
     thread = store.threads.get_or_create({'canonical_user_id': 'synthetic-owner', 'now': 1})
     path = store.storage.message_path(thread.thread_id)
@@ -39,7 +40,8 @@ def synthetic_case(root, count):
     records = []
     with path.open('wb') as handle:
         for index in range(count):
-            row, record = synthetic_row(thread.thread_id, index, body, path)
+            row, record = synthetic_row(thread.thread_id, index, body, path,
+                tool_result_bytes=tool_result_bytes)
             handle.write((json.dumps(row) + '\n').encode())
             records.append(record)
     with local._connection() as conn:
@@ -53,11 +55,11 @@ def synthetic_case(root, count):
     return agent, thread, path
 
 
-def synthetic_row(thread_id, index, body, path):
+def synthetic_row(thread_id, index, body, path, *, tool_result_bytes: int = 1024):
     message_id, call_id = f'm-{index}', f'call-{index}'
     native = [
         {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': call_id, 'name': 'read_file', 'input': {}}]},
-        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call_id, 'content': 'y' * 1024}]},
+        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': call_id, 'content': 'y' * tool_result_bytes}]},
     ]
     row = {'message_id': message_id, 'thread_id': thread_id, 'role': 'assistant', 'content': body,
            'metadata': {'conversation_request_id': f'r-{index}', 'canonical_native_messages': {
@@ -175,11 +177,12 @@ def install_scan_counters(monkeypatch, counts, count):
     monkeypatch.setattr(MessageSnapshotRows, '__iter__', measured_replay)
 
 
-# LLM: 两个规模共用同一组上限（遍数、每行解析次数、连接数、整行读取、峰值相对来源大小）；2 万行版本在 CI 慢机上会超过
-#   单测 60 秒上限（10-08 25d4538db 的 3.11 job 超时），所以标 slow 只在本机/压测跑，CI 跑 2,000 行版本守同一合同。
+# LLM: 两个规模共用原上限；以较少消息承载较大的真实原生工具结果，仍走索引、预检、摘要和检查点提交。
+#   避免把数万来源逐键写不可变索引的文件系统开销混入CI工作量探针；不跳过阶段、不放宽内存或线性工作量约束。
 # 函数用途: 在给定行数的合成线程上测一次完整压缩的工作量，并断言各项上限。
-def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_source_bytes: int) -> None:
-    agent, thread, path = synthetic_case(tmp_path, count)
+def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_source_bytes: int,
+                                  *, tool_result_bytes: int = 1024) -> None:
+    agent, thread, path = synthetic_case(tmp_path, count, tool_result_bytes=tool_result_bytes)
     # 提交后的冷转（f74d1161e）会把已覆盖历史移出热文件，来源大小必须在压缩前量取。
     source_bytes = path.stat().st_size
     counts = measure_compaction(agent, thread, monkeypatch, rows=count)
@@ -199,15 +202,32 @@ def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_sourc
     assert not any(violations.values()), violations
 
 
-# 函数用途: 2 万行、约 50 MB 的完整规模测量（slow：本机复核和压测用）。
+# 函数用途: 64 条来源、每条 640 KB 原生工具结果；仍超过原 40 MB 下限且足以暴露逐行重扫。
 @pytest.mark.slow
 def test_large_synthetic_transcript_work_is_bounded(tmp_path, monkeypatch):
-    _assert_compaction_work_bounded(tmp_path, monkeypatch, 20_000, 40_000_000)
+    _assert_compaction_work_bounded(tmp_path, monkeypatch, 64, 40_000_000, tool_result_bytes=640_000)
 
 
-# 函数用途: 2,000 行、约 5 MB 的同一合同，CI 每次都跑。
+# 函数用途: 半数来源、相同单条结果大小；原 4 MB 下限及所有按行数计算的上限保持不变。
 def test_synthetic_transcript_work_is_bounded(tmp_path, monkeypatch):
-    _assert_compaction_work_bounded(tmp_path, monkeypatch, 2_000, 4_000_000)
+    _assert_compaction_work_bounded(tmp_path, monkeypatch, 32, 4_000_000, tool_result_bytes=640_000)
+
+
+@pytest.mark.parametrize('tool_result_bytes', [None, 4096])
+def test_synthetic_case_preserves_index_and_native_tool_pairs(tmp_path, tool_result_bytes):
+    options = {} if tool_result_bytes is None else {'tool_result_bytes': tool_result_bytes}
+    agent, thread, path = synthetic_case(tmp_path, 2, **options)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == 2
+    for index, row in enumerate(rows):
+        native = row['metadata']['canonical_native_messages']['messages']
+        assert native[0]['content'][0] == {'type': 'tool_use', 'id': f'call-{index}', 'name': 'read_file', 'input': {}}
+        assert native[1]['content'][0] == {'type': 'tool_result', 'tool_use_id': f'call-{index}',
+            'content': 'y' * (1024 if tool_result_bytes is None else tool_result_bytes)}
+        record_id = LocalStore.make_record_id('conversation_message', f'{thread.thread_id}:m-{index}')
+        indexed = agent.local_store.get_record(record_id)
+        assert indexed.content == row['content']
+        assert indexed.metadata['authoritative_transcript'] == str(path)
 
 
 def test_remote_rejection_does_not_materialize_unbudgeted_history(tmp_path):
