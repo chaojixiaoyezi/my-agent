@@ -86,6 +86,10 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_config_subcommands(subparsers)
     add_feishu_subcommands(subparsers)
     add_admin_identity_subcommands(subparsers)
+    for namespace in ('space', 'team'):
+        business = subparsers.add_parser(namespace, help='本人业务空间与后台团队')
+        business.add_argument('business_args', nargs=argparse.REMAINDER)
+        business.set_defaults(func=_cmd_business, business_namespace=namespace)
     if extension_registry is not None:
         subparsers.begin_extensions()
         extension_registry.register_cli_commands(subparsers)
@@ -101,6 +105,29 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
 # LLM: Fast parser intentionally registers only interactive commands and never loads extensions.
 # Extensions can add sibling CLI commands but cannot change the canonical built-in chat contract.
 # 函数用途: 构建只含 chat/resume 的轻量解析器，用于尽快进入交互界面。
+def _cmd_business(args):
+    import json
+    import shlex
+    from types import SimpleNamespace
+
+    from ..agent.gateway_parts.business_api import run_business_command
+    from ..agent.settings import load_config
+    from ..agent.user_space.home_layout import home_paths
+    from ..agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+    config, paths = load_config(args.config), home_paths()
+    home = home_paths_with_owner(paths, resolve_owner_home(paths.root, owner_identity_from_config(config)))
+    host = SimpleNamespace(home_paths=home, config=config)
+    tokens = args.business_args
+    text = ('call ' + ' '.join(tokens[1:])) if tokens and tokens[0] == 'call' else shlex.join(tokens)
+    result = run_business_command(host, args.business_namespace, text)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result['error'] is None else 1
+
+
 def build_interactive_parser() -> argparse.ArgumentParser:
     parser = _build_root_parser()
     subparsers = parser.add_subparsers(dest="command", required=True)

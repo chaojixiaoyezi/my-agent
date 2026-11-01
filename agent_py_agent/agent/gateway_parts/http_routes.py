@@ -17,6 +17,7 @@ class GatewayHTTPRoute:
 
 GATEWAY_HTTP_ROUTES = {
     "GET": (
+        GatewayHTTPRoute("/client/business/artifacts/*/content", "handle_business_artifact_content", "credential", ".business_artifacts_http"),
         GatewayHTTPRoute("/status", "_handle_status", "public"),
         GatewayHTTPRoute("/feishu/oauth/callback*", "handle_feishu_oauth_callback", "public", ".feishu_oauth_service"),
         GatewayHTTPRoute("/result/*", "_handle_result", "credential"),
@@ -28,6 +29,9 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/metrics", "_handle_metrics", "public"),
     ),
     "POST": (
+        GatewayHTTPRoute("/client/business", "handle_client_business", "credential", ".business_api"),
+        GatewayHTTPRoute("/client/business/stream", "handle_client_business_stream", "credential", ".business_api"),
+        GatewayHTTPRoute("/client/business/artifacts", "handle_business_artifact_upload", "credential", ".business_artifacts_http"),
         GatewayHTTPRoute("/remote-agent/push", "handle_remote_push", "push_token", ".remote_push_service"),
         GatewayHTTPRoute("/ask", "_handle_ask", "credential"),
         GatewayHTTPRoute("/channel-observations", "handle_channel_observation", "credential", ".channel_observations"),
@@ -58,6 +62,9 @@ GATEWAY_HTTP_ROUTES = {
 # LLM: 不做URL归一化以免改变旧路由语义；返回同一个路由对象作为处理器和计数模板的来源。
 # 函数用途: 按方法与原请求路径找到实际路由，未知路径返回None。
 def match_gateway_http_route(method: str, path: str) -> GatewayHTTPRoute | None:
+    if method == 'GET' and path.startswith('/client/business/artifacts/'):
+        from urllib.parse import urlsplit
+        path = urlsplit(path).path
     return next((route for route in GATEWAY_HTTP_ROUTES.get(method, ()) if _route_matches(route.template, path)), None)
 
 

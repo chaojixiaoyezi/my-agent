@@ -231,6 +231,18 @@ def revalidate_call(authorized: AuthorizedCall) -> None:
     source._issuer.revalidate(authorized)
 
 
+def canonical_business_approval(authorized: AuthorizedCall) -> AuthorizedCall:
+    """同一原issuer重新授权旧批准动作；不是复制DTO，也不授予旧interactions.respond。"""
+    revalidate_call(authorized)
+    if authorized.call.action != 'business.approvals.decide':
+        raise HostAPIError('INVALID_SCHEMA')
+    payload = authorized.call.payload
+    canonical = Call('plugin_host_call.v2', 'interactions.approvals.respond',
+        {'interaction_id': payload['approval_id'], 'expected_revision': payload['expected_revision'],
+         'response_ticket': payload['response_ticket']}, authorized.call.idempotency_key, authorized.call.as_user_id)
+    return authorized.binding.source._issuer.authorize(authorized.binding.source, canonical)
+
+
 # LLM: 显式目录只认effective_owner=local/main；普通用户在解析路径前403，管理员沿原目录/控制面校验且不创建目录。
 # 函数用途: 规范管理员项目目录，禁止普通用户用目录参数绑定家目录或任意子目录。
 def workspace_directory(context: OwnerReadContext, value):
@@ -340,6 +352,10 @@ def _call_target(source, call, grant, actor, entry=None):
 # LLM: 只有执行动作或明确bounded消息需要独立执行factory。
 # 函数用途: 判定是否需要C的受限执行主体。
 def _requires_execution(call: Call) -> bool:
+    from .business_action_specs import business_action_specs
+    if call.action in {spec.plugin_action for spec in business_action_specs().values()}:
+        return next(spec.metadata["effect"] == "execute" for spec in business_action_specs().values()
+                    if spec.plugin_action == call.action)
     return call.action.startswith("execute.") or (call.action == "conversations.messages.send"
                                                  and call.payload.get("tool_policy") == "bounded")
 

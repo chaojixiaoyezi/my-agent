@@ -65,6 +65,8 @@ ControlKind = Literal[
     "settings",
     "plugins",
     "users",
+    "space",
+    "team",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -260,6 +262,8 @@ def parse_conversation_command(
     if plugin_namespace(raw) is not None:
         return ConversationControlCommand("plugins", value=raw)
     name, trailing = match_conversation_command(raw) or ("", None)
+    if name in {"space", "team"}:
+        return ConversationControlCommand(name, value=str(trailing or "").strip(), operation="business")
     if name == "new":
         title = str(trailing or "").strip()
         return ConversationControlCommand("new", value=title, valid=len(title) <= 200 and "\n" not in title,

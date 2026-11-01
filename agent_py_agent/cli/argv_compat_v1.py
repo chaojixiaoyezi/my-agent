@@ -14,7 +14,9 @@ _UNSET = _Unset()
 
 CANONICAL_ROOTS = frozenset(['adapter', 'admin', 'audit', 'background', 'chat', 'collaboration', 'config', 'context', 'dev', 'feishu', 'gateway', 'guidance', 'home', 'local-store', 'memory', 'resume', 'run', 'runtime', 'skills', 'status', 'subagents', 'task', 'timeline', 'update'])
 
-CLI_ROOT_PATHS = {'status': ('status',),
+CANONICAL_ROOTS = CANONICAL_ROOTS | {'space', 'team'}
+
+CLI_ROOT_PATHS = {'space': ('space',), 'team': ('team',), 'status': ('status',),
  'timeline': ('timeline',),
  'run': ('run',),
  'remember': ('memory', 'remember'),

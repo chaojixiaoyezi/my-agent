@@ -96,7 +96,8 @@ def maybe_run_cli_owner_maintenance(agent: object, *, now: float | None = None) 
         return None
     if not owner_maintenance_due(home.owner_home_dir, now=now):
         return None
-    return run_owner_retention_if_due(home, now=now)
+    return run_owner_retention_if_due(home, now=now,
+        workflow_service=getattr(agent, 'business_workflow_scope_service', None))
 
 
 # LLM: status 保持旧口径；apply_outcome（applied / refused / legal_hold）、isolated_error_count 与 failed_action_count
@@ -174,6 +175,7 @@ def run_owner_retention_if_due(
     expected_state_fingerprint=None,
     quota_max_ms: float | None = None,
     quota_max_entries: int | None = None,
+    workflow_service=None,
 ) -> OwnerMaintenanceResult:
     from ..gateway_parts.multiprocess_mode import current_worker_partition
     from ..gateway_parts.request_entry_admission import require_request_execution
@@ -237,11 +239,49 @@ def run_owner_retention_if_due(
                    "local_store_events_maintenance": local_events,
                    "storage_maintenance": run_owner_storage_maintenance_slice(home, previous, retention, now=current,
                        quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, state_locked=True)}
+        effects['workflow_maintenance'] = run_owner_workflow_maintenance(home, previous, now=current,
+            safe_to_delete=retention.applied and not retention.legal_hold and not retention.load_errors,
+            service=workflow_service)
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
 # LLM: 所有既存owner库共用发现与显式owner引用保护；C逐叶沿原commit，冷库不创建、单库普通错误隔离，执行未知仍原抛。
 # 函数用途: 在原保留门后裁剪全部派生库，单库回执兼容，多库分列真实结果。
+def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, service=None):
+    """沿原维护节拍调用W3同一有界批；引用覆盖未知由W3保留候选，不另开轮询器。"""
+    if not safe_to_delete:
+        return {'executed': False, 'reason': 'retention_not_safe'}
+    index = home.owner_home_dir / 'data' / 'workflow_maintenance.json'
+    if index.is_symlink() or (index.parent.exists() and index.parent.is_symlink()):
+        return {'executed': False, 'reason': 'workflow_index_unavailable'}
+    if not index.is_file():
+        return {'executed': False, 'reason': 'no_workflow_index'}
+    import hashlib
+    import json
+
+    from ..conversation.business_access import BusinessActor
+    from ..workflows.business_scope import WorkflowScopeService
+    from ..workflows.orphan_maintenance import maintain_owner_workflows
+    actor = BusinessActor(home.owner_id, 'owner-maintenance', service or object(),
+        lambda action, facts: action in {'workflows.cleanup.run', 'workflows.recycle'})
+    tick = now.timestamp() if isinstance(now, datetime) else float(now)
+    service = service or WorkflowScopeService(home.owner_home_dir, owner_id=home.owner_id,
+        authorize=lambda current, action, ref: current is actor and actor.authorize(action, {'workflow_ref': ref}),
+        clock=lambda: tick)
+    if service.owner_id != home.owner_id:
+        return {'executed': False, 'reason': 'workflow_owner_mismatch'}
+    key = 'owner-maintenance-' + hashlib.sha256(json.dumps([home.owner_id,
+        previous.get('last_attempt_at', 0)], sort_keys=True).encode()).hexdigest()[:40]
+    try:
+        result = maintain_owner_workflows(service, actor=actor, idempotency_key=key)
+        return {'executed': True, **result}
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
+    except (OSError, ValueError, RuntimeError):
+        return {'executed': False, 'reason': 'workflow_maintenance_unavailable', 'coverage': 'unknown'}
+
+
 def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_transition=None, cursor=None) -> dict[str, Any]:
     from ..local_storage.records import owner_protected_ref_ids
 

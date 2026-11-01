@@ -54,6 +54,7 @@ def handle_common_slash_command(
         _handle_tell_command,
         _handle_permissions_command,
         _handle_plugin_command,
+        _handle_business_command,
         _handle_control_command,
         _handle_remember_command,
         _handle_memory_command,
@@ -70,6 +71,27 @@ def handle_common_slash_command(
 
 # LLM: 目录来自显式模式选定的宿主；原 revision 与命令交互引用分别传递，不借聊天回合或模型执行权限。
 # 函数用途: 在输入线程外提交插件管理或业务命令，并展示原宿主结果。
+def _handle_business_command(user, ctx, include_plain_help):
+    import json
+
+    from ...agent.gateway_parts.business_api import business_command_request, run_business_command
+    from ...agent.plugin_host.errors import HostAPIError
+    command = parse_conversation_control(user)
+    if command is None or command.kind not in {'space', 'team'}:
+        return None
+    try:
+        if ctx.use_gateway:
+            from ..chat_client_context import post_gateway_json
+            _, result = post_gateway_json(ctx.agent, '/client/business',
+                business_command_request(command.kind, command.value), timeout=10.0)
+        else:
+            result = run_business_command(ctx.agent, command.kind, command.value)
+        ctx.print_line(json.dumps(result, ensure_ascii=False))
+    except (HostAPIError, ValueError, OSError):
+        ctx.print_line('业务命令失败；未重试，也未切换到其它宿主。')
+    return True
+
+
 def _handle_plugin_command(user: str, ctx: SlashCommandContext, include_plain_help: bool) -> bool | None:
     del include_plain_help
     if plugin_namespace(user) is None:

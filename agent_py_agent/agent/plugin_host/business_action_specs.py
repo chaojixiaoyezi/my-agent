@@ -156,6 +156,12 @@ def business_plugin_action(native_action: str) -> str:
     return business_action_spec(native_action).plugin_action
 
 
+@lru_cache(maxsize=1)
+def business_plugin_actions() -> frozenset[str]:
+    """静态目录集合，含独立运输动作；不缓存权限、Owner或动态ready。"""
+    return frozenset({spec.plugin_action for spec in business_action_specs().values()} | {'business.events.stream'})
+
+
 def business_native_action(plugin_action: str) -> str:
     # 不通过 removeprefix 猜测；stream 是独立 transport-only spec，不在双射内。
     for spec in business_action_specs().values():

@@ -144,6 +144,27 @@ class ResponseTickets:
 
     # LLM: 不先读取原卡，避免错误installation/owner的票据变成资源枚举器。
     # 函数用途: 在消费前验证完整绑定和精确内容版本。
+    def canonical_business_response(self, authorized):
+        """先核原人类票据的决定、绑定和期限，再让原issuer重发准确legacy调用。"""
+        from .authorization import canonical_business_approval
+        self.services.revalidate(authorized)
+        if authorized.call.action != 'business.approvals.decide':
+            raise HostAPIError('INVALID_SCHEMA')
+        with self._lock:
+            entry = self._tickets.get(authorized.call.payload['response_ticket'])
+            if entry is None:
+                raise HostAPIError('HUMAN_TICKET_INVALID', 403)
+            record = entry['record']
+            if (record.action != 'interactions.approvals.respond'
+                    or record.binding != ticket_binding(authorized)
+                    or record.decision_payload.get('decision') != authorized.call.payload['decision']):
+                raise HostAPIError('HUMAN_TICKET_INVALID', 403)
+            if entry['state'] == 'pending' and self.clock() >= record.expires_at:
+                raise HostAPIError('HUMAN_TICKET_EXPIRED', 410)
+            canonical = canonical_business_approval(authorized)
+            self._check_binding(canonical, record)
+            return canonical
+
     def _check_binding(self, authorized, record):
         payload = authorized.call.payload
         if (record.binding != ticket_binding(authorized) or record.action != authorized.call.action

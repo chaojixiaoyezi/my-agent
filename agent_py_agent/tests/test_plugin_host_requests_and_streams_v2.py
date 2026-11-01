@@ -13,6 +13,7 @@ from agent_py_agent.agent.plugin_host.conversations import workspace_changes
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_host.schemas import validate_request_event
 from agent_py_agent.tests.test_plugin_host_v2_requests import public_case as public_case
+from agent_py_agent.tests.test_plugin_host_v2_requests import request_case as request_case
 
 
 # LLM: 仅造公开事件信封，不把测试数据当作真实模型输出。
@@ -27,6 +28,25 @@ def event(kind, data):
 def terminal_row(**extra):
     return {"id": "plugin-request-one", "status": "done", "completed_at": 1793088000,
             "terminal_response": {"id": "plugin-request-one", "ok": True}, **extra}
+
+
+def test_workflow_resume_receipt_kind_uses_same_prepared_digest_and_owner(request_case):
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
+    paths, owner, original = request_case
+    prepared = deepcopy(original)
+    prepared["id"] = "plugin-workflow-resume"
+    prepared["metadata"]["client_input_digest"] = "b" * 64
+    prepared["metadata"]["plugin_provenance"]["kind"] = "workflow_resume"
+    with inputs.gateway_input_transition(paths, prepared["id"]):
+        receipt, _ = inputs.load_or_prepare_gateway_input_locked(paths, request_id=prepared["id"],
+            client_input_digest="b" * 64, client_message_id="resume-one", guidance_dedupe_key="resume-one",
+            prepared_request=prepared)
+        inputs.queue_gateway_input_locked(paths, receipt)
+    facts = requests.read_request_facts(paths, prepared["id"], expected_owner=owner, installation_ref="install-one")
+    assert facts["kind"] == "workflow_resume" and facts["state"] == "queued"
+    with pytest.raises(HostAPIError) as denied:
+        requests.read_request_facts(paths, prepared["id"], expected_owner=owner, installation_ref="another-install")
+    assert denied.value.status == 404
 
 
 @pytest.mark.parametrize("elapsed", [None, 0, 125])

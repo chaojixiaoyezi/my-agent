@@ -129,6 +129,22 @@ class ModelSettingsV2Handlers:
     # 函数用途: 绑定本owner模型目录。
     def __init__(self, home_paths):
         self.path = catalog.model_profiles_path(home_paths)
+        self.owner_id = home_paths.owner_id
+
+    def business_profiles(self, params):
+        """只投影本人原模型目录；游标绑定Owner/内容快照，不承载权限和秘密。"""
+        from ..capability.business_capabilities import _page
+        data = catalog.read_model_profiles(self.path)
+        rows = []
+        for profile_id, profile in sorted(data['profiles'].items()):
+            enabled = profile.get('enabled', True) is True
+            rows.append({'profile_id': profile_id, 'display_name': profile.get('name', '')[:120],
+                'model_name': profile['model_name'], 'provider_id': profile['provider_id'],
+                'enabled': enabled, 'capability': profile.get('capability', 'agentic'),
+                'availability': {'ref': profile_id, 'state': 'available' if enabled else 'disabled',
+                    'reason_code': '', 'required_capabilities': []}})
+        page, cursor = _page(rows, params, (self.owner_id, 'model_profiles.list'))
+        return {'items': page, 'next_cursor': cursor}
 
     # LLM: 白名单排除auth/access_token，全部非空自定义头值脱敏；双has_key字段仅表明是否配置。
     # 函数用途: 按显式用途过滤服务商及其模型，并返回当前选择和八档推理强度。

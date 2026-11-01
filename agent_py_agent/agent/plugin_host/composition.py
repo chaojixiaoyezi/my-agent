@@ -14,6 +14,9 @@ from .schemas import PAGE_MAX_BYTES, canonical_json, thaw, validate_tree
 # 函数用途: 选择原四域或静态通用扩展处理器。
 def domain_name(action: str) -> str:
     action_spec(action)
+    from .business_action_specs import business_plugin_actions
+    if action in business_plugin_actions():
+        return "business"
     from .action_specs_audit_bots import AUDIT_BOT_ACTIONS
     from .action_specs_substrate import SUBSTRATE_ACTIONS
     from .action_specs_v2_ext import V2_ACTIONS
@@ -41,6 +44,9 @@ def domain_name(action: str) -> str:
 # 函数用途: 核验本组合根当前动作的领域接线与真实就绪条件。
 def domain_ready(action: str, ports: HostDomainPorts) -> bool:
     name = domain_name(action)
+    if name == "business":
+        backend = business_port(ports)
+        return bool(backend is not None and backend.ready(action))
     if name == 'substrate':
         backend = getattr(ports.conversation, 'substrate', None)
         return bool(backend is not None and backend.ready(action))
@@ -119,6 +125,8 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
 # 函数用途: 调用原领域或已就绪的静态扩展后端。
 def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     name = domain_name(authorized.call.action)
+    if name == "business":
+        return business_port(ports).call(authorized)
     if name == 'substrate':
         return ports.conversation.substrate.call(authorized)
     if name == "portal_v2":
@@ -164,11 +172,12 @@ def _observed_outcome(action: str) -> str:
 # 函数用途: 为独立传输泵提供受验证事件序列。
 def stream_events(authorized: AuthorizedCall, ports: HostDomainPorts):
     revalidate_call(authorized)
-    if authorized.call.action != "conversations.requests.stream":
+    business = authorized.call.action == "business.events.stream"
+    if not business and authorized.call.action != "conversations.requests.stream":
         raise HostAPIError("INVALID_SCHEMA")
     if not domain_ready(authorized.call.action, ports):
         raise HostAPIError("HOST_NOT_READY", 503)
-    iterator = iter(ports.conversation.stream(authorized))
+    iterator = iter((business_port(ports) if business else ports.conversation).stream(authorized))
     try:
         while True:
             revalidate_call(authorized)
@@ -182,6 +191,17 @@ def stream_events(authorized: AuthorizedCall, ports: HostDomainPorts):
         close = getattr(iterator, "close", None)
         if callable(close):
             close()
+
+
+def business_port(ports):
+    """显式端口优先；生产原会话域从可信资源绑定同一业务适配器，不借观察口兜底。"""
+    if ports.business is not None:
+        return ports.business
+    conversation = ports.conversation
+    if conversation is None:
+        return None
+    from .business_actions import gateway_business_port
+    return gateway_business_port(conversation)
 
 
 # LLM: 只在可信启动组合根构造，不从HTTP正文注册端口；关闭同时撤销来源和游标。
