@@ -10,7 +10,8 @@ manage_models 的检查）；3a 定为硬门（2026-10-02），随后扩成“�
   owner 级正式 skill 等），规范任务根的 data/pack_verification（ae 能力包核验记录）→ PATH_HOST_STATE_WRITE_BLOCKED，读照常；
 - B 类（runs/、agents/、data/、tasks/）仍是 tool_runtime_ledger 的 forbidden_write_roots：只在隔离模式生效，可被本任务工作目录穿透；
 - 宿主凭据：管理员密码、模型目录、共享模型档案、数据根 config/ 里的 YAML 配置及备份、数据根里 owner home 之外的 secrets
-  目录 → 文件工具读写都拒 PATH_HOST_CREDENTIAL_BLOCKED；命令只拒写不拒读（读取不在 H3 范围，已知边界）。
+  目录 → 文件工具读写都拒 PATH_HOST_CREDENTIAL_BLOCKED；命令对宿主独占配置读写都拒（规格 2.9：W12 把
+  host_exclusive_paths 并入 host_sandbox_paths().hidden）。
 - 命令沙箱：这些路径并进只读覆盖（Full Access 也生效）；Seatbelt 给每个受保护路径的上级目录加写拒绝，堵住“先改名上级目录
   再写”的绕过（探针证据 ~/.my-agent/decision-evidence/host-config-guard-design/）。
 
@@ -529,8 +530,8 @@ def test_real_full_access_shell_cannot_write_host_files(tmp_path):
         assert not run(f"printf x > {home['bare'] / 'runtime.db-shm'}").ok and not (home["bare"] / "runtime.db-shm").exists()
         assert not run(f"mkdir {home['bare'] / 'config'}").ok and not (home["bare"] / "config").exists()
     assert {path: path.read_bytes() for path in before} == before
-    # 命令只拒写不拒读（读取不在 H3 范围，已知边界）；普通写照常。
-    assert run(f"cat {config / 'desktop.yaml'}").ok
+    # 规格 2.9：W12 把 host_exclusive_paths 并入 host_sandbox_paths().hidden，命令对宿主独占配置读写都拒；普通写照常。
+    assert not run(f"cat {config / 'desktop.yaml'}").ok
     assert run(f"printf ok > {home['ws'] / 'new.txt'}").ok and run(f"printf ok > {task / 'work' / 'x.md'}", task / "work").ok
 
 

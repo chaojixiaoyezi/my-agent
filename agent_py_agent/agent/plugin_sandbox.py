@@ -300,24 +300,11 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
-# LLM: Linux 隐藏只能覆盖目录；不在任一隐藏目录内的单文件来源无法精确隔离，调用方须拒绝，不能丢弃或扩成父目录。
-#   启动包装与启动前预检共用这一判定，预检通过的规格在启动时不会因同一缺口改判。
-# 函数用途: 判断隐藏路径里是否有 Linux 目录覆盖无法精确隐藏的单文件。
-def _unisolated_host_file(hidden_paths: tuple[Path, ...]) -> bool:
-    directories = tuple(Path(path).resolve() for path in hidden_paths if Path(path).is_dir())
-    return any(
-        Path(path).is_file() and not any(Path(path).resolve().is_relative_to(root) for root in directories)
-        for path in hidden_paths
-    )
-
-
-# LLM: 规格仍只由统一工厂构造；宿主来源最后覆盖业务放行。Linux 无法精确隐藏单文件时失败关闭，不扩大到父目录。
+# LLM: 规格仍只由统一工厂构造；宿主来源最后覆盖业务放行。Linux 单文件来源由编译器在 --chdir 前精确遮罩，不扩大到父目录。
 # 函数用途: 把插件启动命令按给定沙箱规格包进平台沙箱，返回新的完整 argv。
 def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str]:
     system = platform.system()
     directories = tuple(Path(path).resolve() for path in spec.hidden_paths if Path(path).is_dir())
-    if system == "Linux" and _unisolated_host_file(spec.hidden_paths):
-        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE")
     command = AttemptExecutionSandbox(spec).build_argv(argv)
     if system == "Linux":
         # 公共 hide_home 编译器会重新挂回业务根；宿主独占目录必须在这些挂载之后再次覆盖。
@@ -337,7 +324,7 @@ def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str
 # LLM: 只读平台自检结论，不启动插件；开关关闭时恒为空串。供启用与显式调用在建运行/起进程之前结构化拒绝。
 # 函数用途: 沙箱开关打开时检查本机沙箱是否可用，不可用返回原因码 sandbox_unavailable。
 # LLM: 启用策略按类型结构化传入，网络与受限根检查不读取展示文本；候选、业务和面板最终使用同一规格工厂。
-#   宿主来源与实际启动同集合进入预检规格；Linux 无法精确隐藏其中单文件时在任何副作用前拒绝，不等启动时才失败。
+#   宿主来源与实际启动同集合进入预检规格；Linux 单文件来源由启动编译器精确遮罩，并由启动校验失败关闭，预检不因其拒绝。
 # 函数用途: 沙箱启用时检查平台能力；网络端口隔离不可用或规格缺失时返回结构化原因。
 def plugin_sandbox_problem(
     enabled: bool, owner_home: Path, *, sandbox_policy: PluginSandboxPolicy | None = None,
@@ -355,8 +342,6 @@ def plugin_sandbox_problem(
         AttemptExecutionSandbox(spec).require_ready()
     except SandboxUnavailableError:
         return "sandbox_unavailable"
-    if platform.system() == "Linux" and _unisolated_host_file(spec.hidden_paths):
-        return "host_exclusive_file_isolation_unavailable"
     return ""
 
 

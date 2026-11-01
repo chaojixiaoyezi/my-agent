@@ -3,8 +3,8 @@
 凭据文件与部署配置文件都放在 HOME 与 MY_AGENT_HOME 之外，经真实 load_config 与原宿主投影进入四条实际启动路径：
 管理启用（预检 + _candidate）、业务显式调用、工具注册表同步、Gateway 面板/事件共用池；每条覆盖 legacy-wide、
 restricted、v8 三种策略。替身只在进程边界：候选 start/目录发现/stop、业务 start、MCP 传输与平台就绪自检；
-规格工厂、预检、客户端构造、重连重建与 Seatbelt 规则编译都是真实代码。平台固定为 Darwin 编译规则，Linux 精确
-单文件隔离缺口经平台替身验证拒绝，不宣称真实 Seatbelt/bwrap 车道通过。
+规格工厂、预检、客户端构造、重连重建与 Seatbelt 规则编译都是真实代码。平台固定为 Darwin 编译规则；Linux 经平台
+替身编译真实 bwrap 参数，验证预检放行且启动命令以精确单文件遮罩隐藏来源，不宣称真实 Seatbelt/bwrap 车道通过。
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from agent_py_agent.agent.plugin_enable_tool import PluginEnablePolicy
 from agent_py_agent.agent.plugin_management import PluginManagement, plugin_management_context
 from agent_py_agent.agent.plugin_runtime import PluginMCPClient
 from agent_py_agent.agent.settings.config import load_config
+from agent_py_agent.agent.tooling import sandbox as bwrap_compiler
 from agent_py_agent.agent.tooling.mcp_client import MCPError, MCPStdioClient
 from agent_py_agent.agent.tooling.plugin_registration import synchronize_plugin_clients
 from agent_py_agent.agent.tooling.process_registry import ProcessTerminationReceipt
@@ -41,7 +42,8 @@ from agent_py_agent.tests.test_plugin_manifest_v8 import _v8
 _KINDS = ("legacy-wide", "restricted", "v8")
 # 插件程序永不执行：每次启动都在进程边界被替身截住。
 _PROGRAM = b"raise RuntimeError('fixture plugin must not execute')\n"
-_LINUX_FILE_GAP = "host_exclusive_file_isolation_unavailable"
+# Linux 单文件遮罩的前两个参数；第三个参数是被遮罩的 namespace 位置。
+_LINUX_MASK = ["--ro-bind", bwrap_compiler.HIDDEN_FILE_MASK_SOURCE]
 
 
 # 类用途: 一次用例的目录布局；HOME、数据根与两份外部来源互不包含，同级业务文件用来证明不隐藏父目录。
@@ -142,6 +144,41 @@ def _launch_boundary(patch) -> _Boundary:
 
     patch.setattr(PluginMCPClient, "__init__", observe)
     return boundary
+
+
+# 函数用途: 固定 Linux 平台与替身 bwrap 路径，记录真实包装函数编译出的每条插件启动命令；bwrap 本身从不执行。
+def _linux_launch_boundary(patch) -> _Boundary:
+    boundary = _Boundary()
+    patch.setattr(plugin_sandbox.platform, "system", lambda: "Linux")
+    patch.setattr(AttemptExecutionSandbox, "require_ready", lambda self: boundary.specs.append(self.spec))
+    patch.setattr(bwrap_compiler, "_PROC_MOUNT_KIND", "dir")
+
+    def launch(argv, spec):
+        command = plugin_sandbox.sandboxed_plugin_argv(argv, replace(spec, bwrap_path="/fixture/bwrap"))
+        boundary.launches.append(command)
+        return command
+
+    patch.setattr(plugin_runtime, "sandboxed_plugin_argv", launch)
+    return boundary
+
+
+# 函数用途: 断言 Linux 启动命令以精确单文件遮罩隐藏外部来源：遮罩块紧贴插件目录覆盖之前，同级业务文件与插件 argv 不含来源。
+def _assert_linux_masks_before_overlays(command: list[str], layout: _Layout) -> None:
+    end = command.index("--chdir")
+    overlays = 0
+    while end >= 4 and command[end - 4] == "--tmpfs" and command[end - 2:end] == ["--remount-ro", command[end - 3]]:
+        end, overlays = end - 4, overlays + 1
+    assert overlays, f"插件目录覆盖必须紧跟单文件遮罩: {command}"
+    masked = []
+    while end >= 3 and command[end - 3:end - 1] == _LINUX_MASK:
+        masked.append(command[end - 1])
+        end -= 3
+    # 遮罩只出现在这一块：其前是全部业务与保护挂载，其后只有插件目录覆盖和 --chdir。
+    assert sum(command[index:index + 2] == _LINUX_MASK for index in range(len(command) - 1)) == len(masked)
+    assert {str(source) for source in layout.sources} <= set(masked), command
+    assert str(layout.sibling) not in command
+    plugin_argv = command[command.index("--") + 1:]
+    assert not any(str(source) in part for part in plugin_argv for source in layout.sources)
 
 
 # 函数用途: 候选连接只替换进程收发；客户端构造（含规格）与原启用链照常执行。
@@ -343,61 +380,72 @@ def test_gateway_shared_pool_factory_keeps_external_file_sources_across_reconnec
         plugin_panels_http.close_plugin_channel(server)
 
 
-def test_linux_exact_file_gap_refuses_preflight_and_launch_wrapper(tmp_path, monkeypatch):
+def test_linux_preflight_accepts_file_sources_and_launch_wrapper_masks_them(tmp_path, monkeypatch):
     layout = _layout(tmp_path, monkeypatch)
     roots = configured_host_source_paths(_config(layout, "legacy-wide"))
     owner_home = resolve_owner_home(layout.data_root).home_dir
     owner_home.mkdir(parents=True)
+    # 已存在的宿主独占目录仍由插件包装在单文件遮罩之后再盖一次 tmpfs。
+    (owner_home / "config").mkdir()
     monkeypatch.setattr(AttemptExecutionSandbox, "require_ready", lambda _self: None)
     monkeypatch.setattr(plugin_sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(bwrap_compiler, "_PROC_MOUNT_KIND", "dir")
     assert plugin_sandbox.plugin_sandbox_problem(True, owner_home) == ""
-    assert plugin_sandbox.plugin_sandbox_problem(True, owner_home, host_exclusive_roots=roots) == _LINUX_FILE_GAP
+    assert plugin_sandbox.plugin_sandbox_problem(True, owner_home, host_exclusive_roots=roots) == ""
     spec = plugin_sandbox.plugin_sandbox_spec(cwd=owner_home, data_dir=owner_home, owner_home=owner_home,
                                               host_exclusive_roots=roots)
-    # 拒绝而不是丢弃来源或扩成父目录：规格仍按精确文件保留。
+    # 来源既不丢弃也不扩成父目录：规格仍按精确文件保留，启动命令逐个遮罩。
     _assert_exact_sources(spec, layout)
-    with pytest.raises(SandboxUnavailableError, match="HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE"):
-        plugin_sandbox.sandboxed_plugin_argv(["/usr/bin/true"], replace(spec, bwrap_path="/usr/bin/bwrap"))
+    command = plugin_sandbox.sandboxed_plugin_argv(["/usr/bin/true"], replace(spec, bwrap_path="/usr/bin/bwrap"))
+    _assert_linux_masks_before_overlays(command, layout)
 
 
 @pytest.mark.parametrize("kind", _KINDS)
-def test_linux_exact_file_gap_refuses_enable_before_side_effects(tmp_path, monkeypatch, kind):
+def test_linux_file_sources_let_enable_reach_confirmation(tmp_path, monkeypatch, kind):
     layout = _layout(tmp_path, monkeypatch)
     service = _management(layout, _config(layout, kind), kind)
     _install(service, kind)
     monkeypatch.setattr(AttemptExecutionSandbox, "require_ready", lambda _self: None)
     monkeypatch.setattr(plugin_sandbox.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(PluginMCPClient, "__init__", lambda *_args, **_kwargs: pytest.fail("拒绝必须先于候选客户端"))
-    refused = _enable(service, "enable-linux")
-    assert refused["state"] == "failed" and refused["details"]["reason"] == _LINUX_FILE_GAP, refused
-    assert refused["error_code"] != "PLUGIN_CONFIRMATION_REQUIRED", refused
+    monkeypatch.setattr(PluginMCPClient, "__init__", lambda *_args, **_kwargs: pytest.fail("确认前不能构造候选客户端"))
+    preview = _enable(service, "enable-linux")
+    # 外部单文件来源不再让 Linux 预检拒绝；启用照常进入两步确认，确认前不写激活、不备环境，回执不含来源路径。
+    assert preview["error_code"] == "PLUGIN_CONFIRMATION_REQUIRED", preview
+    assert preview["details"]["reason"] == "confirmation_required", preview
     assert service.installations.snapshot()[0].activation is None
     environments = service.context.owner.plugins_dir / "environments"
     assert not environments.exists() or not any(environments.iterdir())
+    _assert_payload_clean(preview, layout)
 
 
 @pytest.mark.parametrize("kind", _KINDS)
-def test_linux_exact_file_gap_refuses_business_and_shared_pool_launch(tmp_path, monkeypatch, kind):
+def test_linux_business_and_shared_pool_launch_mask_file_sources(tmp_path, monkeypatch, kind):
     layout = _layout(tmp_path, monkeypatch)
     config = _config(layout, kind)
     service = _enabled_service(layout, config, kind, monkeypatch)
     entry = service.installations.snapshot()[0]
+    (service.context.owner.home_dir / "config").mkdir(exist_ok=True)
     target = service.context.workspace / "input.txt"
     target.write_text("business input\n")
-    monkeypatch.setattr(AttemptExecutionSandbox, "require_ready", lambda _self: None)
-    monkeypatch.setattr(plugin_sandbox.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(PluginMCPClient, "start", lambda _self: pytest.fail("不能启动无法精确隔离来源的插件"))
-    result = service.command(f'/plugins@{PLUGIN_ID} read "{target}"', revision=service.catalog().revision,
-                             request_id="business-linux")
-    assert result["state"] == "rejected", result
-    if kind != "restricted":
-        # 沙箱档开启的业务预检在建运行前给出结构化原因；restricted 由客户端内部就绪门在启动前拒绝。
-        assert result["error_code"] == "PLUGIN_RUNTIME_UNAVAILABLE", result
-        assert result["details"] == {"reason": _LINUX_FILE_GAP}, result
-    with pytest.raises(SandboxUnavailableError) as refused:
-        plugin_display_client(service.context.owner, entry, process_sandbox=kind == "legacy-wide",
-                              host_exclusive_roots=configured_host_source_paths(config))
-    assert _LINUX_FILE_GAP in str(refused.value).lower()
+
+    # 业务连接只在实际起进程处截住；预检、客户端构造与 bwrap 参数编译照常执行。
+    def no_process(_self):
+        raise MCPError("fixture business plugin process is not started", code="MCP_SERVER_START_FAILED")
+
+    with monkeypatch.context() as patch:
+        boundary = _linux_launch_boundary(patch)
+        patch.setattr(PluginMCPClient, "start", no_process)
+        result = service.command(f'/plugins@{PLUGIN_ID} read "{target}"', revision=service.catalog().revision,
+                                 request_id="business-linux")
+        assert result["state"] != "succeeded", result
+        assert "host_exclusive_file_isolation_unavailable" not in json.dumps(result, default=str), result
+        (business,) = boundary.launches
+        _assert_linux_masks_before_overlays(business, layout)
+        _assert_payload_clean(result, layout)
+        shared = plugin_display_client(service.context.owner, entry, process_sandbox=kind == "legacy-wide",
+                                       host_exclusive_roots=configured_host_source_paths(config))
+        assert [shared.config.command, *shared.config.args] == boundary.launches[-1]
+        _assert_linux_masks_before_overlays(boundary.launches[-1], layout)
 
 
 def test_host_sources_stay_out_of_policy_and_registry_reprs(tmp_path):

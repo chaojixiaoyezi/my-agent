@@ -143,6 +143,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             host_credential_env_names=params.host_credential_env_names,
             sandbox_boundary_facts=params.shell_sandbox_boundary_facts,
             pty_session_idle_timeout_minutes=getattr(params, "pty_session_idle_timeout_minutes", 30),
+            host_exclusive_paths=tuple(getattr(params, "host_exclusive_paths", ()) or ()),
         ),
     )
     registry.register(shell_tool)

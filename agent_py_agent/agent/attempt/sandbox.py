@@ -60,6 +60,7 @@ from ..path_access_policy import (
     persona_sandbox_root,
 )
 from ..tooling.sandbox import (
+    HIDDEN_FILE_MASK_SOURCE,
     SYSTEM_READ_ROOTS_BY_PLATFORM,
     SandboxReadiness,
     SandboxSpec,
@@ -100,15 +101,14 @@ class SandboxUnavailableError(SandboxUnavailable):
     """
 
 
-# LLM: 与插件预检一样只接受目录遮蔽；同次挂载的来源映射和最终覆盖必须同时成立，不授予新路径或启动进程。
-# 函数用途: 拒绝未被最终隐藏目录覆盖的现存文件，避免只读绑定仍泄露宿主来源。
+# LLM: 只接受三种最终事实：位置未挂载、被空 tmpfs 覆盖，或恰为 /dev/null 精确单文件遮罩；同次 bind 别名入口逐个核对，不授予新路径或启动进程。
+# 函数用途: 拒绝最终仍由宿主 bind 暴露的现存隐藏文件，任何遮罩缺失、被压过或形状不符都失败关闭。
 def _require_linux_file_isolation(hidden_paths: tuple[Path, ...], argv: list[str]) -> None:
     paths = tuple(Path(path).expanduser() for path in hidden_paths)
     try:
         files = tuple(path.resolve(strict=True) for path in paths if path.is_file())
         if not files:
             return
-        directories = {path.resolve(strict=True) for path in paths if path.is_dir()}
         mounts = _mount_snapshot(argv)
         bindings = tuple(
             (mount.source.resolve(strict=False), mount.target)
@@ -124,9 +124,10 @@ def _require_linux_file_isolation(hidden_paths: tuple[Path, ...], argv: list[str
                                for root, target in bindings if source.is_relative_to(root))}
         for location in locations:
             mount = _effective_mount(location, mounts)
-            # hide_home 的业务重挂可能压过先前 tmpfs；RO bind 也不等于拒读。
-            if (mount is None or mount.target not in directories
-                    or mount.arguments[:1] != ("--tmpfs",)):
+            # Unmounted locations and empty tmpfs are invisible; a host-visible location needs the exact final mask.
+            if mount is None or mount.arguments[:1] == ("--tmpfs",):
+                continue
+            if mount.arguments != ("--ro-bind", HIDDEN_FILE_MASK_SOURCE, os.fspath(location)):
                 raise SandboxUnavailableError(
                     "SANDBOX_UNAVAILABLE: HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE"
                 )
@@ -367,7 +368,7 @@ class AttemptExecutionSandbox:
 
     # LLM: extra_write_roots 来自当前工具的结构化 allowed_write_roots，首项是 canonical
     # task work 临时根；v8 隐藏根必须仍存在才能挂 tmpfs，缺失要失败关闭；写根顺序保持原合同。
-    #   隐藏文件必须由最终目录挂载保护；校验先于 Landlock 包装与任何业务进程启动。
+    #   隐藏文件必须由最终目录挂载或精确单文件遮罩保护；校验先于 Landlock 包装与任何业务进程启动。
     # 函数用途: 为 Linux 组装 bwrap 参数，验证文件隔离，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
         if self.spec.read_mode == "allowlist" and (
