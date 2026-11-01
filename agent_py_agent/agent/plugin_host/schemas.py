@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from types import MappingProxyType
 
+from ..contracts.tool_input_schema import _branch_is_valid
 from ..tooling.input_schema import validate_tool_input
 from .errors import HostAPIError
 
@@ -148,29 +149,79 @@ def validate_object(value: object, schema: dict) -> dict:
     return result
 
 
-# LLM: nullable数值仍排除bool；事件的可选耗时/计量与旧整数共用校验，不放宽其它字段或身份门。
-# 函数用途: 递归复核字节、布尔与含空值数值的边界。
-def _validate_units(value, schema: dict) -> None:
+# 单位校验复用原 validator 的分支匹配与原根，避免孤立分支丢失 defs 或误选不匹配 oneOf。
+# active 只阻断同一值/同一 schema 的无进展环；JsonValue 递归到不同子值仍然有效。
+def _validate_units(value, schema: dict, *, root: dict | None = None, active: frozenset = frozenset()) -> None:
+    root = schema if root is None else root
+    marker = (id(value), id(schema))
+    if marker in active:
+        raise HostAPIError("INVALID_SCHEMA")
+    active = active | {marker}
+    if "$ref" in schema:
+        _validate_units(value, _unit_reference(root, schema["$ref"]), root=root, active=active)
+    for branch in schema.get("allOf", []):
+        _validate_units(value, branch, root=root, active=active)
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in schema:
+            _validate_unit_branches(value, schema[keyword], keyword, root, active)
     kind = schema.get("type")
     kinds = kind if isinstance(kind, list) else [kind]
-    if value is not None and "integer" in kinds and type(value) is not int:
+    if value is not None and "integer" in kinds and set(kinds) <= {"integer", "null"} and type(value) is not int:
         raise HostAPIError("INVALID_SCHEMA")
-    if value is not None and "number" in kinds and type(value) not in (int, float):
+    if value is not None and "number" in kinds and set(kinds) <= {"integer", "number", "null"} and type(value) not in (int, float):
         raise HostAPIError("INVALID_SCHEMA")
     if kind == "integer" and type(value) is not int:
         raise HostAPIError("INVALID_SCHEMA")
     if kind == "boolean" and type(value) is not bool:
         raise HostAPIError("INVALID_SCHEMA")
-    if isinstance(value, str) and len(value.encode("utf-8")) > schema.get("x-max-bytes", REQUEST_MAX_BYTES):
+    try:
+        byte_count = len(value.encode("utf-8")) if isinstance(value, str) else (
+            len(canonical_json(value).encode("utf-8")) if "x-max-bytes" in schema else 0)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise HostAPIError("INVALID_SCHEMA") from None
+    if byte_count > schema.get("x-max-bytes", REQUEST_MAX_BYTES):
         raise HostAPIError("INVALID_SCHEMA")
     if isinstance(value, dict):
         for key, item in value.items():
-            _validate_units(item, schema.get("properties", {}).get(key, {}))
+            additional = schema.get("additionalProperties", {})
+            child = schema.get("properties", {}).get(key, additional if isinstance(additional, dict) else {})
+            _validate_units(item, child, root=root, active=active)
     if isinstance(value, list):
         if schema.get("uniqueItems") and len({canonical_json(item) for item in value}) != len(value):
             raise HostAPIError("INVALID_SCHEMA")
         for item in value:
-            _validate_units(item, schema.get("items", {}))
+            _validate_units(item, schema.get("items", {}), root=root, active=active)
+
+
+def _unit_reference(root: dict, reference: object) -> dict:
+    """仅解当前文档的 JSON Pointer；外部、缺失、非 schema 目标一律拒绝。"""
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        raise HostAPIError("INVALID_SCHEMA")
+    target = root
+    for token in reference[2:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(target, dict) or token not in target:
+            raise HostAPIError("INVALID_SCHEMA")
+        target = target[token]
+    if not isinstance(target, dict):
+        raise HostAPIError("INVALID_SCHEMA")
+    return target
+
+
+def _validate_unit_branches(value, branches: list, keyword: str, root: dict, active: frozenset) -> None:
+    matched = 0
+    for branch in branches:
+        if not _branch_is_valid(value, branch, root, "$", 0):
+            continue
+        try:
+            _validate_units(value, branch, root=root, active=active)
+        except HostAPIError:
+            continue
+        matched += 1
+        if keyword == "anyOf":
+            return
+    if matched != 1:
+        raise HostAPIError("INVALID_SCHEMA")
 
 
 # LLM: 目标只允许ASCII普通用户ID，绝不清洗非法输入为有效身份。
@@ -184,20 +235,29 @@ def validate_local_user_id(value: str) -> str:
 
 # LLM: 只有users动作payload顶层user_id是合法选择器，其余身份/权限键递归拒绝。
 # 函数用途: 阻断工具参数中的宿主身份和沙箱元字段注入。
-def reject_identity_injection(payload: dict, users_action: bool = False) -> None:
+def reject_identity_injection(payload: dict, users_action: bool = False, *, workflow_definition: bool = False) -> None:
     forbidden = {"owner_id", "owner_home", "target_owner_home", "admin", "is_admin", "channel", "user_id",
                  "credential_ref", "access_mode", "workspace_root", "override_data_sources", "host_request_owner"}
-    pending = [(payload, True)]
+    pending = [(payload, ())]
     while pending:
-        value, top = pending.pop()
+        value, path = pending.pop()
         if isinstance(value, dict):
             for key, item in value.items():
-                allowed = top and users_action and key == "user_id"
+                current = (*path, key)
+                allowed = not path and users_action and key == "user_id"
+                # 仅冻结完整定义的这个字段可承运 opaque ref；不豁免 config、metadata 或其它动作。
+                credential = (workflow_definition and len(current) == 5
+                    and current[:3] == ("definition", "descriptor", "credential_refs")
+                    and type(current[3]) is int and key == "credential_ref")
+                if credential:
+                    if not isinstance(item, str) or not 1 <= len(item.encode("utf-8")) <= 128:
+                        raise HostAPIError("INVALID_SCHEMA")
+                    allowed = True
                 if not allowed and (key in forbidden or key.startswith("__")):
                     raise HostAPIError("INVALID_SCHEMA")
-                pending.append((item, False))
+                pending.append((item, current))
         elif isinstance(value, (list, tuple)):
-            pending.extend((item, False) for item in value)
+            pending.extend((item, (*path, index)) for index, item in enumerate(value))
 
 
 # LLM: 字段名与现有quota分开验证，范围来自v2对外合同。

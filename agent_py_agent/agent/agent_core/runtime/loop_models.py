@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ...conversation.business_contracts import BusinessExecutionContext
+
 if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
     from ...conversation.host_actor import HostChannelActor
@@ -132,6 +134,14 @@ class RunParams:
     # 上一轮收口原因(缺口F, 双席复核 seq1835): 续跑消息结构化 metadata
     # 的一部分, 系统内部事件可追溯每轮续跑原因, 不依赖提示文本解析。
     continuation_reason: str = ""
+    # 每轮由宿主沿准确 SessionTask/TaskRun 绑定恢复；不从 task_attributes 或当前默认空间推导。
+    business_context: BusinessExecutionContext | None = field(
+        default=None, kw_only=True, repr=False, metadata={"host_only": True}
+    )
+
+    def __post_init__(self) -> None:
+        if self.business_context is not None and not isinstance(self.business_context, BusinessExecutionContext):
+            raise TypeError("business_context 必须是宿主 BusinessExecutionContext 或 None")
 
 
 @dataclass(frozen=True)
@@ -199,6 +209,14 @@ class RuntimeLoopParams:
     capability_presentation_observer: Callable[[dict], object] | None = field(
         default=None, repr=False, compare=False,
     )
+    # RunParams 的同次 host-only 快照；装配透传由 W5 完成，不引入模型参数或执行授权。
+    business_context: BusinessExecutionContext | None = field(
+        default=None, kw_only=True, repr=False, metadata={"host_only": True}
+    )
+
+    def __post_init__(self) -> None:
+        if self.business_context is not None and not isinstance(self.business_context, BusinessExecutionContext):
+            raise TypeError("business_context 必须是宿主 BusinessExecutionContext 或 None")
 
 
 @dataclass

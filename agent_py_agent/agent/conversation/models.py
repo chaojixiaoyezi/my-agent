@@ -13,6 +13,7 @@ from typing import Any
 
 from ..backends.reasoning_control import normalize_reasoning_level
 from ..settings.decision_settings_schema import empty_decision_settings
+from .business_contracts import BusinessExecutionContext
 from .capability_selection_state import (
     CAPABILITY_SELECTION_INVALID,
     CAPABILITY_SELECTION_KEY,
@@ -23,7 +24,7 @@ from .capability_selection_state import (
 
 SCHEMA_VERSION = "conversation_thread.v10"
 # 线程记录里只给界面和宿主用、不进模型上下文的字段：状态条遥测与待送达的宿主提示。拼上下文包的地方都按它剔除。
-MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods", "loaded_tool_names", "metadata")
+MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods", "loaded_tool_names", "metadata", "business_context")
 _MODEL_SELECTION_FIELDS = (
     "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision",
 )
@@ -556,10 +557,16 @@ class ConversationThread:
     learning_source: dict[str, Any] = field(
         default_factory=dict, kw_only=True, metadata={"omit_empty": True}
     )
+    # 完整任务上下文仍归 canonical SessionTask；仅让宿主携带已核验投影，不落线程 JSON/模型上下文。
+    business_context: BusinessExecutionContext | None = field(
+        default=None, kw_only=True, repr=False, compare=False, metadata={"host_only": True}
+    )
 
     # LLM: 构造与 replace 同源验证选择事实；选择时间缺失保持未知，非有限数或错误类型不得混入诊断。
     # 函数用途: 拒绝坏模型/目录版本，旧线程目录从cwd补齐；不读写文件或推断授权。
     def __post_init__(self) -> None:
+        if self.business_context is not None and not isinstance(self.business_context, BusinessExecutionContext):
+            raise TypeError("business_context 必须是宿主 BusinessExecutionContext 或 None")
         if not self.workspace_root and self.cwd:
             object.__setattr__(self, "workspace_root", self.cwd)
         if type(self.revision) is not int or self.revision < 1:
@@ -580,6 +587,7 @@ class ConversationThread:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
+        payload.pop("business_context", None)
         payload["channel_bindings"] = [item.to_dict() for item in self.channel_bindings]
         payload["task_ids"] = list(self.task_ids)
         payload["active_task_ids"] = list(self.active_task_ids)

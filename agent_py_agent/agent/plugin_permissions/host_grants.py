@@ -38,7 +38,8 @@ def execution_schema() -> dict:
                    "max_duration_seconds": integer(86400, 1), "max_tool_calls": integer(1000)})
 
 
-# LLM: 能力枚举动态取唯一host_capabilities（含assets.read/users.read）；批准不免除public管理员和目标名单复验。
+# 能力枚举动态取唯一 host_capabilities（含七项 business.*）；只接受显式 manifest 与用户选择交集。
+# 目录新增词汇不迁移或扩充旧 grant；批准仍不免除原普通执行预算、真人票据、Owner 和目标名单复验。
 # 函数用途: 返回确认预览中可选择的API授权字段。
 def selection_schema() -> dict:
     ids = _list_schema(text(64, 1, r"^(\*|[a-z0-9][a-z0-9_-]{1,63})$"))

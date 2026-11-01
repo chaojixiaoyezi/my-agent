@@ -224,6 +224,25 @@ class WorkflowRunRecord:
     phase: str = field(default='', kw_only=True)
     effect_outcome: str = field(default='', kw_only=True)
     confirmed_step_refs: tuple[str, ...] = field(default=(), kw_only=True)
+    # 三种版本各守职责：业务空间选择、Workflow scope、原运行 CAS 与执行定义指纹互不替代。
+    business_context: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    scope_snapshot: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    scope_revision: int = field(default=0, kw_only=True)
+    revision: int = field(default=0, kw_only=True)
+
+    def __post_init__(self) -> None:
+        # 这里只定义快照/版本合同；锁内比较与递增由 W3 的原 run_store 实现，不在 DTO 猜 CAS。
+        for name in ('scope_revision', 'revision'):
+            value = getattr(self, name)
+            if type(value) is not int:
+                raise TypeError(f'{name} 必须是整数')
+            if value < 0:
+                raise ValueError(f'{name} 不能为负数')
+        for name in ('business_context', 'scope_snapshot'):
+            value = getattr(self, name)
+            if type(value) is not dict:
+                raise TypeError(f'{name} 必须是 JSON 对象')
+            setattr(self, name, payload(value))
 
     # LLM: 嵌套步骤、进度和断点一起序列化；旧记录缺字段由默认值兼容，不清除历史失败。
     # 函数用途: 输出完整运行JSON快照。

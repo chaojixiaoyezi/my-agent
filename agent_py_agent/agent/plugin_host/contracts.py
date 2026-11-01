@@ -2,8 +2,9 @@
 # 模块用途: 定义插件宿主v2调用与独立调用者，将闭合参数解码和身份范围授权分开。
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from .action_specs import action_spec
 from .action_specs import required_capabilities as required_capabilities
@@ -183,6 +184,16 @@ class DomainResult:
         object.__setattr__(self, "warnings", tuple(self.warnings))
 
 
+class BusinessDomainPort(Protocol):
+    """供宿主后续接同一业务服务；只消费原 Issuer 授权对象，不提供身份捷径。"""
+
+    def call(self, authorized: AuthorizedCall) -> DomainResult:
+        ...
+
+    def stream(self, authorized: AuthorizedCall) -> Iterable[Mapping]:
+        ...
+
+
 # LLM: 只能在宿主组合根安装领域对象，None表示未接入而不是成功空结果。
 # 类用途: 固定四条互相独立的业务端口。
 @dataclass(frozen=True)
@@ -191,10 +202,12 @@ class HostDomainPorts:
     local_users: object = None
     execution: object = None
     observations: object = None
+    # W0 只冻结端口；实际分派、实时执行闸与逐帧撤权由 W13/W14 接线。
+    business: BusinessDomainPort | None = None
 
 
 # LLM: execute可选合法key；write/async仍必填、read/stream仍禁止。身份与范围校验不变，DTO不授权。
-# 函数用途: 校验冻结调用并区分受管选择器、普通本地账号和资产投递的身份边界。
+# 函数用途: 校验冻结调用和身份边界；仅业务完整工作流定义允许精确 opaque credential_ref 路径。
 def decode_call(raw: bytes) -> Call:
     row = validate_object(strict_json(raw), closed({
         "schema": {"const": "plugin_host_call.v2"}, "action": text(96, 1), "payload": {"type": "object"}}, {
@@ -206,7 +219,8 @@ def decode_call(raw: bytes) -> Call:
     users = row["action"].startswith(("users.", "governance.reviews.", "assets.delivery."))
     if row["action"].startswith(("users.", "governance.reviews.")) and "as_user" in row:
         raise HostAPIError("INVALID_SCHEMA")
-    reject_identity_injection(row["payload"], users)
+    reject_identity_injection(row["payload"], users, workflow_definition=row["action"] in {
+        "business.workflows.create", "business.workflows.update"})
     payload = spec.validate_payload(row["payload"])
     if (row["action"].startswith("users.local.") and row["action"] != "users.local.audit_group.set"
             and "user_id" in payload):

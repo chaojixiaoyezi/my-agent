@@ -303,6 +303,7 @@ _HOME_STRING_FIELDS = (
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
     "home_context_enabled", "run_task_workspace_enabled", "thread_prompt_prefix_freeze_enabled",
+    "business_spaces_enabled", "prompt_runtime_snapshots_enabled",
     # 来源开关同样走真实布尔归一，带引号false不能按非空字符串误开启本地或网络读取。
     "agents_source_enabled", "agents_source_network_enabled",
 )

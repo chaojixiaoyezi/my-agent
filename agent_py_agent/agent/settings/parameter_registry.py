@@ -113,6 +113,8 @@ _BOUNDARY_NAMES = frozenset({
     "plugin_legacy_sandbox_default",
     # 规则来源及网络读取由用户控制；模型不能关闭规则来源或自行开启URL加载。
     "agents_source_enabled", "agents_source_network_enabled",
+    # 业务开关不能由模型自助开启；快照开关同样不能绕过宿主的提示来源策略。
+    "business_spaces_enabled", "prompt_runtime_snapshots_enabled",
 })
 # 常用参数：/settings 默认只列这些，user_config 的搜索结果也标出来，方便先推荐。这是封闭的产品决策名单（2026-09-27 配置分类
 # 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。
@@ -125,6 +127,8 @@ COMMON_KEYS = (
     "timezone", "tui_mouse_capture_default",
 )
 _CATEGORIES = (
+    (("business_",), "业务空间"),
+    (("prompt_runtime_",), "运行时快照"),
     (("assistant_",), "沟通与展示"),
     (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_", "embedding_"),
      "模型请求"),

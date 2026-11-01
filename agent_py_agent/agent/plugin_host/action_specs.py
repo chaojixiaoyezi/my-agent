@@ -207,9 +207,10 @@ def action_specs():
     from .action_specs_substrate import substrate_action_specs
     from .action_specs_v2_ext import v2_action_specs
     from .action_specs_v2_portal import portal_v2_action_specs
+    from .business_action_specs import business_host_action_specs
     rows = (_conversation_specs() + _user_specs() + _execution_specs() + _interaction_specs()
             + _task_goal_specs() + _read_specs() + v2_action_specs() + audit_bot_specs() + portal_v2_action_specs()
-            + substrate_action_specs())
+            + substrate_action_specs() + business_host_action_specs())
     if len({row.name for row in rows}) != len(rows):
         raise ValueError("宿主动作重名")
     return MappingProxyType({row.name: row for row in rows})

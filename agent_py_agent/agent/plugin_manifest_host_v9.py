@@ -2,15 +2,17 @@
 # 模块用途: 校验插件宿主v2能力清单，不让新接口借旧插件或管理员安装身份提权。
 from __future__ import annotations
 
+from .plugin_host.business_action_specs import business_capabilities
 
-# LLM: plugins.manage/workflows.debug必须独立申请批准，不由write/execute或安装者身份推导。
+
+# LLM: plugins.manage/workflows.debug及business七项必须独立申请批准，不由write/execute或安装者身份推导。
 # 函数用途: 列出v9通用能力词汇，明确区分包管理、管理员调试与旧受限执行。
 def host_capabilities() -> frozenset[str]:
     return frozenset({"read", "write", "chat.history", "chat", "threads.manage", "requests.cancel", "execute",
                       "users.read", "users.manage", "act_as_user", "interactions.read", "interactions.respond",
                       "tasks.read", "tasks.control", "goals.read", "goals.control", "memory.read", "artifacts.read",
                       "assets.read", "assets.write", "datasources.read", "datasources.write", "recorder.control",
-                      "audit_group.read", "audit_group.invoke", "plugins.manage", "workflows.debug"})
+                      "audit_group.read", "audit_group.invoke", "plugins.manage", "workflows.debug"}) | business_capabilities()
 
 
 # LLM: list/tuple入口由调用者指定，不做字符串拆分或去重清洗。

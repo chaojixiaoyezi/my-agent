@@ -78,6 +78,10 @@ home_context_enabled: true
 # 在线程内冻结系统提示里的 AGENTS/SOUL/USER 三份人格文件（目前不冻结其它提示来源）。
 # 期间的安全行变化放动态尾巴；已提交压缩或换模型后下一次准备刷新。关闭后恢复每次现读。
 thread_prompt_prefix_freeze_enabled: true
+# 业务空间合同总开关；默认关闭保留旧owner路径，开启也不授予空间或插件权限。
+business_spaces_enabled: false
+# 运行时快照投影默认开启；关闭恢复旧粗粒度文本，消费方须按单次请求冻结值。
+prompt_runtime_snapshots_enabled: true
 # 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
 # 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
 home_lesson_stale_caveat_days: 7
