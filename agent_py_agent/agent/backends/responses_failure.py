@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from ..contracts.diagnostics import redact_diagnostic_text
 from .errors import (
     ProviderContextWindowError,
     ProviderQuotaExhaustedError,
@@ -29,15 +30,21 @@ _RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "rate_limit_error", "too_m
 _TRANSIENT_CODES = frozenset({
     "server_error", "internal_error", "internal_server_error", "server_is_overloaded", "overloaded",
     "overloaded_error", "service_unavailable", "slow_down", "timeout",
+    "websocket_connection_limit_reached",
 })
 # 诊断里只留错误对象的这几个字段，并限长；不带请求正文或回复正文。
-_KEPT_FIELDS = {"code": 64, "type": 64, "param": 128, "message": 500}
+_KEPT_FIELDS = {"code": 64, "type": 64, "param": 128, "message": 500, "request_id": 128}
 
 
 # LLM: response.failed 的错误在 response.error；error 事件的错误在 error 对象或顶层 code/message/param（顶层 type 恒为 "error"，
 #   不当作错误码）。错误写成字符串时当作 message 保留（error 事件再并上顶层 code/param）。字段只留白名单并限长，缺失时返回空字典。纯函数。
 # 函数用途: 从失败事件里取出服务商给的错误对象。
 def failed_event_provider_error(event: dict) -> dict[str, str]:
+    return _provider_error_projection(event)[0]
+
+
+def _provider_error_projection(event: dict) -> tuple[dict[str, str], bool]:
+    """错误正文与截断事实在同一次提取中生成；公开提取器仍保持原字典签名。"""
     top = {key: event.get(key) for key in ("code", "message", "param")}
     if event.get("type") == "response.failed":
         response = event.get("response") if isinstance(event.get("response"), dict) else {}
@@ -47,20 +54,39 @@ def failed_event_provider_error(event: dict) -> dict[str, str]:
     if isinstance(raw, str):
         raw = {**top, "message": raw}
     if not isinstance(raw, dict):
-        return {}
-    return {key: str(raw[key])[:limit] for key, limit in _KEPT_FIELDS.items() if raw.get(key) not in (None, "")}
+        return {}, raw is not None
+    # 先脱敏再裁剪，不能将秘密截成无法识别的半截，也不能执行扩展对象的 __str__。
+    result = {}
+    changed = len(raw) != sum(key in raw for key in _KEPT_FIELDS)
+    for key, limit in _KEPT_FIELDS.items():
+        value = raw.get(key)
+        if type(value) is str and value:
+            result[key] = redact_diagnostic_text(value).encode('utf-8', errors='replace')[:limit].decode('utf-8', errors='ignore')
+            changed = changed or result[key] != value
+        elif key == 'code' and type(value) is int and value.bit_length() <= 64:
+            result[key] = str(value)
+        elif key in raw and value is not None and type(value) is not str:
+            changed = True
+    request_id = event.get('request_id')
+    if 'request_id' not in result and type(request_id) is str:
+        result['request_id'] = redact_diagnostic_text(request_id).encode('utf-8', errors='replace')[:128].decode('utf-8', errors='ignore')
+        changed = changed or result['request_id'] != request_id
+    return result, changed
 
 
 # LLM: 结构化错误码优先（_error_for_code），认不出码时才用与 HTTP 同一组全文判定兜底上下文超限与硬额度，其余保留原码；
-#   这样“限流消息里提到 token limit”不会被当成上下文超限。返回异常而不抛出，由调用方 raise。用户可见文字只带错误码，
-#   服务商原始消息只进 details 供诊断。
+#   这样“限流消息里提到 token limit”不会被当成上下文超限。返回异常而不抛出，由调用方 raise。
+#   CLI 沿原异常文本显示相同的有界脱敏字段；JSON 转义控制字符，完整正文与请求参数不进入提示。
 # 函数用途: 把一个 error / response.failed 事件换成对应的结构化供应商异常。
 def failed_event_error(event: dict) -> Exception:
-    provider_error = failed_event_provider_error(event)
+    provider_error, truncated = _provider_error_projection(event)
     code = (provider_error.get("code") or provider_error.get("type") or "").strip().lower()
     detail = json.dumps(provider_error, ensure_ascii=False, sort_keys=True)
     message = f"Responses 服务返回失败事件（错误码 {code}）。" if code else "Responses 服务返回失败事件（服务商没有给出错误码）。"
+    if provider_error:
+        message += f' 诊断：{detail}'
     details = {"event_type": str(event.get("type") or ""), "provider_error": provider_error}
+    details['details_truncated'] = truncated
     by_code = _error_for_code(code, message, details)
     if by_code is not None:
         return by_code
@@ -77,9 +103,9 @@ def _error_for_code(code: str, message: str, details: dict) -> Exception | None:
     if code in _HARD_QUOTA_ERROR_CODES:
         return ProviderQuotaExhaustedError(message, details=details)
     if code in _RATE_LIMIT_CODES:
-        return ProviderUsageLimitError(message)
+        return ProviderUsageLimitError(message, details=details)
     if code in _TRANSIENT_CODES:
-        return ProviderTransientError(message)
+        return ProviderTransientError(message, details=details)
     return None
 
 

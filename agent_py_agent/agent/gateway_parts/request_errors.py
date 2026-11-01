@@ -391,6 +391,8 @@ def _structured_error_projection(source: object) -> dict:
 #   空回复错误额外携带已白名单化的诊断，不更改状态/文案，不把其他异常归成空回复。
 def gateway_provider_error_projection(exc: BaseException) -> dict:
     fields = _structured_error_projection(exc)
+    report = runtime_error_report(exc)
+    fields.update({key: report[key] for key in ('provider_error', 'diagnostic', 'details_truncated') if key in report})
     if isinstance(exc, UserReplyUnavailableError):
         return {**fields, "user_reply_diagnostic": public_user_reply_diagnostic(exc.user_reply_diagnostic)}
     details = getattr(exc, "details", None)
@@ -425,8 +427,10 @@ def gateway_provider_error_projection(exc: BaseException) -> dict:
 def provider_rejection_user_notice(user_error: object, projection: object) -> str:
     text = str(user_error or "")
     diagnostic = projection.get("rejection_diagnostic") if isinstance(projection, dict) else None
-    if not isinstance(diagnostic, dict):
+    provider = projection.get('provider_error') if isinstance(projection, dict) else None
+    if not isinstance(diagnostic, dict) and not isinstance(provider, dict):
         return text
+    diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
     parts: list[str] = []
     cause = str(diagnostic.get("cause_code") or "")
     if cause:
@@ -446,6 +450,13 @@ def provider_rejection_user_notice(user_error: object, projection: object) -> st
     excerpt = str(diagnostic.get("body_excerpt") or "")
     if excerpt:
         parts.append(f"服务端说明：{excerpt}")
+    if type(provider) is dict:
+        from ..contracts.diagnostics import redact_diagnostic_text
+
+        for key in ('code', 'type', 'param', 'request_id', 'message'):
+            value = provider.get(key)
+            if type(value) is str and value:
+                parts.append(f'{key}={redact_diagnostic_text(value)[:500]}')
     if not parts:
         return text
     return f"{text}（{'；'.join(parts)}）"

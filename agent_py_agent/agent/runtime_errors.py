@@ -19,6 +19,7 @@ from .backends.errors import (
     is_provider_transient_error,
     provider_error_http_status,
 )
+from .contracts.diagnostics import DiagnosticEnvelope, redact_diagnostic_text
 from .contracts.model_call_ledger import (
     ModelCallAdmissionClosedError,
     find_model_call_admission_error,
@@ -331,7 +332,7 @@ def _report(
     *,
     context: str,
 ) -> dict[str, Any]:
-    return RuntimeErrorReport(
+    report = RuntimeErrorReport(
         category=template.category,
         error_type=exc.__class__.__name__,
         message=compact_error_message(exc),
@@ -340,6 +341,40 @@ def _report(
         operator_message=template.operator_message,
         context=str(context or "").strip(),
     ).to_dict()
+    report.update(_provider_diagnostic_fields(exc, template.category))
+    return report
+
+
+def _provider_diagnostic_fields(exc: BaseException, category: str) -> dict[str, Any]:
+    """只投影 typed 供应商的固定标量；Envelope 守控制合同，原字段保留可定位细因。"""
+    if not isinstance(exc, (ProviderRecoverableError, ProviderRequestRejectedError)):
+        return {}
+    details = getattr(exc, 'details', None)
+    raw = details.get('provider_error') if type(details) is dict else None
+    if type(raw) is not dict or not raw:
+        return {}
+    safe, changed = {}, details.get('details_truncated') is True
+    limits = {'code': 64, 'type': 64, 'param': 128, 'message': 500, 'request_id': 128}
+    for key, limit in limits.items():
+        value = raw.get(key)
+        if type(value) is str:
+            text = redact_diagnostic_text(value).encode('utf-8', errors='replace')[:limit].decode('utf-8', errors='ignore')
+            safe[key] = text
+            changed = changed or text != value
+        elif key in raw:
+            changed = True
+    changed = changed or len(safe) != len(raw)
+    from .contracts.error_taxonomy import error_contract
+
+    code = fallback_error_code(exc)
+    envelope = DiagnosticEnvelope(
+        code=code, category=category, retryable=error_contract(code).retryable,
+        provider_error={key: safe[source] for key, source in (
+            ('provider_code', 'code'), ('request_id', 'request_id')) if source in safe},
+        details_truncated=changed,
+    ).to_dict()
+    # 冻结 DTO 的 provider_error 仅含 code/id；细因沿原报告同一授权出口传输，不改共享 DTO。
+    return {'provider_error': safe, 'diagnostic': envelope, 'details_truncated': changed}
 
 
 # LLM: Error templates carry an explicit recoverability bit so permanent provider/configuration facts cannot inherit the recoverable default by accident.

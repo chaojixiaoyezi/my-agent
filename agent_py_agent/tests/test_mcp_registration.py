@@ -809,3 +809,16 @@ def test_remote_process_claim_stays_untrusted_output_through_executor(tmp_path):
     assert "structuredContent" in rendered
     assert "[runtime-process-facts]" not in rendered
     assert "<untrusted_tool_result" in rendered
+
+
+def test_failed_structured_content_still_survives_diagnostic_extension():
+    client = _FakeClient(result={'content': 'bad input', 'isError': True,
+        'structuredContent': {'reason': 'missing', 'field': 'name', 'token': 'private-token'}})
+    outcome = _proxy(client).execute({})
+    payload = json.loads(outcome.output)
+    assert not outcome.ok and outcome.error_code == 'TOOL_EXECUTION_FAILED'
+    assert outcome.effect_outcome == 'failed'
+    assert payload['structuredContent']['reason'] == 'missing'
+    assert payload['structuredContent']['field'] == 'name'
+    assert payload['structuredContent']['token'] == '<redacted>'
+    assert len(client.calls) == 1

@@ -19,6 +19,8 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 from ..common.cancellation import CancellationToken
+from ..contracts.diagnostics import DiagnosticEnvelope
+from ..contracts.error_taxonomy import error_contract
 from ..io.sqlite_connection import sqlite_error_details
 from ..local_storage import ToolOperationRecord
 from ..plugin_events.decision_ledger import PLUGIN_GATE_DECISION_EVIDENCE_KEY
@@ -938,6 +940,7 @@ def _project_output(
     runtime: ToolRuntime,
     outcome: ToolHandlerOutcome,
 ) -> ToolOutputProjection:
+    """归档后只补安全诊断；失败不再写同一磁盘，不撤销或重放已执行 handler。"""
     if request.output_archiver is not None:
         try:
             return request.output_archiver(call, outcome)
@@ -953,6 +956,7 @@ def _project_output(
                     "raw_output_chars": len(raw),
                     "raw_output_bytes": len(encoded),
                     "raw_output_sha256": hashlib.sha256(encoded).hexdigest(),
+                    **_archive_failure_diagnostic(request, call, exc),
                 },
             )
     output_policy = output_policy_for_outcome(runtime.runtime_policy, outcome)
@@ -977,6 +981,29 @@ def _project_output(
         blocks.append(ToolContentBlock("text", text=output))
     blocks.extend(ToolContentBlock("ref", ref=item.ref) for item in refs)
     return ToolOutputProjection(tuple(blocks), refs, metadata)
+
+
+def _archive_failure_diagnostic(request: ToolExecutorRequest, call: ToolCall, exc: Exception) -> dict[str, Any]:
+    """只取原生 errno 和最多四层显式 cause；不序列化异常正文、文件名或工具正文。"""
+    causes, seen, number = [], set(), None
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(causes) < 4:
+        seen.add(id(current))
+        native_errno = current.errno if isinstance(current, OSError) else None
+        if type(native_errno) is not int or native_errno.bit_length() > 64:
+            native_errno = None
+        if number is None:
+            number = native_errno
+        causes.append({'error_type': type(current).__name__[:96], 'errno': native_errno})
+        current = current.__cause__
+    identity = (request.operation_owner_id, call.run_id, call.attempt_id, call.turn_id, call.call_id)
+    reference = 'volatile:' + hashlib.sha256(json.dumps(identity).encode('utf-8')).hexdigest()
+    contract = error_contract('TOOL_OUTPUT_ARCHIVE_FAILED')
+    diagnostic = DiagnosticEnvelope(code=contract.code, category=contract.category,
+        retryable=contract.retryable, errno=number, operation='tool_output.archive',
+        diagnostic_ref=reference, details_truncated=current is not None).to_dict()
+    return {'diagnostic': diagnostic, 'diagnostic_ref': reference, 'diagnostic_storage': 'volatile',
+            'archive_diagnostic': {'causes': causes}, 'errno': number, 'operation': diagnostic['operation']}
 
 
 # LLM: handler执行后沿原输出/操作事实归一结果；门决定只取宿主evidence覆盖同名metadata，不信handler授权字段。
@@ -1004,9 +1031,11 @@ def _canonical_result(
     }
     projection_error = str(projection.metadata.get("projection_error_code") or "")
     if projection_error:
+        diagnostic = projection.metadata.get('diagnostic') or {}
         return ToolResult.failed(
             call,
-            "The tool ran, but its output could not be archived safely.",
+            "The tool ran, but its output could not be archived safely. "
+            f"errno={diagnostic.get('errno')}; diagnostic_ref={diagnostic.get('diagnostic_ref')}; storage=volatile",
             error_code=projection_error,
             failure_stage=ToolFailureStage.PERSISTENCE.value,
             facts=ToolFailureFacts(

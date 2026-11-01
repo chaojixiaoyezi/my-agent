@@ -217,7 +217,7 @@ class MCPProxyTool(BaseTool):
                                       details={"process_cleanup": exc.report})
         except MCPError as exc:
             return self._error_result(str(exc), _ERROR_CODE_MAP.get(exc.code, "TOOL_EXECUTION_FAILED"),
-                                      effect_outcome=exc.effect_outcome)
+                                      effect_outcome=exc.effect_outcome, details=exc.diagnostic_projection())
         except Exception as exc:  # 兜底：任何意外异常都转结构化错误，绝不向上崩主循环。
             logger.exception("MCP 工具 %s 调用出现未预期异常", self.model_spec.name)
             return self._error_result(
@@ -254,6 +254,8 @@ class MCPProxyTool(BaseTool):
             json.dumps({"error": message, **(details or {})}, ensure_ascii=False),
             error_code=error_code,
             effect_outcome=effect_outcome,
+            result_envelope={key: details[key] for key in ('diagnostic', 'mcp_error', 'details_truncated')
+                             if details is not None and key in details},
         )
 
 
