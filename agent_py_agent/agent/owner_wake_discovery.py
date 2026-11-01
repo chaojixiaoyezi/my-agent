@@ -1699,6 +1699,11 @@ def _project_task_ledger_terminal_locked(
         return False
     if not isinstance(link_payload, dict):
         return False
+    # 旧数据分片回填尚未覆盖时保持关联原样；否则下一 tick 可能把先写出的
+    # cancelled link 当成完成依据，绕过尚未定位/核实的 canonical state。
+    task_root = _task_root_for_link(owner_home, link_payload, task_id)
+    if task_root is None:
+        return False
     # ① link status → 'cancelled'（生命周期权威终态，保留其余字段）
     if str(link_payload.get("status") or "").strip().lower() == THREAD_TASK_LINK_ACTIVE_STATUS:
         def updater(data: dict[str, Any]) -> dict[str, Any]:
@@ -1713,9 +1718,6 @@ def _project_task_ledger_terminal_locked(
         except (OSError, FileNotFoundError, TypeError):
             return False
     # ② state.json → finish_run_workspace（权威终态写；身份从文件读）
-    task_root = _task_root_for_link(owner_home, link_payload, task_id)
-    if task_root is None:
-        return False
     try:
         identity = _read_json_object_at(task_root / "work" / "run_workspace.json")
         state = _read_json_object_at(task_root / "work" / "state.json")
@@ -1755,27 +1757,18 @@ def _project_task_ledger_terminal_locked(
 
 
 def _task_root_for_link(owner_home: Path, link_payload: dict, task_id: str) -> Path | None:
-    """定位 task 工作区根目录：优先 link.task_path（相对 owner_home 解析），
-    失败按 state.json 的 task_id 反查（旧 link 无 task_path 的兜底）。"""
-    task_path = str(link_payload.get("task_path") or "").strip()
+    """保留已核实的 task_path 快路；旧 link 通过有界 locator 延后回填。"""
+    from .conversation.task_locator import resolve_task_location, validate_task_location
+
+    task_path = link_payload.get("task_path")
     if task_path:
-        candidate = Path(task_path)
-        if not candidate.is_absolute():
-            candidate = Path(owner_home) / candidate
-        if (candidate / "work" / "state.json").is_file():
+        candidate = validate_task_location(owner_home, task_path, task_id)
+        if candidate is not None:
             return candidate
-    tasks_root = Path(owner_home) / "tasks"
-    try:
-        for state_path in sorted(tasks_root.glob("*/*/work/state.json"), reverse=True):
-            payload = json.loads(state_path.read_text(encoding="utf-8"))
-            if (
-                isinstance(payload, dict)
-                and str(payload.get("task_id") or "").strip() == task_id
-            ):
-                return state_path.parent.parent
-    except (OSError, UnicodeError, ValueError):
-        return None
-    return None
+    located = resolve_task_location(owner_home, task_id)
+    # partial 与 missing 都不能收口；partial 的耐久游标将在下次发现时继续，
+    # 不将“本片没找到”伪装成不存在或已完成。
+    return Path(located["path"]) if located["status"] == "found" else None
 
 
 def _read_json_object_at(path: Path) -> dict[str, Any]:

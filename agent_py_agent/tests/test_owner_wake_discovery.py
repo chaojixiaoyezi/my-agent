@@ -68,6 +68,59 @@ def _write_scheduler_store(owner_home: Path, *, next_run_at: float, with_run: bo
     )
 
 
+@pytest.mark.parametrize("kind", ["outside", "wrong-task", "wrong-owner", "symlink"])
+def test_link_fast_path_checks_real_task_owner_and_directory_boundary(tmp_path, kind):
+    from agent_py_agent.agent.owner_wake_discovery import _task_root_for_link
+
+    home = tmp_path / "owner"
+    root = (tmp_path / "outside") if kind == "outside" else (home / "tasks" / "day" / "candidate")
+    state = root / "work" / "state.json"
+    state.parent.mkdir(parents=True)
+    home.mkdir(exist_ok=True)
+    state.write_text(json.dumps({"task_id": "other" if kind == "wrong-task" else "wanted",
+                                 "owner_id": "local/other" if kind == "wrong-owner" else "local/main"}))
+    if kind == "symlink":
+        target = home / "linked"
+        target.symlink_to(root, target_is_directory=True)
+    else:
+        target = root
+    result = _task_root_for_link(home, {"task_path": str(target)}, "wanted")
+    assert result is None or result != target
+
+
+def test_link_without_path_does_not_glob_history(tmp_path, monkeypatch):
+    from agent_py_agent.agent.owner_wake_discovery import _task_root_for_link
+
+    home = tmp_path / "owner"
+    root = home / "tasks" / "day" / "old-task"
+    (root / "work").mkdir(parents=True)
+    (root / "work" / "state.json").write_text(json.dumps({"task_id": "wanted"}))
+    original = Path.glob
+
+    def no_full_glob(path, pattern, *args, **kwargs):
+        assert pattern != "*/*/work/state.json", "旧 link 不允许全库 glob"
+        return original(path, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", no_full_glob)
+    assert _task_root_for_link(home, {}, "wanted") == root
+
+
+def test_deferred_task_lookup_does_not_publish_a_terminal_link(tmp_path):
+    from agent_py_agent.agent.owner_wake_discovery import _project_task_ledger_terminal_locked
+
+    home = tmp_path / "owner"
+    for index in range(150):
+        state = home / "tasks" / "day" / str(index) / "work" / "state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"task_id": f"other-{index}"}))
+    link = home / "conversations" / "tasks" / "wanted.json"
+    link.parent.mkdir(parents=True)
+    link.write_text(json.dumps({"task_id": "wanted", "status": "active"}))
+    before = link.read_bytes()
+    assert not _project_task_ledger_terminal_locked(home, None, "wanted", {}, link)
+    assert link.read_bytes() == before, "partial 查找不能先把 link 标成 cancelled"
+
+
 def test_discovers_owner_with_enabled_policy_in_runtime_layout(tmp_path) -> None:
     owners = tmp_path / "owners"
     _write_policy(_store_root(owners, "feishu", "users", "u1", "runtime"), "policy-a", enabled=True)

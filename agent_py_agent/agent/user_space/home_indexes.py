@@ -8,8 +8,12 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import stat
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +25,12 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
-from .home_layout import MyAgentHomePaths
+from ..common.nofollow_fs import (
+    create_private_file_beneath,
+    ensure_private_dir,
+    open_directory_beneath,
+)
+from .home_layout import MyAgentHomePaths, home_paths
 from .owner_resolver import OwnerHomeResult
 
 # 写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。
@@ -100,6 +109,218 @@ class _LatestRefSource:
 class IndexRefsReport:
     records: list[dict[str, Any]]
     load_errors: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class TaskRefLookupScope:
+    """定位缓存只属于可信 owner 根；里面没有任务业务状态。"""
+
+    owner_root: Path
+    owner_id: str
+    source: Path
+    projection: Path
+
+
+def task_ref_lookup_scope(owner_home: object) -> TaskRefLookupScope:
+    if isinstance(owner_home, MyAgentHomePaths):
+        owner_root = owner_home.owner_home_dir
+        base = owner_home.root
+        owner_id = owner_home.owner_id or "local/main"
+        source = owner_home.global_index_active_tasks_jsonl
+    elif isinstance(owner_home, OwnerHomeResult):
+        owner_root, owner_id = owner_home.home_dir, owner_home.owner_id
+        base = owner_home.root
+        source = home_paths(owner_home.root).global_index_active_tasks_jsonl
+    else:
+        owner_root = Path(owner_home).expanduser().absolute()
+        # 只按宿主既有 owner 布局解释可信路径，不用索引正文构造 owner 根。
+        if owner_root.parent.name == "local" and owner_root.parent.parent.name == "owners":
+            base = owner_root.parents[2]
+            owner_id = "local/" + owner_root.name
+        elif (
+            len(owner_root.parents) >= 5
+            and owner_root.parent.name in {"users", "groups"}
+            and owner_root.parents[2].name == "providers"
+            and owner_root.parents[3].name == "owners"
+        ):
+            base = owner_root.parents[4]
+            owner_id = owner_root.relative_to(base / "owners").as_posix()
+        else:
+            # 老版单 owner 布局；根本身就是调用方已绑定的 local/main 空间。
+            base, owner_id = owner_root, "local/main"
+        source = home_paths(base).global_index_active_tasks_jsonl
+    raw_root = Path(owner_root).expanduser().absolute()
+    if raw_root.is_symlink() or ".." in raw_root.parts:
+        raise OSError("owner root cannot be rebound through a symlink")
+    relative = raw_root.relative_to(Path(base).expanduser().absolute())
+    anchor = Path(base).resolve(strict=True)
+    descriptor = open_directory_beneath(anchor, relative.parts)
+    os.close(descriptor)
+    root = anchor.joinpath(*relative.parts)
+    return TaskRefLookupScope(root, owner_id, source, root / "cache" / "task_locator.sqlite3")
+
+
+def task_ref_meta(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM locator_meta WHERE key=?", (key,)).fetchone()
+    return str(row[0]) if row is not None else default
+
+
+def set_task_ref_meta(conn: sqlite3.Connection, key: str, value: object) -> None:
+    text = str(value)
+    if task_ref_meta(conn, key) != text:
+        conn.execute("INSERT OR REPLACE INTO locator_meta(key,value) VALUES (?,?)", (key, text))
+
+
+@contextmanager
+def task_ref_projection(owner_home: object):
+    """每次精确查询使用有界 SQLite 页缓存；游标与位置投影同事务提交，可删除重建。"""
+    scope = task_ref_lookup_scope(owner_home)
+    ensure_private_dir(scope.projection.parent, canonical_root=scope.owner_root)
+    try:
+        descriptor = create_private_file_beneath(scope.owner_root, ("cache", scope.projection.name))
+    except FileExistsError:
+        pass
+    else:
+        os.close(descriptor)
+    leaf = scope.projection.lstat()
+    if not stat.S_ISREG(leaf.st_mode) or leaf.st_nlink != 1:
+        raise OSError("unsafe task locator projection")
+    conn = sqlite3.connect(scope.projection, timeout=0.05)
+    try:
+        conn.execute("PRAGMA cache_size=-256")
+        conn.execute("CREATE TABLE IF NOT EXISTS locator_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS task_refs(
+            owner_id TEXT NOT NULL, task_id TEXT NOT NULL, path TEXT NOT NULL, origin TEXT NOT NULL,
+            PRIMARY KEY(owner_id,task_id,origin,path))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS legacy_dirs(
+            path TEXT PRIMARY KEY, depth INTEGER NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+            signature TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0)""")
+        conn.execute("BEGIN IMMEDIATE")
+        identity = scope.owner_root.stat()
+        binding = f"{scope.owner_root}:{identity.st_dev}:{identity.st_ino}:{scope.owner_id}:{scope.source}"
+        if task_ref_meta(conn, "binding") != binding:
+            conn.execute("DELETE FROM locator_meta")
+            conn.execute("DELETE FROM task_refs")
+            conn.execute("DELETE FROM legacy_dirs")
+            set_task_ref_meta(conn, "binding", binding)
+        with conn:
+            yield scope, conn
+    finally:
+        conn.close()
+
+
+def _task_ref_source_stamp(info: os.stat_result) -> str:
+    return ":".join(str(v) for v in (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+
+
+def _sync_task_ref_source(scope: TaskRefLookupScope, conn: sqlite3.Connection, max_records: int) -> dict:
+    """沿现成 active_tasks.jsonl 的准确字节位置增量消费，不全读/反序列化历史。"""
+    previous = task_ref_meta(conn, "index.stamp")
+    offset = int(task_ref_meta(conn, "index.offset", "0"))
+    try:
+        info = scope.source.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        if previous != "missing":
+            conn.execute("DELETE FROM task_refs WHERE origin='publisher'")
+            set_task_ref_meta(conn, "index.stamp", "missing")
+            set_task_ref_meta(conn, "index.offset", 0)
+            set_task_ref_meta(conn, "index.errors", 0)
+        return {"index_complete": True, "index_records_read": 0, "index_errors": 0,
+                "index_errors_total": 0, "index_offset": 0}
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("unsafe task reference source")
+    stamp = _task_ref_source_stamp(info)
+    reset = previous in {"", "missing"}
+    if not reset:
+        old = tuple(int(v) for v in previous.split(":"))
+        reset = old[:2] != (info.st_dev, info.st_ino) or info.st_size < old[2]
+        reset |= info.st_size == old[2] and stamp != previous
+    scanned = errors = 0
+    with scope.source.open("rb") as stream:
+        if _task_ref_source_stamp(os.fstat(stream.fileno())) != stamp:
+            raise OSError("task reference source changed before open")
+        if not reset and offset:
+            stream.seek(max(0, offset - 128))
+            reset = stream.read(min(offset, 128)).hex() != task_ref_meta(conn, "index.anchor")
+        if reset:
+            conn.execute("DELETE FROM task_refs WHERE origin='publisher'")
+            offset = 0
+            set_task_ref_meta(conn, "index.errors", 0)
+        discarding = False if reset else task_ref_meta(conn, "index.discarding") == "1"
+        stream.seek(offset)
+        # 正常未完成行不签收。超长坏行按有界字节片丢弃到换行，保存丢弃状态，
+        # 不能为限制单行内存就永久堵住其后的正常记录。
+        steps = 0
+        while steps < max_records and stream.tell() < info.st_size:
+            start = stream.tell()
+            raw = stream.readline(65537)
+            steps += 1
+            if discarding:
+                discarding = not raw.endswith(b"\n")
+                continue
+            if len(raw) > 65536:
+                scanned += 1
+                errors += 1
+                discarding = not raw.endswith(b"\n")
+                continue
+            if not raw.endswith(b"\n"):
+                stream.seek(start)
+                break
+            scanned += 1
+            try:
+                row = json.loads(raw)
+            except (ValueError, UnicodeError):
+                errors += 1
+                continue
+            if not isinstance(row, dict):
+                errors += 1
+                continue
+            if not isinstance(row.get("owner_id"), str) or not row["owner_id"]:
+                errors += 1
+                continue
+            if row.get("owner_id") != scope.owner_id:
+                continue
+            task_id, path = row.get("task_id"), row.get("task_path")
+            if not isinstance(task_id, str) or not task_id or not isinstance(path, str) or not path:
+                errors += 1
+                continue
+            conn.execute("DELETE FROM task_refs WHERE owner_id=? AND task_id=? AND origin='publisher'",
+                         (scope.owner_id, task_id))
+            conn.execute("INSERT INTO task_refs VALUES (?,?,?,'publisher')", (scope.owner_id, task_id, path))
+        offset = stream.tell()
+        stream.seek(max(0, offset - 128))
+        anchor = stream.read(min(offset, 128)).hex()
+        after = os.fstat(stream.fileno())
+    current = scope.source.stat(follow_symlinks=False)
+    if _task_ref_source_stamp(current) != _task_ref_source_stamp(after) or _task_ref_source_stamp(after) != stamp:
+        raise OSError("task reference source changed during slice")
+    set_task_ref_meta(conn, "index.stamp", stamp)
+    set_task_ref_meta(conn, "index.offset", offset)
+    set_task_ref_meta(conn, "index.anchor", anchor)
+    set_task_ref_meta(conn, "index.discarding", int(discarding))
+    total_errors = int(task_ref_meta(conn, "index.errors", "0")) + errors
+    set_task_ref_meta(conn, "index.errors", total_errors)
+    return {"index_complete": offset == info.st_size and not discarding, "index_records_read": scanned,
+            "index_errors": errors, "index_errors_total": total_errors, "index_offset": offset}
+
+
+def lookup_task_ref(owner_home: object, task_id: str, *, max_records: int = 128) -> dict:
+    """返回位置候选而非任务状态；调用方必须重新读取 canonical state 核身份。"""
+    with task_ref_projection(owner_home) as (scope, conn):
+        coverage = _sync_task_ref_source(scope, conn, max(1, min(max_records, 128)))
+        paths = []
+        if coverage["index_complete"]:
+            rows = conn.execute(
+                "SELECT path,origin FROM task_refs WHERE owner_id=? AND task_id=? ORDER BY origin DESC LIMIT 17",
+                (scope.owner_id, task_id),
+            ).fetchall()
+            published = [path for path, origin in rows if origin == "publisher"]
+            paths = published or [path for path, _ in rows]
+        coverage.update(legacy_files_scanned=0, legacy_total_scanned=int(task_ref_meta(conn, "legacy.total", "0")),
+                        legacy_complete=task_ref_meta(conn, "legacy.done") == "1",
+                        legacy_errors=int(task_ref_meta(conn, "legacy.errors", "0")))
+        return {"status": "partial" if not coverage["index_complete"] else "found" if paths else "missing",
+                "paths": paths, "coverage": coverage}
 
 
 # LLM: Owner registration is a latest-state projection. Reconstructing the same
@@ -531,6 +752,7 @@ __all__ = [
     "latest_run_refs_report",
     "latest_task_refs",
     "latest_task_refs_report",
+    "lookup_task_ref",
     "register_agent_ref",
     "register_owner_ref",
     "register_run_ref",

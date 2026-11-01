@@ -14,6 +14,7 @@ from ..models import (
     FailureType,
     SubAgentChannelProbeOptions,
     SubAgentTask,
+    task_has_ended_status,
 )
 from ..probe import (
     _channel_status,
@@ -153,13 +154,24 @@ class SubAgentChannelProbeService:
         checks: list[ChannelProbeCheck],
         now: float,
     ) -> None:
-        task.channel_checks = checks
-        task.channel_status = _channel_status(checks)
-        task.last_probe_at = now
-        task.updated_at = now
-        if task.channel_status == "BROKEN":
-            task.failure_type = FailureType.CHANNEL.value
-        self.manager.save(task)
+        # 探测期间允许收口/通知和换轮提交。只在原 canonical 锁内修改最新记录，
+        # 不能把旧 attributes 或执行身份随整份快照写回。
+        observed_attempt = (task.runner_attempts, task.runner_active_attempt_id)
+
+        def update_health(current: SubAgentTask) -> None:
+            current.channel_checks = checks
+            current.channel_status = _channel_status(checks)
+            current.last_probe_at = now
+            same_attempt = observed_attempt == (current.runner_attempts, current.runner_active_attempt_id)
+            if (
+                same_attempt
+                and not task_has_ended_status(current)
+                and current.channel_status == "BROKEN"
+                and current.failure_type in {"", FailureType.CHANNEL.value}
+            ):
+                current.failure_type = FailureType.CHANNEL.value
+
+        self.manager.mutate(task.id, update_health)
 
     def write_channel_probe_files(
         self,
