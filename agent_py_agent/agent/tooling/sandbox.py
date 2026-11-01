@@ -891,6 +891,43 @@ def _append_hidden_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
         argv += ["--tmpfs", path_str, "--remount-ro", path_str]
 
 
+# 宿主独占单文件的只读遮罩来源；启动校验按 (--ro-bind, 本来源, 位置) 精确三元组识别最终遮罩。
+HIDDEN_FILE_MASK_SOURCE = "/dev/null"
+
+
+# LLM: 目录仍由 tmpfs 隐藏；普通文件只在其 canonical 名称及同次非别名 bind 仍暴露宿主内容的位置逐个遮罩，不挂父目录、不放宽既有挂载。
+# 函数用途: 计算宿主独占普通文件的精确遮罩参数，调用方须排在全部业务挂载、最终保护与人格占位之后、--chdir 之前。
+def _hidden_file_masks(argv: list[str], paths: tuple[Path, ...]) -> list[str]:
+    # Exact single-file masks for host-exclusive regular files at every location a host bind still exposes.
+    files: list[Path] = []
+    for raw in paths:
+        candidate = Path(raw).expanduser()
+        try:
+            if candidate.is_file():
+                files.append(candidate.resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+    if not files:
+        return []
+    mounts = _mount_snapshot(argv)
+    bindings = tuple((mount.source.resolve(strict=False), mount.target)
+                     for mount in mounts if mount.source is not None and not mount.alias)
+    masks: list[str] = []
+    seen: set[str] = set()
+    for source in dict.fromkeys(files):
+        locations = {source, *(target / source.relative_to(root)
+                               for root, target in bindings if source.is_relative_to(root))}
+        for location in sorted(locations):
+            mount = _effective_mount(location, mounts)
+            text = os.fspath(location)
+            # Unmounted, tmpfs/proc/dev and symlink-alias locations do not expose host content.
+            if mount is None or mount.source is None or mount.alias or text in seen:
+                continue
+            seen.add(text)
+            masks += ["--ro-bind", HIDDEN_FILE_MASK_SOURCE, text]
+    return masks
+
+
 # LLM: 所有 POSIX shell 命令都必须经此入口，保证管道任一阶段失败会成为命令失败。
 # 函数用途: 找到 bash 并构造开启 pipefail 的 argv；缺失时明确拒绝而非静默退回 /bin/sh。
 def strict_posix_shell_argv(command: str) -> list[str]:
@@ -1519,6 +1556,7 @@ def _append_final_mount_protections(argv: list[str], spec: SandboxSpec) -> None:
 
 
 # LLM: 原完整底图与人格保护完成后才套资源启动器；原网络/owner/别名/新session标志均不变，不在父进程施加限制。
+#   宿主独占单文件遮罩排在全部挂载与人格占位之后、--chdir 之前，任何业务重挂都不能再压过它。
 # 函数用途: 组合原沙箱与人格拒写，确保新增祖先挂载不会擦掉既有安全限制或合法B7重挂。
 def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     authority_root = _freeze_persona_root(spec)
@@ -1529,7 +1567,8 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     _defer_strict_hidden_mounts(argv, spec)
     placeholders = _append_persona_readonly_mounts(argv, authority_root, spec, mounts_snapshot=mounts)
     _append_final_mount_protections(argv, spec)
-    return wrap_resource_command([*argv, *placeholders, *chdir], spec.resource_limits)
+    masks = _hidden_file_masks([*argv, *placeholders], spec.hidden_paths)
+    return wrap_resource_command([*argv, *placeholders, *masks, *chdir], spec.resource_limits)
 
 
 # LLM: CLI必须等所有argv构造器完成定义再启动；只移动启动时机，不把binary成功升级成完整隔离成功。
