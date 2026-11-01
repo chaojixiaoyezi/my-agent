@@ -407,19 +407,14 @@ def _last_response_metrics(response: object, ledger: object, call_id: str) -> di
     from ..agent_core.model.usage import (
         input_token_usage,
         output_token_usage,
+        provider_usage_fields,
         reported_cache_read_token_usage,
-        response_usage,
     )
 
     record = next((record for record in ledger.records() if record.call_id == call_id), None)
     if record and record.metadata.get("purpose") == "decision":
         return {}
-    usage = response_usage(response)
-    known = any(_number(usage.get(key)) is not None for key in ("cache_read_input_tokens", "cached_input_tokens"))
-    for key in ("input_tokens_details", "prompt_tokens_details"):
-        detail = usage.get(key)
-        if isinstance(detail, Mapping):
-            known = known or any(_number(detail.get(key)) is not None for key in ("cached_tokens", "cache_read_tokens"))
+    known = "cache_read_input_tokens" in provider_usage_fields(response)
     denominator = input_token_usage(response)
     cache = 100.0 * reported_cache_read_token_usage(response) / denominator if known and denominator else None
     # 速度 = 输出 token ÷ 整次调用时长（发出请求到收完）。隐藏思考的 token 算在输出里却不逐字流出，按首字到收完算会

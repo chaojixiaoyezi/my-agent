@@ -921,10 +921,10 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         if record.call_id in self._index:
             self._replace(record)
             return
+        self._index[record.call_id] = len(self._records)
         self._records.append(record)
         for aggregate in self._aggregates_for(record):
             aggregate.observe_new(record)
-        self._rebuild_index()
         self._trim_records()
 
     # LLM: 所有生命周期更新必须经过此入口，先计算 aggregate delta，再原子替换 retained detail。
@@ -989,6 +989,9 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
         now, stale_seconds = float(self.context.now()), float(self.options.open_call_stale_seconds)
         keep = set(self._retained_calls) | {record.call_id for record in self._records[-max_records:]}
         keep.update(record.call_id for record in self._records if _is_live_open_call(record, now, stale_seconds))
+        if len(keep) == len(self._records):
+            # 大量 live/pinned 超过窗口时仍保留原数组与索引；只有实际淘汰才需要重排。
+            return
         self._stale_open_calls_trimmed += _count_stale_open_trimmed(self._records, keep, stale_seconds)
         self._records = [record for record in self._records if record.call_id in keep]
         self._rebuild_index()

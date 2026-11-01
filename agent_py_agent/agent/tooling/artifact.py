@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,8 +54,12 @@ class ArtifactReadBudget:
     def __init__(self, *, window_seconds: int, max_chars: int) -> None:
         self.window_seconds = max(0, int(window_seconds or 0))
         self.max_chars = max(0, int(max_chars or 0))
-        self._events_by_run: dict[str, list[tuple[float, int]]] = {}
+        self._events_by_run: dict[str, deque[tuple[float, int]]] = {}
+        self._used_by_run: dict[str, int] = {}
+        self._pending_by_run: dict[str, int] = {}
         self._pending: dict[object, tuple[str, int]] = {}
+        # 仅是事件队列的清理游标：每个run最多一个索引，不另存收费事实。
+        self._maintenance_runs: OrderedDict[str, None] = OrderedDict()
         self._lock = threading.Lock()
 
     # LLM: 检查和记 pending 不能分离；返回 token 只能由同一预算对象结算一次。
@@ -68,19 +73,15 @@ class ArtifactReadBudget:
             return None, ""
         now = float(time.monotonic() if request.now is None else request.now)
         with self._lock:
-            for key in list(self._events_by_run):
-                fresh = [item for item in self._events_by_run[key] if item[0] > now - self.window_seconds]
-                if fresh:
-                    self._events_by_run[key] = fresh
-                else:
-                    del self._events_by_run[key]
-            used = sum(chars for _, chars in self._events_by_run.get(run_id, []))
-            used += sum(chars for owner, chars in self._pending.values() if owner == run_id)
+            self._expire_run(run_id, now)
+            self._maintain_idle_runs(now)
+            used = self._used_by_run.get(run_id, 0) + self._pending_by_run.get(run_id, 0)
             if used + requested > self.max_chars:
                 return None, _budget_error(run_id, self.max_chars, self.window_seconds,
                                            f"已用和预留 {used} 字符，本次请求 {requested} 字符")
             token = object()
             self._pending[token] = (run_id, requested)
+            self._pending_by_run[run_id] = self._pending_by_run.get(run_id, 0) + requested
             return token, ""
 
     # LLM: 只结算已登记 token；异常/取消传 0 释放预留，不能为失败读取扣成功额度。
@@ -88,8 +89,51 @@ class ArtifactReadBudget:
     def settle(self, token: object | None, chars: int) -> None:
         with self._lock:
             entry = self._pending.pop(token, None)
-            if entry is not None and chars > 0:
-                self._events_by_run.setdefault(entry[0], []).append((time.monotonic(), int(chars)))
+            now = time.monotonic()
+            if entry is not None:
+                run_id, reserved = entry
+                pending = self._pending_by_run[run_id] - reserved
+                if pending:
+                    self._pending_by_run[run_id] = pending
+                else:
+                    del self._pending_by_run[run_id]
+                self._expire_run(run_id, now)
+                charged = max(0, int(chars))
+                if charged:
+                    events = self._events_by_run.setdefault(run_id, deque())
+                    # 完全相同到期时刻才合并，不用近似桶，也不丢仍有效事件。
+                    if events and events[-1][0] == now:
+                        events[-1] = (now, events[-1][1] + charged)
+                    else:
+                        events.append((now, charged))
+                    self._used_by_run[run_id] = self._used_by_run.get(run_id, 0) + charged
+                    self._maintenance_runs.setdefault(run_id, None)
+            self._maintain_idle_runs(now)
+
+    def _expire_run(self, run_id: str, now: float, *, limit: int | None = None) -> None:
+        """在原锁下弹过期头并同步减总量；本run精确清理，其它run只做有限维护。"""
+        events = self._events_by_run.get(run_id)
+        if events is None:
+            return
+        expired, count = 0, 0
+        cutoff = now - self.window_seconds
+        while events and events[0][0] <= cutoff and (limit is None or count < limit):
+            expired += events.popleft()[1]
+            count += 1
+        if events:
+            self._used_by_run[run_id] -= expired
+        else:
+            del self._events_by_run[run_id]
+            self._used_by_run.pop(run_id, None)
+            self._maintenance_runs.pop(run_id, None)
+
+    def _maintain_idle_runs(self, now: float) -> None:
+        """每次至多8个run、每run8个事件；无后台线程，闲置历史随后续操作收敛。"""
+        for _ in range(min(8, len(self._maintenance_runs))):
+            run_id, _ = self._maintenance_runs.popitem(last=False)
+            self._expire_run(run_id, now, limit=8)
+            if run_id in self._events_by_run:
+                self._maintenance_runs[run_id] = None
 
 
 # 常量用途: read_artifact 的 run/task/request 身份只绑定宿主 run_scope 的同名字段，模型参数不能覆盖。
