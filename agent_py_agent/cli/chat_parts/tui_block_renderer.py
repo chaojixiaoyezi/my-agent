@@ -249,6 +249,11 @@ class TuiRenderContext:
     focused_agent_failure_label: str = ""
     background_process_count: int = 0
     background_watch_active: bool = False
+    business_agents_enabled: bool = False
+    background_agent_count: int | None = None
+    background_agent_running_count: int | None = None
+    business_list_active: bool = False
+    business_thread_active: bool = False
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文及后台观察计数，保证动画与刷新使用明确类型。
@@ -411,6 +416,11 @@ def tui_render_context_key(
         context.agent_view_depth,
         context.background_process_count,
         context.background_watch_active,
+        context.business_agents_enabled,
+        context.background_agent_count,
+        context.background_agent_running_count,
+        context.business_list_active,
+        context.business_thread_active,
         connection_animation,
         thinking_animation,
         foreground_animation,
@@ -859,6 +869,10 @@ def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
+    if block.metadata.get('source_kind') == 'business_agents':
+        display = block.metadata.get('display') or {}
+        return tuple(line for text in display.get('lines', ())
+                     for line in wrap_fragments((('class:tui-muted', sanitize_terminal_text(str(text))),), width=context.width))
     if block.metadata.get("source_kind") == "background_watch":
         from ...agent.conversation.background_process_view import background_watch_text
 
@@ -3166,6 +3180,21 @@ def _render_pending_input_message(
 # LLM: 只给正常底栏追加独立颜色的进程徽标；预留宽度避免挤掉 F6，观察页本身从不提示停止进程。
 # 函数用途: 在常驻快捷键后显示后台驻留数，选中时反显。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
+    if context.business_list_active or context.business_thread_active:
+        text = '  Ctrl+G 返回 · Enter 完整会话 · ↑↓ 选择' if context.business_list_active else '  Ctrl+G 返回 · 输入发往本后台会话 · /tree 子树 · /log 日志'
+        if context.notice:
+            text += ' · ' + context.notice
+        return (('class:tui-muted', _fit_text(text, context.width, 'left').rstrip()),)
+    if (context.business_agents_enabled or context.background_agent_count is not None) and not context.background_watch_active and snapshot.permission is None:
+        count = '未知' if context.background_agent_count is None else str(context.background_agent_count)
+        running = '未知' if context.background_agent_running_count is None else str(context.background_agent_running_count)
+        prefix = '  详细' if context.detailed_transcript else '  简洁'
+        if context.background_process_count:
+            prefix += f' · 后台驻留 {context.background_process_count} 项'
+        prefix += f' · 后台Agent {count}(运行{running}) · '
+        prefix = _fit_text(prefix, context.width, 'left').rstrip()
+        base = replace(context, width=max(1, context.width - display_width_text(prefix)))
+        return (('class:tui-bg-watch', prefix), *_render_footer_base(snapshot, base))
     if context.background_watch_active:
         text = "  Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
         if context.notice:

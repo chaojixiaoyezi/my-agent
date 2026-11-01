@@ -469,6 +469,11 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         event.app.invalidate()
         return
     navigation_snapshot = _agent_navigation_snapshot(params)
+    if getattr(navigation_snapshot, 'active_thread_id', ''):
+        from .tui_background_agents import submit_business_input
+
+        if submit_business_input(event, params, text, has_media=bool(media)):
+            return
     active_agent_id = str(
         getattr(navigation_snapshot, "active_run_id", "") or ""
     ).strip()
@@ -1075,6 +1080,10 @@ def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None
         return
     if _copy_transcript_selection(event, params):
         return
+    business = _agent_navigation_snapshot(params)
+    if getattr(business, 'business_list_active', False) or getattr(business, 'active_thread_id', ''):
+        _handle_agent_back_keybinding(event, params)
+        return
     if getattr(_agent_navigation_snapshot(params), "background_watch_active", False):
         _handle_agent_back_keybinding(event, params)
         return
@@ -1302,6 +1311,11 @@ def _handle_ctrl_d_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 # LLM: 主代理 Esc 发送本轮中断，子代理沿原停止入口；空闲双 Esc 才清空草稿，均不按正文改变 Goal。
 # 函数用途: 后台观察 Esc 仅返回；其它页面保持原中断与草稿清空行为。
 def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    business = _agent_navigation_snapshot(params)
+    if getattr(business, 'business_list_active', False) or getattr(business, 'active_thread_id', ''):
+        _active_tui_runtime(params).set_notice('后台团队页用 Ctrl+G 返回；未取消任何工作', duration_seconds=2)
+        event.app.invalidate()
+        return
     if getattr(_agent_navigation_snapshot(params), "background_watch_active", False):
         _handle_agent_back_keybinding(event, params)
         return
@@ -1379,7 +1393,8 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     navigation = _agent_navigation_snapshot(params)
     if (
         not str(buffer.text or "")
-        and (str(getattr(navigation, "selected_run_id", "") or "") or getattr(navigation, "background_process_count", 0) > 0)
+        and (str(getattr(navigation, "selected_run_id", "") or "") or getattr(navigation, "background_process_count", 0) > 0
+             or getattr(navigation, 'business_agents_enabled', False))
     ):
         mover = getattr(
             getattr(params, "agent_navigation", None),
