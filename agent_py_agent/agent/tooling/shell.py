@@ -791,7 +791,7 @@ def _sandbox_exec(
         private_read_roots=tuple(
             Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
         ) if owner_text else (),
-        hidden_paths=tuple(dict.fromkeys((*host_paths.hidden, *host_policy.host_exclusive_paths))),
+        hidden_paths=tuple(dict.fromkeys((*host_paths.hidden, *(getattr(host_policy, "host_exclusive_paths", ()) or ())))),
         protected_write_patterns=host_paths.patterns,
         protected_directory_write_patterns=host_paths.directory_write_patterns,
         protected_directory_unlink_patterns=host_paths.directory_unlink_patterns,
