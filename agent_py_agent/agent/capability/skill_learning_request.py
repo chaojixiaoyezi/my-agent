@@ -35,7 +35,8 @@ def learning_request_eligible(ctx: object, min_tool_rounds: int, *, include_back
     return (
         bool(getattr(ctx, "do_save", False))
         and str(getattr(ctx, "context_scope", "") or "").strip().lower() != "task_local"
-        and (include_background or str(getattr(ctx, "source", "") or "").strip().lower() not in _EXCLUDED_SOURCES)
+        # 后台开关不是来源证明；可信完成只经task_learning_bridge复核后组装同一材料。
+        and str(getattr(ctx, "source", "") or "").strip().lower() not in _EXCLUDED_SOURCES
         and int(getattr(ctx, "tool_rounds", 0) or 0) >= max(1, int(min_tool_rounds))
     )
 
@@ -45,6 +46,11 @@ def learning_request_eligible(ctx: object, min_tool_rounds: int, *, include_back
 def build_learning_request(ctx: object, min_tool_rounds: int, *, include_background: bool = False) -> dict[str, object] | None:
     if not learning_request_eligible(ctx, min_tool_rounds, include_background=include_background):
         return None
+    return _learning_request_material(ctx)
+
+
+def _learning_request_material(ctx: object) -> dict[str, object] | None:
+    """组装原有界脱敏材料；调用方须已完成普通收口或canonical完成准入，不授予来源权限。"""
     attrs = getattr(ctx, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
     identity = str(getattr(ctx, "run_id", "") or getattr(ctx, "request_id", "") or '').strip()

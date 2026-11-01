@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 
 from .skill_learning_maintenance import LearningObservationSource, observe_learning
+from .skill_learning_publish import SkillLearningGateError
 from .skill_learning_store import SkillLearningStore
 
 _TARGET_KEYS = ('skill_id','skill_name','target_skill_id','asset_id','asset_ref','method_id','target_skill_ids')
@@ -17,8 +18,10 @@ def observe_command_verifications(agent,call,evidence):
     current = getattr(agent,'_current_run_params',None)
     if getattr(current,'run_id',None) != call.run_id or getattr(current,'attempt_id',None) != call.attempt_id:
         return
+    diagnostics = []
     for fact in evidence:
-        observe_command_verification(agent,current,fact)
+        diagnostics.extend(observe_command_verification(agent,current,fact) or ())
+    return diagnostics
 
 
 # LLM: 仅原账本成功的真实执行回执可记分；明确dry_run/未执行/静态报告拒绝，缺内容/环境归因的普通失败不降分。
@@ -28,16 +31,16 @@ def observe_command_verification(agent, params, evidence):
             or evidence.get('verification_kind') == 'deterministic_static'):
         return
     if evidence.get('status') == 'passed' and evidence.get('exit_code') == 0 and type(evidence.get('id')) is int:
-        _observe(agent,params,'effective',f"verification:{evidence['id']}", evidence)
+        return _observe(agent,params,'effective',f"verification:{evidence['id']}", evidence)
 
 
 # LLM: 包检查器failed仅来自valid=false的声明式内容检查；not_run/error/cancelled均不记负样本，复用键绑定目标内容hash。
 # 函数用途: 登记原沙箱检查器的内容有效性结论，不复制目标、检查错误或秘密。
 def observe_pack_verification(agent, params, result, key):
     if result.status == 'passed' and result.valid is True:
-        _observe(agent,params,'effective',f'pack:{key}', vars(result))
+        return _observe(agent,params,'effective',f'pack:{key}', vars(result))
     elif result.status == 'failed' and result.valid is False:
-        _observe(agent,params,'ineffective',f'pack:{key}', vars(result))
+        return _observe(agent,params,'ineffective',f'pack:{key}', vars(result))
 
 
 # LLM: 显式目标须准确hash；无目标核对当前及跨更新历史的唯一资产版本对，只有当前版实际采用才能记分。
@@ -49,26 +52,32 @@ def _observe(agent,params,outcome,receipt,evidence=None):
     current = getattr(agent,'_current_run_params',None)
     if not run_id or getattr(current,'run_id',None) != run_id or getattr(current,'attempt_id',None) != getattr(params,'attempt_id',None):
         return
-    try:
-        store = SkillLearningStore.for_home(agent.home_paths)
-        registry = store.load_registry()
-        evidence = evidence or {}
-        adopted = [(row, [fact for fact in row.maintenance.get('observations', [])
-                         if fact.get('authority') == 'model' and fact.get('outcome') == 'adopted'
-                         and fact.get('run_id') == run_id and fact.get('sha256') == row.sha256])
-                   for row in registry.skills.values()]
-        adopted = [(row, facts) for row, facts in adopted if facts]
-        pairs = _adopted_skill_pairs(registry.skills.values(), run_id)
-        explicit = any(key in evidence for key in _TARGET_KEYS)
-        for row, adoptions in adopted:
-            if explicit and not _receipt_targets(evidence, row):
-                continue
-            if not explicit and (len(pairs) != 1 or len(adopted) != 1 or not row.sha256 or not _receipt_hash_matches(evidence, row)):
-                continue
-            for adoption in adoptions:
+    store = SkillLearningStore.for_home(agent.home_paths)
+    registry = store.load_registry()
+    evidence = evidence or {}
+    adopted = [(row, [fact for fact in row.maintenance.get('observations', [])
+                     if fact.get('authority') == 'model' and fact.get('outcome') == 'adopted'
+                     and fact.get('run_id') == run_id and fact.get('sha256') == row.sha256])
+               for row in registry.skills.values()]
+    adopted = [(row, facts) for row, facts in adopted if facts]
+    pairs = _adopted_skill_pairs(registry.skills.values(), run_id)
+    explicit = any(key in evidence for key in _TARGET_KEYS)
+    diagnostics = []
+    for row, adoptions in adopted:
+        if explicit and not _receipt_targets(evidence, row):
+            continue
+        if not explicit and (len(pairs) != 1 or len(adopted) != 1 or not row.sha256 or not _receipt_hash_matches(evidence, row)):
+            continue
+        for adoption in adoptions:
+            try:
                 observe_learning(store,row.name,sha256=row.sha256,task_id=adoption['task_id'],outcome=outcome,source=LearningObservationSource(authority='host',run_id=run_id,receipt_id=receipt,job_id=adoption.get('job_id','')))
-    except (AttributeError,OSError,RuntimeError,ValueError):
-        return
+            except SkillLearningGateError as error:
+                # 只跳过这一项的过期观察，CAS不变，旧质量绝不归给新版；其余错误原样交宿主。
+                if error.code != 'SKILL_LEARNING_REVISION_CONFLICT':
+                    raise
+                diagnostics.append({'status': 'stale', 'reason': error.code,
+                                    'skill_id': 'owner:' + row.name, 'receipt_ref': receipt})
+    return diagnostics
 
 
 # LLM: 历史采用只用于歧义判断；返回名称+内容hash，不把历史采用变为当前版本的adoption事实。
