@@ -64,6 +64,8 @@ from ..tooling.sandbox import (
     SandboxReadiness,
     SandboxSpec,
     SandboxUnavailable,
+    _effective_mount,
+    _mount_snapshot,
     allowlisted_directory,
     build_bwrap_argv,
     find_bwrap,
@@ -96,6 +98,38 @@ class SandboxUnavailableError(SandboxUnavailable):
     继承 tooling.sandbox.SandboxUnavailable（G6）：生产 spawn 的既有
     except SandboxUnavailable 捕获链无需改动即对本网关的 fail-closed 生效。
     """
+
+
+# LLM: 与插件预检一样只接受目录遮蔽；同次挂载的来源映射和最终覆盖必须同时成立，不授予新路径或启动进程。
+# 函数用途: 拒绝未被最终隐藏目录覆盖的现存文件，避免只读绑定仍泄露宿主来源。
+def _require_linux_file_isolation(hidden_paths: tuple[Path, ...], argv: list[str]) -> None:
+    paths = tuple(Path(path).expanduser() for path in hidden_paths)
+    try:
+        files = tuple(path.resolve(strict=True) for path in paths if path.is_file())
+        if not files:
+            return
+        directories = {path.resolve(strict=True) for path in paths if path.is_dir()}
+        mounts = _mount_snapshot(argv)
+        bindings = tuple(
+            (mount.source.resolve(strict=False), mount.target)
+            for mount in mounts if mount.source is not None and not mount.alias
+        )
+    except (OSError, RuntimeError) as exc:
+        raise SandboxUnavailableError(
+            "SANDBOX_UNAVAILABLE: HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE"
+        ) from exc
+    for source in files:
+        # 同一宿主来源可能从 owner 别名等 bind 入口再次出现，不能只核 canonical 名称。
+        locations = {source, *(target / source.relative_to(root)
+                               for root, target in bindings if source.is_relative_to(root))}
+        for location in locations:
+            mount = _effective_mount(location, mounts)
+            # hide_home 的业务重挂可能压过先前 tmpfs；RO bind 也不等于拒读。
+            if (mount is None or mount.target not in directories
+                    or mount.arguments[:1] != ("--tmpfs",)):
+                raise SandboxUnavailableError(
+                    "SANDBOX_UNAVAILABLE: HOST_EXCLUSIVE_FILE_ISOLATION_UNAVAILABLE"
+                )
 
 
 # LLM: allowlist 的系统底图只能取当前平台声明的窄目录；解析后的根不得成为用户目录或 /private 下的别名。
@@ -333,7 +367,8 @@ class AttemptExecutionSandbox:
 
     # LLM: extra_write_roots 来自当前工具的结构化 allowed_write_roots，首项是 canonical
     # task work 临时根；v8 隐藏根必须仍存在才能挂 tmpfs，缺失要失败关闭；写根顺序保持原合同。
-    # 函数用途: 为 Linux 组装 bwrap 参数，并让任务临时区与当前项目目录分离。
+    #   隐藏文件必须由最终目录挂载保护；校验先于 Landlock 包装与任何业务进程启动。
+    # 函数用途: 为 Linux 组装 bwrap 参数，验证文件隔离，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
         if self.spec.read_mode == "allowlist" and (
             not self.spec.read_only_root or self.spec.full_access or self.spec.implicit_attempt_write_roots
@@ -372,7 +407,9 @@ class AttemptExecutionSandbox:
             hidden_paths=((*self.spec.private_read_roots, *self.spec.hidden_paths)
                           if self.spec.read_only_root else self.spec.hidden_paths),
         )
-        return self._wrap_with_landlock([*build_bwrap_argv(spec), "--", *command_argv])
+        argv = build_bwrap_argv(spec)
+        _require_linux_file_isolation(spec.hidden_paths, argv)
+        return self._wrap_with_landlock([*argv, "--", *command_argv])
 
     # LLM: G5：登记了 Gateway 端口且 Landlock 就绪时，用启动器把 bwrap argv 包一层（exec bwrap 前按端口拒绝）。包不包只看
     #   landlock_net_readiness——它和 gateway_isolation_fact 读同一个探测，所以“包了”必然 applied、“没包”必然 unavailable:<原因>，
