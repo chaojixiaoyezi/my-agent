@@ -158,11 +158,17 @@ def _script_delivery_handler(agent, params):
 
 
 # LLM: 只读取一次可信边界，公开scope与执行器共用归一化正根；绝对保护、普通拒写及私密来源独立透传，不从脚本推导授权。
-# 函数用途: 冻结本次脚本的正负路径范围、来源擦洗和原宿主投递端口。
+#   有效owner墙取自同一快照，无RunParams或快照缺墙时由唯一权威按宿主agent状态补齐，不读HOME、业务输入或模型参数。
+# 函数用途: 冻结本次脚本的正负路径范围、owner读取墙、来源擦洗和原宿主投递端口。
 def _script_runtime_options(agent):
     from pathlib import Path
 
-    from ..path_access_policy import host_exclusive_paths, host_sandbox_paths, task_host_state_paths
+    from ..path_access_policy import (
+        effective_owner_scope_root,
+        host_exclusive_paths,
+        host_sandbox_paths,
+        task_host_state_paths,
+    )
     from ..settings.secret_ref import managed_secret_environment_names
     from ..tooling.write_boundary import SandboxWriteProtection, _boundary_paths
     from .tool_runtime_ledger import write_boundary_with_runtime_ledger
@@ -170,6 +176,8 @@ def _script_runtime_options(agent):
     params = getattr(agent, '_current_run_params', None)
     boundary = write_boundary_with_runtime_ledger(agent, params) if params is not None else {}
     boundary = boundary or {}
+    owner_scope = (str(boundary.get('effective_owner_scope_root') or '').strip() or effective_owner_scope_root(
+        agent, context_scope=getattr(params, 'context_scope', 'default'), write_boundary=boundary))
     workspace = (boundary.get('execution_cwd')
                  or getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None)))
     context = None
@@ -196,6 +204,7 @@ def _script_runtime_options(agent):
                                                   config=agent.config),
         'host_credential_env_names': managed_secret_environment_names(agent.config),
         'host_exclusive_paths': host_exclusive_paths(agent.home_paths, agent.config),
+        'owner_scope_root': owner_scope or None, 'agent_home_root': agent.home_paths.root,
         'delivery_handler': _script_delivery_handler(agent, params)}
 
 
