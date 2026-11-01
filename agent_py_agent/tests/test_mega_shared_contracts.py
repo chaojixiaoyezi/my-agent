@@ -299,12 +299,22 @@ def test_workflow_existing_run_store_persists_and_restores_new_snapshots(tmp_pat
         business_context=context.to_dict(), scope_snapshot=scope.to_dict(), scope_revision=11,
         revision=4, execution_definition_ref='sha256:execution')
     store.create_run(run, workflow_snapshot={'steps': [], 'definition': 'original'})
-    restored = store.load_run(run.workflow_run_id)
+    # W3 已接入原 Store 的 CAS：新运行不继承 DTO 修订，真实保存后才推进版本。
+    assert run.revision == 1
+    stale = replace(run)
+    for expected_revision in (1, 2, 3):
+        current_store = WorkflowRunStore(owner_home)
+        run = current_store.load_run(run.workflow_run_id)
+        assert run.revision == expected_revision
+        current_store.save_run(run, expected_revision=expected_revision)
+    with pytest.raises(ValueError, match='WORKFLOW_RUN_REVISION_CONFLICT'):
+        store.save_run(stale, expected_revision=stale.revision)
+    restored = WorkflowRunStore(owner_home).load_run(run.workflow_run_id)
     assert restored == run
     assert restored.business_context['task_id'] == 'stask-canonical'
     assert (restored.business_context['space_revision'], restored.scope_revision,
             restored.revision, restored.execution_definition_ref) == (7, 11, 4, 'sha256:execution')
     assert store.load_workflow_snapshot(run.workflow_run_id) == {'steps': [], 'definition': 'original'}
     assert restored.business_context is not run.business_context
-    # W0 只提供/保存字段：原 Store 此处不冒充已实现 W3 锁内 CAS 递增。
+    # 原值 4 的持久化断言不变；现在由真实的四次 CAS 写入产生，不绕过版本门。
     assert restored.revision == 4
