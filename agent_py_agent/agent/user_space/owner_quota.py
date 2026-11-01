@@ -40,6 +40,8 @@ from ..contracts.optimization_contracts import require_schema_generation
 _QUOTA_LOCK_BASENAME = ".owner-quota"
 # 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
 _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
+# 前台快照仍限128项；墙钟预算容纳繁忙主机数百毫秒的调度暂停，超时仍拒绝未知用量增长。
+_FOREGROUND_SCAN_MAX_MS = 2500.0
 # 仅用量展示可短期复用碎片目录统计；权威写入准入绝不读取这个缓存。
 _DISPLAY_USAGE_TTL_SECONDS = 5.0
 # 仅用量展示缓存最多保留的目录统计条数，不参与写入配额准入。
@@ -301,7 +303,8 @@ class OwnerQuotaAdmission:
             snapshot = {}
             token = _QUOTA_SNAPSHOT_STATE.set(snapshot)
             try:
-                total, count, complete = _bounded_quota_snapshot(root, max_entries=128, max_ms=10)
+                total, count, complete = _bounded_quota_snapshot(
+                    root, max_entries=128, max_ms=_FOREGROUND_SCAN_MAX_MS)
             finally:
                 _QUOTA_SNAPSHOT_STATE.reset(token)
                 if snapshot.get('metadata_invalidated'):

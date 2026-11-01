@@ -477,6 +477,88 @@ def test_reconciled_baseline_refuses_orphan_and_still_enforces_limit(tmp_path):
         (tmp_path / 'new').write_bytes(b'y')
 
 
+def _pause_quota_scan(monkeypatch, pause_seconds):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    original_entries = quota._quota_entries
+    clock = [0.0]
+
+    def paused_entries(*args, **kwargs):
+        # 在真实遍历开始后模拟一次调度暂停，不替换扫描结果、配额判定或账本。
+        clock[0] += pause_seconds
+        yield from original_entries(*args, **kwargs)
+
+    monkeypatch.setattr(quota, '_quota_entries', paused_entries)
+    monkeypatch.setattr(quota, 'time', SimpleNamespace(time=quota.time.time, monotonic=lambda: clock[0]))
+    return quota
+
+
+@pytest.mark.parametrize('pause_seconds', [0.1, 0.5])
+def test_cold_quota_admission_tolerates_scheduler_pause(tmp_path, monkeypatch, pause_seconds):
+    quota = _pause_quota_scan(monkeypatch, pause_seconds)
+    (tmp_path / 'existing').write_bytes(b'abc')
+    target = tmp_path / 'new'
+
+    with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=10).reserve([
+        quota.OwnerQuotaChange(target, 7),
+    ]) as projection:
+        assert projection.used_bytes == 3
+        assert projection.projected_bytes == 10
+        target.write_bytes(b'1234567')
+
+    ledger = json.loads((tmp_path / '.owner-quota-ledger.json').read_text())
+    assert (ledger['used_bytes'], ledger['inode_count']) == (10, 2)
+    assert ledger['dirty_since'] is None
+    assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
+
+
+@pytest.mark.parametrize('pause_seconds', [0.1, 0.5])
+def test_paused_cold_quota_admission_still_enforces_byte_limit(tmp_path, monkeypatch, pause_seconds):
+    quota = _pause_quota_scan(monkeypatch, pause_seconds)
+    (tmp_path / 'existing').write_bytes(b'abc')
+    target = tmp_path / 'new'
+
+    with pytest.raises(quota.OwnerQuotaExceeded) as raised:
+        with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=9).reserve([
+            quota.OwnerQuotaChange(target, 7),
+        ]):
+            pytest.fail('paused scan bypassed the finite quota')
+
+    assert raised.value.projection.used_bytes == 3
+    assert raised.value.projection.projected_bytes == 10
+    assert not target.exists()
+
+
+@pytest.mark.parametrize('max_ms', [10, 50])
+def test_bounded_snapshot_explicit_small_time_budget_still_truncates(tmp_path, monkeypatch, max_ms):
+    quota = _pause_quota_scan(monkeypatch, 0.1)
+    (tmp_path / 'first').write_bytes(b'a')
+    (tmp_path / 'second').write_bytes(b'b')
+
+    total, count, complete = quota._bounded_quota_snapshot(tmp_path, max_entries=128, max_ms=max_ms)
+
+    assert complete is False
+    assert (total, count) == (1, 1)
+
+
+@pytest.mark.parametrize('max_ms, pause_seconds', [(None, 3.0), (10.0, 0.1)])
+def test_foreground_quota_scan_timeout_remains_fail_closed(tmp_path, monkeypatch, max_ms, pause_seconds):
+    quota = _pause_quota_scan(monkeypatch, pause_seconds)
+    if max_ms is not None:
+        monkeypatch.setattr(quota, '_FOREGROUND_SCAN_MAX_MS', max_ms)
+    (tmp_path / 'existing').write_bytes(b'abc')
+    target = tmp_path / 'new'
+
+    with pytest.raises(quota.OwnerQuotaUnavailable, match='reconciliation pending'):
+        with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=10).reserve([
+            quota.OwnerQuotaChange(target, 1),
+        ]):
+            pytest.fail('incomplete scan permitted growth')
+
+    assert not target.exists()
+    assert json.loads((tmp_path / '.owner-quota-ledger.json').read_text())['dirty_since'] is not None
+
+
 def test_bounded_snapshot_detects_eof_at_exact_entry_budget(tmp_path):
     from agent_py_agent.agent.user_space import owner_quota as quota
 

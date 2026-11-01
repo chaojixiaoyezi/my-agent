@@ -914,9 +914,9 @@ def test_lock_file_settlement_matches_reconcile(tmp_path, transition, nested):
     assert (report['used_bytes'], report['inode_count']) == (settled['used_bytes'], settled['inode_count'])
 
 
-# LLM: R6-T1：新owner的全新有界快照保持128项/10ms；依赖它的测试固定配额模块单调钟，结果只由条目额度决定。
-# 函数用途: 验证前台全新快照使用128项/10ms额度。
-def test_fresh_owner_snapshot_budget_is_128_entries_10_ms(tmp_path, monkeypatch):
+# LLM: 新owner前台快照保持128项硬上限；有限墙钟预算须容纳CI调度暂停，不改变后台分片或显式小预算。
+# 函数用途: 验证前台全新快照使用128项/2500ms额度。
+def test_fresh_owner_snapshot_budget_is_128_entries_2500_ms(tmp_path, monkeypatch):
     calls = []
     original = quota._bounded_quota_snapshot
 
@@ -927,7 +927,7 @@ def test_fresh_owner_snapshot_budget_is_128_entries_10_ms(tmp_path, monkeypatch)
 
     monkeypatch.setattr(quota, '_bounded_quota_snapshot', recorded)
     assert _r7_grow(tmp_path) == 'ok'
-    assert calls == [(128, 10)]
+    assert calls == [(128, 2500.0)]
 
 
 # LLM: R6-Q2：超过256项的大目录里准入外新建文件，目录戳变化加名字计数在下一次增长时就能发现。
@@ -2087,7 +2087,9 @@ def test_r12_invalidated_preimage_and_staged_settlement_errors_preserve_dirty_st
     assert ledger['reconcile_cursor'].get('metadata_complete') is False
     assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
 
-    # 后续增长请求即使前台10ms快照超时，也必须因已持久化的dirty_since与metadata_invalidated被拒绝。
+    # 显式选10ms故障预算，20ms延迟仍强制截断；不得依赖生产默认值制造脏账拒绝分支。
+    monkeypatch.setattr(quota, '_FOREGROUND_SCAN_MAX_MS', 10.0)
+    # 后续增长请求即使前台快照超时，也必须因已持久化的dirty_since与metadata_invalidated被拒绝。
     real_entries = quota._quota_entries
     delayed = [False]
 
@@ -2298,6 +2300,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from agent_py_agent.agent.user_space import owner_quota as q
 root = Path(sys.argv[2]); target = root / 'a21' / 'retry.bin'
+q._FOREGROUND_SCAN_MAX_MS = 10.0  # 显式故障预算，保留冷进程截断和原异常断言。
 orig_entries = q._quota_entries
 delayed = [False]
 def _entries(owner, parts=()):
@@ -2317,6 +2320,7 @@ except (q.OwnerQuotaUnavailable, q.OwnerQuotaExceeded) as exc:
         proc = subprocess.run([sys.executable, '-c', child_code, repo_root, str(root)], check=True, capture_output=True, text=True)
         assert json.loads(proc.stdout)['error'] == 'OwnerQuotaUnavailable'
     else:
+        monkeypatch.setattr(quota, '_FOREGROUND_SCAN_MAX_MS', 10.0)
         real_entries = quota._quota_entries
         delayed = [False]
 
@@ -2666,7 +2670,8 @@ def test_r15_unconfirmed_settlement_keeps_observed_invalidation(tmp_path, monkey
     assert ledger['dirty_since'] is not None
     assert ledger['reconcile_cursor'].get('metadata_invalidated') is True
     assert ledger['reserved_bytes'] == 0 and not ledger['reservations']
-    # 小owner的全新快照本可完整放行；拖慢首个目录项让快照读不完，增长只能回落到旧账，必须被拒。
+    # 小owner的全新快照本可完整放行；显式10ms故障预算配合20ms延迟强制截断，脏旧账仍必须拒绝增长。
+    monkeypatch.setattr(quota, '_FOREGROUND_SCAN_MAX_MS', 10.0)
     real_entries = quota._quota_entries
     delayed = [False]
 
@@ -2795,6 +2800,7 @@ sys.path.insert(0, sys.argv[1])
 from agent_py_agent.agent.user_space import owner_quota as q
 root = Path(sys.argv[2]); target = root / sys.argv[3]
 if sys.argv[5] == '1':
+    q._FOREGROUND_SCAN_MAX_MS = 10.0  # 仅故障注入分支缩小预算，正常冷启动仍用生产默认值。
     real_entries = q._quota_entries
     delayed = [False]
     def _entries(owner, parts=()):
