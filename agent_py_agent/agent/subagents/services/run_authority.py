@@ -46,6 +46,14 @@ def write_create_run_authority(manager: Any, task: SubAgentTask, params: CreateR
     if not owner_id:
         owner_id = str(getattr(manager, "owner_id", "") or "").strip()
     try:
+        parent = params.host_parent_execution
+        context = params.business_context
+        if context is not None and context.owner_id != owner_id:
+            raise ValueError("business child owner mismatch")
+        if context is not None and parent is None and params.parent_id:
+            raise ValueError("business child requires verified host parent execution")
+        metadata = ({"business_context": context.to_dict(), "session_task_ref": context.task_id}
+                    if context is not None and parent is None else None)
         record = repo.record_run_creation(
             owner_id=owner_id,
             goal=str(task.goal or "").strip(),
@@ -53,8 +61,10 @@ def write_create_run_authority(manager: Any, task: SubAgentTask, params: CreateR
             thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
             run_id=str(task.id or "").strip(),
             role=str(task.role or "").strip(),
-            parent_run_id=str(params.parent_id or "").strip(),
+            parent_run_id=parent.run_id if parent is not None else str(params.parent_id or "").strip(),
             attempt_status="pending",
+            **({"host_parent_execution": parent} if parent is not None else {}),
+            **({"task_run_metadata": metadata} if metadata is not None else {}),
         )
     except (OSError, KeyError) as exc:
         # 权威写入失败不再吞掉：有 home 时记录缺失 = 门后拒绝（fail-closed）。

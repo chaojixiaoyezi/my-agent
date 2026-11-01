@@ -2,6 +2,7 @@
 # 模块用途: 根据父级授权规划和创建孩子，把锁外建议所用的同一 task 交给原保存链。
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ....conversation.host_actor import HostChannelActor
@@ -134,9 +135,16 @@ def _resolve_child(
     sibling_index: int,
     prepared: PreparedSubagentRun | None = None,
 ) -> ScheduledChildResolution:
+    params = _child_create_params(parent, spec, sibling_index=sibling_index)
+    repo = getattr(manager, "runtime_db", None)
+    resolver = getattr(repo, "parent_execution_ref", None)
+    if callable(resolver):
+        # scheduler已从canonical父节点和原调度准入取得来源；pending父不必伪造running attempt。
+        ref = resolver(owner_id=parent.owner, run_id=parent.id)
+        params = replace(params, host_parent_execution=ref)
     return resolve_scheduled_child(
         manager,
-        _child_create_params(parent, spec, sibling_index=sibling_index),
+        params,
         prepared=prepared,
     )
 

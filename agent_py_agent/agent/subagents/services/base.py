@@ -21,12 +21,13 @@ if TYPE_CHECKING:
 
 import time
 from copy import deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
 from ...capability.subagent_entry_authority import SubagentEntryInitialization
 from ...common.id_generator import new_id as _framework_new_id
+from ...conversation.business_contracts import BusinessExecutionContext, HostParentExecutionRef
 from ...conversation.host_actor import HostActorError, HostChannelActor, validate_actor_ancestor
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ..authorization_gate import (
@@ -78,6 +79,8 @@ class CreateRunParams:
     attributes: dict[str, object] | None = None
     host_channel_actor: HostChannelActor | None = None
     parent_access_mode: str = ""
+    host_parent_execution: HostParentExecutionRef | None = field(default=None, kw_only=True)
+    business_context: BusinessExecutionContext | None = field(default=None, kw_only=True)
 
 
 # LLM: task 是同一待提交对象；模型建议和包入口初始化均为宿主 typed 材料，只供新 thread 使用，不进 attrs，不赋予权限。

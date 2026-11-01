@@ -71,6 +71,7 @@ class SessionTaskDispatchPlan:
     target_thread_id: str
     goal: str
     origin_task_id: str = ""
+    idempotency_key: str = ""
 
 
 
@@ -85,10 +86,7 @@ def dispatch_owned_background_task(agent, *, source_thread_id: str, target_threa
             or target_thread.metadata[EXECUTION_ORIGIN_KEY]["kind"] != "delegated"):
         return session_task_dispatch_error("后台派工身份不一致。", error_code=SESSION_IDENTITY_UNAVAILABLE)
     plan = SessionTaskDispatchPlan(source_thread_id, target_thread.thread_id, goal)
-    existing, errors = agent.conversation_store.session_tasks.list_report(limit=0)
-    if errors:
-        return session_task_dispatch_error("会话任务账本不可读。", error_code="TOOL_EXECUTION_FAILED")
-    previous = next((task for task in existing if task.dedupe_key == _task_dedupe_key(plan)), None)
+    previous = agent.conversation_store.session_tasks.find_by_dedupe_key(_task_dedupe_key(plan))
     from .host_message_context import CONTEXT_KEY, HostMessageContext
 
     if host_message_context is not None:
@@ -118,6 +116,7 @@ def dispatch_session_task(
     target_thread: object,
     config: object,
     *, count_pair: bool = True, host_message_context=None,
+    business_context_intent=None, business_context_factory=None,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
     if limit_error := _chain_limit_error(store, plan.origin_task_id, config):
@@ -138,12 +137,20 @@ def dispatch_session_task(
                 dedupe_key=dedupe_key,
                 origin_task_id=plan.origin_task_id,
             ), host_message_context=host_message_context,
+            **({"business_context_intent": business_context_intent,
+                "business_context_factory": business_context_factory}
+               if business_context_intent is not None or business_context_factory is not None else {}),
         )
         from .execution_threads import IM_TASK_EXECUTION_KEY, bind_delegated_task
 
         # 普通会话没有宿主委派策略，不需要线程策略写入；模型派活仍沿原正文/唤醒流程。
         if IM_TASK_EXECUTION_KEY in (getattr(target_thread, "metadata", None) or {}):
             bind_delegated_task(store, plan.target_thread_id, task.task_id)
+        from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
+
+        if task.status in SESSION_TASK_TERMINAL_STATUSES:
+            return ToolHandlerOutcome(SESSION_TASK_TOOL_NAME, True, json.dumps({
+                "task_id": task.task_id, "status": task.status, "target_thread_id": task.target_thread_id}))
         body = _queue_body(store, plan, body_dedupe_key, task.task_id)
         bound = store.session_tasks.bind_body(task.task_id, body.guidance_id)
         if bound is not None:
@@ -188,6 +195,9 @@ def _record_pair(store: object, sender_thread_id: str, target_thread_id: str) ->
 #   正文本就是任务身份；正文用摘要入键，键里不再出现原句，重试与内容变化都仍然可区分。
 # 函数用途: 生成一条会话任务的稳定幂等键，键里不嵌入完整正文。
 def _task_dedupe_key(plan: SessionTaskDispatchPlan) -> str:
+    if plan.idempotency_key:
+        digest = hashlib.sha256(plan.idempotency_key.encode("utf-8")).hexdigest()
+        return f"session_task:{plan.sender_thread_id}->{plan.target_thread_id}:operation:{digest}"
     goal_digest = hashlib.sha256(str(plan.goal or "").encode("utf-8")).hexdigest()[:16]
     return f"session_task:{plan.sender_thread_id}->{plan.target_thread_id}:{goal_digest}"
 
@@ -219,7 +229,11 @@ def _queue_body(store: object, plan: SessionTaskDispatchPlan, body_dedupe_key: s
 
 # LLM: 目标仍 active 才唤醒；返回 wake id 供回执展示，不承诺目标已消费。
 # 函数用途: 目标会话活跃时发起一次来源明确的派活唤醒。
-def _maybe_wake(store: object, target_thread: object, sender_thread_id: str, task_id: str) -> str:
+def _maybe_wake(store: object, target_thread: object, sender_thread_id: str, task_id: str, *, generation: str = "") -> str:
+    from .background_team_lifecycle import background_identity_allows_work
+
+    if not background_identity_allows_work(target_thread):
+        return ""
     if str(getattr(target_thread, "status", "") or "active").strip() != "active":
         return ""
     wakes = getattr(store, "wakes", None)
@@ -228,6 +242,8 @@ def _maybe_wake(store: object, target_thread: object, sender_thread_id: str, tas
     signal = wakes.raise_signal(
         {
             "thread_id": str(getattr(target_thread, "thread_id", "") or ""),
+            "dedupe_key": f"session_task:{task_id}:{generation or 'dispatch'}",
+            "retain_handled": True,
             "urgency": "normal",
             "reason": "session_task",
             "summary": "收到来自另一个会话的任务",
