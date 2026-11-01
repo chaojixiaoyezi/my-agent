@@ -1019,6 +1019,12 @@ class MemoryPromotionService(_PromotionCommitMixin):
                             exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
                     except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
                         deferred[candidate.candidate_id] = _recoverable_promotion_reason(exc)
+                    except Exception as exc:  # noqa: BLE001 - deterministic per-item failure keeps its obligation
+                        code = str(exc) if str(exc) in _PER_ITEM_BARRIER_CODES else "PROMOTION_ITEM_FAILED"
+                        logging.getLogger(__name__).warning(
+                            "memory promotion item failed error_type=%s code=%s", type(exc).__name__, code)
+                        results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False,
+                            candidate.status, code)
                     finally:
                         _AUTOMATIC_PROMOTION.reset(token)
             if conflicts:
@@ -1700,6 +1706,7 @@ class _PromotionBatchState:
 
 
 _PROMOTION_BATCH: ContextVar[_PromotionBatchState | None] = ContextVar("memory_promotion_batch", default=None)
+_PER_ITEM_BARRIER_CODES = frozenset({"MEMORY_TOMBSTONED_CONTENT", "MEMORY_TOMBSTONED_ID"})
 _UNCERTAIN_PROMOTION_ERRORS = (
     RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
     GlobalWriteCommitUnavailable, GlobalWriteInWorkerError, LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable,
