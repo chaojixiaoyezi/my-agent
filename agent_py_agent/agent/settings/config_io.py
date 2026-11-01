@@ -12,6 +12,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .config_diagnostics import ConfigParseDiagnostic
+
+_CONFIG_PARSE_DIAGNOSTIC_LIMIT = 32
+
 # CPython 3.11 tracks AST-constructor recursion depth in process-global state.
 # Concurrent ``ast.literal_eval`` calls can therefore raise the documented
 # ``AST constructor recursion depth mismatch`` SystemError.  my-agent still
@@ -83,7 +87,14 @@ def _yaml_quote_step(ch: str, in_single: bool, in_double: bool) -> tuple[bool, b
 def _strip_yaml_comment(line: str) -> str:
     """去行内注释但不动引号内的 '#'(修 color: "#ff0000" / 含 # 的 URL/口令被截成空的 bug,审计 #24)。"""
     in_single = in_double = False
+    escaped = False
     for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if in_double and ch == "\\":
+            escaped = True
+            continue
         in_single, in_double, is_comment = _yaml_quote_step(ch, in_single, in_double)
         if is_comment:
             return line[:i].rstrip()
@@ -100,23 +111,112 @@ def yaml_trailing_comment(line: str) -> str:
 
 # LLM: 文件与事务候选共用同一个解析器；只读取指定来源，不迁移、写回或猜测来源。
 # 函数用途: 读取正式简化 YAML 文件。
-def load_simple_yaml(path: Path) -> dict[str, Any]:
-    return parse_simple_yaml_text(path.read_text(encoding="utf-8-sig"))
+def load_simple_yaml(path: Path, *, diagnostics: list[ConfigParseDiagnostic] | None = None) -> dict[str, Any]:
+    return parse_simple_yaml_text(path.read_text(encoding="utf-8-sig"),
+                                  source=str(path.expanduser().resolve()), diagnostics=diagnostics)
 
 
 # LLM: 纯解析与正式文件加载相同，不增加默认值或解释权限，供写前候选与旧节点取值。
 # 函数用途: 在内存中解析简化 YAML。
-def parse_simple_yaml_text(text: str) -> dict[str, Any]:
+def parse_simple_yaml_text(
+    text: str, *, source: str = "<memory>", diagnostics: list[ConfigParseDiagnostic] | None = None,
+) -> dict[str, Any]:
+    """保留旧dict返回；正式loader另接收有界、无原文的结构诊断，不在解析期间写盘或记日志。"""
     data: dict[str, Any] = {}
     current_key: str | None = None
-    for raw in text.lstrip("\ufeff").splitlines():
+    facts = diagnostics if diagnostics is not None else []
+    first_diagnostic = len(facts)
+    for number, raw in enumerate(text.lstrip("\ufeff").splitlines(), 1):
         line = _strip_yaml_comment(raw)  # 引号感知去注释(原 split('#') 会截断引号内的 #)
         if not line.strip():
+            continue
+        stripped = line.lstrip()
+        prefix = line[:len(line) - len(stripped)]
+        code, message = _yaml_line_problem(line, current_key)
+        if code:
+            _append_parse_diagnostic(facts, first_diagnostic, source, number, len(prefix) + 1, code, message)
+            current_key = None
+            continue
+        value = stripped[2:].strip() if stripped.startswith("- ") else line.split(":", 1)[1].strip()
+        if _yaml_scalar_is_malformed(value):
+            _append_parse_diagnostic(facts, first_diagnostic, source, number, len(prefix) + 1,
+                                     "CONFIG_PARSE_SCALAR", "引号、集合分隔符或标量结构不完整；该行未加载。")
+            current_key = None
             continue
         if _append_yaml_list_item(data, current_key, line):
             continue
         current_key = _handle_yaml_mapping_line(data, current_key, line)
     return data
+
+
+def _yaml_line_problem(line: str, current_key: str | None) -> tuple[str, str]:
+    stripped = line.lstrip()
+    prefix = line[:len(line) - len(stripped)]
+    if "\t" in prefix:
+        return "CONFIG_PARSE_INDENTATION", "不支持制表符缩进；配置仅支持顶层映射和列表。"
+    if stripped.startswith("- "):
+        return ("", "") if current_key else ("CONFIG_PARSE_ORPHAN_LIST", "列表项没有对应的顶层列表键。")
+    if prefix:
+        return "CONFIG_PARSE_INDENTATION", "不支持缩进映射；配置键必须位于顶层。"
+    if ":" not in line:
+        return "CONFIG_PARSE_MISSING_COLON", "配置映射缺少冒号；该行未加载。"
+    if not line.split(":", 1)[0].strip():
+        return "CONFIG_PARSE_EMPTY_KEY", "配置映射的键不能为空。"
+    return "", ""
+
+
+def _yaml_scalar_is_malformed(value: str) -> bool:
+    """只校验原简化语法的外层结构，不把合法注释、URL或普通文本当作完整YAML重解释。"""
+    if not value:
+        return False
+    if value[0] not in "\"'[{":
+        return ": " in value
+    quote, stack = "", []
+    collection = value[0] in "[{"
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if quote:
+            if character == "\\" and quote == '"':
+                index += 2
+                continue
+            elif character == quote:
+                if quote == "'" and value[index + 1:index + 2] == "'":
+                    index += 2
+                    continue
+                quote = ""
+                if not collection and value[index + 1:].strip():
+                    return True
+            index += 1
+            continue
+        if character in "\"'":
+            quote = character
+        elif collection and character in "[{":
+            stack.append(character)
+            if len(stack) > 32:
+                return True
+        elif collection and character in "]}":
+            expected = "[" if character == "]" else "{"
+            if not stack or stack.pop() != expected:
+                return True
+            if not stack and value[index + 1:].strip():
+                return True
+        index += 1
+    return bool(quote or stack)
+
+
+def _append_parse_diagnostic(facts, first, source, line, column, code, message) -> None:
+    if len(facts) - first < _CONFIG_PARSE_DIAGNOSTIC_LIMIT:
+        facts.append(ConfigParseDiagnostic(source, line, column, code, message, "error", True))
+    elif facts[-1].code != "CONFIG_PARSE_DIAGNOSTICS_TRUNCATED":
+        facts[-1] = ConfigParseDiagnostic(source, line, column, "CONFIG_PARSE_DIAGNOSTICS_TRUNCATED",
+                                          "配置语法诊断过多，后续诊断已省略；请先修复已报告位置。", "error", True)
+
+
+def format_config_parse_diagnostic(diagnostic: ConfigParseDiagnostic) -> str:
+    """loader警告与CLI共用脱敏DTO的展示投影，绝不拼接配置原行或异常正文。"""
+    return (f"{diagnostic.source}:{diagnostic.line or '?'}:{diagnostic.column or '?'} "
+            f"[{diagnostic.code}] {diagnostic.message}")
 
 
 def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:

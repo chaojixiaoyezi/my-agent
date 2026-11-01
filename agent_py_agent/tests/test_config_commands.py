@@ -48,15 +48,18 @@ memory_rule_auto_read_limit: 5
             load_config("/nonexistent/config.yaml")
 
     def test_load_config_invalid_yaml(self, tmp_path: Path):
-        """加载无效的 YAML 文件时配置仍能加载（可能使用默认值）。"""
+        """合法部分仍能加载，但语法错误必须带实际来源行，不能静默回默认。"""
         from agent_py_agent.agent.settings import load_config
 
         config_file = tmp_path / "invalid.yaml"
         config_file.write_text("invalid: yaml: content: [}\n  broken", encoding="utf-8")
 
-        # YAML 加载器可能不会抛出异常，而是使用配置默认值
         config = load_config(str(config_file))
         assert config is not None
+        assert config.config_parse_diagnostics
+        assert any(fact.line == 2 and fact.source == str(config_file.resolve())
+                   for fact in config.config_parse_diagnostics)
+        assert any("CONFIG_PARSE" in message for message in config.config_warnings)
 
 
 class TestResolveWorkspaceRoot:

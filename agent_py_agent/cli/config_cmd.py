@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from agent_py_agent.agent.common.global_write_guard import GlobalWriteInWorkerError
 from agent_py_agent.agent.settings import load_config
+from agent_py_agent.agent.settings.config_io import format_config_parse_diagnostic
 from agent_py_agent.agent.settings.parameter_changes import (
     CLI_DEPLOYMENT_WRITABLE_KEYS,
     ChangeOrigin,
@@ -54,8 +56,10 @@ def cmd_config_set(args) -> int:
     if not path.exists():
         print(f"❌ 配置文件不存在: {path}")
         return 1
+    config = load_config(path)
+    _print_parse_warnings(config)
     # 配置事实已统一去引号并脱敏；只用用户覆盖，不把随包默认值误报成写前旧值。
-    previous = read_config_fact(key, user_path=path, default_path=packaged_config_path())["user_value"]
+    previous = read_config_fact(key, user_path=path, default_path=packaged_config_path(), config=config)["user_value"]
     before = previous if previous is not None else "(新增)"
     try:
         with cli_deployment_write_scope():
@@ -71,20 +75,32 @@ def cmd_config_set(args) -> int:
     return 0
 
 
-# LLM: 生效值与来源只取统一参数事实，值已脱敏；缺失和空串保持未设置展示，不把数字零当空串，不产生写入。
-# 函数用途: 读取显式配置的安全展示值，未设置正常返回零。
 def cmd_config_get(args) -> int:
+    """原始覆盖来自参数事实，实际生效值来自正式loader；二者均脱敏，结构错误明确展示。"""
     path = Path(args.config)
     if not path.exists():
         print(f"❌ 配置文件不存在: {path}")
         return 1
     key = str(args.key)
-    fact = read_config_fact(key, user_path=path, default_path=packaged_config_path(), config=load_config(path))
-    if fact["source"] == "missing" or fact["effective"] == "":
+    config = load_config(path)
+    _print_parse_warnings(config)
+    fact = read_config_fact(key, user_path=path, default_path=packaged_config_path(), config=config)
+    source = config.config_source_for(key)
+    effective = mask_value(key, getattr(config, key)) if source else fact["effective"]
+    if (fact["source"] == "missing" and not source) or effective == "":
         print(f"(未设置) {key}")
-        return 0
-    print(f"{key}: {fact['effective']}")
+    else:
+        print(f"{key}: {effective}")
+    raw = fact["user_value"] if fact["user_value"] is not None else "(未覆盖)"
+    print(f"raw: {raw}")
+    print(f"effective: {effective} (source: {source.get('source') if source else fact['source']})")
     return 0
+
+
+def _print_parse_warnings(config) -> None:
+    # 只展示W0脱敏结构事实，不把类型校验中的原始值或底层异常字符串拼回终端。
+    for diagnostic in config.config_parse_diagnostics:
+        print(f"⚠️ 配置读取告警：{format_config_parse_diagnostic(diagnostic)}", file=sys.stderr)
 
 
 __all__ = ["add_config_subcommands", "cmd_config_get", "cmd_config_set"]
