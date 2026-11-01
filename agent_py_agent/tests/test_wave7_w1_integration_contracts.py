@@ -6,6 +6,24 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+
+# LLM: 仅本模块的资产执行用例使用；先解析来源，避开 Linux scratch 重映射的 /tmp，结束或失败均清理私有根。
+# 函数用途: 为真实脚本和工作流验证提供不被重映射的临时宿主根。
+@pytest.fixture
+def asset_root(tmp_path):
+    root = tmp_path.resolve()
+    if not root.is_relative_to("/tmp"):
+        yield tmp_path
+        return
+    with tempfile.TemporaryDirectory(prefix="my-agent-wave7-w1-", dir="/var/tmp") as directory:
+        root = Path(directory).resolve()
+        assert not root.is_relative_to("/tmp"), "asset root must be outside the remapped /tmp subtree"
+        yield root
 
 
 def test_f06_script_tool_requires_and_honors_revision(tmp_path):
@@ -220,7 +238,9 @@ def test_holistic_gateway_identity_resolve_and_public_pack_and_fork_preferences(
         api.set_host_api_base(None)
 
 
-def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_path):
+# LLM: 只调整临时宿主根；真实资产验证、人格保护、投递与四类载体的全部业务断言保持不变。
+# 函数用途: 在非重映射根下验证 IM 出站接线和四类资产的自主晋升闭环。
+def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(asset_root):
     from types import SimpleNamespace
 
     import pytest
@@ -233,7 +253,7 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.tests.test_wave7_autonomous_learning_closure import BODY
 
-    home = ensure_my_agent_home(tmp_path / 'home')
+    home = ensure_my_agent_home(asset_root / 'home')
     owner_home = home.owner_home_dir
     sent_messages = []
     state = {'mode': 'active'}
