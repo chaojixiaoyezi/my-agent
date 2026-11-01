@@ -17,6 +17,8 @@ from ..gateway_parts.recovery import (
     _terminal_gateway_request_payload,
 )
 from ..local_storage import LocalStore
+from ..path_access_policy import host_sandbox_paths
+from ..settings.secret_ref import managed_secret_environment_names
 from .contracts import resolve_read_context
 from .errors import HostAPIError
 from .execution import ExecutionAccepted, ExecutionHostPorts, RestrictedToolInvoker
@@ -219,8 +221,8 @@ class GatewayPluginRequests:
         from .gateway_assets import registered_asset
         return registered_asset(context, payload)
 
-    # LLM: 仅允许已审内置文件工具或已注册脚本/工作流执行，返回成功状态与安全错误码。
-    # 函数用途: 执行单次已获批工具或资产请求。
+    # LLM: 仅允许已审工具或注册资产；资产保护每次从可信server配置冻结，投影失败向调用方传播，不从业务载荷取权限。
+    # 函数用途: 执行单次已获批工具或资产请求，并把宿主来源保护传给资产执行器。
     def _run_execution_plan(self, context, plan, payload, fence) -> tuple[bool, str]:
         if plan.action == "execute.tool":
             ledger = LocalStore(context.owner_home.home_dir / "data/tool-operations.db")
@@ -235,7 +237,18 @@ class GatewayPluginRequests:
                 if callable(close):
                     close()
         from .gateway_assets import execute_registered_asset
-        return execute_registered_asset(context, plan, fence)
+        agent = getattr(self.resources.server, "agent", None)
+        base = agent if agent is not None else getattr(self.resources.server, "control_plane", None)
+        config = getattr(base, "config", None)
+        host_credential_env_names = managed_secret_environment_names(config)
+        host_path_protection = host_sandbox_paths(
+            self.resources.root, context.owner_home.home_dir, config=config
+        )
+        return execute_registered_asset(
+            context, plan, fence,
+            host_credential_env_names=host_credential_env_names,
+            host_path_protection=host_path_protection,
+        )
 
     # LLM: 原receipt/claim/canonical为唯一执行事实；同键重放不重复文件副作用，未知claim拒绝重做。
     # 函数用途: 受理并经原执行器完成有界内置文件操作或已注册资产执行。
