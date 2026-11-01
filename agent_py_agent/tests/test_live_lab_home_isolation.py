@@ -81,3 +81,43 @@ def test_live_lab_original_default_echo_smoke_cli_completes(tmp_path):
     assert [(row["case"], row["status"]) for row in summary["results"]] == [
         ("health", "pass"), ("bad_weather", "pass"),
     ]
+
+
+def test_scenario_home_is_sibling_of_workspace_and_keeps_data_root_guard(tmp_path):
+    from agent_py_agent.cli.scenario_workspace import ScenarioConfigRequest, write_scenario_config
+
+    fixture = tmp_path / "scenario/fixture_project"
+    fixture.mkdir(parents=True)
+    target = fixture.parent / "scenario.yaml"
+    write_scenario_config(ScenarioConfigRequest(DEFAULT_CONFIG, target, fixture, 30, 1))
+    config = load_config(target)
+    home = home_paths(config.my_agent_home)
+
+    assert home.root == fixture.parent / "home"
+    assert not home.root.is_relative_to(fixture)
+    assert validate_workspace_directory(
+        fixture, owner_home=home.owner_home_dir, home_root=home.root, is_admin=True,
+    ) == fixture
+    with pytest.raises(WorkspaceDirectoryError, match="宿主数据根"):
+        validate_workspace_directory(
+            fixture.parent, owner_home=home.owner_home_dir, home_root=home.root, is_admin=True,
+        )
+
+
+def test_restart_fixture_carries_processing_status_for_real_requeue(tmp_path):
+    from agent_py_agent.agent.gateway_parts import requeue_gateway_processing_requests
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.cli.scenario_cases.gateway_cases import (
+        _restart_case_write_processing_payload,
+    )
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    paths.processing.mkdir(parents=True)
+    processing, payload = _restart_case_write_processing_payload(paths, "restart-fixture")
+    assert payload.get("status") == "processing"
+    assert json.loads(processing.read_text())["status"] == "processing"
+    assert requeue_gateway_processing_requests(paths) == 1
+    assert not processing.exists()
+    pending = json.loads((paths.inbox / processing.name).read_text())
+    assert pending["id"] == payload["id"]
+    assert pending["status"] == "pending"

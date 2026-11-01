@@ -61,11 +61,12 @@ def write_scenario_fixture(fixture_root: Path) -> None:
 def write_scenario_config(request: ScenarioConfigRequest) -> None:
     base = request.source_config.read_text(encoding="utf-8")
     fixture = str(request.fixture_root).replace("\\", "/")
+    isolated_home = str((Path(request.fixture_root).parent / "home").resolve()).replace("\\", "/")
     overrides = f"""
 
 # scenario-test isolation overrides
 workspace_root: "{fixture}"
-my_agent_home: "{fixture}/.my_agent/home"
+my_agent_home: "{isolated_home}"
 access_mode: "full-access"
 prompt_files:
 memory_path: ".my_agent/memory.jsonl"

@@ -1,5 +1,6 @@
 # LLM: 所有安装/用户均为临时资料；真实回环HTTP不替换生产组合根。
 # 模块用途: 回归生产Gateway接线及A/C工具资产合同。
+import importlib.util
 import json
 import sys
 import tempfile
@@ -146,13 +147,69 @@ def production_call(host, action, payload=None, *, user=None, key=None, status=2
 # LLM: 显式空组合仍不可用；callback只有真实验签端口存在才就绪，不用目录登记假报已接IdP。
 # 函数用途: 验证完整HTTP目录和逐动作依赖，缺IdP适配器明确不可用、注入后恢复就绪。
 def test_production_gateway_wires_all_actions(production_host):
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_host_action_specs
+
+    business_implemented = importlib.util.find_spec("agent_py_agent.agent.plugin_host.business_actions") is not None
+    contract_only = set() if business_implemented else {
+        spec.name for spec in business_host_action_specs() if spec.name.startswith("business.")
+    }
     rows = production_call(production_host, "host.capabilities.get")["actions"]
     assert len(rows) == len(action_specs())
     assert {row["action"] for row in rows} == set(action_specs())
-    assert {row['action'] for row in rows if not row['available']} == {'users.auth.sso.callback'}
+    if business_implemented:
+        assert {row['action'] for row in rows if not row['available']} == {'users.auth.sso.callback'}
+    else:
+        # Wave 1 只豁免冻结目录中的业务动作，不按前缀笼统忽略新增或未知动作。
+        assert {row['action'] for row in rows if not row['available']} - contract_only == {'users.auth.sso.callback'}
     production_host[0].sso_assertion_verifier = lambda *args: None
     wired = production_call(production_host, 'host.capabilities.get')['actions']
-    assert all(row['available'] for row in wired)
+    if business_implemented:
+        assert all(row['available'] for row in wired)
+    else:
+        assert all(row['available'] for row in wired if row['action'] not in contract_only)
+
+
+@pytest.mark.parametrize(
+    "business_module_present,business_before,business_after,legacy_before,legacy_after,passes",
+    [
+        pytest.param(False, False, False, True, True, True, id="wave1-contract-only"),
+        pytest.param(False, True, False, True, True, True, id="wave1-after-verifier"),
+        pytest.param(True, False, True, True, True, False, id="wave2-before-must-be-wired"),
+        pytest.param(True, True, False, True, True, False, id="wave2-after-must-be-wired"),
+        pytest.param(True, True, True, True, True, True, id="wave2-fully-wired"),
+        pytest.param(False, True, True, False, True, False, id="wave1-legacy-before-strict"),
+        pytest.param(False, True, True, True, False, False, id="wave1-legacy-after-strict"),
+        pytest.param(True, True, True, True, False, False, id="wave2-legacy-after-strict"),
+    ],
+)
+def test_gateway_wiring_wave_boundary_keeps_handler_assertions(
+    monkeypatch, business_module_present, business_before, business_after, legacy_before, legacy_after, passes,
+):
+    """只模拟目录验证阶段断言；实际 W13 生产接线仍须真实 HTTP 集成验证。"""
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_host_action_specs
+
+    business = {spec.name for spec in business_host_action_specs() if spec.name.startswith("business.")}
+    original_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "agent_py_agent.agent.plugin_host.business_actions":
+            return object() if business_module_present else None
+        return original_find_spec(name, *args, **kwargs)
+
+    def directory(host, _action):
+        after = hasattr(host[0], "sso_assertion_verifier")
+        return {"actions": [{"action": name, "available": (
+            (business_after if after else business_before) if name in business else
+            after if name == "users.auth.sso.callback" else
+            (legacy_after if after else legacy_before)
+        )} for name in action_specs()]}
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setattr(sys.modules[__name__], "production_call", directory)
+    with nullcontext() if passes else pytest.raises(AssertionError):
+        test_production_gateway_wires_all_actions([SimpleNamespace()])
 
 
 # LLM: A/C投影必须保留实际动作/实参/幂等键和获批资产，不能把请求替换成chat.send。
