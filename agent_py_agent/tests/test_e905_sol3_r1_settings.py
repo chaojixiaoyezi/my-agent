@@ -157,11 +157,13 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 # 函数用途: 核证当前展示目录的精确分层与部署守卫拆分。
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 179, "deployment": 121}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 181, "deployment": 121}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
     assert len(DEPLOYMENT_ONLY_KEYS) == 98
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 314
+    assert len(registry) == 316
+    assert registry["im_topic_aggregation_enabled"].tier == "advanced"
+    assert registry["im_progress_cards_enabled"].tier == "advanced"
     assert len(COMMON_KEYS) == len(set(COMMON_KEYS))
 
 

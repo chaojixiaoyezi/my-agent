@@ -296,6 +296,7 @@ def test_opt7_foreground_recovers_and_injects_verification_before_model(tmp_path
     params = RunParams(
         source="gateway", run_id=rec["run_id"], task_id="task-recover", request_id="followup",
         inject=["原有注入"], conversation_task_binding_callback=callback,
+        task_attributes={"conversation_thread_id": "thread-recover"},
     )
     params.compact_continuation_injection = "已有恢复提示"
     bound = runtime_mixin._bind_main_agent_authority(owner, params)
@@ -501,12 +502,13 @@ def test_opt7_review_successful_turn_acknowledges_notice_only(tmp_path, monkeypa
     if ack_fails:
         # LLM: 不影响原恢复CAS内部事件，只模拟可选交接确认写入口故障。
         # 函数用途: 保持业务成功返回而核实提醒不被错误清掉。
-        def fail_ack(**kwargs):
+        def fail_ack(*_args, **_kwargs):
             raise OSError("audit unavailable")
 
-        monkeypatch.setattr(repo, "append_event", fail_ack)
+        monkeypatch.setattr(repo, "acknowledge_foreground_recovery_handoff", fail_ack)
     result = runtime_mixin._run_with_params(owner, "继续", RunParams(
         source="gateway", run_id=rec["run_id"], task_id="task-recover",
+        task_attributes={"conversation_thread_id": "thread-recover"},
     ))
     assert result.runtime_status == "ok" and "run_command" in "\n".join(seen)
     with repo._runtime_connection() as conn:
@@ -514,6 +516,7 @@ def test_opt7_review_successful_turn_acknowledges_notice_only(tmp_path, monkeypa
     assert count == (0 if ack_fails else 1)
     again = runtime_mixin._bind_main_agent_authority(owner, RunParams(
         source="gateway", run_id=rec["run_id"], task_id="task-recover",
+        task_attributes={"conversation_thread_id": "thread-recover"},
     ))
     assert ("【系统恢复提示】" in "\n\n".join(again.inject or [])) is ack_fails
 

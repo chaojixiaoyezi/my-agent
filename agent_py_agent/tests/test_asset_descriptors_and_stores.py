@@ -36,7 +36,7 @@ def asset(api, kind="script", asset_id="collect", **kwargs):
 def test_descriptor_json_roundtrip_and_frozen_defaults(api, kind):
     descriptor = asset(api, kind, access_targets=(api.AccessTarget("logs", "api", "https://example.test", "GET"),),
                        credential_refs=(api.CredentialBindingRef("cred-example", "logs", "bearer"),),
-                       io_contract=api.IOContract(("appnames",), ({"type": "json"},)), tags=("ops",))
+                       io_contract=api.IOContract(("appnames",), ("app_count",), output_types={"app_count": "integer"}), tags=("ops",))
     payload = descriptor.to_dict()
     assert payload["schema_version"] == "asset_descriptor.v1"
     assert api.AssetDescriptor.from_dict(json.loads(json.dumps(payload))) == descriptor

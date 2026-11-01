@@ -37,6 +37,7 @@ from agent_py_agent.agent.adapter.manager import (
 )
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
 from agent_py_agent.agent.conversation.channels import HOST_PATH_REDACTION_NOTE
+from agent_py_agent.agent.delivery.registry import ChannelStopResult
 
 
 class DummyAdapter(BaseChannelAdapter):
@@ -49,14 +50,16 @@ class DummyAdapter(BaseChannelAdapter):
         self._start_called = False
         self._stop_called = False
         self._send_calls: list[tuple[str, OutgoingMessage]] = []
+        self._session_lock_enabled = False
 
     def start(self) -> None:
         self._running = True
         self._start_called = True
 
-    def stop(self) -> None:
+    def stop(self) -> ChannelStopResult:
         self._running = False
         self._stop_called = True
+        return ChannelStopResult("exited", str(getattr(self, "_generation_ref", "") or ""))
 
     def send_message(self, user_id: str, message: OutgoingMessage) -> bool:
         self._send_calls.append((user_id, message))
