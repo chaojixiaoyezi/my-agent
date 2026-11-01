@@ -1,7 +1,10 @@
 # LLM: 所有安装/用户均为临时资料；真实回环HTTP不替换生产组合根。
 # 模块用途: 回归生产Gateway接线及A/C工具资产合同。
 import json
+import tempfile
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +13,28 @@ from agent_py_agent.agent.plugin_host.contracts import decode_call
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_permissions.host_grants import validate_host_grant
 from agent_py_agent.tests.test_plugin_host_v2_grants import grant_payload
+
+
+def test_production_asset_root_preserves_non_remapped_path():
+    safe_root = Path('/non-remapped/gateway-composition')
+    with _production_asset_root(safe_root) as root:
+        assert root == safe_root
+
+
+@pytest.mark.parametrize('raise_in_body', [False, True])
+def test_production_asset_root_relocates_tmp_and_cleans_up(raise_in_body):
+    from types import SimpleNamespace
+
+    # 只合成 Linux 的解析结果；不把本机目录测试当作原生 bwrap 验证。
+    source = SimpleNamespace(resolve=lambda: Path('/tmp/pytest/gateway-composition'))
+    expected = pytest.raises(RuntimeError, match='body failed') if raise_in_body else nullcontext()
+    with expected:
+        with _production_asset_root(source) as root:
+            assert root.is_dir()
+            assert not root.is_relative_to('/tmp')
+            if raise_in_body:
+                raise RuntimeError('body failed')
+    assert not root.exists()
 
 
 # LLM: 不接受C执行器不能表示的工具名，入站grant与动作应在IO前一致拒绝。
@@ -41,7 +66,19 @@ def test_asset_schema_matches_execution_allowlist(kind, identifier):
             "payload": {"thread_id": "thread-one", kind + "_id": identifier, "expected_revision": 1}}).encode())
 
 
-# LLM: 用原安装激活链取得真实令牌，不通过伪造binding获得C投影。
+# Linux 的 /tmp 会被 bwrap 重映射；迁走整个安装根，退出时仍由上下文清理。
+@contextmanager
+def _production_asset_root(tmp_path):
+    if not tmp_path.resolve().is_relative_to('/tmp'):
+        yield tmp_path
+        return
+    with tempfile.TemporaryDirectory(prefix='my-agent-gateway-composition-', dir='/var/tmp') as directory:
+        root = Path(directory).resolve()
+        assert not root.is_relative_to('/tmp'), 'asset root must be outside the remapped /tmp subtree'
+        yield root
+
+
+# LLM: 用原安装激活链取得真实令牌，不通过伪造binding获得C投影；先关Host再清理临时安装根。
 # 函数用途: 提供完整批准范围的生产HTTP服务及安装。
 @pytest.fixture
 def production_host(tmp_path, request):
@@ -57,28 +94,31 @@ def production_host(tmp_path, request):
     from agent_py_agent.agent.plugin_manifest_host_v9 import host_capabilities
     from agent_py_agent.tests import test_plugin_host_v2_grants as _grants
 
-    options = getattr(request, "param", {})
-    owner, store, entry, plan, os_grant, grant = _grants.installed_grant(tmp_path, options.get("caps", sorted(host_capabilities())))
-    if options.get("extra"):
-        grant["target_user_ids"].append(options["extra"])
-    grant.update(manageable_user_ids=["alice"], creatable_user_ids=["alice"])
-    if options.get('task_ids'):
-        grant['tasks']['explicit_ids'] = list(options['task_ids'])
-    default_calls = 4 if _grants.installed_grant.__name__ == "installed_grant" else grant["execution"]["max_tool_calls"]
-    grant["execution"].update(tool_names=["read_file", "write_file"], max_tool_calls=options.get("max_tool_calls", default_calls),
-        asset_refs=options.get("asset_refs") or [{"kind": "script", "id": "script-one", "revision": 1, "sha256": "a" * 64}])
-    preparing = PluginActivation(plan, "preparing", permission_json=json.dumps({**os_grant, "host_api_grant": grant}))
-    prepared = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, preparing)).installation
-    active = replace(preparing, phase="active", catalog_sha256=plugin_catalog_digest(entry.manifest))
-    enabled = store.change_activation(PluginActivationRequest(plan.operation_id, prepared.revision, active)).installation
-    ref = PluginActivationRef.from_owner(owner, entry.manifest.plugin_id, active.activation_id)
-    from types import SimpleNamespace
-    paths = SimpleNamespace(state=tmp_path / "state.json") if options.get("lightweight") else gateway_paths_from_root(tmp_path / "gateway")
-    server = GatewayHTTPServer(0, paths)
-    server.start()
-    token = api.issue_host_api_env(ref, entry.manifest.plugin_id)[api.HOST_API_TOKEN_ENV]
-    yield server, token, owner, enabled
-    server.stop()
+    with _production_asset_root(tmp_path) as root:
+        options = getattr(request, "param", {})
+        owner, store, entry, plan, os_grant, grant = _grants.installed_grant(root, options.get("caps", sorted(host_capabilities())))
+        if options.get("extra"):
+            grant["target_user_ids"].append(options["extra"])
+        grant.update(manageable_user_ids=["alice"], creatable_user_ids=["alice"])
+        if options.get('task_ids'):
+            grant['tasks']['explicit_ids'] = list(options['task_ids'])
+        default_calls = 4 if _grants.installed_grant.__name__ == "installed_grant" else grant["execution"]["max_tool_calls"]
+        grant["execution"].update(tool_names=["read_file", "write_file"], max_tool_calls=options.get("max_tool_calls", default_calls),
+            asset_refs=options.get("asset_refs") or [{"kind": "script", "id": "script-one", "revision": 1, "sha256": "a" * 64}])
+        preparing = PluginActivation(plan, "preparing", permission_json=json.dumps({**os_grant, "host_api_grant": grant}))
+        prepared = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, preparing)).installation
+        active = replace(preparing, phase="active", catalog_sha256=plugin_catalog_digest(entry.manifest))
+        enabled = store.change_activation(PluginActivationRequest(plan.operation_id, prepared.revision, active)).installation
+        ref = PluginActivationRef.from_owner(owner, entry.manifest.plugin_id, active.activation_id)
+        from types import SimpleNamespace
+        paths = SimpleNamespace(state=root / "state.json") if options.get("lightweight") else gateway_paths_from_root(root / "gateway")
+        server = GatewayHTTPServer(0, paths)
+        server.start()
+        try:
+            token = api.issue_host_api_env(ref, entry.manifest.plugin_id)[api.HOST_API_TOKEN_ENV]
+            yield server, token, owner, enabled
+        finally:
+            server.stop()
 
 
 # LLM: 原HTTP传输和原v2解码器必须经过；期望结果从socket读回而非直接调用域。
@@ -464,6 +504,12 @@ def test_production_script_enforces_business_read_and_write_roots(tmp_path):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     from agent_py_agent.agent.assets.script_store import ScriptStore
 
+    # 原生 Seatbelt 拒绝访问与 bwrap 隐藏路径都算拒绝；解释器等其它启动失败不能算通过。
+    subprocess_probe = (
+        "import sys\nfrom pathlib import Path\n"
+        "try:\n    Path(sys.argv[1]).read_text()\n"
+        "except (PermissionError, FileNotFoundError):\n    sys.exit(77)\n"
+    )
     code = (
         "import __main__ as _g, json, sqlite3, subprocess, sys\nfrom pathlib import Path\n"
         "_g.block_subproc = False\n_g.read_roots = ()\n_g.write_roots = ()\n"
@@ -473,9 +519,8 @@ def test_production_script_enforces_business_read_and_write_roots(tmp_path):
         "try:\n    Path(args['outside']).write_text('x')\nexcept PermissionError:\n    res['denied_write'] = True\n"
         "try:\n    sqlite3.connect(args['outside'] + '.db').close()\nexcept PermissionError:\n    res['denied_sqlite'] = True\n"
         "try:\n"
-        "    proc = subprocess.run([sys.executable, '-I', '-B', '-c', "
-        "'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text())', args['outside']], capture_output=True)\n"
-        "    res['denied_subproc'] = proc.returncode != 0\n"
+        f"    proc = subprocess.run([sys.executable, '-I', '-B', '-c', {subprocess_probe!r}, args['outside']], capture_output=True)\n"
+        "    res['denied_subproc'] = proc.returncode == 77\n"
         "except PermissionError:\n    res['denied_subproc'] = True\n"
         "Path(args['out']).write_text(json.dumps(res))\nprint(json.dumps({'ok': True}))\n"
     )
@@ -507,7 +552,7 @@ def test_production_script_enforces_business_read_and_write_roots(tmp_path):
             status=202,
         )
         poll = production_call(host, "conversations.requests.poll", {"request_id": accepted["request_id"]}, user="alice")
-        assert poll["request"]["state"] == "succeeded"
+        assert poll["request"]["state"] == "succeeded", poll
         observed = json.loads(out_path.read_text(encoding="utf-8"))
         assert observed == {"denied_read": True, "denied_write": True, "denied_subproc": True, "denied_sqlite": True}
         assert outside.read_text(encoding="utf-8") == "secret"
