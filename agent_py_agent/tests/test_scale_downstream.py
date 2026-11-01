@@ -14,6 +14,7 @@ from agent_py_agent.agent.scale_downstream import (
     _ExecutionPaths,
     _extract_message,
 )
+from agent_py_agent.agent.session_lock.store import SessionLockStore
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -123,6 +124,8 @@ def test_direct_scale_turn_without_conversation_identity_fails_closed(tmp_path) 
         )
 
 
+# LLM: 独立收集与 W5 包装复用同一用例；只补真实解锁事实，不关闭私聊准入。
+# 函数用途: 验证已解锁私聊复用 Gateway 历史、隔离其它会话并幂等重放。
 def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tmp_path) -> None:
     home_root = tmp_path / "home"
     workspace = tmp_path / "workspace"
@@ -167,6 +170,10 @@ def test_scale_turn_reuses_gateway_transcript_and_isolates_other_conversation(tm
         "oc_other",
         "ou_user",
     )
+
+    locks = SessionLockStore(home_root / "session_lock" / "private_chat_locks.db")
+    locks.set_password_hash("ou_user", "synthetic-hash")
+    locks.record_activity("ou_user")
 
     first_result = pool._run_conversation_turn(
         agent,

@@ -267,6 +267,8 @@ def test_invalid_or_unbound_authorization_does_not_activate(tmp_path, flags):
     assert service.installations.snapshot()[0].activation is None
 
 
+# LLM: 真实加载配置放在可信数据根的 config 目录内；外部单文件拒绝由专门用例覆盖。
+# 函数用途: 验证三种 YAML 设置经正式管理确认传播至激活模式与准备/客户端入口。
 @pytest.mark.parametrize("setting,mode", [("true", "restricted"), ("false", "wide"), ('"false"', "wide")])
 def test_loaded_legacy_default_reaches_real_management_executor(tmp_path, monkeypatch, setting, mode):
     """从 YAML 正式加载到实际管理/HostCommand；仍不将替身启动当 OS 验收。"""
@@ -276,9 +278,11 @@ def test_loaded_legacy_default_reaches_real_management_executor(tmp_path, monkey
     from agent_py_agent.agent.user_space.owner_resolver import home_paths_with_owner
 
     original = installed_manager(tmp_path)
-    path = tmp_path / "configured.yaml"
-    path.write_text("plugin_legacy_sandbox_default: " + setting + "\n")
     owner = original.context.owner
+    config_dir = owner.root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "configured.yaml"
+    path.write_text("plugin_legacy_sandbox_default: " + setting + "\n")
     context = plugin_management_context(owner, home_paths_with_owner(home_paths(tmp_path / "home"), owner),
         load_config(path), original.context.threads, actor_id="tester", channel="chat", conversation_id="session", is_admin=True)
     service = PluginManagement(context)

@@ -301,6 +301,8 @@ def _stub_v8_candidate(monkeypatch, specs):
         confirmed=True, record={"session_id": "test-candidate"}, terminations=[]))
 
 
+# LLM: 私有根独立按 HOME 与可信数据根推导，去掉被祖先覆盖的后代；不调用受测生产助手。
+# 函数用途: 验证 v8 无视旧开关仍包装候选和业务客户端，并覆盖两处隐私根。
 def test_v8_client_is_sandboxed_even_when_global_switch_is_off(tmp_path, monkeypatch):
     service = _installed_v8(tmp_path, network=False)
     specs = []
@@ -315,9 +317,20 @@ def test_v8_client_is_sandboxed_even_when_global_switch_is_off(tmp_path, monkeyp
     client = PluginMCPClient(service.context.owner, entry, process_sandbox=False)
     assert client.config.command == "fake-sandbox"
     assert len(specs) == 2
+    required_private_roots = {
+        Path.home().resolve(strict=True),
+        service.context.owner.root.resolve(strict=True),
+    }
+    expected_private_roots = {
+        root for root in required_private_roots
+        if not any(root != other and root.is_relative_to(other) for other in required_private_roots)
+    }
     for spec in specs:
         assert spec.network_access is False
-        assert spec.private_read_roots == (Path.home().resolve(strict=True),)
+        assert set(spec.private_read_roots) == expected_private_roots
+        assert len(spec.private_read_roots) == len(expected_private_roots)
+        assert all(any(root.is_relative_to(private) for private in spec.private_read_roots)
+                   for root in required_private_roots)
         assert spec.owner_home == Path(client.config.cwd)
         assert spec.read_only_root is True
 
