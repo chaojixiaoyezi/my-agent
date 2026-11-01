@@ -391,6 +391,8 @@ def test_gateway_run_preflight_refuses_before_any_startup_side_effect(tmp_path, 
     assert calls == {"setup": 0, "threads": 0}
 
 
+# LLM: 沿原公开启动及凭据前门，只在setup边界阻断；桩显式保持现行关键字合同，不起恢复或工作线程。
+# 函数用途: 核对缺失凭据先被创建，再携原上下文进入一次setup。
 def test_gateway_run_preflight_generates_missing_credential_and_reaches_setup(tmp_path, monkeypatch):
     # g2bf2 用例 1：必需 G1 凭据缺失 → 预检必须"生成"而不是退出；随后照常进入 setup，凭据权限 0600。
     from agent_py_agent.agent.gateway_parts.local_client_token import local_client_credential_path
@@ -404,7 +406,12 @@ def test_gateway_run_preflight_generates_missing_credential_and_reaches_setup(tm
     class _ReachedSetup(Exception):
         pass
 
-    def stop_at_setup(*_args):
+    # LLM: 接收原context和restart_marker，不用宽泛kwargs吞掉未来的签名错误。
+    # 函数用途: 验证启动边界参数后停住，避免测试产生启动副作用。
+    def stop_at_setup(setup_agent, setup_paths, *, context=None, restart_marker=None):
+        assert setup_agent is agent
+        assert setup_paths.root == tmp_path / "queue"
+        assert context is not None and restart_marker is None
         calls["setup"] += 1
         raise _ReachedSetup
 

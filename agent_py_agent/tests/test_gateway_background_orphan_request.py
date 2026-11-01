@@ -36,14 +36,51 @@ def _run_original_in_thread(agent, gate, claim, backend):
     return run_original(agent, gate, claim)
 
 
-def test_original_canonical_orphan_has_production_source_without_c_owner_agent_build(tmp_path):
+# LLM: C发现沿原64目录项游标有界续页；只重排真实枚举顺序，不替换来源冻结、业务资格或传输实现。
+# 函数用途: 核对默认及canonical延后顺序都能发现同一原孤儿来源，不要求第一拍扫完整个Owner。
+@pytest.mark.parametrize("canonical_after_first_page", [False, True])
+def test_original_canonical_orphan_has_production_source_without_c_owner_agent_build(tmp_path, monkeypatch, canonical_after_first_page):
     base, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = scoped.subagents.create_run(goal="原孤儿合同", thought="实际待派工作", plan=["运行"], depth=1)
+    home = scoped.home_paths.owner_home_dir
+    pattern = "**/work/agents/*/canonical_state.json"
+    if canonical_after_first_page:
+        from agent_py_agent.agent.gateway_parts import (
+            multiprocess_background_discovery as discovery_module,
+        )
+
+        noise = home / "ci-discovery-unmatched"
+        noise.mkdir()
+        for index in range(65):
+            (noise / f"ignored-{index}.txt").write_text("fixture", encoding="utf-8")
+        original = discovery_module._directory_source_items
+
+        # LLM: 输入均来自原真实目录扫描；仅模拟文件系统允许的未匹配项优先顺序，不伪造canonical或后台ref。
+        # 函数用途: 稳定覆盖第一拍预算耗尽但原游标仍有后页的情况。
+        def canonical_last(folder, source_pattern):
+            items = original(folder, source_pattern)
+            if folder == home and source_pattern == pattern:
+                return iter(sorted(items, key=lambda path: path is not None))
+            return items
+
+        monkeypatch.setattr(discovery_module, "_directory_source_items", canonical_last)
     discovery = SimpleNamespace(control=SimpleNamespace(home_root=base.home_paths.root,
         config=replace(base.config, memory_curator_enabled=False, enable_self_learning=False)), _source_cursors={})
-    refs = list(CoordinatorBackgroundRequests._owner_sources(discovery,
-        SimpleNamespace(identity=owner, home_dir=scoped.home_paths.owner_home_dir)))
-    assert any(ref["kind"] == "orphan" and ref["source_id"] == task.id for ref in refs), "canonical_child_must_enter_original_p3_p5_transport"
+    target = SimpleNamespace(identity=owner, home_dir=home)
+    refs = list(CoordinatorBackgroundRequests._owner_sources(discovery, target))
+    source_key = (str(home), pattern)
+    if canonical_after_first_page:
+        assert not any(ref["kind"] == "orphan" for ref in refs)
+        assert source_key in discovery._source_cursors
+    # 只为这个固定隔离夹具续至多16页；游标耗尽仍未发现、游标卡住或原来源失效都必须失败。
+    for _ in range(16):
+        if any(ref["kind"] == "orphan" and ref["source_id"] == task.id for ref in refs) or source_key not in discovery._source_cursors:
+            break
+        refs.extend(CoordinatorBackgroundRequests._owner_sources(discovery, target))
+    matches = [ref for ref in refs if ref["kind"] == "orphan" and ref["source_id"] == task.id]
+    assert len(matches) == 1, "canonical_child_must_enter_original_p3_p5_transport"
+    canonical = Path(task.agent_run_workspace_dir) / "canonical_state.json"
+    assert matches[0]["source_ref"] == canonical.relative_to(home).as_posix()
 
 
 def test_positive_mp_c_orphan_tick_never_constructs_remote_owner_agent(tmp_path, monkeypatch):
