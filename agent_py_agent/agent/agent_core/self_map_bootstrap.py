@@ -157,24 +157,43 @@ def _script_delivery_handler(agent, params):
     return admit
 
 
-# LLM: 配置来源只经中央投影；当前run及有效路径沿原运行边界，不接受脚本或工具实参声明身份。
-# 函数用途: 为本次脚本冻结工作区、来源擦洗和原宿主投递端口；缺公共投影时明确失败关闭。
+# LLM: 只读取一次可信边界，公开scope与执行器共用归一化正根；绝对保护、普通拒写及私密来源独立透传，不从脚本推导授权。
+# 函数用途: 冻结本次脚本的正负路径范围、来源擦洗和原宿主投递端口。
 def _script_runtime_options(agent):
-    from ..path_access_policy import host_exclusive_paths
+    from pathlib import Path
+
+    from ..path_access_policy import host_exclusive_paths, host_sandbox_paths, task_host_state_paths
     from ..settings.secret_ref import managed_secret_environment_names
+    from ..tooling.write_boundary import SandboxWriteProtection, _boundary_paths
     from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
     params = getattr(agent, '_current_run_params', None)
     boundary = write_boundary_with_runtime_ledger(agent, params) if params is not None else {}
     boundary = boundary or {}
-    workspace = _active_agent_workspace_root(agent)
+    workspace = (boundary.get('execution_cwd')
+                 or getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None)))
     context = None
+    read_roots, write_roots, absolute_paths, denied_roots = (), (), (), ()
     if workspace is not None:
+        workspace = Path(workspace).resolve(strict=False)
+        read_roots = tuple(dict.fromkeys(_boundary_paths(boundary.get('allowed_read_roots', [str(workspace)]), workspace)))
+        write_roots = tuple(dict.fromkeys(_boundary_paths(boundary.get('allowed_write_roots', []), workspace)))
+        task_roots = _boundary_paths([boundary.get('task_root')], workspace)
+        absolute_paths = tuple(dict.fromkeys([
+            *_boundary_paths(boundary.get('locked_files'), workspace),
+            *_boundary_paths(boundary.get('runtime_install_roots'), workspace),
+            *(path for task in task_roots for path in task_host_state_paths(task)),
+        ]))
+        denied_roots = tuple(dict.fromkeys(_boundary_paths(boundary.get('forbidden_write_roots'), workspace)))
         context = {'workspace_root': str(workspace), 'run_id': str(getattr(params, 'run_id', '') or ''),
             'task_id': str(getattr(params, 'task_id', '') or ''), 'effective_path_scope': {
-                'read_roots': list(boundary.get('allowed_read_roots', [str(workspace)])),
-                'write_roots': list(boundary.get('allowed_write_roots', []))}}
+                'read_roots': [str(path) for path in read_roots],
+                'write_roots': [str(path) for path in write_roots]}}
     return {'work_context': context,
+        'public_read_roots': read_roots, 'extra_write_roots': write_roots,
+        'write_protection': SandboxWriteProtection(absolute_paths=absolute_paths, denied_roots=denied_roots),
+        'host_path_protection': host_sandbox_paths(agent.home_paths.root, agent.home_paths.owner_home_dir,
+                                                  config=agent.config),
         'host_credential_env_names': managed_secret_environment_names(agent.config),
         'host_exclusive_paths': host_exclusive_paths(agent.home_paths, agent.config),
         'delivery_handler': _script_delivery_handler(agent, params)}
