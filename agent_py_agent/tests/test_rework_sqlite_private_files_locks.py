@@ -155,3 +155,107 @@ def test_second_connect_opens_no_python_fd_on_live_files(tmp_path, monkeypatch):
     finally:
         first.close()
     assert set(opened).isdisjoint(os.fspath(path) for path in _files(store.db_path))
+
+
+# LLM: 仅模拟 Seatbelt 的 file-link 拒绝；真实 LocalStore 仍须守住私有权限、链接拒绝与活库零 Python FD。
+# 函数用途: 验证硬链接不可用时新库能安全出生，后续建连不会碰掉 SQLite 的锁。
+def test_private_birth_falls_back_cleanly_when_hardlink_denied(tmp_path, monkeypatch):
+    denied = []
+    opened = []
+    real_open = schema.os.open
+
+    # LLM: 记录真实出生尝试后抛出与 Seatbelt 相同的 EPERM，不代替文件创建或数据库连接。
+    # 函数用途: 让硬链接发表稳定触发权限拒绝。
+    def deny_link(birth, path):
+        denied.append((birth, path))
+        raise PermissionError(1, "Operation not permitted")
+
+    # LLM: 原样调用 os.open，只在后续建连的有界观察窗记录 Python 层文件打开。
+    # 函数用途: 检查已有数据库建连没有额外打开任何 Python 文件描述符。
+    def recording_open(path, flags, *args, **kwargs):
+        opened.append(os.fspath(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(schema.os, "link", deny_link)
+    previous = os.umask(0o022)
+    try:
+        store = LocalStore(tmp_path / "seatbelt" / "local.db", enable_fts=False)
+        live = store._connect()
+        try:
+            assert {path.name: stat.S_IMODE(os.lstat(path).st_mode) for path in _files(store.db_path)} == {
+                "local.db": 0o600, "local.db-wal": 0o600, "local.db-shm": 0o600}
+            with monkeypatch.context() as connect_patch:
+                connect_patch.setattr(schema.os, "open", recording_open)
+                store._connect().close()
+                store._connect().close()
+            assert opened == []
+        finally:
+            live.close()
+        assert len(denied) == 1
+        assert denied[0][0].name.endswith(".birth")
+        assert denied[0][1] == store.db_path
+        assert list(tmp_path.rglob("*.birth")) == []
+
+        for link_target in ("existing", "dangling"):
+            target = tmp_path / f"{link_target}.db"
+            if link_target == "existing":
+                target.write_bytes(b"must remain untouched")
+                target.chmod(0o644)
+            link = tmp_path / link_target / "local.db"
+            link.parent.mkdir()
+            link.symlink_to(target)
+            with pytest.raises(ValueError, match="^SQLite storage must be a regular file$"):
+                LocalStore(link, enable_fts=False)
+            assert link.is_symlink()
+            assert os.path.lexists(target) == (link_target == "existing")
+            if link_target == "existing":
+                assert target.read_bytes() == b"must remain untouched"
+                assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        assert len(denied) == 1
+        assert list(tmp_path.rglob("*.birth")) == []
+    finally:
+        os.umask(previous)
+
+
+# LLM: 在 link 被拒前模拟其它进程发表主路径；回退的 O_EXCL 不得覆盖普通文件或跟随链接。
+# 函数用途: 验证回退创建遇到并发路径时保留原 inode，并继续拒绝已有和悬空链接。
+@pytest.mark.parametrize("racing_path", ["regular", "existing_symlink", "dangling_symlink"])
+def test_private_birth_fallback_preserves_racing_path(tmp_path, monkeypatch, racing_path):
+    db = tmp_path / "seatbelt-race" / "local.db"
+    target = tmp_path / "target.db"
+    if racing_path == "existing_symlink":
+        target.write_bytes(b"must remain untouched")
+        target.chmod(0o644)
+    published = []
+
+    # LLM: 只在尚不存在的主路径模拟一次外进程发表；拒绝 link 后仍由生产回退与 lstat 做裁决。
+    # 函数用途: 在初次不存在检查与直接创建之间放入竞争文件或链接。
+    def publish_then_deny_link(birth, path):
+        if racing_path == "regular":
+            path.touch(mode=0o600)
+        else:
+            path.symlink_to(target)
+        published.append(os.lstat(path))
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(schema.os, "link", publish_then_deny_link)
+    if racing_path == "regular":
+        store = LocalStore(db, enable_fts=False)
+        conn = store._connect()
+        try:
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in _files(db))
+        finally:
+            conn.close()
+    else:
+        with pytest.raises(ValueError, match="^SQLite storage must be a regular file$"):
+            LocalStore(db, enable_fts=False)
+        assert db.is_symlink()
+        assert os.path.lexists(target) == (racing_path == "existing_symlink")
+        if racing_path == "existing_symlink":
+            assert target.read_bytes() == b"must remain untouched"
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert len(published) == 1
+    current = os.lstat(db)
+    assert (current.st_dev, current.st_ino) == (published[0].st_dev, published[0].st_ino)
+    assert list(tmp_path.rglob("*.birth")) == []

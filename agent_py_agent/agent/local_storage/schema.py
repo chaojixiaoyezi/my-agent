@@ -23,6 +23,9 @@ from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 
+# 串行化本进程的新库出生，硬链接被拒时也只对尚未发表的库创建并关闭 FD。
+_SQLITE_BIRTH_LOCK = threading.Lock()
+
 # FTS5 records 索引的 schema 版本。中文检索失灵根因:默认 unicode61 把一整段汉字
 # 当作 1 个 token(实测 sqlite 3.53 下 '记忆推送模式...' 整串=单 token),子串/词
 # 永远 MATCH 不中,FTS5 对中文形同虚设(只能靠 LIKE 兜底,零排序、只扫 preview)。
@@ -222,12 +225,14 @@ _TOOL_OPERATION_COLUMN_SQL = (
 )
 
 
-# LLM: 只收紧本库及已存在的 sidecar，主库先以 0600 出生让 SQLite 派生文件继承；不改进程 umask、不删库。
+# LLM: 缺失主库在进程锁内双查并以 0600 出生；只收紧现存 sidecar，不开关活文件 FD、不改 umask、不删库。
 # 函数用途: 保证本地数据库及 WAL/SHM 私有，缺失附属文件不创建。
 def _private_sqlite_files(path, *, create=False):
     # Never open/close an fd on an existing db/-wal/-shm: POSIX close() drops this process's SQLite locks.
     if create and not os.path.lexists(path):
-        _create_private_sqlite_file(path)
+        with _SQLITE_BIRTH_LOCK:
+            if not os.path.lexists(path):
+                _create_private_sqlite_file(path)
     for suffix in ("", "-wal", "-shm"):
         target = path.with_name(path.name + suffix)
         try:
@@ -242,7 +247,7 @@ def _private_sqlite_files(path, *, create=False):
             os.chmod(target, 0o600)
 
 
-# LLM: 仅在主库路径尚不存在时调用；临时名含 pid/线程号并以 O_EXCL|O_NOFOLLOW 出生，link 不覆盖已发表的库，临时名总被删除。
+# LLM: 调用方持出生锁且主路径尚不存在；优先 link，权限拒绝时仅以 O_EXCL|O_NOFOLLOW 创建，竞争路径交回 lstat 核验，临时名总删除。
 # 函数用途: 以 0600 原子发表一个空主库文件，让 SQLite 随后派生的 WAL/SHM 继承私有权限。
 def _create_private_sqlite_file(path):
     # Born 0600 under an unpublished name; the closed fd belongs to an inode no connection can see yet.
@@ -253,6 +258,15 @@ def _create_private_sqlite_file(path):
         os.link(birth, path)
     except FileExistsError:
         pass
+    except PermissionError:
+        # Seatbelt 可禁止 file-link，但仍允许独占创建；不打开其它进程刚发表的文件或链接。
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            direct_fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(direct_fd)
     finally:
         os.unlink(birth)
 
