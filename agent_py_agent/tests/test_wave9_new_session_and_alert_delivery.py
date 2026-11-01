@@ -1131,13 +1131,14 @@ def test_r4_selected_agent_view_reads_outside_reset_lock(alert_case, monkeypatch
         assert runtime.background_message_cursor == (0 if reaction == "reset" else 3)
 
 
-# LLM: 在首次采样字段读出后精确启动另一线程reset；锁内只等待对方尝试，锁外则等reset完成，不用sleep赌时序。
+# LLM: 只在真实字段采样入口启用探针，前置上下文读取不触发reset；锁内只等对方尝试，锁外则等reset完成。
 # 函数用途: 同时核对两种poll原子采样、锁外IO，以及旧页不能回写游标500。
 @pytest.mark.parametrize("transport", ["gateway", "local"])
 def test_r3_poll_captures_cursor_and_generation_under_reset_lock(alert_case, monkeypatch, transport):
     import threading
 
     from agent_py_agent.agent.conversation import background_transcript, message_stream
+    from agent_py_agent.cli.chat_parts import tui_threading
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
     from agent_py_agent.cli.chat_parts.tui_threading import (
         _consume_gateway_background_snapshot,
@@ -1178,7 +1179,16 @@ def test_r3_poll_captures_cursor_and_generation_under_reset_lock(alert_case, mon
             finished.set()
     worker = threading.Thread(target=reset)
     worker.start()
-    runtime.probe_armed = True
+    capture = tui_threading._capture_background_poll_state
+    # LLM: 仍调用原采样函数和真实锁；避免_begin_background_poll的代次读取提前触发reset，形成两段锁之间的调度竞态。
+    # 函数用途: 把故障注入精确绑定到被测字段的原子采样边界。
+    def capture_with_probe(tui_runtime, event_cursor):
+        tui_runtime.probe_armed = True
+        try:
+            return capture(tui_runtime, event_cursor)
+        finally:
+            tui_runtime.probe_armed = False
+    monkeypatch.setattr(tui_threading, "_capture_background_poll_state", capture_with_probe)
     # LLM: 只替代IO边界；若生产代码把HTTP或文件读取放进reset锁，此握手会直接失败而非等待超时掩盖。
     # 函数用途: 证明采样锁已释放并让旧页在reset完成后返回。
     def io_boundary():
