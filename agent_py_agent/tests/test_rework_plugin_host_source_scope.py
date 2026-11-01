@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,17 +101,31 @@ def _flow(workflow_id, inputs):
     )
 
 
-# LLM: 来源全是临时合成值；宿主 file: 来源刻意落在 alice 获批业务根中，不靠目录外拒绝掩盖缺口。
+# LLM: 仅本模块使用；先解析来源再避开 Linux 被 scratch 重映射的 /tmp，依赖 teardown 保证 Host 先关闭。
+# 函数用途: 保留安全的 pytest 根，必要时创建并自动清理非重映射的私有资产根。
+@pytest.fixture
+def asset_root(tmp_path):
+    root = tmp_path.resolve()
+    if not root.is_relative_to("/tmp"):
+        yield tmp_path
+        return
+    with tempfile.TemporaryDirectory(prefix="my-agent-source-scope-", dir="/var/tmp") as directory:
+        root = Path(directory).resolve()
+        assert not root.is_relative_to("/tmp"), "asset root must be outside the remapped /tmp subtree"
+        yield root
+
+
+# LLM: 来源全是临时合成值；宿主 file: 来源刻意落在 alice 获批业务根中，不靠目录外拒绝掩盖缺口；先关闭 Host 再清理 asset_root。
 # 函数用途: 提供完整生产 Host API 组合、可信配置与注册脚本/工作流。
 @pytest.fixture
-def asset_case(tmp_path, monkeypatch):
+def asset_case(asset_root, monkeypatch):
     tree = Path(__file__).resolve().parents[1]
     for module in (gateway_runtime, gateway_assets, script_runner, attempt, tooling):
         assert Path(module.__file__).resolve().is_relative_to(tree)
     monkeypatch.setenv(_HOST_ENV, "synthetic-host-only-value")
     monkeypatch.setenv(_BUSINESS_ENV, "north")
     monkeypatch.setattr(GatewayHTTPServer, "start", _in_process_start)
-    home = tmp_path / "owners/local/alice"
+    home = asset_root / "owners/local/alice"
     workspace = home / "workspace"
     source, sibling = workspace / "host-source.data", workspace / "host-source.data-business"
     report = workspace / "report.json"
@@ -124,7 +139,7 @@ def asset_case(tmp_path, monkeypatch):
     for flow in (normal, resumed):
         grants.append({"kind": "workflow", "id": flow.descriptor.id, "revision": 1,
                        "sha256": hashlib.sha256(canonical_json(flow.to_dict()["steps"]).encode()).hexdigest()})
-    fixture = _production_host.__wrapped__(tmp_path, SimpleNamespace(param={"asset_refs": grants}))
+    fixture = _production_host.__wrapped__(asset_root, SimpleNamespace(param={"asset_refs": grants}))
     host = next(fixture)
     try:
         case = SimpleNamespace(host=host, home=home, workspace=workspace, source=source, sibling=sibling,
@@ -133,13 +148,13 @@ def asset_case(tmp_path, monkeypatch):
         workspace.mkdir(parents=True, exist_ok=True)
         source.write_text("synthetic-host-file-value")
         sibling.write_text("ordinary business input")
-        config_file = tmp_path / "deployment.yaml"
-        config_file.write_text(f"my_agent_home: {json.dumps(str(tmp_path))}\n"
+        config_file = asset_root / "deployment.yaml"
+        config_file.write_text(f"my_agent_home: {json.dumps(str(asset_root))}\n"
                                f"feishu_app_secret: env:{_HOST_ENV}\n"
                                f"feishu_encrypt_key: {json.dumps('file:' + str(source))}\n")
         config = load_config(config_file)
         assert _HOST_ENV in managed_secret_environment_names(config)
-        assert source in host_sandbox_paths(tmp_path, home, config=config).hidden
+        assert source in host_sandbox_paths(asset_root, home, config=config).hidden
         case.config, case.config_file = config, config_file
         case.thread = _call(case, "conversations.threads.create", {}, status=201)["thread_id"]
         ScriptStore(home, extra_roots=()).save_script(
