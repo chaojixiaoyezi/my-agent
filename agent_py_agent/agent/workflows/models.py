@@ -14,7 +14,7 @@ from ..common.log_redaction import redact_sensitive_value
 
 _BEARER_VALUE = re.compile(r'''(?i)(\bbearer\s+)(?!<redacted\b|\[redacted\])[^\s,;"'<>]+''')
 StepStatus = Literal['pending', 'running', 'succeeded', 'skipped', 'failed',
-                     'escalated_recovered', 'paused_for_resume']
+                     'escalated_recovered', 'paused_for_resume', 'waiting_for_agent']
 SCRIPT_WORK_CONTEXT_SCHEMA_VERSION = 'script-work-context.v1'
 SCRIPT_OUTPUT_PROTOCOL_VERSION = 'script-output.v1'
 

@@ -2,6 +2,7 @@
 # 模块用途: 脱敏并原子保存运行进度、冻结定义与步骤快照，支持跨平台互斥及断点恢复。
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from contextlib import contextmanager
@@ -176,23 +177,33 @@ class WorkflowRunStore:
             raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', record.workflow_run_id, 'run.json'))
             if raw is not None:
                 raise ValueError('运行编号已存在')
+            # DTO 可复制来创建不同运行；新行的 CAS 起点不能继承另一个 ID 的修订。
+            record.revision = 0
             self.save_run(record, workflow_snapshot)
 
     # LLM: 仅引擎在启动、恢复和结束时调用；定义只在首次传入时替换，不跟随资产后来修改。
     # 函数用途: 保存运行全貌与所有步骤快照。
-    def save_run(self, record, workflow_snapshot=None):
+    def save_run(self, record, workflow_snapshot=None, *, expected_revision=None):
         for step in record.steps:
             safe_path(self.root, step.step_id + '.json')
         with self._lock(record.workflow_run_id):
             parts = ('data', 'workflow_runs', record.workflow_run_id, 'run.json')
             raw = read_text_beneath(self.owner_home, parts)
             data = json.loads(raw) if raw is not None else {}
+            revision = data.get('revision', 0)
+            if (record.revision != revision or expected_revision is not None and expected_revision != revision):
+                raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+            for name in ('business_context', 'scope_snapshot', 'scope_revision'):
+                if raw is not None and data.get(name, {} if name != 'scope_revision' else 0) != getattr(record, name):
+                    raise ValueError('WORKFLOW_RUN_BINDING_IMMUTABLE')
             data.update(_run_payload(record))
+            data['revision'] = revision + 1
             if workflow_snapshot is not None:
                 data['workflow_snapshot'] = payload(workflow_snapshot)
             for step in record.steps:
                 self._write_step(record.workflow_run_id, step)
             _write_json(self.owner_home, parts, data)
+            record.revision = revision + 1
 
     # LLM: 先发表独立快照再更新运行；崩溃窗口由 load_run 读取独立快照弥合。
     # 函数用途: 保存一个已存在步骤的运行中或完成状态，并推进当前步骤位置。
@@ -206,10 +217,50 @@ class WorkflowRunStore:
                              steps=tuple(step_record if s.step_id == step_record.step_id else s for s in record.steps)))
             data = self._read(workflow_run_id, 'run.json')
             execution_receipt(record, phase='step_publish', effect_outcome=(
-                'unknown' if step_record.status not in ('pending', 'running') else getattr(record, 'effect_outcome', 'not_started')))
+                'unknown' if step_record.escalation_result.get('effect_started')
+                or step_record.status not in ('pending', 'running') else getattr(record, 'effect_outcome', 'not_started')))
             data.update(_run_payload(record))
+            data['revision'] = record.revision + 1
             _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
+            record.revision = data['revision']
             return record
+
+    def begin_control(self, workflow_run_id, *, action, operation_key, expected_revision, intent=None):
+        """恢复/取消沿原 run.json 记同键意图，不能用 updated_at 或第二任务账当版本。"""
+        if not isinstance(operation_key, str) or not 0 < len(operation_key.encode()) <= 256:
+            raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
+        fingerprint = hashlib.sha256(json.dumps(intent, sort_keys=True, ensure_ascii=False,
+                                                 allow_nan=False).encode()).hexdigest()
+        with self._lock(workflow_run_id):
+            data = self._read(workflow_run_id, 'run.json')
+            operations = data.setdefault('control_operations', {})
+            previous = operations.get(operation_key)
+            if previous is not None:
+                if (previous['action'] != action or previous['expected_revision'] != expected_revision
+                        or previous.get('intent') != fingerprint):
+                    raise ValueError('IDEMPOTENCY_CONFLICT')
+                return previous['state'] == 'completed', (_decode_run(previous['receipt'])
+                    if previous.get('receipt') else self.load_run(workflow_run_id))
+            if type(expected_revision) is not int or expected_revision != data.get('revision', 0):
+                raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+            operations[operation_key] = {'action': action, 'intent': fingerprint,
+                                        'expected_revision': expected_revision, 'state': 'pending'}
+            data['revision'] = data.get('revision', 0) + 1
+            _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
+            return False, self.load_run(workflow_run_id)
+
+    def complete_control(self, workflow_run_id, operation_key):
+        with self._lock(workflow_run_id):
+            data = self._read(workflow_run_id, 'run.json')
+            operation = data['control_operations'][operation_key]
+            if operation['state'] != 'completed':
+                operation['state'] = 'completed'
+                data['revision'] = data.get('revision', 0) + 1
+                receipt = _run_payload(self.load_run(workflow_run_id))
+                receipt['revision'] = data['revision']
+                operation['receipt'] = receipt
+                _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
+            return _decode_run(operation['receipt']) if operation.get('receipt') else self.load_run(workflow_run_id)
 
     # LLM: 兼容任务指定的步骤保存名，不新增另一套存储格式或锁。
     # 函数用途: 通过同一原子保存链写入步骤记录。

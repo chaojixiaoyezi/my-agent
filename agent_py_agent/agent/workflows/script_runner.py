@@ -46,6 +46,9 @@ from .models import ScriptExecutionResult, payload, safe_path
 
 # 原生工作流脚本标准输出与错误流保留的最大字节数。
 MAX_OUTPUT_BYTES = 1024 * 1024
+# 输入 v2 保留完整 stdin；大 JSON 不进入单个环境变量，避免 E2BIG。
+SCRIPT_INPUT_INLINE_MAX_BYTES = 8192
+SCRIPT_ENVIRONMENT_MAX_BYTES = 65536
 # 原生工作流步骤回执保留的输出预览最大字符数。
 PREVIEW_CHARS = 4096
 _TIMING_FIELDS = ('configuration_load_ms', 'directory_discovery_ms', 'environment_setup_ms',
@@ -423,6 +426,14 @@ exec(_code, _main_globals)
 
 # LLM: 此异常只表示冻结代码为空或缺失，不把路径违规或坏描述符降级为旧格式。
 # 类用途: 让缺失入口返回明确的可修复错误码。
+class ScriptInputTransportError(ValueError):
+    """旧 env-only 脚本须声明迁移协议，不静默改成默认空输入。"""
+
+    def __init__(self, error_code):
+        self.error_code = error_code
+        super().__init__(error_code)
+
+
 class _EntrypointMissing(ValueError):
     pass
 
@@ -492,11 +503,23 @@ def _network_access(metadata, override):
 def _environment(metadata, folder, input_json, sources, *, host_credential_env_names=frozenset(), work_context=None):
     environment = scrub_subprocess_env(dict(os.environ), host_credential_env_names=host_credential_env_names)
     # 不继承另一运行或操作者环境伪造的工作上下文；只有本启动器可注入当前冻结值。
-    for key in ('MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE'):
-        environment.pop(key, None)
+    for key in tuple(environment):
+        if key.startswith('MY_AGENT_SCRIPT_INPUT_') or key in ('MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE'):
+            environment.pop(key, None)
     environment.update(PYTHONIOENCODING='utf-8', PAGER='cat', GIT_PAGER='cat', HOME=str(folder), TMPDIR=str(folder),
-                       MY_AGENT_SCRIPT_INPUT_JSON=input_json,
                        MY_AGENT_DATA_SOURCES_JSON=json.dumps(sources, ensure_ascii=False, allow_nan=False))
+    protocol = metadata.get('metadata', {}).get('script_input_protocol', 'script-input.v1')
+    if protocol not in ('script-input.v1', 'script-input.v2'):
+        raise ScriptInputTransportError('SCRIPT_INPUT_PROTOCOL_INVALID')
+    environment['MY_AGENT_SCRIPT_INPUT_PROTOCOL'] = protocol
+    if len(input_json.encode('utf-8')) <= SCRIPT_INPUT_INLINE_MAX_BYTES:
+        environment.update(MY_AGENT_SCRIPT_INPUT_JSON=input_json, MY_AGENT_SCRIPT_INPUT_MODE='inline')
+    else:
+        if protocol != 'script-input.v2':
+            raise ScriptInputTransportError('SCRIPT_INPUT_PROTOCOL_REQUIRED')
+        # 本次授权 scratch 内的固定叶沿原 nofollow writer 发布，不扩大读取根。
+        write_text_atomic_beneath(folder, ('input.json',), input_json, file_mode=0o600)
+        environment.update(MY_AGENT_SCRIPT_INPUT_MODE='file', MY_AGENT_SCRIPT_INPUT_FILE=str(folder / 'input.json'))
     if work_context is not None:
         environment['MY_AGENT_SCRIPT_WORK_CONTEXT_JSON'] = json.dumps(work_context, ensure_ascii=False, allow_nan=False)
     for ref in metadata.get('credential_refs', ()):
@@ -554,6 +577,11 @@ def _cleanup_process(process):
 # LLM: 原始失败及清理事实写入调用方持有的 capture，输出读取或关闭异常也不能丢失硬失败。
 # 函数用途: 真正启动脚本并返回退出码、输出及超时或输出超限标记。
 def _execute(command, folder, environment, input_json, timeout, capture):
+    # 连同数据源/守卫/继承环境与 argv 一起检查；不能截断环境或误报进程已启动。
+    size = sum(len((str(key) + '=' + str(value)).encode('utf-8')) + 1 for key, value in environment.items())
+    size += sum(len(str(arg).encode('utf-8')) + 1 for arg in command)
+    if size > SCRIPT_ENVIRONMENT_MAX_BYTES:
+        raise ScriptInputTransportError('SCRIPT_ENVIRONMENT_LIMIT')
     with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         stdin.write(input_json.encode('utf-8'))
         stdin.seek(0)
@@ -996,6 +1024,8 @@ class ScriptRunner:
             if isinstance(exc, _EntrypointMissing):
                 error = 'ENTRYPOINT_MISSING'
             if isinstance(exc, AssetDisabledError):
+                error = exc.error_code
+            if isinstance(exc, ScriptInputTransportError):
                 error = exc.error_code
             stderr = str(exc)
             execution_error = {'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)}

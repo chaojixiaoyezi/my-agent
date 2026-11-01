@@ -1,0 +1,443 @@
+"""业务范围是原工作流资产的元数据，不是另一份正文或执行器。
+
+actor 与 authorize/context_provider 只由可信宿主注入；JSON 不能指定它们。
+W1/W2 尚未接线时，相关入口明确拒绝，不凭构造 DTO 或展示标签取得权限。
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import time
+from dataclasses import replace
+from datetime import datetime, timezone
+
+from ..assets.descriptor import asset_descriptor_from_definition
+from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA, WorkflowDefinition, WorkflowStore
+from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
+
+# 原领域入口的参数边界；原生工具只适配此入口，W13 目录仍负责完整公开 schema。
+WORKFLOW_ACTION_FIELDS = {
+    'workflows.create': (('definition',), ('scope',)),
+    'workflows.update': (('workflow_ref', 'definition'), ()),
+    'workflows.list': ((), ('cursor', 'limit', 'space_id', 'scope_mode', 'lifecycle', 'query')),
+    'workflows.get': (('workflow_ref',), ()),
+    'workflows.scope.get': (('workflow_ref',), ()),
+    'workflows.scope.set': (('workflow_ref', 'scope'), ()),
+    'workflows.enable': (('workflow_ref',), ()),
+    'workflows.disable': (('workflow_ref',), ()),
+    'workflows.preview': (('workflow_ref',), ('space_id', 'inputs')),
+    'workflows.run': (('workflow_ref',), ('space_id', 'project_ref', 'inputs')),
+    'workflow_runs.list': ((), ('workflow_ref', 'space_id', 'cursor', 'limit')),
+    'workflow_runs.get': (('workflow_run_id',), ()),
+    'workflow_runs.resume': (('workflow_run_id',), ('resolution_ref',)),
+    'workflow_runs.cancel': (('workflow_run_id',), ()),
+    'workflows.recycle': (('workflow_ref',), ()),
+    'workflows.restore': (('workflow_ref',), ('scope',)),
+    'workflows.protection.set': (('workflow_ref', 'protected'), ()),
+    'workflows.cleanup.policy.get': ((), ()),
+    'workflows.cleanup.policy.set': (('policy',), ()),
+    'workflows.cleanup.preview': ((), ('cursor', 'limit')),
+    'workflows.cleanup.run': ((), ()),
+}
+WORKFLOW_READ_ACTIONS = ('workflows.list', 'workflows.get', 'workflows.scope.get', 'workflows.preview',
+    'workflow_runs.list', 'workflow_runs.get', 'workflows.cleanup.policy.get', 'workflows.cleanup.preview')
+WORKFLOW_NO_CAS_ACTIONS = (*WORKFLOW_READ_ACTIONS, 'workflows.create', 'workflows.run', 'workflows.cleanup.run')
+
+
+def validate_business_request(action, request, *, expected_revision=None, idempotency_key=''):
+    if action not in WORKFLOW_ACTION_FIELDS or not isinstance(request, dict):
+        raise ValueError('INVALID_WORKFLOW_ACTION')
+    required, optional = WORKFLOW_ACTION_FIELDS[action]
+    if set(required) - request.keys() or set(request) - set(required + optional):
+        raise ValueError('INVALID_WORKFLOW_PARAMETERS')
+    if action not in WORKFLOW_READ_ACTIONS and (not isinstance(idempotency_key, str)
+            or not 0 < len(idempotency_key.encode()) <= 256):
+        raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
+    if action not in WORKFLOW_NO_CAS_ACTIONS and (type(expected_revision) is not int or expected_revision < 0):
+        raise ValueError('EXPECTED_REVISION_REQUIRED')
+    if 'scope' in request and (not isinstance(request['scope'], dict)
+            or set(request['scope']) != {'scope_mode', 'space_ids'}):
+        raise ValueError('INVALID_WORKFLOW_SCOPE')
+    if 'scope' in request:
+        WorkflowScope.from_dict({**request['scope'], 'scope_revision': 0})
+    for key in ('workflow_ref', 'workflow_run_id', 'space_id', 'project_ref', 'resolution_ref'):
+        if key in request and (not isinstance(request[key], str) or not 0 < len(request[key].encode()) <= 128):
+            raise ValueError('INVALID_WORKFLOW_REFERENCE')
+
+
+def workflow_state(definition):
+    """旧无范围记录只在读取时解释为全局，不写迁移或延长孤立期限。"""
+    state = json.loads(json.dumps(definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA, {})))
+    scope = WorkflowScope.from_dict(state.get('scope', {
+        'scope_mode': 'owner_global', 'space_ids': [], 'scope_revision': 0}))
+    return {'lifecycle': 'active', 'protected': False, 'orphan_since': None,
+            'last_content_edit_at': None, 'last_run_at': None, 'last_restore_at': None,
+            **state, 'scope': scope.to_dict()}
+
+
+def scope_view(scope):
+    return {key: scope[key] for key in ('scope_mode', 'space_ids')}
+
+
+def with_state(definition, state):
+    return replace(definition, descriptor=replace(definition.descriptor,
+        metadata={**definition.descriptor.metadata, BUSINESS_WORKFLOW_METADATA: state}))
+
+
+def timestamp(value):
+    return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
+
+
+def workflow_view(definition, state=None):
+    state = workflow_state(definition) if state is None else state
+    return {'workflow_ref': definition.descriptor.id, 'name': definition.descriptor.name,
+        'definition_revision': definition.descriptor.revision,
+        'execution_definition_ref': definition.execution_definition_ref,
+        'scope_revision': state['scope']['scope_revision'], 'scope': scope_view(state['scope']),
+        'lifecycle': state['lifecycle'], 'enabled': definition.enabled,
+        'protected': state['protected'], 'definition_ref': definition.descriptor.id}
+
+
+class WorkflowScopeService:
+    """原动作目录与 UI/plugin 共用的 Owner 领域入口；不从请求猜当前业务身份。"""
+
+    def __init__(self, owner_home, *, owner_id, authorize, reference_reader=None, clock=None,
+                 context_provider=None, agent_steps=None, governance=None, engine_factory=None):
+        self.store = WorkflowStore(owner_home)
+        self.owner_id = owner_id
+        self.authorize = authorize
+        self.reference_reader = reference_reader
+        self.clock = clock or time.time
+        self.context_provider = context_provider
+        self.agent_steps, self.governance = agent_steps, governance
+        self.engine_factory = engine_factory
+
+    def _authorize(self, actor, action, workflow_ref=''):
+        if (not callable(self.authorize) or getattr(actor, 'owner_id', None) != self.owner_id
+                or self.authorize(actor, action, workflow_ref) is not True):
+            raise PermissionError('BUSINESS_WORKFLOW_ACCESS_DENIED')
+
+    def _get(self, workflow_ref):
+        definition = self.store.get_workflow(workflow_ref)
+        if definition is None:
+            raise KeyError(workflow_ref)
+        if definition.descriptor.owner_id and definition.descriptor.owner_id != self.owner_id:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        return definition
+
+    def _definition(self, value):
+        value = json.loads(json.dumps(value, allow_nan=False))
+        descriptor = value['descriptor']
+        if set(descriptor) & {'owner_id', 'revision', 'runtime_summary', 'used_by', 'scope_layer', 'source_scope', 'workspace_root'}:
+            raise ValueError('WORKFLOW_HOST_FIELDS_FORBIDDEN')
+        if BUSINESS_WORKFLOW_METADATA in descriptor.get('metadata', {}):
+            raise ValueError('WORKFLOW_HOST_FIELDS_FORBIDDEN')
+        descriptor = asset_descriptor_from_definition(descriptor, descriptor['id'], 'workflow')
+        value['descriptor'] = replace(descriptor, owner_id=self.owner_id).to_dict()
+        return WorkflowDefinition.from_any(value)
+
+    def set_scope(self, workflow_ref: str, scope: WorkflowScope, *, actor: object,
+                  expected_revision: int, idempotency_key: str) -> dict:
+        # scope_revision 由锁内正式关系递增；调用方 DTO 的旧版本不能成为执行授权。
+        if not isinstance(scope, WorkflowScope):
+            raise TypeError('scope必须为WorkflowScope')
+        return self.execute('workflows.scope.set', {'workflow_ref': workflow_ref,
+            'scope': scope_view(scope.to_dict())}, actor=actor,
+            expected_revision=expected_revision, idempotency_key=idempotency_key)
+
+    def execute(self, action, request, *, actor, expected_revision=None, idempotency_key=''):
+        validate_business_request(action, request, expected_revision=expected_revision, idempotency_key=idempotency_key)
+        ref = request.get('workflow_ref', '')
+        self._authorize(actor, action, ref)
+        if action == 'workflows.create':
+            return self._create(request, idempotency_key, actor)
+        if action == 'workflows.list':
+            return self._list(request, actor)
+        if action.startswith('workflows.cleanup.'):
+            from .orphan_maintenance import cleanup_action
+            return cleanup_action(self, action, request, actor=actor, expected_revision=expected_revision,
+                                  idempotency_key=idempotency_key)
+        if action.startswith('workflow_runs.'):
+            return self._run_action(action, request, actor=actor, expected_revision=expected_revision,
+                                    idempotency_key=idempotency_key)
+        definition = self._get(ref)
+        state = workflow_state(definition)
+        if action == 'workflows.scope.get':
+            return {'scope': scope_view(state['scope']), 'scope_revision': state['scope']['scope_revision'],
+                    'origin': {'kind': definition.descriptor.source_scope, 'source_ref': ref,
+                               'revision': state['scope']['scope_revision']}}
+        if action == 'workflows.get':
+            from .orphan_maintenance import cleanup_status
+            return {'workflow': workflow_view(definition), 'scope': scope_view(state['scope']),
+                'run_refs': [row.workflow_run_id for row in self._run_store().list_runs(workflow_id=ref, limit=100)],
+                'cleanup_status': cleanup_status(self, definition),
+                'allowed_actions': [name for name in ('workflows.update', 'workflows.scope.set', 'workflows.run',
+                    'workflows.recycle', 'workflows.restore') if self.authorize(actor, name, ref) is True]}
+        if action == 'workflows.preview':
+            self._check_scope(state['scope'], request.get('space_id'), preview=True)
+            return {'plan': [{'step_id': step.step_id, 'mode': step.mode,
+                'required_capabilities': ['business.execute', 'execute'],
+                'dependencies': list(dict.fromkeys(value['step_id'] for value in step.inputs_map.values()
+                    if isinstance(value, dict) and 'step_id' in value and value['step_id'] != '$inputs')),
+                'would_execute': True} for step in definition.steps],
+                'errors': [], 'required_capabilities': ['business.execute', 'execute'] if definition.steps else []}
+        if action == 'workflows.run':
+            self._check_scope(state['scope'], request.get('space_id'))
+            return self._run(request, actor, idempotency_key)
+        return self._mutate(action, request, actor, expected_revision, idempotency_key)
+
+    def _create(self, request, key, actor):
+        definition = self._definition(request['definition'])
+        scope = WorkflowScope.from_dict({**request.get('scope', {'scope_mode': 'owner_global', 'space_ids': []}),
+                                         'scope_revision': 1})
+
+        def transform(previous):
+            self._authorize(actor, 'workflows.create', definition.descriptor.id)
+            if previous is not None:
+                raise ValueError('WORKFLOW_ALREADY_EXISTS')
+            now = self.clock()
+            state = {'scope': scope.to_dict(), 'lifecycle': 'active', 'protected': False,
+                'orphan_since': now if scope.scope_mode == 'unassigned' else None,
+                'last_content_edit_at': now, 'last_run_at': None, 'last_restore_at': None}
+            return with_state(definition, state), {'workflow_ref': definition.descriptor.id,
+                'definition_revision': 1, 'scope_revision': 1, 'scope': scope_view(scope.to_dict())}
+
+        return self.store.apply_business_operation(definition.descriptor.id, action='workflows.create',
+            intent=request, idempotency_key=key, expected_revision=None, revision_target=None, transform=transform)
+
+    def _check_scope(self, scope, space_id, *, preview=False):
+        if scope['scope_mode'] == 'unassigned' and not preview:
+            raise PermissionError('WORKFLOW_UNASSIGNED')
+        if scope['scope_mode'] == 'spaces' and space_id not in scope['space_ids']:
+            raise PermissionError('WORKFLOW_SPACE_MISMATCH')
+
+    def _list(self, request, actor):
+        rows = []
+        for definition in self.store.list_workflows():
+            if self.authorize(actor, 'workflows.get', definition.descriptor.id) is not True:
+                continue
+            state = workflow_state(definition)
+            if request.get('lifecycle', 'active') not in ('all', state['lifecycle']):
+                continue
+            if request.get('scope_mode', 'all') not in ('all', state['scope']['scope_mode']):
+                continue
+            if request.get('space_id') and state['scope']['scope_mode'] != 'owner_global' and request['space_id'] not in state['scope']['space_ids']:
+                continue
+            if request.get('query', '') not in definition.descriptor.name:
+                continue
+            rows.append(workflow_view(definition))
+        return self._page(rows, request)
+
+    def _page(self, rows, request):
+        limit = request.get('limit', 50)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('limit必须为1到100')
+        identity = hashlib.sha256(json.dumps([rows, {key: value for key, value in request.items()
+            if key not in ('cursor', 'limit')}], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        offset = 0
+        if cursor := request.get('cursor'):
+            try:
+                saved = json.loads(base64.urlsafe_b64decode(cursor))
+                if saved['snapshot'] != identity or type(saved['offset']) is not int or saved['offset'] < 0:
+                    raise ValueError('LIST_SNAPSHOT_EXPIRED')
+                offset = saved['offset']
+            except (ValueError, TypeError, KeyError):
+                raise ValueError('LIST_SNAPSHOT_EXPIRED') from None
+        end = offset + limit
+        cursor = base64.urlsafe_b64encode(json.dumps({'snapshot': identity, 'offset': end}).encode()).decode() if end < len(rows) else None
+        return {'items': rows[offset:end], 'next_cursor': cursor, 'list_snapshot_id': identity,
+                'coverage': 'complete'}
+
+    def _mutate(self, action, request, actor, revision, key):
+        ref = request['workflow_ref']
+        supported = ('workflows.scope.set', 'workflows.update', 'workflows.enable', 'workflows.disable',
+                     'workflows.recycle', 'workflows.restore', 'workflows.protection.set')
+        if action not in supported:
+            raise ValueError('UNKNOWN_WORKFLOW_ACTION')
+        definition = self._get(ref)
+        if definition.descriptor.source_scope != 'owner' or definition.descriptor.scope_layer != 'owner':
+            raise PermissionError('WORKFLOW_READ_ONLY')
+        replacement = self._definition(request['definition']) if action == 'workflows.update' else None
+        if replacement is not None and replacement.descriptor.id != ref:
+            raise ValueError('WORKFLOW_REFERENCE_MISMATCH')
+
+        def transform(previous):
+            self._authorize(actor, action, ref)
+            if previous is None:
+                raise KeyError(ref)
+            state = workflow_state(previous)
+            current = previous
+            now = self.clock()
+            if action in ('workflows.scope.set', 'workflows.restore'):
+                mode = request.get('scope', {'scope_mode': 'unassigned', 'space_ids': []})
+                if set(mode) != {'scope_mode', 'space_ids'}:
+                    raise ValueError('INVALID_WORKFLOW_SCOPE')
+                scope = WorkflowScope.from_dict({**mode, 'scope_revision': state['scope']['scope_revision'] + 1})
+                old_mode = state['scope']['scope_mode']
+                state['scope'] = scope.to_dict()
+                if scope.scope_mode != 'unassigned':
+                    state['orphan_since'] = None
+                elif old_mode != 'unassigned' or action == 'workflows.restore':
+                    state['orphan_since'] = now
+                if action == 'workflows.restore':
+                    state.update(lifecycle='active', last_restore_at=now)
+            elif action == 'workflows.update':
+                if (replacement.execution_definition_ref != previous.execution_definition_ref
+                        or replacement.body_markdown != previous.body_markdown
+                        or replacement.descriptor.name != previous.descriptor.name):
+                    state['last_content_edit_at'] = now
+                    if state['scope']['scope_mode'] == 'unassigned':
+                        state['orphan_since'] = now
+                current = replacement
+            elif action in ('workflows.enable', 'workflows.disable'):
+                enabled = action == 'workflows.enable'
+                if enabled and state['lifecycle'] != 'active':
+                    raise PermissionError('WORKFLOW_RECYCLED')
+                current = replace(previous, enabled=enabled, descriptor=replace(previous.descriptor, enabled=enabled))
+            elif action == 'workflows.protection.set':
+                if type(request['protected']) is not bool:
+                    raise ValueError('protected必须为布尔值')
+                state['protected'] = request['protected']
+            elif action == 'workflows.recycle':
+                from .orphan_maintenance import cleanup_status
+                status = cleanup_status(self, previous)
+                if status['blockers']:
+                    raise PermissionError('WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN')
+                state['lifecycle'] = 'recycled'
+            current = with_state(current, state)
+            current = replace(current, descriptor=replace(current.descriptor, revision=previous.descriptor.revision + 1))
+            if action == 'workflows.scope.set':
+                result = {'scope': scope_view(state['scope']), 'scope_revision': state['scope']['scope_revision'], 'affected_runs': []}
+            elif action == 'workflows.update':
+                result = {'workflow': workflow_view(current), 'definition_revision': current.descriptor.revision, 'affected_runs': []}
+            elif action in ('workflows.enable', 'workflows.disable'):
+                result = {'workflow': workflow_view(current), 'affected_runs': []}
+            elif action == 'workflows.protection.set':
+                result = {'workflow_ref': ref, 'protected': state['protected'], 'revision': current.descriptor.revision}
+            elif action == 'workflows.recycle':
+                result = {'workflow_ref': ref, 'lifecycle': 'recycled', 'blocked_refs': []}
+            else:
+                from .orphan_maintenance import cleanup_status
+                result = {'workflow': workflow_view(current), 'scope': scope_view(state['scope']),
+                          'cleanup_status': cleanup_status(self, current)}
+            return current, result
+
+        return self.store.apply_business_operation(ref, action=action, intent=request, idempotency_key=key,
+            expected_revision=revision, revision_target='scope' if action == 'workflows.scope.set' else 'definition',
+            transform=transform)
+
+    def _run_store(self):
+        from .run_store import WorkflowRunStore
+        return WorkflowRunStore(self.store.owner_home)
+
+    def _engine(self, actor, *, resolution_ref=None):
+        def authorize(record, phase):
+            self._authorize(actor, 'workflows.run', record.workflow_id)
+            current = self._get(record.workflow_id)
+            if workflow_state(current)['lifecycle'] != 'active':
+                raise PermissionError('WORKFLOW_RECYCLED')
+            if record.business_context and record.business_context.get('owner_id') != self.owner_id:
+                raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+            if self.governance is not None:
+                if phase == 'resume' and resolution_ref is not None:
+                    return self.governance.require_resolution(record, resolution_ref)
+                return self.governance.require_effect(record, phase)
+            if resolution_ref is not None:
+                raise PermissionError('WORKFLOW_RESOLUTION_UNAVAILABLE')
+            if phase == 'resume' and record.status != 'waiting_for_agent' and (record.effect_outcome == 'unknown'
+                    or any(step.escalation_result.get('effect_started') and
+                           (step.needs_repair or step.status == 'running') for step in record.steps)):
+                raise PermissionError('WORKFLOW_RECONCILIATION_REQUIRED')
+            return None
+
+        if not callable(self.engine_factory):
+            raise PermissionError('WORKFLOW_BUSINESS_ENGINE_UNAVAILABLE')
+        return self.engine_factory(self.store.owner_home, run_authorizer=authorize, agent_steps=self.agent_steps)
+
+    def _run(self, request, actor, key):
+        if not isinstance(key, str) or not 0 < len(key.encode()) <= 256:
+            raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
+        definition = self._get(request['workflow_ref'])
+        state = workflow_state(definition)
+        if state['lifecycle'] != 'active' or not definition.enabled:
+            raise PermissionError('WORKFLOW_NOT_ACTIVE')
+        identity = hashlib.sha256((self.owner_id + '\0workflows.run\0' + key).encode()).hexdigest()
+        intent = hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        engine = self._engine(actor)
+        try:
+            saved = engine.store.load_run(identity)
+        except FileNotFoundError:
+            saved = None
+        if saved is not None:
+            if engine.store.load_workflow_snapshot(identity).get('_operation_intent') != intent:
+                raise ValueError('IDEMPOTENCY_CONFLICT')
+            return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(saved)}
+        context = None
+        if self.context_provider is not None:
+            context = self.context_provider(actor, request)
+            if not isinstance(context, BusinessExecutionContext) or context.owner_id != self.owner_id:
+                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+            if request.get('space_id') and context.space_id != request['space_id']:
+                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+        if state['scope']['scope_mode'] == 'spaces' and context is None:
+            raise PermissionError('BUSINESS_CONTEXT_UNAVAILABLE')
+        self._check_scope(state['scope'], context.space_id if context else request.get('space_id'))
+        record = engine.run_workflow(definition.to_dict(), request.get('inputs', {}), owner_id=self.owner_id,
+            business_context=context, scope_snapshot=state['scope'], workflow_run_id=identity, operation_intent=intent)
+        return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(record)}
+
+    @staticmethod
+    def _receipt_state(record):
+        return ('completed' if record.status == 'succeeded' else 'pending'
+                if record.status in ('running', 'waiting_for_agent', 'paused_for_resume') else
+                'failed' if record.status == 'failed' else 'blocked')
+
+    @staticmethod
+    def _run_view(record):
+        return {'workflow_run_id': record.workflow_run_id, 'workflow_ref': record.workflow_id,
+            'task_id': record.business_context.get('task_id'), 'space_id': record.business_context.get('space_id'),
+            'status': record.status, 'execution_definition_ref': record.execution_definition_ref,
+            'scope_revision': record.scope_revision, 'phase': record.phase,
+            'effect_outcome': {'confirmed': 'committed', 'failed': 'unknown'}.get(record.effect_outcome, record.effect_outcome),
+            'confirmed_step_refs': list(record.confirmed_step_refs), 'revision': record.revision}
+
+    def _run_action(self, action, request, *, actor, expected_revision, idempotency_key):
+        store = self._run_store()
+        if action == 'workflow_runs.list':
+            records = store.list_runs(workflow_id=request.get('workflow_ref'), limit=1000)
+            rows = [self._run_view(row) for row in records if row.owner_id == self.owner_id
+                    and (not request.get('space_id') or row.business_context.get('space_id') == request['space_id'])
+                    and self.authorize(actor, 'workflow_runs.get', row.workflow_id) is True]
+            page = self._page(rows, request)
+            page.pop('list_snapshot_id')
+            return page
+        record = store.load_run(request['workflow_run_id'])
+        if record.owner_id != self.owner_id:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        self._authorize(actor, action, record.workflow_id)
+        if action == 'workflow_runs.get':
+            return {'run': self._run_view(record), 'steps': [{'step_id': step.step_id, 'mode': step.mode,
+                'status': step.status, 'assignment_ref': step.escalation_result.get('assignment_ref'),
+                'run_id': step.escalation_result.get('run_id'), 'result_ref': step.escalation_result.get('result_ref'),
+                'error': {'code': step.error_code, 'message': step.error_message, 'retryable': False, 'details': []}
+                         if step.error_code else None} for step in record.steps],
+                'assignments': [], 'review_refs': list(dict.fromkeys(ref for step in record.steps
+                    for ref in step.escalation_result.get('review_refs', ()))),
+                'breakpoint': ({'step_id': record.current_step_id, 'reason_code': (record.breakpoint or {}).get('error_code', ''),
+                    'can_resume': (record.breakpoint or {}).get('can_resume', False), 'required_action': 'resume'}
+                    if record.breakpoint else None)}
+        if not idempotency_key:
+            raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
+        engine = self._engine(actor, resolution_ref=request.get('resolution_ref'))
+        if action == 'workflow_runs.resume':
+            result = engine.resume_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
+                                                 operation_key=idempotency_key, control_intent=request)
+            return {'run': self._run_view(result), 'operation_id': record.workflow_run_id,
+                    'state': self._receipt_state(result)}
+        if action == 'workflow_runs.cancel':
+            outstanding = engine.cancel_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
+                                                       operation_key=idempotency_key)
+            return {'operation_id': record.workflow_run_id, 'state': 'pending' if outstanding else 'completed',
+                    'outstanding_refs': outstanding}
+        raise ValueError('UNKNOWN_WORKFLOW_ACTION')
