@@ -1003,7 +1003,21 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         return {'cursor': position, 'complete': report['complete'],
                 'items': report['scanned_entries'], 'bytes': report['bytes']}
 
-    # LLM: 每种原领域均显式绑定；除两个实际写适配器外只核规范锚点并保留，不复制领域清理器。
+    def session_pair_step(cursor, budget):
+        from ..conversation.session_pair_rate import (
+            SESSION_PAIR_RETENTION_MAX_FILES,
+            SessionPairRetentionRequest,
+            cleanup_session_pair_rates,
+        )
+
+        if retention.legal_hold:
+            return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'legal_hold'},
+                    'complete': True, 'items': 0, 'bytes': 0}
+        return cleanup_session_pair_rates(SessionPairRetentionRequest(
+            home, now, cursor, min(budget['items'] or SESSION_PAIR_RETENTION_MAX_FILES, SESSION_PAIR_RETENTION_MAX_FILES),
+            budget['bytes'] or 8 * 1024 * 1024, budget['deadline']))
+
+    # 每种原领域均显式绑定；除显式写适配器外只核规范锚点并保留，不复制领域清理器。
     # 函数用途: 固定本类别元数据，避免闭包误用最后一个类别。
     def preserve_adapter(kind):
         # LLM: 不写领域存储；完整回执只表示本拍保留核验，不表示正文或引用已全量验证。
@@ -1013,8 +1027,8 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         return step
 
     adapters = {kind.kind: preserve_adapter(kind) for kind in storage_kind_registry()
-                if kind.kind not in {'cache_tmp_trash', 'gateway_terminal'}}
-    adapters.update(cache_tmp_trash=quota_step, gateway_terminal=receipt_step)
+                if kind.kind not in {'cache_tmp_trash', 'gateway_terminal', 'session_pair_rate'}}
+    adapters.update(cache_tmp_trash=quota_step, gateway_terminal=receipt_step, session_pair_rate=session_pair_step)
     original = {**original, 'schema_generation': expected[0], 'maintenance_epoch': expected[1]}
     if not original.get('continuation_pending', False):
         original.pop('pending_kinds', None)

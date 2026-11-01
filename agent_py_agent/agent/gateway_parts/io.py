@@ -419,6 +419,37 @@ def locked_file_transition(path: Path, *, blocking: bool = True):
         yield
 
 
+@contextmanager
+def try_existing_file_transition_at(directory_fd: int, path: Path):
+    """维护借用原sidecar inode，不建锁；目录FD固定后不重走可能被替换的祖先。"""
+    thread_handle = path_thread_lock(path)
+    if not thread_handle.lock.acquire(blocking=False):
+        yield False
+        return
+    handle, acquired = None, False
+    try:
+        name = path.name + ".lock"
+        descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
+        try:
+            handle = os.fdopen(descriptor, "r+")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            yield False
+            return
+        acquired = _try_flock_exclusive(handle)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        yield bool(acquired and stat.S_ISREG(current.st_mode) and current.st_nlink == 1
+                   and (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino))
+    finally:
+        try:
+            _release_transition_file_handle(handle, acquired)
+        finally:
+            thread_handle.lock.release()
+
+
 # LLM: Gateway 只读状态探测不能排队等待供应商 IO；返回 False 时无修改权，只能保留或重放已有原子回执。
 #   common包装强引用覆盖整个等待/释放窗口，OS句柄关闭异常也必须归还线程锁。
 # 函数用途: 尝试领取逻辑文件事务锁，锁正被使用时立即返回 False 而不是阻塞。

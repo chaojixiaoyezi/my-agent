@@ -1,5 +1,5 @@
 # LLM: 原facade仍延迟重导出唯一Memory服务；增长登记是声明，不增加写者或删除权。
-# 模块用途: 统一31类生命周期元数据和原保留服务入口，未接线resolver必须明确拒绝。
+# 模块用途: 统一增长对象生命周期元数据和原保留服务入口，未接线resolver必须明确拒绝。
 from __future__ import annotations
 
 """旧 home-retention import 路径对统一 Memory v2 retention Service 的只读导出。"""
@@ -108,11 +108,13 @@ _STORAGE_LIFECYCLES = (
     ('process_sessions', 'owner', 'managed process/PTY authority', 'idle/count policy', 'PID birth/unknown exit', ('preserve', 'reclaim')),
     ('cache_tmp_trash', 'owner', 'original cache/tmp/trash owners', 'original TTL/tombstone policy', 'live locks/staging/deletion barriers', ('preserve', 'reclaim')),
     ('legacy_layout', 'owner', 'original layout/migration authorities', 'explicit migration policy', 'ownership/references/user data', ('preserve', 'inventory')),
+    ('session_pair_rate', 'owner', 'conversation.session_pair_rate', 'fixed hourly window plus one-window grace',
+     'active window/current file identity/original sidecar lock', ('preserve', 'policy-delete')),
 )
 
 
 # LLM: 返回固定声明的只读值，不扫描生产目录、不加载正文、不把未接线声明冒充维护完成。
-# 函数用途: 给原维护入口和各领域适配器同一份31类登记。
+# 函数用途: 给原维护入口和各领域适配器同一份生命周期登记。
 def storage_kind_registry() -> tuple[StorageKind, ...]:
     return tuple(StorageKind(*row) for row in _STORAGE_LIFECYCLES)
 

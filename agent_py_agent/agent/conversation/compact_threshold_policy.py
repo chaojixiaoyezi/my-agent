@@ -28,35 +28,15 @@ def resolve_thread_compact_policy(agent, thread=None, *, use_frozen=True):
         admin = source["compact_admin_default_percent"]
     home = getattr(agent, "home_paths", None)
     if home is not None and getattr(home, "root", None) is not None:
-        from ..user_space.managed_user_governance import (
-            _GovernanceControl,
-            read_global_compact_force_policy,
-        )
+        from ..user_space.managed_user_governance import read_compact_governance_snapshot
 
-        global_policy = read_global_compact_force_policy(home.root)
-        if global_policy is not None:
-            if global_policy.get("trigger_percent") is not None:
-                admin = global_policy["trigger_percent"]
-            forced = global_policy["force_compact_trigger_percent"]
-        if getattr(home, "owner_provider", "") == "local" and getattr(home, "owner_kind", "") == "user":
-            from ..user_space.local_user_store import LocalUserStore
-            from ..user_space.managed_user_governance import (
-                ManagedUserScopeDeniedError,
-                resolve_managed_local_user,
-            )
-
-            try:
-                uid, _identity, _owner = resolve_managed_local_user(home.root, home.owner_id)
-            except ManagedUserScopeDeniedError:
-                raw_uid = str(getattr(home, "owner_id", "") or "").removeprefix("local/").strip()
-                gov_path = _GovernanceControl(home.root, raw_uid).policy_path
-                if LocalUserStore(home.root).get(raw_uid) is not None or gov_path.exists():
-                    raise
-                uid = ""
-            if uid:
-                governed = _GovernanceControl(home.root, uid).policy().get("user_compact_policy", {})
-                if governed.get("default_trigger_percent") is not None or governed.get("force_locked"):
-                    user.update(governed)
+        snapshot = read_compact_governance_snapshot(home, use_cache=use_frozen)
+        if snapshot.global_percent is not None:
+            admin = snapshot.global_percent
+        if snapshot.global_forced is not None:
+            forced = snapshot.global_forced
+        if snapshot.user_percent is not None or snapshot.user_locked:
+            user.update(default_trigger_percent=snapshot.user_percent, force_locked=snapshot.user_locked)
     metadata = getattr(thread, "metadata", {}) or {}
     settings = metadata.get("settings", {})
     override = settings.get("compact_trigger_percent") if isinstance(settings, dict) else None
