@@ -1,5 +1,5 @@
 # LLM: 本机管理员专用 CLI：只在配置的 base owner 为 local/main 时运行，只读写 home/config 下的管理员密码与 IM 身份绑定。
-#   密码只经 getpass 两次无回显读取，不接受命令行参数或环境变量，不打印、不写日志；状态输出只含是否设置与时间。
+#   密码只经 getpass 无回显读取；修改/清除先验证原口令，不接受命令行参数或环境变量，不打印、不写日志。
 #   改动时同步 CLI_REFERENCE.md 与 test_admin_identity_store.py。
 # 模块用途: 提供 `my-agent admin-password set|status|clear` 与 `my-agent admin-identities list|remove`。
 
@@ -21,11 +21,15 @@ from ..agent.user_space.admin_channel_identity import (
     remove_admin_channel_identity,
 )
 from ..agent.user_space.admin_password import (
+    ADMIN_PASSWORD_LOCAL_ATTEMPT_KEY,
     AdminPasswordError,
+    admin_password_refusal_message,
+    admin_password_revision,
     admin_password_status,
     clear_admin_password,
     set_admin_password,
     validate_admin_password,
+    verify_admin_password,
 )
 
 PasswordPrompt = Callable[[str], str]
@@ -37,13 +41,13 @@ def add_admin_identity_subcommands(sub: argparse._SubParsersAction) -> None:
     password = sub.add_parser("admin-password", help="本机管理员密码：IM 私聊 /admin 绑定和 /approve 审批时校验")
     password.set_defaults(func=partial(_print_group_help, password))
     password_sub = password.add_subparsers(dest="admin_password_command")
-    password_sub.add_parser("set", help="设置或更换管理员密码（输入两次，不回显，至少 8 个字符）").set_defaults(
+    password_sub.add_parser("set", help="首次创建输入两次；修改先验证原密码（不回显，至少 8 个字符）").set_defaults(
         func=cmd_admin_password_set
     )
     status = password_sub.add_parser("status", help="查看管理员密码是否已设置")
     status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     status.set_defaults(func=cmd_admin_password_status)
-    password_sub.add_parser("clear", help="清除管理员密码；已绑定的 IM 身份保持不变").set_defaults(
+    password_sub.add_parser("clear", help="验证原密码后清除管理员密码；已绑定的 IM 身份保持不变").set_defaults(
         func=cmd_admin_password_clear
     )
 
@@ -58,22 +62,25 @@ def add_admin_identity_subcommands(sub: argparse._SubParsersAction) -> None:
     remove.set_defaults(func=cmd_admin_identities_remove)
 
 
-# LLM: 有副作用：写 home/config/admin-password.json（0600）。prompt 可注入仅供测试；两次输入不一致或不合规时不写任何文件。
-# 函数用途: 交互式设置或更换管理员密码。
 def cmd_admin_password_set(args, *, prompt: PasswordPrompt = getpass.getpass) -> int:
-    home_root = _local_admin_home(args)
+    """提示在锁外；正式服务在写入前重新核旧口令和提示开始时的记录版本。"""
+    home_root = _password_command_home(args)
     if home_root is None:
         return 2
-    first = prompt("新管理员密码（至少 8 个字符，不回显）：")
     try:
+        revision = admin_password_revision(home_root)
+        old = _prompt_old_password(home_root, prompt, revision)
+        first = prompt("新管理员密码（至少 8 个字符，不回显）：")
         validate_admin_password(first)
-    except AdminPasswordError as exc:
-        print(str(exc), file=sys.stderr)
+        if prompt("再输入一次：") != first:
+            print("两次输入不一致，管理员密码没有更改。", file=sys.stderr)
+            return 2
+        status = set_admin_password(home_root, first, old_password=old, expected_revision=revision)
+    except (KeyboardInterrupt, EOFError):
+        print("操作已取消，管理员密码没有更改。", file=sys.stderr)
         return 2
-    if prompt("再输入一次：") != first:
-        print("两次输入不一致，管理员密码没有更改。", file=sys.stderr)
-        return 2
-    status = set_admin_password(home_root, first)
+    except (AdminPasswordError, OSError, UnicodeError) as exc:
+        return _password_command_failed(exc)
     print(f"管理员密码已保存（{_format_time(status.get('updated_at'))}）。")
     print("在飞书等 IM 与机器人的私聊里发送 /admin <密码> 即可绑定管理员身份；发送后建议撤回含密码的消息。")
     return 0
@@ -102,16 +109,48 @@ def cmd_admin_password_status(args) -> int:
     return 0
 
 
-# LLM: 仅可信本地管理员可删除密码文件；不删除绑定，解除绑定另走规范 admin identities remove。
-# 函数用途: 清除管理员密码。
-def cmd_admin_password_clear(args) -> int:
-    home_root = _local_admin_home(args)
+def cmd_admin_password_clear(args, *, prompt: PasswordPrompt = getpass.getpass) -> int:
+    """正常清除同样验证原口令；损坏记录不降级为缺失，也没有恢复旁路。"""
+    home_root = _password_command_home(args)
     if home_root is None:
         return 2
-    removed = clear_admin_password(home_root)
+    try:
+        revision = admin_password_revision(home_root)
+        old = _prompt_old_password(home_root, prompt, revision)
+        removed = clear_admin_password(home_root, old_password=old, expected_revision=revision)
+    except (KeyboardInterrupt, EOFError):
+        print("操作已取消，管理员密码没有更改。", file=sys.stderr)
+        return 2
+    except (AdminPasswordError, OSError, UnicodeError) as exc:
+        return _password_command_failed(exc)
     print("管理员密码已清除。" if removed else "本来就没有设置管理员密码。")
     print("已绑定的 IM 身份保持不变；需要解除时运行 my-agent admin identities list / remove。")
     return 0
+
+
+def _password_command_home(args) -> Path | None:
+    from ..agent.common.global_write_guard import require_global_writer
+
+    # 先于配置读取、提示和认证节流副作用拒绝受限进程，不借本地CLI绕过原写门。
+    require_global_writer("admin_credential")
+    return _local_admin_home(args)
+
+
+def _prompt_old_password(home_root: Path, prompt: PasswordPrompt, revision: str) -> str | None:
+    if revision == "missing":
+        return None
+    old = prompt("原管理员密码（不回显）：")
+    check = verify_admin_password(home_root, old, attempt_key=ADMIN_PASSWORD_LOCAL_ATTEMPT_KEY)
+    if not check.ok:
+        raise AdminPasswordError(admin_password_refusal_message(check))
+    return old
+
+
+def _password_command_failed(exc: BaseException) -> int:
+    # 领域错误文案由服务固定；底层IO/编码异常可能带秘密，不展示其正文或异常链。
+    message = str(exc) if isinstance(exc, AdminPasswordError) else "管理员密码记录无法读取或保存，操作未完成。"
+    print(message, file=sys.stderr)
+    return 2
 
 
 # LLM: 只读；列出渠道、用户 ID 与绑定时间，不含其他信息。

@@ -64,7 +64,7 @@ def test_password_record_is_private_scrypt_without_plaintext(tmp_path):
     assert verify_admin_password(tmp_path, _SECRET, attempt_key=_KEY).ok is True
     assert verify_admin_password(tmp_path, _SECRET + "x", attempt_key=_KEY).ok is False
     # 同一密码再设置会换新盐，散列不同。
-    set_admin_password(tmp_path, _SECRET)
+    set_admin_password(tmp_path, _SECRET, old_password=_SECRET)
     assert json.loads(path.read_text(encoding="utf-8"))["salt"] != record["salt"]
 
 
@@ -110,8 +110,10 @@ def test_missing_or_corrupt_password_never_verifies(tmp_path):
     admin_password_path(tmp_path).write_text('{"schema": "admin_password.v1", "algorithm": "none"}', encoding="utf-8")
     assert admin_password_status(tmp_path) == {"configured": False, "state": "invalid"}
     assert verify_admin_password(tmp_path, _SECRET, attempt_key=_KEY).ok is False
-    assert clear_admin_password(tmp_path) is True
-    assert not admin_password_path(tmp_path).exists() and clear_admin_password(tmp_path) is False
+    before = admin_password_path(tmp_path).read_bytes()
+    with pytest.raises(AdminPasswordError):
+        clear_admin_password(tmp_path, old_password=_SECRET)
+    assert admin_password_path(tmp_path).read_bytes() == before
 
 
 def test_corrupt_attempts_file_fails_closed(tmp_path):
@@ -193,7 +195,8 @@ def test_cli_sets_password_twice_without_echo_and_status_hides_hash(tmp_path, ca
 
     assert admin_identity_commands.cmd_admin_identities_remove(Namespace(**{**vars(args), "identity": "feishu:ou_admin"})) == 0
     assert find_admin_channel_identity(home, "feishu", "ou_admin") is None
-    assert admin_identity_commands.cmd_admin_password_clear(args) == 0
+    prompt, _seen = _prompts(_SECRET)
+    assert admin_identity_commands.cmd_admin_password_clear(args, prompt=prompt) == 0
     assert not admin_password_path(home).exists()
 
 

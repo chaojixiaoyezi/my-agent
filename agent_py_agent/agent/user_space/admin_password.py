@@ -33,6 +33,8 @@ ADMIN_PASSWORD_MAX_FAILURES_COUNT = 5
 ADMIN_PASSWORD_FAILURE_WINDOW_SECONDS = 600.0
 # 锁定 600 秒：足够打断自动暴破节奏，又不至于让管理员等太久。
 ADMIN_PASSWORD_LOCK_SECONDS = 600.0
+# 本机修改和清除共用原失败节流账，不让调用方选择新身份逃过锁定。
+ADMIN_PASSWORD_LOCAL_ATTEMPT_KEY = "local:admin-password"
 CONFIG_DIR_NAME = "config"
 _PASSWORD_FILE = "admin-password.json"
 _ATTEMPTS_FILE = "admin-password-attempts.json"
@@ -83,42 +85,71 @@ def validate_admin_password(password: object) -> str:
     return password
 
 
-# LLM: 有副作用：用随机盐派生 scrypt 值后原子替换 admin-password.json（0600），并把 config 目录收紧到 0700；
-#   旧密码被整体替换，已绑定的 IM 身份和失败计数不受影响。返回值只含公开状态。
-# 函数用途: 设置或更换管理员密码，只由本机 CLI 调用。
-# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
-# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
-def set_admin_password(home_root: str | Path, password: object, *, now: float | None = None) -> dict[str, object]:
+def set_admin_password(
+    home_root: str | Path, password: object, *, old_password: object = None,
+    expected_revision: str | None = None, now: float | None = None,
+) -> dict[str, object]:
+    """缺失时初始化；已有记录须验证旧口令。同一路径锁覆盖复核、派生和私有原子写。"""
     from ..common.global_write_guard import require_global_writer
     require_global_writer('admin_credential')
 
     secret = validate_admin_password(password)
-    salt = secrets.token_bytes(_SALT_BYTES)
-    record = {
-        "schema": ADMIN_PASSWORD_SCHEMA,
-        "algorithm": "scrypt",
-        "n": _SCRYPT_N,
-        "r": _SCRYPT_R,
-        "p": _SCRYPT_P,
-        "salt": base64.b64encode(salt).decode("ascii"),
-        "hash": base64.b64encode(_derive(secret, salt, _SCRYPT_N, _SCRYPT_R, _SCRYPT_P, _HASH_BYTES)).decode("ascii"),
-        "updated_at": time.time() if now is None else float(now),
-    }
-    write_private_config_json(home_root, _PASSWORD_FILE, record)
-    return admin_password_status(home_root)
+    with locked_json_path(admin_password_path(home_root)):
+        _authorize_password_change(home_root, old_password, expected_revision, now)
+        salt = secrets.token_bytes(_SALT_BYTES)
+        record = {
+            "schema": ADMIN_PASSWORD_SCHEMA,
+            "algorithm": "scrypt",
+            "n": _SCRYPT_N,
+            "r": _SCRYPT_R,
+            "p": _SCRYPT_P,
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "hash": base64.b64encode(_derive(secret, salt, _SCRYPT_N, _SCRYPT_R, _SCRYPT_P, _HASH_BYTES)).decode("ascii"),
+            "updated_at": time.time() if now is None else float(now),
+        }
+        write_private_config_json(home_root, _PASSWORD_FILE, record)
+        return admin_password_status(home_root)
 
 
-# LLM: 有副作用：只删除密码文件，不删绑定与节流记录；返回删除前是否存在。
-# 函数用途: 清除管理员密码，之后 /admin 与 /approve 一律验证不通过。
-# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
-# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
-def clear_admin_password(home_root: str | Path) -> bool:
+def clear_admin_password(
+    home_root: str | Path, *, old_password: object = None,
+    expected_revision: str | None = None, now: float | None = None,
+) -> bool:
+    """在原路径锁内核对旧口令及可选版本，只删除口令，不删除IM绑定或节流账。"""
     from ..common.global_write_guard import require_global_writer
     require_global_writer('admin_credential')
 
-    existed = admin_password_path(home_root).exists()
-    unlink_file_beneath(home_root, (CONFIG_DIR_NAME, _PASSWORD_FILE))
-    return existed
+    with locked_json_path(admin_password_path(home_root)):
+        existed = _authorize_password_change(home_root, old_password, expected_revision, now)
+        if existed:
+            unlink_file_beneath(home_root, (CONFIG_DIR_NAME, _PASSWORD_FILE))
+        return existed
+
+
+def admin_password_revision(home_root: str | Path) -> str:
+    """只读的乐观版本，不是认证凭据；坏记录抛错，缺失与已配置明确区分。"""
+    return _password_revision(_read_password_record(home_root))
+
+
+def _password_revision(record: dict[str, object] | None) -> str:
+    if record is None:
+        return "missing"
+    # 只在调用栈内传递摘要，不在状态、异常或日志公开盐和口令派生值。
+    parameters = repr((record["n"], record["r"], record["p"], record["updated_at"])).encode("ascii")
+    return hashlib.sha256(parameters + record["salt"] + record["hash"]).hexdigest()
+
+
+def _authorize_password_change(home_root, old_password, expected_revision, now) -> bool:
+    """调用方已持口令锁；锁序为口令→原节流锁，交互永远在此临界区外。"""
+    record = _read_password_record(home_root)
+    if expected_revision is not None and expected_revision != _password_revision(record):
+        raise AdminPasswordError("管理员密码记录已变化，请重新操作。")
+    if record is None:
+        return False
+    check = verify_admin_password(home_root, old_password, attempt_key=ADMIN_PASSWORD_LOCAL_ATTEMPT_KEY, now=now)
+    if not check.ok:
+        raise AdminPasswordError(admin_password_refusal_message(check))
+    return True
 
 
 # LLM: 只读；返回值不含盐、散列或参数以外的任何秘密，损坏文件报告 state=invalid 而不是当作已设置。
@@ -195,7 +226,7 @@ def read_private_config_json(home_root: str | Path, file_name: str) -> dict[str,
         payload = None if text is None else json.loads(text)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise AdminPasswordError("管理员身份记录无法读取。") from exc
-    if payload is not None and not isinstance(payload, dict):
+    if text is not None and not isinstance(payload, dict):
         raise AdminPasswordError("管理员身份记录格式无效。")
     return payload
 
@@ -287,12 +318,14 @@ def _write_attempts(home_root: str | Path, identities: dict[str, dict[str, objec
 
 __all__ = [
     "ADMIN_PASSWORD_LOCK_SECONDS",
+    "ADMIN_PASSWORD_LOCAL_ATTEMPT_KEY",
     "ADMIN_PASSWORD_MAX_FAILURES_COUNT",
     "ADMIN_PASSWORD_MIN_LENGTH_CHARS",
     "AdminPasswordCheck",
     "AdminPasswordError",
     "admin_password_path",
     "admin_password_refusal_message",
+    "admin_password_revision",
     "admin_password_status",
     "clear_admin_password",
     "read_private_config_json",

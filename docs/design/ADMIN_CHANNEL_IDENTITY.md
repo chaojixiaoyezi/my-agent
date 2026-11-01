@@ -42,9 +42,20 @@
 
 ### 设置密码（本机）
 
-`my-agent admin-password set` 只在配置的 base owner 为 local/main 时运行。密码经 `getpass` 输入两次，不回显。
+`my-agent admin password set`（兼容 `admin-password set`）只在配置的 base owner 为 local/main 时运行。
+首次创建只要求两次新密码；已有有效记录时，先无回显输入并验证原密码，再输入两次新密码。
 要求至少 8 个字符，首尾不能有空白，不能含控制字符（否则 IM 里的 `/admin <密码>` 无法无歧义地还原）。
-重新设置会换新盐；清除密码不会删除已有绑定。
+重新设置会换新盐；`my-agent admin password clear`（兼容 `admin-password clear`）同样验证原密码，
+清除密码不会删除已有绑定。记录损坏、JSON null、链接或不可读时明确拒绝，不能当作首次创建或直接清空。
+
+口令正式服务是唯一修改/清除入口：原全局写门在任何读取和写入之前核验，验证、派生和原子写/删除共持原路径锁；
+锁序为口令文件锁→原失败节流文件锁。CLI 提示均在锁外，开始提示时冻结只读版本，提交时在锁内重新核对版本和旧口令，
+并发初始化、修改或清除不能覆盖提示期间较新的记录。版本摘要仅作调用栈内的CAS比较，不是认证凭据，不在状态或日志输出。
+本地修改和清除共用 `local:admin-password` 的原失败节流身份；IM 仍按原渠道身份节流。
+错误口令、取消或新密码确认不一致均不改口令；IO失败不回显底层异常正文或秘密。没有新增恢复系统、无验证重设后门或自动解绑。
+
+上述流程为 W11 本地候选合同；它改进受信本机管理员操作流程，不代表发现了普通远端越权。
+最终集成、发行和真实飞书验收分别验证，不能用本片单测代替。
 
 ### `/admin <密码>`（IM 一对一私聊）
 
@@ -132,3 +143,22 @@
 
 `test_admin_identity_store.py`、`test_admin_identity_gateway.py`、`test_admin_identity_clients.py`，说明见 TESTS.md
 “IM 管理员身份与聊天内审批”一节。
+
+W11 新增 `test_admin_password_change_flow.py` 覆盖首次创建、修改、清除、损坏/不可读、取消、失败节流、
+原服务并发写及提示期间的实际竞争写入；兼容命令与规范命令共用同一入口。
+
+## 配置读取诊断（W11）
+
+`settings/config_io.py` 保留简化 YAML 的 dict API、顶层标量、注释、引号、行内/多行列表，
+通过可选 `diagnostics` 接收器产出 W0 冻结的 `ConfigParseDiagnostic`。缺冒号、非法缩进、孤立列表、
+空键或未闭合标量明确报告实际来源、1起算行列、结构原因与错误码；不包含配置原行或秘密值，
+每次解析最多32项，超过后最后一项明确标记省略。解析本身不写诊断文件或日志。
+
+正式 `load_config` 将结构事实保存为宿主只读的 `config_parse_diagnostics`，并追加安全展示到原 `config_warnings`；
+该内部字段不能从 YAML 注入。未知键仍是独立的未知键警告；未支持的结构不会冒充合法配置。
+合法部分沿原归一化/默认规则加载，但错误已显式记录；缺文件、不可读和编码错误不被悄悄替换为默认配置。
+
+`my-agent config get`（兼容 `config-get`）分别标明 raw 覆盖与正式 loader 的 effective 值/来源，二者的秘密字段都脱敏；
+`config set` / `config get` 均显示安全结构告警。原 roundtrip writer、BOM/CRLF及不相关字节保持、CAS与全局写门不变。
+旧直接 dict 调用可保持签名与返回合同；需要对外展示诊断的其它宿主须显式接收同一 DTO，不复制解析器或改用错误正文判断。
+回归见 `test_config_parse_diagnostics.py` 及只读 `test_plan_w10_config_entries.py`。

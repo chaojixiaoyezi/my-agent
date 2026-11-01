@@ -28,7 +28,8 @@ from ..path_access_policy import (
     configured_host_source_paths,
 )
 from ..user_space.home_root import ConfiguredHomeSnapshot
-from .config_io import load_simple_yaml, parse_scalar
+from .config_diagnostics import ConfigParseDiagnostic
+from .config_io import format_config_parse_diagnostic, load_simple_yaml, parse_scalar
 from .config_sources import (
     INTERNAL_RUNTIME_CONFIG_FIELDS,
     merge_agent_config_sources,
@@ -662,6 +663,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 0 表示立即使用短折叠；不同 provider 的缓存寿命应通过真实 usage 账本校准。
     conversation_terminal_tool_hot_tail_seconds: int = 300
     config_warnings: list[str] = field(default_factory=list)
+    # 只由正式loader产生，不能从YAML注入；config_warnings保留原字符串API供旧消费者展示。
+    config_parse_diagnostics: list[ConfigParseDiagnostic] = field(default_factory=list, metadata={"host_only": True})
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)
     config_layers: list[dict[str, object]] = field(default_factory=list)
@@ -690,7 +693,8 @@ def load_config(config_path: str | Path) -> AgentConfig:
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
-    raw = load_simple_yaml(path)
+    diagnostics: list[ConfigParseDiagnostic] = []
+    raw = load_simple_yaml(path, diagnostics=diagnostics)
     if {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"} & raw.keys():
         from .memory import normalize_memory_settings
 
@@ -714,7 +718,8 @@ def load_config(config_path: str | Path) -> AgentConfig:
     )
     config = AgentConfig(**effective.values)
     config.config_path = resolved_path
-    config.config_warnings = config_warnings
+    config.config_parse_diagnostics = diagnostics
+    config.config_warnings = [*config_warnings, *(format_config_parse_diagnostic(item) for item in diagnostics)]
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)
     config.host_exclusive_path_roots = tuple(str(source) for source in configured_host_source_paths(config))
