@@ -44,6 +44,8 @@ _DERIVED_TERMINAL_STATUSES = frozenset({
     "timed_out", "channel_error", "stopped", "dead_lettered", "ok", "error", "taken_over",
 })
 _DERIVED_PENDING_FILES_KEY = "derived_prune_pending_files"
+# 可重建维护投影版本，升级必须同时替换旧触发器，不能只沿用同名定义。
+_DERIVED_STEP_REVISION = "2"
 # 每次派生文件清理最多检查的文件数量。
 _DERIVED_FILE_CLEANUP_MAX_FILES = 1000
 # 每批派生文件清理的字节预算，首个大文件仍按原策略处理以免永久饥饿。
@@ -988,16 +990,25 @@ def _prune_derived_records(store, plan, dry_run):
     return result
 
 
-# LLM: 维护投影沿原库metadata/事务；触发器只维护记录代次，任何并发记录写使未完成扫描失效，不能借旧组图删除。
-# 函数用途: 初始化可重建的分拍关联保护索引，不改变records或原TTL权威。
+# LLM: 调用方持原短写事务；升级原地替换三个旧触发器，只盖投影版本，不清records、dirty工作或待删文件账。
+# 函数用途: 初始化同库可重建投影，并事务性发布去重的记录变更。
 def _derived_step_schema(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS maintenance_derived_groups (key TEXT PRIMARY KEY,parent TEXT NOT NULL,unsafe INTEGER NOT NULL,weight INTEGER NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS maintenance_derived_paths (record_id TEXT PRIMARY KEY,path TEXT NOT NULL)")
     conn.execute("CREATE INDEX IF NOT EXISTS maintenance_derived_paths_path ON maintenance_derived_paths(path)")
+    conn.execute("CREATE TABLE IF NOT EXISTS maintenance_derived_dirty (record_id TEXT PRIMARY KEY)")
     conn.execute("INSERT OR IGNORE INTO metadata(key,value) VALUES('derived_scan_epoch','0')")
+    revision = conn.execute("SELECT value FROM metadata WHERE key='derived_projection_revision'").fetchone()
+    if revision and revision[0] == _DERIVED_STEP_REVISION:
+        return
     for action in ("INSERT", "UPDATE", "DELETE"):
-        conn.execute(f"CREATE TRIGGER IF NOT EXISTS maintenance_derived_{action.lower()} AFTER {action} ON records BEGIN "
-                     "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='derived_scan_epoch'; END")
+        conn.execute(f"DROP TRIGGER IF EXISTS maintenance_derived_{action.lower()}")
+        versions = ("NEW",) if action == "INSERT" else ("OLD",) if action == "DELETE" else ("OLD", "NEW")
+        publish = " ".join("INSERT INTO maintenance_derived_dirty(record_id) VALUES(" + version + ".id) "
+            "ON CONFLICT(record_id) DO NOTHING;" for version in versions)
+        conn.execute(f"CREATE TRIGGER maintenance_derived_{action.lower()} AFTER {action} ON records BEGIN "
+            + publish + " UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='derived_scan_epoch'; END")
+    conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('derived_projection_revision',?)", (_DERIVED_STEP_REVISION,))
 
 
 # LLM: union按weight合并保证路径有界，坏环不得当作安全组；只在原维护写事务内使用。
@@ -1015,8 +1026,8 @@ def _derived_step_root(conn, key, *, create=True):
     raise ValueError("derived protection index cycle")
 
 
-# LLM: 所有来源均扫描路径，九类派生来源才构造保护组；跨批活跃关系必须完成全轮后才可删除。
-# 函数用途: 将一条原记录的路径和结构化关联并入可重建投影。
+# LLM: scan及dirty消费共用本叶；所有来源刷新路径，派生组只增合并/不安全标志，解除保护最迟等下一有限轮重建。
+# 函数用途: 用当前记录替换路径，并保守合并新增或变化的运行关联。
 def _derived_step_index_row(store, conn, row, plan):
     path = str(store._resolve_content_path(row["content_path"]).resolve())
     conn.execute("INSERT OR REPLACE INTO maintenance_derived_paths VALUES(?,?)", (row["id"], path))
@@ -1040,17 +1051,23 @@ def _derived_step_index_row(store, conn, row, plan):
     conn.execute("UPDATE maintenance_derived_groups SET unsafe=?,weight=? WHERE key=?", (int(unsafe), weight, root))
 
 
-# LLM: 调用方持原mutation锁、无写事务；只查同代索引及保护组，不再扫描全库，hash/文件IO均在C短门外。
+# LLM: 调用方持原mutation锁、无写事务且已对账并核代；只查相关路径/组，完整投影中不存在的组不阻止孤立正文结算。
 # 函数用途: 按文件数预算收回已删记录的正文欠账。
 def _derived_step_files(store, conn, plan, limit):
     pending = _derived_pending_files(conn)
     batch = pending[:limit]
     live, parents, blocked = set(), {}, set()
     for entry in batch:
-        path = store._resolve_content_path(entry["content_path"]).resolve()
+        try:
+            path = store._resolve_content_path(entry["content_path"]).resolve()
+            keys = [key for key in entry.get("source_ids", ()) if isinstance(key, str)]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
         if conn.execute("SELECT 1 FROM maintenance_derived_paths WHERE path=? LIMIT 1", (str(path),)).fetchone():
             live.add(path)
-        for key in entry.get("source_ids", ()):
+        for key in keys:
+            if not conn.execute("SELECT 1 FROM maintenance_derived_groups WHERE key=?", (key,)).fetchone():
+                continue
             root, unsafe, _ = _derived_step_root(conn, key, create=False)
             parents[key] = root
             parents[root] = root
@@ -1062,8 +1079,46 @@ def _derived_step_files(store, conn, plan, limit):
     return len(batch), remaining
 
 
-# LLM: 每拍独立提交原metadata游标；组图未完整或records代次变化时零删除，own删除后的新代次随同事务保存。
-# 函数用途: 在行数预算内扫描、删除或清文件，进程重建后从原库继续。
+# LLM: 原短事务中按FIFO消费去重ID，每项只取当前canonical行；删除或改ID移除旧路径，不能把历史载荷当现态。
+# 函数用途: 把记录变化计入本拍扫描预算，预算耗尽时原地保留余项。
+def _derived_step_reconcile(store, conn, plan, limit):
+    changed = conn.execute("SELECT record_id FROM maintenance_derived_dirty ORDER BY rowid LIMIT ?", (limit,)).fetchall()
+    for entry in changed:
+        row = conn.execute("SELECT * FROM records WHERE id=?", (entry[0],)).fetchone()
+        if row is None:
+            conn.execute("DELETE FROM maintenance_derived_paths WHERE record_id=?", (entry[0],))
+        else:
+            _derived_step_index_row(store, conn, row, plan)
+        conn.execute("DELETE FROM maintenance_derived_dirty WHERE record_id=?", (entry[0],))
+    return len(changed)
+
+
+# LLM: 只删可重建投影，每行计费；不清dirty或pending账，正常写入不会重新进入reset。
+# 函数用途: 为版本、保护计划变化或新一轮执行有界重建。
+def _derived_step_reset(conn, limit):
+    scanned = 0
+    tables = ("maintenance_derived_groups", "maintenance_derived_paths")
+    for table in tables:
+        scanned += conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} LIMIT ?)",
+            (limit - scanned,)).rowcount
+        if scanned == limit:
+            break
+    remaining = any(conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in tables)
+    return scanned, remaining
+
+
+# LLM: 原事务在每次阶段后保存边界/位置/当前代次；epoch作同拍文件准入栅栏，不让普通写入废弃有限扫描。
+# 函数用途: 持久化游标并返回真实扫描量及未清文件责任。
+def _derived_step_save(conn, job, result):
+    job["epoch"] = int(conn.execute("SELECT value FROM metadata WHERE key='derived_scan_epoch'").fetchone()[0])
+    conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('derived_scan_cursor',?)", (json.dumps(job),))
+    pending = len(_derived_pending_files(conn))
+    result.update(cursor={"phase": job["phase"], "position": job["position"]},
+        partial=job["phase"] != "complete" or bool(pending), pending_files=pending)
+
+
+# LLM: 冻结上界保证有限pass；原mutation锁→短事务内先消费dirty再用余量推进，组图不完整/dirty未清不得删。
+# 函数用途: 在正常写入及重开期间有界扫描、核验删除和结算正文，不等待空闲窗口。
 def _prune_derived_step(store, plan, dry_run, limit):
     result = {"cutoff": plan.cutoff, "dry_run": dry_run, "candidate_ids": [], "deleted_ids": [],
               "pending_files": 0, "skipped_protected_or_active": 0, "scanned": 0, "cursor": {}, "partial": True}
@@ -1072,52 +1127,54 @@ def _prune_derived_step(store, plan, dry_run, limit):
         return result
     signature = hashlib.sha256(json.dumps([sorted(plan.sources), sorted(plan.protected_records),
         sorted(plan.protected_sources)], sort_keys=True).encode()).hexdigest()
+    files = {}
 
-    # LLM: 原upsert锁外层、SQLite短事务内层；不跨tick持有文件或数据库锁。
-    # 函数用途: 推进一个确定的维护阶段。
+    # LLM: 旧投影、显式refs或更早cutoff使计划不兼容；普通records写入只走dirty，reset本身同样计费。
+    # 函数用途: 对账当前保护后，推进有限扫描或删除批次。
     def operation(conn):
         _derived_step_schema(conn)
-        epoch = int(conn.execute("SELECT value FROM metadata WHERE key='derived_scan_epoch'").fetchone()[0])
         saved = conn.execute("SELECT value FROM metadata WHERE key='derived_scan_cursor'").fetchone()
         job = json.loads(saved[0]) if saved else {}
-        if (job.get("epoch") != epoch or job.get("signature") != signature
-                or plan.cutoff < job.get("cutoff", plan.cutoff)
-                or job.get("phase") == "complete" and plan.cutoff > job.get("cutoff", plan.cutoff)):
-            job = {"epoch": epoch, "signature": signature, "phase": "reset", "position": 0, "cutoff": plan.cutoff}
-        if not job:
-            job = {"epoch": epoch, "signature": signature, "phase": "scan", "position": 0, "cutoff": plan.cutoff}
-        phase = job["phase"]
-        if phase == "reset":
-            for table in ("maintenance_derived_groups", "maintenance_derived_paths"):
-                remaining = limit - result["scanned"]
-                count = conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} LIMIT ?)", (remaining,)).rowcount
-                result["scanned"] += count
-                if result["scanned"] >= limit:
-                    break
-            if not any(conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in
-                       ("maintenance_derived_groups", "maintenance_derived_paths")):
+        if (job.get("revision") != _DERIVED_STEP_REVISION or job.get("signature") != signature
+                or plan.cutoff < job.get("cutoff", plan.cutoff) or job.get("phase") == "complete"):
+            upper = conn.execute("SELECT COALESCE(MAX(rowid),0) FROM records").fetchone()[0]
+            job = {"revision": _DERIVED_STEP_REVISION, "signature": signature, "phase": "reset",
+                "position": 0, "upper_rowid": upper, "cutoff": plan.cutoff}
+        if job["phase"] == "reset":
+            result["scanned"], remaining = _derived_step_reset(conn, limit)
+            if not remaining:
                 job.update(phase="scan", position=0)
-        elif phase == "scan":
-            rows = conn.execute("SELECT rowid AS scan_id,* FROM records WHERE rowid>? ORDER BY rowid LIMIT ?",
-                                (job["position"], limit)).fetchall()
+        if job["phase"] != "reset":
+            result["scanned"] += _derived_step_reconcile(store, conn, plan, limit - result["scanned"])
+        remaining = limit - result["scanned"]
+        dirty = conn.execute("SELECT 1 FROM maintenance_derived_dirty LIMIT 1").fetchone()
+        phase = job["phase"]
+        if remaining and phase == "scan":
+            rows = conn.execute("SELECT rowid AS scan_id,* FROM records WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?",
+                (job["position"], job["upper_rowid"], remaining)).fetchall()
             for row in rows:
                 _derived_step_index_row(store, conn, row, plan)
                 job["position"] = row["scan_id"]
-            result["scanned"] = len(rows)
-            if len(rows) < limit:
+            result["scanned"] += len(rows)
+            if len(rows) < remaining or job["position"] >= job["upper_rowid"]:
                 job.update(phase="delete", position=0)
-        elif phase == "delete":
-            rows = conn.execute("SELECT rowid AS scan_id,* FROM records WHERE rowid>? ORDER BY rowid LIMIT ?",
-                                (job["position"], min(limit, max(1, plan.limit)))).fetchall()
+        elif remaining and phase == "delete" and not dirty:
+            count = min(remaining, max(1, plan.limit))
+            rows = conn.execute("SELECT rowid AS scan_id,* FROM records WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?",
+                (job["position"], job["upper_rowid"], count)).fetchall()
             has_fts = store.fts_available or _records_fts_table_exists(conn)
             pending = _derived_pending_files(conn)
             for row in rows:
+                # 删除触发器若额外发表关联写入，下一候选必须先等下一拍对账。
+                if conn.execute("SELECT 1 FROM maintenance_derived_dirty LIMIT 1").fetchone():
+                    break
                 job["position"] = row["scan_id"]
+                result["scanned"] += 1
                 metadata = _derived_metadata(row)
                 keys = _derived_run_keys(row, metadata)
                 if (not plan.limit or row["source_type"] not in plan.sources or not _derived_state_safe(row, metadata)
                         or _derived_referenced(row, metadata, plan) or not _derived_row_expired(row, metadata, job["cutoff"])
-                        or any(_derived_step_root(conn, key)[1] for key in keys)):
+                        or any(_derived_step_root(conn, key, create=False)[1] for key in keys)):
                     continue
                 snapshot = {key: row[key] for key in row.keys() if key != "scan_id"}
                 result["candidate_ids"].append(row["id"])
@@ -1126,39 +1183,37 @@ def _prune_derived_step(store, plan, dry_run, limit):
                     pending.append({"id": row["id"], "content_path": row["content_path"],
                                     "content_hash": row["content_hash"], "source_ids": sorted(keys)})
                     conn.execute("DELETE FROM maintenance_derived_paths WHERE record_id=?", (row["id"],))
+                    # 已同步的自删除事件不再次收费；其他触发器发表的新ID仍留在队列。
+                    conn.execute("DELETE FROM maintenance_derived_dirty WHERE record_id=?", (row["id"],))
             _derived_write_pending(conn, pending)
-            result["scanned"] = len(rows)
-            job["after_files"] = "complete" if len(rows) < min(limit, max(1, plan.limit)) else "delete"
+            finished = (not rows or job["position"] == rows[-1]["scan_id"] and
+                (len(rows) < count or job["position"] >= job["upper_rowid"]))
+            job["after_files"] = "complete" if finished else "delete"
             job["phase"] = "files" if pending else job["after_files"]
-        job["epoch"] = int(conn.execute("SELECT value FROM metadata WHERE key='derived_scan_epoch'").fetchone()[0])
-        conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('derived_scan_cursor',?)", (json.dumps(job),))
-        result.update(cursor={"phase": job["phase"], "position": job["position"]}, partial=job["phase"] != "complete",
-                      pending_files=len(_derived_pending_files(conn)))
+        elif remaining and phase == "files" and not dirty:
+            files.update(job=job, limit=remaining)
+        _derived_step_save(conn, job, result)
         return result
 
     with _derived_mutation_lock(store):
-        with store._connection() as conn:
-            saved = conn.execute("SELECT value FROM metadata WHERE key='derived_scan_cursor'").fetchone()
-            job = json.loads(saved[0]) if saved else {}
-            epoch = conn.execute("SELECT value FROM metadata WHERE key='derived_scan_epoch'").fetchone()
-            if (job.get('phase') == 'files' and epoch and job.get('epoch') == int(epoch[0])
-                    and job.get('signature') == signature and plan.cutoff >= job['cutoff']):
-                result['scanned'], remaining = _derived_step_files(store, conn, plan, limit)
-            else:
-                remaining = None
-        if remaining is not None:
-            next_phase = job.get('after_files', 'delete')
-            # 一个坏正文欠账不能挡住其余旧记录；扫到末尾后仍保留files阶段直到欠账被核实。
-            if not remaining or next_phase == 'delete':
-                job['phase'] = next_phase
-
-            # LLM: 正文处理完成后只在短事务写准确欠账及原游标，mutation锁阻止record并发发表。
-            # 函数用途: 确认本批文件清理，不把文件IO带入C提交门。
-            def finish_files(conn):
-                _derived_write_pending(conn, remaining)
-                conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('derived_scan_cursor',?)", (json.dumps(job),))
-            _derived_transaction(store, finish_files)
-            result.update(cursor={'phase': job['phase'], 'position': job['position']},
-                          partial=job['phase'] != 'complete', pending_files=len(remaining))
+        _derived_transaction(store, operation)
+        if not files:
             return result
-        return _derived_transaction(store, operation)
+        job = files["job"]
+        with store._connection() as conn:
+            # SQL对账和文件准入之间若有不遵守mutation锁的发表，也必须重新消费其事件。
+            epoch = int(conn.execute("SELECT value FROM metadata WHERE key='derived_scan_epoch'").fetchone()[0])
+            if epoch != job["epoch"] or conn.execute("SELECT 1 FROM maintenance_derived_dirty LIMIT 1").fetchone():
+                return result
+            scanned, remaining = _derived_step_files(store, conn, plan, files["limit"])
+        result["scanned"] += scanned
+        # 本轮文件扫后继续删除；末尾仍有欠账则下一拍开新有限pass，才能释放旧unsafe保护。
+        job["phase"] = job.get("after_files", "delete")
+
+        # LLM: 保持原mutation锁；hash/unlink已在短门外完成，此叶只确认剩余欠账和游标。
+        # 函数用途: 提交本拍文件结算，失败时保留上次持久账以便重开重试。
+        def finish_files(conn):
+            _derived_write_pending(conn, remaining)
+            _derived_step_save(conn, job, result)
+        _derived_transaction(store, finish_files)
+        return result
