@@ -332,7 +332,7 @@ class _SchedulerJobOperations:
         store = self._store_snapshot(readonly=True)
         jobs, errors = self._valid_jobs(store)
         selected = [job for job in jobs if include_deleted or job["status"] != "deleted"]
-        selected.sort(key=lambda job: (float(job.get("next_run_at") or 1e30), str(job["job_id"])))
+        selected.sort(key=lambda job: (_job_sort_time(job), str(job["job_id"])))
         return deepcopy(selected), errors
 
     # LLM: 只解冻选中的job，删除状态和不存在语义不变，不向调用方泄漏共享内核。
@@ -2472,6 +2472,15 @@ def _write_store_projection_cache(cache_key: tuple[str, str, str, str], projecti
         _STORE_PROJECTION_CACHE.move_to_end(cache_key)
         while len(_STORE_PROJECTION_CACHE) > _STORE_PROJECTION_MAX_ENTRIES_COUNT:
             _STORE_PROJECTION_CACHE.popitem(last=False)
+
+
+# 函数用途: 列表排序只读数值型 next_run_at；坏值排到最后，不让单条坏记录拖垮整个计划服务。
+def _job_sort_time(job) -> float:
+    try:
+        value = float(job.get("next_run_at") or 1e30)
+    except (TypeError, ValueError):
+        return 1e30
+    return value if math.isfinite(value) else 1e30
 
 
 def _select_waiting_runs(runs: list[dict[str, object]]) -> list[dict[str, object]]:

@@ -784,7 +784,7 @@ def apply_scheduler_batch(root, jobs, runs, *, previous=False, admission=None, h
 def _scheduler_static_value(value):
     runtime = {'next_run_at', 'last_run_at', 'last_run_status', 'last_error_code', 'run_count',
         'failure_count', 'consecutive_failures', 'backoff_until', 'last_status', 'last_error',
-        'updated_at', 'claimed_by', 'active_run_id', 'precheck_checkpoint', 'result'}
+        'updated_at', 'claimed_by', 'active_run_id', 'precheck_checkpoint', 'result', 'definition_generation'}
     if isinstance(value, dict):
         return {key: _scheduler_static_value(item) if key == 'rules' else deepcopy(item)
             for key, item in value.items() if key not in runtime}

@@ -386,6 +386,153 @@ def _deliver_with_scheduler_scope(agent, delivery, context, envelope):
             effect_outcome='not_started', effect_source_ref='scheduler:event_effect_admission')
 
 
+# 原投递回执里确定没有任何组件外发的状态；只有组件事实也全为 not_started 时脚本回执才报 failed。
+_SCRIPT_DELIVERY_NOT_SENT = frozenset({"failed", "rejected", "unavailable", "not_applicable", "suppressed"})
+
+
+# LLM: 只接 exit=0 且产物已核的脚本意向；原执行准入、取消/中断、同 owner 目标、委派 origin、渠道可用与 scheduler
+#   事件资格都先于持久受理，运输只经原 GatewayReplyDeliveryStore/deliver_host_envelope，不建第二份投递账；
+#   同键而正文/附件/目标不同只返回原操作，不重发；运输之后不再检查取消，迟到取消不把已外发改写成未开始。
+# 函数用途: 把冻结上下文的脚本投递意向交原持久宿主投递，返回 ScriptRunner 认可的 operation_ref/status 回执。
+def deliver_host_script_intent(
+    agent,
+    context: DeliveryContext,
+    envelope: ReplyEnvelope,
+) -> dict[str, object]:
+    from ..adapter.delivery import GatewayReplyDeliveryStore, deliver_host_envelope
+    from ..gateway_parts.request_entry_admission import require_request_execution
+    from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
+    from .channel_message_target import resolve_message_target
+
+    # 合法本地未托管执行返回 None，不是拒绝；拒绝只以异常表达。
+    require_request_execution(agent=agent)
+    _raise_if_script_delivery_stopped()
+    provider, target, owner_root, target_error = resolve_message_target(agent, context.channel)
+    if target_error or owner_root is None or (provider, target) != (context.channel, context.target):
+        return _script_delivery_refused(target_error or "CHANNEL_TARGET_OUT_OF_SCOPE")
+    if _delegated_origin_send_blocked(agent, provider, target):
+        return _script_delivery_refused("CHANNEL_TARGET_OUT_OF_SCOPE")
+    delivery = agent.delivery_service
+    registry = delivery.registry
+    # 渠道不可用必须在持久受理前拒绝；否则原记录会收成 unknown 终态，永久挡住同键的后续重试。
+    if (not registry.capabilities_for(provider).proactive
+            or not registry.validate_target(provider, target).allowed
+            or registry.adapter_for(provider) is None):
+        return _script_delivery_refused("CHANNEL_ADAPTER_UNAVAILABLE")
+    attachments = _script_delivery_attachments(owner_root, envelope.attachments)
+    if attachments is None or not context.idempotency_key or not (str(envelope.content or "").strip() or attachments):
+        return _script_delivery_refused("SCRIPT_DELIVERY_REQUEST_INVALID")
+    envelope = ReplyEnvelope(content=envelope.content, attachments=attachments, format=envelope.format,
+                             evidence_refs=tuple(envelope.evidence_refs))
+    store = GatewayReplyDeliveryStore(owner_root / "data" / "channel-delivery")
+    operation_ref = "host-delivery:" + context.idempotency_key
+    identity = (context.channel, context.target, _host_payload_digest(envelope))
+    stored = _stored_host_delivery(store, operation_ref)
+    if stored is not None and stored[0] != identity:
+        return _script_delivery_conflict(operation_ref)
+    try:
+        with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind="delivery"):
+            _raise_if_script_delivery_stopped()
+            receipt = deliver_host_envelope(delivery, store, context, envelope)
+    except SchedulerEffectRejected as exc:
+        return _script_delivery_refused(exc.error_code)
+    stored = _stored_host_delivery(store, operation_ref)
+    if stored is None:
+        return _script_delivery_refused(receipt.error_code or "CHANNEL_SEND_FAILED")
+    if stored[0] != identity:
+        return _script_delivery_conflict(operation_ref)
+    result: dict[str, object] = {"operation_ref": operation_ref, "status": _script_delivery_status(receipt, stored[1])}
+    if result["status"] != "sent" and receipt.error_code:
+        result["error_code"] = receipt.error_code
+    return result
+
+
+# LLM: 取消沿唯一 ToolCancelled 语义抛出，中断保持原 InterruptedError 结果；只在持久受理/运输前调用。
+# 函数用途: 检查当前调用是否已被取消或中断，是则在任何持久投递副作用之前停止。
+def _raise_if_script_delivery_stopped() -> None:
+    from ..common.cancellation import raise_if_cancelled
+    from ..concurrency.interrupt import is_interrupted
+
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError("script delivery interrupted")
+
+
+# LLM: 只承运 ScriptRunner 已核验的 typed ChannelAttachment；owner_root 改绑可信宿主根，真实路径逃出 owner 即拒绝，
+#   字节仍由 DeliveryService 首发前按原 hash/size 冻结核验，这里不重读文件。
+# 函数用途: 把脚本附件适配成原投递信封的附件元组，任一项非法返回 None。
+def _script_delivery_attachments(owner_root: Path, attachments: object) -> tuple[ChannelAttachment, ...] | None:
+    adapted = []
+    for item in attachments or ():
+        if not isinstance(item, ChannelAttachment):
+            return None
+        try:
+            path = Path(item.path).expanduser().resolve(strict=True)
+            path.relative_to(owner_root)
+        except (OSError, ValueError):
+            return None
+        adapted.append(ChannelAttachment(
+            artifact_id=item.artifact_id, path=str(path), name=path.name,
+            kind=item.kind or path.suffix.lower().lstrip(".") or "file",
+            sha256=item.sha256, size_bytes=item.size_bytes, owner_root=str(owner_root),
+        ))
+    return tuple(adapted)
+
+
+# LLM: 仅镜像 deliver_host_envelope 的原 payload 身份(正文/格式/附件 id+hash+size/证据)做同键冲突只读比对，
+#   不作授权或发送依据；原口径若变化，同键重放会 fail-closed 成冲突而不会重发。
+# 函数用途: 计算与原 host-delivery 记录 host_payload_sha256 同口径的信封摘要。
+def _host_payload_digest(envelope: ReplyEnvelope) -> str:
+    payload = json.dumps({"content": envelope.content, "format": envelope.format,
+        "attachments": [(item.artifact_id, item.sha256, item.size_bytes) for item in envelope.attachments],
+        "evidence_refs": envelope.evidence_refs}, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# LLM: 只读原 sent/pending 账冻结的路由与 payload 摘要，判断同键是否仍是同一业务；不写、不建第二份记录。
+# 函数用途: 返回原持久操作的 (channel, target, payload 摘要) 及仍待续收的 pending 记录，不存在返回 None。
+def _stored_host_delivery(store, operation_ref: str):
+    terminal = store.terminal_receipt(operation_ref)
+    if terminal is not None:
+        draft = terminal.get("progress_draft") if isinstance(terminal.get("progress_draft"), dict) else {}
+        return (terminal.get("channel"), terminal.get("target"), draft.get("host_payload_sha256")), None
+    record = next((row for row in store.pending() if row.stable_id == operation_ref), None)
+    if record is None:
+        return None
+    return (record.channel, record.user_id, record.progress_draft.get("host_payload_sha256")), record
+
+
+# LLM: sent 只认原回执 sent 且全部组件确认；部分确认为 partial，已受理未外发为 accepted，组件全未开始才 failed，
+#   其余一律 unknown；不从正文或日志推断，也绝不把 unknown/partial 升格为 sent。
+# 函数用途: 把原持久回执与组件事实折叠成 ScriptRunner 认可的投递状态。
+def _script_delivery_status(receipt, pending) -> str:
+    components = tuple(getattr(receipt, "component_receipts", ()) or ())
+    confirmed = sum(1 for row in components if isinstance(row, dict)
+                    and row.get("phase") == "send_confirmed" and row.get("effect_outcome") == "confirmed")
+    if receipt.delivery_status == "sent" and confirmed == len(components):
+        return "sent"
+    if confirmed:
+        return "partial"
+    if pending is not None and not pending.dispatch:
+        return "accepted"
+    if receipt.delivery_status in _SCRIPT_DELIVERY_NOT_SENT and all(
+            isinstance(row, dict) and row.get("effect_outcome") == "not_started" for row in components):
+        return "failed"
+    return "unknown"
+
+
+# LLM: 拒绝发生在原持久受理之前，故不返回 operation_ref；ScriptRunner 据此不登记任何投递事实。
+# 函数用途: 构造未受理的脚本投递回执。
+def _script_delivery_refused(code: str) -> dict[str, object]:
+    return {"operation_ref": "", "status": "failed", "error_code": str(code or "CHANNEL_SEND_FAILED")}
+
+
+# LLM: 同一 (owner, run, task, request_key) 已有原持久操作而正文/附件/目标不同：只返回原操作引用，不重发也不报 sent。
+# 函数用途: 构造同键冲突的脚本投递回执。
+def _script_delivery_conflict(operation_ref: str) -> dict[str, object]:
+    return {"operation_ref": operation_ref, "status": "unknown", "error_code": "SCRIPT_DELIVERY_REQUEST_INVALID"}
+
+
 # LLM: attachments 是开放世界的 artifact 引用数组；这里只限制资源数量和元素标量类型。
 # 函数用途: 清洗并去重模型传入的附件引用。
 def _attachment_refs(value: object) -> list[str] | ToolHandlerOutcome:
@@ -694,4 +841,4 @@ def _error(
     )
 
 
-__all__ = ["SendMessageTool", "build_send_message_model_spec"]
+__all__ = ["SendMessageTool", "build_send_message_model_spec", "deliver_host_script_intent"]
