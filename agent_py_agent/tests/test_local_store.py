@@ -680,11 +680,63 @@ def test_b2_dry_run_keeps_pending_and_never_rewrites(tmp_path, coordinator):
     assert _b2_pending_ids(store) == []
 
 
+# LLM: 只安装测试观察器并转交真实替换，不修改文件权限或生产重写路径。
+# 函数用途: 收集事件文件发表时的源文件权限，供流式重写和观察范围回归共用。
+def _b2_event_rewrite_modes(monkeypatch, events_path):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    modes = []
+    actual_replace = maintenance.os.replace
+
+    # LLM: os 是共享模块，只观察完整目标路径；保留真实替换的返回值和异常，不改变捕获到的权限。
+    # 函数用途: 排除其它文件的替换，只记录事件暂存文件发表前的权限。
+    def replace(source, destination):
+        if Path(destination) == events_path:
+            modes.append(Path(source).stat().st_mode & 0o777)
+        return actual_replace(source, destination)
+
+    monkeypatch.setattr(maintenance.os, "replace", replace)
+    return modes
+
+
+# LLM: 真实替换两个无关0644文件和一个事件暂存文件；同名异目录也不属于被测目标，坏权限必须原样可见。
+# 函数用途: 锁定事件重写权限观察器的范围，不能混入其它替换，也不能把0644洗成0600。
+@pytest.mark.parametrize("event_mode", [0o600, 0o644])
+@pytest.mark.parametrize("noise_order", ["before", "after", "both"])
+def test_b2_event_rewrite_modes_ignore_unrelated_replacements(tmp_path, monkeypatch, event_mode, noise_order):
+    import os
+
+    events_path = tmp_path / "events.jsonl"
+    event_temp = tmp_path / ".events.jsonl.test.tmp"
+    event_temp.write_bytes(b'{"event_id":"retained"}\n')
+    event_temp.chmod(event_mode)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    modes = _b2_event_rewrite_modes(monkeypatch, events_path)
+    unrelated = []
+    for index, order in enumerate(("before", "after")):
+        if order == "after":
+            os.replace(event_temp, events_path)
+        if noise_order in (order, "both"):
+            source = tmp_path / f".other-{index}.tmp"
+            source.write_bytes(b"unrelated")
+            source.chmod(0o644)
+            destination = other_dir / "events.jsonl" if index == 0 else tmp_path / "metadata.json"
+            os.replace(source, destination)
+            unrelated.append(destination)
+
+    assert modes == [event_mode]
+    assert events_path.stat().st_mode & 0o777 == event_mode
+    assert events_path.read_bytes() == b'{"event_id":"retained"}\n'
+    assert not event_temp.exists()
+    assert all(path.read_bytes() == b"unrelated" for path in unrelated)
+
+
+# LLM: 共享观察器只核本事件文件，严格保留0600、2MiB峰值、原始字节和无残留断言。
+# 函数用途: 验证两种模式的真实事件重写既流式又私有，不把无关替换算进结果。
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_path, monkeypatch, coordinator):
     import tracemalloc
-
-    from agent_py_agent.agent.local_storage import maintenance
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes().splitlines(keepends=True)
@@ -694,18 +746,7 @@ def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_pat
         for _ in range(20000):
             handle.write(retained)
         handle.write(bad)
-    actual_replace = maintenance.os.replace if hasattr(maintenance, "os") else None
-    modes = []
-
-    def replace(source, destination):
-        # os.replace 属于共享模块；这里只观察本用例负责的事件重写，不能把
-        # SQLite/schema 的其它原子替换误算成第二次 JSONL 重写。
-        if Path(destination) == store.events_path:
-            modes.append(Path(source).stat().st_mode & 0o777)
-        return actual_replace(source, destination)
-
-    if actual_replace is not None:
-        monkeypatch.setattr(maintenance.os, "replace", replace)
+    modes = _b2_event_rewrite_modes(monkeypatch, store.events_path)
     tracemalloc.start()
     try:
         with scope():
