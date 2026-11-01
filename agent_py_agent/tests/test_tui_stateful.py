@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
@@ -617,3 +618,32 @@ def test_stream_chunk_boundaries_do_not_change_terminal_semantics(case) -> None:
     with patch("agent_py_agent.cli.turn_completion.time.time", return_value=1_700_000_000.0), \
             patch("agent_py_agent.cli.turn_completion.time.monotonic", return_value=42.0):
         assert run([text]) == run(chunks)
+
+
+@pytest.mark.parametrize(
+    ("wall_times", "monotonic_times"),
+    [
+        pytest.param(
+            (1_700_000_000.999, 1_700_000_001.001),
+            (42.0, 42.0, 42.0, 42.0),
+            id="wall-clock-second",
+        ),
+        pytest.param(
+            (1_700_000_000.0, 1_700_000_000.0),
+            (42.0, 42.04, 42.04, 42.10),
+            id="elapsed-tenth",
+        ),
+    ],
+)
+# LLM: 用会跨显示边界的外部时钟调用同一个属性测试；保留完整终态断言，不改生产计时。
+# 函数用途: 防止删除任一种固定时钟后，跨秒或跨耗时小数位的假失败再次混入 CI。
+def test_stream_chunk_comparison_is_independent_of_live_clocks(
+    wall_times: tuple[float, ...], monotonic_times: tuple[float, ...]
+) -> None:
+    # 只替换收口模块的时钟引用，不扰动 Hypothesis 或测试运行器本身的计时。
+    with patch("agent_py_agent.cli.turn_completion.time") as clock:
+        clock.time.side_effect = wall_times
+        clock.monotonic.side_effect = monotonic_times
+        test_stream_chunk_boundaries_do_not_change_terminal_semantics.hypothesis.inner_test(
+            ("边界🙂e\u0301", ["边", "界🙂", "e", "\u0301"])
+        )
