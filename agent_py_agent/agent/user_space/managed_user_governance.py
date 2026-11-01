@@ -4,19 +4,30 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
-from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
+from ..common.nofollow_fs import (
+    open_directory_beneath,
+    read_bytes_beneath,
+    write_bytes_atomic_beneath,
+)
 from ..plugin_host.errors import HostAPIError
 from .local_user_lifecycle import now_utc
 from .local_user_store import LocalUserStore
 from .owner_resolver import OwnerHomeResult, OwnerIdentity
 
 _POLICY_SCHEMA = "managed_user_governance_policy.v1"
+_GLOBAL_COMPACT_POLICY_PARTS = ("data", "managed_user_governance", "compact_force_policy.json")
+_COMPACT_POLICY_CACHE_MAX = 128
+_COMPACT_POLICY_CACHE: OrderedDict = OrderedDict()
+_COMPACT_POLICY_CACHE_LOCK = RLock()
 _PERSONA_MODES = {"admin_locked", "admin_base_plus_user", "user_autonomous"}
 _ADMIN_WRITE: ContextVar[bool] = ContextVar("managed_governance_admin_write", default=False)
 _ADMIN_MEMORY_WRITE: ContextVar[tuple[str, str] | None] = ContextVar("managed_admin_memory_write", default=None)
@@ -112,6 +123,7 @@ class _GovernanceControl:
     # 函数用途: 保存控制数据并为目标用户投影可见副本。
     def write(self, name: tuple[str, ...], value: dict, mirror: tuple[str, ...] | None = None) -> None:
         self.store.write_json((*self.prefix, *name), value)
+        _invalidate_compact_policy_cache(self.store.root)
         if mirror is not None:
             try:
                 self.store.write_json(("owners", "local", self.uid, *mirror), value)
@@ -198,7 +210,7 @@ def _require_revision(expected: int | None, actual: int) -> None:
 # LLM: 只读根级host authority，缺失返回None沿用宿主配置；损坏不降级或从owner镜像恢复。
 # 函数用途: 取得管理员全局压缩强制政策，不创建目录或存储。
 def read_global_compact_force_policy(root_dir: Path) -> dict | None:
-    value = LocalUserStore(root_dir).read_json(("data", "managed_user_governance", "compact_force_policy.json"))
+    value = LocalUserStore(root_dir).read_json(_GLOBAL_COMPACT_POLICY_PARTS)
     if value is None:
         return None
     percent = value.get("trigger_percent")
@@ -208,6 +220,110 @@ def read_global_compact_force_policy(root_dir: Path) -> dict | None:
             or percent is not None and (type(percent) is not int or not 50 <= percent <= 95)):
         raise HostAPIError("GOVERNANCE_STORE_INVALID", 503)
     return value
+
+
+@dataclass(frozen=True)
+class CompactGovernanceSnapshot:
+    """仅保留压缩所需标量，不缓存账号、权限对象、秘密或可变原始JSON。"""
+    global_percent: int | None = None
+    global_forced: bool | None = None
+    user_percent: int | None = None
+    user_locked: bool = False
+    revisions: tuple[int, ...] = ()
+
+
+def _invalidate_compact_policy_cache(root: Path) -> None:
+    canonical = str(Path(root).resolve())
+    with _COMPACT_POLICY_CACHE_LOCK:
+        for key in tuple(_COMPACT_POLICY_CACHE):
+            if key[0] == canonical:
+                del _COMPACT_POLICY_CACHE[key]
+
+
+def _compact_authority_stamp(root: Path, path: Path) -> tuple:
+    """逐段nofollow；缓存重验全部文件和父目录身份，不以目录mtime或TTL授权。"""
+    parts = path.relative_to(root).parts
+    try:
+        descriptor = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+    except FileNotFoundError:
+        return ("missing_parent",)
+    try:
+        parent = os.fstat(descriptor)
+        try:
+            info = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return (parent.st_dev, parent.st_ino, "missing")
+        return (parent.st_dev, parent.st_ino, info.st_dev, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink, info.st_uid)
+    finally:
+        os.close(descriptor)
+
+
+def _compact_governance_key(home) -> tuple:
+    store = LocalUserStore(home.root)
+    descriptor = open_directory_beneath(store.root, (), require_dir_fd=True)
+    try:
+        info = os.fstat(descriptor)
+        root_identity = (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+    finally:
+        os.close(descriptor)
+    owner = (getattr(home, "owner_provider", ""), getattr(home, "owner_kind", ""), getattr(home, "owner_id", ""))
+    paths = [store.root.joinpath(*_GLOBAL_COMPACT_POLICY_PARTS)]
+    if owner[:2] == ("local", "user"):
+        uid = owner[2].rsplit("/", 1)[-1]
+        OwnerIdentity.local_user(uid)
+        paths.extend((store.root / "local_users" / (uid + ".json"),
+                      _GovernanceControl(store.root, uid).policy_path,
+                      store.owner_home(uid).home_dir / "owner_status.json"))
+    return (str(store.root), root_identity, owner, tuple(_compact_authority_stamp(store.root, path) for path in paths))
+
+
+def _read_compact_governance(home) -> CompactGovernanceSnapshot:
+    global_policy = read_global_compact_force_policy(home.root)
+    governed, revisions = {}, [global_policy["revision"]] if global_policy else []
+    if getattr(home, "owner_provider", "") == "local" and getattr(home, "owner_kind", "") == "user":
+        try:
+            uid, _identity, _owner = resolve_managed_local_user(home.root, home.owner_id)
+        except ManagedUserScopeDeniedError:
+            raw_uid = str(getattr(home, "owner_id", "") or "").removeprefix("local/").strip()
+            path = _GovernanceControl(home.root, raw_uid).policy_path
+            if LocalUserStore(home.root).get(raw_uid) is not None or path.exists():
+                raise
+            uid = ""
+        if uid:
+            # 压缩的读快照也不继续使用已禁用身份；管理员治理其它读口仍允许管理禁用账号。
+            user = LocalUserStore(home.root).require_enabled(uid)
+            policy = _GovernanceControl(home.root, uid).policy()
+            revisions.extend((user.revision, policy["revision"]))
+            governed = policy.get("user_compact_policy", {})
+    return CompactGovernanceSnapshot(
+        (global_policy or {}).get("trigger_percent"),
+        (global_policy or {}).get("force_compact_trigger_percent"),
+        governed.get("default_trigger_percent"), bool(governed.get("force_locked", False)), tuple(revisions))
+
+
+def read_compact_governance_snapshot(home, *, use_cache: bool = True) -> CompactGovernanceSnapshot:
+    """跨轮仅复用只读解析；显式fresh/写前校验完全绕缓存，跨进程按原文件身份失效。"""
+    if not use_cache:
+        return _read_compact_governance(home)
+    try:
+        key = _compact_governance_key(home)
+    except (OSError, ValueError, HostAPIError):
+        # 身份采样失败交原严格读口裁决，不能使用旧快照或把错误变成自治。
+        return _read_compact_governance(home)
+    with _COMPACT_POLICY_CACHE_LOCK:
+        cached = _COMPACT_POLICY_CACHE.get(key)
+        if cached is not None:
+            _COMPACT_POLICY_CACHE.move_to_end(key)
+            return cached
+    snapshot = _read_compact_governance(home)
+    if _compact_governance_key(home) == key:
+        with _COMPACT_POLICY_CACHE_LOCK:
+            _COMPACT_POLICY_CACHE[key] = snapshot
+            _COMPACT_POLICY_CACHE.move_to_end(key)
+            while len(_COMPACT_POLICY_CACHE) > _COMPACT_POLICY_CACHE_MAX:
+                _COMPACT_POLICY_CACHE.popitem(last=False)
+    return snapshot
 
 
 # LLM: 只由已核身份的治理事务进入；可编辑JSON和admin_override布尔值不能自行建立该活栈。
@@ -384,7 +500,8 @@ class ManagedUserGovernanceService:
                       "force_compact_trigger_percent": values[0],
                       "trigger_percent": trigger_percent if trigger_percent is not None else current.get("trigger_percent"),
                       "updated_at": now_utc(), "updated_by": "local/main"}
-            store.write_json(("data", "managed_user_governance", "compact_force_policy.json"), result)
+            store.write_json(_GLOBAL_COMPACT_POLICY_PARTS, result)
+            _invalidate_compact_policy_cache(self.root_dir)
             return result
 
     # LLM: 正文仅限登记受管用户；模式和修订读取宿主authority，不信任镜像版本。

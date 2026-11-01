@@ -5,15 +5,271 @@
 # 模块用途: 为会话间消息与派活的每对会话限额提供可单测、可核对的持久计数。
 from __future__ import annotations
 
+import json
+import math
+import os
+import stat
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 
+from ..common.nofollow_fs import open_directory_beneath
 from ..gateway_parts.io import read_json_file_report, update_json_file_atomic
 from .store_io import safe_file_stem
 
 # 窗口长度（秒）：一小时，与配置键 session_pair_hourly_limit 的语义一致。
 WINDOW_SECONDS = 3600.0
+# 一片维护的总目录项预算；宽限沿原小时桶长度，不加常驻定时器。
+SESSION_PAIR_RETENTION_MAX_FILES = 128
+_PAIR_SCAN_STREAMS: OrderedDict = OrderedDict()
+_PAIR_SCAN_LOCK = RLock()
+
+
+@dataclass(frozen=True)
+class SessionPairRetentionRequest:
+    home: object
+    now: float
+    cursor: dict = field(default_factory=dict)
+    max_files: int = SESSION_PAIR_RETENTION_MAX_FILES
+    max_bytes: int = 8 * 1024 * 1024
+    deadline: float | None = None
+
+
+def cleanup_session_pair_rates(request: SessionPairRetentionRequest) -> dict:
+    """只消费原维护的owner及预算；游标保留在同一maintenance.json，不另建账本。"""
+    if (type(request.max_files) is not int or request.max_files < 1
+            or type(request.max_bytes) is not int or request.max_bytes < 1
+            or not math.isfinite(request.now)):
+        raise ValueError("invalid_session_pair_retention_budget")
+    root = Path(request.home.owner_home_dir)
+    sessions = Path(request.home.owner_sessions_dir).relative_to(root).parts + ("session_pair_rate",)
+    workspaces = Path(request.home.owner_workspace_dir).relative_to(root).parts + ("runtime", "workspaces")
+    position = deepcopy(request.cursor)
+    if position.get("schema_version", 1) != 1:
+        raise ValueError("invalid_session_pair_retention_cursor")
+    # 已完成位置只代表上一轮走到末尾；下个原维护周期须重扫后来过期的活桶。
+    if position.get("complete") is True:
+        position = {}
+    position.update(schema_version=1)
+    result = {"cursor": position, "complete": False, "items": 0, "bytes": 0, "deleted": 0,
+              "locks_deleted": 0, "preserved_invalid": 0, "busy": 0}
+    limit = min(request.max_files, SESSION_PAIR_RETENTION_MAX_FILES)
+    while result["items"] < limit and (request.deadline is None or time.monotonic() < request.deadline):
+        phase = position.get("phase", "sessions")
+        if phase not in {"sessions", "workspaces"}:
+            raise ValueError("invalid_session_pair_retention_phase")
+        workspace = position.get("workspace")
+        if phase == "workspaces" and workspace is None:
+            names, scan, complete = _pair_scan_page(root, workspaces, position.get("workspace_scan", {}), 1)
+            position["workspace_scan"] = scan
+            result["items"] += max(1, scan.pop("last_scanned", len(names)))
+            if not names:
+                result["complete"] = complete
+                break
+            workspace = names[0]
+            _require_pair_entry_name(workspace)
+            position["workspace"] = workspace
+        parts = sessions if phase == "sessions" else workspaces + (workspace, "conversations", "session_pair_rate")
+        complete = _clean_pair_directory(root, parts, position, result, limit, request)
+        if not complete:
+            break
+        position.pop("pair_scan", None)
+        if phase == "sessions":
+            position["phase"] = "workspaces"
+        else:
+            position.pop("workspace", None)
+    position["complete"] = result["complete"]
+    position["last_slice"] = {key: value for key, value in result.items() if key not in {"cursor", "complete"}}
+    return result
+
+
+def _require_pair_entry_name(name: str) -> None:
+    if type(name) is not str or name in {"", ".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError("invalid_session_pair_entry")
+
+
+def _pair_scan_page(root: Path, parts: tuple, cursor: dict, limit: int) -> tuple[list[str], dict, bool]:
+    # 复用现有配额枚举器的惰性dirent能力，不调用配额账、不改其锁或持久状态。
+    from ..user_space.owner_quota import _quota_scandir
+
+    if limit <= 0:
+        return [], cursor, False
+    try:
+        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    except (FileNotFoundError, NotADirectoryError):
+        return [], {}, True
+    try:
+        info = os.fstat(descriptor)
+        identity = [info.st_dev, info.st_ino]
+        state = deepcopy(cursor) if cursor.get("directory_identity") == identity else {}
+        offset = state.get("offset", 0)
+        if type(offset) is not int or offset < 0:
+            raise ValueError("invalid_session_pair_directory_offset")
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        names, complete = [], False
+        entries = _quota_scandir(descriptor)
+        if not callable(getattr(entries, "checkpoint", None)):
+            return _pair_portable_page((os.getpid(), str(root), parts, *identity), entries, state, identity, limit)
+        with entries:
+            if state.get("pending"):
+                entries.restore(state["pending"])
+            for _ in range(limit):
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    complete = True
+                    break
+                _require_pair_entry_name(entry.name)
+                names.append(entry.name)
+            saved = entries.checkpoint()
+        return names, {"directory_identity": identity, "last_scanned": len(names), **saved}, complete
+    finally:
+        os.close(descriptor)
+
+
+def _pair_portable_page(key, opened, state, identity, limit):
+    """最多32个惰性目录流；冷恢复逐片有界重放，原生后端直接持久化checkpoint。"""
+    target = state.get("visited", 0)
+    if type(target) is not int or target < 0:
+        opened.close()
+        raise ValueError("invalid_session_pair_directory_replay")
+    with _PAIR_SCAN_LOCK:
+        cached = _PAIR_SCAN_STREAMS.pop(key, None)
+        if cached is None or cached[1] != target:
+            if cached is not None:
+                cached[0].close()
+            cached = [opened, target, target]
+        else:
+            opened.close()
+        names, scanned, complete = [], 0, False
+        try:
+            for _ in range(limit):
+                try:
+                    entry = next(cached[0])
+                except StopIteration:
+                    complete = True
+                    break
+                scanned += 1
+                if cached[2]:
+                    cached[2] -= 1
+                    continue
+                _require_pair_entry_name(entry.name)
+                names.append(entry.name)
+                cached[1] += 1
+        except BaseException:
+            cached[0].close()
+            raise
+        if complete:
+            cached[0].close()
+        else:
+            _PAIR_SCAN_STREAMS[key] = cached
+        while len(_PAIR_SCAN_STREAMS) > 32:
+            _old_key, old = _PAIR_SCAN_STREAMS.popitem(last=False)
+            old[0].close()
+        return names, {"directory_identity": identity, "offset": 0, "visited": cached[1],
+                       "last_scanned": scanned}, complete
+
+
+def _clean_pair_directory(root, parts, position, result, limit, request):
+    from ..gateway_parts.io import _cleanup_orphan_lock_at
+
+    remaining = limit - result["items"]
+    if remaining <= 0:
+        return False
+    saved = position.get("pair_scan", {})
+    retry = saved.get("retry", [])
+    if not isinstance(retry, list) or len(retry) > SESSION_PAIR_RETENTION_MAX_FILES:
+        raise ValueError("invalid_session_pair_retry_cursor")
+    if retry:
+        names, scan, complete = retry[:remaining], {**saved, "retry": []}, saved.get("scan_complete", False)
+        tail = retry[remaining:]
+    else:
+        names, scan, complete = _pair_scan_page(root, parts, saved, remaining)
+        tail = []
+    result["items"] += max(1, scan.pop("last_scanned", len(names)))
+    try:
+        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    except (FileNotFoundError, NotADirectoryError):
+        position["pair_scan"] = {}
+        return True
+    try:
+        for name in names:
+            _require_pair_entry_name(name)
+            if request.deadline is not None and time.monotonic() >= request.deadline:
+                tail.append(name)
+                continue
+            if name.endswith(".json.lock"):
+                result["locks_deleted"] += int(_cleanup_orphan_lock_at(descriptor, name, current=request.now))
+            elif name.endswith(".json"):
+                outcome, size = _remove_expired_pair(descriptor, root.joinpath(*parts, name), request.now,
+                                                     request.max_bytes - result["bytes"])
+                result["bytes"] += size
+                result["deleted"] += int(outcome == "deleted")
+                result["busy"] += int(outcome == "busy")
+                result["preserved_invalid"] += int(outcome == "invalid")
+                if outcome in {"busy", "budget", "changed"}:
+                    tail.append(name)
+                if outcome == "deleted":
+                    result["locks_deleted"] += int(_cleanup_orphan_lock_at(descriptor, name + ".lock", current=request.now))
+        scan.update(retry=tail, scan_complete=complete)
+        position["pair_scan"] = scan
+        return complete and not tail
+    finally:
+        os.close(descriptor)
+
+
+def _pair_file_version(info) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink)
+
+
+def _remove_expired_pair(directory_fd, path, now, remaining_bytes):
+    from ..gateway_parts.io import try_existing_file_transition_at
+
+    raw = b""
+    try:
+        with try_existing_file_transition_at(directory_fd, path) as acquired:
+            if not acquired:
+                return "busy", 0
+            info = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+                return "invalid", 0
+            if info.st_size > remaining_bytes:
+                return "budget", 0
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
+            try:
+                handle = os.fdopen(descriptor, "rb")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with handle:
+                opened = os.fstat(handle.fileno())
+                if _pair_file_version(opened) != _pair_file_version(info):
+                    return "changed", 0
+                raw = handle.read(65537)
+                data = json.loads(raw)
+                current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+                if (_pair_file_version(os.fstat(handle.fileno())) != _pair_file_version(opened)
+                        or _pair_file_version(current) != _pair_file_version(opened)):
+                    return "changed", len(raw)
+            if (type(data) is not dict or data.get("schema_version") != "session_pair_rate.v1"
+                    or type(data.get("schema_generation", 1)) is not int or data.get("schema_generation", 1) != 1
+                    or type(data.get("count")) is not int or data["count"] < 1
+                    or type(data.get("window_start")) not in (int, float)
+                    or not math.isfinite(data["window_start"]) or data["window_start"] < 0
+                    or _window_start(data["window_start"]) != data["window_start"]):
+                return "invalid", len(raw)
+            if data["window_start"] + WINDOW_SECONDS * 2 > now:
+                return "active", len(raw)
+            os.unlink(path.name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return "deleted", len(raw)
+    except FileNotFoundError:
+        return "missing", 0
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "invalid", len(raw)
 
 
 # LLM: 冻结值对象；只承载两个 thread id 与窗口起点，不做 IO、不判断上限。
