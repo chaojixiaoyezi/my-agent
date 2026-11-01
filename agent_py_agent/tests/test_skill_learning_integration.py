@@ -3,8 +3,11 @@ from __future__ import annotations
 """自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道、`skills learned` CLI、S1 自动确认与配置。"""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core import _finalization_service as finalization
 from agent_py_agent.agent.agent_core._finalization_service import _request_skill_learning
@@ -18,6 +21,14 @@ from agent_py_agent.agent.capability.skill_learning import (
 from agent_py_agent.agent.capability.skill_learning_prompt import OUTPUT_SCHEMA_VERSION
 from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
 from agent_py_agent.agent.capability.skill_proposals import SkillProposalService
+from agent_py_agent.agent.capability.task_learning_bridge import (
+    TaskLearningEvidence,
+    enqueue_completed_task_learning,
+)
+from agent_py_agent.agent.conversation.business_contracts import (
+    BusinessExecutionContext,
+    TrustedTaskCompletion,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.settings import load_config
@@ -260,3 +271,134 @@ def test_self_learning_budget_keys_ship_in_yaml_dataclass_and_normalizer() -> No
     assert normalized["self_learning_min_tool_rounds"] == 6 and normalized["self_learning_daily_limit"] == 5
     assert normalized["self_learning_max_skills"] == 0 and normalized["self_learning_timeout_seconds"] == 180
     assert len(warnings) == 3
+
+
+def _completed_learning_host(tmp_path):
+    from agent_py_agent.agent.user_space.owner_policy import resolve_effective_owner_policy
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        OwnerIdentity,
+        ensure_owner_home,
+        home_paths_with_owner,
+    )
+    from agent_py_agent.tests.test_skill_learning import _ctx, _output, _runtime
+    ctx = _runtime(tmp_path, _output('skip', name='', description='', when_to_use='', tags=[], body=''),
+                   settings=SkillLearningSettings(min_tool_rounds=6, include_background=True))
+    ctx.home = home_paths_with_owner(ctx.home, ensure_owner_home(ctx.home.root, OwnerIdentity.local_main()))
+    ctx.skills.home_paths = ctx.home
+    ctx.skills.policy_provider = lambda: resolve_effective_owner_policy(ctx.home)
+    ctx.service.runtime = replace(ctx.service.runtime, owner_id=ctx.home.owner_id)
+    material = _ctx('run', do_save=False, source='background_main_agent', tool_rounds=6,
+                    attempt_id='attempt', trajectory_digest='trajectory-digest', task_id='runtime-task',
+                    task_attributes={'conversation_thread_id': 'thread', 'session_task_ref': 'stask-1'})
+    business = BusinessExecutionContext(str(ctx.home.owner_id), 'space', 'project', 'stask-1', 2, None,
+                                        ('owner:method',), ('asset-version',), 'business-context.v1')
+    completion = TrustedTaskCompletion(str(ctx.home.owner_id), 'thread', 'stask-1', 'run', 'attempt',
+                                       'completed', 'claim', 'completion', 'space', 'project',
+                                       'background_main_agent', 6, ('artifact',), 'trajectory-digest')
+
+    class Host:
+        def __init__(self):
+            self.home_paths, self.skill_learning = ctx.home, ctx.service
+            self.config = SimpleNamespace(enable_self_learning=True)
+            self.evidence = TaskLearningEvidence(completion, material, business)
+            self.canonical_completed = True
+
+        def load_task_learning_evidence(self, candidate):
+            return self.evidence if self.canonical_completed and candidate == self.evidence.completion else None
+
+    return ctx, Host(), completion
+
+
+def test_trusted_background_completion_save_false_uses_original_fifo_and_replays_once(tmp_path):
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    result = enqueue_completed_task_learning(completion=completion, host=host)
+    assert result['status'] == 'enqueued'
+    assert ctx.backend.prompts == [] and host.evidence.context.do_save is False
+    [path] = ctx.store.pending_requests()
+    request = ctx.store.read_request(path)
+    assert request['source'] == 'background_main_agent' and request['task_id'] == 'stask-1'
+    assert request['runtime_task_id'] == 'runtime-task'
+    assert request['attempt_id'] == 'attempt' and request['completion_ref'] == 'completion'
+    assert request['business_context']['asset_version_refs'] == ['asset-version']
+    assert request['result_refs'] == ['artifact'] and request['learning_scope']['space_id'] == 'space'
+    host.skill_learning = SkillLearningService(SkillLearningStore.for_home(ctx.home), ctx.service.settings, ctx.service.runtime)
+    assert enqueue_completed_task_learning(completion=completion, host=host)['status'] == 'duplicate'
+    assert ctx.service.run_pending().status == 'skipped'
+    assert enqueue_completed_task_learning(completion=completion, host=host)['status'] == 'duplicate'
+    assert ctx.store.pending_requests() == []
+
+
+@pytest.mark.parametrize('case', ['disabled', 'excluded', 'short', 'unknown', 'claim', 'owner', 'attempt', 'space', 'task_local', 'json'])
+def test_completed_learning_rejects_unverified_or_ineligible_sources_without_writes(tmp_path, case):
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    if case == 'disabled':
+        host.config.enable_self_learning = False
+    elif case == 'excluded':
+        ctx.service.settings = replace(ctx.service.settings, include_background=False)
+    elif case == 'claim':
+        host.canonical_completed = False
+    elif case == 'task_local':
+        host.evidence.context.context_scope = 'task_local'
+    elif case == 'short':
+        completion = replace(completion, tool_rounds=5)
+        host.evidence.context.tool_rounds = 5
+    elif case == 'unknown':
+        completion = replace(completion, source_kind='unknown_source')
+        host.evidence.context.source = 'unknown_source'
+    elif case in {'owner', 'attempt', 'space'}:
+        field = {'owner': 'owner_id', 'attempt': 'attempt_id', 'space': 'space_id'}[case]
+        completion = replace(completion, **{field: 'other'})
+    elif case == 'json':
+        completion = {**completion.to_dict(), 'trusted': True}
+    if isinstance(completion, TrustedTaskCompletion) and case not in {'claim', 'json'}:
+        host.evidence = replace(host.evidence, completion=completion)
+    assert enqueue_completed_task_learning(completion=completion, host=host)['status'] in {'ineligible', 'conflict'}
+    assert ctx.store.pending_requests() == [] and not ctx.store.registry_path.exists()
+    assert ctx.backend.prompts == [] and host.evidence.context.do_save is False
+
+
+def test_original_finalize_consumes_only_host_bound_completion_evidence(tmp_path):
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    material = host.evidence.context
+    assert ctx.service.enqueue_from_finalize(material) == 'ineligible'
+    material.trusted_task_completion = completion
+    ctx.service.runtime = replace(ctx.service.runtime, task_completion_host=host)
+    assert ctx.service.enqueue_from_finalize(material) == 'queued'
+    assert material.do_save is False and material.source == 'background_main_agent'
+    assert len(ctx.store.pending_requests()) == 1
+
+
+def test_completion_queue_storage_error_is_not_an_enqueued_receipt(tmp_path, monkeypatch):
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    def fail(_request):
+        raise OSError('original FIFO unavailable')
+    monkeypatch.setattr(ctx.store, 'enqueue', fail)
+    with pytest.raises(OSError):
+        enqueue_completed_task_learning(completion=completion, host=host)
+
+
+def test_confirmed_background_method_keeps_business_refs_in_original_asset_registry(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_proposals import (
+        list_learning_proposals,
+        resolve_learning_proposal,
+    )
+    from agent_py_agent.tests.test_skill_learning import _output
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    ctx.backend.responses[:] = [_output()]
+    # _runtime的旧测试子类会自动确认提案；本用例使用原服务验证实际确认链。
+    ctx.service = SkillLearningService(ctx.store, replace(ctx.service.settings, autonomous_verified=False), ctx.service.runtime)
+    host.skill_learning = ctx.service
+    assert enqueue_completed_task_learning(completion=completion, host=host)['status'] == 'enqueued'
+    assert ctx.service.run_pending().status == 'proposed'
+    [proposal] = list_learning_proposals(ctx.store)
+    assert resolve_learning_proposal(ctx.store, proposal['proposal_id'], 1, decision='confirm')['status'] == 'committed'
+    [asset] = [row for row in ctx.store.load_registry().assets.values() if row['kind'] == 'skill']
+    source = asset['provenance'][-1]
+    assert source['origin'] == 'S3'
+    assert source['task_id'] == completion.task_id and source['runtime_task_id'] == 'runtime-task'
+    assert source['business_context'] == host.evidence.business_context.to_dict()
+    assert source['learning_scope'] == {'kind': 'business_method', 'space_id': 'space', 'project_ref': 'project'}
+    assert source['result_refs'] == ['artifact'] and source['asset_version_refs'] == ['asset-version']
+    assert source['claim_ref'] == 'claim' and source['completion_ref'] == 'completion'
+    assert host.evidence.context.do_save is False

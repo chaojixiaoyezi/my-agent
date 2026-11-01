@@ -269,16 +269,57 @@ def _family_record_locked(store, registry, publish):
 def _registered_publication(store, registry, record, publish):
     from dataclasses import asdict
 
-    from .asset_promotion import register_asset_locked
+    from .asset_promotion import asset_identity, register_asset_locked
 
+    source = _business_method_source(publish.request)
+    if not publish.request.get('completion_ref'):
+        # 原提案只携带四个请求字段；确认沿准确资产身份和request_key取回同源出处，不猜latest。
+        identity = asset_identity('skill', {**asdict(publish.decision), 'name': record.name}, store.skills_root.parent)
+        refs = registry.assets.get(identity, {}).get('provenance', ())
+        bound = [ref for ref in refs if ref.get('completion_ref')
+                 and ref.get('request_key') == publish.request.get('request_key')
+                 and ref.get('task_id') == publish.request.get('task_id')]
+        if bound:
+            source = {**bound[-1], **source}
     registry, _ = register_asset_locked(store, registry, kind='skill', asset_id='owner:'+record.name,
         asset=asdict(publish.decision), sha256=record.sha256, state='trial',
-        source={'origin':'S3','run_id':str(publish.request.get('run_id', ''))})
+        source=source)
     return replace(registry, skills={**registry.skills, record.name:record})
 
 
-# LLM: 回滚只作用于登记在册且未被用户改动的Skill；v1回滚等同删除。激活版本回退但revision单调递增，历史文件不可重用。
-# 函数用途: 把一个自学 Skill 退回上一个版本，返回账本事件。
+def _business_method_source(request):
+    """只保留宿主方法出处的引用；不写业务正文，不把来源改为user或人格授权。"""
+    source = {'origin': 'S3', 'run_id': str(request.get('run_id', ''))}
+    if request.get('completion_ref'):
+        source.update({key: request[key] for key in (
+            'request_key', 'owner_id', 'task_id', 'runtime_task_id', 'attempt_id', 'completion_ref', 'claim_ref',
+            'business_context', 'learning_scope', 'result_refs', 'asset_version_refs') if key in request})
+    return source
+
+
+def retain_proposed_business_source(store, publish):
+    """FIFO删源前在原资产登记保留待确认出处；不新建账，不改变提案/确认身份或批准结果。"""
+    from dataclasses import asdict
+
+    from .asset_promotion import asset_identity, register_asset_locked
+    from .skill_learning_proposals import _redacted_publish
+
+    # 与原提案使用同一脱敏草稿计算身份；只保存引用和hash，不复制草稿正文。
+    publish, _redacted = _redacted_publish(publish)
+    asset = asdict(publish.decision)
+    with store.state_lock():
+        registry = store.load_registry()
+        identity = asset_identity('skill', asset, store.skills_root.parent)
+        previous = registry.assets.get(identity, {})
+        registry, _ = register_asset_locked(store, registry, kind='skill', asset_id='owner:'+publish.decision.name,
+            asset=asset, source=_business_method_source(publish.request),
+            sha256=skill_content_sha256(render_learned_skill(publish.decision)),
+            state=previous.get('state', 'candidate'))
+        store.save_registry(registry)
+
+
+# 回滚仍持原state/配额锁；只有确认registry未提交才恢复正文，历史清理复用发布事务。
+# v1回滚等同删除；激活版本回退但revision单调递增，已提交或未知状态禁止破坏性补偿。
 def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningEvent:
     with store.state_lock():
         registry = store.load_registry()
@@ -289,9 +330,25 @@ def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningE
         if text is None:
             raise SkillLearningGateError(CODE_VERSION_MISSING, {"version": current.version - 1})
         record = replace(current, version=current.version - 1, revision=current.revision + 1, sha256=skill_content_sha256(text), updated_at=utc_now())
-        store.save_version(name, record.revision, text)
-        replace_skill_file(store.skill_path(name), text)
-        store.save_registry(replace(registry, skills={**registry.skills, name: record}))
+        path = store.skill_path(name)
+        previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
+        if previous is None or skill_content_sha256(previous) != current.sha256:
+            raise SkillLearningGateError(CODE_USER_MODIFIED, {'skill_name': name})
+        try:
+            with ExitStack() as rollback:
+                _save_version_with_rollback(store, name, record.revision, text, rollback)
+                store.check_write(path, text)
+                replace_skill_file(path, text)
+                store.save_registry(replace(registry, skills={**registry.skills, name: record}))
+                rollback.pop_all()
+        except BaseException as primary:
+            try:
+                if _publication_uncommitted(store, record, primary):
+                    replace_skill_file(path, previous)
+            except BaseException as compensation:
+                primary.add_note('reverted_skill_rollback_failed:' + type(compensation).__name__)
+                raise primary from compensation
+            raise
     return SkillLearningEvent(EVENT_REVERTED, "", name, record.version, record.sha256)
 
 

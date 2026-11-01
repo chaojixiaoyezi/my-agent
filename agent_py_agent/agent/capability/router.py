@@ -348,6 +348,18 @@ class CapabilityRouter:
             if score > 0:
                 hits.append(CapabilitySearchHit(card=card, score=score, reasons=reasons[:4]))
         hits.sort(key=lambda item: (-item.score, item.card.kind, item.card.name))
+        from .business_capabilities import (
+            BusinessCapabilityRequest,
+            business_context_for_host,
+            resolve_business_capabilities,
+        )
+
+        host = getattr(self._skill_snapshot_provider, '__self__', None)
+        context = business_context_for_host(host)
+        if context is not None:
+            resolved = resolve_business_capabilities(context=context,
+                request=BusinessCapabilityRequest(query, effective_limit, tuple(hits)), host=host)
+            return list(resolved.hits)
         if effective_limit == 0:
             return hits
         return hits[:effective_limit]

@@ -9,6 +9,7 @@ to write advisory evidence must never change the underlying tool result.
 模块用途: 在所有主代理和子代理共用的工具出口记录测试，并在文件修改后让旧测试过期。
 """
 
+import logging
 import sqlite3
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -41,6 +42,7 @@ def record_tool_verification(
     result: ToolResult,
 ) -> ToolResult:
     context = None
+    learning_evidence = []
     try:
         repository = VerificationEvidenceRepository(runtime_owner_root(agent))
         context = _verification_context(agent)
@@ -54,10 +56,9 @@ def record_tool_verification(
                 result=result,
             )
             if evidence:
-                from ..capability.skill_learning_host_feedback import observe_command_verifications
-                observe_command_verifications(agent,call,evidence)
                 # 单条证据的形状保持不变；&& 串联整体通过时另附完整有序列表，读归档的消费者不能漏看前面几段。
                 additions["verification_evidence"] = evidence[-1]
+                learning_evidence = evidence
             if len(evidence) > 1:
                 additions["verification_evidence_chain"] = evidence
             skipped = [] if evidence else _hidden_verification(agent, call, result)
@@ -77,6 +78,19 @@ def record_tool_verification(
             result = _with_verification_metadata(result, additions)
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
         pass
+    if learning_evidence:
+        from ..capability.skill_learning_host_feedback import observe_command_verifications
+        from ..capability.skill_learning_store import SkillLearningStoreError
+
+        # 真实验证metadata已经保留；学习存储失败单列诊断，不能冒充反馈成功或改写工具事实。
+        try:
+            diagnostics = observe_command_verifications(agent, call, learning_evidence)
+        except (OSError, SkillLearningStoreError) as error:
+            logging.getLogger(__name__).exception('skill_learning_feedback_storage_failed')
+            diagnostics = [{'status': 'error', 'reason': getattr(error, 'code', 'SKILL_LEARNING_STORAGE_ERROR'),
+                            'error_type': type(error).__name__}]
+        if diagnostics:
+            result = _with_verification_metadata(result, {'skill_learning_feedback': diagnostics})
     try:
         _record_tool_telemetry(agent, context or _verification_context(agent), call, result)
     except Exception:

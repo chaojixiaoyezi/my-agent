@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 
@@ -120,6 +120,7 @@ class SkillLearningRuntime:
     lesson_provider: Callable[[],object] | None = None
     deployment_root: Path | None = None
     promotion_verifier: Callable | None = default_machine_promotion_verifier
+    task_completion_host: object | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -234,6 +235,13 @@ class SkillLearningService:
     #   热队列满时由Store合并或保存溢出，仅总缓冲满才记dropped/QUEUE_FULL。副作用：写请求与账本、改两张内存表。
     # 函数用途: 收口时按结构化条件登记一次学习请求，返回 queued/duplicate/queue_full/ineligible。
     def enqueue_from_finalize(self, ctx: object) -> str:
+        if getattr(ctx, 'source', '') == 'background_main_agent':
+            from .task_learning_bridge import enqueue_completed_task_learning
+
+            outcome = enqueue_completed_task_learning(completion=getattr(ctx, 'trusted_task_completion', None),
+                                                       host=self.runtime.task_completion_host)
+            return {'enqueued': 'queued', 'duplicate': 'duplicate', 'ineligible': 'ineligible',
+                    'conflict': 'conflict'}[outcome['status']]
         attrs = getattr(ctx, "task_attributes", None)
         focus = self._user.take_mark(str((attrs if isinstance(attrs, dict) else {}).get("conversation_task_id") or ""))
         prepared = build_learning_request(ctx, 1)
@@ -414,9 +422,14 @@ class SkillLearningService:
                 with gateway_short_transaction("skill_learning_propose"):
                     return operation()
 
-            return propose_or_promote_skill(self.store, publish, verifier=verifier, commit=commit,
+            event = propose_or_promote_skill(self.store, publish, verifier=verifier, commit=commit,
                 autonomous_verified=(self.settings.autonomous_verified and request.get('requested_by') != 'user'
                                      and not request.get('_learning_catalog_unavailable')))
+            if event.event == 'proposed' and request.get('completion_ref'):
+                from .skill_learning_publish import retain_proposed_business_source
+
+                commit(lambda: retain_proposed_business_source(self.store, publish))
+            return event
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:

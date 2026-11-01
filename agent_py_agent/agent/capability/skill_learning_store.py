@@ -338,6 +338,19 @@ class SkillLearningStore:
         self._recover_requests_locked()
         pending, overflow = self._request_paths("requests"), self.overflow_requests()
         all_paths = [*pending, *overflow]
+        if request.get('completion_ref'):
+            for path in all_paths:
+                if path.name.endswith(f'-{key}.json'):
+                    previous = self.read_request(path)
+                    if previous is None:
+                        raise SkillLearningStoreError(CODE_REQUEST_CORRUPT)
+                    same = all(previous.get(field) == request.get(field) for field in
+                               ('completion_identity', 'trajectory_digest', 'trajectory_fingerprint'))
+                    return ('duplicate' if same else 'conflict'), None
+            # 原账本先记结果再删FIFO；重启重放沿原request_key去重，不另建完成或权限账。
+            if any(row.get('request_key') == key and row.get('event') in
+                   {'published', 'updated', 'skipped', 'rejected', 'failed', 'proposed'} for row in self.events(limit=0)):
+                return 'duplicate', None
         if any(path.name.endswith(f"-{key}.json") for path in all_paths):
             return "duplicate", None
         name = self._next_request_name(key, all_paths)
@@ -594,6 +607,10 @@ def _request_context(request):
 # LLM: 用户总结与自动总结不互吞；显式不同task先拒绝，共同root或谱系不能覆盖来源和子任务身份。
 # 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
 def _mergeable_requests(left, right):
+    if left.get('completion_ref') or right.get('completion_ref'):
+        return bool(left.get('completion_identity') and left.get('completion_identity') == right.get('completion_identity')
+                    and left.get('trajectory_digest') == right.get('trajectory_digest')
+                    and left.get('trajectory_fingerprint') == right.get('trajectory_fingerprint'))
     if (left.get('requested_by') or 'auto') != (right.get('requested_by') or 'auto'):
         return False
     if left.get('task_id') and right.get('task_id') and left['task_id'] != right['task_id']:

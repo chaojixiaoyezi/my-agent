@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -75,6 +76,8 @@ _MCP_SHARE_LOCK = threading.Lock()
 _MCP_BORROW_RELEASES = SimpleQueue()
 _MCP_BORROW_WORKER_LOCK = threading.Lock()
 _MCP_BORROW_WORKER: threading.Thread | None = None
+_TOOL_PROJECTION_INIT_LOCK = threading.Lock()
+_TOOL_PROJECTION_MAX_SNAPSHOTS = 8
 
 
 # LLM: GC only invokes the reentrant C SimpleQueue.put; one shared daemon does lock-taking/IO at a safe execution point.
@@ -487,19 +490,48 @@ def _resolve_tool_search_names(registry: Any, snapshot: ToolRuntimeSnapshot, nam
 # LLM: 检索只消费授权快照中的可见deferred定义；索引补原生创作的双语能力别名，不改Schema、执行身份或权限。
 # 函数用途: 提取同一 retriever 的带分候选，供搜索回执决定是否自动加载。
 def _deferred_tool_search_hits(registry: Any, query: str, snapshot: ToolRuntimeSnapshot, limit: int, category: str):
-    extra, _declared = _extra_deferred_names(registry, snapshot, None)
-    specs = [runtime.model_spec for runtime in snapshot.runtimes if runtime.exposure.model_visible
-             and (snapshot.allowed_tools is None or runtime.model_spec.name in snapshot.allowed_tools)
-             and (runtime.model_spec.category in registry.catalog_deferred_categories or runtime.model_spec.name in extra)
-             and (not category or runtime.model_spec.category == category)]
-    by_name = {spec.name: spec for spec in specs}
-    indexed = [_tool_search_index_spec(spec) for spec in specs]
+    specs, by_name, indexed = _deferred_tool_projection(registry, snapshot).get(category, ((), {}, ()))
     return [(by_name[hit.name], hit.score) for hit in registry.retriever.search(query, indexed, limit)
             if hit.name in by_name] if specs else []
 
 
 # LLM: 仅生成检索投影，不热改工具实例或原生定义；能力别名不是查询路由，仍由同一retriever评分和快照过滤。
 # 函数用途: 补全原生脚本/数据源/工作流的Skill组合创作检索词。
+def _deferred_tool_projection(registry, snapshot, allowed_tools=None):
+    """同一门面、冻结快照与展示策略共用静态投影；弱引用不延长快照/客户端租约。"""
+    with _TOOL_PROJECTION_INIT_LOCK:
+        if not hasattr(registry, '_deferred_projection_cache'):
+            registry._deferred_projection_cache = OrderedDict()
+            registry._deferred_projection_lock = threading.RLock()
+    allowed = allowed_tool_set(allowed_tools)
+    categories = tuple(registry.catalog_deferred_categories)
+    key = (id(snapshot), getattr(registry, '_tool_registry_generation', 0),
+           getattr(registry, 'operation_owner_id', ''), getattr(registry, 'owner_scope_root', ''),
+           categories, bool(registry.catalog_default_deferral_enabled),
+           None if allowed is None else frozenset(allowed))
+    with registry._deferred_projection_lock:
+        cache = registry._deferred_projection_cache
+        cached = cache.get(key)
+        if cached is not None and cached[0]() is snapshot:
+            cache.move_to_end(key)
+            return cached[1]
+        extra, _declared = _extra_deferred_names(registry, snapshot, allowed_tools)
+        specs = tuple(runtime.model_spec for runtime in snapshot.runtimes if runtime.exposure.model_visible
+                      and (snapshot.allowed_tools is None or runtime.model_spec.name in snapshot.allowed_tools)
+                      and (allowed is None or runtime.model_spec.name in allowed)
+                      and (runtime.model_spec.category in categories or runtime.model_spec.name in extra))
+        indexed = tuple(_tool_search_index_spec(spec) for spec in specs)
+        grouped = {'': list(zip(specs, indexed))}
+        for spec, index in zip(specs, indexed):
+            grouped.setdefault(spec.category, []).append((spec, index))
+        views = {category: (tuple(spec for spec, _ in rows), {spec.name: spec for spec, _ in rows},
+                            tuple(index for _, index in rows)) for category, rows in grouped.items()}
+        cache[key] = (weakref.ref(snapshot), views)
+        while len(cache) > _TOOL_PROJECTION_MAX_SNAPSHOTS:
+            cache.popitem(last=False)
+        return views
+
+
 def _tool_search_index_spec(spec: ToolModelSpec) -> ToolModelSpec:
     aliases = {"scripts": ("script", "脚本", "skill", "workflow", "工作流"),
                "datasources": ("datasource", "数据源", "sqlite", "database", "数据库", "credential"),
@@ -756,6 +788,7 @@ class ToolRegistry:
         if name in self.tools:
             raise ValueError(f"duplicate tool registration: {name}")
         self.tools[name] = tool
+        self._tool_registry_generation = getattr(self, '_tool_registry_generation', 0) + 1
 
     # LLM: 快照先做硬权限交集，再做无副作用可用性检查；检查异常按不可用 fail-closed。
     #   owner_scope_root 是本 run 的有效 owner 墙（由 path_access_policy.effective_owner_scope_root 算出）；
@@ -853,18 +886,10 @@ class ToolRegistry:
         """Search only structurally deferred specs; searching never grants authority."""
 
         snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
-        specs = self.specs(
-            allowed_tools=allowed_tools,
-            include_orchestration=True,
-            runtime_snapshot=snapshot,
-        )
-        deferred = set(self.catalog_deferred_categories)
-        extra_deferred, _declared = _extra_deferred_names(self, snapshot, allowed_tools)
-        searchable = [spec for spec in specs if spec.category in deferred or spec.name in extra_deferred]
+        searchable, by_name, _indexed = _deferred_tool_projection(self, snapshot, allowed_tools)['']
         if not searchable:
             return []
         hits = self.retriever.search(str(query or ""), searchable, max(1, min(20, int(limit))))
-        by_name = {spec.name: spec for spec in searchable}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
     # LLM: 目录沿同一原快照展示；可选短名单仅缩名卡，显式allowed忽略自适应投影，原完整tool_search(action=catalog)仍可发现全部授权工具。

@@ -32,9 +32,14 @@ def freeze_learned_snapshot(snapshot, home_paths, *, recommended_limit=50):
     for entry in snapshot.entries:
         if entry.source == "owner" and entry.name in hidden:
             continue
-        current = registry.skills.get(entry.name)
-        expected = store.skill_path(entry.name)
-        if current is None or entry.source != 'owner' or Path(entry.path) != expected or entry.content_sha256 != current.sha256:
+        current = registry.skills.get(entry.name) if entry.source == 'owner' else None
+        if current is None:
+            entries.append(entry)
+            continue
+        # 同一次冻结只读一份登记；路径是该已解析record的纯投影，不逐条重载整表。
+        root = store.skills_root if current.layout == 'owner' else store.learned_root
+        expected = root / current.name / 'SKILL.md'
+        if Path(entry.path) != expected or entry.content_sha256 != current.sha256:
             entries.append(entry)
             continue
         state = current.maintenance.get('state','trial')
