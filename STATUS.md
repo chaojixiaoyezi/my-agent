@@ -1,3 +1,11 @@
+## 2026-11-01 当前 MEGA 状态入口（W16，未发布）
+
+当前唯一派工、逐片 SHA、局部门与跨片欠账见 [MEGA_DISPATCH_PROGRESS](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，架构见 [MEGA 统一设计](docs/design/MEGA_ARCHITECTURE_A4BC8B818.md)，验收/最终封包见 [MEGA_ACCEPTANCE](docs/tasks/MEGA_ACCEPTANCE.md)。本文件不再另列一套活跃分片状态。
+
+当前观察仅为冻结 Wave2 上的 W16 文档/目录候选：常量投影与源码一致，总控通过 W16-fix 明确批准10项元数据待整改基线，原11节点修订后全部通过；原失败已归档，欠账不等于源处已整改。新提交的统一机器门以仓外 `review.json` 为准；没有最终组合 candidate 的全矩阵、全仓、封包或双审结论。未 push、部署、启用功能、发消息或关闭 Issue。
+
+### 历史状态（以下原文保留，不继承为当前 PASS）
+
 ## 2026-10-27 CI C8本地候选验收
 
 后台合同指定11文件1340通过、0失败、0错误、3项原nested_sandbox_exec能力跳过，未新增豁免。配额不再重复调用，跨目录继任和计时重放幂等已做组件验证；未推送、部署、全仓或真实TUI验收。准确基线、复现及限制见TESTS.md的CI C8小节。

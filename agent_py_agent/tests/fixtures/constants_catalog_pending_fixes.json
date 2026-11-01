@@ -1,6 +1,6 @@
 {
   "schema": "constants_catalog_pending_fixes.v1",
-  "note": "不合规的代码常数（无单位后缀或无上方中文说明）只允许出现在这份名单里；名单外出现不合规常数、或名单里的常数已合规（有单位且有说明）/已删除，test_constants_catalog 都会失败。名单只会变短。",
+  "note": "不合规的代码常数（无单位后缀或无上方中文说明）只允许出现在这份名单里；名单外出现不合规常数、或名单里的常数已合规（有单位且有说明）/已删除，test_constants_catalog 都会失败。默认只减不增；2026-11-01 总控通过 plan-w16-fix.md 显式批准 MEGA 新增的10项作为一次性待整改基线，不授权自动扩张名单。",
   "groups": [
     {
       "keys": [],
@@ -42,6 +42,21 @@
         "_WAKE_FACT_DEPTH_LIMIT"
       ],
       "reason": "无物理单位：深度/维度/比率/倍数/指数/协议值/权限位/小时点/水位等没有可加后缀的单位，只补中文说明（P10 分批整改，2026-10-01 起）。"
+    },
+    {
+      "keys": [
+        "BUSINESS_MAINTENANCE_MAX_ROWS",
+        "BUSINESS_ORPHAN_AFTER_DAYS",
+        "SCRIPT_ENVIRONMENT_MAX_BYTES",
+        "TASK_LOCATOR_SCAN_MAX_FILES",
+        "UPLOAD_MAX_BYTES",
+        "_COMPACT_POLICY_CACHE_MAX",
+        "_CONFIG_PARSE_DIAGNOSTIC_LIMIT",
+        "_ENUM_CACHE_CAPACITY",
+        "_REBUILD_BATCH",
+        "_TOOL_PROJECTION_MAX_SNAPSHOTS"
+      ],
+      "reason": "2026-11-01 总控审阅 W16 constants_gate_findings.json 后，通过 plan-w16-fix.md 明确批准这10项 MEGA 新增常量的说明/量纲缺口进入待整改基线。源码数值和业务行为不变，不表示元数据已修复；后续由原模块owner整改，合规或删除后仍须从名单移除。仅限本组，不授权自动追加。"
     }
   ]
 }

@@ -1,3 +1,9 @@
+## 2026-11-01 MEGA 已落地记录导航（不是产品完成票）
+
+本轮实现纳入、分片 gate 与未验证边界统一见 [MEGA_DISPATCH_PROGRESS](tasks/MEGA_DISPATCH_PROGRESS.md)。本文件不另维护已完成分片表，不因本地代码存在、生成器一致或旧 PASS 就宣称产品完成。架构见 [MEGA 统一设计](design/MEGA_ARCHITECTURE_A4BC8B818.md)，当前/最终验收条件见 [MEGA_ACCEPTANCE](tasks/MEGA_ACCEPTANCE.md)。
+
+下方历史正文和失败/NOT_RUN 原样保留；旧条目中的“完成/未完成”只指其原观察点，不替代本轮状态。
+
 ## 2026-10-29 e905 sol-5 R2：候选跨引用别名补全（分支候选，未部署）
 
 修复候选旧 operation 单端引用在后补 call/artifact 链时的重复观察计票；先按明确历史 run 收敛，再处理空 run，多跳反向输入保留真正独立来源计票和原始证据。新增 12 项先 10F/2P，独审补 8 项先 4F/4P，最终义务套件 81P、含 Curator 的聚焦组合 321P；严格门与全文注释审计通过，额外核心 237P/3F 未豁免。完整命令和独审边界见本轮 DONE，复现方法见 TESTS.md。同步补齐完整分支范围中文双层注释，不表示已集成或上线。

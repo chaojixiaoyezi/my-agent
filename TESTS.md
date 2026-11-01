@@ -1,3 +1,23 @@
+## 2026-11-01 W16 常量投影、台账与同源验收边界
+
+来源：本轮 `plan-w16.md` 及总控明确追加的 `plan-w16-fix.md`。只修改本片文档、原 `build_constants_catalog.py` 生成的 JSON，以及新获授权的待整改 fixture；不改测试函数/断言、生成器或产品 Python。统一状态见 [MEGA_DISPATCH_PROGRESS](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，完整复跑命令、81 案例/102 动作/27 Issue 和最终封包条件见 [MEGA_ACCEPTANCE](docs/tasks/MEGA_ACCEPTANCE.md)。
+
+### W16-fix：明确批准的欠账基线调整
+
+总控审阅 `constants_gate_findings.json` 后，将 fixture 加入本片白名单，明确批准仅10个新增常量进入待整改组。旧组原样保留、无重复、原值不改；这是一次性接受元数据欠账，不是补齐源处说明/量纲，也不授权后续自动追加。原守卫完整11节点修订后全通过、0失败/错误/跳过，回读 `focused-after-fix.xml`；新提交统一机器状态由重跑后的 `review.json` 记录。
+
+### 修订前观察（原日志与断言保留，不冒充当前失败）
+
+- `python3 scripts/build_constants_catalog.py --write` 与 `--check` 均退出 0，1286 项与源码一致；目录只是展示投影。
+- 指定 `test_constants_catalog.py` 修订前实际 11 节点：10 通过、1 失败、0 error、0 skip，计数回读仓外 `focused.xml`。原失败为 10 个上游常量缺单位/说明，不是数值不一致；准确文件/owner 见唯一台账及 `constants_gate_findings.json`。当时未自行扩白名单；旧失败与提交 `ae1d903bd3ec441e384ad23713b366c39f5abbf6` 的报告/JUnit/log已存仓外 `evidence/before-w16-fix/`，不覆盖为成功。
+- 原生成器在内存中分别关闭协议排除、清空单位规则、清空说明提取，3 个原守卫均实际断言失败；恢复后对应原控制均通过，生成器/测试文件 hash 未变。探针最初的导入/临时路径复用错误与最终证据分开保留；不是产品失败，也不冒充整套守卫已绿。
+- 指定 pytest 后的 `&&` 在失败处停止，后续 Ruff/diff 不能借外层成功计通过；本片提交后的准确严格门与机器状态以仓外 `review.json` 为准。
+- 设计基线到 Wave2 的产品/测试 `.py` 增删为 21672 行；最终组合须重算并追加完整 pytest。W15 未合入的本片不提前跑最终全矩阵，不把分片旧 PASS 相加为产品结论。
+
+本轮命令在 worktree 根，保留系统 HOME，只隔离 MY_AGENT_HOME 和 pytest basetemp；旧正文中覆盖 HOME 的历史示例不作为本轮执行依据。代码尺寸数值、双层注释格式和机械 doc-sync 硬门不重启。原生平台、真实模型/通道、soak、最终源码包及双审当前均未验证；没有推送或部署。
+
+### 历史测试记录（以下原失败、计数与限制原样保留）
+
 ## 2026-10-31 W0–W12 分片回归与四条跨片闭环
 
 来源：`07-tasks/plan-w0.md`。W0 只新增 `test_plan_w0_integration.py`，其余套件保持原样。任务书称“共 16 个”，当前实际文件清点为 **18 个（含 W0）**：W5、W6、W7、W8 含后补的专项套件，全部登记如下，不能为凑旧计数遗漏文件。表内路径均在 `agent_py_agent/tests/`。
