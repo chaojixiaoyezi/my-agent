@@ -33,8 +33,10 @@ from ..attempt.sandbox import (
 )
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
+from ..path_access_policy import HostSandboxPaths, persona_process_protected_paths
 from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
+from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
 from .datasource_runtime import ScriptDatasourceRuntime
 from .models import ScriptExecutionResult, payload, safe_path
 
@@ -51,7 +53,7 @@ _JSON_OUTPUT_TYPES = {
 _PYTHON_GUARD_CODE = """# LLM: Python守卫只作OS沙箱的补充，冻结路径与端口；用户代码执行前安装，不冒称内核隔离。
 # 函数用途: 初始化脚本的文件metadata与网络出口检查。
 def _init_guard():
-    import errno, ipaddress, json, os, socket, sys, threading, types
+    import errno, ipaddress, json, os, re, socket, sys, threading, types
     from pathlib import Path
     from urllib.parse import unquote
     cfg = json.loads(os.environ.pop("MY_AGENT_SCRIPT_GUARD_JSON", "{}"))
@@ -59,8 +61,15 @@ def _init_guard():
     sys.argv[0] = entrypoint
     read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
     write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
+    write_rules = tuple((Path(root), allowed) for root, allowed in cfg.get("write_scope_rules", ()))
+    protected_paths = tuple(Path(p) for p in cfg.get("protected_write_paths", ()))
+    write_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_write_patterns", ()))
+    directory_write_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_directory_write_patterns", ()))
+    directory_unlink_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_directory_unlink_patterns", ()))
     denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
     exclusive_roots = tuple(Path(p) for p in cfg.get("host_exclusive_paths", ()))
+    protected_nodes = frozenset(tuple(part.casefold() for part in parent.parts)
+        for root in (*protected_paths, *exclusive_roots) for parent in root.parents)
     allow_net = bool(cfg.get("network_access", False))
     denied_ports = {int(p) for p in cfg.get("denied_ports", ()) if int(p) > 0}
     block_subproc = bool(cfg.get("block_subprocess", False))
@@ -75,8 +84,16 @@ def _init_guard():
     def _under(target, roots):
         return any(target == r or r in target.parents for r in roots)
 
+    # LLM: 绝对保护沿宿主路径门的大小写口径，普通允许/禁止根仍使用原路径层级规则。
+    # 函数用途: 拒绝保护子树的大小写别名，不把其祖先的业务文件一起拒绝。
+    def _protected(target, roots):
+        parts = tuple(part.casefold() for part in target.parts)
+        return any(parts[:len(root.parts)] == tuple(part.casefold() for part in root.parts) for root in roots)
+
+    # 隐藏来源不能因较窄正根而进入metadata祖先豁免，nofollow链也不能直接打开它。
     read_ancestors = frozenset(parent for root in (*read_roots, *write_roots) for parent in root.parents
-        if not any(_under(parent, (private,)) and not _under(root, (private,)) for private in denied_roots))
+        if not _protected(parent, exclusive_roots)
+        and not any(_under(parent, (private,)) and not _under(root, (private,)) for private in denied_roots))
 
     # LLM: 原生OS路径不展开波浪号；仅内部解析暂时绕过metadata包装，用户PathLike先在TLS豁免之外转换。
     # 函数用途: 无递归地得到读取或写入操作的真实目标。
@@ -92,7 +109,7 @@ def _init_guard():
     # LLM: 已解析的路径只消费冻结根，不重复跟随lstat允许观察的symlink叶节点。
     # 函数用途: 执行私有读取限制的纯路径裁决。
     def _check_read_target(target, raw):
-        if _under(target, exclusive_roots):
+        if _protected(target, exclusive_roots):
             raise perm_err(eacces, "Permission denied", str(raw))
         if _under(target, denied_roots) and not _under(target, read_roots):
             raise perm_err(eacces, "Permission denied", str(raw))
@@ -102,12 +119,30 @@ def _init_guard():
     def _check_read(raw):
         _check_read_target(_resolve(raw), raw)
 
-    # LLM: 写检查与读检查共用有界重入解析，写权限仍只来自冻结write_roots。
-    # 函数用途: 检查一次文件修改。
-    def _check_write(raw):
+    # LLM: 先拒绝绝对路径、祖先及原宿主记录/目录投影，再消费ordered规则；目录unlink与创建分责，不误拦同名普通文件。
+    # 函数用途: 让Python回退同样保住冻结范围与任务保护，最具体规则生效且同层deny胜。
+    def _check_write(raw, *, directory=False, unlink=False):
         target = _resolve(raw)
-        if _under(target, exclusive_roots) or not _under(target, write_roots):
+        if (_protected(target, (*protected_paths, *exclusive_roots))
+                or tuple(part.casefold() for part in target.parts) in protected_nodes
+                or any(pattern.search(str(target)) for pattern in write_patterns)):
             raise perm_err(eacces, "Permission denied", str(raw))
+        if directory_write_patterns or unlink and directory_unlink_patterns:
+            previous = getattr(_guard_tls, "active", False)
+            _guard_tls.active = True
+            try:
+                directory = directory or target.is_dir()
+            finally:
+                _guard_tls.active = previous
+            if directory and any(pattern.search(str(target)) for pattern in
+                    (*directory_write_patterns, *(directory_unlink_patterns if unlink else ()))):
+                raise perm_err(eacces, "Permission denied", str(raw))
+        for root, allowed in reversed(write_rules):
+            if _under(target, (root,)):
+                if allowed:
+                    return
+                break
+        raise perm_err(eacces, "Permission denied", str(raw))
 
     # LLM: 仅从内核FD路径表还原dir_fd真实目录；未知或非整数FD一律拒绝，不信任调用方传入的相对父目录。
     # 函数用途: 将dir_fd还原成绝对目录路径以供沙箱边界核验。
@@ -128,6 +163,17 @@ def _init_guard():
         finally:
             _guard_tls.active = previous
         raise perm_err(eacces, "script dir_fd access denied")
+
+    # LLM: dir_fd和文件FD还原真实目标；目录创建与unlink标志来自审计事件，不从脚本参数自报保护豁免。
+    # 函数用途: 将路径或文件描述符修改交给同一个写门并保留目录操作语义。
+    def _check_mutation(path, dir_fd=None, *, directory=False, unlink=False):
+        if type(path) is int:
+            _check_write(str(_fd_path(path)), directory=directory, unlink=unlink)
+            return
+        text = fsdecode(path)
+        if dir_fd not in (None, -1, getattr(os, "AT_FDCWD", -100)) and not Path(text).is_absolute():
+            text = str(_fd_path(dir_fd) / text)
+        _check_write(text, directory=directory, unlink=unlink)
 
     # LLM: metadata仅豁免必需祖先或既有FD；dir_fd先还原真实父路径，lstat保留symlink/..顺序，末尾斜杠和点必须跟随目标。
     # 函数用途: 阻断私有文件存在性、权限和属性探测，保留合法路径解析与nofollow目录链。
@@ -255,8 +301,8 @@ def _init_guard():
         _check_network(address)
         return original_create_connection(address, *args, **kwargs)
 
-    # LLM: 审计钩子保留原内容读写及子进程规则，并覆盖绕过Python socket子类的原生网络调用。
-    # 函数用途: 在低层操作发生前执行脚本边界检查。
+    # LLM: 审计钩子沿原网络/子进程规则；修改操作先还原dir_fd或文件FD，不能用scratch同名路径穿过绝对保护。
+    # 函数用途: 在低层文件修改与网络操作前执行真实目标边界检查。
     def _audit(event, args):
         if event in ("socket.connect", "socket.sendto"):
             _check_network(args[1])
@@ -276,12 +322,16 @@ def _init_guard():
             is_w = bool(flags & w_flags) or any(c in str(mode or "") for c in ("w", "a", "+", "x"))
             (_check_write if is_w else _check_read)(path_arg)
         elif event in ("os.mkdir", "os.remove", "os.unlink", "os.rmdir", "os.chmod", "os.chown", "os.truncate", "os.utime"):
-            if args and not isinstance(args[0], int):
-                _check_write(args[0])
-        elif event in ("os.rename", "os.replace", "os.symlink", "os.link"):
-            for item in args[:2]:
-                if not isinstance(item, int):
-                    _check_write(item)
+            fd_index = {"os.mkdir": 2, "os.remove": 1, "os.unlink": 1, "os.rmdir": 1,
+                        "os.chmod": 2, "os.chown": 3, "os.utime": 3}.get(event)
+            _check_mutation(args[0], args[fd_index] if fd_index is not None and len(args) > fd_index else None,
+                            directory=event == "os.mkdir", unlink=event in ("os.remove", "os.unlink", "os.rmdir"))
+        elif event in ("os.rename", "os.replace", "os.link"):
+            _check_mutation(args[0], args[2] if len(args) > 2 else None, unlink=event != "os.link")
+            _check_mutation(args[1], args[3] if len(args) > 3 else None, unlink=event != "os.link")
+        elif event == "os.symlink":
+            _check_write(args[0])
+            _check_mutation(args[1], args[2] if len(args) > 2 else None)
         elif event in ("os.listdir", "os.scandir", "os.readlink"):
             if args and not getattr(_guard_tls, "active", False):
                 _check_read(str(_fd_path(args[0])) if isinstance(args[0], int) else args[0])
@@ -623,8 +673,8 @@ def _script_private_roots(owner: Path, workspace: Path | None) -> tuple[Path, ..
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。
 # 类用途: 按 Owner 的脚本配置执行 Python、bash 或 sh，且不调用任何模型。
 class ScriptRunner:
-    # LLM: 初始化只绑定宿主Owner/workspace及沙箱策略，不从脚本或输入取得新工作区授权。
-    # 函数用途: 保存Owner、数据源workspace和默认沙箱选项。
+    # LLM: 仅绑定宿主正负路径快照；新增保护参数默认为空，保留直接runner与restriction默认值，不从业务输入授权。
+    # 函数用途: 保存Owner、数据源workspace、绝对保护及普通拒写范围。
     def __init__(
         self,
         owner_home: str | Path,
@@ -639,6 +689,8 @@ class ScriptRunner:
         host_credential_env_names: frozenset[str] = frozenset(),
         host_exclusive_paths: tuple[str | Path, ...] = (),
         delivery_handler=None,
+        write_protection: SandboxWriteProtection | None = None,
+        host_path_protection: HostSandboxPaths | None = None,
     ):
         self.owner_home = Path(owner_home).absolute()
         self.scripts_root = self.owner_home / 'scripts'
@@ -651,6 +703,16 @@ class ScriptRunner:
         self.host_credential_env_names = frozenset(host_credential_env_names)
         self.host_exclusive_paths = tuple(Path(path).expanduser().resolve(strict=False) for path in host_exclusive_paths)
         self.delivery_handler = delivery_handler
+        protection = write_protection or SandboxWriteProtection()
+        self.write_protection = SandboxWriteProtection(
+            absolute_paths=tuple(Path(p).expanduser().resolve(strict=False) for p in protection.absolute_paths),
+            denied_roots=tuple(Path(p).expanduser().resolve(strict=False) for p in protection.denied_roots))
+        host = host_path_protection or HostSandboxPaths()
+        self.host_path_protection = HostSandboxPaths(
+            readonly=tuple(Path(p).expanduser().resolve(strict=False) for p in host.readonly),
+            hidden=tuple(Path(p).expanduser().resolve(strict=False) for p in host.hidden),
+            patterns=tuple(host.patterns), directory_write_patterns=tuple(host.directory_write_patterns),
+            directory_unlink_patterns=tuple(host.directory_unlink_patterns))
 
     # LLM: 只消费构造期宿主冻结的workspace和scope；scratch由本次实际目录覆盖，身份不来自业务inputs。
     # 函数用途: 投影只读SDK工作上下文，无工作区时不伪造cwd作为工作区。
@@ -716,8 +778,8 @@ class ScriptRunner:
             receipts.append(payload(receipt))
         return tuple(receipts)
 
-    # LLM: workspace由构造器冻结并透传Store；禁用闸先于进程和数据源，执行仍使用Owner与原沙箱边界。
-    # 函数用途: 冻结代码、绑定声明连接、构造沙箱命令并清理临时秘密。
+    # LLM: 原生沙箱与Python守卫共用冻结正负范围；scratch仅授权本次生成目录，owner数据无临时例外，finally沿原清理。
+    # 函数用途: 冻结代码、绑定连接，投影宿主及人格保护并清理本次临时目录。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
         capture = capture if capture is not None else {}
@@ -746,7 +808,7 @@ class ScriptRunner:
         input_json = json.dumps(payload(inputs), ensure_ascii=False, allow_nan=False)
         timings['configuration_load_ms'] += (time.monotonic() - clock) * 1000
         clock = time.monotonic()
-        root = self.owner_home / 'data' / 'script_exec'
+        root = self.owner_home / 'tmp' / 'script_exec'
         ensure_private_dir(root, canonical_root=self.owner_home)
         folder = Path(tempfile.mkdtemp(prefix=f'{script_id}_', dir=root))
         ds_runtime = None
@@ -763,6 +825,10 @@ class ScriptRunner:
             ds_runtime = ScriptDatasourceRuntime(self.owner_home, metadata, folder, env, timeout,
                 capture if capture is not None else {}, workspace_root=self.workspace_root)
             private_roots = _script_private_roots(self.owner_home, self.workspace_root) if self.restrict_to_roots else ()
+            host = self.host_path_protection
+            protected_paths = tuple(dict.fromkeys((*self.write_protection.absolute_paths, *host.readonly)))
+            denied_write_roots = tuple(dict.fromkeys((*private_roots, *self.write_protection.denied_roots)))
+            hidden_paths = tuple(dict.fromkeys((*host.hidden, *self.host_exclusive_paths)))
             command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
             applied_sandbox = False
             if self.use_sandbox:
@@ -772,29 +838,43 @@ class ScriptRunner:
                     extra_write_roots=(folder, *self.extra_write_roots, *ds_runtime.write_roots),
                     public_read_roots=tuple(dict.fromkeys((*runtime_read_roots, *self.public_read_roots, *ds_runtime.read_roots))),
                     private_read_roots=private_roots,
-                    write_scope_denied_roots=private_roots,
-                    hidden_paths=self.host_exclusive_paths,
+                    protected_write_paths=protected_paths,
+                    write_scope_denied_roots=denied_write_roots,
+                    protected_persona_root=self.owner_home,
+                    hidden_paths=hidden_paths,
+                    protected_write_patterns=host.patterns,
+                    protected_directory_write_patterns=host.directory_write_patterns,
+                    protected_directory_unlink_patterns=host.directory_unlink_patterns,
                     implicit_attempt_write_roots=True,
                     network_access=net_allowed, deny_gateway_ports=denied_ports if net_allowed else ()))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     applied_sandbox = True
-            guarded = (self.restrict_to_roots or bool(self.host_exclusive_paths)) and interpreter == 'python3'
+            enforces_scope = self.restrict_to_roots or bool(hidden_paths or protected_paths or denied_write_roots
+                or host.patterns or host.directory_write_patterns or host.directory_unlink_patterns)
+            guarded = enforces_scope and interpreter == 'python3'
             if guarded:
                 guard = safe_path(folder, '_sandbox_guard.py')
                 write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, guard.name),
                                           _PYTHON_GUARD_CODE, file_mode=0o700)
                 resolved_folder = folder.resolve(strict=False)
+                write_roots = (resolved_folder, *self.extra_write_roots, *ds_runtime.write_roots, Path('/dev'))
+                persona_paths = tuple(path.resolve(strict=False) for path in persona_process_protected_paths(self.owner_home))
                 env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
                     'read_roots': [str(p) for p in (resolved_folder, *runtime_read_roots, *self.public_read_roots, *self.extra_write_roots, *ds_runtime.read_roots)],
-                    'write_roots': [str(p) for p in (resolved_folder, *self.extra_write_roots, *ds_runtime.write_roots, Path('/dev'))],
+                    'write_roots': [str(p) for p in write_roots],
+                    'write_scope_rules': [(str(root), allowed) for root, allowed in ordered_write_scope_roots(write_roots, denied_write_roots)],
+                    'protected_write_paths': [str(p) for p in (*protected_paths, *persona_paths)],
+                    'protected_write_patterns': host.patterns,
+                    'protected_directory_write_patterns': host.directory_write_patterns,
+                    'protected_directory_unlink_patterns': host.directory_unlink_patterns,
                     'denied_roots': [str(p) for p in private_roots],
-                    'host_exclusive_paths': [str(p) for p in self.host_exclusive_paths],
+                    'host_exclusive_paths': [str(p) for p in hidden_paths],
                     'network_access': net_allowed,
                     'denied_ports': list(denied_ports),
                     'block_subprocess': not applied_sandbox,
                 })
                 command = [executable, '-I', '-B', str(guard), str(entrypoint)]
-            elif self.restrict_to_roots and not applied_sandbox:
+            elif enforces_scope and not applied_sandbox:
                 raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
             command = ds_runtime.wrap_command(command, interpreter, guarded=bool(guarded))
             timings['environment_setup_ms'] += (time.monotonic() - clock) * 1000
