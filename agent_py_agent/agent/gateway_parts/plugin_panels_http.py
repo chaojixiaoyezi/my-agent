@@ -169,8 +169,10 @@ def current_plugin_channel_pool():
 #   已关闭的 server 一律拒绝：池是进程级共享资源，停机后再建一个就没人在关它了。
 # 函数用途: 取或建 server 上的唯一池（调用方已持锁）。
 def _locked_shared_pool(server, process_sandbox: bool | None):
+    from ..path_access_policy import configured_host_source_paths
     from ..plugin_channel import PluginChannelPool
     from ..plugin_display.service import plugin_display_client
+    from ..plugin_sandbox import host_source_arguments
     from ..settings.secret_ref import managed_secret_environment_names
 
     if _channel_closed(server):
@@ -180,8 +182,10 @@ def _locked_shared_pool(server, process_sandbox: bool | None):
         config = _server_plugin_config(server)
         if process_sandbox is None:
             process_sandbox = bool(getattr(config, "plugin_process_sandbox", False))
+        # 同一 factory 冻结 host config 的宿主独占文件来源，面板与事件中心的插件进程都隐藏它们，不另读配置。
         pool = PluginChannelPool(client_factory=partial(plugin_display_client, process_sandbox=process_sandbox,
-                                                       host_credential_env_names=managed_secret_environment_names(config)))
+                                                       host_credential_env_names=managed_secret_environment_names(config),
+                                                       **host_source_arguments(configured_host_source_paths(config))))
         server.plugin_channel_pool = pool
     return pool
 

@@ -31,6 +31,7 @@ _PACKAGED = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
 
 # 加载器写入的运行时元数据：不是 YAML 值，加载后由 loader 决定；键从 AgentConfig 消失即失败。
 _META_SKIP_KEYS = {
+    "host_exclusive_path_roots",
     "config_layers",
     "config_path",
     "config_sources",

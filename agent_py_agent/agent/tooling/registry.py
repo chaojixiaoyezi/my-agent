@@ -172,6 +172,8 @@ class ToolRegistryParams:
     full_access_other_owner_homes: str = "read_only"
     # 仅宿主装配；模型参数和工具目录不得覆盖或显示凭据环境来源。
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    # 仅宿主装配的可信宿主独占来源（字段名与 core 装配适配器一致）；插件客户端据此隐藏配置外部 file: 来源，不展示。
+    host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
     access_mode: str = "workspace-write"

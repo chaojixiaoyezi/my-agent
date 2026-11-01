@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..conversation.agent_activity import _MAIN_ACTIVITY_LIVE_PHASES
 from ..plugin_channel import (
@@ -453,13 +454,16 @@ def _enabled_installations(owner) -> tuple | None:
 
 
 # LLM: 面板/事件复用原客户端和资源账；host 继承来源与沙箱档由原 factory 注入，显式 native env 授权不变。
+#   宿主独占来源同由 factory 冻结注入，面板/事件连接与业务连接隐藏同一来源集合。
 # 函数用途: 为一个固定激活创建插件客户端（不启动进程）。
 def plugin_display_client(owner, installation, *, process_sandbox: bool = False,
-                          host_credential_env_names: frozenset[str] = frozenset()):
+                          host_credential_env_names: frozenset[str] = frozenset(),
+                          host_exclusive_roots: tuple[Path, ...] = ()):
     from ..plugin_runtime import PluginMCPClient
 
     return PluginMCPClient(owner, installation, process_sandbox=process_sandbox,
-                           host_credential_env_names=host_credential_env_names)
+                           host_credential_env_names=host_credential_env_names,
+                           host_exclusive_roots=host_exclusive_roots)
 
 
 # LLM: 非整数或布尔一律视为 0，不从字符串猜数。
