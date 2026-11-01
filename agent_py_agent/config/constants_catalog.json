@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1271,
+  "count": 1286,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2444,6 +2444,14 @@
       "description": "合同追踪最多展开的层数；防环状引用导致递归无限加深（无物理单位）。"
     },
     {
+      "name": "DIAGNOSTIC_DETAILS_MAX_BYTES",
+      "file": "agent_py_agent/agent/contracts/diagnostics.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "结构化错误投影总量上界，单位UTF-8字节；保留分类和errno，超界明确标记截断。"
+    },
+    {
       "name": "_COMMAND_SOURCE_MAX_CHARS",
       "file": "agent_py_agent/agent/contracts/gates/command_policy.py",
       "value": 65536,
@@ -3628,6 +3636,22 @@
       "description": "热层每 tick 只消费 wake_queue 到期字条(索引查询)。长期助手 分频同款。"
     },
     {
+      "name": "_REBUILD_BATCH",
+      "file": "agent_py_agent/agent/conversation/session_list_index.py",
+      "value": 128,
+      "unit": "",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "SESSION_PAIR_RETENTION_MAX_FILES",
+      "file": "agent_py_agent/agent/conversation/session_pair_rate.py",
+      "value": 128,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "一片维护的总目录项预算；宽限沿原小时桶长度，不加常驻定时器。"
+    },
+    {
       "name": "WINDOW_SECONDS",
       "file": "agent_py_agent/agent/conversation/session_pair_rate.py",
       "value": 3600.0,
@@ -3794,6 +3818,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "唤醒信号模型进程内缓存的最大条目数。"
+    },
+    {
+      "name": "TASK_LOCATOR_SCAN_MAX_FILES",
+      "file": "agent_py_agent/agent/conversation/task_locator.py",
+      "value": 128,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "_ENUM_CACHE_CAPACITY",
+      "file": "agent_py_agent/agent/conversation/task_locator.py",
+      "value": 8,
+      "unit": "",
+      "category": "其它",
+      "description": ""
     },
     {
       "name": "_PLAN_CONTINUATION_ID_LIMIT_COUNT",
@@ -4018,6 +4058,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "资源报告轮询间隔 0.1 秒：接近实时又不过度占 CPU。"
+    },
+    {
+      "name": "UPLOAD_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/business_artifacts_http.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_HEARTBEAT_STALE_SECONDS",
@@ -6428,6 +6476,22 @@
       "description": "每个hash读取块的字节上限，不一次性装入整个大文件。"
     },
     {
+      "name": "BUSINESS_LIST_DEFAULT_ROWS",
+      "file": "agent_py_agent/agent/plugin_host/business_action_specs.py",
+      "value": 50,
+      "unit": "行",
+      "category": "其它",
+      "description": "业务列表省略 limit 时使用的行数；与旧任务目录独立，不能改变旧 schema。"
+    },
+    {
+      "name": "BUSINESS_LIST_MAX_ROWS",
+      "file": "agent_py_agent/agent/plugin_host/business_action_specs.py",
+      "value": 100,
+      "unit": "行",
+      "category": "上限预算",
+      "description": "业务单页行数的硬上限；超限拒绝，不静默裁剪。"
+    },
+    {
       "name": "CURSOR_LIFETIME_SECONDS",
       "file": "agent_py_agent/agent/plugin_host/conversations.py",
       "value": 900,
@@ -7170,6 +7234,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。"
+    },
+    {
+      "name": "_CONFIG_PARSE_DIAGNOSTIC_LIMIT",
+      "file": "agent_py_agent/agent/settings/config_io.py",
+      "value": 32,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "_MAX_CONFIGURATION_BYTES",
@@ -8372,6 +8444,14 @@
       "description": "tool_search(action=catalog) 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。"
     },
     {
+      "name": "_TOOL_PROJECTION_MAX_SNAPSHOTS",
+      "file": "agent_py_agent/agent/tooling/registry.py",
+      "value": 8,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
       "name": "_MAX_EXCEPTION_MESSAGE_CHARS",
       "file": "agent_py_agent/agent/tooling/registry_invoke.py",
       "value": 500,
@@ -8932,6 +9012,14 @@
       "description": "通道身份来源目录允许收集的绑定文件数量上限。"
     },
     {
+      "name": "_COMPACT_POLICY_CACHE_MAX",
+      "file": "agent_py_agent/agent/user_space/managed_user_governance.py",
+      "value": 128,
+      "unit": "",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
       "name": "_DEFAULT_INTERVAL_SECONDS",
       "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
       "value": 86400,
@@ -9172,6 +9260,22 @@
       "description": "准入 slot 等待超时秒数；超时按拒绝处理，避免请求无限排队。"
     },
     {
+      "name": "BUSINESS_MAINTENANCE_MAX_ROWS",
+      "file": "agent_py_agent/agent/workflows/orphan_maintenance.py",
+      "value": 128,
+      "unit": "行",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "BUSINESS_ORPHAN_AFTER_DAYS",
+      "file": "agent_py_agent/agent/workflows/orphan_maintenance.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": ""
+    },
+    {
       "name": "_MAX_WORK_CONTEXT_BYTES",
       "file": "agent_py_agent/agent/workflows/runtime_sdk.py",
       "value": 65536,
@@ -9194,6 +9298,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "原生工作流步骤回执保留的输出预览最大字符数。"
+    },
+    {
+      "name": "SCRIPT_ENVIRONMENT_MAX_BYTES",
+      "file": "agent_py_agent/agent/workflows/script_runner.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": ""
+    },
+    {
+      "name": "SCRIPT_INPUT_INLINE_MAX_BYTES",
+      "file": "agent_py_agent/agent/workflows/script_runner.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "输入 v2 保留完整 stdin；大 JSON 不进入单个环境变量，避免 E2BIG。"
     },
     {
       "name": "SUBAGENT_CLI_DEFAULT_COUNT",

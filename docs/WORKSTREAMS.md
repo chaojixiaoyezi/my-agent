@@ -1,3 +1,13 @@
+## 2026-11-01 当前 MEGA 唯一派工入口
+
+本轮 4 波/17 片的完整 SHA、分工、依赖、精确写白名单投影与真实验收欠账统一见 [MEGA_DISPATCH_PROGRESS](tasks/MEGA_DISPATCH_PROGRESS.md)。写权仍只来自本轮冻结 `workstreams.json`，本页不复制活跃权限表，不解析自然语言扩权；read_only_tests 无写权。
+
+W16 只维护修订后的 12 个授权文件；新增写权仅为总控 W16-fix 明确批准的 `tests/fixtures/constants_catalog_pending_fixes.json`，只登记指定10项欠账，不改其它 owner 的生产源码或测试断言。各波交集实测均 0，跨波共享文件依原 ownership_transfers 互斥交接。局部通过不代替最终组合、原生平台或真实模型验收。总控独占 integration 引用，分片只本地提交，不自行合并、推送、部署、发消息或关 Issue。
+
+### 历史分工（以下原记录保留，不是当前授权）
+
+旧 W0–W12、sol-* 与后续历史席位不映射为本轮同名 owner；旧白名单、分支状态和通过数仅保留来源，不可用于本轮派工或验收。
+
 ## 2026-10-31 W0–W12 零交集所有权与合并收口
 
 来源为 `07-tasks/plan-w0.md` 至 `plan-w12.md` 的显式白名单；对 13 份清单逐对取交集，结果为空。下表 `agent/`、`cli/`、`config/`、`tests/` 均相对 `agent_py_agent/`；W0 的五份 Markdown 路径相对仓库根。清单只声明本轮唯一写者，不扩大业务权限，也不允许为修跨片失败修改其它片的生产文件。

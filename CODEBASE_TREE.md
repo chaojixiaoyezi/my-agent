@@ -1,3 +1,9 @@
+## 2026-11-01 MEGA 统一架构导航（W16，非发布通过）
+
+当前业务空间 v1.2、Cache v2 与 Issue 派工统一见 [唯一集成台账](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，不再从旧 W0–W12 编号推导本轮所有权。详细架构见 [MEGA 架构](docs/design/MEGA_ARCHITECTURE_A4BC8B818.md)，81 案例、102 动作、27 Issue 与后续同源封包/双审标准见 [MEGA 验收](docs/tasks/MEGA_ACCEPTANCE.md)。本片没有新生产 Python 模块，常量 JSON 只由原生成器更新，不成为运行时权威。
+
+以下旧地图继续保留为各日期历史增量；源码位置导航仍可使用，旧分片状态与旧通过数不继承为本轮验收结论。新增三个长期文档同时登记在本文件的 Tree 与关键文件说明。
+
 ## 2026-10-31 W0–W12 全局收口代码地图
 
 本轮长期维护入口增量如下；文件存在、纯函数验收和真实通道接线分别记账，不相互代替。
@@ -934,6 +940,18 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-11-01 MEGA 文档与只读目录
+
+```text
+|-- docs/
+|   |-- design/
+|   |   `-- MEGA_ARCHITECTURE_A4BC8B818.md # 同一业务/缓存架构、权威来源、服务端口与接线边界
+|   `-- tasks/
+|       |-- MEGA_DISPATCH_PROGRESS.md # 本轮唯一派工/集成状态、完整SHA、白名单和真实欠账
+|       `-- MEGA_ACCEPTANCE.md # 81案例/102动作/27Issue、同源矩阵、封包与双审验收规程
+`-- agent_py_agent/config/constants_catalog.json # 原AST生成器的只读展示投影，不授运行权威
+```
+
 ### 2026-10-29 e905 sol-9：CLI 24 根与诊断收敛（开发分支，未部署）
 
 ```text
@@ -1450,6 +1468,12 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### MEGA 统一入口（2026-11-01）
+
+- [MEGA 架构](docs/design/MEGA_ARCHITECTURE_A4BC8B818.md)：说明同一原领域/原账本、Owner/空间/actor 边界、服务端口、Cache 与观察流；符号存在不代表端到端接通。
+- [唯一集成台账](docs/tasks/MEGA_DISPATCH_PROGRESS.md)：按实际冻结引用和原交接记录 17 片完整 SHA、原白名单投影、旧 gate、scope 差异与跨片欠账；Markdown 不授写权。
+- [同源验收](docs/tasks/MEGA_ACCEPTANCE.md)：保留逐案例/逐动作/逐 Issue 要求和最终候选封包/双审条件，不将本片局部观察替代全产品通过。
 
 ### e905 sol-9 CLI 与诊断（2026-10-29）
 
