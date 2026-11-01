@@ -15,6 +15,7 @@ from ..common.cancellation import (
     register_cancellation_callback,
 )
 from ..common.log_redaction import redact_sensitive_text
+from ..contracts.diagnostics import DiagnosticEnvelope, redact_diagnostic_text
 
 
 # LLM: 错误码是调用方映射依据；异常正文必须先脱敏，不能暴露远端回包中的凭证。
@@ -22,10 +23,64 @@ from ..common.log_redaction import redact_sensitive_text
 class MCPError(Exception):
     # LLM: effect_outcome 仅由已观察发送边界的宿主设置，不能从错误码/正文推断；未知与未发送必须分开。
     # 函数用途: 创建脱敏 MCP 错误，携带可供原操作账使用的发送事实。
-    def __init__(self, message: str, *, code: str = "MCP_ERROR", effect_outcome: str = ""):
+    def __init__(self, message: str, *, code: str = "MCP_ERROR", effect_outcome: str = "",
+                 remote_error: object = None):
         super().__init__(redact_sensitive_text(message, redacted_marker="[REDACTED]", redact_assignment_labels=True))
         self.code = code
         self.effect_outcome = effect_outcome
+        self._has_remote_error = remote_error is not None
+        safe, self._details_truncated = _public_rpc_error(remote_error)
+        self.remote_code = safe.get('code')
+        self.remote_message = safe.get('message', '')
+        self.data = safe.get('data', {})
+
+    def diagnostic_projection(self) -> dict[str, Any]:
+        """返回新副本；远端 data 只能解释错误，不能证明未发送或允许重放。"""
+        if not self._has_remote_error:
+            return {}
+        safe, changed = _public_rpc_error({'code': self.remote_code, 'message': self.remote_message, 'data': self.data})
+        envelope = DiagnosticEnvelope(code=self.code, category='mcp', retryable=False,
+            mcp_error={'code': safe.get('code'), 'data': safe.get('data', {})},
+            details_truncated=self._details_truncated or changed).to_dict()
+        return {'diagnostic': envelope, 'mcp_error': safe,
+                'details_truncated': envelope['details_truncated']}
+
+
+def _public_rpc_error(value: object) -> tuple[dict[str, Any], bool]:
+    """只查固定标量键，不遍历未知嵌套对象、不调用远端扩展对象的 str/repr。"""
+    if type(value) is not dict:
+        return {}, value is not None
+    result, changed = {}, False
+    for key in ('code', 'message'):
+        raw = value.get(key)
+        if key == 'code' and type(raw) is int and raw.bit_length() <= 64:
+            result[key] = raw
+        elif type(raw) is str:
+            limit = 64 if key == 'code' else 1024
+            text = redact_diagnostic_text(raw).encode('utf-8', errors='replace')[:limit].decode('utf-8', errors='ignore')
+            result[key] = text
+            changed = changed or text != raw
+        elif key in value:
+            changed = True
+    data = value.get('data')
+    safe_data = {}
+    if type(data) is dict:
+        for key in ('reason', 'field', 'provider_code', 'request_id', 'errno', 'operation', 'diagnostic_ref'):
+            raw = data.get(key)
+            if type(raw) is str:
+                text = redact_diagnostic_text(raw).encode('utf-8', errors='replace')[:512].decode('utf-8', errors='ignore')
+                safe_data[key] = text
+                changed = changed or text != raw
+            elif raw is None or type(raw) is bool or type(raw) is int and raw.bit_length() <= 64:
+                if key in data:
+                    safe_data[key] = raw
+            elif key in data:
+                changed = True
+        changed = changed or len(safe_data) != len(data)
+    elif 'data' in value and data is not None:
+        changed = True
+    result['data'] = safe_data
+    return result, changed or any(key not in ('code', 'message', 'data') for key in value)
 
 
 # LLM: 仅在发送 writer 创建前调用；原回调只核对同次权限，异常结论只描述尚未发送，原账本仍决定是否能收口。
@@ -140,8 +195,10 @@ def unwrap_jsonrpc(server_name: str, payload: dict[str, Any], method: str) -> An
     err = payload.get("error")
     if err is None:
         return payload.get("result")
-    detail = f"{err.get('message') or '未知 JSON-RPC 错误'}（code={err.get('code')}）" if isinstance(err, dict) else str(err)
-    raise MCPError(f"MCP server '{server_name}' {method} 返回错误：{detail}", code="MCP_REMOTE_ERROR")
+    safe, _ = _public_rpc_error(err)
+    detail = f"{safe.get('message') or '未知 JSON-RPC 错误'}（code={safe.get('code')}）"
+    raise MCPError(f"MCP server '{server_name}' {method} 返回错误：{detail}",
+                   code="MCP_REMOTE_ERROR", remote_error=err)
 
 
 # LLM: 诊断归属于单条连接，段长与段数均有上限；不得把旧连接 stderr 携带到新连接。

@@ -247,6 +247,16 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     cached = record.result.metadata.get("archive_output_record")
     if isinstance(cached, dict):
         output_record = dict(cached)
+    elif (record.result.failure_stage == 'persistence'
+          and record.result.metadata.get('projection_error_code') == 'TOOL_OUTPUT_ARCHIVE_FAILED'):
+        # 第一次归档的首因已在原执行器取出；这里不能重入坏盘，更不能用第二个故障覆盖它。
+        output_record = {'tool': record.result.tool_name, 'call_id': call_id,
+                         'output_externalized': False, 'archive_status': 'unavailable',
+                         'output_preview': record.result.output,
+                         **{key: record.result.metadata[key] for key in (
+                             'diagnostic', 'diagnostic_ref', 'diagnostic_storage', 'archive_diagnostic',
+                             'raw_output_chars', 'raw_output_bytes', 'raw_output_sha256')
+                            if key in record.result.metadata}}
     else:
         request = ExternalizeToolOutputRequest(
             root=_tool_output_archive_root(agent, record.params),
@@ -489,6 +499,10 @@ def _conversation_request_id(params: object) -> str:
 
 def _attach_gate_and_refs(output_record: dict[str, object], result: object) -> None:
     output_record.update(_tool_execution_facts_from_result(result))
+    metadata = getattr(result, 'metadata', None)
+    if isinstance(metadata, dict) and metadata.get('projection_error_code') == 'TOOL_OUTPUT_ARCHIVE_FAILED':
+        output_record.update({key: metadata[key] for key in (
+            'diagnostic', 'diagnostic_ref', 'diagnostic_storage', 'archive_diagnostic') if key in metadata})
     approval = _applied_tool_approval_from_result(result)
     if approval:
         output_record["tool_approval"] = approval

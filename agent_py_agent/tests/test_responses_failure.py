@@ -111,3 +111,28 @@ def test_string_errors_keep_the_reason_and_unknown_codes_are_not_retried():
     assert error.details["provider_error"] == {"message": "upstream exploded"}
     contract = error_contract(FAILED_EVENT_ERROR_CODE)
     assert contract.retryable is False  # 与运行时一致：认不出的码不自动重试
+
+
+@pytest.mark.parametrize('transport', ['sse', 'websocket'])
+@pytest.mark.parametrize('field', ['connections', 'requests'])
+def test_stream_connection_capacity_failure_keeps_specific_diagnostics(monkeypatch, transport, field):
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_provider_error_projection
+
+    raw = {'code': 'websocket_connection_limit_reached', 'type': 'capacity', 'param': field,
+           'message': f'{field} pool busy', 'request_id': 'stream-one'}
+    event = {'type': 'error', 'error': raw}
+    if transport == 'websocket':
+        connection = FakeConnection([json.dumps(event)])
+        monkeypatch.setattr(ws, '_connect', lambda req: connection)
+        lines = ws.iter_responses_websocket(request())
+        with pytest.raises(ProviderTransientError) as caught:
+            collect_response(lines, None, None)
+        lines.close()
+        assert connection.closed
+    else:
+        backend = OpenAIResponsesBackend(BackendOptions('https://example.test/v1', 'test', 'model', stream_enabled=True))
+        monkeypatch.setattr(backend, 'request_stream_iter', lambda *args, **kwargs: (json.dumps(item) for item in [event]))
+        with pytest.raises(ProviderTransientError) as caught:
+            backend.generate('test')
+    assert caught.value.details['provider_error'] == raw
+    assert gateway_provider_error_projection(caught.value)['provider_error'] == raw
