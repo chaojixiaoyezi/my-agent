@@ -8,10 +8,11 @@ import pytest
 from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.tests.test_remember_learning_source_review import _agent
 
+# 旧调用方不传源码根时，使用生成脚本的当前工作树，而不是子进程 cwd 或本机安装。
 _CRASH_SCRIPT = '''
 import json, os, sys
 from pathlib import Path
-sys.path.insert(0, sys.argv[3])
+sys.path.insert(0, sys.argv[3] if len(sys.argv) > 3 else __REPO_ROOT__)
 from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
 from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.tests.test_remember_learning_source_review import _agent
@@ -71,16 +72,22 @@ if sys.argv[2] in {"default-target", "legacy-default-target"}:
 else:
     result = tool.execute(dict(action="remove", entry_id=target.entry_id, origin="user_explicit"))
 raise AssertionError(f"crash boundary not reached: {result}")
-'''
+'''.replace('__REPO_ROOT__', repr(str(Path(__file__).resolve().parents[2])))
 
 
-# LLM: 子进程显式导入当前源码；真实入口与进程退出覆盖删除各阶段，manual_only仅布置待确认候选；legacy重建旧补全空操作，恢复不打桩。
+# LLM: 旧/新参数形式都须导入当前源码；真实进程退出覆盖各删除阶段，manual_only仅布置候选；legacy重建旧补全空操作，恢复不打桩。
 # 函数用途: 验证历史正文清理及旧版默认落点均能在新进程恢复。
 @pytest.mark.parametrize('point', ['after-formal', 'before-mark', 'after-mark', 'default-target', 'legacy-default-target'])
-def test_real_remove_crash_recovers_without_private_candidate(tmp_path, point):
+@pytest.mark.parametrize('explicit_repo_root', [False, True], ids=['legacy-argv', 'explicit-repo-root'])
+def test_real_remove_crash_recovers_without_private_candidate(tmp_path, point, explicit_repo_root, monkeypatch):
     repo_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run([sys.executable, '-c', _CRASH_SCRIPT, str(tmp_path), point, str(repo_root)],
-                            capture_output=True, text=True, timeout=30, cwd=repo_root)
+    # 从非仓库目录且不继承源码搜索路径启动，避免本机安装或 cwd 掩盖参数兼容缺口。
+    monkeypatch.setenv('PYTHONSAFEPATH', '1')
+    monkeypatch.delenv('PYTHONPATH', raising=False)
+    command = [sys.executable, '-c', _CRASH_SCRIPT, str(tmp_path), point]
+    if explicit_repo_root:
+        command.append(str(repo_root))
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, cwd=tmp_path)
     assert result.returncode == 73, result.stdout + result.stderr
     agent = _agent(tmp_path, user_dialogue_projection(), {}, {})
     assert agent.memory.all() == []
