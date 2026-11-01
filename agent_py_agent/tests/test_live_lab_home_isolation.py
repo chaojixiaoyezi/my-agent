@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -81,6 +82,52 @@ def test_live_lab_original_default_echo_smoke_cli_completes(tmp_path):
     assert [(row["case"], row["status"]) for row in summary["results"]] == [
         ("health", "pass"), ("bad_weather", "pass"),
     ]
+    reports = [json.loads(path.read_text()) for path in (run_root / "bad_weather").glob("*/scenario_summary.json")]
+    retry = next(row for row in reports if row.get("case") == "runner-retry")
+    assert retry["first_status"] == "FAILED"
+    assert "scenario transient runner failure" in retry["first_error"]
+    assert retry["final_status"] == "DONE" and retry["verification_status"] == "VERIFIED"
+    assert retry["runner_attempts"] == 2
+    report_file = Path(retry["report_file"])
+    assert report_file.is_file() and report_file.is_relative_to(run_root)
+    assert "runner retry" in report_file.read_text()
+    assert "write_file" in retry["used_tools"]
+    assert retry["artifact_registered"] is True
+    home = home_paths(load_config(Path(retry["config"])).my_agent_home)
+    with sqlite3.connect((home.owner_home_dir / "runtime.db").as_uri() + "?mode=ro", uri=True) as db:
+        tree = db.execute(
+            "SELECT tr.status FROM task_runs tr JOIN agent_runs ar ON ar.task_run_id=tr.task_run_id WHERE ar.run_id=?",
+            (retry["run_id"],),
+        ).fetchone()
+        assert tree == ("done",), "场景 CLI 父级不能在结束后留下仍活动的 TaskRun"
+        operations = db.execute(
+            "SELECT op.status, op.settled_at FROM tool_operations op JOIN agent_runs ar ON ar.agent_run_id=op.agent_run_id "
+            "WHERE ar.run_id=? AND op.operation_type='write_file'", (retry["run_id"],),
+        ).fetchall()
+        assert len(operations) == 1 and operations[0][0] == "SUCCEEDED" and operations[0][1] > 0
+
+
+def test_retry_case_failed_acceptance_closes_parent_as_failed(tmp_path, monkeypatch):
+    """场景自己的验收失败应结束父级执行，不能借子代理成功伪报 done。"""
+    from agent_py_agent.cli.scenario_cases import runner_retry_case
+
+    monkeypatch.setattr(runner_retry_case, "_verify_runner_retry", lambda request: False)
+    args = argparse.Namespace(
+        config=str(DEFAULT_CONFIG), workspace=str(tmp_path), timeout=30, count=1,
+        capability_config=None, skill_dir=None,
+    )
+    assert runner_retry_case.run_scenario_runner_retry_case(args) == 2
+    summary_path, = tmp_path.glob("scenario-*/scenario_summary.json")
+    retry = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert retry["ok"] is False
+    assert retry["final_status"] == "DONE" and retry["verification_status"] == "VERIFIED"
+    home = home_paths(load_config(Path(retry["config"])).my_agent_home)
+    with sqlite3.connect((home.owner_home_dir / "runtime.db").as_uri() + "?mode=ro", uri=True) as db:
+        status, closed_at = db.execute(
+            "SELECT tr.status,tr.closed_at FROM task_runs tr JOIN agent_runs ar ON ar.task_run_id=tr.task_run_id "
+            "WHERE ar.run_id=?", (retry["run_id"],),
+        ).fetchone()
+        assert status == "failed" and closed_at > 0
 
 
 def test_scenario_home_is_sibling_of_workspace_and_keeps_data_root_guard(tmp_path):
@@ -121,3 +168,24 @@ def test_restart_fixture_carries_processing_status_for_real_requeue(tmp_path):
     pending = json.loads((paths.inbox / processing.name).read_text())
     assert pending["id"] == payload["id"]
     assert pending["status"] == "pending"
+
+
+def test_retry_backend_emits_native_tool_request_after_real_failure(tmp_path):
+    from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+    from agent_py_agent.cli.scenario_cases.runner_retry_backend import ScenarioRetryBackend
+
+    backend = ScenarioRetryBackend()
+    assert callable(getattr(backend, "probe_tool_capability", None))
+    capability = backend.probe_tool_capability()
+    assert isinstance(capability, ProviderToolCapability) and capability.native_supported is True
+    backend.report_path = tmp_path / "retry.md"
+    tools = [{"name": "write_file"}]
+    with pytest.raises(RuntimeError, match="scenario transient runner failure"):
+        backend.generate("runner task", tools=tools)
+    response = backend.generate("runner task", tools=tools)
+    assert response.text == "" and len(response.tool_use_blocks) == 1
+    block = response.tool_use_blocks[0]
+    assert block["name"] == "write_file" and block["id"]
+    assert block["input"]["path"] == str(backend.report_path)
+    assert "runner retry" in block["input"]["content"]
+    assert not backend.report_path.exists(), "后端不能代替原生工具直接写产物"
