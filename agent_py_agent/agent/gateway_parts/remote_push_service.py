@@ -124,13 +124,20 @@ def push_owner(value):
 # LLM: 字段闭合，外部不能设置路径、角色、工具授权、回调或owner冻结字段；内容只作不可信事件。
 # 函数用途: 规范化一次推送的正文、会话策略和业务幂等键。
 def validate_push_payload(body):
+    managed_fields = {'subscription_id', 'source_ref', 'event_revision'}
     allowed = {"target_owner", "instruction", "title", "idempotency_key", "event_id", "source_kind",
-               "thread_mode", "thread_reuse_key", "context_payload", "context_snapshot"}
+               "thread_mode", "thread_reuse_key", "context_payload", "context_snapshot"} | managed_fields
     if set(body) - allowed:
         raise RemotePushError("REMOTE_PUSH_SCHEMA_INVALID")
     result = dict(body)
+    managed = bool(managed_fields & result.keys())
+    if managed and (not managed_fields <= result.keys()
+            or any(type(result.get(key)) is not str or not result[key] or len(result[key].encode()) > 128
+                   for key in ('subscription_id', 'source_ref', 'event_id'))
+            or type(result['event_revision']) is not int or result['event_revision'] < 0):
+        raise RemotePushError('REMOTE_PUSH_SCHEMA_INVALID')
     key = result.get("idempotency_key") or result.get("event_id")
-    if result.get("idempotency_key") and result.get("event_id") and result["idempotency_key"] != result["event_id"]:
+    if not managed and result.get("idempotency_key") and result.get("event_id") and result["idempotency_key"] != result["event_id"]:
         raise RemotePushError("REMOTE_PUSH_SCHEMA_INVALID")
     result["idempotency_key"] = key
     for name, limit in (("target_owner", 256), ("instruction", 32768), ("idempotency_key", 256)):
@@ -207,6 +214,11 @@ def authenticate_push(root, raw, headers, peer, current):
     if (not isinstance(owners, list) or body["target_owner"] not in owners
             or actions != ["push_event"]):
         raise RemotePushError("REMOTE_PUSH_TOKEN_SCOPE_DENIED", 403)
+    if 'subscription_id' in body and (type(row.get('allowed_source_refs')) is not list
+            or body['source_ref'] not in row['allowed_source_refs'] or type(row.get('allowed_subscription_ids')) is not list
+            or body['subscription_id'] not in row['allowed_subscription_ids']):
+        # 旧push_event令牌不会隐式扩成任意来源/订阅的派活权。
+        raise RemotePushError('REMOTE_PUSH_TOKEN_SCOPE_DENIED', 403)
     check_push_ip(peer, headers, row.get("allowed_source_ips", []), config.get("trusted_proxies", []))
     return row, body, nonce
 
@@ -258,7 +270,10 @@ def handle_remote_push(handler, server):
 # LLM: 仅已持对应locked_json_path者调用；私有原子写及fsync由同一公共叶完成，不重复取不可重入锁。
 # 函数用途: 耐久保存推送账本，文件出生0600。
 def persist_push_json(path, value):
-    write_private_text_file_atomic_unlocked(path, json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False))
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    if len(raw.encode()) > 16 * 1024 * 1024:
+        raise RemotePushError('REMOTE_PUSH_CAPACITY_EXCEEDED', 503)
+    write_private_text_file_atomic_unlocked(path, raw)
 
 
 # LLM: 不物化Agent；当前owner用实际store，其它owner沿原runtime路径解析器，不能继承主用户已解析绝对路径。
@@ -360,12 +375,20 @@ def accept_remote_push(server, raw, headers, peer):
     root, current = remote_push_root(server), time.time()
     row, body, nonce = authenticate_push(root, raw, headers, peer, current)
     consume_push_nonce(root, row["token_id"], nonce, current)
+    managed = None
+    if 'subscription_id' in body:
+        from .business_event_ingress import prepare_subscription_push
+        # 即使返回旧受理回执，也先重核当前来源/Owner/space/权限，不能借旧receipt续权。
+        managed = prepare_subscription_push(server, body, row)
     path = root / "receipts.json"
     with locked_json_path(path, blocking=False):
         state = read_push_json(root, "receipts.json")
         entries, threads = state.setdefault("entries", {}), state.setdefault("threads", {})
-        key = hashlib.sha256(json.dumps([row["token_id"], body["target_owner"], body["idempotency_key"]]).encode()).hexdigest()
-        digest = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        identity = ([body['target_owner'], body['subscription_id'], body['source_ref'], body['event_id'], body['event_revision']]
+            if managed is not None else [row["token_id"], body["target_owner"], body["idempotency_key"]])
+        key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        digest = (managed.intent['event_digest'] if managed is not None else
+            hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest())
         entry = entries.get(key)
         if entry is not None and entry["digest"] != digest:
             raise RemotePushError("REMOTE_PUSH_IDEMPOTENCY_CONFLICT", 409)
@@ -392,9 +415,21 @@ def accept_remote_push(server, raw, headers, peer):
                 "target_owner": body["target_owner"], "thread_id": thread_id,
                 "run_id": "req_remote_" + key, "queued_at": current,
             }}
+            if managed is not None:
+                # 不分配虚假的模型run/thread；任务受理后只返回原SessionTask/operation引用。
+                entry['receipt'].pop('run_id')
+                entry['receipt'].pop('thread_id')
             stamps.append(current)
             persist_push_json(path, state)
-        enqueue_remote_push(server, body, entry, row["token_id"])
+        if managed is not None:
+            if 'managed_intent' not in entry:
+                entry['managed_intent'] = managed.intent
+                persist_push_json(path, state)
+            result = managed.dispatch(entry['managed_intent'])
+            entry['receipt'].update(task_id=result['task_id'], operation_id=result['operation_id'],
+                request_id=result['request_id'], subscription_id=body['subscription_id'])
+        else:
+            enqueue_remote_push(server, body, entry, row["token_id"])
         entry["accepted"] = True
         persist_push_json(path, state)
         return dict(entry["receipt"])
