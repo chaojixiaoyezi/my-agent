@@ -1,6 +1,6 @@
 # LLM: 测试能力依赖随宿主平台/沙箱而异；nested Seatbelt 仅适用于 macOS，相关用例须另有平台 skipif。
 #   这里统一探测并缓存结构化能力事实，缺失时默认 skip；强制开关打开后改为 fail，防止静默漏跑。
-# 模块用途: 探测并缓存三类沙箱能力，对外提供"这条用例能不能在本机真跑"的判定。
+# 模块用途: 探测并缓存宿主沙箱能力，对外提供"这条用例能不能在本机真跑"的判定。
 from __future__ import annotations
 
 import functools
@@ -17,6 +17,8 @@ CAPABILITY_DESCRIPTIONS = {
     "ps": "本会话沙箱不允许执行 /bin/ps 读自己的进程",
     "nested_sandbox_exec": "本会话沙箱不允许嵌套运行 sandbox-exec（macOS Seatbelt）",
     "background_launcher_identity": "本会话沙箱里后台启动器取不到进程身份",
+    "linux_bwrap": "当前 Linux 宿主不能启动 bwrap PID/UTS/IPC 命名空间",
+    "linux_bwrap_network": "当前 Linux 宿主不能启动含独立网络命名空间的 bwrap",
 }
 
 # skip 原因尾句统一，方便复跑时一眼看出该去哪儿真跑
@@ -75,10 +77,34 @@ def _probe_background_launcher_identity() -> bool:
         return False
 
 
+def _probe_linux_bwrap(*, network_isolation: bool = False) -> bool:
+    """只探宿主能否实际启动命名空间；业务读写隔离仍由原生测试断言。"""
+    if not sys.platform.startswith("linux"):
+        return False
+    from agent_py_agent.agent.tooling.sandbox import find_bwrap
+
+    binary = find_bwrap()
+    if not binary:
+        return False
+    try:
+        result = subprocess.run(
+            [binary, "--die-with-parent", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+             "--unshare-net" if network_isolation else "--share-net", "--new-session",
+             "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--",
+             sys.executable, "-I", "-B", "-S", "-c", "pass"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 _PROBES = {
     "ps": _probe_ps,
     "nested_sandbox_exec": _probe_nested_sandbox_exec,
     "background_launcher_identity": _probe_background_launcher_identity,
+    "linux_bwrap": _probe_linux_bwrap,
+    "linux_bwrap_network": functools.partial(_probe_linux_bwrap, network_isolation=True),
 }
 
 

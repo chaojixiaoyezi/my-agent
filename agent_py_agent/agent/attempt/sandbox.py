@@ -611,18 +611,25 @@ def _default_owner_persona_path(path: Path, agent: Path) -> bool:
     return home is not None and path in tuple(home / name for name in ("SOUL.md", "USER.md", "AGENTS.md", "persona"))
 
 
-# LLM: 只给带宿主保护投影的普通owner加跨owner墙；allowlist不重开owner，显式写根不跨owner，祖先只恢复metadata。
-# 函数用途: 用owners根拒绝与本owner放行替代逐owner拒绝，随后恢复普通拒写优先级，绝对保护再覆盖。
-def _macos_cross_owner_rules(spec: AttemptSandboxSpec) -> list[str]:
+def _macos_owner_read_scope(spec: AttemptSandboxSpec) -> tuple[Path, Path] | None:
+    """返回宿主投影的规范 owner/owners 边界；受限插件模式不额外重开 owner。"""
     if spec.full_access or spec.read_mode is not None or not spec.protected_write_patterns:
-        return []
+        return None
     home = persona_sandbox_root(spec.owner_home, spec.protected_persona_root)
     agent = agent_home_root_for_owner(home) if home is not None else None
     if agent is None:
+        return None
+    return home, agent / "owners"
+
+
+# owner 墙先施加，随后 private 规则只能收窄；写根仍不能越过其它 owner。
+def _macos_cross_owner_rules(spec: AttemptSandboxSpec) -> list[str]:
+    scope = _macos_owner_read_scope(spec)
+    if scope is None:
         return []
+    home, owners = scope
     roots = {path.resolve(strict=False) for path in (*spec.extra_write_roots, *((spec.attempt_view, spec.staging_root) if spec.implicit_attempt_write_roots else ()))}
     writable = {path for path in roots if home == path or home in path.parents}
-    owners = agent / "owners"
     # 宿主外的显式写根可重放，兄弟owner与覆盖owners的宽祖先不可在墙之后重新放行。
     replay = writable | {path for path in roots if path != owners and owners not in path.parents and path not in owners.parents}
     return [f"(deny file-read* file-write* (subpath {_seatbelt_string_literal(str(owners))}))",
@@ -689,10 +696,30 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
         *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)}
     visible.update(Path(path).expanduser().absolute() for path in spec.public_read_roots)
     visible.update(Path(path).expanduser().absolute() for path in spec.extra_write_roots)
-    allowed = sorted(_seatbelt_string_literal(str(path)) for path in visible)
+    scope = _macos_owner_read_scope(spec)
+    link_roots = (*visible, *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)
+    if scope is not None:
+        home, owners = scope
+
+        def foreign(path: Path) -> bool:
+            return path.is_relative_to(owners) and not (
+                path.is_relative_to(home) or home.is_relative_to(path))
+
+        # 正根也必须与 owner 墙取交集，含通向其它 owner 的链接；祖先仅能恢复本 owner。
+        visible = {home if path.is_relative_to(owners) and home.is_relative_to(path) else path
+                   for path in visible if not foreign(path) and not foreign(path.resolve(strict=False))}
+        link_roots = tuple(path for path in link_roots
+                           if not foreign(Path(path).absolute()) and not foreign(Path(path).resolve(strict=False)))
+    allowed = []
+    for path in sorted(visible):
+        predicate = f"(subpath {_seatbelt_string_literal(str(path))})"
+        if scope is not None and owners.is_relative_to(path):
+            predicate = (f"(require-all {predicate} (require-any "
+                         f"(subpath {_seatbelt_string_literal(str(home))}) "
+                         f"(require-not (subpath {_seatbelt_string_literal(str(owners))}))))")
+        allowed.append(f"(allow file-read* {predicate})")
     return [*(f"(deny file-read* (subpath {_seatbelt_string_literal(str(root))}))" for root in hidden),
-            *(f"(allow file-read* (subpath {path}))" for path in allowed),
-            *_symlink_metadata_rules((*visible, *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)),
+            *allowed, *_symlink_metadata_rules(link_roots),
             *_ancestor_metadata_rules(hidden, visible)]
 
 
@@ -820,11 +847,11 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 # LLM: spec附加规则按固定顺序拼接；所有写allow之后复核Git指针/别名并拒写控制文件，随后祖先、隐藏、断网与端口拒绝；
 #   隐藏路径排在读放行之后，断网与端口拒绝排最后（Seatbelt 后写覆盖先写；两条 deny 先后不影响结果）。上级目录规则只拒写，
 #   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
-# 函数用途: 按读边界、owner墙、绝对拒写、Git保护、祖先、隐藏和网络顺序汇总规则；Git拒绝不得被宽写allow覆盖。
+# 函数用途: 按owner墙、private/授权读边界、绝对拒写、Git保护、祖先、隐藏和网络顺序汇总规则。
 def _spec_rules(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | None = None,
                 write_denies: tuple[str, ...] = ()) -> list[str]:
     read_rules = _allowlist_read_rules(spec) if spec.read_mode == "allowlist" else _private_read_rules(spec)
-    return [*read_rules, *_macos_cross_owner_rules(spec), *write_denies, *_macos_git_write_denies(spec),
+    return [*_macos_cross_owner_rules(spec), *read_rules, *write_denies, *_macos_git_write_denies(spec),
             *_ancestor_write_denies(spec, persona_paths=persona_paths), *_pattern_write_denies(spec.protected_write_patterns),
             *_pattern_write_denies(spec.protected_directory_write_patterns, directories=True),
             *_pattern_write_denies(spec.protected_directory_unlink_patterns, directories=True, unlink_only=True),

@@ -52,6 +52,8 @@ class LabSessionManager:
         stamp = args.run_id or time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         self.run_root = self.runs_dir / stamp
         self.fixture_root = self.run_root / "fixture_project"
+        # 宿主数据根不能嵌在业务工作区内；两个目录同属本轮，仍保持完全隔离。
+        self.isolated_home = self.run_root / "home"
         self.prompts_dir = self.run_root / "prompts"
         self.responses_dir = self.run_root / "responses"
         self.config_path = self.run_root / "live_agent_config.yaml"
@@ -119,7 +121,7 @@ class LabSessionManager:
         """appends isolation overrides while preserving model/API settings."""
         base = self.source_config.read_text(encoding="utf-8")
         fixture = str(self.fixture_root).replace("\\", "/")
-        isolated_home = str((self.fixture_root / ".my_agent" / "home").resolve()).replace("\\", "/")
+        isolated_home = str(self.isolated_home.resolve()).replace("\\", "/")
         backend_override = "" if self.args.real_llm else '\nmodel_backend: "echo"\n'
         request_timeout = live_lab_model_request_timeout(self.args)
         gateway_timeout = live_lab_gateway_wait_timeout(self.args)
@@ -150,7 +152,17 @@ request_timeout: {request_timeout}
         self.config_path.write_text(base + overrides, encoding="utf-8")
 
     def prepare_runtime_dirs(self) -> None:
-        """pre-creates runtime files that doctor expects in a fresh workspace."""
-        event_path = self.fixture_root / ".my_agent" / "local_store" / "events.jsonl"
+        """沿正式 CLI 解析结果准备本轮运行文件和空记忆的派生索引。"""
+        from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+        from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+        from agent_py_agent.cli.common import make_lightweight_cli_agent_context
+
+        context = make_lightweight_cli_agent_context(argparse.Namespace(config=str(self.config_path)))
+        ensure_my_agent_home(context.home_paths.root)
+        # 项目路径与 owner 固定服务路径的相对基准不同，不能手拼 fixture 子目录。
+        event_path = context.runtime_paths["local_store_events_path"]
         event_path.parent.mkdir(parents=True, exist_ok=True)
         event_path.touch(exist_ok=True)
+        memory = JsonlMemory(context.runtime_paths["memory_path"])
+        memory.migrate_tiers()
+        memory.rebuild_read_index()

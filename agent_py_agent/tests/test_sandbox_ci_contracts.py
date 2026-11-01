@@ -54,3 +54,46 @@ def test_interpreter_link_chain_gets_metadata_without_parent_data_access(tmp_pat
     assert all(rule.startswith('(allow file-read-metadata ') and '(subpath ' not in rule for rule in rules)
     assert not any(str(prefix / 'bin/secret') in rule for rule in rules)
     assert sandbox._symlink_path_nodes(alias) == (alias, prefix / 'bin/python')
+
+
+def test_private_scope_follows_owner_wall_and_precedes_final_secret_denies(tmp_path):
+    home = tmp_path / 'app/owners/local/alice'
+    work = home / 'workspace'
+    work.mkdir(parents=True)
+    secret = work / 'host-secret'
+    secret.write_text('synthetic secret')
+    spec = sandbox.AttemptSandboxSpec(
+        work, work, work, work, protected_persona_root=home,
+        private_read_roots=(home,), public_read_roots=(work,),
+        protected_write_patterns=('^/synthetic-host-control$',),
+        hidden_paths=(secret,),
+    )
+    rules = sandbox.build_macos_sandbox_profile(spec).splitlines()
+    owner_wall = rules.index(f'(deny file-read* file-write* (subpath "{home.parents[1]}"))')
+    private_wall = rules.index(f'(deny file-read* (subpath "{home}"))')
+    granted = rules.index(f'(allow file-read* (subpath "{work}"))')
+    secret_wall = rules.index(f'(deny file-read* file-write* (subpath "{secret}"))')
+    assert owner_wall < private_wall < granted < secret_wall
+    assert f'(allow file-read* (subpath "{home}"))' not in rules[private_wall + 1:]
+
+
+@pytest.mark.parametrize('grant_kind', ['foreign', 'ancestor'])
+def test_private_read_grants_cannot_reopen_cross_owner_wall(tmp_path, grant_kind):
+    home = tmp_path / 'app/owners/local/alice'
+    foreign = home.parent / 'bob'
+    work = home / 'workspace'
+    for path in (work, foreign):
+        path.mkdir(parents=True)
+    positive = foreign if grant_kind == 'foreign' else home.parents[2]
+    spec = sandbox.AttemptSandboxSpec(
+        work, work, work, work, protected_persona_root=home,
+        private_read_roots=(home.parents[2],), public_read_roots=(positive,),
+        protected_write_patterns=('^/synthetic-host-control$',),
+    )
+    rules = sandbox._private_read_rules(spec)
+    assert f'(allow file-read* (subpath "{positive}"))' not in rules
+    if grant_kind == 'ancestor':
+        assert any('(require-not (subpath ' in rule and str(home.parents[1]) in rule
+                   for rule in rules if rule.startswith('(allow file-read*'))
+    else:
+        assert not any(str(foreign) in rule for rule in rules if rule.startswith('(allow '))

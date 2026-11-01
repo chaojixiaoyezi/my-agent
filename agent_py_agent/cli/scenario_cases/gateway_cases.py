@@ -55,6 +55,7 @@ def _restart_case_write_processing_payload(gpaths, request_id):
     payload = {
         "id": request_id,
         "kind": "ask",
+        "status": "processing",
         "prompt": "这个请求模拟 gateway 崩溃时卡在 processing。",
         "inject": [],
         "prompt_files": [],

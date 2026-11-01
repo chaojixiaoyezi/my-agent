@@ -125,6 +125,51 @@ def test_ps_probe_requires_its_own_pid(
     assert calls[0][0] == ["/bin/ps", "-o", "pid=", "-p", "2468"]
 
 
+@pytest.mark.parametrize("name", ["linux_bwrap", "linux_bwrap_network"])
+@pytest.mark.parametrize("outcome", [0, 1, "denied", "timeout"])
+def test_bwrap_capability_executes_namespaces_not_just_binary_version(monkeypatch, name, outcome):
+    from agent_py_agent.agent.tooling import sandbox
+
+    probe = caps._PROBES.get(name)
+    assert callable(probe), f"缺少统一能力探针: {name}"
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if outcome == "denied":
+            raise PermissionError("synthetic host denial")
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(argv, 10)
+        return subprocess.CompletedProcess(argv, outcome, stdout=b"")
+
+    monkeypatch.setattr(caps.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "find_bwrap", lambda: "/synthetic/bwrap")
+    monkeypatch.setattr(caps.subprocess, "run", run)
+    assert probe() is (outcome == 0)
+    assert len(calls) == 1
+    argv, options = calls[0]
+    assert argv[0] == "/synthetic/bwrap" and "--version" not in argv
+    assert {"--unshare-pid", "--unshare-uts", "--unshare-ipc", "--ro-bind", "--proc"} <= set(argv)
+    network_flag = "--unshare-net" if name == "linux_bwrap_network" else "--share-net"
+    assert network_flag in argv
+    assert sys.executable in argv and {"-I", "-B", "-S", "-c"} <= set(argv)
+    assert options["stdin"] == subprocess.DEVNULL and options["timeout"] == 10
+
+
+@pytest.mark.parametrize("name", ["linux_bwrap", "linux_bwrap_network"])
+def test_bwrap_capability_is_unavailable_without_platform_or_binary(monkeypatch, name):
+    from agent_py_agent.agent.tooling import sandbox
+
+    probe = caps._PROBES.get(name)
+    assert callable(probe), f"缺少统一能力探针: {name}"
+    monkeypatch.setattr(sandbox, "find_bwrap", lambda: None)
+    monkeypatch.setattr(caps.subprocess, "run", lambda *_a, **_k: pytest.fail("不应启动探针"))
+    monkeypatch.setattr(caps.sys, "platform", "linux")
+    assert probe() is False
+    monkeypatch.setattr(caps.sys, "platform", "win32")
+    assert probe() is False
+
+
 # LLM: 这个子进程测试把探针固定为缺失，验证 pytest 公共 hook 的真实 skip/fail 结果，
 #   不以被测函数自行报错冒充能力门生效；写入仅落在 tmp_path。
 # 函数用途: 在临时 pytest 项目里验证缺失能力的错误归因和平台 skipif 优先级。
@@ -133,12 +178,14 @@ def _run_generated_capability_case(
     source: str,
     *,
     require: bool,
+    capability: str = "nested_sandbox_exec",
+    available: bool = False,
 ) -> subprocess.CompletedProcess:
     case_root.mkdir(parents=True)
     (case_root / "conftest.py").write_text(
         "from agent_py_agent.tests import _sandbox_capabilities as caps\n"
         "def pytest_configure(config):\n"
-        "    caps._PROBES['nested_sandbox_exec'] = lambda: False\n",
+        f"    caps._PROBES[{capability!r}] = lambda: {available!r}\n",
         encoding="utf-8",
     )
     test_file = case_root / "test_capability_case.py"
@@ -167,6 +214,8 @@ def _run_generated_capability_case(
             "addopts=",
             "--basetemp",
             str(case_root / "basetemp"),
+            "--junitxml",
+            str(case_root / "result.xml"),
         ],
         capture_output=True,
         text=True,
@@ -213,6 +262,30 @@ def test_setup_gate_reports_missing_id_and_platform_skipif_wins(tmp_path: Path) 
     assert platform_run.returncode == 0, platform_run.stdout[-1000:]
     assert "1 skipped" in platform_run.stdout, platform_run.stdout[-1000:]
     assert "PLATFORM_BODY_EXECUTED" not in platform_run.stdout
+
+
+@pytest.mark.parametrize("name", ["linux_bwrap", "linux_bwrap_network"])
+def test_bwrap_marker_uses_shared_skip_required_failure_and_never_hides_product_failure(tmp_path, name):
+    import xml.etree.ElementTree as ET
+
+    body = (
+        'import pytest\n'
+        f'@pytest.mark.sandbox_capability({name!r})\n'
+        'def test_product_boundary():\n'
+        '    raise AssertionError("PRODUCT_BOUNDARY_FAILED")\n'
+    )
+    default = _run_generated_capability_case(tmp_path / "default", body, require=False, capability=name)
+    assert default.returncode == 0 and "1 skipped" in default.stdout, default.stdout
+    xml = ET.parse(tmp_path / "default/result.xml")
+    assert [node.attrib["value"] for node in xml.findall('.//property[@name="sandbox_capability_missing"]')] == [name]
+    assert "PRODUCT_BOUNDARY_FAILED" not in default.stdout
+    required = _run_generated_capability_case(tmp_path / "required", body, require=True, capability=name)
+    assert required.returncode != 0 and f"SANDBOX_CAPABILITY_MISSING[{name}]" in required.stdout, required.stdout
+    present = _run_generated_capability_case(
+        tmp_path / "present", body, require=True, capability=name, available=True,
+    )
+    assert present.returncode != 0 and "PRODUCT_BOUNDARY_FAILED" in present.stdout, present.stdout
+    assert "skipped" not in present.stdout
 
 
 # —— 端到端：拿一个真实被标记的用例，验证 skip / fail 两种模式 ——

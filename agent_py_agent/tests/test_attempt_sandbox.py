@@ -68,14 +68,9 @@ class _Env:
         self.staging = staging
 
 
-def _ready(sandbox) -> bool:
-    return sandbox.probe().ready
-
-
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_readiness_and_view_write(env):
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     env.sandbox.require_ready()
     result = env.sandbox.run(["sh", "-c", "printf ok > view.txt"], timeout=30)
     assert result.returncode == 0
@@ -83,9 +78,8 @@ def test_linux_readiness_and_view_write(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_absolute_write_to_shared_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     result = env.sandbox.run(
         ["sh", "-c", f"echo pwn > {env.shared / 'pwn.txt'}"], timeout=30
     )
@@ -95,9 +89,8 @@ def test_linux_absolute_write_to_shared_blocked(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_cd_shared_write_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     result = env.sandbox.run(
         ["sh", "-c", f"cd {env.shared} && echo pwn > pwn.txt"], timeout=30
     )
@@ -106,9 +99,8 @@ def test_linux_cd_shared_write_blocked(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_python_open_shared_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     code = f"open({str(env.shared / 'pwn.txt')!r}, 'w').write('pwn')"
     result = env.sandbox.run(["python3", "-c", code], timeout=30)
     assert result.returncode != 0
@@ -116,9 +108,8 @@ def test_linux_python_open_shared_blocked(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_cp_mv_shared_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     (env.view / "src.txt").write_text("x", encoding="utf-8")
     cp = env.sandbox.run(
         ["sh", "-c", f"cp {env.view / 'src.txt'} {env.shared / 'cp.txt'}"], timeout=30
@@ -133,9 +124,8 @@ def test_linux_cp_mv_shared_blocked(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_symlink_write_shared_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     result = env.sandbox.run(
         ["sh", "-c", f"ln -s {env.shared / 'keep.txt'} {env.view / 'lnk'} && echo x > {env.view / 'lnk'}"],
         timeout=30,
@@ -146,10 +136,9 @@ def test_linux_symlink_write_shared_blocked(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_background_grandchild_cannot_write_shared(env):
     """E.11：后台孙进程（脱组）仍只能写 staging，不能写共享。"""
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     script = (
         f"(sleep 0.3; echo pwn > {env.shared / 'grandchild.txt'}) & "
         f"wait"
@@ -160,10 +149,9 @@ def test_linux_background_grandchild_cannot_write_shared(env):
 
 
 @needs_linux
+@pytest.mark.sandbox_capability("linux_bwrap")
 def test_linux_setsid_process_cannot_write_shared(env):
     """E.11：主动 setsid 脱离进程组的进程仍不能写共享。"""
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     result = env.sandbox.run(
         ["sh", "-c", f"setsid sh -c 'echo pwn > {env.shared / 'setsid.txt'}' ; wait"],
         timeout=30,
@@ -171,28 +159,23 @@ def test_linux_setsid_process_cannot_write_shared(env):
     assert not (env.shared / "setsid.txt").exists()
 
 
-@needs_linux
 def test_linux_staging_inode_differs_from_shared(env):
     """测试 8：staging 与共享文件 inode 不同（视图构建保证，非 hardlink）。"""
-    if not _ready(env.sandbox):
-        pytest.skip("bwrap 不可用")
     (env.view / "f.txt").write_text("x", encoding="utf-8")
     assert env.view.stat().st_ino != env.shared.stat().st_ino
     assert (env.view / "keep.txt").stat().st_ino != (env.shared / "keep.txt").stat().st_ino
 
 
 @needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
 def test_macos_readiness(env):
-    if not _ready(env.sandbox):
-        pytest.skip("sandbox-exec 不可用")
     report = env.sandbox.require_ready()
     assert report.ready
 
 
 @needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
 def test_macos_absolute_write_to_shared_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("sandbox-exec 不可用")
     result = env.sandbox.run(
         ["/bin/sh", "-c", f"echo pwn > {env.shared / 'pwn.txt'}"], timeout=30
     )
@@ -201,9 +184,8 @@ def test_macos_absolute_write_to_shared_blocked(env):
 
 
 @needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
 def test_macos_view_write_allowed(env):
-    if not _ready(env.sandbox):
-        pytest.skip("sandbox-exec 不可用")
     result = env.sandbox.run(
         ["/bin/sh", "-c", f"printf ok > {env.view / 'view.txt'}"], timeout=30
     )
@@ -212,9 +194,8 @@ def test_macos_view_write_allowed(env):
 
 
 @needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
 def test_macos_tmp_write_blocked(env):
-    if not _ready(env.sandbox):
-        pytest.skip("sandbox-exec 不可用")
     result = env.sandbox.run(
         ["/bin/sh", "-c", "echo pwn > /tmp/seatbelt-pwn.txt"], timeout=30
     )
@@ -271,10 +252,10 @@ def _sandbox_exec_argv(command, target, owner_home, **kwargs):
     return argv
 
 
+@pytest.mark.skipif(not (IS_LINUX or IS_MACOS), reason="Attempt 网关只支持 macOS/Linux")
+@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if IS_MACOS else ("linux_bwrap",)))
 def test_sandbox_exec_owner_scoped_returns_platform_sandbox_argv(tmp_path, monkeypatch):
     """G6：owner-scoped spawn 经 Attempt 网关（Linux bwrap / macOS sandbox-exec）。"""
-    if not (IS_LINUX or IS_MACOS):
-        pytest.skip("Attempt 网关只支持 macOS/Linux")
     monkeypatch.setattr(
         "agent_py_agent.agent.attempt.sandbox.AttemptExecutionSandbox._READINESS_CACHE",
         {},
@@ -326,6 +307,7 @@ def test_linux_attempt_tmp_stays_outside_project_cwd(tmp_path, monkeypatch):
     assert (str(project / ".sandbox-tmp"), "/tmp") not in bind_pairs
 
 
+@pytest.mark.sandbox_capability(*(("linux_bwrap",) if IS_LINUX else ()))
 def test_sandbox_exec_unscoped_uses_full_access_but_still_sandboxed(tmp_path):
     """G6/E.8：单租户（owner_home 空）也进沙箱——full_access 档（文件语义不变，
     网关统一+进程隔离）。macOS profile 不加 deny；Linux 整根 bind。"""
@@ -515,10 +497,10 @@ def test_linux_explicit_write_roots_do_not_make_readonly_cwd_writable(tmp_path):
     assert (str(output), str(output)) in bind_pairs
 
 
+@pytest.mark.skipif(not (IS_LINUX or IS_MACOS), reason="Attempt 网关只支持 macOS/Linux")
+@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if IS_MACOS else ("linux_bwrap",)))
 def test_sandbox_exec_rejects_shared_workspace_write(tmp_path):
     """G6 真实拦截：owner-scoped spawn 经网关后写共享区（owner home）被拦。"""
-    if not (IS_LINUX or IS_MACOS):
-        pytest.skip("Attempt 网关只支持 macOS/Linux")
     from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
 
     shared = tmp_path / "shared"
@@ -533,8 +515,6 @@ def test_sandbox_exec_rejects_shared_workspace_write(tmp_path):
         owner_home=shared,
     )
     sandbox = AttemptExecutionSandbox(spec)
-    if not sandbox.probe().ready:
-        pytest.skip("平台沙箱不可用")
     # argv 已是完整沙箱包装（sandbox-exec/bwrap 前缀），直接真实 spawn。
     command = f"echo pwn > {shared / 'pwn.txt'}"
     argv = _sandbox_exec_argv(command, target, shared)
@@ -616,12 +596,11 @@ def test_macos_profile_adds_private_read_rules_only_for_owner_scope(tmp_path, mo
 
 
 @needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
 def test_macos_private_read_root_hides_other_owners_and_config(tmp_path):
     root, spec = _private_root_spec(tmp_path)
     (tmp_path / "outside.txt").write_text("host", encoding="utf-8")
     sandbox = AttemptExecutionSandbox(spec)
-    if not _ready(sandbox):
-        pytest.skip("sandbox-exec 不可用")
 
     def read_result(path: Path):
         return sandbox.run(["/bin/cat", str(path)], timeout=30)
@@ -678,13 +657,12 @@ def test_shell_passes_the_private_root_only_for_owner_scope(tmp_path, monkeypatc
 
 
 @needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
 def test_registry_built_shell_cannot_read_other_owners_or_config_on_macos(tmp_path):
     from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
     root, spec = _private_root_spec(tmp_path)
     owner = spec.owner_home
-    if not _ready(AttemptExecutionSandbox(spec)):
-        pytest.skip("sandbox-exec 不可用")
     registry = ToolRegistry(ToolRegistryParams(
         workspace_root=owner, max_chars=6000, max_entries=200, max_matches=50, web_max_chars=12000, http_timeout=30,
         catalog_limit=20, retrieval_limit=3, vector_search_enabled=False, shell_tool_timeout=30,
@@ -1052,7 +1030,7 @@ def test_bwrap_restores_authorized_root_below_directory_alias(tmp_path, monkeypa
 
 
 @pytest.mark.skipif(not (IS_LINUX or IS_MACOS), reason="Linux bwrap / macOS Seatbelt")
-@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if IS_MACOS else ()))
+@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if IS_MACOS else ("linux_bwrap",)))
 def test_allowlist_real_process_through_external_directory_symlink_chain(tmp_path):
     import sys
 
@@ -1074,8 +1052,6 @@ def test_allowlist_real_process_through_external_directory_symlink_chain(tmp_pat
                               private_read_roots=(hidden,), hidden_paths=(hidden,), read_only_root=True,
                               implicit_attempt_write_roots=False, read_mode="allowlist")
     sandbox = AttemptExecutionSandbox(spec)
-    if not sandbox.probe().ready:
-        pytest.skip("目标平台沙箱未就绪；需在沙箱外/真实 Linux 车道复跑")
     result = sandbox.run([str(entry), "-I", "-S", "-c", "import json; print(json.dumps({'started': True}))"], timeout=30)
     assert result.returncode == 0, (result.returncode, result.stderr)
     import json
@@ -1144,3 +1120,59 @@ def test_allowlist_run_refuses_unlisted_cwd_before_popen(tmp_path, monkeypatch, 
     with pytest.raises(SandboxUnavailableError, match="RESTRICTED_CWD_NOT_ALLOWLISTED"):
         sandbox.run(["/bin/echo", "ok"])
     assert captured_sandbox_popen == []
+
+
+@needs_macos
+@pytest.mark.sandbox_capability("nested_sandbox_exec")
+def test_macos_business_scope_with_host_protection_blocks_native_canaries(tmp_path):
+    """不安装 Python guard，直接验证 Seatbelt 对真实解释器及子进程的裁决。"""
+    import json
+
+    home = tmp_path / "app/owners/local/alice"
+    execution, work, private = (home / name for name in ("tmp/script", "workspace", "private"))
+    foreign = home.parent / "bob"
+    for directory in (execution, work, private, foreign):
+        directory.mkdir(parents=True)
+    allowed = work / "input.txt"
+    outside, other, secret = private / "canary.txt", foreign / "canary.txt", work / "secret.txt"
+    allowed.write_text("inside")
+    for path in (outside, other, secret):
+        path.write_text("synthetic-secret")
+    sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
+        execution, execution, execution, execution, protected_persona_root=home,
+        public_read_roots=(work,), extra_write_roots=(work,), private_read_roots=(home,),
+        protected_write_patterns=('^/synthetic-host-control$',), hidden_paths=(secret,),
+    ))
+    child = (
+        "import sys\nfrom pathlib import Path\n"
+        "try:\n print(Path(sys.argv[1]).read_text())\n"
+        "except PermissionError:\n sys.exit(77)\n"
+    )
+    code = (
+        "import json, sqlite3, subprocess, sys\nfrom pathlib import Path\n"
+        f"allowed, outside, other, secret = map(Path, {list(map(str, (allowed, outside, other, secret)))!r})\n"
+        "assert allowed.read_text() == 'inside'\n"
+        "allowed.with_name('out.txt').write_text('ok')\n"
+        "sqlite3.connect(allowed.with_suffix('.db')).close()\n"
+        "result = {}\n"
+        "for name, operation in (('read', lambda: outside.read_text()),\n"
+        " ('write', lambda: outside.write_text('changed')),\n"
+        " ('sqlite', lambda: sqlite3.connect(outside.with_suffix('.db'))),\n"
+        " ('other_owner', lambda: other.read_text()), ('secret', lambda: secret.read_text())):\n"
+        " try:\n  operation()\n  result[name] = False\n"
+        " except (PermissionError, sqlite3.OperationalError):\n  result[name] = True\n"
+        f"command = [sys.executable, '-I', '-B', '-S', '-c', {child!r}]\n"
+        "permit = subprocess.run(command + [str(allowed)], capture_output=True, text=True)\n"
+        "assert permit.returncode == 0 and permit.stdout.strip() == 'inside', permit.stderr\n"
+        "deny = subprocess.run(command + [str(outside)], capture_output=True, text=True)\n"
+        "result['subprocess'] = deny.returncode == 77\n"
+        "print(json.dumps(result))\n"
+    )
+    result = sandbox.run([sys.executable, "-I", "-B", "-S", "-c", code], timeout=30)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert json.loads(result.stdout) == dict.fromkeys(
+        ("read", "write", "sqlite", "other_owner", "secret", "subprocess"), True,
+    )
+    assert outside.read_text() == "synthetic-secret"
+    assert (work / "out.txt").read_text() == "ok" and allowed.with_suffix('.db').is_file()
+    assert not outside.with_suffix('.db').exists()
