@@ -9,6 +9,7 @@ import time
 from ..assets.descriptor import execution_definition_ref
 from ..assets.script_store import ScriptStore
 from ..assets.workflow_store import WorkflowStore
+from ..path_access_policy import HostSandboxPaths
 from ..tooling.sandbox import SandboxUnavailable
 from ..workflows.engine import WorkflowEngine
 from ..workflows.run_store import WorkflowRunStore
@@ -185,16 +186,26 @@ def _budget_timeout_seconds(context) -> float:
     return max(0.1, min(3600.0, raw_seconds))
 
 
-# LLM: 每步脚本执行前均消费AssetStepFence并强制禁网、受限读写根与声明时长预算，防止执行中途撤权或篡改步骤脚本。
-# 函数用途: 在目标Owner隔离目录内执行已获批脚本、工作流或工作流断点续跑。
-def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
+# LLM: 调用方必须显式传可信宿主来源快照；三动作共用runner，每步仍消费AssetStepFence并强制禁网、读写根与时长预算。
+# 函数用途: 带宿主来源保护执行目标Owner已获批的脚本、工作流或工作流断点续跑。
+def execute_registered_asset(
+    context,
+    plan,
+    fence,
+    *,
+    host_credential_env_names: frozenset[str],
+    host_path_protection: HostSandboxPaths,
+) -> tuple[bool, str]:
     fence.check()
     payload = json.loads(plan.payload_json)
     home = context.owner_home.home_dir
     policy = context.execution_policy
     max_timeout = _budget_timeout_seconds(context)
     deadline = time.monotonic() + max_timeout
-    runner = ScriptRunner(home, extra_write_roots=policy.write_roots, public_read_roots=policy.read_roots, restrict_to_roots=True)
+    runner = ScriptRunner(
+        home, extra_write_roots=policy.write_roots, public_read_roots=policy.read_roots, restrict_to_roots=True,
+        host_credential_env_names=host_credential_env_names, host_path_protection=host_path_protection,
+    )
     if plan.action == "execute.script":
         try:
             result = runner.run_script(
