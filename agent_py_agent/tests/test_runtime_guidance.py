@@ -29,9 +29,7 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
 )
 from agent_py_agent.agent.agent_core.runtime.guidance_tool import SendGuidanceTool
 from agent_py_agent.agent.agent_core.tool_loop.completion import (
-    ToolRoundCompletionRequest,
     _delegated_work_facts,
-    completion_response_after_tool_round,
     queue_interim_reply_for_active_named_work,
     queue_reply_for_audit_prepare,
 )
@@ -61,6 +59,10 @@ from agent_py_agent.agent.conversation.authority import (
     CONVERSATION_WORK_NAME_ATTR,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.prompting_parts.runtime_injection import (
+    RUNTIME_DIRECT_CHILDREN_SOURCE,
+    RuntimeInjectionFragment,
+)
 from agent_py_agent.agent.runtime_context import (
     ThreadLocalAgentAttribute,
     restore_current_subagent_context,
@@ -170,9 +172,9 @@ def test_tool_loop_refreshes_direct_children_after_status_change_and_context_reb
 
     first_prompt = build_tool_loop_prompt(agent, params)
     first_snapshot = next(
-        item
+        item.text
         for item in params.runtime_injections
-        if item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+        if isinstance(item, RuntimeInjectionFragment) and item.source == RUNTIME_DIRECT_CHILDREN_SOURCE
     )
 
     assert "[RUNTIME_DIRECT_CHILDREN]" in first_prompt
@@ -184,9 +186,9 @@ def test_tool_loop_refreshes_direct_children_after_status_change_and_context_reb
     runs[7].status = "DONE"
     second_prompt = build_tool_loop_prompt(agent, params)
     second_snapshot = next(
-        item
+        item.text
         for item in params.runtime_injections
-        if item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+        if isinstance(item, RuntimeInjectionFragment) and item.source == RUNTIME_DIRECT_CHILDREN_SOURCE
     )
 
     assert '"DONE":8' in second_snapshot
@@ -194,7 +196,7 @@ def test_tool_loop_refreshes_direct_children_after_status_change_and_context_reb
     assert '"all_terminal":true' in second_snapshot
     assert first_snapshot not in second_prompt
     assert sum(
-        item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+        isinstance(item, RuntimeInjectionFragment) and item.source == RUNTIME_DIRECT_CHILDREN_SOURCE
         for item in params.runtime_injections
     ) == 1
 
@@ -203,9 +205,9 @@ def test_tool_loop_refreshes_direct_children_after_status_change_and_context_reb
     params.runtime_injections[:] = ["[BASE_RUNTIME_FACT]"]
     rebuilt_prompt = build_tool_loop_prompt(agent, params)
     rebuilt_snapshot = next(
-        item
+        item.text
         for item in params.runtime_injections
-        if item.startswith("[RUNTIME_DIRECT_CHILDREN]")
+        if isinstance(item, RuntimeInjectionFragment) and item.source == RUNTIME_DIRECT_CHILDREN_SOURCE
     )
     assert rebuilt_snapshot == second_snapshot
     assert rebuilt_snapshot in rebuilt_prompt
@@ -230,7 +232,8 @@ def test_runtime_direct_children_snapshot_uses_exact_current_child_parent() -> N
     finally:
         restore_current_subagent_context(agent, previous)
 
-    snapshot = params.runtime_injections[0]
+    assert params.runtime_injections[0].source == RUNTIME_DIRECT_CHILDREN_SOURCE
+    snapshot = params.runtime_injections[0].text
     payload = json.loads(snapshot.rsplit("\n", 1)[-1])
     assert payload["parent_run_id"] == "child-1"
     assert payload["children"] == [
@@ -252,7 +255,8 @@ def test_runtime_direct_children_snapshot_never_claims_terminal_when_load_is_par
 
     assert refresh_runtime_direct_children_snapshot(agent, params)
 
-    payload = json.loads(params.runtime_injections[0].rsplit("\n", 1)[-1])
+    assert params.runtime_injections[0].source == RUNTIME_DIRECT_CHILDREN_SOURCE
+    payload = json.loads(params.runtime_injections[0].text.rsplit("\n", 1)[-1])
     assert payload["load_error_count"] == 1
     assert payload["projection_complete"] is False
     assert payload["all_terminal"] is False
@@ -269,9 +273,10 @@ def test_root_snapshot_uses_index_without_duplicating_completion_body() -> None:
 
     assert refresh_runtime_direct_children_snapshot(agent, params)
     manager.list_runs_for_root_report.assert_called_once_with("task-root")
-    assert "child-done" in params.runtime_injections[0]
-    assert child.result not in params.runtime_injections[0]
-    assert "completion_message" not in params.runtime_injections[0]
+    assert params.runtime_injections[0].source == RUNTIME_DIRECT_CHILDREN_SOURCE
+    assert "child-done" in params.runtime_injections[0].text
+    assert child.result not in params.runtime_injections[0].text
+    assert "completion_message" not in params.runtime_injections[0].text
 
 
 def test_busy_recursive_parent_receives_result_without_reading_root_mailbox() -> None:
@@ -287,7 +292,7 @@ def test_busy_recursive_parent_receives_result_without_reading_root_mailbox() ->
         assert has_pending_turn_input(agent, params)
         assert inject_pending_turn_input(agent, params)
         assert not has_pending_turn_input(agent, params)
-        assert "整理出的兼容方案" in params.runtime_injections[0]
+        assert "整理出的兼容方案" in params.runtime_injections[0].text
         assert acknowledge_injected_turn_input(agent, params) == 0
     finally:
         restore_current_subagent_context(agent, previous)

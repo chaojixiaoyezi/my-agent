@@ -15,6 +15,7 @@ from ..memory_archive import (
 from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, ArchiveTurnContext
 from ..memory_archive.runtime_fact_source import RuntimeFactSourceRequest, write_runtime_fact_source
 from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+from ..prompting_parts.runtime_injection import runtime_injection_texts
 from ..tooling.operation_verification import (
     build_operation_verification,
     redact_executed_operation_labels,
@@ -114,6 +115,7 @@ class FinalizationService:
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
         if conversation_task_completed(ctx.task_attributes):
             _request_memory_curator(self._agent, "task_complete")
+        if conversation_task_completed(ctx.task_attributes) or ctx.source == "background_main_agent":
             _request_skill_learning(self._agent, ctx)
         _reclaim_turn_pty_sessions(self._agent, ctx)
         return result
@@ -142,7 +144,7 @@ class FinalizationService:
                     status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
                     next_actions=ctx.recovery_next_actions or [],
                     archive_tool_calls=ctx.archive_tool_calls or [],
-                    runtime_injections=tuple(str(item) for item in ctx.runtime_injections or []),
+                    runtime_injections=runtime_injection_texts(ctx.runtime_injections),
                     run_id=ctx.run_id,
                     task_id=ctx.task_id,
                     source=ctx.source,
@@ -255,7 +257,7 @@ class FinalizationService:
             else:
                 input_tokens = (
                     estimate_tokens(params.user_prompt)
-                    + estimate_tokens(params.runtime_injections)
+                    + estimate_tokens(list(runtime_injection_texts(params.runtime_injections)))
                     + estimate_tokens(
                         [getattr(memory, "content", "") for memory in params.memories]
                     )
@@ -345,7 +347,7 @@ class FinalizationService:
             if params.archive_result
             else 0,
             prompt_token_estimate=estimate_tokens(ctx.final_prompt),
-            runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections)
+            runtime_injection_token_estimate=estimate_tokens(list(runtime_injection_texts(ctx.runtime_injections)))
             if ctx.runtime_injections
             else 0,
             **_snapshot_result_fields(),
@@ -366,7 +368,7 @@ class FinalizationService:
             delivery_artifacts=_structured_delivery_artifacts(ctx),
             message_tool_deliveries=_message_tool_deliveries(ctx, agent=self._agent),
             operation_verification=operation_verification,
-            tool_runtime_evidence=dict(ctx.tool_runtime_evidence or {}),
+            tool_runtime_evidence=_finalization_learning_evidence(self._agent, ctx),
             pack_verifications=_pack_verification_facts(self._agent, ctx),
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             canonical_native_messages=list(ctx.canonical_native_messages or []),
@@ -410,10 +412,29 @@ def _request_memory_curator(agent: object, reason: str) -> None:
         return
 
 
-# LLM: 只把收口上下文交给 agent.skill_learning 做结构化判定与有界入队；不在这里调用模型或写 Skill，
-#   自学习关闭（服务缺席）时什么都不做，任何异常都不能影响用户回复。
-# 函数用途: 任务完成后 best-effort 登记一次自动总结 Skill 请求。
+# LLM: 前台保留原 best-effort 学习入口；后台只交已绑定的宿主完成 DTO 给 W6 复核，未知真实错误不吞。
+# 函数用途: 不改变回复保存开关或同步调用学习模型，按原来源登记方法学习请求。
 def _request_skill_learning(agent: object, ctx: FinalizeContext) -> None:
+    if getattr(ctx, "source", "") == "background_main_agent":
+        from ..conversation.business_contracts import TrustedTaskCompletion
+
+        evidence = ctx.tool_runtime_evidence if isinstance(ctx.tool_runtime_evidence, dict) else {}
+        completion = evidence.get("trusted_task_completion")
+        # 候选、聊天 JSON 和模型声称完成都不是 canonical 完成证明。W2 仍负责晚于收尾的持久确认。
+        if not isinstance(completion, TrustedTaskCompletion) or not _conversation_turn_is_terminal(ctx):
+            return
+        attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+        if (ctx.context_scope == "task_local"
+                or completion.owner_id != getattr(getattr(agent, "home_paths", None), "owner_id", None)
+                or completion.thread_id != attrs.get("conversation_thread_id")
+                or completion.run_id != ctx.run_id or completion.attempt_id != ctx.attempt_id
+                or completion.source_kind != ctx.source or completion.tool_rounds != ctx.tool_rounds):
+            return
+        # 冻结端口由 W6 实现；消费端必须重新核验原 claim/completion 和准确业务任务绑定。
+        from ..capability.task_learning_bridge import enqueue_completed_task_learning
+
+        evidence["task_learning_enqueue"] = enqueue_completed_task_learning(completion=completion, host=agent)
+        return
     enqueue = getattr(getattr(agent, "skill_learning", None), "enqueue_from_finalize", None)
     if not callable(enqueue):
         return
@@ -421,6 +442,58 @@ def _request_skill_learning(agent: object, ctx: FinalizeContext) -> None:
         enqueue(ctx)
     except Exception:
         return
+
+
+def _finalization_learning_evidence(agent: object, ctx: FinalizeContext) -> dict[str, object]:
+    """交给原运行结果的有界候选，不新增任务账、不签发完成、不调用学习模型。"""
+    evidence = dict(ctx.tool_runtime_evidence or {})
+    # host-only 运输对象不进入结果 JSON；W2 从 canonical 终态/claim 重建，不从结果字典恢复授权。
+    evidence.pop("trusted_task_completion", None)
+    if ctx.source != "background_main_agent" or ctx.context_scope == "task_local" or not _conversation_turn_is_terminal(ctx):
+        return evidence
+    import json
+    from hashlib import sha256
+
+    from ..capability.skill_learning_request import (
+        TEXT_LIMIT_CHARS,
+        TRACE_COUNT,
+        _sample_learning_trace,
+        _trace_entry,
+        bounded_text,
+    )
+    from ..common.log_redaction import redact_sensitive_value
+    from ..conversation.business_contracts import BusinessExecutionContext
+
+    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+    owner = getattr(getattr(agent, "home_paths", None), "owner_id", None)
+    thread = attrs.get("conversation_thread_id")
+    if not all(isinstance(value, str) and value for value in (owner, thread, ctx.task_id, ctx.run_id, ctx.attempt_id)):
+        return evidence
+    records = [row for row in ctx.archive_tool_calls or () if isinstance(row, dict)]
+    trace = [_trace_entry(row) for row in _sample_learning_trace(records, limit=TRACE_COUNT)]
+    business = attrs.get("business_context")
+    # 业务选择只是材料快照。确切 session_task_ref→TaskRun、空间和资产版本仍须 W2/W6 从原账核验。
+    if isinstance(business, BusinessExecutionContext):
+        business = business.to_dict()
+    elif isinstance(business, dict):
+        try:
+            business = BusinessExecutionContext.from_dict(business).to_dict()
+        except (TypeError, ValueError):
+            business = None
+    else:
+        business = None
+    evidence["task_learning_candidate"] = {
+        "schema_version": "task-learning-candidate.v1", "status": "pending_completion",
+        "owner_id": owner, "thread_id": thread, "runtime_task_id": ctx.task_id,
+        "run_id": ctx.run_id, "attempt_id": ctx.attempt_id, "source_kind": ctx.source,
+        "tool_rounds": ctx.tool_rounds, "business_context": business,
+        "user_prompt": bounded_text(ctx.user_prompt, TEXT_LIMIT_CHARS),
+        "final_response": bounded_text(ctx.final_response.text, TEXT_LIMIT_CHARS),
+        "tool_trace": trace,
+        "trajectory_digest": sha256(json.dumps(redact_sensitive_value(records), sort_keys=True, default=str).encode()).hexdigest(),
+        "result_refs": list(dict.fromkeys(_artifact_refs(records) + _latest_archive_refs(records))),
+    }
+    return evidence
 
 
 # LLM: 回合收口是 PTY 会话的第一道回收点（真机实锤：git grep 在 PTY 里起分页器等按键，挂 9 小时没人收）。

@@ -83,7 +83,6 @@ from .compact_projection import (
 from .compact_provider_surface import (
     ConversationCompactModelSurface,
     ConversationCompactProviderSurface,
-    conversation_compact_provider_messages,
     conversation_compact_provider_prompt,
     conversation_compact_provider_source,
     prepare_conversation_compact_provider_surface,
@@ -106,7 +105,6 @@ from .native_history import (
     _row_turn_identity,
     canonical_native_messages_from_metadata,
     iter_provider_history_messages_from_rows,
-    provider_history_messages_from_rows,
 )
 from .store_threads import IdleCompactActivityChanged
 from .tool_context_window import (
@@ -562,18 +560,23 @@ def _validated_compact_source_context(
         return None
     if context.thread_id != thread.thread_id or not isinstance(context.scope, CompactScope):
         raise ConversationCompactError("Compact source scope mismatches thread", code="COMPACT_SOURCE_CHANGED")
-    ids = [row.message_id for row in source.messages if isinstance(row, MessageLogEntry)]
+    seen: set[str] = set()
+    count = 0
     with message_rows_iterator(source.messages) as rows:
-        foreign_source = any(row.thread_id != thread.thread_id for row in rows)
-    if (len(ids) != len(source.messages) or foreign_source
-            or any(not message_id for message_id in ids) or len(set(ids)) != len(ids)):
+        for row in rows:
+            if (not isinstance(row, MessageLogEntry) or row.thread_id != thread.thread_id
+                    or not isinstance(row.message_id, str) or not row.message_id or row.message_id in seen):
+                raise ConversationCompactError("Compact source messages are invalid", code="COMPACT_SOURCE_CHANGED")
+            if row.message_id in context.view.source_message_ids:
+                raise ConversationCompactError("Compact source repeats covered messages", code="COMPACT_SOURCE_CHANGED")
+            seen.add(row.message_id)
+            count += 1
+    if count != len(source.messages):
         raise ConversationCompactError("Compact source messages are invalid", code="COMPACT_SOURCE_CHANGED")
     from .compact_summary_view import resolve_compact_summary_view
 
     if context.view != resolve_compact_summary_view(agent, thread, context.scope):
         raise ConversationCompactError("Compact source summary changed", code="COMPACT_SOURCE_CHANGED")
-    if any(identity in context.view.source_message_ids for identity in ids):
-        raise ConversationCompactError("Compact source repeats covered messages", code="COMPACT_SOURCE_CHANGED")
     return context
 
 

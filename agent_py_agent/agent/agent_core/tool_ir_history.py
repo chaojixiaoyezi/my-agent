@@ -62,6 +62,10 @@ from ..backends.tool_ir import (
     UserTurn,
 )
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
+from ..prompting_parts.runtime_injection import (
+    is_runtime_injection_source,
+    runtime_injection_clear_text,
+)
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .runtime.conversation_state import conversation_runtime_state_section
 
@@ -283,16 +287,36 @@ def record_user_turn_ir(params: object, text: str, *, input_ids: tuple[str, ...]
 # submission. Compare only the latest surviving item of the same host source: A→B→A must append
 # A again. IR is the sole baseline, so cancellation/Compact rollback cannot leave a stale seen set.
 # 函数用途: 同来源状态有变化才追加，未变化留在原历史位置；不修改或去重真实用户输入。
-def record_runtime_facts_turn_ir(params: object, text: str, *, source: str = "") -> bool:
+def record_runtime_facts_turn_ir(params: object, text: str, *, source: str = "", clear_empty: bool = False) -> bool:
+    if clear_empty and not is_runtime_injection_source(source):
+        raise ValueError("only a runtime injection source may be withdrawn")
     content = str(text or "")
-    if not content.strip():
+    if not content.strip() and not (clear_empty and content == ""):
         return False
     history = native_tool_ir_history(params)
+    previous = None
     for item in reversed(history):
         if isinstance(item, RuntimeFactsTurn) and item.source == source:
-            if item.text == content:
-                return False
+            previous = item
             break
+    return _append_runtime_fact_from_previous(history, content, source=source,
+                                             clear_empty=clear_empty, previous=previous)
+
+
+def _append_runtime_fact_from_previous(
+    history: list[Any], text: str, *, source: str, clear_empty: bool,
+    previous: RuntimeFactsTurn | None,
+) -> bool:
+    """只消费这份当前历史的最近同源项；不扫描、不改旧项、不建立跨请求状态。"""
+    if clear_empty and not is_runtime_injection_source(source):
+        raise ValueError("only a runtime injection source may be withdrawn")
+    content = str(text or "")
+    if clear_empty and content == "":
+        if previous is None:
+            return False
+        content = runtime_injection_clear_text(source)
+    if not content.strip() or (previous is not None and previous.text == content):
+        return False
     history.append(RuntimeFactsTurn(content, source=source))
     return True
 
@@ -318,15 +342,27 @@ def project_native_prompt_history(
     layout = prompt_cache_layout(prompt)
     if layout is None:
         return prompt, history
-    projected = SimpleNamespace(tool_ir_history=history)
     sections = layout.volatile_sections or (("prompt.volatile", layout.volatile_suffix),)
+    remaining = {source for source, _ in sections} | {"conversation.runtime"}
+    latest = {}
+    # 此索引只属于本次投影和当前存活的 IR，取消/重载/Compact 不会留下影子 seen-set。
+    for item in reversed(history):
+        if isinstance(item, RuntimeFactsTurn):
+            source = item.source
+            if source in remaining:
+                latest[source] = item
+                remaining.remove(source)
+                if not remaining:
+                    break
     for source, text in sections:
-        record_runtime_facts_turn_ir(projected, text, source=source)
-    record_runtime_facts_turn_ir(
-        projected,
-        conversation_runtime_state_section(params) if conversation_state is None else conversation_state,
-        source="conversation.runtime",
-    )
+        if _append_runtime_fact_from_previous(history, text, source=source,
+                clear_empty=is_runtime_injection_source(source), previous=latest.get(source)):
+            latest[source] = history[-1]
+    source = "conversation.runtime"
+    if _append_runtime_fact_from_previous(history,
+            conversation_runtime_state_section(params) if conversation_state is None else conversation_state,
+            source=source, clear_empty=False, previous=latest.get(source)):
+        latest[source] = history[-1]
     provider_prompt = CacheStructuredPrompt(
         layout.stable_prefix,
         stable_user_prefix=layout.stable_user_prefix,

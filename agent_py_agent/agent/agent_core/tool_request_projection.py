@@ -14,6 +14,7 @@ from ..prompting_parts.builder import (
     ToolSections,
     render_prepared_prompt,
 )
+from ..prompting_parts.runtime_injection import InjectionValue
 from ..tooling.runtime_contracts import ToolChoice, ToolProtocolSnapshot
 from ..tooling.self_map_availability import self_map_available
 from .native_tool_protocol import native_tool_use_active
@@ -115,7 +116,7 @@ class InputModalityFilter:
 def tool_loop_prompt_request(
     params: ToolLoopExecuteParams,
     *,
-    runtime_injections: list[str] | tuple[str, ...],
+    runtime_injections: list[InjectionValue] | tuple[InjectionValue, ...],
     workspace_context: str | None,
     execution_facts: str,
 ) -> PromptBuildRequest:

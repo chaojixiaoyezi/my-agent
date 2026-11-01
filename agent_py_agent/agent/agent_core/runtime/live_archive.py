@@ -18,6 +18,7 @@ from ...memory_archive.runtime_fact_source import (
     update_runtime_fact_terminal,
     write_runtime_fact_source,
 )
+from ...prompting_parts.runtime_injection import runtime_injection_texts
 from ...runtime_errors import runtime_error_report
 from .owner_roots import runtime_archive_roots
 
@@ -38,7 +39,7 @@ def write_runtime_fact_start_if_enabled(agent: object, params: object) -> None:
                     request_id=request_id,
                     user_prompt=_root_user_prompt(params),
                     status="running",
-                    runtime_injections=tuple(str(item) for item in getattr(params, "runtime_injections", []) or []),
+                    runtime_injections=runtime_injection_texts(getattr(params, "runtime_injections", None)),
                     run_id=str(getattr(params, "run_id", "") or ""),
                     task_id=str(getattr(params, "task_id", "") or ""),
                     source=str(getattr(params, "source", "") or "run"),
@@ -147,7 +148,7 @@ def update_runtime_fact_progress_if_enabled(agent: object, params: object, *, to
                     status="running",
                     next_actions=_runtime_next_actions(params),
                     archive_tool_calls=list(getattr(params, "archive_tool_calls", []) or []),
-                    runtime_injections=tuple(str(item) for item in getattr(params, "runtime_injections", []) or []),
+                    runtime_injections=runtime_injection_texts(getattr(params, "runtime_injections", None)),
                     run_id=str(getattr(params, "run_id", "") or ""),
                     task_id=str(getattr(params, "task_id", "") or ""),
                     source="live_tool_loop",

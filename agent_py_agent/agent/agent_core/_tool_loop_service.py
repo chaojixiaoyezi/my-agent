@@ -34,6 +34,14 @@ from ..conversation.compact_progress import (
 )
 from ..conversation.tool_context_window import window_tool_context_params
 from ..prompting_parts.builder import project_runtime_workspace_context
+from ..prompting_parts.runtime_injection import (
+    RUNTIME_DELIVERY_CONTRACT_SOURCE,
+    RUNTIME_GOAL_SOURCE,
+    RUNTIME_PUBLIC_RECEIPT_SOURCE,
+    InjectionValue,
+    RuntimeInjectionFragment,
+    runtime_injection_texts,
+)
 from ..runtime_context import current_task_attributes
 from ..runtime_db.operations import exec_lock_scope
 from ..subagents.services.session_progress import record_runtime_subagent_tool_progress
@@ -612,7 +620,6 @@ def _prepare_native_compact_plan(
     estimator: Callable[[], int],
     force: bool,
 ) -> _NativeCompactPlan | None:
-    from .model.context_pressure import model_visible_context_tokens
     from .tool_request_projection import text_request_capacity_known
 
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
@@ -1536,7 +1543,7 @@ def _native_compact_summary_surface(
 # LLM: Text history must use the same applied summary as source hiding; injections remain a copy,
 # append current Goal facts without mutating the original seed/message containers.
 # 函数用途: 按本次摘要视图组装文本历史、投递要求与本轮 Goal 归属，前后台和原生工具协议共用。
-def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *, agent: object | None = None) -> list:
+def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *, agent: object | None = None) -> list[InjectionValue]:
     from .tool_loop.background_public_receipt import public_receipt_contract_prompt
 
     injections = list(params.runtime_injections)
@@ -1550,17 +1557,18 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *,
         runtime_state = conversation_runtime_state_section(params)
         if runtime_state:
             injections.append(runtime_state)
-    if isinstance(params.delivery_contract, dict):
-        injections.append(render_delivery_contract_section(params.delivery_contract))
-    if receipt_prompt := public_receipt_contract_prompt(params):
-        injections.append(receipt_prompt)
+    delivery = render_delivery_contract_section(params.delivery_contract) if isinstance(params.delivery_contract, dict) else None
+    receipt = public_receipt_contract_prompt(params) or None
+    goal_scope = None
     if agent is not None:
         from ..conversation.goal_prompting import current_goal_scope_prompt
 
-        goal_scope = current_goal_scope_prompt(agent, params)
-        if goal_scope:
-            injections.append(goal_scope)
-    return injections
+        goal_scope = current_goal_scope_prompt(agent, params) or None
+    # 原 base/recovery 位置不动；每个宿主来源保存完整值，None 只撤回该来源的可用快照。
+    injections.extend((RuntimeInjectionFragment(delivery, RUNTIME_DELIVERY_CONTRACT_SOURCE),
+                       RuntimeInjectionFragment(receipt, RUNTIME_PUBLIC_RECEIPT_SOURCE),
+                       RuntimeInjectionFragment(goal_scope, RUNTIME_GOAL_SOURCE)))
+    return injections if native_tool_use_active(params) else list(runtime_injection_texts(injections))
 
 
 # LLM: Text protocol renders the same already-bounded seed once without reloading the transcript,

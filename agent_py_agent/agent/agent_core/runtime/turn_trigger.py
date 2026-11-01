@@ -49,8 +49,6 @@ TURN_TRIGGER_RECOMMENDATION_REASONS: dict[str, str] = {
     TURN_TRIGGER_LIFECYCLE_WAKE: "宿主生命周期事件的固定推荐：先确认直属子代理的状态与结果，再决定整合、答复或调整",
     TURN_TRIGGER_SESSION_TASK: "会话间派活的固定推荐：先确认任务与来源，再把结果回报给派活的会话",
 }
-# 生命周期唤醒片的这些宿主快照只服务本片，不进后续回合的原生历史重放（后台上下文注入有数万字）。
-LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES = frozenset({"prompt.runtime_injection"})
 
 
 # LLM: 冻结值对象；kind 之外的字段都是唤醒信封里已有的结构化身份，event_facts 是已排序、有界的 JSON 文本。
@@ -155,7 +153,6 @@ __all__ = [
     "HOST_EVENT_FIRST_LINE",
     "HOST_EVENT_FIRST_LINE_ORIGIN_TASK",
     "HOST_EVENT_HEADING",
-    "LIFECYCLE_WAKE_UNREPLAYED_FACT_SOURCES",
     "SESSION_TASK_FACTS_SOURCE",
     "SESSION_TASK_FIRST_LINE",
     "TURN_TRIGGER_LIFECYCLE_WAKE",
