@@ -33,7 +33,11 @@ from ..attempt.sandbox import (
 )
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
-from ..path_access_policy import HostSandboxPaths, persona_process_protected_paths
+from ..path_access_policy import (
+    HostSandboxPaths,
+    owner_home_containing,
+    persona_process_protected_paths,
+)
 from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
@@ -60,6 +64,7 @@ def _init_guard():
     entrypoint = sys.argv.pop(1)
     sys.argv[0] = entrypoint
     read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
+    runtime_roots = tuple(Path(p) for p in cfg.get("runtime_read_roots", ()))
     write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
     write_rules = tuple((Path(root), allowed) for root, allowed in cfg.get("write_scope_rules", ()))
     protected_paths = tuple(Path(p) for p in cfg.get("protected_write_paths", ()))
@@ -68,6 +73,8 @@ def _init_guard():
     directory_unlink_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_directory_unlink_patterns", ()))
     denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
     exclusive_roots = tuple(Path(p) for p in cfg.get("host_exclusive_paths", ()))
+    owner_scope = Path(cfg["owner_scope_root"]) if cfg.get("owner_scope_root") else None
+    app_home = Path(cfg["agent_home_root"]) if owner_scope is not None else None
     protected_nodes = frozenset(tuple(part.casefold() for part in parent.parts)
         for root in (*protected_paths, *exclusive_roots) for parent in root.parents)
     allow_net = bool(cfg.get("network_access", False))
@@ -90,8 +97,49 @@ def _init_guard():
         parts = tuple(part.casefold() for part in target.parts)
         return any(parts[:len(root.parts)] == tuple(part.casefold() for part in root.parts) for root in roots)
 
-    # 隐藏来源不能因较窄正根而进入metadata祖先豁免，nofollow链也不能直接打开它。
-    read_ancestors = frozenset(parent for root in (*read_roots, *write_roots) for parent in root.parents
+    # 冻结owner墙的app home身份在用户代码前取得；宿主解释器根只有严格位于app home内才参与豁免，宽根不能开放控制面。
+    home_identity, home_nodes = None, {}
+    if app_home is not None:
+        home_info = os.stat(app_home)
+        home_identity = (home_info.st_dev, home_info.st_ino)
+    owner_visible = (owner_scope, app_home / "shared") if app_home is not None else ()
+    home_runtime_roots = tuple(root for root in runtime_roots if app_home is not None and app_home in root.parents)
+
+    # LLM: 规范拼写沿宿主大小写口径比较；firmlink、大小写等不经symlink的别名逐层比对目录身份，只缓存元数据事实不读内容。
+    # 函数用途: 返回已解析目标相对规范app home的各段，不在app home内时返回None。
+    def _app_home_parts(target):
+        if _protected(target, (app_home,)):
+            return target.parts[len(app_home.parts):]
+        for index in range(len(target.parts), 0, -1):
+            node = str(Path(*target.parts[:index]))
+            if node not in home_nodes:
+                previous = getattr(_guard_tls, "active", False)
+                _guard_tls.active = True
+                try:
+                    info = os.lstat(node)
+                    home_nodes[node] = (info.st_dev, info.st_ino) == home_identity
+                except OSError:
+                    home_nodes[node] = False
+                finally:
+                    _guard_tls.active = previous
+            if home_nodes[node]:
+                return target.parts[index:]
+        return None
+
+    # LLM: 沿PathAccessPolicy._owner_scope_decision：app home内只放本owner与shared，owners下其余子树恒拒，其它数据/控制路径
+    #   仅由宿主计算的解释器运行根豁免；app home外保持原行为，正向授权根不是全局白名单，也不能越过本墙。
+    # 函数用途: 判断已解析目标是否越过冻结owner读取边界，未冻结owner墙时不拒绝。
+    def _owner_denied(target):
+        parts = _app_home_parts(target) if owner_scope is not None else None
+        if parts is None:
+            return False
+        canonical = app_home.joinpath(*parts)
+        return not _under(canonical, owner_visible) and (
+            _protected(canonical, (app_home / "owners",)) or not _under(canonical, home_runtime_roots))
+
+    # 隐藏来源与越过owner墙的正根都不能进入metadata祖先豁免，nofollow链也不能直接打开它们；合法根的祖先只给metadata。
+    read_ancestors = frozenset(parent for root in (*read_roots, *runtime_roots, *write_roots) if not _owner_denied(root)
+        for parent in root.parents
         if not _protected(parent, exclusive_roots)
         and not any(_under(parent, (private,)) and not _under(root, (private,)) for private in denied_roots))
 
@@ -106,12 +154,12 @@ def _init_guard():
         finally:
             _guard_tls.active = previous
 
-    # LLM: 已解析的路径只消费冻结根，不重复跟随lstat允许观察的symlink叶节点。
-    # 函数用途: 执行私有读取限制的纯路径裁决。
+    # LLM: 已解析的路径只消费冻结根，不重复跟随lstat允许观察的symlink叶节点；宿主专有来源最先拒，owner墙先于正根附加授权。
+    # 函数用途: 执行私有读取限制的路径裁决。
     def _check_read_target(target, raw):
-        if _protected(target, exclusive_roots):
+        if _protected(target, exclusive_roots) or _owner_denied(target):
             raise perm_err(eacces, "Permission denied", str(raw))
-        if _under(target, denied_roots) and not _under(target, read_roots):
+        if _under(target, denied_roots) and not _under(target, (*read_roots, *runtime_roots)):
             raise perm_err(eacces, "Permission denied", str(raw))
 
     # LLM: 文件内容读取沿用真实目标边界，不能由符号链接逃出获准根。
@@ -670,11 +718,27 @@ def _script_private_roots(owner: Path, workspace: Path | None) -> tuple[Path, ..
              or not workspace.is_relative_to(root))))
 
 
+# LLM: 只冻结宿主给出的有效owner墙与规范app home；非空墙必须位于该app home的规范owner布局内，缺根、相对路径或
+#   owners容器失败关闭；空墙保留直接runner与管理员原行为。
+# 函数用途: 一次性归一化并校验脚本执行的owner读取边界。
+def _owner_read_boundary(owner_scope_root, agent_home_root):
+    home = Path(agent_home_root).expanduser() if agent_home_root is not None and str(agent_home_root).strip() else None
+    if owner_scope_root is None or not str(owner_scope_root).strip():
+        return None, home.resolve(strict=False) if home is not None else None
+    scope = Path(owner_scope_root).expanduser()
+    if home is None or not scope.is_absolute() or not home.is_absolute():
+        raise ValueError('owner读取边界需要宿主冻结的绝对owner墙与app home根')
+    scope, home = scope.resolve(strict=False), home.resolve(strict=False)
+    if owner_home_containing(scope, home) is None:
+        raise ValueError('owner读取边界必须位于宿主app home的规范owner布局内')
+    return scope, home
+
+
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。
 # 类用途: 按 Owner 的脚本配置执行 Python、bash 或 sh，且不调用任何模型。
 class ScriptRunner:
-    # LLM: 仅绑定宿主正负路径快照；新增保护参数默认为空，保留直接runner与restriction默认值，不从业务输入授权。
-    # 函数用途: 保存Owner、数据源workspace、绝对保护及普通拒写范围。
+    # LLM: 仅绑定宿主正负路径快照与owner读取墙；新增保护参数默认为空，保留直接runner与restriction默认值，不从业务输入授权。
+    # 函数用途: 保存Owner、数据源workspace、绝对保护、普通拒写范围及冻结owner墙。
     def __init__(
         self,
         owner_home: str | Path,
@@ -691,8 +755,11 @@ class ScriptRunner:
         delivery_handler=None,
         write_protection: SandboxWriteProtection | None = None,
         host_path_protection: HostSandboxPaths | None = None,
+        owner_scope_root: str | Path | None = None,
+        agent_home_root: str | Path | None = None,
     ):
         self.owner_home = Path(owner_home).absolute()
+        self.owner_scope_root, self.agent_home_root = _owner_read_boundary(owner_scope_root, agent_home_root)
         self.scripts_root = self.owner_home / 'scripts'
         self.use_sandbox, self.strict_sandbox = use_sandbox, strict_sandbox
         self.extra_write_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in extra_write_roots)
@@ -849,8 +916,8 @@ class ScriptRunner:
                     network_access=net_allowed, deny_gateway_ports=denied_ports if net_allowed else ()))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     applied_sandbox = True
-            enforces_scope = self.restrict_to_roots or bool(hidden_paths or protected_paths or denied_write_roots
-                or host.patterns or host.directory_write_patterns or host.directory_unlink_patterns)
+            enforces_scope = self.restrict_to_roots or bool(self.owner_scope_root or hidden_paths or protected_paths
+                or denied_write_roots or host.patterns or host.directory_write_patterns or host.directory_unlink_patterns)
             guarded = enforces_scope and interpreter == 'python3'
             if guarded:
                 guard = safe_path(folder, '_sandbox_guard.py')
@@ -860,7 +927,10 @@ class ScriptRunner:
                 write_roots = (resolved_folder, *self.extra_write_roots, *ds_runtime.write_roots, Path('/dev'))
                 persona_paths = tuple(path.resolve(strict=False) for path in persona_process_protected_paths(self.owner_home))
                 env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
-                    'read_roots': [str(p) for p in (resolved_folder, *runtime_read_roots, *self.public_read_roots, *self.extra_write_roots, *ds_runtime.read_roots)],
+                    'read_roots': [str(p) for p in (resolved_folder, *self.public_read_roots, *self.extra_write_roots, *ds_runtime.read_roots)],
+                    'runtime_read_roots': [str(p) for p in runtime_read_roots],
+                    'owner_scope_root': str(self.owner_scope_root or ''),
+                    'agent_home_root': str(self.agent_home_root or ''),
                     'write_roots': [str(p) for p in write_roots],
                     'write_scope_rules': [(str(root), allowed) for root, allowed in ordered_write_scope_roots(write_roots, denied_write_roots)],
                     'protected_write_paths': [str(p) for p in (*protected_paths, *persona_paths)],
