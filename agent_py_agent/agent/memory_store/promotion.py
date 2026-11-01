@@ -65,7 +65,7 @@ from .candidate_models import (
     normalize_reference_list,
 )
 from .candidates import (
-    PROMOTION_BATCH_MAX_ITEMS,
+    PROMOTION_BATCH_MAX_COUNT,
     CandidateService,
     CandidateStateChangedError,
     _unique_candidate_batch,
@@ -971,7 +971,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
     # 函数用途: 成批自动晋升只读筛出的候选，整批只做一次总量治理。
     def promote_ready(self, *, limit: int = 32) -> tuple[MemoryPromotionResult, ...]:
         with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
-            size = min(PROMOTION_BATCH_MAX_ITEMS, limit) if limit > 0 else PROMOTION_BATCH_MAX_ITEMS
+            size = min(PROMOTION_BATCH_MAX_COUNT, limit) if limit > 0 else PROMOTION_BATCH_MAX_COUNT
             rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=size)
             return self.promote_batch(rows, reviewer="memory-promotion-service", automatic=True)
 

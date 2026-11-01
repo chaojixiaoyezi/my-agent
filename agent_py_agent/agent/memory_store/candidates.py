@@ -73,7 +73,8 @@ from .scope_contract import canonical_scope_key
 
 # 保留清理只认合法的未晋升状态；扫描、执行与仓库删除共用同一集合，promoted 永不参与。
 RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
-PROMOTION_BATCH_MAX_ITEMS = 32
+# 单批候选审核/晋升/终态提交最多处理的条数。
+PROMOTION_BATCH_MAX_COUNT = 32
 
 
 # LLM: 扫描、执行及锁内仓库末门共用；approved及任何提交义务不受年龄覆盖。
@@ -751,9 +752,9 @@ class CandidateIdentityConflictError(ValueError):
 # LLM: 迭代器最多消费33项，超界在任何IO之前拒绝，不把无穷输入整表装入内存。
 # 函数用途: 为批准、晋升和终态提交共用固定批次上限。
 def bounded_candidate_batch(items):
-    rows = tuple(islice(iter(items), PROMOTION_BATCH_MAX_ITEMS + 1))
-    if len(rows) > PROMOTION_BATCH_MAX_ITEMS:
-        raise ValueError(f"candidate batch exceeds {PROMOTION_BATCH_MAX_ITEMS} items")
+    rows = tuple(islice(iter(items), PROMOTION_BATCH_MAX_COUNT + 1))
+    if len(rows) > PROMOTION_BATCH_MAX_COUNT:
+        raise ValueError(f"candidate batch exceeds {PROMOTION_BATCH_MAX_COUNT} items")
     return rows
 
 

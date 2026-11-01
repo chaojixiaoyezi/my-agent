@@ -403,6 +403,13 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
                 candidate_id,
                 automatic=True,
             ),
+            # 成批晋升优先：同一批候选只做两次候选账本落盘与一次向量快照，逐条回调仅保留给旧显式调用方。
+            promotion_batch_callback=lambda batch: agent.memory_promotion.promote_batch(
+                batch,
+                reviewer="memory-promotion-service",
+                automatic=True,
+                confirmed=False,
+            ),
             # 学习排除名单：名单会话的消息不进入提炼、既有候选不自动晋升；名单不可读时
             # curator 侧 fail-closed（本轮不收集消息、不补晋升），修复后从原游标重放。
             learning_exclusions=lambda: curator_learning_exclusions(agent.home_paths),

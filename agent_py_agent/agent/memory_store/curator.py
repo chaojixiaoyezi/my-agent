@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.errors import ModelNotConfiguredError
@@ -29,8 +30,13 @@ from ..common.request_execution_ports import (
     gateway_short_transaction,
 )
 from ..conversation.learning_source import projection_is_learnable
-from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
-from .candidates import CandidateService, split_identity_conflicts
+from .candidate_models import (
+    CandidateObservation,
+    MemoryCandidate,
+    host_promotion_mode,
+    utc_now_iso,
+)
+from .candidates import PROMOTION_BATCH_MAX_COUNT, CandidateService, split_identity_conflicts
 from .curator_backend import (
     CuratorModelAttempt,
     CuratorModelCallError,
@@ -113,6 +119,9 @@ from .daily import DailyMemoryEvent, DailyMemoryStore
 from .learning_exclusions import excluded_candidate_ids, sync_learning_exclusion_marks
 from .lessons import _MAX_HOT_RULE_CHARS, _evidence_groups, _has_evidence
 
+if TYPE_CHECKING:
+    from .promotion import MemoryPromotionResult
+
 _LOGGER = logging.getLogger(__name__)
 _RUN_STATUSES = frozenset({"succeeded", "failed", "busy", "disabled", "not_due"})
 _REASON_PRIORITY = (
@@ -162,6 +171,12 @@ class MemoryCuratorDependencies:
     # 与Promotion使用同一宿主账本核验器；缺失时工具引用失败关闭，不能在合并后才拒绝。
     tool_evidence_verifier: object | None = None
     promotion_callback: Callable[[str], object] | None = None
+    # 成批晋升入口：收按原序去重的完整候选快照（每批至多PROMOTION_BATCH_MAX_COUNT条），返回逐项对应结果；
+    # 注入后优先于逐条promotion_callback，未注入的旧调用方仍走逐条回调。
+    promotion_batch_callback: Callable[
+        [tuple[MemoryCandidate, ...]],
+        tuple[MemoryPromotionResult, ...],
+    ] | None = None
     # 升级自愈:每次持 lease 执行前自动应用 Memory v2 迁移(幂等),失败不阻断提炼。
     migration_service: object | None = None
     annotate_batch: Callable[[CuratorInputBatch, str, float], tuple[CuratorInputBatch, tuple[str, ...]]] | None = None
@@ -859,6 +874,18 @@ def _candidate_repetition_ready(row, *, lesson_min_occurrences: int = 2, hot_min
     return True
 
 
+# LLM: 逐条与成批共用同一回执投影：删除待清理进警告，只有本轮正式变更才计入晋升数。
+# 函数用途: 将一条晋升结果追加为无正文回执，返回是否计入本轮正式提交。
+def _append_promotion_receipt(receipts: list[dict], warnings: list[str], candidate_id: str, result: object) -> bool:
+    from .curator_promotion_receipts import promotion_receipt
+
+    receipt = promotion_receipt(candidate_id, result)
+    receipts.append(receipt)
+    if receipt['reason_code'] == 'REMOVE_CLEANUP_PENDING':
+        warnings.append('REMOVE_CLEANUP_PENDING')
+    return bool(receipt['promoted'] and receipt['formal_memory_changed'])
+
+
 # LLM: 只消费持久账本和原提交结果；先结构过滤再三档稳定排序，不可补旧来源不占额，名单拒绝及正式证据/CAS门保持。
 # 类用途: 为Curator公平选择自动晋升候选并沿原回调提交，不创建第二套审核或写入路径。
 class _CuratorPromotionMixin:
@@ -915,13 +942,15 @@ class _CuratorPromotionMixin:
         except Exception as exc:
             raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED") from exc
 
-    # LLM: 晋升在同一租约内逐条重查排除；原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。
-    # 函数用途: 在显式批次上下文内逐条晋升，成功后一次治理；未知执行原样透传并保留治理欠账。
+    # LLM: 晋升在同一租约内逐条重查排除；注入批量回调时按原序去重、以完整快照至多32条一批提交，绝不回退逐条执行；
+    #   原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。
+    # 函数用途: 在显式批次上下文内晋升（批量优先，旧逐条回调兼容），成功后一次治理；未知执行原样透传并保留治理欠账。
     def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
-        from .curator_promotion_receipts import promotion_receipt
         from .promotion import promotion_batch
 
-        if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
+        batch_callback = self._promotion_batch_callback
+        if self.config.auto_promotion_policy == "manual_only" or (
+                self.promotion_callback is None and batch_callback is None):
             return 0, (), ()
         promoted = 0
         warnings: list[str] = []
@@ -929,25 +958,61 @@ class _CuratorPromotionMixin:
         with promotion_batch(long_term=getattr(self.formal_memory_source, "long_term", None),
                              candidates=self.candidate_service,
                              coordinator_io=bool(getattr(self.candidate_service, "coordinator_io", False))):
-            for candidate_id in candidate_ids:
-                skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
-                warnings.extend(skip_warnings)
-                if skipped:
-                    continue
-                try:
-                    result = self.promotion_callback(candidate_id)
-                except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
-                    raise
-                except Exception:
-                    warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
-                    continue
-                receipt = promotion_receipt(candidate_id, result)
-                receipts.append(receipt)
-                if receipt['reason_code'] == 'REMOVE_CLEANUP_PENDING':
-                    warnings.append('REMOVE_CLEANUP_PENDING')
-                if receipt['promoted'] and receipt['formal_memory_changed']:
-                    promoted += 1
+            if batch_callback is not None:
+                promoted = self._promote_eligible_batches(candidate_ids, batch_callback, warnings, receipts)
+            else:
+                for candidate_id in candidate_ids:
+                    skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
+                    warnings.extend(skip_warnings)
+                    if skipped:
+                        continue
+                    try:
+                        result = self.promotion_callback(candidate_id)
+                    except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                        raise
+                    except Exception:
+                        warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
+                        continue
+                    promoted += _append_promotion_receipt(receipts, warnings, candidate_id, result)
         return promoted, tuple(dict.fromkeys(warnings)), tuple(receipts)
+
+    # LLM: 按输入顺序去重并逐条重查排除；读完整快照，凑满一批或输入结束才交批量回调，读取失败的候选只记警告跳过。
+    # 函数用途: 将合格候选按原序切成有界批次提交，返回本轮正式提交数。
+    def _promote_eligible_batches(self, candidate_ids, batch_callback, warnings, receipts) -> int:
+        promoted, chunk = 0, []
+        for candidate_id in dict.fromkeys(candidate_ids):
+            skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
+            warnings.extend(skip_warnings)
+            if skipped:
+                continue
+            try:
+                chunk.append(self.candidate_service.get(candidate_id))
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
+                continue
+            if len(chunk) == PROMOTION_BATCH_MAX_COUNT:
+                promoted += self._promote_candidate_chunk(tuple(chunk), batch_callback, warnings, receipts)
+                chunk = []
+        if chunk:
+            promoted += self._promote_candidate_chunk(tuple(chunk), batch_callback, warnings, receipts)
+        return promoted
+
+    # LLM: 每批只调用一次批量回调；未结执行原样透传，普通失败或结果条数不符只记警告，绝不对该批回退逐条执行。
+    # 函数用途: 提交一批完整候选快照，并按输入顺序投影逐条回执。
+    def _promote_candidate_chunk(self, chunk, batch_callback, warnings, receipts) -> int:
+        try:
+            results = tuple(batch_callback(chunk))
+            if len(results) != len(chunk):
+                raise ValueError("promotion batch result count mismatch")
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception:
+            warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
+            return 0
+        return sum(_append_promotion_receipt(receipts, warnings, row.candidate_id, result)
+                   for row, result in zip(chunk, results))
 
     # LLM: 名单不可读时不晋升（fail-closed）；命中候选补一次标记同步，让后续人工路径也看到排除；
     #   判定只看结构化 refs 与通道绑定，不解析正文（2907）。
@@ -1184,6 +1249,7 @@ class MemoryCuratorService(
         self.formal_memory_source = dependencies.formal_memory_source
         self.tool_reference_source = dependencies.tool_reference_source
         self.promotion_callback = dependencies.promotion_callback
+        self._promotion_batch_callback = dependencies.promotion_batch_callback
         self.migration_service = dependencies.migration_service
         self.learning_exclusions = dependencies.learning_exclusions
         self.learning_exclusions_revision = dependencies.learning_exclusions_revision
