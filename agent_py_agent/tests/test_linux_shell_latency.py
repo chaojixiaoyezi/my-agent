@@ -85,8 +85,8 @@ def test_process_waiters_use_capture_events(tmp_path, monkeypatch, entry):
     assert calls, "生产等待必须使用可唤醒接口"
 
 
-# LLM: 使用真实规范目录，spy只统计owner枚举；不同调用之间新owner和新托管目录必须可见。
-# 函数用途: 验证冻结路径投影每次只枚举一次，且没有跨调用TTL缓存。
+# LLM: 使用真实规范目录，spy只统计owner枚举；隐藏路径包含宿主独占配置/secrets，新owner和新托管目录必须可见。
+# 函数用途: 验证冻结路径投影每次只枚举一次，保留宿主独占路径且没有跨调用TTL缓存。
 def test_host_paths_enumerate_once_and_refresh(tmp_path, monkeypatch):
     from dataclasses import FrozenInstanceError
 
@@ -107,7 +107,10 @@ def test_host_paths_enumerate_once_and_refresh(tmp_path, monkeypatch):
     first = policy.host_sandbox_paths(tmp_path, system="Darwin")
     assert calls == [tmp_path]
     assert first.readonly == policy.host_readonly_paths(tmp_path)
-    assert first.hidden == policy.host_managed_store_dirs(tmp_path)
+    # 隐藏投影是owner托管目录与宿主独占路径的去重并集，不再等同于旧的仅托管目录接口。
+    exclusive = policy.host_exclusive_paths(tmp_path, None)
+    assert first.hidden == tuple(dict.fromkeys((*policy.host_managed_store_dirs(tmp_path), *exclusive)))
+    assert tmp_path / "secrets" in first.hidden
     assert first.patterns == policy.host_readonly_patterns(tmp_path)
     assert first.directory_write_patterns == policy.host_readonly_patterns(tmp_path, directory_operation="write")
     assert first.directory_unlink_patterns == policy.host_readonly_patterns(tmp_path, directory_operation="unlink")
@@ -119,12 +122,15 @@ def test_host_paths_enumerate_once_and_refresh(tmp_path, monkeypatch):
     calls.clear()
     second = policy.host_sandbox_paths(tmp_path, system="Linux")
     assert calls == [tmp_path]
+    assert second.hidden == tuple(dict.fromkeys((*policy.host_managed_store_dirs(tmp_path), *exclusive)))
     assert private in second.hidden and private not in first.hidden
     assert other / "config" in second.readonly
     assert second.patterns == second.directory_write_patterns == second.directory_unlink_patterns == ()
     calls.clear()
     scoped = policy.host_sandbox_paths(tmp_path, main, system="Darwin")
     assert calls == [] and other / "config" not in scoped.readonly
+    assert scoped.hidden == tuple(dict.fromkeys((*policy.host_managed_store_dirs(tmp_path, main), *exclusive)))
+    assert private not in scoped.hidden and tmp_path / "secrets" in scoped.hidden
 
 
 # LLM: 替换沙箱argv构建而非权限投影，观察实际shell准备阶段枚举次数。
