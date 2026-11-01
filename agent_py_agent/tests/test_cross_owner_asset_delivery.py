@@ -1582,7 +1582,7 @@ def test_round2_monitor_due_index_and_queued_cancellation(kit):
     assert index.claim_due_owners(now=future + 1000) == []
 
 
-# LLM: 有限配额仍走原锁和计量；guard仅将会死锁的重复准入变成断言，不替换实际安装/启停。
+# LLM: 本例测有限配额锁重入而非扫描时限；只隔离墙钟抢占，原扫描/128项上限/配额及实际安装启停均保留。
 # 函数用途: 验证监控接收和启停不重入Owner配额锁。
 def test_round2_monitor_install_and_toggle_share_finite_quota(kit, monkeypatch):
     from contextlib import contextmanager
@@ -1590,6 +1590,14 @@ def test_round2_monitor_install_and_toggle_share_finite_quota(kit, monkeypatch):
     from agent_py_agent.agent.assets import delivery_service
     from agent_py_agent.agent.user_space import owner_quota
 
+    snapshot = owner_quota._bounded_quota_snapshot
+
+    # LLM: 原扫描仍受调用方条目预算约束，IO错误与超额仍交原准入拒绝，不用无限配额或假用量。
+    # 函数用途: 将安装与锁序正确性测试从繁忙CI的10ms墙钟窗口中隔离。
+    def entry_bounded_snapshot(root, *, max_entries, max_ms):
+        return snapshot(root, max_entries=max_entries, max_ms=float('inf'))
+
+    monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', entry_bounded_snapshot)
     source = round2_seed_monitor(kit, False)
     sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
     original, active = owner_quota.OwnerQuotaEnforcer.admission, set()

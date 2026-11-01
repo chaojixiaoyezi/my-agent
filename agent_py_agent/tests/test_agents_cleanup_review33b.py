@@ -208,8 +208,21 @@ def test_unconfirmed_heartbeat_join_never_releases_while_real_thread_alive(tmp_p
         probe.finish()
 
 
+# LLM: 本例测Owner隔离而非扫描时限；只隔离墙钟抢占，保留原128项上限、真实扫描、有限配额及全部路径断言。
+# 函数用途: 验证两位Owner同时晋升时只检查各自仓库路径。
 @pytest.mark.parametrize('target', ['long_term', 'user'])
 def test_parallel_owner_admissions_are_local_to_exact_repository(tmp_path, monkeypatch, target):
+    from agent_py_agent.agent.user_space import owner_quota
+
+    snapshot = owner_quota._bounded_quota_snapshot
+
+    # LLM: 仍调用原扫描器和原条目预算，不伪造用量、完成标记或准入结果。
+    # 函数用途: 让并发正确性测试不依赖CI线程恰好在10ms内得到调度。
+    def entry_bounded_snapshot(root, *, max_entries, max_ms):
+        return snapshot(root, max_entries=max_entries, max_ms=float('inf'))
+
+    monkeypatch.setattr(owner_quota, '_bounded_quota_snapshot', entry_bounded_snapshot)
+
     for name in ('owner-a', 'owner-b'):
         (tmp_path / name).mkdir()
     envs = [_setup(tmp_path / name) for name in ('owner-a', 'owner-b')]
