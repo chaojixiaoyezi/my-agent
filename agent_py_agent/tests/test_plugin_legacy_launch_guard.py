@@ -227,7 +227,7 @@ def test_start_rejects_revoked_generation(tmp_path, monkeypatch):
 
 
 # LLM: restricted 的启动命令必须等于统一 B7 底座的包装输出（同一 spec 工厂），收窄读/写/网络。
-# 函数用途: 断言客户端命令与 plugin_sandbox_spec + sandboxed_plugin_argv 完全一致。
+# 函数用途: 断言启动命令完全一致，且独立规范化的私有根精确覆盖 HOME 与可信数据根。
 def test_restricted_launch_uses_b7_sandbox_entry(tmp_path, monkeypatch):
     _, owner, entry, _ = restricted_activation(tmp_path)
     fake_sandbox_ready(monkeypatch)
@@ -239,7 +239,15 @@ def test_restricted_launch_uses_b7_sandbox_entry(tmp_path, monkeypatch):
     spec = plugin_sandbox_spec(cwd=env_dir, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=policy)
     expected = sandboxed_plugin_argv([str(env_dir / "python" / "bin" / "python"), "-I", "-m", entry.manifest.entry_module], spec)
     assert [client.config.command, *client.config.args] == expected
-    assert spec.private_read_roots == (Path.home().resolve(strict=True),)
+    required_private_roots = {Path.home().resolve(strict=True), owner.root.resolve(strict=True)}
+    expected_private_roots = {
+        root for root in required_private_roots
+        if not any(root != other and root.is_relative_to(other) for other in required_private_roots)
+    }
+    assert set(spec.private_read_roots) == expected_private_roots
+    assert len(spec.private_read_roots) == len(expected_private_roots)
+    assert all(any(root.is_relative_to(private) for private in spec.private_read_roots)
+               for root in required_private_roots)
     assert data_dir in spec.extra_write_roots
     assert spec.network_access is False
 
