@@ -36,40 +36,38 @@ def normalize_usage(response: object) -> NormalizedUsage:
     output = output_reported or 0
     partial = output_reported is None
 
-    nested = None
-    for key in ("input_tokens_details", "prompt_tokens_details"):
-        value = usage.get(key)
-        if isinstance(value, Mapping):
-            nested = value
-            break
-    nested_cached = None
-    if nested is not None:
-        nested_cached = _first_positive_int(
-            (nested.get("cached_tokens"), nested.get("cache_read_tokens"))
-        )
+    nested_cached = _nested_cache_token_value(usage, write=False)
+    nested_write = _nested_cache_token_value(usage, write=True)
     top_read = _first_positive_int(
         (usage.get("cache_read_input_tokens"), usage.get("cached_input_tokens"))
     )
     top_write = _first_positive_int(
         (usage.get("cache_creation_input_tokens"), usage.get("cache_write_input_tokens"))
     )
+    cached = _reported_cache_token_value(response, write=False)
+    written = _reported_cache_token_value(response, write=True)
+    # 重复别名冲突时沿统一读取顺序取一个值，并保留已有partial诊断，不相加也不伪装精确。
+    partial = partial or any(
+        nested is not None and top is not None and nested != top
+        for nested, top in ((nested_cached, top_read), (nested_write, top_write))
+    )
 
     prompt_total = _first_positive_int((usage.get("prompt_tokens"),))
     if prompt_total is not None:
         # OpenAI 兼容：prompt 总数已包含缓存明细，不能再加一次。
         return NormalizedUsage(
-            "openai_compatible", prompt_total, nested_cached or 0, top_write or 0, output, partial
+            "openai_compatible", prompt_total, cached or 0, written or 0, output, partial
         )
 
     input_total = _first_positive_int((usage.get("input_tokens"),))
     if input_total is not None:
-        if nested_cached is not None and top_read is None:
-            # OpenAI Responses 风格：input_tokens 已含嵌套缓存明细。
+        if (nested_cached is not None or nested_write is not None) and top_read is None:
+            # 嵌套 write（包括零）也声明 inclusive Responses；不能再加进总输入。
             return NormalizedUsage(
-                "openai_responses", input_total, nested_cached, top_write or 0, output, partial
+                "openai_responses", input_total, cached or 0, written or 0, output, partial
             )
-        read = top_read or 0
-        write = top_write or 0
+        read = cached or 0
+        write = written or 0
         if usage.get("cache_read_input_tokens") is None and top_write is None and read == 0 and write == 0:
             partial = True
         return NormalizedUsage(
@@ -78,7 +76,7 @@ def normalize_usage(response: object) -> NormalizedUsage:
 
     if top_read is None and top_write is None:
         partial = True
-    return NormalizedUsage("unknown", 0, top_read or 0, top_write or 0, output, partial)
+    return NormalizedUsage("unknown", 0, cached or 0, written or 0, output, partial)
 
 
 # LLM: 累计处理量口径 = 协议归一后的总输入（含缓存读写，重复读取也累计）；这是账本
@@ -98,11 +96,10 @@ def input_token_usage(response: object) -> int | None:
 # 函数用途: 把不同厂商的用量字段还原成“本次模型实际看到的输入 token 总数”。
 def provider_visible_input_token_usage(response: object) -> int | None:
     usage = response_usage(response)
-    prompt_total = _first_positive_int((usage.get("prompt_tokens"),))
-    if prompt_total is not None:
-        return prompt_total
-
-    input_total = _first_positive_int((usage.get("input_tokens"),))
+    normalized = normalize_usage(response)
+    if normalized.protocol != "unknown":
+        return normalized.input_tokens
+    # 总输入缺报时，仅保留历史顶层独立缓存计数的兼容读法；不把它声明为已报总输入。
     separate_cache_read = _first_positive_int(
         (usage.get("cache_read_input_tokens"),)
     )
@@ -112,8 +109,6 @@ def provider_visible_input_token_usage(response: object) -> int | None:
             usage.get("cache_write_input_tokens"),
         )
     )
-    if input_total is not None:
-        return input_total + (separate_cache_read or 0) + (separate_cache_write or 0)
     if separate_cache_read is None and separate_cache_write is None:
         return None
     return (separate_cache_read or 0) + (separate_cache_write or 0)
@@ -154,15 +149,29 @@ def cache_creation_input_token_usage(response: object) -> int:
 # 函数用途: 读取缓存命中或写入的可空值，避免按字段来源和原计数采用不同协议规则。
 def _reported_cache_token_value(response: object, *, write: bool) -> int | None:
     usage = response_usage(response)
-    nested_fields = ("cache_creation_tokens", "cache_write_tokens") if write else ("cached_tokens", "cache_read_tokens")
+    nested = _nested_cache_token_value(usage, write=write)
+    if nested is not None:
+        return nested
     top_fields = ("cache_creation_input_tokens", "cache_write_input_tokens") if write else ("cache_read_input_tokens", "cached_input_tokens")
+    top = _first_positive_int(tuple(usage.get(name) for name in top_fields))
+    if top is not None:
+        return top
+    # 只在供应商明确报告有效 prompt 总数时采用最低优先级别名，真实零同样优先。
+    if not write and _first_positive_int((usage.get("prompt_tokens"),)) is not None:
+        return _first_positive_int((usage.get("prompt_cache_hit_tokens"),))
+    return None
+
+
+def _nested_cache_token_value(usage: Mapping[str, object], *, write: bool) -> int | None:
+    """共用嵌套别名顺序，缺失与已报告零保持分开。"""
+    nested_fields = ("cache_creation_tokens", "cache_write_tokens") if write else ("cached_tokens", "cache_read_tokens")
     for key in ("input_tokens_details", "prompt_tokens_details"):
         details = usage.get(key)
         if isinstance(details, Mapping):
             value = _first_positive_int(tuple(details.get(name) for name in nested_fields))
             if value is not None:
                 return value
-    return _first_positive_int(tuple(usage.get(name) for name in top_fields))
+    return None
 
 
 # LLM: 只声明已有有效 token 字段；信封存在、估算回退和真实零互不等价，DecisionResponse 不必伪造 text 或生成接口。
