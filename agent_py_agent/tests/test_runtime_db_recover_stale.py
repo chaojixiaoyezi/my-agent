@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -80,6 +81,8 @@ def test_dead_pid_recovered_to_unknown(tmp_path):
         assert attempt["ended_at"] > 0
 
 
+# LLM: W2 的恢复资格投影增加版本和交接字段；完整核对阻塞事实，动态版本必须稳定且随人工恢复改变。
+# 函数用途: 验证崩溃主链在显式恢复前被阻塞，恢复后才能创建新 attempt。
 def test_stale_main_run_blocks_auto_mount_until_explicit_recovery(tmp_path):
     """崩溃归 unknown 后暴露结构化暂停；人工恢复同时复原 run 并允许新 attempt。"""
     repo = _make_repo(tmp_path)
@@ -102,15 +105,25 @@ def test_stale_main_run_blocks_auto_mount_until_explicit_recovery(tmp_path):
         )
 
     assert repo.recover_stale_attempts() == [rec["agent_run_id"]]
-    assert repo.main_agent_recovery_block_for_task(task_id) == {
+    block = repo.main_agent_recovery_block_for_task(task_id)
+    assert block is not None
+    source_revision = block["source_revision"]
+    assert isinstance(source_revision, str) and re.fullmatch(r"[0-9a-f]{64}", source_revision)
+    assert block == {
         "schema_version": "main-agent-recovery-block.v1",
         "reason": "unknown_run_status",
+        "reason_code": "unknown_run_status",
+        "eligible": False,
+        "source_revision": source_revision,
+        "next_check_at": None,
+        "handoff_ref": None,
         "task_id": task_id,
         "agent_run_id": rec["agent_run_id"],
         "attempt_id": rec["attempt_id"],
         "run_status": "unknown",
         "attempt_status": "unknown",
     }
+    assert repo.main_agent_recovery_block_for_task(task_id, expected_revision=source_revision) == block
 
     recovered = repo.recover_attempt_unknown(
         rec["attempt_id"],
@@ -122,6 +135,7 @@ def test_stale_main_run_blocks_auto_mount_until_explicit_recovery(tmp_path):
     assert recovered["recovered"] is True
     assert recovered["run_status"] == "created"
     assert repo.main_agent_recovery_block_for_task(task_id) is None
+    assert repo.recovery_eligibility_for_task(task_id)["source_revision"] != source_revision
     next_attempt = repo.create_attempt(rec["agent_run_id"])
     assert next_attempt["attempt_id"] != rec["attempt_id"]
 
