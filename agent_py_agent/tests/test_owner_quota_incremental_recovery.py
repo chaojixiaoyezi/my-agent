@@ -1304,9 +1304,10 @@ def test_r8_agent_writable_out_of_band_changes_stay_fail_closed(tmp_path, change
 
 
 # LLM: R7-Q1：维护写完状态后在不阻塞的配额锁下刷新所在目录行：干净完整的表核过后写回当前目录戳；无账不建锁文件、
-#   脏账不改账。账脏时维护下一拍就到期续作对账，不等整天周期。
+#   脏账不改账。首拍可因预算合法分片，必须完成原维护续作后再核日周期；账脏时仍下一拍续作，不等整天。
 # 函数用途: 验证宿主行刷新与待对账触发维护。
-def test_r8_maintenance_refreshes_host_rows_and_runs_while_quota_dirty(tmp_path):
+@pytest.mark.parametrize('quota_max_entries', [None, 1], ids=['default-budget', 'partial-first-slice'])
+def test_r8_maintenance_refreshes_host_rows_and_runs_while_quota_dirty(tmp_path, quota_max_entries):
     from agent_py_agent.agent.common.json_io import write_json_file_atomic_unlocked
     from agent_py_agent.agent.user_space import owner_maintenance as maintenance
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
@@ -1319,8 +1320,27 @@ def test_r8_maintenance_refreshes_host_rows_and_runs_while_quota_dirty(tmp_path)
     home = ensure_my_agent_home(tmp_path / 'home')
     owner = home.owner_home_dir
     quota.OwnerQuotaEnforcer(owner, max_bytes=1 << 30)
-    assert maintenance.run_owner_retention_if_due(home, now=3_000_000_000).ran
+    assert maintenance.run_owner_retention_if_due(
+        home, now=3_000_000_000, quota_max_entries=quota_max_entries).ran
     _r7_finish(owner)
+    state_path = owner / 'data' / 'maintenance.json'
+    if quota_max_entries == 1:
+        assert _r7_ledger(owner)['dirty_since'] is None
+        assert _r7_ledger(owner)['reconcile_cursor']['complete'] is True
+        assert json.loads(state_path.read_text())['maintenance_partial'] is True
+        assert maintenance.owner_maintenance_due(owner, now=3_000_000_060)
+    # 单项/时间预算都可能留下维护续作；只清配额账不会清除原维护状态里的这份责任。
+    for _ in range(100):
+        state = json.loads(state_path.read_text())
+        if state['maintenance_partial'] is False:
+            break
+        continued = maintenance.run_owner_retention_if_due(
+            home, now=3_000_000_000, quota_max_entries=4096, quota_max_ms=5000)
+        assert continued.ran and continued.retention is None
+    else:
+        pytest.fail(f'owner maintenance did not finish: {state}')
+    _r7_finish(owner)
+    assert json.loads(state_path.read_text())['maintenance_partial'] is False
     assert not maintenance.owner_maintenance_due(owner, now=3_000_000_060)
     write_json_file_atomic_unlocked(owner / 'data' / 'maintenance.json',
                                     {**json.loads((owner / 'data' / 'maintenance.json').read_text()), 'pad': 'p' * 64})
