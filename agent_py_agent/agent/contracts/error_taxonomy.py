@@ -78,6 +78,21 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint='恢复资格未获原权威事实确认；核对源版本、原尝试及交接引用，不解释文案、不重放未知操作，claim 时须重新校验。',
     ) for reason in RecoveryBlockReason},
+    'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE': ErrorContract(
+        code='SCHEDULER_EXECUTION_TARGET_UNAVAILABLE', category='state', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='定时执行目标工具或资产当前不可用；核对原 workflow/script 是否存在并启用，不改走模型执行，也不重放已开始的业务。',
+    ),
+    'SCHEDULER_EXECUTION_DEFINITION_STALE': ErrorContract(
+        code='SCHEDULER_EXECUTION_DEFINITION_STALE', category='state', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='计划固定的资产定义已变化；需显式更新计划的执行定义引用后再运行，不自动采用新定义。',
+    ),
+    'WORKFLOW_EXECUTION_FAILED': ErrorContract(
+        code='WORKFLOW_EXECUTION_FAILED', category='execution', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='工作流在断点处失败；用 inspect_run 查看断点与修复指南，按 resume_options 显式恢复，不整条重跑已完成步骤。',
+    ),
     'SCHEDULER_DEFINITION_GENERATION_CONFLICT': ErrorContract(
         code='SCHEDULER_DEFINITION_GENERATION_CONFLICT', category='state', retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

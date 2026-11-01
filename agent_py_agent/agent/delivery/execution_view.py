@@ -7,8 +7,10 @@ from itertools import islice
 
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 
-MAX_EXECUTION_STEPS = 100
+# 进度卡片执行投影最多保留的步骤数。
+MAX_EXECUTION_STEPS_COUNT = 100
 MAX_EXECUTION_EVENTS = 2000
+# 单个步骤标签的最大字节数，超出即截断。
 MAX_LABEL_BYTES = 240
 _TERMINAL_PHASES = frozenset({"finished", "completed", "succeeded", "failed", "cancelled", "interrupted", "denied", "blocked", "skipped"})
 _CONFIRMED_RESULT_STATUSES = frozenset({"succeeded", "failed", "cancelled", "skipped"})
@@ -18,7 +20,7 @@ _CONFIRMED_RESULT_STATUSES = frozenset({"succeeded", "failed", "cancelled", "ski
 # 函数用途: 生成按首次观察排序的有界步骤；终态冻结，未知总量不从已观察数反推。
 def project_execution_view(events, *, request_id: str, source_revision: int | None = None,
                            total_steps: int | None = None, max_steps: int = 50) -> dict:
-    limit = max(1, min(MAX_EXECUTION_STEPS, max_steps))
+    limit = max(1, min(MAX_EXECUTION_STEPS_COUNT, max_steps))
     steps, seen = {}, set()
     request_phase, events_truncated = "unknown", False
     for index, event in enumerate(islice(events, MAX_EXECUTION_EVENTS + 1)):

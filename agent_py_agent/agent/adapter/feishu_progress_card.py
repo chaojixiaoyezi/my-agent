@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from itertools import islice
 
-from ..delivery.execution_view import MAX_EXECUTION_STEPS, bounded_text
+from ..delivery.execution_view import MAX_EXECUTION_STEPS_COUNT, bounded_text
 
 # 比渠道 30KB 限制留余量；同时按 ASCII 转义的保守序列化体积核对，中文和控制字符不能穿透预算。
 MAX_CARD_JSON_BYTES = 28_000
@@ -20,7 +20,7 @@ def render_progress_card(snapshot) -> dict:
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     raw_steps = snapshot.get("steps", ())
     raw_steps = raw_steps if isinstance(raw_steps, (list, tuple)) else ()
-    steps = [step for step in islice(raw_steps, MAX_EXECUTION_STEPS) if isinstance(step, Mapping)]
+    steps = [step for step in islice(raw_steps, MAX_EXECUTION_STEPS_COUNT) if isinstance(step, Mapping)]
     truncation = snapshot.get("truncation")
     truncation = truncation if isinstance(truncation, Mapping) else {}
     observed = _count(truncation.get("observed_steps"), default=len(raw_steps))

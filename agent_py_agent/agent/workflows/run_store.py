@@ -47,7 +47,7 @@ def execution_receipt(record, *, phase=None, effect_outcome=None, definition_ref
 
 # LLM: 旧DTO上的增量属性不由dataclasses.replace携带；只复制同一原运行的回执，不创造执行事实。
 # 函数用途: 替换运行字段时保留定义身份与已记录执行阶段，兼容W12正式字段。
-def replace_run_record(record, **changes):
+def replace_run_record(record, changes):
     updated = replace(record, **changes)
     for name in ('phase', 'effect_outcome', 'execution_definition_ref'):
         if name not in changes and hasattr(record, name):
@@ -202,8 +202,8 @@ class WorkflowRunStore:
             if step_record.step_id not in {step.step_id for step in record.steps}:
                 raise ValueError('运行中不存在该步骤')
             self._write_step(workflow_run_id, step_record)
-            record = replace_run_record(record, current_step_id=step_record.step_id,
-                             steps=tuple(step_record if s.step_id == step_record.step_id else s for s in record.steps))
+            record = replace_run_record(record, dict(current_step_id=step_record.step_id,
+                             steps=tuple(step_record if s.step_id == step_record.step_id else s for s in record.steps)))
             data = self._read(workflow_run_id, 'run.json')
             execution_receipt(record, phase='step_publish', effect_outcome=(
                 'unknown' if step_record.status not in ('pending', 'running') else getattr(record, 'effect_outcome', 'not_started')))

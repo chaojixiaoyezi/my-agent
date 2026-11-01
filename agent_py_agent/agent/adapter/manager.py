@@ -1195,7 +1195,7 @@ class ChannelManager:
                 return self._route_sensitive_command(msg)
             metadata = dict(getattr(msg, 'metadata', {}) or {})
             metadata.pop('reply_policy', None)
-            if self._reply_policy:
+            if self._reply_policy and metadata.get('feishu_chat_type') == 'group':
                 metadata['reply_policy'] = self._reply_policy
             if self._inbound_media_agent is not None:
                 from ..gateway_parts.request_owner_binding import (

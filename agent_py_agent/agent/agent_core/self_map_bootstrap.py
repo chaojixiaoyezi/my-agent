@@ -97,6 +97,66 @@ def _active_agent_workspace_root(agent):
     return getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None))
 
 
+# 脚本投递稳定键的版本前缀；编码口径一旦改变必须换版本，旧键仍命中原持久操作。
+_SCRIPT_DELIVERY_KEY_VERSION = 'script-delivery.v1'
+
+
+# LLM: 键只由可信owner、原逻辑run/task与脚本request_key规范编码；不含tool call、attempt、时间、正文、附件或目标，
+#   同一业务的重试/新调用复用同一原host-delivery操作。
+# 函数用途: 生成脚本投递在原宿主投递账上的稳定版本化幂等键。
+def _script_delivery_key(owner_id, run_id, task_id, request_key):
+    import hashlib
+
+    encoded = json.dumps([_SCRIPT_DELIVERY_KEY_VERSION, owner_id, run_id, task_id, request_key],
+                         ensure_ascii=False, separators=(',', ':'))
+    return f"{_SCRIPT_DELIVERY_KEY_VERSION}:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
+
+
+# LLM: owner/run/task/attempt/会话与渠道目标只在runner创建时由宿主Agent及当前run冻结，回调实参与脚本输出不能替换；
+#   无渠道的本地脚本不预先失败，只在exit=0后真正受理意向时才要求目标可用；宿主显式注入的端口优先。
+# 函数用途: 返回绑定本次冻结上下文的脚本投递端口，交原宿主持久投递并返回原操作回执。
+def _script_delivery_handler(agent, params):
+    override = getattr(agent, 'script_delivery_handler', None)
+    if callable(override):
+        return override
+    from ..capability.channel_message_target import resolve_message_target
+
+    frozen = {name: str(getattr(params, name, '') or '') for name in ('request_id', 'run_id', 'task_id', 'attempt_id')}
+    owner_id = str(getattr(agent.home_paths, 'owner_id', '') or '')
+    attributes = getattr(params, 'task_attributes', None)
+    thread_id = str(attributes.get('conversation_thread_id') or '') if isinstance(attributes, dict) else ''
+    try:
+        channel, target, _owner_root, target_error = resolve_message_target(agent, '')
+    except (OSError, ValueError):
+        channel, target, target_error = '', '', 'CHANNEL_TARGET_INVALID'
+
+    # LLM: 冻结上下文是唯一权威；当前活动run/attempt或owner已切换、回调run/task不符时拒绝，不改投其它运行或目标。
+    # 函数用途: 在脚本exit=0且产物核验后受理一条投递意向，返回原host-delivery操作引用与状态。
+    def admit(*, run_id, task_id, request_key, message, attachments):
+        from ..capability.channel_message_tool import deliver_host_script_intent
+        from ..conversation.channels import DeliveryContext, ReplyEnvelope
+
+        current = getattr(agent, '_current_run_params', None)
+        if (not frozen['run_id'] or (run_id, task_id) != (frozen['run_id'], frozen['task_id'])
+                or any(str(getattr(current, name, '') or '') != frozen[name] for name in ('run_id', 'task_id', 'attempt_id'))
+                or str(getattr(agent.home_paths, 'owner_id', '') or '') != owner_id):
+            raise ValueError('SCRIPT_DELIVERY_REQUEST_INVALID: 投递回调与冻结的宿主运行不一致')
+        if not isinstance(request_key, str) or not request_key.strip() or not isinstance(message, str):
+            raise ValueError('SCRIPT_DELIVERY_REQUEST_INVALID: 投递意向缺少稳定request_key或正文')
+        if target_error or not channel or not target:
+            raise ValueError(f'{target_error or "CHANNEL_ADAPTER_UNAVAILABLE"}: 当前运行没有可用的宿主投递目标')
+        key = _script_delivery_key(owner_id, frozen['run_id'], frozen['task_id'], request_key)
+        receipt = deliver_host_script_intent(agent, DeliveryContext(
+            channel=channel, target=target, mode='proactive', request_id=frozen['request_id'],
+            thread_id=thread_id, task_id=frozen['task_id'], idempotency_key=key),
+            ReplyEnvelope(content=message, attachments=tuple(attachments)))
+        if not receipt.get('operation_ref'):
+            raise ValueError(f"{receipt.get('error_code') or 'CHANNEL_SEND_FAILED'}: 脚本投递未获宿主原持久受理")
+        return receipt
+
+    return admit
+
+
 # LLM: 配置来源只经中央投影；当前run及有效路径沿原运行边界，不接受脚本或工具实参声明身份。
 # 函数用途: 为本次脚本冻结工作区、来源擦洗和原宿主投递端口；缺公共投影时明确失败关闭。
 def _script_runtime_options(agent):
@@ -117,7 +177,7 @@ def _script_runtime_options(agent):
     return {'work_context': context,
         'host_credential_env_names': managed_secret_environment_names(agent.config),
         'host_exclusive_paths': host_exclusive_paths(agent.home_paths, agent.config),
-        'delivery_handler': getattr(agent, 'script_delivery_handler', None)}
+        'delivery_handler': _script_delivery_handler(agent, params)}
 
 
 # LLM: 仅投递至当前Owner已绑定且支持proactive的同一渠道；无通道返回no_channel，发送异常或失败返回unavailable。
@@ -132,8 +192,11 @@ def _agent_im_notifier(agent, notice):
     if not delivery.registry.capabilities_for(provider).proactive:
         return 'no_channel'
     title = str(notice.get('title') or notice.get('event_type') or 'notification')
+    import hashlib
+    digest = hashlib.sha256(json.dumps({'channel': provider, 'target': target, 'notice': notice}, ensure_ascii=False,
+        sort_keys=True, separators=(',', ':'), default=str).encode('utf-8')).hexdigest()
     receipt = delivery.deliver(
-        DeliveryContext(channel=provider, target=target, mode='proactive'),
+        DeliveryContext(channel=provider, target=target, mode='proactive', idempotency_key='asset-im:' + digest),
         ReplyEnvelope(content=f"[{title}] {notice.get('message', '')}".strip()),
     )
     return 'queued' if getattr(receipt, 'delivery_status', '') == 'sent' else 'unavailable'
