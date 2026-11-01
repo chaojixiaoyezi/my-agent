@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import json
 import time
+from contextvars import ContextVar
 from dataclasses import field, replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+# 每条实际车道独立保存“宿主是否注入测试时钟”；生产claim不复用整轮维护前的旧时间。
+_EXPLICIT_BACKGROUND_CLOCK = ContextVar("explicit_background_clock", default=True)
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..agent_core.orchestration.coordinator_policy import coordinator_tool_boundary_text
@@ -845,6 +849,25 @@ class BackgroundMainAgentRuntime:
             thread = self.store.threads.load(request.thread_id)
         if thread is None:
             raise KeyError(f"unknown conversation thread: {request.thread_id}")
+        if request.reason == "task_learning_completion":
+            from .session_tasks import retry_completed_task_learning
+
+            metadata = (request.wake_signal or {}).get("metadata") or {}
+            task = self.store.session_tasks.require(str(metadata.get("session_task_id") or ""))
+            proof = task.metadata.get("trusted_task_completion") or {}
+            if (thread.owner_id != str(self.agent.home_paths.owner_id) or task.target_thread_id != thread.thread_id
+                    or proof.get("completion_ref") != metadata.get("completion_ref")):
+                raise PermissionError("COMPLETION_WAKE_SCOPE_MISMATCH")
+            result = retry_completed_task_learning(self.agent, task.task_id)
+            if result["status"] == "pending":
+                raise BackgroundCapacityDeferred(result["reason"])
+            return BackgroundMainAgentReport(thread_id=thread.thread_id, task_id=request.task_id, reason=request.reason,
+                response="", route_channel="internal", route_target="", created_at=time.time(),
+                delivery_status="suppressed", delivery_reason="task_learning_queue_only", wake_handled=True)
+        from .background_team_lifecycle import background_identity_allows_work
+
+        if not background_identity_allows_work(thread, existing=True):
+            raise BackgroundCapacityDeferred("background_identity_not_available")
         channel, target = _resolve_delivery_route(
             thread,
             request,
@@ -1216,6 +1239,19 @@ def _close_out_session_task_turn(
                                   if isinstance(item.get('path'), str)),
             ),
         )
+        identity = execution.execution_identity or {}
+        if identity.get("run_id") and identity.get("attempt_id"):
+            from .session_tasks import (
+                confirm_background_task_completion,
+                retry_completed_task_learning,
+            )
+
+            repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+            if repo is not None and repo.business_context_for_execution(
+                    owner_id=str(agent.home_paths.owner_id), run_id=identity["run_id"], attempt_id=identity["attempt_id"]) is not None:
+                completion = confirm_background_task_completion(agent, run_id=identity["run_id"], attempt_id=identity["attempt_id"])
+                if completion is not None:
+                    retry_completed_task_learning(agent, completion.task_id)
         from .session_task_report import delegated_result_report_pending
 
         if delegated is not None:
@@ -2132,7 +2168,26 @@ def _run_params(
         carried_archive_tool_calls=carried_tool_calls,
         # 与前台同源的会话历史：后台切片不再只带一份有界摘要指针。
         conversation_history_seed=history_seed,
+        business_context=_business_context_from_wake(agent, thread_id, request),
     )
+
+
+def _business_context_from_wake(agent, thread_id: str, request: BackgroundRunRequest):
+    from .business_contracts import BusinessExecutionContext
+
+    session_task_id = _session_task_id_from_wake(request)
+    if not session_task_id or agent is None:
+        return None
+    task = agent.conversation_store.session_tasks.load(session_task_id)
+    if task is None or "business_context" not in task.metadata:
+        return None
+    context = BusinessExecutionContext.from_dict(task.metadata["business_context"])
+    thread = agent.conversation_store.threads.require(thread_id)
+    if (task.target_thread_id != thread_id or task.task_id != context.task_id
+            or context.owner_id != str(agent.home_paths.owner_id) or thread.owner_id != context.owner_id
+            or task.status in {"cancelled", "failed"}):
+        raise ValueError("business wake context identity mismatch")
+    return context
 
 
 # LLM: Only child lifecycle events continue the originating active turn. Restore rows by the
@@ -3691,8 +3746,12 @@ class _BackgroundSchedulerThreadLaneMixin:
     # 函数用途: 同步处理当前 owner 的全部就绪后台事件。
     def tick(self, *, now: float | None = None) -> list[BackgroundMainAgentReport]:
         current = now if now is not None else __import__("time").time()
-        self.prepare_tick(now=current)
-        return self._consume_ready_sources(now=current)
+        token = _EXPLICIT_BACKGROUND_CLOCK.set(now is not None)
+        try:
+            self.prepare_tick(now=current)
+            return self._consume_ready_sources(now=current)
+        finally:
+            _EXPLICIT_BACKGROUND_CLOCK.reset(token)
 
     # LLM: Preparation is model-free and is called only by the supervisor thread.
     # Gateway must disable inline orphan supervision because its independent
@@ -3716,6 +3775,12 @@ class _BackgroundSchedulerThreadLaneMixin:
         self._enqueue_scheduler_runs(now=current)
         self._reclaim_orphaned_attempts(now=current)
         self._enqueue_unfinished_task_resume_wakes(now=current)
+        from .session_tasks import repair_pending_completed_task_learning_wakes
+
+        try:
+            repair_pending_completed_task_learning_wakes(self.runtime.agent)
+        except Exception:
+            logging.getLogger(__name__).exception("原完成任务的学习唤醒发布待重试")
 
     # LLM: This read-only plan exposes conversation identities, never model content
     # or a second scheduling authority; durable claims still decide who executes.
@@ -3742,7 +3807,11 @@ class _BackgroundSchedulerThreadLaneMixin:
         if not normalized:
             return []
         current = now if now is not None else __import__("time").time()
-        return self._consume_ready_sources(now=current, target_thread_id=normalized)
+        token = _EXPLICIT_BACKGROUND_CLOCK.set(now is not None)
+        try:
+            return self._consume_ready_sources(now=current, target_thread_id=normalized)
+        finally:
+            _EXPLICIT_BACKGROUND_CLOCK.reset(token)
 
     # LLM: Consumption order stays wake -> observation -> policy, while an optional
     # thread filter turns the former owner-wide loop into a 会话运行时 session lane.
@@ -4247,7 +4316,7 @@ def _claim_scheduler_wake(
     result = scheduler.scheduler_service.claim_wake(
         signal,
         lease_seconds=scheduler.claim_ttl_seconds,
-        now=now,
+        now=now if _EXPLICIT_BACKGROUND_CLOCK.get() else time.time(),
     )
     if result.status == "stale":
         scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
@@ -4445,7 +4514,7 @@ def _handle_nonquota_wake_error(
         return
     pending = scheduler.store.wakes.pending_one(signal.wake_signal_id)
     cached = cached_owner_delivery(pending) if pending is not None else None
-    if cached is not None and frozen_owner_delivery(cached).external_sent:
+    if cached is not None:
         # 外发已发生、canonical未提交时保原wake；下一片只补账，不把业务失败关闭吞掉冻结回执。
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=observed_at)
@@ -4930,7 +4999,34 @@ def _background_claim_dependencies(
         lease_seconds=scheduler.claim_ttl_seconds,
         heartbeat_interval_seconds=scheduler.claim_heartbeat_interval_seconds,
         bound_delivery_turn=partial(delegated_turn_id, scheduler.store),
+        claim_clock=None if _EXPLICIT_BACKGROUND_CLOCK.get() else time.time,
+        pending_delivery=lambda kwargs: _has_pending_canonical_delivery(scheduler.store, kwargs),
+        after_slice=partial(_reconcile_background_lifecycle, scheduler.runtime.agent, scheduler.store),
     )
+
+
+def _reconcile_background_lifecycle(agent, store, thread_id):
+    from .background_team_lifecycle import background_identity, reconcile_background_identity
+
+    loader = getattr(getattr(store, "threads", None), "load", None)
+    if not callable(loader):
+        return
+    try:
+        thread = loader(thread_id)
+        if thread is not None and background_identity(thread) is not None:
+            reconcile_background_identity(agent, thread_id)
+    except Exception:
+        # 退休策略是附加收口。原片错误/取消与claim回执不能被盖掉；未改写身份仍留原账待核。
+        logging.getLogger(__name__).exception("后台身份收口待重试：thread_id=%s", thread_id)
+
+
+def _has_pending_canonical_delivery(store, kwargs: dict) -> bool:
+    wake = kwargs.get("wake_signal")
+    wake_id = wake.get("wake_signal_id") if isinstance(wake, dict) else getattr(wake, "wake_signal_id", "")
+    if not wake_id:
+        return False
+    pending = store.wakes.pending_one(wake_id)
+    return pending is not None and cached_owner_delivery(pending) is not None
 
 
 # LLM: 只按原信封 ID 读 pending 队列并核对 thread/task/reason；任一成员已消费则保留其余成员等待重新选批。
@@ -5636,6 +5732,22 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
     if not isinstance(wake, dict):
         return
     policy_id = str(wake.get("policy_id") or "").strip()
+    if wake.get("kind") == "observation_fallback":
+        thread_id, task_id = str(kwargs.get("thread_id") or ""), str(kwargs.get("task_id") or "")
+        if not task_id or wake.get("root_task_id") != task_id:
+            return
+        link, error = store.tasks.load_report(task_id)
+        if error or link is None or link.thread_id != thread_id or link.status not in {"completed", "failed", "cancelled", "interrupted"}:
+            return
+        events, errors = store.observations.recent_report(thread_id, limit=0)
+        if errors:
+            return
+        requested = set(wake.get("observation_ids") or ())
+        ids = [item.observation_id for item in events if item.observation_id in requested
+               and item.thread_id == thread_id and item.root_task_id == task_id]
+        if ids:
+            store.observations.mark_handled(thread_id, ids)
+        return
     if not policy_id:
         return
     try:

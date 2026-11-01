@@ -238,6 +238,126 @@ def session_task_tool_visible(home_paths: object, config: object) -> bool:
     return owner_kind == OWNER_KIND_MAIN and bool(config.session_task_admin_enabled)
 
 
+def cancel_owned_session_task(host, task, *, include_descendants=False):
+    """宿主已核原task/Owner；沿原精确停止和guidance回执，unknown不伪报停止。"""
+    from ..gateway_parts.session_task_stop import stop_session_task_turn
+    from .session_tasks import SESSION_TASK_TERMINAL_STATUSES, SessionTaskUpdate
+
+    store = host.conversation_store
+    current = store.session_tasks.require(task.task_id)
+    if (current.sender_thread_id, current.target_thread_id) != (task.sender_thread_id, task.target_thread_id):
+        raise PermissionError("SESSION_TASK_SCOPE_MISMATCH")
+    if any(store.threads.require(identifier).owner_id != str(host.home_paths.owner_id)
+           for identifier in (current.sender_thread_id, current.target_thread_id)):
+        raise PermissionError("OWNER_MISMATCH")
+    prior = current.metadata.get("cancellation_control", {}).get("outstanding_refs", [])
+    if current.status in SESSION_TASK_TERMINAL_STATUSES and not (current.status == "cancelled" and prior):
+        return {"operation_id": current.task_id, "state": "completed", "outstanding_refs": []}
+    outstanding = []
+    receipt = store.guidance.receipt(current.body_dedupe_key) if current.body_dedupe_key else None
+    if receipt is not None and receipt.status in {"pending", "rejected"}:
+        if receipt.status == "pending":
+            store.guidance.mark_status(current.body_dedupe_key, "rejected")
+    elif current.conversation_request_id:
+        stopped = stop_session_task_turn(host, target_thread=store.threads.require(current.target_thread_id),
+                                          turn_id=current.conversation_request_id)
+        if not stopped.confirmed:
+            outstanding.append(current.conversation_request_id)
+    else:
+        outstanding.append(current.task_id)
+    store.session_tasks.advance(current.task_id, SessionTaskUpdate(status="cancelled"))
+    if include_descendants:
+        page = store.session_tasks.list_page(limit=100)
+        if page["coverage"] != "complete" or page["next_cursor"] or page["load_errors"]:
+            outstanding.append("descendants:coverage_unknown")
+        for child in page["items"]:
+            if child.origin_task_id == current.task_id and child.status not in SESSION_TASK_TERMINAL_STATUSES:
+                result = cancel_owned_session_task(host, child, include_descendants=False)
+                outstanding.extend(result["outstanding_refs"])
+    outstanding = list(dict.fromkeys(outstanding))
+    store.session_tasks.record_cancellation_control(current.task_id, outstanding_refs=outstanding[:100])
+    return {"operation_id": current.task_id, "state": "pending" if outstanding else "completed",
+            "outstanding_refs": outstanding[:100]}
+
+
+def queue_owned_background_message(host, *, actor, target, text, operation_key, input_kind):
+    """只追加原guidance，标宿主消息来源而非user；回执是耐久受理，不是模型已消费。"""
+    from .background_team_lifecycle import background_identity_transition
+
+    with background_identity_transition(host.conversation_store, target.thread_id):
+        target = host.conversation_store.threads.require(target.thread_id)
+        return _queue_owned_background_message_locked(host, actor=actor, target=target, text=text,
+                                                      operation_key=operation_key, input_kind=input_kind)
+
+
+def _queue_owned_background_message_locked(host, *, actor, target, text, operation_key, input_kind):
+    from ..capability.config import CapabilityConfig
+    from ..capability.runtime_config_reload import capability_config_for_agent
+    from .background_team_lifecycle import background_identity, background_identity_allows_work
+    from .session_pair_rate import pair_limit_reached, record_pair_message
+
+    store = host.conversation_store
+    owner = str(host.home_paths.owner_id)
+    if actor.owner_id != owner or target.owner_id != owner or store.threads.require(actor.source_thread_id).owner_id != owner:
+        raise PermissionError("OWNER_MISMATCH")
+    identity = background_identity(target)
+    if identity is None or identity.identity_state in {"retired", "retiring"}:
+        raise ValueError("AGENT_NOT_AVAILABLE")
+    key = session_message_dedupe_key(actor.source_thread_id, target.thread_id, operation_key)
+    previous = store.guidance.receipt(key)
+    config = capability_config_for_agent(host) or CapabilityConfig()
+    if previous is None and pair_limit_reached(store, actor.source_thread_id, target.thread_id, int(config.session_pair_hourly_limit or 0)):
+        raise ValueError(SESSION_TASK_RATE_LIMIT)
+    store.guidance.append_once({"target_type": "thread", "target_id": target.thread_id, "message": text,
+        "sender": actor.source_thread_id, "priority": "normal", "delivery": "next_turn",
+        "metadata": {"origin_kind": SESSION_MESSAGE_ORIGIN_KIND, "origin_thread_id": actor.source_thread_id,
+                     "input_kind": input_kind, SESSION_MESSAGE_KEY_FIELD: key}}, dedupe_key=key)
+    if previous is None:
+        record_pair_message(store, actor.source_thread_id, target.thread_id)
+    if background_identity_allows_work(target):
+        store.wakes.raise_signal({"thread_id": target.thread_id, "reason": "session_message", "urgency": "normal",
+            "dedupe_key": key, "retain_handled": True,
+            "summary": "收到来自另一个会话的消息", "metadata": {"origin_kind": SESSION_MESSAGE_ORIGIN_KIND,
+                "origin_thread_id": actor.source_thread_id, SESSION_MESSAGE_KEY_FIELD: key}})
+    return {"request_id": operation_key, "operation_id": operation_key, "receipt_state": "accepted",
+            "target_thread_id": target.thread_id}
+
+
+def authorize_business_child(host, run_id, actor, operation):
+    from ..subagents.authorization_gate import OperationRequest, authorize_direct_child_operation
+
+    current = getattr(host, "_current_run_params", None)
+    requester = str(getattr(current, "run_id", "") or "")
+    if requester:
+        host.subagents.runtime_db.parent_execution_ref(owner_id=actor.owner_id, run_id=requester,
+                                                       attempt_id=str(current.attempt_id))
+    return authorize_direct_child_operation(host.subagents, OperationRequest(
+        operation, run_id, requester_owner=actor.owner_id, requester_run_id=requester))
+
+
+def control_business_subagent(host, service, action, params, *, actor, idempotency_key):
+    from ..subagents.cancellation import CancelSubagentTaskRequest, cancel_subagent_tree
+    from ..subagents.models import TaskStatus, task_status_in
+
+    operation = "send_guidance" if action == "subagents.messages.send" else "cancel"
+    task = authorize_business_child(host, params["run_id"], actor, operation)
+    if action == "subagents.messages.send":
+        if not task_status_in(task.status, {TaskStatus.PLANNING.value, TaskStatus.PENDING.value,
+                                          TaskStatus.RUNNING.value, TaskStatus.BLOCKED.value}):
+            raise ValueError("SUBAGENT_GUIDANCE_TARGET_NOT_RUNNING")
+        key = service._operation_key(actor, idempotency_key)
+        entry = host.conversation_store.guidance.append_once({"target_type": "agent_run", "target_id": task.id,
+            "message": params["text"], "sender": actor.source_thread_id, "priority": "normal", "delivery": "next_turn",
+            "metadata": {"origin_kind": "business_subagent_message"}}, dedupe_key="business-guidance:" + key)
+        return {"operation_id": entry.guidance_id, "receipt_state": "accepted"}
+    result = cancel_subagent_tree(host, CancelSubagentTaskRequest(task, params.get("reason", ""), source="business_api"))
+    failed = result.get("descendants", {}).get("failed", [])
+    refs = [str(row.get("run_id") or task.id) for row in failed]
+    if result.get("ok") is not True and not refs:
+        refs.append(task.id)
+    return {"operation_id": task.id, "state": "pending" if refs else "completed", "outstanding_refs": refs[:100]}
+
+
 __all__ = [
     "SESSION_MESSAGE_KEY_FIELD",
     "SESSION_MESSAGE_RELEASE_LIMIT",

@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from types import SimpleNamespace as _StoreDomain
 
+import pytest
+
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.capability_auto_grant import (
@@ -228,7 +230,7 @@ def test_capability_request_tool_keeps_special_request_open_for_parent():
         assert reloaded.capability_requests[0].status == "OPEN"
 
 
-def test_wake_sweep_auto_grants_and_redispatches():
+def test_wake_sweep_auto_grants_and_redispatches(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         agent, task = _agent_and_task(td)
         _record_request(agent, task)
@@ -247,11 +249,13 @@ def test_wake_sweep_auto_grants_and_redispatches():
 
         dispatch_calls: list[dict] = []
 
-        def _fake_dispatch(router, cfg, **kwargs):
-            dispatch_calls.append(kwargs)
-            return SimpleNamespace(records=[SimpleNamespace(step="runner", action="started")])
+        def _fake_start(host, tasks, options):
+            dispatch_calls.append([task.id for task in tasks])
+            return {"run_ids": [task.id for task in tasks], "status": "started"}
 
-        agent.dispatch_subagents = _fake_dispatch
+        from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+        monkeypatch.setattr(dispatch, "auto_start_tasks", _fake_start)
+        agent.dispatch_subagents = lambda *a, **k: pytest.fail("wake must not synchronously run child")
         signal = SimpleNamespace(
             metadata={"run_id": task.id},
             source_agent_id=task.id,
@@ -261,10 +265,7 @@ def test_wake_sweep_auto_grants_and_redispatches():
         assert summary["auto_granted"] == 1
         assert summary["redispatched"] == 1
         assert dispatch_calls
-        dispatch_params = dispatch_calls[0]["params"]
-        assert dispatch_params.apply is True
-        assert dispatch_params.start_runners is True
-        assert dispatch_params.include_run_ids == [task.id]
+        assert dispatch_calls == [[task.id]]
         reloaded = agent.subagents.load(task.id)
         assert reloaded.capability_requests[0].status == "GRANTED"
 

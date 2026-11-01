@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..common.json_io import read_json_object_report, write_private_json_object
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.opaque_id import validate_opaque_id
+from ..conversation.session_list_index import SessionListIndex
 from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ class SessionManager:
             last_active_channel=channel,
             metadata=metadata or {},
         )
+        self._list_index().publish(self._get_session_path(session_id))
         return session
 
     def load_session(self, session_id: str) -> Session | None:
@@ -79,6 +81,18 @@ class SessionManager:
 
     def save_session(self, session: Session) -> None:
         write_private_json_object(self._get_session_path(session.session_id), session.to_dict())
+        self._list_index().publish(self._get_session_path(session.session_id))
+
+    def _list_index(self) -> SessionListIndex:
+        def read(path):
+            session, error = _read_session_report(path, path.parent.name)
+            return session.to_dict() if session is not None else {}, error
+        return SessionListIndex(self._session_root, kind="session", reader=read)
+
+    def list_page(self, user_id: str | None = None, *, limit: int = 50, cursor: str | None = None) -> dict:
+        page = self._list_index().page(limit=limit, cursor=cursor,
+                                       filter_key=self.config.user_id if user_id is None else user_id)
+        return {**page, "items": [Session.from_dict(item) for item in page["items"]]}
 
     def touch_session(self, session_id: str, channel: str | None = None) -> bool:
         session = self.load_session(session_id)
@@ -120,6 +134,7 @@ class SessionManager:
 
         import shutil
         shutil.rmtree(session_dir)
+        self._list_index().publish(session_dir / "session.json")
         return True
 
     def session_exists(self, session_id: str) -> bool:

@@ -7,16 +7,22 @@
 # 模块用途: 保存派活状态及宿主typed原输入快照；正文仍仅guidance一份，模型不能改写原输入。
 from __future__ import annotations
 
+import hashlib
+import json
 import time
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import locked_json_path
 from ..gateway_parts.io import (
     read_json_file_report,
     update_json_file_atomic,
     write_json_file_atomic,
 )
+from .business_contracts import BusinessContextIntent, BusinessExecutionContext
 from .models import new_id
 from .store_io import safe_file_stem
 
@@ -31,6 +37,200 @@ SESSION_TASK_STATUSES = frozenset(
 )
 # 终态：写入后不再被普通生命周期改写（取消只能从非终态发起）。
 SESSION_TASK_TERMINAL_STATUSES = frozenset({SESSION_TASK_DONE, SESSION_TASK_FAILED, SESSION_TASK_CANCELLED})
+
+
+def _completion_execution(host, run_id, attempt_id):
+    repo = host.subagents.runtime_db
+    if repo is None:
+        raise ValueError("COMPLETION_AUTHORITY_REQUIRED")
+    owner = str(host.home_paths.owner_id)
+    ref = repo.parent_execution_ref(owner_id=owner, run_id=run_id, attempt_id=attempt_id)
+    context = repo.business_context_for_execution(owner_id=owner, run_id=run_id, attempt_id=attempt_id)
+    if context is None:
+        return None
+    task = host.conversation_store.session_tasks.require(context.task_id)
+    if (task.task_run_id != ref.task_run_id or BusinessExecutionContext.from_dict(task.metadata.get("business_context")) != context
+            or any(host.conversation_store.threads.require(t).owner_id != owner for t in (task.sender_thread_id, task.target_thread_id))):
+        raise PermissionError("COMPLETION_CONTEXT_MISMATCH")
+    return repo, ref, context, task
+
+
+def _live_completion_claim(host, ref, task):
+    from .claim_execution_binding import current_claim_execution
+
+    binding = current_claim_execution()
+    if binding is None or binding.thread_id != task.target_thread_id or binding.claims is not host.conversation_store.claims:
+        raise PermissionError("COMPLETION_CLAIM_REQUIRED")
+    claim, error = binding.claims.load_report(binding.thread_id, claim_scope_id=binding.claim_scope_id)
+    authority = claim.get("runtime_authority") or {}
+    if (error or claim.get("claim_id") != binding.claim_id or claim.get("status") != "running"
+            or claim.get("cancel_requested") is True or float(claim.get("expires_at") or 0) <= time.time()
+            or claim.get("thread_id") != task.target_thread_id or authority.get("run_id") != ref.run_id
+            or authority.get("agent_run_id") != ref.agent_run_id or authority.get("attempt_id") != ref.observed_attempt_id):
+        raise PermissionError("COMPLETION_CLAIM_MISMATCH")
+    return {"claim_ref": binding.claim_id, "thread_id": binding.thread_id,
+            "run_id": ref.run_id, "attempt_id": ref.observed_attempt_id, "task_run_id": ref.task_run_id}
+
+
+def _write_completion_metadata(host, task, updater):
+    def update(payload):
+        current = SessionTask.from_dict(payload)
+        if (current.task_id != task.task_id or current.task_run_id != task.task_run_id
+                or current.target_thread_id != task.target_thread_id or current.metadata.get("business_context") != task.metadata.get("business_context")):
+            raise ValueError("COMPLETION_CONTEXT_MISMATCH")
+        return replace(current, metadata=updater(current)).to_dict()
+    return SessionTask.from_dict(update_json_file_atomic(
+        host.conversation_store.session_tasks._path(task.task_id), update, require_existing=True))
+
+
+def stage_background_learning_candidate(host, *, params, candidate):
+    """W5真实finalize返回后保存候选摘要；不宣告completed、不入队、不调用学习模型。"""
+    if not isinstance(getattr(params, "business_context", None), BusinessExecutionContext) or params.source != "background_main_agent":
+        return
+    execution = _completion_execution(host, params.run_id, params.attempt_id)
+    if execution is None:
+        raise ValueError("COMPLETION_CONTEXT_REQUIRED")
+    _repo, ref, context, task = execution
+    if context != params.business_context or candidate.source != "background_main_agent":
+        raise PermissionError("COMPLETION_CONTEXT_MISMATCH")
+    proof = _live_completion_claim(host, ref, task)
+    if type(candidate.tool_rounds) is not int or candidate.tool_rounds < 0:
+        raise ValueError("COMPLETION_TOOL_ROUNDS_INVALID")
+    trajectory = json.dumps(candidate.archive_tool_calls, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value = {**proof, "tool_rounds": candidate.tool_rounds, "source_kind": "background_main_agent",
+             "trajectory_digest": hashlib.sha256(trajectory.encode()).hexdigest()}
+
+    def update(current):
+        if current.status in {SESSION_TASK_CANCELLED, SESSION_TASK_FAILED}:
+            return current.metadata
+        old = current.metadata.get("task_learning_candidate")
+        if old and old.get("attempt_id") == value["attempt_id"] and old != value:
+            raise ValueError("COMPLETION_CANDIDATE_CONFLICT")
+        return {**current.metadata, "task_learning_candidate": value}
+    _write_completion_metadata(host, task, update)
+
+
+def confirm_background_task_completion(host, *, run_id: str, attempt_id: str):
+    """只在原SessionTask终态+准确执行终态已落盘后铸造运输DTO；同claim原文件持久确认。"""
+    from .business_contracts import TrustedTaskCompletion
+
+    execution = _completion_execution(host, run_id, attempt_id)
+    if execution is None:
+        return None
+    repo, ref, context, task = execution
+    proof = _live_completion_claim(host, ref, task)
+    if task.status != SESSION_TASK_DONE:
+        return None
+    agent_run, attempt = repo.get_agent_run(ref.agent_run_id), repo.get_attempt(attempt_id)
+    if agent_run["status"] != "done" or attempt["status"] != "done" or not attempt["ended_at"]:
+        return None
+    candidate = task.metadata.get("task_learning_candidate")
+    if not isinstance(candidate, dict) or any(candidate.get(key) != value for key, value in proof.items()):
+        return None
+    digest = hashlib.sha256(json.dumps([context.owner_id, task.task_id, run_id, attempt_id,
+        proof["claim_ref"], candidate["trajectory_digest"]], separators=(",", ":")).encode()).hexdigest()
+    completion = TrustedTaskCompletion(context.owner_id, task.target_thread_id, task.task_id, run_id, attempt_id,
+        "completed", proof["claim_ref"], "completion-" + digest, context.space_id, context.project_ref,
+        candidate["source_kind"], candidate["tool_rounds"], task.result_refs, candidate["trajectory_digest"])
+
+    def update(current):
+        if current.status != SESSION_TASK_DONE or current.metadata.get("task_learning_candidate") != candidate:
+            raise ValueError("COMPLETION_STATE_CONFLICT")
+        previous = current.metadata.get("trusted_task_completion")
+        if previous is not None and previous != completion.to_dict():
+            raise ValueError("COMPLETION_IDENTITY_CONFLICT")
+        return {**current.metadata, "trusted_task_completion": completion.to_dict(), "task_completion_proof": proof,
+                "task_learning_enqueue": current.metadata.get("task_learning_enqueue", {"status": "pending", "reason": "awaiting_queue"})}
+    _write_completion_metadata(host, task, update)
+    repair_completed_task_learning_wake(host, task.task_id)
+    return completion
+
+
+def repair_completed_task_learning_wake(host, task_id):
+    """proof已落原task，只有原wake发布失败时补同一completion键；不重新铸证、不进入模型。"""
+    from .business_contracts import TrustedTaskCompletion
+
+    task = host.conversation_store.session_tasks.require(task_id)
+    raw = task.metadata.get("trusted_task_completion")
+    if raw is None or task.metadata.get("task_learning_enqueue", {}).get("status") != "pending":
+        return None
+    completion = TrustedTaskCompletion.from_dict(raw)
+    if not verify_trusted_task_completion(host, completion):
+        raise PermissionError("COMPLETION_PROOF_INVALID")
+    wake = host.conversation_store.wakes.raise_signal({
+        "thread_id": task.target_thread_id, "reason": "task_learning_completion", "urgency": "normal",
+        "summary": "原已完成任务的方法学习入队待确认", "dedupe_key": completion.completion_ref, "retain_handled": True,
+        "metadata": {"session_task_id": task.task_id, "completion_ref": completion.completion_ref}})
+    _write_completion_metadata(host, task, lambda current: {**current.metadata, "task_learning_wake_id": wake.wake_signal_id})
+    return wake
+
+
+def repair_pending_completed_task_learning_wakes(host):
+    """原调度维护每次只读一页定位引用；游标不是权威，失效重建，不扫描全部任务正文。"""
+    store = getattr(host, "conversation_store", None)
+    repo = getattr(getattr(host, "subagents", None), "runtime_db", None)
+    if repo is None or not callable(getattr(getattr(store, "session_tasks", None), "list_page", None)):
+        return
+    page = store.session_tasks.list_page(limit=16, cursor=getattr(host, "_completion_repair_cursor", None))
+    host._completion_repair_cursor = page["next_cursor"] if page["coverage"] != "expired" else None
+    for task in page["items"]:
+        if task.status == SESSION_TASK_DONE and task.metadata.get("task_learning_enqueue", {}).get("status") == "pending":
+            repair_completed_task_learning_wake(host, task.task_id)
+
+
+def verify_trusted_task_completion(host, completion) -> bool:
+    """W6消费时重核原证明及准确DB链；claim已换到别的任务也不能借最新claim替换原完成出处。"""
+    from .business_contracts import TrustedTaskCompletion
+
+    if not isinstance(completion, TrustedTaskCompletion) or completion.owner_id != str(host.home_paths.owner_id):
+        return False
+    try:
+        execution = _completion_execution(host, completion.run_id, completion.attempt_id)
+        if execution is None:
+            return False
+        repo, ref, context, task = execution
+        proof = task.metadata.get("task_completion_proof") or {}
+        return (task.status == SESSION_TASK_DONE and task.task_id == completion.task_id
+            and task.target_thread_id == completion.thread_id and context.space_id == completion.space_id
+            and context.project_ref == completion.project_ref and task.metadata.get("trusted_task_completion") == completion.to_dict()
+            and proof == {"claim_ref": completion.claim_ref, "thread_id": completion.thread_id, "run_id": ref.run_id,
+                          "attempt_id": completion.attempt_id, "task_run_id": ref.task_run_id}
+            and repo.get_agent_run(ref.agent_run_id)["status"] == "done" and repo.get_attempt(completion.attempt_id)["status"] == "done")
+    except (ValueError, TypeError, KeyError, PermissionError, FileNotFoundError):
+        return False
+
+
+def retry_completed_task_learning(host, task_id):
+    """只补原queue；原文件记本地重试责任，队列身份去重仍由W6原队列决定。"""
+    from .business_contracts import TrustedTaskCompletion
+
+    store = host.conversation_store.session_tasks
+    with locked_json_path(store._path(task_id).with_suffix(".learning")):
+        task = store.require(task_id)
+        raw = task.metadata.get("trusted_task_completion")
+        if raw is None:
+            return {"status": "ineligible", "reason": "canonical_completion_missing"}
+        completion = TrustedTaskCompletion.from_dict(raw)
+        if not verify_trusted_task_completion(host, completion):
+            raise PermissionError("COMPLETION_PROOF_INVALID")
+        previous = task.metadata.get("task_learning_enqueue") or {}
+        if previous.get("status") in {"enqueued", "duplicate", "ineligible", "conflict"}:
+            if task.metadata.get("task_learning_wake_id"):
+                host.conversation_store.wakes.mark_handled(task.metadata["task_learning_wake_id"])
+            return dict(previous)
+        try:
+            from ..capability.task_learning_bridge import enqueue_completed_task_learning
+        except ModuleNotFoundError as exc:
+            if exc.name != "agent_py_agent.agent.capability.task_learning_bridge":
+                raise
+            return {"status": "pending", "reason": "TASK_LEARNING_BRIDGE_UNAVAILABLE"}
+        result = enqueue_completed_task_learning(completion=completion, host=host)
+        if not isinstance(result, dict) or result.get("status") not in {"enqueued", "duplicate", "ineligible", "conflict"}:
+            raise ValueError("TASK_LEARNING_BRIDGE_INVALID_RESULT")
+        _write_completion_metadata(host, task, lambda current: {**current.metadata, "task_learning_enqueue": dict(result)})
+        if task.metadata.get("task_learning_wake_id"):
+            host.conversation_store.wakes.mark_handled(task.metadata["task_learning_wake_id"])
+        return result
 
 
 # LLM: 冻结值对象；正文只以 body_guidance_id 引用既有的 guidance 条目，不在这里复制第二份正文。
@@ -161,6 +361,70 @@ class SessionTaskStore:
     def __init__(self, storage: Any) -> None:
         self.storage = storage
 
+    def _list_index(self):
+        from .session_list_index import SessionListIndex
+
+        def read(path):
+            report = read_json_file_report(path, context="conversation.session_task.read")
+            if report.load_error is not None:
+                return {}, {"code": "SESSION_TASK_READ_FAILED", "path": str(path)}
+            try:
+                task = SessionTask.from_dict(report.payload or {})
+                if not task.task_id or self._path(task.task_id) != path:
+                    raise ValueError("task identity mismatch")
+                return task.to_dict(), None
+            except (ValueError, TypeError, KeyError):
+                return {}, {"code": "SESSION_TASK_INVALID", "path": str(path)}
+        return SessionListIndex(self._dir(), kind="session_task", reader=read)
+
+    def list_page(self, *, limit: int = 50, cursor: str | None = None, target_thread_id: str | None = None) -> dict:
+        page = self._list_index().page(limit=limit, cursor=cursor, filter_key=target_thread_id)
+        return {**page, "items": [SessionTask.from_dict(item) for item in page["items"]]}
+
+    def find_by_dedupe_key(self, key: str) -> SessionTask | None:
+        return self._find_by_dedupe_key(key)
+
+    def require(self, task_id: str) -> SessionTask:
+        task = self.load(task_id)
+        if task is None:
+            raise FileNotFoundError("SessionTask not found")
+        return task
+
+    def record_execution_cancellation_control(self, task_id: str, *, execution_ref, outstanding_refs: list[str]) -> SessionTask:
+        from .business_contracts import HostParentExecutionRef
+
+        if (not isinstance(execution_ref, HostParentExecutionRef) or not execution_ref.observed_attempt_id
+                or len(outstanding_refs) > 100 or any(type(ref) is not str or not ref for ref in outstanding_refs)):
+            raise ValueError("invalid execution cancellation references")
+
+        def update(payload):
+            task = SessionTask.from_dict(payload)
+            context = BusinessExecutionContext.from_dict(task.metadata.get("business_context"))
+            if task.task_id != task_id or task.task_run_id != execution_ref.task_run_id or context.owner_id != execution_ref.owner_id:
+                raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
+            previous = task.metadata.get("cancellation_control", {})
+            refs = list(dict.fromkeys([*previous.get("outstanding_refs", []), *outstanding_refs]))
+            if len(refs) > 100:
+                raise ValueError("cancellation reference limit")
+            return replace(task, metadata={**task.metadata, "cancellation_control": {
+                **previous, "outstanding_refs": refs, "execution_ref": execution_ref.to_dict()}}).to_dict()
+
+        return SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+
+    def record_cancellation_control(self, task_id: str, *, outstanding_refs: list[str]) -> SessionTask:
+        if len(outstanding_refs) > 100 or any(type(ref) is not str or not ref for ref in outstanding_refs):
+            raise ValueError("invalid cancellation references")
+
+        def update(payload):
+            task = SessionTask.from_dict(payload)
+            if task.task_id != task_id or task.status != SESSION_TASK_CANCELLED:
+                raise ValueError("SESSION_TASK_CANCEL_CONFLICT")
+            metadata = {**task.metadata, "cancellation_control": {
+                "conversation_request_id": task.conversation_request_id, "outstanding_refs": list(outstanding_refs)}}
+            return replace(task, metadata=metadata).to_dict()
+
+        return SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+
     # LLM: 目录不存在时按"没有任务"返回；读坏文件进 load_errors，不静默跳过。
     # 函数用途: 列出本 owner 的会话任务记录。
     def list_report(self, *, limit: int = 100) -> tuple[list[SessionTask], list[dict[str, Any]]]:
@@ -200,36 +464,94 @@ class SessionTaskStore:
     #   链深在调用方按 origin_task_id 结构化计算后传入校验结果，本方法不读模型给的深度。
     # LLM: 原输入上下文仅typed宿主参数可写；同dedupe必须同快照，模型Draft无此字段，重放不能借旧身份。
     # 函数用途: 新建原派活记录及可选不可变输入快照；同键重放严格核对输入，不新增账本。
-    def create(self, draft: SessionTaskDraft, *, now: float | None = None, host_message_context=None) -> SessionTask:
+    def create(self, draft: SessionTaskDraft, *, now: float | None = None, host_message_context=None,
+               business_context_intent: BusinessContextIntent | None = None,
+               business_context_factory: Callable[[str], BusinessExecutionContext] | None = None) -> SessionTask:
         from .host_message_context import CONTEXT_KEY, HostMessageContext
 
+        if (business_context_intent is None) != (business_context_factory is None):
+            raise ValueError("business intent/factory must be provided together")
+        if business_context_intent is not None:
+            if not isinstance(business_context_intent, BusinessContextIntent) or not callable(business_context_factory):
+                raise ValueError("invalid host business context")
+            self._validate_business_owner(draft, business_context_intent.owner_id)
         if host_message_context is not None and (not isinstance(host_message_context, HostMessageContext)
                 or host_message_context.actor.source_thread_id != draft.sender_thread_id):
             raise ValueError('原派活引用上下文身份无效')
         snapshot = host_message_context.to_record() if host_message_context is not None else None
         current = now if now is not None else time.time()
         key = str(draft.dedupe_key or "").strip()
-        replayed = self._replay_existing(key, draft)
-        if replayed is not None:
-            if replayed.metadata.get(CONTEXT_KEY) != snapshot:
-                raise ValueError('原派活幂等键与引用输入冲突')
-            return replayed
-        task = SessionTask(
-            task_id=new_id("stask"),
-            sender_thread_id=str(draft.sender_thread_id or ""),
-            target_thread_id=str(draft.target_thread_id or ""),
-            goal=str(draft.goal or ""),
-            body_guidance_id=str(draft.body_guidance_id or ""),
-            body_dedupe_key=str(draft.body_dedupe_key or ""),
-            dedupe_key=key,
-            origin_task_id=str(draft.origin_task_id or ""),
-            created_at=current,
-            updated_at=current,
-            metadata={CONTEXT_KEY: snapshot} if snapshot is not None else {},
-        )
-        write_json_file_atomic(self._path(task.task_id), task.to_dict())
-        self._write_lookup_indexes(key, str(draft.body_dedupe_key or "").strip(), task.task_id)
-        return task
+        intent = business_context_intent.to_dict() if business_context_intent else None
+        fingerprint = hashlib.sha256(json.dumps(
+            [draft.sender_thread_id, draft.target_thread_id, draft.goal, draft.origin_task_id,
+             draft.body_dedupe_key, snapshot, intent], sort_keys=True, ensure_ascii=False,
+            separators=(",", ":")).encode()).hexdigest()
+        # 独立的创建门覆盖预留、factory、canonical提交及原索引修复；不持有模型或网络调用。
+        gate = locked_json_path(self._dedupe_path(key).with_suffix(".create")) if key else nullcontext()
+        with gate:
+            replayed = self._replay_existing(key, draft)
+            if replayed is not None:
+                if (replayed.metadata.get(CONTEXT_KEY) != snapshot
+                        or replayed.metadata.get("business_context_intent") != intent
+                        or replayed.origin_task_id != draft.origin_task_id):
+                    raise ValueError("IDEMPOTENCY_CONFLICT: task input or business intent changed")
+                self._write_lookup_indexes(key, draft.body_dedupe_key, replayed.task_id)
+                return replayed
+            task_id = self._reserve_creation_id(key, fingerprint)
+            metadata = {CONTEXT_KEY: snapshot} if snapshot is not None else {}
+            if business_context_intent is not None:
+                context = business_context_factory(task_id)
+                if not isinstance(context, BusinessExecutionContext) or context.task_id != task_id:
+                    raise ValueError("business context task_id does not match reserved task_id")
+                if context.owner_id != business_context_intent.owner_id or not context.space_id:
+                    raise ValueError("business context owner/space mismatch")
+                if (business_context_intent.requested_space_id is not None
+                        and business_context_intent.requested_space_id != context.space_id
+                        or business_context_intent.project_ref != context.project_ref
+                        or business_context_intent.binding_id != context.binding_id):
+                    raise ValueError("business context selection conflicts with intent")
+                metadata.update(business_context_intent=intent, business_context=context.to_dict())
+            task = SessionTask(
+                task_id=task_id, sender_thread_id=str(draft.sender_thread_id or ""),
+                target_thread_id=str(draft.target_thread_id or ""), goal=str(draft.goal or ""),
+                body_guidance_id=str(draft.body_guidance_id or ""), body_dedupe_key=str(draft.body_dedupe_key or ""),
+                dedupe_key=key, origin_task_id=str(draft.origin_task_id or ""),
+                created_at=current, updated_at=current, metadata=metadata,
+            )
+            write_json_file_atomic(self._path(task.task_id), task.to_dict())
+            self._write_lookup_indexes(key, str(draft.body_dedupe_key or "").strip(), task.task_id)
+            self._list_index().publish(self._path(task.task_id))
+            return task
+
+    def _validate_business_owner(self, draft: SessionTaskDraft, owner_id: str) -> None:
+        from .store_threads import ThreadStore
+
+        threads = ThreadStore(self.storage)
+        for thread_id in (draft.sender_thread_id, draft.target_thread_id):
+            thread = threads.require(thread_id)
+            if thread.owner_id != owner_id:
+                raise ValueError("business task owner mismatch")
+
+    def _reserve_creation_id(self, key: str, fingerprint: str) -> str:
+        if not key:
+            return new_id("stask")
+        report = read_json_file_report(self._dedupe_path(key), context="session_task.reserve")
+        if report.load_error is not None:
+            raise ValueError("session task dedupe index is unreadable")
+        reservation = report.payload
+        if reservation:
+            if reservation.get("intent_fingerprint") != fingerprint:
+                raise ValueError("IDEMPOTENCY_CONFLICT: reserved task input changed")
+            task_id = reservation.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                raise ValueError("session task reservation is invalid")
+            return task_id
+        task_id = new_id("stask")
+        write_json_file_atomic(self._dedupe_path(key), {
+            "schema_version": "session_task_dedupe.v1", "task_id": task_id,
+            "intent_fingerprint": fingerprint,
+        })
+        return task_id
 
     # LLM: 幂等重放：同 dedupe_key 且同输入返回原记录（不新建、不改状态）；同键异文报错。
     # 函数用途: 按键重放一条已存在的会话任务；没有可重放的记录时返回 None。
@@ -285,6 +607,7 @@ class SessionTaskStore:
             updated_at=time.time(),
         )
         write_json_file_atomic(self._path(task_id), updated.to_dict())
+        self._list_index().publish(self._path(task_id))
         return updated
 
     # LLM: 绑定只在非终态且尚未绑定其它回合时生效；同回合重复确认幂等，不覆盖已有绑定。
@@ -343,9 +666,22 @@ class SessionTaskStore:
             return updated.to_dict()
 
         update_json_file_atomic(self._path(task_id), updater, require_existing=True)
+        self._list_index().publish(self._path(task_id))
         loaded = self.load(task_id)
         assert loaded is not None
         return loaded
+
+    def bind_execution(self, task_id: str, *, task_run_id: str, target_thread_id: str) -> SessionTask:
+        """反向locator可幂等修复；JSON与SQLite不是跨存储事务，失败必须阻止模型启动。"""
+        def bind(data):
+            task = SessionTask.from_dict(data)
+            if (task.target_thread_id != target_thread_id or not task_run_id
+                    or task.task_run_id and task.task_run_id != task_run_id):
+                raise ValueError("session task execution binding conflict")
+            return replace(task, task_run_id=task_run_id).to_dict()
+
+        payload = update_json_file_atomic(self._path(task_id), bind, require_existing=True)
+        return SessionTask.from_dict(payload)
 
     # LLM: 链深按 origin_task_id 结构化遍历，不信任模型传的深度；环或坏链返回一个足够大的值让调用方拒绝。
     # 函数用途: 计算一条任务在派活链上的深度（根为 0）。

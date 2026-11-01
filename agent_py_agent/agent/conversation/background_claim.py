@@ -91,6 +91,9 @@ class BackgroundClaimDependencies:
     close_out_source: Callable[[dict, str], None] | None = None
     bound_delivery_turn: Callable[[str], str] | None = None
     recovery_claim_scope: Callable | None = field(default=None, kw_only=True)
+    claim_clock: Callable[[], float] | None = field(default=None, kw_only=True)
+    pending_delivery: Callable[[dict], bool] | None = field(default=None, kw_only=True)
+    after_slice: Callable[[str], None] | None = field(default=None, kw_only=True)
 
 
 # LLM: 子代理归属必须来自调用方的 canonical 查询；此回执不调用主模型，也不替孩子续跑。
@@ -172,7 +175,7 @@ def run_claimed(
                     "task_id": kwargs.get("task_id", ""),
                     "reason": kwargs.get("reason", ""),
                     "lease_seconds": dependencies.lease_seconds,
-                    "now": kwargs.get("now"),
+                    "now": dependencies.claim_clock() if dependencies.claim_clock is not None else kwargs.get("now"),
                 }
             )
         if claim is None:
@@ -271,7 +274,8 @@ def run_with_heartbeat(
             attempt_status, admission = WAKE_CLAIM_NOT_EXECUTED, "im_subagent_capacity"
             return None
         except BaseException as exc:
-            status = "failed"
+            status = ("yielded" if dependencies.pending_delivery is not None and dependencies.pending_delivery(kwargs)
+                      else "failed")
             error = exc
             raise
         finally:
@@ -417,6 +421,8 @@ def _finish_slice(
             "now": now(),
         }
     finish_background_claim_inputs(dependencies.claims, request)
+    if dependencies.after_slice is not None:
+        dependencies.after_slice(str(kwargs["thread_id"]))
     if end.status == "failed" and end.error is not None and _counts_as_policy_failure(end.error):
         dependencies.record_policy_failure(kwargs)
     if end.status != "failed":

@@ -534,6 +534,13 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     # （run scope 的 task_id 兜底 = run_id），保证 require_authority 的
     # tasks.task_id 比对与调用者声明一致，无需再回存 runtime_authority attrs。
     task_id = str(params.task_id or run_id).strip()
+    business_metadata = _verified_business_task_metadata(agent, params, owner_id)
+    if business_metadata and not params.task_id:
+        # 一个持久thread会先后接多件工作；线程级bg-main编号不能把它们混进第一件TaskRun。
+        # 准确业务任务仍用stask编号，SQLite运行任务使用独立命名空间，不假定两种task_id相等。
+        task_id = "business-" + business_metadata["session_task_ref"]
+        run_id = "bg-business-" + business_metadata["session_task_ref"]
+        params = replace(params, task_id=task_id, run_id=run_id)
     row = repo.agent_run_for_run_id(run_id)
     if row is not None and repo.task_id_for_run_id(run_id) != task_id:
         # 旧版本曾把同一 thread 的所有后台轮都登记成 bg-main-{thread_id}。
@@ -557,11 +564,17 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
             thread_id=str(attrs.get("conversation_thread_id") or "").strip(),
             run_id=run_id,
             role="main",
+            **({"task_run_metadata": business_metadata} if business_metadata else {}),
         )
         attempt_id = str(record.get("attempt_id") or "").strip()
         agent_run_id = str(record.get("agent_run_id") or "")
         authority_run_id = run_id
     else:
+        if business_metadata:
+            stored = repo.business_context_for_execution(owner_id=owner_id, run_id=str(row["run_id"]),
+                                                          attempt_id=str(row["current_attempt_id"]))
+            if stored != params.business_context:
+                raise ValueError("business execution snapshot conflicts with canonical TaskRun")
         params = _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params)
         attempt = repo.create_attempt(str(row["agent_run_id"]))
         attempt_id = str(attempt["attempt_id"] or "").strip()
@@ -569,6 +582,17 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
         authority_run_id = str(row["run_id"] or "")
     if not attempt_id:
         return params
+    if business_metadata:
+        try:
+            row = repo.agent_run_for_run_id(authority_run_id)
+            agent.conversation_store.session_tasks.bind_execution(
+                business_metadata["session_task_ref"], task_run_id=str(row["task_run_id"]),
+                target_thread_id=str(attrs.get("conversation_thread_id") or ""))
+        except Exception:
+            # 跨存储只保留原TaskRun与准确待修locator；关闭本轮，重放仍可补原绑定，不另建任务。
+            repo.settle_agent_attempt(agent_run_id=agent_run_id, attempt_id=attempt_id,
+                payload={"runtime_status": "not_started", "runtime_reason": "business_locator_commit_pending"})
+            raise
     publish = getattr(params.conversation_task_binding_callback, "bind_runtime_authority", None)
     if callable(publish):
         try:
@@ -588,7 +612,40 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
                 ),
             )
             raise
-    return replace(params, run_id=authority_run_id, attempt_id=attempt_id)
+    bound = replace(params, run_id=authority_run_id, attempt_id=attempt_id)
+    return bound
+
+
+def _verified_business_task_metadata(agent, params: RunParams, owner_id: str) -> dict:
+    from ..conversation.business_contracts import BusinessExecutionContext
+
+    context = params.business_context
+    if context is None:
+        return {}
+    store = getattr(agent, "conversation_store", None)
+    task = store.session_tasks.load(context.task_id) if store is not None else None
+    thread_id = (params.task_attributes or {}).get("conversation_thread_id")
+    if (task is None or task.target_thread_id != thread_id or context.owner_id != owner_id
+            or task.status in {"cancelled", "failed"}
+            or BusinessExecutionContext.from_dict(task.metadata.get("business_context")) != context):
+        raise ValueError("unverified canonical business task context")
+    for tid in (task.sender_thread_id, task.target_thread_id):
+        if store.threads.require(tid).owner_id != owner_id:
+            raise ValueError("business task owner mismatch")
+    return {"business_context": context.to_dict(), "session_task_ref": task.task_id}
+
+
+def _restore_business_execution_context(agent, params: RunParams) -> RunParams:
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    loader = getattr(repo, "business_context_for_execution", None)
+    if not callable(loader) or not params.run_id or not params.attempt_id:
+        if params.business_context is not None:
+            raise ValueError("business execution has no reliable runtime binding")
+        return params
+    context = loader(owner_id=str(agent.home_paths.owner_id), run_id=params.run_id, attempt_id=params.attempt_id)
+    if params.business_context is not None and params.business_context != context:
+        raise ValueError("business execution snapshot conflicts with canonical TaskRun")
+    return replace(params, business_context=context)
 
 
 # 审计账本终态别名：运行时语义 → agent_runs 终态串（只认结构化字段）。
@@ -853,6 +910,7 @@ def _bind_main_agent_turn_params(
             raise InterruptedError("当前任务已停止，未创建新执行轮")
         bound = _bind_main_agent_authority(agent, params)
         try:
+            bound = _restore_business_execution_context(agent, bound)
             return attach_run_task_workspace_context(agent, bound, user_prompt)
         except Exception as exc:
             if bound.attempt_id and bound.attempt_id != params.attempt_id:
@@ -1001,6 +1059,10 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             _log_run_stage("loop_done", params, started_mono=_run_stage_started)
             ctx = agent._build_finalize_context(root_user_prompt, prepared, loop_result, params)
             result = agent._get_finalization_service().finalize(ctx)
+            if params.business_context is not None and str(getattr(result, "runtime_status", "")) == "ok":
+                from ..conversation.session_tasks import stage_background_learning_candidate
+
+                stage_background_learning_candidate(agent, params=params, candidate=ctx)
             result.native_compact_carry = loop_result.native_compact_carry
             _log_run_stage("finalize_done", params, started_mono=_run_stage_started)
             return result

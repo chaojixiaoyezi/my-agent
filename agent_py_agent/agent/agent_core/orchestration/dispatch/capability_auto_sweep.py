@@ -84,7 +84,7 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
             # wake handler.
             summary["redispatched"] = int(auto_start_orphan_run(agent, run_id).get("started") or 0)
         else:
-            summary["redispatched"] = _redispatch_stalled_subagents(agent)
+            summary["redispatched"] = int(auto_start_stalled_orphans(agent).get("started") or 0)
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("capability auto sweep redispatch failed", exc_info=True)

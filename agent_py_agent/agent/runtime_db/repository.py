@@ -79,6 +79,7 @@ from ..common.heartbeat import (
 )
 from ..common.id_generator import new_id
 from ..common.strict_json import load_strict_json
+from ..conversation.business_contracts import BusinessExecutionContext, HostParentExecutionRef
 from ..scheduler.repository import (
     _process_state as _proc_state,
 )
@@ -558,6 +559,8 @@ class RuntimeRepository(
         role: str = "",
         parent_run_id: str = "",
         attempt_status: str = "running",
+        task_run_metadata: dict[str, Any] | None = None,
+        host_parent_execution: HostParentExecutionRef | None = None,
     ) -> dict[str, str]:
         """create_run 权威主链写入（单事务）。
 
@@ -584,12 +587,38 @@ class RuntimeRepository(
         if normalized_attempt_status not in {ATTEMPT_STATUS_PENDING, "running"}:
             raise ValueError(f"不支持的初始 attempt 状态: {attempt_status!r}")
         with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            metadata = json.loads(json.dumps(task_run_metadata or {}, ensure_ascii=False))
+            if "business_context" in metadata:
+                context = BusinessExecutionContext.from_dict(metadata["business_context"])
+                if context.owner_id != owner_id or metadata.get("session_task_ref") != context.task_id:
+                    raise ValueError("business context owner/session_task_ref mismatch")
+            if host_parent_execution is not None:
+                parent = self._validated_parent_execution(conn, owner_id, host_parent_execution)
+                if parent_run_id and parent_run_id != host_parent_execution.run_id:
+                    raise ValueError("host parent run_id conflicts with legacy parent")
+                parent_run_id = host_parent_execution.run_id
+                inherited = _json_object(parent["metadata_json"])
+                if metadata and metadata != inherited:
+                    raise ValueError("child business context conflicts with parent TaskRun")
+            elif parent_run_id:
+                parent = conn.execute(
+                    "SELECT t.owner_id FROM agent_runs ar JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
+                    "JOIN tasks t ON t.task_id=tr.task_id WHERE ar.run_id=?", (parent_run_id,)).fetchone()
+                if parent is not None and parent["owner_id"] != owner_id:
+                    raise ValueError("parent owner mismatch")
+                if metadata:
+                    raise ValueError("business child requires host parent execution proof")
+            existing_task = conn.execute("SELECT owner_id FROM tasks WHERE task_id=?", (conversation_task_id,)).fetchone()
+            if existing_task is not None and existing_task["owner_id"] != owner_id:
+                raise ValueError("task owner mismatch")
             result = create_run_chain(
                 conn,
                 RunCreation(
                     owner_id=owner_id, goal=goal, conversation_task_id=conversation_task_id,
                     thread_id=thread_id, run_id=run_id, role=role, parent_run_id=parent_run_id,
                     attempt_status=normalized_attempt_status,
+                    task_run_metadata=metadata,
                     attempt_metadata=(
                         _runner_identity_metadata()
                         if normalized_attempt_status == "running"
@@ -606,6 +635,54 @@ class RuntimeRepository(
                 conn.execute("UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?",
                              (json.dumps(meta, ensure_ascii=False), result["attempt_id"]))
             return result
+
+    @staticmethod
+    def _validated_parent_execution(conn, owner_id: str, parent: HostParentExecutionRef):
+        if not isinstance(parent, HostParentExecutionRef) or parent.owner_id != owner_id:
+            raise ValueError("host parent owner mismatch")
+        row = conn.execute(
+            "SELECT ar.*, tr.metadata_json, t.owner_id FROM agent_runs ar "
+            "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id "
+            "WHERE ar.agent_run_id=? AND ar.run_id=? AND ar.task_run_id=? AND t.owner_id=?",
+            (parent.agent_run_id, parent.run_id, parent.task_run_id, owner_id)).fetchone()
+        if row is None:
+            raise ValueError("host parent execution identity mismatch")
+        # 稳定父边不要求running；只有提供了观察attempt时才复核准确归属及当前指针。
+        if parent.observed_attempt_id is not None:
+            attempt = conn.execute("SELECT agent_run_id FROM agent_attempts WHERE attempt_id=?",
+                                   (parent.observed_attempt_id,)).fetchone()
+            if (attempt is None or attempt["agent_run_id"] != parent.agent_run_id
+                    or row["current_attempt_id"] != parent.observed_attempt_id):
+                raise ValueError("host parent attempt mismatch")
+        return row
+
+    def parent_execution_ref(self, *, owner_id: str, run_id: str,
+                             attempt_id: str | None = None) -> HostParentExecutionRef:
+        with self._runtime_connection() as conn:
+            row = conn.execute("SELECT agent_run_id,task_run_id FROM agent_runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError("host parent execution missing")
+            ref = HostParentExecutionRef(owner_id, run_id, row["agent_run_id"], row["task_run_id"], attempt_id)
+            self._validated_parent_execution(conn, owner_id, ref)
+            return ref
+
+    def business_context_for_execution(self, *, owner_id: str, run_id: str,
+                                        attempt_id: str) -> BusinessExecutionContext | None:
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT tr.metadata_json,t.owner_id,ar.agent_run_id,ar.current_attempt_id "
+                "FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id "
+                "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id "
+                "WHERE ar.run_id=? AND aa.attempt_id=?", (run_id, attempt_id)).fetchone()
+            if row is None or row["owner_id"] != owner_id or row["current_attempt_id"] != attempt_id:
+                raise ValueError("business execution run/attempt/owner mismatch")
+            metadata = _json_object(row["metadata_json"])
+            if "business_context" not in metadata:
+                return None
+            context = BusinessExecutionContext.from_dict(metadata["business_context"])
+            if context.owner_id != owner_id or metadata.get("session_task_ref") != context.task_id:
+                raise ValueError("business execution context/locator mismatch")
+            return context
 
     # LLM: 请求身份已经由宿主鉴权；查找、创建链和唯一事件必须在同一写事务，重复请求不换代。
     # 函数用途: 为显式管理命令登记或复用原 pending 运行，不启动模型或普通任务调度。

@@ -366,9 +366,29 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         context_packs=create_context_packs(raw_params),
         attributes=create_task_attributes(raw_params, request.agent),
         host_channel_actor=current_actor_for_child(request.agent),
+        **_host_execution_fields(request.agent),
         **_lineage_fields(raw_params, request.agent),
         parent_access_mode=_config_access_mode(request.agent),
     )
+
+
+def _host_execution_fields(agent) -> dict[str, object]:
+    current = getattr(agent, "_current_run_params", None)
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    context = getattr(current, "business_context", None)
+    run_id = getattr(current, "run_id", "")
+    attempt_id = getattr(current, "attempt_id", "")
+    resolver = getattr(repo, "parent_execution_ref", None)
+    if not callable(resolver) or not isinstance(run_id, str) or not run_id or not attempt_id:
+        if context is not None:
+            raise ValueError("business child requires current host parent execution proof")
+        return {}
+    owner_id = str(agent.home_paths.owner_id)
+    parent = resolver(owner_id=owner_id, run_id=run_id, attempt_id=attempt_id)
+    canonical = repo.business_context_for_execution(owner_id=owner_id, run_id=run_id, attempt_id=attempt_id)
+    if context is not None and context != canonical:
+        raise ValueError("business parent context conflict")
+    return {"host_parent_execution": parent, "business_context": canonical}
 
 
 def _lineage_fields(raw_params: dict[str, object], agent) -> dict[str, object]:

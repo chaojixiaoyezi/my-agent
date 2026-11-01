@@ -125,3 +125,102 @@ def test_list_report_sorted_by_created_at(store) -> None:
     tasks, errors = store.list_report()
     assert [t.goal for t in tasks] == ["1", "2"]
     assert errors == []
+
+
+def test_same_key_concurrent_creation_allocates_once(store, monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.conversation import session_tasks as module
+
+    original = module.new_id
+    allocated = []
+    lock = threading.Lock()
+
+    def allocate(prefix):
+        with lock:
+            allocated.append(prefix)
+        time.sleep(0.01)
+        return original(prefix)
+
+    monkeypatch.setattr(module, "new_id", allocate)
+    draft = SessionTaskDraft("A", "B", "same", dedupe_key="concurrent")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        tasks = list(pool.map(lambda _: store.create(draft), range(8)))
+    assert len({task.task_id for task in tasks}) == 1
+    assert allocated == ["stask"]
+
+
+def _business_store(tmp_path):
+    import inspect
+
+    from agent_py_agent.agent.conversation.business_contracts import (
+        BusinessContextIntent,
+        BusinessExecutionContext,
+    )
+
+    conversation = ConversationStore(tmp_path / "business")
+    source = conversation.threads.create(owner_id="owner", title="source")
+    target = conversation.threads.create(owner_id="owner", title="target")
+    store = conversation.session_tasks
+    assert "business_context_factory" in inspect.signature(store.create).parameters
+    draft = SessionTaskDraft(source.thread_id, target.thread_id, "business", dedupe_key="business-key")
+    intent = BusinessContextIntent("owner", None, None, None)
+    calls = []
+
+    def factory(task_id):
+        calls.append(task_id)
+        return BusinessExecutionContext("owner", "space-a", None, task_id, 1, None, (), (), "business-context.v1")
+
+    return store, draft, intent, factory, calls
+
+
+def test_business_replay_keeps_frozen_context_and_does_not_call_factory(tmp_path):
+    store, draft, intent, factory, calls = _business_store(tmp_path)
+    first = store.create(draft, business_context_intent=intent, business_context_factory=factory)
+    replay = store.create(draft, business_context_intent=intent,
+                          business_context_factory=lambda _: pytest.fail("default space must not be resolved again"))
+    assert replay.metadata["business_context"] == first.metadata["business_context"]
+    assert replay.metadata["business_context"]["task_id"] == first.task_id
+    assert calls == [first.task_id]
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        store.create(draft)
+
+
+def test_canonical_write_failure_preserves_reserved_id(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import session_tasks as module
+
+    store, draft, intent, factory, calls = _business_store(tmp_path)
+    writer = module.write_json_file_atomic
+    failed = False
+
+    def fail_once(path, payload, **options):
+        nonlocal failed
+        if path.parent == store._dir() and not failed:
+            failed = True
+            raise OSError("canonical EIO")
+        return writer(path, payload, **options)
+
+    monkeypatch.setattr(module, "write_json_file_atomic", fail_once)
+    with pytest.raises(OSError):
+        store.create(draft, business_context_intent=intent, business_context_factory=factory)
+    task = store.create(draft, business_context_intent=intent, business_context_factory=factory)
+    assert calls == [task.task_id, task.task_id]
+    assert len(store.list_report(limit=0)[0]) == 1
+
+
+def test_business_wrong_owner_intent_and_wrong_task_context_fail_closed(tmp_path):
+    from dataclasses import replace
+    store, draft, intent, factory, calls = _business_store(tmp_path)
+    with pytest.raises(ValueError, match="owner"):
+        store.create(draft, business_context_intent=replace(intent, owner_id="foreign"), business_context_factory=factory)
+    assert calls == []
+    with pytest.raises(ValueError, match="task_id"):
+        store.create(draft, business_context_intent=intent,
+                     business_context_factory=lambda task_id: replace(factory(task_id), task_id="forged"))
+    task = store.create(draft, business_context_intent=intent, business_context_factory=factory)
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        store.create(draft, business_context_intent=replace(intent, requested_space_id="space-b"),
+                     business_context_factory=factory)
+    assert store.load(task.task_id).metadata["business_context"]["space_id"] == "space-a"
