@@ -185,11 +185,12 @@ def _record_background_owner_response(
         delivery_artifacts=delivery_artifacts, assistant_commentaries=assistant_commentaries,
         evidence_refs=evidence_refs, message_metadata=message_metadata, delivery_status=delivery_status,
         receipt_id=str(getattr(receipt, 'receipt_id', '') or ''), target=delivery_context.target,
-        ownership=route.ownership, canonical_record=route.canonical_record or delivery_status == 'sent', persisted=False)
+        ownership=route.ownership, canonical_record=bool(route.canonical_record and origin_valid or delivery_status == 'sent'), persisted=False)
     if delivery_observer is not None:
         delivery_observer(freeze)
-    if delivery_status == 'sent' and delivery_observer is None:
-        # 原外发已发生，先保存已有wake的整封回执；canonical失败后只能补账，不能重执模型或运输。
+    if (delivery_status == 'sent' or freeze.canonical_record) and delivery_observer is None:
+        # 本地 origin 同样欠 canonical；在 commentary/final 的任何可能失败写入前冻结整封。
+        # local/none 的内部转录仍由 _freeze_pending_owner_delivery 明确排除，不混成外发义务。
         _freeze_pending_owner_delivery(delivery.store, freeze)
     commit = _commit_background_response(
         delivery,
@@ -318,6 +319,7 @@ def _freeze_pending_owner_delivery(
             "evidence_refs": list(freeze.evidence_refs),
             "message_metadata": dict(freeze.message_metadata),
             "external_sent": bool(status == "sent"),
+            "canonical_pending": canonical_pending,
             "receipt_id": freeze.receipt_id,
             "ownership": freeze.ownership,
             "last_delivery_status": status,
@@ -873,6 +875,12 @@ def cached_owner_delivery(signal: WakeSignal) -> dict[str, object] | None:
     if not has_body and not has_attachments:
         return None
     return dict(delivery)
+
+
+def has_recoverable_owner_delivery(signal: WakeSignal | None) -> bool:
+    """给原 wake 异常/claim 收口消费的事实；不只依赖 external_sent，不从正文猜成功。"""
+    cached = cached_owner_delivery(signal) if signal is not None else None
+    return cached is not None and (cached.get('external_sent') is True or cached.get('canonical_pending') is True)
 
 
 # LLM: 成功回执、来源交付标志和回执编号缺一不可；审计发现还须精确覆盖本次来源，不能按正文相似去重。

@@ -14,6 +14,8 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     from ..conversation.background_execution import _BackgroundRunControl
     from ..conversation.runtime import _background_task_attributes, _run_request
 
+    if _recover_tool_delivery(agent, service, claim, signal, kwargs):
+        return
     thread = agent.conversation_store.threads.require(claim.run['thread_id'])
     params = RunParams(request_id=claim.run_id, run_id=claim.run_id, task_id=claim.run_id,
         source='scheduler_tool', root_user_prompt=claim.run['name'],
@@ -50,7 +52,19 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     now = time.time()
     service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'completed' if confirmed else 'abandoned',
         'expected_status': 'active', 'now': now})
-    commit = _commit_tool_result(agent, service, claim, kwargs, output) if ok else None
+    try:
+        commit = _commit_tool_result(agent, service, claim, kwargs, output) if ok else None
+    except Exception:
+        from ..conversation.background_delivery import has_recoverable_owner_delivery
+        pending = service.conversation_store.wakes.pending_one(signal.wake_signal_id)
+        if not has_recoverable_owner_delivery(pending):
+            raise
+        # 已确认业务结果仍归原 run；释放进程 claim，保留同 wake，仅恢复原 frozen delivery。
+        parked = service.park_waiting(claim, response=output, delivery_status='canonical_pending',
+            delivery_reason='tool_rule_result', now=now)
+        if parked is None:
+            raise
+        return
     if commit is not None and commit.outbox_frozen:
         service.park_waiting(claim,response=output,delivery_status=commit.delivery_status,delivery_reason='tool_rule_result',now=now)
         return
@@ -65,7 +79,7 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
 
 # LLM: 工具结果与 LLM 结果共用原投递、来源校验、canonical 记录和冻结重投；通知失败不重跑业务工具。
 # 函数用途: 保存 NO 规则结果，显式 origin 才向原布置会话外发，其它模式只记内部历史。
-def _commit_tool_result(agent,service,claim,kwargs,output):
+def _commit_tool_result(agent,service,claim,kwargs,output, *, frozen_retry=None):
     from ..conversation.background_delivery import (
         BackgroundDeliveryDependencies,
         record_background_response,
@@ -81,4 +95,40 @@ def _commit_tool_result(agent,service,claim,kwargs,output):
     dependencies=BackgroundDeliveryDependencies(agent,service.conversation_store,agent.delivery_service,
         lambda _request: service.conversation_store.tasks.load(claim.run_id).status)
     return record_background_response(dependencies,request,context,output,deliver=True,
-        delivery_reason='tool_rule_result',local_transcript_only=scheduled_local_delivery(agent,request))
+        delivery_reason='tool_rule_result',local_transcript_only=scheduled_local_delivery(agent,request),
+        frozen_retry=frozen_retry,
+        delivery_artifacts=frozen_retry.delivery_artifacts if frozen_retry is not None else (),
+        assistant_commentaries=frozen_retry.assistant_commentaries if frozen_retry is not None else ())
+
+
+def _recover_tool_delivery(agent, service, claim, signal, kwargs):
+    """重入原工具入口先补同 wake 交付；绝不重新调用已成功的工具或模型。"""
+    from ..conversation.background_delivery import cached_owner_delivery, frozen_owner_delivery
+    pending = service.conversation_store.wakes.pending_one(signal.wake_signal_id)
+    if (pending is None or pending.root_task_id != claim.run_id
+            or pending.thread_id != claim.run['thread_id'] or pending.reason != signal.reason):
+        return False
+    cached = cached_owner_delivery(pending)
+    if cached is None:
+        return False
+    frozen = frozen_owner_delivery(cached)
+    now = time.time()
+    try:
+        commit = _commit_tool_result(agent, service, claim, kwargs, frozen.content, frozen_retry=frozen)
+    except Exception:
+        if service.park_waiting(claim, response=frozen.content, delivery_status='canonical_pending',
+                delivery_reason='tool_rule_result', now=now) is None:
+            raise
+        return True
+    if commit.outbox_frozen or not (commit.persisted or commit.delivery_status == 'sent'):
+        service.park_waiting(claim, response=frozen.content, delivery_status=commit.delivery_status,
+                             delivery_reason='tool_rule_result', now=now)
+        return True
+    terminal = service.finish(claim, status='done', response=frozen.content, delivery_status=commit.delivery_status,
+                              delivery_reason='tool_rule_result', now=now)
+    if terminal is not None:
+        service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
+        from ..conversation.task_run_closeout import settle_terminal_task_run
+        settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None),
+                                 service.conversation_store, task_id=claim.run_id)
+    return True

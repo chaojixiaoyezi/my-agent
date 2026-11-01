@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from pathlib import Path
 
 from ..assets import AssetPostCommitReadbackError
@@ -10,6 +11,11 @@ from ..assets.descriptor import asset_descriptor_from_definition
 from ..assets.skill_adapter import get_owner_skill_descriptor, list_owner_skill_descriptors
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..capability.skills import split_skill_frontmatter
+from ..workflows.business_scope import (
+    WORKFLOW_ACTION_FIELDS,
+    WORKFLOW_READ_ACTIONS,
+    validate_business_request,
+)
 from ..workflows.models import redact_bearer_values
 from ..workflows.run_store import WorkflowExecutionError
 from .models import BaseTool
@@ -91,11 +97,26 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_r
 # LLM: 路径由构造器Owner固定；纯schema沿tool_spec，运行/恢复/删除仍保持原危险动作分类。
 # 类用途: 对Agent暴露可管理和恢复的工作流工具。
 class WorkflowsTool(BaseTool):
-    ACTIONS = ('list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run', 'preview')
-    READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview')
+    ACTIONS = ('list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run', 'preview',
+               *WORKFLOW_ACTION_FIELDS)
+    READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview', *WORKFLOW_READ_ACTIONS)
     model_spec = _spec('workflows', '管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与断点续跑；步骤输出含_pause_for_resume=true可正常暂停等待确认，再用resume+patched_step_output续跑。',
         list(ACTIONS), {
             'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
+            'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 256},
+            **{key: {'type': 'string', 'minLength': 1, 'maxLength': 128}
+               for key in ('workflow_ref', 'space_id', 'project_ref', 'resolution_ref')},
+            'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 2048},
+            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
+            'query': {'type': 'string', 'maxLength': 256},
+            'scope_mode': {'type': 'string', 'enum': ['owner_global', 'spaces', 'unassigned', 'all']},
+            'lifecycle': {'type': 'string', 'enum': ['active', 'recycled', 'all']},
+            'protected': {'type': 'boolean'},
+            'policy': {'type': 'object'},
+            'scope': {'type': 'object', 'properties': {
+                'scope_mode': {'type': 'string', 'enum': ['owner_global', 'spaces', 'unassigned']},
+                'space_ids': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}}},
+                'required': ['scope_mode', 'space_ids'], 'additionalProperties': False},
             'allow_script_drift': {'type': 'boolean', 'description': '显式确认恢复采用当前脚本版本'},
             **{key: {'type': 'string'} for key in ('workflow_id', 'step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
             'definition': {'type': 'object', 'description': (
@@ -107,13 +128,14 @@ class WorkflowsTool(BaseTool):
             'resolution_origin': {'type': 'string', 'enum': ['user', 'agent', 'system']},
             'updated_data_sources': {'type': ['object', 'array'], 'description': '断点续跑时更新的数据源配置'},
             'inputs': {'type': 'object', 'description': '工作流运行输入参数字典（可在step的condition或inputs_map中用step_id="$inputs"引用）'}})
-    runtime_policy = _policy('workflows', READ_ONLY_ACTIONS, ('run', 'resume', 'delete'))
+    runtime_policy = _policy('workflows', READ_ONLY_ACTIONS, ('run', 'resume', 'delete', 'workflows.run',
+        'workflow_runs.resume', 'workflow_runs.cancel', 'workflows.recycle', 'workflows.cleanup.run'))
 
     # LLM: Owner与项目/快照/模型提供者仅由可信宿主注入，模型实参不能替换；无分析器不注入假实现。
     # 函数用途: 固定当前Owner及运行时依赖，构造阶段不执行资产。
     def __init__(self, owner_home: Path, *, store=None, engine=None, analysis_handler=None,
                  workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None, im_notifier=None,
-                 runner_options_provider=None):
+                 runner_options_provider=None, business_service=None, business_actor_provider=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
@@ -123,6 +145,8 @@ class WorkflowsTool(BaseTool):
         self.skill_snapshot_provider = skill_snapshot_provider
         self.workspace_root = workspace_root
         self.runner_options_provider = runner_options_provider
+        self.business_service, self.business_actor_provider = business_service, business_actor_provider
+        _owner(self.owner_home, getattr(business_service, 'store', None))
 
     # LLM: 每次run/resume冻结当前宿主上下文到本次浅拷贝engine，整次调用只用它；缓存engine仅共享RunStore/回调/解析器，
     #   不承载任一调用的runner，等待中的运行不会改用后启动运行的身份或路径范围；显式注入执行器保持原样。
@@ -147,7 +171,50 @@ class WorkflowsTool(BaseTool):
     # LLM: 与直接execute共用无副作用预检，避免缺参动作先进入写操作账。
     # 函数用途: 按动作验证条件必填和参数Schema。
     def validate_invocation(self, params, context):
+        if isinstance(params, dict) and params.get('action') in WORKFLOW_ACTION_FIELDS:
+            from .input_schema import validate_tool_input
+            if not validate_tool_input(params, self.model_spec.input_schema).ok:
+                return _outcome('workflows', {'error': '参数不符合工具Schema'}, False, 'TOOL_INVALID_ARGUMENTS')
+            try:
+                validate_business_request(params['action'], self._business_request(params),
+                    expected_revision=params.get('expected_revision'), idempotency_key=params.get('idempotency_key', ''))
+            except (ValueError, TypeError) as exc:
+                return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
+            return None
         return _validate(self, params)
+
+    @staticmethod
+    def _business_request(params):
+        return {key: value for key, value in params.items()
+                if key not in ('action', 'expected_revision', 'idempotency_key')}
+
+    def _business_engine(self, owner_home, *, run_authorizer, agent_steps):
+        if Path(owner_home).absolute() != self.owner_home:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        engine = copy.copy(self._execution_engine())
+        original_authorizer = engine.run_authorizer
+
+        def authorize(record, phase):
+            previous = original_authorizer(record, phase) if callable(original_authorizer) else None
+            current = run_authorizer(record, phase)
+            return previous if current is None else current
+
+        engine.run_authorizer = authorize
+        if agent_steps is not None:
+            engine.agent_steps = agent_steps
+        return engine
+
+    def _dispatch_business(self, params):
+        if self.business_service is None or not callable(self.business_actor_provider):
+            raise PermissionError('WORKFLOW_BUSINESS_HOST_UNAVAILABLE')
+        _owner(self.owner_home, self.business_service.store)
+        backend = copy.copy(self.business_service)
+        if backend.engine_factory is None:
+            backend.engine_factory = self._business_engine
+        from ..workflows.datasource_runtime import bind_asset_im_notifier
+        with bind_asset_im_notifier(self.owner_home, self.im_notifier) if callable(self.im_notifier) else nullcontext():
+            return backend.execute(params['action'], self._business_request(params), actor=self.business_actor_provider(),
+                expected_revision=params.get('expected_revision'), idempotency_key=params.get('idempotency_key', ''))
 
     # LLM: 正式Store优先，默认每次绑定当前项目，模块损坏不回退；写入仍由Store显式scope裁决。
     # 函数用途: 延迟取得当前Owner工作流存储。
@@ -181,16 +248,21 @@ class WorkflowsTool(BaseTool):
         if invalid is not None:
             return invalid
         try:
-            data = _dispatch(self, params)
+            business = params['action'] in WORKFLOW_ACTION_FIELDS
+            data = self._dispatch_business(params) if business else _dispatch(self, params)
             ok = (params['action'] not in ('run', 'resume')
                   or data.get('status') == 'succeeded'
                   or (data.get('status') == 'paused_for_resume' and not data.get('needs_repair')))
+            if business:
+                ok = data.get('state') not in ('failed', 'blocked')
             return _outcome('workflows', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('workflows', exc)
         except WorkflowExecutionError as exc:
             return _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
                             effect_outcome=exc.receipt['effect_outcome'], failure_stage='execution')
+        except PermissionError as exc:
+            return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_PERMISSION_DENIED', effect_outcome='not_started')
         except (ValueError, KeyError, TypeError) as exc:
             if str(exc).startswith('ASSET_REVISION_CONFLICT:'):
                 return _outcome('workflows', {'error_code': 'ASSET_REVISION_CONFLICT', 'error': str(exc)},

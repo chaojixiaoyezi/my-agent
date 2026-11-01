@@ -2,6 +2,9 @@
 # 模块用途: 分层保存工作流、节点配置、Skill绑定和摘要，保留原scope/CAS及执行权限边界。
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass, field, replace
 
 from . import (
@@ -17,8 +20,9 @@ from .descriptor import AssetDescriptor, _Record, execution_definition_ref
 
 WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid",
                        "http_request", "script_transform", "condition", "tool_call", "llm_prompt", "subworkflow",
-                       "condition_branch", "approval_wait", "notification", "script")
+                       "condition_branch", "approval_wait", "notification", "script", "agent_task")
 WORKFLOW_ON_ERROR_POLICIES = ("escalate_to_agent", "fail", "skip")
+BUSINESS_WORKFLOW_METADATA = 'business_workflow'
 
 
 # LLM: 旧模式及调试别名/控制节点共用原值对象；config仅有限JSON，不承载回调、审批或执行授权。
@@ -137,10 +141,30 @@ class WorkflowStore(_AssetStore):
     # 函数用途: 写入已经校验的工作流，供多个写入口共用。
     def _save(self, definition):
         definition = with_workflow_step_refs(definition)
+        business = definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA)
+        if business is not None:
+            from ..workflows.orphan_maintenance import update_due_index
+            previous = self._get(definition.descriptor.id)
+            if previous is not None:
+                old_state = previous.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA, {})
+                if (business.get('last_content_edit_at') == old_state.get('last_content_edit_at')
+                        and (definition.execution_definition_ref != previous.execution_definition_ref
+                             or definition.body_markdown != previous.body_markdown
+                             or definition.descriptor.name != previous.descriptor.name)):
+                    business = json.loads(json.dumps(business))
+                    business['last_content_edit_at'] = time.time()
+                    if business['scope']['scope_mode'] == 'unassigned':
+                        business['orphan_since'] = business['last_content_edit_at']
+                    definition = replace(definition, descriptor=replace(definition.descriptor,
+                        metadata={**definition.descriptor.metadata, BUSINESS_WORKFLOW_METADATA: business}))
+            update_due_index(self, definition)
         payload = definition.descriptor.to_dict() | {"steps": [step.to_dict() for step in definition.steps],
                                                     "body_markdown": definition.body_markdown}
         self._write(payload, {"WORKFLOW.md": definition.body_markdown or None})
-        return self._readback_after_commit(definition.descriptor.id)
+        saved = self._readback_after_commit(definition.descriptor.id)
+        if business is not None:
+            update_due_index(self, saved, committed=True)
+        return saved
 
     # LLM: 输入共用严格from_any，显式scope选写根，CAS在锁内读取实际目标，投影路径不产生权限。
     # 函数用途: 创建或替换Owner/项目工作流，汇总引用并返回递增revision。
@@ -150,7 +174,57 @@ class WorkflowStore(_AssetStore):
         with target._locked():
             old = target._get(definition.descriptor.id)
             next_asset_revision(old.descriptor.to_dict() if old else None, expected_revision)
+            # 普通正文编辑不能借 metadata 改宿主范围、治理或操作回执。
+            metadata = dict(definition.descriptor.metadata)
+            metadata.pop(BUSINESS_WORKFLOW_METADATA, None)
+            if old and BUSINESS_WORKFLOW_METADATA in old.descriptor.metadata:
+                state = json.loads(json.dumps(old.descriptor.metadata[BUSINESS_WORKFLOW_METADATA]))
+                if (definition.execution_definition_ref != old.execution_definition_ref
+                        or definition.body_markdown != old.body_markdown
+                        or definition.descriptor.name != old.descriptor.name):
+                    state['last_content_edit_at'] = time.time()
+                    if state['scope']['scope_mode'] == 'unassigned':
+                        state['orphan_since'] = state['last_content_edit_at']
+                metadata[BUSINESS_WORKFLOW_METADATA] = state
+            definition = replace(definition, descriptor=replace(definition.descriptor, metadata=metadata))
             return target._save(definition)
+
+    def apply_business_operation(self, workflow_id, *, action, intent, idempotency_key,
+                                 expected_revision, revision_target, transform):
+        """宿主领域命令复用原资产事务；范围、正文和重放回执在同一 canonical JSON。"""
+        safe_asset_id(workflow_id)
+        if not isinstance(idempotency_key, str) or not 0 < len(idempotency_key.encode('utf-8')) <= 256:
+            raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
+        identity = hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()
+        raw = json.dumps({'action': action, 'intent': intent, 'expected_revision': expected_revision},
+                         sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+        fingerprint = hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        with self._locked():
+            previous = self._get(workflow_id)
+            state = (previous.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA, {}) if previous else {})
+            operations = dict(state.get('operations', {}))
+            if receipt := operations.get(identity):
+                if receipt['fingerprint'] != fingerprint:
+                    raise ValueError('IDEMPOTENCY_CONFLICT')
+                return json.loads(json.dumps(receipt['result']))
+            if revision_target is not None:
+                if previous is None:
+                    raise KeyError(workflow_id)
+                actual = (state.get('scope', {}).get('scope_revision', 0) if revision_target == 'scope'
+                          else previous.descriptor.revision)
+                if type(expected_revision) is not int or expected_revision != actual:
+                    raise ValueError(f'REVISION_CONFLICT: expected={expected_revision}, actual={actual}')
+            updated, result = transform(previous)
+            next_revision = next_asset_revision(previous.descriptor.to_dict() if previous else None)
+            # transform 用下个正式 revision 形成回执；读回 ACK 失败仍沿同键重放，不重复正文写。
+            result = json.loads(json.dumps(result, allow_nan=False))
+            state = json.loads(json.dumps(updated.descriptor.metadata[BUSINESS_WORKFLOW_METADATA]))
+            operations[identity] = {'fingerprint': fingerprint, 'result': result, 'revision': next_revision}
+            state['operations'] = operations
+            updated = replace(updated, descriptor=replace(updated.descriptor,
+                metadata={**updated.descriptor.metadata, BUSINESS_WORKFLOW_METADATA: state}))
+            self._save(updated)
+            return result
 
     # LLM: 项目冷读只用readonly视图，坏记录不回退；返回值不能决定后续更新写根。
     # 函数用途: 依项目、Owner、全局优先级读取工作流定义。
@@ -183,8 +257,11 @@ class WorkflowStore(_AssetStore):
     def delete_workflow(self, workflow_id):
         safe_asset_id(workflow_id)
         with self._locked():
-            if self._get(workflow_id) is None:
+            definition = self._get(workflow_id)
+            if definition is None:
                 return False
+            if BUSINESS_WORKFLOW_METADATA in definition.descriptor.metadata:
+                raise PermissionError('WORKFLOW_BUSINESS_RECYCLE_REQUIRED')
             return self._delete(workflow_id)
 
     # LLM: 仅本Owner原根锁/集合锁内改变运行闸；两层enabled同步，不修改步骤、凭据或运行快照。
@@ -234,6 +311,13 @@ class WorkflowStore(_AssetStore):
             definition = self._get(workflow_id)
             if definition is not None:
                 summary = next_run_summary(definition.descriptor.runtime_summary, status, duration_ms, run_at, last_error=last_error)
+                if BUSINESS_WORKFLOW_METADATA in definition.descriptor.metadata:
+                    state = json.loads(json.dumps(definition.descriptor.metadata[BUSINESS_WORKFLOW_METADATA]))
+                    state['last_run_at'] = time.time()
+                    if state['scope']['scope_mode'] == 'unassigned':
+                        state['orphan_since'] = state['last_run_at']
+                    definition = replace(definition, descriptor=replace(definition.descriptor,
+                        metadata={**definition.descriptor.metadata, BUSINESS_WORKFLOW_METADATA: state}))
                 return self._save(replace(definition, descriptor=replace(definition.descriptor, runtime_summary=summary)))
         definition = self._global_get(workflow_id)
         if definition is None:

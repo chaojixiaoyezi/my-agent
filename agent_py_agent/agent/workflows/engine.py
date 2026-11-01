@@ -103,7 +103,8 @@ class _WorkflowRunLifecycle:
     # LLM: 构造不执行资产；外部debug执行器/分析器只由可信宿主注入，定义JSON不授新权限。
     # 函数用途: 绑定Owner存储、分析及可选通用外部节点执行端口，默认不具备外部节点执行能力。
     def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None,
-                 skill_details_resolver=None, workspace_root=None, debug_node_handler=None):
+                 skill_details_resolver=None, workspace_root=None, debug_node_handler=None,
+                 agent_steps=None, run_authorizer=None):
         self.owner_home = Path(owner_home).absolute()
         self.workspace_root = workspace_root
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
@@ -111,22 +112,37 @@ class _WorkflowRunLifecycle:
         self.skill_resolver = skill_resolver
         self.skill_details_resolver = skill_details_resolver
         self.debug_node_handler = debug_node_handler
+        self.agent_steps, self.run_authorizer = agent_steps, run_authorizer
 
     # LLM: 首次执行冻结定义及脚本版本/hash/来源；owner_id只校验一致性，不建立授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
-    def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id=''):
+    def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id='', *,
+                     business_context=None, scope_snapshot=None, workflow_run_id=None, operation_intent=None):
         definition, descriptor = _definition(self.owner_home, workflow, self.workspace_root)
         self._require_workflow_enabled(definition)
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
             raise ValueError('工作流 Owner 不匹配')
-        record = WorkflowRunRecord(uuid.uuid4().hex, descriptor['id'], owner_id or descriptor.get('owner_id', ''),
+        from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
+        from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
+        if business_context is not None and not isinstance(business_context, BusinessExecutionContext):
+            raise TypeError('business_context必须由可信宿主提供DTO')
+        frozen_scope = scope_snapshot if scope_snapshot is not None else descriptor.get('metadata', {}).get(
+            BUSINESS_WORKFLOW_METADATA, {}).get('scope', {})
+        if frozen_scope:
+            frozen_scope = WorkflowScope.from_dict(frozen_scope).to_dict()
+        record = WorkflowRunRecord(workflow_run_id or uuid.uuid4().hex, descriptor['id'], owner_id or descriptor.get('owner_id', ''),
                                    trigger_kind, 'running', time.time(), 0, 0,
                                    steps=tuple(_pending(spec) for spec in definition['steps']),
-                                   inputs=payload({} if inputs is None else inputs))
+                                   inputs=payload({} if inputs is None else inputs),
+                                   business_context=business_context.to_dict() if business_context else {},
+                                   scope_snapshot=payload(frozen_scope), scope_revision=frozen_scope.get('scope_revision', 0))
+        if operation_intent is not None:
+            definition['_operation_intent'] = operation_intent
         definition['_frozen_scripts'] = self._script_pins(definition['steps'])
         record = replace_run_record(record, dict(workflow_name=descriptor['name'], total_steps=len(definition['steps'])))
         execution_receipt(record, phase='preflight', effect_outcome='not_started',
                           definition_ref=execution_definition_ref(definition, kind='workflow'))
+        self._authorize_run(record, 'preflight')
         self.store.create_run(record, definition)
         with self.store.execution_lock(record.workflow_run_id):
             return self._drive(record, definition, 0)
@@ -134,7 +150,8 @@ class _WorkflowRunLifecycle:
     # LLM: 参数/补丁先完成无副作用验证，再核后缀版本；合法修复可重钉当前依赖，确认/漂移断点仍强制版本门。
     # 函数用途: 在独占锁内校验修复请求、保存批准的快照变更并续跑，保留成功前缀。
     def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
-                            resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False):
+                            resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False,
+                            expected_revision=None, operation_key='', control_intent=None):
         if type(allow_script_drift) is not bool:
             raise ValueError('allow_script_drift必须为布尔值')
         if resolution_origin is not None and resolution_origin not in ('user', 'agent', 'system'):
@@ -143,6 +160,33 @@ class _WorkflowRunLifecycle:
             record = self.store.load_run(workflow_run_id)
             definition = self.store.load_workflow_snapshot(workflow_run_id)
             self._require_workflow_enabled(definition)
+            if operation_key:
+                self._authorize_run(record, 'preflight')
+                intent = control_intent if control_intent is not None else {
+                    'from_step_id': from_step_id, 'patched_step_output': patched_step_output,
+                    'updated_data_sources': updated_data_sources, 'resolution_origin': resolution_origin,
+                    'allow_script_drift': allow_script_drift}
+                replay, record = self.store.begin_control(workflow_run_id, action='resume', operation_key=operation_key,
+                                                          expected_revision=expected_revision, intent=intent)
+                if replay:
+                    return record
+            admission = self._authorize_run(record, 'resume')
+            from .release_gate import WorkflowEffectAdmission
+            if isinstance(admission, WorkflowEffectAdmission):
+                if admission.reconciled_output is not None:
+                    if patched_step_output is not None or from_step_id not in (None, admission.reconciled_step_id):
+                        raise PermissionError('WORKFLOW_RECONCILIATION_CONFLICT')
+                    from_step_id, patched_step_output = admission.reconciled_step_id, admission.reconciled_output
+                    resolution_origin = 'system'
+                if admission.effect_not_started or admission.reconciled_output is not None:
+                    record.effect_outcome = 'not_started' if admission.effect_not_started else 'confirmed'
+            if record.status in ('cancelled', 'cancelling'):
+                raise ValueError('WORKFLOW_CANCELLED')
+            if record.status == 'waiting_for_agent':
+                if from_step_id is not None or patched_step_output is not None or updated_data_sources is not None:
+                    raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
+                result = self._resume_agent(record, definition)
+                return self.store.complete_control(workflow_run_id, operation_key) if operation_key else result
             ids = [s.step_id for s in record.steps]
             if from_step_id is not None and from_step_id not in ids:
                 raise ValueError('恢复步骤不存在')
@@ -165,18 +209,86 @@ class _WorkflowRunLifecycle:
                 definition['_override_data_sources'] = True
                 self._save_definition(record, definition)
             if start == len(ids) and record.status == 'succeeded':
-                return record
+                return self.store.complete_control(workflow_run_id, operation_key) if operation_key else record
             steps = record.steps[:start] + ((repaired,) if repaired else ()) + tuple(
                 _pending(spec) for spec in definition['steps'][start + bool(repaired):])
             record = replace_run_record(record, dict(steps=steps, status='running', ended_at=0, failed_step_id='',
                              needs_repair=False, current_step_id='', final_output={}, resumed_from_step_id=ids[start] if start < len(ids) else ''))
             record = replace_run_record(record, dict(breakpoint=None))
             if repaired:
-                self.store.save_step_result(workflow_run_id, repaired)
+                published = self.store.save_step_result(workflow_run_id, repaired)
+                record.revision = published.revision
             self.store.save_run(record)
-            return self._drive(record, definition, start + bool(repaired))
+            result = self._drive(record, definition, start + bool(repaired))
+            return self.store.complete_control(workflow_run_id, operation_key) if operation_key else result
 
     resume_workflow = resume_workflow_run
+
+    def _authorize_run(self, record, phase):
+        """冻结选择不等于执行许可；新业务入口每次副作用都消费当前宿主授权。"""
+        if record.scope_snapshot or record.business_context:
+            if not callable(self.run_authorizer):
+                raise PermissionError('WORKFLOW_BUSINESS_AUTHORIZATION_UNAVAILABLE')
+            scope = record.scope_snapshot
+            context = record.business_context
+            if context and context.get('owner_id') != record.owner_id:
+                raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+            if scope.get('scope_mode') == 'unassigned':
+                raise PermissionError('WORKFLOW_UNASSIGNED')
+            if scope.get('scope_mode') == 'spaces' and context.get('space_id') not in scope['space_ids']:
+                raise PermissionError('WORKFLOW_SPACE_MISMATCH')
+        if callable(self.run_authorizer):
+            return self.run_authorizer(record, phase)
+        return None
+
+    def _resume_agent(self, record, definition):
+        if self.agent_steps is None:
+            raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
+        index = next(i for i, step in enumerate(record.steps) if step.status == 'waiting_for_agent')
+        step = record.steps[index]
+        previous = payload(step.escalation_result)
+        if not step.escalation_result.get('task_id'):
+            self._admit_effect(record, step)
+            self.agent_steps.submit(record, definition['steps'][index], step)
+        completion = self.agent_steps.completion(record, step)
+        if completion is None:
+            if previous != step.escalation_result:
+                record = self.store.save_step_result(record.workflow_run_id, step)
+            return record
+        step.status = 'succeeded' if completion['status'] == 'completed' else 'failed'
+        step.llm_involved = True
+        step.output_snapshot = redact_sensitive_value(payload(completion.get('output', {})))
+        step.escalation_result.update({name: completion.get(name) for name in ('completion_ref', 'result_ref', 'run_id')})
+        step.error_code = '' if step.status == 'succeeded' else completion.get('error_code', 'WORKFLOW_AGENT_FAILED')
+        step.needs_repair, step.ended_at = step.status == 'failed', time.time()
+        record = self.store.save_step_result(record.workflow_run_id, step)
+        record = replace_run_record(record, dict(status='running' if step.status == 'succeeded' else 'failed',
+            needs_repair=step.needs_repair, failed_step_id=step.step_id if step.needs_repair else '', breakpoint=None))
+        self.store.save_run(record)
+        if step.status == 'failed':
+            return record
+        return self._drive(record, definition, index + 1)
+
+    def cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
+        with self.store.execution_lock(workflow_run_id):
+            record = self.store.load_run(workflow_run_id)
+            self._authorize_run(record, 'cancel')
+            replay, record = self.store.begin_control(workflow_run_id, action='cancel', operation_key=operation_key,
+                                                      expected_revision=expected_revision)
+            if replay:
+                return []
+            record.status = 'cancelling'
+            self.store.save_run(record)
+            outstanding = []
+            for step in record.steps:
+                if step.status == 'waiting_for_agent':
+                    if self.agent_steps is None or not self.agent_steps.cancel(record, step):
+                        outstanding.append(step.escalation_result.get('task_id') or step.escalation_result['attempt_id'])
+            record.status = 'cancelling' if outstanding else 'cancelled'
+            self.store.save_run(record)
+            if not outstanding:
+                self.store.complete_control(workflow_run_id, operation_key)
+            return outstanding
 
     # LLM: 项目覆盖走原只读Store，旧meta只在正式Store缺失时读；正文摘要不授执行权。
     # 函数用途: 统一读取引擎当前作用域的脚本代码与元数据。
@@ -438,6 +550,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         outputs = {s.step_id: payload(s.output_snapshot) for s in record.steps[:start] if s.status in SUCCESS and s.status != 'skipped'}
         for spec in definition['steps'][start:]:
             step = replace(_pending(spec), status='running', started_at=time.time(), input_snapshot=payload(record.inputs))
+            # 所有真实步骤先落准确 attempt；审核及异步完成都绑定此身份。
+            step.escalation_result['attempt_id'] = uuid.uuid4().hex
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             clock = time.monotonic()
@@ -462,6 +576,12 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record = replace_run_record(record, dict(steps=tuple(step if item.step_id == step.step_id else item for item in record.steps)))
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
+            if step.status == 'waiting_for_agent':
+                record = replace_run_record(record, dict(status='waiting_for_agent', needs_repair=False,
+                    current_step_id=step.step_id, ended_at=0, breakpoint=None))
+                execution_receipt(record, phase='waiting_for_agent', effect_outcome='running')
+                self.store.save_run(record)
+                return record
             if step.status in ('failed', 'paused_for_resume'):
                 if not step.needs_repair and step.output_snapshot:
                     outputs[step.step_id] = payload(step.output_snapshot)
@@ -493,7 +613,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     def _perform(self, record, spec, outputs, definition, run, *, record_summary=True, allow_side_effects=True):
         from .debug_nodes import analysis_preview
         self._require_step_enabled(spec)
-        if not run.ephemeral_debug and record.mode not in ('deterministic_script', 'llm_skill_analysis', 'hybrid'):
+        if not run.ephemeral_debug and record.mode not in ('deterministic_script', 'llm_skill_analysis', 'hybrid', 'agent_task'):
             record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
             record.error_message = '通用节点当前仅支持单节点调试，不支持正式DAG执行'
             record.needs_repair = True
@@ -522,6 +642,13 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.status = 'succeeded'
                 record.escalation_result['debug_logs'] = ['仅预览：未执行脚本、外部分析器、网络、工具或子工作流']
                 return
+        self._admit_effect(run, record)
+        if record.mode == 'agent_task':
+            if run.ephemeral_debug or self.agent_steps is None:
+                raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
+            record.status = 'waiting_for_agent'
+            self.agent_steps.submit(run, spec, record)
+            return
         if record.mode in ('condition', 'condition_branch', 'script_transform', 'http_request', 'tool_call',
                            'subworkflow', 'approval_wait', 'notification'):
             self._generic_debug_step(record, spec, outputs, definition, run)
@@ -532,7 +659,18 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 return
             outputs = {**outputs, record.step_id: payload(record.output_snapshot)}
         context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
-        self._analysis_step(record, spec, context)
+        self._analysis_step(record, spec, context, run=run)
+
+    def _admit_effect(self, run, record):
+        from .release_gate import WorkflowEffectAdmission
+        admission = self._authorize_run(run, record.step_id)
+        if isinstance(admission, WorkflowEffectAdmission):
+            record.escalation_result['review_refs'] = list(admission.review_refs)
+        if not run.ephemeral_debug:
+            # 真正启动前先记未知义务；崩溃后不能把“还没发表输出”解释成未执行。
+            record.escalation_result['effect_started'] = True
+            published = self.store.save_step_result(run.workflow_run_id, record)
+            run.revision, run.effect_outcome = published.revision, 'unknown'
 
     # LLM: 仅debug通过副作用门后进入；审批不自批，通知只走原Owner通知账/outbox并保留真实状态，不写正式run。
     # 函数用途: 计算条件/转换、审批等待或显式通知；其它外部节点仍需可信执行器，脚本源合同不变。
@@ -587,7 +725,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     def _require_workflow_enabled(self, definition):
         descriptor = definition['descriptor']
         current = WorkflowStore(self.owner_home, workspace_root=self.workspace_root).get_workflow(descriptor['id'])
-        if (definition.get('enabled', True) is False or descriptor.get('enabled', True) is False
+        business = current.descriptor.metadata.get('business_workflow', {}) if current is not None else {}
+        if (business.get('lifecycle', 'active') != 'active'
+                or definition.get('enabled', True) is False or descriptor.get('enabled', True) is False
                 or current is not None and not current.enabled):
             raise AssetDisabledError('workflow', descriptor['id'])
 
@@ -653,7 +793,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         debug_logs = record.escalation_result.get('debug_logs', [])
         debug_metadata = {key: record.escalation_result[key] for key in
                           ('condition_branch', 'dry_run', 'side_effects_blocked') if key in record.escalation_result}
-        record.escalation_result = redact_sensitive_value(payload(result.escalation_context or {}))
+        identity = {key: value for key, value in record.escalation_result.items()
+                    if key in ('attempt_id', 'review_refs', 'effect_started')}
+        record.escalation_result = {**redact_sensitive_value(payload(result.escalation_context or {})), **identity}
         if not record_summary:
             record.escalation_result.update(debug_logs=debug_logs, **debug_metadata)
         cleanup = result.escalation_context.get('cleanup_error')
@@ -674,6 +816,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         if self.escalation_handler is None:
             return
         record.llm_involved = True
+        self._admit_effect(run, record)
         recovered = payload(self._escalate(spec, result, run))
         if not isinstance(recovered, dict):
             raise ValueError('兜底回调必须返回 JSON 对象')
@@ -697,7 +840,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
 
     # LLM: 动态解析和宿主详情中的禁用同样硬拒绝，保留原机器码；缺技能/分析器仍不走脚本兜底。
     # 函数用途: 核对引用并读取正文，用完整上下文调用真实分析器。
-    def _analysis_step(self, record, spec, context):
+    def _analysis_step(self, record, spec, context, *, run=None):
         try:
             resolved = self._resolve_skills(spec, context)
             self._require_skills_enabled(resolved)
@@ -718,6 +861,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.error_code, record.error_message = 'ANALYZER_UNAVAILABLE', '未提供真实技能分析回调'
             return
         record.llm_involved = record.llm_involved or getattr(self.analysis_handler, 'llm_involved', True) is not False
+        if run is not None:
+            self._admit_effect(run, record)
         _check_stop()
         output = self.analysis_handler(payload(spec), context, resolved)
         _check_stop()
