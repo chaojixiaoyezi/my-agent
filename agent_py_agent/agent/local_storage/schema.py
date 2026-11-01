@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -224,26 +225,36 @@ _TOOL_OPERATION_COLUMN_SQL = (
 # LLM: 只收紧本库及已存在的 sidecar，主库先以 0600 出生让 SQLite 派生文件继承；不改进程 umask、不删库。
 # 函数用途: 保证本地数据库及 WAL/SHM 私有，缺失附属文件不创建。
 def _private_sqlite_files(path, *, create=False):
+    # Never open/close an fd on an existing db/-wal/-shm: POSIX close() drops this process's SQLite locks.
+    if create and not os.path.lexists(path):
+        _create_private_sqlite_file(path)
     for suffix in ("", "-wal", "-shm"):
         target = path.with_name(path.name + suffix)
-        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        if create and not suffix:
-            flags |= os.O_CREAT
         try:
-            fd = os.open(target, flags, 0o600)
+            st = os.lstat(target)
         except FileNotFoundError:
             if create and not suffix:
                 raise
             continue
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise ValueError("SQLite storage must be a regular file")
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            else:
-                os.chmod(target, 0o600)
-        finally:
-            os.close(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("SQLite storage must be a regular file")
+        if stat.S_IMODE(st.st_mode) & 0o077:
+            os.chmod(target, 0o600)
+
+
+# LLM: 仅在主库路径尚不存在时调用；临时名含 pid/线程号并以 O_EXCL|O_NOFOLLOW 出生，link 不覆盖已发表的库，临时名总被删除。
+# 函数用途: 以 0600 原子发表一个空主库文件，让 SQLite 随后派生的 WAL/SHM 继承私有权限。
+def _create_private_sqlite_file(path):
+    # Born 0600 under an unpublished name; the closed fd belongs to an inode no connection can see yet.
+    birth = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.birth")
+    fd = os.open(birth, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.close(fd)
+    try:
+        os.link(birth, path)
+    except FileExistsError:
+        pass
+    finally:
+        os.unlink(birth)
 
 
 _LOCAL_MIGRATION_SQL = ("ALTER TABLE agent_runs RENAME TO legacy_agent_runs",)
