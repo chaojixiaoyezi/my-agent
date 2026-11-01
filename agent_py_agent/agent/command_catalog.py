@@ -37,6 +37,10 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
+    CommandSpec("space", "/space [list|get <编号>|create <名称>|call <JSON>]", "查看或管理本人业务空间",
+        submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
+    CommandSpec("team", "/team [list|get <编号>|call <JSON>]", "查看或管理本人后台团队",
+        submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
     CommandSpec("users", "/users [list|info|create|password|enable|disable]",
         "管理本地普通用户（创建用户名密码、重置密码、启停与查看，仅管理员）",
         help_variants=(

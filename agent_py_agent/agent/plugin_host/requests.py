@@ -69,7 +69,7 @@ def _read_receipt(paths, request_id, expected_owner, installation_ref):
             or provenance.get("installation_ref") != installation_ref):
         raise HostAPIError("RESOURCE_NOT_FOUND", 404)
     validate_opaque_id(provenance.get("thread_id"), kind="thread")
-    if provenance.get("kind") not in {"chat", "tool", "script", "workflow"}:
+    if provenance.get("kind") not in {"chat", "tool", "script", "workflow", "workflow_resume"}:
         raise DataCorruptionError("request kind invalid")
     return receipt, provenance
 

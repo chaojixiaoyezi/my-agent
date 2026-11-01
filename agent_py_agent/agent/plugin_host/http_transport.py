@@ -107,7 +107,12 @@ class StreamSession:
                     break
                 if self.stop.is_set():
                     break
-                self.put(("request", validate_request_event(event)))
+                if self.authorized.call.action == 'business.events.stream':
+                    from .business_action_specs import standalone_schema
+                    from .schemas import validate_object
+                    self.put(('business', validate_object(event, standalone_schema({'$ref': '#/$defs/EventView'}))))
+                else:
+                    self.put(("request", validate_request_event(event)))
         except HostAPIError as error:
             self.put(("error", error.to_payload()))
         except Exception:
@@ -124,7 +129,7 @@ class StreamSession:
         try:
             if self.stop.is_set():
                 return
-            revalidate_call(self.authorized)
+            self._revalidate_stream()
             self.socket.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n"
                                 b"Cache-Control: no-store\r\nConnection: close\r\n\r\n")
             self.headers_sent = True
@@ -144,7 +149,7 @@ class StreamSession:
                 item = self.events.get(timeout=HEARTBEAT_SECONDS)
             except queue.Empty:
                 item = ("heartbeat", None)
-            revalidate_call(self.authorized)
+            self._revalidate_stream()
             if item is None:
                 return
             kind, data = item
@@ -156,6 +161,16 @@ class StreamSession:
 
     # LLM: 仅发送结构化公开错误，不包含异常正文或身份路径。
     # 函数用途: 在可写连接上报告订阅失败。
+    def _revalidate_stream(self):
+        revalidate_call(self.authorized)
+        if self.authorized.call.action == 'business.events.stream':
+            from .composition import business_port
+            backend = business_port(self.ports)
+            check = getattr(backend, 'revalidate_stream', None)
+            if not callable(check):
+                raise HostAPIError('HOST_NOT_READY', 503)
+            check(self.authorized)
+
     def _send_error(self, error):
         try:
             if self.socket is not None:

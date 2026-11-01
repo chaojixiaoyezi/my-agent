@@ -1277,6 +1277,8 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 #   self_map只登记原公开读口，不受子代理开关影响；具体可见性仍由本轮快照与父授权交集控制。
 # 函数用途: 把配置、审计、编排、检索、记忆、消息和只读自我目录装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
+    from .gateway_parts.business_api import register_business_tools
+    register_business_tools(agent)
     # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
     if str(getattr(agent.tools, "owner_type", "") or "") == "main_agent":
