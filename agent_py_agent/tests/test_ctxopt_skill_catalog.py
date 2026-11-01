@@ -9,6 +9,7 @@ from agent_py_agent.agent import assets
 from agent_py_agent.agent.assets import skill_adapter as adapter
 from agent_py_agent.agent.capability import skills
 from agent_py_agent.agent.capability.skill_service import SkillsService
+from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotError
 
 
 # LLM: 所有合成正文只写pytest临时目录。
@@ -91,7 +92,7 @@ def test_codec_limits(tmp_path):
         skills.split_skill_frontmatter('---\nio_contract: ' + '['*40 + '0' + ']'*40 + '\n---\n')
 
 
-# LLM: 空或受限快照是唯一权限来源，不能补扫owner根。
+# LLM: 空或受限快照是唯一权限来源，不能补扫owner根；正文换版须保留typed stale错误码。
 # 函数用途: 对齐目录顺序并验证准确来源、正文版本和空集合权限。
 def test_roots_sources_and_snapshot_authority(tmp_path, monkeypatch):
     home, workspace = tmp_path/'owner', tmp_path/'custom'
@@ -119,8 +120,9 @@ def test_roots_sources_and_snapshot_authority(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         adapter.get_owner_skill_descriptor(home, 'same', skill_snapshot=empty)
     skill(roots[0], 'same', 'changed')
-    with pytest.raises(ValueError):
+    with pytest.raises(SkillSnapshotError) as caught:
         adapter.get_owner_skill_descriptor(home, 'workspace:same', skill_snapshot=restricted)
+    assert caught.value.error_code == 'SKILL_SNAPSHOT_STALE'
 
 
 # LLM: 损坏无关文件只影响自身，指定坏文件不能被当作未发现而吞掉。
