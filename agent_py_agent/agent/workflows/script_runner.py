@@ -53,7 +53,7 @@ _JSON_OUTPUT_TYPES = {
 _PYTHON_GUARD_CODE = """# LLM: Python守卫只作OS沙箱的补充，冻结路径与端口；用户代码执行前安装，不冒称内核隔离。
 # 函数用途: 初始化脚本的文件metadata与网络出口检查。
 def _init_guard():
-    import errno, ipaddress, json, os, socket, sys, threading, types
+    import errno, ipaddress, json, os, re, socket, sys, threading, types
     from pathlib import Path
     from urllib.parse import unquote
     cfg = json.loads(os.environ.pop("MY_AGENT_SCRIPT_GUARD_JSON", "{}"))
@@ -63,6 +63,9 @@ def _init_guard():
     write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
     write_rules = tuple((Path(root), allowed) for root, allowed in cfg.get("write_scope_rules", ()))
     protected_paths = tuple(Path(p) for p in cfg.get("protected_write_paths", ()))
+    write_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_write_patterns", ()))
+    directory_write_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_directory_write_patterns", ()))
+    directory_unlink_patterns = tuple(re.compile(p, re.IGNORECASE) for p in cfg.get("protected_directory_unlink_patterns", ()))
     denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
     exclusive_roots = tuple(Path(p) for p in cfg.get("host_exclusive_paths", ()))
     protected_nodes = frozenset(tuple(part.casefold() for part in parent.parts)
@@ -116,13 +119,24 @@ def _init_guard():
     def _check_read(raw):
         _check_read_target(_resolve(raw), raw)
 
-    # LLM: 先拒绝不可覆盖的保护路径及祖先节点，再倒序消费宿主ordered_write_scope_roots；最具体生效、同层deny胜。
-    # 函数用途: 按冻结正负范围检查修改，不能借宽根改写宿主、人格或挪走保护路径的祖先。
-    def _check_write(raw):
+    # LLM: 先拒绝绝对路径、祖先及原宿主记录/目录投影，再消费ordered规则；目录unlink与创建分责，不误拦同名普通文件。
+    # 函数用途: 让Python回退同样保住冻结范围与任务保护，最具体规则生效且同层deny胜。
+    def _check_write(raw, *, directory=False, unlink=False):
         target = _resolve(raw)
         if (_protected(target, (*protected_paths, *exclusive_roots))
-                or tuple(part.casefold() for part in target.parts) in protected_nodes):
+                or tuple(part.casefold() for part in target.parts) in protected_nodes
+                or any(pattern.search(str(target)) for pattern in write_patterns)):
             raise perm_err(eacces, "Permission denied", str(raw))
+        if directory_write_patterns or unlink and directory_unlink_patterns:
+            previous = getattr(_guard_tls, "active", False)
+            _guard_tls.active = True
+            try:
+                directory = directory or target.is_dir()
+            finally:
+                _guard_tls.active = previous
+            if directory and any(pattern.search(str(target)) for pattern in
+                    (*directory_write_patterns, *(directory_unlink_patterns if unlink else ()))):
+                raise perm_err(eacces, "Permission denied", str(raw))
         for root, allowed in reversed(write_rules):
             if _under(target, (root,)):
                 if allowed:
@@ -150,16 +164,16 @@ def _init_guard():
             _guard_tls.active = previous
         raise perm_err(eacces, "script dir_fd access denied")
 
-    # LLM: 审计事件里的相对路径必须按真实dir_fd还原，FD修改必须检查实际文件；不能误将scratch同名路径作为授权。
-    # 函数用途: 把路径或文件描述符修改交给同一个冻结写门。
-    def _check_mutation(path, dir_fd=None):
+    # LLM: dir_fd和文件FD还原真实目标；目录创建与unlink标志来自审计事件，不从脚本参数自报保护豁免。
+    # 函数用途: 将路径或文件描述符修改交给同一个写门并保留目录操作语义。
+    def _check_mutation(path, dir_fd=None, *, directory=False, unlink=False):
         if type(path) is int:
-            _check_write(str(_fd_path(path)))
+            _check_write(str(_fd_path(path)), directory=directory, unlink=unlink)
             return
         text = fsdecode(path)
         if dir_fd not in (None, -1, getattr(os, "AT_FDCWD", -100)) and not Path(text).is_absolute():
             text = str(_fd_path(dir_fd) / text)
-        _check_write(text)
+        _check_write(text, directory=directory, unlink=unlink)
 
     # LLM: metadata仅豁免必需祖先或既有FD；dir_fd先还原真实父路径，lstat保留symlink/..顺序，末尾斜杠和点必须跟随目标。
     # 函数用途: 阻断私有文件存在性、权限和属性探测，保留合法路径解析与nofollow目录链。
@@ -310,10 +324,11 @@ def _init_guard():
         elif event in ("os.mkdir", "os.remove", "os.unlink", "os.rmdir", "os.chmod", "os.chown", "os.truncate", "os.utime"):
             fd_index = {"os.mkdir": 2, "os.remove": 1, "os.unlink": 1, "os.rmdir": 1,
                         "os.chmod": 2, "os.chown": 3, "os.utime": 3}.get(event)
-            _check_mutation(args[0], args[fd_index] if fd_index is not None and len(args) > fd_index else None)
+            _check_mutation(args[0], args[fd_index] if fd_index is not None and len(args) > fd_index else None,
+                            directory=event == "os.mkdir", unlink=event in ("os.remove", "os.unlink", "os.rmdir"))
         elif event in ("os.rename", "os.replace", "os.link"):
-            _check_mutation(args[0], args[2] if len(args) > 2 else None)
-            _check_mutation(args[1], args[3] if len(args) > 3 else None)
+            _check_mutation(args[0], args[2] if len(args) > 2 else None, unlink=event != "os.link")
+            _check_mutation(args[1], args[3] if len(args) > 3 else None, unlink=event != "os.link")
         elif event == "os.symlink":
             _check_write(args[0])
             _check_mutation(args[1], args[2] if len(args) > 2 else None)
@@ -834,7 +849,9 @@ class ScriptRunner:
                     network_access=net_allowed, deny_gateway_ports=denied_ports if net_allowed else ()))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     applied_sandbox = True
-            guarded = (self.restrict_to_roots or bool(hidden_paths or protected_paths or denied_write_roots)) and interpreter == 'python3'
+            enforces_scope = self.restrict_to_roots or bool(hidden_paths or protected_paths or denied_write_roots
+                or host.patterns or host.directory_write_patterns or host.directory_unlink_patterns)
+            guarded = enforces_scope and interpreter == 'python3'
             if guarded:
                 guard = safe_path(folder, '_sandbox_guard.py')
                 write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, guard.name),
@@ -847,6 +864,9 @@ class ScriptRunner:
                     'write_roots': [str(p) for p in write_roots],
                     'write_scope_rules': [(str(root), allowed) for root, allowed in ordered_write_scope_roots(write_roots, denied_write_roots)],
                     'protected_write_paths': [str(p) for p in (*protected_paths, *persona_paths)],
+                    'protected_write_patterns': host.patterns,
+                    'protected_directory_write_patterns': host.directory_write_patterns,
+                    'protected_directory_unlink_patterns': host.directory_unlink_patterns,
                     'denied_roots': [str(p) for p in private_roots],
                     'host_exclusive_paths': [str(p) for p in hidden_paths],
                     'network_access': net_allowed,
@@ -854,7 +874,7 @@ class ScriptRunner:
                     'block_subprocess': not applied_sandbox,
                 })
                 command = [executable, '-I', '-B', str(guard), str(entrypoint)]
-            elif self.restrict_to_roots and not applied_sandbox:
+            elif enforces_scope and not applied_sandbox:
                 raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
             command = ds_runtime.wrap_command(command, interpreter, guarded=bool(guarded))
             timings['environment_setup_ms'] += (time.monotonic() - clock) * 1000

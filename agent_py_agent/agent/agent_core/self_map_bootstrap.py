@@ -176,7 +176,7 @@ def _script_runtime_options(agent):
     read_roots, write_roots, absolute_paths, denied_roots = (), (), (), ()
     if workspace is not None:
         workspace = Path(workspace).resolve(strict=False)
-        read_roots = tuple(dict.fromkeys(_boundary_paths(boundary.get('allowed_read_roots', [str(workspace)]), workspace)))
+        read_roots = tuple(dict.fromkeys(_boundary_paths(boundary.get('allowed_read_roots', []), workspace)))
         write_roots = tuple(dict.fromkeys(_boundary_paths(boundary.get('allowed_write_roots', []), workspace)))
         task_roots = _boundary_paths([boundary.get('task_root')], workspace)
         absolute_paths = tuple(dict.fromkeys([

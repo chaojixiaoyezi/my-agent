@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -361,3 +362,73 @@ print(json.dumps(results))
 ''')
     assert outcome.ok, data
     assert data['output_data'] == {'stat': False, 'lstat': False, 'open-directory': False}
+
+
+@pytest.mark.parametrize('active_run', [False, True])
+def test_missing_read_scope_does_not_create_authority_from_workspace(case, monkeypatch, active_run):
+    if not active_run:
+        case.agent._current_run_params = None
+    monkeypatch.setattr(tool_runtime_ledger, 'write_boundary_with_runtime_ledger', lambda *_: {})
+    options = self_map_bootstrap._script_runtime_options(case.agent)
+    assert options['work_context']['workspace_root'] == str(case.workspace)
+    assert options['work_context']['effective_path_scope'] == {'read_roots': [], 'write_roots': []}
+    assert options['public_read_roots'] == options['extra_write_roots'] == ()
+
+
+@pytest.mark.parametrize('interpreter', ['bash', 'sh'])
+def test_registered_non_python_script_fails_closed_without_native_scope_enforcement(case, interpreter):
+    target = case.workspace / 'shell-locked.txt'
+    target.write_text('original')
+    case.agent._current_run_params.write_boundary = {'locked_files': [str(target)]}
+    code = f'printf changed > {shlex.quote(str(target))}\nprintf \'{{"written":true}}\'\n'
+    ScriptStore(case.owner, workspace_root=case.workspace).save_script(
+        AssetDescriptor('shell-scope', 'script', 'shell-scope'), code, interpreter=interpreter)
+    outcome = case.agent.tools.tools['scripts'].execute({'action': 'run', 'script_id': 'shell-scope'})
+    assert not outcome.ok, outcome.output
+    assert 'NESTED_SHELL_SANDBOX_UNAVAILABLE' in outcome.output
+    assert target.read_text() == 'original'
+
+
+@pytest.mark.parametrize('interpreter', ['bash', 'sh'])
+def test_direct_non_python_runner_without_scope_keeps_legacy_defaults(case, interpreter):
+    ScriptStore(case.owner).save_script(AssetDescriptor('legacy-shell', 'script', 'legacy-shell'),
+                                        'printf \'{"ok":true}\'\n', interpreter=interpreter)
+    runner = script_runner.ScriptRunner(case.owner, use_sandbox=False)
+    result = runner.run_script('legacy-shell')
+    assert result.ok and result.output_data == {'ok': True}, result.stderr_preview
+    assert not runner.restrict_to_roots
+
+
+def test_python_fallback_enforces_host_record_and_directory_patterns(case):
+    host = host_sandbox_paths(case.agent.home_paths.root, case.owner, system='Darwin', config=case.agent.config)
+    other = case.owner / 'tasks/2026-10-31/other-task'
+    record = other / 'data/pack_verification/record.txt'
+    record.parent.mkdir(parents=True)
+    record.write_text('original')
+    business = case.workspace / 'ordinary.txt'
+    _save(case, f'''import os,json
+from pathlib import Path
+result={{}}
+for name,operation in {{
+    'record-write':lambda:Path({str(record)!r}).write_text('changed'),
+    'rename-ancestor':lambda:os.rename({str(other)!r},{str(other.with_name('moved-task'))!r}),
+    'create-host-root':lambda:Path({str(case.owner / 'runs/2026-10-31/new-run')!r}).mkdir(parents=True),
+    'business-file':lambda:Path({str(business)!r}).write_text('business'),
+    'layout-regular-file':lambda:Path({str(case.owner / 'runs/notes.txt')!r}).write_text('ordinary file, not a directory'),
+    'create-business-dir':lambda:Path({str(case.workspace / 'new-dir')!r}).mkdir(),
+}}.items():
+    try:
+        operation()
+        result[name]=True
+    except PermissionError:
+        result[name]=False
+print(json.dumps(result))
+''')
+    runner = script_runner.ScriptRunner(case.owner, use_sandbox=False, workspace_root=case.workspace,
+        extra_write_roots=(case.owner,), host_path_protection=HostSandboxPaths(patterns=host.patterns,
+            directory_write_patterns=host.directory_write_patterns, directory_unlink_patterns=host.directory_unlink_patterns))
+    result = runner.run_script('scope-check')
+    assert result.ok, result.stderr_preview
+    assert result.output_data == {'record-write': False, 'rename-ancestor': False, 'create-host-root': False,
+                                  'business-file': True, 'layout-regular-file': True, 'create-business-dir': True}
+    assert record.read_text() == 'original' and business.read_text() == 'business'
