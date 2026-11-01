@@ -1,6 +1,7 @@
 """真实 Remember 删除跨库提交在进程中断后必须恢复隐私清理。"""
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ from agent_py_agent.tests.test_remember_learning_source_review import _agent
 _CRASH_SCRIPT = '''
 import json, os, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[3])
 from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
 from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.tests.test_remember_learning_source_review import _agent
@@ -56,12 +58,15 @@ if sys.argv[2] in {"default-target", "legacy-default-target"}:
         proposed_action="remove", target_entry_id=target.entry_id, promotion_target="none")
     deps = replace(agent.memory_curator.dependencies, backend=_Backend(_output(message, [draft])),
         model_router=None, annotate_batch=None)
+    # 本例显式只策展不自动晋升，避免默认批量提交绕过下方单条确认的崩溃边界。
     result = MemoryCuratorService(config=MemoryCuratorConfig(interval_seconds=60, turn_threshold=1,
-        timeout_seconds=2, max_retries=0), dependencies=deps).run(reason="admin")
-    # 策展自动运行只创建候选，用户随后按原管理入口批准这一条精确删除。
-    assert agent.memory.all(), result
+        timeout_seconds=2, max_retries=0, auto_promotion_policy="manual_only"), dependencies=deps).run(reason="admin")
+    assert result.status == "succeeded" and result.candidates == 1, result
+    assert result.formal_commits == 0 and not result.promotion_results, result
+    assert agent.memory.all() == [target], result
     from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
     [pending] = [c for c in agent.memory_candidates.list() if c.proposed_action == 'remove']
+    assert pending.status == "pending_review" and pending.promotion_target == "none", pending
     result = confirm_candidate(agent.memory_promotion, pending.candidate_id)
 else:
     result = tool.execute(dict(action="remove", entry_id=target.entry_id, origin="user_explicit"))
@@ -69,12 +74,13 @@ raise AssertionError(f"crash boundary not reached: {result}")
 '''
 
 
-# LLM: 真实入口与进程退出覆盖删除各阶段；legacy仅在创建时重建旧补全空操作，恢复始终不打桩。
+# LLM: 子进程显式导入当前源码；真实入口与进程退出覆盖删除各阶段，manual_only仅布置待确认候选；legacy重建旧补全空操作，恢复不打桩。
 # 函数用途: 验证历史正文清理及旧版默认落点均能在新进程恢复。
 @pytest.mark.parametrize('point', ['after-formal', 'before-mark', 'after-mark', 'default-target', 'legacy-default-target'])
 def test_real_remove_crash_recovers_without_private_candidate(tmp_path, point):
-    result = subprocess.run([sys.executable, '-c', _CRASH_SCRIPT, str(tmp_path), point],
-                            capture_output=True, text=True, timeout=30)
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run([sys.executable, '-c', _CRASH_SCRIPT, str(tmp_path), point, str(repo_root)],
+                            capture_output=True, text=True, timeout=30, cwd=repo_root)
     assert result.returncode == 73, result.stdout + result.stderr
     agent = _agent(tmp_path, user_dialogue_projection(), {}, {})
     assert agent.memory.all() == []
