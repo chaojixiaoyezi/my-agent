@@ -590,3 +590,90 @@ def test_observation_optional_detail_readiness_is_not_a_generic_query(tmp_path):
     composed = api.BusinessServices(host, projection=service)
     for action in ('logs.read', 'tool_calls.get', 'artifacts.get', 'approvals.get', 'permissions.get', 'changes.get', 'usage.get', 'operations.get'):
         assert not composed.ready(action), action
+
+
+@pytest.fixture
+def dispatch_case(host):
+    from agent_py_agent.agent.conversation.host_actor import HostChannelActor
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.settings import AgentConfig
+
+    host.config = AgentConfig(model_backend='echo', business_spaces_enabled=True)
+    host.conversation_store = ConversationStore(host.home_paths.owner_home_dir / 'conversations')
+    source = host.conversation_store.threads.create(owner_id=host.home_paths.owner_id,
+        owner_home=str(host.home_paths.owner_home_dir))
+    actor = HostChannelActor(host.home_paths.owner_id, source.thread_id, 'original-request',
+        'plugin', 'original-installation', 'original-actor')
+    context = api.bind_business_context(host, authorize=lambda _a, _f: True, actor=actor)
+    services = api.BusinessServices(host)
+    status, space = api.execute_business({'action': 'spaces.create', 'request_id': 'dispatch-space',
+        'params': {'name': '派发空间'}, 'idempotency_key': 'dispatch-space-key'}, context, services)
+    assert status == 200, space
+    params = {'space_id': space['data']['space_id'], 'name': '原派发目标'}
+    created = services.background.execute('background_agents.create', params, actor=actor,
+        context=context, idempotency_key='dispatch-agent-key')
+    target = host.conversation_store.threads.require(created['agent']['thread_id'])
+    return services, context, actor, target, params['space_id']
+
+
+def test_business_dispatch_transports_original_post_publication_uncertainty(dispatch_case, monkeypatch):
+    from agent_py_agent.agent.conversation import session_task_dispatch as dispatch
+
+    services, context, actor, target, space = dispatch_case
+    outcomes = []
+    original = dispatch.dispatch_session_task
+
+    def fail_wake(*_args, **_kwargs):
+        raise OSError('post-publication failure')
+
+    def record(*args, **kwargs):
+        result = original(*args, **kwargs)
+        outcomes.append(result)
+        return result
+
+    monkeypatch.setattr(dispatch, '_maybe_wake', fail_wake)
+    monkeypatch.setattr(dispatch, 'dispatch_session_task', record)
+    service = api._BusinessBackgroundService(services, context)
+    with pytest.raises(dispatch.SessionTaskDispatchError) as denied:
+        service._dispatch_locked({'space_id': space, 'instruction': '只派发一次'}, target,
+            actor=actor, idempotency_key='original-dispatch-key', origin_task_id='')
+    assert len(outcomes) == 1
+    assert denied.value.outcome is outcomes[0]
+    assert denied.value.error_code == outcomes[0].error_code == 'TOOL_EXECUTION_FAILED'
+    assert denied.value.effect_outcome == outcomes[0].effect_outcome == 'unknown'
+    identity = outcomes[0].result_envelope['session_task_dispatch']
+    task = services.host.conversation_store.session_tasks.require(identity['task_id'])
+    assert identity == {'task_id': task.task_id, 'sender_thread_id': actor.source_thread_id,
+        'target_thread_id': target.thread_id, 'dedupe_key': task.dedupe_key}
+    assert services.host.conversation_store.session_tasks.list_report(limit=0)[0] == [task]
+
+
+@pytest.mark.parametrize('effect', ['not_started', 'unknown'])
+def test_business_dispatch_error_projection_keeps_structured_effect_and_closed_schema(dispatch_case, monkeypatch, effect):
+    from agent_py_agent.agent.conversation import session_task_dispatch as dispatch
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+
+    services, context, actor, target, space = dispatch_case
+    outcome = ToolHandlerOutcome('create_session_task', False, 'not an exception-text protocol',
+        error_code='TOOL_EXECUTION_FAILED', effect_outcome=effect,
+        result_envelope={'session_task_dispatch': {'sender_thread_id': actor.source_thread_id,
+            'target_thread_id': target.thread_id, 'dedupe_key': 'original-dedupe'}})
+    calls = []
+
+    def failed(*args, **kwargs):
+        calls.append(args[1])
+        return outcome
+
+    monkeypatch.setattr(dispatch, 'dispatch_session_task', failed)
+    status, result = api.execute_business({'action': 'tasks.assign', 'request_id': 'original-request',
+        'params': {'agent_id': target.thread_id, 'space_id': space, 'instruction': '不重发'},
+        'idempotency_key': 'original-dispatch-key'}, context, services)
+    assert status == 503, result
+    assert result['effect_outcome'] == effect
+    assert result['error']['code'] == 'TOOL_EXECUTION_FAILED'
+    assert len(calls) == 1 and calls[0].sender_thread_id == actor.source_thread_id
+    assert set(result) == {'request_id', 'operation_id', 'state', 'data', 'error',
+        'allowed_actions', 'warnings', 'effect_outcome'}
+    assert result['request_id'] == actor.entry_request_id and result['data'] == {}
+    assert set(result['error']) == {'code', 'message', 'retryable', 'details'}
+    assert 'session_task_dispatch' not in str(result)

@@ -11,6 +11,7 @@ from ..conversation.background_agents import BackgroundAgentService
 from ..conversation.business_access import BusinessActor, BusinessError
 from ..conversation.business_observability import OBSERVATION_ACTIONS, BusinessObservationService
 from ..conversation.business_spaces import BusinessSpaceService
+from ..conversation.session_task_dispatch import SessionTaskDispatchError
 from ..plugin_host.business_action_specs import (
     business_action_spec,
     business_action_specs,
@@ -76,6 +77,8 @@ class _BusinessBackgroundService(BackgroundAgentService):
             return 'default'
         return super()._profile(requested)
 
+    # LLM: 单次原派发失败仍携原outcome/身份；不解析异常文字，也不重派可能已发表的任务。
+    # 函数用途: 把准确业务上下文接入原SessionTask派发，并保留未知回执。
     def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id):
         from ..capability.config import CapabilityConfig
         from ..capability.runtime_config_reload import capability_config_for_agent
@@ -112,7 +115,7 @@ class _BusinessBackgroundService(BackgroundAgentService):
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
             business_context_intent=intent, business_context_factory=factory)
         if not outcome.ok:
-            raise RuntimeError(outcome.error_code or 'TASK_DISPATCH_FAILED')
+            raise SessionTaskDispatchError(outcome)
         return json.loads(outcome.output)
 
 
@@ -341,6 +344,8 @@ def _response(request_id, *, data=None, error=None, accepted=False, effect='none
         'data': data or {}, 'error': error, 'allowed_actions': [], 'warnings': [], 'effect_outcome': effect}
 
 
+# LLM: 只读取结构化错误；派发原对象保留私有身份，公开响应不新增字段或虚报未执行。
+# 函数用途: 将原领域错误映射为冻结业务错误码、HTTP状态和副作用结果。
 def _error_code(error):
     if isinstance(error, HostAPIError):
         return error.code, error.status, error.outcome
@@ -351,7 +356,10 @@ def _error_code(error):
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
               403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED'} else
               400 if code == 'INVALID_SCHEMA' else 503)
-    return code, status, 'not_started'
+    effect = 'not_started'
+    if isinstance(error, SessionTaskDispatchError):
+        effect = error.effect_outcome if error.effect_outcome in {'not_started', 'unknown'} else 'unknown'
+    return code, status, effect
 
 
 def execute_business(request, context, services):
@@ -385,7 +393,7 @@ def execute_business(request, context, services):
         data = spec.validate_result(thaw(raw.data) if isinstance(raw, DomainResult) else raw, accepted=accepted)
         context.check(spec.action, facts)
         return (202 if accepted else 200), _response(request_id, data=data, accepted=accepted, effect=completed_effect)
-    except (HostAPIError, BusinessError) as error:
+    except (HostAPIError, BusinessError, SessionTaskDispatchError) as error:
         code, status, effect = _error_code(error)
     except (OSError, ValueError, TypeError, RuntimeError, PermissionError):
         mutating = entered and spec is not None and spec.metadata['effect'] != 'read'
