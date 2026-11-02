@@ -348,6 +348,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
     from ...conversation.host_actor import current_actor_for_child
     raw_params = request.raw_params
     role_policy = request.role_policy
+    lineage = _lineage_fields(raw_params, request.agent)
     return CreateRunParams(
         goal=request.goal,
         thought=str(raw_params.get("thought") or SUBAGENT_DEFAULT_THOUGHT).strip(),
@@ -366,13 +367,13 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         context_packs=create_context_packs(raw_params),
         attributes=create_task_attributes(raw_params, request.agent),
         host_channel_actor=current_actor_for_child(request.agent),
-        **_host_execution_fields(request.agent),
-        **_lineage_fields(raw_params, request.agent),
+        **_host_execution_fields(request.agent, str(lineage["parent_id"] or "")),
+        **lineage,
         parent_access_mode=_config_access_mode(request.agent),
     )
 
 
-def _host_execution_fields(agent) -> dict[str, object]:
+def _host_execution_fields(agent, lineage_parent_id: str) -> dict[str, object]:
     current = getattr(agent, "_current_run_params", None)
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
     context = getattr(current, "business_context", None)
@@ -382,6 +383,9 @@ def _host_execution_fields(agent) -> dict[str, object]:
     if not callable(resolver) or not isinstance(run_id, str) or not run_id or not attempt_id:
         if context is not None:
             raise ValueError("business child requires current host parent execution proof")
+        return {}
+    if context is None and lineage_parent_id != run_id:
+        # 当前执行不是 canonical 谱系父：执行来源不能替另一个父作证，运行库父链沿谱系父写入。
         return {}
     owner_id = str(agent.home_paths.owner_id)
     parent = resolver(owner_id=owner_id, run_id=run_id, attempt_id=attempt_id)

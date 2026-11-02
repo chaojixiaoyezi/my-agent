@@ -20,6 +20,7 @@ from ..subagents.services.hierarchy.scheduler import (
     HierarchyScheduleRequest,
     HierarchyScheduleResult,
     _child_create_params,
+    scheduled_child_create_params,
 )
 from ..tooling.models import ToolHandlerOutcome
 from .orchestration.capacity import (
@@ -176,7 +177,8 @@ def _decision_children(agent: object, params: dict, prepared: HierarchyScheduleR
         prepared.prepared_runs.append(None)
     result = []
     for index, (item, spec) in enumerate(zip(raw, prepared.child_specs, strict=True)):
-        canonical = _child_create_params(parent, spec, sibling_index=len(parent.child_ids) + 1 + index)
+        canonical = scheduled_child_create_params(agent.subagents, parent, spec,
+                                                  sibling_index=len(parent.child_ids) + 1 + index)
         reused = find_reusable_scheduled_child(agent.subagents, canonical) is not None
         run = prepared.prepared_runs[index]
         if not reused:
