@@ -34,6 +34,60 @@ def _maintain(home, now):
     return result, state
 
 
+@pytest.fixture
+def sidecar_first_pair_scandir(monkeypatch):
+    """只调整指定目录的真实条目顺序，保留可移植枚举器的迭代与关闭合同。"""
+    from agent_py_agent.agent.user_space import owner_quota
+
+    original = owner_quota._quota_scandir
+    opened = []
+
+    class OrderedEntries:
+        def __init__(self, descriptor):
+            with os.scandir(descriptor) as entries:
+                self.entries = iter(sorted(entries, key=lambda entry: (
+                    not entry.name.endswith(".json.lock"), entry.name)))
+            self.seen = []
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.entries)
+            self.seen.append(entry.name)
+            return entry
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+
+        def close(self):
+            self.entries = iter(())
+
+    def install(directory):
+        info = directory.stat()
+        identity = (info.st_dev, info.st_ino)
+
+        def scandir(descriptor):
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino) != identity:
+                return original(descriptor)
+            entries = OrderedEntries(descriptor)
+            opened.append(entries)
+            return entries
+
+        monkeypatch.setattr(owner_quota, "_quota_scandir", scandir)
+        return opened
+
+    try:
+        yield install
+    finally:
+        for entries in opened:
+            entries.close()
+
+
 def test_owner_maintenance_removes_expired_bucket_and_old_sidecar_not_live_window(tmp_path):
     home, limiter = _fixture(tmp_path / "host")
     now = time.time()
@@ -67,22 +121,76 @@ def test_grace_and_legal_hold_preserve_files(tmp_path, hold):
     assert old.exists() is hold
 
 
-def test_cold_restart_maintenance_cursor_drains_over_128_without_recursing_other_data(tmp_path):
+@pytest.mark.parametrize("sidecars_first", [False, True], ids=["native", "sidecars-first-portable"])
+def test_cold_restart_maintenance_cursor_drains_over_128_without_recursing_other_data(
+        tmp_path, request, sidecar_first_pair_scandir, sidecars_first):
     home, limiter = _fixture(tmp_path / "host")
     now = time.time()
     old = [_seed(limiter, f"old-{index}", now - WINDOW_SECONDS * 4) for index in range(180)]
+    live = _seed(limiter, "live", now)
     sentinel = home.owner_home_dir / "unregistered/session_pair_rate/protected.json"
     sentinel.parent.mkdir(parents=True)
     sentinel.write_text("keep")
+    streams = sidecar_first_pair_scandir(old[0].parent) if sidecars_first else []
+    removed, observations = set(), []
+
+    def check_slice(result, state):
+        nonlocal removed
+        assert result.ran
+        storage = state["storage_maintenance"]
+        assert storage["errors"] == []
+        # state来自本次维护之后的磁盘JSON，不能拿上次的内存游标代替本次回执。
+        cursor = storage["cursors"].get("session_pair_rate")
+        current = {path for path in old if not path.exists()}
+        assert removed <= current
+        assert 0 <= len(current - removed) <= 128
+        removed = current
+        if cursor is not None:
+            for field in ("items", "deleted"):
+                assert type(cursor["last_slice"][field]) is int
+                assert 0 <= cursor["last_slice"][field] <= 128
+        if len(removed) < len(old):
+            assert cursor is None or cursor["complete"] is False
+        if cursor is None or cursor["complete"] is False:
+            assert "session_pair_rate" in storage["pending_kinds"]
+            assert storage["continuation_pending"] is True
+            assert state["maintenance_partial"] is True
+        assert live.exists() and limiter.count("live", "target", now=now) == 1
+        assert sentinel.read_text() == "keep"
+        observations.append({"removed": len(removed), "cursor": cursor,
+                             "pending": "session_pair_rate" in storage["pending_kinds"]})
+        return cursor
+
     _result, state = _maintain(home, now)
-    assert 0 < sum(not path.exists() for path in old) <= 128
+    cursor = check_slice(_result, state)
+    assert 0 <= sum(not path.exists() for path in old) <= 128
     assert state["maintenance_partial"] is True
+    if sidecars_first:
+        assert not removed
     for _ in range(16):
         _result, state = _maintain(home, now + 1)
-        if not any(path.exists() for path in old):
+        cursor = check_slice(_result, state)
+        if not any(path.exists() for path in old) and cursor is not None and cursor["complete"]:
             break
     assert not any(path.exists() for path in old)
+    assert cursor is not None and cursor["complete"] is True
     assert sentinel.read_text() == "keep"
+    assert live.exists() and limiter.count("live", "target", now=now) == 1
+    if sidecars_first:
+        first_scan = next(row for row in observations
+                          if row["cursor"] is not None and row["cursor"].get("pair_scan", {}).get("visited", 0))
+        assert first_scan["removed"] == 0 and first_scan["pending"] is True
+        assert first_scan["cursor"]["complete"] is False
+        assert first_scan["cursor"]["last_slice"]["deleted"] == 0
+        assert any(entries.seen for entries in streams)
+        assert all(not entries.seen or entries.seen[0].endswith(".json.lock") for entries in streams)
+    request.node.user_properties.append(("r4_retention", json.dumps({
+        "sidecars_first": sidecars_first, "first_slice": observations[0],
+        "first_pair_scan": first_scan if sidecars_first else None,
+        "maintenance_calls": len(observations), "continuation_calls": len(observations) - 1,
+        "expired_removed": len(removed), "live_count": limiter.count("live", "target", now=now),
+        "live_exists": live.exists(), "sentinel": sentinel.read_text(),
+    })))
 
 
 def test_count_never_creates_locks_or_removes_expired_bucket(tmp_path):
