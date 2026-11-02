@@ -479,3 +479,87 @@ def test_terminal_ancestor_keeps_its_unconfirmed_turn_until_stop_confirmation(bu
     assert service.cancel_task(root, actor=actor, include_descendants=True) == {
         "operation_id": root, "state": "completed", "outstanding_refs": []}
     assert stopped == ["original-turn", "original-turn"]
+
+
+def test_ancestor_cancel_preserves_descendants_previous_root_responsibility(business_host, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import session_task_stop
+
+    service, host, actor = _service(business_host)
+    root, child, leaf = chain(service, actor)
+    store = host.conversation_store
+    for identifier, turn in ((child, "child-turn"), (leaf, "leaf-turn")):
+        store.session_tasks.advance(identifier, SessionTaskUpdate(status="accepted", conversation_request_id=turn))
+    confirmed, stopped = set(), []
+    def stop(host, *, target_thread, turn_id):
+        stopped.append(turn_id)
+        return session_task_stop.SessionTaskStopOutcome(turn_id in confirmed, "observed stop", turn_id)
+    monkeypatch.setattr(session_task_stop, "stop_session_task_turn", stop)
+    ready_index(store)
+    pending = service.cancel_task(child, actor=actor, include_descendants=True)
+    assert pending == {"operation_id": child, "state": "pending", "outstanding_refs": ["child-turn", "leaf-turn"]}
+    confirmed.add("child-turn")
+    assert service.cancel_task(root, actor=actor, include_descendants=True) == {
+        "operation_id": root, "state": "pending", "outstanding_refs": ["leaf-turn"]}
+    control = store.session_tasks.require(child).metadata["cancellation_control"]
+    assert control["outstanding_refs"] == ["leaf-turn"]
+    assert control["descendant_refs"] == {leaf: ["leaf-turn"]}
+    before_retry = list(stopped)
+    assert service.cancel_task(child, actor=actor, include_descendants=False) == {
+        "operation_id": child, "state": "pending", "outstanding_refs": ["leaf-turn"]}
+    assert stopped == before_retry
+    assert store.session_tasks.require(leaf).metadata["cancellation_control"]["outstanding_refs"] == ["leaf-turn"]
+    confirmed.add("leaf-turn")
+    assert service.cancel_task(child, actor=actor, include_descendants=True) == {
+        "operation_id": child, "state": "completed", "outstanding_refs": []}
+    assert service.cancel_task(root, actor=actor, include_descendants=True) == {
+        "operation_id": root, "state": "completed", "outstanding_refs": []}
+    assert [store.session_tasks.require(identifier).status for identifier in (root, child, leaf)] == ["cancelled"] * 3
+
+
+@pytest.mark.parametrize("first_descendants", [False, True])
+def test_overlapping_cancel_preserves_new_descendant_scope(business_host, monkeypatch, first_descendants):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, get_ident
+
+    from agent_py_agent.agent.conversation import session_messaging
+    from agent_py_agent.agent.gateway_parts import session_task_stop
+
+    service, host, actor = _service(business_host)
+    root, _, leaf = chain(service, actor)
+    store = host.conversation_store
+    store.session_tasks.advance(root, SessionTaskUpdate(status="accepted", conversation_request_id="root-turn"))
+    confirmed = {"root-turn"}
+    def stop(host, *, target_thread, turn_id):
+        return session_task_stop.SessionTaskStopOutcome(turn_id in confirmed, "observed stop", turn_id)
+    monkeypatch.setattr(session_task_stop, "stop_session_task_turn", stop)
+    ready_index(store)
+    original = session_messaging._save_cancellation_control
+    saving, resume, single_thread = Event(), Event(), []
+    def save(host, binding, context, refs, **options):
+        if single_thread and get_ident() == single_thread[0] and not refs and binding[0] == root:
+            saving.set()
+            assert resume.wait(timeout=10), "overlapping cancellation did not release final save"
+        return original(host, binding, context, refs, **options)
+    monkeypatch.setattr(session_messaging, "_save_cancellation_control", save)
+    def single_cancel():
+        single_thread.append(get_ident())
+        return service.cancel_task(root, actor=actor, include_descendants=first_descendants)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(single_cancel)
+        try:
+            assert saving.wait(timeout=10), "single-task cancel did not reach its final save"
+            new_leaf = service.follow_up({"task_id": leaf, "instruction": "new cancellation scope"},
+                actor=actor, idempotency_key="overlapping-scope")["new_task_id"]
+            store.session_tasks.advance(new_leaf, SessionTaskUpdate(status="accepted", conversation_request_id="leaf-turn"))
+            assert service.cancel_task(root, actor=actor, include_descendants=True) == {
+                "operation_id": root, "state": "pending", "outstanding_refs": ["leaf-turn"]}
+        finally:
+            resume.set()
+        result = future.result(timeout=10)
+    assert result == {"operation_id": root, "state": "pending", "outstanding_refs": ["leaf-turn"]}
+    control = store.session_tasks.require(root).metadata["cancellation_control"]
+    assert control["outstanding_refs"] == ["leaf-turn"]
+    assert control["descendant_refs"] == {new_leaf: ["leaf-turn"]}
+    confirmed.add("leaf-turn")
+    assert service.cancel_task(root, actor=actor, include_descendants=True) == {
+        "operation_id": root, "state": "completed", "outstanding_refs": []}

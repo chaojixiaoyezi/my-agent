@@ -274,9 +274,10 @@ def _bounded_cancellation_refs(refs):
     return refs if len(refs) <= 100 else [*refs[:99], "descendants:unresolved_scope"]
 
 
-# LLM: 只更新原取消元数据；原子锁内重核完整绑定，done/failed状态、结果及其它元数据一律保留。
+# LLM: 锁内重核完整绑定，只解除本次已解析引用；并发新增scope与出处保留，own_only仅替自身责任，终态结果不变。
 # 函数用途: 在同一规范任务上保存可重试的取消责任，终态祖先也可持有后代责任。
-def _save_cancellation_control(host, binding, root_context, refs, *, descendants=False, descendant_refs=None):
+def _save_cancellation_control(host, binding, root_context, refs, *, descendants=False, descendant_refs=None,
+                               own_only=False, resolved_refs=()):
     from dataclasses import replace
 
     from ..gateway_parts.io import update_json_file_atomic
@@ -293,16 +294,23 @@ def _save_cancellation_control(host, binding, root_context, refs, *, descendants
             own = set(previous.get("session_task_outstanding_refs", ()))
             held = list(dict.fromkeys([*previous.get("execution_outstanding_refs", previous.get("outstanding_refs", [])),
                 *(ref for ref in previous.get("outstanding_refs", []) if ref not in own)]))
+        resolved = {current.task_id, current.conversation_request_id} if own_only else set(resolved_refs)
+        scope = [ref for ref in previous.get("outstanding_refs", []) if ref not in resolved and ref not in held]
+        session_refs = _bounded_cancellation_refs([*scope, *refs])
         control = {**previous, "conversation_request_id": current.conversation_request_id,
-                   "outstanding_refs": _bounded_cancellation_refs([*held, *refs])}
+                   "outstanding_refs": _bounded_cancellation_refs([*held, *session_refs])}
         if previous.get("execution_ref"):
-            control.update(execution_outstanding_refs=held, session_task_outstanding_refs=refs)
+            control.update(execution_outstanding_refs=held, session_task_outstanding_refs=session_refs)
         if descendants:
             control["include_descendants"] = True
         if descendant_refs is not None:
+            scopes = {identifier: [ref for ref in values if ref not in resolved]
+                for identifier, values in previous.get("descendant_refs", {}).items()}
+            for identifier, values in descendant_refs.items():
+                scopes.setdefault(identifier, []).extend(values)
             visible = set(control["outstanding_refs"])
-            control["descendant_refs"] = {identifier: [ref for ref in values if ref in visible]
-                for identifier, values in descendant_refs.items() if any(ref in visible for ref in values)}
+            control["descendant_refs"] = {identifier: list(dict.fromkeys(ref for ref in values if ref in visible))
+                for identifier, values in scopes.items() if any(ref in visible for ref in values)}
         return replace(current, metadata={**current.metadata, "cancellation_control": control}).to_dict()
 
     tasks = host.conversation_store.session_tasks
@@ -339,7 +347,7 @@ def _cancellation_closure(host, current, root_context):
     return selected
 
 
-# LLM: queued只撤原guidance；已有未确认回合即使业务终态仍核准确停止，未确认继续留账，终态不改写。
+# LLM: queued只撤原guidance；终态未确认回合仍核准确停止。作为后代时只更新自身责任，不覆盖它原根scope。
 # 函数用途: 对一个重新核验过的任务执行原取消路径，返回尚未确认的本任务引用。
 def _cancel_selected_session_task(host, binding, root_context, *, root=False):
     from ..gateway_parts.session_task_stop import stop_session_task_turn
@@ -354,7 +362,7 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
         if not ({current.task_id, current.conversation_request_id} & set(prior)):
             return held
     if not root:
-        _save_cancellation_control(host, binding, root_context, [current.conversation_request_id or current.task_id])
+        _save_cancellation_control(host, binding, root_context, [current.conversation_request_id or current.task_id], own_only=True)
     refs = held
     receipt = store.guidance.receipt(current.body_dedupe_key) if current.body_dedupe_key else None
     if current.status in {"queued", "cancelled"} and not current.conversation_request_id and receipt is not None:
@@ -372,11 +380,11 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
     if current.status not in SESSION_TASK_TERMINAL_STATUSES:
         store.session_tasks.advance(current.task_id, SessionTaskUpdate(status="cancelled"))
     if not root:
-        refs = _save_cancellation_control(host, binding, root_context, refs)
+        refs = _save_cancellation_control(host, binding, root_context, refs, own_only=True)
     return refs
 
 
-# LLM: 完整闭包先冻结再逐条取消；原根持有全操作责任，终态根重试仍核对后代，不伪报停止。
+# LLM: 完整闭包先冻结再逐条取消；原根只清本次已解析责任并保留并发新增scope，终态重试仍核后代，不伪报停止。
 # 函数用途: 沿原存储和精确停止回执，取消单任务或完整后代范围并汇总未确认责任。
 def cancel_owned_session_task(host, task, *, include_descendants=False):
     from .background_team_lifecycle import SessionTaskCoverageUnknown
@@ -428,7 +436,7 @@ def cancel_owned_session_task(host, task, *, include_descendants=False):
         if identifier not in selected_ids:
             descendant_refs[identifier] = values
     refs = _save_cancellation_control(host, binding, root_context, outstanding, descendants=include_descendants,
-        descendant_refs=descendant_refs if include_descendants else None)
+        descendant_refs=descendant_refs if include_descendants else None, resolved_refs=resolved)
     return {"operation_id": task.task_id, "state": "pending" if refs else "completed", "outstanding_refs": refs}
 
 
