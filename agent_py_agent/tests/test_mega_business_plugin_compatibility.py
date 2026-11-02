@@ -261,6 +261,96 @@ def test_observation_plugin_real_sse_and_request_local_eight_event_bound(product
     assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
 
 
+def test_observation_plugin_sse_survives_short_runtime_write_lock(production_host, monkeypatch):
+    """在200头之后制造真实WAL独占窗口，仍须交付原snapshot，不能静默EOF。"""
+    import threading
+    import traceback
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.plugin_host.http_transport import StreamSession
+    from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
+
+    services, task = plugin_observation_task(production_host)
+    runtime, run = seed_observed_runtime(services, task)
+    locked, reading, release = threading.Event(), threading.Event(), threading.Event()
+    original_connect = runtime._runtime_connect
+    original_revalidate = StreamSession._revalidate_stream
+    checks, faults, published = 0, [], []
+
+    def writer_connect():
+        conn = original_connect()
+        try:
+            assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+            conn.execute('PRAGMA locking_mode=EXCLUSIVE')
+            conn.execute('BEGIN EXCLUSIVE')
+            locked.set()
+            assert reading.wait(5), 'SSE没有进入锁竞争读入口'
+            # 被测的是零等待与短竞争的差别：读入口到达后保留100ms物理锁，
+            # 不是用sleep猜测请求何时完成；finally另有显式释放与线程回收。
+            release.wait(0.1)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def revalidate(session):
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                published.append(pool.submit(runtime.append_event, event_type='attempt.progress',
+                    attempt_id=run['attempt_id'], agent_run_id=run['agent_run_id'], task_run_id=run['task_run_id']))
+                assert locked.wait(5), '写者没有取得真实SQLite锁'
+                reading.set()
+            try:
+                return original_revalidate(session)
+            except Exception as error:
+                faults.append((type(error).__name__, getattr(error, 'sqlite_errorcode', None), traceback.format_exc()))
+                raise
+
+        monkeypatch.setattr(runtime, '_runtime_connect', writer_connect)
+        monkeypatch.setattr(StreamSession, '_revalidate_stream', revalidate)
+        conn, response = open_plugin_observation(production_host)
+        try:
+            assert response.status == 200, response.read()
+            name, frame = read_business_sse(response)
+            assert name == 'business' and isinstance(frame, dict), '\n'.join(fault[2] for fault in faults)
+            assert frame['stream_item'] == 'snapshot'
+            assert [row['task_id'] for row in frame['payload']['tasks']] == [task.task_id]
+            assert checks >= 2 and locked.is_set() and reading.is_set()
+            assert not faults
+            assert published[0].result(timeout=5)['attempt_id'] == run['attempt_id']
+        finally:
+            release.set()
+            response.close()
+            conn.close()
+
+
+def test_observation_runtime_reader_wait_budget_preserves_read_only_and_c_short_writes(production_host):
+    import sqlite3
+
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
+
+    services, task = plugin_observation_task(production_host)
+    runtime, _ = seed_observed_runtime(services, task)
+    with services.observation.runtime._runtime_connection() as conn:
+        assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 30000
+        with pytest.raises(sqlite3.OperationalError) as denied:
+            conn.execute("INSERT INTO metadata(key,value) VALUES ('observation-write','forbidden')")
+        assert denied.value.sqlite_errorcode == sqlite3.SQLITE_READONLY
+    # 观察读口的等待不能扩散到C现存库短提交，也不能把缺库创建成空事实源。
+    coordinator = RuntimeRepository(runtime.db_path, existing_only=True)
+    with coordinator._runtime_connection() as conn:
+        assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 0
+    missing = runtime.db_path.parent / 'missing-observation-runtime.db'
+    reader = RuntimeRepository(missing, read_only=True)
+    with pytest.raises(sqlite3.OperationalError):
+        with reader._runtime_connection():
+            pytest.fail('只读连接不应创建缺库')
+    assert not missing.exists()
+
+
 def scoped_authorized(host, action, payload=None, *, user=None, key=None):
     import json
 
