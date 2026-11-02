@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import _thread
+import dis
 import math
+import sys
 import threading
 import time
 import weakref
@@ -35,6 +37,36 @@ _thread_wakeups: dict[int, set[threading.Event]] = {}
 # 优雅中断等待的秒数；慢 socket 关闭不能拖住 IM/CLI 的停止响应（上限保护）。
 _GRACEFUL_INTERRUPT_TIMEOUT_SECONDS = 0.1
 
+# 只冻结解释器原启动代码及所有权容器，不安装 hook 或维护另一张线程登记表。
+_NATIVE_THREAD_TYPE = threading.Thread
+_NATIVE_THREAD_START = threading.Thread.start
+_NATIVE_THREAD_START_CODE = getattr(_NATIVE_THREAD_START, '__code__', None)
+_NATIVE_THREAD_OWNERSHIP = tuple(getattr(threading, name, None)
+                                 for name in ('_active_limbo_lock', '_limbo', '_active'))
+
+
+# LLM: 仅识别 CPython 随包 Thread.start 内直接调用 C spawn 的字节码位置；实现未知时不签发未启动证明。
+# 函数用途: 区分原生创建拒绝与后续等待启动确认失败，不读取异常文案或修改运行时。
+def _native_spawn_site():
+    code = _NATIVE_THREAD_START_CODE
+    if (sys.implementation.name != 'cpython' or code is None
+            or getattr(_NATIVE_THREAD_START, '__module__', None) != 'threading'
+            or code.co_filename != threading.__file__):
+        return None
+    instructions = iter(dis.get_instructions(code))
+    for instruction in instructions:
+        if instruction.opname == 'LOAD_GLOBAL' and instruction.argval in ('_start_new_thread', '_start_joinable_thread'):
+            native = getattr(_thread, instruction.argval[1:], None)
+            if native is None:
+                return None
+            for call in instructions:
+                if call.opname in ('CALL', 'CALL_KW'):
+                    return instruction.argval, native, call.offset
+    return None
+
+
+_NATIVE_SPAWN_SITE = _native_spawn_site()
+
 
 # LLM: 只冻结同一 Thread 的出生前引用，不建立新登记或生命周期；观察字段被一起替换也不能重签原物理身份。
 # 类用途: 为 worker 与 cleanup 的退出观察保存不可变原 Thread、通知和原生句柄身份。
@@ -53,18 +85,19 @@ class _ThreadExitObservation:
     # 函数用途: 拒绝普通字段写入替换原引用或倒退启动事实，保留可见字段供身份核验。
     def __setattr__(self, name, value):
         previous = self.__dict__.get(name)
-        if name in ("_identity", "_tstate_lock_origin") and previous is not None and value is not previous:
+        if name in ("_identity", "_tstate_lock_origin", "_nonstart_identity") and previous is not None and value is not previous:
             raise AttributeError("原线程观察身份不能替换")
         if name == "_start_attempted" and previous is True and value is not True:
             raise AttributeError("原线程启动尝试不能撤销")
         object.__setattr__(self, name, value)
 
-    # LLM: 必须在 start 前冻结原 Thread/_started/可用的原生 handle；不启动线程，不把替换后的对象认作原责任。
+    # LLM: 必须在 start 前冻结原 Thread/_started/可用的原生 handle；未启动证明另绑定同一原身份，不从无出生记录推断。
     # 函数用途: 给一个准确线程保存只用于退出核验的原引用。
     def __init__(self, thread: threading.Thread) -> None:
         self.thread = thread
         self.started = thread._started
         self._start_attempted = False
+        self._nonstart_identity = None
         self._tstate_lock = None
         self._tstate_lock_origin = None
         handle_type = getattr(_thread, "_ThreadHandle", None)
@@ -85,14 +118,60 @@ class _ThreadExitObservation:
     def attempted(self) -> bool:
         return self._start_attempted
 
-    # LLM: 尝试事实先于真正 start，异常不能证明未出生；finally 只采原锁，不等待 ACK 或重复启动。
-    # 函数用途: 启动一次原线程并保留启动确认异常的责任。
+    # LLM: 尝试事实先于原 start；只在真实 C spawn 拒绝且原 limbo/active 无所有权时签发非启动事实，ACK 未知继续保留。
+    # 函数用途: 启动一次原线程，区分可证明未创建与尚不能确认的启动失败。
     def start(self) -> None:
         self._start_attempted = True
+        start = self._identity.thread.start
         try:
-            self._identity.thread.start()
+            start()
+        except BaseException as error:
+            self._note_native_nonstart(start, error)
+            raise
         finally:
             self.note_running()
+
+    # LLM: 必须来自冻结原 start 内 C spawn CALL 的原生异常叶帧；替换方法/Mock/低层 Python 包装器和 ACK 异常均未知。
+    # 函数用途: 在原运行时所有权锁下核实本次拒绝确实没有留下原线程。
+    def _note_native_nonstart(self, start, error) -> None:
+        site = _NATIVE_SPAWN_SITE
+        if (site is None or not isinstance(error, Exception)
+                or type(self.original_thread) is not _NATIVE_THREAD_TYPE
+                or getattr(start, '__self__', None) is not self.original_thread
+                or getattr(start, '__func__', None) is not _NATIVE_THREAD_START
+                or _NATIVE_THREAD_START.__code__ is not _NATIVE_THREAD_START_CODE
+                or getattr(threading, site[0], None) is not site[1]):
+            return
+        traceback = error.__traceback__
+        while traceback is not None and traceback.tb_next is not None:
+            traceback = traceback.tb_next
+        if (traceback is not None and traceback.tb_frame.f_code is _NATIVE_THREAD_START_CODE
+                and traceback.tb_lasti == site[2]):
+            self._native_unowned(record_nonstart=True)
+
+    # LLM: 原 CPython 所有权容器必须未替换；核验与可选签发在同一运行时锁内完成，默认只读，单一空值不构成证明。
+    # 函数用途: 排除仍在 limbo、active、已经出生或身份漂移的原线程，必要时原子保存非启动事实。
+    def _native_unowned(self, *, record_nonstart=False) -> bool:
+        lock, limbo, active = _NATIVE_THREAD_OWNERSHIP
+        if lock is None or type(limbo) is not dict or type(active) is not dict:
+            return False
+        with lock:
+            if any(getattr(threading, name, None) is not original for name, original in zip(
+                    ('_active_limbo_lock', '_limbo', '_active'), _NATIVE_THREAD_OWNERSHIP, strict=True)):
+                return False
+            thread = self.original_thread
+            unowned = (self._same_identity() and thread not in limbo
+                    and not any(owner is thread for owner in active.values())
+                    and not self.started.is_set() and thread.ident is None
+                    and self._tstate_lock_origin is None and getattr(thread, '_tstate_lock', None) is None)
+            if unowned and record_nonstart:
+                self._nonstart_identity = self._identity
+            return unowned
+
+    # LLM: 只消费本次原生拒绝保存的原身份事实；无事实、所有权重新出现或引用变化均不能清理尝试未知的 worker。
+    # 函数用途: 只读判断原线程是否已被明确证明没有启动。
+    def proven_not_started(self) -> bool:
+        return self._nonstart_identity is self._identity and self._native_unowned()
 
     # LLM: 旧版原 tstate 锁出生后只冻结一次；worker入口和start收尾采同一原锁，可见字段替换不重签，Event不是退出证明。
     # 函数用途: 保存原线程实际出生时的退出锁，后续 Thread.join 清空字段仍能核实原锁已释放。
@@ -101,12 +180,14 @@ class _ThreadExitObservation:
         if self._tstate_lock_origin is None and type(lock) is _thread.LockType:
             self._tstate_lock_origin = self._tstate_lock = lock
 
-    # LLM: 引用替换或启动 ACK 未知均不是死亡；原生 done/原 tstate 释放才结清，旧运行时无这些引用时沿原 Thread 查询。
+    # LLM: 同一原身份的原生非启动证明可结清；其余只认原生 done/原 tstate 释放，ACK 未知和引用替换仍保留。
     # 函数用途: 无等待观察原线程是否已退出，不回收调用或执行回调。
     def exited(self) -> bool:
         if not self._same_identity():
             return False
         if not self.attempted:
+            return True
+        if self.proven_not_started():
             return True
         if not self.started.is_set() or self.thread.ident is None:
             return False

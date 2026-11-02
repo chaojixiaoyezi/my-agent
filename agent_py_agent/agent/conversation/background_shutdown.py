@@ -211,17 +211,27 @@ def observe_background_claim(claim):
         item.bind_claim(claim)
 
 
-# LLM: 默认原Thread.start不变；当前后台片只在出生前冻结同一物理worker，未知启动或换引用不得视为退出。
-# 函数用途: 沿原启动入口记录本片模型保护线程的真实退出责任。
-def start_background_model_worker(worker):
-    item = _CURRENT.get()
-    if item is None:
-        worker.start()
-        return
-    observation = _ThreadExitObservation(worker)
-    with item.owner.lock:
-        item.workers.append(observation)
-    observation.start()
+# LLM: 有/无后台片均沿同一原观察启动；准备失败或原生非启动证明才调用一次准确释放回调，未知启动保留且原异常重抛。
+# 函数用途: 记录真实模型 worker 责任，只释放已经证明不存在的 worker 保留权。
+def start_background_model_worker(worker, *, on_proven_not_started=None):
+    observation = None
+    prepared = False
+    try:
+        item = _CURRENT.get()
+        observation = _ThreadExitObservation(worker)
+        if item is not None:
+            with item.owner.lock:
+                item.workers.append(observation)
+        prepared = True
+        observation.start()
+    except BaseException:
+        if on_proven_not_started is not None and (not prepared or observation.proven_not_started()):
+            try:
+                on_proven_not_started()
+            except BaseException:
+                # 释放失败仍须保留原始启动异常；未释放的原 token 继续构成阻塞。
+                pass
+        raise
 
 
 # LLM: 必须在原_finish_slice之后；失败/未结不移除原观察，不根据任务正文或TTL补终态。

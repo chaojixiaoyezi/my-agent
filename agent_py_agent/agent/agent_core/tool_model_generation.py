@@ -1226,7 +1226,7 @@ class _GenerationInterruptWake(Event):
 
 
 # LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
-# LLM: 当前后台片如有原宿主观察，出生前保同一Thread真实退出；默认无观察者仍原start，不改超时或模型请求。
+# LLM: 有/无后台片都在出生前保留同一 Thread；只有确定未启动才由准确回调释放，实际 worker 的 finally 独占正常释放。
 #   即时唤醒先于慢取消回调；向等待者显式传递本次已注册事实，两个注册退出时注销，不重复慢close。
 # 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
 def _generate_through_wall_guard(
@@ -1265,7 +1265,7 @@ def _generate_through_wall_guard(
         # 尚未调用原启动入口，确定没有 worker；启动尝试后的异常则不能这样释放。
         worker_retention.release()
         raise
-    start_background_model_worker(worker)
+    start_background_model_worker(worker, on_proven_not_started=worker_retention.release)
     with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
         return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)
 

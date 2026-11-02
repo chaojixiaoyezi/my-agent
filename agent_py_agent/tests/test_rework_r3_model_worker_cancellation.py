@@ -209,7 +209,7 @@ def test_start_ack_failure_keeps_retention_until_original_worker_cleanup(monkeyp
         assert release.wait(10)
         return "late"
 
-    def lose_ack(worker):
+    def lose_ack(worker, *, on_proven_not_started=None):
         workers.append(worker)
         worker.start()
         assert entered.wait(5)
