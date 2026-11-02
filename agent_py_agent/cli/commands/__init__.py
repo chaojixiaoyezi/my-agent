@@ -124,11 +124,11 @@ def add_task_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     task_abandon.add_argument("task_id", help="任务 ID")
     task_abandon.set_defaults(func=cmd_task_abandon)
 
-    task_pause = subparsers.add_parser("task-pause", help="暂停任务（后续可 resume）")
+    task_pause = subparsers.add_parser("task-pause", help="暂停任务：关闭执行权并停止原执行轮（后续可 resume）")
     task_pause.add_argument("task_id", help="任务 ID")
     task_pause.set_defaults(func=cmd_task_pause)
 
-    task_resume = subparsers.add_parser("task-resume", help="恢复 PAUSED 任务为 RUNNING")
+    task_resume = subparsers.add_parser("task-resume", help="清理确认后把 PAUSED 任务恢复为 PENDING（同一 run）")
     task_resume.add_argument("task_id", help="任务 ID")
     task_resume.set_defaults(func=cmd_task_resume)
 

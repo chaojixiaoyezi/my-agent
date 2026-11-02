@@ -1135,7 +1135,7 @@ def _main_approval_session_projection(agent, scope):
     from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
     from ..gateway_parts.request_binding import GatewayTaskBindingWriter
     from .local_run_control import LocalRunControl
-    from .tool_approval_scope import _foreground_runtime_is_current
+    from .tool_approval_scope import _foreground_runtime_is_current, _main_claim_scope_id
 
     current = getattr(agent, "_current_run_params", None)
     if not isinstance(current, RunParams) or current.task_id != scope.root_task_id:
@@ -1161,7 +1161,11 @@ def _main_approval_session_projection(agent, scope):
             return None
         if scope.execution_attempt_id and scope.execution_attempt_id != current.attempt_id:
             return None
-        claim = store.claims.load(scope.thread_id)
+        # 与审批资格同一 claim 定位：detached 任务读自己的原车道，持久 TaskLink 读不出或不属本线程即不复用会话。
+        link, error = store.tasks.load_report(scope.root_task_id)
+        if error is not None or link is None or link.thread_id != thread.thread_id:
+            return None
+        claim = store.claims.load(scope.thread_id, claim_scope_id=_main_claim_scope_id(link, thread))
         authority = claim.get("runtime_authority")
         if (not isinstance(authority, dict) or authority.get("schema_version") != "conversation_claim_execution.v1"
                 or authority.get("claim_id") != scope.claim_id

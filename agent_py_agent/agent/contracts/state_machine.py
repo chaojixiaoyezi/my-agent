@@ -13,11 +13,14 @@ ACTIVE_STATES = {"RUNNING", "WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FO
 TERMINAL_STATES = {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR"}
 WAITING_STATES = {"WAITING_FOR_TOOL", "WAITING_FOR_CHILD", "WAITING_FOR_USER", "VERIFYING"}
 BLOCKED_STATES = {"BLOCKED"}
+# 显式任务控制暂停：非终态、不可派工、不可修复的等待；只有精确清理后的同 run 显式恢复才回到 PENDING。
+PAUSED_STATES = {"PAUSED"}
 REGISTERED_STATES = frozenset({
     *DISPATCHABLE_STATES,
     *ACTIVE_STATES,
     *WAITING_STATES,
     *BLOCKED_STATES,
+    *PAUSED_STATES,
     *TERMINAL_STATES,
 })
 REPAIRABLE_STATES = {"BLOCKED", "FAILED"}
@@ -45,6 +48,7 @@ _STATUS_REASON_BY_STATE = {
     "TAKING_OVER": "taking_over",
     "VERIFYING": "verifying",
     "BLOCKED": "blocked",
+    "PAUSED": "paused",
     "DONE": "done",
     "FAILED": "failed",
     "CANCELLED": "cancelled",
@@ -140,6 +144,8 @@ def can_repair(facts: RunStateFacts) -> bool:
     if _status_protocol_error(facts.status):
         return False
     status = normalize_status(facts.status)
+    if status in PAUSED_STATES:
+        return False
     if normalize_channel(facts.channel_status) == "BROKEN":
         return _attempts_available(facts)
     if status == "BLOCKED":
@@ -151,6 +157,8 @@ def can_repair(facts: RunStateFacts) -> bool:
 
 def waiting_reason(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
+    if status in PAUSED_STATES:
+        return "paused"
     failure = _failure_contract_code(facts.failure_type)
     if failure == "APPROVAL_REQUIRED":
         return "approval"
@@ -169,6 +177,8 @@ def waiting_reason(facts: RunStateFacts) -> str:
 
 def terminal_outcome(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
+    if status in PAUSED_STATES:
+        return "active"
     if can_closeout(facts):
         return "completed"
     if status == "TIMEOUT":
@@ -186,6 +196,8 @@ def lifecycle_phase(facts: RunStateFacts) -> str:
     status = normalize_status(facts.status)
     channel = normalize_channel(facts.channel_status)
     reason = waiting_reason(facts)
+    if reason == "paused":
+        return "PAUSED"
     if channel == "BROKEN":
         return "BLOCKED"
     if status in {"TIMEOUT", "CHANNEL_ERROR"}:
@@ -241,6 +253,9 @@ def recovery_decision(facts: RunStateFacts) -> RecoveryDecision:
     status = normalize_status(facts.status)
     channel = normalize_channel(facts.channel_status)
     reason = waiting_reason(facts)
+    if status in PAUSED_STATES:
+        # 暂停只等显式恢复：不派工、不修通道、不接管，也不新建 run。
+        return RecoveryDecision(RecoveryAction.WAIT, False, _STATUS_REASON_BY_STATE[status])
     if can_closeout(facts):
         return RecoveryDecision(RecoveryAction.CLOSEOUT, False, "done")
     if channel == "BROKEN":

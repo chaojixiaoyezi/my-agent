@@ -67,7 +67,8 @@ WAKE_CLAIM_CANCELLED = "cancelled"
 WAKE_CLAIM_YIELDED = "yielded"
 WAKE_CLAIM_STATUSES = frozenset({WAKE_CLAIM_NOT_EXECUTED, WAKE_CLAIM_FINISHED, WAKE_CLAIM_CANCELLED, WAKE_CLAIM_YIELDED})
 
-# 领到租约但按预期等待、不算失败的 admission：用户中断、任务已终态、等恢复、来源已消费或已变化。
+# 领到租约但按预期等待、不算失败的 admission：用户中断、任务已终态、等恢复、来源已消费或已变化、
+# 子代理容量已满（原任务与唤醒保留，容量释放后由同一任务继续）。
 # 这是已知码的优化清单；不在清单里的码（包括以后新增的）一律计数。
 WAKE_EXPECTED_WAIT_ADMISSIONS = frozenset({
     "turn_interrupted",
@@ -75,6 +76,7 @@ WAKE_EXPECTED_WAIT_ADMISSIONS = frozenset({
     "authority_recovery_required",
     "wake_source_not_pending",
     "wake_source_changed",
+    "im_subagent_capacity",
 })
 # SQLite 主结果码 SQLITE_BUSY=5、SQLITE_LOCKED=6（扩展码的低 8 位）；锁冲突属于瞬时类。
 _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})

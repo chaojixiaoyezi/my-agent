@@ -8,29 +8,27 @@ from __future__ import annotations
 让用户能控制任务生命周期（ABANDONED/PAUSED/RESUMED）。
 """
 
-import time
+import copy
 
-from ..agent.local_storage import LocalStore
-from ..agent.settings import load_config
-from ..agent.subagents.models import TaskStatus
-from ..agent.task_registry import TaskRegistry, format_task_list, get_task_summary
-from .common import ROOT, int_arg_or_default, resolve_workspace_root
+from ..agent.task_registry import format_task_list, get_task_summary
+from .common import int_arg_or_default, make_agent, make_lightweight_cli_agent_context
 from .models import TaskIdOptions, TaskListOptions, TaskSearchOptions
 
 # 参数减量第 3 批：任务列表默认条数不再是配置项，--limit 仍优先；home 运行时命令共用同一常量。
 CLI_TASK_LIST_COUNT = 50
+_CONTROL_VERBS = {"pause": "暂停", "abandon": "放弃", "resume": "恢复"}
 
 
-def _task_store(config_path: str):
-    config = load_config(config_path)
-    root = resolve_workspace_root(config, config_path)
-    return LocalStore(root / "data" / "local_store.db")
+# LLM: 只读查询走实际配置 owner 的同一 LocalStore 构造叶（TaskRegistry 投影），不按工作区另拼一个库，也不创建执行服务。
+# 函数用途: 返回当前配置 owner 的任务投影库。
+def _task_store(args):
+    return make_lightweight_cli_agent_context(args).local_store
 
 
 def cmd_task_list(args) -> int:
 
     options = _task_list_options(args)
-    store = _task_store(options.config)
+    store = _task_store(args)
 
     tasks = store.task_registry.query_tasks(
         user_id=options.user_id,
@@ -46,88 +44,80 @@ def cmd_task_list(args) -> int:
 def cmd_task_show(args) -> int:
 
     options = _task_id_options(args)
-    summary = get_task_summary(_task_store(options.config), options.task_id)
+    summary = get_task_summary(_task_store(args), options.task_id)
 
     print(summary)
     return 0
 
 
 def cmd_task_abandon(args) -> int:
-
-    options = _task_id_options(args)
-    store = _task_store(options.config)
-
-    task_info = store.task_registry.lookup_task(options.task_id)
-    if not task_info:
-        print(f"任务 {options.task_id} 不存在。")
-        return 1
-
-    current_status = task_info["status"]
-    if current_status == TaskStatus.ABANDONED.value:
-        print(f"任务 {options.task_id} 已经是 ABANDONED 状态。")
-        return 0
-
-    ok = store.task_registry.update_task_status(options.task_id, TaskStatus.ABANDONED.value)
-    if ok:
-        print(f"任务 {options.task_id} 已标记为 ABANDONED，Dispatch 不会再调度。")
-        return 0
-    else:
-        print(f"任务 {options.task_id} 更新失败。")
-        return 1
+    return _control_task(args, "abandon")
 
 
 def cmd_task_pause(args) -> int:
-
-    options = _task_id_options(args)
-    store = _task_store(options.config)
-
-    task_info = store.task_registry.lookup_task(options.task_id)
-    if not task_info:
-        print(f"任务 {options.task_id} 不存在。")
-        return 1
-
-    current_status = task_info["status"]
-    if current_status == TaskStatus.PAUSED.value:
-        print(f"任务 {options.task_id} 已经是 PAUSED 状态。")
-        return 0
-
-    ok = store.task_registry.update_task_status(options.task_id, TaskStatus.PAUSED.value)
-    if ok:
-        print(f"任务 {options.task_id} 已暂停，可用 task resume 恢复。")
-        return 0
-    else:
-        print(f"任务 {options.task_id} 更新失败。")
-        return 1
+    return _control_task(args, "pause")
 
 
 def cmd_task_resume(args) -> int:
+    return _control_task(args, "resume")
 
+
+# LLM: 控制命令按实际配置 owner/home/store/workspace 构造原宿主（托管权威库挂载失败即拒绝，不退回投影写入），
+#   全部状态变化经宿主正式生命周期入口里 control_task 的原授权、回执、撤权与清理；TaskRegistry 只随 canonical 投影刷新，这里绝不直写。
+# 函数用途: 执行一次 task pause/abandon/resume，并把结构化回执翻译成用户提示与退出码。
+def _control_task(args, action: str) -> int:
     options = _task_id_options(args)
-    store = _task_store(options.config)
-
-    task_info = store.task_registry.lookup_task(options.task_id)
-    if not task_info:
+    verb = _CONTROL_VERBS[action]
+    host_args = copy.copy(args)
+    host_args._defer_mcp_connect = True
+    try:
+        host = make_agent(host_args)
+    except Exception as exc:  # 构造失败即无可用权威，不能退回未托管或投影控制。
+        print(f"无法打开配置的任务权威，未{verb}任务 {options.task_id}：{type(exc).__name__}: {exc}")
+        return 1
+    try:
+        report = host.subagents.lifecycle.control_task(host, options.task_id, action=action)
+    except FileNotFoundError:
         print(f"任务 {options.task_id} 不存在。")
         return 1
-
-    current_status = task_info["status"]
-    if current_status != TaskStatus.PAUSED.value:
-        print(f"任务 {options.task_id} 当前状态是 {current_status}，只有 PAUSED 状态才能 resume。")
+    except PermissionError as exc:
+        print(f"无权{verb}任务 {options.task_id}：{exc}")
         return 1
-
-    ok = store.task_registry.update_task_status(options.task_id, TaskStatus.RUNNING.value)
-    if ok:
-        print(f"任务 {options.task_id} 已恢复为 RUNNING。")
-        return 0
-    else:
-        print(f"任务 {options.task_id} 更新失败。")
+    except RuntimeError as exc:  # TaskControlError 携带拒绝码；其余运行时冲突即控制未确认。
+        code = str(getattr(exc, "code", "") or "")
+        if code:
+            print(f"任务 {options.task_id} 不能{verb}：{exc}（{code}）")
+        else:
+            print(f"任务 {options.task_id} {verb}未确认：{type(exc).__name__}: {exc}")
         return 1
+    print(_control_message(options.task_id, verb, report))
+    return 0 if report.get("ok") else 1
+
+
+# 函数用途: 把控制回执翻译成一行用户提示；清理确认只引用原宿主写入的回执状态。
+def _control_message(task_id: str, verb: str, report: dict[str, object]) -> str:
+    status = report.get("status")
+    outcome = report.get("outcome")
+    if outcome == "already_applied":
+        return f"任务 {task_id} 已经是 {status} 状态。"
+    if outcome == "not_controllable":
+        return f"任务 {task_id} 当前状态是 {status}，不能{verb}。"
+    if not report.get("ok"):
+        failed = report.get("failed") or []
+        return f"任务 {task_id} {verb}未完成（{outcome}，状态 {status}）：{failed}"
+    if report.get("action") == "resume":
+        return f"任务 {task_id} 已恢复为 {status}，将由原调度续跑同一 run。"
+    cleanup = report.get("cleanup_state")
+    hint = "原执行轮无需清理" if cleanup == "not_required" else (
+        "原执行轮已确认清理" if cleanup == "confirmed" else "等待原执行轮宿主确认清理")
+    tail = "，确认后可用 task-resume 恢复" if status == "PAUSED" else ""
+    return f"任务 {task_id} 已{verb}，状态 {status}；执行权已关闭，{hint}{tail}。"
 
 
 def cmd_task_search(args) -> int:
 
     options = _task_search_options(args)
-    store = _task_store(options.config)
+    store = _task_store(args)
 
     # 获取所有任务，用 LLM 搜索（简单实现：关键词匹配）
     all_tasks = store.task_registry.query_tasks(limit=200)

@@ -78,7 +78,7 @@ def tool_approval_scope(agent: object, run_id: str) -> ToolApprovalScope:
 # 函数用途: 从原任务和当前执行车道读取资格；只读原账，不领取、续租或替换 claim。
 def _main_scope(agent: object, link: object, thread: object) -> ToolApprovalScope:
     store = agent.conversation_store
-    claim, error = store.claims.load_report(thread.thread_id)
+    claim, error = store.claims.load_report(thread.thread_id, claim_scope_id=_main_claim_scope_id(link, thread))
     if error is not None:
         raise ToolApprovalScopeUnavailable("tool approval claim is unreadable")
     claim_id = str(claim.get("claim_id") or "")
@@ -104,6 +104,18 @@ def _main_scope(agent: object, link: object, thread: object) -> ToolApprovalScop
         active = attempt_id is not None
         attempt_id = attempt_id or ""
     return ToolApprovalScope(link.task_id, link.task_id, thread.thread_id, "main", "主代理", active, claim_id, attempt_id)
+
+
+# LLM: 只按持久 TaskLink 自带的 detached 声明与匹配线程推出原 detached 车道键（与领取侧 _background_claim_scope_id 同一
+#   detached_task_claim_scope_id）；其它一律沿原线程车道，不扫描车道、不按名字猜，也不据此授予任何权限。
+# 函数用途: 给审批资格与审批会话复用提供同一个原 claim 定位。
+def _main_claim_scope_id(link: object, thread: object) -> str:
+    from .run_claim import detached_task_claim_scope_id
+
+    if (link.thread_id == thread.thread_id
+            and str(getattr(link, "cancellation_scope", "") or "").strip().lower() == "detached"):
+        return detached_task_claim_scope_id(thread.thread_id, link.task_id)
+    return ""
 
 
 # LLM: claim已发布的准确attempt是定位，不是权限；缺发布仅保无实际attempt的旧单次scope，显式冲突/坏schema/DB未知均拒，不查询current补空。
