@@ -659,7 +659,7 @@ def _pending_guidance_for_current_agent(store, params, *, limit):
     return entries, task_id, warning
 
 
-# LLM: Reserve input only from the current agent's authorized mailboxes under its exact turn guard, then mutate this prompt only.
+# LLM: Reserve input only from the current agent's authorized mailboxes under its exact turn guard; pass trusted current owner for canonical plugin source refusal before prompt mutation.
 # 函数用途: 在模型安全点认领并注入本代理消息，不消费父级或兄弟消息。
 def inject_pending_guidance(agent: object, params: object, *, now: float | None = None) -> bool:
     store = getattr(agent, "conversation_store", None)
@@ -688,6 +688,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
                     attempt_id,
                     # 派活回合自带它那条任务的编号；正文条目也带同一个编号，两者必须一致才允许认领。
                     owning_task_id=session_task_id_for_params(params),
+                    owner_id=str(getattr(getattr(agent, 'home_paths', None), 'owner_id', '') or ''),
                 )
                 _inject_claimed_guidance(params, claimed, tool_context)
                 return claimed
@@ -748,7 +749,7 @@ def _inject_guidance_user_turn(params, entry, tool_context):
         append_active_turn_user_input(params, packet)
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Pending checks and injection must use the same exact-agent mailboxes, including direct child guidance.
+# LLM: 插话持久操作经 guidance 领域组件；Pending/claim共用精确邮箱、回合和插件来源拒绝；先过滤全体原候选，避免最新插件项掩盖更早native项。
 # 函数用途: 检查本代理的新消息；子代理插话也能阻止旧响应直接结束，父级插话不能打断子代理。
 def has_pending_request_guidance(agent: object, params: object) -> bool:
     store = getattr(agent, "conversation_store", None)
@@ -757,7 +758,7 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
     if store is None or not (request_id or task_id):
         return False
     try:
-        entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=1)
+        entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=0)
         candidates = guidance_not_yet_injected(params, _dedupe_guidance(entries))
         turn_id = request_id or task_id
         owning_task_id = session_task_id_for_params(params)
@@ -767,6 +768,8 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
                 expected_turn_id=turn_id,
                 owning_task_id=owning_task_id,
             )
+            and _instruction_admitted(store, entry,
+                owner_id=str(getattr(getattr(agent, 'home_paths', None), 'owner_id', '') or ''))
             for entry in candidates
         )
     except Exception:
@@ -775,6 +778,7 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
 
 # LLM: 插话持久操作经 guidance 领域组件； Claim is the durable equivalent of 会话运行时 appending into the exact active turn_state under
 # its active-turn lock. Rejected or stale-turn receipts are filtered before any prompt mutation.
+#   owner_id由唯一调用者从当前host传入；canonical插件指令在claim之前只拒pending，submitted/consumed不变。
 # 函数用途: 在模型安全点原子认领属于当前精确回合的补充消息。
 def _claim_guidance_for_active_turn(
     store: object,
@@ -782,9 +786,15 @@ def _claim_guidance_for_active_turn(
     turn_id: str,
     attempt_id: str,
     owning_task_id: str = "",
+    *,
+    owner_id: str,
 ) -> list[Any]:
     claimed: list[Any] = []
     for entry in entries:
+        if not store.guidance.available_for_turn(entry, expected_turn_id=turn_id, owning_task_id=owning_task_id):
+            continue
+        if not _instruction_admitted(store, entry, owner_id=owner_id):
+            continue
         if store.guidance.claim_for_turn(
             entry,
             expected_turn_id=turn_id,
@@ -804,6 +814,27 @@ def _claim_guidance_for_active_turn(
         except Exception:  # noqa: BLE001 - 绑定失败只影响取消的精确性，不影响已生效的认领
             pass
     return claimed
+
+
+# LLM: 调用方先核原target/turn；重读精确回执后按canonical来源分类，只经原mark_status拒pending，不触碰已提交/已消费或其它消息。
+# 函数用途: 在probe与claim之间共享插件指令拒绝，避免重复空模型工作。
+def _instruction_admitted(store, entry, *, owner_id: str) -> bool:
+    from ...conversation.host_actor import HostActorError, is_plugin_business_instruction
+    from ...runtime_errors import DataCorruptionError
+
+    key = str((entry.metadata or {}).get('dedupe_key') or '')
+    receipt = store.guidance.receipt(key) if key else None
+    if key and (receipt is None or receipt.entry.guidance_id != entry.guidance_id
+            or (receipt.entry.target_type, receipt.entry.target_id) != (entry.target_type, entry.target_id)):
+        raise DataCorruptionError('guidance source receipt mismatch')
+    canonical = receipt.entry if receipt is not None else entry
+    try:
+        blocked = is_plugin_business_instruction(store, canonical, owner_id=owner_id)
+    except HostActorError:
+        blocked = True
+    if blocked and receipt is not None and receipt.status == 'pending':
+        store.guidance.mark_status(key, 'rejected')
+    return not blocked
 
 
 # LLM: 认领可能改绑回执的 expected_turn_id（被上一回合释放的会话消息跨回合认领时改绑到本回合）；后续注入、提交和确认

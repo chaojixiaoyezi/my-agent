@@ -16,6 +16,12 @@ from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_permissions.host_grants import validate_host_grant
 from agent_py_agent.tests.test_plugin_host_v2_grants import grant_payload
 
+UNREADY_BUSINESS_ACTIONS = frozenset({
+    'business.background_agents.messages.send', 'business.tasks.submit', 'business.tasks.assign',
+    'business.tasks.follow_up', 'business.workflows.run', 'business.workflow_runs.resume',
+    'business.subagents.messages.send', 'business.background_agents.resume', 'business.background_agents.restore',
+})
+
 
 def test_production_asset_root_preserves_non_remapped_path():
     safe_root = Path('/non-remapped/gateway-composition')
@@ -144,7 +150,7 @@ def production_call(host, action, payload=None, *, user=None, key=None, status=2
     return body["data"]
 
 
-# LLM: 显式空组合仍不可用；callback只有真实验签端口存在才就绪，不用目录登记假报已接IdP。
+# LLM: 显式空组合仍不可用；只有九个未实现受限异步适配的业务动作可豁免，SSO仍须真实验签器，其余逐项严格断言。
 # 函数用途: 验证完整HTTP目录和逐动作依赖，缺IdP适配器明确不可用、注入后恢复就绪。
 def test_production_gateway_wires_all_actions(production_host):
     from agent_py_agent.agent.plugin_host.business_action_specs import business_host_action_specs
@@ -157,14 +163,14 @@ def test_production_gateway_wires_all_actions(production_host):
     assert len(rows) == len(action_specs())
     assert {row["action"] for row in rows} == set(action_specs())
     if business_implemented:
-        assert {row['action'] for row in rows if not row['available']} == {'users.auth.sso.callback'}
+        assert {row['action'] for row in rows if not row['available']} == {'users.auth.sso.callback'} | UNREADY_BUSINESS_ACTIONS
     else:
         # Wave 1 只豁免冻结目录中的业务动作，不按前缀笼统忽略新增或未知动作。
         assert {row['action'] for row in rows if not row['available']} - contract_only == {'users.auth.sso.callback'}
     production_host[0].sso_assertion_verifier = lambda *args: None
     wired = production_call(production_host, 'host.capabilities.get')['actions']
     if business_implemented:
-        assert all(row['available'] for row in wired)
+        assert {row['action'] for row in wired if not row['available']} == UNREADY_BUSINESS_ACTIONS
     else:
         assert all(row['available'] for row in wired if row['action'] not in contract_only)
 
@@ -182,6 +188,8 @@ def test_production_gateway_wires_all_actions(production_host):
         pytest.param(True, True, True, True, False, False, id="wave2-legacy-after-strict"),
     ],
 )
+# LLM: 目录替身仅准确九项保持unready，不能按business前缀忽略任何其它缺失handler。
+# 函数用途: 证明接线测试仍能抓住其它业务动作与遗留动作的缺口。
 def test_gateway_wiring_wave_boundary_keeps_handler_assertions(
     monkeypatch, business_module_present, business_before, business_after, legacy_before, legacy_after, passes,
 ):
@@ -201,6 +209,7 @@ def test_gateway_wiring_wave_boundary_keeps_handler_assertions(
     def directory(host, _action):
         after = hasattr(host[0], "sso_assertion_verifier")
         return {"actions": [{"action": name, "available": (
+            False if business_module_present and name in UNREADY_BUSINESS_ACTIONS else
             (business_after if after else business_before) if name in business else
             after if name == "users.auth.sso.callback" else
             (legacy_after if after else legacy_before)

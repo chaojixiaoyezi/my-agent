@@ -812,6 +812,181 @@ def _complete_background_slice(
     )
 
 
+# LLM: 只提供结构化的本片准入失败；wake_handled仅取耐久收口/原结果事实，不把旧执行说成not_started。
+# 函数用途: 为插件旧工作返回零模型、零工具的后台报告，失败时由原wake重试补账。
+def _plugin_unavailable_report(request, *, handled=False, task_status='', detail=''):
+    return BackgroundMainAgentReport(thread_id=request.thread_id, task_id=request.task_id, reason=request.reason,
+        response='', route_channel='internal', route_target='', created_at=request.now,
+        delivery_status='suppressed', delivery_reason=detail or 'plugin_async_adapter_unavailable',
+        wake_handled=handled, task_status=task_status, runtime_status='failed', runtime_reason='HOST_NOT_READY')
+
+
+# LLM: 当前claim须来自词法宿主绑定且匹配可信request的root和原claim scope；runtime_authority/原execution ref存在时不在此结案，过期不等于死亡。
+# 函数用途: 判断本片是否独占未启动工作的收口；预留恢复还须匹配原任务回合的结束claim。
+def _plugin_closeout_owns_claim(store, thread_id, task, *, request, reserved=False):
+    from .claim_execution_binding import current_claim_execution
+
+    binding = current_claim_execution()
+    if binding is None:
+        claim, error = store.claims.load_report(thread_id)
+        return not reserved and not error and (not claim or claim.get('status') != 'running')
+    if binding.claims is not store.claims or binding.thread_id != thread_id:
+        return False
+    expected_scope = _background_claim_scope_id(store, thread_id, request.task_id) or thread_id
+    if (binding.claim_scope_id or thread_id) != expected_scope:
+        return False
+    claim, error = store.claims.load_report(thread_id, claim_scope_id=binding.claim_scope_id)
+    if (error or claim.get('claim_id') != binding.claim_id or claim.get('thread_id') != thread_id
+            or str(claim.get('task_id') or '') != request.task_id
+            or claim.get('status') != 'running' or claim.get('cancel_requested') is True
+            or float(claim.get('expires_at') or 0) <= time.time() or claim.get('runtime_authority')):
+        return False
+    if not reserved:
+        return True
+    previous = claim.get('previous_claim') or {}
+    turn_id = task.conversation_request_id
+    return bool(turn_id and previous.get('task_id') == turn_id
+        and previous.get('claim_id') and previous.get('status') in {'finished', 'failed', 'cancelled', 'yielded'})
+
+
+# LLM: task/body两份canonical身份必须吻合；pending只动准确body回执。reserved仅在原claim恢复归属和排他收口范围证明后走原reject_pending，不释放正文或碰submitted。
+# 函数用途: 关闭旧插件任务尚未提交的原正文，保留不确定投递。
+def _reject_plugin_task_body(store, task, *, request):
+    receipt = store.guidance.receipt(task.body_dedupe_key) if task.body_dedupe_key else None
+    if receipt is None:
+        if task.body_guidance_id:
+            raise DataCorruptionError('plugin task body receipt missing')
+        return True
+    entry, metadata = receipt.entry, receipt.entry.metadata
+    if (entry.guidance_id != task.body_guidance_id or entry.target_type != 'thread'
+            or entry.target_id != task.target_thread_id or entry.sender != task.sender_thread_id
+            or metadata.get('origin_thread_id') != task.sender_thread_id
+            or metadata.get('session_task_id') != task.task_id or metadata.get('origin_kind') != 'session_task'):
+        raise DataCorruptionError('plugin task body scope mismatch')
+    if receipt.status == 'pending':
+        return store.guidance.mark_status(task.body_dedupe_key, 'rejected').status == 'rejected'
+    if receipt.status == 'reserved':
+        turn_id = task.conversation_request_id
+        if (metadata.get('expected_turn_id') != turn_id
+                or not _plugin_closeout_owns_claim(store, task.target_thread_id, task, request=request, reserved=True)
+                or not _plugin_body_is_only_turn_input(store, task, turn_id)):
+            return False
+        result = store.guidance.recovery.reject_pending(turn_id, reject_reserved=True,
+            release_task_body=False, target=('thread', task.target_thread_id))
+        if result['errors']:
+            raise DataCorruptionError('plugin task reserved closeout incomplete')
+        return store.guidance.receipt(task.body_dedupe_key).status == 'rejected'
+    return receipt.status == 'rejected'
+
+
+# LLM: 原批量恢复API会结算同turn/target所有输入；历史claim已结束且本片独占车道时，仍须读取原队列/回执证明没有其它可变输入，否则仅阻断模型并保留账本。
+# 函数用途: 禁止插件正文收口连带拒绝或释放同回合的其它消息。
+def _plugin_body_is_only_turn_input(store, task, turn_id):
+    entries, errors = store.guidance.recent_report('thread', task.target_thread_id, limit=0)
+    if errors:
+        return False
+    for candidate in entries:
+        if candidate.guidance_id == task.body_guidance_id:
+            continue
+        key = str((candidate.metadata or {}).get('dedupe_key') or '')
+        other = store.guidance.receipt(key) if key else None
+        canonical = other.entry if other is not None else candidate
+        if (canonical.metadata.get('expected_turn_id') == turn_id
+                and (other is None or other.status in {'pending', 'reserved'})):
+            return False
+    return True
+
+
+# LLM: 原任务、原sender插件绑定、目标和owner是唯一出处；不读前缀/正文/模型metadata。关闭/报告中断返回wake未处理，重入只补账，不经普通异常释放正文重跑模型。
+# 函数用途: 在任何Goal或模型准备前拦截已排队的旧插件业务SessionTask。
+def _refuse_plugin_session_task(runtime, thread, request):
+    from .business_contracts import BusinessExecutionContext
+    from .host_actor import is_plugin_business_source_thread
+    from .session_task_report import report_task_result
+    from .session_tasks import (
+        SESSION_TASK_FAILED,
+        SESSION_TASK_TERMINAL_STATUSES,
+        SessionTaskUpdate,
+    )
+
+    identifier = _session_task_run_id(request)
+    if not identifier:
+        return None
+    store, owner = runtime.store, str(runtime.agent.home_paths.owner_id)
+    task = store.session_tasks.require(identifier)
+    source = store.threads.require(task.sender_thread_id)
+    if (task.task_id != identifier or task.target_thread_id != thread.thread_id
+            or thread.owner_id != owner or source.owner_id != owner):
+        raise PermissionError('PLUGIN_TASK_SCOPE_MISMATCH')
+    if not is_plugin_business_source_thread(store, source.thread_id, owner_id=owner):
+        return None
+    context = task.metadata.get('business_context')
+    if context is not None:
+        context = BusinessExecutionContext.from_dict(context)
+        if context.task_id != task.task_id or context.owner_id != owner:
+            raise PermissionError('PLUGIN_TASK_SCOPE_MISMATCH')
+    try:
+        if task.status in SESSION_TASK_TERMINAL_STATUSES:
+            # 原有历史结果绝不重写；本补丁失败且缺正文拒绝时只补原回执。
+            if task.status == SESSION_TASK_FAILED and task.failure_code == 'HOST_NOT_READY':
+                if not _reject_plugin_task_body(store, task, request=request):
+                    return _plugin_unavailable_report(request, task_status=task.status)
+            handled = report_task_result(runtime.agent, task)
+            return _plugin_unavailable_report(request, handled=handled, task_status=task.status,
+                detail='plugin_original_result_preserved')
+        if task.task_run_id or not _plugin_closeout_owns_claim(store, thread.thread_id, task, request=request):
+            return _plugin_unavailable_report(request, task_status=task.status, detail='plugin_prior_effects_preserved')
+        if task.status == 'accepted' and (not task.conversation_request_id
+                or context is None
+                or not _plugin_closeout_owns_claim(store, thread.thread_id, task, request=request, reserved=True)):
+            return _plugin_unavailable_report(request, task_status=task.status, detail='plugin_prior_effects_preserved')
+        if task.conversation_request_id and task.status != 'accepted':
+            return _plugin_unavailable_report(request, task_status=task.status, detail='plugin_prior_effects_preserved')
+        if not _reject_plugin_task_body(store, task, request=request):
+            return _plugin_unavailable_report(request, task_status=task.status, detail='plugin_prior_effects_preserved')
+        closed = store.session_tasks.advance(task.task_id,
+            SessionTaskUpdate(status=SESSION_TASK_FAILED, failure_code='HOST_NOT_READY'))
+        handled = report_task_result(runtime.agent, closed)
+        return _plugin_unavailable_report(request, handled=handled, task_status=closed.status)
+    except Exception:  # noqa: BLE001 - 原wake只重试耐久收口，禁止落进释放正文的模型失败路径。
+        return _plugin_unavailable_report(request, task_status=task.status, detail='plugin_closeout_pending')
+
+
+# LLM: 只通过原wake的准确guidance回执取源/目标，复用task/guidance来源分类；仅pending可拒，已提交/预留不明保留，宿主终态报告正常处理。
+# 函数用途: 阻止旧插件session_message在任何提示或模型准备前进入owner运行。
+def _refuse_plugin_session_message(runtime, thread, request):
+    from .host_actor import HostActorError, is_plugin_business_instruction
+    from .session_messaging import SESSION_MESSAGE_KEY_FIELD
+
+    if request.reason != SESSION_MESSAGE_WAKE_REASON:
+        return None
+    metadata = (request.wake_signal or {}).get('metadata') or {}
+    key = str(metadata.get(SESSION_MESSAGE_KEY_FIELD) or '')
+    if not key:
+        return None
+    receipt = runtime.store.guidance.receipt(key)
+    if receipt is None:
+        raise DataCorruptionError('session message receipt missing')
+    entry = receipt.entry
+    owner = str(runtime.agent.home_paths.owner_id)
+    if (thread.owner_id != owner or entry.target_type != 'thread' or entry.target_id != thread.thread_id
+            or metadata.get('origin_thread_id') != entry.metadata.get('origin_thread_id')):
+        raise PermissionError('PLUGIN_MESSAGE_SCOPE_MISMATCH')
+    try:
+        blocked = is_plugin_business_instruction(runtime.store, entry, owner_id=owner)
+    except HostActorError:
+        blocked = True
+    if not blocked:
+        return None
+    try:
+        if receipt.status == 'pending':
+            receipt = runtime.store.guidance.mark_status(key, 'rejected')
+        return _plugin_unavailable_report(request, handled=receipt.status in {'rejected', 'consumed'},
+            detail='plugin_message_admission_unavailable')
+    except Exception:  # noqa: BLE001 - 失败只补原回执，不启动模型或释放输入。
+        return _plugin_unavailable_report(request, detail='plugin_closeout_pending')
+
+
 # LLM: 唤醒准备与投递共用唯一 store；执行委托独立工作片模块，修改时核对历史和外发事务回归。
 # 类用途: 连接原后台请求、执行与收口投递；不拥有调度租约，actual未结不改作普通失败。
 class BackgroundMainAgentRuntime:
@@ -831,7 +1006,7 @@ class BackgroundMainAgentRuntime:
             agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
-    # LLM: 原wake需处理义务先只通知、不重业务；普通工作仍沿原身份与结果链，认证事实在finalization前冻结，展示不参与授权。
+    # LLM: 原wake需处理义务先只通知、不重业务；加载canonical目标后先拒旧插件task/message，trusted学习wake保持原路；普通工作仍沿原身份与结果链。
     # 函数用途: 执行后台工作或恢复原必要通知，沿同一冻结投递结束原失败片，不能将静默当已通知。
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
@@ -864,6 +1039,9 @@ class BackgroundMainAgentRuntime:
             return BackgroundMainAgentReport(thread_id=thread.thread_id, task_id=request.task_id, reason=request.reason,
                 response="", route_channel="internal", route_target="", created_at=time.time(),
                 delivery_status="suppressed", delivery_reason="task_learning_queue_only", wake_handled=True)
+        refused = _refuse_plugin_session_task(self, thread, request) or _refuse_plugin_session_message(self, thread, request)
+        if refused is not None:
+            return refused
         from .background_team_lifecycle import background_identity_allows_work
 
         if not background_identity_allows_work(thread, existing=True):
