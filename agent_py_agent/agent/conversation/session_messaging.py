@@ -375,6 +375,10 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
                                           turn_id=current.conversation_request_id)
         if not stopped.confirmed:
             refs.append(current.conversation_request_id)
+    elif (current.status in {"queued", "cancelled"} and not current.task_run_id
+          and not current.body_guidance_id and receipt is None):
+        # 尚未发表正文/执行的原创建ACK丢失：终态阻止后续准入，不捏造输入或拿别的claim当执行。
+        pass
     else:
         refs.append(current.task_id)
     if current.status not in SESSION_TASK_TERMINAL_STATUSES:
