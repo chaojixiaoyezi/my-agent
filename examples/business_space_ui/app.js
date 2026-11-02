@@ -6,6 +6,21 @@
   class BusinessError extends Error {
     constructor(message, status, body) { super(message); this.status = status; this.body = body; }
   }
+  const RECEIPT_FIELDS = ['request_id', 'operation_id', 'state', 'data', 'error', 'allowed_actions', 'warnings', 'effect_outcome'];
+  const CONFIRMED_STATES = {200: 'completed', 202: 'accepted'};
+  const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  // 冻结回执封套是闭合对象且没有 ok 字段；缺字段、多字段或类型不符都不是可采信的回执。
+  function receiptEnvelope(body) {
+    if (!isRecord(body) || Object.keys(body).length !== RECEIPT_FIELDS.length
+        || !RECEIPT_FIELDS.every(key => Object.hasOwn(body, key))) return null;
+    const valid = typeof body.request_id === 'string' && body.request_id !== ''
+      && (body.operation_id === null || typeof body.operation_id === 'string')
+      && ['completed', 'accepted', 'pending', 'blocked', 'failed', 'unknown'].includes(body.state) && isRecord(body.data)
+      && (body.error === null || (isRecord(body.error) && typeof body.error.code === 'string'))
+      && Array.isArray(body.allowed_actions) && Array.isArray(body.warnings)
+      && ['none', 'not_started', 'committed', 'running', 'unknown'].includes(body.effect_outcome);
+    return valid ? body : null;
+  }
   class BusinessClient {
     constructor(fetcher = globalThis.fetch.bind(globalThis), csrf = () => '') {
       this.fetcher = fetcher; this.csrf = csrf; this.pending = new Map();
@@ -33,11 +48,18 @@
         response = await this.fetcher('/client/business', {method: 'POST', credentials: 'same-origin',
           headers: this.headers(), body: prepared.body, signal});
       } catch (error) { throw new BusinessError('未确认；请核对原 request_id，勿新建重发', 0, {request_id: prepared.request_id}); }
-      if (!response.ok) throw new BusinessError('业务请求被拒绝或尚未连接', response.status);
-      const body = await response.json();
-      if (body.ok !== true) throw new BusinessError('业务回执未成功', response.status, body);
-      this.pending.delete(prepared.request_id);
-      return body;
+      let body = null;
+      try { body = await response.json(); } catch (error) { body = null; }
+      const envelope = receiptEnvelope(body);
+      // 只有 200/completed 或 202/accepted 且 error=null 才算成功；accepted 仅证明已受理，不等于已完成。
+      if (envelope && envelope.error === null && CONFIRMED_STATES[response.status] === envelope.state) {
+        this.pending.delete(prepared.request_id);
+        return envelope;
+      }
+      if (!response.ok && (!envelope || ['none', 'not_started'].includes(envelope.effect_outcome)))
+        throw new BusinessError('业务请求被拒绝或尚未连接', response.status, body);
+      // 结果未知、已提交但不可见、未完成或回执不可采信：保留原准备对象，不换 ID 重发。
+      throw new BusinessError('业务回执未确认；请核对原 request_id，勿新建重发', response.status, body);
     }
     call(action, params, options = {}) { return this.send(this.prepare(action, params, options), options.signal); }
     async uploadArtifact(file, spaceId, idempotencyKey, taskId) {
@@ -83,23 +105,26 @@
   class BusinessObservation {
     constructor(client, onUpdate, filter = {}) {
       this.client = client; this.onUpdate = onUpdate; this.filter = JSON.parse(JSON.stringify(filter));
-      this.cursor = null; this.coverage = 'unknown'; this.seen = new Set();
+      this.cursor = null; this.coverage = 'unknown'; this.seen = new Set(); this.maxCatchUpPages = 10;
     }
     async recover(expired = false) {
       if (expired) { this.cursor = null; this.coverage = 'expired'; this.seen.clear(); }
       else this.coverage = 'partial';
-      let cursor = this.cursor;
-      const cursors = new Set();
-      do {
-        const params = {filter: this.filter}; if (cursor) params.cursor = cursor;
+      // 持续事件源到当前末尾仍给非空续读游标，且游标串随过期时间变化：只靠有界页数收口；
+      // 每页都保存服务端扫描续点（含过滤后为空的页），游标保持不透明，不据其内容做授权判断。
+      for (let page = 0; ; page += 1) {
+        if (page >= this.maxCatchUpPages) { this.coverage = 'partial'; break; }
+        const params = {filter: this.filter}; if (this.cursor) params.cursor = this.cursor;
         const result = await this.client.call('events.list', params);
         const data = result.data;
-        if (!data || !Array.isArray(data.items)) throw new BusinessError('补拉协议不完整', 0);
-        for (const event of data.items) await this.accept(event);
-        this.coverage = data.coverage || 'unknown'; cursor = data.next_cursor;
-        if (cursor && cursors.has(cursor)) { this.coverage = 'partial'; break; }
-        if (cursor) cursors.add(cursor);
-      } while (cursor);
+        if (!data || !Array.isArray(data.events) || typeof data.reset_required !== 'boolean'
+            || (data.next_cursor !== null && typeof data.next_cursor !== 'string')) throw new BusinessError('补拉协议不完整', 0, result);
+        if (data.reset_required) { this.cursor = null; this.coverage = 'expired'; this.seen.clear(); break; }
+        for (const event of data.events) await this.accept(event);
+        if (data.next_cursor) this.cursor = data.next_cursor;
+        this.coverage = data.coverage || 'unknown';
+        if (!data.events.length || !data.next_cursor) break;
+      }
       this.onUpdate({stream_item: 'recovered', coverage: this.coverage, cursor: this.cursor});
     }
     async accept(item) {
