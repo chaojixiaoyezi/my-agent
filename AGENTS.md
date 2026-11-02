@@ -37,6 +37,12 @@
 - 真实任务测试时，任何时候 AI 开发者都只是测试者和旁观者，只能向被测对象给出一次 prompt 需求，然后观察被测对象自己的日志、合同、产物和验收结果；不能越界、越权替被测对象修改文件、补产物、执行任务或把旁路产物算作测试通过。
 - 发现问题时，先读对应模块的合同、实现和回归测试，再改代码。需要引入外部依赖或实现时，先核对公开接口、维护状态与许可，记录适用边界；不能为了单个失败样例增加旁路或专项状态。
 - 主代理和合同层开发默认走“合同单测 -> fake tool -> fake LLM -> replay -> 少量真实环境验收”的顺序。真实环境测试保留，但只能作为最终验收和失败样本来源，不能再作为主要开发反馈回路。
+- **五大 AI 原生防错与秒级门禁铁律（所有现在与未来的开发者/Agent 强制执行）**：
+  1. **每修一类典型缺陷必沉淀 AST 静态规则**：严禁“只修单点行号、不留静态防线”。凡修复锁外读旧快照进锁整条覆盖、归档误移活跃 `.lock`、向严格 Schema 接口塞额外字段、租约未套 `ExitStack` 等模式，必须同步核查同类调用点（参考 `/Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/DEFECT_PATTERNS.md`）并沉淀静态/单测门禁。
+  2. **四大核心状态机（`SessionTaskStore`、`ClaimStore`、`PtySessionRegistry`、`WorkflowEngine`）并发交错不变量**：任何触及这四个状态机的修改，必须用确定性交错测试（`Event` 控制交错）验证三大单调不变量：① **终态不可逆**（`cancelled/done/failed` 绝不被晚到的 `bind_body` 或旧快照写回 `queued/running`）；② **同 Scope 执行体严格互斥**（归档/续租交错下活跃执行体数 `<= 1`）；③ **取消/退出证明单调保留**（在持久化证明被确认前，内存有界历史淘汰如 32 条 PTY 上限绝不能擦除原退出证明）。
+  3. **高频热路径（Hot Path）与宿主租约零泄漏**：在 Gateway 心跳轮询、TUI 状态栏刷新、消息流扫描及被动只读查询（如 `background_agents.get`）中，严禁无界全盘遍历（`rglob`）、严禁在只读路径实例化重型执行 `Agent`；凡控制路径通过 `_resolve_request_agent_for_owner` 获取 `acquire_pinned` 宿主租约，必须使用 `ExitStack` / `try..finally` 确保成功与异常路径 100% 释放。
+  4. **跨模块/前后端契约无 Mock 往返验证（Wire Contract Roundtrip）**：修改 Gateway HTTP/WS 路由与 CLI/TUI/Web 客户端时，禁止前后端各自手写假 JSON 字典 Mock 自测；必须通过真实 Client 发送 $\rightarrow$ Server 路由消费 $\rightarrow$ Client 解析标准 Envelope 的往返测试。
+  5. **连续交互序列验证（Headless Bot Sequence）**：涉及会话、TUI、插话（`steer`）、停止（`/stop`）、新建（`/new`）与重启交接的修改，必须验证“流式生成中 `steer` $\rightarrow$ `/stop` $\rightarrow$ `/new` $\rightarrow$ 下一轮对话”连续序列无悬空 `task_ids`、无状态栏闪烁或死锁。
 - 遇到真实任务跑不通、循环、卡死、工具误用、恢复失败、产物缺失时，不允许第一反应就是临时打补丁。先归类问题属于哪一层：状态机、工具协议、交付合同、恢复合同、工作区、消息、权限或提示注入，然后参考对照项目的成熟做法，再落到本仓库的通用合同层。
 - 禁止为了测试样例写死行为。测试任务、真实任务、样例 prompt 可以存在于数据层和测试层，但不能反向驱动产品代码出现“如果是购物站 / 如果是家具页 / 如果是 xlsx / 如果是 PDF 就这样”的专项分支。
 

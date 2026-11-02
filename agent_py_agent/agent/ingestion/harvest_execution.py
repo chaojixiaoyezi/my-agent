@@ -290,7 +290,7 @@ def _finish(plan):
 
 
 # 提交后租约清理的普通 I/O 错误最多按同一原计划重试的次数（含首次）。
-_FINISH_ATTEMPTS = 3
+_FINISH_ATTEMPT_COUNT = 3
 # 执行权未知/上下文缺失的 typed 事实：不得被普通失败或附注吞掉。
 _TYPED_UNKNOWN = (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable)
 
@@ -299,12 +299,12 @@ _TYPED_UNKNOWN = (RequestExecutionOutcomeUncertainError, RequestExecutionContext
 #   租约换代（_HarvestTransactionUnavailable）、执行权未知/过期（typed）与来源换代都不重试、不删除、不新领租约，原样上抛。
 # 函数用途: 释放本拍唯一原租约（删除租约文件），不重做提交、不回滚已提交状态。
 def _finish_committed(plan):
-    for attempt in range(1, _FINISH_ATTEMPTS + 1):
+    for attempt in range(1, _FINISH_ATTEMPT_COUNT + 1):
         try:
             background_short_operation('harvester_finish', lambda: _finish(plan))
             return
         except OSError as error:
-            if isinstance(error, harvest._HarvestTransactionUnavailable) or attempt == _FINISH_ATTEMPTS:
+            if isinstance(error, harvest._HarvestTransactionUnavailable) or attempt == _FINISH_ATTEMPT_COUNT:
                 raise
 
 

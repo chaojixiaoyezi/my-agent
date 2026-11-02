@@ -23,6 +23,21 @@ before changing code.
 
 本节是所有开发工作的总纲。后面的合同、状态、写入、测试和注释规则都必须服从这里。
 
+### 0.0 Five AI-Native Engineering Guardrails / 五大 AI 原生防错与秒级门禁铁律（全局强制生效）
+
+所有现在与未来的开发者 / AI Agent 在修改任何代码前必须严格执行以下五条防错门禁：
+
+1. **每修一类 P1 缺陷必沉淀 AST 静态拦截规则与同类调用点横扫（Call-Site Sweep & AST Lint）**：
+   - 严禁只修被点名的单行代码。修改前必须对照 `/Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/DEFECT_PATTERNS.md` 横扫当前文件及关联模块中所有同类调用点（如锁外读旧快照进锁整条覆盖、归档函数误移活跃 `.lock`、热路径裸拿租约未套 `ExitStack`），并将典型模式沉淀为秒级静态检查规则。
+2. **四大核心状态机并发交错不变量（State-Machine Interleaving Invariants）**：
+   - 修改 `SessionTaskStore`、`ClaimStore`、`PtySessionRegistry`、`WorkflowEngine` 时，必须通过 `Event` 控制的确定性交错测试验证三大单调不变量：① **终态不可逆**（`cancelled/done/failed` 绝不被晚到的 `bind_body` 或旧快照覆盖回 `queued/running`）；② **同 Scope 执行体严格互斥**（归档/续租交错下活跃执行体数 `<= 1`）；③ **退出/取消证明单调保留**（持久化证明被确认前，32 条 PTY 历史淘汰等有界内存清理绝不能删掉原退出证明）。
+3. **高频热路径（Hot Path）与宿主租约零泄漏（Hot-Path & Lease Discipline）**：
+   - 在 Gateway 轮询/心跳、TUI 状态栏刷新、消息流读取与被动只读查询（如 `background_agents.get`）中，严禁无界全盘遍历（`rglob`）、严禁在被动只读查询中实例化重型执行 `Agent`；凡控制路径调用 `_resolve_request_agent_for_owner` 获取 `acquire_pinned` 宿主租约，必须包裹在 `ExitStack` / `try..finally` 中确保成功与异常路径 100% 释放（断言 `fd_delta == 0`）。
+4. **跨模块与前后端无 Mock 往返契约测试（No-Mock Wire Contract Roundtrip）**：
+   - 涉及 Gateway HTTP/WS 路由与 CLI/TUI/Web 客户端交互时，禁止前后端各自手写假字典 Mock 自测；必须通过真实 Client 序列化 $\rightarrow$ Server 路由消费 $\rightarrow$ Client 解析标准 Envelope 的端到端往返测试。
+5. **连续交互序列验证（Headless Bot Multi-Step Sequence）**：
+   - 涉及会话、TUI、插话（`steer`）、停止（`/stop`）、新建（`/new`）与重启恢复的修改，必须验证“流式生成中 `steer` $\rightarrow$ `/stop` $\rightarrow$ `/new` $\rightarrow$ 下一轮请求”连续动作序列无残留 `task_ids`、无状态栏闪烁或死锁。
+
 ### 0.1 Natural Language Boundary / 自然语言边界
 
 - 自然语言只表达意图，不当机器事实源。用户 prompt、模型 summary、报告正文、

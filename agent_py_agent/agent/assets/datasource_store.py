@@ -459,7 +459,7 @@ def database_gate_facts(owner_home, database_file):
 
 # LLM: 只收集现存普通SQLite文件；缺失/非普通文件上不可能有SDK写者在途，不为它们取锁也不报错。
 # 函数用途: 计算一组规格或原始记录所涉及的物理库身份集合。
-def _database_identities(*rows):
+def _database_identities(rows):
     found = set()
     for row in rows:
         data = asdict(row) if isinstance(row, DatasourceConnectionSpec) else (row or {})
@@ -636,7 +636,7 @@ class _DatasourceMigration:
         root, parts = self._location(source.scope, workspace_root)
         leaf = (*parts, source.datasource_id + '.json')
         # 排序排他物理闸门先于规格锁：在途SDK写者收尾后才做最终指纹核对；锁内重读规格，经已准入的锁内保存路径提交，不重入flock。
-        with _exclusive_database_gates(self.owner_home, _database_identities(source, target)) as gated, \
+        with _exclusive_database_gates(self.owner_home, _database_identities((source, target))) as gated, \
                 locked_json_path(root.joinpath(*leaf)):
             try:
                 current = self._read(root, leaf)
@@ -826,7 +826,7 @@ class DatasourceStore(_DatasourceMigration):
     def save_datasource(self, spec_payload, *, secret_payload=None, credential_values=None, scope='owner', workspace_root=None, expected_revision=None):
         spec, secrets, root, leaf = self._admit_save(spec_payload, scope, workspace_root, (secret_payload, credential_values))
         # 现有与新库的物理闸门先于规格锁；锁外读取只用于发现闸门，锁内重读并核对覆盖后才CAS写回。
-        with _exclusive_database_gates(self.owner_home, _database_identities(self._read(root, leaf), spec)) as gated, \
+        with _exclusive_database_gates(self.owner_home, _database_identities((self._read(root, leaf), spec))) as gated, \
                 locked_json_path(root.joinpath(*leaf)):
             spec = self._save_admitted(root, leaf, spec, secrets, spec_payload, expected_revision, gated)
         return self.public_summary(spec)
@@ -849,7 +849,7 @@ class DatasourceStore(_DatasourceMigration):
     # 函数用途: 在已准入的锁内完成一次规格CAS写入并返回新规格。
     def _save_admitted(self, root, leaf, spec, secrets, spec_payload, expected_revision, gated):
         old = self._read(root, leaf)
-        if not _database_identities(old) <= gated:
+        if not _database_identities((old,)) <= gated:
             raise ValueError('DATASOURCE_REVISION_CONFLICT')
         revision = old['revision'] if old else 0
         if expected_revision is not None and (type(expected_revision) is not int or revision != expected_revision):

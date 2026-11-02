@@ -24,7 +24,10 @@ class ScenarioRetryBackend(BaseBackend):
             observed_at=_utc_now_iso(),
         )
 
-    def generate(self, prompt: str, on_chunk=None, *, tools=None, messages=None, **kwargs) -> ModelResponse:
+    def generate(
+        self, prompt: str, on_chunk=None, *, tools=None, tool_choice=None, messages=None,
+        on_thinking_delta=None, on_tool_input_progress=None, request_options=None,
+    ) -> ModelResponse:
         # 故障诊断不是 runner 任务调用，不消耗这三个固定任务响应。
         if "输出严格 JSON 格式" in prompt:
             return ModelResponse(text=json.dumps({

@@ -140,6 +140,17 @@ BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
         "Strict allowlist-validated browser recording compiler entry point "
         "keeps parameter count <= 6 while rejecting unknown option keys with RECORDER_OPTIONS_INVALID."
     ),
+    "agent_py_agent/agent/conversation/business_access.py:require_access": (
+        "Recorded debt, not an endorsed pattern: the W1 Business Spaces authorization gate forwards caller "
+        "scope keys (space_id/project_ref/binding_id/subscription_id/source_ref/observation filters) into "
+        "the authorize() facts; already offending at 2c6199168, 16 call sites in 6 conversation modules. "
+        "Replace with a typed scope bundle in a dedicated slice, then remove this entry."
+    ),
+    "agent_py_agent/agent/conversation/business_spaces.py:allowed_actions": (
+        "Recorded debt, not an endorsed pattern: projects require_access over each W1 business action with "
+        "the same caller scope keys; exempt only together with business_access.py:require_access and "
+        "removed with it."
+    ),
 }
 
 RUNTIME_ARTIFACT_NAMES = {

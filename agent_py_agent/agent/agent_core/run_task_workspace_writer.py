@@ -217,6 +217,7 @@ def _publish_sandbox_tmp_outputs(root: Path, run_id: str) -> list[str]:
 
 
 _SANDBOX_TMP_DIR = ".sandbox-tmp"
+# 发布沙箱产物时按 1 MB 分块复制：单次读写有界，大文件不整块读入内存。
 _PUBLISH_CHUNK_BYTES = 1024 * 1024
 _PRIVATE_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 

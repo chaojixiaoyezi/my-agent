@@ -315,16 +315,22 @@ def _owner_id(host: object) -> str:
     return str(getattr(getattr(host, "home_paths", None), "owner_id", "") or "")
 
 
+# LLM: failed 只由带冻结批次的停止类控制显式传入；未传时回执不含该键，形状与各调用点原先一致。
 # 函数用途: 把控制结果整理成结构化回执。
-def _report(task: object, action: str, outcome: str, *, ok: bool, **extra: object) -> dict[str, object]:
+def _report(
+    task: object, action: str, outcome: str, *, ok: bool, failed: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     control = task_control_record(task)
     cleanup = control.get("cleanup") if isinstance(control.get("cleanup"), dict) else {}
-    return {
+    report: dict[str, object] = {
         "ok": ok, "action": action, "outcome": outcome,
         "run_id": str(getattr(task, "id", "") or ""), "status": str(getattr(task, "status", "") or ""),
         "control_generation": task_control_generation(task), "control_state": str(control.get("state") or ""),
-        "cleanup_state": str(cleanup.get("state") or ""), **extra,
+        "cleanup_state": str(cleanup.get("state") or ""),
     }
+    if failed is not None:
+        report["failed"] = failed
+    return report
 
 
 __all__ = [

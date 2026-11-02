@@ -1,3 +1,20 @@
+## 2026-11-02 R9 rework 新增生产模块
+
+R9（R1–R4 rework）只新增以下四个生产模块，其余改动都落在原有文件内。
+
+```text
+agent_py_agent/
+`-- agent/
+    |-- common/
+    |   `-- managed_owner_generation.py  # R2 受管普通用户执行代次：只在进程内签发、按对象身份认可，绑定只收窄；新模型/供应商/工具/原生效果前复核当前权威
+    |-- gateway_parts/
+    |   `-- managed_owner_runtime.py  # R2 受管 owner 受限执行宿主池：独立准入、按精确代次键有界租用，经原普通池 pin 共享容量，不克隆管理员凭据
+    |-- user_space/
+    |   `-- managed_dispatch_recovery.py  # R2 旧 owner 会话库中待处理的管理员派单有界迁入唯一规范受管会话库；不新建身份、不重投已消费工作
+    `-- subagents/
+        `-- task_control.py  # R3 子代理 pause/abandon/resume 显式控制与共用控制回执判据；恢复只发布 PAUSED→PENDING，正向清理只认原执行轮宿主
+```
+
 ## 2026-11-01 MEGA 统一架构导航（W16，非发布通过）
 
 当前业务空间 v1.2、Cache v2 与 Issue 派工统一见 [唯一集成台账](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，不再从旧 W0–W12 编号推导本轮所有权。详细架构见 [MEGA 架构](docs/design/MEGA_ARCHITECTURE_A4BC8B818.md)，81 案例、102 动作、27 Issue 与后续同源封包/双审标准见 [MEGA 验收](docs/tasks/MEGA_ACCEPTANCE.md)。本片没有新生产 Python 模块，常量 JSON 只由原生成器更新，不成为运行时权威。

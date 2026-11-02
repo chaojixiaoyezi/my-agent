@@ -53,7 +53,7 @@ def _view(kind, row):
     return redact_sensitive_value({key: _copy(row[key]) for key in business_defs()[kind]['properties'] if key in row})
 
 
-def _coverage(*values):
+def _coverage(values):
     if 'expired' in values:
         return 'expired'
     if all(value == 'complete' for value in values):
@@ -237,7 +237,7 @@ class BusinessObservationService:
         if page.coverage != 'complete':
             if 'coverage' not in result:
                 raise BusinessError('HOST_NOT_READY')
-            result['coverage'] = _coverage(page.coverage, result['coverage'])
+            result['coverage'] = _coverage((page.coverage, result['coverage']))
         return result
 
     def _task_detail(self, params, actor):
@@ -471,12 +471,12 @@ class BusinessObservationService:
                 frontier.extend((child, level + 1) for child in sorted(children[identifier]))
             elif children[identifier]:
                 has_more = True
-        page = ObservationPage(tuple(selected), _coverage(thread_coverage, execution_page.coverage))
+        page = ObservationPage(tuple(selected), _coverage((thread_coverage, execution_page.coverage)))
         chosen, cursor = self._paginate(selected, page, 'agent_tree.get', params, actor)
         ids = {record.value['id'] for record in chosen}
         return {'nodes': [_view('NodeView', row.value) for row in chosen],
             'edges': [edge for edge in edges if edge['to_id'] in ids], 'next_cursor': cursor,
-            'coverage': _coverage(page.coverage, 'partial' if has_more or cursor else 'complete'),
+            'coverage': _coverage((page.coverage, 'partial' if has_more or cursor else 'complete')),
             'has_more_descendants': has_more or cursor is not None}
 
     def _usage(self, params, actor):
@@ -655,7 +655,7 @@ class BusinessObservationService:
                 tree = self.query('agent_tree.get', {'space_id': sid, 'limit': 100}, actor=actor)
                 coverages.append(tree['coverage'])
                 nodes.extend(tree['nodes'])
-            tree = {'coverage': _coverage(*coverages) if coverages else 'unknown', 'next_cursor': None}
+            tree = {'coverage': _coverage(coverages) if coverages else 'unknown', 'next_cursor': None}
             nodes = list({(node['kind'], node['id']): node for node in nodes}.values())
         # snapshot中的树节点同样与全部ReadFilter取交集，不能只有事件页收窄。
         source = self._source('executions', {'filter': filters})
@@ -674,6 +674,6 @@ class BusinessObservationService:
             if facts is not None and self._visible(facts, 'events.list', {'filter': filters}, actor):
                 narrowed.append(node)
         nodes = narrowed
-        coverage = _coverage(tasks['coverage'], executions['coverage'], tree['coverage'], 'partial' if len(nodes) > 100 else 'complete')
+        coverage = _coverage((tasks['coverage'], executions['coverage'], tree['coverage'], 'partial' if len(nodes) > 100 else 'complete'))
         return {'nodes': nodes[:100], 'tasks': tasks['items'], 'executions': executions['items'],
             'next_cursor': tasks['next_cursor'] or executions['next_cursor'] or tree['next_cursor'], 'coverage': coverage}

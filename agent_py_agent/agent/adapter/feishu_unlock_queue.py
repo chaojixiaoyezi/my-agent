@@ -24,6 +24,7 @@ DEFAULT_TOTAL_CAP_COUNT = 10_000
 DEFAULT_RECENT_ID_CAP_COUNT = 10_000
 # 解锁续送被下游拒收或报错后的有界退避：首等 0.5 秒、逐次翻倍、最长 30 秒，本代停止事件随时打断。
 UNLOCK_RESUME_RETRY_INITIAL_SECONDS = 0.5
+# 退避逐次翻倍的单次等待上限 30 秒。
 UNLOCK_RESUME_RETRY_MAX_SECONDS = 30.0
 
 EnqueueStatus = Literal["added", "duplicate", "full", "inactive"]
