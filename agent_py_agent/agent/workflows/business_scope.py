@@ -331,7 +331,11 @@ class WorkflowScopeService:
         from .run_store import WorkflowRunStore
         return WorkflowRunStore(self.store.owner_home)
 
+    # LLM: 当前业务授权先于恢复分类；原生对账不替代新副作用审核，工厂依赖仍只由宿主提供。
+    # 函数用途: 为公共运行入口绑定当前 actor、生命周期和原恢复准入门。
     def _engine(self, actor, *, resolution_ref=None):
+        from .engine import _requires_native_agent_resume
+
         def authorize(record, phase):
             self._authorize(actor, 'workflows.run', record.workflow_id)
             current = self._get(record.workflow_id)
@@ -345,7 +349,7 @@ class WorkflowScopeService:
                 return self.governance.require_effect(record, phase)
             if resolution_ref is not None:
                 raise PermissionError('WORKFLOW_RESOLUTION_UNAVAILABLE')
-            if phase == 'resume' and record.status != 'waiting_for_agent' and (record.effect_outcome == 'unknown'
+            if phase == 'resume' and not _requires_native_agent_resume(record) and (record.effect_outcome == 'unknown'
                     or any(step.escalation_result.get('effect_started') and
                            (step.needs_repair or step.status == 'running') for step in record.steps)):
                 raise PermissionError('WORKFLOW_RECONCILIATION_REQUIRED')
