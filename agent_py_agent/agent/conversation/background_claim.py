@@ -274,8 +274,11 @@ def run_with_heartbeat(
             attempt_status, admission = WAKE_CLAIM_NOT_EXECUTED, "im_subagent_capacity"
             return None
         except BaseException as exc:
-            status = ("yielded" if dependencies.pending_delivery is not None and dependencies.pending_delivery(kwargs)
-                      else "failed")
+            if dependencies.pending_delivery is not None and dependencies.pending_delivery(kwargs):
+                # 执行已结束，待交付仍归原 wake；claim 终态与尝试让出分开结算。
+                status, attempt_status = "finished", WAKE_CLAIM_YIELDED
+            else:
+                status = "failed"
             error = exc
             raise
         finally:
