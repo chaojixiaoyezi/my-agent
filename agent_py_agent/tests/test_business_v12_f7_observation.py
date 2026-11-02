@@ -346,3 +346,30 @@ def test_incomplete_detail_source_cannot_claim_a_completed_read(tmp_path):
     actor = BusinessActor('local/test', 'u', service, lambda _a, _f: True)
     result = service.query('changes.get', {'task_id': 'task'}, actor=actor)
     assert result['coverage'] != 'complete'
+
+
+@pytest.mark.parametrize('workflow', [None, 'workflow-recorded-exactly'])
+def test_task_detail_preserves_nullable_canonical_workflow_and_closed_dto(tmp_path, workflow):
+    from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    case = fixture(tmp_path)
+    if workflow is not None:
+        # 只准备原规范记录，不向观察器注入详情或伪造关联返回值。
+        update_json_file_atomic(case.store.session_tasks._path(case.task.task_id), lambda value:
+            {**value, 'metadata': {**value['metadata'], 'workflow_ref': workflow}}, require_existing=True)
+    try:
+        result = case.service.query('tasks.get', {'task_id': case.task.task_id}, actor=case.actor)
+    except BusinessError as error:
+        result = {'error': error.code}
+    assert 'error' not in result, result
+    assert result['workflow_ref'] == workflow
+    assert result['task']['task_id'] == result['assignments'][0]['task_id'] == case.task.task_id
+    spec = business_action_spec('tasks.get')
+    assert spec.validate_result(result) == result
+    for invalid in ({k: v for k, v in result.items() if k != 'workflow_ref'},
+                    {**result, 'unexpected': True}, {**result, 'workflow_ref': ''}):
+        with pytest.raises(HostAPIError):
+            spec.validate_result(invalid)
+    assert case.store.session_tasks.require(case.task.task_id).metadata.get('workflow_ref') == workflow

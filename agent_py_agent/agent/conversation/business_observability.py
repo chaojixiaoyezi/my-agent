@@ -245,9 +245,7 @@ class BusinessObservationService:
             raise BusinessError('OBSERVATION_NOT_FOUND' if page.coverage == 'complete' else 'HOST_NOT_READY')
         task = self.store.session_tasks.require(params['task_id'])
         workflow = task.metadata.get('workflow_ref')
-        if not workflow:
-            # 冻结详情合同要求非空workflow_ref；非Workflow任务不能捏造一个引用。
-            raise BusinessError('HOST_NOT_READY', details={'source': 'workflow_ref', 'coverage': 'unknown'})
+        # 普通规范任务没有Workflow关联；保留null，不捏造引用或修改任务元数据。
         return {'task': _view('TaskView', rows[0].value), 'assignments': [{
             'assignment_ref': task.task_id, 'task_id': task.task_id, 'sender_thread_id': task.sender_thread_id,
             'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(task.result_refs)}],

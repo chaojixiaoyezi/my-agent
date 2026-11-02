@@ -445,3 +445,148 @@ def test_background_port_requires_current_issued_context_and_same_owner(host):
     with pytest.raises(api.BusinessError) as denied:
         services.background.execute('background_agents.list', {}, actor=actor, context=context)
     assert denied.value.code == 'BUSINESS_ACCESS_DENIED'
+
+
+def observed_native_task(native, *, user='business-alice'):
+    """经真实HTTP提交普通任务，后续观察不替换任何领域/流生产者。"""
+    params, agent = create_background(native, user=user)
+    status, assigned = background_call(native, 'tasks.assign', {'agent_id': agent['agent_id'],
+        'space_id': params['space_id'], 'instruction': '原生产任务'}, user=user, idempotency_key='observe-task')
+    assert status == 200, assigned
+    [services] = [item for item in native[0]._business_services.values() if item.owner_id.endswith('/' + user)]
+    return services, services.host.conversation_store.session_tasks.require(assigned['data']['task_id'])
+
+
+def seed_observed_runtime(services, task):
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+
+    runtime = RuntimeRepository(runtime_db_path(services.owner_home))
+    run = runtime.record_run_creation(owner_id=services.owner_id, run_id='observed-' + task.task_id,
+        thread_id=task.target_thread_id, task_run_metadata={'business_context': task.metadata.get('business_context'),
+            'session_task_ref': task.task_id})
+    return runtime, run
+
+
+def open_native_observation(native, request, *, headers=None):
+    import http.client
+    import json
+
+    server, _ = native
+    conn = http.client.HTTPConnection('127.0.0.1', server.server.server_address[1], timeout=20)
+    conn.request('POST', '/client/business/stream', json.dumps(request).encode(), {
+        'X-Gateway-Token': server._local_client_credential, 'X-User-Id': 'business-alice',
+        'X-Channel': 'feishu', 'Content-Type': 'application/json', **(headers or {})})
+    return conn, conn.getresponse()
+
+
+def test_observation_native_task_list_detail_owner_and_missing_db(background_http):
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+
+    services, task = observed_native_task(background_http)
+    db = runtime_db_path(services.owner_home)
+    assert not db.exists()
+    status, listed = background_call(background_http, 'tasks.list')
+    assert status == 200, listed
+    assert [item['task_id'] for item in listed['data']['items']] == [task.task_id]
+    status, detail = background_call(background_http, 'tasks.get', {'task_id': task.task_id})
+    assert status == 200, detail
+    assert detail['data']['workflow_ref'] is None
+    assert detail['data']['assignments'][0]['task_id'] == task.task_id
+    assert not db.exists(), '只读观察不得创建缺失运行库'
+    bob, bob_task = observed_native_task(background_http, user='business-bob')
+    status, foreign = background_call(background_http, 'tasks.get', {'task_id': bob_task.task_id})
+    assert status == 404, foreign
+    assert bob_task.task_id not in str(background_call(background_http, 'tasks.list')[1]['data'])
+    assert services.projection is services.observation
+    assert services.observation is not bob.observation
+    assert services.observation.store is services.host.conversation_store
+    assert services.observation.runtime.db_path == db
+    assert services.observation.runtime.read_only and services.observation.runtime.existing_only
+
+
+def test_observation_native_stream_decodes_once_and_reconnects(background_http):
+    import json
+
+    services, task = observed_native_task(background_http)
+    runtime, run = seed_observed_runtime(services, task)
+
+    def append():
+        return runtime.append_event(event_type='attempt.progress', attempt_id=run['attempt_id'],
+            agent_run_id=run['agent_run_id'], task_run_id=run['task_run_id'])
+
+    event = append()
+    cursor = None
+    for expected in (event, None):
+        if expected is None:
+            expected = append()
+        conn, response = open_native_observation(background_http, {'request_id': 'observe-native', 'filter': {},
+            **({'cursor': cursor} if cursor else {})})
+        try:
+            assert response.status == 200, response.read()
+            assert response.getheader('Content-Type').startswith('application/x-ndjson')
+            snapshot = json.loads(response.readline())
+            assert isinstance(snapshot, dict) and snapshot['stream_item'] == 'snapshot'
+            assert snapshot['payload']['tasks'][0]['task_id'] == task.task_id
+            for _ in range(8):
+                frame = json.loads(response.readline())
+                assert isinstance(frame, dict)
+                if frame['event_id'] == expected['event_id']:
+                    break
+            else:
+                pytest.fail('真实运行事件没有从原生HTTP流读回')
+            assert frame['run_id'] == 'observed-' + task.task_id and frame['attempt_id'] == run['attempt_id']
+            cursor = frame['cursor']
+        finally:
+            response.close()
+            conn.close()
+    assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
+
+
+@pytest.mark.parametrize('extra,headers,status', [
+    ({'forged_owner': 'other'}, {}, 400),
+    ({}, {'Origin': 'https://other.invalid'}, 403),
+    ({}, {'X-Gateway-Token': ''}, 403),
+])
+def test_observation_native_stream_keeps_closed_schema_and_auth(background_http, extra, headers, status):
+    conn, response = open_native_observation(background_http,
+        {'request_id': 'observe-denied', 'filter': {}, **extra}, headers=headers)
+    try:
+        assert response.status == status
+    finally:
+        response.close()
+        conn.close()
+
+
+def test_observation_composed_actor_is_distinct_live_and_service_bound(tmp_path):
+    from agent_py_agent.agent.conversation.business_access import require_actor
+    from agent_py_agent.tests.test_business_v12_f7_observation import fixture
+
+    case = fixture(tmp_path)
+    host = SimpleNamespace(home_paths=SimpleNamespace(owner_id=case.owner, owner_home_dir=tmp_path),
+        config=SimpleNamespace(business_spaces_enabled=True), conversation_store=case.store)
+    services = api.BusinessServices(host, projection=case.service)
+    context = api.bind_business_context(host, subject_id='current-subject', authorize=lambda _a, _f: case.allowed[0])
+    status, result = api.execute_business({'request_id': 'observe-actor', 'action': 'tasks.list', 'params': {}}, context, services)
+    assert status == 200, result
+    first, second = services.observation_actor(context), services.observation_actor(context)
+    assert first is not second and first.subject_id == 'current-subject'
+    assert require_actor(first, case.service) is first
+    assert require_actor(services.actor(context), services.spaces).service is services.spaces
+    with pytest.raises(api.BusinessError):
+        require_actor(context, case.service)
+    case.allowed[0] = False
+    with pytest.raises(api.HostAPIError) as denied:
+        case.service.query('tasks.list', {}, actor=first)
+    assert denied.value.code == 'CAPABILITY_DENIED'
+
+
+def test_observation_optional_detail_readiness_is_not_a_generic_query(tmp_path):
+    from agent_py_agent.agent.conversation.business_observability import BusinessObservationService
+
+    host = SimpleNamespace(home_paths=SimpleNamespace(owner_id='local/test', owner_home_dir=tmp_path),
+        config=SimpleNamespace(business_spaces_enabled=True))
+    service = BusinessObservationService(tmp_path, owner_id=host.home_paths.owner_id)
+    composed = api.BusinessServices(host, projection=service)
+    for action in ('logs.read', 'tool_calls.get', 'artifacts.get', 'approvals.get', 'permissions.get', 'changes.get', 'usage.get', 'operations.get'):
+        assert not composed.ready(action), action

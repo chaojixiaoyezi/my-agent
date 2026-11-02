@@ -119,40 +119,53 @@ class GatewayBusinessDomain:
         """只桥接原交互首决；没有同Owner W14投影时在任何决定前拒绝。"""
         authorized = context.actor
         revalidate_call(authorized)
-        projection = getattr(context.host, 'business_projection', None)
-        if not callable(getattr(projection, 'query', None)):
+        _, services = self.context(authorized)
+        projection = services.observation
+        if not services._observation_ready('approvals.get'):
             raise HostAPIError('HOST_NOT_READY', 503)
         observations = self.resources.server.plugin_host.composition.ports.observations
         adapter = getattr(observations, 'routes', {}).get('interactions')
         if adapter is None:
             raise HostAPIError('HOST_NOT_READY', 503)
-        projection.query('approvals.get', {'approval_id': params['approval_id']}, actor=context)
+        actor = services.observation_actor(context)
+        projection.query('approvals.get', {'approval_id': params['approval_id']}, actor=actor)
         canonical = adapter.tickets.canonical_business_response(authorized)
         adapter.call(canonical)
         try:
             context.check('approvals.decide', params)
-            latest = projection.query('approvals.get', {'approval_id': params['approval_id']}, actor=context)
+            latest = projection.query('approvals.get', {'approval_id': params['approval_id']}, actor=actor)
             return {'approval': latest['approval'], 'state': params['decision']}
         except HostAPIError as error:
             raise HostAPIError(error.code, error.status, 'committed') from None
 
     def revalidate_stream(self, authorized):
+        from ..conversation.business_access import BusinessError
+        from ..gateway_parts.business_api import _error_code
+
         revalidate_call(authorized)
         context, services = self.context(authorized)
         params = thaw(authorized.call.payload)
         context.check('events.list', params)
-        projection = services.projection
-        if not callable(getattr(projection, 'query', None)):
+        projection = services.observation
+        if not services._observation_ready('events.list'):
             raise HostAPIError('HOST_NOT_READY', 503)
         # 同一原投影重验当前filter/绑定ACL；心跳不能仅验证激活而漏掉业务撤权。
-        projection.query('events.list', {'filter': params['filter'], 'limit': 1}, actor=context)
+        try:
+            projection.query('events.list', {'filter': params['filter'], 'limit': 1},
+                actor=services.observation_actor(context))
+        except BusinessError as error:
+            code, status, outcome = _error_code(error)
+            raise HostAPIError(code, status, outcome) from None
 
     def stream(self, authorized):
         if not business_stream_available():
             raise HostAPIError('HOST_NOT_READY', 503)
         context, services = self.context(authorized)
-        iterator = import_module(_STREAM_MODULE).stream_business_events(thaw(authorized.call.payload),
-            authenticated_context=context, services=services)
+        # 仅本请求选择8事件来源缓冲；共享服务的原生128事件配置不被改变。
+        stream = import_module(_STREAM_MODULE).stream_business_events(thaw(authorized.call.payload),
+            authenticated_context=context, services=SimpleNamespace(observation=services.observation,
+                observation_actor=services.observation_actor, stream_transport='plugin'))
+        iterator = stream.events()
         try:
             for event in iterator:
                 self.revalidate_stream(authorized)

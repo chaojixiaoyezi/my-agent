@@ -10,6 +10,12 @@ from agent_py_agent.agent.gateway_parts.business_event_stream import (
     stream_business_events,
 )
 from agent_py_agent.tests.test_business_v12_f7_observation import fixture, subscription_fixture
+from agent_py_agent.tests.test_mega_business_api_actions import (
+    background_http as background_http,
+)
+from agent_py_agent.tests.test_plugin_host_gateway_composition import (
+    production_host as production_host,
+)
 
 
 def append(case, *, attempt=None):
@@ -280,3 +286,89 @@ def test_disappearing_source_produces_explicit_expiry_not_silent_hang(tmp_path):
         value = {'error': 'unclassified_source_loss'}
     assert value.get('stream_item') == 'cursor_expired', value
     assert value['payload']['reset_required'] is True
+
+
+def test_native_real_stream_missing_db_live_disable_and_disconnect(background_http):
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+    from agent_py_agent.tests.test_mega_business_api_actions import (
+        observed_native_task,
+        open_native_observation,
+    )
+
+    services, task = observed_native_task(background_http)
+    db = runtime_db_path(services.owner_home)
+    assert not db.exists()
+    conn, response = open_native_observation(background_http, {'request_id': 'native-live-disable', 'filter': {}})
+    try:
+        assert response.status == 200, response.read()
+        snapshot = json.loads(response.readline())
+        assert snapshot['stream_item'] == 'snapshot'
+        assert snapshot['payload']['tasks'][0]['task_id'] == task.task_id
+        background_http[1].config.business_spaces_enabled = False
+        assert response.readline() == b'', '下一次真实流复核后必须停止交付'
+    finally:
+        response.close()
+        conn.close()
+    assert not db.exists()
+    assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
+    conn, response = open_native_observation(background_http, {'request_id': 'native-still-disabled', 'filter': {}})
+    try:
+        assert response.status == 503 and json.loads(response.read())['error']['code'] == 'HOST_NOT_READY'
+    finally:
+        response.close()
+        conn.close()
+
+
+def test_plugin_real_sse_live_issuer_revocation_and_missing_db(production_host):
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+    from agent_py_agent.tests.test_mega_business_plugin_compatibility import (
+        open_plugin_observation,
+        plugin_observation_task,
+        read_business_sse,
+    )
+
+    services, task = plugin_observation_task(production_host)
+    db = runtime_db_path(services.owner_home)
+    assert not db.exists()
+    conn, response = open_plugin_observation(production_host)
+    try:
+        assert response.status == 200, response.read()
+        kind, first = read_business_sse(response)
+        assert kind == 'business' and first['stream_item'] == 'snapshot'
+        production_host[0].plugin_host.composition.issuer.close()
+        kind, final = read_business_sse(response)
+        assert kind == 'error' and final['outcome'] == 'not_started', final
+        assert '/private/tmp' not in str(final) and 'Traceback' not in str(final)
+        assert response.readline() == b'', '原issuer撤权后SSE必须结束'
+    finally:
+        response.close()
+        conn.close()
+    assert not db.exists()
+    assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
+
+
+def test_plugin_domain_closes_the_real_typed_iterator_and_retains_task(production_host):
+    from agent_py_agent.agent.plugin_host import composition
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+    from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
+    from agent_py_agent.tests.test_mega_business_plugin_compatibility import plugin_observation_task
+
+    services, task = plugin_observation_task(production_host)
+    runtime, run = seed_observed_runtime(services, task)
+    for _ in range(3):
+        runtime.append_event(event_type='attempt.progress', attempt_id=run['attempt_id'],
+            agent_run_id=run['agent_run_id'], task_run_id=run['task_run_id'])
+    server, token, *_ = production_host
+    issuer = server.plugin_host.composition.issuer
+    authorized = issuer.authorize(issuer.ingress(token), decode_call(json.dumps({'schema': 'plugin_host_call.v2',
+        'action': 'business.events.stream', 'payload': {'request_id': 'typed-close', 'filter': {}}}).encode()))
+    backend = composition.business_port(server.plugin_host.composition.ports)
+    iterator = backend.stream(authorized)
+    assert next(iterator)['stream_item'] == 'snapshot'
+    assert next(iterator)['stream_item'] == 'event'
+    typed = iterator.gi_frame.f_locals['iterator']
+    source = typed.gi_frame.f_locals['self']
+    assert source.max_pending == 8 and source.pending_count > 0
+    iterator.close()
+    assert typed.gi_frame is None and source.pending_count == 0
+    assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status

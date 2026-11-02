@@ -9,11 +9,13 @@ from weakref import WeakSet
 
 from ..conversation.background_agents import BackgroundAgentService
 from ..conversation.business_access import BusinessActor, BusinessError
+from ..conversation.business_observability import OBSERVATION_ACTIONS, BusinessObservationService
 from ..conversation.business_spaces import BusinessSpaceService
 from ..plugin_host.business_action_specs import (
     business_action_spec,
     business_action_specs,
     business_schema_bundle,
+    standalone_schema,
 )
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import thaw, validate_object
@@ -185,6 +187,8 @@ class _BackgroundPort:
 
 class BusinessServices:
     """静态选择原服务。可选端口由组合根注入，绝不从payload或任意函数名加载。"""
+    # LLM: 只绑定当前owner原Store与规范只读库，不启动Agent、不建库，不缓存请求actor。
+    # 函数用途: 装配同一owner的业务查询和事件来源。
     def __init__(self, host, *, spaces=None, workflows=None, background=None, capabilities=None, projection=None):
         self.host = host
         self.owner_id = host.home_paths.owner_id
@@ -209,7 +213,41 @@ class BusinessServices:
             self.background = _BackgroundPort(self)
         self.capabilities = capabilities or getattr(host, 'business_capabilities', None)
         self.projection = projection or getattr(host, 'business_projection', None)
+        if self.projection is None and getattr(host, 'conversation_store', None) is not None:
+            from ..runtime_db.repository import RuntimeRepository
+            from ..runtime_db.schema import runtime_db_path
+
+            self.projection = BusinessObservationService(self.owner_home, owner_id=self.owner_id,
+                store=host.conversation_store, runtime=RuntimeRepository(runtime_db_path(self.owner_home),
+                    read_only=True, existing_only=True))
         self.approvals = getattr(host, 'business_approval_decider', None)
+
+    @property
+    def observation(self):
+        """查询与stream只有一个来源权威；不维护第二份可漂移的实例。"""
+        return self.projection
+
+    def _observation_ready(self, action):
+        projection = self.projection
+        if not callable(getattr(projection, 'query', None)):
+            return False
+        if not isinstance(projection, BusinessObservationService):
+            return True  # 显式宿主注入的端口保留自身合同。
+        if action not in OBSERVATION_ACTIONS:
+            return False
+        if callable(projection.readers.get(action)):
+            return True
+        if action in {'tasks.list', 'tasks.get', 'messages.list'}:
+            return projection.store is not None
+        if action in {'executions.list', 'executions.get', 'subagents.list', 'subagents.get'}:
+            return projection.runtime is not None
+        if action in {'events.list', 'agent_tree.get'}:
+            return projection.store is not None or projection.runtime is not None
+        source = {'tool_calls.list': 'tool_calls', 'artifacts.list': 'artifacts',
+            'approvals.list': 'approvals'}.get(action)
+        if action == 'usage.get':
+            return any(callable(projection.readers.get(name)) for name in ('usage', 'resource_usage'))
+        return source is not None and callable(projection.readers.get(source))
 
     def ready(self, action):
         spec = business_action_spec(action)
@@ -218,11 +256,11 @@ class BusinessServices:
         if not bool(getattr(self.host.config, 'business_spaces_enabled', False)):
             return False
         if action == 'operations.get':
-            return callable(getattr(self.projection, 'query', None))
+            return self._observation_ready(action)
         implementer = spec.metadata['implementer']
         if implementer == 'W1':
             if action.startswith('policies.') or action == 'approvals.decide':
-                return (callable(self.approvals) and callable(getattr(self.projection, 'query', None))
+                return (callable(self.approvals) and self._observation_ready('approvals.get')
                         if action == 'approvals.decide' else self.spaces.governance is not None)
             if action == 'spaces.archive':
                 return callable(self.spaces.active_references)
@@ -237,12 +275,22 @@ class BusinessServices:
             return callable(getattr(self.background, 'execute', None))
         if implementer == 'W6':
             return action == 'spaces.packages.catalog' or callable(getattr(self.capabilities, 'execute', None))
-        return callable(getattr(self.projection, 'query', None))
+        return self._observation_ready(action)
 
     def actor(self, context):
         return BusinessActor(self.owner_id, context.subject_id, self.spaces,
             lambda action, facts: context.check(action, facts),
             content_authorizer=getattr(context.actor, 'content_authorizer', None))
+
+    # LLM: 每次新建绑定确切观察服务的actor；每一帧/查询仍复核原live上下文。
+    # 函数用途: 区分空间操作身份和只读观察身份。
+    def observation_actor(self, context: BusinessCallContext) -> BusinessActor:
+        if (type(context) is not BusinessCallContext or context not in _ISSUED
+                or context.owner_id != self.owner_id
+                or Path(context.host.home_paths.owner_home_dir) != self.owner_home):
+            raise BusinessError('ACTOR_REQUIRED')
+        return BusinessActor(self.owner_id, context.subject_id, self.observation,
+            lambda action, facts: context.check(action, facts))
 
     def supported(self, context):
         result = []
@@ -284,7 +332,7 @@ class BusinessServices:
                 from ..capability.business_capabilities import BusinessCapabilityService
                 backend = BusinessCapabilityService(self.host)
             return backend.execute(action, params, context=context.business_context)
-        return self.projection.query(action, params, actor=context)
+        return self.projection.query(action, params, actor=self.observation_actor(context))
 
 
 def _response(request_id, *, data=None, error=None, accepted=False, effect='none'):
@@ -478,44 +526,54 @@ def handle_client_business(handler, server):
 
 
 def handle_client_business_stream(handler, server):
-    """W14同一typed迭代器的原生NDJSON包装；未合入时明确503，不造心跳/事件账。"""
+    """同一typed迭代器只编码一次；首帧成功后才发头，所有退出均关闭实际观察器。"""
     from importlib import import_module
+    from itertools import chain
 
     from ..plugin_host.business_actions import business_stream_available
     headers_sent = False
+    iterator = None
     try:
         if not _native_source(handler):
             return
         context, services = native_business_context(handler, server)
-        request = validate_object(_native_json(handler), business_schema_bundle()['stream_request_schema'])
+        request = validate_object(_native_json(handler), standalone_schema(business_schema_bundle()['stream_request_schema']))
         context.check('events.list', request)
         if not business_stream_available():
             raise HostAPIError('HOST_NOT_READY', 503)
-        iterator = import_module('agent_py_agent.agent.gateway_parts.business_event_stream').stream_business_events(
+        stream = import_module('agent_py_agent.agent.gateway_parts.business_event_stream').stream_business_events(
             request, authenticated_context=context, services=services)
+        iterator = stream.events()
+        event_schema = standalone_schema({'$ref': '#/$defs/EventView'})
+        try:
+            first = validate_object(next(iterator), event_schema)
+        except StopIteration:
+            raise HostAPIError('CAPABILITY_DENIED', 403) from None
+        context.check('events.list', request)
         handler.send_response(200)
         handler.send_header('Content-Type', 'application/x-ndjson; charset=utf-8')
         handler.send_header('Cache-Control', 'no-store')
         handler.send_header('Connection', 'close')
         handler.end_headers()
         headers_sent = True
-        try:
-            for event in iterator:
-                context.check('events.list', request)
-                from ..plugin_host.business_action_specs import standalone_schema
-                event = validate_object(event, standalone_schema({'$ref': '#/$defs/EventView'}))
-                handler.wfile.write((json.dumps(event, ensure_ascii=False) + '\n').encode())
-                handler.wfile.flush()
-        finally:
-            close = getattr(iterator, 'close', None)
-            if callable(close):
-                close()
-            handler.close_connection = True
-    except HostAPIError as error:
+        for event in chain((first,), iterator):
+            context.check('events.list', request)
+            event = validate_object(event, event_schema)
+            handler.wfile.write((json.dumps(event, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8'))
+            handler.wfile.flush()
+    except (HostAPIError, BusinessError) as error:
         if not headers_sent:
-            handler._send_json(error.status, {'error': {'code': error.code}})
-        handler.close_connection = True
+            code, status, _ = _error_code(error)
+            handler._send_json(status, {'error': {'code': code}})
     except (BrokenPipeError, ConnectionError):
+        pass
+    except (OSError, ValueError, TypeError, RuntimeError):
+        if not headers_sent:
+            handler._send_json(503, {'error': {'code': 'HOST_NOT_READY'}})
+    finally:
+        close = getattr(iterator, 'close', None)
+        if callable(close):
+            close()
         handler.close_connection = True
 
 
