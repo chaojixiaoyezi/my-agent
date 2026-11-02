@@ -5,6 +5,10 @@ submit 沿 W2 BackgroundAgentService 的耐久幂等入口；completion_reader �
 """
 from __future__ import annotations
 
+from ..conversation.session_task_dispatch import (
+    SessionTaskDispatchError,
+    reconcile_session_task_dispatch,
+)
 from .models import payload
 
 
@@ -21,7 +25,16 @@ class WorkflowAgentSteps:
             raise PermissionError('WORKFLOW_AGENT_OWNER_MISMATCH')
         return actor
 
+    # LLM: 真Store上的未知派发只读对账；无Store的旧幂等端口保留原兼容合同，不拼造缺失身份。
+    # 函数用途: 提交一次原任务，并把未知回执及已知身份留在同一步里。
     def submit(self, run, spec, step):
+        """保留原attempt/key与宿主结构化身份；typed未知结果只对账，不重派。"""
+        if ('session_task_dispatch' in step.escalation_result or
+                step.escalation_result.get('submission_state') == 'unknown' and
+                getattr(self.background_service, 'store', None) is not None):
+            self.reconcile(run, step)
+            return
+        step.escalation_result['submission_state'] = 'not_started'
         actor = self._actor(run)
         context = run.business_context
         if not context.get('space_id') or context.get('owner_id') != run.owner_id:
@@ -36,10 +49,31 @@ class WorkflowAgentSteps:
             request['controller_agent_id'] = config['controller_agent_id']
         identity = step.escalation_result['attempt_id']
         key = f'workflow:{run.workflow_run_id}:{step.step_id}:{identity}'
+        if step.escalation_result.setdefault('submission_key', key) != key:
+            raise ValueError('WORKFLOW_AGENT_SUBMISSION_KEY_MISMATCH')
+        step.escalation_result['submission_state'] = 'unknown'
         try:
             receipt = self.background_service.submit(request, actor=actor, idempotency_key=key)
+        except SessionTaskDispatchError as error:
+            step.escalation_result['submission_outcome'] = {
+                'error_code': error.error_code, 'effect_outcome': error.effect_outcome}
+            if error.effect_outcome == 'not_started':
+                step.escalation_result['submission_state'] = 'not_started'
+                raise
+            original = error.outcome.result_envelope.get('session_task_dispatch')
+            original = payload(original) if isinstance(original, dict) else {}
+            known = original.get('task_id')
+            if known:
+                if step.escalation_result.get('task_id') not in (None, known):
+                    raise PermissionError('WORKFLOW_AGENT_DISPATCH_IDENTITY_MISMATCH') from error
+                step.escalation_result['task_id'] = known
+            step.escalation_result['session_task_dispatch'] = original
+            return
+        except PermissionError:
+            step.escalation_result['submission_state'] = 'not_started'
+            raise
         except OSError:
-            # ACK 未知也沿原 key 恢复，不能另分配 attempt 或宣称业务未开始。
+            # 未提供typed身份的既有端口仍保留原key；不分配新attempt，也不声称没有执行。
             step.escalation_result['submission_state'] = 'unknown'
             return
         if (not isinstance(receipt, dict) or not isinstance(receipt.get('task_id'), str)
@@ -47,6 +81,45 @@ class WorkflowAgentSteps:
             raise ValueError('WORKFLOW_AGENT_SUBMISSION_INVALID')
         step.escalation_result.update(task_id=receipt['task_id'], assignment_ref=receipt.get('assignment_ref'),
             operation_id=receipt.get('operation_id'), submission_state='accepted')
+
+    # LLM: 身份仅来自原typed槽/已知canonical，缺失不能从模型正文补齐；不发任何后台副作用。
+    # 函数用途: 找回原任务ID，或保留尚未查明的责任。
+    def reconcile(self, run, step):
+        """只读原ConversationStore；调用方须先持久化恢复的同一步，再发取消副作用。"""
+        self._actor(run)
+        result = step.escalation_result
+        store = getattr(self.background_service, 'store', None)
+        if store is None:
+            return 'session_task_dispatch' not in result and bool(result.get('task_id'))
+        identity = result.get('session_task_dispatch')
+        try:
+            if 'session_task_dispatch' not in result and result.get('task_id'):
+                task = store.session_tasks.require(result['task_id'])
+                identity = {name: getattr(task, name) for name in ('sender_thread_id', 'target_thread_id', 'dedupe_key', 'task_id')}
+            if (not isinstance(identity, dict) or not {'sender_thread_id', 'target_thread_id', 'dedupe_key'} <= set(identity)
+                    or set(identity) - {'sender_thread_id', 'target_thread_id', 'dedupe_key', 'task_id'}):
+                return False
+            identity = dict(identity)
+            if result.get('task_id'):
+                if identity.get('task_id') not in (None, result['task_id']):
+                    raise PermissionError('WORKFLOW_AGENT_DISPATCH_IDENTITY_MISMATCH')
+                identity['task_id'] = result['task_id']
+            task = reconcile_session_task_dispatch(store, owner_id=run.owner_id, **identity)
+        except PermissionError:
+            raise
+        except (SessionTaskDispatchError, OSError, ValueError, TypeError, KeyError):
+            result['reconciliation_state'] = 'unknown'
+            return False
+        if task is None:
+            result.update(submission_state='not_started', reconciliation_state='absent')
+            return True
+        context = task.metadata.get('business_context', {})
+        if (context.get('owner_id') != run.owner_id or context.get('task_id') != task.task_id
+                or any(context.get(name) != run.business_context.get(name) for name in ('space_id', 'project_ref'))):
+            raise PermissionError('WORKFLOW_AGENT_DISPATCH_CONTEXT_MISMATCH')
+        result.update(task_id=task.task_id, session_task_dispatch={**identity, 'task_id': task.task_id},
+            submission_state='accepted', reconciliation_state='confirmed')
+        return True
 
     def completion(self, run, step):
         self._actor(run)
@@ -69,14 +142,18 @@ class WorkflowAgentSteps:
             raise ValueError('WORKFLOW_AGENT_OUTPUT_INVALID')
         return payload(result)
 
+    # LLM: 仅消费原W2 completed且显式空outstanding_refs；固定原attempt取消键，不创建替代工作。
+    # 函数用途: 停止原任务，并如实判断取消是否已经确认。
     def cancel(self, run, step):
+        """只认原W2完成且无未结引用的收据，不把accepted/pending当作取消完成。"""
         actor = self._actor(run)
         task = step.escalation_result.get('task_id')
         if not task:
-            # 未知 submit 必须先沿同 key 对账，不能把可能已创建的任务当不存在。
-            return False
+            # 只有完整只读对账确认不存在，才没有需要停止的原任务。
+            return step.escalation_result.get('reconciliation_state') == 'absent'
         if not callable(self.cancel_handler):
             return False
         receipt = self.cancel_handler(task, actor=actor,
             idempotency_key=f'workflow-cancel:{run.workflow_run_id}:{step.step_id}:{step.escalation_result["attempt_id"]}')
-        return isinstance(receipt, dict) and receipt.get('state') == 'cancelled'
+        step.escalation_result['cancellation_receipt'] = payload(receipt)
+        return isinstance(receipt, dict) and receipt.get('state') == 'completed' and receipt.get('outstanding_refs') == []

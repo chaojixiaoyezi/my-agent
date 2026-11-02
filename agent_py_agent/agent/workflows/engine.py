@@ -51,6 +51,16 @@ from .script_runner import ScriptRunner, _EntrypointMissing, load_script, parse_
 SUCCESS = ('succeeded', 'escalated_recovered', 'skipped')
 
 
+# LLM: 责任按原步骤的结构化派发事实识别，不因failed/paused标签消失，不建立第二账本。
+# 函数用途: 判断这一步是否还有必须核实或取消的原任务。
+def _agent_task_obligation(step):
+    """任务身份/未知提交才是责任事实；failed/paused标签不能消掉已开始的派发。"""
+    result = step.escalation_result
+    return step.mode == 'agent_task' and (step.status == 'waiting_for_agent' or result.get('task_id')
+        or 'session_task_dispatch' in result or result.get('submission_state') == 'unknown'
+        or result.get('effect_started') and result.get('submission_state') != 'not_started')
+
+
 # LLM: 读取同一当前回合令牌和线程停止事实；不自行建控制状态，不改已持久提交的历史成功。
 # 函数用途: 在步骤业务输出和运行终态发表前拒绝已接受的停止。
 def _check_stop():
@@ -170,6 +180,8 @@ class _WorkflowRunLifecycle:
                                                           expected_revision=expected_revision, intent=intent)
                 if replay:
                     return record
+            if record.status in ('cancelled', 'cancelling'):
+                raise ValueError('WORKFLOW_CANCELLED')
             admission = self._authorize_run(record, 'resume')
             from .release_gate import WorkflowEffectAdmission
             if isinstance(admission, WorkflowEffectAdmission):
@@ -180,9 +192,8 @@ class _WorkflowRunLifecycle:
                     resolution_origin = 'system'
                 if admission.effect_not_started or admission.reconciled_output is not None:
                     record.effect_outcome = 'not_started' if admission.effect_not_started else 'confirmed'
-            if record.status in ('cancelled', 'cancelling'):
-                raise ValueError('WORKFLOW_CANCELLED')
-            if record.status == 'waiting_for_agent':
+            if record.status == 'waiting_for_agent' or any(
+                    _agent_task_obligation(step) and not step.escalation_result.get('completion_ref') for step in record.steps):
                 if from_step_id is not None or patched_step_output is not None or updated_data_sources is not None:
                     raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
                 result = self._resume_agent(record, definition)
@@ -241,19 +252,47 @@ class _WorkflowRunLifecycle:
             return self.run_authorizer(record, phase)
         return None
 
+    # LLM: 对账和崩溃恢复只修原记录；有真实完成证据后才走正常后缀，不重派或重放成功前缀。
+    # 函数用途: 等待原任务，恢复未知回执或已落盘但尚未更新运行状态的完成结果。
     def _resume_agent(self, record, definition):
+        """继续核对原步骤，不因暂停/失败重新分配attempt或执行成功前缀。"""
         if self.agent_steps is None:
             raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
-        index = next(i for i, step in enumerate(record.steps) if step.status == 'waiting_for_agent')
+        index = next((i for i, step in enumerate(record.steps)
+            if _agent_task_obligation(step) and not step.escalation_result.get('completion_ref')), None)
+        if index is None:
+            completed = next((step for step in reversed(record.steps) if _agent_task_obligation(step)
+                and step.escalation_result.get('completion_ref') and step.status in ('succeeded', 'failed')), None)
+            if completed is None:
+                raise ValueError('WORKFLOW_AGENT_COMPLETION_UNRESOLVED')
+            # 独立步骤快照先于run.json发表；这一拍只弥合崩溃窗口，不调用完成端口或执行后缀。
+            record = replace_run_record(record, dict(status='running' if completed.status == 'succeeded' else 'failed',
+                needs_repair=completed.needs_repair, failed_step_id=completed.step_id if completed.needs_repair else '',
+                current_step_id=completed.step_id, breakpoint=None))
+            self.store.save_run(record)
+            return record
         step = record.steps[index]
         previous = payload(step.escalation_result)
-        if not step.escalation_result.get('task_id'):
+        result = step.escalation_result
+        has_store = getattr(getattr(self.agent_steps, 'background_service', None), 'store', None) is not None
+        recovery = ('session_task_dispatch' in result and (
+            result.get('submission_state') == 'unknown' or not result.get('task_id'))
+            or has_store and result.get('submission_state') == 'unknown')
+        if recovery:
+            self.agent_steps.reconcile(record, step)
+        elif not step.escalation_result.get('task_id'):
             self._admit_effect(record, step)
             self.agent_steps.submit(record, definition['steps'][index], step)
-        completion = self.agent_steps.completion(record, step)
+        # 对账这一拍只恢复原引用；不能顺带运行模型、脚本或工作流后缀。
+        completion = None if recovery else self.agent_steps.completion(record, step)
         if completion is None:
-            if previous != step.escalation_result:
+            changed = step.status != 'waiting_for_agent' or record.status != 'waiting_for_agent'
+            step.status = 'waiting_for_agent'
+            if changed or previous != step.escalation_result:
                 record = self.store.save_step_result(record.workflow_run_id, step)
+            if changed:
+                record.status = 'waiting_for_agent'
+                self.store.save_run(record)
             return record
         step.status = 'succeeded' if completion['status'] == 'completed' else 'failed'
         step.llm_involved = True
@@ -261,7 +300,6 @@ class _WorkflowRunLifecycle:
         step.escalation_result.update({name: completion.get(name) for name in ('completion_ref', 'result_ref', 'run_id')})
         step.error_code = '' if step.status == 'succeeded' else completion.get('error_code', 'WORKFLOW_AGENT_FAILED')
         step.needs_repair, step.ended_at = step.status == 'failed', time.time()
-        record = self.store.save_step_result(record.workflow_run_id, step)
         record = replace_run_record(record, dict(status='running' if step.status == 'succeeded' else 'failed',
             needs_repair=step.needs_repair, failed_step_id=step.step_id if step.needs_repair else '', breakpoint=None))
         self.store.save_run(record)
@@ -269,7 +307,10 @@ class _WorkflowRunLifecycle:
             return record
         return self._drive(record, definition, index + 1)
 
+    # LLM: 持原execution_lock先完整验身份并保存恢复ID，全部原责任确认前不得完成原control。
+    # 函数用途: 持续核实和取消同一批任务，未知或未停净时保持取消中。
     def cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
+        """原执行锁内逐条清理结构化派发责任；只有全部确认才完成原控制回执。"""
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
             self._authorize_run(record, 'cancel')
@@ -280,10 +321,22 @@ class _WorkflowRunLifecycle:
             record.status = 'cancelling'
             self.store.save_run(record)
             outstanding = []
+            obligations = []
             for step in record.steps:
-                if step.status == 'waiting_for_agent':
-                    if self.agent_steps is None or not self.agent_steps.cancel(record, step):
-                        outstanding.append(step.escalation_result.get('task_id') or step.escalation_result['attempt_id'])
+                if _agent_task_obligation(step):
+                    previous = payload(step.escalation_result)
+                    reconcile = getattr(self.agent_steps, 'reconcile', None)
+                    checked = reconcile(record, step) if callable(reconcile) else self.agent_steps is not None
+                    if previous != step.escalation_result:
+                        record = self.store.save_step_result(workflow_run_id, step)
+                    obligations.append((step, checked))
+            # 所有身份先核验；恢复的canonical ID已在同一原run/step落盘，之后才能取消。
+            for step, checked in obligations:
+                previous = payload(step.escalation_result)
+                if not checked or not self.agent_steps.cancel(record, step):
+                    outstanding.append(step.escalation_result.get('task_id') or step.escalation_result.get('attempt_id') or step.step_id)
+                if previous != step.escalation_result:
+                    record = self.store.save_step_result(workflow_run_id, step)
             record.status = 'cancelling' if outstanding else 'cancelled'
             self.store.save_run(record)
             if not outstanding:
