@@ -252,8 +252,8 @@ class _WorkflowRunLifecycle:
             return self.run_authorizer(record, phase)
         return None
 
-    # LLM: 对账和崩溃恢复只修原记录；有真实完成证据后才走正常后缀，不重派或重放成功前缀。
-    # 函数用途: 等待原任务，恢复未知回执或已落盘但尚未更新运行状态的完成结果。
+    # LLM: 首次未知仅对账；后次显式恢复才消费耐久absence，重验canonical及当前准入后沿原attempt/key提交。
+    # 函数用途: 找回原任务或继续已证明未开始的原提交，不重放成功前缀或在恢复这一拍执行后缀。
     def _resume_agent(self, record, definition):
         """继续核对原步骤，不因暂停/失败重新分配attempt或执行成功前缀。"""
         if self.agent_steps is None:
@@ -274,12 +274,19 @@ class _WorkflowRunLifecycle:
         step = record.steps[index]
         previous = payload(step.escalation_result)
         result = step.escalation_result
+        # 只消费本次恢复前已经落盘的证据；本次刚证明absence不能立即启动工作。
+        retry_absent = (result.get('submission_state') == 'not_started'
+            and result.get('reconciliation_state') == 'absent' and not result.get('task_id'))
         has_store = getattr(getattr(self.agent_steps, 'background_service', None), 'store', None) is not None
         recovery = ('session_task_dispatch' in result and (
             result.get('submission_state') == 'unknown' or not result.get('task_id'))
             or has_store and result.get('submission_state') == 'unknown')
         if recovery:
-            self.agent_steps.reconcile(record, step)
+            checked = self.agent_steps.reconcile(record, step)
+            if (retry_absent and checked and not result.get('task_id')
+                    and result.get('submission_state') == 'not_started' and result.get('reconciliation_state') == 'absent'):
+                self._admit_effect(record, step)
+                self.agent_steps.submit(record, definition['steps'][index], step)
         elif not step.escalation_result.get('task_id'):
             self._admit_effect(record, step)
             self.agent_steps.submit(record, definition['steps'][index], step)
