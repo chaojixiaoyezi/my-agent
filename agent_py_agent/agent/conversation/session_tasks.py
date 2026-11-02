@@ -510,11 +510,24 @@ class SessionTaskStore:
             raise FileNotFoundError("SessionTask not found")
         return task
 
-    def record_execution_cancellation_control(self, task_id: str, *, execution_ref, outstanding_refs: list[str]) -> SessionTask:
+    # LLM: 原任务元数据是唯一取消账；同一执行/claim CAS，不能以新current覆写原责任，更新后发布原索引。
+    # 函数用途: 在发停止副作用前保留精确执行、原claim和未确认引用。
+    def record_execution_cancellation_control(self, task_id: str, *, execution_ref, outstanding_refs: list[str],
+                                               claim_ref: dict | None = None, resources_confirmed: bool | None = None,
+                                               model_worker_exit_unknown: bool = False, claim_finished: bool = False,
+                                               resource_refs: list[dict] | None = None,
+                                               resources_prepared: bool | None = None) -> SessionTask:
         from .business_contracts import HostParentExecutionRef
 
         if (not isinstance(execution_ref, HostParentExecutionRef) or not execution_ref.observed_attempt_id
-                or len(outstanding_refs) > 100 or any(type(ref) is not str or not ref for ref in outstanding_refs)):
+                or len(outstanding_refs) > 100 or any(type(ref) is not str or not ref for ref in outstanding_refs)
+                or type(model_worker_exit_unknown) is not bool
+                or type(claim_finished) is not bool
+                or resources_prepared is not None and type(resources_prepared) is not bool
+                or resource_refs is not None and (type(resource_refs) is not list or len(resource_refs) > 1000
+                    or any(type(item) is not dict or item.get("kind") not in {"background", "pty", "execution"}
+                           or type(item.get("id")) is not str or not item["id"] for item in resource_refs))
+                or resources_confirmed is not None and type(resources_confirmed) is not bool):
             raise ValueError("invalid execution cancellation references")
 
         def update(payload):
@@ -523,27 +536,74 @@ class SessionTaskStore:
             if task.task_id != task_id or task.task_run_id != execution_ref.task_run_id or context.owner_id != execution_ref.owner_id:
                 raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
             previous = task.metadata.get("cancellation_control", {})
+            if previous.get("execution_ref") not in (None, execution_ref.to_dict()):
+                raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
+            if claim_ref is not None and previous.get("claim_ref") not in (None, claim_ref):
+                raise ValueError("SESSION_TASK_CLAIM_CONFLICT")
+            own = previous.get("execution_outstanding_refs", [])
+            if previous.get("execution_ref") and "execution_outstanding_refs" not in previous:
+                own = previous.get("outstanding_refs", [])
+            own = list(dict.fromkeys([*own, *outstanding_refs]))
             refs = list(dict.fromkeys([*previous.get("outstanding_refs", []), *outstanding_refs]))
             if len(refs) > 100:
                 raise ValueError("cancellation reference limit")
+            resources = {(item["kind"], item["id"]): item for item in previous.get("resource_refs", [])}
+            for item in resource_refs or []:
+                # 重试不丢原资源身份；观察只回读唯一资源账，不把这里的副本作为资源状态。
+                resources.setdefault((item["kind"], item["id"]), json.loads(json.dumps(item)))
+            if len(resources) > 1000:
+                raise ValueError("cancellation resource reference limit")
             return replace(task, metadata={**task.metadata, "cancellation_control": {
-                **previous, "outstanding_refs": refs, "execution_ref": execution_ref.to_dict()}}).to_dict()
+                **previous, "outstanding_refs": refs, "execution_outstanding_refs": own,
+                "execution_ref": execution_ref.to_dict(),
+                **({"claim_ref": dict(claim_ref)} if claim_ref is not None else {}),
+                **({"model_worker_exit_unknown": True} if model_worker_exit_unknown else {}),
+                **({"claim_finished": True} if claim_finished else {}),
+                **({"resource_refs": list(resources.values())} if resource_refs is not None else {}),
+                **({"resources_prepared": resources_prepared} if resources_prepared is not None else {}),
+                **({"resources_confirmed": resources_confirmed} if resources_confirmed is not None else {})}}).to_dict()
 
-        return SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+        saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+        self._list_index().publish(self._path(task_id))
+        return saved
 
-    def record_cancellation_control(self, task_id: str, *, outstanding_refs: list[str]) -> SessionTask:
+    # LLM: 只有准确执行的确认可解除其引用；普通会话取消不能清独立执行或后代责任，终态结果及其它元数据不变。
+    # 函数用途: 原子核收已经确认的原执行责任，并发布同一任务的列表定位。
+    def record_cancellation_control(self, task_id: str, *, outstanding_refs: list[str], execution_ref=None,
+                                    confirmed_refs: tuple[str, ...] = (),
+                                    expected_resource_refs: list[dict] | None = None) -> SessionTask:
         if len(outstanding_refs) > 100 or any(type(ref) is not str or not ref for ref in outstanding_refs):
             raise ValueError("invalid cancellation references")
 
         def update(payload):
             task = SessionTask.from_dict(payload)
-            if task.task_id != task_id or task.status != SESSION_TASK_CANCELLED:
+            if task.task_id != task_id or (execution_ref is None and task.status != SESSION_TASK_CANCELLED):
                 raise ValueError("SESSION_TASK_CANCEL_CONFLICT")
-            metadata = {**task.metadata, "cancellation_control": {
-                "conversation_request_id": task.conversation_request_id, "outstanding_refs": list(outstanding_refs)}}
+            previous = task.metadata.get("cancellation_control", {})
+            held = list(previous.get("execution_outstanding_refs", previous.get("outstanding_refs", []))) if previous.get("execution_ref") else []
+            if execution_ref is not None:
+                if (previous.get("execution_ref") != execution_ref.to_dict() or task.task_run_id != execution_ref.task_run_id
+                        or task.metadata.get("business_context", {}).get("owner_id") != execution_ref.owner_id):
+                    raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
+                if expected_resource_refs is not None and (previous.get("resource_refs") != expected_resource_refs
+                        or previous.get("resources_prepared") is not True):
+                    raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+                resolved = set(confirmed_refs)
+                own = [ref for ref in held if ref not in resolved]
+                refs = list(dict.fromkeys([*(ref for ref in previous.get("outstanding_refs", []) if ref not in resolved),
+                                          *outstanding_refs]))
+                control = {**previous, "outstanding_refs": refs, "execution_outstanding_refs": own,
+                    "session_task_outstanding_refs": [ref for ref in previous.get("session_task_outstanding_refs", [])
+                                                      if ref not in resolved]}
+            else:
+                control = {**previous, "conversation_request_id": task.conversation_request_id,
+                    "outstanding_refs": list(dict.fromkeys([*held, *outstanding_refs]))}
+            metadata = {**task.metadata, "cancellation_control": control}
             return replace(task, metadata=metadata).to_dict()
 
-        return SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+        saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+        self._list_index().publish(self._path(task_id))
+        return saved
 
     # LLM: 目录不存在时按"没有任务"返回；读坏文件进 load_errors，不静默跳过。
     # 函数用途: 列出本 owner 的会话任务记录。

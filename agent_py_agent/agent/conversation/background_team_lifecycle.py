@@ -152,6 +152,16 @@ def _reconcile_background_identity_locked(host, thread_id):
         return thread
     if identity.identity_state == "available" and identity.after_task == "reuse":
         return thread
+    from ..gateway_parts.session_task_stop import reconcile_business_session_task_cancellation
+
+    try:
+        # 先固定完整分页链，再更新原索引；不将本次写入造成的游标过期拼成一个假完整快照。
+        pending = [task for items in session_task_pages(store.session_tasks, target_thread_id=thread_id)
+                   for task in items if task.metadata.get("cancellation_control", {}).get("execution_ref")]
+        for task in pending:
+            reconcile_business_session_task_cancellation(host, task)
+    except SessionTaskCoverageUnknown:
+        return thread
     refs, _ = identity_outstanding(host, thread)
     if refs:
         return thread

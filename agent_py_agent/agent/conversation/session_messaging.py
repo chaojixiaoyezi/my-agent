@@ -291,9 +291,7 @@ def _save_cancellation_control(host, binding, root_context, refs, *, descendants
         held = []
         if previous.get("execution_ref"):
             # 独立执行取消的责任不由会话任务停止回执清除；在原控制元数据内区分两者，避免暂存自己的ref后永久混入执行责任。
-            own = set(previous.get("session_task_outstanding_refs", ()))
-            held = list(dict.fromkeys([*previous.get("execution_outstanding_refs", previous.get("outstanding_refs", [])),
-                *(ref for ref in previous.get("outstanding_refs", []) if ref not in own)]))
+            held = list(previous.get("execution_outstanding_refs", previous.get("outstanding_refs", [])))
         resolved = {current.task_id, current.conversation_request_id} if own_only else set(resolved_refs)
         scope = [ref for ref in previous.get("outstanding_refs", []) if ref not in resolved and ref not in held]
         session_refs = _bounded_cancellation_refs([*scope, *refs])
@@ -359,11 +357,20 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
     prior = control.get("outstanding_refs", [])
     held = list(control.get("execution_outstanding_refs", prior)) if control.get("execution_ref") else []
     if current.status in SESSION_TASK_TERMINAL_STATUSES:
-        if not ({current.task_id, current.conversation_request_id} & set(prior)):
-            return held
+        if not held and not ({current.task_id, current.conversation_request_id} & set(prior)):
+            link_closed = not control.get("execution_ref")
+            if not link_closed:
+                # 先前execution-only完成不能跳过这次整任务取消；不以SessionTask终态代替原TaskLink收尾。
+                repo = getattr(getattr(host, "subagents", None), "runtime_db", None)
+                task_run = repo.get_task_run(current.task_run_id) if repo is not None and current.task_run_id else None
+                if task_run is not None:
+                    link = store.tasks.load(task_run["task_id"])
+                    link_closed = link is None or link.status in {"done", "failed", "cancelled", "completed"}
+            if link_closed:
+                return held
     if not root:
         _save_cancellation_control(host, binding, root_context, [current.conversation_request_id or current.task_id], own_only=True)
-    refs = held
+    refs = []
     receipt = store.guidance.receipt(current.body_dedupe_key) if current.body_dedupe_key else None
     if current.status in {"queued", "cancelled"} and not current.conversation_request_id and receipt is not None:
         if receipt.status == "pending":
@@ -372,7 +379,8 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
             refs.append(current.task_id)
     elif current.conversation_request_id:
         stopped = stop_session_task_turn(host, target_thread=store.threads.require(current.target_thread_id),
-                                          turn_id=current.conversation_request_id)
+                                          turn_id=current.conversation_request_id,
+                                          **({"canonical_task": current} if current.metadata.get("business_context") else {}))
         if not stopped.confirmed:
             refs.append(current.conversation_request_id)
     elif (current.status in {"queued", "cancelled"} and not current.task_run_id
@@ -383,6 +391,9 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
         refs.append(current.task_id)
     if current.status not in SESSION_TASK_TERMINAL_STATUSES:
         store.session_tasks.advance(current.task_id, SessionTaskUpdate(status="cancelled"))
+    latest = store.session_tasks.require(current.task_id).metadata.get("cancellation_control", {})
+    if latest.get("execution_ref"):
+        refs.extend(latest.get("execution_outstanding_refs", latest.get("outstanding_refs", [])))
     if not root:
         refs = _save_cancellation_control(host, binding, root_context, refs, own_only=True)
     return refs
@@ -423,6 +434,9 @@ def cancel_owned_session_task(host, task, *, include_descendants=False):
             selected_task = _validate_cancellation_task(host, store.session_tasks.require(selected_binding[0]),
                 selected_binding, root_context)
             resolved.update((selected_binding[0], selected_task.conversation_request_id))
+            selected_control = selected_task.metadata.get("cancellation_control", {})
+            if selected_control.get("execution_ref"):
+                resolved.update(selected_control.get("execution_outstanding_refs", selected_control.get("outstanding_refs", [])))
             # 根只保存可见未确认引用的出处；重试仍读原后代控制账，不把聚合副本当执行权威。
             resolved.update(control.get("descendant_refs", {}).get(selected_binding[0], ()))
             refs = _cancel_selected_session_task(host, selected_binding, root_context,

@@ -452,14 +452,12 @@ class BackgroundAgentService:
 
 
 def cancel_business_execution(host, service, params, *, actor):
-    from ..runtime_db.run_cancellation import RuntimeCancellationTarget, cancel_runtime_run
+    from ..gateway_parts.session_task_stop import stop_business_session_task
     from ..subagents.cancellation import (
         CancelSubagentTaskRequest,
         cancel_subagent_task,
         cancel_subagent_tree,
     )
-    from ..tooling.process_resource_stop import cleanup_process_stop, freeze_process_stop
-    from ..tooling.process_scope import ProcessExecutionScope
     from .session_messaging import authorize_business_child
 
     repo = host.subagents.runtime_db
@@ -481,27 +479,7 @@ def cancel_business_execution(host, service, params, *, actor):
         confirmed = result.get("ok") is True and not result.get("descendants", {}).get("failed")
         return {"operation_id": ref.run_id, "state": "completed" if confirmed else "pending",
                 "unconfirmed_refs": [] if confirmed else [ref.run_id]}
-    root_task_id = str(repo.get_task_run(ref.task_run_id)["task_id"])
-    descendants = ([row for row in repo.agent_runs_for_task_run(ref.task_run_id)
-                    if row["parent_agent_run_id"] == ref.agent_run_id
-                    and row["status"] not in {"done", "failed", "cancelled", "stopped"}]
-                   if params["include_descendants"] else [])
-    refs = [ref.run_id, *(str(row["run_id"]) for row in descendants)]
-    # 先落在原task，失败时尚未发停止副作用；不能把权限关闭冒充实际退出。
-    host.conversation_store.session_tasks.record_execution_cancellation_control(
-        task.task_id, execution_ref=ref, outstanding_refs=refs)
-    target = RuntimeCancellationTarget(root_task_id, ref.run_id, ref.agent_run_id, ref.observed_attempt_id)
-    with host.conversation_store.tasks.transition_guard(root_task_id):
-        cancel_runtime_run(repo, target, reason="execution_cancel", source="business_api")
-        frozen = freeze_process_stop(ProcessExecutionScope(owner_home=str(host.home_paths.owner_home_dir),
-            thread_id=task.target_thread_id, root_task_id=root_task_id, run_id=ref.run_id, attempt_id=ref.observed_attempt_id))
-    cleanup_process_stop(frozen)
-    for row in descendants:
-        try:
-            child = authorize_business_child(host, str(row["run_id"]), actor, "cancel")
-            cancel_subagent_tree(host, CancelSubagentTaskRequest(child, "execution_cancel", source="business_api"))
-        except (FileNotFoundError, PermissionError, ValueError, OSError):
-            # 原停止入口拒绝/未确认仍由同一task持有责任，不跨父级权限另造取消路径。
-            continue
-    # 权限已关闭不等于原主模型线程已退出；原控制/实际退出回执尚未确认时必须保留责任。
-    return {"operation_id": ref.run_id, "state": "pending", "unconfirmed_refs": refs}
+    confirmed = stop_business_session_task(host, task, execution_ref=ref,
+        include_descendants=params["include_descendants"], cancel_task=False)
+    return {"operation_id": ref.run_id, "state": "completed" if confirmed else "pending",
+            "unconfirmed_refs": [] if confirmed else [ref.run_id]}
