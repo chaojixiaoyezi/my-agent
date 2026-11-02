@@ -1130,15 +1130,18 @@ def _conversation_actions(
 
 
 # LLM: thread-scoped 文件通过结构化 ID 组成；message JSONL 坏行会阻断整个会话删除。
-# 函数用途: 收集一个会话的原文、任务链接、目标、观察、guidance、claim、wake 文件，以及唤醒毒丸的尝试账、结案记录和重放留档。
+#   转写本按 canonical 布局整体收集：热文件、分卷清单、prepared 暂存段、archive/<thread>/ 下全部冷段与索引节点；
+#   清单或冷目录不可解析时整会话保守保留并报结构化错误，不能只搬热文件把冷集合留成无人认领的孤儿。
+# 函数用途: 收集一个会话的原文（含冷分卷）、任务链接、目标、观察、guidance、claim、wake 文件，以及唤醒毒丸的尝试账、结案记录和重放留档。
 def _conversation_related_paths(
     root: Path,
     thread: ConversationThread,
 ) -> tuple[tuple[Path, ...], list[MemoryRetentionError]]:
     thread_id = thread.thread_id
+    errors: list[MemoryRetentionError] = []
     candidates = [
         root / "threads" / f"{thread_id}.json",
-        root / "messages" / f"{thread_id}.jsonl",
+        *_transcript_member_paths(root / "messages", thread_id, errors),
         root / "observations" / f"{thread_id}.jsonl",
         root / "goals" / f"{thread_id}.json",
         root / "background_claims" / f"{thread_id}.json",
@@ -1146,9 +1149,8 @@ def _conversation_related_paths(
         *(root / "tasks" / f"{task_id}.json" for task_id in thread.task_ids),
         *(root / "wake_queue" / "dedupe").glob(f"{thread_id}.*.json"),
     ]
-    errors: list[MemoryRetentionError] = []
     messages = root / "messages" / f"{thread_id}.jsonl"
-    if messages.exists():
+    if messages.exists() and not errors:
         report = read_jsonl_objects_report(
             messages,
             context="memory_retention.conversation_messages",
@@ -1175,6 +1177,91 @@ def _conversation_related_paths(
         )
     )
     return paths, errors
+
+
+# LLM: 只做 lstat/目录枚举，不跟随链接、不读冷段正文；清单仍经 message_scan 原选择器解析（prepared 按已提交前缀选唯一代次）。
+#   选不出唯一代次、清单引用的冷段缺失、冷段序号有空洞、出现链接或特殊文件，一律记结构化错误由调用方整会话保留。
+#   prepared 暂存段名由序号决定（.<thread>.jsonl.rotation-<n>.stage，n 不超过已写出的最大冷段序号），逐个精确 lstat，
+#   不扫描整个共享 messages 目录；*.lock 侧车永远不进入搬移集合。
+# 函数用途: 返回一个会话 canonical 转写本的完整常规文件集合：热文件、清单、暂存段、archive/<thread>/ 下全部冷段与索引节点。
+def _transcript_member_paths(messages_dir: Path, thread_id: str, errors: list[MemoryRetentionError]) -> list[Path]:
+    from ..conversation.message_scan import transcript_manifest
+    from ..runtime_errors import DataCorruptionError
+
+    hot = messages_dir / f"{thread_id}.jsonl"
+    members = [hot, messages_dir / f"{thread_id}.manifest.json"]
+    try:
+        for path in members:
+            _regular_member_exists(path)
+        manifest = transcript_manifest(hot)
+        archive, sequences = _transcript_archive_files(messages_dir / "archive" / thread_id)
+        highest = max(sequences, default=0)
+        if sorted(sequences) != list(range(1, highest + 1)):
+            raise DataCorruptionError("transcript cold segment sequence has gaps")
+        if manifest is not None and manifest["segment_count"] > highest:
+            raise DataCorruptionError("transcript manifest references missing cold segments")
+        for sequence in range(1, highest + 1):
+            stage = messages_dir / f".{thread_id}.jsonl.rotation-{sequence}.stage"
+            if _regular_member_exists(stage):
+                members.append(stage)
+    except (DataCorruptionError, OSError, ValueError, KeyError, TypeError) as exc:
+        errors.append(
+            MemoryRetentionError(
+                "MEMORY_RETENTION_CONVERSATION_TRANSCRIPT_INVALID",
+                str(hot),
+                f"conversation transcript layout is invalid or incomplete: {type(exc).__name__}",
+            )
+        )
+        return members
+    return [*members, *archive]
+
+
+# LLM: 缺失返回 False；链接、目录或特殊文件抛错，调用方据此保守保留，不把它们当作"不存在"静默跳过。
+# 函数用途: 判断一个转写本成员是否为存在的普通文件。
+def _regular_member_exists(path: Path) -> bool:
+    try:
+        info = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("conversation transcript member is not a regular file")
+    return True
+
+
+# LLM: archive 与本线程冷目录都须是真实目录；遍历错误显式传播，链接/特殊文件抛错，*.lock 侧车跳过不搬。
+#   冷段序号只认 seg-<20 位 ASCII 数字>.jsonl 直接子项；索引节点、原子写残留等同目录普通文件一并收集。
+# 函数用途: 枚举一个线程冷归档目录下的全部普通文件，并返回已写出的冷段序号。
+def _transcript_archive_files(archive: Path) -> tuple[list[Path], list[int]]:
+    for directory in (archive.parent, archive):
+        try:
+            info = directory.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return [], []
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError("conversation transcript archive is not a regular directory")
+    files: list[Path] = []
+    sequences: list[int] = []
+
+    # LLM: 遍历器回调不容忍权限等错误，防止静默漏掉冷段。
+    # 函数用途: 将目录遍历错误传回扫描调用方。
+    def failed(error):
+        raise error
+
+    for directory, dirs, names in os.walk(archive, followlinks=False, onerror=failed):
+        base = Path(directory)
+        for name in sorted((*dirs, *names)):
+            info = (base / name).stat(follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise OSError("conversation transcript archive contains a symbolic link")
+            if stat.S_ISDIR(info.st_mode) or name.endswith(".lock"):
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("conversation transcript archive member is not a regular file")
+            files.append(base / name)
+            digits = name[len("seg-"):-len(".jsonl")] if name.startswith("seg-") and name.endswith(".jsonl") else ""
+            if base == archive and len(digits) == 20 and digits.isascii() and digits.isdigit():
+                sequences.append(int(digits))
+    return files, sequences
 
 
 # LLM: 只按每个 JSON 顶层 thread_id 判定归属；读不出的文件记 MEMORY_RETENTION_CONVERSATION_WAKE_INVALID（写入 errors），

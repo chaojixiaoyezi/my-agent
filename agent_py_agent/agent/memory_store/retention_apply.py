@@ -44,6 +44,7 @@ from .retention_models import (
 )
 from .retention_scan import (
     _TRASH_COMMIT_PENDING,
+    _conversation_related_paths,
     _load_policy,
     _runtime_unlocked,
     _trash_transaction_pending,
@@ -692,8 +693,10 @@ def _restore_conversation_index(path, removed):
     update_json_file_atomic(path, restore)
 
 
-# LLM: Conversation在原thread锁内重验摘要、active task、时间；移动及索引增量独立补偿，失败保留副本。
-# 函数用途: 将一个过期 ConversationStore thread 及附属文件移入同一回收容器。
+# LLM: 与消息writer（追加/冷转/prepared恢复）同锁序：先原消息锁、再thread转换锁，锁内重验摘要、active task、时间，
+#   并重新枚举热/清单/暂存/冷段/索引完整成员；集合或指纹与规划不一致就放弃本轮，绝不搬半套或漏下冷段。
+#   移动及索引增量独立补偿，失败保留副本；提交后只rmdir本线程已空的冷目录，不碰*.lock侧车与共享archive根。
+# 函数用途: 将一个过期 ConversationStore thread 及其完整转写本、附属文件移入同一回收容器。
 def _trash_conversation(
     *,
     home: object,
@@ -703,7 +706,10 @@ def _trash_conversation(
     if not action.path.exists():
         return replace(action, status="missing")
     root = action.path.parent.parent
-    with locked_file_transition(action.path):
+    if action.path.parent.name != "threads" or action.path.name != f"{action.record_id}.json":
+        return replace(action, status="state_changed")
+    messages = root / "messages" / f"{action.record_id}.jsonl"
+    with locked_json_path(messages), locked_file_transition(action.path):
         try:
             payload = json.loads(action.path.read_text(encoding="utf-8"))
             thread = ConversationThread.from_dict(payload)
@@ -715,7 +721,13 @@ def _trash_conversation(
             or action.cutoff_timestamp is None
             or thread.updated_at >= action.cutoff_timestamp
             or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
-            or not _fingerprint_matches(action.source_fingerprint, paths_fingerprint(action.related_paths))
+        ):
+            return replace(action, status="state_changed")
+        members, member_errors = _conversation_related_paths(root, thread)
+        if (
+            member_errors
+            or set(members) != set(action.related_paths)
+            or not _fingerprint_matches(action.source_fingerprint, paths_fingerprint(members))
         ):
             return replace(action, status="state_changed")
         for path in action.related_paths:
@@ -754,7 +766,18 @@ def _trash_conversation(
                     restored = False
             _finish_failed_trash(destination, action=action, payload=payload_root, now=now, restored=restored)
             raise
+        _prune_transcript_archive_dirs(root / "messages" / "archive" / thread.thread_id, moved)
     return replace(action, status="trashed")
+
+
+# LLM: 仅在回收已提交后调用；自底向上只rmdir本线程冷目录内已被本次搬空的子目录，rmdir原子拒绝非空，
+#   不递归删除、不碰共享archive根；失败只多留空目录，不影响已提交的回收结果。
+# 函数用途: 清掉被整体移走的线程冷归档留下的空目录。
+def _prune_transcript_archive_dirs(archive: Path, moved: list[tuple[Path, Path]]) -> None:
+    directories = {parent for source, _target in moved for parent in source.parents
+                   if parent == archive or archive in parent.parents}
+    for directory in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        _prune_empty_directory(directory)
 
 
 # LLM: 权威文件必须有合法且不变摘要；trash只有明确trashed才能永久删除，moving/recovery_required永远不按龄放行。
