@@ -1,21 +1,21 @@
 """LLM: CLI 任务管理命令的用户体验测试。
 
 测试 task list/show/abandon/pause/resume/search 命令的边界情况和用户交互。
-使用 mock 隔离存储层和 LLM 调用，专注测试 CLI 输出格式和错误处理。
+只读展示命令经 _task_store 缝换成 mock 投影库；abandon/pause/resume 走真实宿主与原 control_task，
+专注测试 CLI 输出格式、退出码和错误处理。
 """
 
 from __future__ import annotations
 
 import sys
-import tempfile
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from io import StringIO
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_py_agent.agent.subagents.models import TaskStatus
+from agent_py_agent.agent.subagents.task_control import task_control_record
 from agent_py_agent.agent.task_registry import format_task_list, get_task_summary
 from agent_py_agent.agent.task_registry.query import _TASK_STATUS_EMOJI
 from agent_py_agent.cli.task_commands import (
@@ -26,6 +26,7 @@ from agent_py_agent.cli.task_commands import (
     cmd_task_search,
     cmd_task_show,
 )
+from agent_py_agent.tests.test_rework_r9_cli_task_control import _cli, _owning_runner, _seed
 
 
 class MockArgs:
@@ -56,28 +57,9 @@ def _make_mock_store(tasks=None):
 
 @contextmanager
 def _patched_task_cli_deps(mock_store):
-    with ExitStack() as stack:
-        mock_ls = stack.enter_context(patch("agent_py_agent.cli.task_commands.LocalStore"))
-        mock_ls.return_value = mock_store
-        mock_cfg = stack.enter_context(patch("agent_py_agent.cli.task_commands.load_config"))
-        mock_cfg.return_value = MagicMock(workspace_root="")
-        mock_resolve = stack.enter_context(
-            patch("agent_py_agent.cli.task_commands.resolve_workspace_root")
-        )
-        mock_resolve.return_value = Path(tempfile.gettempdir())
+    # R9-12：只读命令的唯一存储缝是 task_commands._task_store(args)（实际配置 owner 的投影库）。
+    with patch("agent_py_agent.cli.task_commands._task_store", return_value=mock_store):
         yield
-
-
-def _task_record(task_id, status):
-    return {
-        "task_id": task_id,
-        "status": status,
-        "goal": "",
-        "session_id": "",
-        "user_id": "",
-        "created_at": 0,
-        "updated_at": 0,
-    }
 
 
 class TestTaskList:
@@ -241,105 +223,83 @@ class TestTaskShow:
 
 
 class TestTaskStateTransitions:
-    """测试 task abandon/pause/resume 命令的状态转换。"""
+    """R9-12：控制命令经实际配置 owner 的原宿主 control_task；不写 TaskRegistry 投影。"""
 
-    def _call_abandon(self, task_id, status):
-        mock_store = _make_mock_store([_task_record(task_id, status)])
-        with _patched_task_cli_deps(mock_store):
-            return cmd_task_abandon(MockArgs(task_id=task_id))
+    def test_abandon_completed_task(self, tmp_path, capsys):
+        agent, child, attempt = _seed(tmp_path)
+        lease, _session = _owning_runner(agent, child.id, attempt)
+        try:
+            assert _cli(tmp_path, cmd_task_abandon, child.id) == 0
+            capsys.readouterr()
+            assert _cli(tmp_path, cmd_task_abandon, child.id) == 0
+            assert f"任务 {child.id} 已经是 ABANDONED 状态。" in capsys.readouterr().out
+            assert agent.subagents.load(child.id).status == "ABANDONED"
+        finally:
+            lease.__exit__(None, None, None)
 
-    def _call_pause(self, task_id, status):
-        mock_store = _make_mock_store([_task_record(task_id, status)])
-        with _patched_task_cli_deps(mock_store):
-            return cmd_task_pause(MockArgs(task_id=task_id))
+    def test_pause_already_paused_task(self, tmp_path, capsys):
+        agent, child, attempt = _seed(tmp_path)
+        lease, _session = _owning_runner(agent, child.id, attempt)
+        try:
+            assert _cli(tmp_path, cmd_task_pause, child.id) == 0
+            capsys.readouterr()
+            assert _cli(tmp_path, cmd_task_pause, child.id) == 0
+            assert f"任务 {child.id} 已经是 PAUSED 状态。" in capsys.readouterr().out
+            task = agent.subagents.load(child.id)
+            assert task.status == "PAUSED" and task_control_record(task)["generation"] == 1
+        finally:
+            lease.__exit__(None, None, None)
 
-    def _call_resume(self, task_id, status):
-        mock_store = _make_mock_store([_task_record(task_id, status)])
-        with _patched_task_cli_deps(mock_store):
-            return cmd_task_resume(MockArgs(task_id=task_id))
+    def test_resume_non_paused_task(self, tmp_path, capsys):
+        agent, child, _attempt = _seed(tmp_path)
+        assert _cli(tmp_path, cmd_task_resume, child.id) == 1
+        assert "TASK_NOT_PAUSED" in capsys.readouterr().out
+        assert agent.subagents.load(child.id).status == "RUNNING"
 
-    def test_abandon_completed_task(self):
-        """测试 abandon 已 COMPLETED 的任务。
+    def test_resume_paused_task(self, tmp_path, capsys):
+        agent, child, attempt = _seed(tmp_path)
+        lease, _session = _owning_runner(agent, child.id, attempt)
+        try:
+            assert _cli(tmp_path, cmd_task_pause, child.id) == 0
+            capsys.readouterr()
+            # 原执行轮宿主尚未写正向清理证明：恢复必须被拒，任务仍是 PAUSED。
+            assert _cli(tmp_path, cmd_task_resume, child.id) == 1
+            assert "TASK_CLEANUP_UNCONFIRMED" in capsys.readouterr().out
+            assert agent.subagents.load(child.id).status == "PAUSED"
+        finally:
+            # 原宿主收尾：退出同一租约时落正向清理证明。
+            lease.__exit__(None, None, None)
+        assert _cli(tmp_path, cmd_task_resume, child.id) == 0
+        assert f"任务 {child.id} 已恢复为 PENDING，将由原调度续跑同一 run。" in capsys.readouterr().out
+        assert agent.subagents.load(child.id).status == "PENDING"
 
-        验证对已完成任务执行 abandon 操作会成功（用户可能改变主意）。
-        """
-        result = self._call_abandon("task-1", "COMPLETED")
-        assert result == 0
+    def test_resume_nonexistent_task(self, tmp_path, capsys):
+        _seed(tmp_path)
+        assert _cli(tmp_path, cmd_task_resume, "task-nonexist") == 1
+        assert "任务 task-nonexist 不存在。" in capsys.readouterr().out
 
-    def test_pause_already_paused_task(self):
-        """测试重复操作：pause 已 PAUSED 的任务。
-
-        验证对已暂停任务再次执行 pause 会提示用户并返回成功（幂等）。
-        """
-        result = self._call_pause("task-paused", "PAUSED")
-        assert result == 0
-
-    def test_resume_non_paused_task(self):
-        """测试无效状态转换：resume 非 PAUSED 状态的任务。
-
-        验证只有 PAUSED 状态的任务才能被 resume。
-        """
-        result = self._call_resume("task-running", "RUNNING")
-        assert result == 1
-
-    def test_resume_paused_task(self):
-        """测试正常恢复：resume PAUSED 状态的任务。
-
-        验证对 PAUSED 任务执行 resume 会成功。
-        """
-        mock_store = _make_mock_store([_task_record("task-paused", "PAUSED")])
-        mock_store.task_registry.update_task_status.return_value = True
-
-        with _patched_task_cli_deps(mock_store):
-            result = cmd_task_resume(MockArgs(task_id="task-paused"))
-
-        assert result == 0
-        mock_store.task_registry.update_task_status.assert_called_once_with("task-paused", "RUNNING")
-
-    def test_resume_nonexistent_task(self):
-        """测试 resume 不存在的任务。
-
-        验证返回错误码并提示任务不存在。
-        """
-        mock_store = _make_mock_store([])
-        mock_store.task_registry.lookup_task.return_value = None
-
-        with _patched_task_cli_deps(mock_store):
-            result = cmd_task_resume(MockArgs(task_id="task-nonexist"))
-
-        assert result == 1
-
-    def test_concurrent_state_transitions(self):
-        """测试并发状态转换的安全性。
-
-        验证多个并发操作不会导致状态不一致。
-        """
+    def test_concurrent_state_transitions(self, tmp_path, capsys):
         import threading
 
-        mock_store = _make_mock_store([_task_record("task-concurrent", "RUNNING")])
-        mock_store.task_registry.update_task_status.return_value = True
-
-        update_calls = []
-
-        def mock_update(task_id, status):
-            update_calls.append((task_id, status))
-            return True
-
-        mock_store.task_registry.update_task_status.side_effect = mock_update
-
-        with _patched_task_cli_deps(mock_store):
-            threads = []
-            for _ in range(5):
-                t = threading.Thread(
-                    target=lambda: cmd_task_pause(MockArgs(task_id="task-concurrent"))
-                )
-                threads.append(t)
-                t.start()
-
-            for t in threads:
-                t.join()
-
-        assert len(update_calls) == 5
+        agent, child, attempt = _seed(tmp_path)
+        lease, _session = _owning_runner(agent, child.id, attempt)
+        results = []
+        try:
+            threads = [threading.Thread(target=lambda: results.append(_cli(tmp_path, cmd_task_pause, child.id)))
+                       for _ in range(5)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            task = agent.subagents.load(child.id)
+            assert results == [0] * 5
+            assert task.status == "PAUSED" and task_control_record(task)["generation"] == 1
+            # 同一把 creation guard 串行化控制：恰好一次真正暂停，其余四次只报告已应用。
+            out = capsys.readouterr().out
+            assert out.count(f"任务 {child.id} 已暂停，状态 PAUSED；") == 1
+            assert out.count(f"任务 {child.id} 已经是 PAUSED 状态。") == 4
+        finally:
+            lease.__exit__(None, None, None)
 
 
 class TestTaskSearch:
@@ -435,31 +395,22 @@ class TestTaskSearch:
 class TestErrorMessages:
     """测试错误提示信息的用户体验。"""
 
-    def test_nonexistent_task_error_message(self):
-        """测试不存在的任务错误提示。
+    def test_nonexistent_task_error_message(self, tmp_path, capsys):
+        _seed(tmp_path)
+        assert _cli(tmp_path, cmd_task_abandon, "task-does-not-exist") == 1
+        assert "任务 task-does-not-exist 不存在。" in capsys.readouterr().out
 
-        验证不存在的任务 ID 会给出清晰的错误提示。
-        """
-        mock_store = _make_mock_store([])
-        mock_store.task_registry.lookup_task.return_value = None
+    def test_update_failure_handling(self, tmp_path, monkeypatch, capsys):
+        from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
-        with _patched_task_cli_deps(mock_store):
-            result = cmd_task_abandon(MockArgs(task_id="task-does-not-exist"))
+        _agent, child, _attempt = _seed(tmp_path)
 
-        assert result == 1
+        def unavailable(self, *_args, **_kwargs):
+            raise OSError("simulated I/O error")
 
-    def test_update_failure_handling(self):
-        """测试更新失败时的错误处理。
-
-        验证 update_task_status 返回 False 时会返回错误码。
-        """
-        mock_store = _make_mock_store([_task_record("task-1", "RUNNING")])
-        mock_store.task_registry.update_task_status.return_value = False
-
-        with _patched_task_cli_deps(mock_store):
-            result = cmd_task_abandon(MockArgs(task_id="task-1"))
-
-        assert result == 1
+        monkeypatch.setattr(RuntimeRepository, "__init__", unavailable)
+        assert _cli(tmp_path, cmd_task_abandon, child.id) == 1
+        assert f"无法打开配置的任务权威，未放弃任务 {child.id}：" in capsys.readouterr().out
 
     def test_empty_task_id_handling(self):
         """测试空任务 ID 的处理。
@@ -475,15 +426,7 @@ class TestErrorMessages:
         # 应该优雅处理
         assert result in (0, 1)
 
-    def test_pause_nonexistent_task(self):
-        """测试暂停不存在的任务。
-
-        验证返回错误码。
-        """
-        mock_store = _make_mock_store([])
-        mock_store.task_registry.lookup_task.return_value = None
-
-        with _patched_task_cli_deps(mock_store):
-            result = cmd_task_pause(MockArgs(task_id="task-nonexist"))
-
-        assert result == 1
+    def test_pause_nonexistent_task(self, tmp_path, capsys):
+        _seed(tmp_path)
+        assert _cli(tmp_path, cmd_task_pause, "task-nonexist") == 1
+        assert "任务 task-nonexist 不存在。" in capsys.readouterr().out
