@@ -105,6 +105,8 @@ def _mime(data):
     return 'application/octet-stream'
 
 
+# LLM: 保持 quota admission → business writer lock 顺序；同一锁覆盖账本读取与原子发表，失败不覆盖未知 blob。
+# 函数用途: 在原配额和授权边界内写入业务媒体，并把完整登记原子发表到唯一账本。
 def upload_artifact(source, fields, filename, context, services):
     schema = business_api()['media_routes'][0]['request_fields']
     validate_object({'file': 'binary', **fields}, standalone_schema(schema))
@@ -147,7 +149,8 @@ def upload_artifact(source, fields, filename, context, services):
                 OwnerQuotaChange(root / REGISTRY_RELATIVE_PATH, final_size=registry_size + 8192)])
             _check(context, services, sid, tid, upload=True)
             write_bytes_atomic_beneath(services.owner_home, (*_ROOT, path.name), data)
-            record = register_observed_artifact(request, observed_sha256=sha, observed_size_bytes=size)
+            record = register_observed_artifact(request, observed_sha256=sha, observed_size_bytes=size,
+                atomic_publish=True)
             _check(context, services, sid, tid, upload=True)
             return _view(record)
 
