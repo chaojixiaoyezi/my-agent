@@ -337,7 +337,8 @@ class WorkflowScopeService:
         from .engine import _requires_native_agent_resume
 
         def authorize(record, phase):
-            self._authorize(actor, 'workflows.run', record.workflow_id)
+            # 取消只收回原工作，不重新取得执行准入；其它阶段仍守原执行授权。
+            self._authorize(actor, 'workflow_runs.cancel' if phase == 'cancel' else 'workflows.run', record.workflow_id)
             current = self._get(record.workflow_id)
             if workflow_state(current)['lifecycle'] != 'active':
                 raise PermissionError('WORKFLOW_RECYCLED')

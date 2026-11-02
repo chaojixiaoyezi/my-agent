@@ -410,14 +410,34 @@ def _settle_cancelled_task_body(host, binding, root_context, *, reject_pending=F
     return settled
 
 
+# LLM: 回调只来自可信宿主；严格True才准入，授权异常不能被取消循环误收成存储覆盖失败。
+# 函数用途: 在已核规范任务上重新取得本次调用的实时取消许可。
+def _authorize_cancellation_task(task, authorize_task):
+    from ..plugin_host.errors import HostAPIError
+
+    if authorize_task is None:
+        return
+    try:
+        allowed = authorize_task(task)
+    except HostAPIError:
+        raise
+    except (OSError, ValueError) as error:
+        # 外层沿用原存储错误收口；这两类授权异常必须越过该收口并中止。
+        raise PermissionError("SESSION_TASK_ACCESS_DENIED") from error
+    if allowed is not True:
+        raise PermissionError("SESSION_TASK_ACCESS_DENIED")
+
+
 # LLM: 先耐久取消，再核原回合/独立执行退出；后代只更新自身责任，不覆盖原根scope。正文只收同一任务的准确回执。
 # 函数用途: 执行单条规范任务的取消及正文收尾，返回仍未确认的原引用。
-def _cancel_selected_session_task(host, binding, root_context, *, root=False):
+def _cancel_selected_session_task(host, binding, root_context, *, root=False, authorize_task=None):
     from ..gateway_parts.session_task_stop import stop_session_task_turn
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES, SessionTaskUpdate
 
     store = host.conversation_store
     current = _validate_cancellation_task(host, store.session_tasks.require(binding[0]), binding, root_context)
+    # 终态也可能清理正文或执行链接，必须在其快速路径之前重核。
+    _authorize_cancellation_task(current, authorize_task)
     control = current.metadata.get("cancellation_control", {})
     prior = control.get("outstanding_refs", [])
     held = list(control.get("execution_outstanding_refs", prior)) if control.get("execution_ref") else []
@@ -464,13 +484,15 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
 
 # LLM: 完整闭包先冻结再逐条取消；原根只清本次已解析责任并保留并发新增scope，终态重试仍核后代，不伪报停止。
 # 函数用途: 沿原存储和精确停止回执，取消单任务或完整后代范围并汇总未确认责任。
-def cancel_owned_session_task(host, task, *, include_descendants=False):
+def cancel_owned_session_task(host, task, *, include_descendants=False, authorize_task=None):
+    from ..plugin_host.errors import HostAPIError
     from .background_team_lifecycle import SessionTaskCoverageUnknown
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 
     store, binding = host.conversation_store, _cancellation_binding(task)
     root_context = task.metadata.get("business_context")
     current = _validate_cancellation_task(host, store.session_tasks.require(task.task_id), binding, root_context)
+    _authorize_cancellation_task(current, authorize_task)
     control = current.metadata.get("cancellation_control", {})
     prior = control.get("outstanding_refs", [])
     try:
@@ -481,6 +503,12 @@ def cancel_owned_session_task(host, task, *, include_descendants=False):
         refs = _save_cancellation_control(host, binding, root_context,
             [*prior, "descendants:coverage_unknown"], descendants=include_descendants)
         return {"operation_id": task.task_id, "state": "pending", "outstanding_refs": refs}
+
+    # 完整闭包逐条预检先于任何控制写入；拒绝后代不能被静默剔除。
+    for selected_binding in selected:
+        selected_task = _validate_cancellation_task(host, store.session_tasks.require(selected_binding[0]),
+            selected_binding, root_context)
+        _authorize_cancellation_task(selected_task, authorize_task)
 
     # 在第一条副作用前把责任存回原根；中断/异常不能留下“根已终态，因此不用再核后代”的空窗。
     pending = list(prior)
@@ -503,11 +531,11 @@ def cancel_owned_session_task(host, task, *, include_descendants=False):
             # 根只保存可见未确认引用的出处；重试仍读原后代控制账，不把聚合副本当执行权威。
             resolved.update(control.get("descendant_refs", {}).get(selected_binding[0], ()))
             refs = _cancel_selected_session_task(host, selected_binding, root_context,
-                root=selected_binding[0] == task.task_id)
+                root=selected_binding[0] == task.task_id, authorize_task=authorize_task)
             outstanding.extend(refs)
             if selected_binding[0] != task.task_id and refs:
                 descendant_refs[selected_binding[0]] = refs
-        except PermissionError:
+        except (PermissionError, HostAPIError):
             raise
         except (OSError, ValueError):
             outstanding.append(selected_binding[0])

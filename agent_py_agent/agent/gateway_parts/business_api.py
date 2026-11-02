@@ -115,6 +115,16 @@ class _BusinessBackgroundService(BackgroundAgentService):
             return 'default'
         return super()._profile(requested)
 
+    # LLM: 直接取消和继承的退休取消共用当前发行上下文；逐条走原task grant与两端线程实时门。
+    # 函数用途: 把本次业务授权接入原生取消闭包，不借祖先扩大目标范围。
+    def cancel_task(self, task_id, *, actor, include_descendants=False):
+        from ..conversation.session_messaging import cancel_owned_session_task
+
+        task, _ = self._owned_task(task_id, actor)
+        return cancel_owned_session_task(self.host, task, include_descendants=include_descendants,
+            authorize_task=lambda canonical_task: self.call_context.check('tasks.cancel',
+                {'owner_id': self.call_context.owner_id, 'task_id': canonical_task.task_id}))
+
     # LLM: 单次原派发失败仍携原outcome/身份；不解析异常文字，也不重派可能已发表的任务。
     # 函数用途: 把准确业务上下文接入原SessionTask派发，并保留未知回执。
     def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id):
@@ -356,6 +366,48 @@ class BusinessServices:
                 result.append(action)
         return result
 
+    # LLM: 仅插件取消创建调用局部副本；原生适配器、执行宿主及全部其它依赖保持原对象。
+    # 函数用途: 为工作流原任务清理绑定当前实时任务授权，禁止共享handler串用身份。
+    def _workflow_cancel_service(self, context):
+        from copy import copy
+
+        from ..conversation.session_messaging import cancel_owned_session_task
+        from ..workflows.agent_steps import WorkflowAgentSteps
+        from ..workflows.business_scope import WorkflowScopeService
+
+        service = self.workflows
+        if not isinstance(service, WorkflowScopeService):
+            raise HostAPIError('HOST_NOT_READY', 503)
+        if service.agent_steps is None:
+            return service  # 纯脚本取消不需要Agent执行宿主。
+        if not isinstance(service.agent_steps, WorkflowAgentSteps):
+            raise HostAPIError('HOST_NOT_READY', 503)
+        original = service.agent_steps.background_service
+
+        def cancel_handler(task_id, *, actor, idempotency_key):
+            # 只在已知原任务确实需要清理时核宿主；未知派发和已证不存在沿原对账收口。
+            if not isinstance(original, BackgroundAgentService):
+                raise HostAPIError('HOST_NOT_READY', 503)
+            host = original.host
+            paths = getattr(host, 'home_paths', None)
+            if (getattr(paths, 'owner_id', None) != self.owner_id
+                    or context.owner_id != self.owner_id
+                    or service.owner_id != self.owner_id
+                    or Path(paths.owner_home_dir).resolve() != self.owner_home
+                    or Path(context.host.home_paths.owner_home_dir).resolve() != self.owner_home
+                    or Path(service.store.owner_home).resolve() != self.owner_home
+                    or original.store is not getattr(host, 'conversation_store', None)):
+                raise HostAPIError('HOST_NOT_READY', 503)
+            task, _ = original._owned_task(task_id, actor)
+            return cancel_owned_session_task(host, task, include_descendants=True,
+                authorize_task=lambda canonical_task: context.check('tasks.cancel',
+                    {'owner_id': context.owner_id, 'task_id': canonical_task.task_id}))
+
+        local = copy(service)
+        local.agent_steps = copy(service.agent_steps)
+        local.agent_steps.cancel_handler = cancel_handler
+        return local
+
     def invoke(self, action, params, context, *, expected_revision=None, idempotency_key=''):
         spec = business_action_spec(action)
         actor = self.actor(context)
@@ -375,7 +427,11 @@ class BusinessServices:
         if implementer == 'W1':
             return self.spaces.call(action, params, actor=actor, **kwargs)
         if implementer == 'W3':
-            return self.workflows.execute(action, params, actor=actor, **kwargs)
+            from ..plugin_host.contracts import AuthorizedCall
+
+            service = (self._workflow_cancel_service(context)
+                if action == 'workflow_runs.cancel' and isinstance(context.actor, AuthorizedCall) else self.workflows)
+            return service.execute(action, params, actor=actor, **kwargs)
         if implementer == 'W2':
             background_context = context if isinstance(self.background, _BackgroundPort) else context.business_context
             return self.background.execute(action, params, actor=context.actor, context=background_context, **kwargs)
