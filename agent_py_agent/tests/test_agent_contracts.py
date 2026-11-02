@@ -198,8 +198,11 @@ def test_run_state_machine_warns_and_uses_structured_recovery_actions(caplog) ->
     assert exhausted.action == "takeover"
     assert exhausted.allow_new_run is True
 
+    paused = recovery_decision(RunStateFacts(status="PAUSED", failure_type="UNKNOWN_ERROR"))
+    assert (paused.action, paused.reason, paused.allow_new_run) == ("wait", "paused", False)
+    assert can_repair(RunStateFacts(status="PAUSED", attempts=0, max_attempts=2)) is False
     with caplog.at_level("WARNING"):
-        unknown = recovery_decision(RunStateFacts(status="PAUSED", failure_type="UNKNOWN_ERROR"))
+        unknown = recovery_decision(RunStateFacts(status="UNREGISTERED_STATUS", failure_type="UNKNOWN_ERROR"))
     assert unknown.action == "manual_review"
     assert "unhandled recovery state" not in caplog.text
 

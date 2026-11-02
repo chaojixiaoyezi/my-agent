@@ -1132,6 +1132,8 @@ def test_rw_learner_rejects_foreign_same_named_expected_source(tmp_path):
 # LLM: 使用生产C的owner来源枚举和真实freeze_source，不替换路径合同；无执行事务时也必须发现纯溢出源且零写盘。
 # 函数用途: 保留纯溢出请求从只读发现进入生产运输的端到端回归，揭示范围外白名单缺口。
 def test_rw_production_discovery_freezes_overflow_without_writes(tmp_path, monkeypatch):
+    from types import MethodType
+
     from agent_py_agent.agent.gateway_parts.multiprocess_background_discovery import (
         CoordinatorBackgroundRequests,
     )
@@ -1141,6 +1143,7 @@ def test_rw_production_discovery_freezes_overflow_without_writes(tmp_path, monke
     original = _rw_seed_request(ctx.store, 1, "requests_overflow")
     config = SimpleNamespace(owner_maintenance_scan_interval_seconds=0, memory_curator_enabled=False, enable_self_learning=True)
     discovery = SimpleNamespace(control=SimpleNamespace(home_root=ctx.home.root, config=config), _source_cursors={})
+    discovery._managed_canonical_root = MethodType(CoordinatorBackgroundRequests._managed_canonical_root, discovery)
     before = {p.relative_to(ctx.home.owner_home_dir): p.read_bytes() for p in ctx.home.owner_home_dir.rglob("*") if p.is_file()}
 
     # LLM: 仅把未获授权的短写门变为显式失败，生产发现与冻结逻辑仍原样执行。

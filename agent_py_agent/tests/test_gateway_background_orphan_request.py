@@ -3,7 +3,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -66,6 +66,7 @@ def test_original_canonical_orphan_has_production_source_without_c_owner_agent_b
         monkeypatch.setattr(discovery_module, "_directory_source_items", canonical_last)
     discovery = SimpleNamespace(control=SimpleNamespace(home_root=base.home_paths.root,
         config=replace(base.config, memory_curator_enabled=False, enable_self_learning=False)), _source_cursors={})
+    discovery._managed_canonical_root = MethodType(CoordinatorBackgroundRequests._managed_canonical_root, discovery)
     target = SimpleNamespace(identity=owner, home_dir=home)
     refs = list(CoordinatorBackgroundRequests._owner_sources(discovery, target))
     source_key = (str(home), pattern)

@@ -17,7 +17,8 @@ def test_regular_wake_never_runs_child_synchronously(monkeypatch):
     assert result["redispatched"] == 1
 
 
-def test_terminal_observation_fallback_retires_only_matching_ids():
+def test_terminal_observation_fallback_retires_only_matching_ids(monkeypatch):
+    monkeypatch.setattr(runtime, "now", lambda: 123.0)
     handled = []
     events = [SimpleNamespace(observation_id="one", root_task_id="root", thread_id="thread")]
     store = SimpleNamespace(threads=SimpleNamespace(require=lambda _: SimpleNamespace(owner_id="owner")),
@@ -26,7 +27,7 @@ def test_terminal_observation_fallback_retires_only_matching_ids():
                                                          mark_handled=lambda *a, **k: handled.append((a, k))))
     runtime._retire_terminal_background_source(store, {"thread_id": "thread", "task_id": "root", "wake_signal": {
         "kind": "observation_fallback", "root_task_id": "root", "observation_ids": ["one", "foreign"]}})
-    assert handled == [(("thread", ["one"]), {})]
+    assert handled == [((["one"],), {"now": 123.0})]
 
 
 def test_real_claim_uses_fresh_clock_not_tick_snapshot(monkeypatch):

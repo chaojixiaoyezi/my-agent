@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import replace
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -37,6 +37,7 @@ def learning_sources(context, *, mode="autonomous", enabled=True):
         ),
         _source_cursors={},
     )
+    discovery._managed_canonical_root = MethodType(CoordinatorBackgroundRequests._managed_canonical_root, discovery)
     target = SimpleNamespace(
         identity=OwnerIdentity.local_main(), home_dir=context.home.owner_home_dir
     )

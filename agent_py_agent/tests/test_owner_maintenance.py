@@ -525,6 +525,8 @@ def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monke
         control=types.SimpleNamespace(home_root=home.root, config=config),
         _source_cursors={},
     )
+    discovery._managed_canonical_root = types.MethodType(
+        discovery_module.CoordinatorBackgroundRequests._managed_canonical_root, discovery)
     target = types.SimpleNamespace(identity=OwnerIdentity.local_main(), home_dir=home.owner_home_dir)
     for day in range(3):
         clock[0] = 3_000_000_000.0 + day * (86400 + 60)

@@ -1,7 +1,7 @@
 """待审核候选保留原资格；只有实际工作才能触发新策展运输和运行。"""
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -57,6 +57,7 @@ def _pending_candidate(service, status):
 def _curator_sources(root, owner, home):
     discovery = SimpleNamespace(control=SimpleNamespace(home_root=root, config=AgentConfig(
         owner_maintenance_scan_interval_seconds=0, memory_curator_enabled=True, enable_self_learning=False, timezone='UTC')))
+    discovery._managed_canonical_root = MethodType(CoordinatorBackgroundRequests._managed_canonical_root, discovery)
     return [ref for ref in CoordinatorBackgroundRequests._owner_sources(
         discovery, SimpleNamespace(identity=owner, home_dir=home)) if ref['kind'] == 'curator']
 

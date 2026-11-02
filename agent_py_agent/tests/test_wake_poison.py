@@ -104,7 +104,7 @@ def _sqlite_error(code: int | None) -> sqlite3.OperationalError:
 
 # 合同清单写死在测试里：被测集合少一项或多一项都要让测试变红。
 EXPECTED_WAITS = ("turn_interrupted", "terminal_task_link", "authority_recovery_required",
-                  "wake_source_not_pending", "wake_source_changed")
+                  "wake_source_not_pending", "wake_source_changed", "im_subagent_capacity")
 
 
 class TestAdmission:
