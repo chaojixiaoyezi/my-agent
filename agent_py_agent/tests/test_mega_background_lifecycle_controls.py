@@ -479,3 +479,38 @@ def test_terminal_ancestor_keeps_its_unconfirmed_turn_until_stop_confirmation(bu
     assert service.cancel_task(root, actor=actor, include_descendants=True) == {
         "operation_id": root, "state": "completed", "outstanding_refs": []}
     assert stopped == ["original-turn", "original-turn"]
+
+
+def test_ancestor_cancel_preserves_descendants_previous_root_responsibility(business_host, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import session_task_stop
+
+    service, host, actor = _service(business_host)
+    root, child, leaf = chain(service, actor)
+    store = host.conversation_store
+    for identifier, turn in ((child, "child-turn"), (leaf, "leaf-turn")):
+        store.session_tasks.advance(identifier, SessionTaskUpdate(status="accepted", conversation_request_id=turn))
+    confirmed, stopped = set(), []
+    def stop(host, *, target_thread, turn_id):
+        stopped.append(turn_id)
+        return session_task_stop.SessionTaskStopOutcome(turn_id in confirmed, "observed stop", turn_id)
+    monkeypatch.setattr(session_task_stop, "stop_session_task_turn", stop)
+    ready_index(store)
+    pending = service.cancel_task(child, actor=actor, include_descendants=True)
+    assert pending == {"operation_id": child, "state": "pending", "outstanding_refs": ["child-turn", "leaf-turn"]}
+    confirmed.add("child-turn")
+    assert service.cancel_task(root, actor=actor, include_descendants=True) == {
+        "operation_id": root, "state": "pending", "outstanding_refs": ["leaf-turn"]}
+    control = store.session_tasks.require(child).metadata["cancellation_control"]
+    assert control["outstanding_refs"] == ["leaf-turn"]
+    assert control["descendant_refs"] == {leaf: ["leaf-turn"]}
+    before_retry = list(stopped)
+    assert service.cancel_task(child, actor=actor, include_descendants=False) == {
+        "operation_id": child, "state": "pending", "outstanding_refs": ["leaf-turn"]}
+    assert stopped == before_retry
+    assert store.session_tasks.require(leaf).metadata["cancellation_control"]["outstanding_refs"] == ["leaf-turn"]
+    confirmed.add("leaf-turn")
+    assert service.cancel_task(child, actor=actor, include_descendants=True) == {
+        "operation_id": child, "state": "completed", "outstanding_refs": []}
+    assert service.cancel_task(root, actor=actor, include_descendants=True) == {
+        "operation_id": root, "state": "completed", "outstanding_refs": []}
+    assert [store.session_tasks.require(identifier).status for identifier in (root, child, leaf)] == ["cancelled"] * 3
