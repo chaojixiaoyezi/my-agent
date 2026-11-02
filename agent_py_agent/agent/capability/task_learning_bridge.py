@@ -1,15 +1,15 @@
 """宿主canonical完成证明到原学习FIFO的消费端；DTO构造和聊天JSON均不认证。
 
-W2宿主提供load_task_learning_evidence(completion)，须从原claim和准确完成记录读回，
+session_tasks.load_task_learning_evidence从原claim证明和准确完成记录读回，
 失配/未完成/取消返回None。W5只能准备context；此处不调用学习模型、不保存回复。
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 
 from ..conversation.business_contracts import BusinessExecutionContext, TrustedTaskCompletion
-from .skill_learning_request import _learning_request_material
 from .skill_learning_store import SkillLearningStore, request_key
 
 
@@ -18,10 +18,14 @@ class TaskLearningEvidence:
     completion: TrustedTaskCompletion
     context: object
     business_context: BusinessExecutionContext | None = None
+    request_material: dict = field(kw_only=True)
 
 
+# LLM: 消费原 canonical reader 的身份和材料，复制后才补队列出处；不依赖活 finalize context。
+# 函数用途: 将精确已完成任务的有界材料放入原学习 FIFO，不同步调用学习模型。
 def enqueue_completed_task_learning(*, completion: TrustedTaskCompletion, host: object) -> dict:
     """只消费宿主重新读回的精确完成事实；保存回复和学习准入各守原开关。"""
+    from ..conversation.session_tasks import load_task_learning_evidence
     from .skill_learning import SkillLearningService
 
     if not isinstance(completion, TrustedTaskCompletion):
@@ -35,10 +39,7 @@ def enqueue_completed_task_learning(*, completion: TrustedTaskCompletion, host: 
     if (not owner or owner != completion.owner_id or service.runtime.owner_id != owner
             or service.store.directory != SkillLearningStore.for_home(home).directory):
         return {'status': 'conflict', 'reason': 'owner_binding_mismatch'}
-    loader = getattr(host, 'load_task_learning_evidence', None)
-    if not callable(loader):
-        return {'status': 'ineligible', 'reason': 'canonical_completion_reader_unbound'}
-    evidence = loader(completion)
+    evidence = load_task_learning_evidence(host, completion)
     if not isinstance(evidence, TaskLearningEvidence) or evidence.completion != completion:
         return {'status': 'ineligible', 'reason': 'canonical_completion_unconfirmed'}
     ctx, business = evidence.context, evidence.business_context
@@ -58,9 +59,7 @@ def enqueue_completed_task_learning(*, completion: TrustedTaskCompletion, host: 
             or getattr(ctx, 'tool_rounds', None) != completion.tool_rounds
             or completion.tool_rounds < max(1, service.settings.min_tool_rounds)):
         return {'status': 'ineligible', 'reason': 'background_source_or_rounds_ineligible'}
-    request = _learning_request_material(ctx)
-    if request is None:
-        return {'status': 'ineligible', 'reason': 'trajectory_required'}
+    request = deepcopy(evidence.request_material)
     identity = [owner, completion.task_id, completion.run_id, completion.attempt_id, completion.completion_ref]
     request.update(request_key=request_key(json.dumps(identity, ensure_ascii=False, separators=(',', ':'))),
                    owner_id=owner, task_id=completion.task_id, root_task_id=completion.task_id,
