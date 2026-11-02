@@ -281,6 +281,8 @@ class BackgroundAgentService:
                               expected_revision=expected_revision, idempotency_key=idempotency_key)
         return {"agent": _agent_view(thread), "revision": background_identity(thread).identity_revision}
 
+    # LLM: 原准入锁、Owner/空间和身份CAS保持；动作产生的索引修订须重新完整核对，不能复用旧分页前缀。
+    # 函数用途: 控制身份生命周期，按完整任务责任恢复唤醒或取消，并收口实际可完成的退休。
     def transition(self, agent_id, action, *, actor, expected_revision, idempotency_key,
                    disposition="drain", handoff_agent_id=None):
         changes = {"agent_id": agent_id}
@@ -302,6 +304,11 @@ class BackgroundAgentService:
                     self.cancel_task(task.task_id, actor=actor, include_descendants=True)
             thread = reconcile_background_identity(self.host, agent_id)
             refs, _ = identity_outstanding(self.host, thread)
+            if not refs and background_identity(thread).identity_state == "retiring":
+                # 取消后的首个索引回填可能partial；上面的新完整遍历追平后，再走原锁内CAS，不把新空账配给旧身份。
+                thread = reconcile_background_identity(self.host, agent_id)
+                if background_identity(thread).identity_state == "retiring":
+                    refs, _ = identity_outstanding(self.host, thread)
             return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
         if action in {"resume", "restore"}:
             # 重新开放后只重发表原任务的唤醒；不在控制请求里运行模型。
