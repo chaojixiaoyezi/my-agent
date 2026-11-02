@@ -313,6 +313,8 @@ class BackgroundAgentService:
             if disposition == "cancel_tasks":
                 for task in tasks:
                     self.cancel_task(task.task_id, actor=actor, include_descendants=True)
+            elif disposition == "drain":
+                self._republish_pending_work(thread, tasks, actor=actor)
             thread = reconcile_background_identity(self.host, agent_id)
             refs, _ = identity_outstanding(self.host, thread)
             if not refs and background_identity(thread).identity_state == "retiring":
@@ -322,24 +324,60 @@ class BackgroundAgentService:
                     refs, _ = identity_outstanding(self.host, thread)
             return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
         if action in {"resume", "restore"}:
-            # 重新开放后只重发表原任务的唤醒；不在控制请求里运行模型。
-            from .session_task_dispatch import _maybe_wake
-            for task in tasks:
-                _maybe_wake(self.store, thread, task.sender_thread_id, task.task_id,
-                            generation=str(background_identity(thread).identity_revision))
-            from .session_messaging import SESSION_MESSAGE_KEY_FIELD, SESSION_MESSAGE_ORIGIN_KIND
+            self._republish_pending_work(thread, tasks, actor=actor)
+        return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
 
-            inputs, errors = self.store.guidance.pending_report("thread", agent_id, limit=100)
+    # LLM: 恢复/退休drain共用原输入与代次唤醒；锁内重核Owner及原回执，只重发表调度责任，不追加正文或执行模型。
+    # 函数用途: 为已受理的任务和补充消息恢复唯一原唤醒，允许暂停身份退休时排空旧工作。
+    def _republish_pending_work(self, thread, tasks, *, actor):
+        from .session_messaging import (
+            SESSION_MESSAGE_KEY_FIELD,
+            SESSION_MESSAGE_ORIGIN_KIND,
+            SESSION_TASK_ORIGIN_KIND,
+        )
+
+        with background_identity_transition(self.store, thread.thread_id):
+            thread = self._thread(thread.thread_id, actor)
+            if not background_identity_allows_work(thread, existing=True) or thread.status != "active":
+                return
+            generation = str(background_identity(thread).identity_revision)
+            for task in tasks:
+                current = self.store.session_tasks.require(task.task_id)
+                fields = ("task_id", "sender_thread_id", "target_thread_id", "body_dedupe_key", "body_guidance_id")
+                if any(getattr(current, field) != getattr(task, field) for field in fields):
+                    raise ValueError("SESSION_TASK_SCOPE_MISMATCH")
+                if current.target_thread_id != thread.thread_id or self.store.threads.require(current.sender_thread_id).owner_id != actor.owner_id:
+                    raise PermissionError("OWNER_MISMATCH")
+                if current.status in SESSION_TASK_TERMINAL_STATUSES or not current.body_guidance_id:
+                    continue
+                self.store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "session_task", "urgency": "normal",
+                    "dedupe_key": f"session_task:{current.task_id}:{generation}", "retain_handled": True,
+                    "summary": "恢复原任务", "metadata": {"origin_kind": SESSION_TASK_ORIGIN_KIND,
+                        "origin_thread_id": current.sender_thread_id, "session_task_id": current.task_id}})
+            # pending_report本来已扫描原队列；limit=0防止只发表最后100条后声称完整。
+            inputs, errors = self.store.guidance.pending_report("thread", thread.thread_id, limit=0)
             if errors:
                 raise ValueError("GUIDANCE_UNREADABLE")
             for entry in inputs:
                 metadata = entry.metadata or {}
                 if metadata.get("origin_kind") != SESSION_MESSAGE_ORIGIN_KIND or not metadata.get(SESSION_MESSAGE_KEY_FIELD):
                     continue
-                self.store.wakes.raise_signal({"thread_id": agent_id, "reason": "session_message", "urgency": "normal",
-                    "dedupe_key": str(metadata[SESSION_MESSAGE_KEY_FIELD]) + ":resume:" + str(background_identity(thread).identity_revision),
-                    "retain_handled": True, "summary": "恢复原补充消息", "metadata": dict(metadata)})
-        return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
+                key = metadata[SESSION_MESSAGE_KEY_FIELD]
+                receipt = self.store.guidance.receipt(key)
+                if receipt is None or receipt.entry.guidance_id != entry.guidance_id:
+                    raise ValueError("GUIDANCE_UNREADABLE")
+                entry, metadata = receipt.entry, receipt.entry.metadata or {}
+                if (receipt.dedupe_key != key or metadata.get(SESSION_MESSAGE_KEY_FIELD) != key
+                        or metadata.get("origin_kind") != SESSION_MESSAGE_ORIGIN_KIND
+                        or entry.target_type != "thread" or entry.target_id != thread.thread_id
+                        or entry.sender != metadata.get("origin_thread_id")
+                        or self.store.threads.require(entry.sender).owner_id != actor.owner_id):
+                    raise PermissionError("SESSION_MESSAGE_SCOPE_MISMATCH")
+                if receipt.status != "pending":
+                    continue
+                self.store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "session_message", "urgency": "normal",
+                    "dedupe_key": str(key) + ":resume:" + generation, "retain_handled": True,
+                    "summary": "恢复原补充消息", "metadata": dict(metadata)})
 
     def get_model(self, agent_id, *, actor):
         thread = self._thread(agent_id, actor)

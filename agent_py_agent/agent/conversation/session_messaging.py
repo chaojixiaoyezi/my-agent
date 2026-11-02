@@ -242,7 +242,8 @@ def session_task_tool_visible(home_paths: object, config: object) -> bool:
 # 函数用途: 保存取消动作必须逐次重核的轻量绑定。
 def _cancellation_binding(task):
     return (task.task_id, task.sender_thread_id, task.target_thread_id, task.origin_task_id,
-            task.metadata.get("business_context"))
+            task.metadata.get("business_context"), task.body_dedupe_key, task.body_guidance_id,
+            task.conversation_request_id, task.task_run_id)
 
 
 # LLM: 每个选中任务都读当前canonical并核原绑定、Owner和业务空间；不借祖先权限扩大取消范围。
@@ -345,8 +346,72 @@ def _cancellation_closure(host, current, root_context):
     return selected
 
 
-# LLM: queued只撤原guidance；终态未确认回合仍核准确停止。作为后代时只更新自身责任，不覆盖它原根scope。
-# 函数用途: 对一个重新核验过的任务执行原取消路径，返回尚未确认的本任务引用。
+# LLM: 原任务锁内重核正文；pending走原CAS。仅整任务已取消且业务原执行确认退出时按单回执协议收原预留，不能批量结算回合。
+# 函数用途: 结清准确任务的未消费正文，失败终态、已提交或未知预约继续保留责任。
+def _settle_cancelled_task_body(host, binding, root_context, *, reject_pending=False, confirmed_turn_id=""):
+    from ..gateway_parts.io import update_json_file_atomic
+    from ..runtime_errors import DataCorruptionError
+    from .session_tasks import SessionTask
+    from .store_guidance_recovery import TurnEndSettlement
+
+    store, settled = host.conversation_store, False
+
+    def inspect(payload):
+        nonlocal settled
+        current = _validate_cancellation_task(host, SessionTask.from_dict(payload), binding, root_context)
+        if not current.body_dedupe_key:
+            settled = not current.body_guidance_id
+            return payload
+        receipt = store.guidance.receipt(current.body_dedupe_key)
+        if receipt is None:
+            # 原创建ACK丢失且从未发表正文/执行可以取消；已发表的回执丢失仍是未结义务。
+            settled = not (current.body_guidance_id or current.conversation_request_id or current.task_run_id)
+            return payload
+        entry, metadata = receipt.entry, receipt.entry.metadata or {}
+        if (receipt.dedupe_key != current.body_dedupe_key
+                or entry.guidance_id != current.body_guidance_id
+                or entry.target_type != "thread" or entry.target_id != current.target_thread_id
+                or entry.sender != current.sender_thread_id
+                or metadata.get("dedupe_key") != current.body_dedupe_key
+                or metadata.get("origin_kind") != SESSION_TASK_ORIGIN_KIND
+                or metadata.get("origin_thread_id") != current.sender_thread_id
+                or metadata.get("session_task_id") != current.task_id
+                or metadata.get(SESSION_TASK_STATUS_FIELD)
+                or metadata.get("expected_turn_id", "") not in ("", current.conversation_request_id)):
+            return payload
+        if receipt.status == "pending" and reject_pending:
+            # 原回执锁中CAS；竞争中已reserved/submitted则返回原状态，不能抢结。
+            receipt = store.guidance.mark_status(current.body_dedupe_key, "rejected")
+        elif (receipt.status == "reserved" and reject_pending and current.status == "cancelled"
+                and current.metadata.get("business_context") is not None
+                and confirmed_turn_id and confirmed_turn_id == current.conversation_request_id
+                and metadata.get("expected_turn_id") == confirmed_turn_id):
+            # 普通渠道的控制受理不证明退出；这里只接业务停止回执。先修原提交/确认批次，不能拒绝半写的已提交正文。
+            with store.guidance.ledger.turn_guard(confirmed_turn_id):
+                if (store.guidance.submissions.repair_locked(confirmed_turn_id)
+                        or store.guidance.acknowledgements.repair_locked(confirmed_turn_id)):
+                    return payload
+                outcomes = store.guidance.recovery._settle_turn_receipt(current.body_dedupe_key, confirmed_turn_id,
+                    TurnEndSettlement(reject_reserved=True, target=("thread", current.target_thread_id)))
+                if "errors" in outcomes:
+                    return payload
+                receipt = store.guidance.receipt(current.body_dedupe_key)
+        settled = receipt is not None and receipt.status in {"consumed", "rejected"}
+        return payload
+
+    try:
+        # 不再嵌套调用会重取同一路径锁的require；无变化的任务正文沿原skip-write保留。
+        update_json_file_atomic(store.session_tasks._path(binding[0]), inspect, require_existing=True)
+    except PermissionError:
+        raise
+    except (OSError, ValueError, KeyError, DataCorruptionError):
+        # 清理失败保留同一任务控制账；下次取消仍从原正文重试，不另投输入。
+        return False
+    return settled
+
+
+# LLM: 先耐久取消，再核原回合/独立执行退出；后代只更新自身责任，不覆盖原根scope。正文只收同一任务的准确回执。
+# 函数用途: 执行单条规范任务的取消及正文收尾，返回仍未确认的原引用。
 def _cancel_selected_session_task(host, binding, root_context, *, root=False):
     from ..gateway_parts.session_task_stop import stop_session_task_turn
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES, SessionTaskUpdate
@@ -360,40 +425,38 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False):
         if not held and not ({current.task_id, current.conversation_request_id} & set(prior)):
             link_closed = not control.get("execution_ref")
             if not link_closed:
-                # 先前execution-only完成不能跳过这次整任务取消；不以SessionTask终态代替原TaskLink收尾。
+                # execution-only的完成不能跳过整任务的原TaskLink收尾。
                 repo = getattr(getattr(host, "subagents", None), "runtime_db", None)
                 task_run = repo.get_task_run(current.task_run_id) if repo is not None and current.task_run_id else None
                 if task_run is not None:
                     link = store.tasks.load(task_run["task_id"])
                     link_closed = link is None or link.status in {"done", "failed", "cancelled", "completed"}
-            if link_closed:
+            if link_closed and _settle_cancelled_task_body(host, binding, root_context):
                 return held
     if not root:
         _save_cancellation_control(host, binding, root_context, [current.conversation_request_id or current.task_id], own_only=True)
-    refs = []
-    receipt = store.guidance.receipt(current.body_dedupe_key) if current.body_dedupe_key else None
-    if current.status in {"queued", "cancelled"} and not current.conversation_request_id and receipt is not None:
-        if receipt.status == "pending":
-            receipt = store.guidance.mark_status(current.body_dedupe_key, "rejected")
-        if receipt.status != "rejected":
-            refs.append(current.task_id)
-    elif current.conversation_request_id:
+    if current.status not in SESSION_TASK_TERMINAL_STATUSES:
+        store.session_tasks.advance(current.task_id, SessionTaskUpdate(status="cancelled"))
+    refs, confirmed_turn_id = [], ""
+    if current.conversation_request_id:
         stopped = stop_session_task_turn(host, target_thread=store.threads.require(current.target_thread_id),
                                           turn_id=current.conversation_request_id,
                                           **({"canonical_task": current} if current.metadata.get("business_context") else {}))
         if not stopped.confirmed:
             refs.append(current.conversation_request_id)
-    elif (current.status in {"queued", "cancelled"} and not current.task_run_id
-          and not current.body_guidance_id and receipt is None):
-        # 尚未发表正文/执行的原创建ACK丢失：终态阻止后续准入，不捏造输入或拿别的claim当执行。
-        pass
-    else:
-        refs.append(current.task_id)
-    if current.status not in SESSION_TASK_TERMINAL_STATUSES:
-        store.session_tasks.advance(current.task_id, SessionTaskUpdate(status="cancelled"))
+        elif getattr(stopped, "request_id", "") == current.conversation_request_id:
+            confirmed_turn_id = current.conversation_request_id
     latest = store.session_tasks.require(current.task_id).metadata.get("cancellation_control", {})
-    if latest.get("execution_ref"):
-        refs.extend(latest.get("execution_outstanding_refs", latest.get("outstanding_refs", [])))
+    execution_refs = (latest.get("execution_outstanding_refs", latest.get("outstanding_refs", []))
+                      if latest.get("execution_ref") else [])
+    if (not current.conversation_request_id and not execution_refs
+            and (current.task_run_id or current.status not in {"queued", "cancelled", *SESSION_TASK_TERMINAL_STATUSES})):
+        refs.append(current.task_id)
+    # 原执行引用已经承担未明责任，不能再造一份task引用，也不能在该执行未结时拒绝正文。
+    refs.extend(execution_refs)
+    if not refs and not _settle_cancelled_task_body(host, binding, root_context, reject_pending=True,
+                                                  confirmed_turn_id=confirmed_turn_id):
+        refs.append(current.task_id)
     if not root:
         refs = _save_cancellation_control(host, binding, root_context, refs, own_only=True)
     return refs
