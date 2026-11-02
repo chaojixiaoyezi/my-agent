@@ -1119,6 +1119,7 @@ def _r3_owner_store(tmp_path, layout):
 def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, monkeypatch, layout, transition):
     from types import SimpleNamespace
 
+    from agent_py_agent.agent.conversation import session_pair_rate
     from agent_py_agent.agent.user_space import owner_maintenance, owner_quota
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
@@ -1127,6 +1128,7 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     clock = SimpleNamespace(monotonic=lambda: 0.0, time=time.time, sleep=time.sleep)
     monkeypatch.setattr(owner_maintenance, "time", clock)
     monkeypatch.setattr(owner_quota, "time", clock)
+    monkeypatch.setattr(session_pair_rate, "time", clock)
     home, store = _r3_owner_store(tmp_path, layout)
     options = {"include_global_indexes": False}
     if transition:

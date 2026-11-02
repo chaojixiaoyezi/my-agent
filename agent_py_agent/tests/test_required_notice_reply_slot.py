@@ -228,7 +228,7 @@ def test_consumer_rechecks_canonical_after_finalizer_projection(tmp_path, monkey
 
 
 @pytest.mark.parametrize('change', [
-    {'schema_version': 'bad'}, {'task_id': 'other-task'}, {'reason': 'other-reason'}, {'external_sent': False},
+    {'schema_version': 'bad'}, {'task_id': 'other-task'}, {'reason': 'other-reason'},
 ])
 def test_invalid_frozen_receipt_keeps_original_nonquota_closeout(change):
     from types import SimpleNamespace
@@ -247,6 +247,27 @@ def test_invalid_frozen_receipt_keeps_original_nonquota_closeout(change):
     _handle_nonquota_wake_error(scheduler, signal, lifecycle_reason='scheduled_job_due',
         claim=object(), error=OSError('synthetic canonical append failure'))
     assert effects == ['finished', 'handled']
+
+
+# W2 计划 #10：缓存的待交付不再只看 external_sent；合法冻结交付即使尚未外发，
+# 非瞬态错误也只释放 claim、保留原 wake 供恢复，不 finish、不 mark_handled。
+def test_valid_unsent_frozen_delivery_keeps_wake_for_recovery():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _handle_nonquota_wake_error
+
+    frozen = {'schema_version': 'wake-owner-delivery.v2', 'reason': 'scheduled_job_due',
+        'task_id': 'task-1', 'content': '原冻结正文', 'external_sent': False}
+    signal = SimpleNamespace(wake_signal_id='wake-1', reason='scheduled_job_due', root_task_id='task-1',
+        metadata={'owner_delivery': frozen})
+    effects = []
+    scheduler = SimpleNamespace(store=SimpleNamespace(wakes=SimpleNamespace(
+        pending_one=lambda _: signal, mark_handled=lambda *a, **k: effects.append('handled'))),
+        scheduler_service=SimpleNamespace(release=lambda *a, **k: effects.append('released'),
+            finish=lambda *a, **k: effects.append('finished') or {'status': 'failed'}))
+    _handle_nonquota_wake_error(scheduler, signal, lifecycle_reason='scheduled_job_due',
+        claim=object(), error=OSError('synthetic canonical append failure'))
+    assert effects == ['released']
 
 
 @pytest.mark.parametrize('notice', [True, False], ids=['required', 'normal'])

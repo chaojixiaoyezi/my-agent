@@ -151,7 +151,8 @@ def test_background_learning_is_explicit_and_global_reservations_are_atomic(tmp_
     from agent_py_agent.agent.capability.skill_learning_request import build_learning_request
     from agent_py_agent.tests.test_skill_learning import _ctx
     assert build_learning_request(_ctx(source='background_main_agent'),3) is None
-    assert build_learning_request(_ctx(source='background_main_agent'),3,include_background=True)
+    # W6 #25：后台开关不是来源证明，后台主任务只经 task_learning_bridge 的可信完成入队。
+    assert build_learning_request(_ctx(source='background_main_agent'),3,include_background=True) is None
     with ThreadPoolExecutor(max_workers=8) as pool:
         decisions = list(pool.map(lambda _:reserve_deployment_learning(tmp_path,3),range(20)))
     assert sum(decisions)==3

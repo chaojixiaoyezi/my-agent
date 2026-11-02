@@ -285,7 +285,8 @@ def test_accepted_advance_busy_and_report_read_busy_never_ack_or_hide_failure(
         thread_id=task.target_thread_id, host_session_task_id=task.task_id
     )
     execution = SimpleNamespace(
-        response="工作已结束", runtime_status="ok", error=None, delivery_artifacts=()
+        response="工作已结束", runtime_status="ok", error=None, delivery_artifacts=(),
+        execution_identity=None,
     )
     advance = agent.conversation_store.session_tasks.advance
     with monkeypatch.context() as patch:

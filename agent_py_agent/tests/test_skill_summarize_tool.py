@@ -160,7 +160,9 @@ def test_queue_full_releases_the_claim_and_an_ineligible_finish_is_logged(tmp_pa
     background.source = "background_main_agent"
     assert service.enqueue_from_finalize(background) == "ineligible"
     events = [(item["event"], item["code"]) for item in service.store.events(limit=0)]
-    assert ("dropped", "SKILL_LEARNING_USER_REQUEST_INELIGIBLE") in events, "标记取走了却没入队，账上要看得到"
+    # W6：后台收尾只走可信完成桥，不取用户标记；标记留给同任务的普通收尾按用户要求入队。
+    assert ("dropped", "SKILL_LEARNING_USER_REQUEST_INELIGIBLE") not in events
+    assert service.enqueue_from_finalize(_ctx("run-7", 1, task_id="task-6")) == "queued"
 
 
 def test_a_failed_enqueue_releases_the_claim_and_keeps_the_work_available(tmp_path, monkeypatch):
