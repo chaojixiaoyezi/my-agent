@@ -373,3 +373,319 @@ def test_task_detail_preserves_nullable_canonical_workflow_and_closed_dto(tmp_pa
         with pytest.raises(HostAPIError):
             spec.validate_result(invalid)
     assert case.store.session_tasks.require(case.task.task_id).metadata.get('workflow_ref') == workflow
+
+
+def close_observed_task_run(runtime, runs, *, explicit=False):
+    """用原结算入口关闭精确树，不手工拼造关闭事件。"""
+    for run in runs:
+        assert runtime.settle_agent_run(agent_run_id=run['agent_run_id'], attempt_id=run['attempt_id'],
+            status='done')['settled'] is True
+    root = runs[0]
+    settle = runtime.settle_task_run_terminal if explicit else runtime.settle_task_run_if_agent_tree_terminal
+    assert settle(task_run_id=root['task_run_id'], task_id=root['task_id'],
+        reason='private-close-reason', **({'status': 'done'} if explicit else {}))['settled'] is True
+    with runtime._runtime_connection() as conn:
+        return dict(conn.execute("SELECT * FROM runtime_events WHERE event_type='task_run.closed' "
+            'AND task_run_id=?', (root['task_run_id'],)).fetchone())
+
+
+def test_run_event_with_empty_optional_attempt_does_not_wait_for_a_new_attempt(tmp_path):
+    case = fixture(tmp_path)
+    event = case.runtime.append_event(event_type='agent_run.progress', attempt_id='', agent_run_id=case.root['agent_run_id'],
+        task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    assert page['coverage'] == 'complete'
+    [view] = [row for row in page['events'] if row['event_id'] == event['event_id']]
+    assert view['attempt_id'] is None and view['run_id'] == 'root-run'
+    assert view['node'] == {'kind': 'background_main', 'id': 'root-run'}
+    assert view['payload']['thread_id'] == 'background'
+
+
+def event_position(case, cursor, filters):
+    scope = case.service.scope_digest('events.list', {'filter': filters}, case.actor)
+    return case.service.cursor_position(cursor, scope)['after']
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_task_run_close_is_delivered_and_cursor_reaches_the_next_run(tmp_path, explicit):
+    case = fixture(tmp_path)
+    filters = {'space_id': 'space-a'}
+    first = case.service.query('events.list', {'filter': filters}, actor=case.actor)
+    closed = close_observed_task_run(case.runtime, [case.root, case.child], explicit=explicit)
+    later = case.runtime.record_run_creation(owner_id=case.owner, run_id='later-run', thread_id='background',
+        task_run_metadata={'business_context': case.task.metadata['business_context'], 'session_task_ref': case.task.task_id})
+    before = case.runtime.db_path.read_bytes()
+    page = case.service.query('events.list', {'filter': filters, 'cursor': first['next_cursor']}, actor=case.actor)
+    by_id = {row['event_id']: row for row in page['events']}
+    assert closed['event_id'] in by_id, page
+    close = by_id[closed['event_id']]
+    assert close['event_type'] == 'task_run.closed'
+    assert close['node'] is None and close['run_id'] is None and close['attempt_id'] is None
+    assert close['task_id'] == case.task.task_id and close['space_id'] == 'space-a'
+    assert close['payload']['status'] == 'done'
+    assert close['payload']['thread_id'] == 'background'
+    assert 'private-close-reason' not in str(page)
+    assert any(row['attempt_id'] == later['attempt_id'] for row in page['events'])
+    positions = [event_position(case, row['cursor'], filters) for row in page['events']]
+    assert positions == sorted(set(positions))
+    assert event_position(case, first['next_cursor'], filters) < positions[0]
+    resumed = case.service.query('events.list', {'filter': filters, 'cursor': close['cursor']}, actor=case.actor)
+    assert [row['event_id'] for row in resumed['events']] == [
+        row['event_id'] for row in page['events'] if event_position(case, row['cursor'], filters) > closed['seq']]
+    end = case.service.query('events.list', {'filter': filters, 'cursor': page['next_cursor']}, actor=case.actor)
+    assert end['events'] == [] and end['coverage'] == 'complete'
+    assert event_position(case, end['next_cursor'], filters) == positions[-1]
+    assert case.runtime.db_path.read_bytes() == before
+
+
+@pytest.mark.parametrize('extra,visible', [({}, True), ({'agent_id': 'background'}, True),
+    ({'project_ref': 'other-project'}, False), ({'space_id': 'other-space'}, False),
+    ({'task_id': 'other-task'}, False), ({'run_id': 'root-run'}, False),
+    ({'attempt_id': 'not-an-attempt'}, False), ({'agent_id': 'other-thread'}, False)])
+def test_task_run_close_intersects_every_requested_filter(tmp_path, extra, visible):
+    case = fixture(tmp_path)
+    closed = close_observed_task_run(case.runtime, [case.root, case.child])
+    filters = {'space_id': 'space-a', **extra}
+    page = case.service.query('events.list', {'filter': filters}, actor=case.actor)
+    assert (closed['event_id'] in {row['event_id'] for row in page['events']}) is visible
+    assert page['coverage'] == 'complete'
+    assert event_position(case, page['next_cursor'], filters) == closed['seq']
+
+
+@pytest.mark.parametrize('denied', ['task_id', 'thread_id'])
+def test_task_run_close_rechecks_live_task_and_thread_grants(tmp_path, denied):
+    case = fixture(tmp_path)
+    closed = close_observed_task_run(case.runtime, [case.root, case.child])
+    value = case.task.task_id if denied == 'task_id' else 'background'
+    actor = BusinessActor(case.owner, 'restricted', case.service, lambda _a, facts: facts.get(denied) != value)
+    page = case.service.query('events.list', {'filter': {}}, actor=actor)
+    assert page['events'] == [] and page['coverage'] == 'complete'
+    scope = case.service.scope_digest('events.list', {'filter': {}}, actor)
+    assert case.service.cursor_position(page['next_cursor'], scope)['after'] == closed['seq']
+
+
+def test_foreign_owner_lifecycle_rows_are_processed_without_disclosure(tmp_path):
+    case = fixture(tmp_path)
+    foreign = case.runtime.record_run_creation(owner_id='other/owner', run_id='foreign', thread_id='private-thread')
+    closed = close_observed_task_run(case.runtime, [foreign])
+    page = case.service.query('events.list', {'filter': {}, 'limit': 100}, actor=case.actor)
+    assert page['coverage'] == 'complete'
+    assert event_position(case, page['next_cursor'], {}) == closed['seq']
+    assert all(row['run_id'] != 'foreign' for row in page['events'])
+    assert closed['event_id'] not in {row['event_id'] for row in page['events']}
+    assert 'private-thread' not in str(page)
+
+
+@pytest.mark.parametrize('corruption', ['missing-task-run', 'cross-task-run', 'missing-agent', 'missing-attempt'])
+def test_real_missing_or_conflicting_references_remain_partial(tmp_path, corruption):
+    case = fixture(tmp_path)
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    later = case.runtime.record_run_creation(owner_id=case.owner, run_id='another-run', thread_id='background')
+    # 在规范表里构造坏引用，不修改观察实现或用替身伪造完整结果。
+    fields = {'attempt_id': '', 'agent_run_id': '', 'task_run_id': 'missing-task-run'}
+    if corruption == 'cross-task-run':
+        fields.update(agent_run_id=case.root['agent_run_id'], task_run_id=later['task_run_id'])
+    elif corruption == 'missing-agent':
+        fields.update(agent_run_id='missing-agent', task_run_id=case.root['task_run_id'])
+    elif corruption == 'missing-attempt':
+        fields.update(agent_run_id=case.root['agent_run_id'], attempt_id='missing-attempt', task_run_id=case.root['task_run_id'])
+    bad = case.runtime.append_event(event_type='lifecycle.progress', **fields)
+    valid = case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['coverage'] == 'partial'
+    assert not {bad['event_id'], valid['event_id']} & {row['event_id'] for row in page['events']}
+    assert event_position(case, page['next_cursor'], {}) == bad['seq'] - 1
+    again = case.service.query('events.list', {'filter': {}, 'cursor': page['next_cursor']}, actor=case.actor)
+    assert again['events'] == [] and again['coverage'] == 'partial'
+    assert event_position(case, again['next_cursor'], {}) == bad['seq'] - 1
+
+
+def test_invalid_frozen_business_linkage_does_not_become_complete(tmp_path):
+    import json
+
+    case = fixture(tmp_path)
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    closed = close_observed_task_run(case.runtime, [case.root, case.child])
+    with case.runtime.transaction() as conn:
+        metadata = {'business_context': case.task.metadata['business_context'], 'session_task_ref': 'not-this-task'}
+        conn.execute('UPDATE task_runs SET metadata_json=? WHERE task_run_id=?',
+            (json.dumps(metadata), case.root['task_run_id']))
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['coverage'] == 'partial'
+    assert closed['event_id'] not in {row['event_id'] for row in page['events']}
+    assert event_position(case, page['next_cursor'], {}) < closed['seq']
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_close_event_keeps_its_terminal_fact_after_same_task_run_reopens(tmp_path, explicit):
+    case = fixture(tmp_path)
+    closed = close_observed_task_run(case.runtime, [case.root, case.child], explicit=explicit)
+    before = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    [original] = [row for row in before['events'] if row['event_id'] == closed['event_id']]
+    assert original['payload']['revision'] == int(closed['created_at'] * 1000000)
+    attempt = case.runtime.create_attempt(case.root['agent_run_id'])
+    try:
+        page = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+        [close] = [row for row in page['events'] if row['event_id'] == closed['event_id']]
+        assert close['payload']['status'] == 'done'
+        assert close['payload'] == original['payload']
+        assert close['node'] is None and close['run_id'] is None and close['attempt_id'] is None
+        assert any(row['event_type'] == 'task_run.reopened' and row['attempt_id'] == attempt['attempt_id']
+            for row in page['events'])
+    finally:
+        case.runtime.settle_agent_run(agent_run_id=case.root['agent_run_id'],
+            attempt_id=attempt['attempt_id'], status='done')
+
+
+@pytest.mark.parametrize('replacement', [False, True])
+def test_event_cursor_expires_after_retention_or_source_replacement(tmp_path, replacement):
+    case = fixture(tmp_path)
+    page = case.service.query('events.list', {'filter': {}, 'limit': 1}, actor=case.actor)
+    if replacement:
+        old = case.runtime.db_path.with_suffix('.old')
+        case.runtime.db_path.rename(old)
+        case.runtime.db_path.write_bytes(old.read_bytes())
+    else:
+        close_observed_task_run(case.runtime, [case.root, case.child])
+        with case.runtime.transaction() as conn:
+            conn.execute('DELETE FROM runtime_events WHERE seq<=4')
+    with pytest.raises(BusinessError, match='CURSOR_EXPIRED'):
+        case.service.query('events.list', {'filter': {}, 'cursor': page['next_cursor']}, actor=case.actor)
+
+
+def test_existing_attempt_from_another_same_named_agent_stays_partial(tmp_path):
+    case = fixture(tmp_path)
+    other = case.runtime.record_run_creation(owner_id=case.owner, run_id='root-run', thread_id='background',
+        task_run_metadata={'business_context': case.task.metadata['business_context'], 'session_task_ref': case.task.task_id})
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    bad = case.runtime.append_event(event_type='attempt.progress', attempt_id=other['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['events'] == [] and page['coverage'] == 'partial'
+    assert event_position(case, page['next_cursor'], {}) == bad['seq'] - 1
+
+
+@pytest.mark.parametrize('conflicting', [False, True])
+def test_close_branch_checks_nonempty_session_task_run_binding(tmp_path, conflicting):
+    case = fixture(tmp_path)
+    other = case.runtime.record_run_creation(owner_id=case.owner, run_id='binding-run', thread_id='background',
+        task_run_metadata={'business_context': case.task.metadata['business_context'], 'session_task_ref': case.task.task_id})
+    case.store.session_tasks.bind_execution(case.task.task_id, target_thread_id='background',
+        task_run_id=case.root['task_run_id'] if conflicting else other['task_run_id'])
+    assert case.runtime.settle_agent_run(agent_run_id=other['agent_run_id'],
+        attempt_id=other['attempt_id'], status='done')['settled']
+    before = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    assert case.runtime.settle_task_run_if_agent_tree_terminal(task_run_id=other['task_run_id'])['settled']
+    page = case.service.query('events.list', {'filter': {}, 'cursor': before['next_cursor']}, actor=case.actor)
+    if conflicting:
+        assert page['events'] == [] and page['coverage'] == 'partial'
+        assert event_position(case, page['next_cursor'], {}) == event_position(case, before['next_cursor'], {})
+    else:
+        assert [row['event_type'] for row in page['events']] == ['task_run.closed']
+        assert page['coverage'] == 'complete'
+
+
+def test_foreign_owner_bad_reference_cannot_block_own_following_event(tmp_path):
+    case = fixture(tmp_path)
+    foreign_a = case.runtime.record_run_creation(owner_id='other/owner', run_id='foreign-a', thread_id='private-a')
+    foreign_b = case.runtime.record_run_creation(owner_id='other/owner', run_id='foreign-b', thread_id='private-b')
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    case.runtime.append_event(event_type='attempt.progress', attempt_id=foreign_a['attempt_id'],
+        agent_run_id=foreign_a['agent_run_id'], task_run_id=foreign_b['task_run_id'])
+    own = case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert [row['event_id'] for row in page['events']] == [own['event_id']]
+    assert page['coverage'] == 'complete'
+    assert event_position(case, page['next_cursor'], {}) == own['seq']
+    assert 'private-a' not in str(page) and 'private-b' not in str(page)
+
+
+@pytest.mark.parametrize('empty', [False, True])
+def test_zero_position_cursor_detects_retention_but_new_snapshot_can_start(tmp_path, empty):
+    case = fixture(tmp_path)
+    cursor = case.service.initial_event_cursor({}, actor=case.actor)
+    closed = close_observed_task_run(case.runtime, [case.root, case.child])
+    with case.runtime.transaction() as conn:
+        conn.execute('DELETE FROM runtime_events WHERE seq<=?', (closed['seq'] if empty else 4,))
+    with pytest.raises(BusinessError, match='CURSOR_EXPIRED'):
+        case.service.query('events.list', {'filter': {}, 'cursor': cursor}, actor=case.actor)
+    fresh = case.service.initial_event_cursor({}, actor=case.actor)
+    page = case.service.query('events.list', {'filter': {}, 'cursor': fresh}, actor=case.actor)
+    assert [row['event_type'] for row in page['events']] == ([] if empty else [
+        'agent_run.completed', 'agent_run.completed', 'task_run.closed'])
+    assert page['coverage'] == 'complete'
+    again = case.service.query('events.list', {'filter': {}, 'cursor': page['next_cursor']}, actor=case.actor)
+    assert again['events'] == [] and again['coverage'] == 'complete'
+    later = case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    resumed = case.service.query('events.list', {'filter': {}, 'cursor': again['next_cursor']}, actor=case.actor)
+    assert [row['event_id'] for row in resumed['events']] == [later['event_id']]
+    assert event_position(case, resumed['next_cursor'], {}) == later['seq']
+
+
+@pytest.mark.parametrize('payload', [{}, {'status': 'created'}, {'status': ['done']}, ['done']])
+def test_invalid_close_status_is_an_explicit_partial_gap(tmp_path, payload):
+    case = fixture(tmp_path)
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    bad = case.runtime.append_event(event_type='task_run.closed', attempt_id='', agent_run_id='',
+        task_run_id=case.root['task_run_id'], payload=payload)
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['events'] == [] and page['coverage'] == 'partial'
+    assert event_position(case, page['next_cursor'], {}) == bad['seq'] - 1
+
+
+def test_own_attempt_cannot_be_hidden_by_conflicting_foreign_records(tmp_path):
+    case = fixture(tmp_path)
+    foreign = case.runtime.record_run_creation(owner_id='other/owner', run_id='foreign', thread_id='private-thread')
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    bad = case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=foreign['agent_run_id'], task_run_id=foreign['task_run_id'])
+    case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['events'] == [] and page['coverage'] == 'partial'
+    assert event_position(case, page['next_cursor'], {}) == bad['seq'] - 1
+    assert 'private-thread' not in str(page)
+
+
+@pytest.mark.parametrize('late_owner', ['foreign', 'own'])
+def test_foreign_event_waits_for_nonempty_missing_attempt(tmp_path, late_owner):
+    case = fixture(tmp_path)
+    foreign = case.runtime.record_run_creation(owner_id='other/owner', run_id='foreign', thread_id='private-thread')
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    bad = case.runtime.append_event(event_type='attempt.progress', attempt_id='late-attempt',
+        agent_run_id=foreign['agent_run_id'], task_run_id=foreign['task_run_id'])
+    own = case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['events'] == [] and page['coverage'] == 'partial'
+    assert event_position(case, page['next_cursor'], {}) == bad['seq'] - 1
+    target = foreign if late_owner == 'foreign' else case.root
+    with case.runtime.transaction() as conn:
+        conn.execute('INSERT INTO agent_attempts(attempt_id,agent_run_id,attempt_generation,status,started_at) '
+            'VALUES (?,?,?,?,?)', ('late-attempt', target['agent_run_id'], 2, 'pending', 100))
+    resumed = case.service.query('events.list', {'filter': {}, 'cursor': page['next_cursor']}, actor=case.actor)
+    if late_owner == 'foreign':
+        assert [row['event_id'] for row in resumed['events']] == [own['event_id']]
+        assert resumed['coverage'] == 'complete'
+        assert event_position(case, resumed['next_cursor'], {}) == own['seq']
+    else:
+        assert resumed['events'] == [] and resumed['coverage'] == 'partial'
+        assert event_position(case, resumed['next_cursor'], {}) == bad['seq'] - 1
+    assert 'private-thread' not in str(page) + str(resumed)
+
+
+def test_foreign_task_does_not_skip_missing_explicit_agent(tmp_path):
+    case = fixture(tmp_path)
+    foreign = case.runtime.record_run_creation(owner_id='other/owner', run_id='foreign', thread_id='private-thread')
+    first = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    bad = case.runtime.append_event(event_type='agent_run.progress', attempt_id='',
+        agent_run_id='late-agent', task_run_id=foreign['task_run_id'])
+    case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        agent_run_id=case.root['agent_run_id'], task_run_id=case.root['task_run_id'])
+    page = case.service.query('events.list', {'filter': {}, 'cursor': first['next_cursor']}, actor=case.actor)
+    assert page['events'] == [] and page['coverage'] == 'partial'
+    assert event_position(case, page['next_cursor'], {}) == bad['seq'] - 1
+    assert 'private-thread' not in str(page)

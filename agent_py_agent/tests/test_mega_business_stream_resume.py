@@ -372,3 +372,110 @@ def test_plugin_domain_closes_the_real_typed_iterator_and_retains_task(productio
     iterator.close()
     assert typed.gi_frame is None and source.pending_count == 0
     assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
+
+
+@pytest.mark.parametrize('transport', ['native', 'plugin'])
+@pytest.mark.parametrize('explicit', [False, True])
+def test_typed_stream_task_run_close_and_resume(tmp_path, transport, explicit):
+    from agent_py_agent.tests.test_business_v12_f7_observation import (
+        close_observed_task_run,
+        event_position,
+    )
+
+    case = fixture(tmp_path)
+    response = stream_business_events({'request_id': 'lifecycle', 'filter': {'space_id': 'space-a'}},
+        authenticated_context=case.actor, services=SimpleNamespace(observation=case.service,
+            stream_transport=transport, wait=lambda _s: None))
+    iterator = response.events()
+    assert next(iterator)['stream_item'] == 'snapshot'
+    # 先读完原创建事件，避免把合法的关闭回归误做成超过 Plugin 八项的背压测试。
+    for _ in range(4):
+        assert next(iterator)['stream_item'] == 'event'
+    assert next(iterator)['stream_item'] == 'heartbeat'
+    closed = close_observed_task_run(case.runtime, [case.root, case.child], explicit=explicit)
+    later = case.runtime.record_run_creation(owner_id=case.owner, run_id='after-close', thread_id='background',
+        task_run_metadata={'business_context': case.task.metadata['business_context'], 'session_task_ref': case.task.task_id})
+    frames = [next(iterator) for _ in range(5)]
+    assert [row['event_type'] for row in frames] == [
+        'agent_run.completed', 'agent_run.completed', 'task_run.closed', 'task.created', 'agent_run.created']
+    assert frames[2]['event_id'] == closed['event_id'] and frames[2]['attempt_id'] is None
+    assert frames[-1]['attempt_id'] == later['attempt_id']
+    positions = [event_position(case, row['cursor'], {'space_id': 'space-a'}) for row in frames]
+    assert positions == sorted(set(positions))
+    iterator.close()
+    assert response.pending_count == 0
+    resumed = stream(case, frames[2]['cursor']).events()
+    assert next(resumed)['stream_item'] == 'snapshot'
+    assert [next(resumed)['event_id'] for _ in range(2)] == [row['event_id'] for row in frames[3:]]
+    assert next(resumed)['stream_item'] == 'heartbeat'
+    resumed.close()
+
+
+@pytest.mark.parametrize('transport', ['native', 'plugin'])
+@pytest.mark.parametrize('explicit', [False, True])
+def test_real_transports_deliver_task_run_close_and_resume(request, transport, explicit):
+    from agent_py_agent.tests.test_business_v12_f7_observation import (
+        close_observed_task_run,
+    )
+    from agent_py_agent.tests.test_mega_business_api_actions import (
+        background_call,
+        observed_native_task,
+        open_native_observation,
+        seed_observed_runtime,
+    )
+    from agent_py_agent.tests.test_mega_business_plugin_compatibility import (
+        open_plugin_observation,
+        plugin_observation_task,
+        production_call,
+        read_business_sse,
+    )
+
+    host = request.getfixturevalue('background_http' if transport == 'native' else 'production_host')
+    services, task = observed_native_task(host) if transport == 'native' else plugin_observation_task(host)
+    runtime, run = seed_observed_runtime(services, task)
+    if transport == 'native':
+        status, result = background_call(host, 'events.list', {'filter': {}})
+        assert status == 200, result
+        cursor = result['data']['next_cursor']
+    else:
+        cursor = production_call(host, 'business.events.list', {'filter': {}})['next_cursor']
+    closed = close_observed_task_run(runtime, [run], explicit=explicit)
+    later = runtime.record_run_creation(owner_id=services.owner_id, run_id='wire-after-close',
+        thread_id=task.target_thread_id, task_run_metadata={
+            'business_context': task.metadata['business_context'], 'session_task_ref': task.task_id})
+
+    def connect(selected_cursor):
+        if transport == 'native':
+            return open_native_observation(host, {'request_id': 'wire-close', 'filter': {}, 'cursor': selected_cursor})
+        return open_plugin_observation(host, cursor=selected_cursor)
+
+    def read_frame(response):
+        if transport == 'native':
+            return json.loads(response.readline())
+        kind, frame = read_business_sse(response)
+        assert kind == 'business', frame
+        return frame
+
+    conn, response = connect(cursor)
+    try:
+        assert response.status == 200, response.read()
+        assert read_frame(response)['stream_item'] == 'snapshot'
+        frames = [read_frame(response) for _ in range(4)]
+        assert [row['event_type'] for row in frames] == [
+            'agent_run.completed', 'task_run.closed', 'task.created', 'agent_run.created']
+        assert frames[1]['event_id'] == closed['event_id']
+        assert frames[1]['node'] is None and frames[1]['attempt_id'] is None
+        assert frames[-1]['attempt_id'] == later['attempt_id']
+        assert 'private-close-reason' not in str(frames)
+    finally:
+        response.close()
+        conn.close()
+    conn, response = connect(frames[1]['cursor'])
+    try:
+        assert response.status == 200, response.read()
+        assert read_frame(response)['stream_item'] == 'snapshot'
+        assert [read_frame(response)['event_id'] for _ in range(2)] == [row['event_id'] for row in frames[2:]]
+    finally:
+        response.close()
+        conn.close()
+    assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
