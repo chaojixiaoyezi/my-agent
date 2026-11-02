@@ -19,6 +19,78 @@ from .session_tasks import SessionTaskDraft
 SESSION_TASK_TOOL_NAME = "create_session_task"
 
 
+class SessionTaskDispatchError(RuntimeError):
+    """只运输原派发回执；异常正文不提供任务身份或副作用状态。"""
+
+    def __init__(self, outcome: ToolHandlerOutcome) -> None:
+        self.outcome = outcome
+        self.error_code = outcome.error_code
+        self.effect_outcome = outcome.effect_outcome
+        super().__init__(outcome.error_code)
+
+
+def reconcile_session_task_dispatch(
+    store: object, *, owner_id: str, sender_thread_id: str, target_thread_id: str,
+    dedupe_key: str, task_id: str | None = None,
+) -> object | None:
+    """只读核对原canonical任务；索引缺失/损坏不能证明任务不存在。"""
+    from .background_team_lifecycle import SessionTaskCoverageUnknown, session_task_pages
+
+    identity = {"sender_thread_id": sender_thread_id, "target_thread_id": target_thread_id, "dedupe_key": dedupe_key}
+    if task_id is not None:
+        identity["task_id"] = task_id
+    if any(type(value) is not str or not value.strip() for value in (owner_id, *identity.values())):
+        raise PermissionError("SESSION_TASK_DISPATCH_IDENTITY_MISMATCH")
+    try:
+        for thread_id in (sender_thread_id, target_thread_id):
+            if store.threads.require(thread_id).owner_id != owner_id:
+                raise PermissionError("SESSION_TASK_DISPATCH_OWNER_MISMATCH")
+        tasks = store.session_tasks
+        # 已知ID优先直接读canonical；不因无关或损坏的查找索引丢失准确身份。
+        known = tasks.load(task_id) if task_id is not None else None
+        if known is not None:
+            return _checked_dispatch_task(known, owner_id, identity)
+        indexed = tasks.find_by_dedupe_key(dedupe_key)
+        if indexed is not None:
+            return _checked_dispatch_task(indexed, owner_id, identity)
+        matched = None
+        for items in session_task_pages(tasks):
+            for task in items:
+                if task.dedupe_key == dedupe_key or task_id is not None and task.task_id == task_id:
+                    checked = _checked_dispatch_task(task, owner_id, identity)
+                    if matched is not None and matched.task_id != checked.task_id:
+                        raise PermissionError("SESSION_TASK_DISPATCH_IDENTITY_CONFLICT")
+                    matched = checked
+        return matched
+    except PermissionError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, SessionTaskCoverageUnknown) as exc:
+        raise SessionTaskDispatchError(session_task_dispatch_error(
+            "原派发结果尚未能完整核实。", error_code="TOOL_EXECUTION_FAILED", effect_outcome="unknown",
+            session_task_dispatch=identity)) from exc
+
+
+def _checked_dispatch_task(task, owner_id, identity):
+    from .business_contracts import BusinessContextIntent, BusinessExecutionContext
+
+    if (any(getattr(task, name) != identity[name] for name in ("sender_thread_id", "target_thread_id", "dedupe_key"))
+            or "task_id" in identity and task.task_id != identity["task_id"]):
+        raise PermissionError("SESSION_TASK_DISPATCH_IDENTITY_MISMATCH")
+    raw_context = task.metadata.get("business_context")
+    raw_intent = task.metadata.get("business_context_intent")
+    if raw_context is not None or raw_intent is not None:
+        try:
+            context = BusinessExecutionContext.from_dict(raw_context)
+            intent = BusinessContextIntent.from_dict(raw_intent)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise PermissionError("SESSION_TASK_DISPATCH_BUSINESS_MISMATCH") from exc
+        if (context.owner_id != owner_id or intent.owner_id != owner_id or context.task_id != task.task_id
+                or not context.space_id or intent.requested_space_id not in (None, context.space_id)
+                or intent.project_ref != context.project_ref or intent.binding_id != context.binding_id):
+            raise PermissionError("SESSION_TASK_DISPATCH_BUSINESS_MISMATCH")
+    return task
+
+
 # LLM: 每对会话每小时限额（与发消息共用同一计数与配置键）；0 表示不限制，没有计数器时放行。
 #   在真正建记录前判断，避免被拒的任务占用配额。
 # 函数用途: 判断这次派活是否超出每对会话限额，超出时返回结构化失败。
@@ -124,6 +196,7 @@ def dispatch_session_task(
 
     dedupe_key = _task_dedupe_key(plan)
     body_dedupe_key = f"body:{dedupe_key}"
+    task = None
     try:
         # 记录先建（拿到任务编号），正文再带着自己的任务编号入队：正文写入时就知道它属于哪条任务，
         # 接收回合据此只认领自己的那条。记录里仍只引用正文 id，正文只存一份。
@@ -157,11 +230,16 @@ def dispatch_session_task(
             task = bound
         wake_id = _maybe_wake(store, target_thread, plan.sender_thread_id, task.task_id)
     except Exception as exc:  # noqa: BLE001
+        identity = {"sender_thread_id": plan.sender_thread_id, "target_thread_id": plan.target_thread_id,
+                    "dedupe_key": dedupe_key}
+        if task is not None:
+            identity["task_id"] = task.task_id
         return session_task_dispatch_error(
-            "派发会话任务失败；任务没有派发。",
+            "派发回执未知；可能已耐久受理，须按原身份对账。",
             error_code="TOOL_EXECUTION_FAILED",
             details=runtime_error_report(exc, context="create_session_task.dispatch"),
             effect_outcome="unknown",
+            session_task_dispatch=identity,
         )
     # 派发成功后计入每对会话配额（与消息、回报共用同一计数）。
     if count_pair:
@@ -266,6 +344,7 @@ def session_task_dispatch_error(
     error_code: str,
     details: dict[str, object] | None = None,
     effect_outcome: str = "not_started",
+    session_task_dispatch: dict[str, str] | None = None,
 ) -> ToolHandlerOutcome:
     payload: dict[str, object] = {"ok": False, "error": "session_task_not_dispatched", "message": message}
     if details:
@@ -273,4 +352,5 @@ def session_task_dispatch_error(
     return ToolHandlerOutcome(
         SESSION_TASK_TOOL_NAME, False, json.dumps(payload, ensure_ascii=False, indent=2),
         error_code=error_code, effect_outcome=effect_outcome,
+        result_envelope={"session_task_dispatch": dict(session_task_dispatch)} if session_task_dispatch is not None else {},
     )
