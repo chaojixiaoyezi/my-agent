@@ -68,6 +68,20 @@ def _requires_native_agent_resume(record):
         _agent_task_obligation(step) and not step.escalation_result.get('completion_ref') for step in record.steps)
 
 
+# LLM: 只认原run终态发表失败的结构化暂停与canonical步骤证据；run级needs_repair/unknown不单独否决，不授重提或执行许可。
+# 函数用途: 判断恢复是否只剩同一原运行的终态记录发表。
+def _requires_terminal_publication_resume(record) -> bool:
+    breakpoint = record.breakpoint if isinstance(record.breakpoint, dict) else {}
+    ids = tuple(step.step_id for step in record.steps)
+    return bool(record.status == 'paused_for_resume' and record.phase == 'terminal'
+        and breakpoint.get('phase') == record.phase and breakpoint.get('can_resume') is True
+        and breakpoint.get('error_code') in ('WORKFLOW_EXECUTION_FAILED', 'WORKFLOW_PAUSED')
+        and ids and record.confirmed_step_refs == ids
+        and all(step.status in SUCCESS and not step.needs_repair and not step.escalation_result.get('cleanup_error')
+                for step in record.steps)
+        and not _requires_native_agent_resume(record))
+
+
 # LLM: 读取同一当前回合令牌和线程停止事实；不自行建控制状态，不改已持久提交的历史成功。
 # 函数用途: 在步骤业务输出和运行终态发表前拒绝已接受的停止。
 def _check_stop():
@@ -190,6 +204,16 @@ class _WorkflowRunLifecycle:
             if record.status in ('cancelled', 'cancelling'):
                 raise ValueError('WORKFLOW_CANCELLED')
             admission = self._authorize_run(record, 'resume')
+            if _requires_terminal_publication_resume(record):
+                # 不消费对账裁决或修复选项，冻结定义须与原步骤集一致；只沿原结算/发表链补发终态，不执行后缀。
+                if admission is not None or any(option is not None for option in (
+                        from_step_id, patched_step_output, updated_data_sources)):
+                    raise ValueError('WORKFLOW_TERMINAL_PUBLICATION_ONLY')
+                if [(step.step_id, step.mode) for step in record.steps] != [
+                        (spec['step_id'], spec['mode']) for spec in definition['steps']]:
+                    raise ValueError('WORKFLOW_TERMINAL_PUBLICATION_MISMATCH')
+                result = self._drive(record, definition, len(record.steps))
+                return self.store.complete_control(workflow_run_id, operation_key) if operation_key else result
             from .release_gate import WorkflowEffectAdmission
             if isinstance(admission, WorkflowEffectAdmission):
                 if admission.reconciled_output is not None:

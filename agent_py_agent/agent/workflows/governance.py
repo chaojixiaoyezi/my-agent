@@ -26,11 +26,14 @@ class WorkflowGovernance:
         self.gate = WorkflowReleaseGate(receipt_reader=receipt_reader,
                                          authorization_check=authorization_check, clock=clock)
 
-    # LLM: 原生恢复仅核对原任务；普通未知副作用仍对账，每次新增副作用仍绑定当前审核及原 attempt。
-    # 函数用途: 按原生恢复分类选择完成读取、通用对账或真实副作用审核。
+    # LLM: 原生恢复仅核对原任务；终态发表恢复无当前步骤/新副作用；普通未知副作用仍对账，每次新增副作用仍绑定当前审核及原 attempt。
+    # 函数用途: 按原生/终态发表恢复分类选择完成读取、终态补发、通用对账或真实副作用审核。
     def require_effect(self, record, phase):
-        from .engine import _requires_native_agent_resume
+        from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
 
+        if phase == 'resume' and _requires_terminal_publication_resume(record):
+            # 原步骤已全部确认、只差原 run 终态发表：不选择或伪造当前步骤，也不进入通用对账。
+            return None
         # 创建头记录/取消本身不启动业务；等待恢复只读原完成链，尾部新副作用仍逐步审核。
         unresolved = any(item.escalation_result.get('effect_started') and
                          (item.needs_repair or item.status == 'running') for item in record.steps)
