@@ -30,6 +30,7 @@ from .host_actor import HostChannelActor
 from .models import ConversationThread
 from .session_list_index import SessionListIndex
 from .session_task_dispatch import (
+    SessionTaskDispatchError,
     SessionTaskDispatchPlan,
     dispatch_session_task,
     session_task_pair_limit_error,
@@ -393,7 +394,7 @@ class BackgroundAgentService:
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
                                         business_context_intent=intent, business_context_factory=factory)
         if not outcome.ok:
-            raise RuntimeError(outcome.error_code or "TASK_DISPATCH_FAILED")
+            raise SessionTaskDispatchError(outcome)
         return json.loads(outcome.output)
 
     def assign(self, request: dict, *, actor, idempotency_key):
