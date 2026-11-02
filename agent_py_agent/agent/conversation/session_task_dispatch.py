@@ -29,6 +29,8 @@ class SessionTaskDispatchError(RuntimeError):
         super().__init__(outcome.error_code)
 
 
+# LLM: 只读原ConversationStore；已知ID核canonical，无ID必须读完原分页并拒绝冲突，不产生派发副作用。
+# 函数用途: 找回原任务，只有完整权威记录证明没有任务时才返回空。
 def reconcile_session_task_dispatch(
     store: object, *, owner_id: str, sender_thread_id: str, target_thread_id: str,
     dedupe_key: str, task_id: str | None = None,
@@ -50,9 +52,7 @@ def reconcile_session_task_dispatch(
         known = tasks.load(task_id) if task_id is not None else None
         if known is not None:
             return _checked_dispatch_task(known, owner_id, identity)
-        indexed = tasks.find_by_dedupe_key(dedupe_key)
-        if indexed is not None:
-            return _checked_dispatch_task(indexed, owner_id, identity)
+        # 无ID时索引命中也不能证明唯一性；完整canonical链必须排除同键的第二条责任。
         matched = None
         for items in session_task_pages(tasks):
             for task in items:
