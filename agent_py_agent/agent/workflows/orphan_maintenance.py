@@ -158,14 +158,19 @@ def cleanup_action(service, action, request, *, actor, expected_revision, idempo
         'coverage': 'partial' if more else 'complete'}
 
 
-def maintain_owner_workflows(service, *, actor, idempotency_key):
-    """现有 Owner 节拍和手动动作调用同一片；最多 128 条，无自己的线程或轮询器。"""
+# LLM: 仅可信宿主可采用原inflight身份；行级授权和资产CAS保持，进度/完成回执须在原锁内重读比较，禁止倒退或复活。
+# 函数用途: 用原操作键续跑最多128条持久化清理，手动调用仍须提供自己的原幂等键。
+def maintain_owner_workflows(service, *, actor, idempotency_key, resume_inflight: bool = False):
+    """现有 Owner 节拍和手动动作调用同一片；无自己的线程或轮询器。"""
     identity, fingerprint = _operation_identity('workflows.cleanup.run', {}, idempotency_key)
     with service.store._locked():
         record = _record(service.store)
+        pending = record['inflight']
+        # 定时器的新键可能已有旧回执，仍须先处理尚未完成的原事务。
+        if resume_inflight and pending is not None:
+            identity = pending['identity']
         if saved := record['operations'].get(identity):
             return saved['result']
-        pending = record['inflight']
         if pending is not None and pending['identity'] != identity:
             raise BlockingIOError('WORKFLOW_MAINTENANCE_PENDING')
         if pending is None:
@@ -174,8 +179,24 @@ def maintain_owner_workflows(service, *, actor, idempotency_key):
                 'counts': {'recycled': 0, 'skipped': 0, 'failed': 0, 'unknown': 0}}
             record['inflight'] = pending
             _save(service.store, record)
-    while pending['position'] < len(pending['rows']):
-        row = pending['rows'][pending['position']]
+    while True:
+        with service.store._locked():
+            record = _record(service.store)
+            if saved := record['operations'].get(identity):
+                return saved['result']
+            pending = record['inflight']
+            if pending is None or pending['identity'] != identity:
+                raise BlockingIOError('WORKFLOW_MAINTENANCE_PENDING')
+            position = pending['position']
+            if position >= len(pending['rows']):
+                cursor = list(_key(pending['rows'][-1])) if pending['more'] and pending['rows'] else None
+                result = {'operation_id': identity, 'state': 'completed', 'counts': pending['counts'],
+                          'next_cursor': json.dumps(cursor) if cursor else None}
+                record.update(cursor=cursor, inflight=None)
+                record['operations'][identity] = {'fingerprint': fingerprint, 'result': result}
+                _save(service.store, record)
+                return result
+        row = pending['rows'][position]
         outcome = 'skipped'
         service._authorize(actor, 'workflows.cleanup.run', row['workflow_ref'])
         try:
@@ -194,18 +215,16 @@ def maintain_owner_workflows(service, *, actor, idempotency_key):
         except (KeyError, ValueError, PermissionError):
             # 关系/正文 CAS 或权限变化只保留候选；不能回收刚重新关联的资产。
             outcome = 'skipped'
-        pending['counts'][outcome] += 1
-        pending['position'] += 1
         with service.store._locked():
             record = _record(service.store)
-            record['inflight'] = pending
+            if saved := record['operations'].get(identity):
+                return saved['result']
+            current = record['inflight']
+            if current is None or current['identity'] != identity:
+                raise BlockingIOError('WORKFLOW_MAINTENANCE_PENDING')
+            # 同行副作用由原资产幂等键去重；其它续跑者已经提交的计数不能再加。
+            if current['position'] != position:
+                continue
+            current['counts'][outcome] += 1
+            current['position'] += 1
             _save(service.store, record)
-    with service.store._locked():
-        record = _record(service.store)
-        cursor = list(_key(pending['rows'][-1])) if pending['more'] and pending['rows'] else None
-        result = {'operation_id': identity, 'state': 'completed', 'counts': pending['counts'],
-                  'next_cursor': json.dumps(cursor) if cursor else None}
-        record.update(cursor=cursor, inflight=None)
-        record['operations'][identity] = {'fingerprint': fingerprint, 'result': result}
-        _save(service.store, record)
-        return result
