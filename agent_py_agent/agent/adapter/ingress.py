@@ -773,11 +773,16 @@ class GatewayAdapterDeliveryWorker:
         raise ValueError(f"unsupported gateway ingress state: {record.state}")
 
     # LLM: The loop wakes for new ingress or on a bounded poll interval so both ingress and reply
-    # recovery continue without a second background thread.
-    # 函数用途: 持续运行单次推进，直到生命周期请求停止。
+    # recovery continue without a second background thread. An ordinary queue OSError ends only this
+    # pass: durable stage/owner/epoch stay as last committed, so an uncertain external effect keeps
+    # its unexpired lease instead of being resubmitted at once. BaseException still ends the thread.
+    # 函数用途: 持续运行单次推进，直到生命周期请求停止；单次队列 IO 失败后在原可中断等待后重试。
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.run_once()
+            try:
+                self.run_once()
+            except OSError as exc:
+                _LOGGER.warning("gateway adapter delivery pass failed; retrying error=%s", exc)
             self._wake.wait(self._poll_interval)
             self._wake.clear()
 

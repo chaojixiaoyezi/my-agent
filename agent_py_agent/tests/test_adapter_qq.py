@@ -253,4 +253,6 @@ class TestQQWebSocketMessageHandling:
         })
         adapter._handle_ws_message(raw)
         assert adapter._session_id is None
-        assert adapter._stop_event.is_set()
+        # 连接级重连：只结束当前连接交给生命周期循环重连，全局停止位保持未设置。
+        assert adapter._connection_stop.is_set()
+        assert not adapter._stop_event.is_set()

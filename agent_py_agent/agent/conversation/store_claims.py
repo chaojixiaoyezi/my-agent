@@ -15,7 +15,7 @@ from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..settings.defaults import default_config_value
 from .models import ConversationThread, new_id
-from .store_io import LEDGER_ARCHIVE_DIR, archive_ledger_file, now
+from .store_io import LEDGER_ARCHIVE_DIR, now
 from .store_layout import ConversationStorage
 
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
@@ -409,33 +409,44 @@ class ClaimStore:
         return updated if finished else None
 
     # LLM: 只归档已终态且超过原保留期的 claim；坏账、运行中租约和缺少结束时间的记录保持原位。
-    #   原取消仍需要的终态证明先在原claim锁内重读并存回原任务，未结期间保留claim；锁内不移动claim或锁文件。
-    # 函数用途: 在既有维护周期移动旧租约及其锁文件，不启动独立后台任务或影响执行权。
+    #   锁外快照只作廉价预筛；重读、保留期复核、原取消证明检查点与 JSON 移动在同一原 claim 迁移锁内完成，
+    #   等待中的 acquire 只能看到移动前的旧终态或移动后的空位。稳定 .lock sidecar 留原位交孤儿锁清扫回收。
+    # 函数用途: 在既有维护周期移动旧租约 JSON，不移动锁文件、不启动独立后台任务或影响执行权。
     def archive_stale(self, *, current: float, retention_seconds: float) -> int:
         archived_claims = 0
+        archive_dir = self.storage.background_claims_dir.parent / LEDGER_ARCHIVE_DIR / "claims"
         for path in sorted(self.storage.background_claims_dir.glob("*.json")):
             claim, error = _read_claim_report(path)
             if error is not None or not _stale_finished_claim(claim, current, retention_seconds):
                 continue
-            if self._retained_for_cancellation(path, current=current, retention_seconds=retention_seconds):
-                continue
-            if archive_ledger_file(path, self.storage.background_claims_dir.parent / LEDGER_ARCHIVE_DIR / "claims"):
+            if self._archive_released_claim(path, archive_dir, current=current, retention_seconds=retention_seconds):
                 archived_claims += 1
         return archived_claims
 
-    # LLM: 不按锁外旧快照行动：在稳定的原claim迁移锁内重读并复核归档条件，再由原取消账判断是否仍需此证明。
-    #   需要证明(True)或检查失败都保留原claim与锁文件；archive_ledger_file会移动锁文件，只能在释放锁后调用。
-    # 函数用途: 判定过期终态claim是否须为未结取消继续保留，失败时原证据不动供下次维护重试。
+    # LLM: 一个原claim迁移锁覆盖"判定→检查点→rename"，释放锁前不留可被后继 acquire 插入的间隙（claim→task锁序）。
+    #   锁、读、检查点或 rename 失败都只保留原 claim 与锁文件，原身份不被替换，下次维护重试。
+    # 函数用途: 在原 claim 锁内复核并只移动 JSON 正文，返回本次是否确实移入归档。
+    def _archive_released_claim(self, path: Path, archive_dir: Path, *, current: float,
+                                retention_seconds: float) -> bool:
+        moved = False
+        try:
+            with locked_file_transition(path):
+                if not self._retained_for_cancellation(path, current=current, retention_seconds=retention_seconds):
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    path.rename(archive_dir / path.name)
+                    moved = True
+        except Exception as exc:  # noqa: BLE001 - 维护失败只保留原claim，不丢证据也不中断其它归档
+            _STORE_LOGGER.warning("background claim retained: archive transition failed path=%s error=%r",
+                                  path, exc)
+        return moved
+
+    # LLM: 调用方必须已持有 locked_file_transition(path)；不按锁外旧快照行动，锁内重读并复核归档条件，
+    #   再由原取消账判断是否仍需此证明。需要证明(True)、坏账或已被后继替换都保留；异常上抛给持锁调用方。
+    # 函数用途: 判定过期终态claim是否须为未结取消继续保留，不移动文件。
     def _retained_for_cancellation(self, path: Path, *, current: float, retention_seconds: float) -> bool:
         from .session_tasks import SessionTaskStore
 
-        try:
-            with locked_file_transition(path):
-                claim, error = _read_claim_report(path)
-                if error is not None or not _stale_finished_claim(claim, current, retention_seconds):
-                    return True
-                return SessionTaskStore(self.storage).preserve_terminal_cancellation_claim(claim)
-        except Exception as exc:  # noqa: BLE001 - 维护失败只保留原claim，不丢证据也不中断其它归档
-            _STORE_LOGGER.warning("background claim retained: cancellation proof check failed path=%s error=%r",
-                                  path, exc)
+        claim, error = _read_claim_report(path)
+        if error is not None or not _stale_finished_claim(claim, current, retention_seconds):
             return True
+        return SessionTaskStore(self.storage).preserve_terminal_cancellation_claim(claim)

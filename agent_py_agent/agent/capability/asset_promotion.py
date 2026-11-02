@@ -208,13 +208,14 @@ def register_asset(
 
 
 # LLM: 提炼事务持原资产锁；yield跨正文/提案写入，失败恢复准确版本及registry，不接管workspace正文。
+#   admission为提炼在资产锁前已取得并持有的同owner配额准入，原样交state_lock复用、不再取配额锁；None保持原取锁。
 # 函数用途: 把显式发布的资产来源和Owner技能纳入同一维护权威。
 @contextmanager
-def register_extracted_assets(home, chosen, proposal, scope):
+def register_extracted_assets(home, chosen, proposal, scope, *, admission=None):
     from pathlib import Path
 
     store = SkillLearningStore(Path(home)/'data'/'skill_learning', Path(home)/'skills')
-    with store.state_lock(), ExitStack() as rollback:
+    with store.state_lock(admission=admission), ExitStack() as rollback:
         registry = store.load_registry()
         _restore_on_failure(store, ('registry.json',), rollback)
         for kind, asset in chosen:
