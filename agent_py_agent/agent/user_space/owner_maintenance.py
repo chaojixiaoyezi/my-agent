@@ -245,8 +245,8 @@ def run_owner_retention_if_due(
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
-# LLM: 所有既存owner库共用发现与显式owner引用保护；C逐叶沿原commit，冷库不创建、单库普通错误隔离，执行未知仍原抛。
-# 函数用途: 在原保留门后裁剪全部派生库，单库回执兼容，多库分列真实结果。
+# LLM: 可信owner维护沿原节拍续跑持久化清理身份；保留安全门、owner核验及未知执行错误原抛，不开放公开恢复参数。
+# 函数用途: 在原保留门后恢复同一有界工作流清理片，普通错误隔离为覆盖未知。
 def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, service=None):
     """沿原维护节拍调用W3同一有界批；引用覆盖未知由W3保留候选，不另开轮询器。"""
     if not safe_to_delete:
@@ -273,7 +273,7 @@ def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, servi
     key = 'owner-maintenance-' + hashlib.sha256(json.dumps([home.owner_id,
         previous.get('last_attempt_at', 0)], sort_keys=True).encode()).hexdigest()[:40]
     try:
-        result = maintain_owner_workflows(service, actor=actor, idempotency_key=key)
+        result = maintain_owner_workflows(service, actor=actor, idempotency_key=key, resume_inflight=True)
         return {'executed': True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
