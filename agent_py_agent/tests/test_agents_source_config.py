@@ -26,7 +26,7 @@ _SWITCHES = {"agents_source_enabled": True, "agents_source_network_enabled": Fal
 # 函数用途: 在不创建真实部署配置的情况下测试 loader 对原始配置字典的处理。
 def _load_raw(monkeypatch, raw):
     monkeypatch.delenv("AGENT_API_KEY", raising=False)
-    monkeypatch.setattr(config_module, "load_simple_yaml", lambda _path: dict(raw))
+    monkeypatch.setattr(config_module, "load_simple_yaml", lambda _path, **_kwargs: dict(raw))
     return load_config(_PACKAGED)
 
 
@@ -112,7 +112,7 @@ def test_missing_configuration_raises_instead_of_loading_defaults(monkeypatch):
 def test_unreadable_configuration_propagates_loading_failure(monkeypatch):
     # LLM: 只模拟 IO 权限错误，不执行来源加载。
     # 函数用途: 给正式 loader 提供明确的读取失败。
-    def denied(_path):
+    def denied(_path, **_kwargs):
         raise PermissionError("configuration is unreadable")
 
     monkeypatch.setattr(config_module, "load_simple_yaml", denied)
