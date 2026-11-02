@@ -461,12 +461,51 @@ def _validate_transcript_manifest(state, path):
             raise ValueError('transcript logical generation mismatches')
 
 
+# LLM: root=None沿原同目录语义；显式受信root时路径必须位于root下，热文件/清单/冷段/索引全部从root逐段no-follow打开，
+#   中间目录、叶子链接与硬链接一律拒绝，不能借messages目录链接把读口带出规范存储。
+# 函数用途: 返回读取同一转写本成员所用的锚点目录与相对父路径。
+def _transcript_base(path: Path, root: Path | None):
+    if root is None:
+        return path.parent, ()
+    return Path(root), path.parent.relative_to(root).parts
+
+
+# LLM: 受信root分支只开单链接普通文件且整链no-follow；root=None保持原调用方的路径打开语义。
+# 函数用途: 打开转写本热文件的只读二进制句柄。
+def _open_hot_transcript(path: Path, root: Path | None):
+    if root is None:
+        return path.open('rb')
+    from ..common.nofollow_fs import open_readonly_file_beneath
+
+    return os.fdopen(open_readonly_file_beneath(root, path.relative_to(root).parts), 'rb')
+
+
+# LLM: 受信root分支从父目录FD取lstat，链接叶子得到链接自身身份，必然与已开FD不符而被拒。
+# 函数用途: 观察热文件路径当前指向的(dev, ino)，供同次打开前后核对。
+def _hot_transcript_identity(path: Path, root: Path | None):
+    if root is None:
+        located = path.stat()
+    else:
+        from ..common.nofollow_fs import open_directory_beneath
+
+        parts = path.relative_to(root).parts
+        directory = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+        try:
+            located = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
+        finally:
+            os.close(directory)
+    return located.st_dev, located.st_ino
+
+
 # LLM: pending按旧/新已提交前缀选择唯一视图；只在同次打开内比较FD与路径设备号，读口不写修复。
+#   显式受信root时清单与prepared热文件都从root逐段no-follow读取；root=None保持原同目录读取。
 # 函数用途: 恢复固定大小的消息布局，拒绝不完整或跨线程的清单。
-def transcript_manifest(path: Path):
+def transcript_manifest(path: Path, *, root: Path | None = None):
     from ..common.nofollow_fs import read_bytes_beneath
 
-    raw = read_bytes_beneath(path.parent, (path.with_suffix('.manifest.json').name,), max_bytes=65536)
+    base, parts = _transcript_base(path, root)
+    raw = read_bytes_beneath(base, (*parts, path.with_suffix('.manifest.json').name), max_bytes=65536,
+                             require_dir_fd=root is not None)
     if raw is None:
         return None
     try:
@@ -476,7 +515,7 @@ def transcript_manifest(path: Path):
                 raise ValueError('pending transcript requires a nonempty new layout')
             _validate_transcript_manifest(state['before'], path)
             _validate_transcript_manifest(state['after'], path)
-            with path.open('rb') as handle:
+            with _open_hot_transcript(path, root) as handle:
                 stamp = os.fstat(handle.fileno())
                 if 'old_frontier' in state or 'rotation_id' in state['after']:
                     old = _transcript_prefix_matches(handle, state['before'], frontier=state['old_frontier'])
@@ -492,8 +531,7 @@ def transcript_manifest(path: Path):
                         state = state['after']
                     else:
                         raise ValueError('legacy pending transcript lacks a portable integrity frontier')
-                current = path.stat()
-                if (stamp.st_dev, stamp.st_ino) != (current.st_dev, current.st_ino):
+                if (stamp.st_dev, stamp.st_ino) != _hot_transcript_identity(path, root):
                     raise ValueError('pending transcript replaced during selection')
         _validate_transcript_manifest(state, path)
         return state
@@ -538,23 +576,25 @@ def recover_transcript_transition(path: Path):
 # 类用途: 为显式历史/分页/来源查询提供可seek的完整会话，不让模型热选源打开冷段。
 class TranscriptReader:
     # LLM: 默认冻结完整LF尾界；先核逻辑前缀，同次FD/路径复核防打开竞态，不将持久dev/ino当新布局身份。
+    #   可选受信root：热文件、清单、冷段与索引全部从该存储根逐段no-follow读取（拒链接与硬链接）；省略时原路径语义不变。
     # 函数用途: 冻结当前冷热布局及两种尾界，后续轮转不重绑定这个读取快照。
-    def __init__(self, path: Path, *, complete_only=True):
+    def __init__(self, path: Path, *, complete_only=True, root: Path | None = None):
         from .store_io import ImmutableJsonIndex
 
-        self.path = path
+        self.path, self.root = path, root
+        self._base, self._parts = _transcript_base(path, root)
+        # 省略root时按原单参数形式调用，保持模块级清单读取入口的原调用合同。
+        manifest = (lambda: transcript_manifest(path)) if root is None else (lambda: transcript_manifest(path, root=root))
         for _attempt in range(4):
-            self.manifest = transcript_manifest(path)
-            self.hot = path.open('rb')
+            self.manifest = manifest()
+            self.hot = _open_hot_transcript(path, root)
             try:
-                current = transcript_manifest(path)
+                current = manifest()
                 stamp = os.fstat(self.hot.fileno())
-                located = path.stat()
-                if current == self.manifest and (stamp.st_dev, stamp.st_ino) == (located.st_dev, located.st_ino):
+                if current == self.manifest and (stamp.st_dev, stamp.st_ino) == _hot_transcript_identity(path, root):
                     if not _transcript_prefix_matches(self.hot, self.manifest):
                         raise DataCorruptionError('canonical hot transcript prefix mismatches')
-                    located = path.stat()
-                    if (stamp.st_dev, stamp.st_ino) == (located.st_dev, located.st_ino):
+                    if (stamp.st_dev, stamp.st_ino) == _hot_transcript_identity(path, root):
                         break
             except BaseException:
                 self.hot.close()
@@ -567,7 +607,8 @@ class TranscriptReader:
         self.complete_end = self.base + complete_jsonl_end(self.hot, physical_end)
         self.end = self.complete_end if complete_only else self.base + physical_end
         self.position, self.cached = 0, None
-        self.index = ImmutableJsonIndex(path.parent, ('archive', self.manifest['thread_id'], 'index')) if self.manifest else None
+        self.index = (ImmutableJsonIndex(self._base, (*self._parts, 'archive', self.manifest['thread_id'], 'index'))
+                      if self.manifest else None)
 
     # LLM: 只管理本次句柄，不改变持久布局。
     # 函数用途: 进入只读快照上下文。
@@ -618,7 +659,8 @@ class TranscriptReader:
                 size = descriptor['end'] - descriptor['start']
                 if not 0 < size <= 64 * 1024 * 1024:
                     raise DataCorruptionError('canonical transcript segment exceeds byte budget')
-                raw = read_bytes_beneath(self.path.parent, ('archive', self.manifest['thread_id'], f'seg-{sequence:020d}.jsonl'), max_bytes=size)
+                raw = read_bytes_beneath(self._base, (*self._parts, 'archive', self.manifest['thread_id'], f'seg-{sequence:020d}.jsonl'),
+                                         max_bytes=size, require_dir_fd=self.root is not None)
                 if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
                     raise DataCorruptionError('canonical transcript segment digest or length mismatches')
                 self.cached = descriptor, raw

@@ -10,9 +10,10 @@ import re
 import time
 
 from ..common.log_redaction import redact_sensitive_text
-from ..common.nofollow_fs import open_readonly_file_beneath
+from ..common.nofollow_fs import open_readonly_file_beneath, read_bytes_beneath
 from ..conversation.display_checkpoint import display_checkpoint_event
 from ..conversation.models import MessageLogEntry
+from ..runtime_errors import DataCorruptionError
 from .conversations import CURSOR_LIFETIME_SECONDS, BoundCursor, digest, public_time
 from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json
@@ -143,7 +144,8 @@ def _collect(rows, message, used, limit):
     return used + size + 1, False
 
 
-# LLM: 流式读取完整固定尾界，最多保留一页正文；坏行暂记，旧快照变更优先报过期，首次坏文件明确500。
+# LLM: 流式读取冻结的canonical虚拟尾界（冷段+热尾），最多保留一页正文；坏行与未完成行暂记，旧快照变更优先报过期，
+#   首次坏文件明确500。锚点封印虚拟前缀（记录数、字节数、首尾与全量SHA）及本快照热文件身份：原子replace同样失效。
 # 函数用途: 校验JSONL并生成稳定序号、分页前缀及内容锚点。
 def _scan(handle, through, thread_id, offset, payload):
     handle.seek(0)
@@ -172,59 +174,96 @@ def _scan(handle, through, thread_id, offset, payload):
             raise
         except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError):
             error = True
-    info = os.fstat(handle.fileno())
     anchor = {"record_count": record_count, "byte_size": through,
               "head_tail_sha256": hashlib.sha256(head + tail).hexdigest(), "sha256": full_hash.hexdigest(),
-              "identity": [info.st_dev, info.st_ino]}
+              "identity": _hot_identity(handle)}
     return rows, visible_count, anchor, error
 
 
+# LLM: 身份取自快照内已开的同一热FD，不重开路径；冷段由清单SHA封印，热文件被原子替换（含冷转）即换身份。
+# 函数用途: 返回canonical快照热文件的[dev, ino]。
+def _hot_identity(reader):
+    info = os.fstat(reader.hot.fileno())
+    return [info.st_dev, info.st_ino]
+
+
 # LLM: 只从原规范存储根逐段nofollow打开，拒绝硬链接；逻辑thread归属由ConversationDomain先核。
+#   物理热文件句柄只供Bot等需要fileno/fstat/seek的原调用方；插件历史/回复改走下方_canonical虚拟快照。
 # 函数用途: 打开消息文件且不初始化任何目录。
 def _open(store, thread_id):
     path = store.storage.message_path(thread_id)
     return os.fdopen(open_readonly_file_beneath(store.storage.root, path.relative_to(store.storage.root).parts), "rb")
 
 
+# LLM: 受信存储根下逐段no-follow冻结同次清单、冷段、索引、热FD与物理EOF（拒链接/硬链接）；冷段按清单SHA核验。
+#   EOF含未完成尾行，由扫描按坏行处理而不是静默截掉；热文件缺失而分卷清单仍在属于损坏，不能当成空历史；
+#   真正从未写过消息时仍原样抛FileNotFoundError。
+# 函数用途: 打开一个线程canonical转写本（冷段+热尾）的只读虚拟快照。
+def _canonical(store, thread_id):
+    from ..conversation.message_scan import TranscriptReader
+
+    root = store.storage.root
+    path = store.storage.message_path(thread_id)
+    try:
+        return TranscriptReader(path, root=root, complete_only=False)
+    except FileNotFoundError:
+        manifest = path.with_suffix(".manifest.json").relative_to(root).parts
+        if read_bytes_beneath(root, manifest, max_bytes=65536, require_dir_fd=True) is not None:
+            raise DataCorruptionError("canonical hot transcript is missing") from None
+        raise
+
+
+# LLM: 只在本次已打开的同一虚拟快照上分块核完整旧前缀；追加合法，截短/改写/原子替换（含冷转）/链接或硬链接均409。
+# 函数用途: 验证一个canonical快照仍完整包含锚点封印的前缀内容。
+def _verify_snapshot(reader, anchor):
+    size = anchor.get("byte_size")
+    if type(size) is not int or not 0 <= size <= reader.end or _hot_identity(reader) != anchor.get("identity"):
+        raise HostAPIError("CURSOR_EXPIRED", 409)
+    reader.seek(0)
+    remaining, check = size, hashlib.sha256()
+    while remaining:
+        raw = reader.read(min(remaining, HASH_CHUNK_BYTES))
+        if not raw:
+            raise HostAPIError("CURSOR_EXPIRED", 409)
+        check.update(raw)
+        remaining -= len(raw)
+    if check.hexdigest() != anchor.get("sha256") or os.fstat(reader.hot.fileno()).st_nlink != 1:
+        raise HostAPIError("CURSOR_EXPIRED", 409)
+    reader.seek(0)
+
+
 # LLM: 首尾hash之外核全部冻结前缀；相同长度的中段改写与原子replace同样失效，追加不参与旧快照。
+#   从当前规范路径重新打开canonical快照；冷段缺失/损坏或热文件消失都使旧快照过期，不当作空成功。
 # 函数用途: 返回前从当前规范路径再次验证实际读取的固定前缀。
 def _verify_current(store, thread_id, anchor):
-    with _open(store, thread_id) as handle:
-        info = os.fstat(handle.fileno())
-        if [info.st_dev, info.st_ino] != anchor["identity"] or info.st_size < anchor["byte_size"]:
-            raise HostAPIError("CURSOR_EXPIRED", 409)
-        remaining, check = anchor["byte_size"], hashlib.sha256()
-        while remaining:
-            raw = handle.read(min(remaining, HASH_CHUNK_BYTES))
-            if not raw:
-                raise HostAPIError("CURSOR_EXPIRED", 409)
-            check.update(raw)
-            remaining -= len(raw)
-        if check.hexdigest() != anchor["sha256"] or os.fstat(handle.fileno()).st_nlink != 1:
-            raise HostAPIError("CURSOR_EXPIRED", 409)
+    try:
+        with _canonical(store, thread_id) as reader:
+            _verify_snapshot(reader, anchor)
+    except (OSError, DataCorruptionError, ValueError):
+        raise HostAPIError("CURSOR_EXPIRED", 409) from None
 
 
 # LLM: 缺文件仅在首次有效线程读取时为空；续页解析提前失败也先复核旧锚点，替换/改写优先报409而非500/413。
-# 函数用途: 读取冻结文件快照并返回一页完整可见历史。
+#   读取canonical虚拟快照（冷段+热尾）：首页冻结同次EOF，续页按旧锚点虚拟前缀重扫；冷段缺失/损坏不当作空历史。
+# 函数用途: 读取冻结的canonical转写本快照并返回一页完整可见历史。
 def history_page(store, thread, payload, authorized, context, cursor_codec):
     filters = {key: value for key, value in payload.items() if key != "cursor"}
     cursor = BoundCursor(cursor_codec, authorized, context, filters)
     saved = cursor.decode(payload.get("cursor"))
     try:
-        handle = _open(store, thread.thread_id)
+        handle = _canonical(store, thread.thread_id)
     except FileNotFoundError:
         if saved:
             raise HostAPIError("CURSOR_EXPIRED", 409) from None
         return {"items": [], "next_cursor": None, "snapshot_id": digest([thread.thread_id, 0]), "complete": True, "load_errors": []}
-    except OSError:
+    except (OSError, DataCorruptionError, ValueError):
         raise HostAPIError("CURSOR_EXPIRED" if saved else "CORRUPT_HISTORY", 409 if saved else 500) from None
     try:
         with handle:
-            current = os.fstat(handle.fileno())
-            through = saved["anchor"].get("byte_size") if saved else current.st_size
+            through = saved["anchor"].get("byte_size") if saved else handle.end
             offset = saved["offset"] if saved else 0
-            if (type(through) is not int or not 0 <= through <= current.st_size
-                    or (saved and saved["anchor"].get("identity") != [current.st_dev, current.st_ino])):
+            if (type(through) is not int or not 0 <= through <= handle.end
+                    or (saved and saved["anchor"].get("identity") != _hot_identity(handle))):
                 raise HostAPIError("CURSOR_EXPIRED", 409)
             try:
                 rows, count, anchor, error = _scan(handle, through, thread.thread_id, offset, payload)
@@ -232,12 +271,16 @@ def history_page(store, thread, payload, authorized, context, cursor_codec):
                 if saved:
                     _verify_current(store, thread.thread_id, saved["anchor"])
                 raise
+            except DataCorruptionError:
+                if saved:
+                    raise HostAPIError("CURSOR_EXPIRED", 409) from None
+                raise HostAPIError("CORRUPT_HISTORY", 500) from None
             if saved and (saved["anchor"] != anchor or offset > count):
                 raise HostAPIError("CURSOR_EXPIRED", 409)
             if error:
                 raise HostAPIError("CORRUPT_HISTORY", 500)
             _verify_current(store, thread.thread_id, anchor)
-    except OSError:
+    except (OSError, DataCorruptionError):
         raise HostAPIError("CURSOR_EXPIRED" if saved else "CORRUPT_HISTORY", 409 if saved else 500) from None
     end = offset + len(rows)
     expires = saved["expires"] if saved else time.time() + CURSOR_LIFETIME_SECONDS

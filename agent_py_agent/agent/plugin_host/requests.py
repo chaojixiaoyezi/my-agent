@@ -300,13 +300,14 @@ class RequestDomain:
                 "has_more_events": False, "has_more_replies": more}
 
 
-# LLM: 旧锚点必须同时匹配实际打开的句柄及返回前的canonical路径；只读本request最终正文，不拼接替换文件。
+# LLM: 旧锚点必须同时匹配实际打开的快照及返回前的canonical路径；只读本request最终正文，不拼接替换文件。
+#   读取canonical虚拟快照（冷段+热尾），位置是虚拟字节坐标；冷段缺失/损坏不当作无回复的空成功。
 # 函数用途: 返回一个有界最终回复片段和可重建的内部位置。
 def request_replies(store, facts, position):
     from .history import (
         HISTORY_RECORD_MAX_BYTES,
+        _canonical,
         _entry,
-        _open,
         _scan,
         _verify_current,
         _visible_content,
@@ -316,7 +317,7 @@ def request_replies(store, facts, position):
     try:
         if position.get("anchor"):
             _verify_current(store, tid, position["anchor"])
-        with _open(store, tid) as handle:
+        with _canonical(store, tid) as handle:
             if position.get("anchor"):
                 _verify_reply_handle(handle, position["anchor"])
             handle.seek(0)
@@ -363,32 +364,16 @@ def request_replies(store, facts, position):
         return [], {}, False
     except HostAPIError:
         raise
-    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError, DataCorruptionError):
         raise HostAPIError("STORE_UNAVAILABLE", 503) from None
 
 
-# LLM: 验证的是本次已打开句柄，不再开路径；分块核完整旧前缀，追加合法，换inode/截短/改写均409。
+# LLM: 验证的是本次已打开的canonical快照，不再开路径；分块核完整旧虚拟前缀，追加合法，换inode/截短/改写均409。
 # 函数用途: 拒绝旧锚点预检与实际打开之间发生的回复文件替换。
 def _verify_reply_handle(handle, anchor):
-    import hashlib
-    import os
+    from .history import _verify_snapshot
 
-    info = os.fstat(handle.fileno())
-    size = anchor.get("byte_size")
-    if (type(size) is not int or not 0 <= size <= info.st_size or info.st_nlink != 1
-            or [info.st_dev, info.st_ino] != anchor.get("identity")):
-        raise HostAPIError("CURSOR_EXPIRED", 409)
-    handle.seek(0)
-    remaining, digest = size, hashlib.sha256()
-    while remaining:
-        raw = handle.read(min(remaining, 256 * 1024))
-        if not raw:
-            raise HostAPIError("CURSOR_EXPIRED", 409)
-        digest.update(raw)
-        remaining -= len(raw)
-    if digest.hexdigest() != anchor.get("sha256") or os.fstat(handle.fileno()).st_nlink != 1:
-        raise HostAPIError("CURSOR_EXPIRED", 409)
-    handle.seek(0)
+    _verify_snapshot(handle, anchor)
 
 
 # LLM: revision来自原请求当前代次及cancel/终态事实，不保存第二套可变版本。

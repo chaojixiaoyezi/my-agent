@@ -425,7 +425,7 @@ def test_corrupt_legacy_or_formal_data_fails_closed(
 
 
 def test_apply_failure_restores_every_touched_authority(tmp_path: Path, monkeypatch):
-    home, _candidates, long_term, daily, lessons, migration = _runtime(tmp_path)
+    home, _candidates, long_term, daily, _lessons, migration = _runtime(tmp_path)
     learning = home.owner_data_dir / "learning_drafts"
     learning.mkdir(parents=True)
     draft = learning / "draft.json"
@@ -460,18 +460,21 @@ def test_apply_failure_restores_every_touched_authority(tmp_path: Path, monkeypa
     ]
     before = _file_state(tracked)
 
-    def _fail_rebuild() -> Path:
-        raise RuntimeError("injected routing write failure")
+    # 候选与 Daily 已写、正式删除尚未提交时的一次模拟写错误：删除未提交，按备份整体恢复。
+    # 删除已提交后的失败改为向前收敛，见 test_rework_r9_memory_migration_generation_recovery。
+    def _fail_formal_write(*_args, **_kwargs):
+        raise OSError("simulated formal write error")
 
-    monkeypatch.setattr(lessons, "rebuild_routing_index", _fail_rebuild)
+    monkeypatch.setattr(long_term, "remove_migrated_legacy", _fail_formal_write)
     report = migration.apply()
 
     assert report.applied is False
     assert "MEMORY_MIGRATION_APPLY_FAILED" in _error_codes(report)
-    assert "injected routing write failure" in report.errors[0].message
+    assert "simulated formal write error" in report.errors[0].message
     assert _file_state(tracked) == before
     assert daily_event.event_id in daily_path.read_text(encoding="utf-8")
     assert Path(report.backup_dir, "manifest.json").is_file()
+    assert not (home.owner_memory_dir / "migration.journal.json").exists()
 
 
 def test_source_change_after_backup_aborts_and_restores_original(

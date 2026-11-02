@@ -20,6 +20,7 @@ from ..common.json_io import (
     write_json_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import read_bytes_beneath
+from ..common.request_execution_ports import RequestExecutionContextUnavailable
 from ..common.strict_json import load_strict_json
 from ..gateway_parts.daemon_metadata import process_host_id, process_identity_is_live
 from ..gateway_parts.multiprocess_background_execution import background_short_operation
@@ -288,6 +289,48 @@ def _finish(plan):
         harvest._lease_path(plan.state).unlink()
 
 
+# 提交后租约清理的普通 I/O 错误最多按同一原计划重试的次数（含首次）。
+_FINISH_ATTEMPTS = 3
+# 执行权未知/上下文缺失的 typed 事实：不得被普通失败或附注吞掉。
+_TYPED_UNKNOWN = (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable)
+
+
+# LLM: 提交后的收尾仍是同一原 _finish（同 plan/scope/lease 短门逐次复核），只对普通 I/O 清理错误有界重试；
+#   租约换代（_HarvestTransactionUnavailable）、执行权未知/过期（typed）与来源换代都不重试、不删除、不新领租约，原样上抛。
+# 函数用途: 释放本拍唯一原租约（删除租约文件），不重做提交、不回滚已提交状态。
+def _finish_committed(plan):
+    for attempt in range(1, _FINISH_ATTEMPTS + 1):
+        try:
+            background_short_operation('harvester_finish', lambda: _finish(plan))
+            return
+        except OSError as error:
+            if isinstance(error, harvest._HarvestTransactionUnavailable) or attempt == _FINISH_ATTEMPTS:
+                raise
+
+
+# LLM: 提交已耐久后，通知与收尾分属 try/finally 责任：通知失败照样执行原 _finish，且通知失败原样对外、不回滚已提交状态；
+#   收尾报出 typed 执行权未知时不能被吞，以它为准并链到通知失败；其余收尾失败只作为通知失败的附注。
+# 函数用途: 发出 Audit 来源岗位通知并保证本拍原租约收尾。
+def _notify_and_finish(agent, plan):
+    try:
+        if plan.working.audit_guarantee:
+            from .source_worker import settle_audit_source_worker, wake_audit_source_worker
+
+            callback = settle_audit_source_worker if plan.working.window_finalized_at > 0 else wake_audit_source_worker
+            background_short_operation('harvester_notify_admission', lambda: _check_plan(plan))
+            callback(agent, plan.state)
+    except BaseException as failure:
+        try:
+            _finish_committed(plan)
+        except _TYPED_UNKNOWN as unknown:
+            if not isinstance(failure, _TYPED_UNKNOWN):
+                raise unknown from failure
+        except Exception as cleanup:
+            failure.add_note(f'harvester_finish_failed:{type(cleanup).__name__}')
+        raise
+    _finish_committed(plan)
+
+
 # LLM: 只在活的原运输中按相同intent恢复自己的已进入异常；恢复门失效时保旧记录和P3未知，不能假失败重送新id。
 # 函数用途: 原文件提交失败时按唯一事务编号回滚，不清除别人的意图。
 def _recover(plan):
@@ -365,11 +408,5 @@ def execute_harvester_source(agent, ref, payload):
     except Exception:
         background_short_operation('harvester_recover', lambda: _recover(plan))
         raise
-    if plan.working.audit_guarantee:
-        from .source_worker import settle_audit_source_worker, wake_audit_source_worker
-
-        callback = settle_audit_source_worker if plan.working.window_finalized_at > 0 else wake_audit_source_worker
-        background_short_operation('harvester_notify_admission', lambda: _check_plan(plan))
-        callback(agent, plan.state)
-    background_short_operation('harvester_finish', lambda: _finish(plan))
+    _notify_and_finish(agent, plan)
     return {'outcome': 'handled', 'status': 'ok' if healthy else 'source_error', 'cursor': plan.state.cursor}

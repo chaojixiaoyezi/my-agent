@@ -305,15 +305,20 @@ def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:
     )
 
 
-# LLM: 记录 Markdown 走私有写（0600/0700）；内容与旧实现逐字节一致。
-# 函数用途: 把一条补丁应用记录写成 Markdown 文件。
+# LLM: 记录 Markdown 走私有写（0600/0700）；内容与旧实现逐字节一致。路径只取任务记录真实的字符串字段
+#   reports_dir / task_dir；字段为空时不写，避免空字符串落成当前工作目录。
+# 函数用途: 把一条补丁应用记录写成 JSON 与 Markdown 文件。
 def _write_patch_apply_record_file(record: PatchApplyRecord, manager) -> None:
+    from pathlib import Path
+
     try:
         task = manager.load(record.run_id)
     except FileNotFoundError:
         return
-    record_json = task.reports_dir_path / "patch_apply.json"
-    record_md = task.task_dir_path / "PATCH_APPLY.md"
+    if not task.reports_dir or not task.task_dir:
+        return
+    record_json = Path(task.reports_dir) / "patch_apply.json"
+    record_md = Path(task.task_dir) / "PATCH_APPLY.md"
     write_private_text_file_atomic(
         record_json,
         json.dumps(patch_apply_record_to_dict(record), ensure_ascii=False, indent=2),
