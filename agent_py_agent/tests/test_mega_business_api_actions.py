@@ -502,7 +502,7 @@ def test_observation_native_task_list_detail_owner_and_missing_db(background_htt
     assert services.observation is not bob.observation
     assert services.observation.store is services.host.conversation_store
     assert services.observation.runtime.db_path == db
-    assert services.observation.runtime.read_only and services.observation.runtime.existing_only
+    assert services.observation.runtime.read_only and not services.observation.runtime.existing_only
 
 
 def test_observation_native_stream_decodes_once_and_reconnects(background_http):
