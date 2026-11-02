@@ -240,7 +240,7 @@ class _BackgroundPort:
 
 class BusinessServices:
     """静态选择原服务。可选端口由组合根注入，绝不从payload或任意函数名加载。"""
-    # LLM: 只绑定当前owner原Store与规范只读库；显式供应的端口不被替换，不缓存请求actor。
+    # LLM: 只绑定当前owner原Store与规范只读库，沿原只读等待预算而非C短写零等待；显式端口不被替换，不缓存请求actor。
     # 函数用途: 按canonical owner-home装配同一owner的业务查询和事件来源。
     def __init__(self, host, *, spaces=None, workflows=None, background=None, capabilities=None, projection=None):
         self.host = host
@@ -272,7 +272,7 @@ class BusinessServices:
 
             self.projection = BusinessObservationService(self.owner_home, owner_id=self.owner_id,
                 store=host.conversation_store, runtime=RuntimeRepository(runtime_db_path(self.owner_home),
-                    read_only=True, existing_only=True))
+                    read_only=True))
         self.approvals = getattr(host, 'business_approval_decider', None)
 
     @property

@@ -82,10 +82,12 @@ class ObservationPage:
 
 
 class BusinessObservationService:
+    # LLM: 观察只借原mode=ro连接及其有界busy等待，不复用C短写的existing_only零等待模式；不建库或迁移。
+    # 函数用途: 绑定同owner原事实源，让并发事件写入的短锁不会中断查询与SSE复核。
     def __init__(self, owner_root, *, owner_id, store=None, runtime=None, readers=None, cursor_key=None, scope_provider=None):
         self.owner_id = owner_id
         self.owner_root, self.store = Path(owner_root).absolute(), store
-        self.runtime = RuntimeRepository(runtime.db_path, read_only=True, existing_only=True) if runtime is not None else None
+        self.runtime = RuntimeRepository(runtime.db_path, read_only=True) if runtime is not None else None
         self.readers = dict(readers or {})
         self.scope_provider = scope_provider
         self._cursor_key = cursor_key if cursor_key is not None else os.urandom(32)
