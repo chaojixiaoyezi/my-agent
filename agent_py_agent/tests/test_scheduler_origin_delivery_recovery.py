@@ -52,6 +52,8 @@ def test_local_origin_freezes_before_canonical_eio_and_preserves_exact_envelope(
     assert backend.prompts == []
 
 
+# LLM: 使用真实脚本和新解释器验证恢复；仅计数副作用目录获写授权，交付与沙箱原断言不变。
+# 函数用途: 验证本地交付失败后只修复交付，不重新执行真实脚本。
 def test_real_script_once_then_new_process_only_repairs_origin_delivery(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core import tool_only_execution
     from agent_py_agent.agent.scheduler.repository import (
@@ -83,11 +85,15 @@ def test_real_script_once_then_new_process_only_repairs_origin_delivery(tmp_path
     claim = case.agent.scheduler_service.claim_wake(signal, now=current).claim
     repo.mark_run_running(claim.run_id, claim.claim_id, now=current)
     owner = case.agent.home_paths.owner_home_dir
-    counter = tmp_path / 'script-counter'
+    effects = tmp_path / 'effects'
+    effects.mkdir()
+    counter = effects / 'script-counter'
     script(owner, f'from pathlib import Path\np=Path({str(counter)!r})\np.write_text(str(int(p.read_text())+1) if p.exists() else "1")\nprint(\'{{"value": 17}}\')')
 
+    # LLM: 调度替身仍调用真实 ScriptRunner，仅显式授权 effects 计数目录并核验执行结果。
+    # 函数用途: 执行一次采集脚本并交回调度业务结果。
     def execute(agent, params, *, tool_name, arguments):
-        result = ScriptRunner(owner).run_script('collect')
+        result = ScriptRunner(owner, extra_write_roots=(effects,)).run_script('collect')
         assert result.ok, result.stderr_preview
         output = json.dumps(result.output_data)
         tool = ToolResult(call_id='real-script-call', tool_name='scripts', status='succeeded', handler_executed=True)

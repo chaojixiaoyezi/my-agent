@@ -100,6 +100,8 @@ def test_unassigned_rejects_run_and_foreign_actor(tmp_path):
     assert not (tmp_path / 'data' / 'workflow_runs').exists()
 
 
+# LLM: 治理授权须先于真实脚本副作用；测试只授予 effects 写根，不放宽生产沙箱或原断言。
+# 函数用途: 验证治理拒绝、恢复与结果核对期间，真实脚本副作用只发生一次。
 @pytest.mark.parametrize('invalid', ['candidate', 'self_review', 'revoked', 'attempt', 'unknown_effect', 'committed_resolution'])
 def test_governance_consumed_before_real_script_effect(tmp_path, invalid):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
@@ -113,7 +115,9 @@ def test_governance_consumed_before_real_script_effect(tmp_path, invalid):
     store = WorkflowRunStore(tmp_path)
     allowed = [invalid != 'revoked']
     broken = [True]
-    counter = tmp_path / 'effect'
+    effects = tmp_path / 'effects'
+    effects.mkdir()
+    counter = effects / 'effect'
     script(tmp_path, f'from pathlib import Path\np=Path({str(counter)!r})\np.write_text((p.read_text() if p.exists() else "")+"executed")\nprint(\'{{"value":1}}\')')
 
     def receipt(ref, record, step_id):
@@ -144,6 +148,8 @@ def test_governance_consumed_before_real_script_effect(tmp_path, invalid):
         receipt_reader=receipt, authorization_check=lambda receipt, record: allowed[0],
         effect_reader=reconcile)
     engine = WorkflowEngine(tmp_path, run_authorizer=guard.require_effect)
+    from agent_py_agent.agent.workflows import ScriptRunner
+    engine.runner = ScriptRunner(tmp_path, extra_write_roots=(effects,))
     first = engine.run_workflow(workflow(step()))
     if invalid in ('unknown_effect', 'committed_resolution'):
         # 已开始/结果未知的旧尝试只能核对，不允许凭新的“批准”重跑。
