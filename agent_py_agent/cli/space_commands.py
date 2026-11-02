@@ -3,11 +3,65 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from functools import partial
+from functools import lru_cache, partial
 from uuid import uuid4
 
-from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+from agent_py_agent.agent.plugin_host.business_action_specs import (
+    business_action_spec,
+    business_schema_bundle,
+    standalone_schema,
+)
+from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_host.schemas import validate_object
+
+# 冻结回执中 HTTP 200 只对应 completed、202 只对应 accepted；服务端回执没有 ok 字段。
+_CONFIRMED_STATES = {200: 'completed', 202: 'accepted'}
+
+
+@lru_cache(maxsize=1)
+def _response_envelope_schema() -> dict:
+    return standalone_schema(business_schema_bundle()['response_envelope_schema'])
+
+
+def _unconfirmed(request: dict, status: int, code: str, body: object) -> dict:
+    """无法确认的结果只投影为未知；保留原准备请求身份，供核对或原样重送同一对象。"""
+    result = {'ok': False, 'http_status': status, 'request_id': request['request_id'],
+              'idempotency_key': request.get('idempotency_key'), 'operation_id': None, 'state': 'unknown',
+              'data': {}, 'error': {'code': code}, 'allowed_actions': [], 'warnings': [], 'effect_outcome': 'unknown'}
+    if isinstance(body, dict) and body:
+        result['body'] = body
+    return result
+
+
+def _contradicts(request: dict, status: int, envelope: dict) -> bool:
+    """HTTP 状态与回执矛盾，或成功 DTO 不符本请求动作时，回执不可采信。"""
+    if envelope['error'] is not None:
+        return status < 400 or envelope['state'] != 'failed'
+    if status >= 400:
+        return True
+    if envelope['state'] not in ('completed', 'accepted', 'failed'):
+        return False  # pending/blocked/unknown 是未完成回执，原样保留但不算成功。
+    if _CONFIRMED_STATES.get(status) != envelope['state']:
+        return True
+    try:
+        business_action_spec(request['action']).validate_result(envelope['data'], accepted=status == 202)
+    except HostAPIError:
+        return True
+    return False
+
+
+def _receipt(request: dict, status: int, body: object) -> dict:
+    """消费冻结回执封套；本地 ok 只表示得到 200/completed 或 202/accepted 且 error=null。"""
+    try:
+        envelope = validate_object(body, _response_envelope_schema())
+    except HostAPIError:
+        envelope = None
+    if envelope is None or _contradicts(request, status, envelope):
+        # 既不能升级为成功，也不能断言未执行。
+        return _unconfirmed(request, status, 'BUSINESS_RESPONSE_INVALID', body)
+    # 回执字段（含权威 request_id/operation_id/effect_outcome/warnings）原样保留，只追加本地投影字段。
+    ok = envelope['error'] is None and envelope['state'] in _CONFIRMED_STATES.values()
+    return {**envelope, 'ok': ok, 'http_status': status, 'idempotency_key': request.get('idempotency_key')}
 
 
 @dataclass(frozen=True)
@@ -46,15 +100,8 @@ class BusinessClient:
         except (OSError, TimeoutError):
             status, body = 0, {}
         if not status:
-            return {'ok': False, 'state': 'unknown', 'http_status': 0,
-                    'error': {'code': 'BUSINESS_TRANSPORT_UNKNOWN'},
-                    'request_id': request['request_id'], 'idempotency_key': request.get('idempotency_key')}
-        if not isinstance(body, dict):
-            body = {}
-        if status not in (200, 201, 202) or body.get('ok') is not True:
-            return {**body, 'ok': False, 'http_status': status,
-                    'state': body.get('state', 'unknown'), 'request_id': request['request_id']}
-        return {**body, 'http_status': status}
+            return _unconfirmed(request, 0, 'BUSINESS_TRANSPORT_UNKNOWN', body)
+        return _receipt(request, status, body)
 
     def call(self, action: str, params: dict) -> dict:
         return self.send(self.prepare(action, params))

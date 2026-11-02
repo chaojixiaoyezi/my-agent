@@ -568,6 +568,8 @@ class GatewayChatClientAgent:
 
 # LLM: 薄/完整客户端共用原 JSON 写传输；身份沿显式 owner/原配置解析器，凭据在 try 前读取，不自动重试；
 #   开关关时凭据不可用降级为不带凭据继续发送，开关开时异常只带原因码和处置提示。
+#   /client/business 的冻结请求 schema 是封闭的：正文只序列化调用方已准备好的副本，个人/群身份只走认证头；
+#   其它端点保留原正文身份合同。
 # 函数用途: 在原Gateway地址发送一次认证请求；真实超时/连接异常保留机器原因，未知错误不伪装瞬态。
 def post_gateway_json(
     agent: object, path: str, payload: dict[str, object], *, timeout: float,
@@ -576,7 +578,8 @@ def post_gateway_json(
     if port <= 0:
         return 0, {}
     owner_identity = getattr(agent, "owner_identity", None) or owner_identity_from_config(agent.config)
-    normalized_payload = _with_client_identity(owner_identity, payload)
+    normalized_payload = (dict(payload) if path == "/client/business"
+                          else _with_client_identity(owner_identity, payload))
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"),
