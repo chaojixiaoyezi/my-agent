@@ -226,8 +226,15 @@ def test_wall_guard_media_ack_uses_outbound_observation(tmp_path, monkeypatch):
         backend = agent.backend
         monkeypatch.setattr(backend, "generate", generate)
         monkeypatch.setattr(generation, "_effective_model_request_timeout_seconds", lambda *_args: 10.0)
+        from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+        from agent_py_agent.agent.contracts.model_call_ledger import ModelCallStartedParams
+
+        ledger = model_call_ledger(agent)
+        ledger.started(ModelCallStartedParams(call_id="guard-media-call", backend=backend.name, model="fixture",
+            input_tokens=0, output_tokens_estimate=0, run_id=params.run_id,
+            metadata={"attempt_id": params.attempt_id}))
         state = generation._ModelGenerationState(agent=agent, params=params,
-            chunk_filter=generation.ToolBoundaryChunkFilter(on_chunk=None), ledger=None, call_id="guard-media-call",
+            chunk_filter=generation.ToolBoundaryChunkFilter(on_chunk=None), ledger=ledger, call_id="guard-media-call",
             tool_rounds=0, first_token_timeout_seconds=0, on_chunk=None, retry_sink=None, messages=messages)
         request = generation.ModelGenerateParams(agent=agent, params=params, prompt="look", tool_rounds=0)
         assert generation._generate_through_wall_guard(request, state).text == "ok"

@@ -265,7 +265,7 @@ def _business_execution_exited(agent, repo, task, ref, claim, matches):
     from ..conversation.run_claim import conversation_claim_interrupt_name
 
     if task.metadata.get("cancellation_control", {}).get("model_worker_exit_unknown"):
-        # 原wall-worker没有按claim/attempt可读的物理观察；逻辑账本failed不解除这项未知责任。
+        # 旧的未跟踪 worker 没有原物理身份；当前账本为空也不能替旧未知补签退出。
         return False
     if not _original_business_claim_finished(task, claim, matches):
         return False
@@ -289,10 +289,7 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
 
     from ..concurrency.interrupt import interrupt_by_name
     from ..conversation.run_claim import conversation_claim_interrupt_name
-    from ..conversation.session_tasks import (
-        freeze_main_only_task_resources,
-        has_model_request_wall_timeout,
-    )
+    from ..conversation.session_tasks import freeze_main_only_task_resources
     from ..conversation.task_resources import cleanup_task_resources, freeze_task_resources
     from ..runtime_db.run_cancellation import RuntimeCancellationTarget, cancel_runtime_run
     from ..tooling.process_scope import ProcessExecutionScope
@@ -310,7 +307,6 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
                 raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
             store.session_tasks.record_execution_cancellation_control(task.task_id, execution_ref=ref,
                 outstanding_refs=[ref.run_id], claim_ref=claim_ref,
-                model_worker_exit_unknown=has_model_request_wall_timeout(agent),
                 resources_prepared=False, resources_confirmed=False)
             cancel_runtime_run(repo, RuntimeCancellationTarget(root_id, ref.run_id, ref.agent_run_id, ref.observed_attempt_id),
                 reason="business_cancel", source="session_task_control")

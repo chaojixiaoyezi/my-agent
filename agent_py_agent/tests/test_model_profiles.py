@@ -465,12 +465,21 @@ def test_selected_model_survives_real_transport_guard_thread(tmp_path, monkeypat
 
     monkeypatch.setattr(generation, "_invoke_backend_generate", generate)
     request = SimpleNamespace(agent=host, prompt="ordinary task")
+    from agent_py_agent.agent.contracts.model_call_ledger import (
+        ModelCallLedger,
+        ModelCallStartedParams,
+    )
+
+    ledger = ModelCallLedger()
+    ledger.started(ModelCallStartedParams(call_id="selected-model-guard", backend="fixture", model="chosen-model",
+        input_tokens=0, output_tokens_estimate=0))
+    state = SimpleNamespace(ledger=ledger, call_id="selected-model-guard")
     with selected_model_scope(host):
         if backend_fails:
             with pytest.raises(RuntimeError, match="provider-test-failure"):
-                generation._generate_with_wall_timeout(request, SimpleNamespace())
+                generation._generate_with_wall_timeout(request, state)
         else:
-            assert generation._generate_with_wall_timeout(request, SimpleNamespace()).text == "done"
+            assert generation._generate_with_wall_timeout(request, state).text == "done"
         assert host.config.model_name == "chosen-model"
     assert len(observed) == 1 and observed[0][:3] == ("chosen-model",) * 3
     assert observed[0][3] != threading.get_ident()

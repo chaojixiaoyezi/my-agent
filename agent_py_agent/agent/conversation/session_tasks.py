@@ -557,6 +557,7 @@ class SessionTaskStore:
                 **previous, "outstanding_refs": refs, "execution_outstanding_refs": own,
                 "execution_ref": execution_ref.to_dict(),
                 **({"claim_ref": dict(claim_ref)} if claim_ref is not None else {}),
+                # False 不抹旧未知；无原 worker/进程退出证据就仍保留原取消责任。
                 **({"model_worker_exit_unknown": True} if model_worker_exit_unknown else {}),
                 **({"claim_finished": True} if claim_finished else {}),
                 **({"resource_refs": list(resources.values())} if resource_refs is not None else {}),
@@ -588,6 +589,9 @@ class SessionTaskStore:
                 if expected_resource_refs is not None and (previous.get("resource_refs") != expected_resource_refs
                         or previous.get("resources_prepared") is not True):
                     raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+                if previous.get("model_worker_exit_unknown"):
+                    # 不能绕过原停止观察，单凭当前无在途模型就核收旧未跟踪 worker。
+                    raise ValueError("SESSION_TASK_MODEL_WORKER_EXIT_UNCONFIRMED")
                 resolved = set(confirmed_refs)
                 own = [ref for ref in held if ref not in resolved]
                 refs = list(dict.fromkeys([*(ref for ref in previous.get("outstanding_refs", []) if ref not in resolved),
@@ -989,6 +993,7 @@ def freeze_main_only_task_resources(scope: Any) -> Any:
 
 
 def has_model_request_wall_timeout(agent: Any) -> bool:
+    """保留旧公开配置查询；有超时配置不代表存在 worker，更不代表其退出未知。"""
     from ..agent_core.model.call_runtime import model_request_timeout_seconds
 
     return model_request_timeout_seconds(agent) > 0

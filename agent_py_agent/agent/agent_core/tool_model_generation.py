@@ -1238,7 +1238,11 @@ def _generate_through_wall_guard(
     if timeout <= 0:
         return _invoke_backend_generate(request.agent.backend, request.prompt, state)
 
+    from ..conversation.background_shutdown import start_background_model_worker
+
     results: Queue[_BackendGenerateResult | object] = Queue()
+    # 出生前取得准确调用的保留权；缺账、缺 call 或保留失败必须阻止真正发出模型请求。
+    worker_retention = state.ledger.retain_call(state.call_id)
 
     def _target() -> None:
         try:
@@ -1248,12 +1252,19 @@ def _generate_through_wall_guard(
         except BaseException as exc:  # pragma: no cover - exercised through queue result.
             results.put(_BackendGenerateResult(exc=exc))
         finally:
-            set_interrupt(False)
+            try:
+                set_interrupt(False)
+            finally:
+                # 归 worker 所有，不能被已经超时/取消的 caller 提前释放。
+                worker_retention.release()
 
-    execution_context = copy_context()
-    worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard", daemon=True)
-    from ..conversation.background_shutdown import start_background_model_worker
-
+    try:
+        execution_context = copy_context()
+        worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard", daemon=True)
+    except BaseException:
+        # 尚未调用原启动入口，确定没有 worker；启动尝试后的异常则不能这样释放。
+        worker_retention.release()
+        raise
     start_background_model_worker(worker)
     with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
         return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)

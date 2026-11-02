@@ -137,7 +137,15 @@ def test_generation_queue_wakes_before_slow_cancel_and_accepts_late_result(monke
     monkeypatch.setattr(generation_module, "_interrupt_generation_worker", slow_cancel)
     monkeypatch.setattr(generation_module, "_effective_model_request_timeout_seconds", lambda *args: 5.0)
     request = SimpleNamespace(agent=SimpleNamespace(backend=None))
-    state = SimpleNamespace(liveness=SimpleNamespace(abandon=lambda: None))
+    from agent_py_agent.agent.contracts.model_call_ledger import (
+        ModelCallLedger,
+        ModelCallStartedParams,
+    )
+
+    ledger = ModelCallLedger()
+    ledger.started(ModelCallStartedParams(call_id="queue-cancellation-guard", backend="fixture", model="fixture",
+        input_tokens=0, output_tokens_estimate=0))
+    state = SimpleNamespace(liveness=SimpleNamespace(abandon=lambda: None), ledger=ledger, call_id="queue-cancellation-guard")
     caller = threading.Thread(target=call)
     caller.start()
     try:

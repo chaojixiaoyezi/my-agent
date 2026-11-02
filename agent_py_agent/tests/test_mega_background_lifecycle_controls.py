@@ -453,7 +453,10 @@ def test_retirement_observes_original_pty_exit_without_second_stop(tmp_path):
 def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 
-    agent, backend, scheduler, call, task_id, _view = native_cancellation_case(tmp_path, request_timeout=30)
+    from agent_py_agent.agent.contracts.model_call_ledger import model_call_drain_snapshot
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent, backend, scheduler, call, task_id, _view = native_cancellation_case(tmp_path, request_timeout=AgentConfig().request_timeout)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(scheduler.tick)
         try:
@@ -463,7 +466,11 @@ def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_pat
             assert pending["state"] == "pending"
             future.result(timeout=15)
             assert backend.waiting_worker.is_alive() and not backend.returned.is_set()
-            # claim/core已经finally，原物理模型worker仍活着；不能用逻辑终态/账本无active记录冒充退出。
+            target = agent.conversation_store.session_tasks.require(task_id).target_thread_id
+            authority = agent.conversation_store.claims.load(target)["runtime_authority"]
+            assert any(tokens and record.run_id == authority["run_id"] and record.metadata.get("attempt_id") == authority["attempt_id"]
+                       for _ledger, record, tokens in model_call_drain_snapshot())
+            # claim/core已经finally，原模型worker仍活着；逻辑终态不能抹掉准确调用的保留权。
             again = call("tasks.cancel", {"task_id": task_id, "include_descendants": True})
             assert again["state"] == "pending" and again["outstanding_refs"]
             assert agent.conversation_store.session_tasks.require(task_id).metadata["cancellation_control"]["outstanding_refs"]
@@ -474,6 +481,7 @@ def test_native_wall_guard_keeps_unobserved_physical_worker_exit_pending(tmp_pat
                 assert not backend.waiting_worker.is_alive()
             future.result(timeout=15)
     assert not (agent.home_paths.owner_home_dir / "after-cancel-result.txt").exists()
+    assert call("tasks.cancel", {"task_id": task_id, "include_descendants": True})["state"] == "completed"
 
 
 def test_native_cancellation_leaves_unrelated_active_execution_untouched(tmp_path):
