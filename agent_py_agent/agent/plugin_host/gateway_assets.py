@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import contextmanager
+from copy import deepcopy
 
 from ..assets.descriptor import execution_definition_ref
 from ..assets.script_store import ScriptStore
 from ..assets.workflow_store import WorkflowStore
 from ..path_access_policy import HostSandboxPaths
 from ..tooling.sandbox import SandboxUnavailable
+from ..workflows.datasource_runtime import bind_script_execution_record
 from ..workflows.engine import WorkflowEngine
 from ..workflows.run_store import WorkflowRunStore
 from ..workflows.script_runner import ScriptRunner
@@ -29,17 +32,31 @@ def _asset_revision(metadata: object, version: object) -> int:
     return 1
 
 
-# LLM: 仅读取目标Owner私有ScriptStore（禁用全局extra_roots），同时返回授权AssetGrant与完整执行配置摘要。
-# 函数用途: 读取当前Owner已注册脚本的AssetGrant与执行完整性指纹。
-def _script_fingerprint(
-    home, script_id: str, allowed_assets: tuple[AssetGrant, ...] = ()
-) -> tuple[AssetGrant, str]:
+# LLM: 仅读取目标Owner私有ScriptStore（禁用全局extra_roots），返回独立副本；授权与执行只消费这一份。
+# 函数用途: 取得当前Owner已注册脚本的一份私有执行记录。
+def _script_record(home, script_id: str) -> dict:
     try:
         record = ScriptStore(home, extra_roots=()).get_script(script_id)
     except (ValueError, KeyError, OSError) as exc:
         raise HostAPIError("ASSET_NOT_FOUND", 404) from exc
     if record is None:
         raise HostAPIError("ASSET_NOT_FOUND", 404)
+    return deepcopy(record)
+
+
+# LLM: 仅读取目标Owner私有ScriptStore（禁用全局extra_roots），同时返回授权AssetGrant与完整执行配置摘要。
+# 函数用途: 读取当前Owner已注册脚本的AssetGrant与执行完整性指纹。
+def _script_fingerprint(
+    home, script_id: str, allowed_assets: tuple[AssetGrant, ...] = ()
+) -> tuple[AssetGrant, str]:
+    return _record_fingerprint(script_id, _script_record(home, script_id), allowed_assets)
+
+
+# LLM: 授权与完整执行定义摘要都由同一份记录计算；旧代码摘要与修订授权兼容判定不变。
+# 函数用途: 从一份脚本记录派生AssetGrant与执行完整性指纹。
+def _record_fingerprint(
+    script_id: str, record: dict, allowed_assets: tuple[AssetGrant, ...] = ()
+) -> tuple[AssetGrant, str]:
     rev = _asset_revision(record.get("metadata"), record.get("version"))
     code_digest = hashlib.sha256(str(record["code"]).encode("utf-8")).hexdigest()
     record_digest = execution_definition_ref(record, kind='script')
@@ -59,6 +76,19 @@ def _script_fingerprint(
 # 函数用途: 读取并构造当前Owner已注册脚本的AssetGrant。
 def _script_grant(home, script_id: str, allowed_assets: tuple[AssetGrant, ...] = ()) -> AssetGrant:
     return _script_fingerprint(home, script_id, allowed_assets)[0]
+
+
+# LLM: 复制一份私有执行记录，派生指纹须与准入时的AssetGrant(及冻结引用)完全相同；只在原runner调用期间绑定。
+#   准入后被编辑的活记录不能替换被调用正文；原逐步fence与workflow/旧授权兼容判定保持不变。
+# 函数用途: 把已准入的同一份脚本定义钉到一次原runner调用。
+@contextmanager
+def _pinned_script(home, script_id: str, allowed_assets, grant: AssetGrant, reference: str | None = None):
+    record = _script_record(home, script_id)
+    current, digest = _record_fingerprint(script_id, record, allowed_assets)
+    if current != grant or (reference is not None and digest != reference):
+        raise HostAPIError("ASSET_CHANGED", 409)
+    with bind_script_execution_record(home, script_id, None, record):
+        yield
 
 
 # LLM: 固定覆盖描述符（不含运行统计）、步骤与正文，不随兼容授权模式缩减校验范围。
@@ -200,6 +230,10 @@ def execute_registered_asset(
     payload = json.loads(plan.payload_json)
     home = context.owner_home.home_dir
     policy = context.execution_policy
+    # 准入时的原AssetGrant是执行身份；之后的活记录只能被核对，不能另选正文。
+    admitted = getattr(plan, "asset", None) or getattr(fence, "asset", None)
+    if type(admitted) is not AssetGrant:
+        raise HostAPIError("ASSET_DENIED", 403)
     max_timeout = _budget_timeout_seconds(context)
     deadline = time.monotonic() + max_timeout
     runner = ScriptRunner(
@@ -207,24 +241,32 @@ def execute_registered_asset(
         host_credential_env_names=host_credential_env_names, host_path_protection=host_path_protection,
     )
     if plan.action == "execute.script":
-        try:
-            result = runner.run_script(
-                payload["script_id"],
-                inputs=payload.get("inputs") or {},
-                timeout_seconds=max_timeout,
-                network_access=False,
-            )
-        except SandboxUnavailable as exc:
-            fence.check()
-            raise HostAPIError("HOST_NOT_READY", 503, "not_started") from exc
-        except (ValueError, KeyError, OSError, RuntimeError):
-            fence.check()
-            return False, "SCRIPT_EXECUTION_FAILED"
+        with _pinned_script(home, payload["script_id"], policy.allowed_assets, admitted):
+            try:
+                result = runner.run_script(
+                    payload["script_id"],
+                    inputs=payload.get("inputs") or {},
+                    timeout_seconds=max_timeout,
+                    network_access=False,
+                )
+            except SandboxUnavailable as exc:
+                fence.check()
+                raise HostAPIError("HOST_NOT_READY", 503, "not_started") from exc
+            except (ValueError, KeyError, OSError, RuntimeError):
+                fence.check()
+                return False, "SCRIPT_EXECUTION_FAILED"
         fence.check()
         return bool(result.ok), "" if result.ok else (result.error_code or "SCRIPT_EXECUTION_FAILED")
+    workflow = None
     if plan.action == "execute.workflow":
         definition = WorkflowStore(home, extra_roots=()).get_workflow(payload["workflow_id"])
-        steps = definition.to_dict().get("steps") if definition is not None else ()
+        if definition is None:
+            raise HostAPIError("ASSET_NOT_FOUND", 404)
+        # 同一份私有定义既核准入授权、冻结步骤脚本，也交给原引擎执行，引擎不再按ID重读活记录。
+        workflow = deepcopy(definition.to_dict())
+        if _workflow_grant_from_raw(payload["workflow_id"], workflow, policy.allowed_assets) != admitted:
+            raise HostAPIError("ASSET_CHANGED", 409)
+        steps = workflow.get("steps")
     else:
         steps = WorkflowRunStore(home).load_workflow_snapshot(payload["workflow_run_id"]).get("steps")
     frozen_scripts = _freeze_workflow_step_scripts(home, steps, policy)
@@ -245,20 +287,21 @@ def execute_registered_asset(
     ):
         try:
             fence.check()
-            current = _script_fingerprint(home, script_id, policy.allowed_assets)
-            if frozen_scripts.get(script_id) != current:
+            current = frozen_scripts.get(script_id)
+            if current is None:
                 raise HostAPIError("ASSET_CHANGED", 409)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise HostAPIError("EXECUTION_TIMEOUT", 504)
             eff_timeout = max(0.05, remaining if timeout_seconds is None else min(float(timeout_seconds), remaining))
-            res = original_run(
-                script_id,
-                inputs=inputs,
-                timeout_seconds=eff_timeout,
-                override_data_sources=override_data_sources,
-                network_access=False,
-            )
+            with _pinned_script(home, script_id, policy.allowed_assets, *current):
+                res = original_run(
+                    script_id,
+                    inputs=inputs,
+                    timeout_seconds=eff_timeout,
+                    override_data_sources=override_data_sources,
+                    network_access=False,
+                )
             fence.check()
             if _script_fingerprint(home, script_id, policy.allowed_assets) != current:
                 raise HostAPIError("ASSET_CHANGED", 409)
@@ -271,7 +314,7 @@ def execute_registered_asset(
     try:
         if plan.action == "execute.workflow":
             run = engine.run_workflow(
-                payload["workflow_id"],
+                workflow,
                 inputs=payload.get("inputs") or {},
                 trigger_kind="plugin",
                 owner_id=context.owner_home.owner_id,

@@ -129,11 +129,53 @@ def execute_worker_claim(snapshot, claim, pool):
             raise
         native_client.finish(materialized['handle'])
         owner = require_execution_binding(binding, read_json_file(claim.path))
-    agent = pool.get(owner)
-    require_execution_agent(binding, read_json_file(claim.path), agent)
     paths = gateway_paths_from_root(snapshot.bootstrap.launch.gateway_root)
     from .multiprocess_native_executor_scope import native_request_executor_scope
 
     executor_client = getattr(native_client, 'executor_client', None)
+    managed = getattr(pool, 'managed_owner_pool', None)
+    if managed is not None and managed.handles(owner):
+        return _execute_managed_claim(managed, owner, binding, claim, paths, executor_client)
+    agent = pool.get(owner)
+    require_execution_agent(binding, read_json_file(claim.path), agent)
     with pool.pin(agent), worker_execution_scope(binding, agent), native_request_executor_scope(binding, executor_client):
         return _process_claimed_gateway_request_path(agent, paths, claim.path, claim.lease_owner, claim=claim)
+
+
+# LLM: 受管owner经独立准入池原子租用；仍核原P5绑定/实际home，绑定原受管代次后进入同一请求执行链。
+#   冻结的旧直写库唤醒请求不改投规范库：先经本claim原T门持久交接，再由原来源变更处理结清。
+# 函数用途: 在W执行一个已认领的受管owner请求，租用与代次绑定退出必释放。
+def _execute_managed_claim(managed, owner, binding, claim, paths, executor_client):
+    from contextlib import ExitStack
+
+    from ..common.managed_owner_generation import bind_managed_owner_generation
+    from .io import read_json_file
+    from .multiprocess_dispatch_binding import require_execution_agent
+    from .multiprocess_native_executor_scope import native_request_executor_scope
+    from .request_worker import _process_claimed_gateway_request_path
+
+    with ExitStack() as stack:
+        agent = stack.enter_context(managed.acquire_pinned(owner))
+        payload = read_json_file(claim.path)
+        require_execution_agent(binding, payload, agent)
+        stack.enter_context(bind_managed_owner_generation(agent._managed_owner_generation))
+        stack.enter_context(worker_execution_scope(binding, agent))
+        stack.enter_context(native_request_executor_scope(binding, executor_client))
+        if _frozen_legacy_wake(agent, payload):
+            from .request_binding import GatewayActiveTurnTransition
+
+            transition = GatewayActiveTurnTransition(claim.path, claim.request_id, claim.execution_attempt_id)
+            managed.reconcile(owner, commit_transition=lambda operation: transition("managed_dispatch_handoff", operation))
+        return _process_claimed_gateway_request_path(agent, paths, claim.path, claim.lease_owner, claim=claim)
+
+
+# LLM: 只读原冻结来源字段；仅wake类且store_ref不是本Agent规范会话库时为旧直写库请求，坏字段交原执行链拒绝。
+# 函数用途: 判断已认领请求是否指向旧owner直写会话库的唤醒。
+def _frozen_legacy_wake(agent, payload):
+    from pathlib import Path
+
+    source = (payload.get("metadata") or {}).get("background_source") if isinstance(payload, dict) else None
+    if not isinstance(source, dict) or source.get("kind") != "wake" or type(source.get("store_ref")) is not str:
+        return False
+    actual = Path(agent.conversation_store.storage.root).relative_to(agent.home_paths.owner_home_dir).as_posix()
+    return source["store_ref"] != actual

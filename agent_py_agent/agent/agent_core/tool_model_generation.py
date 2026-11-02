@@ -1440,10 +1440,13 @@ def _register_call_before_send(backend, prompt: str, state: _ModelGenerationStat
 #   失败即 provider I/O 未开始；只在 _CallLiveness 复核通过时被调用。
 # 函数用途: 在真正发出请求前完成本次调用的登记与插话提交。
 def _mark_call_before_send(backend, prompt: str, state: _ModelGenerationState) -> None:
+    from ..common.managed_owner_generation import require_agent_managed_owner_generation
     from ..model_request_selection import before_model_request_send
     from .runtime.guidance import mark_injected_turn_input_submitted
     from .subagent.model_selection import mark_subagent_business_request_submitted
 
+    # 受管原代次在任何登记/插话提交前复核；失效时provider I/O未开始。
+    require_agent_managed_owner_generation(state.agent, "model_generation")
     mark_subagent_business_request_submitted(state.agent, state.params, provider_call_id=state.call_id)
     before_model_request_send(backend, prompt, state)
     mark_injected_turn_input_submitted(state.agent, state.params, provider_call_id=state.call_id)

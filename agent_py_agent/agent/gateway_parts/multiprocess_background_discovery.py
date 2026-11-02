@@ -186,6 +186,9 @@ class CoordinatorBackgroundRequests:
         owner, home = target.identity, target.home_dir
         if owner.owner_kind not in {"user", "group"} and owner != OwnerIdentity.local_main():
             return
+        canonical = self._managed_canonical_root(owner)
+        if canonical is False:
+            return
         from .owner_conversation_store import owner_conversation_store_from_config
         from .owner_resources import resolve_owner_resource_configuration
         from .runtime_wake_source import freeze_runtime_wake, runtime_wake_reader
@@ -227,6 +230,9 @@ class CoordinatorBackgroundRequests:
                 candidates.append(("learning", learning.registry_path))
         for pattern in _STORE_ROOT_PATTERNS:
             for root in sorted(home.glob(pattern)):
+                # 受管owner只发现唯一规范会话库；旧直写库派单经上方持久交接迁入，不再另起旧库请求。
+                if canonical is not None and root.relative_to(home) != canonical:
+                    continue
                 for urgency in ("urgent", "normal"):
                     candidates.extend(("wake", path) for path in _source_page(self, root / "wake_queue" / urgency, "*.json"))
                 candidates.extend(("observation", path) for path in _source_page(self, root / "observations", "*.jsonl"))
@@ -269,6 +275,33 @@ class CoordinatorBackgroundRequests:
                 from .logging import _report_gateway_side_effect_error
 
                 _report_gateway_side_effect_error("background_source_discovery", owner.owner_id, error)
+
+    # LLM: 只对已登记受管普通用户先经本owner原commit门有界交接旧直写库派单；门拒绝的单条派单原样保留待下一轮。
+    #   受管判定失败时报告并跳过该owner本轮发现，不猜测其规范会话库；非受管owner返回None且无新I/O。
+    # 函数用途: 返回受管owner唯一规范会话库相对owner home的路径，非受管返回None，无法判定返回False。
+    def _managed_canonical_root(self, owner):
+        from ..user_space.local_user_store import LocalUserStore
+        from ..user_space.managed_dispatch_recovery import (
+            canonical_conversation_root,
+            reconcile_managed_dispatches,
+        )
+        from .logging import _report_gateway_side_effect_error
+        from .managed_owner_runtime import managed_local_user_id
+
+        try:
+            uid = managed_local_user_id(self.control.home_root, owner)
+            if uid is None:
+                return None
+            managed_home = LocalUserStore(self.control.home_root).owner_home(uid)
+        except Exception as error:
+            _report_gateway_side_effect_error("background_source_discovery", owner.owner_id, error)
+            return False
+        try:
+            reconcile_managed_dispatches(managed_home, commit_transition=lambda operation: self.commit(owner, operation))
+        except (OSError, ValueError, TypeError) as error:
+            # 旧库不可读只让本轮交接停下并保留原工作；规范库发现照常，其它owner不受影响。
+            _report_gateway_side_effect_error("managed_dispatch_handoff", owner.owner_id, error)
+        return canonical_conversation_root(managed_home).relative_to(managed_home.home_dir)
 
     # LLM: 原controller/lease末门仅同步commit，Root关闭与实际副作用同锁；不持任何门做模型、网络、join或完整owner发现。
     # 函数用途: 在原C仍有效且未停止producer时完成一个短原写动作。

@@ -47,7 +47,11 @@ from .models import (
     output_policy_for_outcome,
 )
 from .output_projection import project_tool_output_body
-from .registry_invoke import RegistryToolInvokeRequest, invoke_registry_tool
+from .registry_invoke import (
+    RegistryToolInvokeRequest,
+    _managed_generation_denial,
+    invoke_registry_tool,
+)
 from .registry_workspace import effective_registry_cwd
 from .runtime_boundary import canonicalize_owner_home_arguments
 from .runtime_contracts import (
@@ -281,6 +285,10 @@ def _execute_authorized(
             states.append("failed")
             return ToolExecution(call, denial, _decision_result(call, denial, started_at, input_sources=sources),
                                  (*states, "persisted", "projected"))
+        # 审批等待之后、领取与handler之前复核受管原代次；失效时不进入handler。
+        generation_outcome = _managed_generation_denial(call.tool_name, "tool_after_approval")
+        if generation_outcome is not None:
+            return _pre_handler_failure_execution(request, call, runtime, decision, progress, generation_outcome)
     states.append("approved")
     if decision.sandbox_plan:
         states.append("sandbox_prepared")

@@ -32,6 +32,10 @@ from ..attempt.sandbox import (
     gateway_bound_ports,
 )
 from ..common.log_redaction import redact_sensitive_value
+from ..common.managed_owner_generation import (
+    ManagedOwnerGenerationError,
+    require_managed_owner_generation,
+)
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
 from ..path_access_policy import (
     HostSandboxPaths,
@@ -922,6 +926,8 @@ class ScriptRunner:
             private_roots = _script_private_roots(self.owner_home, self.workspace_root) if self.restrict_to_roots else ()
             host = self.host_path_protection
             protected_paths = tuple(dict.fromkeys((*self.write_protection.absolute_paths, *host.readonly)))
+            # 数据源写者复核依赖的精确规格/闸门叶：沙箱与Python守卫都按只读保护，更宽写根下也不可改写；不单独改变守卫启用条件。
+            readonly_paths = tuple(dict.fromkeys((*protected_paths, *ds_runtime.readonly_control_paths)))
             denied_write_roots = tuple(dict.fromkeys((*private_roots, *self.write_protection.denied_roots)))
             hidden_paths = tuple(dict.fromkeys((*host.hidden, *self.host_exclusive_paths)))
             command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
@@ -933,7 +939,7 @@ class ScriptRunner:
                     extra_write_roots=(folder, *self.extra_write_roots, *ds_runtime.write_roots),
                     public_read_roots=tuple(dict.fromkeys((*runtime_read_roots, *self.public_read_roots, *ds_runtime.read_roots))),
                     private_read_roots=private_roots,
-                    protected_write_paths=protected_paths,
+                    protected_write_paths=readonly_paths,
                     write_scope_denied_roots=denied_write_roots,
                     protected_persona_root=self.owner_home,
                     hidden_paths=hidden_paths,
@@ -961,7 +967,7 @@ class ScriptRunner:
                     'agent_home_root': str(self.agent_home_root or ''),
                     'write_roots': [str(p) for p in write_roots],
                     'write_scope_rules': [(str(root), allowed) for root, allowed in ordered_write_scope_roots(write_roots, denied_write_roots)],
-                    'protected_write_paths': [str(p) for p in (*protected_paths, *persona_paths)],
+                    'protected_write_paths': [str(p) for p in (*readonly_paths, *persona_paths)],
                     'protected_write_patterns': host.patterns,
                     'protected_directory_write_patterns': host.directory_write_patterns,
                     'protected_directory_unlink_patterns': host.directory_unlink_patterns,
@@ -1002,6 +1008,8 @@ class ScriptRunner:
             inputs = payload({} if inputs is None else inputs)
             with self._prepare(script_id, inputs, timeout_seconds, override_data_sources, network_access, capture=capture) as prepared:
                 metadata, sources, execution = prepared
+                # 原生脚本进程启动前复核受管原代次；失效时进程未启动。
+                require_managed_owner_generation("native_script_launch")
                 exit_code, stdout, stderr, error, cleanup = _execute(*execution, capture)
             if cleanup:
                 if exit_code is None and not error:
@@ -1025,7 +1033,7 @@ class ScriptRunner:
                 error = 'ENTRYPOINT_MISSING'
             if isinstance(exc, AssetDisabledError):
                 error = exc.error_code
-            if isinstance(exc, ScriptInputTransportError):
+            if isinstance(exc, (ScriptInputTransportError, ManagedOwnerGenerationError)):
                 error = exc.error_code
             stderr = str(exc)
             execution_error = {'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)}

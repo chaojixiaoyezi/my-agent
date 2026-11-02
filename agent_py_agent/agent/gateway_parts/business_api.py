@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
@@ -24,6 +26,13 @@ from ..plugin_host.schemas import thaw, validate_object
 
 _ISSUED = WeakSet()
 
+# W2控制依赖准确owner的原运行库、创建门、进程/PTY清理与Gateway控制；被动组合只服务读与耐久排队。
+_COMPLETE_HOST_ACTIONS = frozenset({
+    'background_agents.suspend', 'background_agents.resume', 'background_agents.restore',
+    'background_agents.retire', 'tasks.cancel', 'subagents.messages.send', 'subagents.cancel',
+    'executions.cancel',
+})
+
 
 @dataclass(frozen=True, eq=False)
 class BusinessCallContext:
@@ -34,6 +43,7 @@ class BusinessCallContext:
     actor: object = field(default=None, repr=False)
     business_context: object = field(default=None, repr=False)
     actor_factory: object = field(default=None, repr=False)
+    host_provider: object = field(default=None, repr=False)
 
     def check(self, action, facts):
         if self not in _ISSUED or not callable(self.authorize):
@@ -48,11 +58,38 @@ class BusinessCallContext:
         return True
 
 
-def bind_business_context(host, *, authorize, subject_id='host', actor=None, business_context=None, actor_factory=None):
+def bind_business_context(host, *, authorize, subject_id='host', actor=None, business_context=None, actor_factory=None,
+                          host_provider=None):
     """仅可信宿主调用；JSON、复制DTO和展示allowed_actions都不能恢复此活跃身份。"""
-    context = BusinessCallContext(host, host.home_paths.owner_id, subject_id, authorize, actor, business_context, actor_factory)
+    context = BusinessCallContext(host, host.home_paths.owner_id, subject_id, authorize, actor, business_context,
+                                  actor_factory, host_provider)
     _ISSUED.add(context)
     return context
+
+
+# LLM: 只有多进程协调器(无业务Agent)未接完整宿主；接线只是静态事实，调用时仍逐次租用并核准确owner。
+# 函数用途: 报告本Gateway组合能否为W2控制提供准确owner完整宿主。
+def complete_host_wired(server):
+    return getattr(server, 'agent', None) is not None
+
+
+# LLM: 调用方已完成原live授权并持ExitStack；main沿原Agent，其它owner经原池原子租用，已登记账号仍由原池拒绝。
+#   已登记普通账号改由独立准入的受管签发器按启用账号/规范home/当前代次原子租用，不克隆管理员实例。
+#   构造/容量/归属失败都在任何账本变更前收为HOST_NOT_READY/not_started，不把未开始的控制报成未知。
+# 函数用途: 为一次业务控制取得准确owner完整宿主，并把租用交给调用方栈直至控制结束。
+def owner_complete_host(server, owner, stack):
+    from .managed_owner_runtime import managed_local_user_id, managed_owner_pool_for_agent
+    from .request_worker import _resolve_request_agent_for_owner
+
+    base = getattr(server, 'agent', None)
+    if base is None:
+        raise HostAPIError('HOST_NOT_READY', 503)
+    try:
+        if managed_local_user_id(base.home_paths.root, owner) is not None:
+            return stack.enter_context(managed_owner_pool_for_agent(base).acquire_pinned(owner))
+        return _resolve_request_agent_for_owner(base, owner, stack)
+    except RuntimeError:
+        raise HostAPIError('HOST_NOT_READY', 503) from None
 
 
 # LLM: 仅资源不可见返回False，其它live授权或损坏异常继续中止整次披露。
@@ -70,13 +107,38 @@ def _record_visible(context, action, facts):
 class _BusinessBackgroundService(BackgroundAgentService):
     """只桥接W1真实空间读口；线程、CAS、任务与幂等仍归原W2。"""
 
-    # LLM: 上下文只保留本次发行身份，不写共享服务或扩张原Actor权限。
+    # LLM: 上下文只保留本次发行身份，不写共享服务或扩张原Actor权限；完整宿主只属本次控制，调用结束即丢弃。
     # 函数用途: 为当前业务调用装配原后台服务和同一实时授权口。
-    def __init__(self, services, context):
-        super().__init__(services.host)
+    def __init__(self, services, context, host=None):
+        super().__init__(services.host if host is None else host)
+        self.services = services
+        self.complete_host = host
         self.spaces = services.spaces
         self.call_context = context
         self.business_actor = services.actor(context)
+
+    # LLM: 被动读取不构造Agent；运行详情只读同owner观察运行库，缺来源时沿原宿主路径失败而非伪报空闲。
+    # 函数用途: 用规范只读RuntimeDB投影当前running claim的准确执行身份。
+    def _execution_view(self, thread):
+        runtime = getattr(self.services.observation, 'runtime', None)
+        if self.complete_host is not None or runtime is None:
+            return super()._execution_view(thread)
+        claim, error = self.store.claims.load_report(thread.thread_id)
+        if error:
+            raise ValueError('CLAIM_UNREADABLE')
+        authority = claim.get('runtime_authority')
+        if claim.get('status') != 'running' or not isinstance(authority, dict):
+            return None
+        try:
+            ref = runtime.parent_execution_ref(owner_id=thread.owner_id, run_id=authority['run_id'],
+                attempt_id=authority['attempt_id'])
+            context = runtime.business_context_for_execution(owner_id=thread.owner_id, run_id=ref.run_id,
+                attempt_id=ref.observed_attempt_id)
+        except sqlite3.Error:
+            raise ValueError('EXECUTION_AUTHORITY_UNAVAILABLE') from None
+        return {'run_id': ref.run_id, 'attempt_id': ref.observed_attempt_id, 'task_id': context.task_id if context else None,
+                'thread_id': thread.thread_id, 'space_id': context.space_id if context else None, 'status': 'running',
+                'effect_outcome': 'running', 'started_at': None, 'ended_at': None, 'error': None, 'retry_refs': []}
 
     # LLM: R3只对新行调用；插件再次核原发行对象、两层创建范围和真实来源，原生元数据完全不变。
     # 函数用途: 为新建插件后台身份/总控附加原安装出处，不迁移、覆盖或重绑已有线程。
@@ -174,31 +236,59 @@ class _BackgroundPort:
         self.services = services
 
     # LLM: 工厂只来自已发行宿主上下文；即便actor保留AuthorizedCall，也必须选真实W2身份，不放宽原_actor。
+    #   控制在原live授权后经调用局部提供者取准确owner完整宿主，租用跨整个控制并在所有退出路径释放。
     # 函数用途: 使用准确通道身份调用原W2，并按同一实时资源谓词过滤列表中的记录。
     def execute(self, action, params, *, actor=None, context=None, expected_revision=None, idempotency_key=''):
         if type(context) is not BusinessCallContext or context not in _ISSUED:
             raise BusinessError('ACTOR_REQUIRED')
-        context.check(action, {'owner_id': self.services.owner_id, **params})
-        if callable(context.actor_factory):
-            actor = context.actor_factory(action)
-        service = _BusinessBackgroundService(self.services, context)
-        try:
-            service._actor(actor)
-            result = self._call(service, action, params, actor, expected_revision, idempotency_key)
-            if action == 'background_agents.list':
-                result = {**result, 'items': [row for row in result['items']
-                    if _record_visible(context, action, {'agent_id': row['agent_id']})]}
-            elif action == 'background_agents.get':
-                result = {**result, 'pending_tasks': [row for row in result['pending_tasks']
-                    if _record_visible(context, action, {'task_id': row['task_id']})]}
-                current = result.get('current_execution')
-                if current is not None and not _record_visible(context, action, current):
-                    result = {**result, 'current_execution': None}
-            return result
-        except (KeyError, FileNotFoundError) as error:
-            raise BusinessError('RESOURCE_NOT_FOUND') from error
-        except PermissionError as error:
-            raise BusinessError('BUSINESS_ACCESS_DENIED') from error
+        facts = {'owner_id': self.services.owner_id, **params}
+        context.check(action, facts)
+        with ExitStack() as stack:
+            host = None
+            if action in _COMPLETE_HOST_ACTIONS:
+                host = self._complete_host(context, stack)
+                # 构造或等待租用可能跨越撤权；任何账本变更前按同一原授权再核一次。
+                context.check(action, facts)
+            if callable(context.actor_factory):
+                actor = context.actor_factory(action)
+            service = _BusinessBackgroundService(self.services, context, host=host)
+            try:
+                service._actor(actor)
+                result = self._call(service, action, params, actor, expected_revision, idempotency_key)
+                if action == 'background_agents.list':
+                    result = {**result, 'items': [row for row in result['items']
+                        if _record_visible(context, action, {'agent_id': row['agent_id']})]}
+                elif action == 'background_agents.get':
+                    result = {**result, 'pending_tasks': [row for row in result['pending_tasks']
+                        if _record_visible(context, action, {'task_id': row['task_id']})]}
+                    current = result.get('current_execution')
+                    if current is not None and not _record_visible(context, action, current):
+                        result = {**result, 'current_execution': None}
+                return result
+            except (KeyError, FileNotFoundError) as error:
+                raise BusinessError('RESOURCE_NOT_FOUND') from error
+            except PermissionError as error:
+                raise BusinessError('BUSINESS_ACCESS_DENIED') from error
+
+    # LLM: 无提供者表示可信组合根直接给出的就是owner自身宿主；提供者只能给出同owner、同home、同规范Store的实例。
+    #   只有配置投影而无自有Store的组合对象没有独立运行时，沿原规范组合执行；未接线或归属漂移在变更前拒绝。
+    # 函数用途: 取得并核验一次控制所用的准确owner完整宿主，返回None表示沿用原组合宿主。
+    def _complete_host(self, context, stack):
+        if not self.services.complete_host_wired:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        if not callable(context.host_provider):
+            return None
+        host = context.host_provider(stack)
+        store = getattr(host, 'conversation_store', None)
+        if store is None:
+            return None
+        paths = getattr(host, 'home_paths', None)
+        expected = getattr(getattr(self.services.host, 'conversation_store', None), 'storage', None)
+        if (getattr(paths, 'owner_id', None) != self.services.owner_id
+                or Path(paths.owner_home_dir).resolve() != self.services.owner_home
+                or expected is None or Path(store.storage.root).resolve() != Path(expected.root).resolve()):
+            raise HostAPIError('HOST_NOT_READY', 503)
+        return host
 
     def _call(self, service, action, params, actor, revision, key):
         options = {'actor': actor, 'idempotency_key': key}
@@ -284,6 +374,8 @@ class BusinessServices:
                 store=host.conversation_store, runtime=RuntimeRepository(runtime_db_path(self.owner_home),
                     read_only=True))
         self.approvals = getattr(host, 'business_approval_decider', None)
+        # 被动组合由组合根声明完整宿主接线；直接传入的宿主本身即owner宿主。
+        self.complete_host_wired = bool(getattr(host, 'business_complete_host_wired', True))
 
     @property
     def observation(self):
@@ -335,6 +427,8 @@ class BusinessServices:
                 return callable(self.workflows.context_provider) and callable(self.workflows.engine_factory)
             return self.workflows is not None
         if implementer == 'W2':
+            if action in _COMPLETE_HOST_ACTIONS and not self.complete_host_wired:
+                return False
             return callable(getattr(self.background, 'execute', None))
         if implementer == 'W6':
             return action == 'spaces.packages.catalog' or callable(getattr(self.capabilities, 'execute', None))
@@ -519,7 +613,7 @@ def dispatch_business_action(request: dict, *, authenticated_context: object, se
 
 
 def native_business_context(handler, server):
-    """只消费原HTTP身份并只读装配owner Store；线程创建延至已验证的W2写动作。"""
+    """只消费原HTTP身份并只读装配owner Store；线程创建延至已验证的W2写动作，控制宿主只在调用内租用。"""
     from types import SimpleNamespace
 
     from ..auth.middleware import _handler_peer_ip
@@ -533,7 +627,8 @@ def native_business_context(handler, server):
     scope = _gateway_control_scope(handler, {}, user_id=user_id, channel=channel)
     owner = resolve_gateway_scope_owner(base, scope)
     home = home_paths_with_owner(base.home_paths, resolve_owner_home(base.home_paths.root, owner))
-    host = SimpleNamespace(home_paths=home, config=base.config)
+    wired = complete_host_wired(server)
+    host = SimpleNamespace(home_paths=home, config=base.config, business_complete_host_wired=wired)
     if getattr(base, 'conversation_store', None) is not None:
         from .owner_conversation_store import owner_conversation_store
         host.conversation_store = owner_conversation_store(base, home, initialize=False)
@@ -582,12 +677,15 @@ def native_business_context(handler, server):
         return HostChannelActor(home.owner_id, source.thread_id, 'business-' + uuid4().hex,
             channel, scope.conversation_id, user_id)
 
-    context = bind_business_context(host, authorize=check, subject_id=user_id, actor_factory=background_actor)
+    # 提供者只绑定本次已解析的owner；调用时由端口先过同一live check再租用，不缓存宿主或授权。
+    context = bind_business_context(host, authorize=check, subject_id=user_id, actor_factory=background_actor,
+        host_provider=lambda stack: owner_complete_host(server, owner, stack))
     cache = getattr(server, '_business_services', None)
     if cache is None:
         cache = server._business_services = {}
     key = (home.owner_id, str(home.owner_home_dir))
     if (key not in cache or cache[key].host.config is not base.config
+            or cache[key].complete_host_wired != wired
             or cache[key].spaces.enabled != bool(getattr(base.config, 'business_spaces_enabled', False))
             or getattr(getattr(getattr(cache[key].host, 'conversation_store', None), 'storage', None), 'root', None)
             != getattr(getattr(getattr(host, 'conversation_store', None), 'storage', None), 'root', None)):

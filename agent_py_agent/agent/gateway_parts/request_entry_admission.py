@@ -22,6 +22,10 @@ def request_execution_required():
 # LLM: component名称来自原产品绑定，不解析正文/role；同实际Agent/home且原活token才短核claim，合法前台无需BACKGROUND_REQUEST。
 # 函数用途: 在原业务实际执行前核当前准确请求，缺scope或跨owner不得进入模型/持久业务。
 def require_request_execution(*, agent=None, component=None, component_attribute="", home=None):
+    from ..common.managed_owner_generation import require_agent_managed_owner_generation
+
+    # 受管原代次在任何持久业务入口前只收窄复核；普通/未绑定执行保持原纯内存路径。
+    require_agent_managed_owner_generation(agent, "request_admission")
     if not request_execution_required():
         return
     execution = current_worker_execution()

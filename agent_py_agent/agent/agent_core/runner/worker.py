@@ -7,12 +7,13 @@ import inspect
 import logging
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
 from ...backends.provider_headers import provider_agent_owner_scope
+from ...common.managed_owner_generation import current_managed_owner_generation
 from ...common.runner_thread_origin import _capture_runner_thread, _finish_original_runner_thread
 from ...runtime_db.operations import RuntimeConflictError
 from ...settings import AgentConfig
@@ -52,6 +53,9 @@ class RunSubagentWorkerParams:
     backend_override: object | None = None
     expected_attempt_id: str | None = None
     request_transport: object | None = None
+    # 只在父执行线程构造时捕获进程内已签发的受管原代次对象；序列化或重建的副本不是授权。
+    managed_owner_generation: object | None = field(
+        default_factory=current_managed_owner_generation, repr=False, compare=False)
 
 
 # LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
@@ -60,20 +64,30 @@ class RunSubagentWorkerParams:
 #   worker退出确定性关闭独立MCP工具；清理异常不覆盖业务结果，也不关闭父agent共享工具。
 # 函数用途: 运行子代理工作片并收尾独立MCP客户端，保留原attempt及待续跑合同。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
+    from ...common.managed_owner_generation import bind_managed_owner_generation
     from ...core import SimpleAgent
 
     if (refusal := _admission_closed_refusal(params)) is not None:
         return refusal
-    worker = _build_worker_agent(SimpleAgent, params)
-    from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
+    generation = params.managed_owner_generation or getattr(
+        getattr(getattr(getattr(params.request_transport, "scope", None), "execution", None), "agent", None),
+        "_managed_owner_generation", None)
+    with bind_managed_owner_generation(generation):
+        if (refusal := _managed_generation_refusal(params)) is not None:
+            return refusal
+        worker = _build_worker_agent(SimpleAgent, params)
+        if generation is not None:
+            # 子worker沿父执行的同一原代次；其后续线程经provider/工具关口只收窄复核，不重新签发。
+            worker._managed_owner_generation = generation
+        from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
 
-    try:
-        if params.request_transport is not None:
-            params = replace(params, request_transport=replace(params.request_transport, worker_agent=worker))
-        with child_worker_scope(params.request_transport, worker):
-            return _run_bound_subagent_worker(worker, params)
-    finally:
-        _close_worker_mcp_clients(worker, params)
+        try:
+            if params.request_transport is not None:
+                params = replace(params, request_transport=replace(params.request_transport, worker_agent=worker))
+            with child_worker_scope(params.request_transport, worker):
+                return _run_bound_subagent_worker(worker, params)
+        finally:
+            _close_worker_mcp_clients(worker, params)
 
 
 # LLM: 父原tools身份仍跳过；独立门面一律调用close，由其所有权/借用计数决定关闭或释放，异常只告警。
@@ -185,6 +199,26 @@ def _admission_closed_refusal(params: RunSubagentWorkerParams) -> SubAgentRunner
         turn_end_reason=FailureType.MODEL_CALL_ADMISSION_CLOSED.value,
         runner_last_error=MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
     )
+
+
+# LLM: 受管原代次在子worker构造前复核；失效时与准入关门同样不建worker、不激活、不写结果，预留执行轮原样保留。
+# 函数用途: 受管账号/安全/治理权威变化后拒绝启动新的子代理runner，未绑定代次或预览时返回None。
+def _managed_generation_refusal(params: RunSubagentWorkerParams) -> SubAgentRunnerResult | None:
+    from ...common.managed_owner_generation import (
+        ManagedOwnerGenerationError,
+        require_managed_owner_generation,
+    )
+
+    if params.dry_run:
+        return None
+    try:
+        require_managed_owner_generation("child_worker")
+    except ManagedOwnerGenerationError as error:
+        return SubAgentRunnerResult(
+            run_id=params.run_id, dry_run=False, ok=False, status="PENDING", verification_status="UNVERIFIED",
+            message="受管账号授权已变化：没有启动 runner，预留的执行轮保持不变", runner_last_error=error.code,
+        )
+    return None
 
 
 # LLM: 原 result 可能早于并发授权；session 结束后复读 canonical，只为原 attempt 的 PENDING 接续。

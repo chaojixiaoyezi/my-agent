@@ -330,6 +330,10 @@ def _invoke_auxiliary_generate(
         _observe_provider_attempt, cache_diagnostics=_is_compact_purpose(request.purpose),
     ):
         with global_llm_admission_slot():
+            from ..common.managed_owner_generation import require_managed_owner_generation
+
+            # 准入槽等待之后、后端调用之前复核受管原代次。
+            require_managed_owner_generation("auxiliary_generation")
             llm_inflight(1)
             try:
                 return _call_backend(generate, request, on_chunk, timeouts=call.timeouts)

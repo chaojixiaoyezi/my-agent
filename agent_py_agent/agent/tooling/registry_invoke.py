@@ -628,6 +628,9 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             failure_stage=ToolFailureStage.RUNTIME_GATE,
             handler_executed=False,
         )
+    denial = _managed_generation_denial(request.tool_name, "tool_invocation")
+    if denial is not None:
+        return denial
     handler_started = False
     try:
         token = request.invocation_context.cancellation_token
@@ -683,6 +686,25 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
         ),
         handler_executed=handler_started,
     )
+
+
+# LLM: 受管原代次在handler前复核；失效只返回未执行的结构化拒绝，不进入handler，已发生结果/清理不经本门。
+#   error_code沿分类表的通用权限拒绝码，具体变化原因只进reported_error_code，恢复逻辑不会遇到未登记码。
+# 函数用途: 在新工具效果前确认受管账号、安全与治理权威仍是原代次。
+def _managed_generation_denial(tool_name: str, phase: str) -> ToolHandlerOutcome | None:
+    from ..common.managed_owner_generation import (
+        ManagedOwnerGenerationError,
+        require_managed_owner_generation,
+    )
+
+    try:
+        require_managed_owner_generation(phase)
+    except ManagedOwnerGenerationError as error:
+        outcome = structured_tool_error(tool_name, error.message, "受管账号授权已变化；本次动作未执行。",
+                                        error_code="TOOL_EXECUTION_DENIED")
+        outcome.reported_error_code = error.code
+        return apply_tool_execution_facts(outcome, failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False)
+    return None
 
 
 # LLM: 回调只由执行器注入且不接收 arguments；捕获观察异常是保主流程，不绕过任何权限门。

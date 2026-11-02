@@ -68,18 +68,31 @@ class GatewayBusinessDomain:
     # 函数用途: 保留读取/控制接线，明确关闭插件异步执行。
     def ready(self, action):
         """报告原Gateway上的静态接线，不以暖Agent或某次Owner运行依赖代替接线状态。"""
+        from ..gateway_parts.business_api import _COMPLETE_HOST_ACTIONS, complete_host_wired
+
         if self.resources.root is None or action not in business_plugin_actions():
             return False
         if action != 'business.events.stream' and _requires_restricted_async_adapter(business_native_action(action)):
             return False
         base = self._base()
+        # 多进程协调器只有控制面、没有业务Agent：W2控制在静态接线上即不可用，与调用路径同为HOST_NOT_READY。
+        if (base is not None and action != 'business.events.stream'
+                and business_native_action(action) in _COMPLETE_HOST_ACTIONS
+                and not complete_host_wired(self.resources.server)):
+            return False
         # 显式关闭仍即时生效；真实调用的权限、领域ready和W14流依赖门保持原位。
         return getattr(getattr(base, 'config', None), 'business_spaces_enabled', None) is not False
 
     # LLM: 保留原发行对象；每次授权均重新读有效owner并解析canonical目标，不把business能力提升成owner全域。
+    #   控制宿主提供者只绑原AuthorizedCall与已核身份；租用前重读live上下文，资源交集仍由同一check强制。
     # 函数用途: 为同一安装建立带原资源范围和宿主actor工厂的业务调用上下文。
     def context(self, authorized):
-        from ..gateway_parts.business_api import BusinessServices, bind_business_context
+        from ..gateway_parts.business_api import (
+            BusinessServices,
+            bind_business_context,
+            complete_host_wired,
+            owner_complete_host,
+        )
         from ..user_space.home_layout import home_paths
         from ..user_space.owner_resolver import home_paths_with_owner
         from .action_specs import required_capabilities
@@ -88,8 +101,9 @@ class GatewayBusinessDomain:
         if base is None:
             raise HostAPIError('HOST_NOT_READY', 503)
         scoped_home = home_paths_with_owner(home_paths(self.resources.root), current.owner_home)
+        wired = complete_host_wired(self.resources.server)
         host = SimpleNamespace(home_paths=scoped_home, config=base.config,
-            conversation_store=self.resources.store_for(current))
+            conversation_store=self.resources.store_for(current), business_complete_host_wired=wired)
         host.business_approval_decider = self.approve
         # 共享服务必须另行按owner绑定；绝不把main的Agent/执行器或跨owner业务实例复制进来。
         if getattr(getattr(base, 'home_paths', None), 'owner_id', None) == scoped_home.owner_id:
@@ -101,6 +115,7 @@ class GatewayBusinessDomain:
         key = (scoped_home.owner_id, str(scoped_home.owner_home_dir))
         services = self._services.get(key)
         if (services is None or services.host.config is not base.config
+                or services.complete_host_wired != wired
                 or services.spaces.enabled != bool(getattr(base.config, 'business_spaces_enabled', False))):
             services = BusinessServices(host)
             if len(self._services) >= 64:
@@ -125,9 +140,18 @@ class GatewayBusinessDomain:
                 raise HostAPIError('HOST_NOT_READY', 503)
             return True
 
+        identity, home_dir = current.owner_home.identity, current.owner_home.home_dir
+
+        def complete_host(stack):
+            latest = read_context(authorized)
+            if latest.owner_home.identity != identity or latest.owner_home.home_dir != home_dir:
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            return owner_complete_host(self.resources.server, identity, stack)
+
         return bind_business_context(host, authorize=check,
             subject_id=authorized.binding.installation_ref, actor=authorized,
-            actor_factory=lambda action: self._background_actor(authorized, action, services)), services
+            actor_factory=lambda action: self._background_actor(authorized, action, services),
+            host_provider=complete_host), services
 
     # LLM: 线程统一走原require_thread；SessionTask同时核两端、原业务归属和任务范围，不拿展示ID/空间当出处。
     # 函数用途: 验证一个准确任务，并返回它所引用的原线程。
