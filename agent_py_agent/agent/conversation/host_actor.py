@@ -392,3 +392,64 @@ def _missing_task_actor(agent, thread_id):
             or source is not None and any(not supports_transcript_delivery(row.channel) for row in source.channel_bindings)):
         raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
     return None
+
+
+# LLM: 仅canonical线程的同owner安装元数据和原plugin ChannelBinding共同证明业务插件来源；任一正向事实损坏均拒绝，不按ID前缀/正文猜，也不查询现行安装恢复旧执行权。
+# 函数用途: 为旧任务和插话共用只读插件来源分类，撤销安装后仍能识别原来源。
+def is_plugin_business_source_thread(store, thread_id: str, *, owner_id: str) -> bool:
+    row, error = store.threads.load_report(thread_id)
+    if error:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID')
+    if row is None:
+        return False
+    metadata = row.metadata
+    bindings = [binding for binding in row.channel_bindings if binding.channel == 'plugin']
+    if 'plugin_host_v2' not in metadata and not bindings:
+        return False
+    if not owner_id or row.owner_id != owner_id or row.thread_id != thread_id:
+        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    provenance = metadata.get('plugin_host_v2')
+    installation = provenance.get('installation_ref') if isinstance(provenance, dict) else None
+    if (not isinstance(installation, str) or not installation or installation != installation.strip()
+            or not bindings or any(binding.channel_conversation_id != installation
+                or binding.channel_user_id != owner_id or binding.canonical_user_id != owner_id
+                or binding.thread_id != thread_id for binding in bindings)):
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID')
+    return True
+
+
+# LLM: entry必须来自原队列/准确回执；源线程取sender/origin且两者不得冲突，当前owner下显式线程出处缺失/跨owner不得回落native。仅准确canonical终态任务原结果键可保宿主回报。
+# 函数用途: 判断一条原插话是否是暂不支持的插件指令，保留宿主生成的真实结果事件。
+def is_plugin_business_instruction(store, entry, *, owner_id: str) -> bool:
+    from .session_messaging import SESSION_TASK_ORIGIN_KIND, SESSION_TASK_STATUS_FIELD
+    from .session_task_report import result_report_key
+    from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
+
+    metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+    sender = str(entry.sender or '')
+    origin = str(metadata.get('origin_thread_id') or '')
+    if origin and sender and origin != sender:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+    source_id = origin or sender
+    if not source_id:
+        return False
+    row, error = store.threads.load_report(source_id)
+    if error:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID')
+    # 内部无owner队列读者及未声明origin的host/run sender不推断线程身份；实际owner执行的显式出处必须可核。
+    if row is None:
+        if origin and owner_id:
+            raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID')
+        return False
+    if origin and owner_id and row.owner_id != owner_id:
+        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    plugin = is_plugin_business_source_thread(store, source_id, owner_id=owner_id)
+    if (plugin and metadata.get('origin_kind') == SESSION_TASK_ORIGIN_KIND
+            and metadata.get(SESSION_TASK_STATUS_FIELD) in SESSION_TASK_TERMINAL_STATUSES):
+        task = store.session_tasks.load(str(metadata.get('session_task_id') or ''))
+        if (task is not None and task.status == metadata[SESSION_TASK_STATUS_FIELD]
+                and task.target_thread_id == source_id and task.sender_thread_id == entry.target_id
+                and entry.target_type == 'thread' and metadata.get('dedupe_key') == result_report_key(task)
+                and store.threads.require(task.sender_thread_id).owner_id == owner_id):
+            return False
+    return plugin

@@ -5,7 +5,10 @@ from agent_py_agent.agent.plugin_host import composition
 from agent_py_agent.agent.plugin_host.authorization import _requires_execution
 from agent_py_agent.agent.plugin_host.business_action_specs import business_action_specs
 from agent_py_agent.agent.plugin_host.contracts import Call, HostDomainPorts
-from agent_py_agent.tests.test_plugin_host_gateway_composition import production_call
+from agent_py_agent.tests.test_plugin_host_gateway_composition import (
+    UNREADY_BUSINESS_ACTIONS,
+    production_call,
+)
 from agent_py_agent.tests.test_plugin_host_gateway_composition import (
     production_host as production_host,
 )
@@ -101,6 +104,8 @@ def test_actual_business_plugin_uses_shared_space_service(production_host):
     assert 'spaces.create' in production_call(production_host, 'business.system.capabilities')['supported_actions']
 
 
+# LLM: 冷/热接线同守准确九项执行不可用，保留全目录与无副作用验证，不能将声明目录当完整执行支持。
+# 函数用途: 验证读取/控制接线不依赖暖Agent且执行动作始终关闭。
 @pytest.mark.parametrize('enabled', [None, True, False], ids=['cold-gateway', 'bound-enabled', 'bound-disabled'])
 def test_business_host_wiring_does_not_require_a_warm_agent(production_host, enabled):
     from types import SimpleNamespace
@@ -112,7 +117,8 @@ def test_business_host_wiring_does_not_require_a_warm_agent(production_host, ena
     backend = composition.business_port(server.plugin_host.composition.ports)
     before = sorted(path.relative_to(owner.root) for path in owner.root.rglob('*'))
     readiness = {action: backend.ready(action) for action in business_plugin_actions()}
-    assert readiness == dict.fromkeys(business_plugin_actions(), enabled is not False)
+    assert readiness == {action: enabled is not False and action not in UNREADY_BUSINESS_ACTIONS
+                         for action in business_plugin_actions()}
     assert not backend.ready('business.unregistered.action')
     assert backend._services == {}
     assert sorted(path.relative_to(owner.root) for path in owner.root.rglob('*')) == before

@@ -13,12 +13,19 @@ from .business_action_specs import (
     business_native_action,
     business_plugin_actions,
 )
-from .contracts import DomainResult, resolve_execution_context
+from .contracts import DomainResult
 from .conversations import read_context, thread_state
 from .errors import HostAPIError
 from .schemas import canonical_json, thaw
 
 _STREAM_MODULE = 'agent_py_agent.agent.gateway_parts.business_event_stream'
+
+
+# LLM: 业务execute能力包括control效果的resume/guidance；未实现原安装受限异步适配前，所有入口共用此闸，不改变原生owner执行。
+# 函数用途: 明确标记插件暂不支持的九个可启动工作动作。
+def _requires_restricted_async_adapter(action):
+    spec = business_action_spec(action)
+    return 'execute' in spec.capabilities or action in {'background_agents.resume', 'background_agents.restore'}
 
 
 # LLM: 只消费原发行调用的规范值，revision更新不改变同一幂等操作；不接受外部另传身份。
@@ -57,9 +64,13 @@ class GatewayBusinessDomain:
         server = self.resources.server
         return server.agent if server.agent is not None else getattr(server, 'control_plane', None)
 
+    # LLM: 目录只报告真实接线；执行动作在受限异步适配存在前不可用，冷/热Gateway均相同。
+    # 函数用途: 保留读取/控制接线，明确关闭插件异步执行。
     def ready(self, action):
         """报告原Gateway上的静态接线，不以暖Agent或某次Owner运行依赖代替接线状态。"""
         if self.resources.root is None or action not in business_plugin_actions():
+            return False
+        if action != 'business.events.stream' and _requires_restricted_async_adapter(business_native_action(action)):
             return False
         base = self._base()
         # 显式关闭仍即时生效；真实调用的权限、领域ready和W14流依赖门保持原位。
@@ -110,8 +121,8 @@ class GatewayBusinessDomain:
                 if error.status == 404 and spec.metadata['implementer'] == 'W14':
                     raise HostAPIError('OBSERVATION_NOT_FOUND', 404) from None
                 raise
-            if spec.metadata['effect'] == 'execute':
-                resolve_execution_context(authorized)
+            if _requires_restricted_async_adapter(action):
+                raise HostAPIError('HOST_NOT_READY', 503)
             return True
 
         return bind_business_context(host, authorize=check,
@@ -237,6 +248,8 @@ class GatewayBusinessDomain:
         current = read_context(authorized)
         if action != business_native_action(authorized.call.action):
             raise HostAPIError('CAPABILITY_DENIED', 403)
+        if _requires_restricted_async_adapter(action):
+            raise HostAPIError('HOST_NOT_READY', 503)
         owner = current.owner_home.owner_id
         installation = authorized.binding.installation_ref
         identifier = 'thread-plugin-business-' + hashlib.sha256(canonical_json(
@@ -269,12 +282,15 @@ class GatewayBusinessDomain:
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)
         return HostChannelActor(owner, identifier, _request_id(authorized), 'plugin', installation, owner)
 
-    # LLM: 使用原AuthorizedCall及稳定请求身份；副作用和末核仍由唯一业务入口处理。
+    # LLM: 原AuthorizedCall实时验证后先拒不支持的执行；不能创建actor/thread/task/guidance/wake/workflow，也不能零工具模型兜底。
     # 函数用途: 将原插件调用投递给同一业务服务，不替换issuer对象或重放效果。
     def call(self, authorized):
         from ..gateway_parts.business_api import execute_business
         revalidate_call(authorized)
         action = business_native_action(authorized.call.action)
+        read_context(authorized)
+        if _requires_restricted_async_adapter(action):
+            raise HostAPIError('HOST_NOT_READY', 503)
         context, services = self.context(authorized)
         params = thaw(authorized.call.payload)
         revision = params.pop('expected_revision', None)

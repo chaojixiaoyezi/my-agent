@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 from weakref import WeakSet
 
 from ..conversation.background_agents import BackgroundAgentService
@@ -239,13 +240,13 @@ class _BackgroundPort:
 
 class BusinessServices:
     """静态选择原服务。可选端口由组合根注入，绝不从payload或任意函数名加载。"""
-    # LLM: 只绑定当前owner原Store与规范只读库，不启动Agent、不建库，不缓存请求actor。
-    # 函数用途: 装配同一owner的业务查询和事件来源。
+    # LLM: 只绑定当前owner原Store与规范只读库；显式供应的端口不被替换，不缓存请求actor。
+    # 函数用途: 按canonical owner-home装配同一owner的业务查询和事件来源。
     def __init__(self, host, *, spaces=None, workflows=None, background=None, capabilities=None, projection=None):
         self.host = host
         self.owner_id = host.home_paths.owner_id
-        self.owner_home = Path(host.home_paths.owner_home_dir)
-        self.spaces = spaces or BusinessSpaceService(self.owner_home, owner_id=self.owner_id,
+        self.owner_home = Path(host.home_paths.owner_home_dir).resolve()
+        self.spaces = spaces if spaces is not None else BusinessSpaceService(self.owner_home, owner_id=self.owner_id,
             enabled=bool(getattr(host.config, 'business_spaces_enabled', False)),
             reference_resolver=getattr(host, 'business_reference_reader', None),
             active_references=getattr(host, 'business_active_references', None),
@@ -260,11 +261,11 @@ class BusinessServices:
                 governance=getattr(host, 'business_governance', None),
                 engine_factory=getattr(host, 'workflow_engine_factory', None))
         self.workflows = workflows
-        self.background = background or getattr(host, 'business_background', None)
+        self.background = background if background is not None else getattr(host, 'business_background', None)
         if self.background is None and self.spaces.enabled and getattr(host, 'conversation_store', None) is not None:
             self.background = _BackgroundPort(self)
-        self.capabilities = capabilities or getattr(host, 'business_capabilities', None)
-        self.projection = projection or getattr(host, 'business_projection', None)
+        self.capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
+        self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         if self.projection is None and getattr(host, 'conversation_store', None) is not None:
             from ..runtime_db.repository import RuntimeRepository
             from ..runtime_db.schema import runtime_db_path
@@ -339,7 +340,7 @@ class BusinessServices:
     def observation_actor(self, context: BusinessCallContext) -> BusinessActor:
         if (type(context) is not BusinessCallContext or context not in _ISSUED
                 or context.owner_id != self.owner_id
-                or Path(context.host.home_paths.owner_home_dir) != self.owner_home):
+                or Path(context.host.home_paths.owner_home_dir).resolve() != self.owner_home):
             raise BusinessError('ACTOR_REQUIRED')
         return BusinessActor(self.owner_id, context.subject_id, self.observation,
             lambda action, facts: _record_visible(context, action, facts))
@@ -411,6 +412,8 @@ def _error_code(error):
     return code, status, effect
 
 
+# LLM: 服务可按宿主寿命复用，调用身份仍须本次发行且匹配真实owner与canonical home。
+# 函数用途: 经冻结schema、当前授权和领域端口执行一次业务调用。
 def execute_business(request, context, services):
     """先校验原ActionSpec，再实时复验身份；不在运输层替领域补结果或重放副作用。"""
     request_id = 'invalid-request'
@@ -426,7 +429,7 @@ def execute_business(request, context, services):
         if type(context) is not BusinessCallContext or context not in _ISSUED:
             raise HostAPIError('CAPABILITY_DENIED', 403)
         if (context.owner_id != services.owner_id
-                or Path(context.host.home_paths.owner_home_dir) != services.owner_home):
+                or Path(context.host.home_paths.owner_home_dir).resolve() != services.owner_home):
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)
         facts = {'owner_id': services.owner_id, **request['params']}
         context.check(spec.action, facts)
@@ -634,6 +637,33 @@ def handle_client_business_stream(handler, server):
         handler.close_connection = True
 
 
+# LLM: 缓存仅属于这个live host，来源快照保留对象身份而非可变对象的相等比较；不保存actor或授权决定。
+# 函数用途: 在owner、canonical home、配置和原服务来源不变时复用本地业务服务。
+def _local_business_services(host):
+    lock = vars(host).setdefault('_local_business_services_lock', RLock())
+    with lock:
+        store = getattr(host, 'conversation_store', None)
+        storage = getattr(store, 'storage', None)
+        root = getattr(storage, 'root', None)
+        key = (host.home_paths.owner_id, Path(host.home_paths.owner_home_dir).resolve(),
+            bool(getattr(host.config, 'business_spaces_enabled', False)),
+            Path(root).resolve() if root is not None else None)
+        sources = (host.config, store, storage, getattr(store, 'session_tasks', None),
+            getattr(store, 'threads', None), *(getattr(host, name, None) for name in (
+                'business_projection', 'business_reference_reader', 'business_active_references',
+                'business_governance', 'business_background', 'business_capabilities',
+                'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
+                'business_approval_decider')))
+        cached = getattr(host, '_local_business_services_cache', None)
+        if (cached is None or cached[0] != key or cached[2].host is not host
+                or any(previous is not current for previous, current in zip(cached[1], sources))):
+            cached = (key, sources, BusinessServices(host))
+            host._local_business_services_cache = cached
+        return cached[2]
+
+
+# LLM: 每次捕获当前准确actor并发行新上下文；服务缓存不能恢复上次身份或省略live复核。
+# 函数用途: 给本地命令和注册模型工具绑定当前调用身份及同宿主业务服务。
 def local_business_context(host, *, model=False):
     from ..conversation.host_actor import HostActorError, current_actor_for_child
     actor = None
@@ -658,7 +688,7 @@ def local_business_context(host, *, model=False):
                 return False
         return facts.get('owner_id', host.home_paths.owner_id) == host.home_paths.owner_id
 
-    return bind_business_context(host, authorize=check, actor=actor), BusinessServices(host)
+    return bind_business_context(host, authorize=check, actor=actor), _local_business_services(host)
 
 
 def business_command_request(namespace, text):
@@ -688,6 +718,8 @@ def business_command_request(namespace, text):
     return request
 
 
+# LLM: 命令每次重新发行上下文，仅复用同一宿主的owner-bound服务。
+# 函数用途: 经统一业务边界执行本地结构化命令。
 def run_business_command(host, namespace, text):
     context, services = local_business_context(host)
     return dispatch_business_action(business_command_request(namespace, text), authenticated_context=context, services=services)
@@ -710,6 +742,8 @@ def _model_business_schema(schema):
     return result
 
 
+# LLM: 注册与执行共用原宿主服务寿命；注册只看就绪状态，不把它缓存成调用授权。
+# 函数用途: 将当前就绪业务动作注册到原模型工具目录。
 def register_business_tools(agent):
     """只向原Registry登记已接通动作；原执行、审批、归档和W9诊断链保持唯一。"""
     if not bool(getattr(agent.config, 'business_spaces_enabled', False)):
@@ -740,6 +774,8 @@ def register_business_tools(agent):
                 idempotency_policy=IdempotencyPolicy('operation'), output_policy=OutputPolicy(trust='runtime'),
                 resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)))
 
+        # LLM: 每次执行仍取当前上下文并复核动作，不持有注册时或上一调用的actor。
+        # 函数用途: 从注册工具进入同一个本地业务调用边界。
         def execute(self, params):
             try:
                 if params.get('action') != self.action:
@@ -749,11 +785,15 @@ def register_business_tools(agent):
             except HostAPIError as error:
                 status, result = error.status, {'error': {'code': error.code}, 'effect_outcome': error.outcome}
             code = (result.get('error') or {}).get('code', '')
+            # 业务none表示只读无副作用；工具合同用not_started表达同一事实。
+            # 已提交/运行的业务结果不得误报未执行；JSON原值保留，工具层保守标unknown。
+            effect = result.get('effect_outcome', 'not_started')
+            tool_effect = 'not_started' if effect == 'none' else effect if effect in {'not_started', 'unknown'} else 'unknown'
             return ToolHandlerOutcome(self.model_spec.name, status < 400, json.dumps(result, ensure_ascii=False),
                 error_code=code, reported_error_code=code,
-                effect_outcome=result.get('effect_outcome', 'not_started') if status >= 400 else '')
+                effect_outcome=tool_effect if status >= 400 else '')
 
-    services = BusinessServices(agent)
+    services = _local_business_services(agent)
     for spec in business_action_specs().values():
         if services.ready(spec.action):
             agent.tools.register(BusinessTool(spec))
