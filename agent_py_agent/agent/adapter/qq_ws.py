@@ -7,6 +7,8 @@ import base64
 import hashlib
 import json
 import ssl
+import threading
+from socket import SHUT_RDWR
 from socket import socket as _socket
 from typing import Any
 from urllib.parse import urlsplit
@@ -56,11 +58,18 @@ def _send_handshake(sock, parsed, access_token: str) -> str:
     return key
 
 
-def _verify_handshake(sock, key: str) -> None:
+# LLM: 只读到首个头部终止符；与 101 同包到达的首批帧原样交回连接缓冲，握手期 EOF 失败而不空转。
+# 函数用途: 校验握手响应并返回头部之后已收到的帧字节。
+def _verify_handshake(sock, key: str) -> bytes:
     response = b""
     while b"\r\n\r\n" not in response:
-        response += sock.recv(4096)
-    if b"HTTP/1.1 101" not in response and b"HTTP/1.0 101" not in response:
+        chunk = sock.recv(4096)
+        if not chunk:
+            sock.close()
+            raise ConnectionError("WebSocket handshake closed before response")
+        response += chunk
+    head, _separator, remainder = response.partition(b"\r\n\r\n")
+    if b"HTTP/1.1 101" not in head and b"HTTP/1.0 101" not in head:
         sock.close()
         raise ConnectionError(f"WebSocket handshake failed: {response[:200]}")
     accept_expected = base64.b64encode(
@@ -68,6 +77,7 @@ def _verify_handshake(sock, key: str) -> None:
     ).decode()
     if accept_expected.encode() not in response:
         pass
+    return remainder
 
 
 class QQWebSocketClient:
@@ -81,6 +91,9 @@ class QQWebSocketClient:
         self._connected = False
         self._closed = False
         self._last_seq = 0
+        self._buffer = bytearray()
+        self._interrupt_lock = threading.Lock()
+        self._interrupted = False
 
     @property
     def is_connected(self) -> bool:
@@ -91,7 +104,7 @@ class QQWebSocketClient:
         parsed = _parse_ws_url(self.url)
         sock = _connect_socket(parsed)
         key = _send_handshake(sock, parsed, self.access_token)
-        _verify_handshake(sock, key)
+        self._buffer = bytearray(_verify_handshake(sock, key))
         self._sock = sock
         self._connected = True
 
@@ -108,27 +121,39 @@ class QQWebSocketClient:
         """Send a JSON text frame."""
         self.send_text(json.dumps(data, ensure_ascii=False))
 
+    # LLM: 每连接一份增量缓冲：先交付已缓冲的完整帧（含握手后同包字节），半帧保留待补读，多帧逐个消费；
+    #   超时或帧未齐返回 None；EOF、close 帧与 socket 错误标记断开并抛 ConnectionError，不再空转或丢帧。
+    # 函数用途: 返回下一条完整文本帧，途中自动应答 ping。
     def recv_text(self, timeout: float | None = None) -> str | None:
-        """Receive a text frame, returns None on timeout."""
-        if not self._connected or self._sock is None:
-            return None
-        self._sock.settimeout(timeout)
-        try:
-            data = self._sock.recv(8192)
-            return self._handle_received_frame(data)
-        except Exception:
-            return None
+        """Receive a text frame; None on timeout or while a frame is incomplete."""
+        sock = self._sock
+        if not self._connected or sock is None:
+            raise ConnectionError("QQ WebSocket is not connected")
+        frame = WebSocketFrame.parse_frame_extent(self._buffer)
+        if frame is None:
+            try:
+                sock.settimeout(timeout)
+                data = sock.recv(8192)
+            except TimeoutError:
+                return None
+            except OSError as exc:
+                self._connected = False
+                raise ConnectionError("QQ WebSocket receive failed") from exc
+            if not data:
+                self._connected = False
+                raise ConnectionError("QQ WebSocket closed by peer")
+            self._buffer += data
+            frame = WebSocketFrame.parse_frame_extent(self._buffer)
+            if frame is None:
+                return None
+        opcode, payload, consumed = frame
+        del self._buffer[:consumed]
+        return self._handle_received_frame(opcode, payload)
 
-    def _handle_received_frame(self, data: bytes) -> str | None:
-        if not data:
-            return None
-        result = WebSocketFrame.parse_frame(data)
-        if result is None:
-            return None
-        opcode, payload = result
+    def _handle_received_frame(self, opcode: int, payload: bytes) -> str | None:
         if opcode == WebSocketFrame.OPCODE_CLOSE:
             self._connected = False
-            return None
+            raise ConnectionError("QQ WebSocket closed by server")
         if opcode == WebSocketFrame.OPCODE_TEXT:
             return payload.decode("utf-8", "replace")
         if opcode == WebSocketFrame.OPCODE_PING:
@@ -139,14 +164,30 @@ class QQWebSocketClient:
         if self._sock:
             self._sock.sendall(bytes([0x8A, 0x00]))
 
-    def close(self) -> None:
-        """Gracefully close the connection."""
-        self._closed = True
-        if self._connected and self._sock:
+    # LLM: 他线程只终止本连接并唤醒阻塞 recv（close 帧 + shutdown），不释放描述符：跨线程 close 会让阻塞中的
+    #   poll 丢失唤醒而白等接收超时；描述符由接收线程收尾 close()。多次/并发调用只发一次 close 帧，尽力不抛。
+    def interrupt(self) -> None:
+        """Terminate the connection and wake a blocked receive; the receiving thread releases the socket."""
+        sock = self._sock
+        with self._interrupt_lock:
+            if sock is None or self._interrupted:
+                return
+            self._interrupted = True
+        if self._connected:
             try:
-                self._sock.sendall(WebSocketFrame.build_close_frame())
+                sock.sendall(WebSocketFrame.build_close_frame())
             except Exception:
                 pass
+        try:
+            sock.shutdown(SHUT_RDWR)
+        except OSError:
+            pass
+        self._connected = False
+
+    def close(self) -> None:
+        """Gracefully close the connection."""
+        self.interrupt()
+        self._closed = True
         if self._sock:
             try:
                 self._sock.close()

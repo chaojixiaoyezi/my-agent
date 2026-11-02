@@ -16,7 +16,9 @@ from .base import BaseChannelAdapter
 from .protocol import IncomingMessage, OutgoingMessage, qq_to_incoming
 from .qq_runtime import (
     close_ws,
+    end_connection,
     handle_ready_event,
+    interrupt_ws,
     join_ws_threads,
     request_reconnect,
     send_heartbeat_once,
@@ -147,9 +149,12 @@ class QQAdapter(BaseChannelAdapter):
         self._ws_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # 当前连接的停止位：op7/INVALID_SESSION/心跳失败只结束本连接；每次建连换新，全局停止仍是 _stop_event。
+        self._connection_stop = threading.Event()
         self._lock = threading.Lock()
 
         self._seen_ids: set[str] = set()
+        self._inflight_ids: set[str] = set()
         self._seen_lock = threading.Lock()
 
         self._access_token: str | None = None
@@ -181,7 +186,8 @@ class QQAdapter(BaseChannelAdapter):
         with self._lock:
             self._running = False
             self._stop_event.set()
-            self._close_ws()
+            self._connection_stop.set()
+            self._interrupt_ws()
             self._join_ws_threads()
             logger.info("QQ 适配器已停止")
 
@@ -191,6 +197,8 @@ class QQAdapter(BaseChannelAdapter):
                 try:
                     self._connect_and_run()
                 except Exception as exc:
+                    if self._stop_event.is_set():
+                        break
                     logger.warning('QQ WebSocket 异常 error_type=%s', type(exc).__name__)
                     self._reconnect_count += 1
 
@@ -207,6 +215,9 @@ class QQAdapter(BaseChannelAdapter):
         finally:
             self._running = False
 
+    # LLM: 每个连接自带停止位与准确 socket：超时继续收；对端 EOF/socket 错误上抛按失败退避；
+    #   op7/INVALID_SESSION/心跳失败只结束本连接并正常返回交循环重连；全局 stop 才结束循环。收尾关闭准确连接并 join 其心跳。
+    # 函数用途: 建立一次 QQ 连接并接收消息直到该连接结束。
     def _connect_and_run(self) -> None:
         token = self._get_access_token()
         if not token:
@@ -219,28 +230,37 @@ class QQAdapter(BaseChannelAdapter):
 
         ws = QQWebSocketClient(gateway_url, token)
         ws.connect()
-        self._ws = ws
-
-        ws.send_json({
-            "op": 2,
-            "d": {
-                "token": f"QQBot {token}",
-                "intents": self._intents_for_qq(),
-                "shard": [0, 1],
-                "properties": {
-                    "os": "my-agent",
-                    "browser": "my-agent",
-                    "device": "my-agent",
+        connection_stop = threading.Event()
+        self._ws, self._connection_stop = ws, connection_stop
+        try:
+            if self._stop_event.is_set():
+                return
+            ws.send_json({
+                "op": 2,
+                "d": {
+                    "token": f"QQBot {token}",
+                    "intents": self._intents_for_qq(),
+                    "shard": [0, 1],
+                    "properties": {
+                        "os": "my-agent",
+                        "browser": "my-agent",
+                        "device": "my-agent",
+                    },
                 },
-            },
-        })
+            })
 
-        self._reconnect_count = 0  # 连接成功，重置计数
-        while not self._stop_event.is_set():
-            msg = ws.recv_text(timeout=5.0)
-            if msg is None:
-                continue
-            self._handle_ws_message(msg)
+            self._reconnect_count = 0  # 连接成功，重置计数
+            while not self._stop_event.is_set() and not connection_stop.is_set():
+                try:
+                    msg = ws.recv_text(timeout=5.0)
+                except OSError:
+                    if self._stop_event.is_set() or connection_stop.is_set():
+                        return
+                    raise
+                if msg is not None:
+                    self._handle_ws_message(msg)
+        finally:
+            self._end_connection(ws, connection_stop)
 
     def _intents_for_qq(self) -> int:
         return (1 << 25) | (1 << 30) | (1 << 12)
@@ -264,9 +284,7 @@ class QQAdapter(BaseChannelAdapter):
         if op == 11:  # 心跳 ACK,忽略
             return
         if op == 7:
-            logger.warning("QQ WebSocket 要求重连")
-            self._session_id = None
-            self._stop_event.set()
+            self._request_reconnect("QQ WebSocket 要求重连")
 
     def _handle_dispatch_event(self, payload: dict[str, Any], d: dict[str, Any]) -> None:
         seq = payload.get("s", 0)
@@ -294,15 +312,26 @@ class QQAdapter(BaseChannelAdapter):
         interval_sec = self._heartbeat_interval / 1000.0
         if interval_sec <= 0:
             return
+        ws, connection_stop = self._ws, self._connection_stop
+        if ws is None:
+            return
 
+        # LLM: 心跳只服务启动它的连接；发送失败置该连接停止位并中断准确连接唤醒接收端重连，不设全局停止。
         def heartbeat_loop() -> None:
-            while not self._stop_event.is_set():
-                self._send_heartbeat_once()
-                self._stop_event.wait(interval_sec)
+            while not self._stop_event.is_set() and not connection_stop.is_set():
+                if not self._send_heartbeat_once(ws):
+                    logger.warning("QQ 心跳失败，结束当前连接并重连")
+                    connection_stop.set()
+                    self._interrupt_ws(ws)
+                    return
+                connection_stop.wait(interval_sec)
 
         self._heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
         self._heartbeat_thread.start()
 
+    # LLM: 去重分两段：锁内只占 inflight，回调在锁外；原入口受理（legacy None/非 False）后才提交 seen，
+    #   拒收或 Exception 释放 inflight 让平台重投可再送；BaseException 同样释放后原样上抛。
+    # 函数用途: 把一条 QQ 消息交给唯一分发入口，并按受理结果提交去重。
     def _process_qq_message(self, d: dict[str, Any]) -> None:
         payload = {"d": d, "t": "MESSAGE_CREATE"}
         msg = qq_to_incoming(payload)
@@ -312,17 +341,28 @@ class QQAdapter(BaseChannelAdapter):
         if user_openid:
             msg.metadata["qq_user_openid"] = user_openid
         with self._seen_lock:
-            if msg.message_id in self._seen_ids:
+            if msg.message_id in self._seen_ids or msg.message_id in self._inflight_ids:
                 return
-            self._seen_ids.add(msg.message_id)
-            if len(self._seen_ids) > 1000:
-                self._seen_ids = set(sorted(self._seen_ids)[-500:])
-        self._dispatch(msg)
+            self._inflight_ids.add(msg.message_id)
+        accepted = False
+        try:
+            accepted = self._dispatch(msg) is not False
+        except Exception as exc:
+            logger.error("QQ 消息分发失败，未提交去重 error_type=%s", type(exc).__name__)
+        finally:
+            with self._seen_lock:
+                self._inflight_ids.discard(msg.message_id)
+                if accepted:
+                    self._seen_ids.add(msg.message_id)
+                    if len(self._seen_ids) > 1000:
+                        self._seen_ids = set(sorted(self._seen_ids)[-500:])
 
     send_message = _qq_send_message
     _get_access_token = _qq_get_access_token
     _fetch_gateway_url = _qq_fetch_gateway_url
     _close_ws = close_ws
+    _interrupt_ws = interrupt_ws
+    _end_connection = end_connection
     _join_ws_threads = join_ws_threads
     _handle_ready_event = handle_ready_event
     _request_reconnect = request_reconnect

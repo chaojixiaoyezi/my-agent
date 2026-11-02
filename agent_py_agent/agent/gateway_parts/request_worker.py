@@ -410,6 +410,8 @@ def dispatch_pending_requests(
 
 
 # LLM: 按原持久gate分流；Count0在claim前增加配置的活跃用户容量，C/W仍不借内存slot或submit失败清P3。
+#   Count0准入一经记账即归本函数：claim异常(含BaseException)、未认领与submit失败都在同一finally恰好释放一次；
+#   submit正常返回后责任移交原executor，由其执行收尾释放。
 # 函数用途: 让原派发算法消费对应的唯一准入门，不新增排队状态。
 def _admit_and_submit(
     paths: GatewayPaths,
@@ -434,16 +436,17 @@ def _admit_and_submit(
         # 合法排队:把"仍在等准入"这一事实写成结构化字段,客户端据此续期而不是误判超时。
         _record_admission_wait(request, reason=blocked_reason)
         return "blocked"
-    claim = claim_request(paths, request.path)
-    if claim is None:
-        admission.release(user_key, conversation_key=conversation_key)  # 别的扫描抢先认领了:坑退回
-        return "raced"
+    handed_off = False
     try:
+        claim = claim_request(paths, request.path)
+        if claim is None:
+            return "raced"  # 别的扫描抢先认领了:坑退回
         submit(claim, user_key, conversation_key)
-    except Exception:
-        # 提交失败不能漏坑;请求留在 processing,由恢复扫描收尸。
-        admission.release(user_key, conversation_key=conversation_key)
-        raise
+        handed_off = True
+    finally:
+        if not handed_off:
+            # 移交前任何出口都不能漏坑;已认领请求留在 processing,由恢复扫描收尸。
+            admission.release(user_key, conversation_key=conversation_key)
     return "claimed"
 
 

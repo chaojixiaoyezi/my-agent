@@ -272,13 +272,14 @@ def _descriptor_child_bytes(parent, name):
 
 
 # LLM: processing只取原GatewayPaths canonical字段，绝不拼Adapter旧root/processing；P1/P3/control各读唯一源，坏业务项不忽略。
+# LLM: 三源显式沿generation同一原typed已发表分类：原审批/命令目录、chunk流、锁与精确暂存只核设施身份不当责任，未知名仍拒；默认快照不变。
 # 函数用途: 从原准确路径取完整六类责任观察，不创建或回退第二队列。
 def durable_drain_snapshot(paths, count):
     from .control_operation_service import gateway_control_operation_path
     processing_parts = tuple(paths.processing.relative_to(paths.root).parts)
     # 只借原格式合法的定位值取得原目录，不读取/创建这条操作，也不将其当责任来源。
     control_parts = tuple(gateway_control_operation_path(paths, 'gwctl-msg-' + '0' * 32).parent.relative_to(paths.root).parts)
-    directories = tuple(original_directory_snapshot(paths.root, parts) for parts in (
+    directories = tuple(original_directory_snapshot(paths.root, parts, published_sources=True) for parts in (
         ("admission", "reservations"), processing_parts, control_parts))
     namespace = takeover_namespace_state(paths)
     targets = tuple(discover_takeover_targets(paths, count))

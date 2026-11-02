@@ -818,6 +818,9 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         self._pending_unlock_messages = (
             FeishuUnlockQueue() if self._unlock is not None else None
         )
+        # 解锁续送线程启动前在生命周期锁内登记线程及代次；本代停止事件只置位不清除，start 换新事件，stop 锁外 join。
+        self._unlock_drain_stop = threading.Event()
+        self._unlock_drain_threads: dict[threading.Thread, str] = {}
 
 
     # LLM: 开关由构造时显式配置固定；缺数据根或数据库失败返回不可用，由锁门拒绝私聊，不退化成关闭。
@@ -855,6 +858,12 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
             if self._stop_event.is_set() and (self._ws_client is not None and self._ws_thread is None or
                     self._server is not None and self._server_thread is None):
                 raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+            if self._unlock_drain_stop.is_set():
+                # 已停止代次的解锁续送未 join 完不能重启；新代用新停止事件，旧线程不会因清除而复活。
+                if any(thread.is_alive() for thread in self._unlock_drain_threads):
+                    raise RuntimeError('CHANNEL_ADAPTER_STOP_FAILED')
+                self._unlock_drain_threads.clear()
+                self._unlock_drain_stop = threading.Event()
             self._closing_thread = None
             self._generation_counter += 1
             self._generation_ref = f'{self.config_generation}:{self._generation_counter}'
@@ -914,6 +923,8 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         with self._lock:
             self._running = False
             self._stop_event.set()
+            self._unlock_drain_stop.set()
+            drains = tuple(self._unlock_drain_threads)
             client, ws_thread = self._ws_client, self._ws_thread
             server, server_thread = self._server, self._server_thread
             generation = self._generation_ref
@@ -944,7 +955,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
             closer.start()
             closing_started.set()
         ready = closer is None or closing_started is None or closing_started.wait(max(0.0, deadline - time.monotonic()))
-        threads = (closer, ws_thread, server_thread)
+        threads = (closer, ws_thread, server_thread, *drains)
         for thread in threads:
             if thread is closer and not ready:
                 continue
@@ -954,6 +965,9 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         if client is not None and ws_thread is None or server is not None and server_thread is None:
             exited = False  # 只有关闭请求，没有执行线程的退出观察，不能宣称已退出。
         with self._lock:
+            for thread in drains:
+                if not thread.is_alive():
+                    self._unlock_drain_threads.pop(thread, None)
             if exited and generation == self._generation_ref:
                 self._ws_client = self._ws_thread = self._server = self._server_thread = None
                 self._closing_thread = None

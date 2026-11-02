@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+from ..common.nofollow_fs import _openat_file, open_directory_beneath, read_bytes_beneath
+from ..common.opaque_id import validate_opaque_id
 from ..common.strict_json import load_strict_json
 from ..conversation.input_dependencies import validate_input_dependency_record
 from ..conversation.models import ConversationThread, ThreadTaskLink
@@ -110,7 +112,88 @@ def _json(root, parts, files):
     return load_strict_json(raw)
 
 
+# 原审批桥决定桶/锁名取 sha256 前24位，宿主命令 owner 桶为完整 sha256；只描述既有布局，不是新注册表。
+_APPROVAL_DIGEST = re.compile(r"[0-9a-f]{24}")
+_COMMAND_OWNER_DIGEST = re.compile(r"[0-9a-f]{64}")
+_APPROVAL_LOCK_SUFFIX = ".json.lock"
+
+
+# LLM: 布局名不符即固定原因拒绝并给准确ref；不按目录名整体豁免，未消费决定/暂存/未知叶都走这里。
+# 函数用途: 要求原审批设施的一层名称属于既有布局。
+def _require_approval_layout(parts, name, valid):
+    if not valid:
+        _reject("processing_auxiliary_unsettled", "/".join((*parts, name)))
+
+
+# LLM: 每层沿原nofollow FD记录目录身份与完整名称，交给首末/停止摘要比较；链接或非目录由原opener拒绝。
+# 函数用途: 列出一个原审批设施目录并登记其稳定投影。
+def _approval_directory(root, parts, namespaces):
+    namespaces["gateway/" + "/".join(parts)] = value = _directory(root, parts)
+    return value[1]
+
+
+# LLM: 宿主命令编号沿原opaque校验，非法名称不是可解释的历史命令目录。
+# 函数用途: 判断命令设施层名称是否为原 host_command_request 编号。
+def _host_command_request(name):
+    try:
+        return validate_opaque_id(name, kind="host_command_request") == name
+    except ValueError:
+        return False
+
+
+# LLM: 只读打开现存原锁并非阻塞共享锁探测活跃writer/consumer，忙不等待；不创建、写入或删除锁。
+#   原opener核普通单link，读后再核当前叶仍为同一inode；非空或身份漂移都不是已消费遗留锁。
+# 函数用途: 确认一枚原审批锁已结空闲，并把其稳定摘要纳入库存。
+def _settled_approval_lock(root, parts, files):
+    import fcntl
+
+    ref = "/".join(parts)
+    parent = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+    try:
+        descriptor = _openat_file(parent, parts[-1], os.O_RDONLY, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                _reject("processing_approval_lock_unsettled", ref)
+            raw = os.read(descriptor, 1)
+            info = os.fstat(descriptor)
+            current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+    if raw or info.st_size or (info.st_dev, info.st_ino, info.st_nlink) != (current.st_dev, current.st_ino, 1):
+        _reject("processing_approval_lock_unsettled", ref)
+    files["gateway/" + ref] = hashlib.sha256(raw).hexdigest()
+
+
+# LLM: 原 .approvals/<请求桶>/<许可桶>.json.lock 是原桥消费决定后保留的锁；其它名称/类型保持阻塞。
+# 函数用途: 核一个原决定目录只剩已结空锁。
+def _approval_decisions(root, parts, namespaces, files):
+    for bucket in _approval_directory(root, parts, namespaces):
+        _require_approval_layout(parts, bucket, _APPROVAL_DIGEST.fullmatch(bucket))
+        for name in _approval_directory(root, (*parts, bucket), namespaces):
+            lock = name.endswith(_APPROVAL_LOCK_SUFFIX) and _APPROVAL_DIGEST.fullmatch(name[:-len(_APPROVAL_LOCK_SUFFIX)])
+            _require_approval_layout((*parts, bucket), name, lock)
+            _settled_approval_lock(root, (*parts, bucket, name), files)
+
+
+# LLM: 原 .commands/<owner sha256>/<命令编号>/ 只承载原桥 .approvals；从不写 approval.chunks.jsonl，出现即未知。
+# 函数用途: 核宿主命令审批目录只剩原决定目录布局。
+def _host_command_approvals(root, parts, namespaces, files):
+    for owner in _approval_directory(root, parts, namespaces):
+        _require_approval_layout(parts, owner, _COMMAND_OWNER_DIGEST.fullmatch(owner))
+        for request_id in _approval_directory(root, (*parts, owner), namespaces):
+            _require_approval_layout((*parts, owner), request_id, _host_command_request(request_id))
+            command = (*parts, owner, request_id)
+            for name in _approval_directory(root, command, namespaces):
+                _require_approval_layout(command, name, name == ".approvals")
+                _approval_decisions(root, (*command, name), namespaces, files)
+
+
 # LLM: 原processing/control来源仅按原codec/locator解释；route/dispatch若属MP不能借Count0迁移洗掉。
+# LLM: typed设施目录只接受原审批桥已结空锁布局并登记身份/摘要；live持锁、未消费决定、链接、非空锁和未知名称仍阻塞。
 # 函数用途: 确认旧Gateway没有正在处理的请求或未结控制操作，pending请求仍原样留给原恢复链。
 def _gateway_sources(paths, namespaces, files):
     for parts in (("requests", "processing"), ("control_operations",)):
@@ -118,9 +201,8 @@ def _gateway_sources(paths, namespaces, files):
         for name in namespaces["gateway/" + "/".join(parts)][1]:
             kind = _generation_source_entry_kind(paths.root, parts, name)
             if kind == "directory":
-                nested = _directory(paths.root, (*parts, name))
-                if nested[1]:
-                    _reject("processing_auxiliary_unsettled", "/".join((*parts, name)))
+                facility = (_approval_decisions if name == ".approvals" else _host_command_approvals)
+                facility(paths.root, (*parts, name), namespaces, files)
                 continue
             if kind == "file":
                 raw = read_bytes_beneath(paths.root, (*parts, name), max_bytes=4 * 1024 * 1024, require_dir_fd=True)

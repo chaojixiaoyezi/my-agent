@@ -710,10 +710,13 @@ def _rollback_files(root, files):
 
 
 # LLM: proposal锁跨读取/CAS/发布，原集合锁阻断并发同库写；仅相同选项幂等，不重放不同编辑。
+#   owner配额准入先于proposal/资产/集合锁取得（与投递quota→资产锁同序），同一准入贯穿发布、回滚与退出结算。
 # 函数用途: 用户确认后按依赖顺序发布资产，记录提交回执。
 def commit_extracted_assets(owner_home: Path, *, proposal_id: str, selected_assets: Sequence[Mapping[str, object]] | None = None,
                              scope: str | None = None, workspace_root: Path | None = None, expected_revision: int | None = None) -> dict[str, object]:
-    with _record_lock(owner_home, _PROPOSALS):
+    from ..user_space.owner_quota import owner_quota_enforcer_from_policy
+
+    with owner_quota_enforcer_from_policy(owner_home).admission() as admission, _record_lock(owner_home, _PROPOSALS):
         proposal = get_extraction_proposal(owner_home, proposal_id)
         scope = scope or proposal['scope']
         project = workspace_root if workspace_root is not None else proposal.get('workspace_root') or None
@@ -726,12 +729,13 @@ def commit_extracted_assets(owner_home: Path, *, proposal_id: str, selected_asse
             return proposal['commit_result']
         if expected_revision is not None and (type(expected_revision) is not int or expected_revision != proposal['revision']):
             raise ValueError('EXTRACTION_REVISION_CONFLICT')
-        return _commit_batch(owner_home, root, proposal, chosen, scope, key)
+        return _commit_batch(owner_home, root, proposal, chosen, scope, key, admission=admission)
 
 
 # LLM: 原资产集合锁后登记唯一learning registry；登记失败随原资产叶回滚，不自动执行提炼代码。
+#   admission为调用方在资产锁前已持有的同owner配额准入，交登记复用，资产锁内不再申请配额。
 # 函数用途: 执行一次无覆盖的批量写入并持久保存COMMITTED回执。
-def _commit_batch(home, root, proposal, chosen, scope, key):
+def _commit_batch(home, root, proposal, chosen, scope, key, *, admission=None):
     ensure_private_dir(root)
     scripts, workflows = ScriptStore(root), WorkflowStore(root)
     for collection in (scripts.collection, workflows.collection):
@@ -749,7 +753,7 @@ def _commit_batch(home, root, proposal, chosen, scope, key):
                    'committed_assets': assets, 'commit_key': key, 'commit_result': receipt}
         from ..capability.asset_promotion import register_extracted_assets
         try:
-            with register_extracted_assets(home, chosen, proposal, scope):
+            with register_extracted_assets(home, chosen, proposal, scope, admission=admission):
                 for parts, text in files.items():
                     write_text_atomic_beneath(root, parts, text)
                 _write_record(home, _PROPOSALS, updated, 'proposal_id')

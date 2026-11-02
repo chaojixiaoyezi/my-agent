@@ -42,6 +42,14 @@ class WebSocketFrame:
     @staticmethod
     def parse_frame(data: bytes) -> tuple[int, bytes] | None:
         """Parse a server response frame. Returns (opcode, payload) or None."""
+        frame = WebSocketFrame.parse_frame_extent(data)
+        return None if frame is None else (frame[0], frame[1])
+
+    # LLM: 纯函数不消费缓冲；半帧返回 None 由连接补读，consumed 之后的字节属于后续帧，调用方原样保留。
+    # 函数用途: 解析接收缓冲头部的一帧，返回 (opcode, payload, 已消费字节数)。
+    @staticmethod
+    def parse_frame_extent(data: bytes | bytearray) -> tuple[int, bytes, int] | None:
+        """Parse the frame at the head of a receive buffer. Returns (opcode, payload, consumed) or None."""
         if len(data) < 2:
             return None
 
@@ -63,11 +71,11 @@ class WebSocketFrame:
         if len(data) < offset + length:
             return None
 
-        payload = data[offset : offset + length]
+        payload = bytes(data[offset : offset + length])
         if has_mask:
             payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
-        return opcode, payload
+        return opcode, payload, offset + length
 
 
 def _frame_header(first: int, length: int, *, masked: bool) -> bytes:

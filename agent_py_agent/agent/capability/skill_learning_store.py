@@ -13,7 +13,7 @@ import re
 import shutil
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import MISSING, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -32,7 +32,11 @@ from ..common.nofollow_fs import (
     unlink_file_beneath,
     write_text_atomic_beneath,
 )
-from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
+from ..user_space.owner_quota import (
+    OwnerQuotaAdmission,
+    OwnerQuotaChange,
+    owner_quota_enforcer_from_policy,
+)
 
 REQUEST_SCHEMA_VERSION = "my-agent.skill-learning-request.v1"
 REGISTRY_SCHEMA_VERSION = "my-agent.skill-learning-registry.v1"
@@ -195,6 +199,14 @@ class SkillLearningEvent:
         }
 
 
+# LLM: 只认同一规范owner根的原配额准入对象；他owner准入或任意对象都不能借道免取本owner配额锁。
+# 函数用途: 校验调用方传入的配额准入属于本学习存储所在owner。
+def _same_owner_admission(admission: object, owner_root: Path) -> bool:
+    enforcer = getattr(admission, "_enforcer", None)
+    return (isinstance(admission, OwnerQuotaAdmission)
+            and getattr(enforcer, "owner_root", None) == Path(owner_root).expanduser().resolve(strict=False))
+
+
 # LLM: 所有路径都从 owner 规范布局推导；构造不创建任何目录，第一次写入时才创建。
 # 类用途: 一个owner的学习存储，热请求20条、溢出100条并保留独立每日总结调用历史。
 class SkillLearningStore:
@@ -219,16 +231,22 @@ class SkillLearningStore:
         return cls(Path(home_paths.owner_skill_learning_dir), Path(home_paths.owner_home_dir) / "skills")
 
     # LLM: owner配额→state锁固定顺序；登记、队列、版本、导入同源事务，不能在持锁期间调用模型或发网络请求。
+    #   admission仅供已先持本owner原配额准入、且在整个调用期间保持持有的宿主调用方（提炼）传入：复用它取state锁，
+    #   不再重取不可重入的配额锁；他owner或非准入对象拒绝。默认None仍按原quota→state取锁。
     # 函数用途: 返回登记表与队列的互斥区。
     @contextmanager
-    def state_lock(self):
-        with owner_quota_enforcer_from_policy(self.skills_root.parent).admission() as admission:
-            with locked_json_path(self.directory / ".state"):
-                token = self._quota_admission.set(admission)
-                try:
-                    yield admission
-                finally:
-                    self._quota_admission.reset(token)
+    def state_lock(self, *, admission=None):
+        with ExitStack() as stack:
+            if admission is None:
+                admission = stack.enter_context(owner_quota_enforcer_from_policy(self.skills_root.parent).admission())
+            elif not _same_owner_admission(admission, self.skills_root.parent):
+                raise RuntimeError("学习写入缺少本owner原配额事务")
+            stack.enter_context(locked_json_path(self.directory / ".state"))
+            token = self._quota_admission.set(admission)
+            try:
+                yield admission
+            finally:
+                self._quota_admission.reset(token)
 
     # LLM: 写入必须处于owner配额→state锁序内，按最终UTF-8字节检查，不新建第二配额权威。
     # 函数用途: 给发布、候选和版本文件复用同一owner磁盘限制。
