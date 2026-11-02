@@ -16,11 +16,14 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ..common.nofollow_fs import ensure_private_dir
 from ..tooling.sandbox import SandboxSpec, SandboxUnavailable, build_bwrap_argv, find_bwrap
 from .source_http import (
     SourceHttpRequest,
@@ -255,7 +258,7 @@ def _invoke(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     adapter = normalize_source_adapter(raw_adapter)
-    root, script = _resolved_script(owner_home, audit_id, adapter)
+    root, script, source = _resolved_script(owner_home, audit_id, adapter)
     encoded = _canonical_json(payload)
     if len(encoded) > _MAX_INPUT_BYTES:
         raise SourceAdapterError(
@@ -269,58 +272,61 @@ def _invoke(
             "SANDBOX_UNAVAILABLE",
         )
     python = _system_python()
-    try:
-        argv = [
-            *build_bwrap_argv(
-                SandboxSpec(
-                    owner_home=root,
-                    workspace=script.parent,
-                    write_roots=(),
-                    bwrap_path=bwrap,
-                    network_access=False,
-                )
-            ),
-            "--",
-            python,
-            "-I",
-            "-S",
-            str(script),
-        ]
-    except SandboxUnavailable as exc:
-        raise SourceAdapterError(str(exc), "SANDBOX_UNAVAILABLE") from exc
-    env = {
-        "HOME": str(root),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PATH": "/usr/bin:/bin",
-        "PYTHONIOENCODING": "utf-8",
-    }
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+    with _verified_snapshot(owner_home, script.name, source) as snapshot:
         try:
-            result = subprocess.run(
-                argv,
-                input=encoded,
-                stdout=stdout,
-                stderr=stderr,
-                env=env,
-                timeout=_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise SourceAdapterError(
-                "来源适配器执行超时",
-                "SOURCE_ADAPTER_TIMEOUT",
-            ) from exc
-        stdout.flush()
-        stderr.flush()
-        output_size = os.fstat(stdout.fileno()).st_size
-        error_size = os.fstat(stderr.fileno()).st_size
-        if output_size > _MAX_OUTPUT_BYTES:
-            raise SourceAdapterError("来源适配器输出超过安全上限")
-        stdout.seek(0)
-        stderr.seek(max(0, error_size - 2000))
-        output = stdout.read()
-        error_tail = stderr.read().decode("utf-8", "replace").strip()
+            argv = [
+                *build_bwrap_argv(
+                    SandboxSpec(
+                        owner_home=root,
+                        workspace=script.parent,
+                        # The verified bytes are the only added read leaf; cwd stays the original folder.
+                        public_ro_roots=(snapshot,),
+                        write_roots=(),
+                        bwrap_path=bwrap,
+                        network_access=False,
+                    )
+                ),
+                "--",
+                python,
+                "-I",
+                "-S",
+                str(snapshot),
+            ]
+        except SandboxUnavailable as exc:
+            raise SourceAdapterError(str(exc), "SANDBOX_UNAVAILABLE") from exc
+        env = {
+            "HOME": str(root),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONIOENCODING": "utf-8",
+        }
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            try:
+                result = subprocess.run(
+                    argv,
+                    input=encoded,
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=env,
+                    timeout=_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise SourceAdapterError(
+                    "来源适配器执行超时",
+                    "SOURCE_ADAPTER_TIMEOUT",
+                ) from exc
+            stdout.flush()
+            stderr.flush()
+            output_size = os.fstat(stdout.fileno()).st_size
+            error_size = os.fstat(stderr.fileno()).st_size
+            if output_size > _MAX_OUTPUT_BYTES:
+                raise SourceAdapterError("来源适配器输出超过安全上限")
+            stdout.seek(0)
+            stderr.seek(max(0, error_size - 2000))
+            output = stdout.read()
+            error_tail = stderr.read().decode("utf-8", "replace").strip()
     if result.returncode != 0:
         detail = f": {error_tail}" if error_tail else ""
         raise SourceAdapterError(f"来源适配器执行失败(exit={result.returncode}){detail}")
@@ -337,7 +343,7 @@ def _resolved_script(
     owner_home: Path,
     audit_id: str,
     adapter: dict[str, str],
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, bytes]:
     # Import lazily: conversation package initialization imports the source
     # binding schema, which in turn imports this validator.
     from ..conversation.workspace_paths import audit_workspace_path
@@ -363,16 +369,44 @@ def _resolved_script(
         raise SourceAdapterError("来源适配器脚本越过 Audit 工作区") from exc
     if not script.is_file():
         raise SourceAdapterError("来源适配器 path 不是普通文件")
+    # One bounded no-follow load: these exact bytes are size/hash checked and later executed.
     try:
-        size = script.stat().st_size
-        digest = sha256(script.read_bytes()).hexdigest()
+        descriptor = os.open(script, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise SourceAdapterError("来源适配器 path 不是普通文件")
+            source = handle.read(_MAX_SCRIPT_BYTES + 1)
     except OSError as exc:
         raise SourceAdapterError("来源适配器脚本当前不可读") from exc
-    if size <= 0 or size > _MAX_SCRIPT_BYTES:
+    if not source or len(source) > _MAX_SCRIPT_BYTES:
         raise SourceAdapterError(f"来源适配器脚本必须在 1–{_MAX_SCRIPT_BYTES} 字节之间")
-    if digest != adapter["sha256"]:
+    if sha256(source).hexdigest() != adapter["sha256"]:
         raise SourceAdapterError("来源适配器脚本哈希与已发布版本不一致")
-    return root, script
+    return root, script, source
+
+
+# LLM: 校验与执行消费同一份字节：快照建在 Audit 工作区外的 owner 框架 tmp 下、每次调用唯一，
+#   只以单个只读叶挂进原沙箱；子进程结束即删除。工作区原文件之后被改不影响本次执行，下一次请求仍按原引用重验。
+# 函数用途: 在本次子进程整个生命周期内持有已核验的适配器脚本字节。
+@contextmanager
+def _verified_snapshot(owner_home: Path, name: str, source: bytes) -> Iterator[Path]:
+    try:
+        home = Path(owner_home).resolve(strict=True)
+        ensure_private_dir(home / "tmp", canonical_root=home)
+        directory = Path(tempfile.mkdtemp(prefix=".source-adapter-", dir=home / "tmp")).resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        raise SourceAdapterError("来源适配器运行快照不可用", "SOURCE_ADAPTER_UNAVAILABLE") from exc
+    try:
+        snapshot = directory / name
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            with os.fdopen(os.open(snapshot, flags, 0o400), "wb") as handle:
+                handle.write(source)
+        except OSError as exc:
+            raise SourceAdapterError("来源适配器运行快照不可用", "SOURCE_ADAPTER_UNAVAILABLE") from exc
+        yield snapshot
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _system_python() -> str:

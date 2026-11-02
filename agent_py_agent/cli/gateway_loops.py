@@ -1278,6 +1278,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self.poll_interval = _background_main_poll_interval()
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
+        # 已登记普通账号的受管派单由独立准入受管池承载；原普通池对其拒绝保持不变，容量共享。
+        self._managed_owner_pool: object | None = None
         self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
         self._owner_planner_sqlite_scopes: dict[object, object] = {}
         self._owner_planner_scope_used_at: dict[object, float] = {}
@@ -1380,6 +1382,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             now = time.monotonic()
             if now >= self._next_owner_retire_at:
                 release_idle_owner_agents(self)
+                self._release_idle_managed_owner_agents()
                 self._next_owner_retire_at = now + 5.0
             self._sync_owner_schedulers()
             self._recover_active_watch_harvesters()
@@ -1455,12 +1458,20 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 硬事实 owner(待消费 wake/到期 policy/未完成子代理/盯守路/调度活)必进池。
         # 纯 curator 软 owner 不需要会话 scheduler，也不能在这里批量构建完整 Agent；
         # 它们只在 _run_due_curators 真正拿到有限 worker 时临时进入池。
+        managed = self._ensure_managed_owner_pool()
         for owner in self._registry.hard_snapshot():
             try:
-                pool.get(owner, hard=True, touch=False)
+                if managed is not None and managed.handles(owner):
+                    # 旧直写库派单先按原身份持久交接到规范库，再取独立准入的受管Agent；Count0原提交即直调。
+                    managed.reconcile(owner, commit_transition=lambda operation: operation())
+                    managed.get(owner)
+                else:
+                    pool.get(owner, hard=True, touch=False)
             except Exception as exc:
                 _print_gateway_loop_error("gateway_background_main.owner_build", str(getattr(owner, "owner_id", "")), exc)
         active = {id(agent): agent for agent in pool.hard_agents()}
+        if managed is not None:
+            active.update((id(agent), agent) for agent in managed.hard_agents())
         for key in list(self._owner_schedulers):
             if key not in active and not self._active_threads_for_owner(key):
                 self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出且没在跑 → 丢弃其调度器
@@ -1651,6 +1662,49 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 thread_name_prefix="memory-curator",
             )
         return self._curator_executor
+
+    # LLM: 与业务控制共用同一基础Agent上的受管池；失败只记录诊断，不回落普通池或克隆管理员实例。
+    # 函数用途: 惰性取得受管普通用户的独立准入池。
+    def _ensure_managed_owner_pool(self) -> object | None:
+        managed = getattr(self, "_managed_owner_pool", None)
+        if managed is not None:
+            return managed
+        try:
+            from ..agent.gateway_parts.managed_owner_runtime import managed_owner_pool_for_agent
+
+            self._managed_owner_pool = managed_owner_pool_for_agent(self._base_agent)
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_background_main.managed_owner_pool", "background-main", exc)
+            self._managed_owner_pool = None
+        return self._managed_owner_pool
+
+    # LLM: 与原普通空闲回收同条件：在途会话车道或持久硬事实仍在时保留；释放后同步清调度器与登记本旧版本。
+    # 函数用途: 释放空闲受管Agent及其共享容量名额。
+    def _release_idle_managed_owner_agents(self) -> int:
+        from ..agent.owner_wake_discovery import _owner_has_hard_facts
+
+        managed = getattr(self, "_managed_owner_pool", None)
+        seconds = float(getattr(getattr(self._base_agent, "config", None), "owner_agent_idle_seconds", 60.0))
+        if managed is None or seconds <= 0:
+            return 0
+        observed_at = time.monotonic()
+
+        # LLM: 无法确认持久事实时视为忙，不得误当空闲。
+        # 函数用途: 判断受管Agent是否仍有在途车道或持久后台工作。
+        def busy(agent: object) -> bool:
+            if self._active_threads_for_owner(id(agent)):
+                return True
+            home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+            try:
+                return not home or _owner_has_hard_facts(Path(home))
+            except Exception:  # noqa: BLE001
+                return True
+
+        released = managed.release_idle(seconds, busy=busy)
+        for agent in released:
+            self._owner_schedulers.pop(id(agent), None)
+            self._registry.discard_idle(("local", "user", agent._managed_owner_generation.user_id), observed_at)
+        return len(released)
 
     # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
     # 函数用途: 惰性取得请求链共用的owner池，失败记录原诊断而不另造池。

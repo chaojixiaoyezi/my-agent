@@ -74,15 +74,19 @@ def complete_host_wired(server):
 
 
 # LLM: 调用方已完成原live授权并持ExitStack；main沿原Agent，其它owner经原池原子租用，已登记账号仍由原池拒绝。
+#   已登记普通账号改由独立准入的受管签发器按启用账号/规范home/当前代次原子租用，不克隆管理员实例。
 #   构造/容量/归属失败都在任何账本变更前收为HOST_NOT_READY/not_started，不把未开始的控制报成未知。
 # 函数用途: 为一次业务控制取得准确owner完整宿主，并把租用交给调用方栈直至控制结束。
 def owner_complete_host(server, owner, stack):
+    from .managed_owner_runtime import managed_local_user_id, managed_owner_pool_for_agent
     from .request_worker import _resolve_request_agent_for_owner
 
     base = getattr(server, 'agent', None)
     if base is None:
         raise HostAPIError('HOST_NOT_READY', 503)
     try:
+        if managed_local_user_id(base.home_paths.root, owner) is not None:
+            return stack.enter_context(managed_owner_pool_for_agent(base).acquire_pinned(owner))
         return _resolve_request_agent_for_owner(base, owner, stack)
     except RuntimeError:
         raise HostAPIError('HOST_NOT_READY', 503) from None

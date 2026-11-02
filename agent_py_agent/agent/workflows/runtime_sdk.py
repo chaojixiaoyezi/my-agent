@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 
@@ -15,7 +15,9 @@ from ..assets.datasource_store import (
     DatasourceConnectionSpec,
     DatasourcePublicSummary,
     open_sqlite,
+    require_gated_database,
     secret_values,
+    shared_writer_gate,
 )
 from .datasource_runtime import current_datasource_bindings
 from .models import (
@@ -106,6 +108,8 @@ class DatasourceHandle:
     read_only: bool
     _spec: DatasourceConnectionSpec = field(repr=False)
     _secret: dict = field(default_factory=dict, repr=False)
+    # 仅由签名冻结绑定复制的写者复核事实；query_sql 总是按代号重新取句柄，不接受外部构造的值。
+    _control: dict | None = field(default=None, repr=False)
 
     # LLM: 独立安全投影同时提供排序凭据键名，实际值仍仅用于脱敏，不进入公开config。
     # 函数用途: 查看连接摘要和凭据字段名称，不返回凭据正文。
@@ -139,7 +143,18 @@ def get_datasource(datasource_id: str) -> DatasourceHandle:
     spec = DatasourceConnectionSpec(**_copy_binding(row['spec']))
     if spec.datasource_id != datasource_id:
         raise PermissionError('DATASOURCE_RUNTIME_ID_MISMATCH')
-    return DatasourceHandle(datasource_id, spec.kind, spec.read_only or row['access'] == 'read', spec, _copy_binding(row['secret']))
+    return DatasourceHandle(datasource_id, spec.kind, spec.read_only or row['access'] == 'read', spec,
+                            _copy_binding(row['secret']), _copy_binding(row.get('control')))
+
+
+# LLM: 只读句柄与内存库不需要物理闸门；可写文件库缺少签发事实时失败关闭，不退回无协调写入。
+# 函数用途: 为一次SQL选择共享写者闸门。
+def _writer_gate(handle):
+    if handle.read_only or handle._spec.database_path == ':memory:':
+        return nullcontext()
+    if not handle._control:
+        raise PermissionError('DATASOURCE_WRITER_GATE_UNAVAILABLE')
+    return shared_writer_gate(handle._control)
 
 
 # LLM: 原生SQLite在编译SQL时逐动作检查，读合同只允许读动作；ATTACH/扩展加载/路径PRAGMA即使read_write也不能越出绑定。
@@ -183,7 +198,10 @@ def query_sql(datasource_id: str, sql: str, params: Sequence[object] | Mapping[s
     if params is not None and (not isinstance(params, (Mapping, Sequence)) or isinstance(params, (str, bytes))):
         raise ValueError('DATASOURCE_SQL_INVALID_PARAMS')
     authorizer = _SqlAuthorization(handle)
-    with closing(open_sqlite(handle._spec, read_only=handle.read_only)) as conn:
+    # 可写事务全程持共享物理闸门：复核、执行、提交/回滚与连接关闭都在闸门内，切换方排他闸门不能插入其间。
+    with _writer_gate(handle), closing(open_sqlite(handle._spec, read_only=handle.read_only)) as conn:
+        if handle._control and not handle.read_only:
+            require_gated_database(handle._spec.database_path, handle._control)
         conn.row_factory = sqlite3.Row
         conn.set_authorizer(authorizer)
         try:

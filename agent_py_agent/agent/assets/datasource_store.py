@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import hmac
 import importlib
@@ -15,6 +16,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,11 +28,17 @@ from ..common.nofollow_fs import (
     ensure_private_dir,
     list_names_beneath,
     open_directory_beneath,
+    open_private_lock_beneath,
     open_readonly_file_beneath,
     read_text_beneath,
     write_text_atomic_beneath,
 )
 from . import _verify_directory_beneath, safe_asset_id
+
+# 物理库闸门等待上限 30 秒：切换等在途 SDK 写者收尾、写者等切换提交；超时明确失败，不无限占住宿主或脚本。
+_GATE_WAIT_SECONDS = 30.0
+# 写者复核读取的规格叶上限 1 MB：规格只含连接元数据，超限即视为绑定已变。
+_MAX_SPEC_LEAF_BYTES = 1024 * 1024
 
 
 # LLM: 时间仅作审计，不参与授权或CAS。
@@ -415,6 +423,139 @@ def sqlite_fingerprint(connection):
     return {'schema_hash': hashlib.sha256(repr(schema).encode()).hexdigest(), 'row_counts': counts, 'data_hashes': digests}
 
 
+# LLM: 规格指纹覆盖完整无秘密规格(含revision与库路径)，宿主签发与SDK复核用同一规范JSON，不依赖叶文件排版。
+# 函数用途: 计算一个连接规格的稳定指纹。
+def spec_fingerprint(spec):
+    return hashlib.sha256(_json(asdict(spec)).encode('utf-8')).hexdigest()
+
+
+# LLM: 闸门按库文件(dev,ino)物理身份命名，别名路径落同一把锁；只接受现存普通文件，不跟随链接。
+# 函数用途: 取得一个SQLite库文件的稳定物理身份。
+def database_identity(path):
+    info = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('DATASOURCE_UNSAFE_DATABASE_PATH')
+    return info.st_dev, info.st_ino
+
+
+# LLM: 闸门叶固定在Owner私有data下；只创建或复用、从不替换或删除，避免持锁方与等待方落在不同inode。
+# 函数用途: 给出物理库身份对应的闸门叶相对路径。
+def _gate_parts(identity):
+    return ('data', 'datasource_gates', f'{identity[0]}-{identity[1]}.lock')
+
+
+# LLM: 签发的是精确闸门叶真实路径与身份；不授予父目录，脚本侧只读打开该叶取共享锁。
+# 函数用途: 创建或复用一个物理库闸门并返回可签名的闸门事实。
+def database_gate_facts(owner_home, database_file):
+    identity = database_identity(database_file)
+    descriptor = open_private_lock_beneath(owner_home, _gate_parts(identity))
+    try:
+        gate = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    path = Path(owner_home).absolute().joinpath(*_gate_parts(identity)).resolve(strict=True)
+    return {'gate_path': str(path), 'gate_identity': [gate.st_dev, gate.st_ino], 'database_identity': list(identity)}
+
+
+# LLM: 只收集现存普通SQLite文件；缺失/非普通文件上不可能有SDK写者在途，不为它们取锁也不报错。
+# 函数用途: 计算一组规格或原始记录所涉及的物理库身份集合。
+def _database_identities(*rows):
+    found = set()
+    for row in rows:
+        data = asdict(row) if isinstance(row, DatasourceConnectionSpec) else (row or {})
+        path = data.get('database_path') or ''
+        if data.get('kind') != 'sqlite' or path in ('', ':memory:'):
+            continue
+        try:
+            found.add(database_identity(path))
+        except (OSError, ValueError):
+            continue
+    return frozenset(found)
+
+
+# LLM: 有界轮询非阻塞flock；超时只报繁忙、不改任何账，退出必释放，调用方按原失败路径处理。
+# 函数用途: 在截止时间内取得共享或排他文件锁。
+@contextmanager
+def _bounded_flock(descriptor, mode, deadline):
+    while True:
+        try:
+            fcntl.flock(descriptor, mode | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('DATASOURCE_GATE_BUSY') from None
+            time.sleep(0.01)
+    try:
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+# LLM: 切换/保存先按物理身份排序取全部排他闸门，再取规格锁；在途SDK写者先提交或回滚并关闭，之后的写者复核到新规格即失败。
+# 函数用途: 按稳定顺序持有一组物理库排他闸门，返回已持有的身份集合。
+@contextmanager
+def _exclusive_database_gates(owner_home, identities):
+    deadline = time.monotonic() + _GATE_WAIT_SECONDS
+    with ExitStack() as stack:
+        for identity in sorted(identities):
+            descriptor = open_private_lock_beneath(owner_home, _gate_parts(identity))
+            stack.callback(os.close, descriptor)
+            stack.enter_context(_bounded_flock(descriptor, fcntl.LOCK_EX, deadline))
+        yield frozenset(identities)
+
+
+# LLM: 每次按路径重新打开规格叶：原子替换后残留的旧inode(链接数0)与内容指纹变化同样视为绑定已变，不信任先前读取。
+# 函数用途: 在写者闸门内复核签名绑定的规格仍是当前规范规格。
+def _require_current_spec_leaf(control):
+    try:
+        descriptor = os.open(control['spec_path'],
+                             os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    except OSError:
+        raise PermissionError('DATASOURCE_BINDING_CHANGED') from None
+    with os.fdopen(descriptor, 'rb') as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink < 1:
+            raise PermissionError('DATASOURCE_BINDING_CHANGED')
+        raw = handle.read(_MAX_SPEC_LEAF_BYTES + 1)
+    try:
+        current = DatasourceConnectionSpec(**json.loads(raw.decode('utf-8')))
+    except (TypeError, ValueError):
+        raise PermissionError('DATASOURCE_BINDING_CHANGED') from None
+    if (len(raw) > _MAX_SPEC_LEAF_BYTES or current.revision != control['revision']
+            or not hmac.compare_digest(spec_fingerprint(current), control['spec_sha256'])):
+        raise PermissionError('DATASOURCE_BINDING_CHANGED')
+
+
+# LLM: 共享闸门覆盖复核、执行、提交/回滚与连接关闭；闸门叶身份须与签发一致，切换方排他闸门期间写者只等待不越过。
+# 函数用途: 为一次可写SDK事务持有共享物理库闸门并复核冻结的规格事实。
+@contextmanager
+def shared_writer_gate(control):
+    try:
+        descriptor = os.open(control['gate_path'], os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0))
+    except OSError:
+        raise PermissionError('DATASOURCE_WRITER_GATE_UNAVAILABLE') from None
+    try:
+        gate = os.fstat(descriptor)
+        if [gate.st_dev, gate.st_ino] != list(control['gate_identity']):
+            raise PermissionError('DATASOURCE_WRITER_GATE_UNAVAILABLE')
+        with _bounded_flock(descriptor, fcntl.LOCK_SH, time.monotonic() + _GATE_WAIT_SECONDS):
+            _require_current_spec_leaf(control)
+            yield
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 连接建立后核对库路径仍是闸门签发时的物理库；替换过的库文件不在该闸门保护内，直接拒绝。
+# 函数用途: 确认本次写连接落在已持闸门对应的数据库上。
+def require_gated_database(path, control):
+    try:
+        identity = database_identity(path)
+    except (OSError, ValueError):
+        raise PermissionError('DATASOURCE_BINDING_CHANGED') from None
+    if list(identity) != list(control['database_identity']):
+        raise PermissionError('DATASOURCE_BINDING_CHANGED')
+
+
 # LLM: 只比较连接与访问策略，不把显示时间当身份；revision与scope由切换调用方另外硬核对。
 # 函数用途: 识别终态写失败后已经生效的同一目标绑定。
 def _same_binding(left, right):
@@ -492,24 +633,37 @@ class _DatasourceMigration:
         new = replace(target, datasource_id=source.datasource_id, scope=source.scope, migrated_from_id=source.datasource_id)
         database_path(source.database_path, self.owner_home, workspace_root)
         database_path(target.database_path, self.owner_home, workspace_root)
-        with closing(open_sqlite(source, read_only=True)) as src, closing(open_sqlite(target, read_only=True)) as dst:
-            expected = _json(record['source_fingerprint'])
-            if _json(sqlite_fingerprint(src)) != expected or _json(sqlite_fingerprint(dst)) != expected:
-                raise ValueError('DATASOURCE_MIGRATION_CONTENT_CHANGED')
-            if source.revision != record['source_revision'] and not (
-                source.revision == record['source_revision'] + 1 and _same_binding(source, new)
-            ):
-                raise ValueError('DATASOURCE_REVISION_CONFLICT')
+        root, parts = self._location(source.scope, workspace_root)
+        leaf = (*parts, source.datasource_id + '.json')
+        # 排序排他物理闸门先于规格锁：在途SDK写者收尾后才做最终指纹核对；锁内重读规格，经已准入的锁内保存路径提交，不重入flock。
+        with _exclusive_database_gates(self.owner_home, _database_identities(source, target)) as gated, \
+                locked_json_path(root.joinpath(*leaf)):
             try:
-                if source.revision == record['source_revision']:
-                    self.save_datasource(asdict(new), scope=source.scope, workspace_root=workspace_root,
-                                         expected_revision=record['source_revision'])
-                else:
-                    record['reconciled_committed_binding'] = True
-                self._migration_state(record, 'SWITCHED')
-            except OSError:
-                record['switch_commit_uncertain'] = True
-                raise
+                current = self._read(root, leaf)
+                unchanged = current is not None and DatasourceConnectionSpec(**current) == source
+            except (TypeError, ValueError):
+                unchanged = False
+            if not unchanged:
+                raise ValueError('DATASOURCE_REVISION_CONFLICT')
+            with closing(open_sqlite(source, read_only=True)) as src, closing(open_sqlite(target, read_only=True)) as dst:
+                expected = _json(record['source_fingerprint'])
+                if _json(sqlite_fingerprint(src)) != expected or _json(sqlite_fingerprint(dst)) != expected:
+                    raise ValueError('DATASOURCE_MIGRATION_CONTENT_CHANGED')
+                if source.revision != record['source_revision'] and not (
+                    source.revision == record['source_revision'] + 1 and _same_binding(source, new)
+                ):
+                    raise ValueError('DATASOURCE_REVISION_CONFLICT')
+                try:
+                    if source.revision == record['source_revision']:
+                        payload = asdict(new)
+                        spec, secrets, _, _ = self._admit_save(payload, source.scope, workspace_root)
+                        self._save_admitted(root, leaf, spec, secrets, payload, record['source_revision'], gated)
+                    else:
+                        record['reconciled_committed_binding'] = True
+                    self._migration_state(record, 'SWITCHED')
+                except OSError:
+                    record['switch_commit_uncertain'] = True
+                    raise
 
     # LLM: 原迁移锁/CAS保持；归一化前解析源及目标引用的既有秘密，连同新秘密清洗目标与返回记录，不影响原状态账身份。
     # 函数用途: 串行准备或恢复迁移，同时遮蔽复用凭据的实际值。
@@ -670,8 +824,18 @@ class DatasourceStore(_DatasourceMigration):
     # LLM: 两个凭据参数合并且冲突拒绝；原锁/CAS保持，成功保存一律密文（旧引用同值升级），所有秘密参与脱敏。
     # 函数用途: 保存分层连接并返回安全摘要，兼容credential_values别名。
     def save_datasource(self, spec_payload, *, secret_payload=None, credential_values=None, scope='owner', workspace_root=None, expected_revision=None):
+        spec, secrets, root, leaf = self._admit_save(spec_payload, scope, workspace_root, (secret_payload, credential_values))
+        # 现有与新库的物理闸门先于规格锁；锁外读取只用于发现闸门，锁内重读并核对覆盖后才CAS写回。
+        with _exclusive_database_gates(self.owner_home, _database_identities(self._read(root, leaf), spec)) as gated, \
+                locked_json_path(root.joinpath(*leaf)):
+            spec = self._save_admitted(root, leaf, spec, secrets, spec_payload, expected_revision, gated)
+        return self.public_summary(spec)
+
+    # LLM: 只做锁外归一化、秘密合并与目录准备，不取锁不写规格；保存与切换共用，避免切换在已持锁时重入save_datasource。
+    # 函数用途: 准入一次规格保存并返回规格、秘密及其规格叶位置。
+    def _admit_save(self, spec_payload, scope, workspace_root, secret_payloads=()):
         spec, secrets = self._normalize(spec_payload, scope, workspace_root)
-        for payload in (secret_payload, credential_values):
+        for payload in secret_payloads:
             if payload is not None and (not isinstance(payload, dict) or any(not isinstance(key, str) for key in payload)):
                 raise ValueError('DATASOURCE_INVALID_SECRET')
             for key, value in (payload or {}).items():
@@ -679,24 +843,39 @@ class DatasourceStore(_DatasourceMigration):
         root, parts = self._location(scope, workspace_root)
         ensure_private_dir(root)
         _verify_directory_beneath(root, parts, create=True)
-        path = root.joinpath(*parts, spec.datasource_id + '.json')
-        with locked_json_path(path):
-            old = self._read(root, (*parts, spec.datasource_id + '.json'))
-            revision = old['revision'] if old else 0
-            if expected_revision is not None and (type(expected_revision) is not int or revision != expected_revision):
-                raise ValueError('DATASOURCE_REVISION_CONFLICT')
-            existing = self.resolve_secret(spec.credential_ref)
-            known_values = (*secret_values(secrets), *secret_values(existing))
-            spec = DatasourceConnectionSpec(**_redact_spec_fields(asdict(spec), known_values))
-            spec = replace(spec, revision=revision + 1, created_at=old['created_at'] if old else _now(), updated_at=_now())
-            if secrets:
-                spec = replace(spec, credential_ref=self._save_secret(secrets))
-            elif existing:
-                self._save_secret(existing, credential_ref=spec.credential_ref)
-            if spec.kind == 'sqlite' and not spec_payload.get('database_path') and spec.database_path != ':memory:':
-                self._create_local(spec)
-            self._write(root, (*parts, spec.datasource_id + '.json'), asdict(spec))
-        return self.public_summary(spec)
+        return spec, secrets, root, (*parts, spec.datasource_id + '.json')
+
+    # LLM: 调用方必须已持该规格锁与所需排他闸门；当前库不在已持闸门内说明并发换库，按版本冲突拒绝，原CAS与秘密处理不变。
+    # 函数用途: 在已准入的锁内完成一次规格CAS写入并返回新规格。
+    def _save_admitted(self, root, leaf, spec, secrets, spec_payload, expected_revision, gated):
+        old = self._read(root, leaf)
+        if not _database_identities(old) <= gated:
+            raise ValueError('DATASOURCE_REVISION_CONFLICT')
+        revision = old['revision'] if old else 0
+        if expected_revision is not None and (type(expected_revision) is not int or revision != expected_revision):
+            raise ValueError('DATASOURCE_REVISION_CONFLICT')
+        existing = self.resolve_secret(spec.credential_ref)
+        known_values = (*secret_values(secrets), *secret_values(existing))
+        spec = DatasourceConnectionSpec(**_redact_spec_fields(asdict(spec), known_values))
+        spec = replace(spec, revision=revision + 1, created_at=old['created_at'] if old else _now(), updated_at=_now())
+        if secrets:
+            spec = replace(spec, credential_ref=self._save_secret(secrets))
+        elif existing:
+            self._save_secret(existing, credential_ref=spec.credential_ref)
+        if spec.kind == 'sqlite' and not spec_payload.get('database_path') and spec.database_path != ':memory:':
+            self._create_local(spec)
+        self._write(root, leaf, asdict(spec))
+        return spec
+
+    # LLM: 只给可写SQLite文件签发：完整规格指纹、revision、精确规格叶真实路径与闸门事实；规格叶无秘密，不授予父目录。
+    # 函数用途: 生成运行绑定中供SDK写者在共享闸门内复核的控制事实，非写绑定返回None。
+    def writer_control(self, spec, *, workspace_root=None):
+        if spec.read_only or spec.kind != 'sqlite' or spec.database_path in ('', ':memory:'):
+            return None
+        root, parts = self._location(spec.scope, workspace_root)
+        leaf = root.joinpath(*parts, spec.datasource_id + '.json').resolve(strict=True)
+        return {'spec_path': str(leaf), 'spec_sha256': spec_fingerprint(spec), 'revision': spec.revision,
+                **database_gate_facts(self.owner_home, spec.database_path)}
 
     # LLM: 按原nofollow入口仅解析本Owner钥匙串一次；键名排序公开，实际凭据值只用于内存脱敏。
     # 函数用途: 返回保留credential_ref、has_secret并增加credential_keys的公开摘要。

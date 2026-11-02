@@ -882,6 +882,10 @@ def _gateway_urlopen_unlimited(req: urllib.request.Request, request: GatewayRequ
     timeout immediately after connect completes.
     """
 
+    from ..common.managed_owner_generation import require_managed_owner_generation
+
+    # 名额等待之后、物理连接之前复核受管原代次；失效时请求尚未发出。
+    require_managed_owner_generation("gateway_provider_call")
     connect_timeout = _bounded_connect_timeout(request)
     read_timeout = _request_initial_read_timeout(request)
     # 带连接池且能安全复用的目标改走保活打开；不能复用（代理带凭据、明文经代理）时仍走原 urllib 路径。

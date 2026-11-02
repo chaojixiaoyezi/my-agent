@@ -48,9 +48,11 @@ def require_worker_construction(frozen, config):
 
 
 # LLM: frozen由早期入口提供；真实C roots在共享读取前核且原样交池，不用home补根；首次ready前只读核依赖，owner仍惰性且消费时重核。
-# 函数用途: 在资源完整时返回原OwnerScopedAgentPool，不物化owner或补写共享资源。
+#   已登记普通账号另由独立准入的受管池服务：同一冻结bootstrap/分区与本分区实例预算，原普通池拒绝保持不变。
+# 函数用途: 在资源完整时返回原OwnerScopedAgentPool并挂接受管池，不物化owner或补写共享资源。
 def create_worker_pool(frozen, config, root):
     from ..user_space.worker_home import frozen_home_paths, require_worker_shared_home
+    from .managed_owner_runtime import ManagedOwnerPool
 
     require_worker_config(frozen, config)
     roots = require_worker_workspace(frozen, root, frozen.launch.workspace_roots)
@@ -58,7 +60,12 @@ def create_worker_pool(frozen, config, root):
     snapshot = deepcopy(config)
     count = frozen.launch.partition.count
     capacity = _resolved_max_agents(getattr(snapshot, "owner_agent_pool_max_agents", None))
-    return OwnerScopedAgentPool(
+    pool = OwnerScopedAgentPool(
         snapshot, root, workspace_roots=roots,
         max_agents=(capacity + count - 1) // count, worker_bootstrap=frozen,
     )
+    pool.managed_owner_pool = ManagedOwnerPool(
+        frozen.launch.owner_root, host_options=snapshot, shared_pool=pool, worker_bootstrap=frozen,
+        max_agents=(capacity + count - 1) // count,
+    )
+    return pool

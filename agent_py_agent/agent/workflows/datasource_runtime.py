@@ -383,6 +383,7 @@ def declared_datasources(declared_specs):
 
 
 # LLM: 只有声明过的ID可解析秘密；尚未登记的旧查询源保留缺失标记，真正调用SDK时明确失败而非越权回退。
+#   可写SQLite另签发规格指纹/revision/规格叶/物理闸门事实，随整份绑定签名冻结；SDK写者在共享闸门内据此复核。
 # 函数用途: 冻结当前run所需的连接和认证快照。
 def _resolve_bindings(store, declared_specs, workspace_root):
     result = {}
@@ -393,7 +394,17 @@ def _resolve_bindings(store, declared_specs, workspace_root):
             result[source_id] = {'access': access, 'spec': None, 'secret': {}}
             continue
         result[source_id] = {'access': access, 'spec': asdict(spec), 'secret': store.resolve_secret(spec.credential_ref)}
+        control = store.writer_control(spec, workspace_root=workspace_root) if access == 'read_write' else None
+        if control is not None:
+            result[source_id]['control'] = control
     return result
+
+
+# LLM: 只返回签发过的精确规格叶与闸门叶，不含父目录；无控制事实的绑定没有可暴露的叶。
+# 函数用途: 列出一个绑定的写者复核控制叶。
+def _control_leaves(row):
+    control = row.get('control')
+    return (Path(control['spec_path']), Path(control['gate_path'])) if control else ()
 
 
 # LLM: 宿主绑定也深度冻结；ContextVar隔离线程/异步任务并在退出恢复，Store与workspace仍仅受信调用者提供。
@@ -433,6 +444,7 @@ class ScriptDatasourceRuntime:
         self.owner_home = Path(owner_home)
         self.folder = Path(folder)
         self.parts = None
+        self.readonly_control_paths = ()
         for key in (MANIFEST_ENV, MANIFEST_SECRET_ENV):
             environment.pop(key, None)
         contract = metadata.get('access_contract')
@@ -449,6 +461,8 @@ class ScriptDatasourceRuntime:
         bindings = _resolve_bindings(DatasourceStore(owner_home), sources, workspace_root)
         capture['datasource_secrets'] = secret_values([row['secret'] for row in bindings.values()])
         self.read_roots, self.write_roots = self._roots(bindings)
+        # 规格/闸门控制叶只读暴露；ScriptRunner即使在更宽写根下也把它们列为受保护只读路径。
+        self.readonly_control_paths = tuple(leaf for row in bindings.values() for leaf in _control_leaves(row))
         self.name = 'datasources-' + uuid.uuid4().hex + '.json'
         self.parts = (*self.folder.relative_to(self.owner_home).parts, self.name)
         run_secret = os.urandom(32).hex()
@@ -471,6 +485,7 @@ class ScriptDatasourceRuntime:
             reads.extend(files)
             if row['access'] == 'read_write' and not spec['read_only']:
                 writes.extend(files)
+            reads.extend(_control_leaves(row))
         return tuple(reads), tuple(writes)
 
     # LLM: Python一律在用户代码/guard前预载当前SDK；绑定后不得改用shell解释器，原审计钩子保持。

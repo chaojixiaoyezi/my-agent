@@ -195,13 +195,20 @@ def test_asset_provision_installs_workflow_script_closure_and_toggles(managed):
 
 
 def test_dispatch_targets_own_conversation_and_queue_not_admin(managed):
-    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.user_space.managed_dispatch_recovery import (
+        canonical_conversation_root,
+        open_legacy_conversation_store,
+    )
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_conversations
 
     root, service, home = managed
     dispatched = service.dispatch_task("alice", "Do local work", title="Assigned work")
     assert dispatched is not None
     assert dispatched["status"] == "queued" and dispatched["target_owner_id"] == "local/alice"
-    store = ConversationStore(home.home_dir / "conversations", initialize=False)
+    store = _managed_conversations(home)
+    assert store.storage.root == canonical_conversation_root(home)
+    legacy = open_legacy_conversation_store(home)
+    assert legacy is None or legacy.threads.load(dispatched["thread_id"]) is None
     thread = store.threads.require(dispatched["thread_id"])
     assert thread.owner_id == "local/alice" and thread.owner_home == str(home.home_dir)
     message = store.messages.recent(thread.thread_id)[-1]
@@ -229,11 +236,11 @@ def test_review_submission_has_canonical_authority_and_read_only_mirror(managed,
 
 
 def test_review_rejection_requires_feedback_cas_and_notifies_applicant(managed):
-    from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_conversations
 
     root, _service, home = managed
-    conversation = ConversationStore(home.home_dir / "conversations")
+    conversation = _managed_conversations(home, initialize=True)
     thread = conversation.threads.create(owner_id="local/alice", owner_home=str(home.home_dir))
     reviews = GovernanceReviewStore(root)
     item = reviews.submit_review("alice", "high_risk_command", {"command": "example"}, applicant_thread_id=thread.thread_id)
@@ -505,11 +512,13 @@ class _Stage3Crash(BaseException):
 @pytest.mark.parametrize("phase", ["approved", "executing", "effect_checkpoint", "applied", "after_effect"])
 def test_stage3_review_recovers_crashes_without_repeating_persona_effect(managed, monkeypatch, phase):
     import agent_py_agent.agent.user_space.governance_review_store as reviews_module
-    from agent_py_agent.agent.conversation.store import ConversationStore
-    from agent_py_agent.agent.user_space.managed_user_governance import _GovernanceControl
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        _GovernanceControl,
+        _managed_conversations,
+    )
 
     root, service, home = managed
-    conversations = ConversationStore(home.home_dir / "conversations")
+    conversations = _managed_conversations(home, initialize=True)
     thread = conversations.threads.create(owner_id=home.owner_id, owner_home=str(home.home_dir))
     reviews = reviews_module.GovernanceReviewStore(root)
     item = reviews.submit_review("alice", "persona_change", {"target": "soul", "action": "add", "content": "approved once"}, applicant_thread_id=thread.thread_id)

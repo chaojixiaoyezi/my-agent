@@ -138,10 +138,25 @@ def _opaque_owner_key(owner: tuple[str, ...]) -> str:
     return hashlib.sha256(json.dumps(owner, ensure_ascii=True).encode()).hexdigest() if any(owner) else ""
 
 
+# LLM: 受管Agent的原代次先只收窄绑定并复核，再进入会话；普通Agent无代次时不变，绑定不授予任何权限。
+# 函数用途: 在整个工作片外层绑定受管原代次与供应商会话。
+@contextmanager
+def provider_runtime_scope(agent: object, params: object):
+    from ..common.managed_owner_generation import (
+        bind_managed_owner_generation,
+        require_managed_owner_generation,
+    )
+
+    with bind_managed_owner_generation(getattr(agent, "_managed_owner_generation", None)):
+        require_managed_owner_generation("provider_runtime")
+        with _provider_session_runtime_scope(agent, params):
+            yield
+
+
 # LLM: 优先使用宿主 agent_thread_id，子代理不借父 thread；无持久身份的一次独立调用只生成一次临时会话。
 # 函数用途: 在整个工作片外层绑定会话，让探针、正文、Compact 和保护线程一致继承。
 @contextmanager
-def provider_runtime_scope(agent: object, params: object):
+def _provider_session_runtime_scope(agent: object, params: object):
     attrs = getattr(params, "task_attributes", None) or {}
     thread_id = str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "")
     thread_id = thread_id or str(getattr(params, "thread_id", "") or "")

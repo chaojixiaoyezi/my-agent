@@ -333,13 +333,14 @@ def authenticate_user(root: Path, *, account_source: str, user_id: str, password
 
 
 # LLM: 认证版本只进入原credential_fingerprint，无配置仍保留旧指纹口径，不增加token字段或会话账。
+#   免密账号的合法表示是缺失散列；签发与验证共用同一空输入，非空散列的既有指纹逐字节不变。
 # 函数用途: 让MFA启停、SSO配置和改密共同撤销旧session。
 def _credential_fingerprint(root, current, *, stamp=None):
     from .totp_sso_auth import authentication_stamp
     if stamp is None:
         stamp = (authentication_stamp(root, current.owner.owner_id)
                  if current.owner.provider == 'local' and current.owner.owner_kind == 'user' else '')
-    return _fingerprint(current.password_hash + ('\n' + stamp if stamp else ''))
+    return _fingerprint((current.password_hash or '') + ('\n' + stamp if stamp else ''))
 
 
 # LLM: 只供已验主因素/可信SSO调用；SSO提交时stamp必须相同，token冻结旧stamp以拒并发变更后的旧认证。
