@@ -61,6 +61,13 @@ def _agent_task_obligation(step):
         or result.get('effect_started') and result.get('submission_state') != 'not_started')
 
 
+# LLM: 公共准入与引擎路由共用原任务义务；只选择原生对账，不授予重提或后缀副作用许可。
+# 函数用途: 判断恢复是否必须先交回原 Agent 任务完成链。
+def _requires_native_agent_resume(record):
+    return record.status == 'waiting_for_agent' or any(
+        _agent_task_obligation(step) and not step.escalation_result.get('completion_ref') for step in record.steps)
+
+
 # LLM: 读取同一当前回合令牌和线程停止事实；不自行建控制状态，不改已持久提交的历史成功。
 # 函数用途: 在步骤业务输出和运行终态发表前拒绝已接受的停止。
 def _check_stop():
@@ -192,8 +199,7 @@ class _WorkflowRunLifecycle:
                     resolution_origin = 'system'
                 if admission.effect_not_started or admission.reconciled_output is not None:
                     record.effect_outcome = 'not_started' if admission.effect_not_started else 'confirmed'
-            if record.status == 'waiting_for_agent' or any(
-                    _agent_task_obligation(step) and not step.escalation_result.get('completion_ref') for step in record.steps):
+            if _requires_native_agent_resume(record):
                 if from_step_id is not None or patched_step_output is not None or updated_data_sources is not None:
                     raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
                 result = self._resume_agent(record, definition)
