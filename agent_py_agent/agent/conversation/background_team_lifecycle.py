@@ -37,20 +37,49 @@ def background_identity_allows_work(thread, *, existing: bool = False) -> bool:
         and thread.metadata.get("background_retirement", {}).get("disposition") == "drain")
 
 
+class SessionTaskCoverageUnknown(RuntimeError):
+    """当前分页链不完整；不能把已读前缀当作完整责任范围。"""
+
+
+# LLM: 原游标绑定同一索引修订；只逐页读取canonical，不跨失效/partial页拼接快照。
+# 函数用途: 有界读取一份完整任务分页链，覆盖不明时显式中止。
+def session_task_pages(task_store, *, target_thread_id=None):
+    cursor, seen = None, set()
+    while True:
+        try:
+            page = task_store.list_page(limit=100, cursor=cursor, target_thread_id=target_thread_id)
+            if page["coverage"] != "complete" or page["load_errors"]:
+                raise SessionTaskCoverageUnknown("SESSION_TASK_COVERAGE_UNKNOWN")
+            following = page["next_cursor"]
+            if following and following in seen:
+                raise SessionTaskCoverageUnknown("SESSION_TASK_CURSOR_CYCLE")
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise SessionTaskCoverageUnknown("SESSION_TASK_COVERAGE_UNKNOWN") from exc
+        yield page["items"]
+        if not following:
+            return
+        seen.add(following)
+        cursor = following
+
+
+# LLM: 终态历史逐页释放，只保留真实未结任务；分页失效仍显式保留未知责任。
+# 函数用途: 汇总身份在原任务、执行、唤醒和交付存储里的当前义务。
 def identity_outstanding(host, thread) -> tuple[list[str], list]:
     """原存储的当前义务；partial/坏账/未知副作用都阻止retired，不拿PID/TTL猜已结束。"""
     store = host.conversation_store
     refs, tasks = [], []
-    page = store.session_tasks.list_page(limit=100, target_thread_id=thread.thread_id)
-    if page["coverage"] != "complete" or page["next_cursor"] or page["load_errors"]:
+    try:
+        for items in session_task_pages(store.session_tasks, target_thread_id=thread.thread_id):
+            for task in items:
+                refs.extend(task.metadata.get("cancellation_control", {}).get("outstanding_refs", []))
+                if task.metadata.get("task_learning_enqueue", {}).get("status") == "pending":
+                    refs.append(str(task.metadata.get("trusted_task_completion", {}).get("completion_ref") or task.task_id))
+                if task.status not in SESSION_TASK_TERMINAL_STATUSES:
+                    refs.append(task.task_id)
+                    tasks.append(task)
+    except SessionTaskCoverageUnknown:
         refs.append("session_tasks:coverage_unknown")
-    for task in page["items"]:
-        refs.extend(task.metadata.get("cancellation_control", {}).get("outstanding_refs", []))
-        if task.metadata.get("task_learning_enqueue", {}).get("status") == "pending":
-            refs.append(str(task.metadata.get("trusted_task_completion", {}).get("completion_ref") or task.task_id))
-        if task.status not in SESSION_TASK_TERMINAL_STATUSES:
-            refs.append(task.task_id)
-            tasks.append(task)
+        tasks.clear()
     links, errors = store.tasks.active_report(thread.thread_id)
     refs.extend(link.task_id for link in links)
     if errors:
@@ -113,11 +142,15 @@ def reconcile_background_identity(host, thread_id: str):
         return _reconcile_background_identity_locked(host, thread_id)
 
 
+# LLM: 复用中的可用身份没有迁移，不读全历史；实际迁移仍在原准入锁和身份CAS内完成。
+# 函数用途: 仅在请求退休或任务后策略确有状态变化时核对责任并迁移身份。
 def _reconcile_background_identity_locked(host, thread_id):
     store = host.conversation_store
     thread = store.threads.require(thread_id)
     identity = background_identity(thread)
     if identity is None or identity.identity_state in {"suspended", "retired"}:
+        return thread
+    if identity.identity_state == "available" and identity.after_task == "reuse":
         return thread
     refs, _ = identity_outstanding(host, thread)
     if refs:

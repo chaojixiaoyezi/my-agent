@@ -273,7 +273,25 @@ def test_self_learning_budget_keys_ship_in_yaml_dataclass_and_normalizer() -> No
     assert len(warnings) == 3
 
 
-def _completed_learning_host(tmp_path):
+def _completed_learning_host(tmp_path, *, rounds=6, context_scope="default"):
+    """桥接测试也落原 canonical 证明；Host 不再提供假的证据读取器。"""
+    import time
+
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.business_contracts import BusinessContextIntent
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+        publish_claim_runtime_authority,
+    )
+    from agent_py_agent.agent.conversation.session_tasks import (
+        SessionTaskDraft,
+        SessionTaskUpdate,
+        confirm_background_task_completion,
+        load_task_learning_evidence,
+        stage_background_learning_candidate,
+    )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
     from agent_py_agent.agent.user_space.owner_policy import resolve_effective_owner_policy
     from agent_py_agent.agent.user_space.owner_resolver import (
         OwnerIdentity,
@@ -287,26 +305,37 @@ def _completed_learning_host(tmp_path):
     ctx.skills.home_paths = ctx.home
     ctx.skills.policy_provider = lambda: resolve_effective_owner_policy(ctx.home)
     ctx.service.runtime = replace(ctx.service.runtime, owner_id=ctx.home.owner_id)
-    material = _ctx('run', do_save=False, source='background_main_agent', tool_rounds=6,
-                    attempt_id='attempt', trajectory_digest='trajectory-digest', task_id='runtime-task',
-                    task_attributes={'conversation_thread_id': 'thread', 'session_task_ref': 'stask-1'})
-    business = BusinessExecutionContext(str(ctx.home.owner_id), 'space', 'project', 'stask-1', 2, None,
-                                        ('owner:method',), ('asset-version',), 'business-context.v1')
-    completion = TrustedTaskCompletion(str(ctx.home.owner_id), 'thread', 'stask-1', 'run', 'attempt',
-                                       'completed', 'claim', 'completion', 'space', 'project',
-                                       'background_main_agent', 6, ('artifact',), 'trajectory-digest')
-
-    class Host:
-        def __init__(self):
-            self.home_paths, self.skill_learning = ctx.home, ctx.service
-            self.config = SimpleNamespace(enable_self_learning=True)
-            self.evidence = TaskLearningEvidence(completion, material, business)
-            self.canonical_completed = True
-
-        def load_task_learning_evidence(self, candidate):
-            return self.evidence if self.canonical_completed and candidate == self.evidence.completion else None
-
-    return ctx, Host(), completion
+    owner = str(ctx.home.owner_id)
+    store = ConversationStore(tmp_path / "conversations")
+    source, target = (store.threads.create(owner_id=owner) for _ in range(2))
+    task = store.session_tasks.create(SessionTaskDraft(source.thread_id, target.thread_id, "原学习任务"),
+        business_context_intent=BusinessContextIntent(owner, "space", "project", None),
+        business_context_factory=lambda identifier: BusinessExecutionContext(owner, "space", "project", identifier,
+            2, None, ("owner:method",), ("asset-version",), "business-context.v1"))
+    business = BusinessExecutionContext.from_dict(task.metadata["business_context"])
+    repo = RuntimeRepository(tmp_path / "runtime.db")
+    record = repo.record_run_creation(owner_id=owner, run_id="run", attempt_status="running",
+        task_run_metadata={"business_context": business.to_dict(), "session_task_ref": task.task_id})
+    store.session_tasks.bind_execution(task.task_id, task_run_id=record["task_run_id"], target_thread_id=target.thread_id)
+    store.session_tasks.bind_turn(task.task_id, turn_id="input-turn")
+    claim = store.claims.acquire({"thread_id": target.thread_id, "lease_seconds": 300, "now": time.time(), "reason": "session_task"})
+    binding = ClaimExecutionBinding(store.claims, target.thread_id, claim["claim_id"], target.thread_id)
+    authority = {"invocation_run_id": "invocation", "task_id": record["task_id"], "run_id": "run",
+        "agent_run_id": record["agent_run_id"], "attempt_id": record["attempt_id"]}
+    host = SimpleNamespace(home_paths=ctx.home, skill_learning=ctx.service, config=SimpleNamespace(enable_self_learning=True),
+        conversation_store=store, subagents=SimpleNamespace(runtime_db=repo))
+    candidate = _ctx("run", do_save=False, context_scope=context_scope, source="background_main_agent", tool_rounds=rounds,
+        attempt_id=record["attempt_id"], task_id=record["task_id"],
+        task_attributes={"conversation_thread_id": target.thread_id, "session_task_ref": task.task_id})
+    params = SimpleNamespace(source="background_main_agent", business_context=business, run_id="run", attempt_id=record["attempt_id"])
+    with bind_claim_execution(binding):
+        publish_claim_runtime_authority(authority)
+        stage_background_learning_candidate(host, params=params, candidate=candidate)
+        repo.settle_agent_run(agent_run_id=record["agent_run_id"], status="done", attempt_id=record["attempt_id"])
+        store.session_tasks.advance(task.task_id, SessionTaskUpdate(status="done", result_refs=("artifact",)))
+        completion = confirm_background_task_completion(host, run_id="run", attempt_id=record["attempt_id"])
+    host.evidence = load_task_learning_evidence(host, completion)
+    return ctx, host, completion
 
 
 def test_trusted_background_completion_save_false_uses_original_fifo_and_replays_once(tmp_path):
@@ -316,9 +345,9 @@ def test_trusted_background_completion_save_false_uses_original_fifo_and_replays
     assert ctx.backend.prompts == [] and host.evidence.context.do_save is False
     [path] = ctx.store.pending_requests()
     request = ctx.store.read_request(path)
-    assert request['source'] == 'background_main_agent' and request['task_id'] == 'stask-1'
-    assert request['runtime_task_id'] == 'runtime-task'
-    assert request['attempt_id'] == 'attempt' and request['completion_ref'] == 'completion'
+    assert request['source'] == 'background_main_agent' and request['task_id'] == completion.task_id
+    assert request['runtime_task_id'] == host.evidence.context.task_id != completion.task_id
+    assert request['attempt_id'] == completion.attempt_id and request['completion_ref'] == completion.completion_ref
     assert request['business_context']['asset_version_refs'] == ['asset-version']
     assert request['result_refs'] == ['artifact'] and request['learning_scope']['space_id'] == 'space'
     host.skill_learning = SkillLearningService(SkillLearningStore.for_home(ctx.home), ctx.service.settings, ctx.service.runtime)
@@ -330,18 +359,16 @@ def test_trusted_background_completion_save_false_uses_original_fifo_and_replays
 
 @pytest.mark.parametrize('case', ['disabled', 'excluded', 'short', 'unknown', 'claim', 'owner', 'attempt', 'space', 'task_local', 'json'])
 def test_completed_learning_rejects_unverified_or_ineligible_sources_without_writes(tmp_path, case):
-    ctx, host, completion = _completed_learning_host(tmp_path)
+    ctx, host, completion = _completed_learning_host(tmp_path, rounds=5 if case == 'short' else 6,
+        context_scope='task_local' if case == 'task_local' else 'default')
     if case == 'disabled':
         host.config.enable_self_learning = False
     elif case == 'excluded':
         ctx.service.settings = replace(ctx.service.settings, include_background=False)
     elif case == 'claim':
-        host.canonical_completed = False
-    elif case == 'task_local':
-        host.evidence.context.context_scope = 'task_local'
-    elif case == 'short':
-        completion = replace(completion, tool_rounds=5)
-        host.evidence.context.tool_rounds = 5
+        from agent_py_agent.agent.conversation.session_tasks import _write_completion_metadata
+        task = host.conversation_store.session_tasks.require(completion.task_id)
+        _write_completion_metadata(host, task, lambda current: {**current.metadata, 'task_completion_proof': {}})
     elif case == 'unknown':
         completion = replace(completion, source_kind='unknown_source')
         host.evidence.context.source = 'unknown_source'
@@ -350,8 +377,6 @@ def test_completed_learning_rejects_unverified_or_ineligible_sources_without_wri
         completion = replace(completion, **{field: 'other'})
     elif case == 'json':
         completion = {**completion.to_dict(), 'trusted': True}
-    if isinstance(completion, TrustedTaskCompletion) and case not in {'claim', 'json'}:
-        host.evidence = replace(host.evidence, completion=completion)
     assert enqueue_completed_task_learning(completion=completion, host=host)['status'] in {'ineligible', 'conflict'}
     assert ctx.store.pending_requests() == [] and not ctx.store.registry_path.exists()
     assert ctx.backend.prompts == [] and host.evidence.context.do_save is False
@@ -396,9 +421,196 @@ def test_confirmed_background_method_keeps_business_refs_in_original_asset_regis
     [asset] = [row for row in ctx.store.load_registry().assets.values() if row['kind'] == 'skill']
     source = asset['provenance'][-1]
     assert source['origin'] == 'S3'
-    assert source['task_id'] == completion.task_id and source['runtime_task_id'] == 'runtime-task'
+    assert source['task_id'] == completion.task_id and source['runtime_task_id'] == host.evidence.context.task_id
     assert source['business_context'] == host.evidence.business_context.to_dict()
     assert source['learning_scope'] == {'kind': 'business_method', 'space_id': 'space', 'project_ref': 'project'}
     assert source['result_refs'] == ['artifact'] and source['asset_version_refs'] == ['asset-version']
-    assert source['claim_ref'] == 'claim' and source['completion_ref'] == 'completion'
+    assert source['claim_ref'] == completion.claim_ref and source['completion_ref'] == completion.completion_ref
     assert host.evidence.context.do_save is False
+
+
+def test_task_learning_evidence_requires_keyword_material_and_does_not_mutate_it(tmp_path):
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    evidence = host.evidence
+    with pytest.raises(TypeError, match="request_material"):
+        TaskLearningEvidence(completion, evidence.context, evidence.business_context)
+    with pytest.raises(TypeError):
+        TaskLearningEvidence(completion, evidence.context, evidence.business_context, evidence.request_material)
+    copied = TaskLearningEvidence(completion, evidence.context, evidence.business_context,
+        request_material=evidence.request_material)
+    before = json.loads(json.dumps(copied.request_material))
+    assert enqueue_completed_task_learning(completion=completion, host=host)["status"] == "enqueued"
+    assert copied.request_material == before
+    canonical = host.conversation_store.session_tasks.require(completion.task_id)
+    assert canonical.metadata["task_learning_candidate"]["request_material"] == before
+    assert "completion_identity" not in before and ctx.backend.prompts == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("owner_id", "foreign"), ("thread_id", "foreign-thread"), ("task_id", "foreign-task"),
+    ("run_id", "foreign-run"), ("attempt_id", "foreign-attempt"), ("claim_ref", "foreign-claim"),
+    ("completion_ref", "foreign-completion"), ("space_id", "foreign-space"),
+    ("project_ref", "foreign-project"), ("trajectory_digest", "foreign-trajectory"), ("tool_rounds", 5),
+])
+def test_production_reader_rejects_forged_transport_identity(tmp_path, field, value):
+    from agent_py_agent.agent.conversation.session_tasks import load_task_learning_evidence
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    forged = TrustedTaskCompletion.from_dict({**completion.to_dict(), field: value})
+    assert load_task_learning_evidence(host, forged) is None
+    assert load_task_learning_evidence(host, {**completion.to_dict(), "trusted": True}) is None
+    assert enqueue_completed_task_learning(completion=forged, host=host)["status"] in {"ineligible", "conflict"}
+    assert ctx.store.pending_requests() == [] and ctx.backend.prompts == []
+
+
+def test_canonical_reader_io_error_preserves_pending_obligation_and_wake(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.session_tasks import retry_completed_task_learning
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    task = host.conversation_store.session_tasks.require(completion.task_id)
+    wake_id = task.metadata["task_learning_wake_id"]
+    original = host.subagents.runtime_db.get_task_run
+
+    def unavailable(_task_run_id):
+        raise OSError("canonical SQLite read EIO")
+
+    monkeypatch.setattr(host.subagents.runtime_db, "get_task_run", unavailable)
+    with pytest.raises(OSError, match="canonical SQLite read EIO"):
+        retry_completed_task_learning(host, completion.task_id)
+    assert host.conversation_store.session_tasks.require(completion.task_id).metadata["task_learning_enqueue"]["status"] == "pending"
+    assert host.conversation_store.wakes.pending_one(wake_id) is not None and ctx.store.pending_requests() == []
+    monkeypatch.setattr(host.subagents.runtime_db, "get_task_run", original)
+    assert retry_completed_task_learning(host, completion.task_id)["status"] == "enqueued"
+    assert retry_completed_task_learning(host, completion.task_id)["status"] == "enqueued"
+    assert len(ctx.store.pending_requests()) == 1 and host.conversation_store.wakes.pending_one(wake_id) is None
+    assert ctx.backend.prompts == []
+
+
+@pytest.mark.parametrize("damage", ["missing", "null", "digest", "run", "task", "thread", "prompt", "trace"])
+def test_corrupt_current_material_remains_unresolved_until_original_material_returns(tmp_path, damage):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.conversation.session_tasks import (
+        TaskLearningEvidenceUnavailable,
+        _write_completion_metadata,
+        retry_completed_task_learning,
+    )
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    task = host.conversation_store.session_tasks.require(completion.task_id)
+    first = task.metadata["task_learning_candidate"]
+    broken = deepcopy(first)
+    if damage == "missing":
+        broken.pop("request_material")
+    elif damage == "null":
+        broken["request_material"] = None
+    elif damage in {"digest", "run", "task", "thread"}:
+        key = {"digest": "trajectory_digest", "run": "run_id", "task": "task_id", "thread": "thread_id"}[damage]
+        broken["request_material"][key] = "unrelated-current-history"
+    elif damage == "prompt":
+        broken["request_material"]["user_prompt"] = "p" * 3001
+    elif damage == "trace":
+        broken["request_material"]["tool_trace"] = [{"tool": "raw", "output": "not projected"}]
+    _write_completion_metadata(host, task, lambda current: {**current.metadata, "task_learning_candidate": broken})
+    with pytest.raises(TaskLearningEvidenceUnavailable):
+        retry_completed_task_learning(host, completion.task_id)
+    saved = host.conversation_store.session_tasks.require(completion.task_id)
+    assert saved.metadata["task_learning_enqueue"]["status"] == "pending" and saved.status == "done"
+    assert host.conversation_store.wakes.pending_one(saved.metadata["task_learning_wake_id"]) is not None
+    assert ctx.store.pending_requests() == [] and ctx.backend.prompts == []
+    _write_completion_metadata(host, saved, lambda current: {**current.metadata, "task_learning_candidate": first})
+    assert retry_completed_task_learning(host, completion.task_id)["status"] == "enqueued"
+    assert len(ctx.store.pending_requests()) == 1
+
+
+@pytest.mark.parametrize("previous_reason", ["awaiting_queue", "canonical_completion_reader_unbound"])
+def test_legacy_without_recoverable_material_has_explicit_finite_outcome(tmp_path, previous_reason):
+    from agent_py_agent.agent.conversation.session_tasks import (
+        LegacyTaskLearningMaterialMissing,
+        _write_completion_metadata,
+        load_task_learning_evidence,
+        repair_pending_completed_task_learning_wakes,
+        retry_completed_task_learning,
+    )
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    task = host.conversation_store.session_tasks.require(completion.task_id)
+    old = {key: value for key, value in task.metadata["task_learning_candidate"].items()
+           if key not in {"request_material", "request_material_version"}}
+    _write_completion_metadata(host, task, lambda current: {**current.metadata, "task_learning_candidate": old,
+        "task_learning_enqueue": {"status": "pending" if previous_reason == "awaiting_queue" else "ineligible",
+                                  "reason": previous_reason}})
+    with pytest.raises(LegacyTaskLearningMaterialMissing):
+        load_task_learning_evidence(host, completion)
+    expected = {"status": "ineligible", "reason": "legacy_request_material_missing"}
+    assert retry_completed_task_learning(host, completion.task_id) == expected
+    repair_pending_completed_task_learning_wakes(host)
+    assert retry_completed_task_learning(host, completion.task_id) == expected
+    saved = host.conversation_store.session_tasks.require(completion.task_id)
+    assert saved.status == "done" and saved.metadata["trusted_task_completion"] == completion.to_dict()
+    assert saved.metadata["task_learning_candidate"] == old
+    assert host.conversation_store.wakes.pending_one(saved.metadata["task_learning_wake_id"]) is None
+    assert ctx.store.pending_requests() == [] and ctx.backend.prompts == []
+
+
+def test_reopened_canonical_host_ignores_latest_run_and_does_not_reproject_trace(tmp_path):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.session_tasks import (
+        load_task_learning_evidence,
+        retry_completed_task_learning,
+    )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    original = host.evidence.request_material
+    del host.evidence
+    reopened = SimpleNamespace(home_paths=host.home_paths, config=host.config,
+        conversation_store=ConversationStore(host.conversation_store.storage.root),
+        subagents=SimpleNamespace(runtime_db=RuntimeRepository(tmp_path / "runtime.db")),
+        skill_learning=SkillLearningService(SkillLearningStore.for_home(ctx.home), ctx.service.settings, ctx.service.runtime))
+    later = reopened.subagents.runtime_db.record_run_creation(owner_id=completion.owner_id, run_id="a-later-unrelated-run")
+    assert later["attempt_id"] != completion.attempt_id
+    evidence = load_task_learning_evidence(reopened, completion)
+    assert evidence.request_material == original
+    assert retry_completed_task_learning(reopened, completion.task_id)["status"] == "enqueued"
+    [path] = reopened.skill_learning.store.pending_requests()
+    request = reopened.skill_learning.store.read_request(path)
+    assert request["tool_trace"] == original["tool_trace"]
+    assert request["created_at"] == original["created_at"]
+    assert request["run_id"] == completion.run_id and request["attempt_id"] == completion.attempt_id
+    assert enqueue_completed_task_learning(completion=completion, host=reopened)["status"] == "duplicate"
+    assert reopened.skill_learning.store.pending_requests() == [path] and ctx.backend.prompts == []
+
+
+@pytest.mark.parametrize("previous_reason", ["canonical_completion_reader_unbound", "background_learning_disabled"])
+def test_restart_maintenance_discovers_old_unbound_reader_without_reviving_policy_ineligibility(tmp_path, previous_reason):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.conversation.session_tasks import (
+        _write_completion_metadata,
+        repair_pending_completed_task_learning_wakes,
+    )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    ctx, host, completion = _completed_learning_host(tmp_path)
+    task = host.conversation_store.session_tasks.require(completion.task_id)
+    old = {key: value for key, value in task.metadata["task_learning_candidate"].items()
+           if key not in {"request_material", "request_material_version"}}
+    _write_completion_metadata(host, task, lambda current: {**current.metadata, "task_learning_candidate": old,
+        "task_learning_enqueue": {"status": "ineligible", "reason": previous_reason}})
+    host.conversation_store.wakes.mark_handled(task.metadata["task_learning_wake_id"])
+    reopened = SimpleNamespace(home_paths=host.home_paths, config=host.config,
+        conversation_store=ConversationStore(host.conversation_store.storage.root),
+        subagents=SimpleNamespace(runtime_db=RuntimeRepository(tmp_path / "runtime.db")),
+        skill_learning=SkillLearningService(SkillLearningStore.for_home(ctx.home), ctx.service.settings, ctx.service.runtime),
+        run=lambda *a, **k: pytest.fail("legacy maintenance must not rerun the task"))
+    # 不提前直接调用 retry；必须由原有界维护页发现已经 handled 的旧失败。
+    repair_pending_completed_task_learning_wakes(reopened)
+    saved = reopened.conversation_store.session_tasks.require(completion.task_id)
+    expected = "legacy_request_material_missing" if previous_reason == "canonical_completion_reader_unbound" else previous_reason
+    assert saved.metadata["task_learning_enqueue"] == {"status": "ineligible", "reason": expected}
+    assert saved.status == "done" and saved.metadata["task_learning_candidate"] == old
+    assert saved.metadata["trusted_task_completion"] == completion.to_dict()
+    repair_pending_completed_task_learning_wakes(reopened)
+    assert reopened.conversation_store.session_tasks.require(completion.task_id) == saved
+    assert reopened.conversation_store.wakes.pending_one(task.metadata["task_learning_wake_id"]) is None
+    assert ctx.store.pending_requests() == [] and ctx.backend.prompts == []

@@ -38,7 +38,9 @@ def completed_host(tmp_path, monkeypatch):
     binding = ClaimExecutionBinding(store.claims, target.thread_id, claim["claim_id"], target.thread_id)
     host = SimpleNamespace(conversation_store=store, home_paths=SimpleNamespace(owner_id="owner"), subagents=SimpleNamespace(runtime_db=repo))
     params = SimpleNamespace(source="background_main_agent", business_context=context, run_id="actual-run", attempt_id=record["attempt_id"])
-    candidate = SimpleNamespace(tool_rounds=6, archive_tool_calls=[{"tool": "read", "ok": True}], source="background_main_agent")
+    candidate = SimpleNamespace(tool_rounds=6, archive_tool_calls=[{"tool": "read", "ok": True}], source="background_main_agent",
+        run_id=params.run_id, task_id=record["task_id"], task_attributes={"conversation_thread_id": target.thread_id},
+        user_prompt="核对资料", final_response=SimpleNamespace(text="已核对"), do_save=False)
     authority = {"invocation_run_id": "invocation", "task_id": record["task_id"], "run_id": "actual-run",
                  "agent_run_id": record["agent_run_id"], "attempt_id": record["attempt_id"]}
     calls = []
@@ -239,3 +241,220 @@ def test_completion_wake_publish_failure_repairs_same_original_proof_after_resta
         "thread_id": task.target_thread_id, "reason": "task_learning_completion", "wake_signal": first.to_dict()})
     assert report.wake_handled is True and report.delivery_reason == "task_learning_queue_only"
     assert len(calls) == 1
+
+
+def _real_learning_background(tmp_path, *, rounds=6, enabled=True, include=True):
+    """保留真实生产组合、空间、dispatch、SQLite、claim 和学习 FIFO；只控制任务模型。"""
+    import json
+
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    from agent_py_agent.agent.conversation import (
+        BackgroundMainAgentRuntime,
+        BackgroundMainAgentScheduler,
+    )
+    from agent_py_agent.agent.conversation.business_access import BusinessActor
+    from agent_py_agent.agent.conversation.business_context import resolve_business_context
+    from agent_py_agent.agent.conversation.business_spaces import BusinessSpaceService
+    from agent_py_agent.agent.conversation.session_task_dispatch import (
+        SessionTaskDispatchPlan,
+        dispatch_session_task,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    config = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), enable_tools=True,
+        business_spaces_enabled=True, enable_self_learning=enabled, self_learning_include_background=include,
+        self_learning_min_tool_rounds=6, prompt_files=[])
+    agent = SimpleAgent(config, tmp_path / "workspace")
+    home, owner = agent.home_paths.owner_home_dir, str(agent.home_paths.owner_id)
+    for n in range(rounds):
+        (home / f"input-{n}.txt").write_text(f"verified input {n}; RAW_TOOL_OUTPUT_NOT_PERSISTED", encoding="utf-8")
+
+    class Backend:
+        name = "r3-controlled-background-model"
+        calls = 0
+
+        def probe_tool_capability(self):
+            return ProviderToolCapability(provider=self.name, endpoint="local://test", model="", stream=False,
+                native_supported=True, evidence="contract_test", observed_at=_utc_now_iso())
+
+        def generate(self, prompt, on_chunk=None, **kwargs):
+            self.calls += 1
+            if self.calls <= rounds:
+                return ModelResponse(text="", backend=self.name, tool_use_blocks=[{"id": f"step-{self.calls}",
+                    "name": "read_file", "input": {"path": f"input-{self.calls - 1}.txt"}}])
+            return ModelResponse(text="六份资料已逐一核对。" + "核验结论" * 800, backend=self.name)
+
+    agent.backend = Backend()
+    spaces = BusinessSpaceService(home, owner_id=owner, enabled=config.business_spaces_enabled)
+    actor = BusinessActor(owner, "local-agent", spaces, lambda action, facts: True)
+    sid = spaces.create({"name": "原任务方法空间"}, actor=actor, idempotency_key="r3-original-space")["space_id"]
+    source = agent.conversation_store.threads.create(owner_id=owner, canonical_user_id="local-agent")
+    target = agent.conversation_store.threads.create(owner_id=owner, canonical_user_id="local-agent")
+    outcome = dispatch_session_task(agent, SessionTaskDispatchPlan(source.thread_id, target.thread_id,
+        "核对六份资料。" + "任务说明" * 800), target, CapabilityConfig(),
+        business_context_intent=BusinessContextIntent(owner, sid, None, None),
+        business_context_factory=lambda identifier: resolve_business_context(actor=actor, task_id=identifier,
+            requested_space_id=sid, project_ref=None, binding_id=None))
+    assert outcome.ok, outcome
+    task_id = json.loads(outcome.output)["task_id"]
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": agent.conversation_store})
+    return agent, config, task_id, runtime, scheduler
+
+
+def test_r3_real_background_completion_restarts_with_original_fifo(tmp_path):
+    """原缺陷回归：不替换 bridge/reader，六轮真实工具完成后必须入原 FIFO。"""
+    from agent_py_agent.agent.capability.task_learning_bridge import enqueue_completed_task_learning
+    from agent_py_agent.agent.conversation.business_contracts import TrustedTaskCompletion
+    from agent_py_agent.agent.conversation.session_tasks import (
+        load_task_learning_evidence,
+        retry_completed_task_learning,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent, config, task_id, runtime, scheduler = _real_learning_background(tmp_path)
+    reports = scheduler.tick()
+    assert len(reports) == 1 and reports[0].tool_call_count == 6
+    canonical = agent.conversation_store.session_tasks.require(task_id)
+    assert canonical.status == "done"
+    assert canonical.metadata["task_learning_enqueue"] == {"status": "enqueued", "reason": "queued"}
+    completion = TrustedTaskCompletion.from_dict(canonical.metadata["trusted_task_completion"])
+    [path] = agent.skill_learning.store.pending_requests()
+    request = agent.skill_learning.store.read_request(path)
+    material = canonical.metadata["task_learning_candidate"]["request_material"]
+    assert request["user_prompt"] == material["user_prompt"]
+    assert request["user_prompt"].startswith("The same Agent was resumed by a structured background event.")
+    assert "Wake reason: session_task" in request["user_prompt"] and 0 < len(request["user_prompt"]) <= 3000
+    assert request["final_response"].startswith("六份资料已逐一核对。") and len(request["final_response"]) == 3000
+    assert len(request["tool_trace"]) == 6
+    assert all(row["tool"] == "read_file" and row["ok"] is True for row in request["tool_trace"])
+    assert [row["args"] for row in request["tool_trace"]] == [f'{{"path": "input-{n}.txt"}}' for n in range(6)]
+    assert "RAW_TOOL_OUTPUT_NOT_PERSISTED" not in str(material)
+    assert request["created_at"] == material["created_at"]
+    assert request["trajectory_digest"] == completion.trajectory_digest
+    assert request["completion_identity"] == [completion.owner_id, task_id, completion.run_id,
+        completion.attempt_id, completion.completion_ref]
+    assert request["task_id"] == request["root_task_id"] == task_id
+    assert request["run_id"] == completion.run_id and request["attempt_id"] == completion.attempt_id
+    assert request["claim_ref"] == completion.claim_ref and request["result_refs"] == list(completion.result_refs)
+    assert request["business_context"] == canonical.metadata["business_context"]
+    assert request["learning_scope"]["space_id"] == completion.space_id
+    exact = agent.subagents.runtime_db.get_task_run(canonical.task_run_id)
+    assert request["runtime_task_id"] == exact["task_id"]
+    assert agent.backend.calls == 7
+
+    # 新 SimpleAgent 只读同一原 home，不带原 finalize context、claim binding 或候选 Python 对象。
+    reopened = SimpleAgent(config, tmp_path / "workspace")
+    reopened.backend = SimpleNamespace(generate=lambda *a, **k: pytest.fail("replay must not run a model"))
+    evidence = load_task_learning_evidence(reopened, completion)
+    assert evidence.request_material == material and evidence.context.do_save is False
+    assert enqueue_completed_task_learning(completion=completion, host=reopened)["status"] == "duplicate"
+    assert retry_completed_task_learning(reopened, task_id)["status"] == "enqueued"
+    assert reopened.skill_learning.store.pending_requests() == [path]
+    assert reopened.conversation_store.session_tasks.require(task_id) == canonical
+    assert agent.backend.calls == 7
+
+
+def test_r3_staging_reuses_first_bounded_redacted_material(completed_host, monkeypatch):
+    import hashlib
+    import json
+
+    from agent_py_agent.agent.capability import skill_learning_request as material_builder
+    from agent_py_agent.agent.conversation.session_tasks import stage_background_learning_candidate
+
+    host, task, params, candidate, binding, authority, _calls = completed_host
+    candidate.user_prompt = "password=not-a-real-test-password\n" + "p" * 4000
+    candidate.final_response = SimpleNamespace(text="token=not-a-real-test-token\n" + "r" * 4000)
+    candidate.archive_tool_calls = [{"tool": "read_file", "ok": True, "tool_round": n,
+        "model_parameters": {"path": str(n) + "x" * 400, "password": "not-a-real-test-password"},
+        "output": "RAW_OUTPUT_MUST_NOT_PERSIST", "evidence_refs": ["evidence"]} for n in range(100)]
+    expected_digest = hashlib.sha256(json.dumps(candidate.archive_tool_calls, ensure_ascii=False,
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    with bind_claim_execution(binding):
+        publish_claim_runtime_authority(authority)
+        monkeypatch.setattr(material_builder, "utc_now", lambda: "first-created-at")
+        stage_background_learning_candidate(host, params=params, candidate=candidate)
+        first = host.conversation_store.session_tasks.require(task.task_id).metadata["task_learning_candidate"]
+        monkeypatch.setattr(material_builder, "utc_now", lambda: "later-created-at")
+        candidate.user_prompt = "A repeated callback must not replace the first material."
+        stage_background_learning_candidate(host, params=params, candidate=candidate)
+        assert host.conversation_store.session_tasks.require(task.task_id).metadata["task_learning_candidate"] == first
+        candidate.archive_tool_calls.append({"tool": "different"})
+        with pytest.raises(ValueError, match="COMPLETION_CANDIDATE_CONFLICT"):
+            stage_background_learning_candidate(host, params=params, candidate=candidate)
+    material = first["request_material"]
+    assert first["trajectory_digest"] == material["trajectory_digest"] == expected_digest
+    assert material["created_at"] == "first-created-at"
+    assert len(material["user_prompt"]) == len(material["final_response"]) == 3000
+    assert material["tool_calls_total"] == 100 and len(material["tool_trace"]) == 80
+    assert all(len(row["args"]) <= 300 for row in material["tool_trace"])
+    assert not any(value in json.dumps(first) for value in (
+        "not-a-real-test-password", "not-a-real-test-token", "RAW_OUTPUT_MUST_NOT_PERSIST"))
+
+
+@pytest.mark.parametrize("after_queue_commit", [False, True])
+def test_r3_real_fifo_io_failure_survives_restart_and_replays_wake_once(tmp_path, monkeypatch, after_queue_commit):
+    from agent_py_agent.agent.conversation import BackgroundMainAgentRuntime
+    from agent_py_agent.agent.conversation.session_tasks import retry_completed_task_learning
+    from agent_py_agent.agent.core import SimpleAgent
+
+    agent, config, task_id, _runtime, scheduler = _real_learning_background(tmp_path)
+    original = agent.skill_learning.store.enqueue
+
+    def fail_once(request):
+        if after_queue_commit:
+            assert original(request) == "queued"
+        raise OSError("original FIFO EIO")
+
+    monkeypatch.setattr(agent.skill_learning.store, "enqueue", fail_once)
+    reports = scheduler.tick()
+    assert len(reports) == 1 and reports[0].tool_call_count == 6
+    canonical = agent.conversation_store.session_tasks.require(task_id)
+    assert canonical.status == "done" and canonical.metadata["task_learning_enqueue"]["status"] == "pending"
+    wake_id = canonical.metadata["task_learning_wake_id"]
+    assert agent.conversation_store.wakes.pending_one(wake_id) is not None
+    assert len(agent.skill_learning.store.pending_requests()) == int(after_queue_commit)
+    monkeypatch.setattr(agent.skill_learning.store, "enqueue", original)
+    reopened = SimpleAgent(config, tmp_path / "workspace")
+    monkeypatch.setattr(reopened, "run", lambda *a, **k: pytest.fail("learning repair must never rerun the task"))
+    wake = reopened.conversation_store.wakes.pending_one(wake_id)
+    replay = {"thread_id": canonical.target_thread_id, "reason": "task_learning_completion", "wake_signal": wake.to_dict()}
+    runtime = BackgroundMainAgentRuntime(agent=reopened, store=reopened.conversation_store)
+    report = runtime.run_once(replay)
+    assert report.wake_handled and report.delivery_reason == "task_learning_queue_only"
+    saved = reopened.conversation_store.session_tasks.require(task_id)
+    assert saved.status == "done" and saved.task_run_id == canonical.task_run_id
+    assert saved.metadata["trusted_task_completion"] == canonical.metadata["trusted_task_completion"]
+    assert saved.metadata["task_learning_enqueue"]["status"] == ("duplicate" if after_queue_commit else "enqueued")
+    assert reopened.conversation_store.wakes.pending_one(wake_id) is None
+    [path] = reopened.skill_learning.store.pending_requests()
+    original_request = reopened.skill_learning.store.read_request(path)
+    assert retry_completed_task_learning(reopened, task_id) == saved.metadata["task_learning_enqueue"]
+    assert runtime.run_once(replay).wake_handled
+    assert reopened.skill_learning.store.pending_requests() == [path]
+    assert reopened.skill_learning.store.read_request(path) == original_request
+    assert agent.backend.calls == 7
+
+
+@pytest.mark.parametrize("enabled,include,rounds,reason", [
+    (False, True, 6, "background_learning_disabled"),
+    (True, False, 6, "background_learning_disabled"),
+    (True, True, 5, "background_source_or_rounds_ineligible"),
+])
+def test_r3_real_background_policy_ineligibility_is_terminal(tmp_path, enabled, include, rounds, reason):
+    from agent_py_agent.agent.conversation.session_tasks import retry_completed_task_learning
+
+    agent, _config, task_id, _runtime, scheduler = _real_learning_background(
+        tmp_path, rounds=rounds, enabled=enabled, include=include)
+    assert scheduler.tick()[0].tool_call_count == rounds
+    task = agent.conversation_store.session_tasks.require(task_id)
+    assert task.status == "done"
+    result = {"status": "ineligible", "reason": reason}
+    assert task.metadata["task_learning_enqueue"] == result
+    assert retry_completed_task_learning(agent, task_id) == result
+    assert agent.conversation_store.wakes.pending_one(task.metadata["task_learning_wake_id"]) is None
+    assert agent.skill_learning is None or agent.skill_learning.store.pending_requests() == []
+    assert agent.backend.calls == rounds + 1

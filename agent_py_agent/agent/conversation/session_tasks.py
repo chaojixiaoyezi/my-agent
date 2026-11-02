@@ -12,9 +12,11 @@ import json
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 from ..common.json_io import locked_json_path
 from ..gateway_parts.io import (
@@ -25,6 +27,10 @@ from ..gateway_parts.io import (
 from .business_contracts import BusinessContextIntent, BusinessExecutionContext
 from .models import new_id
 from .store_io import safe_file_stem
+
+if TYPE_CHECKING:
+    from ..capability.task_learning_bridge import TaskLearningEvidence
+    from .business_contracts import TrustedTaskCompletion
 
 # 状态机（唯一权威定义）：queued → accepted → done | failed | cancelled。
 SESSION_TASK_QUEUED = "queued"
@@ -83,8 +89,12 @@ def _write_completion_metadata(host, task, updater):
         host.conversation_store.session_tasks._path(task.task_id), update, require_existing=True))
 
 
+# LLM: 仅原执行和活 claim 可暂存脱敏材料；同身份重放复用首次快照，不授予完成或学习资格。
+# 函数用途: 将可重启恢复的有界学习材料随原候选同笔写入 SessionTask。
 def stage_background_learning_candidate(host, *, params, candidate):
-    """W5真实finalize返回后保存候选摘要；不宣告completed、不入队、不调用学习模型。"""
+    """W5真实finalize返回后保存候选；不宣告completed、不入队、不调用学习模型。"""
+    from ..capability.skill_learning_request import _learning_request_material
+
     if not isinstance(getattr(params, "business_context", None), BusinessExecutionContext) or params.source != "background_main_agent":
         return
     execution = _completion_execution(host, params.run_id, params.attempt_id)
@@ -99,14 +109,24 @@ def stage_background_learning_candidate(host, *, params, candidate):
     trajectory = json.dumps(candidate.archive_tool_calls, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     value = {**proof, "tool_rounds": candidate.tool_rounds, "source_kind": "background_main_agent",
              "trajectory_digest": hashlib.sha256(trajectory.encode()).hexdigest()}
+    material = _learning_request_material(candidate)
+    if material is None:
+        raise TaskLearningEvidenceUnavailable("TASK_LEARNING_MATERIAL_UNAVAILABLE")
+    # FinalizeContext 不保证有 trajectory_digest；出处仍按原 raw 轨迹算法冻结，不改变完成身份。
+    material["trajectory_digest"] = value["trajectory_digest"]
+    material["context_scope"] = str(getattr(candidate, "context_scope", "") or "")
 
     def update(current):
         if current.status in {SESSION_TASK_CANCELLED, SESSION_TASK_FAILED}:
             return current.metadata
         old = current.metadata.get("task_learning_candidate")
-        if old and old.get("attempt_id") == value["attempt_id"] and old != value:
-            raise ValueError("COMPLETION_CANDIDATE_CONFLICT")
-        return {**current.metadata, "task_learning_candidate": value}
+        if old and old.get("attempt_id") == value["attempt_id"]:
+            if any(old.get(key) != item for key, item in value.items()):
+                raise ValueError("COMPLETION_CANDIDATE_CONFLICT")
+            # created_at、投影正文均以第一次为准；也不借同 attempt 给旧记录追补材料。
+            return current.metadata
+        return {**current.metadata, "task_learning_candidate": {
+            **value, "request_material_version": 1, "request_material": material}}
     _write_completion_metadata(host, task, update)
 
 
@@ -165,6 +185,8 @@ def repair_completed_task_learning_wake(host, task_id):
     return wake
 
 
+# LLM: 复用原有界维护页；只修 pending 和旧缺读取器的准确失败，不复活策略拒绝或重执任务。
+# 函数用途: 修原学习 wake，并为已处理 wake 的旧无材料记录补明确 legacy 结案。
 def repair_pending_completed_task_learning_wakes(host):
     """原调度维护每次只读一页定位引用；游标不是权威，失效重建，不扫描全部任务正文。"""
     store = getattr(host, "conversation_store", None)
@@ -174,8 +196,14 @@ def repair_pending_completed_task_learning_wakes(host):
     page = store.session_tasks.list_page(limit=16, cursor=getattr(host, "_completion_repair_cursor", None))
     host._completion_repair_cursor = page["next_cursor"] if page["coverage"] != "expired" else None
     for task in page["items"]:
-        if task.status == SESSION_TASK_DONE and task.metadata.get("task_learning_enqueue", {}).get("status") == "pending":
+        if task.status != SESSION_TASK_DONE:
+            continue
+        enqueue = task.metadata.get("task_learning_enqueue", {})
+        if enqueue.get("status") == "pending":
             repair_completed_task_learning_wake(host, task.task_id)
+        elif enqueue.get("status") == "ineligible" and enqueue.get("reason") == "canonical_completion_reader_unbound":
+            # 原 wake 已 handled，不能指望它再调 retry；仍须重核原完成证明，不能按标签铸证。
+            retry_completed_task_learning(host, task.task_id)
 
 
 def verify_trusted_task_completion(host, completion) -> bool:
@@ -200,6 +228,91 @@ def verify_trusted_task_completion(host, completion) -> bool:
         return False
 
 
+class TaskLearningEvidenceUnavailable(ValueError):
+    """当前版本的交接材料不可读或不完整；调用方保留原 pending/wake 后重试。"""
+
+
+class LegacyTaskLearningMaterialMissing(TaskLearningEvidenceUnavailable):
+    """旧候选从未保存过可恢复材料；明确结案，不补造轨迹或无限重试。"""
+
+
+def _validated_learning_material(candidate, completion, runtime_task_id):
+    """只验证原 builder 投影的形状和出处，不把 tool_trace 再投影成空参数。"""
+    from ..capability.skill_learning_request import TEXT_LIMIT_CHARS, TRACE_ARGS_CHARS, TRACE_COUNT
+    from ..capability.skill_learning_store import REQUEST_SCHEMA_VERSION
+
+    if "request_material" not in candidate and "request_material_version" not in candidate:
+        raise LegacyTaskLearningMaterialMissing("LEGACY_TASK_LEARNING_MATERIAL_MISSING")
+    material = candidate.get("request_material")
+    if not isinstance(material, dict) or candidate.get("request_material_version") != 1:
+        raise TaskLearningEvidenceUnavailable("TASK_LEARNING_MATERIAL_INVALID")
+    expected = {"schema_version": REQUEST_SCHEMA_VERSION, "run_id": completion.run_id,
+                "task_id": runtime_task_id, "thread_id": completion.thread_id,
+                "source": completion.source_kind, "tool_rounds": completion.tool_rounds,
+                "trajectory_digest": completion.trajectory_digest}
+    if any(material.get(key) != value for key, value in expected.items()):
+        raise TaskLearningEvidenceUnavailable("TASK_LEARNING_MATERIAL_BINDING_MISMATCH")
+    trace = material.get("tool_trace")
+    if (any(type(material.get(key)) is not str or len(material[key]) > TEXT_LIMIT_CHARS
+            for key in ("user_prompt", "final_response"))
+            or type(material.get("context_scope")) is not str
+            or not isinstance(material.get("created_at"), str) or not material["created_at"]
+            or type(material.get("tool_rounds")) is not int
+            or type(material.get("tool_calls_total")) is not int
+            or type(trace) is not list or len(trace) > TRACE_COUNT
+            or material["tool_calls_total"] < len(trace)):
+        raise TaskLearningEvidenceUnavailable("TASK_LEARNING_MATERIAL_INVALID")
+    for row in trace:
+        if (type(row) is not dict or set(row) != {"round", "tool", "ok", "error_code", "args", "evidence_refs"}
+                or type(row["round"]) is not int or type(row["ok"]) is not bool
+                or any(type(row[key]) is not str or len(row[key]) > limit
+                       for key, limit in (("tool", 80), ("error_code", 80), ("args", TRACE_ARGS_CHARS)))
+                or type(row["evidence_refs"]) is not list or len(row["evidence_refs"]) > 8):
+            raise TaskLearningEvidenceUnavailable("TASK_LEARNING_MATERIAL_INVALID")
+    return deepcopy(material)
+
+
+# LLM: 只从原 SessionTask/SQLite 完成证明恢复；DTO、最新运行和当前 claim 均不授予出处。
+# 函数用途: 为原学习桥接读回精确完成身份及持久化有界材料，不创建任何运行或队列。
+def load_task_learning_evidence(
+    host: object,
+    completion: TrustedTaskCompletion,
+) -> TaskLearningEvidence | None:
+    from ..capability.task_learning_bridge import TaskLearningEvidence
+
+    if not verify_trusted_task_completion(host, completion):
+        return None
+    execution = _completion_execution(host, completion.run_id, completion.attempt_id)
+    if execution is None:
+        return None
+    repo, ref, context, task = execution
+    candidate = task.metadata.get("task_learning_candidate")
+    proof = task.metadata.get("task_completion_proof")
+    if (not isinstance(candidate, dict) or not isinstance(proof, dict)
+            or any(candidate.get(key) != value for key, value in proof.items())
+            or candidate.get("trajectory_digest") != completion.trajectory_digest
+            or candidate.get("source_kind") != completion.source_kind
+            or candidate.get("tool_rounds") != completion.tool_rounds
+            or task.result_refs != completion.result_refs
+            or not repo.get_attempt(completion.attempt_id)["ended_at"]):
+        return None
+    digest = hashlib.sha256(json.dumps([context.owner_id, task.task_id, completion.run_id, completion.attempt_id,
+        completion.claim_ref, candidate["trajectory_digest"]], separators=(",", ":")).encode()).hexdigest()
+    if completion.completion_ref != "completion-" + digest:
+        return None
+    task_run = repo.get_task_run(ref.task_run_id)
+    if task_run is None:
+        raise TaskLearningEvidenceUnavailable("TASK_LEARNING_EXECUTION_UNAVAILABLE")
+    material = _validated_learning_material(candidate, completion, task_run["task_id"])
+    ctx = SimpleNamespace(run_id=completion.run_id, attempt_id=completion.attempt_id,
+        task_id=material["task_id"], source=completion.source_kind, tool_rounds=completion.tool_rounds,
+        trajectory_digest=completion.trajectory_digest, context_scope=material["context_scope"], do_save=False,
+        task_attributes={"conversation_thread_id": task.target_thread_id, "session_task_ref": task.task_id})
+    return TaskLearningEvidence(completion, ctx, context, request_material=material)
+
+
+# LLM: 缺读取器/材料及存储异常不能终结学习责任；旧无材料有独立终态，不重跑原任务。
+# 函数用途: 补原 FIFO 的精确入队，并在持久确认后才处理原学习 wake。
 def retry_completed_task_learning(host, task_id):
     """只补原queue；原文件记本地重试责任，队列身份去重仍由W6原队列决定。"""
     from .business_contracts import TrustedTaskCompletion
@@ -214,7 +327,9 @@ def retry_completed_task_learning(host, task_id):
         if not verify_trusted_task_completion(host, completion):
             raise PermissionError("COMPLETION_PROOF_INVALID")
         previous = task.metadata.get("task_learning_enqueue") or {}
-        if previous.get("status") in {"enqueued", "duplicate", "ineligible", "conflict"}:
+        unresolved = {"canonical_completion_reader_unbound", "canonical_completion_unconfirmed", "trajectory_required", "queue_full"}
+        if (previous.get("status") in {"enqueued", "duplicate", "ineligible", "conflict"}
+                and not (previous.get("status") == "ineligible" and previous.get("reason") in unresolved)):
             if task.metadata.get("task_learning_wake_id"):
                 host.conversation_store.wakes.mark_handled(task.metadata["task_learning_wake_id"])
             return dict(previous)
@@ -224,9 +339,14 @@ def retry_completed_task_learning(host, task_id):
             if exc.name != "agent_py_agent.agent.capability.task_learning_bridge":
                 raise
             return {"status": "pending", "reason": "TASK_LEARNING_BRIDGE_UNAVAILABLE"}
-        result = enqueue_completed_task_learning(completion=completion, host=host)
+        try:
+            result = enqueue_completed_task_learning(completion=completion, host=host)
+        except LegacyTaskLearningMaterialMissing:
+            result = {"status": "ineligible", "reason": "legacy_request_material_missing"}
         if not isinstance(result, dict) or result.get("status") not in {"enqueued", "duplicate", "ineligible", "conflict"}:
             raise ValueError("TASK_LEARNING_BRIDGE_INVALID_RESULT")
+        if result.get("status") == "ineligible" and result.get("reason") in unresolved:
+            raise TaskLearningEvidenceUnavailable("TASK_LEARNING_HANDOFF_UNRESOLVED")
         _write_completion_metadata(host, task, lambda current: {**current.metadata, "task_learning_enqueue": dict(result)})
         if task.metadata.get("task_learning_wake_id"):
             host.conversation_store.wakes.mark_handled(task.metadata["task_learning_wake_id"])
