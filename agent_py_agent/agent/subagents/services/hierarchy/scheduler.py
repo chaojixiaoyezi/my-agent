@@ -135,6 +135,21 @@ def _resolve_child(
     sibling_index: int,
     prepared: PreparedSubagentRun | None = None,
 ) -> ScheduledChildResolution:
+    return resolve_scheduled_child(
+        manager,
+        scheduled_child_create_params(manager, parent, spec, sibling_index=sibling_index),
+        prepared=prepared,
+    )
+
+
+# 函数用途: 准备与提交共用的递归孩子规范参数（含 canonical 父执行来源），让 refreeze 比较同一份事实。
+def scheduled_child_create_params(
+    manager: Any,
+    parent: SubAgentTask,
+    spec: HierarchyChildSpec,
+    *,
+    sibling_index: int,
+) -> CreateRunParams:
     params = _child_create_params(parent, spec, sibling_index=sibling_index)
     repo = getattr(manager, "runtime_db", None)
     resolver = getattr(repo, "parent_execution_ref", None)
@@ -142,11 +157,7 @@ def _resolve_child(
         # scheduler已从canonical父节点和原调度准入取得来源；pending父不必伪造running attempt。
         ref = resolver(owner_id=parent.owner, run_id=parent.id)
         params = replace(params, host_parent_execution=ref)
-    return resolve_scheduled_child(
-        manager,
-        params,
-        prepared=prepared,
-    )
+    return params
 
 
 # LLM: 后代身份只从 canonical parent 的专有 actor 字段继承；spec attributes 不能覆盖归属。
