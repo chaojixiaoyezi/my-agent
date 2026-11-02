@@ -72,16 +72,44 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
     module = catalog()
     api = module.business_api()
     schemas = module.business_schema_bundle()
-    assert digest(api) == "d7f7859fded58ec5ab3e82a5dc8b1d363c7b45bb9a772deea17dcf54113df737"
-    assert digest(schemas) == "d7883032c859fa4d2c7d6365d50e77b2d3f2cb6fa77904f355925bbf3dca2d4b"
-    assert digest(module.business_defs()) == "c2441120aa06032bd0aba9a5b83075f72d60d34f7cc69cd376b80779a5b9554a"
-    assert digest(api["actions"]) == "2650124904f6384a5ccfc348bae539b8ed71b39cd6084e94f45b2405886ba021"
+    normalized_api = deepcopy(api)
+    normalized_schemas = deepcopy(schemas)
+    normalized_defs = deepcopy(module.business_defs())
+    tasks_get = next(row for row in normalized_api["actions"] if row["action"] == "tasks.get")
+    # 唯一已批准的合同变化：普通任务可没有工作流；其它字段仍受原四个摘要约束。
+    for result in (normalized_api["$defs"]["Result_tasks_get"],
+                   normalized_schemas["$defs"]["Result_tasks_get"],
+                   normalized_defs["Result_tasks_get"], tasks_get["result_schema"]):
+        assert "workflow_ref" in result["required"]
+        assert result["properties"]["workflow_ref"] == {
+            "anyOf": [{"$ref": "#/$defs/Id"}, {"type": "null"}]}
+        result["properties"]["workflow_ref"] = {"$ref": "#/$defs/Id"}
+    assert digest(normalized_api) == "d7f7859fded58ec5ab3e82a5dc8b1d363c7b45bb9a772deea17dcf54113df737"
+    assert digest(normalized_schemas) == "d7883032c859fa4d2c7d6365d50e77b2d3f2cb6fa77904f355925bbf3dca2d4b"
+    assert digest(normalized_defs) == "c2441120aa06032bd0aba9a5b83075f72d60d34f7cc69cd376b80779a5b9554a"
+    assert digest(normalized_api["actions"]) == "2650124904f6384a5ccfc348bae539b8ed71b39cd6084e94f45b2405886ba021"
     assert module.BUSINESS_LIST_DEFAULT_ROWS == 50
     assert module.BUSINESS_LIST_MAX_ROWS == 100
     assert api["$defs"] == schemas["$defs"] == module.business_defs()
     api["$defs"]["Id"]["x-max-bytes"] = 999
     schemas["$defs"].clear()
     assert module.business_defs()["Id"]["x-max-bytes"] == 128
+
+
+def test_task_workflow_ref_is_required_nullable_and_still_validates_ids():
+    spec = catalog().business_action_spec('tasks.get')
+    schema = spec.result_schema
+    assert 'workflow_ref' in schema['required']
+    assert schema['properties']['workflow_ref'] == {
+        'anyOf': [{'$ref': '#/$defs/Id'}, {'type': 'null'}]}
+    sample = schema_example(schema, schema)
+    for value in (None, 'real-workflow-id'):
+        assert spec.validate_result({**sample, 'workflow_ref': value})['workflow_ref'] == value
+    for value in ('', False, 1, [], {}, '中' * 43):
+        with pytest.raises(HostAPIError):
+            spec.validate_result({**sample, 'workflow_ref': value})
+    with pytest.raises(HostAPIError):
+        spec.validate_result({key: value for key, value in sample.items() if key != 'workflow_ref'})
 
 
 def test_legacy_143_actions_remain_byte_equivalent():

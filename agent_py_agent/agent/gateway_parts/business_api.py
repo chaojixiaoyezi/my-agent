@@ -54,13 +54,50 @@ def bind_business_context(host, *, authorize, subject_id='host', actor=None, bus
     return context
 
 
+# LLM: 仅资源不可见返回False，其它live授权或损坏异常继续中止整次披露。
+# 函数用途: 为列表和事件复用原资源授权，而不把撤权当成空数据。
+def _record_visible(context, action, facts):
+    """逐记录过滤只隐藏范围拒绝；坏来源、停用与其它真实故障不冒充空集合。"""
+    try:
+        return context.check(action, facts)
+    except HostAPIError as error:
+        if error.status == 404:
+            return False
+        raise
+
+
 class _BusinessBackgroundService(BackgroundAgentService):
     """只桥接W1真实空间读口；线程、CAS、任务与幂等仍归原W2。"""
 
+    # LLM: 上下文只保留本次发行身份，不写共享服务或扩张原Actor权限。
+    # 函数用途: 为当前业务调用装配原后台服务和同一实时授权口。
     def __init__(self, services, context):
         super().__init__(services.host)
         self.spaces = services.spaces
+        self.call_context = context
         self.business_actor = services.actor(context)
+
+    # LLM: R3只对新行调用；插件再次核原发行对象、两层创建范围和真实来源，原生元数据完全不变。
+    # 函数用途: 为新建插件后台身份/总控附加原安装出处，不迁移、覆盖或重绑已有线程。
+    def _thread_creation_metadata(self, *, actor, metadata: dict) -> dict:
+        from ..plugin_host.business_action_specs import business_native_action
+        from ..plugin_host.contracts import AuthorizedCall
+        from ..plugin_host.conversations import read_context, thread_state
+
+        authorized = self.call_context.actor
+        if not isinstance(authorized, AuthorizedCall):
+            return super()._thread_creation_metadata(actor=actor, metadata=metadata)
+        current = read_context(authorized)
+        self.call_context.check(business_native_action(authorized.call.action), thaw(authorized.call.payload))
+        source = self._actor(actor)
+        installation = authorized.binding.installation_ref
+        if (current.owner_home.owner_id != actor.owner_id
+                or thread_state(source).get('installation_ref') != installation
+                or any(scope.get('created_by_installation') is not True for scope in
+                    (authorized.binding.grant['threads'], authorized.resource_scope['threads']))):
+            raise HostAPIError('CAPABILITY_DENIED', 403)
+        return {**metadata, 'plugin_host_v2': {'installation_ref': installation,
+            'revision': 1, 'workspace_ref': 'default'}}
 
     def _space(self, space_id, actor):
         self._actor(actor)
@@ -125,16 +162,28 @@ class _BackgroundPort:
     def __init__(self, services):
         self.services = services
 
+    # LLM: 工厂只来自已发行宿主上下文；即便actor保留AuthorizedCall，也必须选真实W2身份，不放宽原_actor。
+    # 函数用途: 使用准确通道身份调用原W2，并按同一实时资源谓词过滤列表中的记录。
     def execute(self, action, params, *, actor=None, context=None, expected_revision=None, idempotency_key=''):
         if type(context) is not BusinessCallContext or context not in _ISSUED:
             raise BusinessError('ACTOR_REQUIRED')
         context.check(action, {'owner_id': self.services.owner_id, **params})
-        if actor is None and callable(context.actor_factory):
+        if callable(context.actor_factory):
             actor = context.actor_factory(action)
         service = _BusinessBackgroundService(self.services, context)
         try:
             service._actor(actor)
-            return self._call(service, action, params, actor, expected_revision, idempotency_key)
+            result = self._call(service, action, params, actor, expected_revision, idempotency_key)
+            if action == 'background_agents.list':
+                result = {**result, 'items': [row for row in result['items']
+                    if _record_visible(context, action, {'agent_id': row['agent_id']})]}
+            elif action == 'background_agents.get':
+                result = {**result, 'pending_tasks': [row for row in result['pending_tasks']
+                    if _record_visible(context, action, {'task_id': row['task_id']})]}
+                current = result.get('current_execution')
+                if current is not None and not _record_visible(context, action, current):
+                    result = {**result, 'current_execution': None}
+            return result
         except (KeyError, FileNotFoundError) as error:
             raise BusinessError('RESOURCE_NOT_FOUND') from error
         except PermissionError as error:
@@ -293,7 +342,7 @@ class BusinessServices:
                 or Path(context.host.home_paths.owner_home_dir) != self.owner_home):
             raise BusinessError('ACTOR_REQUIRED')
         return BusinessActor(self.owner_id, context.subject_id, self.observation,
-            lambda action, facts: context.check(action, facts))
+            lambda action, facts: _record_visible(context, action, facts))
 
     def supported(self, context):
         result = []

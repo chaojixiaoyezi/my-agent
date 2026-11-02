@@ -150,8 +150,10 @@ def plugin_observation_task(production_host, *, user=None):
         user=user, key='observation-space-' + (user or 'main'))
     [services] = [value for key, value in backend._services.items() if key not in before]
     store = services.host.conversation_store
-    source = store.threads.create(owner_id=services.owner_id)
-    target = store.threads.create(owner_id=services.owner_id)
+    source = store.threads.require(production_call(production_host, 'conversations.threads.create',
+        {'title': '原安装来源'}, user=user, key='observation-source-thread', status=201)['thread_id'])
+    target = store.threads.require(production_call(production_host, 'conversations.threads.create',
+        {'title': '原安装目标'}, user=user, key='observation-target-thread', status=201)['thread_id'])
     intent = BusinessContextIntent(services.owner_id, space['space_id'], None, None)
     task = store.session_tasks.create(SessionTaskDraft(source.thread_id, target.thread_id, '插件原任务'),
         business_context_intent=intent, business_context_factory=lambda tid: BusinessExecutionContext(
@@ -232,7 +234,7 @@ def test_observation_plugin_real_sse_and_request_local_eight_event_bound(product
         validate_object(frame, standalone_schema({'$ref': '#/$defs/EventView'}))
         for _ in range(8):
             name, frame = read_business_sse(response)
-            assert name == 'business'
+            assert name == 'business', frame
             validate_object(frame, standalone_schema({'$ref': '#/$defs/EventView'}))
             if frame['stream_item'] == 'gap' or frame['event_id'] == events[-1]['event_id']:
                 break
@@ -251,3 +253,324 @@ def test_observation_plugin_real_sse_and_request_local_eight_event_bound(product
         authenticated_context=context, services=services)
     assert native.max_pending == 128
     assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
+
+
+def scoped_authorized(host, action, payload=None, *, user=None, key=None):
+    import json
+
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+
+    request = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': payload or {}}
+    if user:
+        request['as_user'] = {'user_id': user}
+    if key:
+        request['idempotency_key'] = key
+    issuer = host[0].plugin_host.composition.issuer
+    return issuer.authorize(issuer.ingress(host[1]), decode_call(json.dumps(request).encode()))
+
+
+def native_scope_rows(host, *, user=None):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.business_contracts import (
+        BusinessContextIntent,
+        BusinessExecutionContext,
+    )
+    from agent_py_agent.agent.conversation.host_actor import HostChannelActor
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
+    from agent_py_agent.agent.gateway_parts.business_api import (
+        _BusinessBackgroundService,
+        bind_business_context,
+    )
+
+    if user:
+        production_call(host, 'users.local.create', {'user_id': user}, key='scope-create-' + user, status=201)
+    services, allowed = plugin_observation_task(host, user=user)
+    store = services.host.conversation_store
+    source = store.threads.create(owner_id=services.owner_id, owner_home=str(services.owner_home))
+    actor = HostChannelActor(services.owner_id, source.thread_id, 'native-original-request',
+        'feishu', 'native-chat', 'native-human')
+    context = bind_business_context(services.host, authorize=lambda _a, _f: True, actor=actor)
+    native = _BusinessBackgroundService(services, context)
+    # 真实原生服务创建，不给这些记录贴插件来源，也不复制已发行AuthorizedCall。
+    services.host.config.model_backend = 'echo'
+    controller = native.ensure_controller(actor=actor)['thread_id']
+    space = allowed.metadata['business_context']['space_id']
+    private_agent = native.create({'space_id': space, 'name': '原生私有后台身份'},
+        actor=actor, idempotency_key='native-private-agent')['agent']['thread_id']
+    private = store.session_tasks.create(SessionTaskDraft(source.thread_id, private_agent, '原生私有任务'),
+        business_context_intent=BusinessContextIntent(services.owner_id, space, None, None),
+        business_context_factory=lambda tid: BusinessExecutionContext(services.owner_id, space,
+            None, tid, 0, None, (), (), 'business-context.v1'))
+    store.messages.append({'thread_id': controller, 'role': 'assistant', 'content': 'NATIVE_PRIVATE_MESSAGE'})
+    return SimpleNamespace(services=services, allowed=allowed, private=private,
+        controller=controller, agent=private_agent, native=native, actor=actor, space=space)
+
+
+@pytest.mark.parametrize('user', [None, 'alice'], ids=['main', 'alice'])
+def test_scope_installation_only_denies_private_controller_on_legacy_and_business(production_host, user):
+    from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
+
+    case = native_scope_rows(production_host, user=user)
+    for action, payload in [('conversations.messages.list', {'thread_id': case.controller}),
+                            ('business.messages.list', {'target': {'kind': 'controller', 'id': case.controller}})]:
+        request = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': payload}
+        if user:
+            request['as_user'] = {'user_id': user}
+        status, result = http_request(production_host[0], production_host[1], request)
+        assert status in {403, 404}, (action, result)
+        assert 'NATIVE_PRIVATE_MESSAGE' not in str(result)
+
+
+@pytest.mark.parametrize('user', [None, 'alice'], ids=['main', 'alice'])
+def test_scope_mixed_lists_tree_runtime_and_stream_keep_only_original_installation(production_host, user):
+    from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
+
+    case = native_scope_rows(production_host, user=user)
+    runtime, permitted_run = seed_observed_runtime(case.services, case.allowed)
+    _, private_run = seed_observed_runtime(case.services, case.private)
+    permitted_event = runtime.append_event(event_type='attempt.progress', attempt_id=permitted_run['attempt_id'],
+        agent_run_id=permitted_run['agent_run_id'], task_run_id=permitted_run['task_run_id'])
+    private_event = runtime.append_event(event_type='attempt.progress', attempt_id=private_run['attempt_id'],
+        agent_run_id=private_run['agent_run_id'], task_run_id=private_run['task_run_id'])
+    listed = production_call(production_host, 'business.tasks.list', user=user)
+    assert [row['task_id'] for row in listed['items']] == [case.allowed.task_id]
+    executions = production_call(production_host, 'business.executions.list', user=user)
+    assert [row['run_id'] for row in executions['items']] == ['observed-' + case.allowed.task_id]
+    tree = production_call(production_host, 'business.agent_tree.get', {'space_id': case.space}, user=user)
+    assert case.agent not in str(tree) and case.controller not in str(tree)
+    events = production_call(production_host, 'business.events.list', user=user)
+    assert {row['task_id'] for row in events['events']} == {case.allowed.task_id}
+    assert permitted_event['event_id'] in {row['event_id'] for row in events['events']}
+    assert private_event['event_id'] not in {row['event_id'] for row in events['events']}
+    authorized = scoped_authorized(production_host, 'business.events.stream',
+        {'request_id': 'scope-stream', 'filter': {}}, user=user)
+    backend = composition.business_port(production_host[0].plugin_host.composition.ports)
+    iterator = backend.stream(authorized)
+    try:
+        snapshot = next(iterator)
+        assert [row['task_id'] for row in snapshot['payload']['tasks']] == [case.allowed.task_id]
+        assert case.private.task_id not in str(snapshot)
+    finally:
+        iterator.close()
+
+
+def test_scope_plugin_actor_is_original_and_factory_read_discovery_creates_no_thread(production_host):
+    from agent_py_agent.agent.plugin_host.authorization import revalidate_call
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    services, _ = plugin_observation_task(production_host)
+    authorized = scoped_authorized(production_host, 'business.background_agents.list')
+    backend = composition.business_port(production_host[0].plugin_host.composition.ports)
+    context, _ = backend.context(authorized)
+    assert context.actor is authorized
+    revalidate_call(context.actor)
+    assert callable(context.actor_factory)
+    before = services.host.conversation_store.threads.list_report(limit=0)
+    with pytest.raises(HostAPIError) as denied:
+        backend.call(authorized)
+    assert denied.value.status == 404
+    assert services.host.conversation_store.threads.list_report(limit=0) == before
+
+
+@pytest.mark.parametrize('user', [None, 'alice'], ids=['main', 'alice'])
+def test_scope_plugin_background_create_replay_and_controller_keep_validated_provenance(production_host, user):
+    if user:
+        production_call(production_host, 'users.local.create', {'user_id': user}, key='actor-create-' + user, status=201)
+    services, task = plugin_observation_task(production_host, user=user)
+    space = task.metadata['business_context']['space_id']
+    params = {'space_id': space, 'name': '插件合法身份'}
+    first = production_call(production_host, 'business.background_agents.create', params,
+        user=user, key='plugin-scope-background-create')
+    before_replay = services.host.conversation_store.threads.list_report(limit=0)
+    replay = production_call(production_host, 'business.background_agents.create', params,
+        user=user, key='plugin-scope-background-create')
+    assert first == replay
+    assert services.host.conversation_store.threads.list_report(limit=0) == before_replay
+    agent = production_call(production_host, 'business.background_agents.get',
+        {'agent_id': first['agent']['agent_id']}, user=user)
+    assert agent['agent']['name'] == params['name']
+    controller = production_call(production_host, 'business.controllers.ensure', user=user, key='plugin-scope-controller')
+    assert production_call(production_host, 'business.controllers.get', user=user)['thread_id'] == controller['thread_id']
+    authorized = scoped_authorized(production_host, 'business.background_agents.get',
+        {'agent_id': first['agent']['agent_id']}, user=user)
+    backend = composition.business_port(production_host[0].plugin_host.composition.ports)
+    context, _ = backend.context(authorized)
+    actor = context.actor_factory('background_agents.get')
+    for tid in (first['agent']['thread_id'], controller['thread_id'], actor.source_thread_id):
+        row = services.host.conversation_store.threads.require(tid)
+        assert row.owner_id == services.owner_id and row.owner_home == str(services.owner_home)
+        assert row.metadata['plugin_host_v2']['installation_ref'] == authorized.binding.installation_ref
+    assert actor.owner_id == services.owner_id and actor.channel == 'plugin'
+    assert actor.conversation_id == authorized.binding.installation_ref
+    assert context.actor is authorized
+
+
+@pytest.fixture
+def explicit_scope_host(monkeypatch, request):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.tests import test_plugin_host_v2_grants as grants
+
+    original = grants.installed_grant
+
+    def installed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        controller = BackgroundAgentService._controller_id(None, SimpleNamespace(owner_id=result[0].owner_id))
+        result[-1]['threads']['explicit_ids'] = ['thread-explicit-native', controller]
+        return result
+
+    monkeypatch.setattr(grants, 'installed_grant', installed)
+    return request.getfixturevalue('production_host')
+
+
+@pytest.mark.parametrize('user', [None, 'alice'], ids=['main', 'alice'])
+def test_scope_explicit_native_and_original_installation_messages_are_usable(explicit_scope_host, user):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.models import ConversationThread
+    from agent_py_agent.agent.conversation.store_threads import create_thread_atomic
+
+    host = explicit_scope_host
+    if user:
+        production_call(host, 'users.local.create', {'user_id': user}, key='explicit-create-alice', status=201)
+    services, task = plugin_observation_task(host, user=user)
+    store = services.host.conversation_store
+    native = create_thread_atomic(store.threads, ConversationThread(thread_id='thread-explicit-native',
+        canonical_user_id=services.owner_id, owner_id=services.owner_id,
+        owner_home=str(services.owner_home), title='明确授权的原生线程', metadata={'business_controller': True}))
+    for tid in (native.thread_id, task.target_thread_id):
+        row = store.threads.require(tid)
+        store.threads.write(replace(row, metadata={**row.metadata, 'business_controller': True}))
+        store.messages.append({'thread_id': tid, 'role': 'assistant', 'content': 'PERMITTED_' + tid})
+        legacy = production_call(host, 'conversations.messages.list', {'thread_id': tid}, user=user)
+        business = production_call(host, 'business.messages.list',
+            {'target': {'kind': 'controller', 'id': tid}}, user=user)
+        assert 'PERMITTED_' + tid in str(legacy)
+        assert 'PERMITTED_' + tid in str(business)
+
+
+def revoke_business_installation(host):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.plugin_activation import PluginActivationRequest
+    from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+
+    store = PluginInstallStore(host[2])
+    entry = next(row for row in store.snapshot() if row.installation_ref == host[3].installation_ref)
+    store.change_activation(PluginActivationRequest('revoke-business-test', entry.revision,
+        replace(entry.activation, phase='revoked')))
+
+
+@pytest.mark.parametrize('stage', ['before', 'final-response', 'origin-creation', 'stream-event'])
+def test_scope_live_revocation_stops_disclosure_and_origin_effect(production_host, monkeypatch, stage):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    services, task = plugin_observation_task(production_host)
+    backend = composition.business_port(production_host[0].plugin_host.composition.ports)
+    store = services.host.conversation_store
+    if stage == 'stream-event':
+        authorized = scoped_authorized(production_host, 'business.events.stream',
+            {'request_id': 'revoke-stream', 'filter': {}})
+        iterator = backend.stream(authorized)
+        try:
+            assert next(iterator)['stream_item'] == 'snapshot'
+            revoke_business_installation(production_host)
+            with pytest.raises(HostAPIError):
+                next(iterator)
+        finally:
+            iterator.close()
+        return
+    if stage == 'origin-creation':
+        authorized = scoped_authorized(production_host, 'business.background_agents.create',
+            {'space_id': task.metadata['business_context']['space_id'], 'name': '不得创建'}, key='revoked-origin-create')
+        original = backend.conversation.new_thread
+
+        def revoke_during_creation(*args, **kwargs):
+            value = original(*args, **kwargs)
+            revoke_business_installation(production_host)
+            return value
+
+        monkeypatch.setattr(backend.conversation, 'new_thread', revoke_during_creation)
+    else:
+        authorized = scoped_authorized(production_host, 'business.tasks.get', {'task_id': task.task_id})
+        if stage == 'before':
+            revoke_business_installation(production_host)
+        else:
+            original = services.invoke
+
+            def revoke_after_read(*args, **kwargs):
+                value = original(*args, **kwargs)
+                revoke_business_installation(production_host)
+                return value
+
+            monkeypatch.setattr(services, 'invoke', revoke_after_read)
+    before = store.threads.list_report(limit=0)
+    with pytest.raises(HostAPIError) as denied:
+        backend.call(authorized)
+    assert denied.value.status in {401, 403}
+    assert store.threads.list_report(limit=0) == before
+
+
+@pytest.mark.parametrize('kind', ['native', 'other-installation', 'inactive'])
+def test_scope_explicit_existing_controllers_are_never_retagged_or_reactivated(explicit_scope_host, kind):
+    from dataclasses import replace
+
+    case = native_scope_rows(explicit_scope_host)
+    store = case.services.host.conversation_store
+    row = store.threads.require(case.controller)
+    if kind == 'other-installation':
+        row = replace(row, metadata={**row.metadata, 'plugin_host_v2': {
+            'installation_ref': 'original-other-installation', 'revision': 1, 'workspace_ref': 'default'}})
+    elif kind == 'inactive':
+        row = replace(row, status='archived')
+    store.threads.write(row)
+    # 先用合法写动作建立本安装的真实来源，不能借现有总控作假身份。
+    production_call(explicit_scope_host, 'business.background_agents.create',
+        {'space_id': case.space, 'name': '合法插件身份'}, key='controller-original-source')
+    before = store.storage.thread_path(case.controller).read_bytes()
+    result = production_call(explicit_scope_host, 'business.controllers.ensure', key='existing-controller')
+    assert result == {'agent_id': case.controller, 'thread_id': case.controller, 'created': False}
+    assert production_call(explicit_scope_host, 'business.controllers.get')['available'] is (kind != 'inactive')
+    assert store.storage.thread_path(case.controller).read_bytes() == before
+
+
+@pytest.mark.parametrize('permitted', [False, True], ids=['private-task', 'original-task'])
+def test_scope_agent_detail_filters_current_execution_using_original_task_and_run(production_host, permitted):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.business_contracts import (
+        BusinessContextIntent,
+        BusinessExecutionContext,
+    )
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
+    from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
+    from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
+
+    case = native_scope_rows(production_host)
+    created = production_call(production_host, 'business.background_agents.create',
+        {'space_id': case.space, 'name': '可见身份的准确执行'}, key='current-execution-agent')
+    agent_id = created['agent']['agent_id']
+    store = case.services.host.conversation_store
+    sender = case.allowed.sender_thread_id if permitted else case.actor.source_thread_id
+    task = store.session_tasks.create(SessionTaskDraft(sender, agent_id, '当前执行范围检查'),
+        business_context_intent=BusinessContextIntent(case.services.owner_id, case.space, None, None),
+        business_context_factory=lambda tid: BusinessExecutionContext(case.services.owner_id, case.space,
+            None, tid, 0, None, (), (), 'business-context.v1'))
+    runtime, run = seed_observed_runtime(case.services, task)
+    run_id = 'observed-' + task.task_id
+    case.services.host.subagents = SimpleNamespace(runtime_db=runtime)
+    claim = store.claims.acquire({'thread_id': agent_id, 'task_id': task.task_id})
+    assert claim is not None
+    update_json_file_atomic(store.storage.background_claim_path(agent_id), lambda latest: {
+        **latest, 'runtime_authority': {'run_id': run_id, 'attempt_id': run['attempt_id']}})
+    result = production_call(production_host, 'business.background_agents.get', {'agent_id': agent_id})
+    if permitted:
+        assert result['current_execution']['run_id'] == run_id
+        assert result['current_execution']['task_id'] == task.task_id
+        assert [row['task_id'] for row in result['pending_tasks']] == [task.task_id]
+    else:
+        assert result['current_execution'] is None
+        assert result['pending_tasks'] == []
+        assert task.task_id not in str(result) and run_id not in str(result)

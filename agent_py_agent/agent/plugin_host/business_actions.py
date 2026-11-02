@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import replace
 from importlib import import_module, util
 from types import SimpleNamespace
 
@@ -12,11 +14,21 @@ from .business_action_specs import (
     business_plugin_actions,
 )
 from .contracts import DomainResult, resolve_execution_context
-from .conversations import read_context
+from .conversations import read_context, thread_state
 from .errors import HostAPIError
 from .schemas import canonical_json, thaw
 
 _STREAM_MODULE = 'agent_py_agent.agent.gateway_parts.business_event_stream'
+
+
+# LLM: 只消费原发行调用的规范值，revision更新不改变同一幂等操作；不接受外部另传身份。
+# 函数用途: 为插件业务调用和W2来源生成一致、可重放的请求编号。
+def _request_id(authorized):
+    """沿原安装、动作、实参和幂等键固定请求身份；不把修订号变成另一条请求。"""
+    params = thaw(authorized.call.payload)
+    params.pop('expected_revision', None)
+    return 'business-' + hashlib.sha256(canonical_json([authorized.binding.installation_ref,
+        business_native_action(authorized.call.action), params, authorized.call.idempotency_key]).encode()).hexdigest()[:32]
 
 
 def business_stream_available():
@@ -53,6 +65,8 @@ class GatewayBusinessDomain:
         # 显式关闭仍即时生效；真实调用的权限、领域ready和W14流依赖门保持原位。
         return getattr(getattr(base, 'config', None), 'business_spaces_enabled', None) is not False
 
+    # LLM: 保留原发行对象；每次授权均重新读有效owner并解析canonical目标，不把business能力提升成owner全域。
+    # 函数用途: 为同一安装建立带原资源范围和宿主actor工厂的业务调用上下文。
     def context(self, authorized):
         from ..gateway_parts.business_api import BusinessServices, bind_business_context
         from ..user_space.home_layout import home_paths
@@ -83,19 +97,180 @@ class GatewayBusinessDomain:
             self._services[key] = services
 
         def check(action, facts):
-            revalidate_call(authorized)
+            current = read_context(authorized)
             spec = business_action_spec(action)
             if not required_capabilities(spec.plugin_action, {}) <= authorized.binding.capabilities:
                 return False
-            if facts.get('owner_id', scoped_home.owner_id) != scoped_home.owner_id:
+            if (current.owner_home.owner_id != scoped_home.owner_id
+                    or facts.get('owner_id', scoped_home.owner_id) != scoped_home.owner_id):
                 return False
+            try:
+                self._require_resources(authorized, action, facts, current, services)
+            except HostAPIError as error:
+                if error.status == 404 and spec.metadata['implementer'] == 'W14':
+                    raise HostAPIError('OBSERVATION_NOT_FOUND', 404) from None
+                raise
             if spec.metadata['effect'] == 'execute':
                 resolve_execution_context(authorized)
             return True
 
         return bind_business_context(host, authorize=check,
-            subject_id=authorized.binding.installation_ref, actor=authorized), services
+            subject_id=authorized.binding.installation_ref, actor=authorized,
+            actor_factory=lambda action: self._background_actor(authorized, action, services)), services
 
+    # LLM: 线程统一走原require_thread；SessionTask同时核两端、原业务归属和任务范围，不拿展示ID/空间当出处。
+    # 函数用途: 验证一个准确任务，并返回它所引用的原线程。
+    def _require_task(self, identifier, authorized, current, store):
+        task = store.session_tasks.load(identifier)
+        if task is None:
+            services = self.resources.server.plugin_host.composition.ports.observations.services
+            if not services.allows(authorized, 'task', identifier):
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            return {store.tasks.load(identifier).thread_id}
+        threads = {task.sender_thread_id, task.target_thread_id}
+        rows = {tid: self.conversation.require_thread(store, tid, authorized, current) for tid in threads}
+        raw = task.metadata.get('business_context')
+        if raw is not None:
+            from ..conversation.business_contracts import BusinessExecutionContext
+            context = BusinessExecutionContext.from_dict(raw)
+            if context.owner_id != current.owner_home.owner_id or context.task_id != task.task_id:
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+        original = thread_state(rows[task.sender_thread_id]).get('installation_ref') == authorized.binding.installation_ref
+        for scope in (authorized.binding.grant['tasks'], authorized.resource_scope['tasks']):
+            if identifier not in scope['explicit_ids'] and not (scope['created_by_installation'] is True and original):
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+        return threads
+
+    # LLM: 只读原SQLite的精确run/attempt关系，再复用原任务授权；历史attempt可读，控制仍由W2核当前attempt。
+    # 函数用途: 把运行身份还原到规范线程与任务，不用请求字段猜归属。
+    def _require_execution(self, run_id, attempt_id, authorized, current, store, services):
+        runtime = getattr(services.observation, 'runtime', None)
+        if runtime is None:
+            raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+        try:
+            if not run_id:
+                with runtime._runtime_connection() as conn:
+                    row = conn.execute('SELECT ar.run_id FROM agent_runs ar JOIN agent_attempts aa '
+                        'ON aa.agent_run_id=ar.agent_run_id WHERE aa.attempt_id=?', (attempt_id,)).fetchone()
+                if row is None:
+                    raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+                run_id = row['run_id']
+            ref = runtime.parent_execution_ref(owner_id=current.owner_home.owner_id, run_id=run_id)
+            if attempt_id:
+                with runtime._runtime_connection() as conn:
+                    row = conn.execute('SELECT attempt_id FROM agent_attempts WHERE attempt_id=? AND agent_run_id=?',
+                        (attempt_id, ref.agent_run_id)).fetchone()
+                if row is None:
+                    raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            task_run = runtime.get_task_run(ref.task_run_id)
+            root = runtime.get_task(task_run['task_id'])
+            self.conversation.require_thread(store, root['thread_id'], authorized, current)
+            metadata = json.loads(task_run['metadata_json'])
+            task_id = metadata.get('session_task_ref')
+            if task_id:
+                from ..conversation.business_contracts import BusinessExecutionContext
+                context = BusinessExecutionContext.from_dict(metadata['business_context'])
+                if context.owner_id != current.owner_home.owner_id or context.task_id != task_id:
+                    raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+                self._require_task(task_id, authorized, current, store)
+                if store.session_tasks.require(task_id).target_thread_id != root['thread_id']:
+                    raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            else:
+                self._require_task(root['task_id'], authorized, current, store)
+        except (KeyError, ValueError, TypeError):
+            raise HostAPIError('RESOURCE_NOT_FOUND', 404) from None
+
+    # LLM: 显式过滤和隐式控制目标取交集；缺行只允许已通过原创建范围的写路径继续，既有行绝不重贴出处。
+    # 函数用途: 对披露、控制、每条记录及事件使用同一原资源授权谓词。
+    def _require_resources(self, authorized, action, facts, current, services):
+        from ..conversation.background_agents import BackgroundAgentService
+
+        store = self.resources.store_for(current)
+        for selected in (facts, facts.get('filter', {})):
+            threads = {selected[key] for key in ('thread_id', 'agent_id', 'controller_agent_id', 'handoff_agent_id')
+                if selected.get(key)}
+            target = selected.get('target') or {}
+            runs = {selected[key] for key in ('run_id', 'parent_run_id') if selected.get(key)}
+            if target.get('id'):
+                (runs if target.get('kind') == 'subagent' else threads).add(target['id'])
+            controller = selected.get('controller') or {}
+            if controller.get('agent_id'):
+                threads.add(controller['agent_id'])
+            if selected.get('root_agent_id'):
+                identifier = selected['root_agent_id']
+                if store.threads.load(identifier) is not None:
+                    threads.add(identifier)
+                else:
+                    runs.add(identifier)
+            for identifier in threads:
+                self.conversation.require_thread(store, identifier, authorized, current)
+            for key in ('task_id', 'origin_task_id'):
+                if selected.get(key):
+                    self._require_task(selected[key], authorized, current, store)
+            for identifier in runs:
+                self._require_execution(identifier, selected.get('attempt_id') if identifier == selected.get('run_id') else None,
+                    authorized, current, store, services)
+            if selected.get('attempt_id') and not selected.get('run_id'):
+                self._require_execution(None, selected['attempt_id'], authorized, current, store, services)
+            if (all(key in selected for key in ('thread_id', 'task_id', 'run_id'))
+                    and not threads and not runs and not selected.get('task_id')):
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+        if action in {'controllers.get', 'controllers.ensure', 'tasks.submit'}:
+            identifier = BackgroundAgentService(services.host)._controller_id(SimpleNamespace(owner_id=current.owner_home.owner_id))
+            row, error = store.threads.load_report(identifier)
+            if error:
+                raise HostAPIError('HOST_NOT_READY', 503)
+            if row is not None:
+                self.conversation.require_thread(store, identifier, authorized, current)
+            elif action != 'controllers.get':
+                # 原new_thread只构造未落盘值，并同时核两层创建范围。
+                self.conversation.new_thread({'title': '业务总控', 'workspace_ref': 'default'}, authorized, current)
+
+    # LLM: 来源线程按owner/安装稳定命名；只在真实W2写调用的原锁内、两层创建范围仍许可时发表新行。
+    # 函数用途: 从真实插件来源构造W2通道身份；读发现、重放与既有其它出处均不创建或重绑定线程。
+    def _background_actor(self, authorized, action, services):
+        from ..conversation.host_actor import HostChannelActor
+        from ..conversation.models import ChannelBinding
+        from ..conversation.store_threads import create_thread_atomic
+        from ..gateway_parts.io import locked_file_transition
+
+        current = read_context(authorized)
+        if action != business_native_action(authorized.call.action):
+            raise HostAPIError('CAPABILITY_DENIED', 403)
+        owner = current.owner_home.owner_id
+        installation = authorized.binding.installation_ref
+        identifier = 'thread-plugin-business-' + hashlib.sha256(canonical_json(
+            [owner, installation, 'business-origin.v1']).encode()).hexdigest()[:32]
+        store = self.resources.store_for(current)
+        row, error = store.threads.load_report(identifier)
+        if error:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        if row is None:
+            if business_action_spec(action).metadata['effect'] == 'read':
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            with locked_file_transition(store.storage.threads_dir / ('.' + identifier)):
+                current = read_context(authorized)
+                row, error = store.threads.load_report(identifier)
+                if error:
+                    raise HostAPIError('HOST_NOT_READY', 503)
+                if row is None:
+                    row = self.conversation.new_thread({'workspace_ref': 'default', 'title': '插件业务来源'},
+                        authorized, current)
+                    binding = ChannelBinding('plugin', installation, owner, owner, identifier, row.updated_at)
+                    row = replace(row, thread_id=identifier, channel_bindings=(binding,))
+                    current = read_context(authorized)
+                    self._require_resources(authorized, action, thaw(authorized.call.payload), current, services)
+                    create_thread_atomic(store.threads, row)
+        current = read_context(authorized)
+        row = self.conversation.require_thread(store, identifier, authorized, current)
+        if (row.status != 'active' or thread_state(row).get('installation_ref') != installation
+                or not any(binding.channel == 'plugin' and binding.channel_conversation_id == installation
+                    and binding.channel_user_id == owner and binding.thread_id == identifier for binding in row.channel_bindings)):
+            raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+        return HostChannelActor(owner, identifier, _request_id(authorized), 'plugin', installation, owner)
+
+    # LLM: 使用原AuthorizedCall及稳定请求身份；副作用和末核仍由唯一业务入口处理。
+    # 函数用途: 将原插件调用投递给同一业务服务，不替换issuer对象或重放效果。
     def call(self, authorized):
         from ..gateway_parts.business_api import execute_business
         revalidate_call(authorized)
@@ -103,8 +278,7 @@ class GatewayBusinessDomain:
         context, services = self.context(authorized)
         params = thaw(authorized.call.payload)
         revision = params.pop('expected_revision', None)
-        request = {'action': action, 'request_id': 'business-' + hashlib.sha256(canonical_json([
-            authorized.binding.installation_ref, action, params, authorized.call.idempotency_key]).encode()).hexdigest()[:32],
+        request = {'action': action, 'request_id': _request_id(authorized),
             'params': params}
         if authorized.call.idempotency_key is not None:
             request['idempotency_key'] = authorized.call.idempotency_key
@@ -112,7 +286,10 @@ class GatewayBusinessDomain:
             request['expected_revision'] = revision
         status, result = execute_business(request, context, services)
         if result['error'] is not None:
-            raise HostAPIError(result['error']['code'], status, result['effect_outcome'])
+            # Plugin错误合同只有三种结局：只读无副作用，耐久受理则已发表；未知仍保留原未知。
+            effect = {'none': 'not_started', 'running': 'committed'}.get(
+                result['effect_outcome'], result['effect_outcome'])
+            raise HostAPIError(result['error']['code'], status, effect)
         return DomainResult(status, result['data'], warnings=tuple(result['warnings']))
 
     def approve(self, params, context, *, expected_revision, idempotency_key):
