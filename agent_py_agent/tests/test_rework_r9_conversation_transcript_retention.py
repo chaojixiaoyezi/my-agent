@@ -1,5 +1,5 @@
 # LLM: 只用 pytest 临时 owner 与真实 ConversationStore/Compact 提交；冷转阈值保持产品原值（1 MiB / 128 行），
-#   配额按 1 GiB 真实量级核算；每个恢复场景只注入一次普通 I/O 错误，不放宽任何保留期安全门。
+#   配额按 1 GiB 真实量级核算；每个恢复场景只出现一次普通模拟 I/O 错误，不放宽任何保留期安全门。
 # 模块用途: 回归 P1-R9-05——会话保留期按 canonical 热/清单/暂存/冷段/索引整体收集，锁内重验后整体回收与清除。
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def _rotated_conversation(home, monkeypatch, fault=None):
     return store, updated, path, original
 
 
-# LLM: 三个中断点各只注入一次普通 OSError：prepared 清单写入前、暂存段替换热文件时、最终清单写入前。
+# LLM: 三个中断点各只出现一次普通模拟 OSError：prepared 清单写入前、暂存段替换热文件时、最终清单写入前。
 # 函数用途: 在原冷转写者的单个 I/O 点制造一次失败，记录确实触发的故障点。
 def _inject_rotation_fault(patch, thread_id, fault):
     injected = []
@@ -150,7 +150,7 @@ def _conversation_action(report, thread_id):
 # LLM: 原阈值真实冷转后，规划集合必须含热/清单/全部冷段与全部索引节点；回收后原位置无残留，
 #   回收站期满清除后 1 GiB 配额口径下释放的字节不少于完整转写本，不留任何无法再被发现的冷集合。
 # 函数用途: 端到端验证普通过期回收与之后的回收站清除。
-def test_original_rotation_cold_set_is_trashed_then_purged_without_leak(tmp_path, monkeypatch):
+def test_original_rotation_cold_set_is_trashed_then_purged_without_residue(tmp_path, monkeypatch):
     home, service = _owner(tmp_path)
     store, thread, path, original = _rotated_conversation(home, monkeypatch)
     root = store.storage.root.resolve()

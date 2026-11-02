@@ -7,11 +7,21 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shutil
+import os
+import secrets
+import stat
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..common.json_io import append_private_jsonl_records
+from ..common.nofollow_fs import (
+    NoFollowPathError,
+    _openat_directory,
+    _openat_file,
+    _reject_unsafe_existing_leaf,
+    open_directory_beneath,
+)
 from ..conversation.authority import (
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
@@ -169,51 +179,171 @@ def finish_run_task_workspace_if_needed(agent, params: object, result: object) -
         return ""
 
 
-# LLM: SANDBOX-01 发布函数——只复制 .sandbox-tmp 下真实文件到 output/.sandbox-tmp/,
-# 保留相对目录结构; 复制失败的文件跳过但发布事实照实记录(timeline), 不掩盖不伪造。
+# LLM: SANDBOX-01 发布函数——沙箱 /tmp 在命令结束后仍可写，宿主收口只经锚定的 no-follow 目录/文件描述符读写：
+#   源与目标的目录链接、叶子链接、非普通文件和多链接源一律不发布；主位置真实不存在才看任务根旧位置，
+#   主位置不安全时整体拒绝。计数与 timeline 只算真正原子发布成功的文件，不掩盖不伪造。
+#   缺少 dir_fd/no-follow 能力的平台不降级到路径复制，直接不发布。
 # 函数用途: 任务收口时把沙箱临时区产物发布到交付目录, 返回发布的相对路径列表。
 def _publish_sandbox_tmp_outputs(root: Path, run_id: str) -> list[str]:
     try:
-        work_dir = root / "work"
-        # SANDBOX-01 适配: 沙箱 tmp 根实际在"沙箱 workspace"下——working_dir 未指定时
-        # 为任务根, 指定时为该目录; write_roots[0] 注入生效时为 work。两处都检查,
-        # 确保收口发布不依赖 tmp 根精确位置(真机: 任务根/.sandbox-tmp)。
-        sandbox_tmp = work_dir / ".sandbox-tmp"
-        if not sandbox_tmp.is_dir():
-            sandbox_tmp = root / ".sandbox-tmp"
-        output_dir = root / "output"
-        if not sandbox_tmp.is_dir():
-            return []
-        files = sorted(p for p in sandbox_tmp.rglob("*") if p.is_file())
-        if not files:
-            return []
-        published: list[str] = []
-        for src in files:
-            rel = src.relative_to(sandbox_tmp)
-            dst = output_dir / ".sandbox-tmp" / rel
-            try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-                published.append(str(rel))
-            except OSError:
-                continue
+        with ExitStack() as descriptors:
+            root_fd = open_directory_beneath(root, (), require_dir_fd=True)
+            descriptors.callback(os.close, root_fd)
+            located = _open_sandbox_tmp_source(root_fd)
+            if located is None:
+                return []
+            source_fd, source_parts = located
+            descriptors.callback(os.close, source_fd)
+            publisher = _SandboxTmpPublisher(root_fd)
+            descriptors.callback(publisher.close)
+            published = publisher.publish_directory(source_fd, ())
         if published:
             append_private_jsonl_records(
-                work_dir / "timeline.jsonl",
+                root / "work" / "timeline.jsonl",
                 [
                     {
                         "created_at": _now_iso(),
                         "event_type": "sandbox_tmp_published",
                         "run_id": run_id,
                         "count": len(published),
-                        "source": str(sandbox_tmp),
-                        "target": str(output_dir / ".sandbox-tmp"),
+                        "source": str(root.joinpath(*source_parts)),
+                        "target": str(root / "output" / _SANDBOX_TMP_DIR),
                     }
                 ],
             )
         return published
     except OSError:
         return []
+
+
+_SANDBOX_TMP_DIR = ".sandbox-tmp"
+_PUBLISH_CHUNK_BYTES = 1024 * 1024
+_PRIVATE_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+
+
+# LLM: 主位置 work/.sandbox-tmp 任一段真实不存在才回落任务根 .sandbox-tmp（working_dir 未指定时的沙箱 tmp 根）；
+#   任一段是链接或非目录属于不安全，NoFollowPathError 交调用方整体拒绝，不回落。
+# 函数用途: 按原两处布局打开沙箱临时区目录描述符，返回描述符与相对任务根的段。
+def _open_sandbox_tmp_source(root_fd: int) -> tuple[int, tuple[str, ...]] | None:
+    for parts in (("work", _SANDBOX_TMP_DIR), (_SANDBOX_TMP_DIR,)):
+        try:
+            return _open_directory_chain(root_fd, parts, create=False), parts
+        except FileNotFoundError:
+            continue
+    return None
+
+
+# 函数用途: 从已打开目录逐段 no-follow 打开子目录（可选创建缺失段），返回新描述符；失败时关闭中间描述符。
+def _open_directory_chain(parent_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+    current = os.dup(parent_fd)
+    try:
+        for part in parts:
+            if create:
+                with suppress(FileExistsError):
+                    os.mkdir(part, dir_fd=current)
+            child = _openat_directory(current, part)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+# LLM: 源只按已准入目录描述符逐层列名；目标 output/.sandbox-tmp 在第一份准入产物出现时才创建并缓存描述符。
+# 类用途: 持有任务根与目标基目录描述符，深度优先发布沙箱临时区产物。
+class _SandboxTmpPublisher:
+    def __init__(self, root_fd: int) -> None:
+        self._root_fd = root_fd
+        self._base_fd = -1
+
+    # 函数用途: 关闭本次发布打开的目标基目录描述符。
+    def close(self) -> None:
+        if self._base_fd >= 0:
+            os.close(self._base_fd)
+            self._base_fd = -1
+
+    # LLM: 子目录必须是普通目录且打开前后同一 inode；链接、非普通、多链接条目一律跳过，单条失败不影响其余条目。
+    # 函数用途: 发布一个源目录子树，返回真正发布成功的相对路径。
+    def publish_directory(self, directory_fd: int, prefix: tuple[str, ...]) -> list[str]:
+        published: list[str] = []
+        for name in sorted(os.listdir(directory_fd)):
+            parts = (*prefix, name)
+            try:
+                admitted = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISDIR(admitted.st_mode):
+                    child = _openat_directory(directory_fd, name)
+                    try:
+                        published.extend(self.publish_directory(child, parts))
+                    finally:
+                        os.close(child)
+                elif stat.S_ISREG(admitted.st_mode) and admitted.st_nlink == 1:
+                    self._publish_file(directory_fd, name, admitted, parts)
+                    published.append(str(Path(*parts)))
+            except OSError:
+                continue
+        return published
+
+    # LLM: 源经 no-follow 打开后必须仍是发现时那个单链接普通文件；之后只从该描述符读取，不按路径重开。
+    # 函数用途: 发布一个已准入的产物文件，任何拒绝或错误都关闭本次打开的描述符。
+    def _publish_file(self, directory_fd: int, name: str, admitted: os.stat_result, parts: tuple[str, ...]) -> None:
+        source_fd = _openat_file(directory_fd, name, os.O_RDONLY, 0o600)
+        try:
+            opened = os.fstat(source_fd)
+            if (opened.st_dev, opened.st_ino) != (admitted.st_dev, admitted.st_ino):
+                raise NoFollowPathError("sandbox output was replaced before publication")
+            if self._base_fd < 0:
+                self._base_fd = _open_directory_chain(self._root_fd, ("output", _SANDBOX_TMP_DIR), create=True)
+            parent_fd = _open_directory_chain(self._base_fd, parts[:-1], create=True)
+            try:
+                _stream_publish(source_fd, opened, parent_fd, parts[-1])
+            finally:
+                os.close(parent_fd)
+        finally:
+            os.close(source_fd)
+
+
+# LLM: 只读准入时的字节数，分块写入目标目录描述符下的私有临时文件；源在复制期间变了就不发布。
+#   权限位与时间戳只经已打开描述符设置（去掉 setuid/setgid/sticky），目标叶子若是链接或非普通文件则拒绝，
+#   最后在同一目录描述符内原子改名；失败只清理本次创建的临时文件。
+# 函数用途: 把源描述符正文发布为目标目录中的同名文件。
+def _stream_publish(source_fd: int, opened: os.stat_result, parent_fd: int, leaf: str) -> None:
+    temporary = f".{leaf}.publish-{secrets.token_hex(8)}"
+    target_fd = os.open(temporary, _PRIVATE_CREATE_FLAGS, 0o600, dir_fd=parent_fd)
+    try:
+        try:
+            copied = _copy_admitted_bytes(source_fd, target_fd, opened.st_size)
+            current = os.fstat(source_fd)
+            if copied != opened.st_size or (current.st_size, current.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
+                raise NoFollowPathError("sandbox output changed during publication")
+            os.fchmod(target_fd, stat.S_IMODE(opened.st_mode) & 0o777)
+            os.utime(target_fd, ns=(opened.st_atime_ns, opened.st_mtime_ns))
+            os.fsync(target_fd)
+        finally:
+            os.close(target_fd)
+        _reject_unsafe_existing_leaf(parent_fd, leaf)
+        os.rename(temporary, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(temporary, dir_fd=parent_fd)
+        raise
+
+
+# 函数用途: 以固定大小分块把源描述符的前 size 个字节写入目标描述符，返回实际复制的字节数。
+def _copy_admitted_bytes(source_fd: int, target_fd: int, size: int) -> int:
+    copied = 0
+    while copied < size:
+        chunk = os.read(source_fd, min(_PUBLISH_CHUNK_BYTES, size - copied))
+        if not chunk:
+            break
+        view = memoryview(chunk)
+        while view:
+            written = os.write(target_fd, view)
+            if written <= 0:
+                raise OSError("short write while publishing sandbox output")
+            view = view[written:]
+        copied += len(chunk)
+    return copied
 
 
 # LLM: 一个 standalone 终态只能构造一份 typed request，写 canonical state 和刷新索引都复用它。

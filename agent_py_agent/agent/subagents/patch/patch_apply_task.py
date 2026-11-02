@@ -29,6 +29,7 @@ from agent_py_agent.agent.subagents.patch.patch_apply_helpers import (
 )
 from agent_py_agent.agent.subagents.patch.patch_file_ops import (
     PatchFileApplyContext,
+    PatchRollbackOutcome,
     do_apply_patches,
     rollback_patch_apply,
 )
@@ -78,32 +79,62 @@ class PatchApplyParams:
     test_commands: list
 
 
+# LLM: 事务中止是结构化事实：携带实际回滚结果与已跑测试结果，上层据此如实决定 ROLLBACK/ROLLBACK_FAILED/APPLY_FAILED。
+# 类用途: 表示一次 patch apply 事务已中止且已按预像账本处理回滚。
+class PatchApplyAborted(RuntimeError):
+    def __init__(self, message: str, *, touched: bool, rollback: PatchRollbackOutcome, test_results: list):
+        super().__init__(message)
+        self.touched = touched
+        self.rollback = rollback
+        self.test_results = test_results
+
+    @property
+    def rollback_performed(self) -> bool:
+        return self.touched and self.rollback.ok
+
+
 class PatchApplyExecutor:
     """Execute patch apply with rollback support."""
 
     @staticmethod
     def execute(params: PatchApplyParams):
-        touched_files = {}
+        # 预像账本与 patch 引用快照都在写者运行前由执行器持有：写到一半失败也能完整回滚并恢复元数据。
+        preimages: dict[Path, dict] = {}
+        original_refs = [dict(spec["patch_ref"]) for spec in params.patch_specs]
         applied_count = 0
-        rollback_performed = False
-        test_results = []
+        test_results: list = []
 
         try:
-            applied_count, touched_files = do_apply_patches(
-                PatchFileApplyContext(params.patch_specs, params.task, params.applier, params.note)
+            applied_count, _ = do_apply_patches(
+                PatchFileApplyContext(params.patch_specs, params.task, params.applier, params.note, preimages)
             )
-            test_results = _run_patch_apply_tests(params)
+            _run_patch_apply_tests(params, test_results)
             _write_patch_apply_success(params, applied_count, test_results)
         except Exception as exc:
-            rollback_performed = bool(touched_files)
-            rollback_patch_apply(touched_files)
-            for spec in params.patch_specs:
-                spec["audit"]["apply_status"] = "ROLLED_BACK" if rollback_performed else "FAILED"
-                spec["audit"]["message"] = f"apply 失败: {exc}"
-                spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
-            raise RuntimeError(str(exc)) from exc
+            rollback = rollback_patch_apply(preimages)
+            _mark_aborted_specs(params.patch_specs, original_refs, rollback, touched=bool(preimages), error=exc)
+            raise PatchApplyAborted(str(exc), touched=bool(preimages), rollback=rollback,
+                                    test_results=test_results) from exc
 
-        return applied_count, touched_files, rollback_performed, test_results
+        return applied_count, preimages, False, test_results
+
+
+# LLM: 中止后 patch 引用恢复为事务前原样（不留 applied/approved 等半截元数据），只附本次真实 apply_status；
+#   审计按每个目标的实际回滚结果标记，实际差异清空，因为盘上已不再是 patch 内容。
+# 函数用途: 把中止事务的每个 patch 审计与引用改成与盘上事实一致的状态。
+def _mark_aborted_specs(patch_specs, original_refs, rollback: PatchRollbackOutcome, *, touched: bool, error) -> None:
+    failed = set(rollback.failed)
+    for spec, original in zip(patch_specs, original_refs):
+        if not touched:
+            status = "FAILED"
+        else:
+            status = "ROLLBACK_FAILED" if str(spec["target"]) in failed else "ROLLED_BACK"
+        spec["patch_ref"].clear()
+        spec["patch_ref"].update(original)
+        spec["patch_ref"]["apply_status"] = status
+        spec["audit"]["apply_status"] = status
+        spec["audit"]["actual_diff"] = ""
+        spec["audit"]["message"] = f"apply 失败: {error}"
 
 
 @dataclass
@@ -225,7 +256,9 @@ def _execute_apply_if_ready(ctx: _ApplyIfReadyContext):
             message=ctx.message,
         )
     )
-    _write_successful_apply_output(ctx.task, params, prepared)
+    if ok:
+        # 中止的事务不产出成功输出：output.json 保持事务前账本，失败事实只进 apply 记录与工作日志。
+        _write_successful_apply_output(ctx.task, params, prepared)
     return applied_count, rollback_performed, test_results, decision, ok, message
 
 
@@ -281,14 +314,21 @@ def _execute_apply(ctx: _ExecuteApplyContext):
                 test_commands=ctx.test_commands,
             ),
         )
-    except Exception as exc:
-        rollback_performed = True
-        for spec in ctx.patch_specs:
-            spec["audit"]["apply_status"] = "ROLLED_BACK"
-            spec["audit"]["message"] = f"apply 失败: {exc}"
-            spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
-        ctx.decision, ctx.ok, ctx.message = "ROLLBACK", False, f"patch apply 失败，已回滚: {exc}"
-        ctx.manager.actions._append_task_work_log(ctx.task, f"patch_apply: rollback applier={ctx.applier} error={exc}")
+    except PatchApplyAborted as exc:
+        # 决策与 rollback_performed 只取执行器回传的实际回滚结果，不按“进入了 except”一律宣称已回滚。
+        rollback_performed, test_results = exc.rollback_performed, exc.test_results
+        if not exc.touched:
+            ctx.decision, ctx.ok, ctx.message = "APPLY_FAILED", False, f"patch apply 失败，未改动任何文件: {exc}"
+        elif exc.rollback.ok:
+            ctx.decision, ctx.ok, ctx.message = "ROLLBACK", False, f"patch apply 失败，已回滚: {exc}"
+        else:
+            ctx.decision, ctx.ok, ctx.message = (
+                "ROLLBACK_FAILED", False,
+                f"patch apply 失败，回滚未完成（{len(exc.rollback.failed)} 个文件未恢复）: {exc}",
+            )
+        ctx.manager.actions._append_task_work_log(
+            ctx.task, f"patch_apply: {ctx.decision.lower()} applier={ctx.applier} error={exc}"
+        )
     return applied_count, rollback_performed, test_results, ctx.decision, ctx.ok, ctx.message
 
 
@@ -331,14 +371,15 @@ def _string_items(value: object) -> list[str]:
     return []
 
 
-def _run_patch_apply_tests(params: PatchApplyParams) -> list:
+# LLM: 结果先进入调用方持有的列表再判失败，事务中止时失败测试仍能如实进入 apply 记录。
+# 函数用途: 运行 apply 后测试，任一失败即中止事务。
+def _run_patch_apply_tests(params: PatchApplyParams, test_results: list) -> None:
     if not params.test_commands:
-        return []
-    test_results = run_patch_apply_tests(params.test_commands, params.manager.workspace_root)
+        return
+    test_results.extend(run_patch_apply_tests(params.test_commands, params.manager.workspace_root))
     failed = [item for item in test_results if not item.get("ok")]
     if failed:
         raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
-    return test_results
 
 
 def _write_patch_apply_success(params: PatchApplyParams, applied_count: int, test_results: list) -> None:

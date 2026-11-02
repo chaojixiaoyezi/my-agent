@@ -40,7 +40,11 @@ from .operations import memory_content_hash
 from .retention_models import RETENTION_SCHEMA_VERSION, MemoryRetentionPolicy
 
 MEMORY_MIGRATION_SCHEMA_VERSION = "my-agent.memory-migration.v2"
+# 迁移恢复日志：canonical 变更前落盘的 prepared 事实（owner/run、备份摘要、正式记录身份及确定性替代 ID）。
+MEMORY_MIGRATION_JOURNAL_SCHEMA = "my-agent.memory-migration-journal.v1"
 _MARKER_NAME = "migration.json"
+_JOURNAL_NAME = "migration.journal.json"
+_JOURNAL_RECORDS_NAME = "long_term_records.jsonl"
 _LEGACY_ARCHIVE_DIR = "memory-migration"
 # LLM: 唯一权威的遗留来源目录名；写入方已删除，只剩迁移读取方，任何新增都必须先补测试。
 # 常量用途: 迁移扫描与稳态探针共用的遗留目录名清单。
@@ -167,6 +171,7 @@ class _MigrationServiceCore:
         self.owner_home = Path(home_paths.owner_home_dir)
         self.memory_dir = Path(home_paths.owner_memory_dir)
         self.marker_path = self.memory_dir / _MARKER_NAME
+        self.journal_path = self.memory_dir / _JOURNAL_NAME
         self.backups_root = Path(home_paths.system_backups_dir) / _LEGACY_ARCHIVE_DIR
         self.legacy_learning_dirs = _legacy_workspace_learning_dirs(
             legacy_workspace_roots
@@ -183,6 +188,7 @@ class _MigrationServiceCore:
             and not errors
             and marker.get("schema_version") == MEMORY_MIGRATION_SCHEMA_VERSION
             and marker.get("status") == "complete"
+            and not self.journal_path.exists()
         )
         return MemoryMigrationReport(
             schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
@@ -193,15 +199,26 @@ class _MigrationServiceCore:
             marker_path=str(self.marker_path),
         )
 
-    # LLM: apply 在 owner 迁移锁内重新扫描、完整备份并执行；失败必须恢复所有被改目标且不写 complete marker。
+    # LLM: apply 在 owner 迁移锁内先恢复未完成代次，再重新扫描、完整备份；canonical 变更前落 prepared 恢复日志。
+    #   删除未提交的失败按备份恢复；删除可能已提交时热备份不得覆盖永久墓碑，日志保持 pending，下次 apply 向前收敛。
     # 稳态短路：marker 已是同一迁移版本的 complete 且契约位置无遗留目录时，跳过整棵 owner home 的递归遍历
     # （该遍历在真实 owner home 上是分钟级：agents/ 42 万条、tasks/ 17 万条、data/ 16 万条）。
     # 函数用途: 显式应用 Memory v2 迁移并返回可恢复归档位置。
     def apply(self) -> MemoryMigrationReport:
         lock_path = self.memory_dir / ".migration-v2"
         with locked_json_path(lock_path):
+            recovered, recovery_errors = self._recover_unfinished()
+            if recovery_errors:
+                return MemoryMigrationReport(
+                    schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
+                    applied=False,
+                    already_current=False,
+                    findings=(),
+                    errors=tuple(recovery_errors),
+                    marker_path=str(self.marker_path),
+                )
             marker, marker_error = self._read_marker()
-            if self._steady_state_current(marker, marker_error):
+            if recovered is None and self._steady_state_current(marker, marker_error):
                 return MemoryMigrationReport(
                     schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
                     applied=False,
@@ -222,6 +239,11 @@ class _MigrationServiceCore:
                     errors=errors,
                     marker_path=str(self.marker_path),
                 )
+            if recovered is not None:
+                if not snapshot.findings:
+                    return self._complete_recovered(recovered, marker)
+                # 上一代替代已核验并留在正式候选/Daily 中，新一轮备份会一并纳入；旧日志只剩签发 complete 的用途，交给新一轮。
+                self._discard_journal()
             if not snapshot.findings and marker.get("status") == "complete":
                 return MemoryMigrationReport(
                     schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
@@ -236,6 +258,7 @@ class _MigrationServiceCore:
             backup_dir = self.backups_root / run_id
             backup_map = self._backup(snapshot, backup_dir)
             try:
+                self._prepare_journal(snapshot, run_id, backup_dir)
                 counters = self._apply_snapshot(snapshot, backup_dir)
                 write_json_file_atomic(
                     self.marker_path,
@@ -255,6 +278,8 @@ class _MigrationServiceCore:
                 )
             except Exception as exc:  # noqa: BLE001 - rollback must cover every migration failure.
                 rollback_errors = self._restore_backup(backup_map)
+                if not rollback_errors:
+                    self._discard_journal()
                 errors = [
                     MemoryMigrationError(
                         "MEMORY_MIGRATION_APPLY_FAILED",
@@ -273,6 +298,7 @@ class _MigrationServiceCore:
                     marker_path=str(self.marker_path),
                     run_id=run_id,
                 )
+            self._discard_journal()
             return MemoryMigrationReport(
                 schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
                 applied=True,
@@ -559,10 +585,27 @@ class _MigrationLegacyProjectionMixin:
         write_text_file_atomic(path, text)
 
     # LLM: rollback 按备份 manifest 精确恢复或删除 apply 新建文件；不能只恢复旧来源而留下半迁移正式数据。
+    #   恢复前先按 prepared 日志核正式库：删除可能已提交（或无法确认）时热备份不得覆盖永久墓碑权威，整体拒绝并保持 pending；
+    #   删除未提交时迁移从未写正式库，正式热文件不回拷，避免覆盖期间的更新版本。
     # 函数用途: 恢复 apply 前文件快照。
     def _restore_backup(self, mapping: dict[Path, Path | None]) -> list[MemoryMigrationError]:
+        journal, journal_error = self._read_journal()
+        if journal_error is not None:
+            return [journal_error]
+        if journal is not None:
+            states, state_error = self._journal_formal_states(journal)
+            if state_error is not None:
+                return [state_error]
+            if "migrated" in states.values():
+                return [MemoryMigrationError(
+                    "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.journal_path),
+                    "formal deletion may have committed; recovery will reconcile forward",
+                )]
+        formal = self.long_term.path.resolve(strict=False)
         errors: list[MemoryMigrationError] = []
         for target, backup in sorted(mapping.items(), key=lambda item: str(item[0])):
+            if target == formal:
+                continue
             try:
                 if backup is None:
                     target.unlink(missing_ok=True)
@@ -608,6 +651,288 @@ class _MigrationLegacyProjectionMixin:
         )
 
 
+# LLM: 恢复日志只记身份、版本、hash、确定性替代 ID 与备份摘要，不含旧正文；正文证据只在私有备份中。
+#   恢复先于正常扫描：正式记录仍按原版本/hash 存活即删除未提交，丢弃日志后由正常扫描幂等重迁；
+#   出现本迁移墓碑即删除已提交，只向前核验/补齐确定性替代，不复活真实后续删除、不覆盖更新版本或已审核候选；
+#   任何读不出、备份摘要不符或替代仍缺失都保持 pending，只有 canonical 证明齐全才写 complete marker。
+# 类用途: 为 Memory v2 迁移提供 prepared 恢复日志与跨重启向前收敛。
+class _MigrationRecoveryMixin:
+    # LLM: 只在完整备份后、任何 canonical 变更前调用；落盘失败按普通失败回滚（此时尚未改动任何正式数据）。
+    #   旧正式记录原样另存为备份目录内私有 JSONL（正式库可能已是代次分片，热文件备份只是 marker），摘要写入日志。
+    # 函数用途: 写入本次迁移的 prepared 恢复日志（新建私有记录副本与日志文件）。
+    def _prepare_journal(self, snapshot: _MigrationSnapshot, run_id: str, backup_dir: Path) -> None:
+        formal = [
+            {
+                "entry_id": record.entry_id,
+                "version": int(record.version or 1),
+                "content_hash": memory_content_hash(record.content),
+                **self._replacement_ids(record, backup_dir),
+            }
+            for record in snapshot.long_term_records
+        ]
+        records_path = backup_dir / _JOURNAL_RECORDS_NAME
+        records_sha256 = (_write_private_records(records_path, snapshot.long_term_records)
+                          if snapshot.long_term_records else "")
+        write_json_file_atomic(self.journal_path, {
+            "schema_version": MEMORY_MIGRATION_JOURNAL_SCHEMA,
+            "status": "prepared",
+            "owner_home": str(self.owner_home),
+            "run_id": run_id,
+            "source_fingerprint": snapshot.fingerprint,
+            "backup_dir": str(backup_dir),
+            "backup_manifest_sha256": _file_hash(backup_dir / "manifest.json"),
+            "records_sha256": records_sha256,
+            "formal": formal,
+            "routing_index": bool(snapshot.legacy_lesson_paths),
+            "legacy_gate_dirs": [str(path) for path in snapshot.legacy_gate_dirs],
+            "learning_dirs": [str(path) for path in snapshot.learning_dirs],
+            "created_at": _utc_now(),
+        })
+
+    # LLM: 缺失即无未完成代次；坏 JSON、错 schema 或非本 owner 的日志不能被当作已完成，返回结构化 pending。
+    # 函数用途: 读取并校验未完成迁移的恢复日志。
+    def _read_journal(self) -> tuple[dict[str, Any] | None, MemoryMigrationError | None]:
+        if not self.journal_path.exists():
+            return None, None
+        report = read_json_object_report(self.journal_path, context="memory_migration.journal")
+        journal = report.payload if report.load_error is None else {}
+        formal = journal.get("formal")
+        if (journal.get("schema_version") != MEMORY_MIGRATION_JOURNAL_SCHEMA
+                or journal.get("status") != "prepared"
+                or journal.get("owner_home") != str(self.owner_home)
+                or not str(journal.get("run_id") or "") or not isinstance(formal, list)
+                or any(not isinstance(item, dict) or not str(item.get("entry_id") or "")
+                       or type(item.get("version")) is not int or not isinstance(item.get("content_hash"), str)
+                       or not isinstance(item.get("candidates"), list) or not isinstance(item.get("daily"), list)
+                       for item in formal)):
+            return None, MemoryMigrationError(
+                "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.journal_path),
+                "unfinished migration journal is unreadable or belongs to another owner",
+            )
+        return journal, None
+
+    # LLM: 与 committed_removal_record 同口径，持 formal 锁严格读取当前正式事件（含冷热代次与永久墓碑），只读不写回；
+    #   intact=仍为日志版本/hash，migrated=本迁移命名空间墓碑恰为下一版本，其余（更新版本、用户墓碑、缺失）都是真实后续变化。
+    #   读失败一律未知，不猜成未提交。
+    # 函数用途: 按 canonical 正式库判定日志中每条旧记录的删除提交状态。
+    def _journal_formal_states(
+        self,
+        journal: dict[str, Any],
+    ) -> tuple[dict[str, str], MemoryMigrationError | None]:
+        from .jsonl import _materialize_memory_events, _strict_memory_events
+
+        try:
+            with self.long_term._locked_memory():  # noqa: SLF001 - same strict authority read as committed_removal_record.
+                events = _strict_memory_events(self.long_term.path)
+            active = {record.entry_id: record for record in _materialize_memory_events(events, include_expired=True)}
+        except Exception as exc:  # noqa: BLE001 - unknown canonical state keeps recovery pending.
+            return {}, MemoryMigrationError(
+                "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.long_term.path),
+                f"formal memory state is unreadable: {type(exc).__name__}",
+            )
+        removed: dict[str, MemoryRecord] = {}
+        for record in events:
+            prior = removed.get(record.entry_id)
+            if record.action == "remove" and (prior is None or int(record.version or 1) >= int(prior.version or 1)):
+                removed[record.entry_id] = record
+        states = {}
+        for item in journal["formal"]:
+            entry_id = item["entry_id"]
+            current, tombstone = active.get(entry_id), removed.get(entry_id)
+            if (current is not None and int(current.version or 1) == item["version"]
+                    and memory_content_hash(current.content) == item["content_hash"]):
+                states[entry_id] = "intact"
+            elif (current is None and tombstone is not None
+                    and str(tombstone.source or "").startswith("memory-migration-")
+                    and int(tombstone.version or 1) == item["version"] + 1):
+                states[entry_id] = "migrated"
+            else:
+                states[entry_id] = "changed"
+        return states, None
+
+    # LLM: 删除未提交时只丢弃日志，正式事实完整，残留旧来源由正常扫描以确定性 ID 幂等重迁；
+    #   删除已提交时核验/补齐替代并重建派生 lesson 路由后返回日志，由 apply 在扫描后写 complete marker。
+    # 函数用途: 在正常扫描前恢复上一轮未完成的迁移代次。
+    def _recover_unfinished(self) -> tuple[dict[str, Any] | None, list[MemoryMigrationError]]:
+        journal, error = self._read_journal()
+        if error is not None:
+            return None, [error]
+        if journal is None:
+            return None, []
+        states, error = self._journal_formal_states(journal)
+        if error is not None:
+            return None, [error]
+        if "migrated" not in states.values():
+            self._discard_journal()
+            return None, []
+        errors = self._reconcile_replacements(journal, states)
+        if errors:
+            return None, errors
+        if journal.get("routing_index"):
+            try:
+                self.lessons.rebuild_routing_index()
+            except Exception as exc:  # noqa: BLE001 - derived index stays pending, never fabricated.
+                return None, [MemoryMigrationError(
+                    "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.journal_path),
+                    f"lesson routing index rebuild failed: {type(exc).__name__}",
+                )]
+        # complete 只为确由本迁移删除且替代已核验的记录签发；真实后续变化的记录不计入。
+        return {**journal, "formal": [item for item in journal["formal"]
+                                      if states.get(item["entry_id"]) == "migrated"]}, []
+
+    # LLM: 已存在的替代（任何状态，含已审核/已晋升/绑定墓碑）原样保留不再观察；缺失的只从摘要相符的私有备份、
+    #   且版本/hash 与日志一致的旧记录确定性重建，补后复核仍缺即 pending。
+    # 函数用途: 让已提交删除的旧正式记录都有经核验的候选或 Daily 替代。
+    def _reconcile_replacements(self, journal: dict[str, Any], states: dict[str, str]) -> list[MemoryMigrationError]:
+        migrated = [item for item in journal["formal"] if states.get(item["entry_id"]) == "migrated"]
+        missing = self._missing_replacements(migrated)
+        if isinstance(missing, MemoryMigrationError):
+            return [missing]
+        if not missing:
+            return []
+        try:
+            self._rebuild_replacements(journal, missing)
+        except Exception as exc:  # noqa: BLE001 - unverifiable replacement keeps recovery pending.
+            return [MemoryMigrationError(
+                "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.journal_path),
+                f"replacement reconciliation failed: {type(exc).__name__}: {exc}",
+            )]
+        remaining = self._missing_replacements(migrated)
+        if isinstance(remaining, MemoryMigrationError):
+            return [remaining]
+        if remaining:
+            return [MemoryMigrationError(
+                "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.journal_path),
+                f"{len(remaining)} migrated record(s) still lack verified replacements",
+            )]
+        return []
+
+    # LLM: 只按确定性候选 ID 与 Daily 事件 ID 精确比对，不按正文模糊匹配。
+    # 函数用途: 返回仍缺替代的已迁移旧记录。
+    def _missing_replacements(self, migrated: list[dict[str, Any]]) -> list[dict[str, Any]] | MemoryMigrationError:
+        try:
+            candidate_ids = {row.candidate_id for row in self.candidates.readonly_rows()}
+            days = {event["day"] for item in migrated for event in item["daily"]}
+            daily_ids = {event.event_id for day in days for event in self.daily.list(day=day)}
+        except Exception as exc:  # noqa: BLE001 - unknown replacement state keeps recovery pending.
+            return MemoryMigrationError(
+                "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.journal_path),
+                f"replacement state is unreadable: {type(exc).__name__}",
+            )
+        return [item for item in migrated
+                if any(candidate_id not in candidate_ids for candidate_id in item["candidates"])
+                or any(event["event_id"] not in daily_ids for event in item["daily"])]
+
+    # LLM: 候选 ID 与 Daily 事件 ID 由原投影和原稳定 ID 规则确定性得出，与 apply 实际写入同源，不另造身份。
+    # 函数用途: 计算一条旧正式记录迁移后的确定性替代身份。
+    def _replacement_ids(self, record: MemoryRecord, backup_dir: Path) -> dict[str, list]:
+        from .candidates import _prepare_observations
+        from .daily import normalize_daily_event, stable_daily_event_id
+
+        observations, daily_event = _legacy_long_term_projection(record, backup_dir, source_path=self.long_term.path)
+        daily = []
+        if daily_event is not None:
+            event = normalize_daily_event(daily_event)
+            daily.append({"day": event.created_at[:10], "event_id": event.event_id or stable_daily_event_id(event)})
+        candidates = sorted({item[1] for item in _prepare_observations(observations)}) if observations else []
+        return {"candidates": candidates, "daily": daily}
+
+    # LLM: 备份 manifest 与私有记录副本摘要都必须等于日志值；旧记录按 entry_id/版本/hash 精确选中，
+    #   重算的替代身份必须与日志一致才写；只观察缺失 ID，已有候选（含已审核）不刷新。
+    # 函数用途: 从经核验的私有备份确定性重建缺失替代（写候选或 Daily）。
+    def _rebuild_replacements(self, journal: dict[str, Any], missing: list[dict[str, Any]]) -> None:
+        from .candidates import _prepare_observations
+
+        backup_dir = Path(str(journal.get("backup_dir") or ""))
+        raw = _read_backup_bytes(backup_dir / _JOURNAL_RECORDS_NAME)
+        if (not str(journal.get("backup_dir") or "") or raw is None
+                or _file_hash(backup_dir / "manifest.json") != journal.get("backup_manifest_sha256")
+                or hashlib.sha256(raw).hexdigest() != journal.get("records_sha256")):
+            raise RuntimeError("MEMORY_MIGRATION_BACKUP_UNVERIFIED")
+        records = {}
+        for line in raw.decode("utf-8").splitlines():
+            record = _memory_record(json.loads(line))
+            if record is not None:
+                records[(record.entry_id, int(record.version or 1), memory_content_hash(record.content))] = record
+        existing = {row.candidate_id for row in self.candidates.readonly_rows()}
+        observations: list[CandidateObservation] = []
+        events: list[DailyMemoryEvent] = []
+        for item in missing:
+            record = records.get((item["entry_id"], item["version"], item["content_hash"]))
+            if record is None or self._replacement_ids(record, backup_dir) != {
+                    "candidates": item["candidates"], "daily": item["daily"]}:
+                raise RuntimeError("MEMORY_MIGRATION_BACKUP_UNVERIFIED")
+            projected, daily_event = _legacy_long_term_projection(record, backup_dir, source_path=self.long_term.path)
+            observations.extend(observation for observation, candidate_id, _key in
+                                (_prepare_observations(projected) if projected else ())
+                                if candidate_id not in existing)
+            if daily_event is not None:
+                events.append(daily_event)
+        if observations:
+            self.candidates.observe_many(tuple(observations))
+        for event in events:
+            self.daily.append(event)
+
+    # LLM: 正常扫描已无遗留时才调用；同 run 已 complete 只清日志，否则以日志 run/备份写 complete marker 后清日志。
+    #   marker 落盘失败保留日志并返回 pending，下次 apply 重新核验后再签发，不抛出到调用方。
+    # 函数用途: 为向前收敛完成的迁移签发 complete 并返回结构化报告。
+    def _complete_recovered(self, journal: dict[str, Any], marker: dict[str, Any]) -> MemoryMigrationReport:
+        run_id, backup_dir = str(journal["run_id"]), str(journal.get("backup_dir") or "")
+        migrated = journal["formal"]
+        if not (marker.get("status") == "complete" and marker.get("run_id") == run_id):
+            try:
+                write_json_file_atomic(self.marker_path, {
+                    "schema_version": MEMORY_MIGRATION_SCHEMA_VERSION,
+                    "status": "complete",
+                    "run_id": run_id,
+                    "source_fingerprint": str(journal.get("source_fingerprint") or ""),
+                    "backup_dir": backup_dir,
+                    "completed_at": _utc_now(),
+                    "recovered": True,
+                    "legacy_gate_dirs": list(journal.get("legacy_gate_dirs") or []),
+                    "learning_dirs": list(journal.get("learning_dirs") or []),
+                    "migrated_candidates": sum(len(item["candidates"]) for item in migrated),
+                    "migrated_daily_events": sum(len(item["daily"]) for item in migrated),
+                    "removed_legacy_long_term": len(migrated),
+                    "archived_sources": 0,
+                })
+            except Exception as exc:  # noqa: BLE001 - completion stays pending until a later apply re-verifies.
+                return MemoryMigrationReport(
+                    schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
+                    applied=False,
+                    already_current=False,
+                    findings=(),
+                    errors=(MemoryMigrationError(
+                        "MEMORY_MIGRATION_RECOVERY_PENDING", str(self.marker_path),
+                        f"recovered completion marker write failed: {type(exc).__name__}",
+                    ),),
+                    backup_dir=backup_dir,
+                    marker_path=str(self.marker_path),
+                    run_id=run_id,
+                )
+        self._discard_journal()
+        return MemoryMigrationReport(
+            schema_version=MEMORY_MIGRATION_SCHEMA_VERSION,
+            applied=True,
+            already_current=False,
+            findings=(),
+            migrated_candidates=sum(len(item["candidates"]) for item in migrated),
+            migrated_daily_events=sum(len(item["daily"]) for item in migrated),
+            removed_legacy_long_term=len(migrated),
+            backup_dir=backup_dir,
+            marker_path=str(self.marker_path),
+            run_id=run_id,
+        )
+
+    # LLM: 只删除固定日志路径；删除失败只留下可再次核验的 pending 事实，由下次恢复幂等收口，不影响已提交结果。
+    # 函数用途: 清除已完成或已确认未提交的恢复日志。
+    def _discard_journal(self) -> None:
+        try:
+            self.journal_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # LLM: The public service composes lifecycle and bounded scan/apply helpers without adding a second migration path.
 # 类用途: 对外提供唯一的 Memory v2 dry-run 与显式 apply 接口。
 class MemoryMigrationService(
@@ -615,6 +940,7 @@ class MemoryMigrationService(
     _MigrationScanMixin,
     _MigrationApplyMixin,
     _MigrationLegacyProjectionMixin,
+    _MigrationRecoveryMixin,
 ):
     pass
 
@@ -818,7 +1144,8 @@ def _scan_legacy_long_term(service: object, state: _MigrationScanState) -> None:
     state.errors.extend(
         _read_errors(report.load_errors, "MEMORY_MIGRATION_CORRUPT_LONG_TERM")
     )
-    invalid = [row for row in report.records if _memory_record(row) is None]
+    # 已发表冷热代次（迁移删除后必然如此）的热文件只是 generation marker；记录由下方正式严格读取校验，marker 不算旧行。
+    invalid = [row for row in report.records if not _is_generation_marker(row) and _memory_record(row) is None]
     if invalid:
         state.errors.append(
             MemoryMigrationError(
@@ -1290,6 +1617,14 @@ def _is_legacy_long_term(record: MemoryRecord) -> bool:
     )
 
 
+# LLM: 只认精确两键 marker；同 schema 的其它形状仍按坏行 fail closed，代次根是否可读由正式严格读取裁决。
+# 函数用途: 判断正式热文件中的一行是否为已发表代次的 marker。
+def _is_generation_marker(row: dict[str, object]) -> bool:
+    from .generation_manifest import GENERATION_SCHEMA
+
+    return set(row) == {"schema_version", "manifest"} and row.get("schema_version") == GENERATION_SCHEMA
+
+
 # LLM: MemoryRecord 宽松兼容未知字段，但迁移扫描必须确认最小 role/content 类型。
 # 函数用途: 校验旧 long-term 行是否可安全构造。
 def _memory_record(row: dict[str, object]) -> MemoryRecord | None:
@@ -1622,6 +1957,31 @@ def _file_hash(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return "missing"
+
+
+# LLM: 副本装旧正式正文，与其它备份副本同口径私有：本次新建 backup_dir 内 O_EXCL 以 0600 新建并落盘，不覆盖任何已有文件。
+# 函数用途: 把迁移前旧正式记录原样写成私有 JSONL 副本并返回其摘要（新建文件）。
+def _write_private_records(path: Path, records: Iterable[MemoryRecord]) -> str:
+    raw = "".join(
+        json.dumps({key: value for key, value in asdict(record).items() if key != "_extra_fields"},
+                   ensure_ascii=False, sort_keys=True) + "\n"
+        for record in records
+    ).encode("utf-8")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as target:
+        target.write(raw)
+        target.flush()
+        os.fsync(target.fileno())
+    return hashlib.sha256(raw).hexdigest()
+
+
+# LLM: 读失败即无法核验，返回 None 交由调用方保持 pending，不当作空备份。
+# 函数用途: 读取私有备份副本字节。
+def _read_backup_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 # LLM: run_id 同一秒还绑定 snapshot 前缀，避免并发/重试覆盖备份目录。

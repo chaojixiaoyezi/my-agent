@@ -1612,7 +1612,11 @@ def _read_spool_records_unlocked(
     effective_audit_objective: str = "",
 ) -> tuple[list[dict], dict[str, Any]]:
     """Read/claim one batch while the caller holds the cursor mutation fence."""
-    cursor = read_spool_cursor(state)
+    report = read_json_object_report(_read_sidecar_path(state), context="watch_spool.read_cursor")
+    cursor = {} if report.load_error is not None else dict(report.payload)
+    if state.audit_guarantee and report.load_error is not None:
+        # 保证档游标存在却读不出（缺失才是全新游标）：不能从头重领覆盖在途欠账与签收计数，如实交可重试结果。
+        return _audit_spool_unavailable(state, cursor, "AUDIT_SPOOL_CURSOR_UNAVAILABLE")
     resolution = _resolve_existing_inflight(
         state,
         cursor,
@@ -1624,14 +1628,22 @@ def _read_spool_records_unlocked(
         return resolution.response
     cursor = resolution.cursor
     _apply_effective_audit_objective(state, effective_audit_objective)
-    records, offset, taken, start_offset = _scan_spool_or_empty(
-        state,
-        cursor,
-        max_candidates=max_candidates,
-        max_bytes=max_bytes,
-    )
+    try:
+        records, offset, taken, start_offset = _scan_spool(
+            state,
+            cursor,
+            max_candidates,
+            max_bytes=max_bytes,
+        )
+    except OSError as exc:
+        if state.audit_guarantee and not isinstance(exc, FileNotFoundError):
+            # 保证档读不出新记录不是“没有新记录”（spool 尚未写出才是）：已证实的签收照常落盘，本轮交可重试结果而非空批。
+            if resolution.acked:
+                _write_spool_cursor(state, {**cursor, "updated_at": time.time()})
+            return _audit_spool_unavailable(state, cursor, "AUDIT_SPOOL_READ_UNAVAILABLE")
+        records, offset, taken, start_offset = [], 0, 0, 0
     if records:
-        _write_claimed_spool_batch(
+        claimed = _write_claimed_spool_batch(
             state,
             cursor,
             records,
@@ -1640,6 +1652,9 @@ def _read_spool_records_unlocked(
             taken=taken,
             start_offset=start_offset,
         )
+        if state.audit_guarantee and not claimed:
+            # 欠账与交付令牌未落盘的批无法逐条签收；保证档不交出去，游标未动，下次原样重领。
+            return _audit_spool_unavailable(state, cursor, "AUDIT_CURSOR_WRITE_UNAVAILABLE")
     elif resolution.acked:
         # 没有新记录但发生了 ack(在途被确认/按缺口清掉):确认必须落盘,否则下次
         # 还会把已判完的批当在途重投。空轮询(无 ack 无新批)不写盘,别刷 IO。
@@ -1693,22 +1708,22 @@ def _apply_effective_audit_objective(state: WatchState, objective: str) -> None:
         persist_state(state)
 
 
-def _scan_spool_or_empty(
+# LLM: 读不出/写不进是不确定而非“记录已不存在”：在途、欠账、游标与租约身份原样保留，不写任何账；
+#   复用原公开错误形状（*_UNAVAILABLE 映射为可重试的工具不可用），下一次无故障拉取拿到同一批。
+# 函数用途: 生成保证档 spool 暂不可用的可重试拉取结果。
+def _audit_spool_unavailable(
     state: WatchState,
     cursor: dict[str, Any],
-    *,
-    max_candidates: int,
-    max_bytes: int,
-) -> tuple[list[dict], int, int, int]:
-    try:
-        return _scan_spool(
-            state,
-            cursor,
-            max_candidates,
-            max_bytes=max_bytes,
-        )
-    except OSError:
-        return [], 0, 0, 0
+    error_code: str,
+) -> tuple[list[dict], dict[str, Any]]:
+    return [], {
+        **_backlog_info(state, cursor),
+        "authorization_error": {
+            "ok": False,
+            "error_code": error_code,
+            "error": "Audit 队列本轮读写失败，在途批与欠账原样保留；稍后重试会拿到同一批。",
+        },
+    }
 
 
 def _write_claimed_spool_batch(
@@ -1720,7 +1735,7 @@ def _write_claimed_spool_batch(
     offset: int,
     taken: int,
     start_offset: int,
-) -> None:
+) -> bool:
     inflight = _new_inflight_claim(
         state,
         cursor,
@@ -1741,7 +1756,7 @@ def _write_claimed_spool_batch(
         "candidates_acked": acked_candidates(cursor),
         "updated_at": time.time(),
     }
-    _write_spool_cursor(state, payload)
+    return _write_spool_cursor(state, payload)
 
 
 def _new_inflight_claim(
@@ -1856,8 +1871,10 @@ def _redeliver_unacked_audit(
     try:
         records = _scan_spool_range(state, inflight)
     except OSError:
-        records = []
+        # 原读者的不确定原样上交：读失败不是缺口，绝不按缺口签收；在途/欠账/游标不动，交可重试结果。
+        return _audit_spool_unavailable(state, cursor, "AUDIT_SPOOL_READ_UNAVAILABLE")
     if not records:
+        # 只有完整读成功且区间内确无记录，才是可证明的不可恢复缺口，按缺口如实入账。
         return _acked_cursor(cursor, inflight, gap=True)
     redelivered, delivered_ids = _pending_record_projection(
         records,
@@ -1890,14 +1907,16 @@ def _redeliver_unacked_audit(
             ),
         },
     )
-    _write_spool_cursor(
+    if not _write_spool_cursor(
         state,
         {
             **updated_cursor,
             "inflight": updated_inflight,
             "updated_at": now,
         },
-    )
+    ):
+        # 新交付令牌未落盘就交出的批无法按令牌签收；保留盘上原在途身份，交可重试结果。
+        return _audit_spool_unavailable(state, cursor, "AUDIT_CURSOR_WRITE_UNAVAILABLE")
     info = _backlog_info(state, read_spool_cursor(state))
     info["redelivered_candidates"] = len(delivered_ids)
     info["pending_verdicts"] = len(delivered_ids)

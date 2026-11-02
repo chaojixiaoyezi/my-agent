@@ -3,6 +3,7 @@
 # 模块用途: 装配文件、网页与单向推送等工具；推送仅绑定当前owner宿主，构造不解密或外发。
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..contracts.gates.network_safety import GatewayEndpointConfig
@@ -111,10 +112,14 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(RemoteAgentPushTool(getattr(params, "remote_push_agent", None), timeout=params.http_timeout))
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     hosts_provider = getattr(params, "allowed_private_hosts_provider", None)
+    owner_root = getattr(params, "artifact_root", None)
     registry.register(
         WebFetchTool(
             max_chars=params.web_max_chars,
             timeout=params.http_timeout,
+            # 产物根只取宿主给定的 owner 根并沿用 artifacts/web 布局，不回落进程级环境覆盖；
+            # 没有 owner 根的独立装配仍走原默认目录。调用副本与访问策略副本都从同一参数得到同一根。
+            artifact_root=Path(owner_root) / "artifacts" / "web" if owner_root else None,
             allowed_private_hosts=(
                 hosts_provider
                 if callable(hosts_provider)
