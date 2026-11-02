@@ -148,14 +148,14 @@ def test_set_previous_value_without_yaml_quotes(tmp_path, capsys, key, old, expe
     ("0", "0"),
 ])
 def test_set_previous_value_uses_typed_config_fact(tmp_path, monkeypatch, capsys, previous, expected):
-    from unittest.mock import Mock
+    from unittest.mock import ANY, Mock
 
     p = _write_config(tmp_path)
     fact = Mock(return_value={"user_value": previous})
     monkeypatch.setattr(C, "read_config_fact", fact)
     assert C.cmd_config_set(Namespace(key="feishu_app_id", value="newvalue", config=str(p))) == 0
     assert f"feishu_app_id: {expected} → newvalue" in capsys.readouterr().out
-    fact.assert_called_once_with("feishu_app_id", user_path=p, default_path=C.packaged_config_path())
+    fact.assert_called_once_with("feishu_app_id", user_path=p, default_path=C.packaged_config_path(), config=ANY)
     assert load_simple_yaml(p)["feishu_app_id"] == "newvalue"
 
 
@@ -174,10 +174,9 @@ def test_set_invalid_port_prints_reason(tmp_path, capsys):
 # LLM: 使用独立随包默认替身区分空串、非空默认值及数值零，不调用真实用户配置。
 # 函数用途: 保留 config get 空串未设置展示并防止零值误判。
 @pytest.mark.parametrize("user_line,default_line,expected", [
-    ("", 'feishu_encrypt_key: ""\n', "(未设置) feishu_encrypt_key"),
-    ('feishu_encrypt_key: ""\n', 'feishu_encrypt_key: "default-key"\n', "(未设置) feishu_encrypt_key"),
-    ("", 'feishu_encrypt_key: "default-key"\n', "feishu_encrypt_key: def***"),
-    ("feishu_callback_port: 0\n", "", "feishu_callback_port: 0"),
+    ("", 'feishu_encrypt_key: ""\n', ("(未设置) feishu_encrypt_key", "raw: (未覆盖)")),
+    ('feishu_encrypt_key: ""\n', 'feishu_encrypt_key: "default-key"\n', ("(未设置) feishu_encrypt_key", "raw: ")),
+    ("feishu_callback_port: 0\n", "", ("feishu_callback_port: 8421", "raw: 0")),
 ])
 def test_get_empty_string_compat(tmp_path, monkeypatch, capsys, user_line, default_line, expected):
     p = tmp_path / "user.yaml"
@@ -187,7 +186,9 @@ def test_get_empty_string_compat(tmp_path, monkeypatch, capsys, user_line, defau
     monkeypatch.setattr(C, "packaged_config_path", lambda: defaults)
     key = "feishu_callback_port" if "callback_port" in user_line else "feishu_encrypt_key"
     assert C.cmd_config_get(Namespace(key=key, config=str(p))) == 0
-    assert capsys.readouterr().out.strip() == expected
+    # W11：首行是正式 loader 的生效值，第二行是用户原始覆盖，第三行标注生效来源。
+    lines = capsys.readouterr().out.splitlines()
+    assert tuple(lines[:2]) == expected and lines[2].startswith("effective:")
 
 
 # LLM: 注入正式写门的受限事实且自动恢复；拒绝前后配置与参数账本都不得变化。

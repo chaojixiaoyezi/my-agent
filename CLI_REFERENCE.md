@@ -44,7 +44,7 @@ python -m agent_py_agent --help
 
 全局参数放在根命令前。兼容器只定位真正的根命令，不扫描配置路径、目录、业务正文或 `--` 后的文本寻找旧名字；未知参数交给同一解析树拒绝。根选项当前只有零值或单值形式，新增多值形式必须先扩展明确的解码合同，不能猜值的边界。未带命令时保持原交互入口，不把合成分组误当成启动聊天。
 
-## 24 个规范根
+## 26 个规范根
 
 | 根 | 当前入口 | 用途 |
 |---|---|---|
@@ -67,9 +67,11 @@ python -m agent_py_agent --help
 | `run` | `my-agent run` | 单轮任务 |
 | `runtime` | `my-agent runtime` | 原运行欠账查看与显式结清 |
 | `skills` | `my-agent skills` | 技能与自学提议 |
+| `space` | `my-agent space` | 本人业务空间（参数原样交给业务入口） |
 | `status` | `my-agent status` | 当前状态 |
 | `subagents` | `my-agent subagents` | 子代理列表、调度、恢复和执行 |
 | `task` | `my-agent task` | 任务查询与原状态控制 |
+| `team` | `my-agent team` | 本人后台团队（参数原样交给业务入口） |
 | `timeline` | `my-agent timeline` | 最近事件 |
 | `update` | `my-agent update` | 原升级入口 |
 
@@ -344,3 +346,5 @@ Probe 输出每次样本、时间、Python 峰值内存与列明文件的源码�
 | `my-agent admin identities` | `--help`, `-h` |
 | `my-agent admin identities list` | `--help`, `--json`, `-h` |
 | `my-agent admin identities remove` | `--help`, `-h` |
+| `my-agent space` | `--help`, `-h` |
+| `my-agent team` | `--help`, `-h` |

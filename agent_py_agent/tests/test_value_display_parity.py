@@ -88,7 +88,8 @@ def _exit_texts(tmp_path, monkeypatch, capsys, row) -> dict[str, object]:
         "receipt": _receipt_text(tmp_path, key, change),
         "settings_running": re.search(r"当前运行值：(.*?)；用户配置里", shown).group(1),
         "settings_user": re.search(r"用户配置里：(.*)", shown).group(1),
-        "config_get": capsys.readouterr().out.rstrip("\n").removeprefix(f"{key}: "),
+        # W11：config get 首行为展示值，其后的 raw/effective 行不参与跨出口一致性比较。
+        "config_get": capsys.readouterr().out.splitlines()[0].removeprefix(f"{key}: "),
     }
 
 
