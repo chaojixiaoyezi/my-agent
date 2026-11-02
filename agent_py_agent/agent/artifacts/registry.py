@@ -1,5 +1,5 @@
 
-# LLM: 解析缓存只复用本次no-follow新读完整raw的投影，不缓存IO成功或权限结论；追加/fsync顺序不变。
+# LLM: 解析缓存只复用本次no-follow新读完整raw的投影，不缓存IO成功或权限结论；默认追加/fsync顺序不变。
 # 模块用途: 保存产物唯一账本并以不可变投影消除重复JSON解析，对外返回独立记录。
 """LLM: Maintain the append-only artifact registry below one canonical task workspace.
 
@@ -18,7 +18,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.nofollow_fs import NoFollowPathError, append_text_beneath, read_text_beneath
+from ..common.nofollow_fs import (
+    NoFollowPathError,
+    append_text_beneath,
+    read_bytes_beneath,
+    read_text_beneath,
+    write_bytes_atomic_beneath,
+)
 from ..runtime_errors import runtime_error_report
 from .registry_projection_cache import detached_payload, registry_projection, trusted_root_identity
 from .registry_reader import lookup_record_with_errors
@@ -142,13 +148,15 @@ def register_artifact(request: ArtifactRegistration) -> ArtifactRegistryRecord:
 
 # LLM: Shell post-check and migrations already hold observed file facts. This append-only seam
 # must persist those facts without resolving or opening the path again, because the path may have
-# become a symlink or disappeared after an external process ran.
-# 函数用途: 把调用方已经安全观测到的产物状态追加到账本，避免复核阶段再次跟随路径读取文件。
+# become a symlink or disappeared after an external process ran. Atomic publication is opt-in;
+# the caller must hold its registry writer lock across the complete read and publication.
+# 函数用途: 将安全观测到的产物状态登记到原账本，允许已持写锁的调用方选择整行原子发表。
 def register_observed_artifact(
     request: ArtifactRegistration,
     *,
     observed_sha256: str,
     observed_size_bytes: int,
+    atomic_publish: bool = False,
 ) -> ArtifactRegistryRecord:
     """Append trusted observations without touching the referenced filesystem path."""
 
@@ -175,7 +183,7 @@ def register_observed_artifact(
     )
     if not record.artifact_id or not record.status:
         raise ValueError("observed artifact requires artifact_id and status")
-    _append_record(root, record)
+    _append_record(root, record, atomic_publish=atomic_publish)
     return record
 
 
@@ -369,9 +377,17 @@ def resolve_artifact_record_report(
 
 # LLM: Registry writes are anchored at the trusted task root and reject symlinked framework
 # directories. Keep fsync semantics because recovery decisions consume this ledger after crashes.
-# 函数用途: 安全地向任务产物账本追加一行并刷盘，不跟随模型可替换的目录链接。
-def _append_record(workspace_root: Path, record: ArtifactRegistryRecord) -> None:
+# Atomic mode requires the caller's writer lock over read + replace; post-rename errors stay unknown.
+# 函数用途: 默认安全追加并刷盘；显式原子模式保留完整旧字节，再一次发表旧账本与完整新行。
+def _append_record(
+    workspace_root: Path, record: ArtifactRegistryRecord, *, atomic_publish: bool = False,
+) -> None:
     line = json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
+    if atomic_publish:
+        parts = tuple(REGISTRY_RELATIVE_PATH.parts)
+        previous = read_bytes_beneath(workspace_root, parts) or b""
+        write_bytes_atomic_beneath(workspace_root, parts, previous + line.encode("utf-8"))
+        return
     append_text_beneath(
         workspace_root,
         tuple(REGISTRY_RELATIVE_PATH.parts),
