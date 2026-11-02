@@ -11,7 +11,7 @@ from typing import Any
 
 from ..common.json_io import serialize_private_json_no_newline
 from ..gateway_parts.daemon_metadata import build_process_identity, process_identity_is_live
-from ..gateway_parts.io import update_json_file_atomic
+from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..settings.defaults import default_config_value
 from .models import ConversationThread, new_id
@@ -175,6 +175,15 @@ def _claim_load_error(exc: BaseException, path: Path) -> dict[str, Any]:
     return report
 
 
+# LLM: 沿原归档条件：只认协议终态与超过保留期的结束时间；空记录、运行中租约和缺结束时间的记录留在原位。
+# 函数用途: 判断一份 claim 快照是否满足原归档条件，不读写文件。
+def _stale_finished_claim(claim: dict[str, Any], current: float, retention_seconds: float) -> bool:
+    if not claim or str(claim.get("status") or "") not in _FINISH_STATUSES:
+        return False
+    finished_at = float(claim.get("finished_at") or 0.0)
+    return finished_at > 0 and current - finished_at > retention_seconds
+
+
 # LLM: Serialize each claim in the owner store; death/TTL cannot transfer recoverable foreground
 # ownership to another task. Terminal cleanup is exact-task CAS, not a directory or quality lock.
 # 类用途: 管理前后台共用执行租约，确保重启恢复和请求结束都能正确交接。
@@ -194,8 +203,11 @@ class ClaimStore:
 
 
     # LLM: Atomically acquire a claim; only the original host-bound task can resume a pinned claim.
+    #   替换前在同一claim锁内把旧终态claim仍被原取消需要的证明存回原SessionTask（claim→task锁序）；失败则不替换。
     # 函数用途: 领取执行权；普通后台维持租约接管，尚未收尾的前台请求不因超时被另一执行者抢走。
     def acquire(self, request: dict) -> dict[str, Any] | None:
+        from .session_tasks import SessionTaskStore
+
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         claim_scope_id = str(request.get("claim_scope_id") or thread.thread_id).strip()
@@ -237,6 +249,8 @@ class ClaimStore:
             if active and not owner_stale:
                 claimed = False
                 return data
+            # 只交实际旧记录；检查点读写/身份失败上抛，旧终态claim原样保留供下次健康领取重试。
+            SessionTaskStore(self.storage).preserve_terminal_cancellation_claim(data)
             claimed = True
             acquisition_reason = (
                 "owner_process_stale" if owner_stale else _claim_acquisition_reason(data, current)
@@ -395,18 +409,33 @@ class ClaimStore:
         return updated if finished else None
 
     # LLM: 只归档已终态且超过原保留期的 claim；坏账、运行中租约和缺少结束时间的记录保持原位。
+    #   原取消仍需要的终态证明先在原claim锁内重读并存回原任务，未结期间保留claim；锁内不移动claim或锁文件。
     # 函数用途: 在既有维护周期移动旧租约及其锁文件，不启动独立后台任务或影响执行权。
     def archive_stale(self, *, current: float, retention_seconds: float) -> int:
         archived_claims = 0
         for path in sorted(self.storage.background_claims_dir.glob("*.json")):
             claim, error = _read_claim_report(path)
-            if error is not None or not claim:
+            if error is not None or not _stale_finished_claim(claim, current, retention_seconds):
                 continue
-            if str(claim.get("status") or "") not in _FINISH_STATUSES:
-                continue
-            finished_at = float(claim.get("finished_at") or 0.0)
-            if finished_at <= 0 or current - finished_at <= retention_seconds:
+            if self._retained_for_cancellation(path, current=current, retention_seconds=retention_seconds):
                 continue
             if archive_ledger_file(path, self.storage.background_claims_dir.parent / LEDGER_ARCHIVE_DIR / "claims"):
                 archived_claims += 1
         return archived_claims
+
+    # LLM: 不按锁外旧快照行动：在稳定的原claim迁移锁内重读并复核归档条件，再由原取消账判断是否仍需此证明。
+    #   需要证明(True)或检查失败都保留原claim与锁文件；archive_ledger_file会移动锁文件，只能在释放锁后调用。
+    # 函数用途: 判定过期终态claim是否须为未结取消继续保留，失败时原证据不动供下次维护重试。
+    def _retained_for_cancellation(self, path: Path, *, current: float, retention_seconds: float) -> bool:
+        from .session_tasks import SessionTaskStore
+
+        try:
+            with locked_file_transition(path):
+                claim, error = _read_claim_report(path)
+                if error is not None or not _stale_finished_claim(claim, current, retention_seconds):
+                    return True
+                return SessionTaskStore(self.storage).preserve_terminal_cancellation_claim(claim)
+        except Exception as exc:  # noqa: BLE001 - 维护失败只保留原claim，不丢证据也不中断其它归档
+            _STORE_LOGGER.warning("background claim retained: cancellation proof check failed path=%s error=%r",
+                                  path, exc)
+            return True

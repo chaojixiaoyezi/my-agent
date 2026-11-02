@@ -472,6 +472,61 @@ def _write_index(path: Path, schema_version: str, task_id: str) -> None:
     write_json_file_atomic(path, {"schema_version": schema_version, "task_id": task_id})
 
 
+# 原claim终态只认ClaimStore.finish的协议值；invalid_status等不是可替代取消观察的结束证明。
+_TERMINAL_CLAIM_STATUSES = frozenset({"finished", "failed", "cancelled"})
+
+
+# LLM: 仅终态、带结构化执行身份且有结束时间的旧claim才有可保存证明；未终态/普通回合保持原未知，不推断。
+# 函数用途: 从旧claim取原SessionTask直达定位，不扫描任务目录，也不读新请求或previous_claim摘要。
+def _terminal_claim_locator(claim: object) -> str:
+    if not isinstance(claim, dict):
+        return ""
+    authority, status, finished_at = claim.get("runtime_authority"), claim.get("status"), claim.get("finished_at")
+    locator = authority.get("invocation_run_id") if isinstance(authority, dict) else None
+    if (type(locator) is not str or not locator or type(status) is not str or status not in _TERMINAL_CLAIM_STATUSES
+            or type(finished_at) not in (int, float) or not finished_at > 0):
+        return ""
+    return locator
+
+
+# LLM: 只认原取消账里同一claim ID且仍有未结引用的执行取消；无claim_ref、他人claim或已结清的取消都不需要本证明。
+# 函数用途: 返回需要本终态claim证明的原取消控制，不判断物理退出或资源清理。
+def _claim_cancellation_control(task: SessionTask, claim: dict[str, Any]) -> dict[str, Any] | None:
+    control, claim_id = task.metadata.get("cancellation_control"), claim.get("claim_id")
+    if not isinstance(control, dict) or type(claim_id) is not str or not claim_id:
+        return None
+    claim_ref = control.get("claim_ref")
+    if (not isinstance(claim_ref, dict) or claim_ref.get("claim_id") != claim_id
+            or not control.get("execution_ref") or not control.get("outstanding_refs")):
+        return None
+    return control
+
+
+# LLM: 同claim ID的原取消账须与整份旧claim、原执行引用、业务owner/task、请求及线程完全一致；冲突上抛，不能吞掉后替换证据。
+# 函数用途: 在原SessionTask锁内核对终态claim证明只属于这一条取消，不读RuntimeDB或当前claim。
+def _require_claim_proof_identity(task: SessionTask, control: dict[str, Any], claim: dict[str, Any]) -> None:
+    from .business_contracts import HostParentExecutionRef
+
+    try:
+        context = BusinessExecutionContext.from_dict(task.metadata.get("business_context"))
+        ref = HostParentExecutionRef.from_dict(control.get("execution_ref"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SESSION_TASK_CLAIM_PROOF_CONFLICT") from exc
+    authority = claim["runtime_authority"]
+    if (context.task_id != task.task_id or context.owner_id != ref.owner_id
+            or not task.task_run_id or task.task_run_id != ref.task_run_id
+            or not task.conversation_request_id or authority.get("invocation_run_id") != task.conversation_request_id
+            or claim.get("schema_version") != "background_run_claim.v1"
+            or claim.get("thread_id") != task.target_thread_id or claim.get("claim_scope_id") != task.target_thread_id
+            or control.get("claim_ref") != {"claim_id": claim.get("claim_id"), "authority": authority,
+                                            "task_id": claim.get("task_id")}
+            or authority.get("schema_version") != "conversation_claim_execution.v1"
+            or authority.get("claim_id") != claim.get("claim_id")
+            or (authority.get("run_id"), authority.get("agent_run_id"), authority.get("attempt_id"))
+            != (ref.run_id, ref.agent_run_id, ref.observed_attempt_id)):
+        raise ValueError("SESSION_TASK_CLAIM_PROOF_CONFLICT")
+
+
 # LLM: 存储只落 canonical 目录下的每任务一个 JSON 文件；状态变更走 update_json_file_atomic（锁内重读），
 #   避免两个写入方互相覆盖。读取坏文件必须显式报错，不能当成"不存在"。
 # 类用途: 保存、读取与推进会话间派活任务的状态。
@@ -567,6 +622,41 @@ class SessionTaskStore:
         saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
         self._list_index().publish(self._path(task_id))
         return saved
+
+    # LLM: 原claim被替换/归档前调用；只按其invocation_run_id直达原SessionTask，同锁CAS补claim_finished，不新建取消权威或运行身份。
+    #   物理worker/操作/资源仍由原取消观察独立核收；读写或身份失败上抛，让调用方保留旧claim原证据重试。
+    # 函数用途: 保存准确未结取消所需的原终态claim证明；True表示已有耐久证明，False表示无相关未结取消。
+    def preserve_terminal_cancellation_claim(self, claim: dict[str, Any]) -> bool:
+        locator = _terminal_claim_locator(claim)
+        if not locator:
+            return False
+        current = self.load(locator)
+        if current is None or current.task_id != locator or _claim_cancellation_control(current, claim) is None:
+            # 普通回合的请求号可能不是任务ID；缺失、他人记录或已结清的取消都不是本claim的证明对象。
+            return False
+        proven = changed = False
+
+        def update(payload):
+            nonlocal proven, changed
+            task = SessionTask.from_dict(payload)
+            if task.task_id != locator:
+                raise ValueError("SESSION_TASK_CLAIM_PROOF_CONFLICT")
+            control = _claim_cancellation_control(task, claim)
+            if control is None:
+                return payload
+            _require_claim_proof_identity(task, control, claim)
+            proven = True
+            if control.get("claim_finished") is True:
+                return payload
+            changed = True
+            # 只补原取消账的claim_finished；执行/后代/资源引用与其它字段原样保留，claim结束不代表物理退出。
+            return {**payload, "metadata": {**task.metadata,
+                                            "cancellation_control": {**control, "claim_finished": True}}}
+
+        update_json_file_atomic(self._path(locator), update, require_existing=True)
+        if changed:
+            self._list_index().publish(self._path(locator))
+        return proven
 
     # LLM: 只有准确执行的确认可解除其引用；普通会话取消不能清独立执行或后代责任，终态结果及其它元数据不变。
     # 函数用途: 原子核收已经确认的原执行责任，并发布同一任务的列表定位。
