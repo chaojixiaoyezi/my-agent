@@ -13,6 +13,7 @@ from .session_messaging import (
     SESSION_TASK_CHAIN_LIMIT,
     SESSION_TASK_ORIGIN_KIND,
     SESSION_TASK_RATE_LIMIT,
+    SESSION_TASK_STATUS_FIELD,
 )
 from .session_tasks import SessionTaskDraft
 
@@ -228,7 +229,12 @@ def dispatch_session_task(
         bound = store.session_tasks.bind_body(task.task_id, body.guidance_id)
         if bound is not None:
             task = bound
-        wake_id = _maybe_wake(store, target_thread, plan.sender_thread_id, task.task_id)
+        if task.status in SESSION_TASK_TERMINAL_STATUSES:
+            # 绑定后的最新记录已终态（如入队前/绑定中提交的取消）：不再发布唤醒，只结清这条迟到正文或保留其责任。
+            _settle_late_task_body(agent, task, body)
+            wake_id = ""
+        else:
+            wake_id = _maybe_wake(store, target_thread, plan.sender_thread_id, task.task_id)
     except Exception as exc:  # noqa: BLE001
         identity = {"sender_thread_id": plan.sender_thread_id, "target_thread_id": plan.target_thread_id,
                     "dedupe_key": dedupe_key}
@@ -303,6 +309,38 @@ def _queue_body(store: object, plan: SessionTaskDispatchPlan, body_dedupe_key: s
         dedupe_key=body_dedupe_key,
     )
 
+
+
+# LLM: 只认本次准确正文的原回执（同键、同条、同目标/发送方、同任务来源，未带派活终态或别的回合），pending经原回执
+#   锁内CAS改rejected；读写失败、身份不符或已越过认领边界都不报结清。已取消的业务任务把自身引用并入原取消账
+#   （原_save_cancellation_control并集写，不清既有责任），交给原取消重试收尾；不另建清理队列，不碰其它输入。
+# 函数用途: 结清终态任务迟到的派活正文，结不清时保留原取消责任。
+def _settle_late_task_body(agent: object, task: object, body: object) -> None:
+    from ..runtime_errors import DataCorruptionError
+    from .session_tasks import SESSION_TASK_CANCELLED
+
+    store, key, settled = agent.conversation_store, task.body_dedupe_key, False
+    try:
+        receipt = store.guidance.receipt(key) if key else None
+        entry = receipt.entry if receipt is not None else None
+        metadata = (entry.metadata or {}) if entry is not None else {}
+        if (entry is not None and receipt.dedupe_key == key and entry.guidance_id == body.guidance_id
+                and entry.guidance_id == task.body_guidance_id and entry.target_type == "thread"
+                and entry.target_id == task.target_thread_id and entry.sender == task.sender_thread_id
+                and metadata.get("dedupe_key") == key and metadata.get("origin_kind") == SESSION_TASK_ORIGIN_KIND
+                and metadata.get("origin_thread_id") == task.sender_thread_id
+                and metadata.get("session_task_id") == task.task_id and not metadata.get(SESSION_TASK_STATUS_FIELD)
+                and metadata.get("expected_turn_id", "") in ("", task.conversation_request_id)):
+            if receipt.status == "pending":
+                receipt = store.guidance.mark_status(key, "rejected")
+            settled = receipt.status in {"consumed", "rejected"}
+    except (OSError, ValueError, KeyError, DataCorruptionError):
+        settled = False
+    if settled or task.status != SESSION_TASK_CANCELLED or task.metadata.get("business_context") is None:
+        return
+    from .session_messaging import _cancellation_binding, _save_cancellation_control
+
+    _save_cancellation_control(agent, _cancellation_binding(task), task.metadata.get("business_context"), [task.task_id])
 
 
 # LLM: 目标仍 active 才唤醒；返回 wake id 供回执展示，不承诺目标已消费。
