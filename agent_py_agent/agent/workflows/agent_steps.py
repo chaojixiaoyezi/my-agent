@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from ..conversation.session_task_dispatch import (
     SessionTaskDispatchError,
+    SessionTaskDispatchPlan,
+    _task_dedupe_key,
     reconcile_session_task_dispatch,
 )
 from .models import payload
@@ -25,15 +27,20 @@ class WorkflowAgentSteps:
             raise PermissionError('WORKFLOW_AGENT_OWNER_MISMATCH')
         return actor
 
-    # LLM: 真Store上的未知派发只读对账；无Store的旧幂等端口保留原兼容合同，不拼造缺失身份。
-    # 函数用途: 提交一次原任务，并把未知回执及已知身份留在同一步里。
+    # LLM: 未知只对账；已有耐久absence须重验原binding与canonical，才允许沿原键/预留ID继续；不清除派发槽。
+    # 函数用途: 提交或继续同一次未开始的原任务，缺证据时保留未知责任。
     def submit(self, run, spec, step):
         """保留原attempt/key与宿主结构化身份；typed未知结果只对账，不重派。"""
+        result = step.escalation_result
+        retry_absent = (result.get('submission_state') == 'not_started'
+            and result.get('reconciliation_state') == 'absent' and not result.get('task_id'))
         if ('session_task_dispatch' in step.escalation_result or
                 step.escalation_result.get('submission_state') == 'unknown' and
                 getattr(self.background_service, 'store', None) is not None):
-            self.reconcile(run, step)
-            return
+            checked = self.reconcile(run, step)
+            if (not retry_absent or not checked or result.get('task_id')
+                    or result.get('submission_state') != 'not_started' or result.get('reconciliation_state') != 'absent'):
+                return
         step.escalation_result['submission_state'] = 'not_started'
         actor = self._actor(run)
         context = run.business_context
@@ -51,6 +58,18 @@ class WorkflowAgentSteps:
         key = f'workflow:{run.workflow_run_id}:{step.step_id}:{identity}'
         if step.escalation_result.setdefault('submission_key', key) != key:
             raise ValueError('WORKFLOW_AGENT_SUBMISSION_KEY_MISMATCH')
+        if retry_absent:
+            original = result.get('session_task_dispatch', {})
+            operation_key = getattr(self.background_service, '_operation_key', None)
+            if (not callable(operation_key) or getattr(actor, 'source_thread_id', None) != original.get('sender_thread_id')):
+                raise PermissionError('WORKFLOW_AGENT_DISPATCH_IDENTITY_MISMATCH')
+            plan = SessionTaskDispatchPlan(actor.source_thread_id, original['target_thread_id'], config['instruction'],
+                idempotency_key=operation_key(actor, key))
+            if (original['dedupe_key'] != _task_dedupe_key(plan)
+                    or request.get('controller_agent_id', original['target_thread_id']) != original['target_thread_id']):
+                raise PermissionError('WORKFLOW_AGENT_DISPATCH_IDENTITY_MISMATCH')
+            request['controller_agent_id'] = original['target_thread_id']
+            result['reconciliation_state'] = 'unknown'
         step.escalation_result['submission_state'] = 'unknown'
         try:
             receipt = self.background_service.submit(request, actor=actor, idempotency_key=key)
@@ -81,6 +100,8 @@ class WorkflowAgentSteps:
             raise ValueError('WORKFLOW_AGENT_SUBMISSION_INVALID')
         step.escalation_result.update(task_id=receipt['task_id'], assignment_ref=receipt.get('assignment_ref'),
             operation_id=receipt.get('operation_id'), submission_state='accepted')
+        if retry_absent:
+            result['reconciliation_state'] = 'confirmed'
 
     # LLM: 身份仅来自原typed槽/已知canonical，缺失不能从模型正文补齐；不发任何后台副作用。
     # 函数用途: 找回原任务ID，或保留尚未查明的责任。
