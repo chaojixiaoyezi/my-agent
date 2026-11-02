@@ -204,7 +204,7 @@ def test_archive_request_uses_executed_call_identity(tmp_path: Path, monkeypatch
         else:
             result = SimpleNamespace(
                 metadata={}, tool_name="shell", output="ok", ok=True,
-                error_code="", reported_error_code="",
+                error_code="", reported_error_code="", failure_stage="",
             )
             record = SimpleNamespace(call=call, params=params, result=result, model_visible_call=call)
             archive_module.archive_tool_call_record(agent, record)
