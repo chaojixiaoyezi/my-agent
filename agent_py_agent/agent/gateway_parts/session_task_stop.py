@@ -201,7 +201,7 @@ def _business_resources_exited(agent, repo, task):
 
     from ..concurrency.interrupt import is_interruptible_registered
     from ..contracts.model_call_ledger import model_call_drain_snapshot
-    from ..subagents.cancellation_hosts import FrozenRunnerStop, cleanup_runner_stop
+    from ..conversation.session_tasks import cleanup_frozen_runner_stop
     from ..tooling.process_cleanup_evidence import process_cleanup_reference
     from ..tooling.process_scope import ProcessExecutionScope
     from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
@@ -249,7 +249,7 @@ def _business_resources_exited(agent, repo, task):
                     or any(record.run_id == binding["run_id"] and record.metadata.get("attempt_id") == binding["attempt_id"]
                            for _ledger, record, _retained in model_call_drain_snapshot())):
                 return False
-            runner = cleanup_runner_stop(FrozenRunnerStop(**reference["runner"]))
+            runner = cleanup_frozen_runner_stop(reference["runner"])
             if runner.get("status") != "no_pid" and runner.get("host_exited") is not True:
                 return False
         else:
@@ -287,9 +287,12 @@ def _business_execution_exited(agent, repo, task, ref, claim, matches):
 def stop_business_session_task(agent, task, *, execution_ref=None, include_descendants=True, cancel_task=True):
     from contextlib import nullcontext
 
-    from ..agent_core.model.call_runtime import model_request_timeout_seconds
     from ..concurrency.interrupt import interrupt_by_name
     from ..conversation.run_claim import conversation_claim_interrupt_name
+    from ..conversation.session_tasks import (
+        freeze_main_only_task_resources,
+        has_model_request_wall_timeout,
+    )
     from ..conversation.task_resources import cleanup_task_resources, freeze_task_resources
     from ..runtime_db.run_cancellation import RuntimeCancellationTarget, cancel_runtime_run
     from ..tooling.process_scope import ProcessExecutionScope
@@ -307,7 +310,7 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
                 raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
             store.session_tasks.record_execution_cancellation_control(task.task_id, execution_ref=ref,
                 outstanding_refs=[ref.run_id], claim_ref=claim_ref,
-                model_worker_exit_unknown=model_request_timeout_seconds(agent) > 0,
+                model_worker_exit_unknown=has_model_request_wall_timeout(agent),
                 resources_prepared=False, resources_confirmed=False)
             cancel_runtime_run(repo, RuntimeCancellationTarget(root_id, ref.run_id, ref.agent_run_id, ref.observed_attempt_id),
                 reason="business_cancel", source="session_task_control")
@@ -319,10 +322,7 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
             if include_descendants:
                 frozen = freeze_task_resources(agent, scope, root_id)
             else:
-                from ..conversation.task_resources import FrozenTaskResources
-                from ..subagents.cancellation import FrozenSubagentStops
-                from ..tooling.process_resource_stop import freeze_process_stop
-                frozen = FrozenTaskResources(freeze_process_stop(scope), FrozenSubagentStops())
+                frozen = freeze_main_only_task_resources(scope)
             store.session_tasks.record_execution_cancellation_control(task.task_id, execution_ref=ref,
                 outstanding_refs=[], resource_refs=_business_resource_references(frozen, scope),
                 resources_prepared=not frozen.unconfirmed)

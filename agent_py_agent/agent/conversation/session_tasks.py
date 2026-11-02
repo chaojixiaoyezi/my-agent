@@ -974,6 +974,26 @@ def _transition_allowed(current: str, target: str) -> bool:
     return False
 
 
+def cleanup_frozen_runner_stop(runner: dict[str, Any]) -> dict[str, Any]:
+    from ..subagents.cancellation_hosts import FrozenRunnerStop, cleanup_runner_stop
+
+    return cleanup_runner_stop(FrozenRunnerStop(**runner))
+
+
+def freeze_main_only_task_resources(scope: Any) -> Any:
+    from ..subagents.cancellation import FrozenSubagentStops
+    from ..tooling.process_resource_stop import freeze_process_stop
+    from .task_resources import FrozenTaskResources
+
+    return FrozenTaskResources(freeze_process_stop(scope), FrozenSubagentStops())
+
+
+def has_model_request_wall_timeout(agent: Any) -> bool:
+    from ..agent_core.model.call_runtime import model_request_timeout_seconds
+
+    return model_request_timeout_seconds(agent) > 0
+
+
 __all__ = [
     "SESSION_TASK_ACCEPTED",
     "SESSION_TASK_CANCELLED",
@@ -985,4 +1005,7 @@ __all__ = [
     "SessionTask",
     "SessionTaskStore",
     "bind_session_task_turns",
+    "cleanup_frozen_runner_stop",
+    "freeze_main_only_task_resources",
+    "has_model_request_wall_timeout",
 ]
