@@ -145,6 +145,13 @@ class SubAgentLifecycleService:
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: CLI 经配置宿主的正式生命周期入口调用原控制服务；宿主提供原会话、撤权与清理上下文，这里不另做判断或写入。
+    # 函数用途: 对同一 run 执行 pause/abandon/resume，返回 control_task 的结构化回执。
+    def control_task(self, host: Any, run_id: str, *, action: str) -> dict[str, object]:
+        from ..task_control import control_task
+
+        return control_task(host, run_id, action=action)
+
     # LLM: Equivalent capability requests are deduplicated against the latest canonical state in
     # one mutate transaction; GRANTED only reuses the actual canonical grant in full scope, never prose.
     # 相对范围先沿工具可信 cwd 冻结为绝对路径，再比较幂等身份；不按 Gateway 进程目录猜授权目标。
@@ -401,6 +408,7 @@ class SubAgentLifecycleService:
         self, run_id: str, update: BackgroundStartUpdate, *, channel_failure: bool = False,
     ) -> None:
         from ..runner_start import assert_expected_runner_attempt
+        from ..task_control import task_control_blocks_execution
 
         manager = self.manager
         with manager.creation_guard():
@@ -412,6 +420,8 @@ class SubAgentLifecycleService:
                 previous = (task.attributes or {}).get("background_start") or {}
                 if task_status_in(task.status, {"CANCELLED", "ABANDONED", "TAKEN_OVER"}):
                     raise RuntimeConflictError("任务已关闭，拒绝旧启动回执")
+                if task_control_blocks_execution(task):
+                    raise RuntimeConflictError("任务已暂停或控制待生效，拒绝迟到启动回执")
                 if update.replace_launch:
                     if previous.get("status") in {"launching", "running"}:
                         raise RuntimeConflictError("已有启动尚未回收，拒绝重复接纳")

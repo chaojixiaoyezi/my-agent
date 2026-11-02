@@ -164,6 +164,44 @@ def _original_business_claim_finished(task, claim, matches):
             and previous.get("status") in {"finished", "failed", "cancelled"})
 
 
+# LLM: 注册表保留的回调只含原会话存储定位与不可变任务/执行身份，不持池化宿主、过期租约或可扩大选择的查询；
+#   以只读布局打开原存储，不为已消失的owner重建目录。选择清单尚未定稿时返回False保留原证明给正常对账重试；
+#   原任务已不存在或定稿清单不含该资源时无须保存；写入仍由原canonical写者核CAS与身份。
+# 类用途: 把PTY注册表交来的准确清理证明写入原SessionTask取消账。
+@dataclass(frozen=True)
+class _CleanupProofConsumer:
+    storage_root: str
+    task_id: str
+    execution_ref: object
+
+    def __call__(self, proof: dict) -> bool:
+        from ..conversation.session_tasks import SessionTaskStore
+        from ..conversation.store_layout import ConversationStorage
+
+        tasks = SessionTaskStore(ConversationStorage(self.storage_root, initialize=False))
+        current = tasks.load(self.task_id)
+        if current is None:
+            return True
+        control = current.metadata.get("cancellation_control", {})
+        selected = [item for item in control.get("resource_refs", [])
+                    if item.get("kind") == "pty" and item.get("id") == proof.get("session_id")]
+        if not selected:
+            return control.get("resources_prepared") is True
+        tasks.record_resource_cleanup_proof(self.task_id, execution_ref=self.execution_ref,
+                                            resource_ref=selected[0], proof=proof)
+        return True
+
+
+# LLM: 在宿主对账线程（不持注册表/关闭/进程锁）重试保留原证明的检查点；不依赖活跃PTY、巡检线程或新启动。
+# 函数用途: 让已选PTY的原清理证明在正常取消对账中持久化，返回是否有证明就绪需要重读原任务。
+def _retry_cleanup_proof_checkpoints(task) -> bool:
+    from ..tooling.pty_sessions import pty_session_registry
+
+    refs = task.metadata.get("cancellation_control", {}).get("resource_refs")
+    ids = [item["id"] for item in refs if item.get("kind") == "pty"] if isinstance(refs, list) else []
+    return bool(ids and pty_session_registry.checkpoint_cleanup_proofs(ids))
+
+
 def _business_resource_references(frozen, scope):
     # 只运输冻结批次的原身份；状态仍由ProcessSessionStore、PTY注册表与RuntimeDB负责。
     from dataclasses import asdict
@@ -214,6 +252,8 @@ def _business_resources_exited(agent, repo, task):
     control = task.metadata.get("cancellation_control", {})
     if control.get("resources_prepared") is not True or not isinstance(control.get("resource_refs"), list):
         return False
+    # 只认原canonical写者锁内按准确已选引用核准后追加的证明；它在内存有界历史淘汰原对象后仍是同一退出证据。
+    proven = [item.get("resource_ref") for item in control.get("resource_cleanup_proofs", []) if isinstance(item, dict)]
     home = str(agent.home_paths.owner_home_dir)
     store = ProcessSessionStore(process_session_store_root(home, home))
     for reference in control.get("resource_refs", []):
@@ -227,6 +267,8 @@ def _business_resources_exited(agent, repo, task):
             except ValueError:
                 return False
         elif reference["kind"] == "pty":
+            if reference in proven:
+                continue
             session = _session_in_scope(pty_session_registry, reference["id"], None)
             if session is None or not session.execution_scope.matches(ProcessExecutionScope(**reference["scope"])):
                 return False
@@ -293,6 +335,7 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
     from ..conversation.task_resources import cleanup_task_resources, freeze_task_resources
     from ..runtime_db.run_cancellation import RuntimeCancellationTarget, cancel_runtime_run
     from ..tooling.process_scope import ProcessExecutionScope
+    from ..tooling.pty_sessions import bind_cleanup_proof_consumer
     from .io import locked_file_transition
 
     store = agent.conversation_store
@@ -315,10 +358,13 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
                     store.tasks.update_status({"task_id": root_id, "status": "cancelled", "expected_status": link.status})
             scope = ProcessExecutionScope(owner_home=str(agent.home_paths.owner_home_dir), thread_id=task.target_thread_id,
                 root_task_id=root_id, run_id=ref.run_id, attempt_id=ref.observed_attempt_id)
-            if include_descendants:
-                frozen = freeze_task_resources(agent, scope, root_id)
-            else:
-                frozen = freeze_main_only_task_resources(scope)
+            # 异步停止前绑定只含存储定位/不可变身份的证明消费者；预留出生或正面未启动都交接给同一选择。
+            consumer = _CleanupProofConsumer(str(store.storage.root), task.task_id, ref)
+            with bind_cleanup_proof_consumer(consumer):
+                if include_descendants:
+                    frozen = freeze_task_resources(agent, scope, root_id)
+                else:
+                    frozen = freeze_main_only_task_resources(scope)
             store.session_tasks.record_execution_cancellation_control(task.task_id, execution_ref=ref,
                 outstanding_refs=[], resource_refs=_business_resource_references(frozen, scope),
                 resources_prepared=not frozen.unconfirmed)
@@ -326,6 +372,8 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
         interrupt_by_name(conversation_claim_interrupt_name(claim["claim_id"]))
     cleanup_task_resources(frozen)
     repo, current, ref, root_id, claim, claim_ref, matches = _business_stop_target(agent, task, ref)
+    if _retry_cleanup_proof_checkpoints(current):
+        repo, current, ref, root_id, claim, claim_ref, matches = _business_stop_target(agent, task, ref)
     clean = _business_resources_exited(agent, repo, current)
     confirmed = clean and _business_execution_exited(agent, repo, current, ref, claim, matches)
     store.session_tasks.record_execution_cancellation_control(task.task_id, execution_ref=ref, outstanding_refs=[],
@@ -348,6 +396,8 @@ def reconcile_business_session_task_cancellation(agent, task):
         return task
     try:
         repo, current, ref, _root, claim, _claim_ref, matches = _business_stop_target(agent, task)
+        if _retry_cleanup_proof_checkpoints(current):
+            repo, current, ref, _root, claim, _claim_ref, matches = _business_stop_target(agent, task)
         if (_business_resources_exited(agent, repo, current)
                 and _business_execution_exited(agent, repo, current, ref, claim, matches)):
             agent.conversation_store.session_tasks.record_execution_cancellation_control(task.task_id,

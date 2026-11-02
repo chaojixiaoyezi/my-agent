@@ -175,11 +175,41 @@ class PtyHostPolicy(SandboxHostPolicy):
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
+#   spawned 只在 Popen 返回进程后置位：从未置位的预留才能被正面证明"未启动"，不靠缺行推断。
 # 类用途: 在 Popen 尚未返回时保留执行归属，让明确的资源停止请求覆盖尚未完成的启动。
 @dataclass
 class _PtyStart:
     execution_scope: ProcessExecutionScope
     cancelled: bool = False
+    spawned: bool = False
+
+
+# LLM: 宿主停止事务选中的一代PTY清理义务；只存选中时冻结的执行范围/出生身份与宿主消费者（只含存储定位和不可变身份）。
+#   预留出生时在登记同锁内交接出生身份，正面未启动时置not_started；全部消费者确认持久化前原证明对象不被历史上限淘汰。
+# 类用途: 保留一个已选PTY的原退出/未启动证明，直到原取消账确认收到。
+@dataclass
+class _PtyCleanupProof:
+    session_id: str
+    execution_scope: ProcessExecutionScope
+    identity: dict | None = None
+    consumers: list = field(default_factory=list)
+    not_started: bool = False
+
+
+# 宿主停止事务在冻结前绑定的清理证明消费者；仅本线程本次request_stop的准确选择可见，不进入模型参数。
+_cleanup_proof_binding = threading.local()
+
+
+# LLM: 仅宿主取消事务在冻结资源时使用；词法范围内本线程的request_stop在注册表锁内、异步停止前把消费者绑到准确选择。
+# 函数用途: 为本次资源冻结绑定PTY清理证明消费者，退出范围后恢复原绑定。
+@contextmanager
+def bind_cleanup_proof_consumer(consumer):
+    previous = getattr(_cleanup_proof_binding, "consumer", None)
+    _cleanup_proof_binding.consumer = consumer
+    try:
+        yield
+    finally:
+        _cleanup_proof_binding.consumer = previous
 
 
 # LLM: 先规范全部宿主路径再比会话权限；缺失列表保持未声明语义，不能误变成空拒绝列表或从模型参数补根。
@@ -239,6 +269,8 @@ class PtySessionRegistry:
         self._counter = 0
         self._lock = threading.Lock()
         self._pending_starts: dict[str, _PtyStart] = {}
+        # 宿主取消选中、尚未确认持久化的清理证明；退役后不占活跃容量，也不计入无关会话的历史上限。
+        self._cleanup_proofs: dict[str, _PtyCleanupProof] = {}
         # 仅供未指定会话超时的直接调用继承；工具装配不再改它，巡检在正超时会话登记后惰性启动。
         self.idle_timeout_seconds = 0.0
         self._idle_thread: threading.Thread | None = None
@@ -282,7 +314,15 @@ class PtySessionRegistry:
                 return self._spawn(session_id, command, target, sandbox, run_scope, idle_timeout_seconds)
         finally:
             with self._lock:
-                self._pending_starts.pop(session_id, None)
+                launch = self._pending_starts.pop(session_id, None)
+                proof = self._cleanup_proofs.get(session_id)
+                if (proof is not None and launch is not None and not launch.spawned
+                        and session_id not in self._sessions):
+                    # Popen从未返回进程：被选中的这次预留正面证明未启动，交接给原清理证明。
+                    proof.not_started = True
+            if proof is not None:
+                # 出生即取消或从未启动的选择没有排空线程；检查点在独立线程，不持调用方的来源/工具锁。
+                _start_cleanup_proof_checkpoint(self, session_id)
 
     # LLM: Popen前后核对同一预留；环境仍经Shell擦洗，超时随会话登记，取消的迟到进程仍终止，仅正超时会话启巡检。
     # 函数用途: 启动 PTY 并排空输出，封住启动期间收到停止后留下孤儿进程的窗口。
@@ -337,6 +377,7 @@ class PtySessionRegistry:
             os.close(master_fd)
             os.close(slave_fd)
             raise
+        launch.spawned = True
         tail_hold_fd = _hold_slave_for_tail(slave_fd)
         session = PtySession(
             session_id=session_id,
@@ -354,6 +395,10 @@ class PtySessionRegistry:
         with self._lock:
             self._sessions[session_id] = session
             cancelled = launch.cancelled
+            proof = self._cleanup_proofs.get(session_id)
+            if proof is not None and proof.identity is None:
+                # 预留选择交接给出生会话：同一ID唯一一代的出生身份在登记同锁内冻结。
+                proof.identity = _pty_identity(session)
         if cancelled or cancellation_requested():
             self.close(session_id)
             raise ToolCancelled("PTY 启动已被取消")
@@ -461,6 +506,7 @@ class PtySessionRegistry:
         return session
 
     # LLM: 使用process_scope精确选择；父进程退出不免除后代责任，全部未退役原资源均可被停止。
+    #   宿主绑定了清理证明消费者时，同一注册表锁内、异步停止前把它与选中时的不可变出生身份绑到准确选择（含预留）。
     # 函数用途: 冻结任务的终端与启动预留，锁外请求清退，不扫描后来恢复的新资源。
     def request_stop(self, *, owner_home: object, thread_id: str = "", task_id: str = "",
                      run_id: str = "", attempt_id: str = "") -> tuple[str, ...]:
@@ -470,6 +516,7 @@ class PtySessionRegistry:
             owner_home=str(Path(str(owner_home)).expanduser().resolve(strict=False)),
             thread_id=thread_id, root_task_id=task_id, run_id=run_id, attempt_id=attempt_id,
         )
+        consumer = getattr(_cleanup_proof_binding, "consumer", None)
 
         with self._lock:
             pending = [key for key, launch in self._pending_starts.items()
@@ -478,10 +525,21 @@ class PtySessionRegistry:
                 self._pending_starts[key].cancelled = True
             sessions = [session for session in self._sessions.values()
                         if session.execution_scope.matches(target) and not _source_resource_retired(session)]
+            if consumer is not None:
+                for key in pending:
+                    _bind_cleanup_proof(self, key, self._pending_starts[key].execution_scope, None, consumer)
+                for session in sessions:
+                    _bind_cleanup_proof(self, session.session_id, session.execution_scope,
+                                        _pty_identity(session), consumer)
         for session in sessions:
-            threading.Thread(target=self.close, args=(session.session_id,),
+            threading.Thread(target=_close_and_checkpoint, args=(self, session.session_id),
                              name=f"stop-{session.session_id}", daemon=True).start()
         return tuple(dict.fromkeys([*pending, *(session.session_id for session in sessions)]))
+
+    # LLM: 正常取消对账在宿主线程调用（不持注册表/关闭/进程锁）；只重试已保留原证明的检查点，不发停止、不等待。
+    # 函数用途: 重新把已就绪的原PTY清理证明交给消费者持久化，返回本次就绪的证明快照。
+    def checkpoint_cleanup_proofs(self, session_ids) -> dict[str, dict]:
+        return _checkpoint_cleanup_proofs(self, session_ids)
 
     # LLM: 空闲兜底是回合/任务收口之外的第三道网：没等到收口的会话（崩溃回合、宿主停摆）按 last_active_at
     #   自动回收。默认0仅影响未声明覆盖的会话；无会话时只配置，不起线程。
@@ -495,7 +553,8 @@ class PtySessionRegistry:
         return _sweep_idle_sessions(self, now)
 
     # LLM: clear是关闭请求而非退出证据；未知后代必须保留在唯一注册表，不能靠清表绕过切源。
-    # 函数用途: 尝试关闭全部会话，只删除完整树已确认退役的记录。
+    #   被宿主取消选中、清理证明尚未确认持久化的退役会话也保留，原证明对象不因清表丢失。
+    # 函数用途: 尝试关闭全部会话，只删除完整树已确认退役且无未确认证明的记录。
     def clear(self) -> None:
         with self._lock:
             ids = list(self._sessions)
@@ -503,7 +562,7 @@ class PtySessionRegistry:
             self.close(session_id)
         with self._lock:
             self._sessions = {key: value for key, value in self._sessions.items()
-                              if not _source_resource_retired(value)}
+                              if not _source_resource_retired(value) or key in self._cleanup_proofs}
 
     # LLM: 委派同一原会话的排空；FD读写/resize/关闭共用生命周期锁，不将无输出当退出。
     # 函数用途: 连续排空 PTY 输出，在终态清理有界历史。
@@ -567,11 +626,12 @@ def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None = None)
 
 
 # LLM: 调用方持registry锁；只有完整树退役记录可裁剪，poll/closed/历史上限均不免除未知资源责任。
-# 函数用途: 保留最近32个已确认退役历史，同时保留全部未确认资源。
+#   宿主取消选中、清理证明尚未确认持久化的原对象既不裁剪也不计入无关会话的历史上限。
+# 函数用途: 保留最近32个已确认退役的无关历史，同时保留全部未确认资源与未确认证明。
 def _prune_finished_sessions(registry: PtySessionRegistry) -> None:
     finished = [
         key for key, item in registry._sessions.items()
-        if _source_resource_retired(item) and item.process.poll() is not None
+        if key not in registry._cleanup_proofs and _source_resource_retired(item) and item.process.poll() is not None
     ]
     for key in finished[:-_MAX_SESSION_COUNT]:
         del registry._sessions[key]
@@ -1173,6 +1233,79 @@ def _source_resource_retired(session):
     return bool(session.closed and receipt is not None and receipt.confirmed and receipt.method != "already_exited")
 
 
+# LLM: 与 _business_resource_references 的选择快照同口径：原PID、启动时间与执行范围，不含可变状态。
+# 函数用途: 返回一个已登记PTY会话的不可变出生身份。
+def _pty_identity(session):
+    return {"pid": session.process.pid, "started_at": session.started_at, "scope": asdict(session.execution_scope)}
+
+
+# LLM: 调用方持registry锁；同一代可被多个取消各自绑定消费者，已冻结的出生身份不被后来者覆盖。
+# 函数用途: 把宿主消费者及选中时的执行范围/出生身份绑到一代PTY的清理证明上。
+def _bind_cleanup_proof(registry, session_id, execution_scope, identity, consumer):
+    proof = registry._cleanup_proofs.setdefault(session_id, _PtyCleanupProof(session_id, execution_scope))
+    if proof.identity is None and identity is not None:
+        proof.identity = dict(identity)
+    if consumer not in proof.consumers:
+        proof.consumers.append(consumer)
+
+
+# LLM: 停止线程不持任何调用方锁；关闭确认后立即尝试交原证明，未就绪或失败由排空线程/正常取消对账重试。
+# 函数用途: 异步关闭一个被选会话并尝试持久化其清理证明。
+def _close_and_checkpoint(registry, session_id):
+    registry.close(session_id)
+    _checkpoint_cleanup_proofs(registry, (session_id,))
+
+
+# LLM: 只为已有清理证明的选择起短命daemon线程，避免在调用方的来源/工具锁内做存储IO。
+# 函数用途: 在独立线程里尝试持久化一个PTY清理证明。
+def _start_cleanup_proof_checkpoint(registry, session_id):
+    threading.Thread(target=_checkpoint_cleanup_proofs, args=(registry, (session_id,)),
+                     name=f"proof-{session_id}", daemon=True).start()
+
+
+# LLM: 调用方持registry锁；只有完整树已确认退役（closed+确认+非already_exited）或预留正面未启动才就绪，
+#   出生身份须与选中时一致；poll、closed或缺行都不是证明。
+# 函数用途: 从保留的原证明对象生成一份交给消费者的不可变证明快照。
+def _ready_cleanup_proof(proof, session):
+    base = {"schema": "pty_cleanup_proof.v1", "session_id": proof.session_id, "scope": asdict(proof.execution_scope)}
+    if session is not None:
+        identity = _pty_identity(session)
+        if not _source_resource_retired(session) or proof.identity not in (None, identity):
+            return None
+        return {**base, "outcome": "retired", "identity": identity, "termination": asdict(session.termination)}
+    if proof.not_started and proof.identity is None:
+        return {**base, "outcome": "not_started", "identity": None, "termination": None}
+    return None
+
+
+# LLM: 注册表锁内只取快照，消费者回调（存储IO）全部在注册表/关闭/进程锁外执行；只有返回True才算确认，
+#   异常或False保留原证明对象，供排空、停止线程或正常取消对账重试；全部确认后才允许常规历史淘汰。
+# 函数用途: 把已就绪的PTY清理证明交给各宿主消费者持久化，并在确认后释放保留。
+def _checkpoint_cleanup_proofs(registry, session_ids):
+    ready = []
+    with registry._lock:
+        for session_id in dict.fromkeys(session_ids):
+            proof = registry._cleanup_proofs.get(session_id)
+            snapshot = _ready_cleanup_proof(proof, registry._sessions.get(session_id)) if proof is not None else None
+            if snapshot is not None:
+                ready.append((session_id, snapshot, tuple(proof.consumers)))
+    for session_id, snapshot, consumers in ready:
+        acknowledged = []
+        for consumer in consumers:
+            try:
+                if consumer(json.loads(json.dumps(snapshot))) is True:
+                    acknowledged.append(consumer)
+            except Exception:  # noqa: BLE001 - 检查点失败只保留原证明，不能冒充已持久化或中断其它消费者
+                logging.getLogger(__name__).warning("PTY 清理证明暂未持久化，保留原证明待对账重试", exc_info=False)
+        with registry._lock:
+            proof = registry._cleanup_proofs.get(session_id)
+            if proof is not None:
+                proof.consumers = [item for item in proof.consumers if item not in acknowledged]
+                if not proof.consumers:
+                    del registry._cleanup_proofs[session_id]
+    return {session_id: snapshot for session_id, snapshot, _ in ready}
+
+
 # LLM: 复用同一可重入来源锁，get仍核原权限和CAS；等锁超时必须报零写入，不得删锁绕过准入。
 # 函数用途: 把PTY来源检查的锁等待纳入输入的原始期限。
 def _get_session_for_write(registry, session_id, access_scope, deadline):
@@ -1212,6 +1345,8 @@ def _drain_session_io(registry, session):
     if isinstance(session.process, PtyOwnedProcess):
         session.process.wait()
         _close_known_session(session)
+    # 排空线程不持注册表/关闭/进程锁；已退役的被选会话先交原证明，确认前裁剪会跳过它。
+    _checkpoint_cleanup_proofs(registry, (session.session_id,))
     with registry._lock:
         _prune_finished_sessions(registry)
 

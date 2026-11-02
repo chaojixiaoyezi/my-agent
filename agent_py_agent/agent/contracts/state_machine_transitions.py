@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from .state_machine import normalize_status
 
 _TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "PLANNING": ("PENDING", "RUNNING", "BLOCKED", "FAILED", "CANCELLED", "ABANDONED"),
-    "PENDING": ("RUNNING", "BLOCKED", "FAILED", "CANCELLED", "ABANDONED"),
+    "PLANNING": ("PENDING", "RUNNING", "BLOCKED", "FAILED", "CANCELLED", "ABANDONED", "PAUSED"),
+    "PENDING": ("RUNNING", "BLOCKED", "FAILED", "CANCELLED", "ABANDONED", "PAUSED"),
     "RUNNING": (
         "WAITING_FOR_TOOL",
         "WAITING_FOR_USER",
@@ -18,12 +18,16 @@ _TRANSITIONS: dict[str, tuple[str, ...]] = {
         "TIMEOUT",
         "CHANNEL_ERROR",
         "CANCELLED",
+        "ABANDONED",
+        "PAUSED",
     ),
     "WAITING_FOR_TOOL": ("RUNNING", "BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "CANCELLED"),
     "WAITING_FOR_USER": ("RUNNING", "BLOCKED", "FAILED", "CANCELLED", "ABANDONED"),
     "WAITING_FOR_CHILD": ("RUNNING", "BLOCKED", "FAILED", "CANCELLED", "ABANDONED"),
     "VERIFYING": ("DONE", "RUNNING", "BLOCKED", "FAILED", "CANCELLED"),
-    "BLOCKED": ("REPAIRING", "TAKING_OVER", "RUNNING", "FAILED", "CANCELLED", "ABANDONED"),
+    "BLOCKED": ("REPAIRING", "TAKING_OVER", "RUNNING", "FAILED", "CANCELLED", "ABANDONED", "PAUSED"),
+    # 暂停只能经显式恢复回到 PENDING（不直写 RUNNING），或被停止/放弃。
+    "PAUSED": ("PENDING", "CANCELLED", "ABANDONED"),
     "REPAIRING": ("RUNNING", "VERIFYING", "BLOCKED", "FAILED", "CANCELLED"),
     "TAKING_OVER": ("RUNNING", "VERIFYING", "BLOCKED", "FAILED", "CANCELLED"),
     "FAILED": ("REPAIRING", "TAKING_OVER", "CANCELLED", "ABANDONED"),
@@ -70,6 +74,10 @@ def first_invalid_transition(statuses: list[object]) -> TransitionContract | Non
 
 
 def _required_condition(source: str, target: str) -> str:
+    if target == "PAUSED":
+        return "explicit_task_control_pause"
+    if source == "PAUSED" and target == "PENDING":
+        return "explicit_resume_after_exact_cleanup"
     if target == "VERIFYING":
         return "artifact_written_and_pending_acceptance"
     if source == "VERIFYING" and target == "DONE":

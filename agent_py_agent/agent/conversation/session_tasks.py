@@ -527,6 +527,43 @@ def _require_claim_proof_identity(task: SessionTask, control: dict[str, Any], cl
         raise ValueError("SESSION_TASK_CLAIM_PROOF_CONFLICT")
 
 
+# PTY清理证明的结构版本；只有原注册表在完整树退役或正面未启动后才铸造。
+_PTY_CLEANUP_PROOF_SCHEMA = "pty_cleanup_proof.v1"
+
+
+# LLM: 只认同一会话ID、执行范围匹配原选择的PTY证明：退役须带已确认、非already_exited的整树回执及出生身份，
+#   正面未启动只适用于选中时尚未出生的预留。缺行、poll、closed或聚合布尔都不是证明；JSON规范化后再比较。
+# 函数用途: 规范并核对一条资源清理证明与原已选资源引用的身份，返回可落盘的副本。
+def _validated_resource_cleanup_proof(resource_ref: object, proof: object) -> tuple[dict, dict]:
+    from ..tooling.process_scope import ProcessExecutionScope
+
+    try:
+        ref, item = json.loads(json.dumps(resource_ref)), json.loads(json.dumps(proof))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid resource cleanup proof") from exc
+    if (type(ref) is not dict or ref.get("kind") != "pty" or type(ref.get("id")) is not str or not ref["id"]
+            or type(ref.get("scope")) is not dict or type(item) is not dict
+            or item.get("schema") != _PTY_CLEANUP_PROOF_SCHEMA or item.get("session_id") != ref["id"]
+            or item.get("outcome") not in {"retired", "not_started"} or type(item.get("scope")) is not dict):
+        raise ValueError("invalid resource cleanup proof")
+    try:
+        selected, observed = ProcessExecutionScope(**ref["scope"]), ProcessExecutionScope(**item["scope"])
+    except TypeError as exc:
+        raise ValueError("invalid resource cleanup proof") from exc
+    identity, termination = item.get("identity"), item.get("termination")
+    if not observed.matches(selected):
+        raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+    if item["outcome"] == "not_started":
+        if identity is not None or termination is not None or ref.get("identity") is not None:
+            raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+    elif (type(identity) is not dict or identity.get("scope") != item["scope"]
+            or type(termination) is not dict or termination.get("confirmed") is not True
+            or termination.get("method") in (None, "", "already_exited")
+            or ref.get("identity") is not None and ref["identity"] != identity):
+        raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+    return ref, item
+
+
 # LLM: 存储只落 canonical 目录下的每任务一个 JSON 文件；状态变更走 update_json_file_atomic（锁内重读），
 #   避免两个写入方互相覆盖。读取坏文件必须显式报错，不能当成"不存在"。
 # 类用途: 保存、读取与推进会话间派活任务的状态。
@@ -699,6 +736,51 @@ class SessionTaskStore:
         self._list_index().publish(self._path(task_id))
         return saved
 
+    # LLM: 与原取消账同一canonical写者：锁内核任务/业务owner/任务运行/原执行attempt、主范围线程，以及已冻结选中的
+    #   准确资源引用；证明只追加，同引用重放须逐字一致，不改状态、未结引用、资源清单或其它控制字段。锁外发布索引。
+    # 函数用途: 把一条已选资源的正面清理证明持久写入原SessionTask取消控制，内存历史淘汰原对象后仍可核收。
+    def record_resource_cleanup_proof(self, task_id: str, *, execution_ref, resource_ref: dict,
+                                      proof: dict) -> SessionTask:
+        from .business_contracts import HostParentExecutionRef
+
+        if not isinstance(execution_ref, HostParentExecutionRef) or not execution_ref.observed_attempt_id:
+            raise ValueError("invalid resource cleanup proof")
+        expected_ref, normalized = _validated_resource_cleanup_proof(resource_ref, proof)
+        changed = False
+
+        def update(payload):
+            nonlocal changed
+            task = SessionTask.from_dict(payload)
+            context = BusinessExecutionContext.from_dict(task.metadata.get("business_context"))
+            control = task.metadata.get("cancellation_control", {})
+            if (task.task_id != task_id or context.task_id != task_id or context.owner_id != execution_ref.owner_id
+                    or task.task_run_id != execution_ref.task_run_id
+                    or control.get("execution_ref") != execution_ref.to_dict()):
+                raise ValueError("SESSION_TASK_EXECUTION_CONFLICT")
+            scope = expected_ref["scope"]
+            if "thread_id" in scope and (scope.get("thread_id") != task.target_thread_id
+                    or scope.get("run_id") != execution_ref.run_id
+                    or scope.get("attempt_id") != execution_ref.observed_attempt_id):
+                raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+            if expected_ref not in control.get("resource_refs", []):
+                raise ValueError("SESSION_TASK_RESOURCE_CONFLICT")
+            proofs = control.get("resource_cleanup_proofs", [])
+            for item in proofs:
+                if item.get("resource_ref") == expected_ref:
+                    if item.get("proof") != normalized:
+                        raise ValueError("SESSION_TASK_RESOURCE_PROOF_CONFLICT")
+                    return payload
+            if len(proofs) >= 1000:
+                raise ValueError("cancellation resource proof limit")
+            changed = True
+            return {**payload, "metadata": {**task.metadata, "cancellation_control": {
+                **control, "resource_cleanup_proofs": [*proofs, {"resource_ref": expected_ref, "proof": normalized}]}}}
+
+        saved = SessionTask.from_dict(update_json_file_atomic(self._path(task_id), update, require_existing=True))
+        if changed:
+            self._list_index().publish(self._path(task_id))
+        return saved
+
     # LLM: 目录不存在时按"没有任务"返回；读坏文件进 load_errors，不静默跳过。
     # 函数用途: 列出本 owner 的会话任务记录。
     def list_report(self, *, limit: int = 100) -> tuple[list[SessionTask], list[dict[str, Any]]]:
@@ -866,23 +948,34 @@ class SessionTaskStore:
         return self.load(task_id) if task_id else None
 
     # LLM: 正文要在记录之后写入才能带上任务编号，所以记录先以空正文 id 落盘，随后由这里补上。
-    #   只补这一次、只补空值；已绑定或终态记录不改写，重放返回当前记录不报错。
+    #   原子updater锁内重读最新记录，只补空引用（同一引用即幂等）；状态（含并发已提交的取消终态）、取消/执行
+    #   控制与其它元数据原样保留，不用锁外旧快照整条覆盖。已绑其它引用时返回当前记录不报错；索引在释放任务锁后发布。
     # 函数用途: 把刚写入的正文 id 绑到它所属的会话任务记录上。
     def bind_body(self, task_id: str, body_guidance_id: str) -> SessionTask | None:
-        guidance_id = str(body_guidance_id or "").strip()
-        current = self.load(task_id)
-        if current is None:
+        selected, guidance_id = str(task_id or "").strip(), str(body_guidance_id or "").strip()
+        if not selected:
             return None
-        if not guidance_id or current.body_guidance_id:
-            return current
-        updated = replace(
-            current,
-            body_guidance_id=guidance_id,
-            updated_at=time.time(),
-        )
-        write_json_file_atomic(self._path(task_id), updated.to_dict())
-        self._list_index().publish(self._path(task_id))
-        return updated
+        if not guidance_id:
+            return self.load(selected)
+        changed = False
+
+        def bind(payload):
+            nonlocal changed
+            latest = SessionTask.from_dict(payload)
+            if latest.task_id != selected:
+                raise ValueError(f"conversation session task is unreadable: {selected}")
+            if latest.body_guidance_id:
+                return payload
+            changed = True
+            return {**payload, "body_guidance_id": guidance_id, "updated_at": time.time()}
+
+        try:
+            saved = update_json_file_atomic(self._path(selected), bind, require_existing=True)
+        except FileNotFoundError:
+            return None
+        if changed:
+            self._list_index().publish(self._path(selected))
+        return SessionTask.from_dict(saved)
 
     # LLM: 绑定只在非终态且尚未绑定其它回合时生效；同回合重复确认幂等，不覆盖已有绑定。
     #   目标回合结束（任务转终态）后不再绑定新回合，避免把取消打到后来的一轮上。

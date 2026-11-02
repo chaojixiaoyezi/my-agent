@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 
-# LLM: 只把明确取消、UNKNOWN、废弃或代次替换当原轮失效；自然完成/失败不在正常结果提交途中制造中断。
+# LLM: 只把明确取消、UNKNOWN、废弃、代次替换或显式暂停/待生效控制当原轮失效；自然完成/失败不在正常结果提交途中制造中断。
 # 查询错误由调用方保留，不能把暂时读失败当取消；空身份的 dry run 不受此入口控制。
 # 函数用途: 从唯一状态源判断原 runner 是否应停止，无写入、信号或新执行副作用。
 def runner_attempt_cancelled(manager: object, run_id: str, attempt_id: str) -> bool:
+    from .task_control import task_control_blocks_execution
+
     if not attempt_id:
         return False
     repo = manager.runtime_db
@@ -24,6 +26,7 @@ def runner_attempt_cancelled(manager: object, run_id: str, attempt_id: str) -> b
     task = manager.load(run_id)
     return (
         task.status in {"CANCELLED", "ABANDONED", "TAKEN_OVER"}
+        or task_control_blocks_execution(task)
         or attempt_id in task.runner_abandoned_attempt_ids
         or bool(task.runner_active_attempt_id and task.runner_active_attempt_id != attempt_id)
     )

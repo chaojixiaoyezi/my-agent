@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from ....runtime_errors import runtime_error_report
 from ....subagents.models import TaskStatus, task_status_in
+from ....subagents.task_control import task_control_blocks_execution
 
 
 @dataclass(frozen=True)
@@ -82,8 +83,11 @@ def _can_run_for_collaboration_request(task: object) -> bool:
         TaskStatus.CANCELLED.value,
         TaskStatus.CHANNEL_ERROR.value,
         TaskStatus.TIMEOUT.value,
+        TaskStatus.PAUSED.value,
     })
     if task_status_in(getattr(task, "status", ""), unavailable_statuses):
+        return False
+    if task_control_blocks_execution(task):
         return False
     if str(getattr(task, "channel_status", "") or "") == "BROKEN":
         return False

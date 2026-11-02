@@ -5915,7 +5915,9 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
         if not task_id or wake.get("root_task_id") != task_id:
             return
         link, error = store.tasks.load_report(task_id)
-        if error or link is None or link.thread_id != thread_id or link.status not in {"completed", "failed", "cancelled", "interrupted"}:
+        # 终态集合与领取准入 terminal_task_link 的判定（_claimed_background_task_is_terminal）一致，否则判了终态却结不掉、每拍重领。
+        if (error or link is None or link.thread_id != thread_id
+                or str(link.status or "").strip().upper() not in _TASK_LINK_TERMINAL_STATUSES):
             return
         events, errors = store.observations.recent_report(thread_id, limit=0)
         if errors:
@@ -5924,7 +5926,8 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
         ids = [item.observation_id for item in events if item.observation_id in requested
                and item.thread_id == thread_id and item.root_task_id == task_id]
         if ids:
-            store.observations.mark_handled(thread_id, ids)
+            # 观察账只收一个位置参数（精确 ID 列表）；写失败照常上抛，观察留在原账下一拍再结。
+            store.observations.mark_handled(ids, now=now())
         return
     if not policy_id:
         return

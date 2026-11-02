@@ -170,10 +170,21 @@ def _record_runner_session(
 
 
 # LLM: 调用方已安装真实child短写端口；正文保存、canonical窄心跳及普通重试完全保main，运输未结原样穿越，不新建租约账。
+#   最终 completed/failed 写入前，若精确控制回执欠本执行轮的清理证明，先由本进程（原宿主）把正向清理与句柄结束同次落盘；
+#   证明写失败时不写最终会话，句柄保留给普通重试。无回执时零新增 I/O。
 # 函数用途: 按原协议写一拍runner状态，不能把关闭scope后的写失败变成已完成。
 def _record_runner_session_unscoped(lease, session, *, status, error=None, require_persisted=False):
+    from ...subagents.task_control import (
+        confirm_task_control_cleanup,
+        task_control_cleanup_pending_for,
+    )
+
     try:
         task = lease.manager.load(lease.run_id)
+        if status in {"completed", "failed"} and task_control_cleanup_pending_for(task, lease.attempt_id):
+            confirm_task_control_cleanup(
+                lease.manager, lease.run_id, attempt_id=lease.attempt_id, session=session, runner_status=status,
+            )
         if _runner_session_update_is_stale_for_terminal_task(task, status):
             return False
         now = time.time()

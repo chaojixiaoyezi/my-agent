@@ -20,6 +20,7 @@ from ..models import (
     task_status_in,
 )
 from ..recovery_eligibility import user_stopped_run_is_resumable
+from ..task_control import task_control_blocks_execution
 from .recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
@@ -112,6 +113,11 @@ def _assert_runner_attempt_start_allowed(
     if recovery_count(task, "recovery_history_unknown_count"):
         raise RunnerRecoveryHistoryUnknownError(
             f"runner attempt requires recovery history review: run_id={task.id}"
+        )
+    # 显式暂停或已落盘未投影的控制挡住预留与最终激活；只有精确恢复发布 PENDING 后才可再启动。
+    if task_control_blocks_execution(task):
+        raise RuntimeConflictError(
+            f"runner attempt not allowed under task control: run_id={task.id} status={task.status}"
         )
     if (
         task_status_in(task.status, SUBAGENT_RECOVERY_CLOSED_STATUSES)

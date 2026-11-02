@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..conversation.goal_delegation import transition_delegated_goal
@@ -26,10 +26,15 @@ from .cancellation_hosts import (
 )
 from .lesson_ledger import LessonIdentity, append_run_status
 from .model_capabilities import capability_request_requires_parent_resolution
-from .models import SUBAGENT_RECOVERY_CLOSED_STATUSES, FailureType, SubAgentTask
+from .models import SUBAGENT_RECOVERY_CLOSED_STATUSES, FailureType, SubAgentTask, TaskStatus
+from .task_control import TASK_CONTROL_ATTR
+
+# 停止后的投影：默认仍是原 CANCELLED；显式任务控制只可选择 PAUSED/ABANDONED，且必须带已落盘的精确控制代次。
+_CONTROL_PROJECTIONS = frozenset({TaskStatus.PAUSED.value, TaskStatus.ABANDONED.value})
 
 
 # LLM: task 为调用方已授权的 canonical 快照；执行身份在创建锁内复核，普通进度/新增孩子不等于换代。
+#   projection 缺省 CANCELLED 保持原合同；PAUSED/ABANDONED 只投影这一精确 run，不写取消结果，后代仍按原取消处理。
 # 类用途: 声明要停止的原子代理及控制来源，不从自然语言推断资源范围。
 @dataclass(frozen=True)
 class CancelSubagentTaskRequest:
@@ -37,6 +42,16 @@ class CancelSubagentTaskRequest:
     reason: str
     kill_process: bool = True
     source: str = "runtime"
+    projection: str = TaskStatus.CANCELLED.value
+    control_generation: int = 0
+
+    # LLM: 显式投影没有精确控制代次就拒绝，避免绕过“回执先于撤权”。
+    # 函数用途: 校验投影取值与控制代次。
+    def __post_init__(self) -> None:
+        if self.projection != TaskStatus.CANCELLED.value and (
+            self.projection not in _CONTROL_PROJECTIONS or int(self.control_generation or 0) <= 0
+        ):
+            raise ValueError("显式停止投影只接受带精确控制代次的 PAUSED/ABANDONED")
 
 
 # LLM: 只携带准备阶段选中的原资源和回执；不持 agent、查询回调或可扩大范围的 selector。
@@ -82,7 +97,8 @@ def prepare_subagent_stops(
             ids = subtree_run_ids(tasks, current.id) if include_descendants else [current.id]
             by_id[current.id] = current
             for run_id in ids:
-                selected.setdefault(run_id, CancelSubagentTaskRequest(
+                # 根沿用请求的投影与控制代次；后代仍按原取消处理。
+                selected.setdefault(run_id, replace(request, task=current) if run_id == current.id else CancelSubagentTaskRequest(
                     by_id[run_id], request.reason, request.kill_process, request.source,
                 ))
         signals = {
@@ -213,16 +229,19 @@ def _close_authority(manager: object, request: CancelSubagentTaskRequest) -> dic
 
 
 # LLM: 已完成/失败或 UNKNOWN 不改业务终态和执行锁；文件接纳即便处于业务终态也须撤销，DB 事务早已退出。
+#   显式 PAUSED/ABANDONED 投影只核同一代 requested 回执后改写这一 run，不写 cancel_subagents、取消失败类型或取消经验；
+#   暂停保留未决授权申请、必要输入和原 runner 会话句柄，句柄由原宿主收尾随正向清理证明结束。
 # 函数用途: 暂停精确子目标、取消其必要输入并记录投影；兄弟输入和既有业务终态保持。
 def _close_projection(agent: object, request: CancelSubagentTaskRequest, authority: dict) -> dict[str, object]:
     task = request.task
+    projection = request.projection
     now, closed_requests = time.time(), []
     attempt_id = str(task.runner_active_attempt_id or authority.get("attempt_id") or "")
     findings_ledger, findings_recorded = _findings_ledger_snapshot(task)
-    preserved = authority["status"] not in {"cancelled", "not_managed"} or task.status in SUBAGENT_RECOVERY_CLOSED_STATUSES
+    preserved = _projection_preserved(request, authority)
 
     # LLM: reducer 只操作最新 canonical 行，不能从旧 task 覆盖并发字段；UNKNOWN 不经过此写路径。
-    # 函数用途: 撤销原文件启动，把可取消任务收为 CANCELLED；保留业务终态和废弃轮记录。
+    # 函数用途: 撤销原文件启动，把可停止任务收为请求的投影；保留业务终态和废弃轮记录。
     def close(current: SubAgentTask) -> None:
         if current.runner_active_attempt_id != task.runner_active_attempt_id:
             raise RuntimeConflictError("取消投影的执行轮发生变化")
@@ -232,48 +251,89 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
             revoke_file_runner_start(current)
         if preserved:
             return
+        attrs = dict(current.attributes or {})
+        control = attrs.get(TASK_CONTROL_ATTR) if isinstance(attrs.get(TASK_CONTROL_ATTR), dict) else {}
+        if projection != TaskStatus.CANCELLED.value and (
+            control.get("state") != "requested" or control.get("target_status") != projection
+            or int(control.get("generation") or 0) != request.control_generation
+        ):
+            raise RuntimeConflictError("任务控制回执已变化，不能沿旧回执投影")
         if attempt_id and attempt_id not in current.runner_abandoned_attempt_ids:
             current.runner_abandoned_attempt_ids.append(attempt_id)
-        closed_requests.extend(_close_pending_capability_requests(current, request.reason))
-        attrs = dict(current.attributes or {})
-        attrs["cancel_subagents"] = {
-            "cancel_status": "CANCELLED", "source": request.source, "reason": request.reason,
-            "cancelled_at": now, "previous_status": str(current.status), "previous_failure_type": str(current.failure_type),
-            "abandoned_attempt_id": attempt_id, "closed_capability_request_ids": closed_requests,
-            "findings_ledger": findings_ledger, "findings_recorded": findings_recorded,
-        }
-        session = attrs.get("runner_session")
-        if isinstance(session, dict):
-            attrs["runner_session"] = {**session, "status": "cancelled", "heartbeat_at": now, "ended_at": now}
+        if projection == TaskStatus.CANCELLED.value:
+            closed_requests.extend(_close_pending_capability_requests(current, request.reason))
+            attrs["cancel_subagents"] = {
+                "cancel_status": "CANCELLED", "source": request.source, "reason": request.reason,
+                "cancelled_at": now, "previous_status": str(current.status), "previous_failure_type": str(current.failure_type),
+                "abandoned_attempt_id": attempt_id, "closed_capability_request_ids": closed_requests,
+                "findings_ledger": findings_ledger, "findings_recorded": findings_recorded,
+            }
+            session = attrs.get("runner_session")
+            if isinstance(session, dict):
+                attrs["runner_session"] = {**session, "status": "cancelled", "heartbeat_at": now, "ended_at": now}
+            current.failure_type, current.ended_at = FailureType.CANCELLED.value, now
+        else:
+            if projection == TaskStatus.ABANDONED.value:
+                closed_requests.extend(_close_pending_capability_requests(current, request.reason, label="subagent_abandoned"))
+                current.ended_at = now
+            else:
+                current.failure_type, current.ended_at = "", 0.0
+            attrs[TASK_CONTROL_ATTR] = {
+                **control, "state": "applied", "applied_at": now, "runtime_authority": str(authority.get("status") or ""),
+                "abandoned_attempt_id": attempt_id, "closed_capability_request_ids": closed_requests,
+                "findings_ledger": findings_ledger, "findings_recorded": findings_recorded,
+            }
         current.attributes = attrs
-        current.status, current.failure_type = "CANCELLED", FailureType.CANCELLED.value
-        current.ended_at = current.updated_at = now
+        current.status = projection
+        current.updated_at = now
         current.runner_active_attempt_id = ""
 
     if not preserved or agent.subagents.runtime_db is None:
         task = agent.subagents.mutate(task.id, close)
     if not preserved:
-        agent.subagents.actions._append_task_work_log(task, f"cancel_subagents: status=CANCELLED reason={request.reason}")
-        _record_cancelled_lesson_status(task, attempt_id, now)
+        label = "cancel_subagents" if projection == TaskStatus.CANCELLED.value else "task_control"
+        agent.subagents.actions._append_task_work_log(task, f"{label}: status={projection} reason={request.reason}")
+        if projection == TaskStatus.CANCELLED.value:
+            _record_cancelled_lesson_status(task, attempt_id, now)
     transition_delegated_goal(agent.subagents, task, expected_status="active", status="paused")
-    link = _sync_cancelled_conversation_link(agent, task.id) if not preserved else {"status": "preserved"}
-    if not preserved or task.status == "CANCELLED":
+    link = _sync_cancelled_conversation_link(agent, task.id, _LINK_STATUS_BY_PROJECTION[projection]) if not preserved else {"status": "preserved"}
+    if (not preserved and projection != TaskStatus.PAUSED.value) or task.status == "CANCELLED":
         from ..conversation.input_dependencies import cancel_task_inputs
         cancel_task_inputs(agent, task.root_id, run_id=task.id)
     return {
-        "status": task.status, "cancel_status": "preserved" if preserved else "CANCELLED",
+        "status": task.status, "cancel_status": "preserved" if preserved else projection,
         "abandoned_attempt_id": attempt_id if not preserved else "", "conversation_link": link,
         "findings_ledger": findings_ledger, "findings_recorded": findings_recorded,
     }
 
 
+# 父会话链接的投影状态；interrupted 只允许显式恢复，任何 runner 不得据此隐式重启。
+_LINK_STATUS_BY_PROJECTION = {
+    TaskStatus.CANCELLED.value: "cancelled",
+    TaskStatus.PAUSED.value: "interrupted",
+    TaskStatus.ABANDONED.value: "abandoned",
+}
+
+
+# LLM: 原取消只在本次确认关闭执行权（或未托管）且非已关闭终态时投影；显式放弃也接受运行账早已失败/取消的 run，
+#   但 UNKNOWN 与运行账已完成必须原样保留；暂停与原取消同口径，不覆盖已结束的执行权。
+# 函数用途: 判断这次停止是否只能保留原状态而不写投影。
+def _projection_preserved(request: CancelSubagentTaskRequest, authority: dict) -> bool:
+    if request.task.status in SUBAGENT_RECOVERY_CLOSED_STATUSES:
+        return True
+    status = str(authority.get("status") or "")
+    if request.projection == TaskStatus.ABANDONED.value:
+        return status in {"unknown_preserved", "done"}
+    return status not in {"cancelled", "not_managed"}
+
+
 # LLM: 状态投影只更新既有链接，不创造新 task；异常交给批次回执，不能伪造同步完成。
-# 函数用途: 让父会话的原子任务链接显示取消。
-def _sync_cancelled_conversation_link(agent: object, task_id: str) -> dict[str, object]:
+# 函数用途: 让父会话的原子任务链接显示停止投影。
+def _sync_cancelled_conversation_link(agent: object, task_id: str, status: str = "cancelled") -> dict[str, object]:
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return {"status": "unavailable"}
-    link = store.tasks.update_status({"task_id": task_id, "status": "cancelled"})
+    link = store.tasks.update_status({"task_id": task_id, "status": status})
     return {"status": "updated" if link is not None else "not_linked"}
 
 
@@ -310,12 +370,12 @@ def _record_cancelled_lesson_status(task: SubAgentTask, attempt_id: str, now: fl
 
 # LLM: 取消仅关闭仍需父级裁决的原能力申请，不授予能力、不创建新的申请或裁决记录。
 # 函数用途: 收起本次已停止任务的未决申请，避免继续等待父级处理。
-def _close_pending_capability_requests(task: SubAgentTask, reason: str) -> list[str]:
+def _close_pending_capability_requests(task: SubAgentTask, reason: str, *, label: str = "subagent_cancelled") -> list[str]:
     closed = []
     for request in task.capability_requests or []:
         if capability_request_requires_parent_resolution(request.status):
             request.status = "CLOSED"
-            request.constraints = {**(request.constraints or {}), "denial_reason": f"subagent_cancelled: {reason}"}
+            request.constraints = {**(request.constraints or {}), "denial_reason": f"{label}: {reason}"}
             closed.append(request.id)
     return closed
 

@@ -47,7 +47,7 @@ from ..runner_result_admission import reject_stale_runner_result
 from ..tool_failure_ledger import record_tool_failure_ledger
 from ..utils import _apply_missing_paths
 from .executor_recovery import record_takeover_hint
-from .runner_result_commit import commit_runner_result
+from .runner_result_commit import commit_runner_result, prepare_runner_result_commit
 from .runtime_closeout import deliver_parent_wake
 
 
@@ -232,9 +232,37 @@ class SubAgentRunnerResultService:
         """Apply status to task and build output payload."""
         return apply_status_and_build_payload(params, extracted, now)
 
-    # LLM: 结果保存后的副作用顺序固定：保存 task→debrief→统一 Memory 候选→可选 Skill 提案→工作日志→索引；
+    # LLM: 纯内存组装最终 canonical 字段（摘要、当前步骤、阻塞），不做任何 IO；首个终态保存由提交准备统一完成。
+    # 函数用途: 在收口事实落盘前把本次结果的最终任务字段写到 task 上。
+    def _assemble_final_task_fields(self, task: SubAgentTask, params: _PostResultSideEffectParams) -> None:
+        parsed = params.parsed
+        if parsed.found and parsed.ok:
+            task.latest_summary = parsed.summary or task.latest_summary
+            if str(task.status or "").strip().upper() == TaskStatus.RUNNING.value:
+                task.current_step = parsed.status or task.status
+        for blocker in params.output_payload.get("blockers", []) or []:
+            text = str(blocker or "").strip()
+            if text and text not in task.blockers:
+                task.blockers.append(text)
+
+    # LLM: 结果文件已落盘后：需要收口时原 exact 收口事实随首个终态 task 一次保存；无需收口（可续跑/非终态）仍做原 canonical
+    #   保存。unpersisted 已由准备入口记下原兜底事件，调用方必须停止，不跑后续副作用或通知。
+    # 函数用途: 先让终态与可恢复收口事实同时持久，再交给后续副作用与提交。
+    def _prepare_result_commit(
+        self, task: SubAgentTask, params: RecordRunnerResultParams, result: SubAgentRunnerResult,
+    ) -> str:
+        prepared = prepare_runner_result_commit(
+            self.manager.runtime_db, task, params, result, save_task=self.manager.save,
+        )
+        if prepared == "not_required":
+            with gateway_short_transaction('child_result_side_effects'):
+                self.manager.save(task)
+        return prepared
+
+    # LLM: 收口事实已落盘后的附带副作用顺序固定：debrief→统一 Memory 候选→可选 Skill 提案→工作日志→索引；
     #   候选含结构化输出与 lesson 账本两个来源；候选与 Skill 提案失败都只写工作日志，返回值仍是候选数量。
-    # 函数用途: 处理子代理结果落盘后的保存、交接、候选、提案与索引副作用。
+    #   这里任何一步失败都不影响已落盘的收口事实，恢复链按原顺序补结算与父级通知。
+    # 函数用途: 处理子代理结果落盘后的交接、候选、提案与索引副作用。
     # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
     # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def _post_result_side_effects(
@@ -243,19 +271,10 @@ class SubAgentRunnerResultService:
         result: SubAgentRunnerResult,
         params: _PostResultSideEffectParams,
     ) -> int:
-        """Handle save, debrief, unified Memory candidate and indexing side effects."""
+        """Handle debrief, unified Memory candidate and indexing side effects."""
         with gateway_short_transaction('child_result_side_effects'):
             output_payload = params.output_payload
             parsed = params.parsed
-            if parsed.found and parsed.ok:
-                task.latest_summary = parsed.summary or task.latest_summary
-                if str(task.status or "").strip().upper() == TaskStatus.RUNNING.value:
-                    task.current_step = parsed.status or task.status
-            for blocker in output_payload.get("blockers", []) or []:
-                text = str(blocker or "").strip()
-                if text and text not in task.blockers:
-                    task.blockers.append(text)
-            self.manager.save(task)
             if parsed.found and parsed.ok:
                 _runner_append_debrief(task, parsed)
             memory_candidates, candidate_note = _record_memory_candidates(self.manager, task, params)
@@ -297,13 +316,14 @@ class SubAgentRunnerResultService:
             task,
         )
         result = self._build_and_persist_result(build_ctx)
-        self._post_result_side_effects(
-            task,
-            result,
-            _PostResultSideEffectParams(
-                output_payload, params.dry_run, extracted.parsed, extracted.lessons, extracted.lesson_ledger
-            ),
+        side_effects = _PostResultSideEffectParams(
+            output_payload, params.dry_run, extracted.parsed, extracted.lessons, extracted.lesson_ledger
         )
+        self._assemble_final_task_fields(task, side_effects)
+        prepared = self._prepare_result_commit(task, params, result)
+        if prepared == "unpersisted":
+            return result
+        self._post_result_side_effects(task, result, side_effects)
         trace_result = partial(
             debug_trace.trace_runner_result,
             debug_trace.SubAgentRunnerTraceRequest(self.manager, task, result, params),
@@ -326,7 +346,7 @@ class SubAgentRunnerResultService:
 
         commit_runner_result(
             self.manager.runtime_db, task, params, result,
-            save_task=self.manager.save, deliver_result=deliver_result,
+            save_task=self.manager.save, deliver_result=deliver_result, prepared=prepared,
         )
         return result
 

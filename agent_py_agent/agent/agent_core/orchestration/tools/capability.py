@@ -39,6 +39,7 @@ from ....subagents.models import (
     task_status_in,
 )
 from ....subagents.runner_session_liveness import has_fresh_runner_session
+from ....subagents.task_control import task_control_blocks_execution
 from ....tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -428,6 +429,7 @@ def _model_requester_run_id(agent: Any) -> str:
 
 
 # LLM: 授权后排队在原创建锁内复读任务；未决请求已闭合且无活 runner 才排队，旧裁决快照不得跨过新控制终态。
+#   canonical PAUSED（或已落盘未投影的控制）时已落盘的授予/拒绝审计照常保留，但不写 PENDING、不重开 TaskLink，只等显式恢复。
 # 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态，不复活后来被停止的孩子。
 def _queue_resolved_child_continuation(
     agent: Any,
@@ -456,6 +458,8 @@ def _queue_resolved_child_continuation(
             },
         ):
             return {"status": "not_queued", "run_id": run_id, "reason": "run_closed_by_control"}
+        if task_control_blocks_execution(task):
+            return {"status": "not_queued", "run_id": run_id, "reason": "run_paused_by_control"}
         if has_fresh_runner_session(task):
             return {"status": "already_running", "run_id": run_id, "reason": "fresh_runner_session"}
         previous_status = str(getattr(task, "status", "") or "")

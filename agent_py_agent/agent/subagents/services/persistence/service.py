@@ -62,6 +62,7 @@ from ...models import (
     task_has_status,
     task_status_in,
 )
+from ...task_control import TASK_CONTROL_ATTR, task_control_generation
 from ...utils import _apply_missing_paths
 from ..agent_run_state import (
     build_agent_run_state,
@@ -1147,6 +1148,7 @@ def _merge_concurrent_capability_and_runner_state(
         task.runner_abandoned_attempt_ids = _unique_strings([
             *existing.runner_abandoned_attempt_ids, *task.runner_abandoned_attempt_ids,
         ])
+    _preserve_canonical_task_control(existing, task)
     # 活动诊断由心跳的窄 mutation 独占写入。旧工具/进度快照保存时不能覆盖或删除它，
     # 否则正常流式进展会抹掉提醒回执，造成重复通知；旧 attempt 的展示仍按 exact ID 隔离。
     diagnostic = (existing.attributes or {}).get("runtime_activity_diagnostic")
@@ -1188,6 +1190,24 @@ def _merge_concurrent_capability_and_runner_state(
     )
     _advance_granted_capability_resume_state(task)
     return replaced
+
+
+# LLM: 任务控制回执只由控制与原宿主收尾的窄 mutation 写，full save 始终保留 canonical 回执；
+#   旧代次快照（控制之前读取）也不能回滚控制投影的状态、失败类型、结束时间与执行轮字段，废弃轮只并集。
+# 函数用途: 让暂停/放弃/恢复的精确代次经得起并发旧快照的整份保存。
+def _preserve_canonical_task_control(existing: SubAgentTask, task: SubAgentTask) -> None:
+    control = (existing.attributes or {}).get(TASK_CONTROL_ATTR)
+    if not isinstance(control, dict):
+        return
+    stale = task_control_generation(task) < task_control_generation(existing)
+    task.attributes = {**dict(task.attributes or {}), TASK_CONTROL_ATTR: copy.deepcopy(control)}
+    if not stale:
+        return
+    task.status, task.failure_type, task.ended_at = existing.status, existing.failure_type, existing.ended_at
+    task.runner_active_attempt_id = existing.runner_active_attempt_id
+    task.runner_abandoned_attempt_ids = _unique_strings([
+        *existing.runner_abandoned_attempt_ids, *task.runner_abandoned_attempt_ids,
+    ])
 
 
 # LLM: A settled attempt with fully resolved capability requests is dispatch-ready, not blocked.
