@@ -115,6 +115,11 @@ class BackgroundAgentService:
         selected_model_config(self.host, profile_id=profile)
         return profile
 
+    # LLM: 只在创建锁内已确认不存在的新行上调用；适配器可附加原安装出处，不授权修改既有线程。
+    # 函数用途: 为新线程提供元数据扩展点；原生入口保持输入不变。
+    def _thread_creation_metadata(self, *, actor, metadata: dict) -> dict:
+        return metadata
+
     def create(self, request: dict, *, actor: object, idempotency_key: str) -> dict:
         request = _params("background_agents.create", request)
         source = self._actor(actor)
@@ -134,14 +139,16 @@ class BackgroundAgentService:
             identity = BackgroundAgentIdentity(identifier, source.thread_id, request["space_id"], request.get("project_ref"),
                                                "available", request.get("after_task", "reuse"), 1)
             current = time.time()
+            metadata = self._thread_creation_metadata(actor=actor, metadata={
+                BACKGROUND_IDENTITY_KEY: identity.to_dict(), "background_purpose": request.get("purpose", ""),
+                "background_creation": {"key": key, "fingerprint": fingerprint}})
             thread = create_thread_atomic(self.store.threads, ConversationThread(
                 thread_id=identifier, canonical_user_id=source.canonical_user_id, owner_id=actor.owner_id,
                 owner_home=str(self.host.home_paths.owner_home_dir), model_profile_id=profile,
                 model_selection_revision=1, model_selection_source="explicit" if request.get("model_profile_id") else "default",
                 model_selection_last_explicit_revision=1 if request.get("model_profile_id") else 0,
                 model_selection_selected_at=current, title=request["name"], created_at=current, updated_at=current,
-                metadata={BACKGROUND_IDENTITY_KEY: identity.to_dict(), "background_purpose": request.get("purpose", ""),
-                          "background_creation": {"key": key, "fingerprint": fingerprint}},
+                metadata=metadata,
             ))
             self._publish(thread)
             return {"agent": _agent_view(thread), "revision": 1}
@@ -161,14 +168,17 @@ class BackgroundAgentService:
         source = self._actor(actor)
         identifier = self._controller_id(actor)
         with locked_file_transition(self.store.storage.threads_dir / ("." + identifier)):
-            if self.get_controller(actor=actor)["available"]:
+            # inactive只是不可接单，不是不存在；仍按原校验拒绝身份冲突，不重写安装出处。
+            self.get_controller(actor=actor)
+            if self.store.threads.load(identifier) is not None:
                 return {"agent_id": identifier, "thread_id": identifier, "created": False}
             current = time.time()
+            metadata = self._thread_creation_metadata(actor=actor, metadata={"business_controller": True})
             create_thread_atomic(self.store.threads, ConversationThread(
                 thread_id=identifier, canonical_user_id=source.canonical_user_id, owner_id=actor.owner_id,
                 owner_home=str(self.host.home_paths.owner_home_dir), title="总控", created_at=current, updated_at=current,
                 model_profile_id=self._profile(), model_selection_revision=1, model_selection_source="default",
-                model_selection_selected_at=current, metadata={"business_controller": True},
+                model_selection_selected_at=current, metadata=metadata,
             ))
             return {"agent_id": identifier, "thread_id": identifier, "created": True}
 

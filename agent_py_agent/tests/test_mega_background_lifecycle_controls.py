@@ -15,6 +15,58 @@ from agent_py_agent.tests.test_business_v12_f3_agents import (
 )
 
 
+def test_thread_creation_metadata_hook_runs_once_per_new_row(business_host):
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+
+    class RecordingService(BackgroundAgentService):
+        def _thread_creation_metadata(self, *, actor, metadata: dict) -> dict:
+            assert actor is original_actor
+            calls.append(dict(metadata))
+            return {**metadata, "installation_provenance": "original-installation"}
+
+    host, original_actor = business_host
+    service, calls = RecordingService(host), []
+    request = {"space_id": "space-A", "name": "new worker"}
+    first = service.create(request, actor=original_actor, idempotency_key="hook-worker")
+    assert len(calls) == 1
+    assert service.create(request, actor=original_actor, idempotency_key="hook-worker") == first
+    controller = service.ensure_controller(actor=original_actor)
+    assert controller["created"] is True and len(calls) == 2
+    for identifier in (first["agent"]["agent_id"], controller["thread_id"]):
+        assert host.conversation_store.threads.require(identifier).metadata["installation_provenance"] == "original-installation"
+    before = host.conversation_store.threads.update_atomic(controller["thread_id"],
+        lambda thread: replace(thread, status="archived"))
+    assert service.ensure_controller(actor=original_actor) == {**controller, "created": False}
+    assert host.conversation_store.threads.require(controller["thread_id"]) == before
+    assert len(calls) == 2
+
+
+def test_thread_creation_hook_does_not_retag_native_or_existing_installation(business_host):
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+
+    service, host, actor = _service(business_host)
+    request = {"space_id": "space-A", "name": "native"}
+    created = service.create(request, actor=actor, idempotency_key="native-hook")
+    controller = service.ensure_controller(actor=actor)
+    worker_thread = host.conversation_store.threads.require(created["agent"]["agent_id"])
+    assert set(worker_thread.metadata) == {"background_agent", "background_purpose", "background_creation"}
+    assert host.conversation_store.threads.require(controller["thread_id"]).metadata == {"business_controller": True}
+
+    class ExistingService(BackgroundAgentService):
+        def _thread_creation_metadata(self, *, actor, metadata: dict) -> dict:
+            pytest.fail("existing canonical row must not be retagged")
+
+    service = ExistingService(host)
+    assert service.create(request, actor=actor, idempotency_key="native-hook") == created
+    assert service.ensure_controller(actor=actor)["created"] is False
+    before = host.conversation_store.threads.update_atomic(controller["thread_id"],
+        lambda thread: replace(thread, status="archived", metadata={**thread.metadata, "installation_provenance": "other-installation"}))
+    assert service.ensure_controller(actor=actor)["created"] is False
+    assert host.conversation_store.threads.require(controller["thread_id"]) == before
+    with pytest.raises(PermissionError, match="OWNER_MISMATCH"):
+        service.ensure_controller(actor=replace(actor, owner_id="foreign"))
+
+
 def worker(business_host):
     service, host, actor = _service(business_host)
     view = service.create({"space_id": "space-A", "name": "worker"}, actor=actor, idempotency_key="worker")["agent"]
