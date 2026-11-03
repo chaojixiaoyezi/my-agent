@@ -245,11 +245,15 @@ class OriginalProcessingRecoverySource:
             raise self.rejection("processing_recovery.defer_failure")
         self._failure_projection = (context, response)
 
-    # LLM: 只在原issued恢复callback中取同owner既有路径；不造manager/工作单，不赋予live worker恢复来源。
+    # LLM: 只在原issued恢复callback中核同owner/parent/request/attempt/lease证明并取既有路径；不从新C代次补原身份。
     # 函数用途: 为原孩子清理返回经过同一配置和归属核验的workspace。
-    def existing_child_workspace(self):
+    def existing_child_workspace(self, proof):
         self.require_writer("processing_recovery.child_workspace")
         _require_published_recovery_binding(self)
+        from .recovery import _validated_capability_closeout
+
+        if _validated_capability_closeout(dict(self.payload, capability_closeout=proof), owner_id=self.home.owner_id) != proof:
+            raise self.rejection("processing_recovery.child_selection")
         root = _recovery_runtime_paths(self)["subagent_workspace"]
         if not root.is_relative_to(self.home.home_dir) or not root.is_dir():
             raise self.rejection("processing_recovery.child_workspace")

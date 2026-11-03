@@ -373,7 +373,7 @@ def _non_negative_int(value: object, *, default: int) -> int:
         return default
 
 
-# LLM: 证明只是待办身份与已产出的原响应，不授执行权；只有原live窗口或已签发恢复来源可消费。
+# LLM: 证明不授执行权；新库存边界须绑定原claim与原响应。旧已选集合沿旧合同，旧pending缺边界必须保持未确认。
 # 函数用途: 校验清理清单仍精确绑定原owner/request/parent/claim。
 def _validated_capability_closeout(payload, *, owner_id=None):
     proof = payload.get("capability_closeout")
@@ -389,12 +389,14 @@ def _validated_capability_closeout(payload, *, owner_id=None):
             or proof.get("request_id") != rid or proof.get("parent_task_id") != parent
             or type(proof.get("owner_id")) is not str or not proof["owner_id"]
             or (owner_id is not None and proof["owner_id"] != owner_id)
-            or any(proof.get(key) != payload.get(key, "" if key != "lease_epoch" else 0)
+            or any(type(proof.get(key)) is not type(payload.get(key, "" if key != "lease_epoch" else 0))
+                   or proof.get(key) != payload.get(key, "" if key != "lease_epoch" else 0)
                    for key in ("execution_attempt_id", "lease_epoch", "lease_owner"))
             or proof.get("reason") not in {"parent_turn_ended", "parent_turn_interrupted"}
             or type(proof.get("acknowledged")) is not bool
             or not isinstance(proof.get("terminal_response"), dict)
             or proof["terminal_response"].get("id") != rid
+            or ("terminal_response" in payload and payload["terminal_response"] != proof["terminal_response"])
             or type(proof.get("snapshot_pending", False)) is not bool
             or (proof.get("snapshot_pending") is True and proof["acknowledged"])
             or not isinstance(proof.get("requests"), dict)
@@ -404,31 +406,114 @@ def _validated_capability_closeout(payload, *, owner_id=None):
         if (type(run_id) is not str or not run_id or not isinstance(ids, list) or not ids
                 or any(type(value) is not str or not value for value in ids) or len(ids) != len(set(ids))):
             raise DataCorruptionError("gateway capability closeout request identity unavailable")
+    boundary = proof.get("selection_boundary")
+    if boundary is not None:
+        if (not isinstance(boundary, dict) or boundary.get("schema_version") != "gateway_capability_selection.v1"
+                or boundary.get("scope") != _capability_selection_scope(proof)
+                or not isinstance(boundary.get("children"), dict)
+                or (proof.get("snapshot_pending") and proof["requests"])):
+            raise DataCorruptionError("gateway capability selection boundary unavailable")
+        for run_id, metadata in boundary["children"].items():
+            if not isinstance(metadata, dict):
+                raise DataCorruptionError("gateway capability selection metadata unavailable")
+            count, indices = metadata.get("request_count"), metadata.get("open_indices")
+            if (type(run_id) is not str or not run_id or metadata.get("run_id") != run_id
+                    or metadata.get("owner_id") != proof["owner_id"]
+                    or metadata.get("parent_task_id") != proof["parent_task_id"]
+                    or type(metadata.get("state_revision")) is not int or metadata["state_revision"] < 1
+                    or type(count) is not int or count < 1 or not isinstance(indices, list) or not indices
+                    or any(type(i) is not int or not 0 <= i < count for i in indices)
+                    or len(indices) != len(set(indices))
+                    or type(metadata.get("request_prefix_sha256")) is not str
+                    or len(metadata["request_prefix_sha256"]) != 64):
+                raise DataCorruptionError("gateway capability selection metadata unavailable")
+        if not proof.get("snapshot_pending") and (
+                proof["requests"].keys() != boundary["children"].keys()
+                or any(len(ids) != len(boundary["children"][run_id]["open_indices"])
+                       for run_id, ids in proof["requests"].items())):
+            raise DataCorruptionError("gateway capability selected set changed")
     return proof
 
 
-# LLM: 一次普通IO错误只在同一原窗口中重试；canonical读回仍不能豁免欠缺的locator，解析失败保pending，来源拒绝不重试。
-# 函数用途: 尝试收口并精确读回，未确认时保留父结果旁的待办证明。
-def _reconcile_capability_closeout(workspace, proof, *, close=None):
-    from ..conversation.agent_activity import reconcile_parent_capability_requests
+# LLM: 纯投影固定原owner/parent/request/attempt/lease/reason及响应字节摘要；不能单独充当来源或恢复许可。
+# 函数用途: 让首份库存边界和以后还原的集合始终属于原来那次结果。
+def _capability_selection_scope(proof):
+    import hashlib
 
-    if proof.get("snapshot_pending"):
+    scope = {key: proof[key] for key in ("owner_id", "parent_task_id", "request_id", "execution_attempt_id",
+                                         "lease_epoch", "lease_owner", "reason")}
+    scope["terminal_response_sha256"] = hashlib.sha256(json.dumps(proof["terminal_response"],
+        sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return scope
+
+
+# LLM: live和冷恢复唯一pending转换；只读原库存，先耐久发表精确ID才可写孩子；缺边界的旧证明不补造，来源拒绝不重试。
+# 函数用途: 把有原库存证据的未完快照恢复成不可扩大的清理清单。
+def _resume_capability_snapshot(workspace, proof, publish):
+    from ..conversation.agent_activity import parent_capability_request_snapshot
+
+    if not proof.get("snapshot_pending"):
+        return True
+    boundary = proof.get("selection_boundary")
+    if boundary is None or publish is None:
         return False
+    for attempt in range(2):
+        selected = {}
+        try:
+            parent_capability_request_snapshot(None, proof["parent_task_id"], request_ids=selected,
+                                               selection_boundary=boundary, workspace=workspace)
+            candidate = dict(proof, requests={run_id: list(ids) for run_id, ids in selected.items()},
+                             snapshot_pending=False, acknowledged=not selected)
+            publish(candidate)
+        except OSError:
+            if attempt == 0:
+                continue
+            return False
+        except (DataCorruptionError, ValueError, TypeError):
+            return False
+        proof.update(candidate)
+        return True
+    return False
+
+
+# LLM: 先恢复原pending库存；一次普通IO仅在同一原窗口重试，读回不能豁免locator，来源拒绝不重试。
+# 函数用途: 尝试收口并精确读回，未确认时保留父结果旁的待办证明。
+def _reconcile_capability_closeout(workspace, proof, *, close=None, publish=None):
+    from ..conversation.agent_activity import (
+        parent_capability_request_snapshot,
+        reconcile_parent_capability_requests,
+    )
+
+    if not _resume_capability_snapshot(workspace, proof, publish):
+        return False
+    boundary = proof.get("selection_boundary")
+    metadata = boundary["children"] if boundary is not None else None
+    if boundary is not None:
+        observed = {}
+        try:
+            parent_capability_request_snapshot(None, proof["parent_task_id"], request_ids=observed,
+                                               selection_boundary=boundary, workspace=workspace)
+        except (OSError, DataCorruptionError, ValueError, TypeError):
+            return False
+        if proof["requests"] != {run_id: list(ids) for run_id, ids in observed.items()}:
+            return False
     selected = {run_id: tuple(ids) for run_id, ids in proof["requests"].items()}
     for attempt in range(2):
         write_confirmed = False
         try:
             if close is None:
-                reconcile_parent_capability_requests(workspace, proof["parent_task_id"], proof["reason"], selected)
+                reconcile_parent_capability_requests(workspace, proof["parent_task_id"], proof["reason"], selected,
+                                                    selection_metadata=metadata)
             else:
                 close()
             write_confirmed = True
         except OSError:
             pass
-        except (DataCorruptionError, json.JSONDecodeError, TypeError):
+        except (DataCorruptionError, ValueError, TypeError):
             return False
         try:
-            confirmed = reconcile_parent_capability_requests(workspace, proof["parent_task_id"], proof["reason"], selected, read_only=True)
+            confirmed = reconcile_parent_capability_requests(workspace, proof["parent_task_id"], proof["reason"], selected,
+                                                            read_only=True, selection_metadata=metadata)
             if confirmed and write_confirmed:
                 return True
         except (OSError, ValueError, TypeError):
@@ -436,27 +521,29 @@ def _reconcile_capability_closeout(workspace, proof, *, close=None):
     return False
 
 
-# LLM: 冷C只取已认证source的原workspace，Count0只用已有同owner Agent；缺失或坏状态保pending，不补建manager。
+# LLM: 冷C只取已认证source原workspace及同claim证明，Count0只用已有同owner Agent；pending沿共享转换，不补建manager。
 # 函数用途: 在合法恢复短窗中补精确孩子清理，不重跑模型或更换终答。
-def _recover_parent_capability_closeout(payload, agent):
+def _recover_parent_capability_closeout(payload, agent, *, publish=None):
+    import copy
+
     from .multiprocess_processing_recovery import current_processing_recovery
 
     source = current_processing_recovery()
     proof = _validated_capability_closeout(payload, owner_id=source.home.owner_id if source is not None else None)
-    if proof is None or proof["acknowledged"] or proof.get("snapshot_pending"):
+    if proof is None or proof["acknowledged"]:
         return payload
+    proof = copy.deepcopy(proof)
     try:
         if source is not None:
-            workspace = source.existing_child_workspace()
+            workspace = source.existing_child_workspace(proof)
         elif agent is not None and agent.home_paths.owner_id == proof["owner_id"]:
             workspace = agent.subagents.workspace
         else:
             return payload
     except OSError:
         return payload
-    if _reconcile_capability_closeout(workspace, proof):
-        payload = dict(payload, capability_closeout=dict(proof, acknowledged=True))
-    return payload
+    proof["acknowledged"] = _reconcile_capability_closeout(workspace, proof, publish=publish)
+    return dict(payload, capability_closeout=proof)
 
 
 def _capability_closeout_pending(payload):
@@ -521,7 +608,11 @@ def _recover_committed_terminal_processing(
                 terminal_payload,
                 terminal_response,
             )
-        reconciled = _recover_parent_capability_closeout(terminal_payload, agent)
+        def publish_selection(proof):
+            write_json_file_atomic(canonical if canonical_committed else request_path,
+                                   dict(terminal_payload, capability_closeout=proof))
+
+        reconciled = _recover_parent_capability_closeout(terminal_payload, agent, publish=publish_selection)
         if reconciled != terminal_payload:
             # 只发表原证明的确认，不改变终答、claim或请求指纹；投影随后沿原幂等链修复。
             write_json_file_atomic(canonical if canonical_committed else request_path, reconciled)

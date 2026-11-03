@@ -618,9 +618,9 @@ class SubAgentPersistenceService:
             return True
 
 
-# LLM: 只改已存在孩子的生命周期元数据；复用原reader、normalizer与canonical guard，不构造manager、目录或工作单。
+# LLM: 只改已存在孩子的生命周期元数据；可选selection在同canonical锁内末核，复用原reader，不构造manager、目录或工作单。
 # 函数用途: 给原请求和已签发恢复短门提供保留未知字段的窄写叶。
-def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Callable[[SubAgentTask], None]) -> SubAgentTask:
+def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Callable[[SubAgentTask], None], *, selection=None) -> SubAgentTask:
     with gateway_short_transaction("child_existing_metadata"):
         run_id = validate_opaque_id(run_id, kind="run_id")
         locator_path = Path(workspace) / run_id / "task.json"
@@ -630,6 +630,8 @@ def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Cal
             task = task_from_payload(copy.deepcopy(payload))
             if task.id != run_id:
                 raise ValueError("existing child identity changed")
+            if selection is not None and not existing_subagent_selection_matches(task, selection):
+                raise ValueError("existing child selection identity changed")
             before = asdict(task)
             reducer(task)
             after = asdict(task)
@@ -666,6 +668,32 @@ def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Cal
                     if updated != locator:
                         write_private_json_file_atomic(path, updated)
             return task_from_payload(payload)
+
+
+# LLM: 只投影canonical中不随grant/终态变化的原前缀身份；不从时间截止或现在的OPEN集合猜过去，不写盘或签权限。
+# 函数用途: 用前缀长度和摘要固定原申请库存，追加申请不会改变这份边界。
+def existing_subagent_selection_metadata(task, *, request_count=None):
+    count = len(task.capability_requests) if request_count is None else request_count
+    if type(count) is not int or not 0 <= count <= len(task.capability_requests):
+        raise ValueError("existing child request prefix unavailable")
+    prefix = [(r.id, r.from_run_id, r.created_at) for r in task.capability_requests[:count]]
+    if len({r[0] for r in prefix}) != count or any(not r[0] or r[1] != task.id for r in prefix):
+        raise ValueError("existing child request prefix identity unavailable")
+    return {"run_id": task.id, "owner_id": task.owner, "parent_task_id": task.parent_id,
+            "created_at": task.created_at,
+            "runtime_authority": copy.deepcopy(task.attributes.get("runtime_authority")),
+            "request_count": count,
+            "request_prefix_sha256": hashlib.sha256(json.dumps(prefix, ensure_ascii=False,
+                sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()}
+
+
+# LLM: 版本可单调前进，身份和原前缀不可换；同检查供选择、锁内写和canonical读回复用，坏值不当空集合。
+# 函数用途: 确认现在读到的还是边界内的同一个孩子和原来的申请。
+def existing_subagent_selection_matches(task, selection):
+    expected = {key: value for key, value in selection.items() if key not in {"state_revision", "open_indices"}}
+    return (type(selection.get("state_revision")) is int
+            and task.state_revision >= selection["state_revision"]
+            and existing_subagent_selection_metadata(task, request_count=selection["request_count"]) == expected)
 
 
 def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
