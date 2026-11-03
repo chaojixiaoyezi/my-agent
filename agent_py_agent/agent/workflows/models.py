@@ -179,6 +179,8 @@ class StepExecutionRecord:
     error_message: str = ''
     escalation_result: dict[str, Any] = field(default_factory=dict)
     needs_repair: bool = False
+    description: str = field(default='', kw_only=True)
+    next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
     # LLM: JSON往返保留修复标记，返回独立快照而不是内部可变字典。
     # 函数用途: 序列化一个步骤的完整运行事实。
@@ -191,7 +193,8 @@ class StepExecutionRecord:
     def from_dict(cls, value):
         if value['status'] not in get_args(StepStatus):
             raise ValueError('未知步骤状态')
-        return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ()))})
+        return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ())),
+                      'next_step_ids': tuple(value.get('next_step_ids', ()))})
 
 
 # LLM: 身份不由正文推导；debug只由引擎内存创建，禁止调试记录进入正式运行Store。
@@ -229,6 +232,7 @@ class WorkflowRunRecord:
     scope_snapshot: dict[str, Any] = field(default_factory=dict, kw_only=True)
     scope_revision: int = field(default=0, kw_only=True)
     revision: int = field(default=0, kw_only=True)
+    progress_seq: int = field(default=0, kw_only=True)
 
     def __post_init__(self) -> None:
         # 这里只定义快照/版本合同；锁内比较与递增由 W3 的原 run_store 实现，不在 DTO 猜 CAS。

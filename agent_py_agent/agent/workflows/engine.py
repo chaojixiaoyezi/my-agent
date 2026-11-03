@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,10 +20,18 @@ from ..assets.delivery_contracts import AssetDisabledError
 from ..assets.descriptor import execution_definition_ref
 from ..assets.script_store import ScriptStore
 from ..assets.skill_adapter import get_owner_skill_descriptor
-from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
+from ..assets.workflow_store import (
+    WorkflowDefinition,
+    WorkflowStore,
+    with_workflow_step_refs,
+)
+from ..assets.workflow_store import (
+    execution_definition_ref as workflow_definition_ref,
+)
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from ..concurrency.interrupt import is_interrupted
+from .concurrency_policy import dispatch
 from .datasource_runtime import (
     _preflight_failure,
     bind_script_execution_record,
@@ -46,7 +56,13 @@ from .run_store import (
     execution_receipt,
     replace_run_record,
 )
-from .script_runner import ScriptRunner, _EntrypointMissing, load_script, parse_script_output
+from .script_runner import (
+    ScriptRunner,
+    _EntrypointMissing,
+    _summary_warning_clock,
+    load_script,
+    parse_script_output,
+)
 
 SUCCESS = ('succeeded', 'escalated_recovered', 'skipped')
 
@@ -107,7 +123,8 @@ def _definition(home, value, workspace_root=None):
 # 函数用途: 依据定义初始化一个待执行步骤。
 def _pending(spec):
     return StepExecutionRecord(spec['step_id'], spec.get('name', spec['step_id']), spec['mode'],
-                               'pending', 0, 0, 0, False, script_id=spec.get('script_id', ''))
+                               'pending', 0, 0, 0, False, script_id=spec.get('script_id', ''),
+                               description=spec.get('description', ''), next_step_ids=tuple(spec.get('next_step_ids', ())))
 
 
 # LLM: 新快照只比执行内容身份；旧无ref快照仍严格比较原pin，不把未知旧定义静默升级。
@@ -135,7 +152,7 @@ class _WorkflowRunLifecycle:
     # 函数用途: 绑定Owner存储、分析及可选通用外部节点执行端口，默认不具备外部节点执行能力。
     def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None,
                  skill_details_resolver=None, workspace_root=None, debug_node_handler=None,
-                 agent_steps=None, run_authorizer=None):
+                 agent_steps=None, run_authorizer=None, step_observer: Callable[[dict], None] | None = None):
         self.owner_home = Path(owner_home).absolute()
         self.workspace_root = workspace_root
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
@@ -144,11 +161,17 @@ class _WorkflowRunLifecycle:
         self.skill_details_resolver = skill_details_resolver
         self.debug_node_handler = debug_node_handler
         self.agent_steps, self.run_authorizer = agent_steps, run_authorizer
+        self.step_observer = step_observer
 
     # LLM: 首次执行冻结定义及脚本版本/hash/来源；owner_id只校验一致性，不建立授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
     def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id='', *,
-                     business_context=None, scope_snapshot=None, workflow_run_id=None, operation_intent=None):
+                     business_context=None, scope_snapshot=None, workflow_run_id=None, operation_intent=None,
+                     concurrency_policy='allow', queue_limit=8):
+        if concurrency_policy == 'allow':
+            concurrency_policy = getattr(self, 'default_concurrency_policy', 'allow')
+        if concurrency_policy not in ('allow', 'skip_if_running', 'queue'):
+            return {'status': 'skipped', 'error_code': 'INVALID_CONCURRENCY_POLICY'}
         definition, descriptor = _definition(self.owner_home, workflow, self.workspace_root)
         self._require_workflow_enabled(definition)
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
@@ -172,15 +195,84 @@ class _WorkflowRunLifecycle:
         definition['_frozen_scripts'] = self._script_pins(definition['steps'])
         record = replace_run_record(record, dict(workflow_name=descriptor['name'], total_steps=len(definition['steps'])))
         execution_receipt(record, phase='preflight', effect_outcome='not_started',
-                          definition_ref=execution_definition_ref(definition, kind='workflow'))
+                          definition_ref=workflow_definition_ref(definition, kind='workflow'))
         self._authorize_run(record, 'preflight')
+        if concurrency_policy != 'allow':
+            record.status = 'queued'
         self.store.create_run(record, definition)
-        with self.store.execution_lock(record.workflow_run_id):
-            return self._drive(record, definition, 0)
+
+        # LLM: 闭包在准入前捕获定义/输入/依赖与本次执行器；不按资产ID重读可变正文，取消终态不可复活。
+        # 函数用途: 取得资产claim后沿本次原run锁及冻结快照执行。
+        def execute_frozen():
+            with self.store.execution_lock(record.workflow_run_id):
+                current = record if concurrency_policy == 'allow' else self.store.load_run(record.workflow_run_id)
+                if current.status in ('cancelled', 'cancelling', 'failed', 'succeeded', 'skipped'):
+                    return current
+                if current.status == 'queued':
+                    current = replace_run_record(current, dict(status='running'))
+                    self.store.save_run(current)
+                return self._drive(current, definition, 0)
+
+        result = dispatch(self.owner_home, 'workflow', descriptor['id'], record.workflow_run_id,
+                          concurrency_policy, execute_frozen, queue_limit=queue_limit)
+        if isinstance(result, dict):
+            result = {**result, 'workflow_run_id': record.workflow_run_id}
+            if result.get('status') == 'skipped':
+                with self.store.execution_lock(record.workflow_run_id):
+                    current = self.store.load_run(record.workflow_run_id)
+                    current.status, current.ended_at = 'skipped', time.time()
+                    self.store.save_run(current)
+                    record = current
+            try:
+                self.store.save_admission_receipt(record.workflow_run_id, result)
+            except Exception as exc:
+                # 入队已发生，回执IO失败不等于执行失败，更不能提示调用方盲目重跑。
+                execution_receipt(record, effect_outcome='unknown' if result['status'] == 'queued' else 'not_started')
+                raise WorkflowExecutionError(record, exc) from exc
+            return self._policy_receipt(result, record)
+        return result
+
+    # LLM: 业务适配端只接本次宿主注入的观察器；原业务服务继续消费DTO，结构化准入回执由原工具返回。
+    # 函数用途: 保留run/resume业务边界的既有强类型返回合同。
+    def _policy_receipt(self, result, record):
+        observer = getattr(self, 'concurrency_admission_observer', None)
+        if isinstance(result, dict) and callable(observer):
+            observer(result)
+            return record
+        return result
 
     # LLM: 参数/补丁先完成无副作用验证，再核后缀版本；合法修复可重钉当前依赖，确认/漂移断点仍强制版本门。
     # 函数用途: 在独占锁内校验修复请求、保存批准的快照变更并续跑，保留成功前缀。
     def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
+                            resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False,
+                            expected_revision=None, operation_key='', control_intent=None,
+                            concurrency_policy='allow', queue_limit=8):
+        if concurrency_policy == 'allow':
+            concurrency_policy = getattr(self, 'default_concurrency_policy', 'allow')
+        if concurrency_policy not in ('allow', 'skip_if_running', 'queue'):
+            return {'status': 'skipped', 'error_code': 'INVALID_CONCURRENCY_POLICY'}
+        options = dict(patched_step_output=payload(patched_step_output), updated_data_sources=payload(updated_data_sources),
+                       resolution_origin=resolution_origin, allow_script_drift=allow_script_drift,
+                       expected_revision=expected_revision, operation_key=operation_key, control_intent=payload(control_intent))
+        # LLM: 参数只捕获本次原运行的显式恢复意图，实际执行仍要经过原CAS和授权门。
+        # 函数用途: 将冻结的恢复请求交给取得claim的原执行器。
+        def callback():
+            return self._resume_workflow_run(workflow_run_id, from_step_id, **options)
+        if concurrency_policy == 'allow':
+            return callback()
+        frozen = self.store._read(workflow_run_id, 'run.json')
+        if options['expected_revision'] is None:
+            options['expected_revision'] = frozen.get('revision', 0)
+        result = dispatch(self.owner_home, 'workflow', frozen['workflow_id'], workflow_run_id,
+                          concurrency_policy, callback, queue_limit=queue_limit)
+        if isinstance(result, dict):
+            from .run_store import _decode_run
+            return self._policy_receipt({**result, 'workflow_run_id': workflow_run_id}, _decode_run(frozen))
+        return result
+
+    # LLM: 公共准入后只消费原run冻结定义、CAS和控制操作账，不从可编辑资产重建运行。
+    # 函数用途: 在原运行排他锁内验证和执行一次显式恢复。
+    def _resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
                             resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False,
                             expected_revision=None, operation_key='', control_intent=None):
         if type(allow_script_drift) is not bool:
@@ -190,6 +282,8 @@ class _WorkflowRunLifecycle:
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
             definition = self.store.load_workflow_snapshot(workflow_run_id)
+            if not operation_key and expected_revision is not None and expected_revision != record.revision:
+                raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
             self._require_workflow_enabled(definition)
             if operation_key:
                 self._authorize_run(record, 'preflight')
@@ -257,9 +351,11 @@ class _WorkflowRunLifecycle:
                              needs_repair=False, current_step_id='', final_output={}, resumed_from_step_id=ids[start] if start < len(ids) else ''))
             record = replace_run_record(record, dict(breakpoint=None))
             if repaired:
-                published = self.store.save_step_result(workflow_run_id, repaired)
+                published = self.store.save_step_result(workflow_run_id, repaired, resuming=True)
                 record.revision = published.revision
-            self.store.save_run(record)
+            self.store.save_run(record, resuming=True)
+            if repaired:
+                self._step_progress(record, repaired, {'seq': record.progress_seq})
             result = self._drive(record, definition, start + bool(repaired))
             return self.store.complete_control(workflow_run_id, operation_key) if operation_key else result
 
@@ -299,7 +395,8 @@ class _WorkflowRunLifecycle:
             record = replace_run_record(record, dict(status='running' if completed.status == 'succeeded' else 'failed',
                 needs_repair=completed.needs_repair, failed_step_id=completed.step_id if completed.needs_repair else '',
                 current_step_id=completed.step_id, breakpoint=None))
-            self.store.save_run(record)
+            self.store.save_run(record, resuming=True)
+            self._step_progress(record, completed, {'seq': record.progress_seq})
             return record
         step = record.steps[index]
         previous = payload(step.escalation_result)
@@ -339,7 +436,8 @@ class _WorkflowRunLifecycle:
         step.needs_repair, step.ended_at = step.status == 'failed', time.time()
         record = replace_run_record(record, dict(status='running' if step.status == 'succeeded' else 'failed',
             needs_repair=step.needs_repair, failed_step_id=step.step_id if step.needs_repair else '', breakpoint=None))
-        self.store.save_run(record)
+        self.store.save_run(record, resuming=True)
+        self._step_progress(record, step, {'seq': record.progress_seq})
         if step.status == 'failed':
             return record
         return self._drive(record, definition, index + 1)
@@ -555,19 +653,24 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # 函数用途: 尽力回写最近状态、耗时及错误。
     def _record_summary(self, record):
         try:
-            if self.workspace_root is not None:
-                current = WorkflowStore(self.owner_home, workspace_root=self.workspace_root).get_workflow(record.workflow_id)
-                if current is not None and current.descriptor.scope_layer != 'owner':
-                    return
-            summary = WorkflowStore(self.owner_home).record_run_summary
+            summary = WorkflowStore(self.owner_home, workspace_root=self.workspace_root).record_run_summary
             breakpoint = record.breakpoint or {}
             error = ': '.join(str(breakpoint[key]) for key in ('error_code', 'error_message') if breakpoint.get(key))
             if not error:
                 error = next((f'{s.error_code}: {s.error_message}' for s in record.steps if s.step_id == record.failed_step_id), '')
             summary(record.workflow_id, record.status, record.duration_ms,
-                    datetime.fromtimestamp(record.ended_at, timezone.utc).isoformat(), last_error=error)
-        except Exception:
-            pass
+                    datetime.fromtimestamp(record.ended_at, timezone.utc).isoformat(), last_error=error,
+                    blocking=False, run_id=hashlib.sha256(json.dumps(
+                        [record.workflow_run_id, record.ended_at]).encode('utf-8')).hexdigest())
+        except Exception as exc:
+            error_type = type(exc).__name__
+            clock = _summary_warning_clock('workflow:' + error_type)
+            now = time.monotonic()
+            if now - clock[0] >= 60:
+                clock[0] = now
+                error = str(redact_sensitive_value(str(exc)))[:512]
+                logging.getLogger(__name__).warning('workflow summary write failed error_type=%s error=%s',
+                    error_type, error, extra={'error_type': error_type, 'error': error})
 
     # LLM: 失败/暂停在真实步骤停住，结算前核最终合同并保存断点；中断仍先落盘再抛，通知不修改运行事实。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
@@ -616,7 +719,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             ended_at=time.time(), completed_steps=sum(step.status in SUCCESS for step in steps), breakpoint=breakpoint))
         execution_receipt(current, phase=state['phase'],
             effect_outcome='unknown' if state['started'] else 'not_started',
-            definition_ref=execution_definition_ref(definition, kind='workflow'))
+            definition_ref=workflow_definition_ref(definition, kind='workflow'))
         if state.get('commit_observation_unknown'):
             current.breakpoint['can_resume'] = False
         else:
@@ -636,6 +739,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # 函数用途: 执行原顺序步骤并在每个IO边界更新当前事实。
     def _drive_steps(self, record, definition, start, *, execution_state=None):
         state = execution_state
+        progress = {'seq': record.progress_seq}
+        for pending in record.steps[start:]:
+            self._step_progress(record, pending, progress)
         timer = time.monotonic()
         outputs = {s.step_id: payload(s.output_snapshot) for s in record.steps[:start] if s.status in SUCCESS and s.status != 'skipped'}
         for spec in definition['steps'][start:]:
@@ -645,6 +751,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             clock = time.monotonic()
+            self._step_progress(record, step, progress)
             state.update(record=record)
             try:
                 _check_stop()
@@ -667,11 +774,13 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             if step.status == 'waiting_for_agent':
+                self._step_progress(record, step, progress)
                 record = replace_run_record(record, dict(status='waiting_for_agent', needs_repair=False,
                     current_step_id=step.step_id, ended_at=0, breakpoint=None))
                 execution_receipt(record, phase='waiting_for_agent', effect_outcome='running')
                 self.store.save_run(record)
                 return record
+            self._step_progress(record, step, progress)
             if step.status in ('failed', 'paused_for_resume'):
                 if not step.needs_repair and step.output_snapshot:
                     outputs[step.step_id] = payload(step.output_snapshot)
@@ -689,7 +798,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         _check_stop()
         execution_receipt(record, phase='finalize' if record.breakpoint else 'terminal',
             effect_outcome='confirmed' if record.status == 'succeeded' else 'failed',
-            definition_ref=execution_definition_ref(definition, kind='workflow'))
+            definition_ref=workflow_definition_ref(definition, kind='workflow'))
         state.update(record=record, phase='terminal')
         self.store.save_run(record)
         state.update(record=record, committed=True)
@@ -697,6 +806,24 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             self._notify_breakpoint(record)
         self._record_summary(record)
         return record
+
+    # LLM: 只投影已发表步骤；序号属于本次执行栈，观察器失败不能改业务或回落文本通道。
+    # 函数用途: 向可选XC-1类型端口发送一次节点状态变化。
+    def _step_progress(self, run, step, progress):
+        if not callable(self.step_observer) or step.status not in ('pending', 'running', 'succeeded', 'failed', 'skipped', 'escalated_recovered'):
+            return
+        try:
+            run.progress_seq, run.revision = self.store.reserve_progress_seq(run.workflow_run_id)
+            progress['seq'] = run.progress_seq
+            event = {'workflow_run_id': run.workflow_run_id, 'workflow_id': run.workflow_id,
+                     'step_id': step.step_id, 'name': step.name,
+                     'status': 'succeeded' if step.status == 'escalated_recovered' else step.status,
+                     'duration_ms': max(0, int(step.duration_ms)) if step.status not in ('pending', 'running') else 0,
+                     'description': step.description, 'next_step_ids': list(step.next_step_ids), 'seq': progress['seq']}
+            self.step_observer(event)
+        except Exception:
+            # best-effort: 进度只是展示投影，不覆盖业务执行事实。
+            pass
 
     # LLM: 正式链仍只原三模式；条件别名纯求值，脚本别名及审批/通知都先过debug副作用门，内置mock例外不变。
     # 函数用途: 复用旧脚本执行链并安全分派单节点，不能从mode别名/config或分析器属性取得新权限。
@@ -954,7 +1081,12 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         if run is not None:
             self._admit_effect(run, record)
         _check_stop()
-        output = self.analysis_handler(payload(spec), context, resolved)
+        try:
+            output = self.analysis_handler(payload(spec), context, resolved)
+        finally:
+            attempts = getattr(context, 'analysis_attempts', None)
+            if isinstance(attempts, list):
+                record.escalation_result['analysis_attempts'] = redact_sensitive_value(payload(attempts))
         _check_stop()
         output = payload(output)
         if not isinstance(output, dict):
