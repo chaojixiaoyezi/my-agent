@@ -1,7 +1,11 @@
 """案件与协同的真实网关往返；纯函数测试补充边界值，不替代原生入口。"""
 from __future__ import annotations
 
+import errno
+import os
 import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -467,3 +471,244 @@ def test_case_path_compares_timezone_offsets(native):
     assert [row['label'] for row in path['path']] == ['early', 'later']
     chain = completed(wire(native, 'soc.graph.case_chain.get', params))
     assert [row['technique_id'] for row in chain['stages']] == ['T1000', 'T1001']
+
+
+# LLM: 只通过公开写入口建立普通记录，保留真实 owner、空间、版本和确认时间。
+# 函数用途: 创建负载测试用的案件或待确认、已确认告警。
+def _workload_record(server, kind, *, assignee=None, selected_space=None):
+    sid = selected_space or space(server)
+    if kind == 'case':
+        params = {'space_id': sid, 'title': 'SLA案件', 'severity': 'high'}
+        if assignee is not None:
+            params['assignee'] = assignee
+        return completed(wire(server, 'soc.cases.create', params))['case']
+    result = completed(wire(server, 'soc.alerts.ingest', {'space_id': sid, 'alerts': [{
+        'external_ref': uuid.uuid4().hex, 'title': 'SLA告警', 'severity': 'high'}]}))
+    row = completed(wire(server, 'soc.alerts.get', {
+        'alert_id': result['results'][0]['alert_id']}))['alert']
+    changes = {}
+    if assignee is not None:
+        changes['assignee'] = assignee
+    if kind == 'acknowledged':
+        changes['status'] = 'acknowledged'
+    if changes:
+        row = completed(wire(server, 'soc.alerts.update', {
+            'alert_id': row['alert_id'], **changes}, revision=row['revision']))['alert']
+    return row
+
+
+# LLM: 每次请求均走真实 W0 HTTP；检查完整信封及逐字段业务结果，不只检查状态码。
+# 函数用途: 精确核对负载查询的成功回执。
+def _assert_workload(server, params, expected, *, user='business-alice'):
+    response = wire(server, 'cases.workload', params, user=user)
+    data = completed(response)
+    body = response[1]
+    assert set(body) == {'request_id', 'operation_id', 'state', 'data', 'error',
+                         'allowed_actions', 'warnings', 'effect_outcome'}
+    assert body['request_id'].startswith('v13-')
+    assert body['operation_id'] is None and body['effect_outcome'] == 'none'
+    assert body['allowed_actions'] == [] and body['warnings'] == []
+    assert data == expected
+    return data
+
+
+# LLM: 空分组与无可评估阶段都保留 null；数字零只用于真实计数。
+# 函数用途: 构造完整的预期分析师负载投影。
+def _expected_workload_load(*, kind=None, row=None, breaches=None, assignee=None):
+    return {'assignee': assignee, 'open_cases': int(kind == 'case'), 'investigating_cases': 0,
+            'open_alerts': int(kind in ('pending', 'acknowledged')),
+            'oldest_open_at': row['created_at'] if row else None, 'sla_breaches': breaches}
+
+
+# LLM: null 与数字零分别覆盖；不同阶段独立评估，两阶段同时超时也只计一条记录。
+# 函数用途: 经真实策略写入和独立负载请求验证可空 SLA 全组合。
+@pytest.mark.parametrize('kind,index', [('pending', 0), ('acknowledged', 1), ('case', 2)])
+@pytest.mark.parametrize('ack,resolve,elapsed,expected', [
+    (5, 5, 600, (1, 1, 1)),
+    (5, 5, 0, (0, 0, 0)),
+    (5, None, 600, (1, None, None)),
+    (5, None, 0, (0, None, None)),
+    (None, 5, 600, (1, 1, 1)),
+    (None, 5, 0, (0, 0, 0)),
+    (None, None, 600, (None, None, None)),
+    (None, None, 0, (None, None, None)),
+    (5, 20, 600, (1, 0, 0)),
+    (20, 5, 600, (1, 1, 1)),
+    (0, 0, 0, (0, 0, 0)),
+    (0, 0, 1, (1, 1, 1)),
+    (5, 5, 300, (0, 0, 0)),
+])
+def test_workload_nullable_sla_http(native, monkeypatch, kind, index, ack, resolve, elapsed, expected):
+    row = _workload_record(native, kind)
+    policy = {'space_id': row['space_id'], 'policies': [
+        {'severity': 'high', 'ack_minutes': ack, 'resolve_minutes': resolve}]}
+    key = uuid.uuid4().hex
+    saved = completed(wire(native, 'monitors.sla.set', policy, key, 0))
+    assert saved == {'policies': policy['policies'], 'revision': 1}
+    assert completed(wire(native, 'monitors.sla.set', policy, key, 0)) == saved
+    # 只固定聚合的观察时刻；HTTP 身份、领域写入及原生存储均保持真实入口。
+    observed_at = datetime.fromisoformat(row['created_at']) + timedelta(seconds=elapsed)
+    monkeypatch.setattr(cases, 'w8_now', lambda call: observed_at.isoformat())
+    _assert_workload(native, {'space_id': row['space_id']}, {
+        'analysts': [], 'unassigned': _expected_workload_load(
+            kind=kind, row=row, breaches=expected[index]), 'coverage': 'complete'})
+    current = completed(wire(native, 'monitors.sla.get', {'space_id': row['space_id']}))
+    assert current['policies'] == policy['policies']
+
+
+# LLM: 其它严重度或空间的策略不授予当前记录 SLA 目标。
+# 函数用途: 验证无策略和不匹配策略继续返回未知。
+@pytest.mark.parametrize('policy_scope', ['missing', 'different_severity', 'different_space'])
+def test_workload_without_applicable_policy_http(native, policy_scope):
+    row = _workload_record(native, 'case')
+    if policy_scope != 'missing':
+        sid = row['space_id']
+        severity = 'critical'
+        if policy_scope == 'different_space':
+            sid = completed(wire(native, 'spaces.create', {'name': '另一策略空间'}))['space_id']
+            severity = 'high'
+        completed(wire(native, 'monitors.sla.set', {'space_id': sid, 'policies': [
+            {'severity': severity, 'ack_minutes': 0, 'resolve_minutes': 0}]}, revision=0))
+    _assert_workload(native, {'space_id': row['space_id']}, {
+        'analysts': [], 'unassigned': _expected_workload_load(kind='case', row=row), 'coverage': 'complete'})
+
+
+# LLM: 同组部分记录可评估时返回实际计数；关闭记录不计入，也不能被只读查询回写。
+# 函数用途: 验证混合阶段、稳定排序、归属筛选及终态保留。
+def test_workload_mixed_stages_and_closed_records_http(native, monkeypatch):
+    case = _workload_record(native, 'case', assignee='zeta')
+    case = completed(wire(native, 'soc.cases.update', {
+        'case_id': case['case_id'], 'status': 'investigating'}, revision=case['revision']))['case']
+    _workload_record(native, 'pending', assignee='zeta')
+    acknowledged = _workload_record(native, 'acknowledged', assignee='alpha')
+    unassigned = _workload_record(native, 'case')
+    closed = _workload_record(native, 'case', assignee='zeta')
+    closed = completed(wire(native, 'soc.cases.update', {
+        'case_id': closed['case_id'], 'status': 'closed'}, revision=closed['revision']))['case']
+    resolved = _workload_record(native, 'pending', assignee='zeta')
+    resolved = completed(wire(native, 'soc.alerts.update', {
+        'alert_id': resolved['alert_id'], 'status': 'resolved'}, revision=resolved['revision']))['alert']
+    completed(wire(native, 'monitors.sla.set', {'space_id': case['space_id'], 'policies': [
+        {'severity': 'high', 'ack_minutes': 5, 'resolve_minutes': None}]}, revision=0))
+    observed_at = datetime.fromisoformat(case['created_at']) + timedelta(minutes=10)
+    monkeypatch.setattr(cases, 'w8_now', lambda call: observed_at.isoformat())
+    alpha = _expected_workload_load(kind='acknowledged', row=acknowledged, assignee='alpha')
+    zeta = {**_expected_workload_load(kind='case', row=case, breaches=1, assignee='zeta'),
+            'investigating_cases': 1, 'open_alerts': 1}
+    _assert_workload(native, {'space_id': case['space_id']}, {
+        'analysts': [alpha, zeta], 'unassigned': _expected_workload_load(kind='case', row=unassigned),
+        'coverage': 'complete'})
+    _assert_workload(native, {'space_id': case['space_id'], 'assignee': 'alpha'}, {
+        'analysts': [alpha], 'unassigned': _expected_workload_load(), 'coverage': 'complete'})
+    _assert_workload(native, {'space_id': case['space_id'], 'assignee': 'missing'}, {
+        'analysts': [], 'unassigned': _expected_workload_load(), 'coverage': 'complete'})
+    assert completed(wire(native, 'soc.cases.get', {'case_id': closed['case_id']}))['case'] == closed
+    assert completed(wire(native, 'soc.alerts.get', {'alert_id': resolved['alert_id']}))['alert'] == resolved
+
+
+# LLM: 策略 authority 来自当前 owner 和耐久修订，旧回执只能重放，不能覆盖新策略。
+# 函数用途: 验证策略 CAS、幂等冲突、跨身份拒绝及新修订读取。
+def test_workload_policy_revision_and_owner_controls_http(native, monkeypatch):
+    row = _workload_record(native, 'case')
+    initial = {'space_id': row['space_id'], 'policies': [
+        {'severity': 'high', 'ack_minutes': None, 'resolve_minutes': None}]}
+    current = {'space_id': row['space_id'], 'policies': [
+        {'severity': 'high', 'ack_minutes': None, 'resolve_minutes': 5}]}
+    old_key = uuid.uuid4().hex
+    saved = completed(wire(native, 'monitors.sla.set', initial, old_key, 0))
+    assert saved == {'policies': initial['policies'], 'revision': 1}
+    rejected(wire(native, 'monitors.sla.set', current, revision=0), 409, 'REVISION_CONFLICT')
+    rejected(wire(native, 'monitors.sla.set', current, old_key, 0), 409, 'IDEMPOTENCY_CONFLICT')
+    assert completed(wire(native, 'monitors.sla.set', current, revision=1)) == {
+        'policies': current['policies'], 'revision': 2}
+    assert completed(wire(native, 'monitors.sla.set', initial, old_key, 0)) == saved
+    observed_at = datetime.fromisoformat(row['created_at']) + timedelta(minutes=10)
+    monkeypatch.setattr(cases, 'w8_now', lambda call: observed_at.isoformat())
+    _assert_workload(native, {'space_id': row['space_id']}, {
+        'analysts': [], 'unassigned': _expected_workload_load(kind='case', row=row, breaches=1),
+        'coverage': 'complete'})
+    assert completed(wire(native, 'monitors.sla.get', {'space_id': row['space_id']}))['policies'] == current['policies']
+    rejected(wire(native, 'soc.cases.get', {'case_id': row['case_id']}, user='other-owner'),
+             404, 'RESOURCE_NOT_FOUND')
+    _assert_workload(native, {}, {
+        'analysts': [], 'unassigned': _expected_workload_load(), 'coverage': 'complete'}, user='other-owner')
+
+
+# LLM: 枚举结束再 fstat，排除采样器自己的目录 FD；只容忍已关闭的描述符。
+# 函数用途: 取得真实打开的 FD 及其文件身份。
+def _workload_fd_snapshot():
+    directory = next(path for path in (Path('/proc/self/fd'), Path('/dev/fd')) if path.is_dir())
+    with os.scandir(directory) as entries:
+        numbers = [int(entry.name) for entry in entries if entry.name.isdecimal()]
+    result = {}
+    for number in numbers:
+        try:
+            status = os.fstat(number)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            result[number] = (status.st_dev, status.st_ino, status.st_mode)
+    return result
+
+
+# LLM: 真实 FD 已打开后单次注入 EIO；观察器始终执行原集合读口，不伪造实现或响应。
+# 函数用途: 验证预热成功、真实读取失败和重试均无资源泄漏。
+@pytest.mark.parametrize('fail_read', [False, True])
+def test_workload_warmed_http_fd_cleanup(native, monkeypatch, fail_read):
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+    row = _workload_record(native, 'pending')
+    completed(wire(native, 'monitors.sla.set', {'space_id': row['space_id'], 'policies': [
+        {'severity': 'high', 'ack_minutes': 5, 'resolve_minutes': 5}]}, revision=0))
+    params = {'space_id': row['space_id']}
+    expected = {'analysts': [], 'unassigned': _expected_workload_load(
+        kind='pending', row=row, breaches=0), 'coverage': 'complete'}
+    _assert_workload(native, params, expected)
+    owner = resolve_owner_home(native[1].home_paths.root, OwnerIdentity.provider_user('feishu', 'business-alice'))
+    target = owner.home_dir / 'data' / 'business_v13' / 'soc_alerts.json'
+    source = target.stat()
+    original_bytes = target.read_bytes()
+    original_read = os.read
+    original_rows = cases.w8_rows
+    opened, faults, deltas, collections = [], [], [], []
+
+    # LLM: 只匹配已授权测试集合的实际 inode，其余读取保持原生行为。
+    # 函数用途: 在原生读取点记录 FD，并按参数触发一次 I/O 故障。
+    def read(descriptor, size):
+        status = os.fstat(descriptor)
+        if (status.st_dev, status.st_ino) == (source.st_dev, source.st_ino):
+            opened.append((descriptor, (status.st_dev, status.st_ino, status.st_mode)))
+            if fail_read and not faults:
+                faults.append(descriptor)
+                raise OSError(errno.EIO, 'injected workload collection read failure')
+        return original_read(descriptor, size)
+
+    # LLM: 在实际资源获取边界观察原调用，已有 HTTP 工作线程也必须被覆盖。
+    # 函数用途: 记录每次原生集合读取成功或失败后的 FD 差额。
+    def rows(call, collection):
+        before = _workload_fd_snapshot()
+        try:
+            return original_rows(call, collection)
+        finally:
+            deltas.append(len(_workload_fd_snapshot()) - len(before))
+            collections.append(collection)
+
+    with monkeypatch.context() as observer:
+        observer.setattr(cases, 'w8_rows', rows)
+        observer.setattr(os, 'read', read)
+        if fail_read:
+            failed = rejected(wire(native, 'cases.workload', params), 503, 'HOST_NOT_READY')
+            assert failed['effect_outcome'] == 'not_started' and failed['operation_id'] is None
+        _assert_workload(native, params, expected)
+    assert len(faults) == int(fail_read)
+    sequence = ['soc_cases', 'soc_alerts', 'monitor_sla_policies']
+    assert collections == (sequence[:2] if fail_read else []) + sequence
+    assert len(deltas) == len(collections)
+    assert all(delta == 0 for delta in deltas), deltas
+    assert opened, '未进入目标集合的真实 FD 读取点'
+    after = _workload_fd_snapshot()
+    assert all(after.get(number) != identity for number, identity in opened)
+    assert target.read_bytes() == original_bytes
+    print('workload FD evidence:', {'faults': len(faults), 'fd_delta': deltas,
+                                    'source_handles_closed': True})
