@@ -495,3 +495,113 @@ def test_workflow_writer_to_http_opt_in_roundtrip(tmp_path):
         writer.close()
     finally:
         server.stop()
+
+
+# LLM: 仅替换供应商传输；真实 Agent 负责调用账本、回调组装和 sealed 提交，测试不手工绑定或提交。
+# 函数用途: 经真实 generation → writer → HTTP 验证提交前增量与终稿使用同一物理调用编号。
+def test_real_generation_delta_before_commit_matches_sealed_call_over_http(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.backends.base import ModelResponse
+    from agent_py_agent.tests.test_cli_run_conversation import _agent, _StaticBackend
+
+    server = _server(tmp_path / "http")
+    agent = _agent(tmp_path / "execution")
+    writer = None
+    observed = {}
+    text = "这是供应商回调实际产生的公开正文。" * 80
+    server.start()
+    try:
+        code, receipt = _w2_http(server, "/ask", {"goal": "验证正文绑定", "verbose_level": "stream"})
+        assert code == 202
+        request_id = receipt["request_id"]
+        writer = BufferedChunkStreamWriter(gateway_chunk_path(server.paths, request_id), rich_transcript=True)
+        writer.set_verbose_level("stream")
+
+        class Streaming(_StaticBackend):
+            def generate(self, prompt, on_chunk=None, **kwargs):
+                self.calls += 1
+                on_chunk(text[:500])
+                observed["code"], observed["before"] = _w2_http(
+                    server, f"/progress/{request_id}?include=assistant_text_delta")
+                observed["default_code"], observed["default"] = _w2_http(server, f"/progress/{request_id}")
+                observed["call_id"] = model_call_ledger(agent).records()[-1].call_id
+                on_chunk(text[500:])
+                return ModelResponse(text, self.name)
+
+        agent.backend = Streaming()
+        result = agent.run("验证正文绑定", source="gateway", request_id=request_id,
+                           on_chunk=writer, allowed_tools=[], save=False)
+        assert agent.backend.calls == 1 and result.response == text
+        assert observed["code"] == observed["default_code"] == 200
+        before = [row for row in observed["before"]["events"] if row["kind"] == "assistant_text_delta"]
+        assert before, "真实供应商回调在提交前必须已经产生 delta，不能由终稿补造"
+        assert {row["model_call_id"] for row in before} == {observed["call_id"]}
+        assert not any(row["kind"] == "assistant_text_done" for row in observed["before"]["events"])
+        assert not any(row["kind"].startswith("assistant_text_") for row in observed["default"]["events"])
+        code, progress = _w2_http(server, f"/progress/{request_id}?include=assistant_text_delta")
+        assert code == 200
+        text_rows = [row for row in progress["events"] if row["kind"].startswith("assistant_text_")]
+        deltas = [row for row in text_rows if row["kind"] == "assistant_text_delta"]
+        assert "".join(row["text"] for row in deltas) == text
+        assert [row["seq"] for row in deltas] == list(range(len(deltas)))
+        sealed = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()
+                  if json.loads(line).get("kind") == "assistant_final"]
+        assert sealed and sealed[-1]["model_source"]["call_id"] == observed["call_id"]
+        assert text_rows[-1] == {"kind": "assistant_text_done", "model_call_id": observed["call_id"],
+                                 "seq": len(deltas) - 1}
+        assert _w2_http(server, f"/progress/{request_id}?include=assistant_text_delta&since={progress['next']}")[1]["events"] == []
+    finally:
+        if writer is not None:
+            writer.close()
+        server.stop()
+
+
+# LLM: 复用真实工具轮与物理调用账本，不由测试构造 call_id；旧回调在第二次生成中真实重入。
+# 函数用途: 验证多轮 generation 自动重绑身份，旧供应商回调不能污染后一次正文。
+def test_real_generation_tool_boundary_rebinds_and_rejects_late_callback(tmp_path):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.backends.base import ModelResponse
+    from agent_py_agent.tests.test_cli_run_conversation import _agent, _StaticBackend
+
+    agent = _agent(tmp_path)
+    source = agent.home_paths.owner_home_dir / "stream-source.txt"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("真实工具证据", encoding="utf-8")
+    writer = _stream(tmp_path)
+    observed, callbacks = [], []
+    texts = ["先核对当前资料。" * 80, "已核对并完成交付。" * 80]
+
+    class ReadThenReply(_StaticBackend):
+        def generate(self, prompt, on_chunk=None, **kwargs):
+            self.calls += 1
+            callbacks.append(on_chunk)
+            current = model_call_ledger(agent).records()[-1].call_id
+            on_chunk(texts[self.calls - 1])
+            if self.calls == 2:
+                before = _events(writer)
+                callbacks[0]("SyntheticLateOldCall 不得进入新正文。" * 80)
+                assert _events(writer) == before
+            observed.append((current, list(_events(writer))))
+            if self.calls == 1:
+                return ModelResponse(texts[0], self.name, tool_use_blocks=[
+                    {"id": "w2-native-read", "name": "read_file", "input": {"path": str(source)}}])
+            return ModelResponse(texts[1], self.name)
+
+    agent.backend = ReadThenReply()
+    try:
+        result = agent.run("读取资料并完成核对", on_chunk=writer, allowed_tools=["read_file"], save=False)
+        assert agent.backend.calls == 2 and result.tool_rounds == 1 and result.response == texts[1]
+        ids = [call_id for call_id, _rows in observed]
+        assert len(set(ids)) == 2
+        for call_id, rows in observed:
+            assert any(row["kind"] == "assistant_text_delta" and row["model_call_id"] == call_id for row in rows)
+        rows = _events(writer)
+        assert any(row.get("reason") == "tool_call" and row["model_call_id"] == ids[0] for row in rows)
+        assert rows[-1]["kind"] == "assistant_text_done" and rows[-1]["model_call_id"] == ids[1]
+        assert "SyntheticLateOldCall" not in writer.chunk_path.read_text()
+        assert ids == [record.call_id for record in model_call_ledger(agent).records()]
+        assert _read_public_progress_events(writer.chunk_path, 0)[0]
+        assert not any(row["kind"].startswith("assistant_text_")
+                       for row in _read_public_progress_events(writer.chunk_path, 0)[0])
+    finally:
+        writer.close()

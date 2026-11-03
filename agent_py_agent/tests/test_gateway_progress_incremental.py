@@ -89,6 +89,8 @@ def test_read_matches_legacy_slice_on_complete_rows(tmp_path, since: int) -> Non
     assert read_progress_lines(path, since) == (lines, next_cursor)
 
 
+# LLM: 公开工具行按 W2 合同新增 kind，其余白名单、精确字段和源行游标断言保持原样。
+# 函数用途: 锁定新增类型标记后的原公开投影和过滤行消费语义。
 def test_public_events_keep_whitelist_and_cursor_semantics(tmp_path) -> None:
     path = tmp_path / "req.chunks.jsonl"
     path.write_bytes(_sample_stream())
@@ -98,8 +100,8 @@ def test_public_events_keep_whitelist_and_cursor_semantics(tmp_path) -> None:
     assert cursor == 12
     assert events == [
         {"kind": "assistant_commentary", "text": "开始处理"},
-        {"level": "on", "tool": "read_file", "status": "完成"},
-        {"level": "full", "tool": "run_command", "status": "完成", "output": "ok"},
+        {"level": "on", "tool": "read_file", "status": "完成", "kind": "tool_progress"},
+        {"level": "full", "tool": "run_command", "status": "完成", "output": "ok", "kind": "tool_progress"},
         {"kind": "permission_requested", "tool": "run_command", "summary": "执行 ls"},
         {"kind": "assistant_commentary", "text": "中文😀"},
     ]
@@ -107,7 +109,7 @@ def test_public_events_keep_whitelist_and_cursor_semantics(tmp_path) -> None:
     events_mid, cursor_mid = _read_public_progress_events(path, 4)
     assert cursor_mid == 12
     assert events_mid == [
-        {"level": "full", "tool": "run_command", "status": "完成", "output": "ok"},
+        {"level": "full", "tool": "run_command", "status": "完成", "output": "ok", "kind": "tool_progress"},
         {"kind": "permission_requested", "tool": "run_command", "summary": "执行 ls"},
         {"kind": "assistant_commentary", "text": "中文😀"},
     ]

@@ -101,7 +101,7 @@
 
 候选缓冲默认保留末尾 256 字符，累计 128 字符后合批投影（小 holdback 会相应缩小合批阈值）。同调用保留完整投影上下文，未闭合标签属性不提前发送；合法但投影为空的 terminal 也会撤回旧候选并发 done。单调用最多保留 1,048,576 字符，累计处理字符预算默认为 16,777,216，切点扫描、投影与前缀比较按每次候选长度的三倍计费。容量或预算耗尽时发送 `superseded` reset，本调用停止候选投影，最终只发 done；客户端须继续读取权威 `/result`，不能把该回退解释为请求失败。这是工作量上限，不是延迟或外部吞吐保证。
 
-**本分支接线限制：** writer 的 `bind_model_call` 与 HTTP opt-in 投影已有组件接口，但真实 generation 回调尚未绑定该接口。接线位置 `agent_core/tool_model_generation.py` 不在当前 W2 白名单内，不能以 writer 直调测试冒充真实 token 流已经交付。
+**真实调用绑定：** `agent_core/tool_model_generation.py` 在原账本分配物理 `call_id` 后、发送提供方请求前，通过 writer 的 `bind_model_call` 冻结同一个编号到流回调。每次重试和后续工具轮重新分配并绑定，旧回调始终携带旧编号；该编号与最终 sealed-call 的 `model_source.call_id` 一致。普通回调与不支持绑定的旧出口保持原行为。
 
 ## `POST /client/history`：发现并续订阅在途回合
 
@@ -130,4 +130,4 @@ history 增量字段均沿用历史接口的 owner/thread 鉴权，不暴露其�
 
 - **#58-2 外部跟进**：新标签页自动挂载 SSE/轮询的前端不在本仓库；需按上述 history → stream_cursor → progress → result 流程接线。
 - **#58-3 外部跟进**：第二窗口后台巡检流与底部状态栏同步，需消费 in_flight_status/turn_phase 及 `/status`；不因后端字段齐全宣称界面已联通。
-- 测试分为组件检查与本地回环真实 Gateway Client → 路由 → Client 往返；具体通过范围以同版本的测试回执为准。回环通过不等于真实供应商生成链路、外部浏览器或其他机器可达，也不代表上述 generation 接线限制已经解除。
+- 测试分为组件检查、本地回环真实 Gateway Client → 路由 → Client 往返，以及使用合成后端的真实 Agent 生成 → 调用账本 → writer → HTTP progress 链路；具体通过范围以同版本的测试回执为准。合成后端和回环通过不等于真实供应商推理、外部浏览器或其他机器可达。

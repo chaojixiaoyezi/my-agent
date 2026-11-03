@@ -663,11 +663,10 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
     )
 
 
-# LLM: 初始化沿原账本与 observed filter；真实估算前捕获线程CAS版本并随同次快照传递，原排队/取消/工具选择不变。
-# 函数用途: 为一次模型请求建立调用账本、流处理器、重连显示出口和 native 参数。
+# LLM: 原账本先分配物理 call_id，再把同一编号冻结到可选 typed 流出口；估算CAS、重试、取消及工具选择沿原路径。
+# 函数用途: 为一次模型请求建立调用账本，并让实时正文与最终提交使用同一个真实调用编号。
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
     _begin_model_turn_identity(request.params, request.tool_rounds)
-    chunk_filter = _build_tool_boundary_chunk_filter(request)
     usage_binding = capture_context_usage_binding(request.agent, request.params)
     context_snapshot = model_visible_context_snapshot(
         request.agent,
@@ -679,6 +678,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         request,
         context_snapshot=context_snapshot,
     )
+    chunk_filter = _build_tool_boundary_chunk_filter(request, model_call_id=call_id)
     on_chunk = observed_chunk_filter(
         ledger=ledger,
         call_id=call_id,
@@ -1087,21 +1087,27 @@ def _recover_unclosed_long_write_response(request: ModelGenerateParams, response
     return long_write_abort_response(abort, backend=backend)
 
 
-# LLM: 流式边界过滤器的内联上限同样取 MAX_INLINE_WRITE_CONTENT_CHARS 常量；native 直通只 bypass，不改 payload。
-# 函数用途: 为一次流式生成装配工具边界过滤器（超长内联写内容时中止本次流）。
-def _build_tool_boundary_chunk_filter(request: ModelGenerateParams) -> ToolBoundaryChunkFilter:
+# LLM: 沿原内联上限与 native bypass 装配过滤器；仅把当前账本编号交给 typed 流出口，不改模型 payload。
+# 函数用途: 为同一次真实调用装配工具边界过滤器，保留旧调用方的缺省行为。
+def _build_tool_boundary_chunk_filter(
+    request: ModelGenerateParams, *, model_call_id: str = "",
+) -> ToolBoundaryChunkFilter:
     # native 直通：text parser 不解析 native 正文（裁决归 _native_prose_violation，
     # 仅完整伪调用成对才拦），防止正文【提及】marker 被流式中途误杀
     # （真机 2026-08-06 MiniMax 形态）。
     return ToolBoundaryChunkFilter(
-        _model_chunk_callback(request.params.effective_on_chunk),
+        _model_chunk_callback(request.params.effective_on_chunk, model_call_id=model_call_id),
         max_inline_content_chars=MAX_INLINE_WRITE_CONTENT_CHARS,
         bypass=native_tool_use_active(request.params),
     )
 
 
-def _model_chunk_callback(on_chunk: object):
-    """Prefer the typed model-delta sink while preserving plain callbacks."""
+# LLM: 支持绑定的出口拿到冻结物理编号的闭包，迟到回调不会借用新身份；无编号或旧出口仍沿原 write_model/plain 回调。
+# 函数用途: 优先绑定当前真实模型调用，同时兼容旧的文本回调接口。
+def _model_chunk_callback(on_chunk: object, *, model_call_id: str = ""):
+    bind = getattr(on_chunk, "bind_model_call", None)
+    if model_call_id and callable(bind):
+        return bind(model_call_id)
     writer = getattr(on_chunk, "write_model", None)
     return writer if callable(writer) else on_chunk
 
