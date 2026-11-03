@@ -375,18 +375,45 @@ def test_web_recovery_reads_real_events_with_bounded_canonical_continuation(gate
  assert.deepEqual(ids(updates), EVENT_IDS, '原 event_id 与顺序完整');
  assert.equal(served.length, 4); assert.deepEqual(served[3].data.events, []);
  assert.ok(served[3].data.next_cursor, '当前末尾仍返回非空游标');
- assert.equal(observation.cursor, served[3].data.next_cursor); assert.equal(observation.coverage, served[3].data.coverage);
+ assert.equal(observation.cursor, served[3].data.next_cursor);
+ // #69-1按页数预算收口；空页仍有续点，不能把预算耗尽写成已追平。
+ assert.equal(observation.coverage, 'partial');
+ let mark = served.length;
  await observation.recover();
- assert.equal(served.length, 5, '持续非空游标在当前末尾一次请求收口');
- assert.equal(served[4].params.cursor, served[3].data.next_cursor); assert.deepEqual(served[4].data.events, []);
+ assert.equal(served.length, mark + observation.maxCatchUpPages, '尾部恢复必须按页数预算收口');
+ for (let index = mark; index < served.length; index++) {
+   assert.equal(served[index].params.cursor, served[index - 1].data.next_cursor, '逐页沿服务续点继续');
+   assert.deepEqual(served[index].data.events, []);
+ }
+ assert.equal(observation.cursor, served[served.length - 1].data.next_cursor);
+ assert.equal(observation.coverage, 'partial');
  const filtered = new ui.BusinessObservation(api, item => updates.push(item), {space_id: OTHER});
+ mark = served.length;
  await filtered.recover();
- assert.deepEqual(served[5].data.events, []);
- assert.equal(filtered.cursor, served[5].data.next_cursor, '过滤后为空的页也保存扫描续点');
+ assert.equal(served.length, mark + filtered.maxCatchUpPages, '过滤后空页也须按预算补拉');
+ for (let index = mark; index < served.length; index++) {
+   assert.deepEqual(served[index].data.events, []);
+   if (index > mark) assert.equal(served[index].params.cursor, served[index - 1].data.next_cursor);
+ }
+ assert.equal(filtered.cursor, served[served.length - 1].data.next_cursor, '空页仍保存续点');
+ assert.equal(filtered.coverage, 'partial');
+ mark = served.length;
  await filtered.recover();
- assert.equal(served[6].params.cursor, served[5].data.next_cursor);
+ assert.equal(served.length, mark + filtered.maxCatchUpPages);
+ for (let index = mark; index < served.length; index++) {
+   assert.equal(served[index].params.cursor, served[index - 1].data.next_cursor);
+   assert.deepEqual(served[index].data.events, []);
+ }
+ assert.equal(filtered.cursor, served[served.length - 1].data.next_cursor);
+ assert.equal(filtered.coverage, 'partial');
  observation.cursor = null; observation.maxCatchUpPages = 3;
  const before = updates.length;
+ mark = served.length;
  await observation.recover();
- assert.equal(served.length, 10); assert.deepEqual(ids(updates.slice(before)), [], '重扫已见事件按 event_id 去重');
+ assert.equal(served.length, mark + 3);
+ for (let index = mark + 1; index < served.length; index++) {
+   assert.equal(served[index].params.cursor, served[index - 1].data.next_cursor);
+ }
+ assert.equal(observation.cursor, served[served.length - 1].data.next_cursor);
+ assert.deepEqual(ids(updates.slice(before)), [], '重扫已见事件按 event_id 去重');
 ''', SPACE=space['space_id'], OTHER=other['space_id'], EVENT_IDS=event_ids)

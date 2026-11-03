@@ -76,7 +76,7 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
     normalized_schemas = deepcopy(schemas)
     normalized_defs = deepcopy(module.business_defs())
     tasks_get = next(row for row in normalized_api["actions"] if row["action"] == "tasks.get")
-    # 唯一已批准的合同变化：普通任务可没有工作流；其它字段仍受原四个摘要约束。
+    # 已批准的合同变化：普通任务可没有工作流；其它字段仍受原四个摘要约束。
     for result in (normalized_api["$defs"]["Result_tasks_get"],
                    normalized_schemas["$defs"]["Result_tasks_get"],
                    normalized_defs["Result_tasks_get"], tasks_get["result_schema"]):
@@ -84,6 +84,15 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert result["properties"]["workflow_ref"] == {
             "anyOf": [{"$ref": "#/$defs/Id"}, {"type": "null"}]}
         result["properties"]["workflow_ref"] = {"$ref": "#/$defs/Id"}
+    # #49-1仅可选追加画布拓扑字段；先证明不进入required，再规范化比较原冻结目录。
+    canvas = {"WorkflowDefinition": ("datasource_ids", "edges", "schedule_ids"),
+              "WorkflowStepDefinition": ("description", "next_step_ids", "ui_position")}
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        for name, added in canvas.items():
+            assert set(added) <= set(definitions[name]["properties"])
+            assert not set(added) & set(definitions[name].get("required", []))
+            for key in added:
+                del definitions[name]["properties"][key]
     assert digest(normalized_api) == "d7f7859fded58ec5ab3e82a5dc8b1d363c7b45bb9a772deea17dcf54113df737"
     assert digest(normalized_schemas) == "d7883032c859fa4d2c7d6365d50e77b2d3f2cb6fa77904f355925bbf3dca2d4b"
     assert digest(normalized_defs) == "c2441120aa06032bd0aba9a5b83075f72d60d34f7cc69cd376b80779a5b9554a"
