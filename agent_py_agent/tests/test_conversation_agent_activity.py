@@ -803,6 +803,7 @@ def test_main_activity_clock_uses_current_workspace_root_not_panel_or_child() ->
     """同一长会话追加任务后，main 计时必须从当前主任务重新开始。"""
     from agent_py_agent.agent.conversation.agent_activity import (
         BackgroundMainActivitySink,
+        background_main_activity,
         conversation_agent_activity,
     )
 
@@ -859,10 +860,13 @@ def test_main_activity_clock_uses_current_workspace_root_not_panel_or_child() ->
     )
     current_sink.write_thinking("核对当前修复子代理")
     activity = conversation_agent_activity(agent, store, "thread-long")
+    live = background_main_activity(agent, "thread-long", {"task-current"})
 
     assert activity.main_activity["task_id"] == "task-current"
     assert activity.main_activity["activity"] == "核对当前修复子代理"
-    assert activity.main_activity["started_at"] == 300.0
+    # #61-1优先当前主任务的实时回合起点，不复用旧link/子任务或插话时间。
+    assert live["task_id"] == "task-current" and live["started_at"] > 300.0
+    assert activity.main_activity["started_at"] == live["started_at"]
 
 
 def test_conversation_agent_activity_projects_canonical_task_progress(tmp_path: Path) -> None:

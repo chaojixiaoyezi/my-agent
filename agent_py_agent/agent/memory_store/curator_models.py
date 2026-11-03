@@ -68,9 +68,11 @@ class MemoryCuratorConfig:
     auto_promotion_policy: str = "conservative_v1"
     lesson_min_occurrences: int = 2
     hot_min_occurrences: int = 3
+    task_file_evidence_max_chars: int = 4000
+    cross_thread_dedupe_window_seconds: int = 600
 
-    # LLM: 固定引用只从已 normalize 的 AgentConfig 读取编号与重复门槛（lesson>=2、hot>=3），不另解析配置文件或自然语言。
-    # 函数用途: 构造一次运行不可变配置，确保 Curator 队列筛选与 PromotionService 共用同一配置门槛。
+    # LLM: 只从已 normalize 的 AgentConfig 读取固定引用、门槛和证据/去重预算，0值原样保留，不另解析配置文件。
+    # 函数用途: 构造一次运行不可变配置，让 Curator 收集与晋升使用真实配置值。
     @classmethod
     def from_agent_config(cls, config: object) -> MemoryCuratorConfig:
         return cls(
@@ -93,9 +95,11 @@ class MemoryCuratorConfig:
             ).strip(),
             lesson_min_occurrences=max(2, int(getattr(config, "memory_lesson_min_occurrences", 2) or 2)),
             hot_min_occurrences=max(3, int(getattr(config, "memory_hot_min_occurrences", 3) or 3)),
+            task_file_evidence_max_chars=int(getattr(config, "memory_curator_task_file_evidence_max_chars", 4000)),
+            cross_thread_dedupe_window_seconds=int(getattr(config, "memory_curator_cross_thread_dedupe_window_seconds", 600)),
         )
 
-    # LLM: revision 只反映影响策展语义/预算的字段（默认重复门槛不改变既有修订哈希），供 state 标识配置切换。
+    # LLM: revision 反映策展语义/预算；新增字段为默认值时剔除，保持既有state的修订哈希，非默认值仍参与计算。
     # 函数用途: 生成短配置修订号。
     def revision(self) -> str:
         payload = asdict(self)
@@ -103,6 +107,10 @@ class MemoryCuratorConfig:
             payload.pop("lesson_min_occurrences", None)
         if payload.get("hot_min_occurrences") == 3:
             payload.pop("hot_min_occurrences", None)
+        if payload.get("task_file_evidence_max_chars") == 4000:
+            payload.pop("task_file_evidence_max_chars", None)
+        if payload.get("cross_thread_dedupe_window_seconds") == 600:
+            payload.pop("cross_thread_dedupe_window_seconds", None)
         material = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return "curator-config-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 

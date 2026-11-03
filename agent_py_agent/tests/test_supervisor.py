@@ -652,7 +652,7 @@ def test_incident_spawn_sets_allocator_defaults(incident_gateway, monkeypatch, o
 
 
 # LLM: 替换全局信号和faulthandler边界，注册本身不对测试进程安装真实handler。
-# 函数用途: 验证诊断注册、身份绑定公告与恢复注销。
+# 函数用途: 验证Python信号标记、导出线程、身份绑定公告及恢复清理。
 def test_incident_gateway_registers_and_restores_diagnostic_signal(incident_gateway, monkeypatch):
     import faulthandler
 
@@ -661,19 +661,24 @@ def test_incident_gateway_registers_and_restores_diagnostic_signal(incident_gate
     case = incident_gateway
     events = []
     monkeypatch.setattr(signal, "getsignal", lambda _: "previous")
-    monkeypatch.setattr(signal, "signal", lambda *a: None)
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: events.append(("signal", sig, handler)))
     monkeypatch.setattr(faulthandler, "enable", lambda **k: events.append(("enable", k)))
-    monkeypatch.setattr(faulthandler, "register", lambda sig, **k: events.append(("register", sig, k)), raising=False)
-    monkeypatch.setattr(faulthandler, "unregister", lambda sig: events.append(("unregister", sig)), raising=False)
+    monkeypatch.setattr(faulthandler, "register", lambda *a, **k: events.append(("register", a, k)), raising=False)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
-    assert ("enable", {"all_threads": True}) in events
+    try:
+        assert ("enable", {"all_threads": True}) in events
+        # #53-6只装Python置位handler，不能退回C层全线程采栈。
+        assert not any(event[0] == "register" for event in events)
+        if hasattr(signal, "SIGUSR1"):
+            installed = [event for event in events if event[0] == "signal" and event[1] == signal.SIGUSR1]
+            assert len(installed) == 1 and installed[0][2] is previous.diagnostic_handler
+            assert previous.stack_dumper is not None and previous.stack_dumper.thread.is_alive()
+            assert json.loads(case.paths.state.read_text(encoding="utf-8"))["diagnostic_sigusr1"] is True
+    finally:
+        gp._restore_gateway_signal_handlers(previous)
     if hasattr(signal, "SIGUSR1"):
-        assert any(e[0] == "register" and e[1] == signal.SIGUSR1 and e[2] == {
-            "file": sys.stderr, "all_threads": True, "chain": False} for e in events)
-        assert json.loads(case.paths.state.read_text(encoding="utf-8"))["diagnostic_sigusr1"] is True
-    gp._restore_gateway_signal_handlers(previous)
-    if hasattr(signal, "SIGUSR1"):
-        assert ("unregister", signal.SIGUSR1) in events
+        assert ("signal", signal.SIGUSR1, "previous") in events
+        assert not previous.stack_dumper.thread.is_alive()
         assert json.loads(case.paths.state.read_text(encoding="utf-8"))["diagnostic_sigusr1"] is False
 
 
@@ -751,8 +756,8 @@ def test_incident_diagnostics_never_blindly_signals_legacy_gateway(incident_gate
 
 
 # LLM: faulthandler失败只降低诊断能力，不能破坏原TERM/INT安装或公告不存在的注册。
-# 函数用途: 覆盖各诊断注册/恢复接口的预期平台异常。
-@pytest.mark.parametrize("operation", ["enable", "register", "unregister"])
+# 函数用途: 覆盖enable、Python信号安装及导出线程启动异常，停止处理器必须保留。
+@pytest.mark.parametrize("operation", ["enable", "usr1_handler", "dumper_start"])
 @pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
 def test_incident_fault_handler_errors_preserve_stop_handlers(incident_gateway, monkeypatch, operation, error):
     import faulthandler
@@ -761,24 +766,40 @@ def test_incident_fault_handler_errors_preserve_stop_handlers(incident_gateway, 
 
     case, calls = incident_gateway, []
     monkeypatch.setattr(signal, "getsignal", lambda _: "old")
-    monkeypatch.setattr(signal, "signal", lambda sig, handler: calls.append(("signal", sig)))
-
-    # LLM: 仅诊断API替身按选定异常失败，原停止处理仍由产品安装。
-    # 函数用途: 模拟平台诊断接口失败。
+    # 仅诊断接口按选定异常失败，原TERM/INT安装和恢复仍走生产实现。
     def maybe_fail(name, *args, **kwargs):
         calls.append((name, args))
         if name == operation:
             raise error("synthetic diagnostic failure")
 
+    def install(sig, handler):
+        calls.append(("signal", (sig, handler)))
+        if sig == getattr(signal, "SIGUSR1", None) and callable(handler) and operation == "usr1_handler":
+            maybe_fail("usr1_handler", sig)
+
+    real_init = gp._GatewayStackDumper.__init__
+
+    def dumper_init(self):
+        real_init(self)
+        if operation == "dumper_start":
+            self.thread.start = lambda: maybe_fail("dumper_start")
+
+    monkeypatch.setattr(signal, "signal", install)
     monkeypatch.setattr(faulthandler, "enable", lambda **k: maybe_fail("enable", **k))
-    monkeypatch.setattr(faulthandler, "register", lambda *a, **k: maybe_fail("register", *a, **k), raising=False)
-    monkeypatch.setattr(faulthandler, "unregister", lambda *a: maybe_fail("unregister", *a), raising=False)
+    monkeypatch.setattr(gp._GatewayStackDumper, "__init__", dumper_init)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
-    assert signal.SIGTERM in previous and signal.SIGINT in previous
-    if operation == "register":
-        assert json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1") is not True
-    gp._restore_gateway_signal_handlers(previous)
-    assert any(name == operation for name, _ in calls)
+    try:
+        assert signal.SIGTERM in previous and signal.SIGINT in previous
+        if operation != "enable" and hasattr(signal, "SIGUSR1"):
+            assert json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1") is not True
+            assert previous.diagnostic_published is False
+            assert signal.SIGUSR1 not in previous and previous.stack_dumper is None
+    finally:
+        gp._restore_gateway_signal_handlers(previous)
+    assert ("signal", (signal.SIGTERM, "old")) in calls
+    assert ("signal", (signal.SIGINT, "old")) in calls
+    if operation == "enable" or hasattr(signal, "SIGUSR1"):
+        assert any(name == operation for name, _ in calls)
 
 
 # LLM: 不注册诊断的旧版也会耗时采集；TERM必须在采集返回后再核原代，不能依赖采集前观测。
@@ -803,11 +824,11 @@ def test_incident_termination_retains_diagnostics_until_cleanup_finishes(inciden
 
     case = incident_gateway
     monkeypatch.setattr(signal, "getsignal", lambda _: signal.SIG_DFL)
-    monkeypatch.setattr(signal, "signal", lambda *a: None)
+    usr1_restores = []
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: usr1_restores.append(handler)
+                        if sig == getattr(signal, "SIGUSR1", None) and handler is signal.SIG_DFL else None)
     monkeypatch.setattr(gp.faulthandler, "enable", lambda **k: None)
-    monkeypatch.setattr(gp.faulthandler, "register", lambda *a, **k: None, raising=False)
-    unregister, log_event = MagicMock(), MagicMock()
-    monkeypatch.setattr(gp.faulthandler, "unregister", unregister, raising=False)
+    log_event = MagicMock()
     monkeypatch.setattr(gp, "log_gateway_event", log_event)
     context = SimpleNamespace(process_identity=case.identity, process_started_at=1, control_plane=None)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
@@ -841,9 +862,11 @@ def test_incident_termination_retains_diagnostics_until_cleanup_finishes(inciden
             log_event.assert_not_called()
         sv._capture_unresponsive_gateway_diagnostics(case.supervisor, 12345, case.identity)
         assert ((signal.SIGUSR1, 12345) in case.events) is same_generation
+        assert usr1_restores == []
     finally:
         gp._restore_gateway_signal_handlers(previous)
-    unregister.assert_called_once_with(signal.SIGUSR1)
+    assert usr1_restores == [signal.SIG_DFL]
+    assert not previous.stack_dumper.thread.is_alive()
     restored = json.loads(case.paths.state.read_text(encoding="utf-8"))
     assert restored == ({**state, "diagnostic_sigusr1": False} if same_generation else successor_state)
     sv._capture_unresponsive_gateway_diagnostics(case.supervisor, 12345, case.identity)

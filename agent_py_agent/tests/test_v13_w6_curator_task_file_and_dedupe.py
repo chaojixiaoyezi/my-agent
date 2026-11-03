@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -19,11 +19,11 @@ from agent_py_agent.agent.memory_store.curator_inputs import (
 )
 from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig, MemoryCuratorState
 from agent_py_agent.agent.memory_store.daily import DailyMemoryEvent, DailyMemoryStore
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _config(**changes):
-    return SimpleNamespace(**{**asdict(MemoryCuratorConfig()), 'task_file_evidence_max_chars': 4000,
-        'cross_thread_dedupe_window_seconds': 600, **changes})
+    return replace(MemoryCuratorConfig(), **changes)
 
 
 def _store_messages(root, count=1, *, text='SYNTHETIC_ONLY_RULE', channel='tui', created_at=6000.0):
@@ -109,6 +109,59 @@ def test_task_file_custom_budget_and_overall_budget(tmp_path):
     assert len(getattr(batch.messages[0], 'referenced_files', ())) == 1
     assert len(batch.messages[0].referenced_files[0]['excerpt']) == 71
     assert len(json.dumps(batch.to_model_payload(), ensure_ascii=False)) <= 40000
+
+
+# 走真实配置快照和收集入口，不能靠给测试替身临时加属性绕过配置接线。
+@pytest.mark.parametrize('budget', [0, 71, 40000])
+def test_agent_config_file_evidence_budget_reaches_collect(tmp_path, budget):
+    path = tmp_path / 'SYNTHETIC_ONLY_policy.md'
+    store, messages = _store_messages(tmp_path, text=f'完整阅读 `{path}` 并照做。')
+    body = 'SYNTHETIC_ONLY_FROZEN_RULE\n' * 500
+    source, _, digest = _artifact(tmp_path, messages[0], path, body=body)
+    config = MemoryCuratorConfig.from_agent_config(AgentConfig(
+        memory_curator_task_file_evidence_max_chars=budget))
+    batch = _collect(tmp_path, store, tool_source=source, config=config)
+    assert len(batch.messages) == 1
+    evidence = batch.messages[0].referenced_files
+    if budget == 0:
+        assert evidence == ()
+    else:
+        assert len(evidence) == 1
+        assert evidence[0]['excerpt'] == body[:budget]
+        assert evidence[0]['sha256'] == digest
+    assert config.task_file_evidence_max_chars == budget
+
+
+@pytest.mark.parametrize(('window', 'created_at', 'model_messages'), [
+    (0, 6059.0, 2), (60, 6059.0, 2), (600, 6059.0, 1), (86400, 6599.0, 1),
+])
+def test_agent_config_dedupe_window_reaches_collect(tmp_path, window, created_at, model_messages):
+    # 6059/6060 跨60秒桶，但仍处于同一个600秒桶；原始消息与游标必须始终保留两条。
+    store, messages = _store_messages(tmp_path, 2, created_at=created_at)
+    config = MemoryCuratorConfig.from_agent_config(AgentConfig(
+        memory_curator_cross_thread_dedupe_window_seconds=window))
+    batch = _collect(tmp_path, store, config=config)
+    assert {message.message_id for message in batch.messages} == {message.message_id for message in messages}
+    assert len(batch.to_model_payload()['messages']) == model_messages
+    if window == 0:
+        assert all(not message.broadcast for message in batch.messages)
+    assert getattr(config, 'cross_thread_dedupe_window_seconds', 600) == window
+
+
+def test_agent_config_default_revision_preserves_legacy_state():
+    # 修复前真实默认快照的摘要；新默认字段不能使既有state误判为配置切换。
+    assert MemoryCuratorConfig().revision() == 'curator-config-2a1d051db3fe348b'
+    assert MemoryCuratorConfig.from_agent_config(AgentConfig()).revision() == MemoryCuratorConfig().revision()
+
+
+@pytest.mark.parametrize(('field', 'value', 'default'), [
+    ('task_file_evidence_max_chars', 0, 4000), ('task_file_evidence_max_chars', 71, 4000),
+    ('cross_thread_dedupe_window_seconds', 0, 600), ('cross_thread_dedupe_window_seconds', 60, 600),
+])
+def test_agent_config_nondefault_revision_changes_and_restores(field, value, default):
+    config = MemoryCuratorConfig.from_agent_config(AgentConfig(**{f'memory_curator_{field}': value}))
+    assert config.revision() != MemoryCuratorConfig().revision()
+    assert replace(config, **{field: default}).revision() == MemoryCuratorConfig().revision()
 
 
 def test_real_tool_archive_and_control_plane_feed_task_evidence(tmp_path):
