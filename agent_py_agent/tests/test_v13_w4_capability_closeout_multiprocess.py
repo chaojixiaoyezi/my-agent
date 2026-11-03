@@ -234,7 +234,7 @@ def _crash_original_release(root, checkpoint):
             store = case.agent.conversation_store
             thread = store.threads.get_or_create({"channel": "chat", "channel_conversation_id": "crash-chat",
                 "channel_user_id": "local-agent", "canonical_user_id": "local-agent",
-                "owner_id": case.agent.home_paths.owner_id})
+                "owner_id": case.agent.home_paths.owner_id, "owner_home": str(case.agent.home_paths.owner_home_dir)})
             binding = case.agent.subagents.runtime_db.record_run_creation(owner_id=case.agent.home_paths.owner_id,
                 run_id="crash-parent-run", role="main", thread_id=thread.thread_id)
             writer = GatewayTaskBindingWriter(case.claim.path, case.claim.request_id,
@@ -245,6 +245,7 @@ def _crash_original_release(root, checkpoint):
             # A real original C/P1 source reserves then abandons a not-started executor.
             # Recovery therefore observes a genuinely stopped domain without faking a P2 process table.
             # This component fixture has no P4 bootstrap; publish its actual old count via the original P0 producer.
+            from agent_py_agent.agent.gateway_parts import daemon_metadata
             _publish_generation_once(case.paths.root, {"schema_version": "multiprocess_c_generation.v1",
                 "c_run_id": case.gate.c_run_id, "worker_count": case.gate.count})
             source = CoordinatorExecutorSource(current_coordinator_execution())
@@ -254,7 +255,10 @@ def _crash_original_release(root, checkpoint):
                 "execution_attempt_id": case.claim.execution_attempt_id, "lease_epoch": case.claim.lease_epoch,
                 "tool_call_id": "crash-original-call", "state": "reserved", "process_identity": None,
                 "pgid": None, "sid": None})
-            source.abandon(row)
+            identity = {"schema_version": "multiprocess_process_identity.v1",
+                        "host_id": daemon_metadata.process_host_id(),
+                        "pid": os.getpid(), "start_time": f"controlled:{os.getpid()}"}
+            source.advance(row, "registered", {"process_identity": identity, "pgid": os.getpgid(0), "sid": os.getsid(0)})
             write_json_file_atomic(root / "crash-locations.json", {
                 "gateway": str(case.paths.root), "children": str(case.agent.subagents.workspace)})
             if checkpoint == "before_child_write":
@@ -297,7 +301,7 @@ def test_actual_crash_then_cold_restart_consumes_only_original_obligation(tmp_pa
     repo_root = Path(__file__).resolve().parents[2]
     environment = dict(os.environ, PYTHONPATH=os.pathsep.join((str(repo_root), str(repo_root / "agent_py_agent"))))
     completed = subprocess.run([sys.executable, "-c", code, str(tmp_path), checkpoint],
-        cwd=repo_root, env=environment, capture_output=True, text=True, timeout=45)
+        cwd=repo_root, env=environment, capture_output=True, text=True, timeout=45, start_new_session=True)
     assert completed.returncode == 71, completed.stdout + completed.stderr
     config = AgentConfig(my_agent_home=str(tmp_path / "home"), model_backend="echo", gateway_per_user_owner_scoping=False)
     home = home_paths(tmp_path / "home")
