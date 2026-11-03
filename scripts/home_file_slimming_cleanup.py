@@ -14,7 +14,6 @@ import ctypes
 import errno
 import fcntl
 import hashlib
-import importlib.util
 import json
 import math
 import os
@@ -58,15 +57,19 @@ BACKUP = re.compile(
 )
 
 
-# LLM: 只加载同源码树的纯标准库YAML解析模块，不导入Agent/settings包或重读活动配置；模块摘要绑定审批策略。
+# LLM: 按正常包结构导入同源码树配置解析器以保留相对依赖；不创建Agent或重读活动配置，模块摘要仍绑定审批策略。
 # 函数用途: 复用产品唯一简化YAML语法，避免为活动路径另造易漏判的字符串解析器。
 @lru_cache(maxsize=1)
 def _config_parser():
-    source = Path(__file__).resolve().parents[1] / "agent_py_agent/agent/settings/config_io.py"
-    spec = importlib.util.spec_from_file_location("_slimming_config_io", source)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.load_simple_yaml, hashlib.sha256(source.read_bytes()).hexdigest()
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from agent_py_agent.agent.settings import config_io
+
+    source = repo_root / "agent_py_agent/agent/settings/config_io.py"
+    if Path(config_io.__file__).resolve() != source:
+        raise ImportError("配置解析器不属于当前源码树")
+    return config_io.load_simple_yaml, hashlib.sha256(source.read_bytes()).hexdigest()
 
 
 # LLM: 产品解析器的read_text适配器只消费已nofollow校验的内存文本，不再次按活动路径打开文件。
