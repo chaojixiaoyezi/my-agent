@@ -618,6 +618,56 @@ class SubAgentPersistenceService:
             return True
 
 
+# LLM: 只改已存在孩子的生命周期元数据；复用原reader、normalizer与canonical guard，不构造manager、目录或工作单。
+# 函数用途: 给原请求和已签发恢复短门提供保留未知字段的窄写叶。
+def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Callable[[SubAgentTask], None]) -> SubAgentTask:
+    with gateway_short_transaction("child_existing_metadata"):
+        run_id = validate_opaque_id(run_id, kind="run_id")
+        locator_path = Path(workspace) / run_id / "task.json"
+        initial = load_subagent_task(workspace, run_id)
+        with locked_json_path(_canonical_state_guard_path(Path(workspace), initial)):
+            payload = _read_state_payload(locator_path)
+            task = task_from_payload(copy.deepcopy(payload))
+            if task.id != run_id:
+                raise ValueError("existing child identity changed")
+            before = asdict(task)
+            reducer(task)
+            after = asdict(task)
+            allowed = {"capability_requests", "attributes", "status", "failure_type", "blockers",
+                       "current_tool", "current_step", "updated_at", "ended_at"}
+            changed = {key for key in before if before[key] != after[key]}
+            if changed - allowed:
+                raise ValueError("existing child metadata reducer changed unrelated fields")
+            if changed:
+                for key in changed - {"capability_requests"}:
+                    payload[key] = copy.deepcopy(after[key])
+                if "capability_requests" in changed:
+                    old_requests = {item["id"]: item for item in before["capability_requests"]}
+                    new_requests = {item["id"]: item for item in after["capability_requests"]}
+                    if old_requests.keys() != new_requests.keys():
+                        raise ValueError("existing child request identity changed")
+                    for raw in payload["capability_requests"]:
+                        old, new = old_requests[raw["id"]], new_requests[raw["id"]]
+                        raw.update({key: copy.deepcopy(value) for key, value in new.items() if value != old[key]})
+                payload["state_revision"] = max(0, int(payload.get("state_revision") or 0)) + 1
+                canonical = _canonical_state_ref_from_payload(payload)
+                if not canonical or not Path(canonical).is_file():
+                    raise FileNotFoundError("existing child canonical state unavailable")
+                write_private_json_file_atomic(Path(canonical), payload)
+            # 即使上次canonical已经发表而locator写失败，重试仍只补原locator、不重复递增版本。
+            for path in dict.fromkeys((locator_path, locator_path.with_name("run.json"),
+                                       Path(task.task_dir) / "task.json", Path(task.task_dir) / "run.json")):
+                report = read_json_object_report(path)
+                if report.load_error is not None or not report.payload:
+                    raise OSError("existing child locator unavailable")
+                locator = report.payload
+                if is_agent_state_locator(locator):
+                    updated = dict(locator, status_mirror=task.status, updated_at=task.updated_at)
+                    if updated != locator:
+                        write_private_json_file_atomic(path, updated)
+            return task_from_payload(payload)
+
+
 def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
     # Lock metadata belongs to the system locator plane, not the model-visible
     # task workspace where artifact scans or the runner could mistake it for work.

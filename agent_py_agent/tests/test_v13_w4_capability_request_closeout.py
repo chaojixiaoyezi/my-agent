@@ -156,3 +156,67 @@ def test_grant_and_expiry_are_serialized_by_canonical_transaction(hot, grant_fir
     current = manager.load(task.id)
     assert current.capability_requests[0].status == ("GRANTED" if grant_first else "CLOSED")
     assert not current.runner_active_attempt_id
+
+
+def test_explicit_interrupt_snapshot_preserves_new_request_on_same_child(hot, monkeypatch):
+    from agent_py_agent.agent.conversation import agent_activity
+    from agent_py_agent.agent.gateway_parts import control_service
+
+    task, old = _blocked(hot)
+    close = agent_activity.close_parent_capability_requests
+    newer = []
+
+    def interleaved(agent, parent, **kwargs):
+        newer.append(agent.subagents.lifecycle.record_capability_request(task.id, RecordCapabilityRequestParams(
+            problem="new duty", needed_capability="filesystem", requested_tools=["edit_file"])))
+        return close(agent, parent, **kwargs)
+
+    monkeypatch.setattr(agent_activity, "close_parent_capability_requests", interleaved)
+    active = control_service._GatewayRequestRecord(None, {
+        "id": "task", "conversation_thread_id": hot.scope.thread_id}, "task")
+    assert control_service._turn_interrupted_result(hot.agent, active, hot.control_scope).ok
+    current = hot.agent.subagents.load(task.id)
+    assert {request.id: request.status for request in current.capability_requests} == {
+        old.id: "CLOSED", newer[0].id: "OPEN"}
+    assert current.status == "BLOCKED"
+
+
+def test_historical_grant_does_not_keep_closed_current_duty_blocked(hot):
+    task, old = _blocked(hot)
+    manager = hot.agent.subagents
+    manager.mutate(task.id, lambda current: setattr(current.capability_requests[0], "status", "GRANTED"))
+    newer = manager.lifecycle.record_capability_request(task.id, RecordCapabilityRequestParams(
+        problem="new duty", needed_capability="filesystem", requested_tools=["edit_file"]))
+    assert close_stale_capability_requests(manager, parent_task_id="task", reason="parent_turn_ended",
+        run_ids=(task.id,), request_ids={task.id: (newer.id,)}) == [task.id]
+    current = manager.load(task.id)
+    assert current.status == "CANCELLED"
+    assert {request.id: request.status for request in current.capability_requests} == {
+        old.id: "GRANTED", newer.id: "CLOSED"}
+
+
+def test_closeout_callers_keep_release_before_child_locks_and_archive():
+    import ast
+    import inspect
+
+    from agent_py_agent.agent.gateway_parts import multiprocess_processing_recovery as recovery
+    from agent_py_agent.agent.gateway_parts import request_worker
+
+    def calls(function):
+        return [node for node in ast.walk(ast.parse(inspect.getsource(function))) if isinstance(node, ast.Call)]
+
+    finish = calls(request_worker._finish_claimed_gateway_request)
+    close_lines = [node.lineno for node in finish if isinstance(node.func, ast.Name)
+                   and node.func.id == "_close_claimed_parent_capabilities"]
+    archive_lines = [node.lineno for node in finish if isinstance(node.func, ast.Name) and node.func.id == "archive_request"]
+    assert len(close_lines) == len(archive_lines) == 1 and close_lines[0] < archive_lines[0]
+    assert not any(isinstance(node.func, ast.Attribute) and node.func.attr == "mutate" for node in finish)
+    helper = ast.parse(inspect.getsource(request_worker._close_claimed_parent_capabilities))
+    releases = [node for node in ast.walk(helper) if isinstance(node, ast.With) and any(
+        isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Name)
+        and item.context_expr.func.id == "gateway_short_transaction" for item in node.items)]
+    assert len(releases) == 1
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "creation_guard"
+               for node in ast.walk(releases[0]))
+    cold = calls(recovery._recovery_runtime_paths)
+    assert not any(isinstance(node.func, ast.Name) and node.func.id in {"SimpleAgent", "SubAgentManager"} for node in cold)

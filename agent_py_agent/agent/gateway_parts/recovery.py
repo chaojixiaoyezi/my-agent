@@ -17,6 +17,7 @@ gateway 如果崩在半路，请求会留在 processing 目录。
 processing liveness 直接读取 lease_service，不再经过 runtime 聚合层。
 """
 
+import json
 import math
 import time
 from bisect import bisect_right
@@ -273,6 +274,7 @@ def _recover_one_processing_request(
     if (
         (paths.terminal / f"{request_id}.json").exists()
         or payload.get("schema_version") == "gateway_terminal_request.v1"
+        or payload.get("capability_closeout") is not None
     ):
         return recover_stale_processing(paths, request_path, payload, context, _settle_committed_terminal)
     if not _processing_request_stale(payload, request_path, context):
@@ -371,6 +373,97 @@ def _non_negative_int(value: object, *, default: int) -> int:
         return default
 
 
+# LLM: 证明只是待办身份与已产出的原响应，不授执行权；只有原live窗口或已签发恢复来源可消费。
+# 函数用途: 校验清理清单仍精确绑定原owner/request/parent/claim。
+def _validated_capability_closeout(payload, *, owner_id=None):
+    proof = payload.get("capability_closeout")
+    if proof is None:
+        return None
+    from .request_binding import gateway_runtime_authority
+
+    rid = payload.get("id")
+    authority = gateway_runtime_authority(payload, rid)
+    runtime = payload.get("conversation_runtime")
+    parent = str(authority.get("task_id") or (runtime.get("task_id") if isinstance(runtime, dict) else "") or rid)
+    if (not isinstance(proof, dict) or proof.get("schema_version") != "gateway_capability_closeout.v1"
+            or proof.get("request_id") != rid or proof.get("parent_task_id") != parent
+            or type(proof.get("owner_id")) is not str or not proof["owner_id"]
+            or (owner_id is not None and proof["owner_id"] != owner_id)
+            or any(proof.get(key) != payload.get(key, "" if key != "lease_epoch" else 0)
+                   for key in ("execution_attempt_id", "lease_epoch", "lease_owner"))
+            or proof.get("reason") not in {"parent_turn_ended", "parent_turn_interrupted"}
+            or type(proof.get("acknowledged")) is not bool
+            or not isinstance(proof.get("terminal_response"), dict)
+            or proof["terminal_response"].get("id") != rid
+            or type(proof.get("snapshot_pending", False)) is not bool
+            or (proof.get("snapshot_pending") is True and proof["acknowledged"])
+            or not isinstance(proof.get("requests"), dict)
+            or (not proof["requests"] and not (proof["acknowledged"] or proof.get("snapshot_pending")))):
+        raise DataCorruptionError("gateway capability closeout identity unavailable")
+    for run_id, ids in proof["requests"].items():
+        if (type(run_id) is not str or not run_id or not isinstance(ids, list) or not ids
+                or any(type(value) is not str or not value for value in ids) or len(ids) != len(set(ids))):
+            raise DataCorruptionError("gateway capability closeout request identity unavailable")
+    return proof
+
+
+# LLM: 一次普通IO错误只在同一原窗口中重试；canonical读回仍不能豁免欠缺的locator，解析失败保pending，来源拒绝不重试。
+# 函数用途: 尝试收口并精确读回，未确认时保留父结果旁的待办证明。
+def _reconcile_capability_closeout(workspace, proof, *, close=None):
+    from ..conversation.agent_activity import reconcile_parent_capability_requests
+
+    if proof.get("snapshot_pending"):
+        return False
+    selected = {run_id: tuple(ids) for run_id, ids in proof["requests"].items()}
+    for attempt in range(2):
+        write_confirmed = False
+        try:
+            if close is None:
+                reconcile_parent_capability_requests(workspace, proof["parent_task_id"], proof["reason"], selected)
+            else:
+                close()
+            write_confirmed = True
+        except OSError:
+            pass
+        except (DataCorruptionError, json.JSONDecodeError, TypeError):
+            return False
+        try:
+            confirmed = reconcile_parent_capability_requests(workspace, proof["parent_task_id"], proof["reason"], selected, read_only=True)
+            if confirmed and write_confirmed:
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    return False
+
+
+# LLM: 冷C只取已认证source的原workspace，Count0只用已有同owner Agent；缺失或坏状态保pending，不补建manager。
+# 函数用途: 在合法恢复短窗中补精确孩子清理，不重跑模型或更换终答。
+def _recover_parent_capability_closeout(payload, agent):
+    from .multiprocess_processing_recovery import current_processing_recovery
+
+    source = current_processing_recovery()
+    proof = _validated_capability_closeout(payload, owner_id=source.home.owner_id if source is not None else None)
+    if proof is None or proof["acknowledged"] or proof.get("snapshot_pending"):
+        return payload
+    try:
+        if source is not None:
+            workspace = source.existing_child_workspace()
+        elif agent is not None and agent.home_paths.owner_id == proof["owner_id"]:
+            workspace = agent.subagents.workspace
+        else:
+            return payload
+    except OSError:
+        return payload
+    if _reconcile_capability_closeout(workspace, proof):
+        payload = dict(payload, capability_closeout=dict(proof, acknowledged=True))
+    return payload
+
+
+def _capability_closeout_pending(payload):
+    proof = payload.get("capability_closeout")
+    return proof is not None and (not isinstance(proof, dict) or proof.get("acknowledged") is not True)
+
+
 # LLM: 插话持久操作经 guidance 领域组件； A canonical archive always wins over a leftover hot record. Legacy sealed processing rows
 # are committed without re-running the provider. Exact request-affine claim cleanup precedes
 # the same canonical commit, so a cleanup I/O failure remains a commit retry, not a model retry.
@@ -405,6 +498,9 @@ def _recover_committed_terminal_processing(
             terminal_payload = report.payload
         else:
             terminal_payload = dict(payload)
+            proof = _validated_capability_closeout(terminal_payload)
+            if proof is not None and terminal_payload.get("schema_version") != "gateway_terminal_request.v1":
+                terminal_payload = _terminal_gateway_request_payload(request_id, terminal_payload, proof["terminal_response"])
         terminal_response = terminal_payload.get("terminal_response")
         if (
             terminal_payload.get("schema_version") != "gateway_terminal_request.v1"
@@ -425,6 +521,11 @@ def _recover_committed_terminal_processing(
                 terminal_payload,
                 terminal_response,
             )
+        reconciled = _recover_parent_capability_closeout(terminal_payload, agent)
+        if reconciled != terminal_payload:
+            # 只发表原证明的确认，不改变终答、claim或请求指纹；投影随后沿原幂等链修复。
+            write_json_file_atomic(canonical if canonical_committed else request_path, reconciled)
+            terminal_payload = reconciled
         target = gateway_terminal_projection_folder(paths, terminal_response)
         _finish_gateway_conversation_claim(terminal_payload, request_id, conversation_store)
         _commit_gateway_terminal_request(
@@ -523,6 +624,7 @@ def mark_gateway_terminal_projection_complete(
             "request_id": selected,
             "projection_folder": target.name,
             "settlement_pending": settlement_pending is not False,
+            "capability_closeout_pending": _capability_closeout_pending(canonical_report.payload),
             "canonical_stamp": _terminal_projection_file_stamp(canonical),
             "projection_stamp": _terminal_projection_file_stamp(projection),
             "response_stamp": _terminal_projection_file_stamp(response_path),
@@ -559,6 +661,7 @@ def _terminal_projection_marker_matches(paths: GatewayPaths, canonical: Path) ->
     return bool(
         marker.get("schema_version") == _TERMINAL_PROJECTION_MARKER_SCHEMA
         and marker.get("settlement_pending", False) is False
+        and marker.get("capability_closeout_pending", False) is False
         and str(marker.get("request_id") or "").strip() == canonical.stem
         and marker.get("canonical_stamp")
         == _terminal_projection_file_stamp(canonical)
