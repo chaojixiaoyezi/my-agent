@@ -79,14 +79,49 @@ def test_source_error_same_object_without_new_error_type():
     assert caught.value is error
 
 
+class _LockDescriptorLifetimes:
+    """只观察本线程选中的真实 FD 生命周期，不把已关闭整数的后续复用算成泄漏。"""
+
+    def __init__(self, monkeypatch):
+        self._os = json_io.os
+        self._thread = get_ident()
+        self._active = {}
+        self.opened = []
+        self.closed = []
+        # 只替换 json_io 的模块引用，不改全进程 os.close。
+        monkeypatch.setattr(json_io, "os", self)
+
+    def __getattr__(self, name):
+        return getattr(self._os, name)
+
+    def record_open(self, descriptor):
+        assert descriptor not in self._active
+        info = self._os.fstat(descriptor)
+        lifetime = (len(self.opened), descriptor, info.st_dev, info.st_ino)
+        self.opened.append(lifetime)
+        self._active[descriptor] = lifetime
+
+    def close(self, descriptor):
+        lifetime = self._active.get(descriptor) if get_ident() == self._thread else None
+        if lifetime is not None:
+            info = self._os.fstat(descriptor)
+            assert (info.st_dev, info.st_ino) == lifetime[2:]
+        self._os.close(descriptor)
+        if lifetime is not None:
+            # 只有原 os.close 确实成功后才记录；漏关、重复关或关错原 inode 都会失败。
+            self.closed.append(self._active.pop(descriptor))
+
+
 def test_lock_birth_rechecks_every_original_inode_retry(tmp_path, monkeypatch):
     path = tmp_path / "data.json"
+    lock_path = path.with_name(path.name + ".lock")
+    main_thread = get_ident()
     phases = []
     inside = False
     original_open = json_io._open_private_lock_descriptor
     original_flock = json_io._flock_descriptor
     original_matches = json_io._descriptor_matches_lock_path
-    seen = []
+    descriptors = _LockDescriptorLifetimes(monkeypatch)
     def birth(operation):
         nonlocal inside
         assert not inside
@@ -95,29 +130,34 @@ def test_lock_birth_rechecks_every_original_inode_retry(tmp_path, monkeypatch):
             return operation()
         finally:
             inside = False
-    def opened(lock_path):
+    def opened(selected):
+        if selected != lock_path or get_ident() != main_thread:
+            return original_open(selected)
         assert inside
-        fd = original_open(lock_path)
+        fd = original_open(selected)
         phases.append("open")
-        seen.append(fd)
+        descriptors.record_open(fd)
         return fd
     def flock(fd, **kwargs):
-        assert not inside
-        phases.append("flock")
+        if get_ident() == main_thread and fd in descriptors._active:
+            assert not inside
+            phases.append("flock")
         return original_flock(fd, **kwargs)
-    def matches(fd, lock_path):
+    def matches(fd, selected):
+        if selected != lock_path or get_ident() != main_thread:
+            return original_matches(fd, selected)
         assert not inside
         phases.append("verify")
-        return len(seen) > 1 and original_matches(fd, lock_path)
+        return len(descriptors.opened) > 1 and original_matches(fd, selected)
     monkeypatch.setattr(json_io, "_open_private_lock_descriptor", opened)
     monkeypatch.setattr(json_io, "_flock_descriptor", flock)
     monkeypatch.setattr(json_io, "_descriptor_matches_lock_path", matches)
     with json_io.locked_json_path(path, birth_commit=birth):
         assert not inside
+        assert descriptors.closed == descriptors.opened[:1]
     assert phases == ["open", "flock", "verify"] * 2
-    for descriptor in seen:
-        with pytest.raises(OSError):
-            os.fstat(descriptor)
+    assert descriptors.closed == descriptors.opened
+    assert descriptors._active == {}
 
 
 def test_lock_birth_revoke_on_reopen_does_not_reuse_old_fd(tmp_path, monkeypatch):
@@ -167,7 +207,11 @@ def test_lock_default_keeps_original_five_attempts(tmp_path, monkeypatch):
     assert len(calls) == 5
 
 
-def test_default_lock_retry_observation_does_not_capture_foreign_thread(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target_test", [
+    test_lock_default_keeps_original_five_attempts,
+    test_lock_birth_rechecks_every_original_inode_retry,
+])
+def test_default_lock_retry_observation_does_not_capture_foreign_thread(tmp_path, monkeypatch, target_test):
     """外来锁首个FD先出生，再与目标测试交错；不让目标观测或mismatch影响其它锁。"""
     target_path = tmp_path / "data.json"
     foreign_path = tmp_path / "foreign.json"
@@ -223,7 +267,7 @@ def test_default_lock_retry_observation_does_not_capture_foreign_thread(tmp_path
         assert first_foreign_open.wait(5), "外来锁首FD未出生"
         with monkeypatch.context() as target_patch:
             # 直接运行原目标断言，旧全局hook确定性混入另外四次open，不能用镜像实现替代它。
-            test_lock_default_keeps_original_five_attempts(tmp_path, target_patch)
+            target_test(tmp_path, target_patch)
     finally:
         release_foreign.set()
         worker.join(timeout=5)
