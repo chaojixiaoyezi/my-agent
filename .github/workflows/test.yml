@@ -24,7 +24,7 @@ jobs:
         python-version:
           - "3.11"
           - "3.12"
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     steps:
       - uses: actions/checkout@v4
@@ -67,23 +67,30 @@ jobs:
           from pathlib import Path
 
           shard_idx = int("${{ matrix.shard }}") - 1
-          total_shards = 4
+          total_shards = 10
           all_files = sorted(str(p) for p in Path("agent_py_agent/tests").rglob("test_*.py"))
           files = [f for idx, f in enumerate(all_files) if idx % total_shards == shard_idx]
-          batch_size = 25
+          batch_size = 40
           batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
-          workers = max(1, min(os.cpu_count() or 2, 2))
+          workers = max(2, os.cpu_count() or 4)
           root_tmp = Path(tempfile.mkdtemp(prefix="pytest_ci_shards_"))
 
           def run_batch(idx: int, batch: list[str]):
               t0 = time.monotonic()
               basetemp = root_tmp / f"s_{idx}"
+              home_dir = root_tmp / f"h_{idx}"
+              home_dir.mkdir(parents=True, exist_ok=True)
+              env = os.environ.copy()
+              env["HOME"] = str(home_dir)
+              env["MY_AGENT_HOME"] = str(home_dir / ".my-agent")
               res = subprocess.run(
                   [sys.executable, "-m", "pytest", "-q", "-m", "not slow and not e2e", "--tb=short", "--timeout=60", f"--basetemp={basetemp}", *batch],
                   capture_output=True,
                   text=True,
+                  env=env,
               )
               shutil.rmtree(basetemp, ignore_errors=True)
+              shutil.rmtree(home_dir, ignore_errors=True)
               return idx, res.returncode, time.monotonic() - t0, res.stdout, res.stderr, batch
 
           failed = []
