@@ -62,6 +62,29 @@ def _short_label(value: object) -> str:
     return value.strip()[:80] if isinstance(value, str) else ""
 
 
+# LLM: 工作流执行器提供事实；这里只做 XC-1 schema 投影，拒绝错误类型和额外字段，不初始化或推进任何工作流。
+# 函数用途: 白名单化工作流步骤事件，供 writer 与公开 HTTP 共用。
+def workflow_step_event(value: object) -> dict[str, object]:
+    from ..common.log_redaction import redact_sensitive_value
+
+    if (not isinstance(value, dict) or not isinstance(value.get("status"), str)
+            or value["status"] not in {"pending", "running", "succeeded", "failed", "skipped"}):
+        return {}
+    strings = ("workflow_run_id", "workflow_id", "step_id", "name", "status", "description")
+    if any(not isinstance(value.get(key), str) for key in strings):
+        return {}
+    if any(not value[key].strip() for key in ("workflow_run_id", "workflow_id", "step_id")):
+        return {}
+    if any(type(value.get(key)) is not int or value[key] < 0 for key in ("duration_ms", "seq")):
+        return {}
+    next_steps = value.get("next_step_ids")
+    if not isinstance(next_steps, list) or any(not isinstance(item, str) for item in next_steps):
+        return {}
+    return redact_sensitive_value({**{key: value[key] for key in strings},
+                                   "duration_ms": value["duration_ms"], "seq": value["seq"],
+                                   "next_step_ids": list(next_steps)})
+
+
 # LLM: Gateway projection validates the frozen compaction schema and copies only nonnegative
 # counters; no model-generated summary or tool record can cross this boundary.
 # 函数用途: 清洗活动回合上下文裁剪事件，拒绝未知 schema 和正文载荷。
@@ -91,13 +114,26 @@ def public_model_text(text: object, *, max_chars: int, delivery_channel: str, id
     return f"{content[:head]}\n…（内容过长，已省略）…\n{content[-tail:]}"
 
 
+# LLM: 只检查原提交信封的结构，真实 sealed 来源仍由生成层守门；空展示正文不等于提交无效，不授予执行权限。
+# 函数用途: 让 writer 与正文投影共用合法边界，非法信封不能结束当前候选。
+def committed_model_call_id(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    source, boundary = payload.get("source"), payload.get("boundary")
+    if (payload.get("schema") != "assistant_messages.v1" or not isinstance(source, dict)
+            or not isinstance(boundary, str) or boundary not in {"tools", "terminal"}
+            or not isinstance(payload.get("messages"), list)):
+        return ""
+    call_id = source.get("call_id")
+    return call_id if isinstance(call_id, str) and call_id.strip() else ""
+
+
 # LLM: 输入只来自已验响应提交；整段安全投影不等于分段时合并显示并标记降级，不制造provider phase或执行许可。
 # 函数用途: 将一次完整模型正文转换为可校正候选的原显示事件，不输出隐藏推理。
 def committed_model_events(payload: dict, *, delivery_channel: str = "", identifiers: tuple = ()) -> list[dict]:
-    source = payload.get("source")
-    if (payload.get("schema") != "assistant_messages.v1" or not isinstance(source, dict)
-            or not source.get("call_id") or payload.get("boundary") not in {"tools", "terminal"}):
+    if not committed_model_call_id(payload):
         return []
+    source = payload["source"]
     rows = payload.get("messages")
     if not isinstance(rows, list):
         return []
