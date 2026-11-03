@@ -121,7 +121,7 @@
       "value": 28000,
       "unit": "字节",
       "category": "上限预算",
-      "description": "比渠道 30KB 限制留余量；同时按 ASCII 转义的保守序列化体积核对，中文和控制字符不能穿透预算。"
+      "description": "比渠道30KB限制留余量，按ASCII转义后的保守JSON字节核对。"
     },
     {
       "name": "MAX_VISIBLE_DEPTH",
