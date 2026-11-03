@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
+from ..user_space.home_indexes import is_sqlite_busy
 
 _REBUILD_BATCH = 128
 
@@ -55,7 +56,10 @@ class SessionListIndex:
                 raise ValueError("list projection hardlink rejected")
             try:
                 conn = self._open_projection()
-            except sqlite3.DatabaseError:
+            except sqlite3.DatabaseError as error:
+                # 锁忙不是损坏：不能在另一写者仍持锁时把投影截断成空数据库。
+                if is_sqlite_busy(error):
+                    raise
                 # 这里只重建私有的可丢弃投影，不碰canonical；拒绝替换、链接和特殊文件。
                 fd = os.open(self.path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
                 try:
@@ -76,9 +80,12 @@ class SessionListIndex:
                 conn.close()
 
     def _open_projection(self):
-        conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True)
+        conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5.0)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-1024")
             conn.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, sort_at REAL, filter_key TEXT, stamp TEXT, generation INTEGER)")
             conn.execute("CREATE INDEX IF NOT EXISTS list_order ON entries(filter_key, sort_at DESC, path DESC)")

@@ -413,6 +413,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3
+    # 用户明确引用且本轮成功读取的文件摘录上限；0关闭关联，不改变消息学习资格。
+    memory_curator_task_file_evidence_max_chars: int = 4000
+    # 相同指令跨线程广播的去重窗口秒数；0关闭，不折叠单线程重复。
+    memory_curator_cross_thread_dedupe_window_seconds: int = 600
+    # 正式规则更新仅追加到其它线程请求尾部，冻结系统记忆前缀不变。
+    memory_rule_notices_enabled: bool = True
+    memory_rule_notices_max_chars: int = 1200
     # compact 自动续跑深度硬顶已降为读取点旁的具名常量
     # （finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
     # compact 续跑时对卸掉的中段历史做一次 LLM 语义摘要（短板6，长期助手 trajectory_compressor

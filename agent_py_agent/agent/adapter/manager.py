@@ -1373,7 +1373,18 @@ class ChannelManager:
             self._update_active_channel(msg.user_id, msg.channel)
         return sent
 
+    # LLM: 只有既有卡片身份才原地终结；预渲染超限才走普通最终回复，编辑失败不另发造成双送。
+    # 函数用途: 将完整结论写回原进度卡，保留非卡片通道与超长结论的原投递路径。
     def _deliver_gateway_reply(self, pending: PendingGatewayReply, response_text: str) -> bool:
+        draft = pending.progress_draft
+        if draft.get('render_kind') == 'card' and (draft.get('display_message_id') or draft.get('message_id')):
+            from .progress_draft import send_gateway_draft
+
+            receipt = send_gateway_draft(self._delivery_service, pending, response_text, final=True)
+            if receipt.error_code != 'CHANNEL_PROGRESS_CARD_OVERFLOW':
+                if receipt.ok:
+                    self._update_active_channel(pending.user_id, pending.channel)
+                return receipt.ok
         return self._send_gateway_reply(
             _pending_gateway_message(pending),
             pending.stable_id,

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -13,11 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from ..common.cache_freshness import cache_entry_trustworthy
+from ..conversation.learning_source import derive_source_projection, projection_is_learnable
 from ..io.cursor_cache import CursorCache, file_stamp
 from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
 from .learning_exclusions import thread_is_excluded
+from .learning_source_authority import message_thread_source
 from .scope_contract import canonical_scope_key
 
 # 消息预览最多 6000 字符：多轮消息给足上下文又不过载。
@@ -49,8 +53,11 @@ class CuratorMessageInput:
     metadata: dict[str, object]
     # LLM: 消息所属线程的宿主来源投影（收集时读取，供候选来源判定用）；缺字段的旧线程为空（未知）。
     thread_source: dict[str, object] = field(default_factory=dict)
+    referenced_files: tuple[dict[str, object], ...] = ()
+    # 只由收集器生成；原始消息metadata不能自报广播身份。
+    broadcast: dict[str, object] = field(default_factory=dict)
 
-    # LLM: 运行 ID 只取 ConversationStore 结构化元数据；Gateway 的 gateway_request_id 归一为 request_id，不从正文推断。
+    # LLM: 运行身份只取宿主元数据；广播字段只取收集器冻结投影，原消息hash不变，模型不能自报去重键。
     # 函数用途: 生成可由宿主核验的消息证据引用并规范化 Gateway 请求编号。
     def ref(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -78,9 +85,9 @@ class CuratorMessageInput:
             )
             if value:
                 result[key] = value
-        return result
+        return {**result, **self.broadcast}
 
-    # LLM: 模型投影始终使用有界 preview，并显式标明原文长度和是否截断。
+    # LLM: preview与已核验文件摘录各自有界，完整工具正文不进入模型；文件证据不改变消息来源授权。
     # 函数用途: 把一条消息转成 Curator 严格输入对象。
     def to_model(self) -> dict[str, object]:
         return {
@@ -89,6 +96,7 @@ class CuratorMessageInput:
             "content_chars": len(self.full_content),
             "content_truncated": len(self.content_preview) < len(self.full_content),
             "metadata": _bounded_metadata(self.metadata),
+            **({"referenced_files": list(self.referenced_files)} if self.referenced_files else {}),
         }
 
 
@@ -227,11 +235,11 @@ class CuratorInputBatch:
     skipped_message_cursors: dict[str, str] = field(default_factory=dict)
     candidate_anchors: tuple[dict[str, object], ...] = ()
 
-    # LLM: 保持原材料顺序；标签校验来源 hash，关系同时校验正式 ref/hash/版本；缩批不能遗留尾部建议。
+    # LLM: 原始消息/游标完整保留，仅模型视图聚合跨线程广播；标签和关系仍核原来源hash与正式版本。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
     def to_model_payload(self) -> dict[str, object]:
         payload = {
-            "messages": [item.to_model() for item in self.messages],
+            "messages": _broadcast_model_messages(self.messages),
             "audit_events": [item.to_model() for item in self.audit_events],
             "formal_memories": [item.to_model() for item in self.formal_memories],
         }
@@ -363,7 +371,7 @@ class CuratorMessageSource:
     excluded_conversation_ids: frozenset[str] | None = frozenset()
 
 
-# LLM: collection 必须用 ConversationStore 的 typed cursor read，不直接解析其文件布局。
+# LLM: 消息走typed cursor；广播只附冻结计数身份，文件仅取同请求成功归档，仍共守整批字符预算。
 # 函数用途: 收集所有线程游标后的有界消息和 audit 事件。
 def collect_curator_inputs(
     *,
@@ -407,7 +415,7 @@ def collect_curator_inputs(
         )
         audit_events = _enrich_audit_artifact_refs(audit_events, refs)
         audit_events = _fit_audit_budget(audit_events, max_chars=remaining_chars)
-    return CuratorInputBatch(
+    batch = CuratorInputBatch(
         messages=tuple(messages),
         audit_events=tuple(audit_events),
         formal_memories=tuple(formal_memories),
@@ -415,6 +423,77 @@ def collect_curator_inputs(
         skipped_audit_cursor=skipped_audit_cursor,
         skipped_message_cursors=skipped_message_cursors,
     )
+    if tool_reference_source is not None:
+        from .task_file_evidence import attach_task_file_evidence
+
+        batch = attach_task_file_evidence(batch, tool_reference_source.owner_root,
+            max_chars=getattr(config, "task_file_evidence_max_chars", 4000), max_input_chars=config.max_input_chars)
+    batch = replace(batch, messages=_with_broadcast_identity(batch.messages,
+        window_seconds=getattr(config, "cross_thread_dedupe_window_seconds", 600)))
+    return _fit_input_payload(batch, max_chars=config.max_input_chars)
+
+
+# LLM: 新增广播来源/证据也计入同一预算；只裁尾部保持每线程和审计原始连续前缀，原文/hash不变。
+# 函数用途: 在返回完整JSON前收紧输入，单条消息只缩预览，不让扩展字段突破预算。
+def _fit_input_payload(batch, *, max_chars):
+    while (excess := len(json.dumps(batch.to_model_payload(), ensure_ascii=False)) - max_chars) > 0:
+        if batch.audit_events:
+            batch = replace(batch, audit_events=batch.audit_events[:-1])
+        elif len(batch.messages) > 1:
+            batch = replace(batch, messages=batch.messages[:-1])
+        elif batch.messages:
+            message = batch.messages[0]
+            if message.content_preview:
+                message = replace(message, content_preview=message.content_preview[:max(0, len(message.content_preview) - excess)])
+            elif message.referenced_files:
+                message = replace(message, referenced_files=())
+            elif message.broadcast:
+                message = replace(message, broadcast={})
+            else:
+                break
+            batch = replace(batch, messages=(message,))
+        else:
+            break
+    return batch
+
+
+# LLM: 合格用户消息即冻结潜在广播指纹，以跨批匹配；不改内部空白，已读取文件版本参与身份，单线程计数仍独立。
+# 函数用途: 附加独立内容指纹和时间桶，保持原消息hash、正文及来源授权不变。
+def _with_broadcast_identity(messages, *, window_seconds: int = 600):
+    result = [replace(item, broadcast={}) for item in messages]
+    for index, item in enumerate(messages):
+        source = derive_source_projection(item.metadata)
+        if source is None and "learning_source" not in item.metadata:
+            source = item.thread_source
+        if (item.role != "user" or not projection_is_learnable(source) or not item.full_content.strip()
+                or not math.isfinite(item.created_at) or window_seconds <= 0):
+            continue
+        material = json.dumps([unicodedata.normalize("NFC", item.full_content),
+            sorted((ref["path"], ref["sha256"]) for ref in item.referenced_files)], ensure_ascii=False)
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        result[index] = replace(item, broadcast={"broadcast_hash": digest,
+            "broadcast_bucket": int(item.created_at // window_seconds), "broadcast_window_seconds": window_seconds})
+    return tuple(result)
+
+
+# LLM: 仅模型视图折叠跨线程同指纹；同线程重复另起观察，各来源文件证据完整保留，原消息游标不变。
+# 函数用途: 显示广播代表正文及每个线程各自的已核验读取证据。
+def _broadcast_model_messages(messages):
+    result, groups = [], {}
+    for item in messages:
+        key = tuple(item.broadcast.get(name) for name in ("broadcast_hash", "broadcast_bucket", "broadcast_window_seconds"))
+        if not item.broadcast:
+            result.append(item.to_model())
+        else:
+            source = {**item.ref(), **({"referenced_files": list(item.referenced_files)} if item.referenced_files else {})}
+            entry = next((row for row in groups.get(key, ()) if item.thread_id not in row["thread_ids"]), None)
+            if entry is None:
+                entry = {**item.to_model(), "broadcast_sources": [], "thread_ids": []}
+                result.append(entry)
+                groups.setdefault(key, []).append(entry)
+            entry["broadcast_sources"].append(source)
+            entry["thread_ids"].append(item.thread_id)
+    return result
 
 
 # LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
@@ -504,8 +583,6 @@ def _consume_thread_page(
 ) -> tuple[str, bool, bool]:
     scan_cursor, thread_selected = page_state
     thread_id = str(thread.thread_id)
-    thread_source = getattr(thread, "learning_source", None)
-    source_dict = dict(thread_source) if isinstance(thread_source, dict) else {}
     selected: list[CuratorMessageInput] = state["selected"]  # type: ignore[assignment]
     skipped_cursors: dict[str, str] | None = state["skipped_cursors"]  # type: ignore[assignment]
     limit = int(state["limit"])
@@ -534,7 +611,7 @@ def _consume_thread_page(
             content_preview=preview,
             content_hash=_content_hash(content),
             metadata=dict(metadata),
-            thread_source=dict(source_dict),
+            thread_source=dict(message_thread_source(thread, entry) or {}),
         )
         item_chars = len(json.dumps(item.to_model(), ensure_ascii=False))
         if selected and used_chars + item_chars > max_chars:

@@ -14,6 +14,7 @@ from pathlib import Path
 from ..common.nofollow_fs import read_bytes_beneath
 from ..user_space.home_indexes import (
     TaskRefLookupScope,
+    is_sqlite_busy,
     lookup_task_ref,
     set_task_ref_meta,
     task_ref_lookup_scope,
@@ -298,4 +299,5 @@ def resolve_task_location(owner_home: object, task_id: str, *, cursor: str | Non
         return _location_result("partial", coverage, cursor=checkpoint, reason="legacy_backfill_deferred")
     except (OSError, ValueError, TypeError, RuntimeError, sqlite3.Error) as error:
         # 锁忙、损坏和挂载消失都是未完成观察，不是 not_found，更不能触发收口。
-        return _location_result("partial", coverage, cursor=cursor, reason=type(error).__name__)
+        return _location_result("partial", coverage, cursor=cursor,
+                                reason="sqlite_busy" if is_sqlite_busy(error) else type(error).__name__)

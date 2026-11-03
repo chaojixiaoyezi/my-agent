@@ -49,6 +49,9 @@ class FeishuWebhookDecodeRequest:
     timestamp: str = ""
     nonce: str = ""
     signature: str = ""
+    timestamp_tolerance_seconds: int = 300
+    now: float | None = None
+    replay_guard: object | None = None
 
 
 def compute_signature(parts: FeishuSignParts) -> str:
@@ -62,6 +65,55 @@ def verify_signature(parts: FeishuSignParts, signature: str) -> bool:
     return hmac.compare_digest(compute_signature(parts), signature)
 
 
+# LLM: 只记录固定诊断码；不得泄露签名、nonce、密钥和原始事件。
+# 函数用途: 记录安全拒绝原因并返回False。
+def _reject_webhook(code: str) -> bool:
+    import logging
+
+    logging.getLogger(__name__).warning('%s', code, extra={'diagnostic_code': code})
+    return False
+
+
+# LLM: 仅在验签成功后调用；None guard保持旧的无缓存行为，生产入口显式传入实例级guard。
+# 函数用途: 校验签名事件的闭区间时间窗，并原子防止窗口内重放。
+def _signed_request_fresh(request: FeishuWebhookDecodeRequest) -> bool:
+    import math
+    import time
+
+    from .feishu_replay_guard import FeishuReplayClockRollbackError, FeishuReplayGuard
+
+    tolerance = request.timestamp_tolerance_seconds
+    if type(tolerance) is not int or tolerance < 0:
+        return _reject_webhook('FEISHU_TIMESTAMP_INVALID')
+    try:
+        timestamp = int(request.timestamp)
+        now = float(time.time() if request.now is None else request.now)
+    except (TypeError, ValueError, OverflowError):
+        return _reject_webhook('FEISHU_TIMESTAMP_INVALID')
+    if not math.isfinite(now):
+        return _reject_webhook('FEISHU_TIMESTAMP_INVALID')
+    try:
+        outside = abs(now - timestamp) > tolerance
+    except OverflowError:
+        outside = True
+    if outside:
+        return _reject_webhook('FEISHU_TIMESTAMP_OUT_OF_WINDOW')
+    if request.replay_guard is None:
+        return True
+    if not isinstance(request.replay_guard, FeishuReplayGuard):
+        return _reject_webhook('FEISHU_REPLAY_GUARD_INVALID')
+    try:
+        accepted = request.replay_guard.check_and_record(request.timestamp, request.nonce,
+            request.signature, now=now, valid_until=timestamp + tolerance)
+    except FeishuReplayClockRollbackError:
+        return _reject_webhook('FEISHU_CLOCK_ROLLBACK')
+    except (TypeError, ValueError, OverflowError):
+        return _reject_webhook('FEISHU_REPLAY_GUARD_INVALID')
+    return accepted or _reject_webhook('FEISHU_REPLAY_DETECTED')
+
+
+# LLM: 单参公共入口兼容旧调用；token-only没有签名时间戳，防重放沿已有event_id准入而非伪造时间窗。
+# 函数用途: 统一验签、时效、防重放和解密，任一步失败即拒绝。
 def verify_and_decode_webhook(request: FeishuWebhookDecodeRequest) -> dict | None:
     """飞书 webhook 的唯一验真/解密入口；任一步失败都返回 None。"""
     if not request.encrypt_key and not request.verification_token:
@@ -75,6 +127,8 @@ def verify_and_decode_webhook(request: FeishuWebhookDecodeRequest) -> dict | Non
         ),
         request.signature,
     ):
+        return None
+    if request.encrypt_key and not _signed_request_fresh(request):
         return None
     try:
         outer = json.loads(request.raw_body.decode("utf-8"))

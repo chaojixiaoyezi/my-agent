@@ -38,6 +38,10 @@ class MemorySettings:
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3
+    memory_curator_task_file_evidence_max_chars: int = 4000
+    memory_curator_cross_thread_dedupe_window_seconds: int = 600
+    memory_rule_notices_enabled: bool = True
+    memory_rule_notices_max_chars: int = 1200
 
 
 # LLM: 记忆配置诊断DTO；仅投影警告不修改配置或执行状态，联测配置coercion。

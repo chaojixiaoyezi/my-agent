@@ -168,16 +168,19 @@ def stable_daily_event_id(event: DailyMemoryEvent) -> str:
     return "daily-event-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
-# LLM: Curator transactions and single append share one pure ordering/idempotency function;
-# failed replay therefore cannot generate a new ID or skip sequence values.
-# LLM: ID字典只建一次并随追加更新，显式ID不同payload仍拒绝；整批合并为O(D+N)。
-# 函数用途: 用线性时间合并当天事件，保留幂等和连续顺序。
+# LLM: 单条与批次共用原链；潜在广播按指纹查已存来源确认跨线程，同线程不同消息不合并，显式ID碰撞仍拒绝。
+# 函数用途: 合并当天经历与跨批广播来源，保留第一次提交的ID和完整previous/sequence链。
 def merge_daily_events(
     existing: list[DailyMemoryEvent],
     events: list[DailyMemoryEvent] | tuple[DailyMemoryEvent, ...],
 ) -> tuple[list[DailyMemoryEvent], list[DailyMemoryEvent]]:
     rows = list(existing)
     by_id = {item.event_id: item for item in rows}
+    positions = {item.event_id: index for index, item in enumerate(rows)}
+    broadcasts = {}
+    for item in rows:
+        if key := _broadcast_event_key(item):
+            broadcasts.setdefault(key, []).append(item.event_id)
     committed: list[DailyMemoryEvent] = []
     for event in events:
         normalized = normalize_daily_event(event)
@@ -185,13 +188,25 @@ def merge_daily_events(
         event_id = normalized.event_id or stable_daily_event_id(normalized)
         normalized = replace(normalized, event_id=event_id)
         prior = by_id.get(event_id)
+        broadcast_key = _broadcast_event_key(normalized)
+        if prior is None and not explicit_event_id and broadcast_key:
+            prior = next((by_id[identity] for identity in broadcasts.get(broadcast_key, ())
+                if _compatible_broadcast_refs(by_id[identity].message_refs, normalized.message_refs)), None)
+            if prior is not None:
+                event_id = prior.event_id
         if prior is not None:
             same_source = _daily_event_source_identity(normalized) == _daily_event_source_identity(
                 prior
             )
+            if not explicit_event_id and broadcast_key and broadcast_key == _broadcast_event_key(prior):
+                same_source = same_source or _compatible_broadcast_refs(prior.message_refs, normalized.message_refs)
             same_payload = _daily_event_identity(normalized) == _daily_event_identity(prior)
             if not same_source or (explicit_event_id and not same_payload):
                 raise ValueError("daily event_id collision with different content")
+            if not explicit_event_id and broadcast_source_identity(normalized.message_refs):
+                prior = replace(prior, message_refs=tuple(normalize_reference_list([*prior.message_refs, *normalized.message_refs])))
+                rows[positions[event_id]] = prior
+                by_id[event_id] = prior
             committed.append(prior)
             continue
         previous = rows[-1].event_id if rows else ""
@@ -201,18 +216,24 @@ def merge_daily_events(
             sequence=(rows[-1].sequence + 1 if rows else 1),
         )
         rows.append(committed_event)
+        positions[event_id] = len(rows) - 1
         by_id[event_id] = committed_event
+        if broadcast_key:
+            broadcasts.setdefault(broadcast_key, []).append(event_id)
         committed.append(committed_event)
     return rows, committed
 
 
-# LLM: Daily replay identity is based on canonical source refs and typed runtime scope, not on
-# model wording; paraphrased extraction after a crash therefore keeps the first committed event.
+# LLM: 广播潜在身份用指令hash/桶及原消息ID，不含run；跨线程确认在merge中完成，避免单线程重复被吞。
 # 函数用途: 生成 Daily 稳定 ID 使用的来源身份。
 def _daily_event_source_identity(event: DailyMemoryEvent) -> dict[str, object]:
     message_refs = normalize_reference_list(event.message_refs)
     tool_refs = normalize_reference_list(event.tool_refs)
     artifact_refs = normalize_reference_list(event.artifact_refs)
+    broadcast = broadcast_source_identity(message_refs)
+    if broadcast and event.origin == "user_explicit" and event.actor == "user" and not tool_refs and not artifact_refs:
+        return {"event_type": event.event_type, "actor": event.actor, "origin": event.origin, "broadcast": broadcast,
+            "message_ids": sorted(str(ref.get("message_id") or "") for ref in message_refs)}
     return {
         "event_type": str(event.event_type or "").strip().lower(),
         "actor": str(event.actor or "").strip().lower(),
@@ -238,6 +259,46 @@ def _daily_event_source_identity(event: DailyMemoryEvent) -> dict[str, object]:
             for ref in artifact_refs
         ),
     }
+
+
+# LLM: 只识别收集器写入规范refs的完整广播投影；混合来源、缺字段及坏数值都退回原精确身份。
+# 函数用途: 为Daily与候选计数共用严格广播键，不更改学习资格。
+def broadcast_source_identity(refs) -> tuple[str, int, int] | None:
+    keys = set()
+    for ref in refs:
+        digest = ref.get("broadcast_hash")
+        bucket, window = ref.get("broadcast_bucket"), ref.get("broadcast_window_seconds")
+        if (ref.get("role") != "user" or not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+                or type(bucket) is not int or bucket < 0 or type(window) is not int or window <= 0):
+            return None
+        keys.add((digest, bucket, window))
+    return next(iter(keys)) if len(keys) == 1 else None
+
+
+# LLM: 仅用户显式事件且无工具混证可作广播候选索引；哈希不构成学习授权。
+# 函数用途: 为当天已持久化的广播观察建立分组键。
+def _broadcast_event_key(event):
+    broadcast = broadcast_source_identity(event.message_refs)
+    if broadcast and event.origin == "user_explicit" and event.actor == "user" and not event.tool_refs and not event.artifact_refs:
+        return event.event_type, event.actor, event.origin, broadcast
+    return None
+
+
+# LLM: 共享线程只能重放同一批消息ID；新线程可补充同广播来源，同线程另一条指令不能借广播吞掉。
+# 函数用途: 核对两组来源是否可属于同一跨线程观察。
+def _compatible_broadcast_refs(left, right):
+    groups = []
+    for refs in (left, right):
+        threads = {}
+        for ref in refs:
+            thread, message = str(ref.get("thread_id") or ""), str(ref.get("message_id") or "")
+            if not thread or not message:
+                return False
+            threads.setdefault(thread, set()).add(message)
+        groups.append(threads)
+    before, after = groups
+    return bool(before and after) and all(before[thread] == after[thread] for thread in before.keys() & after.keys())
 
 
 # LLM: 提取/提交时间和链式顺序是宿主运行元数据，不改变事件的幂等语义身份。

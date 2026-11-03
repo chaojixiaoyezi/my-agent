@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from agent_py_agent.agent.adapter import feishu_crypto
 from agent_py_agent.agent.adapter.feishu_card import extract_webhook_card_action
+from agent_py_agent.agent.adapter.feishu_replay_guard import FeishuReplayGuard
 from agent_py_agent.agent.adapter.protocol import feishu_conversation_id
 from agent_py_agent.agent.graceful import DrainState
 from agent_py_agent.agent.ingress_queue import IngressQueue, QueueBackpressure
@@ -62,7 +63,9 @@ class TracedEnqueueRequest:
     counter: Counter
 
 
-def _verify_and_decode(request: Request, body: bytes, config: FeishuIngressConfig) -> dict | None:
+# LLM: 保持唯一解码入口的单参调用；guard从app生命周期传入，不按请求重建。
+# 函数用途: 组装可信飞书头并交给统一验真函数。
+def _verify_and_decode(request: Request, body: bytes, config: FeishuIngressConfig, *, replay_guard: object | None = None) -> dict | None:
     """fail-closed 验签 + 解密 + 解析；与本地 webhook adapter 共用同一实现。"""
     return feishu_crypto.verify_and_decode_webhook(
         feishu_crypto.FeishuWebhookDecodeRequest(
@@ -72,6 +75,7 @@ def _verify_and_decode(request: Request, body: bytes, config: FeishuIngressConfi
             timestamp=request.headers.get("X-Lark-Request-Timestamp", ""),
             nonce=request.headers.get("X-Lark-Request-Nonce", ""),
             signature=request.headers.get("X-Lark-Signature", ""),
+            replay_guard=replay_guard,
         )
     )
 
@@ -132,6 +136,8 @@ def _enqueue_traced_event(item: TracedEnqueueRequest) -> Response:
         return _enqueue_event(item.queue, item.event, item.counter)
 
 
+# LLM: 每个app持有自己的签名重放窗口；不改变队列event_id去重和token-only行为。
+# 函数用途: 创建异步飞书入站应用及健康端点。
 def create_ingress_app(
     queue: IngressQueue,
     config: FeishuIngressConfig,
@@ -144,10 +150,11 @@ def create_ingress_app(
     reg = deps.registry or default_registry()  # 默认用全局 registry,/metrics 同时暴露 agent_core 热路径指标(审计 #19)
     events = reg.counter("ingress_events_total", "入站事件总数(按结果标签)")
     app = FastAPI()
+    replay_guard = FeishuReplayGuard()
 
     @app.post("/api/im/feishu/events")
     async def feishu_events(request: Request) -> Response:  # noqa: ANN202
-        inner = _verify_and_decode(request, await request.body(), config)
+        inner = _verify_and_decode(request, await request.body(), config, replay_guard=replay_guard)
         if inner is None:
             events.inc(labels={"result": "rejected"})
             return Response('{"error":"signature"}', status_code=403, media_type="application/json")

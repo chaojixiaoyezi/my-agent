@@ -3,28 +3,30 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from itertools import islice
 
-from ..delivery.execution_view import MAX_EXECUTION_STEPS_COUNT, bounded_text
+from ..delivery.execution_view import bounded_text
 
-# 比渠道 30KB 限制留余量；同时按 ASCII 转义的保守序列化体积核对，中文和控制字符不能穿透预算。
+# 比渠道30KB限制留余量，按ASCII转义后的保守JSON字节核对。
 MAX_CARD_JSON_BYTES = 28_000
 _PHASE_LABELS = {"started": "开始", "updated": "执行中", "completed": "已完成", "succeeded": "已完成",
                  "failed": "失败", "cancelled": "取消", "interrupted": "中断", "blocked": "受阻", "denied": "被拒绝",
                  "finished": "已结束", "skipped": "已跳过", "approval_required": "等待审批", "unknown": "结果未确认"}
 
 
-# LLM: 纯函数，只投影原快照；不持有 Store/客户端、不发网络、不改状态。截断说明放合法展示元素，不添加非 schema 顶层键。
-# 函数用途: 生成默认折叠的 Card JSON 2.0，按最终 JSON UTF-8 字节数裁剪完整步骤并说明观察范围。
+class ProgressCardOverflow(ValueError):
+    """完整结论已经超预算；须在网络副作用前改走普通最终回复。"""
+
+
+# LLM: 纯投影且兼容旧truncated；只丢最旧整步，结论不截断，超限在发送前抛出。
+# 函数用途: 渲染最新50步、折叠面板、完整结论和状态栏，并核对保守JSON字节预算。
 def render_progress_card(snapshot) -> dict:
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     raw_steps = snapshot.get("steps", ())
     raw_steps = raw_steps if isinstance(raw_steps, (list, tuple)) else ()
-    steps = [step for step in islice(raw_steps, MAX_EXECUTION_STEPS_COUNT) if isinstance(step, Mapping)]
+    steps = [step for step in raw_steps[-50:] if isinstance(step, Mapping)]
     truncation = snapshot.get("truncation")
     truncation = truncation if isinstance(truncation, Mapping) else {}
-    observed = _count(truncation.get("observed_steps"), default=len(raw_steps))
-    observed = max(observed, len(raw_steps))
+    observed = max(_count(truncation.get("observed_steps"), default=len(raw_steps)), len(raw_steps))
     total = snapshot.get("total_steps")
     total = total if type(total) is int and total >= observed else None
     request_id = bounded_text(snapshot.get("request_id"), max_bytes=240)
@@ -33,31 +35,40 @@ def render_progress_card(snapshot) -> dict:
     summary = _plain(f"请求 {request_id}｜{state}｜已观察 {observed} 步，{total_text}")
     notice = _plain("")
     notice["element_id"] = "truncation"
+    footer = _plain(f"状态：{state}｜{total_text}")
+    footer['element_id'] = 'status_footer'
     elements = [_step_element(step) for step in steps]
     panel = {"tag": "collapsible_panel", "expanded": False,
              "header": {"title": {"tag": "plain_text", "content": "工具执行步骤"}}, "elements": elements}
+    body = [summary, panel]
+    final_text = snapshot.get('final_text')
+    if isinstance(final_text, str) and final_text:
+        body.append(_plain(final_text))
+    body.extend((notice, footer))
     card = {"schema": "2.0", "config": {"wide_screen_mode": True},
-            "header": {"title": {"tag": "plain_text", "content": "执行进度"}},
-            "body": {"elements": [summary, panel, notice]}}
+            "header": {"title": {"tag": "plain_text", "content": "执行进度"}}, "body": {"elements": body}}
     while True:
         facts = {"observed_steps": observed, "displayed_steps": len(elements),
                  "omitted_steps": observed - len(elements),
-                 "events_truncated": truncation.get("events_truncated") is True}
-        notice["text"]["content"] = "truncation: " + json.dumps(facts, ensure_ascii=False)
+                 "events_truncated": truncation.get("events_truncated") is True or snapshot.get('truncated') is True}
+        earlier = f"+{facts['omitted_steps']} 条更早步骤\n" if facts['omitted_steps'] else ''
+        notice["text"]["content"] = earlier + "truncation: " + json.dumps(facts, ensure_ascii=False)
         if len(json.dumps(card, ensure_ascii=True, allow_nan=False).encode("utf-8")) <= MAX_CARD_JSON_BYTES:
             return card
-        # 每次移除一个完整元素，不切 JSON 字节或破坏中文；顶部固定字段均已单独限长。
-        elements.pop()
+        # 每次移除最旧完整元素；完整结论不能为凑预算被悄悄截断。
+        if not elements:
+            raise ProgressCardOverflow('complete conclusion exceeds card byte budget')
+        elements.pop(0)
 
 
-# LLM: 只允许标准 JSON 2.0 的 plain_text div；不把模型文本或工具标签解释成动作、Markdown 或 URL。
+# LLM: 只允许标准JSON 2.0的plain_text div，不把模型文本解释成动作、Markdown或URL。
 # 函数用途: 创建无交互副作用的文本元素。
 def _plain(text: str) -> dict:
     return {"tag": "div", "text": {"tag": "plain_text", "content": text}}
 
 
-# LLM: finished 是原进度结束阶段，结合显式 ok 展示结果；未知与审批不当作完成，不解析状态文案。
-# 函数用途: 将一个步骤渲染成有界纯文本行，保留失败/未执行/耗时事实。
+# LLM: finished结合显式ok展示结果，未知与审批不当作完成，不解析状态文案。
+# 函数用途: 将一个步骤渲染成有界纯文本行，保留失败、未执行和耗时事实。
 def _step_element(step: Mapping) -> dict:
     name = bounded_text(step.get("tool_name"), max_bytes=120)
     phase = bounded_text(step.get("phase"), max_bytes=64)
@@ -78,7 +89,7 @@ def _step_element(step: Mapping) -> dict:
     return _plain("｜".join(parts))
 
 
-# LLM: 数量只接受真实非负整数，布尔不冒充数量；来源缺失时使用已观察列表长度，不推断任务总数。
-# 函数用途: 安全读取截断统计。
+# LLM: 数量只接受真实非负整数，布尔不冒充数量；缺失时只用已观察长度。
+# 函数用途: 安全读取截断统计，不猜任务总数。
 def _count(value: object, *, default: int) -> int:
     return value if type(value) is int and value >= 0 else default
