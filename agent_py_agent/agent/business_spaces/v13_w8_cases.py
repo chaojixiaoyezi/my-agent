@@ -402,7 +402,7 @@ def merge_cases(call):
     return w8_transaction(call, ('soc_cases', 'soc_alerts'), mutate)
 
 
-# LLM: SLA未知时保留空值，不把缺少策略当成零违约。
+# LLM: 只读既有策略；空目标不评估，有适用阶段才计数，每条记录最多一次。
 # 函数用途: 汇总分析师在办案件和告警负载。
 def workload(call):
     cases = [row for row in w8_rows(call, 'soc_cases') if row['status'] not in ('resolved', 'closed')]
@@ -428,11 +428,16 @@ def workload(call):
         matching = [policy for policy in policies.get(row['space_id'], []) if policy['severity'] == row['severity']]
         if matching and at:
             policy = matching[0]
-            load['sla_breaches'] = load['sla_breaches'] or 0
             elapsed = (now - datetime.fromisoformat(at.replace('Z', '+00:00')).timestamp()) / 60
             ack_pending = 'alert_id' in row and row['acknowledged_at'] is None
-            if elapsed > policy['resolve_minutes'] or (ack_pending and elapsed > policy['ack_minutes']):
-                load['sla_breaches'] += 1
+            resolve_minutes = policy['resolve_minutes']
+            ack_minutes = policy['ack_minutes'] if ack_pending else None
+            # 保持整组未知，直到至少一条记录有已配置且适用的阶段。
+            if resolve_minutes is not None or ack_minutes is not None:
+                load['sla_breaches'] = load['sla_breaches'] or 0
+                if ((resolve_minutes is not None and elapsed > resolve_minutes)
+                        or (ack_minutes is not None and elapsed > ack_minutes)):
+                    load['sla_breaches'] += 1
     analysts = [groups[key] for key in sorted(key for key in groups if key is not None)]
     return {'analysts': analysts[:500], 'unassigned': groups[None],
             'coverage': 'partial' if len(analysts) > 500 else 'complete'}
