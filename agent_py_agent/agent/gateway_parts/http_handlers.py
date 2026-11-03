@@ -258,7 +258,9 @@ def handle_status(handler, server) -> None:
     from .status_model_summary import status_model_summary
 
     # 状态页保持公开；这里只检查可信度，不调用会主动发送 403 的认证入口。
-    trusted = middleware is None or middleware.check_trusted(handler.headers, _handler_peer_ip(handler))
+    trusted = middleware is None or middleware.check_trusted(
+        getattr(handler, "headers", None) or {}, _handler_peer_ip(handler),
+    )
     response.update(status_model_summary(server, trusted=trusted))
     response["uncredentialed_loopback_by_endpoint"] = middleware.uncredentialed_loopback_snapshot() if middleware else {}
     # G2a 凭据状态：只给 ok / unavailable:<原因码>，不给路径、内容或异常文字。
@@ -2209,7 +2211,8 @@ def handle_client_history(handler, server) -> None:
         result = read_gateway_client_history(
             server.agent, scope=scope, max_turns=_request_limit(body, default=20), before_message_cursor=before,
         )
-        if result.ok and result.thread_id:
+        # 只有显式成功且带线程身份的结果才补充活动投影；精简结果仍按原合同序列化。
+        if getattr(result, "ok", False) and getattr(result, "thread_id", ""):
             from .client_inflight_projection import client_inflight_projection
 
             result = replace(result, **client_inflight_projection(server, scope, result.thread_id))

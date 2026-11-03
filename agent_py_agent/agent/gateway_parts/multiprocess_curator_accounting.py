@@ -108,7 +108,12 @@ def _inventory_version(home_root):
     os.close(descriptor)
     version = _owner_home_signature(Path(home_root) / "owners" / "providers")
     for provider, kind, _signature in version:
-        relative = ("owners", "providers", provider, {"user": "users", "group": "groups"}[kind])
+        # 签名区分规范本地用户与旧位置；legacy-users是签名种类，不是目录名。
+        bucket = {"user": "users", "group": "groups", "legacy-users": "users"}.get(kind)
+        if bucket is None:
+            raise ValueError("curator_quota_owner_inventory_invalid")
+        relative = (("owners", "local") if (provider, kind) == ("local", "user")
+                    else ("owners", "providers", provider, bucket))
         try:
             descriptor = open_directory_beneath(home_root, relative, require_dir_fd=True)
         except FileNotFoundError:

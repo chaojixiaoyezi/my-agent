@@ -2429,24 +2429,24 @@ def test_scaling_d_receipt_directory_cache_rotates_without_reglob(tmp_path, monk
         (root / f"{name}.json").write_text("{}")
     os.utime(root, (1, 1))
     calls = []
-    original = Path.glob
+    original = delivery.os.scandir
 
-    # LLM: 只记录本次临时回执目录枚举，其他文件访问保持原样。
-    # 函数用途: 证明游标更新后没有重复全目录排序。
-    def glob(path, pattern, *args, **kwargs):
+    # 观察实际scandir并透传上下文，确保未改回glob或泄漏枚举句柄。
+    def scan(path):
         if path == root:
-            calls.append(pattern)
-        return original(path, pattern, *args, **kwargs)
+            calls.append(path)
+        return original(path)
 
-    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(delivery.os, "scandir", scan)
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["a.json", "b.json"]
     before = root.stat().st_mtime_ns
     delivery._commit_reconcile_cursor(paths, root / "b.json")
     assert root.stat().st_mtime_ns == before
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "a.json"]
-    assert calls == ["*.json"]
+    assert calls == [root]
     (root / "d.json").write_text("{}")
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "d.json"]
+    assert calls == [root, root]
 
 
 # LLM: 回执和canonical文件真实落盘，仅在新helper读取guidance的边界注入消费证明或typed未知；不伪装真实端到端鉴权。
