@@ -245,6 +245,16 @@ class OriginalProcessingRecoverySource:
             raise self.rejection("processing_recovery.defer_failure")
         self._failure_projection = (context, response)
 
+    # LLM: 只在原issued恢复callback中取同owner既有路径；不造manager/工作单，不赋予live worker恢复来源。
+    # 函数用途: 为原孩子清理返回经过同一配置和归属核验的workspace。
+    def existing_child_workspace(self):
+        self.require_writer("processing_recovery.child_workspace")
+        _require_published_recovery_binding(self)
+        root = _recovery_runtime_paths(self)["subagent_workspace"]
+        if not root.is_relative_to(self.home.home_dir) or not root.is_dir():
+            raise self.rejection("processing_recovery.child_workspace")
+        return root
+
     # LLM: 冷Store仅原owner路径/initializeFalse，要求原thread/owner与Runtime绑定一致；不得C物化远端Agent或None假空账。
     # 函数用途: 为原guidance/claim收口取得同一个实际会话存储。
     @property
@@ -300,7 +310,9 @@ def _recovery_base_home(agent):
 
 # LLM: 冷C只用typed config/home_root；foreign清原runtime字段克隆，same-owner保显式覆盖；仍核owner墙、原thread/claim与initializeFalse。
 # 函数用途: 组装原owner既有会话库，不造Agent、不建目录；实际写入仍由原ports/T与P2/P3末门负责。
-def _recovery_store(source):
+# LLM: 会话与孩子共享同一冻结配置的纯路径选择，不初始化目录或执行宿主。
+# 函数用途: 解析原owner的运行时路径，供两类已有元数据存储复用。
+def _recovery_runtime_paths(source):
     from dataclasses import replace
 
     from ..user_space.owner_resolver import owner_identity_from_config
@@ -327,8 +339,13 @@ def _recovery_store(source):
             raise source.rejection("processing_recovery.store_path")
     else:
         workspace = getattr(agent, "effective_workspace_root", agent.root)
-    resolution = runtime_paths_for_agent(config, workspace, scoped_home)
-    root = resolution["conversation_workspace"]
+    return runtime_paths_for_agent(config, workspace, scoped_home)
+
+
+# LLM: 沿原解析结果初始化只读既有会话库，保留同thread/owner与initializeFalse核验。
+# 函数用途: 从原冻结路径读取用于恢复的ConversationStore。
+def _recovery_store(source):
+    root = _recovery_runtime_paths(source)["conversation_workspace"]
     if not root.is_relative_to(source.home.home_dir) or not root.is_dir():
         raise source.rejection("processing_recovery.store_path")
     store = ConversationStore(root, initialize=False)

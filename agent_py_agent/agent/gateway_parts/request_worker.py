@@ -1504,6 +1504,81 @@ def _settle_fallback_turn_guidance(conversation_store: object | None, request_id
         pass
 
 
+# LLM: 原release短门先于孩子锁；先保存原终答再读孩子，精确清单持久化后才写孩子；快照未知保pending，退出后才archive。
+# 函数用途: 保存原结果和孩子申请清单，在原执行窗口内收口并核对确认。
+def _close_claimed_parent_capabilities(paths, processing_path, request_id, response, agent, attempt_id, lease_epoch):
+    import copy
+    from contextlib import nullcontext
+
+    from ..common.request_execution_ports import (
+        current_request_execution_source,
+        gateway_short_transaction,
+    )
+    from ..conversation.agent_activity import (
+        close_parent_capability_requests,
+        parent_capability_request_snapshot,
+    )
+    from .io import gateway_turn_transition
+    from .recovery import _reconcile_capability_closeout, _validated_capability_closeout
+    from .request_binding import gateway_runtime_authority
+
+    manager = getattr(agent, "subagents", None)
+    if manager is None or processing_path.parent != paths.processing:
+        return
+    with gateway_short_transaction("release"):
+        source = current_request_execution_source("release")
+        with gateway_turn_transition(paths, request_id) if source is None else nullcontext():
+            report = read_json_file_report(processing_path)
+            payload = report.payload
+            if (report.load_error is not None or payload.get("id") != request_id
+                    or payload.get("status") != "processing"
+                    or (attempt_id and payload.get("execution_attempt_id") != attempt_id)
+                    or (lease_epoch and payload.get("lease_epoch") != lease_epoch)
+                    or (paths.terminal / processing_path.name).exists()):
+                return
+            authority = gateway_runtime_authority(payload, request_id)
+            runtime = payload.get("conversation_runtime")
+            parent = str(authority.get("task_id") or (runtime.get("task_id") if isinstance(runtime, dict) else "") or request_id)
+            with manager.creation_guard():
+                proof = payload.get("capability_closeout")
+                if proof is None:
+                    proof = {"schema_version": "gateway_capability_closeout.v1", "request_id": request_id,
+                             "owner_id": agent.home_paths.owner_id, "parent_task_id": parent,
+                             "execution_attempt_id": payload.get("execution_attempt_id", ""),
+                             "lease_epoch": payload.get("lease_epoch", 0), "lease_owner": payload.get("lease_owner", ""),
+                             "reason": "parent_turn_interrupted" if response.get("status") in {"cancelled", "stopped", "interrupted"} else "parent_turn_ended",
+                             "requests": {}, "snapshot_pending": True,
+                             "acknowledged": False, "terminal_response": copy.deepcopy(response)}
+                    payload["capability_closeout"] = proof
+                    # 这份原响应使窗口中崩溃也只能补终态，不能回到模型重跑。
+                    write_json_file_atomic(processing_path, payload)
+                    for attempt in range(2):
+                        request_ids = {}
+                        try:
+                            parent_capability_request_snapshot(agent, parent, request_ids=request_ids)
+                        except OSError:
+                            if attempt == 0:
+                                continue
+                            return
+                        except (DataCorruptionError, json.JSONDecodeError, TypeError):
+                            return
+                        proof.update(requests={run_id: list(ids) for run_id, ids in request_ids.items()},
+                                     snapshot_pending=False, acknowledged=not request_ids)
+                        write_json_file_atomic(processing_path, payload)
+                        break
+                _validated_capability_closeout(payload, owner_id=agent.home_paths.owner_id)
+                if proof.get("snapshot_pending") or proof["acknowledged"]:
+                    return
+                selected = {run_id: tuple(ids) for run_id, ids in proof["requests"].items()}
+
+                def close():
+                    close_parent_capability_requests(agent, parent, reason=proof["reason"],
+                                                     run_ids=tuple(selected), request_ids=selected)
+
+                proof["acknowledged"] = _reconcile_capability_closeout(manager.workspace, proof, close=close)
+                write_json_file_atomic(processing_path, payload)
+
+
 # LLM: 只有原后台消费者明确pending才经当前同Agent/claim短门重排，P3保留；其它响应沿main终态/重启/供应商续跑，不引入业务continuation旁路。
 # 函数用途: 将已认领请求的真实结果归档，后台尚未消费的同一来源让出执行槽后原请求稍后重领。
 def _finish_claimed_gateway_request(
@@ -1540,20 +1615,8 @@ def _finish_claimed_gateway_request(
         # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
         # request_execution._host_shutdown_resume_marker）。
         return
-    from ..conversation.agent_activity import (
-        close_parent_capability_requests,
-        parent_capability_request_snapshot,
-    )
-    from .request_binding import gateway_runtime_authority
-
-    capability_parent, capability_children = "", ()
-    if execution_agent is not None and processing_path.parent == paths.processing:
-        original = read_json_file_report(processing_path)
-        if original.load_error is None and original.payload.get("id") == request_id:
-            authority = gateway_runtime_authority(original.payload, request_id)
-            runtime = original.payload.get("conversation_runtime")
-            capability_parent = str(authority.get("task_id") or (runtime.get("task_id") if isinstance(runtime, dict) else "") or request_id)
-            capability_children = parent_capability_request_snapshot(execution_agent, capability_parent)
+    _close_claimed_parent_capabilities(paths, processing_path, request_id, response, execution_agent,
+                                      expected_execution_attempt_id, expected_lease_epoch)
     target_folder = gateway_terminal_projection_folder(paths, response)
     response_path = gateway_response_path(paths, request_id)
     archive_result = archive_request(
@@ -1568,10 +1631,6 @@ def _finish_claimed_gateway_request(
     )
     if not archive_result.terminal_committed:
         return
-    if execution_agent is not None and capability_children:
-        close_parent_capability_requests(execution_agent, capability_parent,
-            reason="parent_turn_interrupted" if response.get("status") in {"cancelled", "stopped", "interrupted"} else "parent_turn_ended",
-            run_ids=capability_children)
     from .recovery import (
         mark_gateway_terminal_projection_complete,
         repair_gateway_chunk_projection,

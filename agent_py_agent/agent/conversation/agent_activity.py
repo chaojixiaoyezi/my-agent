@@ -1333,29 +1333,71 @@ def subagent_display_label(task: object) -> str:
     return runner_display_label(getattr(task, "status", ""), getattr(task, "failure_type", ""), capability_resolution=capability_request_resolution(task))
 
 
-# LLM: 显式生命周期桥，与活动读取无关；在父终态提交前固定精确孩子集合，避免旧收尾扫描到新回合孩子。
+# LLM: 仅描述性快照，仍按tuple兼容旧caller；申请清单随同原值传递，不靠可变全局账本或扩大执行权。
+# 类用途: 让旧中断调用也携带当时冻结的精确申请编号。
+class _ParentCapabilityRequestSnapshot(tuple):
+    # LLM: 复制原清单为不可变tuple；不读盘、不获取执行来源，空快照仍等于原空tuple。
+    # 函数用途: 构造同时记住父级和申请集合的孩子编号快照。
+    def __new__(cls, parent_task_id, requests):
+        snapshot = super().__new__(cls, requests)
+        snapshot.parent_task_id = parent_task_id
+        snapshot.request_items = tuple((run_id, tuple(ids)) for run_id, ids in requests.items())
+        return snapshot
+
+
+# LLM: 显式生命周期桥，与活动读取无关；在父终态提交前固定精确孩子及申请集合，兼容原tuple消费者。
 # 函数用途: 冻结这次父回合收口允许处理的子代理编号。
-def parent_capability_request_snapshot(agent: object, parent_task_id: str) -> tuple[str, ...]:
+def parent_capability_request_snapshot(agent: object, parent_task_id: str, *,
+                                       request_ids: dict[str, tuple[str, ...]] | None = None) -> tuple[str, ...]:
+    from ..common.request_execution_ports import gateway_short_transaction
+    from ..subagents.model_capabilities import capability_request_counts_as_open
+
     manager = getattr(agent, "subagents", None)
     if not callable(getattr(manager, "creation_guard", None)) or not callable(getattr(manager, "list_runs_for_root_report", None)):
         return ()
-    with manager.creation_guard():
+    with gateway_short_transaction("release"), manager.creation_guard():
         report = manager.list_runs_for_root_report(parent_task_id)
         if report.load_errors:
             raise OSError("parent capability request snapshot unavailable")
-        return tuple(task.id for task in report.runs if task.parent_id == parent_task_id
-                     and task.status == "BLOCKED" and task.failure_type == "capability_request")
+        selected = {task.id: tuple(request.id for request in task.capability_requests
+                                   if capability_request_counts_as_open(request.status))
+                    for task in report.runs if task.parent_id == parent_task_id
+                    and task.status == "BLOCKED" and task.failure_type == "capability_request"
+                    and not task.runner_active_attempt_id}
+        selected = {run_id: ids for run_id, ids in selected.items() if ids}
+        if request_ids is not None:
+            request_ids.update(selected)
+        return _ParentCapabilityRequestSnapshot(parent_task_id, selected)
 
 
 # LLM: 只有宿主已确认的父回合终态/中断调用；精确冻结集合和canonical reducer决定写入，不供UI读投影触发。
 # 函数用途: 让网关沿conversation边界收口原孩子的未授权申请，不跨层直接导入subagents。
 def close_parent_capability_requests(agent: object, parent_task_id: str, *, reason: str,
-                                     run_ids: tuple[str, ...]) -> list[str]:
+                                     run_ids: tuple[str, ...],
+                                     request_ids: dict[str, tuple[str, ...]] | None = None) -> list[str]:
     from ..subagents.capability_request_expiry import close_stale_capability_requests
 
     if not run_ids:
         return []
-    return close_stale_capability_requests(agent.subagents, parent_task_id=parent_task_id, reason=reason, run_ids=run_ids)
+    if request_ids is None and isinstance(run_ids, _ParentCapabilityRequestSnapshot):
+        if run_ids.parent_task_id != parent_task_id:
+            raise ValueError("parent capability snapshot identity changed")
+        request_ids = dict(run_ids.request_items)
+    return close_stale_capability_requests(agent.subagents, parent_task_id=parent_task_id, reason=reason,
+                                           run_ids=run_ids, request_ids=request_ids)
+
+
+# LLM: 仅消费已验证的原workspace和精确申请；不初始化Agent/manager，读回未知不当作ack。
+# 函数用途: 为Gateway恢复提供既有孩子元数据的领域桥。
+def reconcile_parent_capability_requests(workspace, parent_task_id, reason, request_ids, *, read_only=False):
+    from ..subagents.capability_request_expiry import (
+        close_existing_capability_requests,
+        existing_capability_closeout_confirmed,
+    )
+
+    if not read_only:
+        close_existing_capability_requests(workspace, parent_task_id, reason, request_ids)
+    return existing_capability_closeout_confirmed(workspace, parent_task_id, request_ids)
 
 
 # LLM: 名册行只摊平 kernel 的唯一投影 replaced_by_view（接替者 run_id 与处置）成两个标量，TUI 白名单只收标量；
