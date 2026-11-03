@@ -1533,7 +1533,7 @@ def _emit_tool_progress(event: ToolProgressEvent) -> None:
 
         commit_visible_response(event.request.params, event.request.response, boundary="tools")
     on_chunk = getattr(event.request.params, "effective_on_chunk", None)
-    tool_name = event.call.tool_name or "unknown"
+    tool_name = getattr(event.call, "tool_name", None) or getattr(event.call, "name", None) or "unknown"
     detail = _payload_progress_detail(event.call)
     elapsed = ""
     if event.started_at is not None:
@@ -1628,7 +1628,8 @@ def _structured_tool_progress(
         "phase": event.phase,
         "status": event.status,
     }
-    call_id = str(event.call.call_id or "").strip()
+    # 展示兼容仅有旧 id 或省略身份的事件；没有 ID 时仍由下游按原回合坐标投影。
+    call_id = str(getattr(event.call, "call_id", None) or getattr(event.call, "id", None) or "").strip()
     if call_id:
         payload["call_id"] = call_id
     if detail:
@@ -1688,9 +1689,12 @@ def _structured_tool_progress(
 def _tool_progress_input(event: ToolProgressEvent, *, max_input_chars: int = 16384) -> tuple[dict[str, str], bool]:
     from ...common.log_redaction import redact_sensitive_value
 
+    arguments = getattr(event.call, "arguments", None)
+    if not isinstance(arguments, Mapping):
+        return {}, False
     inputs, truncated = {}, False
     for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope", "command"):
-        value = event.call.arguments.get(key)
+        value = arguments.get(key)
         if value is None or value == "":
             continue
         # 输入必须保留命令结构和空白；面向回复正文的净化器会连参数名也删掉，不能用于完整输入合同。
@@ -1894,7 +1898,9 @@ def _finished_status(result: ToolResult) -> str:
 def _payload_progress_detail(call: ToolCall) -> str:
     from ...common.log_redaction import redact_sensitive_value
 
-    payload = call.arguments
+    payload = getattr(call, "arguments", None)
+    if not isinstance(payload, Mapping):
+        return ""
     for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope"):
         value = str(payload.get(key) or "").strip()
         if value:

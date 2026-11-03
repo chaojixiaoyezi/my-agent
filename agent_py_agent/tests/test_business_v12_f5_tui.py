@@ -565,12 +565,26 @@ const assert=require('node:assert/strict');
  assert.deepEqual(served.map(params=>params.cursor),[undefined,'cursor-0','cursor-1']);
  assert.deepEqual(updates.filter(x=>x.stream_item==='event').map(x=>x.event_id),['evt-0','evt-1','evt-2']);
  assert.equal(obs.cursor,'cursor-2'); assert.equal(obs.coverage,'partial');
- queue=[FILTERED]; await obs.recover();
- assert.equal(served[3].cursor,'cursor-2'); assert.equal(obs.cursor,'filtered-scan','过滤后为空的页也保存扫描续点');
+ // 非空续点的空过滤页不代表结束，替身供满本轮预算，避免把队列耗尽伪装成网络失败。
+ queue=Array(obs.maxCatchUpPages).fill(FILTERED); await obs.recover();
+ assert.equal(served.length,6); assert.equal(queue.length,0);
+ assert.deepEqual(served.slice(3).map(params=>params.cursor),['cursor-2','filtered-scan','filtered-scan']);
+ assert.equal(obs.cursor,'filtered-scan','过滤后为空的页也保存扫描续点');
+ assert.equal(obs.coverage,'partial','达到页数预算不冒充全部补拉完成');
  queue=[PAGES[1],PAGES[2],PAGES[3],FILTERED]; await obs.recover();
+ assert.equal(served.length,9); assert.equal(queue.length,1,'每轮仍受三页预算约束');
+ assert.deepEqual(served.slice(6).map(params=>params.cursor),['filtered-scan','cursor-1','cursor-2']);
  assert.deepEqual(updates.filter(x=>x.stream_item==='event').map(x=>x.event_id),['evt-0','evt-1','evt-2','evt-3'],'按 event_id 去重');
+ queue=[END]; await obs.recover();
+ assert.equal(served.length,10); assert.equal(served[9].cursor,'cursor-3');
+ assert.equal(obs.cursor,null); assert.equal(obs.coverage,'complete'); assert.equal(queue.length,0);
+ obs.cursor='expired-cursor';
  queue=[RESET]; await obs.recover();
+ assert.equal(served.length,11); assert.equal(served[10].cursor,'expired-cursor');
  assert.equal(obs.cursor,null); assert.equal(obs.coverage,'expired'); assert.equal(queue.length,0);
+ assert.equal(obs.seen.size,0); assert.equal(api.pending.size,0);
+ assert.equal(updates.at(-1).stream_item,'recovered'); assert.equal(updates.at(-1).coverage,'expired');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 ''', PAGES=pages, FILTERED=events_page(next_cursor='filtered-scan', coverage='complete'),
+        END=events_page(coverage='complete'),
         RESET=events_page(next_cursor='reset-scan', coverage='expired', reset_required=True))
