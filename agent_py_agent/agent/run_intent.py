@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from .common.nofollow_fs import open_readonly_file_beneath
 from .common.value_parsing import dedupe_strings
+from .run_intent_index import bootstrap_locator, intent_candidates
 from .runtime_errors import DataCorruptionError, runtime_error_report
 
 _PATH_RE = re.compile(r"(~?/[^ \t\r\n，。；;：:、)）\]】\"'<>`]+)")
@@ -102,28 +105,41 @@ def _latest_run_intent_from_dir(facts_dir: Path) -> dict[str, Any]:
     return _latest_run_intent_from_dir_report(facts_dir)[0]
 
 
-def _latest_run_intent_from_dir_report(facts_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if not facts_dir.exists():
-        return {}, []
-    candidates = sorted(
-        (path for path in facts_dir.glob("*/task.json") if path.is_file()),
-        key=_path_mtime,
-        reverse=True,
-    )
-    load_errors: list[dict[str, Any]] = []
-    for path in candidates[:_MAX_FACT_FILES]:
+# LLM: 只消费准确身份或已发布的有界候选；热miss披露unknown，绝不枚举历史目录。
+# 函数用途: 读取本事实根内最近或当前运行意图，保留坏文件诊断。
+def _latest_run_intent_from_dir_report(facts_dir: Path, *, request_id: str = "", run_id: str = "") -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    candidates, load_errors = intent_candidates(facts_dir, limit=_MAX_FACT_FILES, request_id=request_id, run_id=run_id)
+    for path in candidates:
         payload, load_error = _runtime_fact_payload(path)
         if load_error:
             load_errors.append(load_error)
             continue
+        if (request_id or run_id) and not (request_id and payload.get("request_id") == request_id
+                                           or run_id and payload.get("run_id") == run_id):
+            continue
         intent = payload.get("run_intent") if isinstance(payload, dict) else None
         if isinstance(intent, dict) and _items(intent.get("desired_outputs")):
             return intent, load_errors
+    if (request_id or run_id) and not load_errors:
+        error = _load_error(FileNotFoundError("current run intent is not recorded"), facts_dir)
+        error.update(error_code="RUN_INTENT_NOT_FOUND", source_status="unknown")
+        load_errors.append(error)
     return {}, load_errors
 
 
-def reference_write_feedback(*, workspace_root: Path, target: Path, fact_roots: list[Path] | None = None) -> dict[str, Any]:
-    intent, load_errors = latest_run_intent_report(workspace_root, fact_roots=fact_roots)
+# LLM: 只有宿主身份可指定当前意图；无身份时用locator，返回仍为原非阻断软提示。
+# 函数用途: 为本轮写入反馈准确输出/参考目录，不借另一个较新运行推断本轮意图。
+def reference_write_feedback(*, workspace_root: Path, target: Path, fact_roots: list[Path] | None = None,
+                             request_id: str = "", run_id: str = "") -> dict[str, Any]:
+    if request_id or run_id:
+        intent, load_errors = {}, []
+        for facts_dir in _runtime_fact_dirs(workspace_root, fact_roots):
+            intent, errors = _latest_run_intent_from_dir_report(facts_dir, request_id=request_id, run_id=run_id)
+            load_errors.extend(errors)
+            if intent:
+                break
+    else:
+        intent, load_errors = latest_run_intent_report(workspace_root, fact_roots=fact_roots)
     desired = _items(intent.get("desired_outputs"))
     references = _items(intent.get("reference_roots"))
     if not desired or not references:
@@ -189,9 +205,13 @@ def _runtime_fact_dirs(workspace_root: Path, fact_roots: list[Path] | None) -> l
     return dirs
 
 
+# LLM: 候选路径仅由同根目录名产生，逐级no-follow；原子task.json一次读取保证意图字段不混代。
+# 函数用途: 读取一个准确事实文件，缺失/坏内容仍给原结构化诊断。
 def _runtime_fact_payload(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        descriptor = open_readonly_file_beneath(path.parent.parent, (path.parent.name, path.name))
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return {}, _load_error(exc, path)
     if not isinstance(payload, dict):
@@ -205,11 +225,15 @@ def _load_error(exc: BaseException, path: Path) -> dict[str, Any]:
     return report
 
 
-def _path_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+# LLM: 冷装配只迁移最多12个旧事实；大目录保留明确缺失状态，不在write热路径重试枚举。
+# 函数用途: 在注册独立写工具时接住小型旧事实集，正常事实writer负责之后的locator更新。
+def prepare_run_intent_locators(workspace_root: Path, *, fact_roots: list[Path] | None = None) -> None:
+    for facts_dir in _runtime_fact_dirs(workspace_root, fact_roots):
+        try:
+            bootstrap_locator(facts_dir, limit=_MAX_FACT_FILES)
+        except OSError:
+            # 非关键投影的装配失败不影响写工具，反馈读口会披露unknown。
+            continue
 
 
 def _same_or_related(path: Path, target: Path) -> bool:

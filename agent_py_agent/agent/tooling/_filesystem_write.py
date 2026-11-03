@@ -20,7 +20,7 @@ from ..common.file_version import StaleFileVersionError, check_file_version, fil
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery import RecoveryAction
 from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
-from ..run_intent import reference_write_feedback
+from ..run_intent import prepare_run_intent_locators, reference_write_feedback
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, OwnerQuotaUnavailable
 from ._filesystem_display import (
     build_text_diff_display,
@@ -66,6 +66,7 @@ from .models import (
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolInputPolicy,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -138,19 +139,20 @@ class WriteOutputRequest:
     mode: str
 
 
-# LLM: 三种内容输入共用 mutating/operation 合同；可选语法观察不绕审批、版本、owner 墙或改变写入成功事实。
+# LLM: 三种内容输入共用 mutating/operation 合同；当前身份仅由input_policy交executor注入，不进入模型schema或改变权限。
 # 类用途: 在原文件链完成可追踪的原子写入，并反馈本次候选的有限语法信息。
 class WriteFileTool(FileSystemTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(parameter_names=("path",)),
+        input_policy=ToolInputPolicy(internal_parameters=("__run_scope",)),
         promotes_task=True,
         mutates_workspace=True,
     )
 
-    # LLM: 来源 resolver/schema 成对注入；未启用时保持原模型合同，已启用时原参数门消费准确字段声明，联查 core/registry 和写工具测试。
-    # 函数用途: 初始化访问策略与隔离的来源声明，区分新正文和原样复制；装配错误在工具可用前明确失败。
+    # LLM: 来源resolver/schema成对注入；原身份由executor注入，冷装配仅迁移有界微型旧事实集，不做历史全扫。
+    # 函数用途: 初始化访问策略、隔离来源声明与小页意图定位器。
     def __init__(
         self,
         workspace_root: Path,
@@ -169,6 +171,7 @@ class WriteFileTool(FileSystemTool):
         self.runtime_fact_roots = [
             Path(root).expanduser().resolve(strict=False) for root in options.runtime_fact_roots
         ]
+        prepare_run_intent_locators(self.workspace_root, fact_roots=self.runtime_fact_roots)
         self.model_spec = ToolModelSpec(
             name="write_file",
             description=("原子写入或覆盖完整文件；支持文本 content 或二进制 data_base64，缺失父目录会自动创建。"
@@ -225,7 +228,7 @@ class WriteFileTool(FileSystemTool):
             ),
         )
 
-    # LLM: 来源错误仍在写前拒绝；语法观察属于本次调用，发布成功才附回执，诊断失败不得改写原 effect。
+    # LLM: 来源错误仍在写前拒绝；反馈只读宿主当前身份或有界locator，语法诊断与反馈都不改变原effect。
     # 函数用途: 共用原路径与产物检查完成写入，返回版本、字节数、来源和可选语法反馈。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
@@ -298,7 +301,8 @@ class WriteFileTool(FileSystemTool):
             )
         )
         output, feedback = _attach_reference_write_feedback(
-            self.workspace_root, target, output, self.runtime_fact_roots
+            self.workspace_root, target, output, self.runtime_fact_roots,
+            run_scope=params.get("__run_scope"),
         )
         result = _write_result("write_file", target, output, web_decision)
         result.result_envelope["bytes_written"] = len(request.data)
@@ -459,14 +463,20 @@ def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> To
     return ToolHandlerOutcome(tool, True, rendered_output, result_envelope=envelope)
 
 
+# LLM: 内部身份只从executor注入的run_scope读取，不从文件正文或展示文本猜测。
+# 函数用途: 为本次写入附上准确运行的非阻断反馈。
 def _attach_reference_write_feedback(
     workspace_root: Path,
     target: Path,
     output: str,
     runtime_fact_roots: list[Path] | None = None,
+    *,
+    run_scope: dict | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    scope = run_scope if isinstance(run_scope, dict) else {}
     feedback = reference_write_feedback(
-        workspace_root=workspace_root, target=target, fact_roots=runtime_fact_roots
+        workspace_root=workspace_root, target=target, fact_roots=runtime_fact_roots,
+        request_id=str(scope.get("turn_id") or ""), run_id=str(scope.get("run_id") or ""),
     )
     if not feedback:
         return output, {}

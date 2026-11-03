@@ -36,7 +36,6 @@ from typing import Any
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.heartbeat import process_start_time, start_time_relation
 from ..common.json_io import (
-    append_private_jsonl_records,
     locked_json_path,
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
@@ -57,12 +56,12 @@ from .delivery_policy import normalize_delivery
 from .due_index import SchedulerDueIndex
 from .event_effects import (
     SchedulerEventEffectOperations,
-    _cached_history_report,
     _history_file_stamp,
 )
 from .event_source_repository import SchedulerEventSourceOperations
 from .event_sources import sync_event_sources
 from .execution_policy import normalize_execution, normalize_execution_target, normalize_precheck
+from .history_index import SchedulerHistoryIndex
 from .monitor_state import (
     adapt_definition_generations,
     definition_generation,
@@ -462,7 +461,7 @@ class _SchedulerJobOperations:
                 return
             self._write_store_unlocked(store, admission)
 
-    # LLM: 取消范围由原 job tombstone 与 run/history ID 决定；只复用同版历史解析，归属逐次校验，返回与缓存隔离。
+    # LLM: 取消范围由原job tombstone与准确ID决定；逐id点查终态，不解析整个历史，归属仍逐次校验。
     # 函数用途: 为冷启动及重复删除取回尚待取消的准确执行，包含已归档的排队运行。
     def pending_cancellation_runs(self):
         store = self._store_snapshot(readonly=True)
@@ -472,12 +471,10 @@ class _SchedulerJobOperations:
             for key in job.get('cancel_pending_run_ids', ())}
         if pending:
             active_ids = {row['run_id'] for row in result}
-            rows = _cached_history_report(self.history_path, context='scheduler.cancel.history').records
-            for row in rows:
-                if row.get('run_id') in pending - active_ids and row.get('status') in _TERMINAL_RUN_STATUSES:
-                    run, _error = self._parse_run(row, terminal=True)
-                    if run is not None:
-                        result.append(deepcopy(run))
+            for run_id in sorted(pending - active_ids):
+                run = self.effect_run(run_id)
+                if run is not None:
+                    result.append(deepcopy(run))
         return result
 
     # LLM: 原 job CAS 保存通知绑定；调用方已验证认证入口，本方法不接受任意 patch 或改来源，预留 run 不变。
@@ -583,6 +580,7 @@ class _SchedulerReservationOperations:
         limit: int = 32,
         cheap_checks: bool = False,
     ) -> list[dict[str, object]]:
+        self.maintain_history_index()
         current = _now(now)
         if cheap_checks and not self._cheap_due_candidates_exist(now=current):
             return []
@@ -888,36 +886,33 @@ class _SchedulerRunOperations:
         if job is not None:
             store["jobs"][job_id] = _job_after_run(job, terminal, now=now)
 
-    # LLM: 原始历史解析可缓存，owner/schema、去重排序与限量仍逐次执行；坏行诊断不缓存，公开结果保留深复制。
-    # 函数用途: 查询原owner历史，文件未变时省去重复JSONL解析。
+    # LLM: 只解码索引B+1行并沿原owner/schema校验；覆盖不足披露errors，不在读路径回填或全扫。
+    # 函数用途: 保持原排序和公开签名，按有界页查询当前owner历史。
     def history(
         self,
         *,
         job_id: str = "",
         limit: int = 50,
     ) -> tuple[list[dict[str, object]], list[str]]:
-        report = _cached_history_report(self.history_path, context="scheduler.history.read")
-        errors = [
-            str(item.get("error_type") or "SCHEDULER_HISTORY_READ_FAILED")
-            for item in report.load_errors
-        ]
-        rows: dict[str, dict[str, object]] = {}
-        for raw in report.records:
+        page_limit = max(1, min(int(limit or 50), 200))
+        raw_rows, errors = self._history_index.read(job_id=job_id, limit=page_limit)
+        selected = []
+        for raw in raw_rows:
             run, error = self._parse_run(raw, terminal=True)
             if error:
                 errors.append(error)
                 continue
             if run is not None and (not job_id or run["job_id"] == job_id):
-                rows[str(run["run_id"])] = run
-        selected = sorted(
-            rows.values(),
-            key=lambda row: (
-                float(row.get("ended_at") or row.get("created_at") or 0.0),
-                str(row["run_id"]),
-            ),
-            reverse=True,
-        )
-        return deepcopy(selected[: max(1, min(int(limit or 50), 200))]), sorted(set(errors))
+                selected.append(run)
+        return deepcopy(selected[:page_limit]), sorted(set(errors))
+
+    # LLM: 只供启动与原scheduler tick的有界维护，失败保留进度及不完整诊断，不妨碍其他原job判断。
+    # 函数用途: 推进一批旧历史回填，读history/effect时不做这项工作。
+    def maintain_history_index(self):
+        try:
+            return self._history_index.backfill()
+        except (OSError, ValueError) as exc:
+            return {"complete": False, "rows": 0, "bytes": 0, "error": type(exc).__name__}
 
     # LLM: 只读健康投影不参与执行裁决；完整现读快照不取写锁，job/run 损坏均报告 degraded，读取失败标记 unavailable。
     # 函数用途: 汇总监控与活动运行数量，保留无法查询的原因，不把不可用的零计数当没有监控。
@@ -1417,8 +1412,8 @@ class _SchedulerStoreSupport:
             store['jobs'][run['job_id']] = job
             self._write_store_unlocked(store, admission)
 
-    # LLM: 原quota→原文件锁→历史追加→原子写顺序不变；成功写入后只失效当前实例解析缓存。
-    # 函数用途: 持久化当前owner账本并阻止后续查询使用旧副本。
+    # LLM: 原quota→原store锁→历史锁追加/索引→原子store顺序不变；源先落盘，投影中止由游标回放。
+    # 函数用途: 持久化当前owner账本与可重建的有界历史查询投影。
     def _write_store_unlocked(
         self,
         store: dict[str, Any],
@@ -1450,7 +1445,7 @@ class _SchedulerStoreSupport:
         self._sync_due_index_unlocked(store)
         if history_rows:
             # 历史账本是宿主数据：私有追加（0600 文件、0700 目录），内容逐字节不变（pw2）。
-            append_private_jsonl_records(self.history_path, history_rows)
+            self._history_index.append(history_rows)
             self._history_source_seen = True
         write_json_file_atomic_unlocked(self.store_path, store)
         self._invalidate_store_payload()
@@ -1483,6 +1478,7 @@ class _SchedulerStoreSupport:
     def recover_interrupted_executions(self, *, now: float | None = None, job_id: str = '', expected_version: int | None = None) -> list[str]:
         from .recovery import recover_runs
 
+        self.maintain_history_index()
         return recover_runs(self, current=_now(now), job_id=job_id, expected_version=expected_version)
 
     def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
@@ -1892,8 +1888,8 @@ class SchedulerRepository(
 ):
     """Single owner-local facade over job, run, and store responsibilities."""
 
-    # LLM: 保留原装配，缓存受失效代次约束；每实例冷读门不跨owner，索引只绑定显式quota根。
-    # 函数用途: 初始化原仓库、实例缓存和可选owner历史读索引。
+    # LLM: 保留原装配和owner边界；新增本owner历史查询投影，不扩展共享OwnerReadIndex的闭域。
+    # 函数用途: 初始化原仓库与可重放历史索引，并开始一批启动回填。
     def __init__(
         self,
         root: str | Path,
@@ -1945,6 +1941,8 @@ class SchedulerRepository(
                 self._history_read_index = OwnerReadIndex(home, owner_id=self.owner["id"])
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
         ensure_private_dir(self.root)
+        self._history_index = SchedulerHistoryIndex(self.history_path, self.owner, self._parse_run)
+        self.maintain_history_index()
 
     # LLM: 已冻结 dict 且无迁移时只读深复制；忙碌或首次冻结和显式来源迁移始终委托原 mixin 的锁/CAS/证明校验。
     # 函数用途: 避免 queued 运行每拍重复准备来源时取得原 owner 变更锁，并发写繁忙时退回加锁路径。

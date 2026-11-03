@@ -20,7 +20,8 @@ from ..common.json_io import write_private_text_file_atomic
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.safe_id import safe_id
 from ..common.value_parsing import dedupe_strings
-from ..run_intent import build_run_intent, run_intent_payload
+from ..run_intent import _MAX_FACT_FILES, build_run_intent, run_intent_payload
+from ..run_intent_index import update_locator
 from .runtime_workspace_outputs import run_intent_has_desired_outputs, runtime_desired_outputs
 
 
@@ -67,6 +68,8 @@ class RuntimeFactTerminalRequest:
     error: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 同一owner/task-local根内先发布原子事实，再原子更新有界locator；不改变请求公开签名。
+# 函数用途: 写本轮事实并让写工具能直接定位运行意图。
 def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
         return ""
@@ -75,9 +78,12 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     ensure_private_dir(root)
     payload = _runtime_fact_payload(request)
     _write_json_atomic(root / "task.json", payload)
+    update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
     return str(root)
 
 
+# LLM: 终态保留原进度及意图，更新locator仍限定在同一事实根，不搜索别的运行。
+# 函数用途: 结束既有事实并同步其有界定位器。
 def update_runtime_fact_terminal(request: RuntimeFactTerminalRequest) -> str:
     """Close an existing live runtime fact without discarding its progress."""
     if not request.request_id:
@@ -108,9 +114,12 @@ def update_runtime_fact_terminal(request: RuntimeFactTerminalRequest) -> str:
     progress.update({"phase": status, "updated_at": _utc_timestamp()})
     payload = {**previous, "run_status": run_status, "runtime_progress": progress}
     _write_json_atomic(path, payload)
+    update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
     return str(root)
 
 
+# LLM: 批准事实沿原字段保留规则，只同步同根locator，不增加批准或完成语义。
+# 函数用途: 保存已批准事实并保持定位页与原文件一致。
 def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest) -> str:
     if not request.fact_id:
         return ""
@@ -118,6 +127,7 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
     ensure_private_dir(root)
     payload = _approved_fact_payload(request, _read_json_dict(root / "task.json"))
     _write_json_atomic(root / "task.json", payload)
+    update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
     return str(root)
 
 

@@ -403,6 +403,10 @@ _RUNTIME_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_current_attempt ON agent_runs(current_attempt_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_attempts_status_ended ON agent_attempts(status, ended_at)",
+    # 候选只遍历非终态attempt与created运行，历史done行不参与维护页及排序。
+    "CREATE INDEX IF NOT EXISTS idx_agent_attempts_stale_time ON agent_attempts(started_at, agent_run_id, attempt_id) "
+    "WHERE status IN ('running','created','unknown')",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_created_time ON agent_runs(created_at, agent_run_id) WHERE status='created'",
     "CREATE INDEX IF NOT EXISTS idx_tool_operations_status ON tool_operations(status)",
     "CREATE INDEX IF NOT EXISTS idx_resource_locks_attempt ON resource_locks(attempt_id)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_task_run ON runtime_events(task_run_id, seq)",
