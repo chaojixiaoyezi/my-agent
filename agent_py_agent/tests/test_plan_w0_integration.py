@@ -28,8 +28,8 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.concurrency import restart_gate
 from agent_py_agent.agent.conversation import background_claim, runtime
 from agent_py_agent.agent.conversation.background_recovery import BackgroundRecoveryGuard
-from agent_py_agent.agent.conversation.channels import DeliveryReceipt
 from agent_py_agent.agent.delivery.execution_view import project_execution_view
+from agent_py_agent.agent.delivery.progress import ProgressDeliveryReceipt
 from agent_py_agent.agent.gateway_parts import recovery, restart_service
 from agent_py_agent.agent.gateway_parts.io import (
     read_json_file,
@@ -110,7 +110,7 @@ def _tool_events(request_id, phase):
 # 函数用途: 验证同一入站话题从受理到卡片刷新和最终正文的本地闭环。
 def test_inbound_progress_card_and_final_keep_original_topic(tmp_path, monkeypatch, clock):
     """W12/W5/W6：受理先落盘，进度同卡编辑，最终回执仍属于原话题。"""
-    calls, receipts, submissions = [], [], []
+    calls, receipts, progress_receipts, submissions = [], [], [], []
 
     # LLM: 捕获真实 adapter 请求参数并返回合成消息 ID，不访问飞书。
     # 函数用途: 记录实际准备外发的卡片和最终正文。
@@ -148,6 +148,15 @@ def test_inbound_progress_card_and_final_keep_original_topic(tmp_path, monkeypat
         return receipt
 
     monkeypatch.setattr(manager._delivery_service, "deliver", observe_receipt)
+    original_progress = manager._delivery_service.deliver_progress
+
+    def observe_progress(context, envelope, **options):
+        receipt = original_progress(context, envelope, **options)
+        progress_receipts.append((context, envelope.content,
+            json.loads(json.dumps(options["snapshot"])), receipt))
+        return receipt
+
+    monkeypatch.setattr(manager._delivery_service, "deliver_progress", observe_progress)
     message = IncomingMessage("feishu", "ou_w0_actor", "读取原话题资料", "om_w0_inbound",
         conversation_id="oc_w0_group:thread:omt_w0_provider", metadata={
             "feishu_chat_type": "group", "feishu_chat_id": "oc_w0_group",
@@ -194,21 +203,30 @@ def test_inbound_progress_card_and_final_keep_original_topic(tmp_path, monkeypat
     assert [step["step_id"] for step in durable_steps] == [f"w0-call-{index}" for index in range(5)]
     assert all(step["phase"] == "finished" and step["ok"] is True for step in durable_steps)
     expected_cards.append(render_progress_card({"request_id": request_id, **terminal["progress_draft"]}))
+    # W6 原卡终结合同：步骤结束先刷新，随后把完整结论及请求终态写回同一张卡，不另发文本。
+    expected_cards.append(render_progress_card({"request_id": request_id, **terminal["progress_draft"],
+        "request_phase": "completed", "total_steps": len(durable_steps), "final_text": current.final}))
     creates = [row for row in calls if row[0] == "POST" and row[2].get("msg_type") == "interactive"]
     edits = [row for row in calls if row[0] == "PATCH"]
     finals = [row for row in calls if row[0] == "POST" and row[2].get("msg_type") == "text"]
-    assert len(creates) == len(edits) == len(finals) == 1
-    assert calls.index(creates[0]) < calls.index(edits[0]) < calls.index(finals[0])
-    assert json.loads(finals[0][2]["content"])["text"] == current.final
-    assert creates[0][1] == finals[0][1] == "/im/v1/messages/om_w0_inbound/reply"
-    assert creates[0][2]["reply_in_thread"] is finals[0][2]["reply_in_thread"] is True
-    assert edits[0][1].endswith("/om_w0_card")
-    final_receipt, = receipts
-    assert isinstance(final_receipt, DeliveryReceipt) and final_receipt.delivery_status == "sent"
-    assert final_receipt.component_receipts == tuple(terminal["component_receipts"])
-    assert terminal["component_receipts"][0]["provider_message_id"] == "om_w0_final"
+    assert len(creates) == 1 and len(edits) == 2 and not finals and not receipts
+    assert calls.index(creates[0]) < calls.index(edits[0]) < calls.index(edits[1])
+    assert creates[0][1] == "/im/v1/messages/om_w0_inbound/reply"
+    assert creates[0][2]["reply_in_thread"] is True
+    assert [row[1] for row in edits] == ["/im/v1/messages/om_w0_card"] * 2
+    assert len(progress_receipts) == 3
+    assert [row[2]["final"] for row in progress_receipts] == [False, False, True]
+    assert [row[2]["source_revision"] for row in progress_receipts] == [1, 2, 2]
+    for context, _text, _snapshot, receipt in progress_receipts:
+        assert (context.request_id, context.reply_to, context.reply_policy, context.provider_thread_id,
+                context.root_id, context.parent_id) == (request_id, message.message_id, "thread",
+                    "omt_w0_provider", "om_w0_root", "om_w0_parent")
+        assert isinstance(receipt, ProgressDeliveryReceipt) and receipt.ok
+        assert receipt.message_id == terminal["progress_draft"]["display_message_id"] == "om_w0_card"
+    assert progress_receipts[-1][1] == current.final
+    before_repoll = len(calls)
     assert manager._reply_delivery.run_once() == 0
-    assert len([row for row in calls if row[0] == "POST" and row[2].get("msg_type") == "text"]) == 1
+    assert len(calls) == before_repoll
     # 不替换生产 renderer：外发实际卡片必须与 W6 同一快照投影相等，否则保留真实跨片失败。
     actual_cards = [json.loads(row[2]["content"]) for row in (*creates, *edits)]
     assert actual_cards == expected_cards, "W5 实际投递未消费 W6 有界 Card 2.0 renderer"

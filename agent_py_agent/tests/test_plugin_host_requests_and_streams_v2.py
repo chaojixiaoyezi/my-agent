@@ -1,8 +1,10 @@
 # LLM: W6回归使用临时Owner与既有原账；纯合同测试不冒充真实模型、部署或外部SSE验收。
 # 模块用途: 守住扩展事件、真实用量、请求控制、附件及门户动作接线。
+import ast
 import json
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -329,6 +331,71 @@ def test_native_tool_writer_reaches_stream_before_terminal(public_case):
     assert second["sequence"] == first["sequence"] + 1
     assert "private-legacy-arguments" not in json.dumps([first, second])
     assert claim.path.is_file() and not (paths.done / claim.path.name).exists()
+
+
+@pytest.mark.parametrize("identity,expected", [
+    ({"id": "legacy-call"}, "legacy-call"),
+    ({"call_id": " native-call ", "id": "legacy-call"}, "native-call"),
+    ({"call_id": None, "id": "legacy-call"}, "legacy-call"),
+    ({"call_id": "", "id": "legacy-call"}, "legacy-call"),
+])
+def test_native_tool_progress_preserves_call_identity_priority(identity, expected):
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution
+
+    request = SimpleNamespace(tool_rounds=2, agent=SimpleNamespace())
+    call = SimpleNamespace(tool_name="read_file", arguments={"path": "src/main.py"}, **identity)
+    progress = round_execution._structured_tool_progress(round_execution.ToolProgressEvent(
+        request=request, idx=1, call=call, phase="started", status="执行中"), "read_file", "")
+    assert progress["call_id"] == expected
+    assert progress["input"] == {"path": "src/main.py"}
+    assert (progress["round"], progress["call_index"], progress["tool"]) == (2, 1, "read_file")
+
+
+@pytest.mark.parametrize("arguments", [None, [], "not-a-mapping"])
+def test_native_tool_progress_ignores_non_mapping_display_arguments(arguments):
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution
+
+    call = SimpleNamespace(tool_name="read_file", call_id="native-call", arguments=arguments)
+    progress = round_execution._structured_tool_progress(round_execution.ToolProgressEvent(
+        request=SimpleNamespace(tool_rounds=1), idx=1, call=call, phase="started", status="执行中"),
+        "read_file", "")
+    assert progress["call_id"] == "native-call" and "input" not in progress
+    assert "input_truncated" not in progress
+    assert round_execution._payload_progress_detail(call) == ""
+
+
+@pytest.mark.parametrize("fields", [{"tool_name": "read_file"}, {"name": "read_file", "id": "legacy-call"}])
+def test_native_tool_progress_emitter_keeps_optional_call_fields(fields):
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution
+
+    emitted = []
+    sink = SimpleNamespace(write_progress=lambda progress, text: emitted.append((progress, text)))
+    request = SimpleNamespace(tool_rounds=1, params=SimpleNamespace(effective_on_chunk=sink))
+    round_execution._emit_tool_progress(round_execution.ToolProgressEvent(request=request, idx=1,
+        call=SimpleNamespace(**fields), phase="finished", status="结束"))
+    progress, text = emitted[0]
+    assert len(emitted) == 1 and progress["tool"] == "read_file"
+    assert progress["phase"] == "finished" and "input" not in progress
+    assert progress.get("call_id") == fields.get("id")
+    assert "read_file" in text
+
+
+def test_tool_progress_helpers_do_not_directly_read_optional_call_fields():
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution
+
+    def unsafe_reads(tree):
+        fields = {"call_id", "id", "tool_name", "name", "arguments"}
+        return [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+            and node.attr in fields and (
+                isinstance(node.value, ast.Name) and node.value.id == "call"
+                or isinstance(node.value, ast.Attribute) and node.value.attr == "call")]
+
+    assert unsafe_reads(ast.parse("event.call.call_id; call.arguments")) == ["call_id", "arguments"]
+    tree = ast.parse(Path(round_execution.__file__).read_text())
+    names = {"_emit_tool_progress", "_structured_tool_progress", "_tool_progress_input", "_payload_progress_detail"}
+    helpers = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names}
+    assert set(helpers) == names
+    assert {name: unsafe_reads(node) for name, node in helpers.items()} == {name: [] for name in names}
 
 
 # LLM: 文件/媒体来自临时Owner；引用与原输入指纹一同保存，不涉及真实用户资料。
