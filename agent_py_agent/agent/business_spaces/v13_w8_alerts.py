@@ -265,8 +265,8 @@ def _monitor_repository(call):
         owner_kind=paths.owner_kind, owner_id=call.owner_id)
 
 
-# LLM: 只投影携明确 delivery_event_key 的规范消息；坏来源明确失败，历史窗口有界且不冒充完整。
-# 函数用途: 把可见监控规则的投递转换为稳定告警。
+# LLM: 消息的 task_id 必须经原调度 run 核对 owner/job/thread；路由键只去重，不授予规则身份。
+# 函数用途: 在有界历史内导入可证来源的原生投递，保留已有人工分诊与来源缺口。
 def sync_monitor_alerts(call):
     rules = w8_rows(call, 'monitor_rules')
     if not rules:
@@ -275,7 +275,7 @@ def sync_monitor_alerts(call):
     if conversation is None:
         raise HostAPIError('HOST_NOT_READY', 503)
     repository = _monitor_repository(call)
-    projected, coverage = {}, 'complete'
+    projected, histories, runs, legacy_keys, coverage = {}, {}, {}, {}, 'complete'
     for rule in rules[:1000]:
         if not rule.get('scheduler_job_id'):
             continue
@@ -283,26 +283,51 @@ def sync_monitor_alerts(call):
         if job['name'] != 'monitor:' + rule['rule_id']:
             raise HostAPIError('HOST_NOT_READY', 503)
         thread = conversation.threads.require(job['thread_id'])
-        if thread.owner_id != call.owner_id:
+        if thread.owner_id != call.owner_id or thread.owner_home != str(call.owner_home):
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)
         w8_access(call, {'owner_id': thread.owner_id, 'space_id': rule['space_id'], 'agent_id': thread.thread_id})
-        messages, errors = conversation.messages.recent_report(thread.thread_id, limit=1000)
+        if thread.thread_id not in histories:
+            histories[thread.thread_id] = conversation.messages.recent_report(thread.thread_id, limit=1000)
+        messages, errors = histories[thread.thread_id]
         if errors:
             raise HostAPIError('HOST_NOT_READY', 503)
         if len(messages) == 1000:
             coverage = 'partial'
         for message in messages:
-            key = message.metadata.get('scheduler_delivery_event_key')
-            if not isinstance(key, str) or not key:
+            if (message.role != 'assistant' or message.metadata.get('assistant_part_id') != 'final'
+                    or message.metadata.get('process') is True):
                 continue
-            identity = 'ALERT-' + hashlib.sha256(key.encode()).hexdigest()[:12].upper()
-            value = {'external_ref': key, 'title': (message.content.splitlines() or ['监控投递'])[0][:300] or '监控投递',
+            key = message.metadata.get('scheduler_delivery_event_key')
+            key = key if isinstance(key, str) and key else None
+            run_id = message.metadata.get('task_id')
+            if not isinstance(run_id, str) or not run_id:
+                if key or message.metadata.get('reason') == 'scheduled_job_due':
+                    coverage = 'partial'
+                continue
+            if run_id not in runs:
+                runs[run_id] = repository.effect_run(run_id)
+            run = runs[run_id]
+            if run is None:
+                if key or message.metadata.get('reason') == 'scheduled_job_due':
+                    coverage = 'partial'
+                continue
+            if (run['owner'] != repository.owner or run['job_id'] != job['job_id']
+                    or run['thread_id'] != thread.thread_id or message.thread_id != thread.thread_id):
+                continue
+            # 原生重投保留消息 ID；多目标路由另有稳定事件键，同键不能跨 owner/job/run 合并。
+            source_id = ['event', key] if key else ['message', message.message_id]
+            digest = hashlib.sha256(json.dumps([call.owner_id, job['job_id'], run_id, source_id],
+                ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+            identity = 'ALERT-' + digest[:12].upper()
+            if key:
+                legacy_keys[identity] = ('ALERT-' + hashlib.sha256(key.encode()).hexdigest()[:12].upper(), key)
+            value = {'external_ref': 'monitor:' + digest, 'title': (message.content.splitlines() or ['监控投递'])[0][:300] or '监控投递',
                 'description': message.content[:8000], 'severity': rule['severity'],
                 'rule_id': rule['rule_id'], 'techniques': rule['mitre_techniques'][:50],
                 'occurred_at': datetime.fromtimestamp(message.created_at, timezone.utc).isoformat()}
             row = _new_alert(call, rule['space_id'], value, identity, 'monitor')
             row['evidence_refs'] = message.metadata.get('evidence_refs', [])[:100]
-            projected[identity] = row
+            projected.setdefault(identity, row)
     if len(rules) > 1000:
         coverage = 'partial'
     existing = {row['alert_id'] for row in w8_rows(call, 'soc_alerts')}
@@ -317,6 +342,13 @@ def sync_monitor_alerts(call):
         def mutate(tables):
             for key, row in fresh.items():
                 w8_access(call, row)
+                # 已导入的旧键只能在规范 run 已核实后、原集合锁内精确复用，不重开人工分诊。
+                legacy_id, event_key = legacy_keys.get(key, (None, None))
+                old = tables['soc_alerts'].get(legacy_id)
+                if (old is not None and old['source'] == 'monitor' and old['external_ref'] == event_key
+                        and all(old[field] == row[field] for field in ('owner_id', 'space_id', 'rule_id', 'created_at'))):
+                    w8_access(call, old)
+                    continue
                 tables['soc_alerts'].setdefault(key, row)
             return {}
         w8_transaction(projection_call, ('soc_alerts',), mutate)
