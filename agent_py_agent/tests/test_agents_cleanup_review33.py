@@ -79,13 +79,17 @@ class _LockProbe:
             self.local.held = held
             manager.__exit__(None, None, None)
 
+    # LLM: 非阻塞取锁保留BlockingIOError供quota轮询，只有阻塞诊断等待耗尽才报TimeoutError。
+    # 函数用途: 保持真实锁竞争语义，同时给阻塞死锁诊断保留两秒上限。
     def _acquire(self, path, blocking):
         end = time.monotonic() + 2
         while True:
             manager = self._try_acquire(path)
             if manager is not None:
                 return manager
-            if not blocking or time.monotonic() >= end:
+            if not blocking:
+                raise BlockingIOError(f"{path.name} is busy") from None
+            if time.monotonic() >= end:
                 raise TimeoutError(f"{path.name} blocked while holding {getattr(self.local, 'held', [])}") from None
             time.sleep(0.005)
 
@@ -119,6 +123,46 @@ def _cleanup_after_concurrent_persona(env):
         # USER/SOUL 与 AGENTS 共用版本尾；并发真实写入后必须重新 dry-run，不能绕过 CAS。
         env.request = replace(env.request, plan_digest=migration.plan_agents_cleanup(persona=env.service.persona).plan_digest)
         return _apply(env)
+
+
+# LLM: 两套诊断探针必须保留真实双层锁的非阻塞异常，不能让配额轮询把正常竞争误判为存储故障。
+# 函数用途: 用真实跨线程持锁核验非阻塞竞争立即抛 BlockingIOError。
+@pytest.mark.parametrize("probe_kind", ["review33", "review33b"])
+def test_lock_probe_preserves_nonblocking_contention(tmp_path, probe_kind):
+    if probe_kind == "review33":
+        probe = _LockProbe(None)
+        acquire = probe._acquire
+    else:
+        from agent_py_agent.tests.test_agents_cleanup_review33b_locks import _QuotaCycleProbe
+
+        probe = object.__new__(_QuotaCycleProbe)
+        probe.original_lock = json_io._locked_json_path
+        probe.local = threading.local()
+        acquire = probe._wait_for_lock
+    path = tmp_path / ".owner-quota"
+    held, release = threading.Event(), threading.Event()
+    errors = []
+
+    def hold():
+        try:
+            with json_io._locked_json_path(path):
+                held.set()
+                assert release.wait(5)
+        except BaseException as exc:
+            errors.append(exc)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(5)
+        with pytest.raises(BlockingIOError):
+            acquire(path, False)
+    finally:
+        release.set()
+        holder.join(5)
+    assert not holder.is_alive() and not errors
+    with json_io._locked_json_path(path, blocking=False):
+        pass
 
 
 @pytest.mark.parametrize("target", ["long_term", "user", "soul"])

@@ -68,6 +68,11 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "VAPID_SUBJECT_REQUIRED": ErrorContract(
+        code="VAPID_SUBJECT_REQUIRED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="WebPush VAPID 未配置联系人 subject，当前通知已跳过；请管理员在原 VAPID 配置入口补齐 mailto: 邮箱或 https:// 联系地址，再确认是否重新发送，不原样自动重试。",
+    ),
     "FILE_SNAPSHOT_STALE": ErrorContract(
         code="FILE_SNAPSHOT_STALE", category="state", retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

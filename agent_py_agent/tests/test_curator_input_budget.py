@@ -128,15 +128,16 @@ def _conversation(tmp_path: Path, count: int):
     return store, thread, messages
 
 
-# 函数用途: 按生产同一口径（收集预算 = max_input_chars - 7000 - 正式记忆字符）算出“恰好收满全部积压”的配置。
+# LLM: W6收集预算覆盖完整JSON而非消息数组；夹具须计入审计及外壳，仍靠真实最终提示触发尾部缩批。
+# 函数用途: 按完整输入实测收满积压的收集预算，再加生产模板及正式记忆预留。
 def _backlog_filling_config(store: ConversationStore, tmp_path: Path) -> MemoryCuratorConfig:
     base = MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, timeout_seconds=1, max_retries=0,
                                batch_message_limit=80, max_input_chars=500_000)
     everything = collect_curator_inputs(message_source=CuratorMessageSource(conversation_store=store),
-                                        audit_dir=tmp_path / "no-audit",
+                                        audit_dir=tmp_path / "audit",
                                         state=MemoryCuratorState(), config=base)
-    message_chars = len(json.dumps([item.to_model() for item in everything.messages], ensure_ascii=False))
-    return replace(base, max_input_chars=message_chars + 7_000 + len(json.dumps([])))
+    payload_chars = len(json.dumps(everything.to_model_payload(), ensure_ascii=False))
+    return replace(base, max_input_chars=payload_chars + 7_000 + len(json.dumps([])))
 
 
 # 函数用途: 造使用真实 state/daily/candidate/run-log 权威的 Curator 依赖，可选注入前置标注钩子。
@@ -188,9 +189,9 @@ def _batch(messages: int, audits: int, preview_chars: int = 20) -> CuratorInputB
 
 def test_full_backlog_is_fitted_committed_as_prefix_and_replayed_without_loss(tmp_path: Path) -> None:
     store, thread, messages = _conversation(tmp_path, 80)
-    config = _backlog_filling_config(store, tmp_path)
     event_ids = _write_audit(tmp_path, thread.thread_id, 3)
-    # 前置条件即真机形态：消息收满收集预算，审计仍按保底至少进一条，身份清单也不在预算内，最终提示超预算。
+    config = _backlog_filling_config(store, tmp_path)
+    # 完整消息/审计JSON恰好填满收集预算；身份清单等最终提示开销仍使真实prompt超预算。
     collected = collect_curator_inputs(
         message_source=CuratorMessageSource(conversation_store=store),
         audit_dir=tmp_path / "audit", state=MemoryCuratorState(),
@@ -198,6 +199,9 @@ def test_full_backlog_is_fitted_committed_as_prefix_and_replayed_without_loss(tm
     )
     assert len(collected.messages) == 80
     assert collected.audit_events
+    assert len(json.dumps(collected.to_model_payload(), ensure_ascii=False)) == (
+        config.max_input_chars - 7_000 - len(json.dumps([]))
+    )
     assert len(curator_prompt(collected)) > config.max_input_chars
 
     backend = _ManifestEchoBackend(thread.thread_id)
@@ -231,8 +235,8 @@ def test_full_backlog_is_fitted_committed_as_prefix_and_replayed_without_loss(tm
 
 def test_fit_runs_before_optional_decision_annotation(tmp_path: Path) -> None:
     store, thread, _messages = _conversation(tmp_path, 80)
-    config = _backlog_filling_config(store, tmp_path)
     _write_audit(tmp_path, thread.thread_id, 3)
+    config = _backlog_filling_config(store, tmp_path)
     seen: list[CuratorInputBatch] = []
 
     def annotate(batch, run_id, deadline):

@@ -234,6 +234,19 @@ def test_raw_collaboration_status_metadata_is_write_only():
     assert offenders == [], f"raw 状态审计字段被消费: {offenders}"
 
 
+# LLM: 缺少 WebPush 联系人是配置缺口，不得归为未知码或自动重试外部推送。
+# 函数用途: 核验 VAPID subject 缺失时明确请求用户补齐配置。
+def test_vapid_subject_required_has_configuration_recovery():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    contract = error_contract("VAPID_SUBJECT_REQUIRED")
+    assert contract.code == "VAPID_SUBJECT_REQUIRED"
+    assert contract.category == "configuration"
+    assert contract.retryable is False
+    assert contract.recommended_action == RecoveryAction.REQUEST_USER_INPUT.value
+    assert "mailto:" in contract.recovery_hint and "https://" in contract.recovery_hint
+
+
 def test_all_used_error_codes_are_registered():
     """所有 error_code="XXX" 字面量必须在 ERROR_CONTRACTS 注册。
 

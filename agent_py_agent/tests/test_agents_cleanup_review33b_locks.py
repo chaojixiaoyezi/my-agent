@@ -80,13 +80,17 @@ class _QuotaCycleProbe:
         self.quota = self.service.persona.owner_home / '.owner-quota'
         self.local = threading.local()
 
+    # LLM: 非阻塞竞争原样返回给quota取消轮询；不能把正常锁忙改写成存储不可用。
+    # 函数用途: 保留真实BlockingIOError，只为阻塞诊断设置两秒超时。
     def _wait_for_lock(self, path, blocking):
         end = time.monotonic() + 2
         while True:
             manager, error = _try_real_lock(self.original_lock, path)
             if manager is not None:
                 return manager
-            if not blocking or time.monotonic() >= end:
+            if not blocking:
+                raise error
+            if time.monotonic() >= end:
                 name = threading.current_thread().name
                 held = getattr(self.local, 'held', [])
                 raise TimeoutError(f'{name} waits for {path.name} while holding {held}') from error
