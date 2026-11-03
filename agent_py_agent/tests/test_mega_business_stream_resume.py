@@ -73,19 +73,23 @@ def test_ndjson_snapshot_heartbeat_and_revocation_are_readonly(tmp_path):
     assert case.store.session_tasks.require(case.task.task_id).status == 'queued'
 
 
-def test_slow_client_burst_gets_gap_and_never_unbounded_queue(tmp_path):
+def test_slow_client_burst_is_paced_without_gap_or_termination(tmp_path):
     case = fixture(tmp_path)
-    response = stream(case)
+    baseline = case.service.query('events.list', {'filter': {'space_id': 'space-a'}}, actor=case.actor)
+    response = stream(case, baseline['next_cursor'])
     iterator = response.events()
     snapshot = next(iterator)
     assert snapshot['stream_item'] == 'snapshot'
-    for _ in range(BUSINESS_STREAM_MAX_PENDING_EVENTS + 2):
-        append(case)
-    gap = next(iterator)
-    assert gap['stream_item'] == 'gap' and gap['payload']['reset_required'] is True
-    assert response.pending_count <= BUSINESS_STREAM_MAX_PENDING_EVENTS
-    with pytest.raises(StopIteration):
-        next(iterator)
+    expected = [append(case)['event_id'] for _ in range(BUSINESS_STREAM_MAX_PENDING_EVENTS + 2)]
+    received = []
+    for _ in expected:
+        event = next(iterator)
+        assert event['stream_item'] == 'event'
+        received.append(event['event_id'])
+        assert response.pending_count <= BUSINESS_STREAM_MAX_PENDING_EVENTS
+    assert received == expected
+    assert next(iterator)['stream_item'] == 'heartbeat'
+    iterator.close()
 
 
 def test_expired_and_changed_scope_cursor_cannot_resume_old_authority(tmp_path):
@@ -259,7 +263,8 @@ def test_plugin_domain_queue_is_eight_and_disconnect_cannot_cancel_task(tmp_path
     assert next(iterator)['stream_item'] == 'snapshot'
     for _ in range(9):
         append(case)
-    assert next(iterator)['stream_item'] == 'gap'
+    assert next(iterator)['stream_item'] == 'event'
+    assert response.pending_count <= 8
     iterator.close()
     assert response.pending_count == 0
     assert case.store.session_tasks.require(case.task.task_id).status == 'queued'

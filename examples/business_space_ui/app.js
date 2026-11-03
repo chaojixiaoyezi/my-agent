@@ -121,9 +121,9 @@
             || (data.next_cursor !== null && typeof data.next_cursor !== 'string')) throw new BusinessError('补拉协议不完整', 0, result);
         if (data.reset_required) { this.cursor = null; this.coverage = 'expired'; this.seen.clear(); break; }
         for (const event of data.events) await this.accept(event);
-        if (data.next_cursor) this.cursor = data.next_cursor;
+        this.cursor = data.next_cursor;
         this.coverage = data.coverage || 'unknown';
-        if (!data.events.length || !data.next_cursor) break;
+        if (data.next_cursor === null) break;
       }
       this.onUpdate({stream_item: 'recovered', coverage: this.coverage, cursor: this.cursor});
     }
@@ -162,7 +162,14 @@
         if (!signal?.aborted) await this.recover();
       } catch (error) {
         if (!signal?.aborted) { this.coverage = 'unknown'; this.onUpdate({stream_item: 'disconnected', coverage: 'unknown'}); await this.recover(); }
-      } finally { if (reader) { try { await reader.cancel(); } finally { reader.releaseLock(); } } }
+      } finally {
+        if (reader) {
+          // 已中止的真实网络流在cancel时仍可能拒绝；不让清理阶段覆盖已经完成的补拉。
+          try { await reader.cancel(); }
+          catch (error) { if (error.name !== 'AbortError') throw error; }
+          finally { reader.releaseLock(); }
+        }
+      }
     }
   }
   const exported = {BusinessClient, BusinessObservation, NDJSONDecoder, BusinessError, displayUnknown};

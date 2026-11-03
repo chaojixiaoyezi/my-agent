@@ -17,6 +17,7 @@ class GatewayHTTPRoute:
 
 GATEWAY_HTTP_ROUTES = {
     "GET": (
+        GatewayHTTPRoute("/api/admin/*", "handle_admin_api_get", "admin", ".admin_api"),
         GatewayHTTPRoute("/client/business/artifacts/*/content", "handle_business_artifact_content", "credential", ".business_artifacts_http"),
         GatewayHTTPRoute("/status", "_handle_status", "public"),
         GatewayHTTPRoute("/feishu/oauth/callback*", "handle_feishu_oauth_callback", "public", ".feishu_oauth_service"),
@@ -29,6 +30,7 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/metrics", "_handle_metrics", "public"),
     ),
     "POST": (
+        GatewayHTTPRoute("/api/admin/*", "handle_admin_api_post", "admin", ".admin_api"),
         GatewayHTTPRoute("/client/business", "handle_client_business", "credential", ".business_api"),
         GatewayHTTPRoute("/client/business/stream", "handle_client_business_stream", "credential", ".business_api"),
         GatewayHTTPRoute("/client/business/artifacts", "handle_business_artifact_upload", "credential", ".business_artifacts_http"),

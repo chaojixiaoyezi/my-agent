@@ -36,6 +36,9 @@ class BusinessEventStream:
         self.actor = actor_factory(authenticated_context) if callable(actor_factory) else authenticated_context
         require_actor(self.actor, self.service)
         self.wait = _service(services, 'wait', time.sleep)
+        self.clock = _service(services, 'clock', time.monotonic)
+        self.event_signal = _service(services, 'event_signal')
+        self.heartbeat_seconds = business_schema_bundle()['stream_transport_contract']['plugin']['heartbeat_seconds']
         # Plugin仍走原8事件泵/16全局/2安装；host指定transport，模型请求不能放大它。
         self.max_pending = 8 if _service(services, 'stream_transport') == 'plugin' else BUSINESS_STREAM_MAX_PENDING_EVENTS
         self._pending = deque()
@@ -76,59 +79,86 @@ class BusinessEventStream:
 
     def _fill(self):
         coverage = 'unknown'
-        while True:
+        while len(self._pending) < self.max_pending:
             self._authorize()
-            # 多取一条仅用于探测溢出；never排入第129项，也不把整条积压装入内存。
-            limit = min(100, self.max_pending - len(self._pending) + 1)
+            # 积压留在来源，只读取空余容量；来源忽略limit时也只推进到实际入队的事件。
+            limit = min(100, self.max_pending - len(self._pending))
             page = self.service.query('events.list', {'filter': self.request['filter'], 'limit': limit,
                 **({'cursor': self._cursor} if self._cursor else {})}, actor=self.actor)
-            previous, self._cursor = self._cursor, page['next_cursor']
+            previous = self._cursor
             coverage = page['coverage']
-            for event in page['events']:
-                if len(self._pending) == self.max_pending:
-                    self._pending.clear()
-                    return self._gap('gap', 'CLIENT_BACKPRESSURE'), coverage
+            admitted = page['events'][:limit]
+            for event in admitted:
                 self._pending.append(event)
+            self._cursor = admitted[-1]['cursor'] if len(admitted) < len(page['events']) else page['next_cursor']
             if len(page['events']) < limit or previous == self._cursor:
                 return None, coverage
+        return None, coverage
+
+    # LLM: 快照仍从同一来源读取，恢复时不绕过游标签名、代际与实时权限。
+    # 函数用途: 在首次交付前复核续点并构建只读基线。
+    def _snapshot(self):
+        self._authorize()
+        if self._cursor:
+            self.service.cursor_position(self._cursor, self.service.scope_digest('events.list', {'filter': self.request['filter']}, self.actor))
+            self.service.query('events.list', {'filter': self.request['filter'], 'cursor': self._cursor, 'limit': 1}, actor=self.actor)
+        else:
+            self._cursor = self.service.initial_event_cursor(self.request['filter'], actor=self.actor)
+        snapshot = self.service.snapshot(self.request['filter'], actor=self.actor)
+        self._authorize()
+        self._last_sent = self._cursor
+        return self._frame('snapshot', snapshot, coverage=snapshot['coverage'])
 
     def events(self):
         """W13 Plugin消费者使用此同一typed流，再交原SSE编码器，不复制事件库。"""
         if self._used:
             raise BusinessError('STREAM_ALREADY_CONSUMED')
         self._used = True
+        initialized, expired_once = False, False
+        idle_since = self.clock()
+        delay = self.heartbeat_seconds / 60
         try:
-            self._authorize()
-            if self._cursor:
-                self.service.cursor_position(self._cursor, self.service.scope_digest('events.list', {'filter': self.request['filter']}, self.actor))
-                # source generation/retention也要在snapshot之前复核，不能只验签名。
-                self.service.query('events.list', {'filter': self.request['filter'], 'cursor': self._cursor, 'limit': 1}, actor=self.actor)
-            else:
-                self._cursor = self.service.initial_event_cursor(self.request['filter'], actor=self.actor)
-            snapshot = self.service.snapshot(self.request['filter'], actor=self.actor)
-            self._authorize()
-            self._last_sent = self._cursor
-            yield self._frame('snapshot', snapshot, coverage=snapshot['coverage'])
             while True:
-                gap, coverage = self._fill()
-                if gap is not None:
+                try:
                     self._authorize()
-                    yield gap
-                    return
-                while self._pending:
-                    event = self._pending.popleft()
-                    self._authorize(event)
-                    self._last_sent = event['cursor']
-                    yield validate_object(event, standalone_schema(business_defs()['EventView']))
-                self.wait(15)
-                self._authorize()
-                yield self._frame('heartbeat', {'server_time': datetime.now(timezone.utc).isoformat()}, coverage=coverage)
+                    if not initialized:
+                        snapshot = self._snapshot()
+                        initialized = True
+                        yield snapshot
+                    gap, coverage = self._fill()
+                    if gap is not None:
+                        self._authorize()
+                        yield gap
+                        continue
+                    while self._pending:
+                        event = self._pending.popleft()
+                        self._authorize(event)
+                        self._last_sent = event['cursor']
+                        expired_once = False
+                        idle_since, delay = self.clock(), self.heartbeat_seconds / 60
+                        yield validate_object(event, standalone_schema(business_defs()['EventView']))
+                    now = self.clock()
+                    if now - idle_since >= self.heartbeat_seconds:
+                        self._authorize()
+                        expired_once = False
+                        idle_since, delay = now, self.heartbeat_seconds / 60
+                        yield self._frame('heartbeat', {'server_time': datetime.now(timezone.utc).isoformat()}, coverage=coverage)
+                    timeout = min(delay, max(0, self.heartbeat_seconds - (self.clock() - idle_since)))
+                    signal_wait = getattr(self.event_signal, 'wait', None)
+                    (signal_wait if callable(signal_wait) else self.wait)(timeout)
+                    delay = min(delay * 2, self.heartbeat_seconds)
+                except BusinessError as error:
+                    if error.code != 'CURSOR_EXPIRED':
+                        raise
+                    self._cursor = self.service.initial_event_cursor(self.request['filter'], actor=self.actor)
+                    self._authorize()
+                    yield self._gap('cursor_expired', 'CURSOR_EXPIRED')
+                    # snapshot不算恢复进展；只有实际事件或完整空闲心跳才能解除连续过期保护。
+                    if expired_once:
+                        return
+                    expired_once = True
         except BusinessError as error:
-            if error.code == 'CURSOR_EXPIRED':
-                self._cursor = self.service.initial_event_cursor(self.request['filter'], actor=self.actor)
-                self._authorize()
-                yield self._gap('cursor_expired', 'CURSOR_EXPIRED')
-            elif error.code not in {'BUSINESS_ACCESS_DENIED', 'SPACE_SCOPE_MISMATCH', 'ACTOR_REQUIRED'}:
+            if error.code not in {'BUSINESS_ACCESS_DENIED', 'SPACE_SCOPE_MISMATCH', 'ACTOR_REQUIRED'}:
                 raise
         finally:
             self._pending.clear()

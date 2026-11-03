@@ -165,7 +165,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 36 and len({(method, template) for method, template, _ in pairs}) == 36
+    assert len(pairs) == 38 and len({(method, template) for method, template, _ in pairs}) == 38
     assert ("POST", "/client/goal", "credential") in pairs
     assert ("POST", "/channel-observations", "credential") in pairs
     assert {(method, path, tier) for method, path, tier in pairs if path.startswith("/client/business")} == {
@@ -181,7 +181,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     assert {(method, path) for method, path, tier in pairs if tier == "plugin_token"} == {
         ("POST", "/plugin-host/query"), ("POST", "/plugin-host/v2/call"), ("POST", "/plugin-host/v2/stream"),
     }
-    assert {path for _, path, tier in pairs if tier == "admin"} == {"/sessions/*/channels", "/admin/summary", "/stop", "/sessions/*/bind"}
+    assert {path for _, path, tier in pairs if tier == "admin"} == {"/sessions/*/channels", "/admin/summary", "/stop", "/sessions/*/bind", "/api/admin/*"}
     # 所有路由真正经过 do_GET/do_POST，未知路径404；只替换业务处理，不并排造观察路由表。
     called = []
     for method, group in routes.items():
@@ -197,7 +197,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
             assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == len(pairs) == 36
+        assert len(called) == len(pairs) == 38
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()
