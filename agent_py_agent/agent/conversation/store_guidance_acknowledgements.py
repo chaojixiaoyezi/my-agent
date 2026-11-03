@@ -215,6 +215,9 @@ class GuidanceAcknowledgements:
                     "metadata": {
                         "kind": "active_turn_user_input",
                         "guidance_id": guidance_id,
+                        **({"learning_source": dict(metadata["learning_source"])}
+                           if metadata.get("kind") == "active_turn_user_input"
+                           and isinstance(metadata.get("learning_source"), dict) else {}),
                         **attribution,
                         **({"input_media": metadata["input_media"]} if metadata.get("input_media") else {}),
                     },

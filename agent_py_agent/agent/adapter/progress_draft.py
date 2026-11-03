@@ -2,6 +2,7 @@
 # 模块用途: 合并流式进度批次，并沿原 claim/dispatch/CAS 保存可恢复的编辑消息身份。
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -30,7 +31,8 @@ class GatewayProgressBatch:
 
 # LLM: mode/ID沿原记录；新批次先脱敏再在页脚预算内按完整行裁剪，单行保留尾部语义；冻结dispatch与final全文不改。
 # 函数用途: 去除增量旧时间戳并合并发送一条有界进度，失败沿原dispatch恢复，不另建预览。
-def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch, *, force: bool = False):
+def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch, *, force: bool = False,
+                            max_step_identities: int = 4096):
     draft = dict(record.progress_draft)
     # 首发类型先冻结到原 pending；旧 message_id 没有类型字段时只能继续 text。
     render_kind = str(draft.get('render_kind') or ('text' if draft.get('message_id') else batch.render_kind))
@@ -79,10 +81,25 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
         draft.update(mode="stream", content=text)
         if render_kind == 'card':
             steps = {str(row['step_id']): dict(row) for row in draft.get('steps', ()) if isinstance(row, dict) and row.get('step_id')}
+            seen = dict.fromkeys(draft.get('step_id_hashes', ()) or
+                [hashlib.sha256(key.encode()).hexdigest() for key in steps])
+            truncation = dict(draft.get('truncation') or {})
+            observed = max(int(truncation.get('observed_steps') or 0), len(seen))
+            complete = draft.get('step_count_complete', not draft.get('truncated', False))
             for row in batch.steps:
                 if isinstance(row, dict) and row.get('step_id'):
-                    steps[str(row['step_id'])] = dict(row)
+                    identity = str(row['step_id'])
+                    digest = hashlib.sha256(identity.encode()).hexdigest()
+                    if digest not in seen:
+                        if len(seen) < max(1, max_step_identities):
+                            seen[digest] = None
+                            observed += 1
+                        else:
+                            complete = False
+                    steps[identity] = dict(row)
+            truncation.update(observed_steps=observed, events_truncated=not complete)
             draft.update(steps=list(steps.values())[-50:], truncated=draft.get('truncated', False) or len(steps) > 50,
+                step_id_hashes=list(seen), step_count_complete=complete, truncation=truncation, request_phase='updated',
                 source_revision=max(int(draft.get('source_revision') or 0), batch.source_revision or batch.next_cursor))
             if not text:
                 text = '执行记录更新'
@@ -98,7 +115,7 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
 
 # LLM: 原 pending 提供可信回复路由与已发送 ID；所有净化、目标校验和 provider 调用留在唯一 DeliveryService。
 # 函数用途: 将原进度账的消息身份与内容交给统一渠道服务，不启动另一会话。
-def send_gateway_draft(service: object, pending: object, text: str):
+def send_gateway_draft(service: object, pending: object, text: str, *, final: bool = False):
     from ..delivery import ReplyEnvelope
     from ..delivery.service import ChannelDeliveryContext as DeliveryContext
 
@@ -112,7 +129,10 @@ def send_gateway_draft(service: object, pending: object, text: str):
     if draft.get('render_kind') == 'card':
         options = {'render_kind': 'card', 'snapshot': {'request_id': pending.request_id,
             'source_revision': draft.get('source_revision', pending.progress_cursor),
-            'steps': draft.get('steps', ()), 'truncated': draft.get('truncated', False)}}
+            'steps': draft.get('steps', ()), 'truncated': draft.get('truncated', False),
+            'truncation': draft.get('truncation', {}), 'final': final,
+            'request_phase': 'completed' if final else draft.get('request_phase', 'updated'),
+            'total_steps': (draft.get('truncation', {}).get('observed_steps') if final and draft.get('step_count_complete') else draft.get('total_steps'))}}
     if pending.reply_policy:
         options['reply_policy'] = pending.reply_policy
     return service.deliver_progress(context, ReplyEnvelope(content=text),

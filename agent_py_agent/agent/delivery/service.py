@@ -140,10 +140,11 @@ class DeliveryService:
     # 函数用途: 首次创建一条进度消息，以后编辑同一条；进度不附路径说明，返回 provider 消息 ID 供原投递账本耐久保存。
     def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = '',
                          render_kind: str = 'text', snapshot: dict | None = None, reply_policy: str | None = None):
-        from ..adapter.feishu_progress_card import render_progress_card
+        from ..adapter.feishu_progress_card import ProgressCardOverflow, render_progress_card
         from .progress import ProgressDeliveryReceipt
 
-        prepared = self._prepare(context, envelope, progress=True)
+        final = render_kind == 'card' and (snapshot or {}).get('final') is True
+        prepared = self._prepare(context, envelope, progress=not final)
         if isinstance(prepared, DeliveryReceipt):
             return ProgressDeliveryReceipt(False, message_id, prepared.error_code or 'CHANNEL_PROGRESS_REJECTED', 'permanent')
         attempt = self._resolve_attempt(context, envelope, prepared)
@@ -155,7 +156,15 @@ class DeliveryService:
         policy = reply_policy if reply_policy is not None else getattr(context, 'reply_policy', '')
         if policy not in {'', 'reference', 'thread'}:
             return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_DELIVERY_MODE_INVALID', 'permanent')
-        options = {'render_kind': 'card', 'card': render_progress_card(snapshot or {})} if render_kind == 'card' else {}
+        # 结论只能来自统一净化后的正文，不接受snapshot中另塞的原始final_text。
+        card_snapshot = dict(snapshot or {})
+        card_snapshot.pop('final_text', None)
+        if final:
+            card_snapshot['final_text'] = attempt.content
+        try:
+            options = {'render_kind': 'card', 'card': render_progress_card(card_snapshot)} if render_kind == 'card' else {}
+        except ProgressCardOverflow:
+            return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_PROGRESS_CARD_OVERFLOW', 'permanent')
         create_options = {'reply_in_thread': True} if policy == 'thread' and attempt.capabilities.reply_policy else {}
         state = current_component_delivery()
         state = state if state is not None else ComponentDeliveryState(reply_policy=str(policy or ''))
@@ -169,7 +178,7 @@ class DeliveryService:
                 fact.phase == 'unknown' and provider_replay_allowed(attempt.adapter, fact) for fact in facts)
 
         try:
-            text = attempt.content[-8000:]
+            text = attempt.content if final else attempt.content[-8000:]
             with component_delivery_scope(state):
                 if message_id:
                     ok = attempt.adapter.edit_progress_message(message_id, text, **options)

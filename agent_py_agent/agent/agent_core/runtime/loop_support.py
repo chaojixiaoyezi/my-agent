@@ -214,7 +214,7 @@ def _package_recommendations(request: ToolSectionsRequest) -> str:
 
 # LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
 # task-local and explicit owner memory-off never read the formal repositories or project index.
-# LLM: 前台只取latency_safe候选，不提前记访问；最终正式准入统一确认，原scope、低延迟和隔离开关不变。
+# LLM: 前台保留latency_safe正式前缀与隔离总闸；增量规则仅追加到最终runtime尾部，不进入冻结memories或bundle前缀。
 # 函数用途: 准备本轮记忆候选及恢复上下文，不让预算淘汰项留下访问或等待嵌入网络。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     tool_runtime_snapshot, tool_protocol_snapshot = _tool_snapshots_for_run(
@@ -289,6 +289,9 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         len(request.inject or []),
         main_context_bundle,
     )
+    notice = _rule_notice_tail(agent, request, recall_scope, suppressed=recall_suppressed)
+    if notice:
+        runtime_injections = [*runtime_injections, notice]
     return PreparedRuntimeContext(
         memories=memories,
         runtime_injections=runtime_injections,
@@ -302,6 +305,26 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         tool_runtime_snapshot=tool_runtime_snapshot,
         tool_protocol_snapshot=tool_protocol_snapshot,
     )
+
+
+# LLM: owner根及线程只认宿主结构化属性；关闭、隔离及无绑定均零消费，范围复用正式召回同一typed keys。
+# 函数用途: 取得一次本线程未见的增量规则尾部，不修改系统记忆前缀。
+def _rule_notice_tail(agent, request, recall_scope, *, suppressed: bool = False):
+    if suppressed or not getattr(agent.config, "memory_rule_notices_enabled", True):
+        return ""
+    root = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    thread_id = str((request.task_attributes or {}).get("conversation_thread_id") or "")
+    if not root or not thread_id:
+        return ""
+    from ...memory_store.rule_notices import RuleNoticeStore
+
+    try:
+        text = RuleNoticeStore(root).take(thread_id,
+            max_chars=getattr(agent.config, "memory_rule_notices_max_chars", 1200), allows=recall_scope.allows)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        logging.getLogger(__name__).warning("RULE_NOTICE_READ_FAILED")
+        return ""
+    return "### 已正式生效的增量规则\n" + text if text else ""
 
 
 # LLM: 本 run 的工具快照只在这里冻结：工具说明按唯一权威 effective_owner_scope_root 算出的有效 owner 墙渲染，与执行门

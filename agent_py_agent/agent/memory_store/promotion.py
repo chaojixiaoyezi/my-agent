@@ -892,7 +892,7 @@ def _promotion_precheck_code(candidate: MemoryCandidate, automatic: bool) -> str
 # LLM: 不解析聊天意图；消费宿主来源及typed verifier，自动仅审核结构化合格快照，人工仍走原精确审核。
 # 类用途: 唯一执行候选审核及long_term、Persona、lesson与HOT归档，保原安全门和仓库。
 class MemoryPromotionService(_PromotionCommitMixin):
-    # LLM: 构造只接受一组权威依赖与一份策略，防止部分替代接线，并保留默认拒绝核验器。
+    # LLM: 保留唯一权威依赖和默认拒绝核验器；通知选项仅控制提交后的非权威提醒，不放宽任何晋升门。
     # LLM: coordinator_io仅原policy锁出生/实际native透传策略，不保存source，不改review/promote/condense/费用或锁序。
     # 函数用途: 用真实领域对象装配原晋升服务，C每次末写仍靠当次原scope。
     def __init__(
@@ -901,8 +901,12 @@ class MemoryPromotionService(_PromotionCommitMixin):
         dependencies: MemoryPromotionDependencies,
         policy: MemoryPromotionPolicy | None = None,
         coordinator_io: bool = False,
+        rule_notices_enabled: bool = True,
+        rule_notices_max_chars: int = 1200,
     ) -> None:
         self.coordinator_io = coordinator_io
+        self.rule_notices_enabled = rule_notices_enabled
+        self.rule_notices_max_chars = rule_notices_max_chars
         thresholds = policy or MemoryPromotionPolicy()
         self.candidates = dependencies.candidates
         self.long_term = dependencies.long_term
@@ -1123,7 +1127,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
             self, candidate, reviewer=reviewer, confirmed=confirmed
         )
 
-    # LLM: 回执只描述本条已提交事实；治理统一交批次末尾，不在这里逐条重扫或嵌套业务锁。
+    # LLM: 原晋升已经正式提交后才发布通知；失败不能谎报正式写入未发生，记录固定诊断，重复收尾可幂等补发。
     # 函数用途: 返回准确晋升结果，condense欠账由外层原批次完成或耐久保留。
     def _finalize_promotion(
         self,
@@ -1131,6 +1135,13 @@ class MemoryPromotionService(_PromotionCommitMixin):
         reviewer: str,
         outcome: _TargetCommit,
     ) -> MemoryPromotionResult:
+        if self.rule_notices_enabled:
+            from .rule_notices import publish_promoted_rule
+
+            try:
+                publish_promoted_rule(self, candidate, outcome.reference, max_chars=self.rule_notices_max_chars)
+            except (OSError, UnicodeError, ValueError):
+                logging.getLogger(__name__).warning("RULE_NOTICE_WRITE_FAILED")
         return MemoryPromotionResult(
             candidate.candidate_id,
             True,

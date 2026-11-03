@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -208,7 +209,7 @@ def test_feishu_encrypted_event_verified_and_enqueued() -> None:
     inner = {"header": {"event_id": "enc-1"}, "event": {"message": {"chat_id": "c2"}}}
     encrypted = feishu_crypto.encrypt_event_for_test(key, json.dumps(inner).encode(), iv=b"0123456789abcdef")
     raw = json.dumps({"encrypt": encrypted}).encode()
-    ts, nonce = "1700000000", "nonce1"
+    ts, nonce = str(int(time.time())), "nonce1"
     sig = feishu_crypto.compute_signature(feishu_crypto.FeishuSignParts(ts, nonce, key, raw))
     r = client.post(
         "/api/im/feishu/events",

@@ -62,11 +62,54 @@ from .daily import (
     DailyMemoryEvent,
     DailyMemoryStore,
     _load_daily_unlocked,
+    broadcast_source_identity,
     daily_memory_path,
     merge_daily_events,
 )
 
 CURATOR_TRANSACTION_SCHEMA_VERSION = "my-agent.memory-curator-transaction.v1"
+
+
+# LLM: 原整批类型/目标/版本校验先执行；按指纹和每线程独立消息数扣广播重复票，保留单线程真实重复。
+# 函数用途: 在原候选事务内让跨线程广播仅计一次观察，跨批重放仍保留全部来源。
+def _merge_broadcast_observations(before, observations):
+    rows, committed = merge_candidate_observations(before, observations)
+    previous = {row.candidate_id: set(row.observation_keys) for row in before}
+    sources = {row.candidate_id: list(row.source_message_refs) for row in before}
+    suppressed = {}
+    for observation, snapshot in zip(observations, committed, strict=True):
+        candidate_id = snapshot.candidate_id
+        keys = set(snapshot.observation_keys)
+        broadcast = (broadcast_source_identity(observation.source_message_refs)
+            if observation.origin == "user_explicit" and not observation.source_tool_refs
+            and not observation.source_artifact_refs else None)
+        if broadcast is not None:
+            known = sources.setdefault(candidate_id, [])
+            before_count = _broadcast_observation_count(known, broadcast)
+            combined = [*known, *observation.source_message_refs]
+            if before_count and _broadcast_observation_count(combined, broadcast) <= before_count:
+                suppressed.setdefault(candidate_id, set()).update(keys - previous.get(candidate_id, set()))
+            sources[candidate_id] = combined
+        previous[candidate_id] = keys
+    final = {}
+    for index, row in enumerate(rows):
+        if row.candidate_id in suppressed:
+            keys = [key for key in row.observation_keys if key not in suppressed[row.candidate_id]]
+            rows[index] = replace(row, observation_keys=keys, occurrence_count=len(keys))
+            final[row.candidate_id] = rows[index]
+    return rows, [final.get(row.candidate_id, row) for row in committed]
+
+
+# LLM: 一个广播至多贡献每线程一次；同线程不同消息仍是独立观察，精确消息重放不增加计数。
+# 函数用途: 从已核验来源求同一指纹至少需要的独立观察数。
+def _broadcast_observation_count(refs, broadcast):
+    threads = {}
+    for ref in refs:
+        if broadcast_source_identity([ref]) == broadcast:
+            thread, message = str(ref.get("thread_id") or ""), str(ref.get("message_id") or "")
+            if thread and message:
+                threads.setdefault(thread, set()).add(message)
+    return max((len(messages) for messages in threads.values()), default=0)
 
 
 # LLM: 同一对象绑定全部投影与同run/lease，游标不能对另一批提取结果提交；拒绝绑定与接受候选原子持久。
@@ -232,7 +275,7 @@ class CuratorBatchCommitter:
         changes[self.state.path] = _state_text(next_state.to_dict())
         return changes, committed_daily, committed_candidates
 
-    # LLM: 无观察/拒绝绑定且文件存在时零加载；其它情况按全部归一字段相等判断，不按观察条数猜变化。
+    # LLM: 原锁内保留全部规范证据与版本绑定校验；广播仅合并计数，不能成为第二套来源授权或刷新CAS。
     # 函数用途: 只为真正改变或缺失的候选账本生成事务目标，保留原返回候选列表。
     def _candidate_changes(self, request: CuratorBatchCommit) -> tuple[dict[Path, str], list[MemoryCandidate]]:
         exists = self.candidates.path.exists()
@@ -243,7 +286,7 @@ class CuratorBatchCommitter:
         committed = []
         if request.candidate_observations:
             rows = _hydrate_observation_targets(self.candidates.path, rows, request.candidate_observations)
-            rows, committed = merge_candidate_observations(rows, request.candidate_observations)
+            rows, committed = _merge_broadcast_observations(rows, request.candidate_observations)
         changes = {self.candidates.path: _candidate_text(rows)} if rows != before or not exists else {}
         return changes, committed
 

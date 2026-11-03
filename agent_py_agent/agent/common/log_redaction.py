@@ -134,12 +134,13 @@ _SECRET_JSON_FIELD_RE = re.compile(
     rf"(?i)([\"'])((?:[A-Za-z0-9_.-]*[_.-])?(?:{_CREDENTIAL_KEY_NAMES}))(\1\s*:\s*)([\"'])"
     r"((?:\\[\s\S]|\\\Z|(?!\4)[^\\])+)(\4|\Z)"
 )
+# 空用户名仍可携带口令；两条入口仅放宽用户名，保留冒号、非空密码及 @ 边界。
 _URL_PASSWORD_RE = re.compile(
-    rf'(\b[A-Za-z][A-Za-z0-9+.-]*://(?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^:/?\#\s\"\'`@])+:)'
+    rf'(\b[A-Za-z][A-Za-z0-9+.-]*://(?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^:/?\#\s\"\'`@])*:)'
     rf'((?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^/@?\#\s\"\'`])+)(@)'
 )
 _URL_TEMPLATE_USERINFO_RE = re.compile(rf'(\b[A-Za-z][A-Za-z0-9+.-]*://)({_SOURCE_URL_SLOT})(@)')
-_LOG_URL_PASSWORD_RE = re.compile(r'(\b[A-Za-z][A-Za-z0-9+.-]*://[^:/?#\s@]+:)([^@\s]+)(@)')
+_LOG_URL_PASSWORD_RE = re.compile(r'(\b[A-Za-z][A-Za-z0-9+.-]*://[^:/?#\s@]*:)([^@\s]+)(@)')
 _SOURCE_STRING_RE = re.compile(r'''(["'])((?:\\.|(?!\1)[^\\\r\n])*)\1''')
 _KNOWN_SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{10,}|(?:s|r)k_(?:live|test)_[A-Za-z0-9]{10,}|"

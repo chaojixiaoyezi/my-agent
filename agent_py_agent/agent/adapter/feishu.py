@@ -771,6 +771,9 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         workspace_root: Path | None = None,
     ) -> None:
         super().__init__(config)
+        from .feishu_replay_guard import FeishuReplayGuard
+
+        self._replay_guard = FeishuReplayGuard()
         self.callback_port = callback_port
         self.workspace_root = workspace_root or Path.cwd()
 
@@ -1324,6 +1327,7 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
                 timestamp=self.headers.get("X-Lark-Request-Timestamp", ""),
                 nonce=self.headers.get("X-Lark-Request-Nonce", ""),
                 signature=self.headers.get("X-Lark-Signature", ""),
+                replay_guard=adapter._replay_guard,
             )
         )
         if payload is None:

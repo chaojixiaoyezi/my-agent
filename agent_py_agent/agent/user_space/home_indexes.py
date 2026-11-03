@@ -12,6 +12,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -172,7 +173,7 @@ def set_task_ref_meta(conn: sqlite3.Connection, key: str, value: object) -> None
 
 
 @contextmanager
-def task_ref_projection(owner_home: object):
+def task_ref_projection(owner_home: object, *, timeout_seconds: float = 5.0):
     """每次精确查询使用有界 SQLite 页缓存；游标与位置投影同事务提交，可删除重建。"""
     scope = task_ref_lookup_scope(owner_home)
     ensure_private_dir(scope.projection.parent, canonical_root=scope.owner_root)
@@ -185,8 +186,12 @@ def task_ref_projection(owner_home: object):
     leaf = scope.projection.lstat()
     if not stat.S_ISREG(leaf.st_mode) or leaf.st_nlink != 1:
         raise OSError("unsafe task locator projection")
-    conn = sqlite3.connect(scope.projection, timeout=0.05)
+    timeout_seconds = max(0.0, float(timeout_seconds))
+    conn = sqlite3.connect(scope.projection, timeout=timeout_seconds)
     try:
+        conn.execute(f"PRAGMA busy_timeout={int(timeout_seconds * 1000)}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-256")
         conn.execute("CREATE TABLE IF NOT EXISTS locator_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         conn.execute("""CREATE TABLE IF NOT EXISTS task_refs(
@@ -304,7 +309,37 @@ def _sync_task_ref_source(scope: TaskRefLookupScope, conn: sqlite3.Connection, m
             "index_errors": errors, "index_errors_total": total_errors, "index_offset": offset}
 
 
-def lookup_task_ref(owner_home: object, task_id: str, *, max_records: int = 128) -> dict:
+# LLM: 只认SQLite结构化主码，扩展码取低八位；只有缺失码时才读协议名称，绝不解析错误文案。
+# 函数用途: 区分可重试锁竞争与真正的损坏、权限或SQL错误。
+def is_sqlite_busy(error: BaseException) -> bool:
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is int:
+        return code & 0xff in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    name = getattr(error, "sqlite_errorname", "")
+    return isinstance(name, str) and (name in {"SQLITE_BUSY", "SQLITE_LOCKED"}
+        or name.startswith(("SQLITE_BUSY_", "SQLITE_LOCKED_")))
+
+
+# LLM: 每次重试重开原owner绑定事务；耗尽原异常向上交接，不降级为空结果或触发投影修复。
+# 函数用途: 对瞬态锁竞争指数退避，其它失败立即原样抛出。
+def lookup_task_ref(owner_home: object, task_id: str, *, max_records: int = 128,
+                    busy_retries: int = 3, backoff_seconds: float = 0.05) -> dict:
+    retries = max(0, int(busy_retries))
+    for attempt in range(retries + 1):
+        try:
+            return _lookup_task_ref_once(owner_home, task_id, max_records=max_records)
+        except sqlite3.OperationalError as error:
+            if not is_sqlite_busy(error) or attempt >= retries:
+                raise
+            time.sleep(max(0.0, float(backoff_seconds)) * (2 ** attempt))
+    raise AssertionError("unreachable SQLite retry state")
+
+
+# LLM: 每次有界同步和查询共享同一事务；不把投影中的位置当作任务状态或路径权限。
+# 函数用途: 执行一次原任务位置查找。
+def _lookup_task_ref_once(owner_home: object, task_id: str, *, max_records: int = 128) -> dict:
     """返回位置候选而非任务状态；调用方必须重新读取 canonical state 核身份。"""
     with task_ref_projection(owner_home) as (scope, conn):
         coverage = _sync_task_ref_source(scope, conn, max(1, min(max_records, 128)))

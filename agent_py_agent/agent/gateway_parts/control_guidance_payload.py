@@ -5,6 +5,7 @@
 # LLM: scope须由调用方原认证或原prepared owner冻结；不解析正文为控制/审批，不修改传入对象或执行副作用。
 # 函数用途: 生成原guidance append所需的完整结构化参数。
 def control_guidance_payload(target_type, request_id, command, scope, thread_id, turn_id):
+    from ..conversation.learning_source import user_dialogue_projection
     from .control_service import _steer_channel_message_id
 
     channel_message_id = _steer_channel_message_id(scope)
@@ -17,6 +18,7 @@ def control_guidance_payload(target_type, request_id, command, scope, thread_id,
         "delivery": "current_task" if target_type == "task" else "current_request",
         "metadata": {
             "kind": "active_turn_user_input",
+            "learning_source": user_dialogue_projection(),
             "record_in_transcript": True,
             "thread_id": thread_id,
             "channel": scope.channel,

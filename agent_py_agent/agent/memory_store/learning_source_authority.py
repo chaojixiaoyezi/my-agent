@@ -13,6 +13,7 @@ from ..conversation.learning_source import (
     merge_message_sources,
     merge_source_projections,
     unknown_projection,
+    user_dialogue_projection,
 )
 from ..conversation.models import MessageLogEntry
 from ..io.cursor_cache import CursorCache, file_stamp
@@ -20,6 +21,31 @@ from ..io.cursor_cache import CursorCache, file_stamp
 _REQUEST_ALIASES = ("gateway_request_id", "request_id", "conversation_request_id")
 # 每轮只缓存64个线程快照的来源投影，不保存消息正文；淘汰仅恢复只读扫描。
 _SOURCE_SNAPSHOT_CACHE_COUNT = 64
+
+
+# LLM: 仅补旧线程缺失来源；真实绑定和用户角色缺一不可，显式禁学与自动化消息仍由原事实门收紧。
+# 函数用途: 只读推导旧前台用户消息的默认来源，不改线程记录或W4请求入口。
+def message_thread_source(thread: object, message: object) -> dict[str, object] | None:
+    source = getattr(thread, "learning_source", None)
+    if source:
+        return source
+    if getattr(message, "role", "") != "user":
+        return None
+    metadata = getattr(thread, "metadata", {}) or {}
+    if (metadata.get("learning_excluded") is True or metadata.get("bot_mode") == "query_readonly"
+            or derive_source_projection(metadata) is not None):
+        return None
+    # 这是来源资格的保守门，不把未知插件通道或internal自动当作真人前台。
+    foreground = {"tui", "web", "feishu", "telegram", "discord", "slack", "dingtalk", "wecom", "wechat", "qq"}
+    channel = getattr(message, "channel", "")
+    if channel not in foreground:
+        return None
+    for binding in getattr(thread, "channel_bindings", ()):
+        if (binding.channel == channel and binding.thread_id == thread.thread_id
+                and binding.channel_user_id and binding.channel_conversation_id
+                and binding.canonical_user_id == getattr(thread, "canonical_user_id", None)):
+            return user_dialogue_projection()
+    return None
 
 
 # LLM: 只经当前owner的ConversationStore读权威线程/消息；单次对象内缓存精确查询，无持久第二权威库。
@@ -44,7 +70,9 @@ class ConversationLearningSources:
             thread, error = self.store.threads.load_report(thread_id)
             thread = thread if not error and thread and thread.thread_id == thread_id else None
             if thread is not None:
-                thread = SimpleNamespace(thread_id=thread.thread_id, learning_source=getattr(thread, "learning_source", None))
+                thread = SimpleNamespace(thread_id=thread.thread_id, learning_source=getattr(thread, "learning_source", None),
+                    channel_bindings=getattr(thread, "channel_bindings", ()), metadata=getattr(thread, "metadata", {}),
+                    canonical_user_id=getattr(thread, "canonical_user_id", ""))
         except Exception:
             thread = None
         if key is not None and key != self._snapshot_key(thread_id):
@@ -60,7 +88,7 @@ class ConversationLearningSources:
         if not self.owner or thread is None or getattr(message, "thread_id", "") != thread_id:
             return unknown_projection()
         facts = facts_for_message(getattr(message, "metadata", {}), owner=self.owner, thread_id=thread_id,
-                                  thread_source=getattr(thread, "learning_source", None))
+                                  thread_source=message_thread_source(thread, message))
         return merge_message_sources([facts])
 
     # LLM: 消息引用必须精确匹配当前owner存储，不接受另一条可学消息代替缺失引用。
@@ -127,7 +155,7 @@ class ConversationLearningSources:
                     if message.role != "user":
                         continue
                     facts = facts_for_message(message.metadata, owner=self.owner, thread_id=thread_id,
-                                              thread_source=getattr(thread, "learning_source", None))
+                                              thread_source=message_thread_source(thread, message))
                     projection = merge_message_sources([facts])
                     for request_id in {str(message.metadata.get(name) or "") for name in _REQUEST_ALIASES} - {""}:
                         index[request_id] = unknown_projection() if request_id in index else projection

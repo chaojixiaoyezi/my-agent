@@ -162,6 +162,16 @@ memory_curator_auto_promotion_policy: "conservative_v1"
 memory_lesson_min_occurrences: 2
 # 已接受的教训晋升为 HOT 热点教训所需的最少独立观察次数。
 memory_hot_min_occurrences: 3
+# 用户明确引用且同轮成功read_file的任务/规则文件，最多附多少字符摘录给记忆整理模型；0关闭关联。
+# 只使用已经核验的工具归档，不重新读取源文件；摘录仍受单批总字符预算限制。
+memory_curator_task_file_evidence_max_chars: 4000
+# 同一指令跨多个前台用户线程广播时的去重窗口（秒）；0关闭，单线程重复和自动化来源不合并。
+memory_curator_cross_thread_dedupe_window_seconds: 600
+# 是否在其它会话下一轮请求尾部，提醒已经正式晋升的最新偏好/工作规则/HOT；同一线程同一版本只提醒一次。
+# 关闭不会消费未见通知；提醒不改冻结的system记忆前缀，也不绕过原晋升安全门。
+memory_rule_notices_enabled: true
+# 每轮增量规则提醒正文的字符总预算；默认1200，完整规则继续以正式记忆/画像仓库为准。
+memory_rule_notices_max_chars: 1200
 
 # 是否自动持久化运行归档、恢复事实和 task workspace。
 # 该字段不把普通 user/assistant 正文写入正式 long_term；完整对话由 ConversationStore 掌权，
