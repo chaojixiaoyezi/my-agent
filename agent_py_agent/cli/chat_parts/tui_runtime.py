@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -84,6 +85,7 @@ class TuiTurnSummary:
     output_tokens: int = 0
     tool_rounds: int = 0
     outcome_unknown: bool = False
+    gateway_timing: dict[str, float] | None = field(default=None, kw_only=True)
 
 
 # LLM: pending 对象只在 adapter 内桥接审批线程；request 是授权身份，Event/decision 仅负责唤醒同一等待者。
@@ -425,6 +427,17 @@ class _TuiBackgroundActivityState:
     def visible(self) -> bool:
         return bool(self.count > 0 or self.main_activity or self.goals or self.subagents)
 
+    # LLM: 历史名册只控制面板可见性，不能被当作仍有执行体的证据。
+    # 函数用途: 仅在计数非零或主回合尚未结束时保留计时起点。
+    def timing_active(self) -> bool:
+        main = self.main_activity
+        return self.count > 0 or bool(
+            main and not main.get("ended_at")
+            and str(main.get("phase") or "").lower() not in {
+                "done", "completed", "failed", "cancelled", "stopped", "interrupted",
+            }
+        )
+
 
 # LLM: This controller is runtime-owned and only factors the removable
 # background display state out of TuiRuntime; it shares the runtime lock,
@@ -468,6 +481,16 @@ class _TuiBackgroundActivityController:
                     main_activity={key: value for key, value in current.main_activity.items() if key != "context_usage"},
                 )
             next_state = _next_background_activity_state(current, count, snapshot)
+            origin = next_state.main_activity.get("started_at")
+            if not next_state.timing_active():
+                started_at = 0.0
+            elif type(origin) in (int, float) and math.isfinite(origin) and origin > 0:
+                started_at = float(origin)
+            elif not current.timing_active() or (current.count == 0 and count > 0):
+                started_at = time.time()
+            else:
+                started_at = current.started_at or time.time()
+            next_state = replace(next_state, started_at=started_at)
             if next_state == self._state:
                 return False
             # 从动画态切入静止终态时，再排一帧给刷新线程。即时 store
@@ -475,7 +498,6 @@ class _TuiBackgroundActivityController:
             if current.count > 0 and next_state.count == 0:
                 owner._terminal_refresh_pending = True
             if not current.visible() and next_state.visible():
-                next_state = replace(next_state, started_at=time.time())
                 kind, phase = "background_activity_started", "started"
             elif next_state.visible():
                 kind, phase = "background_activity_updated", "updated"
@@ -492,8 +514,6 @@ class _TuiBackgroundActivityController:
                 payload,
                 request_id=f"background:{owner.session_id}",
             )
-            if not next_state.visible():
-                self._state = replace(next_state, started_at=0.0)
         return True
 
     # LLM: Returning from a descendant may expose a parent runtime whose last
@@ -1099,6 +1119,30 @@ class _TuiBackgroundActivityRuntimeMixin:
                 {"gateway_request_id": normalized}, request_id=normalized,
             )
 
+    # LLM: 与前台登记/后台消费共用显示锁；只补放该请求已确认游标的观察事件，不倒退全局游标、不取消服务端请求。
+    # 函数用途: 前台不再轮询时释放显示所有权，补回早到但尚未显示的后台输出。
+    def release_gateway_request(self, request_id: str, *, replay_deferred: bool = True) -> None:
+        normalized = _required_request_id(request_id)
+        with self._lock:
+            if normalized not in self._owned_gateway_requests:
+                return
+            self._owned_gateway_requests.discard(normalized)
+            queue_id = f"queue:{normalized}"
+            if queue_id in self._observed_queue_ids:
+                self._observed_queue_ids.discard(queue_id)
+                self._queued_prompts.pop(queue_id, None)
+                self._publish("queue_removed", "removed", queue_id,
+                              {"queue_id": queue_id}, request_id=normalized)
+            self._publish(
+                "status_updated", "updated", f"foreground-release:{normalized}",
+                {"gateway_request_id": normalized, "foreground_observation_released": True},
+                request_id=normalized,
+            )
+            deferred = [self._deferred_background_events.pop(key) for key in tuple(self._deferred_background_events)
+                        if key[0] == normalized]
+            if replay_deferred:
+                self._publish_background_transcript_events_locked(sorted(deferred, key=lambda item: item["seq"]))
+
     # LLM: This is the single readback for display polling cadence; it delegates to the same
     # controller that consumes canonical activity snapshots and never parses rendered text.
     # 函数用途: 告诉后台轮询线程当前会话是否需要保持一秒刷新。
@@ -1240,8 +1284,6 @@ class _TuiBackgroundActivityRuntimeMixin:
                 continue
             consumed_cursor = max(consumed_cursor, remote_seq)
             gateway_id = item.get("gateway_request_id")
-            if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
-                continue
             request_id = str(item.get("request_id") or "").strip()
             block_id = str(item.get("block_id") or "").strip()
             kind = str(item.get("kind") or "").strip()
@@ -1255,6 +1297,11 @@ class _TuiBackgroundActivityRuntimeMixin:
                 or not block_id.startswith(f"{request_id}:")
                 or not isinstance(payload, Mapping)
             ):
+                continue
+            if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
+                self._deferred_background_events[(gateway_id, remote_seq)] = {**item, "seq": remote_seq, "payload": dict(payload)}
+                while len(self._deferred_background_events) > self._owned_gateway_requests.maximum:
+                    self._deferred_background_events.pop(next(iter(self._deferred_background_events)))
                 continue
             if request_id in self._recovered_background_turns and kind != "active_turn_input_consumed":
                 continue
@@ -1414,10 +1461,13 @@ class _TuiSessionRuntimeMixin(
 
         self.completions = TurnCompletionLedger()
         self._owned_gateway_requests = TuiIdentityWindow()
+        self._deferred_background_events: dict[tuple[str, int], dict] = {}
         self._attached_gateway_jobs = TuiIdentityWindow()
         self._execution_target = None
         self._pending_steers: dict[str, str] = {}
         self._queued_prompts: dict[str, str] = {}
+        self._observed_queue_ids: set[str] = set()
+        self._foreground_gateway_bindings: dict[str, str] = {}
         self._published_control_commands = TuiIdentityWindow()
         self._console_index = 0
         self.background_message_cursor = 0
@@ -1463,6 +1513,7 @@ class _TuiSessionRuntimeMixin(
             self._execution_target = None
             self._pending_steers.clear()
             self._queued_prompts.clear()
+            self._observed_queue_ids.clear()
             self._background_activity._state = _TuiBackgroundActivityState()
             return self._publish("conversation_reset", "completed", f"new:{thread_id}", {"thread_id": thread_id})
 
@@ -1531,6 +1582,8 @@ class _TuiSessionRuntimeMixin(
             queue_id = f"queue:{normalized}"
             with self._lock:
                 self._queued_prompts[queue_id] = str(text)
+                if observed:
+                    self._observed_queue_ids.add(queue_id)
                 self._publish(
                     "queue_added",
                     "queued",
@@ -1603,13 +1656,15 @@ class _TuiSessionRuntimeMixin(
     def has_queued_prompt(self, request_id: str) -> bool:
         queue_id = f"queue:{_required_request_id(request_id)}"
         with self._lock:
-            return queue_id in self._queued_prompts
+            return queue_id in self._queued_prompts and queue_id not in self._observed_queue_ids
 
     # LLM: restore_prompts 只接受已从 canonical Queue 原子移除的 request id；每项发 queue_restored 并删除同一映射。
     # 函数用途: 将尚未执行的排队消息从 TUI 预览撤下，供输入控制器恢复编辑。
     def restore_prompts(self, request_ids: tuple[str, ...]) -> None:
         normalized_ids = tuple(_required_request_id(item) for item in request_ids)
         with self._lock:
+            normalized_ids = tuple(item for item in normalized_ids
+                                   if f"queue:{item}" not in self._observed_queue_ids)
             missing = [
                 request_id
                 for request_id in normalized_ids
@@ -1627,6 +1682,7 @@ class _TuiSessionRuntimeMixin(
                     request_id=request_id,
                 )
                 self._queued_prompts.pop(queue_id, None)
+                self.release_gateway_request(request_id)
 
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；mixin 共享唯一 publish/store 和初始化。
 # 类用途: 管理活动回合生命周期、临时通知和同一会话事件发布。
@@ -1759,6 +1815,8 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
                     request_id=normalized,
                 )
                 self._queued_prompts.pop(queue_id, None)
+                self._observed_queue_ids.discard(queue_id)
+            self._foreground_gateway_bindings[normalized] = task_progress_generation_id or normalized
             adapter = TuiTurnEventAdapter(
                 self,
                 normalized,
@@ -1772,16 +1830,20 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
             return adapter
 
     # LLM: complete_turn 委托已存在 adapter；缺失 turn 是调用方合同错误，不静默造终态。
-    # 函数用途: 发布回合 final/status/terminal 并移除活动 adapter。
+    # 函数用途: 发布回合终态并释放观察；已完整显示成功正文时丢弃后台副本，失败退出允许补放早到事件。
     def complete_turn(self, request_id: str, summary: TuiTurnSummary) -> None:
         normalized = _required_request_id(request_id)
         with self._lock:
             adapter = self._turns.get(normalized)
         if adapter is None:
             raise KeyError(f"TUI turn not started: {normalized}")
-        adapter.finalize(summary)
-        with self._lock:
-            self._turns.pop(normalized, None)
+        try:
+            adapter.finalize(summary)
+        finally:
+            with self._lock:
+                self._turns.pop(normalized, None)
+                self.release_gateway_request(self._foreground_gateway_bindings.pop(normalized, normalized),
+                                             replay_deferred=not (summary.ok and bool(summary.response_text)))
 
     # LLM: interrupt intent 只更新当前唯一活动 adapter 的显示阶段；真正取消仍由 Conversation control 和 cancellation token 执行。
     # 函数用途: 在停止请求离开 UI 线程前立即把当前回合标为正在中断。
@@ -2554,7 +2616,7 @@ class TuiTurnEventAdapter:
             )
         return True
 
-    # LLM: typed summary确认终态；计时仅上方展示，稳定请求后缀幂等去重，运输未知不结算。
+    # LLM: typed summary确认终态；首次计时优先用网关数字，稳定请求后缀幂等去重，运输未知不结算。
     # 函数用途: 发布确认终态和消息流计时尾标，保留旧 CLI 文本合同。
     def _publish_turn_terminal(self, summary: TuiTurnSummary) -> None:
         if summary.outcome_unknown:
@@ -2587,7 +2649,7 @@ class TuiTurnEventAdapter:
 
         from ..turn_completion import render_completion
 
-        completion, first = self.runtime.completions.finish(self.request_id, phase)
+        completion, first = self.runtime.completions.finish(self.request_id, phase, gateway_timing=summary.gateway_timing)
         if first:
             self.runtime._publish("system_message", "completed", f"{self.request_id}:completion",
                 {"text": render_completion(completion), "source_kind": "turn_timing", "display": asdict(completion)}, request_id=self.request_id)

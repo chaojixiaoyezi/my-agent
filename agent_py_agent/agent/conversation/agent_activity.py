@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -16,7 +17,11 @@ from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
 from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 from ..subagents.kernel import replaced_by_view
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
-from ..subagents.runner_display_projection import runner_display_label, runner_failure_label
+from ..subagents.runner_display_projection import (
+    capability_request_resolution,
+    runner_display_label,
+    runner_failure_label,
+)
 from ..task_progress import (
     read_task_progress_report,
     task_progress_display_identity,
@@ -34,6 +39,7 @@ from .model_metrics import model_metrics_from_thread
 from .models import (
     THREAD_TASK_LINK_ACTIVE_STATUS,
     THREAD_TASK_LINK_INACTIVE_STATUSES,
+    thread_task_run_started_at,
 )
 from .tool_input_progress import public_tool_input_progress
 
@@ -697,7 +703,8 @@ def _live_activity_task_ids(
 
 # LLM: The main row is bound to ConversationThread.workspace_task_id, which is the
 # current user turn's canonical root. Child links and an older volatile sink row may
-# never replace its identity or clock; the renderer receives no inferred prose timing.
+# never replace its identity or clock; live turn start wins over persisted run activation,
+# then legacy link creation. All clocks remain structured display-only facts.
 # 函数用途: 组合当前主任务的实时阶段与持久起点，让新回合和 Gateway 重启后计时仍然正确。
 def _conversation_main_activity(
     agent: object,
@@ -722,11 +729,12 @@ def _conversation_main_activity(
     row = background_main_activity(agent, thread_id, allowed_task_ids)
     if current_link is None:
         return row
-    link_started_at = max(
-        0.0,
+    candidates = (
+        _safe_float(row.get("started_at")),
+        thread_task_run_started_at(current_link),
         _safe_float(getattr(current_link, "created_at", 0.0)),
     )
-    started_at = link_started_at or max(0.0, _safe_float(row.get("started_at")))
+    started_at = next((value for value in candidates if math.isfinite(value) and value > 0), 0.0)
     return {
         "task_id": str(workspace_task_id).strip(),
         "phase": _bounded_text(row.get("phase"), limit=40) or "waiting",
@@ -1303,7 +1311,7 @@ def _subagent_row(
         "role": _bounded_text(getattr(task, "role", ""), limit=80),
         "status": status,
         "lifecycle_phase": lifecycle_phase,
-        "failure_label": runner_failure_label(status, getattr(task, "failure_type", "")),
+        "failure_label": runner_failure_label(status, getattr(task, "failure_type", ""), capability_resolution=capability_request_resolution(task)),
         "description": _subagent_description(task),
         "attempts": max(0, _safe_int(getattr(task, "runner_attempts", 0))),
         "context_tokens": context_usage.get("current_tokens", 0),
@@ -1322,7 +1330,32 @@ def _subagent_row(
 #   runner_display_projection.runner_display_label，不另写映射。/status 的异常细分用它。
 # 函数用途: 返回一个子代理任务当前状态的界面标签（宿主停机中断、额度不足、失败等）。
 def subagent_display_label(task: object) -> str:
-    return runner_display_label(getattr(task, "status", ""), getattr(task, "failure_type", ""))
+    return runner_display_label(getattr(task, "status", ""), getattr(task, "failure_type", ""), capability_resolution=capability_request_resolution(task))
+
+
+# LLM: 显式生命周期桥，与活动读取无关；在父终态提交前固定精确孩子集合，避免旧收尾扫描到新回合孩子。
+# 函数用途: 冻结这次父回合收口允许处理的子代理编号。
+def parent_capability_request_snapshot(agent: object, parent_task_id: str) -> tuple[str, ...]:
+    manager = getattr(agent, "subagents", None)
+    if not callable(getattr(manager, "creation_guard", None)) or not callable(getattr(manager, "list_runs_for_root_report", None)):
+        return ()
+    with manager.creation_guard():
+        report = manager.list_runs_for_root_report(parent_task_id)
+        if report.load_errors:
+            raise OSError("parent capability request snapshot unavailable")
+        return tuple(task.id for task in report.runs if task.parent_id == parent_task_id
+                     and task.status == "BLOCKED" and task.failure_type == "capability_request")
+
+
+# LLM: 只有宿主已确认的父回合终态/中断调用；精确冻结集合和canonical reducer决定写入，不供UI读投影触发。
+# 函数用途: 让网关沿conversation边界收口原孩子的未授权申请，不跨层直接导入subagents。
+def close_parent_capability_requests(agent: object, parent_task_id: str, *, reason: str,
+                                     run_ids: tuple[str, ...]) -> list[str]:
+    from ..subagents.capability_request_expiry import close_stale_capability_requests
+
+    if not run_ids:
+        return []
+    return close_stale_capability_requests(agent.subagents, parent_task_id=parent_task_id, reason=reason, run_ids=run_ids)
 
 
 # LLM: 名册行只摊平 kernel 的唯一投影 replaced_by_view（接替者 run_id 与处置）成两个标量，TUI 白名单只收标量；
@@ -1367,7 +1400,7 @@ def _subagent_current_activity(
         "TAKEN_OVER": "已被接管",
     }.get(status)
     if terminal_activity:
-        return runner_failure_label(status, getattr(task, "failure_type", "")) or terminal_activity
+        return runner_failure_label(status, getattr(task, "failure_type", ""), capability_resolution=capability_request_resolution(task)) or terminal_activity
     startup_activity = {
         "queued": "等待调度",
         "starting": "正在启动执行器",

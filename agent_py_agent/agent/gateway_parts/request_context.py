@@ -111,6 +111,25 @@ class GatewayConversationContext:
     load_errors: tuple[dict, ...] = ()
     compact_context: AppliedCompactContext | None = field(default=None, repr=False)
     compact_source: ConversationCompactSource | None = field(default=None, repr=False)
+    load_warnings: tuple[dict, ...] = ()
+
+
+class _GatewayLoadErrors(list):
+    """本次加载的错误与非阻断警告共用生命周期，不给历史索引修复授予写权。"""
+
+    def __init__(self):
+        super().__init__()
+        self.warnings: list[dict] = []
+
+
+def _gateway_task_links(store, thread_id, load_errors):
+    """统一消费显式分级报告；同一缺失链接在各目录投影中只登记一次。"""
+    links, errors, warnings = store.tasks.list_report(thread_id, classify_missing=True)
+    if isinstance(load_errors, _GatewayLoadErrors):
+        for warning in warnings:
+            if warning not in load_errors.warnings:
+                load_errors.warnings.append(warning)
+    return links, errors
 
 
 # LLM: 模型面/钩子/defer只由内部宿主构造，不从请求JSON读取；defer不是force=False，而是明确不执行摘要和CAS。
@@ -210,7 +229,7 @@ def gateway_conversation_context(
         return GatewayConversationContext(
             load_errors=({"error_code": "conversation_store_unavailable"},)
         )
-    load_errors: list[dict] = []
+    load_errors = _GatewayLoadErrors()
     thread, thread_error = _load_gateway_thread(inputs, store, spec)
     if thread_error is not None or thread is None:
         return GatewayConversationContext(
@@ -284,6 +303,7 @@ def gateway_conversation_context(
         thread_goal=thread_goal,
         named_work=named_work,
         load_errors=tuple(load_errors),
+        load_warnings=tuple(load_errors.warnings),
         compact_context=compact_context,
         compact_source=compact_source,
     )
@@ -506,7 +526,7 @@ def _gateway_named_work(
 ) -> tuple[dict[str, str], ...]:
     """Project only active user-visible names, never an implicit current objective."""
     try:
-        links, link_errors = store.tasks.list_report(thread_id)
+        links, link_errors = _gateway_task_links(store, thread_id, load_errors)
         goals, goal_error = store.goals.list_report(thread_id)
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="gateway.conversation.named_work"))
@@ -616,7 +636,7 @@ def _gateway_workspace_lineage_task_ids(
     if not current_task_id or not task_path:
         return set()
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        links, errors = _gateway_task_links(store, thread_id, load_errors)
     except Exception as exc:
         load_errors.append(
             runtime_error_report(exc, context="gateway.conversation.subagent_completion_lineage")
@@ -657,7 +677,7 @@ def _gateway_workspace_task(
 ) -> GatewayWorkspaceSelection | None:
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        links, errors = _gateway_task_links(store, thread_id, load_errors)
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="gateway.conversation.workspace_task"))
         return None
@@ -819,7 +839,7 @@ def _gateway_recent_task_workspaces(
     if not thread_id or not owner_home.is_dir():
         return ()
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        links, errors = _gateway_task_links(store, thread_id, load_errors)
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="gateway.conversation.recent_task_workspaces"))
         return ()
