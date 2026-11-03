@@ -341,9 +341,48 @@ def database_path(path, owner_home, workspace_root=None, *, create_parent=False)
     return candidate
 
 
-# LLM: 逐层nofollow记录目录身份与ctime，涵盖父/祖先目录rename后恢复；依赖文件系统真实元数据，变化即拒绝。
+# LLM: Windows只供SQLite逐段lstat拒绝符号链接及所有reparse point；不resolve，也不宣称具有POSIX目录FD的原子防护。
+# 函数用途: 采集Windows数据库与完整父链的身份、ctime、类型及链接数，供打开前后复核。
+def _windows_sqlite_path_state(path):
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('DATASOURCE_UNSAFE_DATABASE_PATH')
+    result = []
+    for component in (path, *path.parents):
+        info = component.lstat()
+        if (stat.S_ISLNK(info.st_mode)
+                or getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                or (component != path and not stat.S_ISDIR(info.st_mode))):
+            raise ValueError('DATASOURCE_UNSAFE_DATABASE_PATH')
+        result.append((info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mode, info.st_nlink))
+    return tuple(result)
+
+
+# LLM: 仅Windows为SQLite选择lstat/open/fstat复核；POSIX始终走原strict入口，不能因能力不足或打开失败降级，Vault入口不变。
+# 函数用途: 打开并持有数据库的只读校验FD，拒绝链接、特殊文件、硬链接及观察到的路径替换，调用方负责关闭。
+def _open_sqlite_descriptor(path):
+    if os.name != 'nt':
+        return open_readonly_file_beneath(path.anchor, path.parts[1:])
+    before = _windows_sqlite_path_state(path)
+    if not stat.S_ISREG(before[0][3]) or before[0][4] != 1:
+        raise ValueError('DATASOURCE_UNSAFE_DATABASE_PATH')
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                         | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        info = os.fstat(descriptor)
+        opened = (info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mode, info.st_nlink)
+        if opened != before[0] or _windows_sqlite_path_state(path) != before:
+            raise PermissionError('DATASOURCE_SQLITE_PATH_REPLACED')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+# LLM: POSIX原逐层nofollow记录目录身份与ctime；Windows复用完整父链lstat，不能尝试用os.open打开目录，变化均拒绝。
 # 函数用途: 取得连接窗口前后的父链稳定性证据，不开放新的读写权限。
 def _sqlite_directory_state(path):
+    if os.name == 'nt':
+        return tuple(stamp[:3] for stamp in _windows_sqlite_path_state(path)[1:])
     result = []
     for parent in path.parents:
         descriptor = open_directory_beneath(path.anchor, parent.parts[1:])
@@ -372,7 +411,7 @@ def _live_regular_fds():
     return mapping
 
 
-# LLM: 原nofollow FD跨connect存活，立即核路径dev/ino，再核FD的ctime、/proc/self/fd真实打开inode及父链变化以拒绝ABA。
+# LLM: 校验FD跨connect存活；POSIX原strict链不变，Windows走局部路径复核；连接后仍核dev/ino、ctime、父链及可用的/proc FD。
 # 函数用途: 按ro/rw打开SQLite，连接窗口身份/元数据不稳定一律关闭并拒绝，成功连接由调用方关闭。
 def open_sqlite(spec, *, read_only=False):
     if spec.database_path == ':memory:':
@@ -381,7 +420,7 @@ def open_sqlite(spec, *, read_only=False):
     if not path.is_absolute():
         raise ValueError('DATASOURCE_UNSAFE_DATABASE_PATH')
     uri = path.as_uri() + ('?mode=ro' if read_only or spec.read_only else '?mode=rw')
-    descriptor = open_readonly_file_beneath(path.anchor, path.parts[1:])
+    descriptor = _open_sqlite_descriptor(path)
     conn = None
     try:
         expected = os.fstat(descriptor)
@@ -400,7 +439,7 @@ def open_sqlite(spec, *, read_only=False):
             held = os.fstat(descriptor)
             if held.st_ctime_ns != expected.st_ctime_ns or _sqlite_directory_state(path) != parents:
                 raise ValueError('changed during connect')
-            check = open_readonly_file_beneath(path.anchor, path.parts[1:])
+            check = _open_sqlite_descriptor(path)
             try:
                 verified = os.fstat(check)
                 if (verified.st_dev, verified.st_ino) != (expected.st_dev, expected.st_ino):

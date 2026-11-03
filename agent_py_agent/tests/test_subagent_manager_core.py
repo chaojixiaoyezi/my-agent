@@ -6,23 +6,30 @@ from pathlib import Path
 import pytest
 
 
-# LLM: 在独立解释器中屏蔽 fcntl 并重载真实模块，避免改写其它用例持有的类身份；不替换数据源读写实现。
-# 函数用途: 防止 Windows 缺 fcntl 再次阻断导入，并验证 SQLite 读写和两种物理闸门。
-def test_datasource_store_import_and_io_without_fcntl(tmp_path: Path):
+# LLM: 独立解释器屏蔽fcntl并重载；Windows模拟仅替换模块os视图及dir_fd能力，保留真实SQLite和闸门，不污染父进程。
+# 函数用途: 验证本机和Windows无目录FD时均能保存、读写、更新数据源，关闭只读连接的写权限。
+@pytest.mark.parametrize("simulate_windows", [False, True], ids=["native", "windows-no-dirfd"])
+def test_datasource_store_import_and_io_without_fcntl(tmp_path: Path, simulate_windows):
     import subprocess
     import sys
 
     root = Path(__file__).resolve().parents[2]
     probe = r'''
 import importlib
+import os
 import sqlite3
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 from pytest import MonkeyPatch, raises
 
-root, home = map(Path, sys.argv[1:])
+root, home = map(Path, sys.argv[1:3])
 sys.path.insert(0, str(root))
+from agent_py_agent.agent import assets
 from agent_py_agent.agent.assets import datasource_store
+from agent_py_agent.agent.common import nofollow_fs
 from agent_py_agent.agent.gateway_parts import standalone_inventory
 from agent_py_agent.agent.gateway_parts.standalone_migration_errors import StandaloneMigrationRejected
 
@@ -31,6 +38,14 @@ with MonkeyPatch.context() as patch:
     patch.setitem(sys.modules, "fcntl", None)
     importlib.reload(datasource_store)
     assert datasource_store.fcntl is None
+    if sys.argv[3] == "windows":
+        patch.setattr(datasource_store, "os", SimpleNamespace(**{
+            **vars(os), "name": "nt", "O_NOFOLLOW": 0, "O_DIRECTORY": 0,
+        }))
+        for module in (assets, datasource_store, nofollow_fs):
+            patch.setattr(module, "_supports_dir_fd", lambda: False)
+        patch.setattr(datasource_store, "open_directory_beneath",
+            Mock(side_effect=AssertionError("Windows must not open directory FDs")))
     store = datasource_store.DatasourceStore(home)
     saved = store.save_datasource({"datasource_id": "portable", "kind": "sqlite", "title": "portable"})
     assert saved["revision"] == 1
@@ -53,13 +68,173 @@ with MonkeyPatch.context() as patch:
         assert connection.execute("SELECT value FROM records").fetchall() == [("retained",)]
     finally:
         connection.close()
+    for readonly_spec in (updated, replace(updated, read_only=True)):
+        connection = datasource_store.open_sqlite(readonly_spec, read_only=readonly_spec is updated)
+        try:
+            assert connection.execute("SELECT value FROM records").fetchall() == [("retained",)]
+            with raises(sqlite3.OperationalError):
+                connection.execute("INSERT INTO records VALUES ('not-allowed')")
+        finally:
+            connection.close()
     assert store.list_datasources()[0]["revision"] == 2
     with raises(StandaloneMigrationRejected):
         standalone_inventory._settled_approval_lock(home, ("unverified.lock",), {})
 '''
-    result = subprocess.run([sys.executable, "-B", "-c", probe, str(root), str(tmp_path / "home")],
+    result = subprocess.run([sys.executable, "-B", "-c", probe, str(root), str(tmp_path / "home"),
+        "windows" if simulate_windows else "native"],
         cwd=root, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# LLM: 仅替换数据源模块os视图，保留本机Path及真实文件IO；严格入口毒化防止模拟在POSIX上意外借用目录FD。
+# 函数用途: 为Windows安全反例准备无O_NOFOLLOW、无目录打开能力的SQLite入口。
+@pytest.fixture
+def windows_datasource_store(monkeypatch):
+    import os
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.assets import datasource_store
+
+    monkeypatch.setattr(datasource_store, "os", SimpleNamespace(**{
+        **vars(os), "name": "nt", "O_NOFOLLOW": 0, "O_DIRECTORY": 0,
+    }))
+    for name in ("open_readonly_file_beneath", "open_directory_beneath"):
+        monkeypatch.setattr(datasource_store, name,
+            Mock(side_effect=AssertionError("Windows must not call POSIX strict open")))
+    return datasource_store
+
+
+# LLM: 不要求Windows创建符号链接的管理员权限；仅向真实lstat结果注入被测组件的链接/reparse/type/nlink元数据。
+# 函数用途: 确认Windows拒绝叶子、父目录及祖先的重定向和不安全叶子，且拒绝发生在文件/SQLite打开之前。
+@pytest.mark.parametrize("component,unsafe", [
+    ("leaf", "symlink"), ("parent", "symlink"), ("ancestor", "symlink"),
+    ("leaf", "reparse"), ("parent", "reparse"), ("ancestor", "reparse"),
+    ("leaf", "directory"), ("leaf", "hardlink"),
+])
+def test_windows_sqlite_rejects_unsafe_path_components(
+        tmp_path, monkeypatch, windows_datasource_store, component, unsafe):
+    import stat
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    store = windows_datasource_store
+    path = tmp_path.resolve() / "ancestor" / "parent" / "data.sqlite"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    bad = {"leaf": path, "parent": path.parent, "ancestor": path.parent.parent}[component]
+    real_lstat = Path.lstat
+
+    # LLM: 仅改变本用例指定组件的元数据；其余路径仍从真实文件系统读取。
+    # 函数用途: 模拟无需提权即可覆盖的Windows链接、重解析点与非法叶子。
+    def unsafe_lstat(candidate, *args, **kwargs):
+        info = real_lstat(candidate, *args, **kwargs)
+        if candidate != bad:
+            return info
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        if unsafe == "symlink":
+            fields["st_mode"] = stat.S_IFLNK | 0o777
+        elif unsafe == "reparse":
+            fields["st_file_attributes"] = stat.FILE_ATTRIBUTE_REPARSE_POINT
+        elif unsafe == "directory":
+            fields["st_mode"] = stat.S_IFDIR | 0o700
+        else:
+            fields["st_nlink"] = 2
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(Path, "lstat", unsafe_lstat)
+    open_file = Mock(side_effect=AssertionError("unsafe path must not be opened"))
+    connect = Mock(side_effect=AssertionError("unsafe path must not reach SQLite"))
+    monkeypatch.setattr(store.os, "open", open_file)
+    monkeypatch.setattr(store, "sqlite3", SimpleNamespace(connect=connect))
+    spec = store.DatasourceConnectionSpec("unsafe", "sqlite", "unsafe", database_path=str(path))
+    with pytest.raises(ValueError, match="DATASOURCE_UNSAFE_DATABASE_PATH"):
+        store.open_sqlite(spec)
+    open_file.assert_not_called()
+    connect.assert_not_called()
+
+
+# LLM: 真实打开FD和SQLite，只在指定边界伪造一次身份/父链漂移；所有拒绝出口必须关闭真实资源。
+# 函数用途: 验证Windows打开期间及connect期间的替换会被拒绝，且不会泄漏FD或可用连接。
+@pytest.mark.parametrize("drift", ["open_inode", "connect_inode", "connect_parent"])
+def test_windows_sqlite_rejects_path_drift_and_closes_resources(
+        tmp_path, monkeypatch, windows_datasource_store, drift):
+    import os
+    import sqlite3
+    from types import SimpleNamespace
+
+    store = windows_datasource_store
+    path = tmp_path.resolve() / "data.sqlite"
+    path.touch()
+    descriptors, connections = [], []
+    real_open, real_fstat, real_stat, real_lstat = os.open, os.fstat, os.stat, Path.lstat
+    real_connect = sqlite3.connect
+
+    # LLM: 不替换打开实现或伪造成功，记录需要在失败出口真实关闭的文件描述符。
+    # 函数用途: 记录校验FD。
+    def track_open(*args, **kwargs):
+        descriptor = real_open(*args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor
+
+    # LLM: 保留真实元数据，只变更当前反例指定的一个字段。
+    # 函数用途: 构造可证伪的inode或父目录ctime漂移。
+    def changed(info, field):
+        values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        values[field] += 1
+        return SimpleNamespace(**values)
+
+    # LLM: 调用真实SQLite后才记录连接，后续漂移不得使该连接以成功状态返回。
+    # 函数用途: 保存供拒绝后核对关闭状态的真实连接。
+    def track_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(store.os, "open", track_open)
+    monkeypatch.setattr(store, "sqlite3", SimpleNamespace(connect=track_connect))
+    if drift == "open_inode":
+        monkeypatch.setattr(store.os, "fstat", lambda fd: changed(real_fstat(fd), "st_ino"))
+    elif drift == "connect_inode":
+        monkeypatch.setattr(store.os, "stat",
+            lambda *args, **kwargs: changed(real_stat(*args, **kwargs), "st_ino")
+            if connections else real_stat(*args, **kwargs))
+    else:
+        monkeypatch.setattr(Path, "lstat",
+            lambda candidate, *args, **kwargs: changed(real_lstat(candidate, *args, **kwargs), "st_ctime_ns")
+            if candidate == path.parent and connections else real_lstat(candidate, *args, **kwargs))
+    spec = store.DatasourceConnectionSpec("drift", "sqlite", "drift", database_path=str(path))
+    with pytest.raises(PermissionError, match="DATASOURCE_SQLITE_PATH_REPLACED"):
+        store.open_sqlite(spec)
+    assert len(descriptors) == 1
+    with pytest.raises(OSError):
+        real_fstat(descriptors[0])
+    assert len(connections) == (0 if drift == "open_inode" else 1)
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
+# LLM: 即使在Windows运行也仅代理被测模块的平台名，不改全局os.name；强制缺少dir_fd应保持POSIX失败关闭。
+# 函数用途: 防止以后将Windows局部兼容分支扩大成POSIX静默降级。
+def test_sqlite_posix_keeps_strict_open_without_dirfd(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.assets import datasource_store
+    from agent_py_agent.agent.common import nofollow_fs
+
+    path = tmp_path.resolve() / "data.sqlite"
+    path.touch()
+    monkeypatch.setattr(datasource_store, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
+    connect = Mock(side_effect=AssertionError("POSIX must fail before SQLite"))
+    monkeypatch.setattr(datasource_store, "sqlite3", SimpleNamespace(connect=connect))
+    spec = datasource_store.DatasourceConnectionSpec("strict", "sqlite", "strict", database_path=str(path))
+    with pytest.raises(nofollow_fs.NoFollowPathError, match="strict no-follow opening is unavailable"):
+        datasource_store.open_sqlite(spec)
+    connect.assert_not_called()
 
 
 def test_manager_builds_standard_work_order_paths(tmp_path: Path):
