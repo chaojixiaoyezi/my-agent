@@ -37,13 +37,31 @@ def _drop_retained_proofs():
         pty_session_registry._cleanup_proofs.clear()
 
 
+# LLM: 只隔离测试单例的会话/预留/证明表；保留原表及未知退役资源，不重用ID，不更改生产容量或退出证明。
+# 函数用途: 防止同批旧会话占容量，结束后清理本用例并恢复原注册表状态。
 @pytest.fixture(autouse=True)
 def _isolated_registry():
-    _drop_retained_proofs()
-    pty_session_registry.clear()
-    yield
-    _drop_retained_proofs()
-    pty_session_registry.clear()
+    with pty_session_registry._lock:
+        saved = (pty_session_registry._sessions, pty_session_registry._pending_starts,
+                 pty_session_registry._cleanup_proofs, pty_session_registry.idle_timeout_seconds)
+        pty_session_registry._sessions = {}
+        pty_session_registry._pending_starts = {}
+        pty_session_registry._cleanup_proofs = {}
+        pty_session_registry.idle_timeout_seconds = 0.0
+    try:
+        yield
+    finally:
+        _drop_retained_proofs()
+        pty_session_registry.clear()
+        with pty_session_registry._lock:
+            sessions, pending, proofs, timeout = saved
+            # clear不能证明退出的资源仍保留，不能为了隔离把未知进程从唯一账本抹掉。
+            sessions.update(pty_session_registry._sessions)
+            pending.update(pty_session_registry._pending_starts)
+            proofs.update(pty_session_registry._cleanup_proofs)
+            pty_session_registry._sessions, pty_session_registry._pending_starts = sessions, pending
+            pty_session_registry._cleanup_proofs = proofs
+            pty_session_registry.idle_timeout_seconds = timeout
 
 
 @pytest.fixture
@@ -67,15 +85,46 @@ def _run_scope(agent, task, authority):
             "run_id": authority["run_id"], "attempt_id": authority["attempt_id"]}
 
 
+# LLM: 轮转的是退出历史，不是活跃容量；每次等待原退役谓词，不提高上限或伪造清理证明。
+# 函数用途: 按顺序制造足量无关退出记录，使慢CI也能确定触发有界历史淘汰。
 def _churn_unrelated(tmp_path, count):
     # 后续无关PTY正常结束、由排空线程走原裁剪，模拟常规有界历史淘汰。
     scope = {"owner_home": str(tmp_path / "unrelated-owner"), "session_id": "unrelated-thread",
              "root_task_id": "unrelated-task", "run_id": "unrelated-run", "attempt_id": "unrelated-attempt"}
     (tmp_path / "unrelated-owner").mkdir(exist_ok=True)
-    sessions = [pty_session_registry.start("true", tmp_path, run_scope=scope) for _ in range(count)]
-    _wait(lambda: all(pty._source_resource_retired(item) for item in sessions), message="unrelated PTYs did not retire")
+    sessions = []
+    for _ in range(count):
+        session = pty_session_registry.start("true", tmp_path, run_scope=scope)
+        _wait(lambda: pty._source_resource_retired(session), message="unrelated PTY did not retire")
+        sessions.append(session)
     pty_session_registry.sweep_idle()
     return sessions
+
+
+# LLM: 单独核对历史轮转辅助函数的调度顺序，不以此替代下面真实PTY/持久证明验收。
+# 函数用途: 确保慢退役时先等待前一条会话，不能靠true通常很快退出碰运气。
+def test_churn_waits_for_previous_retirement(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    sessions = []
+
+    def start(command, target, *, run_scope):
+        assert command == "true" and target == tmp_path
+        assert all(session.retired for session in sessions), "history churn started concurrent active PTYs"
+        session = SimpleNamespace(retired=False, observations=0)
+        sessions.append(session)
+        return session
+
+    def retired(session):
+        session.observations += 1
+        session.retired = session.observations >= 2
+        return session.retired
+
+    monkeypatch.setattr(pty_session_registry, "start", start)
+    monkeypatch.setattr(pty_session_registry, "sweep_idle", lambda: None)
+    monkeypatch.setattr(pty, "_source_resource_retired", retired)
+    assert _churn_unrelated(tmp_path, 3) == sessions
+    assert len(sessions) == 3 and all(session.retired for session in sessions)
 
 
 def _registered():

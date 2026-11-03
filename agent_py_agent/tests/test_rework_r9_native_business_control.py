@@ -43,6 +43,17 @@ class _BlockingModel:
         return ModelResponse(text='original result', backend=self.name)
 
 
+# LLM: 限流属于每个真实HostTransport，不改生产配额或admit；只在测试安排阶段结束后清空该宿主桶。
+# 函数用途: 让被测控制请求不受准备空间/线程所消费的写入额度干扰。
+@pytest.fixture
+def reset_business_limiter():
+    def reset(server):
+        limiter = server.plugin_host.limiter
+        with limiter._lock:
+            limiter._rows.clear()
+    return reset
+
+
 @pytest.fixture
 def scoped_gateway(tmp_path, monkeypatch):
     from agent_py_agent.agent.core import SimpleAgent
@@ -255,7 +266,9 @@ def test_registered_users_keep_original_ordinary_pool_rejection(scoped_gateway):
     assert not _owner_pool(base)._pins
 
 
-def test_countn_coordinator_control_is_not_ready_before_any_bookkeeping(production_host):
+# LLM: 保留原HTTP、限流器及503/无账本副作用断言；清桶只隔开arrange与实际控制请求。
+# 函数用途: 验证多进程协调器在任何业务写入前按HOST_NOT_READY拒绝控制。
+def test_countn_coordinator_control_is_not_ready_before_any_bookkeeping(production_host, reset_business_limiter):
     from agent_py_agent.agent.plugin_host.business_actions import gateway_business_port
     from agent_py_agent.tests.test_mega_business_plugin_compatibility import plugin_observation_task
     from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
@@ -267,6 +280,7 @@ def test_countn_coordinator_control_is_not_ready_before_any_bookkeeping(producti
     # 多进程协调器：只有原控制面，没有业务Agent；读口仍冷可用，W2控制在接线和调用两侧都不可用。
     server.control_plane, server.agent = SimpleNamespace(config=server.agent.config, home_paths=server.agent.home_paths,
                                                          worker_count=2), None
+    reset_business_limiter(server)
     status, denied = http_request(server, production_host[1], {'schema': 'plugin_host_call.v2',
         'action': 'business.tasks.cancel', 'idempotency_key': 'r9-countn-cancel',
         'payload': {'task_id': task.task_id, 'include_descendants': True, 'expected_revision': 0}})
