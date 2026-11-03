@@ -38,6 +38,7 @@ from ..auth.middleware import (
 )
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.http import unaccounted_probe_attempt_count
+from ..common.log_redaction import redact_sensitive_value
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -226,7 +227,7 @@ def _usage_accounting_diagnostics() -> dict[str, Any]:
 
 
 # LLM: status 公开，只投影宿主白名单字段：本进程模型调用账本的在途数字、G4/G5 隔离事实、凭据状态码、无凭据回环计数的模板/count/last_at；
-#   不投影 owner、模型、请求身份或正文，不遍历或序列化鉴权对象和凭据内容。
+#   不投影 owner、请求身份或正文；模型仅公开配置可用布尔值，默认模型名称只给可信来源。
 #   派发卡死使用与心跳相同的纯投影及本次pending计数，不领取诊断episode、不触发采集或写盘。
 # 函数用途: 汇总公开 Gateway 状态、在途模型调用数、本机凭据状态和本次启动以来的无凭据回环计数，不含请求编号或身份。
 def handle_status(handler, server) -> None:
@@ -254,6 +255,11 @@ def handle_status(handler, server) -> None:
 
     response["gateway_isolation"] = gateway_isolation_status(gateway_bound_ports())
     middleware = getattr(server, "auth_middleware", None)
+    from .status_model_summary import status_model_summary
+
+    # 状态页保持公开；这里只检查可信度，不调用会主动发送 403 的认证入口。
+    trusted = middleware is None or middleware.check_trusted(handler.headers, _handler_peer_ip(handler))
+    response.update(status_model_summary(server, trusted=trusted))
     response["uncredentialed_loopback_by_endpoint"] = middleware.uncredentialed_loopback_snapshot() if middleware else {}
     # G2a 凭据状态：只给 ok / unavailable:<原因码>，不给路径、内容或异常文字。
     response["local_credential"] = getattr(server, "local_credential_status", "unavailable:not_prepared")
@@ -475,7 +481,12 @@ def handle_progress(handler, server) -> None:
     if access_state is not _FinishedRequestAccess.ALLOWED:
         handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": request_id}))
         return
-    raw_since = parse_qs(parsed.query).get("since", ["0"])[0]
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    include = frozenset(value.strip() for item in query.get("include", []) for value in item.split(",") if value.strip())
+    if include - {"assistant_text_delta", "assistant_text_reset", "assistant_text_done", "workflow_step_progress"}:
+        handler._send_json(400, {"error": "unknown progress include", "error_code": "INVALID_PROGRESS_INCLUDE"})
+        return
+    raw_since = query.get("since", ["0"])[0]
     try:
         since = max(0, int(raw_since))
     except (TypeError, ValueError):
@@ -490,7 +501,7 @@ def handle_progress(handler, server) -> None:
         )
         return
     events, next_cursor = _read_public_progress_events(
-        actual_path, since, channel=_request_channel(handler)[1]
+        actual_path, since, channel=_request_channel(handler)[1], include=include,
     )
     handler._send_json(
         200,
@@ -501,9 +512,9 @@ def handle_progress(handler, server) -> None:
 # LLM: /progress 只公开白名单事件：模型过程说明、请求尚未返回的数值等待、按档位的工具进度和工具审批（只含工具名与已脱敏摘要，
 #   不含 binding、选项或参数原文）。审批事件只是提示，授权仍只能经 /approve、/deny 控制写入精确决定文件。
 #   旧model_draft未提交正文不再公开；读取复用有界增量位置索引，半行不消费，超限只投影行号和字节数，等待/时间仍保留。
-# 函数用途: 按行游标公开过程及真实模型/工具等待，不发送思考或请求正文。
+# 函数用途: 按行游标公开过程和真实等待；只在显式订阅时发送 stream 档位的安全正文候选，不发送思考。
 def _read_public_progress_events(
-    path, since: int, *, channel: str = ""
+    path, since: int, *, channel: str = "", include: frozenset[str] = frozenset()
 ) -> tuple[list[dict[str, object]], int]:
     lines, next_cursor = read_progress_lines(path, since)
     events: list[dict[str, object]] = []
@@ -513,6 +524,13 @@ def _read_public_progress_events(
         except (json.JSONDecodeError, TypeError):
             continue
         if not isinstance(row, dict):
+            continue
+        if not isinstance(row.get("kind"), str):
+            continue
+        if row.get("kind") in {"assistant_text_delta", "assistant_text_reset", "assistant_text_done", "workflow_step_progress"}:
+            extension = _public_progress_extension(row, include=include, channel=channel)
+            if extension is not None:
+                events.append(extension)
             continue
         if row.get("kind") == "assistant_commentary":
             # Model commentary is safe at every verbose level only after the
@@ -554,8 +572,42 @@ def _read_public_progress_events(
             continue
         if level not in {"on", "full", "stream"} or not isinstance(progress, dict):
             continue
-        events.append({"level": level, **progress, **_progress_preview_limit(row), **_progress_update_time(row)})
+        events.append({"level": level, **progress, **_progress_preview_limit(row), **_progress_update_time(row), "kind": "tool_progress"})
     return events, next_cursor
+
+
+# LLM: 扩展事件必须显式订阅；只投影合同键，正文增量仍由 writer 的跨块脱敏门负责。
+# 函数用途: 让 Web 读取新事件，同时保持不带 include 的 IM 轮询完全不受影响。
+def _public_progress_extension(row: dict, *, include: frozenset[str], channel: str) -> dict | None:
+    kind = row.get("kind")
+    if kind == "workflow_step_progress":
+        from .stream_events import workflow_step_event
+
+        step = workflow_step_event(row.get("workflow_step"))
+        if kind not in include or not step:
+            return None
+        return {**step, "kind": kind}
+    if kind not in include and "assistant_text_delta" not in include:
+        return None
+    if row.get("verbose_level", row.get("level")) != "stream":
+        return None
+    call_id = row.get("model_call_id")
+    if not isinstance(call_id, str) or not call_id.strip():
+        return None
+    event = {"kind": kind, "model_call_id": call_id}
+    if kind == "assistant_text_reset":
+        if not isinstance(row.get("reason"), str) or row["reason"] not in {"retry", "cancel", "tool_call", "superseded"}:
+            return None
+        event["reason"] = row["reason"]
+    else:
+        if type(row.get("seq")) is not int or row["seq"] < 0:
+            return None
+        event["seq"] = row["seq"]
+        if kind == "assistant_text_delta":
+            if not isinstance(row.get("text"), str):
+                return None
+            event.update(text=project_host_paths_for_channel(redact_sensitive_value(row["text"]), channel), level="stream")
+    return redact_sensitive_value(event)
 
 
 # LLM: 字符上限只由宿主 stream event 投影，不能从模型正文提取；畸形字段不下发，原记录和候选正文不改变。
@@ -768,6 +820,11 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         handler._send_json(400, {"error": f"invalid JSON: {exc}"})
         return
     body = dict(body)
+    if "verbose_level" in body and (
+        not isinstance(body["verbose_level"], str) or body["verbose_level"] not in {"off", "on", "full", "stream"}
+    ):
+        handler._send_json(400, {"error": "verbose_level必须是off/on/full/stream之一。", "error_code": "INVALID_VERBOSE_LEVEL"})
+        return
     delivery_intent = body.get("delivery_intent", "auto")
     if not isinstance(delivery_intent, str) or delivery_intent not in {"auto", "queue"}:
         handler._send_json(400, {"error": "delivery_intent必须是auto或queue。"})
@@ -2152,6 +2209,10 @@ def handle_client_history(handler, server) -> None:
         result = read_gateway_client_history(
             server.agent, scope=scope, max_turns=_request_limit(body, default=20), before_message_cursor=before,
         )
+        if result.ok and result.thread_id:
+            from .client_inflight_projection import client_inflight_projection
+
+            result = replace(result, **client_inflight_projection(server, scope, result.thread_id))
     handler._send_json(200, result.to_dict())
 
 
@@ -2195,6 +2256,11 @@ def _read_coordinator_client_history(server, scope, *, max_turns, before):
         result = read_gateway_client_history_from_store(
             store, scope=scope, max_turns=max_turns, before_message_cursor=before,
         )
+        if result.ok and result.thread_id:
+            from .client_inflight_projection import client_inflight_projection
+
+            # 新发现信息与正文共用下面的来源末门；读到一半关闭时整页一并丢弃。
+            result = replace(result, **client_inflight_projection(server, scope, result.thread_id))
         if (server.control_plane is not control or server.drain_runtime is not runtime or server.paths is not paths):
             raise ValueError("http_original_control_required")
         require_http_transport(runtime, control=control, paths=paths)
@@ -2265,6 +2331,8 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
         "user_id": context.user_id,
         "conversation": _http_conversation_payload(context),
     }
+    if "verbose_level" in context.body:
+        payload["verbose_level"] = context.body["verbose_level"]
     system_task = context.body.get("system_task")
     if isinstance(system_task, dict):
         payload["system_task"] = dict(system_task)
@@ -2334,6 +2402,9 @@ def _http_idempotent_request_identity(
     # 省略/auto保原digest字节；显式queue绑定同ID语义，重放不能切换为活动插话。
     if body.get("delivery_intent", "auto") != "auto":
         canonical_input["delivery_intent"] = body["delivery_intent"]
+    # 显式档位也是幂等输入的一部分；省略时保留旧摘要字节。
+    if "verbose_level" in body:
+        canonical_input["verbose_level"] = body["verbose_level"]
     input_json = json.dumps(
         canonical_input,
         ensure_ascii=False,

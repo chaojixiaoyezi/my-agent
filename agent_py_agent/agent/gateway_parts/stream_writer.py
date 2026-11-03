@@ -1,5 +1,5 @@
 # LLM: Gateway 流出口组合请求缓冲、公开投影、审批和等待 mixin；执行权及最终结果由调用方提交，等待关闭只拦展示。
-# 事件先写原chunk再投影，raw候选只消费不留存；正文唯一来自原sealed-call commit，修改时同步审批、插话和重连回归。
+# 事件先写原chunk再投影；仅显式 stream 订阅保留有界且可撤回的安全候选，权威正文仍来自原sealed-call commit。
 # 思考首块即时发布，其后有界字符/时间合批，跨块重新净化且在任何非思考事件前排空。
 # 模块用途: 将模型、工具、思考与控制过程有序写给客户端，合批高频思考并保留脱敏和迟到读取边界。
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ..conversation.channels import (
 from ..conversation.compact_progress import normalize_conversation_compact_progress
 from ..conversation.tool_input_progress import public_tool_input_progress
 from .approval_session import ToolApprovalSessionCache
+from .progress_text_delta import TextDeltaBuffer
 from .stream_approval import StreamApproval, StreamApprovalRequestOptions
 from .stream_events import (
     active_turn_input_event,
@@ -89,7 +90,7 @@ def _write_provider_queue_event(writer, value: object) -> None:
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
 # 公开事件先沿原chunk落盘再投影sink；thinking首块即时、后续合批并在原事件边界排空，显示故障不能中止请求。
-# 类用途: 缓冲宿主事件与思考增量，提交完整模型公开正文并组合IM等待接口；不发布未提交raw正文候选。
+# 类用途: 缓冲宿主事件与思考增量，提交完整模型公开正文；显式绑定的 stream 候选独立可撤回，不向默认轮询公开。
 @dataclass
 class BufferedChunkStreamWriter(StreamLiveness):
     """Persist committed model replies and typed host/tool events."""
@@ -136,12 +137,17 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _thinking_buffer_chars: int = field(default=0, init=False)
     _last_thinking_flush_at: float = field(default=0.0, init=False)
     _thinking_emitted: bool = field(default=False, init=False)
+    text_delta_holdback_chars: int = 256
+    _text_delta: TextDeltaBuffer = field(init=False, repr=False)
+    _workflow_sequences: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     # LLM: 审批组件只持有同请求的路径和同步输出回调；不会建立新线程、缓存或持久账本。
     # 函数用途: 连接审批交互与本请求的流式发布和刷新边界。
     def __post_init__(self) -> None:
         self._thinking_cond = threading.Condition(self._commit_lock)
         self._approval = StreamApproval(self.chunk_path, self._write_event, self._prepare_permission_request)
+        self._text_delta = TextDeltaBuffer(holdback_chars=self.text_delta_holdback_chars,
+                                          project=self._project_stream_text)
 
     # LLM: 真实等待前按原次序刷新宿主进度；模型说明已由原工具准入前sealed-call hook提交，不从审批边界确认raw。
     # 函数用途: 在审批请求发布之前排空宿主缓冲，使客户端保持原事件顺序。
@@ -164,10 +170,45 @@ class BufferedChunkStreamWriter(StreamLiveness):
                     return
         _publish_writer_event(self, event, still_current=still_current)
 
-    # LLM: 保留原sink方法消费未提交raw，防止ToolBoundaryChunkFilter退回write后公开正文；不保存或发布，数字计量仍走原write_model_metrics。
-    # 函数用途: 接收并丢弃供应商候选，公开正文只由同sealed-call commit_model_response提交。
-    def write_model(self, text: str) -> None:
-        return None
+    # LLM: 默认回调仍丢弃 raw；只有 stream 档位且显式绑定同调用编号时才进入可撤回候选，不改变 sealed commit 或 result。
+    # 函数用途: 接收已绑定调用的真实增量，按安全尾部和序号写入订阅流。
+    def write_model(self, text: str, *, model_call_id: str = "") -> None:
+        with self._commit_lock:
+            if self._verbose_level != "stream" or getattr(self, "_liveness_closed", False) or not model_call_id:
+                return
+            self._text_delta.identifiers = self._identifier_redactions
+            self._write_text_events(self._text_delta.append(text, model_call_id=model_call_id))
+
+    # LLM: 生成层须在创建真实调用编号后、发请求前取得此闭包；旧闭包永远携带旧编号，不能跟随当前 writer 身份。
+    # 函数用途: 冻结模型调用身份，交给原生成回调使用。
+    def bind_model_call(self, model_call_id: str) -> Callable[[str], None]:
+        with self._commit_lock:
+            if self._verbose_level == "stream" and not getattr(self, "_liveness_closed", False):
+                self._write_text_events(self._text_delta.begin(model_call_id))
+
+        def write_bound(text: str) -> None:
+            self.write_model(text, model_call_id=model_call_id)
+
+        return write_bound
+
+    # LLM: 只撤销当前或明确指定的同调用候选；非 stream 时也清内存，但不持久化新 kind。
+    # 函数用途: 在重试、取消和工具边界收起失效正文。
+    def reset_model_text(self, reason: str, *, model_call_id: str = "") -> None:
+        with self._commit_lock:
+            self._write_text_events(self._text_delta.reset(reason, model_call_id=model_call_id))
+
+    def _write_text_events(self, events: list[dict[str, object]]) -> None:
+        if self._verbose_level == "stream":
+            for event in events:
+                self._write_event({**event, "verbose_level": "stream"})
+
+    def _project_stream_text(self, text: str) -> str:
+        from ..conversation.channels import project_user_reply
+
+        return redact_structured_identifiers(
+            project_host_paths_for_channel(project_user_reply(text).content, self.delivery_channel),
+            self._identifier_redactions, channel=self.delivery_channel,
+        )
 
     # LLM: 原已采纳响应先排空本段思考并重开首块额度；call幂等、关闭门、IM档位和final-only沿原提交核心。
     # 函数用途: 结束思考流再提交完整模型公开说明，不让缓冲尾部跑到正文后面。
@@ -180,6 +221,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # 函数用途: 固定本请求的过程档位、短窗口上限和用户时区，随事件传给 IM 投递端。
     def set_verbose_level(self, level: str, *, preview_max_chars: int = 100, timezone: str = "") -> None:
         normalized = str(level or "off").strip().lower()
+        if self._verbose_level == "stream" and normalized != "stream":
+            self.reset_model_text("superseded")
         self._verbose_level = normalized if normalized in {"off", "on", "full", "stream"} else "off"
         self._im_preview_max_chars = max(1, min(8000, int(preview_max_chars)))
         self._display_timezone = timezone
@@ -212,6 +255,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
         real user message arriving during the active turn opens exactly one new
         segment so the same run can answer without waiting for final closeout.
         """
+        self.reset_model_text("superseded")
         self._commentary_emitted = False
         begin = getattr(self.transcript_sink, "begin_active_turn_input", None)
         if callable(begin):
@@ -298,12 +342,36 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self.flush()
         if event.get("phase") == "started":
             self._reset_tool_input_progress()
+            self.reset_model_text("tool_call")
         progress = dict(event)
+        if self._verbose_level != "full":
+            progress.pop("input", None)
+            progress.pop("input_truncated", None)
         if not self.rich_transcript:
             progress.pop("display", None)
         if not self.rich_transcript and self._verbose_level != "full":
             progress.pop("output", None)
         self._write_event({"kind": "tool_progress", "text": legacy_text, "verbose_level": self._verbose_level, "progress": progress})
+
+    # LLM: 只接收 XC-1 的类型化字段；序号只供同工作流去重，不触发工作流执行或持久状态写入。
+    # 函数用途: 将真实工作流步骤写入现有流，公开 HTTP 默认仍不可见。
+    def write_workflow_step_progress(self, event: dict[str, object]) -> None:
+        from .stream_events import workflow_step_event
+
+        public = workflow_step_event(event)
+        if not public:
+            return
+        with self._commit_lock:
+            if getattr(self, "_liveness_closed", False):
+                return
+            run_id, seq = public["workflow_run_id"], public["seq"]
+            if seq <= self._workflow_sequences.get(run_id, -1):
+                return
+            if len(self._workflow_sequences) >= 64 and run_id not in self._workflow_sequences:
+                return
+            self._workflow_sequences[run_id] = seq
+            self._write_event({"kind": "workflow_step_progress", "verbose_level": self._verbose_level,
+                               "workflow_step": public})
 
     # LLM: 完整思考先排空增量并重置分段首块；全量净化及owner/thread归档沿原thinking_event，不改变模型状态。
     # 函数用途: 排空流式思考后发布完整公开思考和引用，不丢尾部或改变原预览限制。
@@ -400,6 +468,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
         error_type: str,
         params: dict | None = None,
     ) -> bool:
+        self.reset_model_text("retry")
         if not self.rich_transcript:
             return False
         payload = provider_retry_event(scope=scope, attempt=attempt, total=total,
@@ -491,7 +560,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；若跨线程活跃发布或延后prepare_final仍在途则将sink关闭移交收尾。
     # 函数用途: 收口显示并拒绝迟到等待事件，异常时仍确保关闭sink，不把流关闭当作工具或任务成功。
     def close(self) -> None:
-        self._liveness_closed = True
+        with self._commit_lock:
+            self._liveness_closed = True
+            self.reset_model_text("cancel")
         try:
             self.flush_thinking_delta(final=True)
             self.flush()
@@ -589,19 +660,24 @@ def request_stream_permission(writer,request,cancellation_token):
         writer.interactive_approvals,writer.approval_mode_decision_provider,cancellation_token))
 
 
-# LLM: 只由原sink完整响应提交调用，保原call幂等和显示档位；并发worker同时started时用短锁消除重复提交竞态。
+# LLM: 只由原sink完整响应提交调用，保原call幂等和显示档位；合法空投影也须收口同调用候选，非法信封不产生状态变化。
 # 函数用途: 将已净化的完整响应提交到原显示段，丢弃旧候选并保留原final-only/通道策略。
 def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> None:
-    from .stream_events import committed_model_events
+    from .stream_events import committed_model_call_id, committed_model_events
 
-    events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
-    call_id = (payload.get("source") or {}).get("call_id")
-    if not events:
+    call_id = committed_model_call_id(payload)
+    if not call_id:
         return
+    events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
     with writer._commit_lock:
         if call_id in writer._committed_model_calls or getattr(writer, "_liveness_closed", False):
             return
         writer._committed_model_calls.add(call_id)
+        if writer._text_delta.model_call_id == call_id:
+            if payload.get("boundary") == "tools":
+                writer.reset_model_text("tool_call", model_call_id=call_id)
+            else:
+                writer._write_text_events(writer._text_delta.finish(call_id, text=str(payload.get("final_text") or "")))
         for event in events:
             if event["kind"] == "assistant_commentary":
                 writer._committed_commentary.append(event["text"])

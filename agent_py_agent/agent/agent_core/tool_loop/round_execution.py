@@ -1618,6 +1618,8 @@ def _structured_tool_progress(
     event: ToolProgressEvent,
     tool_name: str,
     detail: str,
+    *,
+    max_input_chars: int = 16384,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "round": event.request.tool_rounds,
@@ -1626,8 +1628,16 @@ def _structured_tool_progress(
         "phase": event.phase,
         "status": event.status,
     }
+    call_id = str(event.call.call_id or "").strip()
+    if call_id:
+        payload["call_id"] = call_id
     if detail:
-        payload["detail"] = _public_progress_text(event, detail, max_chars=240)
+        payload["detail"] = _shorten(_public_progress_text(event, detail, max_chars=None), limit=100)
+    inputs, truncated = _tool_progress_input(event, max_input_chars=max_input_chars)
+    if inputs:
+        payload["input"] = inputs
+    if truncated:
+        payload["input_truncated"] = True
     if event.result is not None:
         payload["ok"] = bool(event.result.ok)
         payload["handler_executed"] = bool(event.result.handler_executed)
@@ -1671,6 +1681,28 @@ def _structured_tool_progress(
             3,
         )
     return payload
+
+
+# LLM: 只投影 detail 使用的参数键；脱敏先于单字段截断，writer 再按本轮 full 档位决定是否公开。
+# 函数用途: 保存完整安全执行输入，不把其它参数或完整输出塞进进度。
+def _tool_progress_input(event: ToolProgressEvent, *, max_input_chars: int = 16384) -> tuple[dict[str, str], bool]:
+    from ...common.log_redaction import redact_sensitive_value
+
+    inputs, truncated = {}, False
+    for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope", "command"):
+        value = event.call.arguments.get(key)
+        if value is None or value == "":
+            continue
+        # 输入必须保留命令结构和空白；面向回复正文的净化器会连参数名也删掉，不能用于完整输入合同。
+        clean = redact_sensitive_value(str(value))
+        owner_home = str(getattr(getattr(event.request.agent, "home_paths", None), "owner_home_dir", "") or "")
+        if owner_home:
+            clean = clean.replace(owner_home, "~/.my-agent/owner")
+        limit = max(1, int(max_input_chars))
+        if len(clean) > limit:
+            clean, truncated = clean[:limit], True
+        inputs[key] = clean
+    return inputs, truncated
 
 
 # LLM: 外置输出展示既有安全 preview 或 typed inline text，不读取 blob、不展开 refs；正文仍经统一公开脱敏和大小预算。
@@ -1860,14 +1892,16 @@ def _finished_status(result: ToolResult) -> str:
 # LLM: 工具卡首选模型原始公共参数做摘要，不能从输出正文或宿主补全字段反推；新增工具只加无敏感值的显式参数。
 # 函数用途: 从常见工具参数中挑一个短描述，让执行中和完成后的卡片都说明正在操作什么。
 def _payload_progress_detail(call: ToolCall) -> str:
+    from ...common.log_redaction import redact_sensitive_value
+
     payload = call.arguments
     for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope"):
         value = str(payload.get(key) or "").strip()
         if value:
-            return _shorten(value)
+            return _shorten(redact_sensitive_value(value))
     command = str(payload.get("command") or "").strip()
     if command:
-        return _shorten(command)
+        return _shorten(redact_sensitive_value(command))
     items = payload.get("items")
     if isinstance(items, list):
         return f"items={len(items)}"

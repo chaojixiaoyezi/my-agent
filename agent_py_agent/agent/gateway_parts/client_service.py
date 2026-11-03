@@ -43,6 +43,12 @@ class GatewayClientHistoryResult:
     message_cursor: int = 0
     before_message_cursor: int = 0
     has_older: bool = False
+    active_request_id: str = ""
+    in_flight_status: str = "idle"
+    turn_phase: str = ""
+    stream_cursor: int = 0
+    progress_path: str = ""
+    queued_request_ids: tuple[str, ...] = ()
 
     # LLM: HTTP 投影区分预览和 display-only 事件，不输出内部 envelope、服务端路径或异常原文。
     # 函数用途: 转换成各前端共用的公开历史合同。
@@ -56,6 +62,12 @@ class GatewayClientHistoryResult:
             "message_cursor": self.message_cursor,
             "before_message_cursor": self.before_message_cursor,
             "has_older": self.has_older,
+            "active_request_id": self.active_request_id,
+            "in_flight_status": self.in_flight_status,
+            "turn_phase": self.turn_phase,
+            "stream_cursor": self.stream_cursor,
+            "progress_path": self.progress_path,
+            "queued_request_ids": list(self.queued_request_ids),
         }
 
 

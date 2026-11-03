@@ -442,7 +442,10 @@ def _execute_gateway_conversation_turn(
         context.on_chunk,
         request_history.gateway_identifier_redactions(context, conversation),
     )
-    _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level, context.agent.config.im_stream_preview_max_chars,
+    requested_level = request.get("verbose_level")
+    # 请求覆盖仅配置本轮 writer，不能写回线程上的持久详细档位。
+    level = requested_level if isinstance(requested_level, str) and requested_level in {"off", "on", "full", "stream"} else conversation.verbose_level
+    _set_gateway_verbose_level(context.on_chunk, level, context.agent.config.im_stream_preview_max_chars,
                                timezone=context.agent.config.timezone)
     _configure_gateway_approval_session(context, conversation)
     if system_slash_command_name(prompt):
