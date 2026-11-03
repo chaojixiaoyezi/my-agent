@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -67,6 +68,40 @@ def home(tmp_path):
     path = tmp_path / "home"
     path.mkdir()
     return path
+
+
+# LLM: 独立解释器不继承PYTHONPATH或pytest导入缓存；只读临时配置，验证同树解析器与摘要及严格路径解析。
+# 函数用途: 证明清理脚本在仓库之外冷启动时也能加载带相对导入的正式配置模块。
+def test_config_parser_imports_package_from_cold_external_process(tmp_path):
+    workspace = (tmp_path / "workspace").resolve()
+    config = tmp_path / "active.yaml"
+    config.write_text(f'workspace_root: "{workspace}"\nenable_subagents: false\n', encoding="utf-8")
+    probe = textwrap.dedent("""
+        import hashlib
+        import runpy
+        import sys
+        from pathlib import Path
+
+        assert not any(name.startswith("agent_py_agent") for name in sys.modules)
+        script, config_path = map(Path, sys.argv[1:])
+        namespace = runpy.run_path(str(script))
+        loader, digest = namespace["_config_parser"]()
+        from agent_py_agent.agent.settings import config_io
+
+        expected = script.resolve().parents[1] / "agent_py_agent/agent/settings/config_io.py"
+        assert Path(config_io.__file__).resolve() == expected
+        assert loader is config_io.load_simple_yaml
+        assert digest == hashlib.sha256(expected.read_bytes()).hexdigest()
+        workspace = (config_path.parent / "workspace").resolve()
+        assert loader(config_path) == {"workspace_root": str(workspace), "enable_subagents": False}
+        assert namespace["_config_references"](config_path.read_text(encoding="utf-8")) == ([workspace], True)
+        assert namespace["_config_parser"]() == (loader, digest)
+    """)
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", probe, str(SCRIPT), str(config)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # LLM: 五类资格由真实目录、locator和老mtime构成，备份同时保留报告控制。

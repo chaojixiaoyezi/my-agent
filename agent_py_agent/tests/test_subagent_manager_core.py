@@ -6,6 +6,62 @@ from pathlib import Path
 import pytest
 
 
+# LLM: 在独立解释器中屏蔽 fcntl 并重载真实模块，避免改写其它用例持有的类身份；不替换数据源读写实现。
+# 函数用途: 防止 Windows 缺 fcntl 再次阻断导入，并验证 SQLite 读写和两种物理闸门。
+def test_datasource_store_import_and_io_without_fcntl(tmp_path: Path):
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    probe = r'''
+import importlib
+import sqlite3
+import sys
+from pathlib import Path
+from pytest import MonkeyPatch, raises
+
+root, home = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root))
+from agent_py_agent.agent.assets import datasource_store
+from agent_py_agent.agent.gateway_parts import standalone_inventory
+from agent_py_agent.agent.gateway_parts.standalone_migration_errors import StandaloneMigrationRejected
+
+assert Path(datasource_store.__file__).resolve().is_relative_to(root)
+with MonkeyPatch.context() as patch:
+    patch.setitem(sys.modules, "fcntl", None)
+    importlib.reload(datasource_store)
+    assert datasource_store.fcntl is None
+    store = datasource_store.DatasourceStore(home)
+    saved = store.save_datasource({"datasource_id": "portable", "kind": "sqlite", "title": "portable"})
+    assert saved["revision"] == 1
+    spec = store.get_datasource_spec("portable")
+    control = store.writer_control(spec)
+    with datasource_store.shared_writer_gate(control):
+        connection = datasource_store.open_sqlite(spec)
+        try:
+            connection.execute("CREATE TABLE records (value TEXT)")
+            connection.execute("INSERT INTO records VALUES ('retained')")
+            connection.commit()
+        finally:
+            connection.close()
+    store.save_datasource({"datasource_id": "portable", "kind": "sqlite", "title": "updated",
+        "database_path": spec.database_path}, expected_revision=1)
+    updated = store.get_datasource_spec("portable")
+    assert updated.revision == 2 and updated.title == "updated"
+    connection = sqlite3.connect(updated.database_path)
+    try:
+        assert connection.execute("SELECT value FROM records").fetchall() == [("retained",)]
+    finally:
+        connection.close()
+    assert store.list_datasources()[0]["revision"] == 2
+    with raises(StandaloneMigrationRejected):
+        standalone_inventory._settled_approval_lock(home, ("unverified.lock",), {})
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", probe, str(root), str(tmp_path / "home")],
+        cwd=root, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_manager_builds_standard_work_order_paths(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 

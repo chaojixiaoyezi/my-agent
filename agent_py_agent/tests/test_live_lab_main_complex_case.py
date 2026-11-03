@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.settings.config_io import load_simple_yaml
 from scripts.live_lab.constants import REAL_CASES, SUITES
 from scripts.live_lab.main_agent_artifact_case import (
     _assert_artifact_readback_report,
@@ -56,6 +57,8 @@ def test_main_complex_case_is_registered_as_real_opt_in_suite():
         assert "contract" not in prompt.lower()
 
 
+# LLM: 使用真实LabSessionManager写隔离配置并回读正式解析结果；宿主根须在业务工作区外，原配置保持不变。
+# 函数用途: 检查复杂主代理用例关闭子代理且不破坏宿主数据与业务文件的隔离布局。
 def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     source = tmp_path / "agent_config.yaml"
     source.write_text("model_backend: echo\nenable_subagents: true\n", encoding="utf-8")
@@ -76,7 +79,12 @@ def test_main_complex_config_disables_subagents_in_isolated_config(tmp_path):
     text = session.config_path.read_text(encoding="utf-8")
     assert "# main-agent-complex overrides" in text
     assert "enable_subagents: false" in text
-    assert f'my_agent_home: "{session.fixture_root / ".my_agent" / "home"}"' in text
+    config = load_simple_yaml(session.config_path)
+    assert config["enable_subagents"] is False
+    assert Path(config["my_agent_home"]) == session.isolated_home.resolve()
+    assert Path(config["workspace_root"]) == session.fixture_root.resolve()
+    assert not session.isolated_home.resolve().is_relative_to(session.fixture_root.resolve())
+    assert not session.fixture_root.resolve().is_relative_to(session.isolated_home.resolve())
     assert source.read_text(encoding="utf-8") == "model_backend: echo\nenable_subagents: true\n"
 
 

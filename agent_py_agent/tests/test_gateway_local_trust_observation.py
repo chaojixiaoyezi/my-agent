@@ -159,13 +159,21 @@ def test_auth_disabled_keeps_explicit_single_machine_behavior(tmp_path, monkeypa
         server.stop()
 
 
+# LLM: 直接遍历规范路由表并经真实HTTP分发逐条验证；固定数量、唯一性与安全档位，不运行真实业务处理器。
+# 函数用途: 确认36条已审路由共用唯一注册表，业务和产物入口仍要求宿主凭据。
 def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, monkeypatch):
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 32 and len({(method, template) for method, template, _ in pairs}) == 32
+    assert len(pairs) == 36 and len({(method, template) for method, template, _ in pairs}) == 36
     assert ("POST", "/client/goal", "credential") in pairs
     assert ("POST", "/channel-observations", "credential") in pairs
+    assert {(method, path, tier) for method, path, tier in pairs if path.startswith("/client/business")} == {
+        ("GET", "/client/business/artifacts/*/content", "credential"),
+        ("POST", "/client/business", "credential"),
+        ("POST", "/client/business/stream", "credential"),
+        ("POST", "/client/business/artifacts", "credential"),
+    }
     # 浏览器 OAuth 回调不携宿主头，仍由原处理器验签 state/actor；观察写入口必须持宿主凭据。
     assert {(method, path) for method, path, tier in pairs if tier == "public"} == {
         ("GET", "/status"), ("GET", "/metrics"), ("GET", "/feishu/oauth/callback*"),
@@ -189,7 +197,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
             assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == len(pairs) == 32
+        assert len(called) == len(pairs) == 36
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()

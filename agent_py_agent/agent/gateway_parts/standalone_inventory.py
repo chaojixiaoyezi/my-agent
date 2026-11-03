@@ -142,12 +142,15 @@ def _host_command_request(name):
 
 
 # LLM: 只读打开现存原锁并非阻塞共享锁探测活跃writer/consumer，忙不等待；不创建、写入或删除锁。
-#   原opener核普通单link，读后再核当前叶仍为同一inode；非空或身份漂移都不是已消费遗留锁。
+#   原opener核普通单link；无只读OS锁探针时保守拒绝库存判定，不把缺模块当作锁已结清。
 # 函数用途: 确认一枚原审批锁已结空闲，并把其稳定摘要纳入库存。
 def _settled_approval_lock(root, parts, files):
-    import fcntl
-
     ref = "/".join(parts)
+    try:
+        import fcntl
+    except ImportError:
+        _reject("processing_approval_lock_unsettled", ref)
+
     parent = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
     try:
         descriptor = _openat_file(parent, parts[-1], os.O_RDONLY, 0o600)
