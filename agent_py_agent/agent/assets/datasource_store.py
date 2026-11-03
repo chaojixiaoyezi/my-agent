@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-import fcntl
+import errno
 import hashlib
 import hmac
 import importlib
@@ -14,6 +14,7 @@ import re
 import socket
 import sqlite3
 import stat
+import threading
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
@@ -34,6 +35,19 @@ from ..common.nofollow_fs import (
     write_text_atomic_beneath,
 )
 from . import _verify_directory_beneath, safe_asset_id
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows 无 fcntl。
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX 无 msvcrt。
+    msvcrt = None
+
+# 无 flock 时串行本进程的闸门；可重入以支持同一事务按顺序持有多个物理库闸门。
+_FALLBACK_GATE_LOCK = threading.RLock()
 
 # 物理库闸门等待上限 30 秒：切换等在途 SDK 写者收尾、写者等切换提交；超时明确失败，不无限占住宿主或脚本。
 _GATE_WAIT_SECONDS = 30.0
@@ -473,10 +487,48 @@ def _database_identities(rows):
     return frozenset(found)
 
 
-# LLM: 有界轮询非阻塞flock；超时只报繁忙、不改任何账，退出必释放，调用方按原失败路径处理。
+# LLM: Windows同一首字节保留跨进程读/写锁；仅两种OS原语都缺失时告警并降级为有期限的进程内互斥。
+# 函数用途: 没有fcntl时仍能打开数据源，并在可用时使用Windows文件锁保护物理库。
+@contextmanager
+def _fallback_database_gate(descriptor, *, exclusive, deadline):
+    if not _FALLBACK_GATE_LOCK.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError('DATASOURCE_GATE_BUSY')
+    try:
+        if msvcrt is None:
+            from ..common.file_lock_support import warn_file_lock_unavailable_once
+            warn_file_lock_unavailable_once()
+            yield
+            return
+        mode = msvcrt.LK_NBLCK if exclusive else msvcrt.LK_NBRLCK
+        while True:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, mode, 1)
+                break
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('DATASOURCE_GATE_BUSY') from None
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        _FALLBACK_GATE_LOCK.release()
+
+
+# LLM: POSIX共享/排他flock原样保留；无fcntl时在辅助上下文选择Windows锁或显式线程降级，均保证退出释放。
 # 函数用途: 在截止时间内取得共享或排他文件锁。
 @contextmanager
-def _bounded_flock(descriptor, mode, deadline):
+def _bounded_flock(descriptor, *, exclusive, deadline):
+    if fcntl is None:
+        with _fallback_database_gate(descriptor, exclusive=exclusive, deadline=deadline):
+            yield
+        return
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     while True:
         try:
             fcntl.flock(descriptor, mode | fcntl.LOCK_NB)
@@ -491,7 +543,7 @@ def _bounded_flock(descriptor, mode, deadline):
         fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
-# LLM: 切换/保存先按物理身份排序取全部排他闸门，再取规格锁；在途SDK写者先提交或回滚并关闭，之后的写者复核到新规格即失败。
+# LLM: 切换/保存先排序取排他物理闸门再取规格锁；平台选择留在原有界锁入口，不提前解引用可缺失的fcntl。
 # 函数用途: 按稳定顺序持有一组物理库排他闸门，返回已持有的身份集合。
 @contextmanager
 def _exclusive_database_gates(owner_home, identities):
@@ -500,7 +552,7 @@ def _exclusive_database_gates(owner_home, identities):
         for identity in sorted(identities):
             descriptor = open_private_lock_beneath(owner_home, _gate_parts(identity))
             stack.callback(os.close, descriptor)
-            stack.enter_context(_bounded_flock(descriptor, fcntl.LOCK_EX, deadline))
+            stack.enter_context(_bounded_flock(descriptor, exclusive=True, deadline=deadline))
         yield frozenset(identities)
 
 
@@ -526,7 +578,7 @@ def _require_current_spec_leaf(control):
         raise PermissionError('DATASOURCE_BINDING_CHANGED')
 
 
-# LLM: 共享闸门覆盖复核、执行、提交/回滚与连接关闭；闸门叶身份须与签发一致，切换方排他闸门期间写者只等待不越过。
+# LLM: 共享闸门覆盖复核至连接关闭，原叶身份检查保持；平台锁在有界入口选择，无fcntl也不跳过规格复核。
 # 函数用途: 为一次可写SDK事务持有共享物理库闸门并复核冻结的规格事实。
 @contextmanager
 def shared_writer_gate(control):
@@ -538,7 +590,7 @@ def shared_writer_gate(control):
         gate = os.fstat(descriptor)
         if [gate.st_dev, gate.st_ino] != list(control['gate_identity']):
             raise PermissionError('DATASOURCE_WRITER_GATE_UNAVAILABLE')
-        with _bounded_flock(descriptor, fcntl.LOCK_SH, time.monotonic() + _GATE_WAIT_SECONDS):
+        with _bounded_flock(descriptor, exclusive=False, deadline=time.monotonic() + _GATE_WAIT_SECONDS):
             _require_current_spec_leaf(control)
             yield
     finally:
