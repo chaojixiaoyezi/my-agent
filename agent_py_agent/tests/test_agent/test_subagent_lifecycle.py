@@ -31,7 +31,8 @@ def test_subagent_capability_records():
         parent = agent.subagents.create_run(
             goal="审查项目", thought="先拆分风险面。", plan=["拆任务", "分配能力"],
             agent_name="review-parent", role="coordinator",
-            owner="parent-owner", supervisor="root-supervisor", final_owner="final-owner",
+            # owner 是权限域，不是负责人标签；父子沿同一宿主 owner 创建。
+            owner=agent.subagents.owner_id, supervisor="root-supervisor", final_owner="final-owner",
             acceptance_checks=["必须有真实命令或文件证据"],
         )
         child = agent.subagents.create_run(
@@ -58,11 +59,30 @@ def test_subagent_capability_records():
         loaded_parent = agent.subagents.load(parent.id)
 
         assert child.id in loaded_parent.child_ids
-        assert loaded_parent.owner == "parent-owner" and loaded_parent.final_owner == "final-owner"
+        assert loaded_parent.owner == loaded_child.owner == agent.subagents.owner_id
+        assert loaded_parent.final_owner == "final-owner"
+        repo = agent.subagents.runtime_db
+        parent_run = repo.agent_run_for_run_id(parent.id)
+        child_run = repo.agent_run_for_run_id(child.id)
+        assert child_run["task_run_id"] == parent_run["task_run_id"]
+        assert child_run["parent_agent_run_id"] == parent_run["agent_run_id"]
         assert loaded_child.capability_requests[0].id == request.id
         assert loaded_child.capability_grants[0].id == grant.id
         assert loaded_child.capability_gaps[0].id == gap.id
         assert "web_fetch" in loaded_child.allowed_tools
+
+
+def test_subagent_capability_tree_rejects_cross_owner_child(tmp_path):
+    import pytest
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    parent = agent.subagents.create_run(goal="同 owner 的父任务")
+    before = agent.subagents.runtime_db.agent_run_for_run_id(parent.id)
+    with pytest.raises(ValueError, match="parent owner mismatch"):
+        agent.subagents.create_run(goal="不能跨 owner 挂到父任务", parent_id=parent.id,
+            root_id=parent.root_id, depth=1, owner="users/another-owner")
+    assert agent.subagents.load(parent.id).child_ids == []
+    assert agent.subagents.runtime_db.agent_run_for_run_id(parent.id) == before
 
 
 def test_subagent_done_status_does_not_require_machine_evidence():

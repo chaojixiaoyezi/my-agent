@@ -181,11 +181,65 @@ def test_new_claim_cannot_accept_old_background_approval(background):
                             "task_id": ctx.task_id, "status": "cancelled"})
     successor = ctx.store.claims.acquire({"thread_id": ctx.thread.thread_id, "task_id": ctx.task_id, "reason": "thread_goal_continue"})
     assert successor["claim_id"] != ctx.claim["claim_id"]
+    # 本例验证无竞争时的失活结果；先等旧 waiter 退休，再检查迟到的点击。
+    # 锁竞争必须保留 typed 未结，另一个用例用原锁单独验证，不能吞错伪造 unavailable。
+    ctx.waiter.join(timeout=2)
+    assert not ctx.waiter.is_alive()
+    assert ctx.response["decision"] == "unavailable"
     with pytest.raises(AgentControlError):
         resolve_agent_permission(ctx.agent, scope=ctx.scope, run_id=ctx.task_id, request=ctx.request.to_dict(),
                                  decision=ToolApprovalDecision(ctx.request.permission_id, "approved").to_dict())
     ctx.waiter.join(timeout=2)
     assert ctx.response["decision"] == "unavailable"
+    assert list_pending_agent_tool_approvals(ctx.agent, root_task_id=ctx.task_id) == []
+
+
+def test_new_claim_retirement_keeps_exact_obligation_when_transition_is_busy(background, monkeypatch):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+    from agent_py_agent.agent.conversation import agent_tool_approval as bridge
+
+    ctx = background
+    read_gateway_client_notices(ctx.agent, scope=ctx.scope, after=0, interactive_approvals=True)
+    original_wait = bridge.wait_for_agent_tool_approval
+    handles, before, errors, successors = [], [], [], []
+
+    def wait_while_original_transition_is_busy(handle, **kwargs):
+        handles.append(handle)
+        before.append(handle.path.read_bytes())
+        ctx.store.claims.finish({"thread_id": ctx.thread.thread_id, "claim_id": ctx.claim["claim_id"],
+                                 "task_id": ctx.task_id, "status": "cancelled"})
+        successors.append(ctx.store.claims.acquire({"thread_id": ctx.thread.thread_id,
+            "task_id": ctx.task_id, "reason": "thread_goal_continue"}))
+        # 原锁真实繁忙；旧 waiter 不能等待、覆盖新 claim 或伪造已退休。
+        with locked_json_path(bridge._transition_path(handle.path)):
+            try:
+                return original_wait(handle, **kwargs)
+            except bridge.ApprovalRetirementUnconfirmedError as error:
+                errors.append(error)
+                raise
+
+    monkeypatch.setattr(bridge, "wait_for_agent_tool_approval", wait_while_original_transition_is_busy)
+    with pytest.raises(bridge.ApprovalRetirementUnconfirmedError) as caught:
+        ctx.sink.request_permission(ctx.request.to_dict())
+    error = caught.value
+    assert errors == [error]
+    assert errors[0] is error
+    assert error.reason == "permission_transition_busy"
+    fact = bridge.approval_retirement_obligation(error)
+    assert fact is error.obligation
+    assert fact.scope.claim_id == ctx.claim["claim_id"]
+    assert fact.decision.decision == "unavailable" and not fact.decision.approved
+    assert handles[0].path.read_bytes() == before[0]
+    assert error._retirement_origin.callback_closed
+    assert ctx.response == {}
+    with pytest.raises(AgentControlError):
+        resolve_agent_permission(ctx.agent, scope=ctx.scope, run_id=ctx.task_id, request=ctx.request.to_dict(),
+                                 decision=ToolApprovalDecision(ctx.request.permission_id, "approved").to_dict())
+    assert bridge.retry_approval_retirement(error).status == "no_input"
+    assert not handles[0].path.exists()
+    current = ctx.store.claims.load(ctx.thread.thread_id)
+    assert current["claim_id"] == successors[0]["claim_id"] != ctx.claim["claim_id"]
+    assert current["status"] == "running"
     assert list_pending_agent_tool_approvals(ctx.agent, root_task_id=ctx.task_id) == []
 
 
