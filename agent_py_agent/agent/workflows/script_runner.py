@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import math
 import os
 import shutil
@@ -15,6 +16,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
 
 from ..assets.datasource_store import redact_datasource_values
@@ -532,7 +534,14 @@ def _environment(metadata, folder, input_json, sources, *, host_credential_env_n
     return environment
 
 
-# LLM: 摘要失败不能覆盖执行事实；按真实签名兼容并行Store的run_at和新增last_error，不重试已经进入的写操作。
+# LLM: 缓存按异常类型有界；每种异常周期内最多一条，不因异常文案变化导致周期任务刷屏。
+# 函数用途: 为运行摘要诊断保存最近一次警告时间。
+@lru_cache(maxsize=128)
+def _summary_warning_clock(error_type):
+    return [float('-inf')]
+
+
+# LLM: 摘要失败不能覆盖执行事实；按签名兼容旧Store，正式Store走spool且不重试已进入的写操作。
 # 函数用途: 尽力将成功、失败及超时累计到脚本摘要。
 def _record_summary(owner_home, result):
     try:
@@ -540,13 +549,26 @@ def _record_summary(owner_home, result):
         parameters = inspect.signature(record).parameters
         status = 'succeeded' if result.ok else 'timed_out' if result.error_code == 'SCRIPT_TIMEOUT' else 'failed'
         options = {'status': status, 'duration_ms': result.duration_ms}
+        accepts_kwargs = any(p.kind == p.VAR_KEYWORD for p in parameters.values())
+        if 'blocking' in parameters or accepts_kwargs:
+            options['blocking'] = False
+        if 'run_id' in parameters or accepts_kwargs:
+            identity = [result.script_id, result.started_at, result.ended_at]
+            options['run_id'] = sha256(json.dumps(identity).encode('utf-8')).hexdigest()
         if 'run_at' in parameters:
             options['run_at'] = datetime.fromtimestamp(result.ended_at, timezone.utc).isoformat()
-        if 'last_error' in parameters or any(p.kind == p.VAR_KEYWORD for p in parameters.values()):
+        if 'last_error' in parameters or accepts_kwargs:
             options['last_error'] = redact_sensitive_value(result.error_code or result.stderr_preview[:200])
         record(result.script_id, **options)
-    except Exception:
-        pass
+    except Exception as exc:
+        error_type = type(exc).__name__
+        clock = _summary_warning_clock(error_type)
+        now = time.monotonic()
+        if now - clock[0] >= 60:
+            clock[0] = now
+            error = str(redact_sensitive_value(str(exc)))[:512]
+            logging.getLogger(__name__).warning('script summary write failed error_type=%s error=%s',
+                                               error_type, error, extra={'error_type': error_type, 'error': error})
 
 
 # LLM: 只能由本模块处理其亲自创建的进程组，退出后也清理仍留存的同组子进程。

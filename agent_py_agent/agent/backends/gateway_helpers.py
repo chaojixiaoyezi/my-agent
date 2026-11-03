@@ -102,6 +102,19 @@ _HARD_QUOTA_ERROR_CODES = frozenset(
     }
 )
 _PROVIDER_ERROR_CODE_KEYS = frozenset({"code", "error_code", "reason", "status", "type"})
+# 仅明确的能力拒绝码与格式字段组合才允许本地分析步骤降级；schema内容非法不在此列。
+_RESPONSE_FORMAT_PARAMS = frozenset({
+    'response_format', 'response_format.type', 'response_format.json_schema', 'json_schema',
+})
+_RESPONSE_FORMAT_CAPABILITY_CODES = frozenset({'unsupported_parameter', 'unsupported_value'})
+_RESPONSE_FORMAT_ERROR_CODES = frozenset({
+    'response_format_unavailable', 'response_format_not_supported',
+    'json_schema_unavailable', 'json_schema_not_supported',
+})
+# 来源：v13 Part A Issue #47 原始结构化错误体；完整精确协议标记，不做自然语言子串推断。
+_RESPONSE_FORMAT_ERROR_MESSAGES = frozenset({
+    'Upstream request failed: [invalid_request_error] This response_format type is unavailable now',
+})
 # 429 错误体里供应商声明的限额窗口（真机 2026-09-29：metadata.limitName="weekly"）。窗口超过一小时，
 # 回合内重试（默认合计约 6 分钟）和后台供应退避（封顶 15 分钟）都等不到重置，按额度用完处理；
 # 一小时及以内或认不出的写法，保持原来的瞬时限流默认。
@@ -1313,7 +1326,7 @@ def _dump_header_value(name: str, value: str) -> str:
     return line[len(prefix):] if line.startswith(prefix) else redact_sensitive_text(value)
 
 
-# never transient merely because the provider omitted its explanation.
+# LLM: 分类只读取结构化协议证据和集中登记的精确标记；普通400不因此变成可重试错误。
 # 函数用途: 保留请求拒绝、额度、上下文超限与临时服务失败的区别，供主子代理同样处理。
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     """Classify provider HTTP errors at the backend boundary."""
@@ -1350,12 +1363,27 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
             f"HTTP {exc.code}: {detail}",
             details={"status_code": code, "rejection_diagnostic": diagnostic},
         )
-    return ProviderRequestRejectedError(
-        f"HTTP {exc.code}: {detail}",
-        status_code=code,
-        details={"status_code": code, "provider_error": _provider_error_payload(detail),
-                 "rejection_diagnostic": diagnostic},
-    )
+    details = {'status_code': code, 'provider_error': _provider_error_payload(detail),
+               'rejection_diagnostic': diagnostic}
+    if code == 400 and _provider_error_rejects_response_format(details['provider_error']):
+        details['rejected_feature'] = 'response_format'
+    return ProviderRequestRejectedError(f'HTTP {exc.code}: {detail}', status_code=code, details=details)
+
+
+# LLM: 只标记已知格式能力拒绝；异常仍不可通用重试，未知及schema内容错误不获重放许可。
+# 函数用途: 从结构化供应商字段或集中精确标记识别response_format能力缺失。
+def _provider_error_rejects_response_format(payload: object) -> bool:
+    error = payload.get('error') if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return False
+    param, code = error.get('param'), error.get('code')
+    if isinstance(code, str):
+        if code in _RESPONSE_FORMAT_ERROR_CODES:
+            return param is None or isinstance(param, str) and param in _RESPONSE_FORMAT_PARAMS
+        if code in _RESPONSE_FORMAT_CAPABILITY_CODES and isinstance(param, str) and param in _RESPONSE_FORMAT_PARAMS:
+            return True
+    message = error.get('message')
+    return isinstance(message, str) and message in _RESPONSE_FORMAT_ERROR_MESSAGES
 
 
 def _runtime_decode_error(exc: BaseException, request: GatewayRequest) -> ProviderResponseError:

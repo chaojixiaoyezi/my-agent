@@ -2,7 +2,9 @@
 # 模块用途: 装配Owner一等公民工具、本机管理员运行治理和只读目录；注册不创建服务、不触发运行维护。
 import functools
 import json
+from dataclasses import replace
 
+from ..backends.errors import ProviderRequestRejectedError
 from ..capability.self_map_memory import register_memory_section
 from ..capability.self_map_skills import register_skill_section
 from ..common.cancellation import raise_if_cancelled
@@ -31,7 +33,7 @@ from ..workflows.models import redact_bearer_values
 
 # LLM: 不直接调用backend、不递归agent.run；仅按后端声明传system选项，不给结构化入口附加tools参数。
 # 函数用途: 为已配置模型的宿主创建真正的工作流分析器，未配置则保留None失败关闭。
-def _workflow_analysis_handler(agent):
+def _workflow_analysis_handler(agent, *, run_params=None):
     if not callable(getattr(getattr(agent, 'backend', None), 'generate', None)):
         return None
 
@@ -41,7 +43,7 @@ def _workflow_analysis_handler(agent):
         raise_if_cancelled()
         if is_interrupted():
             raise InterruptedError('workflow analysis interrupted')
-        params = getattr(agent, '_current_run_params', None)
+        params = run_params if run_params is not None else getattr(agent, '_current_run_params', None)
         run_id = str(getattr(params, 'run_id', '') or '')
         if not run_id:
             raise RuntimeError('workflow analysis requires an active host run')
@@ -55,7 +57,7 @@ def _workflow_analysis_handler(agent):
             'step_inputs': context.step_inputs, 'skill_details': context.skill_details,
             'data_sources': context.data_sources,
         })
-        response = generate_auxiliary_model_response(AuxiliaryModelCallRequest(
+        request = AuxiliaryModelCallRequest(
             agent=agent, prompt=json.dumps(material, ensure_ascii=False),
             # 旧结构化后端没有request_options；有能力声明的生产后端仍使用高优先级system通道。
             system_instruction=instruction if getattr(agent.backend, 'supports_provider_request_options', False) else '',
@@ -63,26 +65,57 @@ def _workflow_analysis_handler(agent):
             request_id=str(getattr(params, 'run_request_id', '') or ''), run_id=run_id,
             task_id=str(getattr(params, 'task_id', '') or ''),
             thread_id=str(attributes.get('conversation_thread_id') or ''), purpose='workflow_analysis',
-        ))
-        raise_if_cancelled()
-        if is_interrupted():
-            raise InterruptedError('workflow analysis interrupted')
-        if (getattr(response, 'truncated', False) or getattr(response, 'tool_use_blocks', None)
-                or getattr(response, 'tool_protocol_violations', None)
-                or getattr(response, 'runtime_status', 'ok') not in ('', 'ok')):
-            raise ValueError('workflow analyzer returned an incomplete or non-business response')
-        text = getattr(response, 'text', None)
-        if not isinstance(text, str):
-            raise ValueError('workflow analyzer must return JSON text')
-        result = load_strict_json(text)
-        if not isinstance(result, dict):
-            raise ValueError('workflow analyzer must return a JSON object')
-        raise_if_cancelled()
-        if is_interrupted():
-            raise InterruptedError('workflow analysis interrupted')
-        return result
+        )
+        context.analysis_attempts = []
+        for number in (1, 2):
+            raise_if_cancelled()
+            if is_interrupted():
+                raise InterruptedError('workflow analysis interrupted')
+            attempt = {'attempt': number, 'response_schema': 'native' if request.response_schema is not None else None}
+            context.analysis_attempts.append(attempt)
+            try:
+                response = generate_auxiliary_model_response(request)
+                result = _workflow_analysis_result(response)
+            except Exception as exc:
+                attempt.update(outcome='failed', error_type=type(exc).__name__,
+                               error_code=getattr(exc, 'error_code', '') or type(exc).__name__)
+                details = getattr(exc, 'details', None)
+                rejected = (isinstance(exc, ProviderRequestRejectedError) and exc.status_code == 400
+                            and isinstance(details, dict) and details.get('rejected_feature') == 'response_format')
+                if rejected:
+                    attempt['rejected_feature'] = 'response_format'
+                if number == 1 and rejected:
+                    request = replace(request, response_schema=None)
+                    continue
+                raise
+            attempt['outcome'] = 'succeeded'
+            return result
 
+    # 只捕获宿主显式上下文，不伪造worker线程的_current_run_params。
+    analyze.bind_run_params = lambda params: _workflow_analysis_handler(agent, run_params=params)
     return analyze
+
+
+# LLM: 两种请求共用严格JSON、无工具及取消验收；坏响应或未知执行结果不触发重放。
+# 函数用途: 验证一次模型响应是完整业务JSON对象。
+def _workflow_analysis_result(response):
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError('workflow analysis interrupted')
+    if (getattr(response, 'truncated', False) or getattr(response, 'tool_use_blocks', None)
+            or getattr(response, 'tool_protocol_violations', None)
+            or getattr(response, 'runtime_status', 'ok') not in ('', 'ok')):
+        raise ValueError('workflow analyzer returned an incomplete or non-business response')
+    text = getattr(response, 'text', None)
+    if not isinstance(text, str):
+        raise ValueError('workflow analyzer must return JSON text')
+    result = load_strict_json(text)
+    if not isinstance(result, dict):
+        raise ValueError('workflow analyzer must return a JSON object')
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError('workflow analysis interrupted')
+    return result
 
 
 # LLM: 活动回合走统一工具账本边界裁决execution_cwd，无活动回合退回构造期有效工作区，不绕过安全门。
@@ -246,6 +279,7 @@ def register_self_map(agent):
                 workspace_root_provider=ws_provider,
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
                 analysis_handler=_workflow_analysis_handler(agent),
+                run_params_provider=lambda: getattr(agent, '_current_run_params', None),
                 im_notifier=im_notifier, runner_options_provider=runner_options))
             if is_permission_admin(getattr(agent, 'home_paths', None)):
                 agent.tools.register(RuntimeGovernanceTool(agent, is_admin=True))

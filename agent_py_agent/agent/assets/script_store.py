@@ -2,14 +2,16 @@
 # 模块用途: 分层管理固化脚本、项目覆盖、动态查询范围、候选评估和运行摘要。
 from __future__ import annotations
 
+import json
 from dataclasses import fields, replace
 
+from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
 from . import (
+    MAX_ASSET_BYTES,
     TRANSACTION_FILE,
     AssetPostCommitReadbackError,
     _AssetStore,
     next_asset_revision,
-    next_run_summary,
     positive_timeout,
     safe_asset_id,
 )
@@ -59,7 +61,7 @@ def _record_descriptor(record):
     return AssetDescriptor.from_dict({key: value for key, value in record.items() if key in names})
 
 
-# LLM: 仅继承新定义仍存在的source_id历史；非空新摘要保持显式值，不恢复已删除数据源。
+# LLM: 仅继承仍存在的source_id历史；幂等凭据属于存储运行事实，普通定义保存不能抹除。
 # 函数用途: 普通脚本保存时保护候选历史和未提供的运行摘要。
 def _preserve_history(descriptor, old):
     previous = {source.source_id: source for source in old.data_sources}
@@ -67,7 +69,10 @@ def _preserve_history(descriptor, old):
         previous[source.source_id].evaluated_candidates, source.evaluated_candidates))
         if source.source_id in previous else source for source in descriptor.data_sources)
     summary = old.runtime_summary if descriptor.runtime_summary == RuntimeSummary() else descriptor.runtime_summary
-    return replace(descriptor, data_sources=sources, runtime_summary=summary)
+    metadata = dict(descriptor.metadata)
+    if '_run_summary_spool' in old.metadata:
+        metadata['_run_summary_spool'] = old.metadata['_run_summary_spool']
+    return replace(descriptor, data_sources=sources, runtime_summary=summary, metadata=metadata)
 
 
 # LLM: 每个写操作共用根锁及原集合锁；workspace仅用于读取覆盖，写入必须显式指定，路径不从投影恢复。
@@ -170,10 +175,10 @@ class ScriptStore(_AssetStore):
 
             record = WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
                                          builtin_roots=self._global_roots).get_asset('script', script_id)
-            return self._project_record(record)
+            return self._summary_projection(self._project_record(record))
         with self._locked():
             record = self._get(script_id)
-        return self._project_record(record if record is not None else self._global_get(script_id))
+        return self._summary_projection(self._project_record(record if record is not None else self._global_get(script_id)))
 
     # LLM: 有workspace走同一只读覆盖入口，不创建.agent；只投影元数据，实时状态不持久化。
     # 函数用途: 按ID稳定列出项目、Owner和全局脚本的去重元数据。
@@ -235,22 +240,92 @@ class ScriptStore(_AssetStore):
             self._write(replace(descriptor, data_sources=tuple(sources)).to_dict() | options)
             return self._readback_after_commit(script_id)
 
-    # LLM: 项目/全局命中不累计到同名Owner；本Owner摘要原锁读改写，展示字段不能进入严格解码。
-    # 函数用途: 保存本地脚本运行摘要，安全跳过只读全局摘要写入。
-    def record_run_summary(self, script_id, status, duration_ms, run_at=None, *, last_error=""):
+    # LLM: 展示投影只读spool不写盘；存储私有幂等元数据不进入公开定义，保留旧调度固定引用。
+    # 函数用途: 为公开脚本读口合并尚未fold的摘要展示。
+    def _summary_projection(self, record):
+        if record is None or record.get('scope_layer', 'owner') != 'owner':
+            return record
+        from ..workflows.run_summary_spool import project
+        metadata = dict(record.get('metadata', {}))
+        summary = project(self.owner_home, 'script', record['id'], RuntimeSummary.from_dict(record['runtime_summary']), metadata)
+        metadata.pop('_run_summary_spool', None)
+        return {**record, 'runtime_summary': summary.to_dict(), 'metadata': metadata}
+
+    # LLM: 仅用于摘要来源选择，不供执行；并发事务中原子元数据版本可认领来源，但不恢复事务或写其目录。
+    # 函数用途: 无锁读取完整安全元数据快照，保留原返回字段并有限重读原子替换。
+    def _summary_snapshot(self, script_id):
+        try:
+            raw = read_bytes_beneath(self.owner_home, (self.collection, script_id, self.filename),
+                                     max_bytes=MAX_ASSET_BYTES, snapshot_retries=2 if _supports_dir_fd() else 0)
+        except FileNotFoundError:
+            return None
+        if raw is None:
+            return None
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or payload.get('id') != script_id:
+            raise ValueError('资产元数据ID与目录不匹配')
+        descriptor, options = _decode_script(payload)
+        code = self._text(script_id, options['entrypoint'])
+        if code is None:
+            raise ValueError('脚本代码文件缺失')
+        record = descriptor.to_dict() | options | {'code': code, 'entrypoint_path': str(
+            self.owner_home / self.collection / script_id / options['entrypoint'])}
+        return {**record, 'execution_definition_ref': execution_definition_ref(record)}
+
+    # LLM: 不走get_script的Owner根锁；只认实际只读来源，项目覆盖不把摘要写到同名Owner。
+    # 函数用途: 为摘要选择实际来源，返回记录及是否允许写本Owner。
+    def _summary_source(self, script_id):
+        safe_asset_id(script_id)
         if self.workspace_root is not None:
-            selected = self.get_script(script_id)
-            if selected is not None and selected.get('scope_layer') != 'owner':
-                return selected
-        with self._locked():
-            record = self._get(script_id)
+            from . import workspace_asset_home
+
+            view = self._global_view(workspace_asset_home(self.workspace_root))
+            record = view._summary_snapshot(script_id)
             if record is not None:
-                descriptor = _record_descriptor(record)
-                options = {key: record[key] for key in ('entrypoint', 'interpreter', 'timeout_seconds')}
-                summary = next_run_summary(descriptor.runtime_summary, status, duration_ms, run_at, last_error=last_error)
-                self._write(replace(descriptor, runtime_summary=summary).to_dict() | options)
-                return self._readback_after_commit(script_id)
-        record = self._global_get(script_id)
-        if record is None:
-            raise KeyError(script_id)
-        return record
+                return {**record, 'scope_layer': 'workspace', 'source_scope': 'workspace'}, False
+        record = self._summary_snapshot(script_id)
+        if record is not None:
+            return record, not self._read_only
+        for root in self._global_roots:
+            view = self._global_view(root)
+            record = view._summary_snapshot(script_id)
+            if record is not None:
+                return view._mark_global(record), False
+        raise KeyError(script_id)
+
+    # LLM: 非阻塞调用只原子发布spool，不取Owner根锁；返回的是未合并快照，不冒称计数已提交。
+    # 函数用途: 记录脚本摘要，可显式同步fold，run_id用于跨调用与重启幂等。
+    def record_run_summary(self, script_id, status, duration_ms, run_at=None, *, last_error="", blocking=True, run_id=""):
+        from ..workflows import run_summary_spool
+
+        if type(blocking) is not bool:
+            raise ValueError('blocking必须是布尔值')
+        record, writable = self._summary_source(script_id)
+        if not writable:
+            return record
+        run_summary_spool.append(self.owner_home, 'script', script_id,
+                                {'status': status, 'duration_ms': duration_ms, 'run_at': run_at,
+                                 'last_error': last_error, 'run_id': run_id})
+        return self.fold_run_summaries(script_id) if blocking else record
+
+    # LLM: 原根锁下重新读权威值；摘要与run_id集合放同一次资产事务，ACK失败后重放不重复累计。
+    # 函数用途: 显式合并本脚本spool，项目及全局来源仍保持只读。
+    def fold_run_summaries(self, script_id):
+        from ..workflows import run_summary_spool
+
+        selected, writable = self._summary_source(script_id)
+        if not writable:
+            return selected
+        with self._locked():
+            record = self._required(script_id)
+            descriptor = _record_descriptor(record)
+            options = {key: record[key] for key in ('entrypoint', 'interpreter', 'timeout_seconds')}
+
+            # LLM: 回调只提交同一锁内取得的定义；不能先ACK或独立保存幂等清单。
+            # 函数用途: 以原资产事务原子提交合并的摘要及幂等元数据。
+            def commit(summary, metadata):
+                self._write(replace(descriptor, runtime_summary=summary, metadata=metadata).to_dict() | options)
+
+            run_summary_spool.fold(self.owner_home, 'script', script_id, descriptor.runtime_summary,
+                                   descriptor.metadata, commit)
+            return self._readback_after_commit(script_id)

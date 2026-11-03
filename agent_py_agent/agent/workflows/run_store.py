@@ -183,7 +183,7 @@ class WorkflowRunStore:
 
     # LLM: 仅引擎在启动、恢复和结束时调用；定义只在首次传入时替换，不跟随资产后来修改。
     # 函数用途: 保存运行全貌与所有步骤快照。
-    def save_run(self, record, workflow_snapshot=None, *, expected_revision=None):
+    def save_run(self, record, workflow_snapshot=None, *, expected_revision=None, resuming=False):
         for step in record.steps:
             safe_path(self.root, step.step_id + '.json')
         with self._lock(record.workflow_run_id):
@@ -193,6 +193,9 @@ class WorkflowRunStore:
             revision = data.get('revision', 0)
             if (record.revision != revision or expected_revision is not None and expected_revision != revision):
                 raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
+            if (data.get('status') == 'cancelled' and record.status != 'cancelled'
+                    or data.get('status') in ('succeeded', 'failed') and record.status == 'running' and not resuming):
+                raise ValueError('WORKFLOW_RUN_TERMINAL')
             for name in ('business_context', 'scope_snapshot', 'scope_revision'):
                 if raw is not None and data.get(name, {} if name != 'scope_revision' else 0) != getattr(record, name):
                     raise ValueError('WORKFLOW_RUN_BINDING_IMMUTABLE')
@@ -207,9 +210,13 @@ class WorkflowRunStore:
 
     # LLM: 先发表独立快照再更新运行；崩溃窗口由 load_run 读取独立快照弥合。
     # 函数用途: 保存一个已存在步骤的运行中或完成状态，并推进当前步骤位置。
-    def save_step_result(self, workflow_run_id, step_record):
+    def save_step_result(self, workflow_run_id, step_record, *, resuming=False):
         with self._lock(workflow_run_id):
             record = self.load_run(workflow_run_id)
+            previous = next((s for s in record.steps if s.step_id == step_record.step_id), None)
+            changed = previous is not None and payload(previous) != payload(step_record)
+            if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed') and not resuming):
+                raise ValueError('WORKFLOW_RUN_TERMINAL')
             if step_record.step_id not in {step.step_id for step in record.steps}:
                 raise ValueError('运行中不存在该步骤')
             self._write_step(workflow_run_id, step_record)
@@ -261,6 +268,36 @@ class WorkflowRunStore:
                 operation['receipt'] = receipt
                 _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
             return _decode_run(operation['receipt']) if operation.get('receipt') else self.load_run(workflow_run_id)
+
+    # LLM: 序号先在原run锁内持久预留再发事件；revision与调用者同步，崩溃只允许序号有缺口而不重复。
+    # 函数用途: 为同一运行领取一个耐久单调的进度序号。
+    def reserve_progress_seq(self, workflow_run_id):
+        with self._lock(workflow_run_id):
+            data = self._read(workflow_run_id, 'run.json')
+            data['progress_seq'] = data.get('progress_seq', 0) + 1
+            data['revision'] = data.get('revision', 0) + 1
+            _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
+            return data['progress_seq'], data['revision']
+
+    # LLM: 准入回执附着原run，不更改run CAS或授予执行权；独立叶文件避免与已启动worker的步骤写回竞争。
+    # 函数用途: 原run锁内保存一次可供同键重试读取的并发决策。
+    def save_admission_receipt(self, workflow_run_id, receipt):
+        value = payload(receipt)
+        if not isinstance(value, dict) or value.get('status') not in ('queued', 'skipped'):
+            raise ValueError('并发准入回执必须是queued或skipped对象')
+        with self._lock(workflow_run_id):
+            self._read(workflow_run_id, 'run.json')
+            _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'admission.json'), value)
+
+    # LLM: 仅读原run的说明性回执，缺失不推断准入或重建callback；终态仍只以原run.json为准。
+    # 函数用途: 为业务幂等命中恢复原并发回执。
+    def load_admission_receipt(self, workflow_run_id):
+        with self._lock(workflow_run_id):
+            self._read(workflow_run_id, 'run.json')
+            try:
+                return self._read(workflow_run_id, 'admission.json')
+            except FileNotFoundError:
+                return None
 
     # LLM: 兼容任务指定的步骤保存名，不新增另一套存储格式或锁。
     # 函数用途: 通过同一原子保存链写入步骤记录。
