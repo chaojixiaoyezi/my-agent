@@ -156,13 +156,15 @@ class WorkflowsTool(BaseTool):
     #   不承载任一调用的runner，等待中的运行不会改用后启动运行的身份或路径范围；显式注入执行器保持原样。
     # 函数用途: 给本次默认执行器配置可信脚本范围和宿主来源屏蔽。
     def _execution_engine(self):
-        engine = copy.copy(self._engine())
-        if self.engine is None:
-            options = self._skill_options()
+        if self.engine is not None:
+            return self.engine
+        options = self._skill_options()
+        engine = copy.copy(self._engine(_options=options))
+        if options != self._lazy_engine_options:
+            # 同范围复用已冻结的解析器；快照变化只影响本次副本，不能改写等待中的执行器。
             engine.skill_resolver = lambda step, context: _resolve_owner_skills(self.owner_home, step, context, **options)
             engine.skill_details_resolver = lambda ids: [_skill_descriptor(self.owner_home, reference, **options) for reference in ids]
         if self.run_params_provider is not None:
-            engine = copy.copy(engine)
             params = self.run_params_provider()
             on_chunk = getattr(params, 'effective_on_chunk', None)
             sink = getattr(on_chunk, 'write_workflow_step_progress', None)
@@ -170,10 +172,9 @@ class WorkflowsTool(BaseTool):
             bind = getattr(engine.analysis_handler, 'bind_run_params', None)
             if callable(bind):
                 engine.analysis_handler = bind(params)
-        if self.engine is None and self.runner_options_provider is not None:
+        if self.runner_options_provider is not None:
             from ..workflows.script_runner import ScriptRunner
-            engine = copy.copy(engine)
-            engine.runner = ScriptRunner(self.owner_home, workspace_root=self._skill_options()['workspace_root'],
+            engine.runner = ScriptRunner(self.owner_home, workspace_root=options['workspace_root'],
                                          **self.runner_options_provider())
         return engine
 
@@ -271,24 +272,26 @@ class WorkflowsTool(BaseTool):
     def _store(self):
         return self.store if self.store is not None else WorkflowStore(self.owner_home, workspace_root=self._skill_options()['workspace_root'])
 
-    # LLM: 默认引擎绑定本次项目并复用同一实例；项目路径变化时重建，保持外部注入analysis_handler跨调用生效。
-    # 函数用途: 延迟取得Owner绑定的正式工作流执行器。
-    def _engine(self):
+    # LLM: 默认缓存只绑定已冻结范围，不承载本次runner；_options仅由执行入口传入可信宿主快照，项目变化时重建。
+    # 函数用途: 延迟取得Owner绑定的正式工作流执行器，避免等待中的解析器读取后来范围。
+    def _engine(self, *, _options=None):
         if self.engine is not None:
             return self.engine
-        ws = self._skill_options()['workspace_root']
+        options = self._skill_options() if _options is None else _options
+        ws = options['workspace_root']
         cached = getattr(self, '_lazy_engine', None)
         if cached is None or getattr(self, '_lazy_engine_ws', None) != ws:
             from ..workflows.engine import WorkflowEngine
             cached = WorkflowEngine(self.owner_home, workspace_root=ws,
                 skill_resolver=lambda step, context: _resolve_owner_skills(
-                    self.owner_home, step, context, **self._skill_options()),
+                    self.owner_home, step, context, **options),
                 skill_details_resolver=lambda references: [
-                    _skill_descriptor(self.owner_home, reference, **self._skill_options())
+                    _skill_descriptor(self.owner_home, reference, **options)
                     for reference in references],
                 analysis_handler=self.analysis_handler)
             self._lazy_engine = cached
             self._lazy_engine_ws = ws
+            self._lazy_engine_options = options
         return cached
 
     # LLM: inspect失败是成功读取；运行失败保留断点机器码，CAS在Store原锁拒绝，不冒称写入已发生。

@@ -381,7 +381,7 @@ class _WorkflowRunLifecycle:
             return self.run_authorizer(record, phase)
         return None
 
-    # LLM: 首次未知仅对账；后次显式恢复才消费耐久absence，重验canonical及当前准入后沿原attempt/key提交。
+    # LLM: 仅显式恢复在原执行锁和授权门后发表；每次写入都携带恢复意图，普通晚到写仍受终态守卫拒绝。
     # 函数用途: 找回原任务或继续已证明未开始的原提交，不重放成功前缀或在恢复这一拍执行后缀。
     def _resume_agent(self, record, definition):
         """继续核对原步骤，不因暂停/失败重新分配attempt或执行成功前缀。"""
@@ -426,10 +426,11 @@ class _WorkflowRunLifecycle:
             changed = step.status != 'waiting_for_agent' or record.status != 'waiting_for_agent'
             step.status = 'waiting_for_agent'
             if changed or previous != step.escalation_result:
-                record = self.store.save_step_result(record.workflow_run_id, step)
+                # 已经过同一原运行的恢复授权和 CAS；不能把合法对账误判成外部晚到写入。
+                record = self.store.save_step_result(record.workflow_run_id, step, resuming=True)
             if changed:
                 record.status = 'waiting_for_agent'
-                self.store.save_run(record)
+                self.store.save_run(record, resuming=True)
             return record
         step.status = 'succeeded' if completion['status'] == 'completed' else 'failed'
         step.llm_involved = True
@@ -458,14 +459,22 @@ class _WorkflowRunLifecycle:
             if restricted:
                 _reconcile_workflow_claim(self.owner_home, workflow_id, workflow_run_id)
 
+    # LLM: 原执行锁和CAS内核实全部原责任；已结清终态仅完成控制回执，未知责任继续清理而不伪造完成。
+    # 函数用途: 取消原运行或确认它已经结束，不改写已结清的历史结果。
     def _cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
         """原执行锁内逐条清理结构化派发责任；只有全部确认才完成原控制回执。"""
+        from .run_store import _concurrency_settled
+
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
             self._authorize_run(record, 'cancel')
             replay, record = self.store.begin_control(workflow_run_id, action='cancel', operation_key=operation_key,
                                                       expected_revision=expected_revision)
             if replay:
+                return []
+            if record.status in ('succeeded', 'failed', 'skipped', 'cancelled') and _concurrency_settled(record):
+                # 已结清终态只确认本次控制，不经过 cancelling，也不覆盖原成功或失败。
+                self.store.complete_control(workflow_run_id, operation_key)
                 return []
             record.status = 'cancelling'
             self.store.save_run(record)

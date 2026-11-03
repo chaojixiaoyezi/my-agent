@@ -289,3 +289,49 @@ def test_inspect_run_reads_durable_record_without_building_execution_context(cas
     assert case.frozen == [('run-a', 'task-a')] and case.gate.calls == ['gate']
     assert case.tool._lazy_engine is cached and cached.runner is runner and runner.work_context is None
     assert _tree_bytes(folder) == before
+
+
+# LLM: 只观察原解析器实参，宿主范围变化不能回写旧执行器，空受限快照不可变成无限制。
+# 函数用途: 验证并发执行器的Skill范围和runner身份分别冻结。
+def test_run_skill_snapshots_remain_frozen_when_host_snapshot_changes(case, monkeypatch):
+    active = [None]
+    case.tool.skill_snapshot_provider = lambda: active[0]
+    observed = []
+    original = workflows_tool._resolve_owner_skills
+
+    def resolve(home, step, context, **options):
+        observed.append(options['skill_snapshot'])
+        return original(home, step, context, **options)
+
+    monkeypatch.setattr(workflows_tool, '_resolve_owner_skills', resolve)
+    case.agent._current_run_params = _params('snapshot-a', 'task-a', case.out_a)
+    first = case.tool._execution_engine()
+    cached = case.tool._lazy_engine
+    active[0] = {}  # 空受限快照与无快照不同，不能复用原无限制解析器。
+    case.agent._current_run_params = _params('snapshot-b', 'task-b', case.out_b)
+    second = case.tool._execution_engine()
+    case.tool.skill_snapshot_provider = lambda: pytest.fail('execution reread the current host snapshot')
+    spec = SimpleNamespace(skill_ids=(), skill_tags=())
+    assert first.skill_resolver(spec, {}) == second.skill_resolver(spec, {}) == []
+    assert observed == [None, {}]
+    assert first.skill_resolver is cached.skill_resolver
+    assert second.skill_resolver is not cached.skill_resolver
+    assert first.store is second.store is cached.store
+    assert first.runner is not second.runner and cached.runner.work_context is None
+    assert case.frozen == [('snapshot-a', 'task-a'), ('snapshot-b', 'task-b')]
+
+
+# LLM: 两条引擎装配路径的全部回调均检查，不允许执行时重读后来宿主范围。
+# 函数用途: 静态保护已冻结的解析器，防止缓存回调重新变成动态取权。
+def test_cached_skill_resolvers_never_read_live_scope_inside_callback():
+    import ast
+    import inspect
+    import textwrap
+
+    for method in (WorkflowsTool._engine, WorkflowsTool._execution_engine):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+        callbacks = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
+        assert callbacks
+        for callback in callbacks:
+            assert not any(isinstance(node, ast.Attribute) and node.attr == '_skill_options'
+                           for node in ast.walk(callback))

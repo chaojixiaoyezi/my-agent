@@ -232,14 +232,14 @@ class WorkflowRunStore:
             _write_json(self.owner_home, parts, data)
             record.revision = revision + 1
 
-    # LLM: 先发表独立快照再更新运行；崩溃窗口由 load_run 读取独立快照弥合。
-    # 函数用途: 保存一个已存在步骤的运行中或完成状态，并推进当前步骤位置。
+    # LLM: 先发表独立快照再更新运行；全部终态拒绝普通晚到改写，显式恢复不允许复活cancelled。
+    # 函数用途: 保存已存在步骤并推进位置，保留终态保护及同状态运行元数据更新。
     def save_step_result(self, workflow_run_id, step_record, *, resuming=False):
         with self._lock(workflow_run_id):
             record = self.load_run(workflow_run_id)
             previous = next((s for s in record.steps if s.step_id == step_record.step_id), None)
             changed = previous is not None and payload(previous) != payload(step_record)
-            if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed') and not resuming):
+            if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed', 'skipped') and not resuming):
                 raise ValueError('WORKFLOW_RUN_TERMINAL')
             if step_record.step_id not in {step.step_id for step in record.steps}:
                 raise ValueError('运行中不存在该步骤')
