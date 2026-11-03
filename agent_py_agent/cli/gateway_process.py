@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -857,6 +858,44 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
 
 # LLM: 仅进程内保存原handler及同代公告目标，兼容原字典调用方；不增加持久生命周期权威。
 # 类用途: 让恢复函数能先撤销诊断公告，再注销本次安装的SIGUSR1。
+# LLM: 信号回调只置位；全线程帧读取和stderr IO放在守护线程，避免C信号处理器遍历活动帧。
+# 类用途: 管理本代SIGUSR1栈导出线程及其停止事件，不改变独立C停滞看门狗。
+class _GatewayStackDumper:
+    def __init__(self) -> None:
+        self.pending = threading.Event()
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="gateway-sigusr1-dumper", daemon=True)
+
+    def _run(self) -> None:
+        while True:
+            self.pending.wait()
+            self.pending.clear()
+            if self.stopping.is_set():
+                return
+            try:
+                names = {thread.ident: thread.name for thread in threading.enumerate()}
+                frames = sys._current_frames()
+                try:
+                    parts = ["Gateway SIGUSR1 Python thread dump\n"]
+                    for ident, frame in frames.items():
+                        parts.append(f"Thread {names.get(ident, 'unknown')} (ident={ident}):\n")
+                        parts.extend(traceback.format_stack(frame))
+                    sys.stderr.write("".join(parts))
+                    sys.stderr.flush()
+                finally:
+                    # 帧引用不得跨事件保留，否则会把业务线程局部变量一直钉在内存中。
+                    frames.clear()
+                    del frame
+            except Exception as exc:  # 诊断失败不能杀掉下一次信号的导出能力。
+                _print_gateway_loop_error("gateway.diagnostics.sigusr1", "gateway", exc)
+
+    def close(self) -> None:
+        self.stopping.set()
+        self.pending.set()
+        if self.thread.ident is not None:
+            self.thread.join(timeout=2.0)
+
+
 class _GatewaySignalHandlers(dict[int, object]):
     # LLM: 参数来自本次真实Gateway上下文；不由磁盘补造身份，不安装信号。
     # 函数用途: 记录当前网关诊断注册的恢复资料。
@@ -864,6 +903,8 @@ class _GatewaySignalHandlers(dict[int, object]):
         super().__init__()
         self.paths, self.identity = paths, dict(identity)
         self.diagnostic_published = False
+        self.stack_dumper: _GatewayStackDumper | None = None
+        self.diagnostic_handler = None
 
 
 # LLM: 公告只是同代SIGUSR1注册事实，不授健康或停止权；无state路径不发表，不能阻断独立的TERM/INT处理。
@@ -885,7 +926,7 @@ def _publish_gateway_diagnostic_signal(previous: _GatewaySignalHandlers, enabled
     return True
 
 
-# LLM: TERM/INT只写绑定启动原身份的停止请求；USR1仍向stderr注册并公告，持久诊断只装文件/GC不抢信号。
+# LLM: TERM/INT只写绑定启动原身份的停止请求；USR1只置事件并公告，持久诊断只装文件/GC不抢信号。
 # 函数用途: 安装停止处理及全线程栈导出，返回原handler供原生命周期恢复。
 def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict[str, object]) -> dict[int, object]:
     previous = _GatewaySignalHandlers(paths, process_identity)
@@ -908,12 +949,22 @@ def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict
         signal.signal(signum, handler)
     if hasattr(signal, "SIGUSR1"):
         old_usr1 = signal.getsignal(signal.SIGUSR1)
+        dumper = _GatewayStackDumper()
+        pending = dumper.pending
+
+        # 函数用途: 信号上下文只发安全标记，栈采集、格式化和IO全部留给守护线程。
+        def mark_stack_dump(_signum: int, _frame: object) -> None:
+            pending.set()
+
         try:
-            faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
+            dumper.thread.start()
+            signal.signal(signal.SIGUSR1, mark_stack_dump)
         except (OSError, RuntimeError, ValueError):
-            pass
+            dumper.close()
         else:
             previous[signal.SIGUSR1] = old_usr1
+            previous.stack_dumper = dumper
+            previous.diagnostic_handler = mark_stack_dump
             previous.diagnostic_published = _publish_gateway_diagnostic_signal(previous, True)
     return previous
 
@@ -924,15 +975,12 @@ def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
     keep_usr1 = (isinstance(previous, _GatewaySignalHandlers) and previous.diagnostic_published
                  and not _publish_gateway_diagnostic_signal(previous, False))
     usr1 = getattr(signal, "SIGUSR1", None)
-    if usr1 in previous and not keep_usr1:
-        try:
-            faulthandler.unregister(usr1)
-        except (OSError, RuntimeError, ValueError):
-            pass
     for signum, handler in previous.items():
         if signum != usr1 or not keep_usr1:
             signal.signal(signum, handler)
     if isinstance(previous, _GatewaySignalHandlers):
+        if previous.stack_dumper is not None and not keep_usr1:
+            previous.stack_dumper.close()
         try:
             hang_diagnostics.close()
         except Exception as exc:

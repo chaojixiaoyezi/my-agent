@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import stat
 import threading
 import time
@@ -185,10 +186,25 @@ class ProcessSessionTransaction:
 
     # LLM: 单条损坏保留错误；调用方需要全范围原子操作时必须拒绝有错误的清单。
     # 函数用途: 在一个一致的目录视图内枚举原 session 文件，记录无效项。
-    def list_records(self) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    def list_records(self, *, max_entries: int = 100000, max_ms: float = 1000
+                     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         self._require_active()
+        if type(max_entries) is not int or max_entries < 1 or not math.isfinite(max_ms) or max_ms <= 0:
+            raise ValueError("invalid process record scan budget")
+        deadline = time.monotonic() + max_ms / 1000
+        names = []
+        # 先关闭目录句柄再按原文件名顺序读取；预算耗尽拒绝整次选择，不能把半份列表当全量用于停止/裁剪。
+        with os.scandir(self.root) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > max_entries or time.monotonic() >= deadline:
+                    raise RuntimeError("process_session_scan_budget_exceeded")
+                if entry.name.startswith("bg-") and entry.name.endswith(".json"):
+                    names.append(entry.name)
         records, errors = [], []
-        for path in sorted(self.root.glob("bg-*.json")):
+        for name in sorted(names):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("process_session_scan_budget_exceeded")
+            path = self.root / name
             try:
                 record = self.load(path.stem)
                 if record is not None:
@@ -404,9 +420,10 @@ class ProcessSessionStore:
     # LLM: 保持原二元组API；公开全量读取始终复制全部记录，私有底座不得缓存过滤后的子集。
     # 函数用途: 返回独占的完整记录与错误，调用者修改不会污染冷热缓存。
     def list_records(
-        self, *, cheap_checks: bool = False
+        self, *, cheap_checks: bool = False, max_entries: int | None = None, max_ms: float | None = None
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        records, errors = self._load_records_projection_cached(cheap_checks=cheap_checks)
+        budget = {key: value for key, value in (("max_entries", max_entries), ("max_ms", max_ms)) if value is not None}
+        records, errors = self._load_records_projection_cached(cheap_checks=cheap_checks and not budget, scan_budget=budget)
         return [deepcopy(record) for record in records], [deepcopy(error) for error in errors]
 
     # LLM: 先取完整未过滤快照，再在存储层筛选并只复制命中；空规范目标{}不欠通知，错误不被过滤。
@@ -436,7 +453,7 @@ class ProcessSessionStore:
     # LLM: 私有只读底座永远是全量记录和错误，冷读直接移交新对象；公开API负责复制，False仍强制事务重读。
     #   信任在读前冻结，发布时只核目录身份；不因慢读跨过保护窗口而将旧视图变可信。
     # 函数用途: 复用目录内容投影，不缓存通知结论或暴露可变对象给外部。
-    def _load_records_projection_cached(self, *, cheap_checks: bool = False):
+    def _load_records_projection_cached(self, *, cheap_checks: bool = False, scan_budget: dict | None = None):
         if cheap_checks:
             hit = _lookup_process_records_projection(self.root)
             if hit is not None:
@@ -450,7 +467,7 @@ class ProcessSessionStore:
             if not self.root.exists():
                 return [], []
             with self.transaction() as transaction:
-                records, errors = transaction.list_records()
+                records, errors = transaction.list_records(**(scan_budget or {}))
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
         if read_trusted:

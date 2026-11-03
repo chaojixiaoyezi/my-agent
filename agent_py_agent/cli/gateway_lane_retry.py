@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -18,8 +19,9 @@ from ..agent.backends.errors import (
     is_provider_environment_fault,
     provider_error_http_status,
 )
-from ..agent.conversation.compact_guard import is_provider_quota_failure
+from ..agent.conversation.compact_guard import ConversationCompactError, is_provider_quota_failure
 from ..agent.gateway_parts.loop_health import loop_health
+from ..agent.runtime_db.operations import RuntimeRecoveryRequiredError
 from ..agent.settings.thread_model_selection import is_model_configuration_unavailable
 from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
 
@@ -42,6 +44,8 @@ class _LaneFailure:
     fingerprint: str | None = None
     waiting_for_storage: bool = False
     wait_count: int = 0
+    waiting_for_user_input: bool = False
+    inbound_marker: str | None = None
 
 
 # LLM: worker 写入和 planner 读取共用短锁；配置与指纹读取在锁外，不能堵住其它用户或正在慢流的模型。
@@ -56,13 +60,24 @@ class BackgroundLaneRetry:
     # LLM: 分类顺序固定：先判等模型配置（ModelNotConfiguredError 也命中环境级判定，必须先走这条），再判环境级故障或额度用完，
     #   其余按 delay 冷却；远端 400/413 这类请求问题、临时断线都不是环境故障，保持普通冷却。环境暂停打一行日志。
     # 函数用途: 失败后记住这条车道要等配置、等环境恢复，还是等一段冷却时间。
-    def failed(self, owner: str, thread_id: str, exc: Exception, *, delay: float) -> None:
+    def failed(self, owner: str, thread_id: str, exc: Exception, *, delay: float,
+               wait_for_inbound_marker: str | None = None) -> None:
         key = (owner, thread_id)
         with self._lock:
-            row = _next_failure(self._failures.get(key), exc, delay)
+            previous = self._failures.get(key)
+            row = _next_failure(previous, exc, delay)
+            if row.waiting_for_user_input:
+                row = replace(row, inbound_marker=wait_for_inbound_marker)
             if key not in self._failures and len(self._failures) >= 1024:
                 self._failures.pop(next(iter(self._failures)))
             self._failures[key] = row
+        if row.waiting_for_user_input and (previous is None or not previous.waiting_for_user_input
+                                          or previous.inbound_marker != row.inbound_marker):
+            logging.getLogger(__name__).warning(
+                "BACKGROUND_LANE_WAITING_FOR_USER_INPUT owner=%s thread_id=%s error_type=%s",
+                owner, thread_id, type(exc).__name__,
+                extra={"failure_class": "waiting_for_user_input"},
+            )
         if row.waiting_for_storage and row.wait_count == 1:
             _log_lane_event("storage_wait", key, {"wait_count": row.wait_count,
                 "next_check_at": row.retry_at, "error_type": type(exc).__name__})
@@ -83,10 +98,25 @@ class BackgroundLaneRetry:
         *,
         model_ready: Callable[[], bool],
         fingerprint: Callable[[], str] | None = None,
+        inbound_marker: Callable[[], str | None] | None = None,
     ) -> bool:
         with self._lock:
             row = self._failures.get((owner, thread_id))
         if row is None:
+            return True
+        if row.waiting_for_user_input:
+            current = _read_fingerprint(inbound_marker)
+            if current is None:
+                return False
+            with self._lock:
+                if self._failures.get((owner, thread_id)) is not row:
+                    return False
+                if row.inbound_marker is None:
+                    self._failures[(owner, thread_id)] = replace(row, inbound_marker=current)
+                    return False
+                if current == row.inbound_marker:
+                    return False
+                self._failures.pop((owner, thread_id))
             return True
         if row.waiting_for_environment:
             return self._environment_ready((owner, thread_id), row, fingerprint)
@@ -150,6 +180,9 @@ class BackgroundLaneRetry:
 # 函数用途: 根据上一条记录和本次异常算出这条车道新的失败记录。
 def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -> _LaneFailure:
     now = time.monotonic()
+    # 压缩包装的额度错误仍由原环境探测/模型指纹恢复，不能强制等待新消息。
+    if isinstance(exc, (RuntimeRecoveryRequiredError, ConversationCompactError)) and not is_provider_quota_failure(exc):
+        return _LaneFailure(0.0, False, waiting_for_user_input=True)
     if isinstance(exc, OwnerQuotaUnavailable):
         count = previous.wait_count + 1 if previous is not None and previous.waiting_for_storage else 1
         interval = min(30.0, 2.0 ** min(count - 1, 5))

@@ -1425,6 +1425,7 @@ class _SchedulerStoreSupport:
         admission: OwnerQuotaAdmission,
         *,
         history_records: list[dict[str, object]] | None = None,
+        bounded_control_growth_bytes: int = 65536,
     ) -> None:
         store["updated_at"] = time.time()
         history_rows = self._new_history_rows_unlocked(history_records or [])
@@ -1441,7 +1442,7 @@ class _SchedulerStoreSupport:
                     append=True,
                 )
             )
-        admission.check(changes)
+        admission.check(changes, bounded_control_growth_bytes=bounded_control_growth_bytes)
         # The SQLite row is a wake-up projection, not job authority.  Publish it
         # before the owner ledger so a failed index update cannot return a false
         # "scheduled" success; a stale projection from a later owner-write
@@ -1958,6 +1959,39 @@ class SchedulerRepository(
             if run is not None and isinstance(run.get("execution_context"), dict):
                 return deepcopy(run)
         return super().prepare_run_context(run_id, context, origin_migration=origin_migration)
+
+    # LLM: 只在未领取queued且原来源确已缺失时记录兜底；不改job/source/creator，终态和已经开工的运行不能迁移。
+    # 函数用途: 原子冻结独立执行线程及缺失来源标记。
+    def prepare_thread_fallback(self, run_id, context, marker):
+        with self._mutation_scope() as (store, admission):
+            run = self._require_run(store, run_id)
+            if run.get('thread_fallback') == marker:
+                return deepcopy(run)
+            if (run['status'] != 'queued' or run.get('claim_id') or run.get('claim_epoch')
+                    or run.get('started_at') or run.get('execution_context') is not None
+                    or run['origin_thread_id'] != marker['original_thread_id']):
+                raise SchedulerConflictError('定时运行已冻结，不能兜底')
+            from .delivery_policy import (
+                _repository_delivery_agent,
+                validate_delivery_targets,
+            )
+
+            agent = _repository_delivery_agent(self)
+            fallback = agent.conversation_store.threads.require(marker['fallback_thread_id'])
+            if (set(marker) != {'reason', 'original_thread_id', 'fallback_thread_id'}
+                    or marker['reason'] != 'source_thread_unavailable'
+                    or context.get('origin_thread_id') != fallback.thread_id
+                    or agent.conversation_store.threads.load(marker['original_thread_id']) is not None
+                    or fallback.owner_id != self.owner['id']
+                    or fallback.owner_home != str(self.quota_enforcer.owner_root)):
+                raise SchedulerConflictError('定时兜底证明与owner不一致')
+            validate_delivery_targets(agent, run.get('delivery'))
+            updated = {**run, 'thread_id': marker['fallback_thread_id'],
+                'origin_thread_id': marker['fallback_thread_id'], 'thread_fallback': deepcopy(marker),
+                'execution_context': deepcopy(context)}
+            store['runs'][run_id] = updated
+            self._write_store_unlocked(store, admission)
+        return deepcopy(updated)
 
     # LLM: 相同或空 wake 输入只返回原快照深副本；真正换绑仍委托原 owner/quota 锁重新验证并写入。
     # 函数用途: 为活跃运行挂接唤醒信号，幂等重放不取变更锁也不清空已有信号。

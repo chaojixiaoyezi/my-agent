@@ -66,8 +66,7 @@ def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
             if wake_id:
                 wake_ids.append(wake_id)
         except (KeyError, SchedulerNotFoundError):
-            # The conversation or run was removed concurrently. A missing
-            # thread cannot be guessed or recreated by the scheduler.
+            # 显式通知兜底已在prepare_execution经认证目标解析；其余缺失仍失败，不猜源线程。
             service._fail_without_execution(run, "SCHEDULER_THREAD_UNAVAILABLE", now=current)
         except ValueError:
             if run.get('event_source') is None:

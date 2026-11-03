@@ -37,7 +37,8 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections import deque
+import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -950,35 +951,80 @@ def _git_pointer_path(path: Path, *, gitfile: bool = False) -> Path | None:
     return (path.parent / value).resolve(strict=False)
 
 
-# LLM: 每根及全部祖先始终查.git；向下仅查3层/128目录并剪重目录，广度优先按realpath去环，不缓存发现事实。
-#   只发现已有仓库；未来仓库通配仅来自显式protected_write_patterns，不据.git名字封禁合法初始化。
+# LLM: 短TTL只复用目录列名发现，不缓存Git指针内容或授权；逐个stat所有已扫描目录，变化或过期即重扫。
+# 类用途: 按真实根保存有界发现快照；锁避免并发命令重复扫描，不跨不同根复用。
+class _MacosGitMarkerCache:
+    max_entries = 64
+    entries: OrderedDict[Path, tuple] = OrderedDict()
+    lock = threading.RLock()
+
+
+# 函数用途: 保留路径解析及目录变化事实；仅缺失/非目录可略过，其他IO错误仍失败关闭。
+def _macos_git_directory_stamp(directory: Path) -> tuple:
+    actual = directory.resolve(strict=False)
+    try:
+        info = directory.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return (actual, None)
+    return (actual, info.st_mtime_ns, info.st_ino, info.st_mode)
+
+
+# LLM: 每根及全部祖先始终查.git；向下仅查3层/128目录并剪重目录，广度优先按realpath去环。
+#   默认最多复用5秒且逐目录mtime核实；新仓库创建改变父目录mtime，Git指针内容仍每次现读。
 # 函数用途: 有界发现已有worktree控制入口；缺失根无现成仓库，实际扫描IO错误仍失败关闭。
-def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
+def _macos_git_markers(spec: AttemptSandboxSpec, *, ttl_seconds: float = 5.0) -> tuple[Path, ...]:
     roots = {Path(path).resolve(strict=False) for path in (spec.attempt_view, *spec.extra_write_roots,
              *((spec.staging_root,) if spec.implicit_attempt_write_roots else ()))}
     markers = {parent / ".git" for root in roots for parent in (root, *root.parents)
                if (parent / ".git").exists() or (parent / ".git").is_symlink()}
-    visited: set[Path] = set()
-    discoveries: dict[Path, tuple[Path | None, list[Path]]] = {}
+    discoveries: dict[Path, tuple] = {}
     for root in sorted(roots):
+        markers.update(_macos_git_root_markers(root, ttl_seconds=ttl_seconds, discoveries=discoveries))
+    return tuple(sorted(markers))
+
+
+# 函数用途: 复用同一真实根的完整扫描签名；扫描期间变化的目录不写缓存，下一轮必须重查。
+def _macos_git_root_markers(root: Path, *, ttl_seconds: float, discoveries: dict[Path, tuple]) -> tuple[Path, ...]:
+    cache = _MacosGitMarkerCache
+    with cache.lock:
+        now = time.monotonic()
+        cached = cache.entries.get(root)
+        if cached is not None:
+            created, signatures, markers = cached
+            if now - created < ttl_seconds and all(
+                _macos_git_directory_stamp(path) == stamp for path, stamp in signatures
+            ):
+                cache.entries.move_to_end(root)
+                return markers
+            del cache.entries[root]
         pending = deque([(root, 0)])
         traversed: set[Path] = set()
+        signatures, found = [], set()
         while pending and len(traversed) < 128:
             directory, depth = pending.popleft()
             actual = directory.resolve(strict=False)
             if actual in traversed:
                 continue
+            stamp = _macos_git_directory_stamp(directory)
+            signatures.append((directory, stamp))
             traversed.add(actual)
-            if actual not in visited:
-                # 单次调用缓存列名；嵌套显式根可复用已有发现继续其更深范围，不缓存跨调用事实。
-                discoveries[actual] = _macos_git_scan_directory(directory, descend=True)
-                visited.add(actual)
-            marker, children = discoveries[actual]
+            # 仅同次调用的重叠根复用原枚举，跨调用快照仍严格按各自root及签名单独校验。
+            discovery = discoveries.get(actual)
+            if discovery is None or discovery[0] != stamp:
+                marker, children = _macos_git_scan_directory(directory, descend=True)
+                discoveries[actual] = (stamp, marker, children)
+            else:
+                _, marker, children = discovery
             if marker is not None:
-                markers.add(marker)
+                found.add(marker)
             if depth < 3:
                 pending.extend((child, depth + 1) for child in children)
-    return tuple(sorted(markers))
+        markers = tuple(sorted(found))
+        if all(_macos_git_directory_stamp(path) == stamp for path, stamp in signatures):
+            cache.entries[root] = (now, tuple(signatures), markers)
+            while len(cache.entries) > cache.max_entries:
+                cache.entries.popitem(last=False)
+        return markers
 
 
 # LLM: scandir分类错误不能像os.walk那样静默吞掉；仅缺失/非目录可略过，.git自身不跟入对象库。

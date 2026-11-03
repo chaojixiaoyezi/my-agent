@@ -7,6 +7,7 @@ import logging
 import time
 from collections import OrderedDict
 
+from ..common.log_redaction import redact_sensitive_text
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_runtime import PluginMCPClient, PluginProxyTool
 from .mcp_client import MCPError
@@ -63,14 +64,16 @@ def _plugin_environment_key(owner, installation, stamp: tuple) -> tuple:
             installation.activation_id, stamp, env_stamp)
 
 
-# LLM: 负缓存只吞缺失环境重试，不跳过上游撤销/stop 或下游工具视图重建；日志按代只报一次。
+# LLM: 负缓存仅延后缺失或无效环境重试，不跳过上游撤销/stop 或下游工具视图重建；日志按代只报一次。
 # 函数用途: 保存有期限的环境失败观察，限制坏插件重复构造与刷屏。
-def _remember_missing_environment(key: tuple) -> None:
+def _remember_missing_environment(key: tuple, *, error: BaseException | None = None) -> None:
     _MISSING_ENVIRONMENTS[key] = time.monotonic() + _MISSING_ENV_RETRY_SECONDS
     warning_key = key[:-1]
-    if warning_key not in _MISSING_ENV_WARNED:
-        logger.warning("插件业务连接暂不可创建：FileNotFoundError")
-        _MISSING_ENV_WARNED[warning_key] = None
+    level = logging.DEBUG if warning_key in _MISSING_ENV_WARNED else logging.WARNING
+    logger.log(level, "插件业务连接暂不可创建：%s error=%s",
+               type(error).__name__ if error is not None else "FileNotFoundError",
+               redact_sensitive_text(str(error)) if error is not None else "")
+    _MISSING_ENV_WARNED[warning_key] = None
     for cache in (_MISSING_ENVIRONMENTS, _MISSING_ENV_WARNED):
         while len(cache) > _PLUGIN_CACHE_MAX_ENTRIES:
             cache.popitem(last=False)
@@ -108,6 +111,7 @@ def synchronize_plugin_clients(registry) -> None:
             continue
         key = _plugin_environment_key(owner, installation, stamp)
         if time.monotonic() < _MISSING_ENVIRONMENTS.get(key, 0.0):
+            logger.debug("插件业务连接暂不可创建：negative_cache_hit")
             continue
         client = None
         try:
@@ -124,8 +128,8 @@ def synchronize_plugin_clients(registry) -> None:
         except (OSError, ValueError, RuntimeError, MCPError) as exc:
             if client is not None:
                 client.stop()
-            if isinstance(exc, FileNotFoundError) or key[-1] == (False,):
-                _remember_missing_environment(key)
+            if isinstance(exc, (FileNotFoundError, ValueError)) or key[-1] == (False,):
+                _remember_missing_environment(key, error=exc)
             else:
                 logger.warning("插件业务连接暂不可创建：%s", type(exc).__name__)
 

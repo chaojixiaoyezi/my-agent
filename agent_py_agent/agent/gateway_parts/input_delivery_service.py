@@ -13,6 +13,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
+import os
 import threading
 import time
 from bisect import bisect_right
@@ -221,7 +223,30 @@ def _raise_for_input_read_report(report, corruption_message: str) -> None:
     if report.lock_busy:
         raise BlockingIOError("gateway input lock is busy")
     if report.load_error is not None:
+        # JSON读取报告不能把瞬时IO包装成可隔离的损坏；仅依结构化类型/类别保留重试。
+        error = report.load_error
+        if isinstance(error, dict) and (error.get('category') == 'io' or error.get('error_type') in {
+                'OSError', 'PermissionError', 'BlockingIOError', 'TimeoutError', 'FileNotFoundError',
+                'InterruptedError', 'IsADirectoryError', 'NotADirectoryError'}):
+            raise OSError("gateway input receipt IO unavailable")
         raise DataCorruptionError(corruption_message)
+
+
+# 已归档consumed回执仍是同id重试的权威；只在热文件明确缺失且无读错误时按索引回落。
+# LLM: 只在热文件明确缺失且无错误时按归档索引回落；显式blocking保持原读口默认及非阻塞形态。
+# 函数用途: 读取输入回执的热文件或已提交的冷归档原件。
+def _read_input_receipt_report(paths, path, *, blocking: bool = True):
+    options = {} if blocking else {"blocking": False}
+    report = read_json_file_report(path, context="gateway.input_receipt.read", **options)
+    if report.load_error is None and not report.lock_busy and not report.payload and not path.exists():
+        from .runtime_file_retention import lookup_runtime_file
+        archived = lookup_runtime_file(paths, "input_receipts", path.name)
+        if archived is not None:
+            report = read_json_file_report(archived, context="gateway.input_receipt.archive", **options)
+            # 索引已经证明存在原输入；校验与实际JSON读之间消失或变空也不能转入首次prepare。
+            if report.load_error is None and not report.lock_busy and not report.payload:
+                raise DataCorruptionError("gateway input archive receipt is missing or invalid")
+    return report
 
 
 # LLM: 先读原receipt再裁决首次prepare；实际C的owner/同次绑定版本必须在完整摘要前冻结，重放不能热读绑定或重签metadata。
@@ -264,7 +289,7 @@ def load_or_prepare_gateway_input_request_locked(paths: GatewayPaths, request: G
     prepared_request, prepare_request = request.prepared_request, request.prepare_request
     path = gateway_input_receipt_path(paths, request_id)
     options = {} if read_blocking else {"blocking": False}
-    report = read_json_file_report(path, context="gateway.input_receipt.read", **options)
+    report = _read_input_receipt_report(paths, path, **options)
     _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
@@ -331,7 +356,7 @@ def read_gateway_input_receipt(
 ) -> GatewayInputReceipt | None:
     path = gateway_input_receipt_path(paths, request_id)
     read_options = {} if blocking else {'blocking': False}
-    report = read_json_file_report(path, context="gateway.input_receipt.read", **read_options)
+    report = _read_input_receipt_report(paths, path, **read_options)
     _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
@@ -727,6 +752,64 @@ class _ReceiptSweep:
 _RECEIPT_SWEEP_CACHE: OrderedDict[str, _ReceiptSweep] = OrderedDict()
 
 
+# 隔离是有界调度提示，不改回执或结算事实；原文件变化立即重试。
+@dataclass(frozen=True)
+class _ReceiptFailure:
+    stamp: tuple[int, int]
+    count: int
+    error_type: str
+    quarantined: bool = False
+
+
+class _ReceiptFailureCache:
+    max_entries = 512
+    lock = threading.Lock()
+    entries: OrderedDict[str, _ReceiptFailure] = OrderedDict()
+
+
+def _receipt_failure_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        status = path.stat()
+        return status.st_mtime_ns, status.st_size
+    except OSError:
+        return None
+
+
+def _receipt_is_quarantined(path: Path, stamp: tuple[int, int] | None) -> bool:
+    with _ReceiptFailureCache.lock:
+        previous = _ReceiptFailureCache.entries.get(str(path))
+        if previous is not None and previous.stamp != stamp:
+            _ReceiptFailureCache.entries.pop(str(path), None)
+            return False
+        if previous is not None:
+            _ReceiptFailureCache.entries.move_to_end(str(path))
+        return bool(previous is not None and previous.quarantined and stamp is not None)
+
+
+# 明确非瞬态类型才隔离；包括无errno的OSError在内的IO失败都保留重试。
+def _record_receipt_failure(path: Path, stamp: tuple[int, int] | None,
+                            error_type: str, threshold: int) -> bool:
+    deterministic = error_type in {"DataCorruptionError", "ValueError", "TypeError", "JSONDecodeError"}
+    key = str(path)
+    with _ReceiptFailureCache.lock:
+        previous = _ReceiptFailureCache.entries.get(key)
+        if not deterministic or stamp is None or _receipt_failure_stamp(path) != stamp:
+            _ReceiptFailureCache.entries.pop(key, None)
+            return False
+        count = (previous.count if previous is not None and previous.stamp == stamp else 0) + 1
+        quarantined = count >= max(1, threshold)
+        _ReceiptFailureCache.entries[key] = _ReceiptFailure(stamp, count, error_type, quarantined)
+        _ReceiptFailureCache.entries.move_to_end(key)
+        while len(_ReceiptFailureCache.entries) > _ReceiptFailureCache.max_entries:
+            _ReceiptFailureCache.entries.popitem(last=False)
+    if quarantined and not (previous is not None and previous.quarantined):
+        logging.getLogger(__name__).warning(
+            "GATEWAY_INPUT_RECEIPT_QUARANTINED path=%s mtime_ns=%s size=%s error_type=%s failures=%s",
+            path, stamp[0], stamp[1], error_type, count,
+        )
+    return quarantined
+
+
 # LLM: 目录缺失或拒读时不信旧门；签名额外包含inode/ctime，不能只按mtime和size漏掉同名换代。
 # 函数用途: 只stat回执顶层目录，生成扫描门的文件系统代次。
 def _receipt_sweep_stamp(directory: Path) -> tuple[int, int, int, int, int] | None:
@@ -748,7 +831,8 @@ def _receipt_sweep_gate(paths: GatewayPaths) -> tuple[tuple | None, bool]:
         ):
             _RECEIPT_SWEEP_CACHE.pop(str(directory), None)
             cached = None
-        skip = bool(cached is not None and cached.complete and stamp is not None and cache_entry_trustworthy(stamp[3]))
+        # 目录mtime不反映原文件原地改写；只复用名字投影，逐页stat原文件，不缓存“全目录无事”。
+        skip = False
         if skip:
             _RECEIPT_SWEEP_CACHE.move_to_end(str(directory))
         return stamp, skip
@@ -797,6 +881,7 @@ def reconcile_gateway_input_receipts(
     agent: object,
     *,
     limit: int = 64,
+    quarantine_after_failures: int = 3,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "checked": 0, "consumed": 0, "queued": 0, "terminal_unknown": 0, "errors": 0,
@@ -804,6 +889,7 @@ def reconcile_gateway_input_receipts(
         # 供 raise_if_input_reconcile_unsettled 抛给循环守卫，进 loop_health 与日志，不再静默。
         "terminal_unknown_errors": 0,
         "last_terminal_unknown_error": {},
+        "quarantined": 0,
     }
     sweep_stamp, skip = _receipt_sweep_gate(paths)
     if skip:
@@ -813,6 +899,13 @@ def reconcile_gateway_input_receipts(
     page = _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1)))
     try:
         for path in page:
+            stamp = _receipt_failure_stamp(path)
+            if _receipt_is_quarantined(path, stamp):
+                summary["quarantined"] += 1
+                last_path = path
+                continue
+            before_errors = summary["errors"], summary["terminal_unknown_errors"]
+            failure_type = ""
             try:
                 _reconcile_receipt_path(paths, agent, path, summary)
             except RequestExecutionOutcomeUncertainError:
@@ -820,6 +913,12 @@ def reconcile_gateway_input_receipts(
             except Exception as exc:
                 _raise_input_transport_uncertain(exc)
                 summary["errors"] += 1
+                failure_type = type(exc).__name__ if not isinstance(exc, OSError) else "OSError"
+            if summary["terminal_unknown_errors"] > before_errors[1]:
+                failure_type = summary["last_terminal_unknown_error"].get("error_type", "")
+            if _record_receipt_failure(path, stamp, failure_type, int(quarantine_after_failures)):
+                summary["errors"], summary["terminal_unknown_errors"] = before_errors
+                summary["quarantined"] += 1
             last_path = path
     except BaseException as exc:
         pending_error = exc
@@ -1361,6 +1460,9 @@ def _gateway_turn_lifecycle_locked(paths: GatewayPaths, target_turn_id: str) -> 
 # 函数用途: 从上次位置继续领取有界回执扫描页，到目录末尾后循环。
 def _reconcile_receipt_paths(paths: GatewayPaths, *, limit: int) -> tuple[Path, ...]:
     receipt_dir = paths.root / "input_receipts"
+    if receipt_dir.is_dir():
+        # 首次游标父目录创建先于名字投影，避免第二拍因自己的state目录而重扫。
+        (receipt_dir / "state").mkdir(exist_ok=True)
     names, candidates = _cached_receipt_candidates(receipt_dir)
     if not candidates:
         return ()
@@ -1389,14 +1491,20 @@ def _receipt_directory_stamp(directory: Path) -> tuple[int, int, int, int] | Non
 # 函数用途: 复用回执名字和Path列表，让state子目录游标写入不重复触发全目录glob排序。
 def _cached_receipt_candidates(directory: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
     key, stamp = str(directory), _receipt_directory_stamp(directory)
-    trustworthy = stamp is not None and cache_entry_trustworthy(stamp[2])
+    trustworthy = stamp is not None
     with _RECEIPT_DIR_CACHE_LOCK:
         cached = _RECEIPT_DIR_CACHE.get(key)
         if trustworthy and cached is not None and cached[0] == stamp:
             _RECEIPT_DIR_CACHE.move_to_end(key)
             return cached[1], cached[2]
         _RECEIPT_DIR_CACHE.pop(key, None)
-    candidates = tuple(sorted(directory.glob("*.json"), key=lambda item: item.name))
+    try:
+        with os.scandir(directory) as entries:
+            candidates = tuple(sorted((Path(entry.path) for entry in entries
+                                       if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False)),
+                                      key=lambda item: item.name))
+    except FileNotFoundError:
+        candidates = ()
     names = tuple(path.name for path in candidates)
     if trustworthy and _receipt_directory_stamp(directory) == stamp:
         with _RECEIPT_DIR_CACHE_LOCK:

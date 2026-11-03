@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from ..capability.config import CapabilityConfig
 from ..capability.runtime_config_reload import capability_config_for_agent
@@ -220,10 +220,120 @@ def schedule_execution_thread(agent: object, source_thread_id: str, operation_ke
     ).thread_id
 
 
-# LLM: 运行身份只取原 run 复制的 creator、owner 和首次冻结的 origin_bindings；job 的 immutable 来源仅核对，不从群最新发言者补人。
+# LLM: 缺源证明只读原job/run；owner、creator和原source必须一致，且只认确已缺失的来源，不授予通知目标执行身份。
+# 函数用途: 拒绝伪造的兜底标记和本地身份降级，保留原计划来源不变。
+def _validate_fallback_proof(service, run, marker):
+    if (not isinstance(marker, dict) or set(marker) != {'reason', 'original_thread_id', 'fallback_thread_id'}
+            or marker['reason'] != 'source_thread_unavailable' or run.get('owner') != service.repository.owner):
+        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    job = service.repository.get_job(str(run['job_id']), include_deleted=True)
+    original, error = service.conversation_store.threads.load_report(marker['original_thread_id'])
+    if (error or original is not None or job['owner'] != run['owner'] or job.get('creator') != run.get('creator')
+            or job['source_thread_id'] != run['source_thread_id']
+            or marker['original_thread_id'] != run['source_thread_id']):
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+
+
+# LLM: 缺源不能猜actor；仅原显式目标/带版本接管中当前仍认证、同owner且与原creator逐字相同的绑定可证明身份。
+# 函数用途: 选取准确认证来源供原HostActor链使用，不拿最近会话或另一管理员补人。
+def _fallback_actor_binding(service, run):
+    from .delivery_policy import (
+        _repository_delivery_agent,
+        available_delivery_targets,
+        validate_delivery_targets,
+    )
+
+    creator = run.get('creator')
+    if not isinstance(creator, dict) or set(creator) != {'channel', 'actor_id'}:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID')
+    agent = _repository_delivery_agent(service.repository)
+    policy = validate_delivery_targets(agent, run.get('delivery'))
+    rows = {row['binding_id']: row for row in available_delivery_targets(agent)}
+    source, selected = None, None
+    for spec in policy.get('targets', []):
+        row = rows.get(spec.get('binding_id')) if spec.get('target_kind') == 'channel_binding' else None
+        if (row is not None and row['channel'] == creator['channel'] == 'feishu'
+                and row['account_id'] == creator['actor_id']):
+            source = service.conversation_store.threads.require(row['thread_id'])
+            selected = row
+            break
+    notification = run.get('notification_binding')
+    if source is None and notification is not None:
+        from .notification_binding import bound_notification_thread
+
+        binding = notification['binding']
+        if binding['channel'] == creator['channel'] == 'feishu' and binding['actor_id'] == creator['actor_id']:
+            source = bound_notification_thread(agent, notification,
+                follow_latest_channel_session=policy.get('follow_latest_channel_session', True))
+            selected = {'channel': binding['channel'], 'account_id': binding['actor_id'], 'chat_id': binding['conversation_id']}
+    if (source is None or source.owner_id != run['owner']['id']
+            or source.owner_home != str(service.repository.quota_enforcer.owner_root)
+            or EXECUTION_ORIGIN_KEY in source.metadata):
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+    binding = next((row for row in source.channel_bindings if row.channel == selected['channel']
+        and row.channel_user_id == selected['account_id'] and row.channel_conversation_id == selected['chat_id']), None)
+    if binding is None:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+    return source, asdict(binding)
+
+
+# LLM: 只给同owner原scheduler专用线程追加一次不可变ExecutionOrigin；creator来自原run，目标先经原认证门，冲突拒绝。
+# 函数用途: 为缺源IM运行固定可恢复的真实身份，不新增TaskLink或修改原job/历史。
+def freeze_fallback_actor(service, run, marker):
+    _validate_fallback_proof(service, run, marker)
+    if run.get('creator') in (None, {'local': True}):
+        return []
+    source, binding = _fallback_actor_binding(service, run)
+    reference = {'source_thread_id': source.thread_id, 'kind': 'scheduled',
+        'operation_key': f"fallback:{run['job_id']}", 'binding': {
+            'channel': binding['channel'], 'conversation_id': binding['channel_conversation_id'],
+            'actor_id': binding['channel_user_id']}}
+
+    # LLM: 原线程事务保留全部可变字段，不覆盖已有不同来源；scheduler绑定必须仍为准确job的专用地址。
+    # 函数用途: 原子固定兜底来源，重试只能确认同一身份。
+    def freeze(current):
+        if (current.thread_id != marker['fallback_thread_id'] or current.thread_id == source.thread_id
+                or current.owner_id != run['owner']['id']
+                or current.owner_home != str(service.repository.quota_enforcer.owner_root)
+                or not current.channel_bindings or any(row.channel != 'scheduler'
+                    or row.channel_conversation_id != f"scheduler-job:{run['job_id']}" for row in current.channel_bindings)):
+            raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+        existing = current.metadata.get(EXECUTION_ORIGIN_KEY)
+        if existing is not None and existing != reference:
+            raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+        return replace(current, metadata={**current.metadata, EXECUTION_ORIGIN_KEY: reference})
+
+    service.conversation_store.threads.update_atomic(marker['fallback_thread_id'], freeze)
+    return [binding]
+
+
+# LLM: 已准备的run仍重验目标认证、准确fallback线程及冻结三元组；不再require已删除的job工作线程，也不绕过HostActor。
+# 函数用途: 从经认证的不可变兜底来源恢复原布置者，供原TaskLink和后续敏感操作复核。
+def _scheduled_fallback_actor(service, run, identity):
+    marker = run['thread_fallback']
+    thread = service.conversation_store.threads.require(run['thread_id'])
+    source, binding = _fallback_actor_binding(service, run)
+    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY)
+    expected = {'channel': binding['channel'], 'conversation_id': binding['channel_conversation_id'],
+        'actor_id': binding['channel_user_id']}
+    if (run['thread_id'] != marker['fallback_thread_id'] or run['origin_thread_id'] != thread.thread_id
+            or thread.owner_id != run['owner']['id'] or thread.owner_home != str(service.repository.quota_enforcer.owner_root)
+            or not isinstance(reference, dict) or reference.get('kind') != 'scheduled'
+            or reference.get('source_thread_id') != source.thread_id or reference.get('binding') != expected
+            or reference.get('operation_key') != f"fallback:{run['job_id']}"
+            or identity != (expected['channel'], expected['conversation_id'], expected['actor_id'])
+            or execution_origin_thread(service.conversation_store.threads.require, thread).thread_id != source.thread_id):
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+    return HostChannelActor.from_record({'owner_id': run['owner']['id'], 'source_thread_id': source.thread_id,
+        'entry_request_id': reference['operation_key'], **expected})
+
+
+# LLM: 运行身份取原creator/owner及冻结origin_bindings；缺源须认证兜底证明，普通路径仍核原job immutable来源，不补最新群成员。
 # 函数用途: 为新定时主根准备宿主 actor，供隔离线程和原 TaskLink 同源使用；本机和旧无证据任务保持 None。
 def scheduled_run_actor(service, run):
     creator = run.get("creator")
+    if run.get('thread_fallback') is not None:
+        _validate_fallback_proof(service, run, run['thread_fallback'])
     if creator in (None, {"local": True}):
         return None
     if (not isinstance(creator, dict) or set(creator) != {"channel", "actor_id"}
@@ -241,6 +351,8 @@ def scheduled_run_actor(service, run):
     if len(identities) != 1:
         raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
     channel, conversation, actor_id = identities.pop()
+    if run.get('thread_fallback') is not None:
+        return _scheduled_fallback_actor(service, run, (channel, conversation, actor_id))
     job = service.repository.get_job(str(run["job_id"]), include_deleted=True)
     thread = service.conversation_store.threads.require(job["thread_id"])
     reference = thread.metadata.get(EXECUTION_ORIGIN_KEY)

@@ -1032,15 +1032,39 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         if retention.legal_hold:
             return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'legal_hold'},
                     'complete': True, 'items': 0, 'bytes': 0}
+        # 上轮三阶段已完成时，新周期必须重新核terminal，不沿用旧阶段跳过本周期候选。
+        phase = cursor.get('runtime_directory') if not cursor.get('complete') else None
+        if phase in {'input_receipts', 'client_outbox'}:
+            from ..gateway_parts.runtime_file_retention import archive_terminal_slice
+            if not _real_owner_directory(home, paths.root / phase):
+                report = {'complete': True, 'scanned_entries': 0, 'bytes': 0, 'archived_entries': 0, 'errors': []}
+            else:
+                remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
+                report = archive_terminal_slice(paths, directory=phase, before=now - 7 * 86400,
+                    max_entries=budget['items'], max_bytes=budget['bytes'], max_ms=min(25, remaining_ms))
+            position = {**cursor, **report}
+            complete = report['complete'] and not report['errors']
+            if complete and phase == 'input_receipts':
+                position.update(runtime_directory='client_outbox', complete=False)
+                complete = False
+            return {'cursor': position, 'complete': complete, 'items': report['scanned_entries'], 'bytes': report['bytes']}
         if not _real_owner_directory(home, paths.terminal):
-            return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'no_safe_gateway_terminal'},
-                    'complete': True, 'items': 0, 'bytes': 0}
+            runtime_pending = any(_real_owner_directory(home, paths.root / name)
+                                  for name in ('input_receipts', 'client_outbox'))
+            return {'cursor': {**cursor, 'complete': not runtime_pending, 'runtime_directory': 'input_receipts',
+                               'deferred_reason': 'no_safe_gateway_terminal'},
+                    'complete': not runtime_pending, 'items': 0, 'bytes': 0}
         remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
         report = seal_gateway_receipts_slice(paths, before=now - 7 * 86400, max_entries=budget['items'],
                                             max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=False)
         position = {'complete': report['complete'], 'errors': report['errors'],
                     'reader_cutover_required': True, 'archived_requests': report['archived_requests']}
-        return {'cursor': position, 'complete': report['complete'],
+        runtime_pending = any(_real_owner_directory(home, paths.root / name)
+                              for name in ('input_receipts', 'client_outbox'))
+        complete = report['complete'] and not report['errors'] and not runtime_pending
+        if report['complete'] and not report['errors'] and runtime_pending:
+            position.update(runtime_directory='input_receipts', complete=False)
+        return {'cursor': position, 'complete': complete,
                 'items': report['scanned_entries'], 'bytes': report['bytes']}
 
     def session_pair_step(cursor, budget):

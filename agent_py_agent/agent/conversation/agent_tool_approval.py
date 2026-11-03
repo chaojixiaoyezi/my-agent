@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,6 +20,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+from ..common.cancellation import ToolCancelled
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
@@ -784,6 +787,83 @@ def renew_agent_tool_approval_consumer(
     return target
 
 
+# LLM: 保留原生目录位置而非反复跳过前缀；最多8个租约，满载先让已接纳扫描完成，完成/失败/闲置/退出均关闭上下文。
+# 类用途: 给审批退休与closing提供不排序全目录、可分拍推进的有界JSON枚举。
+class _BoundedJsonDirectoryScan:
+    _ROOT_LIMIT = 8
+    _IDLE_SECONDS = 60.0
+
+    # LLM: 只登记进程内临时枚举状态，不创建目录、索引或执行Agent。
+    # 函数用途: 初始化扫描租约并登记最终关闭。
+    def __init__(self):
+        self._slices = OrderedDict()
+        self._lock = threading.RLock()
+        atexit.register(self.close)
+
+    # LLM: 生成器拥有且最终释放scandir上下文，跨片存活是有界租约，不是游离的未关闭句柄。
+    # 函数用途: 从原生目录当前位置逐项读，不在每拍重走已处理前缀。
+    @staticmethod
+    def _entries(directory):
+        try:
+            entries = os.scandir(directory)
+        except FileNotFoundError:
+            # 从未发布审批的任务没有目录；缺目录是空集合，其他读取错误仍向上传递。
+            return
+        with entries:
+            yield from entries
+
+    # LLM: visitor每次只消费一项；预算检查覆盖非JSON前缀，出错时释放本目录原生句柄。
+    # 函数用途: 在共同绝对deadline内推进一片，返回是否已扫到真实目录尾。
+    def scan(self, directory, visitor, *, deadline: float, max_entries: int):
+        if max_entries <= 0 or time.monotonic() >= deadline:
+            return False
+        if not self._lock.acquire(blocking=False):
+            return False
+        key = str(directory)
+        try:
+            now = time.monotonic()
+            for old_key, (iterator, touched) in list(self._slices.items()):
+                if now - touched >= self._IDLE_SECONDS:
+                    self._slices.pop(old_key)[0].close()
+            row = self._slices.pop(key, None)
+            if row is None:
+                if len(self._slices) >= self._ROOT_LIMIT:
+                    # 不逐出未完成游标：轮流处理超过容量的根时，重开会让所有尾部永久饥饿。
+                    return False
+                iterator = self._entries(directory)
+            else:
+                iterator = row[0]
+            self._slices[key] = (iterator, now)
+            for _ in range(max(0, max_entries)):
+                if time.monotonic() >= deadline:
+                    return False
+                try:
+                    entry = next(iterator)
+                except StopIteration:
+                    self._slices.pop(key)[0].close()
+                    return True
+                if entry.name.endswith(".json") and not entry.name.startswith(".") and entry.is_file(follow_symlinks=False):
+                    visitor(Path(entry.path))
+            return False
+        except BaseException:
+            row = self._slices.pop(key, None)
+            if row is not None:
+                row[0].close()
+            raise
+        finally:
+            self._lock.release()
+
+    # LLM: 只释放自身持有的枚举租约，不删除文件；正常完成、闲置及atexit均可重复调用。
+    # 函数用途: 显式关闭全部未完成的目录上下文。
+    def close(self):
+        with self._lock:
+            while self._slices:
+                self._slices.popitem()[1][0].close()
+
+
+_retirement_scans = _BoundedJsonDirectoryScan()
+
+
 # LLM: 有界列表只投影 owner 的一个 root 目录；每行重验原始请求及当前归属，返回公开字段与展示标签。
 # 函数用途: 列出当前主任务树里等待用户处理的主/子后台工具审批。
 def list_pending_agent_tool_approvals(
@@ -791,10 +871,27 @@ def list_pending_agent_tool_approvals(
     *,
     root_task_id: str,
     limit: int = AGENT_TOOL_APPROVAL_MAX_PENDING_COUNT,
+    deadline: float | None = None,
+    scan_limit: int = 128,
+    scan_progress: dict | None = None,
+    on_pending: Callable[[dict], None] | None = None,
 ) -> list[dict[str, object]]:
     root = validate_opaque_id(root_task_id, kind="root_task_id")
     directory = _approval_root(agent, root)
     rows: list[dict[str, object]] = []
+    if deadline is not None:
+        def collect(path):
+            report = read_json_object_report(path, context="subagent.tool_approval.list")
+            public = _public_pending_record(agent, root, report.payload)
+            if public is not None:
+                rows.append(public)
+                if on_pending is not None:
+                    on_pending(public)
+
+        complete = _retirement_scans.scan(directory, collect, deadline=deadline, max_entries=min(scan_limit, limit))
+        if scan_progress is not None:
+            scan_progress["complete"] = complete
+        return rows
     paths = [
         path
         for path in sorted(directory.glob("*.json"))
@@ -807,6 +904,46 @@ def list_pending_agent_tool_approvals(
             rows.append(public)
     rows.sort(key=lambda item: (float(item.get("requested_at") or 0.0), str(item["run_id"])))
     return rows[: max(1, int(limit or 1))]
+
+
+# LLM: 仅对同线程同root当前仍pending的审批写负向决定；复用原scope/完整请求/attempt校验与非阻塞CAS，不授任何工具执行权。
+# 函数用途: 父回合closing超时后唤醒悬挂审批等待者，锁忙或旧代次留待下拍重试。
+def retire_pending_agent_tool_approvals(agent, *, thread_id: str, root_task_id: str,
+                                      reason: str = "parent_turn_closing", deadline: float | None = None) -> dict[str, object]:
+    deadline = time.monotonic() + 0.05 if deadline is None else deadline
+    summary = {"checked": 0, "retired": 0, "errors": 0, "reason": reason, "complete": False}
+    if time.monotonic() >= deadline:
+        return summary
+    link, error = agent.conversation_store.tasks.load_report(root_task_id)
+    if error is not None or link is None or link.thread_id != thread_id:
+        return {**summary, "errors": 1}
+    def retire(row):
+        summary["checked"] += 1
+        try:
+            scope = tool_approval_scope(agent, row["run_id"])
+            # 子代理有自己的agent_thread_id；父会话边界由同一root的规范TaskLink确认。
+            if scope.root_task_id != root_task_id or (scope.agent_kind == "main" and scope.thread_id != thread_id):
+                return
+            request = _approval_request(row["request"])
+
+            # 末核原行仍为pending，不能改写用户已提交的决定；原因独立记账，不扩展合同层reason_code枚举。
+            def pending_only(payload):
+                if payload.get("status") != "pending":
+                    raise FileNotFoundError("approval already decided")
+
+            resolve_agent_tool_approval(agent, run_id=row["run_id"], request_value=request,
+                decision_value=ToolApprovalDecision(request.permission_id, "cancelled", feedback=reason),
+                blocking=False, record_guard=pending_only)
+            summary["retired"] += 1
+        except ToolCancelled:
+            raise
+        except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+            summary["errors"] += 1
+    progress = {}
+    list_pending_agent_tool_approvals(agent, root_task_id=root_task_id, deadline=deadline,
+        scan_progress=progress, on_pending=retire)
+    summary["complete"] = progress.get("complete", False)
+    return summary
 
 
 # LLM: 同一原scope/完整请求/claim/attempt决定只能在原permission锁内提交；可选C门在锁外，record_guard只在原锁内末核版本/授权。

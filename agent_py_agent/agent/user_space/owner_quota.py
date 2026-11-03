@@ -8,6 +8,7 @@ import ctypes
 import json
 import math
 import os
+import selectors
 import stat
 import subprocess
 import sys
@@ -15,7 +16,7 @@ import time
 import uuid
 import zlib
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from ..common.cancellation import ToolCancelled, cancellation_requested, current_cancellation_token
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import locked_json_path, read_json_object_report
@@ -132,6 +134,12 @@ class OwnerQuotaProjection:
 # 类用途: 区分无法安全判定配额与已经确定超额。
 class OwnerQuotaUnavailable(RuntimeError):
     """The authoritative owner quota or current usage could not be read safely."""
+
+    # LLM: 现有单消息调用和消息文本保持不变，周期调用方只按结构化原因分类。
+    # 函数用途: 保存配额不可用的机器可读原因。
+    def __init__(self, message: str = "", *, reason_code: str = ""):
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 # LLM: 普通本地用户使用显式有限配额；零子代理/深度有意义，bool和遗漏字段不得被强转。
@@ -261,9 +269,10 @@ class OwnerQuotaAdmission:
         # 中间结算只把本准入预留降为0字节标记、不移除：业务仍可能回滚，最后一次退出结算才清除。
         self._held = False
 
-    # LLM: 完整小批核对可准入，未读完只允许非增长；绝不触发旧全树walk或find。
+    # LLM: 完整小批核对可准入；缺省未读完只允许非增长。显式控制写须有权威账且在同一锁内预留、按实际差额结算。
     # 函数用途: 计算本批增长并在写入前持久预留。
-    def check(self, changes: Iterable[OwnerQuotaChange]) -> OwnerQuotaProjection | None:
+    def check(self, changes: Iterable[OwnerQuotaChange], *, bounded_control_growth_bytes: int = 0) -> OwnerQuotaProjection | None:
+        _check_quota_cancelled()
         if not self.enabled:
             return None
         relevant = _normalized_owner_changes(self._enforcer.owner_root, changes)
@@ -271,8 +280,10 @@ class OwnerQuotaAdmission:
             return None
         try:
             current_sizes = {path: _logical_file_size(path) for path in relevant}
+        except ToolCancelled:
+            raise
         except (OSError, RuntimeError, ValueError) as exc:
-            raise OwnerQuotaUnavailable("owner disk usage is unavailable") from exc
+            raise OwnerQuotaUnavailable("owner disk usage is unavailable", reason_code="usage_unavailable") from exc
         replaced = sum(current_sizes.values())
         final = sum(
             0
@@ -335,11 +346,34 @@ class OwnerQuotaAdmission:
         # 同一准入中间结算留下的0字节标记只拦冷进程，本准入后续阶段照常核验基线。
         authoritative = not complete and not snapshot_invalidated and _verified_quota_baseline(
             root, ledger, touched, reservation=self._reservation)
-        if not complete and not authoritative and final > replaced:
+        # 干净账核验失败不是仅等待对账：先持久失效，避免本次或后续控制写把偏低旧账当权威计数。
+        # 复用结算的失效落盘/重试合同；普通dirty挂起未尝试核验，仍保留有界增长语义。
+        if not complete and not authoritative and not snapshot_invalidated and ledger.get('dirty_since') is None:
+            snapshot_invalidated = True
+            self._ledger = None
+            cursor = ledger.get('reconcile_cursor') or {}
+            if cursor.get('complete') is False and ledger.get('usage_authoritative') is True:
+                # 活跃对账保留原逐目录表和epoch来补正漂移；撤销旧计数权威，后续bounded也必须拒绝。
+                ledger.update(usage_authoritative=False, dirty_since=time.time())
+                try:
+                    _write_quota_ledger(root, ledger)
+                except BaseException:
+                    _write_quota_ledger(root, ledger)
+                    raise
+            else:
+                self._invalidated = True
+                self.commit_delta(final=False)
+            ledger = _read_quota_ledger(root)
+        # 有界控制写只消费上次完整权威计数，未知初始账、孤儿预留、根身份变化与扫描失效绝不放行。
+        bounded = (not complete and not authoritative and not snapshot_invalidated
+                   and type(bounded_control_growth_bytes) is int
+                   and 0 < final - replaced <= bounded_control_growth_bytes
+                   and _quota_control_baseline(root, ledger, reservation=self._reservation))
+        if not complete and not authoritative and not bounded and final > replaced:
             ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
             _write_quota_ledger(root, ledger)
-            raise OwnerQuotaUnavailable('owner usage reconciliation pending; growth refused')
-        used = total if complete else ledger['used_bytes'] if authoritative else max(ledger['used_bytes'], self._enforcer.max_bytes)
+            raise OwnerQuotaUnavailable('owner usage reconciliation pending; growth refused', reason_code='reconciliation_pending')
+        used = total if complete else ledger['used_bytes'] if authoritative or bounded else max(ledger['used_bytes'], self._enforcer.max_bytes)
         projection = OwnerQuotaProjection(
             used_bytes=used,
             projected_bytes=max(0, used - replaced + final),
@@ -349,7 +383,7 @@ class OwnerQuotaAdmission:
             raise OwnerQuotaExceeded(projection)
         rebased = None
         if complete:
-            ledger.update(used_bytes=total, inode_count=count, dirty_since=None)
+            ledger.update(used_bytes=total, inode_count=count, dirty_since=None, usage_authoritative=True)
             # 所有正规写者都持同一owner锁；拿到锁时旧预留只可能是退出未确认的遗留。
             ledger['reservations'] = {}
             # 全新快照已计入全部落盘结果，但上阶段前像、待确认结算与失效只在快照确已发布后才随之以当前大小重定基准：
@@ -589,11 +623,11 @@ class OwnerQuotaEnforcer:
         if self.max_bytes > 0:
             _remember_quota_finite_root(self.owner_root)
 
-    # LLM: 默认阻塞保持既有调用合同；限时准备可选择立即拒绝竞争，但仍须在同一锁内检查和执行完整写入。
+    # LLM: 默认轮询同一原锁直至取得或取消；非阻塞仍立即拒绝竞争，检查和完整写入始终在同一锁内。
     # LLM: C只透传锁出生策略，原quota锁仍跨领域/同步embedding；max_bytes<=0不添scan或新限制。
     # 函数用途: 持原owner配额锁供领域同一准入共享，等待在Root外。
     @contextmanager
-    def admission(self, *, blocking: bool = True) -> Iterator[OwnerQuotaAdmission]:
+    def admission(self, *, blocking: bool = True, should_cancel: Callable[[], bool] | None = None) -> Iterator[OwnerQuotaAdmission]:
         """Hold the owner gate while a repository computes and applies a mutation."""
 
         if not self.policy_available:
@@ -602,7 +636,7 @@ class OwnerQuotaEnforcer:
             yield OwnerQuotaAdmission(self, enabled=False)
             return
         options = {} if not self.coordinator_io else {"coordinator_io": True}
-        with _locked_owner_quota(self._lock_anchor, blocking=blocking, **options):
+        with _locked_owner_quota(self._lock_anchor, blocking=blocking, should_cancel=should_cancel, **options):
             admission = OwnerQuotaAdmission(self, enabled=True)
             try:
                 yield admission
@@ -658,22 +692,23 @@ def owner_quota_enforcer_from_policy(
 # LLM: 默认展示扫描只缓存display_archives各目录直接文件字节，5秒/256项有界；exact供权威准入禁用缓存。
 #   trash与冷归档始终计费，硬链接逐路径计数；目录mtime不证明文件没原地扩写，不能用于授权。
 # 函数用途: 统计owner普通文件逻辑用量，减少展示档案重复逐文件stat，不跟随符号链接。
-def owner_logical_usage_bytes(root: str | Path, *, exact: bool = False) -> int:
+def owner_logical_usage_bytes(root: str | Path, *, exact: bool = False, should_cancel: Callable[[], bool] | None = None) -> int:
     """Count regular-file bytes below an owner root without following symlinks.
 
     Hard links are intentionally counted per visible path.  A logical quota
     must not be bypassable by creating many links to the same inode.
     """
 
+    _check_quota_cancelled(should_cancel)
     owner_root = Path(root).expanduser().resolve(strict=False)
     try:
         root_info = owner_root.stat(follow_symlinks=False)
     except FileNotFoundError:
         return 0
     except OSError as exc:
-        raise OwnerQuotaUnavailable("owner disk usage root is unavailable") from exc
+        raise OwnerQuotaUnavailable("owner disk usage root is unavailable", reason_code="root_unavailable") from exc
     if not stat.S_ISDIR(root_info.st_mode):
-        raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
+        raise OwnerQuotaUnavailable("owner disk usage root is not a directory", reason_code="root_unavailable")
     total = 0
 
     # LLM: 同时删除目录不计费，其余错误继续关闭式拒绝统计，不返回不完整用量。
@@ -691,6 +726,7 @@ def owner_logical_usage_bytes(root: str | Path, *, exact: bool = False) -> int:
             followlinks=False,
             onerror=handle_walk_error,
         ):
+            _check_quota_cancelled(should_cancel)
             base = Path(directory)
             parts = base.relative_to(owner_root).parts
             dirnames[:] = [name for name in dirnames
@@ -698,13 +734,13 @@ def owner_logical_usage_bytes(root: str | Path, *, exact: bool = False) -> int:
             cached = not exact and "display_archives" in parts
             total += _directory_usage_bytes(owner_root, base, filenames, cached=cached)
     except OSError as exc:
-        raise OwnerQuotaUnavailable("owner disk usage scan failed") from exc
+        raise OwnerQuotaUnavailable("owner disk usage scan failed", reason_code="scan_failed") from exc
     return total
 
 
 # LLM: 配额准入保持精确；Linux原native扫描保留，portable路径显式exact，不借展示TTL放宽写入权限。
 # 函数用途: 为持锁配额准入返回准确用量，包括回收站和冷归档。
-def _owner_usage_bytes_for_admission(root: str | Path) -> int:
+def _owner_usage_bytes_for_admission(root: str | Path, *, should_cancel: Callable[[], bool] | None = None) -> int:
     """Return exact regular-file usage without monopolising the Python runtime.
 
     Large owner workspaces can contain hundreds of thousands of files.  Running
@@ -718,10 +754,11 @@ def _owner_usage_bytes_for_admission(root: str | Path) -> int:
     """
 
     owner_root = Path(root).expanduser().resolve(strict=False)
-    native = _native_regular_file_usage_bytes(owner_root)
+    _check_quota_cancelled(should_cancel)
+    native = _native_regular_file_usage_bytes(owner_root, should_cancel=should_cancel)
     if native is not None:
         return native
-    return owner_logical_usage_bytes(owner_root, exact=True)
+    return owner_logical_usage_bytes(owner_root, exact=True, should_cancel=should_cancel)
 
 
 # LLM: 只缓存单目录直接文件总数；目录身份/时间、已遍历文件名或TTL失效即重算，权限错误不回旧值。
@@ -769,7 +806,7 @@ def _directory_regular_bytes(owner_root: Path, base: Path, names: list[str]) -> 
 
 # LLM: 仅Linux调用系统find并限制15秒；非支持平台返回None，真实扫描故障拒绝，不使用展示缓存。
 # 函数用途: 为需要精确扫描的原调用方统计普通文件字节，不跟随符号链接。
-def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
+def _native_regular_file_usage_bytes(owner_root: Path, *, should_cancel: Callable[[], bool] | None = None) -> int | None:
     if not sys.platform.startswith("linux"):
         return None
     try:
@@ -777,9 +814,9 @@ def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
     except FileNotFoundError:
         return 0
     except OSError as exc:
-        raise OwnerQuotaUnavailable("owner disk usage root is unavailable") from exc
+        raise OwnerQuotaUnavailable("owner disk usage root is unavailable", reason_code="root_unavailable") from exc
     if not stat.S_ISDIR(root_info.st_mode):
-        raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
+        raise OwnerQuotaUnavailable("owner disk usage root is not a directory", reason_code="root_unavailable")
     find_path = next(
         (
             candidate
@@ -798,6 +835,8 @@ def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
     for path in excluded:
         command += ["!", "-path", path]
     try:
+        if should_cancel is not None or current_cancellation_token() is not None:
+            return _cancellable_find_usage([*command, "-printf", "%s\n"], should_cancel=should_cancel)
         completed = subprocess.run(
             [*command, "-printf", "%s\n"],
             check=False,
@@ -808,16 +847,16 @@ def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
     except FileNotFoundError:
         return None
     except subprocess.TimeoutExpired as exc:
-        raise OwnerQuotaUnavailable("owner disk usage scan timed out") from exc
+        raise OwnerQuotaUnavailable("owner disk usage scan timed out", reason_code="scan_failed") from exc
     if completed.returncode != 0:
         detail = str(completed.stderr or "").lower()
         if any(token in detail for token in ("unknown predicate", "unrecognized", "illegal option")):
             return None
-        raise OwnerQuotaUnavailable("owner disk usage scan failed")
+        raise OwnerQuotaUnavailable("owner disk usage scan failed", reason_code="scan_failed")
     try:
         return sum(int(line) for line in completed.stdout.splitlines() if line)
     except ValueError as exc:
-        raise OwnerQuotaUnavailable("owner disk usage scan returned invalid data") from exc
+        raise OwnerQuotaUnavailable("owner disk usage scan returned invalid data", reason_code="scan_failed") from exc
 
 
 # LLM: 只处理当前owner规范路径；控制账及锁不得作为免费payload目标，追加合并不改变原批次计费语义。
@@ -878,11 +917,22 @@ def _logical_file_size(path: Path) -> int:
 # LLM: 只有新birth原scope的实际native类同对象透传，普通OSError/RuntimeError仍原领域包装；不改usage scan catch。
 # 函数用途: 保原配额锁竞争/坏账语义，C出生拒绝不可洗成普通配额故障。
 @contextmanager
-def _locked_owner_quota(path: Path, *, blocking: bool = True, coordinator_io: bool = False) -> Iterator[None]:
+def _locked_owner_quota(path: Path, *, blocking: bool = True, coordinator_io: bool = False,
+                        should_cancel: Callable[[], bool] | None = None, poll_seconds: float = 0.05) -> Iterator[None]:
     options = {} if not coordinator_io else {"birth_commit": _coordinator_quota_birth}
-    manager = locked_json_path(path, blocking=blocking, **options)
     try:
-        manager.__enter__()
+        while True:
+            _check_quota_cancelled(should_cancel)
+            manager = locked_json_path(path, blocking=False, **options)
+            try:
+                manager.__enter__()
+                break
+            except BlockingIOError:
+                if not blocking:
+                    raise
+                time.sleep(poll_seconds)
+    except ToolCancelled:
+        raise
     except BlockingIOError as exc:
         raise OwnerQuotaLockContention("owner quota lock is busy") from exc
     except (OSError, RuntimeError, ValueError) as exc:
@@ -1617,6 +1667,7 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
 #   宿主状态随宿主生命周期增删，扫描中途消失只少计，不作废目录表。
 # 函数用途: 惰性枚举owner的普通文件字节和inode，不生成全目录列表。
 def _quota_entries(root, parts=()):
+    _check_quota_cancelled()
     if len(parts) > 64:
         raise OwnerQuotaUnavailable('quota traversal depth exceeded')
     descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
@@ -1625,6 +1676,7 @@ def _quota_entries(root, parts=()):
         _capture_quota_metadata(state, parts, os.fstat(descriptor))
         with os.scandir(descriptor) as entries:
             for entry in entries:
+                _check_quota_cancelled()
                 if not parts and entry.name in _QUOTA_CONTROL_NAMES:
                     _capture_quota_metadata(state, parts, None, entry.name)
                     yield (0, 0)
@@ -1977,7 +2029,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 scan['dirty'] = True
             if complete:
                 # 清点放弃过的目录未补正或枚举观察失效，总量照常发布但保持脏，由下一轮补正后才恢复增长。
-                ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'],
+                ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'], usage_authoritative=not scan.get('dirty'),
                               dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
                 scan['iterator'].close()
                 _QUOTA_SCANS.pop(key, None)
@@ -2582,10 +2634,83 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
 # LLM: 必须先于各owner锁，所有后台扫描共享同一短片；非阻塞获取失败不接触扫描器和持久账。
 # 函数用途: 防不同owner线程同时推进或关闭同一个缓存生成器。
 @contextmanager
-def _locked_quota_scan_cache(*, blocking):
-    if not _QUOTA_SCANS_LOCK.acquire(blocking=blocking):
-        raise OwnerQuotaLockContention('quota scan cache is busy')
+def _locked_quota_scan_cache(*, blocking, poll_seconds=0.05):
+    while True:
+        _check_quota_cancelled()
+        if _QUOTA_SCANS_LOCK.acquire(blocking=False):
+            break
+        if not blocking:
+            raise OwnerQuotaLockContention('quota scan cache is busy')
+        time.sleep(poll_seconds)
     try:
         yield
     finally:
         _QUOTA_SCANS_LOCK.release()
+
+
+# LLM: 只读本次工具令牌或显式谓词，取消必须保持统一异常类型，不转换为配额故障。
+# 函数用途: 在扫描和短锁轮询边界立即响应取消。
+def _check_quota_cancelled(should_cancel=None):
+    if (cancellation_requested if should_cancel is None else should_cancel)():
+        raise ToolCancelled('owner quota operation cancelled')
+
+
+# LLM: 只用完整扫描发布的计数；脏账允许有限控制写但不变成干净账，根替换和孤儿预留仍关闭。
+# 函数用途: 判断挂起对账是否有可累加的历史权威用量。
+def _quota_control_baseline(root, ledger, *, reservation):
+    cursor = ledger.get('reconcile_cursor')
+    if (not isinstance(cursor, dict)
+            or not (ledger.get('usage_authoritative') is True
+                or 'usage_authoritative' not in ledger and cursor.get('complete') is True and ledger.get('dirty_since') is None)
+            or cursor.get('metadata_invalidated') is True
+            or (ledger.get('reservations') or {}).keys() - {reservation}):
+        return False
+    info = root.stat(follow_symlinks=False)
+    return (info.st_dev, info.st_ino) == (cursor.get('root_dev'), cursor.get('root_ino'))
+
+
+# LLM: 两条管道都用有界非阻塞块读取，不缓存全find输出；取消/超时必须杀死并回收子进程。
+#   没有可取消上下文的旧调用保留subprocess.run合同；实际工具令牌始终走本路径。
+# 函数用途: Linux精确扫描在每块输出和等待间隙检查取消。
+def _cancellable_find_usage(command, *, should_cancel=None, poll_seconds=0.05, chunk_bytes=32768):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    total, pending = 0, b''
+    deadline = time.monotonic() + _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS
+    try:
+        with selectors.DefaultSelector() as selector:
+            for pipe in (process.stdout, process.stderr):
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ)
+            while selector.get_map():
+                _check_quota_cancelled(should_cancel)
+                if time.monotonic() >= deadline:
+                    raise OwnerQuotaUnavailable('owner disk usage scan timed out', reason_code='scan_failed')
+                for key, _ in selector.select(poll_seconds):
+                    _check_quota_cancelled(should_cancel)
+                    chunk = os.read(key.fileobj.fileno(), chunk_bytes)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.fileobj is process.stderr:
+                        continue
+                    lines = (pending + chunk).split(b'\n')
+                    pending = lines.pop()
+                    if len(pending) > chunk_bytes:
+                        raise ValueError('invalid find size record')
+                    total += sum(int(line) for line in lines if line)
+            while process.poll() is None:
+                _check_quota_cancelled(should_cancel)
+                if time.monotonic() >= deadline:
+                    raise OwnerQuotaUnavailable('owner disk usage scan timed out', reason_code='scan_failed')
+                time.sleep(poll_seconds)
+        if process.returncode:
+            raise OwnerQuotaUnavailable('owner disk usage scan failed', reason_code='scan_failed')
+        return total + (int(pending) if pending else 0)
+    except (OSError, ValueError) as exc:
+        raise OwnerQuotaUnavailable('owner disk usage scan returned invalid data', reason_code='scan_failed') from exc
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
