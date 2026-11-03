@@ -31,7 +31,7 @@ from ..assets.workflow_store import (
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from ..concurrency.interrupt import is_interrupted
-from .concurrency_policy import dispatch
+from .concurrency_policy import _reconcile_workflow_claim, dispatch
 from .datasource_runtime import (
     _preflight_failure,
     bind_script_execution_record,
@@ -214,7 +214,7 @@ class _WorkflowRunLifecycle:
                 return self._drive(current, definition, 0)
 
         result = dispatch(self.owner_home, 'workflow', descriptor['id'], record.workflow_run_id,
-                          concurrency_policy, execute_frozen, queue_limit=queue_limit)
+                          concurrency_policy, execute_frozen, queue_limit=queue_limit, _lifecycle=self.store)
         if isinstance(result, dict):
             result = {**result, 'workflow_run_id': record.workflow_run_id}
             if result.get('status') == 'skipped':
@@ -258,13 +258,16 @@ class _WorkflowRunLifecycle:
         # 函数用途: 将冻结的恢复请求交给取得claim的原执行器。
         def callback():
             return self._resume_workflow_run(workflow_run_id, from_step_id, **options)
+        original_policy = self.store._concurrency_policy(workflow_run_id)
+        if original_policy != 'allow':
+            concurrency_policy = original_policy
         if concurrency_policy == 'allow':
             return callback()
         frozen = self.store._read(workflow_run_id, 'run.json')
         if options['expected_revision'] is None:
             options['expected_revision'] = frozen.get('revision', 0)
         result = dispatch(self.owner_home, 'workflow', frozen['workflow_id'], workflow_run_id,
-                          concurrency_policy, callback, queue_limit=queue_limit)
+                          concurrency_policy, callback, queue_limit=queue_limit, _lifecycle=self.store)
         if isinstance(result, dict):
             from .run_store import _decode_run
             return self._policy_receipt({**result, 'workflow_run_id': workflow_run_id}, _decode_run(frozen))
@@ -445,6 +448,17 @@ class _WorkflowRunLifecycle:
     # LLM: 持原execution_lock先完整验身份并保存恢复ID，全部原责任确认前不得完成原control。
     # 函数用途: 持续核实和取消同一批任务，未知或未停净时保持取消中。
     def cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
+        """取消不排在自身保留占位后；运行锁退出之后才按原证明结算占位。"""
+        restricted = self.store._concurrency_policy(workflow_run_id) != 'allow'
+        workflow_id = self.store._read(workflow_run_id, 'run.json')['workflow_id'] if restricted else None
+        try:
+            return self._cancel_workflow_run(workflow_run_id, expected_revision=expected_revision,
+                                             operation_key=operation_key)
+        finally:
+            if restricted:
+                _reconcile_workflow_claim(self.owner_home, workflow_id, workflow_run_id)
+
+    def _cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
         """原执行锁内逐条清理结构化派发责任；只有全部确认才完成原控制回执。"""
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
@@ -777,7 +791,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 self._step_progress(record, step, progress)
                 record = replace_run_record(record, dict(status='waiting_for_agent', needs_repair=False,
                     current_step_id=step.step_id, ended_at=0, breakpoint=None))
-                execution_receipt(record, phase='waiting_for_agent', effect_outcome='running')
+                execution_receipt(record, phase='waiting_for_agent', effect_outcome=(
+                    'unknown' if step.escalation_result.get('submission_state') == 'unknown' else 'running'))
                 self.store.save_run(record)
                 return record
             self._step_progress(record, step, progress)

@@ -79,6 +79,29 @@ class WorkflowExecutionError(RuntimeError):
         self.error_code = 'WORKFLOW_EXECUTION_FAILED'
 
 
+def _concurrency_settled(record):
+    """终态标签不等于义务消失；只消费原步骤上的完成、取消或未提交证明。"""
+    if record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling'):
+        return False
+    for step in record.steps:
+        result = step.escalation_result
+        if result.get('cleanup_error'):
+            return False
+        if step.mode == 'agent_task':
+            obligation = (step.status == 'waiting_for_agent' or result.get('task_id')
+                or 'session_task_dispatch' in result or result.get('submission_state') == 'unknown'
+                or result.get('effect_started') and result.get('submission_state') != 'not_started')
+            cancellation = result.get('cancellation_receipt', {})
+            settled = (bool(result.get('completion_ref')) or cancellation.get('state') == 'completed'
+                and cancellation.get('outstanding_refs') == [] or result.get('submission_state') == 'not_started'
+                and result.get('reconciliation_state') == 'absent')
+            if obligation and not settled:
+                return False
+        elif result.get('effect_started') and step.status not in ('succeeded', 'escalated_recovered', 'skipped'):
+            return False
+    return record.status in ('succeeded', 'failed', 'skipped', 'cancelled') or record.effect_outcome == 'not_started'
+
+
 # LLM: RuntimeError是新执行锁合同；同时保留旧引擎调用方捕获ValueError的兼容性。
 # 类用途: 明确说明同一工作流运行已被其它执行者持有。
 class _RunBusy(RuntimeError, ValueError):
@@ -194,7 +217,8 @@ class WorkflowRunStore:
             if (record.revision != revision or expected_revision is not None and expected_revision != revision):
                 raise ValueError('WORKFLOW_RUN_REVISION_CONFLICT')
             if (data.get('status') == 'cancelled' and record.status != 'cancelled'
-                    or data.get('status') in ('succeeded', 'failed') and record.status == 'running' and not resuming):
+                    or data.get('status') in ('succeeded', 'skipped') and record.status != data['status'] and not resuming
+                    or data.get('status') == 'failed' and record.status in ('queued', 'running', 'waiting_for_agent') and not resuming):
                 raise ValueError('WORKFLOW_RUN_TERMINAL')
             for name in ('business_context', 'scope_snapshot', 'scope_revision'):
                 if raw is not None and data.get(name, {} if name != 'scope_revision' else 0) != getattr(record, name):
@@ -298,6 +322,64 @@ class WorkflowRunStore:
                 return self._read(workflow_run_id, 'admission.json')
             except FileNotFoundError:
                 return None
+
+    def _concurrency_claim(self, lease):
+        """精确比对原 run 的占位证明；私有元数据不推进业务 CAS。"""
+        data = self._read(lease.record['run_id'], 'run.json')
+        proof = data.get('concurrency_claim')
+        if (data.get('workflow_run_id') != lease.record['run_id']
+                or data.get('workflow_id') != lease.record.get('asset_id') or not isinstance(proof, dict)
+                or proof.get('schema') != 'workflow-concurrency-lifecycle.v1'
+                or proof.get('record') != lease.record or proof.get('stamp') != list(lease.stamp)):
+            raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
+        return data, proof
+
+    def _bind_concurrency_claim(self, lease):
+        """在执行前将准确 nonce/文件身份附到原账本，不授予新的执行权限。"""
+        run_id = lease.record['run_id']
+        with self._lock(run_id):
+            data = self._read(run_id, 'run.json')
+            previous = data.get('concurrency_claim')
+            if data.get('workflow_run_id') != run_id:
+                raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
+            if previous and previous.get('phase') != 'released':
+                self._concurrency_claim(lease)
+                if previous.get('phase') != 'retained':
+                    raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_BUSY')
+            data['concurrency_claim'] = {'schema': 'workflow-concurrency-lifecycle.v1',
+                'record': payload(lease.record), 'stamp': list(lease.stamp), 'phase': 'executing'}
+            _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
+
+    def _finish_concurrency_claim(self, lease):
+        """回调返回后仍核规范步骤义务；未知责任保留，占位删除前先持久化清理证明。"""
+        run_id = lease.record['run_id']
+        with self._lock(run_id):
+            data, proof = self._concurrency_claim(lease)
+            phase = 'release_pending' if _concurrency_settled(self.load_run(run_id)) else 'retained'
+            if proof['phase'] != phase:
+                proof['phase'] = phase
+                _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
+            return phase
+
+    def _concurrency_claim_phase(self, lease):
+        # 准入门不能等待正持运行锁的回调，否则等待者无法交还回调所等的事件。
+        with self.execution_lock(lease.record['run_id']):
+            return self._concurrency_claim(lease)[1]['phase']
+
+    def _ack_concurrency_release(self, lease):
+        """准确占位已不在当前叶后才确认；未确认的证明继续保存在原 run。"""
+        run_id = lease.record['run_id']
+        with self._lock(run_id):
+            data, proof = self._concurrency_claim(lease)
+            if proof['phase'] != 'release_pending':
+                raise ValueError('WORKFLOW_CONCURRENCY_RELEASE_UNCONFIRMED')
+            proof['phase'] = 'released'
+            _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
+
+    def _concurrency_policy(self, workflow_run_id):
+        with self._lock(workflow_run_id):
+            proof = self._read(workflow_run_id, 'run.json').get('concurrency_claim', {})
+            return proof.get('record', {}).get('policy', 'allow')
 
     # LLM: 兼容任务指定的步骤保存名，不新增另一套存储格式或锁。
     # 函数用途: 通过同一原子保存链写入步骤记录。

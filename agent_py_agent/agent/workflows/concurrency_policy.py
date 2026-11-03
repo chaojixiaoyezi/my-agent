@@ -29,6 +29,8 @@ except ImportError:  # Windows不伪装成具有POSIX进程互斥能力。
     fcntl = None
 
 _LOG = logging.getLogger(__name__)
+# 仅保存本进程确已结束回调的准确清理证明；规范工作流证明另附在原 run.json。
+_PENDING_RELEASES: dict[tuple, _Lease] = {}
 
 
 # LLM: 默认值属于对象配置，不增加模块级数值常量；路径只包含固定段和结构化作用域摘要。
@@ -150,7 +152,7 @@ def _stamp(info) -> tuple[int, int]:
 
 # LLM: 父FD已由通用安全FS逐段打开；最终叶拒绝链接、FIFO及打开窗口中的身份替换。
 # 函数用途: 相对固定父FD安全打开普通文件，由调用方关闭返回FD。
-def _open_leaf(parent: int, name: str, flags: int) -> int:
+def _open_leaf(parent: int, name: str, flags: int, *, _with_stamp=False):
     try:
         before = _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False))
     except FileNotFoundError:
@@ -166,7 +168,7 @@ def _open_leaf(parent: int, name: str, flags: int) -> int:
         current = _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False))
         if opened != current or (before is not None and before != opened):
             raise NoFollowPathError("并发元数据在打开期间变化")
-        return descriptor
+        return (descriptor, opened) if _with_stamp else descriptor
     except BaseException:
         os.close(descriptor)
         raise
@@ -262,10 +264,9 @@ def _write_queue(parent: int, entries: list[dict[str, Any]]) -> None:
         allow_nan=False,
     ).encode("utf-8")
     name = f".queue-{uuid.uuid4().hex}.tmp"
-    descriptor = _open_leaf(
-        parent, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+    descriptor, identity = _open_leaf(
+        parent, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _with_stamp=True,
     )
-    identity = _stamp(os.fstat(descriptor))
     try:
         _write_all(descriptor, content)
         try:
@@ -346,15 +347,49 @@ def _claim(scope: _Scope, parent: int):
 
 # LLM: 回收和新建共用gate；仅同源明确死亡可删，未知或坏schema保持占用。
 # 函数用途: 返回当前持有者，并在可证明死亡时原位回收旧claim。
+def _claim_key(scope: _Scope, lease: _Lease):
+    return str(scope.root), scope.parts, lease.record.get('nonce'), lease.stamp
+
+
+def _lifecycle_store(scope: _Scope, lease: _Lease):
+    if lease.record.get('lifecycle') != 'workflow':
+        return None
+    from .run_store import WorkflowRunStore
+    expected = _scope(scope.root, 'workflow', lease.record.get('asset_id'), lease.record.get('run_id'))
+    if expected.parts != scope.parts:
+        raise _StateError('工作流占位作用域不匹配')
+    return WorkflowRunStore(scope.root)
+
+
 def _holder(scope: _Scope, parent: int):
+    """先核确切回调退出证明；委派义务不随原进程死亡而被回收。"""
     lease = _claim(scope, parent)
-    if (
-        lease is not None
-        and lease.record.get("schema") == "workflow-concurrency-claim.v1"
-        and _identity_live(lease.record.get("identity")) is False
-    ):
-        if not _unlink_same(parent, "claim.json", lease.stamp):
-            raise _StateError("死亡claim在回收期间变化")
+    if lease is None:
+        return None
+    key = _claim_key(scope, lease)
+    store = _lifecycle_store(scope, lease)
+    if _PENDING_RELEASES.get(key) == lease:
+        if store is not None:
+            phase = store._finish_concurrency_claim(lease)
+            if phase != 'release_pending':
+                _PENDING_RELEASES.pop(key, None)
+                return lease
+        _release_locked(scope, parent, lease)
+        return _claim(scope, parent)
+    if store is not None:
+        from .run_store import _RunBusy
+        try:
+            phase = store._concurrency_claim_phase(lease)
+        except _RunBusy:
+            return lease
+        if phase == 'release_pending':
+            _release_locked(scope, parent, lease)
+            return _claim(scope, parent)
+        return lease
+    if (lease.record.get('schema') == 'workflow-concurrency-claim.v1'
+            and _identity_live(lease.record.get('identity')) is False):
+        if not _unlink_same(parent, 'claim.json', lease.stamp):
+            raise _StateError('死亡claim在回收期间变化')
         return None
     return lease
 
@@ -384,26 +419,59 @@ def _create_claim(parent: int, ticket: dict[str, Any]) -> _Lease:
 # LLM: 同run_id不等于同租约；nonce、完整记录、inode及本进程身份全部匹配才释放。
 # 函数用途: 在原gate内安全释放自己的claim，不误删后来者。
 def _release_locked(scope: _Scope, parent: int, lease: _Lease) -> None:
-    identity = lease.record.get("identity", {})
-    if identity.get("pid") != os.getpid():
+    """删除与确认分开；一旦 I/O 失败，完整原租约仍在内存和规范账本中。"""
+    store = _lifecycle_store(scope, lease)
+    if store is None:
+        if lease.record.get('identity') != _self_identity():
+            return
+    elif store._concurrency_claim_phase(lease) != 'release_pending':
         return
+    key = _claim_key(scope, lease)
+    _PENDING_RELEASES[key] = lease
     current = _claim(scope, parent)
-    if (
-        current is not None
-        and current.stamp == lease.stamp
-        and current.record == lease.record
-    ):
-        _unlink_same(parent, "claim.json", lease.stamp)
+    if current is not None and current.stamp == lease.stamp and current.record == lease.record:
+        _unlink_same(parent, 'claim.json', lease.stamp)
+    if store is not None:
+        store._ack_concurrency_release(lease)
+    _PENDING_RELEASES.pop(key, None)
 
 
-# LLM: 同步路径保留callback原始结果与异常；finally只归还本次claim，不改业务终态。
-# 函数用途: 在gate之外执行真实callback并安全释放。
+# LLM: 回调结束只证明本栈退出；原工作流义务须由规范账本确认，清理不能覆盖业务返回或原异常。
+# 函数用途: 在门外执行一次真实回调，退出后保留或归还准确占位。
 def _execute(scope: _Scope, lease: _Lease, callback: Callable[[], Any]):
     try:
         return callback()
     finally:
+        key = _claim_key(scope, lease)
+        _PENDING_RELEASES[key] = lease
+        try:
+            with _gate(scope) as parent:
+                store = _lifecycle_store(scope, lease)
+                if store is not None and store._finish_concurrency_claim(lease) != 'release_pending':
+                    _PENDING_RELEASES.pop(key, None)
+                else:
+                    _release_locked(scope, parent, lease)
+        except Exception as exc:
+            _log_failure('claim_cleanup', exc)
+
+
+def _reconcile_workflow_claim(owner_home, asset_id, run_id):
+    """控制操作已退出运行锁后，核对同一原运行的保留证明；不触碰其它运行或执行中的回调。"""
+    scope = _scope(owner_home, 'workflow', asset_id, run_id)
+    if not _supported():
+        return
+    try:
         with _gate(scope) as parent:
-            _release_locked(scope, parent, lease)
+            lease = _holder(scope, parent)
+            if (lease is None or lease.record.get('run_id') != run_id
+                    or lease.record.get('lifecycle') != 'workflow'):
+                return
+            store = _lifecycle_store(scope, lease)
+            if (store._concurrency_claim_phase(lease) == 'retained'
+                    and store._finish_concurrency_claim(lease) == 'release_pending'):
+                _release_locked(scope, parent, lease)
+    except Exception as exc:
+        _log_failure('control_cleanup', exc)
 
 
 # LLM: 磁盘记录只做FIFO匹配，只有worker内存中原始ticket及callback能够竞争自己的claim。
@@ -424,9 +492,17 @@ def _take_ticket(scope: _Scope, ticket: dict[str, Any]):
         if index != 0 or holder is not None:
             return True, None
         lease = _create_claim(parent, ticket)
+        store = _lifecycle_store(scope, lease)
+        if store is not None:
+            store._bind_concurrency_claim(lease)
         try:
             _write_queue(parent, entries[1:])
         except BaseException:
+            # 原子发表后的 ACK 错误不等于票据仍在；已删除时继续消费本次准确占位。
+            if not any(entry['nonce'] == ticket['nonce'] for entry in _queue(scope, parent)):
+                return True, lease
+            if store is not None:
+                store._finish_concurrency_claim(lease)
             _release_locked(scope, parent, lease)
             raise
         return True, lease
@@ -455,24 +531,31 @@ def _log_failure(phase: str, exc: BaseException) -> None:
 # LLM: worker只执行原callback，不从文件恢复函数；Context由创建线程显式复制，不冒充线程局部run_params。
 # 函数用途: 等待FIFO执行权，执行后或失败时清理本次排队票据。
 def _queue_worker(scope: _Scope, ticket: dict[str, Any], callback: Callable[[], Any]) -> None:
+    """等待失败不消费已受理票据；取得占位之后绝不重试业务回调。"""
     pause = threading.Event()
-    try:
-        while True:
-            present, lease = _take_ticket(scope, ticket)
-            if not present:
-                return
-            if lease is not None:
-                _execute(scope, lease, callback)
-                return
-            pause.wait(scope.poll_seconds)
-    except BaseException as exc:
-        _log_failure("execute_or_wait", exc)
-    finally:
+    reported = False
+    while True:
         try:
-            with _gate(scope) as parent:
-                _remove_ticket_locked(scope, parent, ticket)
+            present, lease = _take_ticket(scope, ticket)
+        except OSError as exc:
+            if not reported:
+                _log_failure('wait', exc)
+                reported = True
+            pause.wait(scope.poll_seconds)
+            continue
         except BaseException as exc:
-            _log_failure("ticket_cleanup", exc)
+            # 无法解释的队列状态仍保留原票据，不能假装已经取消或完成。
+            _log_failure('wait_unconfirmed', exc)
+            return
+        if not present:
+            return
+        if lease is not None:
+            try:
+                _execute(scope, lease, callback)
+            except BaseException as exc:
+                _log_failure('execute', exc)
+            return
+        pause.wait(scope.poll_seconds)
 
 
 # LLM: allow保持旧调用语义；其它策略只管理执行准入，冻结定义、权限和运行终态仍由原宿主/Engine负责。
@@ -486,6 +569,7 @@ def dispatch(
     callback,
     *,
     queue_limit=8,
+    _lifecycle=None,
 ):
     if type(policy) is not str or policy not in ("allow", "skip_if_running", "queue"):
         return {"status": "skipped", "error_code": "INVALID_CONCURRENCY_POLICY"}
@@ -513,12 +597,23 @@ def dispatch(
         "run_id": run_id,
         "identity": identity,
     }
+    if _lifecycle is not None:
+        if kind != 'workflow' or Path(_lifecycle.owner_home).absolute() != scope.root:
+            raise ValueError('工作流生命周期作用域不匹配')
+        ticket.update(lifecycle='workflow', asset_id=asset_id, policy=policy)
     context = copy_context()
     with _gate(scope) as parent:
         entries = _prune_queue(scope, parent)
         holder = _holder(scope, parent)
-        if holder is None and not entries:
+        if (holder is not None and _lifecycle is not None and holder.record.get('run_id') == run_id
+                and holder.record.get('lifecycle') == 'workflow'
+                and _lifecycle._concurrency_claim_phase(holder) == 'retained'):
+            _lifecycle._bind_concurrency_claim(holder)
+            lease = holder
+        elif holder is None and not entries:
             lease = _create_claim(parent, ticket)
+            if _lifecycle is not None:
+                _lifecycle._bind_concurrency_claim(lease)
         elif policy == "skip_if_running":
             return {
                 "status": "skipped",
