@@ -18,7 +18,7 @@ from ..gateway_parts.io import (
     update_json_file_atomic,
     write_json_file_atomic,
 )
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .models import (
     ConversationThread,
     ObservationEvent,
@@ -32,7 +32,17 @@ from .store_io import (
 from .store_layout import ConversationStorage, wake_urgency
 from .store_observations import observation_from_request
 from .store_wake_attempts import WakeAttemptStore
-from .store_wake_publication import publication_receipt, publish_deduped
+from .store_wake_publication import (
+    publication_receipt,
+    publish_deduped,
+    rebuild_task_responsibility_index,
+    register_task_locator,
+    remove_task_locator,
+    session_task_identity,
+    signal_responsibility_guard,
+    task_responsibility_guard,
+    task_responsibility_report,
+)
 
 
 # LLM: 显式 refs 优先于观察 refs，沿原有值归一，不推断证据真实性。
@@ -214,6 +224,21 @@ class WakeStore:
 
         return publication_receipt(self.storage, thread_id, dedupe_key)
 
+    # LLM: 检查与发布共用准确task锁；上下文可安全重入，非阻塞争用在提交前拒绝。
+    # 函数用途: 为producer提供同任务责任转换的串行化边界。
+    def task_responsibility_guard(self, thread_id, session_task_id, *, blocking=True):
+        return task_responsibility_guard(self.storage, thread_id, session_task_id, blocking=blocking)
+
+    # LLM: 纯只读task查询，unknown不可解释成空责任；canonical及原发布记录仍为唯一权威。
+    # 函数用途: 返回准确任务的待处理wake/prepared引用及读取错误。
+    def task_responsibility_report(self, thread_id, session_task_id):
+        return task_responsibility_report(self.storage, thread_id, session_task_id)
+
+    # LLM: 显式维护入口，不在热查询隐式调用；重建只改派生定位，不改变唤醒状态。
+    # 函数用途: 在热路径之外为旧库建立可核验的任务级覆盖。
+    def rebuild_task_responsibility_index(self):
+        return rebuild_task_responsibility_index(self.storage)
+
     # LLM: 有键配对先冻结原负载，再安装 wake/观察；部分提交原样报错，不追加随机无链观察。
     #   retain_handled 是显式通用策略；无键调用不承诺重试幂等，线程活动仍原子合并。
     # 函数用途: 可靠发布或恢复同一对观察与唤醒，不把迟到请求内容覆盖到原发布。
@@ -260,11 +285,27 @@ class WakeStore:
         )
         return linked, selected
 
-    # LLM: 写入原 canonical 队列文件，不另写观察或去重状态。
+    # LLM: 沿原无键发布入口，task定位预留与canonical写在同一责任锁内；不另写观察或投递状态。
     # 函数用途: 发布一条不需要去重领取的新唤醒。
     def _write_new(self, signal: WakeSignal) -> WakeSignal:
-        write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
-        return signal
+        return self._publish_unkeyed(signal)
+
+    # LLM: 无键不承诺幂等，但定位必须先于canonical；原非阻塞队列锁/私有写不变。
+    # 函数用途: 将无键唤醒纳入task责任定位，仍发布独立原事件。
+    def _publish_unkeyed(self, signal: WakeSignal, *, blocking: bool = True) -> WakeSignal:
+        with signal_responsibility_guard(self.storage, signal, blocking=blocking):
+            register_task_locator(self.storage, signal, blocking=blocking)
+            if not blocking:
+                from ..common.json_io import (
+                    locked_json_path,
+                    write_private_json_file_atomic_no_newline_unlocked,
+                )
+
+                with locked_json_path(self.storage.wake_signal_path(signal), blocking=False):
+                    write_private_json_file_atomic_no_newline_unlocked(self.storage.wake_signal_path(signal), signal.to_dict())
+            else:
+                write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
+            return signal
 
     # LLM: 稳定键沿原发布锁冻结信号，显式 retain_handled 控制已消费重发；无键仍直接发布。
     # 函数用途: 创建或恢复一个信号，普通 Goal 在上一代处理后仍能正常继续。
@@ -291,16 +332,7 @@ class WakeStore:
             return publish_deduped(
                 self.storage, signal, retain_handled=request.get("retain_handled", False), blocking=blocking,
             )[1]
-        if not blocking:
-            from ..common.json_io import (
-                locked_json_path,
-                write_private_json_file_atomic_no_newline_unlocked,
-            )
-            with locked_json_path(self.storage.wake_signal_path(signal), blocking=False):
-                write_private_json_file_atomic_no_newline_unlocked(self.storage.wake_signal_path(signal), signal.to_dict())
-        else:
-            write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
-        return signal
+        return self._publish_unkeyed(signal, blocking=blocking)
 
     # LLM: 保留调用方只取结果的原接口，严格错误处理须调用 pending_report。
     # 函数用途: 读取有界待处理信号，不消费队列。
@@ -395,18 +427,27 @@ class WakeStore:
         selected = signals if limit <= 0 else signals[:limit]
         return selected, load_errors
 
-    # LLM: 保持先写 handled 回执、再移除 pending、最后确认观察的原顺序。
+    # LLM: task锁先于canonical写；先handled再移pending，之后才清定位；观察确认仍在原结案之后。
     # 函数用途: 持久确认一条唤醒已处理，并更新关联观察回执。
     def mark_handled(self, wake_signal_id: str, *, now: float | None = None) -> WakeSignal | None:
         path = self._find_path(wake_signal_id)
         if path is None or not (data := read_json_file(path)):
             return None
-        current = now if now is not None else time.time()
-        handled = replace(WakeSignal.from_dict(data), status="handled", handled_at=current)
-        write_json_file_atomic(
-            self.storage.wake_handled_dir / f"{handled.wake_signal_id}.json", handled.to_dict()
-        )
-        unlink_quietly(path)
+        original = WakeSignal.from_dict(data)
+        with signal_responsibility_guard(self.storage, original):
+            path = self._find_path(wake_signal_id)
+            if path is None or not (data := read_json_file(path)):
+                return None
+            selected = WakeSignal.from_dict(data)
+            if session_task_identity(selected) != session_task_identity(original):
+                raise DataCorruptionError("wake task identity changed while settling")
+            current = now if now is not None else time.time()
+            handled = replace(selected, status="handled", handled_at=current)
+            write_json_file_atomic(
+                self.storage.wake_handled_dir / f"{handled.wake_signal_id}.json", handled.to_dict()
+            )
+            unlink_quietly(path)
+            remove_task_locator(self.storage, handled)
         if handled.observation_id:
             self._mark_observations_handled([handled.observation_id], now=handled.handled_at)
         return handled

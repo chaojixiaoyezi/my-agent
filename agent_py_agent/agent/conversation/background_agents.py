@@ -327,8 +327,40 @@ class BackgroundAgentService:
             self._republish_pending_work(thread, tasks, actor=actor)
         return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
 
-    # LLM: 恢复/退休drain共用原输入与代次唤醒；锁内重核Owner及原回执，只重发表调度责任，不追加正文或执行模型。
-    # 函数用途: 为已受理的任务和补充消息恢复唯一原唤醒，允许暂停身份退休时排空旧工作。
+    # LLM: 只读一次原claim及精确owner/run/attempt关联；空串表示无执行，None表示未知责任，不能靠空root猜SessionTask。
+    # 函数用途: 找到当前助手真正执行的派活任务，读取或身份异常时保守阻止重发。
+    def _running_session_task(self, thread):
+        try:
+            claim, error = self.store.claims.load_report(thread.thread_id)
+            if error:
+                return None
+            if claim.get("status") != "running":
+                return ""
+            authority = claim.get("runtime_authority")
+            required = ("invocation_run_id", "task_id", "run_id", "agent_run_id", "attempt_id")
+            if (not isinstance(authority, dict) or authority.get("schema_version") != "conversation_claim_execution.v1"
+                    or authority.get("claim_id") != claim.get("claim_id")
+                    or claim.get("thread_id") != thread.thread_id
+                    or any(not isinstance(authority.get(key), str) or not authority[key] for key in required)):
+                return None
+            repo = self.host.subagents.runtime_db
+            ref = repo.parent_execution_ref(owner_id=thread.owner_id, run_id=authority["run_id"], attempt_id=authority["attempt_id"])
+            if (ref.agent_run_id != authority["agent_run_id"]
+                    or repo.task_id_for_run_id(ref.run_id) != authority["task_id"]):
+                return None
+            context = repo.business_context_for_execution(owner_id=thread.owner_id, run_id=ref.run_id, attempt_id=ref.observed_attempt_id)
+            if context is None or context.owner_id != thread.owner_id or context.space_id != background_identity(thread).space_id:
+                return None
+            task = self.store.session_tasks.require(context.task_id)
+            if task.target_thread_id != thread.thread_id or task.metadata.get("business_context") != context.to_dict():
+                return None
+            return context.task_id
+        except Exception:
+            # 原读取边界的任何失败都保留未知责任，不把关联损坏解释成当前没有执行。
+            return None
+
+    # LLM: 恢复/退休drain共用原输入；原身份锁内只读一次claim，各任务在同一task锁内检查定位与发布，不追加正文或执行模型。
+    # 函数用途: 仅在原唤醒及执行责任均已结束时恢复调度，允许暂停身份排空旧工作。
     def _republish_pending_work(self, thread, tasks, *, actor):
         from .session_messaging import (
             SESSION_MESSAGE_KEY_FIELD,
@@ -341,6 +373,7 @@ class BackgroundAgentService:
             if not background_identity_allows_work(thread, existing=True) or thread.status != "active":
                 return
             generation = str(background_identity(thread).identity_revision)
+            executing = self._running_session_task(thread)
             for task in tasks:
                 current = self.store.session_tasks.require(task.task_id)
                 fields = ("task_id", "sender_thread_id", "target_thread_id", "body_dedupe_key", "body_guidance_id")
@@ -350,10 +383,19 @@ class BackgroundAgentService:
                     raise PermissionError("OWNER_MISMATCH")
                 if current.status in SESSION_TASK_TERMINAL_STATUSES or not current.body_guidance_id:
                     continue
-                self.store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "session_task", "urgency": "normal",
-                    "dedupe_key": f"session_task:{current.task_id}:{generation}", "retain_handled": True,
-                    "summary": "恢复原任务", "metadata": {"origin_kind": SESSION_TASK_ORIGIN_KIND,
-                        "origin_thread_id": current.sender_thread_id, "session_task_id": current.task_id}})
+                if executing is None or executing == current.task_id:
+                    continue
+                with self.store.wakes.task_responsibility_guard(thread.thread_id, current.task_id):
+                    live, error = self.store.wakes.task_responsibility_report(thread.thread_id, current.task_id)
+                    if error or live:
+                        continue
+                    # 消费者可在查询期间结束准确任务；发布前仍沿原任务权威重读。
+                    if self.store.session_tasks.require(current.task_id).status in SESSION_TASK_TERMINAL_STATUSES:
+                        continue
+                    self.store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "session_task", "urgency": "normal",
+                        "dedupe_key": f"session_task:{current.task_id}:{generation}", "retain_handled": True,
+                        "summary": "恢复原任务", "metadata": {"origin_kind": SESSION_TASK_ORIGIN_KIND,
+                            "origin_thread_id": current.sender_thread_id, "session_task_id": current.task_id}})
             # pending_report本来已扫描原队列；limit=0防止只发表最后100条后声称完整。
             inputs, errors = self.store.guidance.pending_report("thread", thread.thread_id, limit=0)
             if errors:
@@ -379,14 +421,28 @@ class BackgroundAgentService:
                     "dedupe_key": str(key) + ":resume:" + generation, "retain_handled": True,
                     "summary": "恢复原补充消息", "metadata": dict(metadata)})
 
+    # LLM: 两个模型读写入口共享同一claim事实映射；读取失败保守等待安全边界，不改变执行租约。
+    # 函数用途: 同时给出模型查询的生效时点和写回执的冻结采纳状态。
+    def _model_adoption(self, agent_id):
+        claim, error = self.store.claims.load_report(agent_id)
+        if error:
+            return "pending", "pending_safe_boundary"
+        if claim.get("status") == "running":
+            return "next_safe_turn", "pending_safe_boundary"
+        return "current", "applied"
+
+    # LLM: 授权仍由原线程/空间门裁决；生效时点只取共享claim映射，不从模型名推断。
+    # 函数用途: 查询后台助手的当前模型选择和采纳边界。
     def get_model(self, agent_id, *, actor):
         thread = self._thread(agent_id, actor)
-        claim, error = self.store.claims.load_report(agent_id)
+        effective_at, _adoption_status = self._model_adoption(agent_id)
         return {"model_profile_id": thread.model_profile_id, "selection_revision": thread.model_selection_revision,
                 "source": {"kind": thread.model_selection_source or "default", "source_ref": thread.thread_id,
                            "revision": thread.model_selection_revision},
-                "effective_at": "pending" if error else "next_safe_turn" if claim.get("status") == "running" else "current"}
+                "effective_at": effective_at}
 
+    # LLM: 原权限、CAS和幂等写入保持；相同选择仍经过_mutate，提交后只返回冻结结果枚举。
+    # 函数用途: 保存后台模型选择，按是否改变选择及真实执行边界返回采纳状态。
     def set_model(self, agent_id, model_profile_id, *, actor, expected_revision, idempotency_key):
         from ..user_space.group_authorization_context import group_capability_guard
 
@@ -394,9 +450,13 @@ class BackgroundAgentService:
         self._thread(agent_id, actor)
         self._profile(model_profile_id)
         with group_capability_guard(self.host, "assistant.configure", thread_id=agent_id):
+            previous = self._thread(agent_id, actor)
+            unchanged = previous.model_profile_id == model_profile_id
             thread = self._mutate(agent_id, actor=actor, action="model.set", changes={"model_profile_id": model_profile_id},
                                   expected_revision=expected_revision, idempotency_key=idempotency_key, model=True)
-        return {"selection_revision": thread.model_selection_revision, "adoption_status": "pending"}
+        _effective_at, adoption_status = self._model_adoption(agent_id)
+        return {"selection_revision": thread.model_selection_revision,
+                "adoption_status": "unchanged" if unchanged else adoption_status}
 
     def _dispatch(self, request, target, *, actor, idempotency_key, origin_task_id=""):
         with background_identity_transition(self.store, target.thread_id):

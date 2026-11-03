@@ -115,7 +115,7 @@ from .models import (
     new_id,
 )
 from .run_claim import claim_heartbeat_interval_seconds
-from .session_tasks import SESSION_TASK_CANCELLED
+from .session_tasks import SESSION_TASK_CANCELLED, SESSION_TASK_TERMINAL_STATUSES
 from .store import ConversationStore
 
 # 连续失败次数由原 Store 持久化；普通失败达阈值后停用策略（阈值只在 store_progress 定义一次）。
@@ -3148,7 +3148,10 @@ def _skip_pending_wake_signal(
     return False
 # LLM: 批次执行先经过 scheduler 共享的供应冷却，再沿原耐久 wake 确认；runtime 已提交 canonical 回复，这里不能另存正文。
 #   若主信号在 _run_wake_signal 内已作为失效/取消来源结案（report=None 且已不在 pending），释放尚未结案的同批兄弟信号，避免误做 30 秒失败退避。
-# 函数用途: 运行一批同源唤醒、登记调度结果并处理确认或退避，不创建第二条通知主链。
+#   最后一条wake确认后再核原身份责任；claim结束前或wake确认前的旧快照不能宣告退休已排空。
+# 函数用途: 运行一批同源唤醒、登记调度结果并处理确认或退避，确认后收口原后台身份。
+# LLM: 原claim/报告/确认语义保持；所有batch成员确认后才收口身份，不能把sibling未结案时的旧快照当最终结果。
+# 函数用途: 消费同一责任批次并在最后一个唤醒结案后重新核对助手退休状态。
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -3175,6 +3178,7 @@ def _consume_wake_signal_batch(
                     handled.add(member.wake_signal_id)
                 else:
                     attempted.discard(member.wake_signal_id)
+            _reconcile_background_lifecycle(scheduler.runtime.agent, scheduler.store, execution_signal.thread_id)
             return
         _defer_failed_wake_batch(scheduler, wake_batch, execution_signal, current)
         return
@@ -3190,11 +3194,13 @@ def _consume_wake_signal_batch(
         handled,
         sampled_at=report.created_at,
     )
+    if len(wake_batch) > 1:
+        for member in wake_batch:
+            if member.wake_signal_id not in handled:
+                scheduler._mark_signal(member, current, handled)
+    _reconcile_background_lifecycle(scheduler.runtime.agent, scheduler.store, execution_signal.thread_id)
     if len(wake_batch) <= 1:
         return
-    for member in wake_batch:
-        if member.wake_signal_id not in handled:
-            scheduler._mark_signal(member, current, handled)
     if _typed_audit_finding_signal(signal):
         from .task_promotion import complete_named_audit_task_if_settled
 
@@ -3401,8 +3407,8 @@ def _select_successful_completion_batch(
     return tuple(selected)
 
 
-# LLM: 只读同任务的结构化事件类型；审计专属批次及已冻结交付沿各自路径，不按正文合并。
-# 函数用途: 判断普通唤醒能否共同消费；消息键不同分别准入，避免已消费primary吞未消费sibling。
+# LLM: 只读同任务的结构化事件类型；SessionTask必须共享非空准确任务号，空root不代表同一完成责任。
+# 函数用途: 判断普通唤醒能否共同消费；不同任务或消息键分别准入，不吞未消费的兄弟来源。
 def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
     reason = str(primary.reason or "").strip().lower()
     if (
@@ -3416,6 +3422,11 @@ def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
         or cached_owner_delivery(sibling) is not None
     ):
         return False
+    if reason == "session_task":
+        primary_task_id = (primary.metadata or {}).get("session_task_id")
+        sibling_task_id = (sibling.metadata or {}).get("session_task_id")
+        if not isinstance(primary_task_id, str) or not primary_task_id.strip() or primary_task_id != sibling_task_id:
+            return False
     if reason == "session_message":
         from .session_messaging import SESSION_MESSAGE_KEY_FIELD
 
@@ -5895,8 +5906,9 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     return False
 
 
-# LLM: claim 后重查精确任务；自然收尾后的受管进程补报与队列筛选共用权威校验，不复活停止任务。
-# 函数用途: 拦截过期工作；精确委派终态仅保留无模型的原结果补账，命令通知仍沿原来源。
+# LLM: 原claim领取后、模型请求构造前重查准确SessionTask；终态只结原wake，不重执或改学习候选。
+#   原TaskLink/受管进程补报和委派结果补账保持；业务上下文中的身份不匹配仍拒绝，未放宽原ValueError门。
+# 函数用途: 持原执行责任拦截终态任务的迟到唤醒，同时保留既有无模型补账入口。
 def _claimed_background_task_is_terminal(
     agent: object,
     store: object,
@@ -5905,6 +5917,24 @@ def _claimed_background_task_is_terminal(
     """Recheck exact terminal state at the final background-run admission edge."""
     thread_id = str(kwargs.get("thread_id") or "").strip()
     task_id = str(kwargs.get("task_id") or "").strip()
+    signal = kwargs.get("wake_signal")
+    wake = signal.to_dict() if isinstance(signal, WakeSignal) else signal
+    if str(kwargs.get("reason") or "").strip().lower() == "session_task" and isinstance(wake, dict):
+        request = BackgroundRunRequest(thread_id=thread_id, reason="session_task", wake_signal=wake)
+        session_task_id = _session_task_id_from_wake(request)
+        task = store.session_tasks.load(session_task_id) if session_task_id else None
+        if task is not None and task.status in SESSION_TASK_TERMINAL_STATUSES:
+            if task.target_thread_id != thread_id:
+                raise ValueError("business wake context identity mismatch")
+            if "business_context" in task.metadata:
+                from .business_contracts import BusinessExecutionContext
+
+                context = BusinessExecutionContext.from_dict(task.metadata["business_context"])
+                thread = store.threads.require(thread_id)
+                if (task.task_id != context.task_id or context.owner_id != str(agent.home_paths.owner_id)
+                        or thread.owner_id != context.owner_id):
+                    raise ValueError("business wake context identity mismatch")
+            return True
     if not thread_id or not task_id:
         return False
     from .process_events import process_completion_delivery_state
@@ -5912,7 +5942,6 @@ def _claimed_background_task_is_terminal(
 
     if delegated_result_report_pending(agent, thread_id, task_id=task_id):
         return False  # 原claim只进入metadata补账入口，recover_delegated_result在模型前返回。
-    signal = kwargs.get("wake_signal")
     if (isinstance(signal, WakeSignal)
         and signal.thread_id == thread_id and signal.root_task_id == task_id
         and signal.reason == kwargs.get("reason")

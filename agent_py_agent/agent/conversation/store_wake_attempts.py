@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,11 @@ from ..runtime_errors import DataCorruptionError, compact_error_message, runtime
 from .models import WakeSignal
 from .store_io import read_json_object_report, unlink_quietly
 from .store_layout import ConversationStorage
+from .store_wake_publication import (
+    register_task_locator,
+    remove_task_locator,
+    signal_responsibility_guard,
+)
 from .wake_poison import (
     WAKE_ATTEMPT_ABANDONED,
     WAKE_ATTEMPT_GATEWAY_STOPPED,
@@ -235,11 +241,21 @@ class WakeAttemptStore:
     #   结掉关联观察。结案记录必须最先落盘，pending 紧接着删：若先移账、再删 pending，两步之间崩溃会留下 pending 而账已不在，
     #   这条唤醒会从零重新计数（9a 复审，C6 收窄窗口）；现在任何一步之后崩溃，最多留下一份没有 pending 对应的孤儿坏账。
     #   pending 信封读不出时走 _quarantine_unreadable（原字节移到 unreadable/，不在坏内容上补字段）。
-    # 函数用途: 把一条反复同因失败的唤醒结案为 failed_permanently，不再被领取；会写、删、移文件并更新观察回执。
+    #   task责任门先于结案锁；原canonical落盘并离开pending后才清派生引用，坏信封保留unknown。
+    # 函数用途: 将失败唤醒按原顺序结案并维护责任定位；会写、删、移文件并更新观察回执。
     def quarantine(self, wake_signal_id: str, decision: QuarantineDecision, *, now: float) -> WakeQuarantineResult:
         target = self.storage.wake_quarantine_path(wake_signal_id)
         attempts = self.storage.wake_attempt_path(wake_signal_id)
-        with locked_file_transition(target):
+        initial = self._find_pending_path(wake_signal_id)
+        if initial is None:
+            return WakeQuarantineResult(None)
+        payload, error = read_json_object_report(initial, context="conversation.wake_quarantine.read")
+        try:
+            signal = WakeSignal.from_dict(payload) if error is None else None
+        except (ValueError, TypeError):
+            signal = None
+        guard = signal_responsibility_guard(self.storage, signal) if signal is not None else nullcontext()
+        with guard, locked_file_transition(target):
             pending = self._find_pending_path(wake_signal_id)
             if pending is None:
                 return WakeQuarantineResult(None)
@@ -256,6 +272,8 @@ class WakeAttemptStore:
             if preserved:
                 _move_aside(attempts, Path(preserved))
             unlink_quietly(attempts)
+            if signal is not None:
+                remove_task_locator(self.storage, signal)
         settled = WakeSignal.from_dict(record)
         if settled.observation_id:
             self._mark_observations_handled([settled.observation_id], now=now)
@@ -292,12 +310,16 @@ class WakeAttemptStore:
     # LLM: 在结案记录的锁内完成：来源状态经 replay_source 判定（已归档、读不出、不存在各自拒绝），再核对 pending 没有
     #   同 ID 文件、领域未终态（由调用方传入判定），然后按原 ID 和冻结内容写回 pending，结案记录移入
     #   replayed/<id>/<n>.json 留档，尝试账清零。领域判定为 None 表示调用方不做领域检查。任何拒绝都不改文件，不抛异常。
-    # 函数用途: 管理员人工重放一条已结案的唤醒；会写 pending、留档和尝试账，并删除结案记录。
+    #   原task责任门先于结案锁，定位预留先于pending；重放仍是显式恢复原ID，不修改原发布冻结。
+    # 函数用途: 人工重放原唤醒并恢复派生定位；会写pending、留档并删除结案和尝试账。
     def replay(
         self, wake_signal_id: str, *, now: float, domain_terminal: Callable[[WakeSignal], bool] | None = None,
     ) -> WakeReplayResult:
         source = self.storage.wake_quarantine_path(wake_signal_id)
-        with locked_file_transition(source):
+        code, initial = self.replay_source(wake_signal_id)
+        if code:
+            return WakeReplayResult(False, code)
+        with signal_responsibility_guard(self.storage, WakeSignal.from_dict(initial)), locked_file_transition(source):
             code, payload = self.replay_source(wake_signal_id)
             if code:
                 return WakeReplayResult(False, code)
@@ -310,6 +332,7 @@ class WakeAttemptStore:
             if domain_terminal is not None and domain_terminal(signal):
                 return WakeReplayResult(False, WAKE_REPLAY_DOMAIN_TERMINAL, signal)
             archive = self._replay_archive_dir(wake_signal_id)
+            register_task_locator(self.storage, signal)
             write_json_file_atomic(self.storage.wake_signal_path(signal), restored)
             write_json_file_atomic(archive / f"{_archive_count(archive) + 1}.json",
                                    {**payload, "quarantine": {**facts, "replayed_at": now}})
