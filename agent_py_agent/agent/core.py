@@ -485,7 +485,7 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
-    # LLM: 保持W原bootstrap及owner初始化顺序；会话库显式绑定owner_compact_dir，defer仅透传实例MCP策略，默认eager、不修改配置或子worker策略。
+    # LLM: 保持W原bootstrap及owner初始化顺序；会话库显式绑定owner_compact_dir，defer仅透传实例MCP策略，默认eager、不修改配置或子worker策略；home绑定后登记弱活动源。
     # 函数用途: 按真实owner装配代理及统一冷检查点路径，可为控制面延后普通MCP连接，原工作区与孤儿消费者接线保持。
     def __init__(
         self,
@@ -510,6 +510,10 @@ class SimpleAgent(
 
         self.home_paths = (_resolve_home_paths(config) if worker_bootstrap is None
                            else _resolve_home_paths(config, worker_bootstrap=worker_bootstrap))
+        from .observability.concurrency_metrics import register_owner_model_activity
+
+        # 物理owner已固定，登记只保留弱执行引用，不从全局指标猜测空闲。
+        register_owner_model_activity(self)
         if worker_bootstrap is None:
             self.root.mkdir(parents=True, exist_ok=True)
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)

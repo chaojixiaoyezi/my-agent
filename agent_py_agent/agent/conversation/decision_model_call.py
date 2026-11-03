@@ -45,7 +45,7 @@ from ..contracts.model_call_ledger import (
 )
 from ..llm_scale.hot_path import global_llm_admission_slot
 from ..memory_archive import estimate_tokens
-from ..observability.concurrency_metrics import llm_inflight
+from ..observability.concurrency_metrics import llm_inflight, owner_model_activity_scope
 from ..runtime_context import current_subagent_attempt_id
 from ..settings.decision_experiment_schema import experiment_task_id
 from .decision_send_permit import DecisionExperimentCall, issue_send_permit
@@ -221,7 +221,7 @@ def _started_params(params: object, request: DecisionRequest, backend: object, *
     )
 
 
-# LLM: thread-local HTTP 观察必须在实际 worker 安装；先领取准确保留再检查取消，准入槽与保留仅在实际退出时释放。
+# LLM: thread-local HTTP观察及owner活动必须在实际worker安装；先领取准确保留再检查取消，准入槽、保留与占用仅在实际退出时释放。
 # operation 由调用方绑定为普通 decide 或携带发送许可的 send，worker 不自行选择路径。
 # 观察者开启传输分段计时（只量不改发送）：各阶段进度实时进账本，caller 超时那一刻也能读到卡在哪个阶段。
 # 函数用途: 在原可选名额内执行一次决策请求，传播身份上下文并记录真实 HTTP 尝试及其分段计时，不提交逻辑终态。
@@ -242,7 +242,9 @@ def _invoke_worker(
         def observe(event: dict[str, object]) -> None:
             record_model_provider_attempt(ledger, call_id, event)
 
-        with global_llm_admission_slot(optional=True), provider_runtime_scope(agent, params), provider_attempt_observer(observe, cache_diagnostics=False, transport_timing=True):
+        with (global_llm_admission_slot(optional=True), provider_runtime_scope(agent, params),
+                provider_attempt_observer(observe, cache_diagnostics=False, transport_timing=True),
+                owner_model_activity_scope(agent)):
             _record_inflight(1)
             try:
                 _check_active(deadline)

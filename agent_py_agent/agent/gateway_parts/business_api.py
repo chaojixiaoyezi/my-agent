@@ -381,6 +381,7 @@ class BusinessServices:
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         self._default_projection = self.projection is None
         if self.projection is None and getattr(host, 'conversation_store', None) is not None:
+            from ..observability.concurrency_metrics import owner_model_activity_provider
             from ..runtime_db.repository import RuntimeRepository
             from ..runtime_db.schema import runtime_db_path
             from .business_api_v13_readers import (
@@ -389,9 +390,13 @@ class BusinessServices:
             )
 
             runtime = RuntimeRepository(runtime_db_path(self.owner_home), read_only=True)
+            resource_provider = getattr(host, '_business_model_activity_provider', None)
+            if resource_provider is None:
+                resource_provider = owner_model_activity_provider(self.owner_home, self.owner_id)
             self.projection = DefaultBusinessObservationService(self.owner_home, owner_id=self.owner_id,
                 store=host.conversation_store, runtime=runtime,
-                readers=default_observation_readers(self.owner_home, self.owner_id, host.conversation_store, runtime))
+                readers=default_observation_readers(self.owner_home, self.owner_id, host.conversation_store, runtime,
+                    resource_provider=resource_provider))
         self.approvals = getattr(host, 'business_approval_decider', None)
         # 被动组合由组合根声明完整宿主接线；直接传入的宿主本身即owner宿主。
         self.complete_host_wired = bool(getattr(host, 'business_complete_host_wired', True))
@@ -400,10 +405,14 @@ class BusinessServices:
     # 函数用途: 在下一请求识别首次创建或已消失的规范来源。
     def refresh_observation_readers(self):
         if self._default_projection and isinstance(self.projection, BusinessObservationService):
+            from ..observability.concurrency_metrics import owner_model_activity_provider
             from .business_api_v13_readers import default_observation_readers
             projection = self.projection
+            resource_provider = getattr(self.host, '_business_model_activity_provider', None)
+            if resource_provider is None:
+                resource_provider = owner_model_activity_provider(self.owner_home, self.owner_id)
             projection.readers = default_observation_readers(self.owner_home, self.owner_id,
-                projection.store, projection.runtime)
+                projection.store, projection.runtime, resource_provider=resource_provider)
 
     @property
     def observation(self):
@@ -692,11 +701,14 @@ def dispatch_business_action(request: dict, *, authenticated_context: object, se
     return execute_business(request, authenticated_context, services)[1]
 
 
+# LLM: 只消费原认证owner并只读装配；模型来源按该物理home重新取，不复制base owner的provider或替换显式投影。
+# 函数用途: 保持原宿主身份与缓存投影，同时为当前owner绑定可信本地活动源。
 def native_business_context(handler, server):
     """只消费原HTTP身份并只读装配owner Store；线程创建延至已验证的W2写动作，控制宿主只在调用内租用。"""
     from types import SimpleNamespace
 
     from ..auth.middleware import _handler_peer_ip
+    from ..observability.concurrency_metrics import owner_model_activity_provider
     from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
     from .control_service import resolve_gateway_scope_owner
     from .http_handlers import _gateway_control_scope, _request_channel
@@ -708,7 +720,8 @@ def native_business_context(handler, server):
     owner = resolve_gateway_scope_owner(base, scope)
     home = home_paths_with_owner(base.home_paths, resolve_owner_home(base.home_paths.root, owner))
     wired = complete_host_wired(server)
-    host = SimpleNamespace(home_paths=home, config=base.config, business_complete_host_wired=wired)
+    host = SimpleNamespace(home_paths=home, config=base.config, business_complete_host_wired=wired,
+        _business_model_activity_provider=owner_model_activity_provider(home.owner_home_dir, home.owner_id))
     # 路径句柄仅供可信只读适配器关联原生push；不接受JSON路径，也不因此授予其它owner权限。
     host.business_v13_gateway_paths = server.paths
     if getattr(base, 'conversation_store', None) is not None:

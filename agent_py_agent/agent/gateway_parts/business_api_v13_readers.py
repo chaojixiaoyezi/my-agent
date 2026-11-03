@@ -106,15 +106,15 @@ class _DecisionWindow:
 
 
 # LLM: 探测只开只读连接，不迁移或创建目录；不接受请求选择owner或文件路径。
-# 函数用途: 为生产组合根提供精确四参数默认reader工厂。
-def default_observation_readers(owner_home, owner_id, store, runtime) -> dict:
+# 函数用途: 为生产组合根提供默认reader工厂，资源可由同owner只读来源显式绑定。
+def default_observation_readers(owner_home, owner_id, store, runtime, *, resource_provider=None) -> dict:
     home = Path(owner_home).resolve()
     if store is not None and not Path(store.storage.root).resolve().is_relative_to(home):
         return {}
     repo = None
     if runtime is not None and Path(runtime.db_path).resolve().is_relative_to(home):
         repo = RuntimeRepository(runtime.db_path, read_only=True)
-    source = _OwnerReaders(home, owner_id, store, repo)
+    source = _OwnerReaders(home, owner_id, store, repo, resource_provider=resource_provider)
     readers = {}
     try:
         resources = source.resource_snapshot()
@@ -156,8 +156,9 @@ class _OwnerReaders:
 
     # LLM: 不构造执行器；同namespace复用密钥，首次插入到达上限时淘汰最早条目。
     # 函数用途: 保存源引用和有界的owner日志游标密钥，确保跨HTTP分页仍能验签。
-    def __init__(self, home, owner, store, repo):
+    def __init__(self, home, owner, store, repo, *, resource_provider=None):
         self.home, self.owner, self.store, self.repo = home, owner, store, repo
+        self.resource_provider = resource_provider
         namespace = (str(Path(store.storage.root)) if store is not None else '', str(home), owner)
         with self._cursor_lock:
             if namespace not in self._cursor_keys:
@@ -442,19 +443,46 @@ class _OwnerReaders:
             pass
         return False
 
-    # LLM: 无owner标签的进程指标不能当owner事实；只读已采样label，不初始化0。
-    # 函数用途: 获取owner模型并发及规范任务/子运行计数。
+    # LLM: 公共来源须匹配物理home、owner及本进程且为整数；显式坏源不降级，旧label仅兼容未装公共源的调用。
+    # 函数用途: 获取真实owner模型并发及规范任务/子运行计数，不把未知冒充空闲0。
     def resource_snapshot(self):
+        from collections.abc import Mapping
+
         from ..observability import concurrency_metrics
 
-        metrics = concurrency_metrics._METRICS
-        if metrics is None or self.store is None or self.repo is None:
+        if self.store is None or self.repo is None:
             return None
-        meter = metrics.llm_inflight
-        with meter._lock:
-            value = meter._vals.get((('owner_id', self.owner),))
-        if value is None or not float(value).is_integer() or value < 0:
-            return None
+        provider = self.resource_provider
+        if provider is None:
+            provider = concurrency_metrics.owner_model_activity_provider(self.home, self.owner)
+        if provider is not None:
+            try:
+                snapshot = provider() if callable(provider) else None
+                if not isinstance(snapshot, Mapping):
+                    return None
+                source_home = Path(snapshot.get('owner_home'))
+                value = snapshot.get('active_model_calls')
+                if (snapshot.get('owner_id') != self.owner or not source_home.is_absolute()
+                        or source_home.resolve() != self.home
+                        or type(snapshot.get('process_id')) is not int
+                        or snapshot['process_id'] != os.getpid()
+                        or type(value) is not int or value < 0):
+                    return None
+            except Exception:
+                return None
+        else:
+            # 旧宿主/测试的已采样owner标签保留；无标签的全局总量永远不是本owner事实。
+            metrics = concurrency_metrics._METRICS
+            if metrics is None:
+                return None
+            meter = metrics.llm_inflight
+            with meter._lock:
+                value = meter._vals.get((('owner_id', self.owner),))
+            if type(value) is float:
+                if not value.is_integer() or value < 0:
+                    return None
+            elif type(value) is not int or value < 0:
+                return None
         tasks, errors = self.store.session_tasks.list_report(limit=0)
         if errors:
             return None
