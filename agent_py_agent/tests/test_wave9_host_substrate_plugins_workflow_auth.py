@@ -589,12 +589,72 @@ def test_host_real_http_package_install_staged_tar_and_lifecycle(production_host
     assert removed['status'] == 'uninstalled'
 
 
-# LLM: 同键重放来源已删仍不重写；新更新须原安装CAS，旧修订不能成功。
-# 函数用途: 验证安装重放和已有包更新的真实HTTP行为。
-def test_host_package_update_cas_and_idempotent_staging_retry(production_host):
-    import base64
+# LLM: 仅此stale探测重试明确未开始的限流；不改变生产limiter、production_call或领域CAS，不掩盖其它错误。
+# 函数用途: 最多八次发送stale更新，只有安全限流才间隔0.25秒后重试。
+def _stale_update_request(host, row):
+    import time
 
     from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
+    for attempt in range(8):
+        status, body = http_request(host[0], host[1], row)
+        error = body.get('error', {})
+        if (status != 429 or not isinstance(error, dict) or error.get('code') != 'RATE_LIMITED'
+                or error.get('outcome') != 'not_started'):
+            return status, body
+        if attempt < 7:
+            time.sleep(0.25)
+    return status, body
+
+
+# LLM: helper只得重试已明确未进入领域的限流，次数和等待预算固定，不接受未知执行状态。
+# 函数用途: 锁住stale更新测试的局部重试条件和八次上限。
+@pytest.mark.parametrize('status,code,outcome,tries,sleeps', [
+    (429, 'RATE_LIMITED', 'not_started', 8, 7), (429, 'RATE_LIMITED', 'unknown', 1, 0),
+    (429, 'OTHER', 'not_started', 1, 0), (409, 'PLUGIN_MANAGEMENT_FAILED', 'not_started', 1, 0),
+])
+def test_stale_update_retry_is_bounded_and_not_started_only(monkeypatch, status, code, outcome, tries, sleeps):
+    import sys
+    import time
+
+    from agent_py_agent.tests import test_plugin_host_v2_grants as transport
+    helper = getattr(sys.modules[__name__], '_stale_update_request', None)
+    assert callable(helper), 'missing bounded stale update retry'
+    calls, waits = [], []
+    response = {'error': {'code': code, 'outcome': outcome}}
+    monkeypatch.setattr(transport, 'http_request', lambda *a: calls.append(a) or (status, response))
+    monkeypatch.setattr(time, 'sleep', waits.append)
+    assert helper(('server', 'token'), {}) == (status, response)
+    assert len(calls) == tries and waits == [0.25] * sleeps
+
+
+# LLM: 同键重放来源已删仍不重写；新更新须原安装CAS，旧修订不能成功。
+# 函数用途: 验证安装重放和已有包更新的真实HTTP行为。
+@pytest.mark.parametrize('deterministic', [False, True])
+def test_host_package_update_cas_and_idempotent_staging_retry(production_host, monkeypatch, deterministic):
+    import base64
+
+    from agent_py_agent.tests import test_plugin_host_v2_grants as transport
+    limited = []
+    if deterministic:
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.plugin_host import http_transport
+        # 第一写0.0、重放0.1；第三写重试至1.0，第四写仍落在0.1与1.0的同一窗口。
+        ticks = iter([0.0, 0.1, 0.2, 0.45, 0.7, 0.95, 1.0, 1.0, 1.25])
+        monkeypatch.setattr(http_transport, 'time', SimpleNamespace(monotonic=lambda: next(ticks, 2.0)))
+        original_http = transport.http_request
+
+        # LLM: 只记录原HTTP返回，不替换限流准入或领域CAS，任何429须在领域执行前拒绝。
+        # 函数用途: 核实受控窗口内的每个中间拒绝都能安全重试。
+        def observe(*args, **kwargs):
+            status, body = original_http(*args, **kwargs)
+            if status == 429:
+                assert body['error']['code'] == 'RATE_LIMITED'
+                assert body['error']['outcome'] == 'not_started'
+                limited.append(args[2]['idempotency_key'])
+            return status, body
+
+        monkeypatch.setattr(transport, 'http_request', observe)
     uploads = production_host[2].home_dir / 'uploads'
     uploads.mkdir()
     staged = uploads / 'first.zip'
@@ -607,9 +667,11 @@ def test_host_package_update_cas_and_idempotent_staging_retry(production_host):
         'expected_revision': first['revision']}
     second = production_call(production_host, 'plugins.packages.install', updated, key='wave9-update-install-2')
     assert second['version'] == '0.2.0' and second['revision'] > first['revision']
-    status, body = http_request(production_host[0], production_host[1], {'schema': 'plugin_host_call.v2',
+    status, body = _stale_update_request(production_host, {'schema': 'plugin_host_call.v2',
         'action': 'plugins.packages.install', 'payload': updated, 'idempotency_key': 'wave9-update-stale-3'})
     assert status == 409 and body['error']['code'] == 'PLUGIN_MANAGEMENT_FAILED'
+    if deterministic:
+        assert 'wave9-update-stale-3' in limited
 
 
 # LLM: 只替换管理命令副作用，明确本例不证明插件进程已真实启停。

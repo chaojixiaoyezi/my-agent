@@ -106,7 +106,10 @@ def compact_status_result(agent, thread=None):
               "user_override": policy["user_default_percent"], "admin_default": policy["admin_default_percent"]}
     details = {"compact_policy": public, "compact_generation": getattr(thread, "compact_generation", 0),
                "idle_auto_compact": copy.deepcopy(metadata.get("idle_auto_compact", {})),
-               "idle_policy": {"enabled": bool(threshold and seconds), "trigger_percent": threshold, "idle_seconds": seconds},
+               "idle_policy": {"enabled": bool(threshold and seconds), "trigger_percent": threshold, "idle_seconds": seconds,
+                               "trigger_percent_of_compact_window": threshold,
+                               "effective_compact_trigger_percent": policy["effective_trigger_percent"],
+                               "effective_window_percent": round(policy["effective_trigger_percent"] * threshold / 100, 2)},
                "last_user_activity_at": metadata.get("last_user_activity_at", getattr(thread, "updated_at", None)),
                "user_activity_generation": metadata.get("user_activity_generation", 0)}
     return ConversationControlResult("compact", True,

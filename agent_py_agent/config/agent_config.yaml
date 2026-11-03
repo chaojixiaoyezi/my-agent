@@ -228,7 +228,7 @@ memory_compact_trigger_percent: 80
 # 管理员全局强制开关；开启后用户和会话覆盖不能改变生效比例，运行覆盖层不得解除。
 # 同一管理员配置源也识别 admin_force_compact_trigger_percent / memory_compact_admin_forced，任一true即强制。
 force_compact_trigger_percent: false
-# 会话闲置自动压缩的容量门，默认60%，限制0..95；0关闭此能力。
+# 会话闲置自动压缩容量门，相对于当前生效压缩阈值窗口（配置或会话覆盖）的比例，默认60%，限制0..95；0关闭。
 memory_compact_idle_trigger_percent: 60
 # 距最后真实用户发言静默多久才尝试闲置压缩，默认2小时；0关闭，启用时最短60秒。
 memory_compact_idle_seconds: 7200

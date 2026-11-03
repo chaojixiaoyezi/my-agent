@@ -113,9 +113,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _tool_input_active: bool = False
     _identifier_redactions: tuple[tuple[object, str], ...] = ()
     _observed_tool_rounds: int = 0
-    # LLM: 出口正文里的宿主绝对路径是否保留，只由这条请求的通道事实决定（本机私有通道保留，
-    #   外部/未知通道收敛成 basename）。不得从正文内容判断，也不得整体取消脱敏。
+    # LLM: 此通道字段保持交付/审批路由事实；完整路径展示另读服务端请求级标志，
+    #   未获例外的外部/未知通道仍收敛成 basename，不得从正文判断或整体取消脱敏。
     delivery_channel: str = ""
+    # 服务端请求级展示资格与路由分离；关键字字段不挤占既有位置参数。
+    preserve_host_paths: bool = field(default=False, kw_only=True)
     interactive_approvals: bool = False
     rich_transcript: bool = False
     main_activity_sink: object | None = field(default=None, repr=False)
@@ -202,12 +204,16 @@ class BufferedChunkStreamWriter(StreamLiveness):
             for event in events:
                 self._write_event({**event, "verbose_level": "stream"})
 
+    # LLM: 只消费本请求冻结标志；正文与标识净化保留，不在增量热路径查询认证。
+    # 函数用途: 为原模型增量缓冲生成本查看者的安全文本。
     def _project_stream_text(self, text: str) -> str:
         from ..conversation.channels import project_user_reply
 
         return redact_structured_identifiers(
-            project_host_paths_for_channel(project_user_reply(text).content, self.delivery_channel),
+            project_host_paths_for_channel(project_user_reply(text).content, self.delivery_channel,
+                preserve_host_paths=self.preserve_host_paths),
             self._identifier_redactions, channel=self.delivery_channel,
+            preserve_host_paths=self.preserve_host_paths,
         )
 
     # LLM: 原已采纳响应先排空本段思考并重开首块额度；call幂等、关闭门、IM档位和final-only沿原提交核心。
@@ -381,7 +387,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
         if not self.rich_transcript:
             return
         payload = thinking_event(text, duration_seconds=duration_seconds, delivery_channel=self.delivery_channel,
-                                 identifiers=self._identifier_redactions, transcript_sink=self.transcript_sink)
+                                 identifiers=self._identifier_redactions, transcript_sink=self.transcript_sink,
+                                 preserve_host_paths=self.preserve_host_paths)
         if payload:
             self._write_event(payload)
 
@@ -393,8 +400,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
             return
         raw = str(text or "")
         content = redact_structured_identifiers(
-            project_host_paths_for_channel(raw, self.delivery_channel),
+            project_host_paths_for_channel(raw, self.delivery_channel, preserve_host_paths=self.preserve_host_paths),
             self._identifier_redactions, channel=self.delivery_channel,
+            preserve_host_paths=self.preserve_host_paths,
         )
         with self._commit_lock:
             if not content and not self._thinking_buffer:
@@ -668,7 +676,8 @@ def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> 
     call_id = committed_model_call_id(payload)
     if not call_id:
         return
-    events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
+    events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions,
+                                    preserve_host_paths=writer.preserve_host_paths)
     with writer._commit_lock:
         if call_id in writer._committed_model_calls or getattr(writer, "_liveness_closed", False):
             return

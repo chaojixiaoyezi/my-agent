@@ -1444,6 +1444,7 @@ def _handle_gateway_request(
         interactive_approvals=_gateway_request_interactive_approvals(agent, context["request"]),
         rich_transcript=_gateway_client_supports_rich_transcript(context["request"]),
         delivery_channel=request_history.gateway_request_channel(context["request"]),
+        preserve_host_paths=request_history.gateway_request_preserves_host_paths(context["request"]),
     )
 
     chunk_writer.im_approval_agent = agent

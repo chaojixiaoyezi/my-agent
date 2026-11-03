@@ -115,9 +115,11 @@ def persist_gateway_assistant_result(
         project_message_paths_for_channel(
             delivery_projection.content,
             gateway_conversation_channel(context, conversation),
+            preserve_host_paths=gateway_request_preserves_host_paths(context.request),
         ),
         gateway_identifier_redactions(context, conversation, result=result),
         channel=gateway_conversation_channel(context, conversation),
+        preserve_host_paths=gateway_request_preserves_host_paths(context.request),
     )
     channel_delivery["content"] = public_content
     channel_delivery["artifacts"] = _metadata_artifact_refs(
@@ -257,9 +259,11 @@ def _persist_gateway_assistant_commentaries(
         projection = project_user_reply(str(raw or ""))
         # 每条说明消息各自是一条完整消息，同样走整条消息出口（脱敏过路径才附说明，每条最多一次）。
         content = redact_structured_identifiers(
-            project_message_paths_for_channel(projection.content, channel),
+            project_message_paths_for_channel(projection.content, channel,
+                preserve_host_paths=gateway_request_preserves_host_paths(context.request)),
             identifiers,
             channel=channel,
+            preserve_host_paths=gateway_request_preserves_host_paths(context.request),
         ).strip()
         if not content:
             continue
@@ -793,6 +797,13 @@ def gateway_request_channel(request: object) -> str:
     metadata = request.get("metadata")
     declared = metadata.get("channel") if isinstance(metadata, dict) else None
     return str(declared or request.get("source") or request.get("channel") or "").strip().lower()
+
+
+# LLM: 只读取HTTP准入时覆盖的精确metadata键；缺少标志的历史请求不从用户名、通道或正文推断管理员。
+# 函数用途: 取得当前请求已冻结的完整路径展示资格，不访问认证服务。
+def gateway_request_preserves_host_paths(request: object) -> bool:
+    metadata = request.get("metadata") if isinstance(request, dict) else None
+    return isinstance(metadata, dict) and metadata.get("host_path_display") == "full"
 
 
 # LLM: 展示与落账共用请求的通道 resolver；缺请求事实时回到会话绑定，不能从模型内容或 rich 开关猜私有性。

@@ -100,12 +100,13 @@ def public_context_compaction_payload(value: object) -> dict[str, object]:
 # LLM: All public model text shares redaction. A positive max applies only to volatile
 # display-only thinking; zero preserves committed assistant prose for transcript/Compact.
 # 函数用途: 生成公开模型文本；max_chars=0 时保留完整已确认回复。
-def public_model_text(text: object, *, max_chars: int, delivery_channel: str, identifiers: tuple[tuple[object, str], ...]) -> str:
+def public_model_text(text: object, *, max_chars: int, delivery_channel: str, identifiers: tuple[tuple[object, str], ...], preserve_host_paths: bool = False) -> str:
     projection = project_user_reply(str(text or ""))
     content = redact_structured_identifiers(
-        project_host_paths_for_channel(projection.content, delivery_channel),
+        project_host_paths_for_channel(projection.content, delivery_channel, preserve_host_paths=preserve_host_paths),
         identifiers,
         channel=delivery_channel,
+        preserve_host_paths=preserve_host_paths,
     ).strip()
     if max_chars <= 0 or len(content) <= max_chars:
         return content
@@ -130,7 +131,7 @@ def committed_model_call_id(payload: object) -> str:
 
 # LLM: 输入只来自已验响应提交；整段安全投影不等于分段时合并显示并标记降级，不制造provider phase或执行许可。
 # 函数用途: 将一次完整模型正文转换为可校正候选的原显示事件，不输出隐藏推理。
-def committed_model_events(payload: dict, *, delivery_channel: str = "", identifiers: tuple = ()) -> list[dict]:
+def committed_model_events(payload: dict, *, delivery_channel: str = "", identifiers: tuple = (), preserve_host_paths: bool = False) -> list[dict]:
     if not committed_model_call_id(payload):
         return []
     source = payload["source"]
@@ -139,7 +140,7 @@ def committed_model_events(payload: dict, *, delivery_channel: str = "", identif
         return []
     rows = [row for row in rows if isinstance(row, dict)]
     rows, full, separable = message_projection(rows, lambda text: public_model_text(
-        text, max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers))
+        text, max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers, preserve_host_paths=preserve_host_paths))
     events = []
     final_known = any(row.get("phase") == "final_answer" for row in rows)
     if not separable:
@@ -155,7 +156,8 @@ def committed_model_events(payload: dict, *, delivery_channel: str = "", identif
                 events.append({"kind": "assistant_commentary", "text": row["text"], "model_source": source,
                                "message_source": {key: row.get(key) for key in ("protocol", "message_id", "output_index", "phase", "source_type")}})
         if payload["boundary"] == "terminal":
-            final = public_model_text(payload.get("final_text"), max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers)
+            final = public_model_text(payload.get("final_text"), max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers,
+                preserve_host_paths=preserve_host_paths)
             if final:
                 events.append({"kind": "assistant_final", "text": final, "model_source": source})
     for index, event in enumerate(events):
@@ -169,8 +171,10 @@ def committed_model_events(payload: dict, *, delivery_channel: str = "", identif
 def thinking_event(
     text: str, *, duration_seconds: float, delivery_channel: str,
     identifiers: tuple[tuple[object, str], ...], transcript_sink: object | None,
+    preserve_host_paths: bool = False,
 ) -> dict[str, object]:
-    full_content = public_model_text(text, max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers)
+    full_content = public_model_text(text, max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers,
+        preserve_host_paths=preserve_host_paths)
     if not full_content:
         return {}
     archived = {}
@@ -179,7 +183,8 @@ def thinking_event(
         from ..conversation.background_transcript import _thinking_archive_payload
 
         archived = _thinking_archive_payload(transcript_sink, full_content)
-        content = public_model_text(full_content, max_chars=12_000, delivery_channel=delivery_channel, identifiers=identifiers)
+        content = public_model_text(full_content, max_chars=12_000, delivery_channel=delivery_channel, identifiers=identifiers,
+            preserve_host_paths=preserve_host_paths)
     return {
         "kind": "assistant_thinking",
         "text": content,
@@ -265,9 +270,10 @@ def drain_thinking_delta_text(writer: Any, raw_joined: str, *, final: bool = Tru
     if not emit_raw:
         return ""
     return redact_structured_identifiers(
-        project_host_paths_for_channel(emit_raw, writer.delivery_channel),
+        project_host_paths_for_channel(emit_raw, writer.delivery_channel, preserve_host_paths=getattr(writer, "preserve_host_paths", False)),
         writer._identifier_redactions,
         channel=writer.delivery_channel,
+        preserve_host_paths=getattr(writer, "preserve_host_paths", False),
     )
 
 

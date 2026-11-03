@@ -50,16 +50,26 @@ LOCAL_PRIVATE_CHANNELS = frozenset(
 HOST_PATH_REDACTION_NOTE = "（路径只显示最后一段，完整路径请在本机 TUI 查看。）"
 
 
-# 函数用途: 按通道决定正文里的宿主绝对路径是保留还是收敛成 basename。
-def project_host_paths_for_channel(text: object, channel: object) -> str:
-    return project_host_paths_report(text, channel)[0]
+# LLM: 展示例外只消费服务端冻结的布尔事实，不改变通道路由或其它净化规则。
+# 函数用途: 按通道及请求展示权限投影路径，片段不附说明。
+def project_host_paths_for_channel(text: object, channel: object, *, preserve_host_paths: bool = False) -> str:
+    return project_host_paths_report(text, channel, preserve_host_paths=preserve_host_paths)[0]
+
+
+# LLM: 仅本机私有通道或具备全用户能力的非IM、非群查看者保留路径；不检查正文或用户名，不访问认证服务。
+# 函数用途: 根据当前查看者的结构化权限决定是否展示宿主完整路径。
+def host_paths_visible_to_viewer(channel: object, *, can_access_all_users: bool, chat_type: object = '') -> bool:
+    normalized = str(channel or '').strip().lower()
+    return (normalized in LOCAL_PRIVATE_CHANNELS
+            or (can_access_all_users is True and normalized not in PROACTIVE_PUSH_CHANNELS
+                and str(chat_type or '').strip().lower() != 'group'))
 
 
 # LLM: 与 project_host_paths_for_channel 同一规则，额外返回本次替换了几处宿主绝对路径（结构化事实，不读正文语义）；
 #   本机私有通道不替换，计数为 0。
 # 函数用途: 投影路径并报告这次是否真的替换过路径。
-def project_host_paths_report(text: object, channel: object) -> tuple[str, int]:
-    if str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
+def project_host_paths_report(text: object, channel: object, *, preserve_host_paths: bool = False) -> tuple[str, int]:
+    if preserve_host_paths or str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
         return str(text or ""), 0
     return _HOST_ABSOLUTE_PATH_RE.subn(_host_path_basename, str(text or ""))
 
@@ -68,8 +78,8 @@ def project_host_paths_report(text: object, channel: object) -> tuple[str, int]:
 #   project_host_paths_for_channel，免得一条消息里出现多次说明。是否附说明只看本次替换计数；已投影过的正文里不再有
 #   宿主绝对路径、说明本身也不含路径，所以同一条消息再经一次出口时计数为 0，说明只会出现一次。
 # 函数用途: 对外通道脱敏了宿主绝对路径时，在消息末尾统一附一句说明。
-def project_message_paths_for_channel(text: object, channel: object) -> str:
-    projected, replaced = project_host_paths_report(text, channel)
+def project_message_paths_for_channel(text: object, channel: object, *, preserve_host_paths: bool = False) -> str:
+    projected, replaced = project_host_paths_report(text, channel, preserve_host_paths=preserve_host_paths)
     return f"{projected.rstrip()}\n\n{HOST_PATH_REDACTION_NOTE}" if replaced else projected
 
 
@@ -188,6 +198,7 @@ def redact_structured_identifiers(
     identifiers: Iterable[tuple[object, str]],
     *,
     channel: object = "",
+    preserve_host_paths: bool = False,
 ) -> str:
     projected = str(text or "")
     replacements: dict[str, str] = {}
@@ -198,7 +209,7 @@ def redact_structured_identifiers(
             continue
         replacements.setdefault(value, str(public_label or "当前对象"))
     for value in sorted(replacements, key=len, reverse=True):
-        if str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
+        if preserve_host_paths or str(channel or "").strip().lower() in LOCAL_PRIVATE_CHANNELS:
             # 完整路径先匹配并原样保留；相对路径中的精确目录段也不替换。
             pattern = _HOST_ABSOLUTE_PATH_RE.pattern + rf"|(?<![/\\])(?P<identifier>{re.escape(value)})(?![/\\])"
             projected = re.sub(pattern, lambda match: replacements[value]
