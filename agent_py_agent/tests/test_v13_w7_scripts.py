@@ -1,10 +1,15 @@
 """#73 固定脚本合同回归：原生资产、持久回执、真实 HTTP 与原审批门。"""
 from __future__ import annotations
 
+import ast
 import base64
+import errno
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
+from threading import Event, Lock, get_ident
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -794,3 +799,310 @@ def test_assignment_receipt_uses_native_identity(kind):
         with pytest.raises(HostAPIError) as error:
             scripts._assignment_receipt(raw)
         assert error.value.code == 'HOST_NOT_READY'
+
+
+# LLM: 原生目录操作使用 POSIX 描述符；枚举结束后再 fstat，排除采样器自身的临时目录 FD。
+# 函数用途: 取得当前进程真实打开的描述符身份，不引入额外测试依赖。
+def _script_fd_snapshot():
+    directory = next(path for path in (Path('/proc/self/fd'), Path('/dev/fd')) if path.is_dir())
+    with os.scandir(directory) as entries:
+        numbers = [int(entry.name) for entry in entries if entry.name.isdecimal()]
+    result = {}
+    for number in numbers:
+        try:
+            status = os.fstat(number)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            result[number] = (status.st_dev, status.st_ino, status.st_mode)
+    return result
+
+
+def _script_fd_is_open(number, identity):
+    try:
+        status = os.fstat(number)
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise
+        return False
+    return (status.st_dev, status.st_ino, status.st_mode) == identity
+
+
+# LLM: 只观察原生获取/删除，不替换存储、服务或信封；单次错误只发生在目的目录获取处。
+# 函数用途: 记录删除调用内的真实 FD 差额，失败断言后也收回测试观测到的残留资源。
+@pytest.fixture
+def delete_resources(monkeypatch):
+    observed = SimpleNamespace(handles=[], measurements=[], failure=None, errors=0, home=None)
+    original_open = scripts.open_directory_beneath
+    original_delete = scripts._NativeCASStore._delete
+
+    def open_directory(root, parts, **kwargs):
+        if parts == ('data', 'business_v13', 'script_delete_proofs') and observed.failure is not None:
+            error, observed.failure = observed.failure, None
+            observed.errors += 1
+            raise error
+        number = original_open(root, parts, **kwargs)
+        status = os.fstat(number)
+        observed.home = Path(root)
+        observed.handles.append((number, (status.st_dev, status.st_ino, status.st_mode), parts))
+        return number
+
+    def delete(store, script_id):
+        before = _script_fd_snapshot()
+        try:
+            return original_delete(store, script_id)
+        finally:
+            after = _script_fd_snapshot()
+            observed.measurements.append(len(after) - len(before))
+            if len(after) != len(before):
+                import fcntl
+                added = {}
+                for number, identity in after.items():
+                    if before.get(number) != identity:
+                        try:
+                            path = fcntl.fcntl(number, fcntl.F_GETPATH, bytes(1024)).split(b'\0', 1)[0].decode()
+                        except (AttributeError, OSError):
+                            path = 'descriptor identity: ' + repr(identity)
+                        added[number] = path
+                print('Delete FD observation:', {'delta': observed.measurements[-1], 'added': added})
+
+    monkeypatch.setattr(scripts, 'open_directory_beneath', open_directory)
+    monkeypatch.setattr(scripts._NativeCASStore, '_delete', delete)
+    try:
+        yield observed
+    finally:
+        for number, identity, _parts in observed.handles:
+            if _script_fd_is_open(number, identity):
+                os.close(number)
+
+
+def _script_delete_proof(directory, script_id):
+    matches = [json.loads(path.read_text()) for path in directory.glob('*.json')]
+    matches = [row for row in matches if row.get('schema_version') == 'script-config-proof.v1'
+               and row.get('action') == 'scripts.delete' and row.get('script_id') == script_id]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+# LLM: 真实 HTTP 创建/删除及同键重试均经过原 dispatcher、CAS、原生资产与耐久回执，不手写响应。
+# 函数用途: 验证成功和单次目的目录 EIO 都关闭 FD，失败保留准确证明，重试不删除后建同名资产。
+@pytest.mark.parametrize('destination_error', [False, True])
+def test_script_delete_cleanup_http(v13_native, delete_resources, destination_error):
+    script_id, key = 'r4-http-cleanup', 'r4-http-delete-key-0001'
+    status, created = v13_call(v13_native, 'scripts.create',
+        {'script_id': script_id, 'name': '删除资源检查', 'code': 'print("original")'},
+        user='business-alice', idempotency_key='r4-http-create-key-0001')
+    assert status == 200 and created['state'] == 'completed' and created['error'] is None, created
+    revision = created['data']['script']['revision']
+    delete_resources.failure = OSError(errno.EIO, 'single destination acquisition error') if destination_error else None
+    result = v13_call(v13_native, 'scripts.delete', {'script_id': script_id},
+        user='business-alice', idempotency_key=key, expected_revision=revision)
+    if destination_error:
+        assert_error(result, 503, 'OUTCOME_UNKNOWN')
+    print('HTTP delete fd_delta:', delete_resources.measurements)
+    source_handles = [(fd, identity) for fd, identity, parts in delete_resources.handles if parts == ('scripts',)]
+    assert source_handles
+    assert not any(_script_fd_is_open(fd, identity) for fd, identity in source_handles), 'source descriptor retained'
+    assert delete_resources.measurements == [0]
+    home = delete_resources.home
+    previous_proof = None
+    if destination_error:
+        assert delete_resources.errors == 1
+        assert ScriptStore(home).get_script(script_id)['code'] == 'print("original")'
+        previous_proof = _script_delete_proof(home / 'scripts' / script_id, script_id)
+        assert previous_proof['phase'] == 'deleted'
+        result = v13_call(v13_native, 'scripts.delete', {'script_id': script_id},
+            user='business-alice', idempotency_key=key, expected_revision=revision)
+        assert delete_resources.measurements == [0, 0]
+    assert result[0] == 200 and result[1]['state'] == 'completed' and result[1]['error'] is None, result
+    assert result[1]['data'] == {'script_id': script_id, 'deleted': True}
+    assert ScriptStore(home).get_script(script_id) is None
+    proof_root = home / 'data' / 'business_v13' / 'script_delete_proofs'
+    directories = list(proof_root.iterdir())
+    assert len(directories) == 1
+    proof = _script_delete_proof(directories[0], script_id)
+    assert proof['operation_id'] == directories[0].name and proof['phase'] == 'deleted'
+    assert proof['fingerprint'] == scripts.digest(['scripts.delete', {'script_id': script_id}, revision])
+    assert {path.name for path in directories[0].iterdir()} == {proof['operation_id'] + '.json'}
+    if previous_proof is not None:
+        assert proof == previous_proof
+    status, replacement = v13_call(v13_native, 'scripts.create',
+        {'script_id': script_id, 'name': '后建资产', 'code': 'print("replacement")'},
+        user='business-alice', idempotency_key='r4-http-recreate-key-0001')
+    assert status == 200 and replacement['error'] is None, replacement
+    replay = v13_call(v13_native, 'scripts.delete', {'script_id': script_id},
+        user='business-alice', idempotency_key=key, expected_revision=revision)
+    assert replay[0] == 200 and replay[1]['data'] == result[1]['data'] and replay[1]['error'] is None, replay
+    assert ScriptStore(home).get_script(script_id)['code'] == 'print("replacement")'
+    assert _script_delete_proof(directories[0], script_id) == proof
+    assert all(delta == 0 for delta in delete_resources.measurements)
+    assert not any(_script_fd_is_open(fd, identity) for fd, identity, _parts in delete_resources.handles)
+
+
+# LLM: 遍历整个模块的目录/原生 FD 获取；禁止第二次获取先于第一次清理登记，保留单 FD try/finally。
+# 函数用途: 返回没有立即登记关闭或紧邻 finally 保护的获取点，防止同模式在其它函数重现。
+def _script_fd_cleanup_gaps(source):
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    gaps = []
+    for parent in ast.walk(tree):
+        for _field, block in ast.iter_fields(parent):
+            if not isinstance(block, list):
+                continue
+            for index, statement in enumerate(block):
+                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
+                    continue
+                if ast.unparse(statement.value.func) not in ('open_directory_beneath', 'os.open', 'os.dup'):
+                    continue
+                name = ast.unparse(statement.targets[0])
+                following = block[index + 1] if index + 1 < len(block) else None
+                registered = False
+                if isinstance(following, ast.Expr) and isinstance(following.value, ast.Call):
+                    call = following.value
+                    if (isinstance(call.func, ast.Attribute) and call.func.attr == 'callback'
+                            and len(call.args) == 2 and ast.unparse(call.args[0]) == 'os.close'
+                            and ast.unparse(call.args[1]) == name):
+                        scope = parents.get(statement)
+                        while scope is not None:
+                            if isinstance(scope, ast.With):
+                                registered = any(isinstance(item.context_expr, ast.Call)
+                                    and ast.unparse(item.context_expr.func) == 'ExitStack'
+                                    and item.optional_vars is not None
+                                    and ast.unparse(item.optional_vars) == ast.unparse(call.func.value)
+                                    for item in scope.items)
+                                if registered:
+                                    break
+                            scope = parents.get(scope)
+                if isinstance(following, ast.Try):
+                    registered = any(isinstance(node, ast.Call) and ast.unparse(node.func) == 'os.close'
+                        and len(node.args) == 1 and ast.unparse(node.args[0]) == name
+                        for final in following.finalbody for node in ast.walk(final))
+                if not registered:
+                    gaps.append((statement.lineno, name))
+    return gaps
+
+
+def test_script_descriptor_acquisitions_register_cleanup_immediately():
+    assert _script_fd_cleanup_gaps(Path(scripts.__file__).read_text()) == []
+    paired = '''
+def paired():
+    source = open_directory_beneath(root, source_parts)
+    destination = open_directory_beneath(root, destination_parts)
+    try:
+        move(source, destination)
+    finally:
+        os.close(destination)
+        os.close(source)
+'''
+    assert _script_fd_cleanup_gaps(paired) == [(3, 'source')]
+    unentered = '''
+def unentered():
+    cleanup = ExitStack()
+    source = open_directory_beneath(root, source_parts)
+    cleanup.callback(os.close, source)
+'''
+    assert _script_fd_cleanup_gaps(unentered) == [(4, 'source')]
+
+
+# LLM: CancelledError 只模拟同步删除栈的取消展开，不声称覆盖会话 stop；操作准备和证明仍由原 dispatcher 写入。
+# 函数用途: 验证 BaseException 展开也关闭源 FD，保留证明并可用原键恢复。
+def test_script_delete_cleanup_on_cancellation(world, delete_resources):
+    from asyncio import CancelledError
+
+    script_id, key = 'r4-cancel-cleanup', 'r4-cancel-delete-key-0001'
+    initial = create(world, script_id)
+    home = world.host.home_paths.owner_home_dir
+    delete_resources.failure = CancelledError()
+    with pytest.raises(CancelledError):
+        invoke(world, 'scripts.delete', {'script_id': script_id}, key=key, revision=initial['revision'])
+    print('Cancelled delete fd_delta:', delete_resources.measurements)
+    assert delete_resources.errors == 1 and delete_resources.measurements == [0]
+    assert not any(_script_fd_is_open(fd, identity) for fd, identity, _parts in delete_resources.handles)
+    proof = _script_delete_proof(home / 'scripts' / script_id, script_id)
+    assert ScriptStore(home).get_script(script_id) is not None
+    status, body = invoke(world, 'scripts.delete', {'script_id': script_id}, key=key, revision=initial['revision'])
+    assert status == 200 and body['state'] == 'completed' and body['error'] is None, body
+    private = home / 'data' / 'business_v13' / 'script_delete_proofs' / proof['operation_id']
+    assert _script_delete_proof(private, script_id) == proof
+    assert delete_resources.measurements == [0, 0]
+    assert ScriptStore(home).get_script(script_id) is None
+
+
+# LLM: Event 等到第二请求竞争首请求实持的原生锁才释放，不以 HTTP 到达代替锁竞争，不替换真实锁行为。
+# 函数用途: 证明同键请求只删除一次、活动删除数不超过一，后到重放不擦除准确删除证明。
+def test_script_delete_same_key_interleaving_retains_proof(v13_native, delete_resources, monkeypatch):
+    from agent_py_agent.agent.common import json_io
+
+    entered, contending, release = Event(), Event(), Event()
+    guard = Lock()
+    active = {'current': 0, 'maximum': 0, 'calls': 0}
+    held = {'thread': None, 'locks': set(), 'contended_path': None}
+    original_path_lock = json_io.path_thread_lock
+    original_delete = scripts._NativeCASStore._delete
+    key, script_id = 'r4-interleaved-delete-key-0001', 'r4-interleaved'
+    status, created = v13_call(v13_native, 'scripts.create',
+        {'script_id': script_id, 'name': '并发删除', 'code': 'print("{}")'},
+        user='business-alice', idempotency_key='r4-interleaved-create-key-0001')
+    assert status == 200, created
+    revision = created['data']['script']['revision']
+
+    def observe_path_lock(path):
+        handle = original_path_lock(path)
+        if get_ident() != held['thread'] and id(handle.lock) in held['locks']:
+            # 先用同一实际锁证明竞争失败，再走原获取器；不靠调度快慢推测第二请求是否已竞争。
+            if handle.lock.acquire(blocking=False):
+                handle.lock.release()
+                raise AssertionError('首请求仍在等待时原生锁已提前释放')
+            held['contended_path'] = str(path)
+            contending.set()
+        return handle
+
+    def delete(store, item):
+        with guard:
+            active['current'] += 1
+            active['calls'] += 1
+            active['maximum'] = max(active['maximum'], active['current'])
+        held['thread'] = get_ident()
+        with json_io._JSON_FILE_LOCKS_GUARD:
+            held['locks'] = {id(mutex.lock) for name, mutex in json_io._JSON_FILE_LOCKS.items()
+                if name.startswith(str(store.owner_home) + os.sep) and mutex.lock.locked()}
+        assert held['locks'], '原生删除没有实持的 owner 锁'
+        entered.set()
+        try:
+            assert release.wait(10), '未收到第二个请求的交错释放'
+            return original_delete(store, item)
+        finally:
+            with guard:
+                active['current'] -= 1
+
+    monkeypatch.setattr(json_io, 'path_thread_lock', observe_path_lock)
+    monkeypatch.setattr(scripts._NativeCASStore, '_delete', delete)
+
+    def request():
+        return v13_call(v13_native, 'scripts.delete', {'script_id': script_id},
+            user='business-alice', idempotency_key=key, expected_revision=revision)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(request)
+        try:
+            assert entered.wait(10), '首个删除未进入原生边界'
+            second = pool.submit(request)
+            assert contending.wait(10), '第二个 HTTP 请求未竞争首请求实持的原生锁'
+            assert active == {'current': 1, 'maximum': 1, 'calls': 1}
+        finally:
+            release.set()
+        results = [first.result(timeout=20), second.result(timeout=20)]
+    assert active == {'current': 0, 'maximum': 1, 'calls': 1}
+    assert held['contended_path'] is not None
+    assert [status for status, _body in results] == [200, 200], results
+    assert all(body['state'] == 'completed' and body['error'] is None for _status, body in results)
+    assert results[0][1]['data'] == results[1][1]['data'] == {'script_id': script_id, 'deleted': True}
+    proof_root = delete_resources.home / 'data' / 'business_v13' / 'script_delete_proofs'
+    directories = list(proof_root.iterdir())
+    assert len(directories) == 1
+    proof = _script_delete_proof(directories[0], script_id)
+    assert proof['operation_id'] == directories[0].name
+    assert delete_resources.measurements == [0]
+    print('Interleaved delete maximum_active:', active['maximum'], 'fd_delta:', delete_resources.measurements,
+          'contended_lock:', Path(held['contended_path']).name)
