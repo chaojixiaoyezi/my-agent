@@ -127,12 +127,12 @@ def test_serialization_expiry_cannot_commit_guidance_after_original_budget(tmp_p
             result = serialize(payload, **options)
             if payload.get('schema_version') == 'conversation_guidance_once.v4' and not delayed:
                 delayed.append(True)
-                time.sleep(0.10)
+                time.sleep(0.35)
             return result
 
         monkeypatch.setattr(json_io, 'serialize_private_json_no_newline', slow)
         params = params_for(agent, claim, thread)
-        with provider_request_budget(0.04), pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
+        with provider_request_budget(0.25), pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
             run_input_safe_point(params.pending_turn_input_source, agent, 'drain', params)
         assert caught.value.phase == 'input.transport.retry_admission' and delayed
         assert original_input_guidance(agent.conversation_store, receipt) is None
