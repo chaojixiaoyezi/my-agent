@@ -113,6 +113,12 @@ subagent_heartbeat_timeout: 0
 subagent_run_timeout: 0
 # 同一任务连续这么多次尝试都没有进展时触发无进展熔断：停止自动重试和扩容，汇总引用后等父级或用户决策；0 关闭熔断。
 subagent_no_progress_attempt_limit: 4
+# 仅有显式写文件/产物合同的子代理：连续只读调用达到此次数时提醒一次；0 关闭提醒。
+# 任意写尝试（含失败）或阶段产物更新清零；默认值是观察起点，不代表已验证的安全阈值。
+subagent_readonly_stall_hint_calls: 30
+# 同一只读连续段达到此次数时以 SUBAGENT_READONLY_STALL 阻塞交直属父级；0 关闭熔断。
+# 不依据任务正文判断合同，不改变模型路由或工具授权；普通只读任务不受影响。
+subagent_readonly_stall_halt_calls: 80
 
 # 失败自省自动拆分开关。
 # - true: runner 失败自省（FailureIntrospector）判定 should_split 且给出拆分建议时，

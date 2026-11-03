@@ -99,6 +99,10 @@ class CapabilityConfig:
     subagent_heartbeat_timeout: int = 0
     subagent_run_timeout: int = 0
     subagent_no_progress_attempt_limit: int = 4
+    # 仅显式产物合同子代理：连续只读调用到此次数提醒一次；写尝试或阶段产物更新清零，0 关闭提醒。
+    subagent_readonly_stall_hint_calls: int = field(default=30, kw_only=True)
+    # 同一只读连续段到此次数阻塞交直属父级；0 关闭熔断，不改变工具授权或模型路由。
+    subagent_readonly_stall_halt_calls: int = field(default=80, kw_only=True)
     # 慢模型流式活动投影：只写时间、阶段和字符计数，不保存正文。
     subagent_stream_activity_projection_enabled: bool = True
     # 同一模型流阶段写 canonical child state 的最小间隔，避免逐 token 落盘。
@@ -163,6 +167,10 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
 
     自建 yaml 里带引号的标量按 YAML 语义是字符串(qq_app_id: "190…" 等纯数字 ID 必须保字符串),
     普通策略按 dataclass 类型归一；新增审批和认证部署边界严格校验，未知值不能静默打开能力。"""
+    if field_name in {"subagent_readonly_stall_hint_calls", "subagent_readonly_stall_halt_calls"}:
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{field_name} 必须为非负整数；0 关闭对应只读空转观察。")
+        return value
     if field_name == "im_task_credentials_ttl_seconds":
         if type(value) is not int or (value != 0 and not 60 <= value <= 31536000):
             raise ValueError("im_task_credentials_ttl_seconds 必须为0或60秒到一年的整数。")

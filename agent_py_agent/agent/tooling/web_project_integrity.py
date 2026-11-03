@@ -69,7 +69,11 @@ def _static_site_request(site_root: Path, workspace: Path) -> dict[str, object]:
     }
 
 
+# LLM: 路径先 canonicalize，回溯不越过工作区且绝不把宿主根当站点；cjs 必须有 index 邻域。
+# 函数用途: 只在真正的项目范围定位静态站点，避免写脚本触发全 home 扫描。
 def _nearest_site_root(path: Path, workspace_root: Path) -> Path | None:
+    path = path.expanduser().resolve(strict=False)
+    workspace_root = workspace_root.expanduser().resolve(strict=False)
     try:
         path.relative_to(workspace_root)
     except ValueError:
@@ -78,11 +82,27 @@ def _nearest_site_root(path: Path, workspace_root: Path) -> Path | None:
     for candidate in (start, *start.parents):
         if not _inside(candidate, workspace_root):
             break
-        if any(item.is_file() for item in candidate.glob("*.html")):
+        if _is_host_root(candidate):
+            break
+        has_html = ((candidate / "index.html").is_file() if path.suffix.lower() == ".cjs" else
+                    any(item.is_file() for item in candidate.glob("*.html")))
+        if has_html:
             return candidate
         if candidate == workspace_root:
             break
     return None
+
+
+# LLM: 只读取目录事实与 canonical owner 布局，不依赖任务正文或当前进程 cwd。
+# 函数用途: 识别不能作为站点根的宿主/owner 根目录。
+def _is_host_root(path: Path) -> bool:
+    if any((path / marker).exists() or (path / marker).is_symlink()
+           for marker in ("runtime.db", "workspace/runtime", "sessions")):
+        return True
+    return path.parent.parent.name == "owners" or (
+        path.parent.name in {"users", "groups"} and path.parent.parent.parent.name == "providers"
+        and path.parent.parent.parent.parent.name == "owners"
+    )
 
 
 def _inside(candidate: Path, workspace_root: Path) -> bool:
@@ -100,6 +120,8 @@ def _site_root_ref(site_root: Path, workspace_root: Path) -> str:
         return str(site_root)
 
 
+# LLM: 成功写入仍成功，扫描缺口以结构化 warning 暴露给调用方。
+# 函数用途: 把整站发现及不完整事实转换成写后提醒。
 def _web_project_decision(validation_result: dict[str, Any]) -> ArtifactIntegrityDecision:
     issues = [
         ArtifactIntegrityIssue(
@@ -111,6 +133,9 @@ def _web_project_decision(validation_result: dict[str, Any]) -> ArtifactIntegrit
         for field, code in _STATIC_SITE_ISSUE_CODES.items()
         if isinstance((values := validation_result.get(field)), list) and values
     ]
+    if validation_result.get("scan_incomplete") is True:
+        issues.append(ArtifactIntegrityIssue(code="STATIC_SITE_SCAN_INCOMPLETE", message="站点扫描不完整。",
+                                            severity="warning", count=1))
     # 单文件已经原子落盘后，整站未收齐只是当前状态，不能把成功写入伪装成失败。
     # 最终是否可交付仍由显式 static_site_check 统一判定。
     return ArtifactIntegrityDecision(ok=True, kind="web_project", issues=issues)

@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ...common.bounded_walk import bounded_walk
 from ...common.value_parsing import sequence_strings
 from ..execution.executor_helpers import _test_name, _utc_now_iso
 from ..execution.records import TestExecutionRecord
 
 REMOTE_SCHEMES = {"http", "https", "mailto", "tel", "data", "javascript"}
+_SITE_SCAN_EXCLUDES = frozenset({".git", "__pycache__", "node_modules", "local_store", "compact", "runs", "sessions"})
 _VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _GET_ELEMENT_BY_ID_RE = re.compile(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _QUERY_SELECTOR_ID_RE = re.compile(r"querySelector(?:All)?\(\s*['\"]#([A-Za-z0-9_-]+)['\"]\s*\)")
@@ -41,10 +43,14 @@ class StaticSiteCheckResult:
     missing_js_api_hits: list[str] = field(default_factory=list)
     repair_hints: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    scan_incomplete: bool = field(default=False, kw_only=True)
+    scan_coverage: dict[str, object] = field(default_factory=dict, kw_only=True)
 
+    # LLM: 未覆盖的显式文件或预算截断不能被空发现列表掩盖。
+    # 函数用途: 只有完整检查且没有失败项时才通过。
     @property
     def ok(self) -> bool:
-        return not (
+        return not self.scan_incomplete and not (
             self.missing_required_files
             or self.placeholder_hits
             or self.broken_local_refs
@@ -55,6 +61,8 @@ class StaticSiteCheckResult:
             or self.missing_js_api_hits
         )
 
+    # LLM: 保留历史字段并附加扫描覆盖，调用方不得把部分扫描当作完整验收。
+    # 函数用途: 输出静态检查结果及其覆盖范围。
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
@@ -70,6 +78,8 @@ class StaticSiteCheckResult:
             "missing_js_api_hits": self.missing_js_api_hits,
             "repair_hints": self.repair_hints,
             "warnings": self.warnings,
+            "scan_incomplete": self.scan_incomplete,
+            "scan_coverage": dict(self.scan_coverage),
         }
 
 
@@ -183,8 +193,12 @@ def static_site_record(
     )
 
 
+# LLM: 部分扫描必须在失败摘要中可见，不把空 findings 误称完整通过。
+# 函数用途: 汇总静态站点失败及覆盖缺口。
 def static_site_failure_summary(result: Any) -> str:
     parts: list[str] = []
+    if getattr(result, "scan_incomplete", False):
+        parts.append("scan_incomplete=True")
     for field_name in (
         "missing_required_files",
         "placeholder_hits",
@@ -433,6 +447,8 @@ def _object_property_names(body: str) -> set[str]:
     return names
 
 
+# LLM: 排除相对可信工作区的运行目录祖先，防止把排除目录本身作为扫描根绕过剪枝。
+# 函数用途: 验证站点根存在、未越界且不处于宿主运行目录。
 def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path, str]:
     raw = str(test.get("site_root") or ".").strip()
     workspace = workspace_root.expanduser().resolve()
@@ -442,15 +458,24 @@ def _resolve_site_root(test: dict[str, Any], workspace_root: Path) -> tuple[Path
         path.relative_to(workspace)
     except ValueError:
         return path, "site_root 超出 workspace 边界"
+    if not _site_path_allowed(path, workspace):
+        return path, "site_root 位于排除的运行目录"
     if not path.exists() or not path.is_dir():
         return path, "site_root 不存在或不是目录"
     return path, ""
 
 
+# LLM: 整站结果携带遍历覆盖；超过预算或文件选择上限不能作为通过证明。
+# 函数用途: 在限定的项目子树内执行静态检查。
 def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     result = StaticSiteCheckResult(checked_root=str(site_root))
     _check_required_files(result, test, site_root)
-    html_files = _html_files(test, site_root, int(test.get("max_files") or 200))
+    coverage: dict[str, object] = {}
+    html_files = _html_files(test, site_root, int(test.get("max_files") or 200), coverage=coverage)
+    result.scan_coverage = coverage
+    result.scan_incomplete = bool(coverage.get("truncated"))
+    if result.scan_incomplete:
+        result.warnings.append("STATIC_SITE_SCAN_INCOMPLETE")
     result.checked_files = [rel(path, site_root) for path in html_files]
     options = _scan_options(test)
     state = StaticSiteScanState()
@@ -534,25 +559,54 @@ def _check_required_files(
             result.missing_required_files.append(item)
 
 
-def _html_files(test: dict[str, Any], site_root: Path, max_files: int) -> list[Path]:
-    scoped = _scoped_html_files(test, site_root)
-    if scoped:
-        return scoped[: max(1, min(max_files, 500))]
+# LLM: 运行时目录在进入前排除；显式 scope 也不能引入它们，不完整扫描显式上报。
+# 函数用途: 用统一预算枚举项目 HTML，而不是对整个 owner home 做 rglob。
+def _html_files(test: dict[str, Any], site_root: Path, max_files: int, *,
+                coverage: dict[str, object] | None = None) -> list[Path]:
     limit = max(1, min(max_files, 500))
-    return sorted(path for path in site_root.rglob("*.html") if path.is_file())[:limit]
+    rejected: list[str] = []
+    scoped = _scoped_html_files(test, site_root, rejected=rejected)
+    if test.get("html_files") or test.get("check_files"):
+        if coverage is not None:
+            invalid = bool(rejected) or not scoped
+            coverage.update(truncated=invalid or len(scoped) > limit, rejected_files=rejected,
+                            stop_reason="invalid_scope" if invalid else "max_files" if len(scoped) > limit else "complete")
+        return scoped[:limit]
+    result = bounded_walk(site_root, include=lambda entry: Path(entry.name).suffix.lower() in {".html", ".htm"}
+                          and entry.is_file(follow_symlinks=False), exclude_dir_names=_SITE_SCAN_EXCLUDES,
+                          exclude_relative_paths=frozenset({"workspace/runtime"}))
+    paths = sorted(result.paths)
+    if coverage is not None:
+        coverage.update(result.coverage, truncated=result.truncated or len(paths) > limit,
+                        selection_limited=len(paths) > limit)
+    return paths[:limit]
 
 
-def _scoped_html_files(test: dict[str, Any], site_root: Path) -> list[Path]:
+# LLM: 用户显式文件清单不授权扫描宿主运行目录或符号链接逃逸。
+# 函数用途: 从项目内声明文件中提取可检查 HTML。
+def _scoped_html_files(test: dict[str, Any], site_root: Path, *, rejected: list[str] | None = None) -> list[Path]:
     paths: list[Path] = []
     for item in sequence_strings(test.get("html_files") or test.get("check_files")):
         candidate = (site_root / item).resolve()
         if (
             inside(candidate, site_root)
+            and _site_path_allowed(candidate, site_root)
             and candidate.is_file()
             and candidate.suffix.lower() in {".html", ".htm"}
         ):
             paths.append(candidate)
+        elif rejected is not None:
+            rejected.append(item)
     return sorted(dict.fromkeys(paths))
+
+
+# LLM: 名称排除只适用于站点扫描，通用 bounded_walk 仍保留开放目录集合。
+# 函数用途: 对显式 scope 应用和目录遍历相同的运行目录排除规则。
+def _site_path_allowed(path: Path, site_root: Path) -> bool:
+    parts = path.relative_to(site_root).parts
+    return not any(part in _SITE_SCAN_EXCLUDES for part in parts) and not any(
+        parts[index:index + 2] == ("workspace", "runtime") for index in range(len(parts) - 1)
+    )
 
 
 def _missing_required_dom_id_hits(element_ids: set[str], required_dom_ids: list[str]) -> list[str]:

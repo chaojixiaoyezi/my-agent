@@ -1,8 +1,12 @@
-# LLM: runner 只中断 exact attempt；冻结进程身份仅供观察退出，绝不授权杀整棵宿主树，联测共享宿主及接续。
-# 模块用途: 分开子代理的精确线程中断和锁外宿主观察，保护 Gateway 与其它任务。
+# LLM: runner 先中断 exact attempt；独占宿主升级也只针对已复核身份的原 PID，绝不杀整棵宿主树。
+# 模块用途: 分开精确线程中断、只读宿主观察及独占升级，保护共享宿主与其它任务。
 from __future__ import annotations
 
+import math
+import os
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 
 from ..concurrency.interrupt import interrupt_by_name
@@ -11,8 +15,8 @@ from .process_control import is_pid_alive
 from .runner_session_liveness import has_fresh_runner_session, runner_session_of
 
 
-# LLM: 原实例只用于只读存活核对；report 不能转成进程树排他授权。
-# 类用途: 把原宿主身份交给锁外观察，不扫描新执行或发送宿主信号。
+# LLM: 仅 cooperative_requested 携带的原实例允许单 PID 升级；report 不能授权清理进程树。
+# 类用途: 把原宿主身份交给锁外清理，共享/身份不明者不携带信号授权。
 @dataclass(frozen=True)
 class FrozenRunnerStop:
     report: dict[str, object]
@@ -29,7 +33,7 @@ def signal_runner_attempt(run_id: str, attempt_id: str) -> str:
 
 
 # LLM: 调用者持 creation guard；整个有限批次也可能启动接续后代，因此 launch 不证明进程树排他。
-# 函数用途: 冻结宿主的只读观察身份，缺身份或共享时如实报告，不把 PID 当清理许可。
+# 函数用途: 冻结原宿主的独占身份，缺身份或共享时不交付可升级的 PID 与 birth token。
 def freeze_runner_stop(task: object, tasks: list, closed_run_ids: set[str], *, kill_process: bool) -> FrozenRunnerStop:
     session = runner_session_of(task) if has_fresh_runner_session(task) else {}
     if not session or session.get("in_process") is not False:
@@ -83,3 +87,57 @@ def cleanup_runner_stop(stop: FrozenRunnerStop) -> dict[str, object]:
     if not same:
         return {**report, "status": "instance_replaced", "host_exited": True}
     return {**report, "host_exited": False, "identity_confirmed": True}
+
+
+# LLM: 只升级已冻结的独占原 PID；协作、TERM、KILL 各有有界等待，每次信号紧邻重新核验出生身份。
+# 函数用途: 在锁外等待协作退出，必要时单 PID 发信号；共享/身份不明零信号，不把发送成功当作退出。
+def escalate_exclusive_runner_stop(
+    stop: FrozenRunnerStop, *, grace_seconds: float = 1.5, kill_grace_seconds: float = 1.5,
+    sleep=time.sleep, now=time.monotonic,
+) -> dict[str, object]:
+    signals = []
+    if stop.report.get("status") != "cooperative_requested" or stop.pid <= 0 or not stop.birth_token.strip():
+        return {"escalated": False, "signals": signals, "host_exited": False, "identity_confirmed": False}
+    if not math.isfinite(grace_seconds) or not math.isfinite(kill_grace_seconds):
+        raise ValueError("runner 停止宽限期必须是有限秒数")
+
+    # 复用原只读字典合同；观察失败是未知，不能当作原实例消失或信号许可。
+    def observe() -> dict[str, object]:
+        try:
+            return cleanup_runner_stop(stop)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return {**stop.report, "host_exited": False, "identity_confirmed": False}
+
+    # 使用单调时钟有界等待；退出、PID 换代或身份未知时立即停止，不追踪新的执行。
+    def wait(seconds: float) -> dict[str, object]:
+        deadline = now() + max(0.0, seconds)
+        while True:
+            observed = observe()
+            if observed.get("host_exited") is True or observed.get("identity_confirmed") is not True:
+                return observed
+            remaining = deadline - now()
+            if remaining <= 0:
+                return observed
+            sleep(min(0.05, remaining))
+
+    observed = wait(grace_seconds)
+    for signum, timeout in ((signal.SIGTERM, grace_seconds), (getattr(signal, "SIGKILL", None), kill_grace_seconds)):
+        if observed.get("host_exited") is True or observed.get("identity_confirmed") is not True:
+            break
+        # 等待完成的观察不能代替发信号前的核验，防止在两个阶段之间复用 PID。
+        observed = observe()
+        if observed.get("host_exited") is True or observed.get("identity_confirmed") is not True:
+            break
+        if signum is None:
+            observed["signal_error_type"] = "UnsupportedSignal"
+            break
+        try:
+            os.kill(stop.pid, signum)
+        except OSError as exc:
+            # ESRCH 也需重新观察，不能把信号异常冒充退出；权限失败保留原实例的真实状态。
+            observed = observe()
+            observed["signal_error_type"] = type(exc).__name__
+            break
+        signals.append(signum)
+        observed = wait(timeout)
+    return {**observed, "escalated": bool(signals), "signals": signals}

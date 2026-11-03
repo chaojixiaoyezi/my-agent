@@ -21,6 +21,7 @@ from ..tooling.process_scope import ProcessExecutionScope
 from .cancellation_hosts import (
     FrozenRunnerStop,
     cleanup_runner_stop,
+    escalate_exclusive_runner_stop,
     freeze_runner_stop,
     signal_runner_attempt,
 )
@@ -70,7 +71,8 @@ class FrozenSubagentStops:
     stops: tuple[FrozenSubagentStop, ...] = ()
     failed: tuple[dict[str, object], ...] = ()
 
-    # LLM: 此属性仅判断准备是否完整，不表示进程已经退出。
+    # LLM: 此属性仅判断准备是否完整，不表示进程已经退出；保持 cleanup 前的冻结真值语义。
+    #   runner 退出由 cleanup_subagent_stops 复核，通过 failed 使 ok=False，不回写冻结事实。
     # 函数用途: 让控制入口把部分冻结失败报告为未确认。
     @property
     def unconfirmed(self) -> bool:
@@ -146,7 +148,7 @@ def _control_identity(task: SubAgentTask) -> tuple:
 
 
 # LLM: 无 agent 参数，无法重新发现后代；逐项异常保留其它资源清理，原业务状态不由进程退出回写。
-# 函数用途: 在所有控制锁外执行固定批次，并返回权限、后台、PTY 与宿主各自的真实结果。
+# 函数用途: 锁外清理固定批次，独占 runner 升级后仍活/身份不明必须失败，共享宿主不发信号。
 def cleanup_subagent_stops(batch: FrozenSubagentStops) -> dict[str, object]:
     reports, failed = [], list(batch.failed)
     for stop in batch.stops:
@@ -162,11 +164,32 @@ def cleanup_subagent_stops(batch: FrozenSubagentStops) -> dict[str, object]:
             failed.append(_failure(str(report["run_id"]), exc, "subagent_stop.cleanup_resources"))
         try:
             pid_report = cleanup_runner_stop(stop.runner)
+            runner_status = stop.runner.report.get("status")
+            if runner_status == "cooperative_requested":
+                if pid_report.get("host_exited") is False and pid_report.get("identity_confirmed") is True:
+                    pid_report.update(escalate_exclusive_runner_stop(stop.runner))
+                if pid_report.get("host_exited") is not True:
+                    failed.append({
+                        "run_id": report["run_id"], "cancellation_attempted": True,
+                        "error_code": "RUNNER_WORKER_STILL_ALIVE" if (
+                            pid_report.get("host_exited") is False and pid_report.get("identity_confirmed") is True
+                        ) else "RUNNER_WORKER_EXIT_UNCONFIRMED",
+                    })
+            elif runner_status == "identity_unavailable":
+                failed.append({
+                    "run_id": report["run_id"], "cancellation_attempted": True,
+                    "error_code": "RUNNER_WORKER_EXIT_UNCONFIRMED",
+                })
             if report["thread_interrupt"] != "not_found" or pid_report.get("status") == "no_pid":
                 pid_report["thread_interrupt"] = report["thread_interrupt"]
             report["pid_report"] = pid_report
         except Exception as exc:
-            failed.append(_failure(str(report["run_id"]), exc, "subagent_stop.cleanup_runner"))
+            failure = _failure(str(report["run_id"]), exc, "subagent_stop.cleanup_runner")
+            if stop.runner.report.get("status") in {"cooperative_requested", "identity_unavailable"}:
+                # 观察或升级异常不能丢掉 runner 未确认这一结构化事实；异常详情仍由原错误报告保留。
+                failure["error_code"] = "RUNNER_WORKER_EXIT_UNCONFIRMED"
+                report["pid_report"] = {**stop.runner.report, "host_exited": False, "identity_confirmed": False}
+            failed.append(failure)
         reports.append(report)
     if failed:
         logging.getLogger(__name__).warning("子代理停止存在未确认项: %s", failed)

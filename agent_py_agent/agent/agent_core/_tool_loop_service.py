@@ -55,6 +55,7 @@ from ..tooling.registry_workspace import effective_registry_cwd
 from ._runtime_params import ToolLoopExecuteParams
 from .delivery_contract_prompting import render_delivery_contract_section
 from .native_tool_protocol import native_tool_use_active
+from .readonly_stall_guard import is_readonly_stall_halt, record_readonly_stall
 from .runner.stage_trace import (
     trace_runner_tool_call_started,
 )
@@ -2570,6 +2571,12 @@ def _final_response_after_repeated_failure(
 ):
     if getattr(params, "identical_failure_halt", None) is not None:
         return build_tool_loop_prompt(agent, params), _identical_failure_response(agent, params)
+    if is_readonly_stall_halt(params):
+        prompt, response = _final_response_after_halt(
+            agent, params, tool_rounds,
+            reason="subagent_readonly_stall", runtime_reason="SUBAGENT_READONLY_STALL",
+        )
+        return prompt, replace(response, runtime_status="blocked", turn_end_reason="blocked")
     if params.authorization_failure_halt is None:
         return _final_response_after_halt(
             agent,
@@ -2800,6 +2807,8 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
     append_long_content_recovery_context(record)
     progress = record_runtime_subagent_tool_progress(agent, record)
+    # 使用同次真实阶段产物投影，不能把读工具成功/心跳当作合同进展。
+    record_readonly_stall(agent, record, stage_progress=progress)
     if progress:
         record.params.tool_context.append(_task_local_progress_context(progress))
 
