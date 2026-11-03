@@ -184,40 +184,21 @@ def test_list_filters_and_cursor_binding(native):
 # LLM: 使用真实 scheduler job、后台线程和 canonical 消息，不手写网关响应。
 # 函数用途: 验证监控投递稳定投影及多次读取不重复。
 def test_list_projects_monitor_deliveries_idempotently_and_filters(native):
-    from agent_py_agent.agent.gateway_parts.owner_conversation_store import owner_conversation_store
-    from agent_py_agent.agent.scheduler.repository import (
-        SchedulerJobCreateRequest,
-        SchedulerRepository,
-    )
+    from agent_py_agent.tests.test_v13_monitor_delivery_contract import deliver, monitor_case
 
-    sid = space(native)
-    status, body = harness.v13_call(native, 'background_agents.create',
-        {'space_id': sid, 'name': '监控测试', 'purpose': '投影', 'after_task': 'reuse'},
-        user='business-alice', idempotency_key=uuid.uuid4().hex)
-    agent = completed((status, body))['agent']
-    home = owner(native)
-    repository = SchedulerRepository(home.scheduler_dir, owner_provider='feishu', owner_kind='user', owner_id=home.owner_id)
-    job, _ = repository.create_job(SchedulerJobCreateRequest(name='monitor:rule-native', prompt='规范检查',
-        thread_id=agent['thread_id'], schedule={'kind': 'every', 'every_seconds': 3600,
-            'anchor_at': time.time(), 'timezone': 'UTC'}))
-    now = datetime.now(timezone.utc).isoformat()
-    rule = {'rule_id': 'rule-native', 'space_id': sid, 'name': '原监控', 'description': '', 'enabled': True,
-        'severity': 'critical', 'query': {'language': 'text', 'text': '规范检查'}, 'schedule': None, 'script_id': None,
-        'skill_ids': [], 'datasource_ids': [], 'mitre_techniques': ['T1000'], 'tags': [], 'exclusions': [],
-        'origin': 'manual', 'scheduler_job_id': job['job_id'], 'last_run': None, 'revision': 0,
-        'created_at': now, 'updated_at': now, 'owner_id': home.owner_id}
-    harness.v13_seed(home.home_dir, 'monitor_rules', {rule['rule_id']: rule})
-    from agent_py_agent.agent.user_space.owner_resolver import home_paths_with_owner
-    store = owner_conversation_store(native[1], home_paths_with_owner(native[1].home_paths, home), initialize=False)
-    event_key = 'fixture-delivery-event'
-    store.messages.append({'thread_id': agent['thread_id'], 'role': 'assistant', 'content': '规范告警\n详细证据',
-        'metadata': {'scheduler_delivery_event_key': event_key}})
-    first = completed(invoke(native, 'soc.alerts.list', {'severity': 'critical', 'rule_id': rule['rule_id']}))
-    expected = 'ALERT-' + hashlib.sha256(event_key.encode()).hexdigest()[:12].upper()
-    assert [row['alert_id'] for row in first['items']] == [expected]
-    assert first['items'][0]['title'] == '规范告警' and first['items'][0]['techniques'] == ['T1000']
-    assert completed(invoke(native, 'soc.alerts.list', {'severity': 'critical', 'rule_id': rule['rule_id']})) == first
-    assert completed(invoke(native, 'soc.alerts.list', {'severity': 'low'}))['items'] == []
+    with monitor_case(native, modes=('bound',)) as case:
+        message = deliver(case)
+        job = case.jobs[0]
+        source = [case.agent.home_paths.owner_id, job['job_id'], message.metadata['task_id'],
+            ['event', message.metadata['scheduler_delivery_event_key']]]
+        digest = hashlib.sha256(json.dumps(source, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        params = {'severity': 'critical', 'rule_id': case.rules[0]['rule_id']}
+        first = completed(invoke(native, 'soc.alerts.list', params))
+        assert [row['alert_id'] for row in first['items']] == ['ALERT-' + digest[:12].upper()]
+        assert first['items'][0]['external_ref'] == 'monitor:' + digest
+        assert first['items'][0]['title'] == '规范告警' and first['items'][0]['techniques'] == ['T1000']
+        assert completed(invoke(native, 'soc.alerts.list', params)) == first
+        assert completed(invoke(native, 'soc.alerts.list', {'severity': 'low'}))['items'] == []
 
 
 # LLM: 不要求未合入的 W9/W7 存在；一旦存在必须核对规范 owner 的别名，不在 W8 重复注册。
