@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 
-# LLM: 独立解释器屏蔽fcntl并重载；Windows模拟仅替换模块os视图及dir_fd能力，保留真实SQLite和闸门，不污染父进程。
+# LLM: 独立解释器屏蔽fcntl并重载；Windows模拟同时覆盖dir_fd缺失与3.12路径/FD的ctime异义，保留真实SQLite和闸门。
 # 函数用途: 验证本机和Windows无目录FD时均能保存、读写、更新数据源，关闭只读连接的写权限。
 @pytest.mark.parametrize("simulate_windows", [False, True], ids=["native", "windows-no-dirfd"])
 def test_datasource_store_import_and_io_without_fcntl(tmp_path: Path, simulate_windows):
@@ -46,6 +46,17 @@ with MonkeyPatch.context() as patch:
             patch.setattr(module, "_supports_dir_fd", lambda: False)
         patch.setattr(datasource_store, "open_directory_beneath",
             Mock(side_effect=AssertionError("Windows must not open directory FDs")))
+        if os.name != "nt":
+            # LLM: 仅在非Windows模拟：空文件创建/变更时间重合，写入后FD变更时间与路径创建时间分离；不改变身份。
+            # 函数用途: 在macOS/Linux复现Windows3.12写库后才出现的ctime来源差异。
+            def windows_fstat(descriptor):
+                info = os.fstat(descriptor)
+                if info.st_size == 0:
+                    return info
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields["st_ctime_ns"] += 1_000_000_000
+                return SimpleNamespace(**fields)
+            patch.setattr(datasource_store.os, "fstat", windows_fstat)
     store = datasource_store.DatasourceStore(home)
     saved = store.save_datasource({"datasource_id": "portable", "kind": "sqlite", "title": "portable"})
     assert saved["revision"] == 1
@@ -154,9 +165,12 @@ def test_windows_sqlite_rejects_unsafe_path_components(
     connect.assert_not_called()
 
 
-# LLM: 真实打开FD和SQLite，只在指定边界伪造一次身份/父链漂移；所有拒绝出口必须关闭真实资源。
-# 函数用途: 验证Windows打开期间及connect期间的替换会被拒绝，且不会泄漏FD或可用连接。
-@pytest.mark.parametrize("drift", ["open_inode", "connect_inode", "connect_parent"])
+# LLM: 真实FD和SQLite，仅在指定边界伪造身份、硬链或同源ctime漂移；不把合法跨源ctime差异当作绕过检查的理由。
+# 函数用途: 验证Windows身份/链接数/叶与父链时间漂移仍会被拒绝，且关闭真实FD和连接。
+@pytest.mark.parametrize("drift", [
+    "open_inode", "open_device", "open_hardlink", "connect_inode", "connect_parent",
+    "connect_fd_ctime", "connect_path_ctime",
+])
 def test_windows_sqlite_rejects_path_drift_and_closes_resources(
         tmp_path, monkeypatch, windows_datasource_store, drift):
     import os
@@ -193,26 +207,72 @@ def test_windows_sqlite_rejects_path_drift_and_closes_resources(
 
     monkeypatch.setattr(store.os, "open", track_open)
     monkeypatch.setattr(store, "sqlite3", SimpleNamespace(connect=track_connect))
-    if drift == "open_inode":
-        monkeypatch.setattr(store.os, "fstat", lambda fd: changed(real_fstat(fd), "st_ino"))
+    if drift.startswith("open_"):
+        field = {"open_inode": "st_ino", "open_device": "st_dev", "open_hardlink": "st_nlink"}[drift]
+        monkeypatch.setattr(store.os, "fstat", lambda fd: changed(real_fstat(fd), field))
     elif drift == "connect_inode":
         monkeypatch.setattr(store.os, "stat",
             lambda *args, **kwargs: changed(real_stat(*args, **kwargs), "st_ino")
             if connections else real_stat(*args, **kwargs))
+    elif drift == "connect_fd_ctime":
+        monkeypatch.setattr(store.os, "fstat",
+            lambda fd: changed(real_fstat(fd), "st_ctime_ns") if connections else real_fstat(fd))
     else:
+        component = path if drift == "connect_path_ctime" else path.parent
         monkeypatch.setattr(Path, "lstat",
             lambda candidate, *args, **kwargs: changed(real_lstat(candidate, *args, **kwargs), "st_ctime_ns")
-            if candidate == path.parent and connections else real_lstat(candidate, *args, **kwargs))
+            if candidate == component and connections else real_lstat(candidate, *args, **kwargs))
     spec = store.DatasourceConnectionSpec("drift", "sqlite", "drift", database_path=str(path))
     with pytest.raises(PermissionError, match="DATASOURCE_SQLITE_PATH_REPLACED"):
         store.open_sqlite(spec)
     assert len(descriptors) == 1
     with pytest.raises(OSError):
         real_fstat(descriptors[0])
-    assert len(connections) == (0 if drift == "open_inode" else 1)
+    assert len(connections) == (0 if drift.startswith("open_") else 1)
     for connection in connections:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             connection.execute("SELECT 1")
+
+
+# LLM: CPython3.12 Windows win32_xstat用birthtime覆盖ctime，os.fstat保留ChangeTime；仅模拟稳定时间差，不改dev/ino/类型/硬链数。
+# 函数用途: 写过数据的SQLite在两个时间来源不同的情况下仍可只读或可写打开，并保持只读限制。
+@pytest.mark.parametrize("read_only", [False, True])
+def test_windows_sqlite_accepts_distinct_path_and_fd_ctime_after_write(
+        tmp_path, monkeypatch, windows_datasource_store, read_only):
+    import sqlite3
+    from types import SimpleNamespace
+
+    store = windows_datasource_store
+    path = tmp_path.resolve() / "written.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE records (value TEXT)")
+        connection.execute("INSERT INTO records VALUES ('retained')")
+    real_fstat = store.os.fstat
+
+    # LLM: 同一FD前后返回同一稳定ChangeTime，但故意不同于路径时间；身份及其它元数据来自真实fstat。
+    # 函数用途: 防止只在空库或POSIX相同ctime条件下验证Windows兼容性。
+    def changed_time_fstat(descriptor):
+        info = real_fstat(descriptor)
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        fields["st_ctime_ns"] += 1_000_000_000
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(store.os, "fstat", changed_time_fstat)
+    spec = store.DatasourceConnectionSpec("written", "sqlite", "written", database_path=str(path))
+    connection = store.open_sqlite(spec, read_only=read_only)
+    try:
+        assert connection.execute("SELECT value FROM records").fetchall() == [("retained",)]
+        if read_only:
+            with pytest.raises(sqlite3.OperationalError):
+                connection.execute("INSERT INTO records VALUES ('forbidden')")
+        else:
+            connection.execute("INSERT INTO records VALUES ('written')")
+            connection.commit()
+    finally:
+        connection.close()
+    with sqlite3.connect(path) as check:
+        expected = [("retained",)] if read_only else [("retained",), ("written",)]
+        assert check.execute("SELECT value FROM records ORDER BY rowid").fetchall() == expected
 
 
 # LLM: 即使在Windows运行也仅代理被测模块的平台名，不改全局os.name；强制缺少dir_fd应保持POSIX失败关闭。

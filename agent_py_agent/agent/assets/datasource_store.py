@@ -357,7 +357,7 @@ def _windows_sqlite_path_state(path):
     return tuple(result)
 
 
-# LLM: 仅Windows为SQLite选择lstat/open/fstat复核；POSIX始终走原strict入口，不能因能力不足或打开失败降级，Vault入口不变。
+# LLM: Windows3.12路径ctime为创建时间而fstat为变更时间，不能跨源比较；身份仍跨源严格匹配，路径快照与持有FD时间各自复核。
 # 函数用途: 打开并持有数据库的只读校验FD，拒绝链接、特殊文件、硬链接及观察到的路径替换，调用方负责关闭。
 def _open_sqlite_descriptor(path):
     if os.name != 'nt':
@@ -369,8 +369,10 @@ def _open_sqlite_descriptor(path):
                          | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
     try:
         info = os.fstat(descriptor)
-        opened = (info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mode, info.st_nlink)
-        if opened != before[0] or _windows_sqlite_path_state(path) != before:
+        # 跨源只比较同义的身份、类型/权限和硬链接数；ctime不删除，仍由同源路径快照和连接窗口FD复核检查。
+        opened = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink)
+        expected = before[0][:2] + before[0][3:]
+        if opened != expected or _windows_sqlite_path_state(path) != before:
             raise PermissionError('DATASOURCE_SQLITE_PATH_REPLACED')
         return descriptor
     except BaseException:
@@ -378,11 +380,11 @@ def _open_sqlite_descriptor(path):
         raise
 
 
-# LLM: POSIX原逐层nofollow记录目录身份与ctime；Windows复用完整父链lstat，不能尝试用os.open打开目录，变化均拒绝。
-# 函数用途: 取得连接窗口前后的父链稳定性证据，不开放新的读写权限。
+# LLM: POSIX原逐层nofollow父链不变；Windows复用完整叶/父链lstat，同源ctime前后比较，不能尝试用os.open打开目录。
+# 函数用途: 取得连接窗口前后的路径稳定性证据，Windows额外保留库叶以免丢失其ctime变化检查。
 def _sqlite_directory_state(path):
     if os.name == 'nt':
-        return tuple(stamp[:3] for stamp in _windows_sqlite_path_state(path)[1:])
+        return tuple(stamp[:3] for stamp in _windows_sqlite_path_state(path))
     result = []
     for parent in path.parents:
         descriptor = open_directory_beneath(path.anchor, parent.parts[1:])
