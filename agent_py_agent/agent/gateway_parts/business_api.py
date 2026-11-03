@@ -26,6 +26,19 @@ from ..plugin_host.schemas import thaw, validate_object
 
 _ISSUED = WeakSet()
 
+
+# LLM: 冻结动作优先；扩展只解析独立注册器，不修改原冻结目录及能力发现。
+# 函数用途: 给所有业务入口解析同一份规范动作与别名。
+def resolve_business_action_spec(action):
+    try:
+        return business_action_spec(action)
+    except HostAPIError as error:
+        if error.code != 'UNSUPPORTED_ACTION':
+            raise
+    from .business_api_v13 import v13_action_spec
+    return v13_action_spec(action)
+
+
 # W2控制依赖准确owner的原运行库、创建门、进程/PTY清理与Gateway控制；被动组合只服务读与耐久排队。
 _COMPLETE_HOST_ACTIONS = frozenset({
     'background_agents.suspend', 'background_agents.resume', 'background_agents.restore',
@@ -366,16 +379,31 @@ class BusinessServices:
             self.background = _BackgroundPort(self)
         self.capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
+        self._default_projection = self.projection is None
         if self.projection is None and getattr(host, 'conversation_store', None) is not None:
             from ..runtime_db.repository import RuntimeRepository
             from ..runtime_db.schema import runtime_db_path
+            from .business_api_v13_readers import (
+                DefaultBusinessObservationService,
+                default_observation_readers,
+            )
 
-            self.projection = BusinessObservationService(self.owner_home, owner_id=self.owner_id,
-                store=host.conversation_store, runtime=RuntimeRepository(runtime_db_path(self.owner_home),
-                    read_only=True))
+            runtime = RuntimeRepository(runtime_db_path(self.owner_home), read_only=True)
+            self.projection = DefaultBusinessObservationService(self.owner_home, owner_id=self.owner_id,
+                store=host.conversation_store, runtime=runtime,
+                readers=default_observation_readers(self.owner_home, self.owner_id, host.conversation_store, runtime))
         self.approvals = getattr(host, 'business_approval_decider', None)
         # 被动组合由组合根声明完整宿主接线；直接传入的宿主本身即owner宿主。
         self.complete_host_wired = bool(getattr(host, 'business_complete_host_wired', True))
+
+    # LLM: 仅刷新默认只读来源；显式注入的端口不被替换，已签发观察actor仍绑定同一投影。
+    # 函数用途: 在下一请求识别首次创建或已消失的规范来源。
+    def refresh_observation_readers(self):
+        if self._default_projection and isinstance(self.projection, BusinessObservationService):
+            from .business_api_v13_readers import default_observation_readers
+            projection = self.projection
+            projection.readers = default_observation_readers(self.owner_home, self.owner_id,
+                projection.store, projection.runtime)
 
     @property
     def observation(self):
@@ -405,7 +433,7 @@ class BusinessServices:
         return source is not None and callable(projection.readers.get(source))
 
     def ready(self, action):
-        spec = business_action_spec(action)
+        spec = resolve_business_action_spec(action)
         if action in {'system.capabilities', 'model_profiles.list'}:
             return True
         if not bool(getattr(self.host.config, 'business_spaces_enabled', False)):
@@ -413,6 +441,9 @@ class BusinessServices:
         if action == 'operations.get':
             return self._observation_ready(action)
         implementer = spec.metadata['implementer']
+        if implementer.startswith('V13-'):
+            from .business_api_v13 import v13_ready
+            return v13_ready(action, self)
         if implementer == 'W1':
             if action.startswith('policies.') or action == 'approvals.decide':
                 return (callable(self.approvals) and self._observation_ready('approvals.get')
@@ -502,8 +533,14 @@ class BusinessServices:
         local.agent_steps.cancel_handler = cancel_handler
         return local
 
-    def invoke(self, action, params, context, *, expected_revision=None, idempotency_key=''):
-        spec = business_action_spec(action)
+    # LLM: 扩展和冻结动作共用实时context，扩展才消费额外请求编号。
+    # 函数用途: 按唯一Spec分派原生领域与扩展handler。
+    def invoke(self, action, params, context, *, expected_revision=None, idempotency_key='', request_id=''):
+        spec = resolve_business_action_spec(action)
+        if spec.metadata['implementer'].startswith('V13-'):
+            from .business_api_v13 import v13_invoke
+            return v13_invoke(action, params, context, self, request_id=request_id,
+                idempotency_key=idempotency_key, expected_revision=expected_revision)
         actor = self.actor(context)
         kwargs = {'expected_revision': expected_revision, 'idempotency_key': idempotency_key}
         if action == 'approvals.decide' and callable(self.approvals):
@@ -535,6 +572,11 @@ class BusinessServices:
                 from ..capability.business_capabilities import BusinessCapabilityService
                 backend = BusinessCapabilityService(self.host)
             return backend.execute(action, params, context=context.business_context)
+        if action == 'messages.list':
+            from .business_api_v13 import v13_conversation_messages
+            conversation = v13_conversation_messages(params, context, self)
+            if conversation is not None:
+                return conversation
         return self.projection.query(action, params, actor=self.observation_actor(context))
 
 
@@ -547,8 +589,9 @@ def _response(request_id, *, data=None, error=None, accepted=False, effect='none
 # LLM: 只读取结构化错误；派发原对象保留私有身份，公开响应不新增字段或虚报未执行。
 # 函数用途: 将原领域错误映射为冻结业务错误码、HTTP状态和副作用结果。
 def _error_code(error):
+    from .business_api_v13 import v13_error_status
     if isinstance(error, HostAPIError):
-        return error.code, error.status, error.outcome
+        return error.code, v13_error_status(error.code) or error.status, error.outcome
     code = getattr(error, 'error_code', None) or getattr(error, 'code', None)
     if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
         code = 'HOST_NOT_READY'
@@ -556,10 +599,31 @@ def _error_code(error):
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
               403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED'} else
               400 if code == 'INVALID_SCHEMA' else 503)
+    status = v13_error_status(code) or status
     effect = 'not_started'
     if isinstance(error, SessionTaskDispatchError):
         effect = error.effect_outcome if error.effect_outcome in {'not_started', 'unknown'} else 'unknown'
     return code, status, effect
+
+
+# LLM: 只投影原错误显式结构化标量，沿冻结key/value数组与脱敏；不解析异常文案。
+# 函数用途: 保留覆盖范围等安全错误细节而不扩张冻结信封。
+def _error_details(error):
+    from ..common.log_redaction import redact_sensitive_value
+    from ..plugin_host.business_action_specs import business_defs
+    details = getattr(error, 'details', None)
+    if not details:
+        return []
+    if isinstance(details, dict):
+        details = [{'key': key, 'value': value} for key, value in details.items()
+            if isinstance(key, str) and (value is None or type(value) in (str, int, float, bool))]
+    try:
+        schema = standalone_schema({'type': 'object', 'properties': {
+            'details': business_defs()['Error']['properties']['details']}, 'required': ['details'],
+            'additionalProperties': False})
+        return validate_object({'details': redact_sensitive_value(details)}, schema)['details']
+    except (HostAPIError, ValueError, TypeError):
+        return []
 
 
 # LLM: 服务可按宿主寿命复用，调用身份仍须本次发行且匹配真实owner与canonical home。
@@ -570,11 +634,20 @@ def execute_business(request, context, services):
     entered = False
     completed_effect = None
     spec = None
+    details = []
     try:
         if type(request) is not dict or type(request.get('action')) is not str:
             raise HostAPIError('INVALID_SCHEMA')
-        spec = business_action_spec(request['action'])
-        request = validate_object(request, spec.native_request_schema)
+        spec = resolve_business_action_spec(request['action'])
+        submit_alias = False
+        if (request['action'] in {'messages.list', 'events.list', 'tasks.submit'}
+                and type(request.get('params')) is dict and 'thread_id' in request['params']):
+            if type(context) is not BusinessCallContext or context not in _ISSUED:
+                raise HostAPIError('CAPABILITY_DENIED', 403)
+            from .business_api_v13 import v13_frozen_alias
+            request, submit_alias = v13_frozen_alias(request, context, services)
+        if not submit_alias:
+            request = validate_object(request, spec.native_request_schema)
         request_id = request['request_id']
         if type(context) is not BusinessCallContext or context not in _ISSUED:
             raise HostAPIError('CAPABILITY_DENIED', 403)
@@ -586,8 +659,14 @@ def execute_business(request, context, services):
         if not services.ready(spec.action):
             raise HostAPIError('HOST_NOT_READY', 503)
         entered = True
-        raw = services.invoke(spec.action, request['params'], context,
-            expected_revision=request.get('expected_revision'), idempotency_key=request.get('idempotency_key', ''))
+        if submit_alias:
+            from .business_api_v13 import v13_submit_alias
+            raw = v13_submit_alias(request, context, services)
+        else:
+            options = {'request_id': request_id} if spec.metadata['implementer'].startswith('V13-') else {}
+            raw = services.invoke(spec.action, request['params'], context,
+                expected_revision=request.get('expected_revision'), idempotency_key=request.get('idempotency_key', ''),
+                **options)
         # 原端口显式返回DomainResult(202,...)才算耐久受理；不凭state字段猜运输状态。
         from ..plugin_host.contracts import DomainResult
         accepted = isinstance(raw, DomainResult) and raw.http_status == 202
@@ -597,13 +676,14 @@ def execute_business(request, context, services):
         return (202 if accepted else 200), _response(request_id, data=data, accepted=accepted, effect=completed_effect)
     except (HostAPIError, BusinessError, SessionTaskDispatchError) as error:
         code, status, effect = _error_code(error)
+        details = _error_details(error)
     except (OSError, ValueError, TypeError, RuntimeError, PermissionError):
         mutating = entered and spec is not None and spec.metadata['effect'] != 'read'
         code, status, effect = ('OUTCOME_UNKNOWN', 503, 'unknown') if mutating else ('HOST_NOT_READY', 503, 'not_started')
     if completed_effect is not None and effect == 'not_started':
         # 末核撤权只隐藏返回数据，不把原端口已经完成的提交谎报成未执行。
         effect = completed_effect
-    error = {'code': code, 'message': code, 'retryable': status == 503, 'details': []}
+    error = {'code': code, 'message': code, 'retryable': status == 503, 'details': details}
     return status, _response(request_id, error=error, effect=effect)
 
 
@@ -629,15 +709,31 @@ def native_business_context(handler, server):
     home = home_paths_with_owner(base.home_paths, resolve_owner_home(base.home_paths.root, owner))
     wired = complete_host_wired(server)
     host = SimpleNamespace(home_paths=home, config=base.config, business_complete_host_wired=wired)
+    # 路径句柄仅供可信只读适配器关联原生push；不接受JSON路径，也不因此授予其它owner权限。
+    host.business_v13_gateway_paths = server.paths
     if getattr(base, 'conversation_store', None) is not None:
         from .owner_conversation_store import owner_conversation_store
         host.conversation_store = owner_conversation_store(base, home, initialize=False)
     if base.home_paths.owner_id == home.owner_id:
         for key in ('business_projection', 'business_reference_reader', 'business_active_references',
                     'business_governance', 'business_background', 'business_capabilities',
-                    'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps', 'subagents'):
+                    'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps', 'subagents',
+                    'business_v13_providers', 'business_v13_clock'):
             if hasattr(base, key):
                 setattr(host, key, getattr(base, key))
+    if (getattr(host, 'business_reference_reader', None) is None
+            and getattr(host, 'conversation_store', None) is not None
+            and ('business_reference_reader' not in getattr(base, '__dict__', {})
+                 or getattr(base, 'business_reference_reader', None) is not None)):
+        def _default_ref_reader(kind, ref_id, _actor, _store=host.conversation_store):
+            if kind != 'task':
+                return None
+            stask = _store.session_tasks.load(str(ref_id))
+            bc = (getattr(stask, 'metadata', None) or {}).get('business_context') if stask is not None else None
+            if isinstance(bc, dict):
+                return {'owner_id': bc.get('owner_id'), 'space_id': bc.get('space_id'), 'task_id': stask.task_id}
+            return None
+        host.business_reference_reader = _default_ref_reader
 
     def check(action, facts):
         middleware = getattr(handler, '_auth_middleware', None)
@@ -652,7 +748,7 @@ def native_business_context(handler, server):
             from ..user_space.local_user_store import LocalUserStore
             owner_state(LocalUserStore(home.root), owner)
         # 原批准票据必须走专用人类issuer；本通用JSON上下文不能签出批准。
-        return not business_action_spec(action).human_authorization_required
+        return not resolve_business_action_spec(action).human_authorization_required
 
     def background_actor(action):
         from uuid import uuid4
@@ -668,7 +764,7 @@ def native_business_context(handler, server):
         if error:
             raise HostAPIError('HOST_NOT_READY', 503)
         if source is None:
-            if business_action_spec(action).metadata['effect'] == 'read':
+            if resolve_business_action_spec(action).metadata['effect'] == 'read':
                 raise BusinessError('ACTOR_REQUIRED')
             source = store.threads.get_or_create({**binding, 'canonical_user_id': user_id,
                 'owner_id': home.owner_id, 'owner_home': str(home.owner_home_dir)})
@@ -677,6 +773,15 @@ def native_business_context(handler, server):
         return HostChannelActor(home.owner_id, source.thread_id, 'business-' + uuid4().hex,
             channel, scope.conversation_id, user_id)
 
+    # LLM: 原生管理员判定留在请求闭包，不能被业务RBAC角色或缓存替代。
+    # 函数用途: 复用原认证中间件当前管理员裁决。
+    def native_admin():
+        middleware = getattr(handler, '_auth_middleware', None)
+        if middleware is None:
+            return home.owner_provider == 'local' and home.owner_kind == 'main'
+        return middleware.require_admin(handler.headers, _handler_peer_ip(handler))[0] is True
+
+    host.business_native_admin = native_admin
     # 提供者只绑定本次已解析的owner；调用时由端口先过同一live check再租用，不缓存宿主或授权。
     context = bind_business_context(host, authorize=check, subject_id=user_id, actor_factory=background_actor,
         host_provider=lambda stack: owner_complete_host(server, owner, stack))
@@ -692,6 +797,16 @@ def native_business_context(handler, server):
         if len(cache) >= 64:
             cache.pop(next(iter(cache)))
         cache[key] = BusinessServices(host)
+    else:
+        cache[key].host = host
+        # 默认投影保持原对象和签名密钥，但所有读口须绑定本次可信宿主的同一会话库。
+        if cache[key]._default_projection and isinstance(cache[key].projection, BusinessObservationService):
+            cache[key].projection.store = getattr(host, 'conversation_store', None)
+        cache[key].refresh_observation_readers()
+    if cache[key]._default_projection and isinstance(cache[key].projection, BusinessObservationService):
+        from .business_api_v13_readers import native_approval_readers
+        cache[key].projection.readers.update(native_approval_readers(base, server.paths, home.owner_id,
+            getattr(host, 'conversation_store', None)))
     return context, cache[key]
 
 
@@ -807,7 +922,7 @@ def _local_business_services(host):
                 'business_projection', 'business_reference_reader', 'business_active_references',
                 'business_governance', 'business_background', 'business_capabilities',
                 'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
-                'business_approval_decider')))
+                'business_approval_decider', 'business_v13_providers', 'business_v13_clock')))
         cached = getattr(host, '_local_business_services_cache', None)
         if (cached is None or cached[0] != key or cached[2].host is not host
                 or any(previous is not current for previous, current in zip(cached[1], sources))):
@@ -828,7 +943,7 @@ def local_business_context(host, *, model=False):
             raise HostAPIError('CAPABILITY_DENIED', 403) from None
 
     def check(action, facts):
-        spec = business_action_spec(action)
+        spec = resolve_business_action_spec(action)
         if spec.human_authorization_required:
             return False
         if model:

@@ -238,18 +238,17 @@ def test_observation_plugin_real_sse_and_request_local_eight_event_bound(product
         assert name == 'business' and isinstance(frame, dict)
         assert frame['stream_item'] == 'snapshot' and frame['payload']['tasks'][0]['task_id'] == task.task_id
         validate_object(frame, standalone_schema({'$ref': '#/$defs/EventView'}))
-        for _ in range(8):
+        with runtime._runtime_connection() as connection:
+            expected = [row[0] for row in connection.execute('SELECT event_id FROM runtime_events ORDER BY seq')]
+        received = []
+        for _ in expected:
             name, frame = read_business_sse(response)
             assert name == 'business', frame
             validate_object(frame, standalone_schema({'$ref': '#/$defs/EventView'}))
-            if frame['stream_item'] == 'gap' or frame['event_id'] == events[-1]['event_id']:
-                break
-        else:
-            pytest.fail('真实业务SSE没有交付事件/背压缺口')
-        if burst == 9:
-            assert frame['stream_item'] == 'gap' and frame['payload']['reset_required']
-        else:
-            assert frame['event_id'] == events[-1]['event_id'] and frame['attempt_id'] == run['attempt_id']
+            assert frame['stream_item'] == 'event'
+            received.append(frame['event_id'])
+        assert received == expected
+        assert frame['event_id'] == events[-1]['event_id'] and frame['attempt_id'] == run['attempt_id']
     finally:
         response.close()
         conn.close()
