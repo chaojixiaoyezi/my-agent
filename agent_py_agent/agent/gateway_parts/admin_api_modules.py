@@ -51,12 +51,38 @@ class ModuleRead:
         return {"data": data, "coverage": "partial" if self.unavailable else "complete", "unavailable": self.unavailable}
 
 
-# LLM: home只来自宿主，不接收请求中的路径。
+# LLM: 只选择宿主已绑定的Agent或原控制面，不物化Agent，不从请求和环境变量另找根。
+# 函数用途: 取得冷暖管理入口共用的可信配置基座。
+def configuration_base(server):
+    from ..conversation.business_access import BusinessError
+    agent = getattr(server, "agent", None)
+    base = agent if agent is not None else getattr(server, "control_plane", None)
+    if base is None:
+        raise BusinessError("HOST_NOT_READY")
+    return base
+
+
+# LLM: 仅执行依赖的原端口要求Agent，缺失显式拒绝，由模块覆盖账记录，不建替身Agent。
+# 函数用途: 为确实需要执行服务的来源取得已存在Agent。
+def execution_agent(server):
+    from ..conversation.business_access import BusinessError
+    agent = getattr(server, "agent", None)
+    if agent is None:
+        raise BusinessError("HOST_NOT_READY")
+    return agent
+
+
+# LLM: home只来自真实Agent或已有控制面的canonical root，不接收请求路径；缺源是进入前不可用。
 # 函数用途: 解析规范主owner路径。
 def main_home_paths(server):
+    from ..conversation.business_access import BusinessError
     from ..user_space.home_layout import home_paths
     from ..user_space.owner_resolver import OwnerIdentity, home_paths_with_owner, resolve_owner_home
-    root = server.agent.home_paths.root
+    base = configuration_base(server)
+    root = (getattr(getattr(base, "home_paths", None), "root", None)
+            if base is getattr(server, "agent", None) else getattr(base, "home_root", None))
+    if root is None:
+        raise BusinessError("HOST_NOT_READY")
     return home_paths_with_owner(home_paths(root), resolve_owner_home(root, OwnerIdentity.local_main()))
 
 
@@ -99,11 +125,12 @@ def model_state(server):
     return profiles[:200], providers, truncated
 
 
-# LLM: 只读宿主与原生查询；近期活动先白名单投影再统一脱敏，不让任务goal或未来来源字段泄密。
+# LLM: 配置来自可信Agent或控制面；执行查询缺源按字段披露，近期活动白名单投影后脱敏。
 # 函数用途: 聚合系统状态。
 def module_system(server):
     from ..common.log_redaction import redact_sensitive_value
     read = ModuleRead("system")
+    config = read.value("config", getattr(configuration_base(server), "config", None))
     query = server.admin_query
     sessions = read.read("admin_query.sessions", lambda: query.get_all_sessions(query.ADMIN_USER))
     tasks = read.read("admin_query.tasks", lambda: report_value(query.get_all_tasks_report(query.ADMIN_USER)))
@@ -122,21 +149,22 @@ def module_system(server):
     return read.result({"gateway": gateway, "sessions_total": len(sessions) if sessions is not None else None,
         "tasks": {name: sum(str(row.get("status", "")).lower() == name for row in tasks) if tasks is not None else None
                   for name in ("running", "queued")}, "recent_activity": activity,
-        "business_spaces_enabled": bool(getattr(server.agent.config, "business_spaces_enabled", False)),
+        "business_spaces_enabled": bool(getattr(config, "business_spaces_enabled", False)) if config is not None else None,
         "model_configured": bool(models and models[0]),
         "default_model_profile_id": models[1]["selected_profile_id"] if models else None})
 
 
-# LLM: URL仅输出hostname，凭据、头值和查询串都不输出。
+# LLM: 冷暖路径共用规范持久模型目录和可信配置；URL仅输出hostname，凭据、头值和查询串不输出。
 # 函数用途: 投影模型与安全路由配置。
 def module_models(server):
     read = ModuleRead("models")
+    config = read.value("config", getattr(configuration_base(server), "config", None))
     state = read.read("model_profiles", lambda: model_state(server))
     profiles, providers, truncated = state if state else ([], {"providers": [], "selected_profile_id": None}, False)
     if truncated:
         read.value("model_profiles.truncated", None)
-    routing = {key: getattr(server.agent.config, key) for key in ("model_routing_enabled", "default_model_profile_id", "decision_model_profile_id", "embedding_model_profile_id")
-               if hasattr(server.agent.config, key)}
+    routing = {key: getattr(config, key) for key in ("model_routing_enabled", "default_model_profile_id", "decision_model_profile_id", "embedding_model_profile_id")
+               if hasattr(config, key)}
     return read.result({"profiles": profiles, "providers": [{"provider_id": row["provider_id"],
         "kind": next(iter(kinds)) if len(kinds := {model["model_backend"] for model in row["models"]}) == 1 else "mixed_or_unknown",
         "base_url_host": urlsplit(row["api_base"]).hostname,
@@ -158,7 +186,7 @@ def tool_metadata(row, read):
         "effect": effect, "default_deferred": read.value(prefix + "default_deferred", getattr(hints, "default_deferred", None))}
 
 
-# LLM: 工具来自原注册表，不以推荐卡片替代目录；审批超过公开上限才截断并披露覆盖缺口。
+# LLM: 工具与审批只读现存Agent端口，冷协调器显式partial；超过公开上限才截断并披露。
 # 函数用途: 聚合工具元数据和当前scope审批。
 def module_tools(server, *, handler=None):
     from ..auth.middleware import extract_user_from_request
@@ -166,12 +194,12 @@ def module_tools(server, *, handler=None):
     from .admin_control_service import pending_tool_approvals
     from .control_service import GatewayControlScope
     read = ModuleRead("tools")
-    rows = read.read("agent.tools", lambda: list(server.agent.tools.tools.values()), [])
+    rows = read.read("agent.tools", lambda: list(execution_agent(server).tools.tools.values()), [])
     if len(rows) > 1000:
         read.value("agent.tools.truncated", None)
     user, channel = extract_user_from_request(handler) if handler is not None else ("admin", "chat")
     scope = GatewayControlScope(user_id=user, channel=channel, conversation_id="", all_user_access=True)
-    pending = read.read("pending_tool_approvals", lambda: pending_tool_approvals(server.agent, server.paths, scope), [])
+    pending = read.read("pending_tool_approvals", lambda: pending_tool_approvals(execution_agent(server), server.paths, scope), [])
     if len(pending) > 100:
         read.value("pending_tool_approvals.truncated", None)
     return read.result({"tools": [tool_metadata(row, read) for row in rows[:1000]],
@@ -227,7 +255,7 @@ def module_subagents(server):
         "concurrency": read.read("concurrency_metrics", concurrency_snapshot, {})})
 
 
-# LLM: 列表是原候选库的结构化状态，不解析展示文案，不触发preview/confirm。
+# LLM: 候选查询需要现存执行端口，缺失不构造Agent；不解析展示文案或触发preview/confirm。
 # 函数用途: 分页统计仍待审核的记忆候选。
 def memory_pending(server):
     from types import SimpleNamespace
@@ -236,7 +264,7 @@ def memory_pending(server):
     offset, pending = 0, 0
     while True:
         command = SimpleNamespace(operation="list", target_id=str(offset))
-        result = run_memory_candidate_control(server.agent, server.paths, command, None, "")
+        result = run_memory_candidate_control(execution_agent(server), server.paths, command, None, "")
         if not result.ok:
             raise ValueError("memory unavailable")
         details = result.details
@@ -302,10 +330,10 @@ def module_skills(server):
     return read.result({"layers": layers, "learned": learned[:500]})
 
 
-# LLM: 仅读已绑定的原仓储，不能为一个只读页面构造会建目录的SchedulerRepository。
+# LLM: 仅读现存Agent已绑定的原仓储，缺失显式不可用；不能为页面构造SchedulerRepository。
 # 函数用途: 获取调度公共只读列表。
 def schedule_jobs(server):
-    return report_value(server.agent.scheduler_repository.list_jobs())
+    return report_value(execution_agent(server).scheduler_repository.list_jobs())
 
 
 # LLM: 缺源时计数是null，而不是误导门户的零。
@@ -324,18 +352,18 @@ def module_schedules(server):
     return read.result({"jobs": redact_sensitive_value((jobs or [])[:500]), "counts": counts})
 
 
-# LLM: 适配器只使用宿主当前绑定的公共对象，不创建新客户端或读取token。
+# LLM: 适配器只使用现存Agent绑定的公共对象，冷路径显式不可用；不新建客户端或读取token。
 # 函数用途: 找到原生飞书适配器。
 def feishu_adapter(server):
-    return server.agent.channel_registry.adapter_for("feishu")
+    return execution_agent(server).channel_registry.adapter_for("feishu")
 
 
-# LLM: 原通道摘要可能带近期消息，管理口仅返回计数和掩码应用ID。
+# LLM: 通道配置沿可信Agent或控制面，原查询缺失显式partial；仅返回计数和掩码应用ID。
 # 函数用途: 聚合通道配置与活跃计数。
 def module_channels(server):
     read = ModuleRead("channels")
-    config = server.agent.config
-    configured = bool(getattr(config, "feishu_app_id", "") and getattr(config, "feishu_app_secret", ""))
+    config = read.value("config", getattr(configuration_base(server), "config", None))
+    configured = bool(getattr(config, "feishu_app_id", "") and getattr(config, "feishu_app_secret", "")) if config is not None else None
     rows = []
     for channel in ("chat", "feishu", "qq", "web"):
         summary = read.read("admin_query." + channel,
@@ -396,13 +424,13 @@ def module_workspace(server):
     return read.result({"owners": [owner_quota_view(server, owner_id, home, read) for owner_id, home in owners[:500]]})
 
 
-# LLM: 审计与业务audit.list共用唯一聚合读口。
+# LLM: 审计沿规范根共用唯一读口；可选host端口缺失传None，由原聚合器披露部分覆盖。
 # 函数用途: 查询host审计并保持原coverage和unavailable。
 def audit_page(server, *, handler=None, since=None, actor=None, cursor=None, limit=50):
     from ..business_spaces.v13_audit import audit_records
     home = main_home_paths(server)
     page = audit_records(home.owner_home_dir, "local/main", scope="host", since=since, until=None,
-                         actor=actor, cursor=cursor, limit=limit, admin_context=handler, host=server.agent)
+                         actor=actor, cursor=cursor, limit=limit, admin_context=handler, host=getattr(server, "agent", None))
     return {"data": {key: page[key] for key in ("records", "next_cursor", "coverage")},
             "coverage": page["coverage"], "unavailable": page["unavailable"]}
 
