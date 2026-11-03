@@ -48,6 +48,9 @@ def test_v13_unknown_params_and_result_validation(v13_host, monkeypatch):
 # LLM: 发现按规范动作ready与实时权限过滤，别名必须独立获准。
 # 函数用途: 验证扩展发现不污染冻结目录。
 def test_extensions_discovery_lists_only_ready_and_authorized_v13_actions(v13_host, monkeypatch):
+    v13.v13_action_specs()
+    monkeypatch.setattr(v13, '_ACTIONS', {'system.capabilities.extensions': v13._ACTIONS['system.capabilities.extensions']})
+    monkeypatch.setattr(v13, 'ALIASES', {})
     for item in (action(), action('not.ready', ready=lambda call: False), action('denied.read'),
             action('admin.read', admin=True)):
         monkeypatch.setitem(v13._ACTIONS, item.name, item)

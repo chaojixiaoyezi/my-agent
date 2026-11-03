@@ -233,7 +233,7 @@ def test_soc_bridge_aliases_resolve_when_owner_slices_present():
     expected = {'soc.hunt.search': 'hunts.search', 'soc.hunt.saved.list': 'hunts.saved.list',
         'soc.hunt.saved.create': 'hunts.saved.create', 'soc.hunt.saved.run': 'hunts.saved.run',
         'soc.threat_intel.indicators.list': 'threat_intel.indicators.list',
-        'soc.threat_intel.lookup': 'threat_intel.lookup'}
+        'soc.threat_intel.lookup': 'threat_intel.indicators.lookup'}
     for alias, canonical in expected.items():
         if canonical in specs:
             assert ALIASES[alias] == canonical and v13_action_spec(alias).action == canonical

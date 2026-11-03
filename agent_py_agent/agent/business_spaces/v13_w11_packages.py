@@ -13,6 +13,8 @@ import html
 import io
 import json
 import zipfile
+from copy import copy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -102,6 +104,38 @@ def _management(call):
 def _installed_entry(manager, package_id):
     return next((row for row in manager.installations.snapshot()
                  if row.manifest.plugin_id == package_id), None)
+
+
+# LLM: 只给本次调用补原安装表只读引用；保留显式宿主解析器，不改缓存服务、actor或安装权威。
+# 函数用途: 让包安装和卸载通过原生空间端口解析真实的已安装包。
+def _mount_call(call, manager):
+    from ..conversation.business_spaces import BusinessSpaceService
+
+    services = call.services
+    if callable(services.spaces.reference_resolver):
+        return call
+    if not isinstance(services.spaces, BusinessSpaceService):
+        raise HostAPIError('HOST_NOT_READY', 503)
+    local = copy(services)
+    local.spaces = copy(services.spaces)
+
+    # LLM: 每次读取当前owner原安装快照，未安装或非包引用不产生可用事实；原actor和live门继续有效。
+    # 函数用途: 把当前安装版本和启用状态投影成原空间服务的引用元数据。
+    def resolve(kind, ref, actor):
+        if actor.service is not local.spaces or actor.owner_id != call.owner_id:
+            raise BusinessError('ACTOR_REQUIRED')
+        if kind != 'package':
+            return None
+        v13_require_access(call, {'owner_id': call.owner_id, 'package_ref': ref})
+        entry = _installed_entry(manager, ref)
+        if entry is None:
+            return None
+        return {'owner_id': call.owner_id, 'ref': ref,
+                'state': 'available' if entry.enabled else 'disabled',
+                'version_ref': entry.package_sha256}
+
+    local.spaces.reference_resolver = resolve
+    return replace(call, services=local)
 
 
 # LLM: 来源字节必须通过原静态校验并绑定请求ID/版本，合法的另一包同样拒绝。
@@ -420,13 +454,15 @@ def install(call):
     return _package_receipted(call, _install_once)
 
 
-# LLM: 空间先授权后安装，字节身份由fetch复核，安装与挂载仍走原生端口。
+# LLM: 空间先授权后安装，字节身份由fetch复核，调用局部原安装引用接入原生挂载端口。
 # 函数用途: 执行一次尚未完成的安装和挂载。
 def _install_once(call):
     package_id, version = call.params['package_id'], call.params['version']
     space_id, mount = call.params.get('space_id'), call.params.get('mount', True)
-    space = v13_resolve_space(call, space_id) if space_id else None
     manager = _management(call)
+    if space_id and mount:
+        call = _mount_call(call, manager)
+    space = v13_resolve_space(call, space_id) if space_id else None
     entry = _installed_entry(manager, package_id)
     if entry is not None:
         if entry.manifest.version != version:
@@ -458,11 +494,12 @@ def uninstall(call):
     return _package_receipted(call, _uninstall_once)
 
 
-# LLM: 完整枚举且有界拒绝截断，稳定空间键摘除后检查原生卸载回执。
+# LLM: 完整枚举且有界拒绝截断，同一原安装引用解析剩余挂载，摘除后检查原生卸载回执。
 # 函数用途: 执行一次尚未完成的卸载编排。
 def _uninstall_once(call):
     package_id = call.params['package_id']
     manager = _management(call)
+    call = _mount_call(call, manager)
     if _installed_entry(manager, package_id) is None:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     detached, revisions, cursor = [], {}, None

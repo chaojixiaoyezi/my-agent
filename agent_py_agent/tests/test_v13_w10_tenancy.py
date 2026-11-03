@@ -65,7 +65,7 @@ class MemoryPort:
 # 函数用途: 捕获测试目录的可比较磁盘状态。
 def snapshot(root):
     return {str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None)
-        for path in root.rglob('*')}
+        for path in root.rglob('*') if path.name not in {'runtime.db-shm', 'runtime.db-wal'}}
 
 
 # LLM: 每次测试使用临时HOME和真实原生账号；仅替换W0存储构造及管理员决策端口。

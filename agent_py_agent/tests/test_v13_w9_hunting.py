@@ -158,7 +158,7 @@ def _model_text(monkeypatch, output):
     # 函数用途: 返回确定性模型结果。
     def generate(self, prompt, on_chunk=None, tools=None, tool_choice=None, messages=None,
             on_thinking_delta=None, request_options=None):
-        observed.append(prompt)
+        observed.append(prompt + (" " + json.dumps(messages, ensure_ascii=False) if messages else ""))
         text = json.dumps(output, ensure_ascii=False)
         if on_chunk is not None:
             on_chunk(text)

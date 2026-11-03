@@ -679,16 +679,16 @@ def _async_jobs_get(call):
             if kind is None:
                 raise HostAPIError('HOST_NOT_READY', 503)
             text = _job_text(call, row)
+            validator = kind.get('validate_result')
+            if validator is not None:
+                v13_require_access(call, row)
+                if not callable(validator):
+                    raise HostAPIError('HOST_NOT_READY', 503)
             try:
                 result = validate_object(kind['finalize'](text), v13_schema(kind['result_schema']))
-                validator = kind.get('validate_result')
-                if validator is not None:
-                    v13_require_access(call, row)
-                    if not callable(validator) or validator(call, deepcopy(row), deepcopy(result)) is not True:
-                        raise ValueError('作业结果未通过登记的业务约束')
-            except (HostAPIError, ValueError, TypeError, KeyError) as failure:
-                if isinstance(failure, HostAPIError) and failure.code != 'INVALID_SCHEMA':
-                    raise
+                if validator is not None and validator(call, deepcopy(row), deepcopy(result)) is not True:
+                    raise ValueError('作业结果未通过登记的业务约束')
+            except (HostAPIError, ValueError, TypeError, KeyError):
                 state, result = 'failed', None
                 error = {'code': 'JOB_RESULT_INVALID', 'message': '模型输出不符合已登记的结果结构'}
         elif state == 'failed':

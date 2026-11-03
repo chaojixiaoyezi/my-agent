@@ -721,19 +721,6 @@ def native_business_context(handler, server):
                     'business_v13_providers', 'business_v13_clock'):
             if hasattr(base, key):
                 setattr(host, key, getattr(base, key))
-    if (getattr(host, 'business_reference_reader', None) is None
-            and getattr(host, 'conversation_store', None) is not None
-            and ('business_reference_reader' not in getattr(base, '__dict__', {})
-                 or getattr(base, 'business_reference_reader', None) is not None)):
-        def _default_ref_reader(kind, ref_id, _actor, _store=host.conversation_store):
-            if kind != 'task':
-                return None
-            stask = _store.session_tasks.load(str(ref_id))
-            bc = (getattr(stask, 'metadata', None) or {}).get('business_context') if stask is not None else None
-            if isinstance(bc, dict):
-                return {'owner_id': bc.get('owner_id'), 'space_id': bc.get('space_id'), 'task_id': stask.task_id}
-            return None
-        host.business_reference_reader = _default_ref_reader
 
     def check(action, facts):
         middleware = getattr(handler, '_auth_middleware', None)
@@ -807,6 +794,19 @@ def native_business_context(handler, server):
         from .business_api_v13_readers import native_approval_readers
         cache[key].projection.readers.update(native_approval_readers(base, server.paths, home.owner_id,
             getattr(host, 'conversation_store', None)))
+    if (getattr(host, 'business_reference_reader', None) is None
+            and getattr(host, 'conversation_store', None) is not None
+            and ('business_reference_reader' not in getattr(base, '__dict__', {})
+                 or getattr(base, 'business_reference_reader', None) is not None)):
+        def _default_ref_reader(kind, ref_id, _actor, _store=host.conversation_store):
+            if kind != 'task':
+                return None
+            stask = _store.session_tasks.load(str(ref_id))
+            bc = (getattr(stask, 'metadata', None) or {}).get('business_context') if stask is not None else None
+            if isinstance(bc, dict):
+                return {'owner_id': bc.get('owner_id'), 'space_id': bc.get('space_id'), 'task_id': stask.task_id}
+            return None
+        host.business_reference_reader = _default_ref_reader
     return context, cache[key]
 
 
