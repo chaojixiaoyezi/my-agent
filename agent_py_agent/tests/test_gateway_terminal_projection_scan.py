@@ -55,28 +55,37 @@ def _submit_real_terminal(agent, paths) -> str:
     return request_id
 
 
-def _copy_terminal_as(paths, source_id: str, new_id: str) -> None:
-    """把终态文件复制成新 id，模拟"终态已写、投影与标记缺失"的崩溃残留。
+def _copy_terminal_as(agent, paths, source_id: str, new_id: str) -> None:
+    """经原提交/执行链生成独立终态，再移去投影模拟崩溃，不复制旧执行绑定。"""
+    import pytest
 
-    复制时必须同步改写请求身份字段（id、会话车道引用）并重算指纹，否则重放会按
-    "与不可变请求内容冲突"拒绝——那是数据损坏路径，不是本测试要构造的场景。
-    """
-    payload = json.loads(json.dumps(read_json_file(paths.terminal / f"{source_id}.json")))
-    payload["id"] = new_id
-    payload["terminal_response"]["id"] = new_id
-    claim = payload.get("conversation_claim")
-    if isinstance(claim, dict):
-        claim["request_id"] = new_id
-        claim["task_id"] = f"gateway:{new_id}"
-    payload["request_fingerprint"] = gateway_request_fingerprint(payload, new_id)
-    write_json_file(paths.terminal / f"{new_id}.json", payload)
+    from agent_py_agent.agent.gateway_parts import request_client
+    from agent_py_agent.agent.gateway_parts.request_binding import gateway_runtime_authority
+
+    source = read_json_file(paths.terminal / f"{source_id}.json")
+    # 仅固定新请求的编号；owner、claim、RuntimeDB与执行代次仍由原生产者签发。
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(request_client, "new_gateway_request_id", lambda: new_id)
+        request_id, _, _ = submit_gateway_ask(
+            paths, params=GatewayAskParams(prompt=source["prompt"], save=False),
+        )
+    assert request_id == new_id
+    assert _process_gateway_requests(agent, paths, worker_id="terminal-scan") == 1
+    payload = read_json_file(paths.terminal / f"{new_id}.json")
+    binding = gateway_runtime_authority(payload, new_id)
+    assert binding["request_id"] == new_id
+    assert binding["gateway_execution_attempt_id"] == payload["execution_attempt_id"]
+    assert binding != gateway_runtime_authority(source, source_id)
+    _projection_path(paths, new_id).unlink()
+    _marker_path(paths, new_id).unlink()
+    (paths.responses / f"{new_id}.json").unlink()
 
 
 def _seed_terminal_archive(agent, paths, copies: int) -> str:
     """真实终态 1 个 + 复制 copies 个待补副本，返回真实请求 id。"""
     request_id = _submit_real_terminal(agent, paths)
     for index in range(copies):
-        _copy_terminal_as(paths, request_id, f"gwreq-probe-{index:03d}")
+        _copy_terminal_as(agent, paths, request_id, f"gwreq-probe-{index:03d}")
     return request_id
 
 
@@ -153,7 +162,7 @@ def test_new_terminal_file_is_projected_after_directory_change(tmp_path):
     repair_gateway_terminal_projections(paths, agent=agent, limit=16, full_scan=True)
 
     # 新到一个终态文件（无投影、无标记）→ 目录变化必须放开节流并补齐。
-    _copy_terminal_as(paths, request_id, "gwreq-probe-000")
+    _copy_terminal_as(agent, paths, request_id, "gwreq-probe-000")
 
     projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=16)
     assert (projected, errors) == (1, [])
@@ -208,7 +217,7 @@ def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path, monk
 
     # 只预热新文件的真实读锁，不用glob辅助函数污染产品枚举计数。
     new_id = "gwreq-probe-005"
-    _copy_terminal_as(paths, request_id, new_id)
+    _copy_terminal_as(agent, paths, request_id, new_id)
     read_json_file_report(paths.terminal / f"{new_id}.json", context="tests.terminal_projection_scan.warm")
     assert _directory_stamp(paths.terminal) != stamp
     projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
@@ -481,3 +490,34 @@ def test_opt6_empty_terminal_candidates_reset_cursor_and_are_cached(tmp_path, mo
     assert cursor["last_name"] == "" and cursor["caught_up"] is True
     assert repair_gateway_terminal_projections(paths, agent=None, full_scan=True) == (0, [])
     assert calls == ["*.json"]
+
+
+def test_terminal_copy_cannot_reuse_source_runtime_authority(tmp_path):
+    """保留旧失败输入作反例：改编号和指纹不等于取得另一回合的执行绑定。"""
+    agent = _make_recovery_agent(tmp_path)
+    paths = gateway_paths(agent)
+    _ensure_gateway_dirs(paths)
+    source_id = _submit_real_terminal(agent, paths)
+    source_path = paths.terminal / f"{source_id}.json"
+    source_bytes = source_path.read_bytes()
+    payload = json.loads(source_bytes)
+    request_id = "gwreq-stale-binding"
+    payload["id"] = request_id
+    payload["terminal_response"]["id"] = request_id
+    claim = payload.get("conversation_claim")
+    if isinstance(claim, dict):
+        claim["request_id"] = request_id
+        claim["task_id"] = f"gateway:{request_id}"
+    payload["request_fingerprint"] = gateway_request_fingerprint(payload, request_id)
+    assert payload["runtime_authority"]["request_id"] == source_id
+    canonical = paths.terminal / f"{request_id}.json"
+    write_json_file(canonical, payload)
+    rejected_bytes = canonical.read_bytes()
+
+    projected, errors = repair_gateway_terminal_projections(paths, agent=agent, full_scan=True)
+    assert projected == 0 and len(errors) == 1
+    assert errors[0]["error_type"] == "ConversationPersistenceError"
+    assert not _marker_path(paths, request_id).exists()
+    assert not _projection_path(paths, request_id).exists()
+    assert not (paths.responses / f"{request_id}.json").exists()
+    assert source_path.read_bytes() == source_bytes and canonical.read_bytes() == rejected_bytes

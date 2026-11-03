@@ -234,6 +234,8 @@ def test_c_business_wait_follows_original_credential_gate(tmp_path, monkeypatch,
             assert status == 200 and result == {
                 'ok': True, 'thread_id': '', 'turns': [], 'load_errors': [], 'display_events': [],
                 'message_cursor': 0, 'before_message_cursor': 0, 'has_older': False,
+                'active_request_id': '', 'in_flight_status': 'idle', 'turn_phase': '',
+                'stream_cursor': 0, 'progress_path': '', 'queued_request_ids': [],
             }
         elif expected == 'absent':
             assert status == 404 and result == {'error': 'control operation not found'}

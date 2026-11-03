@@ -289,3 +289,33 @@ def test_actual_control_gate_reads_same_canonical_curator_quota_root(tmp_path, m
         if exemption == 'none':
             assert read_json_file(quota)['count'] == CURATOR_DAILY_QUOTA_DEFAULT_COUNT - 1
             assert any(row.get('admission_wait_reason') == 'curator_daily_quota_exhausted' for row in rows)
+
+
+@pytest.mark.parametrize('denied', [None, ('owners', 'local'), ('owners', 'providers', 'local', 'users')])
+def test_curator_inventory_checks_canonical_and_legacy_owner_buckets(tmp_path, monkeypatch, denied):
+    from agent_py_agent.agent.gateway_parts import multiprocess_curator_accounting as accounting
+
+    for owner in (OwnerIdentity.provider_user('feishu', 'alice'),
+                  OwnerIdentity.provider_group('feishu', 'team'), OwnerIdentity.local_user('bob')):
+        ensure_owner_home(tmp_path, owner)
+    (tmp_path / 'owners/providers/local/users').mkdir(parents=True)
+    opened = []
+    original = accounting.open_directory_beneath
+
+    def observe(root, relative, **options):
+        opened.append(relative)
+        if relative == denied:
+            raise PermissionError('synthetic unreadable owner bucket')
+        return original(root, relative, **options)
+
+    monkeypatch.setattr(accounting, 'open_directory_beneath', observe)
+    if denied is not None:
+        with pytest.raises(PermissionError):
+            accounting._inventory_version(tmp_path)
+        assert denied in opened
+        return
+    version = accounting._inventory_version(tmp_path)
+    assert {kind for _provider, kind, _stamp in version} == {'user', 'group', 'legacy-users'}
+    assert {('owners', 'local'), ('owners', 'providers', 'local', 'users'),
+            ('owners', 'providers', 'feishu', 'users'),
+            ('owners', 'providers', 'feishu', 'groups')} <= set(opened)
