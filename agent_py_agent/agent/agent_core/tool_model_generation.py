@@ -1385,7 +1385,7 @@ def _generate_backend_response(
         backend.request_timeout = original
 
 
-# LLM: 原 observer/并发槽内核对宿主最终请求，再提交 child/guidance 意图；发送前拒绝 HTTP 为零，网络开始后不跨模型重发。
+# LLM: 原observer/并发槽内核对宿主最终请求，再提交child/guidance；发送前拒绝HTTP为零，网络开始后不跨模型重发；owner占用随实际worker退出释放。
 # 函数用途: 调用真实模型后端，记录物理尝试、耗时、并发与费用；排队事件只交当前用户显示。
 def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # LLM 热路径 RED + token + USD 成本埋点(审计 #19):计时 + 成败 + token + cost 发到默认
@@ -1393,7 +1393,7 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     # llm_inflight(§6-A2):在飞 LLM 并发 gauge——"1000 用户扇出成多少并发模型调用"的实测值。
     from ..backends.gateway_helpers import provider_attempt_observer
     from ..llm_scale.hot_path import global_llm_admission_slot
-    from ..observability.concurrency_metrics import llm_inflight
+    from ..observability.concurrency_metrics import llm_inflight, owner_model_activity_scope
     from .model.llm_metrics import record_llm_call, record_llm_cost
 
     start = time.monotonic()
@@ -1415,7 +1415,7 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     # 请求前缀诊断开关：只算出站请求的不可逆摘要（见 backends/cache_diagnostics.py），
     # 不修改请求、不记录正文/密钥，是内部诊断参数 —— 2026-09-28 参数减量降为常量。
     with provider_attempt_observer(_observe_provider_attempt, cache_diagnostics=_CACHE_DIAGNOSTICS_ENABLED):
-        with global_llm_admission_slot():
+        with global_llm_admission_slot(), owner_model_activity_scope(state.agent):
             llm_inflight(1)
             try:
                 _register_call_before_send(backend, prompt, state)

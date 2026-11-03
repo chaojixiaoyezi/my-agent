@@ -305,7 +305,7 @@ def _auxiliary_base_request_timeout(request: AuxiliaryModelCallRequest) -> float
         return 0.0
 
 
-# LLM: 两种生成共享原 admission、provider scope 和观察者；schema 不启动工具循环，取消与后端异常原样退出。
+# LLM: 两种生成共享原admission、provider scope和观察者；schema不启动工具循环，取消与后端异常原样退出；owner占用只随实际生成栈释放。
 #   cabfix：这里是所有辅助调用的唯一咽喉，首事件预算和绝对期限都从这一处注入，不散落到各调用方。
 # 函数用途: 在原并发槽调用已选方法，把实际流事件和 HTTP 尝试记入原模型账。
 def _invoke_auxiliary_generate(
@@ -314,7 +314,7 @@ def _invoke_auxiliary_generate(
     call: _AuxiliaryCallRef,
 ) -> object:
     from ..llm_scale.hot_path import global_llm_admission_slot
-    from ..observability.concurrency_metrics import llm_inflight
+    from ..observability.concurrency_metrics import llm_inflight, owner_model_activity_scope
 
     ledger, call_id = call.ledger, call.call_id
     on_chunk = _auxiliary_chunk_observer(ledger, call_id)
@@ -329,7 +329,7 @@ def _invoke_auxiliary_generate(
     with provider_runtime_scope(request.agent, request), provider_attempt_observer(
         _observe_provider_attempt, cache_diagnostics=_is_compact_purpose(request.purpose),
     ):
-        with global_llm_admission_slot():
+        with global_llm_admission_slot(), owner_model_activity_scope(request.agent):
             from ..common.managed_owner_generation import require_managed_owner_generation
 
             # 准入槽等待之后、后端调用之前复核受管原代次。
