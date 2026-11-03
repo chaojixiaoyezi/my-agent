@@ -158,7 +158,7 @@ def channel_target(server, handler, body):
     return adapter, target
 
 
-# LLM: POST保留原鉴权；writer门位于包括运维回执在内的全部写副作用之前。
+# LLM: POST保留原鉴权及writer门；冷协调器还须保有原HTTP角色，全部先于运维回执写入。
 # 函数用途: 分派受控运维写路由。
 def handle_admin_api_post(handler, server):
     if require_admin_handler(handler):
@@ -172,7 +172,7 @@ def handle_admin_api_post(handler, server):
             return
         name = url.path.removeprefix("/api/admin/ops/")
         operation_body(name, body)
-        require_global_writer("admin_ops")
+        require_operation_writer(server)
         result = run_operation(handler, server, name, body)
         send_page(handler, {"data": result, "coverage": "complete", "unavailable": []})
     except GlobalWriteInWorkerError:
@@ -183,7 +183,32 @@ def handle_admin_api_post(handler, server):
         send_error(handler, "OUTCOME_UNKNOWN")
 
 
-# LLM: 先耐久记录可能进入副作用，再执行一次；崩溃/并发重投不能重做外发或回收。
+# LLM: 不签新角色；沿原global writer及冷C的原HTTP来源核验，缺失在任何运维首写前拒绝。
+# 函数用途: 复核当前管理写入口仍属于原本可写的宿主。
+def require_operation_writer(server):
+    require_global_writer("admin_ops")
+    if getattr(server, "agent", None) is None:
+        from .multiprocess_http_transport import require_http_transport
+        control = getattr(server, "control_plane", None)
+        if control is None:
+            raise BusinessError("HOST_NOT_READY")
+        try:
+            require_http_transport(getattr(server, "drain_runtime", None), control=control, paths=server.paths)
+        except (AttributeError, RuntimeError, ValueError):
+            raise BusinessError("HOST_NOT_READY") from None
+
+
+# LLM: 只在fresh预留中核可选端口，不执行领域操作；回放已完成回执时不因端口后续失源改写结果。
+# 函数用途: 区分进入前不可用与真正进入执行后的结果未知。
+def operation_available(handler, server, name, body):
+    require_operation_writer(server)
+    if name == "channel-test":
+        channel_target(server, handler, body)
+    elif name == "reclaim" and body["kind"] == "turn":
+        modules.execution_agent(server)
+
+
+# LLM: fresh先核原角色和执行端口，再耐久预留并执行一次；崩溃/并发重投不重做副作用。
 # 函数用途: 在main admin_ops维护幂等运维操作。
 def run_operation(handler, server, name, body):
     from ..auth.middleware import extract_user_from_request
@@ -196,9 +221,10 @@ def run_operation(handler, server, name, body):
     params = {key: value for key, value in body.items() if key != "idempotency_key"}
     digest = hashlib.sha256(json.dumps(params, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     entered = []
-    # LLM: mutate在存储锁内只创建记录，不在配额锁内执行外部副作用。
+    # LLM: mutate只核原内存端口并创建记录；失源不预留，不在配额锁内执行外部副作用。
     # 函数用途: 原子预留本次操作身份并隔离同键并发。
     def reserve(records):
+        operation_available(handler, server, name, body)
         op_id = "admin-" + uuid4().hex
         at = modules.timestamp(time.time())
         records[op_id] = {"op_id": op_id, "owner_id": body.get("owner_id", "local/main"),
@@ -218,7 +244,7 @@ def run_operation(handler, server, name, body):
     try:
         if not still_admin(handler):
             raise BusinessError("CAPABILITY_DENIED")
-        require_global_writer("admin_ops")
+        require_operation_writer(server)
         result = execute_operation(handler, server, name, body, op_id)
     except BusinessError as error:
         result = {"_error": error.code}
@@ -236,7 +262,7 @@ def run_operation(handler, server, name, body):
     return result
 
 
-# LLM: 配额沿原有界reconcile默认预算，外发只调用已绑定适配器公共send_message。
+# LLM: 配额只沿可信基座解析规范owner并调用原有界reconcile，绝不为存储操作创建业务Agent。
 # 函数用途: 执行经过鉴权和耐久预留的运维动作。
 def execute_operation(handler, server, name, body, op_id):
     if name == "quota-reconcile":

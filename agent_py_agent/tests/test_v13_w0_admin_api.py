@@ -408,6 +408,10 @@ def test_api_admin_ops_channel_test(native_http, delivered):
     assert request(native_http, "POST", "/api/admin/ops/channel-test", body)[1]["data"] == first["data"]
     assert len(adapter.calls) == 1 and "管理员通道测试" in adapter.calls[0][1].content
     assert adapter.calls[0][1].metadata["delivery_idempotency_key"] == first["data"]["op_id"]
+    from agent_py_agent.agent.delivery.registry import ChannelAdapterRegistry
+    native_http[1].channel_registry = ChannelAdapterRegistry()
+    status, after_port_loss = request(native_http, "POST", "/api/admin/ops/channel-test", body)
+    assert status == 200 and after_port_loss["data"] == first["data"]
     status, conflict = request(native_http, "POST", "/api/admin/ops/channel-test", {**body, "target": "ou_different"})
     assert status == 409 and conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     assert len(adapter.calls) == 1
