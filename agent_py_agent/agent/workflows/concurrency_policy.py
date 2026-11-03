@@ -12,7 +12,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
@@ -361,6 +361,8 @@ def _lifecycle_store(scope: _Scope, lease: _Lease):
     return WorkflowRunStore(scope.root)
 
 
+# LLM: gate内只非阻塞读取原run；仅规范义务与可靠的callback退出证明允许释放准确代次。
+# 函数用途: 查询占位并恢复已退出回调留下的规范清理证明，不等待活回调的执行锁。
 def _holder(scope: _Scope, parent: int):
     """先核确切回调退出证明；委派义务不随原进程死亡而被回收。"""
     lease = _claim(scope, parent)
@@ -379,7 +381,7 @@ def _holder(scope: _Scope, parent: int):
     if store is not None:
         from .run_store import _RunBusy
         try:
-            phase = store._concurrency_claim_phase(lease)
+            phase = store._concurrency_claim_phase(lease, recover_exited=True)
         except _RunBusy:
             return lease
         if phase == 'release_pending':
@@ -414,6 +416,36 @@ def _create_claim(parent: int, ticket: dict[str, Any]) -> _Lease:
     finally:
         os.close(descriptor)
     return _Lease(record, identity)
+
+
+# LLM: 只能由尚未进入callback的绑定栈调用；异常保留准确租约及原run上的未确认清理证明。
+# 函数用途: 对账绑定前后错误，归还未启动占位或恢复原委派义务的retained阶段。
+def _abort_binding(scope: _Scope, parent: int, lease: _Lease) -> None:
+    key = _claim_key(scope, lease)
+    try:
+        current = _claim(scope, parent)
+        if current is None or current.stamp != lease.stamp or current.record != lease.record:
+            return
+        _PENDING_RELEASES[key] = lease
+        store = _lifecycle_store(scope, lease)
+        if store is not None and store._abort_concurrency_binding(lease) != 'release_pending':
+            _PENDING_RELEASES.pop(key, None)
+            return
+        _release_locked(scope, parent, lease)
+    except Exception as exc:
+        _PENDING_RELEASES[key] = lease
+        _log_failure('binding_cleanup', exc)
+
+
+# LLM: 注册清理早于作用域解析和绑定IO；成功后才移交给_execute，覆盖新建和原run重绑。
+# 函数用途: 用同一ExitStack保护准确claim的生命周期绑定。
+def _bind_claim(scope: _Scope, parent: int, lease: _Lease) -> None:
+    with ExitStack() as cleanup:
+        cleanup.callback(_abort_binding, scope, parent, lease)
+        store = _lifecycle_store(scope, lease)
+        if store is not None:
+            store._bind_concurrency_claim(lease)
+        cleanup.pop_all()
 
 
 # LLM: 同run_id不等于同租约；nonce、完整记录、inode及本进程身份全部匹配才释放。
@@ -492,18 +524,14 @@ def _take_ticket(scope: _Scope, ticket: dict[str, Any]):
         if index != 0 or holder is not None:
             return True, None
         lease = _create_claim(parent, ticket)
-        store = _lifecycle_store(scope, lease)
-        if store is not None:
-            store._bind_concurrency_claim(lease)
+        _bind_claim(scope, parent, lease)
         try:
             _write_queue(parent, entries[1:])
         except BaseException:
             # 原子发表后的 ACK 错误不等于票据仍在；已删除时继续消费本次准确占位。
             if not any(entry['nonce'] == ticket['nonce'] for entry in _queue(scope, parent)):
                 return True, lease
-            if store is not None:
-                store._finish_concurrency_claim(lease)
-            _release_locked(scope, parent, lease)
+            _abort_binding(scope, parent, lease)
             raise
         return True, lease
 
@@ -608,12 +636,11 @@ def dispatch(
         if (holder is not None and _lifecycle is not None and holder.record.get('run_id') == run_id
                 and holder.record.get('lifecycle') == 'workflow'
                 and _lifecycle._concurrency_claim_phase(holder) == 'retained'):
-            _lifecycle._bind_concurrency_claim(holder)
+            _bind_claim(scope, parent, holder)
             lease = holder
         elif holder is None and not entries:
             lease = _create_claim(parent, ticket)
-            if _lifecycle is not None:
-                _lifecycle._bind_concurrency_claim(lease)
+            _bind_claim(scope, parent, lease)
         elif policy == "skip_if_running":
             return {
                 "status": "skipped",
