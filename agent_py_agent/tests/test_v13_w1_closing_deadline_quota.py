@@ -126,12 +126,20 @@ def test_closing_timeout_retires_pending_approval_and_unblocks(tmp_path, monkeyp
     assert second is not None and second["task_id"] == "gateway:second"
 
 
+# LLM: 六类排除条件在收集后推进本模块墙钟；真实审批夹具与生产期限不变，排除项不得写盘或发中断。
+# 函数用途: 验证立即执行和延后超过硬期限时，未过期或非closing请求均保持原样。
+@pytest.mark.parametrize("execution_delay", [0.0, 121.0], ids=["immediate", "collection-delayed"])
 @pytest.mark.parametrize("change", [
-    {"cancel_requested_at": time.time()}, {"turn_phase": "open"}, {"control_status": "running"},
+    pytest.param(lambda: {"cancel_requested_at": time.time()}, id="change0"),
+    {"turn_phase": "open"}, {"control_status": "running"},
     {"cancel_requested": False}, {"status": "done"}, {"cancel_requested_at": "0"},
 ])
-def test_closing_not_expired_or_nonclosing_is_untouched(tmp_path, change, monkeypatch):
+def test_closing_not_expired_or_nonclosing_is_untouched(tmp_path, change, monkeypatch, execution_delay):
+    # 参数已在模块收集时固定；只推进本模块墙钟，不改产品的单调时钟或默认120秒期限。
+    execution_now = time.time() + execution_delay
+    monkeypatch.setattr(f"{__name__}.time", SimpleNamespace(time=lambda: execution_now))
     ctx = closing_context(tmp_path)
+    change = change() if callable(change) else change
     row = {**ctx.row, **change}
     write_json_file(ctx.path, row)
     before = ctx.path.read_bytes()
