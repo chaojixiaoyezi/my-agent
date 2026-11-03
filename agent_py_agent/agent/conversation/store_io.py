@@ -2,8 +2,10 @@
 # 模块用途: 为各领域共用账本读取、路径、时间和显式文件归档，避免领域对象反向依赖组装入口。
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import logging
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -218,7 +220,7 @@ def jsonl_error(
 LEDGER_ARCHIVE_DIR = ".ledger_archive"
 
 
-# LLM: 归档操作保持原文件及锁的移动顺序，重复清理幂等；是否可归档由调用领域判断。
+# LLM: 调用方先确认可归档；锁迁移失败回滚数据文件，回滚失败保留两个errno与路径供人工恢复。
 # 函数用途: 将已确认可归档的单个账本文件及锁移入归档目录，返回是否成功。
 def archive_ledger_file(src: Path, archive_dir: Path) -> bool:
     """把单个账本文件(及其 .lock)移入归档目录;文件已被并发清走则视为成功(幂等)。"""
@@ -233,8 +235,22 @@ def archive_ledger_file(src: Path, archive_dir: Path) -> bool:
     try:
         if lock.exists():
             lock.rename(archive_dir / lock.name)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger = logging.getLogger(__name__)
+        try:
+            (archive_dir / src.name).rename(src)
+        except OSError as rollback_exc:
+            logger.error(
+                "LEDGER_ARCHIVE_LOCK_MOVE_FAILED rolled_back=False errno=%s rollback_errno=%s source=%s archived=%s",
+                errno.errorcode.get(exc.errno, str(exc.errno)),
+                errno.errorcode.get(rollback_exc.errno, str(rollback_exc.errno)), src, archive_dir / src.name,
+            )
+        else:
+            logger.warning(
+                "LEDGER_ARCHIVE_LOCK_MOVE_FAILED rolled_back=True errno=%s source=%s archived=%s",
+                errno.errorcode.get(exc.errno, str(exc.errno)), src, archive_dir / src.name,
+            )
+        return False
     return True
 
 

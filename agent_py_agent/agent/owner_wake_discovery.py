@@ -81,6 +81,12 @@ _STORE_ROOT_PATTERNS = (
     "data/conversations",
 )
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
+# LLM: local 用户的规范位置是 owners/local/<id>，owners/providers/local/users/<id> 是历史
+# 遗留位置。同一身份在两处同时存在时，发现端在旧位置看到事实、消费端(resolve_owner_home)
+# 只看规范位置，旧路径上的唤醒信号永远消费不到，Agent 被反复种入又反复逐出。因此枚举
+# 跳过旧位置，只把它当「待迁移的旧位置」单独诊断：不种入、不删除、不扩大身份权限。
+_LEGACY_LOCAL_PROVIDER = "local"
+_LEGACY_LOCAL_USER_BUCKET = "users"
 OwnerWakeCursor = tuple[str, str, str]
 
 # 分页目录快照:一次「枚举 + 整体排序」的结果投影,供同一轮分页的相邻页复用。
@@ -180,18 +186,44 @@ class _OwnerFactCacheEntry:
     files: int
 
 
+class _OwnerHomeDiagnosticLedger:
+    """每进程一次的 owner home 位置诊断台账。
+
+    LLM: 同一身份只占位一次，避免每轮扫描重复刷屏；条目数有上界（类属性），超限按最旧
+    淘汰。台账只记「该不该报」，不做任何目录、身份或权限动作。
+    类用途: 给「旧位置 / 双位置冲突」诊断提供一次性占位。
+    """
+
+    MAX_REPORTED = 256
+    _reported: OrderedDict[str, None] = OrderedDict()
+    _lock = threading.Lock()
+
+    @classmethod
+    def claim(cls, key: str) -> bool:
+        """占位一次上报机会；该身份已上报过时返回 False。"""
+        with cls._lock:
+            if key in cls._reported:
+                return False
+            cls._reported[key] = None
+            while len(cls._reported) > cls.MAX_REPORTED:
+                cls._reported.popitem(last=False)
+            return True
+
+
 @dataclass(frozen=True)
 class _OwnerHomeSnapshot:
     """providers 根目录的一次枚举投影:已排序候选 + 预计算排序键 + 失效签名。
 
     LLM: ``candidates`` 与 ``keys`` 必须同序同源(同一份 candidates 派生),分页的
-    bisect 定位只依赖 keys;快照是不可变值对象,复用期间不得原地修改。
+    bisect 定位只依赖 keys;每个候选是「唯一身份 + 该身份的规范 home」,游标键就是
+    身份键——同一身份只出现一次,续页既不重复也不跳过规范位置。快照是不可变值对象,
+    复用期间不得原地修改。
     类用途: 让「取第 N 页」不再重新枚举排序全部 owner home 的只读缓存条目。
     """
 
     signature: tuple[Any, ...]
     created_at: float
-    candidates: tuple[tuple[str, str, Path], ...]
+    candidates: tuple[tuple[Any, Path], ...]
     keys: tuple[OwnerWakeCursor, ...]
 
 
@@ -211,7 +243,12 @@ def discover_wake_pending_owner_page(
     limit: int = 64,
     after_cursor: OwnerWakeCursor | None = None,
 ) -> OwnerWakeDiscoveryPage:
-    """Return one bounded, ordered page without starving owners after the cap."""
+    """Return one bounded, ordered page without starving owners after the cap.
+
+    LLM: 事实判定用的就是发现时给出的规范 home——发现端与消费端(pool.get ->
+    resolve_owner_home / release_idle_owner_agents)看同一个目录,不会出现
+    「旧位置发现、规范位置消费」的空转。
+    """
     page = discover_owner_home_page(
         owners_dir,
         limit=limit,
@@ -244,7 +281,11 @@ def discover_owner_home_page(
     limit: int = 64,
     after_cursor: OwnerWakeCursor | None = None,
 ) -> OwnerHomeDiscoveryPage:
-    """Return one bounded canonical provider-owner page without filtering facts."""
+    """Return one bounded canonical provider-owner page without filtering facts.
+
+    LLM: 候选按唯一身份去重并归一到规范 home;游标是身份键,所以同一个身份在
+    旧位置与规范位置同时存在时也只出现一次,limit=1 连翻两页也不会跳过规范目标。
+    """
     providers_root = Path(owners_dir) / "providers"
     if not providers_root.is_dir() and not (Path(owners_dir) / "local").is_dir():
         return OwnerHomeDiscoveryPage((), None, 0)
@@ -256,18 +297,18 @@ def discover_owner_home_page(
     page_size = max(1, limit)
     end = min(len(candidates), start + page_size)
     for index in range(start, end):
-        provider, owner_kind, owner_home = candidates[index]
+        identity, owner_home = candidates[index]
         scanned += 1
         targets.append(
             OwnerHomeDiscoveryTarget(
-                identity=_identity(provider, owner_kind, owner_home.name),
+                identity=identity,
                 home_dir=owner_home,
             )
         )
     next_cursor: OwnerWakeCursor | None = None
     if end > start and end < len(candidates):
-        provider, owner_kind, owner_home = candidates[end - 1]
-        next_cursor = _owner_cursor(provider, owner_kind, owner_home.name)
+        identity, _owner_home = candidates[end - 1]
+        next_cursor = _identity_cursor(identity)
     return OwnerHomeDiscoveryPage(tuple(targets), next_cursor, scanned)
 
 
@@ -278,6 +319,7 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
     磁盘一致;② 距快照生成不超过 _SNAPSHOT_TTL_SECONDS(monotonic 计时,不受系统改钟影响)。
     签名在枚举之前计算,因此「枚举期间目录又变了」只会让下次校验失效,不会存下一个比内容
     更新的签名。多线程安全:目录 I/O 在锁外做,只有缓存读写持锁。
+    重建快照时才做旧位置扫描:诊断每进程每个身份只报一次,重复扫描不会刷屏。
     函数用途: 让相邻页(网关在 owner 数 > 页大小时相邻 tick 连跑)共享同一次全量枚举排序;
     缓存条目按 _SNAPSHOT_MAX_ENTRY_COUNT 淘汰,不随路径种类无限增长。
     """
@@ -293,17 +335,13 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
         ):
             _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
             return cached
-    candidates = tuple(
-        sorted(
-            _candidate_owner_homes(providers_root),
-            key=lambda item: _owner_cursor(item[0], item[1], item[2].name),
-        )
-    )
+    _report_legacy_local_user_homes(providers_root)
+    candidates = _canonical_owner_candidates(providers_root)
     snapshot = _OwnerHomeSnapshot(
         signature=signature,
         created_at=now,
         candidates=candidates,
-        keys=tuple(_owner_cursor(provider, kind, home.name) for provider, kind, home in candidates),
+        keys=tuple(_identity_cursor(identity) for identity, _home in candidates),
     )
     with _SNAPSHOT_LOCK:
         _OWNER_HOME_SNAPSHOTS[cache_key] = snapshot
@@ -321,12 +359,19 @@ def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
     LLM: 与 _candidate_owner_homes 复用同一个 _provider_buckets 迭代器,保证签名覆盖枚举
     读到的每一个目录(口径漂移会漏失效,改 _candidate_owner_homes 必须同步这里)。只读目录
     元数据,不逐条目 stat,因此成本与 owner 数近似无关。
+    旧位置(providers/local/users)虽然不进候选,但它决定迁移诊断,必须一并计入签名:
+    新增/删除旧目录时快照要失效,诊断才能跟上真实目录状态。
     函数用途: 判断上一轮枚举结果能否继续复用;新增/删除/替换 owner 目录都会改变签名。
     """
     entries: list[tuple[str, str, tuple[int, int, int]]] = []
     for provider_dir, owner_kind, bucket_dir in _provider_buckets(providers_root):
         entries.append((provider_dir.name, owner_kind, _bucket_signature(bucket_dir)))
     entries.append(("local", "user", _bucket_signature(providers_root.parent / "local")))
+    entries.append((
+        _LEGACY_LOCAL_PROVIDER,
+        "legacy-users",
+        _bucket_signature(providers_root / _LEGACY_LOCAL_PROVIDER / _LEGACY_LOCAL_USER_BUCKET),
+    ))
     return tuple(entries)
 
 
@@ -367,6 +412,19 @@ def _owner_cursor(provider: str, owner_kind: str, owner_id: str) -> OwnerWakeCur
     return provider, owner_kind, owner_id
 
 
+# LLM: 游标是去重后的唯一身份键，不是目录名也不是下标：同一个身份只出现一次，
+# 续页定位才能既不重复也不跳过规范位置（旧位置与规范位置同键时曾互相吞掉）。
+# 函数用途: 由身份生成稳定游标键。
+def _identity_cursor(identity: Any) -> OwnerWakeCursor:
+    return identity.provider, identity.owner_kind, identity.owner_id
+
+
+# LLM: 身份键用于日志与诊断台账，形态与游标一致但面向人读；不参与任何权限判定。
+# 函数用途: 生成可读的身份标识串。
+def _owner_identity_key(identity: Any) -> str:
+    return f"{identity.provider}/{identity.owner_kind}/{identity.owner_id}"
+
+
 # LLM: 保留provider枚举原顺序，本地用户经过同一分页排序，main和链接不进入新候选。
 # 函数用途: 合并两类规范owner目录作为原发现器的候选输入。
 def _candidate_owner_homes(providers_root: Path):
@@ -375,6 +433,46 @@ def _candidate_owner_homes(providers_root: Path):
             yield provider_dir.name, owner_kind, owner_home
     for home in _iter_owner_user_dirs(providers_root.parent.parent):
         yield "local", "user", home
+
+
+# LLM: 同一身份只保留一个 home，且优先规范位置：发现端的事实判定必须和消费端
+# (pool.get -> resolve_owner_home / release_idle_owner_agents)落在同一个目录，
+# 否则旧位置上的事实永远不会被消费到，实例被种入又被逐出形成空转。
+# 函数用途: 枚举候选 owner home，按身份键去重并归一到规范位置。
+def _canonical_owner_candidates(providers_root: Path) -> tuple[tuple[Any, Path], ...]:
+    root = providers_root.parent.parent
+    selected: dict[Any, tuple[Any, Path]] = {}
+    for provider, owner_kind, home in _candidate_owner_homes(providers_root):
+        identity = _identity(provider, owner_kind, home.name)
+        canonical = _canonical_owner_home(root, identity)
+        chosen = canonical if canonical is not None and canonical.is_dir() else home
+        existing = selected.get(identity)
+        if existing is None:
+            selected[identity] = (identity, chosen)
+            continue
+        if existing[1] == chosen:
+            continue
+        # 同一身份落在两个位置：规范位置优先，并发冲突诊断（不删除任何目录）。
+        _report_owner_home_conflict(
+            identity,
+            existing[1],
+            canonical if canonical is not None else chosen,
+        )
+        if canonical is not None and chosen == canonical:
+            selected[identity] = (identity, chosen)
+    return tuple(sorted(selected.values(), key=lambda item: _identity_cursor(item[0])))
+
+
+# LLM: 规范路径只读解析，复用 owner_resolver 的唯一权威实现；这里不创建、不改写目录，
+# 身份非法（例如 local/main）时返回 None 表示「没有规范位置」。
+# 函数用途: 取某身份在消费端使用的规范 home 路径。
+def _canonical_owner_home(root: Path, identity: Any) -> Path | None:
+    from .user_space.owner_resolver import _owner_home_dir
+
+    try:
+        return _owner_home_dir(root, identity)
+    except ValueError:
+        return None
 
 
 # LLM: 只枚举已物化的owners/local直接子目录；跳过main、隐藏项及任一链接，不创建账号或执行工作。
@@ -388,9 +486,82 @@ def _iter_owner_user_dirs(root_home: Path):
             yield home
 
 
+# LLM: 旧位置只诊断不种入：发现端若种入旧位置的身份，消费端解析到的是尚不存在的规范
+# home，唤醒信号永远消费不到。旧目录保持原样（不删除、不迁移、不扩大身份权限）。
+# 函数用途: 枚举 local 用户的旧位置目录，只用于迁移诊断。
+def _iter_legacy_local_user_homes(providers_root: Path):
+    legacy_bucket = providers_root / _LEGACY_LOCAL_PROVIDER / _LEGACY_LOCAL_USER_BUCKET
+    yield from _dirs_of(legacy_bucket)
+
+
+# LLM: 每进程每个身份只报一次，避免周期扫描反复刷屏；诊断只描述位置事实。
+# 函数用途: 报告「某身份只存在于历史遗留位置」的结构化诊断。
+def _report_owner_home_legacy(identity: Any, legacy_home: Path, canonical_home: Path) -> None:
+    key = _owner_identity_key(identity)
+    if not _OwnerHomeDiagnosticLedger.claim(f"legacy:{key}"):
+        return
+    _LOGGER.warning(
+        "OWNER_HOME_LEGACY_LOCATION identity=%s legacy_home=%s canonical_home=%s",
+        key,
+        legacy_home,
+        canonical_home,
+        extra={
+            "owner_home_diagnostic": {
+                "code": "OWNER_HOME_LEGACY_LOCATION",
+                "identity": key,
+                "legacy_home": str(legacy_home),
+                "canonical_home": str(canonical_home),
+            }
+        },
+    )
+
+
+# LLM: 新旧并存时以规范位置为准；诊断只报告冲突，不删除旧目录、不改写身份归属。
+# 函数用途: 报告「同一身份同时存在旧位置与规范位置」的结构化诊断。
+def _report_owner_home_conflict(identity: Any, legacy_home: Path, canonical_home: Path) -> None:
+    key = _owner_identity_key(identity)
+    if not _OwnerHomeDiagnosticLedger.claim(f"conflict:{key}"):
+        return
+    _LOGGER.warning(
+        "OWNER_HOME_LOCATION_CONFLICT identity=%s legacy_home=%s canonical_home=%s",
+        key,
+        legacy_home,
+        canonical_home,
+        extra={
+            "owner_home_diagnostic": {
+                "code": "OWNER_HOME_LOCATION_CONFLICT",
+                "identity": key,
+                "legacy_home": str(legacy_home),
+                "canonical_home": str(canonical_home),
+            }
+        },
+    )
+
+
+# LLM: 旧位置不进入候选，只产出迁移诊断：仅旧位置 → OWNER_HOME_LEGACY_LOCATION；
+# 新旧并存 → OWNER_HOME_LOCATION_CONFLICT（规范位置仍然生效）。
+# 函数用途: 扫描 local 用户的旧位置目录，逐个给出迁移或冲突诊断。
+def _report_legacy_local_user_homes(providers_root: Path) -> None:
+    root = providers_root.parent.parent
+    for legacy_home in _iter_legacy_local_user_homes(providers_root):
+        identity = _identity(_LEGACY_LOCAL_PROVIDER, "user", legacy_home.name)
+        canonical_home = _canonical_owner_home(root, identity)
+        if canonical_home is None:
+            continue
+        if canonical_home.is_dir():
+            _report_owner_home_conflict(identity, legacy_home, canonical_home)
+        else:
+            _report_owner_home_legacy(identity, legacy_home, canonical_home)
+
+
 def _provider_buckets(providers_root: Path):
     for provider_dir in _dirs_of(providers_root):
         for bucket, owner_kind in _PROVIDER_BUCKET_KINDS.items():
+            # local 用户的规范位置是 owners/local/<id>：旧位置 providers/local/users
+            # 只做迁移诊断，不进候选（同一身份不得产出两次）。
+            # providers/local/groups 仍是 local 群组的规范位置，保持原枚举。
+            if provider_dir.name == _LEGACY_LOCAL_PROVIDER and bucket == _LEGACY_LOCAL_USER_BUCKET:
+                continue
             yield provider_dir, owner_kind, provider_dir / bucket
 
 

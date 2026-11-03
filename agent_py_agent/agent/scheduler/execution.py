@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 
 from .delivery_policy import TARGET_DELIVERY_MODES
 from .execution_policy import (
+    freeze_fallback_actor,
     migrate_queued_execution_origin,
     normalize_execution,
     scheduled_execution_metadata,
@@ -164,7 +165,7 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
     settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None), service.conversation_store, task_id=claim.run_id)
 
 
-# LLM: 来源按原creator冻结；旧委派work只在原双引用同源且queued未claim时显式规范，owner/topic门不放宽，终态不可复活。
+# LLM: 来源按原creator冻结；缺源只沿认证目标固定同一actor，旧work仍须双引用且queued未claim，owner/topic门不放宽。
 # 函数用途: 入队前规范合法旧来源并冻结交付/宿主身份，原store记录迁移证明，只为isolated创建运行线程。
 def prepare_execution(service, run: dict, *, now: float) -> dict:
     if not service.repository.event_run_is_current(run):
@@ -172,7 +173,22 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
     execution = normalize_execution(run.get("execution"))
     from ..conversation.models import ConversationThread
     from ..conversation.unbound_thread_store import ensure_unbound_thread
+    from .thread_fallback import resolve_scheduler_execution_thread
 
+    if run.get('thread_fallback'):
+        service.conversation_store.threads.require(run['thread_id'])
+        return run
+    if service.conversation_store.threads.load(run['origin_thread_id']) is None:
+        identifier, marker = resolve_scheduler_execution_thread(service.conversation_store, run,
+            owner_fields={'owner_id': service.repository.owner['id'],
+                'owner_home': str(service.repository.quota_enforcer.owner_root)})
+        origin = service.conversation_store.threads.require(identifier)
+        context = {'origin_thread_id': identifier, 'origin_bindings': freeze_fallback_actor(service, run, marker),
+            'defined_model_policy': execution['model_policy'], 'source_selection_revision': origin.model_selection_revision}
+        from .delivery_policy import repository_delivery_targets
+        context['delivery_target_threads'] = {row['binding_id']: row['thread_id']
+            for row in repository_delivery_targets(service.repository)}
+        return service.repository.prepare_thread_fallback(run['run_id'], context, marker)
     origin, migration = _execution_origin(service, run)
     context = {
         "origin_thread_id": origin.thread_id,
@@ -355,6 +371,9 @@ def delivery_thread(agent, thread, request, *, channel=""):
         selected = tuple(row for row in origin.channel_bindings if row.channel == binding['channel']
             and row.channel_user_id == binding['actor_id'] and row.channel_conversation_id == binding['conversation_id'])
         return replace(origin, channel_bindings=selected)
+    if run.get('thread_fallback'):
+        from .thread_fallback import fallback_delivery_thread
+        return fallback_delivery_thread(agent, run, channel=channel)
     origin = agent.conversation_store.threads.load(str(context.get("origin_thread_id") or ""))
     if origin is None:
         raise KeyError("定时交付来源会话不存在")

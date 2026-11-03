@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
 
 _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
@@ -57,6 +59,23 @@ class BackgroundRecoveryGuard:
 # LLM: 仅保存当前消费者重试节奏，不消费due/wake或授予增长权限；重启由原持久责任重建。
 # 类用途: 把存储配额暂不可用收敛为带检查时间的等待。
 class StorageWaitBackoff:
+    _SHARED_LIMIT = 256
+    _shared: OrderedDict[str, StorageWaitBackoff] = OrderedDict()
+    _shared_lock = threading.Lock()
+
+    # LLM: 只共享同一owner的进程内退避节奏，不缓存配额授权；容量淘汰不改持久任务。
+    # 函数用途: 让Agent重建后仍沿用该owner尚未到期的等待窗口。
+    @classmethod
+    def shared(cls, key: str) -> StorageWaitBackoff:
+        with cls._shared_lock:
+            wait = cls._shared.get(key)
+            if wait is None:
+                wait = cls._shared[key] = cls()
+            cls._shared.move_to_end(key)
+            while len(cls._shared) > cls._SHARED_LIMIT:
+                cls._shared.popitem(last=False)
+            return wait
+
     # LLM: 无I/O，不预取配额；常量仅限制故障探测节奏。
     # 函数用途: 建立等待投影，累计次数在恢复后仍可查询。
     def __init__(self):

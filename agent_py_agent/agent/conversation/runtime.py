@@ -1322,7 +1322,7 @@ def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundR
     except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
             RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
         raise
-    except Exception:  # noqa: BLE001 - 与前台收尾同口径：收尾失败不阻断原异常上抛
+    except Exception:  # best-effort: 收尾失败不能覆盖正在向上抛出的原执行异常。
         pass
 
 
@@ -4253,6 +4253,43 @@ class _BackgroundSchedulerTickMixin:
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake queue reconcile failed", exc_info=True)
 
+    _TASK_PROBE_WARN_LIMIT = 256
+
+    # LLM: 只缓存诊断指纹，不缓存任务资格；并发探针共用短锁，异常正文先沿统一日志规则脱敏。
+    # 函数用途: 同一探针、任务及异常类型只警告一次，并有界保留最近诊断。
+    def _record_task_probe_failure(self, probe: str, task_id: str, exc: BaseException) -> None:
+        self._record_task_probe_diagnostic(probe, task_id, type(exc).__name__, str(exc))
+
+    # LLM: load_report/list_report已经捕获异常；只消费其结构化类型和消息，不重造异常或解析自然语言。
+    # 函数用途: 让真实存储读口返回的错误与直接抛出的异常共用脱敏、去重诊断。
+    def _record_task_probe_report(self, probe: str, task_id: str, report: dict) -> None:
+        error_type = str(report.get("error_type") or "UnknownError")
+        if error_type != "FileNotFoundError":
+            self._record_task_probe_diagnostic(probe, task_id, error_type, str(report.get("message") or ""))
+
+    # LLM: 锁只保护有界指纹；日志不包含report里的path或正文，消息沿统一规则脱敏。
+    # 函数用途: 同一任务探针的同类型失败只记录一次。
+    def _record_task_probe_diagnostic(self, probe: str, task_id: str, error_type: str, message: str) -> None:
+        from ..common.log_redaction import redact_sensitive_text
+
+        key = (probe, task_id, error_type)
+        lock = self.__dict__.setdefault("_task_probe_warning_lock", threading.Lock())
+        with lock:
+            seen = self.__dict__.setdefault("_task_probe_warnings", {})
+            if key in seen:
+                return
+            if len(seen) >= self._TASK_PROBE_WARN_LIMIT:
+                seen.pop(next(iter(seen)))
+            seen[key] = True
+        error = redact_sensitive_text(message)
+        logging.getLogger("agent.conversation.runtime").warning(
+            "TASK_PROBE_FAILED probe=%s task_id=%s error_type=%s error=%s",
+            probe, task_id, error_type, error,
+            extra={"probe": probe, "task_id": task_id, "error_type": error_type, "error": error},
+        )
+
+    # LLM: 读不到仍拒绝自动补醒，但保留有界诊断，不把未知冒充没有Goal。
+    # 函数用途: 查询指定任务是否具有自动续跑授权。
     def _task_has_active_goal(self, task_id: str) -> bool:
         """EXEC-39 同源: 任务是否持有 active goal(自动续跑授权)。"""
         try:
@@ -4264,7 +4301,8 @@ class _BackgroundSchedulerTickMixin:
                 goal is not None
                 and str(getattr(goal, "status", "") or "").strip().lower() == "active"
             )
-        except Exception:  # noqa: BLE001 读不到=fail-closed 不自动补字条
+        except Exception as exc:  # noqa: BLE001 读不到=fail-closed 不自动补字条
+            self._record_task_probe_failure("task_has_active_goal", task_id, exc)
             return False
 
     # LLM: 任务的 work_kind(link 权威)；优先按 task_id 单条读取，读不到返回空串(fail-open 补字条)。
@@ -4278,16 +4316,21 @@ class _BackgroundSchedulerTickMixin:
                 link, error = load_report(task_id)
                 if error is None and link is not None:
                     return str(getattr(link, "work_kind", "") or "").strip().lower()
+                if error is not None:
+                    self._record_task_probe_report("task_work_kind", task_id, error)
                 return ""
             thread = tasks_store.thread_for(task_id)
             if thread is None:
                 return ""
             links, _errors = tasks_store.list_report(thread.thread_id)
+            for error in _errors:
+                if not error.get("task_id") or error.get("task_id") == task_id:
+                    self._record_task_probe_report("task_work_kind", task_id, error)
             for link in links:
                 if str(getattr(link, "task_id", "") or "") == task_id:
                     return str(getattr(link, "work_kind", "") or "").strip().lower()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self._record_task_probe_failure("task_work_kind", task_id, exc)
         return ""
 
     # LLM: 热层唤醒前核 link 状态；优先按 task_id 单条读取，文件缺失判 missing，损坏或异常判 unknown。
@@ -4305,11 +4348,13 @@ class _BackgroundSchedulerTickMixin:
         if callable(load_report):
             try:
                 link, error = load_report(task_id)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                self._record_task_probe_failure("task_link_status", task_id, exc)
                 return "unknown"
             if error is not None:
                 if str(error.get("error_type") or "") == "FileNotFoundError":
                     return "missing"
+                self._record_task_probe_report("task_link_status", task_id, error)
                 return "unknown"
             if link is None or str(getattr(link, "thread_id", "") or "") != str(thread_id or ""):
                 return "missing"
@@ -4317,15 +4362,21 @@ class _BackgroundSchedulerTickMixin:
             return "active" if status == "active" else "terminal"
         try:
             links, _errors = tasks_store.list_report(thread_id)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            self._record_task_probe_failure("task_link_status", task_id, exc)
             return "unknown"
+        has_error = False
+        for error in _errors:
+            if not error.get("task_id") or error.get("task_id") == task_id:
+                self._record_task_probe_report("task_link_status", task_id, error)
+                has_error = has_error or error.get("error_type") != "FileNotFoundError"
         status = None
         for link in links:
             if str(getattr(link, "task_id", "") or "") == task_id:
                 status = str(getattr(link, "status", "") or "").strip().lower()
                 break
         if status is None:
-            return "missing"
+            return "unknown" if has_error else "missing"
         if status == "active":
             return "active"
         return "terminal"
@@ -4338,9 +4389,12 @@ class _BackgroundSchedulerTickMixin:
         from ..user_space.owner_quota import OwnerQuotaUnavailable
         from .background_recovery import StorageWaitBackoff
 
-        wait = getattr(self, "_scheduler_storage_wait", None)
+        agent = getattr(getattr(self, "runtime", None), "agent", None)
+        owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+        wait = StorageWaitBackoff.shared(str(owner_home)) if owner_home else getattr(self, "_scheduler_storage_wait", None)
         if wait is None:
-            wait = self._scheduler_storage_wait = StorageWaitBackoff()
+            wait = StorageWaitBackoff()
+        self._scheduler_storage_wait = wait
         if not wait.ready(now):
             return
         try:
@@ -4354,7 +4408,11 @@ class _BackgroundSchedulerTickMixin:
             )
         except OwnerQuotaUnavailable as exc:
             if wait.failed(now, exc):
-                _HEARTBEAT_LOGGER.warning("owner scheduler storage_wait", extra={"storage_wait": wait.snapshot()})
+                _HEARTBEAT_LOGGER.warning(
+                    "SCHEDULER_ENQUEUE_BACKOFF error_type=%s reason_code=%s",
+                    type(exc).__name__, getattr(exc, "reason_code", ""),
+                    extra={"storage_wait": wait.snapshot()},
+                )
         except Exception:
             _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)
         else:
@@ -5362,7 +5420,7 @@ class _BackgroundSchedulerExecutionMixin:
                 if status.upper() in _POLICY_RETIRE_TERMINAL_STATUSES:
                     try:
                         self.store.progress.disable(policy.policy_id)
-                    except Exception:
+                    except Exception:  # best-effort: 已知终态策略的禁用失败不阻断终态过滤，后续维护可重试。
                         pass
                     return None
         report = background_claim.run_claimed(
@@ -5904,7 +5962,7 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
     if isinstance(wake, WakeSignal):
         try:
             store.wakes.mark_handled(wake.wake_signal_id, now=now())
-        except Exception:
+        except Exception:  # best-effort: 业务已结算，消费失败保留原字条供后续幂等补账。
             pass
         return
     if not isinstance(wake, dict):
@@ -5933,7 +5991,7 @@ def _retire_terminal_background_source(store: object, kwargs: dict) -> None:
         return
     try:
         store.progress.disable(policy_id, now=now())
-    except Exception:
+    except Exception:  # best-effort: 策略禁用是已结算业务的投影清理，不改变原业务结果。
         pass
 
 
@@ -5978,7 +6036,7 @@ def _apply_suppressed_policy(store, policy: ProgressPolicy, action: str, *, now:
             store.progress.disable(policy.policy_id, now=now)
         else:
             store.progress.mark_reported(policy.policy_id, now=now)
-    except Exception:
+    except Exception:  # best-effort: 抑制后的策略更新允许下一轮重试，不授予新的业务执行权。
         pass
 
 

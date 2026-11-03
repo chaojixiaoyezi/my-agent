@@ -35,6 +35,12 @@ _RECEIPT_MAX_SEGMENT_BYTES = 8 * 1_048_576
 _RECEIPT_SCANS: OrderedDict = OrderedDict()
 
 
+# 上下文由有界缓存拥有，完成、错误与逐出时关闭生成器，跨片不丢位置也不无限积累FD。
+def _receipt_scan_entries(directory):
+    with os.scandir(directory) as entries:
+        yield from entries
+
+
 # LLM: 按候选版本复核在途及磁盘硬事实，异常保留实例；登记与池均重检时刻，不能擦除并发新消息。
 # 函数用途: 回收一批已空闲的用户缓存，保留会话、身份、记忆、工具进程和任务文件。
 def release_idle_owner_agents(supervisor) -> int:
@@ -245,7 +251,7 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
         identity = str(paths.root.absolute())
         iterator = _RECEIPT_SCANS.get(identity)
         if iterator is None:
-            iterator = os.scandir(paths.terminal)
+            iterator = _receipt_scan_entries(paths.terminal)
             _RECEIPT_SCANS[identity] = iterator
         _RECEIPT_SCANS.move_to_end(identity)
         while len(_RECEIPT_SCANS) > 32:
@@ -288,8 +294,12 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                 result['bytes'] = size
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            iterator.close()
+            _RECEIPT_SCANS.pop(identity, None)
             raise
         except Exception as exc:
+            iterator.close()
+            _RECEIPT_SCANS.pop(identity, None)
             result['errors'].append({'error_type': type(exc).__name__, 'side_effects_unknown': True})
             result['complete'] = False
     return result

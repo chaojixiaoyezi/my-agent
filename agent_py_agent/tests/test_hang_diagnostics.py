@@ -46,7 +46,9 @@ def test_gateway_signal_lifecycle_installs_persistent_diagnostics(tmp_path, monk
     try:
         assert hd._handle is not None
         assert hd._gc_probe in gc.callbacks
-        assert len([call for call in diagnostic_calls if call[0] == "register"]) == int(hasattr(signal, "SIGUSR1"))
+        assert len([call for call in diagnostic_calls if call[0] == "register"]) == 0
+        assert callable(previous.diagnostic_handler)
+        assert previous.diagnostic_handler.__name__ == "mark_stack_dump"
         hd.arm_stall_watchdog(120)
         assert diagnostic_calls[-1][0] == "arm"
     finally:

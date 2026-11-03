@@ -285,6 +285,7 @@ def _note_loop_tick_error(site: _LoopSite, exc: BaseException, backoff: LoopErro
 # 派发 tick 里五个段的落点：计数都在 loop "dispatcher" 下，打印各以自己的 worker_id 出现。
 _DISPATCH_SEGMENT_SITE = _LoopSite("dispatcher", "gateway_request_dispatch.iteration", "dispatcher")
 _RECOVERY_SITE = _LoopSite("dispatcher", "gateway_request_recovery.iteration", "recovery")
+_CLOSING_SITE = _LoopSite("dispatcher", "gateway_closing_deadline.iteration", "closing-deadline")
 _PROJECTION_SITE = _LoopSite("dispatcher", "gateway_terminal_projection.iteration", "terminal-projector")
 _RECONCILE_SITE = _LoopSite("dispatcher", "gateway_input_reconcile.iteration", "input-reconciler")
 # 锁 sidecar 清扫节拍：孤儿锁宽限 24 小时（gateway_parts.io._ORPHAN_LOCK_MIN_AGE_SECONDS），每小时扫一遍目录就够，不必跟着秒级 tick 跑。
@@ -377,6 +378,7 @@ class _RequestDispatcher:
         self.backoff = LoopErrorBackoff()
         self.tick_failed = False
         self._recovery_backoff = LoopErrorBackoff()
+        self._closing_backoff = LoopErrorBackoff()
         self._projection_backoff = LoopErrorBackoff()
         self._reconcile_backoff = LoopErrorBackoff()
         self._lock_cleanup_backoff = LoopErrorBackoff()
@@ -413,6 +415,9 @@ class _RequestDispatcher:
             _note_loop_tick_error(_DISPATCH_SEGMENT_SITE, exc, self.backoff)
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
+        self._note_segment_progress()
+        closing_backoff = self.__dict__.setdefault("_closing_backoff", LoopErrorBackoff())
+        self._run_segment(_CLOSING_SITE, closing_backoff, self._closing_deadline_once)
         if self._recover_throttle.due():
             self._note_segment_progress()
             self._recover_throttle.defer(self._run_segment(_RECOVERY_SITE, self._recovery_backoff, self._recover_once))
@@ -452,6 +457,13 @@ class _RequestDispatcher:
             return backoff.delay()
         backoff.record_success()
         return 0.0
+
+    # LLM: closing催收有界且独立于恢复退避，每拍检查硬期限；不代执行器结算，不释放claim。
+    # 函数用途: 撤销超时回合的原审批等待并重发协作中断。
+    def _closing_deadline_once(self) -> None:
+        from ..agent.gateway_parts.closing_deadline import evaluate_closing_deadlines
+
+        evaluate_closing_deadlines(self.paths, self.bootstrap_agent, now=time.time())
 
     # LLM: 正MP只传本dispatcher原P3门；实际P2长观察由恢复链在T外核，旧域/Runtime未知不由TTL授恢复权。
     # 函数用途: 用本代真实准入源扫描恢复旧processing；Count0仍不创建gate或新执行账。
@@ -1052,6 +1064,23 @@ class _BackgroundOwnerPlannerMixin:
             raise first_error
 
 
+# LLM: 只读原用户活动代次，后台消息或元数据更新时间不算新用户输入；读不到不能解除挂起。
+# 函数用途: 为等待新消息的车道取得规范线程入站标记。
+def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
+    store = getattr(scheduler, "store", None) or getattr(
+        getattr(getattr(scheduler, "runtime", None), "agent", None), "conversation_store", None
+    )
+    try:
+        thread = store.threads.require(thread_id)
+        metadata = thread.metadata or {}
+        generation = metadata.get("user_activity_generation", 0)
+        if type(generation) is not int or generation < 0:
+            return None
+        return json.dumps([generation, metadata.get("last_user_activity_request_id", "")])
+    except (AttributeError, KeyError, OSError, ValueError):
+        return None
+
+
 # LLM: 仅持有本进程执行槽；规划缓存继承私有mixin，原scheduler/store仍是durable执行权威。
 # 类用途: 公平提交owner/thread后台车道，不把规划连接传给执行线程。
 class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
@@ -1126,6 +1155,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                 label, thread_id,
                 model_ready=lambda: thread_model_is_configured(scheduler.runtime.agent, thread_id),
                 fingerprint=lambda: thread_model_fingerprint(scheduler.runtime.agent, thread_id),
+                inbound_marker=lambda: _thread_inbound_marker(scheduler, thread_id),
             )
         except Exception as exc:
             self._record_thread_failure(label, thread_id, exc)
@@ -1133,11 +1163,15 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
 
     # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
     # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误按代码常量 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 冷却。
-    def _record_thread_failure(self, label: str, thread_id: str, exc: Exception) -> None:
+    def _record_thread_failure(self, label: str, thread_id: str, exc: Exception, *,
+                               wait_for_inbound_marker: str | None = None) -> None:
+        from ..agent.conversation.compact_guard import ConversationCompactError
+        from ..agent.runtime_db.operations import RuntimeRecoveryRequiredError
         from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
 
-        self._lane_retry.failed(label, thread_id, exc, delay=BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS)
-        if isinstance(exc, OwnerQuotaUnavailable):
+        self._lane_retry.failed(label, thread_id, exc, delay=BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS,
+                                wait_for_inbound_marker=wait_for_inbound_marker)
+        if isinstance(exc, (OwnerQuotaUnavailable, RuntimeRecoveryRequiredError, ConversationCompactError)):
             return
         _print_gateway_loop_error(
             "gateway_background_main.iteration", f"background-main:{label}:{thread_id}", exc,
@@ -1247,6 +1281,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         label: str,
         thread_id: str,
     ) -> list[object]:
+        inbound_marker = _thread_inbound_marker(scheduler, thread_id)
         try:
             result = list(scheduler.tick_thread(thread_id) or [])
             self._lane_retry.succeeded(label, thread_id)
@@ -1254,7 +1289,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         except Exception as exc:
             if isinstance(exc, InterruptedError) and self._shutdown_control.stopping:
                 return []
-            self._record_thread_failure(label, thread_id, exc)
+            self._record_thread_failure(label, thread_id, exc, wait_for_inbound_marker=inbound_marker)
             return []
 
 
