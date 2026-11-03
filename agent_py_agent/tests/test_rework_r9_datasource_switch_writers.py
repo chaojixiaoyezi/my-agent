@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -18,6 +19,7 @@ from agent_py_agent.agent.assets.datasource_store import DatasourceStore
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor, DataSourceSpec
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.attempt import sandbox as attempt
+from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
 from agent_py_agent.agent.workflows import datasource_runtime as runtime
 from agent_py_agent.agent.workflows import runtime_sdk as sdk
 from agent_py_agent.agent.workflows import script_runner
@@ -234,6 +236,54 @@ except Exception as exc:
     report["write_error"] = type(exc).__name__
 print(json.dumps(report))
 '''
+
+
+# LLM: 直接调用正式bwrap构造器，跨平台覆盖Linux常见的/tmp权威根；不宣称实际施加了Linux内核隔离。
+# 函数用途: 验证临时区重映射不改选人格权威，较宽写根中的控制叶仍以精确只读挂载获胜。
+def test_bwrap_script_controls_with_persona_authority_beneath_tmp():
+    with TemporaryDirectory(prefix="ci3-bwrap-authority-", dir="/tmp") as directory:
+        home = Path(directory) / "owner"
+        work = home / "tmp/script_exec/report"
+        work.mkdir(parents=True)
+        broader = (home / "assets", home / "data")
+        leaves = (broader[0] / "datasources/orders.json", broader[1] / "writers/gate.lock")
+        for leaf in leaves:
+            leaf.parent.mkdir(parents=True)
+            leaf.write_text("host control")
+        (home / "AGENTS.md").write_text("original authority")
+        spec = tooling_sandbox.SandboxSpec(owner_home=work, workspace=work,
+            protected_persona_root=home, write_roots=(work, *broader), write_scope_denied_roots=(home,),
+            read_only_paths=leaves, bwrap_path="/fixture/bwrap")
+        argv = tooling_sandbox.build_bwrap_argv(spec)
+        mounts = tooling_sandbox._mount_snapshot(argv)
+        for leaf in leaves:
+            mount = tooling_sandbox._effective_mount(leaf.resolve(), mounts)
+            assert mount is not None and not mount.writable and mount.source == leaf.resolve()
+        probe_mount = tooling_sandbox._effective_mount((broader[0] / "probe.txt").resolve(), mounts)
+        assert probe_mount is not None and probe_mount.writable
+        frozen = tooling_sandbox._freeze_persona_root(spec)
+        assert frozen.authority_root == home.resolve()
+        assert (home / "AGENTS.md").read_text() == "original authority"
+
+
+# LLM: 非原生scratch的异名覆盖仍必须失败关闭；不能为修复/tmp合法底图移除changed-authority闸。
+# 函数用途: 防止显式换源挂载借临时目录例外冒充原人格权威。
+def test_bwrap_rejects_non_scratch_persona_authority_replacement(tmp_path, monkeypatch):
+    home, replacement = tmp_path / "owner", tmp_path / "replacement"
+    home.mkdir()
+    replacement.mkdir()
+    original = tooling_sandbox._build_bwrap_base_argv
+
+    def replaced_root(spec):
+        argv = original(spec)
+        argv[-2:-2] = ["--bind", str(replacement), str(home)]
+        return argv
+
+    monkeypatch.setattr(tooling_sandbox, "_build_bwrap_base_argv", replaced_root)
+    spec = tooling_sandbox.SandboxSpec(owner_home=home, workspace=home,
+        protected_persona_root=home, bwrap_path="/fixture/bwrap")
+    with pytest.raises(tooling_sandbox.SandboxUnavailable, match="PATH_AGENTS_SOURCE_PROTECTION_INVALID"):
+        tooling_sandbox.build_bwrap_argv(spec)
 
 
 @pytest.mark.parametrize('use_sandbox', [False, True])

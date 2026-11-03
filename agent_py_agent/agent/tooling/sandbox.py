@@ -306,6 +306,16 @@ class SandboxSpec:
             )
 
 
+# LLM: 仅投影原底图既定的/tmp源，不创建目录或授予权限；人格核验必须与发出的同一scratch挂载匹配。
+# 函数用途: 统一临时区源路径的选择，避免构造器与权威根遮蔽判定各算一套。
+def _bwrap_tmp_root(spec: SandboxSpec) -> Path:
+    if spec.write_roots:
+        return Path(spec.write_roots[0]) / ".sandbox-tmp"
+    if spec.write_roots is not None:
+        return Path(spec.owner_home) / "tmp" / ".sandbox-tmp"
+    return spec.workspace / ".sandbox-tmp"
+
+
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
 #   workspace 是仅有的可写挂载；新增挂载必须同步安全测试和设计文档。
 # 函数用途: 根据用户目录和本次工作目录构造 bubblewrap 启动参数。
@@ -369,14 +379,8 @@ def _build_bwrap_base_argv(spec: SandboxSpec) -> list[str]:
     # 排在首位；Attempt sandbox 必须保留该顺序，再追加当前 cwd/staging。
     # 因而 write_roots[0] 是任务 work，而不是更深的项目目录或 output。
     # 无 write_roots(单租户 full_access)时保持 workspace 目录(旧行为, /tmp 即宿主)。
-    if spec.write_roots:
-        tmp_root = Path(spec.write_roots[0]) / ".sandbox-tmp"
-    elif spec.write_roots is not None:
-        # Explicit empty write scope means cwd is read-only. Framework-owned owner/tmp remains
-        # the only scratch mount; never create .sandbox-tmp inside the read-only source tree.
-        tmp_root = Path(spec.owner_home) / "tmp" / ".sandbox-tmp"
-    else:
-        tmp_root = spec.workspace / ".sandbox-tmp"
+    # 显式空写根仍只使用框架owner/tmp，不在只读cwd创建临时区。
+    tmp_root = _bwrap_tmp_root(spec)
     tmp_root.mkdir(parents=True, exist_ok=True)
     argv += ["--bind", str(tmp_root), "/tmp"]
     for ro in _SYSTEM_RO_ROOTS:
@@ -1351,7 +1355,8 @@ def _append_persona_namespace_ancestors(
             _append_mount_preserving_children(argv, ("--bind", str(source), str(parent)))
 
 
-# LLM: 元数据权威由入口冻结；共享祖先先去重再核原写位和来源，不改变任何名称投影或配置身份复核。
+# LLM: 元数据权威由入口冻结；仅原底图scratch遮蔽的host-only根不作换源，显式异名覆盖仍拒绝。
+#   共享祖先先去重再核原写位和来源，不改变任何名称投影或配置身份复核。
 #   身份/配置代次返回前复核，路径argv仍不消除最后核验到内核bind的竞争；普通同级业务写位保持原权限。
 # 函数用途: 按同次来源和全部有效namespace别名保护人格及必要名称祖先，未知或不安全链失败关闭。
 def _append_persona_readonly_mounts(
@@ -1364,7 +1369,13 @@ def _append_persona_readonly_mounts(
         namespace_root = root.namespace_root
         authority_root = root.authority_root
         projected_root = _persona_projected_source(namespace_root, mounts_snapshot, unmounted_root=authority_root)
-        if projected_root is not None and projected_root != authority_root:
+        covering = _effective_mount(namespace_root, mounts_snapshot)
+        # /tmp重映射会隐藏其下未显式重挂的宿主根；它仍仅是冻结配置的host-only权威，不能改选scratch里的同名配置。
+        scratch_shadow = (not spec.read_only_root and not spec.full_access
+                          and namespace_root != Path("/tmp") and namespace_root.is_relative_to("/tmp")
+                          and covering is not None and covering.target == Path("/tmp")
+                          and covering.writable and not covering.alias and covering.source == _bwrap_tmp_root(spec))
+        if projected_root is not None and projected_root != authority_root and not scratch_shadow:
             raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: changed authority root")
         checked_alias_nodes: set[Path] = set()
         _reject_persona_mutable_alias(namespace_root, mounts_snapshot, checked_nodes=checked_alias_nodes)
