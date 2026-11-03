@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import ExitStack
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,8 +253,8 @@ class _NativeCASStore(ScriptStore):
         updates[_operation_file(operation)] = canonical_json(proof)
         super()._write(payload, updates)
 
-    # LLM: 原生 delete_script 已持资产锁并完成 CAS；先验证所有叶，再原子移出公开命名空间。
-    # 函数用途: 将本操作删除的准确目录移至私有证明区，避免删除与回执之间的无证据窗口。
+    # LLM: 原生 delete_script 已持资产锁并完成 CAS；每个目录 FD 获取后立即登记关闭，证明、移位及刷盘顺序不变。
+    # 函数用途: 将准确目录移至私有证明区，目的目录获取失败或取消也释放已取得的源描述符。
     def _delete(self, script_id):
         operation, phase = self._config_operation
         for name in list_names_beneath(self.owner_home, (self.collection, script_id)):
@@ -261,10 +262,12 @@ class _NativeCASStore(ScriptStore):
         proof = _operation_proof(operation, 'deleted', {'script_id': script_id, 'deleted': True})
         write_bytes_atomic_beneath(self.owner_home,
             (self.collection, script_id, _operation_file(operation)), canonical_json(proof).encode())
-        source = open_directory_beneath(self.owner_home, (self.collection,), require_dir_fd=True)
-        destination = open_directory_beneath(self.owner_home,
-            ('data', 'business_v13', 'script_delete_proofs'), create=True, require_dir_fd=True)
-        try:
+        with ExitStack() as cleanup:
+            source = open_directory_beneath(self.owner_home, (self.collection,), require_dir_fd=True)
+            cleanup.callback(os.close, source)
+            destination = open_directory_beneath(self.owner_home,
+                ('data', 'business_v13', 'script_delete_proofs'), create=True, require_dir_fd=True)
+            cleanup.callback(os.close, destination)
             try:
                 os.stat(operation['operation_id'], dir_fd=destination, follow_symlinks=False)
             except FileNotFoundError:
@@ -274,9 +277,6 @@ class _NativeCASStore(ScriptStore):
             os.rename(script_id, operation['operation_id'], src_dir_fd=source, dst_dir_fd=destination)
             os.fsync(source)
             os.fsync(destination)
-        finally:
-            os.close(destination)
-            os.close(source)
         _purge_deleted_code(self, operation)
         return True
 
