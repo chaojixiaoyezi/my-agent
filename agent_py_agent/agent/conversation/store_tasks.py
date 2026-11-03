@@ -900,9 +900,17 @@ class TaskStore:
 
     # LLM: store_tasks 的持久化合同：从线程历史任务身份读取关联及错误，不扫描其它线程；修改须同步本领域调用方与存储回归。
     # 函数用途: 从线程历史任务身份读取关联及错误，不扫描其它线程。
-    def list_report(self, thread_id: str) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
+    def list_report(self, thread_id: str, *, classify_missing: bool = False):
         thread = self._require_thread(thread_id)
-        return self._links_for_ids(thread.task_ids)
+        links, errors = self._links_for_ids(thread.task_ids)
+        if not classify_missing:
+            return links, errors
+        # 只给显式选择分级的历史消费者附带 warnings；活动索引、损坏及权限故障保持阻断。
+        warnings = [{"code": "missing_historical_task_link", "id": error["task_id"]}
+                    for error in errors if error.get("error_type") == "FileNotFoundError"
+                    and error.get("task_id") not in thread.active_task_ids]
+        missing = {row["id"] for row in warnings}
+        return links, [error for error in errors if error.get("task_id") not in missing], warnings
 
     # LLM: store_tasks 的持久化合同：从线程活动索引读取候选任务，完成记录不因目录扫描重新进入列表；修改须同步本领域调用方与存储回归。
     # 函数用途: 从线程活动索引读取候选任务，完成记录不因目录扫描重新进入列表。

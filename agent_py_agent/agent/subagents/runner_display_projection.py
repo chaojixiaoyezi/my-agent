@@ -32,18 +32,32 @@ _LABEL_BY_STATUS = {
 
 
 # LLM: 此函数属于只读展示投影，输入必须是宿主已裁决的 typed 字段；RUNNING 保留原活动，不得在此推断完成或失败。
-# 函数用途: 返回子代理当前状态的界面标签；空串表示保留正在显示的活动信息。
-def runner_display_label(status: object, failure_type: object) -> str:
+# 函数用途: 返回子代理当前状态的界面标签；已提交的申请处置只改变终态标签，不授予重试权。
+def runner_display_label(status: object, failure_type: object, *, capability_resolution: object = None) -> str:
     normalized_status = str(status or "").strip().upper()
     if normalized_status == TaskStatus.RUNNING.value:
         return ""
-    return runner_failure_label(status, failure_type) or _LABEL_BY_STATUS.get(normalized_status, normalized_status)
+    return runner_failure_label(status, failure_type, capability_resolution=capability_resolution) or _LABEL_BY_STATUS.get(normalized_status, normalized_status)
 
 
 # LLM: 失败类型专属标签的唯一出口（宿主停机中断、额度不足、等待授权等）；没有专属标签或仍在 RUNNING 时返回空串，
 #   调用方保留自己按状态的默认文字。Gateway 名册行 failure_label、终态活动文字和 /status 分类都读这里，客户端不另写映射。
-# 函数用途: 返回失败类型对应的专属界面标签；没有专属说法时返回空串。
-def runner_failure_label(status: object, failure_type: object) -> str:
+# 函数用途: 返回失败类型或已提交授权处置的专属界面标签；没有专属说法时返回空串。
+def runner_failure_label(status: object, failure_type: object, *, capability_resolution: object = None) -> str:
     if str(status or "").strip().upper() == TaskStatus.RUNNING.value:
         return ""
+    if str(status or "").strip().upper() == TaskStatus.CANCELLED.value and isinstance(capability_resolution, dict):
+        label = {"parent_turn_ended": "已过期", "parent_turn_interrupted": "已过期",
+                 "replaced": "已被替代", "user_denied": "已拒绝"}.get(capability_resolution.get("reason"), "")
+        if label:
+            return label
     return _DETAIL_BY_FAILURE.get(str(failure_type or "").strip(), "")
+
+
+# LLM: 仅读取canonical attributes中的结构化处置；正文、current_step和模型文字都不能形成处置事实。
+# 函数用途: 为所有展示出口提供同一授权收口事实。
+def capability_request_resolution(task: object) -> dict:
+    attrs = getattr(task, "attributes", {})
+    closeout = attrs.get("capability_request_closeout") if isinstance(attrs, dict) else None
+    resolution = closeout.get("resolution") if isinstance(closeout, dict) else None
+    return dict(resolution) if isinstance(resolution, dict) else {}

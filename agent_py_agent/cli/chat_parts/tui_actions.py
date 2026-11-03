@@ -209,6 +209,7 @@ def _tui_attach_gateway_job(
     except Exception:
         with params.state_lock:
             params.pending_jobs_ref_for_enqueue[0] -= 1
+        runtime.release_gateway_request(request_id)
         runtime.release_gateway_job_attachment(request_id)
         raise
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
@@ -74,13 +75,34 @@ class TurnCompletionLedger:
                 if old is not None:
                     self.clocks.pop(old)
 
-    # LLM: 无原时钟用 None，不把恢复观察开始点冒充输入开始；同身份终态保持首次结果。
-    # 函数用途: 返回结构化完成事实及是否首次结算。
-    def finish(self, logical_id, status):
+    # LLM: 仅首次收口接受有限非负网关耗时，随后回退本地单调钟；恢复观察缺时钟仍未知，同身份终态不改写。
+    # 函数用途: 返回结构化完成事实及是否首次结算，让早失败也能使用服务器记录的真实耗时。
+    def finish(self, logical_id, status, *, gateway_timing: Mapping[str, float] | None = None):
         with self.lock:
             clock = self.clocks.setdefault(logical_id, TurnClock(logical_id, started_monotonic=None))
             first = clock.completion is None
-            return clock.finish(status), first
+            completion = clock.finish(status)
+            elapsed = _gateway_elapsed_seconds(gateway_timing) if first else None
+            if elapsed is not None:
+                completion = TurnCompletion(logical_id, status, completion.completed_at, elapsed, "gateway")
+                clock.completion = completion
+            return completion, first
+
+
+# LLM: 只读取响应结构化数字，bool/NaN/无穷/负数都不是有效耗时；区间端点也必须有限且非负。
+# 函数用途: 优先读取网关直接耗时，其次用起止时间计算，不把缺值伪装成零。
+def _gateway_elapsed_seconds(timing: Mapping[str, float] | None) -> float | None:
+    if not isinstance(timing, Mapping):
+        return None
+    duration = timing.get("duration_seconds")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration) and duration >= 0:
+        return float(duration)
+    start, end = timing.get("started_at"), timing.get("ended_at")
+    if all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 for value in (start, end)):
+        elapsed = end - start
+        if math.isfinite(elapsed) and elapsed >= 0:
+            return float(elapsed)
+    return None
 
 
 # LLM: 只格式化非负有限耗时，短于一分钟保留一位小数；未知和非法值明确未知。

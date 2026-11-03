@@ -354,7 +354,7 @@ class PersistentAdmission:
     #   同一请求重排或
     #   重新盖章复用原预留不重复扣；读不出的预留不能被覆盖；代次缺失或归属不明一律暂停。
     #   mc4-1706：snapshot 是锁外扫描到的请求正文，锁内用同一投影核对归属输入未漂移。
-    # 函数用途: 在请求锁内为一次派发完成预留与盖章，返回 admitted/blocked/raced 决策。
+    # 函数用途: 为派发完成预留与盖章；过期插话保留inbox，退出原T后重新取得真实末门补投影。
     def admit(self, request_path: Path, ownership, limits, snapshot: dict | None = None) -> dict:
         if not self.ready():
             return _blocked("coordinator_generation_unavailable")
@@ -371,14 +371,23 @@ class PersistentAdmission:
             if rejection:
                 return rejection
             decision = self._admit_locked(request_path, ownership, limits, snapshot)
-            return _remember_runtime_commit(self, request_path, decision)
+            if decision.get("status") != "expired":
+                return _remember_runtime_commit(self, request_path, decision)
+        from .queued_steer_expiry import project_expired_steer
+
+        try:
+            settled = project_expired_steer(self.paths, request_path.stem, admission_gate=self)
+        except (OSError, ValueError, DataCorruptionError):
+            return _blocked("queued_steer_projection_pending")
+        self.release_if_terminal(request_path.stem)
+        return decision if settled else _blocked("queued_steer_settlement_pending")
 
     # LLM: 锁内重读请求文件（并发等待信号写者可能已更新字段），再决定复用、新建或暂停；
     #   文件已被移走返回 raced，不写任何预留。mc4-1706：锁内重算会话归属并要求与锁外一致，
     #   不一致或算不出都暂停（session_scope_unavailable / request_scope_drift），不能拿旧结果扣名额。
     #   有原InputReceipt时先核完整输入/typed owner，不从被改队列重新自洽签名；无receipt维持原显式旧合同，不补账。
     # LLM: ControlPlane元数据host不能成为C执行者；在原prepared与归属校验后、任何新P3之前仅作限制性拒绝，原P2隔离原因仍由外层先返回。
-    # 函数用途: 请求锁内核实原输入并作准入决策，cold C路由保持pending，不借控制面执行本地业务。
+    # 函数用途: 请求锁内核实原输入并作准入决策；过期判定不能绕过prepared/owner/P3校验，也不新建占位。
     def _admit_locked(self, request_path: Path, ownership, limits, snapshot) -> dict:
         owner, session_scope = ownership
         request_id = request_path.stem
@@ -414,10 +423,20 @@ class PersistentAdmission:
         if existing is _UNREADABLE:
             return _blocked("reservation_unreadable")
         if existing is None:
+            if current.get("route") is not None:
+                return _blocked("reservation_missing")
+            expired = _expire_pending_steer_locked(self, request_path, current, owner)
+            if expired is not None:
+                return expired
             return self._create_and_publish(request_path, current, ownership, limits)
         if existing.get("state") == "released":
             return _blocked("reservation_released")
-        return self._reuse_and_publish(request_path, current, existing, ownership)
+        decision = self._reuse_and_publish(request_path, current, existing, ownership)
+        if decision.get("status") == "admitted":
+            expired = _expire_pending_steer_locked(self, request_path, decision["request"], owner)
+            if expired is not None:
+                return expired
+        return decision
 
     # LLM: 新建准备不持生命周期门；最终写入共撤权门并重核owner；有路由无预留仍拒绝，不重扣额。
     #   限额通过后
@@ -588,6 +607,28 @@ class PersistentAdmission:
     @staticmethod
     def verify_claimable(request_payload: dict, reservation) -> dict:
         return verify_claimable_reservation(request_payload, reservation)
+
+
+# LLM: 仅原T→controller区调用，过期写入必须先确认真实C来源；纯记录合同无副作用拒绝，不造P3或运行身份。
+# 函数用途: 让过期排队插话在原多进程安全门内结清，输入或终态不可读时拒绝派发。
+def _expire_pending_steer_locked(gate, path, current, owner):
+    from .queued_steer_expiry import (
+        _expiry_coordinator_source,
+        expire_queued_steer_locked,
+        queued_steer_expiry_response,
+    )
+
+    try:
+        if queued_steer_expiry_response(gate.paths, current) is None:
+            return None
+        _expiry_coordinator_source(gate)
+        with _runtime_commit_scope(gate, owner) as rejection:
+            if rejection:
+                return rejection
+            response = expire_queued_steer_locked(gate.paths, path, current, retain_inbox=True)
+        return {"status": "expired", "response": response} if response else {"status": "raced"}
+    except (OSError, ValueError, RuntimeError, DataCorruptionError):
+        return _blocked("target_turn_unavailable")
 
 
 # LLM: 仅T锁已取得后进入内存门；缺运行时由原拒绝门处理，纯记录组件不新增I/O或租约。

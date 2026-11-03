@@ -1580,10 +1580,22 @@ def _linked_active_task_record(
     scope: GatewayControlScope,
     task_id: str,
 ) -> _GatewayRequestRecord | None:
-    """Bind one live request only to the durable task named by its runtime facts."""
+    """Bind one live request to its exact durable task; cancelled same-id links may repair an unfinished stop."""
     durable = _active_conversation_task(base_agent, scope, task_id=task_id)
     if durable is None:
-        return None
+        if task_id != _record_id(processing):
+            return None
+        owner = _request_agent_for_scope(base_agent, scope)
+        store = owner.conversation_store
+        thread = store.threads.resolve(channel=scope.channel, channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+        link = store.tasks.load(task_id)
+        if thread is None or link is None or link.thread_id != thread.thread_id or link.status != "cancelled":
+            return None
+        durable = _GatewayRequestRecord(None, {
+            **_scope_request_payload(scope), "id": task_id,
+            "conversation_thread_id": thread.thread_id,
+            "conversation_task_link_status": link.status,
+        }, "task")
     return _GatewayRequestRecord(
         durable.path,
         durable.payload,
@@ -1662,7 +1674,7 @@ def _request_is_detached(record: _GatewayRequestRecord) -> bool:
     )
 
 
-# LLM: 从规范任务链接解析唯一前台根；活动目标属于该根，不是第二个独立执行者。
+# LLM: 从规范任务链接解析唯一前台根；显式指定任务时只降级历史缺文件，损坏/权限/活动缺失仍拒绝。
 # 函数用途: 按当前用户会话定位可操作的主任务；普通窗口停止也要覆盖 Goal 两轮之间的等待，命名 Audit 保持独立。
 def _active_conversation_task(
     base_agent: object,
@@ -1683,7 +1695,10 @@ def _active_conversation_task(
         )
         if thread is None:
             return None
-        links, load_errors = store.tasks.list_report(thread.thread_id)
+        if task_id:
+            links, load_errors, _warnings = store.tasks.list_report(thread.thread_id, classify_missing=True)
+        else:
+            links, load_errors = store.tasks.list_report(thread.thread_id)
     except Exception:
         return None
     if load_errors:
@@ -2381,7 +2396,7 @@ def _wake_for_task_guidance(
         return
 
 
-# LLM: T 内关闭请求并读取新鲜绑定，释放 T 后才取 task guard；无持久链接也必须沿正式绑定关闭主执行权。
+# LLM: T 内关闭请求并读取新鲜绑定，释放 T 后才取 task guard；回填缺失只查询同 request_id 的持久链接，仍由原 owner/thread 门核验。
 # 函数用途: 中断当前窗口执行链，明确 stop 时按实际主链冻结资源；缺失身份保留未知，不猜 run/attempt。
 def _stop_live_window_request(
     base_agent: object,
@@ -2431,6 +2446,15 @@ def _stop_live_window_request(
     )
 
     linked_task_id = _linked_conversation_task_id(live_request)
+    if not linked_task_id and store is not None:
+        # 晋升的 task 文件可能早于 conversation_runtime 回填；不从正文或旧绑定猜其他任务。
+        try:
+            promoted = store.tasks.load(request_id)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            promoted = None
+            binding_error = "request_task_link_unconfirmed"
+        if promoted is not None:
+            linked_task_id = request_id
     if _request_is_detached(live_request):
         return ConversationControlResult(
             "stop",
@@ -2648,7 +2672,7 @@ def _stop_active_task(
     )
 
 
-# LLM: 中断已确认打到一轮后的收尾：先记用户中断事实（续接窗口），再按精确 active Goal 决定是否发续接 wake；不碰资源。
+# LLM: 中断已确认打到一轮后记录续接事实，收口此刻已让出的授权等待；在Goal续接wake之前固定原孩子，不碰运行中独立资源。
 #   从 _stop_active_task 抽出只为控制函数长度，语义不变。
 # 函数用途: 组装纯中断的成功回执，说明目标是否会继续、资源是否保留。
 def _turn_interrupted_result(
@@ -2656,6 +2680,14 @@ def _turn_interrupted_result(
 ) -> ConversationControlResult:
     task_id = _record_id(active)
     _record_user_interrupt(base_agent, scope, task_id)
+    from ..conversation.agent_activity import (
+        close_parent_capability_requests,
+        parent_capability_request_snapshot,
+    )
+
+    owner = _request_agent_for_scope(base_agent, scope)
+    children = parent_capability_request_snapshot(owner, task_id)
+    close_parent_capability_requests(owner, task_id, reason="parent_turn_interrupted", run_ids=children)
     continuing = _continue_goal_after_turn_interrupt(base_agent, active, scope)
     return ConversationControlResult(
         "stop", True,
@@ -2701,6 +2733,7 @@ def _continue_goal_after_turn_interrupt(
 
 
 # LLM: 后台 Goal→task→claim 内使用 core 原绑定，不回读旧运输 T；前台沿原请求代次核对，进入 creation 后冻结树。
+# 同id晋升且未回填的明确stop收为cancelled（包括索引修复），原中断/其他任务路径保留原合同。
 # 函数用途: 精确关闭主任务并取消其必要输入，再固定原资源清单；输入回收失败保留未确认事实。
 def _prepare_main_task_stop(
     owner_agent: object,
@@ -2735,9 +2768,13 @@ def _prepare_main_task_stop(
                     binding=binding,
                 )
                 interrupt_by_name(conversation_request_interrupt_name(task_id))
-                stopped = store.tasks.update_status(
-                    {"task_id": task_id, "status": "interrupted", "expected_status": expected_status}
-                )
+                same_request_promotion = (active.linked_request is not None
+                    and task_id == _record_id(active.linked_request)
+                    and not _linked_conversation_task_id(active.linked_request))
+                stopped = store.tasks.update_status({
+                    "task_id": task_id, "status": "cancelled" if same_request_promotion else "interrupted",
+                    "expected_status": expected_status,
+                })
                 if stopped is None:
                     raise ValueError("停止时任务状态发生冲突")
                 try:

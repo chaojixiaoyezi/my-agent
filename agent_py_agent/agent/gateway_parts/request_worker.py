@@ -206,7 +206,7 @@ class GatewayAdmission:
         ) == ""
 
     # LLM: 准入失败必须给出**结构化原因**(哪一层限流),排队等待信号与诊断都只认这个原因码,
-    # 不从文案或调用顺序推断。返回空串=已获取。
+    # 不从文案或调用顺序推断。返回空串=已获取；只读pre_acquire在计数前与release串行复核原目标。
     # 函数用途: 尝试获取准入并返回容量或会话忙原因，不在池内等待。
     def try_acquire_report(
         self,
@@ -217,8 +217,13 @@ class GatewayAdmission:
         conversation_key: str = "",
         owner_limit: int | None = None,
         pool_can_acquire: Callable[[], bool] | None = None,
+        pre_acquire: Callable[[], str] | None = None,
     ) -> str:
         with self._lock:
+            if pre_acquire is not None:
+                rejection = pre_acquire()
+                if rejection:
+                    return rejection
             if self._total >= max(1, global_limit):
                 return "global_inflight"
             if self._per_user.get(user_key, 0) >= max(1, user_limit):
@@ -365,7 +370,7 @@ def _positive_int(value: object, fallback: int) -> int:
 
 # LLM: hold_reason 非空时（Gateway 安全重启排空）整轮只给每个待处理请求记一次结构化等待事实、不认领，
 # 请求留给接班进程；等待事实让客户端按活动续期，不把长时间排空误判为超时。改动须同步 test_gateway_safe_restart.py。
-# 函数用途: 按两层限流认领待处理请求并提交执行；排空时只记录等待。
+# 函数用途: 按两层限流派发；已提交过期输入先补交不认领，排空时仍只记录等待。
 def dispatch_pending_requests(
     paths: GatewayPaths,
     limits: AdmissionLimits,
@@ -391,6 +396,12 @@ def dispatch_pending_requests(
     blocked = 0
     deferred_present = False
     for request in _iter_pending_requests(paths):
+        from .queued_steer_expiry import resume_expired_steer
+
+        resumed = resume_expired_steer(paths, request.path, admission_gate=admission_gate)
+        if resumed is not None:
+            blocked += int(resumed == "blocked")
+            continue
         if _request_deferred_until_later(request):
             deferred_present = True
             # 恢复退避也是合法排队:同样发结构化等待信号(原因码区分),客户端不按超时误判。
@@ -412,7 +423,7 @@ def dispatch_pending_requests(
 # LLM: 按原持久gate分流；Count0在claim前增加配置的活跃用户容量，C/W仍不借内存slot或submit失败清P3。
 #   Count0准入一经记账即归本函数：claim异常(含BaseException)、未认领与submit失败都在同一finally恰好释放一次；
 #   submit正常返回后责任移交原executor，由其执行收尾释放。
-# 函数用途: 让原派发算法消费对应的唯一准入门，不新增排队状态。
+# 函数用途: 让原派发算法消费对应的唯一准入门；过期插话在占坑前封存，不新增执行身份。
 def _admit_and_submit(
     paths: GatewayPaths,
     request: _PendingGatewayRequest,
@@ -424,6 +435,12 @@ def _admit_and_submit(
     limits, submit = lane[0], lane[1]
     user_key = request_user_key(request.payload)
     conversation_key = request_conversation_key(request.payload)
+    from .queued_steer_expiry import (
+        expire_queued_steer_locked,
+        project_expired_steer,
+        queued_steer_pre_acquire,
+    )
+
     blocked_reason = admission.try_acquire_report(
         user_key,
         limits.user_inflight,
@@ -431,7 +448,18 @@ def _admit_and_submit(
         conversation_key=conversation_key,
         owner_limit=limits.owner_inflight or None,
         pool_can_acquire=partial(limits.pool_can_acquire, request.payload) if limits.pool_can_acquire is not None else None,
+        pre_acquire=partial(queued_steer_pre_acquire, paths, request.payload),
     )
+    if blocked_reason == "expired_target_turn":
+        try:
+            with gateway_turn_transition(paths, request.path.stem):
+                expired = expire_queued_steer_locked(paths, request.path, request.payload, retain_inbox=True)
+            if expired is not None:
+                return "expired" if project_expired_steer(paths, request.path.stem) else "blocked"
+            return "raced"
+        except (OSError, ValueError, RuntimeError, DataCorruptionError):
+            # 原提交器的投影冲突也是单条欠账；保留inbox和冲突文件，让扫描继续。
+            return "blocked"
     if blocked_reason:
         # 合法排队:把"仍在等准入"这一事实写成结构化字段,客户端据此续期而不是误判超时。
         _record_admission_wait(request, reason=blocked_reason)
@@ -1512,6 +1540,20 @@ def _finish_claimed_gateway_request(
         # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
         # request_execution._host_shutdown_resume_marker）。
         return
+    from ..conversation.agent_activity import (
+        close_parent_capability_requests,
+        parent_capability_request_snapshot,
+    )
+    from .request_binding import gateway_runtime_authority
+
+    capability_parent, capability_children = "", ()
+    if execution_agent is not None and processing_path.parent == paths.processing:
+        original = read_json_file_report(processing_path)
+        if original.load_error is None and original.payload.get("id") == request_id:
+            authority = gateway_runtime_authority(original.payload, request_id)
+            runtime = original.payload.get("conversation_runtime")
+            capability_parent = str(authority.get("task_id") or (runtime.get("task_id") if isinstance(runtime, dict) else "") or request_id)
+            capability_children = parent_capability_request_snapshot(execution_agent, capability_parent)
     target_folder = gateway_terminal_projection_folder(paths, response)
     response_path = gateway_response_path(paths, request_id)
     archive_result = archive_request(
@@ -1526,6 +1568,10 @@ def _finish_claimed_gateway_request(
     )
     if not archive_result.terminal_committed:
         return
+    if execution_agent is not None and capability_children:
+        close_parent_capability_requests(execution_agent, capability_parent,
+            reason="parent_turn_interrupted" if response.get("status") in {"cancelled", "stopped", "interrupted"} else "parent_turn_ended",
+            run_ids=capability_children)
     from .recovery import (
         mark_gateway_terminal_projection_complete,
         repair_gateway_chunk_projection,
@@ -1803,6 +1849,8 @@ def _admit_and_submit_durable(
         limits,
     )
     status = str(decision.get("status") or "")
+    if status == "expired":
+        return "expired"
     if status == "blocked":
         _record_admission_wait(request, reason=str(decision.get("reason") or "admission_blocked"), error_code=str(decision.get("error_code") or ""), paths=paths, admission_gate=gate)
         return "blocked"
