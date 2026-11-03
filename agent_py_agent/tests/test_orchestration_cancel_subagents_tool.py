@@ -51,6 +51,22 @@ def _execute_host_cancel_subagents(agent: object, arguments: dict[str, object]):
     return execute_cancel_subagents(agent, arguments)
 
 
+# LLM: 只观察生产清理函数的原始回执，不替换结果，不绕过真实ToolCall及操作账。
+# 函数用途: 让未知出口同时核对领域细节和工具层的防重试包装。
+def _observe_subagent_stop_results(monkeypatch):
+    from agent_py_agent.agent.subagents import cancellation
+
+    observed, cleanup = [], cancellation.cleanup_subagent_stops
+
+    def record(batch):
+        result = cleanup(batch)
+        observed.append(result)
+        return result
+
+    monkeypatch.setattr(cancellation, 'cleanup_subagent_stops', record)
+    return observed
+
+
 def test_cancel_model_schema_only_names_direct_runs():
     from agent_py_agent.agent.agent_core.orchestration.tool_specs import (
         build_cancel_subagents_model_spec,
@@ -724,6 +740,8 @@ def test_cancel_subagents_never_signals_gateway_pid_for_in_process_runner(tmp_pa
     assert loaded.attributes["runner_session"]["ended_at"] > 0
 
 
+# LLM: 真实工具层未知出口与原清理回执一起核对，缺宿主身份不能报完整停止。
+# 函数用途: 验证撤权后仍如实报告宿主未确认，并且不向未知进程发信号。
 def test_cancel_subagents_observes_host_without_killing_its_future_descendants(tmp_path, monkeypatch):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -748,14 +766,22 @@ def test_cancel_subagents_observes_host_without_killing_its_future_descendants(t
 
     monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", _terminate)
 
+    observed = _observe_subagent_stop_results(monkeypatch)
     result = _execute_cancel_subagents(agent, {"run_id": task.id, "reason": "停止独立进程"})
     payload = json.loads(result.output)
 
-    assert result.ok is True
-    assert signalled == []
-    assert payload["cancelled"][0]["pid_report"]["status"] == "identity_unavailable"
+    # 缺少 birth/launch 不能确认宿主退出；任务已被撤权也不代表资源完整收起。
+    assert result.ok is False and result.effect_outcome == "unknown"
+    assert payload['error_code'] == result.error_code == 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+    assert signalled == [] and len(observed) == 1 and observed[0]['ok'] is False
+    assert observed[0]['cancelled'][0]['pid_report']['status'] == 'identity_unavailable'
+    assert observed[0]['failed'] == [{'run_id': task.id, 'cancellation_attempted': True,
+                                     'error_code': 'RUNNER_WORKER_EXIT_UNCONFIRMED'}]
+    assert agent.subagents.load(task.id).status == "CANCELLED"
 
 
+# LLM: 两个任务共享PID但缺身份；只取消点名原轮，资源未确认必须留在未知出口。
+# 函数用途: 验证共享宿主的保守停止不会误停兄弟，也不会把撤权冒充资源退出。
 def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host(
     tmp_path,
     monkeypatch,
@@ -798,6 +824,7 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
 
     monkeypatch.setattr("agent_py_agent.agent.subagents.process_control.terminate_pid_with_escalation", _terminate)
 
+    observed = _observe_subagent_stop_results(monkeypatch)
     first = _execute_cancel_subagents(
         agent,
         {
@@ -807,11 +834,12 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
     )
     first_payload = json.loads(first.output)
 
-    assert first.ok is True
-    assert signalled == []
-    assert first_payload["cancelled"][0]["pid_report"] == {
-        "status": "identity_unavailable", "pid": 5353,
-    }
+    assert first.ok is False and first.effect_outcome == "unknown"
+    assert first_payload['error_code'] == first.error_code == 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+    assert signalled == [] and len(observed) == 1 and observed[0]['ok'] is False
+    assert observed[0]['cancelled'][0]['pid_report'] == {"status": "identity_unavailable", "pid": 5353}
+    assert observed[0]['failed'] == [{'run_id': tasks[0].id, 'cancellation_attempted': True,
+                                     'error_code': 'RUNNER_WORKER_EXIT_UNCONFIRMED'}]
     assert agent.subagents.load(tasks[0].id).status == "CANCELLED"
     assert agent.subagents.load(tasks[1].id).status == "RUNNING"
 
@@ -824,9 +852,13 @@ def test_cancel_subagents_fences_one_task_without_killing_shared_subprocess_host
     )
     second_payload = json.loads(second.output)
 
-    assert second.ok is True
-    assert signalled == []
-    assert second_payload["cancelled"][0]["pid_report"]["status"] == "identity_unavailable"
+    assert second.ok is False and second.effect_outcome == "unknown"
+    assert second_payload['error_code'] == second.error_code == 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+    assert signalled == [] and len(observed) == 2 and observed[1]['ok'] is False
+    assert observed[1]['cancelled'][0]['pid_report']['status'] == 'identity_unavailable'
+    assert observed[1]['failed'] == [{'run_id': tasks[1].id, 'cancellation_attempted': True,
+                                     'error_code': 'RUNNER_WORKER_EXIT_UNCONFIRMED'}]
+    assert all(agent.subagents.load(task.id).status == "CANCELLED" for task in tasks)
 
 
 def test_cancel_subagents_does_not_interrupt_shared_in_process_dispatch(
@@ -1143,3 +1175,40 @@ def _create_cancel_tree(agent):
     for task in (parent, child, done_child):
         agent.subagents.save(task)
     return parent, child, done_child
+
+
+# LLM: 走原工具和规范任务账；PID/信号仅为替身，成功证明来自共享拓扑而不是伪造退出。
+# 函数用途: 完整宿主身份下只撤销点名执行轮，保留共享宿主和兄弟任务。
+def test_cancel_verified_shared_subprocess_host_fences_only_selected_attempt(tmp_path, monkeypatch):
+    import pytest
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.subagents import cancellation_hosts as hosts
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
+    tasks = [agent.subagents.create_run(params=CreateRunParams(
+        goal=f'共享宿主 {index}', thought='精确停止', plan=['核对'], allowed_tools=['read_file'])) for index in range(2)]
+    for index, task in enumerate(tasks):
+        attempt = f'attempt-shared-{index}'
+        task.status, task.runner_active_attempt_id = 'RUNNING', attempt
+        session = _fresh_runner_session(worker_pid=5353, in_process=False)
+        session.update(run_id=task.id, attempt_id=attempt, launch_id='launch-shared', worker_birth_token='shared-birth')
+        task.attributes = {**dict(task.attributes or {}), 'runner_session': session,
+            'background_start': {'pid': 5353, 'attempt_id': attempt, 'launch_id': 'launch-shared'}}
+        agent.subagents.save(task)
+    interrupted = []
+    monkeypatch.setattr(hosts, 'interrupt_by_name', lambda name: interrupted.append(name) or True)
+    monkeypatch.setattr(hosts.os, 'kill', lambda *args: pytest.fail('shared host received a process signal'))
+    monkeypatch.setattr(hosts, 'capture_process_birth_token', lambda *args: pytest.fail('shared host was escalated'))
+    outcome = _execute_cancel_subagents(agent, {'run_id': tasks[0].id, 'reason': '只停止原轮'})
+    payload = json.loads(outcome.output)
+    assert outcome.ok is True and payload['failed'] == []
+    report = payload['cancelled'][0]['pid_report']
+    assert report['status'] == 'shared_host_cooperative' and report['escalated'] is False
+    assert report['shared_run_ids'] == [tasks[1].id]
+    assert report['thread_interrupt'] == 'attempt_signaled' and 'host_exited' not in report
+    assert interrupted == [f'subagent-runner-attempt:{tasks[0].id}:attempt-shared-0']
+    assert agent.subagents.load(tasks[0].id).status == 'CANCELLED'
+    assert agent.subagents.load(tasks[1].id).status == 'RUNNING'

@@ -103,6 +103,8 @@ def test_unassigned_rejects_run_and_foreign_actor(tmp_path):
 # LLM: 治理授权须先于真实脚本副作用；测试只授予 effects 写根，不放宽生产沙箱或原断言。
 # 函数用途: 验证治理拒绝、恢复与结果核对期间，真实脚本副作用只发生一次。
 @pytest.mark.parametrize('invalid', ['candidate', 'self_review', 'revoked', 'attempt', 'unknown_effect', 'committed_resolution'])
+# LLM: 真实脚本与原治理门不替换；未知现场只用显式恢复写入，不放宽普通终态守卫。
+# 函数用途: 核对执行前治理及已提交结果的对账，禁止批准后重放副作用。
 def test_governance_consumed_before_real_script_effect(tmp_path, invalid):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
     from agent_py_agent.agent.workflows.governance import (
@@ -156,7 +158,8 @@ def test_governance_consumed_before_real_script_effect(tmp_path, invalid):
         assert first.status == 'succeeded'
         first.status, first.effect_outcome = 'paused_for_resume', 'unknown'
         first.steps[0].status = 'paused_for_resume'
-        store.save_run(first)
+        # 显式注入恢复现场；普通晚到写入仍不得把已成功的运行改回暂停。
+        store.save_run(first, resuming=True)
         if invalid == 'unknown_effect':
             with pytest.raises(PermissionError, match='RECONCILIATION'):
                 engine.resume_workflow_run(first.workflow_run_id)
@@ -207,6 +210,8 @@ def test_native_tool_consumes_business_service_and_preserves_host_engine(tmp_pat
     assert not injected.ok and injected.error_code == 'TOOL_INVALID_ARGUMENTS'
 
 
+# LLM: 同一原运行保留已完成控制回执，取消结清终态不改写业务结果。
+# 函数用途: 验证后续控制不会覆盖先前恢复的幂等回执。
 def test_completed_control_replays_original_receipt_after_later_control(tmp_path):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
     from agent_py_agent.tests.test_workflow_script_engine import script, step, workflow
@@ -218,7 +223,9 @@ def test_completed_control_replays_original_receipt_after_later_control(tmp_path
     engine.cancel_workflow_run(first.workflow_run_id, expected_revision=resumed.revision, operation_key='cancel-once')
     replay = engine.resume_workflow_run(first.workflow_run_id, expected_revision=expected, operation_key='resume-once')
     assert replay.to_dict() == resumed.to_dict()
-    assert engine.store.load_run(first.workflow_run_id).status == 'cancelled'
+    current = engine.store.load_run(first.workflow_run_id)
+    assert current.status == 'succeeded'  # 取消已结清运行只确认控制，不改写原成功。
+    assert engine.store._read(first.workflow_run_id, 'run.json')['control_operations']['cancel-once']['state'] == 'completed'
 
 
 def test_legacy_delete_cannot_bypass_business_recycle_protection(tmp_path):
@@ -237,3 +244,70 @@ def test_real_script_sees_durable_admission_before_process_effect(tmp_path):
                      'print(json.dumps({"value":r["effect_outcome"]}))')
     done = WorkflowEngine(tmp_path).run_workflow(workflow(step()), workflow_run_id='exact-running')
     assert done.status == 'succeeded' and done.final_output == {'value': 'unknown'}
+
+
+@pytest.mark.parametrize('status', ['succeeded', 'failed', 'skipped', 'cancelled'])
+# LLM: 使用真实Store的终态DTO、CAS和步骤落盘路径，不以元数据更新重新授予执行权。
+# 函数用途: 覆盖全部终态的元数据更新、晚到写拒绝及旧修订冲突。
+def test_terminal_store_allows_metadata_but_rejects_late_execution(tmp_path, status):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *args: {'value': 1})
+    first = engine.run_workflow(definition(steps=[
+        {'step_id': 'analyze', 'name': '分析', 'mode': 'llm_skill_analysis'}]))
+    record = replace(first, workflow_run_id='terminal', status=status)
+    engine.store.create_run(record, engine.store.load_workflow_snapshot(first.workflow_run_id))
+    metadata = replace(record, workflow_name='同状态元数据更新')
+    engine.store.save_run(metadata)
+    before = engine.store.load_run(record.workflow_run_id).to_dict()
+    with pytest.raises(ValueError, match='WORKFLOW_RUN_TERMINAL'):
+        engine.store.save_run(replace(metadata, status='running'))
+    with pytest.raises(ValueError, match='WORKFLOW_RUN_TERMINAL'):
+        engine.store.save_step_result(record.workflow_run_id, replace(record.steps[0], status='running'))
+    with pytest.raises(ValueError, match='REVISION_CONFLICT'):
+        engine.store.save_run(record)
+    assert engine.store.load_run(record.workflow_run_id).to_dict() == before
+
+
+@pytest.mark.parametrize('status', ['succeeded', 'failed', 'skipped', 'cancelled'])
+# LLM: 原执行锁内只确认已结清义务；控制重放必须返回同一结果且不再推进修订。
+# 函数用途: 验证取消已结束运行不会把历史成功或失败改写掉。
+def test_cancel_settled_terminal_acknowledges_control_without_rewriting_result(tmp_path, status):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *args: {'value': 1})
+    first = engine.run_workflow(definition(steps=[
+        {'step_id': 'analyze', 'name': '分析', 'mode': 'llm_skill_analysis'}]))
+    record = replace(first, workflow_run_id='terminal', status=status)
+    engine.store.create_run(record, engine.store.load_workflow_snapshot(first.workflow_run_id))
+    expected = record.revision
+    assert engine.cancel_workflow_run(record.workflow_run_id, expected_revision=expected, operation_key='cancel') == []
+    current = engine.store.load_run(record.workflow_run_id)
+    assert current.status == status and current.steps == record.steps
+    assert current.final_output == record.final_output
+    operation = engine.store._read(record.workflow_run_id, 'run.json')['control_operations']['cancel']
+    assert operation['state'] == 'completed' and operation['receipt']['status'] == status
+    assert engine.cancel_workflow_run(record.workflow_run_id, expected_revision=expected, operation_key='cancel') == []
+    assert engine.store.load_run(record.workflow_run_id).to_dict() == current.to_dict()
+
+
+# LLM: 静态检查原恢复函数的全部Store写入，防止同类分支再次遗漏显式恢复意图。
+# 函数用途: 给恢复写入添加全模式保护，不能靠移除终态守卫通过测试。
+def test_agent_recovery_writes_always_declare_explicit_resume():
+    import ast
+    import inspect
+    import textwrap
+
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(WorkflowEngine._resume_agent)))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr in ('save_run', 'save_step_result')]
+    assert calls
+    for call in calls:
+        assert any(keyword.arg == 'resuming' and isinstance(keyword.value, ast.Constant)
+                   and keyword.value.value is True for keyword in call.keywords)

@@ -232,14 +232,14 @@ class WorkflowRunStore:
             _write_json(self.owner_home, parts, data)
             record.revision = revision + 1
 
-    # LLM: 先发表独立快照再更新运行；崩溃窗口由 load_run 读取独立快照弥合。
-    # 函数用途: 保存一个已存在步骤的运行中或完成状态，并推进当前步骤位置。
+    # LLM: 先发表独立快照再更新运行；全部终态拒绝普通晚到改写，显式恢复不允许复活cancelled。
+    # 函数用途: 保存已存在步骤并推进位置，保留终态保护及同状态运行元数据更新。
     def save_step_result(self, workflow_run_id, step_record, *, resuming=False):
         with self._lock(workflow_run_id):
             record = self.load_run(workflow_run_id)
             previous = next((s for s in record.steps if s.step_id == step_record.step_id), None)
             changed = previous is not None and payload(previous) != payload(step_record)
-            if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed') and not resuming):
+            if changed and (record.status == 'cancelled' or record.status in ('succeeded', 'failed', 'skipped') and not resuming):
                 raise ValueError('WORKFLOW_RUN_TERMINAL')
             if step_record.step_id not in {step.step_id for step in record.steps}:
                 raise ValueError('运行中不存在该步骤')
@@ -334,37 +334,84 @@ class WorkflowRunStore:
             raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
         return data, proof
 
+    # LLM: 只在原run锁内绑定同Owner/资产/租约；callback身份来自本机原语，恢复不沿用老进程身份。
+    # 函数用途: 将准确占位和当前回调进程写入原运行，不改变业务版本或执行结果。
     def _bind_concurrency_claim(self, lease):
         """在执行前将准确 nonce/文件身份附到原账本，不授予新的执行权限。"""
         run_id = lease.record['run_id']
         with self._lock(run_id):
             data = self._read(run_id, 'run.json')
             previous = data.get('concurrency_claim')
-            if data.get('workflow_run_id') != run_id:
+            if data.get('workflow_run_id') != run_id or data.get('workflow_id') != lease.record.get('asset_id'):
                 raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
             if previous and previous.get('phase') != 'released':
                 self._concurrency_claim(lease)
                 if previous.get('phase') != 'retained':
                     raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_BUSY')
+            from .concurrency_policy import _self_identity
+            identity = _self_identity()
+            if identity is None:
+                raise ValueError('WORKFLOW_CONCURRENCY_IDENTITY_UNAVAILABLE')
             data['concurrency_claim'] = {'schema': 'workflow-concurrency-lifecycle.v1',
-                'record': payload(lease.record), 'stamp': list(lease.stamp), 'phase': 'executing'}
+                'record': payload(lease.record), 'stamp': list(lease.stamp), 'phase': 'executing',
+                'callback_identity': identity}
             _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
 
+    # LLM: 调用栈已证明本次callback未进入；读回已提交绑定，只清同代或已释放前代，未知原责任保持占用。
+    # 函数用途: 绑定失败时先持久化准确清理证明，或把原运行未结义务恢复为retained。
+    def _abort_concurrency_binding(self, lease):
+        run_id = lease.record['run_id']
+        with self.execution_lock(run_id):
+            data = self._read(run_id, 'run.json')
+            if data.get('workflow_run_id') != run_id or data.get('workflow_id') != lease.record.get('asset_id'):
+                raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
+            previous = data.get('concurrency_claim')
+            if previous and previous.get('phase') != 'released':
+                self._concurrency_claim(lease)
+            record = self.load_run(run_id)
+            unstarted = (record.status == 'queued' and record.effect_outcome == 'not_started'
+                and all(step.status == 'pending' and not step.escalation_result for step in record.steps))
+            phase = 'release_pending' if unstarted or _concurrency_settled(record) else 'retained'
+            if not previous or previous.get('phase') == 'released':
+                data['concurrency_claim'] = {'schema': 'workflow-concurrency-lifecycle.v1',
+                    'record': payload(lease.record), 'stamp': list(lease.stamp), 'phase': phase}
+            else:
+                previous['phase'] = phase
+            _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
+            return phase
+
+    # LLM: 本次callback确已退出；已发表release_pending/released不倒退，原步骤责任仍是唯一结算依据。
+    # 函数用途: 在删除占位之前把退出与义务结算结果保存在原run。
     def _finish_concurrency_claim(self, lease):
         """回调返回后仍核规范步骤义务；未知责任保留，占位删除前先持久化清理证明。"""
         run_id = lease.record['run_id']
         with self._lock(run_id):
             data, proof = self._concurrency_claim(lease)
+            if proof['phase'] in ('release_pending', 'released'):
+                return proof['phase']
             phase = 'release_pending' if _concurrency_settled(self.load_run(run_id)) else 'retained'
             if proof['phase'] != phase:
                 proof['phase'] = phase
                 _write_json(self.owner_home, ('data', 'workflow_runs', run_id, 'run.json'), data)
             return phase
 
-    def _concurrency_claim_phase(self, lease):
+    # LLM: 准入非阻塞核原run和完整租约；可靠进程退出才恢复，非终态或未知委派责任只保留retained。
+    # 函数用途: 查询准确阶段，并按需恢复死亡回调留下的规范清理证明。
+    def _concurrency_claim_phase(self, lease, *, recover_exited=False):
         # 准入门不能等待正持运行锁的回调，否则等待者无法交还回调所等的事件。
         with self.execution_lock(lease.record['run_id']):
-            return self._concurrency_claim(lease)[1]['phase']
+            data, proof = self._concurrency_claim(lease)
+            if recover_exited and proof['phase'] in ('executing', 'retained'):
+                from .concurrency_policy import _identity_live
+                identity = proof.get('callback_identity', lease.record.get('identity'))
+                if _identity_live(identity) is False:
+                    record = self.load_run(lease.record['run_id'])
+                    phase = ('release_pending' if record.status in ('succeeded', 'failed', 'skipped', 'cancelled')
+                        and _concurrency_settled(record) else 'retained')
+                    if proof['phase'] != phase:
+                        proof['phase'] = phase
+                        _write_json(self.owner_home, ('data', 'workflow_runs', lease.record['run_id'], 'run.json'), data)
+            return proof['phase']
 
     def _ack_concurrency_release(self, lease):
         """准确占位已不在当前叶后才确认；未确认的证明继续保存在原 run。"""
