@@ -16,7 +16,7 @@ jobs:
       matrix:
         python-version:
           - "3.12"
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
       - uses: actions/checkout@v4
@@ -60,12 +60,12 @@ jobs:
           from pathlib import Path
 
           shard_idx = int("${{ matrix.shard }}") - 1
-          total_shards = 10
+          total_shards = 12
           all_files = sorted(str(p) for p in Path("agent_py_agent/tests").rglob("test_*.py"))
           files = [f for idx, f in enumerate(all_files) if idx % total_shards == shard_idx]
-          batch_size = 40
+          batch_size = 25
           batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
-          workers = max(2, os.cpu_count() or 4)
+          workers = max(1, min(os.cpu_count() or 2, 2))
           root_tmp = Path(tempfile.mkdtemp(prefix="pytest_full_shards_"))
 
           def run_batch(idx: int, batch: list[str]):
