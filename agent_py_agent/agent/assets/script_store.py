@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import fields, replace
 
 from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
@@ -72,6 +73,10 @@ def _preserve_history(descriptor, old):
     metadata = dict(descriptor.metadata)
     if '_run_summary_spool' in old.metadata:
         metadata['_run_summary_spool'] = old.metadata['_run_summary_spool']
+    if '_run_summary_generation' in old.metadata:
+        metadata['_run_summary_generation'] = old.metadata['_run_summary_generation']
+    else:
+        metadata.pop('_run_summary_generation', None)
     return replace(descriptor, data_sources=sources, runtime_summary=summary, metadata=metadata)
 
 
@@ -93,12 +98,16 @@ class ScriptStore(_AssetStore):
         from ..workflows.datasource_runtime import project_script_asset_fields
         return {**record, **project_script_asset_fields(self.owner_home, record, workspace_root=self.workspace_root)} if record is not None else None
 
-    # LLM: 仅原写操作正常返回后使用，投影失败也是已提交读回失败，不能误报未执行。
-    # 函数用途: 给全部保存/更新读回补充统一展示。
+    # LLM: 只投影本次已提交的定义快照，不能用并发新聚合覆盖显式摘要或fold快照；错误阶段保持。
+    # 函数用途: 给保存/更新读回隐藏内部摘要元数据，不改变本次写入返回的摘要时点。
     def _readback_after_commit(self, asset_id):
         record = super()._readback_after_commit(asset_id)
         try:
-            return self._project_record(record)
+            record = self._project_record(record)
+            metadata = dict(record['metadata'])
+            metadata.pop('_run_summary_spool', None)
+            metadata.pop('_run_summary_generation', None)
+            return {**record, 'metadata': metadata}
         except Exception as exc:
             raise AssetPostCommitReadbackError('脚本已提交但展示投影失败') from exc
 
@@ -154,6 +163,10 @@ class ScriptStore(_AssetStore):
             next_asset_revision(old, expected_revision)
             if old:
                 descriptor = _preserve_history(descriptor, _record_descriptor(old))
+            else:
+                # 生命周期只在持根锁的新建时生成；同ID删除后重建不能复用旧摘要或调用方身份。
+                descriptor = replace(descriptor, metadata={**descriptor.metadata,
+                    '_run_summary_generation': uuid.uuid4().hex})
             if old and old["entrypoint"].casefold() == entrypoint.casefold():
                 entrypoint = options["entrypoint"] = old["entrypoint"]
             files = {entrypoint: code}
@@ -240,8 +253,8 @@ class ScriptStore(_AssetStore):
             self._write(replace(descriptor, data_sources=tuple(sources)).to_dict() | options)
             return self._readback_after_commit(script_id)
 
-    # LLM: 展示投影只读spool不写盘；存储私有幂等元数据不进入公开定义，保留旧调度固定引用。
-    # 函数用途: 为公开脚本读口合并尚未fold的摘要展示。
+    # LLM: 展示投影直读聚合；存储私有迁移元数据不进入公开定义，保留旧调度固定引用。
+    # 函数用途: 为公开脚本读口返回最新事务摘要。
     def _summary_projection(self, record):
         if record is None or record.get('scope_layer', 'owner') != 'owner':
             return record
@@ -249,6 +262,7 @@ class ScriptStore(_AssetStore):
         metadata = dict(record.get('metadata', {}))
         summary = project(self.owner_home, 'script', record['id'], RuntimeSummary.from_dict(record['runtime_summary']), metadata)
         metadata.pop('_run_summary_spool', None)
+        metadata.pop('_run_summary_generation', None)
         return {**record, 'runtime_summary': summary.to_dict(), 'metadata': metadata}
 
     # LLM: 仅用于摘要来源选择，不供执行；并发事务中原子元数据版本可认领来源，但不恢复事务或写其目录。
@@ -293,8 +307,8 @@ class ScriptStore(_AssetStore):
                 return view._mark_global(record), False
         raise KeyError(script_id)
 
-    # LLM: 非阻塞调用只原子发布spool，不取Owner根锁；返回的是未合并快照，不冒称计数已提交。
-    # 函数用途: 记录脚本摘要，可显式同步fold，run_id用于跨调用与重启幂等。
+    # LLM: 非阻塞调用直接提交SQLite聚合，不取Owner根锁；返回值仍保持旧定义快照契约。
+    # 函数用途: 记录脚本摘要，可显式同步保存定义快照，run_id用于跨调用与重启幂等。
     def record_run_summary(self, script_id, status, duration_ms, run_at=None, *, last_error="", blocking=True, run_id=""):
         from ..workflows import run_summary_spool
 
@@ -303,13 +317,14 @@ class ScriptStore(_AssetStore):
         record, writable = self._summary_source(script_id)
         if not writable:
             return record
-        run_summary_spool.append(self.owner_home, 'script', script_id,
+        run_summary_spool.record(self.owner_home, 'script', script_id,
                                 {'status': status, 'duration_ms': duration_ms, 'run_at': run_at,
-                                 'last_error': last_error, 'run_id': run_id})
+                                 'last_error': last_error, 'run_id': run_id},
+                                 RuntimeSummary.from_dict(record['runtime_summary']), record['metadata'])
         return self.fold_run_summaries(script_id) if blocking else record
 
-    # LLM: 原根锁下重新读权威值；摘要与run_id集合放同一次资产事务，ACK失败后重放不重复累计。
-    # 函数用途: 显式合并本脚本spool，项目及全局来源仍保持只读。
+    # LLM: 原根锁下重新读定义，SQLite负责去重；写回固定大小摘要，ACK失败可重放。
+    # 函数用途: 显式迁移本脚本旧spool并保存摘要快照，项目及全局来源仍保持只读。
     def fold_run_summaries(self, script_id):
         from ..workflows import run_summary_spool
 

@@ -6,10 +6,11 @@ import hashlib
 import json
 import math
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
-from ..common.nofollow_fs import read_bytes_beneath
+from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
 from . import (
     MAX_ASSET_BYTES,
     _AssetStore,
@@ -132,6 +133,7 @@ class WorkflowDefinition(_Record):
                  "body_markdown": self.body_markdown, "enabled": self.enabled}
         # 存储内部幂等凭据不属于公开定义，不能污染调度器既有的整对象固定引用。
         value['descriptor']['metadata'].pop('_run_summary_spool', None)
+        value['descriptor']['metadata'].pop('_run_summary_generation', None)
         for key in ('edges', 'schedule_ids', 'datasource_ids'):
             if getattr(self, key):
                 value[key] = super().to_dict()[key]
@@ -210,11 +212,19 @@ class WorkflowStore(_AssetStore):
     # LLM: 同锁提交refs/steps/正文后读回权威记录；提交后读失败按独立阶段抛出，不能报告未开始。
     # 函数用途: 写入已经校验的工作流，供多个写入口共用。
     def _save(self, definition):
+        previous = self._get(definition.descriptor.id)
+        metadata = dict(definition.descriptor.metadata)
+        if previous is None:
+            metadata['_run_summary_generation'] = uuid.uuid4().hex
+        elif '_run_summary_generation' in previous.descriptor.metadata:
+            metadata['_run_summary_generation'] = previous.descriptor.metadata['_run_summary_generation']
+        else:
+            metadata.pop('_run_summary_generation', None)
+        definition = replace(definition, descriptor=replace(definition.descriptor, metadata=metadata))
         definition = with_workflow_step_refs(definition)
         business = definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA)
         if business is not None:
             from ..workflows.orphan_maintenance import update_due_index
-            previous = self._get(definition.descriptor.id)
             if previous is not None:
                 old_state = previous.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA, {})
                 if (business.get('last_content_edit_at') == old_state.get('last_content_edit_at')
@@ -400,7 +410,7 @@ class WorkflowStore(_AssetStore):
     def _summary_snapshot(self, workflow_id):
         try:
             raw = read_bytes_beneath(self.owner_home, (self.collection, workflow_id, self.filename),
-                                     max_bytes=MAX_ASSET_BYTES, snapshot_retries=2)
+                                     max_bytes=MAX_ASSET_BYTES, snapshot_retries=2 if _supports_dir_fd() else 0)
         except FileNotFoundError:
             return None
         if raw is None:
@@ -410,8 +420,8 @@ class WorkflowStore(_AssetStore):
             raise ValueError('资产元数据ID与目录不匹配')
         return self._decode_definition(data)
 
-    # LLM: 公开读只计算未fold摘要的展示投影，不写盘、不ACK、不把私有幂等凭据当定义内容。
-    # 函数用途: 兼容执行后立即读取最新摘要的旧调用方。
+    # LLM: 公开读直取一个聚合，不遍历运行历史、不ACK、不把私有迁移凭据当定义内容。
+    # 函数用途: 兼容执行后立即读取最新事务摘要的旧调用方。
     def _summary_projection(self, definition):
         if definition is None or definition.descriptor.scope_layer != 'owner':
             return definition
@@ -438,8 +448,8 @@ class WorkflowStore(_AssetStore):
                 return self._mark_global(selected), False
         raise KeyError(workflow_id)
 
-    # LLM: 非阻塞追加不取资产根锁；摘要不影响执行事实，run_id用于持久幂等。
-    # 函数用途: 暂存或同步合并本Owner工作流运行摘要。
+    # LLM: 非阻塞事务不取资产根锁；摘要不影响执行事实，run_id用于持久幂等。
+    # 函数用途: 提交本Owner工作流摘要，可同步保存固定大小定义快照。
     def record_run_summary(self, workflow_id, status, duration_ms, run_at=None, *, last_error='', blocking=True, run_id=''):
         from ..workflows import run_summary_spool
         if type(blocking) is not bool:
@@ -447,12 +457,13 @@ class WorkflowStore(_AssetStore):
         selected, writable = self._summary_source(workflow_id)
         if not writable:
             return selected
-        run_summary_spool.append(self.owner_home, 'workflow', workflow_id,
-            dict(run_id=run_id, status=status, duration_ms=duration_ms, run_at=run_at, last_error=last_error))
+        run_summary_spool.record(self.owner_home, 'workflow', workflow_id,
+            dict(run_id=run_id, status=status, duration_ms=duration_ms, run_at=run_at, last_error=last_error),
+            selected.descriptor.runtime_summary, selected.descriptor.metadata)
         return self.fold_run_summaries(workflow_id) if blocking else selected
 
-    # LLM: 原资产事务同写摘要与幂等凭据后才ACK，普通定义编辑保留凭据，未提交或ACK失败可重放。
-    # 函数用途: 显式合并一个工作流的运行摘要，不写项目和全局来源。
+    # LLM: SQLite同事务保存摘要和凭据，定义写回与ACK可重放，业务metadata仍沿原写口。
+    # 函数用途: 显式迁移旧输入并保存一个工作流摘要快照，不写项目和全局来源。
     def fold_run_summaries(self, workflow_id):
         from ..workflows import run_summary_spool
         selected, writable = self._summary_source(workflow_id)

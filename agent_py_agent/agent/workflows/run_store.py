@@ -13,7 +13,6 @@ from threading import local
 from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
-from ..common.nofollow_fs import list_names_beneath as list_dir_names_beneath
 from ..concurrency.interrupt import is_interrupted
 from .models import (
     WorkflowRunRecord,
@@ -108,6 +107,14 @@ class _RunBusy(RuntimeError, ValueError):
     pass
 
 
+# LLM: 未启动与已结清各自需要完整状态证据，queued 标签本身不能代表没有委派责任。
+# 函数用途: 判定一份持久运行快照是否允许归还未启动的占位。
+def _unstarted_or_settled(record):
+    return (record.status == 'queued' and record.effect_outcome == 'not_started'
+        and all(step.status == 'pending' and not step.escalation_result for step in record.steps)
+        or _concurrency_settled(record))
+
+
 # LLM: 调用方已持run.json锁，正文与中间目录始终从Owner锚点nofollow；先复制脱敏，绝不修改调用方内存。
 # 函数用途: 将结构化记录以0600原子写入账本。
 def _write_json(root, parts, value):
@@ -117,7 +124,11 @@ def _write_json(root, parts, value):
         raise_if_cancelled()
         if is_interrupted():
             raise InterruptedError('workflow interrupted')
-    write_text_atomic_beneath(root, parts, raw + '\n')
+    if len(parts) == 4 and parts[:2] == ('data', 'workflow_runs') and parts[-1] == 'run.json':
+        from .run_list_index import commit_run
+        commit_run(root, value, lambda: write_text_atomic_beneath(root, parts, raw + '\n'))
+    else:
+        write_text_atomic_beneath(root, parts, raw + '\n')
 
 
 # LLM: Store仅过滤运行外层扩展，步骤恢复一律委托模型权威合同。
@@ -334,13 +345,111 @@ class WorkflowRunStore:
             raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
         return data, proof
 
+    # LLM: 只核原作用域内的完整记录与文件身份；缺失与被新代替换不等于原租约仍持有叶。
+    # 函数用途: 验证租约格式，并查询当前叶是否仍属于该准确代次。
+    def _claim_leaf_holds(self, lease):
+        from ..common.nofollow_fs import open_directory_beneath
+        from .concurrency_policy import _claim, _scope
+        record = lease.record
+        if (not isinstance(record, dict) or record.get('schema') != 'workflow-concurrency-claim.v1'
+                or record.get('lifecycle') != 'workflow' or record.get('policy') not in ('skip_if_running', 'queue')
+                or type(record.get('nonce')) is not str or len(record['nonce']) != 32
+                or any(c not in '0123456789abcdef' for c in record['nonce'])
+                or len(lease.stamp) != 2 or any(type(n) is not int or n < 0 for n in lease.stamp)):
+            raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
+        scope = _scope(self.owner_home, 'workflow', record.get('asset_id'), record.get('run_id'))
+        try:
+            parent = open_directory_beneath(scope.root, scope.parts, require_dir_fd=True)
+        except FileNotFoundError:
+            return False
+        try:
+            current = _claim(scope, parent)
+            return current is not None and current.stamp == lease.stamp and current.record == record
+        finally:
+            os.close(parent)
+
+    # LLM: 调用方持非阻塞运行锁及资产 gate；只有彻底缺证明、准确叶、死亡身份与无未结工作可恢复。
+    # 函数用途: 为创建后尚未绑定就退出的原代次补写可释放证明，不启动回调。
+    def _recover_bootstrap_claim(self, lease):
+        data = self._read(lease.record['run_id'], 'run.json')
+        if 'concurrency_claim' in data:
+            return
+        self._release_unbound_claim(data, lease)
+
+    # LLM: 前代必须已由严格 reader 确认 released；只能结清另一准确死亡新代，不覆盖任何旧未决责任。
+    # 函数用途: 恢复已完成运行续跑在新代绑定前退出的交接窗口。
+    def _recover_released_bootstrap_claim(self, lease):
+        data = self._read(lease.record['run_id'], 'run.json')
+        previous = data.get('concurrency_claim')
+        if not isinstance(previous, dict) or previous.get('phase') != 'released':
+            return
+        old = self._previous_claim_lease(data, lease)
+        if old == lease or self._claim_leaf_holds(old):
+            return
+        self._release_unbound_claim(data, lease)
+
+    # LLM: 当前run/asset先锚定，再允许严格reader按旧租约取数；外来合法proof不能借另一个run通过。
+    # 函数用途: 从当前规范账本取得并核验同一运行的旧租约，不产生任何写入。
+    def _previous_claim_lease(self, data, lease):
+        from .concurrency_policy import _Lease
+        proof = data.get('concurrency_claim')
+        record = proof.get('record') if isinstance(proof, dict) else None
+        if (data.get('workflow_run_id') != lease.record.get('run_id')
+                or data.get('workflow_id') != lease.record.get('asset_id') or not isinstance(record, dict)
+                or record.get('run_id') != data['workflow_run_id']
+                or record.get('asset_id') != data['workflow_id']):
+            raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
+        try:
+            old = _Lease(record, tuple(proof['stamp']))
+            self._concurrency_claim(old)
+        except (KeyError, TypeError) as exc:
+            raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH') from exc
+        return old
+
+    # LLM: 两种 bootstrap 分支共用准确叶、身份与双快照义务核验，构造规则与绑定失败清理一致。
+    # 函数用途: 为已证未启动或结清的死亡新代持久化待释放证明。
+    def _release_unbound_claim(self, data, lease):
+        if (data.get('workflow_run_id') != lease.record.get('run_id')
+                or data.get('workflow_id') != lease.record.get('asset_id') or not self._claim_leaf_holds(lease)):
+            raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
+        from .concurrency_policy import _identity_live
+        if _identity_live(lease.record.get('identity')) is not False:
+            return
+        # 步骤独立叶与 run.json 任一仍记未结责任，都不能靠另一份前像覆盖来放行。
+        if not all(_unstarted_or_settled(record) for record in (
+                _decode_run(data), self.load_run(lease.record['run_id']))):
+            return
+        data['concurrency_claim'] = {'schema': 'workflow-concurrency-lifecycle.v1',
+            'record': payload(lease.record), 'stamp': list(lease.stamp), 'phase': 'release_pending'}
+        _write_json(self.owner_home, ('data', 'workflow_runs', lease.record['run_id'], 'run.json'), data)
+
+    # LLM: 新绑定和失败清理都先锚定并严格核验已有证明；released也不能借外来记录跳过核验。
+    # 函数用途: 核验同运行前代，在旧叶已消失或换代后以一次重试收敛原 release_pending。
+    def _settle_previous_release(self, data, lease):
+        if 'concurrency_claim' not in data:
+            return data
+        old = self._previous_claim_lease(data, lease)
+        previous = data.get('concurrency_claim')
+        if previous['phase'] != 'release_pending':
+            return data
+        if self._claim_leaf_holds(old):
+            return data
+        for attempt in range(2):
+            try:
+                self._ack_concurrency_release(old)
+                break
+            except OSError:
+                if attempt:
+                    raise
+        return self._read(old.record['run_id'], 'run.json')
+
     # LLM: 只在原run锁内绑定同Owner/资产/租约；callback身份来自本机原语，恢复不沿用老进程身份。
     # 函数用途: 将准确占位和当前回调进程写入原运行，不改变业务版本或执行结果。
     def _bind_concurrency_claim(self, lease):
         """在执行前将准确 nonce/文件身份附到原账本，不授予新的执行权限。"""
         run_id = lease.record['run_id']
         with self._lock(run_id):
-            data = self._read(run_id, 'run.json')
+            data = self._settle_previous_release(self._read(run_id, 'run.json'), lease)
             previous = data.get('concurrency_claim')
             if data.get('workflow_run_id') != run_id or data.get('workflow_id') != lease.record.get('asset_id'):
                 raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
@@ -362,7 +471,7 @@ class WorkflowRunStore:
     def _abort_concurrency_binding(self, lease):
         run_id = lease.record['run_id']
         with self.execution_lock(run_id):
-            data = self._read(run_id, 'run.json')
+            data = self._settle_previous_release(self._read(run_id, 'run.json'), lease)
             if data.get('workflow_run_id') != run_id or data.get('workflow_id') != lease.record.get('asset_id'):
                 raise ValueError('WORKFLOW_CONCURRENCY_CLAIM_MISMATCH')
             previous = data.get('concurrency_claim')
@@ -400,6 +509,9 @@ class WorkflowRunStore:
     def _concurrency_claim_phase(self, lease, *, recover_exited=False):
         # 准入门不能等待正持运行锁的回调，否则等待者无法交还回调所等的事件。
         with self.execution_lock(lease.record['run_id']):
+            if recover_exited:
+                self._recover_released_bootstrap_claim(lease)
+                self._recover_bootstrap_claim(lease)
             data, proof = self._concurrency_claim(lease)
             if recover_exited and proof['phase'] in ('executing', 'retained'):
                 from .concurrency_policy import _identity_live
@@ -413,11 +525,15 @@ class WorkflowRunStore:
                         _write_json(self.owner_home, ('data', 'workflow_runs', lease.record['run_id'], 'run.json'), data)
             return proof['phase']
 
+    # LLM: ACK可在替换后报错重放；已确认同代不重复写，不接受其它阶段或不同租约。
+    # 函数用途: 幂等确认已不再持叶的准确释放代次。
     def _ack_concurrency_release(self, lease):
         """准确占位已不在当前叶后才确认；未确认的证明继续保存在原 run。"""
         run_id = lease.record['run_id']
         with self._lock(run_id):
             data, proof = self._concurrency_claim(lease)
+            if proof['phase'] == 'released':
+                return
             if proof['phase'] != 'release_pending':
                 raise ValueError('WORKFLOW_CONCURRENCY_RELEASE_UNCONFIRMED')
             proof['phase'] = 'released'
@@ -468,18 +584,49 @@ class WorkflowRunStore:
         with self._lock(workflow_run_id, execution=True):
             yield
 
-    # LLM: 返回最近运行，过滤条件只读明确字段；损坏记录不静默吞掉。
-    # 函数用途: 按工作流、状态和条数查询运行历史。
+    # LLM: 索引只选候选，run.json验证事实；迁移每次只修一批，余集精确合并但不整批修复。
+    # 函数用途: 按工作流、状态和条数查询有界运行页，不打开独立步骤叶。
     def list_runs(self, workflow_id=None, status=None, limit=50):
         if not isinstance(limit, int) or limit < 0:
             raise ValueError('limit 必须为非负整数')
         if limit == 0:
             return []
-        records = []
-        for name in list_dir_names_beneath(self.owner_home, ('data', 'workflow_runs')):
+        from .run_list_index import RunListIndex
+        index = RunListIndex(self.owner_home)
+        index.replay(self)
+        index.backfill(self)
+        # 先固定余集，再取索引候选；并发迁移只能产生可去重的交集，不能产生遗漏缝隙。
+        legacy = index.legacy_ids()
+        records, seen, after = [], set(), None
+        while len(records) < limit:
+            candidates = index.page(workflow_id, status, after=after, limit=limit + 1)
+            if not candidates:
+                break
+            for name, sort_time in candidates:
+                after = (sort_time, name)
+                with self._lock(name):
+                    record = _decode_run(self._read(name, 'run.json'))
+                if record.workflow_run_id != name:
+                    raise ValueError('运行身份与目录不匹配')
+                if name not in seen and (workflow_id is None or record.workflow_id == workflow_id) and (
+                        status is None or record.status == status):
+                    records.append(record)
+                    seen.add(name)
+                    if len(records) == limit:
+                        break
+            if len(candidates) < limit + 1:
+                break
+        # 只有尚未迁移的旧目录需要读余集；每次 backfill 单调缩小它，新运行不进入此队列。
+        for name in legacy:
+            if name in seen:
+                continue
             with self._lock(name):
-                if read_text_beneath(self.owner_home, ('data', 'workflow_runs', name, 'run.json')) is not None:
-                    records.append(self.load_run(name))
-        records = [r for r in records if (workflow_id is None or r.workflow_id == workflow_id)
-                   and (status is None or r.status == status)]
-        return sorted(records, key=lambda r: r.started_at, reverse=True)[:limit]
+                raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', name, 'run.json'))
+                if raw is None:
+                    continue
+                record = _decode_run(json.loads(raw))
+            if record.workflow_run_id != name:
+                raise ValueError('运行身份与目录不匹配')
+            if (workflow_id is None or record.workflow_id == workflow_id) and (status is None or record.status == status):
+                records.append(record)
+        return sorted(records, key=lambda r: (-r.started_at, r.workflow_run_id))[:limit]
