@@ -1,7 +1,9 @@
 # Real-run review data model
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from ..common.bounded_walk import bounded_walk
 
 
 @dataclass(frozen=True)
@@ -30,7 +32,11 @@ class RealRunRecord:
     approval_anomaly: bool = False
     invalid_state_transition: bool = False
     context_contract_lost: bool = False
+    candidate_coverage_incomplete: bool = field(default=False, kw_only=True)
+    candidate_coverage: dict[str, object] = field(default_factory=dict, kw_only=True)
 
+    # LLM: 候选覆盖缺口随真实运行记录输出，不能在序列化时丢失不确定结论。
+    # 函数用途: 输出一次运行的分类事实与扫描覆盖信息。
     def to_dict(self) -> dict[str, object]:
         return {
             "run_id": self.run_id,
@@ -57,6 +63,8 @@ class RealRunRecord:
             "approval_anomaly": self.approval_anomaly,
             "invalid_state_transition": self.invalid_state_transition,
             "context_contract_lost": self.context_contract_lost,
+            "candidate_coverage_incomplete": self.candidate_coverage_incomplete,
+            "candidate_coverage": dict(self.candidate_coverage),
         }
 
 
@@ -184,6 +192,8 @@ class CollectedFacts:
     codes: tuple[str, ...]
     refs: tuple[str, ...]
     ok_values: tuple[bool, ...]
+    incomplete: bool = field(default=False, kw_only=True)
+    coverage: dict[str, object] = field(default_factory=dict, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -205,11 +215,14 @@ def review_scan_limits() -> ReviewScanLimits:
     return ReviewScanLimits(max_report_bytes=_REVIEW_MAX_REPORT_BYTES, max_log_bytes=_REVIEW_MAX_LOG_BYTES)
 
 
+# LLM: 保留 JSON 事实，同时携带候选遍历覆盖；不从部分成功推断全量通过。
+# 函数用途: 读取有界候选中的结构化报告。
 def json_facts(root: Path, *, max_report_bytes: int) -> CollectedFacts:
     codes: list[str] = []
     refs: list[str] = []
     ok_values: list[bool] = []
-    for path in _candidate_json_files(root, max_report_bytes=max_report_bytes):
+    coverage: dict[str, object] = {}
+    for path in _candidate_json_files(root, max_report_bytes=max_report_bytes, coverage=coverage):
         payload = _read_json(path)
         if payload is None:
             continue
@@ -223,13 +236,17 @@ def json_facts(root: Path, *, max_report_bytes: int) -> CollectedFacts:
         codes=_ordered_unique(codes),
         refs=tuple(refs),
         ok_values=tuple(ok_values),
+        incomplete=bool(coverage.get("truncated")), coverage=coverage,
     )
 
 
+# LLM: 日志内容规则不变，遍历覆盖独立于提取出的错误码。
+# 函数用途: 从有界日志候选中提取已有失败标记。
 def marker_facts(root: Path, *, max_log_bytes: int) -> CollectedFacts:
     codes: list[str] = []
     refs: list[str] = []
-    for path in _candidate_log_files(root):
+    coverage: dict[str, object] = {}
+    for path in _candidate_log_files(root, coverage=coverage):
         if not _size_allowed(path, max_log_bytes):
             continue
         content = path.read_text(encoding="utf-8", errors="replace")
@@ -237,20 +254,31 @@ def marker_facts(root: Path, *, max_log_bytes: int) -> CollectedFacts:
         if path_codes:
             refs.append(_rel(path, root))
             codes.extend(path_codes)
-    return CollectedFacts(codes=_ordered_unique(codes), refs=tuple(refs), ok_values=())
+    return CollectedFacts(codes=_ordered_unique(codes), refs=tuple(refs), ok_values=(),
+                          incomplete=bool(coverage.get("truncated")), coverage=coverage)
 
 
-def _candidate_json_files(root: Path, *, max_report_bytes: int) -> tuple[Path, ...]:
+# LLM: 默认只排除明确不纳入结果的目录，不默认排除 Library/node_modules。
+# 函数用途: 返回预算内的报告候选，并交回覆盖事实。
+def _candidate_json_files(root: Path, *, max_report_bytes: int,
+                          coverage: dict[str, object] | None = None) -> tuple[Path, ...]:
+    result = bounded_walk(root, include=lambda entry: entry.name.endswith(".json") and entry.is_file(follow_symlinks=False))
     paths = [
-        path
-        for path in root.rglob("*.json")
+        path for path in result.paths
         if any(part in path.name for part in _REPORT_NAME_PARTS) and _size_allowed(path, max_report_bytes)
     ]
+    if coverage is not None:
+        coverage.update(result.coverage, truncated=result.truncated)
     return tuple(sorted(paths))
 
 
-def _candidate_log_files(root: Path) -> tuple[Path, ...]:
-    return tuple(sorted(path for path in root.rglob("*") if path.is_file() and path.name in _LOG_NAMES))
+# LLM: 只读日志候选使用统一预算，不先全盘枚举再切片。
+# 函数用途: 枚举预算内已知日志名并传递截断标记。
+def _candidate_log_files(root: Path, *, coverage: dict[str, object] | None = None) -> tuple[Path, ...]:
+    result = bounded_walk(root, include=lambda entry: entry.name in _LOG_NAMES and entry.is_file(follow_symlinks=False))
+    if coverage is not None:
+        coverage.update(result.coverage, truncated=result.truncated)
+    return tuple(sorted(result.paths))
 
 
 def _read_json(path: Path) -> Any | None:
@@ -422,6 +450,8 @@ def review_real_run_tree(
     )
 
 
+# LLM: 复盘候选不完整时只能保留已证失败，不能宣称整体通过。
+# 函数用途: 把一次运行的有界报告、日志和任务目录事实汇总为复盘记录。
 def review_real_run_directory(
     run_dir: Path,
     *,
@@ -435,7 +465,11 @@ def review_real_run_directory(
     codes = _ordered_unique(json_report_facts.codes + marker_report_facts.codes)
     tags = _tags_for_codes(codes)
     status = _final_status(json_report_facts)
-    task_types = _task_types(root)
+    task_coverage: dict[str, object] = {}
+    task_types = _task_types(root, coverage=task_coverage)
+    incomplete = json_report_facts.incomplete or marker_report_facts.incomplete or bool(task_coverage.get("truncated"))
+    if incomplete and status == "PASSED":
+        status = "UNKNOWN"
     first_code = codes[0] if codes else ""
     return RealRunRecord(
         run_id=root.name,
@@ -462,6 +496,9 @@ def review_real_run_directory(
         approval_anomaly="approval_anomaly" in tags,
         invalid_state_transition="invalid_state_transition" in tags,
         context_contract_lost="context_contract_lost" in tags,
+        candidate_coverage_incomplete=incomplete,
+        candidate_coverage={"json": json_report_facts.coverage, "logs": marker_report_facts.coverage,
+                            "tasks": task_coverage},
     )
 
 
@@ -474,10 +511,12 @@ def cluster_real_run_failures(records: tuple[RealRunRecord, ...]) -> tuple[Failu
     return tuple(sorted(patterns, key=lambda item: (_priority_rank(item.priority), -item.count, item.tag)))
 
 
+# LLM: 已看到的失败仍可信，部分扫描中只有成功则不足以判 PASSED。
+# 函数用途: 根据结构化结果和扫描覆盖计算运行状态。
 def _final_status(facts: CollectedFacts) -> str:
     if any(value is False for value in facts.ok_values):
         return "FAILED"
-    if facts.ok_values and all(value is True for value in facts.ok_values):
+    if not facts.incomplete and facts.ok_values and all(value is True for value in facts.ok_values):
         return "PASSED"
     return "UNKNOWN"
 
@@ -490,11 +529,13 @@ def _tags_for_codes(codes: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(tags)
 
 
-def _task_types(root: Path) -> tuple[str, ...]:
-    values: list[str] = []
-    for path in root.rglob("tasks/*"):
-        if path.is_dir() and path.parent.name == "tasks":
-            values.append(path.name)
+# LLM: 任务目录分类也不能绕开候选扫描预算，目录名只用于既有展示分类。
+# 函数用途: 读取预算内 tasks 的直接子目录名称。
+def _task_types(root: Path, *, coverage: dict[str, object] | None = None) -> tuple[str, ...]:
+    result = bounded_walk(root, include=lambda entry: Path(entry.path).parent.name == "tasks" and entry.is_dir(follow_symlinks=False))
+    values = [path.name for path in result.paths]
+    if coverage is not None:
+        coverage.update(result.coverage, truncated=result.truncated)
     return _ordered_unique(values) or (root.name,)
 
 

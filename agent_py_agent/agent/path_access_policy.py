@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import platform
@@ -13,6 +14,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
+from typing import ClassVar
 from urllib.parse import urlsplit
 
 PATH_ACCESS_MODE_NORMAL = "normal"
@@ -212,27 +215,58 @@ class PathAccessPolicy:
     owner_scope_root: Path | None = None
     agent_home_root: Path | None = None
     host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True)
+    workspace_roots: tuple[Path, ...] = field(default=(), kw_only=True)
+    _workspace_warning_emitted: ClassVar[bool] = False
+    _workspace_warning_lock: ClassVar = Lock()
 
     # LLM: 配置读取只在构造处发生；配置切换应重建策略，不原地改变已在执行的调用。agent_home_root 同 from_values：拿得到宿主解析出
     #   的数据根（home_paths.root）就传进来，不传才退回环境变量。
-    # 函数用途: 从当前配置创建冻结路径策略。
+    # 函数用途: 冻结显式工作区及可信 owner 的 workspace；只影响危险根门，不签发 owner 墙外访问权。
     @classmethod
     def from_config(cls, config: object | None, *, agent_home_root: object = None,
                     owner_scope_root: object = None) -> PathAccessPolicy:
         root = _normalized_root(agent_home_root) if agent_home_root else _my_agent_home_root()
-        return cls.from_values(
+        configured = getattr(config, "workspace_root", "")
+        workspaces = [configured] if isinstance(configured, str) else list(configured or ())
+        owner = _normalized_root(owner_scope_root) if owner_scope_root else (
+            root / "owners" / "local" / "main" if root is not None else None)
+        if owner is not None:
+            workspaces.append(owner / "workspace")
+        policy = cls.from_values(
             mode=getattr(config, "path_access_mode", DEFAULT_PATH_ACCESS_MODE),
             dangerous_roots=getattr(config, "path_dangerous_roots", DEFAULT_DANGEROUS_PATH_ROOTS),
             agent_home_root=root, owner_scope_root=owner_scope_root,
             host_exclusive_roots=host_exclusive_paths(root, config) if root is not None else (),
+            workspace_roots=workspaces,
         )
+        policy._warn_workspace_under_dangerous_root()
+        return policy
+
+    # LLM: 构造时仅记录危险布局告警，不改变权限；进程内锁保护去重标志。
+    # 函数用途: 提醒工作区位于危险根下，且每个进程只提醒一次。
+    def _warn_workspace_under_dangerous_root(self) -> None:
+        """危险根下的工作区启动告警每进程仅一次；并发构造不重复刷日志，不改变权限结论。"""
+        with PathAccessPolicy._workspace_warning_lock:
+            if PathAccessPolicy._workspace_warning_emitted:
+                return
+            for workspace in self.workspace_roots:
+                for dangerous in self.dangerous_roots:
+                    if _is_relative_to(workspace, dangerous):
+                        PathAccessPolicy._workspace_warning_emitted = True
+                        logging.getLogger(__name__).warning(
+                            "PATH_WORKSPACE_UNDER_DANGEROUS_ROOT workspace_root=%s dangerous_root=%s",
+                            workspace, dangerous,
+                            extra={"code": "PATH_WORKSPACE_UNDER_DANGEROUS_ROOT",
+                                   "workspace_root": str(workspace), "dangerous_root": str(dangerous)},
+                        )
+                        return
 
     # LLM: 当前用户 home 过滤与数据根豁免必须由宿主计算一次；直接恢复协议字段不得再次应用此环境归一化。
     #   数据根的唯一权威是宿主启动时解析出的结果（home_paths：配置 my_agent_home 优先，其次环境变量），由构造处经
     #   agent_home_root 结构化传入（宿主 owner home 或写边界 canonical_owner_home_root 反推）；传了就不读进程环境变量。
     #   只有没有任何宿主事实时才按 owner 墙反推、再退回 MY_AGENT_HOME。两者不一致时（配置写了固定 home）若只看环境变量，
     #   H2/H3 的宿主文件判定会落到另一个目录上（9b 二审实测 Full Access 写进了 permissions.json 等）。
-    # 函数用途: 规范化模式和危险根，并固定 owner 及数据根事实。
+    # 函数用途: 规范化模式、危险根与工作区，并固定 owner 及数据根事实，工作区列表不能事后变更策略。
     @classmethod
     def from_values(
         cls,
@@ -242,6 +276,7 @@ class PathAccessPolicy:
         owner_scope_root: object = None,
         agent_home_root: object = None,
         host_exclusive_roots: Iterable[object] = (),
+        workspace_roots: Iterable[object] = (),
     ) -> PathAccessPolicy:
         normalized_mode = normalize_path_access_mode(mode)
         roots = tuple(_normalized_root(item) for item in (dangerous_roots or DEFAULT_DANGEROUS_PATH_ROOTS))
@@ -259,8 +294,9 @@ class PathAccessPolicy:
         if data_root is None:
             data_root = _home_root_from_owner_scope(scope) if scope else _my_agent_home_root()
         exclusive = tuple(dict.fromkeys(path for value in host_exclusive_roots if (path := _normalized_root(value)) is not None))
+        workspaces = tuple(dict.fromkeys(path for value in workspace_roots if (path := _normalized_root(value)) is not None))
         return cls(mode=normalized_mode, dangerous_roots=roots, owner_scope_root=scope, agent_home_root=data_root,
-                   host_exclusive_roots=exclusive)
+                   host_exclusive_roots=exclusive, workspace_roots=workspaces)
 
     # LLM: 宿主托管存储最先拒绝（PATH_HOST_MANAGED_STORE_BLOCKED，H2）；之后 owner 墙强于模式；模式放行后再拒宿主凭据
     #   （PATH_HOST_CREDENTIAL_BLOCKED，H3），所以原有拒绝码不变。只读构造时冻结的根，不受另一个会话或子进程环境影响。
@@ -327,7 +363,7 @@ class PathAccessPolicy:
         )
 
     # LLM: check 拆出的模式裁决，顺序不变：owner 墙 → full → normal（凭据文件名、数据根豁免、危险根）。
-    # 函数用途: 按 owner 墙和路径模式判断一个已解析路径是否可访问。
+    # 函数用途: 按 owner 墙和路径模式裁决；可信工作区仅跳过危险根，凭据及后续宿主保护保持原顺序。
     def _mode_decision(self, resolved: Path) -> PathAccessDecision:
         # owner 隔离是租户边界，不是普通安全模式。远程 owner 的文件可见面
         # 只有自己 home + shared；不仅是 .my-agent 里的其他目录，宿主其他位置也默认拒绝。
@@ -346,6 +382,12 @@ class PathAccessPolicy:
         # /root/.my-agent/.../output(agent 自己的产物目录)。豁免精确到 home 子树——/root/.ssh 等敏感
         # 目录不在 my-agent home 下,仍被 dangerous_roots 拦截,口子不扩大(resolve 已展开 .. 防逃逸)。
         if home_root is not None and _is_relative_to(resolved, home_root):
+            return PathAccessDecision(True)
+        # 两端均为 realpath：只允许严格子路径，根本身或包含危险根的宽工作区不能开洞；
+        # 目标 symlink 指向工作区外时不会匹配。这里只跳过下方危险根门，check 仍核宿主凭据。
+        if any(resolved != workspace and _is_relative_to(resolved, workspace)
+               and not any(_is_relative_to(dangerous, workspace) for dangerous in self.dangerous_roots)
+               for workspace in self.workspace_roots):
             return PathAccessDecision(True)
         for root in self.dangerous_roots:
             if _is_relative_to(resolved, root):
@@ -414,7 +456,7 @@ class PathAccessPolicy:
             return False
         return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
 
-    # LLM: 只有 owner 普通墙拒绝允许原明确授权根复核，跨 owner/控制面等拒绝不能覆盖；插件须传宿主冻结的 external_policy。
+    # LLM: 只有 owner 普通墙拒绝允许原明确授权根复核，跨 owner/控制面等拒绝不能覆盖；复核保留冻结工作区与宿主专属根。
     # 函数用途: 为核心文件工具和隔离插件统一检查已授权的墙外工作路径。
     def check_with_external_roots(
         self, resolved: Path, granted_external_roots: tuple[Path, ...],
@@ -426,7 +468,9 @@ class PathAccessPolicy:
         if not any(_is_relative_to(resolved, root) for root in granted_external_roots):
             return decision
         policy = external_policy or PathAccessPolicy.from_values(
-            mode=self.mode, dangerous_roots=self.dangerous_roots, agent_home_root=self.agent_home_root)
+            mode=self.mode, dangerous_roots=self.dangerous_roots, agent_home_root=self.agent_home_root,
+            host_exclusive_roots=self.host_exclusive_roots, workspace_roots=self.workspace_roots,
+        )
         return policy.check(resolved)
 
     # LLM: 在my-agent数据根内执行多租户owner级隔离裁决，仅放行当前owner私有子树与只读共享资源目录。

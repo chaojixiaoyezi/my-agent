@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.bounded_walk import bounded_walk
+
 _KIND_EXTENSIONS = {
     "csv": (".csv",),
     "docx": (".docx",),
@@ -45,8 +47,11 @@ class ArtifactLocatorResult:
     path: Path | None
     findings: list[dict[str, object]] = field(default_factory=list)
     candidates: list[str] = field(default_factory=list)
+    coverage: dict[str, object] = field(default_factory=dict, kw_only=True)
 
 
+# LLM: 显式路径不受候选检索影响；部分枚举不能证明无匹配或唯一匹配。
+# 函数用途: 定位产物，并在候选截断时交回不确定而不是误选首个文件。
 def locate_artifact(item: dict[str, Any], workspace_root: Path) -> ArtifactLocatorResult:
     workspace = Path(workspace_root).resolve(strict=False)
     if raw_path := _artifact_target_path(item):
@@ -58,7 +63,11 @@ def locate_artifact(item: dict[str, Any], workspace_root: Path) -> ArtifactLocat
     extensions = _extensions_for_item(item)
     if not extensions:
         return ArtifactLocatorResult(None, [_finding("ARTIFACT_LOCATOR_EXTENSION_MISSING", kind)])
-    candidates = _candidate_paths(item, workspace, extensions)
+    coverage: dict[str, object] = {}
+    candidates = _candidate_paths(item, workspace, extensions, coverage=coverage)
+    if coverage.get("truncated"):
+        return ArtifactLocatorResult(None, [_finding("ARTIFACT_LOCATOR_INCOMPLETE", kind, evidence=coverage)],
+                                     candidates=[_portable_ref(path, workspace) for path in candidates], coverage=coverage)
     if not candidates:
         return ArtifactLocatorResult(None, [_finding("ARTIFACT_LOCATOR_NO_MATCH", kind)])
     selected = _select_by_structured_hint(item, candidates)
@@ -89,26 +98,53 @@ def _artifact_target_path(item: dict[str, Any]) -> str:
     return str(item.get("preferred_path") or item.get("path") or "").strip()
 
 
-def _candidate_paths(item: dict[str, Any], workspace: Path, extensions: tuple[str, ...]) -> list[Path]:
+# LLM: 每个根独立有界，任意根截断后保留不完整事实，最新排序仅作用于观察子集。
+# 函数用途: 合并候选根并记录覆盖缺口。
+def _candidate_paths(item: dict[str, Any], workspace: Path, extensions: tuple[str, ...], *,
+                     coverage: dict[str, object] | None = None) -> list[Path]:
     candidates: list[Path] = []
+    scans: list[dict[str, object]] = []
     for root in _search_roots(item):
         root_path = _resolve_output_path(root, workspace)
-        candidates.extend(_candidate_paths_under_root(root_path, extensions, remaining=_MAX_ARTIFACT_CANDIDATE_COUNT - len(candidates)))
+        scan: dict[str, object] = {}
+        candidates.extend(_candidate_paths_under_root(root_path, extensions, remaining=_MAX_ARTIFACT_CANDIDATE_COUNT - len(candidates), coverage=scan))
+        scans.append(scan)
         if len(candidates) >= _MAX_ARTIFACT_CANDIDATE_COUNT:
             break
     candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+    if coverage is not None:
+        coverage.update(truncated=any(scan.get("truncated") for scan in scans), roots=scans)
     return candidates
 
 
-def _candidate_paths_under_root(root_path: Path | None, extensions: tuple[str, ...], *, remaining: int) -> list[Path]:
+class _ArtifactCandidateLimit(Exception):
+    """包含回调的局部早停，不冒充遍历预算已耗尽或覆盖完整。"""
+
+
+# LLM: include 回调达到结果上限即退出，scandir 上下文仍释放；截断不能证明唯一。
+# 函数用途: 保留命中早停，同时让无匹配检索受 entries/dirs/deadline 限制。
+def _candidate_paths_under_root(root_path: Path | None, extensions: tuple[str, ...], *, remaining: int,
+                                coverage: dict[str, object] | None = None) -> list[Path]:
     if remaining <= 0 or root_path is None or not root_path.exists() or not root_path.is_dir():
         return []
     candidates: list[Path] = []
-    for path in root_path.rglob("*"):
-        if len(candidates) >= remaining:
-            break
-        if path.is_file() and path.suffix.lower() in extensions:
-            candidates.append(path.resolve(strict=False))
+
+    # 命中上限即抛局部哨兵，避免先遍历整棵树；外层负责标记覆盖不完整。
+    def include(entry) -> bool:
+        if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in extensions:
+            candidates.append(Path(entry.path).resolve(strict=False))
+            if len(candidates) >= remaining:
+                raise _ArtifactCandidateLimit
+        return False
+
+    try:
+        result = bounded_walk(root_path, include=include)
+    except _ArtifactCandidateLimit:
+        if coverage is not None:
+            coverage.update(truncated=True, stop_reason="result_limit")
+    else:
+        if coverage is not None:
+            coverage.update(result.coverage, truncated=result.truncated)
     return candidates
 
 

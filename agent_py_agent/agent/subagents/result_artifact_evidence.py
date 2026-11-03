@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from ..artifacts.registry import ArtifactRegistration, register_artifact
+from ..common.bounded_walk import bounded_walk
 from ..model_visible_refs import has_placeholder_path_segment
 from ..runtime_errors import runtime_error_report
 from .evidence_packet_serializer import serialize_evidence_packet as _packet_payload
@@ -127,13 +128,18 @@ def _resolve_relative_artifact(task: SubAgentTask, path: Path) -> Path | None:
     return _resolve_by_suffix(path, artifact_suffix_roots(task))
 
 
+# LLM: 只在所有根完整遍历且恰好一个匹配时解析；截断与多匹配都返回不确定。
+# 函数用途: 在有界扫描内核实后缀唯一性，不把首个匹配冒充唯一产物。
 def _resolve_by_suffix(path: Path, roots: list[Path]) -> Path | None:
     parts = path.parts
     if not parts:
         return None
     matches: list[Path] = []
     for root in roots:
-        matches.extend(item for item in root.rglob(parts[-1]) if _path_has_suffix(item, parts))
+        result = bounded_walk(root, include=lambda entry: entry.name == parts[-1] and _path_has_suffix(Path(entry.path), parts))
+        if result.truncated:
+            return None
+        matches.extend(result.paths)
     unique = list(dict.fromkeys(matches))
     return unique[0] if len(unique) == 1 else None
 

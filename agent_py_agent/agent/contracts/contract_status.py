@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.bounded_walk import bounded_walk
 from ..common.value_parsing import text_value as _text
 
 # 参数减量第 3 批 E 组：合同状态扫描预算不再是配置项（原 contract_status_* 三项，值不变）；
@@ -26,11 +27,17 @@ class ContractStatusReport:
     by_code: dict[str, int]
     by_severity: dict[str, int]
     recent_findings: tuple[dict[str, object], ...]
+    incomplete: bool = field(default=False, kw_only=True)
+    coverage: dict[str, object] = field(default_factory=dict, kw_only=True)
 
+    # LLM: 零 finding 只在覆盖完整时才能表示通过，保留截断的不确定性。
+    # 函数用途: 判断本次合同扫描是否完整且没有发现问题。
     @property
     def ok(self) -> bool:
-        return self.finding_count == 0
+        return self.finding_count == 0 and not self.incomplete
 
+    # LLM: 保留原有统计字段，新增覆盖事实供 CLI 和上层验收使用。
+    # 函数用途: 把扫描统计和不完整标记转成可序列化报告。
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
@@ -42,6 +49,8 @@ class ContractStatusReport:
             "by_code": dict(self.by_code),
             "by_severity": dict(self.by_severity),
             "recent_findings": [dict(item) for item in self.recent_findings],
+            "incomplete": self.incomplete,
+            "coverage": dict(self.coverage),
         }
 
 
@@ -62,6 +71,8 @@ class ContractStatusScanRequest:
     max_file_bytes: int | None = None
 
 
+# LLM: 扫描只读且有界；无 finding 不代表截断后仍可声称完整通过。
+# 函数用途: 汇总合同问题并同时公开本次扫描的覆盖缺口。
 def summarize_contract_status(
     root: Path,
     request: ContractStatusScanRequest | None = None,
@@ -73,7 +84,8 @@ def summarize_contract_status(
     scanned = 0
     skipped = 0
     files_with_findings = 0
-    for path in _json_paths(base, max_files=resolved.max_files):
+    coverage: dict[str, object] = {}
+    for path in _json_paths(base, max_files=resolved.max_files, coverage=coverage):
         findings, was_skipped = _findings_from_file(path, resolved.max_file_bytes)
         if was_skipped:
             skipped += 1
@@ -92,6 +104,8 @@ def summarize_contract_status(
         by_code=dict(sorted(accumulator.by_code.items())),
         by_severity=dict(sorted(accumulator.by_severity.items())),
         recent_findings=tuple(accumulator.recent),
+        incomplete=bool(coverage.get("truncated")),
+        coverage=coverage,
     )
 
 
@@ -122,17 +136,23 @@ def _provided_or_default_int(value: int | None, default: object) -> int:
         return 0
 
 
-def _json_paths(root: Path, *, max_files: int) -> list[Path]:
+# LLM: 最新排序只针对有界候选；coverage 接收截断/选择上限，不改变旧 list 返回形状。
+# 函数用途: 在进入目录前剪枝，再选出本次预算内最近的 JSON。
+def _json_paths(root: Path, *, max_files: int, coverage: dict[str, object] | None = None) -> list[Path]:
+    if max_files <= 0:
+        if coverage is not None:
+            coverage.update(truncated=True, stop_reason="max_files", visited_entries=0, visited_dirs=0)
+        return []
     if root.is_file():
         return [root] if root.suffix.lower() == ".json" else []
     if not root.exists():
         return []
-    paths = [
-        path
-        for path in root.rglob("*.json")
-        if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts
-    ]
+    result = bounded_walk(root, include=lambda entry: entry.name.endswith(".json") and entry.is_file(follow_symlinks=False))
+    paths = list(result.paths)
     paths.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+    if coverage is not None:
+        coverage.update(result.coverage, truncated=result.truncated or len(paths) > max_files,
+                        selection_limited=len(paths) > max_files)
     return paths[:max(0, max_files)]
 
 
