@@ -6,7 +6,8 @@ import hashlib
 import json
 import logging
 import time
-from copy import deepcopy
+from contextlib import contextmanager
+from copy import copy, deepcopy
 from dataclasses import replace
 
 from .delivery_policy import (
@@ -193,7 +194,10 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
     from .execution import execution_run
 
     run = execution_run(delivery.agent, request)
-    if run is None or normalize_delivery(run.get("delivery"))["mode"] not in TARGET_DELIVERY_MODES:
+    # 普通wake仍由原单路sender处理；群thread偏好不能把它提升为调度告警。
+    if run is None:
+        return None
+    if normalize_delivery(run.get("delivery"))["mode"] not in TARGET_DELIVERY_MODES:
         topic = _topic_delivery(delivery, request, reconcile_only=options.get('frozen_retry') is not None)
         return (record_one(topic, request, context, content, **options)
             if topic is not delivery else None)
@@ -319,6 +323,141 @@ def _topic_delivery(delivery, request, *, reconcile_only=False):
         source=source, event_id=event_id, reconcile_only=reconcile_only))
 
 
+# LLM: 只观察本次原DeliveryService进入provider的事实，不修改共享registry或绕过其前置门。
+# 类用途: 给首发提供一个同授权、同能力的临时注册表视图。
+class _AlertDispatchRegistry:
+    # LLM: 旧组件事实必须一起核验，不能把本次零调用当成历史从未发送。
+    # 函数用途: 捕获原组件账并初始化派发观察。
+    def __init__(self, registry):
+        from ..delivery.registry import current_component_delivery
+
+        self._registry, self.dispatched = registry, False
+        state = current_component_delivery()
+        self.prior_receipts = state.snapshot() if state is not None else ()
+
+    # LLM: 能力、目标校验和配置仍由原registry负责。
+    # 函数用途: 透传非发送查询。
+    def __getattr__(self, name):
+        return getattr(self._registry, name)
+
+    # LLM: 不构造或替换provider，只在原解析结果外记录进入发送接口的时刻。
+    # 函数用途: 包装本次已解析适配器。
+    def adapter_for(self, channel):
+        adapter = self._registry.adapter_for(channel)
+        return _AlertDispatchAdapter(adapter, self,
+            tracks_components=self._registry.capabilities_for(channel).component_receipts) if adapter is not None else None
+
+
+# LLM: 包装原组件状态的发送边界，不新建账或替换persist；旧事实与宿主outbox仍由原state保存。
+# 类用途: 观察适配器承诺的before_send阶段。
+class _AlertComponentState:
+    # LLM: 只持同一次发送的原状态和内存观察器。
+    # 函数用途: 绑定组件状态的同权视图。
+    def __init__(self, state, observer):
+        self._state, self._observer = state, observer
+
+    # LLM: ensure/save/finish/snapshot及所有字段均使用原账和原sink。
+    # 函数用途: 透传原组件状态接口。
+    def __getattr__(self, name):
+        return getattr(self._state, name)
+
+    # LLM: before_send成功预记派发才算进入潜在发送；持久化失败前不伪造已派发。
+    # 函数用途: 记录适配器真正取得提供方发送许可的时刻。
+    def before_send(self, receipt, provider):
+        prepared = self._state.before_send(receipt, provider)
+        if prepared is not None:
+            self._observer.dispatched = True
+        return prepared
+
+
+# LLM: 发送参数和返回值原样交回已注册provider；旧适配器无组件契约时仍保守按入口判断。
+# 类用途: 观察真实provider发送边界。
+class _AlertDispatchAdapter:
+    # LLM: 仅registry显式承诺component_receipts时采用组件派发合同，不从类名或空回执猜测。
+    # 函数用途: 绑定原适配器、能力和本次观察器。
+    def __init__(self, adapter, observer, *, tracks_components):
+        self._adapter, self._observer, self._tracks_components = adapter, observer, tracks_components
+
+    # LLM: 不伪造未实现的能力或提供方lookup。
+    # 函数用途: 透传原适配器属性。
+    def __getattr__(self, name):
+        return getattr(self._adapter, name)
+
+    # LLM: 宿主outbox已经进入本次原state后才加观察，不提前注入state绕过host_delivery_store。
+    # 函数用途: 沿原组件发送门观察派发，旧适配器一进入发送仍保守未知。
+    @contextmanager
+    def _dispatch_scope(self):
+        from ..delivery.registry import component_delivery_scope, current_component_delivery
+
+        state = current_component_delivery()
+        if self._tracks_components and state is not None:
+            with component_delivery_scope(_AlertComponentState(state, self._observer)):
+                yield
+        else:
+            self._observer.dispatched = True
+            yield
+
+    # LLM: 原适配器仍负责正文格式、认证与请求；不把适配器准备失败当作消息已经发出。
+    # 函数用途: 观察主动正文发送。
+    def send_message(self, target, message):
+        with self._dispatch_scope():
+            return self._adapter.send_message(target, message)
+
+    # LLM: 回复沿原状态和原提供方，不另建发送出口。
+    # 函数用途: 观察原线程回复。
+    def finalize_response(self, target, handle, message):
+        with self._dispatch_scope():
+            return self._adapter.finalize_response(target, handle, message)
+
+    # LLM: 可选线程参数仅在原调用提供时传递，不扩大不支持thread的适配器协议。
+    # 函数用途: 观察冻结附件发送。
+    def send_attachment_content(self, target, content, *, idempotency_key, as_image=False,
+                                reply_to=None, reply_in_thread=None):
+        options = {} if reply_to is None and reply_in_thread is None else {
+            'reply_to': reply_to, 'reply_in_thread': reply_in_thread}
+        with self._dispatch_scope():
+            return self._adapter.send_attachment_content(target, content,
+                idempotency_key=idempotency_key, as_image=as_image, **options)
+
+
+# LLM: 只有本次原生sender零调用且旧账/当前回执也无发送事实才可释放；不透明sender失败仍保守未知。
+# 函数用途: 核对首发失败是否明确发生在provider派发前。
+def _topic_send_not_started(observer, receipt=None):
+    from ..delivery.registry import current_component_delivery
+
+    if observer is None or observer.dispatched:
+        return False
+    if receipt is not None and receipt.delivery_status in {'sent', 'unknown'}:
+        return False
+    state = current_component_delivery()
+    facts = (*observer.prior_receipts, *(state.snapshot() if state is not None else ()),
+        *getattr(receipt, 'component_receipts', ()))
+    for fact in facts:
+        row = fact if isinstance(fact, dict) else vars(fact)
+        if (row.get('first_dispatch_at') is not None or row.get('phase') in {'unknown', 'send_confirmed'}
+                or row.get('effect_outcome') in {'unknown', 'confirmed'}):
+            return False
+    return True
+
+
+# LLM: 沿唯一锚点账的原锁/nofollow写口释放当前首发预留；已确认根和其它派发身份不能被删除。
+# 函数用途: 让确定未发送的告警在下一次重试重新取得首发权。
+def _release_unsent_topic(owner_home, key, dispatch_key):
+    from ..common.json_io import locked_json_path
+    from . import alert_topic_anchors as anchors
+
+    root, lock = anchors._prepare(owner_home, key)
+    with locked_json_path(lock):
+        data = anchors._read(root)
+        row = data['anchors'].get(key, {})
+        if (row.get('state') not in {'pending', 'unknown'} or row.get('root_message_id')
+                or data.get('root_delivery_keys', {}).get(key) != dispatch_key):
+            return
+        del data['anchors'][key]
+        data.get('root_delivery_keys', {}).pop(key, None)
+        anchors._write(root, data)
+
+
 class _AlertTopicChannels:
     """一次告警的通道策略视图；网络和权限仍由原 sender 与 DeliveryService 执行。"""
 
@@ -361,17 +500,30 @@ class _AlertTopicChannels:
             provider_thread_id='', root_id='', parent_id='', idempotency_key='alert-topic:' + key)
             if first else replace(context, mode='reply', reply_to=row['root_message_id'], progress_handle='',
                 reply_policy='thread', provider_thread_id=row['thread_id'], root_id=row['root_message_id'], parent_id=''))
+        # 仅原生统一sender可提供可证明的零派发观察；不透明发送器不因空回执获得重发许可。
+        from ..delivery.service import DeliveryService
+
+        channels, observer = self._channels, None
+        if first and type(channels) is DeliveryService:
+            observer = _AlertDispatchRegistry(channels.registry)
+            channels = copy(channels)
+            channels.registry = observer
         try:
-            receipt = self._channels.deliver(routed, envelope)
+            receipt = channels.deliver(routed, envelope)
         except Exception:
             if first:
-                anchors.mark_unknown(home.owner_home_dir, key, now=now)
+                if _topic_send_not_started(observer):
+                    _release_unsent_topic(home.owner_home_dir, key, dispatch_key)
+                else:
+                    anchors.mark_unknown(home.owner_home_dir, key, now=now)
             raise
         if first:
             root_message_id = _confirmed_provider_root(receipt)
             if receipt.delivery_status == 'sent' and root_message_id:
                 row = anchors.mark_sent(home.owner_home_dir, key, root_message_id=root_message_id, thread_id='', now=now)
                 self._remember_seed(context, envelope, row)
+            elif _topic_send_not_started(observer, receipt):
+                _release_unsent_topic(home.owner_home_dir, key, dispatch_key)
             else:
                 anchors.mark_unknown(home.owner_home_dir, key, now=now)
         return receipt
