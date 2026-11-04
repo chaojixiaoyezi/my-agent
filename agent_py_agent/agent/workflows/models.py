@@ -95,12 +95,13 @@ class DeliveryIntent:
 class AnalysisContext(dict[str, Any]):
     # LLM: dict中不插入skill_details等保留元字段，保持旧outputs相等合同。
     # 函数用途: 复制前步、原始和映射输入、Skill正文及数据源。
-    def __init__(self, prior_outputs=None, run_inputs=None, step_inputs=None, skill_details=None, data_sources=None):
+    def __init__(self, prior_outputs=None, run_inputs=None, step_inputs=None, skill_details=None, data_sources=None, *, run_params=None):
         self.prior_outputs = payload({} if prior_outputs is None else prior_outputs)
         self.run_inputs = payload({} if run_inputs is None else run_inputs)
         self.step_inputs = payload({} if step_inputs is None else step_inputs)
         self.skill_details = payload([] if skill_details is None else skill_details)
         self.data_sources = payload({} if data_sources is None else data_sources)
+        self.run_params = payload({} if run_params is None else run_params)
         super().__init__(payload(self.prior_outputs))
         for values in (self.step_inputs, self.run_inputs):
             for key, value in values.items():
@@ -192,6 +193,8 @@ class StepExecutionRecord:
     error_code: str = ''
     error_message: str = ''
     escalation_result: dict[str, Any] = field(default_factory=dict)
+    batches: list[dict] = field(default_factory=list, kw_only=True)
+    batches_summary: dict = field(default_factory=dict, kw_only=True)
     needs_repair: bool = False
     description: str = field(default='', kw_only=True)
     next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
@@ -250,6 +253,7 @@ class WorkflowRunRecord:
     scope_revision: int = field(default=0, kw_only=True)
     revision: int = field(default=0, kw_only=True)
     progress_seq: int = field(default=0, kw_only=True)
+    definition_version: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # 这里只定义快照/版本合同；锁内比较与递增由 W3 的原 run_store 实现，不在 DTO 猜 CAS。

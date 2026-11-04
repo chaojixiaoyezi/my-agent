@@ -58,10 +58,14 @@ class WorkflowStepSpec(_Record):
     description: str = field(default='', kw_only=True)
     next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
     ui_position: dict[str, float] = field(default_factory=dict, kw_only=True)
+    foreach: dict | None = field(default=None, kw_only=True)
 
     # LLM: 资产层唯一校验步骤；Skill引用允许来源前缀，脚本目录ID仍严格，模式/策略/超时不静默修正。
     # 函数用途: 在构造或JSON恢复时拒绝非法工作流步骤。
     def __post_init__(self):
+        if self.foreach is not None:
+            from ..workflows.batching import validate_foreach
+            validate_foreach(self.foreach)
         if (not isinstance(self.ui_position, dict) or set(self.ui_position) - {'x', 'y'}
                 or any(type(number) not in (int, float) or not math.isfinite(number)
                        for number in self.ui_position.values())):
@@ -86,6 +90,8 @@ class WorkflowStepSpec(_Record):
         for key in ('description', 'next_step_ids', 'ui_position'):
             if not value[key]:
                 value.pop(key)
+        if value['foreach'] is None:
+            value.pop('foreach')
         return value
 
 
