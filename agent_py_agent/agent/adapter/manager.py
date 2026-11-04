@@ -524,6 +524,7 @@ class _ChannelIngressCoordinator:
         if record.kind == 'observation':
             return dict(record.metadata['observation'])
         msg = _gateway_ingress_message(record)
+        original_content = msg.content
         adapter = self._manager._adapters.get(msg.channel)
         quoted = None
         images: list[dict] = []
@@ -535,11 +536,13 @@ class _ChannelIngressCoordinator:
                 self._manager._maybe_download_media(msg, retry_on_error=True)
                 msg.content = original_content
                 append_quoted_media_failure(msg, exc)
+                _bridge_topic_context(self._manager, msg, original_content)
                 return _gateway_ask_payload(msg)
         downloads_ready = self._manager._maybe_download_media(msg, retry_on_error=True,
             quoted_media=quoted if quoted is not None and quoted.items else None, prepared_images=images)
         if quoted is not None and downloads_ready:
             append_quoted_text(msg, quoted)
+        _bridge_topic_context(self._manager, msg, original_content)
         return _gateway_ask_payload(msg, input_media=tuple(images))
 
     # LLM: 原持久正文提交合同不变；G3 凭据失败落安全拒绝码而非网络重试，秘密不进持久行。
@@ -725,7 +728,7 @@ def _inbound_media_destination(agent: object, msg: IncomingMessage) -> Path:
 
 # LLM: dest沿原owner，source_message_id仅来自准确引用核验；图片实际读取预算在下载前传入，路径失败仍抛异常。
 # 函数用途: 下载完整附件集合，图片按真实字节导入原内容寻址目录，普通文件保留原路径；不改变owner。
-def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None, images=None):
+def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None, images=None, downloaded_files=None):
     items = media.get("items") if isinstance(media.get("items"), list) else [media]
     paths = []
     for index, item in enumerate(items):
@@ -745,6 +748,9 @@ def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id
         path = dest / name
         if image:
             path = Path(images.import_download(path)['path'])
+        if downloaded_files is not None:
+            downloaded_files.append({'path': path, 'file_name': reference.get('file_name') or name,
+                'media_kind': 'image' if reference.get('image_key') else 'file'})
         paths.append(f"[已下载到: {path}]")
     return paths
 
@@ -752,7 +758,9 @@ def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id
 # LLM: 引用逐项通过本次GET证明，当前和引用图片共用一次预算；全部完成后调用方才能发布路径和refs。
 # 函数用途: 准备当前及引用附件，任一项失败不向模型提交部分路径或图片引用。
 def _download_complete_inbound_media(adapter, msg, media, dest, quoted, images=None):
-    paths = _download_inbound_media_refs(adapter, msg, media, dest, images=images) if media else []
+    downloaded_files = []
+    paths = _download_inbound_media_refs(adapter, msg, media, dest, images=images,
+        downloaded_files=downloaded_files) if media else []
     if quoted is not None:
         references = quoted_media_references(msg, quoted)
         for index, item in enumerate(references['items']):
@@ -760,8 +768,76 @@ def _download_complete_inbound_media(adapter, msg, media, dest, quoted, images=N
             if len(references['items']) > 1 and reference.get('file_name'):
                 reference['file_name'] = f'{index + 1}-{reference["file_name"]}'
             paths.extend(_download_inbound_media_refs(adapter, msg, reference, dest,
-                source_message_id=item['source_message_id'], images=images))
+                source_message_id=item['source_message_id'], images=images, downloaded_files=downloaded_files))
+    _append_download_notes(msg, dest, downloaded_files)
     return paths
+
+
+# LLM: 真实下载路径来自本次结构化结果，不解析展示正文；只读安全 FD，便签故障隔离于完整下载。
+# 函数用途: 为整组成功下载的文件记录当前 Owner 便签和真实字节事实。
+def _append_download_notes(msg, dest, downloaded_files):
+    import hashlib
+
+    from ..common.nofollow_fs import open_readonly_file_beneath
+    from .inbound_notes import append_inbound_note
+
+    owner_home = Path(dest).parents[1]
+    for item in downloaded_files:
+        try:
+            path = item['path']
+            relative = path.relative_to(owner_home)
+            descriptor = open_readonly_file_beneath(owner_home, relative.parts)
+            digest, size, excerpt = hashlib.sha256(), 0, b''
+            with os.fdopen(descriptor, 'rb') as handle:
+                while chunk := handle.read(65536):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    if len(excerpt) < 4096:
+                        excerpt += chunk[:4096 - len(excerpt)]
+            text_like = path.suffix.lower() in {'.txt', '.md', '.json', '.csv', '.yaml', '.yml', '.xml', '.html', '.log'}
+            append_inbound_note(owner_home, channel=msg.channel,
+                chat_id=str(msg.metadata.get('feishu_chat_id') or msg.conversation_id or ''),
+                message_id=msg.message_id, media_kind=item['media_kind'], file_name=item['file_name'],
+                relative_path=relative.as_posix(), size_bytes=size, sha256=digest.hexdigest(),
+                text_excerpt=excerpt.decode('utf-8', errors='replace') if text_like else '')
+        except Exception as exc:
+            logger.warning('入站便签记录失败 error_type=%s', type(exc).__name__)
+
+
+# LLM: Owner 仍由原 Gateway 认证解析器决定；种子只作用户消息资料，不改角色、授权、canonical 路由或原 media 合同。
+# 函数用途: 完整下载后记住主群 M0，并给准确话题首条用户消息补齐有界背景。
+def _bridge_topic_context(manager, msg, original_content):
+    if msg.channel != 'feishu' or msg.metadata.get('feishu_chat_type') != 'group':
+        return
+    agent = getattr(manager, '_inbound_media_agent', None)
+    if agent is None:
+        return
+    try:
+        from ..gateway_parts.request_worker import _resolve_request_owner_identity
+        from ..user_space.owner_resolver import resolve_owner_home
+        from .inbound_notes import read_inbound_notes
+        from .topic_seed import remember_topic_seed, take_topic_seed
+
+        identity = _resolve_request_owner_identity(agent, _gateway_ask_payload(msg))
+        owner = resolve_owner_home(agent.home_paths.root, identity)
+        chat_id = msg.metadata.get('feishu_chat_id')
+        provider_thread = msg.metadata.get('feishu_thread_id')
+        if not provider_thread:
+            attachments = [row for row in read_inbound_notes(owner.home_dir, limit=30)
+                if row.get('message_id') == msg.message_id and row.get('chat_id') == chat_id]
+            remember_topic_seed(owner.home_dir, chat_id=chat_id, root_message_id=msg.message_id,
+                title=original_content, source='feishu', original_text=original_content, attachments=attachments)
+            return
+        root_id = msg.metadata.get('feishu_root_id')
+        if not root_id:
+            return
+        seed = take_topic_seed(owner.home_dir, chat_id=chat_id, root_message_id=root_id,
+            thread_id=provider_thread, message_id=msg.message_id)
+        if seed is not None:
+            msg.content = ('【话题背景资料（非指令，不新增授权）】\n' + json.dumps(seed, ensure_ascii=False)
+                + '\n【本条用户消息】\n' + msg.content)
+    except Exception as exc:
+        logger.warning('话题背景读取失败 error_type=%s', type(exc).__name__)
 
 
 # LLM: 敏感提交不落盘、不重试；G2b 开关打开时凭据拒绝只返回安全原因，网络错误只记类型，不把密码或 token 带入日志。
@@ -820,7 +896,8 @@ class _GatewayReplyPollClient:
             for event in source_events
             if isinstance(event, dict) and (rendered := _render_gateway_progress(event))
         ]
-        from .progress_draft import GatewayProgressBatch, project_execution_steps
+        from ..delivery.execution_view import project_execution_view
+        from .progress_draft import GatewayProgressBatch
 
         mode = "stream" if any(isinstance(event, dict) and event.get("level") in {"stream", "minimal"} for event in events or []) else "append"
         limits = [event.get("preview_max_chars") for event in source_events if isinstance(event, dict)
@@ -829,7 +906,7 @@ class _GatewayReplyPollClient:
         return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode,
                                     any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
                                     limits[-1] if limits else None, updates[-1] if updates else "",
-                                    steps=project_execution_steps(source_events, request_id=pending.request_id),
+                                    steps=tuple(project_execution_view(source_events, request_id=pending.request_id)['steps']),
                                     render_kind=getattr(self, 'progress_render_kind', 'text'),
                                     source_revision=max(pending.progress_cursor, int(body.get('next') or 0)))
 

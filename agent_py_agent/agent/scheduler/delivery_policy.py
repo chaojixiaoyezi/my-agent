@@ -234,3 +234,13 @@ def creation_delivery(agent: object, source_thread_id: str, raw: object) -> dict
     if any(not supports_transcript_delivery(binding.channel) for binding in source.channel_bindings):
         return normalize_delivery({"mode": getattr(agent.config, "scheduler_im_default_delivery_mode", "local")})
     return normalize_delivery(None)
+
+
+# LLM: 仅决定已授权群路线的 thread 展示策略，不授予目标权限；单次 context 优先且不反写共享 config。
+# 函数用途: 读取当前用户本次告警的话题偏好。
+def alert_topic_enabled(agent, context):
+    if context.channel != 'feishu' or getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') != 'group':
+        return False
+    if context.reply_policy in {'thread', 'reference'}:
+        return context.reply_policy == 'thread'
+    return getattr(getattr(agent, 'config', None), 'im_topic_aggregation_enabled', False) is True

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from ..delivery.execution_view import bounded_text
+from ..delivery.execution_view import bounded_text, step_display_text
 
 # 比渠道30KB限制留余量，按ASCII转义后的保守JSON字节核对。
 MAX_CARD_JSON_BYTES = 28_000
@@ -83,6 +83,12 @@ def _step_element(step: Mapping) -> dict:
         parts.append(f"{key}={str(value).lower() if type(value) is bool else 'unknown'}")
     duration = step.get("duration_ms")
     parts.append(f"耗时 {duration}ms" if type(duration) is int and duration >= 0 else "耗时未知")
+    excerpt = step_display_text(step.get('result_excerpt'), max_chars=60)
+    if excerpt:
+        parts.append(excerpt)
+    batch_index, batch_total = step.get('batch_index'), step.get('batch_total')
+    if type(batch_index) is int and type(batch_total) is int and 0 <= batch_index <= batch_total and batch_total > 0:
+        parts.append(f'Batch {batch_index}/{batch_total}')
     reference = bounded_text(step.get("detail_ref"), max_bytes=160)
     if reference:
         parts.append(f"detail_ref={reference}")
