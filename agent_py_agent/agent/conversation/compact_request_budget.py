@@ -1,4 +1,5 @@
-# LLM: 摘要请求复用原缓存前缀和工具目录，但显式 none 禁止选择工具；本模块不执行工具或拥有 checkpoint 状态。
+"""摘要复用冻结前缀；工具响应只作失败数据，输出预算只作用于本次辅助调用。"""
+# LLM: 前台保留原工具与选择策略，闲置调用由宿主明确移除工具；本模块不执行工具或拥有 checkpoint 状态。
 # 分段沿原有界纠正和机械摘录，非分段仍保持原严格/普通截断规则；诊断只投影响应形状，不成为新的状态事实源。
 # 每次摘要请求遇到结构化瞬时错误（断流、限流、过载、首包/空闲超时）按主回合同一退避配置原地重发，见 _generate_auxiliary_with_retry。
 # 模块用途: 在当前窗口内发送只读摘要，超量时顺序分段保留完整源历史；失败日志不泄露原文或增加恢复请求。
@@ -10,15 +11,16 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import closing
+from copy import copy
 from dataclasses import dataclass, replace
 
-from ..agent_core.model.call_runtime import compact_summary_output_reserve_tokens
+from ..agent_core.model.call_runtime import compact_summary_output_reserve_tokens, max_output_tokens
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..backends.base import ModelResponse
 from ..backends.errors import ProviderContextWindowError
 from ..backends.request_content import text_messages_supported
 from ..memory_archive import estimate_tokens
-from ..prompting_parts.cache_layout import prompt_cache_layout
+from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
 from .auxiliary_model_call import (
     AuxiliaryModelCallRequest,
@@ -44,6 +46,49 @@ from .compact_message_source import (
 )
 from .compact_text_source import CompactTextSource
 from .input_media import InputMediaError
+
+# 压缩摘要单次输出的 token 上限；不改变共享后端或主请求的上限。
+COMPACT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
+
+
+# LLM: 小于上限的主请求预算不被抬高；未知主上限仍有明确的摘要上限。
+# 函数用途: 返回本次摘要的实际输出预留。
+def _compact_summary_output_tokens(agent: object) -> int:
+    normal = max_output_tokens(agent)
+    return min(normal, COMPACT_SUMMARY_MAX_OUTPUT_TOKENS) if normal > 0 else COMPACT_SUMMARY_MAX_OUTPUT_TOKENS
+
+
+# LLM: 只为本次调用替换后端快照，其余身份和账本读写仍交原 agent，不能丢失线程本地宿主绑定。
+# 类用途: 为辅助调用携带私有输出上限，不修改共享代理。
+class _CompactCallAgent:
+    # LLM: 只保存原代理及本次后端快照，不创建新的执行身份。
+    # 函数用途: 初始化本次摘要的只读后端视图。
+    def __init__(self, agent, backend):
+        object.__setattr__(self, '_agent', agent)
+        object.__setattr__(self, 'backend', backend)
+
+    # LLM: 保留原代理的动态线程属性、owner 及账本引用。
+    # 函数用途: 读取未覆盖的原代理属性。
+    def __getattr__(self, name):
+        return getattr(self._agent, name)
+
+    # LLM: 辅助调用创建或更新账本时仍写回同一个真实 agent。
+    # 函数用途: 防止模型用量变成本次临时视图的孤立状态。
+    def __setattr__(self, name, value):
+        setattr(self._agent, name, value)
+
+
+# LLM: 后端是浅快照，原传输资源与缓存配置保留；只改快照 max_tokens，绝不临时修改共享实例。
+# 函数用途: 在辅助调用入口附上可被现有后端直接消费的请求级输出上限。
+def _with_compact_output_cap(request: AuxiliaryModelCallRequest) -> AuxiliaryModelCallRequest:
+    cap = _compact_summary_output_tokens(request.agent)
+    normal = max_output_tokens(request.agent)
+    backend = getattr(request.agent, 'backend', None)
+    if backend is None or 0 < normal <= cap:
+        return request
+    capped = copy(backend)
+    capped.max_tokens = cap
+    return replace(request, agent=_CompactCallAgent(request.agent, capped))
 
 # LLM: Bounded repair budget for one source segment, driven by the typed response reason only.
 # 常量用途: 同一片段最多再纠正几次；1 + 该值就是单个片段允许的最大模型调用次数。
@@ -83,6 +128,7 @@ _SEGMENT_MERGE_INSTRUCTION = (
 # 函数用途: 算出当前模型一次摘要请求允许的输入 token 上限。
 def compact_summary_budget(agent: object) -> int:
     window = resolve_model_context_window_tokens(agent)
+    # 准入保留既有配置预留；它可保守大于本次实际的 4096 输出上限。
     return max(1, int(window * 0.8) - compact_summary_output_reserve_tokens(agent))
 
 
@@ -123,24 +169,26 @@ def generate_bounded_compact_response(
 ) -> object:
     if message_source is not None and request.messages is not None:
         raise ValueError('compact summary requires one message source')
-    if request.tools:
-        request = replace(request, tool_choice=ToolChoice.auto("compact_cache_surface"))
+    if request.tools and request.tool_choice is None:
+        # 后端对 None 本就发送 auto；只补等价的显式默认，不覆盖前台已选策略。
+        request = replace(request, tool_choice=ToolChoice.auto('compact_cache_surface'))
     budget = compact_summary_budget(request.agent)
     raise_if_compact_interrupted(interrupt_check)
     if vision_summary:
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
-    attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
+    attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source,
+                                     calibration=calibration)
     shared_prefix = message_source is not None and message_source.preserve_prefix
     single_budget = compact_cache_surface_budget(request.agent) if request.tools or shared_prefix else budget
     cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
-    result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source))
+    result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source, budget=single_budget))
               if cached_source is not None else None)
     if result is not None:
         if result.response is not None:
             return result.response
         attempt = replace(
             attempt,
-            budget=result.budget,
+            budget=min(budget, result.budget),
             tool_call_reply=result.tool_call_reply,
         )
     if message_source is not None and message_source.preserve_prefix:
@@ -216,6 +264,7 @@ class _CompactAttemptContext:
     message_source: CompactMessageSource | None
     retry: bool = False
     tool_call_reply: object | None = None
+    calibration: CompactRequestCalibration | None = None
 
 
 # LLM: Result separates usable text response from a rejected structured tool response retained only for old fallback behavior.
@@ -227,9 +276,8 @@ class _CompactAttemptResult:
     budget: int
 
 
-# LLM: Only explicit provider window errors shrink the segment budget; structured tool calls never execute.
-# 首次单次空正文仅原样补一次，不改缓存面或分段；第二次仍空沿原回退；截断/工具调用不借空正文路径额外重试。
-# 函数用途: 尝试缓存前缀请求、空正文有界补发和至多一次 none/no-tools 重试，保留取消与结构化响应语义。
+# LLM: 窗口错误才缩减预算；空正文及工具响应共用一次修复，不能叠加第三次完整请求。
+# 函数用途: 发送冻结前缀并拒绝工具响应，失败仍保留原始来源及取消语义。
 def _try_cached_compact_requests(
     request: AuxiliaryModelCallRequest,
     attempt: _CompactAttemptContext,
@@ -243,47 +291,31 @@ def _try_cached_compact_requests(
         if not _response_has_tool_calls(response):
             return _CompactAttemptResult(response, None, attempt.budget)
         compact_summary_response_outcome(response, request=request)
-        rejected_response = response
-        retry = _none_tool_compact_retry_request(request)
-        if _request_tokens(retry, attempt.message_source) > attempt.budget:
-            return _CompactAttemptResult(None, rejected_response, attempt.budget)
-        return _retry_without_compact_tools(retry, attempt)
+        # 无法在同一预算内修复，交上层原空正文回退；工具块绝不进入执行链。
+        return _CompactAttemptResult(_verified_segment_response(response, ''), None, attempt.budget)
     except ProviderContextWindowError:
         # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
         return _CompactAttemptResult(None, rejected_response, max(1, attempt.budget // 2))
 
 
-# LLM: 仅有原text字段的单次响应在完整形状为EMPTY时原样补一次；不把无text的旧对象协议当空正文，纯分类不记其它形状，截断仍由原消费点诊断。
-# 函数用途: 一次空摘要先给同一冻结来源一次恢复机会，持续空答仍由原上层保守回退。
+# LLM: EMPTY 原样补一次，TOOL_CALL 只在最后指令追加纠正；两者共用单次修复预算，计量沿冻结校准。
+# 函数用途: 不改工具、system 和历史前缀，给不可用摘要一次有界恢复机会。
 def _generate_cached_summary_response(request, attempt):
     response = _generate_materialized_response(request, attempt.message_source)
     raise_if_compact_interrupted(attempt.interrupt_check)
     if getattr(response, "text", None) is None:
         return response
     _text, reason, _shape = _compact_summary_response_facts(response, reject_truncated=True)
-    if reason == "EMPTY":
+    if reason in {"EMPTY", "TOOL_CALL"}:
         compact_summary_response_outcome(response, request=request)
         raise_if_compact_interrupted(attempt.interrupt_check)
-        response = _generate_materialized_response(request, attempt.message_source)
+        retry = _none_tool_compact_retry_request(request) if reason == 'TOOL_CALL' else request
+        budget = _SurfaceBudget(attempt.budget, attempt.calibration)
+        if budget.measure(_request_tokens(retry, attempt.message_source)) > budget.tokens:
+            return response
+        response = _generate_materialized_response(retry, attempt.message_source)
         raise_if_compact_interrupted(attempt.interrupt_check)
     return response
-
-
-# LLM: The none request preserves the same thread reasoning options; its structured calls remain data, never execution.
-# 函数用途: 执行唯一无工具重试，成功直接返回，否则保留 typed 失败回到已有分段策略。
-def _retry_without_compact_tools(
-    request: AuxiliaryModelCallRequest,
-    attempt: _CompactAttemptContext,
-) -> _CompactAttemptResult:
-    retry_attempt = replace(attempt, retry=True)
-    raise_if_compact_interrupted(retry_attempt.interrupt_check)
-    response = _generate_materialized_response(request, retry_attempt.message_source)
-    raise_if_compact_interrupted(retry_attempt.interrupt_check)
-    _raise_if_preserved_compact_truncation(response, request, retry_attempt)
-    if not _response_has_tool_calls(response):
-        return _CompactAttemptResult(response, None, attempt.budget)
-    compact_summary_response_outcome(response, request=request)
-    return _CompactAttemptResult(None, response, attempt.budget)
 
 
 # LLM: Complete-source candidates cannot silently accept a truncated provider result.
@@ -331,15 +363,14 @@ def _response_has_tool_calls(response: object) -> bool:
     )
 
 
-# LLM: 仅在 auto 请求返回结构化工具调用后构造一次降级请求；保留输入/线程档位，移除工具定义并明确 none。
-# 函数用途: 防止摘要模型执行工具，同时复用原请求内容重试一次，不让无效工具响应成为摘要。
+# LLM: 保留原工具、tool_choice、system 和消息；只向末尾追加无工具摘要指令，不破坏缓存前缀。
+# 函数用途: 用缓存安全的最终指令纠正工具响应，函数名保留供既有内部调用使用。
 def _none_tool_compact_retry_request(request: AuxiliaryModelCallRequest) -> AuxiliaryModelCallRequest:
-    return replace(
-        request,
-        tools=[],
-        tool_choice=ToolChoice.none("compact_summary_only"),
-        system_instruction=_SUMMARY_SYSTEM_INSTRUCTION,
-    )
+    instruction = _SEGMENT_REPAIR_INSTRUCTION['TOOL_CALL']
+    layout = prompt_cache_layout(request.prompt)
+    prompt = (CacheStructuredPrompt(layout.stable_prefix, f'{layout.volatile_suffix}\n\n{instruction}')
+              if layout is not None else f'{request.prompt}\n\n{instruction}')
+    return replace(request, prompt=prompt)
 
 
 # LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
@@ -390,6 +421,7 @@ def _generate_materialized_response(request, source):
 def _generate_auxiliary_with_retry(request: AuxiliaryModelCallRequest) -> object:
     from ..agent_core.provider_transient_auto_resume import run_with_provider_transient_auto_resume
 
+    request = _with_compact_output_cap(request)
     return run_with_provider_transient_auto_resume(lambda: generate_auxiliary_model_response(request))
 
 

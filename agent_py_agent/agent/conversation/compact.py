@@ -1,3 +1,4 @@
+"""会话压缩保持来源、候选与检查点分离，模型摘要前只选择一次历史分区。"""
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算模型用量，失败形状不含正文且不改变收口。
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
 # 联合候选绑定消息及工具分区，须满足原输入/输出门；备份收缩只用完整同源重测裁决，不以局部相减跳测；取消不提交、不计熔断。
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING
 from ..backends.request_content import compact_source_supported
 from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
+from ..tooling.runtime_contracts import ToolChoice
 from .channels import project_user_reply
 from .compact_calibration import CompactRequestCalibration, calibrated_compact_request_tokens
 from .compact_checkpoint import (
@@ -299,6 +301,8 @@ class _CompactSummaryCall:
     #   来源前缀据此发压缩项而不是占位文本（链式压缩、与主请求逐字一致）。
     provider_outcome: list[dict[str, object]] | None = None
     previous_provider_compaction: str = ""
+    # 闲置摘要没有热前缀，允许使用无工具请求；前台保持冻结的工具面。
+    idle_compact: bool = False
     # 主请求的校准事实：单次缓存面与服务端压缩的预算检查按它换算，不再用原始上界误判超预算（10-08 mc4 复盘）。
     calibration: CompactRequestCalibration | None = None
 
@@ -800,6 +804,32 @@ def _nontext_turn_start(rows: Sequence[MessageLogEntry], index: int) -> int:
 
 # LLM: 原生媒体或未知非文本块所在逻辑turn起的完整后缀必须保留；仅安全前缀进入原forced/auto分区与checkpoint覆盖。
 # 函数用途: 以地址分区尝试候选，立即释放超量候选；保留候选与自己的请求一起采用。
+# LLM: 只用宿主纯计量投影或同口径本地估算选区，预留摘要输出；不调用模型、不提交候选或改变历史。
+# 函数用途: 在摘要之前确定唯一切分点，优先保留能达到恢复目标的近期尾部。
+def _select_compact_partition(request, partitions, protected_suffix):
+    from .compact_request_budget import _compact_summary_output_tokens
+
+    if len(partitions) == 1:
+        return partitions[0]
+    reserve = _compact_summary_output_tokens(request.agent)
+    for compact_rows, ordinary_tail in partitions:
+        raise_if_compact_interrupted(request.interrupt_check)
+        tail = concatenate_message_rows((ordinary_tail, protected_suffix))
+        projection = project_compact_request(request.request_projector, ConversationCompactView(
+            request.thread.thread_id, request.thread.compact_generation + 1, '', tail, {}, {},
+            request.policy.trigger_tokens, True, measure_only=True,
+            retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
+            retained_ir_history=request.tool_source.retained_ir_history if request.tool_source is not None else None,
+        ))
+        tokens = (calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
+                  if projection is not None else _projected_context_tokens(request.agent, '', tail, request.current_prompt))
+        if tokens + reserve <= request.policy.recovery_target_tokens:
+            return compact_rows, ordinary_tail
+    return partitions[-1]
+
+
+# LLM: 分区在模型调用前冻结为一个候选；真实完整请求仍须通过原容量门、取消检查与 checkpoint CAS。
+# 函数用途: 对一次确定的历史分区生成并提交摘要，软目标未达到也不再次调用模型换区。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # LLM: 供应商施压后的重试必须一次替换全部已完成前缀；反复保护再压同一尾部只会产生检查点抖动，不能帮活动回合装下请求。
     # 普通阈值压缩仍保护有界的完整回合。
@@ -818,7 +848,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
             max_tail_tokens=request.policy.recent_tail_tokens,
         )
     )
-    partition_count = max(1, len(partitions))
+    partitions = (_select_compact_partition(request, partitions, protected_suffix),)
+    partition_count = 1
     trigger_fallback: _CompactCandidate | None = None
     rejected = _RejectedCandidates(request)
     provider_surface = _resolved_provider_surface(request)
@@ -1108,7 +1139,8 @@ def _build_compact_candidate(
             run_id=request.run_id,
             task_id=request.task_id,
             compact_generation=request.thread.compact_generation,
-            provider_surface=provider_surface,
+            provider_surface=(replace(provider_surface, transcript_prefix=None)
+                              if request.idle_compact and provider_surface is not None else provider_surface),
             interrupt_check=request.interrupt_check,
             tool_source_records=request.tool_source.source_records if request.tool_source is not None else (),
             tool_source_ir_history=request.tool_source.source_ir_history if request.tool_source is not None else (),
@@ -1122,6 +1154,7 @@ def _build_compact_candidate(
             provider_outcome=provider_outcome,
             previous_provider_compaction=previous_provider_compaction,
             calibration=request.calibration,
+            idle_compact=request.idle_compact,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -1600,7 +1633,7 @@ def _summarize_once(
                              if selected_call.media_policy != MEDIA_POLICY_OFF else None),
             previous_provider_compaction=selected_call.previous_provider_compaction,
         ))
-        provider_tools = (
+        provider_tools = [] if selected_call.idle_compact else (
             list(provider_surface.tools)
             if provider_surface.tools is not None
             else None
@@ -1622,6 +1655,7 @@ def _summarize_once(
         prompt=prompt,
         messages=None,
         tools=provider_tools,
+        tool_choice=ToolChoice.none('compact_idle') if selected_call.idle_compact else None,
         system_instruction=system_instruction,
         request_id=selected_call.request_id,
         run_id=selected_call.run_id,
@@ -1839,7 +1873,8 @@ def _conversation_summary_instruction(
     )
     return "\n".join(
         [
-            "You maintain a conversation summary for one user and one conversation thread.",
+            "Direct factual archival only: maintain a concise summary for one user and one conversation thread.",
+            "Do not continue the task, solve problems, or add meta commentary. Skip extended analysis; output facts directly.",
             row_location,
             "Read the supplied rows chronologically before writing. Summarize only supplied facts.",
             "Represent every distinct user request and every final assistant result, including completed",

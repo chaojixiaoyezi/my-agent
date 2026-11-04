@@ -6,13 +6,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import read_text_lines_cached
 from ..runtime_errors import runtime_error_report
+
+
+# LLM: 继承只使用宿主提供的完整 owner/home/request tuple；空值和类型错误都不能形成相同身份。
+# 函数用途: 纯比较两次 Attempt 的产物继承作用域，不授予文件读取权限。
+def inheritance_scope_matches(previous: Mapping[str, object], current: Mapping[str, object]) -> bool:
+    return all(isinstance(previous.get(key), str) and bool(previous[key].strip())
+               and previous[key] == current.get(key) for key in ('owner_id', 'owner_home', 'request_id'))
 
 
 @dataclass

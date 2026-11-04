@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     NoFollowPathError,
     append_text_beneath,
@@ -27,7 +28,7 @@ from ..common.nofollow_fs import (
 )
 from ..runtime_errors import runtime_error_report
 from .registry_projection_cache import detached_payload, registry_projection, trusted_root_identity
-from .registry_reader import lookup_record_with_errors
+from .registry_reader import inheritance_scope_matches, lookup_record_with_errors
 
 SCHEMA_VERSION = "artifact_registry.v1"
 REGISTRY_RELATIVE_PATH = Path("data") / "artifacts" / "registry.jsonl"
@@ -111,6 +112,52 @@ class ArtifactRegistryLookupReport:
 
     record: ArtifactRegistryRecord | None = None
     errors: list[dict[str, Any]] = field(default_factory=list)
+
+
+# LLM: 身份由宿主传入，Attempt 编号只作来源标识；不从目录名、模型正文或注册内容推断 owner/request。
+# 类用途: 描述一次登记表继承的准确来源和目标。
+@dataclass(frozen=True)
+class ArtifactRegistryAttempt:
+    owner_home: Path
+    workspace_root: Path
+    owner_id: str
+    request_id: str
+    attempt_id: str
+
+
+# LLM: 该入口只继承登记表，不创建工具输出索引或新的读取权限；实际 Attempt 调用方须显式调用。
+# 函数用途: 为同一 owner/request 的下一次 Attempt 保留已登记产物。
+def inherit_artifact_registry(previous: ArtifactRegistryAttempt, current: ArtifactRegistryAttempt) -> int:
+    previous_home, current_home = _workspace_root_path(previous.owner_home), _workspace_root_path(current.owner_home)
+    if not inheritance_scope_matches(
+        {'owner_id': previous.owner_id, 'owner_home': str(previous_home), 'request_id': previous.request_id},
+        {'owner_id': current.owner_id, 'owner_home': str(current_home), 'request_id': current.request_id},
+    ):
+        return 0
+    if (not isinstance(previous.attempt_id, str) or not previous.attempt_id.strip()
+            or not isinstance(current.attempt_id, str) or not current.attempt_id.strip()
+            or previous.attempt_id == current.attempt_id):
+        return 0
+    source, target = _workspace_root_path(previous.workspace_root), _workspace_root_path(current.workspace_root)
+    source.relative_to(current_home)
+    target.relative_to(current_home)
+    if source == target:
+        return 0
+    report = latest_artifact_records_report(source)
+    if report.errors:
+        raise ValueError('artifact inheritance source registry is unreadable')
+    if not report.records:
+        return 0
+    # 来源 Attempt 应已退出；目标继承重试串行化，追加不重写或覆盖其已登记的新事实。
+    with locked_json_path(registry_path(target)):
+        current_report = latest_artifact_records_report(target)
+        if current_report.errors:
+            raise ValueError('artifact inheritance target registry is unreadable')
+        inherited = [record for key, record in report.records.items() if key not in current_report.records]
+        if inherited:
+            lines = ''.join(json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + '\n' for record in inherited)
+            append_text_beneath(target, tuple(REGISTRY_RELATIVE_PATH.parts), lines)
+        return len(inherited)
 
 
 def registry_path(workspace_root: str | Path) -> Path:

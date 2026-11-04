@@ -21,6 +21,7 @@ from agent_py_agent.agent.conversation.compact_guard import (
     ConversationCompactError,
     split_recent_complete_turns,
 )
+from agent_py_agent.agent.conversation.compact_message_source import CompactMessageSource
 from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.agent.conversation.native_history import canonical_native_messages_envelope
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
@@ -509,8 +510,9 @@ def _scripted(monkeypatch, replies):
     return calls
 
 
-def test_tool_call_reply_is_rewritten_through_the_text_segment_chain(monkeypatch, caplog):
-    # 可共享前缀的首发请求用 auto；结构化工具调用被作废，再用无工具/none 请求一次。
+# LLM: 结构化工具块是失败摘要，只在末尾指令纠正；不允许用冷工具面重复完整请求。
+# 函数用途: 验证两次请求的工具、选择策略、系统和历史完全一致。
+def test_tool_call_reply_repairs_without_changing_the_cached_prefix(monkeypatch, caplog):
     tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}], stop_reason="tool_use")
     calls = _scripted(monkeypatch, [tool_call, ModelResponse(text="分段重写的摘要", backend="fake")])
     request = replace(_request("记住蓝色项目，稍后继续"), request_id="req-1", thread_id="thread-1")
@@ -519,47 +521,66 @@ def test_tool_call_reply_is_rewritten_through_the_text_segment_chain(monkeypatch
 
     assert "分段重写的摘要" in result.text and "source_range" not in result.text
     assert calls[0].tools == [{"name": "read_file"}] and calls[0].tool_choice.mode == "auto"
-    assert len(calls) == 2 and calls[1].tools == [] and calls[1].tool_choice.mode == "none"
+    assert len(calls) == 2 and calls[1].tools == calls[0].tools
+    assert calls[1].tool_choice == calls[0].tool_choice
+    assert calls[1].system_instruction == calls[0].system_instruction
+    assert calls[1].messages == calls[0].messages == request.messages
+    assert calls[1].prompt.startswith(calls[0].prompt)
     shape = next(record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape"))
     assert (shape["reason"], shape["tool_use_count"], shape["stop_reason"]) == ("TOOL_CALL", 1, "tool_use")
     assert (shape["request_id"], shape["thread_id"], shape["purpose"]) == ("req-1", "thread-1", "conversation_compact_summary")
     assert shape["logged_at"] > 0 and "蓝色项目" not in caplog.text
 
 
-def test_tool_call_reply_is_returned_when_the_source_cannot_be_segmented(monkeypatch):
+# LLM: 非文本原始来源保留不变，持续工具响应被丢弃，不执行工具或转为伪文字覆盖。
+# 函数用途: 验证带图来源只修复一次，并返回不可用的空摘要。
+def test_tool_call_reply_is_discarded_when_the_source_cannot_be_segmented(monkeypatch):
     tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
     calls = _scripted(monkeypatch, [tool_call])
     request = replace(_request("看图"), messages=[{"role": "user", "content": [
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}]}])
 
-    # 带图来源不能文本化分段；auto 首发与一次 none 重试均返回工具块后，交回末次无工具响应做原机械回退。
-    assert budget_module.generate_bounded_compact_response(request) is tool_call
+    result = budget_module.generate_bounded_compact_response(request)
+    assert result.text == '' and result.tool_use_blocks == []
     assert len(calls) == 2
     assert calls[0].tool_choice.mode == "auto"
-    assert calls[1].tool_choice.mode == "none" and calls[1].tools == []
+    assert calls[1].tool_choice == calls[0].tool_choice and calls[1].tools == calls[0].tools
+    assert calls[1].messages == request.messages == calls[0].messages
 
 
-def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_source(monkeypatch):
+# LLM: 严格来源的完整机械回退仍归上层；持续工具块不再启动额外冷分段链。
+# 函数用途: 拒绝无效工具摘要，且完整请求最多补发一次。
+def test_persistent_tool_reply_has_one_repair_and_no_segment_restart(monkeypatch):
     tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
     calls = _scripted(monkeypatch, [tool_call])
 
-    # 严格来源不接受降级摘录：分段链报 typed 错误时同样交回原回复，保留原机械回退与完整来源行为。
-    assert budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True) is tool_call
-    assert len(calls) == 2 + 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
+    result = budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True)
+    assert result.text == '' and result.tool_use_blocks == []
+    assert len(calls) == 2 and calls[1].messages == calls[0].messages
+    assert calls[1].tools == calls[0].tools and calls[1].tool_choice == calls[0].tool_choice
 
 
-def test_tool_call_fallback_does_not_hide_a_source_that_changed_during_segments(monkeypatch):
+# LLM: 真实可重放来源在第三次读取报告变化；修复预算计量不能吞掉这一 typed 错误。
+# 函数用途: 来源变化仍中断摘要，不拿旧工具响应冒充有效结果。
+def test_tool_call_repair_does_not_hide_a_changed_source(monkeypatch):
     tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}])
-    _scripted(monkeypatch, [tool_call])
+    calls = _scripted(monkeypatch, [tool_call])
+    request = _request('来源会变')
+    reads = []
 
-    def changed(*_args, **_kwargs):
-        raise ConversationCompactError("来源在分段期间变化", code="COMPACT_SOURCE_CHANGED")
+    # LLM: 只模拟来源自己的稳定性拒绝，不替换压缩决策或异常处理。
+    # 函数用途: 在修复前复读时报告来源已改变。
+    def changed():
+        reads.append(True)
+        if len(reads) >= 3:
+            raise ConversationCompactError('来源在修复期间变化', code='COMPACT_SOURCE_CHANGED')
+        yield from request.messages
 
-    monkeypatch.setattr(budget_module, "_summarize_segments", changed)
-    # 只有"不能文本化"和"严格来源不接受降级"可以退回原回复；来源变化必须上抛，不能拿旧回复掩盖。
     with pytest.raises(ConversationCompactError) as error:
-        budget_module.generate_bounded_compact_response(_request("来源会变"))
+        budget_module.generate_bounded_compact_response(replace(request, messages=None),
+                                                       message_source=CompactMessageSource(changed, preserve_prefix=True))
     assert error.value.code == "COMPACT_SOURCE_CHANGED"
+    assert len(calls) == 1
 
 
 _RETRY_WAIT = "agent_py_agent.agent.agent_core.provider_transient_auto_resume.wait_interruptibly"
