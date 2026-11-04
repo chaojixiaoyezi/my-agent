@@ -275,6 +275,9 @@ class CapabilityRouter:
 
         agent = getattr(self._skill_snapshot_provider, '__self__', None)
         params = getattr(agent, '_current_run_params', None)
+        if selected_skill_ids is None:
+            return self._render_public_method_index(context_window_tokens=context_window_tokens,
+                required_skill_ids=required_skill_ids, in_use_method_ids=in_use_method_ids, query=query)
         query = query or str(getattr(params, 'user_prompt', '') or '')
         skills = sorted(
             [card for card in self.cards(kinds={"skill", "script", "workflow"}) if card.kind == "skill"
@@ -324,6 +327,59 @@ class CapabilityRouter:
         if total_budget.cost(minimum_text) <= total_budget.limit < total_budget.cost(text):
             text = minimum_text
         return _enforce_skill_catalog_envelope(text, skills, packages, unavailable_text, selected_skill_ids, required_skill_ids)
+
+    # LLM: 公开技能与方法树只依赖库存；包沿原独立排序和用法，选中模式仍由原路径负责。
+    #   无资产时预留固定包分区，不借用本轮包的空余量，字符限额也按同一静态分区裁剪。
+    # 函数用途: 生成固定公开目录，无资产时沿用原技能行与2%预算而不受包在用标记挤压。
+    def _render_public_method_index(self, *, context_window_tokens=None, required_skill_ids=(),
+                                   in_use_method_ids=(), query=""):
+        from .method_tree import build_method_tree, render_method_catalog
+
+        ranks = {"workspace": 0, "owner": 1, "shared": 2, "builtin": 3}
+        skills = sorted([card for card in self.cards(kinds={"skill"})
+                         if card.metadata.get("recommended", True) and card.metadata.get("hidden") is not True],
+                        key=lambda card: (ranks.get(card.source, len(ranks)), card.name.casefold(),
+                                          str(card.metadata.get("stable_id") or "")))
+        agent = getattr(self._skill_snapshot_provider, '__self__', None)
+        params = getattr(agent, '_current_run_params', None)
+        package_query = query or str(getattr(params, 'user_prompt', '') or '')
+        attrs = getattr(params, 'task_attributes', None) or {}
+        packages = self.cards(kinds={"capability_package"})
+        baseline_packages = sorted(packages, key=lambda card: _package_priority(card, "", {}))
+        budget = _skill_metadata_budget(context_window_tokens)
+        total_budget = budget
+        unavailable = _render_unavailable_package_references(self._snapshot())
+        budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable + "\n\n" if unavailable else "")), budget.token_based)
+        package_budget, skill_budget = _public_metadata_partition(skills, baseline_packages, budget, required_skill_ids)
+        descriptors = _public_method_descriptors(self, skills)
+        tree = build_method_tree(descriptors)
+        has_methods = any(node["kind"] in {"workflow", "script"} for node in tree["nodes"].values()) or bool(tree["monitors"])
+        if has_methods:
+            skill_text = render_method_catalog(descriptors, skill_usage_instructions=_SKILL_USAGE_INSTRUCTIONS,
+                skill_header=_SKILL_METADATA_HEADER, bytes_per_token=_APPROX_BYTES_PER_TOKEN)["text"]
+        else:
+            skill_text = _render_public_skill_metadata(skills, skill_budget, required_skill_ids) if skills else ""
+        packages = using_method_cards(sorted(packages, key=lambda card: _package_priority(card, package_query, attrs)), in_use_method_ids)
+        package_text, _ = _render_package_metadata(packages, package_budget, None, (*required_skill_ids, *in_use_method_ids))
+        if not has_methods:
+            char_budget = _SkillMetadataBudget(max(0, _MAX_SKILL_METADATA_ENVELOPE_CHARS
+                - (len(unavailable) + 2 if unavailable else 0)), False)
+            package_chars, skill_chars = _public_metadata_partition(skills, baseline_packages, char_budget, required_skill_ids)
+            if len(package_text) > package_chars.limit:
+                package_text, _ = _render_package_metadata(packages, package_chars, None, (*required_skill_ids, *in_use_method_ids))
+            if len(skill_text) > skill_chars.limit:
+                skill_text = _render_public_skill_metadata(skills, skill_chars, required_skill_ids) if skills else ""
+        package_text = "\n\n".join(part for part in (unavailable, package_text) if part)
+        text = "\n\n".join(part for part in (package_text, skill_text) if part)
+        if has_methods:
+            return text
+        # 无固定方法仍沿原完整信封；在用包保留原必显，但不能顺带提升在用Skill。
+        required = (*required_skill_ids, *(card.metadata["stable_id"] for card in packages
+                                          if card.metadata.get("conversation_in_use")))
+        minimum = _minimum_metadata_index(skills, packages, total_budget, None, required, unavailable)
+        if total_budget.cost(minimum) <= total_budget.limit < total_budget.cost(text):
+            text = minimum
+        return _enforce_skill_catalog_envelope(text, skills, packages, unavailable, None, required)
 
     def search(
         self,
@@ -435,10 +491,15 @@ def from_skill_card(card: SkillCard) -> CapabilityCard:
     )
 
 
+# LLM: 绑定与可见性来自冻结entry；卡片身份和来源仍由授权条目覆盖，不预读正文。
+# 函数用途: 保留Skill原短卡，并把冻结refs传给公开方法树。
 def from_skill_snapshot_entry(entry: SkillSnapshotEntry) -> CapabilityCard:
     card = from_skill_card(entry.to_card())
     card.id = f"skill:{entry.stable_id}"
     card.path = ""
+    card.metadata = {**getattr(entry, "asset_metadata", {}), **card.metadata}
+    card.metadata["refs"] = getattr(entry, "refs", {})
+    card.metadata["source"] = entry.source
     card.metadata["stable_id"] = entry.stable_id
     card.metadata["content_sha256"] = entry.content_sha256
     card.metadata["recommended"] = entry.recommended
@@ -788,6 +849,23 @@ def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataB
     return _SkillMetadataBudget(_DEFAULT_SKILL_METADATA_MAX_CHARS, False)
 
 
+# LLM: 分区只由库存与固定预算决定；预留包在用指导的外壳，不让prompt或实际包费用改变Skill分区。
+# 函数用途: 为公开Skill回退和包目录划定独立预算，空包集合不占Skill额度。
+def _public_metadata_partition(skills, packages, budget, required):
+    if not packages:
+        return _SkillMetadataBudget(0, budget.token_based), budget
+    package_limit = max(1, budget.limit // 2) if skills else budget.limit
+    if skills:
+        skill_floor = _metadata_floor(skills, budget, [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS], required)
+        package_floor = _metadata_floor(packages, budget,
+            [*_PACKAGE_METADATA_HEADER, _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS, _IN_USE_PACKAGE_GUIDANCE], ())
+        separator = budget.cost("\n\n")
+        if skill_floor + package_floor + separator <= budget.limit:
+            package_limit = min(max(package_limit, package_floor), budget.limit - skill_floor - separator)
+    return (_SkillMetadataBudget(package_limit, budget.token_based),
+            _SkillMetadataBudget(max(0, budget.limit - package_limit - budget.cost("\n\n")), budget.token_based))
+
+
 # LLM: 包用package_id，Skill用skill_id；脚本/流程保留其真实ref和next_read，不能伪作Skill或增加授权。
 # 函数用途: 在同一预算行内展示准确方法入口，不读取或执行资产。
 def _skill_line(card: CapabilityCard, description: str) -> str:
@@ -1122,3 +1200,33 @@ def _chinese_ngrams(token: str) -> list[str]:
         for idx in range(0, max(len(token) - size + 1, 0)):
             ngrams.append(token[idx : idx + size])
     return ngrams
+
+
+# LLM: 有宿主绑定时只沿当前Owner的描述符列口；无宿主的静态卡仅作值投影，不猜磁盘根。
+# 函数用途: 为公开目录准备完整库存，保留隐藏组合资料用于徽标重定向。
+def _public_method_descriptors(router, skills):
+    from ..assets import skill_asset_id
+
+    snapshot = router._snapshot()
+    agent = getattr(router._skill_snapshot_provider, '__self__', None)
+    home = getattr(agent, 'home_paths', None)
+    if snapshot is not None and home is not None and getattr(home, 'owner_id', None) == snapshot.owner_id:
+        from .decision_candidates import method_descriptors_for_agent
+
+        visible_ids = {card.metadata.get("stable_id") for card in skills}
+        return [row for row in method_descriptors_for_agent(agent, skill_snapshot=snapshot)
+                if row.get("kind") != "skill" or row["metadata"].get("stable_id") in visible_ids]
+    else:
+        descriptors = []
+        for card in router.cards(kinds={'script', 'workflow', 'monitor'}):
+            metadata = dict(card.metadata)
+            descriptors.append({'kind': card.kind, 'id': metadata.get('asset_id') or card.id.rsplit(':', 1)[-1],
+                'name': card.name, 'summary': card.description, 'source_scope': card.source,
+                'enabled': metadata.get('enabled', True), 'refs': metadata.get('refs', {}), 'metadata': metadata,
+                'tags': metadata.get('tags', [])})
+    for card in skills:
+        metadata = dict(card.metadata)
+        descriptors.append({'kind': 'skill', 'id': metadata.get('asset_id') or skill_asset_id(card.name),
+            'name': card.name, 'summary': card.description, 'source_scope': card.source, 'metadata': metadata,
+            'refs': metadata.get('refs', {}), 'tags': metadata.get('tags', [])})
+    return descriptors

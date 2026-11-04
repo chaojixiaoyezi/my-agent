@@ -1,13 +1,14 @@
 # LLM: 逐轮 Skill 与能力包共用一个快照和引用合同；公开 Skill 与包内资源保持独立命名域，不能展平后再过滤。
 # 模块用途: 固定本轮可发现的方法身份，按原哈希和明确包代次读取，并为委派生成不扩权的子集。
-from __future__ import annotations
-
 """Immutable per-turn Skill catalog and guarded body reads."""
+
+from __future__ import annotations
 
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
@@ -82,6 +83,9 @@ class SkillSnapshotEntry:
     risk_level: str = "low"
     frozen_path: str = ""
     recommended: bool = True
+    refs: dict[str, object] = field(default_factory=dict, kw_only=True)
+    asset_metadata: dict[str, object] = field(default_factory=dict, kw_only=True)
+    asset_fields: dict[str, object] = field(default_factory=dict, kw_only=True, repr=False)
 
     # LLM: 与原 skill_snapshot_refs 四字段一致；不把展示文案或文件路径当权限来源。
     # 函数用途: 返回可保存到现有任务和授权记录的正文引用。
@@ -108,6 +112,8 @@ class SkillSnapshotEntry:
             enabled=self.enabled,
         )
 
+    # LLM: refs/metadata是冻结投影的独立容器，输出副本不能改写entry；路径仍须显式宿主选择。
+    # 函数用途: 序列化公开元数据与绑定，不附正文或固定版本私有路径。
     def to_dict(self, *, include_path: bool = False) -> dict[str, object]:
         payload: dict[str, object] = {
             "stable_id": self.stable_id,
@@ -117,6 +123,8 @@ class SkillSnapshotEntry:
             "category": self.category,
             "enabled": self.enabled,
             "content_sha256": self.content_sha256,
+            "refs": deepcopy(self.refs),
+            "asset_metadata": deepcopy(self.asset_metadata),
         }
         if include_path:
             payload["path"] = self.path
@@ -133,6 +141,33 @@ class SkillSnapshot:
     owner_id: str
     workspace_root: str
     packages: tuple[CapabilityPackageSnapshot, ...] = ()
+
+    # LLM: 只冻结现有enabled条目的绑定，不扫描根；已有refs的替换/委派复用冻结值，不重新读取正文。
+    # 函数用途: 为原服务构造口补齐绑定投影，读取失败隔离为禁用条目且保留结构化错误。
+    def __post_init__(self) -> None:
+        entries, errors = [], list(self.errors)
+        for entry in self.entries:
+            if entry.refs or not entry.enabled or not entry.path:
+                entries.append(entry)
+                continue
+            try:
+                from ..assets.skill_adapter import _freeze_skill_asset_metadata
+
+                refs, metadata, asset_fields = _freeze_skill_asset_metadata(entry)
+            except InterruptedError:
+                raise
+            except FileNotFoundError:
+                # 缺文件的宿主构造条目不产生绑定；显式read_body仍沿原SKILL_READ_FAILED读口拒绝。
+                entries.append(entry)
+                continue
+            except (OSError, ValueError, SkillSnapshotError) as exc:
+                code = exc.error_code if isinstance(exc, SkillSnapshotError) else 'SKILL_READ_FAILED'
+                errors.append(SkillLoadError(entry.path, code, str(exc), entry.source))
+                entries.append(replace(entry, enabled=False))
+                continue
+            entries.append(replace(entry, refs=refs, asset_metadata=metadata, asset_fields=asset_fields))
+        object.__setattr__(self, 'entries', tuple(entries))
+        object.__setattr__(self, 'errors', tuple(errors))
 
     def enabled_entries(self) -> tuple[SkillSnapshotEntry, ...]:
         return tuple(entry for entry in self.entries if entry.enabled)
@@ -266,7 +301,7 @@ class SkillSnapshot:
                 historical = resolve_learned_revision(entry,wanted_sha) if isinstance(entry,SkillSnapshotEntry) else None
                 if historical is None:
                     raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")
-                entry = historical
+                entry = replace(historical, refs={}, asset_metadata={}, asset_fields={})
             if isinstance(entry, CapabilityPackageSnapshot):
                 _validate_package_reference(entry, refs)
             if entry.stable_id not in seen:
