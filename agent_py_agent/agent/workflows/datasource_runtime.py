@@ -1,3 +1,4 @@
+"""冻结数据源授权、查询健康回执与历史pin解析；执行仍交原脚本沙箱。"""
 # LLM: 仅冻结合同可绑定；debug的record_summary=False禁止源通知写账，其它SDK权限和进程沙箱不变。
 # 模块用途: 归一声明、创建只读签名清单并固定本次运行的数据源权限快照。
 from __future__ import annotations
@@ -23,6 +24,7 @@ from types import MappingProxyType
 from ..assets import safe_asset_id
 from ..assets.datasource_store import DatasourceStore, secret_values
 from ..assets.descriptor import AssetDescriptor, DataSourceSpec, clean_json
+from ..assets.source_manifest import load_manifest, should_emit_alert
 from ..common.nofollow_fs import (
     append_text_beneath,
     open_readonly_file_beneath,
@@ -30,6 +32,7 @@ from ..common.nofollow_fs import (
     unlink_file_beneath,
     write_text_atomic_beneath,
 )
+from ..concurrency.retry import jittered_backoff
 
 _RUNTIME_BINDINGS = ContextVar('datasource_runtime_bindings', default=None)
 MANIFEST_ENV = 'MY_AGENT_DATASOURCE_RUNTIME_MANIFEST'
@@ -45,9 +48,9 @@ _SOURCE_CHECK_TIMESTAMP_LOCK = RLock()
 # LLM: 仅可信执行包装器绑定已验版本；副本按Owner/脚本/workspace隔离，用户子进程不继承宿主ContextVar。
 # 函数用途: 让原runner的Store加载取得本次已核对的同份代码与合同。
 @contextmanager
-def bind_script_execution_record(owner_home, script_id, workspace_root, record):
+def bind_script_execution_record(owner_home, script_id, workspace_root, record, *, history_record=None):
     key = (Path(owner_home).absolute(), script_id, Path(workspace_root).resolve() if workspace_root else None)
-    token = _SCRIPT_EXECUTION_RECORD.set((key, deepcopy(record)))
+    token = _SCRIPT_EXECUTION_RECORD.set((key, deepcopy(record), deepcopy(history_record)))
     try:
         yield
     finally:
@@ -60,6 +63,14 @@ def script_execution_record(owner_home, script_id, workspace_root):
     current = _SCRIPT_EXECUTION_RECORD.get()
     key = (Path(owner_home).absolute(), script_id, Path(workspace_root).resolve() if workspace_root else None)
     return deepcopy(current[1]) if current and current[0] == key else None
+
+
+# LLM: 历史身份只从同调用栈的可信绑定取得，不从脚本metadata或磁盘marker取得。
+# 函数用途: 给原runner取得本次已解析的历史快照。
+def script_history_record(owner_home, script_id, workspace_root):
+    current = _SCRIPT_EXECUTION_RECORD.get()
+    key = (Path(owner_home).absolute(), script_id, Path(workspace_root).resolve() if workspace_root else None)
+    return deepcopy(current[2]) if current and current[0] == key and len(current) > 2 else None
 
 
 # LLM: 只有可信调用方可绑定workspace，线程/异步上下文退出即恢复；不从脚本输入或持久投影取得路径权限。
@@ -271,14 +282,230 @@ def _preflight_failure(script_id, record, code, check):
          'source_check': check}, source_check=check)
 
 
-# LLM: 版本/源硬门在runner前，record_summary=False同时禁通知写账，不改变预检裁决或SDK授权。
-# 函数用途: 为工具、工作流与内存调试统一校验数据源并执行同份脚本，debug不产生通知账。
+# LLM: 求交前复用原SDK严格校验；冲突身份、重复行或非法等级不能在重建时被洗成授权。
+# 函数用途: 取得已验证的当前或历史源权限索引。
+def _permission_sources(record):
+    contract = record.get('access_contract')
+    if contract is not None and not isinstance(contract, dict):
+        raise ValueError('DATASOURCE_INVALID_CONTRACT')
+    values = contract.get('data_sources', []) if contract is not None else record.get('data_sources', [])
+    try:
+        permissions = declared_datasources(values)
+    except (AttributeError, TypeError) as exc:
+        raise ValueError('DATASOURCE_INVALID_CONTRACT') from exc
+    return {identity: {'access': access} for identity, access in permissions.items()}
+
+
+# LLM: 两侧必须已经由原SDK校验并归一；read_write必须由两个快照同时声明。
+# 函数用途: 计算单源的最小共同访问等级。
+def _common_access(current, historical):
+    return 'read_write' if current['access'] == historical['access'] == 'read_write' else 'read'
+
+
+# LLM: 当前停用、沙箱、凭据及源权限仍是上限；历史只能缩小授权，不加载旧秘密。
+# 函数用途: 将已验证的历史代码和执行定义合入当前最小权限快照。
+def _historical_execution_record(current, historical, code):
+    from ..assets.descriptor import access_target_requires_network
+
+    prior = {**historical.get('descriptor', {}), **historical}
+    effective = deepcopy(current)
+    for key in ('interpreter', 'io_contract'):
+        if key in prior:
+            effective[key] = deepcopy(prior[key])
+    effective.update(code=code.decode('utf-8'), entrypoint=prior.get('entrypoint', 'main.py'),
+        enabled=current.get('enabled', True) is not False and prior.get('enabled', True) is not False)
+    effective['timeout_seconds'] = min(current.get('timeout_seconds', 120), prior.get('timeout_seconds', 120))
+    current_targets = current.get('access_targets', [])
+    old_targets = prior.get('access_targets', current_targets)
+    targets = ([row for row in current_targets if row in old_targets] if current_targets and old_targets
+               else current_targets or old_targets)
+    effective['access_targets'] = deepcopy(targets)
+    network = ((not current_targets or any(access_target_requires_network(row) for row in current_targets))
+        and (not old_targets or any(access_target_requires_network(row) for row in old_targets))
+        and (not (current_targets and old_targets) or any(access_target_requires_network(row) for row in targets)))
+    if 'credential_refs' in prior:
+        refs = {row['credential_ref'] for row in prior['credential_refs']}
+        effective['credential_refs'] = [row for row in current.get('credential_refs', []) if row['credential_ref'] in refs]
+    current_sources, prior_sources = _permission_sources(current), _permission_sources(prior)
+    allowed = current_sources.keys() & prior_sources.keys()
+    effective['data_sources'] = [{**row, 'query_scope': {**row.get('query_scope', {}),
+        'access': _common_access(current_sources[row['source_id']], prior_sources[row['source_id']])}}
+        for row in current.get('data_sources', []) if row['source_id'] in allowed]
+    if 'access_contract' in current or 'access_contract' in prior:
+        effective['access_contract'] = {**(current.get('access_contract') or {}), 'data_sources': [
+            {'id': identity, 'access': _common_access(current_sources[identity], prior_sources[identity])}
+            for identity in sorted(allowed)]}
+    current_metadata, prior_metadata = current.get('metadata'), prior.get('metadata')
+    current_metadata = current_metadata if isinstance(current_metadata, dict) else {}
+    prior_metadata = prior_metadata if isinstance(prior_metadata, dict) else {}
+    current_policy = current_metadata.get('retry_policy', {})
+    prior_policy = prior_metadata.get('retry_policy', {})
+    current_policy = current_policy if isinstance(current_policy, dict) else {}
+    prior_policy = prior_policy if isinstance(prior_policy, dict) else {}
+    effective['metadata'] = {**current_metadata, 'retry_policy': {**current_policy,
+        'idempotent': current_policy.get('idempotent') is True and prior_policy.get('idempotent') is True}}
+    return effective, network
+
+
+# LLM: 内容身份精确寻址，全部blob先核验；不存在或损坏不使用当前代码兜底。
+# 函数用途: 解析冻结pin为当前快照或受限的历史执行快照。
+def _resolve_execution_pin(owner_home, script_id, record, expected):
+    from ..assets.revision_history import blob_get, find_version
+
+    missing = {'mode': 'missing', 'reason': 'history_blob_missing'}
+    if _execution_pin_matches(script_id, record, expected):
+        return record, None, {'mode': 'current'}, None
+    if (not isinstance(expected, dict) or not isinstance(expected.get('code_sha256'), str)
+            or expected.get('script_id', script_id) != script_id
+            or expected.get('source_scope', record.get('source_scope', 'owner')) != record.get('source_scope', 'owner')
+            or expected['code_sha256'] == hashlib.sha256(record['code'].encode('utf-8')).hexdigest()):
+        return None, None, missing, None
+    try:
+        history = find_version(owner_home, 'script', script_id, code_sha256=expected['code_sha256'])
+        if history is None:
+            return None, None, missing, None
+        code = blob_get(owner_home, history['code_sha256'])
+        payload = blob_get(owner_home, history['payload_blob'])
+        if code is None or payload is None or any(blob_get(owner_home, digest) is None
+                for digest in history.get('side_blobs', {}).values()):
+            return None, None, missing, None
+        effective, network = _historical_execution_record(record, json.loads(payload), code)
+        return effective, history, {'mode': 'history', 'version': history['version'],
+            'code_sha256': history['code_sha256']}, network
+    except (OSError, ValueError, TypeError, KeyError):
+        return None, None, missing, None
+
+
+# LLM: 仅多源且有实际可用源的manifest脚本可以降级；原SDK权限和单源硬门不变。
+# 函数用途: 判断当前预检是否允许隔离部分失败来源。
+def _partial_source_mode(record, check, manifest):
+    declared = {row['source_id'] for row in record.get('data_sources', [])}
+    unavailable = {row['source_id'] for key in ('missing_sources', 'empty_sources') for row in check.get(key, [])}
+    return manifest is not None and len(declared) >= 2 and bool(declared - unavailable)
+
+
+# LLM: 字典替身与原dataclass共用字段读取，不改变真实runner接口。
+# 函数用途: 读取一次脚本结果的结构化字段。
+def _result_field(result, name, default=None):
+    return result.get(name, default) if isinstance(result, dict) else getattr(result, name, default)
+
+
+# LLM: receipt永远保留红灯；debug零落盘，健康账IO失败仅影响去重，发送仍走原宿主出口。
+# 函数用途: 尽力发送当前Owner的有界红灯通知。
+def _emit_query_alerts(owner_home, source_system, health, *, now):
+    for alert in health['auth_alerts']:
+        try:
+            emit = should_emit_alert(owner_home, source_system, alert['source_id'], alert['credential_ref'], now=now)
+        except (OSError, ValueError, TypeError):
+            emit = True
+        if emit:
+            emit_asset_im_notification(owner_home, event_type='AUTH_OR_ENDPOINT_EXPIRED',
+                title='数据源需要处理', message=alert['source_id'] + ': AUTH_OR_ENDPOINT_EXPIRED', payload=alert)
+
+
+# LLM: 预检已证明缺失的源不能被脚本自报ok覆盖；只投影有界副本，不改原输出。
+# 函数用途: 将已知缺失来源叠加到健康裁决输入。
+def _preflight_source_report(source_report, check, *, max_sources=64):
+    if not isinstance(source_report, dict) or not isinstance(source_report.get('sources'), list):
+        return source_report
+    missing = {row['source_id'] for row in check.get('missing_sources', [])}
+    if not missing:
+        return source_report
+    # 多保留一行让归一器仍能观察截断，不遍历不可信长列表或抹掉真实命中输出。
+    rows = [{**row, 'status': 'offline', 'hit_count': 0, 'http_status': None, 'error_code': 'SOURCE_MISSING'}
+            if isinstance(row, dict) and isinstance(row.get('source_id'), str) and row['source_id'] in missing
+            else row for row in source_report['sources'][:max_sources + 1]]
+    return {**source_report, 'sources': rows}
+
+
+# LLM: query_health唯一来自纯规则，嵌入scripts_tool实际渲染的source_check，不解析模型回复。
+# 函数用途: 合并健康回执、pin解析及可见指引。
+def _query_result(owner_home, result, record, check, manifest, retries, resolution, *, notify, now):
+    from .query_health import build_query_health
+
+    output = _result_field(result, 'output_data', {})
+    error = _result_field(result, 'error_code', '')
+    report = output.get('source_report') if isinstance(output, dict) else None
+    health = build_query_health(_preflight_source_report(report, check),
+        manifest, retries, error, declared_sources=record.get('data_sources', []))
+    if resolution.get('mode') == 'history' and error == 'SCRIPT_REVISION_DRIFT':
+        resolution = {'mode': 'missing', 'reason': 'history_blob_missing'}
+    previous = _result_field(result, 'source_check', {})
+    merged = {**(previous if isinstance(previous, dict) else {}), **check,
+              'query_health': health, 'pin_resolution': resolution}
+    if notify and manifest is not None:
+        _emit_query_alerts(owner_home, manifest['source_system'], health, now=now)
+    if isinstance(result, dict):
+        return {**result, 'source_check': merged}
+    result.source_check = merged
+    return result
+
+
+# LLM: metadata只保存清单键，不授予访问权限；错误类型视作未声明。
+# 函数用途: 读取当前脚本显式关联的Owner清单。
+def _bound_source_manifest(owner_home, record):
+    metadata = record.get('metadata', {})
+    system = metadata.get('source_system') if isinstance(metadata, dict) else None
+    return load_manifest(owner_home, system) if isinstance(system, str) and system else None
+
+
+# LLM: 时限从接缝入口开始，非法时限仍交原runner返回其原配置错误，不新增解释路径。
+# 函数用途: 取得包含预检和退避的整步截止时间。
+def _query_deadline(record, options, started):
+    try:
+        timeout = float(options.get('timeout_seconds', record.get('timeout_seconds') or 30))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return started + timeout if math.isfinite(timeout) and 0 < timeout <= 3600 else None
+
+
+# LLM: 只重试结构化瞬态失败；清理未知或已交接外部投递不重放，最多两次且不重置步骤预算。
+# 函数用途: 在原runner上执行有界的幂等重试并记录实际重试。
+def _run_query_attempts(owner_home, script_id, inputs, runner, record, history, workspace_root, options,
+                        *, deadline, max_retries=2, base_delay_seconds=0.1, max_delay_seconds=1.0):
+    from .query_health import retry_is_safe, transient_failure_code
+
+    retries, result = [], None
+    while True:
+        attempt_options = dict(options)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result = result or _preflight_failure(script_id, record, 'SCRIPT_TIMEOUT', {})
+                break
+            attempt_options['timeout_seconds'] = remaining
+        with bind_script_execution_record(owner_home, script_id, workspace_root, record, history_record=history):
+            result = runner.run_script(script_id, inputs, **attempt_options)
+        output = _result_field(result, 'output_data', {})
+        code = transient_failure_code(output.get('source_report') if isinstance(output, dict) else None,
+                                      _result_field(result, 'error_code', ''))
+        context = _result_field(result, 'escalation_context', {})
+        uncertain = (isinstance(context, dict) and bool(context.get('cleanup_error'))
+                     or bool(_result_field(result, 'delivery_receipts', ()))
+                     or _result_field(result, 'effect_outcome') == 'unknown')
+        if (not code or uncertain or not retry_is_safe(record) or len(retries) >= max_retries
+                or deadline is None):
+            break
+        delay = jittered_backoff(len(retries) + 1, base_delay=base_delay_seconds, max_delay=max_delay_seconds)
+        if delay >= deadline - time.monotonic():
+            break
+        time.sleep(delay)
+        if time.monotonic() >= deadline:
+            break
+        retries.append({'attempt': len(retries) + 1, 'error_code': code, 'delay_ms': delay * 1000})
+    return result, retries
+
+
+# LLM: 历史代码保持当前授权上限；partial仅适用多源manifest，debug同时禁摘要和通知写账。
+# 函数用途: 统一解析pin、隔离源失败、执行有界重试并返回可见健康回执。
 def run_script_with_datasources(
     owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None,
-    timeout_seconds=None, override_data_sources=None, network_access=None, options=None,
+    timeout_seconds=None, override_data_sources=None, network_access=None, options=None, now=None,
 ):
     from .script_runner import ScriptRunner, _EntrypointMissing, load_script
 
+    started = time.monotonic()
+    instant = time.time() if now is None else now
     run_opts = dict(options or {})
     for key, val in (('timeout_seconds', timeout_seconds), ('override_data_sources', override_data_sources),
                      ('network_access', network_access)):
@@ -289,23 +516,32 @@ def run_script_with_datasources(
             record = load_script(owner_home, script_id)[1]
         except _EntrypointMissing:
             code = 'SCRIPT_REVISION_DRIFT' if expected_script_pin and expected_script_pin.get('code_sha256') else 'ENTRYPOINT_MISSING'
-            return _preflight_failure(script_id, {}, code, {})
-        if not _execution_pin_matches(script_id, record, expected_script_pin):
-            return _preflight_failure(script_id, record, 'SCRIPT_REVISION_DRIFT', record.get('source_check', {}))
+            resolution = {'mode': 'missing', 'reason': 'history_blob_missing'}
+            return _query_result(owner_home, _preflight_failure(script_id, {}, code, {}), {}, {},
+                None, [], resolution, notify=False, now=instant)
+        current = record
+        record, history, resolution, historical_network = _resolve_execution_pin(owner_home, script_id, record, expected_script_pin)
+        manifest = _bound_source_manifest(owner_home, current)
+        if record is None:
+            check = current.get('source_check', {})
+            return _query_result(owner_home, _preflight_failure(script_id, current, 'SCRIPT_REVISION_DRIFT', check),
+                current, check, manifest, [], resolution, notify=False, now=instant)
+        if historical_network is False:
+            run_opts['network_access'] = False
         check = _execution_source_check(owner_home, record, run_opts.get('override_data_sources'), workspace_root)
         status = check['status']
-        if status in ('source_missing', 'source_empty', 'source_added') and run_opts.get('record_summary', True):
+        notify = run_opts.get('record_summary', True)
+        if status in ('source_missing', 'source_empty', 'source_added') and notify and manifest is None:
             emit_asset_im_notification(owner_home, event_type=status, title=str(record.get('name', script_id)),
                 message=f'{script_id}: {status}', payload={'script_id': script_id, 'source_check': check})
-        if status in ('source_missing', 'source_empty'):
+        if status == 'source_empty' or status == 'source_missing' and not _partial_source_mode(record, check, manifest):
             code = 'DATASOURCE_MISSING' if status == 'source_missing' else 'DATASOURCE_EMPTY'
-            return _preflight_failure(script_id, record, code, check)
-        with bind_script_execution_record(owner_home, script_id, workspace_root, record):
-            result = (runner or ScriptRunner(owner_home, workspace_root=workspace_root)).run_script(script_id, inputs, **run_opts)
-        if isinstance(result, dict):
-            return {**result, 'source_check': check}
-        result.source_check = check
-        return result
+            return _query_result(owner_home, _preflight_failure(script_id, record, code, check), record, check,
+                manifest, [], resolution, notify=notify, now=instant)
+        result, retries = _run_query_attempts(owner_home, script_id, inputs,
+            runner or ScriptRunner(owner_home, workspace_root=workspace_root), record, history, workspace_root, run_opts,
+            deadline=_query_deadline(record, run_opts, started))
+        return _query_result(owner_home, result, record, check, manifest, retries, resolution, notify=notify, now=instant)
 
 
 # LLM: 签名与完整快照摘要使用相同严格规范JSON；不把dict插入顺序、空白或非有限浮点当授权依据。

@@ -1,3 +1,4 @@
+"""原脚本执行器；历史代码在同一run scratch中物化，沿原权限与清理链执行。"""
 # LLM: 仅执行授权nofollow快照；debug可禁摘要但不绕过数据源、沙箱、超时或清理，不冒称内核隔离。
 # 模块用途: 执行Owner脚本并脱敏回执，正式运行回写摘要，内存调试不改资产计数和修订。
 from __future__ import annotations
@@ -26,6 +27,7 @@ from ..assets.descriptor import (
     execution_definition_ref,
     output_contract_fields,
 )
+from ..assets.revision_history import AssetHistoryError, materialize_script
 from ..assets.script_store import ScriptStore
 from ..attempt.sandbox import (
     AttemptExecutionSandbox,
@@ -52,7 +54,7 @@ from ..path_access_policy import (
 from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
-from .datasource_runtime import ScriptDatasourceRuntime
+from .datasource_runtime import ScriptDatasourceRuntime, script_history_record
 from .models import ScriptExecutionResult, payload, safe_path
 from .run_artifacts import RunArtifactBatch, RunOutError, current_run_out_target
 
@@ -448,6 +450,10 @@ class ScriptInputTransportError(ValueError):
 
 class _EntrypointMissing(ValueError):
     pass
+
+
+class _HistorySnapshotMissing(ValueError):
+    """历史查找后、物化前blob失效，仍按原pin漂移合同失败关闭。"""
 
 
 # LLM: 权威入口沿宿主workspace覆盖与nofollow；项目根只读代码，Owner仍为执行/权限根；缺失才读旧Owner格式。
@@ -911,7 +917,7 @@ class ScriptRunner:
             receipts.append(payload(receipt))
         return tuple(receipts)
 
-    # LLM: 原沙箱范围不变；只有正式目标+quota才在scratch内加run_out，绑定时清理失败必须传播，不能发表文件丢失成功。
+    # LLM: 历史快照只取可信调用栈绑定，W1物化在同一scratch内；原沙箱/凭据上限、run-out及清理语义不变。
     # 函数用途: 冻结代码、绑定连接，投影宿主及人格保护并清理本次临时目录。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
@@ -943,12 +949,20 @@ class ScriptRunner:
         clock = time.monotonic()
         root = self.owner_home / 'tmp' / 'script_exec'
         ensure_private_dir(root, canonical_root=self.owner_home)
-        folder = Path(tempfile.mkdtemp(prefix=f'{script_id}_', dir=root))
+        staging_root = Path(tempfile.mkdtemp(prefix=f'{script_id}_', dir=root))
+        folder = staging_root
         ds_runtime = None
         try:
+            history = script_history_record(self.owner_home, script_id, self.workspace_root)
+            if history is not None:
+                try:
+                    folder = materialize_script(self.owner_home, history, staging_root)
+                except AssetHistoryError as exc:
+                    raise _HistorySnapshotMissing('history_blob_missing') from exc
             entrypoint = safe_path(folder, metadata.get('entrypoint', 'main.py'))
-            write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, entrypoint.name),
-                                      metadata['code'], file_mode=0o700)
+            if history is None:
+                write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, entrypoint.name),
+                                          metadata['code'], file_mode=0o700)
             net_allowed = _network_access(metadata, network_access)
             denied_ports = gateway_bound_ports()
             context = self._work_context(folder)
@@ -1041,10 +1055,10 @@ class ScriptRunner:
                         raise
             finally:
                 if capture.get('run_out_target') is None:
-                    shutil.rmtree(folder, ignore_errors=True)
+                    shutil.rmtree(staging_root, ignore_errors=True)
                 else:
                     try:
-                        shutil.rmtree(folder)
+                        shutil.rmtree(staging_root)
                     except OSError as exc:
                         raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED') from exc
 
@@ -1095,6 +1109,8 @@ class ScriptRunner:
             error = capture.get('error_code') or ('SCRIPT_CLEANUP_ERROR' if cleanup else 'SCRIPT_CONFIGURATION_ERROR')
             if isinstance(exc, _EntrypointMissing):
                 error = 'ENTRYPOINT_MISSING'
+            if isinstance(exc, _HistorySnapshotMissing):
+                error = 'SCRIPT_REVISION_DRIFT'
             if isinstance(exc, AssetDisabledError):
                 error = exc.error_code
             if isinstance(exc, (ScriptInputTransportError, ManagedOwnerGenerationError, RunOutError)):
