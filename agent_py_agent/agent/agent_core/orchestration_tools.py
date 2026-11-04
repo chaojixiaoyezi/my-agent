@@ -890,7 +890,12 @@ def _next_system_lineage_index(
 ) -> int:
     if not prepared:
         return 1
+    from ..subagents.manager import creation_run_index
+
     parent_id = str(prepared[0].parent_id or "").strip()
+    index = creation_run_index(agent.subagents)
+    if index is not None:
+        return index.next_system_index(parent_id, _DEFAULT_DEPTH)
     pattern = re.compile(
         rf"^agent-d{_DEFAULT_DEPTH}-.+-(?P<index>[1-9][0-9]*)$"
     )

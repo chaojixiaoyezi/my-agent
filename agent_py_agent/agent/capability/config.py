@@ -66,6 +66,8 @@ class CapabilityConfig:
     im_group_authorization_required: bool = True
     # 仅订阅准确机器人身份的群消息，沿原调度账本运行；没有订阅时不增加模型调用或轮询。
     feishu_bot_subscriptions_enabled: bool = True
+    # 当前群只读历史需要部署者显式开启，和事件订阅开关相互独立。
+    feishu_chat_history_enabled: bool = False
     # 跨owner投递/一次复刻仍需双端真人确认精确清单，不能复制权限或秘密。
     skill_transfers_enabled: bool = True
     # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。
@@ -160,7 +162,7 @@ def _coerce_int(value: object, default: int) -> int:
     return default
 
 
-# LLM: 安全开关、期限及整机额度严格校验；全局额度仅非负真整数，拒bool/字符串，0不限；额度来源权限由调度读口负责。
+# LLM: 安全开关（含群历史）、期限及整机额度严格校验；群历史只接受真 bool，未知值不能打开读取能力。
 # 函数用途: 按唯一dataclass归一配置，非法安全参数或整机额度明确拒绝加载，保持YAML默认一致。
 def _coerce_capability_value(field_name: str, value: object) -> object:
     """按 dataclass 声明类型归一配置值,不依赖 parse_scalar 的引号类型推断。
@@ -193,7 +195,7 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
         return int(value)
     if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled",
                       "background_user_action_notice_enabled", "im_group_shared_credentials_enabled",
-                      "im_group_authorization_required", "feishu_bot_subscriptions_enabled"}:
+                      "im_group_authorization_required", "feishu_bot_subscriptions_enabled", "feishu_chat_history_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value

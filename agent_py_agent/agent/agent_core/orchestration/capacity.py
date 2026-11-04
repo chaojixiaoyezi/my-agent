@@ -125,35 +125,15 @@ def _configured_max_subagents(agent: object) -> int:
         return _DEFAULT_MAX_SUBAGENTS
 
 
-# LLM: Count canonical non-terminal runs globally for the owner and exactly for
-# the current conversation task; projections and model prose are not capacity facts.
+# LLM: 规范写者同步维护带 pending 栅栏的索引；容量热查询不列举终态历史，partial 必须拒绝。
 # 函数用途: 统计当前 owner 与当前根任务已占用的子代理数。
 def _active_subagent_counts(agent: object) -> tuple[int, int]:
     try:
-        from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+        from ...subagents.manager import creation_capacity_counts
 
-        runs = list(agent.subagents.list_runs())
-        active = [
-            run
-            for run in runs
-            if str(getattr(run, "id", "") or "").strip()
-            and not task_status_in(
-                getattr(run, "status", ""),
-                SUBAGENT_ENDED_STATUSES,
-            )
-        ]
+        return creation_capacity_counts(agent, _current_root_task_id(agent))
     except Exception as exc:
         raise SubagentCapacityStateError("subagent registry is unavailable") from exc
-    task_id = _current_root_task_id(agent)
-    if not task_id:
-        return len(active), 0
-    try:
-        related_ids = set(agent.subagent_run_ids_for_request(task_id))
-    except Exception as exc:
-        raise SubagentCapacityStateError("task subagent lineage is unavailable") from exc
-    return len(active), sum(
-        str(getattr(run, "id", "") or "").strip() in related_ids for run in active
-    )
 
 
 # LLM: Conversation task identity is the session-tree capacity key; request/run

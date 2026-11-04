@@ -309,22 +309,28 @@ def find_reusable_named_child(manager: Any, params: CreateRunParams):
     return None
 
 
+# LLM: 持久化 manager 先按结构化合同索引定位，原 canonical 匹配器仍做最终核验；不因索引失败全扫。
+# 函数用途: 按工作范围精确复用原任务，不随无关终态历史增长读取。
 def find_reusable_work_scope_child(manager: Any, params: CreateRunParams, work_scope_key: str):
-    for task in reversed(_safe_list_runs(manager)):
+    for task in _reuse_candidates(manager, params, "work", work_scope_key):
         if _same_work_scope(task, params, work_scope_key):
             return task
     return None
 
 
+# LLM: 修复合同沿原 identity helper，索引只选候选，权限与规范状态仍由原匹配器复核。
+# 函数用途: 精确定位同一修复合同的可复用孩子。
 def find_reusable_repair_child(manager: Any, params: CreateRunParams, repair_identity: tuple[object, ...]):
-    for task in reversed(_safe_list_runs(manager)):
+    for task in _reuse_candidates(manager, params, "repair", repair_identity):
         if _same_repair_scope(task, params, repair_identity):
             return task
     return None
 
 
+# LLM: 幂等查找保留原 parent/root/role/write-roots/display 判据，不从名称或目标推导合同。
+# 函数用途: 按明确幂等合同选择原孩子，并复核 canonical。
 def find_reusable_idempotency_child(manager: Any, params: CreateRunParams, idempotency_identity: tuple[object, ...]):
-    for task in reversed(_safe_list_runs(manager)):
+    for task in _reuse_candidates(manager, params, "idempotency", idempotency_identity):
         if _same_idempotency_scope(task, params, idempotency_identity):
             return task
     return None
@@ -430,6 +436,22 @@ def _normalized_path(value: object) -> str:
     if text == "/":
         return text
     return text.rstrip("/")
+
+
+# LLM: 索引仅缩窄候选；先恢复原 ID 升序和稳定时间倒序，再整体逆序，保留原时间平局规则。
+# 函数用途: 共用复用查询入口，索引或规范文件坏账不能伪装成没有可复用任务。
+def _reuse_candidates(manager: Any, params: CreateRunParams, kind: str, identity):
+    from ...subagents.manager import creation_run_index
+
+    index = creation_run_index(manager)
+    if index is None:
+        return reversed(_safe_list_runs(manager))
+    report = manager.list_runs_by_ids_report(index.reusable_ids(params, kind, identity))
+    if report.load_errors:
+        raise RuntimeError("subagent reusable index canonical rows unavailable")
+    canonical = sorted(report.runs, key=lambda task: task.id)
+    canonical.sort(key=lambda task: task.updated_at or task.created_at, reverse=True)
+    return reversed(canonical)
 
 
 def _safe_list_runs(manager: Any) -> list[Any]:
