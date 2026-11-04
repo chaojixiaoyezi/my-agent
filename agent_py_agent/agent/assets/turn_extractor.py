@@ -10,7 +10,6 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import uuid4
 
 from ..common.directory_lock import locked_private_directory
 from ..common.json_io import locked_json_path
@@ -559,8 +558,48 @@ def get_extraction_proposal(owner_home: Path, proposal_id: str) -> dict[str, obj
     proposal = _read_record(owner_home, _PROPOSALS, proposal_id, 'proposal_id')
     if proposal.get('status') not in {'DRAFT', 'COMMITTED'} or proposal['revision'] < 1:
         raise ValueError('EXTRACTION_PROPOSAL_INVALID')
+    if (proposal.get('status') == 'DRAFT' and proposal.get('expires_at')
+            and _date(proposal['expires_at']) <= datetime.now(timezone.utc)):
+        raise ValueError('EXTRACTION_PROPOSAL_EXPIRED')
     _validate_candidates(proposal)
     return proposal
+
+
+# LLM: 演进草稿沿唯一提取库持久化；按族去重、来源独立性只看thread/date，十四天后重建草稿。
+# 函数用途: 保存确定性脚本DRAFT并记录第二独立来源。
+def save_evolution_draft(owner_home, family, script, *, run_id, thread_id, created_at,
+                          member_of=(), ttl_days=14):
+    from .asset_metadata import normalize_member_of
+
+    if not re.fullmatch(r'[0-9a-f]{64}', family):
+        raise ValueError('invalid evolution family')
+    proposal_id = 'exp_' + family[:16]
+    occurrence = {'run_id': run_id, 'thread_id': thread_id, 'date': created_at[:10]}
+    script = json.loads(json.dumps(script))
+    script.setdefault('descriptor', {}).setdefault('metadata', {})['member_of'] = normalize_member_of(member_of)
+    with _record_lock(owner_home, _PROPOSALS):
+        raw = read_bytes_beneath(owner_home, ('data', _PROPOSALS, proposal_id + '.json'), max_bytes=MAX_ASSET_BYTES)
+        previous = json.loads(raw) if raw is not None else None
+        if previous and previous.get('status') == 'COMMITTED':
+            return previous
+        if previous and _date(previous['expires_at']) > _date(created_at):
+            occurrences = previous.get('evolution_occurrences', [])
+            independent = any((thread_id and row.get('thread_id') and row['thread_id'] != thread_id)
+                              or row['date'] != occurrence['date'] for row in occurrences)
+            if not any(row['run_id'] == run_id for row in occurrences):
+                previous['evolution_occurrences'] = [*occurrences, occurrence][-32:]
+                previous['independent_reuse'] = independent
+                previous['revision'] += 1
+                _write_record(owner_home, _PROPOSALS, previous, 'proposal_id')
+            return previous
+        proposal = {'proposal_id': proposal_id, 'status': 'DRAFT', 'revision': 1, 'scope': 'owner',
+                    'candidate_scripts': [script], 'candidate_skills': [], 'candidate_workflows': [],
+                    'created_at': created_at, 'expires_at': (_date(created_at) + timedelta(days=ttl_days)).isoformat(),
+                    'redacted_secrets': [], 'workspace_root': '', 'source_turn_refs': [],
+                    'family_fingerprint': family, 'evolution_occurrences': [occurrence], 'independent_reuse': False}
+        _validate_candidates(proposal)
+        _write_record(owner_home, _PROPOSALS, proposal, 'proposal_id')
+        return proposal
 
 
 # LLM: 选择必须匹配原候选；编辑仅改资产字段，不允许恢复scope或路径权限。
@@ -632,6 +671,9 @@ def _asset_files(chosen):
         if kind == 'script':
             spec = _script_spec(asset_id, item['title'], item['entry_source'], item['input_schema'],
                                 item['output_schema'], item.get('access_contract', {}).get('network_targets', []))
+            from .asset_metadata import normalize_member_of
+            metadata = item.get('descriptor', {}).get('metadata', {})
+            spec['descriptor']['metadata']['member_of'] = normalize_member_of(metadata.get('member_of'))
             payload = {**spec['descriptor'], 'entrypoint': 'main.py', 'interpreter': 'python3', 'timeout_seconds': 120}
             files['scripts', asset_id, 'script.json'] = json.dumps(payload, ensure_ascii=False)
             files['scripts', asset_id, 'main.py'] = spec['entry_source']

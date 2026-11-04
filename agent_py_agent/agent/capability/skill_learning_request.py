@@ -32,8 +32,12 @@ _EXCLUDED_SOURCES = frozenset({"background_main_agent"})
 # LLM: 全部是结构化判据；子代理（task_local）、后台唤醒/定时/Goal 续跑回合、不落盘的回合和工具轮数不足的回合都不学。
 # 函数用途: 判断这次收口是否值得登记学习请求。
 def learning_request_eligible(ctx: object, min_tool_rounds: int, *, include_background: bool = False) -> bool:
+    from ..assets.mutation_ledger import query_analysis_blocked
+    evidence = getattr(ctx, 'tool_runtime_evidence', {}) or {}
     return (
-        bool(getattr(ctx, "do_save", False))
+        'query_failed' not in evidence.get('evidence_tags', [])
+        and not any(query_analysis_blocked(row) for row in getattr(ctx, 'archive_tool_calls', ()) or ())
+        and bool(getattr(ctx, "do_save", False))
         and str(getattr(ctx, "context_scope", "") or "").strip().lower() != "task_local"
         # 后台开关不是来源证明；可信完成只经task_learning_bridge复核后组装同一材料。
         and str(getattr(ctx, "source", "") or "").strip().lower() not in _EXCLUDED_SOURCES

@@ -11,7 +11,6 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,7 @@ from ..common.owner_write_errors import (
     LocalControlCoordinatorUnavailable,
     OwnerManagementIngressUnavailable,
 )
-from .candidate_models import MemoryCandidate, utc_now_iso
+from .candidate_models import MemoryCandidate, normalize_lesson_asset_refs, utc_now_iso
 from .security import scan_memory_content
 
 LESSON_SCHEMA_VERSION = "my-agent.lesson.v1"
@@ -63,6 +62,7 @@ class LessonRecord:
     updated_at: str
     path: str
     status: str = "active"
+    asset_refs: tuple[str, ...] = ()
 
     # LLM: routing/HOT 只消费无正文 metadata，详细 lesson content 继续留在唯一 Markdown 正文。
     # 函数用途: 返回可写入索引和引用的 lesson 元数据。
@@ -157,6 +157,7 @@ class LessonRepository:
             created_at=now,
             updated_at=now,
             path=f"memory/lessons/{filename}",
+            asset_refs=tuple(normalize_lesson_asset_refs(candidate.asset_refs)),
         )
         with locked_json_path(path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_lesson_write})):
             changed = not path.exists()
@@ -410,6 +411,7 @@ def _read_lesson(path: Path) -> LessonRecord:
         updated_at=str(payload.get("updated_at") or ""),
         path=str(payload.get("path") or ""),
         status=str(payload.get("status") or "active"),
+        asset_refs=tuple(normalize_lesson_asset_refs(payload.get('asset_refs', []))),
     )
 
 

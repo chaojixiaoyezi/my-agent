@@ -398,6 +398,11 @@ def _execute_learning(agent, ref):
         result = service.run_pending(maintenance_only=True)
     else:
         result = service.run_pending(expected_request_path=agent.home_paths.owner_home_dir / ref["source_ref"])
+    notices = getattr(result, 'evolution_notices', ())
+    if notices:
+        from ..capability.asset_evolution import emit_evolution_notices
+
+        background_short_operation('asset_evolution_notices', lambda: emit_evolution_notices(agent, notices))
     return {"source_kind": "learning", "source_id": ref["source_id"], "status": result.status,
             "outcome": "pending" if result.status in {"busy", "daily_limit", "retry"} else "handled"}
 
