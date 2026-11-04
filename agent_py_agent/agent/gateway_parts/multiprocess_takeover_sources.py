@@ -265,6 +265,52 @@ def takeover_namespace_state(paths) -> tuple:
 
 # LLM: list_names缺目录返回空列表，因此先严格打开锚定目录；收尾再次打开以发现目录替换和消失。
 # 函数用途: 区分缺目录与空目录并保全本次目录身份及完整名称。
+def indexed_role_coverage(paths, current, count, closed, *, standalone=None):
+    """冷维护已核完整闭包；热读角色/P4，metadata原件由strict stamp守住。
+
+    closure只提供旧角色原字节约束，不提供P1停止或P3授权。
+    """
+    with ExitStack() as retained:
+        anchors = _role_directory_anchors(paths.root, retain=retained)
+        for attempt in range(3):
+            if _role_directory_anchors(paths.root) != anchors:
+                raise ValueError('generation_role_sources_changed')
+            roles, registry = _role_snapshot(paths.root), _discovery_registry(paths.root)
+            if registry is not None and registry[0]['c_run_id'] == current:
+                from .multiprocess_executor_identity import process_birth
+                identity = registry[0]['process_identity']
+                if identity['pid'] != os.getpid() or identity['start_time'] != process_birth(os.getpid()):
+                    raise ValueError('old_role_lifecycle_unproven')
+            if standalone is not None:
+                standalone.require_unchanged()
+                roles = standalone.filter_roles(roles)
+            for generation, closure in closed.items():
+                if set(roles) != set(closure['role_markers']):
+                    raise ValueError('old_role_lifecycle_unproven')
+                _require_closed_markers(roles, closure, generation, current)
+                if registry is not None and registry[0]['c_run_id'] == generation and registry[1] != closure['registry_sha256']:
+                    raise ValueError('generation_closed_registry_changed')
+            for name, raw in roles.items():
+                value = json.loads(raw)
+                if value.get('c_run_id') == current:
+                    _check_role_marker(paths.root, tuple(name.split('/')), current, snapshot_retries=2)
+                elif value.get('c_run_id') not in closed:
+                    raise ValueError('old_role_lifecycle_unproven')
+            after = _role_snapshot(paths.root)
+            if standalone is not None:
+                standalone.require_unchanged()
+                after = standalone.filter_roles(after)
+            if _discovery_registry(paths.root) != registry or _role_directory_anchors(paths.root) != anchors:
+                raise ValueError('generation_role_sources_changed')
+            try:
+                _require_stable_roles(roles, after, registry, current, count, closed=tuple(closed))
+            except _ClosedWorkerPublished:
+                if attempt == 2:
+                    raise
+                continue
+            return
+
+
 def _namespace_state(root, parts):
     try:
         descriptor = open_directory_beneath(root, parts, require_dir_fd=True)

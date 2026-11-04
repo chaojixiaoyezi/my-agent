@@ -34,6 +34,8 @@ from .multiprocess_takeover_unresolved_source import (
 
 # LLM: 控制器仅附真实锁并保存旧关闭raw；后台无P3权，历史关闭范围不替fresh P2，不靠TTL/心跳/覆盖state解除未知。
 # 类用途: 统一当前C启动/重启/改代及只读复核，隔离/调度不持久化第二账本。
+# LLM: 原C租约与generation限定接管权限；短门核active来源，冷发现及物理观察在门外固定批推进。
+# 函数用途: 保留原证明链地协调启动、隔离、接管和责任结清。
 class CoordinatorTakeover:
     # LLM: 原guard登记lease；mutex保存原目标/限制与捕获关闭raw，未知不造范围，关闭历史不授P2/P3且后台不继承授权。
     # 函数用途: 保存启动来源及原租约内隔离/调度事实，不持久化证明。
@@ -69,6 +71,7 @@ class CoordinatorTakeover:
         self._recheck_thread_origin = None
         self._recheck_thread_start_unknown = False
         self._recheck_joined = True
+        self._cold_start_pending = False
 
     # LLM: 只有相同租约/本进程/当前代和控制器仍挂在原租约上才有效；退出后对象引用不能延寿。
     # 函数用途: 检查当前实际持锁C是否仍拥有本接线对象。
@@ -223,10 +226,17 @@ class CoordinatorTakeover:
         finally:
             self._mutex.release()
 
-    # LLM: 只由原C租约收尾调用；先撤销lease，迟到回执不得解除；不向旧树发信号。
-    # 函数用途: 收尾自己的后台线程，保持P1/P3原记录不变。
+    # LLM: 原C停止先撤销lease；关闭两个可丢弃索引游标，不改P1/P3/额度事实，迟到回执仍须原generation复核。
+    # 函数用途: 回收自己的后台线程及冷扫描句柄，保持全部原证明来源。
     def close(self):
-        return stop_takeover_rechecks(self)
+        from .curator_quota_index import close_directory_cursor
+
+        result = stop_takeover_rechecks(self)
+        index = getattr(self, '_executor_active_index', None)
+        if index is not None:
+            index.close()
+        close_directory_cursor(self)
+        return result
 
 
 # LLM: 调用方持内存门；源核实在门外完成，最终回调与真实撤权互斥，阻塞回调不能被硬抢占。
@@ -296,6 +306,13 @@ def prepare_coordinator_takeover(paths, count, c_run_id, *, config=None, config_
         from .standalone_migration import capture_standalone_migration
 
         capture_standalone_migration(controller, config, config_path)
+    from .multiprocess_executor_active_index import maintain_controller_index
+
+    # 冷发现只推进固定批，未完保持unknown；绝不在owner短门回填全历史。
+    try:
+        maintain_controller_index(controller)
+    except (OSError, ValueError, TypeError, KeyError):
+        controller._all_quarantined = True
     with controller._mutex:
         _refresh_targets(controller)
         for target in controller.targets:
@@ -575,10 +592,11 @@ def collect_coordinator_executor_domains(controller):
         root.collect_completed_hosts()
 
 
-# LLM: P6只读首绑定的原C/W/source/host对象，退出后不可从P4/P1/清表补历史；锁只冻结引用，不等kernel/join，不授新的业务权。
-# 函数用途: 给停止观察保留本代真实来源的完整原对象集合。
+# LLM: P6只读首绑定原来源；W覆盖不全才用原索引拒绝遗漏的occupied P3，完整W仍交原P6全审计；退出不要求存活、不等kernel/join。
+# 函数用途: 给停止观察保留完整原来源，不能漏掉尚未结清却没有原W对象的准入责任。
 def original_drain_sources(controller):
     from .multiprocess_coordinator_executor_source import CoordinatorExecutorSource
+    from .multiprocess_executor_active_index import ExecutorActiveIndex
     from .multiprocess_native_coordinator_host import CoordinatorNativeHostRoot
     from .multiprocess_worker_commit import WorkerCommitIssuer
     if type(controller) is not CoordinatorTakeover or not controller.active():
@@ -591,6 +609,20 @@ def original_drain_sources(controller):
             if (type(issuer) is not WorkerCommitIssuer or controller._current_workers.get(index) is not issuer
                     or issuer.launch is not launch or issuer.process is not process or issuer._controller is not controller):
                 raise ValueError('drain_original_worker_source_changed')
+        if any(index not in controller._current_worker_origins for index in range(controller.count)):
+            active_index = getattr(controller, '_executor_active_index', None)
+            if type(active_index) is not ExecutorActiveIndex or not active_index.ready or active_index.failed:
+                raise ValueError('responsibility_index_unknown')
+            active_index.require_original()
+            active_index._require_revision()
+            for row in active_index.reservations.values():
+                if active_index._p3(row['request_id']) != row:
+                    raise ValueError('active_p3_canonical_changed')
+                if (row['route']['c_run_id'] == controller.c_run_id and row['state'] == 'occupied'
+                        and type(row['route']['worker']) is int
+                        and row['route']['worker'] not in controller._current_worker_origins):
+                    raise ValueError('drain_original_p3_worker_source_missing')
+            active_index._require_revision()
         for source, origin in sources:
             if type(source) is not CoordinatorExecutorSource or source._sources is not origin or origin[4] is not controller:
                 raise ValueError('drain_original_coordinator_source_changed')
@@ -613,32 +645,13 @@ def _refresh_targets(controller) -> bool:
         migration = current_standalone_migration(controller)
         if migration is not None:
             migration.require_unchanged()
-        controller._closed_role_sources = require_role_coverage(
-            controller.paths, controller.c_run_id, count=controller.count, captured=controller._closed_role_sources,
-            committed=_current_receipt_sources(controller),
-            **({"standalone": migration} if migration is not None else {}))
-        before = takeover_namespace_state(controller.paths)
-        if controller._namespaces is not None and any(
-            old is not None and (new is None or old[:2] != new[:2])
-            for old, new in zip(controller._namespaces, before, strict=True)
-        ):
-            raise ValueError("takeover_namespace_lost")
-        found = discover_takeover_targets(controller.paths, controller.count, current_c_run_id=controller.c_run_id)
-        unresolved = tuple(value for value in found if type(value) is UnresolvedExecutorSource)
-        _refresh_unresolved_sources(controller, unresolved)
-        targets = _takeover_targets_only(controller, [value for value in found if type(value) is TakeoverTarget])
-        owners = uncovered_admission_owners(controller.paths, targets, controller._accepted)
-        if takeover_namespace_state(controller.paths) != before:
-            raise ValueError("takeover_namespace_changed")
-        controller._closed_role_sources = require_role_coverage(
-            controller.paths, controller.c_run_id, count=controller.count, captured=controller._closed_role_sources,
-            committed=_current_receipt_sources(controller),
-            **({"standalone": migration} if migration is not None else {}))
-        previous = [_authority_bytes(target.scope) for target in controller.targets]
-        controller.targets, controller._unproven_owners, controller._namespaces = targets, owners, before
-        for target in (value for value in targets if _authority_bytes(value.scope) not in previous):
-            controller._quarantined.update(_scope_keys(target.scope))
-            _queue_target_recheck(controller, target)
+        from .multiprocess_executor_active_index import index_for
+
+        index = index_for(controller)
+        if not index.ready:
+            return False
+        index.check_roles(migration)
+        index.check_sources()
         return True
     except (OSError, ValueError, TypeError, KeyError) as error:
         controller._all_quarantined = True
@@ -676,7 +689,9 @@ def _pending_restriction_keys(target):
 # 函数用途: 在启动副作用前及P3锁内对照当次P1/P3覆盖快照，原拒绝后只补静态位置诊断。
 def _sources_unchanged(controller, frozen=None) -> bool:
     previous = _source_snapshot(controller) if frozen is None else frozen
-    if not _refresh_targets(controller) or _source_snapshot(controller) != previous:
+    if not _refresh_targets(controller):
+        return False
+    if _source_snapshot(controller) != previous:
         controller._all_quarantined = True
         _log_source_refusal("source_guard_refused")
         return False
@@ -758,6 +773,10 @@ def _remember_restamped(controller, path, decision) -> bool:
         if digest != record_digest(decision["reservation"]) or row["route"]["c_run_id"] != controller.c_run_id:
             raise ValueError("admission_commit_readback_changed")
         # 当前租约内的耐久提交已完成；此处仅记精确内容，撤权后的旧controller缓存不产生消费权。
+        from .multiprocess_executor_active_index import index_for
+
+        if index_for(controller).reservations.get(row["request_id"]) != row:
+            raise ValueError("admission_original_index_commit_required")
         controller._accepted[row["request_id"]] = digest
         return True
     except (OSError, ValueError, TypeError, KeyError):
@@ -770,6 +789,90 @@ def _remember_restamped(controller, path, decision) -> bool:
 def bind_admission_takeover(gate, controller):
     gate._runtime_takeover_required = True
     gate._runtime_takeover = controller
+    # 首gate组合根尚未持T/C门；失败仍绑定原controller，由原准入拒绝，不能回退纯JSON授权。
+    if controller is not None:
+        _await_cold_index(controller)
+
+
+# LLM: 仅无T/C/lease门的启动组合根按需启动冷驱动；Condition等待释放C门，不在owner短门回填或等待。
+# 函数用途: 等待固定批冷发现及首轮原隔离复核，撤权/失败/关闭均失败关闭。
+def _await_cold_index(controller):
+    from .multiprocess_executor_active_index import index_for
+
+    if (controller._mutex._is_owned() or controller._lease._lifecycle_gate._is_owned()):
+        return False
+    with controller._condition:
+        try:
+            index = index_for(controller)
+            if not index.ready and not index.failed:
+                if controller._recheck_thread is not None and not controller._cold_start_pending:
+                    return False
+                _start_cold_rechecks(controller)
+            while (not index.ready or controller._cold_start_pending):
+                if (index.failed or not controller.active() or controller._all_quarantined
+                        or controller._recheck_stop.is_set() or controller._lease._closing):
+                    return False
+                controller._condition.wait(timeout=0.1)
+            return (not index.failed and controller.active() and not controller._all_quarantined
+                    and not controller._recheck_stop.is_set() and not controller._lease._closing)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            controller._all_quarantined = True
+            controller._condition.notify_all()
+            return False
+
+
+# LLM: 与原调度共用唯一Thread/origin/ACK/stop槽；start前保原引用，失败不清未知，P6仍消费同一对象。
+# 函数用途: 只在首次实际启动需要时创建可见于原P6的冷驱动线程。
+def _start_cold_rechecks(controller):
+    if controller._recheck_thread is not None or not controller.active() or controller._recheck_stop.is_set():
+        return
+    thread = threading.Thread(target=_run_cold_rechecks, args=(controller,),
+                              name='c-takeover-recheck', daemon=True)
+    controller._cold_start_pending = True
+    controller._recheck_thread = controller._recheck_thread_origin = thread
+    controller._recheck_thread_start_unknown = True
+    controller._recheck_joined = False
+    try:
+        thread.start()
+    except BaseException:
+        controller._all_quarantined = True
+        controller._condition.notify_all()
+        raise
+    controller._recheck_thread_start_unknown = False
+
+
+# LLM: 每拍门外只推进64游标步，完成后同一个原Thread进入既有recheck循环；关闭/失败不发表ready或清隔离。
+# 函数用途: 驱动冷启动并通知首gate/worker等待者，不另造P6看不到的后台线程。
+def _run_cold_rechecks(controller):
+    from .multiprocess_executor_active_index import maintain_controller_index
+    from .multiprocess_takeover_recovery import _run_rechecks
+
+    try:
+        while not controller._recheck_stop.is_set():
+            if not controller.active() or controller._all_quarantined or controller._lease._closing:
+                return
+            progress = maintain_controller_index(controller, limit=64)
+            if progress['ready']:
+                # 首业务factory不能在索引刚ready、首轮P2尚未完成时漏掉唯一物化机会。
+                with controller._mutex:
+                    first = [(key, target, state) for key, (target, state) in controller._rechecks.items()]
+                for key, target, state in first:
+                    if controller._recheck_stop.wait(max(0.0, state['next_check_at'] - time.monotonic())):
+                        return
+                    _recheck_target(controller, key, target, state)
+                with controller._condition:
+                    controller._cold_start_pending = False
+                    controller._condition.notify_all()
+                _run_rechecks(controller)
+                return
+            controller._recheck_stop.wait(0.01)
+    except Exception:
+        with controller._condition:
+            controller._all_quarantined = True
+    finally:
+        with controller._condition:
+            controller._cold_start_pending = False
+            controller._condition.notify_all()
 
 
 # LLM: 冻结启动参数必须与真实C租约逐项相同，拒绝请求/文件冒充；只创建空闲W，不发信号或执行请求。
@@ -781,6 +884,8 @@ def spawn_coordinator_worker(launch, spawn) -> dict:
     if (lease is None or lease.controller is None or lease.c_run_id != launch.partition.c_run_id
             or lease.pid != launch.parent_pid or not _valid_launch(launch)):
         return _blocked("coordinator_context_unavailable")
+    if not _await_cold_index(lease.controller):
+        return _blocked("takeover_scope_unconfirmed")
     return lease.controller.launch_worker(launch.partition.index, spawn)
 
 

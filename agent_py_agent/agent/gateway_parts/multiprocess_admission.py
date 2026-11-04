@@ -313,6 +313,8 @@ class CoordinatorAdmissionScope:
 #   也不能被覆盖或删除。旧代与隔离分区的预留同样计入，不因代次不同而忽略。
 #   正式ordinary末发表还须原Root单次登记，不以closing阻断既有责任收尾；同步关闭门及恢复回归。
 # 类用途: C 的持久准入门：按原责任账预留和盖章，新责任与停止共门，规范终态释放和认领校验仍独立。
+# LLM: 原T→C→lease内创建与释放规范P3；准入和计账消费同一个原C责任索引，不建立替代授权。
+# 函数用途: 持久管理请求预留及额度保护，未知状态拒绝发布路由。
 class PersistentAdmission:
     # LLM: 只初始化进程内观察缓存；不读取或创建目录、不保存另一绑定版本，新实例不能继承另一个gate的耐久确认。
     # 函数用途: 冻结 C 的来源并初始化本实例的扫描和目录链观察。
@@ -343,6 +345,18 @@ class PersistentAdmission:
     # 函数用途: 扫描预留目录并汇总当前占用快照。
     def occupied_snapshot(self) -> dict:
         snapshot = {"total": 0, "per_owner": {}, "per_session": {}, "unreadable": 0}
+        controller = getattr(self, "_runtime_takeover", None)
+        if controller is not None:
+            from .multiprocess_executor_active_index import index_for
+
+            try:
+                rows = index_for(controller).active_p3()
+            except (OSError, ValueError, TypeError, KeyError):
+                snapshot.update(total=1, unreadable=1)
+                return snapshot
+            for row in rows:
+                _count_reservation_record(row, snapshot)
+            return snapshot
         directory = reservations_dir(self.paths)
         if not directory.is_dir():
             return snapshot
@@ -366,6 +380,18 @@ class PersistentAdmission:
             return runtime_rejection
         if not _valid_session_scope(session_scope):
             return _blocked("session_scope_unavailable")
+        from .multiprocess_curator_accounting import prepare_quota_admission
+
+        current = snapshot
+        if current is None:
+            report = read_json_file_report(request_path, context="gateway.admission.quota.prepare")
+            current = report.payload if report.load_error is None else None
+        if isinstance(current, dict):
+            try:
+                if not prepare_quota_admission(self, current):
+                    return _blocked("curator_quota_migration_pending")
+            except (OSError, ValueError, TypeError):
+                return _blocked("curator_quota_unavailable")
         with gateway_turn_transition(self.paths, request_path.stem), _runtime_decision_scope(self):
             rejection = _runtime_owner_rejection(self, owner)
             if rejection:
@@ -764,6 +790,11 @@ def _persist_created_record(gate, path, owner, stamped, record):
         _write_gate_record_durable(gate, reservation_file(gate.paths, path.stem), record)
     except OSError:
         return _blocked("reservation_write_failed")
+    controller = getattr(gate, "_runtime_takeover", None)
+    if controller is not None:
+        from .multiprocess_executor_active_index import index_for
+
+        index_for(controller).remember_p3(record, stamped)
     gate.observe("reservation_persisted", {"request_id": path.stem, "reservation_id": record["reservation_id"]})
     rejection = _runtime_owner_rejection(gate, owner)
     if rejection:
@@ -794,6 +825,11 @@ def _persist_reused_record(gate, path, owner, current, stamped, updated):
         _write_gate_record_durable(gate, reservation_file(gate.paths, path.stem), updated)
     except OSError:
         return _blocked("reservation_write_failed")
+    controller = getattr(gate, "_runtime_takeover", None)
+    if controller is not None:
+        from .multiprocess_executor_active_index import index_for
+
+        index_for(controller).remember_p3(updated, stamped if stamped is not None else current)
     rejection = _runtime_owner_rejection(gate, owner)
     if rejection:
         return rejection
@@ -838,11 +874,14 @@ def _read_scan_reservation(gate, path: Path, info):
     return record
 
 
-# LLM: 首写前确认完整目录链，全链失败不记确认；原子记录写和目录 fsync 仍沿原公共测试观察点。
-# 函数用途: 在本 gate 的固定目录链确认后持久写记录；错误向上抛，不发布路由。
+# LLM: 原T→C→lease内先建立原JSON伴随锁，再持久P3；索引只在本叶返回后登记版本，正常读回不新增目录项。
+# 函数用途: 沿原文件锁和耐久写叶发布预留；任一步失败都不发表路由。
 def _write_gate_record_durable(gate, path: Path, record: dict) -> None:
+    from .io import _locked_json_path
+
     confirm_reservation_chain(gate, path.parent, _fsync_directory)
-    _write_record_durable(path, record)
+    with _locked_json_path(path):
+        _write_record_durable(path, record)
 
 
 # LLM: 读不出 = 占位（total+unreadable），不归因；released 跳过；occupied 才参与 owner/会话计数。
@@ -856,6 +895,12 @@ def _count_reservation(gate, path: Path, snapshot: dict) -> None:
         snapshot["unreadable"] += 1
         snapshot["total"] += 1
         return
+    _count_reservation_record(record, snapshot)
+
+
+# LLM: 输入是原规范P3的已核投影，不读取目录、不构造新预留；released不计占用。
+# 函数用途: 共用显式组件扫描和原C活跃索引的同一名额统计规则。
+def _count_reservation_record(record: dict, snapshot: dict) -> None:
     if record.get("state") != "occupied":
         return
     snapshot["total"] += 1
@@ -1059,6 +1104,16 @@ def _release_settled_if_terminal(gate, request_id: str) -> bool:
 #   线程返回、目录移动、responses 投影、心跳消失都不会走到这里。
 # 函数用途: 在请求锁内读取规范终态并释放对应预留；无终态或校验失败一律不释放。
 def release_reservation_if_terminal(gate, request_id: str) -> dict:
+    from .multiprocess_curator_accounting import prepare_quota_release
+
+    terminal = _terminal_payload(gate.paths, request_id)
+    original = _read_reservation(reservation_file(gate.paths, request_id))
+    if terminal is not None and not (isinstance(original, dict) and original.get("state") == "released"):
+        try:
+            if not prepare_quota_release(gate, terminal):
+                return {"released": False, "reason": "curator_quota_settlement_pending"}
+        except (OSError, ValueError, TypeError):
+            return {"released": False, "reason": "curator_quota_settlement_pending"}
     record_path = reservation_file(gate.paths, request_id)
     with gateway_turn_transition(gate.paths, request_id), _runtime_decision_scope(gate):
         return _release_reservation_locked(gate, record_path, request_id)
@@ -1081,30 +1136,53 @@ def _release_reservation_locked(gate, record_path: Path, request_id: str) -> dic
     except MultiprocessRecordError as exc:
         return {"released": False, "reason": exc.reason}
     if record.get("state") == "released":
-        return _finish_runtime_released(gate, record_path, record)
+        return _finish_runtime_released(gate, record_path, record, terminal)
     with _runtime_commit_scope(gate) as rejection:
         if rejection:
             return {"released": False, "reason": rejection["reason"]}
         try:
+            from .multiprocess_curator_accounting import account_completed_terminal
+
+            account_completed_terminal(gate, record, terminal)
+        except (OSError, ValueError, TypeError):
+            return {"released": False, "reason": "curator_quota_settlement_pending"}
+        controller = getattr(gate, "_runtime_takeover", None)
+        try:
             _write_gate_record_durable(gate, record_path, updated)
         except OSError:
+            if controller is not None:
+                from .multiprocess_executor_active_index import index_for
+
+                try:
+                    index_for(controller).retain_release_attempt(updated, terminal)
+                except (OSError, ValueError, TypeError, KeyError):
+                    return {"released": False, "reason": "release_write_failed"}
             return {"released": False, "reason": "release_write_failed"}
-        controller = getattr(gate, "_runtime_takeover", None)
         if controller is not None:
+            from .multiprocess_executor_active_index import index_for
+
+            try:
+                index_for(controller).settle_p3(updated, terminal)
+            except (OSError, ValueError, TypeError, KeyError):
+                return {"released": False, "reason": "release_settlement_pending"}
             controller._accepted.pop(request_id, None)
         gate.observe("released", {"request_id": request_id})
         return {"released": True}
 
 
-# LLM: 调用方已持T/内存并核匹配终态；仅释放转换前的精确自身摘要可补耐久，不能把任意released当授权。
-# 函数用途: 幂等补上rename成功后失败的目录同步，再清自身摘要；不重写规范文件或重复计释放。
-def _finish_runtime_released(gate, record_path: Path, record: dict) -> dict:
+# LLM: 已持原T/C并核规范终态；只补原accepted或同一索引的dirty原像，不从陌生released签出新权。
+# 函数用途: 幂等补齐释放目录耐久和同一结清hint，成功后才清自身未结摘要。
+def _finish_runtime_released(gate, record_path: Path, record: dict, terminal: dict) -> dict:
     settled = {"released": False, "reason": "already_released"}
     controller = getattr(gate, "_runtime_takeover", None)
     if controller is None:
         return settled
+    from .multiprocess_executor_active_index import index_for
+
+    index = index_for(controller)
     occupied = {**record, "state": "occupied", "terminal_fact": None}
-    if controller._accepted.get(record["request_id"]) != record_digest(occupied):
+    pending = record["request_id"] in index.reservations
+    if not pending and controller._accepted.get(record["request_id"]) != record_digest(occupied):
         return settled
     with _runtime_commit_scope(gate) as rejection:
         if rejection:
@@ -1114,6 +1192,11 @@ def _finish_runtime_released(gate, record_path: Path, record: dict) -> dict:
             _fsync_directory(record_path.parent)
         except OSError:
             return {"released": False, "reason": "release_write_failed"}
+        if pending:
+            try:
+                index.settle_p3(record, terminal)
+            except (OSError, ValueError, TypeError, KeyError):
+                return {"released": False, "reason": "release_settlement_pending"}
         controller._accepted.pop(record["request_id"], None)
     return settled
 
@@ -1132,6 +1215,16 @@ def _runtime_remembers_reservation(gate, request_id: str) -> bool:
 #   已结清且身份稳定的历史released仍走缓存捷径；未结摘要强制回读后经原终态/租约门，不凭扫描放行。
 # 函数用途: 有界扫描释放已有终态名额并幂等收尾，返回本轮新释放数与实际读盘数。
 def release_settled_reservations(gate) -> dict:
+    controller = getattr(gate, "_runtime_takeover", None)
+    if controller is not None:
+        from .multiprocess_executor_active_index import index_for
+
+        try:
+            rows = index_for(controller).pending_p3()
+        except (OSError, ValueError, TypeError, KeyError):
+            return {"released": 0, "scanned": 0}
+        released = sum(int(_release_settled_if_terminal(gate, row["request_id"])) for row in rows)
+        return {"released": released, "scanned": len(rows)}
     directory = reservations_dir(gate.paths)
     if not directory.is_dir():
         return {"released": 0, "scanned": 0}

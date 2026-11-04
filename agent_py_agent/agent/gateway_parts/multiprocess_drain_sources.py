@@ -114,7 +114,7 @@ def _generation_source_entry_kind(root, parts, name):
             return 'file'
     if namespace == 'executor' and name == 'ledger.lock':
         return 'file'
-    if namespace in {'processing', 'control'} and name.endswith('.lock'):
+    if namespace in {'processing', 'control', 'admission'} and name.endswith('.lock'):
         target = name[:-5]
         if (_generation_canonical_name(root, parts, target)
                 or (namespace == 'processing' and _generation_chunk_name(root, target))):

@@ -21,9 +21,11 @@ from .multiprocess_worker_commit import WorkerCommitRejected
 
 # LLM: 实例只由已安装的原 C scope 构造，捕获原 gate/claim/controller/lease/Agent；来源摘要只证明自产 P1，不是第二权威账。
 # 类用途: 保存一个本地请求的实际协调者来源，每次写入和 spawn/R 都重新核原请求与原撤权门。
+# LLM: C本地执行者能力绑定原lease、claim与P1；精确pin结清由原finish显式记录，不能由缺失补证。
+# 函数用途: 为协调器自己的执行操作保留原提交和退出证明来源。
 class CoordinatorExecutorSource:
     __slots__ = ('_origin', '_creator_pid', '_sources', '_root', '_partition', '_transition',
-                 '_executor_records', '_pins', '_domains', '_epoch')
+                 '_executor_records', '_pins', '_domains', '_epoch', '_finished_pins')
 
     # LLM: 构造不造claim/worker；只认原main或自产actualchild绑定，原T/P3/P5最终核；缺controller拒，gate.agent不改。
     # 函数用途: 固定当前 C 本地认领及其物理域收尾引用，不从热配置重新选 owner。
@@ -46,6 +48,7 @@ class CoordinatorExecutorSource:
                             ('_transition', GatewayActiveTurnTransition(execution.claim.path, execution.claim.request_id,
                                                                        execution.claim.execution_attempt_id))):
             object.__setattr__(self, name, value)
+        object.__setattr__(self, '_finished_pins', set())
         self._require_source_identity()
         self._commit(lambda: controller._current_coordinator_sources.append((self, self._sources)))
 
@@ -135,12 +138,15 @@ class CoordinatorExecutorSource:
     # LLM: 调用方已持原 T/C 门；P1 fsync 成功后才更新进程内摘要，失败保留原账和未知责任。
     # 函数用途: 同步写入 canonical 记录并发布准确的自产来源摘要。
     def _write(self, row, state=None, registration=None):
+        from .multiprocess_executor_active_index import capture_coordinator_descriptor, index_for
+        descriptor = capture_coordinator_descriptor(self, row) if state is None else None
         identifier = row['reservation_id']
         if state is not None and self._executor_records.get(identifier) != record_digest(row):
             raise WorkerCommitRejected('original_coordinator_executor_submission_required')
         ledger = ExecutorLedger(self.root, self.partition)
         result = ledger.reserve(row) if state is None else ledger.advance(row, state, registration)
         self._executor_records[identifier] = record_digest(result)
+        index_for(self._sources[4]).remember_executor(ledger, result, self, descriptor)
         return result
 
     # LLM: closing 可读原账，不复活执行权；只读入口不核尚在 processing 的业务状态。
@@ -190,6 +196,7 @@ class CoordinatorExecutorSource:
                 raise WorkerCommitRejected('original_coordinator_executor_pin_required')
             retire_coordinator_commit(lease, pin)
             self._pins.remove(pin)
+            self._finished_pins.add(pin)
 
     # LLM: 原引用表不是第二生命周期权威；只由真实 domain 判定 barrier，不修改 P1/P3，不重建丢失对象。
     # 函数用途: 对实际已退出的本地执行域结清物理责任，活或未知域原样保留。

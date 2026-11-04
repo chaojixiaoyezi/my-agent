@@ -51,6 +51,8 @@ class WorkerCommitNotStarted(WorkerCommitRejected):
 
 # LLM: 仅可信launcher交原Popen；本对象不由文件重建，不物化owner，不跨fork运输。
 # 类用途: 把原C准入短门与原lease在途责任组合起来。
+# LLM: 原W出生绑定限定claim及P1提交，精确pin的完成事件由原finish产出，不扩展冻结调用合同。
+# 函数用途: 为worker的执行者启动和回送提供可追溯的原始提交来源。
 class WorkerCommitIssuer:
     # LLM: 构造独立捕获本对象及原launch/Popen引用和P0/C身份，浅拷贝/公开字段替换不能改来源；P4不符拒绝。
     # 函数用途: 固定一个真实worker实例与它自己的协调者来源。
@@ -62,6 +64,8 @@ class WorkerCommitIssuer:
         self._lease = coordinator_for_root(control.paths.root, context=control)
         self._controller = control.controller()
         self._pins = set()
+        # 只有原finish producer成功后加入；缺pin不是结清历史。
+        self._finished_pins = set()
         self._executor_records = {}
         if (type(launch) is not WorkerLaunch or not _valid_launch(launch)
                 or type(process) is not subprocess.Popen or process.poll() is not None
@@ -128,6 +132,8 @@ class WorkerCommitIssuer:
         self._require_worker(self.process.pid)
         ledger = ExecutorLedger(self.control.paths.root, self.launch.partition)
         source = ledger._bound_record(record)
+        from .multiprocess_executor_active_index import capture_worker_descriptor, index_for
+        descriptor = capture_worker_descriptor(self, source) if state is None else None
         committed = []
 
         # LLM: 由原P2短门同步调用，写入成功与摘要发布不可被另一次源发现分开。
@@ -140,6 +146,7 @@ class WorkerCommitIssuer:
                 raise WorkerCommitRejected('original_executor_submission_required')
             row = (ledger.reserve(source) if state is None else ledger.advance(source, state, registration))
             self._executor_records[identifier] = record_digest(row)
+            index_for(self._controller).remember_executor(ledger, row, self, descriptor)
             committed.append(row)
 
         decision = self._controller.launch_owner_writer(source['owner_sha'], commit)
@@ -162,6 +169,7 @@ class WorkerCommitIssuer:
             except CoordinatorUnavailable as error:
                 raise WorkerCommitRejected('original_commit_lease_required') from error
             self._pins.remove(pin)
+            self._finished_pins.add(pin)
 
     # LLM: 先核原issuer自身身份再访问原controller/lease，浅拷贝、缺来源或同run_id替换C不能借用。
     # 函数用途: 每次新提交锁前确认本原对象仍属于当前原C。

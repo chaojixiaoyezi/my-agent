@@ -58,11 +58,13 @@ def _read_quota(path):
         rows = value.get("accounted_records")
         if type(rows) is not list or len(set(rows)) != len(rows) or any(type(row) is not str or len(row) != 64 or any(char not in "0123456789abcdef" for char in row) for row in rows):
             raise ValueError("curator_quota_records_invalid")
-    if value.get("date") != quota_date():
+    day = quota_date()
+    if value.get("date") != day:
+        rollover = {"quota_rollover": value} if value.get("date") else {}
         if value.get("schema_version") == _QUOTA_SCHEMA:
-            return {**value, "date": quota_date(), "count": 0, "accounted_records": []}
-        return {"date": quota_date(), "count": 0}
-    return value or {"date": quota_date(), "count": 0}
+            return {**value, "date": day, "count": 0, "accounted_records": [], **rollover}
+        return {"date": day, "count": 0, **rollover}
+    return value or {"date": day, "count": 0}
 
 
 # LLM: 所有模式共用原文件锁与原date/count；额外读取只用于保留已经存在的v2事实，不丢去重身份。
@@ -74,11 +76,19 @@ def read_quota_count(path):
         return _read_quota(Path(path))["count"]
 
 
-# LLM: C从原owner固定run分片读取实际final审计；单行必须通过原严格schema，缺分片才是零，损坏/权限拒绝不是零。
-# 函数用途: 只读提取当前owner当日真正succeeded/failed运行的稳定会计身份。
+# LLM: 一次原读取冻结UTC日；跨零点不能打开昨日分片后再按今日过滤，公开签名和原owner/run去重不变。
+# 函数用途: 读取同一UTC日的真实final身份，显式日期私有叶供迟到结清复用。
 def owner_consumed_records(home_root, owner, *, run_id=None):
+    return _owner_records_for_date(home_root, owner, quota_date(), run_id=run_id)
+
+
+# LLM: day是受信会计冻结的UTC分片，不由请求选路径；原no-follow/严格schema和重复final拒绝保持。
+# 函数用途: 为原公开读口和跨日重放读取准确一天的原审计。
+def _owner_records_for_date(home_root, owner, day, *, run_id=None):
+    if type(day) is not str or datetime.fromisoformat(day).date().isoformat() != day:
+        raise ValueError("curator_quota_date_invalid")
     home = _owner_home_dir(Path(home_root), owner)
-    relative = ("memory", "curator", "runs", quota_date() + ".jsonl")
+    relative = ("memory", "curator", "runs", day + ".jsonl")
     try:
         descriptor = open_readonly_file_beneath(home, relative)
     except FileNotFoundError:
@@ -89,7 +99,7 @@ def owner_consumed_records(home_root, owner, *, run_id=None):
             if not line.strip():
                 raise ValueError("curator_quota_audit_invalid")
             record = CuratorRunRecord.from_record(load_strict_json(line))
-            if record.phase == "final" and record.status in {"succeeded", "failed"} and record.finished_at[:10] == quota_date() and (run_id is None or record.run_id == run_id):
+            if record.phase == "final" and record.status in {"succeeded", "failed"} and record.finished_at[:10] == day and (run_id is None or record.run_id == run_id):
                 if record.run_id in run_ids:
                     raise ValueError("curator_quota_run_binding_ambiguous")
                 run_ids.add(record.run_id)
@@ -160,25 +170,51 @@ def _reconcile_unlocked(path, home_root, owners=None):
     return value
 
 
-# LLM: 原quota RMW/账不变；实际叶只在本次同PID/thread同步窗口消费一次并finally失效，producer另守同Root末门，默认None保controller/额度锁。
-# 函数用途: 合并实际完成身份，并让当前C关闭栅栏覆盖这次原全局会计写。
+# LLM: 原冻结入口仍消费同Root末门；原审计固定批读取先在热门外完成，callback里只复核CAS及写唯一quota。
+# 函数用途: 按给定活跃owner准备增量核算，不再从该入口耗尽注册用户。
 def reconcile_quota(control, owners, *, commit_transition=None):
     controller = control.controller()
     if controller is None:
         raise ValueError("curator_quota_coordinator_required")
-    path = control.home_root / "global_index" / "curator_daily_quota.json"
+    return _prepare_quota_step(controller, control.home_root, owners, commit_transition=commit_transition)
+
+
+# LLM: 真实读取不持T/controller/quota锁；原短提交中的单次cell仍拒fork/异线程/复用/退出后执行。
+# 函数用途: 分离有界来源准备与原全局会计的短CAS落盘。
+def _prepare_quota_step(controller, home_root, owners, *, commit_transition=None):
+    from . import curator_quota_index as index
+
+    home_root = Path(home_root)
+    path = home_root / "global_index" / "curator_daily_quota.json"
+    with locked_json_path(path):
+        previous = _read_quota(path)
+    day = previous["date"]
+    candidate = index.prepare_batch(previous, home_root, day, tuple(owners), controller=controller)
+    return _commit_quota_candidate(controller, path, previous, candidate, commit_transition=commit_transition)
+
+
+# LLM: 候选只由当前门外原来源读取产生；原窗口限同PID/thread一次消费，跨日或原会计CAS变化必须重新准备。
+# 函数用途: 共用原C短门提交迁移进度和迟到完成准备，不在锁内读取历史。
+def _commit_quota_candidate(controller, path, previous, candidate, *, commit_transition=None):
+    day = previous["date"]
     committed = []
     window = [True, os.getpid(), threading.get_ident(), False]
 
-    # LLM: 原controller/Root同步消费本次cell；裸叶在任何锁或写前拒异PID/thread、重复及退出后的调用，不接受W回调或模型正文。
-    # 函数用途: 在原全局会计锁内合并实际完成身份，防止缓存裸核算叶绕过关闭门。
+    # LLM: 本叶只接收当前调用已核的一批候选，锁内不翻页、不读取Owner历史；全局文件变更或跨零点要求重试。
+    # 函数用途: 在原短门和原quota锁内原子提交这批身份、总数与游标。
     def update():
         if not window[0] or window[1:3] != [os.getpid(), threading.get_ident()] or window[3]:
             raise ValueError("curator_quota_commit_window_required")
         window[3] = True
         require_global_writer("curator_quota")
         with locked_json_path(path):
-            committed.append(_reconcile_unlocked(path, control.home_root, owners)["count"])
+            if quota_date() != day or _read_quota(path) != previous:
+                raise ValueError("curator_quota_preparation_changed")
+            if candidate != previous:
+                _write_quota_durable(path, candidate)
+            else:
+                _sync_quota(path)
+            committed.append(candidate["count"])
 
     try:
         if commit_transition is None:
@@ -206,12 +242,12 @@ def record_legacy_consumption(path, *, home_root=None, owner=None, run_id=None):
             records = owner_consumed_records(home_root, owner, run_id=run_id)
             if not records:
                 raise ValueError("curator_quota_actual_audit_required")
-            existing = set(value["accounted_records"])
-            value["count"] += len(records - existing)
-            value["accounted_records"] = sorted(existing | records)
+            from . import curator_quota_index as index
+
+            index.merge_facts(value, records, actual=False)
         else:
             value["count"] += 1
-        write_json_file_atomic_unlocked(Path(path), value)
+        _write_quota_durable(Path(path), value)
         return value["count"]
 
 
@@ -224,11 +260,20 @@ def unsettled_curator_requests(paths):
         reservations_dir,
         verify_claimable_reservation,
     )
+    from .multiprocess_coordinator import coordinator_for_root
+    from .multiprocess_executor_active_index import current_index
     from .multiprocess_route import _request_binding
 
+    index = current_index(paths)
+    if index is None:
+        lease = coordinator_for_root(paths.root)
+        if lease is not None and lease.controller is not None:
+            raise ValueError("curator_quota_responsibility_index_unknown")
+        rows = (_read_reservation(path) for path in sorted(reservations_dir(paths).glob("*.json")))
+    else:
+        rows = index.active_p3()
     count = 0
-    for path in sorted(reservations_dir(paths).glob("*.json")):
-        row = _read_reservation(path)
+    for row in rows:
         if row is _UNREADABLE or row is None:
             raise ValueError("curator_quota_request_unreadable")
         if row["state"] != "occupied":
@@ -287,7 +332,13 @@ def curator_quota_admission(gate, request):
     guards = ExitStack()
     try:
         guards.enter_context(locked_json_path(path))
-        value = _reconcile_unlocked(path, home.root)
+        from . import curator_quota_index as index
+        from .multiprocess_background_request import source_owner
+
+        value = _read_quota(path)
+        if not index.ready(value, home.root, value["date"]):
+            raise ValueError("curator_quota_migration_pending")
+        index.owner_facts(value, home.root, source_owner(ref["owner"]), value["date"])
         pending = unsettled_curator_requests(gate.paths)
         rejection = "curator_daily_quota_exhausted" if value["count"] + pending >= limit else None
     except (OSError, ValueError, TypeError) as error:
@@ -308,3 +359,180 @@ def _quota_host_paths(host):
     if type(host) is GatewayControlPlane:
         return home_paths(host.home_root), host.config
     return host.home_paths, host.config
+
+
+# LLM: 原quota唯一原子写者保留；文件和目录都fsync，rename后故障的重放也必须补耐久，不能仅看事实键存在。
+# 函数用途: 先确认完成事实与总数都耐久，才允许调用者释放P3。
+def _write_quota_durable(path, value):
+    if value.get("quota_rollover") is not None:
+        value = dict(value)
+        _archive_quota_day(path.parent, value.pop("quota_rollover"))
+    write_json_file_atomic_unlocked(path, value)
+    _sync_quota(path)
+
+
+# LLM: 只同步既有准确quota，不创建替身记录；读源仍沿原no-follow根，异常必须向上传递。
+# 函数用途: 幂等补齐先前rename成功但fsync失败的会计提交。
+def _sync_quota(path):
+    descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 原豁免在锁和quota文件物化前判断，源变化仍交原P5处理；只读准备不能给未核输入签运行许可。
+# 函数用途: 在进入admit的T门前推进一批迁移，稳态只核当前准确Owner。
+def prepare_quota_admission(gate, request):
+    from . import curator_quota_index as index
+    from .multiprocess_background_request import BackgroundSourceChanged, read_source, source_owner
+
+    ref = request.get("metadata", {}).get("background_source")
+    if request.get("kind") != "background" or type(ref) is not dict or ref.get("kind") != "curator":
+        return True
+    home, _config = _quota_host_paths(gate.agent)
+    try:
+        state = read_source(home.root, ref)
+    except BackgroundSourceChanged:
+        return True
+    if state.get("pending_reasons") or state.get("active_lease"):
+        return True
+    owner = source_owner(ref["owner"])
+    controller = getattr(gate, "_runtime_takeover", None)
+    if controller is None:
+        raise ValueError("curator_quota_coordinator_required")
+    _prepare_quota_step(controller, home.root, (owner,))
+    path = home.global_index_dir / "curator_daily_quota.json"
+    with locked_json_path(path):
+        value = _read_quota(path)
+        if not index.ready(value, home.root, value["date"]):
+            return False
+        index.owner_facts(value, home.root, owner, value["date"])
+    return True
+
+
+# LLM: 只有规范terminal给出的准确run_id才需要结清；普通失败/disabled/not_due没有实际运行，不伪造消耗。
+# 函数用途: 从原终态冻结Owner和实际策展run定位。
+def _terminal_curator_run(terminal):
+    from .multiprocess_background_request import source_owner, validate_source_ref
+
+    ref = terminal.get("metadata", {}).get("background_source")
+    if terminal.get("kind") != "background" or type(ref) is not dict or ref.get("kind") != "curator":
+        return None
+    validate_source_ref(ref)
+    result = terminal.get("terminal_response", {}).get("background_result")
+    if type(result) is not dict or result.get("status") not in {"succeeded", "failed"}:
+        return None
+    run_id = result.get("run_id")
+    if type(run_id) is not str or not run_id:
+        raise ValueError("curator_quota_actual_run_required")
+    return source_owner(ref["owner"]), run_id
+
+
+# LLM: 调用时尚未持T/controller；这里只准备准确原日账，不将未校验terminal当release许可。
+# 函数用途: 为原规范释放准备有界完成核算，失败保留原P3。
+def prepare_quota_release(gate, terminal):
+    from . import curator_quota_index as index
+
+    original = _terminal_curator_run(terminal)
+    if original is None:
+        return True
+    owner, run_id = original
+    home, _config = _quota_host_paths(gate.agent)
+    controller = getattr(gate, "_runtime_takeover", None)
+    if controller is None:
+        raise ValueError("curator_quota_coordinator_required")
+    _prepare_quota_step(controller, home.root, (owner,))
+    path = home.global_index_dir / "curator_daily_quota.json"
+    with locked_json_path(path):
+        value = _read_quota(path)
+        if not index.ready(value, home.root, value["date"]):
+            return False
+    candidate, complete = index.prepare_completion(value, home.root, owner, run_id, terminal)
+    _commit_quota_candidate(controller, path, value, candidate)
+    return complete
+
+
+# LLM: 原release_admission已在同T门核规范终态；原C/lease末门内再次核Owner、原审计版本，事实和总数原子幂等落盘。
+# 函数用途: 在原P3写released之前完成准确run的耐久计账。
+def account_completed_terminal(gate, record, terminal):
+    from . import curator_quota_index as index
+
+    original = _terminal_curator_run(terminal)
+    if original is None:
+        return
+    owner, run_id = original
+    if owner_digest(owner) != record["owner_sha"] or terminal.get("route") != record["route"]:
+        raise ValueError("curator_quota_terminal_binding_conflict")
+    home, _config = _quota_host_paths(gate.agent)
+    path = home.global_index_dir / "curator_daily_quota.json"
+    require_global_writer("curator_quota")
+    with locked_json_path(path):
+        value = _read_quota(path)
+        binding = index.completion_binding(terminal, owner, run_id)
+        receipt = value.get("quota_completion_receipts", {}).get(binding)
+        if receipt is None:
+            raise ValueError("curator_quota_completion_pending")
+        fact = index.validate_completion(receipt, home.root, owner, run_id, terminal)
+        if value.get("quota_rollover") is not None:
+            _archive_quota_day(path.parent, value.pop("quota_rollover"))
+        if receipt["day"] == value["date"]:
+            index.merge_facts(value, (fact["identity"],), actual=True)
+        else:
+            history_path = _history_path(path.parent, receipt["day"])
+            history = _read_history(history_path, receipt["day"])
+            index.merge_facts(history, (fact["identity"],), actual=True)
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_quota_durable(history_path, history)
+        del value["quota_completion_receipts"][binding]
+        _write_quota_durable(path, value)
+
+
+# LLM: 仅规范UTC日期选择原全局会计的历史日分片；当前日仍只有curator_daily_quota这一权威，不存第二个当前总数。
+# 函数用途: 给迟到结清和日切保留准确一天的唯一历史会计。
+def _history_path(global_index, day):
+    if type(day) is not str or datetime.fromisoformat(day).date().isoformat() != day:
+        raise ValueError("curator_quota_date_invalid")
+    return Path(global_index) / "curator_quota_history" / (day + ".json")
+
+
+# LLM: 历史文件只在原全局quota锁内读取；原严格schema/身份不放宽，缺分片是尚无已计消费而非原审计不存在。
+# 函数用途: 读取指定完成日的去重事实与旧累计下限。
+def _read_history(path, day):
+    raw = read_bytes_beneath(path.parent, (path.name,), require_dir_fd=True)
+    value = ({"schema_version": _QUOTA_SCHEMA, "date": day, "count": 0, "accounted_records": []}
+             if raw is None else load_strict_json(raw))
+    if (type(value) is not dict or value.get("date") != day or type(value.get("count")) is not int
+            or value["count"] < 0 or value.get("schema_version", _QUOTA_SCHEMA) != _QUOTA_SCHEMA):
+        raise ValueError("curator_quota_history_invalid")
+    records = value.get("accounted_records", [])
+    if (type(records) is not list or any(type(row) is not str or len(row) != 64
+            or any(char not in "0123456789abcdef" for char in row) for row in records)
+            or len(set(records)) != len(records)):
+        raise ValueError("curator_quota_history_invalid")
+    return {**value, "schema_version": _QUOTA_SCHEMA, "accounted_records": records}
+
+
+# LLM: 先耐久旧日分片再覆盖当前日；崩溃时旧main仍可重放，已含迟到事实的历史不能被旧快照覆盖或减账。
+# 函数用途: 原会计日切时保留旧日总数和事实，释放流程仍用同一原锁串行。
+def _archive_quota_day(global_index, value):
+    path = _history_path(global_index, value["date"])
+    previous = read_bytes_beneath(global_index, ("curator_quota_history", path.name), require_dir_fd=True)
+    if previous is not None:
+        saved = _read_history(path, value["date"])
+        if (saved["count"] < value["count"]
+                or not set(value.get("accounted_records", [])) <= set(saved["accounted_records"])):
+            raise ValueError("curator_quota_history_conflict")
+        _sync_quota(path)
+        return
+    archive = {key: item for key, item in value.items()
+               if key not in {"quota_rollover", "quota_pending_completions", "quota_completion_receipts"}}
+    archive.setdefault("schema_version", _QUOTA_SCHEMA)
+    archive.setdefault("accounted_records", [])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_quota_durable(path, archive)
