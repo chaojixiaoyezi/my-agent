@@ -1,4 +1,4 @@
-# LLM: 加载名是线程展示事实，不是权限；只读正式搜索信封并原子并入线程，不从摘要正文反推或写Agent全局状态。
+# LLM: 加载名是线程展示事实，不是权限；只读正式搜索信封或宿主资产库存并原子并入线程，不从正文反推或写Agent全局状态。
 # 模块用途: 压缩后恢复同线程工具表，并从当前授权快照提供不改原生定义的参数速查。
 from collections.abc import Callable, Iterable
 from copy import deepcopy
@@ -89,6 +89,49 @@ def ordered_thread_loaded_tools(agent: object, params: object) -> tuple[str, ...
         return ()
     thread = store.threads.load(thread_id)
     return normalized_loaded_tools(getattr(thread, "loaded_tool_names", ()))
+
+
+# LLM: 仅主线程非隔离范围在当前授权快照内预挂资产工具；一次CAS合并loaded/history/pins，不伪造搜索或授予执行权。
+# 函数用途: 把可调用固定资产的两个管理入口持久挂到本线程，之后资产删除也不回收。
+def mount_thread_asset_tools(agent: object, params: object, *, runtime_snapshot: object) -> tuple[str, ...]:
+    from ..capability.turn_recommendations import authorized_asset_tools, inventory_for_agent
+    from ..runtime_context import current_subagent_run_id
+
+    attrs = getattr(params, "task_attributes", None) or {}
+    scope = str(getattr(params, "context_scope", "default") or "").strip().lower()
+    if scope in {"task_local", "isolated", "control_plane"} or attrs.get("agent_thread_id") or current_subagent_run_id(agent):
+        return ()
+    thread_id = run_thread_id(params)
+    store = getattr(agent, "conversation_store", None)
+    if not thread_id or store is None:
+        return ()
+    allowed = getattr(params, "allowed_tools", None)
+    names = authorized_asset_tools(runtime_snapshot, allowed)
+    rows, monitors, home = inventory_for_agent(agent, runtime_snapshot=runtime_snapshot, allowed_tools=allowed)
+    if not names or not any(row.get("kind") in {"script", "workflow"} and row.get("enabled") is True
+                            and row.get("metadata", {}).get("hidden") is not True for row in rows):
+        return ()
+
+    # LLM: 锁内仅合并最新线程的已结构化名称，保留所有并发发现顺序和无关metadata；重复挂载不刷新revision。
+    # 函数用途: 原子发布同一线程的三份工具展示事实。
+    def merge(thread):
+        loaded = normalized_loaded_tools([*thread.loaded_tool_names, *names])
+        metadata = dict(thread.metadata)
+        history = normalized_loaded_tools([*metadata.get("discovered_tool_history", ()), *thread.loaded_tool_names, *names])
+        pins = normalized_loaded_tools([*metadata.get("pinned_tool_names", ()), *names])
+        metadata["discovered_tool_history"], metadata["pinned_tool_names"] = list(history), list(pins)
+        added = tuple(name for name in names if name not in thread.loaded_tool_names)
+        if added:
+            revisions = discovery_revisions(thread)
+            metadata["discovered_tool_revisions"] = {**revisions, **dict.fromkeys(added, max(revisions.values(), default=0) + 1)}
+        return replace(thread, loaded_tool_names=loaded, metadata=metadata) if (
+            loaded != thread.loaded_tool_names or metadata != thread.metadata) else thread
+
+    try:
+        current = store.threads.update_atomic(thread_id, merge)
+    except FileNotFoundError:
+        return ()
+    return normalized_loaded_tools(current.loaded_tool_names)
 
 
 # LLM: 每个循环仅在首次渲染时取本线程顺序；只写原展示状态，名称仍由loaded set及当前授权快照过滤。
