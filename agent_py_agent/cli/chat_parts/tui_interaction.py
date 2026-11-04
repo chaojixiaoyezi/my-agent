@@ -48,6 +48,7 @@ class TuiInteractionSnapshot:
     help_open: bool = False
     todos_expanded: bool = False
     mouse_capture_enabled: bool = True
+    todo_scroll_offset: int = 0
 
 
 # LLM: _HistorySearchSession 是 Ctrl-R 的内部游标；entries 已按新到旧去重，query 匹配只影响编辑器投影，不执行历史 prompt。
@@ -79,6 +80,7 @@ class TuiInteractionState:
         self._is_pasting = False
         self._help_open = False
         self._todos_expanded = False
+        self._todo_scroll_offset = 0
         self._mouse_capture_enabled = bool(mouse_capture_enabled)
         self._current_pasted_text_refs: tuple[TuiPastedTextRef, ...] = ()
         self._current_media_refs: tuple[TuiMediaRef, ...] = ()
@@ -106,6 +108,7 @@ class TuiInteractionState:
                 help_open=self._help_open,
                 todos_expanded=self._todos_expanded,
                 mouse_capture_enabled=self._mouse_capture_enabled,
+                todo_scroll_offset=self._todo_scroll_offset,
             )
 
     # LLM: 帮助面板只是一项显式 UI 状态；切换不能向输入 Buffer 写入 `?`、提交命令或改会话历史。
@@ -128,14 +131,28 @@ class TuiInteractionState:
         return True
 
     # LLM: Todo expansion is a process-local display preference only; toggling it must not
-    # mutate task_progress, reorder canonical items, or enter the conversation transcript.
-    # 函数用途: 用 Ctrl-T 在四条任务窗口和完整任务清单之间切换，并请求界面重绘。
+    # mutate task_progress, reorder canonical items, or enter the conversation transcript; reset viewport on each toggle.
+    # 函数用途: 用 Ctrl-T 切换任务视口并归零滚动位置，请求界面重绘。
     def toggle_todos(self) -> bool:
         with self._lock:
             self._todos_expanded = not self._todos_expanded
+            self._todo_scroll_offset = 0
             expanded = self._todos_expanded
         self._notify()
         return expanded
+
+    # LLM: 只修改进程内显示偏移；渲染/resize可传当前上限，回调仍在锁外执行。
+    # 函数用途: 滚动任务列表，并将偏移夹在零和当前末页之间。
+    def scroll_todos(self, delta: int, *, max_offset: int | None = None) -> int:
+        with self._lock:
+            offset = max(0, self._todo_scroll_offset + int(delta))
+            if max_offset is not None:
+                offset = min(offset, max(0, int(max_offset)))
+            changed = offset != self._todo_scroll_offset
+            self._todo_scroll_offset = offset
+        if changed:
+            self._notify()
+        return offset
 
     # LLM: 鼠标 capture 只控制 prompt_toolkit 是否请求终端鼠标协议；它不改变 transcript、选区正文或配置默认值。
     # 函数用途: 在终端原生复制/右键模式与 TUI 滚轮/点击模式之间切换，并返回切换后的 capture 状态。

@@ -124,6 +124,7 @@ class TuiStatus:
     context_usage: TuiContextUsage | None = None
     model_metrics: dict[str, object] = field(default_factory=dict)
     completion: dict[str, object] = field(default_factory=dict)
+    thread_id: str = ""
 
 
 # LLM: TuiDiagnostic 记录被拒绝/未知/非法事件的有界机器事实，默认不作为用户消息显示。
@@ -286,7 +287,7 @@ class _TuiPermissionReducerMixin:
 # LLM: TuiViewModelReducer 是事件到显示状态的唯一转换表；权限方法按领域拆入内部 mixin，新增 kind 仍须注册 handler 并补状态转换测试。
 # 类用途: 顺序应用已通过 journal 的事件，并维持 active→stable 一次冻结。
 class TuiViewModelReducer(_TuiPermissionReducerMixin):
-    # LLM: handler registry 明确列出显示事件；稳定块和近期去重身份分别有界，持久历史不在 reducer 保存。
+    # LLM: handler registry明确列出显示事件；在途phase只按请求跟踪显示，终态/reset释放，不保存执行权限。
     # 函数用途: 初始化空显示和唯一事件表；会话重置走显式事件，不读取命令正文或改变真实任务。
     def __init__(
         self,
@@ -303,6 +304,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self._confirmed_steer_ids: OrderedDict[str, None] = OrderedDict()
         self.permission: TuiPermissionOverlay | None = None
         self.status = TuiStatus()
+        self._active_turn_phases: dict[str, str] = {}
         self.background_sync_failed = False
         self.selected_model_name = ""
         self.diagnostics: list[TuiDiagnostic] = []
@@ -380,11 +382,12 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         }
 
     # LLM: 只消费服务端确认的重置事件；保留模型偏好和真实待处理审批显示，不调用业务、关闭进程或取消后台任务。
-    # 函数用途: 清空旧会话显示块及去重索引，新线程的历史从空视图开始恢复。
+    # 函数用途: 清空旧会话显示与去重索引，并将状态绑定到已确认的新线程。
     def _handle_conversation_reset(self, event: TuiEvent) -> None:
         selected, permission = self.selected_model_name, self.permission
         self.__init__(max_diagnostics=self.max_diagnostics, max_stable_blocks=self.max_stable_blocks)
         self.selected_model_name, self.permission = selected, permission
+        self.status = replace(self.status, thread_id=str(event.payload.get("thread_id") or ""))
 
     # LLM: Only typed foreground provenance selects disposable observer copies. Keep stable seen IDs
     # to reject late replay; do not touch canonical messages, other requests, queues, Todo or status.
@@ -654,17 +657,14 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # LLM: Only a canonical compact boundary may advance the visible main-agent count. The last
     # provider preflight snapshot describes the pre-compact history, so it must be retired until
     # the next real model call publishes a fresh model_visible_context_usage.v1 snapshot.
-    # 函数用途: 记录成功 Compact 次数、清掉已失效的旧 Context 数字，并保留稳定边界提示。
+    # 函数用途: 按线程记录Compact次数，清掉旧Context并保留稳定边界提示。
     def _handle_compact_boundary(self, event: TuiEvent) -> None:
         generation = _nonnegative_int(event.payload.get("compact_generation"), 0)
         if generation <= 0:
             raise ValueError("compact_generation must be positive")
-        self.status = replace(
-            self.status,
-            compact_count=max(self.status.compact_count, generation),
-            context_tokens=0,
-            context_usage=None,
-        )
+        self.status = _status_with_update(self.status, replace(event, payload={
+            **event.payload, "compact_count": generation, "context_usage_cleared": True,
+        }))
         self._handle_system_message(event)
 
     # LLM: Compact 开始事件必须创建独立 active block，不得复用 thinking 或修改会话 compact generation。
@@ -1179,17 +1179,36 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             event,
         )
 
-    # LLM: turn 状态只由 kind 映射；终态先清易失参数行，payload 文案不参与
-    # running/failed/interrupted 判断。
+    # LLM: turn状态只由kind映射；按精确请求收口，其他仍在途的回合保留其显示phase，不解析文案。
     # 函数用途: 收口临时展示并更新当前回合状态和事件时间。
     def _handle_turn_status(self, event: TuiEvent) -> None:
-        if event.kind in {"turn_completed", "turn_failed", "turn_interrupted", "turn_observation_ended"}:
+        terminal = event.kind in {"turn_completed", "turn_failed", "turn_interrupted", "turn_observation_ended"}
+        if terminal:
             self._clear_tool_input_blocks()
+            self._active_turn_phases.pop(event.request_id, None)
+        elif event.request_id:
+            self._active_turn_phases[event.request_id] = (
+                "interrupting" if event.kind == "turn_interrupt_requested" else "running")
         self.status = _status_for_turn_event(self.status, event)
+        if terminal and self._active_turn_phases:
+            self.status = replace(self.status, phase=next(reversed(self._active_turn_phases.values())))
 
-    # LLM: status_updated 只接受显式数值/模式字段，不能从格式化统计行反解析。
-    # 函数用途: 合并 token、tool round、activity 和 mode 状态。
+    # LLM: 本地精确release只结束对应显示请求及实际活动ID；最后一个观察结束回到idle，不伪造后端成功。
+    # 函数用途: 合并统计状态，并在前台显示交接结束时撤下该回合残留的活动块。
     def _handle_status_updated(self, event: TuiEvent) -> None:
+        if (event.payload.get("foreground_observation_released") is True
+                and event.payload.get("gateway_request_id") == event.request_id
+                and event.block_id == f"foreground-release:{event.request_id}"):
+            block_ids = event.payload.get("foreground_block_ids")
+            if isinstance(block_ids, (list, tuple)):
+                for block_id in block_ids:
+                    if isinstance(block_id, str):
+                        self.active_blocks.pop(block_id, None)
+            request_id = event.payload.get("foreground_request_id")
+            if isinstance(request_id, str) and request_id in self._active_turn_phases:
+                self._active_turn_phases.pop(request_id)
+                phase = next(reversed(self._active_turn_phases.values())) if self._active_turn_phases else "idle"
+                self.status = replace(self.status, phase=phase)
         self.status = _status_with_update(self.status, event)
 
     # LLM: block 工厂只拷贝公开字段，禁止把完整未知 payload 塞进 metadata 后被 renderer 意外展示。
@@ -1397,8 +1416,11 @@ def _status_for_turn_event(status: TuiStatus, event: TuiEvent) -> TuiStatus:
 
 
 # LLM: 数值仅取 typed payload；只有显式 context_usage_cleared 才撤下旧快照，坏 schema 不清合法数字。
-# 函数用途: 合并状态与最近上下文，空闲恢复显示数字，成功压缩后不保留压缩前的假读数。
+# 函数用途: 同线程单调合并状态；换线程先清旧指标，包括新帧的空值，再采用新线程事实。
 def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
+    thread_id = str(event.payload.get("thread_id") or "").strip()
+    if thread_id and status.thread_id and thread_id != status.thread_id:
+        status = replace(status, compact_count=0, context_tokens=0, context_usage=None, model_metrics={})
     context_usage = _context_usage_from_mapping(
         event.payload.get("context_usage"),
         status.context_usage,
@@ -1422,6 +1444,7 @@ def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
     return replace(
         status,
         activity=str(event.payload.get("activity") or status.activity),
+        thread_id=thread_id or status.thread_id,
         last_event_at=event.created_at or status.last_event_at,
         context_tokens=context_tokens,
         output_tokens=_nonnegative_int(event.payload.get("output_tokens"), status.output_tokens),

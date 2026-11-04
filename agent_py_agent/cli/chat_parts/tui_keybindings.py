@@ -330,7 +330,7 @@ def _register_scroll_bindings(
 
 
 # LLM: 鼠标切换独立于聊天过滤，Goal模态也可用；其余聊天动作仍整体让位，不能操作背后的草稿或发送请求。
-# 函数用途: 合并全局鼠标兼容键与有Goal隔离的聊天快捷键，不改模态自己的Esc动作。
+# 函数用途: 合并全局鼠标、独立任务滚动和有Goal隔离的聊天键，不改已有历史/正文滚动键。
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     from prompt_toolkit.application import get_app
     from prompt_toolkit.filters import Condition
@@ -363,6 +363,9 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
         "c-t",
         filter=~filters.history_search_active & ~filters.permission_active,
     )(lambda e: _handle_ctrl_t_keybinding(e, params))
+    todo_scroll = filters.chat_active & Condition(lambda: _todo_scroll_limit(params) > 0)
+    kb.add("s-up", filter=todo_scroll)(lambda e: _scroll_todos(params, -max(1, int(e.arg))))
+    kb.add("s-down", filter=todo_scroll)(lambda e: _scroll_todos(params, max(1, int(e.arg))))
     kb.add("c-e", filter=filters.chat_active)(
         lambda e: _handle_ctrl_e_keybinding(e, params)
     )
@@ -372,6 +375,27 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
         lambda: not bool(getattr(get_app(), "_my_agent_goal_editor_open", False))
     ))
     return merge_key_bindings([chat, mouse])
+
+
+# LLM: 只读取当前runtime的typed任务快照和终端尺寸，不从标题推断溢出，不接管其它模式。
+# 函数用途: 展开且溢出时返回任务末页偏移；其它情况不启用Shift方向键。
+def _todo_scroll_limit(params: TuiCreateKeybindingsParams) -> int:
+    from prompt_toolkit.application import get_app
+
+    if not _required_interaction(params).snapshot().todos_expanded:
+        return 0
+    runtime = _active_tui_runtime(params)
+    count = next((sum(isinstance(item, dict) for item in block.metadata.get("items", []))
+                  for block in runtime.store.snapshot().active_blocks if block.role == "todo"), 0)
+    # 与任务Window/context相同的含标题视口：三分之一终端，至少三行。
+    rows = max(3, get_app().output.get_size().rows // 3)
+    return max(0, count - (rows - 1))
+
+
+# LLM: 任务滚动只改interaction偏移，不触碰输入Buffer、history或transcript anchor。
+# 函数用途: 将Shift方向键交给有边界的任务视口。
+def _scroll_todos(params: TuiCreateKeybindingsParams, delta: int) -> None:
+    _required_interaction(params).scroll_todos(delta, max_offset=_todo_scroll_limit(params))
 
 
 # LLM: help toggle 只修改 TuiInteractionState 并请求重绘；`?` 不得成为 prompt、slash command 或历史正文。

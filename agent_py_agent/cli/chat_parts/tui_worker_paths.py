@@ -129,7 +129,7 @@ def _gateway_timeout(cfg: Any) -> float:
     return float(cfg.agent.config.gateway_request_timeout)
 
 
-# LLM: Gateway typed provider error 保留已安全投影正文，技术错误另列；max-tokens 仍非完整回复，silent stop 不落正文。
+# LLM: Gateway错误保留安全正文且技术错误另列；prompt沿精确adapter围栏，silent stop不落正文。
 # 函数用途: 把 Gateway response 转为统一终态；不把坏工具参数前的半句话当正常完成，也不丢掉该段正文。
 def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.gateway_parts.response_renderer import (
@@ -141,11 +141,12 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
     if is_silent_user_stop(response):
         return "", False, TuiTurnSummary(ok=False, interrupted=True)
     if ctx.job.show_prompt and response.get("prompt"):
-        ctx.cfg.tui_runtime.write_console(
-            "===== FINAL PROMPT =====\n"
-            + str(response.get("prompt") or "")
-            + "\n===== RESPONSE ====="
-        )
+        with ctx.cfg.tui_runtime.turn_console_output(getattr(ctx, "turn_adapter", None)):
+            ctx.cfg.tui_runtime.write_console(
+                "===== FINAL PROMPT =====\n"
+                + str(response.get("prompt") or "")
+                + "\n===== RESPONSE ====="
+            )
     if not response.get("ok"):
         from ...agent.gateway_parts.request_errors import (
             gateway_client_error_message,
@@ -156,6 +157,8 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
             response.get("user_error")
             or gateway_client_error_message(response.get("error_code"))
         )
+        if not response.get("user_error") and error == gateway_client_error_message(None):
+            error += _public_failure_diagnostics(response)
         text = str(response.get("response") or "") if gateway_model_response_error_projection(response) else ""
         return text, False, TuiTurnSummary(response_text=text, ok=False, error=error)
     text = str(response.get("response") or "")
@@ -172,6 +175,32 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
         tool_rounds=_nonnegative_int(response.get("tool_rounds")),
     )
     return text, False, summary
+
+
+# LLM: 只消费公开标量；字段独立校验，不泄露raw error、不让控制字符或巨量数字撑坏终端。
+# 函数用途: 为通用失败提示生成有界错误码、请求编号、耗时和尝试次数后缀。
+def _public_failure_diagnostics(response: dict[str, Any]) -> str:
+    import math
+
+    parts = []
+    for field, label in (("error_code", "错误码"), ("request_id", "请求")):
+        value = response.get(field)
+        if isinstance(value, str) and value.isprintable() and value.strip():
+            parts.append(f"{label} {value.strip()[:120]}")
+    duration = response.get("duration_seconds")
+    if type(duration) in (int, float):
+        try:
+            seconds = float(duration)
+        except (ValueError, OverflowError):
+            seconds = -1.0
+        if math.isfinite(seconds) and seconds >= 0:
+            formatted = f"{seconds:.1f}"
+            if len(formatted) <= 32:
+                parts.append(f"用时 {formatted}s")
+    attempts = response.get("attempts")
+    if type(attempts) is int and attempts >= 0 and attempts.bit_length() <= 64:
+        parts.append(f"尝试 {attempts} 次")
+    return "（" + " · ".join(parts) + "）" if parts else ""
 
 
 # LLM: Only host-owned turn_end/runtime fields select this display notice. No prose parsing,
