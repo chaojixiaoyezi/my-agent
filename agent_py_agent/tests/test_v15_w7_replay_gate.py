@@ -178,3 +178,90 @@ def test_rollback_and_environment_failures(versioned_store):
     assert store.get_script('sample')['code'] == old_code
     assert latest_version(store.owner_home, 'script', 'sample')['version'] == 3
     assert [edge['verdict'] for edge in read_compat_edges(store.owner_home, 'script', 'sample')] == ['replay_passed', 'replay_failed']
+
+
+@pytest.fixture
+def active_trial(versioned_store):
+    """沿真实Store和晋升路由建立试用，回放算法由现有精确比较用例覆盖。"""
+    store, _ = versioned_store
+    descriptor = AssetDescriptor('sample', 'script', 'sample')
+    store.save_script(descriptor, 'def main(inputs):\n return {"ok": True}\n')
+    code = 'def main(inputs):\n return {"ok": True}\n# candidate\n'
+
+    def passed(home, script_id, source, desc, *, options=None):
+        return {'verdict': 'passed', 'replayed': 1, 'hashes': []}
+
+    result = routes.route_existing_script(store.owner_home, 'sample', code,
+        maintenance_mode='autonomous', replay=passed)
+    assert result['status'] == 'promoted'
+    current = store.get_script('sample')
+    execution = {'call_id': 'trial-call', 'sha256': hashlib.sha256(code.encode()).hexdigest(),
+                 'ok': False, 'error_code': 'SCRIPT_OUTPUT_INVALID'}
+    return store, current, execution, result['version']
+
+
+@pytest.mark.parametrize('version_mode', ['omitted', 'null', 'current'])
+@pytest.mark.parametrize('captured', [False, True])
+def test_trial_optional_version_accepts_matching_sha(active_trial, version_mode, captured):
+    store, current, execution, version = active_trial
+    if version_mode != 'omitted':
+        execution['version'] = None if version_mode == 'null' else version
+    if captured:
+        execution.update(verified=True, source_scope='owner',
+            execution_definition_ref=current['execution_definition_ref'],
+            published_definition_ref=current['execution_definition_ref'], requested_version=None)
+    result = routes.observe_evolution_trial(store.owner_home, 'sample', execution)
+    assert result == {'status': 'trial', 'failures': 1}
+    assert routes.observe_evolution_trial(store.owner_home, 'sample', execution) is None
+    trial = routes.read_evolution_json(store.owner_home,
+        ('data', 'asset_evolution', 'trials', 'sample.json'))
+    assert trial['failures'] == 1 and trial['seen_calls'] == ['trial-call']
+    assert store.get_script('sample') == current
+
+
+@pytest.mark.parametrize('version', [0, 1, 3, '2'])
+@pytest.mark.parametrize('captured', [False, True])
+def test_explicit_stale_trial_version_never_counts_same_sha(active_trial, version, captured):
+    store, current, execution, _ = active_trial
+    execution['version'] = version
+    if captured:
+        execution.update(verified=True, source_scope='owner',
+            execution_definition_ref=current['execution_definition_ref'],
+            published_definition_ref=current['execution_definition_ref'], requested_version=None)
+    assert routes.observe_evolution_trial(store.owner_home, 'sample', execution) is None
+    trial = routes.read_evolution_json(store.owner_home,
+        ('data', 'asset_evolution', 'trials', 'sample.json'))
+    assert trial['active'] is True and trial['failures'] == 0 and trial['seen_calls'] == []
+    assert store.get_script('sample') == current
+
+
+@pytest.mark.parametrize('identity', [
+    {'schema_version': 'asset_execution.v1'}, {'verified': False}, {'verified': True},
+    {'source_scope': 'workspace'}, {'execution_definition_ref': 'different'},
+    {'published_definition_ref': 'different'},
+])
+def test_partial_or_unverified_capture_cannot_become_sha_only(active_trial, identity):
+    store, current, execution, _ = active_trial
+    execution.update(identity)
+    assert routes.observe_evolution_trial(store.owner_home, 'sample', execution) is None
+    trial = routes.read_evolution_json(store.owner_home,
+        ('data', 'asset_evolution', 'trials', 'sample.json'))
+    assert trial['failures'] == 0 and trial['seen_calls'] == []
+    assert store.get_script('sample') == current
+
+
+@pytest.mark.parametrize('change', ['code', 'summary'])
+def test_sha_only_receipt_does_not_rollback_newer_store_revision(active_trial, change):
+    store, current, execution, _ = active_trial
+    descriptor = evolution_descriptor(current).to_dict()
+    descriptor['summary'] = 'newer summary' if change == 'summary' else current['summary']
+    code = current['code'] + '# newer\n' if change == 'code' else current['code']
+    newer = store.save_script(AssetDescriptor.from_dict(descriptor), code,
+                             expected_revision=current['revision'])
+    assert routes.observe_evolution_trial(store.owner_home, 'sample', execution) == {'status': 'superseded'}
+    assert routes.observe_evolution_trial(store.owner_home, 'sample',
+        {**execution, 'call_id': 'second-call'}) is None
+    trial = routes.read_evolution_json(store.owner_home,
+        ('data', 'asset_evolution', 'trials', 'sample.json'))
+    assert trial['active'] is False and trial['failures'] == 0 and trial['seen_calls'] == []
+    assert store.get_script('sample') == newer
