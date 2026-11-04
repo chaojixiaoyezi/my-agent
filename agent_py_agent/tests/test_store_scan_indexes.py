@@ -602,9 +602,12 @@ def test_wake_and_policy_writes_are_visible_through_warm_index(tmp_path) -> None
     ]
 
 
-# LLM: 超限索引保持有界并给结构化告警，查询仍须与规范扫描一致。
-# 函数用途: 验证索引容量上限和诊断事实。
+# LLM: 新观察投影冷启动必须显式partial并有界追平，旧ScanIndex容量诊断仍独立保持原断言。
+# 函数用途: 验证分批重建结果一致及旧读取索引的容量告警。
 def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> None:
+    from agent_py_agent.agent.conversation.observation_index import ObservationIndexIncomplete
+    from agent_py_agent.agent.conversation.store_observations import _read_observation_shard_entry
+
     root = _seed_all_ledgers(tmp_path / "conversations")
     store = ConversationStore(root)
 
@@ -632,7 +635,20 @@ def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> N
             for position in range(_SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT + 10)
         ],
     )
+    with pytest.raises(ObservationIndexIncomplete):
+        _observation_snapshot(budget)
+    for _ in range((_SCAN_INDEX_MAX_RECORDS_PER_FILE_COUNT + 10) // 64 + 10):
+        work = budget.observations._index.maintenance()
+        assert work["bytes_read"] <= 131072
+        assert not work["load_errors"]
+        if work["coverage"] == "complete":
+            break
+    else:
+        pytest.fail("bounded observation backfill did not converge")
     assert _observation_snapshot(budget) == _observation_snapshot(ConversationStore(root))
+    # 显式诊断旧读取器，不能为了触发告警把整账扫描重新塞回普通pending热路。
+    budget.storage.indexes.read(budget_index, root / "observations" / "thread-huge.jsonl",
+                               _read_observation_shard_entry, use_index=True)
     assert "thread-huge.jsonl" not in budget_index._entries  # noqa: SLF001
     assert [item["reason"] for item in budget_index.warnings] == [
         "entry_record_budget_exceeded"
@@ -1409,19 +1425,32 @@ def test_planner_memo_observations_and_handled_updates(tmp_path, monkeypatch):
     assert len(calls) == 10
 
 
-# LLM: 缺失/错误handled文件不得复用上次处理代次；读取窗口内变化也不可发布成稳定缓存。
-# 函数用途: 检查处理标记被删除、损坏和恢复时沿原空映射语义即时失效。
+# LLM: 新确认是持久事实，不受旧 map 删除影响；未迁移 legacy 的损坏和恢复仍独立严格检查。
+# 函数用途: 验证旧 map 不能撤销新 ack，并保留 legacy 错误暴露与恢复断言。
 def test_planner_memo_handled_missing_corrupt_and_restored(tmp_path):
+    from agent_py_agent.agent.conversation.observation_index import ObservationIndexError
+
     store = ConversationStore(tmp_path / 'conversations')
     _seed_observations(store.storage.root, 'thread-1', [_observation_row('event')])
     store.observations.mark_handled(['event'], now=10)
     assert store.observations.unhandled_requiring_main() == []
     for text in ['{broken', '{}', '{"event": 10}']:
         store.storage.observation_handled_path.write_text(text, encoding='utf-8')
-        expected = [] if text == '{"event": 10}' else ['event']
-        assert [item.observation_id for item in store.observations.unhandled_requiring_main()] == expected
+        assert store.observations.unhandled_requiring_main() == []
+        assert ConversationStore(store.storage.root).observations.unhandled_requiring_main() == []
     store.storage.observation_handled_path.unlink()
-    assert [item.observation_id for item in store.observations.unhandled_requiring_main()] == ['event']
+    assert store.observations.unhandled_requiring_main() == []
+    assert ConversationStore(store.storage.root).observations.unhandled_requiring_main() == []
+
+    legacy = ConversationStore(tmp_path / 'legacy')
+    _seed_observations(legacy.storage.root, 'thread-1', [_observation_row('event')])
+    assert [item.observation_id for item in legacy.observations.unhandled_requiring_main()] == ['event']
+    legacy.storage.observation_handled_path.write_text('{broken', encoding='utf-8')
+    with pytest.raises(ObservationIndexError):
+        legacy.observations.unhandled_requiring_main()
+    legacy.storage.observation_handled_path.write_text('{"event": 10}', encoding='utf-8')
+    assert legacy.observations.unhandled_requiring_main() == []
+    assert ConversationStore(legacy.storage.root).observations.unhandled_requiring_main() == []
 
 
 # LLM: 现有wake全局模型缓存不能代替本次对象转换器memo；两类ScanIndex每拍read仍须原样计数。

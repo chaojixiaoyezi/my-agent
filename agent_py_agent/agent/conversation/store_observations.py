@@ -1,8 +1,9 @@
-# LLM: 观察账本与处理回执保持原路径；唤醒共用事件构造，修改须联测追加顺序、扫描与处理去重。
-# 模块用途: 保存观察事件、读取近期或待处理事实，并原子更新处理时间和线程活动投影。
+# LLM: 观察账本保持原路径；旧回执只读迁移到私有 ack journal，SQLite 损坏不得丢确认；唤醒仍共用事件构造。
+# 模块用途: 保存观察事件、读取近期或有界待处理事实，并持久确认处理和原子更新线程活动。
 from __future__ import annotations
 
 import copy
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -12,16 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_private_jsonl_records
-from ..gateway_parts.io import (
-    read_json_file_report,
-    update_json_file_atomic,
-)
+from ..gateway_parts.io import read_json_file_report
 from ..runtime_errors import runtime_error_report
 from .models import (
     ConversationThread,
     ObservationEvent,
     new_id,
 )
+from .observation_index import ObservationIndex, ObservationIndexError
 from .store_index import _file_fingerprint
 from .store_io import (
     now,
@@ -163,8 +162,8 @@ def _read_observation_shard_entry(
 # LLM: 只拥有观察账和处理回执；线程活动修改使用注入的原子更新能力。
 # 类用途: 提供观察追加、近期读取、待处理扫描和确认接口。
 class ObservationStore:
-    # LLM: 观察与活动仍沿原文件；处理和分片memo仅为有界派生投影，RLock绑定处理数据与指纹，不产生处理权威。
-    # 函数用途: 连接原观察存储与线程回调，初始化只读热拍记忆。
+    # LLM: 观察仍沿原 JSONL；ack journal 是持久确认源，SQLite 和 memo 只作派生定位。
+    # 函数用途: 连接原观察存储、精确 ack 索引与线程回调，构造本身不执行索引 IO。
     def __init__(
         self,
         storage: ConversationStorage,
@@ -177,8 +176,10 @@ class ObservationStore:
         self.storage = storage
         self._require_thread = require_thread
         self._update_thread_atomic = update_thread_atomic
+        self._index = ObservationIndex(storage)
         self._memo_lock = threading.RLock()
-        self._handled_cache_fp: tuple[int, int, int, int] | None = None
+        self._handled_cache_fp: tuple | None = None
+        self._legacy_cache_fp: tuple | None = None
         self._handled_cache_data: dict[str, float] = {}
         self._shard_main_events_cache: OrderedDict[str, tuple[list, tuple[int, int, int, int], tuple[ObservationEvent, ...]]] = OrderedDict()
 
@@ -212,9 +213,8 @@ class ObservationStore:
         )
         return events
 
-    # LLM: An observation ledger is append-on-first-use; absence is an authoritative empty
-    # collection, while unreadable or malformed existing rows remain explicit load errors.
-    # 函数用途: 读取会话观察事件；尚未产生任何观察时正常返回空列表，不把未创建文件误报成会话损坏。
+    # LLM: 近期历史是显式全账读取口；ack 仍仅查本线程实际行的精确 ID，坏行错误不能被投影隐藏。
+    # 函数用途: 读取会话观察并叠加持久处理时间，保持原 load_errors 和缺失文件语义。
     def recent_report(
         self,
         thread_id: str,
@@ -222,7 +222,6 @@ class ObservationStore:
         limit: int = 20,
         include_handled: bool = True,
     ) -> tuple[list[ObservationEvent], list[dict[str, Any]]]:
-        handled = self._read_handled()
         path = self.storage.observation_path(thread_id)
         if not path.exists():
             return [], []
@@ -230,24 +229,25 @@ class ObservationStore:
             path,
             context="conversation.observations.read",
         )
+        handled = self._read_handled([str(row.get("observation_id") or "") for row in report.rows])
         events, parse_errors = _observation_events(report.rows, handled)
         if not include_handled:
             events = [event for event in events if event.handled_at <= 0]
         selected = events if limit <= 0 else events[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
-    # LLM: 每轮仍完整调用原索引以保持metrics；处理数据与版本同锁取快照，分片memo只省建模，排序/limit不变。
-    # 函数用途: 汇总未处理主代理观察，复用未变化分片但即时反映处理标记。
+    # LLM: 大历史包括 limit=0 均只查 pending；仅固定 16 分片/64KiB 内的小集合保留旧 ScanIndex 记忆化。
+    # 函数用途: 汇总未处理主代理观察，limit<=0 只放开活跃结果数，不放开历史扫描预算。
     def unhandled_requiring_main(self, *, limit: int = 20) -> list[ObservationEvent]:
-        with self._memo_lock:
-            handled = self._read_handled()
-            handled_fp = self._handled_cache_fp
+        if not self._small_legacy_snapshot():
+            return self._index.pending(limit)
         index = self.storage.indexes.get("observations")
         paths = index.ordered_paths(self.storage.observations_dir, "*.jsonl")
         use_index = self.storage.indexes.usable(
             index, key="observations", directory=self.storage.observations_dir, pattern="*.jsonl"
         )
-        events: list[ObservationEvent] = []
+        shards = []
+        ids = []
         for path in paths:
             # 读取目标仍按 path.stem 反推(与旧实现 recent_observations(path.stem) 完全同路),
             # 因此文件名与 thread_id 约定不一致时仍然读不到东西,不会因为换了扫描方式而多读。
@@ -258,59 +258,99 @@ class ObservationStore:
                 _read_observation_shard_entry,
                 use_index=use_index,
             )
+            shards.append((target, rows, _ok))
+            ids.extend(str(row.get("observation_id") or "") for row in rows or [])
+        with self._memo_lock:
+            handled = self._read_handled(ids)
+            handled_fp = self._handled_cache_fp
+        events: list[ObservationEvent] = []
+        for target, rows, _ok in shards:
             events.extend(_memo_main_events(self, target, rows, handled, handled_fp,
                                            cacheable=_ok and use_index and rows is not None))
         events.sort(key=lambda item: item.observed_at)
         return events if limit <= 0 else events[:limit]
 
-    # LLM: 给读不出信封的唤醒结案用：只靠观察记录自带的 wake_signal_id 链接找关联观察，不读唤醒信封；扫全部分片
-    #   （唤醒的 thread 未知），只标未处理的。返回本次标掉的观察 ID，空列表表示没有关联观察。副作用同 mark_handled。
-    # 函数用途: 把链接到某条唤醒的全部未处理观察标成已处理。
+    # LLM: 旧 ScanIndex 的小集合记忆化保留，但准入先有界探测 16 个分片/合计 64KiB；大历史只能走 pending。
+    # 函数用途: 判断当前数据能否在固定预算内沿原读取口完成精确快照。
+    def _small_legacy_snapshot(self):
+        path = self.storage.observation_handled_path
+        if path.exists() and path.stat().st_size > 65536:
+            return False
+        total, count = 0, 0
+        with os.scandir(self.storage.observations_dir) as entries:
+            for entry in entries:
+                count += 1
+                if count > 16:
+                    return False
+                if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+                    if total > 65536:
+                        return False
+        return True
+
+    # LLM: 只靠 canonical 行的 wake_signal_id 关联；索引保留普通及主代理观察，不读损坏信封或扫描已处理历史。
+    # 函数用途: 持久确认链接到某条唤醒的全部未处理观察，恢复未追平时明确报 partial。
     def mark_handled_for_wake(self, wake_signal_id: str, *, now: float | None = None) -> list[str]:
         selected = str(wake_signal_id or "").strip()
         if not selected:
             return []
-        handled = self._read_handled()
-        directory = self.storage.observations_dir
-        ids: list[str] = []
-        for path in sorted(directory.glob("*.jsonl")) if directory.is_dir() else ():
-            report = read_jsonl_report(path, context="conversation.observations.read")
-            events, _parse_errors = _observation_events(report.rows, handled)
-            ids.extend(event.observation_id for event in events
-                       if event.wake_signal_id == selected and event.handled_at <= 0)
+        ids = [event.observation_id for event in self._index.pending(0, wake=selected)]
         self.mark_handled(ids, now=now)
         return ids
 
-    # LLM: 处理 ID 与时间一次原子合并到原回执，不覆盖其它观察的确认事实。
-    # 函数用途: 持久确认一批精确观察 ID 已处理。
+    # LLM: 只按传入 ID 追加首次确认，SQLite 幂等 upsert；不读 legacy、不重写任何历史 map。
+    # 函数用途: 持久确认一批精确观察 ID，重复与崩溃重放不改变首次正处理时间。
     def mark_handled(
         self, observation_ids: list[str] | tuple[str, ...], *, now: float | None = None
     ) -> None:
         ids = [str(item) for item in observation_ids if str(item or "").strip()]
         if ids:
             current = now if now is not None else time.time()
-            update_json_file_atomic(
-                self.storage.observation_handled_path,
-                lambda data: {**data, **dict.fromkeys(ids, current)},
-            )
+            self._index.ack(ids, current)
 
-    # LLM: 原数字时间规则不变；仅成功且读前后指纹稳定才记忆，异常/缺失先清版本，绝不复用旧处理代次。
-    # 函数用途: 读取处理回执或克隆未变映射，保持坏值忽略和读取失败空结果语义。
-    def _read_handled(self) -> dict[str, float]:
+    # LLM: 此兼容读口只查询本次实际行 ID；journal 与 legacy 双版本使显式全量扫描的 memo 即时失效。
+    # 函数用途: 获取候选处理时间，不复制 owner 的整张确认表；未知迁移状态明确报错。
+    def _read_handled(self, observation_ids=()) -> dict[str, float]:
         with self._memo_lock:
+            ids = list(dict.fromkeys(observation_ids))
+            handled = self._index.handled(ids, include_legacy=False)
             path = self.storage.observation_handled_path
             fp = _file_fingerprint(path)
-            if fp is not None and fp == self._handled_cache_fp:
-                return dict(self._handled_cache_data)
+            journal_fp = _file_fingerprint(self._index.journal_path)
             self._handled_cache_fp = None
-            report = read_json_file_report(path)
-            handled: dict[str, float] = {}
-            for key, value in report.payload.items():
-                try:
-                    handled[str(key)] = float(value or 0.0)
-                except (TypeError, ValueError):
-                    continue
-            if not report.load_error and fp is not None and _file_fingerprint(path) == fp:
-                self._handled_cache_fp = fp
-                self._handled_cache_data = dict(handled)
+            if all(handled.get(key, 0) > 0 for key in ids):
+                self._handled_cache_fp = (journal_fp, fp) if journal_fp is not None or fp is not None else None
+                return handled
+            if fp is not None and fp[1] <= 65536:
+                stable = fp == self._legacy_cache_fp
+                if stable:
+                    legacy = self._handled_cache_data
+                else:
+                    report = read_json_file_report(path)
+                    if report.load_error:
+                        raise ObservationIndexError("legacy observation handled map is unreadable")
+                    legacy = {}
+                    for key, value in report.payload.items():
+                        try:
+                            legacy[str(key)] = float(value or 0)
+                        except (ValueError, TypeError):
+                            continue
+                    stable = _file_fingerprint(path) == fp
+                    if stable:
+                        self._legacy_cache_fp, self._handled_cache_data = fp, legacy
+                # 只合并候选；小图可精确查尾部，同时固定批迁移持久事实，不把 partial 当未处理。
+                for key in ids:
+                    if handled.get(key, 0) <= 0 and key in legacy:
+                        handled[key] = legacy[key]
+                if stable:
+                    self._index.migrate_legacy()
+                    self._handled_cache_fp = (_file_fingerprint(self._index.journal_path), fp)
+            elif fp is not None:
+                handled = self._index.handled(ids)
+                self._handled_cache_fp = (_file_fingerprint(self._index.journal_path), fp)
+            else:
+                # 缺失也须核对迁移游标；迁移到一半的旧图删除不能把尾部未知 ack 当未处理。
+                handled = self._index.handled(ids)
+                if journal_fp is not None:
+                    self._handled_cache_fp = (journal_fp, None)
             return handled

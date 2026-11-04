@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records, check_io_deadline
+from ..common.json_io import check_io_deadline
 from ..gateway_parts.io import (
     locked_file_transition,
     read_json_file_report,
@@ -25,14 +25,12 @@ from .store_guidance_ledger import GuidanceLedger
 from .store_guidance_records import (
     GUIDANCE_INPUT_DIGEST_VERSION,
     GuidanceOnceReceipt,
-    _guidance_entries,
     _guidance_entry_from_request,
     _guidance_input_digest,
     guidance_receipt_input_matches,
 )
 from .store_guidance_recovery import GuidanceRecovery
 from .store_guidance_submission import GuidanceSubmissions
-from .store_io import read_jsonl_report
 from .store_layout import ConversationStorage
 
 
@@ -120,11 +118,7 @@ class GuidanceStore:
     # 函数用途: 追加一条不带重试语义的内部补充消息。
     def append(self, request: dict[str, Any]) -> GuidanceEntry:
         entry = _guidance_entry_from_request(request)
-        append_private_jsonl_records(
-            self.storage.guidance_path(entry.target_type, entry.target_id),
-            [entry.to_dict()],
-            sort_keys=True,
-        )
+        self.ledger.ensure_queue_entry(entry)
         return entry
 
     # LLM: GuidanceStore：回执锁内先写权威回执再修队列及索引；同键异文报错，重试必须返回原消息身份。
@@ -181,7 +175,7 @@ class GuidanceStore:
                 input_digest_version=GUIDANCE_INPUT_DIGEST_VERSION,
             )
             check_io_deadline(deadline)
-            write_json_file_atomic(receipt_path, receipt.to_dict(), **options)
+            self.ledger.write_receipt(receipt_path, receipt.to_dict(), writer=write_json_file_atomic, **options)
             self.ledger.repair_projections(receipt, **options)
             check_io_deadline(deadline)
             return entry
@@ -202,7 +196,7 @@ class GuidanceStore:
                 raise DataCorruptionError("conversation guidance receipt key mismatch")
             if receipt.status in {"pending", "reserved", "submitted"}:
                 self.ledger.repair_projections(receipt)
-            delivered = self.ledger.read_delivered().get(receipt.entry.guidance_id, 0.0)
+            delivered = self.ledger.delivered_at(receipt.entry.guidance_id)
             return replace(receipt, entry=replace(receipt.entry, delivered_at=delivered))
 
     # LLM: GuidanceStore：竞争状态沿同一回执锁决出胜者；只允许原有迁移边，不覆盖已消费或拒绝，联测 Gateway 终态。
@@ -232,7 +226,7 @@ class GuidanceStore:
             if not allowed:
                 return receipt
             updated = replace(receipt, status=normalized, updated_at=time.time())
-            write_json_file_atomic(receipt_path, updated.to_dict())
+            self.ledger.write_receipt(receipt_path, updated.to_dict(), writer=write_json_file_atomic)
             return updated
 
     # LLM: GuidanceStore：安全点仅为精确尝试预留 pending；跨回合例外必须由持久释放记录授权，联测主子邮箱隔离。
@@ -297,9 +291,8 @@ class GuidanceStore:
                     updated,
                     entry=replace(receipt.entry, metadata=bound_metadata),
                 )
-                # 精确回合索引是"这一轮有哪些补充消息"的投影；绑定时一起补，回合收尾才能按它找到。
-                self.ledger.ensure_turn_index(updated)
-            write_json_file_atomic(receipt_path, updated.to_dict())
+                # canonical先提交，再维护新回合引用，不把投影当作绑定授权。
+            self.ledger.write_receipt(receipt_path, updated.to_dict(), writer=write_json_file_atomic)
             return True
 
     # LLM: "有没有可认领的新输入"必须和"能不能认领"用同一个判定。两者不一致时（真实链路上
@@ -400,29 +393,29 @@ class GuidanceStore:
             return [], [
                 {"code": "GUIDANCE_TARGET_TYPE_INVALID", "target_type": str(target_type or "")}
             ]
-        delivered = self.ledger.read_delivered()
-        path = self.storage.guidance_path(normalized_type, str(target_id))
-        if not path.exists():
-            return [], []
-        report = read_jsonl_report(
-            path,
-            context="conversation.guidance.read",
-        )
-        entries, parse_errors = _guidance_entries(report.rows, delivered)
-        if not include_delivered:
-            pending_entries: list[GuidanceEntry] = []
-            for item in entries:
-                try:
-                    pending = self._canonical_pending(item)
-                    if pending is not None:
-                        pending_entries.append(pending)
-                except Exception as exc:
-                    error = runtime_error_report(exc, context="conversation.guidance.receipt")
-                    error["guidance_id"] = item.guidance_id
-                    parse_errors.append(error)
-            entries = pending_entries
-        selected = entries if limit <= 0 else entries[-limit:]
-        return selected, [*report.load_errors, *parse_errors]
+        index = self.ledger.pending_index()
+        try:
+            rows, errors = index.rows(normalized_type, str(target_id), limit, include_delivered)
+        except Exception as exc:
+            return [], [runtime_error_report(exc, context="conversation.guidance.index")]
+        entries = []
+        try:
+            delivered = index.delivered_many([row['id'] for row in rows])
+        except Exception as exc:
+            return [], [*errors, runtime_error_report(exc, context="conversation.guidance.delivered")]
+        for row in rows:
+            try:
+                entry = index.read_entry(row)
+                entry = replace(entry, delivered_at=delivered.get(entry.guidance_id, 0.0))
+                if not include_delivered:
+                    entry = self._canonical_pending(entry)
+                if entry is not None:
+                    entries.append(entry)
+            except Exception as exc:
+                error = runtime_error_report(exc, context="conversation.guidance.receipt")
+                error["guidance_id"] = row["id"]
+                errors.append(error)
+        return entries, errors
 
     # LLM: GuidanceStore：幂等输入按回执决定可注入内容，未知提交不得重放；内部无幂等输入沿原送达索引。
     # 函数用途: 返回仍可注入的权威 guidance；已消费、已拒绝和提交结果未知的记录不会再次出现。

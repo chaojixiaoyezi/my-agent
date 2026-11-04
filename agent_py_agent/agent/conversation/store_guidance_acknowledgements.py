@@ -182,7 +182,7 @@ class GuidanceAcknowledgements:
                 receipt = self.ledger.read_receipt(receipt_path)
                 if receipt.status != "consumed":
                     receipt = replace(receipt, status="consumed", updated_at=time.time())
-                    write_json_file_atomic(receipt_path, receipt.to_dict())
+                    self.ledger.write_receipt(receipt_path, receipt.to_dict(), writer=write_json_file_atomic)
                 self.project_transcript(receipt.entry)
 
     # LLM: GuidanceAcknowledgements：只由已消费回执投影消息；沿 guidance ID 幂等追加原 transcript，失败返回 False 保留恢复路径。

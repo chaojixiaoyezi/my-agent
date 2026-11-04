@@ -170,7 +170,7 @@ class GuidanceSubmissions:
                         call_id and receipt.submission_id != call_id
                     ):
                         raise DataCorruptionError("guidance retry restore was not submitted")
-                    write_json_file_atomic(
+                    self.ledger.write_receipt(
                         receipt_path,
                         replace(
                             receipt,
@@ -286,7 +286,7 @@ class GuidanceSubmissions:
                         updated_at=float(batch.get("rejected_at") or time.time()),
                     )
                 if updated != receipt:
-                    write_json_file_atomic(receipt_path, updated.to_dict())
+                    self.ledger.write_receipt(receipt_path, updated.to_dict(), writer=write_json_file_atomic)
 
     # LLM: GuidanceSubmissions：调用方持回合锁；按原提交次序修批次后才能解释回执，坏批次计数且不影响其它回合。
     # 函数用途: 修复精确回合的模型提交批次投影，并返回发现的损坏批次数。

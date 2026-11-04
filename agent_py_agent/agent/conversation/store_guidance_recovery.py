@@ -125,7 +125,7 @@ class GuidanceRebinding:
             if receipt.status == "reserved" and receipt.attempt_id != old_turn_id:
                 raise DataCorruptionError("reserved guidance attempt does not match dead turn")
             delivered_at = float(
-                self.ledger.read_delivered().get(receipt.entry.guidance_id) or 0.0
+                self.ledger.delivered_at(receipt.entry.guidance_id)
             )
             if delivered_at > 0:
                 migrated = _legacy_prompt_submission_unknown_receipt(
@@ -133,7 +133,7 @@ class GuidanceRebinding:
                     old_turn_id=old_turn_id,
                     delivered_at=delivered_at,
                 )
-                write_json_file_atomic(receipt_path, migrated.to_dict())
+                self.ledger.write_receipt(receipt_path, migrated.to_dict(), writer=write_json_file_atomic)
                 return "legacy_submission_unknown"
             self.write_rebound_locked(receipt, recovered_turn_id=recovered_turn_id)
             return "rebound"
@@ -147,7 +147,7 @@ class GuidanceRebinding:
         rebound = _rebound_guidance_receipt(
             receipt, old_turn_id=old_turn_id, recovered_turn_id=recovered_turn_id,
         )
-        write_json_file_atomic(self.storage.guidance_dedupe_path(receipt.dedupe_key), rebound.to_dict())
+        self.ledger.write_receipt(self.storage.guidance_dedupe_path(receipt.dedupe_key), rebound.to_dict(), writer=write_json_file_atomic)
         self.ledger.ensure_turn_index(rebound)
         self.ledger.rebind_input_index(rebound, old_turn_id=old_turn_id)
         unlink_quietly(self.storage.guidance_turn_index_path(old_turn_id, receipt.dedupe_key))
@@ -310,7 +310,7 @@ class GuidanceRecovery:
                     expected_attempt and receipt.attempt_id != expected_attempt
                 ):
                     return
-                write_json_file_atomic(
+                self.ledger.write_receipt(
                     receipt_path,
                     replace(
                         receipt,
@@ -445,7 +445,7 @@ class GuidanceRecovery:
             settled = _turn_end_settled(receipt, turn_id, settlement, self.storage)
             if settled is None:
                 return (receipt.status,)
-            write_json_file_atomic(receipt_path, settled.to_dict())
+            self.ledger.write_receipt(receipt_path, settled.to_dict(), writer=write_json_file_atomic)
         return turn_end_labels(settled, dead=settlement.settle_dead_submissions and receipt.status == "submitted")
 
     # LLM: GuidanceRecovery：本回合索引里被收口拒收、又没有入口请求号的插话（migration.closeout_replay=="pending"）就是
@@ -479,7 +479,7 @@ class GuidanceRecovery:
             if receipt is None or receipt.migration.get("closeout_replay") != CLOSEOUT_REPLAY_PENDING:
                 return
             migration = {**dict(receipt.migration), "closeout_replay": outcome}
-            write_json_file_atomic(receipt_path, replace(receipt, migration=migration).to_dict())
+            self.ledger.write_receipt(receipt_path, replace(receipt, migration=migration).to_dict(), writer=write_json_file_atomic)
 
     # LLM: GuidanceRecovery：调用方持回合锁；按“回执级”结构化字段判定，坏回执和绑定对不上的一律跳过，不影响本回合收口。
     # 函数用途: 读出一条仍等收口重放的插话回执，其余情况返回 None。
@@ -543,7 +543,7 @@ class GuidanceRecovery:
                         updated_at=time.time(),
                         migration=migration,
                     )
-                    write_json_file_atomic(receipt_path, updated.to_dict())
+                    self.ledger.write_receipt(receipt_path, updated.to_dict(), writer=write_json_file_atomic)
                     released += 1
                 unlink_quietly(path)
             except Exception:
