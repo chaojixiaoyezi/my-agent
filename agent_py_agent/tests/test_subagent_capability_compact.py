@@ -296,7 +296,11 @@ def test_child_second_prepare_uses_cleared_current_params_instead_of_old_frozen_
         assert kwargs["defer_compact"] is True
         observed.append(model_surface.capability_presentation)
         actual = prepare_conversation_compact_provider_surface(agent, model_surface, run_id="summary-operation")
-        assert actual.volatile_sections == ()
+        # 载体已清除后不复活旧选择；无选择的新准备仍沿 P1.2b-C 保留当前普通推荐。
+        cards = dict(actual.volatile_sections)["prompt.tool_recommendations"]
+        assert cards and "workspace:method-001" not in cards
+        assert actual.stable_prompt_prefix == first.stable_prompt_prefix
+        assert actual.tools == first.tools
         return AgentThreadTurnContext(
             current.thread_id, 0, False, "", compact_source=SimpleNamespace(messages=()),
         )
