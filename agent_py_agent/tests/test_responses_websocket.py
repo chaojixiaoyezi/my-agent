@@ -4,7 +4,9 @@
 import importlib
 import json
 import sys
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from websockets.http11 import Response
 
 from agent_py_agent.agent.backends import get_backend
 from agent_py_agent.agent.backends import responses_websocket as ws
+from agent_py_agent.agent.backends.cache_diagnostics import compare_request_surfaces
 from agent_py_agent.agent.backends.errors import (
     ProviderRequestRejectedError,
     ProviderTimeoutError,
@@ -22,6 +25,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderUsageLimitError,
 )
 from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest, provider_attempt_observer
+from agent_py_agent.agent.backends.provider_headers import provider_session_scope
 from agent_py_agent.agent.backends.responses_wire import collect_response, response_fields
 from agent_py_agent.agent.settings.model_profiles import (
     execute_model_profile_operation,
@@ -603,3 +607,160 @@ def test_handshake_403_records_structured_diagnostic(monkeypatch):
     assert diagnostic["status_code"] == 403
     assert diagnostic["cause_code"] == "forbidden_unknown"
     assert diagnostic["headers"]["x-request-id"] == "ws-req-1"
+
+
+# ---------------------------------------------------------------- 发送阶段断开与增量续接诊断（v14 ws-media-fix）
+
+# 增量链用例的工具调用及其结果；与连接池用例同形，上一轮回复按原生重放后逐字节等于 CALL。
+CALL = {"type": "function_call", "call_id": "c1", "name": "read_file", "arguments": json.dumps({"path": "a"}, sort_keys=True)}
+RESULT = {"type": "function_call_output", "call_id": "c1", "output": "content"}
+
+
+# LLM: plans 每项对应一次 send：事件列表正常排入回复，异常则在 send 处抛出（模拟写 socket 时连接已被对端关闭）。
+#   recv(timeout=0) 无数据时抛 TimeoutError，与真实库“没有未读帧”一致，因此能通过复用前的干净检查。不联网。
+# 类用途: 模拟可跨多次请求复用、并可在发送阶段断开的 WebSocket 连接。
+class ScriptedSocket:
+    # 函数用途: 记录每次 send 对应的脚本结果。
+    def __init__(self, *plans):
+        self.plans, self.messages, self.sent, self.closed = list(plans), [], [], False
+
+    # 函数用途: 记下首包内容，再按脚本排入回复或抛出关闭异常。
+    def send(self, text):
+        self.sent.append(json.loads(text))
+        plan = self.plans.pop(0)
+        if isinstance(plan, BaseException):
+            raise plan
+        self.messages.extend(json.dumps(event) for event in plan)
+
+    # 函数用途: 返回下一帧；无数据时超时，已关闭时报连接关闭。
+    def recv(self, timeout=None):
+        if self.closed:
+            raise ConnectionClosedError(None, None)
+        if not self.messages:
+            raise TimeoutError()
+        return self.messages.pop(0)
+
+    # 函数用途: 记录正常关闭。
+    def close(self):
+        self.closed = True
+
+    # 函数用途: 记录不等关闭握手的 socket 收回。
+    def close_socket(self):
+        self.closed = True
+
+
+# LLM: 计时器到期由 _expire_websocket_send 调 close_socket 唤醒阻塞的发送，真实库随后以 ConnectionClosed 报出写失败。
+# 类用途: 模拟发送卡住、直到本端关 socket 才失败的连接。
+class BlockedSendSocket:
+    # 函数用途: 初始化发送阻塞开关。
+    def __init__(self):
+        self.released, self.closed = threading.Event(), False
+
+    # 函数用途: 阻塞到 socket 被关，再按真实库报连接关闭。
+    def send(self, text):
+        self.released.wait(5)
+        raise ConnectionClosedError(None, None)
+
+    # 函数用途: 记录关闭并唤醒发送。
+    def close_socket(self):
+        self.closed = True
+        self.released.set()
+
+
+# 函数用途: 生成带响应 ID 的完成终态，使干净连接能回池并留下增量锚点。
+def completed_with_id(response_id, output):
+    return [{"type": "response.completed", "response": {"id": response_id, "status": "completed", "output": output,
+                                                         "usage": {"input_tokens": 5, "output_tokens": 1}}}]
+
+
+# 函数用途: 构造会话内可比较的请求，只替换 input，其余字段与键序保持一致以便命中增量链。
+def session_request(items):
+    return replace(request(), payload={"model": "m", "stream": True, "input": items})
+
+
+# LLM: 生产全局池只在本组用例内换成新池，结束时关闭，避免与其它用例共享空闲连接或增量锚点。
+# 函数用途: 为会话复用用例提供隔离的连接池。
+@pytest.fixture
+def fresh_pool(monkeypatch):
+    pool = type(ws._POOL)()
+    monkeypatch.setattr(ws, "_POOL", pool)
+    yield pool
+    pool.close()
+
+
+# LLM: 生产事故形态：新建连接上发送 response.create 时对端断开。必须是可恢复的 ProviderTransientError（阶段 send_request，
+#   带关闭帧信息），原关闭异常保留为 __cause__，连接被收回；不能把库的原始异常漏给上层变成未知错误。
+# 函数用途: 钉住非复用连接发送阶段断开的错误分类与诊断。
+@pytest.mark.parametrize(("close", "detail"), [
+    (ConnectionClosedError(None, None), "无关闭帧"),
+    (ConnectionClosedError(Close(1009, "message too big"), None), "服务端关闭码 1009，原因 message too big"),
+])
+def test_send_phase_close_is_a_recoverable_transient_error(monkeypatch, close, detail):
+    connection = ScriptedSocket(close)
+    monkeypatch.setattr(ws, "_connect", lambda req: connection)
+    with pytest.raises(ProviderTransientError) as caught:
+        list(ws.iter_responses_websocket(request()))
+    assert caught.value.__cause__ is close
+    assert "阶段 send_request" in str(caught.value) and detail in str(caught.value)
+    assert connection.closed and len(connection.sent) == 1
+
+
+# LLM: 复用连接（17 分钟空闲后半死的旧连接）发送时断开：首轮仍被识别为可恢复的复用失效，换新连接全量重发一次；
+#   新连接发送也断开时，最终交给上层的是 send_request 阶段的 ProviderTransientError，而不是原始关闭异常。
+# 函数用途: 钉住复用连接发送失败后的一次全量回退及回退失败后的错误分类。
+def test_reused_send_close_falls_back_once_then_surfaces_transient_error(monkeypatch, fresh_pool):
+    pooled = ScriptedSocket(completed_with_id("r1", [CALL]), ConnectionClosedError(None, None))
+    fallback = ScriptedSocket(ConnectionClosedError(None, None))
+    sockets, opened = iter([pooled, fallback]), []
+    monkeypatch.setattr(ws, "_connect", lambda req: opened.append(req) or next(sockets))
+    with provider_session_scope(("local", "owner-a"), "thread-send"):
+        list(ws.iter_responses_websocket(session_request([{"role": "user", "content": "你好"}])))
+        with pytest.raises(ProviderTransientError) as caught:
+            list(ws.iter_responses_websocket(session_request([{"role": "user", "content": "你好"}, CALL, RESULT])))
+    assert isinstance(caught.value.__cause__, ConnectionClosedError)
+    assert "阶段 send_request" in str(caught.value)
+    assert len(opened) == 2 and pooled.closed and fallback.closed
+    assert pooled.sent[1]["previous_response_id"] == "r1" and pooled.sent[1]["input"] == [RESULT]
+    assert "previous_response_id" not in fallback.sent[0]
+    assert fallback.sent[0]["input"] == [{"role": "user", "content": "你好"}, CALL, RESULT]
+
+
+# LLM: 用户停止优先于任何分类：发送中被停止关掉 socket 时报 InterruptedError，不当作服务商故障重试。
+# 函数用途: 钉住发送阶段的用户停止语义。
+def test_user_stop_during_send_is_an_interruption(monkeypatch):
+    close = ConnectionClosedError(None, None)
+    monkeypatch.setattr(ws, "_provider_is_interrupted", lambda: True)
+    with pytest.raises(InterruptedError) as caught:
+        ws._send_create_message(ScriptedSocket(close), request())
+    assert caught.value.__cause__ is close
+
+
+# LLM: 首包预算到期由计时器关 socket，真实库随后报 ConnectionClosed；这仍是 first_event 超时，不能被新的断开分支改判。
+#   无绝对期限时发送预算取 timeout 与 first_event_timeout 的较大者且最少 1 秒，所以这里用 timeout=1。
+# 函数用途: 钉住发送阶段超时的分类不变。
+def test_send_budget_expiry_stays_a_first_event_timeout():
+    connection = BlockedSendSocket()
+    with pytest.raises(ProviderTimeoutError) as caught:
+        ws._send_create_message(connection, request(timeout=1))
+    assert caught.value.stage == "first_event"
+    assert isinstance(caught.value.__cause__, ConnectionClosedError) and connection.closed
+
+
+# LLM: 复用连接线上只发 previous_response_id 加差量，但请求尝试的缓存诊断必须按完整历史计算：
+#   32 条（对齐检查点）历史后追加一轮，应报 history_appended、共享前缀 32，且不能因锚点或差量切片误报 options/前缀变化。
+# 函数用途: 钉住增量续接的请求面诊断使用完整 input。
+def test_reused_incremental_send_reports_full_prefix_diagnostics(monkeypatch, fresh_pool):
+    history = [{"role": "user", "content": f"m{index}"} for index in range(32)]
+    connection = ScriptedSocket(completed_with_id("r1", [CALL]), completed_with_id("r2", []))
+    monkeypatch.setattr(ws, "_connect", lambda req: connection)
+    observed = []
+    with provider_session_scope(("local", "owner-a"), "thread-diag"), \
+            provider_attempt_observer(observed.append, cache_diagnostics=True):
+        list(ws.iter_responses_websocket(session_request(history)))
+        list(ws.iter_responses_websocket(session_request([*history, CALL, RESULT])))
+    assert connection.sent[1]["previous_response_id"] == "r1" and connection.sent[1]["input"] == [RESULT]
+    first, second = [row["request_surface"] for row in observed if row["status"] == "started"]
+    assert second["message_count"] == 34
+    result = compare_request_surfaces(first, second)
+    assert result["changes"] == ["history_appended"]
+    assert result["shared_message_prefix"] == 32 and result["comparable"] is True

@@ -214,6 +214,8 @@ def input_media_blocks(refs: object) -> list[dict]:
 
 
 # LLM: 校验成功才在精确调用句柄内记编码sha并取消淘汰；锁只包小集合更新，不持有它读文件或编码。
+#   图片在校验原件后、编码前经 input_media_images 按需缩放/重编码，只改本次发送的内存副本（MIME随之改变）；
+#   磁盘原件、sha及淘汰/编码观察仍按canonical引用。延迟导入：该模块反向依赖本模块的 InputMediaError。
 # 函数用途: 为一次模型请求读取附件原件，并生成标准 base64 source。
 def provider_media_block(block: dict) -> dict:
     source = block.get("source")
@@ -228,6 +230,10 @@ def provider_media_block(block: dict) -> dict:
     media_type = ref["media_type"]
     if media_type == "video/quicktime":
         media_type = "video/mov"
+    if block.get("type") == "image":
+        from .input_media_images import compress_provider_image_bytes
+
+        data, media_type = compress_provider_image_bytes(data, media_type)
     delivery = _input_media_delivery()
     with delivery.lock:
         delivery.encoded = (delivery.encoded or frozenset()) | {ref["sha256"]}
