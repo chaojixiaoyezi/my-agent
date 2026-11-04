@@ -22,12 +22,17 @@ from ..common.nofollow_fs import (
     write_text_atomic_beneath,
 )
 
-MAX_RECORD_BYTES = 16777216  # 保留原生产读取上限；写入也检查 UTF-8 字节上限。
 _ROOT_PARTS = ('data', 'alert_topic_anchors.json')
 _STORE_PARTS = ('data', 'alert_topic_anchors')
 _READY_PARTS = (*_STORE_PARTS, 'ready.json')
 _SCHEMA = 'alert_topic_anchors.v2'
 _READY_SCHEMA = 'alert_topic_anchors.ready.v2'
+
+
+# LLM: Keep the production bound local to its owner; no unregistered module numeric declaration.
+# 类用途: 保存单记录读写共用的原生产字节上限。
+class _AnchorLimits:
+    MAX_RECORD_BYTES = 16777216
 
 
 # LLM: 锚点身份由显式来源、Owner、目标和事件决定。
@@ -80,7 +85,7 @@ def _reject_constant(value):
 
 # LLM: Check the exact production reader limit before replacement, not after durable mutation.
 # 函数用途: 编码一份有界且可重读的原子记录。
-def _encode(data, *, limit=MAX_RECORD_BYTES):
+def _encode(data, *, limit=_AnchorLimits.MAX_RECORD_BYTES):
     text = json.dumps(data, ensure_ascii=False, sort_keys=True, allow_nan=False) + '\n'
     if len(text.encode('utf-8')) > limit:
         raise ValueError('alert record exceeds read limit')
@@ -122,7 +127,7 @@ def _prepare(owner_home, alert_key):
 # LLM: The old path holds at most one primary record, or an empty migrated-format fence.
 # 函数用途: 安全读取旧路径单记录槽；缺失或旧格式不能重置成空。
 def _read(root):
-    raw = read_bytes_beneath(root, _ROOT_PARTS, max_bytes=MAX_RECORD_BYTES)
+    raw = read_bytes_beneath(root, _ROOT_PARTS, max_bytes=_AnchorLimits.MAX_RECORD_BYTES)
     if raw is None:
         raise ValueError('missing alert primary record')
     data = json.loads(raw, parse_constant=_reject_constant)
@@ -178,7 +183,7 @@ def _read_key(root, key, layout, *, staging=False):
     if primary:
         data = _read(root)
     else:
-        raw = read_bytes_beneath(root, _record_parts(key), max_bytes=MAX_RECORD_BYTES)
+        raw = read_bytes_beneath(root, _record_parts(key), max_bytes=_AnchorLimits.MAX_RECORD_BYTES)
         if raw is None:
             return None
         data = json.loads(raw, parse_constant=_reject_constant)

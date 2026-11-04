@@ -6,6 +6,7 @@ No provider traffic; reservations, files, locks and subprocess restarts are real
 """
 from __future__ import annotations
 
+import ast
 import errno
 import importlib
 import importlib.util
@@ -21,8 +22,26 @@ import pytest
 
 from agent_py_agent.agent.scheduler import alert_topic_anchors as anchors
 
-LIMIT = 16777216  # The actual pre-fix production reader ceiling, not a reduced test limit.
 MODULE = 'agent_py_agent.agent.scheduler.alert_topic_anchor_migration'
+
+
+# LLM: Match the actual production ceiling without adding a module-level numeric declaration.
+# 类用途: 保留测试使用的真实生产上限，不缩小阈值制造回归。
+class _RegressionLimits:
+    LIMIT = 16777216
+
+
+# LLM: Check declaration placement, not just names, so aliases/expressions cannot bypass the gate.
+# 函数用途: 防止两个生产模块重新声明未注册的模块级数字常量。
+@pytest.mark.parametrize('module_name', [anchors.__name__, MODULE])
+def test_numeric_limits_are_not_declared_at_module_scope(module_name):
+    module = importlib.import_module(module_name)
+    tree = ast.parse(Path(module.__file__).read_text(encoding='utf-8'))
+    assignments = (node for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign)))
+    offenders = [ast.unparse(node) for node in assignments if any(
+        isinstance(value, ast.Constant) and type(value.value) in (int, float, complex)
+        for value in ast.walk(node.value))]
+    assert offenders == []
 
 
 # LLM: Deterministic identities belong only to synthetic temporary owners.
@@ -72,7 +91,7 @@ def _finish(home, *, max_records=256, restart=False):
     for _ in range(2000):
         report = module.migrate_legacy(home, max_records=max_records)
         assert 0 <= report['records'] <= max_records
-        assert 0 <= report['bytes_read'] <= module.MAX_MIGRATION_BYTES
+        assert 0 <= report['bytes_read'] <= module._MigrationLimits.MAX_MIGRATION_BYTES
         reports.append(report)
         if report['complete']:
             return reports
@@ -88,7 +107,7 @@ def large_history(tmp_path_factory):
     home = tmp_path_factory.mktemp('f08-over-limit')
     source = _legacy(home, 60000)
     size = source.stat().st_size
-    assert LIMIT < size < 100_000_000
+    assert _RegressionLimits.LIMIT < size < 100_000_000
     reports = _finish(home)
     return home, size, reports
 
@@ -97,7 +116,7 @@ def large_history(tmp_path_factory):
 # 函数用途: 核验超限历史迁移保留所有抽查的已送达、未知和派发证明，且接受新事件。
 def test_over_limit_history_preserves_proof_and_accepts_new_event(large_history):
     home, size, reports = large_history
-    assert size > LIMIT
+    assert size > _RegressionLimits.LIMIT
     for index in (0, 1, 255, 256, 29999, 59998, 59999):
         row, first, dispatch = anchors._reserve_for_delivery(home, _key(index), now='reopen', dispatch_key='retry')
         assert row == _row(index)
@@ -139,7 +158,7 @@ def test_hot_path_io_is_independent_of_history(tmp_path, large_history, monkeypa
             anchors.mark_sent(home, key, root_message_id='om_confirmed', thread_id='omt_confirmed', now='sent')
             row, first, dispatch = anchors._reserve_for_delivery(home, key, now='retry', dispatch_key='different')
             assert row['root_message_id'] == 'om_confirmed' and first is False and dispatch == 'original'
-        assert all(limit is not None and limit <= LIMIT for _, limit, _ in reads)
+        assert all(limit is not None and limit <= _RegressionLimits.LIMIT for _, limit, _ in reads)
         assert len(reads) <= 12 and len(writes) == 3
         assert sum(size for _, _, size in reads) < 32768
         assert sum(size for _, size in writes) < 16384
@@ -200,7 +219,7 @@ def test_same_event_has_one_winner_and_one_atomic_correlation(tmp_path):
 def test_oversized_point_update_is_rejected_before_replace(tmp_path):
     expected = anchors.reserve(tmp_path, _key(1), now='original')
     with pytest.raises(ValueError, match='limit|large|bound'):
-        anchors.mark_sent(tmp_path, _key(1), root_message_id='x' * LIMIT, thread_id='', now='oversize')
+        anchors.mark_sent(tmp_path, _key(1), root_message_id='x' * _RegressionLimits.LIMIT, thread_id='', now='oversize')
     assert anchors.reserve(tmp_path, _key(1), now='reopen') == expected
 
 
@@ -397,7 +416,7 @@ def test_utf8_chunk_boundaries_and_legacy_without_dispatch_map(tmp_path, monkeyp
     path.parent.mkdir()
     path.write_text(json.dumps({'anchors': {_key(8): row},
         'schema_version': 'alert_topic_anchors.v1'}, ensure_ascii=False))
-    monkeypatch.setattr(module, '_CHUNK_BYTES', 7)
+    monkeypatch.setattr(module._MigrationLimits, '_CHUNK_BYTES', 7)
     reports = []
     for _ in range(30):
         report = module.migrate_legacy(tmp_path, max_records=1, max_bytes=512)

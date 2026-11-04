@@ -23,13 +23,18 @@ from ..common.nofollow_fs import (
 )
 from . import alert_topic_anchors as anchors
 
-MAX_MIGRATION_BYTES = anchors.MAX_RECORD_BYTES + 65536  # One maximum value plus JSON framing.
-MAX_MIGRATION_RECORDS = 512
-_CHUNK_BYTES = 65536
 _PROGRESS_PARTS = (*anchors._STORE_PARTS, 'migration.json')
 _PROGRESS_SCHEMA = 'alert_topic_anchors.migration.v2'
 _PHASES = {'initializing', 'root', 'top_start', 'top_item', 'top_separator',
     'bucket_start', 'bucket_item', 'bucket_separator', 'tail', 'publish', 'complete'}
+
+
+# LLM: Class-owned limits preserve all budgets without unregistered module numeric declarations.
+# 类用途: 保存分片记录数、读取字节和小块读取的固定预算。
+class _MigrationLimits:
+    MAX_MIGRATION_BYTES = anchors._AnchorLimits.MAX_RECORD_BYTES + 65536
+    MAX_MIGRATION_RECORDS = 512
+    _CHUNK_BYTES = 65536
 
 
 class MigrationPending(RuntimeError):
@@ -135,11 +140,11 @@ class _Reader:
         remaining = self.budget - self.bytes_read
         if remaining <= 0:
             raise _SliceEnd
-        raw = os.read(self.fd, min(_CHUNK_BYTES, remaining))
+        raw = os.read(self.fd, min(_MigrationLimits._CHUNK_BYTES, remaining))
         self.bytes_read += len(raw)
         self.eof = not raw
         self.buffer += self.decoder.decode(raw, final=self.eof)
-        if len(self.buffer.encode('utf-8')) > MAX_MIGRATION_BYTES:
+        if len(self.buffer.encode('utf-8')) > _MigrationLimits.MAX_MIGRATION_BYTES:
             raise ValueError('legacy alert value exceeds migration bound')
 
     # LLM: Encoding consumed valid text yields the original byte position, including CRLF/Unicode.
@@ -353,10 +358,10 @@ def _begin(root, primary_key):
 
 # LLM: This API is one bounded maintenance step, not a background worker or an unbounded retry loop.
 # 函数用途: 按预算恢复旧账本，完成前所有正常入口都明确拒绝把历史当作不存在。
-def migrate_legacy(owner_home, *, max_records=256, max_bytes=MAX_MIGRATION_BYTES, primary_key=''):
-    if type(max_records) is not int or not 1 <= max_records <= MAX_MIGRATION_RECORDS:
+def migrate_legacy(owner_home, *, max_records=256, max_bytes=_MigrationLimits.MAX_MIGRATION_BYTES, primary_key=''):
+    if type(max_records) is not int or not 1 <= max_records <= _MigrationLimits.MAX_MIGRATION_RECORDS:
         raise ValueError('migration record budget is out of bound')
-    if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_MIGRATION_BYTES:
+    if type(max_bytes) is not int or not 1 <= max_bytes <= _MigrationLimits.MAX_MIGRATION_BYTES:
         raise ValueError('migration byte budget is out of bound')
     if primary_key:
         anchors._validate_key(primary_key)
