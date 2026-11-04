@@ -957,6 +957,59 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-11-04 v1.5 新增生产模块与 API 对接 Skill
+
+以下登记当前源码中的新增入口及职责，不代表真实通道、完整业务链路或部署已验收；原有历史地图保持不变。
+
+```text
+agent_py_agent/
+|-- agent/
+|   |-- adapter/
+|   |   |-- inbound_notes.py # 当前 Owner 附件定位便签与有界脱敏摘要，不授予文件读取权限
+|   |   `-- topic_seed.py # 按 Owner 保存首条话题根消息及附件种子，幂等供首条用户消息消费
+|   |-- assets/
+|   |   |-- asset_dependents.py # 结构化资产依赖反查、版本与监控绑定只读投影及更新 CAS 预检
+|   |   |-- asset_metadata.py # 资产归属和触发提示归一、宿主管理字段剥离，不授予执行权限
+|   |   |-- monitor_composition.py # 从发布快照保存监控隐藏组合，冻结基础流程及脚本依赖引用
+|   |   |-- mutation_ledger.py # 回合内代码变更与成功执行身份账，收口时冻结已执行字节
+|   |   |-- pitfalls.py # 按资产 ID 维护已知陷阱侧账本，不修改描述符或发布版本
+|   |   |-- revision_history.py # Owner 资产内容寻址快照、不可变发布历史及可修复索引
+|   |   |-- source_manifest.py # Owner 数据源清单修订与告警去重，不连接端点或解析真实凭据
+|   |   |-- version_diff.py # 从不可变历史快照生成有界差异和确定性摘要，不执行资产
+|   |   `-- version_hook.py # 资产提交和删除后的历史旁账回调，不改变原 canonical 事务语义
+|   |-- capability/
+|   |   |-- asset_evolution.py # 后台资产演进服务与确定性分类路由，发布依据结构化证据
+|   |   |-- asset_evolution_replay.py # 候选依赖回放闸，原始输入只用于临时 stage，回执不携快照正文
+|   |   |-- asset_evolution_routes.py # 已有脚本演进的发布、草稿及教训分流，沿结构化证据裁决
+|   |   |-- inbound_indicators.py # 有界提取入站指标供方法软推荐，不读取附件或执行动作
+|   |   |-- method_tree.py # 描述符驱动的方法树与固定目录，不读取正文、不写存储或执行资产
+|   |   `-- turn_recommendations.py # 当前 Owner 方法匹配和侧文件软推荐，仅投影到逐轮动态尾段
+|   |-- conversation/
+|   |   |-- background_agent_quota.py # 后台身份额度与有界可丢弃引用索引，原线程仍是唯一身份权威
+|   |   |-- origin_notice_sync.py # 已外发消息的 canonical 关联与原会话摘要幂等同步，不执行运输
+|   |   |-- outbound_message_index.py # 有界回执索引定位 canonical 消息，不授予会话或资料权限
+|   |   |-- quoted_context.py # 已认证入站引用的本轮只读上下文投影，不写历史或执行正文
+|   |   `-- route_mode.py # 会话路由模式解析、只读查询及原线程事务更新
+|   |-- scheduler/
+|   |   |-- alert_topic_anchor_migration.py # 旧告警锚点账本有界迁入逐事件记录，未完成不得视为不存在
+|   |   |-- alert_topic_anchors.py # Owner 逐事件告警根锚点与幂等发送状态，未知结果不触发第二条根消息
+|   |   |-- monitor_pool.py # 监控专用有界线程池与非阻塞准入，保留原工作流并发策略
+|   |   `-- pinned_targets.py # 调度器历史目标解析，不以草稿或当前定义替代固定版本
+|   `-- workflows/
+|       |-- analysis_gate.py # 消费结构化查询健康事实阻断分析，不检查模型正文或另建状态
+|       |-- analysis_isolation.py # 选择单步研判隔离模式，本模块不建立会话、回忆记忆或挂载工具
+|       |-- batching.py # 确定性 foreach 切批、有界调度和聚合，账本仅由协调线程写入
+|       |-- pinned_definitions.py # 从发布历史恢复工作流定义与冻结脚本引用，不回退当前可编辑资产
+|       `-- query_health.py # 源报告归一、查询健康回执与安全重试判断，无 I/O 或权限副作用
+`-- skills/
+    `-- builtin/
+        `-- plugins/
+            `-- api-onboarding/
+                |-- SKILL.md # 从已有接口资料和只读探测整理配置草案，确认后沿正式入口注册来源
+                `-- scripts/
+                    `-- endpoint_probe.py # 显式 HTTP(S) GET/HEAD 探测与结构化 JSON，不追随重定向或回显认证头
+```
+
 ### 2026-11-01 MEGA 文档与只读目录
 
 ```text
