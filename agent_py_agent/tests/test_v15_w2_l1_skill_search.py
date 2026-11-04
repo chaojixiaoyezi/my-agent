@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+from agent_py_agent.agent.assets.monitor_composition import save_monitor_composition
+from agent_py_agent.agent.assets.revision_history import latest_version
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import (
     WorkflowDefinition,
@@ -65,6 +67,20 @@ def _workflow(agent, identifier, *, scripts=(), metadata=None, enabled=True, wor
         WorkflowDefinition(descriptor, steps, body_markdown="WORKFLOW-SIDE-FILE-MUST-NOT-BE-READ"))
 
 
+# LLM: 通过真实宿主组合入口建立隐藏资产；移除当前基础定义但保留不可变历史，不向清单增加可见父。
+# 函数用途: 为只读搜索准备有真实宿主归属的隐藏工作流。
+def _hidden_workflow(agent, monitor_id, *, scripts=()):
+    home = agent.home_paths.owner_home_dir
+    _workflow(agent, "base", scripts=scripts)
+    publication = latest_version(home, "workflow", "base")
+    saved = save_monitor_composition(home, monitor_id, "base", publication["version"], [])
+    store = WorkflowStore(home)
+    store.delete_workflow("base")
+    hidden = store.get_workflow(saved["workflow_id"])
+    assert hidden.descriptor.metadata["hidden"] is True
+    return hidden
+
+
 # LLM: 只构造原 Tool snapshot 的必要属性；实际选择仍调用生产候选及映射函数。
 # 函数用途: 为公开方法候选绑定当前 agent。
 def _tool_snapshot(agent):
@@ -112,9 +128,9 @@ def test_search_preserves_children_and_visible_parents(tmp_path):
 # 函数用途: 验证不可见父被忽略，隐藏子本身也不进入搜索卡。
 def test_invisible_parents_promote_children_and_hidden_methods_are_not_searchable(tmp_path):
     agent = _surface(tmp_path)
-    _script(agent, "orphan", metadata={"member_of": ["workflow:hidden", "workflow:disabled", "skill:missing"]})
+    _script(agent, "orphan", metadata={"member_of": ["workflow:monitor-hidden", "workflow:disabled", "skill:missing"]})
     _script(agent, "secret", metadata={"hidden": True})
-    _workflow(agent, "hidden", scripts=("orphan",), metadata={"hidden": True})
+    _hidden_workflow(agent, "hidden", scripts=("orphan",))
     _workflow(agent, "disabled", scripts=("orphan",), enabled=False)
     cards = candidates.asset_cards_for_agent(agent)
     assert [card.id for card in cards] == ["script:owner:orphan"]
@@ -155,7 +171,7 @@ def test_loader_is_readonly_descriptor_only_and_workspace_wins(tmp_path, monkeyp
     agent = _surface(tmp_path, name="中文方法", refs={"scripts": ["same"]})
     _script(agent, "same")
     _script(agent, "same", workspace=True)
-    _workflow(agent, "monitor-job", metadata={"hidden": True, "composition": {"base_workflow_id": "base"}})
+    _hidden_workflow(agent, "job")
     before = {str(path): path.stat().st_mtime_ns for path in tmp_path.rglob("*")}
     original = ScriptStore._text
 
@@ -288,15 +304,23 @@ def test_cycle_has_one_candidate_and_inherits_without_duplicates(tmp_path):
 # LLM: 引用本身不使停用或隐藏方法复活，完整搜索也不能通过另一个父绕过可见性。
 # 函数用途: 验证 get 的直接绑定只含可见启用子项。
 def test_get_excludes_disabled_and_hidden_children(tmp_path):
-    agent = _surface(tmp_path, refs={"scripts": ["visible", "disabled", "secret"], "workflows": ["hidden-flow"]})
+    agent = _surface(tmp_path, refs={"scripts": ["visible", "disabled", "secret"], "workflows": ["monitor-hidden-flow"]})
     _script(agent, "visible")
     _script(agent, "disabled", enabled=False)
     _script(agent, "secret", metadata={"hidden": True})
-    _workflow(agent, "hidden-flow", metadata={"hidden": True})
+    _hidden_workflow(agent, "hidden-flow")
     result = SkillSearchTool(agent).execute({"action": "get", "skill_id": "owner:review"})
     assert result.ok
     assert json.loads(result.output)["bound_methods"] == [
         {"kind": "script", "id": "visible", "name": "visible", "summary": "inventory visible"}]
+
+
+def test_ordinary_workflow_metadata_cannot_hide_a_searchable_method(tmp_path):
+    agent = _surface(tmp_path)
+    ordinary = _workflow(agent, "ordinary", metadata={"hidden": True, "composition": {"monitor_id": "forged"}})
+    assert "hidden" not in ordinary.descriptor.metadata
+    assert "composition" not in ordinary.descriptor.metadata
+    assert [card.id for card in candidates.asset_cards_for_agent(agent)] == ["workflow:owner:ordinary"]
 
 
 # LLM: loader 消费的是冻结 refs，不重新打开 SKILL 或 sidecar；metadata 中的伪造来源也不能覆盖冻结身份。

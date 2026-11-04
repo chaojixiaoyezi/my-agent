@@ -460,18 +460,27 @@ def test_repeat_save_rejects_missing_script_code_blob(tmp_path):
 
 # LLM: 首次追加依赖也必须核验原发布记录的完整blob，不能仅凭SHA索引行宣称冻结成功。
 # 函数用途: 验证新尾部脚本历史代码缺失在canonical提交前拒绝。
-def test_new_composition_rejects_missing_appended_history_blob(tmp_path):
+@pytest.mark.parametrize('blob_key,corrupt', [
+    ('payload_blob', False), ('code_sha256', False), ('payload_blob', True), ('code_sha256', True),
+])
+def test_new_composition_rejects_missing_appended_history_blob(tmp_path, blob_key, corrupt):
     store, _ = _publish(tmp_path)
     scripts = ScriptStore(tmp_path)
     scripts.save_script(AssetDescriptor(id='tail-script', kind='script', name='尾部'), 'print(7)')
     publication = latest_version(tmp_path, 'script', 'tail-script')
-    digest = publication['code_sha256']
-    (tmp_path / 'data/asset_evolution/blobs' / digest[:2] / digest).unlink()
+    digest = publication[blob_key]
+    blob = tmp_path / 'data/asset_evolution/blobs' / digest[:2] / digest
+    if corrupt:
+        blob.write_bytes(b'corrupt')
+    else:
+        blob.unlink()
     before = _fd_count()
     with pytest.raises(ValueError, match='COMPOSITION_SCRIPT_PIN_UNAVAILABLE'):
         save_monitor_binding(tmp_path, 'job48', workflow_ids=['base'], appended_steps=[
             {'step_id': 'tail', 'name': '追加', 'mode': 'deterministic_script', 'script_id': 'tail-script'}])
     assert store.get_workflow('monitor-job48') is None
+    assert latest_version(tmp_path, 'workflow', 'monitor-job48') is None
+    assert latest_version(tmp_path, 'script', 'tail-script') == publication
     assert not (tmp_path / 'data/monitors/job48.json').exists()
     assert _fd_count() == before
 
@@ -480,9 +489,10 @@ def test_new_composition_rejects_missing_appended_history_blob(tmp_path):
 # 函数用途: 验证真实发布的依赖身份冲突没有canonical及监控绑定写入。
 def test_unrepresentable_inherited_workflow_pin_is_rejected(tmp_path):
     store, base = _publish(tmp_path)
-    saved = store.save_workflow(replace(base, descriptor=replace(base.descriptor,
-        metadata={'base_workflow_pin': {'id': 'base', 'version': 1}})))
-    publication = latest_version(tmp_path, 'workflow', saved.descriptor.id)
+    # 普通发布入口拒绝自身基础引用；用真实历史原语构造合法旧记录里的额外继承pin。
+    publication = record_version(tmp_path, 'workflow', 'base', payload=base.to_dict(),
+        execution_definition_ref=base.execution_definition_ref,
+        pins={'scripts': {}, 'skills': {}, 'workflows': {'base': {'version': 1}}})['record']
     assert publication['version'] == 2
     assert publication['pins']['workflows'] == {'base': {'version': 1}}
     before = _fd_count()
@@ -490,6 +500,7 @@ def test_unrepresentable_inherited_workflow_pin_is_rejected(tmp_path):
         save_monitor_binding(tmp_path, 'job48', workflow_ids=['base'], appended_steps=[
             {'step_id': 'tail', 'name': '追加', 'mode': 'llm_skill_analysis'}])
     assert store.get_workflow('monitor-job48') is None
+    assert not (tmp_path / 'data/monitors/job48.json').exists()
     assert get_version(tmp_path, 'workflow', 'base', 2) == publication
     assert _fd_count() == before
 

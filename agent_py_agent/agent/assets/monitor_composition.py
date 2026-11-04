@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from . import next_asset_revision, safe_asset_id
 from .revision_history import (
+    AssetHistoryError,
     asset_fingerprint,
     blob_get,
     get_version,
@@ -101,7 +102,13 @@ def _composition_pins(store, base, base_record, appended, base_workflow_id, base
             raise ValueError('MONITOR_COMPOSITION_SCRIPT_PIN_UNAVAILABLE')
     additions = [step.to_dict() for step in appended if step.script_id and step.script_id not in pins['scripts']]
     if previous_pins is None:
-        extra = _pins(store, {'steps': additions})
+        try:
+            extra = _pins(store, {'steps': additions})
+        except AssetHistoryError as exc:
+            # 缺失或损坏的追加历史统一走组合错误合同；配额和其它历史错误仍保留原分类。
+            if exc.code != 'ASSET_HISTORY_BLOB_MISSING':
+                raise
+            raise ValueError('MONITOR_COMPOSITION_SCRIPT_PIN_UNAVAILABLE') from exc
         pins['scripts'].update(extra['scripts'])
     else:
         if not isinstance(previous_pins, dict):
