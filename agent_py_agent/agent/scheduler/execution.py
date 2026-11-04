@@ -56,8 +56,8 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
     return replace(dependencies, run_once=run_once)
 
 
-# LLM: 原宿主轮内只冻结同工具的数据，不改共享 registry/权限；脚本复用原 ContextVar 快照。
-# 函数用途: 通过原工具执行器运行固定资产，保留审批、取消、归档和 attempt 结算。
+# LLM: 历史定义只选内容，不签发当前授权；脚本由原数据源执行器加载当前记录、校验 pin 并绑定有效快照。
+# 函数用途: 通过原工具执行器运行固定资产，保留审批、取消、归档、当前权限上限和 attempt 结算。
 def _execute_target_tool(agent, params, target, *, monitor_id=''):
     from types import SimpleNamespace
 
@@ -69,7 +69,7 @@ def _execute_target_tool(agent, params, target, *, monitor_id=''):
     from ..common.cancellation import CancellationToken
     from ..concurrency.interrupt import is_interrupted, register_interrupt_callback
     from ..tooling.runtime_contracts import ToolCall
-    from ..workflows.datasource_runtime import bind_asset_im_notifier, bind_script_execution_record
+    from ..workflows.datasource_runtime import bind_asset_im_notifier
     from .execution_policy import ExecutionTargetError, resolve_execution_target
 
     name = 'workflows' if target['kind'] == 'workflow' else 'scripts'
@@ -95,9 +95,8 @@ def _execute_target_tool(agent, params, target, *, monitor_id=''):
             if target['kind'] == 'workflow':
                 tool.store = SimpleNamespace(owner_home=tool.owner_home,
                     get_workflow=lambda identifier: deepcopy(definition) if identifier == target['asset_id'] else None)
-            else:
-                scope.enter_context(bind_script_execution_record(tool.owner_home, target['asset_id'], tool._workspace_root(), definition))
-            # 数据绑定在授权之前固定；名称、可用性、schema 和策略原样保留。
+            # 脚本的历史 payload 不含当前修订/来源，不能绑定成当前记录；原 resolver 负责权限求交及 runner 快照。
+            # 仅替换本次 handler；名称、可用性、schema 和授权策略原样保留。
             snapshot = replace(snapshot, runtimes=tuple(replace(item, handler=tool) if item.model_spec.name == name else item
                 for item in snapshot.runtimes))
             arguments = {'action': 'run', ('workflow_id' if name == 'workflows' else 'script_id'): target['asset_id'],
@@ -151,8 +150,8 @@ def _pinned_script_dispatch(tool, target, params):
         timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
 
 
-# LLM: 业务仅执行一次，结果/用量先落原 run；欠发只走原 outbox，分析调用数取原模型账而非节点个数。
-# 函数用途: 执行结构化目标并沿现有 TaskLink、终态和冻结通知合同收口。
+# LLM: 业务仅执行一次，结果/用量先落原 run；冻结欠发释放原 claim 供 outbox 重投，不进入业务 waiting 对账。
+# 函数用途: 执行结构化目标并沿现有 TaskLink、终态和冻结通知合同收口，通知失败不重跑脚本。
 def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=None):
     from ..agent_core.model.call_runtime import model_call_ledger
     from ..agent_core.runtime.loop_models import RunParams
@@ -207,7 +206,9 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
         'expected_status': 'active', 'now': now})
     commit = _commit_tool_result(agent, service, claim, kwargs, output) if ok else None
     if commit is not None and commit.outbox_frozen:
-        service.park_waiting(claim, response=output, delivery_status=commit.delivery_status, delivery_reason='execution_target_result', now=now)
+        # TaskLink 已 completed；waiting 对账排除定时触发自身，会在欠发尚未确认时提前记 done。
+        # 与原后台交付一致回到 queued；真实冻结 wake 保留，下一片先重投，不再进入业务工具。
+        service.release(claim, now=now)
         return
     service.finish(claim, status='done' if ok else 'failed', response=output,
         delivery_status=commit.delivery_status if commit is not None else 'suppressed',

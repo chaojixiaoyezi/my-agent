@@ -11,9 +11,11 @@ import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.assets.monitor_adapter import (
     get_monitor_descriptor,
     save_monitor_binding,
@@ -32,12 +34,14 @@ from agent_py_agent.agent.assets.revision_history import (
 )
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.capability.asset_evolution import AssetEvolutionService
-from agent_py_agent.agent.scheduler.execution import _bind_pinned_tool
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.scheduler.execution import _execute_target_tool
 from agent_py_agent.agent.scheduler.execution_policy import (
     ExecutionTargetError,
     resolve_execution_target,
 )
 from agent_py_agent.agent.scheduler.pinned_targets import resolve_monitor_target
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling._filesystem_edit import EditFileTool
 from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool, WriteFileToolOptions
@@ -82,8 +86,8 @@ def _pause_analysis(spec, context, skills):
     return {'_pause_for_resume': True}
 
 
-# LLM: 所有路径都属于本用例的临时 Owner；不读取部署 Home 或构造真实 Agent。
-# 函数用途: 装配真实工具、存储及工作流引擎。
+# LLM: 所有路径都属于本用例的临时 Owner；真实 Agent 仅承载宿主工具轮，不调用模型或部署通道。
+# 函数用途: 装配真实工具、存储、工作流引擎及调度宿主，退出回收监控池。
 @pytest.fixture
 def gate(tmp_path):
     home = (tmp_path / 'app' / 'owners' / 'local' / 'main').resolve()
@@ -99,11 +103,15 @@ def gate(tmp_path):
     engine = WorkflowEngine(home, analysis_handler=_pause_analysis)
     workflows = WorkflowsTool(home, engine=engine)
     access = FileSystemAccessOptions(path_access_mode='full', owner_scope_root=str(home))
-    return SimpleNamespace(home=home, workspace=workspace, descriptor=descriptor,
+    host = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(home.parents[2]),
+        enable_plugins=False), workspace)
+    assert host.home_paths.owner_home_dir == home
+    yield SimpleNamespace(home=home, workspace=workspace, descriptor=descriptor, host=host,
         scripts=scripts, workflows=workflows, engine=engine, code_v1=code,
         store=ScriptStore(home), writer=WriteFileTool(workspace,
             options=WriteFileToolOptions(access_options=access)),
         editor=EditFileTool(workspace, access_options=access))
+    host.scheduler_service.monitor_pool.shutdown()
 
 
 # LLM: 工作流保存走公开工具和唯一版本钩子；快照只能由引擎真实执行生成。
@@ -164,19 +172,21 @@ def _edit_and_execute(gate, code):
     return state, json.loads(completed.stdout)
 
 
-# LLM: 同时经过监控策略、scheduler 内容解析及原工具版本绑定，实际结果必须能证明执行字节。
-# 函数用途: 沿监控的固定版本执行真实脚本工具。
+# LLM: 监控选择后走完整宿主轮、runtime/handler 和原 pin resolver；不能用仅调用绑定 helper 的旁路冒充生产。
+# 函数用途: 沿真实调度工具栈执行监控固定版本，并核对实际进程回执。
 def _run_monitor(gate, monitor_id):
     selected = resolve_monitor_target(gate.home, monitor_id,
         {'kind': 'script', 'asset_id': 'continuity',
          'input_ref': {'inputs': {'value': 7, 'identify': True}}})
     notice = selected.pop('upgrade_notice', None)
-    host = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=gate.home))
-    target, definition = resolve_execution_target(host, selected,
+    target, _definition = resolve_execution_target(gate.host, selected,
         runtime=SimpleNamespace(handler=gate.scripts))
-    bound = _bind_pinned_tool(gate.scripts, target, definition)
-    result = _call(bound, {'action': 'run', 'script_id': 'continuity',
-        'inputs': target['input_ref']['inputs']})
+    identifier = 'gate3-monitor-' + uuid4().hex
+    execution, output = _execute_target_tool(gate.host, RunParams(request_id=identifier,
+        run_id=identifier, task_id=identifier, source='scheduler_tool',
+        root_user_prompt='运行固定监控'), selected, monitor_id=monitor_id)
+    assert execution.result.ok, output
+    result = json.loads(output)
     assert result['ok'] is True and result['exit_code'] == 0, result
     assert result['output_data']['value'] == 8
     if notice is not None:

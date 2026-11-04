@@ -9,7 +9,11 @@ import pytest
 
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
 from agent_py_agent.agent.assets.monitor_adapter import get_monitor_descriptor, save_monitor_binding
-from agent_py_agent.agent.assets.revision_history import record_compat_edge, record_version
+from agent_py_agent.agent.assets.revision_history import (
+    latest_version,
+    record_compat_edge,
+    record_version,
+)
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import (
     WorkflowDefinition,
@@ -79,20 +83,21 @@ def test_missing_blob_is_structured_stale(tmp_path):
     assert caught.value.reason == 'blob_missing'
 
 
-# LLM: 脚本版本显示号不是执行身份，真正固定的是代码原始字节SHA。
-# 函数用途: 验证历史脚本pin与返回快照的代码一致。
+# LLM: 使用原 Store 发布钩子的 storage_revision；历史 payload 不补当前授权字段，真正内容固定为原字节 SHA。
+# 函数用途: 验证历史脚本 pin、存储修订和返回快照的代码一致。
 def test_script_history_builds_exact_expected_pin(tmp_path):
     store = ScriptStore(tmp_path)
     descriptor = AssetDescriptor(id='collect', kind='script', name='采集')
     old = store.save_script(descriptor, 'print(1)')
     reference = execution_definition_ref('script', 'collect', old)
-    record_version(tmp_path, 'script', 'collect', payload=old, code=b'print(1)',
-                   execution_definition_ref=reference['definition_sha256'])
+    assert latest_version(tmp_path, 'script', 'collect')['storage_revision'] == old['revision']
     store.save_script(descriptor, 'print(2)')
     agent, runtime = _agent(tmp_path, store)
     target, frozen = resolve_execution_target(agent, {'kind': 'script', 'asset_id': 'collect',
         'execution_definition_ref': reference}, runtime=runtime)
     assert target['expected_script_pin']['code_sha256'] == hashlib.sha256(b'print(1)').hexdigest()
+    assert target['expected_script_pin']['revision'] == old['revision'] == 1
+    assert 'revision' not in frozen
     assert frozen['code'] == 'print(1)'
 
 
