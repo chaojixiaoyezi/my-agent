@@ -510,12 +510,14 @@ def test_get_run_handles_pending_failure_and_unavailable_evidence(world, monkeyp
 def test_get_run_requires_bound_script_run_result(world, monkeypatch, case):
     from agent_py_agent.agent.gateway_parts import business_api_v13 as foundation
     from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+    from agent_py_agent.agent.tooling.runtime_contracts import tool_arguments_hash
     now = '2026-11-02T00:00:00+00:00'
     row = {'execution_id': 'synthetic-bound-run', 'owner_id': world.context.owner_id, 'space_id': None,
         'script_id': 'collect', 'subject_id': world.context.subject_id, 'requires_approval': True,
         'task_id': 'synthetic-task', 'context': None, 'inputs_sha256': scripts.digest({}), 'state': 'accepted',
         'ok': None, 'output': None, 'error': None, 'duration_ms': None, 'started_at': None,
         'finished_at': None, 'revision': 0, 'created_at': now, 'updated_at': now}
+    row['tool_args_hashes'] = [tool_arguments_hash({'action': 'run', 'script_id': 'collect', 'inputs': {}})]
     v13_seed(world.host.home_paths.owner_home_dir, 'script_runs', {'synthetic-bound-run': row})
     tool = {'operation_id': 'synthetic-operation', 'run_id': 'synthetic-runtime-run',
         'attempt_id': 'synthetic-attempt', 'task_id': 'synthetic-task', 'tool_name': 'scripts',
@@ -533,9 +535,7 @@ def test_get_run_requires_bound_script_run_result(world, monkeypatch, case):
         if action == 'tool_calls.list':
             return {'items': [tool], 'next_cursor': None, 'coverage': 'complete'}
         assert action == 'tool_calls.get' and params == {'operation_id': 'synthetic-operation'}
-        inputs = {'action': 'list' if case == 'list_only' else 'run',
-            'script_id': 'another' if case == 'wrong_script' else 'collect', 'inputs': {}}
-        return {'tool_call': tool, 'redacted_input': inputs}
+        return {'tool_call': tool, 'redacted_input': {}}
 
     # LLM: 此假读口只模拟原协议的内容，参数断言证明实现请求准确 owner/run/attempt/tool。
     # 函数用途: 返回合成 ToolOperationRecord 的真实协议形状或缺失反例。
@@ -549,7 +549,9 @@ def test_get_run_requires_bound_script_run_result(world, monkeypatch, case):
             'duration_ms': 5, 'started_at': 1, 'ended_at': 2, 'error_code': 'SCRIPT_EXIT_NONZERO' if case == 'failed' else '',
             'effect_outcome': 'failed' if case == 'failed' else 'confirmed'}
         status = 'unknown' if case == 'unknown_operation' else 'failed' if case == 'failed' else 'succeeded'
-        return SimpleNamespace(status=status, result={'schema_version': 'tool_execution_result.v1',
+        arguments = {'action': 'list' if case == 'list_only' else 'run',
+            'script_id': 'another' if case == 'wrong_script' else 'collect', 'inputs': {}}
+        return SimpleNamespace(status=status, args_hash=tool_arguments_hash(arguments), result={'schema_version': 'tool_execution_result.v1',
             'handler_executed': True, 'output': canonical_json(raw)})
 
     monkeypatch.setattr(foundation, 'v13_call_frozen', observe)
@@ -1106,3 +1108,186 @@ def test_script_delete_same_key_interleaving_retains_proof(v13_native, delete_re
     assert delete_resources.measurements == [0]
     print('Interleaved delete maximum_active:', active['maximum'], 'fd_delta:', delete_resources.measurements,
           'contended_lock:', Path(held['contended_path']).name)
+
+
+# LLM: 经真实 HTTP 准入高风险运行，任务和 operation 仍由原 writer 产生；不签审批票或模拟展示输入。
+# 函数用途: 保存批准路径的关联并通过规范 managed 写口发布真实 runner 输出。
+def _150_approved_roundtrip(native, *, inputs=None, arguments=None, ok=True):
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    from agent_py_agent.tests.test_v13_w0_observation_readers import managed_roundtrip_operation
+
+    space = v13_space(native)
+    schema = {'type': 'object', 'properties': {'number': {'type': 'integer'}}, 'additionalProperties': False}
+    status, created = v13_call(native, 'scripts.create', {'script_id': 'roundtrip-script',
+        'space_id': space, 'name': '原生结算往返', 'code': 'print(\'{"value": 7}\')' if ok else 'raise SystemExit(9)',
+        'risk_level': 'high', 'requires_approval': True, 'input_schema': schema},
+        user='business-alice', idempotency_key='150-create-roundtrip')
+    assert status == 200, created
+    params = {'script_id': 'roundtrip-script', 'space_id': space}
+    if inputs is not None:
+        params['inputs'] = inputs
+    key = '150-admit-roundtrip'
+    status, accepted = v13_call(native, 'scripts.run', params,
+        user='business-alice', idempotency_key=key)
+    assert status == 202, accepted
+    [services] = [service for service in native[0]._business_services.values()
+        if service.owner_id.endswith('/business-alice')]
+    store = services.host.conversation_store
+    task = store.session_tasks.require(accepted['data']['task_id'])
+    if task.status == 'queued':
+        task = store.session_tasks.advance(task.task_id, SessionTaskUpdate(status='accepted'))
+    if task.status == 'accepted':
+        task = store.session_tasks.advance(task.task_id, SessionTaskUpdate(status='done'))
+    assert task.status == 'done'
+    actual_inputs = inputs or {}
+    # 这里只运行隔离测试资产，验证结果运输与恢复；不声称覆盖真实人工批准链。
+    result = ScriptRunner(services.owner_home, owner_scope_root=services.owner_home,
+        agent_home_root=services.host.home_paths.root).run_script('roundtrip-script', actual_inputs)
+    assert result.ok is ok
+    raw = {**vars(result), 'script_id': 'roundtrip-script'}
+    args = arguments if arguments is not None else {
+        'action': 'run', 'script_id': 'roundtrip-script', 'inputs': actual_inputs}
+    runtime, run, operation_id, payload = managed_roundtrip_operation(services, task,
+        arguments=args, raw=raw, ok=ok)
+    return services, task, runtime, run, operation_id, params, key, accepted['data']
+
+
+# LLM: 参数 hash 在准入时固定，空对象只允许省略和显式两种原生形状；服务重建后仍可恢复。
+# 函数用途: 真实 HTTP 核对准入摘要、成功/失败恢复、重放终态和来源失效后的单调性。
+@pytest.mark.parametrize('inputs,omit_tool_inputs,ok', [
+    (None, True, True), ({}, False, True), ({'number': 4}, False, True), ({}, True, False),
+])
+def test_150_approved_managed_http_terminal(v13_native, inputs, omit_tool_inputs, ok):
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+    from agent_py_agent.agent.tooling.runtime_contracts import tool_arguments_hash
+
+    args = {'action': 'run', 'script_id': 'roundtrip-script'}
+    if not omit_tool_inputs:
+        args['inputs'] = inputs or {}
+    services, task, runtime, run, operation_id, params, key, accepted = _150_approved_roundtrip(
+        v13_native, inputs=inputs, arguments=args, ok=ok)
+    stored = V13Store(services.owner_home).get('script_runs', accepted['execution_id'])
+    expected = [tool_arguments_hash({'action': 'run', 'script_id': 'roundtrip-script', 'inputs': inputs or {}})]
+    if not inputs:
+        expected.append(tool_arguments_hash({'action': 'run', 'script_id': 'roundtrip-script'}))
+    assert stored['tool_args_hashes'] == expected
+    status, body = v13_call(v13_native, 'scripts.runs.get', {'execution_id': accepted['execution_id']}, user='business-alice')
+    assert status == 200, body
+    terminal = body['data']['run']
+    assert terminal['state'] == ('completed' if ok else 'failed') and terminal['ok'] is ok, terminal
+    assert terminal['output'] == ({'value': 7} if ok else {})
+    assert terminal['task_id'] == task.task_id
+    assert terminal['coverage'] == services.observation.readers['approvals']({}).coverage
+    status, replay = v13_call(v13_native, 'scripts.run', params, user='business-alice', idempotency_key=key)
+    assert status == 200 and replay['data']['run'] == terminal, replay
+    # 精确来源此时损坏；已保存终态不依赖再次观察才能继续返回。
+    with runtime._runtime_connection() as conn:
+        conn.execute('UPDATE tool_operations SET outcome_json=? WHERE operation_id=?', ('{broken', operation_id))
+        conn.commit()
+    assert runtime.db_path == runtime_db_path(services.owner_home)
+    services.observation.readers.clear()
+    status, again = v13_call(v13_native, 'scripts.runs.get', {'execution_id': accepted['execution_id']}, user='business-alice')
+    assert status == 200 and again['data']['run'] == terminal, again
+    status, again = v13_call(v13_native, 'scripts.run', params, user='business-alice', idempotency_key=key)
+    assert status == 200 and again['data']['run'] == terminal, again
+
+
+# LLM: 各反例都通过真实 claim/settle 写入，公开观察不会提供虚构 redacted_input。
+# 函数用途: 验证摘要包含 action、script、完整输入和额外参数，坏 task provenance 不恢复结果。
+@pytest.mark.parametrize('case', ['action', 'script', 'inputs', 'extra', 'task_provenance', 'owner', 'attempt'])
+def test_150_native_binding_rejects_mismatches(v13_native, case):
+    args = {'action': 'run', 'script_id': 'roundtrip-script', 'inputs': {}}
+    if case == 'action':
+        args['action'] = 'list'
+    elif case == 'script':
+        args['script_id'] = 'different-script'
+    elif case == 'inputs':
+        args['inputs'] = {'number': 99}
+    elif case == 'extra':
+        args['other'] = True
+    services, task, runtime, run, operation_id, params, key, accepted = _150_approved_roundtrip(
+        v13_native, arguments=args)
+    with runtime._runtime_connection() as conn:
+        if case == 'task_provenance':
+            metadata = json.loads(conn.execute('SELECT metadata_json FROM task_runs WHERE task_run_id=?',
+                (run['task_run_id'],)).fetchone()[0])
+            metadata['session_task_ref'] = 'different-task'
+            conn.execute('UPDATE task_runs SET metadata_json=? WHERE task_run_id=?', (json.dumps(metadata), run['task_run_id']))
+        elif case == 'owner':
+            conn.execute('UPDATE tasks SET owner_id=? WHERE task_id=?', ('local/other', run['task_id']))
+        elif case == 'attempt':
+            other = runtime.record_run_creation(owner_id=services.owner_id, run_id='different-run')
+            conn.execute('UPDATE tool_operations SET attempt_id=? WHERE operation_id=?', (other['attempt_id'], operation_id))
+        conn.commit()
+    status, body = v13_call(v13_native, 'scripts.runs.get', {'execution_id': accepted['execution_id']}, user='business-alice')
+    assert status == 200, body
+    assert body['data']['run']['state'] == 'unknown' and body['data']['run']['ok'] is None, body
+
+
+# LLM: 此组只验证已准入记录的消费，不代替上面的真实派工测试；规范任务创建不发布 wake。
+# 函数用途: 在受限环境也能覆盖真实 managed 结算、观察与脚本终态恢复。
+from agent_py_agent.tests import test_v13_w0_observation_readers as observation_roundtrip
+
+_observation_gateway = observation_roundtrip.background_http
+
+
+@pytest.fixture
+def background_http(_observation_gateway):
+    _observation_gateway[0].paths.processing.mkdir(parents=True, exist_ok=True)
+    return _observation_gateway
+
+
+@pytest.mark.parametrize('case', ['explicit_empty', 'omitted_empty', 'populated', 'wrong_input', 'failed'])
+def test_150_native_consumer_without_dispatch(background_http, case):
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+    from agent_py_agent.agent.tooling.runtime_contracts import tool_arguments_hash
+
+    services, task = observation_roundtrip.observed_task(background_http)
+    inputs = {'number': 4} if case == 'populated' else {}
+    status, created = observation_roundtrip.background_call(background_http, 'scripts.create', {
+        'script_id': 'consumer-script', 'name': '消费者往返',
+        'code': 'raise SystemExit(9)' if case == 'failed' else 'print(\'{"value": 7}\')',
+        'input_schema': {'type': 'object', 'properties': {'number': {'type': 'integer'}}, 'additionalProperties': False}},
+        idempotency_key='150-consumer-create')
+    assert status == 200, created
+    status, executed = observation_roundtrip.background_call(background_http, 'scripts.run',
+        {'script_id': 'consumer-script', 'inputs': inputs}, idempotency_key='150-consumer-native-run')
+    assert status == 200, executed
+    actual = executed['data']['run']
+    assert actual['state'] == ('failed' if case == 'failed' else 'completed'), actual
+    admitted = V13Store(services.owner_home).get('script_runs', actual['execution_id'])
+    args = {'action': 'run', 'script_id': 'consumer-script', 'inputs': inputs}
+    hashes = [tool_arguments_hash(args)]
+    if not inputs:
+        hashes.append(tool_arguments_hash({'action': 'run', 'script_id': 'consumer-script'}))
+    raw = {'script_id': 'consumer-script', 'ok': actual['ok'], 'output_data': actual['output'],
+        'duration_ms': actual['duration_ms'], 'started_at': 1, 'ended_at': 2,
+        'error_code': actual['error'], 'effect_outcome': 'confirmed' if actual['ok'] else 'failed'}
+    if case == 'omitted_empty':
+        args.pop('inputs')
+    elif case == 'wrong_input':
+        args['inputs'] = {'number': 99}
+    runtime, run, operation_id, payload = observation_roundtrip.managed_roundtrip_operation(
+        services, task, arguments=args, raw=raw, ok=actual['ok'])
+    task = services.host.conversation_store.session_tasks.advance(task.task_id, SessionTaskUpdate(status='accepted'))
+    services.host.conversation_store.session_tasks.advance(task.task_id, SessionTaskUpdate(status='done'))
+    # 这是消费端的明确初态夹具，由真实 V13Store 保存，不注入观察 reader 或结果字典。
+    bound = {**admitted, 'execution_id': 'consumer-approved', 'task_id': task.task_id,
+        'requires_approval': True, 'state': 'accepted', 'ok': None, 'output': None, 'error': None,
+        'started_at': None, 'finished_at': None, 'tool_args_hashes': hashes}
+    v13_seed(services.owner_home, 'script_runs', {'consumer-approved': bound})
+    status, body = observation_roundtrip.background_call(background_http, 'scripts.runs.get', {'execution_id': 'consumer-approved'})
+    assert status == 200, body
+    result = body['data']['run']
+    expected = 'unknown' if case == 'wrong_input' else 'failed' if case == 'failed' else 'completed'
+    assert result['state'] == expected, result
+    if expected != 'unknown':
+        assert result['output'] == actual['output'] and result['ok'] is actual['ok']
+        status, again = observation_roundtrip.background_call(background_http, 'scripts.runs.get', {'execution_id': 'consumer-approved'})
+        assert status == 200 and again['data']['run'] == result, again
+        with runtime._runtime_connection() as conn:
+            conn.execute('UPDATE tool_operations SET outcome_json=? WHERE operation_id=?', ('{broken', operation_id))
+            conn.commit()
+        status, again = observation_roundtrip.background_call(background_http, 'scripts.runs.get', {'execution_id': 'consumer-approved'})
+        assert status == 200 and again['data']['run'] == result, again

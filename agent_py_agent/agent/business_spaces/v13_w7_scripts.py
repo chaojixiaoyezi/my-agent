@@ -33,6 +33,7 @@ from ..plugin_host.contracts import DomainResult
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import canonical_json, thaw, validate_object
 from ..tooling.input_schema import canonicalize_tool_input_schema, validate_tool_input
+from ..tooling.runtime_contracts import tool_arguments_hash
 from ..workflows.datasource_runtime import run_script_with_datasources
 from ..workflows.script_runner import ScriptRunner
 from .v13_store import v13_store_for
@@ -583,6 +584,9 @@ def _run_view(row, *, approval_ids=None, coverage='complete'):
     names = ('execution_id', 'script_id', 'state', 'requires_approval', 'task_id', 'ok',
              'output', 'error', 'duration_ms', 'started_at', 'finished_at')
     result = {key: row[key] for key in names}
+    if row['state'] in ('completed', 'failed'):
+        coverage = row.get('terminal_coverage', coverage)
+        approval_ids = []
     result.update(approval_ids=list(approval_ids or []), coverage=coverage)
     return result
 
@@ -604,9 +608,13 @@ def _patch_run(call, execution_id, changes):
         row.update(changes, revision=row['revision'] + 1, updated_at=timestamp(call.clock()))
         return row
 
-    return store.transaction('script_runs', mutate,
+    store.transaction('script_runs', mutate,
         idempotency_key='run-state-' + digest([execution_id, changes])[:48],
         params_digest=digest([execution_id, changes]))
+    # 回执可能保存旧的非终态投影；返回前重读当前记录，不能让旧状态补丁重放倒退终态。
+    current = store.get('script_runs', execution_id)
+    _foundation().v13_require_access(call, current)
+    return current
 
 
 # LLM: 输入与静态输入校验器同源，错误仅包含结构路径，不带用户值。
@@ -711,6 +719,9 @@ def run_script(call):
         if not script.get('enabled', True):
             raise HostAPIError('STATE_CONFLICT', 409)
         inputs = validate_script_inputs(script, call.params.get('inputs', {}))
+        tool_args_hashes = [tool_arguments_hash({'action': 'run', 'script_id': script['id'], 'inputs': inputs})]
+        if inputs == {}:
+            tool_args_hashes.append(tool_arguments_hash({'action': 'run', 'script_id': script['id']}))
         risk, approval = script_risk(script)
         approval = approval or risk in ('high', 'critical')
         if approval and not callable(getattr(call.services.background, 'execute', None)):
@@ -719,7 +730,8 @@ def run_script(call):
         records[execution_id] = {'execution_id': execution_id, 'owner_id': call.owner_id,
             'space_id': call.params.get('space_id'), 'script_id': script['id'], 'subject_id': call.subject_id,
             'requires_approval': approval, 'task_id': None, 'context': call.params.get('context'),
-            'inputs_sha256': digest(inputs), 'state': 'accepted', 'ok': None, 'output': None,
+            'inputs_sha256': digest(inputs), 'tool_args_hashes': tool_args_hashes,
+            'state': 'accepted', 'ok': None, 'output': None,
             'error': None, 'duration_ms': None, 'started_at': None, 'finished_at': None,
             'revision': 0, 'created_at': now, 'updated_at': now}
         return {'execution_id': execution_id}
@@ -730,12 +742,19 @@ def run_script(call):
             params_digest=digest([call.action, call.params, call.expected_revision]))
         row = business.get('script_runs', execution_id)
         _foundation().v13_require_access(call, row)
+        if row['state'] in ('completed', 'failed'):
+            return {'run': _run_view(row)}
         if row['task_id'] is not None:
+            observed = get_run(replace(call, params={'execution_id': execution_id}))
+            if observed['run']['state'] in ('completed', 'failed'):
+                return observed
             return _run_accepted_replay(call, row)
         if row['state'] != 'accepted':
             return _run_low(call, native, {}, row, {})
         script = required_script(call, native, row['script_id'])
         inputs = validate_script_inputs(script, call.params.get('inputs', {}))
+        if digest(inputs) != row['inputs_sha256']:
+            raise HostAPIError('IDEMPOTENCY_CONFLICT', 409)
         risk, approval = script_risk(script)
         if row['requires_approval'] or approval or risk in ('high', 'critical'):
             return _run_approval(call, script, row, inputs)
@@ -773,7 +792,7 @@ def _task_observations(call, action, task_id):
     return rows, 'partial' if coverage != 'unknown' else 'unknown'
 
 
-# LLM: 工具名称或 SUCCEEDED 状态本身不能证明 run；冻结详情核 action/ID/输入，再由原操作库核 owner/run/attempt。
+# LLM: 工具名称或 SUCCEEDED 状态不能证明 run；冻结详情核任务来源，原操作库核身份与准入时的规范参数摘要。
 # 函数用途: 从当前任务的原生 scripts.run 操作提取真实脚本结果。
 def _task_script_result(call, row, tools):
     from ..local_storage import TOOL_OPERATION_FAILED, TOOL_OPERATION_SUCCEEDED
@@ -783,20 +802,19 @@ def _task_script_result(call, row, tools):
     repo = RuntimeRepository(runtime_db_path(call.owner_home), read_only=True)
     operations = ManagedOperationStore(repo)
     for tool in reversed(tools):
-        if tool['tool_name'] != 'scripts' or tool['executed'] is not True:
+        if (row['owner_id'] != call.owner_id or tool['tool_name'] != 'scripts' or tool['executed'] is not True
+                or tool['task_id'] != row['task_id']):
             continue
         details = _foundation().v13_call_frozen(call, 'tool_calls.get', {'operation_id': tool['operation_id']})
         actual = details['tool_call']
-        if actual['task_id'] != row['task_id'] or actual['run_id'] != tool['run_id']:
-            continue
-        inputs = details['redacted_input']
-        if (inputs.get('action') != 'run' or inputs.get('script_id') != row['script_id']
-                or digest(inputs.get('inputs', {})) != row['inputs_sha256']
-                or set(inputs) - {'action', 'script_id', 'inputs'}):
+        if (actual['task_id'] != row['task_id'] or actual['executed'] is not True
+                or any(actual[key] != tool[key] for key in ('operation_id', 'run_id', 'attempt_id', 'tool_name'))):
             continue
         record = operations.get_tool_operation(owner_id=call.owner_id, run_id=tool['run_id'],
             operation_id=tool['operation_id'], attempt_id=tool['attempt_id'], tool_name='scripts')
         if record is None or record.status not in (TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED):
+            continue
+        if not record.args_hash or record.args_hash not in row.get('tool_args_hashes', ()):
             continue
         payload = record.result
         if payload.get('schema_version') != 'tool_execution_result.v1' or payload.get('handler_executed') is not True:
@@ -825,7 +843,7 @@ def get_run(call):
     if row is None:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     _foundation().v13_require_access(call, row)
-    if row['task_id'] is None:
+    if row['state'] in ('completed', 'failed') or row['task_id'] is None:
         coverage = 'unknown' if row['state'] == 'unknown' else 'complete'
         return {'run': _run_view(row, coverage=coverage)}
     try:
@@ -857,9 +875,15 @@ def get_run(call):
         else:
             changes['state'] = 'unknown'
             coverage = 'unknown'
+        if changes and changes.get('state') in ('completed', 'failed'):
+            changes['terminal_coverage'] = coverage
         if changes and any(row.get(key) != value for key, value in changes.items()):
             row = _patch_run(call, row['execution_id'], changes)
         return {'run': _run_view(row, approval_ids=pending[:20], coverage=coverage)}
     except (HostAPIError, BusinessError, OSError, ValueError, RuntimeError, sqlite3.Error):
+        current = business.get('script_runs', row['execution_id'])
+        if current is not None and current['state'] in ('completed', 'failed'):
+            _foundation().v13_require_access(call, current)
+            return {'run': _run_view(current)}
         unknown = {**row, 'state': 'unknown', 'ok': None}
         return {'run': _run_view(unknown, coverage='unknown')}

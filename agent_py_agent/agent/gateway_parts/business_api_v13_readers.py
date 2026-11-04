@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import sqlite3
@@ -29,6 +30,10 @@ from ..conversation.business_observability import (
     BusinessObservationService,
     ObservationPage,
     ObservationRecord,
+    _observation_cached,
+    _observation_task,
+    _observation_thread,
+    observation_request,
 )
 from ..conversation.decision_audit import decision_usage_summary
 from ..conversation.display_archive import (
@@ -89,15 +94,16 @@ class DefaultBusinessObservationService(BusinessObservationService):
 class _DecisionWindow:
     """原model_usage的内存只读筛选视图，不增加落盘账、不替换原计数算法。"""
 
-    # LLM: 原revision不变，事件对象直接来自原events_report。
-    # 函数用途: 包装本次已验证窗口给decision_usage_summary。
-    def __init__(self, original, events):
+    # LLM: revision在原events_report前后核验后固定到本次窗口，分组不重新读磁盘。
+    # 函数用途: 包装本次已验证窗口及原事件对象给decision_usage_summary。
+    def __init__(self, original, events, revisions):
         self.model_usage, self.original, self.events = self, original, events
+        self.revisions = revisions
 
-    # LLM: 版本仍来自原事实源。
-    # 函数用途: 转发原账本版本。
+    # LLM: 版本仍来自原事实源，但不在本地分组时重复stat历史文件。
+    # 函数用途: 返回本窗口已核验的原账本版本。
     def revision(self, thread_id):
-        return self.original.revision(thread_id)
+        return self.revisions[thread_id]
 
     # LLM: 异常已在投影前失败关闭，不用过滤掩盖坏账。
     # 函数用途: 返回当前窗口原事件对象。
@@ -105,8 +111,8 @@ class _DecisionWindow:
         return self.events[thread_id], []
 
 
-# LLM: 探测只开只读连接，不迁移或创建目录；不接受请求选择owner或文件路径。
-# 函数用途: 为生产组合根提供默认reader工厂，资源可由同owner只读来源显式绑定。
+# LLM: 注册只核schema与来源存在性，不能读取历史正文或计算资源快照；坏源在实际读取时保持unknown。
+# 函数用途: 廉价装配同owner默认reader，不接受请求选择owner或文件路径。
 def default_observation_readers(owner_home, owner_id, store, runtime, *, resource_provider=None) -> dict:
     home = Path(owner_home).resolve()
     if store is not None and not Path(store.storage.root).resolve().is_relative_to(home):
@@ -116,20 +122,12 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
         repo = RuntimeRepository(runtime.db_path, read_only=True)
     source = _OwnerReaders(home, owner_id, store, repo, resource_provider=resource_provider)
     readers = {}
-    try:
-        resources = source.resource_snapshot()
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-        resources = None
+    resource_available = source.resource_exists()
     if source.opens_table('tool_operations'):
         readers.update({'tool_calls': source.tool_calls, 'tool_calls.get': source.tool_detail})
     media = home / 'artifacts' / 'business' / REGISTRY_RELATIVE_PATH
     if source.runtime_artifacts or media.is_file():
-        try:
-            source.artifacts({})
-        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-            pass
-        else:
-            readers.update({'artifacts': source.artifacts, 'artifacts.get': source.artifact_detail})
+        readers.update({'artifacts': source.artifacts, 'artifacts.get': source.artifact_detail})
     if store is not None:
         archive = Path(store.storage.root) / 'display_archives'
         if archive.is_dir() and not archive.is_symlink():
@@ -140,9 +138,10 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
                 pass
             else:
                 readers['logs.read'] = source.logs
-        if source.usage_exists() and resources is not None:
+        if resource_available and source.usage_exists():
             readers['usage'] = source.usage
-    if resources is not None:
+            readers['usage.batch'] = source.usage_batch
+    if resource_available:
         readers['resource_usage'] = source.resources
     return readers
 
@@ -193,35 +192,60 @@ class _OwnerReaders:
             context.project_ref if context else None, context.task_id if context else None,
             row['thread_id'], row['run_id'], row['attempt_id'])
 
-    # LLM: 同owner且准确attempt属于同run；历史尝试不偷换成current。
-    # 函数用途: 读取工具或不可变产物账及其授权join。
-    def joined(self, table):
+    # LLM: 同owner且准确attempt属于同run；点详情必须在SQL中筛选，历史尝试不偷换成current。
+    # 函数用途: 读取工具或产物账的严格授权join，可按operation精确点读。
+    def joined(self, table, *, operation_id=None):
         if table not in {'tool_operations', 'artifact_records'}:
             raise ValueError('invalid source')
+        condition, values = 't.owner_id=?', [self.owner]
+        if operation_id is not None:
+            if table != 'tool_operations':
+                raise ValueError('invalid operation source')
+            condition += ' AND x.operation_id=?'
+            values.append(operation_id)
         with self.repo._runtime_connection() as conn:
             return conn.execute('SELECT x.*,ar.run_id,t.thread_id,tr.metadata_json FROM ' + table + ' x '
                 'JOIN agent_runs ar ON ar.agent_run_id=x.agent_run_id '
                 'JOIN agent_attempts aa ON aa.attempt_id=x.attempt_id AND aa.agent_run_id=ar.agent_run_id '
                 'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
-                'WHERE t.owner_id=? ORDER BY x.created_at,x.rowid', (self.owner,)).fetchall()
+                'WHERE ' + condition + ' ORDER BY x.created_at,x.rowid', values).fetchall()
 
-    # LLM: handler开始与outcome为执行事实；成功状态不等于已证明副作用提交。
-    # 函数用途: 将runtime工具账投影为工具调用视图。
+    # LLM: handler开始与嵌套outcome为执行事实；点详情限制源SQL，成功状态不等于副作用已提交。
+    # 函数用途: 将runtime工具账投影为工具调用视图，保留既有结算协议。
     def tool_calls(self, params):
         records = []
-        for row in self.joined('tool_operations'):
+        selected = ({'operation_id': params['operation_id']} if 'operation_id' in params else {})
+        for row in self.joined('tool_operations', **selected):
             outcome = json.loads(row['outcome_json'])
-            effect = outcome.get('effect_outcome', 'running' if row['status'] == 'EXECUTING' else 'unknown')
-            if effect not in {'none', 'not_started', 'committed', 'running', 'unknown'}:
+            if not isinstance(outcome, dict):
+                raise ValueError('invalid tool outcome')
+            result = outcome.get('result', {})
+            settled = bool(row['settled_at'])
+            if result:
+                if (not isinstance(result, dict) or result.get('schema_version') != 'tool_execution_result.v1'
+                        or result.get('tool') != row['operation_type']
+                        or not isinstance(result.get('result_ref'), str) or not result['result_ref'].strip()
+                        or type(result.get('handler_executed')) is not bool
+                        or type(result.get('ok')) is not bool
+                        or type(result.get('duration_ms')) not in (int, float)
+                        or not math.isfinite(result['duration_ms']) or result['duration_ms'] < 0
+                        or result.get('effect_outcome') not in ('', 'failed', 'none', 'not_started', 'committed', 'running', 'unknown')):
+                    raise ValueError('invalid native tool result')
+            elif settled and row['status'] in ('SUCCEEDED', 'FAILED'):
+                raise ValueError('settled tool result missing')
+            # 原生空值/failed没有副作用提交证明；冻结词表不增加状态，也不从SUCCEEDED推断committed。
+            effect = result.get('effect_outcome') if settled and result else (
+                'running' if row['status'] == 'EXECUTING' else 'unknown')
+            if effect not in ('none', 'not_started', 'committed', 'running', 'unknown'):
                 effect = 'unknown'
             error_code = outcome.get('error_code')
             value = {'operation_id': row['operation_id'], 'run_id': row['run_id'], 'attempt_id': row['attempt_id'],
                 'task_id': None, 'tool_name': row['operation_type'], 'status': row['status'],
-                'executed': bool(row['handler_started_at']), 'effect_outcome': effect,
-                'duration_ms': max(0, (row['settled_at'] - row['handler_started_at']) * 1000)
-                    if row['settled_at'] and row['handler_started_at'] else None,
+                'executed': result['handler_executed'] if settled and result else bool(row['handler_started_at']),
+                'effect_outcome': effect,
+                'duration_ms': result['duration_ms'] if settled and result else None,
                 'error': {'code': error_code, 'message': error_code, 'retryable': False, 'details': []} if error_code else None,
-                'result_ref': outcome.get('result_ref'), '_input': redact_sensitive_value(outcome.get('redacted_input', {}))}
+                'result_ref': result['result_ref'] if settled and result else row['operation_id'], '_input': {}}
             record = self.record(value, row)
             value['task_id'] = record.task_id
             records.append(record)
@@ -355,15 +379,17 @@ class _OwnerReaders:
             'next_cursor': cursor, 'coverage': 'partial' if cursor else 'complete', 'truncated': False, 'gap': None}
         return ObservationPage((self.wrap(value, facts),))
 
-    # LLM: 线程选择只读原owner和background identity，不从过滤字段捏造空间归属。
+    # LLM: 线程列表和distinct身份按请求复用，不从过滤字段捏造空间归属或缓存授权。
     # 函数用途: 返回与请求结构化过滤相符的规范线程。
     def selected_threads(self, params):
-        threads, errors = self.store.threads.list_report(limit=0)
+        threads, errors = _observation_cached((self.store.threads, 'list', None),
+            lambda: self.store.threads.list_report(limit=0))
         if errors:
             raise ValueError('thread source unreadable')
         result = []
         filters = params.get('filter', {})
         for thread in threads:
+            _observation_cached((self.store.threads, 'record', thread.thread_id), lambda: thread)
             if thread.owner_id != self.owner:
                 continue
             if filters.get('agent_id') is not None and filters['agent_id'] != thread.thread_id:
@@ -373,16 +399,16 @@ class _OwnerReaders:
             result.append(thread)
         return result
 
-    # LLM: 用量事件task_id必须回到canonical任务和两端owner，历史task上下文优先于当前线程空间。
+    # LLM: 用量事件task_id回到canonical任务和两端owner；每个ID本请求只读一次，不缓存授权。
     # 函数用途: 为原用量事件恢复准确授权事实，不把同线程不同task混算。
     def usage_event_record(self, thread, event):
         identity = background_identity(thread)
         context, task = None, None
         if event.task_id:
-            task = self.store.session_tasks.load(event.task_id)
+            task = _observation_task(self.store, event.task_id)
             if task is not None:
-                sender = self.store.threads.require(task.sender_thread_id)
-                target = self.store.threads.require(task.target_thread_id)
+                sender = _observation_thread(self.store, task.sender_thread_id)
+                target = _observation_thread(self.store, task.target_thread_id)
                 if (sender.owner_id != self.owner or target.owner_id != self.owner
                         or task.target_thread_id != thread.thread_id):
                     raise ValueError('usage task identity mismatch')
@@ -395,7 +421,7 @@ class _OwnerReaders:
             context.project_ref if context else identity.project_ref if identity else None,
             task.task_id if task else None, thread.thread_id, event.run_id or None)
 
-    # LLM: 先完成时间/身份范围与异常检查，再交原decision算法求和；不从请求捏造事件归属。
+    # LLM: 先完成时间/身份范围与异常检查，再交原decision算法；原事件与成员事实一一对应。
     # 函数用途: 筛选原增量账本，并收集可逐条复验的成员事实。
     def usage_window(self, params):
         filters = params.get('filter', {})
@@ -428,24 +454,33 @@ class _OwnerReaders:
                 members.append(facts)
         if not events:
             raise ValueError('usage source missing')
-        return _DecisionWindow(self.store.model_usage, events), tuple(members), _digest(revisions)
+        return _DecisionWindow(self.store.model_usage, events, dict(revisions)), tuple(members), _digest(revisions)
 
-    # LLM: 只有真实账本存在并可打开才披露usage，空线程目录不等于0费用。
-    # 函数用途: 检查规范用量来源。
+    # LLM: 探测不解析事件或列出线程；存在不等于可读，坏账在查询时保持unknown。
+    # 函数用途: 用原用量目录中的文件存在性廉价检查来源。
     def usage_exists(self):
         try:
-            for thread in self.selected_threads({}):
-                if self.store.model_usage.revision(thread.thread_id):
-                    _, errors = self.store.model_usage.events_report(thread.thread_id)
-                    if not errors:
-                        return True
+            with os.scandir(self.store.model_usage._directory) as entries:
+                return any(entry.name.endswith('.jsonl') and entry.is_file(follow_symlinks=False)
+                    for entry in entries)
         except (OSError, ValueError, TypeError, KeyError):
-            pass
-        return False
+            return False
 
-    # LLM: 公共来源须匹配物理home、owner及本进程且为整数；显式坏源不降级，旧label仅兼容未装公共源的调用。
-    # 函数用途: 获取真实owner模型并发及规范任务/子运行计数，不把未知冒充空闲0。
-    def resource_snapshot(self):
+    # LLM: 注册只核公开活动源的小型身份元数据，不扫描任务、线程或运行历史；坏源不能冒充已接线。
+    # 函数用途: 廉价验证同物理owner活动源，完整资源快照仍延迟到需要它的请求。
+    def resource_exists(self):
+        if self.store is None or self.repo is None:
+            return False
+        return self.model_activity() is not None
+
+    # LLM: 失败的None也在当前请求复用；缓存只存读数据，不存任何授权裁决。
+    # 函数用途: 惰性读取本请求唯一的owner资源快照。
+    def current_resources(self):
+        return _observation_cached((self, 'resources'), self.resource_snapshot)
+
+    # LLM: 只校验原公开活动源的owner/home/PID/整数合同，不读取历史或退回不可信全局值。
+    # 函数用途: 取得轻量物理模型活动事实，供注册身份核验和真实资源请求共用。
+    def model_activity(self):
         from collections.abc import Mapping
 
         from ..observability import concurrency_metrics
@@ -483,13 +518,25 @@ class _OwnerReaders:
                     return None
             elif type(value) is not int or value < 0:
                 return None
-        tasks, errors = self.store.session_tasks.list_report(limit=0)
+        return int(value)
+
+    # LLM: 公共活动事实在实际读取时重新核验；任务和distinct线程本请求只读一次。
+    # 函数用途: 获取真实owner模型并发及规范任务/子运行计数，不把未知冒充空闲0。
+    def resource_snapshot(self):
+        value = self.model_activity()
+        if value is None:
+            return None
+        # 一次线程列表为任务两端点读提供规范对象，避免重复读取同一线程文件。
+        self.selected_threads({})
+        tasks, errors = _observation_cached((self.store.session_tasks, 'list', None),
+            lambda: self.store.session_tasks.list_report(limit=0))
         if errors:
             return None
         queued = 0
         for task in tasks:
-            target = self.store.threads.require(task.target_thread_id)
-            sender = self.store.threads.require(task.sender_thread_id)
+            _observation_cached((self.store.session_tasks, 'record', task.task_id), lambda: task)
+            target = _observation_thread(self.store, task.target_thread_id)
+            sender = _observation_thread(self.store, task.sender_thread_id)
             if target.owner_id == self.owner and sender.owner_id == self.owner and task.status == 'queued':
                 queued += 1
         try:
@@ -503,25 +550,68 @@ class _OwnerReaders:
             'rss_bytes': None, 'source': 'owner_concurrency_metrics+canonical_runtime'}
 
     # LLM: 缺真实资源计量则失败关闭，禁止默认0；全owner计数不能冒充过滤子集。
-    # 函数用途: 提供原_usage降级路径需要的资源行。
+    # 函数用途: 提供原_usage降级路径需要的同请求资源行。
+    @observation_request()
     def resources(self, params):
-        value = self.resource_snapshot()
+        value = self.current_resources()
         if value is None or params.get('filter'):
             raise ValueError('owner resource meter unavailable')
         return ObservationPage((ObservationRecord(value, self.owner),))
 
     # LLM: decision_audit只有已报输入和未结束估算输入，其余字段null，决策子集不宣称完整。
-    # 函数用途: 投影原决策用量与真实资源快照并明确未知范围。
+    # 函数用途: 惰性读取原决策用量与同请求资源快照并明确未知范围。
+    @observation_request()
     def usage(self, params):
+        resources = self.current_resources()
+        if resources is None:
+            raise ValueError('resource source missing')
         window, members, revision = self.usage_window(params)
+        return self.usage_page(params, window, members, revision, resources)
+
+    # LLM: 空组只能由同owner的规范任务、Agent或catalog证明范围；不以filter自证、不缓存授权。
+    # 函数用途: 为合法无事件范围取准确身份，缺源、跨owner及未知范围仍失败关闭。
+    def empty_usage_scope(self, filters):
+        if filters.get('task_id'):
+            task = _observation_task(self.store, filters['task_id'])
+            if task is None:
+                raise ValueError('usage task unavailable')
+            target = _observation_thread(self.store, task.target_thread_id)
+            sender = _observation_thread(self.store, task.sender_thread_id)
+            if target.owner_id != self.owner or sender.owner_id != self.owner:
+                raise ValueError('usage task owner mismatch')
+            raw = task.metadata.get('business_context')
+            context = BusinessExecutionContext.from_dict(raw) if raw else None
+            if context and (context.owner_id != self.owner or context.task_id != task.task_id):
+                raise ValueError('usage task context mismatch')
+            return {'task_id': task.task_id, 'thread_id': target.thread_id,
+                'space_id': context.space_id if context else None, 'project_ref': context.project_ref if context else None}
+        if filters.get('agent_id'):
+            thread = _observation_thread(self.store, filters['agent_id'])
+            identity = background_identity(thread)
+            if thread.owner_id != self.owner or identity is None:
+                raise ValueError('usage agent identity unavailable')
+            return {'thread_id': thread.thread_id, 'space_id': identity.space_id, 'project_ref': identity.project_ref}
+        if filters.get('space_id'):
+            from ..conversation.business_spaces import BusinessSpaceService
+
+            state = _observation_cached((self, 'catalog'),
+                lambda: BusinessSpaceService(self.home, owner_id=self.owner, enabled=True)._read())
+            space = state['spaces'].get(filters['space_id'])
+            if space is None or space['owner_id'] != self.owner:
+                raise ValueError('usage space unavailable')
+            return {'space_id': space['space_id']}
+        if any(filters.get(key) is not None for key in ('project_ref', 'run_id', 'attempt_id')):
+            raise ValueError('empty usage scope not witnessed')
+        return {}
+
+    # LLM: 与公共usage共用算法；空组取规范身份后仍走逐次与返回前授权，不重读用量账本。
+    # 函数用途: 将已筛选窗口投影为带准确范围证明的原Usage结果，空计量保持null。
+    def usage_page(self, params, window, members, revision, resources):
         filters = params.get('filter', {})
         # 时间窗已按原created_at筛完。since=0避免原mtime快路径误跳过带未来事件的合法账本。
         report = decision_usage_summary(window, list(window.events), since=0)
         if report['unreadable_threads']:
             raise ValueError('usage ledger unreadable')
-        resources = self.resource_snapshot()
-        if resources is None:
-            raise ValueError('resource source missing')
         unknown = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'uncached_input_tokens', 'output_tokens', 'cost', 'currency'))
         actual, estimated = dict(unknown, coverage='partial'), dict(unknown, coverage='unknown')
         if report['input_reported_calls']:
@@ -532,30 +622,50 @@ class _OwnerReaders:
         for key in ('space_id', 'project_ref', 'task_id', 'thread_id', 'run_id', 'attempt_id'):
             values = {getattr(member, key) for member in members}
             common[key] = next(iter(values)) if len(values) == 1 else None
-        # 空窗口不伪造发生时间或0 token。已明确请求的任务仍先核对canonical身份。
+        # 空窗口不伪造发生时间或0 token；准确身份来自规范源，不能直接复制filter。
         if not members:
-            if filters.get('task_id'):
-                task = self.store.session_tasks.load(filters['task_id'])
-                if task is None:
-                    raise ValueError('usage task unavailable')
-                target = self.store.threads.require(task.target_thread_id)
-                sender = self.store.threads.require(task.sender_thread_id)
-                if target.owner_id != self.owner or sender.owner_id != self.owner:
-                    raise ValueError('usage task owner mismatch')
-                raw = task.metadata.get('business_context')
-                context = BusinessExecutionContext.from_dict(raw) if raw else None
-                common.update(task_id=task.task_id, thread_id=target.thread_id,
-                    space_id=context.space_id if context else None, project_ref=context.project_ref if context else None)
-            else:
-                # 查询确为空但空间/线程范围无法由事件证明，保持未知而不借owner全量冒充。
-                if any(filters.get(key) is not None for key in ('space_id', 'project_ref', 'agent_id', 'run_id')):
-                    raise ValueError('empty usage scope not witnessed')
+            common.update(self.empty_usage_scope(filters))
         value = {'actual': actual, 'estimated': estimated,
             'unknown': ['decision_usage_only', 'cost_unavailable', 'output_tokens_unavailable', 'cache_breakdown_unavailable',
                 'resource_usage_owner_current'],
             'resource_usage': resources}
         record = _ScopedUsageRecord(value, self.owner, **common, members=members, filter_digest=_digest(filters))
         return ObservationPage((record,), coverage='partial', revision=revision)
+
+    # LLM: 此端口只由同进程观察服务调用，不注册catalog；仅返回本次原事件和成员证明。
+    # 函数用途: 一次读取窗口，按task、Agent、space索引在内存投影多个准确范围。
+    @observation_request()
+    def usage_batch(self, params, requests):
+        resources = self.current_resources()
+        if resources is None:
+            raise ValueError('resource source missing')
+        window, members, revision = self.usage_window(params)
+        events = [event for rows in window.events.values() for event in rows]
+        if len(events) != len(members):
+            raise ValueError('usage member alignment mismatch')
+        indexes = {key: {} for key in ('task_id', 'agent_id', 'space_id')}
+        for index, member in enumerate(members):
+            for key, groups in indexes.items():
+                value = member.thread_id if key == 'agent_id' else getattr(member, key)
+                groups.setdefault(value, set()).add(index)
+        pages = []
+        base = params.get('filter', {})
+        for request in requests:
+            selected = None
+            for key, groups in indexes.items():
+                value = request.get('filter', {}).get(key)
+                if value is not None and value != base.get(key):
+                    positions = groups.get(value, set())
+                    selected = positions if selected is None else selected.intersection(positions)
+            positions = range(len(members)) if selected is None else sorted(selected)
+            chosen_events, chosen_members = {}, []
+            for index in positions:
+                event, member = events[index], members[index]
+                chosen_events.setdefault(event.thread_id, []).append(event)
+                chosen_members.append(member)
+            chosen = _DecisionWindow(window.original, chosen_events, window.revisions)
+            pages.append(self.usage_page(request, chosen, tuple(chosen_members), revision, resources))
+        return tuple(pages), window.events
 
 
 # LLM: 四参数默认工厂没有真实前台执行句柄；组合根持有真实Agent时才显式装配审批。

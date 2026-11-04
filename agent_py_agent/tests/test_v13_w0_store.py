@@ -55,8 +55,17 @@ def test_receipts_redact_once_and_cas_across_instances(tmp_path):
     assert first.get('async_jobs', 'one')['value'] == 2
     state = json.loads((root / 'data/business_v13/async_jobs.json').read_bytes())
     expected = hashlib.sha256(module._encode(['host', 'job.create', 'request-00000001'])).hexdigest()
-    assert expected in state['receipts']
-    assert all(len(key) == 64 for key in state['receipts'])
+    receipts = first._rows('async_jobs')
+    receipt = receipts.get('receipts', expected)
+    assert receipt['result']['secret'] == '<redacted>'
+    assert receipt['fingerprint'] == hashlib.sha256(
+        module._encode(['async_jobs', 'job.create', 'params', 0])).hexdigest()
+    persisted = [json.loads(path.read_bytes()) for path in
+                 (root / 'data/business_v13/history/async_jobs/receipts').glob('*.json')]
+    assert expected in {row['key'] for row in persisted}
+    assert all(len(row['key']) == 64 for row in persisted)
+    assert state['history_rows'] is True and state['receipts'] == {}
+    assert b'synthetic-once-value' not in root.joinpath(*receipts.parts('receipts', expected)).read_bytes()
     assert b'synthetic-once-value' not in (root / 'data/business_v13/async_jobs.json').read_bytes()
     assert [row['outcome'] for row in first.list('audit_log')] == ['committed', 'committed']
 
@@ -191,7 +200,17 @@ def test_quota_lock_order_and_last_guard(tmp_path, monkeypatch):
         # 函数用途: 在配额末核后撤销权限以测试提交末核。
         def check(self, changes):
             events.append('check')
-            assert {change.path.name for change in changes} == {'async_jobs.json', 'audit_log.json', '.transaction.json'}
+            base = root / 'data/business_v13'
+            paths = {change.path for change in changes}
+            metadata = {base / name for name in ('async_jobs.json', 'audit_log.json', '.transaction.json')}
+            assert metadata <= paths
+            rows = paths - metadata
+            assert len(paths) == len(changes) == 6
+            assert {path.parent for path in rows} == {
+                base / 'history/async_jobs/receipts', base / 'history/async_jobs/records',
+                base / 'history/audit_log/records'}
+            assert all(len(path.stem) == 64 and path.suffix == '.json' for path in rows)
+            assert all(change.final_size > 0 for change in changes)
             allowed[0] = False
     class Gate:
         # LLM: 仅记录配额准入事件并提供测试末核对象，不替换真实文件锁。

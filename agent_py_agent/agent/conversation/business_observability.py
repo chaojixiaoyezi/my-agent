@@ -12,6 +12,8 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,51 @@ OBSERVATION_ACTIONS = frozenset({
     'artifacts.list', 'artifacts.get', 'changes.get', 'approvals.list', 'approvals.get',
     'permissions.get', 'usage.get', 'events.list',
 })
+
+_observation_request_data = ContextVar('business_observation_request_data', default=None)
+
+
+# LLM: 只复用当前调用栈的数据，不保存actor或授权裁决；异常退出也必须丢弃。
+# 函数用途: 为嵌套冻结调用和直接观察查询建立请求局部读缓存。
+@contextmanager
+def observation_request():
+    if _observation_request_data.get() is not None:
+        yield
+        return
+    token = _observation_request_data.set({})
+    try:
+        yield
+    finally:
+        _observation_request_data.reset(token)
+
+
+# LLM: None和读失败也在本请求复用；无作用域时不缓存，下一请求必须重新读事实。
+# 函数用途: 在当前请求内复用一次规范读取。
+def _observation_cached(key, read):
+    cache = _observation_request_data.get()
+    if cache is None:
+        return read()
+    if key not in cache:
+        try:
+            cache[key] = True, read()
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError) as error:
+            cache[key] = False, error
+    succeeded, value = cache[key]
+    if not succeeded:
+        raise value
+    return value
+
+
+# LLM: 以原Store组件和准确ID为键，不将同名其它owner数据复用。
+# 函数用途: 对当前请求的distinct线程只执行一次require。
+def _observation_thread(store, thread_id):
+    return _observation_cached((store.threads, 'record', thread_id), lambda: store.threads.require(thread_id))
+
+
+# LLM: 缺失任务同样只读一次，但不能跨请求保存缺失或身份事实。
+# 函数用途: 对当前请求的distinct任务只执行一次load。
+def _observation_task(store, task_id):
+    return _observation_cached((store.session_tasks, 'record', task_id), lambda: store.session_tasks.load(task_id))
 
 
 def _copy(value):
@@ -183,6 +230,9 @@ class BusinessObservationService:
         next_cursor = self.cursor(scope, {'revision': revision, 'offset': offset + limit}) if offset + limit < len(records) else None
         return chosen, next_cursor
 
+    # LLM: 直接观察调用也有独立作用域；已在业务调用内时共享数据但仍逐次活授权。
+    # 函数用途: 验证并分派一次原观察查询。
+    @observation_request()
     def query(self, action: str, params: dict, *, actor: object) -> dict:
         if action not in OBSERVATION_ACTIONS:
             raise BusinessError('UNSUPPORTED_ACTION')
@@ -240,12 +290,16 @@ class BusinessObservationService:
             result['coverage'] = _coverage((page.coverage, result['coverage']))
         return result
 
+    # LLM: 使用本请求列表已读的canonical任务，不重复读取或缓存访问裁决。
+    # 函数用途: 返回已授权任务详情和原关联。
     def _task_detail(self, params, actor):
         page = self._source('tasks', params)
         rows = [row for row in page.records if self._visible(row, 'tasks.get', params, actor)]
         if len(rows) != 1:
             raise BusinessError('OBSERVATION_NOT_FOUND' if page.coverage == 'complete' else 'HOST_NOT_READY')
-        task = self.store.session_tasks.require(params['task_id'])
+        task = _observation_task(self.store, params['task_id'])
+        if task is None:
+            raise BusinessError('OBSERVATION_NOT_FOUND')
         workflow = task.metadata.get('workflow_ref')
         # 普通规范任务没有Workflow关联；保留null，不捏造引用或修改任务元数据。
         return {'task': _view('TaskView', rows[0].value), 'assignments': [{
@@ -253,6 +307,8 @@ class BusinessObservationService:
             'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(task.result_refs)}],
             'workflow_ref': workflow, 'result_refs': list(task.result_refs), 'allowed_actions': []}
 
+    # LLM: 同一线程/任务在本页只读一次，消息行仍逐条活授权且沿原归档边界。
+    # 函数用途: 返回有界规范消息页及真实历史边界。
     def _messages(self, params, actor):
         scope = self.scope_digest('messages.list', params, actor)
         position = self.cursor_position(params.get('cursor'), scope)
@@ -260,7 +316,7 @@ class BusinessObservationService:
         if self.store is None or target['kind'] == 'subagent':
             # 子代理原文须经W4准确任务路径/attempt读口；不能拿根线程历史冒充。
             raise BusinessError('HOST_NOT_READY')
-        thread = self.store.threads.require(target['id'])
+        thread = _observation_thread(self.store, target['id'])
         if thread.owner_id != self.owner_id:
             raise BusinessError('BUSINESS_ACCESS_DENIED')
         identity = background_identity(thread)
@@ -294,7 +350,7 @@ class BusinessObservationService:
             if row.role not in {'user', 'assistant', 'tool', 'host'}:
                 continue
             task_id, context = row.metadata.get('task_id'), None
-            task = self.store.session_tasks.load(task_id) if task_id else None
+            task = _observation_task(self.store, task_id) if task_id else None
             if task and task.metadata.get('business_context'):
                 context = BusinessExecutionContext.from_dict(task.metadata['business_context'])
                 if context.owner_id != self.owner_id or context.task_id != task.task_id:
@@ -346,14 +402,18 @@ class BusinessObservationService:
         return {'subagent': items[0], 'thread_ref': items[0]['thread_id'],
             'children_ref': items[0]['run_id'], 'allowed_actions': []}
 
+    # LLM: 列表已经读取的任务用于本请求点读；线程身份按distinct ID读取，不缓存授权。
+    # 函数用途: 投影规范任务并保留坏上下文的partial标志。
     def _tasks(self):
         if self.store is None:
             return ObservationPage(coverage='unknown')
-        tasks, errors = self.store.session_tasks.list_report(limit=0)
+        tasks, errors = _observation_cached((self.store.session_tasks, 'list', None),
+            lambda: self.store.session_tasks.list_report(limit=0))
         rows = []
         for task in tasks:
-            target = self.store.threads.require(task.target_thread_id)
-            sender = self.store.threads.require(task.sender_thread_id)
+            _observation_cached((self.store.session_tasks, 'record', task.task_id), lambda: task)
+            target = _observation_thread(self.store, task.target_thread_id)
+            sender = _observation_thread(self.store, task.sender_thread_id)
             if target.owner_id != self.owner_id or sender.owner_id != self.owner_id:
                 continue
             raw = task.metadata.get('business_context')
@@ -398,6 +458,8 @@ class BusinessObservationService:
                 value['task_id'], value['thread_id'], value['run_id'], value['attempt_id']))
         return ObservationPage(tuple(rows), 'partial' if incomplete else 'complete')
 
+    # LLM: 线程原对象与其它本请求观察共用读取，节点/边仍逐条授权，不跨请求保存。
+    # 函数用途: 从规范执行和线程生成准确范围的观察树。
     def _tree(self, params, actor):
         execution_page = self._source('executions', params)
         executions = [row for row in execution_page.records if row.value.get('_is_current')
@@ -405,9 +467,11 @@ class BusinessObservationService:
         records, edges, controllers = {}, [], {}
         thread_coverage = 'unknown'
         if self.store is not None:
-            threads, errors = self.store.threads.list_report(limit=0)
+            threads, errors = _observation_cached((self.store.threads, 'list', None),
+                lambda: self.store.threads.list_report(limit=0))
             thread_coverage = 'partial' if errors else 'complete'
             for thread in threads:
+                _observation_cached((self.store.threads, 'record', thread.thread_id), lambda: thread)
                 if thread.owner_id != self.owner_id:
                     continue
                 identity = background_identity(thread)
@@ -479,6 +543,50 @@ class BusinessObservationService:
             'coverage': _coverage((page.coverage, 'partial' if has_more or cursor else 'complete')),
             'has_more_descendants': has_more or cursor is not None}
 
+    # LLM: 内部非catalog端口不放宽usage授权；每组及其所有成员仍先核与末核，缓存不含裁决。
+    # 函数用途: 对单窗口的多个准确子范围读取用量，可将已整窗授权的事件供模型次数聚合复用。
+    @observation_request()
+    def usage_groups(self, params, selectors, *, actor, include_events=False):
+        params = validate_params('usage.get', params)
+        requests = []
+        for selector in selectors:
+            if (not isinstance(selector, dict) or set(selector) - {'task_id', 'agent_id', 'space_id'}
+                    or any(key in params.get('filter', {}) and value != params['filter'][key]
+                        for key, value in selector.items())):
+                raise BusinessError('INVALID_SCHEMA')
+            request = validate_params('usage.get', {'filter': {**params.get('filter', {}), **selector}})
+            self.authorize_call('usage.get', request, actor=actor)
+            requests.append(request)
+        if include_events and (not selectors or selectors[0] != {}):
+            raise BusinessError('INVALID_SCHEMA')
+        if not requests:
+            return [], None
+        reader = self.readers.get('usage.batch')
+        if not callable(reader):
+            # 聚合DTO没有分组事实时不能倒推子范围，也不恢复N次全窗口读取。
+            raise BusinessError('HOST_NOT_READY')
+        try:
+            pages, events = reader(_copy(params), _copy(requests))
+            if (not isinstance(pages, (tuple, list)) or len(pages) != len(requests)
+                    or not isinstance(events, dict)):
+                raise ValueError('usage groups source shape')
+            values = []
+            for request, page in zip(requests, pages):
+                if (not isinstance(page, ObservationPage)
+                        or page.coverage not in {'complete', 'partial'} or len(page.records) != 1
+                        or not self._visible(page.records[0], 'usage.get', request, actor)):
+                    raise BusinessError('HOST_NOT_READY')
+                values.append(validate_result('usage.get', redact_sensitive_value(_copy(page.records[0].value))))
+        except BusinessError:
+            raise
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+            raise BusinessError('HOST_NOT_READY') from None
+        for request, page in zip(requests, pages):
+            self.authorize_call('usage.get', request, actor=actor)
+            if not self._visible(page.records[0], 'usage.get', request, actor):
+                raise BusinessError('HOST_NOT_READY')
+        return values, events if include_events else None
+
     def _usage(self, params, actor):
         measured = self._source('usage', params)
         rows = [row for row in measured.records if self._visible(row, 'usage.get', params, actor)]
@@ -521,6 +629,8 @@ class BusinessObservationService:
         return conn.execute('SELECT min(seq),COALESCE(max(seq),'
             '(SELECT seq FROM sqlite_sequence WHERE name=\'runtime_events\'),0) FROM runtime_events').fetchone()
 
+    # LLM: 事件复核复用本帧distinct身份读取，不复用任何授权裁决。
+    # 函数用途: 用本次TaskRun规范关联投影无attempt生命周期层级。
     def _event_without_attempt(self, source):
         """缺省 attempt 是合法生命周期层级，只用本次 TaskRun 的规范关联构造公开事实。"""
         try:
@@ -530,11 +640,11 @@ class BusinessObservationService:
                 return None
             task_id = context.task_id if context else source['canonical_task_id']
             if context and self.store is not None:
-                task = self.store.session_tasks.load(task_id)
+                task = _observation_task(self.store, task_id)
                 if (task is None or task.target_thread_id != source['thread_id']
                         or task.task_run_id and task.task_run_id != source['canonical_task_run_id']
                         or task.metadata.get('business_context') != metadata['business_context']
-                        or any(self.store.threads.require(tid).owner_id != self.owner_id
+                        or any(_observation_thread(self.store, tid).owner_id != self.owner_id
                             for tid in (task.sender_thread_id, task.target_thread_id))):
                     return None
             space_id, project_ref = (context.space_id, context.project_ref) if context else (None, None)
@@ -640,6 +750,9 @@ class BusinessObservationService:
         return {'events': events, 'next_cursor': self.cursor(scope, {'generation': generation, 'after': after}),
             'coverage': coverage, 'reset_required': False}
 
+    # LLM: 重连基线的嵌套查询共用当前快照作用域，返回后丢弃身份读取，不跨帧缓存。
+    # 函数用途: 生成沿原授权和游标边界的重连基线。
+    @observation_request()
     def snapshot(self, filters, *, actor):
         """重连基线与补拉沿同一读门；分页未覆盖部分明确保留partial与原游标。"""
         tasks = self.query('tasks.list', {'filter': filters, 'limit': 100}, actor=actor)
@@ -667,7 +780,7 @@ class BusinessObservationService:
             else:
                 identity = None
                 if self.store is not None:
-                    thread = self.store.threads.require(node['thread_id'])
+                    thread = _observation_thread(self.store, node['thread_id'])
                     identity = background_identity(thread)
                 facts = ObservationRecord(node, self.owner_id, node['space_id'] or filters.get('space_id'),
                     identity.project_ref if identity else None, node['task_id'], node['thread_id'])

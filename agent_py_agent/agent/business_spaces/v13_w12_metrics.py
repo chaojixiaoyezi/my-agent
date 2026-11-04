@@ -1,6 +1,6 @@
 """SOC 指标与成本只读聚合：真实 owner 账本、UTC 半开窗口及明确的未知值。
 
-指标不执行模型，不为读操作补写数据；成本只消费冻结 usage.get，模型账本仅提供尝试次数。
+指标不执行模型，不为读操作补写数据；成本消费原 usage 投影的内部单窗分组，公开 schema 不变。
 公开纯聚合函数的输入须先完成 owner/space 授权与样本排除。
 """
 from __future__ import annotations
@@ -426,10 +426,15 @@ def insights(call):
     return {'window': window, 'insights': found[:20], 'coverage': 'partial' if len(found) > 20 else coverage}
 
 
-# LLM: 扩展只在冻结 usage.get 真实就绪时披露，不根据空模型账本造零。
-# 函数用途: 供父级注册两个成本动作的 readiness。
-def costs_ready(call):
-    return call.services.ready('usage.get')
+# LLM: 成本同时需要原usage与内部可分组事实；只有聚合DTO的显式宿主不能被宣称支持分组。
+# 函数用途: 供父级注册两个成本动作的准确readiness，不根据空模型账本造零。
+def costs_ready(services):
+    from ..conversation.business_observability import BusinessObservationService
+
+    observation = services.observation
+    return (services.ready('usage.get') and callable(getattr(observation, 'usage_groups', None))
+        and (not isinstance(observation, BusinessObservationService)
+            or callable(observation.readers.get('usage.batch'))))
 
 
 # LLM: 只读冻结调用不接受异步受理冒充数据；不构造第二个授权身份。
@@ -466,15 +471,23 @@ def _directory(call, action, params):
     raise HostAPIError('LIMIT_EXCEEDED')
 
 
-# LLM: 时窗和可选空间都传给冻结 reader，不在本切片重算 token。
-# 函数用途: 对准确过滤范围查询用量。
-def _usage(call, since, until, extra=None):
+# LLM: 内部批读沿原观察身份、usage schema与实时授权；没有分组事实时显式拒绝，不回退N次读。
+# 函数用途: 一次读取窗口并按准确子范围在本地分组，可复用整窗已授权事件。
+def _usage_groups(call, since, until, selectors, *, include_events=False):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
+    v13_require_access(call)
     filters = {'since': _iso(since), 'until': _iso(until)}
     if call.params.get('space_id'):
         filters['space_id'] = call.params['space_id']
-    if extra:
-        filters.update(extra)
-    return _frozen(call, 'usage.get', {'filter': filters})
+    observation = call.services.observation
+    grouped = getattr(observation, 'usage_groups', None)
+    if not call.services.ready('usage.get') or not callable(grouped):
+        raise HostAPIError('HOST_NOT_READY', 503)
+    result = grouped({'filter': filters}, selectors,
+        actor=call.services.observation_actor(call.context), include_events=include_events)
+    v13_require_access(call)
+    return result
 
 
 # LLM: 覆盖未知与任一计量空值都向上传递；不同货币不可相加。
@@ -507,15 +520,16 @@ def _usage_rank(row, identity):
     return tokens is None, -(tokens or 0), row[identity]
 
 
-# LLM: 模型账本没有按模型 token 拆分；只累计明确的尝试次数，坏账保留未知标志。
-# 函数用途: 从当前 owner 已授权线程读取模型尝试数量。
-def _model_attempts(call, since, until):
+# LLM: 模型账本没有按模型token拆分；批量费用复用已授权窗口，直接调用仍走原读口。
+# 函数用途: 从当前owner已授权线程取得模型尝试数量并保留坏账未知标志。
+def _model_attempts(call, since, until, *, events_by_thread=None):
     from ..conversation.background_team_lifecycle import background_identity
+    from ..conversation.business_observability import _observation_cached
     store = getattr(call.context.host, 'conversation_store', None)
     if store is None:
         return [], False
     try:
-        threads, errors = store.threads.list_report(limit=0)
+        threads, errors = _observation_cached((store.threads, 'list', None), lambda: store.threads.list_report(limit=0))
         counts, complete = Counter(), not errors
         for thread in threads:
             if thread.owner_id != call.owner_id:
@@ -527,7 +541,8 @@ def _model_attempts(call, since, until):
             if identity is not None:
                 facts['space_id'] = identity.space_id
             call.context.check('usage.get', facts)
-            events, load_errors = store.model_usage.events_report(thread.thread_id)
+            events, load_errors = (store.model_usage.events_report(thread.thread_id) if events_by_thread is None
+                else (events_by_thread.get(thread.thread_id, ()), []))
             complete = complete and not load_errors
             seen = set()
             for event in events:
@@ -560,15 +575,12 @@ def _model_attempts(call, since, until):
         return [], False
 
 
-# LLM: 总计、Agent 与空间全部查询冻结 usage.get；不按价格表或模型名推测费用。
+# LLM: 总计、Agent和空间来自一个原usage窗口；模型次数也复用该窗口，不推算价格或未知费用。
 # 函数用途: 提供成本仪表盘真实用量、排名和未知范围。
 def costs_dashboard(call):
     window, since, until = _period(call)
     _resolve_scope(call)
-    usage = _usage(call, since, until)
-    unknown = {'tokens_by_model', *usage['unknown']}
-    coverage = 'complete'
-    measures = [usage['actual'], usage['estimated']]
+    unknown, coverage = {'tokens_by_model'}, 'complete'
     agent_params = {'lifecycle': 'all'}
     if call.params.get('space_id'):
         agent_params['space_id'] = call.params['space_id']
@@ -581,11 +593,7 @@ def costs_dashboard(call):
             unknown.add('duplicate_agents')
             continue
         seen.add(agent['agent_id'])
-        record = _usage(call, since, until, {'agent_id': agent['agent_id']})
-        measures.extend((record['actual'], record['estimated']))
-        unknown.update(record['unknown'])
-        by_agent.append({'agent_id': agent['agent_id'], 'name': agent.get('name'),
-            'actual': record['actual'], 'estimated': record['estimated']})
+        by_agent.append({'agent_id': agent['agent_id'], 'name': agent.get('name')})
     seen = set()
     for space in spaces:
         if call.params.get('space_id') and space['space_id'] != call.params['space_id']:
@@ -595,11 +603,18 @@ def costs_dashboard(call):
             unknown.add('duplicate_spaces')
             continue
         seen.add(space['space_id'])
-        record = _usage(call, since, until, {'space_id': space['space_id']})
+        by_space.append({'space_id': space['space_id']})
+    selectors = ([{}] + [{'agent_id': row['agent_id']} for row in by_agent]
+        + [{'space_id': row['space_id']} for row in by_space])
+    grouped, events = _usage_groups(call, since, until, selectors, include_events=True)
+    usage = grouped[0]
+    measures = [usage['actual'], usage['estimated']]
+    unknown.update(usage['unknown'])
+    for row, record in zip(by_agent + by_space, grouped[1:]):
+        row.update(actual=record['actual'], estimated=record['estimated'])
         measures.extend((record['actual'], record['estimated']))
         unknown.update(record['unknown'])
-        by_space.append({'space_id': space['space_id'], 'actual': record['actual'], 'estimated': record['estimated']})
-    by_model, models_complete = _model_attempts(call, since, until)
+    by_model, models_complete = _model_attempts(call, since, until, events_by_thread=events)
     if not models_complete:
         unknown.add('model_attempts')
         coverage = 'partial'
@@ -621,13 +636,13 @@ def _unknown_list(values):
     return (first + sorted(set(values) - set(first)))[:20]
 
 
-# LLM: 每个真实 run 查询准确 task；无 task 或重复 task 不冒充零用量、不重复求和。
+# LLM: 去重后各task只分组本地单窗口；无task不冒充零用量，重复task不重复求和。
 # 函数用途: 聚合窗口内调查任务的实际用量与排名。
 def costs_investigations(call):
     window, since, until = _period(call)
     runs, clean = _records(call, 'soc_investigations')
     runs = [row for row in runs if _within(row, 'started_at', since, until)]
-    top, measures, unknown, tasks = [], [], set(), set()
+    top, measures, unknown, tasks, selected = [], [], set(), set(), []
     for run in sorted(runs, key=lambda row: row['run_id']):
         if not run.get('task_id'):
             unknown.add('runs_without_task')
@@ -638,7 +653,10 @@ def costs_investigations(call):
             clean = False
             continue
         tasks.add(run['task_id'])
-        usage = _usage(call, since, until, {'task_id': run['task_id'], 'space_id': run['space_id']})
+        selected.append(run)
+    grouped, _events = _usage_groups(call, since, until,
+        [{'task_id': run['task_id'], 'space_id': run['space_id']} for run in selected])
+    for run, usage in zip(selected, grouped):
         actual = usage['actual']
         measures.append(actual)
         unknown.update(usage['unknown'])
