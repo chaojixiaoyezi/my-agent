@@ -8,6 +8,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ...agent.contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
@@ -19,12 +20,12 @@ _RESOLVED_EXTERNAL_COUNT = 512
 # LLM: 宿主复用回合适配器的审批接口，不创建模型回合、正文或生命周期；真实归属保留在服务端原请求。
 # 类用途: 给主/子后台审批提供纯 UI 宿主，不伪造前台回合。
 class ExternalTuiPermissionOwner:
-    # LLM: runtime 与 request id 只路由显示；服务端原请求由决定回写闭包另行冻结，不以界面编号授权。
-    # 函数用途: 创建一个不带模型输出的审批面板宿主。
+    # LLM: 外部宿主没有adapter事件状态，审批与队列共用runtime锁，不能再引入owner→runtime反序；原请求仍由回写闭包冻结。
+    # 函数用途: 创建不带模型输出的审批宿主，并复用全局审批状态锁。
     def __init__(self, runtime: object, request_id: str) -> None:
         self.runtime = runtime
         self.request_id = str(request_id or "external-permission")
-        self._lock = threading.RLock()
+        self._lock = runtime._lock
 
     # LLM: 外部审批没有正文候选可冻结；空操作保留控制器接口，并阻止面板修改真实 transcript。
     # 函数用途: 兼容普通回合审批控制器的边界回调。
@@ -55,6 +56,33 @@ class TuiPermissionCoordinator:
         self._external: dict[str, _ExternalPermissionEntry] = {}
         self._resolved_external: set[str] = set()
         self._resolved_order: deque[str] = deque()
+        self._activation_defer = threading.local()
+
+    # LLM: 仅推迟本线程的跨owner激活，作用域须包在最外层runtime锁之外；reset校验、队列和pending仍原锁原子提交。
+    # 函数用途: 快照提交结束并释放锁后，再打开下一条前台或后台审批。
+    @contextmanager
+    def deferred_activation(self):
+        outer = getattr(self._activation_defer, "pending", None) is None
+        if outer:
+            self._activation_defer.pending = []
+        try:
+            yield
+        finally:
+            if outer:
+                pending = self._activation_defer.pending
+                self._activation_defer.pending = None
+                for controller in pending:
+                    if self.is_active(controller):
+                        self._activate(controller)
+
+    # LLM: 不能在快照外层runtime锁内等待前台adapter锁；没有外层快照时保持原来的即时激活。
+    # 函数用途: 按当前线程的提交边界选择立即激活或暂存队首控制器。
+    def _activate_or_defer(self, controller: object) -> None:
+        pending = getattr(self._activation_defer, "pending", None)
+        if pending is not None:
+            pending.append(controller)
+        else:
+            self._activate(controller)
 
     # LLM: Enqueue is idempotent by controller identity. Only the head may emit
     # permission_requested, so reducer state can never be replaced by a peer.
@@ -70,7 +98,7 @@ class TuiPermissionCoordinator:
             else:
                 self._queued.append(controller)
         if activate:
-            self._activate(controller)
+            self._activate_or_defer(controller)
 
     # LLM: Release removes exactly one controller. If it owned the visible
     # overlay, the next surviving controller is activated only after release.
@@ -91,7 +119,7 @@ class TuiPermissionCoordinator:
                     self._external.pop(key, None)
                     self._remember_resolved_locked(key)
         if next_controller is not None:
-            self._activate(next_controller)
+            self._activate_or_defer(next_controller)
 
     # LLM: Selection and decisions route only to the one visible controller;
     # queued requests cannot accept keystrokes before their own panel appears.

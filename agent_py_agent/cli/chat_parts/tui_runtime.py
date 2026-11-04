@@ -401,8 +401,8 @@ class _TuiPermissionController:
                 )
         self._release()
 
-    # LLM: 正文仍受adapter代次围栏；reset保留的审批仅能按精确permission+block更新或关闭，不能重开旧卡。
-    # 函数用途: 统一发布审批覆盖层事件，避免各交互分支重复拼装身份字段。
+    # LLM: 正文仍受adapter代次围栏；reset审批须精确permission+block，未显示就失效的pending不发孤立关闭事件。
+    # 函数用途: 按真实面板发布审批事件，避免迟到重开和未打开先关闭。
     def _publish(
         self,
         kind: str,
@@ -423,6 +423,8 @@ class _TuiPermissionController:
         publisher = getattr(self._owner, "_publish", self._owner.runtime._publish)
         with self._owner.runtime._lock:
             overlay = self._owner.runtime.store.snapshot().permission
+            if kind == "permission_resolved" and overlay is None:
+                return
             if (kind in {"permission_selection_changed", "permission_feedback_toggled",
                          "permission_feedback_changed", "permission_resolved"}
                     and overlay is not None and overlay.permission_id == effective_request.permission_id
@@ -1655,11 +1657,12 @@ class _TuiSessionRuntimeMixin(
         with self._lock:
             self._conversation_history_binding = (history, history_lock, outputs)
 
-    # LLM: 网络读取必须在外部完成；旧代次的整页结果不允许改显示、去重窗口或游标。
-    # 函数用途: 在同一reset锁内验证并发表一页会话快照。
+    # LLM: IO仍在锁外；reset围栏内原子提交快照和外部审批，跨owner激活须等外层runtime锁释放后再争取adapter锁。
+    # 函数用途: 在同一reset锁内发表当前快照，出锁后安全切换审批面板。
     def apply_conversation_snapshot(self, generation, publish):
-        with self._lock:
-            return True if generation != self.conversation_reset_generation else publish()
+        with self._permission_coordinator.deferred_activation():
+            with self._lock:
+                return True if generation != self.conversation_reset_generation else publish()
 
     # LLM: 只能在/new服务端成功后调用；同锁清空前后台显示缓存，保留controller实例，不取消业务任务或改变transport session_id。
     # 函数用途: 清空旧历史游标与显示投影，新会话继续使用原终端通道。
