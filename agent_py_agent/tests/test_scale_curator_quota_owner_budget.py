@@ -1083,3 +1083,180 @@ def test_native_directory_change_revokes_ready_and_reaudits(tmp_path, monkeypatc
     finally:
         index.close_directory_cursor(host)
     assert len(os.listdir(descriptors)) - before == 0
+
+
+def _expected_conservative_identity(owner, run_id, binding):
+    import hashlib
+    import json
+
+    content = json.dumps({'owner_sha': owner_digest(owner), 'run_id': run_id, 'binding': binding},
+                         sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def test_failed_completion_without_audit_persists_bounded_conservative_receipt(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.gateway_parts import curator_quota_index as index
+
+    owner, run_id = OwnerIdentity.local_main(), 'memory-curator-run-no-audit'
+    terminal = _locator_terminal()
+    terminal['completed_at'] += 8 * 86400
+    terminal['terminal_response'] = {'background_result': {'status': 'failed', 'run_id': run_id}}
+    for number in range(129):
+        _append_run(tmp_path, owner, f'memory-curator-run-unrelated-{number}')
+    value = {'date': '2026-11-03', 'count': 0}
+    binding = index.completion_binding(terminal, owner, run_id)
+    for tick in range(16):
+        with _cold_meter(monkeypatch) as costs:
+            value, done = index.prepare_completion(value, tmp_path, owner, run_id, terminal)
+        assert costs['rows'] <= 64 and costs['bytes'] <= 65536, costs
+        value = json.loads(json.dumps(value))
+        if done:
+            break
+    else:
+        pytest.fail('failed completion without audit did not finish within bounded rounds')
+    receipt = value['quota_completion_receipts'][binding]
+    assert receipt['day'] == '2026-11-11'
+    assert receipt['source'] == 'conservative' and receipt['quiet'] is True
+    assert binding not in value['quota_pending_completions']
+    assert receipt['fact']['identity'] == _expected_conservative_identity(owner, run_id, binding)
+    assert value['count'] == 0
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('conservative validation must not read audit or state')
+
+    monkeypatch.setattr(index, 'audit_version', forbidden)
+    monkeypatch.setattr(index, '_quiet_state', forbidden)
+    assert index.validate_completion(receipt, tmp_path, owner, run_id, terminal) == receipt['fact']
+    assert index.prepare_completion(value, tmp_path, owner, run_id, terminal) == (value, True)
+    print({'conservative_prepare_rounds': tick + 1, 'receipt_day': receipt['day']})
+
+
+@pytest.mark.parametrize('field', ['binding', 'owner', 'run_id', 'fact', 'status', 'attempt', 'terminal_run_id'])
+def test_conservative_completion_rejects_changed_binding_or_nonfailed_terminal(tmp_path, field):
+    from agent_py_agent.agent.gateway_parts import curator_quota_index as index
+
+    owner, run_id = OwnerIdentity.local_main(), 'memory-curator-run-conservative-binding'
+    terminal = _locator_terminal()
+    terminal['terminal_response'] = {'background_result': {'status': 'failed', 'run_id': run_id}}
+    value, done = index.prepare_completion({'date': '2026-11-03', 'count': 0}, tmp_path, owner, run_id, terminal)
+    assert done
+    binding = index.completion_binding(terminal, owner, run_id)
+    receipt = value['quota_completion_receipts'][binding]
+    if field == 'status':
+        terminal['terminal_response']['background_result']['status'] = 'succeeded'
+    elif field == 'attempt':
+        terminal['execution_attempt_id'] = 'different-attempt'
+    elif field == 'terminal_run_id':
+        terminal['terminal_response']['background_result']['run_id'] = 'different-run'
+    elif field == 'fact':
+        receipt['fact']['identity'] = '0' * 64
+    else:
+        receipt[field] = 'different-binding'
+    with pytest.raises(ValueError, match='binding_conflict'):
+        index.validate_completion(receipt, tmp_path, owner, run_id, terminal)
+
+
+def test_succeeded_completion_without_audit_remains_pending(tmp_path):
+    from agent_py_agent.agent.gateway_parts import curator_quota_index as index
+
+    owner, run_id = OwnerIdentity.local_main(), 'memory-curator-run-success-no-audit'
+    terminal = _locator_terminal()
+    terminal['terminal_response'] = {'background_result': {'status': 'succeeded', 'run_id': run_id}}
+    value = {'date': '2026-11-03', 'count': 0}
+    for _retry in range(3):
+        with pytest.raises(ValueError, match='curator_quota_actual_audit_required'):
+            index.prepare_completion(value, tmp_path, owner, run_id, terminal)
+    assert value == {'date': '2026-11-03', 'count': 0}
+
+
+def _finish_real_failed_curator_without_audit(case, monkeypatch):
+    import errno
+
+    from agent_py_agent.agent.gateway_parts.io import read_json_file
+    from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_execution import (
+        coordinator_execution_scope,
+    )
+    from agent_py_agent.agent.gateway_parts.request_transactions import (
+        request_transaction_ports_scope,
+    )
+    from agent_py_agent.agent.gateway_parts.request_worker import _finish_claimed_gateway_request
+    from agent_py_agent.tests.test_gateway_background_curator_transactions import run_original
+
+    agent, service, backend, gate, claim, _close = case
+    backend.payload = {}  # 原模型解析器拒绝无效输出，仍走真实租约和失败收口。
+    backend.release.set()
+
+    def unavailable(*args, **kwargs):
+        raise OSError(errno.EIO, 'simulated unavailable audit writer')
+
+    with monkeypatch.context() as failure:
+        failure.setattr(service.run_log, 'append', unavailable)
+        response = run_original(agent, gate, claim)
+    result = response['background_result']
+    assert result['status'] == 'failed' and result['run_id']
+    assert backend.calls > 0 and service.run_log.list() == []
+    assert not service.state_store.load().active_lease
+    with coordinator_execution_scope(gate, claim, agent), request_transaction_ports_scope(agent):
+        _finish_claimed_gateway_request(gate.paths, claim.path, claim.request_id, response,
+            conversation_store=agent.conversation_store, execution_agent=agent,
+            expected_execution_attempt_id=claim.execution_attempt_id, expected_lease_epoch=claim.lease_epoch)
+    return read_json_file(gate.paths.terminal / claim.path.name)
+
+
+@pytest.mark.parametrize('late_release', [False, True])
+def test_real_failed_curator_without_audit_releases_and_accounts_once(tmp_path, monkeypatch, late_release):
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from agent_py_agent.agent.gateway_parts import curator_quota_index as index
+    from agent_py_agent.tests.test_gateway_background_curator_transactions import curator_case
+
+    descriptors = '/proc/self/fd' if Path('/proc/self/fd').is_dir() else '/dev/fd'
+    before_fds = len(os.listdir(descriptors))
+    with curator_case(tmp_path, monkeypatch) as case:
+        terminal = _finish_real_failed_curator_without_audit(case, monkeypatch)
+        agent, _service, _backend, gate, claim, _close = case
+        owner = OwnerIdentity.local_main()
+        run_id = terminal['terminal_response']['background_result']['run_id']
+        binding = index.completion_binding(terminal, owner, run_id)
+        occupied = gate.occupied_snapshot()
+        assert occupied['total'] == 1 and occupied['per_owner'][owner_digest(owner)] == 1
+        finished_day = datetime.fromtimestamp(terminal['completed_at'], timezone.utc).date()
+        if late_release:
+            tomorrow = (finished_day + timedelta(days=1)).isoformat()
+            monkeypatch.setattr(accounting, 'quota_date', lambda: tomorrow)
+        path = agent.home_paths.global_index_dir / 'curator_daily_quota.json'
+        for tick in range(128):
+            if accounting.prepare_quota_release(gate, terminal):
+                break
+        else:
+            pytest.fail('failed no-audit quota release did not converge')
+        prepared = json.loads(path.read_text())
+        receipt = prepared['quota_completion_receipts'][binding]
+        assert receipt['source'] == 'conservative' and receipt['day'] == finished_day.isoformat()
+        assert binding not in prepared['quota_pending_completions']
+        assert prepared['count'] == 0 and prepared['accounted_records'] == []
+        released = admission.release_reservation_if_terminal(gate, claim.request_id)
+        assert released['released'] is True, released
+        after = gate.occupied_snapshot()
+        assert after['total'] == occupied['total'] - 1
+        assert after['per_owner'].get(owner_digest(owner), 0) == 0
+        reservation = admission._read_reservation(admission.reservation_file(gate.paths, claim.request_id))
+        assert reservation['state'] == 'released'
+        settled = json.loads(path.read_text())
+        assert binding not in settled['quota_completion_receipts']
+        usage_path = (path.parent / 'curator_quota_history' / (receipt['day'] + '.json')
+                      if late_release else path)
+        usage = json.loads(usage_path.read_text())
+        assert usage['count'] == 1
+        assert usage['accounted_records'] == [_expected_conservative_identity(owner, run_id, binding)]
+        assert settled['count'] == (0 if late_release else 1)
+        assert admission.release_reservation_if_terminal(gate, claim.request_id)['reason'] == 'already_released'
+        assert json.loads(usage_path.read_text()) == usage
+        assert gate.occupied_snapshot() == after
+        print({'late_release': late_release, 'prepare_rounds': tick + 1,
+               'occupied_before': occupied['total'], 'occupied_after': after['total'],
+               'owner_usage': usage['count']})
+    assert len(os.listdir(descriptors)) - before_fds == 0

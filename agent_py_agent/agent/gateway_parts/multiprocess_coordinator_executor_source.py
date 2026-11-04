@@ -144,9 +144,14 @@ class CoordinatorExecutorSource:
         if state is not None and self._executor_records.get(identifier) != record_digest(row):
             raise WorkerCommitRejected('original_coordinator_executor_submission_required')
         ledger = ExecutorLedger(self.root, self.partition)
-        result = ledger.reserve(row) if state is None else ledger.advance(row, state, registration)
-        self._executor_records[identifier] = record_digest(result)
-        index_for(self._sources[4]).remember_executor(ledger, result, self, descriptor)
+        from .multiprocess_records import advance_executor
+
+        attempted = row if state is None else ledger._bound_record(advance_executor(row, state, registration))
+        index = index_for(self._sources[4])
+        with index.executor_write(ledger, attempted, self, descriptor):
+            result = ledger.reserve(row) if state is None else ledger.advance(row, state, registration)
+            self._executor_records[identifier] = record_digest(result)
+            index.remember_executor(ledger, result, self, descriptor)
         return result
 
     # LLM: closing 可读原账，不复活执行权；只读入口不核尚在 processing 的业务状态。

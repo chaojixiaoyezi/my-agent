@@ -4,26 +4,58 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
+import stat
 from pathlib import Path
 
-from ..common.nofollow_fs import read_bytes_beneath
+from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
 from ..common.strict_json import load_strict_json
 from ..conversation.models import ObservationEvent
+from ..conversation.observation_index import ObservationIndex
+from ..conversation.store_layout import ConversationStorage
 
 
-# LLM: 原handled.json是唯一观察确认源；revision只用于来源换代，不能取代原consumer/claim授权。
-# 函数用途: 完整读取原观察确认账并返回其稳定字节身份。
-def observation_handled(home, store_ref, max_bytes):
+# LLM: legacy与原ack journal共同确认；只查当前分片ID，投影同步不迁移legacy或初始化会话目录。
+# 函数用途: 合并观察确认并冻结原legacy字节与journal身份，revision不替代consumer/claim授权。
+def observation_handled(home, store_ref, max_bytes, *, observation_ids=()):
     relative = Path(store_ref).parts + ("observation_handled.json",)
     raw = read_bytes_beneath(home, relative, max_bytes=max_bytes, require_dir_fd=True)
     handled = {} if raw is None else load_strict_json(raw)
     if type(handled) is not dict or any(type(key) is not str or type(value) not in (int, float)
                                       or not math.isfinite(value) or value < 0 for key, value in handled.items()):
         raise ValueError("background_observation_handled_invalid")
-    revision = hashlib.sha256(b"missing" if raw is None else b"present:" + raw).hexdigest()
+    root = Path(home) / store_ref
+    if not root.resolve().is_relative_to(Path(home).resolve()):
+        raise ValueError("background_observation_store_outside_home")
+    identity = _observation_journal_identity(home, Path(store_ref))
+    if observation_ids:
+        index = ObservationIndex(ConversationStorage(root, initialize=False))
+        for key, value in index.handled(list(observation_ids), include_legacy=False).items():
+            handled[key] = max(handled.get(key, 0), value)
+    revision = hashlib.sha256(b"legacy:" + (raw if raw is not None else b"missing")
+                              + b"\0journal:" + json.dumps(identity).encode()).hexdigest()
     return handled, revision
+
+
+# LLM: journal的父链与叶均no-follow；只读stat且所有出口关闭FD，缺失不创建来源。
+# 函数用途: 捕获原确认日志的文件身份，不跟随home内外的链接。
+def _observation_journal_identity(home, store):
+    try:
+        parent = open_directory_beneath(home, store.parent.parts, require_dir_fd=True)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            info = os.stat(f".{store.name}-observation-acks.jsonl", dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("background_observation_journal_invalid")
+        return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+    finally:
+        os.close(parent)
 
 
 # LLM: 整份原JSONL每行都核原ObservationEvent身份与显式bool；有限预算超限由读者拒绝，不能过滤坏行得到假完整源。

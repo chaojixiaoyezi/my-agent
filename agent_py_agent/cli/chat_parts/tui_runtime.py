@@ -110,6 +110,38 @@ class _TuiPermissionController:
         self._pending: _PendingTuiPermission | None = None
         self._sink: Callable[[ToolApprovalRequest, ToolApprovalDecision], None] | None = None
         self._resolved_ids: set[str] = set()
+        self._release_defer = threading.local()
+
+    # LLM: 只延迟当前线程的释放；原控制器及队列身份不变，外层退出后才允许激活另一owner。
+    # 函数用途: 防止持有runtime锁时在全局审批队列中反向争取适配器锁。
+    def _release(self) -> None:
+        if getattr(self._release_defer, "depth", 0) > 0:
+            self._release_defer.due = True
+        else:
+            self._owner.runtime._permission_coordinator.release(self)
+            # 旧决定离开owner锁后，新审批可能已在同一控制器上打开；原enqueue按控制器去重，须保留新pending的队列责任。
+            with self._owner._lock:
+                reopen = self._pending is not None
+            if reopen:
+                self._owner.runtime._permission_coordinator.enqueue(self)
+
+    # LLM: 作用域必须包在owner/runtime两把锁外；嵌套只在最外层提交，异常同样执行收口。
+    # 函数用途: 将释放及首次入队激活延后到当前事件的双锁全部退出后。
+    @contextmanager
+    def deferred_release(self):
+        self._release_defer.depth = getattr(self._release_defer, "depth", 0) + 1
+        try:
+            yield
+        finally:
+            self._release_defer.depth -= 1
+            if self._release_defer.depth == 0:
+                due = getattr(self._release_defer, "due", False)
+                enqueue = getattr(self._release_defer, "enqueue", False)
+                self._release_defer.due = self._release_defer.enqueue = False
+                if due:
+                    self._release()
+                if enqueue:
+                    self._owner.runtime._permission_coordinator.enqueue(self)
 
     # LLM: Gateway sink 只负责原子写决定文件，request/decision 都已由 shared approval contract 校验；本地模式保持 None。
     # 函数用途: 为当前 Gateway 回合安装审批答复写回函数。
@@ -283,7 +315,7 @@ class _TuiPermissionController:
                     phase="completed",
                     request=pending.request,
                 )
-        self._owner.runtime._permission_coordinator.release(self)
+        self._release()
         return True
 
     # LLM: request 打开顺序必须在 tool_started 之后且一次仅一个；重复同 id 幂等，冲突请求显式失败而不覆盖等待者。
@@ -297,7 +329,10 @@ class _TuiPermissionController:
                 raise RuntimeError("another TUI permission request is already pending")
             pending = _PendingTuiPermission(request, threading.Event())
             self._pending = pending
-        self._owner.runtime._permission_coordinator.enqueue(self)
+        if getattr(self._release_defer, "depth", 0) > 0:
+            self._release_defer.enqueue = True
+        else:
+            self._owner.runtime._permission_coordinator.enqueue(self)
         return pending
 
     # LLM: Only the global queue head may publish the overlay. Activation keeps
@@ -338,7 +373,7 @@ class _TuiPermissionController:
                     phase="completed",
                     request=pending.request,
                 )
-        self._owner.runtime._permission_coordinator.release(self)
+        self._release()
         return True
 
     # LLM: turn 收口时仍在等待的审批必须成为 cancelled 并唤醒本地线程；不得留下悬挂 Event 或可迟到批准的 sink。
@@ -364,7 +399,7 @@ class _TuiPermissionController:
                     phase="completed",
                     request=pending.request,
                 )
-        self._owner.runtime._permission_coordinator.release(self)
+        self._release()
 
     # LLM: 正文仍受adapter代次围栏；reset保留的审批仅能按精确permission+block更新或关闭，不能重开旧卡。
     # 函数用途: 统一发布审批覆盖层事件，避免各交互分支重复拼装身份字段。
@@ -2567,16 +2602,17 @@ class TuiTurnEventAdapter:
     # LLM: 退休Gateway回合仅可收口仍保留的精确审批；其余typed行须命中当前显示代次，不由正文猜类型。
     # 函数用途: 接收一个 Gateway chunk object 并映射为 TUI event。
     def on_gateway_event(self, payload: dict[str, Any]) -> bool:
-        with self._lock, self.runtime._lock:
-            if not self._display_current():
-                overlay = self.runtime.store.snapshot().permission
-                pending = self._permissions._pending
-                if (not self._finished and payload.get("kind") == "permission_resolved"
-                        and overlay is not None and pending is not None
-                        and payload.get("permission_id") == overlay.permission_id == pending.request.permission_id):
-                    return self._permissions.accept_gateway_resolution(payload)
-                return False
-            return _consume_gateway_turn_event(self, payload)
+        with self._permissions.deferred_release():
+            with self._lock, self.runtime._lock:
+                if not self._display_current():
+                    overlay = self.runtime.store.snapshot().permission
+                    pending = self._permissions._pending
+                    if (not self._finished and payload.get("kind") == "permission_resolved"
+                            and overlay is not None and pending is not None
+                            and payload.get("permission_id") == overlay.permission_id == pending.request.permission_id):
+                        return self._permissions.accept_gateway_resolution(payload)
+                    return False
+                return _consume_gateway_turn_event(self, payload)
 
     # LLM: finalize 只使用结构化 summary；技术失败仍保留已收到的响应正文，失败提示另列，不能伪装完整成功。
     # 活动块先 terminal，再 status，最后 turn terminal 且仅一次；不影响模型或持久化。
