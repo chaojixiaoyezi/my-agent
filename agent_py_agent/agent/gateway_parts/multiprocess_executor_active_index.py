@@ -141,10 +141,17 @@ class ExecutorActiveIndex:
         if self._revisions() != self._revision:
             raise ValueError('responsibility_namespace_changed')
 
-    # LLM: 只接收调用方已验证的规范写叶版本；其余目录不得变化，原目录身份不得替换。
-    # 函数用途: 在原末提交后更新受影响目录的版本点。
-    def _accept_write(self, changed):
+    # LLM: 只接收调用方已验证的规范写叶版本；补确认末采样必须等于冻结版本，其余目录及原目录身份仍不得变化。
+    # 函数用途: 在原末提交后更新受影响目录的版本点，不接纳补确认期间的陌生追加。
+    def _accept_write(self, changed, *, expected_revision=None):
         actual = self._revisions()
+        if expected_revision is not None:
+            confirmed = dict(actual)
+            # 新分区在写前失败时可能尚未进入已知集合，仍按原尝试的准确路径点核。
+            for parts in expected_revision.keys() - confirmed.keys():
+                confirmed[parts] = _directory(self.root, parts, revision=True)
+            if confirmed != expected_revision:
+                raise ValueError('responsibility_namespace_changed')
         for parts, previous in self._revision.items():
             if parts in changed:
                 if previous is not None and (actual[parts] is None or actual[parts][:2] != previous[:2]):
@@ -242,8 +249,19 @@ class ExecutorActiveIndex:
                 pass
             raise
         else:
-            attempt['revision'] = self._attempt_revisions(attempt)
-            self._reconcile_write(key)
+            # 原写者已在同一短门内接受此版本；确认读取失败不能留下缺revision的责任。
+            attempt['revision'] = dict(self._revision)
+            try:
+                if self._attempt_revisions(attempt) != attempt['revision']:
+                    raise ValueError('responsibility_namespace_changed')
+                self._reconcile_write(key)
+            except OSError:
+                # 只按已冻结版本补核一次，绝不重捕后来的目录变化；原I/O异常仍原样返回。
+                try:
+                    self._reconcile_write(key)
+                except (OSError, ValueError, TypeError, KeyError):
+                    pass
+                raise
 
     # LLM: 原写门内固定本次副作用后的版本；新分区尚未登记时也单独核验，不枚举历史目录。
     # 函数用途: 防止延后读回期间把同目录的陌生追加当成本次写入。
@@ -263,7 +281,7 @@ class ExecutorActiveIndex:
         raw = read_bytes_beneath(self.root, parts, max_bytes=16384, require_dir_fd=True)
         return validate_record(json.loads(raw)) if raw is not None else None
 
-    # LLM: 只容原前像/本次完整后像与已知锁设施；目录身份及其它namespace仍由原_accept_write严格核验。
+    # LLM: 只容原前像/本次完整后像与已知锁设施；末接纳也绑定尝试冻结版本，仍由原_accept_write核验目录身份。
     # 函数用途: 对已知写入补观察，不声明耐久成功、不发布路由，也不清任何隔离标记。
     def _reconcile_write(self, key):
         self.require_original()
@@ -276,7 +294,8 @@ class ExecutorActiveIndex:
         if self._attempt_revisions(attempt) != attempt['revision']:
             raise ValueError('responsibility_namespace_changed')
         if attempt['kind'] == 'p3':
-            self._accept_write({('admission',), ('admission', 'reservations')})
+            self._accept_write({('admission',), ('admission', 'reservations')},
+                               expected_revision=attempt['revision'])
             if row is not None:
                 self.reservations[row['request_id']] = copy.deepcopy(row)
         else:
@@ -285,7 +304,8 @@ class ExecutorActiveIndex:
             namespace = ('workers', 'executors', f'w{ledger.partition.index}')
             if _directory(self.root, namespace, revision=False) is not None:
                 self._partitions.add(namespace[-1])
-            self._accept_write({('workers',), ('workers', 'executors'), namespace})
+            self._accept_write({('workers',), ('workers', 'executors'), namespace},
+                               expected_revision=attempt['revision'])
             if row is not None:
                 holder._executor_records[row['reservation_id']] = record_digest(row)
                 self.executors[_executor_key(row)] = {
