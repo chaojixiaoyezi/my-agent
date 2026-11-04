@@ -192,8 +192,8 @@ def test_handler_fallback_keeps_budget_for_both_attempts():
     assert ctx.analysis_attempts[0]['input_budget'] == ctx.analysis_attempts[1]['input_budget']
 
 
-# LLM: 无预算沿原JSON编码和attempt字典，不增加空事实。
-# 函数用途: 固定无预算请求字节与attempt兼容性。
+# LLM: 无预算保持原JSON字节且不增加预算事实；隔离审计属于独立合同，仍须完整记录。
+# 函数用途: 同时锁定无预算请求字节兼容性与默认隔离的完整attempt事实。
 def test_no_budget_is_byte_identical():
     agent, ctx, spec = host(), context(), {'step_id': 'analysis'}
     bootstrap._workflow_analysis_handler(agent)(spec, ctx, ('method',))
@@ -206,7 +206,11 @@ def test_no_budget_is_byte_identical():
         'data_sources': ctx.data_sources,
     }
     assert agent.backend.sent[0][0].encode() == json.dumps(expected, ensure_ascii=False).encode()
-    assert ctx.analysis_attempts == [{'attempt': 1, 'response_schema': 'native', 'outcome': 'succeeded'}]
+    assert ctx.analysis_attempts == [{
+        'attempt': 1, 'response_schema': 'native',
+        'analysis_isolation': {'requested': 'stateless_skill', 'mode': 'stateless_skill', 'note': ''},
+        'outcome': 'succeeded',
+    }]
 
 
 # LLM: 结构错误必须是预算拒绝，而非模型失败或Python容器异常。
