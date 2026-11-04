@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,8 +32,32 @@ def _owned(thread, home) -> bool:
             and Path(thread.owner_home) == Path(home.owner_home_dir))
 
 
+# LLM: 仅在外发和canonical提交后更新查找投影；actor目标保持opaque，群话题仍归基础chat；确定性错误逐项隔离并记日志，OSError原样交冻结重试。
+# 函数用途: 尽力补齐外发索引，不让无效投影或冲突回执使已送达消息误报失败。
+def _index_outbound_notice(owner_home, entry, identities):
+    try:
+        if entry["channel"] == "feishu" and entry["chat_id"].startswith("oc_"):
+            from ..adapter.protocol import parse_feishu_conversation_address
+
+            entry = {**entry, "chat_id": parse_feishu_conversation_address(entry["chat_id"])[0]}
+        index = OutboundMessageIndex(owner_home)
+    except (ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning(
+            "Outbound index projection rejected (%s); canonical message retained", type(exc).__name__)
+        return entry
+    for identity in identities:
+        try:
+            index.record({**entry, "channel_message_id": identity})
+        except (ValueError, TypeError) as exc:
+            logging.getLogger(__name__).warning(
+                "Outbound index projection rejected (%s); canonical message retained", type(exc).__name__)
+    return entry
+
+
+# LLM: 供后台已发送回执补账调用；Owner和原会话仍逐次复核，索引确定性错误不阻断通知，索引或通知I/O错误沿原冻结重试且不再次外发。
+# 函数用途: 建立可用的外发查找投影并幂等同步原会话摘要，不改写已提交正文或旧索引绑定。
 def commit_outbound_notice(agent, store, request, context, message):
-    """先建有界查找投影，再幂等同步原会话；任一步失败交回原冻结重试链。"""
+    """投影确定性错误仅降级查找能力；临时I/O失败仍交原冻结重试链。"""
     home = getattr(agent, "home_paths", None)
     if home is None or not getattr(home, "owner_home_dir", None) or not getattr(home, "owner_id", None):
         return
@@ -46,10 +71,6 @@ def commit_outbound_notice(agent, store, request, context, message):
     chat_id = context.conversation_id or context.target
     if not chat_id:
         return
-    if context.channel == "feishu":
-        from ..adapter.protocol import parse_feishu_conversation_address
-
-        chat_id = parse_feishu_conversation_address(chat_id)[0]
     refs = message.metadata.get("evidence_refs", [])
     workflow_run_id = message.metadata.get("workflow_run_id")
     entry = {"schema_version": "outbound_message.v1", "channel": context.channel,
@@ -59,9 +80,8 @@ def commit_outbound_notice(agent, store, request, context, message):
         "evidence_refs": list(refs) if isinstance(refs, list) else [],
         "receipt_id": message.metadata.get("receipt_id") or None,
         "sent_at": datetime.fromtimestamp(message.created_at, timezone.utc).isoformat()}
-    index = OutboundMessageIndex(home.owner_home_dir)
-    for identity in ids:
-        index.record({**entry, "channel_message_id": identity})
+    entry = _index_outbound_notice(home.owner_home_dir, entry, ids)
+    chat_id = entry["chat_id"]
     work = store.threads.require(request.thread_id)
     if not _owned(work, home):
         return
