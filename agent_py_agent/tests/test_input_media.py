@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import io
 import json
+import random
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
 from agent_py_agent.agent.backends.openai_chat import _openai_user_messages
 from agent_py_agent.agent.backends.responses_wire import message_items
 from agent_py_agent.agent.backends.tool_ir import UserTurn
+from agent_py_agent.agent.conversation import input_media_images
 from agent_py_agent.agent.conversation.input_media import (
+    DEFAULT_MEDIA_BYTES,
     InputMediaError,
+    evicted_input_media_hashes,
     import_input_media,
     input_media_blocks,
+    last_encoded_input_media_hashes,
     project_input_media,
+    provider_media_block,
     provider_media_messages,
     validate_input_media,
 )
@@ -330,3 +340,146 @@ def test_guidance_media_observation_survives_compact(tmp_path, monkeypatch, with
         assert media.last_encoded_input_media_hashes(snapshot) == encoded
         provider_media_messages([])
         assert media.last_encoded_input_media_hashes(snapshot) == encoded
+
+
+# ---- 发送边界图片压缩与多轮历史媒体（v14 ws-media-fix）----
+
+
+# LLM: 每例换用独立的出站压缩LRU，避免测试顺序影响命中/淘汰断言；不改生产上限。
+# 函数用途: 隔离出站图片压缩缓存并返回被测模块。
+@pytest.fixture
+def image_cache(monkeypatch):
+    monkeypatch.setattr(input_media_images, "_PROVIDER_IMAGE_CACHE", OrderedDict())
+    return input_media_images
+
+
+# LLM: 固定种子噪声生成真实可解码的PNG，体积稳定超过重编码阈值、每次运行字节相同；只在内存生成，不读用户文件。
+# 函数用途: 按尺寸、模式与可选alpha构造真实PNG字节。
+def _noise_png(size: tuple[int, int], *, mode: str = "RGBA", seed: int = 0, alpha: Image.Image | None = None) -> bytes:
+    width, height = size
+    image = Image.frombytes("RGB", size, random.Random(seed).randbytes(width * height * 3)).convert(mode)
+    if alpha is not None:
+        image.putalpha(alpha)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+# LLM: 不透明RGBA大图（剪贴板截图形态）：长边超限或字节超阈值时发送副本缩到长边2048并转JPEG；磁盘原件、sha与校验不变。
+# 函数用途: 钉住发送边界压缩只改本次发送副本。
+@pytest.mark.parametrize("size", [(2100, 120), (600, 400)], ids=["over-edge", "over-bytes"])
+def test_provider_copy_of_large_opaque_image_is_downscaled_jpeg_and_original_is_kept(tmp_path, image_cache, size):
+    data = _noise_png(size)
+    ref = imported(tmp_path, data=data)
+    source = provider_media_messages([{"role": "user", "content": input_media_blocks([ref])}])[0]["content"][0]["source"]
+    sent = base64.b64decode(source["data"])
+    with Image.open(io.BytesIO(sent)) as image:
+        assert image.format == "JPEG" and image.mode == "RGB"
+        assert max(image.size) == min(2048, max(size))
+        assert abs(image.size[0] / image.size[1] - size[0] / size[1]) < 0.05
+    assert source["media_type"] == "image/jpeg" and len(sent) < len(data)
+    assert Path(ref["path"]).read_bytes() == data
+    assert validate_input_media([ref])[0]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert last_encoded_input_media_hashes() == frozenset({ref["sha256"]})
+
+
+# LLM: 有真实透明像素时不能转JPEG丢掉透明度；缩放后仍是带alpha的PNG。
+# 函数用途: 钉住真透明图片的发送副本保留alpha。
+def test_provider_copy_keeps_real_transparency_as_png(tmp_path, image_cache):
+    mask = Image.new("L", (2600, 120), 255)
+    mask.paste(0, (0, 0, 400, 120))
+    ref = imported(tmp_path, data=_noise_png((2600, 120), alpha=mask))
+    source = provider_media_block(input_media_blocks([ref])[0])["source"]
+    with Image.open(io.BytesIO(base64.b64decode(source["data"]))) as image:
+        assert source["media_type"] == "image/png" and image.mode == "RGBA"
+        assert max(image.size) == 2048 and image.getchannel("A").getextrema()[0] == 0
+
+
+# LLM: 小图、合成测试字节、超阈值但不可解码的字节都必须逐字节原样发送且保留原MIME，旧合同与测试样本不受影响。
+# 函数用途: 钉住压缩只在确有收益的真实大图上生效。
+@pytest.mark.parametrize("kind", ["small-real-png", "synthetic-bytes", "large-undecodable-bytes"])
+def test_small_or_undecodable_images_are_sent_byte_for_byte(tmp_path, image_cache, kind):
+    data = {"small-real-png": _noise_png((32, 24)), "synthetic-bytes": b"test-media",
+            "large-undecodable-bytes": b"\x89PNG\r\n\x1a\n" + b"x" * (70 * 1024)}[kind]
+    ref = imported(tmp_path, data=data)
+    source = provider_media_block(input_media_blocks([ref])[0])["source"]
+    assert source["media_type"] == "image/png"
+    assert base64.b64decode(source["data"]) == data
+
+
+# LLM: 动图重编码会丢帧，必须原样发送；样本超过字节阈值，证明是动图规则而不是小图规则放行。
+# 函数用途: 钉住动图不进入压缩。
+def test_animated_image_is_sent_unchanged(image_cache):
+    frames = [Image.frombytes("RGB", (300, 300), random.Random(seed).randbytes(300 * 300 * 3)) for seed in range(2)]
+    output = io.BytesIO()
+    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:])
+    data = output.getvalue()
+    assert len(data) > 64 * 1024
+    assert image_cache.compress_provider_image_bytes(data, "image/gif") == (data, "image/gif")
+
+
+# LLM: 重编码不携带原EXIF；带方向标记的照片必须先按方向转正，否则模型看到的是侧躺的图。
+# 函数用途: 钉住EXIF方向在重编码前生效且输出不再带方向标记。
+def test_exif_orientation_is_applied_before_reencoding(image_cache):
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    output = io.BytesIO()
+    Image.frombytes("RGB", (2200, 100), random.Random(3).randbytes(2200 * 100 * 3)).save(
+        output, format="JPEG", quality=95, exif=exif.tobytes())
+    data, media_type = image_cache.compress_provider_image_bytes(output.getvalue(), "image/jpeg")
+    with Image.open(io.BytesIO(data)) as image:
+        assert media_type == "image/jpeg" and image.size[1] == 2048 and image.size[0] < image.size[1]
+        assert image.getexif().get(0x0112) is None
+
+
+# LLM: 同一原件每次得到同一字节（命中缓存或重算都一样），否则整段历史重发会打断增量链与服务端前缀缓存；
+#   缓存按条数LRU淘汰，单条超过字节上限的结果照常返回但不入缓存。
+# 函数用途: 钉住压缩结果确定性与缓存上限。
+def test_compression_is_deterministic_and_the_cache_is_bounded(image_cache, monkeypatch):
+    first, second, third = (_noise_png((600, 400), seed=seed) for seed in (11, 12, 13))
+    out = image_cache.compress_provider_image_bytes(first, "image/png")
+    assert out[1] == "image/jpeg"
+    assert image_cache.compress_provider_image_bytes(first, "image/png")[0] is out[0]
+    image_cache._PROVIDER_IMAGE_CACHE.clear()
+    assert image_cache.compress_provider_image_bytes(first, "image/png") == out
+    monkeypatch.setattr(image_cache, "_PROVIDER_IMAGE_CACHE_MAX_ENTRIES", 2)
+    for data in (second, third):
+        image_cache.compress_provider_image_bytes(data, "image/png")
+    assert [key[0] for key in image_cache._PROVIDER_IMAGE_CACHE] == [hashlib.sha256(data).hexdigest() for data in (second, third)]
+    image_cache._PROVIDER_IMAGE_CACHE.clear()
+    monkeypatch.setattr(image_cache, "_PROVIDER_IMAGE_CACHE_MAX_BYTES", len(out[0]) - 1)
+    assert image_cache.compress_provider_image_bytes(first, "image/png") == out
+    assert not image_cache._PROVIDER_IMAGE_CACHE
+
+
+# LLM: 生产事故的缩小版：多轮历史各带一张真实大图、末轮纯文字。预算内全部按压缩副本发送且重发逐字节相同；
+#   超预算时从新到旧保留最新两张，旧图换成原占位文案并记入淘汰观察；canonical消息与磁盘原件始终不变。
+# 函数用途: 钉住多轮历史媒体的预算合同与发送副本压缩，防止整段历史以原始大图重复上传。
+def test_multi_turn_history_media_keeps_budget_contract_and_sends_compressed_copies(tmp_path, image_cache):
+    refs = [imported(tmp_path, data=_noise_png((600, 400), seed=index)) for index in range(4)]
+    messages = []
+    for index, ref in enumerate(refs):
+        messages.append({"role": "user", "content": [{"type": "text", "text": f"截图 {index}"}, *input_media_blocks([ref])]})
+        messages.append({"role": "assistant", "content": [{"type": "text", "text": f"收到 {index}"}]})
+    messages.append({"role": "user", "content": [{"type": "text", "text": "什么情况"}]})
+    original = json.dumps(messages)
+
+    wire = provider_media_messages(project_input_media(messages, DEFAULT_MEDIA_BYTES))
+    sources = [block["source"] for row in wire if isinstance(row.get("content"), list)
+               for block in row["content"] if block.get("type") == "image"]
+    assert [source["media_type"] for source in sources] == ["image/jpeg"] * 4
+    assert all(len(base64.b64decode(source["data"])) < ref["size_bytes"] for source, ref in zip(sources, refs))
+    assert last_encoded_input_media_hashes() == frozenset(ref["sha256"] for ref in refs)
+    assert evicted_input_media_hashes() == frozenset()
+    assert json.dumps(provider_media_messages(project_input_media(messages, DEFAULT_MEDIA_BYTES))) == json.dumps(wire)
+
+    projected = project_input_media(messages, refs[-1]["size_bytes"] + refs[-2]["size_bytes"])
+    assert evicted_input_media_hashes() == frozenset(ref["sha256"] for ref in refs[:2])
+    for index, ref in enumerate(refs[:2]):
+        assert projected[index * 2]["content"][1] == {"type": "text", "text": (
+            f"[历史附件已归档，本轮媒体预算未加载：{ref['name']}；原件引用：{ref['path']}。需要视觉重读时请重新添加附件。]")}
+    provider_media_messages(projected)
+    assert last_encoded_input_media_hashes() == frozenset(ref["sha256"] for ref in refs[2:])
+    assert evicted_input_media_hashes() == frozenset(ref["sha256"] for ref in refs[:2])
+    assert json.dumps(messages) == original
+    assert all(hashlib.sha256(Path(ref["path"]).read_bytes()).hexdigest() == ref["sha256"] for ref in refs)

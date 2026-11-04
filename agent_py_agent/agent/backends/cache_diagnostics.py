@@ -217,6 +217,7 @@ def _extract_tool_name(tool: object) -> str:
 #   比较层还会在末块缺证据时置 partial，不能把它读成“整段历史都稳定”；旧 partial 同样保守表示证明不完整。
 #   另存工具名清单的摘要与个数：与全量 tools 摘要互补（名字集合变了还是同一集合内容变了），
 #   且 run 第一次调用也能留下自己的基线，供事后定位“第一次调用后收窄”。
+#   previous_response_id 是每轮都换的增量链锚点（传输事实，不是采样选项），不进 options，否则每次增量续接都误报 options_changed。
 # 函数用途: 在真正 HTTP 请求处提取诊断事实，兼容 chat/messages/responses 三种字段形态。
 def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
     messages = payload.get("messages", payload.get("input", []))
@@ -224,7 +225,8 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
     system = payload.get("system", payload.get("instructions", []))
     if not system:
         system = [row for row in rows if isinstance(row, dict) and row.get("role") in {"system", "developer"}]
-    options = {key: value for key, value in payload.items() if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream"}}
+    options = {key: value for key, value in payload.items()
+               if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream", "previous_response_id"}}
     checkpoints = _chain_checkpoints(rows)
     tools = payload.get("tools", [])
     tool_names = [_extract_tool_name(tool) for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []

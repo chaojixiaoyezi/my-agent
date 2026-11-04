@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1292,
+  "count": 1297,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3442,6 +3442,46 @@
       "unit": "帧",
       "category": "上限预算",
       "description": "入站图片最多解码的帧数，防止动图占满处理资源。"
+    },
+    {
+      "name": "_PROVIDER_IMAGE_CACHE_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "出站压缩结果进程内 LRU 缓存保存的压缩字节总量上限。"
+    },
+    {
+      "name": "_PROVIDER_IMAGE_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 64,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "出站压缩结果进程内 LRU 缓存最多保留的条目数。"
+    },
+    {
+      "name": "_PROVIDER_IMAGE_JPEG_QUALITY_PERCENT",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 85,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "出站 JPEG 编码质量（Pillow 1–95 档位），兼顾截图文字清晰度与体积。"
+    },
+    {
+      "name": "_PROVIDER_IMAGE_MAX_EDGE_PIXELS",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 2048,
+      "unit": "像素",
+      "category": "上限预算",
+      "description": "出站图片长边上限：超过时按比例缩小到该像素数再发给模型，磁盘原件不变。"
+    },
+    {
+      "name": "_PROVIDER_IMAGE_RECOMPRESS_MIN_BYTES",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "出站图片超过该字节数才尝试重新编码；更小且长边不超限的图片（含测试样本）原样发送。"
     },
     {
       "name": "INPUT_RESOURCE_RETRY_BUDGET_SECONDS",

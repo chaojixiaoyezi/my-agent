@@ -645,3 +645,31 @@ def test_w21_digest_work_is_outside_cache_lock_and_concurrent_results_match(dige
     with ThreadPoolExecutor(max_workers=4) as pool:
         actual = list(pool.map(digest_cache._chain_checkpoints, cases))
     assert actual == [_uncached_checkpoints(rows) for rows in cases]
+
+
+# LLM: previous_response_id 每轮都换，是增量链锚点不是采样选项；进 options 会让每次增量续接都报 options_changed。
+#   真实选项变化仍须照常报出。
+# 函数用途: 钉住增量锚点不计入选项摘要。
+def test_incremental_anchor_is_not_reported_as_an_option_change():
+    base = {"model": "m", "input": [{"role": "user", "content": "x"}], "prompt_cache_key": "k", "stream": True}
+    plain = request_surface(base, "endpoint")
+    anchored = request_surface({**base, "previous_response_id": "resp_1"}, "endpoint")
+    rotated = request_surface({**base, "previous_response_id": "resp_2"}, "endpoint")
+    assert plain["options"] == anchored["options"] == rotated["options"]
+    assert compare_request_surfaces(anchored, rotated)["changes"] == []
+    assert compare_request_surfaces(plain, request_surface({**base, "temperature": 0.5}, "endpoint"))["changes"] == ["options_changed"]
+
+
+# LLM: 复用连接的增量续接在线上只发差量，但诊断必须按完整 input 比较：完整前缀才证明纯追加与整段共享前缀，
+#   只看差量切片时连上一轮的共同检查点都没有，无法证明前缀。
+# 函数用途: 钉住增量续接按完整历史比较时报 history_appended 且共享前缀等于上一轮全长。
+def test_incremental_turn_compared_on_full_input_reports_append_with_full_shared_prefix():
+    history = _messages(32)["messages"]
+    tail = [{"role": "assistant", "content": "reply"}, {"role": "user", "content": "next"}]
+    before = request_surface({"model": "a", "input": history}, "endpoint")
+    after = request_surface({"model": "a", "input": [*history, *tail], "previous_response_id": "resp_1"}, "endpoint")
+    result = compare_request_surfaces(before, after)
+    assert result["changes"] == ["history_appended"]
+    assert result["shared_message_prefix"] == 32 and result["comparable"] is True
+    delta_only = request_surface({"model": "a", "input": tail, "previous_response_id": "resp_1"}, "endpoint")
+    assert compare_request_surfaces(before, delta_only)["shared_message_prefix"] == 0

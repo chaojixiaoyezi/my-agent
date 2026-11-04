@@ -7,7 +7,8 @@
 #   不等对端关闭握手，再抛 InterruptedError；
 #   握手失败沿 HTTP 同一分类（_runtime_http_error / _runtime_network_error）并按同一有限次数重试；握手阶段的超时
 #   （TLS/升级握手，response.create 还没发出）照 SSE 归 first_event，交给回合层退避重试，不落 provider_declared；
-#   回复完成前断开抛可恢复的 ProviderTransientError（文本带阶段、连接后秒数和关闭码，供排查），交给上层模型重试。
+#   回复完成前断开（含发送 response.create 时断开，阶段 send_request）抛可恢复的 ProviderTransientError（文本带阶段、
+#   连接/发送后秒数和关闭码，供排查），交给上层模型重试；不让库的原始关闭异常漏到上层。
 #   实验发送许可不支持（拒绝发送）。
 #   与官方 Codex 一致不主动发心跳 ping，只自动回应服务端 ping（09-30 审计：49 次里 2 次在 23–24 秒中途断开，紧跟客户端
 #   第 20 秒的 ping）。改动须同步 test_responses_websocket。
@@ -119,7 +120,7 @@ def iter_responses_websocket(request: GatewayRequest, *, provider_id: str = "", 
             else:
                 connection = entry.connection
                 connection._provider_request_lease = acquire_provider_request(sending, _emit_provider_queue)
-                _reused_attempt(sending)
+                _reused_attempt(request)
             with _provider_interrupt_callback(connection.close_socket):
                 _send_create_message(connection, sending)
                 for text in _events(connection, sending):
@@ -219,6 +220,8 @@ def _sticky_request(request: GatewayRequest, state: SessionState | None) -> Gate
 
 
 # LLM: Reused physical sends must be visible in the same attempt ledger, with full request-local diagnostic input and no socket headers.
+#   Callers pass the pre-incremental envelope: the wire carries only the previous_response_id delta, but the cache
+#   surface must compare the full conversation prefix, or every incremental turn reads as a prefix/option change.
 # 函数用途: 为复用连接上的真实发送补齐请求尝试观察事件。
 def _reused_attempt(request: GatewayRequest) -> None:
     event = _attempt_event(request, 1)
@@ -346,8 +349,13 @@ def _connect(request: GatewayRequest):
 
 # LLM: `websockets.sync.Connection.send` 会对普通发送执行 socket.sendall，close_timeout 只约束关闭握手；
 #   计时器到期先关当前 socket 唤醒发送线程，超时仍归原 first_event 合同，不新增重试分类。
+#   库把写 socket 失败包成 ConnectionClosed：用户停止优先→InterruptedError；首包预算到期仍归 first_event 超时；
+#   其余与 _events 同口径包成可恢复的 ProviderTransientError（阶段 send_request），原关闭异常保留为 __cause__，
+#   复用连接首轮仍由 _recoverable_reuse_error 识别后全量回退一次，非复用或回退后的失败交上层重试。
 # 函数用途: 为 response.create 的网络写入复用当前请求首包预算，避免连接建立后卡在发送阶段。
 def _send_create_message(connection, request: GatewayRequest) -> None:
+    from websockets.exceptions import ConnectionClosed
+
     # LLM: WebSocket 首包不经 HTTP（直接 socket.send），编码仍复用唯一编码器 gateway_request_body：
     #   历史结构化对象的键序同样受磁盘重排影响，与 HTTP 路径共用「同一语义 → 同一字节」口径。
     #   编码器用 json.dumps 默认转义（含中文时输出 \uXXXX，JSON 解析语义等价）；旧实现
@@ -357,9 +365,18 @@ def _send_create_message(connection, request: GatewayRequest) -> None:
     timed_out = Event()
     timer = Timer(_stream_first_event_timeout(request), _expire_websocket_send, args=(connection, timed_out))
     timer.daemon = True
+    started = time.monotonic()
     timer.start()
     try:
         connection.send(message)
+    except ConnectionClosed as exc:
+        _raise_if_stopped(exc)
+        if timed_out.is_set():
+            raise _stream_timeout_error(request, "first_event") from exc
+        raise ProviderTransientError(
+            f"网络请求失败: 模型接口 WebSocket 在发送请求时断开（{request.url}；阶段 send_request，开始发送后 "
+            f"{time.monotonic() - started:.1f} 秒，{_close_detail(exc)}）。本次请求可由重试/恢复/接管继续处理；"
+            f"底层错误: {type(exc).__name__}") from exc
     except Exception as exc:
         if timed_out.is_set():
             raise _stream_timeout_error(request, "first_event") from exc
