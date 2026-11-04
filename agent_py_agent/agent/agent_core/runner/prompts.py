@@ -67,7 +67,8 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         "自主决定，不要编造固定流程。\n"
         "运行中如果收到新的真实用户消息，它与普通聊天输入同等优先：先在普通 assistant 回复中"
         "直接回答或确认用户，再继续工具和原任务（除非用户要求停止或改向）；不要只在 thinking"
-        "里回应，也不要把用户消息当成无须回复的内部便签。\n"
+        "里回应，也不要把用户消息当成无须回复的内部便签。"
+        "用户要求翻译或解释交接事实、工具结果等内部记录时，同样先用自然语言讲清楚，再回到原任务。\n"
         "自证纪律（建系统/写代码类交付）：建完别只“文件写齐”就报完成——写个小的端到端"
         "测试或冒烟脚本亲手跑一遍关键主链路，把运行输出留进交付证据；跑不过先修再交。\n"
         "数据纪律（分析/统计/排名类交付）：聚合前先识别明显异常记录（缺字段/重复/数量级"
@@ -300,6 +301,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     lines.extend(_root_execution_contract_lines(context))
     if _is_coordinator_context(context):
         lines.extend(_coordinator_execution_contract_lines())
+    lines.extend(_a2a_handoff_lines(context))
     return lines
 
 
@@ -313,6 +315,32 @@ def _lesson_ledger_lines(context: SubAgentExecutionContext) -> list[str]:
         "- 本次工作若形成以后同类任务可复用的具体做法，可以调用 record_lesson 记一条（可选；只记可复用做法，"
         "不记本任务的事实结论，结论照常写在最终回复里）。"
     ]
+
+
+# LLM: 交接事实只作软引导，按本轮实际动作取舍：只读、检索、问答不写；改动、诊断或审查结论才写。用普通文本标签行
+#   放在最终回复开头（完成通知超长时只保留前 3/4 与末 1/4），不得变成 JSON、代码块或结果标记；宿主不解析这些行，
+#   状态与收口仍只由工具循环事实决定。协调者另按完成通知里的截断标记先读完整报告，并把下级的假设与未核对面并入自己的交接。
+# 函数用途: 生成 Runner Contract 里 A2A-LOSSLESS v1 交接事实条款；协调者额外得到汇总下级结果时的读取规则。
+def _a2a_handoff_lines(context: SubAgentExecutionContext) -> list[str]:
+    lines = [
+        "- 交接事实（A2A-LOSSLESS v1，按本轮实际动作取舍）：本轮改了文件、代码或配置，定位了故障，或给出了审查结论时，"
+        "在最终回复开头用普通文本逐行写下面几项，只写有内容的项，不包成 JSON、代码块或结果标记，也不为凑格式补空项；"
+        "只做了读取、检索或简单问答时直接作答，不写这些项。",
+        "- delta_map：每处改动写 路径:起止行#符号(完整签名)，再写“触发 → 状态/数据变化 → 可观察结果”；"
+        "路径、行号、签名和分支条件不要省略或改写成概括。",
+        "- decisions_and_assumptions：目标没有写死、由你决定的阈值、默认值、锁范围、错误归类、回退还是抛错、缓存取舍，逐条写出。",
+        "- unchecked_surfaces：没有实际跑到的调用方、并发交错、平台差异和集成边界，逐条写出；测试通过不等于全部正确。",
+        "- blast_radius：从 LOW / MEDIUM / HIGH-STATE-MACHINE / HIGH-HOT-PATH / HIGH-SCOPE-BOUNDARY 选一个；"
+        "invariants_verified 写明核对过的不变量和对应的工具步骤。",
+        "- falsification_check：写明怎样试图推翻自己的结论（例如新测试在修复前失败、搜索核对同类调用点）及结果；"
+        "没做就写“未做反证”。",
+    ]
+    if _is_coordinator_context(context):
+        lines.append(
+            "- 汇总下级结果时：completion_message 带“完成消息已截断”标记就先读 final_report_ref 再下结论；"
+            "下级写出的 decisions_and_assumptions 与 unchecked_surfaces 并入你自己的交接事实，不要在汇总中丢掉。"
+        )
+    return lines
 
 
 # LLM: Prompt wording mirrors the typed execution_cwd consumed by tools. Task
