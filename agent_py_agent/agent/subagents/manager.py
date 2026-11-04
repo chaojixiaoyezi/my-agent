@@ -355,6 +355,43 @@ _DEFAULT_RUN_LIST_READERS = (
 )
 
 
+# LLM: 真实 manager 的热读先有界点修 pending；partial/错误仍向上传递，不降级为全历史扫描。
+# 函数用途: 让派工调用方取得唯一运行索引，旧内存适配器仍使用其原协议。
+def creation_run_index(manager):
+    if not isinstance(manager, SubAgentManager):
+        return None
+    manager.persistence.prepare_run_index()
+    return manager.persistence.run_index
+
+
+# LLM: 正式 manager 复用唯一 prepare/索引接线；仅非 manager 适配器保留原列表协议。
+# 函数用途: 为请求谱系按索引选择精确记录，并保留旧内存适配器的接口。
+def request_scope_runs(manager, scope_ids, request_key, epoch):
+    if not isinstance(manager, SubAgentManager):
+        return manager.list_runs()
+    run_ids = creation_run_index(manager).request_ids(scope_ids, request_key, epoch)
+    report = manager.list_runs_by_ids_report(run_ids)
+    if report.load_errors:
+        raise RuntimeError("subagent request index canonical rows unavailable")
+    return report.runs
+
+
+# LLM: 请求范围解析器与 prepare 接线唯一；容量只计活跃 SQL 索引，未结错误不降级。
+# 函数用途: 读取创建容量，非持久化适配器仍按其原列表合同计算。
+def creation_capacity_counts(agent, task_id):
+    from .models import SUBAGENT_ENDED_STATUSES, task_status_in
+    from .services.persistence.run_index import request_selection
+
+    manager = agent.subagents
+    if isinstance(manager, SubAgentManager):
+        selection = request_selection(agent, task_id) if task_id else ((), "", None)
+        return creation_run_index(manager).active_counts(*selection)
+    runs = [run for run in manager.list_runs() if str(getattr(run, "id", "") or "").strip()
+            and not task_status_in(getattr(run, "status", ""), SUBAGENT_ENDED_STATUSES)]
+    related_ids = set(agent.subagent_run_ids_for_request(task_id)) if task_id else set()
+    return len(runs), sum(str(getattr(run, "id", "") or "").strip() in related_ids for run in runs)
+
+
 # LLM: 只对标准且旧读口未覆盖的manager提前筛选；实例/类替身仍沿原list_runs，异常不被吞掉。
 # 函数用途: 为各巡检阶段选择实时任务，保留旧测试与业务适配器的列表合同。
 def select_manager_runs(manager: Any, predicate: Callable[[Any], bool]) -> list[Any]:

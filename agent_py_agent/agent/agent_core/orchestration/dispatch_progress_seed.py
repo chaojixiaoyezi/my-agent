@@ -168,7 +168,7 @@ def planned_dispatch_contract(agent: object, items: list) -> dict[str, Any] | No
     if root is None or not run_id or not items:
         return None
     ledger_run_id, targets = _binding_ledger_targets(agent, root, run_id)
-    child_run_ids = _known_child_run_ids(agent)
+    child_run_ids = _known_child_run_ids(agent, [str(target.get("id") or "").strip() for target in targets])
     plan_targets = [
         target
         for target in targets
@@ -290,17 +290,25 @@ def _planned_binding_issues(
     return unbound, unknown, unavailable, duplicates, active
 
 
-# LLM: Existing cover ownership is decided only from canonical direct-child lineage,
-# exact covers ids, and typed run status. Goal/title similarity is deliberately ignored.
+# LLM: covers 仅按规范直接父代、精确绑定和状态判断；持久索引故障向上报告，不能当作无人占用。
 # 函数用途: 找出同一个父代理下仍占用 Todo 的旧 child，阻止后续唤醒重复派同一项。
 def _active_direct_cover_owners(agent: object, parent_id: str) -> dict[str, list[str]]:
     manager = getattr(agent, "subagents", None)
     if manager is None or not parent_id:
         return {}
-    try:
-        tasks = list(manager.list_runs())
-    except (AttributeError, OSError, TypeError, ValueError):
-        return {}
+    from ...subagents.manager import creation_run_index
+
+    index = creation_run_index(manager)
+    if index is not None:
+        report = manager.list_runs_by_ids_report(index.active_child_ids(parent_id))
+        if report.load_errors:
+            raise RuntimeError("subagent covers index canonical rows unavailable")
+        tasks = report.runs
+    else:
+        try:
+            tasks = list(manager.list_runs())
+        except (AttributeError, OSError, TypeError, ValueError):
+            return {}
     closed = {TaskStatus.DONE.value, *SUBAGENT_HANDLED_TERMINAL_STATUSES}
     owners: dict[str, list[str]] = {}
     for task in tasks:
@@ -316,25 +324,28 @@ def _active_direct_cover_owners(agent: object, parent_id: str) -> dict[str, list
     return owners
 
 
-# LLM: Dispatch-seeded Todo rows are identified only by exact canonical child
-# run ids. Removing those ids from the plan view prevents old projection rows
-# from becoming a second plan without parsing their generated titles.
+# LLM: 创建路径显式传候选 ID，仅点查；None 保留既有非创建读口的完整集合合同，不是索引失败回退。
 # 函数用途: 收集当前任务树里已存在的真实子代理 id，供计划合同排除自动派工展示项。
-def _known_child_run_ids(agent: object) -> set[str]:
+def _known_child_run_ids(agent: object, candidate_ids=None) -> set[str]:
+    from ...subagents.manager import creation_run_index
+
     run_ids: set[str] = set()
     manager = getattr(agent, "subagents", None)
-    try:
-        tasks = list(manager.list_runs()) if manager is not None else []
-    except (AttributeError, OSError, TypeError, ValueError):
-        tasks = []
-    run_ids.update(
-        run_id
-        for task in tasks
-        if (run_id := str(getattr(task, "id", "") or "").strip())
-    )
+    index = creation_run_index(manager) if candidate_ids is not None else None
+    if index is not None:
+        run_ids.update(index.known_ids(candidate_ids))
+    else:
+        try:
+            tasks = list(manager.list_runs()) if manager is not None else []
+        except (AttributeError, OSError, TypeError, ValueError):
+            tasks = []
+        run_ids.update(
+            run_id for task in tasks
+            if (run_id := str(getattr(task, "id", "") or "").strip())
+        )
     task_root = _current_task_root(agent)
     if task_root is not None:
-        run_ids.update(_canonical_child_rows(task_root))
+        run_ids.update(_canonical_child_rows(task_root, candidate_ids))
     return run_ids
 
 
@@ -577,16 +588,40 @@ def _current_task_root(agent: object) -> Path | None:
     return Path(text).expanduser().resolve(strict=False) if text else None
 
 
-def _canonical_child_rows(task_root: Path) -> dict[str, dict[str, object]]:
+# LLM: 派工只按当前清单候选点查；离线谱系协调保留全树接口；候选必须是合法路径分量。
+# 函数用途: 读取规范孩子行，不让创建新任务扫描无关历史。
+def _canonical_child_rows(task_root: Path, candidate_ids=None) -> dict[str, dict[str, object]]:
+    from ...common.nofollow_fs import NoFollowPathError, read_bytes_beneath
+    from ...common.opaque_id import validate_opaque_id
+
     rows: dict[str, dict[str, object]] = {}
-    for path in sorted((task_root / "work" / "agents").glob("*/canonical_state.json")):
+    directory = task_root / "work" / "agents"
+    if candidate_ids is None:
+        paths = sorted(directory.glob("*/canonical_state.json"))
+    else:
+        paths = []
+        for candidate in dict.fromkeys(candidate_ids):
+            try:
+                run_id = validate_opaque_id(candidate, kind="candidate_id")
+            except ValueError:
+                continue
+            paths.append(directory / run_id / "canonical_state.json")
+    for path in paths:
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            if candidate_ids is None:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                raw = read_bytes_beneath(task_root, ("work", "agents", path.parent.name, "canonical_state.json"))
+                if raw is None:
+                    continue
+                payload = json.loads(raw)
+        except (OSError, json.JSONDecodeError, NoFollowPathError):
             continue
         if not isinstance(payload, dict):
             continue
         child_id = str(payload.get("run_id") or payload.get("id") or "").strip()
+        if candidate_ids is not None and child_id != path.parent.name:
+            continue
         if child_id:
             rows[child_id] = payload
     return rows
@@ -674,7 +709,7 @@ def _plan_targets_without_child_rows(
     agent: object,
     targets: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    child_run_ids = _known_child_run_ids(agent)
+    child_run_ids = _known_child_run_ids(agent, [str(target.get("id") or "").strip() for target in targets])
     return [
         target
         for target in targets

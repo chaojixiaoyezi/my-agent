@@ -692,24 +692,18 @@ class SimpleAgent(
             snapshot = snapshot.restricted(references, expected_sha256=expected, expected_refs=refs)
         return scope_main_task_references(self, snapshot, attrs)
 
-    # LLM: 组合根级状态与停止查询入口，优先按结构化task attributes关联request_id与子代理run_id。
+    # LLM: 按同步索引定位候选后逐 id 读取规范状态；容量复用相同范围解析，不再扫描其它请求历史。
     # 函数用途: 列出某个会话请求真正派生的子代理编号。
     def subagent_run_ids_for_request(self, request_id: str) -> list[str]:
+        from .subagents.manager import request_scope_runs
+        from .subagents.services.persistence.run_index import request_selection
+
         request_key = str(request_id or "").strip()
         if not request_key:
             return []
-        scope_ids = {request_key}
-        current = getattr(self, "_current_run_params", None)
-        if str(getattr(current, "request_id", "") or "").strip() == request_key:
-            attrs = getattr(current, "task_attributes", None)
-            if isinstance(attrs, dict):
-                scope_ids.add(str(attrs.get("conversation_task_id") or "").strip())
-            scope_ids.add(str(getattr(current, "run_id", "") or "").strip())
-            scope_ids.add(str(getattr(current, "task_id", "") or "").strip())
-        scope_ids.discard("")
-        current_audit_epoch = _active_audit_run_epoch(self, request_key)
+        scope_ids, request_key, current_audit_epoch = request_selection(self, request_key)
         run_ids: list[str] = []
-        for task in self.subagents.list_runs():
+        for task in request_scope_runs(self.subagents, scope_ids, request_key, current_audit_epoch):
             task_id = str(getattr(task, "id", "") or "").strip()
             attrs = getattr(task, "attributes", None)
             linked_request = (
@@ -1279,6 +1273,7 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 #   audit_records 与 user_config 同范围注册（执行时再按 owner 控制与管理员许可裁决）；admin_controls 只按 is_permission_admin 注册。
 #   record_lesson只按原子代理开关隐藏；普通/群手动总结只产本owner候选，迁移工具只prepare/status，正式确认仍走原人类控制。
 #   self_map只登记原公开读口，不受子代理开关影响；具体可见性仍由本轮快照与父授权交集控制。
+#   当前群只读历史默认不注册；显式开启时才加载工具，每次执行仍检查部署开关和实时群边界。
 # 函数用途: 把配置、审计、编排、检索、记忆、消息和只读自我目录装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     from .gateway_parts.business_api import register_business_tools
@@ -1372,6 +1367,10 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 配置读不了(无读权限、路径是目录)或有非法值(校验抛 ValueError)时 capability_config_for_agent 返回 None,这里算一次兜到默认实例,
     # 三处共用:否则主代理构造会直接崩在属性读取上。
     session_capability_config = capability_config_for_agent(agent) or CapabilityConfig()
+    if getattr(session_capability_config, "feishu_chat_history_enabled", False) is True:
+        from .tooling.channel_messages_tool import ChannelMessagesTool
+
+        agent.tools.register(ChannelMessagesTool(agent))
     if session_messaging_tool_visible(agent.home_paths, session_capability_config):
         agent.tools.register(SendSessionMessageTool(agent))
     # 会话间派活:第一期只开给管理员,并单独看派活开关;条件不满足时工具不进 registry。

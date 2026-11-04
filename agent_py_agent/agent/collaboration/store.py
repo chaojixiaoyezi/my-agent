@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -18,10 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_private_jsonl_records, locked_json_path
-from ..common.nofollow_fs import ensure_private_dir
-from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
+from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath
+from ..common.opaque_id import validate_opaque_id
+from ..gateway_parts.io import read_json_file, write_json_file_atomic
 from ..runtime_errors import runtime_error_report
 from .coverage import case_response_coverage
+from .history_index import CollaborationHistoryIndex, file_signature
 from .identity import agent_identity_keys, request_update_targets
 from .models import (
     AGENT_CAPABILITY_STATUS_AVAILABLE,
@@ -109,6 +112,8 @@ def _read_cached_case(path: Path) -> CollaborationCase | None:
 class CollaborationBaseStore:
     """Shared directory layout for case/request/evidence ledgers."""
 
+    # LLM: 原目录和账本仍保留；旧 case 在后台固定批次迁移，构造不读取整份旧 JSON 名册。
+    # 函数用途: 初始化协作存储及按行索引的唯一生产维护入口。
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.cases_dir = self.root / "cases"
@@ -118,6 +123,11 @@ class CollaborationBaseStore:
         self.decisions_dir = self.root / "decisions"
         self.capabilities_path = self.root / "agent_capabilities.json"
         self._ensure_dirs()
+        self.history_index = CollaborationHistoryIndex(self.root)
+        self._history_worker_lock = threading.Lock()
+        self._history_worker = None
+        self._history_maintenance_report = {}
+        self._start_history_maintenance()
 
     def _ensure_dirs(self) -> None:
         for path in (
@@ -129,8 +139,141 @@ class CollaborationBaseStore:
         ):
             ensure_private_dir(path)
 
+    # LLM: 持久 dirty 先于规范发表；规范写失败不清占位，投影成功与指纹一起原子提交。
+    # 函数用途: 保留原 case JSON 写入口，并增量同步 case 状态路由。
     def _write_case(self, case: CollaborationCase) -> None:
+        self._prepare_history_write(case.case_id)
+        self.history_index.mark_dirty(case.case_id, published=self._case_path(case.case_id).exists())
         write_json_file_atomic(self._case_path(case.case_id), case.to_dict())
+        self.history_index.commit_event(case.case_id, self._history_signature(case.case_id), case=case)
+
+    # LLM: 精确三文件 stat 是一致性门；不用目录/正文标题推断业务身份。
+    # 函数用途: 记录一个 case 的规范版本，用于点查识别外部改写或未结提交。
+    def _history_signature(self, case_id):
+        return json.dumps([file_signature(path) for path in (self._case_path(case_id),
+                          self._requests_path(case_id), self._evidence_path(case_id))])
+
+    # LLM: 持原 case 锁复核 ID、版本及 JSONL 错误；先过滤原始行归属，再由 SQL 按本 case 请求 ID 折叠最后快照。
+    # 函数用途: 迁移或恢复一个精确 case，保留有效行和坏账事实。
+    def _sync_history_case(self, case_id, *, already_locked=False):
+        case_id = validate_opaque_id(case_id, kind="case_id")
+        if not already_locked:
+            with self._case_update_lock(case_id):
+                return self._sync_history_case(case_id, already_locked=True)
+        before = self._history_signature(case_id)
+        data = read_bytes_beneath(self.root, ("cases", f"{case_id}.json"), require_dir_fd=True)
+        if data is None:
+            if self.history_index.discard_unpublished(case_id):
+                return
+            raise KeyError(f"collaboration canonical case unavailable: {case_id}")
+        case = CollaborationCase.from_dict(json.loads(data))
+        if case.case_id != case_id:
+            raise ValueError("collaboration canonical case identity mismatch")
+        requests, request_errors = self.case_request_history_report(case_id)
+        evidence, evidence_errors = self.case_evidence_report(case_id)
+        requests, misplaced_requests = self._owned_history_rows(case_id, requests, "requests")
+        evidence, misplaced_evidence = self._owned_history_rows(case_id, evidence, "evidence")
+        after = self._history_signature(case_id)
+        if before != after:
+            raise RuntimeError("collaboration canonical files changed during index recovery")
+        self.history_index.sync_case(case, requests, evidence,
+                                     [*request_errors, *evidence_errors, *misplaced_requests, *misplaced_evidence], after)
+
+    # LLM: 规范文件所属 case 决定边界；冲突行单列错误，不跨 case 投影，也不丢其它有效行。
+    # 函数用途: 从迁移/修复批次中分离归属错误的可解析行。
+    @staticmethod
+    def _owned_history_rows(case_id, rows, kind):
+        valid, errors = [], []
+        for record_index, row in enumerate(rows, 1):
+            if row.case_id == case_id:
+                valid.append(row)
+            else:
+                error = runtime_error_report(ValueError("collaboration case identity mismatch"),
+                                             context=f"collaboration.{kind}.read")
+                error.update(case_id=case_id, claimed_case_id=row.case_id, record_index=record_index)
+                errors.append(error)
+        return valid, errors
+
+    # LLM: 原 case 锁内先核验旧来源，避免增量写将此前未索引的有效行/坏账盖成新的健康指纹；不重入文件锁。
+    # 函数用途: 仅在该 case 来源变化或尚未迁移时精确恢复，再允许写新事件。
+    def _prepare_history_write(self, case_id):
+        current = self._history_signature(case_id)
+        previous = self.history_index.case_signature(case_id)
+        if previous != current and self._case_path(case_id).exists():
+            self._sync_history_case(case_id, already_locked=True)
+
+    # LLM: 手动/后台每轮各消费一页精确 dirty 和稳定库存；失败标记保留，不以成功数推断完整覆盖。
+    # 函数用途: 固定批次修复/迁移 case 并返回真实覆盖和错误。
+    def backfill_history_index(self):
+        errors, repaired = self._recover_history_cases()
+        loaded = 0
+        for seq, case_id in self.history_index.inventory_batch():
+            try:
+                self._sync_history_case(case_id)
+                self.history_index.complete_inventory(seq)
+                loaded += 1
+            except Exception as exc:  # noqa: BLE001 保留覆盖未知，绝不回退全树 pending 扫描
+                error = runtime_error_report(exc, context="collaboration.history.migration")
+                error["case_id"] = case_id
+                errors.append(error)
+        self.history_index.complete_inventory(None)
+        return {**self.history_index.coverage(), "loaded": loaded, "repaired": repaired, "errors": errors}
+
+    # LLM: 只用于已在停写/同 case 锁约束下完成并稳定的外部修复；不改规范文件、不自动发现任意手工写。
+    #   标记耐久化后由正常读前恢复或后台固定页消费，调用成功不等于重建已经完成。
+    # 函数用途: 将一个明确修复完的冷 case 交回生产索引恢复队列。
+    def invalidate_history_case(self, case_id: str) -> None:
+        case_id = validate_opaque_id(case_id, kind="case_id")
+        if not self._case_path(case_id).exists() and self.history_index.case_signature(case_id) is None:
+            raise KeyError(f"collaboration case unknown: {case_id}")
+        with self._case_update_lock(case_id):
+            self.history_index.mark_dirty(case_id, published=True)
+        self._start_history_maintenance()
+
+    # LLM: 每实例至多一个后台迁移，健康库立即返回；启动不是覆盖完成证明。
+    # 函数用途: 自动调度旧 case 的生产迁移，不在 hot miss 中同步枚举。
+    def _start_history_maintenance(self):
+        if self.history_index.coverage()["complete"]:
+            return
+        with self._history_worker_lock:
+            if self._history_worker is not None and self._history_worker.is_alive():
+                return
+            self._history_worker = threading.Thread(target=self._maintain_history, name="collaboration-history", daemon=True)
+            self._history_worker.start()
+
+    # LLM: 首批建立库存后按真实剩余数限定轮数，遇到坏账立即停该轮，不无限重试或伪报覆盖。
+    # 函数用途: 后台逐页收敛旧 case 投影。
+    def _maintain_history(self):
+        try:
+            report = self.backfill_history_index()
+            for _ in range((report["remaining"] + 63) // 64 + 1):
+                if report["complete"] or report["errors"]:
+                    break
+                report = self.backfill_history_index()
+            self._history_maintenance_report = report
+        except Exception as exc:  # noqa: BLE001 未完成覆盖继续显式拒绝健康空集
+            self._history_maintenance_report = {"complete": False, "errors": [runtime_error_report(exc, context="collaboration.history.migration")]}
+
+    # LLM: 每轮最多修一页已知 dirty；同一原 case 锁内核对源，失败保持标记，不触发目录发现。
+    # 函数用途: 供读前和后台共用的精确恢复入口。
+    def _recover_history_cases(self):
+        errors, repaired = [], 0
+        for case_id in self.history_index.dirty_cases():
+            try:
+                self._sync_history_case(case_id)
+                repaired += 1
+            except Exception as exc:  # noqa: BLE001 精确恢复失败继续保留 dirty
+                error = runtime_error_report(exc, context="collaboration.history.recovery")
+                error["case_id"] = case_id
+                errors.append(error)
+        return errors, repaired
+
+    # LLM: 正常 pending 先消费固定页精确恢复，再请求仍未完成的后台维护；热缺失不全树扫描。
+    # 函数用途: 在读取候选前恢复已知失败或外部修复通知。
+    def _prepare_history_read(self):
+        errors, _ = self._recover_history_cases()
+        self._start_history_maintenance()
+        return errors
 
     def _case_path(self, case_id: str) -> Path:
         return self.cases_dir / f"{case_id}.json"
@@ -179,7 +322,7 @@ class CollaborationEvidenceStore(CollaborationBaseStore):
         append_private_jsonl_records(self._participants_path(participant.case_id), [participant.to_dict()], sort_keys=True)
         return participant
 
-    # LLM: 证据包追加写私有账本（0600/0700）；内容与旧格式逐字节一致，只改权限口径。
+    # LLM: 证据格式及私有追加不变；同一原 case 锁内先标 dirty，再发表规范证据和精确回应投影。
     # 函数用途: 提交一份证据包并落进该 case 的证据账。
     def submit_evidence(self, request: dict) -> EvidencePacket:
         case_id = str(request.get("case_id") or "")
@@ -204,7 +347,11 @@ class CollaborationEvidenceStore(CollaborationBaseStore):
             metadata=request.get("metadata") or {},
         )
         # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
-        append_private_jsonl_records(self._evidence_path(case_id), [evidence.to_dict()], sort_keys=True)
+        with self._case_update_lock(case_id):
+            self._prepare_history_write(case_id)
+            self.history_index.mark_dirty(case_id, published=True)
+            append_private_jsonl_records(self._evidence_path(case_id), [evidence.to_dict()], sort_keys=True)
+            self.history_index.commit_event(case_id, self._history_signature(case_id), evidence=evidence)
         return evidence
 
     def case_evidence(self, case_id: str) -> list[EvidencePacket]:
@@ -250,27 +397,23 @@ def _capability_roster_load_error(path: Path, exc: BaseException) -> dict[str, A
 
 
 class CollaborationCapabilityStore(CollaborationEvidenceStore):
+    # LLM: 每次只 upsert 一个身份及其能力，旧整体 JSON 仅作迁移来源，不再受 1 MiB 整体读写门槛限制。
+    # 函数用途: 保持原登记签名，以按行原子事务持久化一名代理。
     def register_agent(self, capability: AgentCapability) -> AgentCapability:
-        def updater(data: dict[str, Any]) -> dict[str, Any]:
-            return {**data, capability.agent_id: capability.to_dict()}
-
-        update_json_file_atomic(self.capabilities_path, updater)
+        self.history_index.upsert_agent(capability)
         return capability
 
     def agent_capabilities(self) -> list[AgentCapability]:
         capabilities, _load_error = self.agent_capabilities_report()
         return capabilities
 
+    # LLM: 旧名册流式迁移错误与 SQL 错误均显式报告，不把部分迁移解释为健康空名册。
+    # 函数用途: 返回全部历史能力身份及准确读错误。
     def agent_capabilities_report(self) -> tuple[list[AgentCapability], dict[str, Any] | None]:
-        if not self.capabilities_path.exists():
-            return [], None
         try:
-            data = json.loads(self.capabilities_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError(f"agent capabilities roster is {type(data).__name__}, expected object")
-        except (OSError, UnicodeError, ValueError) as exc:
+            return self.history_index.agents(), None
+        except (OSError, UnicodeError, ValueError, sqlite3.Error) as exc:
             return [], _capability_roster_load_error(self.capabilities_path, exc)
-        return [AgentCapability.from_dict(item) for item in data.values() if isinstance(item, dict)], None
 
     def agent_identity_keys(self, values: object = ()) -> set[str]:
         return agent_identity_keys(values)
@@ -289,6 +432,8 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
         )
         return matches
 
+    # LLM: 有限候选只读独立活跃投影，精确能力/排除/排序及 limit<=0 合同保持，错误不吞成健康无匹配。
+    # 函数用途: 不加载整份历史名册地挑选协作候选。
     def match_agents_report(
         self,
         *,
@@ -297,11 +442,10 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
         limit: int = 20,
     ) -> tuple[list[AgentCapability], dict[str, Any] | None]:
         required = {str(item) for item in (required_capabilities or []) if str(item or "").strip()}
-        capabilities, load_error = self.agent_capabilities_report()
-        matches = [item for item in capabilities if self._matches(item, required, exclude_agent_id)]
-        matches.sort(key=lambda item: (item.load, item.agent_id))
-        matches = matches if limit <= 0 else matches[:limit]
-        return matches, load_error
+        try:
+            return self.history_index.matching_agents(required, exclude_agent_id, limit), None
+        except (OSError, UnicodeError, ValueError, sqlite3.Error) as exc:
+            return [], _capability_roster_load_error(self.capabilities_path, exc)
 
     def _matches(self, capability: AgentCapability, required: set[str], exclude_agent_id: str) -> bool:
         if capability.agent_id == exclude_agent_id:
@@ -318,6 +462,8 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
 # LLM: 协作 case 的创建、持久化、列表缓存与成员绑定继承自能力存储基类；改动时保持 case_id/thread_id/task_id 账本契约与 test_collaboration_store.py / test_store_scan_indexes.py 一致。
 # 类用途: 管理多代理协作 case 的落盘记录、状态流转与按物理文件指纹复用的读取缓存。
 class CollaborationCaseStore(CollaborationCapabilityStore):
+    # LLM: 新 ID 的首次规范发表也持原 case 更新锁，与后续增量写和恢复采用同一边界。
+    # 函数用途: 创建一个协作 case 并发表规范文件及索引。
     def open_case(self, request: dict) -> CollaborationCase:
         current = current_time(request.get("now"))
         case = CollaborationCase(
@@ -334,7 +480,8 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
             updated_at=current,
             metadata=request.get("metadata") or {},
         )
-        self._write_case(case)
+        with self._case_update_lock(case.case_id):
+            self._write_case(case)
         if case.created_by:
             self.add_participant({
                 "case_id": case.case_id,
@@ -481,7 +628,7 @@ class _RequestTargetResolution:
 
 
 class CollaborationRequestStore(CollaborationCaseStore):
-    # LLM: 协作请求追加写私有账本（0600/0700）；状态更新仍由按 case 的更新锁串行。
+    # LLM: 原 case 锁同时串行请求/证据/状态发表；先耐久 dirty，原 JSONL 成功后才更新目标路由。
     # 函数用途: 发起一条协作请求并登记进请求账。
     def request_collaboration(self, request_data: dict) -> CollaborationRequest:
         case_id = str(request_data.get("case_id") or "")
@@ -518,8 +665,12 @@ class CollaborationRequestStore(CollaborationCaseStore):
             metadata=metadata,
         )
         # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
-        append_private_jsonl_records(self._requests_path(case_id), [request.to_dict()], sort_keys=True)
-        self._add_request_participants(case_id, request, current)
+        with self._case_update_lock(case_id):
+            self._prepare_history_write(case_id)
+            self.history_index.mark_dirty(case_id, published=True)
+            append_private_jsonl_records(self._requests_path(case_id), [request.to_dict()], sort_keys=True)
+            self.history_index.commit_event(case_id, self._history_signature(case_id), request=request)
+            self._add_request_participants(case_id, request, current)
         return request
 
     def case_requests(self, case_id: str) -> list[CollaborationRequest]:
@@ -584,7 +735,7 @@ class CollaborationRequestStatusStore(CollaborationRequestStore):
         with self._case_update_lock(case_id):
             return self._update_request_status_locked(case_id, request_data)
 
-    # LLM: 只能在 _case_update_lock 内调用；校验顺序保持原样（先请求编号、再状态文本），读最新一行后追加新快照。
+    # LLM: 原 case 锁内保持原校验顺序；dirty 先于规范追加，最后快照与新目标路由一起发表。
     # 函数用途: update_request_status 的锁内实现，拆开是为了让加锁范围一眼可见。
     def _update_request_status_locked(self, case_id: str, request_data: dict) -> CollaborationRequest:
         request_id = str(request_data.get("request_id") or "")
@@ -601,7 +752,10 @@ class CollaborationRequestStatusStore(CollaborationRequestStore):
         }
         updated = self._updated_request_snapshot(request, status_text, kwargs)
         # 私有追加：0600/0700，存量宽权限协作账下次写入即收紧；内容逐字节不变。
+        self._prepare_history_write(case_id)
+        self.history_index.mark_dirty(case_id, published=True)
         append_private_jsonl_records(self._requests_path(case_id), [updated.to_dict()], sort_keys=True)
+        self.history_index.commit_event(case_id, self._history_signature(case_id), request=updated)
         self._add_rerouted_participants(case_id, request, updated, kwargs)
         self._append_request_status_decision(case_id, updated, kwargs)
         return updated
@@ -725,12 +879,14 @@ class CollaborationPendingRequestStore(CollaborationRequestStatusStore):
         )
         return rows
 
+    # LLM: 保持冻结签名、精确身份和排序；limit 下推有限点查，覆盖/坏账通过既有 load_errors 返回。
+    # 函数用途: 返回指定代理的待回应请求，不枚举关闭历史。
     def pending_requests_for_agent_report(
         self, *, agent_id: str, agent_name: str = "", agent_role: str = "", limit: int = 10
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         identities = self.agent_identity_keys((agent_id, agent_name, agent_role))
         rows, load_errors = (
-            self._pending_request_rows_for_identities_report(identities) if identities else ([], [])
+            self._pending_request_rows_for_identities_report(identities, limit=limit) if identities else ([], [])
         )
         rows.sort(key=lambda item: (str(item.get("priority") or ""), float(item.get("created_at") or 0.0)))
         return (rows if limit <= 0 else rows[:limit]), load_errors
@@ -739,16 +895,25 @@ class CollaborationPendingRequestStore(CollaborationRequestStatusStore):
         rows, _load_errors = self._pending_request_rows_for_identities_report(identities)
         return rows
 
+    # LLM: 正常查询在一个复用连接内按目标分页；只对版本变化的候选 case 精确恢复，不作全树回退。
+    # 函数用途: 读取热投影，复核候选规范指纹，显式报告中断提交或未完成迁移。
     def _pending_request_rows_for_identities_report(
-        self, identities: set[str]
+        self, identities: set[str], *, limit: int = 0
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        rows: list[dict[str, Any]] = []
-        load_errors: list[dict[str, Any]] = []
-        for case in self.list_cases(status="open"):
-            case_rows, case_errors = self._pending_rows_for_case_report(case, identities)
-            rows.extend(case_rows)
-            load_errors.extend(case_errors)
-        return rows, load_errors
+        try:
+            recovery_errors = self._prepare_history_read()
+            for _ in range(2):
+                candidates, errors = self.history_index.pending_rows(identities, limit)
+                changed = {row[0] for row in candidates if self._history_signature(row[0]) != row[4]}
+                if not changed:
+                    rows = [pending_request_row(CollaborationCase.from_dict(json.loads(row[2])),
+                            CollaborationRequest.from_dict(json.loads(row[3]))) for row in candidates]
+                    return rows, [*recovery_errors, *errors]
+                for case_id in sorted(changed):
+                    self._sync_history_case(case_id)
+            raise RuntimeError("collaboration canonical candidates changed repeatedly")
+        except Exception as exc:  # noqa: BLE001 索引错误不伪装健康空集，也不回退全树读取
+            return [], [runtime_error_report(exc, context="collaboration.pending.index")]
 
     def _pending_rows_for_case(self, case, identities: set[str]) -> list[dict[str, Any]]:
         rows, _load_errors = self._pending_rows_for_case_report(case, identities)

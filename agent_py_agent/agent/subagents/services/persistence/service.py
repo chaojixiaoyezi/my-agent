@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ....common.cache_freshness import CACHE_TRUST_AGE_SECONDS, cache_stat_signature
@@ -92,6 +93,7 @@ from .model_normalizers import (
     _normalize_status_report,
 )
 from .projections import sync_derived_projections
+from .run_index import SubagentRunIndex
 
 _HIGH_RISK_FAILURE_TYPES = {"tool_output_context_overflow", "context_overflow", "blackbox_output_overflow"}
 
@@ -246,9 +248,10 @@ class SubAgentPersistenceService:
     # projection may share it, but callers always receive deep copies and canonical files remain
     # authoritative across processes.
     # 缺失canonical仅缓存稳定locator的指纹与既有reader解析路径，不保存正文或新的状态权威。
-    # 函数用途: 初始化线程安全的解析和缺失目标缓存，供Gateway历史任务巡检复用。
+    # 函数用途: 初始化缓存与索引维护接线；只在后台建立旧目录库存，不在构造或热 miss 同步全扫。
     def __init__(self, manager: Any):
         self.manager = manager
+        self.run_index = SubagentRunIndex(manager.workspace)
         # task.json 文件指纹未变时复用解析对象，避免每轮 dispatch 全量重读+重解析。
         # 近期 mtime 仍强制重读，以防多代替换后 inode 重用且时间戳同片；旧文件继续享有缓存收益。
         # 其余情况同时核对 inode、大小和 ctime，避免只看 mtime 漏掉原子替换。
@@ -257,6 +260,10 @@ class SubAgentPersistenceService:
         self._run_cache_canonical: dict[str, tuple[Path, tuple]] = {}
         self._missing_canonical_cache: dict[str, tuple[tuple[int, int, int, int, int], Path]] = {}
         self._run_cache_lock = threading.RLock()
+        self._run_index_maintenance_lock = threading.Lock()
+        self._run_index_maintenance_thread: threading.Thread | None = None
+        self._run_index_maintenance_report: dict[str, object] = {}
+        self._start_run_index_maintenance()
 
     @property
     def workspace(self) -> Path:
@@ -276,6 +283,78 @@ class SubAgentPersistenceService:
         """Scan the workspace for subagent task records."""
 
         return self.list_runs_report().runs
+
+    # LLM: 热入口只点修一批 pending 并异步请求库存维护；当前仍 partial 时索引读继续 fail closed。
+    # 函数用途: 为正常容量/请求/派工读准备索引，限定同步恢复为固定一批且绝不全扫。
+    def prepare_run_index(self):
+        state = self.run_index.coverage()
+        recovery = self.recover_pending_run_index(batch_size=64) if state["pending"] else {"errors": [], "recovered": 0, "discarded": 0}
+        state = self.run_index.coverage()
+        if not state["complete"] or state["pending"]:
+            self._start_run_index_maintenance()
+        return {**state, **recovery}
+
+    # LLM: 只有显式维护和后台线程可建立库存；与创建共用原锁，每批 canonical 复核和 pending 点查均有上界。
+    # 函数用途: 执行一批旧运行迁移与中断提交恢复并报告实际覆盖。
+    def backfill_run_index(self, *, batch_size=64):
+        with self.manager.creation_guard():
+            recovery = self.recover_pending_run_index(batch_size=batch_size)
+            if recovery["errors"]:
+                return {**self.run_index.coverage(), **recovery, "loaded": 0}
+            report = self.run_index.backfill(self.load, batch_size=batch_size)
+            return {**report, "recovered": recovery["recovered"], "discarded": recovery["discarded"]}
+
+    # LLM: 单服务至多一个后台维护线程；构造时与 prepare 的重复调度幂等，持久错误停止本轮而非无界重试。
+    # 函数用途: 自动调度旧目录及 pending 的生产维护，不在当前请求中执行目录库存。
+    def _start_run_index_maintenance(self):
+        state = self.run_index.coverage()
+        if state["complete"] and not state["pending"]:
+            return
+        with self._run_index_maintenance_lock:
+            worker = self._run_index_maintenance_thread
+            if worker is not None and worker.is_alive():
+                return
+            worker = threading.Thread(target=self._maintain_run_index, name="subagent-run-index", daemon=True)
+            self._run_index_maintenance_thread = worker
+            worker.start()
+
+    # LLM: 首批建立耐久库存后，后续轮数按真实 remaining/pending 计算固定上界；坏记录不自动清除。
+    # 函数用途: 在后台逐批收敛存量覆盖，留下可复核的末次结构化维护结果。
+    def _maintain_run_index(self):
+        try:
+            report = self.backfill_run_index(batch_size=64)
+            rounds = (int(report["remaining"]) + int(report["pending"]) + 63) // 64 + 1
+            for _ in range(rounds):
+                self._run_index_maintenance_report = report
+                if report["errors"] or (report["complete"] and not report["pending"]):
+                    break
+                report = self.backfill_run_index(batch_size=64)
+            self._run_index_maintenance_report = report
+        except Exception as exc:  # noqa: BLE001 维护失败保留索引拒绝，不影响 canonical 权威状态
+            self._run_index_maintenance_report = {"complete": False, "errors": [{"error_type": type(exc).__name__}]}
+
+    # LLM: 同创建锁和原 canonical guard 内按精确 ID 重读 pending；首写未发表须由定位证据和缺失事实共同证明。
+    # 函数用途: 固定一批恢复中断提交，不枚举历史、不重放 canonical 写入或推进业务版本。
+    def recover_pending_run_index(self, *, batch_size=64):
+        recovered, discarded, errors = 0, 0, []
+        with self.manager.creation_guard():
+            for run_id, _, _ in self.run_index.pending_rows(batch_size=batch_size):
+                try:
+                    with locked_json_path(_canonical_state_guard_path(self.workspace, SimpleNamespace(id=run_id))):
+                        record = self.run_index.pending_record(run_id)
+                        if record is None:
+                            continue
+                        task = _pending_canonical_task(self, record)
+                        if task is None:
+                            self.run_index.discard_unpublished(run_id)
+                            discarded += 1
+                            continue
+                        _repair_index_locators(self, task)
+                        self.run_index.upsert(task)
+                        recovered += 1
+                except Exception as exc:  # noqa: BLE001 未知身份/坏 canonical 保持 pending，不能当成未发表
+                    errors.append({"run_id": run_id, "error_type": type(exc).__name__})
+        return {"recovered": recovered, "discarded": discarded, "errors": errors}
 
     # LLM: 轻查询仍逐文件复核原指纹/负缓存，不返回私有任务引用或递归副本，也不缓存跨轮结果。
     # 函数用途: 返回标量运行摘要，供后台仅收集身份时避免复印全部任务内容。
@@ -537,6 +616,7 @@ class SubAgentPersistenceService:
                     task,
                     allow_terminal_reactivation=allow_terminal_reactivation,
                 ):
+                    self.run_index.upsert(task)
                     return
                 _merge_concurrent_capability_and_runner_state(self, task)
                 _persist_task_inside_guard(
@@ -608,6 +688,7 @@ class SubAgentPersistenceService:
                 canonical_ref = _canonical_state_ref_from_payload(payload)
                 if not canonical_ref:
                     raise FileNotFoundError(f"canonical subagent state missing for runner session: {run_id}")
+                self.run_index.mark_pending(run_id, task=initial_task)
                 write_private_json_file_atomic(Path(canonical_ref), payload)
                 # list_runs 的文件指纹来自 locator；只刷新这个轻量文件，
                 # 让列表入口及时看到新 heartbeat，不重建其余派生投影。
@@ -615,7 +696,68 @@ class SubAgentPersistenceService:
                 if locator:
                     locator["updated_at"] = now
                     write_private_json_file_atomic(locator_path, locator)
+                self.run_index.upsert(self.task_from_payload(payload))
             return True
+
+
+# LLM: pending 恢复只读取已钉住的框架定位字段；无 locator 的首存不能退回目录发现或靠缺文件猜已经提交。
+# 函数用途: 在原 canonical guard 内读取一个精确中断提交，或证明该首存从未发表。
+def _pending_canonical_task(service, record):
+    run_id, encoded, was_published = record
+    if encoded is None:
+        # 旧版本 pending 没有首存定位字段，只允许通过已有 locator 读回；缺失时保持未知。
+        task = service.load(run_id)
+        if task.id != run_id:
+            raise ValueError("pending canonical identity mismatch")
+        return task
+    binding = json.loads(encoded)
+    if not isinstance(binding, dict) or binding.get("id") != run_id:
+        raise ValueError("pending recovery identity unavailable")
+    canonical = canonical_state_path_from_payload(binding)
+    if canonical is None:
+        raise ValueError("pending canonical path unavailable")
+    content = read_bytes_beneath(canonical.parent, (canonical.name,), require_dir_fd=True)
+    if content is None:
+        if was_published != 0:
+            raise FileNotFoundError("published pending canonical state unavailable")
+        paths = [service.workspace / run_id / name for name in ("task.json", "run.json")]
+        if binding.get("task_dir"):
+            paths.extend(Path(binding["task_dir"]) / name for name in ("task.json", "run.json"))
+        for path in paths:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            raise ValueError("unpublished pending has an existing locator")
+        return None
+    payload = json.loads(content)
+    if not isinstance(payload, dict) or is_agent_state_locator(payload):
+        raise ValueError("pending canonical state must be a full task")
+    task = service.task_from_payload(payload)
+    actual = {"id": task.id, "created_at": task.created_at, "task_dir": task.task_dir,
+              "task_workspace_dir": task.task_workspace_dir,
+              "agent_run_workspace_dir": task.agent_run_workspace_dir}
+    if actual != binding or canonical_state_path_from_payload(actual) != canonical:
+        raise ValueError("pending canonical identity changed")
+    return task
+
+
+# LLM: 只补原保存入口的四个 locator，不重写 canonical、业务版本、工作单或其它派生账本。
+# 函数用途: 用已验证的 canonical 状态修复失败的定位发表，保持首次提交可按精确 ID 加载。
+def _repair_index_locators(service, task):
+    state = build_agent_run_state(task)
+    if state.canonical_path is None:
+        return  # 可读旧格式 task.json 本身就是 canonical，不强行迁移其物理格式。
+    if not state.canonical_path.is_file():
+        raise FileNotFoundError("pending canonical state unavailable")
+    locator = build_agent_state_locator(task, state)
+    locator_dir = service.workspace / _directory_id_for_task(service, task)
+    paths = [locator_dir / name for name in ("task.json", "run.json")]
+    if task.task_dir:
+        paths.extend(Path(task.task_dir) / name for name in ("task.json", "run.json"))
+    for path in dict.fromkeys(paths):
+        if read_json_object_report(path).payload != locator:
+            write_private_json_file_atomic(path, locator)
 
 
 # LLM: 只改已存在孩子的生命周期元数据；可选selection在同canonical锁内末核，复用原reader，不构造manager、目录或工作单。
@@ -655,6 +797,8 @@ def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Cal
                 canonical = _canonical_state_ref_from_payload(payload)
                 if not canonical or not Path(canonical).is_file():
                     raise FileNotFoundError("existing child canonical state unavailable")
+                index = SubagentRunIndex(Path(workspace))
+                index.mark_pending(run_id, task=task)
                 write_private_json_file_atomic(Path(canonical), payload)
             # 即使上次canonical已经发表而locator写失败，重试仍只补原locator、不重复递增版本。
             for path in dict.fromkeys((locator_path, locator_path.with_name("run.json"),
@@ -667,6 +811,7 @@ def mutate_existing_subagent_metadata(workspace: Path, run_id: str, reducer: Cal
                     updated = dict(locator, status_mirror=task.status, updated_at=task.updated_at)
                     if updated != locator:
                         write_private_json_file_atomic(path, updated)
+            SubagentRunIndex(Path(workspace)).upsert(task_from_payload(payload))
             return task_from_payload(payload)
 
 
@@ -935,6 +1080,7 @@ def _prepare_and_write_state(
     extra = getattr(task, "_extra_fields", {})
     if extra:
         state.payload.update(copy.deepcopy({key: value for key, value in extra.items() if key not in state.payload}))
+    service.run_index.mark_pending(task.id, task=task)
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
     locator_dir = service.workspace / _directory_id_for_task(service, task)
@@ -943,6 +1089,7 @@ def _prepare_and_write_state(
     write_private_json_file_atomic(locator_dir / "run.json", locator_payload)
     write_private_json_file_atomic(task_dir / "task.json", locator_payload)
     write_private_json_file_atomic(task_dir / "run.json", locator_payload)
+    service.run_index.upsert(task)
     return task_dir, build_owner_agent_projection(task, state)
 
 
