@@ -137,15 +137,27 @@ def _fixed_inventory_allowed(agent) -> bool:
                    or any(attrs.get(key) for key in ("parent_id", "parent_run_id", "subagent_run_id"))) for attrs in attributes)
 
 
+# LLM: 直接提供者的None也是权威；仅缺失时沿绑定Router取冻结快照，不重建目录或更换Owner。
+# 函数用途: 按显式提供者、Agent内存快照、Router的顺序取得当前授权快照。
+def _snapshot_for(agent):
+    provider = getattr(agent, "current_skill_snapshot", None)
+    if callable(provider):
+        return provider()
+    snapshot = getattr(agent, "_current_skill_snapshot", None)
+    if snapshot is not None:
+        return snapshot
+    provider = getattr(getattr(agent, "capability_router", None), "_snapshot", None)
+    return provider() if callable(provider) else None
+
+
 # LLM: 真实 owner 绑定与冻结 snapshot.owner_id 必须一致；受限上下文只保留内存中的授权技能，不触碰固定资产。
-# 函数用途: 向目录、候选和 L1 共用同一描述符清单，监控沿原适配器读取，隐藏项留给纯树裁剪。
+# 函数用途: 向目录、候选和 L1 共用同一描述符清单，缺直接快照时沿原Router回退，隐藏项留给纯树裁剪。
 def method_descriptors_for_agent(agent, *, skill_snapshot=None) -> list[dict]:
     from ..assets.monitor_adapter import list_monitor_descriptors
 
     snapshot = skill_snapshot
     if snapshot is None:
-        provider = getattr(agent, "current_skill_snapshot", None)
-        snapshot = provider() if callable(provider) else getattr(agent, "_current_skill_snapshot", None)
+        snapshot = _snapshot_for(agent)
     rows = _snapshot_method_descriptors(snapshot)
     home = getattr(agent, "home_paths", None)
     owner_id = getattr(home, "owner_id", "")

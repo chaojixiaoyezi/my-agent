@@ -12,8 +12,8 @@ def query_health(value):
     return None
 
 
-# LLM: 显式依赖优先，无映射时分析上下文包含全部前步；hybrid还消费自身脚本结果。
-# 函数用途: 找到本次分析输入中被阻断的来源。
+# LLM: 显式依赖优先，无映射时包含全部前步；成功恢复已过原合同门，不继承旧阻断或擦除诊断。
+# 函数用途: 找到本次分析输入中仍未恢复的阻断来源，hybrid同时检查自身脚本结果。
 def blocked_inputs(spec, records, own_record):
     dependencies = {ref['step_id'] for ref in spec.get('inputs_map', {}).values()
                     if isinstance(ref, dict) and isinstance(ref.get('step_id'), str) and ref['step_id'] != '$inputs'}
@@ -26,6 +26,8 @@ def blocked_inputs(spec, records, own_record):
         candidates.append(own_record)
     blocked = []
     for row in candidates:
+        if row.status in ('succeeded', 'escalated_recovered') and row.escalation_result.get('recovered') is True:
+            continue
         value = row.escalation_result.get('query_health')
         # 不同源的同号批没有关联保证；hybrid本批健康已保存在own_record。
         health = query_health(value)
