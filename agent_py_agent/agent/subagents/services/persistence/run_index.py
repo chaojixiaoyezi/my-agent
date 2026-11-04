@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from ....common.json_io import locked_json_path
 from ....common.nofollow_fs import (
+    NoFollowPathError,
     open_directory_beneath,
     open_private_lock_beneath,
     open_readonly_file_beneath,
@@ -81,6 +82,7 @@ class SubagentRunIndex:
                         done INTEGER NOT NULL DEFAULT 0, error_type TEXT NOT NULL DEFAULT ''
                     );
                     CREATE INDEX IF NOT EXISTS inventory_remaining ON inventory(done,seq);
+                    CREATE INDEX IF NOT EXISTS inventory_skipped ON inventory(seq) WHERE done=1 AND error_type!='';
                     CREATE TABLE IF NOT EXISTS pending_commits (
                         run_id TEXT PRIMARY KEY, recovery TEXT NOT NULL, was_published INTEGER NOT NULL
                     );
@@ -217,8 +219,9 @@ class SubagentRunIndex:
             meta = dict(db.execute("SELECT key,value FROM meta"))
             pending = db.execute("SELECT count(*) FROM runs WHERE pending=1").fetchone()[0]
             remaining = db.execute("SELECT count(*) FROM inventory WHERE done=0").fetchone()[0]
+            skipped = db.execute("SELECT count(*) FROM inventory WHERE done=1 AND error_type!=''").fetchone()[0]
         return {"complete": bool(meta["complete"]), "offset": meta["offset"], "pending": pending,
-                "inventory_ready": bool(meta["inventory_ready"]), "remaining": remaining}
+                "inventory_ready": bool(meta["inventory_ready"]), "remaining": remaining, "skipped": skipped}
 
     # LLM: 参数全来自宿主结构化身份；UNION 消除多个谱系键命中的同一 run。
     # 函数用途: 生成同时供请求列表与容量计数使用的唯一谱系选择器。
@@ -350,7 +353,7 @@ class SubagentRunIndex:
             db.execute("UPDATE meta SET value=1 WHERE key='inventory_ready'")
 
     # LLM: 库存一次枚举与固定 canonical 批次明确分开；服务只在显式维护/后台调用，不由热 miss 同步执行。
-    # 函数用途: 通过稳定 SQL seq 续迁移，逐 ID 在原 canonical guard 内读取，坏行保留 partial。
+    # 函数用途: 通过稳定 SQL seq 续迁移，逐 ID 在原 canonical guard 内读取；确定缺失的规范记录结项排除，其余坏行保留 partial。
     def backfill(self, loader, *, batch_size=64) -> dict[str, object]:
         from .service import _canonical_state_guard_path
 
@@ -376,19 +379,24 @@ class SubagentRunIndex:
                             opened = os.fstat(directory_fd)
                             if (not stat.S_ISDIR(directory.st_mode)
                                     or (directory.st_dev, directory.st_ino) != (opened.st_dev, opened.st_ino)):
-                                raise ValueError("inventory canonical directory changed")
+                                raise InventoryCanonicalMismatch("inventory canonical directory changed")
                             if task.id != run_id:
-                                raise ValueError("inventory canonical identity mismatch")
+                                raise InventoryCanonicalMismatch("inventory canonical identity mismatch")
                             with self.connect() as db:
                                 self.upsert(task, connection=db)
                                 db.execute("UPDATE inventory SET done=1,error_type='' WHERE seq=?", (seq,))
                     finally:
                         os.close(directory_fd)
                     loaded += 1
-                except Exception as exc:  # noqa: BLE001 错误行保留库存和 partial，不伪装缺失
-                    errors.append({"run_id": run_id, "error_type": type(exc).__name__})
+                except Exception as exc:  # noqa: BLE001 确定的规范缺失结项排除；其余错误行保留 partial 待下一轮
+                    # 同锚点 list_runs 跳过坏行：不登记 runs 行、不计容量，库存结项并保留错误类型；瞬态打开竞态、权限、I/O 与解析错误仍重试。
+                    skipped = (isinstance(exc, (FileNotFoundError, NotADirectoryError, InventoryCanonicalMismatch))
+                               or isinstance(exc, NoFollowPathError) and not exc.transient_open_race)
+                    if not skipped:
+                        errors.append({"run_id": run_id, "error_type": type(exc).__name__})
                     with self.connect() as db:
-                        db.execute("UPDATE inventory SET error_type=? WHERE seq=?", (type(exc).__name__, seq))
+                        db.execute("UPDATE inventory SET done=?,error_type=? WHERE seq=?",
+                                   (int(skipped), type(exc).__name__, seq))
             with self.connect() as db:
                 first_pending = db.execute("SELECT min(seq) FROM inventory WHERE done=0").fetchone()[0]
                 offset = (first_pending - 1 if first_pending is not None
@@ -422,6 +430,12 @@ class SubagentRunIndex:
             db.execute("DELETE FROM membership WHERE run_id=?", (run_id,))
             db.execute("DELETE FROM runs WHERE run_id=? AND pending=1", (run_id,))
             db.execute("DELETE FROM pending_commits WHERE run_id=?", (run_id,))
+
+
+# LLM: 仅迁移循环在 canonical guard 内确认目录或身份已不对应库存行时抛出；按类型归为确定不可用，不凭文案判断。
+# 类用途: 标记一条库存行的规范记录已不属于该 run 身份。
+class InventoryCanonicalMismatch(ValueError):
+    pass
 
 
 # LLM: SQLite 连接前后复核原 no-follow FD 对应的路径；不存在的 sidecar 也必须在出现时保持普通私有单链接。

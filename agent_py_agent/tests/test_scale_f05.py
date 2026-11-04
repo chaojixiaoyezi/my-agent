@@ -251,6 +251,19 @@ def _legacy_task(workspace, run_id, **values):
     return payload
 
 
+# LLM: 只写真实 locator schema；声明的 canonical 目录不存在，复现 agent_run_state 的确定缺失错误。
+# 函数用途: 写一个规范状态已丢失的旧 run 定位叶。
+def _locator_without_canonical(workspace, run_id, **values):
+    from agent_py_agent.agent.subagents.services.agent_run_state import STATE_LOCATOR_SCHEMA_VERSION
+
+    lost = workspace.parent / "lost" / run_id
+    path = workspace / run_id / "task.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema_version": STATE_LOCATOR_SCHEMA_VERSION, "id": run_id, "run_id": run_id,
+                                "task_dir": str(lost), "task_workspace_dir": str(lost),
+                                "agent_run_workspace_dir": str(lost), **values}), encoding="utf-8")
+
+
 # LLM: 热查询及 pending 点修复都不应通过目录枚举发现其它 run。
 # 函数用途: 对意外的同步全扫立即报错。
 def _unexpected_scan(*args, **kwargs):
@@ -428,6 +441,66 @@ def test_inventory_errors_remain_partial_until_canonical_repaired(tmp_path, monk
     report = restarted.persistence.backfill_run_index(batch_size=1)
     assert report["complete"] and not report["errors"]
     assert restarted.persistence.run_index.active_counts() == (0, 0)
+
+
+# LLM: 规范状态确定缺失的旧行按锚点 list_runs 跳过：库存结项、不计容量；单次瞬态 I/O 只保留待重试，下一轮加载。
+# 函数用途: 验证一条不可加载旧记录不会让索引永久 partial，容量与请求谱系读口恢复可用并排除它。
+def test_unloadable_legacy_record_is_skipped_and_transient_error_retries(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagents.manager import request_scope_runs
+
+    _disable_maintenance(monkeypatch)
+    workspace = tmp_path / "runs"
+    _legacy_task(workspace, "legacy-live", root_id="parent")
+    _legacy_task(workspace, "legacy-flaky", root_id="parent")
+    _locator_without_canonical(workspace, "legacy-lost", root_id="parent")
+    manager = SubAgentManager(workspace, workspace_root=tmp_path)
+    service = manager.persistence
+    load = service.load
+    transient = []
+
+    def flaky(run_id):
+        if run_id == "legacy-flaky" and not transient:
+            transient.append(run_id)
+            raise OSError("simulated I/O error")
+        return load(run_id)
+
+    monkeypatch.setattr(service, "load", flaky)
+    reports = []
+    for _ in range(6):
+        report = service.backfill_run_index(batch_size=1)
+        reports.append(report)
+        if report["errors"]:
+            assert report["errors"] == [{"run_id": "legacy-flaky", "error_type": "OSError"}]
+            assert not report["complete"] and report["remaining"] >= 1
+            with service.run_index.connect() as db:
+                assert db.execute("SELECT done,error_type FROM inventory WHERE run_id='legacy-flaky'").fetchone() == (0, "OSError")
+        if report["complete"]:
+            break
+    # 三行各一轮，外加恰好一次瞬态重试。
+    assert len(reports) == 4 and transient == ["legacy-flaky"]
+    assert sum(bool(item["errors"]) for item in reports) == 1 and sum(item["loaded"] for item in reports) == 2
+    assert report["complete"] and report["skipped"] == 1 and report["remaining"] == 0 and not report["errors"]
+    index = service.run_index
+    with index.connect() as db:
+        assert db.execute("SELECT done,error_type FROM inventory WHERE run_id='legacy-lost'").fetchone() == (1, "FileNotFoundError")
+    assert index.active_counts() == (2, 0)
+    assert index.active_counts({"parent"}, "", None) == (2, 2)
+    assert index.known_ids(["legacy-live", "legacy-flaky", "legacy-lost"]) == {"legacy-live", "legacy-flaky"}
+    assert sorted(task.id for task in request_scope_runs(manager, {"parent"}, "", None)) == ["legacy-flaky", "legacy-live"]
+
+
+# LLM: 生产后台维护不能因确定缺失的旧行停在首批；一次维护线程须越过它收敛到完整覆盖。
+# 函数用途: 验证真实 manager 自动维护在跨批库存中排除缺失规范状态的旧行。
+def test_manager_maintenance_completes_past_missing_canonical_record(tmp_path):
+    workspace = tmp_path / "runs"
+    for number in range(130):
+        _legacy_task(workspace, f"legacy-{number}")
+    _locator_without_canonical(workspace, "legacy-lost")
+    manager = SubAgentManager(workspace, workspace_root=tmp_path)
+    _join_maintenance(manager.persistence)
+    coverage = manager.persistence.run_index.coverage()
+    assert coverage["complete"] and coverage["skipped"] == 1 and coverage["remaining"] == 0, coverage
+    assert manager.persistence.run_index.active_counts() == (130, 0)
 
 
 # LLM: 缺入口以明确的契约断言报红，不把 AttributeError 当作有效业务回归。
@@ -869,8 +942,8 @@ def test_backfill_rechecks_canonical_under_cross_process_guard(tmp_path):
     assert index.active_counts() == (0, 0)
 
 
-# LLM: 旧目录中的链接不是“没有任务”，未知覆盖必须 partial；全量列表语义不因此收窄或改写 canonical。
-# 函数用途: 验证迁移不会跳过符号链接 run 或跟随 task 文件链接后发布错误的完整覆盖。
+# LLM: 宿主从不以链接创建 run；迁移不跟随、不改写 canonical、不登记成员，也不让一条链接永久阻塞覆盖与停止传播。
+# 函数用途: 验证符号链接 run 或 task 文件链接按确定不可用结项跳过，而不是被当作完整成员发布。
 @pytest.mark.parametrize("kind", ["directory", "file"])
 def test_migration_rejects_linked_canonical_rows(tmp_path, kind):
     workspace = tmp_path / "runs"
@@ -886,7 +959,8 @@ def test_migration_rejects_linked_canonical_rows(tmp_path, kind):
     index = SubagentRunIndex(workspace)
     assert not index.coverage()["complete"]
     report = index.backfill(lambda run_id: load_subagent_task(workspace, run_id), batch_size=1)
-    assert report["errors"] and not report["complete"] and report["loaded"] == 0
+    assert report["complete"] and report["skipped"] == 1 and report["loaded"] == 0 and not report["errors"]
+    assert index.known_ids(["linked"]) == set() and index.active_counts() == (0, 0)
     assert json.loads(target.read_bytes()) == payload
 
 
@@ -963,9 +1037,9 @@ def test_creation_manager_reads_prepare_pending_projection(tmp_path, monkeypatch
     assert manager.persistence.run_index.coverage()["pending"] == 0
 
 
-# LLM: 老投影登记本身就是待复核来源，缺 locator 不能在目录库存中静默消失。
-# 函数用途: 钉住升级时 SQL 旧 ID 与文件系统库存取并集的完整覆盖条件。
-def test_v1_missing_locator_remains_partial(tmp_path):
+# LLM: 老投影登记本身就是待复核来源，缺 locator 不能在库存中静默消失：带错误类型结项为跳过，不再永久阻塞覆盖。
+# 函数用途: 钉住升级时 SQL 旧 ID 进入库存，规范记录缺失时按确定不可用记录跳过。
+def test_v1_missing_locator_is_recorded_as_skipped(tmp_path):
     import sqlite3
 
     workspace = tmp_path / "runs"
@@ -978,8 +1052,9 @@ def test_v1_missing_locator_remains_partial(tmp_path):
                          "INSERT INTO meta VALUES ('complete',1),('offset',50);")
     index = SubagentRunIndex(workspace)
     report = index.backfill(lambda run_id: load_subagent_task(workspace, run_id), batch_size=1)
-    assert not report["complete"] and report["errors"], report
-    assert report["errors"][0]["run_id"] == "missing"
+    assert report["complete"] and report["skipped"] == 1 and not report["errors"], report
+    with index.connect() as db:
+        assert db.execute("SELECT done,error_type FROM inventory WHERE run_id='missing'").fetchone() == (1, "FileNotFoundError")
 
 
 # LLM: 无恢复凭据的旧 pending 必须保持未知；再次登记不能倒推从未发表过。

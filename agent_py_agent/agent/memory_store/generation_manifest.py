@@ -157,10 +157,21 @@ class StorageTombstones:
         root = json.loads(root_body) if root_body is not None else {}
         if "barrier_revision" in root and "index_file" not in marker:
             raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+        # 迁移完成而marker改写失败时，只有回执证明索引恰为未变旧账的导入，才沿旧账读取；下一次正式写会补写marker。
         if ("index_file" not in marker and not _allow_migration
                 and self.index.has_committed_authority()):
-            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+            receipt = self.index.migration_receipt()
+            records = list(self._load_legacy(max_bytes=max_bytes,
+                _read=lambda path: body if path == self.path else (_read(path) if _read else read_bytes_beneath(path.parent, (path.name,), max_bytes=max_bytes))).values())
+            if (receipt is None or receipt.get("migrated_revision") != receipt["revision"]
+                    or receipt.get("source_identity") != self._legacy_source_identity(body, records)):
+                raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
         return body, marker
+
+    # LLM: 迁移写入与marker回退核验共用唯一身份算法；只摘要旧JSON原字节和已严格解析的旧删除。
+    # 函数用途: 计算一次旧格式永久账来源的稳定身份。
+    def _legacy_source_identity(self, body, records) -> str:
+        return hashlib.sha256((body or b"") + b"\0" + b"".join(r.to_json().encode() for r in records)).hexdigest()
 
     # LLM: 迁移后旧JSONL仍是冻结兼容来源；只核固定一个文件代次，变化不被误认为已导入索引。
     # 函数用途: 绑定旧账身份，避免升级后忽略被改坏的旧归档。
@@ -291,7 +302,7 @@ class StorageTombstones:
         if admission is not None:
             size = self.index.path.stat().st_size if self.index.path.exists() else 0
             admission.check([OwnerQuotaChange(self.index.path, size + 65536 + sum(len(r.to_json().encode()) * 3 for r in records))])
-        identity = hashlib.sha256((body or b"") + b"\0" + b"".join(r.to_json().encode() for r in records)).hexdigest()
+        identity = self._legacy_source_identity(body, records)
         state = self.index.migrate_step(records, source_identity=identity, commit=commit)
         while not state["complete"]:
             state = self.index.migrate_step(records, source_identity=identity, commit=commit)

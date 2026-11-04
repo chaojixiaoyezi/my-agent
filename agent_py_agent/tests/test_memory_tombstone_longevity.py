@@ -11,7 +11,7 @@ from agent_py_agent.agent.memory_store.jsonl import JsonlMemory, MemoryRecord, m
 
 # LLM: 样本只在临时库；永久账来自升级前格式，迁移和搜索均走真实产品入口。
 # 函数用途: 创建过期行和删除账挡在有效匹配前的可重现库存。
-def _old_store(tmp_path, count):
+def _old_store(tmp_path, count, *, migrate=True):
     memory = JsonlMemory(tmp_path / "memory.jsonl")
     expired = [MemoryRecord("user", f"expired-{i}", entry_id=f"old-{i}", expires_at=1,
                             created_at=i + 1, updated_at=i + 1) for i in range(count)]
@@ -23,7 +23,8 @@ def _old_store(tmp_path, count):
                             removed_content_hashes=(memory_content_hash(f"deleted content {i}"),)) for i in range(count)]
     store.tombstones.path.write_text(json.dumps({"schema_version": "storage-tombstones.v1",
         "owner": store.tombstones.owner, "records": {row.entry_id: json.loads(row.to_json()) for row in removed}}))
-    memory.migrate_tiers()
+    if migrate:
+        memory.migrate_tiers()
     return memory, live
 
 
@@ -277,6 +278,71 @@ def test_first_delete_failed_root_cannot_downgrade_marker(tmp_path, monkeypatch,
         reopened.search("private first deletion")
     with pytest.raises(ValueError, match="MEMORY_TOMBSTONES_UNREADABLE"):
         reopened.add("user", "unrelated fact")
+
+
+# LLM: 迁移已提交而改写小marker一次I/O失败；旧账未变时凭导入回执沿旧账可读，下一次维护写补齐marker，删除不复活。
+# 函数用途: 复现单次marker写失败使整库永久不可读，并约束故障窗口及修复后热路径不枚举全账。
+@pytest.mark.parametrize("repair", ["remove", "migrate_tiers"])
+def test_failed_post_migration_marker_write_keeps_legacy_barrier_readable(tmp_path, monkeypatch, repair):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store.storage_tombstone_index import _TombstoneSnapshot
+
+    memory, live = _old_store(tmp_path, 100, migrate=False)
+    # 旧正文残行只靠永久屏障挡住：同ID与同正文异ID各一条。
+    stale = [MemoryRecord("user", "deleted content 0", entry_id="deleted-0", created_at=1, updated_at=1),
+             MemoryRecord("user", "deleted content 1", entry_id="alias-1", created_at=1, updated_at=1)]
+    with memory.path.open("a", encoding="utf-8") as handle:
+        handle.write("".join(row.to_json() + "\n" for row in stale))
+    store = MemoryGenerationStore(memory.path)
+    writer = jsonl.write_private_text_file_atomic_unlocked
+    failed = []
+
+    def fail_marker_once(path, text, **kwargs):
+        if path == store.tombstones.path and '"index_file"' in text and not failed:
+            failed.append(path)
+            raise OSError("simulated I/O error")
+        return writer(path, text, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_marker_once)
+        with pytest.raises(OSError, match="simulated I/O error"):
+            memory.remove(live[0].entry_id)
+    assert failed == [store.tombstones.path]
+    assert "index_file" not in json.loads(store.tombstones.path.read_text())
+    receipt = store.tombstones.index.migration_receipt()
+    assert receipt is not None and receipt["migrated_revision"] == receipt["revision"]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("hot path enumerated permanent barrier ledger")
+
+    reopened = JsonlMemory(memory.path)
+    with monkeypatch.context() as hot:
+        hot.setattr(_TombstoneSnapshot, "full_dict", forbidden)
+        assert len(reopened.search("needle", 200)) == 100
+        assert reopened.search("deleted content", 100) == []
+        reopened.add("user", "needle 故障后新事实")
+        assert len(reopened.search("needle", 200)) == 101
+        visible = {row.entry_id for row in reopened.all()}
+    assert {row.entry_id for row in live} < visible
+    assert not visible & {"deleted-0", "alias-1"}
+    for entry_id in ("deleted-0", "another-alias"):
+        with pytest.raises(ValueError, match="MEMORY_TOMBSTONED"):
+            reopened.add_record(MemoryRecord("user", "deleted content 0", entry_id=entry_id))
+    assert "index_file" not in json.loads(store.tombstones.path.read_text())
+    if repair == "remove":
+        reopened.remove(live[0].entry_id)
+    else:
+        reopened.migrate_tiers()
+    marker = json.loads(store.tombstones.path.read_text())
+    assert marker["index_file"] == store.tombstones.index.path.name
+    assert type(marker["index_revision"]) is int and marker["index_revision"] >= receipt["revision"]
+    restarted = JsonlMemory(memory.path)
+    with monkeypatch.context() as hot:
+        hot.setattr(_TombstoneSnapshot, "full_dict", forbidden)
+        assert len(restarted.search("needle", 200)) == (100 if repair == "remove" else 101)
+        assert restarted.search("deleted content", 100) == []
+        restarted.add("user", "needle 修复后新事实")
+    assert not {row.entry_id for row in restarted.all()} & {"deleted-0", "alias-1"}
 
 
 # LLM: 最终注入确认及访问flush也是正常回合的一部分，不能由all/严格默认路径枚举D。
