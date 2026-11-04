@@ -170,6 +170,66 @@ def test_escalated_recovery_and_dynamic_skill_merge(tmp_path):
     assert (folder / 'main.py').read_text() == 'raise RuntimeError("upstream failed")'
 
 
+# LLM: 真实失败账本经补丁入口恢复，旧query_health留作诊断，不能再次阻断后续分析。
+# 函数用途: 验证进程重建后的输出补丁能推进分析且不重跑或改写失败脚本。
+def test_patched_resume_before_analysis_ignores_failed_query_health(tmp_path):
+    folder = script(tmp_path, 'raise SystemExit(4)')
+    first = WorkflowEngine(tmp_path).run_workflow(workflow(
+        step(), step('judge', mode='llm_skill_analysis',
+                     inputs_map={'value': {'step_id': 'collect', 'key': 'value'}})))
+    assert first.status == 'paused_for_resume' and first.failed_step_id == 'collect'
+    assert first.steps[0].escalation_result['query_health']['analysis_blocked'] is True
+    calls = []
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda spec, context, skills:
+                            calls.append(context.prior_outputs) or {'decision': 'repaired'})
+    resumed = engine.resume_workflow_run(first.workflow_run_id, patched_step_output={'value': 12},
+                                         resolution_origin='user')
+    assert resumed.status == 'succeeded' and resumed.final_output == {'decision': 'repaired'}
+    assert calls == [{'collect': {'value': 12}}]
+    repaired = resumed.steps[0]
+    assert repaired.status == 'escalated_recovered' and repaired.escalation_result['recovered'] is True
+    assert repaired.escalation_result['repaired_via'] == 'patched_step_output'
+    assert repaired.error_code == repaired.error_message == '' and not repaired.needs_repair
+    assert engine.store.load_run(resumed.workflow_run_id) == resumed
+    assert first.steps[0].status == 'paused_for_resume'
+    assert (folder / 'main.py').read_text() == 'raise SystemExit(4)'
+
+
+# LLM: hybrid的本步恢复同样须进入原分析器，不另开兜底或改写查询诊断。
+# 函数用途: 验证恢复成功的hybrid不会被自己的原始失败健康信息阻断。
+def test_hybrid_recovery_runs_own_analysis(tmp_path):
+    script(tmp_path, 'raise SystemExit(4)')
+    calls = []
+    engine = WorkflowEngine(tmp_path,
+        escalation_handler=lambda *args: {'recovered': True, 'output_data': {'value': 9}},
+        analysis_handler=lambda spec, context, skills: calls.append(context.prior_outputs) or {'analyzed': True})
+    run = engine.run_workflow(workflow(step(mode='hybrid')))
+    assert run.status == 'succeeded' and run.final_output == {'analyzed': True}
+    assert calls == [{'collect': {'value': 9}}]
+    assert run.steps[0].escalation_result['recovered'] is True
+
+
+# LLM: 只有合同校验后的成功状态与严格True组成恢复事实，不能把成功空查询或失败恢复声明当有效数据。
+# 函数用途: 成对验证成功恢复放行和未恢复、错误标记、非成功状态继续阻断。
+@pytest.mark.parametrize('status,recovered,blocked', [
+    ('succeeded', True, False), ('escalated_recovered', True, False),
+    ('succeeded', False, True), ('succeeded', 1, True), ('succeeded', 'true', True),
+    ('escalated_recovered', False, True), ('failed', True, True),
+    ('paused_for_resume', True, True), ('running', True, True),
+])
+def test_analysis_gate_requires_validated_recovery(status, recovered, blocked):
+    from agent_py_agent.agent.workflows.analysis_gate import blocked_inputs
+
+    health = {'analysis_blocked': True, 'block_reason': 'source_error'}
+    upstream = StepExecutionRecord('collect', 'collect', 'deterministic_script', status, 0, 0, 0, False,
+                                   escalation_result={'query_health': health, 'recovered': recovered})
+    own = StepExecutionRecord('judge', 'judge', 'llm_skill_analysis', 'running', 0, 0, 0, False)
+    before = json.dumps(asdict(upstream), sort_keys=True)
+    spec = {'inputs_map': {'value': {'step_id': 'collect', 'key': 'value'}}}
+    assert blocked_inputs(spec, [upstream], own) == ([('collect', health)] if blocked else [])
+    assert json.dumps(asdict(upstream), sort_keys=True) == before
+
+
 # LLM: 失败后重建引擎模拟进程重启；前步计数器不得再次增长。
 # 函数用途: 验证默认失败步恢复与指定中间步恢复都会复用前序输出。
 def test_resume_reuses_outputs_and_frozen_definition(tmp_path, monkeypatch):

@@ -408,6 +408,49 @@ def test_f01_saved_scripts_and_workflows_are_direct_candidates(tmp_path):
     assert all('code' not in row and 'steps' not in row for row in matches)
 
 
+# LLM: 真Router的快照只在直接快照缺失时接管；显式None、跨owner与受限上下文不得借此枚举资产。
+# 函数用途: 验证描述符快照优先级、router回退及只读范围边界。
+@pytest.mark.parametrize('source,owner_id,scope,visible', [
+    ('router', 'owner', 'default', True), ('router-provider', 'owner', 'default', True),
+    ('private', 'owner', 'default', True), ('current', 'owner', 'default', True),
+    ('explicit', 'owner', 'default', True),
+    ('router', 'other-owner', 'default', False), ('router-provider', 'other-owner', 'default', False),
+    ('private', 'other-owner', 'default', False), ('current', 'other-owner', 'default', False),
+    ('explicit', 'other-owner', 'default', False), ('router', '', 'default', False),
+    ('current-none', 'owner', 'default', False),
+    ('router', 'owner', 'task_local', False), ('router', 'owner', 'isolated', False),
+    ('router', 'owner', 'control_plane', False),
+])
+def test_f01_candidate_snapshot_fallback_keeps_owner_and_scope(tmp_path, source, owner_id, scope, visible):
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.capability.decision_candidates import method_descriptors_for_agent
+    from agent_py_agent.agent.capability.router import CapabilityRouter
+
+    home, workspace = tmp_path / 'owner', tmp_path / 'workspace'
+    workspace.mkdir()
+    ScriptStore(home).save_script(AssetDescriptor(id='alarm', kind='script', name='告警汇总'), 'print("{}")')
+    frozen = replace(snapshot(workspace=workspace), owner_id=owner_id)
+    router_snapshot = frozen if source in ('router', 'router-provider') else snapshot(workspace=workspace)
+    router = (CapabilityRouter(skill_snapshot_provider=lambda: router_snapshot) if source == 'router-provider'
+              else CapabilityRouter(skill_snapshot=router_snapshot))
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home, owner_id='owner'),
+                            tools=SimpleNamespace(workspace_root=workspace), capability_router=router,
+                            _current_run_params=SimpleNamespace(context_scope=scope))
+    if source == 'private':
+        agent._current_skill_snapshot = frozen
+    elif source in ('current', 'current-none'):
+        agent.current_skill_snapshot = lambda: None if source == 'current-none' else frozen
+    elif source == 'explicit':
+        agent.current_skill_snapshot = lambda: snapshot(workspace=workspace)
+    before = {str(path): path.stat().st_mtime_ns for path in tmp_path.rglob('*')}
+    options = {'skill_snapshot': frozen} if source == 'explicit' else {}
+    rows = method_descriptors_for_agent(agent, **options)
+    assert [row['id'] for row in rows if row['kind'] == 'script'] == (['alarm'] if visible else [])
+    assert all('code' not in row and 'steps' not in row for row in rows)
+    assert {str(path): path.stat().st_mtime_ns for path in tmp_path.rglob('*')} == before
+
+
 # LLM: 用工作区脚本的真实输出证明 Runner 执行了候选代码；显式关闭沙箱，不据此外推沙箱隔离能力。
 # 函数用途: 回归工作区作用域脚本能经真实 Runner 执行并返回业务数据。
 def test_f05_workspace_script_executes_actual_code(tmp_path):
