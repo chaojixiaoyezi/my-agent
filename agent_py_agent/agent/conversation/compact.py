@@ -802,8 +802,6 @@ def _nontext_turn_start(rows: Sequence[MessageLogEntry], index: int) -> int:
     )
 
 
-# LLM: 原生媒体或未知非文本块所在逻辑turn起的完整后缀必须保留；仅安全前缀进入原forced/auto分区与checkpoint覆盖。
-# 函数用途: 以地址分区尝试候选，立即释放超量候选；保留候选与自己的请求一起采用。
 # LLM: 只用宿主纯计量投影或同口径本地估算选区，预留摘要输出；不调用模型、不提交候选或改变历史。
 # 函数用途: 在摘要之前确定唯一切分点，优先保留能达到恢复目标的近期尾部。
 def _select_compact_partition(request, partitions, protected_suffix):

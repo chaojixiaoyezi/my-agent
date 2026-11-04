@@ -92,3 +92,56 @@ def test_workspace_scope_validation_rejects_outside_root(tmp_path):
     current = replace(current, workspace_root=tmp_path / 'outside')
     with pytest.raises(ValueError):
         inherit_artifact_registry(previous, current)
+
+
+# LLM: 同一目标继承重试竞争同一真实锁，不使用 sleep 或替换锁实现。
+# 函数用途: 两个并发继承请求合计只追加一条记录。
+def test_concurrent_inheritance_has_no_duplicate_rows(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    previous, current, _ = _attempts(tmp_path)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _number: inherit_artifact_registry(previous, current), (1, 2)))
+    assert sorted(results) == [0, 1]
+    assert len(registry_path(current.workspace_root).read_text().splitlines()) == 1
+
+
+# LLM: 在实际追加边界模拟 I/O 失败，失败不计为继承成功。
+# 函数用途: 验证追加错误传播且原登记不被改写。
+def test_simulated_io_error_leaves_current_records_readable(tmp_path, monkeypatch):
+    from agent_py_agent.agent.artifacts import registry
+
+    previous, current, _ = _attempts(tmp_path)
+    current.workspace_root.mkdir(parents=True)
+    artifact = current.workspace_root / 'kept.txt'
+    artifact.write_text('kept')
+    existing = register_artifact(ArtifactRegistration(current.workspace_root, artifact, artifact_id='kept'))
+    before = registry_path(current.workspace_root).read_bytes()
+
+    # LLM: 只替换目标 I/O，不改变继承选择或读取逻辑。
+    # 函数用途: 在真正写入前制造可重复的 I/O 错误。
+    def fail_append(root, parts, text):
+        raise OSError('simulated I/O error')
+
+    monkeypatch.setattr(registry, 'append_text_beneath', fail_append)
+    with pytest.raises(OSError, match='simulated I/O error'):
+        inherit_artifact_registry(previous, current)
+    assert registry_path(current.workspace_root).read_bytes() == before
+    assert latest_artifact_records(current.workspace_root) == {'kept': existing}
+
+
+# LLM: 来源或目标根被改成链接时，既有 no-follow 存储和锁都不能沿链接写入外部目录。
+# 函数用途: 拒绝链接替换，且不创建外部登记表或锁文件。
+@pytest.mark.parametrize('side', ['source', 'target'])
+def test_inheritance_rejects_symlinked_roots(tmp_path, side):
+    previous, current, _ = _attempts(tmp_path)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    if side == 'source':
+        previous.workspace_root.rename(previous.owner_home / 'original')
+        previous.workspace_root.symlink_to(outside, target_is_directory=True)
+    else:
+        current.workspace_root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises((ValueError, OSError)):
+        inherit_artifact_registry(previous, current)
+    assert list(outside.iterdir()) == []

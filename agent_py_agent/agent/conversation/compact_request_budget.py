@@ -19,7 +19,6 @@ from ..agent_core.model.context_window import resolve_model_context_window_token
 from ..backends.base import ModelResponse
 from ..backends.errors import ProviderContextWindowError
 from ..backends.request_content import text_messages_supported
-from ..memory_archive import estimate_tokens
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
 from .auxiliary_model_call import (
@@ -148,8 +147,8 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
     return _request_tokens(request, source)
 
 
-# LLM: 有工具定义的可缓存摘要保留原 system/messages/tools 并使用 tool_choice=auto，以便服务端继续对齐缓存前缀。
-# 若真实响应含结构化工具调用，响应不得采用，最多额外发一次 no-tools/none 请求；分段路径只摘要局部源，明确不承诺与主历史共享前缀。
+# LLM: 可缓存摘要保留原 system/messages/tools/tool_choice；None 仅规范为后端原默认 auto，显式策略不改写。
+# 工具响应不得采用，最多在最后指令纠正一次，EMPTY 共用同一修复预算；非前缀分段不承诺与主历史共享缓存。
 # 显式空工具列表可携带 tool_choice=none；非冻结前缀超量沿原分段链，冻结主前缀只报容量不足，I/O 前后复查取消。
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
@@ -254,7 +253,7 @@ def _single_request_source(
     return _SingleRequestSource(shrunk.source)
 
 
-# LLM: Context holds only per-generation controls so the cache request and its one none retry share exact policy.
+# LLM: Context holds per-generation controls so the cached request and its one repair share exact policy and calibration.
 # 类用途: 传递当前预算、取消边界、来源投影与完整回退约束。
 @dataclass(frozen=True)
 class _CompactAttemptContext:

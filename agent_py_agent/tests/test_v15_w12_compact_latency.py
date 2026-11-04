@@ -10,12 +10,15 @@ from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.backends.tool_protocol_adapter import anthropic_tool_choice
 from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.conversation import compact_request_budget as budget
+from agent_py_agent.agent.conversation.auxiliary_model_call import generate_auxiliary_model_response
 from agent_py_agent.agent.conversation.compact_message_source import CompactMessageSource
 from agent_py_agent.agent.conversation.compact_projection import ConversationCompactProjection
 from agent_py_agent.agent.conversation.compact_provider_surface import (
     ConversationCompactProviderSurface,
 )
+from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+from agent_py_agent.tests.test_compact_cache_surface_fit import _capturing_backend, _compact_request
 from agent_py_agent.tests.test_compact_calibrated_candidate_gate import _calibration
 from agent_py_agent.tests.test_compact_capacity_facts import _transcript_case
 from agent_py_agent.tests.test_compact_request_budget import _request, _request_between_budgets
@@ -133,3 +136,27 @@ def test_split_point_is_selected_before_the_single_summary_call(tmp_path, monkey
     assert result.compacted and len(calls) == 1
     assert result.projected_tokens == 7000
     assert store.threads.load(thread.thread_id).compact_generation == 1
+
+
+# LLM: 用真实 Chat/Responses 序列化器，仅替换 HTTP 传输；比较前台载荷及有界摘要的真实字节字段。
+# 函数用途: 输出 4096 上限真正到达供应商载荷，工具、选择策略和历史前缀不变。
+@pytest.mark.parametrize('provider,model,sequence_key,output_key', [
+    ('openai_compatible', 'deepseek-v4-flash', 'messages', 'max_tokens'),
+    ('openai_responses', 'gpt-6.1-sol', 'input', 'max_output_tokens'),
+])
+def test_real_provider_payload_has_cap_and_unchanged_foreground_prefix(provider, model, sequence_key, output_key):
+    backend, agent, payloads = _capturing_backend(
+        provider, model_name=model, api_base='https://fixture.invalid/v1', model_context_window_tokens=272000)
+    normal_cap = backend.max_tokens
+    request = replace(_compact_request(agent), tool_choice=ToolChoice.auto('foreground'))
+    foreground = replace(request, purpose='auxiliary', prompt=CacheStructuredPrompt('稳定前缀', ''))
+    generate_auxiliary_model_response(foreground)
+    response = budget.generate_bounded_compact_response(request)
+    assert response.text and len(payloads) == 2
+    before, after = payloads
+    assert before[output_key] == normal_cap and after[output_key] == 4096
+    assert backend.max_tokens == normal_cap
+    assert after['tools'] == before['tools'] and after['tool_choice'] == before['tool_choice']
+    assert after.get('instructions') == before.get('instructions')
+    assert after[sequence_key][:len(before[sequence_key])] == before[sequence_key]
+    assert after[sequence_key][-1]['role'] == 'user'
