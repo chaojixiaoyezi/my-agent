@@ -6,6 +6,7 @@ from __future__ import annotations
 import time
 
 from .repository import SchedulerNotFoundError
+from .schedule import monitor_dispatch_after
 
 
 # LLM: 原服务唯一入口委托到此；经queued_runs(exclude_active_lanes=True)按同job/rule车道筛选候选，job级准入在prepare/wake前原子提交。
@@ -28,6 +29,9 @@ def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
         cheap_checks=cheap_checks,
         exclude_active_lanes=True,
     ):
+        if monitor_dispatch_after(run, owner_id=service.repository.owner['id'],
+                                  window_seconds=service.monitor_jitter_window_seconds) > current:
+            continue
         if not service.repository.event_run_is_current(run):
             service._fail_without_execution(run, 'EVENT_SOURCE_RETIRED', now=current, status='cancelled')
             continue

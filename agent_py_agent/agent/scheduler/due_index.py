@@ -445,7 +445,11 @@ def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
         if status == "waiting":
             continue
         field = "dispatch_after" if status == "queued" else "claim_expires_at"
-        candidates.append(_positive_timestamp(raw.get(field)) or now)
+        value = _positive_timestamp(raw.get(field)) or now
+        if status == 'queued' and isinstance(raw.get('execution_target'), dict):
+            from .schedule import monitor_dispatch_after
+            value = max(value, monitor_dispatch_after(raw, owner_id=(store.get('owner') or {}).get('id', '')))
+        candidates.append(value)
     return min(candidates) if candidates else 0.0
 
 
@@ -482,6 +486,10 @@ def _job_due_times(job: dict, job_id: str, active_jobs: set[str], active_rules: 
     gate = max(job_next, _positive_timestamp(job.get("backoff_until")))
     due = [max(gate, value, _positive_timestamp(rule.get("backoff_until"))) for rule in available
            if job_next > 0 and (value := _positive_timestamp(rule.get("next_run_at"))) > 0]
+    if isinstance(job.get('execution_target'), dict):
+        from .schedule import monitor_jitter_seconds
+        offset = monitor_jitter_seconds((job.get('owner') or {}).get('id', ''), job_id)
+        due = [value + offset for value in due]
     return [*due, *event_due_times(job, now)]
 
 

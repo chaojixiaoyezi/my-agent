@@ -144,6 +144,32 @@ def test_create_mirrors_enabled_scheduled_rule_to_native_scheduler(v13_native):
     assert status == 200 and fetched['data'] == first['data'], fetched
 
 
+# LLM: 使用原v13 dispatcher和Store写入真实规则，绑定不改闭合HTTP DTO或赋予执行权。
+# 函数用途: 验证v13镜像把script_id写为结构化监控依赖。
+def test_native_mirror_exposes_structured_script_binding(v13_native):
+    from agent_py_agent.agent.assets.monitor_adapter import get_monitor_descriptor
+    sid = harness.v13_space(v13_native)
+    home = _http_owner(v13_native).home_dir
+    ScriptStore(home).save_script(AssetDescriptor(id='collect', kind='script', name='采集'), 'print(1)')
+    status, body = _wire(v13_native, 'monitors.rules.create', {**_draft(sid), 'script_id': 'collect',
+        'enabled': True, 'schedule': {'kind': 'every', 'every_seconds': 600}}, key='v15-structured-ref')
+    assert status == 200, body
+    result = get_monitor_descriptor(home, body['data']['rule']['scheduler_job_id'])
+    assert result['refs'] == [{'kind': 'script', 'id': 'collect'}]
+    assert result['metadata']['alias'] == '固定检测规则'
+
+
+# LLM: 使用原v13集合写路径，覆盖没有原生scheduler镜像的规则，而非手造旧版JSON集合。
+# 函数用途: 验证无计划规则仍通过真实存储读口展示脚本引用。
+def test_unscheduled_rule_exposes_structured_script_reference(world):
+    from agent_py_agent.agent.assets.monitor_adapter import list_monitor_descriptors
+    ScriptStore(world.home).save_script(AssetDescriptor(id='collect', kind='script', name='采集'), 'print(1)')
+    rule = _local(world, 'monitors.rules.create', {**_draft(world.sid), 'script_id': 'collect'})['rule']
+    rows = list_monitor_descriptors(world.home)
+    projected = next(row for row in rows if row['id'] == rule['rule_id'])
+    assert projected['refs'] == [{'kind': 'script', 'id': 'collect'}]
+
+
 # LLM: 相同规则版本不能因其它规则写入而冲突，旧记录 CAS 不能更改调度。
 # 函数用途: 验证更新、启停、schedule 移除/重建和最终删除的 HTTP 闭环。
 def test_update_cas_and_scheduler_job_follows(v13_native):

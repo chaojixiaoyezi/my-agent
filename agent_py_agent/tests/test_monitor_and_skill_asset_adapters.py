@@ -19,13 +19,18 @@ def _skill(root, name='analyse', header=None):
     return directory
 
 
-# LLM: 仅断言标准公共字段可由共同契约无损恢复，适配器扩展在metadata中也必须保留。
-# 函数用途: 检查返回值不是对象或自造的非标准结构。
+# LLM: 监控C-MONITOR-BINDING公开refs列表，原AssetRefs无损保存在metadata；其它字段仍按原共同契约往返。
+# 函数用途: 同时严格检查新引用列表与原标准资产字段，没有跳过标准往返断言。
 def _standard(payload, kind):
     assert isinstance(payload, dict)
     assert payload['schema_version'] == 'asset_descriptor.v1' and payload['kind'] == kind
     extra = {'schedule_spec', 'when_to_use', 'category'}
     base = {key: value for key, value in payload.items() if key not in extra}
+    if kind == 'monitor':
+        native = payload['metadata']['asset_refs']
+        assert payload['refs'] == [{'kind': target, 'id': identifier}
+            for target in ('workflow', 'script') for identifier in native[target + 's']]
+        base['refs'] = native
     assert AssetDescriptor.from_dict(base).to_dict() == base
 
 
@@ -48,8 +53,8 @@ def test_monitor_binding_roundtrip(tmp_path):
         data_sources=[{'source_id': 'logs', 'system': 'audit', 'query_scope': {'apps': ['a']}}],
         credential_refs=[{'credential_ref': 'cred_synthetic', 'status': 'configured'}])
     _standard(descriptor, 'monitor')
-    assert descriptor['refs']['workflows'] == ['flow_a']
-    assert descriptor['refs']['scripts'] == ['script_a'] and descriptor['refs']['skills'] == ['analyse']
+    assert descriptor['refs'] == [{'kind': 'workflow', 'id': 'flow_a'}, {'kind': 'script', 'id': 'script_a'}]
+    assert descriptor['metadata']['asset_refs']['skills'] == ['analyse']
     assert descriptor['owner_id'] == tmp_path.name
     assert descriptor['schedule_spec'] == descriptor['metadata']['schedule_spec']
     path = tmp_path / 'data/monitors/job_a.json'
@@ -81,7 +86,7 @@ def test_scheduler_fields_override_stale_binding(tmp_path, schedule, expression)
     assert descriptor['runtime_summary'] == {'last_run_at': '1970-01-01T00:16:40Z',
         'last_status': 'failed', 'last_duration_ms': 42, 'run_count': 5, 'consecutive_failures': 2, 'last_error': ''}
     assert descriptor['owner_id'] == 'local/main' and descriptor['version'] == '3'
-    assert descriptor['refs']['skills'] == ['analyse'] and json.dumps(job) == before
+    assert descriptor['metadata']['asset_refs']['skills'] == ['analyse'] and json.dumps(job) == before
 
 
 # LLM: 列表合并只按准确job_id，已删除Job不复活为绑定节点，重复或错ID显式拒绝。
@@ -191,7 +196,7 @@ def test_real_scheduler_record_and_pinned_skill_refs(tmp_path):
     job, _ = repository.create_job(SchedulerJobCreateRequest(name='真实格式', prompt='测试', thread_id='thread_fixture',
         schedule={'kind': 'every', 'every_seconds': 90, 'anchor_at': 1000, 'timezone': 'UTC'}, skill_refs=[reference], now=1000))
     descriptor = monitors.get_monitor_descriptor(tmp_path, job['job_id'])
-    assert descriptor['refs']['skills'] == ['analyse']
+    assert descriptor['refs'] == [] and descriptor['metadata']['asset_refs']['skills'] == ['analyse']
     assert descriptor['metadata']['scheduler_skill_refs'] == [reference]
     assert monitors.list_monitor_descriptors(tmp_path) == [descriptor]
 
