@@ -63,6 +63,7 @@ PRIVATE_INTERACTIONS_OWNER_PARTS: tuple[str, ...] = ("data", "private_interactio
 # Gateway/adapter 的服务队列是整机控制面，可能含多 owner 正文；即使物理放在 main 下，也不是管理员 Agent 的业务资料。
 HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (
     ("data", "plugins"), PRIVATE_INTERACTIONS_OWNER_PARTS, ("workspace", "runtime", "services"),
+    ("data", "asset_evolution"), ("data", "source_manifests"), ("data", "asset_extractions"),
 )
 # 只读例外不拆整机服务隐藏根；Shell挂载体积及队列保护保持原声明。
 ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS: frozenset[tuple[str, ...]] = frozenset({
@@ -339,6 +340,9 @@ class PathAccessPolicy:
             resolved = Path(path).expanduser().resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        asset = _asset_store_write_decision(resolved, self.agent_home_root, self.owner_scope_root)
+        if asset is not None:
+            return asset
         if self.agent_home_root is None:
             return PathAccessDecision(True)
         return (_host_write_block(resolved, self.agent_home_root)
@@ -653,6 +657,27 @@ def host_managed_store_for_path(path: Path, agent_home_root: Path) -> Path | Non
     if home is None:
         return None
     return _declared_root_containing(path, home, HOST_MANAGED_OWNER_STORE_PARTS)
+
+
+# LLM: 读口不调用此门；两端realpath消除firmlink/链接别名，大小写按已有宿主路径合同折叠。
+# 函数用途: 阻止文件工具绕过Owner资产Store并提示正确恢复入口。
+def _asset_store_write_decision(path: Path, agent_home_root: Path | None,
+                                owner_scope_root: Path | None) -> PathAccessDecision | None:
+    canonical = Path(os.path.realpath(path))
+    root = Path(os.path.realpath(agent_home_root)) if agent_home_root is not None else None
+    home = owner_home_containing(canonical, root) if root is not None else None
+    if home is None and owner_scope_root is not None:
+        explicit = Path(os.path.realpath(owner_scope_root))
+        if _relative_folded(canonical, explicit) is not None:
+            home = explicit
+    if home is None:
+        return None
+    parts = _relative_folded(canonical, home)
+    if not parts or parts[0] not in ('scripts', 'workflows'):
+        return None
+    hint = 'scripts(action=update)' if parts[0] == 'scripts' else 'workflows(action=save)'
+    return PathAccessDecision(False, 'PATH_HOST_MANAGED_STORE_BLOCKED',
+        f'Owner资产只能通过正式存储工具修改，请使用 {hint}。', str(home / parts[0]))
 
 
 # LLM: H3 只做路径运算：数据根 config/、system/config/ 或任一 owner home 的 config/（含目录本身）里就返回该目录，否则 None。

@@ -449,6 +449,13 @@ def _prepare_item(item, scope, workspace):
     from .workflow_store import WorkflowDefinition, with_workflow_step_refs
 
     descriptor, values, expected = _split_item(item)
+    if descriptor.kind in ('script', 'workflow'):
+        from .asset_metadata import normalize_member_of, normalize_trigger_matchers
+        metadata = dict(descriptor.metadata)
+        for key, normalize in (('member_of', normalize_member_of), ('trigger_matchers', normalize_trigger_matchers)):
+            if key in metadata:
+                metadata[key] = normalize(metadata[key])
+        descriptor = replace(descriptor, metadata=metadata)
     descriptor = replace(descriptor, scope_layer=scope, source_scope=scope,
                          workspace_root=str(workspace) if scope == 'workspace' else '')
     kind, identifier = descriptor.kind, descriptor.id
@@ -785,6 +792,18 @@ def commit_asset_batch(items, *, scope='owner', workspace_root=None, owner_home)
             _finalize_plans(root, plans)
             entries, journal = _batch_entries(root, plans)
             _commit_staged(root, entries, journal)
+            if scope == 'owner':
+                # 全批次提交后才发表历史；先脚本后工作流，使同批次脚本pin可解析。
+                for plan in sorted(plans, key=lambda item: item['descriptor'].kind != 'script'):
+                    kind = plan['descriptor'].kind
+                    if kind not in ('script', 'workflow'):
+                        continue
+                    view = _store_view(root, kind)
+                    view._read_only = False
+                    previous = {entry['parts'][-1]: entry['previous'] for entry in entries
+                                if tuple(entry['parts'][:2]) == tuple(plan['metadata'][:2])}
+                    updates = {parts[-1]: content for parts, content in plan['updates'].items()}
+                    view._history_notify('save', payload=plan['payload'], previous=previous, updates=updates)
             result['items'] = [plan['descriptor'].to_dict() for plan in plans]
     return result
 
