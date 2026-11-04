@@ -1,6 +1,6 @@
-# LLM: 能力决策材料只读原授权快照；包只提供公开摘要，私有资源不出题、不计入 Skill，也不预读正文或授予权限。
-#   发给 Jev 的候选是白名单字段、按字段字节上限截短的投影（标定依据见上限常数），完整行只留在宿主。
-# 模块用途: 为一次能力推荐准备可核对的候选和独立适用性题目，并将答案映射回原精确引用。
+"""能力决策只读原授权快照与描述符，不预读正文或授予权限。
+发给 Jev 的候选保持原白名单和字节标定；顶层选择的后代引用仅留宿主。
+提供共用的固定方法描述符、完整检索卡和层级候选投影。"""
 from __future__ import annotations
 
 import hashlib
@@ -58,8 +58,8 @@ def _tool_row(runtime) -> dict:
     return row
 
 
-# LLM: 工具、Skill 与包摘要都取原 scoped snapshot；包内资源不进入候选，现有决策开关仍控制是否请求模型。
-# 函数用途: 提取公开可发现能力名卡，不预读方法或脚本正文。
+# LLM: 工具和包保持原快照；固定方法只读绑定 Agent 的同 owner 清单，子项随顶层父选择，不单独出题。
+# 函数用途: 提取顶层方法候选，不把顶层过滤应用到完整搜索卡集合。
 def capability_candidates(snapshot, skills, *, categories: list[str], skills_discoverable: bool,
                           allowed_tools: list[str] | None = None) -> list[dict]:
     rows = [_tool_row(runtime)
@@ -68,18 +68,15 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
             and (allowed_tools is None or runtime.model_spec.name in allowed_tools)
             and runtime.model_spec.name not in TOOL_DISCOVERY_ENTRY_NAMES]
     if skills_discoverable:
-        rows.extend({"kind": "skill", "ref": entry.stable_id, "name": entry.name,
-                     "description": entry.description, "when_to_use": entry.when_to_use,
-                     "version": entry.content_sha256, "tools_required": list(entry.tools_required)}
-                    for entry in skills.enabled_entries())
+        agent = next((getattr(runtime.handler, "agent", None) for runtime in snapshot.runtimes
+                      if runtime.model_spec.name == "skill_search"), None)
+        descriptors = method_descriptors_for_agent(agent, skill_snapshot=skills)
+        rows.extend(_top_level_method_rows(descriptors, skills))
         rows.extend({"kind": "capability_package", "ref": package.stable_id,
                      "name": package.package_id, "description": package.description,
                      "when_to_use": package.summary, "keywords": list(package.keywords),
                      "version": package.package_sha256, "tools_required": []}
                     for package in skills.packages)
-        owner = next((getattr(runtime.handler, 'owner_home', None) for runtime in snapshot.runtimes
-                      if runtime.model_spec.name in {'scripts', 'workflows'} and getattr(runtime.handler, 'owner_home', None)), None)
-        rows.extend(asset_candidate_rows(owner, getattr(skills, 'workspace_root', None)))
     return rows
 
 
@@ -88,31 +85,154 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
 def asset_candidate_rows(owner_home, workspace_root=None):
     if owner_home is None:
         return []
+    return [_asset_candidate_row(row) for row in _stored_method_descriptors(owner_home, workspace_root)
+            if _visible_method(row)]
+
+
+# LLM: 唯一来源是已授权 Store 列表的只读覆盖；不构造可写 Store、不调用 get、不读取代码或 WORKFLOW.md。
+# 函数用途: 按 workspace 优先列出脚本和工作流描述符，保留隐藏 composition 给纯树处理。
+def _stored_method_descriptors(owner_home, workspace_root=None) -> list[dict]:
     from ..assets.workspace_assets import WorkspaceAssetOverlay
 
     overlay = WorkspaceAssetOverlay(workspace_root or None, owner_home=owner_home)
-    records = [*overlay.list_assets('script'), *overlay.list_assets('workflow')]
-    return [{'kind': row['kind'], 'ref': f"{row['kind']}:{row['source_scope']}:{row['id']}",
-             'name': row['name'], 'description': row.get('summary', ''), 'when_to_use': row.get('summary', ''),
-             'version': str(row.get('revision', 0)), 'tools_required': ['scripts' if row['kind']=='script' else 'workflows'],
-             'asset_id': row['id'], 'scope': row['source_scope']}
-            for row in records if row.get('enabled', True)]
+    return [{key: value for key, value in row.items() if key not in {"code", "entrypoint_path", "steps", "body_markdown"}}
+            for kind in ("script", "workflow") for row in overlay.list_assets(kind)]
 
 
-# LLM: 只使用当前Agent绑定的Owner/workspace，不从Skill路径或用户文本反推权限。
-# 函数用途: 将当前Agent保存的资产变成只读名卡，不自动执行或为子代理开放其它Owner。
-def asset_cards_for_agent(agent):
+# LLM: 技能只从 enabled_entries 的冻结字段投影，不用路径重建目录或重新读取 sidecar；准确来源覆盖附加元数据。
+# 函数用途: 生成带稳定身份、合并 refs 和安全资产 ID 的技能描述符。
+def _snapshot_method_descriptors(snapshot) -> list[dict]:
+    from ..assets import skill_asset_id
+
+    if snapshot is None:
+        return []
+    rows = []
+    for entry in snapshot.enabled_entries():
+        metadata = getattr(entry, "asset_metadata", {})
+        refs = getattr(entry, "refs", {})
+        rows.append({"kind": "skill", "id": skill_asset_id(entry.name), "name": entry.name,
+                     "summary": entry.description, "enabled": True, "tags": list(entry.tags),
+                     "refs": dict(refs) if isinstance(refs, dict) else {}, "source_scope": entry.source,
+                     "metadata": {**(metadata if isinstance(metadata, dict) else {}),
+                                  "stable_id": entry.stable_id, "source": entry.source}})
+    return rows
+
+
+# LLM: 范围只按当前线程 runner、结构化 context_scope 和父身份裁决，先于任何固定资产枚举。
+# 函数用途: 判断本轮是否允许读取固定方法清单，不从自然语言或路径反推权限。
+def _fixed_inventory_allowed(agent) -> bool:
+    from ..runtime_context import current_subagent_run_id, current_task_attributes
+
+    if agent is None or current_subagent_run_id(agent):
+        return False
+    params = getattr(agent, "_current_run_params", None)
+    sources = (agent, params)
+    if any(getattr(source, "context_scope", "") in {"task_local", "isolated", "control_plane"}
+           for source in sources):
+        return False
+    if any(getattr(source, key, "") for source in sources for key in ("parent_id", "parent_run_id", "subagent_run_id")):
+        return False
+    attributes = (current_task_attributes(agent), getattr(params, "task_attributes", None))
+    return not any(isinstance(attrs, dict) and (attrs.get("context_scope") in {"task_local", "isolated", "control_plane"}
+                   or any(attrs.get(key) for key in ("parent_id", "parent_run_id", "subagent_run_id"))) for attrs in attributes)
+
+
+# LLM: 真实 owner 绑定与冻结 snapshot.owner_id 必须一致；受限上下文只保留内存中的授权技能，不触碰固定资产。
+# 函数用途: 向目录、候选和 L1 共用同一描述符清单，监控沿原适配器读取，隐藏项留给纯树裁剪。
+def method_descriptors_for_agent(agent, *, skill_snapshot=None) -> list[dict]:
+    from ..assets.monitor_adapter import list_monitor_descriptors
+
+    snapshot = skill_snapshot
+    if snapshot is None:
+        provider = getattr(agent, "current_skill_snapshot", None)
+        snapshot = provider() if callable(provider) else getattr(agent, "_current_skill_snapshot", None)
+    rows = _snapshot_method_descriptors(snapshot)
+    home = getattr(agent, "home_paths", None)
+    owner_id = getattr(home, "owner_id", "")
+    owner_home = getattr(home, "owner_home_dir", None)
+    if (not _fixed_inventory_allowed(agent) or not isinstance(owner_id, str) or not owner_id
+            or not owner_home or snapshot is None or owner_id != snapshot.owner_id):
+        return rows
+    workspace = getattr(getattr(agent, "tools", None), "workspace_root", None)
+    if workspace is None:
+        workspace = getattr(snapshot, "workspace_root", None)
+    rows.extend(_stored_method_descriptors(owner_home, workspace))
+    rows.extend({**row, "source_scope": "owner"} for row in list_monitor_descriptors(owner_home))
+    return rows
+
+
+# LLM: 可见性只按结构化启停和 hidden 字段判定；监控是徽标，不是独立方法候选或父节点。
+# 函数用途: 统一过滤搜索卡和候选中的不可见方法，不影响 loader 保留 composition。
+def _visible_method(row: dict) -> bool:
+    metadata = row.get("metadata")
+    return (row.get("kind") in {"skill", "script", "workflow"} and row.get("enabled", True) is not False
+            and not (isinstance(metadata, dict) and metadata.get("hidden") is True))
+
+
+# LLM: 来源来自只读覆盖的实际层，不相信正文的 source；候选仍只保存摘要与精确工具读取入口。
+# 函数用途: 把可见脚本或工作流描述符转为原候选行形状。
+def _asset_candidate_row(row: dict) -> dict:
+    source = row.get("source_scope") or "owner"
+    return {"kind": row["kind"], "ref": f"{row['kind']}:{source}:{row['id']}",
+            "name": row["name"], "description": row.get("summary", ""), "when_to_use": row.get("summary", ""),
+            "version": str(row.get("revision", 0)), "tools_required": ["scripts" if row["kind"] == "script" else "workflows"],
+            "asset_id": row["id"], "scope": source}
+
+
+# LLM: 纯树负责可见父和 SCC 根，后代精确引用不进 Jev 白名单；遍历用 visited 防止环路。
+# 函数用途: 仅对顶层方法出题，为采用后的传递选择继承保存同次清单后代。
+def _top_level_method_rows(descriptors: list[dict], skills) -> list[dict]:
+    entries = {entry.stable_id: entry for entry in skills.enabled_entries()}
+    method_rows = {}
+    for row in descriptors:
+        if not _visible_method(row):
+            continue
+        if row["kind"] == "skill":
+            entry = entries[row["metadata"]["stable_id"]]
+            candidate = {"kind": "skill", "ref": entry.stable_id, "name": entry.name,
+                         "description": entry.description, "when_to_use": entry.when_to_use,
+                         "version": entry.content_sha256, "tools_required": list(entry.tools_required)}
+            key = f"skill:{entry.stable_id}"
+        else:
+            candidate, key = _asset_candidate_row(row), f"{row['kind']}:{row['id']}"
+        method_rows[key] = candidate
+    if not any(row["kind"] in {"script", "workflow"} for row in method_rows.values()):
+        return list(method_rows.values())
+    from .method_tree import build_method_tree
+
+    tree = build_method_tree(descriptors)
+    result = []
+    for root in tree["roots"]:
+        if root not in method_rows:
+            continue
+        row = dict(method_rows[root])
+        pending, seen, inherited = list(tree["children"].get(root, ())), {root}, []
+        while pending:
+            key = pending.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in method_rows:
+                inherited.append(method_rows[key])
+            pending.extend(tree["children"].get(key, ()))
+        if inherited:
+            row["inherited_candidates"] = sorted(inherited, key=lambda item: (item["kind"], item["ref"]))
+        result.append(row)
+    return result
+
+
+# LLM: 只使用当前 Agent 的同 owner 描述符；完整卡片保留可见子项，不复用顶层候选过滤。
+# 函数用途: 将全部可见脚本/工作流投影为可搜索名卡，不自动读取正文或扩大权限。
+def asset_cards_for_agent(agent, *, skill_snapshot=None, descriptors=None):
     from .router import CapabilityCard
 
-    home = getattr(agent, 'home_paths', None)
-    if home is None:
-        return []
-    workspace = getattr(getattr(agent, 'tools', None), 'workspace_root', None)
+    records = method_descriptors_for_agent(agent, skill_snapshot=skill_snapshot) if descriptors is None else descriptors
     return [CapabilityCard(row['ref'], row['kind'], row['name'], row['description'], source=row['scope'],
                            metadata={**row, 'stable_id':row['ref'], 'next_read':{
                                'tool':'scripts' if row['kind']=='script' else 'workflows',
                                'arguments':{'action':'get', row['kind']+'_id':row['asset_id']}}})
-            for row in asset_candidate_rows(home.owner_home_dir, workspace)]
+            for record in records if record.get('kind') in {'script', 'workflow'} and _visible_method(record)
+            for row in [_asset_candidate_row(record)]]
 
 
 # LLM: 只按结构化 provider_id 合并同一插件的工具，一个插件一题；不读描述、关键词或用户原话判断归属。
@@ -189,8 +309,8 @@ def selection_questions(rows: list[dict]) -> tuple[dict, dict]:
     return questions, {"schema": "jev_candidate_projection.v1", "caps_bytes": dict(_WIRE_TEXT_CAPS), "truncated": cut}
 
 
-# LLM: 按原题候选读取答案，不解析模型文字；任何无效/不确定题保持全集，明确无需能力才允许空短名单。
-# 函数用途: 将独立适用性答案映射回对应候选；缺数据或坏答案保持原输入并保留结构化原因。
+# LLM: 按原题读取答案；只有明确采用的顶层父才展开同次清单后代，共享子按精确 kind/ref 去重，不另出题或读取。
+# 函数用途: 映射选择并传递父选择给后代；无效/不确定答案仍保留原错误边界。
 def selected_capabilities(response, questions: dict, rows: list[dict]) -> tuple[list[dict], str]:
     answers = {answer.question_id: answer for answer in response.answers}
     indices = set()
@@ -203,7 +323,15 @@ def selected_capabilities(response, questions: dict, rows: list[dict]) -> tuple[
         if answer.value in _NON_SELECTIONS:
             return [], answer.value
         indices.add(int(key.removeprefix("candidate_")))
-    return [rows[index] for index in sorted(indices)], ""
+    selected, seen = [], set()
+    for index in sorted(indices):
+        row = rows[index]
+        for candidate in (row, *row.get("inherited_candidates", ())):
+            key = candidate["kind"], candidate["ref"]
+            if key not in seen:
+                selected.append(candidate)
+                seen.add(key)
+    return selected, ""
 
 
 # LLM: 必要引用只来自宿主合同与授权快照，包含包级引用但不展开私有资源，包不会隐式增加工具。

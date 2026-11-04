@@ -18,6 +18,7 @@
 #   修改时同步检查 skill_tree、包发现、会话沿用和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
+"""在当前授权快照中检索方法摘要、展示可见父子绑定并按原入口读取正文。"""
 from __future__ import annotations
 
 import hashlib
@@ -37,7 +38,7 @@ from ..tooling.models import (
     ToolParameterCondition,
     ToolRuntimePolicy,
 )
-from .decision_candidates import asset_cards_for_agent
+from .decision_candidates import asset_cards_for_agent, method_descriptors_for_agent
 from .learnpack_domain import self_made_package_ids
 from .method_carry import record_method_read
 from .package_read import (
@@ -138,8 +139,8 @@ class SkillSearchTool(BaseTool):
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
-    # LLM: 全局四资产只投影摘要；cursor绑定查询、范围和准确版本；不读取代码、不pin或授执行权。
-    # 函数用途: 返回公开方法卡及可原样重用的读取参数，让模型无需从多种身份字段猜调用方式。
+    # LLM: 检索全集仍含可见子项，父关系只从同 owner 的可见纯树取得；不读取代码、不 pin 或授执行权。
+    # 函数用途: 返回公开方法卡、绑定父与可原样重用的读取参数，保持既有分页入口。
     def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
         if not query:
@@ -150,10 +151,13 @@ class SkillSearchTool(BaseTool):
         category = str(params.get("category") or "").strip()
         limit = _safe_limit(params.get("limit"))
         try:
+            snapshot = _snapshot_for(self.agent)
+            descriptors = method_descriptors_for_agent(self.agent, skill_snapshot=snapshot)
+            tree = _binding_tree(descriptors)
             hits = [
                 hit
                 for hit in router.search(query, limit=0, kinds={"skill", "capability_package", "script", "workflow"},
-                                         extra_cards=tuple(asset_cards_for_agent(self.agent)))
+                                         extra_cards=tuple(asset_cards_for_agent(self.agent, descriptors=descriptors)))
                 if not category or str(hit.card.metadata.get("category") or "") == category
             ]
             hits, page = _search_page(hits, params, query, category, limit)
@@ -176,7 +180,7 @@ class SkillSearchTool(BaseTool):
               "stable_id": hit.card.metadata["stable_id"], "score": round(hit.score, 1),
               "made_by_me": hit.card.metadata["package_id"] in mine,
               "next_read": package_read_parameters(hit.card.metadata)}
-             if hit.card.kind == "capability_package" else _saved_asset_match(hit)
+             if hit.card.kind == "capability_package" else _saved_asset_match(hit, tree=tree)
              if hit.card.kind in {"script", "workflow"} else {
                 "kind": "skill",
                 "name": hit.card.name,
@@ -247,9 +251,9 @@ class SkillSearchTool(BaseTool):
         except (OSError, ValueError) as exc:
             return _invalid(str(exc))
 
-    # LLM: 保持普通 Skill resolve 的既有优先级；失败后仅精确匹配当前受限包身份来给建议，不读成员、不 pin、不转换执行。
-    #   读正文失败时回执在 details.error_code 带出快照异常的结构化码；成功才以 entry.stable_id/source 和实际字符计 manual_get。
-    # 函数用途: 读取普通 Skill，成功后记主会话沿用；错填包身份仍失败，不记账或自动读取。
+    # LLM: 普通 Skill 仍沿原 resolve/read_body；绑定只来自同快照可见父的直接子，不替代正文核验或扩大权限。
+    #   原正文失败码和成功沿用记账保持不变；隐藏/停用/缺失父不产生绑定。
+    # 函数用途: 读取普通 Skill 并返回按 kind/id 排序的直接 bound_methods。
     def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
         if not skill_id:
@@ -272,6 +276,7 @@ class SkillSearchTool(BaseTool):
             return _invalid("当前轮没有这个可用 skill_id", hint="重新 action=search 查找当前可用摘要，再使用结果的 next_read")
         try:
             body = snapshot.read_body(skill_id)
+            tree = _binding_tree(method_descriptors_for_agent(self.agent, skill_snapshot=snapshot))
         except SkillSnapshotError as exc:
             payload = {"error": str(exc), "skill_id": skill_id, "details": {"error_code": exc.error_code}}
             return ToolHandlerOutcome(
@@ -287,6 +292,7 @@ class SkillSearchTool(BaseTool):
             "path": entry.path,
             "content_sha256": entry.content_sha256,
             "body": body,
+            "bound_methods": _bound_methods(tree, f"skill:{entry.stable_id}"),
         }
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         record_method_read(self.agent, entry)
@@ -313,12 +319,44 @@ def _record_search_matches(agent, matches: list[dict]) -> None:
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
 
-# LLM: 非Skill资产只给原工具读取入口，不伪造skill_id或允许skill_search执行；版本与scope保留。
-# 函数用途: 把保存的脚本/工作流命中转换成只读短卡。
-def _saved_asset_match(hit):
-    return {'kind':hit.card.kind, 'name':hit.card.name, 'stable_id':hit.card.id,
-            'description':hit.card.description, 'source':hit.card.source, 'score':round(hit.score, 1),
-            'next_read':hit.card.metadata['next_read'], 'version':hit.card.metadata['version']}
+# LLM: 纯树只计算当前描述符；无固定方法时直接空图，不借目录、正文或拓扑环枚举补出资产。
+# 函数用途: 为 L1 构建可见绑定图，复用公共纯函数而不重复解析 refs。
+def _binding_tree(descriptors: list[dict]) -> dict:
+    if not any(row.get("kind") in {"script", "workflow"} for row in descriptors):
+        return {"nodes": {}, "children": {}, "parents": {}}
+    from .method_tree import build_method_tree
+
+    return build_method_tree(descriptors)
+
+
+# LLM: Skill 使用冻结 stable_id，脚本/工作流仍使用原安全资产 ID；不从展示名称构造读取权限。
+# 函数用途: 将图节点转换为 L1 的准确 kind/id 引用。
+def _method_reference(node: dict) -> dict:
+    identifier = node.get("metadata", {}).get("stable_id") if node["kind"] == "skill" else node["id"]
+    return {"kind": node["kind"], "id": identifier or node["id"]}
+
+
+# LLM: 只返回直接可见脚本/工作流子项，不把孙项、监控或统计计数混作 bound_methods。
+# 函数用途: 生成按 kind/id 稳定排序的 L1 子方法摘要。
+def _bound_methods(tree: dict, parent_key: str) -> list[dict]:
+    methods = [{**_method_reference(node), "name": node["name"], "summary": node.get("summary", "")}
+               for key in tree["children"].get(parent_key, ()) if (node := tree["nodes"].get(key)) is not None
+               and node["kind"] in {"script", "workflow"}]
+    return sorted(methods, key=lambda row: (row["kind"], row["id"]))
+
+
+# LLM: 非 Skill 资产只给原工具读取入口；可见父来自同次纯树，监控不作父，未绑定项不伪造 parents。
+# 函数用途: 把脚本/工作流命中转换成带准确父引用的只读短卡。
+def _saved_asset_match(hit, *, tree=None):
+    row = {'kind':hit.card.kind, 'name':hit.card.name, 'stable_id':hit.card.id,
+           'description':hit.card.description, 'source':hit.card.source, 'score':round(hit.score, 1),
+           'next_read':hit.card.metadata['next_read'], 'version':hit.card.metadata['version']}
+    if tree is not None and hit.card.metadata.get("asset_id"):
+        key = f"{hit.card.kind}:{hit.card.metadata['asset_id']}"
+        parents = [_method_reference(tree["nodes"][parent]) for parent in tree["parents"].get(key, ())]
+        if parents:
+            row["parents"] = sorted(parents, key=lambda parent: (parent["kind"], parent["id"]))
+    return row
 
 
 # LLM: 游标绑定候选身份/内容/activation代次与查询；变代明确失败，总数保留total兼容并提供total_count。

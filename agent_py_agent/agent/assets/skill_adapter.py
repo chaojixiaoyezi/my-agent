@@ -1,5 +1,7 @@
 # LLM: 普通发现只读明确根；有快照只投影enabled_entries，不补扫或执行正文。
 # 模块用途: 共用安全codec和根声明提供技能资产投影及准确来源匹配。
+"""安全投影Skill资产，统一头部/侧文件绑定并消费已冻结的授权元数据。"""
+
 from __future__ import annotations
 
 import json
@@ -8,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from ..capability.skill_snapshot import SkillSnapshotError
-from ..capability.skills import _as_list, skill_catalog_roots, split_skill_frontmatter
+from ..capability.skills import (
+    _as_list,
+    skill_catalog_roots,
+    skill_enabled,
+    split_skill_frontmatter,
+)
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath, write_text_atomic_beneath
 from . import (
@@ -19,7 +26,7 @@ from . import (
     skill_asset_id,
     valid_skill_reference,
 )
-from .descriptor import AssetDescriptor, clean_json
+from .descriptor import AssetDescriptor, AssetRefs, clean_json
 
 
 # LLM: 不resolve模型路径以保留链接拒绝，输入必须是目录或准确SKILL.md，不从元数据取得路径。
@@ -56,14 +63,26 @@ def _sidecar(directory):
     return value
 
 
-# LLM: Owner身份由可信调用参数给出，frontmatter/sidecar不能扩权；先头部后侧文件覆盖，正文无回传。
+# LLM: 引用沿既有AssetRefs类型与安全ID校验，排序去重后统一限额；普通扩展仍由侧文件覆盖。
+# 函数用途: 为提取、catalog和快照提供唯一的头部/侧文件引用并集合并。
+def _merged_metadata(front, side, *, max_refs_per_kind=64):
+    front_refs = AssetRefs.from_dict(front.get('refs', {})).to_dict()
+    side_refs = AssetRefs.from_dict(side.get('refs', {})).to_dict()
+    refs = {kind: sorted(set(front_refs[kind]) | set(side_refs[kind]))[:max_refs_per_kind]
+            for kind in ('workflows', 'scripts', 'skills', 'monitors')}
+    if 'skill_dir' in front_refs or 'skill_dir' in side_refs:
+        refs['skill_dir'] = side_refs.get('skill_dir', front_refs.get('skill_dir', ''))
+    return {**front, **side, 'refs': refs}
+
+
+# LLM: Owner身份由可信调用参数给出，frontmatter/sidecar不能扩权；refs单独求并集，正文无回传。
 # 函数用途: 提取单个技能的标准字典，支持目录和SKILL.md路径。
 def extract_skill_descriptor(skill_dir_or_md_path, owner_id=''):
     directory = _directory(skill_dir_or_md_path)
     text = _text(directory, 'SKILL.md')
     if text is None:
         raise FileNotFoundError('Skill正文不存在')
-    return _descriptor(directory, {**_frontmatter(text), **_sidecar(directory)}, owner_id)
+    return _descriptor(directory, _merged_metadata(_frontmatter(text), _sidecar(directory)), owner_id)
 
 
 # LLM: 共用资产键派生，已合法ID保持原值；非ASCII名称绝不直接拼成未验证路径。
@@ -110,7 +129,7 @@ def update_skill_extraction_keys(skill_dir, *, access_targets=None, data_sources
         if text is None:
             raise FileNotFoundError('Skill正文不存在')
         meta = {**_sidecar(directory), **{key: value for key, value in updates.items() if value is not None}}
-        descriptor = _descriptor(directory, {**_frontmatter(text), **meta}, '')
+        descriptor = _descriptor(directory, _merged_metadata(_frontmatter(text), meta), '')
         write_text_atomic_beneath(directory, ('skill_meta.json',), json.dumps(
             clean_json(meta), ensure_ascii=False, allow_nan=False) + '\n')
     return descriptor
@@ -186,29 +205,54 @@ def _catalog_descriptor(path, source, owner_id, include_body):
     text = _text(path.parent, 'SKILL.md')
     if text is None:
         raise FileNotFoundError('Skill正文不存在')
-    meta = {**_frontmatter(text), **_sidecar(path.parent)}
+    meta = _merged_metadata(_frontmatter(text), _sidecar(path.parent))
     descriptor = _descriptor(path.parent, meta, owner_id)
     name = meta.get('name') or path.parent.name
     stable_id = valid_skill_reference(f'{source}:{name}')
     return _catalog_projection(descriptor, source, stable_id, sha256(text.encode('utf-8')).hexdigest(), text, include_body)
 
 
-# LLM: 只沿快照read_body取授权版本并核对hash；typed快照异常保持同一对象，不能把stale包装成missing。
-# 函数用途: 将已启用条目投影为资产，失效快照明确拒读。
+# LLM: 只读取entry中已授权的准确路径，nofollow与正文hash先于引用发表；侧开关不能复活禁用条目。
+# 函数用途: 在快照组装时冻结合并refs和描述符metadata，不返回正文或新增候选。
+def _freeze_skill_asset_metadata(entry):
+    directory = Path(entry.path).parent
+    if entry.frozen_path:
+        from ..capability.skill_learning_versions import read_frozen_learned_body
+
+        text = read_frozen_learned_body(entry)
+    else:
+        text = _text(directory, 'SKILL.md')
+    if text is None:
+        raise FileNotFoundError('Skill正文不存在')
+    if sha256(text.encode('utf-8')).hexdigest() != entry.content_sha256:
+        raise SkillSnapshotError('SKILL_SNAPSHOT_STALE', f'skill={entry.stable_id}')
+    meta = _merged_metadata(_frontmatter(text), _sidecar(directory))
+    if not entry.enabled or meta.get('enabled', True) is False:
+        raise SkillSnapshotError('ASSET_DISABLED_BY_OWNER', f'skill={entry.stable_id}')
+    descriptor = _descriptor(directory, meta, '')
+    fields = {key: descriptor[key] for key in
+              ('version', 'access_targets', 'data_sources', 'credential_refs', 'io_contract')}
+    return descriptor['refs'], descriptor['metadata'], fields
+
+
+# LLM: 元数据只消费冻结entry并复核当前侧开关；只有显式include_body沿read_body核原hash/guard，不补扫候选。
+# 函数用途: 将已启用条目投影为资产，目录/L1不提前读取Skill正文。
 def _snapshot_descriptor(home, snapshot, entry, include_body):
     stable_id = valid_skill_reference(entry.stable_id)
     if stable_id != f'{entry.source}:{entry.name}':
         raise ValueError('Skill快照身份不一致')
     try:
-        text = snapshot.read_body(stable_id)
+        if not skill_enabled(Path(entry.path)):
+            raise SkillSnapshotError('ASSET_DISABLED_BY_OWNER', f'skill={stable_id}')
+        text = snapshot.read_body(stable_id) if include_body else ''
     except (InterruptedError, SkillSnapshotError):
         raise
     except (OSError, RuntimeError) as exc:
         raise ValueError('已授权Skill快照正文不可读') from exc
-    if sha256(text.encode('utf-8')).hexdigest() != entry.content_sha256:
+    if include_body and sha256(text.encode('utf-8')).hexdigest() != entry.content_sha256:
         raise ValueError('Skill快照正文已变化')
     directory = Path(entry.path).parent
-    meta = {**_frontmatter(text), 'id': _skill_id(directory.name),
+    meta = {**entry.asset_fields, 'refs': entry.refs, 'metadata': entry.asset_metadata, 'id': _skill_id(directory.name),
             'name': entry.name, 'description': entry.description,
             'when_to_use': entry.when_to_use, 'category': entry.category, 'tags': list(entry.tags)}
     descriptor = _descriptor(directory, meta, home.name)
@@ -327,7 +371,7 @@ class SkillAdapter:
                 if text is None:
                     raise FileNotFoundError('Skill正文不存在')
                 meta.update(enabled=enabled, revision=next_asset_revision(meta))
-                descriptor = _descriptor(directory, {**_frontmatter(text), **meta}, meta.get('owner_id', ''))
+                descriptor = _descriptor(directory, _merged_metadata(_frontmatter(text), meta), meta.get('owner_id', ''))
                 raw = json.dumps(clean_json(meta), ensure_ascii=False, allow_nan=False) + '\n'
                 admission.check((OwnerQuotaChange(directory / 'skill_meta.json', len(raw.encode())),))
                 write_text_atomic_beneath(home, (*directory.relative_to(home).parts, 'skill_meta.json'), raw)

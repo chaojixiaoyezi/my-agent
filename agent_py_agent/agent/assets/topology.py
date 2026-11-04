@@ -1,40 +1,168 @@
 # LLM: 拓扑只消费已给定描述符，反向引用是正向边的纯投影，不写Store、不读取授权或执行资产。
 # 模块用途: 构建四类资产依赖图、反向引用、前向子图和稳定去重的全部简单有向环。
+"""资产依赖图的纯值投影；目录可单独复用连边与线性 SCC，不必枚举简单环。"""
+
 from __future__ import annotations
 
+from . import safe_asset_id
 from .descriptor import ASSET_KINDS, AssetDescriptor, AssetRefs
 
 
-# LLM: kind:id是唯一节点键；同键重复拒绝，不用输入used_by冒充实际反向边。
-# 函数用途: 校验并建立独立的标准描述符节点表。
+# LLM: 无冲突时保留原 kind:id；同裸 ID 的不同来源 skill 用稳定身份区分，真正重复仍拒绝。
+# 函数用途: 校验描述符并建立独立节点表，清空不可信的 stored used_by。
 def _index_nodes(descriptors):
-    nodes = {}
+    groups, nodes = {}, {}
     for value in descriptors:
         descriptor = AssetDescriptor.from_dict(value.to_dict() if isinstance(value, AssetDescriptor) else value)
         key = f"{descriptor.kind}:{descriptor.id}"
-        if key in nodes:
-            raise ValueError("资产拓扑包含重复节点")
-        nodes[key] = descriptor.to_dict() | {"key": key, "used_by": AssetRefs().to_dict()}
+        groups.setdefault(key, []).append(descriptor.to_dict())
+    for original_key, group in groups.items():
+        for node in group:
+            key = original_key
+            if len(group) > 1:
+                stable_id = node['metadata'].get('stable_id')
+                if node['kind'] != 'skill' or not isinstance(stable_id, str) or not stable_id.strip():
+                    raise ValueError("资产拓扑包含重复节点")
+                key = f"skill:{stable_id}"
+            if key in nodes:
+                raise ValueError("资产拓扑包含重复节点")
+            nodes[key] = node | {"key": key, "used_by": AssetRefs().to_dict()}
     return nodes
 
 
-# LLM: 仅枚举实际refs且集合去重；展示默认排序，闭包stable_order=False保持线性，不改变既有图返回顺序。
-# 函数用途: 生成确定性边表并把引用来源填入每个目标节点。
+# LLM: 规范节点通常已有 dict metadata；宽容读口不让缺失或错误扩展字段影响其它边。
+# 函数用途: 取得只读元数据视图，非对象按空扩展处理。
+def _metadata(node):
+    metadata = node.get('metadata')
+    return metadata if isinstance(metadata, dict) else {}
+
+
+# LLM: member_of 只可折叠到真实可见父；placeholder、hidden=True 和 enabled=False 均不是父。
+# 函数用途: 为反向绑定索引判断节点可见性，不改变完整依赖图的既有 refs 语义。
+def _visible_parent(node):
+    return not node.get('missing') and node.get('enabled', True) is not False and _metadata(node).get('hidden') is not True
+
+
+# LLM: 来源权威是 metadata.source；仅空缺才回退 source_scope，不从 stable_id 的文本前缀推断。
+# 函数用途: 提取裸 skill 别名排序使用的实际来源。
+def _skill_source(node):
+    source = _metadata(node).get('source')
+    return source if isinstance(source, str) and source.strip() else node.get('source_scope', '')
+
+
+# LLM: 别名与最高优先级候选只预建一次，重复引用不再扫描全表；字典保留无排序模式的输入顺序。
+# 函数用途: 索引实际图键、准确 stable_id 及裸 id/name，支持可见父专用视图。
+def _reference_index(nodes, *, visible_only=False):
+    actual, stable, aliases, ranks = {}, {}, {}, {}
+    priority = {source: rank for rank, source in enumerate(('workspace', 'owner', 'shared', 'builtin'))}
+    for key, node in nodes.items():
+        if node.get('missing') or visible_only and not _visible_parent(node):
+            continue
+        kind = node['kind']
+        actual[kind, key] = (key,)
+        stable_id = _metadata(node).get('stable_id')
+        if kind == 'skill' and isinstance(stable_id, str) and stable_id:
+            stable.setdefault((kind, stable_id), {})[key] = None
+        source = _skill_source(node)
+        rank = priority.get(source, len(priority)) if isinstance(source, str) else len(priority)
+        names = {node['id'], node.get('name', '')}
+        suffix = key.removeprefix(f'{kind}:')
+        if ':' not in suffix:
+            names.add(suffix)
+        for name in names:
+            if not isinstance(name, str) or not name:
+                continue
+            token = kind, name
+            if token not in aliases or kind == 'skill' and rank < ranks[token]:
+                aliases[token] = {}
+                ranks[token] = rank
+            if kind != 'skill' or rank == ranks[token]:
+                aliases[token][key] = None
+    return actual, stable, aliases
+
+
+# LLM: 准确引用优先于裸别名；目标永远返回索引中的实际 key，不假设 key 等于 kind:id。
+# 函数用途: 解析单个规范引用，裸 skill 名返回最高来源的全部并列候选。
+def _resolve_reference(kind, reference, index):
+    actual, stable, aliases = index
+    token = kind, reference
+    if token in actual:
+        return actual[token]
+    if token in stable:
+        return stable[token]
+    qualified = kind, f'{kind}:{reference}'
+    if (kind != 'skill' or ':' in reference) and qualified in actual:
+        return actual[qualified]
+    return aliases.get(token, ())
+
+
+# LLM: 无效 member_of 逐项忽略；仅消费既有安全 ID 规则，不跨片导入尚未合并的 normalizer。
+# 函数用途: 读取 list 中的 skill/workflow 字典或 kind:id 声明，不创建父节点。
+def _member_of(node):
+    declarations = _metadata(node).get('member_of')
+    if not isinstance(declarations, list):
+        return
+    for declaration in declarations:
+        if isinstance(declaration, str):
+            kind, _, asset_id = declaration.partition(':')
+        elif isinstance(declaration, dict):
+            kind, asset_id = declaration.get('kind'), declaration.get('id')
+        else:
+            continue
+        if kind not in ('skill', 'workflow'):
+            continue
+        try:
+            safe_asset_id(asset_id)
+        except ValueError:
+            continue
+        yield kind, asset_id
+
+
+# LLM: 缺依赖仍显式保留，逻辑 stable_id 不作为磁盘路径；公共描述符的安全 ID 校验不放宽。
+# 函数用途: 为规范图中的未解析 refs 创建同形 missing 叶节点。
+def _missing_node(nodes, kind, reference):
+    prefix = f'{kind}:'
+    target = reference if reference.startswith(prefix) else prefix + reference
+    if target not in nodes:
+        asset_id = reference.removeprefix(prefix)
+        nodes[target] = AssetDescriptor('missing', kind, 'missing').to_dict() | {
+            'id': asset_id, 'name': asset_id, 'key': target, 'missing': True}
+    return target
+
+
+# LLM: refs 和 member_of 共用边去重与反向投影，used_by 只含真实连边来源的原描述符 ID。
+# 函数用途: 记录一条父到子边，保持 monitor→workflow 的 triggers 和既有四类 used_by shape。
+def _add_edge(nodes, edges, incoming, source, target):
+    node, child = nodes[source], nodes[target]
+    relation = 'triggers' if node['kind'] == 'monitor' and child['kind'] == 'workflow' else 'uses_' + child['kind']
+    edges[source, target, relation] = {'from': source, 'to': target, 'relation': relation}
+    reference = target, node['kind'], node['id']
+    if reference not in incoming:
+        child['used_by'][node['kind'] + 's'].append(node['id'])
+        incoming.add(reference)
+
+
+# LLM: 只按 refs/member_of 连边，清空 stored used_by；无排序模式的预索引和连边均为 O(V+E)。
+# 函数用途: 连接规范节点表及 monitor 引用，允许调用方使用 skill:<stable_id> 等实际节点键。
 def _connect(nodes, *, stable_order=True):
     edges, incoming = {}, set()
+    for node in nodes.values():
+        node['used_by'] = AssetRefs().to_dict()
+    index = _reference_index(nodes)
+    parents = _reference_index(nodes, visible_only=True)
     for key, node in tuple(nodes.items()):
+        if node.get('missing'):
+            continue
         for kind in ASSET_KINDS:
-            for asset_id in node["refs"][kind + "s"]:
-                target = f"{kind}:{asset_id}"
-                if target not in nodes:
-                    nodes[target] = AssetDescriptor(asset_id, kind, asset_id).to_dict() | {"key": target, "missing": True}
-                relation = "triggers" if node["kind"] == "monitor" and kind == "workflow" else "uses_" + kind
-                edges[key, target, relation] = {"from": key, "to": target, "relation": relation}
-                used_by = nodes[target]["used_by"][node["kind"] + "s"]
-                reference = (target, node['kind'], node['id'])
-                if reference not in incoming:
-                    used_by.append(node["id"])
-                    incoming.add(reference)
+            for asset_id in node.get('refs', {}).get(kind + 's', ()):
+                targets = _resolve_reference(kind, asset_id, index)
+                if not targets:
+                    targets = (_missing_node(nodes, kind, asset_id),)
+                for target in targets:
+                    _add_edge(nodes, edges, incoming, key, target)
+        for kind, asset_id in _member_of(node):
+            for parent in _resolve_reference(kind, asset_id, parents):
+                _add_edge(nodes, edges, incoming, parent, key)
     if stable_order:
         for node in nodes.values():
             for ids in node["used_by"].values():
