@@ -908,38 +908,83 @@ class RuntimeRepository(
             })
         return result
 
-    # LLM: 空指针与悬空指针分开；旧结清事件不得隐藏仍unknown的当前attempt，取消后自然退出原状态集合。
-    # 函数用途: 在原事务中读取有界待结清运行，兼容只打过标记而未解锁的旧行。
+    # LLM: 两个索引分支各取B+1，在内存仅合并这一页；旧事件不得隐藏unknown，空/悬空指针保持区别。
+    # 函数用途: 读取活动attempt与created孤儿，不让终态运行历史进入维护扫描或SQL排序。
     def _stale_runtime_rows(self, conn, *, after: tuple = (0.0, ""), limit: int = 256) -> list:
-        return conn.execute(
-            "SELECT ar.agent_run_id, ar.run_id, ar.role, ar.status AS run_status, ar.current_attempt_id, "
-            "at.status AS attempt_status, COALESCE(at.started_at, ar.created_at) AS started_at, at.metadata_json "
-            "FROM agent_runs ar LEFT JOIN agent_attempts at ON at.attempt_id=ar.current_attempt_id AND at.agent_run_id=ar.agent_run_id "
-            "WHERE (at.status IN ('running','created','unknown') OR (ar.status='created' AND at.attempt_id IS NULL)) "
-            "AND (at.status='unknown' OR NOT EXISTS (SELECT 1 FROM runtime_events ev WHERE ev.agent_run_id=ar.agent_run_id "
-            "AND ev.attempt_id=COALESCE(ar.current_attempt_id,'') AND ev.event_type='agent_run.operational_settlement')) "
-            "AND (COALESCE(at.started_at,ar.created_at),ar.agent_run_id) > (?,?) "
-            "ORDER BY COALESCE(at.started_at,ar.created_at), ar.agent_run_id LIMIT ?",
-            (*after, int(limit) if limit else -1),
+        projection = ("SELECT ar.agent_run_id, ar.run_id, ar.role, ar.status AS run_status, ar.current_attempt_id, "
+                      "at.status AS attempt_status, {time} AS started_at, at.metadata_json ")
+        unsettled = (" AND (at.status='unknown' OR NOT EXISTS (SELECT 1 FROM runtime_events ev "
+                     "WHERE ev.agent_run_id=ar.agent_run_id AND ev.attempt_id=COALESCE(ar.current_attempt_id,'') "
+                     "AND ev.event_type='agent_run.operational_settlement')) ")
+        page_limit = int(limit) + 1 if limit else -1
+        rows = conn.execute(
+            projection.format(time="at.started_at") +
+            "FROM agent_attempts at INDEXED BY idx_agent_attempts_stale_time "
+            "JOIN agent_runs ar ON ar.agent_run_id=at.agent_run_id AND ar.current_attempt_id=at.attempt_id "
+            "WHERE at.status IN ('running','created','unknown') "
+            "AND (at.started_at,at.agent_run_id) > (?,?) " + unsettled +
+            "ORDER BY at.started_at,at.agent_run_id LIMIT ?", (*after, page_limit),
         ).fetchall()
+        rows += conn.execute(
+            projection.format(time="ar.created_at") +
+            "FROM agent_runs ar INDEXED BY idx_agent_runs_created_time "
+            "LEFT JOIN agent_attempts at ON at.attempt_id=ar.current_attempt_id AND at.agent_run_id=ar.agent_run_id "
+            "WHERE ar.status='created' AND at.attempt_id IS NULL "
+            "AND (ar.created_at,ar.agent_run_id) > (?,?) " + unsettled +
+            "ORDER BY ar.created_at,ar.agent_run_id LIMIT ?", (*after, page_limit),
+        ).fetchall()
+        rows.sort(key=lambda row: (row["started_at"], row["agent_run_id"]))
+        return rows[:limit] if limit else rows
 
-    # LLM: 自动仅取消老unknown/未执行孤儿，显式可取消无身份运行；IMMEDIATE事务内复核进程、全锁和current指针，不重放工具。
-    # 函数用途: 按原阈值与死亡证明结清运维欠账，取消收敛后解除unknown阻塞门。
+    # LLM: 候选在短只读快照读取；写事务逐id重读并比对前像，继续核原死亡/lease/current约束；年龄跨门槛可提前重访，不重放工具。
+    # 函数用途: 将历史无关的候选读取移出写锁，只在批内CAS结清安全欠账。
     def settle_unidentified_attempts(self, *, older_than_seconds: float, now: float | None = None,
                                      settled_by: str = "explicit_control", automatic: bool = False) -> list[str]:
         current = time.time() if now is None else float(now)
         cutoff = current - max(0.0, float(older_than_seconds))
         settled: list[str] = []
-        with self.transaction() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            after = getattr(self, "_stale_settlement_cursor", (0.0, "")) if automatic else (0.0, "")
-            rows = self._stale_runtime_rows(conn, after=after, limit=256 if automatic else 0)
+        after = getattr(self, "_stale_settlement_cursor", (0.0, "")) if automatic else (0.0, "")
+        revisit_at = getattr(self, "_stale_settlement_revisit_at", 0.0) if automatic else 0.0
+        if automatic and revisit_at and current >= revisit_at:
+            # 已见候选跨过原年龄门槛时重访；不是因为短页长度而每拍重置。
+            after, revisit_at = (0.0, ""), 0.0
+        reader = RuntimeRepository(self.db_path, read_only=True)
+        with reader._runtime_connection() as conn:
+            conn.execute("BEGIN")
+            try:
+                rows = self._stale_runtime_rows(conn, after=after, limit=256 if automatic else 0)
+            finally:
+                conn.rollback()
+        if rows:
+            with self.transaction() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for candidate in rows:
+                    row = conn.execute(
+                        "SELECT ar.agent_run_id, ar.run_id, ar.role, ar.status AS run_status, ar.current_attempt_id, "
+                        "at.status AS attempt_status, COALESCE(at.started_at,ar.created_at) AS started_at, at.metadata_json "
+                        "FROM agent_runs ar LEFT JOIN agent_attempts at "
+                        "ON at.attempt_id=ar.current_attempt_id AND at.agent_run_id=ar.agent_run_id "
+                        "WHERE ar.agent_run_id=? AND (at.status='unknown' OR NOT EXISTS "
+                        "(SELECT 1 FROM runtime_events ev WHERE ev.agent_run_id=ar.agent_run_id "
+                        "AND ev.attempt_id=COALESCE(ar.current_attempt_id,'') "
+                        "AND ev.event_type='agent_run.operational_settlement'))", (candidate["agent_run_id"],),
+                    ).fetchone()
+                    if row is None or dict(row) != dict(candidate):
+                        continue
+                    if float(row["started_at"] or 0) <= cutoff and self._settle_stale_runtime_row(
+                            conn, row, current, settled_by, automatic):
+                        settled.append(str(row["agent_run_id"]))
+        if automatic:
+            # 短页保留位置，下一次空页才开始新一轮活动集；过早/活锁候选不会永久饥饿。
+            self._stale_settlement_cursor = (rows[-1]["started_at"], rows[-1]["agent_run_id"]) if rows else (0.0, "")
             for row in rows:
-                if float(row["started_at"] or 0) <= cutoff and self._settle_stale_runtime_row(
-                        conn, row, current, settled_by, automatic):
-                    settled.append(str(row["agent_run_id"]))
-            if automatic:
-                self._stale_settlement_cursor = (rows[-1]["started_at"], rows[-1]["agent_run_id"]) if len(rows) == 256 else (0.0, "")
+                if row["attempt_status"] not in (None, "unknown"):
+                    continue
+                age = max(max(0.0, float(older_than_seconds)), 86400 if row["attempt_status"] == "unknown" else 3600)
+                eligible_at = float(row["started_at"] or 0.0) + age
+                if eligible_at > current:
+                    revisit_at = min(revisit_at, eligible_at) if revisit_at else eligible_at
+            self._stale_settlement_revisit_at = revisit_at
         return settled
 
     # LLM: 没有 attempt、op、资源锁或子运行才证明未执行；非空悬空指针是损坏，绝不当孤儿取消。

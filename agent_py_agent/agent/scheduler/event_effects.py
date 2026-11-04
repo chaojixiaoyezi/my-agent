@@ -78,19 +78,17 @@ def _cached_history_report(path: Path, *, context: str) -> JsonlObjectsReadRepor
 # LLM: 所有方法都复用原SchedulerRepository锁与quota；在途lease只有准入/释放，不复制模型或投递结果。
 # 类用途: 提供事件运行副作用的线性化开始与结束。
 class SchedulerEventEffectOperations:
-    # LLM: 精确查询原活动run或同版历史投影，不限最近行数；归属/schema逐次校验，嵌套返回与缓存隔离。
-    # 函数用途: 为副作用边界读取准确run，历史未变化时省去重复JSONL解析。
+    # LLM: 活动run仍优先；终态只按准确id查投影，缺失/未覆盖不全扫，owner/schema沿原解析器校验。
+    # 函数用途: 为副作用边界有界读取准确run，不复制或解析全部历史。
     def effect_run(self, run_id):
         run = self.get_active_run(run_id)
         if run is not None:
             return run
-        report = _cached_history_report(self.history_path, context='scheduler.effect.history')
-        for raw in reversed(report.records):
-            if raw.get('run_id') != run_id:
-                continue
-            terminal, _error = self._parse_run(deepcopy(raw), terminal=True)
-            return terminal
-        return None
+        rows, _errors = self._history_index.read(run_id=run_id)
+        if not rows:
+            return None
+        terminal, _error = self._parse_run(deepcopy(rows[0]), terminal=True)
+        return terminal
 
     # LLM: begin成功是副作用已经准入的线性化点；控制先提交则拒绝，begin先提交则原取消只报告在途待清理。
     # 函数用途: 原子登记一个有限在途操作，释放原锁后才调用原模型或运输；归档运行仅允许既有冻结交付重投。
