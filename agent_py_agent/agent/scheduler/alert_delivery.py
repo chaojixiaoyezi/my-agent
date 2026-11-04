@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from copy import deepcopy
 from dataclasses import replace
@@ -11,6 +12,7 @@ from dataclasses import replace
 from .delivery_policy import (
     TARGET_DELIVERY_MODES,
     ScheduleDeliveryTargetUnauthorized,
+    alert_topic_enabled,
     available_delivery_targets,
     delivery_specs,
     normalize_delivery,
@@ -192,7 +194,9 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
 
     run = execution_run(delivery.agent, request)
     if run is None or normalize_delivery(run.get("delivery"))["mode"] not in TARGET_DELIVERY_MODES:
-        return None
+        topic = _topic_delivery(delivery, request, reconcile_only=options.get('frozen_retry') is not None)
+        return (record_one(topic, request, context, content, **options)
+            if topic is not delivery else None)
     if not options.get("deliver") and not options.get("local_transcript_only"):
         return None
     repository = delivery.agent.scheduler_repository
@@ -269,7 +273,8 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
         if retry is not None:
             kwargs.update(delivery_artifacts=retry.delivery_artifacts, assistant_commentaries=retry.assistant_commentaries)
         try:
-            commit = record_one(delivery, request, target, retry.content if retry is not None else business["content"], **kwargs)
+            topic = _topic_delivery(delivery, request, reconcile_only=retry is not None)
+            commit = record_one(topic, request, target, retry.content if retry is not None else business["content"], **kwargs)
         except AlertOutboxUnavailable:
             raise
         except OSError:
@@ -296,3 +301,139 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
         commit_kind=("external_delivery" if any(row.get("delivery_status") == "sent" for row in receipts.values())
             else "canonical_transcript") if complete else "outbox_pending", transcript_route=True,
         outbox_frozen=cached or any(row.outbox_frozen for row in commits))
+
+
+# LLM: 发送适配沿原 DeliveryService 协议，不另建发送出口或修改共享配置。
+# 函数用途: 为一次告警构造隔离的锚点投递视图。
+def _topic_delivery(delivery, request, *, reconcile_only=False):
+    if getattr(getattr(delivery.agent, 'home_paths', None), 'owner_kind', '') != 'group':
+        return delivery
+    signal = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    metadata = signal.get('metadata') if isinstance(signal.get('metadata'), dict) else {}
+    event_id = (signal.get('event_id') or metadata.get('event_id') or signal.get('wake_signal_id')
+        or signal.get('wake_id') or signal.get('idempotency_key'))
+    source = signal.get('source') or metadata.get('source') or metadata.get('source_system') or 'scheduler'
+    if not isinstance(event_id, str) or not event_id or not isinstance(source, str) or not source:
+        return delivery
+    return replace(delivery, channels=_AlertTopicChannels(delivery.channels, delivery.agent, request,
+        source=source, event_id=event_id, reconcile_only=reconcile_only))
+
+
+class _AlertTopicChannels:
+    """一次告警的通道策略视图；网络和权限仍由原 sender 与 DeliveryService 执行。"""
+
+    # LLM: 不修改共享 channels、config、Owner 或请求，只固定当前事件的路由资料。
+    # 函数用途: 绑定当前告警的原投递能力和事件身份。
+    def __init__(self, channels, agent, request, *, source, event_id, reconcile_only=False):
+        self._channels, self._agent, self._request = channels, agent, request
+        self._source, self._event_id, self._reconcile_only = source, event_id, reconcile_only
+
+    # LLM: 既有声明、能力和注册表仍由同一原服务提供，不新增或伪造外发能力。
+    # 函数用途: 保留原 DeliveryService 的能力查询接口。
+    def __getattr__(self, name):
+        return getattr(self._channels, name)
+
+    # LLM: 首发 pending 先落盘且锁内只认一个首发者；未知先查提供方，查不到就停，不绕过原发送/审批/副作用门。
+    # 函数用途: 首次创建告警根，后续在已确认根的话题内回复。
+    def deliver(self, context, envelope):
+        from datetime import datetime, timezone
+
+        from . import alert_topic_anchors as anchors
+
+        if not alert_topic_enabled(self._agent, context):
+            return self._channels.deliver(context, envelope)
+        home = self._agent.home_paths
+        key = anchors.make_alert_key(self._source, home.owner_id, context.target, self._event_id)
+        now = datetime.now(timezone.utc).isoformat()
+        dispatch_key = str(context.idempotency_key or self._request.task_id)
+        row, first, root_dispatch = anchors._reserve_for_delivery(home.owner_home_dir, key,
+            now=now, dispatch_key=dispatch_key)
+        reconciled = False
+        if not first and row['state'] != 'sent':
+            row = self._reconcile(context, key, row, now)
+            reconciled = row['state'] == 'sent'
+            if not reconciled:
+                anchors.mark_unknown(home.owner_home_dir, key, now=now)
+                return _topic_receipt(context, envelope, key, row, sent=False)
+        if not first and (root_dispatch == dispatch_key or reconciled and not root_dispatch and self._reconcile_only):
+            return _topic_receipt(context, envelope, key, row, sent=True)
+        routed = (replace(context, mode='proactive', reply_to='', progress_handle='', reply_policy='reference',
+            provider_thread_id='', root_id='', parent_id='', idempotency_key='alert-topic:' + key)
+            if first else replace(context, mode='reply', reply_to=row['root_message_id'], progress_handle='',
+                reply_policy='thread', provider_thread_id=row['thread_id'], root_id=row['root_message_id'], parent_id=''))
+        try:
+            receipt = self._channels.deliver(routed, envelope)
+        except Exception:
+            if first:
+                anchors.mark_unknown(home.owner_home_dir, key, now=now)
+            raise
+        if first:
+            root_message_id = _confirmed_provider_root(receipt)
+            if receipt.delivery_status == 'sent' and root_message_id:
+                row = anchors.mark_sent(home.owner_home_dir, key, root_message_id=root_message_id, thread_id='', now=now)
+                self._remember_seed(context, envelope, row)
+            else:
+                anchors.mark_unknown(home.owner_home_dir, key, now=now)
+        return receipt
+
+    # LLM: 只有提供方显式 lookup 能力能恢复未知根，结果必须绑定当前键与目标；无能力不靠 fetch(id未知) 猜测。
+    # 函数用途: 在再次发送前精确核对已创建的根消息。
+    def _reconcile(self, context, key, row, now):
+        from .alert_topic_anchors import mark_sent
+
+        registry = getattr(self._channels, 'registry', None)
+        adapter = registry.adapter_for(context.channel) if registry is not None else None
+        lookup = getattr(adapter, 'lookup_alert_root', None)
+        if not callable(lookup):
+            return row
+        try:
+            found = lookup(alert_key=key, target_chat_id=context.target)
+        except Exception as exc:
+            logging.getLogger(__name__).warning('告警根核对失败 error_type=%s', type(exc).__name__)
+            return row
+        if (not isinstance(found, dict) or found.get('state') != 'sent' or found.get('alert_key') != key
+                or found.get('target_chat_id') != context.target or not isinstance(found.get('root_message_id'), str)
+                or not found['root_message_id'] or not isinstance(found.get('thread_id', ''), str)):
+            return row
+        return mark_sent(self._agent.home_paths.owner_home_dir, key, root_message_id=found['root_message_id'],
+            thread_id=found.get('thread_id', ''), now=now)
+
+    # LLM: 首发根已确认后才建立种子；可选资料写失败不冒充发送失败或再次创建根。
+    # 函数用途: 保存原始告警标题、正文、事件与准确 run 引用。
+    def _remember_seed(self, context, envelope, row):
+        from ..adapter.topic_seed import remember_topic_seed
+
+        signal = self._request.wake_signal or {}
+        metadata = signal.get('metadata') if isinstance(signal.get('metadata'), dict) else {}
+        try:
+            remember_topic_seed(self._agent.home_paths.owner_home_dir, chat_id=context.target,
+                root_message_id=row['root_message_id'], title=signal.get('title') or metadata.get('title') or '告警',
+                source=self._source, event_id=self._event_id, original_text=envelope.content,
+                run_refs=tuple(value for value in (self._request.task_id, metadata.get('run_id')) if isinstance(value, str)))
+        except Exception as exc:
+            logging.getLogger(__name__).warning('告警背景记录失败 error_type=%s', type(exc).__name__)
+
+
+# LLM: 逻辑 receipt_id 不是外部消息；只接受正文组件中提供方 send_confirmed/confirmed 的准确消息 ID。
+# 函数用途: 从原 DeliveryService 的组件事实提取已确认根。
+def _confirmed_provider_root(receipt):
+    for component in getattr(receipt, 'component_receipts', ()):
+        row = component if isinstance(component, dict) else vars(component)
+        if row.get('phase') == 'send_confirmed' and row.get('effect_outcome') == 'confirmed':
+            value = row.get('provider_message_id')
+            if isinstance(value, str) and value:
+                return value
+    return ''
+
+
+# LLM: 此回执只表示精确 lookup 的已送达事实或明确未知，绝不产生额外外部发送。
+# 函数用途: 让原 sender 继续补 canonical 或冻结未知结果。
+def _topic_receipt(context, envelope, key, row, *, sent):
+    from ..conversation.channels import ComponentDeliveryReceipt, DeliveryReceipt
+
+    return DeliveryReceipt(channel=context.channel, target=context.target, content=envelope.content,
+        thread_id=context.thread_id, task_id=context.task_id, delivery_status='sent' if sent else 'unknown',
+        receipt_id='alert-topic:' + key if sent else '',
+        component_receipts=(ComponentDeliveryReceipt(component_id='root', message_key='alert-topic:' + key,
+            phase='send_confirmed', effect_outcome='confirmed', provider_message_id=row['root_message_id']),) if sent else (),
+        phase='send_confirmed' if sent else 'unknown', effect_outcome='confirmed' if sent else 'unknown')

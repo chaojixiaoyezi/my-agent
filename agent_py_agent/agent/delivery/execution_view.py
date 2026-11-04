@@ -27,8 +27,12 @@ def project_execution_view(events, *, request_id: str, source_revision: int | No
         if index == MAX_EXECUTION_EVENTS:
             events_truncated = True
             break
-        if isinstance(event, Mapping) and event.get("request_id", request_id) != request_id:
-            continue
+        if isinstance(event, Mapping):
+            if event.get('kind') in {'subagent_progress', 'session_task_progress'}:
+                if event.get('parent_request_id') != request_id:
+                    continue
+            elif event.get("request_id", request_id) != request_id:
+                continue
         if isinstance(event, Mapping) and event.get("kind") in {"request_started", "request_completed", "request_failed"}:
             phase = event.get("phase", event.get("status"))
             if isinstance(phase, str) and request_phase not in _TERMINAL_PHASES:
@@ -48,7 +52,7 @@ def project_execution_view(events, *, request_id: str, source_revision: int | No
         else:
             step_id = call_id
         # 内部身份带来源种类，显示键不能与真实 call_id 碰撞而合并操作。
-        key = (display_only, step_id)
+        key = (facts.get('_source_kind', 'tool'), display_only, step_id)
         seen.add(key)
         if key not in steps and len(steps) >= limit:
             continue
@@ -65,10 +69,16 @@ def project_execution_view(events, *, request_id: str, source_revision: int | No
             "handler_executed": (facts["handler_executed"] if type(facts.get("handler_executed")) is bool
                                  else previous.get("handler_executed")),
             "duration_ms": duration if type(duration) is int and duration >= 0 else previous.get("duration_ms"),
-            "label": bounded_text(facts.get("label", facts.get("detail", previous.get("label", facts["tool_name"]))),
-                                  max_bytes=MAX_LABEL_BYTES),
+            "label": _step_label(facts, previous),
             "_terminal": bool(facts.get("_terminal")) or phase in _TERMINAL_PHASES,
         }
+        excerpt = facts.get('result_excerpt', previous.get('result_excerpt'))
+        if isinstance(excerpt, str):
+            step['result_excerpt'] = step_display_text(excerpt, max_chars=60)
+        batch_index = facts.get('batch_index', previous.get('batch_index'))
+        batch_total = facts.get('batch_total', previous.get('batch_total'))
+        if type(batch_index) is int and type(batch_total) is int and 0 <= batch_index <= batch_total and batch_total > 0:
+            step.update(batch_index=batch_index, batch_total=batch_total)
         if isinstance(facts.get("detail_ref"), str):
             step["detail_ref"] = bounded_text(facts["detail_ref"], max_bytes=240)
         steps[key] = step
@@ -96,6 +106,13 @@ def _tool_facts(event: object) -> dict | None:
     kind = event.get("kind")
     if kind == "tool_progress":
         facts = event.get("progress", event.get("payload", event))
+    elif kind in {'subagent_progress', 'session_task_progress'}:
+        identity = event.get('run_id' if kind == 'subagent_progress' else 'task_id')
+        if not isinstance(identity, str) or not identity:
+            return None
+        return {**event, 'call_id': f'{kind}:{identity}', '_source_kind': kind,
+            'tool_name': '后台子代理' if kind == 'subagent_progress' else '后台任务',
+            'request_id': event.get('parent_request_id')}
     elif kind in {"tool_call", "tool_result"}:
         facts = event.get("call" if kind == "tool_call" else "result", event)
         if isinstance(facts, (ToolCall, ToolResult)):
@@ -118,6 +135,29 @@ def _tool_facts(event: object) -> dict | None:
         if "ok" not in result and facts.get("status") in {"succeeded", "failed"}:
             result["ok"] = facts["status"] == "succeeded"
     return result
+
+
+# LLM: 显式 display 字段是脱敏展示提示，不读取 arguments/output 或自然语言声明来创建执行事实。
+# 函数用途: 汇总连接器、接口路径与关键子命令，保留旧标签回退。
+def _step_label(facts, previous):
+    display = facts.get('display')
+    if isinstance(display, Mapping):
+        values = [step_display_text(display.get(key), max_chars=80)
+                  for key in ('connector_id', 'endpoint_path', 'command_name', 'subcommand')]
+        if any(values):
+            return bounded_text(' '.join(value for value in values if value), max_bytes=MAX_LABEL_BYTES)
+    value = facts.get('label', facts.get('detail', previous.get('label', facts['tool_name'])))
+    return bounded_text(step_display_text(value, max_chars=240), max_bytes=MAX_LABEL_BYTES)
+
+
+# LLM: 展示文本先走统一凭据与宿主路径投影；仅展示有界纯文本，不从中解析状态或控制。
+# 函数用途: 生成单行的结果节选或步骤标签。
+def step_display_text(value, *, max_chars=60):
+    from ..conversation.channels import project_host_paths_for_channel, project_user_reply
+
+    text = value if isinstance(value, str) else ''
+    text = project_host_paths_for_channel(project_user_reply(text[:4096]).content, 'feishu')
+    return ' '.join(text.split())[:max_chars]
 
 
 # LLM: 按 UTF-8 字节预算裁剪并丢弃非法 surrogate；不截断多字节字符，不调用网络、时钟或持久化。
