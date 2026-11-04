@@ -242,3 +242,79 @@ def test_legacy_preimage_has_execution_reference(tmp_path):
     previous = store.get_script('demo')['execution_definition_ref']
     store.save_script(descriptor(), 'new\n')
     assert get_version(tmp_path, 'script', 'demo', 1)['execution_definition_ref'] == previous
+
+
+def test_unchanged_legacy_workflow_save_records_complete_script_pins(tmp_path):
+    from agent_py_agent.agent.assets.workflow_store import with_workflow_step_refs
+
+    ScriptStore(tmp_path).save_script(descriptor(), 'print(1)\n')
+    definition = with_workflow_step_refs(WorkflowDefinition(
+        AssetDescriptor('flow', 'workflow', '旧工作流', revision=7),
+        (WorkflowStepSpec('fetch', 'fetch', 'deterministic_script', script_id='demo'),)))
+    root = tmp_path / 'workflows/flow'
+    root.mkdir(parents=True)
+    payload = definition.descriptor.to_dict() | {'steps': [step.to_dict() for step in definition.steps],
+                                               'body_markdown': ''}
+    (root / 'workflow.json').write_text(json.dumps(payload))
+    (root / 'WORKFLOW.md').write_text('')
+    assert latest_version(tmp_path, 'workflow', 'flow') is None
+    saved = WorkflowStore(tmp_path).save_workflow(definition, expected_revision=7)
+    assert saved.descriptor.revision == 8
+    legacy = get_version(tmp_path, 'workflow', 'flow', 1)
+    assert legacy['legacy'] is True and legacy['pins']['scripts']['demo']['version'] == 1
+    assert latest_version(tmp_path, 'workflow', 'flow')['pins']['scripts'] == legacy['pins']['scripts']
+
+
+def composition_fixture(home):
+    scripts, workflows = ScriptStore(home), WorkflowStore(home)
+    scripts.save_script(descriptor(), 'print(1)\n')
+    base = workflows.save_workflow(WorkflowDefinition(AssetDescriptor('base', 'workflow', '基础流程'),
+        (WorkflowStepSpec('fetch', 'fetch', 'deterministic_script', script_id='demo'),), '# 历史正文'))
+    published = latest_version(home, 'workflow', 'base')
+    scripts.save_script(descriptor(), 'print(2)\n')
+    hidden = replace(base, descriptor=AssetDescriptor('monitor-watch', 'workflow', '隐藏组合', metadata={
+        'hidden': True, 'base_workflow_pin': {'id': 'base', 'version': published['version']},
+        'composition': {'monitor_id': 'watch', 'base_workflow_id': 'base', 'base_version': published['version'],
+                        'appended_step_ids': ['tail']}}))
+    return scripts, workflows, hidden, published
+
+
+def test_composition_hook_keeps_historical_base_pins_and_appended_dependencies(tmp_path):
+    scripts, workflows, hidden, base = composition_fixture(tmp_path)
+    scripts.save_script(descriptor('other'), 'print(3)\n')
+    hidden = replace(hidden, steps=hidden.steps + (
+        WorkflowStepSpec('tail', '追加查询', 'deterministic_script', script_id='other'),))
+    workflows.save_workflow(hidden)
+    published = latest_version(tmp_path, 'workflow', 'monitor-watch')
+    assert published['pins']['scripts']['demo'] == base['pins']['scripts']['demo']
+    assert published['pins']['scripts']['other']['version'] == 1
+    assert published['pins']['workflows'] == {'base': {'version': base['version']}}
+    assert blob_get(tmp_path, published['side_blobs']['WORKFLOW.md']) == '# 历史正文'.encode()
+    workflows.save_workflow(hidden)
+    assert latest_version(tmp_path, 'workflow', 'monitor-watch') == published
+
+
+def test_composition_hook_does_not_publish_conflicting_dependency_identities(tmp_path):
+    from agent_py_agent.agent.assets.version_hook import version_operation
+
+    _, workflows, hidden, _ = composition_fixture(tmp_path)
+    hidden = replace(hidden, steps=hidden.steps + (
+        WorkflowStepSpec('tail', '同名但不同版本查询', 'deterministic_script', script_id='demo'),))
+    with version_operation() as operation:
+        workflows.save_workflow(hidden)
+    assert operation['recording']['recorded'] is False
+    assert latest_version(tmp_path, 'workflow', 'monitor-watch') is None
+
+
+@pytest.mark.parametrize('missing', ['base_payload', 'script_code'])
+def test_composition_hook_rejects_incomplete_base_snapshots(tmp_path, missing):
+    from agent_py_agent.agent.assets.version_hook import version_operation
+
+    _, workflows, hidden, base = composition_fixture(tmp_path)
+    digest = (base['payload_blob'] if missing == 'base_payload'
+              else get_version(tmp_path, 'script', 'demo', base['pins']['scripts']['demo']['version'])['code_sha256'])
+    (tmp_path / 'data/asset_evolution/blobs' / digest[:2] / digest).unlink()
+    with version_operation() as operation:
+        workflows.save_workflow(hidden)
+    assert operation['recording']['recorded'] is False
+    assert latest_version(tmp_path, 'workflow', 'monitor-watch') is None

@@ -91,16 +91,26 @@ def asset_projection(owner_home, kind, asset_id, metadata, *, workspace_root=Non
             'member_of': normalize_member_of(metadata.get('member_of')), 'source_system': metadata.get('source_system', '')}
 
 
-# LLM: W8字段缺失或类型不符按缺省处理，不把外部展示文字当pin。
-# 函数用途: 按现有监控描述符生成绑定版本投影。
+# LLM: 沿唯一描述符适配公开列表refs；只认准确workflow身份，保留旧绑定和版本展示，不写绑定或升级。
+# 函数用途: 为基础工作流及隐藏组合返回真实监控绑定。
 def bound_monitors(owner_home, workflow_id):
     result = []
     for row in list_monitor_descriptors(owner_home):
         metadata = row.get('metadata') if isinstance(row.get('metadata'), dict) else {}
         binding = metadata.get('workflow_binding')
         binding = binding if isinstance(binding, dict) else {}
-        target = binding.get('workflow_id')
-        if target != workflow_id and workflow_id not in (row.get('refs') or {}).get('workflows', []):
+        refs = AssetDescriptor.from_dict(_descriptor(row)).refs
+        workflows = set(refs.workflows)
+        if isinstance(binding.get('workflow_id'), str):
+            workflows.add(binding['workflow_id'])
+        for key in ('base_target', 'execution_target'):
+            target = metadata.get(key)
+            if isinstance(target, dict) and target.get('kind') == 'workflow':
+                workflows.add(target.get('asset_id'))
+        composition = metadata.get('composition')
+        if isinstance(composition, dict):
+            workflows.add(composition.get('base_workflow_id'))
+        if workflow_id not in workflows:
             continue
         item = {'monitor_id': row['id']}
         for key in ('alias', 'pinned_version', 'upgrade_policy'):
