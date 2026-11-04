@@ -290,9 +290,13 @@ def test_summary_write_does_not_wait_for_asset_lock(store):
     assert store.fold_run_summaries("sample")["runtime_summary"]["run_count"] == 1
 
 
+# LLM: 新完成直接入聚合，旧输入才有spool ACK；保留提交后失败及重启去重的原断言。
+# 函数用途: 用旧叶准备原迁移窗口，核对提交后ACK失败不会导致重复累计。
 def test_commit_before_ack_replay_survives_new_store(store, monkeypatch):
     spool = importlib.import_module("agent_py_agent.agent.workflows.run_summary_spool")
-    store.record_run_summary("sample", "failed", 4, blocking=False, run_id="durable")
+    # 新完成没有spool ACK；此处沿原内部入口准备旧输入，保留迁移ACK重放的全部断言。
+    spool.append(store.owner_home, "script", "sample",
+                 dict(status="failed", duration_ms=4, run_id="durable"))
     unlink = spool.unlink_file_beneath
 
     def fail_ack(*args, **kwargs):
@@ -490,6 +494,8 @@ def test_edit_does_not_erase_idempotency_receipt(store):
     assert store.get_script("sample")["runtime_summary"]["run_count"] == 1
 
 
+# LLM: 只按实际生命周期定位旧输入目录，坏JSON和叶链接仍必须拒绝且不污染摘要。
+# 函数用途: 保持旧输入损坏和真实链接的安全拒绝回归。
 def test_spool_corrupt_record_and_leaf_symlink_fail_closed(store, tmp_path):
     spool = importlib.import_module("agent_py_agent.agent.workflows.run_summary_spool")
     spool.append(
@@ -498,7 +504,9 @@ def test_spool_corrupt_record_and_leaf_symlink_fail_closed(store, tmp_path):
         "sample",
         {"run_id": "r", "status": "succeeded", "duration_ms": 1},
     )
-    directory = store.owner_home / ".run-summary-spool/script/sample"
+    # 只跟随内部spool生命周期分区，不改变损坏记录和链接拒绝断言。
+    directory = store.owner_home.joinpath(*spool._parts("script", "sample",
+        store._summary_snapshot("sample")["metadata"].get("_run_summary_generation", "")))
     leaf = next(directory.glob("*.json"))
     leaf.write_text("{bad json", encoding="utf-8")
     with pytest.raises(ValueError):
@@ -568,12 +576,17 @@ def test_real_script_runner_spools_then_folds(store):
 # LLM: 子进程真正退出，不用内存缓存模拟重启；只在测试资产根注入中断点。
 # 函数用途: 验证事务中断回滚与提交后ACK中断均可重放且最终只计一次。
 @pytest.mark.parametrize("phase", ["journal", "ack"])
+# LLM: 原journal/ACK退出边界仍属于旧spool迁移；真实子进程和重启断言不替换。
+# 函数用途: 准备旧输入后在原两个持久化边界退出，核对重开不丢失、不双算。
 def test_process_crash_and_reopen(store, phase):
     import os
     import subprocess
     import sys
 
-    store.record_run_summary("sample", "succeeded", 1, blocking=False, run_id="crash-run")
+    from agent_py_agent.agent.workflows import run_summary_spool
+    # journal/ACK是旧输入迁移的两个边界；新完成事务的退出重放另有独立回归。
+    run_summary_spool.append(store.owner_home, "script", "sample",
+                             dict(status="succeeded", duration_ms=1, run_id="crash-run"))
     code = """import os, sys
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.workflows import run_summary_spool
