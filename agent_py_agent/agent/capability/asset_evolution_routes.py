@@ -126,8 +126,8 @@ def route_existing_script(home, script_id, code, *, maintenance_mode='observe', 
     raise AssertionError('bounded CAS loop exhausted')
 
 
-# LLM: 回执、来源和当前发布修订均须同试用身份；SHA相同不代表同定义，最终恢复仍走原Store CAS。
-# 函数用途: 在两次非环境失败后通过store写入恢复版本并记失败兼容边。
+# LLM: 简短回执按SHA及可选版本匹配；冻结回执仍须完整来源/定义证明，当前发布修订与最终Store CAS不放宽。
+# 函数用途: 校验两种回执后累计非环境失败，通过store恢复版本并记失败兼容边。
 def observe_evolution_trial(home, script_id, execution, *, commit=None, failure_threshold=2):
     safe_asset_id(script_id)
     parts = ('data', 'asset_evolution', 'trials', script_id + '.json')
@@ -141,13 +141,19 @@ def observe_evolution_trial(home, script_id, execution, *, commit=None, failure_
             trial = read_evolution_json(home, parts)
             call_id = execution.get('call_id')
             if (not trial or not trial.get('active') or not call_id or call_id in trial.get('seen_calls', [])
-                    or execution.get('verified') is not True or execution.get('source_scope') != 'owner'
                     or query_analysis_blocked(execution)
                     or execution.get('sha256') != trial.get('promoted_sha256')
                     or not trial.get('promoted_definition_ref')
-                    or execution.get('execution_definition_ref') != trial['promoted_definition_ref']
-                    or execution.get('published_definition_ref') != trial['promoted_definition_ref']
-                    or execution.get('requested_version') not in (None, trial['promoted_version'])):
+                    or any(execution.get(key) not in (None, trial['promoted_version'])
+                           for key in ('version', 'requested_version', 'execution_version'))):
+                return None
+            # 冻结证明只要出现就必须完整有效，不能把部分或明确未验证的证据降为简短SHA回执。
+            capture_fields = ('schema_version', 'verified', 'source_scope', 'execution_definition_ref',
+                              'published_definition_ref', 'requested_version', 'execution_version')
+            if (any(key in execution for key in capture_fields)
+                    and (execution.get('verified') is not True or execution.get('source_scope') != 'owner'
+                         or execution.get('execution_definition_ref') != trial['promoted_definition_ref']
+                         or execution.get('published_definition_ref') != trial['promoted_definition_ref'])):
                 return None
             store = ScriptStore(home)
             current = store.get_script(script_id)
