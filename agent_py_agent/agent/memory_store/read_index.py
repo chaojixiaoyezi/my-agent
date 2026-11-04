@@ -69,7 +69,7 @@ class MemoryReadIndex:
         except (sqlite3.Error, ValueError, TypeError):
             return {"status": "unavailable", "indexed_records": None, "total_records": root["total_records"]}
         current = (state.get("index_signature") == root.get("index_signature", root["operation_id"])
-                   and state.get("format_version") == 2 and state.get("owner") == self.store.tombstones.owner)
+                   and state.get("format_version") == 3 and state.get("owner") == self.store.tombstones.owner)
         return {"status": ("complete" if state.get("complete") else "partial") if current else "missing",
                 "operation_id": root["operation_id"], "generation": root["generation"],
                 "indexed_records": state.get("indexed_records", 0) if current else 0,
@@ -101,12 +101,12 @@ class MemoryReadIndex:
                 if record is None:
                     raise ValueError("MEMORY_AUTHORITY_UNREADABLE")
                 prepared.append((record.entry_id, record.version, memory_content_hash(record.content),
-                    segment_no, row_no, _lexical_projection(record)))
+                    segment_no, row_no, record.expires_at, _lexical_projection(record)))
                 row_no += 1
             if row_no == len(rows):
                 segment_no, row_no = segment_no + 1, 0
         state = {"owner": self.store.tombstones.owner, "operation_id": root["operation_id"],
-                 "index_signature": root.get("index_signature", root["operation_id"]), "format_version": 2,
+                 "index_signature": root.get("index_signature", root["operation_id"]), "format_version": 3,
                  "generation": root["generation"], "indexed_records": before["indexed_records"] + len(prepared),
                  "cursor": [segment_no, row_no], "complete": segment_no == len(root["segments"])}
         if admission is not None:
@@ -122,19 +122,21 @@ class MemoryReadIndex:
             with closing(self._connect(write=True)) as conn, conn:
                 conn.execute("PRAGMA secure_delete=ON")
                 conn.execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-                conn.execute("CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,version INTEGER,content_hash TEXT,segment INTEGER,row_no INTEGER,search_text TEXT)")
+                conn.execute("CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,version INTEGER,content_hash TEXT,segment INTEGER,row_no INTEGER,expires_at REAL,search_text TEXT)")
+                if "expires_at" not in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}:
+                    conn.execute("ALTER TABLE entries ADD COLUMN expires_at REAL")
                 conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(id UNINDEXED,search_text,tokenize='trigram')")
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute("SELECT value FROM metadata WHERE key='watermark'").fetchone()
                 actual = json.loads(row[0]) if row else {}
                 if actual.get("owner") not in (None, state["owner"]):
                     raise ValueError("MEMORY_INDEX_OWNER_MISMATCH")
-                if (actual.get("index_signature") != state["index_signature"] or actual.get("format_version") != 2):
+                if (actual.get("index_signature") != state["index_signature"] or actual.get("format_version") != 3):
                     conn.execute("DELETE FROM entries")
                     conn.execute("DELETE FROM entries_fts")
                 elif actual.get("indexed_records", 0) != before["indexed_records"]:
                     raise ValueError("MEMORY_INDEX_CURSOR_CONFLICT")
-                conn.executemany("INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?)", prepared)
+                conn.executemany("INSERT OR REPLACE INTO entries(id,version,content_hash,segment,row_no,expires_at,search_text) VALUES (?,?,?,?,?,?,?)", prepared)
                 conn.executemany("INSERT INTO entries_fts(id,search_text) VALUES (?,?)", [(row[0], row[-1]) for row in prepared])
                 conn.execute("INSERT OR REPLACE INTO metadata VALUES ('watermark',?)", (json.dumps(state),))
         if self.coordinator_io:
@@ -165,11 +167,30 @@ class MemoryReadIndex:
                 return [], coverage
             if terms:
                 expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-                rows = conn.execute("SELECT e.* FROM entries_fts f JOIN entries e ON e.id=f.id WHERE entries_fts MATCH ? ORDER BY rank LIMIT ?", (expression, limit + 1)).fetchall()
+                rows = conn.execute("SELECT e.* FROM entries_fts f JOIN entries e ON e.id=f.id WHERE entries_fts MATCH ? AND (e.expires_at IS NULL OR e.expires_at=0 OR e.expires_at>?) ORDER BY rank LIMIT ?", (expression, time.time(), limit + 1)).fetchall()
             else:
-                rows = conn.execute("SELECT * FROM entries WHERE instr(search_text,?) > 0 ORDER BY id LIMIT ?", (folded, limit + 1)).fetchall()
+                rows = conn.execute("SELECT * FROM entries WHERE instr(search_text,?) > 0 AND (expires_at IS NULL OR expires_at=0 OR expires_at>?) ORDER BY id LIMIT ?", (folded, time.time(), limit + 1)).fetchall()
         coverage = {**coverage, "result_truncated": len(rows) > limit}
         return [{**dict(row), "operation_id": root["operation_id"]} for row in rows[:limit]], coverage
+
+    # LLM: 最终注入只点查已入选身份；缺/旧索引返回None交有界权威降级，不能全账或全live枚举。
+    # 函数用途: 用本代索引定位最终确认的一小批正式事实。
+    def resolve_ids(self, ids):
+        root = self.store.manifest()
+        if root is None:
+            return None
+        try:
+            with closing(self._connect()) as conn:
+                conn.execute("BEGIN")
+                if self.coverage(root, connection=conn)["status"] != "complete":
+                    return None
+                candidates = []
+                for entry_id in dict.fromkeys(ids):
+                    if row := conn.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone():
+                        candidates.append({**dict(row), "operation_id": root["operation_id"]})
+        except (FileNotFoundError, sqlite3.Error):
+            return None
+        return self.resolve(candidates, operation_id=root["operation_id"])
 
     # LLM: 坐标只解释于绑定根；换代显式冲突而非完整空命中，读取后再次核根及当前墓碑。
     # 函数用途: 将候选恢复为当前真正可见的正式事实。
@@ -182,7 +203,6 @@ class MemoryReadIndex:
             bound.add(operation_id)
         if root is None or bound != {root["operation_id"]}:
             raise MemoryReadIndexGenerationConflict("MEMORY_READ_INDEX_GENERATION_CONFLICT")
-        blocked = self.store.tombstones.load()
         loaded, records = {}, []
         for item in candidates:
             index, offset = item["segment"], item["row_no"]
@@ -194,17 +214,15 @@ class MemoryReadIndex:
             if not 0 <= offset < len(rows):
                 continue
             record = _memory_record_from_obj(rows[offset])
-            if (record is not None and not self.store.tombstones.excludes(record.entry_id,
-                    memory_content_hash(record.content), records=blocked) and record.entry_id == item["id"]
+            if (record is not None and record.entry_id == item["id"]
                     and (not record.expires_at or record.expires_at > time.time())
                     and record.version == item["version"] and memory_content_hash(record.content) == item["content_hash"]):
                 records.append(record)
         current = self.store.manifest()
         if current is None or current["operation_id"] != root["operation_id"]:
             raise MemoryReadIndexGenerationConflict("MEMORY_READ_INDEX_GENERATION_CONFLICT")
-        blocked = self.store.tombstones.load()
-        return [record for record in records if not self.store.tombstones.excludes(
-            record.entry_id, memory_content_hash(record.content), records=blocked)]
+        blocked = self.store.tombstones.blocked((r.entry_id, memory_content_hash(r.content)) for r in records)
+        return [record for record in records if record.entry_id not in blocked]
 
     # LLM: 删除后整份派生库可丢弃，清空字节后移除精确DB及journal/WAL/SHM；调用方持formal锁，无常驻连接。
     # 函数用途: 让已遗忘正文不留在SQLite空闲页或FTS历史段中。

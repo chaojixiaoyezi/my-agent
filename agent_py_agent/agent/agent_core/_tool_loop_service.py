@@ -724,6 +724,7 @@ def _native_compact_floor_tokens(
 # LLM: An authoritative turn binds the applied scope/view to its exact thread before summary
 # generation and rechecks stop before classifying an empty result; only real empty summaries
 # consume the shared circuit.
+#   摘要内部最后一次检查之后的取消也以原operation撤销，不能漏终态或误记失败。
 # 函数用途: 按本次摘要范围绑定代理线程并可中断地生成完整摘要，真实失败时才记录统一熔断事实。
 def _live_compact_binding_and_summary(
     agent: object,
@@ -786,7 +787,11 @@ def _live_compact_binding_and_summary(
         provider_prompt=provider_prompt,
         provider_outcome=provider_outcome,
     )
-    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    try:
+        raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    except InterruptedError:
+        _emit_native_compact_progress(params, phase="superseded", stage="candidate_discarded", percent=0, **progress)
+        raise
     if binding is None or summary:
         return (
             binding,
@@ -896,6 +901,7 @@ def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
 
 # LLM: 候选与发送同源，CAS 失败恢复原列表；赢得 CAS 并刷新视图后才向 IR 补带方法，提交后异常不回滚。联测中断/前缀。
 #   补带预算按距再次触发压缩的余量（trigger_tokens - after_tokens）封顶，不能把刚压缩完的上下文又填满。
+#   真正计量前切换私有阶段；CAS后的异常仅补完成观测（未知最终计量为0），保留原异常与持久成功事实。
 # 函数用途: 提交后补带再计量最终请求，明确区分提交前回滚与提交后投递，健康目标仍为优选。
 def _apply_native_compact_plan(
     agent: object,
@@ -914,6 +920,9 @@ def _apply_native_compact_plan(
     ) if plan.semantic_summary else None
     try:
         raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+        timing = params.live_archive_state.get("_compact_progress_timing", {}).get("clock")
+        if timing is not None:
+            timing.enter_stage("measuring")
         candidate = reduce_native_compact_candidate(
             NativeCompactWindow(
                 params.tool_ir_history, params.tool_context, params.archive_tool_calls,
@@ -982,21 +991,28 @@ def _apply_native_compact_plan(
         raise
 
     # 已赢得 CAS：同范围视图刷新与投影异常原样上抛，不回滚已提交历史，也不记作压缩失败。
-    if params.compact_context is not None:
-        from ..capability.method_carry import prepare_conversation_method_carry
+    try:
+        if params.compact_context is not None:
+            from ..capability.method_carry import prepare_conversation_method_carry
 
-        _refresh_native_compact_context(
-            params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
-            provider_compaction=plan.provider_compaction,
-            agent=agent,
+            _refresh_native_compact_context(
+                params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
+                provider_compaction=plan.provider_compaction,
+                agent=agent,
+            )
+            prepare_conversation_method_carry(agent, params, budget_cap=plan.trigger_tokens - after_tokens)
+        # 提交视图刷新和方法补带都改变发送材料，完成事件不能沿用候选的旧数字。
+        after_tokens = _settled_native_compact_tokens(params, estimator, commit.generation)
+        return _publish_native_compact_result(
+            agent, params, plan, dropped=dropped, after_tokens=after_tokens,
+            preserved_pairs=preserved_pairs, canonical_generation=commit.generation,
         )
-        prepare_conversation_method_carry(agent, params, budget_cap=plan.trigger_tokens - after_tokens)
-    # 提交视图刷新和方法补带都改变发送材料，完成事件不能沿用候选的旧数字。
-    after_tokens = _settled_native_compact_tokens(params, estimator, commit.generation)
-    return _publish_native_compact_result(
-        agent, params, plan, dropped=dropped, after_tokens=after_tokens,
-        preserved_pairs=preserved_pairs, canonical_generation=commit.generation,
-    )
+    finally:
+        timing = params.live_archive_state.get("_compact_progress_timing", {}).get("clock")
+        if timing is not None and not timing.terminal_logged:
+            # 持久压缩已成功；这里只补完成观测，不吞后处理异常。0沿用未知计量口径，不能冒充最终发送大小。
+            _emit_native_compact_progress(params, phase="completed", stage="completed", percent=100,
+                **{**_native_compact_progress_values(plan), "generation": commit.generation})
 
 
 # LLM: Rollback restores both provider IR and its mechanical guidance projection atomically from
@@ -1330,8 +1346,6 @@ def _emit_native_compact_progress(
 ) -> bool:
     sink = params.effective_on_chunk
     writer = getattr(sink, "write_conversation_compact_progress", None)
-    if not callable(writer):
-        return False
     payload = {
         "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         "phase": str(phase),
@@ -1347,6 +1361,20 @@ def _emit_native_compact_progress(
         "source_messages": max(0, int(source_messages or 0)),
         "error_code": str(error_code or "").strip(),
     }
+    from ..conversation.authority import AGENT_THREAD_ID_ATTR
+    from ..conversation.compact_progress import CompactProgressTiming
+
+    state = params.live_archive_state
+    holder = state.get("_compact_progress_timing") if isinstance(state, dict) else None
+    if not isinstance(holder, dict) or holder.get("operation_id") != operation_id:
+        holder = {"operation_id": operation_id, "clock": CompactProgressTiming()}
+        if isinstance(state, dict):
+            state["_compact_progress_timing"] = holder
+    attrs = getattr(params, "task_attributes", None) or {}
+    holder["clock"].apply(payload, logger=_LOGGER,
+        thread_id=attrs.get(AGENT_THREAD_ID_ATTR) or attrs.get("conversation_thread_id", ""))
+    if not callable(writer):
+        return False
     try:
         return writer(payload) is not False
     except Exception:
@@ -1959,110 +1987,128 @@ def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) ->
 # 裁决顺序须同步核对中断、续跑和工具循环测试；返回具名结果，调用方从 result.params 取最终参数。
 #   收口时只读取当前空正文预算形成诊断；原待输入失效上限清除公开text/工具，保留原块与pending事实，不加采样。
 #   原continue/break/工具分支直接判断，先前的子代理等待和必要回复队列顺序不变。
+# LLM: 长度前缀只活在当前循环；finally 覆盖中断、供应商异常和旁路终态，未交付候选必须登记排除并消费。
+#   外层持有交付确认权；独立decision调用仍在它自己的同步返回边界记账。
 # 函数用途: 执行主子共用工具循环并带出只读诊断，仍按原响应、中断和预算推进。
 def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult:
     from ..conversation.task_rejected_actions import sync_task_rejected_actions
     sync_task_rejected_actions(agent, params)
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
+    params.live_archive_state["_defer_assistant_delivery_confirmation"] = True
     repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
 
-    while True:
-        if is_interrupted():
-            final_response = _interrupted_conversation_response(agent)
-            break
-        # R1-03：每轮续租执行权锁（fail-silent），活 worker 持续占有防误接管。
-        _renew_exec_lock_if_held(agent, params)
-        tool_rounds, pending_final, drained, pending_prompt = _pending_drain_outcome(
-            agent, params, tool_rounds
-        )
-        if drained and pending_final is None:
-            continue
-        if drained:
-            final_response = pending_final
-            # 归属面: 收口回复自带"产出它的那次出站 prompt"时就用它，绝不与上一轮的 prompt 混配
-            # （没有自带 prompt 的宿主合成回复保持上一轮的值，语义不变）。
-            final_prompt = pending_prompt or final_prompt
-            break
-        turn = _model_turn_or_retry(agent, params, tool_rounds, provider_response_repairs)
-        params = turn.params
-        final_prompt, final_response = turn.prompt, turn.response
-        provider_response_repairs = turn.provider_response_repairs
-        if turn.retry_after_provider_response:
-            continue
-        if is_interrupted():
-            final_response = _interrupted_conversation_response(agent)
-            break
-        if turn.should_stop:
-            break
-        # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
-        if _pending_turn_input_invalidates_response(agent, params):
-            # 正常情况下下一轮就把输入注入本回合，不会连续作废；连续作废说明判据出了问题，
-            # 到上限就用结构化原因收尾（绝不无限重来）。
-            if _pending_turn_input_invalidation_exhausted(params):
-                params.live_archive_state["turn_end_reason"] = PENDING_TURN_INPUT_LIMIT_REASON
-                # 达到原失效上限也不能把过期候选确认给用户；保留原块供审计，后续出口只认清空后的text。
-                final_response = replace(final_response, text="", tool_use_blocks=[], runtime_status="failed",
-                    runtime_reason=PENDING_TURN_INPUT_LIMIT_REASON, runtime_source="tool_loop", turn_end_reason="error")
+    try:
+        while True:
+            if is_interrupted():
+                final_response = _interrupted_conversation_response(agent)
                 break
-            continue
-        natural_reply_verdict, final_response = _natural_user_reply_step(agent, params, final_response)
-        if natural_reply_verdict == "retry":
-            continue
-        if natural_reply_verdict == "finish":
-            break
-        repair_counters, action = _response_action(agent, params, final_response, repair_counters)
-        # 会话运行时 root/child lifecycle boundary: only a plain final response is
-        # deferred.  Real tool calls remain executable while children run.
-        if action.action == "break":
-            if wait_response := task_local_wait_response_for_open_subagents(
-                agent,
-                params,
-                response=final_response,
-            ):
-                final_response = wait_response
+            # R1-03：每轮续租执行权锁（fail-silent），活 worker 持续占有防误接管。
+            _renew_exec_lock_if_held(agent, params)
+            tool_rounds, pending_final, drained, pending_prompt = _pending_drain_outcome(
+                agent, params, tool_rounds
+            )
+            if drained and pending_final is None:
+                continue
+            if drained:
+                final_response = pending_final
+                # 归属面: 收口回复自带"产出它的那次出站 prompt"时就用它，绝不与上一轮的 prompt 混配
+                # （没有自带 prompt 的宿主合成回复保持上一轮的值，语义不变）。
+                final_prompt = pending_prompt or final_prompt
                 break
-            # 子代理仍活跃只是状态/展示事实（agent tree/child 面板已在展示）：既不替换模型正文，
-            # 也不改写 turn-end。task_local 的等待由 completion.py 的 direct_child_wait marker
-            # + 子代理生命周期事件负责；主/子递归同规则。
-            if queue_interim_reply_for_active_named_work(
-                agent,
-                params,
-                tool_rounds=tool_rounds,
-            ):
+            turn = _model_turn_or_retry(agent, params, tool_rounds, provider_response_repairs)
+            params = turn.params
+            final_prompt, final_response = turn.prompt, turn.response
+            provider_response_repairs = turn.provider_response_repairs
+            if turn.retry_after_provider_response:
                 continue
-            if queue_reply_for_audit_prepare(
-                agent,
-                params,
-                response=final_response,
-                tool_rounds=tool_rounds,
-            ):
+            if is_interrupted():
+                final_response = _interrupted_conversation_response(agent)
+                break
+            if turn.should_stop:
+                break
+            # /btw 可能在 provider 正在生成时到达；旧响应此时已过期，不能据此开工具或结束任务。
+            if _pending_turn_input_invalidates_response(agent, params):
+                # 正常情况下下一轮就把输入注入本回合，不会连续作废；连续作废说明判据出了问题，
+                # 到上限就用结构化原因收尾（绝不无限重来）。
+                if _pending_turn_input_invalidation_exhausted(params):
+                    params.live_archive_state["turn_end_reason"] = PENDING_TURN_INPUT_LIMIT_REASON
+                    # 达到原失效上限也不能把过期候选确认给用户；保留原块供审计，后续出口只认清空后的text。
+                    final_response = replace(final_response, text="", tool_use_blocks=[], runtime_status="failed",
+                        runtime_reason=PENDING_TURN_INPUT_LIMIT_REASON, runtime_source="tool_loop", turn_end_reason="error")
+                    break
                 continue
-            # 会话运行时 式自然收口：模型看过本轮真实工具结果后给出 plain final，
-            # 当前 turn 就结束。operation/task_progress 继续作为审计和工作记忆，
-            # 不能据此覆盖正文、强制返工或另起后台续跑。
-        if action.action == "continue":
-            continue
-        if action.action == "break":
-            routed_response = action.response
-            final_response = routed_response if routed_response is not None else final_response
-            break
-        final_prompt, final_response, tool_rounds = _tool_step_or_limit(
-            agent,
-            _ToolStepRequest(
-                params=params,
-                tool_rounds=tool_rounds,
-                action=action,
-                current_prompt=final_prompt,
-            ),
-        )
-        if final_response:
-            break
+            natural_reply_verdict, final_response = _natural_user_reply_step(agent, params, final_response)
+            if natural_reply_verdict == "retry":
+                continue
+            if natural_reply_verdict == "finish":
+                break
+            repair_counters, action = _response_action(agent, params, final_response, repair_counters)
+            # 会话运行时 root/child lifecycle boundary: only a plain final response is
+            # deferred.  Real tool calls remain executable while children run.
+            if action.action == "break":
+                if wait_response := task_local_wait_response_for_open_subagents(
+                    agent,
+                    params,
+                    response=final_response,
+                ):
+                    final_response = wait_response
+                    break
+                # 子代理仍活跃只是状态/展示事实（agent tree/child 面板已在展示）：既不替换模型正文，
+                # 也不改写 turn-end。task_local 的等待由 completion.py 的 direct_child_wait marker
+                # + 子代理生命周期事件负责；主/子递归同规则。
+                if queue_interim_reply_for_active_named_work(
+                    agent,
+                    params,
+                    tool_rounds=tool_rounds,
+                ):
+                    from .tool_loop.response_decision import _finalize_assistant_delivery
 
-    from .tool_loop.reply_diagnostic import ReplyLoopFacts, attach_user_reply_diagnostic
+                    _finalize_assistant_delivery(params)
+                    continue
+                if queue_reply_for_audit_prepare(
+                    agent,
+                    params,
+                    response=final_response,
+                    tool_rounds=tool_rounds,
+                ):
+                    from .tool_loop.response_decision import _finalize_assistant_delivery
 
-    attach_user_reply_diagnostic(params, final_response, ReplyLoopFacts(repair_counters, tool_rounds))
-    return ToolLoopRunResult(final_prompt, final_response, tool_rounds, params)
+                    _finalize_assistant_delivery(params)
+                    continue
+                # 会话运行时 式自然收口：模型看过本轮真实工具结果后给出 plain final，
+                # 当前 turn 就结束。operation/task_progress 继续作为审计和工作记忆，
+                # 不能据此覆盖正文、强制返工或另起后台续跑。
+            if action.action == "continue":
+                continue
+            if action.action == "break":
+                routed_response = action.response
+                final_response = routed_response if routed_response is not None else final_response
+                break
+            final_prompt, final_response, tool_rounds = _tool_step_or_limit(
+                agent,
+                _ToolStepRequest(
+                    params=params,
+                    tool_rounds=tool_rounds,
+                    action=action,
+                    current_prompt=final_prompt,
+                ),
+            )
+            if final_response:
+                break
+
+        from .tool_loop.reply_diagnostic import ReplyLoopFacts, attach_user_reply_diagnostic
+
+        attach_user_reply_diagnostic(params, final_response, ReplyLoopFacts(repair_counters, tool_rounds))
+        from .tool_loop.response_decision import _finalize_assistant_delivery
+
+        _finalize_assistant_delivery(params, final_response)
+        return ToolLoopRunResult(final_prompt, final_response, tool_rounds, params)
+    finally:
+        from .tool_loop.response_decision import _discard_output_limit_segments
+
+        _discard_output_limit_segments(params, final_response)
+        params.live_archive_state.pop("_defer_assistant_delivery_confirmation", None)
 
 
 # LLM: 兼容原服务模块的取消入口；真实构造只在response_decision，不新增正文、状态或模型调用。

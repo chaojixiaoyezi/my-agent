@@ -439,4 +439,4 @@ def test_loop_visible_text_truncation_keeps_original_resume(monkeypatch) -> None
     assert backend.seen_efforts == ["max", "max"], "正文截断不降档"
     assert "truncation_thinking_downgrade_trace" not in params.live_archive_state
     assert "请直接从被截断处接着写" in prompts.built[1]
-    assert loop_result.final_response.text == "全部完成了。"
+    assert loop_result.final_response.text == "我已经写完了第一段\n\n全部完成了。"

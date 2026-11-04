@@ -543,8 +543,14 @@ class _JsonlMemoryMutationMixin:
     #   仅legacy兼容读按旧墓碑→事件流取最后语义版本；新写入口不得以新版本绕过已提交的永久屏障。
     # 函数用途: 返回当前权威中的精确删除回执，不把旧归档副本当作独立清理许可。
     def committed_removal_record(self, entry_id: str) -> MemoryRecord | None:
+        from .generation_manifest import StorageTombstones
+
         with self._locked_memory():
-            events = _strict_memory_events(self.path)
+            with StorageTombstones(self.path).snapshot() as snapshot:
+                removal = snapshot.entries([entry_id]).get(entry_id)
+            if removal is not None:
+                return removal
+            events = _strict_memory_events(self.path, include_tombstones=False)
         latest = next((record for record in reversed(events)
                        if record.entry_id == entry_id and record.action != "touch"), None)
         return latest if latest is not None and latest.action == "remove" else None
@@ -568,13 +574,15 @@ class _JsonlMemoryMutationMixin:
         committed: list[MemoryRecord]
         with _quota_admission(self.quota_enforcer, _admission) as admission, _managed_learning_batch_guard(self.path, operations):
             with self._locked_memory():
-                current_events = _strict_memory_events(self.path)
+                current_events = _strict_memory_events(self.path, include_tombstones=False)
                 working = _materialize_memory_events(current_events, include_expired=True)
                 active = {record.entry_id: record for record in working}
                 from .generation_manifest import StorageTombstones
 
                 barrier = StorageTombstones(self.path)
-                barriers = barrier.load()
+                with barrier.snapshot() as snapshot:
+                    barriers = snapshot.entries(str(row.get("entry_id") or "").strip() for row in operations if isinstance(row, dict))
+                current_events.extend(barriers.values())
                 _require_memory_write_barriers(operations, barrier, barriers)
                 latest_events = {record.entry_id: record for record in current_events if record.action != "touch"}
                 committed = _prepare_memory_operations(
@@ -868,7 +876,8 @@ class _JsonlMemorySearchMixin:
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         return self._search_scoped(query, top_k, predicate, record_access=False, latency_safe=latency_safe)
 
-    # LLM: 重读正式源核对原scope/完整版本及渲染门；保序映射只确认每个ID一次，隔离/撤销/替换项不得touch。
+    # LLM: 已入选身份经本代坐标回读并点查永久屏障；索引未追平只走原有界权威，不能经all枚举删除历史。
+    #   核对原scope/完整版本及渲染门；保序映射只确认每个ID一次，隔离/撤销/替换项不得touch。
     # 函数用途: 只给有效且可注入的候选登记访问，保序去重后返回确认列表，不重复维护两套ID状态。
     def confirm_scoped_access(
         self,
@@ -876,7 +885,18 @@ class _JsonlMemorySearchMixin:
         predicate: Callable[[MemoryRecord], bool],
     ) -> list[MemoryRecord]:
         from ..prompting_parts.memory_context import is_memory_context_admissible
-        current = {record.entry_id: record for record in self.all() if predicate(record)}
+        from ._jsonl_indexing import bounded_authority_records
+        from .read_index import MemoryReadIndex, MemoryReadIndexGenerationConflict
+
+        records = list(records)
+        try:
+            fresh = MemoryReadIndex(self.path).resolve_ids(row.entry_id for row in records)
+        except MemoryReadIndexGenerationConflict:
+            fresh = None
+        if fresh is None:
+            fresh, _coverage = bounded_authority_records(self, max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+                max_bytes=_AUTHORITY_SCAN_MAX_BYTES)
+        current = {record.entry_id: record for record in fresh if predicate(record)}
         confirmed: dict[str, MemoryRecord] = {}
         for record in records:
             active = current.get(record.entry_id)
@@ -1122,7 +1142,7 @@ def _search_authority_revision(path):
 
     store = MemoryGenerationStore(path)
     return tuple(_scan_stamp(source) for source in (
-        path, _tombstone_path(path), store.manifest_path, store.tombstones.path))
+        path, _tombstone_path(path), store.manifest_path, store.tombstones.path, store.tombstones.index.path))
 
 
 # LLM: 生命周期治理与检索投影分离:Lifecycle 只做访问信号、总量闸与健康快照,不直接召回。
@@ -1209,9 +1229,9 @@ class _JsonlMemoryLifecycleMixin:
         from .generation_manifest import MemoryGenerationStore
 
         if MemoryGenerationStore(self.path).manifest() is not None:
-            return MaintenanceSnapshot(_materialize_memory_events(_strict_memory_events(self.path)), True)
+            return MaintenanceSnapshot(_materialize_memory_events(_strict_memory_events(self.path, include_tombstones=False)), True)
         _payloads, source_opened = read_maintenance_objects(self.path, require_source=require_source)
-        events = _strict_memory_events(self.path)
+        events = _strict_memory_events(self.path, include_tombstones=False)
         return MaintenanceSnapshot(_materialize_memory_events(events), source_opened)
 
     # LLM: 访问信号只在召回命中时产生;不命中不 touch,命中才证明"这条被用过"。
@@ -1222,7 +1242,7 @@ class _JsonlMemoryLifecycleMixin:
         self._pending_access[entry_id] = time.time()
 
     # LLM: 落盘仍是写路径职责(锁内原子);公开入口供无写场景时手动冲刷。
-    # LLM: 遵循quota→policy→formal锁序（按parents[2]定位owner_home），折叠访问时间而不改变版本；成功后才比较清旧pending。
+    # LLM: 遵循quota→policy→formal锁序（按parents[2]定位owner_home），不枚举永久删除账，折叠访问时间不改版本；成功后才比较清旧pending。
     # 函数用途: 原子压实访问热度，失败保留待刷信号。
     def flush_access_events(self) -> int:
         if not self._pending_access:
@@ -1233,7 +1253,7 @@ class _JsonlMemoryLifecycleMixin:
             with self._locked_memory():
                 if not self._pending_access:
                     return 0
-                current_events = _strict_memory_events(self.path)
+                current_events = _strict_memory_events(self.path, include_tombstones=False)
                 active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
                 snapshot = dict(self._pending_access)
                 pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
@@ -1243,7 +1263,7 @@ class _JsonlMemoryLifecycleMixin:
 
     # LLM: 只给当前owner实际HTTP长scope使用；原formal锁在Root外持有，锁出生/固定一次replace各消费同source末门，失败保完整snapshot。
     #   只在成功search后显式调用，不在finally补写；原默认flush/apply_batch不变，C3-J另负责其它写链。
-    # LLM: 遵循quota→policy→formal锁序并在同次source末门写压实结果，不保留单独touch；失败保snapshot，成功只清旧值。
+    # LLM: 遵循quota→policy→formal锁序并在同次source末门写压实结果，不枚举删除账、不保留单独touch；失败保snapshot，成功只清旧值。
     # 函数用途: 在协调来源下折叠访问信号。
     def flush_access_events_from_source(self) -> int:
         from ..common.global_write_commit import execute_global_write
@@ -1261,7 +1281,7 @@ class _JsonlMemoryLifecycleMixin:
         owner_home = resolved.parents[2] if len(resolved.parents) >= 3 else resolved.parent.parent
         with _quota_admission(self.quota_enforcer, None) as admission, _managed_policy_scope(owner_home):
             with locked_json_path(self.path, birth_commit=commit):
-                current_events = _strict_memory_events(self.path, require_source=True)
+                current_events = _strict_memory_events(self.path, require_source=True, include_tombstones=False)
                 active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
                 pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
                 _write_compacted_memory(self, current_events, current_events, pending, admission, commit=commit)
@@ -1996,6 +2016,10 @@ def _materialize_memory_events(
 # LLM: 批次变更前检查规范ID及与写入相同strip/hash语义；也用于本批新增删除账的发表前校验。
 # 函数用途: 明确拒绝已遗忘正文，避免代次末端过滤制造假成功或覆盖活记录前像。
 def _require_memory_write_barriers(operations, barrier, barriers):
+    pairs = [(str(raw.get("entry_id") or "").strip(), memory_content_hash(str(raw.get("content") or "").strip()))
+             for raw in operations if isinstance(raw, dict)
+             and str(raw.get("action") or "add").strip().lower() in {"add", "replace"}]
+    blocked = barrier.blocked(pairs)
     for index, raw in enumerate(operations, start=1):
         if not isinstance(raw, dict):
             raise ValueError(f"memory operation {index} must be an object")
@@ -2005,7 +2029,7 @@ def _require_memory_write_barriers(operations, barrier, barriers):
         if entry_id in barriers:
             raise ValueError("MEMORY_TOMBSTONED_ID")
         content = str(raw.get("content") or "").strip()
-        if content and barrier.excludes(entry_id, memory_content_hash(content), records=barriers):
+        if content and (entry_id in blocked or barrier.excludes(entry_id, memory_content_hash(content), records=barriers)):
             raise ValueError("MEMORY_TOMBSTONED_CONTENT")
 
 
@@ -2444,7 +2468,7 @@ def _memory_stamp(path: Path) -> tuple:
 
     store = MemoryGenerationStore(path)
     stamps = [str(path.absolute())]
-    sources = [path, _tombstone_path(path), store.manifest_path, store.tombstones.path]
+    sources = [path, _tombstone_path(path), store.manifest_path, store.tombstones.path, store.tombstones.index.path]
     root = store.manifest()
     if root:
         sources.extend(path.parent / item["path"] for item in root["segments"])
@@ -2465,12 +2489,12 @@ class MemoryAuthorityCorruptError(ValueError):
 
 # LLM: 迁移后验证根和全部分片；旧小库仍严格验证前像，缺失根不回退旧正文。
 # 函数用途: 严格读取完整冷热事件，保护重写不丢冷事实。
-def _strict_memory_events(path: Path, *, require_source: bool = False) -> list[MemoryRecord]:
+def _strict_memory_events(path: Path, *, require_source: bool = False, include_tombstones: bool = True) -> list[MemoryRecord]:
     from ._jsonl_maintenance import require_maintenance_event
     from .generation_manifest import GENERATION_SCHEMA, MemoryGenerationStore
 
     store = MemoryGenerationStore(path)
-    committed = store.events()
+    committed = store.events(include_tombstones=include_tombstones)
     if committed is not None:
         return committed
     events = []
@@ -2497,7 +2521,10 @@ def _strict_memory_events(path: Path, *, require_source: bool = False) -> list[M
             except (TypeError, ValueError) as exc:
                 raise MemoryAuthorityCorruptError("MEMORY_AUTHORITY_UNREADABLE") from exc
             events.append(_with_legacy_identity(record))
-    return [*events, *store.tombstones.load().values()]
+    if include_tombstones:
+        return [*events, *store.tombstones.load().values()]
+    blocked = store.tombstones.blocked((r.entry_id, memory_content_hash(r.content)) for r in events if r.content)
+    return [r for r in events if r.action == "remove" or r.entry_id not in blocked]
 
 
 # LLM: 只保留最后semantic版本并合并访问最大值及历史hash；不按热度淘汰任何active（包括managed锁定及过期条目）。
@@ -2536,6 +2563,7 @@ def _memory_events_text(events) -> str:
 
 
 # LLM: 调用方先quota→policy再持formal锁；legacy无最终删除且未超热预算时只压实旧两文件，可保留128条小历史。
+#   旧库最终行数或真实序列化字节超过固定authority预算时，普通写入口自动迁移，不能依赖用户手工doctor才能恢复召回。
 #   已有根、最终删除或超热预算走generation：先写分片及永久墓碑屏障、后发布根，再GC/验根/marker收尾。
 #   屏障成功而根失败时删除可能已生效，必须报告partial并由purge重启恢复，绝不承诺失败零写入或归档重放。
 #   根成功后收尾失败保留已提交事实与清理责任；pending只在原调用方成功返回后消费，不在此反取quota/policy。
@@ -2547,7 +2575,9 @@ def _write_compacted_memory(memory, history, events, pending, admission, *, comm
     current = _compact_memory_events(events, pending)
     budget = memory.memory_policy().active_library_max_chars
     if (MemoryGenerationStore(memory.path).manifest() is not None or any(r.action == "remove" for r in current)
-            or sum(len(r.content) for r in current) > budget):
+            or len(current) > _AUTHORITY_SCAN_MAX_RECORDS or sum(len(r.content) for r in current) > budget
+            or len(_memory_events_text(_fold_small_memory_history(events, current) if keep_history else current).encode("utf-8"))
+                > _AUTHORITY_SCAN_MAX_BYTES):
         from ._jsonl_maintenance import publish_tier_generation
 
         publish_tier_generation(memory, current, admission=admission, commit=commit,

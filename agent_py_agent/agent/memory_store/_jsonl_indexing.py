@@ -153,6 +153,13 @@ class JsonlMemoryIndexMixin:
                 self._index_vector(pending[0])
             else:
                 self._index_vectors(pending)
+        if records and not removed:
+            try:
+                self.rebuild_read_index()
+            except Exception as exc:
+                if getattr(self, "coordinator_io", False) and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                    raise
+                # 可重建投影失败不撤销已提交事实，下次正常写入继续按水位推进。
 
     # LLM: 仅本轮正式删除后的入口，历史恢复不得虚增formal_memory_changed；已有活准入必须透传。
     # 函数用途: 保留删除已提交但隐私清理未完成的回执。
@@ -266,6 +273,7 @@ def _scan_stamp(path):
 def bounded_authority_records(memory, *, max_records, max_bytes):
     import hashlib
     import json
+    import time
 
     from ..common.nofollow_fs import NoFollowPathError, read_bytes_beneath
     from ._jsonl_maintenance import require_maintenance_event
@@ -279,13 +287,16 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
     )
 
     store = MemoryGenerationStore(memory.path)
-    controls = [store.manifest_path, store.tombstones.path, _tombstone_path(memory.path)]
-    used, scanned = 0, 0
+    controls = [store.manifest_path, store.tombstones.path, _tombstone_path(memory.path), store.tombstones.index.path]
+    used, scanned, examined = 0, 0, 0
+    cache = {}
 
     # LLM: 预算先于正文；底层最多多读一个拒绝探测字节，只转换明确超限错误，不吞完整性错误。
     # 函数用途: 读取一个受预算约束的私有权威文件。
     def read(path):
         nonlocal used
+        if path in cache:
+            return cache[path]
         stamp = _scan_stamp(path)
         if stamp is not None and stamp[2] > max_bytes - used:
             raise _AuthorityScanLimit()
@@ -297,6 +308,7 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
             used = max_bytes
             raise _AuthorityScanLimit() from exc
         used += len(value or b"")
+        cache[path] = value
         return value
 
     # LLM: 新账、旧墓碑及正文共用同一条数硬限，重复代次重读也累计，不凭去重后的条数少计。
@@ -308,42 +320,53 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
         scanned += 1
 
     for attempt in range(3):
+        cache.clear()
         stamps = {path: _scan_stamp(path) for path in controls}
-        records, blocked, root, partial, cursor = [], None, None, False, None
+        records, barrier_ready, root, partial, cursor = [], False, None, False, None
         try:
             root = store.manifest(_read=read)
-            blocked = store.tombstones.load(_read=read, on_record=charge_record)
-            if root is None:
-                stamps[memory.path] = _scan_stamp(memory.path)
-                body = read(memory.path)
-                for line in (body or b"").splitlines():
-                    if not line.strip():
-                        continue
-                    charge_record()
-                    record = _memory_record_from_obj(json.loads(line))
-                    require_maintenance_event(record)
-                    records.append(_with_legacy_identity(record))
-            else:
-                for number, segment in enumerate(root["segments"]):
-                    cursor = [number, 0]
-                    if scanned >= max_records:
-                        raise _AuthorityScanLimit()
-                    body = read(memory.path.parent / segment["path"])
-                    if body is None or hashlib.sha256(body).hexdigest() != segment["sha256"]:
-                        raise ValueError("MEMORY_GENERATION_UNREADABLE")
-                    lines = [line for line in body.splitlines() if line]
-                    if len(lines) != segment["count"]:
-                        raise ValueError("MEMORY_GENERATION_UNREADABLE")
-                    for offset, line in enumerate(lines):
-                        cursor = [number, offset]
-                        charge_record()
-                        record = _memory_record_from_obj(json.loads(line))
-                        require_maintenance_event(record)
-                        records.append(record)
-                cursor = None
+            with store.tombstones.snapshot(_read=read):
+                barrier_ready = True
+            if barrier_ready:
+                try:
+                    segments = root["segments"] if root else [{"path": memory.path.name}]
+                    if root is None:
+                        stamps[memory.path] = _scan_stamp(memory.path)
+                    for number, segment in enumerate(segments):
+                        cursor = [number, 0]
+                        expires = segment.get("expires_before")
+                        if type(expires) in (int, float) and 0 < expires <= time.time():
+                            continue
+                        if examined >= max_records:
+                            raise _AuthorityScanLimit()
+                        body = read(memory.path.parent / segment["path"])
+                        if root and (body is None or hashlib.sha256(body).hexdigest() != segment["sha256"]):
+                            raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                        lines = [line for line in (body or b"").splitlines() if line.strip()]
+                        if root and len(lines) != segment["count"]:
+                            raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                        for offset, line in enumerate(lines):
+                            cursor = [number, offset]
+                            if examined >= max_records:
+                                raise _AuthorityScanLimit()
+                            examined += 1
+                            record = _memory_record_from_obj(json.loads(line))
+                            require_maintenance_event(record)
+                            if root and record.expires_at and record.expires_at <= time.time():
+                                continue
+                            if not record.expires_at or record.expires_at > time.time():
+                                charge_record()
+                            records.append(_with_legacy_identity(record))
+                    cursor = None
+                finally:
+                    records = _materialize_memory_events(records)
+                    # 文件读取及并发写期间不占SQLite读锁；最终点查再取最新一致快照。
+                    with store.tombstones.snapshot(_read=read) as barrier:
+                        blocked = barrier.blocked((r.entry_id, memory_content_hash(r.content)) for r in records)
+                    records = [r for r in records if r.entry_id not in blocked]
         except _AuthorityScanLimit:
             partial = True
-            if root is None or blocked is None:
+            if root is None or not barrier_ready:
                 records = []
         except (OSError, ValueError) as exc:
             if isinstance(exc, (*_NATIVE_MEMORY_ERRORS, NoFollowPathError)):
@@ -357,11 +380,8 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
             if attempt < 2 and used < max_bytes and scanned < max_records:
                 continue
             records, partial = [], True
-        if blocked is not None:
-            records = _materialize_memory_events([*records, *blocked.values()])
-            records = [r for r in records if not store.tombstones.excludes(r.entry_id,
-                memory_content_hash(r.content), records=blocked)]
         break
     return records, {"partial": partial, "scanned_records": scanned, "scanned_bytes": used,
+        "examined_records": examined,
         "max_records": max_records, "max_bytes": max_bytes,
         "continuation": {"operation_id": root["operation_id"], "cursor": cursor} if root and cursor else None}

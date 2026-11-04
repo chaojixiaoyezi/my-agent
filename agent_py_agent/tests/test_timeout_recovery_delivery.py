@@ -533,11 +533,20 @@ def test_prior_segment_is_kept_across_a_truncated_probe_shot(monkeypatch, tmp_pa
         prompt, response, _rounds = loop_result.final_prompt, loop_result.final_response, loop_result.tool_rounds
 
     assert backend.calls == 5, "截断那一枪之后按既有截断续跑预算再走一轮"
-    assert response.text == _joined(_PRIOR_PROMISE, _TERMINAL_COMPLETE_ANSWER), (
+    assert response.text == _joined(_PRIOR_PROMISE, "被输出上限截断的半句", _TERMINAL_COMPLETE_ANSWER), (
         "前导段必须跟着截断续跑一起走到真正的终答，不能被中间态丢掉"
     )
     rows = _delivery_ledger(params)["segments"]
     assert rows[0]["text"] == _PRIOR_PROMISE and rows[0]["delivered"] is True
+    assert [row["text"] for row in rows] == [
+        _PRIOR_PROMISE, "被输出上限截断的半句", _TERMINAL_COMPLETE_ANSWER,
+    ]
+    assert [row["origin"] for row in rows] == [
+        "provider_timeout_probe_prior", "output_limit_resume_prefix", "terminal_response",
+    ]
+    assert [row["order"] for row in rows] == [0, 1, 2]
+    assert all(row["delivered"] for row in rows)
+    assert rows[0]["sequence"] < rows[1]["sequence"] < rows[2]["sequence"]
     assert _PROVIDER_TIMEOUT_RESUME in prompt
 
 

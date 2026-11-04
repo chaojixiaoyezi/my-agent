@@ -179,6 +179,11 @@ def publish_tier_generation(memory, records, *, admission=None, commit=None, red
             commit(lambda: jsonl.write_private_text_file_atomic_unlocked(path, raw, replace_once=True))
 
     store = MemoryGenerationStore(memory.path)
+    if admission is not None:
+        from ..user_space.owner_quota import OwnerQuotaChange
+
+        admission.check([OwnerQuotaChange(store.manifest_path, 65536), OwnerQuotaChange(store.tombstones.path, 4096)])
+    store.tombstones.ensure_index(write=write, admission=admission, commit=commit)
     plan = store.prepare(records, max_chars=max_chars or memory.memory_policy().active_library_max_chars,
                          pinned_ids=managed_locked_memory_ids(memory.path), quarantine=quarantine)
     result = store.publish(plan, write=write, admission=admission, commit=commit,
@@ -203,7 +208,7 @@ def finish_tier_generation(memory, root, *, admission=None, collect=True, formal
         if store.manifest() != root:
             raise ValueError("MEMORY_GENERATION_CONFLICT")
         # 首次发表已做GC也不能省略校验：不可读的新根不得成为抹除legacy原文的许可。
-        store.events(root)
+        store.events(root, include_tombstones=False)
         if collect:
             store.collect_unreferenced(root, commit=commit)
         marker = json.dumps({"schema_version": GENERATION_SCHEMA, "manifest": store.manifest_path.name}) + "\n"

@@ -148,6 +148,7 @@ _PROVIDER_TIMEOUT_RESUME_COUNT = 1
 # 只有这两种原因会排除一段——两者都是该段自己的结构字段（供应商截断标志 / 空正文），
 # 与另一段写了什么、写了多长完全无关；宿主不得再引入任何"哪一段更像终答"的判断。
 _PRIOR_SEGMENT_ORIGIN = "provider_timeout_probe_prior"
+_OUTPUT_LIMIT_SEGMENT_ORIGIN = "output_limit_resume_prefix"
 _TERMINAL_SEGMENT_ORIGIN = "terminal_response"
 _SEGMENT_TRUNCATED = "output_limit_truncated"
 _SEGMENT_EMPTY_TEXT = "empty_text"
@@ -265,6 +266,7 @@ class _NoToolCallsRequest:
 
 
 # LLM: continue 不执行工具；先把本轮真实内容追加到唯一 IR，再由既有恢复提示引导下一轮。
+#   普通break的有界合成候选交最外层收口确认，不在中间decision把它清掉或登记为成功。
 # 函数用途: 作出本轮裁决并保留续跑上下文；工具轮及最终回复仍由各自原入口保存，避免重复。
 def tool_loop_response_decision(
     request: ToolLoopResponseDecisionRequest,
@@ -279,6 +281,8 @@ def tool_loop_response_decision(
             response_text=str(getattr(request.response, "text", "") or ""),
             response_content_blocks=list(getattr(request.response, "assistant_content_blocks", None) or []),
         )
+    if decision.action == "break" and not request.params.live_archive_state.get("_pending_assistant_delivery_segments"):
+        _discard_output_limit_segments(request.params, decision.response)
     return _carry_provider_timeout_probe_segment(request.params, probe_rollback, decision)
 
 
@@ -1007,6 +1011,9 @@ def _truncated_output_resume_decision(request: _NoToolCallsRequest) -> ToolLoopR
         return None
     if request.counters.truncated_output_repairs >= _TRUNCATED_OUTPUT_RESUME_COUNT:
         return None
+    from ..tool_model_generation import arm_output_limit_resume_segment
+
+    arm_output_limit_resume_segment(request.params, request.response)
     if _thinking_downgrade_enabled(request.agent) and _is_thinking_only_truncation(request.response):
         request.params.tool_context.append(_THINKING_ONLY_TRUNCATION_RESUME)
         counters = _downgrade_next_call_reasoning(request)
@@ -1101,6 +1108,9 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             #   碰巧跑完。这里改成轮内续跑：先把断点续写指令回灌，同一个 run 再走一轮；超限才按
             #   unfinished 收口，让上游按既有恢复路径处理。
             if request.counters.truncated_output_repairs < _TRUNCATED_OUTPUT_RESUME_COUNT:
+                from ..tool_model_generation import arm_output_limit_resume_segment
+
+                arm_output_limit_resume_segment(request.params, request.response)
                 request.params.tool_context.append(_TRUNCATED_OUTPUT_RESUME)
                 return ToolLoopResponseDecision(
                     "continue", None, [], _inc_truncated_output(request.counters)
@@ -1232,8 +1242,9 @@ def _provider_timeout_resume_decision(
 #      usage/backend/stop_reason 全部是**本轮那次 request** 的，因此主循环返回的
 #      final_prompt（本轮出站 prompt）、final_response、usage 的 request/turn 来源结构性同一，
 #      不可能再出现"prompt 属探针那一枪、response 属上一枪"的跨枪混配。
-#   ④ 每段的来源（turn_id + 序号 + 用量）与顺序登记成结构化交付账本，供审计/验收读取；
-#      账本不参与裁决。被排除的段也记下来（含结构化排除原因），排除事实同样不被隐藏。
+#   ④ 工具循环内只产生有界候选；最外层生命周期路由结束且确认返回同一候选后，才登记成功交付账本。
+#      没有外层循环的独立调用以本函数返回为交付边界，保持原入口的同步记账契约。
+#      改道、异常、取消会登记排除事实；账本不参与正文裁决。
 #   ⑤ 只有 terminal 一段可投影时原样返回 terminal（对象同一），不制造无意义的副本。
 # 已知边界（必须知情，不是语义判定）：生命周期终态响应(runtime_status != ok)与宿主自己写的
 #   阻断文案不是"已产生的合法答复"，它们走各自分支，不参与本合成；那些分支里前导段落已作为
@@ -1241,38 +1252,70 @@ def _provider_timeout_resume_decision(
 # 函数用途: 把「探针之前那一枪」的合法正文按顺序并进本轮的终答交付。
 def _provider_timeout_probe_delivery(request: _NoToolCallsRequest, terminal: object) -> object:
     rollback = request.probe_rollback
-    if rollback is None:
+    from ..tool_model_generation import (
+        current_model_turn_source,
+        take_output_limit_resume_segments,
+    )
+
+    prefixes = take_output_limit_resume_segments(request.params)
+    if rollback is None and not prefixes:
         return terminal
+    current = current_model_turn_source(request.params)
+    rows = _delivery_segment_rows(rollback, terminal, current, prefixes=prefixes)
+    delivered = [row for row in rows if row["delivered"]]
+    response = terminal
+    if delivered and not (len(delivered) == 1 and delivered[0]["origin"] == _TERMINAL_SEGMENT_ORIGIN):
+        response = replace(terminal, text=_DELIVERY_SEGMENT_SEPARATOR.join(str(row["text"]) for row in delivered))
+    _finalize_assistant_delivery(request.params)
+    request.params.live_archive_state["_pending_assistant_delivery_segments"] = {
+        "response": response, "owner_turn_id": str(current.get("turn_id") or ""), "segments": rows,
+    }
+    if not request.params.live_archive_state.get("_defer_assistant_delivery_confirmation"):
+        _finalize_assistant_delivery(request.params, response)
+    return response
+
+
+# LLM: 只有最外层实际返回同一候选对象才确认；重路由或未返回时排除全部候选，单槽pop避免二次登记。
+# 函数用途: 在最终出口把候选段落转为真实交付或明确排除的审计事实。
+def _finalize_assistant_delivery(params: object, response: object = None) -> None:
+    from ..tool_model_generation import record_assistant_delivery_segments
+
+    state = getattr(params, "live_archive_state", None)
+    pending = state.pop("_pending_assistant_delivery_segments", None) if isinstance(state, dict) else None
+    if pending is None:
+        return
+    rows = pending["segments"]
+    if response is None or response is not pending["response"]:
+        rows = [{**row, "delivered": False, "excluded_reason": "terminal_not_deliverable"} for row in rows]
+    record_assistant_delivery_segments(params, owner_turn_id=pending["owner_turn_id"], segments=rows)
+
+
+# LLM: 非最终交付的 break 不得把旧正文升级为成功；零候选时不写交付账。
+# 函数用途: 清理取消、失败、过滤、预算耗尽或宿主阻断时剩下的长度候选。
+def _discard_output_limit_segments(params: object, terminal: object) -> None:
     from ..tool_model_generation import (
         current_model_turn_source,
         record_assistant_delivery_segments,
+        take_output_limit_resume_segments,
     )
 
-    current = current_model_turn_source(request.params)
-    rows = _delivery_segment_rows(rollback, terminal, current)
-    delivered = [row for row in rows if row["delivered"]]
-    record_assistant_delivery_segments(
-        request.params,
-        owner_turn_id=str(current.get("turn_id") or ""),
-        segments=rows,
-    )
-    if not delivered:
-        # 两段都不可投影（截断/空正文）: 保持既有语义——交付 terminal 自己（含它的 typed 截断事实）。
-        return terminal
-    if len(delivered) == 1 and delivered[0]["origin"] == _TERMINAL_SEGMENT_ORIGIN:
-        return terminal
-    return replace(
-        terminal,
-        text=_DELIVERY_SEGMENT_SEPARATOR.join(str(row["text"]) for row in delivered),
-    )
+    _finalize_assistant_delivery(params)
+    prefixes = take_output_limit_resume_segments(params)
+    if not prefixes:
+        return
+    current = current_model_turn_source(params)
+    rows = _delivery_segment_rows(None, terminal, current, prefixes=prefixes, allow_prefixes=False)
+    record_assistant_delivery_segments(params, owner_turn_id=str(current.get("turn_id") or ""), segments=rows)
 
 
-# LLM: 段落可投影性只看该段自己的两个结构字段（truncated / 正文是否为空），与另一段无关：
+# LLM: 仅明确的长度续写来源且已有成功终答时允许截断前缀，其余截断仍拒绝。
 #   任何"哪一段更好/更长/更像终答"的判断都被禁止——缺结构化证据时宿主不得声称能区分完成度，
 #   也不得据此丢掉任何一条已产生的合法答复。空正文判定沿用既有 empty-text nudge 的 strip 口径。
 # 函数用途: 给出一个响应段的结构化排除原因（可投影时返回空串）。
-def _segment_exclusion_reason(response: object) -> str:
-    if bool(getattr(response, "truncated", False)):
+def _segment_exclusion_reason(response: object, *, origin: str = "", completed: bool = False) -> str:
+    if bool(getattr(response, "truncated", False)) and not (
+        origin == _OUTPUT_LIMIT_SEGMENT_ORIGIN and completed
+    ):
         return _SEGMENT_TRUNCATED
     if not str(getattr(response, "text", "") or "").strip():
         return _SEGMENT_EMPTY_TEXT
@@ -1286,24 +1329,27 @@ def _delivery_segment_rows(
     rollback: object,
     terminal: object,
     current: dict,
+    *, prefixes: tuple = (), allow_prefixes: bool = True,
 ) -> list[dict[str, object]]:
-    prior = getattr(rollback, "response", None)
-    rows = [
-        _delivery_segment_row(
-            order=0,
-            origin=_PRIOR_SEGMENT_ORIGIN,
-            response=prior,
-            turn_id=str(getattr(rollback, "turn_id", "") or ""),
-            sequence=int(getattr(rollback, "sequence", 0) or 0),
-        ),
-        _delivery_segment_row(
-            order=1,
+    completed = allow_prefixes and not _is_runtime_status_response(terminal) and not bool(getattr(terminal, "truncated", False))
+    sources = [(part, _OUTPUT_LIMIT_SEGMENT_ORIGIN) for part in prefixes]
+    if rollback is not None:
+        sources.append((rollback, _PRIOR_SEGMENT_ORIGIN))
+    sources.sort(key=lambda item: int(getattr(item[0], "sequence", 0) or 0))
+    rows = [_delivery_segment_row(
+        order=index, origin=origin, response=part.response, turn_id=part.turn_id, sequence=part.sequence,
+        completed=completed,
+    ) for index, (part, origin) in enumerate(sources)]
+    rows.append(_delivery_segment_row(
+            order=len(rows),
             origin=_TERMINAL_SEGMENT_ORIGIN,
             response=terminal,
             turn_id=str(current.get("turn_id") or ""),
             sequence=int(current.get("sequence") or 0),
-        ),
-    ]
+        ))
+    if prefixes and not completed:
+        for row in rows:
+            row.update(delivered=False, excluded_reason="terminal_not_deliverable")
     return rows
 
 
@@ -1317,8 +1363,9 @@ def _delivery_segment_row(
     response: object,
     turn_id: str,
     sequence: int,
+    completed: bool = False,
 ) -> dict[str, object]:
-    reason = _segment_exclusion_reason(response)
+    reason = _segment_exclusion_reason(response, origin=origin, completed=completed)
     usage = getattr(response, "usage", None)
     return {
         "order": order,

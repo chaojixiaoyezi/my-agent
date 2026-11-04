@@ -247,6 +247,8 @@ class _CompactRunRequest:
     expected_message_tail: dict[str, object] | None = field(default=None, kw_only=True, repr=False)
     idle_compact: bool = field(default=False, kw_only=True)
     commit_guard: Callable[[], bool] | None = field(default=None, kw_only=True, repr=False)
+    started_monotonic: float = field(default_factory=time.monotonic, kw_only=True, compare=False)
+    timing_state: dict[str, object] = field(default_factory=dict, kw_only=True, compare=False, repr=False)
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
@@ -603,10 +605,11 @@ def _validate_compact_tool_source(options, context):
 
 
 # LLM: 进度围绕候选与提交，独立模型用量在成功/失败后均结算；计费失败不覆盖压缩异常或改变终态。
+#   首事件回调也受取消边界保护，防止已发started却没有撤销观测。
 # 函数用途: 执行压缩并上报开始、完成、中断或失败，同时让独立压缩的消耗不依赖后续聊天才能入账。
 def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompactResult:
-    _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
     try:
+        _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
         result = _compact_pending(request)
     except (InterruptedError, ToolCancelled, IdleCompactActivityChanged):
         _emit_compact_progress(
@@ -1185,9 +1188,13 @@ def _candidate_limits(request: _CompactRunRequest) -> _CandidateLimits:
 # LLM: 与提交前的容量门同一口径：有宿主投影器时用完整下一请求计量并按冻结校准折算（与预检同一观测），否则用本地
 #   会话估算（不套校准）；计量返回后立即复核取消，避免过大候选在活动变化后误记失败；只读，不写状态。
 #   projection 保留原始纯投影，供提交后改写本轮观测基线；联测闲置竞争和候选容量门。
+#   计量开始前切换私有时钟，公开阶段事件仍按原顺序、原数字发送。
 # 函数用途: 计量“某个摘要文本 + 保留尾部”组成的下一请求有多大。
 def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summary: str) -> _MeasuredSummary:
     raise_if_compact_interrupted(request.interrupt_check)
+    timing = request.timing_state.get("clock")
+    if timing is not None:
+        timing.enter_stage("measuring")
     retained_tail, evidence = tail.retained_tail, tail.evidence
     projection = project_compact_request(request.request_projector, ConversationCompactView(
         request.thread.thread_id, request.thread.compact_generation + 1, summary, retained_tail,
@@ -1351,8 +1358,6 @@ def _emit_compact_progress(
     failure: BaseException | None = None,
 ) -> None:
     callback = request.progress_callback
-    if callback is None:
-        return
     payload: dict[str, object] = {
         "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA,
         "phase": str(phase),
@@ -1373,6 +1378,17 @@ def _emit_compact_progress(
         payload["trigger_source"] = request.trigger_source
     if failure is not None:
         payload.update(compact_failure_progress_fields(failure))
+    import logging
+
+    from .compact_progress import CompactProgressTiming
+
+    timing = request.timing_state.get("clock")
+    if not isinstance(timing, CompactProgressTiming):
+        timing = CompactProgressTiming(request.started_monotonic)
+        request.timing_state["clock"] = timing
+    timing.apply(payload, logger=logging.getLogger(__name__), thread_id=request.thread.thread_id)
+    if callback is None:
+        return
     try:
         callback(payload)
     except (InterruptedError, ToolCancelled):

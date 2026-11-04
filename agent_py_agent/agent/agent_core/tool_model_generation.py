@@ -108,6 +108,8 @@ _PROVIDER_TIMEOUT_RESUME_STATE_KEY = "_provider_timeout_resume_turns"
 #     序号上, 交给下一次真正交付, 绝不能被"本轮还没交付"的中间态吞掉。
 # 消费一次即 pop; 序号不紧邻(中间插了别的模型轮)一律 fail-closed 丢弃。
 _PROVIDER_TIMEOUT_RESUME_PROBE_STATE_KEY = "_provider_timeout_resume_probe"
+# 长度续写只暂存本次 run 的原响应引用，不占用或改写超时探针槽。
+_OUTPUT_LIMIT_RESUME_SEGMENTS_STATE_KEY = "_output_limit_resume_segments"
 # 交付归属: 一次交付可能由多个 model turn 的合法答复段落合成(探针场景)。段落顺序与每段来源
 # (turn_id + 序号 + 用量 + 是否被排除)登记在这里, 供审计与验收读取;
 # 它不参与任何裁决——交付对象本身只从当前轮派生, prompt/response/usage 因此结构性同一来源。
@@ -376,6 +378,44 @@ class ProviderTimeoutProbeRollback:
     response: object
     turn_id: str = ""
     sequence: int = 0
+
+
+# LLM: 仅保存有可见正文、具有本轮身份的原响应；与原截断预算同上限，不改变探针登记。
+# 函数用途: 在放行长度续写前追加一个有序交付候选。
+def arm_output_limit_resume_segment(params: object, response: object) -> bool:
+    from .tool_loop.response_decision import _TRUNCATED_OUTPUT_RESUME_COUNT
+
+    state = getattr(params, "live_archive_state", None)
+    sequence = _model_turn_sequence(params)
+    if not isinstance(state, dict) or sequence <= 0 or not str(getattr(response, "text", "") or "").strip():
+        return False
+    entries = state.setdefault(_OUTPUT_LIMIT_RESUME_SEGMENTS_STATE_KEY, [])
+    if not isinstance(entries, list) or len(entries) >= _TRUNCATED_OUTPUT_RESUME_COUNT:
+        return False
+    if any(isinstance(row, dict) and row.get("sequence") == sequence for row in entries):
+        return False
+    entries.append({"response": response, "turn_id": str(state.get("_current_model_turn_id") or ""),
+                    "sequence": sequence})
+    return True
+
+
+# LLM: pop 后不能再次交付；只接受当前模型轮之前的有界候选，保持原产生顺序。
+# 函数用途: 一次性取出长度续写候选及其真实来源。
+def take_output_limit_resume_segments(params: object) -> tuple[ProviderTimeoutProbeRollback, ...]:
+    from .tool_loop.response_decision import _TRUNCATED_OUTPUT_RESUME_COUNT
+
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return ()
+    entries = state.pop(_OUTPUT_LIMIT_RESUME_SEGMENTS_STATE_KEY, ())
+    if not isinstance(entries, (tuple, list)):
+        return ()
+    current = _model_turn_sequence(params)
+    return tuple(ProviderTimeoutProbeRollback(response=row["response"], turn_id=str(row.get("turn_id") or ""),
+                                             sequence=row["sequence"])
+                 for row in entries[:_TRUNCATED_OUTPUT_RESUME_COUNT]
+                 if isinstance(row, dict) and type(row.get("sequence")) is int
+                 and 0 < row["sequence"] <= current and row.get("response") is not None)
 
 
 # LLM: 探针登记/消费的唯一权威位置在生成层——这里才有 _model_turn_sequence 与超时事实表;
