@@ -1,5 +1,7 @@
 """历史版本延续：精确内容身份、缺失原因及显式兼容升级。"""
 import hashlib
+import json
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -97,7 +99,7 @@ def test_script_history_builds_exact_expected_pin(tmp_path):
 # LLM: 兼容链只通过W1接口读取；非显式策略从不自动推进。
 # 函数用途: 核对固定策略和通过1→2、失败2→3的升级边界。
 @pytest.mark.parametrize('policy,expected', [('pinned', 1), ('follow_compatible', 2)])
-def test_follow_compatible_only_advances_passing_chain(tmp_path, policy, expected):
+def test_follow_compatible_only_advances_passing_chain(tmp_path, policy, expected, caplog):
     from agent_py_agent.agent.scheduler.pinned_targets import resolve_monitor_target
 
     store, definition, target = _workflow(tmp_path)
@@ -108,10 +110,15 @@ def test_follow_compatible_only_advances_passing_chain(tmp_path, policy, expecte
                        execution_definition_ref=execution_definition_ref('workflow', 'flow', definition)['definition_sha256'])
     record_compat_edge(tmp_path, 'workflow', 'flow', from_version=1, to_version=2, verdict='replay_passed')
     record_compat_edge(tmp_path, 'workflow', 'flow', from_version=2, to_version=3, verdict='replay_failed')
+    caplog.set_level('INFO', logger='agent_py_agent.agent.scheduler.pinned_targets')
     resolved = resolve_monitor_target(tmp_path, 'job48', target)
     assert resolved['pinned_version'] == expected
     assert get_monitor_descriptor(tmp_path, 'job48')['metadata']['pinned_version'] == expected
     assert ('upgrade_notice' in resolved) is (policy == 'follow_compatible')
+    notices = [record for record in caplog.records if getattr(record, 'event', '') == 'monitor_pin_advanced']
+    assert len(notices) == (1 if policy == 'follow_compatible' else 0)
+    if notices:
+        assert (notices[0].from_version, notices[0].to_version) == (1, 2)
 
 
 # LLM: 工具权限链不替换，仅复制本次handler并在原engine调用处固定版本参数。
@@ -166,3 +173,48 @@ def test_script_tool_passes_expected_pin_to_original_seam(tmp_path, monkeypatch)
     result = pinned.execute({'action': 'run', 'script_id': 'collect', 'inputs': {}})
     assert result.ok and calls == [pin]
     assert original._dispatch.__func__ is ScriptsTool._dispatch
+
+
+# LLM: 独立审查指出pin与内容引用可能互相矛盾，不能输出自相矛盾的冻结身份。
+# 函数用途: 用既有STALE错误拒绝版本和引用不匹配。
+def test_explicit_pin_and_ref_must_identify_same_version(tmp_path):
+    store, definition, target = _workflow(tmp_path)
+    newer = store.save_workflow(replace(definition, steps=()))
+    record_version(tmp_path, 'workflow', 'flow', payload=newer.to_dict(),
+                   execution_definition_ref=execution_definition_ref('workflow', 'flow', newer)['definition_sha256'])
+    agent, runtime = _agent(tmp_path, store)
+    with pytest.raises(ExecutionTargetError) as caught:
+        resolve_execution_target(agent, {**target, 'pinned_version': 2}, runtime=runtime)
+    assert caught.value.error_code == 'SCHEDULER_EXECUTION_DEFINITION_STALE'
+
+
+# LLM: 绑定可显式手工升级，但不能在消费已有明确pin时无提示覆盖它。
+# 函数用途: 验证输入pin冲突不会被清空内容引用后隐藏。
+def test_monitor_rejects_conflicting_explicit_pin(tmp_path):
+    from agent_py_agent.agent.scheduler.pinned_targets import resolve_monitor_target
+    store, definition, target = _workflow(tmp_path)
+    save_monitor_binding(tmp_path, 'job48', workflow_ids=['flow'])
+    newer = store.save_workflow(replace(definition, steps=()))
+    record_version(tmp_path, 'workflow', 'flow', payload=newer.to_dict(),
+                   execution_definition_ref=execution_definition_ref('workflow', 'flow', newer)['definition_sha256'])
+    save_monitor_binding(tmp_path, 'job48', pinned_version=2)
+    with pytest.raises(ExecutionTargetError):
+        resolve_monitor_target(tmp_path, 'job48', {**target, 'pinned_version': 1})
+
+
+# LLM: 使用base提交的真实旧算法，不拿新函数生成所谓兼容样本。
+# 函数用途: 验证升级前冻结的旧SHA仍恢复同一历史定义，不替换成当前内容。
+def test_legacy_frozen_reference_resolves_verified_history(tmp_path):
+    store, definition, target = _workflow(tmp_path)
+    payload = deepcopy(definition.to_dict())
+    for key in ('revision', 'runtime_summary', 'used_by', 'entrypoint_path', 'source_check',
+                'source_system', 'source_binding', 'last_check_result'):
+        payload['descriptor'].pop(key, None)
+    legacy = hashlib.sha256(json.dumps(payload, ensure_ascii=False, allow_nan=False,
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    old_target = {**target, 'execution_definition_ref': {**target['execution_definition_ref'], 'definition_sha256': legacy}}
+    store.save_workflow(replace(definition, steps=()))
+    agent, runtime = _agent(tmp_path, store)
+    resolved, frozen = resolve_execution_target(agent, old_target, runtime=runtime)
+    assert resolved['definition_version'] == 1
+    assert [step.step_id for step in frozen.steps] == ['one']

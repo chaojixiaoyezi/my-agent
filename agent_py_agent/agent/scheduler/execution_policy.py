@@ -120,6 +120,18 @@ def resolve_execution_target(agent, value, *, runtime=None):
     return resolve_pinned_target(agent.home_paths.owner_home_dir, target, definition, reference)
 
 
+# LLM: 旧引用只按旧算法对真实内容重新计算，不能因查不到新索引便接受当前替代定义。
+# 函数用途: 为升级前已冻结的调度引用提供字节可核验的兼容比较。
+def _legacy_execution_definition_ref(definition):
+    value = deepcopy(definition.to_dict() if hasattr(definition, 'to_dict') else definition)
+    descriptor = value.get('descriptor', value)
+    for key in ('revision', 'runtime_summary', 'used_by', 'entrypoint_path', 'source_check',
+                'source_system', 'source_binding', 'last_check_result'):
+        descriptor.pop(key, None)
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, allow_nan=False,
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 # LLM: 机器分类只读取类型及错误码，文案仅供解释；继承原校验异常保持工具旧错误出口。
 # 类用途: 区分目标定义漂移与一般输入失败，不从异常正文推导状态。
 class ExecutionTargetError(ScheduleValidationError):

@@ -61,3 +61,34 @@ def test_last_run_projection_uses_scheduler_record(tmp_path):
 def test_wrong_target_types_do_not_raise(tmp_path):
     for value in ([], 'workflow:flow', {'kind': 'future', 'asset_id': 'x'}, {'kind': 'workflow', 'asset_id': '../x'}):
         assert get_monitor_descriptor(tmp_path, 'job48', {**_job(), 'execution_target': value})['refs'] == []
+
+
+# LLM: 终态原账本使用ended_at并移出活动集合，投影不能只测试自造finished_at字段。
+# 函数用途: 验证归档运行的阶段、耗时和终态仍能读回，且列表只读。
+def test_archived_scheduler_terminal_projection(tmp_path):
+    directory = tmp_path / 'data/scheduler'
+    directory.mkdir(parents=True)
+    job = _job()
+    (directory / 'store.json').write_text(json.dumps({'owner': {'id': 'local/main'}, 'jobs': {'job48': job}, 'runs': {}}))
+    run = {'run_id': 'r1', 'job_id': 'job48', 'owner': {'id': 'local/main'}, 'status': 'done',
+           'started_at': 1000, 'ended_at': 1002.5, 'response': 'observed\nresult'}
+    (directory / 'history.jsonl').write_text(json.dumps(run) + '\n')
+    before = {path: path.read_bytes() for path in directory.iterdir()}
+    last = get_monitor_descriptor(tmp_path, 'job48')['metadata']['last_run']
+    assert last == {'stage': 'finished', 'status': 'done', 'duration_ms': 2500,
+                    'result_summary': 'observed result', 'finished_at': '1970-01-01T00:16:42.500000Z'}
+    assert list_monitor_descriptors(tmp_path)[0]['metadata']['last_run'] == last
+    assert {path: path.read_bytes() for path in directory.iterdir()} == before
+
+
+# LLM: 原v13规则可没有计划；它仍是监控，不能只枚举scheduler已镜像任务。
+# 函数用途: 验证v13原集合结构化依赖及同镜像job去重。
+def test_v13_rules_project_refs_without_schedule(tmp_path):
+    directory = tmp_path / 'data/business_v13'
+    directory.mkdir(parents=True)
+    (directory / 'monitor_rules.json').write_text(json.dumps({'records': {
+        'rule_a': {'rule_id': 'rule_a', 'name': 'Rule A', 'enabled': False, 'schedule': None,
+                   'script_id': 'collect', 'workflow_id': 'flow', 'scheduler_job_id': None}}}))
+    rows = list_monitor_descriptors(tmp_path)
+    assert len(rows) == 1 and rows[0]['id'] == 'rule_a'
+    assert rows[0]['refs'] == [{'kind': 'workflow', 'id': 'flow'}, {'kind': 'script', 'id': 'collect'}]

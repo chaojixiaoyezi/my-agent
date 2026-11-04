@@ -242,6 +242,10 @@ def _mirror(call, row, agent_id=None, *, deleting=False):
         elif not row['enabled'] and job['status'] != 'paused':
             job = repo.pause_job(job['job_id'], expected_version=job['version'], now=call.clock())
             changed = True
+        from ..assets.monitor_adapter import save_monitor_binding
+        save_monitor_binding(call.owner_home, job['job_id'], name=row['name'], alias=row['name'],
+            script_ids=[row['script_id']] if row.get('script_id') else [],
+            workflow_ids=[row['workflow_id']] if row.get('workflow_id') else [])
         return job['job_id']
     except ScheduleValidationError as error:
         raise HostAPIError('INVALID_SCHEMA') from error

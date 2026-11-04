@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import unicodedata
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     list_names_beneath,
-    open_directory_beneath,
+    open_readonly_file_beneath,
     read_bytes_beneath,
     write_text_atomic_beneath,
 )
@@ -72,13 +74,29 @@ def save_monitor_binding(owner_home, monitor_id, *, name='', summary='', schedul
 # LLM: scheduler_job显式传入优先；缺省仅读本Owner canonical store，不猜路径或创建仓库实例。
 # 函数用途: 从Scheduler集合取得Job记录，调用方自行处理删除状态。
 def _jobs(owner_home, scheduler_jobs=()):
-    if scheduler_jobs:
-        return list(scheduler_jobs)
     store = _read_object(owner_home, ('data', 'scheduler', 'store.json')) or {}
-    jobs = store.get('jobs', {})
+    if scheduler_jobs:
+        supplied = list(scheduler_jobs)
+        jobs = {row['job_id']: row for row in supplied}
+        if len(jobs) != len(supplied):
+            raise ValueError('重复的Scheduler job_id')
+    else:
+        jobs = store.get('jobs', {})
     if not isinstance(jobs, dict):
         raise ValueError('Scheduler jobs必须是对象')
-    return list(jobs.values())
+    result = dict(jobs)
+    rules = _read_object(owner_home, ('data', 'business_v13', 'monitor_rules.json')) or {}
+    for row in rules.get('records', {}).values():
+        if not isinstance(row, dict) or row.get('_deleted'):
+            continue
+        identifier = row.get('scheduler_job_id') or row.get('rule_id')
+        if not isinstance(identifier, str):
+            continue
+        existing = result.get(identifier, {})
+        result[identifier] = {'job_id': identifier, 'name': row.get('name', identifier),
+            'schedule': row.get('schedule') or {}, 'status': 'active' if row.get('enabled') else 'paused',
+            **existing, **{kind + '_id': row[kind + '_id'] for kind in ('workflow', 'script') if row.get(kind + '_id')}}
+    return list(result.values())
 
 
 # LLM: 绑定与Job按精确ID合并，重复Job拒绝；deleted覆盖同ID绑定，不复活已删除监控，不吞坏记录。
@@ -116,7 +134,9 @@ def get_monitor_descriptor(owner_home, monitor_id, scheduler_job=None):
     job = dict(scheduler_job or {})
     if '_last_run' not in job:
         store = _read_object(home, ('data', 'scheduler', 'store.json')) or {}
-        job['_last_run'] = _latest_run(store.get('runs'), identifier)
+        active = _latest_run(store.get('runs'), identifier)
+        archived = _archived_run(home, store.get('owner', {}), identifier)
+        job['_last_run'] = _latest_run({'active': active, 'archived': archived}, identifier)
     return _monitor_dict(home, identifier, binding or {}, job)
 
 
@@ -141,7 +161,7 @@ def _schedule(job, binding):
     expression = source.get('expression', source.get('every_seconds', source.get('at', '')))
     result = {'kind': source.get('kind', ''), 'expression': str(expression), 'timezone': source.get('timezone', 'UTC'),
               'next_run_at': job.get('next_run_at', source.get('next_run_at')),
-              'enabled': job.get('status') == 'active' if job else source.get('enabled', False)}
+              'enabled': job.get('status') == 'active' if 'status' in job or 'job_id' in job else source.get('enabled', False)}
     if job.get('rules') is not None:
         result.update(kind='composite', expression='', rules=[{'id': rule['id'], **_schedule(
             {'schedule': rule['schedule'], 'next_run_at': rule.get('next_run_at'),
@@ -185,6 +205,7 @@ def _monitor_dict(home, identifier, binding, job):
         owner_id=job.get('owner', {}).get('id', home.name), refs=refs, runtime_summary=runtime, revision=binding.get('revision', 0),
         metadata={**metadata, 'schedule_spec': schedule, 'scheduler_skill_refs': job.get('skill_refs', [])}, **{key: binding.get(key, ()) for key in
             ('access_targets', 'data_sources', 'credential_refs')}).to_dict()
+    descriptor['metadata']['asset_refs'] = descriptor['refs']
     structured = [{'kind': kind, 'id': asset_id} for kind in ('workflow', 'script') for asset_id in refs.get(kind + 's', [])]
     return {**descriptor, 'refs': structured, 'schedule_spec': descriptor['metadata']['schedule_spec']}
 
@@ -278,7 +299,46 @@ def _latest_run(runs, identifier):
     if not isinstance(runs, dict):
         return None
     candidates = [row for row in runs.values() if isinstance(row, dict) and row.get('job_id') == identifier]
-    return max(candidates, key=lambda row: float(row.get('finished_at') or row.get('started_at') or row.get('created_at') or 0), default=None)
+    return max(candidates, key=lambda row: float(row.get('ended_at') or row.get('finished_at') or row.get('started_at') or row.get('created_at') or 0), default=None)
+
+
+# LLM: 已有SQLite投影只读打开并核原owner/源快照；不创建库、不回填、不取得会写锁文件的history读锁。
+# 函数用途: 按job索引点查最近终态；旧未建索引账本只读有界尾部，不全扫。
+def _archived_run(home, owner, identifier, *, tail_bytes=256 * 1024):
+    from types import SimpleNamespace
+
+    from ..scheduler.history_index import SchedulerHistoryIndex, _snapshot
+    source = home / 'data' / 'scheduler' / 'history.jsonl'
+    view = SimpleNamespace(path=source.with_suffix('.index.sqlite3'), owner=owner)
+    try:
+        with closing(SchedulerHistoryIndex._connect(view, read_only=True)) as connection:
+            connection.execute('BEGIN')
+            state = SchedulerHistoryIndex._state(view, connection)
+            snapshot = _snapshot(source)
+            if state.get('owner') == owner and all(state.get(key) == snapshot[key] for key in ('stamp', 'head', 'tail')):
+                raw = connection.execute('SELECT payload FROM history_rows WHERE generation=? AND job_id=? '
+                    'ORDER BY ended_at DESC,run_id DESC LIMIT 1', (state['generation'], identifier)).fetchone()
+                if raw is not None and snapshot == _snapshot(source):
+                    return json.loads(raw[0])
+    except (FileNotFoundError, sqlite3.Error):
+        pass
+    try:
+        descriptor = open_readonly_file_beneath(home, ('data', 'scheduler', 'history.jsonl'))
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, 'rb') as handle:
+        start = max(0, os.fstat(handle.fileno()).st_size - tail_bytes)
+        handle.seek(start)
+        content = handle.read(tail_bytes)
+    rows = {}
+    for line in content.splitlines()[1 if start else 0:]:
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(row, dict) and row.get('owner') == owner and row.get('job_id') == identifier:
+            rows[str(row.get('run_id'))] = row
+    return _latest_run(rows, identifier)
 
 
 # LLM: 运行结果只投影结构化状态；文字只做脱敏后的有界展示，不决定成功或失败。
@@ -288,9 +348,13 @@ def _run_projection(run):
         return None
     summary = run.get('result_summary', run.get('response', ''))
     summary = ' '.join(summary.split())[:120] if isinstance(summary, str) else ''
-    return {'stage': run.get('stage', ''), 'status': run.get('status', ''),
-            'duration_ms': run.get('duration_ms'), 'result_summary': summary,
-            'finished_at': _run_time(run.get('finished_at'))}
+    finished = run.get('ended_at', run.get('finished_at'))
+    duration = run.get('duration_ms')
+    if duration is None and type(finished) in (int, float) and type(run.get('started_at')) in (int, float):
+        duration = max(0, round((finished - run['started_at']) * 1000))
+    return {'stage': run.get('stage') or ('finished' if finished else run.get('status', '')),
+            'status': run.get('status', ''), 'duration_ms': duration, 'result_summary': summary,
+            'finished_at': _run_time(finished)}
 
 
 # LLM: Scheduler保存准确stable_id/hash对象，不能把dict当字符串ID；仅普通Skill转拓扑ID，包身份完整留在metadata而非伪造Skill边。

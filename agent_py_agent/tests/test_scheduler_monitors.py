@@ -271,7 +271,7 @@ def test_successful_monitor_only_records_json_object(tmp_path, monkeypatch, outp
     assert row['status'] == 'done'
 
 
-# LLM: 只从真实Scheduler归一化Job及公开绑定入口观察refs，不直接测试私有提取函数。
+# LLM: 只从真实Scheduler及绑定观察C-MONITOR-BINDING列表，不直接测试私有提取函数；原引用顺序和数量不放宽。
 # 函数用途: 验证tool、规则precheck和顶层precheck自动建边，保留绑定顺序且去重。
 def test_monitor_descriptor_extracts_rule_and_precheck_asset_refs(tmp_path):
     from agent_py_agent.agent.assets.monitor_adapter import (
@@ -289,11 +289,13 @@ def test_monitor_descriptor_extracts_rule_and_precheck_asset_refs(tmp_path):
     save_monitor_binding(home, job['job_id'], workflow_ids=['bound_wf', 'wf_1'], script_ids=['bound_sc'])
     job['precheck'] = {'tool_name': 'scripts', 'arguments': {'script_id': 'sc_top'}}
     descriptor = get_monitor_descriptor(home, job['job_id'], job)
-    assert descriptor['refs']['workflows'] == ['bound_wf', 'wf_1', 'wf_2']
-    assert descriptor['refs']['scripts'] == ['bound_sc', 'sc_1', 'sc_top']
+    assert descriptor['refs'] == [
+        {'kind': 'workflow', 'id': 'bound_wf'}, {'kind': 'workflow', 'id': 'wf_1'},
+        {'kind': 'workflow', 'id': 'wf_2'}, {'kind': 'script', 'id': 'bound_sc'},
+        {'kind': 'script', 'id': 'sc_1'}, {'kind': 'script', 'id': 'sc_top'}]
 
 
-# LLM: 工具名决定资产类型，非字符串和空值不建边，不安全字符串沿safe_asset_id拒绝。
+# LLM: 工具名决定资产类型，空值不建边，不安全字符串仍拒绝；引用断言按新列表合同严格比较。
 # 函数用途: 验证脚本tool引用及错误ID边界，不修改源Job。
 @pytest.mark.parametrize('identifier', ['script_1', '../escape', '', None, 7])
 def test_monitor_descriptor_script_tool_id_validation(tmp_path, identifier):
@@ -308,7 +310,7 @@ def test_monitor_descriptor_script_tool_id_validation(tmp_path, identifier):
             get_monitor_descriptor(tmp_path / 'owner', job['job_id'], job)
     else:
         refs = get_monitor_descriptor(tmp_path / 'owner', job['job_id'], job)['refs']
-        assert refs['scripts'] == (['script_1'] if identifier == 'script_1' else [])
+        assert refs == ([{'kind': 'script', 'id': 'script_1'}] if identifier == 'script_1' else [])
 
 
 # LLM: 使用真实tick、默认名称prompt与原后台notify/模型收口，工具边界和模型提供者可控，不修改状态迁就结果。
