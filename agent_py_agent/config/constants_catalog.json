@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1297,
+  "count": 1298,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3018,6 +3018,14 @@
       "unit": "个",
       "category": "其它",
       "description": "瘦身时永远原样保留的最近工具结果条数：摘要至少要看到最新的工具结果原文。"
+    },
+    {
+      "name": "COMPACT_SUMMARY_MAX_OUTPUT_TOKENS",
+      "file": "agent_py_agent/agent/conversation/compact_request_budget.py",
+      "value": 4096,
+      "unit": "tokens",
+      "category": "上限预算",
+      "description": "压缩摘要单次输出的 token 上限；不改变共享后端或主请求的上限。"
     },
     {
       "name": "_SEGMENT_DIGEST_CHARS",
