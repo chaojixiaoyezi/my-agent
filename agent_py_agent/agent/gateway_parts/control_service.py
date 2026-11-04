@@ -706,21 +706,23 @@ def _execute_gateway_new_session(base_agent, paths, command, scope):
     return new_session_result(store, current.thread_id, title=command.value, binding=binding)
 
 
-# LLM: 调用方已完成命令鉴权；只从认证scope取owner及通道线程，缺HomePaths时用canonical storage.root，不猜基础Agent或最新线程。
+# LLM: 调用方已完成命令鉴权；首次绑定同时记录认证Home的owner；缺HomePaths时保留canonical storage.root，不猜基础Agent或最新线程。
 # 函数用途: 接通目录及分叉领域服务；仅首次dir创建会话，空fork明确拒绝。
 def _execute_gateway_workspace_control(base_agent, command, scope, *, is_admin: bool):
     from ..conversation.workspace_context import execute_workspace_control
 
     owner_agent = _request_agent_for_scope(base_agent, scope)
     store = owner_agent.conversation_store
-    owner_home = Path(getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "") or store.storage.root.parent)
+    home = getattr(owner_agent, "home_paths", None)
+    owner_home = Path(getattr(home, "owner_home_dir", "") or store.storage.root.parent)
     thread = store.threads.resolve(channel=scope.channel, channel_conversation_id=scope.conversation_id,
                                    channel_user_id=scope.user_id)
     if thread is None:
         if command.kind == "fork":
             return ConversationControlResult("fork", False, "当前还没有可分叉的会话。", error_code="WORKSPACE_CONTROL_INVALID")
         thread = store.threads.get_or_create({"canonical_user_id": scope.user_id, "channel": scope.channel,
-            "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id, "owner_home": str(owner_home)})
+            "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,
+            "owner_id": getattr(home, "owner_id", ""), "owner_home": str(owner_home)})
     return execute_workspace_control(store, command, thread_id=thread.thread_id, owner_home=owner_home, is_admin=is_admin)
 
 

@@ -16,10 +16,10 @@ def parse_route_mode(value: object) -> bool | str:
     return {"": "status", "status": "status", "true": True, "false": False}[value.strip()]
 
 
-# LLM: owner取已认证home，actor只来自宿主参数；同一actor跨入口共享，群中其他actor不继承设置。
-# 函数用途: 校验线程归属并生成不含明文发送者的设置键。
+# LLM: home取已认证owner且线程来自对应Store；仅兼容旧绑定空owner，非空异主仍拒绝；actor只来自宿主参数，群中其他actor不继承设置。
+# 函数用途: 校验线程归属并生成不含明文发送者的设置键，不回填旧线程。
 def _setting_key(home, thread, actor_id):
-    if thread.owner_id != str(home.owner_id):
+    if thread.owner_id not in ("", str(home.owner_id)):
         raise PermissionError("route owner scope mismatch")
     actor = actor_id or thread.canonical_user_id
     if not isinstance(actor, str) or not actor or len(actor) > 1024:

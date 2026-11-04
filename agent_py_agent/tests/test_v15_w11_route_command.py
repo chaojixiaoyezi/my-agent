@@ -13,12 +13,20 @@ from agent_py_agent.agent.conversation.route_mode import (
     execute_route_control,
     parse_route_mode,
     route_setting,
+    route_setting_for_paths,
+    route_thread_for_paths,
     set_route_mode,
 )
 from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.gateway_parts import control_service
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
-from agent_py_agent.agent.gateway_parts.im_dispatch_policy import capture_im_dispatch
+from agent_py_agent.agent.gateway_parts.im_dispatch_policy import (
+    capture_im_dispatch,
+    capture_im_dispatch_for_owner,
+)
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
+from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.tests.test_business_v12_f3_agents import business_host as business_host
 from agent_py_agent.tests.test_im_execution_threads import fixture_agent
 
@@ -213,3 +221,123 @@ def test_old_preference_is_a_readonly_migration_hint_not_route_state(tmp_path):
     assert result.ok and result.details['enabled'] is False
     assert '旧' in result.message and '/delegate' in result.message and '迁移' in result.message
     assert agent.conversation_store.storage.thread_path(thread.thread_id).read_bytes() == before
+
+
+def _empty_owner_route_case(tmp_path, owner_kind, *, enabled=False):
+    identity = (OwnerIdentity.provider_user('feishu', 'ou_a') if owner_kind == 'user'
+                else OwnerIdentity.provider_group('feishu', 'oc_source'))
+    agent, thread = fixture_agent(tmp_path, identity=identity)
+    agent.config.enable_subagents = True
+    agent.config.conversation_workspace = str(agent.conversation_store.storage.root)
+    scope = GatewayControlScope('ou_a', 'feishu', 'oc_source', resolved_owner=identity)
+    if enabled:
+        set_route_mode(agent, thread, True, actor_id=scope.user_id)
+    thread = agent.conversation_store.threads.update_atomic(
+        thread.thread_id, lambda current: replace(current, owner_id=''))
+    return agent, thread, scope
+
+
+def _route_capture(agent, scope, entry):
+    if entry == 'agent':
+        return capture_im_dispatch(agent, scope)
+    return capture_im_dispatch_for_owner(
+        home_paths=agent.home_paths, config=agent.config, scope=scope,
+        capability_root=agent.root)
+
+
+@pytest.mark.parametrize('owner_kind', ['user', 'group'])
+def test_legacy_empty_owner_route_status_and_lookup_remain_readonly(tmp_path, owner_kind):
+    from agent_py_agent.tests.test_im_dispatch_readonly import _tree
+
+    agent, thread, scope = _empty_owner_route_case(tmp_path, owner_kind)
+    before = _tree(tmp_path)
+    status = execute_route_control(agent, ConversationControlCommand('route', value='status'),
+        thread, actor_id=scope.user_id, channel=scope.channel)
+    assert status.ok, status.message
+    expected = {'enabled': False, 'source': 'default', 'revision': 0}
+    assert route_setting(agent, thread, actor_id=scope.user_id) == expected
+    assert route_setting_for_paths(agent.home_paths, thread, actor_id=scope.user_id) == expected
+    resolved = route_thread_for_paths(agent.home_paths, agent.config, scope)
+    assert resolved.thread_id == thread.thread_id and resolved.owner_id == ''
+    assert _tree(tmp_path) == before
+    saved = set_route_mode(agent, thread, True, actor_id=scope.user_id)
+    assert saved == {'enabled': True, 'source': 'thread', 'revision': 1}
+    assert route_setting(agent, thread, actor_id=scope.user_id) == saved
+    assert route_setting(agent, thread, actor_id='ou_b')['enabled'] is False
+    assert agent.conversation_store.threads.require(thread.thread_id).owner_id == ''
+
+
+@pytest.mark.parametrize('owner_kind', ['user', 'group'])
+@pytest.mark.parametrize('entry', ['agent', 'cold'])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_legacy_empty_owner_im_capture_remains_readonly(tmp_path, monkeypatch, owner_kind, entry, enabled):
+    from agent_py_agent.tests.test_im_dispatch_readonly import _tree
+
+    agent, thread, scope = _empty_owner_route_case(tmp_path, owner_kind, enabled=enabled)
+    monkeypatch.setattr(control_service, '_request_agent_for_scope', lambda base, scope: agent)
+    before = _tree(tmp_path)
+    captured = _route_capture(agent, scope, entry)
+    assert captured['mode'] == ('delegated' if enabled else 'original')
+    assert captured['route_mode_frozen'] is enabled
+    assert captured['preference_revision'] == (1 if enabled else 0)
+    assert captured['owner_id'] == agent.home_paths.owner_id
+    assert captured['route_origin'] == {
+        'channel': scope.channel, 'chat_id': scope.conversation_id, 'thread_id': thread.thread_id,
+        'message_id': '', 'owner_id': agent.home_paths.owner_id,
+    }
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.parametrize('entry', ['agent', 'cold'])
+def test_workspace_control_stamps_owner_for_ordinary_capture(tmp_path, monkeypatch, entry):
+    agent, _thread, scope = _empty_owner_route_case(tmp_path, 'user')
+    scope = replace(scope, conversation_id='oc_first_dir')
+    monkeypatch.setattr(control_service, '_request_agent_for_scope', lambda base, scope: agent)
+    result = control_service._execute_gateway_workspace_control(
+        agent, ConversationControlCommand('dir'), scope, is_admin=False)
+    assert result.ok, result.message
+    created = agent.conversation_store.threads.require(result.details['thread_id'])
+    assert created.owner_id == agent.home_paths.owner_id
+    assert created.owner_home == str(agent.home_paths.owner_home_dir)
+    captured = _route_capture(agent, scope, entry)
+    assert captured['mode'] == 'original' and captured['route_mode_frozen'] is False
+    assert captured['route_origin']['thread_id'] == created.thread_id
+    assert captured['owner_id'] == agent.home_paths.owner_id
+
+
+@pytest.mark.parametrize('entry', ['lookup', 'paths', 'binding', 'agent', 'cold', 'write'])
+def test_foreign_thread_owner_is_rejected_at_every_route_entry(tmp_path, monkeypatch, entry):
+    from agent_py_agent.tests.test_im_dispatch_readonly import _tree
+
+    agent, thread, scope = _empty_owner_route_case(tmp_path, 'user', enabled=True)
+    thread = agent.conversation_store.threads.update_atomic(
+        thread.thread_id, lambda current: replace(current, owner_id='foreign'))
+    monkeypatch.setattr(control_service, '_request_agent_for_scope', lambda base, scope: agent)
+    before = _tree(tmp_path)
+    with pytest.raises(PermissionError, match='route owner scope mismatch'):
+        if entry == 'lookup':
+            route_setting(agent, thread, actor_id=scope.user_id)
+        elif entry == 'paths':
+            route_setting_for_paths(agent.home_paths, thread, actor_id=scope.user_id)
+        elif entry == 'binding':
+            route_thread_for_paths(agent.home_paths, agent.config, scope)
+        elif entry == 'write':
+            set_route_mode(agent, thread, False, actor_id=scope.user_id)
+        else:
+            _route_capture(agent, scope, entry)
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.parametrize('entry', ['agent', 'cold'])
+def test_legacy_empty_owner_does_not_accept_foreign_route_metadata(tmp_path, monkeypatch, entry):
+    from agent_py_agent.tests.test_im_dispatch_readonly import _tree
+
+    agent, thread, scope = _empty_owner_route_case(tmp_path, 'user', enabled=True)
+    agent.conversation_store.threads.update_atomic(thread.thread_id, lambda current: replace(
+        current, metadata={**current.metadata, 'route_mode.v1': {
+            **current.metadata['route_mode.v1'], 'owner_id': 'foreign'}}))
+    monkeypatch.setattr(control_service, '_request_agent_for_scope', lambda base, scope: agent)
+    before = _tree(tmp_path)
+    with pytest.raises(DataCorruptionError, match='route setting is unreadable'):
+        _route_capture(agent, scope, entry)
+    assert _tree(tmp_path) == before
