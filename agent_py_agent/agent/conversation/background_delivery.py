@@ -181,6 +181,13 @@ def _record_background_owner_response(
     )
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
     committed_content = str(getattr(receipt, "content", projection.content) or "")
+    if delivery_status == "sent":
+        from .origin_notice_sync import outbound_message_ids
+
+        # 提供方编号必须在 canonical 或索引写入前随整封冻结，补账不能重发。
+        message_metadata["channel_message_ids"] = list(outbound_message_ids(
+            receipt, frozen_metadata=frozen_retry.message_metadata if frozen_retry is not None else None))
+        message_metadata["receipt_id"] = str(getattr(receipt, "receipt_id", "") or "")
     freeze = _OwnerDeliveryFreeze(request=request, content=committed_content,
         delivery_artifacts=delivery_artifacts, assistant_commentaries=assistant_commentaries,
         evidence_refs=evidence_refs, message_metadata=message_metadata, delivery_status=delivery_status,
@@ -396,6 +403,9 @@ def _background_owner_message_metadata(
         "evidence_refs": list(evidence_refs),
         LEARNING_SOURCE_KEY: source,
     }
+    workflow_run_id = wake_metadata.get("workflow_run_id")
+    if isinstance(workflow_run_id, str) and workflow_run_id:
+        metadata["workflow_run_id"] = workflow_run_id
     if operation_verification is not None:
         metadata["operation_verification"] = operation_verification
     if public_receipt is not None:
@@ -571,11 +581,13 @@ def _commit_background_response(
         delivery_key=delivery_key,
         assistant_commentaries=assistant_commentaries,
     )
+    channel_ids = message_metadata.get("channel_message_ids", []) if status == "sent" else []
     message_request = {
         "thread_id": delivery_context.thread_id,
         "role": "assistant",
         "content": committed_content,
         "channel": delivery_context.channel,
+        "channel_message_id": channel_ids[0] if channel_ids else "",
         "metadata": {
             **message_metadata, "assistant_part_id": "final",
             **({"background_display_turn": display_snapshot} if display_snapshot else {}),
@@ -589,6 +601,10 @@ def _commit_background_response(
         )
     else:
         message_entry = delivery.store.messages.append(message_request)
+    if status == "sent":
+        from .origin_notice_sync import commit_outbound_notice
+
+        commit_outbound_notice(delivery.agent, delivery.store, request, delivery_context, message_entry)
     if audit_refs_settled:
         # 这次只是补本地落账：审计交付回执在真正外发成功时已经记过，绝不能重复记一遍。
         pass
@@ -930,6 +946,8 @@ def message_tool_delivery_reason(request: BackgroundDeliveryRequest) -> str:
 # LLM: 调用方只传共核后且满足原reason/refs的回执；沿原external_sent冻结出口补canonical，失败重入不再次外发。
 # 函数用途: 把同槽工具正文、附件和原证据引用整封保存到原来源会话，返回实际提交事实并保留原回执metadata。
 def mirror_message_tool_deliveries(delivery, request, context, deliveries, *, delivery_reason):
+    from .origin_notice_sync import outbound_message_ids
+
     content = "\n\n".join(str(item.get('content') or '') for item in deliveries)
     artifacts = tuple(dict(ref) for item in deliveries for ref in item.get('attachments', ()) if isinstance(ref, dict))
     first = deliveries[0]
@@ -939,6 +957,9 @@ def mirror_message_tool_deliveries(delivery, request, context, deliveries, *, de
         evidence_refs=refs, operation_verification=None, frozen_retry=None)
     metadata['message_tool_delivery'] = {'receipt_id': first['receipt_id'], 'delivery_status': 'sent',
         'deduplicated': first.get('deduplicated') is True}
+    metadata['channel_message_ids'] = list(dict.fromkeys(identity for item in deliveries
+        for identity in outbound_message_ids(SimpleNamespace(**item))))
+    metadata['receipt_id'] = first['receipt_id']
     return record_background_response(delivery, request, context, content,
         delivery_artifacts=artifacts, deliver=True, delivery_reason=delivery_reason,
         frozen_retry=FrozenOwnerDelivery(content=content, external_sent=True,
