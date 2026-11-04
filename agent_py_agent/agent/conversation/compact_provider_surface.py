@@ -67,6 +67,7 @@ class ConversationCompactProviderSurface:
 # display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
 # 包候选沿 model_surface 原范围和重验后的 selected 集合投影，不用默认范围或载体旧选择重新补回未选包。
 # 工具加载名只按首见顺序去重后交原resolver，不先转set破坏发现顺序或改变allowed_tools。
+# 本轮推荐不依赖能力选择载体；单模型同样消费当前请求文本，并只保留layout中唯一当前分段。
 # 函数用途: 按原链冻结压缩缓存面和实际自我目录资格，复用已提交线程人格；失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
@@ -106,7 +107,7 @@ def prepare_conversation_compact_provider_surface(
     )
     presentation = _compact_capability_presentation(agent, model_surface, runtime_snapshot, protocol_snapshot)
     runtime_snapshot = presentation.tool_snapshot
-    user_prompt = runtime_request.user_prompt if presentation.selection is not None else ""
+    user_prompt = runtime_request.user_prompt
     tool_catalog, tool_recommendations = _resolve_tool_sections(
         ToolSectionsRequest(
             agent=agent,
@@ -116,6 +117,8 @@ def prepare_conversation_compact_provider_surface(
             protocol_snapshot=protocol_snapshot,
             context_scope=model_surface.context_scope,
             selected_skill_ids=presentation.selected_skill_ids,
+            attachments=tuple((runtime_request.task_attributes or {}).get("input_media") or ()),
+            ocr_texts=tuple((runtime_request.task_attributes or {}).get("ocr_texts") or ()),
         )
     )
     prompt_request = PromptBuildRequest(
@@ -154,8 +157,7 @@ def prepare_conversation_compact_provider_surface(
         system_instruction=provider_system_instruction(getattr(agent, "backend", None)),
         volatile_sections=tuple(
             section for section in layout.volatile_sections
-            if section[0] == "prompt.persona_updates"
-            or (presentation.selection is not None and section[0] == "prompt.tool_recommendations")
+            if section[0] in {"prompt.persona_updates", "prompt.tool_recommendations"}
         ),
     )
 

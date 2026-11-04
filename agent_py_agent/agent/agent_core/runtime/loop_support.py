@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
 from ...capability.config import CapabilityConfig
@@ -85,6 +85,9 @@ class ToolSectionsRequest:
     selected_skill_ids: tuple[str, ...] | None = None
     # 回合触发类型；有固定推荐短名单的类型（如生命周期唤醒）不按任务文字检索推荐。
     turn_trigger: object | None = None
+    attachments: tuple[dict, ...] = field(default=(), kw_only=True)
+    ocr_texts: tuple[str, ...] = field(default=(), kw_only=True)
+    in_use_method_ids: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 # LLM: 原拒绝/展示/Compact及opaque输入source只沿宿主参数链传递；不序列化或恢复身份，同片失效不得再决策，批准归原精确调用。
@@ -138,7 +141,7 @@ def _runtime_loop_params(
 
 # LLM: 目录和推荐区消费同一工具快照；包建议只从当前授权目录软排序，沿能力配置开关，不重新探测、读正文或扩大权限。
 #   回合触发类型有固定短名单时（生命周期唤醒）推荐区只用它，不按任务文字检索，也不加包建议。
-# 函数用途: 渲染本轮工具说明，按原工具权限追加有界包建议，空建议保持原字节。
+# 函数用途: 渲染本轮工具说明，只在动态推荐尾部追加有界包与固定方法建议，空建议保持原字节。
 def _resolve_tool_sections(request: ToolSectionsRequest):
     if not request.agent.config.enable_tools:
         return "", ""
@@ -154,7 +157,9 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
         runtime_snapshot=request.runtime_snapshot,
     )
     if (fixed := turn_trigger_recommendation(request.turn_trigger)) is not None:
-        return tool_catalog, _fixed_recommendations_section(request, fixed, tool_protocol)
+        recommendations = _fixed_recommendations_section(request, fixed, tool_protocol)
+        methods = _asset_recommendations(replace(request, user_prompt=""))
+        return tool_catalog, "\n\n".join(part for part in (recommendations, methods) if part)
     tool_recommendations = request.agent.tools.render_recommended_tools_section(
         request.user_prompt,
         allowed_tools=request.allowed_tools,
@@ -163,7 +168,27 @@ def _resolve_tool_sections(request: ToolSectionsRequest):
     )
     if packages := _package_recommendations(request):
         tool_recommendations = "\n\n".join(part for part in (tool_recommendations, packages) if part)
+    if methods := _asset_recommendations(request):
+        tool_recommendations = "\n\n".join(part for part in (tool_recommendations, methods) if part)
     return tool_catalog, tool_recommendations
+
+
+# LLM: 库存只消费原owner和当前工具快照；子代理/隔离/task_local不读取主线程资产或便签，纯投影不授权。
+# 函数用途: 为主线程把固定方法建议及在用、入站资料放到动态尾段。
+def _asset_recommendations(request: ToolSectionsRequest) -> str:
+    from ...capability.method_carry import prompt_method_ids
+    from ...capability.turn_recommendations import inventory_for_agent, render_turn_recommendations
+
+    if str(request.context_scope or "").strip().lower() in {"task_local", "isolated", "control_plane"} or current_subagent_run_id(request.agent):
+        return ""
+    rows, monitors, home = inventory_for_agent(request.agent, runtime_snapshot=request.runtime_snapshot,
+                                              allowed_tools=request.allowed_tools)
+    if request.selected_skill_ids is not None:
+        selected = set(request.selected_skill_ids)
+        rows = [row for row in rows if row.get("kind") != "skill" or row.get("metadata", {}).get("stable_id") in selected]
+    return render_turn_recommendations(request.user_prompt, rows, owner_home=home, monitors=monitors,
+        in_use_method_ids=request.in_use_method_ids or prompt_method_ids(request.agent),
+        attachments=request.attachments, ocr_texts=request.ocr_texts)
 
 
 # LLM: 名字与理由来自回合触发类型（宿主常量），只在本轮可见工具里按顺序取交集；原生协议只列名字与理由，文本协议沿用
@@ -743,6 +768,7 @@ def _runtime_injections_with_bundle(
 # 由循环结果显式交回；异常先保存当前 IR 再原样抛错（候选只换协议快照、共享同一 IR），需核对原生历史与中断回归。
 # 能力推荐真的发起过决策时回传结构化观测；同一 selected 集合传给包动态建议，不绕过原展示选择或另发请求。
 # 回合触发类型原样交给推荐区与工具循环（当前回合开头、原生历史保存）。
+# 媒体推荐仅读canonical媒体元数据及显式OCR文本，不读附件正文；输出不增加执行权限。
 # 函数用途: 驱动工具循环，正常返回完整结果；溢出时释放未提交插话并冻结IR，异常也经宿主回调保存已发生的会话事实。
 def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     write_runtime_fact_start_if_enabled(agent, params)
@@ -779,6 +805,8 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
             context_scope=params.context_scope,
             selected_skill_ids=presentation.selected_skill_ids,
             turn_trigger=params.turn_trigger,
+            attachments=tuple((params.task_attributes or {}).get("input_media") or ()),
+            ocr_texts=tuple((params.task_attributes or {}).get("ocr_texts") or ()),
         )
     )
     loop_params = _tool_loop_execute_params(
@@ -1472,8 +1500,8 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     )
 
 
-# LLM: 原恢复/合同/线程加载事实不清空；新增预载只取本轮快照及allowed交集，绝不改执行许可或持久化。
-# 函数用途: 按后台唤醒或能力创作事实准备首轮工具参数，不再无条件加载整套后台工具。
+# LLM: 原恢复/合同/线程加载事实不清空；资产入口由本线程CAS持久挂载，其余预载只取本轮快照及allowed交集，绝不改执行许可。
+# 函数用途: 合并粘性资产工具及原后台、创作预载，让后续回合沿同一线程顺序恢复。
 def _initial_loop_loaded_tool_names(
     agent, params: RuntimeLoopParams, seed: RuntimeToolLoopSeed, reconstructed: _ReconstructedRuntimeState,
 ) -> set[str]:
@@ -1496,6 +1524,9 @@ def _initial_loop_loaded_tool_names(
     if _authoring_tools_requested(agent, params, seed, snapshot, attrs):
         additions.update({"skill_search", "scripts", "workflows"})
     loaded.update(additions & available)
+    from ...conversation.tool_discovery import mount_thread_asset_tools
+
+    loaded.update(mount_thread_asset_tools(agent, params, runtime_snapshot=snapshot))
     return loaded
 
 
