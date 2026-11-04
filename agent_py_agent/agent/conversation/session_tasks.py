@@ -19,8 +19,9 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from ..common.json_io import locked_json_path
+from ..common.nofollow_fs import read_bytes_beneath
 from ..gateway_parts.io import (
-    read_json_file_report,
+    GatewayJsonReadReport,
     update_json_file_atomic,
     write_json_file_atomic,
 )
@@ -43,6 +44,21 @@ SESSION_TASK_STATUSES = frozenset(
 )
 # 终态：写入后不再被普通生命周期改写（取消只能从非终态发起）。
 SESSION_TASK_TERMINAL_STATUSES = frozenset({SESSION_TASK_DONE, SESSION_TASK_FAILED, SESSION_TASK_CANCELLED})
+
+
+# LLM: 只读 canonical 使用原子替换快照；不创建 sidecar，不改变被监听目录，保持1MiB上限及坏账显式报告。
+# 函数用途: 读取一个任务 JSON，文件变化、链接和解析失败都交给原调用方处理。
+def read_json_file_report(path, *, context):
+    from ..runtime_errors import runtime_error_report
+
+    try:
+        raw = read_bytes_beneath(path.parent, (path.name,), max_bytes=1024 * 1024)
+        payload = json.loads(raw) if raw is not None else {}
+        if not isinstance(payload, dict):
+            raise ValueError("session task JSON root must be an object")
+        return GatewayJsonReadReport(payload)
+    except (OSError, ValueError, UnicodeError) as exc:
+        return GatewayJsonReadReport({}, {**runtime_error_report(exc, context=context), "path": str(path)})
 
 
 def _completion_execution(host, run_id, attempt_id):
@@ -78,6 +94,8 @@ def _live_completion_claim(host, ref, task):
             "run_id": ref.run_id, "attempt_id": ref.observed_attempt_id, "task_run_id": ref.task_run_id}
 
 
+# LLM: 原 canonical CAS 提交后同步 owed 投影；重读原文件，不能按过期返回值复活责任。
+# 函数用途: 保存完成材料和学习交接状态，并同步学习待办定位。
 def _write_completion_metadata(host, task, updater):
     def update(payload):
         current = SessionTask.from_dict(payload)
@@ -85,8 +103,10 @@ def _write_completion_metadata(host, task, updater):
                 or current.target_thread_id != task.target_thread_id or current.metadata.get("business_context") != task.metadata.get("business_context")):
             raise ValueError("COMPLETION_CONTEXT_MISMATCH")
         return replace(current, metadata=updater(current)).to_dict()
-    return SessionTask.from_dict(update_json_file_atomic(
-        host.conversation_store.session_tasks._path(task.task_id), update, require_existing=True))
+    store = host.conversation_store.session_tasks
+    saved = SessionTask.from_dict(update_json_file_atomic(store._path(task.task_id), update, require_existing=True))
+    store._learning_index().publish(store._path(task.task_id))
+    return saved
 
 
 # LLM: 仅原执行和活 claim 可暂存脱敏材料；同身份重放复用首次快照，不授予完成或学习资格。
@@ -185,7 +205,7 @@ def repair_completed_task_learning_wake(host, task_id):
     return wake
 
 
-# LLM: 复用原有界维护页；只修 pending 和旧缺读取器的准确失败，不复活策略拒绝或重执任务。
+# LLM: 只取 owed 索引的一页；canonical 重核及原 wake 去重保持，失效从第一页恢复。
 # 函数用途: 修原学习 wake，并为已处理 wake 的旧无材料记录补明确 legacy 结案。
 def repair_pending_completed_task_learning_wakes(host):
     """原调度维护每次只读一页定位引用；游标不是权威，失效重建，不扫描全部任务正文。"""
@@ -193,7 +213,7 @@ def repair_pending_completed_task_learning_wakes(host):
     repo = getattr(getattr(host, "subagents", None), "runtime_db", None)
     if repo is None or not callable(getattr(getattr(store, "session_tasks", None), "list_page", None)):
         return
-    page = store.session_tasks.list_page(limit=16, cursor=getattr(host, "_completion_repair_cursor", None))
+    page = store.session_tasks.pending_learning_page(limit=16, cursor=getattr(host, "_completion_repair_cursor", None))
     host._completion_repair_cursor = page["next_cursor"] if page["coverage"] != "expired" else None
     for task in page["items"]:
         if task.status != SESSION_TASK_DONE:
@@ -573,6 +593,8 @@ class SessionTaskStore:
     def __init__(self, storage: Any) -> None:
         self.storage = storage
 
+    # LLM: 列表、回填及逐条重核共享无副作用读取器；canonical 写者仍用原 per-path 锁和原子替换。
+    # 函数用途: 取得不扰动任务目录 stamp 的列表投影。
     def _list_index(self):
         from .session_list_index import SessionListIndex
 
@@ -592,6 +614,22 @@ class SessionTaskStore:
     def list_page(self, *, limit: int = 50, cursor: str | None = None, target_thread_id: str | None = None) -> dict:
         page = self._list_index().page(limit=limit, cursor=cursor, filter_key=target_thread_id)
         return {**page, "items": [SessionTask.from_dict(item) for item in page["items"]]}
+
+    # LLM: 共享原 canonical 读取器与校验，独立投影只筛责任，不认证完成事实。
+    # 函数用途: 取得可重建的学习待办索引。
+    def _learning_index(self):
+        from .session_task_pending_index import SessionTaskPendingIndex
+
+        return SessionTaskPendingIndex(self._dir(), reader=self._list_index().reader)
+
+    # LLM: 每次最多回填128条；热页SQL候选含分页探路行合计至多16条，未追平明确 partial。
+    # 函数用途: 向维护者返回学习欠账及原分页覆盖状态。
+    def pending_learning_page(self, *, limit=16, cursor=None):
+        from .session_task_pending_index import learning_repair_owed
+
+        # 原分页会多读一行判断后续游标；将它纳入预算，不改通用列表的分页协议。
+        page = self._learning_index().page(limit=min(limit, 15), cursor=cursor)
+        return {**page, "items": [SessionTask.from_dict(item) for item in page["items"] if learning_repair_owed(item)]}
 
     def find_by_dedupe_key(self, key: str) -> SessionTask | None:
         return self._find_by_dedupe_key(key)
@@ -1034,6 +1072,7 @@ class SessionTaskStore:
 
         update_json_file_atomic(self._path(task_id), updater, require_existing=True)
         self._list_index().publish(self._path(task_id))
+        self._learning_index().publish(self._path(task_id))
         loaded = self.load(task_id)
         assert loaded is not None
         return loaded

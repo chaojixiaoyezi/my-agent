@@ -79,6 +79,8 @@ class SessionListIndex:
             finally:
                 conn.close()
 
+    # LLM: 两个排序索引分别服务过滤和无过滤 keyset 查询，按原建库路径幂等升级。
+    # 函数用途: 打开私有列表投影并补齐有界分页所需索引。
     def _open_projection(self):
         conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5.0)
         conn.row_factory = sqlite3.Row
@@ -89,6 +91,7 @@ class SessionListIndex:
             conn.execute("PRAGMA cache_size=-1024")
             conn.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, sort_at REAL, filter_key TEXT, stamp TEXT, generation INTEGER)")
             conn.execute("CREATE INDEX IF NOT EXISTS list_order ON entries(filter_key, sort_at DESC, path DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS list_order_all ON entries(sort_at DESC, path DESC)")
             conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('revision', ?)", (str(time.time_ns()),))
             return conn
@@ -129,6 +132,8 @@ class SessionListIndex:
     def _filter_field(self):
         return {"session": "user_id", "session_task": "target_thread_id", "thread": "owner_id"}[self.kind]
 
+    # LLM: 重建和游标版本在同一连接事务提交；每批成员变化都废弃前一批的游标。
+    # 函数用途: 有界补齐定位记录，防止后续批次插入到已越过的排序区间。
     def _refresh(self, conn) -> bool:
         current = _stamp(self.root)
         if self._meta(conn, "directory") != current:
@@ -142,6 +147,7 @@ class SessionListIndex:
         offset = int(self._meta(conn, "offset", "0"))
         generation = int(self._meta(conn, "generation", "0"))
         selected = []
+        before = conn.total_changes
         if self.root.exists():
             with os.scandir(self.root) as entries:
                 selected = list(itertools.islice(entries, offset, offset + _REBUILD_BATCH + 1))
@@ -152,11 +158,16 @@ class SessionListIndex:
                 if self.kind != "session" and (not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False)):
                     continue
                 self._record(conn, path, generation)
+        changed = conn.total_changes > before
         complete = len(selected) <= _REBUILD_BATCH and current == _stamp(self.root)
         self._put_meta(conn, "offset", offset + min(len(selected), _REBUILD_BATCH))
         self._put_meta(conn, "complete", int(complete))
         if complete:
-            conn.execute("DELETE FROM entries WHERE generation<>?", (generation,))
+            removed = conn.execute("DELETE FROM entries WHERE generation<>?", (generation,)).rowcount
+            changed = changed or removed > 0
+        # entries 的写入或最终清理与版本一起提交，不能签发跨批仍有效的旧游标。
+        if changed:
+            self._put_meta(conn, "revision", int(self._meta(conn, "revision", "0")) + 1)
         return complete
 
     def _probe_file_identities(self, conn):

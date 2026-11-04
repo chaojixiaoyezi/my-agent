@@ -3,26 +3,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from pathlib import Path
 
-from ..common.json_io import append_private_jsonl_records, check_io_deadline
+from ..common.json_io import check_io_deadline, write_private_text_file_atomic_unlocked
 from ..gateway_parts.io import (
     locked_file_transition,
-    read_json_file,
     read_json_file_report,
-    update_json_file_atomic,
     write_json_file_atomic,
 )
 from ..runtime_errors import DataCorruptionError
+from .guidance_pending_index import GuidancePendingIndex
 from .models import GuidanceEntry
 from .store_guidance_records import (
     GuidanceOnceReceipt,
-    _guidance_queue_entry_matches_receipt,
     _guidance_rebound_from_turn_ids,
     _legacy_prompt_submission_unknown_receipt,
 )
-from .store_io import read_jsonl_report, unlink_quietly
+from .store_io import unlink_quietly
 from .store_layout import ConversationStorage
 
 
@@ -33,6 +32,30 @@ class GuidanceLedger:
     # 函数用途: 为插话事务提供同源路径、回执读取及可修复投影。
     def __init__(self, storage: ConversationStorage) -> None:
         self.storage = storage
+        self._pending = GuidancePendingIndex(storage, self)
+
+    # LLM: 所有调用共用同源投影；构造不打开SQLite，不改变原锁序。
+    # 函数用途: 返回可重建的插话定位器。
+    def pending_index(self) -> GuidancePendingIndex:
+        return self._pending
+
+    # LLM: 调用方仍持原receipt锁；意图仅定位恢复，canonical先提交，投影失败不能回滚事实。
+    # 函数用途: 原子发布规范回执并在同一原锁内维护pending投影。
+    def write_receipt(self, path, payload, *, writer=None, blocking=True, deadline=None):
+        options = {} if blocking and deadline is None else {"blocking": blocking, **({} if deadline is None else {"deadline": deadline})}
+        marker = self._pending.dirty_path(path)
+        check_io_deadline(deadline)
+        write_private_text_file_atomic_unlocked(marker, json.dumps({"receipt": str(path)}), replace_once=True)
+        check_io_deadline(deadline)
+        (writer or write_json_file_atomic)(path, payload, **options)
+        self.repair_projections(GuidanceOnceReceipt.from_dict(payload), **options)
+        check_io_deadline(deadline)
+        marker.unlink(missing_ok=True)
+
+    # LLM: 精确ID查独立退休日志投影，旧map未迁移时缺失不能当未送达。
+    # 函数用途: 取得一条消息的送达时间。
+    def delivered_at(self, guidance_id, *, blocking=True, deadline=None):
+        return self._pending.delivered(guidance_id, blocking=blocking, deadline=deadline)
 
     # LLM: GuidanceLedger：运行循环与终态结算共用精确回合锁；不得改变与 Gateway 外锁、回执锁的获取顺序。
     # 函数用途: 返回一个精确活动回合的补充消息状态转换锁。
@@ -66,9 +89,9 @@ class GuidanceLedger:
             return None
         receipt = GuidanceOnceReceipt.from_dict(report.payload)
         if report.payload.get("schema_version") != "conversation_guidance_once.v4":
-            write_json_file_atomic(path, receipt.to_dict(), **options)
+            self.write_receipt(path, receipt.to_dict(), **options)
         delivered_at = float(
-            self.read_delivered(**options).get(receipt.entry.guidance_id) or 0.0
+            self.delivered_at(receipt.entry.guidance_id, **options)
         )
         if delivered_at > 0 and receipt.status in {"pending", "reserved"}:
             metadata = receipt.entry.metadata if isinstance(receipt.entry.metadata, dict) else {}
@@ -77,7 +100,7 @@ class GuidanceLedger:
                 old_turn_id=str(metadata.get("expected_turn_id") or "").strip(),
                 delivered_at=delivered_at,
             )
-            write_json_file_atomic(path, receipt.to_dict(), **options)
+            self.write_receipt(path, receipt.to_dict(), **options)
         check_io_deadline(deadline)
         return receipt
 
@@ -91,6 +114,7 @@ class GuidanceLedger:
         self.ensure_turn_index(receipt, **options)
         self._ensure_input_index(receipt, **options)
         self.ensure_queue_entry(receipt.entry, **options)
+        self._pending.publish(receipt, **options)
         self._retire_rebound_indexes(receipt, **options)
 
         check_io_deadline(deadline)
@@ -188,35 +212,7 @@ class GuidanceLedger:
     # LLM: 原默认blocking=True/deadline=None保持；短窗显式False贯通原JSON/JSONL锁，拿锁/读后/下一副作用前核同一预算，不将busy视为空。
     # 函数用途: 维持该原账本步骤；到期保已提交事实并让原调用方门外处理，不回滚或重放模型。
     def ensure_queue_entry(self, entry: GuidanceEntry, *, blocking: bool = True, deadline: float | None = None) -> None:
-        check_io_deadline(deadline)
-        options = {} if blocking and deadline is None else {"blocking": blocking, **({} if deadline is None else {"deadline": deadline})}
-        path = self.storage.guidance_path(entry.target_type, entry.target_id)
-        if not path.exists():
-            append_private_jsonl_records(path, [entry.to_dict()], sort_keys=True, **options)
-            return
-        report = read_jsonl_report(path, context="conversation.guidance_once.queue")
-        check_io_deadline(deadline)
-        if report.load_errors:
-            raise DataCorruptionError(
-                f"conversation guidance queue is unreadable: {entry.target_type}:{entry.target_id}"
-            )
-        matches = [
-            GuidanceEntry.from_dict(row)
-            for row in report.rows
-            if str(row.get("guidance_id") or "") == entry.guidance_id
-        ]
-        check_io_deadline(deadline)
-        if matches:
-            if len(matches) != 1 or not _guidance_queue_entry_matches_receipt(
-                matches[0], entry
-            ):
-                raise DataCorruptionError(
-                    f"conversation guidance id has conflicting rows: {entry.guidance_id}"
-                )
-            return
-        append_private_jsonl_records(path, [entry.to_dict()], sort_keys=True, **options)
-
-        check_io_deadline(deadline)
+        self._pending.ensure_queue_entry(entry, blocking=blocking, deadline=deadline)
     # LLM: GuidanceLedger：原子更新原送达索引；这是内部无幂等消息的退休事实，不能替代幂等回执的消费确认。
     # 函数用途: 原子更新非幂等内部消息的送达投影，并供确认批次修复使用。
     def mark_delivered(
@@ -226,34 +222,14 @@ class GuidanceLedger:
         if not ids:
             return
         delivered_at = now if now is not None else time.time()
-        update_json_file_atomic(
-            self.storage.guidance_delivered_path,
-            lambda data: {**data, **dict.fromkeys(ids, delivered_at)},
-        )
+        self._pending.mark_delivered(ids, delivered_at)
 
     # LLM: GuidanceLedger：送达索引是投影；保留旧无效数值的忽略语义，不在读取时推进消费状态。
     # 函数用途: 读取已有送达索引，忽略不可解析的旧数值，不推进回执状态。
     # LLM: 原默认blocking=True/deadline=None保持；短窗显式False贯通原JSON/JSONL锁，拿锁/读后/下一副作用前核同一预算，不将busy视为空。
     # 函数用途: 维持该原账本步骤；到期保已提交事实并让原调用方门外处理，不回滚或重放模型。
     def read_delivered(self, *, blocking: bool = True, deadline: float | None = None) -> dict[str, float]:
-        check_io_deadline(deadline)
-        options = {} if blocking and deadline is None else {"blocking": blocking, **({} if deadline is None else {"deadline": deadline})}
-        delivered: dict[str, float] = {}
-        if blocking and deadline is None:
-            payload = read_json_file(self.storage.guidance_delivered_path)
-        else:
-            report = read_json_file_report(self.storage.guidance_delivered_path, **options)
-            if report.lock_busy:
-                raise BlockingIOError("guidance delivered index is busy")
-            payload = report.payload
-        check_io_deadline(deadline)
-        for key, value in payload.items():
-            try:
-                delivered[str(key)] = float(value or 0.0)
-            except (TypeError, ValueError):
-                continue
-        check_io_deadline(deadline)
-        return delivered
+        return self._pending.all_delivered(blocking=blocking, deadline=deadline)
 
     # LLM: GuidanceLedger：改绑只覆盖同键、同旧回合的输入反查；修改须联测恢复中断后的索引修复。
     # 函数用途: 同步更新普通消息回执的反向索引，保证恢复后查询指向新的子代理 attempt。

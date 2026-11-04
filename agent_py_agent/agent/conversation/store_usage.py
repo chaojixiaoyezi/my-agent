@@ -172,40 +172,15 @@ class ModelUsageStore:
 
         return self._update_thread_atomic(thread_id, apply)
 
-    # LLM: This is the one durable per-thread usage append. The event id is a
-    # host-generated idempotency key; conflicting reuse fails closed instead of
-    # silently changing historical cost facts.
-    #   落盘走私有追加（0600/0700），已有 0644 账本下次写入即收紧；内容逐字节不变。
-    # 函数用途: 将一次已结束模型轮的精确用量幂等追加到所属会话。
+    # LLM: 新投影逐ID去重；迁移未完成只对本线程沿原精确路径，原追加锁覆盖整个判定和提交。
+    # 函数用途: 幂等追加精确用量，不在正常热路扫描历史。
     def append_once(self, request: dict[str, Any]) -> ThreadModelUsageEvent:
         event = _thread_model_usage_event(request)
         self._require_thread(event.thread_id)
-        path = self._path(event.thread_id)
-        transition = path.with_name(f".{path.name}.append-once")
-        with locked_file_transition(transition):
-            events, load_errors = self.events_report(event.thread_id)
-            if load_errors:
-                raise DataCorruptionError(
-                    f"conversation model usage ledger is unreadable: {event.thread_id}"
-                )
-            existing = next(
-                (item for item in events if item.event_id == event.event_id),
-                None,
-            )
-            if existing is not None:
-                if _model_usage_identity_payload(existing) != _model_usage_identity_payload(
-                    event
-                ):
-                    raise DataCorruptionError(
-                        f"model usage event id reused with different input: {event.event_id}"
-                    )
-                return existing
-            append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
-            return event
+        return self._append_indexed(event)
 
-    # LLM: 累计快照只保存同范围单调增量；缺省事件 ID 由范围和摘要生成，显式旧 ID 仍严格核对冲突。
-    #   落盘走私有追加（0600/0700），已有 0644 账本下次写入即收紧；内容逐字节不变。
-    # 函数用途: 幂等保存用量及迟到 HTTP 事实，同物理调用数也能补记新快照而不重复计费。
+    # LLM: 仍按同范围摘要计算单调delta；点查和投影更新在原追加协议内，不改变迟到事实口径。
+    # 函数用途: 保存累计用量的新事实并保留重放冲突检查。
     def append_snapshot_once(
         self,
         request: dict[str, Any],
@@ -213,47 +188,75 @@ class ModelUsageStore:
         request = _snapshot_event_request(request)
         snapshot = _thread_model_usage_event(request)
         self._require_thread(snapshot.thread_id)
+        return self._append_indexed(snapshot, snapshot_request=request)
+
+    # LLM: 局部导入避免数字求和器与投影初始化形成模块循环；不缓存可变事件。
+    # 函数用途: 取得当前线程独立的用量定位器。
+    def _index(self, thread_id):
+        from .usage_index import UsageIndex
+
+        return UsageIndex(self._path(thread_id), thread_id)
+
+    # LLM: canonical先提交，投影后提交；中间失败的字节后缀会在下一次prepare精确重放。
+    # 函数用途: 在原锁内选择完整索引热路或迁移期间单线程精确回退。
+    def _append_indexed(self, snapshot, *, snapshot_request=None):
         path = self._path(snapshot.thread_id)
         transition = path.with_name(f".{path.name}.append-once")
-        snapshot_digest = _model_usage_snapshot_digest(snapshot.model_calls)
         with locked_file_transition(transition):
-            events, load_errors = self.events_report(snapshot.thread_id)
-            if load_errors:
-                raise DataCorruptionError(
-                    f"conversation model usage ledger is unreadable: {snapshot.thread_id}"
-                )
-            existing = next(
-                (item for item in events if item.event_id == snapshot.event_id),
-                None,
-            )
+            index = self._index(snapshot.thread_id)
+            with index._connection() as conn:
+                complete = index.prepare(conn)
+                if complete:
+                    existing = index.event(conn, snapshot.event_id)
+                    if existing is not None:
+                        return self._replay(existing, snapshot, snapshot_request is not None)
+                    prior = index.prior(conn, snapshot) if snapshot_request is not None else []
+                    event = self._delta_event(snapshot, snapshot_request, prior)
+                    offset = path.stat().st_size if path.exists() else 0
+                    append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
+                    index.committed(conn, event, offset)
+                    return event
+            # 未完整的投影绝不能输出partial费用；只回退当前会话的既有精确逻辑。
+            events = self._exact_events(snapshot.thread_id)
+            existing = next((item for item in events if item.event_id == snapshot.event_id), None)
             if existing is not None:
-                if (
-                    _model_usage_scope(existing.to_dict())
-                    != _model_usage_scope(snapshot.to_dict())
-                    or _model_usage_snapshot_digest_from_delta(existing.model_calls)
-                    != snapshot_digest
-                ):
-                    raise DataCorruptionError(
-                        f"model usage snapshot event id reused with different input: "
-                        f"{snapshot.event_id}"
-                    )
-                return existing
-            prior = [
-                item.model_calls
-                for item in events
-                if _model_usage_scope(item.to_dict()) == _model_usage_scope(snapshot.to_dict())
-            ]
-            delta = _model_usage_snapshot_delta(snapshot.model_calls, prior)
-            delta["ledger_projection"] = {
-                "kind": "cumulative_snapshot_delta",
-                "snapshot_physical_model_attempt_count": _usage_int(
-                    snapshot.model_calls.get("physical_model_attempt_count")
-                ),
-                "snapshot_digest": snapshot_digest,
-            }
-            event = _thread_model_usage_event({**request, "model_calls": delta})
+                return self._replay(existing, snapshot, snapshot_request is not None)
+            prior = [item.model_calls for item in events
+                     if _model_usage_scope(item.to_dict()) == _model_usage_scope(snapshot.to_dict())]
+            event = self._delta_event(snapshot, snapshot_request, prior)
             append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
             return event
+
+    # LLM: 快照和加法事件保留各自原冲突合同，created_at沿首次原账。
+    # 函数用途: 严格核验重复事件并返回首次提交结果。
+    def _replay(self, existing, event, snapshot):
+        equal = (_model_usage_scope(existing.to_dict()) == _model_usage_scope(event.to_dict()) and
+                 _model_usage_snapshot_digest_from_delta(existing.model_calls) == _model_usage_snapshot_digest(event.model_calls)) if snapshot else (
+                     _model_usage_identity_payload(existing) == _model_usage_identity_payload(event))
+        if not equal:
+            raise DataCorruptionError(f"model usage event id reused with different input: {event.event_id}")
+        return existing
+
+    # LLM: 所有delta字段和摘要仍由原函数生成，不能从展示数字推断费用。
+    # 函数用途: 构造累计快照的新增事件或保留原加法事件。
+    def _delta_event(self, snapshot, request, prior):
+        if request is None:
+            return snapshot
+        delta = _model_usage_snapshot_delta(snapshot.model_calls, prior)
+        delta["ledger_projection"] = {
+            "kind": "cumulative_snapshot_delta",
+            "snapshot_physical_model_attempt_count": _usage_int(snapshot.model_calls.get("physical_model_attempt_count")),
+            "snapshot_digest": _model_usage_snapshot_digest(snapshot.model_calls),
+        }
+        return _thread_model_usage_event({**request, "model_calls": delta})
+
+    # LLM: 仅迁移未完整时使用，不能把坏账当作空用量。
+    # 函数用途: 读取本线程完整事件供过渡期精确计算。
+    def _exact_events(self, thread_id):
+        events, errors = self.events_report(thread_id)
+        if errors:
+            raise DataCorruptionError(f"conversation model usage ledger is unreadable: {thread_id}")
+        return events
 
     # LLM: A corrupt row remains an explicit load error; consumers must never
     # convert missing or unreadable provider usage into a zero-cost turn.
@@ -283,15 +286,24 @@ class ModelUsageStore:
                 )
         return events, errors
 
-    # LLM: 只累计原事件真值/估算及显式用途分区；旧事件缺用途时保留不可追溯，不反推为零决策消耗。
-    #   estimated.unfinished_* 是超时/失败调用的发送前本地估算，旧事件没有该键按 0 累计，不补算。
-    # 函数用途: 汇总会话用量和用途，兼容旧事件且不重新解释旧计费事实。
+    # LLM: 完整投影输出精确数字；旧账迁移未完成仅回退该线程，不发布partial总量。
+    # 函数用途: 读取累计用量，正常热路不再扫描JSONL。
     def summary(self, thread_id: str) -> dict[str, Any]:
-        events, load_errors = self.events_report(thread_id)
-        if load_errors:
-            raise DataCorruptionError(
-                f"conversation model usage ledger is unreadable: {thread_id}"
-            )
+        normalized = str(thread_id or "").strip()
+        if not normalized:
+            raise ValueError("thread_id is required")
+        path = self._path(normalized)
+        with locked_file_transition(path.with_name(f".{path.name}.append-once")):
+            index = self._index(normalized)
+            with index._connection() as conn:
+                if index.prepare(conn):
+                    return index.summary(conn)
+            return self._exact_summary(normalized)
+
+    # LLM: 原求和口径仅用于未迁移的当前线程，保持未知用途和旧账语义。
+    # 函数用途: 在迁移期间完整重算当前线程数字。
+    def _exact_summary(self, thread_id):
+        events = self._exact_events(thread_id)
         provider = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -522,8 +534,8 @@ def _purpose_usage_partition_has_value(usage: dict[str, Any]) -> bool:
 
 # LLM: 持久行已经是增量，不能当作新累计；用途复用同一求和且不递归嵌套，不改变旧字段含义。
 #   按名尝试次数是映射，由 _add_identity_counts 按名相加，不能落进下面的整数求和（会被当成 0，下次增量就重复记名）。
-# 函数用途: 合并原用量增量与其用途投影，供新快照去重。
-def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purposes: bool = True) -> dict[str, Any]:
+# 函数用途: 合并用量增量；纯投影维护可关闭读取诊断，不能把写入计作用户读取。
+def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purposes: bool = True, count_unknown: bool = True) -> dict[str, Any]:
     total: dict[str, Any] = {
         "backends": [],
         "models": [],
@@ -548,7 +560,7 @@ def _sum_model_call_summaries(summaries: list[dict[str, Any]], *, include_purpos
         _add_usage_mapping(total["usage_breakdown"]["provider"], usage.get("provider"))
         _add_usage_mapping(total["usage_breakdown"]["estimated"], usage.get("estimated"))
     if include_purposes:
-        purposes = _sum_purpose_breakdowns(summaries)
+        purposes = _sum_purpose_breakdowns(summaries, count_unknown=count_unknown)
         if purposes:
             total["purpose_breakdown"] = purposes
     return total
@@ -580,12 +592,13 @@ def _purpose_rows(summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 # LLM: 各桶互斥但复用根摘要加法；按“已知桶 + 出现过的桶”求和并保留，不能倒推旧调用用途。
 #   出现过的未知键同时记进程内诊断计数（unknown_purpose_key_counts），只计不拦，拼错的键靠 /status 发现。
-# 函数用途: 合并已声明用途的增量，未知用途键一并求和并保留（并记诊断计数），供计费和回放。
-def _sum_purpose_breakdowns(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+# 函数用途: 合并用途数字；显式读取才计未知键，投影写入保持无诊断副作用。
+def _sum_purpose_breakdowns(summaries: list[dict[str, Any]], *, count_unknown: bool = True) -> dict[str, Any]:
     rows = [_purpose_rows(summary) for summary in summaries]
     if not any(rows):
         return {}
-    _count_unknown_purpose_keys(purpose for row in rows for purpose in row)
+    if count_unknown:
+        _count_unknown_purpose_keys(purpose for row in rows for purpose in row)
     purposes = [*_PURPOSES, *sorted({purpose for row in rows for purpose in row} - set(_PURPOSES))]
     return {"schema": _PURPOSE_SCHEMA, **{
         purpose: _sum_model_call_summaries([row.get(purpose, {}) for row in rows], include_purposes=False)
