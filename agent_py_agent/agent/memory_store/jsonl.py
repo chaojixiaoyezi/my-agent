@@ -1202,13 +1202,13 @@ class _JsonlMemoryLifecycleMixin:
 
         return restore_tier_records(self, records)
 
-    # LLM: 显式维护才创建SQLite；沿原quota→policy→formal锁序，一次至多1000条且水位同事务提交。
-    # 函数用途: 有界追平冷热派生读索引，重启后沿耐久游标续作。
-    def rebuild_read_index(self, *, batch_size=1000):
+    # LLM: 沿原quota→policy→formal锁序；晋升透传活准入避免自锁，独立维护仍自行准入，每批至多1000条。
+    # 函数用途: 有界追平冷热派生读索引，复用外层配额且保持水位同事务提交。
+    def rebuild_read_index(self, *, batch_size=1000, _admission: OwnerQuotaAdmission | None = None):
         from .read_index import MemoryReadIndex
 
         owner = self.path.parents[2] if len(self.path.parents) >= 3 else self.path.parent
-        with _quota_admission(self.quota_enforcer) as admission, _managed_policy_scope(owner):
+        with _quota_admission(self.quota_enforcer, _admission) as admission, _managed_policy_scope(owner):
             with self._locked_memory():
                 return MemoryReadIndex(self.path, coordinator_io=self.coordinator_io).rebuild_step(
                     batch_size=batch_size, admission=admission)

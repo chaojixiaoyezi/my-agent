@@ -128,8 +128,8 @@ class JsonlMemoryIndexMixin:
         except Exception:
             return str(self.path)
 
-    # LLM: 正式提交后只写向量；外层晋升仍持quota时透传_admission，独立调用由清理入口重新准入。
-    # 函数用途: 同步向量并批量清理已删除事实的所有派生副本。
+    # LLM: 正式提交后更新派生索引；清理和读索引均透传仍持有的_admission，普通独立调用保持重新准入。
+    # 函数用途: 同步向量、追平读索引并清理删除副本，不重复取得晋升持有的配额锁。
     def _after_commit_indexes(self, records: list[MemoryRecord], *, _admission=None) -> None:
         removed = {record.entry_id for record in records if record.action == "remove"}
         if removed:
@@ -155,7 +155,7 @@ class JsonlMemoryIndexMixin:
                 self._index_vectors(pending)
         if records and not removed:
             try:
-                self.rebuild_read_index()
+                self.rebuild_read_index(**({} if _admission is None else {"_admission": _admission}))
             except Exception as exc:
                 if getattr(self, "coordinator_io", False) and isinstance(exc, _NATIVE_MEMORY_ERRORS):
                     raise

@@ -8,6 +8,7 @@ import sqlite3
 import stat
 from contextlib import closing, contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 from ..common.nofollow_fs import NoFollowPathError, open_directory_beneath
 
@@ -23,19 +24,18 @@ class StorageTombstoneIndex:
         self.path = Path(memory_path).with_name(Path(memory_path).name + ".storage_tombstones.sqlite3")
         self.owner = owner
 
-    # LLM: 与现有私有索引相同的nofollow/单链接规则；只读不能创建文件，FD和连接均由调用方关闭。
-    # 函数用途: 打开本次短连接，拒绝链接或异常文件。
+    # LLM: 写者已持formal锁；缺库先原子发表完整schema，只读不创建文件，存量坏权威仍拒绝且不重建覆盖。
+    # 函数用途: 打开本次短连接，拒绝链接或异常文件，不留下未初始化的正式库。
     def _connect(self, *, write=False):
         parent = open_directory_beneath(self.path.parent, (), require_dir_fd=True)
         try:
-            if write:
-                try:
-                    fd = os.open(self.path.name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent)
-                except FileExistsError:
-                    pass
-                else:
-                    os.close(fd)
-            metadata = os.stat(self.path.name, dir_fd=parent, follow_symlinks=False)
+            try:
+                metadata = os.stat(self.path.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                if not write:
+                    raise
+                self._initialize_file(parent)
+                metadata = os.stat(self.path.name, dir_fd=parent, follow_symlinks=False)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise NoFollowPathError("invalid storage tombstone index")
             conn = sqlite3.connect(self.path.absolute().as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=0)
@@ -43,6 +43,28 @@ class StorageTombstoneIndex:
             return conn
         finally:
             os.close(parent)
+
+    # LLM: 仅缺库且已持formal锁时调用；完整schema/初始水位同事务，close+fsync后才replace，失败不动旧JSON删除权威。
+    # 函数用途: 在同目录0600临时库中完成首次初始化，避免单次IO故障毒化所有后续读写。
+    def _initialize_file(self, parent):
+        name = f".{self.path.name}.{uuid4().hex}.tmp"
+        descriptor = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                             0o600, dir_fd=parent)
+        try:
+            uri = self.path.with_name(name).absolute().as_uri() + "?mode=rw"
+            with closing(sqlite3.connect(uri, uri=True, timeout=0)) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._initialize(conn)
+            os.fsync(descriptor)
+            os.replace(name, self.path.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            os.close(descriptor)
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                try:
+                    os.unlink(name + suffix, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
 
     # LLM: 元数据与屏障同事务；错误不解释为空账；缺库只有显式首次写入可初始化。
     # 函数用途: 验证owner、修订号和迁移水位。
@@ -100,8 +122,8 @@ class StorageTombstoneIndex:
         except sqlite3.Error as exc:
             raise ValueError("MEMORY_TOMBSTONES_UNREADABLE") from exc
 
-    # LLM: 仅迁移/正式写入口使用；查询不建表，任何DDL和事务失败都原样失败关闭。
-    # 函数用途: 创建首次私有屏障表。
+    # LLM: 首次出生在私有暂存事务内；迁移重试幂等核表，查询不建表，错误不解释为空账。
+    # 函数用途: 初始化屏障表及未完成迁移状态，不发表不完整删除快照。
     def _initialize(self, conn):
         conn.execute("CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS deleted_entries(entry_id TEXT PRIMARY KEY,version INTEGER NOT NULL,payload TEXT NOT NULL)")

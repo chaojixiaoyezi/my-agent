@@ -438,3 +438,134 @@ def test_corrupt_migration_cursor_is_rejected(tmp_path, cursor):
         conn.execute("UPDATE metadata SET value=? WHERE key='state'", (json.dumps(state),))
     with pytest.raises(ValueError, match="MEMORY_TOMBSTONES_UNREADABLE"):
         barrier.index.migrate_step(rows, source_identity="test-source")
+
+
+# LLM: 只在首次schema创建注入一次IO失败；重启后沿真实旧删除权威读取/修复，已遗忘身份与同hash别名都不可复活。
+# 函数用途: 验证首次出生各窗口失败不污染正式SQL名字，读、删除重试和迁移能够继续。
+@pytest.mark.parametrize("phase", ["before_schema", "middle_schema", "after_state"])
+@pytest.mark.parametrize("repair", ["remove", "migrate_tiers"])
+def test_r2_first_tombstone_initialization_is_atomic_and_retryable(tmp_path, monkeypatch, phase, repair):
+    from agent_py_agent.agent.memory_store.storage_tombstone_index import StorageTombstoneIndex
+
+    memory, live = _old_store(tmp_path, 3, migrate=False)
+    stale = [MemoryRecord("user", "deleted content 0", entry_id="deleted-0"),
+             MemoryRecord("user", "deleted content 1", entry_id="deleted-1")]
+    with memory.path.open("a", encoding="utf-8") as stream:
+        stream.write("".join(row.to_json() + "\n" for row in stale))
+    barrier = MemoryGenerationStore(memory.path).tombstones
+    # 先核旧格式夹具的真实读取前提；异ID同hash的重新添加在迁移重试后单独拒绝。
+    assert {row.entry_id for row in memory.all()} == {row.entry_id for row in live}
+    before = memory.path.read_bytes(), barrier.path.read_bytes()
+    initialize, failures = StorageTombstoneIndex._initialize, []
+
+    class OnceFailingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, *args):
+            if phase == "middle_schema" and "CREATE TABLE IF NOT EXISTS deleted_entries" in sql:
+                raise OSError("first schema I/O error")
+            return self.connection.execute(sql, *args)
+
+    def fail_once(self, connection):
+        if failures:
+            return initialize(self, connection)
+        failures.append(phase)
+        if phase == "before_schema":
+            raise OSError("first schema I/O error")
+        initialize(self, OnceFailingConnection(connection))
+        if phase == "after_state":
+            raise OSError("first schema I/O error")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(StorageTombstoneIndex, "_initialize", fail_once)
+        with pytest.raises(OSError, match="first schema I/O error"):
+            memory.migrate_tiers()
+    assert failures == [phase]
+    assert (memory.path.read_bytes(), barrier.path.read_bytes()) == before
+    assert not barrier.index.path.exists()
+    assert not list(tmp_path.glob("*.tmp*"))
+    reopened = JsonlMemory(memory.path)
+    assert {row.entry_id for row in reopened.all()} == {row.entry_id for row in live}
+    assert reopened.search("deleted content", 10) == []
+    if repair == "remove":
+        reopened.remove(live[0].entry_id)
+    else:
+        reopened.migrate_tiers()
+    restarted = JsonlMemory(memory.path)
+    assert {row.entry_id for row in restarted.all()} == {row.entry_id for row in live[int(repair == "remove"): ]}
+    for entry_id in ("deleted-0", "new-alias"):
+        with pytest.raises(ValueError, match="MEMORY_TOMBSTONED"):
+            restarted.add_record(MemoryRecord("user", "deleted content 0", entry_id=entry_id))
+
+
+# LLM: 每例只让真实发表流程的一处IO失败一次；rename后的目录同步失败保完整未完成库，不能误删可恢复状态。
+# 函数用途: 钉住提交/同步/替换四个边界的可重试性、0600权限及失败后FD零泄漏。
+@pytest.mark.parametrize("phase", ["commit", "file_fsync", "replace", "directory_fsync"])
+def test_r2_tombstone_publication_failure_keeps_recoverable_state_and_no_fds(tmp_path, monkeypatch, phase):
+    import os
+    import sqlite3
+    import stat
+
+    from agent_py_agent.agent.memory_store import storage_tombstone_index as module
+    from agent_py_agent.tests.test_v14_length_resume_delivery import _fd_count
+
+    barrier = MemoryGenerationStore(tmp_path / "memory.jsonl").tombstones
+    index = barrier.index
+    records = [MemoryRecord("user", "", action="remove", entry_id="forgotten", version=2,
+                            removed_content_hashes=(memory_content_hash("forgotten body"),))]
+    connect, fsync, replace_file = sqlite3.connect, os.fsync, os.replace
+    failures = []
+
+    def fail_once():
+        if not failures:
+            failures.append(phase)
+            if phase == "commit":
+                raise sqlite3.OperationalError("publication I/O error")
+            raise OSError("publication I/O error")
+
+    class FailingCommitConnection(sqlite3.Connection):
+        def __exit__(self, exc_type, exc, traceback):
+            if exc_type is None and phase == "commit" and not failures:
+                self.rollback()
+                fail_once()
+            return super().__exit__(exc_type, exc, traceback)
+
+    def connection(*args, **kwargs):
+        return connect(*args, **{**kwargs, "factory": FailingCommitConnection})
+
+    def synchronize(descriptor):
+        is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        if phase == ("directory_fsync" if is_directory else "file_fsync"):
+            fail_once()
+        return fsync(descriptor)
+
+    def publish(*args, **kwargs):
+        if phase == "replace":
+            fail_once()
+        return replace_file(*args, **kwargs)
+
+    before = _fd_count()
+    with monkeypatch.context() as fault:
+        fault.setattr(module.sqlite3, "connect", connection)
+        fault.setattr(module.os, "fsync", synchronize)
+        fault.setattr(module.os, "replace", publish)
+        with pytest.raises((OSError, sqlite3.OperationalError), match="publication I/O error"):
+            index.migrate_step(records, source_identity="legacy-source")
+    assert failures == [phase]
+    assert _fd_count() == before
+    assert not list(tmp_path.glob("*.tmp*"))
+    reopened = module.StorageTombstoneIndex(barrier.memory_path, barrier.owner)
+    if phase == "directory_fsync":
+        assert reopened.path.is_file() and reopened.has_committed_authority() is False
+        with pytest.raises(ValueError, match="MEMORY_TOMBSTONES_MIGRATING"):
+            with reopened.snapshot():
+                pytest.fail("unmigrated barrier admitted")
+    else:
+        assert not reopened.path.exists()
+    state = reopened.migrate_step(records, source_identity="legacy-source")
+    assert state["complete"] and state["cursor"] == 1
+    assert stat.S_IMODE(reopened.path.stat().st_mode) == 0o600
+    with reopened.snapshot() as snapshot:
+        assert snapshot.blocked([("forgotten", ""), ("alias", memory_content_hash("forgotten body"))]) == {"forgotten", "alias"}
+    assert _fd_count() == before

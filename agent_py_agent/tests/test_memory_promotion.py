@@ -340,3 +340,68 @@ def test_m2_same_candidate_root_cannot_silently_mix_two_formal_files(tmp_path, m
         _register_condense_debt(service.long_term, service.candidates, False)
         with pytest.raises(RuntimeError, match="FORMAL_MISMATCH"):
             _register_condense_debt(other, service.candidates, False)
+
+
+# LLM: 子进程只写隔离owner；使用真实1GiB配额/候选/正式库，不替换锁，卡住时由父测试有界收回。
+# 函数用途: 走单条、批量或Curator晋升，核正式事实、候选终态、读索引和后续普通写入。
+def _finite_quota_promotion_case(root, mode):
+    import faulthandler
+    from pathlib import Path
+
+    from agent_py_agent.agent.memory_store.curator_formal import FormalMemorySource
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
+    from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+    from agent_py_agent.tests.test_memory_curator_v2 import _service
+
+    service, store, thread = _runtime(Path(root))
+    quota = OwnerQuotaEnforcer(service.persona.owner_home, max_bytes=1024**3)
+    for repository in (service.candidates, service.long_term, service.persona):
+        repository.quota_enforcer = quota
+    service.long_term.add("user", "migration seed")
+    service.long_term.migrate_tiers()
+    candidate = _explicit(service, store, thread, content="有限配额下必须完整晋升")
+    print("quota promotion ready", flush=True)
+    faulthandler.dump_traceback_later(5)
+    try:
+        if mode == "single":
+            assert service.promote(candidate.candidate_id, automatic=True).promoted
+        elif mode == "batch":
+            results = service.promote_ready()
+            assert len(results) == 1 and results[0].promoted
+        else:
+            curator = _service(Path(root) / "curator-data", SimpleNamespace(), store)
+            curator.candidate_service = service.candidates
+            curator.formal_memory_source = FormalMemorySource(service.long_term, service.lessons, service.hot)
+            assert len(curator.formal_memory_source.read()) == 1
+            curator.promotion_callback = lambda cid: service.promote(cid, automatic=True)
+            promoted, warnings, receipts = curator._promote_eligible([candidate.candidate_id])
+            assert promoted == 1 and not warnings and len(receipts) == 1
+        saved = service.candidates.get(candidate.candidate_id)
+        assert saved.status == "promoted" and not saved.commit_obligation
+        assert [row.content for row in service.long_term.all()].count(candidate.content) == 1
+        assert MemoryReadIndex(service.long_term.path).coverage()["status"] == "complete"
+        service.long_term.add("user", "after promotion write")
+        assert len(service.long_term.all()) == 3
+        assert MemoryReadIndex(service.long_term.path).coverage()["status"] == "complete"
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+# LLM: 父进程超时必须失败并保留真实锁栈；不使用可重入假锁，也不把子进程启动当晋升成功。
+# 函数用途: 钉住非零配额下正式提交后重取同锁造成的三条晋升入口挂起。
+@pytest.mark.parametrize("mode", ["single", "batch", "curator"])
+def test_r2_finite_quota_promotion_finishes_and_releases_owner(tmp_path, mode):
+    import subprocess
+    import sys
+
+    program = (
+        "import sys; from agent_py_agent.tests.test_memory_promotion import _finite_quota_promotion_case; "
+        "_finite_quota_promotion_case(sys.argv[1], sys.argv[2])"
+    )
+    try:
+        result = subprocess.run([sys.executable, "-c", program, str(tmp_path), mode],
+                                capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"finite-quota promotion hung: {exc.stdout!r}\n{exc.stderr!r}")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "quota promotion ready" in result.stdout
