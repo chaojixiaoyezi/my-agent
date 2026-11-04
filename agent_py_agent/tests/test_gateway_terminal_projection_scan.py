@@ -170,11 +170,9 @@ def test_new_terminal_file_is_projected_after_directory_change(tmp_path):
     assert _projection_path(paths, "gwreq-probe-000").exists()
 
 
-# LLM: 真实终态流程跨页追赶时只枚举一次并复用名称元组；目录新增后须立即重枚举且保留原追平合同。
-# 函数用途: 验证分页补投影、缓存复用、二分游标定位及新增终态失效，不放宽原轮数和修复数量断言。
+# LLM: 真实终态跨页改用SQL keyset；保留原每轮数量、总修复数与追平合同，并禁止旧glob。
+# 函数用途: 验证有界页与持久keyset定位，不再要求复用完整目录名称元组。
 def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path, monkeypatch):
-    from bisect import bisect_right
-
     from agent_py_agent.agent.gateway_parts import recovery
 
     agent = _make_recovery_agent(tmp_path)
@@ -186,13 +184,16 @@ def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path, monk
     calls = _counting_terminal_glob(monkeypatch, paths)
     seeks = []
 
-    # LLM: 名称来自产品真实候选，原bisect算法负责定位；不替换排序结果或游标。
-    # 函数用途: 记录跨页是否二分定位及是否复用同一名称元组。
-    def seek(names, previous):
-        seeks.append((names, previous))
-        return bisect_right(names, previous)
+    original_page = recovery.RecoveryPendingIndex.page
 
-    monkeypatch.setattr(recovery, "bisect_right", seek, raising=False)
+    # LLM: 页与游标来自产品，不改查询结果或终态证明。
+    # 函数用途: 记录每轮真实keyset条件及候选数量。
+    def seek(index, kind, **options):
+        page = original_page(index, kind, **options)
+        seeks.append((options["after"], options["limit"], len(page)))
+        return page
+
+    monkeypatch.setattr(recovery.RecoveryPendingIndex, "page", seek)
 
     rounds: list[tuple[int, int, bool]] = []
     for _ in range(3):
@@ -206,14 +207,14 @@ def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path, monk
     assert all(_marker_path(paths, f"gwreq-probe-{index:03d}").exists() for index in range(5))
     cursor = read_json_file(paths.root / _CURSOR_RELATIVE)
     assert cursor["caught_up"] is True
-    assert calls == ["*.json"], "目录代次不变的多页追赶只能枚举一次"
-    assert [previous for _names, previous in seeks] == ["gwreq-probe-000.json", "gwreq-probe-002.json"]
-    assert seeks[0][0] is seeks[1][0]
+    assert calls == [], "包括首次迁移在内均不允许全量glob"
+    assert seeks == [("", 2, 2), ("gwreq-probe-000", 2, 2), ("gwreq-probe-002", 2, 2)]
+    assert all(len(value[1]) <= 128 for value in recovery._TERMINAL_CANDIDATES_CACHE.values())
 
     # 追平后恢复稳态跳过。
     projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
     assert (projected, errors) == (0, [])
-    assert calls == ["*.json"]
+    assert calls == []
 
     # 只预热新文件的真实读锁，不用glob辅助函数污染产品枚举计数。
     new_id = "gwreq-probe-005"
@@ -221,15 +222,15 @@ def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path, monk
     read_json_file_report(paths.terminal / f"{new_id}.json", context="tests.terminal_projection_scan.warm")
     assert _directory_stamp(paths.terminal) != stamp
     projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
-    assert (projected, errors) == (0, [])
-    assert calls == ["*.json", "*.json"], "目录变化后的首轮就必须重新枚举"
+    assert (projected, errors) == (1, [])
+    assert calls == [], "新canonical的写前责任首轮可见，无需全目录重枚举"
     for _ in range(3):
         _projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
-        assert errors == []
+        assert (_projected, errors) == (0, [])
     assert _marker_path(paths, new_id).exists()
     assert _projection_path(paths, new_id).exists()
     assert read_json_file(paths.root / _CURSOR_RELATIVE)["caught_up"] is True
-    assert calls == ["*.json", "*.json"]
+    assert calls == []
 
 
 def test_round_limit_caps_files_examined_per_call(tmp_path):
@@ -271,6 +272,8 @@ def test_missing_projection_is_repaired_on_startup_full_scan(tmp_path):
     assert marker.exists()
 
 
+# LLM: 已知键有界审计更早发现丢投影；小时到期仍只能通过原修复链补齐。
+# 函数用途: 验证普通审计及强制复核均修复真实缺失，不固定旧完整目录缓存的等待时间。
 def test_missing_projection_is_repaired_by_low_frequency_rescan(tmp_path):
     agent = _make_recovery_agent(tmp_path)
     paths = gateway_paths(agent)
@@ -283,10 +286,12 @@ def test_missing_projection_is_repaired_by_low_frequency_rescan(tmp_path):
     projection.unlink()
     marker.unlink()
 
-    # 目录时间戳没变、已追平：稳态调用跳过不复查（提速的设计行为），破坏留给低频复核。
+    # canonical目录时间戳不变，有界已知键审计仍能发现marker/投影变化。
     projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=16)
-    assert (projected, errors) == (0, [])
-    assert not projection.exists()
+    assert (projected, errors) == (1, [])
+    assert projection.exists() and marker.exists()
+    projection.unlink()
+    marker.unlink()
 
     # 推进游标里的全量复核时间（模拟 1 小时窗口到期）→ 必须补齐。
     cursor_path = paths.root / _CURSOR_RELATIVE
@@ -450,7 +455,8 @@ def test_opt6_terminal_candidate_cache_is_bounded(tmp_path, monkeypatch):
     assert len(cache) == 32
     assert paths[0].terminal not in cache and paths[-1].terminal in cache
     assert repair_gateway_terminal_projections(paths[0], agent=None, full_scan=True) == (0, [])
-    assert calls == ["*.json", "*.json"]
+    assert calls == []
+    assert all(len(value[1]) <= 128 for value in cache.values())
     assert len(cache) == 32
 
 
@@ -472,7 +478,7 @@ def test_opt6_unknown_stamp_discards_terminal_candidate_cache(tmp_path, monkeypa
         (paths.terminal / f"{request_id}.json").write_text(json.dumps({"id": request_id}), encoding="utf-8")
         assert repair_gateway_terminal_projections(paths, agent=None) == (0, [])
         assert paths.terminal not in cache
-    assert calls == ["*.json"] * 3
+    assert calls == []
 
 
 # LLM: 空目录候选也是可复用的不可变快照，但持久游标不得保留已消失的last_name。
@@ -487,9 +493,10 @@ def test_opt6_empty_terminal_candidates_reset_cursor_and_are_cached(tmp_path, mo
     calls = _counting_terminal_glob(monkeypatch, paths)
     assert repair_gateway_terminal_projections(paths, agent=None, full_scan=True) == (0, [])
     cursor = read_json_file(paths.root / _CURSOR_RELATIVE)
-    assert cursor["last_name"] == "" and cursor["caught_up"] is True
+    assert cursor["last_name"] == "" and cursor["caught_up"] is False
     assert repair_gateway_terminal_projections(paths, agent=None, full_scan=True) == (0, [])
-    assert calls == ["*.json"]
+    assert read_json_file(paths.root / _CURSOR_RELATIVE)["caught_up"] is True
+    assert calls == []
 
 
 def test_terminal_copy_cannot_reuse_source_runtime_authority(tmp_path):

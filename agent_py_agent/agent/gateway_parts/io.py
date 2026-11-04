@@ -26,14 +26,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..common.json_io import (
-    append_private_jsonl_records,
     check_io_deadline,
     jsonl_lines,
     path_thread_lock,
     serialize_private_json_no_newline,
     write_private_json_file_atomic_no_newline,
     write_private_json_file_atomic_no_newline_unlocked,
-    write_private_text_file_atomic,
 )
 from ..common.json_io import (
     locked_json_path as locked_private_json_path,
@@ -160,6 +158,7 @@ def write_json_file(path: Path, payload: dict) -> None:
 #   C显式False只尝试原common写锁及同一unlocked原语；不能因资源忙跳过锁或假写成功，默认True沿原body。
 # 函数用途: 原子替换本人JSON；可选deadline与try锁到同一末writer，原默认行为保留。
 # LLM: R1在原private JSON锁内核原header和输入，不能在检查与replace间让迁移写者插入；deadline不授予权限。
+#   canonical终态/输入回执先登记可重放变更，再沿同一writer发布；索引不决定业务状态或确认结算。
 # 函数用途: 沿原锁和序列化原子写入，拒绝覆盖当前进程不理解的存储代际。
 def write_json_file_atomic(path: Path, payload: dict, *, blocking: bool = True, deadline: float | None = None) -> None:
     check_io_deadline(deadline)
@@ -167,6 +166,10 @@ def write_json_file_atomic(path: Path, payload: dict, *, blocking: bool = True, 
     with locked_private_json_path(path, blocking=blocking):
         current, _readable, _raw, _version = _read_json_dict_unlocked_report(path)
         require_schema_generation(current)
+        check_io_deadline(deadline)
+        from .recovery_pending_index import record_canonical_change
+
+        record_canonical_change(path, blocking=blocking, deadline=deadline)
         check_io_deadline(deadline)
         options = {} if deadline is None else {"deadline": deadline}
         write_private_json_file_atomic_no_newline_unlocked(path, payload, sort_keys=True, **options)
@@ -1004,48 +1007,12 @@ def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
     append_gateway_history_once(paths, payload)
 
 
-# LLM: Gateway 历史按规范请求号维护可重建投影；全局事务锁与版本缓存保护追加，冲突/重复行以规范正文原子替换，非终态权威。
-#   落盘走私有追加/原子重写（0600/0700），存量宽权限历史下次写入即收紧；内容逐字节不变。
-# 函数用途: 按请求 ID 最多保留一条准确历史记录，并返回本次是否实际写入或修复。
+# LLM: 历史投影按请求唯一键更新，共用原历史转换锁；旧JSONL只做定批迁移，终态文件仍是完成权威。
+# 函数用途: 点更新一条历史摘要，完全相同的重放不写，不读取或复制整份历史。
 def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
-    request_id = str(payload.get("id") or payload.get("request_id") or "").strip()
-    if not request_id:
-        raise ValueError("gateway history projection requires request_id")
-    transition = paths.root / "history_transitions" / "history.transition"
-    with locked_file_transition(transition):
-        lines, index = _gateway_history_snapshot(paths.history)
-        existing = index.get(request_id)
-        if (
-            existing is not None
-            and not existing.conflict
-            and existing.count == 1
-            and existing.payload == payload
-        ):
-            return False
-        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        if existing is None:
-            append_private_jsonl_records(paths.history, [payload], sort_keys=True)
-            retained = [*lines, serialized]
-        else:
-            retained: list[str] = []
-            for line in lines:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    retained.append(line)
-                    continue
-                row_id = (
-                    str(row.get("id") or row.get("request_id") or "").strip()
-                    if isinstance(row, dict)
-                    else ""
-                )
-                if row_id != request_id:
-                    retained.append(line)
-            retained.append(serialized)
-            write_private_text_file_atomic(paths.history, "\n".join(retained) + "\n")
-        index[request_id] = _GatewayHistoryIndexEntry(dict(payload))
-        _store_gateway_history_cache(paths.history, retained, index)
-    return True
+    from .gateway_history_index import GatewayHistoryIndex
+
+    return GatewayHistoryIndex(paths).append(payload)
 
 
 # LLM: 原行与索引保留冲突修复合同；单文件及总字节预算只限制内存驻留，不改变返回正文或磁盘权威。

@@ -21,12 +21,13 @@ from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import ExitStack
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
-from ..common.json_io import check_io_deadline
+from ..common.json_io import check_io_deadline, locked_json_path
 from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
     raise_if_transport_uncertain,
@@ -39,12 +40,14 @@ from ..conversation.store_guidance_recovery import (
 from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError, runtime_error_report
 from .io import (
+    _read_json_dict_unlocked_report,
     gateway_response_path,
     gateway_turn_transition,
     read_json_file_report,
     write_json_file_atomic,
 )
 from .paths import GatewayPaths
+from .recovery_pending_index import RecoveryPendingIndex, projection_file_stamp
 from .steer_closeout_replay import (
     SteerReplayQueue,
     notice_steer_closeout,
@@ -56,6 +59,8 @@ _INPUT_RECEIPT_SCHEMA = "gateway_input_receipt.v2"
 _RECEIPT_DIR_CACHE_LOCK = threading.Lock()
 # 输入回执目录扫描缓存的最大目录数量。
 _RECEIPT_DIR_CACHE_MAX_COUNT = 32
+_receipt_page_versions: ContextVar[tuple[str, tuple[tuple[str, int], ...]] | None] = ContextVar("receipt_page_versions", default=None)
+_receipt_consumer_ack: ContextVar[bool] = ContextVar("receipt_consumer_ack", default=False)
 _RECEIPT_DIR_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], tuple[str, ...], tuple[Path, ...]]] = OrderedDict()
 _INPUT_RECEIPT_STATES = {
     "pending",
@@ -875,6 +880,7 @@ def _record_receipt_sweep(paths: GatewayPaths, stamp: tuple | None, page: tuple[
 #   批尾finally仅提交一次最后完成扫描的位置；typed未知立即停止且不越过当前项（只提交前一项），
 #   批内异常优先于提交失败；双重错误保留原异常对象，并以异常链保留游标写入失败，不伪称落盘成功。
 #   普通坏账继续轮转，terminal_unknown_errors/last_terminal_unknown_error仍交原循环守卫上报，不补claim或释放。
+#   本入口已有逐行确认，领取页期间关闭共享预确认，保留原公开读序及未结行之前的批尾游标；退出必复原上下文。
 # 函数用途: 有界扫描入口回执，跳过已收敛终态，汇总恢复结果并在本批退出时保存一次扫描位置。
 def reconcile_gateway_input_receipts(
     paths: GatewayPaths,
@@ -896,7 +902,11 @@ def reconcile_gateway_input_receipts(
         return summary
     last_path: Path | None = None
     pending_error: BaseException | None = None
-    page = _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1)))
+    token = _receipt_consumer_ack.set(True)
+    try:
+        page = _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1)))
+    finally:
+        _receipt_consumer_ack.reset(token)
     try:
         for path in page:
             stamp = _receipt_failure_stamp(path)
@@ -908,6 +918,8 @@ def reconcile_gateway_input_receipts(
             failure_type = ""
             try:
                 _reconcile_receipt_path(paths, agent, path, summary)
+                if (summary["errors"], summary["terminal_unknown_errors"]) == before_errors:
+                    _ack_reconciled_receipt(paths, agent, path)
             except RequestExecutionOutcomeUncertainError:
                 raise
             except Exception as exc:
@@ -932,8 +944,40 @@ def reconcile_gateway_input_receipts(
                     raise pending_error from (pending_error.__cause__ if getattr(pending_error, "__cause__", None) is not None else exc)
                 _raise_input_transport_uncertain(exc)
                 summary["errors"] += 1
-    _record_receipt_sweep(paths, sweep_stamp, page, summary)
     return summary
+
+
+# LLM: 共享维护先走原公开读口，读错/忙锁不确认；再在原锁内复核codec/摘要/版本，仅确认consumed或原已结unknown。
+# 函数用途: 确认本页已完成的输入恢复责任，不在cursor写者或索引中推断业务状态。
+def _ack_reconciled_receipt(paths: GatewayPaths, agent: object, path: Path, *, consumed_only: bool = False, blocking: bool = True) -> None:
+    captured = _receipt_page_versions.get()
+    if captured is None or captured[0] != str(paths.root):
+        return
+    version = dict(captured[1]).get(path.stem)
+    if version is None:
+        return
+    if consumed_only:
+        observed = read_gateway_input_receipt(paths, path.stem, blocking=blocking)
+        if observed is None or observed.state != "consumed":
+            return
+    index = RecoveryPendingIndex(paths.root, blocking=blocking)
+    with locked_json_path(path, blocking=blocking):
+        stamp = projection_file_stamp(path)
+        if stamp == "missing":
+            index.forget("receipt", path.stem, version)
+            return
+        if stamp == "invalid":
+            raise DataCorruptionError("gateway input projection source is not a regular file")
+        payload, readable, _raw, _version = _read_json_dict_unlocked_report(path)
+        if not readable or not payload:
+            raise DataCorruptionError("gateway input projection source is unreadable")
+        receipt = GatewayInputReceipt.from_dict(payload)
+        _validate_prepared_request(receipt)
+        if receipt.request_id != path.stem:
+            raise DataCorruptionError("gateway input projection path identity mismatch")
+        if receipt.state == "consumed" or (not consumed_only and receipt.state == "terminal_unknown" and not receipt.reconcile_error
+                                         and _is_settled_terminal_unknown(paths, agent, receipt)):
+            index.acknowledge("receipt", path.stem, version, stamp)
 
 
 # 已消费输入回执时间戳缓存的最大条目数。
@@ -1457,24 +1501,28 @@ def _gateway_turn_lifecycle_locked(paths: GatewayPaths, target_turn_id: str) -> 
 
 
 # LLM: 仅复用可信且完整结构指纹未变的回执目录；游标仍逐次读原文件，二分取有界页，不复制全目录。
-# 函数用途: 从上次位置继续领取有界回执扫描页，到目录末尾后循环。
+# LLM: 原last_name仅定位；有界共享维护核实规范consumed后CAS确认，原页仍交consumer；不借cursor结算或改其writer来源。
+#   已有逐行确认的普通consumer在其原读序中确认；冻结C consumer仍由本共享入口维护，不重复提前读整个普通页。
+# 函数用途: 从pending部分索引领取有界回执页，按原持久位置避免新前缀饿死旧积压。
 def _reconcile_receipt_paths(paths: GatewayPaths, *, limit: int) -> tuple[Path, ...]:
     receipt_dir = paths.root / "input_receipts"
-    if receipt_dir.is_dir():
-        # 首次游标父目录创建先于名字投影，避免第二拍因自己的state目录而重扫。
-        (receipt_dir / "state").mkdir(exist_ok=True)
-    names, candidates = _cached_receipt_candidates(receipt_dir)
-    if not candidates:
+    if not receipt_dir.is_dir() or limit <= 0:
+        _receipt_page_versions.set(None)
         return ()
+    (receipt_dir / "state").mkdir(exist_ok=True)
     cursor_path = receipt_dir / "state" / "reconcile_cursor.json"
     report = read_json_file_report(cursor_path, context="gateway.input_reconcile_cursor.read")
     previous = str(report.payload.get("last_name") or "") if report.load_error is None else ""
-    start = bisect_right(names, previous) if previous else 0
-    if start >= len(candidates):
-        start = 0
-    count = min(max(0, limit), len(candidates))
-    page = candidates[start:start + count]
-    return page + candidates[:count - len(page)] if len(page) < count else page
+    _names, candidates = _cached_receipt_candidates(receipt_dir, after=Path(previous).stem if previous else "", limit=limit)
+    if not _receipt_consumer_ack.get():
+        for path in candidates:
+            try:
+                _ack_reconciled_receipt(paths, None, path, consumed_only=True, blocking=False)
+            except (OSError, ValueError, UnicodeError, DataCorruptionError) as exc:
+                # 原消费者继续负责坏行隔离及busy/typed错误处理；维护失败绝不清掉它的pending。
+                _raise_input_transport_uncertain(exc)
+                continue
+    return candidates
 
 
 # LLM: 目录失踪/拒读不使用旧投影；原glob仍决定读取错误语义，ctime和inode捕捉同名替换。
@@ -1487,24 +1535,16 @@ def _receipt_directory_stamp(directory: Path) -> tuple[int, int, int, int] | Non
     return st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns
 
 
-# LLM: 排序在锁外；只发布枚举前后相同且离开粗时间窗口的投影，LRU最多32目录；从不缓存回执正文。
-# 函数用途: 复用回执名字和Path列表，让state子目录游标写入不重复触发全目录glob排序。
-def _cached_receipt_candidates(directory: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+# LLM: 每拍仅有界发现/审计和pending keyset查询；LRU只存这一页最多128个引用，不缓存完整目录或回执正文。
+# 函数用途: 领取变化/未结回执，并保存单页版本以确认本拍责任。
+def _cached_receipt_candidates(directory: Path, *, after: str = "", limit: int = 128) -> tuple[tuple[str, ...], tuple[Path, ...]]:
     key, stamp = str(directory), _receipt_directory_stamp(directory)
     trustworthy = stamp is not None
-    with _RECEIPT_DIR_CACHE_LOCK:
-        cached = _RECEIPT_DIR_CACHE.get(key)
-        if trustworthy and cached is not None and cached[0] == stamp:
-            _RECEIPT_DIR_CACHE.move_to_end(key)
-            return cached[1], cached[2]
-        _RECEIPT_DIR_CACHE.pop(key, None)
-    try:
-        with os.scandir(directory) as entries:
-            candidates = tuple(sorted((Path(entry.path) for entry in entries
-                                       if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False)),
-                                      key=lambda item: item.name))
-    except FileNotFoundError:
-        candidates = ()
+    index = RecoveryPendingIndex(directory.parent)
+    index.refresh("receipt", directory)
+    page = index.page("receipt", after=after, limit=limit)
+    _receipt_page_versions.set((str(directory.parent), page))
+    candidates = tuple(directory / f"{request_id}.json" for request_id, _version in page)
     names = tuple(path.name for path in candidates)
     if trustworthy and _receipt_directory_stamp(directory) == stamp:
         with _RECEIPT_DIR_CACHE_LOCK:
