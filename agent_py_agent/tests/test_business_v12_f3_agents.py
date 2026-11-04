@@ -96,7 +96,7 @@ def test_identity_suspend_resume_retire_restore_and_model_isolation(business_hos
     resumed = service.transition(identifier, "resume", actor=actor, expected_revision=suspended["agent"]["revision"], idempotency_key="resume")
     assert resumed["agent"]["identity_state"] == "available"
     selected = service.set_model(identifier, "model-B", actor=actor, expected_revision=1, idempotency_key="model")
-    assert selected["selection_revision"] == 2 and selected["adoption_status"] == "pending"
+    assert selected["selection_revision"] == 2 and selected["adoption_status"] == "applied"
     assert host.conversation_store.threads.require(actor.source_thread_id).model_profile_id != "model-B"
     retired = service.transition(identifier, "retire", actor=actor, expected_revision=resumed["agent"]["revision"], idempotency_key="retire", disposition="drain")
     assert retired["agent"]["identity_state"] == "retired"

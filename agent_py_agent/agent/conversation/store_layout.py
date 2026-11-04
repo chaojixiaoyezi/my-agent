@@ -60,6 +60,10 @@ class ConversationStorage:
         self.user_latest_path = self.root / "user_latest_threads.json"
         self.background_claims_dir = self.root / "background_claims"
         self.wake_dedupe_dir = self.wake_queue_dir / "dedupe"
+        # 仅保存可重建定位；原wake/发布记录仍是责任状态的唯一权威。
+        self.wake_task_index_path = self.wake_queue_dir / "task_responsibility.sqlite3"
+        self.wake_task_index_lock_path = self.wake_queue_dir / "task_responsibility.guard"
+        self.wake_task_locks_dir = self.wake_queue_dir / "task_locks"
         # 唤醒毒丸：每条唤醒的尝试账、已结案记录、人工重放后的留档；按需创建，不进 ensure_dirs。
         self.wake_attempts_dir = self.wake_queue_dir / "attempts"
         self.wake_quarantine_dir = self.wake_queue_dir / "quarantine"
@@ -85,12 +89,15 @@ class ConversationStorage:
             return self.root.parents[3].parent / 'compact'
         return self.root.parent / 'compact'
 
-    # LLM: 只创建既有目录集合；被动读取不能调用本入口，不写业务文件。
-    # 函数用途: 在可写 Store 初始化时准备原有目录，失败直接暴露给调用方。
+    # LLM: 可写初始化在热路径外建立派生覆盖标记；旧账不自动全扫重建，initialize=False不进入此处。
+    # 函数用途: 准备原有私有目录和空库的责任定位投影，不改业务权威记录。
     def ensure_dirs(self) -> None:
         for path in self.managed_dirs():
             # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
             ensure_private_dir(path)
+        from .store_wake_publication import initialize_task_responsibility_index
+
+        initialize_task_responsibility_index(self)
 
     # LLM: 目录集合是初始化唯一来源，不引入按任务命名的新数据目录。
     # 函数用途: 列出本会话存储管理的固定目录，供初始化和维护核对。
@@ -260,3 +267,9 @@ class ConversationStorage:
         return (
             self.wake_dedupe_dir / f"{safe_file_stem(thread_id)}.{safe_file_stem(dedupe_key)}.json"
         )
+
+    # LLM: thread/task使用完整摘要寻址；锁文件不承载执行或投递状态，不扫描历史代次。
+    # 函数用途: 为同任务责任检查与发布提供唯一串行化位置。
+    def wake_task_lock_path(self, thread_id: str, task_id: str) -> Path:
+        digest = hashlib.sha256(json.dumps([thread_id, task_id], separators=(",", ":")).encode()).hexdigest()
+        return self.wake_task_locks_dir / f"{digest}.guard"

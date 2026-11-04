@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import json
 import os
-from contextlib import ExitStack, contextmanager
+import sqlite3
+import threading
+from contextlib import ExitStack, closing, contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -18,7 +21,7 @@ from ..common.json_io import (
 from ..common.nofollow_fs import open_directory_beneath
 from ..common.opaque_id import validate_opaque_id
 from ..gateway_parts.io import locked_file_transition
-from ..runtime_errors import DataCorruptionError
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .models import ObservationEvent, WakeSignal
 from .store_io import read_jsonl_report
 from .store_layout import ConversationStorage
@@ -26,6 +29,7 @@ from .wake_poison import WAKE_STATUS_FAILED_PERMANENTLY
 
 _SCHEMA = "wake_dedupe.v2"
 _LEGACY_SCHEMA = "wake_dedupe.v1"
+_TASK_GUARDS = ContextVar("wake_task_responsibility_guards", default=())
 
 
 # LLM: 发布先按根到叶对现有祖先目录持SH；任何祖先owner的维护EX均互斥，不靠路径形状猜owner或创建全局锁文件。
@@ -45,6 +49,135 @@ def _publication_guard(root: Path, *, blocking: bool):
             stack.callback(os.close, descriptor)
             fcntl.flock(descriptor, fcntl.LOCK_SH | (0 if blocking else fcntl.LOCK_NB))
         yield
+
+
+# LLM: 写者持共享门、显式重建持排他门；锁先于task/dedupe锁，查询不创建或获取此文件。
+# 函数用途: 防止重建覆盖并行发布产生的定位引用，保留非阻塞拒绝语义。
+@contextmanager
+def _task_index_guard(storage: ConversationStorage, *, exclusive: bool, blocking: bool = True):
+    if os.name != "posix":
+        with locked_file_transition(storage.wake_task_index_lock_path, blocking=blocking):
+            yield
+        return
+    import fcntl
+
+    descriptor = os.open(storage.wake_task_index_lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(descriptor, mode | (0 if blocking else fcntl.LOCK_NB))
+        yield
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 只取结构化准确身份，不从dedupe字符串猜任务；没有可验证身份的普通事件不进入任务投影。
+# 函数用途: 提取session_task信号的任务归属。
+def session_task_identity(signal: WakeSignal) -> tuple[str, str] | None:
+    task_id = (signal.metadata or {}).get("session_task_id")
+    if (str(signal.reason).strip().lower() == "session_task" and isinstance(task_id, str)
+            and task_id.strip() and signal.thread_id):
+        return signal.thread_id, task_id
+    return None
+
+
+# LLM: owner祖先SH→索引SH→准确task锁→原发布/队列锁；仅同进程同线程同身份可重入，不继承别的执行者的锁。
+# 函数用途: 串行化一个任务的检查和发布；锁忙在提交定位或canonical之前拒绝。
+@contextmanager
+def task_responsibility_guard(storage: ConversationStorage, thread_id: str, task_id: str, *, blocking: bool = True):
+    identity = (str(storage.root.resolve()), os.getpid(), threading.get_ident(), thread_id, task_id)
+    active = _TASK_GUARDS.get()
+    if identity in active:
+        yield
+        return
+    with (_publication_guard(storage.root, blocking=blocking),
+          _task_index_guard(storage, exclusive=False, blocking=blocking),
+          locked_file_transition(storage.wake_task_lock_path(thread_id, task_id), blocking=blocking)):
+        token = _TASK_GUARDS.set((*active, identity))
+        try:
+            yield
+        finally:
+            _TASK_GUARDS.reset(token)
+
+
+# LLM: 普通事件保持原owner维护门；session_task额外共用检查者的task门，不把不同事件强行合成一个wake。
+# 函数用途: 为原发布及结案路径选择正确的锁边界。
+@contextmanager
+def signal_responsibility_guard(storage: ConversationStorage, signal: WakeSignal, *, blocking: bool = True):
+    identity = session_task_identity(signal)
+    if identity is None:
+        with _publication_guard(storage.root, blocking=blocking):
+            yield
+    else:
+        with task_responsibility_guard(storage, *identity, blocking=blocking):
+            yield
+
+
+# LLM: ro/rw均禁止SQLite自动创建；query只读，不建表、不修账、不写journal。
+# 函数用途: 打开已存在的派生定位库，调用方负责关闭连接。
+def _task_index_connection(storage: ConversationStorage, *, writable: bool = False, blocking: bool = True):
+    mode = "rw" if writable else "ro"
+    return sqlite3.connect(storage.wake_task_index_path.resolve().as_uri() + "?mode=" + mode,
+        uri=True, timeout=5.0 if writable and blocking else 0)
+
+
+# LLM: schema只描述定位字段与覆盖，不复制状态；旧无发布账的canonical在显式重建时标为legacy引用。
+# 函数用途: 在新派生库内建立按thread/task寻址的主键。
+def _create_task_index(connection, coverage: str) -> None:
+    connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute("CREATE TABLE locators (thread_id TEXT NOT NULL, task_id TEXT NOT NULL, "
+        "wake_id TEXT NOT NULL, dedupe_key TEXT NOT NULL, urgency TEXT NOT NULL, receipt_required INTEGER NOT NULL, "
+        "PRIMARY KEY(thread_id, task_id, wake_id))")
+    connection.executemany("INSERT INTO metadata VALUES (?, ?)", (
+        ("schema", "wake-task-locators.v1"), ("coverage", coverage)))
+
+
+# LLM: 只在显式可写初始化且索引不存在时调用；已有pending/dedupe说明覆盖未知，绝不把旧库当空库。
+# 函数用途: 为全新空库建立覆盖证明；旧库等待显式离线重建，不扫描正文。
+def initialize_task_responsibility_index(storage: ConversationStorage) -> None:
+    with _publication_guard(storage.root, blocking=True), _task_index_guard(storage, exclusive=True):
+        if storage.wake_task_index_path.exists():
+            return
+        legacy = any(next(directory.glob("*.json"), None) is not None for directory in (
+            storage.wake_queue_dir / "urgent", storage.wake_queue_dir / "normal", storage.wake_dedupe_dir))
+        descriptor = os.open(storage.wake_task_index_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(descriptor)
+        with closing(_task_index_connection(storage, writable=True)) as connection, connection:
+            _create_task_index(connection, "unknown" if legacy else "complete")
+
+
+# LLM: 定位先于prepared/canonical提交；崩溃留下孤儿引用会返回unknown，绝不会漏掉已提交责任。
+# 函数用途: 在原task锁内预留可重建位置，不保存状态或冻结内容的副本。
+def register_task_locator(storage: ConversationStorage, signal: WakeSignal, *, blocking: bool = True) -> None:
+    identity = session_task_identity(signal)
+    if identity is None:
+        return
+    with closing(_task_index_connection(storage, writable=True, blocking=blocking)) as connection, connection:
+        connection.execute("INSERT OR REPLACE INTO locators VALUES (?, ?, ?, ?, ?, ?)",
+            (*identity, signal.wake_signal_id, signal.dedupe_key, signal.urgency, int(bool(signal.dedupe_key))))
+
+
+# LLM: 原task锁内确认两个pending位置均不存在后才清定位；尽力删除失败或stat错误保留引用，索引坏时保留unknown。
+# 函数用途: 删除终态的派生引用，避免积累历史代次导致热查询放大。
+def remove_task_locator(storage: ConversationStorage, signal: WakeSignal) -> None:
+    identity = session_task_identity(signal)
+    if identity is None:
+        return
+    for kind in ("urgent", "normal"):
+        try:
+            (storage.wake_queue_dir / kind / f"{signal.wake_signal_id}.json").stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return
+        else:
+            return
+    try:
+        with closing(_task_index_connection(storage, writable=True)) as connection, connection:
+            connection.execute("DELETE FROM locators WHERE thread_id=? AND task_id=? AND wake_id=?",
+                (*identity, signal.wake_signal_id))
+    except (OSError, sqlite3.Error):
+        # 底层canonical已经结案；后续report会暴露索引缺失/损坏，不把它解释成空责任。
+        return
 
 
 # LLM: 原文件通过原子替换发布，查询可直接读完整快照；不创建锁文件，只有不存在才是空账。
@@ -212,7 +345,7 @@ def _install(storage: ConversationStorage, path: Path, record: dict[str, Any], *
     return observation, installed
 
 
-# LLM: owner祖先共享锁先于原dedupe锁，判断/预留/安装及prepared重试全程互斥维护；锁忙不能写半条发布或假报成功。
+# LLM: owner/index/task锁先于原dedupe锁；定位先于prepared，原冻结/重试/retain_handled语义不变，不合并不同事件。
 # 函数用途: 发布或恢复一个有稳定键的信号及观察，返回原内容，不新增后台恢复服务。
 # LLM: 非阻塞只透传同一原锁；prepared/installed/published顺序不变，paired半提交保原账而非假原子成功。
 # 函数用途: C可立即拒绝发布锁忙，后续仍重放原同键内容。
@@ -221,7 +354,7 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
     if type(retain_handled) is not bool:
         raise ValueError("wake retain_handled must be boolean")
     path = storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key)
-    with _publication_guard(storage.root, blocking=blocking), locked_file_transition(path, blocking=blocking):
+    with signal_responsibility_guard(storage, signal, blocking=blocking), locked_file_transition(path, blocking=blocking):
         record = _read_record(path)
         if record is not None and record.get("schema_version") == _LEGACY_SCHEMA:
             record = _migrate_legacy(storage, record, signal, paired=observation is not None, retain_handled=retain_handled)
@@ -231,18 +364,23 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
             if record["retain_handled"] != retain_handled or (previous_observation is None) != (observation is None):
                 raise DataCorruptionError("wake publication retention or pair contract conflicts")
             if record["phase"] == "prepared":
+                register_task_locator(storage, frozen, blocking=blocking)
                 return _install(storage, path, record, blocking=blocking)
             existing = _installed_signal(storage, frozen)
             if existing is None:
                 raise DataCorruptionError("published wake signal is missing")
             # 已结案的同一事件不能靠再次发布自己复活，只能人工重放。
             if existing.status in {"pending", WAKE_STATUS_FAILED_PERMANENTLY} or retain_handled:
+                if existing.status == "pending":
+                    register_task_locator(storage, existing, blocking=blocking)
                 return previous_observation, existing
+            remove_task_locator(storage, existing)
         migration = record.get("migration") if record is not None else None
         record = _prepare(signal, observation, retain_handled)
         if migration is not None:
             record["migration"] = migration
         _frozen_pair(record, signal.thread_id, signal.dedupe_key)
+        register_task_locator(storage, signal, blocking=blocking)
         write_private_json_file_atomic_unlocked(path, record)
         return _install(storage, path, record, blocking=blocking)
 
@@ -270,3 +408,109 @@ def publication_receipt(storage: ConversationStorage, thread_id: str, key: str) 
     if signal is None:
         raise DataCorruptionError("published wake signal is missing")
     return signal.status
+
+
+# LLM: 引用不拥有liveness；必须回读原发布及canonical，prepared算责任，缺失/冲突不能降为空。
+# 函数用途: 精确核验一个定位引用并返回仍待处理的责任事实。
+def _task_locator_fact(storage, thread_id, task_id, locator):
+    wake_id, key, urgency, receipt_required = locator
+    phase = "published"
+    if receipt_required:
+        record = _read_record(storage.wake_dedupe_path(thread_id, key))
+        if record is None:
+            raise DataCorruptionError("task wake publication is missing")
+        if record.get("schema_version") == _LEGACY_SCHEMA:
+            if (record.get("thread_id"), record.get("dedupe_key"), record.get("wake_signal_id")) != (thread_id, key, wake_id):
+                raise DataCorruptionError("legacy task wake publication conflicts")
+            signal = _read_existing_identity(storage, wake_id)
+        else:
+            _, frozen = _frozen_pair(record, thread_id, key)
+            if frozen.wake_signal_id != wake_id:
+                # 上一代结案后同键可以再发布；只允许忽略准确旧ID的已结案引用。
+                previous = _read_existing_identity(storage, wake_id)
+                if previous is not None and previous.status != "pending":
+                    return None
+                raise DataCorruptionError("task wake locator identity conflicts")
+            signal = _installed_signal(storage, frozen)
+            if record["phase"] == "prepared" and signal is None:
+                signal, phase = frozen, "prepared"
+    else:
+        signal = _read_existing_identity(storage, wake_id)
+    if signal is None:
+        raise DataCorruptionError("task wake canonical signal is missing")
+    if (session_task_identity(signal) != (thread_id, task_id) or signal.dedupe_key != key
+            or signal.urgency != urgency):
+        raise DataCorruptionError("task wake locator does not match canonical identity")
+    return {"wake_signal_id": wake_id, "phase": phase} if signal.status == "pending" else None
+
+
+# LLM: 纯ro连接只按主键前缀读取一个task；无glob/全队列/历史代次/修账，覆盖不明和任何坏账均返回unknown。
+# 函数用途: 查询准确任务仍承担调度的原wake或prepared发布，供持task锁的producer判定。
+def task_responsibility_report(storage: ConversationStorage, thread_id: str, task_id: str):
+    try:
+        with closing(_task_index_connection(storage)) as connection:
+            metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+            if metadata != {"schema": "wake-task-locators.v1", "coverage": "complete"}:
+                raise DataCorruptionError("task wake locator coverage is unknown")
+            locators = connection.execute("SELECT wake_id, dedupe_key, urgency, receipt_required FROM locators "
+                "WHERE thread_id=? AND task_id=? ORDER BY wake_id", (thread_id, task_id)).fetchall()
+        rows = [fact for locator in locators if (fact := _task_locator_fact(storage, thread_id, task_id, locator)) is not None]
+        return rows, None
+    except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError) as exc:
+        return [], runtime_error_report(exc, context="conversation.wake_task_responsibility.read")
+
+
+# LLM: 仅由显式重建入口调用；读取当前队列和原发布账，不读取handled历史正文，canonical决定是否仍有责任。
+# 函数用途: 在热路径之外从原权威源提取可重建定位引用。
+def _task_projection_sources(storage: ConversationStorage):
+    for kind in ("urgent", "normal"):
+        for path in (storage.wake_queue_dir / kind).glob("*.json"):
+            signal = _signal(_read_record(path))
+            if path.stem != signal.wake_signal_id:
+                raise DataCorruptionError("task wake filename identity conflicts")
+            if signal.status == "pending" and session_task_identity(signal) is not None:
+                yield signal, bool(signal.dedupe_key and storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key).is_file())
+    for path in storage.wake_dedupe_dir.glob("*.json"):
+        record = _read_record(path)
+        if record.get("schema_version") == _LEGACY_SCHEMA:
+            signal = _read_existing_identity(storage, str(record.get("wake_signal_id") or ""))
+            if signal is None or (signal.thread_id, signal.dedupe_key) != (record.get("thread_id"), record.get("dedupe_key")):
+                raise DataCorruptionError("legacy task publication has no canonical signal")
+        else:
+            _, frozen = _frozen_pair(record, record.get("thread_id"), record.get("dedupe_key"))
+            if session_task_identity(frozen) is None:
+                continue
+            signal = _installed_signal(storage, frozen)
+            if signal is None:
+                if record["phase"] != "prepared":
+                    raise DataCorruptionError("published task wake is missing during rebuild")
+                signal = frozen
+        if signal.status == "pending" and session_task_identity(signal) is not None:
+            yield signal, True
+
+
+# LLM: 明确写入口，ownerSH→索引EX与所有发布/确认/replay互斥；新库原子替换，失败也发布unknown而不留下旧空覆盖。
+# 函数用途: 显式重建旧库或损坏投影；不在查询或每task热路径触发。
+def rebuild_task_responsibility_index(storage: ConversationStorage) -> None:
+    import tempfile
+
+    with _publication_guard(storage.root, blocking=True), _task_index_guard(storage, exclusive=True):
+        descriptor, name = tempfile.mkstemp(prefix=".task-responsibility-", suffix=".sqlite3", dir=storage.wake_queue_dir)
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            with closing(sqlite3.connect(temporary)) as connection, connection:
+                _create_task_index(connection, "unknown")
+            with closing(sqlite3.connect(temporary)) as connection, connection:
+                for signal, receipt_required in _task_projection_sources(storage):
+                    connection.execute("INSERT OR REPLACE INTO locators VALUES (?, ?, ?, ?, ?, ?)",
+                        (*session_task_identity(signal), signal.wake_signal_id, signal.dedupe_key, signal.urgency, int(receipt_required)))
+                connection.execute("UPDATE metadata SET value='complete' WHERE key='coverage'")
+        finally:
+            os.replace(temporary, storage.wake_task_index_path)
+            if os.name == "posix":
+                descriptor = os.open(storage.wake_queue_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
