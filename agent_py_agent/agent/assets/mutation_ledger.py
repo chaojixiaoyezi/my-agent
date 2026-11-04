@@ -14,7 +14,8 @@ from pathlib import Path
 from ..common.log_redaction import redact_sensitive_text
 from ..common.nofollow_fs import read_bytes_beneath, write_text_atomic_beneath
 from . import safe_asset_id
-from .revision_history import blob_put
+from .descriptor import execution_definition_ref
+from .revision_history import blob_put, get_version
 from .script_store import ScriptStore
 
 
@@ -152,13 +153,13 @@ class AssetMutationLedger:
                                    call_id=call_id, observed_at=timestamp, asset_id=asset_id,
                                    existing=args['action'] == 'update')
             elif args.get('action') == 'run':
-                record = ScriptStore(owner_home).get_script(asset_id)
-                if record and len(record['code'].encode()) <= self.max_capture_bytes:
-                    if key not in book['targets'] and len(book['targets']) < self.max_targets:
-                        book['targets'][key] = {'kind': 'script', 'asset_id': asset_id, 'path': None,
-                                                'existing': True, 'facts': []}
-                    self._execution(book, key, record['code'].encode(), value, call_id,
-                                    timestamp, archive_ref, args.get('inputs', {}))
+                if key not in book['targets'] and len(book['targets']) >= self.max_targets:
+                    return
+                raw, source = self._script_execution(owner_home, workspace_root, asset_id, args, value)
+                book['targets'].setdefault(key, {'kind': 'script', 'asset_id': asset_id, 'path': None,
+                                                 'existing': True, 'facts': []})
+                self._execution(book, key, raw, value, call_id, timestamp, archive_ref,
+                                args.get('inputs', {}), source=source)
             return
         if name in ('write_file', 'edit_file', 'apply_patch') and value.get('ok') is True:
             paths = [args['path']] if isinstance(args.get('path'), str) else []
@@ -190,6 +191,55 @@ class AssetMutationLedger:
                     self._execution(book, key, raw, value, call_id, timestamp, archive_ref, {})
                 break
 
+    # LLM: 只按本次显式版本读取一份不可变记录和两个有界blob；工作区覆盖优先，身份不符不借当前字节补齐。
+    # 函数用途: 把实际执行回执绑定到同来源、同定义的代码快照。
+    def _script_execution(self, owner_home, workspace_root, asset_id, args, receipt):
+        from ..workflows.datasource_runtime import _historical_execution_record
+
+        record = ScriptStore(owner_home, workspace_root=workspace_root).get_script(asset_id)
+        source = {'source_scope': record.get('source_scope', 'owner') if record else '',
+                  'requested_version': args.get('version')}
+        if record is None:
+            return None, source
+        data = evolution_receipt(receipt.get('result', receipt.get('output', receipt)))
+        actual = data.get('execution_definition_ref')
+        if not actual:
+            return None, source
+        snapshot = record
+        version = args.get('version')
+        if version is not None:
+            if source['source_scope'] != 'owner':
+                return None, source
+            history = get_version(owner_home, 'script', asset_id, version)
+            if history is None:
+                return None, source
+            source.update(execution_version=history['version'],
+                          published_definition_ref=history['execution_definition_ref'])
+            resolution = data.get('source_check', {}).get('pin_resolution', {})
+            if resolution.get('mode') == 'history':
+                if resolution.get('version') != version or resolution.get('code_sha256') != history['code_sha256']:
+                    return None, source
+                blobs = []
+                for digest, limit in ((history['code_sha256'], self.max_capture_bytes),
+                                      (history['payload_blob'], 4194304)):
+                    if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+                        return None, source
+                    raw = read_bytes_beneath(Path(owner_home),
+                        ('data', 'asset_evolution', 'blobs', digest[:2], digest), max_bytes=limit)
+                    if raw is None or hashlib.sha256(raw).hexdigest() != digest:
+                        return None, source
+                    blobs.append(raw)
+                snapshot, _ = _historical_execution_record(record, json.loads(blobs[1]), blobs[0])
+            elif (hashlib.sha256(record['code'].encode()).hexdigest() != history['code_sha256']
+                  or actual != history['execution_definition_ref']):
+                return None, source
+        else:
+            source['published_definition_ref'] = record['execution_definition_ref']
+        raw = snapshot['code'].encode()
+        if len(raw) > self.max_capture_bytes or actual != execution_definition_ref(snapshot, kind='script'):
+            return None, source
+        return raw, source
+
     # LLM: 历史条数与目标数都受帽控制，溢出只存一个计数事实而非继续缓存代码。
     # 函数用途: 追加代码哈希与大小变更。
     def _mutation(self, book, key, raw, size, *, tool_name, call_id, observed_at,
@@ -212,7 +262,7 @@ class AssetMutationLedger:
 
     # LLM: started或无退出证明不算执行通过；后台命令必须等真实exit回执，输入只存hash。
     # 函数用途: 记录同字节的执行结果及输出身份。
-    def _execution(self, book, key, raw, receipt, call_id, timestamp, archive_ref, inputs):
+    def _execution(self, book, key, raw, receipt, call_id, timestamp, archive_ref, inputs, *, source=None):
         target = book['targets'].get(key)
         if target is None:
             return
@@ -230,14 +280,15 @@ class AssetMutationLedger:
             except ValueError:
                 output = data['stdout']
         fact = {'schema_version': 'asset_execution.v1', 'target': key,
-                'sha256': hashlib.sha256(raw).hexdigest(), 'ok': ok,
-                'literal_hashes': evolution_literal_hashes(raw),
+                'sha256': hashlib.sha256(raw).hexdigest() if raw is not None else None, 'ok': ok,
+                'verified': raw is not None,
+                'literal_hashes': evolution_literal_hashes(raw) if raw is not None else [],
                 'error_code': str(data.get('error_code') or receipt.get('error_code') or ''),
                 'call_id': call_id, 'observed_at': timestamp,
                 'execution_definition_ref': data.get('execution_definition_ref'),
                 'input_hash': evolution_value_hash(inputs),
                 'output_hash': evolution_value_hash(output) if output is not None else '',
-                'archive_ref': archive_ref}
+                'archive_ref': archive_ref, **(source or {})}
         target['facts'] = [*target['facts'], fact][-self.max_facts_per_target:]
         target['last_execution'] = fact
 
@@ -263,7 +314,12 @@ def freeze_asset_mutations(owner_home, state, *, run_id, owner_id='', thread_id=
         if tagged or mutation.get('status') != 'captured' or execution.get('ok') is not True:
             continue
         try:
-            record = ScriptStore(owner_home).get_script(target['asset_id']) if target.get('asset_id') else None
+            record = ScriptStore(owner_home, workspace_root=state.get('workspace_root')).get_script(
+                target['asset_id']) if target.get('asset_id') else None
+            if record and (execution.get('verified') is not True
+                    or execution.get('execution_definition_ref') != record['execution_definition_ref']
+                    or execution.get('source_scope') != record.get('source_scope', 'owner')):
+                continue
             raw = record['code'].encode() if record else read_workspace_script(
                 state.get('workspace_root', owner_home), owner_home, target['path'])[0]
             if raw is None or hashlib.sha256(raw).hexdigest() != mutation['sha256']:

@@ -63,6 +63,7 @@ STATUS_DAILY_LIMIT = "daily_limit"
 STATUS_RETRY = "retry"
 CODE_MODEL_TIMEOUT = "SKILL_LEARNING_MODEL_TIMEOUT"
 CODE_MODEL_FAILED = "SKILL_LEARNING_MODEL_FAILED"
+CODE_EVOLUTION_FAILED = "SKILL_LEARNING_EVOLUTION_FAILED"
 # 单轮最多更新几条已登记的自主学习 Skill。
 UPDATABLE_COUNT = 3
 
@@ -375,8 +376,18 @@ class SkillLearningService:
                 with gateway_short_transaction('asset_evolution_commit'):
                     return operation()
 
-            result = AssetEvolutionService(self.store.skills_root.parent,
-                maintenance_mode=self.settings.maintenance_mode, commit=evolution_commit).process(request['asset_evolution_run_id'])
+            try:
+                result = AssetEvolutionService(self.store.skills_root.parent,
+                    maintenance_mode=self.settings.maintenance_mode, commit=evolution_commit).process(request['asset_evolution_run_id'])
+            except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                    ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError,
+                    OwnerQuotaExceeded, OwnerQuotaUnavailable, SkillLearningStoreError):
+                raise
+            except CuratorModelStillRunningError:
+                return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get('request_key') or ''))
+            except (TypeError, ValueError, SyntaxError, RecursionError) as exc:
+                # 只给确定性的处理错误记尝试；I/O、中断、撤权和实际未知不消费请求。
+                return self._retry_or_drop(path, request, exc, code=CODE_EVOLUTION_FAILED)
             if request.get('asset_evolution_only'):
                 finished = self._finish(path, request, _request_event(EVENT_SKIPPED, '', request))
                 return replace(finished, evolution_notices=tuple(result.get('notices', [])))
@@ -458,11 +469,11 @@ class SkillLearningService:
             rejected = _request_event(EVENT_REJECTED, exc.code, request)
             return replace(rejected, skill_name=decision.name, reason=decision.reason)
 
-    # LLM: 普通模型失败按原attempts重试；同次短T保护重写与丢弃，撤权不能消费原请求。
-    # 函数用途: 处理一次模型调用失败。
-    def _retry_or_drop(self, path: Path, request: dict[str, object], exc: Exception) -> SkillLearningRunResult:
+    # LLM: 模型或确定性演进失败沿原attempts有界重试；错误码保留载体，短T保护重写与终账，撤权不消费源。
+    # 函数用途: 对失败请求持久化进度或可追溯终态，让后续FIFO继续。
+    def _retry_or_drop(self, path: Path, request: dict[str, object], exc: Exception, *, code: str = '') -> SkillLearningRunResult:
         with gateway_short_transaction("skill_learning_retry_or_drop"):
-            code = CODE_MODEL_TIMEOUT if isinstance(exc, TimeoutError) else CODE_MODEL_FAILED
+            code = code or (CODE_MODEL_TIMEOUT if isinstance(exc, TimeoutError) else CODE_MODEL_FAILED)
             attempts = int(request.get("attempts") or 0) + 1
             if attempts < MAX_REQUEST_ATTEMPT_COUNT:
                 self.store.rewrite_request(path, {**request, "attempts": attempts})
@@ -576,6 +587,7 @@ def _config_int(config: object, key: str, default: int) -> int:
 
 
 __all__ = [
+    "CODE_EVOLUTION_FAILED",
     "CODE_MODEL_FAILED",
     "CODE_MODEL_TIMEOUT",
     "FOCUS_LIMIT_CHARS",

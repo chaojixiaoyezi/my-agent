@@ -9,6 +9,8 @@ from agent_py_agent.agent.assets.descriptor import AssetDescriptor
 from agent_py_agent.agent.assets.mutation_ledger import AssetMutationLedger, freeze_asset_mutations
 from agent_py_agent.agent.assets.revision_history import blob_get
 from agent_py_agent.agent.assets.script_store import ScriptStore
+from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
+from agent_py_agent.agent.workflows.script_runner import ScriptRunner
 
 
 # LLM: 临时Owner与workspace严格分离，不访问用户真实目录。
@@ -46,16 +48,20 @@ def test_workspace_sources_and_freeze(capture, tool):
 @pytest.mark.parametrize('action', ['register', 'update'])
 def test_scripts_sources(capture, action):
     ledger, state, home, work = capture
-    code = 'print("state check")\n'
+    code = 'print(\'{"ok": true}\')\n'
     ScriptStore(home).save_script(AssetDescriptor('sample', 'script', 'sample'), code)
     ledger.observe(state, 'scripts', {'action': action, 'script_id': 'sample', 'code': code}, {'ok': True},
                    owner_home=home, workspace_root=work, call_id='save')
-    ledger.observe(state, 'scripts', {'action': 'run', 'script_id': 'sample'},
-                   {'ok': True, 'output_data': {'ok': True}, 'execution_definition_ref': 'receipt-ref'},
+    runner = ScriptRunner(home, workspace_root=work, use_sandbox=False, restrict_to_roots=True)
+    receipt = ScriptsTool(home, workspace_root=work, runner=runner).execute({'action': 'run', 'script_id': 'sample'})
+    value = json.loads(receipt.output)
+    assert receipt.ok and value['ok']
+    ledger.observe(state, 'scripts', {'action': 'run', 'script_id': 'sample'}, value,
                    owner_home=home, workspace_root=work, call_id='exec')
     target = state['asset_mutations']['targets']['script:sample']
     assert target['last_mutation']['sha256'] == hashlib.sha256(code.encode()).hexdigest()
-    assert target['last_execution']['execution_definition_ref'] == 'receipt-ref'
+    assert target['last_execution']['execution_definition_ref'] == value['execution_definition_ref']
+    assert target['last_execution']['verified'] is True
     assert freeze_asset_mutations(home, state, run_id='official')['targets'][0]['verified'] is True
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 from pathlib import Path
 
 from ..assets import safe_asset_id
@@ -20,11 +21,16 @@ from .asset_evolution_routes import (
 from .skill_learning_promotion import _commit
 
 
-# LLM: 常量值只参与参数化族比较；IO字段名参与指纹，族相同本身不代表兼容或授权。
+# LLM: 每项保留完整JSON类型与声明，字符串/对象不能混排或只取name丢掉约束；不读取文件。
+# 函数用途: 为所有合法输入表示生成可稳定排序的字段身份。
+def _evolution_field_identities(values):
+    return sorted(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'),
+                             allow_nan=False) for value in values)
+
+
+# LLM: 常量值只参与参数化族比较；完整IO声明参与指纹，族相同本身不代表兼容或授权。
 # 函数用途: 生成替换字符串和数值字面量后的AST族指纹。
 def evolution_family_fingerprint(code, io_contract=None):
-    import json
-
     # LLM: 保留AST结构与常量类型，避免字符串、数值、布尔混淆。
     # 类用途: 将可变化常量替换为固定占位。
     class Normalize(ast.NodeTransformer):
@@ -38,8 +44,8 @@ def evolution_family_fingerprint(code, io_contract=None):
             return node
     tree = Normalize().visit(ast.parse(code))
     contract = io_contract if isinstance(io_contract, dict) else {}
-    fields = {key: sorted(contract.get(key, [])) for key in ('inputs', 'outputs')}
-    fields['output_types'] = sorted(contract.get('output_types', {}))
+    fields = {key: _evolution_field_identities(contract.get(key, [])) for key in ('inputs', 'outputs', 'nullable_outputs')}
+    fields['output_types'] = contract.get('output_types', {})
     text = json.dumps([ast.dump(tree, include_attributes=False), fields], sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(text.encode()).hexdigest()
 
