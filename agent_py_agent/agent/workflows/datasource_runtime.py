@@ -518,8 +518,8 @@ def _run_query_attempts(owner_home, script_id, inputs, runner, record, history, 
     return result, retries
 
 
-# LLM: 历史代码保持当前授权上限；显式版本/修订须有合法存储身份，旧无版本记录兼容，revision不作定义比较。
-# 函数用途: 区分旧无版本记录与正式pin后解析合同、隔离源失败及有界重试，debug仍不写账。
+# LLM: 历史代码保持当前授权上限；仅预期pin的版本/修订要求合法存储身份，旧记录默认revision=0不作拒绝依据。
+# 函数用途: 兼容旧无版本脚本并保留正式pin拒绝门，继续解析合同、隔离源失败及有界重试，debug不写账。
 def run_script_with_datasources(
     owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None,
     timeout_seconds=None, override_data_sources=None, network_access=None, options=None, now=None,
@@ -530,7 +530,7 @@ def run_script_with_datasources(
     instant = time.time() if now is None else now
     bound = script_execution_record(owner_home, script_id, workspace_root)
     if (expected_script_pin is not None and bound is not None
-            and ('revision' in bound or expected_script_pin.get('revision') or 'version' in expected_script_pin)
+            and (expected_script_pin.get('revision') or 'version' in expected_script_pin)
             and (type(bound.get('revision')) is not int or bound['revision'] < 1)):
         resolution = {'mode': 'missing', 'reason': 'history_blob_missing'}
         return _query_result(owner_home, _preflight_failure(script_id, {}, 'SCRIPT_REVISION_DRIFT', {}),
