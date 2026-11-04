@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..assets.monitor_adapter import _read_object, save_monitor_binding
 from ..assets.revision_history import (
+    AssetHistoryError,
     blob_exists,
     blob_get,
     compatible_successor,
@@ -23,8 +24,8 @@ def _stale(reason):
     raise ExecutionTargetError('固定资产发布快照不可用', error_code='SCHEDULER_EXECUTION_DEFINITION_STALE', reason=reason)
 
 
-# LLM: 版本记录及所有必需blob在执行前核验；返回的历史对象不写回当前资产。
-# 函数用途: 从准确版本或内容引用恢复调度目标与旧定义。
+# LLM: 版本记录及所有必需blob在执行前核验，损坏沿原 STALE 关闭；历史 payload 不是当前授权记录。
+# 函数用途: 从准确版本或内容引用恢复调度目标与旧定义；脚本当前记录仍由原执行器独立加载。
 def resolve_pinned_target(owner_home, target, definition, reference):
     kind, identifier = target['kind'], target['asset_id']
     pin, frozen = target.get('pinned_version'), target.get('execution_definition_ref')
@@ -34,7 +35,10 @@ def resolve_pinned_target(owner_home, target, definition, reference):
     if record is None and pin is None and frozen:
         if definition is not None and frozen['definition_sha256'] == _legacy_execution_definition_ref(definition):
             return deepcopy(target), definition
-        record = _find_legacy_version(owner_home, kind, identifier, frozen['definition_sha256'])
+        try:
+            record = _find_legacy_version(owner_home, kind, identifier, frozen['definition_sha256'])
+        except AssetHistoryError:
+            _stale('blob_missing')
     if record is None:
         if definition is not None and pin is None and frozen in (None, reference):
             return {**target, 'execution_definition_ref': reference}, definition
@@ -42,9 +46,13 @@ def resolve_pinned_target(owner_home, target, definition, reference):
     hashes = [record['payload_blob'], *record.get('side_blobs', {}).values()]
     if record.get('code_sha256'):
         hashes.append(record['code_sha256'])
-    if not all(blob_exists(owner_home, digest) for digest in hashes) or kind == 'script' and not record.get('code_sha256'):
+    try:
+        if not all(blob_exists(owner_home, digest) for digest in hashes) or kind == 'script' and not record.get('code_sha256'):
+            _stale('blob_missing')
+        payload = json.loads(blob_get(owner_home, record['payload_blob']))
+        code = blob_get(owner_home, record['code_sha256']).decode('utf-8') if kind == 'script' else None
+    except (AssetHistoryError, UnicodeError, json.JSONDecodeError):
         _stale('blob_missing')
-    payload = json.loads(blob_get(owner_home, record['payload_blob']))
     resolved = {**target, 'definition_version': record['version']}
     if frozen is None:
         resolved['execution_definition_ref'] = {'schema_version': 'scheduler_execution_definition.v1',
@@ -53,7 +61,8 @@ def resolve_pinned_target(owner_home, target, definition, reference):
         historical = (WorkflowDefinition.from_any(payload) if 'descriptor' in payload
                       else WorkflowStore._decode_definition(payload))
     else:
-        historical = {**payload, 'code': blob_get(owner_home, record['code_sha256']).decode('utf-8')}
+        # 不给去除易变字段的历史 payload 补 revision；storage_revision 只属于待核验 pin，不能恢复当前权限。
+        historical = {**payload, 'code': code}
         resolved['expected_script_pin'] = {'script_id': identifier, 'revision': record.get('storage_revision') or 0,
             'code_sha256': record['code_sha256'], 'source_scope': payload.get('source_scope', 'owner'),
             'execution_definition_ref': record.get('execution_definition_ref')}

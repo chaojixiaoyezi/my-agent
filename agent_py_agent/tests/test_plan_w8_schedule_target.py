@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+from agent_py_agent.agent.assets.revision_history import get_version, latest_version
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import (
     WorkflowDefinition,
@@ -94,16 +95,64 @@ def test_pinned_target_runs_once_with_no_outer_model_and_ignores_summary_revisio
     assert row["delivery_status"] in {"suppressed", "not_applicable", "local_only", "recorded"}
 
 
-def test_changed_asset_is_rejected_instead_of_silently_rebinding(tmp_path):
+# LLM: 正常发布已保存 v1 历史；当前编辑只能改变权限上限，不能把冻结内容改绑为 v2。
+# 函数用途: 经真实 scheduler tick 验证保留历史时执行原 v1，而不是错误报告 STALE。
+def test_changed_asset_executes_frozen_history_instead_of_silently_rebinding(tmp_path):
     case = asset_case(tmp_path)
+    old = case.scripts.get_script("scheduled_script")
+    historical = latest_version(case.scripts.owner_home, "script", "scheduled_script")
+    assert historical["version"] == historical["storage_revision"] == 1
+    case.scripts.save_script(AssetDescriptor(id="scheduled_script", kind="script", name="合成脚本"),
+        'raise RuntimeError("must not execute replacement")', expected_revision=old["revision"])
+    try:
+        case.agent.scheduler_service.enqueue_ready_runs(now=1000)
+        case.scheduler.tick(now=1001)
+        rows, errors = case.agent.scheduler_repository.history()
+        assert errors == [] and len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "done" and row["error_code"] == "", row
+        assert row["execution_definition_ref"] == case.job["execution_target"]["execution_definition_ref"]
+        result = row["structured_result"]
+        assert result["output_data"] == {"ok": True, "value": 7}
+        assert result["source_check"]["pin_resolution"] == {
+            "mode": "history", "version": 1, "code_sha256": historical["code_sha256"],
+        }
+        assert row["model_call_count"] == 0 and not case.agent.backend.prompts
+        assert "must not execute replacement" in case.scripts.get_script("scheduled_script")["code"]
+    finally:
+        case.agent.scheduler_service.monitor_pool.shutdown()
+
+
+# LLM: 历史记录或必需 blob 消失时不能改跑当前代码；真实历史存储与 scheduler 收口均不替换。
+# 函数用途: 与保留历史的成功用例配对，证明 STALE 只用于固定快照确实不可用的情况。
+@pytest.mark.parametrize("missing", ["version", "payload_blob", "code_sha256"])
+def test_changed_asset_with_missing_pinned_history_is_structured_stale(tmp_path, missing):
+    case = asset_case(tmp_path)
+    home = case.scripts.owner_home
+    historical = latest_version(home, "script", "scheduled_script")
+    assert get_version(home, "script", "scheduled_script", 1) == historical
     old = case.scripts.get_script("scheduled_script")
     case.scripts.save_script(AssetDescriptor(id="scheduled_script", kind="script", name="合成脚本"),
         'raise RuntimeError("must not execute replacement")', expected_revision=old["revision"])
-    case.agent.scheduler_service.enqueue_ready_runs(now=1000)
-    case.scheduler.tick(now=1001)
-    row = case.agent.scheduler_repository.history()[0][0]
-    assert row["status"] == "failed" and row["error_code"] == "SCHEDULER_EXECUTION_DEFINITION_STALE"
-    assert row["model_call_count"] == 0 and not case.agent.backend.prompts
+    if missing == "version":
+        (home / "data/asset_evolution/versions/script/scheduled_script/v1.json").unlink()
+        assert get_version(home, "script", "scheduled_script", 1) is None
+    else:
+        digest = historical[missing]
+        (home / "data/asset_evolution/blobs" / digest[:2] / digest).unlink()
+    try:
+        case.agent.scheduler_service.enqueue_ready_runs(now=1000)
+        case.scheduler.tick(now=1001)
+        rows, errors = case.agent.scheduler_repository.history()
+        assert errors == [] and len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "failed" and row["error_code"] == "SCHEDULER_EXECUTION_DEFINITION_STALE", row
+        assert row["execution_definition_ref"] == case.job["execution_target"]["execution_definition_ref"]
+        assert row["model_call_count"] == 0 and not case.agent.backend.prompts
+        assert row.get("structured_result") is None
+        assert "must not execute replacement" in case.scripts.get_script("scheduled_script")["code"]
+    finally:
+        case.agent.scheduler_service.monitor_pool.shutdown()
 
 
 def test_run_freezes_target_and_delivery_when_job_updated(tmp_path):
