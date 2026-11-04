@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import stat
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -368,6 +370,13 @@ class _AssetStore:
     # LLM: undo先持久化，元数据最后替换；版本只从锁内canonical旧记录递增，投影不能改变写入作用域。
     # 函数用途: 在根锁及集合锁下发布元数据和侧文件，失败或重启恢复一致旧版。
     def _write(self, payload, side_files=None):
+        if self.collection in ('scripts', 'workflows'):
+            from .asset_metadata import normalize_member_of, normalize_trigger_matchers
+            metadata = dict(payload.get('metadata', {}))
+            for key, normalize in (('member_of', normalize_member_of), ('trigger_matchers', normalize_trigger_matchers)):
+                if key in metadata:
+                    metadata[key] = normalize(metadata[key])
+            payload = {**payload, 'metadata': metadata}
         asset_id = safe_asset_id(payload["id"])
         workspace = getattr(self, '_scope_workspace', '')
         payload = {**payload, 'revision': next_asset_revision(self._read(asset_id)),
@@ -390,6 +399,25 @@ class _AssetStore:
         except BaseException:
             self._recover(asset_id)
             raise
+        self._history_notify('save', payload=payload, previous=previous, updates=updates)
+
+    # LLM: 事务完成后才通知，导入与回调异常不进入undo，也不伪装canonical保存失败。
+    # 函数用途: 非致命通知历史旁账并向已有工具上下文回报失败。
+    def _history_notify(self, action, *, asset_id=None, payload=None, previous=None, updates=None):
+        try:
+            from .version_hook import record_committed, record_deleted
+            if action == 'delete':
+                return record_deleted(self, asset_id)
+            return record_committed(self, payload, previous, updates)
+        except Exception as exc:
+            module = sys.modules.get(f'{__package__}.version_hook')
+            variable = getattr(module, '_VERSION_OPERATION', None)
+            state = variable.get() if variable is not None else None
+            receipt = {'recorded': False, 'error_code': getattr(exc, 'code', 'TOOL_EXECUTION_FAILED')}
+            if state is not None:
+                state['recording'] = receipt
+            logging.getLogger(__name__).warning('asset history callback failed: %s', type(exc).__name__)
+            return receipt
 
     # LLM: 只读固定undo叶，先校验全部恢复名和值再写；恢复再失败保留undo，下次读取仍拒绝混合版本。
     # 函数用途: 锁内恢复进程中断的保存，全部旧叶恢复后才删除事务记录。
@@ -437,12 +465,14 @@ class _AssetStore:
             self._put(asset_id, name, None)
         if not _supports_dir_fd():
             _verify_directory_beneath(self.owner_home, parts).rmdir()
+            self._history_notify('delete', asset_id=asset_id)
             return True
         parent = open_directory_beneath(self.owner_home, (self.collection,))
         try:
             os.rmdir(asset_id, dir_fd=parent)
         finally:
             os.close(parent)
+        self._history_notify('delete', asset_id=asset_id)
         return True
 
 

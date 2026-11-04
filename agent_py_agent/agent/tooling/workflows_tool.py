@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import copy
+import json
+import time
 from contextlib import nullcontext
+from dataclasses import fields, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..assets import AssetPostCommitReadbackError
-from ..assets.descriptor import asset_descriptor_from_definition
+from ..assets.asset_dependents import (
+    AssetActionError,
+    bound_monitors,
+    dependents,
+    model_metadata,
+    require_revision,
+    workflow_projection,
+)
+from ..assets.descriptor import AssetDescriptor, asset_descriptor_from_definition
+from ..assets.revision_history import (
+    blob_get,
+    delete_draft,
+    get_draft,
+    latest_version,
+    list_versions,
+    save_draft,
+)
 from ..assets.skill_adapter import get_owner_skill_descriptor, list_owner_skill_descriptors
+from ..assets.version_diff import diff_versions, field_changes, load_snapshot
+from ..assets.version_hook import _VERSION_OPERATION
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..capability.skills import split_skill_frontmatter
 from ..workflows.business_scope import (
@@ -98,11 +120,14 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_r
 # 类用途: 对Agent暴露可管理和恢复的工作流工具。
 class WorkflowsTool(BaseTool):
     ACTIONS = ('list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run', 'preview',
-               *WORKFLOW_ACTION_FIELDS)
-    READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview', *WORKFLOW_READ_ACTIONS)
+               'versions', 'diff', 'impact', 'rollback', 'draft', 'publish', 'status', *WORKFLOW_ACTION_FIELDS)
+    READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview', 'versions', 'diff', 'impact', 'status', *WORKFLOW_READ_ACTIONS)
     model_spec = _spec('workflows', '管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与断点续跑；步骤输出含_pause_for_resume=true可正常暂停等待确认，再用resume+patched_step_output续跑。',
         list(ACTIONS), {
             'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
+            **{key: {'type': ['integer', 'null'], 'minimum': 1} for key in ('version', 'from_version', 'to_version')},
+            'summary_line': {'type': 'string', 'maxLength': 120},
+            'include_monitors': {'type': 'boolean'},
             'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 256},
             **{key: {'type': 'string', 'minLength': 1, 'maxLength': 128}
                for key in ('workflow_ref', 'space_id', 'project_ref', 'resolution_ref')},
@@ -120,7 +145,8 @@ class WorkflowsTool(BaseTool):
                 'space_ids': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}}},
                 'required': ['scope_mode', 'space_ids'], 'additionalProperties': False},
             'allow_script_drift': {'type': 'boolean', 'description': '显式确认恢复采用当前脚本版本'},
-            **{key: {'type': 'string'} for key in ('workflow_id', 'step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
+            'workflow_id': {'type': ['string', 'null']},
+            **{key: {'type': 'string'} for key in ('step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
             'definition': {'type': 'object', 'description': (
                 '工作流定义对象：{descriptor: {name, access_targets:[], data_sources:[], credential_refs:[], io_contract:{}}, '
                 'body_markdown: 说明文本, steps: [{step_id, name, mode(deterministic_script|llm_skill_analysis|hybrid), '
@@ -309,9 +335,13 @@ class WorkflowsTool(BaseTool):
                   or (data.get('status') == 'paused_for_resume' and not data.get('needs_repair')))
             if business:
                 ok = data.get('state') not in ('failed', 'blocked')
+            if params['action'] == 'publish' and data.get('publish_complete') is False:
+                ok = False
             return _outcome('workflows', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('workflows', exc)
+        except AssetActionError as exc:
+            return _outcome('workflows', exc.data, False, exc.code, effect_outcome='not_started')
         except WorkflowExecutionError as exc:
             return _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
                             effect_outcome=exc.receipt['effect_outcome'], failure_stage='execution')
@@ -329,6 +359,8 @@ class WorkflowsTool(BaseTool):
     # 函数用途: 分派CRUD、绑定、运行、补丁恢复或快照检查。
     def _dispatch(self, params):
         action = params['action']
+        if action == 'status':
+            return self._status(params)
         if action == 'resume':
             options = {'concurrency_policy': params.get('concurrency_policy', 'allow')}
             if 'allow_script_drift' in params:
@@ -340,16 +372,45 @@ class WorkflowsTool(BaseTool):
             return _plain(self._engine().store.load_run(params['workflow_run_id']))
         store = self._store()
         if action == 'list':
-            return {'workflows': [_plain(item) for item in store.list_workflows()]}
+            return {'workflows': [_plain(item) for item in store.list_workflows()
+                                  if item.descriptor.metadata.get('hidden') is not True]}
         workflow_id = params['workflow_id']
+        if action == 'versions':
+            return {'versions': list_versions(self.owner_home, 'workflow', workflow_id, limit=params.get('limit', 20))}
+        if action == 'diff':
+            return diff_versions(self.owner_home, 'workflow', workflow_id, params['from_version'], params.get('to_version'))
+        if action == 'impact':
+            return self._impact(params)
+        if action == 'draft':
+            definition, stripped = self._clean_definition(params['definition'], workflow_id)
+            latest = latest_version(self.owner_home, 'workflow', workflow_id)
+            draft = save_draft(self.owner_home, 'workflow', workflow_id, payload=self._flat_definition(definition),
+                side_files={'WORKFLOW.md': definition.body_markdown or None}, base_version=latest['version'] if latest else None)
+            return {'draft': draft, 'stripped_metadata_keys': stripped}
+        if action == 'publish':
+            draft = get_draft(self.owner_home, 'workflow', workflow_id)
+            if draft is None:
+                raise AssetActionError('ASSET_DRAFT_NOT_FOUND')
+            raw = blob_get(self.owner_home, draft['payload_blob'])
+            if raw is None:
+                raise AssetActionError('ASSET_HISTORY_BLOB_MISSING')
+            definition = self._from_flat(json.loads(raw))
+            data = self._save_definition(definition.to_dict(), workflow_id, params.get('expected_revision'))
+            recording = (_VERSION_OPERATION.get() or {}).get('recording', {})
+            if recording.get('recorded') is not True:
+                return {**data, 'publish_complete': False, 'committed': True, 'effect_outcome': 'unknown'}
+            delete_draft(self.owner_home, 'workflow', workflow_id)
+            return {**data, 'publish_complete': True}
+        if action == 'rollback':
+            _, payload, _, _ = load_snapshot(self.owner_home, 'workflow', workflow_id, params['to_version'])
+            return self._save_definition(self._from_flat(payload).to_dict(), workflow_id, params['expected_revision'])
         if action == 'save':
-            options = {'expected_revision': params['expected_revision']} if 'expected_revision' in params else {}
-            return _plain(store.save_workflow(self._topology_refs(_definition(params['definition'], workflow_id)), **options))
+            return self._save_definition(params['definition'], workflow_id, params.get('expected_revision'))
         definition = store.get_workflow(workflow_id)
         if definition is None:
             raise ValueError('工作流不存在')
         if action == 'get':
-            return _plain(definition)
+            return _plain(definition) | workflow_projection(self.owner_home, definition, **self._skill_options())
         if action == 'delete':
             return {'deleted': store.delete_workflow(workflow_id)}
         if action in ('bind_skill', 'unbind_skill'):
@@ -358,9 +419,110 @@ class WorkflowsTool(BaseTool):
         if action == 'preview':
             return self._preview(definition, params.get('inputs', {}))
         if action == 'run':
+            options = {'definition_version': params['version']} if params.get('version') is not None else {}
             return _plain(self._execution_engine().run_workflow(_plain(definition), params.get('inputs', {}),
-                          concurrency_policy=params.get('concurrency_policy', 'allow')))
+                          concurrency_policy=params.get('concurrency_policy', 'allow'), **options))
         raise ValueError('未知工作流action')
+
+    # LLM: 仅清理模型传入metadata；保留原定义codec、步骤refs和数据源绑定规则。
+    # 函数用途: 规范工作流保存请求并记录剥离键。
+    def _clean_definition(self, value, workflow_id):
+        definition = _definition(value, workflow_id)
+        metadata, stripped = model_metadata(definition.descriptor.metadata)
+        return replace(definition, descriptor=replace(definition.descriptor, metadata=metadata)), stripped
+
+    # LLM: G1只预检是否显式提供CAS，具体revision匹配仍在原Store的同一锁内判断。
+    # 函数用途: 统一save、publish和rollback的正式保存路径。
+    def _save_definition(self, value, workflow_id, expected_revision):
+        store = self._store()
+        previous = store.get_workflow(workflow_id)
+        if previous is not None:
+            require_revision(self.owner_home, 'workflow', workflow_id, previous.descriptor.revision,
+                             expected_revision, **self._skill_options())
+        definition, stripped = self._clean_definition(value, workflow_id)
+        saved = store.save_workflow(self._topology_refs(definition), expected_revision=expected_revision)
+        return _plain(saved) | {'stripped_metadata_keys': stripped}
+
+    # LLM: W1历史payload使用与原Store相同的平铺格式，不保存工具展示字段。
+    # 函数用途: 把工作流定义转为历史快照格式。
+    @staticmethod
+    def _flat_definition(definition):
+        value = definition.to_dict()
+        return {**value['descriptor'], **{key: item for key, item in value.items() if key != 'descriptor'}}
+
+    # LLM: 历史字段通过同一严格codec恢复，描述符与步骤字段不相互混入。
+    # 函数用途: 从W1快照恢复完整工作流。
+    @staticmethod
+    def _from_flat(payload):
+        names = {item.name for item in fields(AssetDescriptor)} | {'schema_version'}
+        return WorkflowDefinition.from_any({'descriptor': {key: value for key, value in payload.items() if key in names},
+            **{key: value for key, value in payload.items() if key not in names}})
+
+    # LLM: 影响报告只读描述符与历史，不执行或升级监控；缺失W8字段不会报错。
+    # 函数用途: 报告目标版本的依赖、监控、组合及IO变更。
+    def _impact(self, params):
+        workflow_id = params['workflow_id']
+        current = self._store().get_workflow(workflow_id)
+        if current is None:
+            raise AssetActionError('ASSET_VERSION_NOT_FOUND')
+        _, target, _, _ = load_snapshot(self.owner_home, 'workflow', workflow_id, params.get('to_version'))
+        compositions = []
+        for definition in self._store().list_workflows():
+            metadata = definition.descriptor.metadata
+            composition = metadata.get('composition')
+            if metadata.get('hidden') is not True or not isinstance(composition, dict):
+                continue
+            if composition.get('base_workflow_id') != workflow_id:
+                continue
+            ids = composition.get('appended_step_ids')
+            compositions.append({'workflow_id': definition.descriptor.id,
+                'appended_step_ids': [item for item in ids if isinstance(item, str)] if isinstance(ids, list) else []})
+        return {'dependents': dependents(self.owner_home, 'workflow', workflow_id, **self._skill_options()),
+                'monitors': bound_monitors(self.owner_home, workflow_id), 'compositions': compositions,
+                'io_contract_changes': field_changes(current.descriptor.to_dict()['io_contract'], target.get('io_contract', {}))}
+
+    # LLM: 查询固定活动状态的有界页，不因最新历史挤占页面而漏掉旧运行；不实例化Engine或Agent。
+    # 函数用途: 返回当前步骤、版本、监控来源和可选Batch进度。
+    def _status(self, params):
+        from ..workflows.run_store import WorkflowRunStore
+
+        runs = self.engine.store if self.engine is not None else WorkflowRunStore(self.owner_home)
+        limit = params.get('limit', 50)
+        workflow_id = params.get('workflow_id')
+        active = [*runs.list_runs(workflow_id, status='running', limit=limit),
+                  *runs.list_runs(workflow_id, status='queued', limit=limit),
+                  *runs.list_runs(workflow_id, status='paused_for_resume', limit=limit)]
+        result = []
+        for value in sorted(active, key=lambda item: (_plain(item).get('started_at', 0)), reverse=True):
+            data = _plain(value)
+            context = data.get('trigger_context')
+            context = context if isinstance(context, dict) else {}
+            trigger = data.get('trigger_kind', context.get('trigger_kind', 'manual'))
+            if params.get('include_monitors', True) is False and trigger == 'monitor':
+                continue
+            steps = data.get('steps')
+            step = next((item for item in steps if isinstance(item, dict) and item.get('status') == 'running'), None) if isinstance(steps, list) else None
+            if step is None and isinstance(steps, list):
+                step = next((item for item in steps if isinstance(item, dict) and item.get('status') in ('pending', 'paused_for_resume')), None)
+            started = data.get('started_at')
+            epoch = started if type(started) in (int, float) else None
+            if isinstance(started, str):
+                try:
+                    instant = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                    epoch = instant.replace(tzinfo=timezone.utc).timestamp() if instant.tzinfo is None else instant.timestamp()
+                except ValueError:
+                    pass
+            row = {'workflow_run_id': data['workflow_run_id'], 'workflow_id': data['workflow_id'],
+                   'trigger_kind': trigger, 'current_step': step.get('step_id') if step else None,
+                   'started_at': started, 'duration': max(0, time.time() - epoch) if epoch is not None else None}
+            if type(data.get('definition_version')) is int:
+                row['definition_version'] = data['definition_version']
+            summary = step.get('batches_summary') if step else None
+            if isinstance(summary, dict) and type(summary.get('total')) is int and summary['total'] > 0:
+                completed = summary.get('completed') if type(summary.get('completed')) is int else 0
+                row['batch_progress'] = f"Batch {min(completed + 1, summary['total'])}/{summary['total']}"
+            result.append(row)
+        return {'runs': result[:limit], 'limit': limit, 'truncated': len(result) > limit}
 
     # LLM: 数据源只读当前授权脚本；监控引用来自只读列表，不启动调度或改共享AssetRefs。
     # 函数用途: 保存时补齐画布关联的数据源和监控编号。
