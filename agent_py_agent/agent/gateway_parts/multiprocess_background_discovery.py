@@ -94,6 +94,8 @@ def _curator_submission_config(control, owner, ref, *, expected=None):
 
 # LLM: 原control/Root/lease同源且持续有效才发现/提交；游标仅查询，owner局部blocked不扩散成健康owner禁令，全域失源仍停止，不建权限账。
 # 类用途: 在生产C后台节拍中发现原持久源，并给同一P3/P5请求主链提交有限工作。
+# LLM: 只由原C后台轮询门外准备固定批来源；原短门复核提交，节流不停止责任结清维护。
+# 函数用途: 持续发现后台请求并推进执行者和额度的有界恢复。
 class CoordinatorBackgroundRequests:
     # LLM: 原C/control/Root/controller/lease必须准确同源；构造仅内存检查，不建远端Agent/线程，不因None或复制Root退回旧车道。
     # 函数用途: 捕获本代原生产发现源与关闭栅栏。
@@ -158,6 +160,11 @@ class CoordinatorBackgroundRequests:
     # 函数用途: 提交到期来源供原P3/P5消费者执行，不占C远端模型槽。
     def poll(self):
         self.require_original()
+        from .multiprocess_executor_active_index import maintain_controller_index
+
+        # 原内核/回执观察不持T/C门，也不随业务来源发现的节流而停摆。
+        if not maintain_controller_index(self._controller)["ready"]:
+            return 0
         now = time.monotonic()
         if now < self._next_poll_at:
             return 0
