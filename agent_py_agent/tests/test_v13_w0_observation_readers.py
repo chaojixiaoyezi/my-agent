@@ -74,8 +74,9 @@ def seeded(background):
         operations.append(operation['operation_id'])
         with runtime._runtime_connection() as conn:
             conn.execute("UPDATE tool_operations SET status='SUCCEEDED',handler_started_at=1,settled_at=2,outcome_json=? WHERE operation_id=?",
-                (json.dumps({'effect_outcome': 'none', 'redacted_input': {'api_key': 'synthetic-secret'},
-                    'result_ref': 'result-' + name}), operation['operation_id']))
+                (json.dumps({'result': {'schema_version': 'tool_execution_result.v1', 'tool': name,
+                    'ok': True, 'handler_executed': True, 'effect_outcome': 'none', 'duration_ms': 1000,
+                    'result_ref': 'result-' + name}}), operation['operation_id']))
             conn.commit()
     digest = hashlib.sha256(b'canonical snapshot').hexdigest()
     with runtime._runtime_connection() as conn:
@@ -414,3 +415,132 @@ def test_usage_window_task_and_multithread_scope(background_http):
     finally:
         with metrics.llm_inflight._lock:
             metrics.llm_inflight._vals.pop((('owner_id', services.owner_id),), None)
+
+
+# LLM: 参数和结算均走规范写口；嵌套结果使用原 coordinator 序列化，不写展示输入。
+# 函数用途: 创建真实 managed 操作，可停在未结算阶段供边界测试复用。
+def managed_roundtrip_operation(services, task, *, arguments=None, tool='scripts', raw=None,
+                                settled=True, ok=True):
+    import os
+    from uuid import uuid4
+
+    from agent_py_agent.agent.local_storage.tool_operations import (
+        ToolOperationClaimRequest,
+        ToolOperationCompletionRequest,
+        ToolOperationHolder,
+    )
+    from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+    from agent_py_agent.agent.tooling.runtime_contracts import tool_arguments_hash
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        ToolHandlerOutcome,
+        _result_payload,
+    )
+
+    runtime, run = seed_observed_runtime(services, task)
+    operation_id = 'roundtrip-' + uuid4().hex
+    operations = ManagedOperationStore(runtime)
+    args = arguments if arguments is not None else {'action': 'run', 'script_id': 'collect', 'inputs': {}}
+    claimed = operations.claim_tool_operation(ToolOperationClaimRequest(
+        owner_id=services.owner_id, run_id='observed-' + task.task_id, task_id=run['task_id'],
+        operation_id=operation_id, tool=tool, args_hash=tool_arguments_hash(args),
+        idempotency_key=operation_id, idempotency_scope='operation', idempotency_namespace='roundtrip',
+        holder=ToolOperationHolder('roundtrip-holder', 'localhost', os.getpid(), 'roundtrip-process'),
+        lease_expires_at=time.time() + 900, attempt_id=run['attempt_id']))
+    assert claimed.action == 'execute'
+    result_ref = 'tool-operation:' + operation_id
+    payload = _result_payload(ToolHandlerOutcome(tool, ok, json.dumps(raw or {'value': 7}),
+        call_id=operation_id, result_envelope={'tool_operation': {'result_ref': result_ref}},
+        handler_executed=True, effect_outcome='' if ok else 'failed', duration_ms=17))
+    if settled:
+        operations.finish_tool_operation(ToolOperationCompletionRequest(
+            services.owner_id, 'observed-' + task.task_id, operation_id,
+            claimed.record.holder_id, claimed.record.generation, 'succeeded' if ok else 'failed', payload))
+    with runtime._runtime_connection() as conn:
+        outcome = json.loads(conn.execute('SELECT outcome_json FROM tool_operations WHERE operation_id=?',
+            (operation_id,)).fetchone()[0])
+    assert 'redacted_input' not in outcome and outcome['args_hash'] == tool_arguments_hash(args)
+    return runtime, run, operation_id, payload
+
+
+# LLM: 真实 writer→reader→service→HTTP→冻结 schema 校验，没有手写服务端响应。
+# 函数用途: 证明嵌套结算事实被精确投影，未结算引用不代表完成。
+@pytest.mark.parametrize('settled', [True, False])
+def test_150_managed_writer_observation_http_roundtrip(background_http, settled):
+    from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+
+    services, task = observed_task(background_http)
+    runtime, run, operation_id, payload = managed_roundtrip_operation(services, task, settled=settled)
+    wire(services, runtime)
+    actor = BusinessActor(services.owner_id, 'roundtrip', services.observation, lambda action, facts: True)
+    projected = services.observation.query('tool_calls.get', {'operation_id': operation_id}, actor=actor)
+    status, body = background_call(background_http, 'tool_calls.get', {'operation_id': operation_id})
+    assert status == 200, body
+    data = business_action_spec('tool_calls.get').validate_result(body['data'])
+    assert data == projected
+    assert data['redacted_input'] == {}
+    assert data['tool_call']['task_id'] == task.task_id
+    assert data['tool_call']['run_id'] == 'observed-' + task.task_id
+    assert data['tool_call']['attempt_id'] == run['attempt_id']
+    assert data['tool_call']['executed'] is True
+    assert data['effect_outcome'] == ('unknown' if settled else 'running')
+    assert data['result_ref'] == (payload['result_ref'] if settled else operation_id)
+    assert data['tool_call']['duration_ms'] == (17 if settled else None)
+    assert data['tool_call']['status'] == ('SUCCEEDED' if settled else 'EXECUTING')
+
+
+# LLM: 已结算的坏协议不能降级成似乎正常的运行中数据，保留来源 unknown。
+# 函数用途: 检查嵌套 schema、tool 与事实类型的拒绝边界。
+@pytest.mark.parametrize('change', [
+    {'schema_version': 'other.v1'}, {'tool': 'other'}, {'result_ref': ''},
+    {'effect_outcome': 'confirmed'}, {'handler_executed': 'true'}, {'duration_ms': -1},
+])
+def test_150_invalid_nested_result_is_unknown(background_http, change):
+    services, task = observed_task(background_http)
+    runtime, run, operation_id, payload = managed_roundtrip_operation(services, task)
+    with runtime._runtime_connection() as conn:
+        outcome = json.loads(conn.execute('SELECT outcome_json FROM tool_operations WHERE operation_id=?',
+            (operation_id,)).fetchone()[0])
+        outcome['result'].update(change)
+        conn.execute('UPDATE tool_operations SET outcome_json=? WHERE operation_id=?',
+            (json.dumps(outcome), operation_id))
+        conn.commit()
+    wire(services, runtime)
+    status, body = background_call(background_http, 'tool_calls.list')
+    assert status == 200 and body['data']['coverage'] == 'unknown' and body['data']['items'] == [], body
+    status, body = background_call(background_http, 'tool_calls.get', {'operation_id': operation_id})
+    assert status == 503 and body['error']['code'] == 'HOST_NOT_READY', body
+
+
+# LLM: 静态规则只约束这次协议边界，正例允许嵌套别名读取，反例覆盖旧外层读取和展示字段证明。
+# 函数用途: 收集 #150 的错误读取模式，用同一规则检查生产与最小反例。
+def _150_wire_contract_gaps(source):
+    import ast
+
+    gaps = []
+    for function in ast.walk(ast.parse(source)):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if (function.name == 'tool_calls' and isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute) and node.func.attr == 'get'
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == 'outcome'
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in ('result_ref', 'effect_outcome', 'redacted_input')):
+                gaps.append(node.args[0].value)
+            if (function.name == '_task_script_result' and isinstance(node, ast.Constant)
+                    and node.value == 'redacted_input'):
+                gaps.append('redacted_input')
+    return gaps
+
+
+def test_150_ast_contract_guard_positive_and_negative():
+    from pathlib import Path
+
+    from agent_py_agent.agent.business_spaces import v13_w7_scripts
+    from agent_py_agent.agent.gateway_parts import business_api_v13_readers
+
+    for module in (business_api_v13_readers, v13_w7_scripts):
+        assert _150_wire_contract_gaps(Path(module.__file__).read_text()) == []
+    assert _150_wire_contract_gaps('def tool_calls():\n return outcome.get("effect_outcome"), outcome.get("result_ref")') == ['effect_outcome', 'result_ref']
+    assert _150_wire_contract_gaps('def _task_script_result():\n return details["redacted_input"]') == ['redacted_input']
+    assert _150_wire_contract_gaps('def tool_calls():\n result = outcome["result"]\n return result["result_ref"], result["effect_outcome"]') == []

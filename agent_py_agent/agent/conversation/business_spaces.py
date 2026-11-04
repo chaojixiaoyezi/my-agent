@@ -34,6 +34,7 @@ from .business_access import (
     validate_params,
     validate_result,
 )
+from .business_receipt_rows import ReceiptRows
 
 
 def _copy(value):
@@ -72,15 +73,41 @@ class BusinessSpaceService:
         # 只保护只读分页，不是授权/持久状态；服务重建后旧游标明确过期。
         self._cursor_key = os.urandom(32)
 
+    # LLM: 同一 journal 前后采样，目录、revision 与回执提交保持单笔逻辑视图；不执行恢复写。
+    # 函数用途: 读取有界目录快照或已提交日志的覆盖状态。
     def _read(self):
+        rows = ReceiptRows(self)
+        for _attempt in range(3):
+            before = rows.pending()
+            state = self._read_snapshot(allow_missing=True)
+            after = rows.pending()
+            if before == after:
+                if after is not None:
+                    return after['state']
+                if state.pop('_missing_snapshot', False) and rows.has_history():
+                    raise BusinessError('STORE_UNAVAILABLE')
+                return state
+        raise BusinessError('HOST_NOT_READY')
+
+    # LLM: 缺失快照但有永久行时必须拒绝；采样读者仅由同笔有效journal覆盖这种缺失。
+    # 函数用途: 读取有界目录，区分首次初始化与canonical损坏。
+    def _read_snapshot(self, *, allow_missing=False):
         raw = read_bytes_beneath(self.owner_root, self.state_parts)
         if raw is None:
+            if not allow_missing and ReceiptRows(self).has_history():
+                raise BusinessError('STORE_UNAVAILABLE')
             return {'schema_version': 'business-catalog.v1', 'owner_id': self.owner_id, 'revision': 0,
-                    'spaces': {}, 'bindings': {}, 'assets': {}, 'receipts': {}}
+                    'spaces': {}, 'bindings': {}, 'assets': {}, 'receipts': {},
+                    **({'_missing_snapshot': True} if allow_missing else {})}
         try:
             value = json.loads(raw)
         except (ValueError, UnicodeError) as error:
             raise BusinessError('STORE_UNAVAILABLE') from error
+        return self._validate_catalog(value)
+
+    # LLM: 原实体约束保持不变；同一校验也用于 journal 覆盖，坏源不能变成空成功。
+    # 函数用途: 校验目录 owner、修订及所有有界业务实体。
+    def _validate_catalog(self, value):
         if (type(value) is not dict or value.get('schema_version') != 'business-catalog.v1'
                 or value.get('owner_id') != self.owner_id or type(value.get('revision')) is not int
                 or value['revision'] < 0 or any(type(value.get(k)) is not dict for k in ('spaces', 'bindings', 'assets', 'receipts'))):
@@ -186,6 +213,8 @@ class BusinessSpaceService:
         return {key: row[key] for key in ('owner_id', 'space_id', 'project_ref', 'state', 'ref',
             'version_ref', 'artifact_id', 'content_sha256', 'package_ref') if key in row}
 
+    # LLM: 原末核、CAS 和指纹不变；小快照与逐键回执沿同一日志提交，重放不解析旧回执历史。
+    # 函数用途: 在原 quota→目录锁内执行目录变更或返回准确的永久幂等结果。
     def _transaction(self, action, params, *, actor, expected_revision=None, idempotency_key=None, mutate, commit_guard=None):
         spec = business_action_spec(action)
         params = validate_params(action, params)
@@ -200,27 +229,40 @@ class BusinessSpaceService:
             sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         key = hashlib.sha256(json.dumps([actor.subject_id, idempotency_key], ensure_ascii=False).encode()).hexdigest()
         gate = owner_quota_enforcer_from_policy(self.owner_root)
+        rows = ReceiptRows(self)
         with gate.admission() as admission:
             with locked_private_directory(self.owner_root, relative_parts=('data', 'business'), lock_name='.catalog.lock'):
+                rows.recover(admission)
                 state = self.authorize_call(action, params, actor=actor)
-                receipt = state['receipts'].get(key)
+                state = rows.migrate(state, admission)
+                self.authorize_call(action, params, actor=actor, state=state)
+                receipt = rows.get(key)
                 if receipt is not None:
                     if receipt.get('fingerprint') != fingerprint:
                         raise BusinessError('IDEMPOTENCY_CONFLICT')
-                    return validate_result(action, _copy(receipt['result']))
+                    result = validate_result(action, _copy(receipt['result']))
+                    self.authorize_call(action, params, actor=actor, state=state)
+                    return result
                 result, changed = mutate(state, params)
                 result = validate_result(action, result)
                 if not changed:
                     return result
                 self.authorize_call(action, params, actor=actor, state=state)
                 state['revision'] += 1
-                state['receipts'][key] = {'fingerprint': fingerprint, 'result': _copy(result)}
-                raw = (json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
-                admission.check([OwnerQuotaChange(self.state_path, final_size=len(raw))])
+                receipt = {'fingerprint': fingerprint, 'result': _copy(result)}
+                state.update(receipts={}, receipt_rows=True)
+                pending = {'schema': 'business-catalog-transaction.v1', 'owner_id': self.owner_id,
+                           'state': state, 'key': key, 'receipt': receipt}
+                raw = (json.dumps(pending, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+                payloads = rows.materialized(pending)
+                admission.check([OwnerQuotaChange(self.owner_root.joinpath(*path), final_size=len(data))
+                                 for path, data in [*payloads, (rows.journal, raw)]])
                 self.authorize_call(action, params, actor=actor, state=state)
                 if commit_guard is not None:
                     commit_guard()
-                write_bytes_atomic_beneath(self.owner_root, self.state_parts, raw)
+                write_bytes_atomic_beneath(self.owner_root, rows.journal, raw)
+                rows.write(payloads, admission)
+                write_bytes_atomic_beneath(self.owner_root, rows.journal, b'{}\n')
                 # fsync/配额结算失败可发生在替换后；不伪称未提交，同键重放只读同笔回执。
                 return _copy(result)
 

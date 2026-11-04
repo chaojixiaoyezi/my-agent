@@ -12,7 +12,11 @@ from weakref import WeakSet
 
 from ..conversation.background_agents import BackgroundAgentService
 from ..conversation.business_access import BusinessActor, BusinessError
-from ..conversation.business_observability import OBSERVATION_ACTIONS, BusinessObservationService
+from ..conversation.business_observability import (
+    OBSERVATION_ACTIONS,
+    BusinessObservationService,
+    observation_request,
+)
 from ..conversation.business_spaces import BusinessSpaceService
 from ..conversation.session_task_dispatch import SessionTaskDispatchError
 from ..plugin_host.business_action_specs import (
@@ -353,7 +357,7 @@ class _BackgroundPort:
 
 class BusinessServices:
     """静态选择原服务。可选端口由组合根注入，绝不从payload或任意函数名加载。"""
-    # LLM: 只绑定当前owner原Store与规范只读库，沿原只读等待预算而非C短写零等待；显式端口不被替换，不缓存请求actor。
+    # LLM: 只绑定当前owner原Store与规范只读库；功能关闭不探测观察来源，显式端口不替换，不缓存actor。
     # 函数用途: 按canonical owner-home装配同一owner的业务查询和事件来源。
     def __init__(self, host, *, spaces=None, workflows=None, background=None, capabilities=None, projection=None):
         self.host = host
@@ -380,7 +384,7 @@ class BusinessServices:
         self.capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         self._default_projection = self.projection is None
-        if self.projection is None and getattr(host, 'conversation_store', None) is not None:
+        if self.projection is None and self.spaces.enabled and getattr(host, 'conversation_store', None) is not None:
             from ..observability.concurrency_metrics import owner_model_activity_provider
             from ..runtime_db.repository import RuntimeRepository
             from ..runtime_db.schema import runtime_db_path
@@ -396,14 +400,16 @@ class BusinessServices:
             self.projection = DefaultBusinessObservationService(self.owner_home, owner_id=self.owner_id,
                 store=host.conversation_store, runtime=runtime,
                 readers=default_observation_readers(self.owner_home, self.owner_id, host.conversation_store, runtime,
-                    resource_provider=resource_provider))
+                    resource_provider=resource_provider) if self.spaces.enabled else {})
         self.approvals = getattr(host, 'business_approval_decider', None)
         # 被动组合由组合根声明完整宿主接线；直接传入的宿主本身即owner宿主。
         self.complete_host_wired = bool(getattr(host, 'business_complete_host_wired', True))
 
-    # LLM: 仅刷新默认只读来源；显式注入的端口不被替换，已签发观察actor仍绑定同一投影。
+    # LLM: 功能关闭不探测来源；显式端口不替换，刷新不建立快照或缓存授权。
     # 函数用途: 在下一请求识别首次创建或已消失的规范来源。
     def refresh_observation_readers(self):
+        if not bool(getattr(self.host.config, 'business_spaces_enabled', False)):
+            return
         if self._default_projection and isinstance(self.projection, BusinessObservationService):
             from ..observability.concurrency_metrics import owner_model_activity_provider
             from .business_api_v13_readers import default_observation_readers
@@ -441,6 +447,8 @@ class BusinessServices:
             return any(callable(projection.readers.get(name)) for name in ('usage', 'resource_usage'))
         return source is not None and callable(projection.readers.get(source))
 
+    # LLM: 关闭功能先拒绝；成本除了公共usage还必须具备内部单窗分组来源，不能虚报能力。
+    # 函数用途: 在不读取观察正文的前提下核实准确业务动作接线。
     def ready(self, action):
         spec = resolve_business_action_spec(action)
         if action in {'system.capabilities', 'model_profiles.list'}:
@@ -449,6 +457,9 @@ class BusinessServices:
             return False
         if action == 'operations.get':
             return self._observation_ready(action)
+        if action in {'costs.dashboard', 'costs.investigations_aggregate'}:
+            from ..business_spaces.v13_w12_metrics import costs_ready
+            return costs_ready(self)
         implementer = spec.metadata['implementer']
         if implementer.startswith('V13-'):
             from .business_api_v13 import v13_ready
@@ -543,7 +554,8 @@ class BusinessServices:
         return local
 
     # LLM: 扩展和冻结动作共用实时context，扩展才消费额外请求编号。
-    # 函数用途: 按唯一Spec分派原生领域与扩展handler。
+    # 函数用途: 在同一个请求局部数据作用域内按唯一Spec分派原生领域与扩展handler。
+    @observation_request()
     def invoke(self, action, params, context, *, expected_revision=None, idempotency_key='', request_id=''):
         spec = resolve_business_action_spec(action)
         if spec.metadata['implementer'].startswith('V13-'):
@@ -701,7 +713,7 @@ def dispatch_business_action(request: dict, *, authenticated_context: object, se
     return execute_business(request, authenticated_context, services)[1]
 
 
-# LLM: 只消费原认证owner并只读装配；模型来源按该物理home重新取，不复制base owner的provider或替换显式投影。
+# LLM: 只消费原认证owner并只读装配；关闭功能不探测审批，来源按物理home绑定，不替换显式投影。
 # 函数用途: 保持原宿主身份与缓存投影，同时为当前owner绑定可信本地活动源。
 def native_business_context(handler, server):
     """只消费原HTTP身份并只读装配owner Store；线程创建延至已验证的W2写动作，控制宿主只在调用内租用。"""
@@ -721,7 +733,8 @@ def native_business_context(handler, server):
     home = home_paths_with_owner(base.home_paths, resolve_owner_home(base.home_paths.root, owner))
     wired = complete_host_wired(server)
     host = SimpleNamespace(home_paths=home, config=base.config, business_complete_host_wired=wired,
-        _business_model_activity_provider=owner_model_activity_provider(home.owner_home_dir, home.owner_id))
+        _business_model_activity_provider=(owner_model_activity_provider(home.owner_home_dir, home.owner_id)
+            if bool(getattr(base.config, 'business_spaces_enabled', False)) else None))
     # 路径句柄仅供可信只读适配器关联原生push；不接受JSON路径，也不因此授予其它owner权限。
     host.business_v13_gateway_paths = server.paths
     if getattr(base, 'conversation_store', None) is not None:
@@ -803,7 +816,8 @@ def native_business_context(handler, server):
         if cache[key]._default_projection and isinstance(cache[key].projection, BusinessObservationService):
             cache[key].projection.store = getattr(host, 'conversation_store', None)
         cache[key].refresh_observation_readers()
-    if cache[key]._default_projection and isinstance(cache[key].projection, BusinessObservationService):
+    if (bool(getattr(base.config, 'business_spaces_enabled', False))
+            and cache[key]._default_projection and isinstance(cache[key].projection, BusinessObservationService)):
         from .business_api_v13_readers import native_approval_readers
         cache[key].projection.readers.update(native_approval_readers(base, server.paths, home.owner_id,
             getattr(host, 'conversation_store', None)))
