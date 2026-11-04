@@ -25,7 +25,8 @@ def validate_foreach(value):
             'from', 'batch_size', 'max_parallel', 'as', 'max_batch_tokens', 'on_batch_error', 'mode'}:
         raise ForeachInvalid('foreach必须是合法配置对象')
     path = value.get('from')
-    if not isinstance(path, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+', path):
+    parts = path.split('.') if isinstance(path, str) else []
+    if len(parts) < 2 or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*', parts[0]) or not all(parts):
         raise ForeachInvalid('from必须是inputs.<name>或<step_id>.<path>')
     normalized = {'batch_size': 50, 'max_parallel': 1, 'as': 'items', 'max_batch_tokens': None,
                   'on_batch_error': 'fail_fast', 'mode': 'map', **value}

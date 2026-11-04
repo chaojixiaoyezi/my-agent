@@ -165,7 +165,8 @@ def test_parallel_pool_propagates_context_and_keeps_order(tmp_path):
             active[0] -= 1
         return {'values': context.step_inputs['batch']}
 
-    # 父执行线程也须显式绑定自身身份。
+    # LLM: 父执行线程也须显式绑定自身身份，不能误用启动线程的默认值。
+    # 函数用途: 在独立宿主执行线程启动有界批池。
     def execute():
         token.set('host-run')
         return WorkflowEngine(tmp_path, analysis_handler=analyze).run_workflow(
@@ -199,3 +200,28 @@ def test_refs_recompute_still_uses_step_dependencies(tmp_path):
     saved = WorkflowStore(tmp_path).save_workflow(value)
     assert saved.descriptor.refs.scripts == ('collect',)
     assert json.loads((tmp_path / 'workflows/daily/workflow.json').read_text())['steps'][0]['foreach']['from'] == 'inputs.rows'
+
+
+# LLM: JSON字段名不限英文，解析只按显式路径，不按语言否定有效输入。
+# 函数用途: 验证中文输出路径和保存合同。
+def test_foreach_accepts_unicode_json_field_path(tmp_path):
+    value = batch_flow(mode='aggregate')
+    value['steps'][0]['foreach']['from'] = 'inputs.候选'
+    saved = WorkflowStore(tmp_path).save_workflow(value)
+    run = WorkflowEngine(tmp_path, analysis_handler=lambda spec, context, skills:
+        {'values': context.step_inputs['batch']}).run_workflow(saved, {'候选': [1, 2, 3]})
+    assert run.status == 'succeeded' and run.final_output == {'values': [1, 2, 3]}
+
+
+# LLM: 批worker不能把原有中断合同降成普通业务失败；退出前由原引擎暂停并收口。
+# 函数用途: 锁定并发批的中断传播与非成功回执。
+def test_batch_worker_does_not_swallow_interruption(tmp_path):
+    # LLM: 仅在模型边界发出原生中断，不改变宿主控制记录。
+    # 函数用途: 模拟本批执行栈停止。
+    def analyze(spec, context, skills):
+        raise InterruptedError('simulated interruption')
+
+    with pytest.raises(InterruptedError) as caught:
+        WorkflowEngine(tmp_path, analysis_handler=analyze).run_workflow(batch_flow(parallel=2), {'rows': [1, 2]})
+    assert caught.value.record.status == 'paused_for_resume'
+    assert caught.value.record.effect_outcome != 'confirmed'

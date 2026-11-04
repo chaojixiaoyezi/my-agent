@@ -27,9 +27,7 @@ def blocked_inputs(spec, records, own_record):
     blocked = []
     for row in candidates:
         value = row.escalation_result.get('query_health')
-        index = spec.get('_batch_index')
-        if type(index) is int and row is not own_record and row.batches and index < len(row.batches):
-            value = row.batches[index].get('query_health')
+        # 不同源的同号批没有关联保证；hybrid本批健康已保存在own_record。
         health = query_health(value)
         if health is not None and health['analysis_blocked'] is True:
             blocked.append((row.step_id, health))

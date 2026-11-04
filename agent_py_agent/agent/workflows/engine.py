@@ -32,7 +32,7 @@ from ..assets.workflow_store import (
 from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from ..concurrency.interrupt import is_interrupted
-from .analysis_gate import apply_analysis_gate, isolation_params
+from .analysis_gate import apply_analysis_gate, isolation_params, query_health
 from .batching import (
     batch_summary,
     dispatch_batches,
@@ -994,6 +994,13 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         # 函数用途: 发表当前逐批账本及进度摘要。
         def persist():
             record.batches_summary = batch_summary(record.batches)
+            # 重算而非粘住旧阻断：恢复修好失败批后，旧健康也必须随账本更新。
+            healths = [health for row in record.batches if (health := query_health(row.get('query_health'))) is not None]
+            blocked = [health for health in healths if health['analysis_blocked'] is True]
+            if healths:
+                record.escalation_result['query_health'] = payload((blocked or healths)[0])
+            else:
+                record.escalation_result.pop('query_health', None)
             published = self.store.save_step_result(run.workflow_run_id, record)
             run.revision, run.effect_outcome = published.revision, 'unknown'
 
@@ -1035,6 +1042,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 _check_stop()
                 self._perform(child, child_spec, child_outputs, definition, child_run)
                 _check_stop()
+            except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError):
+                raise
             except Exception as exc:
                 child.status, child.needs_repair = 'failed', True
                 child.error_code, child.error_message = getattr(exc, 'error_code', 'STEP_EXECUTION_ERROR'), str(exc)
@@ -1050,6 +1059,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 analysis_blocked=blocked, output=payload(child.output_snapshot),
                 query_health=payload(child.escalation_result.get('query_health')), error_message=child.error_message)
             record.llm_involved = record.llm_involved or child.llm_involved
+            if child.escalation_result.get('analysis_isolation_replaced') is True:
+                record.escalation_result['analysis_isolation_replaced'] = True
             persist()
             return status in ('failed', 'blocked')
 
