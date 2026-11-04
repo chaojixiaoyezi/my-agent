@@ -36,7 +36,7 @@ def _read_object(home, parts):
     return value
 
 
-# LLM: 组合准备不持资产根锁；独立协调锁串行绑定写者，原根锁→单项锁只负责CAS与提交，避免递归flock。
+# LLM: 协调锁内先持根锁恢复再读旧绑定，随即释放根锁供组合准备；提交仍按根锁→单项锁CAS，避免递归flock。
 # 函数用途: 固定发布版本、更新隐藏组合并原子保存监控绑定，不修改Scheduler原任务。
 def save_monitor_binding(owner_home, monitor_id, *, name='', summary='', schedule_spec=None, **bindings):
     home, identifier = Path(owner_home).absolute(), safe_asset_id(monitor_id)
@@ -53,7 +53,8 @@ def save_monitor_binding(owner_home, monitor_id, *, name='', summary='', schedul
     home.mkdir(parents=True, exist_ok=True)
     _verify_directory_beneath(home, ('data', 'monitors'), create=True)
     with locked_json_path(home / 'data' / 'monitors' / '.bindings'):
-        previous = _read_object(home, parts)
+        with asset_root_lock(home):
+            previous = _read_object(home, parts)
         revision = next_asset_revision(previous, bindings.get('expected_revision'))
         if previous:
             payload = {**previous, **{key: value for key, value in payload.items()
@@ -118,11 +119,15 @@ def list_monitor_descriptors(owner_home, scheduler_jobs=()):
             if jobs.get(identifier, {}).get('status') != 'deleted']
 
 
-# LLM: ID始终单段且须与Job及已存绑定匹配；不存在抛FileNotFoundError，损坏/链接错误不伪装成空对象。
+# LLM: 默认查询保持只读；for_update仅锁内恢复并复制绑定，释放root后才投影/查询Store；ID校验及缺失/损坏语义不变。
 # 函数用途: 合并一个监控的真实调度记录与扩展绑定，返回独立安全字典。
-def get_monitor_descriptor(owner_home, monitor_id, scheduler_job=None):
+def get_monitor_descriptor(owner_home, monitor_id, scheduler_job=None, *, for_update=False):
     home, identifier = Path(owner_home).absolute(), safe_asset_id(monitor_id)
-    binding = _read_object(home, ('data', 'monitors', identifier + '.json'))
+    if for_update:
+        with asset_root_lock(home):
+            binding = _read_object(home, ('data', 'monitors', identifier + '.json'))
+    else:
+        binding = _read_object(home, ('data', 'monitors', identifier + '.json'))
     if binding is not None and binding.get('id') != identifier:
         raise ValueError('监控绑定ID不匹配')
     if scheduler_job is None:

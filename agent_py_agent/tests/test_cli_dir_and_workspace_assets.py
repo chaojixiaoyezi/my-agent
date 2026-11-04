@@ -1127,3 +1127,258 @@ def test_wp11_gateway_fork_without_thread_never_creates_one(tmp_path, monkeypatc
     assert not result.ok and result.error_code == 'WORKSPACE_CONTROL_INVALID'
     assert result.message == '当前还没有可分叉的会话。'
     assert case.store.threads.list() == []
+
+
+@pytest.mark.parametrize('projection', ['structured', 'legacy_dict'])
+# LLM: 实际Broker与Store完整往返；旧dict对照仅转换真实读口的投影形状，不替换保存或权限裁决。
+# 函数用途: 防止更新现有监控丢失未指定引用，且显式空数组只解除该类引用。
+def test_r6_broker_bind_preserves_existing_monitor_refs(tmp_path, monkeypatch, projection):
+    from agent_py_agent.agent.assets import monitor_adapter
+    from agent_py_agent.tests.test_plugin_broker_api import request, seed_assets
+
+    home = tmp_path / 'owners/providers/test/users/alice'
+    home.mkdir(parents=True)
+    seed_assets(home)
+    asset_api().commit_asset_batch([asset_item('skill', 'k')], owner_home=home)
+    first = monitor_adapter.save_monitor_binding(home, 'watch', name='original', summary='keep summary',
+        schedule_spec={'kind': 'every', 'every_seconds': 60},
+        workflow_ids=['w'], script_ids=['s'], skill_ids=['k'])
+    refs = {'workflows': ['w'], 'scripts': ['s'], 'skills': ['k'], 'monitors': []}
+    assert isinstance(first['refs'], list)
+    assert first['metadata']['asset_refs'] == refs
+    if projection == 'legacy_dict':
+        original = monitor_adapter.get_monitor_descriptor
+
+        # LLM: 兼容控制仍读取真实canonical，只模拟旧调用方尚未采用结构化refs的公开形状。
+        # 函数用途: 验证metadata无asset_refs时回退旧字典，而非把列表当字典。
+        def legacy_descriptor(*args, **options):
+            record = original(*args, **options)
+            metadata = dict(record['metadata'])
+            return {**record, 'refs': metadata.pop('asset_refs'), 'metadata': metadata}
+
+        monkeypatch.setattr(monitor_adapter, 'get_monitor_descriptor', legacy_descriptor)
+    result = request(home, 'assets.bind', {'kind': 'monitor', 'id': 'watch', 'name': 'renamed'})
+    assert result['ok'], result
+    updated = result['data']
+    assert updated['metadata']['asset_refs'] == refs
+    assert updated['name'] == 'renamed' and updated['revision'] == first['revision'] + 1
+    for field in ('summary', 'schedule_spec', 'access_targets', 'data_sources', 'credential_refs'):
+        assert updated[field] == first[field]
+    cleared = request(home, 'assets.bind', {'kind': 'monitor', 'id': 'watch', 'script_ids': []})
+    assert cleared['ok'], cleared
+    assert cleared['data']['metadata']['asset_refs'] == {**refs, 'scripts': []}
+    stored = json.loads((home / 'data/monitors/watch.json').read_text())
+    assert stored['refs'] == cleared['data']['metadata']['asset_refs']
+
+
+# LLM: adapter初读在bindings→root内、pin准备在root外；Broker请求锁内绑定快照，公共投影不持root，禁止递归flock。
+# 函数用途: 拦住恢复前读旧previous及把公开列表refs按旧字典索引的结构性回归。
+def test_r6_monitor_recovery_and_broker_refs_ast_contract():
+    import ast
+    import inspect
+
+    from agent_py_agent.agent.assets.monitor_adapter import (
+        get_monitor_descriptor,
+        save_monitor_binding,
+    )
+    from agent_py_agent.agent.plugin_host_broker_topics import _save_monitor
+
+    tree = ast.parse(inspect.getsource(save_monitor_binding))
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    # LLM: 仅收集语法祖先的with调用；不执行源码或声称任意数据流均已证明。
+    # 函数用途: 比较读取和pin准备所在的锁域。
+    def lock_domains(node):
+        result = []
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.With):
+                result.extend(item.context_expr.func.id for item in node.items
+                    if isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Name))
+        return result
+
+    reads = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+             and any(isinstance(target, ast.Name) and target.id == 'previous' for target in node.targets)]
+    assert len(reads) == 1
+    assert lock_domains(reads[0])[:2] == ['asset_root_lock', 'locked_json_path']
+    pin_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == '_binding_pins']
+    assert len(pin_calls) == 1 and lock_domains(pin_calls[0]) == ['locked_json_path']
+    broker = ast.parse(inspect.getsource(_save_monitor))
+    assert not any(isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+        and node.value.id == 'old' and isinstance(node.slice, ast.Constant) and node.slice.value == 'refs'
+        for node in ast.walk(broker))
+    parents = {child: parent for parent in ast.walk(broker) for child in ast.iter_child_nodes(parent)}
+    broker_reads = [node for node in ast.walk(broker) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == 'get_monitor_descriptor']
+    broker_saves = [node for node in ast.walk(broker) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == 'save_monitor_binding']
+    assert len(broker_reads) == 1 and lock_domains(broker_reads[0]) == []
+    assert len(broker_saves) == 1 and lock_domains(broker_saves[0]) == []
+    update = next(keyword.value for keyword in broker_reads[0].keywords if keyword.arg == 'for_update')
+    assert isinstance(update, ast.Constant) and update.value is True
+    descriptor = ast.parse(inspect.getsource(get_monitor_descriptor))
+    parents = {child: parent for parent in ast.walk(descriptor) for child in ast.iter_child_nodes(parent)}
+    update_branch = next(node for node in ast.walk(descriptor) if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name) and node.test.id == 'for_update')
+    snapshots = [node for statement in update_branch.body for node in ast.walk(statement)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == 'binding' for target in node.targets)]
+    assert len(snapshots) == 1 and lock_domains(snapshots[0]) == ['asset_root_lock']
+    projections = [node for node in ast.walk(descriptor) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == '_monitor_dict']
+    assert len(projections) == 1 and lock_domains(projections[0]) == []
+
+
+# LLM: 真实子进程在监控叶发表后退出；后续仅通过Broker改名称，不把未提交引用作为显式输入。
+# 函数用途: 防止Broker的保留字段快照把批次恢复已经撤销的引用重新写回。
+def test_r6_broker_bind_reads_recovered_monitor_snapshot(tmp_path):
+    from agent_py_agent.tests.test_plugin_broker_api import request
+
+    home = tmp_path / 'owners/providers/test/users/alice'
+    home.mkdir(parents=True)
+    baseline, changed = wp11_monitor_item('baseline'), wp11_monitor_item('uncommitted')
+    baseline['descriptor']['refs']['skills'] = ['k']
+    baseline['descriptor']['summary'] = 'committed summary'
+    changed['descriptor']['refs']['skills'] = ['n']
+    changed['descriptor']['summary'] = 'uncommitted summary'
+    changed['expected_revision'] = 1
+    asset_api().commit_asset_batch([baseline], owner_home=home)
+    program = '''
+import json,os,sys
+from pathlib import Path
+import agent_py_agent.agent.assets.workspace_assets as assets
+original=assets._put_text
+def interrupt_after_monitor(root,parts,content):
+    original(root,parts,content)
+    if parts==('data','monitors','watch.json'):
+        os._exit(23)
+assets._put_text=interrupt_after_monitor
+assets.commit_asset_batch([json.loads(sys.argv[2])],owner_home=Path(sys.argv[1]))
+'''
+    worker = subprocess.run([sys.executable, '-c', program, str(home), json.dumps(changed)],
+                            capture_output=True, text=True, timeout=20)
+    assert worker.returncode == 23, worker.stderr
+    path, journal = home / 'data/monitors/watch.json', home / '.asset-batch.json'
+    assert journal.exists()
+    assert json.loads(path.read_text())['refs']['skills'] == ['n']
+    result = request(home, 'assets.bind', {'kind': 'monitor', 'id': 'watch', 'name': 'acknowledged'})
+    assert result['ok'], result
+    assert result['data']['metadata']['asset_refs']['skills'] == ['k']
+    assert result['data']['summary'] == 'committed summary'
+    assert result['data']['name'] == 'acknowledged' and result['data']['revision'] == 2
+    assert not journal.exists()
+    assert json.loads(path.read_text())['refs']['skills'] == ['k']
+
+
+# LLM: 在Broker读取与保存边界插入一次真实Store更新，保留字段的旧快照只能CAS拒绝，不能覆写新值。
+# 函数用途: 防止恢复锁释放后并发更新再次污染Broker保留字段。
+def test_r6_broker_bind_rejects_changed_preservation_snapshot(tmp_path, monkeypatch):
+    from agent_py_agent.agent.assets import monitor_adapter
+    from agent_py_agent.tests.test_plugin_broker_api import request
+
+    home = tmp_path / 'owners/providers/test/users/alice'
+    home.mkdir(parents=True)
+    original = monitor_adapter.save_monitor_binding
+    first = original(home, 'watch', name='first', skill_ids=['k'])
+
+    # LLM: 两次均调用真实存储；仅在调用边界安排确定性写入交错，不替换锁、恢复或CAS原语。
+    # 函数用途: 在旧投影被消费前提交另一个更新。
+    def save_after_competing_write(*args, **options):
+        original(home, 'watch', name='winner', skill_ids=['n'], expected_revision=first['revision'])
+        return original(*args, **options)
+
+    monkeypatch.setattr(monitor_adapter, 'save_monitor_binding', save_after_competing_write)
+    result = request(home, 'assets.bind', {'kind': 'monitor', 'id': 'watch', 'name': 'late'})
+    assert not result['ok'], result
+    stored = json.loads((home / 'data/monitors/watch.json').read_text())
+    assert (stored['name'], stored['revision'], stored['refs']['skills']) == ('winner', 2, ['n'])
+
+
+# LLM: 子进程按真实flock状态安排同一ABA交错；两分支断言相同，不用时间猜测写者是否进入根锁。
+# 函数用途: 拦住恢复后revision被重用时把未提交引用误当成同版本快照。
+def test_r6_broker_bind_rejects_uncommitted_snapshot_revision_aba(tmp_path, monkeypatch):
+    import select
+
+    from agent_py_agent.agent.assets import monitor_adapter
+    from agent_py_agent.tests.test_plugin_broker_api import request
+
+    home = tmp_path / 'owners/providers/test/users/alice'
+    home.mkdir(parents=True)
+    save, read = monitor_adapter.save_monitor_binding, monitor_adapter._read_object
+    save(home, 'watch', name='first', summary='committed', skill_ids=['k'])
+    changed = wp11_monitor_item('uncommitted')
+    changed['descriptor']['summary'] = 'uncommitted'
+    changed['descriptor']['refs']['skills'] = ['n']
+    changed['expected_revision'] = 1
+    program = '''
+import fcntl,json,os,sys
+from pathlib import Path
+import agent_py_agent.agent.assets.workspace_assets as assets
+home=Path(sys.argv[1])
+assert sys.stdin.readline().strip()=='probe'
+with (home/'.asset-batch.lock').open('rb') as lock:
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError:
+        state='held'
+    else:
+        state='free'
+        fcntl.flock(lock,fcntl.LOCK_UN)
+print(state,flush=True)
+if state=='held':
+    assert sys.stdin.readline().strip()=='go'
+original=assets._put_text
+def interrupt_after_monitor(root,parts,content):
+    original(root,parts,content)
+    if parts==('data','monitors','watch.json'):
+        os._exit(23)
+assets._put_text=interrupt_after_monitor
+assets.commit_asset_batch([json.loads(sys.argv[2])],owner_home=home)
+'''
+    with subprocess.Popen([sys.executable, '-c', program, str(home), json.dumps(changed)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as worker:
+        pending, state = True, None
+
+        # LLM: 只协调真实子进程的提交时机，校验其确实在发表监控叶后退出。
+        # 函数用途: 完成中断批次，供正常写者恢复后重用revision 2。
+        def finish_batch():
+            if worker.poll() is None:
+                if state == 'held':
+                    worker.stdin.write('go\n')
+                    worker.stdin.flush()
+                _, error = worker.communicate(timeout=20)
+                assert worker.returncode == 23, error
+            assert worker.returncode == 23
+
+        # LLM: 在Broker实际读绑定的位置探测根锁；无锁时先发表脏叶，有锁时让写者等到读完。
+        # 函数用途: 同一回归同时覆盖旧实现的脏读及正确实现的锁内快照。
+        def read_with_batch_interleave(owner, parts):
+            nonlocal pending, state
+            if pending and parts == ('data', 'monitors', 'watch.json'):
+                pending = False
+                worker.stdin.write('probe\n')
+                worker.stdin.flush()
+                assert select.select([worker.stdout], [], [], 20)[0], 'batch probe did not respond'
+                state = worker.stdout.readline().strip()
+                assert state in ('free', 'held'), state
+                if state == 'free':
+                    finish_batch()
+            return read(owner, parts)
+
+        # LLM: 两次写入均走真实adapter；首次恢复并提交winner revision 2，随后才消费Broker快照。
+        # 函数用途: 造成revision编号相同而保留字段不同的确定性ABA对照。
+        def save_after_aba(*args, **options):
+            finish_batch()
+            save(home, 'watch', name='winner', summary='committed winner',
+                 skill_ids=['winner'], expected_revision=1)
+            return save(*args, **options)
+
+        monkeypatch.setattr(monitor_adapter, '_read_object', read_with_batch_interleave)
+        monkeypatch.setattr(monitor_adapter, 'save_monitor_binding', save_after_aba)
+        result = request(home, 'assets.bind', {'kind': 'monitor', 'id': 'watch', 'name': 'late'})
+        assert state in ('free', 'held') and worker.returncode == 23
+        assert not result['ok'], result
+        stored = json.loads((home / 'data/monitors/watch.json').read_text())
+        assert (stored['name'], stored['revision'], stored['refs']['skills'], stored['summary']) == (
+            'winner', 2, ['winner'], 'committed winner')

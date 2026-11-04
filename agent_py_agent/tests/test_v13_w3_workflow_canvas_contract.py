@@ -323,6 +323,8 @@ def test_canvas_round_trip_in_workspace_overlay(tmp_path):
     )
 
 
+# LLM: 活动调度任务是工作流真实依赖，更新时传当前CAS；删除任务后仍验证无依赖保存路径，不放宽生产门。
+# 函数用途: 核对工作流保存读取canonical调度引用并排除已删除任务。
 def test_tool_save_reads_canonical_scheduler_job_id_and_excludes_deleted(tmp_path):
     from agent_py_agent.tests.test_plan_w8_schedule_target import asset_case
 
@@ -331,7 +333,8 @@ def test_tool_save_reads_canonical_scheduler_job_id_and_excludes_deleted(tmp_pat
     tool = WorkflowsTool(home)
     definition = case.workflows.get_workflow("scheduled_workflow").to_dict()
     saved = tool.execute(
-        {"action": "save", "workflow_id": "scheduled_workflow", "definition": definition}
+        {"action": "save", "workflow_id": "scheduled_workflow", "definition": definition,
+         "expected_revision": definition["descriptor"]["revision"]}
     )
     assert saved.ok, saved.output
     assert WorkflowStore(home).get_workflow("scheduled_workflow").schedule_ids == (
