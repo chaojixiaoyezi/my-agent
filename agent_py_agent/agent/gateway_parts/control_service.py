@@ -510,6 +510,12 @@ def execute_gateway_conversation_control(
         from .delegation_control import execute_delegation_control
 
         return execute_delegation_control(agent, command, scope)
+    if command.kind == "route":
+        from ..conversation.route_mode import execute_route_control
+
+        owner_agent = _request_agent_for_scope(agent, scope)
+        thread = _settings_thread(owner_agent, scope) if scope.conversation_id else None
+        return execute_route_control(owner_agent, command, thread, actor_id=scope.user_id, channel=scope.channel)
     if command.kind == "goal":
         return _execute_goal_control(agent, command, scope)
     if command.kind == "audit":

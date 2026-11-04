@@ -149,14 +149,16 @@ class BackgroundAgentIdentity(_BusinessDTO):
 
     agent_id: str
     managed_by_thread_id: str | None
-    space_id: str
+    space_id: str | None
     project_ref: str | None
     identity_state: Literal['available', 'suspended', 'retiring', 'retired']
     after_task: Literal['reuse', 'suspend', 'retire']
     identity_revision: int
 
+    # LLM: dataclass构造及DTO反序列化自动调用；只校验必填/可空字符串、身份与收尾枚举和非负整数修订，无存储或授权副作用。
+    # 函数用途: 拒绝格式错误的后台助手身份，同时允许空间、项目和管理线程为空。
     def __post_init__(self) -> None:
-        _strings(self, ('agent_id', 'space_id'), ('managed_by_thread_id', 'project_ref'))
+        _strings(self, ('agent_id',), ('managed_by_thread_id', 'space_id', 'project_ref'))
         _enum(self.identity_state, 'identity_state', ('available', 'suspended', 'retiring', 'retired'))
         _enum(self.after_task, 'after_task', ('reuse', 'suspend', 'retire'))
         _counter(self.identity_revision, 'identity_revision')

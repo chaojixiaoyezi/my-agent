@@ -46,6 +46,7 @@ RUNTIME_GUARD_SOURCE_TEXT = (
 # 359 决策表的 deployment_only，按 v2 显式把 gateway_user_inflight_limit 留在高级管理员层。
 # 原表 99 项减这一项得到 98；不擅自迁移另一项来凑总数。运行时不依赖任务目录或生成副本。
 DEPLOYMENT_ONLY_KEYS = frozenset({
+    "max_background_agents",
     "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",
     "my_agent_owner_id", "workspace_task_path_template", "memory_path", "local_store_path", "local_store_files_dir",
     "local_store_events_path", "local_store_fts_enabled", "self_dev_worktree", "protect_running_runtime",
@@ -96,6 +97,7 @@ _TARGET_TOKENS = frozenset({
 # 或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
 # 收紧超时是整数，不会命中 plugin 指向记号；显式登记才能防止模型自行放大征询预算。
 _BOUNDARY_NAMES = frozenset({
+    "max_background_agents",
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
     # 物理请求资源上限由部署者设置；模型不能把0当作绕过共享并发额度的开关。
@@ -127,6 +129,7 @@ COMMON_KEYS = (
     "timezone", "tui_mouse_capture_default",
 )
 _CATEGORIES = (
+    (("max_background_agents",), "后台主Agent"),
     (("business_",), "业务空间"),
     (("prompt_runtime_",), "运行时快照"),
     (("assistant_",), "沟通与展示"),

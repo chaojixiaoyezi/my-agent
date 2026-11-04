@@ -85,15 +85,20 @@ def test_tui_and_foreign_or_broken_preferences_are_rejected(tmp_path):
         delegation_preference(agent, "feishu", "ou_a")
 
 
-def test_delegate_command_changes_only_authenticated_actor(tmp_path, monkeypatch):
+# LLM: 旧控制退役，不能写本人或别人偏好；发送者隔离仍由原存储合同守护。
+# 函数用途: 所有旧写法只给迁移提示且不触及设置。
+def test_delegate_command_migration_changes_no_actor(tmp_path, monkeypatch):
     agent, _ = fixture_agent(tmp_path)
     agent.config.enable_subagents = True
     monkeypatch.setattr("agent_py_agent.agent.gateway_parts.control_service._request_agent_for_scope", lambda *_: agent)
     scope = GatewayControlScope("ou_a", "feishu", "oc_chat")
     enabled = execute_delegation_control(agent, parse_conversation_command("/delegate enable"), scope)
-    assert enabled.ok and delegation_preference(agent, "feishu", "ou_a")["enabled"]
+    assert not enabled.ok and '/route' in enabled.message
+    assert not delegation_preference(agent, "feishu", "ou_a")["enabled"]
     assert not delegation_preference(agent, "feishu", "ou_b")["enabled"]
-    assert execute_delegation_control(agent, parse_conversation_command("/delegate disable"), scope).ok
+    assert not execute_delegation_control(agent, parse_conversation_command("/delegate disable"), scope).ok
     assert not delegation_preference(agent, "feishu", "ou_a")["enabled"]
     invalid = parse_conversation_command("/delegate enable ou_b")
-    assert invalid is None or not invalid.valid
+    assert invalid is not None and invalid.kind == 'delegate'
+    assert not execute_delegation_control(agent, invalid, scope).ok
+    assert not preference_path(agent).exists()

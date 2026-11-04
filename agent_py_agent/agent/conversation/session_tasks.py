@@ -857,6 +857,7 @@ class SessionTaskStore:
     # LLM: 幂等创建：同 dedupe_key 且同输入返回原记录（不新建、不改状态）；同键异文报错。
     #   链深在调用方按 origin_task_id 结构化计算后传入校验结果，本方法不读模型给的深度。
     # LLM: 原输入上下文仅typed宿主参数可写；同dedupe必须同快照，模型Draft无此字段，重放不能借旧身份。
+    # LLM: 无归属intent允许冻结null空间；Owner、准确task_id、显式空间、项目与绑定仍逐项核对。
     # 函数用途: 新建原派活记录及可选不可变输入快照；同键重放严格核对输入，不新增账本。
     def create(self, draft: SessionTaskDraft, *, now: float | None = None, host_message_context=None,
                business_context_intent: BusinessContextIntent | None = None,
@@ -897,7 +898,9 @@ class SessionTaskStore:
                 context = business_context_factory(task_id)
                 if not isinstance(context, BusinessExecutionContext) or context.task_id != task_id:
                     raise ValueError("business context task_id does not match reserved task_id")
-                if context.owner_id != business_context_intent.owner_id or not context.space_id:
+                # 只有未指定空间的意图可以保留无归属，不能放松显式空间和Owner边界。
+                if (context.owner_id != business_context_intent.owner_id
+                        or business_context_intent.requested_space_id is not None and not context.space_id):
                     raise ValueError("business context owner/space mismatch")
                 if (business_context_intent.requested_space_id is not None
                         and business_context_intent.requested_space_id != context.space_id

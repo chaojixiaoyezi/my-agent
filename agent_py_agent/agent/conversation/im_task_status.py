@@ -59,17 +59,21 @@ def _background_children(agent, roots):
     return children
 
 
-# LLM: /status 只读当前 actor 设置与原 SessionTask/SubagentStore/input refs；waiting_input 不计运行，BLOCKED 单列等待，坏账显式不可用。
-# 函数用途: 显示当天委派期限、后台任务运行与待输入数量，说明等待不占执行资源，不读取秘密或其它用户配置。
+# LLM: /status只读唯一route及原任务/input refs；无owner的旧只读线程不启用route，坏账仍显式不可用。
+# 函数用途: 显示会话路由及后台任务运行与待输入，旧每日偏好不再改变新请求。
 def im_task_status_facts(agent, thread, scope):
-    from ..settings.im_task_preferences import delegation_preference
     from .channels import supports_transcript_delivery
+    from .route_mode import route_setting_for_paths
 
     if scope is None or supports_transcript_delivery(scope.channel):
         return {}
     try:
-        setting = delegation_preference(agent, scope.channel, scope.user_id)
-        result = {"delegation_enabled": setting["enabled"], "expires_at": setting["expires_at"], "timezone": setting["timezone"]}
+        current = thread if thread is not None and thread.owner_id else None
+        if current is not None:
+            current = agent.conversation_store.threads.require(current.thread_id)
+        setting = route_setting_for_paths(agent.home_paths, current, actor_id=scope.user_id)
+        result = {"delegation_enabled": setting["enabled"], "expires_at": 0.0,
+                  "timezone": agent.config.timezone, "route_mode": setting["enabled"], "route_source": setting["source"]}
         if thread is not None:
             tasks, errors = agent.conversation_store.session_tasks.list_report(limit=0)
             if errors:

@@ -69,8 +69,8 @@ COMMAND_CATALOG = (
                 ("/schedule takeover job01", "管理员私聊接管本机监控未来通知，保留当前执行"),
                 ("/schedule execution job01", "查看准确执行、等待与取消状态"), ("/schedule cancel job01", "停止当前规则，保留未来计划"),
                 ("/schedule recover job01", "重新核对死亡执行与等待状态，不启动新工作"), ("/schedule notify job01 origin|local|none", "后续回执通知方式"))),
-    CommandSpec("delegate", "/delegate enable|disable|status", "当天自动委派任务，部署时区零点自动关闭（IM）",
-                submit_on_enter=True, conversation_suffix=r"(?:\s+(\S+))?\s*$", surfaces=("im",)),
+    CommandSpec("route", "/route true|false|status", "持久设置当前会话主控模式；默认 false",
+                submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
     CommandSpec("help", "/help [命令]", "查看本身份的可用命令和单项用法", submit_on_enter=True,
                 conversation_suffix=r"(?:\s+(.*))?$", available_locked=True),
     CommandSpec(

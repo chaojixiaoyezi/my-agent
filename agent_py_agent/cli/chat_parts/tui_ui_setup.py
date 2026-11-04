@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -202,6 +201,9 @@ def _make_render_context_factory(
             background_agent_running_count=getattr(navigation_snapshot, 'background_agent_running_count', None),
             business_list_active=getattr(navigation_snapshot, 'business_list_active', False),
             business_thread_active=bool(getattr(navigation_snapshot, 'active_thread_id', '')),
+            route_enabled=getattr(navigation_snapshot, 'route_enabled', None),
+            business_identity_state=getattr(navigation_snapshot, 'active_identity_state', ''),
+            business_work_state=getattr(navigation_snapshot, 'active_work_state', ''),
         )
 
     return make_context

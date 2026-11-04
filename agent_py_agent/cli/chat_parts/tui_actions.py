@@ -329,10 +329,17 @@ def _tui_submit_control_operation(
 #   返回 (解析结果, 是否已处理)；其余命令原样交回调用方继续走持久控制流程。
 # 函数用途: 解析一条 TUI 控制命令，并就地拒绝 IM 专用的管理员命令。
 def _tui_control_or_im_only_refusal(params: TuiCreateKeybindingsParams, text: str):
-    from ...agent.conversation.control_commands import parse_conversation_control
-    from .control_runtime import im_only_control_result
+    from ...agent.conversation.control_commands import (
+        ConversationControlCommand,
+        parse_conversation_control,
+    )
+    from .control_runtime import im_only_control_result, retired_delegate_result
 
     command = parse_conversation_control(text, reject_unknown_slash=True)
+    migration = retired_delegate_result(command, text=text)
+    if migration is not None:
+        _required_tui_runtime(params).write_console(migration.message)
+        return ConversationControlCommand('delegate'), True
     refused = im_only_control_result(command) if command is not None else None
     if refused is None:
         return command, False

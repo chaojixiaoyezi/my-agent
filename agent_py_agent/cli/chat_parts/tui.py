@@ -418,6 +418,9 @@ def run_tui(*, params: TuiRunParams) -> int:
             return
         worker_started.set()
         _start_worker_threads(params=_make_start_worker_params(params, refs))
+        from .tui_background_agents import start_route_observation
+
+        start_route_observation(params.agent, agent_navigation, refresh_stop)
         if params.use_gateway:
             from .tui_background_agents import start_business_observation
 

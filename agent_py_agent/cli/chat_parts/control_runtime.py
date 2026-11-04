@@ -83,6 +83,15 @@ def im_only_control_result(command: ConversationControlCommand) -> ConversationC
     return ConversationControlResult(command.kind, False, _IM_ONLY_CONTROL_MESSAGE, error_code="ADMIN_IDENTITY_SCOPE_INVALID")
 
 
+# LLM: 旧命令所有参数都退役，invalid也只提示，绝不访问旧偏好、持久outbox或停止当前回合。
+# 函数用途: 给plain、TUI和直接控制提供同一无副作用迁移结果。
+def retired_delegate_result(command: ConversationControlCommand | None, *, text: str = '') -> ConversationControlResult | None:
+    head = text.strip().split(maxsplit=1)
+    if (command is None or command.kind != 'delegate') and (not head or head[0] != '/delegate'):
+        return None
+    return ConversationControlResult('delegate', False, '/delegate 已退役；请迁移到 /route true|false|status。命令未修改任何设置。')
+
+
 # LLM: 原控制合同和 IM 专用命令拒绝不变；Gateway 凭据失败按 G2b 开关降级或拒绝，direct 完全不读本机凭据。
 # 函数用途: 分派本地/Gateway 控制及用户管理，候选确认沿原 once，凭据错误不静默重试。
 def execute_chat_control(
@@ -95,6 +104,9 @@ def execute_chat_control(
     refused = im_only_control_result(command)
     if refused is not None:
         return refused
+    migration = retired_delegate_result(command)
+    if migration is not None:
+        return migration
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
     if execution.use_gateway:
@@ -437,6 +449,16 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
+    if command.kind == 'route':
+        try:
+            from ...agent.conversation.route_mode import execute_route_control
+
+            thread = _chat_existing_thread(execution.agent, state.session_id)
+            return execute_route_control(execution.agent, command, thread,
+                                         actor_id=str(getattr(thread, 'canonical_user_id', '') or ''), channel='chat')
+        except (ImportError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
+            return ConversationControlResult('route', False, '当前会话路由控制不可用，设置结果未确认。',
+                                             delivery_status='unknown')
     if command.kind == "new":
         if state.running or state.queued_count:
             return ConversationControlResult("new", False, "前台回合仍在运行；请等待完成或先 /stop 再 /new。",
@@ -758,6 +780,8 @@ def _recover_command_text(command: ConversationControlCommand) -> str:
 #   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
 # 函数用途: 还原服务端控制协议，保留/new标题、/compact status与threshold前缀、用户管理和候选原参数，仅用于活请求运输。
 def _command_text(command: ConversationControlCommand) -> str:
+    if command.kind == 'route':
+        return f'/route {command.value}'.rstrip()
     if command.kind == "new":
         return f"/new {command.value}".rstrip()
     if command.kind == "users":
@@ -833,6 +857,39 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "unsupported":
         return f"/{command.operation or 'unsupported'}"
     return f"/{command.kind}"
+
+
+# LLM: 只解析现有canonical绑定；查询route不能get_or_create，避免底栏刷新产生会话。
+# 函数用途: 查找终端当前线程，保留原通道身份和解析错误。
+def _chat_existing_thread(agent: object, session_id: str):
+    if not session_id:
+        return None
+    threads = agent.conversation_store.threads
+    if session_id.startswith('thread-'):
+        return threads.load(session_id)
+    thread, error = threads.resolve_report(channel='chat', channel_conversation_id=session_id, channel_user_id='local-agent')
+    if error:
+        raise ValueError('THREAD_BINDING_UNAVAILABLE')
+    return thread
+
+
+# LLM: 共享模块尚未集成或读取失败都明确未知，不能把false默认值当作实际观察。
+# 函数用途: 为TUI有界后台刷新提供只读route快照。
+def chat_route_setting(agent: object, session_id: str) -> dict:
+    try:
+        from ...agent.conversation.route_mode import route_setting
+
+        thread = _chat_existing_thread(agent, session_id)
+        if thread is None:
+            return {'enabled': None, 'source': 'unknown', 'revision': None}
+        setting = route_setting(agent, thread, actor_id=str(getattr(thread, 'canonical_user_id', '') or ''), channel='chat')
+        if (isinstance(setting, dict) and isinstance(setting.get('enabled'), bool)
+                and setting.get('source') in ('thread', 'default')
+                and type(setting.get('revision')) is int and setting['revision'] >= 0):
+            return dict(setting)
+    except (ImportError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
+        pass
+    return {'enabled': None, 'source': 'unknown', 'revision': None}
 
 
 # LLM: 手动压缩可能真实调用一次摘要模型，客户端超时须覆盖供应商请求超时；其他轻量控制仍用有界服务命令超时。
