@@ -86,7 +86,7 @@ def test_real_cold_c_failure_publisher_keeps_projections_without_business_index(
     assert recovery.read_json_file_report(recovery.gateway_response_path(paths, canonical.stem)).payload == response
     assert json.loads(chunk.read_text().splitlines()[-1])['kind'] == 'request_aborted'
     assert len(paths.history.read_text().splitlines()) == 1
-    assert not (paths.root / 'admission').exists()
+    assert not any((paths.root / 'admission').rglob('*.json'))
 
 
 # LLM: 使用实际Echo Agent及原LocalStore，但不调用模型；索引仍收到完全同一Agent对象。

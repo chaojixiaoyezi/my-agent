@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -13,7 +14,8 @@ from pathlib import Path
 from ..common.nofollow_fs import read_bytes_beneath
 from ..common.opaque_id import validate_path_segment
 from ..common.strict_json import load_strict_json
-from ..conversation.models import ProgressPolicy, WakeSignal
+from ..conversation.models import ObservationEvent, ProgressPolicy, WakeSignal
+from ..conversation.observation_index import ObservationIndexIncomplete
 from ..memory_store.curator_models import MemoryCuratorState
 from ..runtime_errors import DataCorruptionError
 from ..user_space.owner_resolver import OwnerIdentity, _owner_home_dir
@@ -193,7 +195,12 @@ def read_source(home_root, ref):
     if ref["kind"] == "observation":
         from .multiprocess_background_sources import observation_handled, observation_payload
 
-        handled, revision = observation_handled(owner_home, ref["store_ref"], _SOURCE_MAX_BYTES)
+        ids = _observation_ids(raw, ref["thread_id"])
+        try:
+            handled, revision = observation_handled(owner_home, ref["store_ref"], _SOURCE_MAX_BYTES,
+                                                     observation_ids=ids)
+        except ObservationIndexIncomplete as error:
+            raise BackgroundSourceChanged() from error
         if revision != ref["input_revision"]:
             raise BackgroundSourceChanged()
         return observation_payload(raw, ref["thread_id"], handled)
@@ -220,6 +227,22 @@ def read_source(home_root, ref):
     if ref["kind"] == "curator" and curator_input_revision(owner_home) != ref["input_revision"]:
         raise BackgroundSourceChanged()
     return value
+
+
+# LLM: 与observation_payload同口径严格核整份raw，查ack前拒坏行，不从过滤后候选漏掉分片ID。
+# 函数用途: 提取worker原观察分片涉及的全部精确确认ID。
+def _observation_ids(raw, thread_id):
+    ids = []
+    for line in raw.splitlines():
+        value = load_strict_json(line)
+        if type(value) is not dict or any(type(value.get(key, False)) is not bool
+                                        for key in ("requires_main_agent", "requires_llm_report")):
+            raise ValueError("background_observation_invalid")
+        event = ObservationEvent.from_dict(value)
+        if event.thread_id != thread_id or not event.observation_id or not math.isfinite(event.handled_at):
+            raise ValueError("background_observation_identity_invalid")
+        ids.append(event.observation_id)
+    return ids
 
 
 # LLM: 校验只认原wake/curator schema及结构化pending代次；不按reason正文或状态口头别名派工。

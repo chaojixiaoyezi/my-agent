@@ -9,7 +9,7 @@ import json
 import os
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from ..common.json_io import serialize_private_json_no_newline
@@ -786,15 +786,17 @@ def _commit_ordinary_created_record(gate, path, owner, stamped, record):
 # LLM: 调用方已持原C生命周期及可选原quota锁；原预留→观察→owner复核→盖章顺序不变，不建第二占用账。
 # 函数用途: 通过最终准入门后持久写入原P3预留和原请求路由。
 def _persist_created_record(gate, path, owner, stamped, record):
+    controller = getattr(gate, "_runtime_takeover", None)
+    from .multiprocess_executor_active_index import index_for
+
+    index = index_for(controller) if controller is not None else None
     try:
-        _write_gate_record_durable(gate, reservation_file(gate.paths, path.stem), record)
+        with index.p3_write(record) if index is not None else nullcontext():
+            _write_gate_record_durable(gate, reservation_file(gate.paths, path.stem), record)
+            if index is not None:
+                index.remember_p3(record, stamped)
     except OSError:
         return _blocked("reservation_write_failed")
-    controller = getattr(gate, "_runtime_takeover", None)
-    if controller is not None:
-        from .multiprocess_executor_active_index import index_for
-
-        index_for(controller).remember_p3(record, stamped)
     gate.observe("reservation_persisted", {"request_id": path.stem, "reservation_id": record["reservation_id"]})
     rejection = _runtime_owner_rejection(gate, owner)
     if rejection:
@@ -821,15 +823,17 @@ def _commit_reused_record(gate, path, owner, prepared, *, ordinary_admission=Fal
 # LLM: 只提原共用写叶，默认takeover/恢复仍同参数/写入/owner末核；ordinary额外Root门由固定caller包围，不改旧权限或回执。
 # 函数用途: 保原预留写入和可选路由发表次序，失败保occupied，不补终态或回滚。
 def _persist_reused_record(gate, path, owner, current, stamped, updated):
+    controller = getattr(gate, "_runtime_takeover", None)
+    from .multiprocess_executor_active_index import index_for
+
+    index = index_for(controller) if controller is not None else None
     try:
-        _write_gate_record_durable(gate, reservation_file(gate.paths, path.stem), updated)
+        with index.p3_write(updated) if index is not None else nullcontext():
+            _write_gate_record_durable(gate, reservation_file(gate.paths, path.stem), updated)
+            if index is not None:
+                index.remember_p3(updated, stamped if stamped is not None else current)
     except OSError:
         return _blocked("reservation_write_failed")
-    controller = getattr(gate, "_runtime_takeover", None)
-    if controller is not None:
-        from .multiprocess_executor_active_index import index_for
-
-        index_for(controller).remember_p3(updated, stamped if stamped is not None else current)
     rejection = _runtime_owner_rejection(gate, owner)
     if rejection:
         return rejection

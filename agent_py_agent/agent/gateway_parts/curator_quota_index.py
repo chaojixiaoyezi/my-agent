@@ -703,6 +703,13 @@ def _completion_days(home_root, owner, run_id, terminal):
     return first.isoformat(), last.isoformat()
 
 
+# LLM: 失败终态遍历原日期范围后可形成保守事实；身份不依赖扫描日期或重放次数，不签P3释放权。
+# 函数用途: 为没有审计行的实际失败运行生成唯一消费身份。
+def _conservative_fact(owner, run_id, binding):
+    return {"identity": digest({"owner_sha": owner_digest(owner), "run_id": run_id, "binding": binding}),
+            "status": "failed"}
+
+
 # LLM: 失效来源只废弃候选receipt并重建定位；绑定冲突不重建，原日账仍限四日/64行/64KiB，原P3不变。
 # 函数用途: 门外为跨日完成准备一条准确、可重放的原审计定位。
 def prepare_completion(value, home_root, owner, run_id, terminal):
@@ -751,16 +758,31 @@ def prepare_completion(value, home_root, owner, run_id, terminal):
         progress["job"] = None
         progress["day"] = (date.fromisoformat(progress["day"]) + timedelta(days=1)).isoformat()
     if progress["day"] > progress["last_day"]:
+        result = terminal.get("terminal_response", {}).get("background_result", {})
+        if result.get("status") == "failed" and result.get("run_id") == run_id:
+            # 完整有界扫描确无原审计后，只为规范failed终态保留一次真实消费；成功仍要求审计。
+            receipts[binding] = {"binding": binding, "owner": asdict(owner), "run_id": run_id,
+                "day": progress["last_day"], "source": "conservative", "quiet": True,
+                "fact": _conservative_fact(owner, run_id, binding)}
+            del jobs[binding]
+            return candidate, True
         raise ValueError("curator_quota_actual_audit_required")
     return candidate, False
 
 
-# LLM: 真正计账仍点核原审计和quiet state；绑定冲突不可重建，来源换代用独立异常使门外按原预算重核。
+# LLM: 审计事实点核原来源；保守事实仅核原失败终态和准确绑定，不再读不存在的日账；两者都不授释放权。
 # 函数用途: 在原短门内验证门外已读的准确完成事实。
 def validate_completion(receipt, home_root, owner, run_id, terminal):
     if (receipt.get("binding") != completion_binding(terminal, owner, run_id)
-            or receipt.get("owner") != asdict(owner) or receipt.get("run_id") != run_id
-            or receipt["fact"]["identity"] != fact_identity(owner, run_id)
+            or receipt.get("owner") != asdict(owner) or receipt.get("run_id") != run_id):
+        raise ValueError("curator_quota_completion_binding_conflict")
+    if receipt.get("source") == "conservative":
+        result = terminal.get("terminal_response", {}).get("background_result", {})
+        if (result.get("status") != "failed" or result.get("run_id") != run_id
+                or receipt.get("fact") != _conservative_fact(owner, run_id, receipt["binding"])):
+            raise ValueError("curator_quota_completion_binding_conflict")
+        return receipt["fact"]
+    if (receipt["fact"]["identity"] != fact_identity(owner, run_id)
             or receipt["fact"]["finished_at"][:10] != receipt["day"]):
         raise ValueError("curator_quota_completion_binding_conflict")
     if (receipt.get("source") != audit_version(home_root, owner, receipt["day"])

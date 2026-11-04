@@ -144,10 +144,15 @@ class WorkerCommitIssuer:
             identifier = source['reservation_id']
             if state is not None and self._executor_records.get(identifier) != record_digest(source):
                 raise WorkerCommitRejected('original_executor_submission_required')
-            row = (ledger.reserve(source) if state is None else ledger.advance(source, state, registration))
-            self._executor_records[identifier] = record_digest(row)
-            index_for(self._controller).remember_executor(ledger, row, self, descriptor)
-            committed.append(row)
+            from .multiprocess_records import advance_executor
+
+            attempted = source if state is None else ledger._bound_record(advance_executor(source, state, registration))
+            index = index_for(self._controller)
+            with index.executor_write(ledger, attempted, self, descriptor):
+                row = (ledger.reserve(source) if state is None else ledger.advance(source, state, registration))
+                self._executor_records[identifier] = record_digest(row)
+                index.remember_executor(ledger, row, self, descriptor)
+                committed.append(row)
 
         decision = self._controller.launch_owner_writer(source['owner_sha'], commit)
         if decision.get('status') != 'started' or not committed:

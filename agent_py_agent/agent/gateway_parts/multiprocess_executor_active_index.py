@@ -103,6 +103,8 @@ class ExecutorActiveIndex:
         self.ready, self.failed = False, False
         self.executors, self.reservations = OrderedDict(), {}
         self._settled_p3 = {}
+        # 原短门内先保留精确写责任；恢复只认本次旧像或尝试像，不重捕外部来源。
+        self._write_attempts = {}
         self._cold_visited = 0
         self._groups, self._unresolved = {}, []
         self._partitions = set()
@@ -157,6 +159,8 @@ class ExecutorActiveIndex:
         self.require_original()
         if not self.ready or self.failed:
             raise ValueError('responsibility_index_unknown')
+        for key in tuple(self._write_attempts):
+            self._reconcile_write(key)
         self._require_revision()
         for entry in self.executors.values():
             if entry['ledger'].read(entry['row']['reservation_id']) != entry['row']:
@@ -188,6 +192,106 @@ class ExecutorActiveIndex:
     def _p3(self, identifier):
         from .multiprocess_takeover_sources import _read_admission_source
         return _read_admission_source(self.root, ('admission', 'reservations'), identifier + '.json')
+
+    # LLM: 原T→C→lease区先冻结规范前像，随后锁设施创建或写后确认失败也保留同一责任。
+    # 函数用途: 将本次P3写入及索引确认纳入可精确读回的同步作用域。
+    @contextmanager
+    def p3_write(self, record):
+        row = validate_record(record)
+        if row['state'] != 'occupied' or row['route']['c_run_id'] != self.generation:
+            raise ValueError('original_p3_commit_required')
+        attempt = {'kind': 'p3', 'row': copy.deepcopy(row),
+                   'previous': copy.deepcopy(self.reservations.get(row['request_id']))}
+        with self._write_scope(('p3', row['request_id']), attempt):
+            yield
+
+    # LLM: 仅原holder及完整CAS/FSM尝试可记责任；未确认发表不等同执行许可或耐久成功。
+    # 函数用途: 覆盖P1规范写入到holder摘要及责任索引确认之间的窗口。
+    @contextmanager
+    def executor_write(self, ledger, record, holder, descriptor=None):
+        row = ledger._bound_record(record)
+        _require_holder(holder)
+        previous = self.executors.get(_executor_key(row))
+        if previous is not None and previous['holder'] is not holder:
+            raise ValueError('original_executor_holder_changed')
+        attempt = {'kind': 'executor', 'row': copy.deepcopy(row), 'ledger': ledger, 'holder': holder,
+                   'previous': copy.deepcopy(previous['row']) if previous is not None else None,
+                   'descriptor': previous['descriptor'] if previous is not None else descriptor}
+        with self._write_scope(('executor', _executor_key(row)), attempt):
+            yield
+
+    # LLM: 保存的是本进程原来源引用，不是新权限账；错误路径读回失败仍保留尝试，下一次原检查先补确认。
+    # 函数用途: 在任何命名空间副作用前登记精确责任，并保留原始写入异常。
+    @contextmanager
+    def _write_scope(self, key, attempt):
+        self.require_original()
+        if (not self.controller._mutex._is_owned() or not self.lease._lifecycle_gate._is_owned()
+                or key in self._write_attempts):
+            raise ValueError('original_write_scope_required')
+        self._require_revision()
+        if self._attempt_current(attempt) != attempt['previous']:
+            raise ValueError('original_write_canonical_changed')
+        self._write_attempts[key] = attempt
+        try:
+            yield
+        except BaseException:
+            try:
+                attempt['revision'] = self._attempt_revisions(attempt)
+                self._reconcile_write(key)
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+            raise
+        else:
+            attempt['revision'] = self._attempt_revisions(attempt)
+            self._reconcile_write(key)
+
+    # LLM: 原写门内固定本次副作用后的版本；新分区尚未登记时也单独核验，不枚举历史目录。
+    # 函数用途: 防止延后读回期间把同目录的陌生追加当成本次写入。
+    def _attempt_revisions(self, attempt):
+        actual = self._revisions()
+        if attempt['kind'] == 'executor':
+            namespace = ('workers', 'executors', f"w{attempt['ledger'].partition.index}")
+            actual[namespace] = _directory(self.root, namespace, revision=True)
+        return actual
+
+    # LLM: 缺文件仅是本次新建的允许前像；沿原nofollow点读，不创建目录、锁或规范文件。
+    # 函数用途: 读取一次尝试对应的唯一canonical路径。
+    def _attempt_current(self, attempt):
+        if attempt['kind'] == 'executor':
+            return attempt['ledger'].read(attempt['row']['reservation_id'])
+        parts = ('admission', 'reservations', attempt['row']['request_id'] + '.json')
+        raw = read_bytes_beneath(self.root, parts, max_bytes=16384, require_dir_fd=True)
+        return validate_record(json.loads(raw)) if raw is not None else None
+
+    # LLM: 只容原前像/本次完整后像与已知锁设施；目录身份及其它namespace仍由原_accept_write严格核验。
+    # 函数用途: 对已知写入补观察，不声明耐久成功、不发布路由，也不清任何隔离标记。
+    def _reconcile_write(self, key):
+        self.require_original()
+        attempt = self._write_attempts[key]
+        if self._attempt_revisions(attempt) != attempt.get('revision'):
+            raise ValueError('responsibility_namespace_changed')
+        row = self._attempt_current(attempt)
+        if row not in (attempt['previous'], attempt['row']):
+            raise ValueError('original_write_canonical_changed')
+        if self._attempt_revisions(attempt) != attempt['revision']:
+            raise ValueError('responsibility_namespace_changed')
+        if attempt['kind'] == 'p3':
+            self._accept_write({('admission',), ('admission', 'reservations')})
+            if row is not None:
+                self.reservations[row['request_id']] = copy.deepcopy(row)
+        else:
+            ledger, holder = attempt['ledger'], attempt['holder']
+            _require_holder(holder)
+            namespace = ('workers', 'executors', f'w{ledger.partition.index}')
+            if _directory(self.root, namespace, revision=False) is not None:
+                self._partitions.add(namespace[-1])
+            self._accept_write({('workers',), ('workers', 'executors'), namespace})
+            if row is not None:
+                holder._executor_records[row['reservation_id']] = record_digest(row)
+                self.executors[_executor_key(row)] = {
+                    'ledger': ledger, 'row': copy.deepcopy(row), 'holder': holder,
+                    'descriptor': attempt['descriptor'], 'revision': object()}
+        del self._write_attempts[key]
 
     # LLM: 原C与lease末门内核对当前代canonical原像，登记不产生第二份预留权限。
     # 函数用途: 把刚成功发布的P3纳入同一个活跃责任集合。
