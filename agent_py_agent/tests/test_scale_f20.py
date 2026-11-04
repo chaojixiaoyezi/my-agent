@@ -128,8 +128,7 @@ def test_canonical_commit_marker_replays_after_publication_error(tmp_path, monke
 
     with monkeypatch.context() as point:
         point.setattr(RunListIndex, 'publish_rows', stop)
-        with pytest.raises(OSError, match='simulated I/O error'):
-            store.save_run(replace(record, status='running'))
+        store.save_run(replace(record, status='running'))
     latest = store.load_run('marker-run')
     assert latest.status == 'running' and latest.revision == 2
     assert RunListIndex(tmp_path).pending_ids() == ['marker-run']
@@ -237,8 +236,7 @@ def test_commit_backlog_is_bounded_and_never_silently_returns_partial_list(tmp_p
         point.setattr(RunListIndex, 'publish_rows', unavailable)
         for n in range(40):
             record = WorkflowRunRecord(f'pending-{n}', 'flow', 'alice', 'manual', 'queued', n, 0, 0)
-            with pytest.raises(OSError, match='simulated I/O error'):
-                store.create_run(record)
+            store.create_run(record)
     with pytest.raises(RuntimeError, match='WORKFLOW_RUN_INDEX_RECOVERY_PENDING'):
         store.list_runs()
     assert len(RunListIndex(tmp_path).pending_ids()) == 8

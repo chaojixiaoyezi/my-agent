@@ -52,7 +52,9 @@ class StorageTombstoneIndex:
         if (not isinstance(state, dict) or state.get("owner") != self.owner
                 or type(state.get("revision")) is not int or state["revision"] < 0
                 or type(state.get("complete")) is not bool
-                or type(state.get("cursor")) is not int or state["cursor"] < 0):
+                or type(state.get("cursor")) is not int or state["cursor"] < 0
+                or "migrated_revision" in state and (type(state["migrated_revision"]) is not int
+                                                     or state["migrated_revision"] < 0)):
             raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
         return state
 
@@ -66,6 +68,21 @@ class StorageTombstoneIndex:
             return False
         except sqlite3.Error as exc:
             raise ValueError("MEMORY_TOMBSTONES_UNREADABLE") from exc
+
+    # LLM: 与has_committed_authority同口径只读一行；只有迁移完成后才交出水位，供marker缺失时证明索引恰是旧账导入。
+    # 函数用途: 返回完整迁移的修订号、导入完成水位和来源身份。
+    def migration_receipt(self) -> dict | None:
+        try:
+            with closing(self._connect()) as conn:
+                state = self._state(conn)
+        except FileNotFoundError:
+            return None
+        except sqlite3.Error as exc:
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE") from exc
+        if not state["complete"]:
+            return None
+        return {"revision": state["revision"], "migrated_revision": state.get("migrated_revision"),
+                "source_identity": state.get("source_identity")}
 
     # LLM: 完成前不能发放查询快照；根或JSON marker要求的修订号不允许回退。
     # 函数用途: 在同一只读事务中核屏障水位并交出点查接口。
@@ -126,8 +143,10 @@ class StorageTombstoneIndex:
             with closing(self._connect(write=True)) as conn, conn:
                 self._initialize(conn)
                 state = self._state(conn)
+                was_complete = state["complete"]
                 if state.get("source_identity") != source_identity:
                     state.update(cursor=0, complete=False, source_identity=source_identity)
+                    state.pop("migrated_revision", None)
                 start = state["cursor"]
                 if start > len(records):
                     raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
@@ -137,6 +156,9 @@ class StorageTombstoneIndex:
                 changed = self._merge(conn, batch)
                 state.update(cursor=start + len(batch), complete=start + len(batch) == len(records),
                              revision=state["revision"] + int(changed))
+                # 首次完成时记下导入水位；之后任何正式删除都会让修订号越过它，旧账不再能代表全集。
+                if state["complete"] and not was_complete:
+                    state["migrated_revision"] = state["revision"]
                 conn.execute("UPDATE metadata SET value=? WHERE key='state'", (json.dumps(state),))
                 return state
         return publish() if commit is None else commit(publish)

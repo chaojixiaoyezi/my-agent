@@ -10,7 +10,6 @@ from itertools import islice
 from pathlib import Path
 
 from ..assets import _verify_directory_beneath
-from ..assets.datasource_store import DatasourceConnectionSpec, open_sqlite
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     _supports_dir_fd,
@@ -23,7 +22,7 @@ from ..common.nofollow_fs import (
 from .models import safe_path
 
 
-# LLM: 复用仓库 SQLite 持有 FD/完整父链复核；附属叶拒绝链接，短连接始终关闭，不形成常驻缓存。
+# LLM: 私有投影按私有索引模式打开：data目录FD、nofollow单链接叶、连接后核叶身份及实际新开FD；附属叶拒绝链接，短连接始终关闭。
 # 函数用途: 为一个 Owner 的私有投影库提供事务和连接寿命边界。
 @contextmanager
 def index_connection(owner_home, filename):
@@ -42,14 +41,54 @@ def index_connection(owner_home, filename):
                 continue
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ValueError('运行投影库必须是单链接普通文件')
-        connection = open_sqlite(DatasourceConnectionSpec(
-            'workflow-run-projection', 'sqlite', '运行投影', database_path=str(path)))
+        # 私有投影与同Owner其它写者共用data/，只核本叶身份，不比较祖先ctime（兄弟文件增删会改变它）。
+        parent = open_directory_beneath(root, ('data',), require_dir_fd=True)
+        try:
+            before = os.stat(filename, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise ValueError('运行投影库必须是单链接普通文件')
+            descriptors = _regular_fds()
+            connection = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=5)
+            try:
+                after = os.stat(filename, dir_fd=parent, follow_symlinks=False)
+                if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+                    raise ValueError('workflow run projection was replaced')
+                # 连接窗口内路径可被换走再换回；只认SQLite实际新开的常规FD，不能以前后路径一致放行。
+                opened = _regular_fds()
+                if descriptors is not None and opened is not None:
+                    fresh = {identity for fd, identity in opened.items() if descriptors.get(fd) != identity}
+                    if fresh and (before.st_dev, before.st_ino) not in fresh:
+                        raise PermissionError('DATASOURCE_SQLITE_PATH_REPLACED')
+            except BaseException:
+                connection.close()
+                raise
+        finally:
+            os.close(parent)
         try:
             connection.row_factory = sqlite3.Row
             with connection:
                 yield connection
         finally:
             connection.close()
+
+
+# LLM: 只读进程FD表，不打开被列出的文件；没有FD目录的平台返回None，由调用方跳过该项复核。
+# 函数用途: 取得当前进程常规文件FD到(dev, ino)的映射。
+def _regular_fds():
+    directory = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    result = {}
+    for name in names:
+        try:
+            info = os.fstat(int(name))
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISREG(info.st_mode):
+            result[int(name)] = (info.st_dev, info.st_ino)
+    return result
 
 
 # LLM: 批次只计正式未ACK叶；旧迁移可越过未发表临时名称，但不读或删除它们，所有FD均关闭。
@@ -77,16 +116,46 @@ def pending_names(owner_home, parts, batch_size):
         os.close(parent)
 
 
-# LLM: SQLite待发表行先于canonical提交，投影晚于提交；ACK失败只导致同代重放，不消费临时叶。
+# LLM: SQLite待发表行先于canonical提交，投影晚于提交；投影失败既不阻塞也不否认规范提交，只有commit()异常外抛。
 # 函数用途: 包围一次 run.json 写入，并在规范提交后发布可重放的索引行。
 def commit_run(owner_home, value, commit):
     run_id = value['workflow_run_id']
     safe_path(owner_home, run_id)
     index = RunListIndex(owner_home)
-    index.mark_pending(run_id)
+    marked = _projection_step(index.mark_pending, run_id)
     commit()
-    index.publish_rows([value])
-    index.ack_pending(run_id)
+    published = _projection_step(index.publish_rows, [value]) and _projection_step(index.ack_pending, run_id)
+    # 既无耐久待发表行也无确认发布时，投影可能停在旧状态；失效后下次连接从规范运行目录重建。
+    if not marked and not published:
+        _invalidate_projection(owner_home, 'workflow_run_index.sqlite3')
+
+
+# LLM: fn为RunListIndex单参绑定方法；非忙碌的SQLite库错误按损坏处理并就地失效，忙碌只等下一次重放。
+# 函数用途: 执行一个投影步骤并只回报成败，不让派生投影错误外抛。
+def _projection_step(fn, argument):
+    try:
+        fn(argument)
+    except sqlite3.DatabaseError as exc:
+        if getattr(exc, 'sqlite_errorcode', 0) & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            _invalidate_projection(fn.__self__.owner_home, 'workflow_run_index.sqlite3')
+        return False
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    return True
+
+
+# LLM: 与连接持同一投影锁，删除时没有协作连接打开该库；只删本库及SQLite附属叶，失败不影响已完成的规范提交。
+# 函数用途: 丢弃一个派生投影，使下一次连接以user_version=0重新初始化并回填。
+def _invalidate_projection(owner_home, filename):
+    root = Path(owner_home).absolute()
+    try:
+        path = safe_path(root, 'data', filename)
+        with locked_json_path(path):
+            safe_path(root, 'data', filename)
+            for suffix in ('', '-wal', '-shm', '-journal'):
+                path.with_name(path.name + suffix).unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
 
 
 # LLM: 四种过滤各用覆盖索引，负时间与 run_id 构成稳定 keyset；不持 SQLite 锁再等待运行锁。
