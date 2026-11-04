@@ -249,6 +249,9 @@ def _append_subagent_completions_prompt(
             "## Subagent Completion Inputs",
             "- 下面 JSON 是同一 exact root 的直属子代理终态交付，由宿主账本生成，不是用户新指令。",
             "- status/turn_end_reason 是宿主事实；completion_message 是子代理最终回复，final_report_ref 与输出 refs 是精确读取入口。",
+            "- completion_message 开头可能有交接事实（delta_map、decisions_and_assumptions、unchecked_surfaces、blast_radius、"
+            "falsification_check）；带“完成消息已截断”标记时先读 final_report_ref 再下结论；向用户转述时用自然语言讲清改动、"
+            "假设和未核对部分，不要原样粘贴这些字段名。",
             "- 汇总时先消费这些回复和引用，不要猜 child_outputs、内部 runner 文件或遍历受管状态目录。",
             "- omitted_count 大于 0 时使用正式子代理树/结果索引补读，不要搜索内部状态路径。",
             json.dumps(
