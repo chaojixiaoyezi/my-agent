@@ -349,7 +349,7 @@ def _append_usage(case, thread_id, task_id, event_id, input_tokens, age=-60):
             'model_attempt_counts': {'model-a': 2},
             'usage_breakdown': {'provider': {'input_tokens': input_tokens, 'output_tokens': 7,
                 'cache_read_input_tokens': 0, 'cache_write_input_tokens': 0, 'call_count': 1}},
-            'purpose_breakdown': {'decision': {'physical_model_attempt_count': 2,
+            'purpose_breakdown': {'schema': 'model_call_purpose_breakdown.v1', 'decision': {'physical_model_attempt_count': 2,
                 'status_counts': {'finished': 2}, 'usage_breakdown': {'provider': {
                     'input_tokens': input_tokens, 'input_tokens_reported_call_count': 1}}}}}})
 

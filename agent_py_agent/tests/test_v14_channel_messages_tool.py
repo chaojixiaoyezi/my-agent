@@ -203,3 +203,37 @@ def test_empty_result_reauthorizes_before_metadata_publication(environment, monk
     result = ChannelMessagesTool(env.agent).execute(params(sender_ids=["ou_a"]))
     assert not result.ok and len(env.calls) == 1
     assert "channel_messages" not in result.result_envelope
+
+
+# LLM: pytest 权限拒绝回归；第2页平台文档码230027经原 provider facts 映射后，工具整体失败，不泄漏第1页。
+# 函数用途: 检查工具公开入口对明确读取权限拒绝只返回安全失败码，不发布已缓冲消息或页信封。
+def test_permission_rejection_after_first_page_fails_without_buffered_items(environment, monkeypatch):
+    from agent_py_agent.agent.adapter import feishu
+    from agent_py_agent.tests.test_v14_feishu_message_history import failing_from_page
+
+    env = environment
+    env.replies.extend([page([message(1, text="PRIVATE_FIRST_PAGE")], more=True, token="p2"), page([message(2)])])
+    monkeypatch.setattr(feishu, "_feishu_msg_api", failing_from_page(
+        env, 2, {"code": 230027, "msg": "PRIVATE_PROVIDER_TEXT"}))
+    result = ChannelMessagesTool(env.agent).execute(params())
+    assert not result.ok and result.error_code == "FEISHU_PROVIDER_READ_REJECTED"
+    assert "channel_messages" not in result.result_envelope and len(env.calls) == 2
+    visible = result.output + json.dumps(result.result_envelope, ensure_ascii=False, default=str)
+    assert "om_1" not in visible and "PRIVATE_FIRST_PAGE" not in visible and "PRIVATE_PROVIDER_TEXT" not in visible
+
+
+# LLM: pytest 暂态失败回归；第1页后的传输故障仍是诚实部分结果，工具成功但覆盖标为部分。
+# 函数用途: 检查权限拒绝的失败关闭没有把普通可用性故障变成整体失败。
+def test_transient_failure_after_first_page_returns_honest_partial_result(environment, monkeypatch):
+    from agent_py_agent.agent.adapter import feishu
+    from agent_py_agent.tests.test_v14_feishu_message_history import failing_from_page
+
+    env = environment
+    env.replies.extend([page([message(1)], more=True, token="p2"), page([message(2)])])
+    monkeypatch.setattr(feishu, "_feishu_msg_api", failing_from_page(env, 2, OSError("PRIVATE_TRANSPORT_TEXT")))
+    result = ChannelMessagesTool(env.agent).execute(params())
+    assert result.ok, result.output
+    payload = result.result_envelope["channel_messages"]
+    assert [item["message_id"] for item in payload["items"]] == ["om_1"]
+    assert payload["coverage"]["status"] == "partial" and payload["has_more"] and payload["truncated"]
+    assert "PRIVATE_TRANSPORT_TEXT" not in result.output

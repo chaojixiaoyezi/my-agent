@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from agent_py_agent.agent.adapter import feishu
 from agent_py_agent.agent.adapter import feishu_message_history as history
+from agent_py_agent.agent.adapter.feishu_provider_facts import FeishuProviderFactError
 
 
 # LLM: 本地测试消息构造器；只生成官方字段形状的假数据，不读取真实群消息。
@@ -156,6 +158,57 @@ def test_provider_error_keeps_only_completed_pages_and_safe_diagnostics(environm
     assert result["pages_read"] == 1 and result["coverage"]["status"] == "partial"
     assert result["has_more"] and result["next_cursor"]
     assert "PRIVATE_BODY_AND_CREDENTIAL" not in json.dumps(result)
+
+
+# LLM: 只把指定页的平台信封换成非0码；前面页仍走原假 HTTP，原 _read 负责映射原因码。
+# 函数用途: 构造“第 N 页起平台返回某种失败”的传输替身。
+def failing_from_page(env, number, failure):
+    original = feishu._feishu_msg_api
+
+    def transport(method, path, body, credential, *, timeout=10):
+        response = original(method, path, body, credential, timeout=timeout)
+        if len(env.calls) < number:
+            return response
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    return transport
+
+
+# LLM: pytest 权限拒绝回归；平台文档码230027是读取消息的明确权限拒绝，已缓冲的页同样不得发布。
+# 函数用途: 检查任一页遇到230027都整体失败并保留原因链，不返回部分页或页信封。
+@pytest.mark.parametrize("failing_page", [1, 2])
+def test_message_read_permission_rejection_is_fatal_and_drops_buffered_pages(environment, monkeypatch, failing_page):
+    env = environment
+    env.replies.extend([page([message(1)], more=True, token="p2"), page([message(2)])])
+    monkeypatch.setattr(feishu, "_feishu_msg_api", failing_from_page(
+        env, failing_page, {"code": 230027, "msg": "PRIVATE_PROVIDER_TEXT"}))
+    with pytest.raises(history.ChannelMessageHistoryError) as failed:
+        read(env)
+    assert failed.value.error_code == "FEISHU_PROVIDER_READ_REJECTED"
+    cause = failed.value.__cause__
+    assert isinstance(cause, FeishuProviderFactError)
+    assert (cause.reason_code, cause.provider_code, cause.stage) == ("FEISHU_PROVIDER_READ_REJECTED", 230027, "message")
+    assert len(env.calls) == failing_page
+    assert "PRIVATE_PROVIDER_TEXT" not in str(failed.value)
+
+
+# LLM: pytest 暂态失败回归；传输、HTTP 不可用或其它非权限平台码在第1页之后仍诚实返回部分结果。
+# 函数用途: 检查230027的失败关闭没有扩大到普通可用性故障。
+@pytest.mark.parametrize("failure", [OSError("PRIVATE_TRANSPORT_TEXT"),
+    HTTPError("https://invalid.example/", 503, "PRIVATE_HTTP_TEXT", {}, None),
+    {"code": 99991400, "msg": "PRIVATE_PROVIDER_TEXT"}], ids=["transport", "http_503", "provider_frequency"])
+def test_transient_failure_after_first_page_keeps_honest_partial_result(environment, monkeypatch, failure):
+    env = environment
+    env.replies.extend([page([message(1)], more=True, token="p2"), page([message(2)])])
+    monkeypatch.setattr(feishu, "_feishu_msg_api", failing_from_page(env, 2, failure))
+    result = read(env)
+    assert [item["message_id"] for item in result["items"]] == ["om_1"]
+    assert result["coverage"]["status"] == "partial" and "provider_read_failed" in result["coverage"]["reasons"]
+    assert result["has_more"] and result["next_cursor"] and result["truncated"]
+    assert result["coverage"]["provider_error"]["stage"] == "message"
+    assert "PRIVATE" not in json.dumps(result)
 
 
 # LLM: pytest 分页停机回归；页数上限、重复或缺失 token 都必须留有覆盖缺口。
