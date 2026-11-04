@@ -464,6 +464,7 @@ def _write_result(tool: str, target: Path, output: str, web_decision: Any) -> To
 
 
 # LLM: 内部身份只从executor注入的run_scope读取，不从文件正文或展示文本猜测。
+#   turn_id是单次模型调用编号，从不命名运行事实目录；只按run_id定位当前运行，不把turn_id当请求ID。
 # 函数用途: 为本次写入附上准确运行的非阻断反馈。
 def _attach_reference_write_feedback(
     workspace_root: Path,
@@ -476,7 +477,7 @@ def _attach_reference_write_feedback(
     scope = run_scope if isinstance(run_scope, dict) else {}
     feedback = reference_write_feedback(
         workspace_root=workspace_root, target=target, fact_roots=runtime_fact_roots,
-        request_id=str(scope.get("turn_id") or ""), run_id=str(scope.get("run_id") or ""),
+        request_id="", run_id=str(scope.get("run_id") or ""),
     )
     if not feedback:
         return output, {}

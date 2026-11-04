@@ -247,7 +247,9 @@ def list_group_messages(agent: object, chat_id: str, *, start_time: int, end_tim
         try:
             data = _read(credential, "/im/v1/messages?" + urlencode(query), timeout=min(5.0, remaining), stage="message")
         except FeishuProviderFactError as exc:
-            if exc.reason_code == "FEISHU_PROVIDER_SCOPE_REQUIRED" or exc.provider_code in {401, 403}:
+            # 平台文档码230027是读取消息的明确权限拒绝，与缺scope、HTTP 401/403同属授权失败：整体失败，不发布已缓冲页。
+            if (exc.reason_code == "FEISHU_PROVIDER_SCOPE_REQUIRED" or exc.provider_code in {401, 403}
+                    or (exc.reason_code == "FEISHU_PROVIDER_READ_REJECTED" and exc.provider_code == 230027)):
                 raise ChannelMessageHistoryError(exc.reason_code) from exc
             provider_error = exc.safe_diagnostics()
             reasons.append("provider_read_failed")

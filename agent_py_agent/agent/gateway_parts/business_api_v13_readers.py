@@ -221,7 +221,16 @@ class _OwnerReaders:
                 raise ValueError('invalid tool outcome')
             result = outcome.get('result', {})
             settled = bool(row['settled_at'])
-            if result:
+            # 原收口事务给handler从未启动的领取行写的未启动取消回执无result_ref/duration_ms；
+            # 只对该准确形状免这两项，并固定投影为未执行，其它行仍走下方原严格校验。
+            not_started = (row['status'] == 'CANCELLED' and isinstance(result, dict)
+                and result.get('schema_version') == 'tool_execution_result.v1'
+                and result.get('tool') == row['operation_type']
+                and result.get('effect_outcome') == 'not_started' and result.get('handler_executed') is False
+                and type(result.get('ok')) is bool)
+            if not_started:
+                pass
+            elif result:
                 if (not isinstance(result, dict) or result.get('schema_version') != 'tool_execution_result.v1'
                         or result.get('tool') != row['operation_type']
                         or not isinstance(result.get('result_ref'), str) or not result['result_ref'].strip()
@@ -233,19 +242,24 @@ class _OwnerReaders:
                     raise ValueError('invalid native tool result')
             elif settled and row['status'] in ('SUCCEEDED', 'FAILED'):
                 raise ValueError('settled tool result missing')
-            # 原生空值/failed没有副作用提交证明；冻结词表不增加状态，也不从SUCCEEDED推断committed。
-            effect = result.get('effect_outcome') if settled and result else (
-                'running' if row['status'] == 'EXECUTING' else 'unknown')
-            if effect not in ('none', 'not_started', 'committed', 'running', 'unknown'):
-                effect = 'unknown'
+            if not_started:
+                # 回执只证明从未执行：不读它没有的结果引用/耗时，也不从ok或行状态推断已执行。
+                executed, effect, duration, ref = False, 'not_started', None, row['operation_id']
+            else:
+                # 原生空值/failed没有副作用提交证明；冻结词表不增加状态，也不从SUCCEEDED推断committed。
+                effect = result.get('effect_outcome') if settled and result else (
+                    'running' if row['status'] == 'EXECUTING' else 'unknown')
+                if effect not in ('none', 'not_started', 'committed', 'running', 'unknown'):
+                    effect = 'unknown'
+                executed = result['handler_executed'] if settled and result else bool(row['handler_started_at'])
+                duration = result['duration_ms'] if settled and result else None
+                ref = result['result_ref'] if settled and result else row['operation_id']
             error_code = outcome.get('error_code')
             value = {'operation_id': row['operation_id'], 'run_id': row['run_id'], 'attempt_id': row['attempt_id'],
                 'task_id': None, 'tool_name': row['operation_type'], 'status': row['status'],
-                'executed': result['handler_executed'] if settled and result else bool(row['handler_started_at']),
-                'effect_outcome': effect,
-                'duration_ms': result['duration_ms'] if settled and result else None,
+                'executed': executed, 'effect_outcome': effect, 'duration_ms': duration,
                 'error': {'code': error_code, 'message': error_code, 'retryable': False, 'details': []} if error_code else None,
-                'result_ref': result['result_ref'] if settled and result else row['operation_id'], '_input': {}}
+                'result_ref': ref, '_input': {}}
             record = self.record(value, row)
             value['task_id'] = record.task_id
             records.append(record)

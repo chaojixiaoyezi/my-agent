@@ -106,6 +106,7 @@ def _latest_run_intent_from_dir(facts_dir: Path) -> dict[str, Any]:
 
 
 # LLM: 只消费准确身份或已发布的有界候选；热miss披露unknown，绝不枚举历史目录。
+#   缺失locator由read_locator报RUN_INTENT_LOCATOR_MISSING；已有locator无匹配行或匹配运行未记录desired_outputs只是没有意图，不算读取失败。
 # 函数用途: 读取本事实根内最近或当前运行意图，保留坏文件诊断。
 def _latest_run_intent_from_dir_report(facts_dir: Path, *, request_id: str = "", run_id: str = "") -> tuple[dict[str, Any], list[dict[str, Any]]]:
     candidates, load_errors = intent_candidates(facts_dir, limit=_MAX_FACT_FILES, request_id=request_id, run_id=run_id)
@@ -120,10 +121,6 @@ def _latest_run_intent_from_dir_report(facts_dir: Path, *, request_id: str = "",
         intent = payload.get("run_intent") if isinstance(payload, dict) else None
         if isinstance(intent, dict) and _items(intent.get("desired_outputs")):
             return intent, load_errors
-    if (request_id or run_id) and not load_errors:
-        error = _load_error(FileNotFoundError("current run intent is not recorded"), facts_dir)
-        error.update(error_code="RUN_INTENT_NOT_FOUND", source_status="unknown")
-        load_errors.append(error)
     return {}, load_errors
 
 
