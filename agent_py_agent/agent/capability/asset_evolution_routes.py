@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..assets import _verify_directory_beneath, safe_asset_id
-from ..assets.mutation_ledger import evolution_value_hash
+from ..assets.mutation_ledger import evolution_value_hash, query_analysis_blocked
 from ..assets.revision_history import (
     asset_fingerprint,
     blob_get,
@@ -87,7 +87,8 @@ def route_existing_script(home, script_id, code, *, maintenance_mode='observe', 
         if old is None or old.get('source_scope', 'owner') != 'owner':
             return {'status': 'skipped', 'reason': 'owner_script_missing'}
         descriptor, options = merge_evolution_candidate(script_id, candidate.get('summary', old['summary']), candidate, old)
-        base = find_version(home, 'script', script_id, code_sha256=hashlib.sha256(old['code'].encode()).hexdigest())
+        base = find_version(home, 'script', script_id, code_sha256=hashlib.sha256(old['code'].encode()).hexdigest(),
+                            execution_definition_ref=old['execution_definition_ref'])
         verdict = gate(home, script_id, code, descriptor, options=options)
         if verdict['verdict'] != 'passed' or maintenance_mode != 'autonomous' or base is None:
             reason = ('history_unavailable' if base is None else
@@ -109,20 +110,23 @@ def route_existing_script(home, script_id, code, *, maintenance_mode='observe', 
                                                replay=verdict, reason='cas_conflict', candidate=candidate, commit=commit)
             return {'status': 'proposal', 'asset_id': script_id, 'candidate_id': proposal['candidate_id'], 'reason': 'cas_conflict'}
         # W4的唯一store hook负责版本；W7不导入它、不另建平行版本写者。
-        new = find_version(home, 'script', script_id, code_sha256=hashlib.sha256(code.encode()).hexdigest())
+        new = find_version(home, 'script', script_id, code_sha256=hashlib.sha256(code.encode()).hexdigest(),
+                           execution_definition_ref=submitted['execution_definition_ref'])
         if new is None or new['storage_revision'] != submitted['revision']:
             return {'status': 'history_pending', 'asset_id': script_id, 'revision': submitted['revision']}
         _commit(commit, lambda: record_compat_edge(home, 'script', script_id, from_version=base['version'],
                     to_version=new['version'], verdict='replay_passed', replayed=verdict['replayed'], evidence_ref=evidence_ref))
         trial = {'schema_version': 'asset_evolution_trial.v1', 'asset_id': script_id,
                  'base_version': base['version'], 'promoted_version': new['version'],
+                 'promoted_definition_ref': new['execution_definition_ref'],
+                 'promoted_revision': submitted['revision'],
                  'promoted_sha256': new['code_sha256'], 'active': True, 'failures': 0, 'seen_calls': []}
         _commit(commit, lambda: write_evolution_json(home, ('data', 'asset_evolution', 'trials', script_id + '.json'), trial))
         return {'status': 'promoted', 'asset_id': script_id, 'version': new['version'], 'revision': submitted['revision'], 'replay': verdict}
     raise AssertionError('bounded CAS loop exhausted')
 
 
-# LLM: 只回滚当前仍等于试用版本的代码；成功或环境故障中断连续失败，不因网络问题恢复旧代码。
+# LLM: 回执、来源和当前发布修订均须同试用身份；SHA相同不代表同定义，最终恢复仍走原Store CAS。
 # 函数用途: 在两次非环境失败后通过store写入恢复版本并记失败兼容边。
 def observe_evolution_trial(home, script_id, execution, *, commit=None, failure_threshold=2):
     safe_asset_id(script_id)
@@ -137,20 +141,29 @@ def observe_evolution_trial(home, script_id, execution, *, commit=None, failure_
             trial = read_evolution_json(home, parts)
             call_id = execution.get('call_id')
             if (not trial or not trial.get('active') or not call_id or call_id in trial.get('seen_calls', [])
-                    or execution.get('sha256') != trial.get('promoted_sha256')):
+                    or execution.get('verified') is not True or execution.get('source_scope') != 'owner'
+                    or query_analysis_blocked(execution)
+                    or execution.get('sha256') != trial.get('promoted_sha256')
+                    or not trial.get('promoted_definition_ref')
+                    or execution.get('execution_definition_ref') != trial['promoted_definition_ref']
+                    or execution.get('published_definition_ref') != trial['promoted_definition_ref']
+                    or execution.get('requested_version') not in (None, trial['promoted_version'])):
                 return None
+            store = ScriptStore(home)
+            current = store.get_script(script_id)
+            if (current is None or current.get('source_scope', 'owner') != 'owner'
+                    or current['revision'] != trial.get('promoted_revision')
+                    or current['execution_definition_ref'] != trial['promoted_definition_ref']
+                    or hashlib.sha256(current['code'].encode()).hexdigest() != trial['promoted_sha256']):
+                trial['active'] = False
+                write_evolution_json(home, parts, trial)
+                return {'status': 'superseded'}
             trial['seen_calls'] = [*trial.get('seen_calls', []), call_id][-64:]
             failed = execution.get('ok') is False and not evolution_environment_error(execution.get('error_code'))
             trial['failures'] = trial.get('failures', 0) + 1 if failed else 0
             if trial['failures'] < failure_threshold:
                 write_evolution_json(home, parts, trial)
                 return {'status': 'trial', 'failures': trial['failures']}
-            store = ScriptStore(home)
-            current = store.get_script(script_id)
-            if current is None or hashlib.sha256(current['code'].encode()).hexdigest() != trial['promoted_sha256']:
-                trial['active'] = False
-                write_evolution_json(home, parts, trial)
-                return {'status': 'superseded'}
             base = get_version(home, 'script', script_id, trial['base_version'])
             if base is None:
                 return {'status': 'inconclusive', 'reason': 'restore_version_missing'}
