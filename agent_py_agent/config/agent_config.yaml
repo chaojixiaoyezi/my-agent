@@ -326,6 +326,8 @@ enable_subagents: true
 # 对照 会话运行时 AgentControl：容量属于 root session，不由 owner 历史账本全局占用。
 # 默认允许按 8 个独立职责一次铺开；终态 child 释放槽位，历史累计数量可以超过 8。
 max_subagents: 8
+# 每个 Owner 未退役的后台主 Agent 身份上限；0 表示不限制，调低不终止已有任务。
+max_background_agents: 8
 # 可选的更严格当前任务上限；0 表示不在 max_subagents 之外再收紧。
 task_max_subagents: 0
 
