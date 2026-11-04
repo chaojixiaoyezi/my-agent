@@ -215,22 +215,29 @@ def mutate_assets(home, owner_id, action, payload):
     return WorkflowStore(home).save_workflow(WorkflowDefinition(descriptor, steps, payload.get('body_markdown', '')))
 
 
-# LLM: bind保留未指定字段，显式空列表用于解除绑定；save仍是完整覆盖，不修改Scheduler。
+# LLM: bind取锁内恢复的绑定快照并携带CAS；投影及保存不持root，refs兼容旧dict，空列表解除绑定，不修改Scheduler。
 # 函数用途: 为监控动态绑定保留名称、计划与其他类型引用。
 def _save_monitor(home, owner_id, action, payload):
+    from .assets import safe_asset_id
     from .assets.monitor_adapter import get_monitor_descriptor, save_monitor_binding
+    identifier = safe_asset_id(payload['id'])
     values = {}
     if action == 'assets.bind':
         try:
-            old = get_monitor_descriptor(home, payload['id'])
+            old = get_monitor_descriptor(home, identifier, for_update=True)
         except FileNotFoundError:
             old = None
         if old is not None:
             values = {key: old[key] for key in ('name', 'summary', 'schedule_spec',
                       'access_targets', 'data_sources', 'credential_refs')}
-            values.update({kind + '_ids': old['refs'][kind + 's'] for kind in ('workflow', 'script', 'skill')})
+            refs = old.get('metadata', {}).get('asset_refs')
+            if not isinstance(refs, dict):
+                refs = old.get('refs') if isinstance(old.get('refs'), dict) else {}
+            values.update({kind + '_ids': refs.get(kind + 's', []) for kind in ('workflow', 'script', 'skill')})
+        # 在保留字段字典建好后携带快照CAS；后续显式请求仍可覆盖版本条件。
+        values['expected_revision'] = old['revision'] if old is not None else 0
     values.update({key: value for key, value in payload.items() if key not in ('kind', 'id')})
-    return {**save_monitor_binding(home, payload['id'], **values), 'owner_id': owner_id}
+    return {**save_monitor_binding(home, identifier, **values), 'owner_id': owner_id}
 
 
 # LLM: 复用同一账本与nearest-rank算法；脚本分组只统计scripts/run，分页读全而不截断历史。
