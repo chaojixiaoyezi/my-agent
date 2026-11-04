@@ -24,8 +24,8 @@ def _stale(reason):
     raise ExecutionTargetError('固定资产发布快照不可用', error_code='SCHEDULER_EXECUTION_DEFINITION_STALE', reason=reason)
 
 
-# LLM: 版本记录及所有必需blob在执行前核验，损坏沿原 STALE 关闭；历史 payload 不是当前授权记录。
-# 函数用途: 从准确版本或内容引用恢复调度目标与旧定义；脚本当前记录仍由原执行器独立加载。
+# LLM: 版本及全部blob执行前核验；准确发布编号与SHA/ref一起交原resolver，历史payload不签发当前授权。
+# 函数用途: 恢复准确历史目标并传递完整pin，即使当前字节相同也不丢侧文件或借用新重试许可。
 def resolve_pinned_target(owner_home, target, definition, reference):
     kind, identifier = target['kind'], target['asset_id']
     pin, frozen = target.get('pinned_version'), target.get('execution_definition_ref')
@@ -63,7 +63,8 @@ def resolve_pinned_target(owner_home, target, definition, reference):
     else:
         # 不给去除易变字段的历史 payload 补 revision；storage_revision 只属于待核验 pin，不能恢复当前权限。
         historical = {**payload, 'code': code}
-        resolved['expected_script_pin'] = {'script_id': identifier, 'revision': record.get('storage_revision') or 0,
+        resolved['expected_script_pin'] = {'script_id': identifier, 'version': record['version'],
+            'revision': record.get('storage_revision') or 0,
             'code_sha256': record['code_sha256'], 'source_scope': payload.get('source_scope', 'owner'),
             'execution_definition_ref': record.get('execution_definition_ref')}
     if frozen is not None and frozen['definition_sha256'] not in (

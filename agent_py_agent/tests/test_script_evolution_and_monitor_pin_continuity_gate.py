@@ -194,8 +194,8 @@ def _run_monitor(gate, monitor_id):
     return target, result
 
 
-# LLM: 九个检查点共用同一真实历史链；不手写版本、兼容边、run 快照或修补产品函数。
-# 函数用途: 核验版本发布、回放、两种监控、在途恢复、保护门、回滚及缺失历史的完整连续性。
+# LLM: 九步共用真实历史链，workflow pin精确包含版本/SHA/执行引用；不手写发布、兼容边或run快照。
+# 函数用途: 核验完整pin、发布回放、两种监控、在途恢复、保护门、回滚及历史缺失的连续性。
 def test_gate3_script_evolution_and_monitor_pin_continuity(gate):
     # 1. 首次保存的脚本由 W4 钩子生成 v1；工作流和两种监控都固定它。
     v1 = latest_version(gate.home, 'script', 'continuity')
@@ -204,7 +204,8 @@ def test_gate3_script_evolution_and_monitor_pin_continuity(gate):
     assert v1['code_sha256'] == sha1
     runs = _seed_replay_runs(gate)
     flow_v1 = get_version(gate.home, 'workflow', 'continuity-flow', 1)
-    assert flow_v1['pins']['scripts']['continuity'] == {'version': 1, 'code_sha256': sha1}
+    assert flow_v1['pins']['scripts']['continuity'] == {'version': 1, 'code_sha256': sha1,
+        'execution_definition_ref': v1['execution_definition_ref']}
     for identifier, policy in (('fixed-monitor', 'pinned'), ('following-monitor', 'follow_compatible')):
         binding = save_monitor_binding(gate.home, identifier, script_ids=['continuity'], upgrade_policy=policy)
         assert binding['metadata']['pinned_version'] == 1

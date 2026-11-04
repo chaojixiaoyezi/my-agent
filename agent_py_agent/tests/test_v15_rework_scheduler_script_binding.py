@@ -91,24 +91,27 @@ def _execute(case, *, request_id='r2-first', target=None):
         root_user_prompt='固定脚本执行', source='scheduler_tool'), target or case.target)
 
 
-# LLM: 此反例保留旧生产绑定顺序；补 revision 并不是合法的当前权限修复。
-# 函数用途: 证明去修订号历史快照会产生 SCRIPT_REVISION_DRIFT 且零 runner 调用。
-def test_revision_stripped_history_is_not_current_authority(case):
+# LLM: 此反例保留旧生产绑定顺序；缺失或非法当前存储身份不能被相同执行引用重新授权。
+# 函数用途: 证明历史正文不是当前授权记录，所有无效 revision 均零 runner 调用。
+@pytest.mark.parametrize('bound_revision', [None, 0, True, -1, '1'])
+def test_revision_stripped_history_is_not_current_authority(case, bound_revision):
     runtime = case.agent.tools.runtime_snapshot(allowed_tools=['scripts']).runtime('scripts')
     target, historical = resolve_execution_target(case.agent, case.target, runtime=runtime)
     assert 'revision' not in historical
     assert target['expected_script_pin']['revision'] == 1
     pinned = _bind_pinned_tool(case.tool, target, historical)
+    if bound_revision is not None:
+        historical = {**historical, 'revision': bound_revision}
     with bind_script_execution_record(case.home, 'binding', case.tool._workspace_root(), historical):
         result = pinned.execute({'action': 'run', 'script_id': 'binding', 'inputs': {}})
     data = json.loads(result.output)
-    assert not result.ok and data['error_code'] == 'SCRIPT_REVISION_DRIFT', data
+    assert not result.ok and data.get('error_code') == 'SCRIPT_REVISION_DRIFT', data
     assert case.calls == []
     assert script_execution_record(case.home, 'binding', case.tool._workspace_root()) is None
 
 
-# LLM: 不跳过生产 ContextVar 边界；首发内容未改变时必须通过真实工具栈到达 runner 一次。
-# 函数用途: 防止原门禁 helper 通过而定时执行仍失败。
+# LLM: 首发也传完整发布版本，不走current-match捷径；原ContextVar、宿主工具栈及runner均保留。
+# 函数用途: 核对第一次发布的精确历史执行及当前权限身份，真实进程只启动一次。
 def test_first_publication_reaches_runner_once_through_runtime(case):
     execution, output = _execute(case)
     data = json.loads(output)
@@ -116,10 +119,11 @@ def test_first_publication_reaches_runner_once_through_runtime(case):
     assert execution.result.ok, data
     assert data['ok'] and data['exit_code'] == 0
     assert data['output_data'] == {'version': 1}
-    assert data['source_check']['pin_resolution'] == {'mode': 'current'}
+    assert data['source_check']['pin_resolution'] == {'mode': 'history', 'version': 1,
+        'code_sha256': case.version['code_sha256']}
     assert len(case.calls) == 1
     current, history, _options = case.calls[0]
-    assert current['revision'] == 1 and history is None
+    assert current['revision'] == 1 and history == case.version
     assert len(case.processes) == 1
 
 
@@ -263,15 +267,40 @@ def test_workspace_shadow_cannot_consume_owner_history_pin(case):
     assert not case.calls and not case.processes
 
 
-# LLM: 版本校验保留；同字节但当前修订不一致时不能通过补字段或删除 pin 比较放行。
-# 函数用途: 证伪简单取消 revision 校验的修法。
-def test_same_code_revision_drift_is_not_ignored(case):
+# LLM: storage revision 是可变存储身份，不是执行定义；相同正文/合同仍须执行原发布，不能错误漂移或重选最新。
+# 函数用途: 核对正常同内容写回后仍保留精确旧发布及当前权限身份。
+def test_same_code_storage_revision_drift_keeps_exact_published_pin(case):
     case.store.save_script(case.descriptor, SOURCE)
-    assert case.store.get_script('binding')['revision'] == 2
+    current = case.store.get_script('binding')
+    assert current['revision'] == 2
+    assert current['execution_definition_ref'] == case.version['execution_definition_ref']
+    assert latest_version(case.home, 'script', 'binding') == case.version
     execution, output = _execute(case)
     data = json.loads(output)
-    assert not execution.result.ok and data['error_code'] == 'SCRIPT_REVISION_DRIFT', data
-    assert not case.calls and not case.processes
+    assert execution.result.ok and data['output_data'] == {'version': 1}, data
+    assert data['source_check']['pin_resolution'] == {'mode': 'history', 'version': 1,
+        'code_sha256': case.version['code_sha256']}
+    assert len(case.calls) == len(case.processes) == 1
+    effective, history, _options = case.calls[0]
+    assert effective['revision'] == current['revision'] and history == case.version
+
+
+# LLM: retry metadata 不进入执行引用但会生成正式版本；精确 pin 必须保留旧重试许可，不能按相同 SHA/ref 重选。
+# 函数用途: 证伪只传执行引用却丢失明确发布版本的调度绑定。
+def test_scheduler_pin_keeps_selected_retry_contract_when_ref_and_sha_repeat(case):
+    changed = replace(case.descriptor, metadata={'retry_policy': {'idempotent': True}})
+    case.store.save_script(changed, SOURCE)
+    newer = latest_version(case.home, 'script', 'binding')
+    assert newer['version'] > case.version['version']
+    for key in ('code_sha256', 'execution_definition_ref'):
+        assert newer[key] == case.version[key]
+    execution, output = _execute(case)
+    assert execution.result.ok and json.loads(output)['output_data'] == {'version': 1}, output
+    assert len(case.calls) == len(case.processes) == 1
+    effective, history, _options = case.calls[0]
+    assert history == case.version
+    assert effective['metadata']['retry_policy']['idempotent'] is False
+    assert case.store.get_script('binding')['metadata']['retry_policy']['idempotent'] is True
 
 
 # LLM: 权限数据来自真实 Store 发布与当前读取；观察器只委托原 runner，子进程仍使用原 SDK。

@@ -518,8 +518,8 @@ def _run_query_attempts(owner_home, script_id, inputs, runner, record, history, 
     return result, retries
 
 
-# LLM: 历史代码保持当前授权上限；partial仅适用多源manifest，debug同时禁摘要和通知写账。
-# 函数用途: 统一解析pin、隔离源失败、执行有界重试并返回可见健康回执。
+# LLM: 历史代码保持当前授权上限；无合法存储身份的继承绑定在加载前拒绝，revision不作执行定义比较。
+# 函数用途: 校验可信当前记录后解析完整pin、隔离源失败、执行有界重试并返回健康回执，debug仍不写账。
 def run_script_with_datasources(
     owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None,
     timeout_seconds=None, override_data_sources=None, network_access=None, options=None, now=None,
@@ -528,6 +528,12 @@ def run_script_with_datasources(
 
     started = time.monotonic()
     instant = time.time() if now is None else now
+    bound = script_execution_record(owner_home, script_id, workspace_root)
+    if (expected_script_pin is not None and bound is not None
+            and (type(bound.get('revision')) is not int or bound['revision'] < 1)):
+        resolution = {'mode': 'missing', 'reason': 'history_blob_missing'}
+        return _query_result(owner_home, _preflight_failure(script_id, {}, 'SCRIPT_REVISION_DRIFT', {}),
+            {}, {}, None, [], resolution, notify=False, now=instant)
     run_opts = dict(options or {})
     for key, val in (('timeout_seconds', timeout_seconds), ('override_data_sources', override_data_sources),
                      ('network_access', network_access)):

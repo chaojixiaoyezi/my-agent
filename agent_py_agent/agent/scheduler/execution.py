@@ -150,8 +150,8 @@ def _pinned_script_dispatch(tool, target, params):
         timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
 
 
-# LLM: 业务仅执行一次，结果/用量先落原 run；冻结欠发释放原 claim 供 outbox 重投，不进入业务 waiting 对账。
-# 函数用途: 执行结构化目标并沿现有 TaskLink、终态和冻结通知合同收口，通知失败不重跑脚本。
+# LLM: 业务仅执行一次，结果/用量先落原run；初发与重投共原后台上下文，欠发释放claim而不进业务waiting。
+# 函数用途: 执行固定目标并沿原TaskLink、终态和冻结通知收口，保留相同运输身份且不重跑业务。
 def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=None):
     from ..agent_core.model.call_runtime import model_call_ledger
     from ..agent_core.runtime.loop_models import RunParams
@@ -159,7 +159,6 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
     from ..conversation.runtime import _background_task_attributes, _run_request
     from ..conversation.task_run_closeout import settle_terminal_task_run
     from .schedule import ScheduleValidationError
-    from .tool_work import _commit_tool_result
 
     thread = service.conversation_store.threads.require(claim.run['thread_id'])
     params = RunParams(request_id=claim.run_id, run_id=claim.run_id, task_id=claim.run_id,
@@ -204,7 +203,7 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
     now = time.time()
     service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'completed' if ok else 'abandoned',
         'expected_status': 'active', 'now': now})
-    commit = _commit_tool_result(agent, service, claim, kwargs, output) if ok else None
+    commit = _commit_target_result(agent, service, claim, kwargs, output) if ok else None
     if commit is not None and commit.outbox_frozen:
         # TaskLink 已 completed；waiting 对账排除定时触发自身，会在欠发尚未确认时提前记 done。
         # 与原后台交付一致回到 queued；真实冻结 wake 保留，下一片先重投，不再进入业务工具。
@@ -215,6 +214,29 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
         delivery_reason='execution_target_result', error_code=code, model_call_count=count, now=now)
     service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
     settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None), service.conversation_store, task_id=claim.run_id)
+
+
+# LLM: 仅装配原sender依赖；与redeliver_cached_wake共用上下文/幂等键函数，权限、冻结及canonical仍由原链裁决。
+# 函数用途: 将一次固定资产结果交给原后台投递入口，避免初发硬编码run键而重投变成wake键。
+def _commit_target_result(agent, service, claim, kwargs, output):
+    from ..conversation.background_delivery import (
+        BackgroundDeliveryDependencies,
+        background_delivery_idempotency_key,
+        record_background_response,
+    )
+    from ..conversation.background_im_progress import background_delivery_context
+    from ..conversation.runtime import _run_request
+
+    request = _run_request(kwargs)
+    thread = service.conversation_store.threads.require(claim.run['thread_id'])
+    owner_thread, channel, target = resolve_delivery(agent, thread, request, '', '')
+    context = background_delivery_context(agent, thread, channel=channel, target=target,
+        owner_thread_id=owner_thread.thread_id, task_id=claim.run_id, request=request,
+        idempotency_key=background_delivery_idempotency_key(request))
+    dependencies = BackgroundDeliveryDependencies(agent, service.conversation_store, agent.delivery_service,
+        lambda _request: service.conversation_store.tasks.load(claim.run_id).status)
+    return record_background_response(dependencies, request, context, output, deliver=True,
+        delivery_reason='tool_rule_result', local_transcript_only=scheduled_local_delivery(agent, request))
 
 
 # LLM: 来源按原creator冻结；缺源只沿认证目标固定同一actor，旧work仍须双引用且queued未claim，owner/topic门不放宽。
