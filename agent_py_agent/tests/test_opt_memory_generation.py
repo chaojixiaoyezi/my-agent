@@ -668,8 +668,8 @@ def test_r1_fallback_search_is_bounded_and_partial(tmp_path, monkeypatch, scoped
     memory = JsonlMemory(tmp_path / "memory.jsonl")
     _legacy(memory, [30] * 6)
     memory.migrate_tiers()
-    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_RECORDS", 3, raising=False)
-    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_BYTES", 1024 * 1024, raising=False)
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_RECORDS", 3, raising=True)
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_BYTES", 1024 * 1024, raising=True)
 
     # LLM: 观察权威入口，不替换检索结果。
     # 函数用途: 阻止把全库读取伪装成有限降级。
@@ -693,7 +693,10 @@ def test_r1_fallback_byte_budget_precedes_segment_read(tmp_path, monkeypatch):
 
     memory = JsonlMemory(tmp_path / "memory.jsonl")
     memory.add("user", "巨" * 21000)
-    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_BYTES", 64, raising=False)
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_BYTES", 64, raising=True)
+    # 正常写入会自动推进索引；显式使投影失效，仍测原有fallback字节门而非旁路索引。
+    from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
+    MemoryReadIndex(memory.path).invalidate()
 
     # LLM: 被超预算拦下时不得打开整片读取函数。
     # 函数用途: 记录实际I/O入口是否被错误调用。
@@ -850,8 +853,8 @@ def test_r1_fallback_control_growth_returns_partial(tmp_path, monkeypatch):
     assert records == [] and facts["partial"] is True
 
 
-# LLM: 墓碑也是权威记录，未验证全账时不得继续召回正文；字节量小也受条数硬限。
-# 函数用途: 验证新永久账及旧墓碑都计入同一记录预算。
+# LLM: 永久屏障必须完整验证，但不能计入live候选预算；两种旧账升级后仍不得复活旧身份。
+# 函数用途: 验证历史删除不挤占正文扫描预算，真实live超限仍报告partial。
 @pytest.mark.parametrize("legacy", [False, True])
 def test_r1_fallback_counts_tombstones_in_record_budget(tmp_path, legacy):
     from agent_py_agent.agent.memory_store._jsonl_indexing import bounded_authority_records
@@ -865,8 +868,15 @@ def test_r1_fallback_counts_tombstones_in_record_budget(tmp_path, legacy):
     else:
         ledger = StorageTombstones(memory.path)
         ledger.path.write_text(ledger.prepare(rows)[1])
+    memory.migrate_tiers()
     records, facts = bounded_authority_records(memory, max_records=2, max_bytes=1024 * 1024)
-    assert records == [] and facts["partial"] is True
+    assert records == [] and facts["partial"] is False
+    assert facts["scanned_records"] == 0
+    with pytest.raises(ValueError, match="MEMORY_TOMBSTONED_ID"):
+        memory.add_record(MemoryRecord("user", "blocked", entry_id="gone-0"))
+    memory.apply_batch([dict(action="add", content=f"live-{i}") for i in range(4)])
+    records, facts = bounded_authority_records(memory, max_records=2, max_bytes=1024 * 1024)
+    assert len(records) == 2 and facts["partial"] is True
     assert facts["scanned_records"] == 2
 
 
@@ -1471,7 +1481,7 @@ def test_r3_public_search_revalidates_after_vector_hits(tmp_path, monkeypatch, a
             assert any(hit.metadata.get("entry_id") == "target" for hit in hits)
             observed_hits.extend(hits)
             if limited:
-                # 永久账新增四个真实墓碑，严格超过同一个三条预算；屏障未核全必须拒绝一切旧候选。
+                # 永久账新增四个真实墓碑；点查屏障不挤占三条live预算，也不得回传旧版本。
                 writer.apply_batch([dict(action="remove", entry_id=f"filler-{index}") for index in range(4)])
             if action == "remove_root_failure":
                 from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
@@ -1505,7 +1515,7 @@ def test_r3_public_search_revalidates_after_vector_hits(tmp_path, monkeypatch, a
     monkeypatch.setattr(memory, "all", forbid_all)
     result = memory.search(query)
     assert observed_hits
-    if action != "replace" or limited:
+    if action != "replace":
         assert result == []
         assert "target" not in memory._pending_access
     else:
@@ -1514,6 +1524,7 @@ def test_r3_public_search_revalidates_after_vector_hits(tmp_path, monkeypatch, a
         assert current.content != original.content and current.version == original.version + 1
     assert len(scans) == 2
     if limited:
-        assert scans[-1]["partial"] and scans[-1]["scanned_records"] == 3
+        assert not scans[-1]["partial"]
+        assert scans[-1]["scanned_records"] <= 1
     assert all(facts["scanned_records"] <= jsonl._AUTHORITY_SCAN_MAX_RECORDS
                and facts["scanned_bytes"] <= jsonl._AUTHORITY_SCAN_MAX_BYTES for facts in scans)

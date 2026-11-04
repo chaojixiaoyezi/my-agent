@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -116,10 +117,62 @@ class StorageTombstones:
         self.memory_path = Path(memory_path)
         self.path = self.memory_path.with_name(self.memory_path.name + ".storage_tombstones.json")
         self.owner = hashlib.sha256(str(self.memory_path.absolute()).encode()).hexdigest()
+        from .storage_tombstone_index import StorageTombstoneIndex
 
-    # LLM: 永久账叠加旧墓碑且不回滚hash；可共用调用方的字节/记录预算，未读完整不得返回部分屏障；引用快照内两账解析字节须等于读前观察。
-    # 函数用途: 读取并验证永久删除记录。
+        self.index = StorageTombstoneIndex(self.memory_path, self.owner)
+
+    # LLM: 冻结全量dict合同供retention使用；热召回走snapshot，不按历史删除数耗尽live预算。
+    # 函数用途: 完整读取当前永久删除账，旧格式保持兼容且绝不把坏账当空。
     def load(self, *, max_bytes=None, on_read=None, _read=None, on_record=None):
+        body, marker = self._marker(max_bytes=max_bytes, _read=_read)
+        if marker.get("index_file") is None:
+            return self._load_legacy(max_bytes=max_bytes, on_read=on_read,
+                _read=lambda path: body if path == self.path else (_read(path) if _read else read_bytes_beneath(path.parent, (path.name,), max_bytes=max_bytes)),
+                on_record=on_record)
+        if on_read is not None:
+            on_read(len(body or b""))
+        with self.snapshot(_marker=marker) as snapshot:
+            records = snapshot.full_dict()
+        if on_record is not None:
+            for _ in records:
+                on_record()
+        return records
+
+    # LLM: 只读JSON小marker；其版本独立于可回退内容根，格式损坏不允许降级。
+    # 函数用途: 校验旧账或指向永久索引的耐久标记。
+    def _marker(self, *, max_bytes=None, _read=None, _allow_migration=False):
+        body = _read(self.path) if _read else read_bytes_beneath(self.path.parent, (self.path.name,), max_bytes=max_bytes)
+        record_parsed_pin_bytes(self.path, body)
+        marker = json.loads(body) if body is not None else {"schema_version": TOMBSTONE_SCHEMA, "owner": self.owner, "records": {}}
+        if (not isinstance(marker, dict) or marker.get("schema_version") != TOMBSTONE_SCHEMA
+                or marker.get("owner") != self.owner or not isinstance(marker.get("records"), dict)):
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+        if "index_file" in marker and (marker["index_file"] != self.index.path.name
+                or type(marker.get("index_revision")) is not int or marker["index_revision"] < 0 or marker["records"]):
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+        if "index_file" in marker and marker.get("legacy_stamp") != self._legacy_stamp():
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+        root_path = self.memory_path.with_name(self.memory_path.name + ".manifest.json")
+        root_body = _read(root_path) if _read else read_bytes_beneath(root_path.parent, (root_path.name,), max_bytes=max_bytes)
+        root = json.loads(root_body) if root_body is not None else {}
+        if "barrier_revision" in root and "index_file" not in marker:
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+        if ("index_file" not in marker and not _allow_migration
+                and self.index.has_committed_authority()):
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+        return body, marker
+
+    # LLM: 迁移后旧JSONL仍是冻结兼容来源；只核固定一个文件代次，变化不被误认为已导入索引。
+    # 函数用途: 绑定旧账身份，避免升级后忽略被改坏的旧归档。
+    def _legacy_stamp(self):
+        from ._jsonl_indexing import _scan_stamp
+        from .jsonl import _tombstone_path
+
+        return json.loads(json.dumps(_scan_stamp(_tombstone_path(self.memory_path))))
+
+    # LLM: 旧格式只在冷迁移或显式全量消费者读取；保留原预算、语义校验及pin字节绑定。
+    # 函数用途: 升读升级前的JSON和JSONL永久账。
+    def _load_legacy(self, *, max_bytes=None, on_read=None, _read=None, on_record=None):
         from ._jsonl_maintenance import require_maintenance_event
         from .jsonl import _memory_record_from_obj, _tombstone_path
 
@@ -196,9 +249,106 @@ class StorageTombstones:
     # LLM: ID和正文hash均来自当前库删除账；lesson等跨线调用方可复用，不授读写权限。
     # 函数用途: 判断旧备份、候选或派生正文是否已被明确遗忘。
     def excludes(self, entry_id, content_hash="", *, records=None):
-        records = self.load() if records is None else records
+        if records is None:
+            return entry_id in self.blocked([(entry_id, content_hash)])
         return entry_id in records or bool(content_hash and any(
             content_hash in row.removed_content_hashes for row in records.values()))
+
+    # LLM: 索引不完整、丢失或低于已发表marker/根修订均失败关闭；旧小库可兼容只读快照。
+    # 函数用途: 把同一次有界候选校验绑定到一个稳定屏障事务。
+    @contextmanager
+    def snapshot(self, *, max_bytes=None, _read=None, _marker=None):
+        marker = _marker or self._marker(max_bytes=max_bytes, _read=_read)[1]
+        if marker.get("index_file") is None:
+            yield _LegacyBarrierSnapshot(self.load(max_bytes=max_bytes, _read=_read))
+            return
+        manifest = self.memory_path.with_name(self.memory_path.name + ".manifest.json")
+        body = _read(manifest) if _read else read_bytes_beneath(manifest.parent, (manifest.name,), max_bytes=max_bytes)
+        root = json.loads(body) if body is not None else {}
+        minimum = max(marker["index_revision"], root.get("barrier_revision", 0))
+        try:
+            with self.index.snapshot(minimum_revision=minimum) as snapshot:
+                yield snapshot
+        except FileNotFoundError as exc:
+            raise ValueError("MEMORY_TOMBSTONES_UNREADABLE") from exc
+
+    # LLM: 读取不建索引，不扫描全账；每个候选只做两个主键查询。
+    # 函数用途: 批量判断小集合的永久屏障。
+    def blocked(self, pairs):
+        with self.snapshot() as snapshot:
+            return snapshot.blocked(pairs)
+
+    # LLM: 只用于原quota→formal维护入口；游标分批耐久，可中断重启，最后才替换旧JSON为小marker。
+    # 函数用途: 将旧账导入永久键索引并保留失败关闭和写前配额。
+    def ensure_index(self, *, write, admission=None, commit=None):
+        from ..user_space.owner_quota import OwnerQuotaChange
+
+        body, marker = self._marker(_allow_migration=True)
+        if marker.get("index_file") is not None:
+            with self.snapshot(_marker=marker) as snapshot:
+                return snapshot.revision
+        records = list(self._load_legacy().values())
+        if admission is not None:
+            size = self.index.path.stat().st_size if self.index.path.exists() else 0
+            admission.check([OwnerQuotaChange(self.index.path, size + 65536 + sum(len(r.to_json().encode()) * 3 for r in records))])
+        identity = hashlib.sha256((body or b"") + b"\0" + b"".join(r.to_json().encode() for r in records)).hexdigest()
+        state = self.index.migrate_step(records, source_identity=identity, commit=commit)
+        while not state["complete"]:
+            state = self.index.migrate_step(records, source_identity=identity, commit=commit)
+        write(self.path, self.marker_text(state["revision"]))
+        return state["revision"]
+
+    # LLM: marker只包含版本和路径，不含正文或历史删除全集；每次屏障推进使原pin消费者看见代次变化。
+    # 函数用途: 编码根之前发表的小型屏障回执。
+    def marker_text(self, revision, *, deletion=False):
+        payload = {"schema_version": TOMBSTONE_SCHEMA, "owner": self.owner, "records": {},
+            "index_file": self.index.path.name, "index_revision": revision, "legacy_stamp": self._legacy_stamp()}
+        if deletion:
+            payload["last_committed_deletion"] = {"action": "remove", "revision": revision}
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+# LLM: 只兼容未迁移小库；维护写入口会将它转换成永久键索引，不作为长期热路径缓存。
+# 类用途: 为旧全量屏障提供与SQLite一致的批量查询形状。
+class _LegacyBarrierSnapshot:
+    # LLM: 只持本次已严格解析的旧账；首次迁移后热路径改用SQLite，不在此保留跨请求缓存。
+    # 函数用途: 为未升级的冷格式提供同形快照。
+    def __init__(self, records):
+        self.records, self.revision = records, 0
+        self.hashes = {digest for row in records.values() for digest in row.removed_content_hashes}
+
+    # LLM: 只对本批候选查既有集合；不影响live召回预算。
+    # 函数用途: 判断升级前永久账是否阻止候选复活。
+    def blocked(self, pairs):
+        return {entry_id for entry_id, digest in pairs if entry_id in self.records or digest in self.hashes}
+
+    # LLM: 只返回指定身份的已有删除回执，保持旧格式和索引格式语义一致。
+    # 函数用途: 读取本批涉及的永久删除。
+    def entries(self, ids):
+        return {entry_id: self.records[entry_id] for entry_id in ids if entry_id in self.records}
+
+    # LLM: 全量冷维护消费者取得副本，不得写回或裁掉永久屏障。
+    # 函数用途: 保留完整load合同。
+    def full_dict(self):
+        return dict(self.records)
+
+
+# LLM: 分片同时约束物理行数与序列化字节；单个超大事实仍独占一片，由读取预算显式拒读而非无限整读。
+# 函数用途: 为普通迁移与维护产生有界正文批次。
+def _generation_batches(rows):
+    from .jsonl import _AUTHORITY_SCAN_MAX_BYTES, _memory_events_text
+
+    batch, size = [], 0
+    limit = max(1, _AUTHORITY_SCAN_MAX_BYTES // 2)
+    for record in rows:
+        cost = len(_memory_events_text([record]).encode("utf-8"))
+        if batch and (len(batch) >= 1000 or size + cost > limit):
+            yield batch
+            batch, size = [], 0
+        batch.append(record)
+        size += cost
+    if batch:
+        yield batch
 
 
 # LLM: 根清单只选择本逻辑库已提交的不可变文件；不存在根时仍读旧库，坏根绝不回退旧副本。
@@ -255,7 +405,7 @@ class MemoryGenerationStore:
 
     # LLM: 旧根遇合法发表/GC才最多重读两次；根未变的损坏保持原异常，绝不吞完整性错误。
     # 函数用途: 还原完整冷热事件快照并应用永久删除屏障。
-    def events(self, root=None, *, tier=None):
+    def events(self, root=None, *, tier=None, include_tombstones=True):
         from ._jsonl_maintenance import require_maintenance_event
         from .jsonl import _memory_record_from_obj
 
@@ -284,9 +434,10 @@ class MemoryGenerationStore:
             latest = self.manifest()
             if latest is not None and latest["operation_id"] == root["operation_id"]:
                 records.sort(key=lambda r: (r.created_at, r.entry_id))
-                blocked = self.tombstones.load()
-                return [*(r for r in records if not self.tombstones.excludes(
-                    r.entry_id, _content_hash(r.content), records=blocked)), *blocked.values()]
+                with self.tombstones.snapshot() as snapshot:
+                    excluded = snapshot.blocked((r.entry_id, _content_hash(r.content)) for r in records)
+                    blocked = snapshot.full_dict() if include_tombstones else {}
+                return [*(r for r in records if r.entry_id not in excluded), *blocked.values()]
             root = latest
             if root is None:
                 raise ValueError("MEMORY_GENERATION_UNREADABLE")
@@ -295,56 +446,92 @@ class MemoryGenerationStore:
     # LLM: 原formal锁内固定新分片、预期根与永久账CAS；额外保存真实前像可见ID以准确报告部分删除。
     # 函数用途: 生成可逐路径检查峰值配额的同代提交计划。
     def prepare(self, records, *, max_chars, pinned_ids=(), cold_ids=None, quarantine=None):
+        import time
+
         from .jsonl import (
             _materialize_memory_events,
             _memory_events_text,
+            _record_payload,
             _strict_memory_events,
             _with_legacy_identity,
         )
 
         records = [_with_legacy_identity(record) for record in records]
         old = self.manifest()
-        prior_deleted, expected_tombstones = self.tombstones.prepare(())
+        with self.tombstones.snapshot() as snapshot:
+            expected_tombstones = snapshot.revision
         visible_before = set()
         old_cold = set()
         if old is not None:
             for segment in old["segments"]:
                 ids = {row["entry_id"] for row in self.segment_rows(segment)}
-                visible_before.update(ids - prior_deleted.keys())
+                visible_before.update(ids - self.tombstones.blocked((entry_id, "") for entry_id in ids))
                 if segment["tier"] == "cold":
                     old_cold.update(ids)
         else:
             visible_before.update(record.entry_id for record in _materialize_memory_events(
-                _strict_memory_events(self.path), include_expired=True))
+                _strict_memory_events(self.path, include_tombstones=False), include_expired=True))
         if cold_ids is None:
             cold_ids = old_cold
-        removed, tombstone_text = self.tombstones.prepare(records)
-        live = [r for r in records if r.action != "remove" and not self.tombstones.excludes(
-            r.entry_id, _content_hash(r.content), records=removed)]
-        active, cold = partition_records(live, max_chars, cold_ids=cold_ids, pinned_ids=pinned_ids)
+        removed = {r.entry_id: r for r in records if r.action == "remove"}
+        with self.tombstones.snapshot() as snapshot:
+            previous_removed = snapshot.entries(removed)
+        changed_removed = []
+        for entry_id, record in removed.items():
+            previous = previous_removed.get(entry_id)
+            before = _record_payload(previous) if previous else None
+            selected = record if previous is None or record.version >= previous.version else previous
+            after = _record_payload(selected)
+            after["removed_content_hashes"] = sorted(set(record.removed_content_hashes) | set(previous.removed_content_hashes if previous else ()))
+            if before is not None:
+                before["removed_content_hashes"] = sorted(previous.removed_content_hashes)
+            if before != after:
+                changed_removed.append(record)
+        removed_hashes = {digest for r in removed.values() for digest in r.removed_content_hashes}
+        blocked = self.tombstones.blocked((r.entry_id, _content_hash(r.content)) for r in records if r.action != "remove")
+        live = [r for r in records if r.action != "remove" and r.entry_id not in blocked
+                and r.entry_id not in removed and _content_hash(r.content) not in removed_hashes]
+        now = time.time()
+        expired = [r for r in live if r.expires_at and r.expires_at <= now]
+        visible = [r for r in live if not r.expires_at or r.expires_at > now]
+        active, cold = partition_records(visible, max_chars, cold_ids=cold_ids, pinned_ids=pinned_ids)
         operation = uuid.uuid4().hex
         files, segments = {}, []
         reusable = {(item["tier"], item["sha256"], item["count"]): item for item in (old or {}).get("segments", [])}
         index_material = []
+        segment_numbers = {"active": 0, "cold": 0}
+        # 未来TTL按精确到期边界成片；不同期限混片会在较短TTL到期后再次让过期行挤占物理预算。
+        # 已经到期的历史仍可共片，未来任何时刻都能凭expires_before整片跳过。
+        groups = []
         for tier, rows in (("active", active), ("cold", cold)):
-            for offset in range(0, len(rows), 1000):
-                batch = rows[offset:offset + 1000]
+            groups.append((tier, [r for r in rows if not r.expires_at]))
+            expiry_groups = {}
+            for record in rows:
+                if record.expires_at:
+                    expiry_groups.setdefault(record.expires_at, []).append(record)
+            groups.extend((tier, group) for group in expiry_groups.values())
+        groups.append(("cold", expired))
+        for tier, rows in groups:
+            for batch in _generation_batches(rows):
                 text = _memory_events_text(batch)
-                relative = f"{self.directory.name}/{operation}/{tier}-{offset // 1000:06d}.jsonl"
+                relative = f"{self.directory.name}/{operation}/{tier}-{segment_numbers[tier]:06d}.jsonl"
+                segment_numbers[tier] += 1
                 digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 segment = reusable.get((tier, digest, len(batch)))
                 if segment is None:
                     files[self.path.parent / relative] = text
                     segment = {"path": relative, "tier": tier, "count": len(batch), "sha256": digest}
+                if all(r.expires_at for r in batch):
+                    segment = {**segment, "expires_before": max(r.expires_at for r in batch)}
                 segments.append(segment)
                 from ..retrieval.text_vector_cache import index_text
 
-                index_material.append([(r.entry_id, r.version, _content_hash(r.content), index_text(r.content, r.attributes)) for r in batch])
+                index_material.append([(r.entry_id, r.version, _content_hash(r.content), index_text(r.content, r.attributes), r.expires_at) for r in batch])
         root = {"schema_version": GENERATION_SCHEMA, "owner": self.tombstones.owner,
                 "generation": 1 if old is None else old["generation"] + 1,
                 "operation_id": operation, "segments": segments, "tombstone_file": self.tombstones.path.name,
-                "active_chars": sum(len(r.content) for r in active), "cold_chars": sum(len(r.content) for r in cold),
-                "active_total": len(active), "cold_total": len(cold), "total_records": len(live),
+                "active_chars": sum(len(r.content) for r in active), "cold_chars": sum(len(r.content) for r in [*cold, *expired]),
+                "active_total": len(active), "cold_total": len(cold) + len(expired), "total_records": len(live),
                 "active_budget_chars": max_chars, "pinned_overflow_chars": max(0, sum(len(r.content) for r in active) - max_chars)}
         if old and "legacy_quarantine" in old:
             root["legacy_quarantine"] = old["legacy_quarantine"]
@@ -355,7 +542,9 @@ class MemoryGenerationStore:
                                          "count": sum(bool(line.strip()) for line in quarantine.split("\n"))}
         root["index_signature"] = hashlib.sha256(json.dumps(index_material, ensure_ascii=False).encode()).hexdigest()
         root_text = json.dumps(root, ensure_ascii=False, sort_keys=True)
-        return {"root": root, "files": files, "root_text": root_text, "tombstone_text": tombstone_text,
+        return {"root": root, "files": files, "root_text": root_text,
+                "tombstone_text": read_text_beneath(self.tombstones.path.parent, (self.tombstones.path.name,)),
+                "barrier_records": tuple(changed_removed),
                 "has_tombstones": True, "expected_root": old,
                 "expected_tombstones": expected_tombstones,
                 "newly_removed": visible_before.intersection(removed)}
@@ -365,15 +554,18 @@ class MemoryGenerationStore:
     def publish(self, plan, *, write, admission=None, commit=None, redact=None):
         from ..user_space.owner_quota import OwnerQuotaChange
 
-        if (self.manifest() != plan["expected_root"]
-                or self.tombstones.prepare(())[1] != plan["expected_tombstones"]):
+        with self.tombstones.snapshot() as snapshot:
+            revision = snapshot.revision
+        if (self.manifest() != plan["expected_root"] or revision != plan["expected_tombstones"]):
             raise ValueError("MEMORY_GENERATION_CONFLICT")
         changes = {**plan["files"], self.manifest_path: plan["root_text"]}
         if plan["has_tombstones"]:
             changes[self.tombstones.path] = plan["tombstone_text"]
         # 所有新分片均为额外峰值，不以未来回收的净差额抵扣临时空间。
         if admission is not None:
-            admission.check([OwnerQuotaChange(path, len(text.encode("utf-8"))) for path, text in changes.items()])
+            admission.check([*[OwnerQuotaChange(path, len(text.encode("utf-8")) + 256) for path, text in changes.items()],
+                OwnerQuotaChange(self.tombstones.index.path, self.tombstones.index.path.stat().st_size + 65536
+                    + sum(len(r.to_json().encode()) * 3 for r in plan["barrier_records"]))])
         if redact is not None:
             redact()
         for path, raw in plan["files"].items():
@@ -384,6 +576,14 @@ class MemoryGenerationStore:
             write(path, raw)
         # 独立屏障先于正文清理；根发表失败也不得从旧代召回已明确遗忘的内容。
         try:
+            if plan["barrier_records"]:
+                # 原屏障写入口仍是准入边界；失败发生在任何新删除生效之前。
+                write(self.tombstones.path, self.tombstones.marker_text(revision))
+            revision = self.tombstones.index.publish(plan["barrier_records"], expected_revision=revision, commit=commit)
+            plan["root"]["barrier_revision"] = revision
+            plan["root_text"] = json.dumps(plan["root"], ensure_ascii=False, sort_keys=True)
+            if plan["barrier_records"]:
+                plan["tombstone_text"] = self.tombstones.marker_text(revision, deletion=True)
             if plan["has_tombstones"] and read_text_beneath(
                     self.path.parent, (self.tombstones.path.name,)) != plan["tombstone_text"]:
                 write(self.tombstones.path, plan["tombstone_text"])
@@ -394,7 +594,8 @@ class MemoryGenerationStore:
             if isinstance(exc, _NATIVE_MEMORY_ERRORS):
                 raise
             try:
-                changed = bool(plan["newly_removed"].intersection(self.tombstones.load()))
+                changed = bool(plan["newly_removed"].intersection(self.tombstones.blocked(
+                    (entry_id, "") for entry_id in plan["newly_removed"])))
             except (OSError, ValueError, TypeError):
                 changed = False
             if changed:

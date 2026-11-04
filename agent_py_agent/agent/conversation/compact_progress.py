@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 
 CONVERSATION_COMPACT_PROGRESS_SCHEMA = "conversation_compaction_progress.v1"
@@ -119,7 +120,55 @@ def normalize_conversation_compact_progress(value: object) -> dict[str, object]:
     if trigger_source in COMPACT_TRIGGER_SOURCES:
         payload["trigger_source"] = trigger_source
     payload.update({key: _nonnegative_int(value[key]) for key in _OPTIONAL_COUNT_FIELDS if key in value})
+    duration = value.get("duration_ms")
+    if type(duration) is int and duration >= 0:
+        payload["duration_ms"] = duration
+    stages = value.get("stage_durations_ms")
+    if phase in {"completed", "failed", "superseded"} and isinstance(stages, Mapping):
+        payload["stage_durations_ms"] = {key: count for key, count in stages.items()
+            if key in CONVERSATION_COMPACT_PROGRESS_STAGES and type(count) is int and count >= 0}
     return payload
+
+
+# LLM: 只保留当前压缩的8种固定阶段时长和一个终态日志标志；不持有摘要、消息、请求或提交权。
+# 类用途: 共用单调计时和一次终态记录，让三种压缩出口保持同一个口径。
+class CompactProgressTiming:
+    # LLM: 可绑定请求创建时刻；缺省从首个started事件开始，不混用墙上时钟。
+    # 函数用途: 初始化一次压缩的私有、非持久计时状态。
+    def __init__(self, started_monotonic=None):
+        self.started_monotonic = time.monotonic() if started_monotonic is None else started_monotonic
+        self.last_monotonic = self.started_monotonic
+        self.last_stage = "preparing"
+        self.stage_seconds = {}
+        self.terminal_logged = False
+
+    # LLM: 真实工作入口可以先切换计时归属，而不新增公开事件；终态之后冻结，不能再延长已完成耗时。
+    # 函数用途: 在工作开始时记下阶段边界，保留原公开事件顺序和百分比。
+    def enter_stage(self, stage):
+        if not self.terminal_logged:
+            now = max(self.last_monotonic, time.monotonic())
+            self.stage_seconds[self.last_stage] = self.stage_seconds.get(self.last_stage, 0.0) + now - self.last_monotonic
+            self.last_monotonic, self.last_stage = now, stage
+
+    # LLM: 每段只在阶段跃迁时累积、同阶段亦更新时间；终态后冻结时长，重复展示不能多打一条日志。
+    # 函数用途: 给当前事件补纯数字时长，并在终态输出不含正文的结构化记录。
+    def apply(self, payload, *, logger, thread_id=""):
+        self.enter_stage(payload["stage"])
+        payload["duration_ms"] = max(0, int((self.last_monotonic - self.started_monotonic) * 1000))
+        terminal = payload["phase"] in {"completed", "failed", "superseded"}
+        if terminal:
+            payload["stage_durations_ms"] = {stage: max(0, int(seconds * 1000)) for stage, seconds in self.stage_seconds.items()
+                if stage in CONVERSATION_COMPACT_PROGRESS_STAGES}
+        if terminal and not self.terminal_logged:
+            self.terminal_logged = True
+            try:
+                logger.info("会话压缩结束", extra={"event": "conversation_compaction", "thread_id": str(thread_id or ""),
+                    "phase": payload["phase"], "trigger_source": payload.get("trigger_source", ""),
+                    "before_tokens": payload["before_tokens"], "after_tokens": payload["after_tokens"],
+                    "source_messages": payload["source_messages"], "duration_ms": payload["duration_ms"]})
+            except Exception:
+                # 展示/日志失败不改变已提交的业务事实。
+                pass
 
 
 # LLM: 错误码只保留字母数字与下划线并限长，任何正文都不能借错误码进入公开事件。

@@ -349,6 +349,7 @@ def _build_active_turn_compact_plan(
         retained_tool_refs=retained_refs,
         projected_tokens_before=before_tokens,
         progress={
+            "_thread_id": thread.thread_id,
             "generation": generation,
             "operation_id": f"active-turn-archive:{uuid.uuid4().hex}",
             "source_kind": COMPACT_SOURCE_ACTIVE_TURN,
@@ -362,6 +363,7 @@ def _build_active_turn_compact_plan(
 
 
 # LLM: 摘要后、checkpoint 前只投影一次完整请求；失败沿原熔断，停止中性撤销，CAS 成功后原样返回投影。
+#   首阶段回调属于同一取消边界；计量前只切换私有时钟，不改变公开事件序列。
 # 函数用途: 可中断地生成、计量并提交跨片摘要，防止局部小估算让实际仍过大的请求取得覆盖权。
 def _execute_active_turn_compact(
     agent: object,
@@ -373,11 +375,12 @@ def _execute_active_turn_compact(
     callback = request.progress_callback
     progress = plan.progress
     raise_if_compact_interrupted(request.interrupt_check)
-    _emit_progress(callback, progress, phase="started", stage="preparing", percent=5)
-    _emit_progress(callback, progress, phase="progress", stage="summarizing", percent=20)
     try:
+        _emit_progress(callback, progress, phase="started", stage="preparing", percent=5)
+        _emit_progress(callback, progress, phase="progress", stage="summarizing", percent=20)
         replacement, provider_compaction = _active_turn_replacement_summary(agent, plan, request)
         raise_if_compact_interrupted(request.interrupt_check)
+        progress["_timing"].enter_stage("measuring")
         projection = _project_active_turn_request(agent, plan, request, replacement, provider_compaction)
         # 接受门与提交记的是折算后的值；projection 本身保留原始纯投影，供宿主提交后改写本轮观测基线。
         after_tokens = (
@@ -757,11 +760,9 @@ def _emit_progress(
     after_tokens: int = 0,
     failure: BaseException | None = None,
 ) -> None:
-    if callback is None:
-        return
     payload = {
         "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA,
-        **base,
+        **{key: value for key, value in base.items() if not key.startswith("_")},
         "phase": str(phase),
         "stage": str(stage),
         "percent": min(100, max(0, int(percent or 0))),
@@ -770,6 +771,17 @@ def _emit_progress(
     }
     if failure is not None:
         payload.update(compact_failure_progress_fields(failure))
+    import logging
+
+    from .compact_progress import CompactProgressTiming
+
+    timing = base.get("_timing")
+    if not isinstance(timing, CompactProgressTiming):
+        timing = CompactProgressTiming()
+        base["_timing"] = timing
+    timing.apply(payload, logger=logging.getLogger(__name__), thread_id=base.get("_thread_id", ""))
+    if callback is None:
+        return
     try:
         callback(payload)
     except (InterruptedError, ToolCancelled):
