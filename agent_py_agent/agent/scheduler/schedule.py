@@ -9,6 +9,7 @@ runtime authority never depends on words in the scheduled prompt.
 """
 
 import calendar
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -171,7 +172,12 @@ def validate_schedule(schedule: object) -> dict[str, object]:
 
 # LLM: 事件只由准确入站预留，不允许计算出历史轮询时间；原时间表达式保持旧算法。
 # 函数用途: 返回下次时间到期，事件来源返回 None。
-def compute_next_run(schedule: dict[str, object], *, after: float) -> float | None:
+def compute_next_run(schedule: dict[str, object], *, after: float, owner_id: str = '', monitor_id: str = '',
+                     window_seconds: int = 30) -> float | None:
+    if owner_id and monitor_id:
+        offset = monitor_jitter_seconds(owner_id, monitor_id, window_seconds=window_seconds)
+        base = compute_next_run(schedule, after=after - offset)
+        return base + offset if base is not None else None
     normalized = validate_schedule(schedule)
     kind = str(normalized["kind"])
     if kind == 'event_source':
@@ -192,6 +198,26 @@ def compute_next_run(schedule: dict[str, object], *, after: float) -> float | No
         timezone_name=str(normalized["timezone"]),
         after=float(after),
     )
+
+
+# LLM: 抖动只由准确owner/monitor和显式窗口决定，重启后不变，不读随机数或当前时间。
+# 函数用途: 计算监控到期的稳定错峰偏移秒数。
+def monitor_jitter_seconds(owner_id, monitor_id, *, window_seconds=30):
+    if type(window_seconds) is not int or window_seconds < 0:
+        raise ScheduleValidationError('jitter window_seconds must be nonnegative')
+    if not window_seconds:
+        return 0
+    return int(hashlib.sha256(f'{owner_id}:{monitor_id}'.encode()).hexdigest(), 16) % window_seconds
+
+
+# LLM: 原scheduled_for仍是周期身份；偏移只改变可派发时刻，不重复推进或延后重投。
+# 函数用途: 返回一个结构化资产监控的有效派发时间。
+def monitor_dispatch_after(run, *, owner_id, window_seconds=30):
+    base = max(float(run.get('dispatch_after') or 0), float(run.get('scheduled_for') or 0))
+    if not isinstance(run.get('execution_target'), dict) or run.get('trigger') != 'due':
+        return base
+    return max(float(run.get('dispatch_after') or 0), float(run.get('scheduled_for') or 0)
+               + monitor_jitter_seconds(owner_id, run.get('job_id', ''), window_seconds=window_seconds))
 
 
 def schedule_timestamp(schedule: dict[str, object]) -> float:

@@ -1,3 +1,4 @@
+"""定时资产执行沿原工具授权和运行账本，监控业务使用专用有界worker。"""
 # LLM: 来源沿原ThreadStore/HostActor与run；旧work双引用证明仅交原queued CAS规范，不产生第二个权限、迁移或模型账。
 # 模块用途: 冻结规范定时来源并物化独立线程；同通道通知沿显式继任链解析，执行来源不迁移，失败重投不重执业务。
 from __future__ import annotations
@@ -7,6 +8,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from copy import copy, deepcopy
 from dataclasses import asdict, replace
+from functools import partial
 
 from .delivery_policy import TARGET_DELIVERY_MODES
 from .execution_policy import (
@@ -56,7 +58,7 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
 
 # LLM: 原宿主轮内只冻结同工具的数据，不改共享 registry/权限；脚本复用原 ContextVar 快照。
 # 函数用途: 通过原工具执行器运行固定资产，保留审批、取消、归档和 attempt 结算。
-def _execute_target_tool(agent, params, target):
+def _execute_target_tool(agent, params, target, *, monitor_id=''):
     from types import SimpleNamespace
 
     from ..agent_core._tool_loop_service import _record_tool_call
@@ -81,8 +83,12 @@ def _execute_target_tool(agent, params, target):
             runtime = snapshot.runtime(name)
             if runtime is None:
                 raise ExecutionTargetError('定时执行目标工具当前不可用', error_code='SCHEDULER_EXECUTION_TARGET_UNAVAILABLE')
+            if monitor_id:
+                from .pinned_targets import resolve_monitor_target
+                target = resolve_monitor_target(agent.home_paths.owner_home_dir, monitor_id, target)
+                target.pop('upgrade_notice', None)
             target, definition = resolve_execution_target(agent, target, runtime=runtime)
-            tool = copy(runtime.handler)
+            tool = _bind_pinned_tool(runtime.handler, target, definition)
             # 只有 scheduler 冻结的结果出口可通知，不能按当前会话另发一条。
             tool.im_notifier = None
             scope.enter_context(bind_asset_im_notifier(tool.owner_home, lambda _notice: 'suppressed'))
@@ -96,6 +102,8 @@ def _execute_target_tool(agent, params, target):
                 for item in snapshot.runtimes))
             arguments = {'action': 'run', ('workflow_id' if name == 'workflows' else 'script_id'): target['asset_id'],
                 'inputs': deepcopy(target['input_ref']['inputs'])}
+            if target['kind'] == 'workflow':
+                arguments['concurrency_policy'] = 'skip_if_running'
             call = ToolCall(call_id=f'host-tool-{params.request_id}', tool_name=name, arguments=arguments,
                 source_protocol='text', schema_hash=runtime.model_spec.schema_hash,
                 run_id=bound.run_id, turn_id=bound.request_id, attempt_id=bound.attempt_id)
@@ -109,6 +117,38 @@ def _execute_target_tool(agent, params, target):
                 raise InterruptedError('定时资产执行已中断')
             turn.runtime_status = 'ok' if execution.result.ok else 'failed'
             return execution, outputs[-1] if outputs else ''
+
+
+# LLM: 仅修改本次handler和engine副本；版本参数不经模型schema、不改共享工具注册表。
+# 函数用途: 把准确的工作流版本或脚本SHA接到原工具执行入口。
+def _bind_pinned_tool(handler, target, definition):
+    from types import SimpleNamespace
+    tool = copy(handler)
+    if target['kind'] == 'workflow':
+        tool.store = SimpleNamespace(owner_home=tool.owner_home,
+            get_workflow=lambda identifier: deepcopy(definition) if identifier == target['asset_id'] else None)
+        if 'definition_version' in target:
+            tool.engine = copy(tool._execution_engine())
+            tool.engine.run_workflow = partial(tool.engine.run_workflow, definition_version=target['definition_version'])
+    elif 'expected_script_pin' in target:
+        tool._dispatch = partial(_pinned_script_dispatch, tool, target)
+    return tool
+
+
+# LLM: 原ScriptTool已校验并授权；宿主固定pin只传给已有数据源执行seam，runner选项仍来自原宿主。
+# 函数用途: 在脚本工具的单次run中传递历史代码身份。
+def _pinned_script_dispatch(tool, target, params):
+    from ..tooling.scripts_tool import _plain
+    from ..workflows.datasource_runtime import run_script_with_datasources
+    from ..workflows.script_runner import ScriptRunner
+    if params.get('action') != 'run' or params.get('script_id') != target['asset_id']:
+        raise ValueError('scheduled script target mismatch')
+    runner = tool.runner
+    if runner is None and tool.runner_options_provider is not None:
+        runner = ScriptRunner(tool.owner_home, workspace_root=tool._workspace_root(), **tool.runner_options_provider())
+    return _plain(run_script_with_datasources(tool.owner_home, target['asset_id'], params.get('inputs', {}),
+        runner=runner, workspace_root=tool._workspace_root(), expected_script_pin=target['expected_script_pin'],
+        timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
 
 
 # LLM: 业务仅执行一次，结果/用量先落原 run；欠发只走原 outbox，分析调用数取原模型账而非节点个数。
@@ -129,10 +169,21 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
         task_attributes=_background_task_attributes(thread.thread_id, _run_request(kwargs), agent, thread=thread),
         write_boundary={'task_id': claim.run_id})
     try:
-        execution, output = _execute_target_tool(agent, params, claim.run['execution_target'])
+        from ..agent_core.runtime_mixin import current_prompt_scope
+        future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
+            partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id']),
+            run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
+        result = future.result()
+        if isinstance(result, dict) and result.get('status') == 'skipped':
+            service.finish(claim, status='skipped', response=json.dumps(result), error_code=result['error_code'])
+            service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'cancelled',
+                'expected_status': 'active', 'now': time.time()})
+            service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=time.time())
+            return
+        execution, output = result
     except ScheduleValidationError as exc:
         code = getattr(exc, 'error_code', 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE')
-        ok, output = False, json.dumps({'error_code': code}, ensure_ascii=False)
+        ok, output = False, json.dumps({'error_code': code, 'reason': getattr(exc, 'reason', '')}, ensure_ascii=False)
     else:
         ok, code = execution.result.ok, execution.result.error_code or ''
         if not ok and notify is not None:

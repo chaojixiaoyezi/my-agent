@@ -1,3 +1,4 @@
+"""调度执行身份及固定内容合同，历史解析沿发布版本而非当前替代定义。"""
 # LLM: job来源沿原ExecutionOrigin/typed actor规范，执行位置与原聊天分开；策略保存在原job并复制到run，不从文本或attrs补身份。
 # 模块用途: 统一IM计划的原聊天、后台位置、隔离、模型和预检合同，不保存凭据或另建来源账。
 from __future__ import annotations
@@ -42,6 +43,7 @@ EXECUTION_TARGET_SCHEMA = {
     'description': '直接执行 workflow/script，不启动外层模型。省略定义引用时宿主固定当前定义；input_ref.inputs 为冻结 JSON 入参。定义变化须显式更新计划，运行统计不会使引用漂移。',
     'properties': {'kind': {'type': 'string', 'enum': ['workflow', 'script']},
         'asset_id': {'type': 'string'}, 'execution_definition_ref': {'type': 'object'},
+        'pinned_version': {'type': 'integer', 'minimum': 1},
         'input_ref': {'type': 'object', 'additionalProperties': False,
             'properties': {'inputs': {'type': 'object'}}, 'required': ['inputs']}},
     'required': ['kind', 'asset_id'],
@@ -55,7 +57,7 @@ def normalize_execution_target(value, *, require_reference=True):
 
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) - {'kind', 'asset_id', 'execution_definition_ref', 'input_ref'}:
+    if not isinstance(value, dict) or set(value) - {'kind', 'asset_id', 'execution_definition_ref', 'input_ref', 'pinned_version'}:
         raise ScheduleValidationError('execution_target 字段无效')
     kind, identifier = value.get('kind'), value.get('asset_id')
     if kind not in {'workflow', 'script'} or not isinstance(identifier, str):
@@ -70,7 +72,7 @@ def normalize_execution_target(value, *, require_reference=True):
                 or len(reference['definition_sha256']) != 64
                 or any(c not in '0123456789abcdef' for c in reference['definition_sha256'])):
             raise ScheduleValidationError('execution_definition_ref 必须是宿主固定的原资产定义引用')
-    elif require_reference:
+    elif require_reference and 'pinned_version' not in value:
         raise ScheduleValidationError('execution_target 缺少固定 execution_definition_ref')
     inputs = value.get('input_ref', {'inputs': {}})
     if not isinstance(inputs, dict) or set(inputs) != {'inputs'} or not isinstance(inputs['inputs'], dict):
@@ -79,19 +81,20 @@ def normalize_execution_target(value, *, require_reference=True):
         json.dumps(inputs, allow_nan=False)
     except (ValueError, TypeError) as exc:
         raise ScheduleValidationError('input_ref 必须为有限 JSON') from exc
-    return {'kind': kind, 'asset_id': identifier, 'execution_definition_ref': deepcopy(reference), 'input_ref': deepcopy(inputs)}
+    pin = value.get('pinned_version')
+    if 'pinned_version' in value and (type(pin) is not int or pin < 1):
+        raise ScheduleValidationError('pinned_version 必须是正式发布编号')
+    return {'kind': kind, 'asset_id': identifier, 'execution_definition_ref': deepcopy(reference), 'input_ref': deepcopy(inputs),
+            **({'pinned_version': pin} if pin is not None else {})}
 
 
 # LLM: 摘要只排除原资产的运行/展示投影和 CAS；代码、步骤、来源、连接声明及执行开关仍属于固定定义。
 # 函数用途: 从原领域读取的完整定义计算稳定执行引用，不执行或保存资产。
 def execution_definition_ref(kind, asset_id, definition):
-    value = deepcopy(definition.to_dict() if hasattr(definition, 'to_dict') else definition)
-    descriptor = value.get('descriptor', value)
-    for key in ('revision', 'runtime_summary', 'used_by', 'entrypoint_path', 'source_check',
-                'source_system', 'source_binding', 'last_check_result'):
-        descriptor.pop(key, None)
-    digest = hashlib.sha256(json.dumps(value, ensure_ascii=False, allow_nan=False,
-        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    from ..assets.descriptor import execution_definition_ref as script_reference
+    from ..assets.workflow_store import execution_definition_ref as workflow_reference
+    value = definition.to_dict() if hasattr(definition, 'to_dict') else definition
+    digest = workflow_reference(value, kind=kind) if kind == 'workflow' else script_reference(value, kind=kind)
     return {'schema_version': 'scheduler_execution_definition.v1', 'kind': kind,
         'asset_id': asset_id, 'definition_sha256': digest}
 
@@ -112,20 +115,20 @@ def resolve_execution_target(agent, value, *, runtime=None):
     store = tool._store()
     definition = (store.get_workflow(target['asset_id']) if target['kind'] == 'workflow'
                   else store.get_script(target['asset_id']))
-    if definition is None:
-        raise ScheduleValidationError('定时执行目标不存在')
-    reference = execution_definition_ref(target['kind'], target['asset_id'], definition)
-    if target['execution_definition_ref'] not in (None, reference):
-        raise ExecutionTargetError('固定资产定义已变化，请显式更新计划', error_code='SCHEDULER_EXECUTION_DEFINITION_STALE')
-    return {**target, 'execution_definition_ref': reference}, definition
+    reference = execution_definition_ref(target['kind'], target['asset_id'], definition) if definition is not None else None
+    from .pinned_targets import resolve_pinned_target
+    return resolve_pinned_target(agent.home_paths.owner_home_dir, target, definition, reference)
 
 
 # LLM: 机器分类只读取类型及错误码，文案仅供解释；继承原校验异常保持工具旧错误出口。
 # 类用途: 区分目标定义漂移与一般输入失败，不从异常正文推导状态。
 class ExecutionTargetError(ScheduleValidationError):
-    def __init__(self, message, *, error_code):
+    # LLM: 原错误码不变，额外reason只供结构化展示和验证。
+    # 函数用途: 携带固定版本失败的准确分类。
+    def __init__(self, message, *, error_code, reason=''):
         super().__init__(message)
         self.error_code = error_code
+        self.reason = reason
 
 
 # LLM: 缺省保持原会话继承行为；固定引用必须是明确档案，不能用可变 default 别名代替固定语义。

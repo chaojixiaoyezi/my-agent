@@ -33,6 +33,8 @@ from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 def asset_case(tmp_path, kind="script", *, analysis=False):
     agent = _agent(tmp_path)
+    # 旧用例观察未错峰的精确周期身份；抖动单独由v15的真实派发测试验证。
+    agent.scheduler_service.monitor_jitter_window_seconds = 0
     agent.backend = _Backend()
     home = agent.home_paths.owner_home_dir
     scripts = ScriptStore(home, workspace_root=tmp_path)

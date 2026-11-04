@@ -148,6 +148,8 @@ class SchedulerService:
         skill_snapshot_provider: Callable[[], Any] | None = None,
         follow_up: Any | None = None,
         cancellation_handler: Callable[[dict], Any] | None = None,
+        monitor_pool: Any | None = None,
+        monitor_jitter_window_seconds: int = 30,
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store
@@ -155,6 +157,9 @@ class SchedulerService:
         self.skill_snapshot_provider = skill_snapshot_provider
         self.follow_up = follow_up
         self.cancellation_handler = cancellation_handler
+        from .monitor_pool import MonitorPool
+        self.monitor_pool = monitor_pool if monitor_pool is not None else MonitorPool()
+        self.monitor_jitter_window_seconds = monitor_jitter_window_seconds
         prepare_repository(repository, conversation_store, now=time.time())
 
     # LLM: queued run仍是唯一durable root，便宜检查仅透传给现行dispatch读取；取消、事件和恢复顺序不变。
