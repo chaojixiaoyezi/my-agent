@@ -2,12 +2,15 @@
 # 模块用途: 验证同业务turn的能力展示、恢复和canonical发现入口。
 """child 同一业务 turn 的原展示载体：真实运行、快照和 Compact，供应商仅用本地 fake。"""
 from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.agent_core.subagent import run_flow
+from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
 from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
@@ -26,11 +29,37 @@ from agent_py_agent.tests.test_tool_presentation_projection import (
     prepared as tool_surface,  # noqa: F401
 )
 
+_CAPTURED_CHILD_MAIN_CALL = ContextVar("test_child_capability_main_call", default=False)
+
+
+# LLM: 只改变本文件fake的响应分流和观察计数，不替换宿主准备、压缩、账本或权限链。
+# 类用途: 按真实主生成作用域区分业务和摘要，避免摘要措辞变化被误记为业务重试。
+class _ScopedOverflowThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
+    # LLM: scope由原主生成入口绑定并随copy_context进入worker；提示词正文不参与分类。
+    # 函数用途: 保留一次业务overflow、摘要及最终业务回复，分别记录实际provider输入。
+    def generate(self, prompt, on_chunk=None, **kwargs):
+        if not _CAPTURED_CHILD_MAIN_CALL.get():
+            self.summary_prompts.append(prompt)
+            self.summary_kwargs.append(dict(kwargs))
+            return ModelResponse(text="旧轮次已完成现状核对；继续执行当前子任务。", backend=self.name)
+        self.model_prompts.append(prompt)
+        self.model_messages.append(list(kwargs.get("messages") or []))
+        self.model_kwargs.append(dict(kwargs))
+        if self.overflow_once and len(self.model_prompts) == 1:
+            return ModelResponse(
+                text="provider reported context pressure", backend=self.name,
+                runtime_status="context_overflow", runtime_reason="context_overflow",
+                runtime_source="provider_error", usage={"input_tokens": 90_000, "output_tokens": 10},
+            )
+        return ModelResponse(text="已核对来源，子任务完成。", backend=self.name,
+                             usage={"input_tokens": 500, "output_tokens": 100})
+
 
 # LLM: 复用原配置、目录、快照和 Agent.run；fake 后端只制造一次 provider overflow 并返回摘要及最终回复，禁止真实网络。
+# 主调用只包裹原generate_model_response，摘要走原辅助入口；不从prompt、工具列表或调用序号猜用途。
 # 函数用途: 为 child 和后台测试提供同一批真实可发现工具和技能，比较最终 provider 输入而非手拼预期 renderer。
 @pytest.fixture
-def capability_host(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F811
+def capability_host(tmp_path, tool_surface, skill_catalog_factory, monkeypatch):  # noqa: F811
     agent = _agent(tmp_path, context_tokens=1_000_000)
     self_map = agent.tools.tools["self_map"]
     # PTL 重试上限已是读取点旁的具名常量（agent_core.tool_context.ptl_retry.DEFAULT_PTL_RETRY_MAX_COUNT），
@@ -43,13 +72,43 @@ def capability_host(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     agent.skill_snapshot_for_run_scope = lambda _: catalog.snapshot
     registry.register(SkillSearchTool(agent))
     registry.register(self_map)
-    backend = _OverflowThenCompleteChildBackend()
+    backend = _ScopedOverflowThenCompleteChildBackend()
     backend.model_name = "test-model"
     backend.context_window_tokens = 1_000_000
     agent.backend = backend
+    original_generate = _tool_loop_service.generate_model_response
+
+    # LLM: 仅设置测试观察范围并透传原request，异常也必须恢复上下文，不改任何生成输入。
+    # 函数用途: 让后端worker知道本次是否来自真实主生成入口。
+    def generate(request):
+        token = _CAPTURED_CHILD_MAIN_CALL.set(True)
+        try:
+            return original_generate(request)
+        finally:
+            _CAPTURED_CHILD_MAIN_CALL.reset(token)
+
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
     profile, _ = decision(agent)
     patch(agent, {"enabled": True, "profile_id": profile, "points.skill_tool.mode": "apply"})
     return SimpleNamespace(agent=agent, backend=backend, first=first, second=second)
+
+
+@pytest.mark.parametrize("main_call", [False, True], ids=["summary", "business"])
+@pytest.mark.parametrize("prompt", [
+    "You maintain a conversation summary",
+    "只保留已经核对的历史事实。",
+], ids=["legacy-marker", "reworded"])
+def test_child_fake_backend_routes_by_generation_scope_not_prompt_text(capability_host, main_call, prompt):
+    backend = capability_host.backend
+    token = _CAPTURED_CHILD_MAIN_CALL.set(main_call)
+    try:
+        response = backend.generate(prompt)
+    finally:
+        _CAPTURED_CHILD_MAIN_CALL.reset(token)
+    assert backend.model_prompts == ([prompt] if main_call else [])
+    assert backend.summary_prompts == ([] if main_call else [prompt])
+    assert (response.runtime_status == "context_overflow") is main_call
+    assert _CAPTURED_CHILD_MAIN_CALL.get() is False
 
 
 # LLM: 旧历史只写入原 child/main thread；在业务发送前从 canonical 原行取得预期消息，不从摘要输出反推合同。
