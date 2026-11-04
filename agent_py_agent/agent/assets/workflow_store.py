@@ -254,7 +254,7 @@ class WorkflowStore(_AssetStore):
             update_due_index(self, saved, committed=True)
         return saved
 
-    # LLM: 输入共用严格from_any，显式scope选写根，CAS在锁内读取实际目标，投影路径不产生权限。
+    # LLM: 输入共用严格from_any，显式scope选写根；锁内CAS及宿主归属保护，普通metadata不能认领或撤销隐藏组合。
     # 函数用途: 创建或替换Owner/项目工作流，汇总引用并返回递增revision。
     def save_workflow(self, definition, *, target_scope='owner', expected_revision=None):
         definition = WorkflowDefinition.from_any(definition)
@@ -264,6 +264,14 @@ class WorkflowStore(_AssetStore):
             next_asset_revision(old.descriptor.to_dict() if old else None, expected_revision)
             # 普通正文编辑不能借 metadata 改宿主范围、治理或操作回执。
             metadata = dict(definition.descriptor.metadata)
+            for key in ('hidden', 'composition'):
+                metadata.pop(key, None)
+                if old and key in old.descriptor.metadata:
+                    metadata[key] = old.descriptor.metadata[key]
+            if old and 'composition' in old.descriptor.metadata:
+                metadata.pop('base_workflow_pin', None)
+                if 'base_workflow_pin' in old.descriptor.metadata:
+                    metadata['base_workflow_pin'] = old.descriptor.metadata['base_workflow_pin']
             if old and '_run_summary_spool' in old.descriptor.metadata:
                 metadata['_run_summary_spool'] = old.descriptor.metadata['_run_summary_spool']
                 if definition.descriptor.runtime_summary == type(old.descriptor.runtime_summary)():

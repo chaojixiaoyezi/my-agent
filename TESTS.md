@@ -1,3 +1,39 @@
+## 2026-11-04 R1：监控组合发布 pin 与原子归属保护
+
+来源：`rework-sol-r1.md`（`v15-sol-r1`），审计基线 `d89e9c5f9e08cf877a7fb451d199146fb1ef6d45`。仅修改 `monitor_composition.py`、`workflow_store.py`、`test_v15_w8_composition_pins.py` 和本记录；`monitor_adapter.py` 已核对但未改，scheduler/R2 文件未改。没有部署、启停服务或修改解释器环境。
+
+### 行为与因果链
+
+- 原组合普通保存先生成有效依赖 pin，随后显式空 `scripts` 发布成为被选版本，导致真实历史 resolver 拒绝。现沿用 canonical `_save` 的事务/历史回调，只发布一次合成 pin：基础步骤继承所选基础发布的历史 SHA，追加专属依赖使用现有历史原语冻结；共享 ID 保留继承身份，不读当前脚本重定义基础版本。全部实际脚本的历史记录、代码及侧文件可用性在提交前核验；无法表示的 workflow pin 冲突明确拒绝。
+- 原 `monitor-<id>` 命中无关 workflow 后，使用该对象 revision 通过 CAS 并不能证明归属。现于同一根→集合锁内读取 canonical、核对 `hidden is True` 与宿主 `composition.monitor_id`、计算 pin，再作 revision CAS 保存；同名非同监控组合明确报冲突，不覆盖、不另造隐式目标。普通 `save_workflow` 剥离新声明的宿主字段并保留原宿主 provenance，hidden 不作为调用者可自签的授权令牌。
+- 返回版本、绑定的 `composition_version`/execution target 与唯一历史记录一致；同正文且同完整 pin 可复用，显式基础升级和合法替换只追加一条新记录，旧记录不改。现有 monitor→根→集合及历史锁顺序、原存储事务和消费端 required-pin 校验保留；无整 owner 扫描。改动函数补双层注释。
+
+### 实际验证与反证
+
+| 观察点 | 结果 | 证据（隔离测试 HOME 下的 JUnit） |
+|---|---|---|
+| 最终专项单文件，同一回归入口与断言 | 25 通过，0 failure/error/skip，退出 0 | `r1-gate-reviewed.xml` |
+| 专项 + W4 version hook + W5 pinned execution + W8 stale continuity + run-summary spool | 80 通过，0 failure/error/skip，退出 0；包含前述 25 项，不相加计覆盖 | `r1-reviewed-neighbors.xml` |
+| 最终同一 25 项测试拷入未改产品的审计基线快照 | 20 失败、5 通过，0 error/skip，退出 1（预期反证）；其中 AST 变异用例在旧源码也因缺新锁结构失败，不冒充 20 条独立产品漏洞 | `r1-falsification-reviewed.xml` |
+| 开工仅补两条核心真实 Store 回归 | 原 3 通过、2 失败；修复后原断言保留并纳入最终专项全绿 | `r1-red.xml` |
+| 首轮评审的遗漏继承 pin/blob 与两个 AST 变异反例 | 修前 3 失败、1 正常对照通过；修后纳入最终专项全绿 | `r1-review-red.xml` |
+
+真实 ScriptStore/WorkflowStore/MonitorBindingStore、publication record、resolver 和 `WorkflowEngine.run_workflow(definition_version=...)` 已覆盖：当前脚本改写/删除仍执行基础历史字节、追加依赖冻结/共享 ID、重复保存、替换/升级、无关或其他监控 ID 碰撞、伪造宿主字段、缺历史 blob、不可表示的 pin 冲突、Event 同步的竞争创建及更新。成功/冲突/依赖错误/竞争路径实测 `fd_delta == 0`；独立 open→计数加一→close→恢复对照验证 FD 观测有效。状态终态单调、同 execution scope 活跃数与 cleanup proof 本轮无实现改动，不能从本片测试外推其全面证明。
+
+AST 静态合同留在本片允许的测试文件：检查同锁体读取→归属拒绝→合成 pin 来源→唯一保存及正式发布来源；内存变异“先保存后拒绝”和“pin 来源置空”均被实际拦截。它是结构性回归门，不是任意控制流/数据流的形式证明。独立 6.1sol 首审发现两条 P2，父级复现后修正；第二轮静态复评确认两条可关闭，评审者未独立执行测试或 FD 测量。
+
+复跑须在 worktree 根；本机 `safe_path` 会使默认导入指向别树，因此仅为命令显式设置 `PYTHONPATH="$PWD"`，并已核实 `find_spec('agent_py_agent').origin` 落在本 worktree。隔离 HOME 为 `/private/tmp/my-agent-home-rework-r1`，JUnit 均在该目录，未安装依赖或改用户 Python：
+
+```bash
+export PYTHONPATH="$PWD"
+HOME=/private/tmp/my-agent-home-rework-r1 MY_AGENT_HOME=/private/tmp/my-agent-home-rework-r1 PYTHONDONTWRITEBYTECODE=1 /Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest agent_py_agent/tests/test_v15_w8_composition_pins.py -q --tb=short
+HOME=/private/tmp/my-agent-home-rework-r1 MY_AGENT_HOME=/private/tmp/my-agent-home-rework-r1 PYTHONDONTWRITEBYTECODE=1 /Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest agent_py_agent/tests/test_v15_w8_composition_pins.py agent_py_agent/tests/test_v15_w4_version_hook.py agent_py_agent/tests/test_v15_w5_pinned_execution.py agent_py_agent/tests/test_v15_w8_stale_continuity.py agent_py_agent/tests/test_scale_run_summary_spool.py -q --tb=short
+ruff check agent_py_agent/agent/assets/monitor_composition.py agent_py_agent/agent/assets/monitor_adapter.py agent_py_agent/agent/assets/workflow_store.py agent_py_agent/tests/test_v15_w8_composition_pins.py
+git diff --check
+```
+
+analysis/model 在实际外部边界使用本地函数隔离；真实 scheduler/provider 服务端到端、其他平台及全仓矩阵未验证。R1 为本轮 `TESTS.md` 单一写入者；R2 的准确条目和证据由集成者转交后在集成阶段补入，本记录不声称 R2 已运行或已集成。
+
 ## 2026-11-01 W16 常量投影、台账与同源验收边界
 
 来源：本轮 `plan-w16.md` 及总控明确追加的 `plan-w16-fix.md`。只修改本片文档、原 `build_constants_catalog.py` 生成的 JSON，以及新获授权的待整改 fixture；不改测试函数/断言、生成器或产品 Python。统一状态见 [MEGA_DISPATCH_PROGRESS](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，完整复跑命令、81 案例/102 动作/27 Issue 和最终封包条件见 [MEGA_ACCEPTANCE](docs/tasks/MEGA_ACCEPTANCE.md)。
