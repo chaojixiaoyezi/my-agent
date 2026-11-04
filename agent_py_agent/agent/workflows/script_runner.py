@@ -38,7 +38,12 @@ from ..common.managed_owner_generation import (
     ManagedOwnerGenerationError,
     require_managed_owner_generation,
 )
-from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
+from ..common.nofollow_fs import (
+    ensure_private_dir,
+    open_directory_beneath,
+    read_text_beneath,
+    write_text_atomic_beneath,
+)
 from ..path_access_policy import (
     HostSandboxPaths,
     owner_home_containing,
@@ -49,6 +54,7 @@ from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
 from .datasource_runtime import ScriptDatasourceRuntime
 from .models import ScriptExecutionResult, payload, safe_path
+from .run_artifacts import RunArtifactBatch, RunOutError, current_run_out_target
 
 # 原生工作流脚本标准输出与错误流保留的最大字节数。
 MAX_OUTPUT_BYTES = 1024 * 1024
@@ -504,13 +510,14 @@ def _network_access(metadata, override):
     return not targets or any(access_target_requires_network(target) for target in targets)
 
 
-# LLM: 从宿主副本清洗凭据，仅添加引用占位符；工作目录、HOME与TMPDIR均指向本次冻结目录。
+# LLM: 从宿主副本清洗凭据及旧run-out，仅添加引用占位符；工作目录、HOME与TMPDIR均指向本次冻结目录。
 # 函数用途: 准备脚本输入和不携带宿主密钥的环境。
 def _environment(metadata, folder, input_json, sources, *, host_credential_env_names=frozenset(), work_context=None):
     environment = scrub_subprocess_env(dict(os.environ), host_credential_env_names=host_credential_env_names)
     # 不继承另一运行或操作者环境伪造的工作上下文；只有本启动器可注入当前冻结值。
     for key in tuple(environment):
-        if key.startswith('MY_AGENT_SCRIPT_INPUT_') or key in ('MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE'):
+        if key.startswith('MY_AGENT_SCRIPT_INPUT_') or key in (
+                'MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE', 'MY_AGENT_RUN_OUT'):
             environment.pop(key, None)
     environment.update(PYTHONIOENCODING='utf-8', PAGER='cat', GIT_PAGER='cat', HOME=str(folder), TMPDIR=str(folder),
                        MY_AGENT_DATA_SOURCES_JSON=json.dumps(sources, ensure_ascii=False, allow_nan=False))
@@ -791,7 +798,10 @@ def _owner_read_boundary(owner_scope_root, agent_home_root):
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。
 # 类用途: 按 Owner 的脚本配置执行 Python、bash 或 sh，且不调用任何模型。
 class ScriptRunner:
-    # LLM: 仅绑定宿主正负路径快照与owner读取墙；新增保护参数默认为空，保留直接runner与restriction默认值，不从业务输入授权。
+    RUN_OUT_MAX_FILES = 64
+    RUN_OUT_MAX_BYTES = 64 * 1024 * 1024
+
+    # LLM: 仅绑定宿主路径/owner墙/可选归档配额；None不注入目录或改变原执行链，不从业务输入授予权限。
     # 函数用途: 保存Owner、数据源workspace、绝对保护、普通拒写范围及冻结owner墙。
     def __init__(
         self,
@@ -811,6 +821,7 @@ class ScriptRunner:
         host_path_protection: HostSandboxPaths | None = None,
         owner_scope_root: str | Path | None = None,
         agent_home_root: str | Path | None = None,
+        run_out_quota: object = None,
     ):
         self.owner_home = Path(owner_home).absolute()
         self.owner_scope_root, self.agent_home_root = _owner_read_boundary(owner_scope_root, agent_home_root)
@@ -824,6 +835,7 @@ class ScriptRunner:
         self.host_credential_env_names = frozenset(host_credential_env_names)
         self.host_exclusive_paths = tuple(Path(path).expanduser().resolve(strict=False) for path in host_exclusive_paths)
         self.delivery_handler = delivery_handler
+        self.run_out_quota = run_out_quota
         protection = write_protection or SandboxWriteProtection()
         self.write_protection = SandboxWriteProtection(
             absolute_paths=tuple(Path(p).expanduser().resolve(strict=False) for p in protection.absolute_paths),
@@ -899,7 +911,7 @@ class ScriptRunner:
             receipts.append(payload(receipt))
         return tuple(receipts)
 
-    # LLM: 原生沙箱与Python守卫共用冻结正负范围；scratch仅授权本次生成目录，owner数据无临时例外，finally沿原清理。
+    # LLM: 原沙箱范围不变；只有正式目标+quota才在scratch内加run_out，绑定时清理失败必须传播，不能发表文件丢失成功。
     # 函数用途: 冻结代码、绑定连接，投影宿主及人格保护并清理本次临时目录。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
@@ -940,9 +952,18 @@ class ScriptRunner:
             net_allowed = _network_access(metadata, network_access)
             denied_ports = gateway_bound_ports()
             context = self._work_context(folder)
+            target = current_run_out_target(self.owner_home) if self.run_out_quota is not None else None
+            if target is not None:
+                descriptor = open_directory_beneath(folder, ('run_out',), create=True, require_dir_fd=True)
+                os.close(descriptor)
+                capture['run_out_target'] = target
+                if context is not None:
+                    context['run_out_dir'] = str(folder / 'run_out')
             capture['work_context'] = context
             env = _environment(metadata, folder, input_json, sources,
                 host_credential_env_names=self.host_credential_env_names, work_context=context)
+            if target is not None:
+                env['MY_AGENT_RUN_OUT'] = str(folder / 'run_out')
             ds_runtime = ScriptDatasourceRuntime(self.owner_home, metadata, folder, env, timeout,
                 capture if capture is not None else {}, workspace_root=self.workspace_root)
             private_roots = _script_private_roots(self.owner_home, self.workspace_root) if self.restrict_to_roots else ()
@@ -1012,11 +1033,22 @@ class ScriptRunner:
         finally:
             try:
                 if ds_runtime is not None:
-                    ds_runtime.close()
+                    try:
+                        ds_runtime.close()
+                    except Exception as exc:
+                        if capture.get('run_out_target') is not None:
+                            raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED') from exc
+                        raise
             finally:
-                shutil.rmtree(folder, ignore_errors=True)
+                if capture.get('run_out_target') is None:
+                    shutil.rmtree(folder, ignore_errors=True)
+                else:
+                    try:
+                        shutil.rmtree(folder)
+                    except OSError as exc:
+                        raise RunOutError('SCRIPT_RUN_OUT_HARVEST_FAILED') from exc
 
-    # LLM: record_summary仅由可信执行器传入；False不改脚本修订/计数，沙箱、数据源、超时与清理保持原执行链。
+    # LLM: 原摘要/超时/沙箱链不变；run-out清理前暂存、清理后发表；归档异常硬失败并透传有界脱敏首因。
     # 函数用途: 执行脚本并返回结构化结果，单步调试可显式禁止资产摘要写入。
     def run_script(self, script_id, inputs=None, *, timeout_seconds: int | float | None = None,
                    override_data_sources=None, network_access: bool | None = None, record_summary: bool = True):
@@ -1026,6 +1058,7 @@ class ScriptRunner:
         metadata, sources, output, stdout, stderr, error, exit_code = {}, {}, {}, '', '', '', None
         cleanup, capture, execution_error = {}, {'phase': 'preflight', 'timings': dict.fromkeys(_TIMING_FIELDS, 0.0)}, {}
         delivery_receipts = []
+        batch, envelope_parsed, output_dir, output_artifacts = None, False, '', ()
         try:
             inputs = payload({} if inputs is None else inputs)
             with self._prepare(script_id, inputs, timeout_seconds, override_data_sources, network_access, capture=capture) as prepared:
@@ -1033,18 +1066,27 @@ class ScriptRunner:
                 # 原生脚本进程启动前复核受管原代次；失效时进程未启动。
                 require_managed_owner_generation("native_script_launch")
                 exit_code, stdout, stderr, error, cleanup = _execute(*execution, capture)
+                if capture.get('run_out_target') is not None and not error and exit_code == 0 and not cleanup:
+                    capture['phase'] = 'finalize'
+                    output, intents, error = _parse_result_envelope(stdout, metadata.get('io_contract', {}))
+                    envelope_parsed = True
+                    if not error:
+                        batch = RunArtifactBatch(capture['run_out_target'], self.run_out_quota)
+                        batch.stage(Path(execution[1]), max_files=self.RUN_OUT_MAX_FILES, max_bytes=self.RUN_OUT_MAX_BYTES)
             if cleanup:
                 if exit_code is None and not error:
                     error = 'SCRIPT_CLEANUP_ERROR'
             if not error and exit_code != 0:
                 error = 'SCRIPT_EXIT_NONZERO'
-            if not error:
+            if not error and not envelope_parsed:
                 capture['phase'] = 'finalize'
                 output, intents, error = _parse_result_envelope(stdout, metadata.get('io_contract', {}))
             if cleanup:
                 error = error or 'SCRIPT_CLEANUP_ERROR'
             if not error:
                 self._admit_delivery(intents, output, metadata, capture.get('work_context'), receipts=delivery_receipts)
+                if batch is not None and batch.artifacts:
+                    output_dir, output_artifacts = batch.publish()
         except SandboxUnavailableError:
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1055,10 +1097,19 @@ class ScriptRunner:
                 error = 'ENTRYPOINT_MISSING'
             if isinstance(exc, AssetDisabledError):
                 error = exc.error_code
-            if isinstance(exc, (ScriptInputTransportError, ManagedOwnerGenerationError)):
+            if isinstance(exc, (ScriptInputTransportError, ManagedOwnerGenerationError, RunOutError)):
                 error = exc.error_code
             stderr = str(exc)
             execution_error = {'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)}
+            if isinstance(exc, RunOutError):
+                execution_error.update(exc.diagnostics())
+        finally:
+            if batch is not None and not batch.published:
+                try:
+                    batch.discard()
+                except RunOutError as exc:
+                    error = exc.error_code
+                    stderr += '\n归档清理失败: ' + str(exc)
         if cleanup:
             stderr += '\n进程组清理失败: ' + cleanup['message']
         output, stdout, stderr, cleanup, execution_error, inputs, sources = redact_datasource_values(
@@ -1079,6 +1130,7 @@ class ScriptRunner:
         result.effect_outcome = ('unknown' if cleanup or delivery_receipts else 'failed') if capture.get('started') and error else (
             'confirmed' if not error else 'not_started')
         result.execution_definition_ref = capture.get('definition_ref', '')
+        result.output_dir, result.output_artifacts = output_dir, output_artifacts
         result.preparation_timings = capture['timings']
         result.delivery_receipts = tuple(delivery_receipts)
         if record_summary:

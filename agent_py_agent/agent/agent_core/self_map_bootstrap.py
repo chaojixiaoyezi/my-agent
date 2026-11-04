@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 
 from ..backends.errors import ProviderRequestRejectedError
+from ..backends.structured_output_mode import json_object_prompt
 from ..capability.self_map_memory import register_memory_section
 from ..capability.self_map_skills import register_skill_section
 from ..common.cancellation import raise_if_cancelled
@@ -16,6 +17,7 @@ from ..conversation.auxiliary_model_call import (
 )
 from ..conversation.self_map_context import register_context_section
 from ..conversation.self_map_work import register_work_section
+from ..memory_archive.tokens import estimate_tokens
 from ..plugin_self_map import register_install_sections
 from ..settings.self_map_settings import register_setting_sections
 from ..tooling.datasources_tool import DatasourcesTool
@@ -28,7 +30,18 @@ from ..tooling.self_map_tools import register_tool_section
 from ..tooling.workflows_tool import WorkflowsTool
 from ..user_space.approval_mode import is_permission_admin
 from ..user_space.self_map_paths import register_path_sections
+from ..workflows.analysis_input_budget import AnalysisInputBudgetError, apply_prompt_input_budget
 from ..workflows.models import redact_bearer_values
+
+
+# LLM: 此处只读正式Chat后端的既有包装声明，不调用backend、不改共享模式或schema；fallback没有该前缀。
+# 函数用途: 投影结构化调用额外增加的不可裁剪user正文，统一预算与发送的观察点。
+def _workflow_analysis_prompt_prefix(backend, response_schema):
+    if (response_schema is not None and getattr(backend, 'name', '') == 'openai_compatible'
+            and getattr(backend, 'structured_output', '') == 'json_object'
+            and callable(getattr(backend, 'generate_structured', None))):
+        return json_object_prompt('', response_schema)
+    return ''
 
 
 # LLM: 不直接调用backend、不递归agent.run；仅按后端声明传system选项，不给结构化入口附加tools参数。
@@ -37,8 +50,8 @@ def _workflow_analysis_handler(agent, *, run_params=None):
     if not callable(getattr(getattr(agent, 'backend', None), 'generate', None)):
         return None
 
-    # LLM: Skill与来源是数据而非授权，使用完整隔离上下文；取消、坏JSON和工具调用都不得变成成功。
-    # 函数用途: 在原运行身份下分析一个步骤并返回严格业务JSON对象。
+    # LLM: Skill/来源不授权；预算包含最终user正文前缀且只裁数据，拒绝先记attempt零号；fallback复用同一受限材料。
+    # 函数用途: 在原运行身份下按可选输入预算分析步骤，保留取消与严格业务JSON验收。
     def analyze(spec, context, resolved_ids):
         raise_if_cancelled()
         if is_interrupted():
@@ -57,21 +70,38 @@ def _workflow_analysis_handler(agent, *, run_params=None):
             'step_inputs': context.step_inputs, 'skill_details': context.skill_details,
             'data_sources': context.data_sources,
         })
+        context.analysis_attempts = []
+        config = spec.get('config')
+        budget = config.get('input_budget') if isinstance(config, dict) else None
+        response_schema = {'type': 'object', 'additionalProperties': True}
+        original_prompt = json.dumps(material, ensure_ascii=False) if budget is not None else ''
+        prefix = _workflow_analysis_prompt_prefix(agent.backend, response_schema) if budget is not None else ''
+        try:
+            material, budget_facts = apply_prompt_input_budget(material, budget, prompt_prefix=prefix)
+        except AnalysisInputBudgetError as exc:
+            context.analysis_attempts.append({'attempt': 0, 'outcome': 'rejected',
+                                             'error_code': exc.error_code, 'input_budget': exc.facts})
+            raise
         request = AuxiliaryModelCallRequest(
             agent=agent, prompt=json.dumps(material, ensure_ascii=False),
             # 旧结构化后端没有request_options；有能力声明的生产后端仍使用高优先级system通道。
             system_instruction=instruction if getattr(agent.backend, 'supports_provider_request_options', False) else '',
-            response_schema={'type': 'object', 'additionalProperties': True},
+            response_schema=response_schema,
             request_id=str(getattr(params, 'run_request_id', '') or ''), run_id=run_id,
             task_id=str(getattr(params, 'task_id', '') or ''),
             thread_id=str(attributes.get('conversation_thread_id') or ''), purpose='workflow_analysis',
         )
-        context.analysis_attempts = []
         for number in (1, 2):
             raise_if_cancelled()
             if is_interrupted():
                 raise InterruptedError('workflow analysis interrupted')
             attempt = {'attempt': number, 'response_schema': 'native' if request.response_schema is not None else None}
+            if budget_facts is not None:
+                # 每次事实对应各自最终user正文；system与原生schema协议开销不冒充本预算或真实计费用量。
+                prefix = _workflow_analysis_prompt_prefix(agent.backend, request.response_schema)
+                attempt['input_budget'] = {**budget_facts,
+                    'input_tokens_before_budget': estimate_tokens(prefix + original_prompt),
+                    'input_tokens_after_budget': estimate_tokens(prefix + request.prompt)}
             context.analysis_attempts.append(attempt)
             try:
                 response = generate_auxiliary_model_response(request)
@@ -192,7 +222,7 @@ def _script_delivery_handler(agent, params):
 
 # LLM: 只读取一次可信边界，公开scope与执行器共用归一化正根；绝对保护、普通拒写及私密来源独立透传，不从脚本推导授权。
 #   有效owner墙取自同一快照，无RunParams或快照缺墙时由唯一权威按宿主agent状态补齐，不读HOME、业务输入或模型参数。
-# 函数用途: 冻结本次脚本的正负路径范围、owner读取墙、来源擦洗和原宿主投递端口。
+# 函数用途: 冻结本次脚本的正负路径、owner墙、来源擦洗、投递端口及Owner归档配额。
 def _script_runtime_options(agent):
     from pathlib import Path
 
@@ -238,7 +268,8 @@ def _script_runtime_options(agent):
         'host_credential_env_names': managed_secret_environment_names(agent.config),
         'host_exclusive_paths': host_exclusive_paths(agent.home_paths, agent.config),
         'owner_scope_root': owner_scope or None, 'agent_home_root': agent.home_paths.root,
-        'delivery_handler': _script_delivery_handler(agent, params)}
+        'delivery_handler': _script_delivery_handler(agent, params),
+        'run_out_quota': getattr(agent, 'owner_quota', None)}
 
 
 # LLM: 仅投递至当前Owner已绑定且支持proactive的同一渠道；无通道返回no_channel，发送异常或失败返回unavailable。

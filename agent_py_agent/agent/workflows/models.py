@@ -107,7 +107,7 @@ class AnalysisContext(dict[str, Any]):
                 self.setdefault(key, payload(value))
 
 
-# LLM: 数据容器无执行副作用，输出与兜底上下文供引擎和工具读取。
+# LLM: 数据容器无执行副作用；归档引用为可选keyword-only字段，空值不进入旧JSON合同。
 # 类用途: 保存一次真实脚本调用的结果与错误上下文。
 @dataclass
 class ScriptExecutionResult:
@@ -130,6 +130,20 @@ class ScriptExecutionResult:
     effect_outcome: str = field(default='', kw_only=True)
     breakpoint: dict[str, Any] | None = field(default=None, kw_only=True)
     confirmed_step_refs: tuple[str, ...] = field(default=(), kw_only=True)
+    output_dir: str = field(default='', kw_only=True)
+    output_artifacts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
+
+    # LLM: 动态运行事实仍由原工具投影补齐；空归档字段不改变旧脚本回执。
+    # 函数用途: 返回独立脚本结果JSON。
+    def to_dict(self):
+        return payload(self)
+
+    # LLM: 未知字段保持TypeError，旧记录缺产物字段按空值读取。
+    # 函数用途: 从JSON恢复脚本结果及不可变产物列表。
+    @classmethod
+    def from_dict(cls, value):
+        return cls(**{**payload(value), 'confirmed_step_refs': tuple(value.get('confirmed_step_refs', ())),
+                      'output_artifacts': tuple(value.get('output_artifacts', ()))})
 
 
 # LLM: 仅内存返回，不可进入WorkflowRunStore；step_type保留保存的mode，所有状态新旧别名统一脱敏。
@@ -159,7 +173,7 @@ class StepDebugResult:
         return result
 
 
-# LLM: 状态仅接受 StepStatus；所有可变字段独立创建，供账本序列化。
+# LLM: 状态仅接受StepStatus；归档字段keyword-only且空时省略，旧账本与新步骤共用序列化。
 # 类用途: 记录一步的输入、输出、模型参与情况和恢复草案。
 @dataclass
 class StepExecutionRecord:
@@ -181,20 +195,23 @@ class StepExecutionRecord:
     needs_repair: bool = False
     description: str = field(default='', kw_only=True)
     next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
+    output_dir: str = field(default='', kw_only=True)
+    output_artifacts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
 
     # LLM: JSON往返保留修复标记，返回独立快照而不是内部可变字典。
     # 函数用途: 序列化一个步骤的完整运行事实。
     def to_dict(self):
         return payload(self)
 
-    # LLM: 状态校验集中于模型；旧账本缺needs_repair用False，技能容器恢复tuple。
+    # LLM: 状态校验集中于模型；旧账本缺字段沿默认值，技能、边及产物容器恢复tuple。
     # 函数用途: 严格恢复独立步骤记录。
     @classmethod
     def from_dict(cls, value):
         if value['status'] not in get_args(StepStatus):
             raise ValueError('未知步骤状态')
         return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ())),
-                      'next_step_ids': tuple(value.get('next_step_ids', ()))})
+                      'next_step_ids': tuple(value.get('next_step_ids', ())),
+                      'output_artifacts': tuple(value.get('output_artifacts', ()))})
 
 
 # LLM: 身份不由正文推导；debug只由引擎内存创建，禁止调试记录进入正式运行Store。
@@ -261,10 +278,13 @@ class WorkflowRunRecord:
                       'confirmed_step_refs': tuple(value.get('confirmed_step_refs', ()))})
 
 
-# LLM: 所有跨磁盘和回调边界的 JSON 值均复制，禁止共享可变快照和非 JSON 对象。
+# LLM: 所有JSON边界均复制；仅dataclass归档空字段省略，业务dict的同名键原样保留，嵌套步骤同样兼容。
 # 函数用途: 将 dataclass 或 JSON 配置转成独立的普通数据。
 def payload(value):
-    return json.loads(json.dumps(asdict(value) if is_dataclass(value) else value, allow_nan=False))
+    projected = asdict(value, dict_factory=lambda pairs: {
+        key: item for key, item in pairs if key not in ('output_dir', 'output_artifacts') or item
+    }) if is_dataclass(value) else value
+    return json.loads(json.dumps(projected, allow_nan=False))
 
 
 # LLM: 在通用脱敏后补齐裸Bearer值遮蔽，保持字典键和数值类型不变。

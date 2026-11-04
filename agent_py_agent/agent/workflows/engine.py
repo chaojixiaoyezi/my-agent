@@ -9,6 +9,7 @@ import math
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,7 @@ from .models import (
     skill_sequence,
 )
 from .models import redact_bearer_values as redact_sensitive_value
+from .run_artifacts import bind_run_out_target
 from .run_store import (
     WorkflowExecutionError,
     WorkflowRunStore,
@@ -163,7 +165,7 @@ class _WorkflowRunLifecycle:
         self.agent_steps, self.run_authorizer = agent_steps, run_authorizer
         self.step_observer = step_observer
 
-    # LLM: 首次执行冻结定义及脚本版本/hash/来源；owner_id只校验一致性，不建立授权。
+    # LLM: 首次执行冻结定义及依赖；准入前后重读原run，queued只读复核不再争执行权；取消终态不伪报准入，owner_id不授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
     def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id='', *,
                      business_context=None, scope_snapshot=None, workflow_run_id=None, operation_intent=None,
@@ -205,7 +207,7 @@ class _WorkflowRunLifecycle:
         # 函数用途: 取得资产claim后沿本次原run锁及冻结快照执行。
         def execute_frozen():
             with self.store.execution_lock(record.workflow_run_id):
-                current = record if concurrency_policy == 'allow' else self.store.load_run(record.workflow_run_id)
+                current = self.store.load_run(record.workflow_run_id)
                 if current.status in ('cancelled', 'cancelling', 'failed', 'succeeded', 'skipped'):
                     return current
                 if current.status == 'queued':
@@ -213,13 +215,22 @@ class _WorkflowRunLifecycle:
                     self.store.save_run(current)
                 return self._drive(current, definition, 0)
 
+        if concurrency_policy != 'allow':
+            with self.store.execution_lock(record.workflow_run_id):
+                current = self.store.load_run(record.workflow_run_id)
+                if current.status in ('cancelled', 'cancelling', 'failed', 'succeeded', 'skipped'):
+                    return current
         result = dispatch(self.owner_home, 'workflow', descriptor['id'], record.workflow_run_id,
                           concurrency_policy, execute_frozen, queue_limit=queue_limit, _lifecycle=self.store)
         if isinstance(result, dict):
             result = {**result, 'workflow_run_id': record.workflow_run_id}
-            if result.get('status') == 'skipped':
-                with self.store.execution_lock(record.workflow_run_id):
-                    current = self.store.load_run(record.workflow_run_id)
+            # queued回执不修改运行；load_run沿原普通IO锁等待worker，而非竞争非阻塞执行锁。
+            receipt_lock = self.store.execution_lock(record.workflow_run_id) if result.get('status') == 'skipped' else nullcontext()
+            with receipt_lock:
+                current = self.store.load_run(record.workflow_run_id)
+                if current.status in ('cancelled', 'cancelling', 'failed', 'succeeded', 'skipped'):
+                    return current
+                if result.get('status') == 'skipped':
                     current.status, current.ended_at = 'skipped', time.time()
                     self.store.save_run(current)
                     record = current
@@ -695,7 +706,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 logging.getLogger(__name__).warning('workflow summary write failed error_type=%s error=%s',
                     error_type, error, extra={'error_type': error_type, 'error': error})
 
-    # LLM: 失败/暂停在真实步骤停住，结算前核最终合同并保存断点；中断仍先落盘再抛，通知不修改运行事实。
+    # LLM: 失败保存若确认原run已经终结则返回耐久记录；其它异常和中断保持原回执，附属通知不改运行事实。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
         state = {'record': record, 'phase': 'preflight', 'started': bool(start), 'committed': False}
@@ -713,6 +724,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             if committed is not None:
                 return committed
             current = self._pause_failed_run(state, definition, exc)
+            if state.get('terminal_record_observed'):
+                return current
             raise WorkflowExecutionError(current, exc) from exc
 
     # LLM: 原原子写可能已提交但ACK失败；只以同一RunStore完整回读确认，观察失败不能用暂停覆盖可能已提交的终态。
@@ -730,7 +743,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             state['commit_observation_unknown'] = True
         return None
 
-    # LLM: 只修复原run的发表事实，已经成功的步骤不倒改；保存失败仍携原ID和安全最小回执。
+    # LLM: 只修复原run发表；终态/CAS拒绝时回读一次，已终结则不发布未保存暂停的通知和摘要。
     # 函数用途: 统一收口执行异常和取消，保留成功前缀并尽力保存可恢复暂停。
     def _pause_failed_run(self, state, definition, error, *, interrupted=False):
         current = state['record']
@@ -748,7 +761,15 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         else:
             try:
                 self.store.save_run(current)
-            except Exception:
+            except Exception as save_error:
+                if str(save_error) in ('WORKFLOW_RUN_TERMINAL', 'WORKFLOW_RUN_REVISION_CONFLICT'):
+                    try:
+                        persisted = self.store.load_run(current.workflow_run_id)
+                    except Exception:
+                        persisted = None
+                    if persisted is not None and persisted.status in ('cancelled', 'succeeded', 'failed', 'skipped'):
+                        state['terminal_record_observed'] = True
+                        return persisted
                 current.breakpoint['can_resume'] = False
         for hook in (self._notify_breakpoint, self._record_summary):
             try:
@@ -996,7 +1017,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             if descriptor.get('enabled', True) is False:
                 raise AssetDisabledError('skill', reference)
 
-    # LLM: 源/漂移门不变；debug禁摘要/pin与失败升级，替换脚本错误上下文时仍保留已评估分支及预览事实。
+    # LLM: 源/漂移门不变；正式步骤在原调用链绑定run-out目标，debug清空目标，产物引用沿原步骤账持久化。
     # 函数用途: 沿原脚本链执行并保留成功/失败日志及调试合同，内存调试不写资产或运行账。
     def _script_step(self, record, spec, run, definition, *, record_summary=True):
         sources = definition.get('descriptor', definition).get('data_sources')
@@ -1015,7 +1036,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             result = _preflight_failure(record.script_id, metadata or {}, 'SCRIPT_REVISION_DRIFT', {})
         else:
             # 同一记录经内容门后冻结交原数据源门；当前CAS只是该旧门的读取一致性令牌，不再作为执行身份。
-            with bind_script_execution_record(self.owner_home, record.script_id, self.workspace_root, metadata):
+            with bind_run_out_target(self.owner_home, run.workflow_run_id, record.step_id,
+                    record.escalation_result.get('attempt_id', ''), enabled=not run.ephemeral_debug), \
+                    bind_script_execution_record(self.owner_home, record.script_id, self.workspace_root, metadata):
                 result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
                     runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
                     expected_script_pin=current, **options)
@@ -1023,9 +1046,17 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.escalation_result['debug_logs'] = [text for text in
                 (result.stdout_preview, result.stderr_preview) if text]
         record.output_snapshot, record.error_code = payload(result.output_data), result.error_code
+        record.output_dir = getattr(result, 'output_dir', '')
+        record.output_artifacts = tuple(payload(getattr(result, 'output_artifacts', ())))
         record.error_message = result.stderr_preview if not result.ok else ''
         record.status = 'succeeded' if result.ok else 'failed'
         record.needs_repair = not result.ok
+        if result.error_code.startswith('SCRIPT_RUN_OUT_'):
+            # 文件归档损失不能被skip或模型修复输出伪装成成功。
+            diagnostic = result.escalation_context.get('execution_error')
+            if diagnostic:
+                record.escalation_result['execution_error'] = redact_sensitive_value(payload(diagnostic))
+            return
         if result.ok:
             if isinstance(record.output_snapshot, dict) and record.output_snapshot.get('_pause_for_resume') is True:
                 record.status, record.needs_repair = 'paused_for_resume', False
