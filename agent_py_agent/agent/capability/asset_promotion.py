@@ -503,12 +503,14 @@ def _require_stage_identity(home, staging, identity):
         os.close(descriptor)
 
 
-# LLM: 隔离沙箱验证后由commit回调在原来源短门CAS写入；返回准确提交的binding摘要str或None，不以晚到读回签版本。
-# 函数用途: 验证并发布脚本，失败不碰既有版本，成功交回正式版本摘要供精确receipt绑定。
-def _promote_script_asset(home, name, desc, candidate, *, commit=None):
+# LLM: 无损合并五个允许字段，依赖回放和沙箱样本验证都在CAS前；失败保留提案，不改既有版本。
+# 函数用途: 验证并发布脚本，返回准确提交的binding摘要或None。
+def _promote_script_asset(home, name, desc, candidate, *, commit=None, replay_gate=None):
     from ..assets.descriptor import AssetDescriptor
     from ..assets.script_store import ScriptStore
     from ..workflows import ScriptRunner
+    from .asset_evolution_replay import merge_evolution_candidate, replay_evolution_candidate
+    from .asset_evolution_routes import save_evolution_proposal
 
     sstore = ScriptStore(home)
     existing = sstore.get_script(name)
@@ -516,11 +518,19 @@ def _promote_script_asset(home, name, desc, candidate, *, commit=None):
         return None
     target_rev = existing.get('revision') if existing is not None else 0
     code = candidate.get('entry_source', candidate.get('code', ''))
-    desc_obj = AssetDescriptor.from_dict({'id': name, 'kind': 'script', 'name': name, 'summary': desc,
-                                          'io_contract': candidate.get('io_contract', {})})
-    options = {key: candidate[key] for key in ('entrypoint', 'interpreter', 'timeout_seconds') if key in candidate}
+    desc_obj, options = merge_evolution_candidate(name, desc, candidate, existing)
+    if existing is None and isinstance(candidate.get('descriptor'), dict):
+        desc_obj = AssetDescriptor.from_dict(candidate['descriptor'])
+        if desc_obj.id != name or desc_obj.kind != 'script':
+            return None
+    gate = replay_evolution_candidate if replay_gate is None else replay_gate
+    replay = gate(home, name, code, desc_obj, options=options)
+    if replay.get('verdict') != 'passed':
+        save_evolution_proposal(home, name, code, replay=replay, candidate=candidate,
+                                reason='ASSET_DEPENDENT_REPLAY_FAILED', commit=commit)
+        return None
     with _stage_dir(home) as staging:
-        ScriptStore(staging).save_script(desc_obj, code, **options)
+        ScriptStore(staging).save_script(replace(desc_obj, enabled=True), code, **options)
         res = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True).run_script(name, candidate.get('sample_inputs', {}))
         out = getattr(res, 'output_data', None)
         if out is None:

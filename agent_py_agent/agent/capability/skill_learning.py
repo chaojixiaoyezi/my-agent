@@ -132,6 +132,7 @@ class SkillLearningRunResult:
     code: str = ""
     skill_name: str = ""
     request_key: str = ""
+    evolution_notices: tuple[dict, ...] = field(default=(), kw_only=True)
 
 
 # 同时记着的“用户要求总结”标记、以及按会话记着的“最近完成的那次活”各自的上限：超出丢最早的。
@@ -235,6 +236,13 @@ class SkillLearningService:
     #   热队列满时由Store合并或保存溢出，仅总缓冲满才记dropped/QUEUE_FULL。副作用：写请求与账本、改两张内存表。
     # 函数用途: 收口时按结构化条件登记一次学习请求，返回 queued/duplicate/queue_full/ineligible。
     def enqueue_from_finalize(self, ctx: object) -> str:
+        evidence = getattr(ctx, 'tool_runtime_evidence', {}) or {}
+        if evidence.get('asset_evolution_run_id'):
+            request = build_learning_request(ctx, 1)
+            if request is not None:
+                request['asset_evolution_run_id'] = evidence['asset_evolution_run_id']
+                request['asset_evolution_only'] = True
+                return self._enqueue(request)
         if getattr(ctx, 'source', '') == 'background_main_agent':
             from .task_learning_bridge import enqueue_completed_task_learning
 
@@ -358,6 +366,20 @@ class SkillLearningService:
             with gateway_short_transaction("skill_learning_drop_corrupt"):
                 self.store.discard_request(path)
                 return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
+        if request.get('asset_evolution_run_id'):
+            from .asset_evolution import AssetEvolutionService
+
+            # LLM: 演进回放在短写门外，每次真实持久化重新核当前来源；不占模型预算。
+            # 函数用途: 提交一项确定性演进写入。
+            def evolution_commit(operation):
+                with gateway_short_transaction('asset_evolution_commit'):
+                    return operation()
+
+            result = AssetEvolutionService(self.store.skills_root.parent,
+                maintenance_mode=self.settings.maintenance_mode, commit=evolution_commit).process(request['asset_evolution_run_id'])
+            if request.get('asset_evolution_only'):
+                finished = self._finish(path, request, _request_event(EVENT_SKIPPED, '', request))
+                return replace(finished, evolution_notices=tuple(result.get('notices', [])))
         from .skill_learning_budget import (
             deployment_learning_available,
             reserve_deployment_learning,

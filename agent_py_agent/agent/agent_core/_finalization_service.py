@@ -76,6 +76,7 @@ class FinalizationService:
                 current_task_id=ctx.task_id,
             )
         run_request_id = ctx.request_id or f"{RUN_REQUEST_ID_PREFIX}{time_module.time_ns()}"
+        _freeze_turn_asset_mutations(self._agent, ctx)
 
         archive_params = ArchiveRunParams(
             do_save=ctx.do_save,
@@ -113,9 +114,11 @@ class FinalizationService:
         from .runtime.goal_accounting import finish_goal_turn_accounting
 
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)
-        if conversation_task_completed(ctx.task_attributes):
+        if (conversation_task_completed(ctx.task_attributes)
+                and 'query_failed' not in ctx.tool_runtime_evidence.get('evidence_tags', [])):
             _request_memory_curator(self._agent, "task_complete")
-        if conversation_task_completed(ctx.task_attributes) or ctx.source == "background_main_agent":
+        if (conversation_task_completed(ctx.task_attributes) or ctx.source == "background_main_agent"
+                or ctx.tool_runtime_evidence.get('asset_evolution_run_id')):
             _request_skill_learning(self._agent, ctx)
         _reclaim_turn_pty_sessions(self._agent, ctx)
         return result
@@ -408,6 +411,32 @@ def _request_memory_curator(agent: object, reason: str) -> None:
         return
     try:
         request(reason)
+    except Exception:
+        return
+
+
+# LLM: 收口只冻结原run/attempt中已验证字节，不调用模型；无权限、关闭开关或task_local均不生成请求。
+# 函数用途: 将临时变更账原子冻结为后台演进材料。
+def _freeze_turn_asset_mutations(agent, ctx):
+    states = getattr(agent, '_asset_mutation_states', {})
+    state = states.pop((ctx.run_id, getattr(ctx, 'attempt_id', '')), {})
+    if (not getattr(getattr(agent, 'config', None), 'enable_self_learning', False)
+            or not ctx.do_save or ctx.context_scope == 'task_local'):
+        return
+    from ..assets.mutation_ledger import freeze_asset_mutations, query_analysis_blocked
+
+    attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+    if any(query_analysis_blocked(row) for row in ctx.archive_tool_calls or ()):
+        state.setdefault('asset_mutations', {})['evidence_tags'] = ['query_failed']
+    if state.get('asset_mutations', {}).get('evidence_tags'):
+        ctx.tool_runtime_evidence['evidence_tags'] = ['query_failed']
+    try:
+        request = freeze_asset_mutations(agent.home_paths.owner_home_dir, state,
+            run_id=ctx.run_id or ctx.request_id, owner_id=getattr(agent.home_paths, 'owner_id', ''),
+            thread_id=attrs.get('conversation_thread_id', ''), user_prompt=ctx.user_prompt,
+            member_of=attrs.get('member_of', []), records=ctx.archive_tool_calls or ())
+        if request and (request.get('targets') or request.get('executions')):
+            ctx.tool_runtime_evidence['asset_evolution_run_id'] = request['run_id']
     except Exception:
         return
 

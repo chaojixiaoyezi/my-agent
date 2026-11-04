@@ -2866,6 +2866,53 @@ def _record_tool_post_archive(agent, record, archive_record, result_rendered):
 
     _record_tool_call_ir_if_native(record, result_rendered)
     persist_discovered_tools(agent, record.params, archive_record)
+    _observe_turn_asset_mutations(agent, record, archive_record)
+
+
+# LLM: 同run/attempt只保原live_archive_state引用，异常不改回执、不进入工具循环；开关关闭或子代理不捕获。
+# 函数用途: 将工具完成事实接入有界脚本变更账。
+def _observe_turn_asset_mutations(agent, record, archive_record):
+    try:
+        if not getattr(getattr(agent, 'config', None), 'enable_self_learning', False):
+            return
+        params = record.params
+        if getattr(params, 'context_scope', '') == 'task_local':
+            return
+        from ..assets.mutation_ledger import AssetMutationLedger, evolution_receipt
+
+        home = agent.home_paths.owner_home_dir
+        state = params.live_archive_state
+        key = (getattr(params, 'run_id', ''), getattr(params, 'attempt_id', ''))
+        states = getattr(agent, '_asset_mutation_states', None)
+        if states is None:
+            states = agent._asset_mutation_states = {}
+        if key not in states and len(states) >= 32:
+            return
+        states[key] = state
+        from ..assets.asset_metadata import normalize_member_of
+
+        book = state.setdefault('asset_mutations', {'targets': {}, 'evidence_tags': []})
+        members = list(book.get('member_of', []))
+        for method_id in getattr(params, 'in_use_method_ids', ())[:32]:
+            if isinstance(method_id, str) and method_id.startswith('owner:'):
+                members.append({'kind': 'skill', 'id': method_id.partition(':')[2]})
+        attrs = getattr(params, 'task_attributes', {}) or {}
+        for kind in ('skill', 'workflow'):
+            identifier = attrs.get(kind + '_id')
+            if isinstance(identifier, str):
+                members.append({'kind': kind, 'id': identifier.removeprefix('owner:')})
+        book['member_of'] = normalize_member_of(members)
+        value = dict(evolution_receipt(getattr(record.result, 'output', {})))
+        value.update(ok=record.result.ok, error_code=getattr(record.result, 'error_code', ''))
+        args = getattr(record.call, 'arguments', None)
+        if not isinstance(args, dict):
+            args = archive_record.get('parameters', {})
+        AssetMutationLedger().observe(state, getattr(record.call, 'tool_name', '') or archive_record.get('tool', ''),
+            args, value, owner_home=home, workspace_root=agent.root,
+            call_id=getattr(record.call, 'call_id', '') or archive_record.get('call_id', ''),
+            archive_ref=str(archive_record.get('raw_archive_path') or ''))
+    except Exception:
+        return
 
 
 # LLM: 三点沿原归档信封消费结构化事实（web_fetch / run_command 验证或成功写入 stale / 插件观察）；

@@ -14,7 +14,6 @@ import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 from ..common.text_norm import fold_key, nfc
 from .operations import memory_content_hash, normalized_memory_content
@@ -219,6 +218,16 @@ class CandidateObservation:
     target_entry_version: int | None = None
     # 宿主在当前输入锚点集合内核对后才能使用；不是正式目标ID或晋升权限。
     link_candidate_id: str = ""
+    asset_refs: tuple[str, ...] = ()
+
+    # LLM: 新字段沿原证据引用运输，避免另改候选合并权威；引用只作附件，不产生学习或发布权。
+    # 函数用途: 为观察携带最多八个精确资产引用。
+    def __post_init__(self):
+        refs = normalize_lesson_asset_refs(self.asset_refs)
+        object.__setattr__(self, 'asset_refs', tuple(refs))
+        if refs and self.evidence_refs:
+            first, *rest = self.evidence_refs
+            object.__setattr__(self, 'evidence_refs', ({**first, 'asset_refs': refs}, *rest))
 
 
 # LLM: 候选当前态唯一事实源；raw缓存仅实例属性，不属于dataclass字段/asdict，构造、比较、持久协议不含缓存。
@@ -280,6 +289,7 @@ class MemoryCandidate:
     commit_obligation: bool = False
     obligation_blocked_reason: str = ""
     obligation_retry_after: str = ""
+    asset_refs: list[str] = field(default_factory=list)
     _extra_fields: dict[str, object] = field(default_factory=dict, repr=False)
     _raw_json_line = ""
     _raw_state_digest = ""
@@ -288,6 +298,9 @@ class MemoryCandidate:
     # 函数用途: 统一隔离候选重建后的未来字段，避免冷热转换或调用者修改污染旧快照。
     def __post_init__(self) -> None:
         self._extra_fields = deepcopy(self._extra_fields)
+        carried = [ref for row in self.evidence_refs if isinstance(row, dict)
+                   for ref in row.get('asset_refs', []) if isinstance(row.get('asset_refs'), (list, tuple))]
+        self.asset_refs = normalize_lesson_asset_refs([*self.asset_refs, *carried])
 
     # LLM: 字段赋值即时失效原行；嵌套变更由序列化器的完整状态摘要再次校验，不能依赖调用方自觉。
     # 函数用途: 避免状态、版本绑定或隐私字段改写后复用旧JSON。
@@ -476,6 +489,16 @@ def normalize_string_list(values: object) -> list[str]:
     if not isinstance(values, (list, tuple, set)):
         raise ValueError("candidate id collection must be an array")
     return list(dict.fromkeys(text for item in values if (text := str(item or "").strip())))
+
+
+# LLM: 只收合同精确引用，拒绝任意路径和未知scheme；坏旧值宽容丢弃，不授权限。
+# 函数用途: 规范最多八条lesson资产引用。
+def normalize_lesson_asset_refs(values):
+    if not isinstance(values, (list, tuple)):
+        return []
+    pattern = r'(?:script:owner:|workflow:owner:|data_source:)[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}'
+    return list(dict.fromkeys(value for value in values if isinstance(value, str)
+                              and re.fullmatch(pattern, value)))[:8]
 
 
 # LLM: 只收真实正整数版本；None保留旧记录的未知语义，不把bool、数字文本或浮点数猜成版本。
