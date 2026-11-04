@@ -1,4 +1,10 @@
 """差异和影响只消费结构化定义，未变化步骤必须折叠。"""
+import pytest
+
+from agent_py_agent.agent.assets.monitor_adapter import (
+    get_monitor_descriptor,
+    save_monitor_binding,
+)
 from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
 from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
 from agent_py_agent.tests.test_v15_w4_tool_surface import call, script_params, workflow_params
@@ -51,3 +57,42 @@ def test_workflow_impact_includes_contract_changes(tmp_path):
     data = call(tool, {'action': 'impact', 'workflow_id': 'flow', 'to_version': 1})
     assert data['io_contract_changes']['outputs'] == {'before': ['new'], 'after': []}
     assert data['dependents'] == [] and data['monitors'] == [] and data['compositions'] == []
+
+
+@pytest.mark.parametrize('binding_kind', ['workflow', 'script', 'empty', 'target_only', 'composition'])
+def test_monitor_producer_roundtrips_through_workflow_get_and_impact(tmp_path, binding_kind):
+    """真实绑定的公开refs始终为列表，不能破坏同Owner任一工作流读口。"""
+    scripts, tool = ScriptsTool(tmp_path), WorkflowsTool(tmp_path)
+    call(scripts, script_params())
+    call(scripts, {**script_params(), 'script_id': 'flow'})
+    call(tool, workflow_params())
+    call(tool, {'action': 'save', 'workflow_id': 'unrelated', 'definition': {
+        'descriptor': {**workflow_params()['definition']['descriptor'], 'name': '无关工作流'},
+        'steps': [{'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis'}]}})
+    bindings = {'alias': 'FLOW-WATCH', 'upgrade_policy': 'follow_compatible'}
+    if binding_kind in ('workflow', 'composition'):
+        bindings['workflow_ids'] = ['flow']
+    elif binding_kind == 'script':
+        bindings['script_ids'] = ['flow']
+    elif binding_kind == 'target_only':
+        bindings['execution_target'] = {'kind': 'workflow', 'asset_id': 'flow'}
+    if binding_kind == 'composition':
+        bindings['appended_steps'] = [{'step_id': 'tail', 'name': '追加分析', 'mode': 'llm_skill_analysis'}]
+    produced = save_monitor_binding(tmp_path, 'watch', **bindings)
+    wire = get_monitor_descriptor(tmp_path, 'watch')
+    assert wire['refs'] == produced['refs'] and isinstance(wire['refs'], list)
+    expected = ([{'monitor_id': 'watch', 'alias': 'flow-watch', 'pinned_version': 1,
+                  'upgrade_policy': 'follow_compatible'}]
+                if binding_kind in ('workflow', 'target_only', 'composition') else [])
+    for workflow_id, monitors in [('flow', expected), ('unrelated', [])]:
+        got = call(tool, {'action': 'get', 'workflow_id': workflow_id})
+        impact = call(tool, {'action': 'impact', 'workflow_id': workflow_id, 'to_version': 1})
+        assert got['monitors'] == impact['monitors'] == monitors
+        if workflow_id == 'flow':
+            assert [item['id'] for item in got['bound_methods']] == ['demo']
+    if binding_kind == 'composition':
+        hidden = call(tool, {'action': 'get', 'workflow_id': 'monitor-watch'})
+        assert hidden['monitors'] == expected
+        assert call(tool, {'action': 'impact', 'workflow_id': 'flow', 'to_version': 1})['compositions'] == [
+            {'workflow_id': 'monitor-watch', 'appended_step_ids': ['tail']}]
+    assert get_monitor_descriptor(tmp_path, 'watch') == wire

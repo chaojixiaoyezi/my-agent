@@ -23,7 +23,12 @@ from types import MappingProxyType
 
 from ..assets import safe_asset_id
 from ..assets.datasource_store import DatasourceStore, secret_values
-from ..assets.descriptor import AssetDescriptor, DataSourceSpec, clean_json
+from ..assets.descriptor import (
+    AssetDescriptor,
+    DataSourceSpec,
+    clean_json,
+    execution_definition_ref,
+)
 from ..assets.source_manifest import load_manifest, should_emit_alert
 from ..common.nofollow_fs import (
     append_text_beneath,
@@ -263,13 +268,19 @@ def _execution_source_check(owner_home, record, overrides, workspace_root):
     return evaluate_script_source_check(owner_home, descriptor, workspace_root=workspace_root)[1]
 
 
-# LLM: 冻结版本来自宿主运行快照，比较后将同记录送原runner，不允许按ID重新加载其它版本。
-# 函数用途: 检查实际执行代码是否仍符合运行时冻结的脚本版本。
+# LLM: revision仅属于可变存储摘要；SHA与显式执行身份共同约束当前合同，不允许同代码的新合同冒充旧定义。
+# 函数用途: 判断当前冻结记录是否满足执行身份，而不是比较摘要写回次数。
 def _execution_pin_matches(script_id, record, expected):
-    actual = {'script_id': script_id, 'revision': record.get('revision', 0),
+    if expected is None:
+        return True
+    if not isinstance(expected, dict):
+        return False
+    actual = {'script_id': script_id,
               'code_sha256': hashlib.sha256(record['code'].encode('utf-8')).hexdigest(),
               'source_scope': record.get('source_scope', 'owner')}
-    return expected is None or all(expected.get(key) == value for key, value in actual.items())
+    return (all(expected.get(key) == value for key, value in actual.items())
+            and (not expected.get('execution_definition_ref')
+                 or expected['execution_definition_ref'] == execution_definition_ref(record, kind='script')))
 
 
 # LLM: 硬门失败零执行且保留明确机器码、合同与源状态，不伪造退出成功或调用模型恢复。
@@ -302,7 +313,7 @@ def _common_access(current, historical):
     return 'read_write' if current['access'] == historical['access'] == 'read_write' else 'read'
 
 
-# LLM: 当前停用、沙箱、凭据及源权限仍是上限；历史只能缩小授权，不加载旧秘密。
+# LLM: 查询语义来自历史；当前停用、沙箱、凭据及源访问等级仍是上限，不加载旧秘密。
 # 函数用途: 将已验证的历史代码和执行定义合入当前最小权限快照。
 def _historical_execution_record(current, historical, code):
     from ..assets.descriptor import access_target_requires_network
@@ -330,7 +341,7 @@ def _historical_execution_record(current, historical, code):
     allowed = current_sources.keys() & prior_sources.keys()
     effective['data_sources'] = [{**row, 'query_scope': {**row.get('query_scope', {}),
         'access': _common_access(current_sources[row['source_id']], prior_sources[row['source_id']])}}
-        for row in current.get('data_sources', []) if row['source_id'] in allowed]
+        for row in prior.get('data_sources', []) if row['source_id'] in allowed]
     if 'access_contract' in current or 'access_contract' in prior:
         effective['access_contract'] = {**(current.get('access_contract') or {}), 'data_sources': [
             {'id': identity, 'access': _common_access(current_sources[identity], prior_sources[identity])}
@@ -347,29 +358,40 @@ def _historical_execution_record(current, historical, code):
     return effective, network
 
 
-# LLM: 内容身份精确寻址，全部blob先核验；不存在或损坏不使用当前代码兜底。
+# LLM: 无版本旧pin的ref不含重试metadata；修订不一致仅撤回无法证明的重试许可，不决定代码身份或阻止首次执行。
+# 函数用途: 对缺少准确版本的旧调用失败收窄幂等许可，不改变canonical记录或增加历史扫描。
+def _restrict_legacy_retry(record, expected, storage_revision):
+    revision = expected.get('revision')
+    if 'version' in expected or type(revision) is int and revision == storage_revision:
+        return record
+    metadata = record.get('metadata')
+    policy = metadata.get('retry_policy') if isinstance(metadata, dict) else None
+    if not isinstance(policy, dict) or policy.get('idempotent') is not True:
+        return record
+    effective = deepcopy(record)
+    effective['metadata']['retry_policy']['idempotent'] = False
+    return effective
+
+
+# LLM: 明确编号总沿完整历史合同；无编号当前pin忽略摘要revision但不能借用未证明的重试许可，历史权限与当前求交。
 # 函数用途: 解析冻结pin为当前快照或受限的历史执行快照。
 def _resolve_execution_pin(owner_home, script_id, record, expected):
-    from ..assets.revision_history import blob_get, find_version
+    from .pinned_definitions import script_snapshot
 
     missing = {'mode': 'missing', 'reason': 'history_blob_missing'}
-    if _execution_pin_matches(script_id, record, expected):
+    if expected is None:
         return record, None, {'mode': 'current'}, None
     if (not isinstance(expected, dict) or not isinstance(expected.get('code_sha256'), str)
             or expected.get('script_id', script_id) != script_id
-            or expected.get('source_scope', record.get('source_scope', 'owner')) != record.get('source_scope', 'owner')
-            or expected['code_sha256'] == hashlib.sha256(record['code'].encode('utf-8')).hexdigest()):
+            or expected.get('source_scope', record.get('source_scope', 'owner')) != record.get('source_scope', 'owner')):
         return None, None, missing, None
+    matches = _execution_pin_matches(script_id, record, expected)
+    if matches and 'version' not in expected:
+        return _restrict_legacy_retry(record, expected, record.get('revision')), None, {'mode': 'current'}, None
     try:
-        history = find_version(owner_home, 'script', script_id, code_sha256=expected['code_sha256'])
-        if history is None:
-            return None, None, missing, None
-        code = blob_get(owner_home, history['code_sha256'])
-        payload = blob_get(owner_home, history['payload_blob'])
-        if code is None or payload is None or any(blob_get(owner_home, digest) is None
-                for digest in history.get('side_blobs', {}).values()):
-            return None, None, missing, None
-        effective, network = _historical_execution_record(record, json.loads(payload), code)
+        history, payload, code = script_snapshot(owner_home, {**expected, 'script_id': script_id})
+        effective, network = _historical_execution_record(record, payload, code)
+        effective = _restrict_legacy_retry(effective, expected, history.get('storage_revision'))
         return effective, history, {'mode': 'history', 'version': history['version'],
             'code_sha256': history['code_sha256']}, network
     except (OSError, ValueError, TypeError, KeyError):
