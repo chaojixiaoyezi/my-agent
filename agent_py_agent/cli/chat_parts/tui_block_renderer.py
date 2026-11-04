@@ -254,9 +254,11 @@ class TuiRenderContext:
     background_agent_running_count: int | None = None
     business_list_active: bool = False
     business_thread_active: bool = False
+    todo_viewport_rows: int | None = None
+    todo_scroll_offset: int = 0
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
-    # 函数用途: 规范渲染上下文及后台观察计数，保证动画与刷新使用明确类型。
+    # 函数用途: 规范渲染上下文、任务视口及后台计数，保证动画与刷新使用明确类型。
     def __post_init__(self) -> None:
         object.__setattr__(self, "width", max(1, int(self.width or 1)))
         object.__setattr__(self, "background_sync_failed", bool(self.background_sync_failed))
@@ -287,6 +289,9 @@ class TuiRenderContext:
         object.__setattr__(self, "is_pasting", bool(self.is_pasting))
         object.__setattr__(self, "help_open", bool(self.help_open))
         object.__setattr__(self, "todos_expanded", bool(self.todos_expanded))
+        if self.todo_viewport_rows is not None:
+            object.__setattr__(self, "todo_viewport_rows", max(1, int(self.todo_viewport_rows)))
+        object.__setattr__(self, "todo_scroll_offset", max(0, int(self.todo_scroll_offset)))
         object.__setattr__(
             self,
             "mouse_capture_enabled",
@@ -405,6 +410,8 @@ def tui_render_context_key(
         context.is_pasting,
         context.help_open,
         context.todos_expanded,
+        context.todo_viewport_rows,
+        context.todo_scroll_offset,
         context.mouse_capture_enabled,
         context.focused_agent_run_id,
         context.focused_agent_name,
@@ -1435,7 +1442,7 @@ def _block_cache_key(block: TuiBlock, context: TuiRenderContext) -> tuple[Any, .
         key += _tool_input_animation_key(block, context)
     if block.role == "todo":
         active_execution = bool(block.metadata.get("active_execution"))
-        key += (context.todos_expanded, active_execution)
+        key += (context.todos_expanded, context.todo_viewport_rows, context.todo_scroll_offset, active_execution)
         if active_execution and _todo_has_in_progress_items(block.metadata.get("items")):
             key += (context.spinner_index % len(SPINNER_GLYPHS),)
     return key
@@ -2094,6 +2101,8 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     visible_items, hidden_count = _todo_window_items(
         public_items,
         expanded=context.todos_expanded,
+        viewport_rows=context.todo_viewport_rows,
+        scroll_offset=context.todo_scroll_offset,
     )
     completed_count = sum(
         1
@@ -2115,7 +2124,14 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     )
     if unrepresented_active_child_count:
         title += f" · 另有 {unrepresented_active_child_count} 个子代理运行中"
-    if hidden_count:
+    if hidden_count and context.todos_expanded and context.todo_viewport_rows is not None:
+        capacity = max(0, context.todo_viewport_rows - 1)
+        start = min(context.todo_scroll_offset, max(0, len(public_items) - capacity))
+        title += (
+            f" · 显示 {start + 1 if visible_items else 0}-{start + len(visible_items)}/{len(public_items)}"
+            "（Shift+↑↓ 滚动 · Ctrl+T 收起）"
+        )
+    elif hidden_count:
         title += "（Ctrl+T 展开）"
     elif context.todos_expanded and len(public_items) > TODO_COLLAPSED_MAX_ITEM_COUNT:
         title += "（Ctrl+T 收起）"
@@ -2159,14 +2175,19 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
 
 # LLM: Selection uses typed statuses and original ledger positions only. It preserves one
 # recent completion, then running rows, then upcoming work; prose and child names are irrelevant.
-# 函数用途: 从完整 Todo 中挑出默认四条状态窗口，展开时原顺序返回全部。
+# 函数用途: 默认选四条状态窗口；有视口时预留标题行、夹住偏移，不修改任务顺序。
 def _todo_window_items(
     items: list[dict[str, object]],
     *,
     expanded: bool,
+    viewport_rows: int | None = None,
+    scroll_offset: int = 0,
 ) -> tuple[list[dict[str, object]], int]:
+    capacity = len(items) if viewport_rows is None else max(0, int(viewport_rows) - 1)
     if expanded or len(items) <= TODO_COLLAPSED_MAX_ITEM_COUNT:
-        return list(items), 0
+        start = min(max(0, int(scroll_offset)), max(0, len(items) - capacity)) if expanded and viewport_rows is not None else 0
+        visible = list(items[start:start + capacity])
+        return visible, len(items) - len(visible)
     statuses = [str(item.get("status") or "pending").strip().lower() for item in items]
     running = [index for index, status in enumerate(statuses) if status == "in_progress"]
     open_items = [
@@ -2204,7 +2225,7 @@ def _todo_window_items(
             add(index)
     for index in range(len(items)):
         add(index)
-    selected = sorted(priority[:TODO_COLLAPSED_MAX_ITEM_COUNT])
+    selected = sorted(priority[:min(TODO_COLLAPSED_MAX_ITEM_COUNT, capacity)])
     return [items[index] for index in selected], len(items) - len(selected)
 
 

@@ -93,20 +93,24 @@ def _tui_cleanup_after_job(
     agent_response_text: str,
     response_recorded: bool,
 ) -> None:
-    if agent_response_text:
-        if not response_recorded:
-            cfg.assistant_outputs.append(agent_response_text)
-        _append_conversation_turn(
-            ConversationTurnAppendRequest(
-                conversation_history=cfg.conversation_history,
-                history_lock=cfg.history_lock,
-                user_message=job.user,
-                assistant_message=agent_response_text,
-                max_turns=chat_history_max_turns(cfg.agent.config),
+    try:
+        if agent_response_text:
+            if not response_recorded:
+                cfg.assistant_outputs.append(agent_response_text)
+            _append_conversation_turn(
+                ConversationTurnAppendRequest(
+                    conversation_history=cfg.conversation_history,
+                    history_lock=cfg.history_lock,
+                    user_message=job.user,
+                    assistant_message=agent_response_text,
+                    max_turns=chat_history_max_turns(cfg.agent.config),
+                )
             )
-        )
-    _reset_worker_refs(cfg)
-    cfg.jobs.task_done()
+    finally:
+        try:
+            _reset_worker_refs(cfg)
+        finally:
+            cfg.jobs.task_done()
 
 
 # LLM: reset 先结束旧句柄再清运行 refs；不会结算执行权或清理独立资源，不触碰下一条 job。
@@ -122,7 +126,7 @@ def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
         cfg.running_started_at_ref[0] = 0.0
 
 
-# LLM: path selection 仅由显式 use_gateway 配置决定；两条路径返回同一 `(text, recorded, summary)` 合同。
+# LLM: path只由use_gateway选择；线程内console绑定原adapter，两条路径仍返回同一text/recorded/summary合同。
 # 函数用途: 组装本轮注入并执行本地或 Gateway 聊天路径。
 def _tui_process_job(
     cfg: TuiWorkerConfig,
@@ -141,15 +145,15 @@ def _tui_process_job(
         turn_inject=turn_inject,
         turn_adapter=turn_adapter,
     )
-    if cfg.use_gateway:
-        # Gateway TUI must remain a thin client. Importing the local path here would
-        # pull SimpleAgent/model/tool services into the UI process before turn 1.
-        from .tui_worker_paths import _worker_gateway_path
+    with _required_runtime(cfg).turn_console_output(turn_adapter):
+        if cfg.use_gateway:
+            # Gateway薄客户端不能提前加载本地agent/model/tool服务。
+            from .tui_worker_paths import _worker_gateway_path
 
-        return _worker_gateway_path(path_ctx)
-    from .tui_worker_local import _worker_local_path
+            return _worker_gateway_path(path_ctx)
+        from .tui_worker_local import _worker_local_path
 
-    return _worker_local_path(path_ctx)
+        return _worker_local_path(path_ctx)
 
 
 # LLM: Gateway 已从 ConversationStore 读取同一 thread 的权威历史，客户端不得再次注入内存副本；direct 路径才使用本进程历史上下文。
@@ -210,14 +214,16 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
         except Exception as exc:  # noqa: BLE001 - submission failure still closes this queued turn.
             prepare_error = exc
         _tui_update_running_state(cfg, job)
-        turn_adapter = runtime.begin_turn(
-            job.request_id,
-            task_progress_generation_id=(
-                str(getattr(job, "gateway_request_id", "") or "").strip()
-                or job.request_id
-            ),
-            defer_assistant_display=bool(getattr(job, "show_prompt", False)),
-        )
+        with runtime._lock:
+            generation = runtime.conversation_reset_generation
+            turn_adapter = runtime.begin_turn(
+                job.request_id,
+                task_progress_generation_id=(
+                    str(getattr(job, "gateway_request_id", "") or "").strip()
+                    or job.request_id
+                ),
+                defer_assistant_display=bool(getattr(job, "show_prompt", False)),
+            )
         agent_response_text = ""
         response_recorded = False
         summary = TuiTurnSummary(ok=False, error="TUI worker did not produce a result")
@@ -237,8 +243,14 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
         except Exception as exc:  # noqa: BLE001 worker 必须把任意执行异常收口为 typed failed turn
             summary = TuiTurnSummary(ok=False, error=str(exc))
         finally:
-            runtime.complete_turn(job.request_id, summary)
-            _tui_cleanup_after_job(cfg, job, agent_response_text, response_recorded)
+            try:
+                runtime.complete_turn(job.request_id, summary)
+            finally:
+                # 与reset共锁检查并追加，不能在检查通过后又把旧正文写入新历史。
+                with runtime._lock:
+                    if generation != runtime.conversation_reset_generation:
+                        agent_response_text = ""
+                    _tui_cleanup_after_job(cfg, job, agent_response_text, response_recorded)
 
 
 # LLM: runtime 缺失说明组装错误，禁止新建第二 store 或回退 stdout worker。

@@ -533,12 +533,13 @@ def _begin_background_poll(agent, session_id, runtime, navigation=None):
 
 
 # LLM: 真实runtime的锁与reset、快照提交共用；无锁旧显示替身沿原协议兼容，不另造锁，锁内不做IO。
-# 函数用途: 一次采样同代的消息游标、过程游标及流身份，避免旧游标配上新代次。
+# 函数用途: 同时采样消息游标及其线程、过程游标和流身份，不跨文件复用字节偏移。
 def _capture_background_poll_state(tui_runtime, event_cursor):
     with getattr(tui_runtime, "_lock", nullcontext()):
         return (getattr(tui_runtime, "conversation_reset_generation", 0),
             max(0, int(getattr(tui_runtime, "background_message_cursor", 0))),
-            max(0, int(event_cursor[0] or 0)), str(getattr(tui_runtime, "background_event_stream_id", "")))
+            max(0, int(event_cursor[0] or 0)), str(getattr(tui_runtime, "background_event_stream_id", "")),
+            str(getattr(tui_runtime, "background_message_thread_id", "")))
 
 
 # LLM: 认证消息页与独立过程流分开消费；起始采样及提交均与reset共锁，消息页请求在锁外。
@@ -558,7 +559,7 @@ def _consume_gateway_background_snapshot(
     fetcher = getattr(agent, "request_background_notices", None)
     if not callable(fetcher):
         return True
-    generation, message_after, event_after, event_stream_id = _capture_background_poll_state(tui_runtime, event_cursor)
+    generation, message_after, event_after, event_stream_id, cursor_thread = _capture_background_poll_state(tui_runtime, event_cursor)
     try:
         payload = fetcher(
             session_id,
@@ -575,6 +576,8 @@ def _consume_gateway_background_snapshot(
     def publish():
         if not _background_poll_current(agent, tui_runtime, report):
             return False
+        if getattr(tui_runtime, "background_message_thread_id", "") != cursor_thread:
+            return True
         _classify_gateway_background_poll(tui_runtime, session_id, payload, report)
         if report.binding_state == "invalid":
             return False
@@ -620,12 +623,26 @@ def _classify_gateway_background_poll(runtime, session_id, payload, report):
                            else "corrupt_or_unknown")
 
 
-# LLM: 同reset代次内发表；空target只保留同一本地durable前台请求旧投影，空闲/换请求仍清除，不保留后台task。
-# 函数用途: 沿原控制DTO顺序同步消息和游标；生产调用方先用独立报告拒绝明确坏绑定。
+# LLM: 确认新线程先重基且整页零发表；同线程仍校验字节单调性，硬拒绝不能借重基恢复。
+# 函数用途: 先处理换线程，再沿原DTO同步消息及绑定游标；失败页不发表正文。
 def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, payload, message_after):
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
+    if not isinstance(payload, dict):
         return False
     if _background_watch_hard_projection(payload) or payload.get("binding_state") == "invalid":
+        return False
+    if payload.get("failure_kind") in {"permission_denied", "owner_mismatch", "binding_invalid"}:
+        return False
+    if payload.get("ok") is not True and payload.get("binding_state") != "confirmed":
+        return False
+    if not _publish_gateway_background_watch_binding(tui_runtime, session_id, payload):
+        return False
+    thread_id = tui_runtime._background_watch_gateway_binding[1]
+    context = getattr(tui_runtime, "_background_watch_poll_context", None)
+    generation = context[3] if context is not None else getattr(tui_runtime, "conversation_reset_generation", 0)
+    if payload.get("binding_state") == "confirmed" and thread_id:
+        if _rebase_background_message_cursor(tui_runtime, thread_id, generation, app_ref):
+            return True
+    if payload.get("ok") is not True:
         return False
     target_publisher = getattr(tui_runtime, "publish_execution_target", None)
     if callable(target_publisher):
@@ -640,8 +657,6 @@ def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, 
                                 and current.get("turn_id") == request_id[0])
         if not preserve:
             target_publisher(raw_target)
-    if not _publish_gateway_background_watch_binding(tui_runtime, session_id, payload):
-        return False
     permission_changed = _sync_gateway_agent_permissions(
         agent,
         session_id,
@@ -655,6 +670,7 @@ def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, 
             if isinstance(payload.get("agent_activity"), dict)
             else {"active_task_count": payload.get("active_task_count")},
             agent_navigation=agent_navigation,
+            thread_id=thread_id,
         )
         if isinstance(payload.get("agent_activity"), dict)
         or "active_task_count" in payload
@@ -680,6 +696,7 @@ def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, 
     if not transcript_ok:
         return False
     tui_runtime.background_message_cursor = cursor
+    tui_runtime.background_message_thread_id = thread_id or getattr(tui_runtime, "background_message_thread_id", "")
     if (
         fresh
         or activity_changed
@@ -688,6 +705,24 @@ def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, 
     ) and app_ref[0] is not None:
         app_ref[0].invalidate()
     return True
+
+
+# LLM: 调用方已验证owner/session/thread；同reset锁内只改游标身份，不读历史、放宽边界或发表失败页。
+# 函数用途: 每次线程变化只重基一次；首次空游标仅登记身份，不丢弃首个有效页。
+def _rebase_background_message_cursor(runtime, thread_id, generation, app_ref):
+    with getattr(runtime, "_lock", nullcontext()):
+        if generation != getattr(runtime, "conversation_reset_generation", 0):
+            return True
+        previous = getattr(runtime, "background_message_thread_id", "")
+        if previous == thread_id:
+            return False
+        rebase = bool(previous or getattr(runtime, "background_message_cursor", 0))
+        runtime.background_message_thread_id = thread_id
+        if rebase:
+            runtime.background_message_cursor = 0
+            if app_ref and app_ref[0] is not None:
+                app_ref[0].invalidate()
+        return rebase
 
 
 # LLM: /notices线程只绑定本次session；缺字段兼容只取当轮payload的DTO，永不回退上轮控制目标；坏类型失败关闭。
@@ -724,7 +759,7 @@ def _consume_local_background_snapshot(
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
     report = report if report is not None else _begin_background_poll(agent, session_id, tui_runtime, agent_navigation)
-    generation, message_after, event_after, event_stream_id = _capture_background_poll_state(tui_runtime, event_cursor)
+    generation, message_after, event_after, event_stream_id, cursor_thread = _capture_background_poll_state(tui_runtime, event_cursor)
     root = getattr(getattr(store, "storage", None), "root", None)
     if not root:
         return True
@@ -750,6 +785,12 @@ def _consume_local_background_snapshot(
         report.binding_state, report.failure_kind = "invalid", "binding_invalid"
         return False
     report.binding_state, report.thread_id = "confirmed", thread_id
+    with getattr(tui_runtime, "_lock", nullcontext()):
+        current = generation == getattr(tui_runtime, "conversation_reset_generation", 0) and getattr(tui_runtime, "background_message_thread_id", "") == cursor_thread
+        # 旧读取仍可完成原有锁外IO；只禁止它修改当前身份，提交时原guard会整页丢弃。
+        if current and _rebase_background_message_cursor(tui_runtime, thread_id, generation, app_ref):
+            report.failure_kind = ""
+            return True
     from ...agent.conversation.agent_activity import conversation_agent_activity
 
     activity = conversation_agent_activity(agent, store, thread_id).to_dict()
@@ -778,8 +819,10 @@ def _consume_local_background_snapshot(
     def publish():
         if not _background_poll_current(agent, tui_runtime, report):
             return False
+        if getattr(tui_runtime, "background_message_thread_id", "") != thread_id:
+            return True
         permission_changed = permission_publisher() if permission_publisher is not None else False
-        activity_changed = _publish_background_activity(tui_runtime, activity, agent_navigation=agent_navigation)
+        activity_changed = _publish_background_activity(tui_runtime, activity, agent_navigation=agent_navigation, thread_id=thread_id)
         transcript_ok, transcript_changed = _consume_background_transcript_projection(
             tui_runtime, transcript.get("events"), transcript.get("cursor"), event_cursor,
             stream_id=transcript.get("stream_id"),
@@ -790,6 +833,7 @@ def _consume_local_background_snapshot(
             if not _publish_background_notice_row(tui_runtime, row, seen):
                 return False
         tui_runtime.background_message_cursor = cursor
+        tui_runtime.background_message_thread_id = thread_id
         if (
             fresh
             or activity_changed
@@ -927,12 +971,13 @@ def _consume_background_transcript_projection(
 # LLM: The monitor may project only the typed conversation-agent snapshot built
 # from canonical task links and run records. Invalid values leave the current UI
 # unchanged instead of guessing activity from notice prose.
-# 函数用途: 更新主任务、子代理与独立上下文数字；数字读取失败保留旧帧，不能把未知当清空。
+# 函数用途: 按同一poll确认的thread发布活动和指标；读取失败保留旧帧，不借另一线程的高水位。
 def _publish_background_activity(
     tui_runtime: object,
     value: object,
     *,
     agent_navigation: object | None = None,
+    thread_id: str = "",
 ) -> bool:
     updater = getattr(tui_runtime, "update_background_activity", None)
     if not callable(updater) or not isinstance(value, Mapping):
@@ -965,6 +1010,7 @@ def _publish_background_activity(
         updater(
             count,
             {
+                "thread_id": thread_id,
                 "compact_count": compact_count,
                 "main_activity": value.get("main_activity"),
                 "context_usage": value.get("context_usage") if value.get("context_usage_projection_ok") is not False else None,
@@ -1259,7 +1305,15 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
         return updated or changed
 
 
-# LLM: 快照失败不等于绑定失信；完整scope与原reset锁围住发表及成功/异常出口，迟到结果不得清新线程画面或提示。
+# LLM: 观察同步晚于整页消费；同一reset内也须复核消息thread，不能用旧report把successor范围改回去。
+# 函数用途: 在观察同步提交点判断报告是否仍对应当前消息线程。
+def _background_watch_poll_current(agent, runtime, report):
+    cursor_thread = getattr(runtime, "background_message_thread_id", "")
+    return _background_poll_current(agent, runtime, report) and not (
+        report.thread_id and cursor_thread and report.thread_id != cursor_thread)
+
+
+# LLM: 完整scope、消息thread与原reset锁围住发表及成功/异常出口，迟到结果不得清新线程画面或提示。
 # 函数用途: 独立处理绑定、安全、陈旧帧和面板提示；主聊天页瞬态安静，第三次面板告警不续期。
 def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False, poll_report: _BackgroundPollReport | None = None) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
@@ -1268,7 +1322,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
     root = getattr(navigation, "root_runtime", None) or runtime
     report = poll_report if poll_report is not None else _BackgroundPollReport(
         _background_watch_context(agent, session_id, root), snapshot_ok=snapshot_ok)
-    if not _background_poll_current(agent, root, report):
+    if not _background_watch_poll_current(agent, root, report):
         return False
     display_runtime = runtime_reader()
     scope_confirmed = False
@@ -1283,7 +1337,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
                      if report.binding_state == "empty" else
                      _background_watch_thread_id(agent, navigation, session_id=session_id, runtime=root))
         with getattr(root, "_lock", nullcontext()):
-            if not _background_poll_current(agent, root, report):
+            if not _background_watch_poll_current(agent, root, report):
                 return False
             display_runtime = runtime_reader()
             if not hasattr(navigation, "_background_watch_valid_scope"):
@@ -1310,7 +1364,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
         changed = _refresh_background_watch(agent, navigation, thread_id=thread_id, scope=scope) or changed
     except Exception as exc:
         with getattr(root, "_lock", nullcontext()):
-            if not _background_poll_current(agent, root, report):
+            if not _background_watch_poll_current(agent, root, report):
                 return False
             if scope is not None and getattr(navigation, "_background_watch_scope", None) != scope:
                 return False
@@ -1333,7 +1387,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
             return _background_watch_unavailable(navigation, display_runtime,
                 "projection_transient" if transient else "corrupt_or_unknown", changed=changed)
     with getattr(root, "_lock", nullcontext()):
-        if not _background_poll_current(agent, root, report):
+        if not _background_watch_poll_current(agent, root, report):
             return False
         if scope is not None and getattr(navigation, "_background_watch_scope", None) != scope:
             return False

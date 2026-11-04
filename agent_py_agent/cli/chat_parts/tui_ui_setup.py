@@ -116,8 +116,10 @@ def _make_render_context_factory(
     navigation = params.agent_navigation
 
     # LLM: 子页面内容来自其独立 runtime，连接健康只读取 root runtime，避免产生多份相互矛盾的健康状态。
-    # 函数用途: 读取当前页面、后台徽标与模型显示；所有字段只用于渲染。
+    # 函数用途: 读取当前页面与终端尺寸，夹住任务偏移；所有字段只用于渲染。
     def make_context(width: int) -> TuiRenderContext:
+        from prompt_toolkit.application import get_app
+
         interaction_snapshot = interaction.snapshot()
         transcript_snapshot = transcript_state.snapshot()
         active_runtime = (
@@ -133,6 +135,11 @@ def _make_render_context_factory(
         view_snapshot = active_runtime.store.snapshot()
         sync_snapshot = view_snapshot if active_runtime is runtime else runtime.store.snapshot()
         status = view_snapshot.status
+        # 固定任务区至多用终端三分之一，至少三行（含标题），给输入与正文留空间。
+        todo_rows = max(3, get_app().output.get_size().rows // 3)
+        todo_count = next((sum(isinstance(item, dict) for item in block.metadata.get("items", []))
+                           for block in view_snapshot.active_blocks if block.role == "todo"), 0)
+        todo_offset = interaction.scroll_todos(0, max_offset=max(0, todo_count - (todo_rows - 1)))
         return TuiRenderContext(
             width=width,
             agent_name=agent_name,
@@ -160,6 +167,8 @@ def _make_render_context_factory(
             is_pasting=interaction_snapshot.is_pasting,
             help_open=interaction_snapshot.help_open,
             todos_expanded=interaction_snapshot.todos_expanded,
+            todo_viewport_rows=todo_rows,
+            todo_scroll_offset=todo_offset,
             mouse_capture_enabled=interaction_snapshot.mouse_capture_enabled,
             focused_agent_run_id=str(
                 getattr(navigation_snapshot, "active_run_id", "") or ""
@@ -276,14 +285,17 @@ def _make_input_status_window(view: TuiTranscriptView) -> Any:
 
 
 # LLM: Todo has its own fixed region above the composer, matching 终端交互's
-# standalone TaskListV2 placement; it never enters scrollback or the input buffer.
-# 函数用途: 创建输入框上方的固定任务清单区域，空清单不占高度。
+# standalone TaskListV2 placement; rendered viewport and Window use the same terminal cap.
+# 函数用途: 创建有界任务区，包含标题的高度不超过终端三分之一，空清单不占高度。
 def _make_todo_window(view: TuiTranscriptView) -> Any:
+    from prompt_toolkit.application import get_app
     from prompt_toolkit.layout import Window
 
     return Window(
         content=view.todo_control,
-        height=lambda: len(view.provider.frame(view.provider.last_width).todo_lines),
+        # 与 context 的三分之一上限一致，不能按整个任务列表撑高固定区域。
+        height=lambda: min(max(3, get_app().output.get_size().rows // 3),
+                           len(view.provider.frame(view.provider.last_width).todo_lines)),
         dont_extend_height=True,
     )
 
