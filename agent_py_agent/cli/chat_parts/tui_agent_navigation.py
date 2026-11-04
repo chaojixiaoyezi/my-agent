@@ -252,43 +252,58 @@ class TuiAgentNavigationState:
         runtime.store.invalidate()
         return True
 
-    # LLM: 每次最多一页；未读续页由/history显式加载，刷新只重读末页而不扫全历史。
-    # 函数用途: 按准确agent/thread读取正文，保存原message_id与有界续点。
+    # LLM: 每次最多一页；刷新无游标读当前页，只有/history推进旧历史续点，失败不消费续点。
+    # 函数用途: 独立维护实时观察和旧历史分页，保留原message_id与准确agent/thread归属。
     def _load_business_conversation(self, thread_id: str, runtime: TuiRuntime, *, more: bool = False) -> None:
         with self._lock:
             if thread_id in self._business_loading:
                 return
             history = self._business_history.get(thread_id, {})
-            if history.get('next_cursor') and not more:
+            cursor = history.get('next_cursor') if more else None
+            if more and not cursor:
                 return
-            cursor = history.get('next_cursor') if more else history.get('last_cursor')
             target = self._business_targets.get('business:' + thread_id)
             if target is None:
                 return
+            projection = self.business_agents
+            generation = runtime.conversation_reset_generation
             self._business_loading.add(thread_id)
-        projection = self.business_agents
 
-        # LLM: 冻结准确目标与runtime，异步完成时切页不改变读取归属。
-        # 函数用途: 应用一页完整消息并留下显式续页提示。
+        # LLM: 调用方持导航锁并经原runtime reset围栏；切页不改归属，替换观察源或重置后旧页不再发表。
+        # 函数用途: 去重发表一页正文，独立保存旧历史续点和真实覆盖提示。
+        def publish_page(result):
+            if self.business_agents is not projection:
+                return
+            if projection.read_denied or result.get('read_denied'):
+                runtime.publish_conversation_reset(thread_id)
+                self._business_messages.pop(thread_id, None)
+                self._business_history.pop(thread_id, None)
+                return
+            seen = self._business_messages.setdefault(thread_id, set())
+            # 只核本页至多100个ID；整页与已见消息不衔接时，保留跨页新增产生的未读缺口。
+            history_gap = (not more and bool(result.get('next_cursor') and result['items'])
+                           and not any(row['message_id'] in seen for row in result['items']))
+            for row in result['items']:
+                if row['message_id'] not in seen:
+                    runtime.write_console(str(row.get('role', '未知')) + '：' + str(row.get('text', '')))
+                    seen.add(row['message_id'])
+            # 正常刷新不消费旧续点；跨页缺口只重建更近的历史入口，更老未读页仍在其后方可达。
+            if result['coverage'] != 'unknown' and (more or history_gap or thread_id not in self._business_history):
+                self._business_history[thread_id] = {'next_cursor': result.get('next_cursor')}
+            next_cursor = self._business_history.get(thread_id, {}).get('next_cursor')
+            continuation = ' · /history 加载下一页' if next_cursor else ''
+            runtime.set_notice('会话覆盖：' + str(result['coverage']) + continuation + ' · Ctrl+G 返回', duration_seconds=4)
+
+        # LLM: I/O在导航锁外；成功/失败显示均绑定原reset代次，finally始终释放本thread的加载标记。
+        # 函数用途: 读取一个有界页，再通过原runtime合同发表或丢弃迟到结果。
         def load():
             try:
                 result = projection.conversation(target['agent_id'], thread_id=thread_id, cursor=cursor)
                 with self._lock:
-                    if projection.read_denied or result.get('read_denied'):
-                        runtime.publish_conversation_reset(thread_id)
-                        self._business_messages.pop(thread_id, None)
-                        self._business_history.pop(thread_id, None)
-                        return
-                    seen = self._business_messages.setdefault(thread_id, set())
-                    for row in result['items']:
-                        if row['message_id'] not in seen:
-                            runtime.write_console(str(row.get('role', '未知')) + '：' + str(row.get('text', '')))
-                            seen.add(row['message_id'])
-                    self._business_history[thread_id] = {'last_cursor': cursor, 'next_cursor': result.get('next_cursor')}
-                continuation = ' · /history 加载下一页' if result.get('next_cursor') else ''
-                runtime.set_notice('会话覆盖：' + str(result['coverage']) + continuation + ' · Ctrl+G 返回', duration_seconds=4)
+                    runtime.apply_conversation_snapshot(generation, lambda: publish_page(result))
             except Exception:
-                runtime.set_notice('完整会话读取失败；覆盖未知，Ctrl+G 返回', duration_seconds=4)
+                runtime.apply_conversation_snapshot(generation, lambda: runtime.set_notice(
+                    '完整会话读取失败；覆盖未知，Ctrl+G 返回', duration_seconds=4))
             finally:
                 with self._lock:
                     self._business_loading.discard(thread_id)
