@@ -1,3 +1,4 @@
+"""同Owner的数据源管理及显式确认的清单变更；不自动登记或移除来源。"""
 # LLM: Owner/workspace只由宿主授予；凭据双参数经Store隔离，保存/探测/迁移仍走审批，公开结果不含秘密。
 # 模块用途: 提供数据源结构化工具；参数schema共用纯构造器，结果保留专属安全输出投影。
 from __future__ import annotations
@@ -7,6 +8,12 @@ import sqlite3
 from pathlib import Path
 
 from ..assets.datasource_store import DatasourceStore
+from ..assets.source_manifest import (
+    ManifestRevisionConflict,
+    load_manifest,
+    prune_sources,
+    save_manifest,
+)
 from .input_schema import validate_tool_input
 from .models import BaseTool, ToolHandlerOutcome
 from .scripts_tool import _policy
@@ -25,16 +32,25 @@ def _result(data, ok=True, code='', *, effect=''):
 class DatasourcesTool(BaseTool):
     name = 'datasources'
     model_spec = _spec('datasources', '管理数据源代号、隔离凭据、SQLite schema与迁移；输出不包含密码，外库导出不代表远端已导入。',
-        ['list', 'get', 'save', 'test', 'inspect_schema', 'migrate'], {
+        ['list', 'get', 'save', 'test', 'inspect_schema', 'migrate',
+         'manifest_get', 'manifest_register', 'manifest_prune'], {
             'datasource_id': {'type': 'string'}, 'workspace_root': {'type': 'string'},
             'spec_payload': {'type': 'object'}, 'secret_payload': {'type': 'object'},
             'credential_values': {'type': 'object'},
             'scope': {'type': 'string', 'enum': ['owner', 'workspace']},
-            'expected_revision': {'type': 'integer', 'minimum': 0},
+            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
+            'source_system': {'type': 'string'},
+            'sources': {'type': 'array', 'maxItems': 256, 'items': {'type': 'object',
+                'required': ['source_id'], 'additionalProperties': False, 'properties': {
+                    'source_id': {'type': 'string'}, 'core': {'type': 'boolean'},
+                    'credential_ref': {'type': 'string'}, 'endpoint_ref': {'type': 'string'}}}},
+            'source_ids': {'type': 'array', 'maxItems': 256, 'items': {'type': 'string'}},
+            'confirmed': {'type': 'boolean'},
             'target_spec': {'type': 'object'},
             'mode': {'type': 'string', 'enum': ['prepare_and_validate', 'switch']},
             'auto_switch': {'type': 'boolean'}})
-    runtime_policy = _policy('datasources', ('list', 'get', 'inspect_schema'), ('save', 'test', 'migrate'))
+    runtime_policy = _policy('datasources', ('list', 'get', 'inspect_schema', 'manifest_get'),
+                            ('save', 'test', 'migrate', 'manifest_register', 'manifest_prune'))
 
     # LLM: 构造不读写数据源，workspace由宿主静态或动态提供；不同Owner Store不接受注入。
     # 函数用途: 绑定当前Owner和可选当前工作区提供者。
@@ -59,6 +75,16 @@ class DatasourcesTool(BaseTool):
             return _result({'error': '参数不符合数据源Schema'}, False, 'TOOL_INVALID_ARGUMENTS', effect='not_started')
         action = params['action']
         required = [] if action == 'list' else ['spec_payload'] if action == 'save' else ['datasource_id']
+        if action in ('manifest_get', 'manifest_register', 'manifest_prune'):
+            required = ['source_system']
+            if action == 'manifest_register':
+                required.append('sources')
+            if action == 'manifest_prune':
+                required += ['source_ids', 'expected_revision']
+            if (action != 'manifest_get' and params.get('confirmed') is not True
+                    or action == 'manifest_prune' and type(params.get('expected_revision')) is not int):
+                return _result({'error': '清单变更需要明确确认，移除还需要精确revision'}, False,
+                               'TOOL_INVALID_ARGUMENTS', effect='not_started')
         if action == 'migrate':
             required.append('target_spec')
         if any(key not in params for key in required):
@@ -78,8 +104,11 @@ class DatasourcesTool(BaseTool):
             data = self._dispatch(params)
             ok = data.get('ok', True) is not False and data.get('state') != 'FAILED' and data.get('effect_outcome') != 'unknown'
             return _result(data, ok, data.get('error_code', '') if not ok else '', effect=data.get('effect_outcome', ''))
+        except ManifestRevisionConflict:
+            return _result({'error_code': 'ASSET_REVISION_CONFLICT', 'error': '清单版本已变化，请先重新读取'},
+                           False, 'TOOL_INVALID_ARGUMENTS', effect='not_started')
         except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as error:
-            effect = 'unknown' if params['action'] in ('save', 'migrate') else 'failed'
+            effect = 'unknown' if params['action'] in ('save', 'migrate', 'manifest_register', 'manifest_prune') else 'failed'
             return _result({'error': '数据源操作失败', 'exception_type': type(error).__name__}, False,
                            'DATASOURCE_OPERATION_FAILED', effect=effect)
 
@@ -88,6 +117,14 @@ class DatasourcesTool(BaseTool):
     def _dispatch(self, params):
         store, action = self.store, params['action']
         options = {'workspace_root': self._effective_workspace_root()}
+        if action == 'manifest_get':
+            return {'manifest': load_manifest(self.owner_home, params['source_system'])}
+        if action == 'manifest_register':
+            return {'manifest': save_manifest(self.owner_home, params['source_system'], params['sources'],
+                expected_revision=params.get('expected_revision'))}
+        if action == 'manifest_prune':
+            return {'manifest': prune_sources(self.owner_home, params['source_system'], params['source_ids'],
+                expected_revision=params['expected_revision'])}
         if action == 'list':
             return {'datasources': store.list_datasources(**options)}
         if action == 'save':
