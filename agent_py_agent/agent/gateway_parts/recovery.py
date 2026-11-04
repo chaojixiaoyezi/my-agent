@@ -20,11 +20,12 @@ processing liveness 直接读取 lease_service，不再经过 runtime 聚合层�
 import json
 import math
 import time
-from bisect import bisect_right
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.json_io import locked_json_path
 from ..conversation.turn_resume_notice import TURN_RESUME_LIMIT_NOTICE, turn_resume_limit_notice
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .io import (
@@ -39,6 +40,7 @@ from .io import (
 )
 from .logging import _report_gateway_side_effect_error, log_gateway_payload
 from .paths import GatewayPaths, gateway_chunk_path
+from .recovery_pending_index import RecoveryPendingIndex, projection_file_stamp
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -53,6 +55,7 @@ _TERMINAL_CANDIDATES_CACHE: dict[
 ] = {}
 # 网关终态请求目录候选列表缓存的最大目录数。
 _TERMINAL_CANDIDATES_CACHE_MAX_COUNT = 32
+_terminal_page_versions: ContextVar[tuple[tuple[str, int], ...]] = ContextVar("terminal_page_versions", default=())
 _ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
 GATEWAY_SAFE_RESTART_CAUSE = "gateway_safe_restart"
 # 续跑次数用完时请求收口的错误码（登记在 contracts.error_taxonomy，恢复动作 request_user_input）。
@@ -846,17 +849,23 @@ def _write_terminal_projection_cursor(
     )
 
 
-# LLM: 仅在终态目录directory_stamp未变时复用排序路径与名称元组；代次变化或未知时重走glob，使跨进程新增可见。
-# 函数用途: 获取按文件名排序的终态JSON候选，避免积压分页时重复枚举与排序全目录。
+# LLM: 缓存只留至多128个pending候选，目录发现与已知文件审计均按持久位置推进，不作全量glob或排序。
+# 函数用途: 从部分索引领取一页终态责任，并保留本页确切版本供CAS确认。
 def _sorted_terminal_candidates(
     terminal_dir: Path,
     directory_stamp: tuple[int, int] | None,
+    *, after: str = "", limit: int = 128, force: bool = False, paths: GatewayPaths | None = None,
 ) -> tuple[tuple[Path, ...], tuple[str, ...]]:
-    if directory_stamp is not None:
-        cached = _TERMINAL_CANDIDATES_CACHE.get(terminal_dir)
-        if cached is not None and cached[0] == directory_stamp:
-            return cached[1], cached[2]
-    candidates = tuple(sorted(terminal_dir.glob("*.json"), key=lambda item: item.name))
+    root = terminal_dir.parents[1] if terminal_dir.parent.name == "requests" else terminal_dir.parent
+    index = RecoveryPendingIndex(root)
+    audited = index.refresh("terminal", terminal_dir, force=force)
+    if paths is not None:
+        for key, version, pending in audited:
+            if not pending and not _terminal_projection_marker_matches(paths, terminal_dir / f"{key}.json"):
+                index.wake("terminal", key, version)
+    page = index.page("terminal", after=after, limit=limit)
+    _terminal_page_versions.set(page)
+    candidates = tuple(terminal_dir / f"{key}.json" for key, _version in page)
     names = tuple(item.name for item in candidates)
     if directory_stamp is not None:
         if len(_TERMINAL_CANDIDATES_CACHE) >= _TERMINAL_CANDIDATES_CACHE_MAX_COUNT and terminal_dir not in _TERMINAL_CANDIDATES_CACHE:
@@ -867,15 +876,22 @@ def _sorted_terminal_candidates(
     return candidates, names
 
 
-# LLM: The live dispatcher walks canonical terminal authorities in bounded rotating pages. Repair
-# never delays Gateway readiness, and one corrupt archive is reported without blocking others.
-# 稳态节流：目录时间戳没变、且上一轮已沿文件名追平目录末尾（caught_up）、且不在低频全量复核
-# 窗口内时直接跳过（不再每轮 glob+sort 全部历史终态）；未追平（积压多于每轮上限）时继续推进，
-# 保证任何崩溃场景最终补齐。启动全扫由调用方传 full_scan=True；运行中被外部改坏的投影由
-# _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS 到期的全量复核兜住。
-# LLM: 正多进程只消费dispatcher传入的原gate，缺来源保原pending；不得削弱当前分页/finite/CAS合同。
-#   同代次候选只枚举排序一次，跨页二分定位；未知代次不命中稳态跳过，原pass_stamp和整轮欠账语义不变。
-# 函数用途: 复用候选并分批补原终态投影，保持原追平、目录代次和结算欠账，未知不重放业务。
+# LLM: marker核验与确认均在原canonical路径锁内；writer先拿同一锁再登记，不能确认尚未发布的新写前责任。
+# 函数用途: 只确认领取的确切终态版本，缺失松散文件仅去掉调度引用，不碰封存历史。
+def _ack_terminal_projection(paths: GatewayPaths, canonical: Path, index: RecoveryPendingIndex, version: int) -> bool:
+    with locked_json_path(canonical):
+        stamp = projection_file_stamp(canonical)
+        if stamp == "missing":
+            index.forget("terminal", canonical.stem, version)
+            return True
+        if stamp == "invalid" or not _terminal_projection_marker_matches(paths, canonical):
+            return False
+        return index.acknowledge("terminal", canonical.stem, version, stamp)
+
+
+# LLM: 只从pending部分索引按调用方持久keyset位置领取有界页，原终态/typed gate/owner/结算链完全保留。
+#   full_scan只开始有界再审计，不同步全目录枚举；并发提交以写前版本CAS留到下一拍，坏行不会挡住后页。
+# 函数用途: 分页修复原终态投影并确认本拍版本，不把检索索引变成业务权威。
 def repair_gateway_terminal_projections(
     paths: GatewayPaths,
     *,
@@ -894,7 +910,6 @@ def repair_gateway_terminal_projections(
     cursor = cursor_report.payload if cursor_report.load_error is None else None
     cursor = cursor if isinstance(cursor, dict) else {}
     previous = str(cursor.get("last_name") or "")
-    caught_up = _cursor_caught_up(cursor)
     directory_stamp = _terminal_directory_stamp(paths.terminal)
     now_epoch = time.time()
     try:
@@ -904,36 +919,20 @@ def repair_gateway_terminal_projections(
     if not math.isfinite(last_full_scan_at):
         last_full_scan_at = 0.0
     full_due = full_scan or now_epoch - last_full_scan_at >= _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS
-    if (
-        not full_due and caught_up and directory_stamp is not None
-        and directory_stamp == _cursor_directory_stamp(cursor)
-    ):
-        return projected, errors
-    candidates, candidate_names = _sorted_terminal_candidates(paths.terminal, directory_stamp)
-    total = len(candidates)
-    if total == 0:
-        _write_terminal_projection_cursor(
-            cursor_path,
-            _TerminalProjectionCursor(
-                last_name="",
-                directory_stamp=directory_stamp,
-                full_scan_at=now_epoch if full_due else last_full_scan_at,
-                caught_up=True,
-            ),
-        )
-        return projected, errors
-    if full_due or caught_up:
-        previous = ""
-    start = bisect_right(candidate_names, previous) if previous else 0
-    if start >= total and previous:
-        start = 0
-    # 分页保持线性；不把尾部加前缀混成“已覆盖整轮”。并发新增时先推进旧积压，再完整复核下一轮。
-    selected = candidates[start : start + max(1, int(limit or 1))]
-    pass_stamp = directory_stamp if start == 0 else _cursor_directory_stamp(cursor)
-    # 只在新一轮从目录首项开始时清整轮欠账；跨页须保留前页观察。
-    settlement_pending = bool(cursor.get("settlement_pending")) if start > 0 else False
+    selected, _names = _sorted_terminal_candidates(
+        paths.terminal, directory_stamp, after=Path(previous).stem if previous else "",
+        limit=max(1, int(limit or 1)), force=full_due, paths=paths,
+    )
+    versions = dict(_terminal_page_versions.get())
+    index = RecoveryPendingIndex(paths.root)
+    settlement_pending = False
     for canonical in selected:
+        version = versions[canonical.stem]
+        if projection_file_stamp(canonical) == "missing":
+            _ack_terminal_projection(paths, canonical, index, version)
+            continue
         if _terminal_projection_marker_matches(paths, canonical):
+            _ack_terminal_projection(paths, canonical, index, version)
             continue
         report = read_json_file_report(
             canonical,
@@ -965,16 +964,17 @@ def repair_gateway_terminal_projections(
             errors.append(failure)
             continue
         projected += 1
-        settlement_pending = settlement_pending or not _terminal_projection_marker_matches(paths, canonical)
+        acknowledged = _ack_terminal_projection(paths, canonical, index, version)
+        settlement_pending = settlement_pending or not acknowledged
     _write_terminal_projection_cursor(
         cursor_path,
         _TerminalProjectionCursor(
-            last_name=selected[-1].name,
-            directory_stamp=pass_stamp,
+            last_name=selected[-1].name if selected else "",
+            directory_stamp=directory_stamp,
             full_scan_at=now_epoch if full_due else last_full_scan_at,
-            caught_up=(not settlement_pending and not errors and len(candidates) - start <= len(selected)
-                       and pass_stamp == _terminal_directory_stamp(paths.terminal)),
-            settlement_pending=settlement_pending or bool(errors),
+            caught_up=(not settlement_pending and not errors and index.caught_up("terminal")
+                       and directory_stamp == _terminal_directory_stamp(paths.terminal)),
+            settlement_pending=not index.caught_up("terminal") or settlement_pending or bool(errors),
         ),
     )
     return projected, errors

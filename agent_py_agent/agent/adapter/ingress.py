@@ -9,6 +9,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import stat
 import threading
 import time
 import uuid
@@ -17,8 +19,11 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
+from ..common.nofollow_fs import ensure_private_dir
+from ..gateway_parts.recovery_pending_index import directory_page
 from .delivery import GatewayClaimLeaseConfig, GatewayReplyDeliveryWorker
 from .inbound_images import InboundMediaInputError
+from .ingress_index import IngressIndex
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 3
@@ -248,18 +253,22 @@ def build_gateway_ingress_record(
 # same-id/different-body never overwrites it and writes separate quarantine evidence.
 # 类用途: 原子保存入站记录、执行 CAS 推进并保留冲突隔离证据，供进程重启恢复。
 class GatewayIngressStore:
+    # LLM: 索引与扫描位置只属于当前 spool，不复用其它根的缓存。
+    # 函数用途: 初始化规范存储、投影和有界维护运行态。
     def __init__(self, root: Path | None) -> None:
         self.root = Path(root).expanduser() if root is not None else None
         self._volatile_records: dict[str, GatewayIngressRecord] = {}
         self._volatile_quarantine: list[dict[str, object]] = []
         self._lock = threading.RLock()
+        self._index: IngressIndex | None = None
+        self._scans: dict[str, object] = {}
+        self._scan_stamps: dict[str, str] = {}
 
     @property
     def durable(self) -> bool:
         return self.root is not None
 
-    # LLM: First writer owns the provider message identity. Conflict evidence is written only after
-    # releasing the primary record lock so nested path locks cannot deadlock.
+    # LLM: 首写者拥有消息身份；规范文件、intent 与投影在同一路径锁内发布，冲突证据在锁外另存。
     # 函数用途: 首次登记消息；完全相同的重放复用原记录，正文或路由变化则隔离。
     def put_if_absent(
         self,
@@ -284,7 +293,7 @@ class GatewayIngressStore:
                     if path.exists() and current is None:
                         raise RuntimeError("gateway ingress record is unreadable")
                     if current is None:
-                        _write_private_json(path, record.to_dict())
+                        self._write_indexed(path, record)
                         return record, True, False
                     if not _same_ingress_body(current, record):
                         conflict = (current, record)
@@ -294,8 +303,7 @@ class GatewayIngressStore:
         self._quarantine_conflict(*conflict)
         return conflict[0], False, True
 
-    # LLM: Every state advance compares the exact observed record and preserves provider identity
-    # plus canonical digest; callbacks must complete before calling this method.
+    # LLM: 持原路径锁核对完整前像；规范状态先发布，查找投影错误留下可重放 intent。
     # 函数用途: 用比较并交换持久推进一条入站记录，避免旧 worker 覆盖恢复后的新状态。
     def compare_and_swap(
         self,
@@ -318,11 +326,10 @@ class GatewayIngressStore:
                     raise RuntimeError("gateway ingress record is unreadable")
                 if current != expected:
                     return False
-                _write_private_json(path, replacement.to_dict())
+                self._write_indexed(path, replacement)
                 return True
 
-    # LLM: A claim is one short per-record CAS. Expired claims may be taken over with a strictly
-    # larger epoch; no media, HTTP, or provider callback runs inside this method.
+    # LLM: 原跨进程 CAS 持续保护 owner/epoch，过期接管只能增加 epoch；锁内不执行运输回调。
     # 函数用途: 为一次外部 IO 阶段领取跨进程租约，返回带 owner/epoch/expiry 的权威快照。
     def claim(
         self,
@@ -365,11 +372,10 @@ class GatewayIngressStore:
                     claim_epoch=current.claim_epoch + 1,
                     claim_expires_at=expires_at,
                 )
-                _write_private_json(path, claimed.to_dict())
+                self._write_indexed(path, claimed)
                 return claimed
 
-    # LLM: Results from external IO are committed only if the durable row still contains the exact
-    # owner and epoch that produced them. Release clears owner/expiry but preserves epoch history.
+    # LLM: 只有原 owner/epoch 的完整规范前像可提交，释放清空 owner/expiry 但保留 epoch 历史。
     # 函数用途: 提交当前租约阶段的结果；租约被接管时拒绝旧 worker 写回。
     def commit_claim(
         self,
@@ -402,7 +408,7 @@ class GatewayIngressStore:
                 current = self._read_record(path) if path.exists() else None
                 if current != expected:
                     return None
-                _write_private_json(path, committed.to_dict())
+                self._write_indexed(path, committed)
                 return committed
 
     # LLM: A WAIT result releases only the matching epoch; a newer claimant cannot be cleared by a
@@ -465,12 +471,40 @@ class GatewayIngressStore:
             ),
         )
 
-    # LLM: Pending projection reads typed state only; filenames and timestamps never decide whether
-    # an ingress may execute external IO.
-    # 函数用途: 返回所有尚未移交完成且已通过结构校验的记录。
+    # LLM: 非完成态合同不含退避判断；只核一批索引候选，绝不调用全量诊断 records。
+    # 函数用途: 返回按创建时间排序的有界未完成规范记录。
     def pending(self) -> list[GatewayIngressRecord]:
-        records = self.records()
-        return [record for record in records if record.state != "completed"]
+        return self._candidates("pending")
+
+    # LLM: 调度使用独立 due 部分索引，前一批退避或有效租约不能饿死后面的活跃行。
+    # 函数用途: 返回当前可尝试推进的有界候选，执行前仍走原 claim CAS。
+    def due(self, now: float) -> list[GatewayIngressRecord]:
+        return self._candidates("due", now=now)
+
+    # LLM: 每条候选重新核读规范 JSON；索引过时只能降低本轮数量，不能授权外部 IO。
+    # 函数用途: 从部分索引查询并核验活跃状态。
+    def _candidates(self, kind: str, *, now: float = 0.0) -> list[GatewayIngressRecord]:
+        with self._lock:
+            if self.root is None:
+                rows = sorted((r for r in self._volatile_records.values() if r.state != "completed"),
+                              key=lambda r: (r.created_at, r.ingress_id))
+                if kind == "due":
+                    rows = [r for r in rows if r.next_attempt_at <= now
+                            and (not r.claim_owner or r.claim_expires_at <= now)]
+                return rows[:128]
+            self._ensure_dirs()
+            self._repair_intents()
+            assert self._index is not None
+            if self._index.get("legacy") == "1":
+                self._scan_batch("records")
+            result = []
+            for ingress_id in self._index.candidates(kind, now=now):
+                record = self._project_id(ingress_id)
+                if record is not None and record.state != "completed":
+                    if kind != "due" or (record.next_attempt_at <= now
+                            and (not record.claim_owner or record.claim_expires_at <= now)):
+                        result.append(record)
+            return result
 
     # LLM: Records include terminal idempotency receipts so duplicate callbacks remain suppressed
     # across restarts until bounded retention pruning.
@@ -505,40 +539,155 @@ class GatewayIngressStore:
                     rows.append(payload)
             return rows
 
-    # LLM: Completed rows are short-lived idempotency receipts, not an unbounded event log.
-    # 函数用途: 删除超过保留期的已完成记录和隔离证据，未完成记录永不自动删除。
+    # LLM: 只按 expires 部分索引领取固定批次，删除前在原规范路径锁内重验真实七天窗口。
+    # 函数用途: 清理过期终态与隔离证据，未完成责任永不自动删除。
     def prune_terminal_records(self, *, now: float | None = None) -> None:
         if self.root is None:
             return
-        cutoff = (time.time() if now is None else float(now)) - _TERMINAL_RETENTION_SECONDS
+        current_time = time.time() if now is None else float(now)
+        cutoff = current_time - _TERMINAL_RETENTION_SECONDS
         with self._lock:
             self._ensure_dirs()
-            for path in (self.root / "ingress" / "records").glob("*.json"):
-                record = self._read_record(path)
-                if record is not None and record.state == "completed" and record.updated_at < cutoff:
-                    path.unlink(missing_ok=True)
-            for path in (self.root / "ingress" / "quarantine").glob("*.json"):
-                try:
-                    if path.stat().st_mtime < cutoff:
+            assert self._index is not None
+            for ingress_id in self._index.candidates("expires", now=current_time):
+                path = self._record_path(ingress_id)
+                with locked_json_path(path):
+                    record = self._read_record(path) if path.exists() else None
+                    if record is not None and record.state == "completed" and record.updated_at < cutoff:
+                        self._index.begin(ingress_id)
                         path.unlink(missing_ok=True)
-                except OSError as exc:
-                    _LOGGER.warning("cannot prune ingress quarantine path=%s error=%s", path, exc)
+                        _sync_ingress_directory(path.parent)
+                        record = None
+                    self._index.settle(ingress_id, record, unreadable=path.exists() and record is None)
+            for name in self._index.quarantine_expired(current_time):
+                if re.fullmatch(r"[0-9a-f]{64}-[0-9a-f]{16}\.json", name) is None:
+                    raise ValueError("invalid ingress quarantine projection key")
+                path = self.root / "ingress" / "quarantine" / name
+                with locked_json_path(path):
+                    try:
+                        if path.exists() and path.stat().st_mtime < cutoff:
+                            path.unlink(missing_ok=True)
+                        if not path.exists():
+                            self._index.quarantine_drop(name)
+                        else:
+                            self._index.quarantine_put(name, path.stat().st_mtime + _TERMINAL_RETENTION_SECONDS)
+                    except OSError as exc:
+                        _LOGGER.warning("cannot prune ingress quarantine path=%s error=%s", path, exc)
 
-    # LLM: Malformed durable rows stay in place and are logged; silent deletion would lose the only
-    # recovery fact for an authenticated provider message.
+    # LLM: intent 与已知记录按持久 keyset 审计；旧目录使用同一个流式游标续读，绝不每轮从头跳 N 项。
+    # 函数用途: 每轮推进固定批次的责任恢复、规范审计和旧目录回填。
+    def maintenance(self) -> None:
+        if self.root is None:
+            return
+        with self._lock:
+            self._ensure_dirs()
+            self._repair_intents()
+            assert self._index is not None
+            for ingress_id in self._index.audit_ids():
+                self._project_id(ingress_id)
+            try:
+                self._scan_batch("records")
+                self._scan_batch("quarantine")
+            except BaseException:
+                self.close()
+                raise
+
+    # LLM: 原生发现每页已经关闭；兼容旧调用方的close不清持久cookie或恢复责任。
+    # 函数用途: 清理无文件句柄的运行态提示，重启仍从持久位置继续。
+    def close(self) -> None:
+        with self._lock:
+            self._scans.clear()
+            self._scan_stamps.clear()
+
+    # LLM: 单批最多128个真实目录项；内核cookie与本轮inode落盘，目录增删不重置尚未完成的旧积压。
+    # 函数用途: 关闭每页目录句柄并提交可重启的发现位置，只有EOF才确认本轮迁移完成。
+    def _scan_batch(self, kind: str) -> None:
+        assert self.root is not None and self._index is not None
+        directory = self.root / "ingress" / kind
+        stamp = self._directory_stamp(directory)
+        key = f"dir_{kind}"
+        value = directory.stat()
+        identity = f"{value.st_dev}:{value.st_ino}"
+        cookie = self._index.get(f"cookie_{kind}")
+        if self._index.get(f"identity_{kind}") != identity:
+            cookie = ""
+        if not cookie:
+            audit_due = time.time() >= float(self._index.get(f"scan_after_{kind}", "0"))
+            if stamp == self._index.get(key) and self._index.get("legacy") != "1" and not audit_due:
+                return
+            self._index.set(f"pass_stamp_{kind}", stamp)
+        names, position, complete = directory_page(directory, cookie)
+        for name in names:
+            path = directory / name
+            try:
+                regular = stat.S_ISREG(path.lstat().st_mode)
+            except FileNotFoundError:
+                continue
+            if not name.endswith(".json") or not regular:
+                continue
+            if kind == "records":
+                if re.fullmatch(r"[0-9a-f]{64}\.json", name):
+                    self._project_id(path.stem)
+            else:
+                if re.fullmatch(r"[0-9a-f]{64}-[0-9a-f]{16}\.json", name):
+                    self._index.quarantine_put(name, path.stat().st_mtime + _TERMINAL_RETENTION_SECONDS)
+        self._index.set(f"identity_{kind}", identity)
+        self._index.set(f"cookie_{kind}", "" if complete else position)
+        if complete:
+            self._index.set(key, self._index.get(f"pass_stamp_{kind}", stamp))
+            self._index.set(f"scan_after_{kind}", str(time.time() + 3600))
+            if kind == "records":
+                self._index.set("legacy", "0")
+
+    # LLM: 目录戳仅决定是否需要发现新文件，绝不决定是否可执行消息。
+    # 函数用途: 读取目录变化标记，不枚举文件。
+    def _directory_stamp(self, directory: Path) -> str:
+        value = directory.stat()
+        return f"{value.st_dev}:{value.st_ino}:{value.st_mtime_ns}"
+
+    # LLM: 不重放写入后像；只核当前规范文件，所以写前失败仍由原 lease/epoch 处理未知效果。
+    # 函数用途: 逐批修复规范已发布但投影未确认的责任。
+    def _repair_intents(self) -> None:
+        assert self._index is not None
+        for ingress_id in self._index.audit_ids(intents=True):
+            self._project_id(ingress_id)
+
+    # LLM: 修复与所有写者共用原跨进程路径锁；读取旧文件后不能无锁覆盖更新的投影。
+    # 函数用途: 核读一个规范文件并修复其查找字段。
+    def _project_id(self, ingress_id: str) -> GatewayIngressRecord | None:
+        assert self._index is not None
+        path = self._record_path(ingress_id)
+        with locked_json_path(path):
+            exists = path.exists()
+            record = self._read_record(path) if exists else None
+            self._index.settle(ingress_id, record, unreadable=exists and record is None)
+            return record
+
+    # LLM: intent 先提交；规范文件与投影之间任何错误都留下可核读责任，不把异常当成未发布证明。
+    # 函数用途: 在已持规范路径锁时发布单条状态及其索引。
+    def _write_indexed(self, path: Path, record: GatewayIngressRecord) -> None:
+        assert self._index is not None
+        self._index.begin(record.ingress_id)
+        _write_private_json(path, record.to_dict())
+        self._index.settle(record.ingress_id, record)
+        self._index.set("dir_records", self._directory_stamp(path.parent))
+
+    # LLM: 损坏记录和路径身份不符只记诊断并保留原文件，不把投影当作执行或删除许可。
     # 函数用途: 读取并校验单条入站记录，损坏时保留原文件供修复。
     def _read_record(self, path: Path) -> GatewayIngressRecord | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("gateway ingress JSON root must be an object")
-            return GatewayIngressRecord.from_dict(payload)
+            record = GatewayIngressRecord.from_dict(payload)
+            if record.ingress_id != path.stem:
+                raise ValueError("gateway ingress canonical path identity mismatch")
+            return record
         except Exception as exc:
             _LOGGER.error("gateway ingress record unreadable path=%s error=%s", path, exc)
             return None
 
-    # LLM: Quarantine stores both digests and the attempted authenticated body but never mutates
-    # the first accepted record.
+    # LLM: 隔离证据独立保存两份摘要及尝试正文，过期投影不改变首条规范记录。
     # 函数用途: 为同一 provider message 的冲突重放写入独立诊断证据。
     def _quarantine_conflict(
         self,
@@ -569,18 +718,32 @@ class GatewayIngressStore:
             path = self.root / "ingress" / "quarantine" / f"{candidate.ingress_id}-{suffix}.json"
         with locked_json_path(path):
             _write_private_json(path, evidence)
+            assert self._index is not None
+            self._index.quarantine_put(path.name, path.stat().st_mtime + _TERMINAL_RETENTION_SECONDS)
 
-    # LLM: Directory ownership is confined to the configured adapter delivery root.
-    # 函数用途: 创建入站记录和冲突隔离目录。
+    # LLM: 初始化不扫描旧记录；只记录是否存在迁移责任，正常登记不等待回填。
+    # 函数用途: 创建入站目录并懒加载当前 spool 的私有投影。
     def _ensure_dirs(self) -> None:
         assert self.root is not None
-        (self.root / "ingress" / "records").mkdir(parents=True, exist_ok=True)
-        (self.root / "ingress" / "quarantine").mkdir(parents=True, exist_ok=True)
+        for path in (self.root / "ingress", self.root / "ingress" / "records", self.root / "ingress" / "quarantine"):
+            if path.is_symlink():
+                raise ValueError("ingress directory link rejected")
+        legacy = (self.root / "ingress" / "records").exists()
+        ensure_private_dir(self.root / "ingress" / "records")
+        ensure_private_dir(self.root / "ingress" / "quarantine")
+        if self._index is None:
+            self._index = IngressIndex(self.root / "ingress", legacy=legacy)
+            if not legacy:
+                for kind in ("records", "quarantine"):
+                    self._index.set(f"dir_{kind}", self._directory_stamp(self.root / "ingress" / kind))
+                    self._index.set(f"scan_after_{kind}", str(time.time() + 3600))
 
-    # LLM: Filenames are derived only from an already-hashed stable ingress id.
-    # 函数用途: 返回一条入站记录的规范持久路径。
+    # LLM: 投影返回键也不可信，必须先核已冻结的SHA256格式，不能先拼路径再比较正文身份。
+    # 函数用途: 在任何打开或锁操作之前校验入站键并返回规范路径。
     def _record_path(self, ingress_id: str) -> Path:
         assert self.root is not None
+        if re.fullmatch(r"[0-9a-f]{64}", ingress_id) is None:
+            raise ValueError("invalid ingress projection key")
         return self.root / "ingress" / "records" / f"{ingress_id}.json"
 
 
@@ -648,7 +811,7 @@ class GatewayAdapterDeliveryWorker:
             )
             self._thread.start()
 
-    # LLM: Stop never deletes pending ingress or reply records; the next process resumes them.
+    # LLM: 停机不删除未完责任；线程确已结束后显式释放流式迁移游标。
     # 函数用途: 停止后台线程并保留所有未完成状态。
     def stop(self, timeout: float = 6.0) -> None:
         self._stop.set()
@@ -657,17 +820,20 @@ class GatewayAdapterDeliveryWorker:
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, timeout))
+        if thread is None or not thread.is_alive():
+            self.store.close()
 
-    # LLM: Deterministic tests and the background loop share this exact executor. No store lock is
-    # held while any injected callback performs provider, channel, or Gateway IO.
+    # LLM: 同一入口完成定批维护、到期调度与既有回复轮询；所有运输回调都在存储锁外运行。
     # 函数用途: 推进当前可运行的入站记录，再轮询一次既有三态回复 watcher。
     def run_once(self) -> int:
         if not self._run_lock.acquire(blocking=False):
             return 0
         try:
             now = time.time()
+            self.store.maintenance()
+            self.store.prune_terminal_records(now=now)
             ingresses = sum(
-                self._process_record(record, now) for record in self.store.pending()
+                self._process_record(record, now) for record in self.store.due(now)
             )
             return ingresses + self.reply_worker.run_once()
         finally:
@@ -772,19 +938,19 @@ class GatewayAdapterDeliveryWorker:
             return None
         raise ValueError(f"unsupported gateway ingress state: {record.state}")
 
-    # LLM: The loop wakes for new ingress or on a bounded poll interval so both ingress and reply
-    # recovery continue without a second background thread. An ordinary queue OSError ends only this
-    # pass: durable stage/owner/epoch stay as last committed, so an uncertain external effect keeps
-    # its unexpired lease instead of being resubmitted at once. BaseException still ends the thread.
+    # LLM: 普通 IO 错误只结束本轮，未过期租约保护未知效果；任何线程退出都释放旧目录流。
     # 函数用途: 持续运行单次推进，直到生命周期请求停止；单次队列 IO 失败后在原可中断等待后重试。
     def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.run_once()
-            except OSError as exc:
-                _LOGGER.warning("gateway adapter delivery pass failed; retrying error=%s", exc)
-            self._wake.wait(self._poll_interval)
-            self._wake.clear()
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.run_once()
+                except OSError as exc:
+                    _LOGGER.warning("gateway adapter delivery pass failed; retrying error=%s", exc)
+                self._wake.wait(self._poll_interval)
+                self._wake.clear()
+        finally:
+            self.store.close()
 
 
 # LLM: Immutable ingress identity includes authenticated route and canonical body digest; state,
@@ -832,8 +998,7 @@ def _same_ingress_body(
     return True
 
 
-# LLM: Ingress rows contain user content and provider media references, so every durable file is
-# atomically replaced and restricted to the owning OS user.
+# LLM: 私有文件原子发布并同步父目录，只有耐久成功后才能确认写前责任标记。
 # 函数用途: 在调用方已持路径锁时原子写入私有 JSON 文件。
 def _write_private_json(path: Path, payload: dict[str, object]) -> None:
     temp_path = path.with_name(
@@ -847,8 +1012,20 @@ def _write_private_json(path: Path, payload: dict[str, object]) -> None:
             os.fsync(handle.fileno())
         os.chmod(temp_path, 0o600)
         os.replace(temp_path, path)
+        _sync_ingress_directory(path.parent)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+# LLM: POSIX 先耐久目录项再确认 intent；无 O_DIRECTORY 平台沿原文件同步语义，不假称目录同步。
+# 函数用途: 同步规范文件发布或删除后的父目录。
+def _sync_ingress_directory(directory: Path) -> None:
+    if hasattr(os, "O_DIRECTORY"):
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 __all__ = [

@@ -10,12 +10,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..common.json_io import jsonl_lines
-
 if TYPE_CHECKING:
     from agent_py_agent.agent.core import SimpleAgent
 
 import json
+import sqlite3
 import threading
 import time
 import uuid
@@ -128,29 +127,35 @@ def _rebuild_gateway_history_index(agent: SimpleAgent, paths: GatewayPaths) -> i
     return _rebuild_gateway_history_index_report(agent, paths).indexed_count
 
 
+# LLM: doctor离线重建按持久游标迁移旧源，再keyset读固定128条；不改变完成权威或公开入口。
+# 函数用途: 从可恢复历史投影分批重建检索记录，保留坏旧行的错误报告。
 def _rebuild_gateway_history_index_report(agent: SimpleAgent, paths: GatewayPaths) -> GatewayIndexRebuildReport:
+    from .gateway_history_index import GatewayHistoryIndex
+
     count = 0
     load_errors: list[dict[str, Any]] = []
-    if not paths.history.exists():
-        return GatewayIndexRebuildReport(count, load_errors)
+    index = GatewayHistoryIndex(paths)
     try:
-        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-        lines = jsonl_lines(paths.history.read_text(encoding="utf-8"))
+        while not index.migrate_batch()["complete"]:
+            pass
+        after_error = 0
+        while errors := index.migration_errors(after=after_error):
+            load_errors.extend(errors)
+            after_error = errors[-1]["line_number"]
+        after = ""
+        while batch := index.page(after=after, limit=128):
+            for payload in batch:
+                request_id = str(payload.get("id") or payload.get("request_id") or "").strip()
+                response_path = gateway_response_path(paths, request_id)
+                if _index_gateway_payload(agent, payload, GatewayIndexPayloadOptions(response_path=response_path)):
+                    count += 1
+                after = request_id
     except (OSError, UnicodeDecodeError) as exc:
-        return GatewayIndexRebuildReport(
-            count,
-            [_gateway_index_load_error(paths.history, exc, "gateway.index.history.read")],
-        )
-    for line_number, line in enumerate(lines, start=1):
-        payload_report = _payload_from_history_line_report(line, paths.history, line_number)
-        if payload_report.load_error:
-            load_errors.append(payload_report.load_error)
-        payload = payload_report.payload
-        if not payload:
-            continue
-        response_path = gateway_response_path(paths, str(payload.get("id") or ""))
-        if _index_gateway_payload(agent, payload, GatewayIndexPayloadOptions(response_path=response_path)):
-            count += 1
+        load_errors.append(_gateway_index_load_error(paths.history, exc, "gateway.index.history.read"))
+    except sqlite3.Error as exc:
+        load_errors.append(_gateway_index_load_error(index.path, exc, "gateway.index.history.read"))
+    except ValueError as exc:
+        load_errors.append(_gateway_index_load_error(paths.history, exc, "gateway.index.history.read"))
     return GatewayIndexRebuildReport(count, load_errors)
 
 

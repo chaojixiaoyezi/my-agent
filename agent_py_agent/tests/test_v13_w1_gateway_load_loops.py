@@ -459,7 +459,8 @@ def test_unchanged_dir_skips_scan_and_pending_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(receipt_delivery.os, 'scandir', receipt_scan)
     receipt_delivery.reconcile_gateway_input_receipts(paths, object())
     calls.clear()
-    assert receipt_delivery.reconcile_gateway_input_receipts(paths, object())['consumed'] == 1
+    summary = receipt_delivery.reconcile_gateway_input_receipts(paths, object())
+    assert summary['checked'] == summary['consumed'] == 0
     assert not calls
     # 已消费整圈缓存不能掩蔽原地修改，也不能掩蔽pending的后续重试。
     path = receipt_delivery.gateway_input_receipt_path(paths, 'input-a')
@@ -643,17 +644,27 @@ def test_receipt_retention_legal_hold_preserves_runtime_files(tmp_path):
     assert not (paths.root / 'archive/runtime-files.sqlite3').exists()
 
 
+# LLM: 两个既有scandir持有者仍须with；已移动的候选发现使用原生FD，异常路径也必须finally关闭。
+# 函数用途: 在真实枚举入口检查资源释放，不要求已删除的完整目录扫描继续存在。
 def test_receipt_hot_scans_use_context_managers_static():
     import inspect as receipt_inspect
 
     from agent_py_agent.agent.tooling import process_session_store as receipt_sessions
-    for function in (receipt_retention._directory_entries, receipt_delivery._cached_receipt_candidates,
+    for function in (receipt_retention._directory_entries,
                      receipt_sessions.ProcessSessionTransaction.list_records):
         import textwrap as receipt_textwrap
         tree = receipt_ast.parse(receipt_textwrap.dedent(receipt_inspect.getsource(function)))
         assert any(isinstance(node, receipt_ast.With) and any(
             isinstance(item.context_expr, receipt_ast.Call) and isinstance(item.context_expr.func, receipt_ast.Attribute)
             and item.context_expr.func.attr == 'scandir' for item in node.items) for node in receipt_ast.walk(tree))
+    from agent_py_agent.agent.gateway_parts.recovery_pending_index import directory_page
+    tree = receipt_ast.parse(receipt_inspect.getsource(directory_page))
+    assert any(isinstance(node, receipt_ast.Try) and any(
+        isinstance(call, receipt_ast.Call) and isinstance(call.func, receipt_ast.Attribute)
+        and call.func.attr == 'close' for final in node.finalbody for call in receipt_ast.walk(final)
+    ) for node in receipt_ast.walk(tree))
+    assert not any(isinstance(node, receipt_ast.Call) and isinstance(node.func, receipt_ast.Attribute)
+                   and node.func.attr in {'glob', 'scandir'} for node in receipt_ast.walk(tree))
 
 
 def test_receipt_persisted_terminal_unknown_failure_is_quarantined(tmp_path, monkeypatch, caplog):
