@@ -303,6 +303,26 @@ class AssetDescriptor(_Record):
     revision: int = 0
     enabled: bool = True
 
+    # LLM: 仅适配监控公开列表引用；合并原metadata资产引用后仍走严格codec，不改变输入、授权或持久化。
+    # 函数用途: 让推荐、依赖和拓扑恢复同一监控描述符时保留全部依赖。
+    @classmethod
+    def from_dict(cls, payload):
+        if isinstance(payload, dict) and isinstance(payload.get('refs'), list):
+            metadata = payload.get('metadata')
+            saved = metadata.get('asset_refs') if isinstance(metadata, dict) else None
+            refs = AssetRefs.from_dict(saved if isinstance(saved, dict) else {}).to_dict()
+            additions = {}
+            for ref in payload['refs']:
+                if (not isinstance(ref, dict) or ref.keys() != {'kind', 'id'}
+                        or ref['kind'] not in ASSET_KINDS):
+                    raise ValueError('资产引用必须包含有效kind和id')
+                safe_asset_id(ref['id'])
+                additions.setdefault(ref['kind'] + 's', []).append(ref['id'])
+            for key, identifiers in additions.items():
+                refs[key] = list(dict.fromkeys([*refs.get(key, []), *identifiers]))
+            payload = {**payload, 'refs': refs}
+        return super().from_dict(payload)
+
     # LLM: 展示来源只做值域校验，路径授权属于宿主；严格整数版本不能用bool或语义版本字符串冒充。
     # 函数用途: 在构造和JSON恢复时校验来源字段与非负CAS版本。
     def __post_init__(self):

@@ -92,3 +92,18 @@ def test_v13_rules_project_refs_without_schedule(tmp_path):
     rows = list_monitor_descriptors(tmp_path)
     assert len(rows) == 1 and rows[0]['id'] == 'rule_a'
     assert rows[0]['refs'] == [{'kind': 'workflow', 'id': 'flow'}, {'kind': 'script', 'id': 'collect'}]
+
+
+# LLM: 实际监控公开投影必须可恢复为规范描述符，且解析不改原始列表或丢失引用；只使用临时目录。
+# 函数用途: 防止推荐、反向依赖和拓扑读口再次因列表引用丢弃监控。
+@pytest.mark.parametrize('kind', ['workflow', 'script', None])
+def test_monitor_public_refs_roundtrip_as_asset_descriptor(tmp_path, kind):
+    from agent_py_agent.agent.assets.asset_dependents import _descriptor
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+
+    raw = get_monitor_descriptor(tmp_path, 'job48', _job(kind))
+    original = json.loads(json.dumps(raw))
+    descriptor = AssetDescriptor.from_dict(_descriptor(raw))
+    assert descriptor.refs.to_dict() == raw['metadata']['asset_refs']
+    assert AssetDescriptor.from_dict(descriptor.to_dict()) == descriptor
+    assert raw == original

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1298,
+  "count": 1300,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1604,6 +1604,14 @@
       "description": "每个包保留的最近成功读取资料路径数，入口不占名额。"
     },
     {
+      "name": "METHOD_CATALOG_BUDGET_TOKENS",
+      "file": "agent_py_agent/agent/capability/method_tree.py",
+      "value": 2500,
+      "unit": "tokens",
+      "category": "上限预算",
+      "description": "完整公开方法块的估算token预算，包含两组固定用法，不含能力包区。"
+    },
+    {
       "name": "MAX_DELIVERABLE_REWORK_COUNT",
       "file": "agent_py_agent/agent/capability/pack_verification_deliverables.py",
       "value": 2,
@@ -2314,6 +2322,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "单个 Skill 文件允许读取的最大字节数上限。"
+    },
+    {
+      "name": "TURN_RECOMMENDATION_MAX_TOKENS",
+      "file": "agent_py_agent/agent/capability/turn_recommendations.py",
+      "value": 800,
+      "unit": "tokens",
+      "category": "上限预算",
+      "description": "Tier-2 每轮推荐段的估算 token 上限（UTF-8 字节 / 4）。"
     },
     {
       "name": "MAX_CAPABILITY_FILES",

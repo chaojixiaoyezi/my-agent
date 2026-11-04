@@ -150,14 +150,22 @@ def code_fingerprint(code: bytes | str) -> str:
     return 'sha256:' + hashlib.sha256(normalize_code_text(text).encode('utf-8', errors='surrogateescape')).hexdigest()
 
 
-# LLM: 只剥离顶层易变字段和metadata中的宿主管理键，其他用户定义原样参与语义。
-# 函数用途: 生成可冻结的定义副本。
+# LLM: workflow嵌套/平铺传输统一为canonical平铺定义；剥离运行投影，正文和用户字段仍参与版本语义。
+# 函数用途: 生成跨Store和显式发布入口一致的可冻结定义副本。
 def _payload_copy(payload):
     if not isinstance(payload, Mapping):
         raise ValueError('history payload must be an object')
+    descriptor = payload.get('descriptor')
+    if isinstance(descriptor, Mapping) and descriptor.get('kind') == 'workflow':
+        payload = {**descriptor, **{key: value for key, value in payload.items() if key != 'descriptor'}}
     clean = {key: value for key, value in payload.items() if key not in VOLATILE_DESCRIPTOR_KEYS}
+    if clean.get('kind') == 'script':
+        for key in ('code', 'entrypoint_path', 'execution_definition_ref'):
+            clean.pop(key, None)
     if 'metadata' in clean:
         clean['metadata'] = strip_host_managed_metadata(clean['metadata'])[0]
+        for key in ('_run_summary_generation', '_run_summary_spool'):
+            clean['metadata'].pop(key, None)
     return json.loads(_canonical(clean))
 
 
@@ -325,8 +333,8 @@ def _snapshot_blobs(owner_home, payload, code, side_files):
             'side_blobs': {name: blob_put(owner_home, text.encode('utf-8')) for name, text in sorted(side_files.items())}}
 
 
-# LLM: 发布版本与storage_revision独立；先核CAS，再blob/记录/索引原子顺序，旧记录永不重写。
-# 函数用途: 去重或追加一个正式版本。
+# LLM: 发布版本与storage_revision独立；仅显式WORKFLOW.md、同存储修订或未指定修订、同定义且无正文/侧文件的workflow可补全；新修订、pin变化和回滚仍追加版本，CAS不变。
+# 函数用途: 在跨片保存入口之间去重、受限补全或追加完整正式版本。
 def record_version(owner_home, kind, asset_id, *, payload: Mapping, code: bytes | None = None,
                    side_files: Mapping[str, str | None] | None = None,
                    execution_definition_ref: str | None = None, storage_revision: int | None = None,
@@ -344,10 +352,28 @@ def record_version(owner_home, kind, asset_id, *, payload: Mapping, code: bytes 
     if restored_from is not None:
         _integer(restored_from, minimum=1)
     sides = _side_files(side_files)
+    payload = _payload_copy(payload)
+    if kind == 'workflow':
+        if 'WORKFLOW.md' in sides:
+            payload['body_markdown'] = sides['WORKFLOW.md']
+        elif side_files is None and payload.get('body_markdown'):
+            sides['WORKFLOW.md'] = payload['body_markdown']
     fingerprint = asset_fingerprint(payload=payload, code=code, side_files=sides)
     published = _iso_time(published_at)
     summary = _single_line(summary_line, limit=120)
     frozen_pins = json.loads(_canonical(dict(pins))) if pins is not None else {'scripts': {}, 'skills': {}, 'workflows': {}}
+    base_pin = payload.get('metadata', {}).get('base_workflow_pin') if kind == 'workflow' else None
+    if base_pin is not None:
+        if not isinstance(base_pin, Mapping):
+            raise ValueError('invalid base workflow pin')
+        base_id = safe_asset_id(base_pin.get('id'))
+        base_version = _integer(base_pin.get('version'), minimum=1)
+        if get_version(owner_home, 'workflow', base_id, base_version) is None:
+            raise AssetHistoryError('ASSET_VERSION_NOT_FOUND')
+        workflows = frozen_pins.setdefault('workflows', {})
+        if not isinstance(workflows, dict) or base_id in workflows and workflows[base_id] != {'version': base_version}:
+            raise ValueError('conflicting base workflow pin')
+        workflows[base_id] = {'version': base_version}
     with _asset_lock(owner_home, kind, asset_id):
         index = _load_index(owner_home, kind, asset_id)
         latest = index['latest']
@@ -355,7 +381,22 @@ def record_version(owner_home, kind, asset_id, *, payload: Mapping, code: bytes 
             raise AssetHistoryError('ASSET_VERSION_CONFLICT')
         previous = _record(owner_home, kind, asset_id, latest) if latest else None
         blobs = _snapshot_blobs(owner_home, payload, code, sides)
-        if previous is not None and previous['fingerprint'] == fingerprint:
+        if (kind == 'workflow' and previous is not None and not previous.get('side_blobs')
+                and restored_from is None
+                and (storage_revision is None or storage_revision == previous.get('storage_revision'))
+                and side_files is not None and 'WORKFLOW.md' in sides):
+            prev_payload = _payload_copy(json.loads(_required_blob(owner_home, previous['payload_blob'])))
+            if (not prev_payload.get('body_markdown')
+                    and {**prev_payload, 'body_markdown': ''} == {**payload, 'body_markdown': ''}):
+                record = {**previous, 'fingerprint': fingerprint, **blobs,
+                          'pins': {**previous.get('pins', {}), **frozen_pins}}
+                if record != previous:
+                    _write_json(owner_home, (*_HISTORY_PARTS, 'versions', kind, asset_id, f'v{latest}.json'), record)
+                    index = {**index, 'versions': [*index['versions'][:-1], _index_row(record)]}
+                    _write_json(owner_home, (*_HISTORY_PARTS, 'versions', kind, f'{asset_id}.json'), index)
+                return {'created': False, 'version': latest, 'record': record}
+        if (previous is not None and previous['fingerprint'] == fingerprint
+                and (kind != 'workflow' or pins is None or previous.get('pins', {}) == frozen_pins)):
             # 原始换行不同仍保留blob，供按raw code_sha256冻结的在途读取者使用。
             return {'created': False, 'version': latest, 'record': previous}
         version = latest + 1

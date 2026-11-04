@@ -68,6 +68,140 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    # LLM: INT.REG仅补分类，不签发发布、继承、重放或越权许可；未知副作用必须先核原回执。
+    # 配置用途: 登记冻结接口合同及当前生产代码实际发出的错误，保留明确恢复边界。
+    "ASSET_VERSION_NOT_FOUND": ErrorContract(
+        code="ASSET_VERSION_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="请求的已发布版本不存在；读取原资产版本索引并核对准确版本，不自动换成最新版本或补造历史。",
+    ),
+    "ASSET_VERSION_CONFLICT": ErrorContract(
+        code="ASSET_VERSION_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="expected_latest与当前索引不一致；重新读取原索引并核对用户意图，不覆盖并发更新或盲目重放发布。",
+    ),
+    "ASSET_HISTORY_BLOB_MISSING": ErrorContract(
+        code="ASSET_HISTORY_BLOB_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="版本记录引用的原始blob缺失；保留版本与引用并核对原存储，不补造内容、改指纹或把缺失当作空版本。",
+    ),
+    "ASSET_HISTORY_QUOTA_EXCEEDED": ErrorContract(
+        code="ASSET_HISTORY_QUOTA_EXCEEDED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前owner的版本存储额度已满；核对用量及原保留策略，在授权范围处理，不换owner、删历史或绕过配额。",
+    ),
+    "ASSET_REVISION_REQUIRED": ErrorContract(
+        code="ASSET_REVISION_REQUIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="有依赖的资产更新必须显式提供expected_revision；读取准确版本和依赖后按原意图修改，不取消保护或直接覆盖。",
+    ),
+    "ASSET_DRAFT_NOT_FOUND": ErrorContract(
+        code="ASSET_DRAFT_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原资产没有可发布草稿；核对准确资产及草稿状态，取得有效草稿后再显式发布，不补造草稿或绕过验证。",
+    ),
+    "ASSET_STORE_DIRECT_WRITE_DENIED": ErrorContract(
+        code="ASSET_STORE_DIRECT_WRITE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="文件工具不得直接写入受管资产目录；通过原scripts/workflows等受控入口修改，不用shell、链接或其他路径绕过。",
+    ),
+    "ANALYSIS_BLOCKED_NO_DATA": ErrorContract(
+        code="ANALYSIS_BLOCKED_NO_DATA", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="输入携带analysis_blocked，本次分析未派发；核对原查询健康与数据来源，修复数据后显式恢复，不换模型或把无数据当有效结论。",
+    ),
+    "WORKFLOW_FOREACH_INVALID": ErrorContract(
+        code="WORKFLOW_FOREACH_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="foreach声明不满足合同；核对原输入数组、批次边界及准确schema，修正原定义，不去掉断言或重跑已有副作用。",
+    ),
+    "WORKFLOW_BATCH_FAILED": ErrorContract(
+        code="WORKFLOW_BATCH_FAILED", category="execution", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="批次按fail_fast策略失败；查看原批次结果及已执行事实，修复准确断点，不从头重放成功批次或忽略失败。",
+    ),
+    "SOURCE_MISSING": ErrorContract(
+        code="SOURCE_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="声明的数据来源缺失或不可取得；核对原来源记录和授权，不补造来源、把未知当零结果或越权扩大查询。",
+    ),
+    "ASSET_DEPENDENT_REPLAY_FAILED": ErrorContract(
+        code="ASSET_DEPENDENT_REPLAY_FAILED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="依赖回放门未通过，晋升被拒绝；查看准确回放结果并修复原资产，不绕过验证门或自动发布未验证版本。",
+    ),
+    "BACKGROUND_AGENT_LIMIT_REACHED": ErrorContract(
+        code="BACKGROUND_AGENT_LIMIT_REACHED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="后台代理数量达到原策略上限；核对真实在运行任务及额度，不转前台、换owner或停止无关任务绕过限制。",
+    ),
+    **{code: ErrorContract(
+        code=code, category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原参数或能力声明不满足合同；核对结构化错误及准确schema，修正后沿原入口提交，不删约束、改身份或盲目重试。",
+    ) for code in (
+        "ADAPTER_EMPTY_PROMPT", "BROKER_INVALID_REQUEST", "CONTROL_OPERATION_ID_REQUIRED",
+        "DATASOURCE_DRIVER_UNSUPPORTED", "DISPLAY_REF_INVALID", "IM_INTERACTION_INVALID",
+        "INVALID_CONCURRENCY_POLICY", "INVALID_PROGRESS_INCLUDE", "INVALID_SCHEMA",
+        "INVALID_VERBOSE_LEVEL", "LEARNING_EXCLUSIONS_INVALID", "PARAMETER_BOUNDARY",
+        "TEST_UNSUPPORTED", "WORKFLOW_CONCURRENCY_UNSUPPORTED", "WORKFLOW_INPUT_BUDGET_INVALID",
+    )},
+    **{code: ErrorContract(
+        code=code, category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="原宿主拒绝当前调用范围；核对准确owner、能力及授权快照，沿原受控入口申请，不换工具、路径或身份绕过。",
+    ) for code in (
+        "BROKER_EXECUTION_DENIED", "BROKER_SCOPE_DENIED", "CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE",
+    )},
+    **{code: ErrorContract(
+        code=code, category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="原安全控制所需凭据不可用；通过准确的宿主安全入口恢复，不在普通聊天收集秘密、借用其他账号或降级绕过。",
+    ) for code in ("IM_CONTROL_CREDENTIAL_UNAVAILABLE", "LOCAL_CREDENTIAL_REQUIRED")},
+    **{code: ErrorContract(
+        code=code, category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原状态、版本或目标与当前请求不一致；读取准确记录并保留已有执行事实，修正后由原入口继续，不补造状态或重放旧控制。",
+    ) for code in (
+        "ASSET_REVISION_CONFLICT", "AUDIT_CURSOR_MISSING", "AUDIT_NO_PUBLISHED_SOURCES",
+        "AUDIT_SOURCE_IDENTITY_UNAVAILABLE", "AUDIT_SOURCE_WATCH_CLOSED", "EXPIRED_TARGET_TURN",
+        "GATEWAY_REQUEST_IDENTITY_CONFLICT", "IDEMPOTENCY_CONFLICT", "IM_INTERACTION_ALREADY_HANDLED",
+        "IM_INTERACTION_IN_PROGRESS", "PLUGIN_NOT_ENABLED", "PROCESS_SESSION_NOT_FOUND",
+        "RESOURCE_NOT_FOUND", "SCHEDULER_MISFIRE_GRACE_EXPIRED", "SCHEDULER_TASK_UNAVAILABLE",
+        "WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING",
+    )},
+    **{code: ErrorContract(
+        code=code, category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原资源或输入预算已达上限；核对当前用量与真实运行，按既有策略等待或缩小工作，不拆身份、修改策略或重放已开始业务。",
+    ) for code in ("GATEWAY_HTTP_BUSY", "WORKFLOW_ANALYSIS_INPUT_OVER_BUDGET", "WORKFLOW_RUN_QUEUE_FULL")},
+    **{code: ErrorContract(
+        code=code, category="execution", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原执行、投递、写入或退出结果需要核实；沿准确调用读取原回执及实际状态，确认前不重放、补写成功或擅自释放资源。",
+    ) for code in (
+        "ASSET_DELIVERY_FAILED", "BACKGROUND_STOP_UNCONFIRMED", "CHANNEL_PROGRESS_UNKNOWN",
+        "CONTROL_OPERATION_DELIVERY_UNKNOWN", "CONTROL_OPERATION_INTERRUPTED",
+        "CONTROL_OPERATION_RECEIPT_CORRUPT", "CONTROL_OPERATION_RECONCILE_FAILED",
+        "DATASOURCE_MIGRATION_COMMIT_UNCERTAIN", "GATEWAY_PROCESSING_TIMEOUT",
+        "GATEWAY_REQUEST_PROCESSING_STATE_WRITE_ERROR", "GATEWAY_TIMEOUT",
+        "IM_INTERACTION_DISPATCH_UNCONFIRMED", "OUTCOME_UNKNOWN", "RUNNER_WORKER_EXIT_UNCONFIRMED",
+        "SCRIPT_CLEANUP_ERROR", "TARGET_DELIVERY_IO_ERROR",
+    )},
+    **{code: ErrorContract(
+        code=code, category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原来源、宿主或可信读取不可用；保留待恢复工作并核对准确来源及原错误，不把未知当空数据、不补造身份或自动重放写入。",
+    ) for code in (
+        "ADAPTER_MESSAGE_LOAD_ERROR", "AUDIT_CURSOR_LOCK_UNAVAILABLE", "AUDIT_GROUP_UNAVAILABLE",
+        "AUDIT_READ_FAILED", "AUDIT_SOURCE_WORKER_CREATE_FAILED", "BROKER_UNAVAILABLE",
+        "CLIENT_HISTORY_LOAD_FAILED", "DATASOURCE_SCHEMA_FAILED", "DISPLAY_ARCHIVE_UNAVAILABLE",
+        "DISPLAY_ARCHIVE_WRITE_FAILED", "GATEWAY_REQUEST_LOAD_ERROR", "GATEWAY_RESPONSE_LOAD_ERROR",
+        "GATEWAY_UNAVAILABLE", "HARVESTER_LEASE_UNAVAILABLE", "HARVESTER_LEASE_UNREADABLE",
+        "HOST_V2_REQUIRED", "IM_CONTROL_RESPONSE_INVALID", "IM_CONTROL_TRANSPORT_UNAVAILABLE",
+        "IM_INTERACTION_HOST_UNAVAILABLE", "PARENT_WAIT_LOAD_ERROR", "SANDBOX_RESOURCE_GUARD_FAILED",
+        "TOOL_REFERENCE_READ_FAILED", "WORKFLOW_CONCURRENCY_IDENTITY_UNAVAILABLE",
+    )},
     "VAPID_SUBJECT_REQUIRED": ErrorContract(
         code="VAPID_SUBJECT_REQUIRED", category="configuration", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
