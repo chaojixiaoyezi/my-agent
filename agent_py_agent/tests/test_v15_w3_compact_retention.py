@@ -72,6 +72,35 @@ def test_compact_keeps_only_latest_structured_section(tmp_path, monkeypatch, sel
     assert previous.volatile_sections[0] == ('prompt.tool_recommendations', 'OLD-RECOMMENDATION')
 
 
+@pytest.mark.parametrize(('supplied', 'scope'), [
+    (True, 'conversation'), (False, 'isolated'), (True, 'isolated'),
+    (False, 'control_plane'), (True, 'control_plane'),
+])
+def test_compact_rejected_or_isolated_surface_strips_recommendations_but_keeps_persona(
+    tmp_path, monkeypatch, supplied, scope,
+):
+    """拒绝分支既清空 builder 的输入，也过滤自定义 renderer 回传的推荐；人格更新不受影响。"""
+    agent, surface = setup_surface(tmp_path, monkeypatch, selected=False)
+    surface = replace(surface, context_scope=scope, capability_presentation=object() if supplied else None)
+    requests = []
+
+    def parent_prompt(host, request, params):
+        requests.append(request)
+        return CacheStructuredPrompt('fixed-prefix', '', volatile_sections=(
+            ('prompt.tool_recommendations', 'REJECTED-RECOMMENDATION'),
+            ('prompt.persona_updates', 'PERSONA-UPDATE')))
+
+    monkeypatch.setattr(module, '_compact_parent_prompt', parent_prompt)
+    prepared = module.prepare_conversation_compact_provider_surface(agent, surface, run_id='compact-w3-rejected')
+    assert requests[0].user_prompt == ''
+    assert requests[0].tools.tool_recommendations_section == ''
+    assert prepared.volatile_sections == (('prompt.persona_updates', 'PERSONA-UPDATE'),)
+    assert prepared.stable_prompt_prefix == 'fixed-prefix'
+    messages = module.conversation_compact_provider_messages('', 0, [], volatile_sections=prepared.volatile_sections)
+    assert 'REJECTED-RECOMMENDATION' not in str(messages)
+    assert 'PERSONA-UPDATE' in str(messages)
+
+
 # LLM: 原IR合同是同文本不重复、空文本不撤销旧事实；此测试明确记录既有语义，不修改只读模块。
 # 函数用途: 验证同输入去重、变化追加、空段忽略和原输入不变。
 def test_runtime_facts_repeat_change_and_empty_semantics_are_preserved():

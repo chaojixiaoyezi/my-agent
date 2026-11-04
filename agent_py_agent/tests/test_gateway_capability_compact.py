@@ -108,7 +108,7 @@ def test_compact_keeps_loaded_schema_and_fails_closed_on_changed_scope(surface, 
     assert len(calls) == 1 and surface.first.calls == surface.second.calls == 0
 
 
-@pytest.mark.parametrize("scope", ["run", "task", "thread", "turn", "missing"])
+@pytest.mark.parametrize("scope", ["run", "task", "thread", "turn", "missing", "missing-turn", "carrier", "isolated", "control_plane"])
 def test_compact_never_uses_carrier_binding_as_current_scope(surface, monkeypatch, scope):  # noqa: F811
     surface.params.capability_presentation_turn_id = "gateway-turn"
     calls = provider(monkeypatch)
@@ -119,13 +119,22 @@ def test_compact_never_uses_carrier_binding_as_current_scope(surface, monkeypatc
         requested = replace(requested, capability_presentation_turn_id="other-turn")
     elif scope == "missing":
         requested = replace(requested, presentation_context=None)
+    elif scope == "missing-turn":
+        requested = replace(requested, capability_presentation_turn_id="")
+    elif scope == "carrier":
+        requested = replace(requested, capability_presentation=object())
+    elif scope in {"isolated", "control_plane"}:
+        requested = replace(requested, context_scope=scope)
     else:
         context = requested.presentation_context
         values = {scope + "_id": "other-scope"} if scope != "thread" else {"task_attributes": {"agent_thread_id": "other-thread"}}
         requested = replace(requested, presentation_context=replace(context, **values))
     prepared = prepare_conversation_compact_provider_surface(surface.host, requested, run_id="summary-operation")
     assert observed == [None] and prepared.volatile_sections == () and len(calls) == 1
-    assert "method-059" in prepared.stable_prompt_prefix
+    if scope == "control_plane":
+        assert "method-059" not in prepared.stable_prompt_prefix
+    else:
+        assert "method-059" in prepared.stable_prompt_prefix
 
 
 @pytest.mark.parametrize("mode", ["off", "observe"])
@@ -138,7 +147,13 @@ def test_unselected_compact_surface_retains_original_bytes_without_extra_decisio
     requested = compact_surface(surface, None)
     actual = prepare_conversation_compact_provider_surface(surface.host, requested, run_id=surface.params.run_id)
     baseline = prepare_conversation_compact_provider_surface(surface.host, ConversationCompactModelSurface(), run_id=surface.params.run_id)
-    assert asdict(actual) == asdict(baseline)
+    # P1.2b-C：未提供选择不是拒绝；缓存面不变，但应保留与普通轮同源的当前推荐。
+    _, _, loop = model_input(surface, selected)
+    layout = prompt_cache_layout(_render_tool_loop_prompt(surface.host, loop))
+    assert actual.stable_prompt_prefix == baseline.stable_prompt_prefix == layout.stable_prefix
+    assert actual.tools == baseline.tools == tuple(resolve_native_tools(surface.host, loop))
+    assert actual.system_instruction == baseline.system_instruction
+    assert dict(actual.volatile_sections)["prompt.tool_recommendations"] == dict(layout.volatile_sections)["prompt.tool_recommendations"]
     assert str(conversation_compact_provider_prompt(actual, "压缩要求")) == str(conversation_compact_provider_prompt(baseline, "压缩要求"))
     assert len(calls) == (mode == "observe")
 

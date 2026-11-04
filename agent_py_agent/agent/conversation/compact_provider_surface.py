@@ -67,7 +67,7 @@ class ConversationCompactProviderSurface:
 # display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
 # 包候选沿 model_surface 原范围和重验后的 selected 集合投影，不用默认范围或载体旧选择重新补回未选包。
 # 工具加载名只按首见顺序去重后交原resolver，不先转set破坏发现顺序或改变allowed_tools。
-# 本轮推荐不依赖能力选择载体；单模型同样消费当前请求文本，并只保留layout中唯一当前分段。
+# 单模型无需选择载体仍可保留当前推荐；显式载体复核被拒或隔离范围必须清空推荐输入及尾段。
 # 函数用途: 按原链冻结压缩缓存面和实际自我目录资格，复用已提交线程人格；失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
@@ -107,7 +107,12 @@ def prepare_conversation_compact_provider_surface(
     )
     presentation = _compact_capability_presentation(agent, model_surface, runtime_snapshot, protocol_snapshot)
     runtime_snapshot = presentation.tool_snapshot
-    user_prompt = runtime_request.user_prompt
+    keep_recommendations = (
+        bool(getattr(config, "enable_tools", False))
+        and str(model_surface.context_scope or "default").strip().lower() not in {"isolated", "control_plane"}
+        and (model_surface.capability_presentation is None or presentation.selection is not None)
+    )
+    user_prompt = runtime_request.user_prompt if keep_recommendations else ""
     tool_catalog, tool_recommendations = _resolve_tool_sections(
         ToolSectionsRequest(
             agent=agent,
@@ -131,7 +136,7 @@ def prepare_conversation_compact_provider_surface(
         workspace_context_override="",
         tools=ToolSections(
             tool_catalog_section=tool_catalog,
-            tool_recommendations_section=tool_recommendations,
+            tool_recommendations_section=tool_recommendations if keep_recommendations else "",
             native_tool_use=True,
             self_map_available=self_map_available(runtime_snapshot, allowed_tools),
             selected_skill_ids=presentation.selected_skill_ids,
@@ -157,7 +162,8 @@ def prepare_conversation_compact_provider_surface(
         system_instruction=provider_system_instruction(getattr(agent, "backend", None)),
         volatile_sections=tuple(
             section for section in layout.volatile_sections
-            if section[0] in {"prompt.persona_updates", "prompt.tool_recommendations"}
+            if section[0] == "prompt.persona_updates"
+            or (keep_recommendations and section[0] == "prompt.tool_recommendations")
         ),
     )
 
