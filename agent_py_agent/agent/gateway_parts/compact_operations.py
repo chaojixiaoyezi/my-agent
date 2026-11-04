@@ -146,7 +146,9 @@ def _compact_idle_candidate(agent, store, thread, *, now=None):
         return {**result, "reason": "already_compacted"}
     usage = inspect_conversation_context(agent, store, latest)
     used, window = usage.projected_tokens, usage.context_window_tokens
-    if window <= 0 or used * 100 < window * idle_threshold:
+    # 闲置水位相对于同次普通压缩的生效预算，整数比较保留精确边界。
+    effective_trigger = policy["effective_trigger_percent"]
+    if window <= 0 or used * 10000 < window * effective_trigger * idle_threshold:
         return {**result, "reason": "below_threshold"}
     if (used * 100 >= window * policy["effective_trigger_percent"]
             and metadata.get("last_compacted_user_activity_gen") == generation

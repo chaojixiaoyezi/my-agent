@@ -238,7 +238,7 @@ def test_idle_compact_guards_and_generation_idempotency(conversation, tmp_path, 
     agent = SimpleNamespace(config=config, home_paths=SimpleNamespace(owner_home_dir=tmp_path))
     busy = {"foreground": "foreground_active", "subagent": "subagent_active", "process": "background_process_active"}.get(scenario, "")
     monkeypatch.setattr(idle, "idle_compact_busy_state", lambda *_: busy)
-    tokens = 599 if scenario == "below_threshold" else 850 if scenario == "regular_compacted" else 650
+    tokens = 479 if scenario == "below_threshold" else 850 if scenario == "regular_compacted" else 650
     monkeypatch.setattr(idle, "inspect_conversation_context", lambda *_: SimpleNamespace(projected_tokens=tokens, context_window_tokens=1000))
     calls = []
 
@@ -263,6 +263,40 @@ def test_idle_compact_guards_and_generation_idempotency(conversation, tmp_path, 
         assert updated.metadata["last_idle_compacted_activity_gen"] == 1
         assert idle.maybe_auto_compact_idle_session(agent, store, updated, now=15000.0)["reason"] == "already_compacted"
         assert len(calls) == 1
+
+
+# LLM: 只替换容量观察及模型准备；原会话策略、闲置门和整数比较均走产品代码。
+# 函数用途: 验证500K窗口的相对水位及精确边界，全部正常阈值下闲置总早于常规压缩。
+@pytest.mark.parametrize("trigger,tokens", [(90, 270000), (80, 240000), (60, 180000), (50, 150000)])
+def test_relative_idle_trigger_table(conversation, tmp_path, monkeypatch, trigger, tokens):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.gateway_parts import compact_operations as idle
+
+    store, row = conversation
+    row = store.threads.update_atomic(row.thread_id, lambda t: replace(t, metadata={
+        "last_user_activity_at": 100.0, "settings": {"compact_trigger_percent": trigger}}))
+    agent = SimpleNamespace(config=AgentConfig(), home_paths=SimpleNamespace(owner_home_dir=tmp_path))
+    monkeypatch.setattr(idle, "idle_compact_busy_state", lambda *_: "")
+    usage = SimpleNamespace(projected_tokens=tokens - 1, context_window_tokens=500000)
+    monkeypatch.setattr(idle, "inspect_conversation_context", lambda *_: usage)
+    calls = []
+    monkeypatch.setattr(idle, "prepare_conversation_context", lambda *a, **k: calls.append(k) or SimpleNamespace(compacted=True))
+    assert idle._compact_idle_candidate(agent, store, row, now=7300)["reason"] == "below_threshold"
+    usage.projected_tokens = tokens
+    assert idle._compact_idle_candidate(agent, store, row, now=7300)["reason"] == "compacted"
+    assert len(calls) == 1
+    for percent in range(50, 96):
+        current = store.threads.update_atomic(row.thread_id, lambda t: replace(t, metadata={
+            "last_user_activity_at": 100.0, "settings": {"compact_trigger_percent": percent}}))
+        boundary = 500000 * percent * 60 // 10000
+        assert boundary < 500000 * percent // 100
+        usage.projected_tokens = boundary - 1
+        before = len(calls)
+        assert idle._compact_idle_candidate(agent, store, current, now=7300)["reason"] == "below_threshold"
+        usage.projected_tokens = boundary
+        assert idle._compact_idle_candidate(agent, store, current, now=7300)["reason"] == "compacted"
+        assert len(calls) == before + 1
 
 
 # LLM: 实际CAS冲突属于让位而非模型失败；测试在摘要期间加入新用户消息，必须保留新活动并不标记闲置完成。

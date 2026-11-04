@@ -57,6 +57,7 @@ from ..conversation.agent_control import (
 )
 from ..conversation.background_transcript import read_background_transcript_events
 from ..conversation.channels import (
+    host_paths_visible_to_viewer,
     project_host_paths_for_channel,
     project_user_reply,
     redact_host_absolute_paths,
@@ -132,6 +133,7 @@ class _AskRequestContext:
     request_id: str
     user_id: str
     channel: str
+    preserve_host_paths: bool = False
 
 
 # LLM: 只限制已由启动门核过的C缺业务Agent状态，不签角色/owner或加载Agent；调用方须先原认证拒门，Count0 None保持原契约。
@@ -465,6 +467,8 @@ def _continuation_result_projection(agent: object | None, request_id: str) -> di
 #   记录不存在回 404、存在但无权限保持 403，与 /result、/input-status 同口径；两种拒绝都经
 #   _denial_body 补"缺本机凭据"码，客户端不再需要从 403 里猜"记录不存在"。
 # 函数用途: 按行游标返回当前 request 已启用的 typed 工具进度。
+# LLM: 轮询者的当前权限只解析一次，展示标志不继承被读请求的管理员能力，也不改变读取ACL。
+# 函数用途: 按本次查看者投影有界进度事件。
 def handle_progress(handler, server) -> None:
     parsed = urlsplit(handler.path)
     request_id = parsed.path[len("/progress/") :]
@@ -502,8 +506,12 @@ def handle_progress(handler, server) -> None:
             {"request_id": request_id, "events": [], "next": since},
         )
         return
+    channel = _request_channel(handler)[1]
+    preserve_host_paths = host_paths_visible_to_viewer(
+        channel, can_access_all_users=permission is None or permission.can_access_all_users,
+        chat_type=(getattr(handler, "headers", {}) or {}).get("X-Channel-Chat-Type", ""))
     events, next_cursor = _read_public_progress_events(
-        actual_path, since, channel=_request_channel(handler)[1], include=include,
+        actual_path, since, channel=channel, include=include, preserve_host_paths=preserve_host_paths,
     )
     handler._send_json(
         200,
@@ -516,7 +524,7 @@ def handle_progress(handler, server) -> None:
 #   旧model_draft未提交正文不再公开；读取复用有界增量位置索引，半行不消费，超限只投影行号和字节数，等待/时间仍保留。
 # 函数用途: 按行游标公开过程和真实等待；只在显式订阅时发送 stream 档位的安全正文候选，不发送思考。
 def _read_public_progress_events(
-    path, since: int, *, channel: str = "", include: frozenset[str] = frozenset()
+    path, since: int, *, channel: str = "", include: frozenset[str] = frozenset(), preserve_host_paths: bool = False
 ) -> tuple[list[dict[str, object]], int]:
     lines, next_cursor = read_progress_lines(path, since)
     events: list[dict[str, object]] = []
@@ -530,7 +538,7 @@ def _read_public_progress_events(
         if not isinstance(row.get("kind"), str):
             continue
         if row.get("kind") in {"assistant_text_delta", "assistant_text_reset", "assistant_text_done", "workflow_step_progress"}:
-            extension = _public_progress_extension(row, include=include, channel=channel)
+            extension = _public_progress_extension(row, include=include, channel=channel, preserve_host_paths=preserve_host_paths)
             if extension is not None:
                 events.append(extension)
             continue
@@ -541,6 +549,7 @@ def _read_public_progress_events(
             text = project_host_paths_for_channel(
                 project_user_reply(row.get("text", "")).content,
                 channel,
+                preserve_host_paths=preserve_host_paths,
             ).strip()
             if text:
                 events.append({"kind": str(row["kind"]), "text": text,
@@ -552,7 +561,7 @@ def _read_public_progress_events(
             events.append({"kind": "progress_oversize", "line": row.get("line"), "bytes": row.get("bytes")})
             continue
         if row.get("kind") == "permission_requested":
-            permission_event = _public_permission_request_event(row, channel)
+            permission_event = _public_permission_request_event(row, channel, preserve_host_paths=preserve_host_paths)
             if permission_event is not None:
                 events.append(permission_event)
             continue
@@ -580,7 +589,7 @@ def _read_public_progress_events(
 
 # LLM: 扩展事件必须显式订阅；只投影合同键，正文增量仍由 writer 的跨块脱敏门负责。
 # 函数用途: 让 Web 读取新事件，同时保持不带 include 的 IM 轮询完全不受影响。
-def _public_progress_extension(row: dict, *, include: frozenset[str], channel: str) -> dict | None:
+def _public_progress_extension(row: dict, *, include: frozenset[str], channel: str, preserve_host_paths: bool = False) -> dict | None:
     kind = row.get("kind")
     if kind == "workflow_step_progress":
         from .stream_events import workflow_step_event
@@ -608,7 +617,8 @@ def _public_progress_extension(row: dict, *, include: frozenset[str], channel: s
         if kind == "assistant_text_delta":
             if not isinstance(row.get("text"), str):
                 return None
-            event.update(text=project_host_paths_for_channel(redact_sensitive_value(row["text"]), channel), level="stream")
+            event.update(text=project_host_paths_for_channel(redact_sensitive_value(row["text"]), channel,
+                preserve_host_paths=preserve_host_paths), level="stream")
     return redact_sensitive_value(event)
 
 
@@ -636,7 +646,7 @@ def _progress_update_time(row: dict[str, object]) -> dict[str, str]:
 
 # LLM: 只接受结构化 permission 对象里的工具名和展示摘要；摘要经与最终回复同一的公开投影和宿主路径收敛并限长。
 # 函数用途: 把一条等待确认的工具审批变成 IM 可渲染的公开进度事件。
-def _public_permission_request_event(row: dict, channel: str) -> dict[str, object] | None:
+def _public_permission_request_event(row: dict, channel: str, *, preserve_host_paths: bool = False) -> dict[str, object] | None:
     permission = row.get("permission")
     if not isinstance(permission, dict):
         return None
@@ -646,6 +656,7 @@ def _public_permission_request_event(row: dict, channel: str) -> dict[str, objec
     summary = project_host_paths_for_channel(
         project_user_reply(str(permission.get("description") or "")).content,
         channel,
+        preserve_host_paths=preserve_host_paths,
     )
     summary = " ".join(summary.split())[:200] or tool
     return {"kind": "permission_requested", "tool": tool, "summary": summary}
@@ -931,11 +942,12 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         )
         return
     request_id = request_id_factory()
-    request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     try:
         from .control_plane import prepare_coordinator_input
 
         scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
+        request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel,
+            preserve_host_paths=scope.metadata["host_path_display"] == "full"))
         pending_path = server.paths.inbox / f"{request_id}.json"
 
         # LLM: 原随机ID入口仍用同一私有writer；C身份/偏好准备与写入须在原lease末门内，不能保存callback延寿。
@@ -994,14 +1006,15 @@ def _handle_idempotent_ordinary_ask(
         }
     )
     routed_body["metadata"] = metadata
-    prepared_request = _build_ask_request(
-        _AskRequestContext(routed_body, goal, request_id, user_id, channel)
-    )
     scope = _gateway_control_scope(
         handler,
         routed_body,
         user_id=user_id,
         channel=channel,
+    )
+    prepared_request = _build_ask_request(
+        _AskRequestContext(routed_body, goal, request_id, user_id, channel,
+            preserve_host_paths=scope.metadata["host_path_display"] == "full")
     )
     from .im_dispatch_policy import IM_DISPATCH_KEY
     from .request_owner_binding import frozen_request_owner
@@ -2296,6 +2309,10 @@ def _gateway_control_scope(
         channel = str(body.get("channel") or channel).strip()
     metadata = body.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
+    # 展示权限来自本次认证事实，覆盖外部同名字段；后续投影不再访问认证服务。
+    metadata = {**metadata, "host_path_display": "full" if host_paths_visible_to_viewer(
+        channel, can_access_all_users=permission is None or permission.can_access_all_users,
+        chat_type=(getattr(handler, "headers", {}) or {}).get("X-Channel-Chat-Type", "")) else "basename"}
     return GatewayControlScope(
         user_id=user_id,
         channel=channel,
@@ -2319,6 +2336,7 @@ def _build_ask_request(context: _AskRequestContext) -> dict:
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
     metadata["user_id"] = context.user_id
     metadata["channel"] = context.channel
+    metadata["host_path_display"] = "full" if context.preserve_host_paths else "basename"
     payload = {
         "id": context.request_id,
         "request_id": context.request_id,

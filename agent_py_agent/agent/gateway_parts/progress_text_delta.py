@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from ..common import log_redaction
 from ..conversation import user_visible_text
+from ..conversation.channels import _HOST_ABSOLUTE_PATH_RE
 
 # 沿用共用秘密语法，只补流切点，不另设一套凭据识别口径。
 _OPEN_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s]*\Z")
@@ -143,7 +144,7 @@ class TextDeltaBuffer:
         return [event]
 
 
-# LLM: 固定 holdback 之外还保留跨切点的完整秘密语法、未闭合 URL 和可信标识；长凭据不能因超过 256 字而漏尾部。
+# LLM: 固定holdback外保留完整秘密、URL、标识和宿主路径；复用原投影语法及调用方预算，不新增状态或认证I/O。
 # 函数用途: 寻找仍保有完整脱敏上下文的前缀，找不到就继续等待，不强行刷新。
 def _safe_cut(raw: str, limit: int, identifiers: tuple) -> int:
     cut = max(0, limit)
@@ -204,4 +205,9 @@ def _safe_cut(raw: str, limit: int, identifiers: tuple) -> int:
         for length in range(1, min(len(needle), len(raw) + 1)):
             if raw.endswith(needle[:length]):
                 cut = min(cut, len(raw) - length)
+    # 复用投影路径语法；虚拟末段只补齐未完整的POSIX首段或末尾斜杠，不进入实际投影。
+    path_probe = raw + ("_" if raw.endswith("/") else "/_")
+    for match in _HOST_ABSOLUTE_PATH_RE.finditer(path_probe):
+        if match.start() < cut < match.end():
+            cut = match.start()
     return cut

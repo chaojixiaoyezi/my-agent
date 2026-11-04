@@ -91,6 +91,24 @@ def test_cli_status_dispatch_is_read_only(conversation):
     assert store.storage.thread_path(row.thread_id).read_bytes() == before
 
 
+# LLM: 状态读取走真实策略，不写会话，不用展示文字计算阈值。
+# 函数用途: 验证相对窗口显示的三个新字段与配置水位一致。
+@pytest.mark.parametrize("trigger", [90, 80, 60, 50])
+def test_status_reports_relative_idle_window(conversation, trigger):
+    from agent_py_agent.agent.conversation.compact_threshold_policy import compact_status_result
+
+    store, row = conversation
+    row = store.threads.update_atomic(row.thread_id, lambda t: replace(t,
+        metadata={"settings": {"compact_trigger_percent": trigger}}))
+    before = store.storage.thread_path(row.thread_id).read_bytes()
+    result = compact_status_result(SimpleNamespace(config=AgentConfig()), row)
+    policy = result.details["idle_policy"]
+    assert policy.get("trigger_percent_of_compact_window") == 60
+    assert policy.get("effective_compact_trigger_percent") == trigger
+    assert policy.get("effective_window_percent") == round(trigger * 60 / 100, 2)
+    assert store.storage.thread_path(row.thread_id).read_bytes() == before
+
+
 # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
 # 函数用途: 验证重置阈值删除覆盖项但不执行摘要。
 @pytest.mark.parametrize("reset", ["reset", "default"])
