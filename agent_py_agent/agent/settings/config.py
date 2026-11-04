@@ -318,6 +318,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 函数用途: 校验拓扑并清洗私网名单，压缩比例仅使用当前字段。
     def __post_init__(self) -> None:
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
+        if type(self.max_background_agents) is not int or self.max_background_agents < 0:
+            raise ValueError("max_background_agents 必须是非负整数（0 表示不限制）")
         self.host_exclusive_path_roots = tuple(str(path) for path in configured_host_source_paths(self))
         values = self.allowed_private_hosts
         self.allowed_private_hosts = (
@@ -442,6 +444,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     enable_subagents: bool = True
     # 当前根会话树可同时保留的未结束子代理数；不同 TUI/根任务互不占槽。
     max_subagents: int = 8
+    # 管理员配置的每Owner非退役后台主Agent身份上限；0不限，调低不终止已有任务。
+    max_background_agents: int = 8
     subagent_workspace: str = ""
     subagent_allowed_tools: list[str] = field(default_factory=list)
     subagent_role_template_dirs: list[str] = field(default_factory=list)

@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 
 from ..gateway_parts.io import locked_file_transition
 from ..plugin_host.business_action_specs import business_action_spec
 from ..plugin_host.schemas import validate_object
+from .background_agent_quota import BackgroundAgentQuota
 from .background_team_lifecycle import (
     BACKGROUND_IDENTITY_KEY,
     background_identity,
@@ -74,9 +77,14 @@ class BackgroundAgentService:
             raise PermissionError("OWNER_MISMATCH")
         return source
 
+    # LLM: 供身份创建、查询和派活复核归属；先核Actor与Owner，None表示无归属，非空只读核活跃空间，不选择默认空间。
+    # 函数用途: 确认指定空间可用；无归属时直接返回None。
     def _space(self, space_id, actor):
         from .business_spaces import BusinessSpaceService
 
+        self._actor(actor)
+        if space_id is None:
+            return None
         observed = BusinessSpaceService(self.host).get(space_id, actor=actor)
         space = observed.get("space", observed)
         if space.get("space_id") != space_id or space.get("state") != "active":
@@ -121,21 +129,27 @@ class BackgroundAgentService:
     def _thread_creation_metadata(self, *, actor, metadata: dict) -> dict:
         return metadata
 
+    # LLM: 业务创建入口先校验请求、Owner和归属，再在配额及幂等锁内预留额度、原子建线程并发布索引；同键同请求复用，不启动模型。
+    # 函数用途: 创建可接单的后台助手身份，拒绝幂等冲突、超额及无空间却指定项目的请求。
     def create(self, request: dict, *, actor: object, idempotency_key: str) -> dict:
         request = _params("background_agents.create", request)
         source = self._actor(actor)
         self._space(request["space_id"], actor)
+        if request["space_id"] is None and request.get("project_ref") is not None:
+            raise ValueError("CONTEXT_REQUIRED")
         key = self._operation_key(actor, idempotency_key)
         identifier = "thread-bg-" + key[:32]
         fingerprint = _digest(request)
-        with locked_file_transition(self.store.storage.threads_dir / (".background-create-" + key)):
+        quota = BackgroundAgentQuota(self)
+        with quota.guard(), locked_file_transition(self.store.storage.threads_dir / (".background-create-" + key)):
             existing = self.store.threads.load(identifier)
             if existing is not None:
                 creation = existing.metadata.get("background_creation")
                 if existing.owner_id != actor.owner_id or creation != {"key": key, "fingerprint": fingerprint}:
                     raise ValueError("IDEMPOTENCY_CONFLICT")
                 self._thread(identifier, actor)
-                return {"agent": _agent_view(existing), "revision": background_identity(existing).identity_revision}
+                quota.track(identifier)
+                return {"agent": self._agent_view(existing), "revision": background_identity(existing).identity_revision}
             profile = self._profile(request.get("model_profile_id"))
             identity = BackgroundAgentIdentity(identifier, source.thread_id, request["space_id"], request.get("project_ref"),
                                                "available", request.get("after_task", "reuse"), 1)
@@ -143,6 +157,7 @@ class BackgroundAgentService:
             metadata = self._thread_creation_metadata(actor=actor, metadata={
                 BACKGROUND_IDENTITY_KEY: identity.to_dict(), "background_purpose": request.get("purpose", ""),
                 "background_creation": {"key": key, "fingerprint": fingerprint}})
+            quota.reserve(identifier)
             thread = create_thread_atomic(self.store.threads, ConversationThread(
                 thread_id=identifier, canonical_user_id=source.canonical_user_id, owner_id=actor.owner_id,
                 owner_home=str(self.host.home_paths.owner_home_dir), model_profile_id=profile,
@@ -152,7 +167,58 @@ class BackgroundAgentService:
                 metadata=metadata,
             ))
             self._publish(thread)
-            return {"agent": _agent_view(thread), "revision": 1}
+            return {"agent": self._agent_view(thread), "revision": 1}
+
+    # LLM: 可信Actor守Owner边界；读失败只降级观察，不创建任务或改变额度/身份。
+    # 函数用途: 提供route与列表共用的真实身份配额摘要。
+    def quota_summary(self, *, actor):
+        self._actor(actor)
+        quota = BackgroundAgentQuota(self)
+        try:
+            with quota.guard():
+                return quota.snapshot()
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            from ..settings.defaults import default_config_value
+
+            limit = getattr(self.host.config, "max_background_agents", default_config_value("max_background_agents"))
+            limit = limit if type(limit) is int and limit >= 0 else None
+            return {"limit": limit, "used": None, "available": None, "unassigned": None,
+                    "available_agents": None, "over_limit": None, "unlimited": limit == 0 if limit is not None else None,
+                    "coverage": "unknown"}
+
+    # LLM: 工作态核对同thread的claim、canonical任务和有界guidance报告；坏账或覆盖不足不假称idle。
+    # 函数用途: 给身份DTO添加独立当前工作观察，available从不等价于running。
+    def _agent_view(self, thread):
+        view = _agent_view(thread)
+        view["work_state"] = "unknown"
+        try:
+            claim, error = self.store.claims.load_report(thread.thread_id)
+            if error or (claim and claim.get("thread_id") != thread.thread_id):
+                return view
+            if claim.get("status") == "running":
+                execution = self._execution_view(thread)
+                if execution is not None:
+                    view["work_state"] = "running"
+                return view
+            if claim and claim.get("status") not in {"finished", "failed", "cancelled"}:
+                return view
+            page = self.store.session_tasks.list_page(target_thread_id=thread.thread_id, limit=100)
+            if page["load_errors"]:
+                return view
+            pending = [task for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
+            if pending:
+                view["work_state"] = "waiting"
+            elif page["coverage"] == "complete" and page["next_cursor"] is None:
+                inputs, errors = self.store.guidance.pending_report("thread", thread.thread_id, limit=100)
+                if errors:
+                    return view
+                if inputs:
+                    view["work_state"] = "waiting"
+                else:
+                    view["work_state"] = "failed" if claim.get("status") == "failed" else "idle"
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
+            pass
+        return view
 
     def _controller_id(self, actor):
         return "thread-controller-" + _digest([actor.owner_id, "business-controller.v1"])[:32]
@@ -183,6 +249,8 @@ class BackgroundAgentService:
             ))
             return {"agent_id": identifier, "thread_id": identifier, "created": True}
 
+    # LLM: 供业务名册按Owner读取有界索引页并核空间访问；省略空间表示全部，显式None只选无归属，返回真实分页覆盖与独立配额观察，不派活。
+    # 函数用途: 分页列出符合空间和生命周期筛选的后台助手及当前工作观察。
     def list(self, request: dict, *, actor) -> dict:
         request = _params("background_agents.list", request)
         self._actor(actor)
@@ -193,38 +261,81 @@ class BackgroundAgentService:
         for payload in page["items"]:
             thread = ConversationThread.from_dict(payload)
             identity = background_identity(thread)
-            if identity is None or (request.get("space_id") and identity.space_id != request["space_id"]):
+            if thread.owner_id != actor.owner_id or identity is None or ("space_id" in request and identity.space_id != request["space_id"]):
                 continue
             if request.get("lifecycle", "all") not in {"all", identity.identity_state}:
                 continue
             self._space(identity.space_id, actor)
-            items.append(_agent_view(thread))
+            items.append(self._agent_view(thread))
         return {"items": items, "next_cursor": page["next_cursor"],
-                "coverage": "partial" if page["load_errors"] else page["coverage"]}
+                "coverage": "partial" if page["load_errors"] else page["coverage"],
+                "quota": self.quota_summary(actor=actor)}
 
+    # LLM: 业务详情入口先核目标Owner与空间，再读有界待办页和准确执行关联；执行观察异常仅降级为None，不创建任务或改写身份。
+    # 函数用途: 查询一个后台助手的身份、待办及可核实的当前执行。
     def get(self, agent_id, *, actor):
         thread = self._thread(agent_id, actor)
         page = self.store.session_tasks.list_page(target_thread_id=agent_id, limit=100)
         pending = [self._task_view(task) for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
-        return {"agent": _agent_view(thread), "current_execution": self._execution_view(thread), "pending_tasks": pending,
+        try:
+            execution = self._execution_view(thread)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
+            execution = None
+        return {"agent": self._agent_view(thread), "current_execution": execution, "pending_tasks": pending,
                 "allowed_actions": ["background_agents.get", "background_agents.messages.send", "background_agents.suspend",
                                     "background_agents.resume", "background_agents.retire", "background_agents.model.set"]}
 
+    # LLM: 供详情和工作态投影只读使用；running须同时通过有效claim、同Owner运行库和canonical任务绑定复核，缺证抛错，不用身份可用态推断执行。
+    # 函数用途: 将真正仍在运行的精确run与attempt整理为执行详情；非运行claim返回None。
     def _execution_view(self, thread):
         claim, error = self.store.claims.load_report(thread.thread_id)
         if error:
             raise ValueError("CLAIM_UNREADABLE")
         authority = claim.get("runtime_authority")
-        if claim.get("status") != "running" or not isinstance(authority, dict):
+        if claim.get("status") != "running":
             return None
+        self._validate_execution_claim(thread, claim)
         repo = getattr(getattr(self.host, "subagents", None), "runtime_db", None)
         if repo is None:
             raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
         ref = repo.parent_execution_ref(owner_id=thread.owner_id, run_id=authority["run_id"], attempt_id=authority["attempt_id"])
         context = repo.business_context_for_execution(owner_id=thread.owner_id, run_id=ref.run_id, attempt_id=ref.observed_attempt_id)
+        self._validate_execution_context(thread, authority, ref, context, runtime=repo)
         return {"run_id": ref.run_id, "attempt_id": ref.observed_attempt_id, "task_id": context.task_id if context else None,
                 "thread_id": thread.thread_id, "space_id": context.space_id if context else None, "status": "running",
                 "effect_outcome": "running", "started_at": None, "ended_at": None, "error": None, "retry_refs": []}
+
+    # LLM: 运行展示仍绑定准确claim/thread/run/attempt，不能把旧claim或相似ID配给新执行。
+    # 函数用途: 复核claim携带的完整宿主执行身份。
+    def _validate_execution_claim(self, thread, claim):
+        authority = claim.get("runtime_authority")
+        required = ("invocation_run_id", "task_id", "run_id", "agent_run_id", "attempt_id")
+        if (claim.get("thread_id") != thread.thread_id or not isinstance(authority, dict)
+                or authority.get("schema_version") != "conversation_claim_execution.v1"
+                or authority.get("claim_id") != claim.get("claim_id")
+                or float(claim.get("expires_at") or 0) <= time.time()
+                or any(not isinstance(authority.get(key), str) or not authority[key] for key in required)):
+            raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+
+    # LLM: context必须来自同owner原运行库且回指准确SessionTask，缺来源只能unknown不能猜running。
+    # 函数用途: 核对当前执行与业务身份/任务的冻结绑定。
+    def _validate_execution_context(self, thread, authority, ref, context, *, runtime):
+        identity = background_identity(thread)
+        run, attempt = runtime.get_agent_run(ref.agent_run_id), runtime.get_attempt(ref.observed_attempt_id)
+        task_run = runtime.get_task_run(ref.task_run_id)
+        if (ref.agent_run_id != authority["agent_run_id"] or ref.observed_attempt_id != authority["attempt_id"]
+                or context is None or context.owner_id != thread.owner_id
+                or run is None or attempt is None or task_run is None
+                or run["status"] != "running" or attempt["status"] != "running"
+                or run["current_attempt_id"] != ref.observed_attempt_id
+                or task_run["task_id"] != authority["task_id"]
+                or (identity is not None and context.space_id != identity.space_id)):
+            raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+        task = self.store.session_tasks.require(context.task_id)
+        if (task.target_thread_id != thread.thread_id or task.status in SESSION_TASK_TERMINAL_STATUSES
+                or task.task_run_id != ref.task_run_id or task.conversation_request_id != authority["invocation_run_id"]
+                or task.metadata.get("business_context") != context.to_dict()):
+            raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
 
     def _task_view(self, task):
         raw = task.metadata.get("business_context")
@@ -233,11 +344,15 @@ class BackgroundAgentService:
                 "project_ref": context.project_ref if context else None, "status": task.status,
                 "current_run_id": None, "result_refs": list(task.result_refs), "revision": int(task.updated_at * 1000000)}
 
+    # LLM: 更新、模型选择和生命周期共用此写入口；核目标范围后在身份锁及线程原子更新内处理CAS与幂等回执并发布索引，restore还须预留配额。
+    # 函数用途: 按修订号安全修改后台身份或模型选择，同键重放不重复变更。
     def _mutate(self, agent_id, *, actor, action, changes, expected_revision, idempotency_key, model=False):
         self._thread(agent_id, actor)
         key = self._operation_key(actor, idempotency_key)
         fingerprint = _digest([action, changes, expected_revision])
 
+        # LLM: 由线程update_atomic传入最新记录；核Owner、幂等指纹和对应修订，再形成模型或身份变更及有界回执，恢复身份时会写配额预留。
+        # 函数用途: 计算一次受CAS约束的线程新值，冲突或非法生命周期转换立即拒绝。
         def apply(latest):
             if latest.owner_id != actor.owner_id:
                 raise PermissionError("OWNER_MISMATCH")
@@ -269,6 +384,8 @@ class BackgroundAgentService:
                     state = "retiring" if state != "retired" else state
                 elif state in {"retired", "retiring"}:
                     raise ValueError("AGENT_NOT_AVAILABLE")
+                if action == "restore":
+                    BackgroundAgentQuota(self).reserve(agent_id)
                 identity = replace(identity, identity_state=state, after_task=changes.get("after_task", identity.after_task),
                                    identity_revision=identity.identity_revision + 1)
                 metadata = {**latest.metadata, BACKGROUND_IDENTITY_KEY: identity.to_dict()}
@@ -286,11 +403,13 @@ class BackgroundAgentService:
         with background_identity_transition(self.store, agent_id):
             return self._publish(self.store.threads.update_atomic(agent_id, apply))
 
+    # LLM: 业务编辑入口校验update schema后委托_mutate完成范围、CAS和幂等写入；返回含独立工作观察的身份DTO及身份修订，不启动执行。
+    # 函数用途: 保存后台助手的名称、用途等允许编辑的身份字段。
     def update(self, agent_id, changes: dict, *, actor, expected_revision, idempotency_key):
         changes = _params("background_agents.update", {**changes, "agent_id": agent_id})
         thread = self._mutate(agent_id, actor=actor, action="update", changes=changes,
                               expected_revision=expected_revision, idempotency_key=idempotency_key)
-        return {"agent": _agent_view(thread), "revision": background_identity(thread).identity_revision}
+        return {"agent": self._agent_view(thread), "revision": background_identity(thread).identity_revision}
 
     # LLM: 原准入锁、Owner/空间和身份CAS保持；动作产生的索引修订须重新完整核对，不能复用旧分页前缀。
     # 函数用途: 控制身份生命周期，按完整任务责任恢复唤醒或取消，并收口实际可完成的退休。
@@ -306,8 +425,10 @@ class BackgroundAgentService:
                     raise ValueError("SPACE_MISMATCH")
                 # 不改写在途任务的冻结归属。交接是可观察的待处理义务，不复制任务到新空间。
         _params("background_agents." + action, changes)
-        thread = self._mutate(agent_id, actor=actor, action=action, changes=changes,
-                              expected_revision=expected_revision, idempotency_key=idempotency_key)
+        quota = BackgroundAgentQuota(self)
+        with quota.guard() if action == "restore" else nullcontext():
+            thread = self._mutate(agent_id, actor=actor, action=action, changes=changes,
+                                  expected_revision=expected_revision, idempotency_key=idempotency_key)
         refs, tasks = identity_outstanding(self.host, thread)
         if action == "retire":
             if disposition == "cancel_tasks":
@@ -322,10 +443,10 @@ class BackgroundAgentService:
                 thread = reconcile_background_identity(self.host, agent_id)
                 if background_identity(thread).identity_state == "retiring":
                     refs, _ = identity_outstanding(self.host, thread)
-            return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
+            return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
         if action in {"resume", "restore"}:
             self._republish_pending_work(thread, tasks, actor=actor)
-        return {"agent": _agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
+        return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "state": "completed"}
 
     # LLM: 只读一次原claim及精确owner/run/attempt关联；空串表示无执行，None表示未知责任，不能靠空root猜SessionTask。
     # 函数用途: 找到当前助手真正执行的派活任务，读取或身份异常时保守阻止重发。
@@ -466,6 +587,8 @@ class BackgroundAgentService:
             return self._dispatch_locked(request, target, actor=actor, idempotency_key=idempotency_key,
                                          origin_task_id=origin_task_id)
 
+    # LLM: 调用方_dispatch已持目标身份锁；复核Actor/空间及新任务接单和配对额度，沿原SessionTask派发写入冻结上下文、正文与唤醒，失败保留原outcome而不重派。
+    # 函数用途: 将派活或后续请求幂等送入原任务通道，无归属任务不借用默认空间。
     def _dispatch_locked(self, request, target, *, actor, idempotency_key, origin_task_id):
         from ..capability.config import CapabilityConfig
         from ..capability.runtime_config_reload import capability_config_for_agent
@@ -484,10 +607,13 @@ class BackgroundAgentService:
             raise ValueError(failure.error_code)
         intent = BusinessContextIntent(actor.owner_id, request["space_id"], request.get("project_ref"), None)
 
+        # LLM: 仅由dispatch_session_task首次建canonical任务时传入准确task_id；只解析并校验上下文，None显式走无归属，重放不重算默认选择。
+        # 函数用途: 为本次原生派活生成与准确任务绑定的冻结业务上下文。
         def factory(task_id):
             return resolve_business_context(actor=actor, task_id=task_id, requested_space_id=intent.requested_space_id,
                 project_ref=intent.project_ref, binding_id=intent.binding_id,
-                requested_method_refs=intent.requested_method_refs, requested_asset_version_refs=intent.requested_asset_version_refs)
+                requested_method_refs=intent.requested_method_refs, requested_asset_version_refs=intent.requested_asset_version_refs,
+                unassigned=intent.requested_space_id is None, host=self.host)
 
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
                                         business_context_intent=intent, business_context_factory=factory)

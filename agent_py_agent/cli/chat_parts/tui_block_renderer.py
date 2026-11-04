@@ -8,7 +8,6 @@ import math
 from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any
 
 from wcwidth import wcswidth
@@ -256,6 +255,9 @@ class TuiRenderContext:
     business_thread_active: bool = False
     todo_viewport_rows: int | None = None
     todo_scroll_offset: int = 0
+    route_enabled: bool | None = None
+    business_identity_state: str = ''
+    business_work_state: str = ''
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文、任务视口及后台计数，保证动画与刷新使用明确类型。
@@ -428,6 +430,9 @@ def tui_render_context_key(
         context.background_agent_running_count,
         context.business_list_active,
         context.business_thread_active,
+        context.route_enabled,
+        context.business_identity_state,
+        context.business_work_state,
         connection_animation,
         thinking_animation,
         foreground_animation,
@@ -3201,35 +3206,42 @@ def _render_pending_input_message(
 # LLM: 只给正常底栏追加独立颜色的进程徽标；预留宽度避免挤掉 F6，观察页本身从不提示停止进程。
 # 函数用途: 在常驻快捷键后显示后台驻留数，选中时反显。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
+    # 子代理run不是主会话路由作用域，保留原精确控制提示，不拿主线程模式覆盖子页。
+    if context.focused_agent_run_id or (context.selected_agent_run_id and
+            not context.selected_agent_run_id.startswith(('business:', 'bg:', 'goal:'))):
+        return _render_footer_base(snapshot, context)
+    route = '未知' if not isinstance(context.route_enabled, bool) else str(context.route_enabled).lower()
     if context.business_list_active or context.business_thread_active:
-        text = '  Ctrl+G 返回 · Enter 完整会话 · ↑↓ 选择' if context.business_list_active else '  Ctrl+G 返回 · 输入发往本后台会话 · /tree 子树 · /log 日志'
+        text = f'  /route {route} · Ctrl+G 返回 · '
+        text += 'Enter 下钻/下一页 · ↑↓ 选择' if context.business_list_active else '输入发往本后台会话 · /tree 子树 · /log 日志 · /history 下一页'
+        if context.business_thread_active:
+            identity = {'available': '可接单', 'suspended': '已挂起', 'retiring': '退役中', 'retired': '已退役'}.get(context.business_identity_state, '未知')
+            work = {'idle': '待命', 'running': '运行中', 'waiting': '等待', 'queued': '排队', 'failed': '失败',
+                    'completed': '已完成', 'cancelled': '已取消'}.get(context.business_work_state, '未知')
+            text += f' · 身份：{identity} · 工作：{work}'
         if context.notice:
             text += ' · ' + context.notice
         return (('class:tui-muted', _fit_text(text, context.width, 'left').rstrip()),)
-    if (context.business_agents_enabled or context.background_agent_count is not None) and not context.background_watch_active and snapshot.permission is None:
+    if not context.background_watch_active and snapshot.permission is None:
         count = '未知' if context.background_agent_count is None else str(context.background_agent_count)
         running = '未知' if context.background_agent_running_count is None else str(context.background_agent_running_count)
-        prefix = '  详细' if context.detailed_transcript else '  简洁'
+        prefix = ('  详细' if context.detailed_transcript else '  简洁') + f' · /route {route}'
+        process_selected = context.selected_agent_run_id == 'bg:watch'
         if context.background_process_count:
-            prefix += f' · 后台驻留 {context.background_process_count} 项'
-        prefix += f' · 后台Agent {count}(运行{running}) · '
+            prefix += f' · {"› " if process_selected else ""}后台驻留 {context.background_process_count} 项'
+        selected = context.selected_agent_run_id == 'business:agents'
+        if context.business_agents_enabled or context.background_agent_count is not None:
+            prefix += f' · {"› " if selected else ""}后台Agent：运行 {running} / 总 {count}'
+        prefix += ' · '
         prefix = _fit_text(prefix, context.width, 'left').rstrip()
         base = replace(context, width=max(1, context.width - display_width_text(prefix)))
-        return (('class:tui-bg-watch', prefix), *_render_footer_base(snapshot, base))
+        return (('class:tui-agent-selected' if selected or process_selected else 'class:tui-bg-watch', prefix), *_render_footer_base(snapshot, base))
     if context.background_watch_active:
-        text = "  Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
+        text = f"  /route {route} · Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
         if context.notice:
             text += " · " + context.notice
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    count = context.background_process_count
-    if count <= 0 or snapshot.permission is not None:
-        return _render_footer_base(snapshot, context)
-    selected = context.selected_agent_run_id == "bg:watch"
-    badge = f" · {'› ' if selected else ''}⚡ 后台驻留 {count} 项"
-    badge = _fit_text(badge, context.width, "left").rstrip()
-    base = replace(context, width=max(1, context.width - display_width_text(badge)),
-                   selected_agent_run_id="" if selected else context.selected_agent_run_id)
-    return (*_render_footer_base(snapshot, base), ("class:tui-agent-selected" if selected else "class:tui-bg-watch", badge))
+    return _render_footer_base(snapshot, context)
 
 
 # LLM: 完成计时只在消息流；主代理 Esc、/stop 与 Goal 暂停仍各守原控制范围，不解析文案授控制权。

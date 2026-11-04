@@ -12,6 +12,8 @@ from agent_py_agent.agent.conversation.host_actor import HostChannelActor
 from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft, SessionTaskUpdate
 
 
+# LLM: pytest fixture为领域及W11测试创建临时真实Store和来源线程，替换模型选择、空间服务与上下文解析模块，并令模型执行直接失败；不代表真实空间授权联调。
+# 函数用途: 提供能验证线程、任务、guidance和wake持久行为的离线宿主及可信通道Actor。
 @pytest.fixture
 def business_host(tmp_path, monkeypatch):
     store = ConversationStore(tmp_path / "conversations")
@@ -41,9 +43,11 @@ def business_host(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, spaces.__name__, spaces)
     context = ModuleType("agent_py_agent.agent.conversation.business_context")
 
+    # LLM: 仅供本fixture替换的上下文模块调用；按传入意图构造DTO，unassigned决定空间修订为空，不读存储或执行真实空间/资产授权。
+    # 函数用途: 为测试任务返回固定格式上下文，兼容明确的无归属意图。
     def resolve_business_context(*, actor, task_id, requested_space_id, project_ref, binding_id,
-                                 requested_method_refs=(), requested_asset_version_refs=()):
-        return BusinessExecutionContext(actor.owner_id, requested_space_id, project_ref, task_id, 1,
+                                 requested_method_refs=(), requested_asset_version_refs=(), unassigned=False, host=None):
+        return BusinessExecutionContext(actor.owner_id, requested_space_id, project_ref, task_id, None if unassigned else 1,
                                         binding_id, requested_method_refs, requested_asset_version_refs, "business-execution-context.v1")
 
     context.resolve_business_context = resolve_business_context

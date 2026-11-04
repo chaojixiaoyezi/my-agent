@@ -8,14 +8,23 @@ from .business_contracts import BusinessExecutionContext
 from .business_spaces import _identifier
 
 
+# LLM: 供SessionTask宿主factory首次解析准确task_id；只读核Actor、空间、绑定和引用并冻结选择，不建任务或调用模型；显式unassigned不采用唯一默认空间。
+# 函数用途: 把本次派活的业务意图解析成可随任务保存的确定上下文。
 def resolve_business_context(*, actor: object, task_id: str, requested_space_id: str | None,
         project_ref: str | None, binding_id: str | None, requested_method_refs: tuple[str, ...] = (),
-        requested_asset_version_refs: tuple[str, ...] = ()) -> BusinessExecutionContext:
+        requested_asset_version_refs: tuple[str, ...] = (), unassigned: bool = False,
+        host: object = None) -> BusinessExecutionContext:
     """仅供SessionTask的host-only factory首次调用；重放使用其原canonical context。
 
     W2负责将意图、准确stask ID和本结果同次原子写；这里不分配runtime ID，也不取latest。
     None默认选择与显式空间是不同意图；恢复时不能再次解析默认空间覆盖原冻结选择。
     """
+    if unassigned:
+        if requested_space_id is not None or binding_id is not None:
+            raise BusinessError('SPACE_SCOPE_MISMATCH')
+        return _unassigned_context(actor=actor, task_id=task_id, project_ref=project_ref,
+            requested_method_refs=requested_method_refs, requested_asset_version_refs=requested_asset_version_refs,
+            host=host)
     actor = require_actor(actor)
     service = actor.service
     _identifier(task_id)
@@ -79,6 +88,28 @@ def resolve_business_context(*, actor: object, task_id: str, requested_space_id:
         selected_method_refs=tuple(methods), asset_version_refs=versions, schema_version='business-context.v1')
 
 
+# LLM: 无归属显式选择只冻结Owner任务，不借唯一默认空间或空间资产扩大权限；仍过原执行/工具门。
+# 函数用途: 为可信原生或业务Actor形成真正space_id=null的canonical任务上下文。
+def _unassigned_context(*, actor, task_id, project_ref, requested_method_refs, requested_asset_version_refs, host):
+    from .host_actor import HostChannelActor
+
+    _identifier(task_id)
+    if project_ref is not None or requested_method_refs or requested_asset_version_refs:
+        raise BusinessError('CONTEXT_REQUIRED')
+    if isinstance(actor, HostChannelActor):
+        if (host is None or actor.owner_id != str(host.home_paths.owner_id)
+                or host.conversation_store.threads.require(actor.source_thread_id).owner_id != actor.owner_id):
+            raise BusinessError('ACTOR_REQUIRED')
+    else:
+        actor = require_actor(actor)
+        require_access(actor, 'tasks.assign', service=actor.service, space_id=None)
+    return BusinessExecutionContext(owner_id=actor.owner_id, space_id=None, project_ref=None, task_id=task_id,
+        space_revision=None, binding_id=None, selected_method_refs=(), asset_version_refs=(),
+        schema_version='business-context.v1')
+
+
+# LLM: 供原执行器在使用canonical上下文时复核当前业务授权；只读校验Owner、空间或无归属约束及绑定/项目，不重算冻结选择，也不授予工具执行权限。
+# 函数用途: 确认旧任务保存的业务归属在当前权限下仍然允许使用。
 def revalidate_business_context(*, actor, context):
     """只复核当前权限，不按新默认值迁移或重算旧任务的冻结选择。
 
@@ -91,6 +122,12 @@ def revalidate_business_context(*, actor, context):
     if context.owner_id != actor.owner_id:
         raise BusinessError('SPACE_SCOPE_MISMATCH')
     service = actor.service
+    if context.space_id is None:
+        if (context.space_revision is not None or context.binding_id is not None or context.project_ref is not None
+                or context.selected_method_refs or context.asset_version_refs):
+            raise BusinessError('SPACE_SCOPE_MISMATCH')
+        require_access(actor, 'tasks.assign', service=service, space_id=None)
+        return
     state = service.authorize_call('spaces.get', {'space_id': context.space_id}, actor=actor)
     service._space(state, context.space_id, active=True)
     if context.binding_id is not None:

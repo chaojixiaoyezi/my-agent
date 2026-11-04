@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from agent_py_agent.agent.capability import runtime_config_reload
+from agent_py_agent.agent.conversation.route_mode import set_route_mode
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts import im_dispatch_policy
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
@@ -42,11 +44,23 @@ def _case(root, *, owner=None, actor="actor-a", timezone="Asia/Shanghai"):
     return agent, scope
 
 
-# LLM: 使用原控制写口准备完整记录；删除仅由测试创建的锁，便于检测只读入口是否重新写锁。
-# 函数用途: 在合成用户下设置每日偏好，产品入口仍须自行读取并校验它。
+# LLM: 显式准备route和legacy记录，二者各守原读取合同；删除仅测试创建的锁以检查冷入口副作用。
+# 函数用途: 用真实线程设置启用新路由，同时保留旧日界线读取测试输入。
 def _enable(agent, scope, *, now=_NOW):
     result = preferences.set_delegation_preference(agent, scope.channel, scope.user_id, True, now=now)
     preferences.preference_path(agent).with_suffix(".json.lock").unlink(missing_ok=True)
+    if not hasattr(agent, 'conversation_store'):
+        from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+
+        root = runtime_paths_for_agent(agent.config, agent.home_paths.owner_home_dir, agent.home_paths)['conversation_workspace']
+        agent.config.conversation_workspace = str(root)
+        agent.conversation_store = ConversationStore(root)
+    thread = agent.conversation_store.threads.get_or_create({
+        'owner_id': agent.home_paths.owner_id, 'canonical_user_id': scope.user_id,
+        'channel': scope.channel, 'channel_user_id': scope.user_id,
+        'channel_conversation_id': scope.conversation_id,
+    })
+    set_route_mode(agent, thread, True, actor_id=scope.user_id, channel=scope.channel)
     return result
 
 
@@ -73,6 +87,8 @@ def _capture(agent, scope):
     )
 
 
+# LLM: pytest在不存在的临时Owner路径采样冷入口，并令Agent/Store构造器一旦调用就失败；断言只返回原路由及冻结来源字段且目录仍不存在，不启动执行或模型。
+# 函数用途: 检查第一次只读派发观察不会偷偷创建用户目录或宿主实例。
 def test_cold_owner_capture_never_creates_home_or_agent(tmp_path, monkeypatch):
     from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.core import SimpleAgent
@@ -89,10 +105,15 @@ def test_cold_owner_capture_never_creates_home_or_agent(tmp_path, monkeypatch):
         "mode": "original", "channel": "feishu", "actor_id": "actor-a",
         "conversation_id": "chat-a", "owner_id": agent.home_paths.owner_id,
         "preference_revision": 0, "expires_at": 0.0,
+        "route_mode_frozen": False,
+        "route_origin": {"channel": "feishu", "chat_id": "chat-a", "thread_id": "",
+                         "message_id": "", "owner_id": agent.home_paths.owner_id},
     }
     assert before is None and _tree(agent.home_paths.root) is None
 
 
+# LLM: pytest先显式准备临时route/旧偏好，再比较采样前后整树字节、权限及mtime；核新route冻结且无每日过期，不播种能力缓存或改磁盘记录。
+# 函数用途: 检查读取已保存的路由选择没有文件或元数据写入副作用。
 def test_stored_preference_read_is_byte_and_metadata_readonly(tmp_path, monkeypatch):
     agent, scope = _case(tmp_path)
     expected = _enable(agent, scope)
@@ -101,7 +122,8 @@ def test_stored_preference_read_is_byte_and_metadata_readonly(tmp_path, monkeypa
     captured = _capture(agent, scope)
     assert captured["mode"] == "delegated"
     assert captured["preference_revision"] == expected["revision"]
-    assert captured["expires_at"] == expected["expires_at"]
+    assert captured["expires_at"] == 0.0  # 新route不再继承每日有效期。
+    assert captured['route_mode_frozen'] is True
     assert _tree(tmp_path) == before
     assert not hasattr(agent, "_capability_config_runtime_snapshot")
 
@@ -219,6 +241,8 @@ def test_by_paths_preserves_business_midnight_and_dst(tmp_path, timezone, local,
     assert read(current - 86400)["enabled"] is False
 
 
+# LLM: pytest故意损坏临时legacy偏好，要求旧读取口抛DataCorruptionError而新route仍独立冻结；比较全树确保读取不修复、覆盖或隐藏坏文件。
+# 函数用途: 检查旧偏好损坏保持可见，但不会污染新路由决策。
 def test_bad_preference_stays_error_and_bytes_unchanged(tmp_path):
     agent, scope = _case(tmp_path)
     _enable(agent, scope)
@@ -226,7 +250,8 @@ def test_bad_preference_stays_error_and_bytes_unchanged(tmp_path):
     path.write_text("{broken", encoding="utf-8")
     before = _tree(tmp_path)
     with pytest.raises(DataCorruptionError):
-        _capture(agent, scope)
+        preferences.delegation_preference(agent, scope.channel, scope.user_id, now=_NOW)
+    assert _capture(agent, scope)['route_mode_frozen'] is True  # 坏legacy文件不参与新路由决策。
     assert _tree(tmp_path) == before
 
 
@@ -273,6 +298,8 @@ def test_legacy_agent_bad_capability_does_not_fall_back_open(tmp_path, monkeypat
     assert im_dispatch_policy.capture_im_dispatch(agent, scope)["mode"] == "original"
 
 
+# LLM: pytest将冷入口快照序列化保存后，在临时存储关闭旧偏好和route并推进时钟；只复用原字节重放，核旧快照不漂移而新采样反映关闭，不连接真实IM。
+# 函数用途: 检查重放沿受理时冻结的路由修订，不跟随后续设置变化。
 def test_capture_fake_ingress_freezes_revision_for_serialized_replay(tmp_path, monkeypatch):
     agent, scope = _case(tmp_path)
     enabled = _enable(agent, scope)
@@ -280,6 +307,9 @@ def test_capture_fake_ingress_freezes_revision_for_serialized_replay(tmp_path, m
     accepted = {im_dispatch_policy.IM_DISPATCH_KEY: _capture(agent, scope)}
     frozen_bytes = json.dumps(accepted, sort_keys=True).encode()
     preferences.set_delegation_preference(agent, scope.channel, scope.user_id, False, now=_NOW + 1)
+    thread = agent.conversation_store.threads.resolve(channel=scope.channel,
+        channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+    set_route_mode(agent, thread, False, actor_id=scope.user_id, channel=scope.channel)
     monkeypatch.setattr(preferences.time, "time", lambda: enabled["expires_at"] + 1)
     replay = json.loads(frozen_bytes)
     assert replay == accepted

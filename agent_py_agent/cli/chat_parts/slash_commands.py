@@ -8,7 +8,6 @@ from collections.abc import Callable
 from datetime import datetime
 
 from ...agent.command_catalog import (
-    COMMAND_CATALOG,
     COMMAND_INDEX,
     CommandAccessContext,
     decode_slash_v1_input,
@@ -120,11 +119,18 @@ def _handle_permissions_command(user: str, ctx: SlashCommandContext, include_pla
 
 # LLM: Local slash parsing delegates to the adapter-neutral typed control protocol.
 # 函数用途：即时处理状态、单次纠偏和停止命令，不把它们排进普通聊天任务。
+# 函数用途: 为本地slash入口处理结构化控制及delegate迁移提示，打印用法或回执；停止命令不追加助手式消息。
 def _handle_control_command(
     user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
     del include_plain_help
     command = parse_conversation_control(user)
+    from .control_runtime import retired_delegate_result
+
+    migration = retired_delegate_result(command, text=user)
+    if migration is not None:
+        ctx.print_line(migration.message)
+        return True
     if command is None:
         return None
     if not command.valid:

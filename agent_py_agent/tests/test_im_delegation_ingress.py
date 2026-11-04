@@ -6,6 +6,7 @@ import urllib.request
 
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
+from agent_py_agent.agent.conversation.route_mode import set_route_mode
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.client_credentials import gateway_client_credentials
 from agent_py_agent.agent.gateway_parts.http_service import (
@@ -16,7 +17,6 @@ from agent_py_agent.agent.gateway_parts.im_dispatch_policy import IM_DISPATCH_KE
 from agent_py_agent.agent.gateway_parts.io import write_json_file
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
 from agent_py_agent.tests.test_gateway_conversation_control import (
     _free_port,
     _hold_foreground_lane,
@@ -36,13 +36,19 @@ def submit(port, message_id, agent):
         return json.loads(response.read())
 
 
+# LLM: pytest占住临时前台车道并启动本地HTTP Gateway，在finally关闭；经原认证入口核route开启时新排队、重送保留受理快照及关闭后的新输入归当前轮，不调用模型或真实IM。
+# 函数用途: 检查路由切换不会改写已受理请求的派发选择。
 def test_enabled_input_is_new_queued_work_and_replay_keeps_acceptance_snapshot(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
     _hold_foreground_lane(agent, paths.processing / "req-1.json")
-    set_delegation_preference(agent, "feishu", "u-1", True)
+    thread = agent.conversation_store.threads.get_or_create({
+        'owner_id': agent.home_paths.owner_id, 'canonical_user_id': 'u-1',
+        'channel': 'feishu', 'channel_user_id': 'u-1', 'channel_conversation_id': 'c-1',
+    })
+    set_route_mode(agent, thread, True, actor_id='u-1')
     port = _free_port()
     server = GatewayHTTPServer(port, paths, params=GatewayHTTPServerParams(
         agent=agent, auth_middleware=AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))))
@@ -53,7 +59,7 @@ def test_enabled_input_is_new_queued_work_and_replay_keeps_acceptance_snapshot(t
         queued = json.loads(next(paths.inbox.glob("*.json")).read_text())
         assert queued[IM_DISPATCH_KEY]["mode"] == "delegated"
         revision = queued[IM_DISPATCH_KEY]["preference_revision"]
-        set_delegation_preference(agent, "feishu", "u-1", False)
+        set_route_mode(agent, thread, False, actor_id='u-1')
         replay = submit(port, "new-task", agent)
         assert replay["request_id"] == first["request_id"]
         assert json.loads(next(paths.inbox.glob("*.json")).read_text())[IM_DISPATCH_KEY]["preference_revision"] == revision

@@ -14,6 +14,7 @@ from agent_py_agent.agent.capability.channel_message_tool import SendMessageTool
 from agent_py_agent.agent.concurrency.interrupt import register_interruptible
 from agent_py_agent.agent.conversation.control_commands import conversation_request_interrupt_name
 from agent_py_agent.agent.conversation.im_delegation import prepare_delegated_execution
+from agent_py_agent.agent.conversation.route_mode import set_route_mode
 from agent_py_agent.agent.conversation.session_task_report import (
     TaskTurnOutcome,
     close_out_turn,
@@ -30,7 +31,6 @@ from agent_py_agent.agent.gateway_parts.im_dispatch_policy import (
 from agent_py_agent.agent.gateway_parts.recovery import terminalize_gateway_request_file
 from agent_py_agent.agent.runtime_context import current_subagent_run_id
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli.gateway_loops import _build_background_scheduler
 from agent_py_agent.tests.test_channel_message_tool import _RecordingAdapter
@@ -119,6 +119,16 @@ def ordinary_chain(tmp_path, monkeypatch, *, owner_kind="user"):
     return agent, _ready_gateway_paths(agent), provider, calls, blocked
 
 
+# LLM: route由可信测试控制入口写入，同一IM绑定与真实worker共用，不伪造入站快照。
+# 函数用途: 为离线真实链准备当前发送者的持久route设置。
+def _set_route(agent, enabled):
+    thread = agent.conversation_store.threads.get_or_create({
+        'owner_id': agent.home_paths.owner_id, 'canonical_user_id': 'ou_a',
+        'channel': 'feishu', 'channel_user_id': 'ou_a', 'channel_conversation_id': 'oc_a',
+    })
+    return set_route_mode(agent, thread, enabled, actor_id='ou_a')
+
+
 # LLM: 输入沿原宿主偏好快照和完整worker，不从客户端伪造委派策略；同一真实主session后续聊天用新request。
 # 函数用途: 在临时Gateway路径执行一个普通IM请求，不开HTTP服务。
 def ask(agent, paths, key, prompt, *, actor="ou_a"):
@@ -164,6 +174,8 @@ def ask(agent, paths, key, prompt, *, actor="ou_a"):
     return response
 
 
+# LLM: pytest在临时个人/群Owner运行原worker、claim、调度器及child链，供应商用脚本、IM用记录器；核route切换后的原sender汇总与单次对外记录，不证明真实模型或IM运输。
+# 函数用途: 检查委派孩子负责执行，最终公开结果只由原发送会话发出且不重复。
 @pytest.mark.parametrize("owner_kind", ["user", "group"])
 def test_actual_worker_child_and_sender_model_are_only_public_speaker(
     tmp_path, monkeypatch, owner_kind
@@ -171,7 +183,7 @@ def test_actual_worker_child_and_sender_model_are_only_public_speaker(
     agent, paths, provider, calls, blocked = ordinary_chain(
         tmp_path, monkeypatch, owner_kind=owner_kind
     )
-    set_delegation_preference(agent, "feishu", "ou_a", True)
+    _set_route(agent, True)
     ask(agent, paths, "first", "整理工作区里的资料")
     tasks, errors = agent.conversation_store.session_tasks.list_report(limit=0)
     assert not errors and len(tasks) == 1
@@ -183,7 +195,7 @@ def test_actual_worker_child_and_sender_model_are_only_public_speaker(
     child = agent.subagents.list_runs()[0]
     assert child.attributes["conversation_request_id"] == task.task_id
     assert not provider.messages  # 后台主首片不发额外受理/进度。
-    set_delegation_preference(agent, "feishu", "ou_a", False)
+    _set_route(agent, False)
     ask(agent, paths, "chat", "你好，继续聊聊", actor="ou_b" if owner_kind == "group" else "ou_a")
     if owner_kind == "user":
         assert calls[-1]["thread"] == task.sender_thread_id
@@ -369,9 +381,11 @@ def test_ack_final_only_does_not_leak_into_next_request_or_rich_transcript(tmp_p
     assert rich.chunk_path.exists()
 
 
+# LLM: pytest在离线真实worker链开启route后令临时任务创建抛错；要求ask失败且无模型采样、IM记录或遗留任务，不把未交接成功写成已受理。
+# 函数用途: 检查派活队列失败时不会生成成功确认或对外消息。
 def test_failed_actual_handoff_never_samples_success_ack(tmp_path, monkeypatch):
     agent, paths, provider, calls, _ = ordinary_chain(tmp_path, monkeypatch)
-    set_delegation_preference(agent, "feishu", "ou_a", True)
+    _set_route(agent, True)
     monkeypatch.setattr(
         agent.conversation_store.session_tasks,
         "create",
@@ -422,6 +436,8 @@ def test_actual_child_missing_root_is_unknown_but_ordinary_child_stays_ordinary(
         restore_current_subagent_context(agent, previous)
 
 
+# LLM: pytest复用临时离线宿主并准备孩子的真实runner attempt，用该执行上下文验证发送门拒绝，再恢复普通上下文核原发送可用；IM仅记录不触网络。
+# 函数用途: 检查委派孩子不能绕过单一发言者门，普通本人消息不受影响。
 def test_child_final_send_gate_uses_original_attempt_and_ordinary_send_unchanged(
     tmp_path, monkeypatch
 ):
@@ -430,7 +446,6 @@ def test_child_final_send_gate_uses_original_attempt_and_ordinary_send_unchanged
         set_current_subagent_context,
     )
     from agent_py_agent.tests import test_im_delegation_runtime as fixtures
-    from agent_py_agent.tests.test_host_message_context import select_child
 
     owned, _, provider, _, _ = ordinary_chain(tmp_path, monkeypatch)
     monkeypatch.setitem(

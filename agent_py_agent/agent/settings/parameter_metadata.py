@@ -91,6 +91,7 @@ _EXTRA_INT_RANGES = {
     "model_context_window_tokens": (1, None),
     "memory_top_k": (0, None),
     "max_subagents": (0, None),
+    "max_background_agents": (0, None),
     "subagent_hierarchy_max_children_per_tool_call": (0, None),
     "subagent_takeover_chain_max_depth": (0, None),
     "subagent_debug_trace_level": (0, 5),

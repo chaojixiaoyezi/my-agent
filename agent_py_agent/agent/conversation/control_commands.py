@@ -40,6 +40,7 @@ ControlKind = Literal[
     "help",
     "group",
     "delegate",
+    "route",
     "schedule",
     "sessions",
     "status",
@@ -251,6 +252,9 @@ def parse_conversation_command(
     reject_unknown_slash: bool = False,
 ) -> ConversationCommand | None:
     raw = str(text or "").strip()
+    # 旧写法都只返回迁移提示，不能作为普通模型任务。
+    if re.match(r"^/delegate(?:\s|$)", raw, re.IGNORECASE):
+        return ConversationControlCommand("delegate", value=raw[len("/delegate"):].strip())
     from .control_delivery_command import parse_delivery_command
 
     delivery = parse_delivery_command(raw)
@@ -264,6 +268,16 @@ def parse_conversation_command(
     name, trailing = match_conversation_command(raw) or ("", None)
     if name in {"space", "team"}:
         return ConversationControlCommand(name, value=str(trailing or "").strip(), operation="business")
+    if name == "route":
+        from .route_mode import parse_route_mode
+
+        value = str(trailing or "").strip()
+        try:
+            parse_route_mode(value)
+            valid = True
+        except ValueError:
+            valid = False
+        return ConversationControlCommand("route", value=value, valid=valid, usage="用法：/route true|false|status")
     if name == "new":
         title = str(trailing or "").strip()
         return ConversationControlCommand("new", value=title, valid=len(title) <= 200 and "\n" not in title,
@@ -1005,12 +1019,12 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
         if settings.get("available") is False:
             lines.append("IM 后台任务：状态读取不可用")
         else:
-            enabled = settings.get("delegation_enabled") is True
+            enabled = settings.get("route_mode", settings.get("delegation_enabled")) is True
             text = "开启" if enabled else "关闭"
-            if enabled:
+            if enabled and 'route_mode' not in settings:
                 expiry = datetime.fromtimestamp(float(settings["expires_at"]), ZoneInfo(str(settings["timezone"])))
                 text += f"（到 {expiry.isoformat()}）"
-            lines.append(f"当天自动委派：{text}")
+            lines.append(f"主控路由：{text}（来源 {settings.get('route_source', 'legacy')}）")
             if "queued" in settings:
                 lines.append(f"独立后台任务：排队 {settings['queued']}；运行/汇总 {settings['running']}；待输入 {settings.get('waiting_input', 0)}（等待不占执行资源）")
             if "subagent_running" in settings:

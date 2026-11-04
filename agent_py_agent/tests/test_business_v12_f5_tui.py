@@ -28,6 +28,7 @@ from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_host.schemas import validate_object
 from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+from agent_py_agent.tests.test_v15_w11_tui_navigation import NavigationClient, agent_row
 
 ENVELOPE = standalone_schema(business_schema_bundle()['response_envelope_schema'])
 # 领域替身的宿主身份只供真实 execute_business 复核；它不读写这个路径。
@@ -211,10 +212,13 @@ def test_team_list_preserves_unknown_counts_and_expands_only_on_demand():
     assert [x['action'] for x in transport.calls][-2:] == ['agent_tree.get', 'logs.read']
 
 
+# LLM: pytest以协议领域替身驱动真实TUI导航，依次进入团队、空间和助手完整会话再返回；仅改组件状态并记录请求，核身份不冒充run且导航不发取消/退役/挂起控制。
+# 函数用途: 检查后台团队导航层级及返回位置正确，会话输入绑定助手而非子代理执行。
 def test_navigation_adds_background_team_between_watch_and_goals_without_run_identity():
     nav = TuiAgentNavigationState(TuiRuntime('thread-main'))
     assert callable(getattr(nav, 'update_business_agents', None))
-    transport = ProtocolTransport({'background_agents.list': {
+    transport = ProtocolTransport({'spaces.list': {'items': [dto('SpaceView', space_id='sp_1', name='设计空间')],
+        'coverage': 'complete', 'next_cursor': None}, 'background_agents.list': {
         'items': [dto('AgentView', agent_id='ag_A', thread_id='ag_A', space_id='sp_1', name='设计')],
         'coverage': 'complete', 'next_cursor': None}})
     agents = module('chat_parts.tui_background_agents').TuiBackgroundAgents(client(transport))
@@ -225,15 +229,20 @@ def test_navigation_adds_background_team_between_watch_and_goals_without_run_ide
     assert nav.enter_selected()
     assert nav.snapshot().business_list_active is True
     assert nav.move_selection(1) and nav.enter_selected()
+    assert nav.snapshot().business_space_id == 'sp_1'
+    assert nav.move_selection(1) and nav.enter_selected()
     snapshot = nav.snapshot()
     assert snapshot.active_thread_id == 'ag_A'
     assert snapshot.active_run_id == '' and snapshot.can_send_input
     assert not nav.enter_selected(), '完整会话空 Enter 不能把根选择当子代理进入'
     assert nav.back() and nav.snapshot().business_list_active
+    assert nav.back() and nav.snapshot().selected_run_id == 'business:space:sp_1'
     assert nav.back() and nav.snapshot().depth == 0
     assert not any(x['action'].endswith(('cancel', 'retire', 'suspend')) for x in transport.calls)
 
 
+# LLM: pytest通过协议替身提供两页消息，核准确background_main目标、原message_id及覆盖/游标；首调只取一页，第二页显式请求，不连接真实领域HTTP或改消息存储。
+# 函数用途: 检查后台会话消息按用户续页读取，不自动吞掉分页边界。
 def test_thread_messages_are_paged_without_summary_or_duplicate_ids():
     def messages(params):
         assert params['target'] == {'kind': 'background_main', 'id': 'ag_A'}
@@ -244,8 +253,11 @@ def test_thread_messages_are_paged_without_summary_or_duplicate_ids():
     transport = ProtocolTransport({'messages.list': messages})
     agents = module('chat_parts.tui_background_agents').TuiBackgroundAgents(client(transport))
     result = agents.conversation('ag_A')
-    assert [x['message_id'] for x in result['items']] == ['m1', 'm2']
-    assert len(transport.calls) == 2 and result['coverage'] == 'complete'
+    assert [x['message_id'] for x in result['items']] == ['m1']
+    assert len(transport.calls) == 1 and result['coverage'] == 'partial' and result['next_cursor'] == 'next'
+    following = agents.conversation('ag_A', cursor=result['next_cursor'])
+    assert [x['message_id'] for x in result['items'] + following['items']] == ['m1', 'm2']
+    assert len(transport.calls) == 2 and following['coverage'] == 'complete' and following['next_cursor'] is None
 
 
 def test_background_input_is_prepared_before_return_and_targets_original_thread():
@@ -296,6 +308,8 @@ def test_invented_ok_and_contradictory_receipts_stay_unknown():
         assert result['http_status'] == status
 
 
+# LLM: pytest只渲染内存TUI快照和给定计数，断言route、驻留、后台身份与原控制的顺序；未知运行数保持未知，不查询服务或推进任务。
+# 函数用途: 检查底栏新增信息的排列及未知数量文案。
 def test_footer_orders_mode_watch_team_before_existing_controls():
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext, _render_footer
     runtime = TuiRuntime('thread-main')
@@ -303,7 +317,7 @@ def test_footer_orders_mode_watch_team_before_existing_controls():
     context = TuiRenderContext(width=200, background_process_count=1,
                                background_agent_count=4, background_agent_running_count=None)
     text = ''.join(x[1] for x in _render_footer(runtime.store.snapshot(), context))
-    assert text.index('后台驻留') < text.index('后台Agent 4(运行未知)') < text.index('F4')
+    assert text.index('/route 未知') < text.index('后台驻留') < text.index('后台Agent：运行 未知 / 总 4') < text.index('F4')
 
 
 def run_web(script, **fixtures):
@@ -385,14 +399,18 @@ def test_up_starts_at_business_entry_not_last_goal():
     assert nav.snapshot().selected_run_id == 'business:agents'
 
 
+# LLM: pytest用NavigationClient组件数据注入ANSI序列和长名称，再以窄宽度渲染团队块；核控制字符清除和多行输出，不把替身当nullable空间的真实HTTP验证。
+# 函数用途: 检查后台团队的长名称能安全显示，不泄漏终端转义码。
 def test_business_list_terminal_text_is_sanitized_and_wrapped():
     from agent_py_agent.cli.chat_parts.tui_block_renderer import (
         TuiRenderContext,
         _render_background_activity,
     )
     nav = TuiAgentNavigationState(TuiRuntime('main-render'))
-    agents = module('chat_parts.tui_background_agents').TuiBackgroundAgents(client(ProtocolTransport()))
-    agents.rows = ({'agent_id': 'ag_A', 'name': '\x1b[31m名字' + '长' * 120},)
+    fixture = NavigationClient()  # 仅renderer组件数据，不冒充nullable空间的真实HTTP验证。
+    fixture.spaces = []
+    fixture.agents = [{**agent_row('ag_A'), 'name': '\x1b[31m名字' + '长' * 120}]
+    agents = module('chat_parts.tui_background_agents').TuiBackgroundAgents(fixture)
     nav.update_business_agents(agents)
     nav.move_selection(1)
     nav.enter_selected()
@@ -402,11 +420,14 @@ def test_business_list_terminal_text_is_sanitized_and_wrapped():
     assert len(lines) > 4
 
 
+# LLM: pytest用协议替身暂存submit创建的协程，退回三层导航后才运行；只产生本地UI状态和记录请求，断言冻结agent_id仍是原助手，不连接外部运输。
+# 函数用途: 检查异步发送期间离开后台会话也不会把消息改投当前页面。
 def test_deferred_input_does_not_follow_navigation_back():
     import asyncio
 
     from prompt_toolkit.buffer import Buffer
-    transport = ProtocolTransport({'background_agents.list': {
+    transport = ProtocolTransport({'spaces.list': {'items': [dto('SpaceView', space_id='sp_1', name='设计空间')],
+        'coverage': 'complete', 'next_cursor': None}, 'background_agents.list': {
         'items': [dto('AgentView', agent_id='ag_A', thread_id='ag_A', space_id='sp_1')],
         'coverage': 'complete', 'next_cursor': None}})
     background = module('chat_parts.tui_background_agents')
@@ -419,10 +440,12 @@ def test_deferred_input_does_not_follow_navigation_back():
     nav.move_selection(1)
     nav.enter_selected()
     pending = []
+    assert nav.snapshot().business_space_id == 'sp_1'
+    assert nav.move_selection(1) and nav.enter_selected()
     event = SimpleNamespace(app=SimpleNamespace(create_background_task=pending.append, invalidate=lambda: None))
     params = SimpleNamespace(agent_navigation=nav, input_area=SimpleNamespace(buffer=Buffer()))
     assert background.submit_business_input(event, params, '精确原目标')
-    assert nav.back() and nav.back()
+    assert nav.back() and nav.back() and nav.back()
     asyncio.run(pending[0])
     assert transport.calls[-1]['params']['agent_id'] == 'ag_A'
     assert nav.snapshot().active_thread_id == ''
@@ -457,10 +480,14 @@ def test_denial_clears_old_roster_instead_of_showing_revoked_space():
     assert agents.rows == () and agents.count is None
 
 
+# LLM: pytest用组件名册及记录型加载回调驱动导航更新，断言列表层不加载正文、打开后仅刷新当前助手；不读取真实消息或证明领域HTTP接线。
+# 函数用途: 检查后台会话按当前可见目标刷新，不预读未打开的对话。
 def test_open_business_conversation_refreshes_only_the_visible_thread(monkeypatch):
     nav = TuiAgentNavigationState(TuiRuntime('main-refresh'))
-    agents = module('chat_parts.tui_background_agents').TuiBackgroundAgents(client(ProtocolTransport()))
-    agents.rows = ({'agent_id': 'ag_A', 'thread_id': 'ag_A'},)
+    fixture = NavigationClient()  # 可见页刷新是消费端组件测试，不宣称领域HTTP接线通过。
+    fixture.spaces = []
+    fixture.agents = [agent_row('ag_A')]
+    agents = module('chat_parts.tui_background_agents').TuiBackgroundAgents(fixture)
     calls = []
     monkeypatch.setattr(nav, '_load_business_conversation', lambda thread, runtime: calls.append(thread))
     nav.update_business_agents(agents)

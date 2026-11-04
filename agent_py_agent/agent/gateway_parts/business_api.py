@@ -130,6 +130,8 @@ class _BusinessBackgroundService(BackgroundAgentService):
         super().__init__(services.host if host is None else host)
         self.services = services
         self.complete_host = host
+        # 控制宿主可能是受限owner配置；额度始终沿本Gateway管理员配置，不取普通owner可覆盖项。
+        self.quota_config = services.host.config
         self.spaces = services.spaces
         self.call_context = context
         self.business_actor = services.actor(context)
@@ -144,8 +146,9 @@ class _BusinessBackgroundService(BackgroundAgentService):
         if error:
             raise ValueError('CLAIM_UNREADABLE')
         authority = claim.get('runtime_authority')
-        if claim.get('status') != 'running' or not isinstance(authority, dict):
+        if claim.get('status') != 'running':
             return None
+        self._validate_execution_claim(thread, claim)
         try:
             ref = runtime.parent_execution_ref(owner_id=thread.owner_id, run_id=authority['run_id'],
                 attempt_id=authority['attempt_id'])
@@ -153,6 +156,7 @@ class _BusinessBackgroundService(BackgroundAgentService):
                 attempt_id=ref.observed_attempt_id)
         except sqlite3.Error:
             raise ValueError('EXECUTION_AUTHORITY_UNAVAILABLE') from None
+        self._validate_execution_context(thread, authority, ref, context, runtime=runtime)
         return {'run_id': ref.run_id, 'attempt_id': ref.observed_attempt_id, 'task_id': context.task_id if context else None,
                 'thread_id': thread.thread_id, 'space_id': context.space_id if context else None, 'status': 'running',
                 'effect_outcome': 'running', 'started_at': None, 'ended_at': None, 'error': None, 'retry_refs': []}
@@ -179,8 +183,12 @@ class _BusinessBackgroundService(BackgroundAgentService):
         return {**metadata, 'plugin_host_v2': {'installation_ref': installation,
             'revision': 1, 'workspace_ref': 'default'}}
 
+    # LLM: 供继承的后台身份和派活入口复核空间；通道Actor守Owner门，业务Actor走真实空间读口，None直接保留无归属，不写空间或选择默认值。
+    # 函数用途: 在Gateway适配层核实指定活跃空间，或接受明确的无归属。
     def _space(self, space_id, actor):
         self._actor(actor)
+        if space_id is None:
+            return None
         space = self.spaces.get(space_id, actor=self.business_actor)['space']
         if space['space_id'] != space_id or space['state'] != 'active':
             raise BusinessError('RESOURCE_NOT_FOUND')
@@ -233,11 +241,14 @@ class _BusinessBackgroundService(BackgroundAgentService):
             raise ValueError(failure.error_code)
         intent = BusinessContextIntent(actor.owner_id, request['space_id'], request.get('project_ref'), None)
 
+        # LLM: 由原SessionTask派发器仅在首次创建时调用；以本次业务Actor只读解析准确task_id的上下文，None显式无归属，不把通道DTO当业务授权或重算重放选择。
+        # 函数用途: 为Gateway派活提供与原任务同次冻结的业务上下文。
         def factory(task_id):
             return resolve_business_context(actor=self.business_actor, task_id=task_id,
                 requested_space_id=intent.requested_space_id, project_ref=intent.project_ref,
                 binding_id=intent.binding_id, requested_method_refs=intent.requested_method_refs,
-                requested_asset_version_refs=intent.requested_asset_version_refs)
+                requested_asset_version_refs=intent.requested_asset_version_refs,
+                unassigned=intent.requested_space_id is None)
 
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
             business_context_intent=intent, business_context_factory=factory)
@@ -616,7 +627,7 @@ def _error_code(error):
     code = getattr(error, 'error_code', None) or getattr(error, 'code', None)
     if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
         code = 'HOST_NOT_READY'
-    status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT'} else
+    status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'BACKGROUND_AGENT_LIMIT_REACHED'} else
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
               403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED'} else
               400 if code == 'INVALID_SCHEMA' else 503)

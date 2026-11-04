@@ -10,8 +10,8 @@ from ..capability.runtime_config_reload import (
     capability_config_for_paths,
 )
 from ..conversation.channels import supports_transcript_delivery
+from ..conversation.route_mode import route_setting_for_paths, route_thread_for_paths
 from ..settings.config import AgentConfig
-from ..settings.im_task_preferences import delegation_preference_by_paths
 from ..user_space.home_layout import MyAgentHomePaths
 from ..user_space.home_layout import home_paths as resolve_home_paths
 from ..user_space.owner_policy import resolve_effective_owner_policy
@@ -23,17 +23,25 @@ if TYPE_CHECKING:
 IM_DISPATCH_KEY = "host_im_dispatch.v1"
 
 
-# LLM: 原 Agent 入口保留可信作用域解析和运行时配置/策略上界，再共用路径快照；不读 body 自报身份，不改变已有回执。
-# 函数用途: 为仍持有 Agent 的 IM 宿主冻结发送者偏好；无 Agent 或 TUI 不生成快照，Agent 解析仍由原宿主负责。
+# LLM: 原Agent入口保留可信身份与能力上界；仅按准确绑定读取route，已接受的请求不经过此入口重算。
+# 函数用途: 为IM宿主冻结当前会话路由与来源，不从正文推断单轮覆盖。
 def capture_im_dispatch(base_agent, scope) -> dict | None:
     if base_agent is None or supports_transcript_delivery(scope.channel):
         return None
     from .control_service import _request_agent_for_scope
 
     agent = _request_agent_for_scope(base_agent, scope)
+    store = getattr(agent, "conversation_store", None)
+    if store is not None:
+        thread, error = store.threads.resolve_report(channel=scope.channel,
+            channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+        if error:
+            raise ValueError("route thread binding is unreadable")
+    else:
+        thread = route_thread_for_paths(agent.home_paths, agent.config, scope)
     return _capture_snapshot(
         agent.home_paths, agent.config, scope, capability_config_for_agent(agent),
-        live_policy=getattr(agent, "owner_policy", None),
+        live_policy=getattr(agent, "owner_policy", None), thread=thread,
     )
 
 
@@ -49,6 +57,7 @@ def capture_im_dispatch_for_owner(
     return _capture_snapshot(
         home_paths, config, scope,
         capability_config_for_paths(root=capability_root, user_path=capability_config_path),
+        thread=route_thread_for_paths(home_paths, config, scope),
     )
 
 
@@ -71,18 +80,23 @@ def _require_scope_owner(home: MyAgentHomePaths, scope: GatewayControlScope) -> 
         raise ValueError("IM 委派 owner 与规范路径不一致")
 
 
-# LLM: 原 owner policy 与现 Agent 更严上界都只能收窄；任何策略读取诊断、坏配置或禁用创建工具均不开放委派。
-# 函数用途: 共用只读偏好与开关生成原快照，不处理模型、写账、排队或重放。
-def _capture_snapshot(home, config, scope, capability, *, live_policy=None) -> dict:
-    preference = delegation_preference_by_paths(home, config.timezone, scope.channel, scope.user_id)
+# LLM: 唯一route设置决定新请求，能力/owner只收窄；结构化覆盖仅影响本轮mode，原route值仍冻结。
+# 函数用途: 返回原受理快照的兼容字段和C-ROUTE-SNAPSHOT，不写任务或重算已接受的通知归属。
+def _capture_snapshot(home, config, scope, capability, *, live_policy=None, thread=None) -> dict:
+    preference = route_setting_for_paths(home, thread, actor_id=scope.user_id)
     policy = resolve_effective_owner_policy(home)
     enabled = (
         capability is not None and capability.im_task_delegation_enabled and config.enable_subagents
-        and preference["enabled"] and _allows_delegation(policy) and _allows_delegation(live_policy)
+        and preference["enabled"] and scope.metadata.get("route_self_execution") is not True
+        and _allows_delegation(policy) and _allows_delegation(live_policy)
     )
     return {"mode": "delegated" if enabled else "original", "channel": scope.channel,
             "actor_id": scope.user_id, "conversation_id": scope.conversation_id, "owner_id": str(home.owner_id),
-            "preference_revision": preference["revision"], "expires_at": preference["expires_at"]}
+            "preference_revision": preference["revision"], "expires_at": 0.0,
+            "route_mode_frozen": preference["enabled"],
+            "route_origin": {"channel": scope.channel, "chat_id": scope.conversation_id,
+                             "thread_id": thread.thread_id if thread is not None else "",
+                             "message_id": str(scope.metadata.get("message_id") or ""), "owner_id": str(home.owner_id)}}
 
 
 # LLM: 只消费原策略结构化错误及禁用列表；缺少可选 Agent 上界不等于越过刚读取的 owner policy。
