@@ -225,8 +225,8 @@ def test_debug_script_transform_preserves_workflow_datasource_override(tmp_path)
     assert result['rendered_input'] == {} and result['condition_branch'] is None
 
 
-# LLM: 本轮扩展的是单节点调试，不是正式DAG新执行权；原正式run不得把未知mode当可运行脚本/分析。
-# 函数用途: 防止可存储通用节点意外绕过正式摘要/执行策略。
+# LLM: v15明确开放llm_prompt正式分析；其余调试别名仍不得取得正式DAG新执行权。
+# 函数用途: 检查显式开放的分析模式和其余通用节点的隔离边界。
 @pytest.mark.parametrize('mode', ['script_transform', 'llm_prompt', 'condition_branch', 'approval_wait', 'notification', 'script'])
 def test_debug_generic_modes_do_not_implicitly_enable_formal_execution(tmp_path, mode):
     marker = tmp_path / 'formal-marker'
@@ -234,8 +234,12 @@ def test_debug_generic_modes_do_not_implicitly_enable_formal_execution(tmp_path,
     save_node(tmp_path, mode, script_id='formal' if mode in ('script_transform', 'script') else '')
     seen = []
     run = WorkflowEngine(tmp_path, analysis_handler=lambda *args: seen.append(args) or {'value': 1}).run_workflow('debug-flow')
-    assert run.status == 'failed' and not seen and not marker.exists()
-    assert run.steps[0].error_code == 'NODE_EXECUTOR_UNAVAILABLE'
+    if mode == 'llm_prompt':
+        assert run.status == 'succeeded' and len(seen) == 1 and run.final_output == {'value': 1}
+        assert not marker.exists() and run.steps[0].error_code == ''
+    else:
+        assert run.status == 'failed' and not seen and not marker.exists()
+        assert run.steps[0].error_code == 'NODE_EXECUTOR_UNAVAILABLE'
 
 
 # LLM: 前置执行条件和condition节点自身表达式不是一个缓存，不能用True前置条件掩盖False或坏表达式。
