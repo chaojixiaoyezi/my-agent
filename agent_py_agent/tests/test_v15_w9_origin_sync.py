@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -184,3 +185,90 @@ def test_origin_notice_failure_repairs_after_restart_without_external_send(tmp_p
     commit = _send(deps, request, context, frozen_retry=frozen)
     assert commit.persisted and len(deps.channels.calls) == 1
     assert len(reopened.messages.recent(origin.thread_id, limit=10)) == 1
+
+
+# LLM: 运输替身只确认一次外发；canonical与索引、原会话均使用真实临时Store，不声称飞书公网可达。
+# 函数用途: 验证没有chat ID的actor目标不能在已发送后因群地址解析失败。
+@pytest.mark.parametrize("target", ["ou_main", "user@example.invalid"])
+def test_actor_target_without_conversation_id_commits_once(tmp_path, target):
+    deps, request, context, origin = _setup(tmp_path)
+    context = replace(context, target=target, conversation_id="")
+    commit = _send(deps, request, context)
+    assert commit.persisted and len(deps.channels.calls) == 1
+    row, errors = deps.store.messages.by_id_report(context.thread_id, commit.message_id)
+    assert errors == [] and row.metadata["channel_message_ids"] == ["transport-receipt"]
+    indexed = OutboundMessageIndex(tmp_path).lookup("transport-receipt", channel="feishu", chat_id=target)
+    assert indexed is not None and indexed["conversation_message_id"] == commit.message_id
+    assert len(deps.store.messages.recent(origin.thread_id, limit=10)) == 1
+    _send(deps, request, context, frozen_retry=FrozenOwnerDelivery(
+        content=commit.content, external_sent=True, receipt_id="transport-receipt"))
+    assert len(deps.channels.calls) == 1
+    assert len(deps.store.messages.recent(origin.thread_id, limit=10)) == 1
+
+
+# LLM: 证据列表来自冻结信封，canonical必须完整保存；索引预算不足不得变成重发或丢失原会话通知。
+# 函数用途: 反证超过32条证据时确定性投影错误不破坏已完成交付。
+def test_oversized_evidence_projection_does_not_fail_committed_delivery(tmp_path, caplog):
+    deps, request, context, origin = _setup(tmp_path)
+    refs = tuple(f"artifact://report-{number}" for number in range(33))
+    commit = _send(deps, request, context, frozen_retry=FrozenOwnerDelivery(content="主动报告", evidence_refs=refs))
+    assert commit.persisted and len(deps.channels.calls) == 1
+    row, errors = deps.store.messages.by_id_report(context.thread_id, commit.message_id)
+    assert errors == [] and row.metadata["evidence_refs"] == list(refs)
+    assert OutboundMessageIndex(tmp_path).lookup("transport-receipt", channel="feishu", chat_id="oc_main") is None
+    notices = deps.store.messages.recent(origin.thread_id, limit=10)
+    assert len(notices) == 1 and notices[0].metadata["origin_notice"]["evidence_refs"] == list(refs)
+    assert any("canonical" in record.getMessage() for record in caplog.records)
+    _send(deps, request, context, frozen_retry=FrozenOwnerDelivery(
+        content=commit.content, external_sent=True, receipt_id="transport-receipt", evidence_refs=refs))
+    assert len(deps.channels.calls) == 1
+    assert len(deps.store.messages.recent(origin.thread_id, limit=10)) == 1
+
+
+# LLM: 回执索引拒绝重绑仍有效，投递层只能隔离确定性投影错误，不能覆盖旧绑定或重发新正文。
+# 函数用途: 验证冲突索引保留原绑定，而canonical与原会话通知仍正常完成。
+def test_receipt_rebinding_projection_does_not_fail_committed_delivery(tmp_path, caplog):
+    deps, request, context, origin = _setup(tmp_path)
+    index = OutboundMessageIndex(tmp_path)
+    existing = {"schema_version": "outbound_message.v1", "channel": "feishu", "chat_id": "oc_main",
+        "channel_message_id": "transport-receipt", "thread_id": "thread-existing",
+        "conversation_message_id": "message-existing", "task_id": None, "workflow_run_id": None,
+        "evidence_refs": [], "receipt_id": "receipt-existing", "sent_at": datetime.now(timezone.utc).isoformat()}
+    index.record(existing)
+    commit = _send(deps, request, context)
+    assert commit.persisted and len(deps.channels.calls) == 1
+    row, errors = deps.store.messages.by_id_report(context.thread_id, commit.message_id)
+    assert errors == [] and row.channel_message_id == "transport-receipt"
+    assert index.lookup("transport-receipt", channel="feishu", chat_id="oc_main") == existing
+    notices = deps.store.messages.recent(origin.thread_id, limit=10)
+    assert len(notices) == 1 and notices[0].metadata["origin_notice"]["conversation_message_id"] == commit.message_id
+    assert any("canonical" in record.getMessage() for record in caplog.records)
+    _send(deps, request, context, frozen_retry=FrozenOwnerDelivery(
+        content=commit.content, external_sent=True, receipt_id="transport-receipt"))
+    assert len(deps.channels.calls) == 1
+    assert len(deps.store.messages.recent(origin.thread_id, limit=10)) == 1
+
+
+# LLM: 批次内一条回执的确定性校验错误不能遮住另一条成功回执；只替换单条索引入口，真实存储仍写其它记录。
+# 函数用途: 验证确定性异常按回执隔离且不吞掉后续有效组件。
+@pytest.mark.parametrize("error_type", [ValueError, TypeError])
+def test_deterministic_projection_error_keeps_other_component_ids(tmp_path, monkeypatch, caplog, error_type):
+    components = tuple({"phase": "send_confirmed", "effect_outcome": "confirmed", "provider_message_id": value}
+                       for value in ("om_conflict", "om_valid"))
+    deps, request, context, origin = _setup(tmp_path, components=components)
+    record = OutboundMessageIndex.record
+
+    # LLM: 只注入一个组件的确定性错误；其它组件继续进入原索引实现，不使用宽泛参数转发。
+    # 函数用途: 模拟局部投影拒绝，不改变运输或canonical写入。
+    def reject_one(self, entry, *, now=None):
+        if entry["channel_message_id"] == "om_conflict":
+            raise error_type("deterministic projection rejection")
+        return record(self, entry, now=now)
+
+    monkeypatch.setattr(OutboundMessageIndex, "record", reject_one)
+    commit = _send(deps, request, context)
+    assert commit.persisted and len(deps.channels.calls) == 1
+    indexed = OutboundMessageIndex(tmp_path).lookup("om_valid", channel="feishu", chat_id="oc_main")
+    assert indexed is not None and indexed["conversation_message_id"] == commit.message_id
+    assert len(deps.store.messages.recent(origin.thread_id, limit=10)) == 1
+    assert any("canonical" in entry.getMessage() for entry in caplog.records)
