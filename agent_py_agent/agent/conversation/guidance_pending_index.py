@@ -303,35 +303,45 @@ class GuidancePendingIndex(ObservationIndex):
         return self.dirty_dir / (hashlib.sha256(str(path).encode()).hexdigest() + '.json')
 
     # LLM: db锁不能包住receipt锁；始终先取原receipt锁后开投影事务，避免与写者交错死锁。
+    #   逐标记隔离：失败标记保留并归因到回执目标（改绑只换回合、不换目标），标记或回执读不出时归所有目标；
+    #   只在归因命中target或所有目标时重抛首个错误，target=None沿原语义任一失败即抛。
     # 函数用途: 每次最多修复64个跨库提交窗口。
-    def _repair_dirty(self):
+    def _repair_dirty(self, *, target=None):
         if not self.dirty_dir.exists():
             return True
         with os.scandir(self.dirty_dir) as iterator:
             names = [item.path for item in itertools.islice(iterator, 65) if item.name.endswith('.json')]
+        failures = []
         for name in names[:64]:
             marker = Path(name)
+            receipt = None
             try:
-                with _reader(marker) as handle:
-                    payload = json.loads(handle.read(65537))
-            except FileNotFoundError:
-                continue
-            if not isinstance(payload, dict) or not payload.get('receipt'):
-                raise DataCorruptionError('guidance repair marker is unreadable')
-            path = Path(payload['receipt'])
-            if path.parent != self.storage.guidance_dedupe_dir:
-                raise DataCorruptionError('guidance repair marker scope mismatch')
-            with locked_file_transition(path.with_name(f'.{path.name}.transition')):
-                receipt = self.ledger.read_receipt(path)
-                if receipt is not None:
-                    self.ledger.repair_projections(receipt)
-                marker.unlink(missing_ok=True)
+                try:
+                    with _reader(marker) as handle:
+                        payload = json.loads(handle.read(65537))
+                except FileNotFoundError:
+                    continue
+                if not isinstance(payload, dict) or not payload.get('receipt'):
+                    raise DataCorruptionError('guidance repair marker is unreadable')
+                path = Path(payload['receipt'])
+                if path.parent != self.storage.guidance_dedupe_dir:
+                    raise DataCorruptionError('guidance repair marker scope mismatch')
+                with locked_file_transition(path.with_name(f'.{path.name}.transition')):
+                    receipt = self.ledger.read_receipt(path)
+                    if receipt is not None:
+                        self.ledger.repair_projections(receipt)
+                    marker.unlink(missing_ok=True)
+            except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError) as exc:
+                failures.append((None if receipt is None else (receipt.entry.target_type, receipt.entry.target_id), exc))
+        for scope, exc in failures:
+            if target is None or scope is None or scope == target:
+                raise exc
         return len(names) <= 64
 
     # LLM: 一次调用只推进一个切片；未知回执在原锁内复读，缺失或损坏只报错，不重放提交未知消息。
     # 函数用途: 恢复一个目标的退休事实和队列状态，返回是否完整。
     def refresh(self, target_type, target_id):
-        dirty_complete = self._repair_dirty()
+        dirty_complete = self._repair_dirty(target=(target_type, target_id))
         with self._connection() as conn:
             ack_complete = self._prepare_acks(conn)
             queue_complete = self._queue_slice(conn, target_type, target_id)

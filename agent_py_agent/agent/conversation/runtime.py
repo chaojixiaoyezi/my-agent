@@ -5934,6 +5934,14 @@ def _claimed_background_task_is_terminal(
                 if (task.task_id != context.task_id or context.owner_id != str(agent.home_paths.owner_id)
                         or thread.owner_id != context.owner_id):
                     raise ValueError("business wake context identity mismatch")
+            from .host_actor import is_plugin_business_source_thread
+            from .session_task_report import delegated_result_report_pending
+
+            # 终态wake结案前先让无模型补账入口运行：委派结果还欠原sender，或插件业务任务要重报原结果。
+            if delegated_result_report_pending(agent, thread_id, task_id=task_id):
+                return False
+            if is_plugin_business_source_thread(store, task.sender_thread_id, owner_id=str(agent.home_paths.owner_id)):
+                return False
             return True
     if not thread_id or not task_id:
         return False

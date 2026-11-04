@@ -610,7 +610,7 @@ def test_producer_old_generation_lookup_has_one_claim_and_task_only_reads(busine
 
 
 # LLM: 索引/canonical错误与prepared都不能当作没有责任；私有producer仍运行真实存储与授权。
-# 函数用途: 验证未知或半提交责任保留原JSON，不产生新wake，也不隐式修索引。
+# 函数用途: 验证未知或半提交责任保留原JSON，不产生新wake；缺失索引只由task门入口从canonical重建（R1），坏索引不隐式修。
 @pytest.mark.parametrize("state", ["missing-index", "corrupt-index", "missing-wake", "prepared"])
 def test_producer_preserves_unknown_or_prepared_task_publication(business_wire, monkeypatch, state):
     case = runtime_case(business_wire)
@@ -640,7 +640,8 @@ def test_producer_preserves_unknown_or_prepared_task_publication(business_wire, 
     service._republish_pending_work(store.threads.require(thread_id), [store.session_tasks.require(task_id)], actor=actor)
     assert {path: path.read_bytes() for path in store.storage.wake_queue_dir.rglob("*.json")} == before
     if state == "missing-index":
-        assert not store.storage.wake_task_index_path.exists()
+        rows, error = store.wakes.task_responsibility_report(thread_id, task_id)
+        assert error is None and [row["wake_signal_id"] for row in rows] == [wake.wake_signal_id]
 
 
 # LLM: 仅目标pending的unlink注入I/O失败；原handled/quarantine与report/producer均真实运行。

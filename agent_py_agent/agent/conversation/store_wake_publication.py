@@ -18,10 +18,11 @@ from ..common.json_io import (
     write_private_json_file_atomic,
     write_private_json_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import open_directory_beneath
+from ..common.nofollow_fs import ensure_private_dir, open_directory_beneath
 from ..common.opaque_id import validate_opaque_id
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError, runtime_error_report
+from ..user_space.home_indexes import is_sqlite_busy
 from .models import ObservationEvent, WakeSignal
 from .store_io import read_jsonl_report
 from .store_layout import ConversationStorage
@@ -30,6 +31,10 @@ from .wake_poison import WAKE_STATUS_FAILED_PERMANENTLY
 _SCHEMA = "wake_dedupe.v2"
 _LEGACY_SCHEMA = "wake_dedupe.v1"
 _TASK_GUARDS = ContextVar("wake_task_responsibility_guards", default=())
+# 本进程已尝试从canonical重建过unknown覆盖的会话根（resolve后的路径）：可变登记表，不是常数；持锁读写，失败也不重复全量重建。
+_UNKNOWN_INDEX_REBUILDS: set[str] = set()
+# 保护上面登记表的进程内锁，只在判定/登记时短暂持有，不包住任何文件锁或重建IO。
+_UNKNOWN_INDEX_REBUILDS_LOCK = threading.Lock()
 
 
 # LLM: 发布先按根到叶对现有祖先目录持SH；任何祖先owner的维护EX均互斥，不靠路径形状猜owner或创建全局锁文件。
@@ -55,6 +60,8 @@ def _publication_guard(root: Path, *, blocking: bool):
 # 函数用途: 防止重建覆盖并行发布产生的定位引用，保留非阻塞拒绝语义。
 @contextmanager
 def _task_index_guard(storage: ConversationStorage, *, exclusive: bool, blocking: bool = True):
+    # 只读打开（initialize=False）的根可能还没有wake_queue/；两个平台分支开锁前都按0700私有补建，已有目录不动。
+    ensure_private_dir(storage.wake_queue_dir)
     if os.name != "posix":
         with locked_file_transition(storage.wake_task_index_lock_path, blocking=blocking):
             yield
@@ -81,6 +88,7 @@ def session_task_identity(signal: WakeSignal) -> tuple[str, str] | None:
 
 
 # LLM: owner祖先SH→索引SH→准确task锁→原发布/队列锁；仅同进程同线程同身份可重入，不继承别的执行者的锁。
+#   索引不是普通文件时在取任何锁之前懒初始化；本上下文已持同根门（已有索引SH）时再取EX会自锁，故跳过，异根门用另一把锁不受影响。
 # 函数用途: 串行化一个任务的检查和发布；锁忙在提交定位或canonical之前拒绝。
 @contextmanager
 def task_responsibility_guard(storage: ConversationStorage, thread_id: str, task_id: str, *, blocking: bool = True):
@@ -89,6 +97,12 @@ def task_responsibility_guard(storage: ConversationStorage, thread_id: str, task
     if identity in active:
         yield
         return
+    if all(entry[0] != identity[0] for entry in active) and not storage.wake_task_index_path.is_file():
+        try:
+            _initialize_task_index(storage, blocking=blocking)
+        except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError):
+            # 投影修不好不挡canonical：非阻塞忙（BlockingIOError）由下面原门按原语义在提交前拒绝，其它错误交给定位写入按投影丢失处理。
+            pass
     with (_publication_guard(storage.root, blocking=blocking),
           _task_index_guard(storage, exclusive=False, blocking=blocking),
           locked_file_transition(storage.wake_task_lock_path(thread_id, task_id), blocking=blocking)):
@@ -112,12 +126,32 @@ def signal_responsibility_guard(storage: ConversationStorage, signal: WakeSignal
             yield
 
 
-# LLM: ro/rw均禁止SQLite自动创建；query只读，不建表、不修账、不写journal。
+# LLM: ro/rw均禁止SQLite自动创建；query只读，不建表、不修账、不写journal。阻塞调用（含只读报告）等在途定位写最多5秒，非阻塞立即报忙。
 # 函数用途: 打开已存在的派生定位库，调用方负责关闭连接。
 def _task_index_connection(storage: ConversationStorage, *, writable: bool = False, blocking: bool = True):
     mode = "rw" if writable else "ro"
     return sqlite3.connect(storage.wake_task_index_path.resolve().as_uri() + "?mode=" + mode,
-        uri=True, timeout=5.0 if writable and blocking else 0)
+        uri=True, timeout=5.0 if blocking else 0)
+
+
+# LLM: 纯ro只读metadata与表结构，不建表、不修账；缺失、空文件、无效字节或schema不符都返回None，锁忙原样上抛而不当成缺失。
+# 函数用途: 返回派生定位库的覆盖标记（complete/unknown），供初始化决定保留、原子新建或从canonical重建。
+def _task_index_coverage(storage: ConversationStorage) -> str | None:
+    try:
+        with closing(_task_index_connection(storage)) as connection:
+            metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+            locators = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='locators'").fetchone()
+    except FileNotFoundError:
+        return None
+    except sqlite3.DatabaseError as exc:
+        if is_sqlite_busy(exc):
+            raise
+        return None
+    coverage = metadata.get("coverage")
+    if locators is None or coverage not in {"complete", "unknown"}:
+        return None
+    return coverage if metadata == {"schema": "wake-task-locators.v1", "coverage": coverage} else None
 
 
 # LLM: schema只描述定位字段与覆盖，不复制状态；旧无发布账的canonical在显式重建时标为legacy引用。
@@ -131,29 +165,75 @@ def _create_task_index(connection, coverage: str) -> None:
         ("schema", "wake-task-locators.v1"), ("coverage", coverage)))
 
 
-# LLM: 只在显式可写初始化且索引不存在时调用；已有pending/dedupe说明覆盖未知，绝不把旧库当空库。
-# 函数用途: 为全新空库建立覆盖证明；旧库等待显式离线重建，不扫描正文。
+# LLM: 可写初始化（ensure_dirs）入口；索引只是投影，创建或重建的任何错误都不得让ensure_dirs失败，读者保持fail-closed，task门下次懒修复。
+# 函数用途: 为空库发布complete覆盖，为旧库或unknown覆盖从canonical升级。
 def initialize_task_responsibility_index(storage: ConversationStorage) -> None:
-    with _publication_guard(storage.root, blocking=True), _task_index_guard(storage, exclusive=True):
-        if storage.wake_task_index_path.exists():
+    try:
+        _initialize_task_index(storage, blocking=True)
+    except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError):
+        return
+
+
+# LLM: ownerSH→索引EX，与所有发布/确认/重放（索引SH）互斥；complete原样返回；缺失/无效且无旧账时原子发布空complete库，
+#   不再留下半建的零字节文件；有旧账或unknown从canonical重建，unknown每进程每根至多一次；重建失败保留其finally已发布的unknown。
+# 函数用途: 供可写初始化与task门懒修复共用，建立或升级派生定位库，不改任何canonical唤醒或发布记录。
+def _initialize_task_index(storage: ConversationStorage, *, blocking: bool) -> None:
+    import tempfile
+
+    with (_publication_guard(storage.root, blocking=blocking),
+          _task_index_guard(storage, exclusive=True, blocking=blocking)):
+        coverage = _task_index_coverage(storage)
+        if coverage == "complete":
             return
         legacy = any(next(directory.glob("*.json"), None) is not None for directory in (
             storage.wake_queue_dir / "urgent", storage.wake_queue_dir / "normal", storage.wake_dedupe_dir))
-        descriptor = os.open(storage.wake_task_index_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(descriptor)
-        with closing(_task_index_connection(storage, writable=True)) as connection, connection:
-            _create_task_index(connection, "unknown" if legacy else "complete")
+        if coverage is None and not legacy:
+            descriptor, name = tempfile.mkstemp(prefix=".task-responsibility-", suffix=".sqlite3", dir=storage.wake_queue_dir)
+            os.close(descriptor)
+            temporary = Path(name)
+            try:
+                with closing(sqlite3.connect(temporary)) as connection, connection:
+                    _create_task_index(connection, "complete")
+                os.replace(temporary, storage.wake_task_index_path)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+            if os.name == "posix":
+                descriptor = os.open(storage.wake_queue_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            return
+        if coverage == "unknown":
+            root = str(storage.root.resolve())
+            with _UNKNOWN_INDEX_REBUILDS_LOCK:
+                if root in _UNKNOWN_INDEX_REBUILDS:
+                    return
+                _UNKNOWN_INDEX_REBUILDS.add(root)
+        try:
+            _rebuild_task_index_locked(storage)
+        except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError):
+            # 临时库已提交unknown schema并在finally原子替换上去，读者fail-closed；不把派生投影的失败抛给canonical调用方。
+            return
 
 
 # LLM: 定位先于prepared/canonical提交；崩溃留下孤儿引用会返回unknown，绝不会漏掉已提交责任。
+#   锁忙原样上抛，非阻塞争用仍在任何prepared/canonical写前拒绝；其它SQLite错误是投影丢失：删索引让读者报unknown，
+#   canonical照常发布，下次task门入口或可写初始化从权威源重建；删不掉则上抛，不能带着缺这条定位的complete覆盖继续。
 # 函数用途: 在原task锁内预留可重建位置，不保存状态或冻结内容的副本。
 def register_task_locator(storage: ConversationStorage, signal: WakeSignal, *, blocking: bool = True) -> None:
     identity = session_task_identity(signal)
     if identity is None:
         return
-    with closing(_task_index_connection(storage, writable=True, blocking=blocking)) as connection, connection:
-        connection.execute("INSERT OR REPLACE INTO locators VALUES (?, ?, ?, ?, ?, ?)",
-            (*identity, signal.wake_signal_id, signal.dedupe_key, signal.urgency, int(bool(signal.dedupe_key))))
+    try:
+        with closing(_task_index_connection(storage, writable=True, blocking=blocking)) as connection, connection:
+            connection.execute("INSERT OR REPLACE INTO locators VALUES (?, ?, ?, ?, ?, ?)",
+                (*identity, signal.wake_signal_id, signal.dedupe_key, signal.urgency, int(bool(signal.dedupe_key))))
+    except sqlite3.DatabaseError as exc:
+        if is_sqlite_busy(exc):
+            raise
+        storage.wake_task_index_path.unlink(missing_ok=True)
 
 
 # LLM: 原task锁内确认两个pending位置均不存在后才清定位；尽力删除失败或stat错误保留引用，索引坏时保留unknown。
@@ -492,25 +572,31 @@ def _task_projection_sources(storage: ConversationStorage):
 # LLM: 明确写入口，ownerSH→索引EX与所有发布/确认/replay互斥；新库原子替换，失败也发布unknown而不留下旧空覆盖。
 # 函数用途: 显式重建旧库或损坏投影；不在查询或每task热路径触发。
 def rebuild_task_responsibility_index(storage: ConversationStorage) -> None:
+    with _publication_guard(storage.root, blocking=True), _task_index_guard(storage, exclusive=True):
+        _rebuild_task_index_locked(storage)
+
+
+# LLM: 调用方已持ownerSH→索引EX；只读当前队列与原发布账，临时库先提交unknown再填定位，finally原子替换并fsync目录。
+# 函数用途: 在已持锁内从canonical重建定位库，供显式重建与初始化升级共用。
+def _rebuild_task_index_locked(storage: ConversationStorage) -> None:
     import tempfile
 
-    with _publication_guard(storage.root, blocking=True), _task_index_guard(storage, exclusive=True):
-        descriptor, name = tempfile.mkstemp(prefix=".task-responsibility-", suffix=".sqlite3", dir=storage.wake_queue_dir)
-        os.close(descriptor)
-        temporary = Path(name)
-        try:
-            with closing(sqlite3.connect(temporary)) as connection, connection:
-                _create_task_index(connection, "unknown")
-            with closing(sqlite3.connect(temporary)) as connection, connection:
-                for signal, receipt_required in _task_projection_sources(storage):
-                    connection.execute("INSERT OR REPLACE INTO locators VALUES (?, ?, ?, ?, ?, ?)",
-                        (*session_task_identity(signal), signal.wake_signal_id, signal.dedupe_key, signal.urgency, int(receipt_required)))
-                connection.execute("UPDATE metadata SET value='complete' WHERE key='coverage'")
-        finally:
-            os.replace(temporary, storage.wake_task_index_path)
-            if os.name == "posix":
-                descriptor = os.open(storage.wake_queue_dir, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
+    descriptor, name = tempfile.mkstemp(prefix=".task-responsibility-", suffix=".sqlite3", dir=storage.wake_queue_dir)
+    os.close(descriptor)
+    temporary = Path(name)
+    try:
+        with closing(sqlite3.connect(temporary)) as connection, connection:
+            _create_task_index(connection, "unknown")
+        with closing(sqlite3.connect(temporary)) as connection, connection:
+            for signal, receipt_required in _task_projection_sources(storage):
+                connection.execute("INSERT OR REPLACE INTO locators VALUES (?, ?, ?, ?, ?, ?)",
+                    (*session_task_identity(signal), signal.wake_signal_id, signal.dedupe_key, signal.urgency, int(receipt_required)))
+            connection.execute("UPDATE metadata SET value='complete' WHERE key='coverage'")
+    finally:
+        os.replace(temporary, storage.wake_task_index_path)
+        if os.name == "posix":
+            descriptor = os.open(storage.wake_queue_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)

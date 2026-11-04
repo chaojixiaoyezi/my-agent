@@ -1014,7 +1014,7 @@ def test_task_cancelled_while_queued_does_not_open_an_empty_task_turn(tmp_path, 
 
 def test_task_cancelled_after_its_turn_starts_but_before_claiming_the_body_delivers_nothing(tmp_path, monkeypatch) -> None:
     """开跑前判定放行之后、第一次认领正文之前任务被取消（任务还没绑定回合，取消走"撤队列"）：派活回合认领不到已撤回的正文，
-    那一次模型调用照样发生（已知代价），但答复在交付前按任务号读到 cancelled 被丢弃、唤醒结案，目标会话里没有派活回合的答复
+    领取后的终态复核（C-W5-02）直接结案唤醒、不再发生模型调用，目标会话里没有派活回合的答复
     （ae 探针 ra-residual-window 转正；原来交付前判定按绑定反查，未绑定的任务对不上，答复照样交付）。"""
     chain = _real_chain(tmp_path, monkeypatch)
     chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-DONE 整理三条要点。")
@@ -1036,8 +1036,8 @@ def test_task_cancelled_after_its_turn_starts_but_before_claiming_the_body_deliv
     chain.drain()
 
     _require(withdrawn == [True], f"前提不成立：派活回合开跑时正文应已从队列撤回：{withdrawn}")
-    assert [call["own_goals"] for call in chain.wire.calls_for_task(task.task_id)] == [[]], (
-        f"已知代价应当只有一次没有正文的模型调用：{[call['kind'] for call in chain.wire.calls_for_task(task.task_id)]}")
+    assert [call["own_goals"] for call in chain.wire.calls_for_task(task.task_id)] == [], (
+        f"正文认领前已取消的任务不应再有任何模型调用：{[call['kind'] for call in chain.wire.calls_for_task(task.task_id)]}")
     assert [text for text in chain.assistant_texts("B") if "RC-TASK" in text] == [], "已取消任务的空回合答复被交付到了目标会话"
     assert not _pending_wakes(chain, "B"), f"B 的派活唤醒没有结案：{_pending_wakes(chain, 'B')}"
     assert chain.agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled"
