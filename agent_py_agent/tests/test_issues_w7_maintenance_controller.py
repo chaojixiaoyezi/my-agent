@@ -107,9 +107,9 @@ def test_priority_is_fifo_and_capped_at_sixty_four(tmp_path, monkeypatch, mainte
     assert list(controller._priority) == queued
 
 
-# LLM: 先有真实续扫游标，再让每次monotonic观察推进25秒；预算耗尽后仅基础owner运行，下一拍可继续。
-# 函数用途: 验证时间耗尽不重置或跳过已保存分页游标。
-def test_advancing_clock_stops_after_base_owner_and_preserves_cursor(tmp_path, monkeypatch, maintenance_clock):
+# LLM: 先有真实续扫游标，再让每次monotonic观察推进25秒；预算耗尽也必须完成一页，下一拍从新游标继续。
+# 函数用途: 验证时间耗尽不阻止发现，亦不重置或跳过已保存分页游标。
+def test_advancing_clock_still_discovers_one_page_and_advances_cursor(tmp_path, monkeypatch, maintenance_clock):
     controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 10)
     monkeypatch.setattr(gateway_loops, '_OWNER_MAINTENANCE_MAX_PAGES_COUNT', 1)
     controller.tick(now=200_000)
@@ -125,18 +125,19 @@ def test_advancing_clock_stops_after_base_owner_and_preserves_cursor(tmp_path, m
         return current
 
     monkeypatch.setattr(gateway_loops.time, 'monotonic', jump)
-    assert controller.tick(now=200_001)['scanned'] == 0
-    assert calls == [home.owner_home_dir]
-    assert controller._cursor == cursor
+    assert controller.tick(now=200_001)['scanned'] == 4
+    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners[4:8])]
+    assert controller._cursor is not None and controller._cursor != cursor
     monkeypatch.setattr(gateway_loops.time, 'monotonic', lambda: maintenance_clock.now)
     calls.clear()
-    assert controller.tick(now=200_002)['scanned'] == 4
-    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners[4:8])]
+    assert controller.tick(now=200_002)['scanned'] == 2
+    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners[8:])]
+    assert controller._cursor is None
 
 
-# LLM: 真实优先续作过程中由维护回调耗尽时间；未处理的队列项与普通分页游标必须保留。
-# 函数用途: 验证时间预算也约束优先队列且下一拍不会丢owner。
-def test_priority_deadline_leaves_unvisited_entries(tmp_path, monkeypatch, maintenance_clock):
+# LLM: 真实优先续作过程中由维护回调耗尽时间；发现仍处理一页，但不重复执行已经优先访问的 owner。
+# 函数用途: 验证超时后发现仍前进，优先 FIFO 与同拍去重保持。
+def test_priority_overrun_preserves_fifo_and_discovery_deduplication(tmp_path, monkeypatch, maintenance_clock):
     names = {'owner-000', 'owner-001', 'owner-002'}
     controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 3, partial=names)
     controller.tick(now=200_000)
@@ -152,8 +153,8 @@ def test_priority_deadline_leaves_unvisited_entries(tmp_path, monkeypatch, maint
 
     monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', slow)
     calls.clear()
-    assert controller.tick(now=200_001)['scanned'] == 0
-    assert calls == [home.owner_home_dir, owners[0].home_dir]
+    assert controller.tick(now=200_001)['scanned'] == 3
+    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners)]
     assert [k[2] for k in controller._priority] == ['owner-001', 'owner-002', 'owner-000']
 
 
@@ -191,3 +192,61 @@ def test_due_error_does_not_enqueue_or_lose_report(tmp_path, monkeypatch, mainte
     monkeypatch.setattr(gateway_loops, 'owner_maintenance_due', unavailable)
     assert controller.tick(now=200_000) == {'scanned': 2, 'ran': 3, 'failed': 0, 'refused': 0, 'isolated': 0}
     assert len(calls) == 3 and not controller._priority
+
+
+# LLM: 用真实优先 FIFO、发现分页与代理时钟覆盖半拍预算及单个 owner 超时；不替换调度入口。
+# 函数用途: 优先续作再忙也须推进至少一页发现，且未访问的优先项不丢失。
+@pytest.mark.parametrize('elapsed', [11, 25], ids=['half-budget', 'overrun'])
+def test_priority_cannot_starve_discovery(tmp_path, monkeypatch, maintenance_clock, elapsed):
+    partial = {f'owner-{i:03d}' for i in range(6, 10)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 10, partial=partial)
+    controller.tick(now=200_000)
+    assert [key[2] for key in controller._priority] == sorted(partial)
+    original = gateway_loops.run_owner_retention_if_due
+    monkeypatch.setattr(gateway_loops, '_OWNER_MAINTENANCE_MAX_PAGES_COUNT', 1)
+
+    # 只让真实优先候选消耗虚拟时间，避免用 sleep 制造时序不稳定。
+    def slow_priority(scoped_home, *, now):
+        result = original(scoped_home, now=now)
+        if scoped_home.owner_home_dir in {owner.home_dir for owner in owners[6:]}:
+            maintenance_clock.now += elapsed
+        return result
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', slow_priority)
+    calls.clear()
+    result = controller.tick(now=200_001)
+    assert result['scanned'] == 4
+    assert calls == [home.owner_home_dir, owners[6].home_dir, *(owner.home_dir for owner in owners[:4])]
+    assert controller._cursor is not None
+    assert [key[2] for key in controller._priority] == ['owner-007', 'owner-008', 'owner-009', 'owner-006']
+    assert len(calls) == len(set(calls))
+
+
+# LLM: 真实维护先填满64项优先队列，再让每次维护消耗1秒；分页和入队仍用原实现。
+# 函数用途: 验证满优先队列最多使用半拍，并给不在优先队列的新 owner 留下发现机会。
+def test_sixty_four_priority_owners_leave_half_budget_for_discovery(tmp_path, monkeypatch, maintenance_clock):
+    partial = {f'owner-{index:03d}' for index in range(6, 70)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 70, partial=partial)
+    controller.tick(now=200_000)
+    assert len(controller._priority) == gateway_loops._OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT == 64
+    original = gateway_loops.run_owner_retention_if_due
+
+    def one_second(scoped_home, *, now):
+        result = original(scoped_home, now=now)
+        maintenance_clock.now += 1
+        return result
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', one_second)
+    monkeypatch.setattr(gateway_loops, '_OWNER_MAINTENANCE_MAX_PAGES_COUNT', 1)
+    calls.clear()
+    summary = controller.tick(now=200_001)
+    assert summary['scanned'] == 4
+    assert calls == [home.owner_home_dir, *(owner.home_dir for owner in owners[6:16]),
+                     *(owner.home_dir for owner in owners[:4])]
+    assert len(calls) == len(set(calls))
+    assert len(controller._priority) == 64
+    assert [key[2] for key in controller._priority] == [
+        *(f'owner-{index:03d}' for index in range(16, 70)),
+        *(f'owner-{index:03d}' for index in range(6, 16)),
+    ]
+    assert controller._cursor is not None
