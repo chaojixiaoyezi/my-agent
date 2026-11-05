@@ -103,7 +103,7 @@ def test_real_null_context_does_not_inherit_the_only_space(tmp_path):
         revalidate_business_context(actor=actor, context=unassigned)
 
 
-# LLM: pytest在临时Store/运行库建立准确任务、claim、run和attempt绑定，再将运行库置终态；只写测试存储，要求旧running claim不能继续证明执行存活。
+# LLM: pytest在临时Store/运行库建立准确任务、claim、run和attempt绑定；原入口激活同一pending attempt，核created父run的合法执行及终态拒绝，只写测试存储。
 # LLM: 原任务用accepted表示受理，running仅属于claim与运行库；不扩展原SessionTask状态机。
 # 函数用途: 检查运行中展示需要完整且仍有效的任务与执行证据。
 def test_work_state_requires_exact_live_claim_task_and_runtime(business_host, tmp_path):
@@ -133,7 +133,7 @@ def test_work_state_requires_exact_live_claim_task_and_runtime(business_host, tm
     context = BusinessExecutionContext.from_dict(task.metadata["business_context"])
     repo = RuntimeRepository(tmp_path / "runtime.db")
     run = repo.record_run_creation(owner_id=actor.owner_id, conversation_task_id="runtime-root", run_id="exact-run",
-        thread_id=agent["agent_id"], attempt_status="running",
+        thread_id=agent["agent_id"], attempt_status="pending",
         task_run_metadata={"business_context": context.to_dict(), "session_task_ref": task.task_id})
     store.session_tasks.bind_execution(task.task_id, task_run_id=run["task_run_id"], target_thread_id=agent["agent_id"])
     store.session_tasks.advance(task.task_id, SessionTaskUpdate(status=SESSION_TASK_ACCEPTED, conversation_request_id="invocation-exact"))
@@ -143,8 +143,22 @@ def test_work_state_requires_exact_live_claim_task_and_runtime(business_host, tm
     with bind_claim_execution(ClaimExecutionBinding(store.claims, agent["agent_id"], claim["claim_id"], agent["agent_id"])):
         publish_claim_runtime_authority({"invocation_run_id": "invocation-exact", "task_id": "runtime-root",
             "run_id": "exact-run", "agent_run_id": run["agent_run_id"], "attempt_id": run["attempt_id"]})
-    assert service.get(agent["agent_id"], actor=actor)["agent"]["work_state"] == "unknown", "仅有running attempt不能冒称run已运行"
-    # 创建回执只登记created run；模拟真实runner启动后，才具备完整运行证据。
+    assert repo.get_agent_run(run["agent_run_id"])["status"] == "created"
+    assert repo.get_attempt(run["attempt_id"])["status"] == "pending"
+    observed = service.get(agent["agent_id"], actor=actor)
+    assert observed["agent"]["work_state"] == "unknown", "running claim不能把未启动的pending attempt当作执行存活"
+    assert observed["current_execution"] is None
+    # 沿真实runner入口激活准确current attempt；父run仍可为created，不靠手改父run制造执行证据。
+    attempt = repo.create_attempt(run["agent_run_id"], reuse_pending=True, reject_running=True,
+        expected_pending_attempt_id=run["attempt_id"])
+    assert attempt["attempt_id"] == run["attempt_id"] and attempt["status"] == "running"
+    assert repo.get_agent_run(run["agent_run_id"])["status"] == "created"
+    observed = service.get(agent["agent_id"], actor=actor)
+    assert observed["agent"]["work_state"] == "running"
+    assert observed["current_execution"]["task_id"] == task.task_id
+    assert observed["current_execution"]["run_id"] == "exact-run"
+    assert observed["current_execution"]["attempt_id"] == run["attempt_id"]
+    # 父run随后更新为running，精确执行关联仍保持不变。
     with repo.transaction() as connection:
         connection.execute("UPDATE agent_runs SET status='running' WHERE agent_run_id=?", (run["agent_run_id"],))
     observed = service.get(agent["agent_id"], actor=actor)
@@ -155,6 +169,7 @@ def test_work_state_requires_exact_live_claim_task_and_runtime(business_host, tm
         connection.execute("UPDATE agent_attempts SET status='cancelled' WHERE attempt_id=?", (run["attempt_id"],))
     observed = service.get(agent["agent_id"], actor=actor)
     assert observed["agent"]["work_state"] == "unknown", "终态执行不能因旧running claim而继续显示运行"
+    assert observed["current_execution"] is None
 
 
 # LLM: pytest复用本地HTTP Gateway fixture，经真实业务客户端准备/发送请求；临时配置下核null身份、列表配额及超额409/not_started，不外推外网可达或模型执行。

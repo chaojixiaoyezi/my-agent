@@ -956,7 +956,12 @@ def _wire_assert_history_flat(probe, identifier):
 
 # LLM: 真实C+2W与原_commit_created_record均不mock；历史cancelled输入明确是夹具，仍保完整P6收尾。
 # 函数用途: 在同一个真实wire入口核对10/100/1000历史后的新原短提交，而不是只测空目录或存在。
-@pytest.mark.parametrize('history', [10, 100, 1000])
+@pytest.mark.parametrize('history', [
+    10, 100,
+    # 千条历史的夹具及完整P6已有150秒子进程上限；外层须留出收尾时间，不能被CI默认60秒先中断。
+    # 仅调整此大样本的整例期限；12秒业务等待、历史数量及短提交的全部I/O/字节/工作量断言保持。
+    pytest.param(1000, marks=pytest.mark.timeout(180)),
+])
 def test_real_two_worker_wire_budget_stays_flat_after_history(tmp_path, history):
     report = _wire_child(tmp_path / 'wire-history', 'scale-c', initialize=True, history=history)
     assert report['stage'] == 'sealed' and report['history'] == history
