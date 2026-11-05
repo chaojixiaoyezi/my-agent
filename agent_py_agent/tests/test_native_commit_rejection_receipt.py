@@ -332,21 +332,33 @@ def test_expired_deadline_does_not_read_or_clear_nack(endpoint, monkeypatch):
     assert c.waits == [] and c.value._inflight == {1: ('applied', 1, False)} and c.value._uncertain == {1}
 
 
-def test_wire_only_rejection_does_not_silently_reap_or_settle_original_claim(endpoint):
+def test_wire_only_rejection_does_not_silently_reap_or_settle_original_claim(endpoint, capsys):
     c = endpoint
     c.frames.append((NACK, c.value._parent[0]))
-    try:
+    with pytest.raises(client.NativeCommitNotStarted) as caught:
         c.value.materialize_owner('request', 'attempt')
-    except producer.WorkerCommitRejected as error:
-        original = error
+    original = caught.value
+    assert original._client is c.value and original.seq == 1
+    assert original._materialize_origin is None
     future = Future()
     future.set_exception(original)
     claim = SimpleNamespace(request_id='request', execution_attempt_id='attempt')
     pump = dispatch.WorkerRequestPump.__new__(dispatch.WorkerRequestPump)
     pump._active = {future: claim}
-    with pytest.raises(producer.WorkerCommitRejected) as caught:
+    sent = list(c.sent)
+    # MP-W2收容普通异常而不是让泵退出；重复核收仍保留原Future、claim及异常。
+    for _ in range(3):
         pump._reap()
-    assert caught.value is original and pump._active == {future: claim}
+        assert pump._active == {future: claim} and pump._active[future] is claim
+        assert pump._faulted == {future} and future.exception() is original
+    with pytest.raises(client.NativeCommitNotStarted) as retained:
+        future.result()
+    assert retained.value is original and c.sent == sent
+    diagnostics = [json.loads(line.partition('] ')[2]) for line in capsys.readouterr().err.splitlines()
+                   if line.startswith('[gateway-native-diagnostic] ')]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]['stage'] == 'worker_future_result'
+    assert diagnostics[0]['error_type'] == 'NativeCommitNotStarted'
 
 
 @pytest.mark.parametrize('kind', ['short', 'bounded', 'heartbeat', 'runner'])

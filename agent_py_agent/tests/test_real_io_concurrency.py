@@ -616,9 +616,11 @@ def test_create_delete_task_dirs_with_concurrent_listing_does_not_raise(tmp_path
                 task = manager.create_run(goal=f"churn-{i}", thought="t", plan=["p"])
                 # 先删任务工作目录(canonical_state.json 所在),再删 workspace 下的
                 # locator 目录,制造 glob 与 load 之间文件消失的竞态窗口。
-                shutil.rmtree(task.task_dir, ignore_errors=True)
-                shutil.rmtree(task.task_workspace_dir, ignore_errors=True)
-                shutil.rmtree(manager.workspace / task.id, ignore_errors=True)
+                for path in (task.task_dir, task.task_workspace_dir, manager.workspace / task.id):
+                    try:
+                        shutil.rmtree(path)
+                    except FileNotFoundError:
+                        pass  # 规范工作目录可能已随父级task目录删除；其它删除错误不能吞掉。
         except BaseException:  # noqa: BLE001
             writer_error.append(traceback.format_exc())
         finally:
@@ -641,12 +643,11 @@ def test_create_delete_task_dirs_with_concurrent_listing_does_not_raise(tmp_path
     readers = [threading.Thread(target=reader, args=(slot,), daemon=True) for slot in range(2)]
     for thread in readers:
         thread.start()
-    writer_thread = threading.Thread(target=writer, daemon=True)
-    writer_thread.start()
-    writer_thread.join(timeout=15)
-    stop.set()
+    # 两个读者仍并行；主线程完成全部25轮写删后才观察最终空集，不猜CI用时。
+    writer()
     for thread in readers:
         thread.join(timeout=15)
+    assert all(not thread.is_alive() for thread in readers), "列表线程未退出"
 
     assert writer_error == [], "创建/删除线程不应抛出异常:\n" + "\n".join(writer_error)
     assert reader_errors == [], (

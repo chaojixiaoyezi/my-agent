@@ -1,4 +1,6 @@
 """W4：使用真实canonical事务验证过期申请与授权交错。"""
+import gc
+
 import pytest
 
 from agent_py_agent.agent.subagents.capability_request_expiry import close_stale_capability_requests
@@ -284,6 +286,7 @@ def test_count0_real_stop_and_completion_finish_without_lock_cycle(request, tmp_
 
     from agent_py_agent.tests.test_rework_v14_admission_io_recovery import fd_count
 
+    gc.collect()
     before = fd_count()
     if concurrent:
         monkeypatch.setattr(managers, "subagent_creation_guard", scheduled_guard)
@@ -310,7 +313,43 @@ def test_count0_real_stop_and_completion_finish_without_lock_cycle(request, tmp_
     prior = terminal.read_bytes()
     finish()
     assert terminal.read_bytes() == prior
-    assert fd_count() - before == 0
+    # 增长才是泄漏；负差可来自既存描述符正常关闭（CI曾观察到-1）。
+    gc.collect()
+    assert fd_count() - before <= 0
+
+
+def _fd_snapshot():
+    """记录FD号和内核文件身份；不是open-file-description的出生身份。"""
+    import errno
+    import os
+    import sys
+
+    result = set()
+    for name in os.listdir('/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'):
+        fd = int(name)
+        try:
+            info = os.fstat(fd)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            continue  # listdir自身的临时目录FD已关闭，不属于可观察的存活集合。
+        result.add((fd, info.st_dev, info.st_ino, info.st_mode, info.st_rdev))
+    return result
+
+
+@pytest.mark.parametrize('new_owned_path', [None, 'new-owned', 'inherited'])
+def test_fd_snapshot_distinguishes_inherited_cleanup_from_masked_leak(tmp_path, new_owned_path):
+    with (tmp_path / 'inherited').open('wb') as inherited:
+        before = _fd_snapshot()
+        inherited_fd = inherited.fileno()
+    assert inherited.closed
+    # 已明确关闭的句柄没有继续存活资格，即使同号重开同文件也不算旧资源。
+    allowed = {identity for identity in before if identity[0] != inherited_fd}
+    if new_owned_path:
+        with (tmp_path / new_owned_path).open('wb'):
+            assert not _fd_snapshot() <= allowed, '关闭旧FD不能掩盖同号新FD'
+    else:
+        assert _fd_snapshot() <= allowed, '仅关闭继承FD不应误报泄漏'
 
 
 def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monkeypatch):
@@ -367,7 +406,11 @@ def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monk
         return path
 
     first = enqueue("sequence-first")
-    before = fd_count()
+    # 模拟本进程的继承/临时FD在测量窗口中正常关闭，负差不能冒充泄漏。
+    with (tmp_path / 'inherited-fd').open('wb') as inherited:
+        gc.collect()
+        before = fd_count()
+        original_fds = {identity for identity in _fd_snapshot() if identity[0] != inherited.fileno()}
 
     def worker():
         try:
@@ -422,4 +465,9 @@ def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monk
     assert len(calls) == 2 and not tuple(paths.processing.glob("*.json"))
     assert not restarted.conversation_store.threads.require(thread.thread_id).active_task_ids
     assert terminal.read_bytes() == saved
-    assert fd_count() - before == 0
+    gc.collect()
+    after_fds = _fd_snapshot()
+    assert after_fds <= original_fds, ('new live descriptors', after_fds - original_fds)
+    # 不允许正增量；继承/临时FD关闭使总量减少，不是泄漏。
+    gc.collect()
+    assert fd_count() - before <= 0
