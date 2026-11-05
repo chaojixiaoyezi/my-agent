@@ -123,9 +123,15 @@ def test_replay_still_checks_original_client_digest_for_changed_facts(server, fa
     (False, True, True, "original"), (True, False, True, "delegated"),
     (True, True, False, "original"),
 ])
+@pytest.mark.parametrize("route_enabled", [False, True])
+# LLM: 临时原ThreadStore显式写当前route，冷HTTP仍不能构造Agent；完整回执及重放断言不变。
+# 函数用途: 核constructor能力上界与当前线程route共同决定受理快照，不沿用旧每日委派偏好。
 def test_real_c_http_cold_capture_keeps_original_constructor_config_source(
-    server, monkeypatch, root_enabled, owner_enabled, subagents, expected,
+    server, monkeypatch, root_enabled, owner_enabled, subagents, expected, route_enabled,
 ):
+    from agent_py_agent.agent.conversation.route_mode import set_route_mode
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+    from agent_py_agent.agent.conversation.store_threads import ThreadStore
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.gateway_parts.control_plane import GatewayControlPlane
     from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import coordinator_guard
@@ -133,11 +139,11 @@ def test_real_c_http_cold_capture_keeps_original_constructor_config_source(
         prepare_coordinator_takeover,
     )
     from agent_py_agent.agent.owner_scoped_pool import _config_with_owner
-    from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
     from agent_py_agent.agent.user_space.owner_resolver import (
         home_paths_with_owner,
         resolve_owner_home,
     )
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
 
     owner = OwnerIdentity.provider_user("feishu", "fixture-user")
     config, constructor_root = server.agent.config, server.agent.root
@@ -147,8 +153,14 @@ def test_real_c_http_cold_capture_keeps_original_constructor_config_source(
         target = base / "config" / "capability_config.yaml"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("im_task_delegation_enabled: " + str(enabled).lower() + "\n")
-    set_delegation_preference(SimpleNamespace(home_paths=scoped_home, config=_config_with_owner(config, owner)),
-                              "feishu", "fixture-user", True)
+    scoped_config = _config_with_owner(config, owner)
+    workspace = runtime_paths_for_agent(scoped_config, scoped_home.owner_home_dir, scoped_home)["conversation_workspace"]
+    threads = ThreadStore(ConversationStorage(workspace))
+    thread = threads.get_or_create({"canonical_user_id": "fixture-user", "channel": "feishu",
+        "channel_conversation_id": "fixture-thread", "channel_user_id": "fixture-user",
+        "owner_id": scoped_home.owner_id, "owner_home": str(scoped_home.owner_home_dir)})
+    set_route_mode(SimpleNamespace(home_paths=scoped_home, conversation_store=SimpleNamespace(threads=threads)),
+                   thread, route_enabled, actor_id="fixture-user")
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("C受理不能物化业务Agent")
@@ -166,7 +178,9 @@ def test_real_c_http_cold_capture_keeps_original_constructor_config_source(
         assert status == 202
         prepared = read_gateway_input_receipt(server.paths, request_id).prepared_request
         assert frozen_request_owner(prepared) == owner
-        assert prepared["host_im_dispatch.v1"]["mode"] == expected
+        assert prepared["host_im_dispatch.v1"]["mode"] == (expected if route_enabled else "original")
+        assert prepared["host_im_dispatch.v1"]["route_mode_frozen"] is route_enabled
+        assert prepared["host_im_dispatch.v1"]["route_origin"]["thread_id"] == thread.thread_id
         assert prepared["metadata"]["gateway_admin_binding_version"] == "none"
         assert prepared["input_media"] == body["input_media"]
         from agent_py_agent.agent.user_space import admin_channel_identity

@@ -97,14 +97,22 @@ def case(context, monkeypatch):
     issuer.control, issuer.launch = context, launch
     issuer._controller, issuer._lease = context.controller(), runtime._lease_origin
     issuer._issuer_origin, issuer._creator_pid = issuer, os.getpid()
-    issuer._source_origin = (launch, object())
+    issuer.process = type("OriginalFakeProcess", (), {"pid": os.getpid()})()
+    issuer._source_origin = (launch, issuer.process)
     issuer._identity = {
         "schema_version": "multiprocess_process_identity.v1",
         **build_process_identity(),
     }
     issuer._pins, issuer._executor_records = set(), {}
+    issuer._finished_pins = set()
     issuer._require_current = lambda: runtime.require_original()
     issuer._require_worker = lambda peer: None if peer == os.getpid() else pytest.fail("wrong peer")
+    from agent_py_agent.agent.gateway_parts.multiprocess_takeover_runtime import (
+        _scope_keys,
+        bind_current_worker_source,
+    )
+
+    bind_current_worker_source(issuer._controller, issuer)
     session = NativeCommitSession.__new__(NativeCommitSession)
     session._sources, session._lock = (issuer, object(), object()), threading.RLock()
     session._closed, session._handles, session._operations = False, {}, WeakValueDictionary()
@@ -114,7 +122,10 @@ def case(context, monkeypatch):
         {"request_id": claim.request_id, "execution_attempt_id": claim.execution_attempt_id},
     )
     operation = session._operations[identifier]
-    issuer._controller._unproven_owners.add(stamped["route"]["owner_sha"])
+    # 明确只隔离当前owner，不改原索引覆盖投影导致其它owner也被全局来源末检拒绝。
+    owner_restrictions = _scope_keys({"c_run_id": context.c_run_id, "role": "W",
+        "worker_index": launch.partition.index, "owner_shas": [stamped["route"]["owner_sha"]]})
+    issuer._controller._quarantined.update(owner_restrictions)
     return SimpleNamespace(
         control=context,
         gate=gate,
@@ -125,6 +136,7 @@ def case(context, monkeypatch):
         binding=binding,
         original=current,
         owner=owner,
+        owner_restrictions=owner_restrictions,
     )
 
 

@@ -106,22 +106,36 @@ def test_logging_fault_does_not_replace_original_error(monkeypatch, logger_fault
 
 
 @pytest.mark.parametrize('logger_fault', [False, True])
+# LLM: 当前refresh通过原active-index角色门；只在该观察口注入解析异常，不能让更早的身份拒绝冒充覆盖。
+# 函数用途: 验原刷新捕获异常后仍隔离、返回False，并记录原解析调用链。
 def test_refresh_keeps_original_quarantine_and_false_result(monkeypatch, caplog, logger_fault):
+    from agent_py_agent.agent.gateway_parts import (
+        multiprocess_executor_active_index as active_index,
+    )
+
     caplog.set_level(logging.WARNING, logger=runtime.__name__)
     original = _extra_data_error()
     controller = SimpleNamespace(active=lambda: True, _all_quarantined=False, paths=object(),
                                  c_run_id='synthetic-current', count=2, _closed_role_sources=(),
                                  _bootstrap_sources=None, _standalone_migration=None, _standalone_origin=None)
+    observed = []
 
     def refuse(*_args, **_kwargs):
+        observed.append(original)
         raise original
 
-    monkeypatch.setattr(runtime, 'require_role_coverage', refuse)
+    def locate(actual):
+        assert actual is controller
+        return SimpleNamespace(ready=True, check_roles=refuse,
+                               check_sources=lambda: pytest.fail('refused roles cannot check sources'))
+
+    monkeypatch.setattr(active_index, 'index_for', locate)
     if logger_fault:
         def fail(*_args, **_kwargs):
             raise RuntimeError('SECRET_LOGGER_FAILURE')
         monkeypatch.setattr(runtime, 'logging', SimpleNamespace(getLogger=lambda _name: SimpleNamespace(warning=fail)))
     assert runtime._refresh_targets(controller) is False
+    assert observed == [original]
     assert controller._all_quarantined is True
     assert controller._closed_role_sources == () and controller._bootstrap_sources is None
     assert original.doc == '{"敏感正文":"不可输出"}\n{"第二根":"不可输出"}'
@@ -143,7 +157,13 @@ def test_invalid_numeric_positions_are_not_logged(caplog, value):
     assert f'json_doc_chars={len(error.doc)}' in text
 
 
+# LLM: 注入同一实际索引角色门，确保坏异常属性由原日志保护而非前置身份拒绝掩盖。
+# 函数用途: 验日志读取异常属性失败不覆盖原刷新隔离结果。
 def test_exception_attribute_failure_keeps_original_refusal(monkeypatch):
+    from agent_py_agent.agent.gateway_parts import (
+        multiprocess_executor_active_index as active_index,
+    )
+
     class BrokenJSONError(json.JSONDecodeError):
         def __getattribute__(self, name):
             if name == 'pos':
@@ -154,10 +174,18 @@ def test_exception_attribute_failure_keeps_original_refusal(monkeypatch):
     controller = SimpleNamespace(active=lambda: True, _all_quarantined=False, paths=object(),
                                  c_run_id='synthetic-current', count=2, _closed_role_sources=(),
                                  _bootstrap_sources=None, _standalone_migration=None, _standalone_origin=None)
+    observed = []
 
     def refuse(*_args, **_kwargs):
+        observed.append(original)
         raise original
 
-    monkeypatch.setattr(runtime, 'require_role_coverage', refuse)
+    def locate(actual):
+        assert actual is controller
+        return SimpleNamespace(ready=True, check_roles=refuse,
+                               check_sources=lambda: pytest.fail('refused roles cannot check sources'))
+
+    monkeypatch.setattr(active_index, 'index_for', locate)
     assert runtime._refresh_targets(controller) is False
+    assert observed == [original]
     assert controller._all_quarantined is True
