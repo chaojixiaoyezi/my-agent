@@ -232,12 +232,12 @@ def test_same_raw_fixed_roles_can_be_republished_during_retry(
 ):
     from agent_py_agent.agent.common.nofollow_fs import write_bytes_atomic_beneath
 
-    # LLM: 仅原strict atomic写叶重发临时目录中的相同字节，不手造角色或关闭证明。
-    # 函数用途: 明确建立inode改变但角色完整raw未变的合法反例。
+    # LLM: 沿原atomic writer的真实签名重发相同字节；strict父链由写者自身核实，不传reader专用参数。
+    # 函数用途: 真正完成同字节原子重发，避免错误参数在测试刺激中抛错而被误当业务隔离。
     def republish(root, _workers):
         path = root.joinpath(*parts)
         before = path.stat()
-        write_bytes_atomic_beneath(root, parts, path.read_bytes(), require_dir_fd=True)
+        write_bytes_atomic_beneath(root, parts, path.read_bytes())
         assert path.stat().st_ino != before.st_ino
 
     result = successor_probe(closing, coordinator_handles, monkeypatch, interleave=True,

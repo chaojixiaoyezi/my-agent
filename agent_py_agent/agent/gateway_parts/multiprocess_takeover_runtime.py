@@ -634,8 +634,8 @@ def original_drain_sources(controller):
     return workers, sources, roots
 
 
-# LLM: 每次先核准确standalone来源或原角色关闭字节，再发现完整P1/旧N；丢源/漂移整体拒，不清未知或以历史替fresh P2。
-# 函数用途: 更新原P1/P3及旧count未知责任，保持原末检和隔离，并在原异常被捕获后记录类型及代码位置。
+# LLM: 原indexed热读前后固定C/P4完整raw与冷审计metadata原stamp；不冻结动态W、不回扫P1/P3历史，漂移只隔离不重捕基线。
+# 函数用途: 在原来源检查返回成功前补齐跨轮末检，同字节C/P4原子重发仍可通过。
 def _refresh_targets(controller) -> bool:
     if not controller.active() or controller._all_quarantined:
         return False
@@ -650,13 +650,35 @@ def _refresh_targets(controller) -> bool:
         index = index_for(controller)
         if not index.ready:
             return False
+        fixed_sources = _fixed_role_refresh_sources(index)
         index.check_roles(migration)
         index.check_sources()
+        if _fixed_role_refresh_sources(index) != fixed_sources:
+            raise ValueError('generation_role_sources_changed')
         return True
     except (OSError, ValueError, TypeError, KeyError) as error:
         controller._all_quarantined = True
         _log_source_refusal("source_refresh_failed", error)
         return False
+
+
+# LLM: 只点读固定两叶，沿原strict reader预算；旧metadata始终比较冷审计原stamp，不更新索引或扫描历史正文。
+# 函数用途: 捕获本次C/P4完整字节并核旧代原件，避免合法W重读时把漂移当新基线。
+def _fixed_role_refresh_sources(index):
+    from ..common.nofollow_fs import read_bytes_beneath
+    from .multiprocess_bootstrap_publish import _WORKER_REGISTRY_MAX_BYTES
+    from .multiprocess_executor_active_index import _file_stamp
+
+    roles = (
+        read_bytes_beneath(index.root, ('gateway_state.json',), max_bytes=16384,
+                          require_dir_fd=True, snapshot_retries=2),
+        read_bytes_beneath(index.root, ('workers', 'registry.json'),
+                          max_bytes=_WORKER_REGISTRY_MAX_BYTES, require_dir_fd=True),
+    )
+    for parts, original in index._metadata_stamps.items():
+        if _file_stamp(index.root, parts) != original:
+            raise ValueError('generation_original_metadata_changed')
+    return roles
 
 
 # LLM: 只核原限制引用/字节，未知永不消失或换成新来源；使用唯一_rechecks调度，不造第二进度或P2 scope。
