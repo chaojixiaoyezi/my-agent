@@ -284,9 +284,8 @@ def test_mp_hook_refuses_before_takeover_or_business(tmp_path, monkeypatch, caps
 # 函数用途: 为死亡与未知执行者用例创建规范账本行。
 def _executor(paths):
     from agent_py_agent.agent.gateway_parts.multiprocess_executor_ledger import ExecutorLedger
-    from agent_py_agent.agent.gateway_parts.multiprocess_route import WorkerPartition
-
     from agent_py_agent.agent.gateway_parts.multiprocess_executor_runtime import _reservation
+    from agent_py_agent.agent.gateway_parts.multiprocess_route import WorkerPartition
 
     ledger = ExecutorLedger(paths.root, WorkerPartition(0, 2, 'crashed-c'))
     binding = {'request_id': 'request-old', 'execution_attempt_id': 'attempt-old',
