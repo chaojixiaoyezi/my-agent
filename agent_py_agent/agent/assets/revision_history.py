@@ -333,6 +333,37 @@ def _snapshot_blobs(owner_home, payload, code, side_files):
             'side_blobs': {name: blob_put(owner_home, text.encode('utf-8')) for name, text in sorted(side_files.items())}}
 
 
+# LLM: 待发表证据只按一个资产点读，区别于canonical undo；prepared必须由原Store核对提交事实后才可发表。
+# 函数用途: 读取一份有界的快照发表义务，未知或损坏状态不当作空。
+def pending_publication(owner_home, kind, asset_id):
+    _identity(kind, asset_id)
+    value = _read_json(owner_home, (*_HISTORY_PARTS, 'pending', kind, f'{asset_id}.json'))
+    if value is not None and (not isinstance(value, dict)
+            or value.get('schema_version') != 'asset_publication.v1'
+            or value.get('kind') != kind or value.get('asset_id') != asset_id
+            or value.get('phase') not in ('prepared', 'committed')
+            or not isinstance(value.get('snapshot'), dict)):
+        raise ValueError('invalid pending asset publication')
+    return value
+
+
+# LLM: 原Store持root/canonical锁，历史锁只写证据，不反向取得canonical锁；完整正文独立于会失败的blob writer。
+# 函数用途: 原子保留准确payload、代码、侧文件和依赖身份直到发表被确认。
+def retain_publication(owner_home, kind, asset_id, snapshot, *, committed=False):
+    with _asset_lock(owner_home, kind, asset_id):
+        value = {'schema_version': 'asset_publication.v1', 'kind': kind, 'asset_id': asset_id,
+                 'phase': 'committed' if committed else 'prepared', 'snapshot': snapshot}
+        _write_json(owner_home, (*_HISTORY_PARTS, 'pending', kind, f'{asset_id}.json'), value)
+    return value
+
+
+# LLM: 只有原Store的未提交判定或不可变发表ACK后清除；不清理其它资产或任何正式记录。
+# 函数用途: 确认一个资产的待发表证据已完成。
+def acknowledge_publication(owner_home, kind, asset_id):
+    with _asset_lock(owner_home, kind, asset_id):
+        unlink_file_beneath(Path(owner_home), (*_HISTORY_PARTS, 'pending', kind, f'{asset_id}.json'))
+
+
 # LLM: 发布版本与storage_revision独立；仅显式WORKFLOW.md、同存储修订或未指定修订、同定义且无正文/侧文件的workflow可补全；新修订、pin变化和回滚仍追加版本，CAS不变。
 # 函数用途: 在跨片保存入口之间去重、受限补全或追加完整正式版本。
 def record_version(owner_home, kind, asset_id, *, payload: Mapping, code: bytes | None = None,
