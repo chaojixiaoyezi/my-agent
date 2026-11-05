@@ -1,8 +1,10 @@
 """CI-R2：真实维护轮次、独立标记额度和有界多线程宽限的行为回归。"""
 from __future__ import annotations
 
+import gc
 import json
 import os
+import shutil
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -394,6 +396,91 @@ def test_waiting_retirement_closes_compact_pass(compact_case):
     assert all(path.read_bytes() == raw for path, raw in protected.items())
 
 
+def test_torn_journal_tail_closes_compact_pass(compact_case, record_property):
+    case = compact_case
+    home = SimpleNamespace(**vars(home_for(case)), owner_trash_dir=case.root / "trash")
+    committed_pair(case)
+    now = time.time()
+    action = _retire_through_writer(case, home, now)
+    shutil.rmtree(action.destination)
+    journal = home.owner_data_dir / "retention/retired_threads.jsonl"
+    torn = b'{"schema": "retired_thread.v1", "thread_id": "other-thread"'
+    with journal.open("ab") as handle:
+        handle.write(torn)
+    original = journal.read_bytes()
+    protected = {path: path.read_bytes() for path in home.owner_compact_dir.rglob("*")
+                 if path.is_file()}
+    cursor, receipts, writes = {}, [], []
+    gc.collect()
+    before = _fd_count()
+    for _ in range(20):
+        result = compact.maintain_compact_reachability_lane(request_for(
+            home, cursor=cursor, now=now + 60,
+            commit=lambda operation: (writes.append(True), operation())[1],
+        ))
+        validate_lane_receipt(result)
+        receipts.append(result)
+        cursor = result["cursor"]
+        if result["complete"]:
+            break
+    gc.collect()
+    fd_delta = _fd_count() - before
+    record_property("fd_delta", fd_delta)
+    record_property("complete_history", json.dumps([row["complete"] for row in receipts]))
+    record_property("deferred_reason", result.get("deferred_reason"))
+    assert result["complete"] is True
+    assert result.get("deferred_reason") == "retired_thread_unknown"
+    assert any(error["code"] == "retired_thread_state_unknown"
+               for row in receipts for error in row["errors"])
+    assert cursor["journal_offset"] == 0 and cursor["phase"] == "live"
+    assert journal.read_bytes() == original
+    assert all(path.read_bytes() == raw for path, raw in protected.items())
+    assert not writes and all(row["deleted_items"] == 0 for row in receipts)
+    assert fd_delta == 0
+
+
+def test_malformed_journal_line_is_skipped_without_purging_earlier_rows(compact_case, record_property):
+    case = compact_case
+    home = SimpleNamespace(**vars(home_for(case)), owner_trash_dir=case.root / "trash")
+    committed_pair(case)
+    now = time.time()
+    action = _retire_through_writer(case, home, now)
+    shutil.rmtree(action.destination)
+    journal = home.owner_data_dir / "retention/retired_threads.jsonl"
+    torn = b'{"schema": "retired_thread.v1", "thread_id": "other-thread"'
+    with journal.open("ab") as handle:
+        handle.write(torn + b"\n")
+    original = journal.read_bytes()
+    protected = {path: path.read_bytes() for path in home.owner_compact_dir.rglob("*")
+                 if path.is_file()}
+    cursor, receipts, skipped, writes = {}, [], set(), []
+    gc.collect()
+    before = _fd_count()
+    for _ in range(20):
+        result = compact.maintain_compact_reachability_lane(request_for(
+            home, cursor=cursor, now=now + 60,
+            commit=lambda operation: (writes.append(True), operation())[1],
+        ))
+        validate_lane_receipt(result)
+        receipts.append(result)
+        skipped.update(result["skipped"])
+        cursor = result["cursor"]
+        if result["complete"]:
+            break
+    gc.collect()
+    fd_delta = _fd_count() - before
+    record_property("fd_delta", fd_delta)
+    record_property("complete_history", json.dumps([row["complete"] for row in receipts]))
+    record_property("skipped", json.dumps(sorted(skipped)))
+    assert result["complete"] is True
+    assert cursor["journal_offset"] == journal.stat().st_size
+    assert {"retired_thread_undecidable", "retired_thread_malformed"} <= skipped
+    assert all(path.read_bytes() == raw for path, raw in protected.items())
+    assert journal.read_bytes() == original
+    assert not writes and all(row["deleted_items"] == 0 for row in receipts)
+    assert fd_delta == 0
+
+
 def _owner_case(case):
     """沿 W1 的真实 home 初始化方式准备维护输入，不替换通道或登记表。"""
     home = ensure_my_agent_home(case.root / "cycle-home")
@@ -439,6 +526,39 @@ def test_dispatcher_cycle_closes_with_waiting_row_and_grace_entry(compact_case, 
     later = _owner_tick(home, previous, now + (finished + 1) * 3600)
     assert not later["errors"]
     assert set(later["lane_reports"]) == set(storage_lanes.LANE_BINDINGS)
+
+
+def test_dispatcher_cycle_closes_with_torn_journal_tail(compact_case, record_property):
+    home, retired_case = _owner_case(compact_case)
+    committed_pair(retired_case)
+    now = time.time()
+    action = _retire_through_writer(retired_case, home, now)
+    shutil.rmtree(action.destination)
+    journal = home.owner_data_dir / "retention/retired_threads.jsonl"
+    torn = b'{"schema": "retired_thread.v1", "thread_id": "other-thread"'
+    with journal.open("ab") as handle:
+        handle.write(torn)
+    original = journal.read_bytes()
+    previous, reports, pending, finished = {}, set(), [], None
+    for tick in range(6):
+        state = _owner_tick(home, previous, now + tick * 3600)
+        assert not state["errors"]
+        reports.update(state["lane_reports"])
+        pending.append(state["continuation_pending"])
+        previous = {"storage_maintenance": state}
+        if not state["continuation_pending"]:
+            finished = tick
+            break
+    record_property("continuation_pending_history", json.dumps(pending))
+    record_property("lane_reports", json.dumps(sorted(reports)))
+    assert finished is not None
+    assert state["continuation_pending"] is False
+    assert set(state["pending_kinds"]) <= {"global_indexes"}
+    assert reports == set(storage_lanes.LANE_BINDINGS)
+    later = _owner_tick(home, previous, now + (finished + 1) * 3600)
+    assert not later["errors"]
+    assert set(later["lane_reports"]) == set(storage_lanes.LANE_BINDINGS)
+    assert journal.read_bytes() == original and journal.read_bytes().endswith(torn)
 
 
 def test_first_thread_allowance_collects_orphan_with_tiny_slices(compact_case, monkeypatch):

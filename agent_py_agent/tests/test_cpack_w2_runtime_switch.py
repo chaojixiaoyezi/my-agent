@@ -5,11 +5,11 @@ from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from agent_py_agent.agent.plugin_enable_tool import PluginEnablePolicy, PluginEnableTool
 from agent_py_agent.agent.plugin_management import plugin_management_context
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
+from agent_py_agent.agent.settings.config_io import load_simple_yaml
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.owner_resolver import (
     OwnerIdentity,
@@ -20,6 +20,8 @@ from agent_py_agent.tests.test_cpack_w2_enable_pin_catalog import _build, _enabl
 from agent_py_agent.tests.test_plugin_management import manager
 
 
+# LLM: 用产品的正式 YAML 加载器核对默认值；只向测试临时目录写输入，不依赖 PyYAML。
+# 函数用途: 保留配置范围和用户边界断言，同时验证真实配置解析。
 def test_config_defaults_yaml_range_and_user_boundary(tmp_path):
     from pathlib import Path
 
@@ -29,14 +31,14 @@ def test_config_defaults_yaml_range_and_user_boundary(tmp_path):
     config = AgentConfig()
     assert getattr(config, "capability_pack_mcp_enabled", None) is False
     assert getattr(config, "capability_pack_mcp_idle_stop_seconds", None) == 600
-    defaults = yaml.safe_load((Path(__file__).parents[1] / "config/agent_config.yaml").read_text())
+    defaults = load_simple_yaml(Path(__file__).parents[1] / "config/agent_config.yaml")
     assert defaults["capability_pack_mcp_enabled"] is False
     assert defaults["capability_pack_mcp_idle_stop_seconds"] == 600
     for name in ("capability_pack_mcp_enabled", "capability_pack_mcp_idle_stop_seconds"):
         assert name in _BOUNDARY_NAMES and name in USER_SETTINGS_BOUNDARY_KEYS
     for value, expected in ((0, 0), (11, 11), (-1, 600), ("bad", 600)):
         path = tmp_path / "agent.yaml"
-        path.write_text(yaml.safe_dump({"capability_pack_mcp_idle_stop_seconds": value}))
+        path.write_text(f"capability_pack_mcp_idle_stop_seconds: {value}\n", encoding="utf-8")
         assert load_config(path).capability_pack_mcp_idle_stop_seconds == expected
 
 
