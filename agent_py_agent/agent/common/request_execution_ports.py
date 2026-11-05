@@ -122,7 +122,7 @@ def current_request_execution_source(phase):
     return cell.source
 
 
-# LLM: phase是产品声明；先原平台T/P3/P5再业务锁，nested由同一个平台窗口核；Count0无端口仅内存早返。
+# LLM: phase是产品声明；creation_guard → T → controller → lease → 会话guard → 叶锁；持controller/lease时creation_guard只try（MP-00）；nested由同一个平台窗口核；Count0无端口仅内存早返。
 # 函数用途: 在真实执行短门覆盖下完成文件事务，不持门等待网络或线程。
 @contextmanager
 def gateway_short_transaction(phase):

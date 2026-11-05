@@ -52,17 +52,36 @@ def require_http_worker_source(runtime, group, initializer, failure):
         raise ValueError('http_original_worker_observer_required')
 
 
-# LLM: 仅socket/pool/listener设施出生的同步短门，原controller/lease/root再次末核；不等待业务、模型、join或取消，Count0无新锁/文件/authority。
-# 函数用途: 使本C撤权与原HTTP设施出生互斥，出生对象仍由原Runtime保留。
+# LLM: 只表示 submit 前三把出生锁的有界竞争；故意不继承 RuntimeError/OSError，不能被当作未知线程出生保留 fault。
+# 类用途: 通知 accept 线程立即按现有繁忙 503 退回连接。
+class HTTPBirthGateBusy(Exception):
+    pass
+
+
+# LLM: 默认保持原阻塞出生；accept 显式传超时则 M→L→G 逐把限时，反序释放，取得全部锁才核源（核源本身也取 G）。
+# 函数用途: 使本C撤权与原HTTP设施出生互斥，单 accept 线程不再无界等待原运行时锁。
 @contextmanager
-def original_http_birth(runtime, *, control=None, paths=None):
-    require_http_transport(runtime, control=control, paths=paths)
-    if runtime is None:
-        yield
+def original_http_birth(runtime, *, control=None, paths=None, timeout_seconds=None):
+    if timeout_seconds is None or runtime is None:
+        require_http_transport(runtime, control=control, paths=paths)
+        if runtime is None:
+            yield
+            return
+        with runtime.controller._mutex, runtime._lease_origin._lifecycle_gate, runtime._gate:
+            require_http_transport(runtime, control=control, paths=paths)
+            yield
         return
-    with runtime.controller._mutex, runtime._lease_origin._lifecycle_gate, runtime._gate:
+    acquired = []
+    try:
+        for gate in (runtime.controller._mutex, runtime._lease_origin._lifecycle_gate, runtime._gate):
+            if not gate.acquire(timeout=timeout_seconds):
+                raise HTTPBirthGateBusy("http_birth_gate_busy")
+            acquired.append(gate)
         require_http_transport(runtime, control=control, paths=paths)
         yield
+    finally:
+        for gate in reversed(acquired):
+            gate.release()
 
 
 # LLM: 原pool只在finish_request同步区间构造一次；字段不持久化、不授权限，origin/当前pointer/寿命共同拒绝复制和退出复用。

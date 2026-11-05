@@ -473,7 +473,7 @@ class SubAgentBaseService:
 
     # LLM: 原创建锁串行线程/DB/canonical 发布但不提供跨存储回滚；同一对象的建议和包首资格只初始化新 thread，锁内复核权限。
     # 函数用途: 创建孩子及独立会话，传递宿主首次准备材料；复用准备时拒绝输入、父代次、权限或对象漂移。
-    # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+    # LLM: creation_guard 先于原T/P3/P5短门（MP-00全局锁序）；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
     # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def create_run(
         self,
@@ -482,8 +482,8 @@ class SubAgentBaseService:
         prepared: PreparedSubagentRun | None = None,
     ) -> SubAgentTask:
         """Create one explicit subagent task record."""
-        with gateway_short_transaction('child_create_run_commit'):
-            with self.manager.creation_guard():
+        with self.manager.creation_guard():
+            with gateway_short_transaction('child_create_run_commit'):
                 prepared = (
                     self.prepare_run(params=params)
                     if prepared is None

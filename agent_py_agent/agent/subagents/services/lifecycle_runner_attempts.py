@@ -37,15 +37,15 @@ class RunnerRecoveryHistoryUnknownError(RuntimeConflictError):
 
 # LLM: 原创建锁覆盖 canonical 复读、准确激活和投影；文件消费与活动指针同次 mutate，先核对身份才可恢复链接与 Goal。
 # 函数用途: 用原配置阈值生成恢复指令，在同一短事务里准备执行轮和恢复目标，避免取消或插话换代竞态。
-# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# LLM: creation_guard 先于原T/P3/P5短门（MP-00全局锁序）；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
 # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def prepare_runner_attempt(
     manager: object, run_id: str, *, retry_reason: str = "",
     expected_attempt_id: str | None = None,
 ) -> SubAgentTask:
     no_progress_limit = manager_no_progress_attempt_limit(manager)
-    with gateway_short_transaction('child_attempt_prepare'):
-        with manager.creation_guard():
+    with manager.creation_guard():
+        with gateway_short_transaction('child_attempt_prepare'):
             task = manager.load(run_id)
             resumable_user_stop = user_stopped_run_is_resumable(task)
             _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
@@ -179,7 +179,7 @@ def _reactivate_user_stopped_conversation_link(
 
 # LLM: 原创建锁与准备/控制共用；canonical mutate 只放弃显式旧 attempt，不能用旧快照清掉后来激活的 ID。
 # 函数用途: 登记一个执行轮已放弃，仅当它仍是当前轮时清空指针，保留其它并发状态。
-# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# LLM: creation_guard 先于原T/P3/P5短门（MP-00全局锁序）；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
 # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def abandon_runner_attempt(
     manager: object,
@@ -188,9 +188,9 @@ def abandon_runner_attempt(
     *,
     reason: str = "",
 ) -> SubAgentTask:
-    with gateway_short_transaction('child_attempt_abandon'):
+    with manager.creation_guard():
         normalized = str(attempt_id or "").strip()
-        with manager.creation_guard():
+        with gateway_short_transaction('child_attempt_abandon'):
             if not normalized:
                 return manager.load(run_id)
 

@@ -25,6 +25,7 @@ from typing import Any
 
 from ..concurrency import DurableDaemonThreadPoolExecutor
 from .multiprocess_http_transport import (
+    HTTPBirthGateBusy,
     http_request_work_scope,
     original_http_birth,
     require_http_worker_source,
@@ -42,6 +43,7 @@ class GatewayBoundedHTTPServer(HTTPServer):
     max_outstanding_requests = 128
     request_socket_timeout = 5.0
     request_queue_timeout = 2.0
+    http_birth_gate_timeout_seconds = 1.0
 
     # LLM: Construction must establish admission before serve_forever can
     # accept work. The daemon executor preserves the previous restart behavior:
@@ -81,7 +83,7 @@ class GatewayBoundedHTTPServer(HTTPServer):
             )
 
     # LLM: 在途数包含运行和排队；从接收时计排队时限，socket 超时只约束传输，不中止已接收的持久任务。
-    # LLM: 懒submit可能创建Thread，须同原runtime的controller→lease→runtime末门；等待/handler不在门内。任意submit异常保原group未知出生，普通忙错误沿原503，其余同对象上抛。
+    # LLM: 懒submit可能创建Thread，须同原runtime的controller→lease→runtime有界末门；超时未submit只回503，不保未知出生；submit异常仍保原group责任。
     # 函数用途: 接收有界连接，提交失败不丢原Thread责任或把中断误当繁忙重试。
     def process_request(
         self,
@@ -95,13 +97,18 @@ class GatewayBoundedHTTPServer(HTTPServer):
             request.settimeout(self.request_socket_timeout)
             if self._request_drain_runtime is not self._request_drain_runtime_origin:
                 raise ValueError("http_original_runtime_required")
-            with original_http_birth(self._request_drain_runtime):
+            with original_http_birth(self._request_drain_runtime,
+                                     timeout_seconds=self.http_birth_gate_timeout_seconds):
                 future = self._request_executor.submit(
                     self._process_request_worker,
                     request,
                     client_address,
                     time.monotonic(),
                 )
+        except HTTPBirthGateBusy:
+            self._request_slots.release()
+            self._reject_overloaded_request(request)
+            return
         except (RuntimeError, OSError) as error:
             if self._request_worker_failure is not None:
                 self._request_worker_failure(error)

@@ -324,7 +324,7 @@ def _business_execution_exited(agent, repo, task, ref, claim, matches):
                    for _ledger, record, _retained in model_call_drain_snapshot())
 
 
-# LLM: 原task→claim→creation门内冻结；中断回调和进程/子代理清理在门外。原取消账保全部未知，不伪造channel。
+# LLM: 先可选 CG 再 task→claim（MP-00），内层 CG 重入且无 guard 仍 nullcontext；中断回调及资源清理在门外，原取消账保全部未知。
 # 函数用途: 停止一个已核准的业务主执行，原权限立即关闭，实际退出后同操作解除责任。
 def stop_business_session_task(agent, task, *, execution_ref=None, include_descendants=True, cancel_task=True):
     from contextlib import nullcontext
@@ -340,8 +340,9 @@ def stop_business_session_task(agent, task, *, execution_ref=None, include_desce
 
     store = agent.conversation_store
     repo, task, ref, root_id, claim, claim_ref, matches = _business_stop_target(agent, task, execution_ref)
-    with store.tasks.transition_guard(root_id), locked_file_transition(store.storage.background_claim_path(task.target_thread_id)):
-        guard = getattr(agent.subagents, "creation_guard", None)
+    guard = getattr(agent.subagents, "creation_guard", None)
+    with (guard() if callable(guard) else nullcontext(), store.tasks.transition_guard(root_id),
+          locked_file_transition(store.storage.background_claim_path(task.target_thread_id))):
         with guard() if callable(guard) else nullcontext():
             repo, task, ref, root_id, claim, claim_ref, matches = _business_stop_target(agent, task, ref)
             # 完成缓存不跨取消模式复用；扩大到后代或整任务时，仍按准确原引用重新固定范围。

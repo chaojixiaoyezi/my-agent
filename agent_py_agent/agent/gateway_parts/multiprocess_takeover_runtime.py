@@ -7,6 +7,7 @@ import threading
 import time
 from contextvars import ContextVar
 
+from ..common.runtime_gate_registry import register_runtime_gate
 from . import multiprocess_takeover as p2
 from .multiprocess_coordinator import bind_coordinator_generation, current_coordinator
 from .multiprocess_route import owner_digest
@@ -37,7 +38,7 @@ from .multiprocess_takeover_unresolved_source import (
 # LLM: 原C租约与generation限定接管权限；短门核active来源，冷发现及物理观察在门外固定批推进。
 # 函数用途: 保留原证明链地协调启动、隔离、接管和责任结清。
 class CoordinatorTakeover:
-    # LLM: 原guard登记lease；mutex保存原目标/限制与捕获关闭raw，未知不造范围，关闭历史不授P2/P3且后台不继承授权。
+    # LLM: 原guard登记lease；mutex保存原目标/限制与捕获关闭raw；末尾弱登记 M/L 供 CG 锁序观察，不授P2/P3或延长租约。
     # 函数用途: 保存启动来源及原租约内隔离/调度事实，不持久化证明。
     def __init__(self, paths, count, c_run_id):
         self.paths, self.count, self.c_run_id = paths, count, c_run_id
@@ -72,6 +73,7 @@ class CoordinatorTakeover:
         self._recheck_thread_start_unknown = False
         self._recheck_joined = True
         self._cold_start_pending = False
+        register_runtime_gate(self)
 
     # LLM: 只有相同租约/本进程/当前代和控制器仍挂在原租约上才有效；退出后对象引用不能延寿。
     # 函数用途: 检查当前实际持锁C是否仍拥有本接线对象。
