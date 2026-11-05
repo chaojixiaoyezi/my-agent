@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..common.cancellation import raise_if_cancelled
-from ..common.json_io import write_private_json_file_atomic
+from ..common.json_io import write_private_json_file_atomic_unlocked
 from .listen_scope import DEFAULT_LISTEN_SCOPE, normalize_listen_scope
 from .process_registry import (
     _process_instance_terminated,
@@ -149,7 +149,7 @@ def start_background_process(
             record = transaction.write(record)
             # 启动 spec 含命令参数，写走私有原语：目录缺失按 0700 建、文件出生 0600、原子替换；
             # 已存在的目录一律不动（不再显式 chmod 收紧）。
-            write_private_json_file_atomic(
+            write_private_json_file_atomic_unlocked(
                 spec_path,
                 {
                     "schema": LAUNCH_SPEC_SCHEMA,

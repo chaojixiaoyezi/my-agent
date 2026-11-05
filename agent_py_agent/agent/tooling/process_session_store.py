@@ -18,7 +18,11 @@ from pathlib import Path
 
 from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.directory_lock import locked_private_directory
-from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
+from ..common.json_io import (
+    append_private_jsonl_records_unlocked,
+    locked_json_path,
+    write_json_file_atomic_unlocked,
+)
 from ..common.nofollow_fs import read_bytes_beneath, unlink_file_beneath
 from ..runtime_errors import runtime_error_report
 from .process_cleanup_evidence import confirm_cleanup_reference, validate_cleanup_reference
@@ -62,6 +66,13 @@ _PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT = 64
 _PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS = 60.0
 _PROCESS_RECORDS_PROJECTION_CACHE: OrderedDict[str, _ProcessRecordsProjection] = OrderedDict()
 _PROCESS_RECORDS_PROJECTION_LOCK = threading.Lock()
+
+# 进程记录默认扫描的基础毫秒额度。
+_PROCESS_SESSION_SCAN_BASE_MS = 1000
+# 默认全量枚举每见一个目录项追加的毫秒额度，显式预算不受影响。
+_PROCESS_SESSION_SCAN_ENTRY_MS = 0.1
+# 台账信息使用的默认保留天数，与维护通道 BACKGROUND_JOB_LOG_RETENTION_DAYS 保持一致。
+_LOG_RETIREMENT_DEFAULT_DAYS = 7
 
 
 # LLM: 仅真实目录可命中优化；链接或类型异常交回原Store事务，原锚点正规化和允许/拒绝语义不变。
@@ -186,20 +197,25 @@ class ProcessSessionTransaction:
 
     # LLM: 单条损坏保留错误；调用方需要全范围原子操作时必须拒绝有错误的清单。
     # 函数用途: 在一个一致的目录视图内枚举原 session 文件，记录无效项。
-    def list_records(self, *, max_entries: int = 100000, max_ms: float = 1000
+    def list_records(self, *, max_entries: int = 100000, max_ms: float | None = None
                      ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         self._require_active()
-        if type(max_entries) is not int or max_entries < 1 or not math.isfinite(max_ms) or max_ms <= 0:
+        if (type(max_entries) is not int or max_entries < 1
+                or (max_ms is not None and (not math.isfinite(max_ms) or max_ms <= 0))):
             raise ValueError("invalid process record scan budget")
-        deadline = time.monotonic() + max_ms / 1000
+        start = time.monotonic()
+        deadline = start + (max_ms if max_ms is not None else _PROCESS_SESSION_SCAN_BASE_MS) / 1000
         names = []
-        # 先关闭目录句柄再按原文件名顺序读取；预算耗尽拒绝整次选择，不能把半份列表当全量用于停止/裁剪。
+        # 默认额度随已见目录项线性增长；显式额度仍固定，超限拒绝整份选择，不返回半份停止/裁剪清单。
         with os.scandir(self.root) as entries:
             for count, entry in enumerate(entries, 1):
+                if max_ms is None:
+                    deadline = start + (_PROCESS_SESSION_SCAN_BASE_MS + count * _PROCESS_SESSION_SCAN_ENTRY_MS) / 1000
                 if count > max_entries or time.monotonic() >= deadline:
                     raise RuntimeError("process_session_scan_budget_exceeded")
                 if entry.name.startswith("bg-") and entry.name.endswith(".json"):
                     names.append(entry.name)
+        # deadline 保留最终目录项计数的额度，读取阶段不能继续无限延长。
         records, errors = [], []
         for name in sorted(names):
             if time.monotonic() >= deadline:
@@ -299,11 +315,22 @@ class ProcessSessionTransaction:
             record = self.load(session_id)
             if record is not None:
                 confirm_cleanup_reference(reference, record)
-                selected.append(session_id)
-        for session_id in selected:
-            unlink_file_beneath(self.root, (f"{session_id}.json",))
+                selected.append(reference)
+        for reference in selected:
+            session_id = reference["session_id"]
+            with locked_json_path(self.root / f"{session_id}.json"):
+                record = self.load(session_id)
+                if record is None:
+                    continue
+                confirm_cleanup_reference(reference, record)
+                _append_log_retirement(self.root, record)
+                unlink_file_beneath(self.root, (f"{session_id}.json",))
+            try:
+                unlink_file_beneath(self.root, (f"{session_id}.json.lock",))
+            except FileNotFoundError:
+                pass  # best-effort: 侧车已被同一消费操作移除时无需重做。
 
-    # LLM: 数量和年龄裁剪共用已终态、无保留/激活约束且通知结清的同一候选集合；TTL不能绕过这些门。
+    # LLM: 数量裁剪仍仅含普通终态；TTL额外接纳已确认退出且无停止/保留/通知义务的激活记录。
     #   只按可信finished_at判断超龄，不关闭进程、不替代资源释放或用explicit_stop标记代替消费读口。
     # 函数用途: 在原目录锁内清理数量超额或安全超龄记录，并返回实际删除的句柄。
     def prune_finished(self, max_finished: int | None = None, *, max_age_seconds: float | None = None,
@@ -323,7 +350,17 @@ class ProcessSessionTransaction:
         )
         selected = {record["session_id"]: record for record in finished[max(0, int(max_finished)) :]} if max_finished is not None else {}
         current_now = time.time() if now is None else float(now)
-        for record in finished:
+        # 激活退出证据只参加可信 TTL，不按历史数量淘汰；停用中的证据仍由 consume_cleanup 接管。
+        activation_candidates = [
+            record for record in records
+            if record.get("activation_scope") is not None
+            and record["status"] in PROCESS_TERMINAL_STATUSES
+            and not record.get("stop_requested")
+            and not record.get("retain_until_consumed", False)
+            and _activation_exit_confirmed(record)
+            and _completion_obligation_finished(record, is_notice_consumed)
+        ]
+        for record in (*finished, *activation_candidates):
             if _record_ttl_expired(record, max_age_seconds, current_now):
                 selected[record["session_id"]] = record
         return [session_id for session_id, record in selected.items() if _unlink_session_if_unchanged(self.root, record)]
@@ -355,14 +392,70 @@ def _record_ttl_expired(record: dict[str, object], max_age_seconds: float | None
             and float(finished) >= 86400.0 and 0 < age <= now - float(finished))
 
 
-# LLM: 调用者持目录锁；叶锁内同时比较原记录和两次nofollow字节，版本或字节漂移就不删，侧车只随成功删除清理。
-# 函数用途: 删除未并发更新的准确session及其锁文件，不跟随链接、不清理日志或其他资源。
+# LLM: 与 host 已结清的终态形状一致，但不导入 launcher，避免领域循环；停止中的记录没有独立退出证明。
+# 函数用途: 判断激活记录是否具备参加 TTL 的退出事实。
+def _activation_exit_confirmed(record: dict[str, object]) -> bool:
+    return record.get("status") == "exited" or (
+        record.get("status") == "killed" and not record.get("stop_requested")
+        and bool(record.get("reason")) and record.get("finished_at") is not None
+    )
+
+
+# LLM: 调用方持目录锁；先追加并同步准确日志身份，再允许删除唯一定位记录。这里只记责任，不删除日志。
+# 函数用途: 为仍存在的日志追加耐久退役行；同步失败上抛，调用方保留 session。
+def _append_log_retirement(root: Path, record: dict[str, object]) -> None:
+    output_file = record.get("output_file")
+    if not output_file:
+        return
+    try:
+        info = os.lstat(output_file)
+    except FileNotFoundError:
+        return
+    finished = record.get("finished_at")
+    finished = time.time() if finished is None else finished
+    row = {"schema": "background_log_retirement.v1", "session_id": record["session_id"],
+           "output_file": str(output_file), "log_root": str(Path(output_file).parent),
+           "dev": info.st_dev, "ino": info.st_ino, "finished_at": finished,
+           "retire_after": finished + _LOG_RETIREMENT_DEFAULT_DAYS * 86400}
+    path = root / ".log_retirement.jsonl"
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        before = None
+    if before is not None and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
+        raise OSError("background log retirement ledger is not a regular single-link file")
+    append_private_jsonl_records_unlocked(path, [row], sort_keys=True)
+    # 现有追加原语关闭时 flush，但不 fsync；重开同一个普通文件同步后才丢 session 定位。
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened, current = os.fstat(descriptor), path.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or (before is not None and (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino))):
+            raise OSError("background log retirement ledger identity changed")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if os.name != "nt":
+        descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+# LLM: 调用者持目录锁；叶锁内比较原记录和两次 nofollow 字节，退役责任耐久后才删除，侧车只随成功删除清理。
+# 函数用途: 删除未并发更新的准确 session 及其锁文件，不立即清理日志或其他资源。
 def _unlink_session_if_unchanged(root: Path, record: dict[str, object]) -> bool:
     session_id = validate_session_id(record["session_id"])
     name = f"{session_id}.json"
     with locked_json_path(root / name):
         before = read_bytes_beneath(root, (name,))
         if before is None or read_process_record(root, session_id) != record or read_bytes_beneath(root, (name,)) != before:
+            return False
+        try:
+            _append_log_retirement(root, record)
+        except OSError:
             return False
         unlink_file_beneath(root, (name,))
     unlink_file_beneath(root, (name + ".lock",))
