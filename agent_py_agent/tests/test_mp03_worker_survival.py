@@ -2,6 +2,8 @@
 # 模块用途: 验证故障只报一次且保责任、就绪短暂不可读容忍、日志通知去重。
 import hashlib
 import json
+import os
+import threading
 import time
 from concurrent.futures import Future
 from dataclasses import replace
@@ -15,7 +17,7 @@ from agent_py_agent.agent.gateway_parts import multiprocess_control_worker as co
 from agent_py_agent.agent.gateway_parts import multiprocess_worker as worker
 from agent_py_agent.agent.gateway_parts import multiprocess_worker_dispatch as dispatch
 from agent_py_agent.agent.gateway_parts import request_worker
-from agent_py_agent.agent.gateway_parts.io import read_json_file
+from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file_atomic
 from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap import WorkerBootstrapError
 from agent_py_agent.cli import gateway_worker as entry
 from agent_py_agent.tests.test_gateway_multiprocess_control_worker import prepared_case
@@ -234,3 +236,251 @@ def test_heartbeat_file_still_updates_each_publish(tmp_path, monkeypatch, capsys
     assert len(capsys.readouterr().out.splitlines()) == 1
     worker._publish_heartbeat(frozen.launch, {'ready': True}, entry._HeartbeatNotice())
     assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+# LLM: 只固定独立的进程出生观察；producer/codec/registry/heartbeat/authority/双泵均用原实现。
+# 函数用途: 给本机组件测试准备真实注册与可损坏/恢复的C状态文件，不代签原生进程验收。
+def readiness_case(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import multiprocess_bootstrap_ready as ready
+    from agent_py_agent.agent.gateway_parts.daemon_metadata import build_process_identity
+
+    monkeypatch.setattr(ready, 'process_birth', lambda _pid: 'readiness-component-birth')
+    monkeypatch.setattr(controls, 'process_birth', lambda _pid: 'readiness-component-birth')
+    paths, receipt, scope, frozen, pool, owners = prepared_case(tmp_path, monkeypatch)
+    state = {'c_run_id': frozen.launch.partition.c_run_id, 'pid': frozen.launch.parent_pid,
+             'process_identity': build_process_identity(frozen.launch.parent_pid), 'http_port': 43210}
+    write_json_file_atomic(paths.state, state)
+    return SimpleNamespace(paths=paths, receipt=receipt, scope=scope, frozen=frozen, pool=pool,
+                           owners=owners, coordinator=state)
+
+
+# LLM: 计数当前进程真实FD；这只是资源回收断言，不是进程/网络可达性证明。
+# 函数用途: 观察成功、不可读、恢复及关闭之后有无新增描述符。
+def fd_count():
+    if os.name == 'nt':
+        import ctypes
+        import msvcrt
+
+        opened = 0
+        for descriptor in range(ctypes.CDLL('ucrtbase')._getmaxstdio()):
+            try:
+                msvcrt.get_osfhandle(descriptor)
+            except OSError:
+                continue
+            opened += 1
+        return opened
+    return len(os.listdir('/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'))
+
+
+# LLM: run_worker、真实心跳写入/读取、控制消费及同一原生Thread全部保留；仅隔离无关native连接/父死亡设定。
+# 函数用途: 原缺陷必须在真实生命周期失败；1至3次不可读后同一prepared操作恢复且只执行一次。
+@pytest.mark.parametrize('unreadable_beats', [1, 2, 3])
+def test_real_worker_loop_recovers_with_pending_control(tmp_path, monkeypatch, unreadable_beats):
+    from agent_py_agent.agent.gateway_parts import multiprocess_native_runtime as native
+    from agent_py_agent.agent.gateway_parts.multiprocess_control_poller import ControlPollingLane
+
+    case = readiness_case(tmp_path, monkeypatch)
+    pump = dispatch.WorkerRequestPump(case.frozen, case.pool, 1)
+    poll_entered, allow_poll, poll_finished = threading.Event(), threading.Event(), threading.Event()
+    lanes, effects, notices, unhealthy, native_closed = [], [], [], [], []
+    original_poll, original_start = pump.controls.poll, ControlPollingLane.start
+    before = fd_count()
+
+    # LLM: Event仅选择原轮询入口时序，真实poll及异常仍原样执行。
+    # 函数用途: 让独立lane在不健康发表后再经过共享暂停门。
+    def observed_poll():
+        if threading.current_thread().name == 'gateway-worker-control-poll':
+            poll_entered.set()
+            assert allow_poll.wait(5)
+            try:
+                return original_poll()
+            finally:
+                poll_finished.set()
+        return original_poll()
+
+    # LLM: 保存并启动原lane，等待同一线程进入，不替换线程生命周期。
+    # 函数用途: 固定run_worker首拍前的独立控制线程位置。
+    def original_lane_start(lane):
+        lanes.append(lane)
+        original_start(lane)
+        assert poll_entered.wait(5)
+
+    # LLM: 只替代领域效果并通过原control文件请求退出，不绕过控制认领与结算。
+    # 函数用途: 记录恢复后的唯一执行并让真实worker退出。
+    def effect(_agent, _paths, command, _scope):
+        effects.append(command.kind)
+        write_json_file_atomic(case.paths.root / 'workers/control.json',
+                               {'c_run_id': case.frozen.launch.partition.c_run_id, 'exit': True})
+        return ConversationControlResult(command.kind, True, 'recovered control')
+
+    # LLM: 观察真实心跳后改变临时C状态，仅按参数选择恢复拍数。
+    # 函数用途: 让首拍健康、随后若干不可读再恢复，并核暂停中无认领。
+    def notice(row):
+        notices.append(row)
+        if row['ready'] and not unhealthy:
+            case.paths.state.write_text('{', encoding='utf-8')
+        elif row['readiness'].get('reason') == 'coordinator_state_unreadable':
+            unhealthy.append(row)
+            allow_poll.set()
+            assert poll_finished.wait(5)
+            assert effects == []
+            assert ops.read_gateway_control_operation(case.paths, case.receipt.operation_id).state == 'prepared'
+            if len(unhealthy) == unreadable_beats:
+                write_json_file_atomic(case.paths.state, case.coordinator)
+
+    monkeypatch.setattr(pump.controls, 'poll', observed_poll)
+    monkeypatch.setattr(ControlPollingLane, 'start', original_lane_start)
+    monkeypatch.setattr(worker, '_arm_parent_exit', lambda _pid: '')
+    monkeypatch.setattr(worker, 'create_request_pump', lambda *_args, **_kwargs: pump)
+    monkeypatch.setattr(worker, 'WORKER_PARENT_POLL_SECONDS', 0.01)
+    monkeypatch.setattr(worker, 'WORKER_HEARTBEAT_SECONDS', 0.02)
+    monkeypatch.setattr(native, 'connect_worker_native',
+                        lambda _launch: SimpleNamespace(close=lambda: native_closed.append(True)))
+    monkeypatch.setattr(ops, 'execute_gateway_conversation_control', effect)
+    try:
+        assert worker.run_worker(case.frozen.launch, notice) == 0
+    finally:
+        allow_poll.set()
+        for lane in lanes:
+            lane._thread.join(5)
+            assert not lane._thread.is_alive()
+        pump.close()
+    assert len(unhealthy) == unreadable_beats
+    assert effects == ['steer'] and case.owners == [case.scope.resolved_owner]
+    assert len(lanes) == 1 and lanes[0]._error is None and not lanes[0].worker_stop.is_set()
+    assert native_closed == [True]
+    actual = ops.read_gateway_control_operation(case.paths, case.receipt.operation_id)
+    assert actual.state == 'completed' and actual.dispatch['instance_id'] == case.frozen.launch.instance_id
+    assert actual.dispatch['executor']['pid'] == os.getpid()
+    assert pump.inflight == 0 and notices[-1]['loop_health'] == 'stopped'
+    assert fd_count() - before == 0
+
+
+# LLM: 同一真实run_worker/双泵/控制Thread跨暂停退出；代次替换走原registry校验，不伪造fatal异常。
+# 函数用途: 验证第4拍、父退出、exit、真实drain及撤权边界没有被可逆暂停改写。
+@pytest.mark.parametrize('boundary', ['fourth_unreadable', 'parent_exit', 'control_exit', 'drain', 'generation_replaced'])
+def test_real_paused_worker_preserves_fatal_and_drain_boundaries(tmp_path, monkeypatch, boundary):
+    from agent_py_agent.agent.gateway_parts import multiprocess_native_runtime as native
+    from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap_ready import WorkerReadyError
+    from agent_py_agent.agent.gateway_parts.multiprocess_control_poller import ControlPollingLane
+
+    case = readiness_case(tmp_path, monkeypatch)
+    pump = dispatch.WorkerRequestPump(case.frozen, case.pool, 1)
+    allow, polled = threading.Event(), threading.Event()
+    lanes, notices, bad, effects = [], [], [], []
+    actual_poll, actual_start = pump.controls.poll, ControlPollingLane.start
+    before = fd_count()
+
+    # LLM: 原控制泵仍负责认领和完成；领域替身只返回有类型的结果。
+    # 函数用途: 为drain边界先结清原prepared责任。
+    def effect(_agent, _paths, command, _scope):
+        effects.append(command.kind)
+        return ConversationControlResult(command.kind, True, 'settled before drain')
+
+    monkeypatch.setattr(ops, 'execute_gateway_conversation_control', effect)
+    if boundary == 'drain':
+        # drain不丢弃prepared义务；先经真实执行把唯一控制结清，再验证暂停中收到的drain。
+        assert pump.controls.poll() == 1
+        for future in tuple(pump.controls._active):
+            future.result(timeout=5)
+        pump.controls._reap()
+        assert ops.read_gateway_control_operation(case.paths, case.receipt.operation_id).state == 'completed'
+    receipt_before = ops.gateway_control_operation_path(case.paths, case.receipt.operation_id).read_bytes()
+
+    # LLM: 仍调用原poll，只用Event选择暂停建立后的独立轮询。
+    # 函数用途: 记录致命边界测试中的实际暂停轮询。
+    def observed_poll():
+        if threading.current_thread().name == 'gateway-worker-control-poll':
+            assert allow.wait(5)
+            try:
+                return actual_poll()
+            finally:
+                polled.set()
+        return actual_poll()
+
+    # LLM: 记录真实lane并保留原start行为，供最终join同一线程。
+    # 函数用途: 保存致命边界测试的原控制lane。
+    def start(lane):
+        lanes.append(lane)
+        actual_start(lane)
+
+    # LLM: 只在真实不健康发表后注入实际状态文件或受控父进程观察，不伪造致命异常。
+    # 函数用途: 选择第4拍、父退出、退出指令、drain或代次撤销边界。
+    def notice(row):
+        notices.append(row)
+        if row['ready'] and not bad:
+            case.paths.state.write_text('{', encoding='utf-8')
+        elif row['readiness'].get('reason') == 'coordinator_state_unreadable':
+            bad.append(row)
+            allow.set()
+            assert polled.wait(5) and pump.controls.poll() == 0
+            assert not lanes[0].worker_stop.is_set()
+            if len(bad) != 1:
+                return
+            if boundary == 'parent_exit':
+                monkeypatch.setattr(worker, 'os', SimpleNamespace(getppid=lambda: case.frozen.launch.parent_pid + 1))
+            elif boundary in {'control_exit', 'drain'}:
+                write_json_file_atomic(case.paths.root / 'workers/control.json', {
+                    'c_run_id': case.frozen.launch.partition.c_run_id,
+                    'drain' if boundary == 'drain' else 'exit': True})
+                if boundary == 'drain':
+                    write_json_file_atomic(case.paths.state, case.coordinator)
+            elif boundary == 'generation_replaced':
+                path = case.paths.root / 'workers/registry.json'
+                write_json_file_atomic(path, {**read_json_file(path), 'c_run_id': 'replacement-generation'})
+                write_json_file_atomic(case.paths.state, case.coordinator)
+
+    monkeypatch.setattr(pump.controls, 'poll', observed_poll)
+    monkeypatch.setattr(ControlPollingLane, 'start', start)
+    monkeypatch.setattr(worker, '_arm_parent_exit', lambda _pid: '')
+    monkeypatch.setattr(worker, 'create_request_pump', lambda *_args, **_kwargs: pump)
+    monkeypatch.setattr(worker, 'WORKER_PARENT_POLL_SECONDS', 0.01)
+    monkeypatch.setattr(worker, 'WORKER_HEARTBEAT_SECONDS', 0.02)
+    monkeypatch.setattr(native, 'connect_worker_native', lambda _launch: SimpleNamespace(close=lambda: None))
+    try:
+        if boundary == 'generation_replaced':
+            with pytest.raises(WorkerReadyError) as caught:
+                worker.run_worker(case.frozen.launch, notice)
+            assert caught.value.reason == 'registry_generation_mismatch'
+            assert notices[-1]['readiness']['reason'] == 'worker_runtime_failed'
+        else:
+            assert worker.run_worker(case.frozen.launch, notice) == 0
+            expected = {'fourth_unreadable': 'not_ready', 'parent_exit': 'parent_exited',
+                        'control_exit': 'stopped', 'drain': 'drained'}[boundary]
+            assert notices[-1]['readiness']['reason'] == expected and notices[-1]['loop_health'] == 'stopped'
+        assert len(bad) == (4 if boundary == 'fourth_unreadable' else 1)
+    finally:
+        allow.set()
+        for lane in lanes:
+            lane._thread.join(5)
+            assert not lane._thread.is_alive()
+        pump.close()
+    assert len(lanes) == 1 and lanes[0]._error is None
+    assert ops.gateway_control_operation_path(case.paths, case.receipt.operation_id).read_bytes() == receipt_before
+    assert effects == (['steer'] if boundary == 'drain' else [])
+    assert pump.inflight == 0 and fd_count() - before == 0
+
+
+# LLM: 永久stop与可逆暂停独立；即使读回健康，真实发表仍为draining，不得复活prepared控制。
+# 函数用途: 验证恢复不能撤销永久stop_claiming或消除原待执行义务。
+def test_healthy_refresh_never_reverses_permanent_stop(tmp_path, monkeypatch):
+    case = readiness_case(tmp_path, monkeypatch)
+    pump = dispatch.WorkerRequestPump(case.frozen, case.pool, 1)
+    before = fd_count()
+    path = ops.gateway_control_operation_path(case.paths, case.receipt.operation_id)
+    original = path.read_bytes()
+    try:
+        case.paths.state.write_text('{', encoding='utf-8')
+        assert worker._refresh_due_heartbeat(case.frozen.launch, 0, None, pump=pump)[1] is False
+        pump.stop_claiming()
+        write_json_file_atomic(case.paths.state, case.coordinator)
+        report = {}
+        assert worker._refresh_due_heartbeat(case.frozen.launch, 0, None, pump=pump, report=report)[1] is True
+        assert report['ready'] is True and report['refreshed'] is True
+        heartbeat = read_json_file(case.paths.root / 'workers' / f'w{case.frozen.launch.partition.index}.json')
+        assert heartbeat['ready'] is False and heartbeat['loop_health'] == 'draining'
+        assert pump.controls.poll() == pump.poll() == 0
+        assert pump.claiming_stopped and pump.controls._stopped and path.read_bytes() == original
+    finally:
+        pump.close()
+    assert fd_count() - before == 0

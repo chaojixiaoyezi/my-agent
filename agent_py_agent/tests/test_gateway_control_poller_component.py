@@ -1,4 +1,7 @@
-"""只验证原轮询线程的独立消费与退出责任，不启动真正W或native控制。"""
+"""验证原控制Thread、readiness交错和真实临时双泵；不代签原生W/native验收。"""
+import ast
+import copy
+import inspect
 import threading
 from types import SimpleNamespace
 
@@ -182,3 +185,322 @@ def test_worker_root_keeps_lane_for_finally_after_start_ack_error(monkeypatch):
     assert len(threads) == 1 and closed == threads
     assert claim_stops == [True] and pump_closes == [True]
     assert notices[-1]["reason"] == "worker_runtime_failed"
+
+
+# LLM: 真实线程仅选择交错，原异常收集后由主测试断言，不能在线程中静默失败。
+# 函数用途: 在可join的线程里运行一个真实调用并保留返回值/原异常。
+def _background_action(action):
+    done, results, errors = threading.Event(), [], []
+
+    # LLM: 只捕获调用事实与原异常，finally必定通知等待者。
+    # 函数用途: 执行一次调用并保留可供主线程断言的结果。
+    def run():
+        try:
+            results.append(action())
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, done, results, errors
+
+
+# LLM: 准备控制、authority、操作锁、心跳写盘和Future均真实；只在原authority前用Event停住旧poll。
+# 函数用途: 不健康发布必须等旧poll到安全边界，并保留已认领Future责任。
+def test_unhealthy_publication_waits_for_existing_poll_boundary(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.control_commands import ConversationControlResult
+    from agent_py_agent.agent.gateway_parts import control_operation_service as ops
+    from agent_py_agent.agent.gateway_parts import multiprocess_control_worker as controls
+    from agent_py_agent.agent.gateway_parts import multiprocess_worker as worker
+    from agent_py_agent.agent.gateway_parts.multiprocess_worker_dispatch import WorkerRequestPump
+    from agent_py_agent.tests.test_mp03_worker_survival import fd_count, readiness_case
+
+    case = readiness_case(tmp_path, monkeypatch)
+    pump = WorkerRequestPump(case.frozen, case.pool, 1)
+    entered, release_poll, attempting_pause = threading.Event(), threading.Event(), threading.Event()
+    effect_entered, release_effect, published = threading.Event(), threading.Event(), threading.Event()
+    authority, pause = controls.control_worker_authority, pump.controls.pause_admission
+    threads, effects = [], []
+    before = fd_count()
+
+    # LLM: Event只停在原认领校验之前，释放后原authorizer仍执行。
+    # 函数用途: 选择旧poll持锁尚未完成的竞争窗口。
+    def checked_authority(frozen, *, claiming):
+        if claiming:
+            entered.set()
+            assert release_poll.wait(5)
+        return authority(frozen, claiming=claiming)
+
+    # LLM: 记录暂停尝试后仍调用原同步方法，不抢先设置暂停字段。
+    # 函数用途: 通知主线程刷新已开始等待旧poll。
+    def pausing():
+        attempting_pause.set()
+        pause()
+
+    # LLM: 只替代领域返回；原控制认领、Future、心跳及关闭链均保留。
+    # 函数用途: 保持一个已认领控制在途，以核对暂停不丢责任。
+    def effect(_agent, _paths, command, _scope):
+        effects.append(command.kind)
+        effect_entered.set()
+        assert release_effect.wait(5)
+        return ConversationControlResult(command.kind, True, 'completed before pause acknowledgment')
+
+    monkeypatch.setattr(controls, 'control_worker_authority', checked_authority)
+    monkeypatch.setattr(pump.controls, 'pause_admission', pausing)
+    monkeypatch.setattr(ops, 'execute_gateway_conversation_control', effect)
+    try:
+        poll = _background_action(pump.controls.poll)
+        threads.append(poll[0])
+        assert entered.wait(5)
+        case.paths.state.write_text('{', encoding='utf-8')
+        refresh = _background_action(lambda: worker._refresh_due_heartbeat(
+            case.frozen.launch, 0, lambda _row: published.set(), pump=pump, report={}))
+        threads.append(refresh[0])
+        assert attempting_pause.wait(5)
+        assert not published.is_set() and not refresh[1].is_set()
+        release_poll.set()
+        assert poll[1].wait(5) and refresh[1].wait(5) and effect_entered.wait(5)
+        assert poll[2] == [1] and poll[3] == [] and refresh[3] == []
+        assert published.is_set() and refresh[2][0][1] is False
+        retained = dict(pump.controls._active)
+        assert len(retained) == 1 and all(not future.done() for future in retained)
+        assert pump.controls.poll() == 0
+        assert pump.controls._active == retained and pump.inflight == 1
+        assert effects == ['steer']
+        release_effect.set()
+    finally:
+        release_poll.set()
+        release_effect.set()
+        for thread in threads:
+            thread.join(5)
+            assert not thread.is_alive()
+        pump.close()
+    assert ops.read_gateway_control_operation(case.paths, case.receipt.operation_id).state == 'completed'
+    assert pump.inflight == 0 and fd_count() - before == 0
+
+
+# LLM: 真实writer在健康写前及写后通知两端被Event暂停；同一controls在两窗口都只能核收，不能提前认领。
+# 函数用途: 证明健康读/登记/发表完成之前不恢复准入，且发表和unpause之间也没有错误认领。
+def test_healthy_publication_precedes_unpause(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.control_commands import ConversationControlResult
+    from agent_py_agent.agent.gateway_parts import control_operation_service as ops
+    from agent_py_agent.agent.gateway_parts import multiprocess_control_worker as controls
+    from agent_py_agent.agent.gateway_parts import multiprocess_worker as worker
+    from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file_atomic
+    from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap_ready import WorkerReadyError
+    from agent_py_agent.agent.gateway_parts.multiprocess_worker_dispatch import WorkerRequestPump
+    from agent_py_agent.tests.test_mp03_worker_survival import fd_count, readiness_case
+
+    case = readiness_case(tmp_path, monkeypatch)
+    pump = WorkerRequestPump(case.frozen, case.pool, 1)
+    writing, allow_write, published, allow_resume = (threading.Event() for _ in range(4))
+    original_write, effects, thread = worker.write_json_file_atomic, [], None
+    before = fd_count()
+    heartbeat = case.paths.root / 'workers' / f'w{case.frozen.launch.partition.index}.json'
+
+    # LLM: Event释放后才执行原心跳writer，不伪造写成功。
+    # 函数用途: 固定健康心跳实际发布前的竞争窗口。
+    def write(path, row):
+        writing.set()
+        assert allow_write.wait(5)
+        original_write(path, row)
+
+    # LLM: 回调发生在原写盘之后；只阻塞恢复，不改变已发布内容。
+    # 函数用途: 固定健康发表已完成但尚未unpause的窗口。
+    def notice(_row):
+        published.set()
+        assert allow_resume.wait(5)
+
+    # LLM: 仅记录真实泵交付的命令，不代写认领或终态。
+    # 函数用途: 验证恢复后唯一控制才被执行。
+    def effect(_agent, _paths, command, _scope):
+        effects.append(command.kind)
+        return ConversationControlResult(command.kind, True, 'healthy publication observed')
+
+    monkeypatch.setattr(ops, 'execute_gateway_conversation_control', effect)
+    try:
+        case.paths.state.write_text('{', encoding='utf-8')
+        assert worker._refresh_due_heartbeat(case.frozen.launch, 0, None, pump=pump)[1] is False
+        unhealthy = heartbeat.read_bytes()
+        write_json_file_atomic(case.paths.state, case.coordinator)
+        monkeypatch.setattr(worker, 'write_json_file_atomic', write)
+        refresh = _background_action(lambda: worker._refresh_due_heartbeat(
+            case.frozen.launch, 0, notice, pump=pump))
+        thread = refresh[0]
+        assert writing.wait(5)
+        assert heartbeat.read_bytes() == unhealthy and pump.controls.poll() == 0
+        with pytest.raises(WorkerReadyError, match='worker_unhealthy'):
+            controls.control_worker_authority(case.frozen, claiming=True)
+        allow_write.set()
+        assert published.wait(5)
+        assert read_json_file(heartbeat)['ready'] is True
+        assert pump.controls.poll() == 0 and effects == []
+        assert ops.read_gateway_control_operation(case.paths, case.receipt.operation_id).state == 'prepared'
+        allow_resume.set()
+        assert refresh[1].wait(5) and refresh[3] == [] and refresh[2][0][1] is True
+        assert pump.poll() == 1
+    finally:
+        allow_write.set()
+        allow_resume.set()
+        if thread is not None:
+            thread.join(5)
+            assert not thread.is_alive()
+        pump.close()
+    assert effects == ['steer']
+    assert ops.read_gateway_control_operation(case.paths, case.receipt.operation_id).state == 'completed'
+    assert fd_count() - before == 0
+
+
+# LLM: 故障只发生在真实健康发表边界或真实registry读取；不替换authorizer，不以失败写盘解除暂停。
+# 函数用途: 验证写失败/代次替换保留原错误、旧心跳及暂停，清理后FD仍归零。
+@pytest.mark.parametrize('failure', ['heartbeat_write', 'generation_replaced'])
+def test_failed_healthy_refresh_does_not_reopen_admission(tmp_path, monkeypatch, failure):
+    from agent_py_agent.agent.gateway_parts import control_operation_service as ops
+    from agent_py_agent.agent.gateway_parts import multiprocess_worker as worker
+    from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file_atomic
+    from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap_ready import WorkerReadyError
+    from agent_py_agent.agent.gateway_parts.multiprocess_worker_dispatch import WorkerRequestPump
+    from agent_py_agent.tests.test_mp03_worker_survival import fd_count, readiness_case
+
+    case = readiness_case(tmp_path, monkeypatch)
+    pump = WorkerRequestPump(case.frozen, case.pool, 1)
+    before = fd_count()
+    original, cause = OSError('healthy-heartbeat-write-failed'), RuntimeError('retained publication cause')
+
+    # LLM: 只在实际writer边界注入同一个异常及cause，不能伪装发表成功。
+    # 函数用途: 复现健康心跳写失败。
+    def failing_write(_path, _row):
+        raise original from cause
+
+    try:
+        case.paths.state.write_text('{', encoding='utf-8')
+        assert worker._refresh_due_heartbeat(case.frozen.launch, 0, None, pump=pump)[1] is False
+        heartbeat = case.paths.root / 'workers' / f'w{case.frozen.launch.partition.index}.json'
+        unhealthy = heartbeat.read_bytes()
+        write_json_file_atomic(case.paths.state, case.coordinator)
+        if failure == 'heartbeat_write':
+            monkeypatch.setattr(worker, 'write_json_file_atomic', failing_write)
+            expected = OSError
+        else:
+            registry_path = case.paths.root / 'workers/registry.json'
+            registry = read_json_file(registry_path)
+            write_json_file_atomic(registry_path, {**registry, 'c_run_id': 'replacement-generation'})
+            expected = WorkerReadyError
+        with pytest.raises(expected) as caught:
+            worker._refresh_due_heartbeat(case.frozen.launch, 0, None, pump=pump)
+        if failure == 'heartbeat_write':
+            assert caught.value is original and caught.value.__cause__ is cause
+        else:
+            assert caught.value.reason == 'registry_generation_mismatch'
+        assert heartbeat.read_bytes() == unhealthy and pump.controls.poll() == 0
+        assert pump.controls._admission_paused and pump.inflight == 0
+        assert ops.read_gateway_control_operation(case.paths, case.receipt.operation_id).state == 'prepared'
+    finally:
+        pump.close()
+    assert fd_count() - before == 0
+
+
+# LLM: 解析真实生产模块，不用字符串搜索或单行位置充当同步合同。
+# 函数用途: 定位唯一指定函数。
+def _function(tree, name):
+    found = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name]
+    assert len(found) == 1
+    return found[0]
+
+
+# LLM: 只检查AST函数调用，不依赖源码行号或字符串形状。
+# 函数用途: 提取指定名称的实际调用节点。
+def _calls(node, name):
+    return [item for item in ast.walk(node) if isinstance(item, ast.Call)
+            and ((isinstance(item.func, ast.Name) and item.func.id == name)
+                 or (isinstance(item.func, ast.Attribute) and item.func.attr == name))]
+
+
+# LLM: 阻止锁外暂停、漏认领/对账门、先恢复后发表及吞fatal；行为由真实交错回归另验。
+# 函数用途: 静态守住共享暂停与发表/授权/异常边界。
+def _assert_readiness_admission_contract(worker_tree, control_tree, poller_tree):
+    for method in ('poll', '_offer_reconciliation', 'pause_admission', 'resume_admission'):
+        node = _function(control_tree, method)
+        assert len(node.body) == 1 and isinstance(node.body[0], ast.With)
+        context = node.body[0].items[0].context_expr
+        assert isinstance(context, ast.Attribute) and context.attr == '_lock'
+        if method in {'poll', '_offer_reconciliation'}:
+            guards = [index for index, statement in enumerate(node.body[0].body)
+                      if isinstance(statement, ast.If) and any(isinstance(item, ast.Attribute)
+                          and item.attr == '_admission_paused' for item in ast.walk(statement.test))]
+            assert len(guards) == 1
+            body = node.body[0].body
+            assert any(isinstance(item, ast.Return) for item in ast.walk(body[guards[0]]))
+            assert any(isinstance(item, ast.Attribute) and item.attr == '_stopped'
+                       for item in ast.walk(body[guards[0]].test))
+            assert all(not _calls(statement, 'control_worker_authority') for statement in body[:guards[0]])
+        else:
+            assert not any(isinstance(item, (ast.For, ast.While, ast.Call)) for item in ast.walk(node))
+    refresh = _function(worker_tree, '_refresh_due_heartbeat')
+    positions = {name: [index for index, node in enumerate(refresh.body) if _calls(node, name)]
+                 for name in ('pause_admission', 'require_worker_registration', '_publish_heartbeat', 'resume_admission')}
+    assert all(len(indices) == 1 for indices in positions.values())
+    assert positions['pause_admission'][0] < positions['_publish_heartbeat'][0] < positions['resume_admission'][0]
+    assert positions['require_worker_registration'][0] < positions['_publish_heartbeat'][0]
+    resume = refresh.body[positions['resume_admission'][0]]
+    assert isinstance(resume, ast.If) and any(isinstance(node, ast.Name) and node.id == 'ready'
+                                             for node in ast.walk(resume.test))
+    assert any(isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+               and node.value.id == 'readiness' and isinstance(node.slice, ast.Constant)
+               and node.slice.value == 'ready' for node in ast.walk(resume.test))
+    claims = [node for node in _calls(control_tree, 'control_worker_authority')
+              if any(key.arg == 'claiming' and isinstance(key.value, ast.Constant) and key.value.value is True
+                     for key in node.keywords)]
+    assert len(claims) == 3
+    authority = _function(control_tree, 'control_worker_authority')
+    assert len(_calls(authority, 'require_current_worker')) == 1
+    run = _function(poller_tree, '_run')
+    handlers = [node for node in ast.walk(run) if isinstance(node, ast.ExceptHandler)]
+    assert len(handlers) == 1 and isinstance(handlers[0].type, ast.Name) and handlers[0].type.id == 'Exception'
+    assert _calls(handlers[0], 'set')
+    close = _function(poller_tree, 'close')
+    assert _calls(close, 'join') and any(isinstance(node, ast.Raise) for node in ast.walk(close))
+
+
+# LLM: 从当前被测模块取源并解析，不另造授权或同步实现。
+# 函数用途: 取得暂停、泵和轮询线程的真实AST。
+def _admission_trees():
+    from agent_py_agent.agent.gateway_parts import (
+        multiprocess_control_poller,
+        multiprocess_control_worker,
+        multiprocess_worker,
+    )
+
+    return [ast.parse(inspect.getsource(module)) for module in (
+        multiprocess_worker, multiprocess_control_worker, multiprocess_control_poller)]
+
+
+# LLM: 结构守卫只补行为测试，不据此冒称完整并发证明。
+# 函数用途: 核对当前生产模块的共享暂停及致命传播合同。
+def test_shared_pause_static_admission_and_fatal_contract():
+    _assert_readiness_admission_contract(*_admission_trees())
+
+
+# LLM: 同一静态核验器必须拒绝删任一门、锁外写暂停或先恢复后发表；只改内存AST。
+# 函数用途: 用已知退化变换验证静态门不是永远通过的存在性检查。
+@pytest.mark.parametrize('mutation', ['poll_gate', 'reconcile_gate', 'pause_outside_lock', 'resume_before_publish'])
+def test_shared_pause_static_guard_rejects_regressions(mutation):
+    trees = copy.deepcopy(_admission_trees())
+    if mutation in {'poll_gate', 'reconcile_gate'}:
+        function = _function(trees[1], 'poll' if mutation == 'poll_gate' else '_offer_reconciliation')
+        for node in ast.walk(function):
+            if isinstance(node, ast.Attribute) and node.attr == '_admission_paused':
+                node.attr = '_stopped'
+    elif mutation == 'pause_outside_lock':
+        function = _function(trees[1], 'pause_admission')
+        function.body = function.body[0].body
+    else:
+        function = _function(trees[0], '_refresh_due_heartbeat')
+        resume = next(node for node in function.body if _calls(node, 'resume_admission'))
+        function.body.remove(resume)
+        index = next(index for index, node in enumerate(function.body) if _calls(node, '_publish_heartbeat'))
+        function.body.insert(index, resume)
+    with pytest.raises(AssertionError):
+        _assert_readiness_admission_contract(*trees)

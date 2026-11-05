@@ -188,7 +188,7 @@ def _worker_execution_loop(launch: WorkerLaunch, stop: threading.Event, notice, 
     return "stopped"
 
 
-# LLM: 每次发布重核C；report只运输本循环上次就绪/原因与本轮是否发心跳，不改二元返回；不可读心跳仍不就绪，P6不变。
+# LLM: 临时不可读先在原control锁内暂停再锁外发布；新鲜就绪/登记/心跳发布成功后才恢复，不改二元返回与P6。
 # 函数用途: 固定节拍更新本worker健康及排空进度，不把在途清零。
 def _refresh_due_heartbeat(launch: WorkerLaunch, next_heartbeat: float, notice, *, pump=None, report=None) -> tuple[float, bool]:
     if report is not None:
@@ -197,7 +197,10 @@ def _refresh_due_heartbeat(launch: WorkerLaunch, next_heartbeat: float, notice, 
         return next_heartbeat, True if report is None else report.get('ready', True)
     readiness = prepare_worker_readiness(launch)
     ready = readiness["ready"]
+    controls = getattr(pump, 'controls', None)
     if not ready and readiness.get('reason') == 'coordinator_state_unreadable':
+        if controls is not None:
+            controls.pause_admission()
         readiness['loop_health'] = 'coordinator_state_unreadable'
     if ready and launch.instance_id:
         require_worker_registration(launch, readiness)
@@ -206,6 +209,8 @@ def _refresh_due_heartbeat(launch: WorkerLaunch, next_heartbeat: float, notice, 
         if pump.claiming_stopped and ready:
             readiness.update(ready=False, loop_health="draining")
     _publish_heartbeat(launch, readiness, notice)
+    if ready and readiness['ready'] and controls is not None:
+        controls.resume_admission()
     if report is not None:
         report.update(ready=ready, reason=readiness.get('reason', ''), refreshed=True)
     return time.monotonic() + WORKER_HEARTBEAT_SECONDS, ready
