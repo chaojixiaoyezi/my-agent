@@ -8,14 +8,12 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
+from ..common.runtime_gate_registry import (
+    SubagentCreationGuardBusy,
+    current_thread_holds_runtime_gate,
+)
 
 _HELD_GUARDS = threading.local()
-
-
-# LLM: 仅表示 M/L 持有者首次获取 CG 时的竞争，继承原非阻塞 IO 语义，不代表业务体写入失败。
-# 类用途: 通知事务调用方先退出短门，再重新尝试原操作。
-class SubagentCreationGuardBusy(BlockingIOError):
-    pass
 
 
 # LLM: 同线程/PID 重入不变；首次获取若已持任一 M/L 则 CG 只 try，竞争异常在 yield 前转换，业务体异常原样传播。
@@ -30,7 +28,6 @@ def subagent_creation_guard(workspace: str | Path):
     if key in held:
         yield
         return
-    from ..common.runtime_gate_registry import current_thread_holds_runtime_gate
 
     with ExitStack() as stack:
         if current_thread_holds_runtime_gate():

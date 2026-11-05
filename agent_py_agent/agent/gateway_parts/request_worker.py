@@ -1507,7 +1507,7 @@ def _settle_fallback_turn_guidance(conversation_store: object | None, request_id
 # LLM: 仅重试 CG 竞争；operation 异常已展开原短门，退避不持锁，30 秒后原异常上抛，不把 IO/来源失败洗成重试。
 # 函数用途: 在释放协调者短门后，有界重跑幂等的孩子申请收口。
 def _retry_on_creation_guard_busy(operation):
-    from ..subagents.coordination import SubagentCreationGuardBusy
+    from ..common.runtime_gate_registry import SubagentCreationGuardBusy
 
     deadline = time.monotonic() + 30.0
     delay = 0.05

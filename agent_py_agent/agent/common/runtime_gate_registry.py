@@ -10,6 +10,12 @@ _LIVE = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
 
 
+# LLM: 仅表示 M/L 持有者首次获取 CG 时的竞争，继承原非阻塞 IO 语义，不代表业务体写入失败。
+# 类用途: 通知事务调用方先退出短门，再重新尝试原操作。
+class SubagentCreationGuardBusy(BlockingIOError):
+    pass
+
+
 # LLM: 构造器在 M/L 字段赋值后调用；只保存弱引用，不延长控制器或租约寿命。
 # 函数用途: 登记一个需要参与当前线程锁序检查的运行时对象。
 def register_runtime_gate(owner) -> None:

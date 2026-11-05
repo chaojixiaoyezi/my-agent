@@ -9586,3 +9586,26 @@ Owner 墙继续采用原有收紧方向的配置回退，不能把请求漏传�
    - **修复方案**：
      1. **移除 `multiprocess_native_*` 无意义的每轮 `0.001s` 等待并收敛 `0.01s` 轮询退避**：`serve_once` 本身已具备 `receive_timeout=0.1` 阻塞接收，正常循环无需额外 `self._stop.wait(0.001)`（或仅在让锁需求下用 `time.sleep(0)` / 事件通知）；将 `multiprocess_native_executor_client.py:416, 529` 的 `0.01s` 轮询改为指数退避（`0.005s -> 0.05s`）或完成事件唤醒；
      2. **为 `/client/notices` 的 `conversation_agent_activity` 与 `execution_target_payload` 增加基于版本/目录 `mtime_ns` 的轻量秒级缓存（TTL `0.5s～1.0s`）**，消除 16 个 TUI 并发轮询时的重复磁盘遍历与 GIL 争用。
+
+
+## 2026-11-05 多进程 Gateway 全系列修复（MP-00–MP-17）与两阶段并发演进路线（Python 3.14t Free-Threaded + Redis 集群）
+
+### 1. MP-00–MP-17 修复落地（状态：已实现，待双路终审）
+- **锁序解环（`MP-00/07/08`，Issues `#176`/`#180`）**：新增 `agent_py_agent/agent/common/runtime_gate_registry.py`，在 `CoordinatorExecution` / `CoordinatorRuntimeLease` 持有 `M`/`L` 时令 `subagent_creation_guard` 采用非阻塞 `try-lock` 并抛出 `SubagentCreationGuardBusy` 由外层释放短门后指数退避重试；同时将 HTTP `_ensure_started()` 迁出 socket accept 出生门，并将 stop 路径与 owner 路径统一为 `CG` 在最外层获取，彻底消除 `CG` 与 `T/M/L` 的双向死锁。
+- **Worker 增量扫盘与异常存活（`MP-01/03c/09/10`，Issues `#177`/`#181`）**：`WorkerRequestPump` 与 `WorkerControlPump` 引入基于目录 `(mtime_ns, size)` 与文件签名的负向跳过缓存（过滤稳定 `foreign`/`inert` 项，`fault` 项保持重试），消除 $O(W \times N)$ 热扫盘；`_reap()` 隔离单请求 future 异常，协调器状态瞬态不可读按时间窗口计数而非单拍退出，杜绝 Worker 进程因普通任务错误永久暴毙。
+- **跨代次死锁退役与孤儿请求自愈（`MP-02/03/05/06/12/13`，Issues `#178`/`#182`）**：新增 `multiprocess_generation_retirement.py` 与 `multiprocess_unroutable_closeout.py`，在启动准入前自动对证明无存活 PID 的崩溃代次/异构 `worker_count` 代次归档至 `multiprocess_retired/<ts>-<gen>/`，并在 `count>0 -> count=0` 切换或缩容后由协调器/单进程自动对死代次遗留 `pending` 请求做确定性失败收口。
+
+### 2. 下一阶段两级并发与多租户扩展架构决议（状态：用户已拍板，待当前批次封板后由 Opus 5.5 max 专项审计与设计）
+- **废弃不引入 Redis 的纯文件轮询复杂变体（放弃方案 3/4）**：不再在磁盘文件轮询多进程架构上叠加更复杂的跨进程拆锁补丁，直接确立**“单机 Python 3.14t 无 GIL 满血版 -> 多机 Python 3.14t + Redis 集群版”**的清晰两步走路线：
+  1. **阶段一（单机满血版：覆盖个人自用 / 团队 / 1～200 并发用户）—— 升级 Python 3.14 Free-Threaded (`python3.14t`，No-GIL) + 单进程真多线程 (`gateway_worker_process_count: 0`)**：
+     - **核心收益**：在同一进程地址空间内实现真正的多核 CPU 线程并行（彻底消除 GIL `take_gil` 抢锁风暴），所有用户、子代理、权限表、会话与流式 chunk 天然内存共享，零跨进程 IPC 序列化开销、零磁盘目录轮询、零外部组件依赖。
+     - **Opus 专项审计重点**：① 独立运行时打包与 C 扩展依赖（`cryptography`、`websockets` 等）的 `cp314t` 无 GIL 兼容性核验；② 全仓共享可变内存状态（字典/集合/缓存并发读写、SQLite 连接线程隔离、细粒度锁）的 No-GIL 线程安全审计，确保多核真并行下零数据竞争（Zero Data Race）且无粗粒度大锁瓶颈。
+  2. **阶段二（云原生集群版：覆盖 1,000～100,000+ 多租户用户）—— 多台 `python3.14t` 机器节点 + Redis 分布式协调层（`RedisCoordinationBackend`）**：
+     - **统一抽象 4 个分布式协调原语接口（单机走内存，集群走 Redis）**：
+       - `DistributedLease`：Owner/Session 分布式租约与单调递增 `fencing_token`（防多机脑裂）；
+       - `EventStream / PubSub`：跨机器流式 chunk、`/stop` 中断信号、审批通知毫秒级直推（取代磁盘轮询）；
+       - `RequestQueue`：基于 Redis Streams（`XREADGROUP` + `XAUTOCLAIM`）的跨节点队列与死节点自动故障转移；
+       - `HotCache`：权限、配额、路由表的本地内存 + Redis 二级缓存（通过 Pub/Sub 毫秒级广播失效）。
+     - **多机器与多 Redis 拓扑准则**：
+       - **多机器协同（Lease Affinity 租约亲和）**：每台服务器运行 1 个 `python3.14t` 进程吃满本机多核；活跃 Owner 会话通过 Redis 绑定当前宿主节点，跨节点到达的 `/stop` 或補充消息经 Redis Stream `<1ms` 路由至宿主节点执行；持久化层分离为共享数据库（Postgres）+ 对象存储（S3/MinIO）。
+       - **多 Redis 演进（Sentinel 主备 -> Redis Cluster Hash Tag）**：1,000～20,000 用户优先采用单套高可用 Redis（主从 + Sentinel / 云托管主备），天然支持多 Key 原子 Lua 脚本；超大规模（50,000+ 用户）采用 Redis Cluster 分片时，所有 Key 强制携带 `{owner_id}` Hash Tag（如 `agent:{owner_id}:lease`、`agent:{owner_id}:stream`），保证同一用户的全部状态固定落在同一 Hash Slot，支持跨分片集群下的单用户原子 Lua 事务。

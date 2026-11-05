@@ -1,3 +1,17 @@
+## 2026-11-05 多进程 Gateway 全系列（MP-00–MP-17）新增生产模块
+
+本轮针对多进程协调锁序反转、Worker 扫盘退避与异常存活、跨代次死锁与孤儿 pending 自愈新增以下三个生产模块：
+
+```text
+agent_py_agent/
+`-- agent/
+    |-- common/
+    |   `-- runtime_gate_registry.py  # MP-00 进程内运行时锁（M/L）只读持有观察与 SubagentCreationGuardBusy 退避异常，阻断 CG 与 M/L 的 AB-BA 死锁
+    `-- gateway_parts/
+        |-- multiprocess_unroutable_closeout.py  # MP-02/MP-06 跨代次/进程数缩容/单进程切换下不可路由 pending 请求的确定性自愈收口
+        `-- multiprocess_generation_retirement.py  # MP-05/MP-12/MP-13 启动准入前证明已死多进程代次的原子归档退役（multiprocess_retired/）
+```
+
 ## 2026-11-02 R9 rework 新增生产模块
 
 R9（R1–R4 rework）只新增以下四个生产模块，其余改动都落在原有文件内。
