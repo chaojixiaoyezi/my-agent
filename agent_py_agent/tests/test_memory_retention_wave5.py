@@ -182,6 +182,8 @@ def test_legacy_semantic_corruption_blocks_retention(tmp_path, source, damage):
     assert not [action for action in report.actions if action.path == target and action.status == "trashed"]
 
 
+# LLM: 真实墓碑与缓存pin沿同一留存入口验证；旧版本记录也不得通过重新追加而复活来源身份。
+# 函数用途: 验证被墓碑删除的记忆不再复活，也不再阻止其过期缓存进入回收计划。
 @pytest.mark.parametrize("version", [1, 3])
 def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version):
     from agent_py_agent.agent.memory_store.jsonl import (

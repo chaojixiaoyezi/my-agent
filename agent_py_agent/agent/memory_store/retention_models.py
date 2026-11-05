@@ -12,6 +12,9 @@ from pathlib import Path
 RETENTION_SCHEMA_VERSION = "my-agent.memory-retention.v2"
 RETENTION_PLAN_SCHEMA_VERSION = "my-agent.memory-retention-plan.v2"
 
+# 已终态并完成交付的子代理线程默认保留三天；普通用户会话仍保留365天。
+DEFAULT_SUBAGENT_THREAD_DAYS = 3
+
 TASK_TERMINAL_STATUSES = frozenset(
     {
         "ABANDONED",
@@ -48,8 +51,9 @@ class MemoryRetentionPolicy:
     schema_version: str = RETENTION_SCHEMA_VERSION
     security_audit_days: int = 180
     task_tmp_idle_days: int = 3
+    subagent_thread_days: int = DEFAULT_SUBAGENT_THREAD_DAYS
 
-    # LLM: 原字段严格必填；新增安全审计缺失沿明确180天默认，提供时严格拒绝错类型/负值。
+    # LLM: 原字段严格必填；新增可选保留期沿各自默认，显式拒绝bool、错类型及负值。
     # 函数用途: 从 retention.json 严格恢复一份可执行策略。
     @classmethod
     def from_payload(cls, payload: object) -> MemoryRetentionPolicy:
@@ -80,6 +84,10 @@ class MemoryRetentionPolicy:
         )
         values["task_tmp_idle_days"] = _strict_nonnegative_int(
             {"task_tmp_idle_days": payload.get("task_tmp_idle_days", 3)}, "task_tmp_idle_days"
+        )
+        values["subagent_thread_days"] = _strict_nonnegative_int(
+            {"subagent_thread_days": payload.get("subagent_thread_days", DEFAULT_SUBAGENT_THREAD_DAYS)},
+            "subagent_thread_days",
         )
         legal_hold = _strict_bool(payload, "legal_hold")
         maintenance_enabled = _strict_bool(payload, "maintenance_enabled")
@@ -175,6 +183,8 @@ class MemoryRetentionReport:
     policy_fingerprint: str = ""
     schema_version: str = RETENTION_PLAN_SCHEMA_VERSION
     isolated_errors: tuple[MemoryRetentionError, ...] = field(default_factory=tuple)
+    scan_partial: bool = False
+    scan_cursor: dict = field(default_factory=dict)
 
     # LLM: 任一策略/状态/动作错误都使报告不成功；legal hold 是安全停止而非错误。
     # 函数用途: 告诉 CLI 是否可把本轮视为完整成功。
@@ -188,7 +198,7 @@ class MemoryRetentionReport:
     def load_errors(self) -> tuple[dict[str, str], ...]:
         return tuple(error.to_dict() for error in self.errors)
 
-    # LLM: JSON 输出保持 action/error 结构，不能降成无法机器判断的文本列表。
+    # LLM: JSON保持action/error结构，并完整报告预算部分扫描与下一片游标，不把执行成功当成全域扫描完成。
     # 函数用途: 生成 CLI、doctor 和测试共用报告。
     def to_dict(self) -> dict[str, object]:
         return {
@@ -201,6 +211,8 @@ class MemoryRetentionReport:
             "errors": [error.to_dict() for error in self.errors],
             "load_errors": [error.to_dict() for error in self.errors],
             "isolated_errors": [error.to_dict() for error in self.isolated_errors],
+            "scan_partial": self.scan_partial,
+            "scan_cursor": self.scan_cursor,
         }
 
 

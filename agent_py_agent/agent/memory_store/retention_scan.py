@@ -5,6 +5,7 @@ from __future__ import annotations
 """Memory v2 retention 的只读扫描与计划生成。"""
 
 import hashlib
+import heapq
 import io
 import json
 import os
@@ -12,14 +13,18 @@ import sqlite3
 import stat
 import time
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
+from ..common.nofollow_fs import read_bytes_beneath
 from ..conversation.models import ConversationThread
+from ..conversation.store_io import safe_file_stem
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
+from ..local_storage.records import derived_terminal_expired
 from . import reference_pins
 from .candidate_models import MemoryCandidate
 from .candidates import (
@@ -40,6 +45,11 @@ from .retention_models import (
     MemoryRetentionReport,
     retention_action_id,
 )
+from .retention_scan_budget import (
+    RETENTION_SCAN_SLICE_BYTES,
+    RETENTION_SCAN_SLICE_ENTRIES,
+    RetentionScanBudget,
+)
 
 # 一天按 86400 秒算：保留期换算成秒的统一口径。
 _DAY_SECONDS = 86_400
@@ -58,14 +68,16 @@ _CONTEXT_BUNDLE_LATEST_PREFIX = "latest_context_bundle"
 _TRASH_COMMIT_PENDING = ".retention-pending"
 
 
-# LLM: plan纯读取；发现源不可枚举须结构化失败，策略摘要与所有动作经过统一指纹门。
-# 函数用途: 扫描完整会话、审计、Daily、工具大输出、候选、Curator、Compact 和终态任务。
+# LLM: plan纯读取；预算只限制会话/快照发现，输入游标深复制，错误及策略指纹门保持。
+# 函数用途: 规划临时数据与完整会话的安全回收，可显式分片并返回续点。
 def build_retention_plan(
     *,
     home: object,
     candidates: CandidateService,
     conversation_roots: tuple[Path, ...] = (),
     now: datetime | None = None,
+    scan_budget: RetentionScanBudget | None = None,
+    scan_cursor: dict | None = None,
 ) -> MemoryRetentionReport:
     current = _normalize_now(now)
     policy_path = Path(home.owner_retention_json)
@@ -99,6 +111,8 @@ def build_retention_plan(
         policy=policy,
         conversation_roots=roots,
         now=current,
+        scan_budget=scan_budget,
+        scan_cursor=deepcopy(scan_cursor) if scan_budget is not None and isinstance(scan_cursor, dict) else {},
     )
     actions = _validated_actions(_collect_retention_actions(context), context.errors)
     unique = {action.action_id: action for action in actions}
@@ -108,10 +122,12 @@ def build_retention_plan(
         actions=ordered,
         errors=tuple(context.errors),
         policy_fingerprint=fingerprint,
+        scan_partial=context.scan_partial,
+        scan_cursor=context.scan_cursor,
     )
 
 
-# LLM: 一次扫描上下文为所有类别共享同一类型化策略与关闭式错误集合，不能各自放宽失败规则。
+# LLM: 同次上下文共享策略、错误及可选预算；游标属于本次私有副本，scanner永不落盘。
 # 类用途: 汇总一次只读 retention 计划所需的 owner、策略、会话根和扫描时间。
 @dataclass
 class _RetentionScanContext:
@@ -121,6 +137,9 @@ class _RetentionScanContext:
     conversation_roots: tuple[Path, ...]
     now: datetime
     errors: list[MemoryRetentionError] = field(default_factory=list)
+    scan_budget: RetentionScanBudget | None = None
+    scan_cursor: dict = field(default_factory=dict)
+    scan_partial: bool = False
 
     # LLM: 法律保留任务 ID 从已解析策略转成统一集合，供所有扫描器按精确身份复用。
     # 函数用途: 返回禁止清理的任务编号集合。
@@ -129,9 +148,10 @@ class _RetentionScanContext:
         return frozenset(self.policy.legal_hold_task_ids)
 
 
-# LLM: 所有类别共用一次严格pin构建及其错误集合；目标分域仍沿原完整性门，不新增清理权威。
+# LLM: 所有类别共用一次严格pin构建；可选有界发现先运行，避免旧全量pins在每片开始前耗光时钟。
 # 函数用途: 按任务保护关系组合会话、候选、运行记录、回收站与过期快照/工具清单的清理动作。
 def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
+    discovered = _budgeted_discovery_actions(context) if context.scan_budget is not None else ()
     task_actions, selected_task_roots = _task_actions(
         home=context.home,
         policy=context.policy,
@@ -148,7 +168,7 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     # 保留原类别错误顺序：任务权威错误在前，统一来源错误只发表一次。
     context.errors.extend(pin_errors)
     actions.extend(_aged_file_actions(context, selected_task_roots, protection))
-    actions.extend(_context_bundle_actions(context))
+    actions.extend(_context_bundle_actions(context) if context.scan_budget is None else discovered)
     actions.extend(
         _trash_actions(
             home=context.home,
@@ -162,7 +182,29 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     return actions
 
 
-# LLM: 依赖任务或会话权威的运行产物共用同一法律保留和终态输入，不能单独按文件年龄授权清理。
+# LLM: 正常续点表示未完周期；错误重试不独占周期，健康域完成后可再开新周期，停用域清掉旧续点。
+# 函数用途: 在原未预算化扫描前完成会话与快照的共享有界发现。
+def _budgeted_discovery_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
+    snapshot = Path(context.home.owner_home_dir) / "memory_archive/snapshots/context_bundles"
+    snapshot_key = _scan_cursor_key(context.home, "snapshot", snapshot)
+    root_keys = {_scan_cursor_key(context.home, "conversation", root): root for root in context.conversation_roots
+                 if context.policy.conversation_days > 0}
+    known = {*root_keys, snapshot_key}
+    for key in tuple(context.scan_cursor):
+        if isinstance(key, str) and key.startswith(("conversation:", "snapshot:")) and key not in known:
+            context.scan_cursor.pop(key)
+    pending = {key for key in known.intersection(context.scan_cursor)
+               if not isinstance(context.scan_cursor[key], dict) or context.scan_cursor[key].get("retry") is not True}
+    roots = tuple(root for key, root in root_keys.items() if not pending or key in pending)
+    actions = _conversation_actions(home=context.home, policy=context.policy,
+        held_task_ids=context.held_task_ids, roots=roots,
+        now=context.now, errors=context.errors, context=context)
+    if not pending or snapshot_key in pending:
+        actions.extend(_context_bundle_actions(context))
+    return actions
+
+
+# LLM: 共用法律保留和终态输入；仅会话扫描消费共享预算，不以mtime预筛线程权威。
 # 函数用途: 汇总工具正文、子代理临时目录、候选和完整会话动作。
 def _protected_runtime_actions(
     context: _RetentionScanContext,
@@ -194,7 +236,8 @@ def _protected_runtime_actions(
             roots=context.conversation_roots,
             now=context.now,
             errors=context.errors,
-        )
+            context=context,
+        ) if context.scan_budget is None else ()
     )
     return actions
 
@@ -289,32 +332,171 @@ def security_audit_content(path, cutoff):
     return "".join(kept), removed
 
 
-# LLM: 快照清理只接进现有 retention 流程（回收站 / legal hold / 执行前复核 / 报告都复用），不另造清理器。
+# LLM: 快照仍走原回收主链；预算片未掌握完整剩余引用时不规划清单，不能把部分视图当全域无人引用。
 #   快照与工具清单一起规划：清单"还有没有人用"只由本轮不会被移走的剩余 .json 快照摘要里的
 #   manifest_sha256（结构化字段）决定。先删快照、再按剩余引用删清单的次序由类别名保证——计划最后按
 #   (category, path) 排序，context_bundle_snapshot 排在 tool_manifest 前面，执行时快照先走。
 # 函数用途: 规划过期快照与无人引用的旧工具清单的回收动作（两者都走可恢复回收站）。
 def _context_bundle_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
     base = Path(context.home.owner_home_dir) / "memory_archive" / "snapshots"
+    snapshot_key = _scan_cursor_key(context.home, "snapshot", base / "context_bundles")
+    resumed = bool(context.scan_cursor.get(snapshot_key))
     actions, kept = _snapshot_retention_actions(context, base / "context_bundles")
-    actions.extend(_manifest_retention_actions(context, base / "tool_manifests", kept))
+    # 续扫片无法证明此前保留快照的引用完整；等一次完整单片或非预算扫描再回收清单。
+    if not context.scan_partial and not resumed:
+        actions.extend(_manifest_retention_actions(context, base / "tool_manifests", kept))
     return actions
+
+
+# LLM: 游标只用稳定的域前缀及owner相对根；显式外部根保留绝对身份，不把不同目录合并。
+# 函数用途: 生成会话或快照扫描域的确定性续点键。
+def _scan_cursor_key(home: object, kind: str, root: Path) -> str:
+    try:
+        identity = str(root.relative_to(Path(home.owner_home_dir)))
+    except ValueError:
+        identity = str(root)
+    return f"{kind}:{identity}"
+
+
+# LLM: 单次stream枚举且不跟随链接；walk局部失败按真实路径记录，继续健康分支，上层标不完整而非空树。
+# 函数用途: 产生线程文件名或快照相对路径，供有界最小堆取窗口。
+def _scan_entry_names(root: Path, *, recursive: bool, errors: list[MemoryRetentionError] | None = None):
+    if not recursive:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.name.endswith(".json"):
+                    yield entry.name
+        return
+
+    # LLM: 局部失败必须保留路径诊断并继续其他分支；没有错误收集方时仍显式抛错，不吞异常。
+    # 函数用途: 登记无法枚举的快照分支，留给上层标记不完整并保护引用。
+    def unreadable(error):
+        if errors is None:
+            raise error
+        errors.append(_state_error("MEMORY_RETENTION_SCAN_UNREADABLE", Path(error.filename) if error.filename else root))
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
+        dirs.sort()
+        for name in sorted(files):
+            yield str((Path(directory) / name).relative_to(root))
+        for name in dirs:
+            path = Path(directory) / name
+            if path.is_symlink():
+                yield str(path.relative_to(root))
+
+
+# LLM: 单次全序发现用O(limit)堆；超时保留有界窗口到下一片，不延长deadline或推进未读项；字节准入在解析之前。
+# 函数用途: 逐片返回候选路径并更新内存中的部分标记及续点，永不保存游标。
+def _budgeted_scan_paths(context: _RetentionScanContext, root: Path, key: str, *, recursive: bool = False):
+    budget = context.scan_budget
+    cursor = context.scan_cursor.get(key)
+    after = cursor.get("after", "") if isinstance(cursor, dict) else ""
+    if not isinstance(after, str):
+        after = ""
+    limit = min(RETENTION_SCAN_SLICE_ENTRIES, max(0, budget.max_entries - budget.entries))
+    try:
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise OSError("scan root is not a real directory")
+    except FileNotFoundError:
+        context.scan_cursor.pop(key, None)
+        return
+    except OSError:
+        context.errors.append(_state_error("MEMORY_RETENTION_SCAN_UNREADABLE", root))
+        context.scan_partial = True
+        context.scan_cursor[key] = {"after": "", "retry": True}
+        return
+    if budget.exhausted():
+        context.scan_partial = True
+        context.scan_cursor[key] = cursor if isinstance(cursor, dict) and cursor.get("retry") is not True else {"after": after}
+        return
+    cached = cursor.get("window") if isinstance(cursor, dict) else None
+    valid_cache = (isinstance(cached, list) and 0 < len(cached) <= RETENTION_SCAN_SLICE_ENTRIES + 1
+                   and type(cursor.get("window_complete")) is bool
+                   and all(isinstance(name, str) and name > after and not Path(name).is_absolute()
+                           and ".." not in Path(name).parts and (recursive or Path(name).name == name)
+                           for name in cached))
+    error_count = len(context.errors)
+    try:
+        selected = sorted(set(cached)) if valid_cache else heapq.nsmallest(limit + 1,
+            (name for name in _scan_entry_names(root, recursive=recursive, errors=context.errors) if name > after))
+    except OSError:
+        context.errors.append(_state_error("MEMORY_RETENTION_SCAN_UNREADABLE", root))
+        context.scan_partial = True
+        context.scan_cursor[key] = {"after": "", "retry": True}
+        return
+    incomplete = len(context.errors) > error_count or bool(valid_cache and cursor.get("window_incomplete"))
+    if incomplete:
+        context.scan_partial = True
+    complete_window = cursor["window_complete"] if valid_cache else len(selected) <= limit
+    for index, name in enumerate(selected[:limit]):
+        if budget.exhausted():
+            context.scan_partial = True
+            context.scan_cursor[key] = {"after": after, "window": selected[index:], "window_complete": complete_window}
+            if incomplete:
+                context.scan_cursor[key]["window_incomplete"] = True
+            return
+        path = root / name
+        try:
+            info = path.lstat()
+            if info.st_size > budget.max_bytes:
+                budget.charge(entries=1)
+                after = name
+                context.errors.append(_state_error("MEMORY_RETENTION_SCAN_ENTRY_TOO_LARGE", path))
+                continue
+            if info.st_size > budget.max_bytes - budget.size:
+                context.scan_partial = True
+                context.scan_cursor[key] = {"after": after, "window": selected[index:], "window_complete": complete_window}
+                if incomplete:
+                    context.scan_cursor[key]["window_incomplete"] = True
+                return
+            budget.charge(entries=1, size=info.st_size)
+            after = name
+            if stat.S_ISLNK(info.st_mode):
+                context.errors.append(_symlink_error(path))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+        except FileNotFoundError:
+            budget.charge(entries=1)
+            after = name
+            continue
+        except OSError:
+            budget.charge(entries=1)
+            after = name
+            context.errors.append(_state_error("MEMORY_RETENTION_SCAN_UNREADABLE", path))
+            continue
+        yield path
+    if len(selected) > limit or not complete_window:
+        context.scan_partial = True
+        context.scan_cursor[key] = {"after": after}
+        if len(selected) > limit and valid_cache:
+            context.scan_cursor[key].update(window=selected[limit:], window_complete=complete_window)
+            if incomplete:
+                context.scan_cursor[key]["window_incomplete"] = True
+    elif incomplete:
+        context.scan_cursor[key] = {"after": "", "retry": True}
+    else:
+        context.scan_cursor.pop(key, None)
 
 
 # LLM: 快照范围 = memory_archive/snapshots/context_bundles/<日期>/ 下的 <请求>.json 与 .md；latest 副本
 #   永不参与删除（但它的引用照算）。30 天内改过的都保留，进行中回合的快照天然安全；命中 30 天的交给
 #   trash_file 移进回收站，不做永久删除。清单引用只从"不会被移走的剩余 .json"里读，被移走的那批不算。
-# 函数用途: 扫描过期快照文件，返回动作与剩余 .json 快照（供清单引用判断）。
+# LLM: 预算模式以相对路径全序选有界窗口；每个文件计条目/字节，未读完只返回部分发现。
+# 函数用途: 扫描过期快照文件，返回动作与本片保留的JSON引用来源。
 def _snapshot_retention_actions(
     context: _RetentionScanContext,
     root: Path,
 ) -> tuple[list[MemoryRetentionAction], tuple[Path, ...]]:
     if not root.exists():
+        context.scan_cursor.pop(_scan_cursor_key(context.home, "snapshot", root), None)
         return [], ()
     cutoff = context.now.timestamp() - _CONTEXT_BUNDLE_SNAPSHOT_DAYS * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     kept: list[Path] = []
-    for path in sorted(root.rglob("*")):
+    paths = (sorted(root.rglob("*")) if context.scan_budget is None else
+             _budgeted_scan_paths(context, root, _scan_cursor_key(context.home, "snapshot", root), recursive=True))
+    for path in paths:
         if path.is_symlink():
             context.errors.append(_symlink_error(path))
             continue
@@ -1036,7 +1218,7 @@ def _subagent_scratch_actions(
     return actions
 
 
-# LLM: 原文按thread整体处理；绑定、索引未知、active task、held task或坏transcript均保护。
+# LLM: 原文按thread整体处理；绑定、索引未知及活跃/法律保留均保护，子代理快路须精确投影正面证明。
 # 函数用途: 规划超过 conversation_days 的完整会话及其 thread-scoped 附属文件移入回收站。
 def _conversation_actions(
     *,
@@ -1046,6 +1228,7 @@ def _conversation_actions(
     roots: tuple[Path, ...],
     now: datetime,
     errors: list[MemoryRetentionError],
+    context: _RetentionScanContext | None = None,
 ) -> list[MemoryRetentionAction]:
     if policy.conversation_days <= 0:
         return []
@@ -1054,8 +1237,13 @@ def _conversation_actions(
     for root in roots:
         bound = _bound_thread_ids(root, errors)
         if bound is None:
+            if context is not None and context.scan_budget is not None:
+                context.scan_partial = True
+                context.scan_cursor[_scan_cursor_key(home, "conversation", root)] = {"after": "", "retry": True}
             continue
-        for thread_path in sorted((root / "threads").glob("*.json")):
+        paths = (sorted((root / "threads").glob("*.json")) if context is None or context.scan_budget is None else
+                 _budgeted_scan_paths(context, root / "threads", _scan_cursor_key(home, "conversation", root)))
+        for thread_path in paths:
             report = read_json_object_report(
                 thread_path,
                 context="memory_retention.conversation_thread",
@@ -1098,7 +1286,15 @@ def _conversation_actions(
                     _state_error("MEMORY_RETENTION_CONVERSATION_TIMESTAMP_INVALID", thread_path)
                 )
                 continue
-            if thread.updated_at >= cutoff:
+            action_cutoff = cutoff
+            reason = f"inactive_conversation_older_than_{policy.conversation_days}_days"
+            sub_cutoff = now.timestamp() - policy.subagent_thread_days * _DAY_SECONDS
+            if (policy.subagent_thread_days > 0 and thread.thread_id.startswith("thread-subagent-")
+                    and thread.updated_at < sub_cutoff
+                    and _subagent_run_settled(home, thread.thread_id[len("thread-"):], sub_cutoff)):
+                action_cutoff = sub_cutoff
+                reason = f"terminal_subagent_thread_older_than_{policy.subagent_thread_days}_days"
+            if thread.updated_at >= action_cutoff:
                 continue
             related, related_errors = _conversation_related_paths(root, thread)
             errors.extend(related_errors)
@@ -1109,7 +1305,7 @@ def _conversation_actions(
                     category="conversation",
                     operation="conversation_trash",
                     path=thread_path,
-                    reason=f"inactive_conversation_older_than_{policy.conversation_days}_days",
+                    reason=reason,
                     destination=_trash_destination(
                         home,
                         category="conversation",
@@ -1122,12 +1318,36 @@ def _conversation_actions(
                         authority_fingerprint=file_fingerprint(thread_path),
                         source_fingerprint=paths_fingerprint(related),
                         record_id=thread.thread_id,
-                        cutoff_timestamp=cutoff,
+                        cutoff_timestamp=action_cutoff,
                         related_paths=related,
                     ),
                 )
             )
     return actions
+
+
+# LLM: 精确owner内投影用nofollow读取复核原报告器；缺失、坏解析/时间、链接及交付欠账不能授予快路。
+# 函数用途: 确认子代理投影已经终态、交付收口且业务时间早于截止点。
+def _subagent_run_settled(home: object, run_id: str, cutoff: float) -> bool:
+    if not run_id.startswith("subagent-") or run_id == "subagent-" or Path(run_id).name != run_id:
+        return False
+    path = Path(home.owner_home_dir) / "agents" / run_id / "state.json"
+    parts = ("agents", run_id, "state.json")
+    try:
+        raw = read_bytes_beneath(home.owner_home_dir, parts, max_bytes=RETENTION_SCAN_SLICE_BYTES, require_dir_fd=True)
+        if raw is None:
+            return False
+        report = read_json_object_report(path, context="memory_retention.subagent_thread_projection")
+        if raw != read_bytes_beneath(home.owner_home_dir, parts, max_bytes=RETENTION_SCAN_SLICE_BYTES, require_dir_fd=True):
+            return False
+        row = json.loads(raw)
+        if row != report.payload:
+            return False
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return False
+    return bool(report.load_error is None and row.get("run_id", run_id) == run_id
+                and derived_terminal_expired(row, cutoff)
+                and not any(row.get(key) for key in ("delivery_pending", "consume_pending", "callback_pending")))
 
 
 # LLM: 两个共享路由只读一次；缺文件是空表，任何读取错误保护整个会话根并报告原因。
@@ -1150,7 +1370,8 @@ def _bound_thread_ids(root: Path, errors: list[MemoryRetentionError]) -> set[str
 # LLM: thread-scoped 文件通过结构化 ID 组成；message JSONL 坏行会阻断整个会话删除。
 #   转写本按 canonical 布局整体收集：热文件、分卷清单、prepared 暂存段、archive/<thread>/ 下全部冷段与索引节点；
 #   清单或冷目录不可解析时整会话保守保留并报结构化错误，不能只搬热文件把冷集合留成无人认领的孤儿。
-# 函数用途: 收集一个会话的原文（含冷分卷）、任务链接、目标、观察、guidance、claim、wake 文件，以及唤醒毒丸的尝试账、结案记录和重放留档。
+# LLM: 模型usage仅精确枚举本线程JSONL及SQLite四文件；链接或读取未知保护整会话，锁侧车不移动。
+# 函数用途: 收集一个会话的完整原文、任务、usage与唤醒家族，不移动Compact树。
 def _conversation_related_paths(
     root: Path,
     thread: ConversationThread,
@@ -1164,6 +1385,7 @@ def _conversation_related_paths(
         root / "goals" / f"{thread_id}.json",
         root / "background_claims" / f"{thread_id}.json",
         root / "guidance" / f"thread.{thread_id}.jsonl",
+        *_conversation_usage_paths(root, thread_id, errors),
         *(root / "tasks" / f"{task_id}.json" for task_id in thread.task_ids),
         *(root / "wake_queue" / "dedupe").glob(f"{thread_id}.*.json"),
     ]
@@ -1195,6 +1417,34 @@ def _conversation_related_paths(
         )
     )
     return paths, errors
+
+
+# LLM: usage路径复用原安全文件名；父目录及叶必须真实目录/普通文件，异常不当作缺失，不跟随链接。
+# 函数用途: 返回线程模型用量JSONL与SQLite主库、WAL、SHM、journal的精确集合。
+def _conversation_usage_paths(root: Path, thread_id: str, errors: list[MemoryRetentionError]) -> list[Path]:
+    directory = root / "model_usage"
+    paths: list[Path] = []
+    try:
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise OSError("model_usage is not a real directory")
+    except FileNotFoundError:
+        return paths
+    except OSError:
+        errors.append(_state_error("MEMORY_RETENTION_CONVERSATION_USAGE_UNREADABLE", directory))
+        return paths
+    stem = safe_file_stem(thread_id)
+    candidates = (directory / f"{stem}.jsonl", *(directory / f".{stem}-usage.sqlite3{suffix}"
+                  for suffix in ("", "-wal", "-shm", "-journal")))
+    for path in candidates:
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise OSError("usage member is not a regular file")
+            paths.append(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            errors.append(_state_error("MEMORY_RETENTION_CONVERSATION_USAGE_UNREADABLE", path))
+    return paths
 
 
 # LLM: 只做 lstat/目录枚举，不跟随链接、不读冷段正文；清单仍经 message_scan 原选择器解析（prepared 按已提交前缀选唯一代次）。

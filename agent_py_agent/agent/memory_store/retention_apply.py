@@ -44,10 +44,12 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    _DAY_SECONDS,
     _TRASH_COMMIT_PENDING,
     _conversation_related_paths,
     _load_policy,
     _runtime_unlocked,
+    _subagent_run_settled,
     _trash_transaction_pending,
     current_retention_pins,
     current_tool_manifest_references,
@@ -133,6 +135,8 @@ def execute_retention_plan(
         errors=tuple(errors),
         policy_fingerprint=plan.policy_fingerprint,
         isolated_errors=plan.isolated_errors,
+        scan_partial=plan.scan_partial,
+        scan_cursor=plan.scan_cursor,
     )
     _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
     return report
@@ -697,7 +701,7 @@ def _restore_conversation_index(path, removed):
     update_json_file_atomic(path, restore)
 
 
-# LLM: 与消息writer同锁序；锁内重验摘要、active task、时间及两份绑定索引，提交成功后才追加退休证明。
+# LLM: 与消息writer同锁序；锁内重验摘要、绑定、active task、cutoff及快路投影，提交后才追加退休证明。
 #   并重新枚举热/清单/暂存/冷段/索引完整成员；集合或指纹与规划不一致就放弃本轮，绝不搬半套或漏下冷段。
 #   移动及索引增量独立补偿，失败保留副本；提交后只rmdir本线程已空的冷目录，不碰*.lock侧车与共享archive根。
 # 函数用途: 将一个过期 ConversationStore thread 及其完整转写本、附属文件移入同一回收容器。
@@ -728,6 +732,16 @@ def _trash_conversation(
         ):
             return replace(action, status="state_changed")
         members, member_errors = _conversation_related_paths(root, thread)
+        if thread.thread_id.startswith("thread-subagent-"):
+            policy, policy_error = _load_policy(Path(home.owner_retention_json))
+            if policy_error is not None or policy is None:
+                return replace(action, status="state_changed")
+            normal_cutoff = now.timestamp() - policy.conversation_days * _DAY_SECONDS
+            if action.cutoff_timestamp > normal_cutoff and (
+                policy.subagent_thread_days <= 0
+                or not _subagent_run_settled(home, thread.thread_id[len("thread-"):], action.cutoff_timestamp)
+            ):
+                return replace(action, status="state_changed")
         if (
             member_errors
             or set(members) != set(action.related_paths)
