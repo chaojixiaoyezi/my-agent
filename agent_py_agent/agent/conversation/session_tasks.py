@@ -478,12 +478,16 @@ class SessionTaskUpdate:
 # LLM: 幂等判定只比结构化身份字段（发送方/目标/正文），不比对时间戳等派生值。
 # 函数用途: 判断同键重放是否是同一份输入。
 def _draft_matches(existing: SessionTask, draft: SessionTaskDraft) -> bool:
+    # 退役只移除正文，原输入摘要仍是同键重放的证明，不能把空正文当作新输入。
+    retired = existing.metadata.get("payload_retired")
+    goal_matches = existing.goal == draft.goal
+    if isinstance(retired, dict) and isinstance(retired.get("goal_sha256"), str):
+        goal_matches = hashlib.sha256(str(draft.goal or "").encode("utf-8")).hexdigest() == retired["goal_sha256"]
     pairs = (
         (existing.sender_thread_id, draft.sender_thread_id),
         (existing.target_thread_id, draft.target_thread_id),
-        (existing.goal, draft.goal),
     )
-    return all(left == right for left, right in pairs)
+    return goal_matches and all(left == right for left, right in pairs)
 
 
 # LLM: 索引文件只是查找用，权威仍是每任务文件；调用方保证键非空，本函数不做语义判断。
@@ -639,6 +643,51 @@ class SessionTaskStore:
         if task is None:
             raise FileNotFoundError("SessionTask not found")
         return task
+
+    # LLM: 只在原记录锁内重核终态和版本；保留身份、结果引用、时间及全部责任元数据，不持有转录锁。
+    # 函数用途: 把已结清任务的正文退役为摘要证明，保留原去重入口并发布列表投影。
+    def retire_payload(self, task_id: str, *, expected_updated_at: float, now: float) -> bool:
+        import math
+
+        from ..user_space.storage_lanes import _real_directory
+        from .session_task_retention import _task_keep_reason
+
+        changed = False
+
+        def updater(data):
+            nonlocal changed
+            if data.get("schema_version") != "session_task.v1" or type(data.get("updated_at")) not in (int, float):
+                return data
+            if "metadata" in data and not isinstance(data["metadata"], dict):
+                return data
+            try:
+                task = SessionTask.from_dict(data)
+            except (TypeError, ValueError, OverflowError):
+                return data
+            if (not math.isfinite(task.updated_at) or task.updated_at <= 0
+                    or task.task_id != task_id or task.status not in SESSION_TASK_TERMINAL_STATUSES
+                    or task.updated_at != expected_updated_at or "payload_retired" in task.metadata
+                    or _task_keep_reason(self.storage, task)):
+                return data
+            goal, summary = task.goal.encode("utf-8"), task.summary.encode("utf-8")
+            changed = True
+            return {**data, "goal": "", "summary": "", "metadata": {**task.metadata, "payload_retired": {
+                "schema": "session_task_payload_retired.v1", "at": now,
+                "goal_sha256": hashlib.sha256(goal).hexdigest(), "summary_sha256": hashlib.sha256(summary).hexdigest(),
+                "goal_bytes": len(goal), "summary_bytes": len(summary)}}}
+
+        saved = update_json_file_atomic(self._path(task_id), updater, require_existing=True)
+        if changed:
+            task = SessionTask.from_dict(saved)
+            if task.body_dedupe_key and _real_directory(self.storage.root, ("session_tasks", "body")):
+                path = self._body_index_path(task.body_dedupe_key)
+                # 与正文索引原写者共锁；先释放任务锁，不嵌套另一把记录锁。
+                with locked_json_path(path):
+                    report = read_json_file_report(path, context="session_task.retire.body_index")
+                    if report.load_error is None and report.payload.get("task_id") == task_id:
+                        path.unlink(missing_ok=True)
+            self._list_index().publish(self._path(task_id))
+        return changed
 
     # LLM: 原任务元数据是唯一取消账；同一执行/claim CAS，不能以新current覆写原责任，更新后发布原索引。
     # 函数用途: 在发停止副作用前保留精确执行、原claim和未确认引用。

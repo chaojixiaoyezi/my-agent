@@ -772,7 +772,8 @@ def _restore_projection(boundary):
 def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = None, remove_dangling_orphans: bool = True,
                                      slim_after_days: float = 7.0, archive_after_days: float = 30.0,
                                      max_dirs: int = 5000, dry_run: bool = False, active_run_ids: set[str] | None = None,
-                                     pinned_run_ids: set[str] | None = None) -> dict[str, Any]:
+                                     pinned_run_ids: set[str] | None = None,
+                                     run_write: Callable[[Callable[[], Any]], Any] | None = None) -> dict[str, Any]:
     owner_home = Path(owner_home)
     current = time.time() if now is None else float(now)
     if not all(math.isfinite(value) and value >= 0 for value in (current, slim_after_days, archive_after_days)):
@@ -784,7 +785,9 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
               "would_archive_dirs": 0, "protected_dirs": 0, "errors": [], "dry_run": dry_run}
     try:
         page, _complete, _positive = agent_projection_page(owner_home, max_dirs, purpose="preview" if dry_run else "maintenance")
+        report["page_complete"] = _complete
     except OSError as exc:
+        report["page_complete"] = False
         report["errors"].append({"run_id": "", "error_type": type(exc).__name__})
         return report
     for run_dir in page:
@@ -800,11 +803,173 @@ def maintain_owner_agent_projections(owner_home: Path, *, now: float | None = No
                     "terminal_archive_candidate": "would_archive_dirs"}[kind]] += 1
             continue
         try:
-            _maintain_projection(owner_home, run_dir, info, report, now=current, active_run_ids=active_run_ids,
-                                  pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days)
+            if run_write is None:
+                _maintain_projection(owner_home, run_dir, info, report, now=current, active_run_ids=active_run_ids,
+                                      pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days)
+            else:
+                run_write(lambda run_dir=run_dir, info=info: _maintain_projection(
+                    owner_home, run_dir, info, report, now=current, active_run_ids=active_run_ids,
+                    pinned_run_ids=pinned_run_ids, slim_after_days=slim_after_days, archive_after_days=archive_after_days))
         except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
             error = {"run_id": run_dir.name, "error_type": type(exc).__name__}
             if getattr(exc, "projection_recovery", None) is not None:
                 error["recovery"] = exc.projection_recovery
             report["errors"].append(error)
     return report
+
+
+# LLM: 两阶段共用本次pin快照和调度预算；投影算法不变，转录仅凭真实runtime终态及已结清唤醒退役。
+# 函数用途: 将既有投影维护与终态展示流TTL接入协调器，保留未知、活跃、pin和未收口责任。
+def maintain_subagents_lane(request) -> dict:
+    from agent_py_agent.agent.conversation import agent_transcript
+    from agent_py_agent.agent.memory_store.retention_scan import current_retention_pins
+
+    from ....user_space.storage_lanes import (
+        STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT,
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+        _real_directory,
+        lane_cursor_window,
+        owner_conversation_roots,
+        owner_retention_override,
+    )
+
+    receipt = {"cursor": dict(request.cursor), "complete": False, "items": 0, "bytes": 0,
+               "deleted_items": 0, "freed_bytes": 0, "protected": {}, "skipped": {}, "errors": []}
+    if request.legal_hold:
+        return {**receipt, "complete": True, "deferred_reason": "legal_hold"}
+    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
+    if request.budget.exhausted():
+        return receipt
+    home = Path(request.home.owner_home_dir)
+    roots = owner_conversation_roots(request.home)
+    pins = None
+
+    def pin_snapshot():
+        nonlocal pins
+        if pins is None:
+            errors = []
+            pins, _ = current_retention_pins(request.home, roots, errors,
+                now=datetime.fromtimestamp(request.now, timezone.utc))
+        return pins
+
+    def incomplete():
+        return {**receipt, "complete": True, "deferred_reason": "pins_incomplete",
+                "skipped": {**receipt["skipped"], "pins_incomplete": 1}}
+
+    def still_eligible(run_id, path):
+        try:
+            payload = read_projection_object(home / "agents" / run_id / "state.json", optional=True)
+        except (OSError, ValueError, TypeError):
+            return False
+        status, pending = projection_runtime_facts(home, run_id, payload)
+        return (status in AGENT_RUN_TERMINAL_STATUSES and not pending and not _pending_obligation(payload)
+                and not _has_parent_wake(home, run_id, payload) and pins.complete
+                and run_id not in pins.ids and not pins.protects(path, []))
+
+    def retire_stream(path, observation):
+        import fcntl
+
+        # 写门可能在另一执行线程调用operation，资格回调及计量必须在真正执行的上下文中绑定。
+        token = agent_transcript._RETIRE_OBSERVATION.set(observation)
+        try:
+            # 原发布者持owner祖先SH，原runtime写者持SQLite事务；不嵌套JSON记录锁。
+            with ExitStack() as stack:
+                descriptor = open_directory_beneath(home, (), require_dir_fd=True)
+                stack.callback(os.close, descriptor)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                for db in (runtime_db_path(home), home / "data/runtime.db"):
+                    if not db.exists() and not db.is_symlink():
+                        continue
+                    if db.is_symlink() or db.parent.is_symlink() or not db.is_file():
+                        raise ValueError("转录运行库边界无效")
+                    connection = stack.enter_context(closing(sqlite3.connect(db.absolute().as_uri() + "?mode=rw", uri=True, timeout=0)))
+                    connection.execute("BEGIN IMMEDIATE")
+                    stack.callback(connection.rollback)
+                return agent_transcript.retire_agent_transcript_file(path, now=request.now, retention_seconds=days * 86400)
+        finally:
+            agent_transcript._RETIRE_OBSERVATION.reset(token)
+
+    phase = request.cursor.get("phase", "projections")
+    if phase not in {"projections", "transcripts"}:
+        phase = "projections"
+    if phase == "projections":
+        if _real_directory(home, ("agents",)):
+            with os.scandir(home / "agents") as entries:
+                populated = any(entry.is_dir(follow_symlinks=False) for entry in entries)
+            if populated:
+                if not pin_snapshot().complete:
+                    return incomplete()
+                report = maintain_owner_agent_projections(home, now=request.now, max_dirs=budget.max_items,
+                    pinned_run_ids=set(pins.ids), run_write=request.run_write)
+                receipt["items"] += report["scanned_dirs"]
+                receipt["deleted_items"] += report["removed_dirs"] + report["slimmed_dirs"] + report["archived_dirs"]
+                receipt["freed_bytes"] += report["removed_bytes"]
+                receipt["protected"]["projection"] = report["protected_dirs"]
+                receipt["errors"] = [{"code": "agent_projection", **error} for error in report["errors"]
+                                     [:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]]
+                if not report["page_complete"]:
+                    return {**receipt, "cursor": {"phase": "projections", "root": 0, "after": ""}}
+        receipt["cursor"] = {"phase": "transcripts", "root": 0, "after": ""}
+    days = owner_retention_override(request.home, "agent_transcript_days", agent_transcript.AGENT_TRANSCRIPT_RETENTION_DAYS)
+    root_index = receipt["cursor"].get("root", 0)
+    root_index = root_index if type(root_index) is int and 0 <= root_index <= len(roots) else 0
+    after = receipt["cursor"].get("after", "")
+    after = after if isinstance(after, str) else ""
+    for index in range(root_index, len(roots)):
+        root = roots[index]
+        if not _real_directory(root, ("agent_transcript_events",)):
+            after = ""
+            receipt["cursor"] = {"phase": "transcripts", "root": index + 1, "after": ""}
+            continue
+        with os.scandir(root / "agent_transcript_events") as entries:
+            names = lane_cursor_window({"after": after}, (entry.name for entry in entries if entry.name.endswith(".jsonl")),
+                                       STORAGE_LANE_SLICE_ENTRIES)
+        for name in names:
+            if budget.exhausted(receipt["items"], receipt["bytes"]):
+                return receipt
+            path = root / "agent_transcript_events" / name
+            receipt["items"] += 1
+            receipt["cursor"] = {"phase": "transcripts", "root": index, "after": name}
+            try:
+                run_id = validate_opaque_id(path.stem, kind="run_id")
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    reason = "transcript_unsafe"
+                elif not info.st_mtime <= request.now - days * 86400:
+                    reason = "transcript_young"
+                else:
+                    try:
+                        payload = read_projection_object(home / "agents" / run_id / "state.json", optional=True)
+                    except (OSError, ValueError, TypeError):
+                        payload = {}
+                    status, pending = projection_runtime_facts(home, run_id, payload)
+                    if not status:
+                        reason = "transcript_unknown"
+                    elif status not in AGENT_RUN_TERMINAL_STATUSES or pending or _pending_obligation(payload) or _has_parent_wake(home, run_id, payload):
+                        reason = "transcript_active_or_pending"
+                    elif not pin_snapshot().complete:
+                        return incomplete()
+                    elif run_id in pins.ids or pins.protects(path, []):
+                        reason = "transcript_pinned"
+                    else:
+                        observation = {"eligible": lambda run_id=run_id, path=path: still_eligible(run_id, path)}
+                        freed = request.run_write(lambda path=path, observation=observation: retire_stream(path, observation))
+                        if observation.get("deleted"):
+                            receipt["freed_bytes"] += freed
+                            receipt["deleted_items"] += 1
+                            continue
+                        if observation.get("lock_busy"):
+                            receipt["skipped"]["lock_busy"] = receipt["skipped"].get("lock_busy", 0) + 1
+                        reason = "transcript_changed_or_busy"
+                receipt["protected"][reason] = receipt["protected"].get(reason, 0) + 1
+            except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+                receipt["protected"]["transcript_error"] = receipt["protected"].get("transcript_error", 0) + 1
+                if len(receipt["errors"]) < STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT:
+                    receipt["errors"].append({"code": type(exc).__name__, "path": str(path.relative_to(home))})
+        if len(names) == STORAGE_LANE_SLICE_ENTRIES:
+            return receipt
+        after = ""
+        receipt["cursor"] = {"phase": "transcripts", "root": index + 1, "after": ""}
+    return {**receipt, "cursor": {}, "complete": True}
