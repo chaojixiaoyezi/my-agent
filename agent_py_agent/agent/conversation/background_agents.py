@@ -326,7 +326,8 @@ class BackgroundAgentService:
         if (ref.agent_run_id != authority["agent_run_id"] or ref.observed_attempt_id != authority["attempt_id"]
                 or context is None or context.owner_id != thread.owner_id
                 or run is None or attempt is None or task_run is None
-                or run["status"] != "running" or attempt["status"] != "running"
+                # 父 run 在 create_attempt 后可仍为 created；准确 current attempt 的 running 才是执行事实。
+                or run["status"] not in {"created", "running"} or attempt["status"] != "running"
                 or run["current_attempt_id"] != ref.observed_attempt_id
                 or task_run["task_id"] != authority["task_id"]
                 or (identity is not None and context.space_id != identity.space_id)):

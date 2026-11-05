@@ -28,7 +28,10 @@ def test_storage_diagnostic_measures_actual_calls_and_preserves_facts(tmp_path):
     assert json.loads(result.stdout) == report
     assert report["scope"] == "storage_phases_only" and report["fixture_removed"]
     off, on = report["results"]
-    assert off["sqlite_connections"] == 8 and on["sqlite_connections"] == 4
+    owner_ticks = report["owners"] * report["ticks"]
+    # 每拍两臂均推进一次 scheduler history 索引；另外 off 有两个 runtime 读口，on 只有一次候选探针。
+    assert off["sqlite_connections"] == 3 * owner_ticks
+    assert on["sqlite_connections"] == 2 * owner_ticks
     # 每个owner每拍完整读一次；同拍后续scheduler读口共用可信投影，不禁用缓存凑旧12次。
     assert off["scheduler_reads"] == report["owners"] * report["ticks"] == 4
     assert on["scheduler_reads"] == 0

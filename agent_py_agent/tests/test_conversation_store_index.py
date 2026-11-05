@@ -61,11 +61,23 @@ def _scan_spy(monkeypatch):
 def test_each_ledger_scan_enumerates_each_directory_once(tmp_path, monkeypatch, kind):
     store, query, path, name = _ledger_case(tmp_path, kind)
     calls = _scan_spy(monkeypatch)
+    index_scans = []
+    original = store_index._scan_dir_match_names
+
+    def index_scan(directory, pattern):
+        index_scans.append(directory)
+        return original(directory, pattern)
+
+    monkeypatch.setattr(store_index, "_scan_dir_match_names", index_scan)
     first = query()
-    assert calls.count(path.parent) == 1
+    # 观察多一次固定 16 分片/64KiB 的准入探针；ScanIndex 本身仍只能枚举一次。
+    assert calls.count(path.parent) == (2 if kind == "observation" else 1)
+    assert index_scans == ([path.parent, path.parent.with_name("normal")] if kind == "wake" else [path.parent])
     calls.clear()
+    index_scans.clear()
     assert query() == first
-    assert calls.count(path.parent) == 1
+    assert calls.count(path.parent) == (2 if kind == "observation" else 1)
+    assert index_scans == ([path.parent, path.parent.with_name("normal")] if kind == "wake" else [path.parent])
     stats = store.storage.indexes.get(name).stats()
     assert (stats["misses"], stats["hits"], stats["stale"], stats["prunes"]) == (1, 1, 0, 0)
 
@@ -268,3 +280,36 @@ def test_ready_scan_keeps_all_sources_when_not_full(monkeypatch, limit):
     scheduler, calls = _ready_case(monkeypatch, wakes=[WakeSignal("wake", "one")], observations=[ObservationEvent("obs", "two", "event", "summary")], policies=policies)
     assert runtime_module._ready_background_thread_ids(scheduler, current=10, limit=limit) == ("one", "two", "three")
     assert calls == ["wakes", "observations", "policies", "runnable"]
+
+
+@pytest.mark.parametrize("budget", ["entries", "bytes"])
+def test_observation_snapshot_admission_has_fixed_scan_budget(tmp_path, monkeypatch, budget):
+    from contextlib import contextmanager
+
+    # 准入预算只取决于文件项数和大小，不让追加器的旁置锁文件或目录枚举顺序影响样本。
+    store = ConversationStore(tmp_path / "conversations")
+    path = store.storage.observations_dir / "sample.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n")
+    if budget == "entries":
+        for number in range(40):
+            (path.parent / f"extra-{number}.jsonl").write_text("{}\n")
+        expected = 17
+    else:
+        path.write_bytes(b"x" * 65537)
+        expected = 1
+    original = store_observations.os.scandir
+    visited = []
+
+    def record(entry):
+        visited.append(entry.name)
+        return entry
+
+    @contextmanager
+    def scan(directory):
+        with original(directory) as entries:
+            yield (record(entry) for entry in entries)
+
+    monkeypatch.setattr(store_observations.os, "scandir", scan)
+    assert store.observations._small_legacy_snapshot() is False
+    assert len(visited) == expected
