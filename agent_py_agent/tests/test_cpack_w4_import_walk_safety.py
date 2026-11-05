@@ -32,22 +32,25 @@ def test_control_or_separator_name_refuses_whole_tree(tmp_path, name):
     refused(tmp_path, "PLUGIN_IMPORT_PATH_UNSAFE")
 
 
+# LLM: 只在 pytest 临时目录创建特殊文件；socket 用短相对地址绑定，失败也关闭，cwd 由 monkeypatch 恢复。
+# 函数用途: 确认隐藏特殊文件仍拒绝整树导入，不让 macOS 地址长度遮住实际断言。
 @requires_fd
 @pytest.mark.parametrize("kind", ["file_link", "dir_link", "fifo", "socket"])
-def test_special_types_refuse_even_before_hidden_filter(tmp_path, kind):
+def test_special_types_refuse_even_before_hidden_filter(tmp_path, kind, monkeypatch):
     put(tmp_path, "CAPABILITY.md", "# 方法\n")
     target = tmp_path / ".hidden-unsafe"
     channel = None
-    if kind == "file_link":
-        target.symlink_to(tmp_path / "CAPABILITY.md")
-    elif kind == "dir_link":
-        target.symlink_to(tmp_path, target_is_directory=True)
-    elif kind == "fifo":
-        os.mkfifo(target)
-    else:
-        channel = socket.socket(socket.AF_UNIX)
-        channel.bind(str(target))
     try:
+        if kind == "file_link":
+            target.symlink_to(tmp_path / "CAPABILITY.md")
+        elif kind == "dir_link":
+            target.symlink_to(tmp_path, target_is_directory=True)
+        elif kind == "fifo":
+            os.mkfifo(target)
+        else:
+            monkeypatch.chdir(tmp_path)
+            channel = socket.socket(socket.AF_UNIX)
+            channel.bind(target.name)
         refused(tmp_path, "PLUGIN_IMPORT_PATH_UNSAFE")
     finally:
         if channel is not None:
