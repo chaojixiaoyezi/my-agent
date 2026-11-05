@@ -3436,6 +3436,9 @@ def test_review_and_report_refs_fail_closed_outside_owner(owner_home, tmp_path):
 def test_rotation_archives_judged_records_in_guarantee(owner_home, monkeypatch):
     source = _FakeSource()
     state = _audit_state(owner_home, source, 6, chunk=2)
+    # Direct harvest fixtures must establish the same real lease as the production entry.
+    claimed, _ = hv._claim_harvester_lease(state)
+    assert claimed
     # 判完全部(交结论签收),归档窗口出现
     for _ in range(6):
         records, _ = hv.read_spool_records(state, max_candidates=2, consumer="w0")
@@ -3450,11 +3453,44 @@ def test_rotation_archives_judged_records_in_guarantee(owner_home, monkeypatch):
     # the exact unread row without dropping data.
     source.feed(1)
     assert hv._harvest_cycle(state, source.handle)
+    # Rotation is sliced now; advance its real tick until the original postconditions apply.
+    for _ in range(32):
+        if state.spool_generation >= 1:
+            break
+        assert hv._harvest_once(state, source.handle) == "ok"
     assert state.spool_generation >= 1
     archive = ws.state_dir(owner_home) / f"{state.watch_id}.archive.ndjson"
     assert archive.exists()
     archived = [json.loads(line) for line in archive.read_text().splitlines()]
     assert archived and all(row.get("candidates") for row in archived)  # 已判记录原样留痕
+
+
+@pytest.mark.parametrize("lease_state", ["missing", "other_owner", "expired"])
+def test_w10_guarantee_rotation_requires_live_owned_lease(owner_home, monkeypatch, lease_state):
+    source = _FakeSource()
+    state = _audit_state(owner_home, source, 4, chunk=2)
+    for _ in range(8):
+        records, _ = hv.read_spool_records(state, max_candidates=4, consumer="w10-lease")
+        if not records:
+            break
+        result = hv.submit_verdicts(state, consumer="w10-lease",
+            verdicts=[_verdict(aid) for aid in _ack_ids(records)])
+        assert result["ok"]
+    assert not isinstance(hv.read_spool_cursor(state).get("inflight"), dict)
+    if lease_state != "missing":
+        payload = hv._lease_payload(state, "w10-lease")
+        if lease_state == "other_owner":
+            payload["owner"] = "pid:other"
+        else:
+            payload["heartbeat_at"] = time.time() - hv._LEASE_FRESH_SECONDS - 1
+        hv._lease_path(state).write_text(json.dumps(payload))
+    before = hv.spool_path(state).read_bytes()
+    monkeypatch.setattr(hv, "_SPOOL_ROTATE_BYTES", 1)
+    hv._maybe_rotate_spool(state, hv.spool_path(state))
+    assert state.spool_generation == 0
+    assert hv.spool_path(state).read_bytes() == before
+    assert state.totals["spool_maintenance_lease_lost"] == 1
+    assert not hv._spool_rotation_inputs(state).archive.exists()
 
 
 # ── 6. 抬取背压:保证档不按判读积压停抬,只按磁盘水位 ──
