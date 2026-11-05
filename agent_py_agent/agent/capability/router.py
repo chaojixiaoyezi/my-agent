@@ -200,14 +200,14 @@ class CapabilityRouter:
     def cards(self, *, kinds: set[str] | None = None) -> list[CapabilityCard]:
         """返回当前能力卡。"""
 
-        cards = self._current_cards()
+        cards = self._current_cards(kinds)
         if kinds is None:
             return cards
         return [card for card in cards if card.kind in kinds]
 
     # LLM: 原快照保留授权边界；宿主绑定的脚本/流程只读元数据，不展平包内成员，不授执行权。
     # 函数用途: 汇集本轮公开可见的工具、Skill 与能力包卡片。
-    def _current_cards(self) -> list[CapabilityCard]:
+    def _current_cards(self, kinds: set[str] | None = None) -> list[CapabilityCard]:
         snapshot = self._snapshot()
         static = list(self._cards.values())
         if snapshot is None:
@@ -217,7 +217,9 @@ class CapabilityRouter:
         packages = [from_capability_package(package) for package in snapshot.packages]
         from .decision_candidates import asset_cards_for_agent
         agent = getattr(self._skill_snapshot_provider, '__self__', None)
-        assets = asset_cards_for_agent(agent) if getattr(getattr(agent, 'home_paths', None), 'owner_id', None) == snapshot.owner_id else []
+        assets = (asset_cards_for_agent(agent)
+                  if (kinds is None or set(kinds) & {'script', 'workflow'})
+                  and getattr(getattr(agent, 'home_paths', None), 'owner_id', None) == snapshot.owner_id else [])
         return [*non_skills, *skills, *packages, *assets]
 
     def _snapshot(self) -> SkillSnapshot | None:
