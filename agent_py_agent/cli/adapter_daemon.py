@@ -49,6 +49,8 @@ def daemonize_adapter(request: AdapterDaemonRequest) -> int:
     return _wait_for_adapter_pid(process, request.pid_file)
 
 
+# LLM: 原命令、进程组和日志FD不变；只复制父环境并告知子进程它实际继承的日志路径。
+# 函数用途: 启动可自行轮转日志的后台通道适配器。
 def _start_adapter_daemon_process(agent, gpaths, options: AdapterOptions) -> subprocess.Popen:
     cmd = [
         sys.executable,
@@ -66,6 +68,7 @@ def _start_adapter_daemon_process(agent, gpaths, options: AdapterOptions) -> sub
         return subprocess.Popen(
             cmd,
             cwd=str(agent.root),
+            env={**os.environ, "MY_AGENT_DAEMON_LOG_PATH": str(gpaths.log)},
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,

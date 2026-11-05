@@ -202,6 +202,7 @@ def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
     with log_path.open("ab") as log_file:
         return subprocess.Popen(
             cmd, cwd=ROOT.parent, stdin=subprocess.DEVNULL,
+            env={**os.environ, "MY_AGENT_DAEMON_LOG_PATH": str(log_path)},
             stdout=log_file, stderr=subprocess.STDOUT,
             creationflags=creationflags, start_new_session=start_new_session,
         )
@@ -276,6 +277,8 @@ def cmd_supervisor_start(args) -> int:
 # LLM: 唯一CLI组合根沿make_agent解析YAML/环境/owner与工作区一次，延迟本监护进程不用的MCP；runtime只消费这个真实Agent，不能注入任意factory或Count0默认。
 # 函数用途: 装配实际Agent后进入原监护循环，配置失败仍沿原CLI错误出口。
 def cmd_supervisor_run(args) -> int:
+    from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+    install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     args._defer_mcp_connect = True
     try:
         agent = make_agent(args)

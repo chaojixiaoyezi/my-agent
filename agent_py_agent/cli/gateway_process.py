@@ -317,7 +317,7 @@ def _gateway_popen_options() -> tuple[int, bool]:
 # 函数用途: 用安全Python搜索路径拉起后台Gateway，日志和原进程组配置保持。
 def _spawn_gateway_process(paths, command: list[str], *, cwd: Path):
     creationflags, start_new_session = _gateway_popen_options()
-    environment = {**os.environ, "PYTHONSAFEPATH": "1"}
+    environment = {**os.environ, "PYTHONSAFEPATH": "1", "MY_AGENT_DAEMON_LOG_PATH": str(paths.log)}
     with paths.log.open("ab") as log_file:
         return subprocess.Popen(
             command,
@@ -1315,6 +1315,8 @@ def cmd_gateway_run(args) -> int:
 
     args = frozen_gateway_arguments(args)
     mark_hosting_gateway_process()
+    from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+    install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
     count = args._gateway_worker_count
     if count != 0:
