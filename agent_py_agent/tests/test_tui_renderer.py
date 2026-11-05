@@ -201,12 +201,20 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
     ),)
 
 
-@pytest.mark.parametrize("width", [10, 16, 24, 40, 80, 120, 240])
+# LLM: 用真实 renderer 核对一列到宽屏的徽标组合，不把字符数当作终端列宽。
+# 函数用途: 防止后台 Agent 与驻留进程同时存在或选中时底栏溢出。
+@pytest.mark.parametrize("width", [1, 2, 10, 16, 24, 40, 80, 120, 240])
 @pytest.mark.parametrize("options", [
     {},
     {"route_enabled": True},
     {"background_process_count": 2},
     {"business_agents_enabled": True, "background_process_count": 2},
+    {"background_agent_count": 3, "background_agent_running_count": 1},
+    {"background_agent_count": 4, "background_process_count": 2},
+    {"background_agent_count": 3, "background_process_count": 2,
+     "selected_agent_run_id": "business:agents"},
+    {"background_agent_count": 3, "background_process_count": 2,
+     "selected_agent_run_id": "bg:watch"},
 ])
 def test_footer_composition_respects_total_display_width(width, options) -> None:
     frame = render_tui_snapshot(TuiStateStore().snapshot(), TuiRenderContext(width=width, **options))
@@ -232,6 +240,8 @@ def test_footer_status_and_help_keep_full_width_with_business_badges(options) ->
     assert decorated == expected
 
 
+# LLM: route 与业务开关只作为上下文输入，不得变成普通底栏前缀或未知数量徽标。
+# 函数用途: 保留驻留进程尾标和选中样式，同时清除路由与空团队文案。
 @pytest.mark.parametrize("route", [None, False, True])
 @pytest.mark.parametrize("business", [False, True])
 def test_process_badge_follows_history_hint_with_route_and_team_counts(route, business) -> None:
@@ -244,10 +254,76 @@ def test_process_badge_follows_history_hint_with_route_and_team_counts(route, bu
 
     assert text.index("F6 原生模式") < text.index("⚡ 后台驻留 2 项")
     assert ("class:tui-agent-selected", " · › ⚡ 后台驻留 2 项") in frame.footer
-    if business:
-        assert "后台Agent：运行 未知 / 总 未知" in text
-    if route is not None:
-        assert f"/route {str(route).lower()}" in text
+    assert text.endswith("⚡ 后台驻留 2 项")
+    assert "/route" not in text and "简洁" not in text
+    assert "后台Agent" not in text
+
+
+# LLM: 总量必须为正整数才展示；开关和运行数不能把未知、空或非法总量变成有 Agent。
+# 函数用途: 核对无后台 Agent 时底栏不留数量占位。
+@pytest.mark.parametrize("count", [None, 0, -1, 3.0, "3"])
+@pytest.mark.parametrize("business", [False, True])
+def test_footer_hides_background_agents_without_positive_integer_total(count, business) -> None:
+    frame = render_tui_snapshot(TuiStateStore().snapshot(), TuiRenderContext(
+        width=240, route_enabled=True, business_agents_enabled=business,
+        background_agent_count=count, background_agent_running_count=1,
+    ))
+    text = fragments_text(frame.footer)
+
+    assert text.startswith("  ? 快捷键 · F4 权限")
+    assert "后台Agent" not in text and "/route" not in text and "简洁" not in text
+
+
+# LLM: 真实 renderer 在空闲、运行和团队选中状态下先输出原控制提示，再输出两个独立尾标。
+# 函数用途: 验证已知正总量的尾置位置、未知运行数和选中样式。
+@pytest.mark.parametrize("running_count", [None, 0, 1])
+@pytest.mark.parametrize("selected", ["", "business:agents"])
+@pytest.mark.parametrize("active", [False, True])
+@pytest.mark.parametrize("process_count", [0, 2])
+def test_background_agent_badge_trails_controls(running_count, selected, active, process_count) -> None:
+    store = TuiStateStore()
+    if active:
+        seq = TuiEventSequencer("footer-active", clock=lambda: 10.0)
+        store.publish(seq.emit("turn_started", "started", "turn"))
+        store.publish(seq.emit("thinking_started", "started", "thinking"))
+    frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(
+        width=240, route_enabled=True, background_agent_count=3,
+        background_agent_running_count=running_count, selected_agent_run_id=selected,
+        background_process_count=process_count,
+    ))
+    text = fragments_text(frame.footer)
+    running = "未知" if running_count is None else str(running_count)
+    badge = f' · {"› " if selected else ""}后台Agent：运行 {running} / 总 3'
+    style = "class:tui-agent-selected" if selected else "class:tui-bg-watch"
+
+    assert (style, badge) in frame.footer
+    assert text.index("F6 原生模式") < text.index("后台Agent")
+    if not selected:
+        assert text.index("Esc" if active else "F4") < text.index("后台Agent")
+    assert "/route" not in text and "简洁" not in text
+    if process_count:
+        assert text.endswith(badge + " · ⚡ 后台驻留 2 项")
+    else:
+        assert text.endswith(badge)
+
+
+# LLM: 详细模式保留原展开提示，路由设置与后台开关不得添加简洁/详细状态前缀。
+# 函数用途: 检查详细底栏的干净前部及按正总量出现的尾标。
+@pytest.mark.parametrize("route", [None, False, True])
+@pytest.mark.parametrize("count", [None, 0, 3])
+def test_detailed_footer_has_no_route_or_mode_prefix(route, count) -> None:
+    frame = render_tui_snapshot(TuiStateStore().snapshot(), TuiRenderContext(
+        width=240, detailed_transcript=True, route_enabled=route,
+        business_agents_enabled=True, background_agent_count=count,
+    ))
+    text = fragments_text(frame.footer)
+
+    assert text.startswith("  Showing detailed transcript")
+    assert "/route" not in text and "详细" not in text and "简洁" not in text
+    if count:
+        assert text.endswith(" · 后台Agent：运行 未知 / 总 3")
+    else:
+        assert "后台Agent" not in text
 
 
 def test_tui_theme_dims_thinking_and_emphasizes_user_text() -> None:

@@ -245,8 +245,8 @@ def test_denial_clears_scoped_rosters_and_message_runtime(monkeypatch):
     assert not nav._business_messages
 
 
-# LLM: footer/cache都读同一份结构化模式，开关不影响后台可观察入口。
-# 函数用途: 核对模式变化、运行/总量及进程数独立渲染。
+# LLM: route 仍参与原缓存键，但不再显示在底栏；已知正总量与进程数只作尾标。
+# 函数用途: 核对路由设置不污染控制提示，未知或零团队数量不占底栏。
 def test_footer_route_counts_and_cache_key():
     runtime = TuiRuntime('thread-footer')
     first = TuiRenderContext(width=240, route_enabled=False, business_agents_enabled=True,
@@ -255,10 +255,34 @@ def test_footer_route_counts_and_cache_key():
                              background_process_count=7, background_agent_count=3, background_agent_running_count=1)
     snapshot = runtime.store.snapshot()
     text = ''.join(part[1] for part in _render_footer(snapshot, first))
-    assert '/route false' in text and '后台驻留 7' in text and '后台Agent：运行 1 / 总 3' in text
+    assert '/route' not in text and '简洁' not in text
+    assert text.index('F4') < text.index('后台Agent：运行 1 / 总 3') < text.index('后台驻留 7')
+    assert text.endswith(' · 后台Agent：运行 1 / 总 3 · ⚡ 后台驻留 7 项')
+    assert _render_footer(snapshot, first) == _render_footer(snapshot, second)
     assert tui_render_context_key(snapshot, first) != tui_render_context_key(snapshot, second)
-    unknown = ''.join(p[1] for p in _render_footer(snapshot, TuiRenderContext(width=240, business_agents_enabled=True)))
-    assert '/route 未知' in unknown and '运行 未知 / 总 未知' in unknown
+    for count in (None, 0):
+        empty = ''.join(p[1] for p in _render_footer(snapshot, TuiRenderContext(
+            width=240, business_agents_enabled=True, background_agent_count=count)))
+        assert '/route' not in empty and '后台Agent' not in empty
+        assert empty.startswith('  ? 快捷键 · F4 权限')
+
+
+# LLM: 业务列表、后台会话和进程观察仍保留原导航与身份提示，只移除路由状态显示。
+# 函数用途: 防止子页面底栏残留 /route 前缀或空团队数量。
+@pytest.mark.parametrize('route', [None, False, True])
+@pytest.mark.parametrize(('options', 'hint'), [
+    ({'business_list_active': True}, 'Ctrl+G 返回 · Enter 下钻/下一页 · ↑↓ 选择'),
+    ({'business_thread_active': True, 'business_identity_state': 'available',
+      'business_work_state': 'running'}, '输入发往本后台会话 · /tree 子树 · /log 日志 · /history 下一页 · 身份：可接单 · 工作：运行中'),
+    ({'background_watch_active': True}, 'Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出'),
+])
+def test_navigation_footers_keep_controls_without_route(route, options, hint):
+    snapshot = TuiRuntime('thread-footer-navigation').store.snapshot()
+    text = ''.join(p[1] for p in _render_footer(snapshot, TuiRenderContext(
+        width=240, route_enabled=route, business_agents_enabled=True, **options)))
+
+    assert text.startswith('  Ctrl+G') and hint in text
+    assert '/route' not in text and '后台Agent' not in text
 
 
 # LLM: 新route_mode尚未集成，桩只验证CLI适配器入参与控制边界，不证明真实设置持久化。

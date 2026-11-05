@@ -3203,16 +3203,15 @@ def _render_pending_input_message(
     return tuple(visible)
 
 
-# LLM: 只装饰普通主会话底栏；状态/帮助独占原宽度，各段共享同一列预算，展示不改变路由或导航状态。
-# 函数用途: 按已知上下文显示路由及团队计数，在快捷键后追加后台进程徽标。
+# LLM: 只装饰普通主会话底栏；状态/帮助独占原宽度，快捷键与尾标共享列预算，展示不改变路由或导航状态。
+# 函数用途: 保留各页控制提示，只在快捷键后追加正总量后台 Agent 和驻留进程徽标。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
     # 子代理run不是主会话路由作用域，保留原精确控制提示，不拿主线程模式覆盖子页。
     if context.focused_agent_run_id or (context.selected_agent_run_id and
             not context.selected_agent_run_id.startswith(('business:', 'bg:', 'goal:'))):
         return _render_footer_base(snapshot, context)
-    route = '未知' if not isinstance(context.route_enabled, bool) else str(context.route_enabled).lower()
     if context.business_list_active or context.business_thread_active:
-        text = f'  /route {route} · Ctrl+G 返回 · '
+        text = '  Ctrl+G 返回 · '
         text += 'Enter 下钻/下一页 · ↑↓ 选择' if context.business_list_active else '输入发往本后台会话 · /tree 子树 · /log 日志 · /history 下一页'
         if context.business_thread_active:
             identity = {'available': '可接单', 'suspended': '已挂起', 'retiring': '退役中', 'retired': '已退役'}.get(context.business_identity_state, '未知')
@@ -3226,35 +3225,31 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         if (context.is_pasting or context.background_sync_failed or context.help_open or context.notice
                 or any(block.role == 'connection' for block in snapshot.active_blocks)):
             return _render_footer_base(snapshot, context)
-        count = '未知' if context.background_agent_count is None else str(context.background_agent_count)
-        running = '未知' if context.background_agent_running_count is None else str(context.background_agent_running_count)
-        business_visible = context.business_agents_enabled or context.background_agent_count is not None
-        prefix = ''
-        if isinstance(context.route_enabled, bool) or business_visible:
-            prefix = ('  详细' if context.detailed_transcript else '  简洁') + f' · /route {route}'
-            if business_visible:
-                selected = context.selected_agent_run_id == 'business:agents'
-                prefix += f' · {"› " if selected else ""}后台Agent：运行 {running} / 总 {count}'
-            prefix += ' · '
-        prefix = _fit_text(prefix, context.width, 'left').rstrip()
+        business_selected = context.selected_agent_run_id == 'business:agents'
+        business_badge = ''
+        if isinstance(context.background_agent_count, int) and context.background_agent_count > 0:
+            count = str(context.background_agent_count)
+            running = '未知' if context.background_agent_running_count is None else int(context.background_agent_running_count)
+            business_badge = f' · {"› " if business_selected else ""}后台Agent：运行 {running} / 总 {count}'
+            business_badge = _fit_text(business_badge, context.width, 'left').rstrip()
         process_selected = context.selected_agent_run_id == 'bg:watch'
-        badge = ''
+        process_badge = ''
         if context.background_process_count:
-            badge = f' · {"› " if process_selected else ""}⚡ 后台驻留 {context.background_process_count} 项'
-            badge = _fit_text(badge, context.width - display_width_text(prefix), 'left').rstrip()
-        remaining = context.width - display_width_text(prefix) - display_width_text(badge)
-        # 前缀或徽标占满时不再构造最小一列的上下文，避免额外拼出一个省略号。
+            process_badge = f' · {"› " if process_selected else ""}⚡ 后台驻留 {context.background_process_count} 项'
+            process_badge = _fit_text(process_badge, context.width - display_width_text(business_badge), 'left').rstrip()
+        remaining = context.width - display_width_text(business_badge) - display_width_text(process_badge)
+        # 尾标占满时不再构造最小一列的上下文，避免额外拼出一个省略号。
         base = _render_footer_base(snapshot, replace(
             context, width=remaining,
             selected_agent_run_id='' if process_selected else context.selected_agent_run_id,
         )) if remaining > 0 else ()
-        prefix_style = 'class:tui-agent-selected' if context.selected_agent_run_id == 'business:agents' else 'class:tui-bg-watch'
+        business_style = 'class:tui-agent-selected' if business_selected else 'class:tui-bg-watch'
         badge_style = 'class:tui-agent-selected' if process_selected else 'class:tui-bg-watch'
-        prefix_fragments = ((prefix_style, prefix),) if prefix else ()
-        badge_fragments = ((badge_style, badge),) if badge else ()
-        return (*prefix_fragments, *base, *badge_fragments)
+        business_fragments = ((business_style, business_badge),) if business_badge else ()
+        badge_fragments = ((badge_style, process_badge),) if process_badge else ()
+        return (*base, *business_fragments, *badge_fragments)
     if context.background_watch_active:
-        text = f"  /route {route} · Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
+        text = "  Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
         if context.notice:
             text += " · " + context.notice
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
