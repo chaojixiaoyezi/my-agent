@@ -532,9 +532,12 @@ def test_partial_multiline_retry_never_resends_committed_target(alert_case):
     assert len(channels.attempts) == 2
 
 
-# LLM: 真实后台调度器运行并按原30秒退避重试，模型及网络用可计数替身。
-# 函数用途: 证明完成业务后只补投递、不再次执行模型。
-def test_real_scheduler_multiline_retry_after_completed_task_does_not_rerun_model(alert_case):
+# LLM: 调度、outbox和持久退避均真实；只控制时钟和模型/运输边界，覆盖投递耗时超过一轮退避的情况。
+# 函数用途: 证明完成业务后按真实退避只补投递，不再次执行模型或重复本地留档。
+@pytest.mark.parametrize("delivery_seconds", [0, 120])
+def test_real_scheduler_multiline_retry_after_completed_task_does_not_rerun_model(alert_case, monkeypatch, delivery_seconds):
+    import time
+
     from agent_py_agent.agent.conversation import (
         BackgroundMainAgentRuntime,
         BackgroundMainAgentScheduler,
@@ -544,15 +547,43 @@ def test_real_scheduler_multiline_retry_after_completed_task_does_not_rerun_mode
     refs = [{"target_kind": "channel_binding", "binding_id": row["binding_id"]} for row in delivery_targets(case)]
     signal, _request = prepared_alert(case, {"mode": "multi", "targets": refs})
     channels = _RetryDelivery()
+    clock = [case.job["next_run_at"]]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    deliver = channels.deliver
+
+    # LLM: 只让首次运输边界推进受控时钟，不改投递回执、outbox或生产退避状态。
+    # 函数用途: 无需真实等待即可覆盖首次投递较慢的情况。
+    def timed_delivery(context, envelope):
+        receipt = deliver(context, envelope)
+        if len(channels.attempts) == 1:
+            clock[0] += delivery_seconds
+        return receipt
+
+    monkeypatch.setattr(channels, "deliver", timed_delivery)
     runtime = BackgroundMainAgentRuntime(agent=case.agent, store=case.store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": case.store, "scheduler_service": case.agent.scheduler_service})
     scheduler.tick(now=case.job["next_run_at"])
     assert len(case.backend.prompts) == 1 and len(channels.attempts) == 1
     assert len(case.store.messages.recent(case.local.thread_id)) == 1
     assert case.store.wakes.pending_one(signal.wake_signal_id).metadata["owner_delivery"]
+    assert case.store.tasks.load(signal.root_task_id).status == "completed"
+    state, error = case.store.wakes.attempts.state_report(signal.wake_signal_id)
+    assert error is None
+    # 原重试同时核进程内30秒节流与持久退避；不能拿计划起点+31猜实际可领取时间。
+    retry_at = max(scheduler._wake_retry_after[signal.wake_signal_id], state.next_attempt_at)
+    assert retry_at >= case.job["next_run_at"] + 30
     channels.status = "sent"
-    scheduler.tick(now=case.job["next_run_at"] + 31)
+    if clock[0] < retry_at:
+        clock[0] = retry_at - 1
+        scheduler.tick(now=clock[0])
+        assert len(case.backend.prompts) == len(channels.attempts) == 1
+        assert case.store.wakes.pending_one(signal.wake_signal_id) is not None
+        assert len(case.store.messages.recent(case.local.thread_id)) == 1
+    clock[0] = max(clock[0], retry_at)
+    scheduler.tick(now=clock[0])
     assert len(case.backend.prompts) == 1 and len(channels.attempts) == 2
+    assert channels.attempts[1][1].content == channels.attempts[0][1].content
+    assert channels.attempts[1][2].delivery_status == "sent"
     assert len(case.store.messages.recent(case.local.thread_id)) == 1
     assert case.store.wakes.pending_one(signal.wake_signal_id) is None
 

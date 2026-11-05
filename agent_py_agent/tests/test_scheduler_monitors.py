@@ -295,8 +295,8 @@ def test_monitor_descriptor_extracts_rule_and_precheck_asset_refs(tmp_path):
         {'kind': 'script', 'id': 'sc_1'}, {'kind': 'script', 'id': 'sc_top'}]
 
 
-# LLM: 工具名决定资产类型，空值不建边，不安全字符串仍拒绝；引用断言按新列表合同严格比较。
-# 函数用途: 验证脚本tool引用及错误ID边界，不修改源Job。
+# LLM: 工具名决定资产类型；不安全、空值或非字符串不建边，但不阻断监控只读投影。
+# 函数用途: 验证脚本tool引用及错误ID边界，并保证投影不修改源Job。
 @pytest.mark.parametrize('identifier', ['script_1', '../escape', '', None, 7])
 def test_monitor_descriptor_script_tool_id_validation(tmp_path, identifier):
     from agent_py_agent.agent.assets.monitor_adapter import get_monitor_descriptor
@@ -305,12 +305,23 @@ def test_monitor_descriptor_script_tool_id_validation(tmp_path, identifier):
     job, req = _create(repo)
     rule = dict(req.rules[1], tool={'name': 'scripts', 'arguments': {'script_id': identifier}})
     job = repo.update_job(job['job_id'], patch={'rules': [rule]}, expected_version=job['version'], now=950)
-    if identifier == '../escape':
-        with pytest.raises(ValueError, match='资产ID'):
-            get_monitor_descriptor(tmp_path / 'owner', job['job_id'], job)
-    else:
-        refs = get_monitor_descriptor(tmp_path / 'owner', job['job_id'], job)['refs']
-        assert refs == ([{'kind': 'script', 'id': 'script_1'}] if identifier == 'script_1' else [])
+    descriptor = get_monitor_descriptor(tmp_path / 'owner', job['job_id'], job)
+    assert descriptor['id'] == job['job_id']
+    refs = descriptor['refs']
+    assert refs == ([{'kind': 'script', 'id': 'script_1'}] if identifier == 'script_1' else [])
+    assert job['rules'][0]['tool']['arguments']['script_id'] == identifier
+    assert repo.get_job(job['job_id'])['rules'][0]['tool']['arguments']['script_id'] == identifier
+
+
+# LLM: 容错仅适用于投影中的引用；查询监控自身的ID仍须严格校验，不能用于路径穿越。
+# 函数用途: 锁住监控查询入口的非法ID拒绝边界。
+def test_monitor_descriptor_rejects_unsafe_monitor_id(tmp_path):
+    from agent_py_agent.agent.assets.monitor_adapter import get_monitor_descriptor
+
+    repo = _repo(tmp_path)
+    job, _ = _create(repo)
+    with pytest.raises(ValueError, match='资产ID'):
+        get_monitor_descriptor(tmp_path / 'owner', '../escape', job)
 
 
 # LLM: 使用真实tick、默认名称prompt与原后台notify/模型收口，工具边界和模型提供者可控，不修改状态迁就结果。

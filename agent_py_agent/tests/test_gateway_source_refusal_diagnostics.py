@@ -106,9 +106,9 @@ def test_logging_fault_does_not_replace_original_error(monkeypatch, logger_fault
 
 
 @pytest.mark.parametrize('logger_fault', [False, True])
-# LLM: 当前refresh通过原active-index角色门；只在该观察口注入解析异常，不能让更早的身份拒绝冒充覆盖。
-# 函数用途: 验原刷新捕获异常后仍隔离、返回False，并记录原解析调用链。
-def test_refresh_keeps_original_quarantine_and_false_result(monkeypatch, caplog, logger_fault):
+# LLM: 替身索引提供临时root和空metadata原stamp供真实来源预检，只在原角色门注入解析异常，不绕过新增固定来源检查。
+# 函数用途: 验解析异常真实到达拒绝入口，仍隔离、返回False并记录原调用链。
+def test_refresh_keeps_original_quarantine_and_false_result(monkeypatch, caplog, logger_fault, tmp_path):
     from agent_py_agent.agent.gateway_parts import (
         multiprocess_executor_active_index as active_index,
     )
@@ -124,9 +124,11 @@ def test_refresh_keeps_original_quarantine_and_false_result(monkeypatch, caplog,
         observed.append(original)
         raise original
 
+    # LLM: 只为诊断测试补齐索引的读取合同；原角色拒绝后仍禁止继续检查active来源。
+    # 函数用途: 让真实固定来源预检读取临时空根，而不是因替身缺字段提前失败。
     def locate(actual):
         assert actual is controller
-        return SimpleNamespace(ready=True, check_roles=refuse,
+        return SimpleNamespace(ready=True, root=tmp_path, _metadata_stamps={}, check_roles=refuse,
                                check_sources=lambda: pytest.fail('refused roles cannot check sources'))
 
     monkeypatch.setattr(active_index, 'index_for', locate)
@@ -157,9 +159,9 @@ def test_invalid_numeric_positions_are_not_logged(caplog, value):
     assert f'json_doc_chars={len(error.doc)}' in text
 
 
-# LLM: 注入同一实际索引角色门，确保坏异常属性由原日志保护而非前置身份拒绝掩盖。
-# 函数用途: 验日志读取异常属性失败不覆盖原刷新隔离结果。
-def test_exception_attribute_failure_keeps_original_refusal(monkeypatch):
+# LLM: 替身提供真实临时root和空metadata原stamp，确保坏异常属性进入原角色拒绝及日志保护，不被来源预检的字段错误掩盖。
+# 函数用途: 验日志读取异常属性失败时，原刷新仍保持False和整体隔离。
+def test_exception_attribute_failure_keeps_original_refusal(monkeypatch, tmp_path):
     from agent_py_agent.agent.gateway_parts import (
         multiprocess_executor_active_index as active_index,
     )
@@ -180,9 +182,11 @@ def test_exception_attribute_failure_keeps_original_refusal(monkeypatch):
         observed.append(original)
         raise original
 
+    # LLM: 只补诊断替身的新增来源字段，真实固定来源reader与原异常处理均不替换。
+    # 函数用途: 允许预检临时根后到达原定坏异常属性观察口。
     def locate(actual):
         assert actual is controller
-        return SimpleNamespace(ready=True, check_roles=refuse,
+        return SimpleNamespace(ready=True, root=tmp_path, _metadata_stamps={}, check_roles=refuse,
                                check_sources=lambda: pytest.fail('refused roles cannot check sources'))
 
     monkeypatch.setattr(active_index, 'index_for', locate)

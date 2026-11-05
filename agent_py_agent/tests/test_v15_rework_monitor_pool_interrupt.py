@@ -261,7 +261,7 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     assert not is_interruptible_registered(conversation_claim_interrupt_name(binding.claim_id))
     assert _fd_count() - fd_before == 0
 
-    # C：原 worker 必须清旗；这与已撤权操作保留 owner 资源锁是两份不同事实。
+    # C：原 worker 必须清旗；撤权后的资源清理也不得阻塞新的真实运行。
     probe = case.service.monitor_pool.submit(case.home, run.job['job_id'], 'r3-reuse-probe',
         partial(_run_with_claim_interrupts, (), Event(), lambda: (get_ident(), is_interrupted())))
     assert probe.result(timeout=2) == (case.calls[call_before][1], False)
@@ -270,21 +270,10 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     case.scheduler = BackgroundMainAgentScheduler({'runtime': case.scheduler.runtime,
         'store': case.store, 'scheduler_service': case.service})
     _join(*_start(case, next_run, thread_only=True))
-    if sender == 'cancel_monitor':
-        history, load_errors = case.repo.history(job_id=next_run.job['job_id'])
-        assert not load_errors and len(history) == 1
-        assert history[0]['status'] == 'failed'
-        assert history[0]['error_code'] == 'TOOL_OPERATION_BUSY_CONFLICT'
-        assert json.loads(history[0]['response'])['error_code'] == 'TOOL_OPERATION_BUSY_CONFLICT'
-        assert not case.runs.list_runs(workflow_id=next_run.workflow_id)
-        assert not next_run.markers and not next_run.completed
-        assert [call[0] for call in case.calls[call_before:]] == ['r3_s1']
-        assert case.store.tasks.load(next_run.signal.root_task_id).status == 'abandoned'
-    else:
-        _assert_done(case, next_run)
+    _assert_done(case, next_run)
     assert {call[1] for call in case.calls[call_before:]} == {case.calls[call_before][1]}
     assert case.store.tasks.load(run.signal.root_task_id).status == ('cancelled' if sender == 'cancel_monitor' else 'active')
-    assert len(case.channels.attempts) == delivery_before + (sender != 'cancel_monitor')
+    assert len(case.channels.attempts) == delivery_before + 1
     assert _fd_count() - fd_before == 0
 
 
@@ -431,16 +420,25 @@ def test_all_scheduler_pool_handoffs_are_scoped_and_fenced_before_effects():
 
     target = functions['execute_scheduled_target']
     guarded = next(node for node in target.body if isinstance(node, ast.Try))
-    handoff = next(node for node in guarded.body if isinstance(node, ast.With))
+    joined = next(node for node in guarded.body if isinstance(node, ast.Try))
+    handoff = next(node for node in joined.body if isinstance(node, ast.With))
     assert ast.unparse(handoff.items[0].context_expr) == 'register_interrupt_callback(early.set)'
     assert any(isinstance(node, ast.Call) and ast.unparse(node.func) == 'future.result'
         for node in ast.walk(handoff))
-    after = guarded.body[guarded.body.index(handoff) + 1]
+    after = joined.body[joined.body.index(handoff) + 1]
     assert isinstance(after, ast.If) and ast.unparse(after.test) == 'is_interrupted()'
     assert isinstance(after.body[0], ast.Raise)
-    before = guarded.body[guarded.body.index(handoff) - 2]
+    before = guarded.body[guarded.body.index(joined) - 2]
     assert isinstance(before, ast.If) and ast.unparse(before.test) == 'is_interrupted()'
     assert [ast.unparse(handler.type) for handler in guarded.handlers] == ['ScheduleValidationError']
+    assert [ast.unparse(handler.type) for handler in joined.handlers] == ['InterruptedError']
+    interrupted = joined.handlers[0]
+    assert isinstance(interrupted.body[-1], ast.Raise) and interrupted.body[-1].exc is None
+    cleanup = interrupted.body[0]
+    assert isinstance(cleanup, ast.Try)
+    assert ast.unparse(cleanup.handlers[0].type) == '(OSError, sqlite3.Error, RuntimeError, KeyError, ValueError)'
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == 'release_terminal_attempt_operations' for node in ast.walk(cleanup))
 
     worker = functions['_run_with_claim_interrupts']
     scope = next(node for node in worker.body if isinstance(node, ast.With))

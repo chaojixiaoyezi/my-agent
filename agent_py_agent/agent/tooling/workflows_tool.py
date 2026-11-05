@@ -53,6 +53,12 @@ from .scripts_tool import (
 from .tool_spec import _spec
 
 
+# LLM: 兼容当前组合标记与历史快照保留的基础 pin；只判定身份，不读取或修改 Store。
+# 函数用途: 识别不能通过公开工作流回滚写入的宿主组合。
+def _host_managed_composition(metadata):
+    return isinstance(metadata, dict) and (isinstance(metadata.get('composition'), dict) or 'base_workflow_pin' in metadata)
+
+
 # LLM: 完整定义的目标id/kind与标准Key交资产领域统一校验，引用派生沿原合同，不改变_plain顺序。
 # 函数用途: 规范工具保存请求，不另维护模式或错误策略副本。
 def _definition(value, workflow_id):
@@ -355,7 +361,7 @@ class WorkflowsTool(BaseTool):
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
-    # LLM: 恢复默认拒绝依赖漂移，显式允许才透传；保存CAS只由原Store核验，输入与前缀沿冻结快照。
+    # LLM: 恢复默认拒绝依赖漂移；宿主组合在恢复上下文及写回前拒绝，普通保存CAS仍由原Store核验。
     # 函数用途: 分派CRUD、绑定、运行、补丁恢复或快照检查。
     def _dispatch(self, params):
         action = params['action']
@@ -404,6 +410,15 @@ class WorkflowsTool(BaseTool):
         if action == 'rollback':
             from ..assets.version_hook import restoring_snapshot
             record, payload, _, _ = load_snapshot(self.owner_home, 'workflow', workflow_id, params['to_version'])
+            selected = self._from_flat(payload).descriptor.metadata
+            # 历史身份已命中时直接拒绝，不必读取当前资产或进入其存储恢复流程。
+            if _host_managed_composition(selected):
+                raise AssetActionError('ASSET_STORE_DIRECT_WRITE_DENIED',
+                    {'workflow_id': workflow_id, 'reason': 'monitor_composition_host_managed'})
+            current = self._store().get_workflow(workflow_id)
+            if current is not None and _host_managed_composition(current.descriptor.metadata):
+                raise AssetActionError('ASSET_STORE_DIRECT_WRITE_DENIED',
+                    {'workflow_id': workflow_id, 'reason': 'monitor_composition_host_managed'})
             with restoring_snapshot(self.owner_home, record):
                 return self._save_definition(self._from_flat(payload).to_dict(), workflow_id, params['expected_revision'])
         if action == 'save':

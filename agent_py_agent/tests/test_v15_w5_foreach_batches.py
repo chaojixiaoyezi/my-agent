@@ -225,3 +225,30 @@ def test_batch_worker_does_not_swallow_interruption(tmp_path):
         WorkflowEngine(tmp_path, analysis_handler=analyze).run_workflow(batch_flow(parallel=2), {'rows': [1, 2]})
     assert caught.value.record.status == 'paused_for_resume'
     assert caught.value.record.effect_outcome != 'confirmed'
+
+
+# LLM: 读取兼容与新内容准入分开；拒绝不得删除原内容或推进资产revision。
+# 函数用途: 验证公开Store创建/更新拒绝agent_task批次，但值对象仍可恢复旧定义。
+@pytest.mark.parametrize('policy,parallel', [('fail_fast', 1), ('continue', 1), ('fail_fast', 2), ('continue', 2)])
+@pytest.mark.parametrize('existing', [False, True])
+def test_agent_foreach_save_refuses_without_breaking_historical_codec(tmp_path, policy, parallel, existing):
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition
+
+    store = WorkflowStore(tmp_path)
+    value = batch_flow(policy=policy, parallel=parallel)
+    if existing:
+        store.save_workflow(value)
+    path = tmp_path / 'workflows/daily/workflow.json'
+    before = path.read_bytes() if existing else None
+    value['steps'][0].update(mode='agent_task', config={'instruction': '核对原输入'})
+    decoded = WorkflowDefinition.from_any(value)
+    assert WorkflowDefinition.from_any(decoded.to_dict()) == decoded
+    with pytest.raises(ValueError) as caught:
+        WorkflowStore(tmp_path).save_workflow(decoded, expected_revision=1 if existing else 0)
+    assert caught.value.error_code == 'WORKFLOW_FOREACH_AGENT_TASK_UNSUPPORTED'
+    assert caught.value.details['step_id'] == 'judge'
+    if existing:
+        assert path.read_bytes() == before
+        assert WorkflowStore(tmp_path).get_workflow('daily').descriptor.revision == 1
+    else:
+        assert not path.exists() and WorkflowStore(tmp_path).get_workflow('daily') is None

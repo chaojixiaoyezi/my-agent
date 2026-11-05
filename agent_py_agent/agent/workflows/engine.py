@@ -24,6 +24,8 @@ from ..assets.skill_adapter import get_owner_skill_descriptor
 from ..assets.workflow_store import (
     WorkflowDefinition,
     WorkflowStore,
+    validate_definition_eligibility,
+    validate_step_eligibility,
     with_workflow_step_refs,
 )
 from ..assets.workflow_store import (
@@ -195,6 +197,7 @@ class _WorkflowRunLifecycle:
                 return {'status': 'failed', 'error_code': exc.error_code, 'effect_outcome': 'not_started'}
             descriptor = definition['descriptor']
         self._require_workflow_enabled(definition)
+        validate_definition_eligibility(definition)
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
             raise ValueError('工作流 Owner 不匹配')
         from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
@@ -285,6 +288,8 @@ class _WorkflowRunLifecycle:
         options = dict(patched_step_output=payload(patched_step_output), updated_data_sources=payload(updated_data_sources),
                        resolution_origin=resolution_origin, allow_script_drift=allow_script_drift,
                        expected_revision=expected_revision, operation_key=operation_key, control_intent=payload(control_intent))
+        # 旧冻结定义也必须先拒绝；不能先申请claim或排队，再把异步批次当原生单任务恢复。
+        validate_definition_eligibility(self.store.load_workflow_snapshot(workflow_run_id))
         # LLM: 参数只捕获本次原运行的显式恢复意图，实际执行仍要经过原CAS和授权门。
         # 函数用途: 将冻结的恢复请求交给取得claim的原执行器。
         def callback():
@@ -321,6 +326,9 @@ class _WorkflowRunLifecycle:
             self._require_workflow_enabled(definition)
             if operation_key:
                 self._authorize_run(record, 'preflight')
+            # 必须先于begin_control的耐久写入，以及原生任务恢复/副作用准入；拒绝不改原证据。
+            validate_definition_eligibility(definition)
+            if operation_key:
                 intent = control_intent if control_intent is not None else {
                     'from_step_id': from_step_id, 'patched_step_output': patched_step_output,
                     'updated_data_sources': updated_data_sources, 'resolution_origin': resolution_origin,
@@ -418,6 +426,7 @@ class _WorkflowRunLifecycle:
     # 函数用途: 找回原任务或继续已证明未开始的原提交，不重放成功前缀或在恢复这一拍执行后缀。
     def _resume_agent(self, record, definition):
         """继续核对原步骤，不因暂停/失败重新分配attempt或执行成功前缀。"""
+        validate_definition_eligibility(definition)
         if self.agent_steps is None:
             raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
         index = next((i for i, step in enumerate(record.steps)
@@ -737,6 +746,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # LLM: 失败保存若确认原run已经终结则返回耐久记录；其它异常和中断保持原回执，附属通知不改运行事实。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
+        # 内部/已排队调用也不得先发表新attempt；资格错误不转换为失败批次或可恢复执行。
+        validate_definition_eligibility(definition)
         state = {'record': record, 'phase': 'preflight', 'started': bool(start), 'committed': False}
         try:
             return self._drive_steps(record, definition, start, execution_state=state)
@@ -906,6 +917,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # 函数用途: 复用旧脚本执行链并安全分派单节点，不能从mode别名/config或分析器属性取得新权限。
     def _perform(self, record, spec, outputs, definition, run, *, record_summary=True, allow_side_effects=True):
         from .debug_nodes import analysis_preview
+        validate_step_eligibility(spec)
         self._require_step_enabled(spec)
         if spec.get('foreach') is not None and not run.ephemeral_debug:
             self._foreach_step(record, spec, outputs, definition, run)
@@ -976,6 +988,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # LLM: 只在原执行锁内协调批；恢复沿原步骤保留成功批，worker不保存run或父步骤。
     # 函数用途: 在一个运行中切批、逐批发表并按序聚合输出。
     def _foreach_step(self, record, spec, outputs, definition, run):
+        validate_step_eligibility(spec)
         config = validate_foreach(spec['foreach'])
         items = resolve_items(config['from'], run.inputs, outputs)
         plan = pack_items(items, batch_size=config['batch_size'], max_batch_tokens=config['max_batch_tokens'])

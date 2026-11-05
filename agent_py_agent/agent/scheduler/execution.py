@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 import time
 from contextlib import ExitStack, contextmanager
 from copy import copy, deepcopy
@@ -187,7 +189,7 @@ def _run_with_claim_interrupts(names, early, callback):
         return callback()
 
 
-# LLM: 业务仅执行一次，原claim停止传入worker且返回后重查；初发与重投共原后台上下文，欠发释放claim而不进业务waiting。
+# LLM: 业务仅执行一次，原claim停止传入worker且返回后重查；仅在真实 worker 退出后清理终态工具资源，异常不掩盖原中断。
 # 函数用途: 执行固定目标并沿原TaskLink、终态和冻结通知收口，保留相同运输身份且不重跑业务。
 def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=None):
     import threading
@@ -212,14 +214,26 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
             raise InterruptedError('定时资产执行已中断')
         early = threading.Event()
         # 先在claim线程记住早到停止，再移交；等待真实worker退出后才交回原收口链。
-        with register_interrupt_callback(early.set):
-            future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
-                partial(_run_with_claim_interrupts, _claim_interrupt_names(kwargs), early,
-                    partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id'])),
-                run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
-            result = future.result()
-        if is_interrupted():
-            raise InterruptedError('定时资产执行已中断')
+        try:
+            with register_interrupt_callback(early.set):
+                future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
+                    partial(_run_with_claim_interrupts, _claim_interrupt_names(kwargs), early,
+                        partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id'])),
+                    run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
+                result = future.result()
+            if is_interrupted():
+                raise InterruptedError('定时资产执行已中断')
+        except InterruptedError:
+            # future 已交回，工具不再执行；只释放已由原取消入口关闭的准确 attempt。
+            try:
+                repo = getattr(getattr(agent, 'subagents', None), 'runtime_db', None)
+                row = repo.main_agent_run_for_task(claim.run_id) if repo is not None else None
+                if row is not None:
+                    repo.release_terminal_attempt_operations(str(row['current_attempt_id']),
+                        reason='scheduled_target_interrupted_after_authority_close')
+            except (OSError, sqlite3.Error, RuntimeError, KeyError, ValueError):
+                logging.getLogger(__name__).exception('定时资产中断后的资源清理未确认')
+            raise
         if isinstance(result, dict) and result.get('status') == 'skipped':
             service.finish(claim, status='skipped', response=json.dumps(result), error_code=result['error_code'])
             service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'cancelled',
