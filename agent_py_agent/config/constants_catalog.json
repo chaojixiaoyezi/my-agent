@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1300,
+  "count": 1360,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -18,6 +18,30 @@
       "unit": "秒",
       "category": "其它",
       "description": "既保留\"还在失败\"的可观测性，又不把日志刷爆。"
+    },
+    {
+      "name": "_SENT_RECEIPT_MAINTENANCE_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/adapter/delivery.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "同一回送存储两次完整维护之间的最短间隔秒数。"
+    },
+    {
+      "name": "_SENT_RECEIPT_MAINTENANCE_SLICE_FILES",
+      "file": "agent_py_agent/agent/adapter/delivery.py",
+      "value": 128,
+      "unit": "个文件",
+      "category": "其它",
+      "description": "sent 回执维护单片最多检查的文件数。"
+    },
+    {
+      "name": "_SENT_RECEIPT_MAINTENANCE_SLICE_MS",
+      "file": "agent_py_agent/agent/adapter/delivery.py",
+      "value": 25,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "sent 回执维护单片墙钟预算毫秒数。"
     },
     {
       "name": "_SENT_RECEIPT_RETENTION_SECONDS",
@@ -962,6 +986,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "单个接收方收件箱允许暂存的最大待处理投递包数量上限。"
+    },
+    {
+      "name": "_ASSET_AUXILIARY_PASS_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/assets/revision_history.py",
+      "value": 3600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "资产辅助状态完整扫描后再次扫描的最小间隔秒数。"
+    },
+    {
+      "name": "_ASSET_RECORDS_LOCK_WAIT_SECONDS",
+      "file": "agent_py_agent/agent/assets/turn_extractor.py",
+      "value": 0.02,
+      "unit": "秒",
+      "category": "其它",
+      "description": "自动草稿退休时等待原记录集合锁的最大秒数。"
     },
     {
       "name": "_CANCELLATION_POLL_SECONDS",
@@ -2716,6 +2756,14 @@
       "description": "agent 转录文件最大 8 MiB：超过即截断/轮转，防止转录无限增长占满磁盘。"
     },
     {
+      "name": "AGENT_TRANSCRIPT_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/conversation/agent_transcript.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "子代理终态展示转录的默认保留天数；完整会话账本不由此入口删除。"
+    },
+    {
       "name": "_MAX_SOURCE_PROBE_REFS_COUNT",
       "file": "agent_py_agent/agent/conversation/audit_tools.py",
       "value": 256,
@@ -3396,6 +3444,22 @@
       "description": "每个处理名额最多枚举16个目录项，跳过与非UUID名称同样消耗扫描预算。"
     },
     {
+      "name": "HAMT_SWEEP_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
+      "value": 604800,
+      "unit": "秒",
+      "category": "其它",
+      "description": "不可达对象至少保留七天，保护旧读取快照及尚未发表的新根。"
+    },
+    {
+      "name": "HAMT_SWEEP_SLICE_NODES",
+      "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
+      "value": 2048,
+      "unit": "个节点",
+      "category": "其它",
+      "description": "单次根标记最多访问的节点数，超过后整棵树保留。"
+    },
+    {
       "name": "HOST_NOTICE_LIMIT_COUNT",
       "file": "agent_py_agent/agent/conversation/host_notices.py",
       "value": 5,
@@ -3764,6 +3828,14 @@
       "description": "窗口长度（秒）：一小时，与配置键 session_pair_hourly_limit 的语义一致。"
     },
     {
+      "name": "SESSION_TASK_PAYLOAD_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/conversation/session_task_retention.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "终态会话任务正文默认保留三十天；任务身份和去重证明永久沿原记录保存。"
+    },
+    {
       "name": "_LEDGER_GC_RETENTION_SECONDS",
       "file": "agent_py_agent/agent/conversation/store.py",
       "value": 604800,
@@ -3810,6 +3882,30 @@
       "unit": "字节",
       "category": "其它",
       "description": "读取 JSONL 尾部每块 64 KiB：控制读尾的 IO 粒度。"
+    },
+    {
+      "name": "HANDLED_WAKE_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/conversation/store_ledger_retention.py",
+      "value": 14,
+      "unit": "天",
+      "category": "其它",
+      "description": "未被永久幂等记录保护的已处理唤醒回执保留天数。"
+    },
+    {
+      "name": "LEDGER_ARCHIVE_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/conversation/store_ledger_retention.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "仅移动归档在满足安全条件后的保留天数。"
+    },
+    {
+      "name": "LEDGER_GUIDANCE_JOURNAL_BATCH_ROWS",
+      "file": "agent_py_agent/agent/conversation/store_ledger_retention.py",
+      "value": 64,
+      "unit": "行",
+      "category": "其它",
+      "description": "每批退休线程台账最多读取的物理行数。"
     },
     {
       "name": "_NO_PROGRESS_MAX_BACKOFF_MULTIPLIER",
@@ -5276,6 +5372,22 @@
       "description": "合法记录完整保留；超过安全上限明确失败并停在原游标，绝不把一条切成多条或静默截短。"
     },
     {
+      "name": "SPOOL_MAINTENANCE_SLICE_BYTES",
+      "file": "agent_py_agent/agent/ingestion/spool_maintenance.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "其它",
+      "description": "背压期间 spool 维护单片最多复制的字节数。"
+    },
+    {
+      "name": "SPOOL_MAINTENANCE_SLICE_MS",
+      "file": "agent_py_agent/agent/ingestion/spool_maintenance.py",
+      "value": 50,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "背压期间 spool 维护单片墙钟预算毫秒数。"
+    },
+    {
       "name": "_HEAD_CAP_TOKENS",
       "file": "agent_py_agent/agent/ingestion/text_tokens.py",
       "value": 48,
@@ -5530,6 +5642,54 @@
       "unit": "个",
       "category": "上限预算",
       "description": "防长跑进程随历史租户数无界增长(审计 #16)。真·活跃且在限流中的租户是工作集不是泄漏,保留。"
+    },
+    {
+      "name": "LOCAL_STORE_CATCHUP_BATCH_ROWS",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 50000,
+      "unit": "行",
+      "category": "其它",
+      "description": "事件积压追平期间单批登记删除的最多事件行数。"
+    },
+    {
+      "name": "LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "积压追平时单拍最多执行的事件裁剪步数。"
+    },
+    {
+      "name": "LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 2048,
+      "unit": "个",
+      "category": "其它",
+      "description": "单次增量回收最多释放的数据库页数。"
+    },
+    {
+      "name": "LOCAL_STORE_VACUUM_CONVERT_MAX_BYTES",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 536870912,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "旧库一次性切换增量回收模式允许的最大库文件字节数。"
+    },
+    {
+      "name": "LOCAL_STORE_VACUUM_FREE_PERCENT",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 25,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "空闲页占比达到该百分比才执行页回收。"
+    },
+    {
+      "name": "LOCAL_STORE_VACUUM_MIN_FREE_DISK_BYTES",
+      "file": "agent_py_agent/agent/local_storage/maintenance.py",
+      "value": 1073741824,
+      "unit": "字节",
+      "category": "其它",
+      "description": "执行整库重建前要求的最小剩余磁盘字节数。"
     },
     {
       "name": "_FTS_SYNC_SINGLE_MAX_BYTES",
@@ -5882,6 +6042,38 @@
       "unit": "个",
       "category": "上限预算",
       "description": "外置化时容器参数最多保留的条目数；防止海量条目撑爆外置载荷。"
+    },
+    {
+      "name": "OWNER_TOOL_OUTPUT_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/memory_archive/tool_output_retention.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "Owner根工具输出正文默认保留天数。"
+    },
+    {
+      "name": "_TOOL_OUTPUT_LOCK_SWEEP_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/memory_archive/tool_output_retention.py",
+      "value": 86400.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "已失去数据文件的锁侧文件清扫间隔秒数。"
+    },
+    {
+      "name": "_TOOL_OUTPUT_PASS_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/memory_archive/tool_output_retention.py",
+      "value": 3600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "完整扫描后再次扫描的最小间隔秒数。"
+    },
+    {
+      "name": "_TOOL_OUTPUT_WRAPPER_MAX_BYTES",
+      "file": "agent_py_agent/agent/memory_archive/tool_output_retention.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个工具输出包装文件最多读取的字节数。"
     },
     {
       "name": "_GOAL_MAX_CHARS",
@@ -6284,6 +6476,14 @@
       "description": "热源单次系统调用分块读取上限为 64 KiB，保持流式读取与块级摘要复用粒度。"
     },
     {
+      "name": "DEFAULT_SUBAGENT_THREAD_DAYS",
+      "file": "agent_py_agent/agent/memory_store/retention_models.py",
+      "value": 3,
+      "unit": "天",
+      "category": "其它",
+      "description": "已终态并完成交付的子代理线程默认保留三天；普通用户会话仍保留365天。"
+    },
+    {
       "name": "_CONTEXT_BUNDLE_SNAPSHOT_DAYS",
       "file": "agent_py_agent/agent/memory_store/retention_scan.py",
       "value": 30,
@@ -6300,6 +6500,38 @@
       "description": "一天按 86400 秒算：保留期换算成秒的统一口径。"
     },
     {
+      "name": "RETENTION_SCAN_SLICE_BYTES",
+      "file": "agent_py_agent/agent/memory_store/retention_scan_budget.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "其它",
+      "description": "留存扫描单片最多读取的字节数。"
+    },
+    {
+      "name": "RETENTION_SCAN_SLICE_ENTRIES",
+      "file": "agent_py_agent/agent/memory_store/retention_scan_budget.py",
+      "value": 128,
+      "unit": "条",
+      "category": "其它",
+      "description": "留存扫描单片最多解析的候选条数。"
+    },
+    {
+      "name": "RETENTION_SCAN_SLICE_MS",
+      "file": "agent_py_agent/agent/memory_store/retention_scan_budget.py",
+      "value": 25,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "留存扫描单片墙钟预算毫秒数，目录枚举计入。"
+    },
+    {
+      "name": "RETIRED_THREAD_JOURNAL_PAGE_ROWS",
+      "file": "agent_py_agent/agent/memory_store/retired_thread_journal.py",
+      "value": 256,
+      "unit": "行",
+      "category": "其它",
+      "description": "退休线程台账单页最多返回的行数。"
+    },
+    {
       "name": "_ADVISORY_LOCK_KEY",
       "file": "agent_py_agent/agent/migrations.py",
       "value": 7242319002,
@@ -6308,12 +6540,76 @@
       "description": "迁移串行化用的 PG 事务级 advisory lock key（固定常量）；保证多进程迁移互斥（无物理单位）。"
     },
     {
+      "name": "DAEMON_LOG_CHECK_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/observability/log_volume_rotation.py",
+      "value": 30.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "daemon 检查日志卷长度与换代的间隔秒数。"
+    },
+    {
+      "name": "DAEMON_LOG_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/observability/log_volume_rotation.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "已封口 daemon 日志卷的最长保留天数。"
+    },
+    {
+      "name": "DAEMON_LOG_TOTAL_MAX_BYTES",
+      "file": "agent_py_agent/agent/observability/log_volume_rotation.py",
+      "value": 268435456,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "每个服务日志根允许保留的总字节数。"
+    },
+    {
+      "name": "DAEMON_LOG_VOLUME_MAX_BYTES",
+      "file": "agent_py_agent/agent/observability/log_volume_rotation.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "原生 daemon 日志单卷封口前的最大字节数。"
+    },
+    {
+      "name": "TELEMETRY_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/observability/telemetry_ledger.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "已封口遥测卷的最长保留天数。"
+    },
+    {
+      "name": "TELEMETRY_TOTAL_MAX_BYTES",
+      "file": "agent_py_agent/agent/observability/telemetry_ledger.py",
+      "value": 268435456,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "每个 owner 遥测目录允许保留的总字节数。"
+    },
+    {
+      "name": "TELEMETRY_VOLUME_MAX_BYTES",
+      "file": "agent_py_agent/agent/observability/telemetry_ledger.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "工具遥测单卷封口前的最大字节数。"
+    },
+    {
       "name": "_MAX_APPEND_WITNESS_READ_BYTES",
       "file": "agent_py_agent/agent/observability/telemetry_ledger.py",
       "value": 16384,
       "unit": "字节",
       "category": "上限预算",
       "description": "大于2 MiB的账本追加见证最多核验16 KiB头中尾历史窗口字节（<=2 MiB旧前缀整读核验全部锚点），新增记录另计。"
+    },
+    {
+      "name": "_TELEMETRY_RETENTION_CHECK_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/observability/telemetry_ledger.py",
+      "value": 3600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "同一进程两次检查遥测封口卷到期的最短间隔秒数。"
     },
     {
       "name": "_DEFAULT_MAX_AGENT_COUNT",
@@ -8404,6 +8700,46 @@
       "description": "只读ps关系表最多复用0.25秒；终止选取仍强制新鲜观察。"
     },
     {
+      "name": "BACKGROUND_JOB_LOG_RETENTION_DAYS",
+      "file": "agent_py_agent/agent/tooling/process_session_retention.py",
+      "value": 7,
+      "unit": "天",
+      "category": "其它",
+      "description": "已结束后台命令日志的默认保留天数。"
+    },
+    {
+      "name": "BACKGROUND_LOG_RETIREMENT_COMPACT_BYTES",
+      "file": "agent_py_agent/agent/tooling/process_session_retention.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": "日志退役台账已消费前缀达到该字节数时尝试压缩。"
+    },
+    {
+      "name": "_PROCESS_SESSION_LANE_LOCK_WAIT_MS",
+      "file": "agent_py_agent/agent/tooling/process_session_retention.py",
+      "value": 20,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "等待原进程目录锁的最长毫秒数，超时按锁忙留待下一片。"
+    },
+    {
+      "name": "_PROCESS_SESSION_LANE_PRUNE_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/tooling/process_session_retention.py",
+      "value": 3600,
+      "unit": "秒",
+      "category": "其它",
+      "description": "对同一进程目录执行终态 TTL 裁剪的最短间隔秒数。"
+    },
+    {
+      "name": "_LOG_RETIREMENT_DEFAULT_DAYS",
+      "file": "agent_py_agent/agent/tooling/process_session_store.py",
+      "value": 7,
+      "unit": "天",
+      "category": "其它",
+      "description": "台账信息使用的默认保留天数，与维护通道 BACKGROUND_JOB_LOG_RETENTION_DAYS 保持一致。"
+    },
+    {
       "name": "_PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS",
       "file": "agent_py_agent/agent/tooling/process_session_store.py",
       "value": 60.0,
@@ -8418,6 +8754,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "进程记录投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）；被逐出的 owner 下次全读，只变慢不出错。"
+    },
+    {
+      "name": "_PROCESS_SESSION_SCAN_BASE_MS",
+      "file": "agent_py_agent/agent/tooling/process_session_store.py",
+      "value": 1000,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "进程记录默认扫描的基础毫秒额度。"
+    },
+    {
+      "name": "_PROCESS_SESSION_SCAN_ENTRY_MS",
+      "file": "agent_py_agent/agent/tooling/process_session_store.py",
+      "value": 0.1,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "默认全量枚举每见一个目录项追加的毫秒额度，显式预算不受影响。"
     },
     {
       "name": "_DEFAULT_WAIT_SECONDS",
@@ -9140,6 +9492,22 @@
       "description": "维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。"
     },
     {
+      "name": "_OWNER_LANE_SLICE_MS",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
+      "value": 25,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "每个已接线通道为本拍维护总预算追加的毫秒数。"
+    },
+    {
+      "name": "_OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
+      "value": 300,
+      "unit": "秒",
+      "category": "其它",
+      "description": "配额高水位时维护提前到期的最短间隔秒数。"
+    },
+    {
       "name": "_QUOTA_CATCH_UP_MAX_ENTRIES",
       "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
       "value": 1024,
@@ -9178,6 +9546,38 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "原maintenance source完整快照预算，单位字节；超限拒绝，不截断后冒称同一来源。"
+    },
+    {
+      "name": "OWNER_QUOTA_PERMANENT_HEADROOM_PERCENT",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 5,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "永久资产写入在配额之上允许使用的保底余量百分比。"
+    },
+    {
+      "name": "OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 33554432,
+      "unit": "字节",
+      "category": "其它",
+      "description": "对账未完成期间永久资产累计允许增长的字节数。"
+    },
+    {
+      "name": "OWNER_QUOTA_PRESSURE_CRITICAL_PERCENT",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 95,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "owner 用量达到配额该百分比即视为临界水位。"
+    },
+    {
+      "name": "OWNER_QUOTA_PRESSURE_HIGH_PERCENT",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 85,
+      "unit": "%",
+      "category": "比例阈值",
+      "description": "owner 用量达到配额该百分比即视为高水位。"
     },
     {
       "name": "_DISPLAY_USAGE_CACHE_MAX_ENTRIES",
@@ -9314,6 +9714,54 @@
       "unit": "条",
       "category": "其它",
       "description": "核验一个目录时每层nofollow打开按这么多次lstat计入额度；打开比单项lstat贵一个数量级。"
+    },
+    {
+      "name": "OWNER_RETENTION_OVERRIDE_MAX_DAYS",
+      "file": "agent_py_agent/agent/user_space/storage_lanes.py",
+      "value": 3650,
+      "unit": "天",
+      "category": "上限预算",
+      "description": "所有者留存覆盖项允许的最大天数。"
+    },
+    {
+      "name": "STORAGE_LANE_CURSOR_MAX_BYTES",
+      "file": "agent_py_agent/agent/user_space/storage_lanes.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个存储通道游标序列化后的最大字节数，超限视为非法回执。"
+    },
+    {
+      "name": "STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT",
+      "file": "agent_py_agent/agent/user_space/storage_lanes.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个通道回执最多携带的错误条数。"
+    },
+    {
+      "name": "STORAGE_LANE_SLICE_BYTES",
+      "file": "agent_py_agent/agent/user_space/storage_lanes.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "其它",
+      "description": "每个存储通道单拍最多读取的字节数。"
+    },
+    {
+      "name": "STORAGE_LANE_SLICE_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/storage_lanes.py",
+      "value": 128,
+      "unit": "条",
+      "category": "其它",
+      "description": "每个存储通道单拍最多检查的候选条数。"
+    },
+    {
+      "name": "STORAGE_LANE_SLICE_MS",
+      "file": "agent_py_agent/agent/user_space/storage_lanes.py",
+      "value": 25,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "每个存储通道单拍墙钟预算毫秒数。"
     },
     {
       "name": "_MAX_FACT_FILE_BYTES",
@@ -10250,6 +10698,38 @@
       "unit": "个",
       "category": "其它",
       "description": "记忆策展并发 worker 数 2"
+    },
+    {
+      "name": "_OWNER_MAINTENANCE_MAX_PAGES_COUNT",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 256,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单进程 owner 维护每拍最多翻的页数。"
+    },
+    {
+      "name": "_OWNER_MAINTENANCE_PAGE_OWNERS_COUNT",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 4,
+      "unit": "个",
+      "category": "其它",
+      "description": "单进程 owner 维护每页发现的 owner 数。"
+    },
+    {
+      "name": "_OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 64,
+      "unit": "个",
+      "category": "其它",
+      "description": "优先续作队列最多记住的 owner 数。"
+    },
+    {
+      "name": "_OWNER_MAINTENANCE_TICK_BUDGET_SECONDS",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 20.0,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "单进程 owner 维护每拍最多使用的单调时钟秒数。"
     },
     {
       "name": "_NONBLOCKING_DRAIN_SECONDS",

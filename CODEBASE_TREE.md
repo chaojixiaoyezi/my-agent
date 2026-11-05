@@ -1,3 +1,31 @@
+## 2026-11-05 issues-159-179 存储留存车道与有界维护新增生产模块
+
+本轮针对 `#159`–`#179` 共 21 个存储膨胀、孤儿状态、无界扫盘与日志轮转 Issue，新增以下 12 个生产模块并接入统一 `storage_lanes` 维护调度：
+
+```text
+agent_py_agent/
+`-- agent/
+    |-- conversation/
+    |   |-- compact_reachability.py       # W3 从存活线程、检查点与待归档根计算 compact 证据树可达集与宽限期清扫
+    |   |-- hamt_reachability.py          # W3 从存活会话根追踪 HAMT 持久化节点/载荷可达集并清扫孤儿块
+    |   |-- transcript_index_gc.py        # W3 清理指向已删除会话或孤儿偏移量的转录二级索引条目
+    |   |-- store_ledger_retention.py     # W4 已处理唤醒回执、归档记录与退役线程 guidance 账本的有界留存清理
+    |   `-- session_task_retention.py     # W8 已完结并消费报告的 SessionTask 大载荷裁剪与子代理投影/转录留存车道
+    |-- ingestion/
+    |   `-- spool_maintenance.py          # W10 背压下可恢复保证缓冲池（Guarantee Spool）轮转与已发送回执分片维护
+    |-- memory_archive/
+    |   `-- tool_output_retention.py      # W9 Owner 根级超期工具大输出归档退役与已过期读取状态标记
+    |-- memory_store/
+    |   |-- retention_scan_budget.py      # W2 按文件 stat 预算与目录游标可恢复的增量留存扫描器
+    |   `-- retired_thread_journal.py     # W2 已退役子代理/会话线程的紧凑型流水账与幂等清扫登记
+    |-- observability/
+    |   `-- log_volume_rotation.py        # W11 遥测账本容量上限裁剪与守护进程 stdio 日志自轮转
+    |-- tooling/
+    |   `-- process_session_retention.py  # W5 后台进程会话日志按终态/激活 TTL 退役与按比例扫描预算
+    `-- user_space/
+        `-- storage_lanes.py              # W1 统一存储留存车道（10 条车道绑定、请求/回执契约与多进程/单进程协调器续跑）
+```
+
 ## 2026-11-05 多进程 Gateway 全系列（MP-00–MP-17）新增生产模块、状态机形式化/混沌回放单测与三阶段扩缩容蓝图
 
 本轮针对多进程协调锁序反转、Worker 扫盘退避与异常存活、跨代次死锁与孤儿 pending 自愈新增以下生产模块与确定性状态机/仿真回放单测，并落盘 `1 -> 500 -> 500,000` 用户三阶段架构与拆单总纲（Opus × GPT-6 Pro 统一版）：

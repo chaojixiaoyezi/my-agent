@@ -1,3 +1,13 @@
+## 2026-11-05 issues-159-179 存储留存 10 车道、配额永久水位与有界增量扫描收口（已落地）
+
+解决问题：修复 `#159`–`#179` 暴露的长期运行存储与扫描退化问题（正式记忆/绑定误删风险、compact 与 HAMT 历史块无界累积、已处理唤醒/插话/工具输出/后台进程日志/遥测账本未按 TTL 退役、配额满载时缺乏永久恢复水位预留等）。
+
+- **统一存储留存车道（`W1`、`W7`）**：新增 `storage_lanes.py` 定义 `StorageLaneRequest`、结构化车道回执校验与 10 条标准留存车道绑定（`LANE_BINDINGS`），并在 `owner_quota.py` 与 `gateway_loops.py` 引入压力探针、永久水位预留及按游标自适应分页调度。
+- **记忆、会话、紧凑树与账本留存（`W2`、`W3`、`W4`、`W13`）**：正式记忆永不按 TTL 驱逐，引入 `retired_thread_journal.py` 与 `retention_scan_budget.py` 有界扫描（`W2`）；新增 `compact_reachability.py`、`hamt_reachability.py`、`transcript_index_gc.py` 可达性 GC（`W3`）；新增 `store_ledger_retention.py` 清理已处理唤醒与退役 guidance（`W4`）；新增跨会话根展示归档车道（`W13`）。
+- **进程、本地事件库、子代理、工具输出与遥测轮转（`W5`、`W6`、`W8`、`W9`、`W10`、`W11`、`W12`）**：新增 `process_session_retention.py`（`W5`）、`LocalStore` 积压追赶与增量页回收（`W6`）、`session_task_retention.py`（`W8`）、`tool_output_retention.py` 与资产辅助 TTL（`W9`）、`spool_maintenance.py` 与已发回执分片（`W10`）、`log_volume_rotation.py`（`W11`）及依赖基线升级（`W12`）。
+
+状态：`W1`–`W13` 全部通过契约门禁并集成刷新 `constants_catalog.json`。
+
 ## 2026-11-05 能力包内置 MCP 合一与外部插件（Claude Plugin / 开源 Agent）双轨接入设计（设计定稿，待排期实施）
 
 解决问题：现有能力包（`plugin_package.v7`，`/plugins#`）有按任务自动推荐、入口手册、多 `SKILL.md` 与同领域合并，但硬性禁止带 MCP 进程；插件（`plugin_package.v6/v8`，`/plugins@`）能带 MCP 却没有能力包的推荐与方法包结构，导致直装社区现成 Claude Plugin 或偷学带 MCP 的外部 Agent 时被迫手动改造或拆成两份管理。详细设计放在 [能力包内置 MCP 与外部插件双轨接入设计](docs/design/CAPABILITY_PACK_MCP_AND_EXTERNAL_IMPORT.md)。
