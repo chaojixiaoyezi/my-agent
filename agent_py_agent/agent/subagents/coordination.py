@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
@@ -12,8 +12,14 @@ from ..common.json_io import locked_json_path
 _HELD_GUARDS = threading.local()
 
 
-# LLM: 线程局部持有集合仅消除同一原锁的递归获取；PID 防止 fork 后借用父进程的持锁事实，finally 清理不留下 owner 缓存。
-# 函数用途: 在原创建锁上执行短事务，允许同一调用链经过多个正式服务入口而不重复锁住自己。
+# LLM: 仅表示 M/L 持有者首次获取 CG 时的竞争，继承原非阻塞 IO 语义，不代表业务体写入失败。
+# 类用途: 通知事务调用方先退出短门，再重新尝试原操作。
+class SubagentCreationGuardBusy(BlockingIOError):
+    pass
+
+
+# LLM: 同线程/PID 重入不变；首次获取若已持任一 M/L 则 CG 只 try，竞争异常在 yield 前转换，业务体异常原样传播。
+# 函数用途: 在原创建锁上执行短事务，避免协调者持门等待 CG 形成 AB-BA 环。
 @contextmanager
 def subagent_creation_guard(workspace: str | Path):
     path = (Path(workspace) / ".create-subagents.guard").resolve()
@@ -24,7 +30,16 @@ def subagent_creation_guard(workspace: str | Path):
     if key in held:
         yield
         return
-    with locked_json_path(path):
+    from ..common.runtime_gate_registry import current_thread_holds_runtime_gate
+
+    with ExitStack() as stack:
+        if current_thread_holds_runtime_gate():
+            try:
+                stack.enter_context(locked_json_path(path, blocking=False))
+            except BlockingIOError as error:
+                raise SubagentCreationGuardBusy(str(path)) from error
+        else:
+            stack.enter_context(locked_json_path(path))
         held.add(key)
         try:
             yield

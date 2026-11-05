@@ -1504,7 +1504,26 @@ def _settle_fallback_turn_guidance(conversation_store: object | None, request_id
         pass
 
 
-# LLM: 原release短门先于孩子锁；首证明同次保存原终答和可信库存边界，精确清单先耐久发表再写孩子；旧pending不补造边界。
+# LLM: 仅重试 CG 竞争；operation 异常已展开原短门，退避不持锁，30 秒后原异常上抛，不把 IO/来源失败洗成重试。
+# 函数用途: 在释放协调者短门后，有界重跑幂等的孩子申请收口。
+def _retry_on_creation_guard_busy(operation):
+    from ..subagents.coordination import SubagentCreationGuardBusy
+
+    deadline = time.monotonic() + 30.0
+    delay = 0.05
+    max_delay = 1.0
+    while True:
+        try:
+            return operation()
+        except SubagentCreationGuardBusy:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, max_delay)
+
+
+# LLM: 保持原release短门→CG避免Count0反转；竞争先展开全部短门再重试，首证明与精确清单仍在 CG 内耐久发表。
 # 函数用途: 保存原结果和孩子申请清单，在原执行窗口内收口并核对确认。
 def _close_claimed_parent_capabilities(paths, processing_path, request_id, response, agent, attempt_id, lease_epoch):
     import copy
@@ -1529,66 +1548,70 @@ def _close_claimed_parent_capabilities(paths, processing_path, request_id, respo
     manager = getattr(agent, "subagents", None)
     if manager is None or processing_path.parent != paths.processing:
         return
-    with gateway_short_transaction("release"):
-        source = current_request_execution_source("release")
-        with gateway_turn_transition(paths, request_id) if source is None else nullcontext():
-            report = read_json_file_report(processing_path)
-            payload = report.payload
-            if (report.load_error is not None or payload.get("id") != request_id
-                    or payload.get("status") != "processing"
-                    or (attempt_id and payload.get("execution_attempt_id") != attempt_id)
-                    or (lease_epoch and payload.get("lease_epoch") != lease_epoch)
-                    or (paths.terminal / processing_path.name).exists()):
-                return
-            authority = gateway_runtime_authority(payload, request_id)
-            runtime = payload.get("conversation_runtime")
-            parent = str(authority.get("task_id") or (runtime.get("task_id") if isinstance(runtime, dict) else "") or request_id)
-            with manager.creation_guard():
-                proof = payload.get("capability_closeout")
-                if proof is None:
-                    proof = {"schema_version": "gateway_capability_closeout.v1", "request_id": request_id,
-                             "owner_id": agent.home_paths.owner_id, "parent_task_id": parent,
-                             "execution_attempt_id": payload.get("execution_attempt_id", ""),
-                             "lease_epoch": payload.get("lease_epoch", 0), "lease_owner": payload.get("lease_owner", ""),
-                             "reason": "parent_turn_interrupted" if response.get("status") in {"cancelled", "stopped", "interrupted"} else "parent_turn_ended",
-                             "requests": {}, "snapshot_pending": True,
-                             "acknowledged": False, "terminal_response": copy.deepcopy(response)}
-                    # 库存读取无法核实时仍保存原响应，但以后不能把新库存当成旧边界。
-                    proof["selection_boundary"] = None
-                    for attempt in range(2):
-                        try:
-                            children = parent_capability_request_boundary(agent, parent, proof["owner_id"])
-                            proof["selection_boundary"] = {"schema_version": "gateway_capability_selection.v1",
-                                "scope": _capability_selection_scope(proof), "children": children}
-                            break
-                        except OSError:
-                            if attempt == 0:
-                                continue
-                        except (DataCorruptionError, json.JSONDecodeError, TypeError, ValueError):
-                            break
-                    payload["capability_closeout"] = proof
-                    # 这份原响应使窗口中崩溃也只能补终态，不能回到模型重跑。
-                    write_json_file_atomic(processing_path, payload)
-                _validated_capability_closeout(payload, owner_id=agent.home_paths.owner_id)
-                if proof["terminal_response"] != response:
-                    raise DataCorruptionError("gateway capability closeout original response changed")
-                if proof["acknowledged"]:
+
+    def attempt():
+        with gateway_short_transaction("release"):
+            source = current_request_execution_source("release")
+            with gateway_turn_transition(paths, request_id) if source is None else nullcontext():
+                report = read_json_file_report(processing_path)
+                payload = report.payload
+                if (report.load_error is not None or payload.get("id") != request_id
+                        or payload.get("status") != "processing"
+                        or (attempt_id and payload.get("execution_attempt_id") != attempt_id)
+                        or (lease_epoch and payload.get("lease_epoch") != lease_epoch)
+                        or (paths.terminal / processing_path.name).exists()):
                     return
+                authority = gateway_runtime_authority(payload, request_id)
+                runtime = payload.get("conversation_runtime")
+                parent = str(authority.get("task_id") or (runtime.get("task_id") if isinstance(runtime, dict) else "") or request_id)
+                with manager.creation_guard():
+                    proof = payload.get("capability_closeout")
+                    if proof is None:
+                        proof = {"schema_version": "gateway_capability_closeout.v1", "request_id": request_id,
+                                 "owner_id": agent.home_paths.owner_id, "parent_task_id": parent,
+                                 "execution_attempt_id": payload.get("execution_attempt_id", ""),
+                                 "lease_epoch": payload.get("lease_epoch", 0), "lease_owner": payload.get("lease_owner", ""),
+                                 "reason": "parent_turn_interrupted" if response.get("status") in {"cancelled", "stopped", "interrupted"} else "parent_turn_ended",
+                                 "requests": {}, "snapshot_pending": True,
+                                 "acknowledged": False, "terminal_response": copy.deepcopy(response)}
+                        # 库存读取无法核实时仍保存原响应，但以后不能把新库存当成旧边界。
+                        proof["selection_boundary"] = None
+                        for attempt in range(2):
+                            try:
+                                children = parent_capability_request_boundary(agent, parent, proof["owner_id"])
+                                proof["selection_boundary"] = {"schema_version": "gateway_capability_selection.v1",
+                                    "scope": _capability_selection_scope(proof), "children": children}
+                                break
+                            except OSError:
+                                if attempt == 0:
+                                    continue
+                            except (DataCorruptionError, json.JSONDecodeError, TypeError, ValueError):
+                                break
+                        payload["capability_closeout"] = proof
+                        # 这份原响应使窗口中崩溃也只能补终态，不能回到模型重跑。
+                        write_json_file_atomic(processing_path, payload)
+                    _validated_capability_closeout(payload, owner_id=agent.home_paths.owner_id)
+                    if proof["terminal_response"] != response:
+                        raise DataCorruptionError("gateway capability closeout original response changed")
+                    if proof["acknowledged"]:
+                        return
 
-                def close():
-                    selected = {run_id: tuple(ids) for run_id, ids in proof["requests"].items()}
-                    boundary = proof.get("selection_boundary")
-                    close_parent_capability_requests(agent, parent, reason=proof["reason"],
-                        run_ids=tuple(selected), request_ids=selected,
-                        selection_metadata=boundary["children"] if boundary is not None else None)
+                    def close():
+                        selected = {run_id: tuple(ids) for run_id, ids in proof["requests"].items()}
+                        boundary = proof.get("selection_boundary")
+                        close_parent_capability_requests(agent, parent, reason=proof["reason"],
+                            run_ids=tuple(selected), request_ids=selected,
+                            selection_metadata=boundary["children"] if boundary is not None else None)
 
-                def publish_selection(selected_proof):
-                    write_json_file_atomic(processing_path, dict(payload, capability_closeout=selected_proof))
+                    def publish_selection(selected_proof):
+                        write_json_file_atomic(processing_path, dict(payload, capability_closeout=selected_proof))
 
-                proof["acknowledged"] = _reconcile_capability_closeout(manager.workspace, proof, close=close,
-                                                                       publish=publish_selection)
-                if not proof.get("snapshot_pending"):
-                    write_json_file_atomic(processing_path, payload)
+                    proof["acknowledged"] = _reconcile_capability_closeout(manager.workspace, proof, close=close,
+                                                                           publish=publish_selection)
+                    if not proof.get("snapshot_pending"):
+                        write_json_file_atomic(processing_path, payload)
+
+    return _retry_on_creation_guard_busy(attempt)
 
 
 # LLM: 只有原后台消费者明确pending才经当前同Agent/claim短门重排，P3保留；其它响应沿main终态/重启/供应商续跑，不引入业务continuation旁路。
