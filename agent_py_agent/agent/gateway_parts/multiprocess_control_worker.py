@@ -67,6 +67,7 @@ class WorkerControlPump:
         self._faulted = set()
         self._lock = threading.RLock()
         self._stopped = False
+        self._admission_paused = False
         self._read_faults = {}
         self._observation_cursor = ''
         from .request_worker import GatewayInboxScanGate
@@ -92,13 +93,13 @@ class WorkerControlPump:
                 group._require_original()
             return self._stopped, self._drain_resources, tuple(self._active.items()), tuple(self._read_faults)
 
-    # LLM: 目录门与稳定五元组只跳过foreign/inert；fault/prepared/对账保持重扫；原短锁重读及撤权核验不变，只有未返回Future占槽。
+    # LLM: 暂停与认领共用原锁，先核收在途责任但不开始认领或对账；目录缓存及两次精确撤权核验不变。
     #   单条坏记录只保留并诊断，不关闭其它分区；bootstrap/撤权失败仍向组合根传播。
     # 函数用途: 将本分区prepared控制交给独立槽。
     def poll(self):
         with self._lock:
             self._reap()
-            if self._stopped:
+            if self._stopped or self._admission_paused:
                 return 0
             directory = self.paths.root / 'control_operations'
             if not self._scan_gate.should_scan(directory):
@@ -310,18 +311,19 @@ class WorkerControlPump:
     # LLM: 原steer与待私卡executing/UNKNOWN只排一次有界观察；失败已返回Future保责任但不占槽，原op重复仍拒绝，不批准或重发。
     # 函数用途: 为既有插话结果安排只读对账，不重执行任何命令。
     def _offer_reconciliation(self, receipt):
-        if (not self._reconcilable(receipt)
-                or any(item.operation_id == receipt.operation_id for item in self._active.values())
-                or any(not future.done() and item.state == 'completed' for future, item in self._active.items())
-                or sum(not future.done() and item.command_kind != 'stop'
-                       for future, item in self._active.items()) >= 4):
-            return
-        identity = control_worker_authority(self.frozen, claiming=True)
-        if (receipt.dispatch.get('executor') != identity
-                or receipt.dispatch.get('instance_id') != self.frozen.launch.instance_id):
-            return
-        self._active[self._submit(self._executor, self._reconcile_delivery, receipt)] = receipt
-        self._observation_cursor = receipt.operation_id
+        with self._lock:
+            if (self._stopped or self._admission_paused or not self._reconcilable(receipt)
+                    or any(item.operation_id == receipt.operation_id for item in self._active.values())
+                    or any(not future.done() and item.state == 'completed' for future, item in self._active.items())
+                    or sum(not future.done() and item.command_kind != 'stop'
+                           for future, item in self._active.items()) >= 4):
+                return
+            identity = control_worker_authority(self.frozen, claiming=True)
+            if (receipt.dispatch.get('executor') != identity
+                    or receipt.dispatch.get('instance_id') != self.frozen.launch.instance_id):
+                return
+            self._active[self._submit(self._executor, self._reconcile_delivery, receipt)] = receipt
+            self._observation_cursor = receipt.operation_id
 
     # LLM: 每次只读原steer/私卡决定事实，核同登记/出生/Agent pin及完整CAS；私卡op→permission只try，JSON忙保原回执，不批准/投递或占槽长等。
     # 函数用途: 把原插话已消费/已拒绝投影回同一操作，其它结果保持未知。
@@ -469,6 +471,19 @@ class WorkerControlPump:
         except BaseException as error:
             self._drain_resources[index].retain_fault(error)
             raise
+
+    # LLM: 原poll锁内建立O(1)可逆暂停；返回时旧poll已到安全边界，随后可在锁外发布不健康心跳。
+    # 函数用途: 临时关闭认领与对账准入，不设置stop、不清Future或退出证明。
+    def pause_admission(self):
+        with self._lock:
+            self._admission_paused = True
+
+    # LLM: 仅由新鲜readiness、登记复核及健康心跳发布均成功的调用者恢复；暂停本身不授予执行权。
+    # 函数用途: 解除临时准入暂停，永久停单仍保持单向。
+    def resume_admission(self):
+        with self._lock:
+            if not self._stopped:
+                self._admission_paused = False
 
     # LLM: 单向停止新认领，原执行继续结算。
     # 函数用途: 阻止排空时增加控制责任。
