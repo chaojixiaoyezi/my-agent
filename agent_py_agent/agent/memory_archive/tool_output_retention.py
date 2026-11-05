@@ -176,16 +176,16 @@ def _same_wrapper(home, candidate):
     return all(value[key] == candidate['value'][key] for key in ('sha256', 'created_at', 'attempt_id', 'run_id'))
 
 
-# LLM: 不嵌套artifact/shard锁；证据必须先成功刷盘，任一失败保留正文并留下可重试续点。
+# LLM: 不嵌套artifact/shard锁；证据必须先刷盘；min_items只保证已核引用的首项跨过时间门。
 # 函数用途: 分验证、写账、删除三阶段退休一批同Owner候选。
-def _retire_batch(home, eligible, *, now, days, budget):
+def _retire_batch(home, eligible, *, now, days, budget, min_items: int = 0):
     from ..common.nofollow_fs import append_text_beneath
 
     result = {'decided': set(), 'deleted_items': 0, 'freed_bytes': 0, 'skipped': {}, 'errors': []}
     verified = defaultdict(list)
     directory = tool_output_root(home)
-    for candidate in eligible:
-        if budget.remaining_ms() <= 0:
+    for index, candidate in enumerate(eligible):
+        if index >= min_items and budget.remaining_ms() <= 0:
             break
         name = candidate['name']
         try:
@@ -202,8 +202,8 @@ def _retire_batch(home, eligible, *, now, days, budget):
         except (OSError, ValueError):
             _error(result['errors'], 'artifact_verify_failed', '/'.join((*_PARTS, name)))
     recorded = []
-    for shard, candidates in verified.items():
-        if budget.remaining_ms() <= 0:
+    for index, (shard, candidates) in enumerate(verified.items()):
+        if index >= min_items and budget.remaining_ms() <= 0:
             break
         try:
             ensure_private_dir(directory / 'retired', canonical_root=home)
@@ -219,8 +219,8 @@ def _retire_batch(home, eligible, *, now, days, budget):
             result['skipped']['lock_busy'] = result['skipped'].get('lock_busy', 0) + len(candidates)
         except (OSError, ValueError):
             _error(result['errors'], 'retired_shard_unwritable', '/'.join((*_PARTS, *shard)))
-    for candidate in recorded:
-        if budget.remaining_ms() <= 0:
+    for index, candidate in enumerate(recorded):
+        if index >= min_items and budget.remaining_ms() <= 0:
             break
         name = candidate['name']
         try:
@@ -359,7 +359,7 @@ def _sweep_locks(request, cursor, directory, budget):
         os.close(descriptor)
 
 
-# LLM: 调度器拥有游标和写门；扫描锁外、pin只取一次，任何未处理/锁忙名称不能越过连续前缀。
+# LLM: 调度器拥有游标和写门；pin每片只取一次，耗时后仍推进首项，未决名称不越过连续前缀。
 # 函数用途: 在Owner规范根有界退休终态attempt的到期工具正文。
 def maintain_owner_tool_outputs_lane(request) -> dict:
     from ..memory_store.retention_scan import current_retention_pins
@@ -469,8 +469,9 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
                 else:
                     eligible.append(item)
     _pin_error_rows(pin_errors, errors)
-    if eligible and budget.remaining_ms() > 0:
-        result = request.run_write(lambda: _retire_batch(home, eligible, now=request.now, days=days, budget=budget))
+    if eligible:
+        result = request.run_write(lambda: _retire_batch(home, eligible, now=request.now,
+                                                        days=days, budget=budget, min_items=1))
         decided.update(result['decided'])
         for key in ('deleted_items', 'freed_bytes'):
             receipt[key] = result[key]

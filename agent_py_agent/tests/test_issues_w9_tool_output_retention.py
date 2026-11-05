@@ -420,24 +420,102 @@ def test_freed_bytes_include_unlink_before_directory_fsync_error(setup, monkeypa
     assert not path.exists() and first['freed_bytes'] + sum(row['freed_bytes'] for row in rest) == expected
 
 
-# LLM: pin获取完成时预算已耗尽，不能取得写门再追加注定无法删除的重复退休行。
-# 函数用途: 复现并约束时间预算耗尽后的零提交。
-def test_budget_exhausted_after_pins_makes_zero_commits(setup, monkeypatch):
-    from agent_py_agent.agent.memory_store import retention_scan
+# LLM: 原生FD目录只读计数，目录枚举自身的临时FD在两次观察中相同且立即关闭。
+# 函数用途: 返回本进程实际打开的FD数，不以常量或删除数量代替资源观察。
+def _fd_count():
+    root = Path('/proc/self/fd') if Path('/proc/self/fd').is_dir() else Path('/dev/fd')
+    return len(os.listdir(root))
 
-    path, _ = artifact(setup)
+
+# LLM: 真实pins前等待两倍时间片，原writer、权威attempt及三阶段退休器全部实际执行。
+# 函数用途: 验证慢引用扫描仍持续退休正文、证据先落盘、游标收敛且FD零增量。
+def test_slow_pin_snapshot_still_retires_due_outputs(setup, monkeypatch, record_property):
+    import time
+
+    from agent_py_agent.agent.memory_store import retention_scan
+    from agent_py_agent.agent.user_space.storage_lanes import STORAGE_LANE_SLICE_MS
+
+    artifacts = [artifact(setup, 'slow-inline-a'), artifact(setup, 'slow-blob', blob=True),
+                 artifact(setup, 'slow-inline-b')]
+    paths = [path for path, _ in artifacts]
+    blobs = [path.with_name(value['content_blob']) for path, value in artifacts if value.get('content_blob')]
+    index = paths[0].parent / 'index.jsonl'
+    index_before = index.read_bytes()
     original = retention_scan.current_retention_pins
-    # LLM: 保留真实pin结果，只将下一观察点的剩余时间设为零。
-    # 函数用途: 模拟准备工作恰好耗尽本片时间预算。
-    def exhaust_after_pins(*args, **kwargs):
-        result = original(*args, **kwargs)
-        monkeypatch.setattr(StorageLaneBudget, 'remaining_ms', lambda self: 0)
-        return result
-    monkeypatch.setattr(retention_scan, 'current_retention_pins', exhaust_after_pins)
-    calls = []
-    result = retention.maintain_owner_tool_outputs_lane(request(setup, commits=calls))
-    assert calls == [] and path.exists() and not (path.parent / 'retired').exists()
-    assert not result['complete'] and result['cursor'].get('after', '') == ''
+    pin_calls, commits = [], []
+
+    def slow_pins(*args, **kwargs):
+        pin_calls.append(True)
+        time.sleep(2 * STORAGE_LANE_SLICE_MS / 1000)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(retention_scan, 'current_retention_pins', slow_pins)
+    before = _fd_count()
+    cursor, rows = {}, []
+    for _ in range(8):
+        pins_before, commits_before = len(pin_calls), len(commits)
+        row = retention.maintain_owner_tool_outputs_lane(request(setup, cursor=cursor, commits=commits))
+        validate_lane_receipt(row)
+        rows.append(row)
+        assert len(pin_calls) - pins_before == 1
+        assert len(commits) - commits_before == 1
+        assert row['deleted_items'] == 1
+        if row['complete']:
+            break
+        assert any(path.exists() for path in paths)
+        assert row['cursor'] != cursor
+        cursor = json.loads(json.dumps(row['cursor']))
+    assert rows[-1]['complete'] is True and sum(row['deleted_items'] for row in rows) == len(paths)
+    assert all(not path.exists() for path in paths + blobs)
+    retired = [json.loads(line) for shard in (paths[0].parent / 'retired').glob('*.jsonl')
+               for line in shard.read_text().splitlines()]
+    assert {row['name'] for row in retired} == {path.name for path in paths}
+    assert index.read_bytes() == index_before
+    for path in paths:
+        assert read_tool_output_artifact(ReadToolOutputArtifactRequest(setup[0].owner_home_dir, str(path)))['error_code'] == 'artifact_expired'
+    idle = retention.maintain_owner_tool_outputs_lane(request(setup, cursor=rows[-1]['cursor']))
+    assert idle['complete'] and idle['items'] == idle['bytes'] == 0
+    assert all(not path.exists() for path in paths + blobs)
+    delta = _fd_count() - before
+    record_property('fd_delta', delta)
+    record_property('pin_calls', len(pin_calls))
+    assert delta == 0
+
+
+# LLM: 原锁真实竞争；unlink错误发生在真实父FD已打开之后，不替换删除或FD计量为假成功。
+# 函数用途: 验证锁忙及删除失败不丢续点、不泄漏FD，条件解除后可原样恢复。
+@pytest.mark.parametrize('condition', ['lock_busy', 'unlink_failure'])
+def test_retirement_failure_paths_close_descriptors(setup, monkeypatch, record_property, condition):
+    from contextlib import nullcontext
+
+    path, value = artifact(setup, 'fd-check', blob=True)
+    original, failed = os.unlink, []
+
+    def fail_unlink(name, *args, **kwargs):
+        if name == value['content_blob'] and kwargs.get('dir_fd') is not None:
+            failed.append(True)
+            raise OSError('simulated unlink failure')
+        return original(name, *args, **kwargs)
+
+    if condition == 'unlink_failure':
+        monkeypatch.setattr(os, 'unlink', fail_unlink)
+        # 替身仍使用真实dir_fd调用；保留原能力声明，避免被当成平台不支持而提前退出。
+        monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {fail_unlink})
+    with held_lock(path) if condition == 'lock_busy' else nullcontext():
+        before = _fd_count()
+        row = retention.maintain_owner_tool_outputs_lane(request(setup))
+        delta = _fd_count() - before
+        record_property('fd_delta', delta)
+        assert delta == 0 and path.exists() and row['deleted_items'] == 0
+        assert not row['complete'] and row['cursor'].get('after', '') == ''
+        if condition == 'lock_busy':
+            assert row['skipped']['lock_busy'] == 1
+        else:
+            assert failed and row['errors']
+            assert retention.retired_tool_output(setup[0].owner_home_dir, path, value)
+    monkeypatch.setattr(os, 'unlink', original)
+    assert sum(item['deleted_items'] for item in drain(setup, cursor=row['cursor'])) == 1
+    assert not path.exists() and not path.with_suffix('.blob').exists()
 
 
 # LLM: 一个完整窗口的有数据伴生锁不能让排序后部的旧孤儿永久饥饿；清扫续点跨完整pass保存。

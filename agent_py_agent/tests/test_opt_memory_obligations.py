@@ -175,17 +175,19 @@ def test_retention_uses_last_observed_not_review_updated_time(tmp_path):
 
 
 # LLM: 三个独立过期目标共用同阶段pin视图；实际删除仍走指纹/引用重核，禁止按目标全量重建。
-# 函数用途: 验证DEL-MR-17不会为每个Daily文件重读全部记忆和会话。
+# 函数用途: 验证三个真实过期回收容器复用pins，不借永久Daily或不检查pins的缓存误证。
 def test_retention_reuses_pin_snapshot_for_unchanged_sources(tmp_path, monkeypatch):
     from agent_py_agent.agent.memory_store import retention_apply
-    from agent_py_agent.tests.test_memory_retention_wave5 import NOW, old_file, runtime
+    from agent_py_agent.tests.test_memory_retention_phase2 import _trash_tool_manifests
+    from agent_py_agent.tests.test_memory_retention_wave5 import NOW, runtime
 
     home, _candidates, service = runtime(tmp_path)
-    paths = [old_file(home.owner_memory_daily_dir / f"expired-{i}.jsonl") for i in range(3)]
+    moved = _trash_tool_manifests(home, service, [f"expired-{i}" for i in range(3)])
+    paths = [action.destination for action in moved]
     with patch.object(retention_apply, "current_retention_pins", wraps=retention_apply.current_retention_pins) as scan:
-        report = service.apply(now=NOW)
+        report = service.apply(now=NOW + timedelta(days=31))
     assert report.ok and all(not path.exists() for path in paths)
-    assert scan.call_count <= 1
+    assert scan.call_count == 1
 
 
 # LLM: 实际CandidateService发表新引用后旧投影必须失效；坏源不得复用旧complete结果，不假装跨进程原子。

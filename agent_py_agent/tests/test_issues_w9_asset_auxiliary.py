@@ -272,23 +272,96 @@ def test_auxiliary_read_budget_and_invalid_json_accounting(setup, invalid):
     assert result['deleted_items'] == 0
 
 
-# LLM: pin完成后时间预算归零时，辅助lane不能提交一个必然不做事的批次。
-# 函数用途: 约束预算耗尽下的写门调用。
-def test_auxiliary_budget_exhausted_after_pins_zero_commits(setup, monkeypatch):
-    from agent_py_agent.agent.memory_store import retention_scan
+# LLM: 等待只包住真实pins，不替换引用视图；每个有到期候选的片必须前进，空集合仍走原阶段切换。
+# 函数用途: 验证慢扫描下辅助候选最终清完、完整轮结束、字节计量及FD观察都准确。
+def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch, record_property):
+    import time
 
-    path = evolution_request(setup, 'expired-budget')
+    from agent_py_agent.agent.memory_store import retention_scan
+    from agent_py_agent.agent.user_space.storage_lanes import STORAGE_LANE_SLICE_MS
+    from agent_py_agent.tests.test_issues_w9_tool_output_retention import _fd_count
+
+    paths = [candidate(setup, f'slow-{index}', age=31) for index in range(3)]
+    expected_bytes = sum(path.stat().st_size for path in paths)
+    blobs = setup[0].owner_home_dir / 'data/asset_evolution/blobs'
+    preserved = {path: path.read_bytes() for path in blobs.rglob('*') if path.is_file()}
     original = retention_scan.current_retention_pins
-    # LLM: 只注入剩余预算变化，不替换pin来源或候选到期事实。
-    # 函数用途: 精确模拟pin检查耗尽预算。
-    def exhaust_after_pins(*args, **kwargs):
-        result = original(*args, **kwargs)
-        monkeypatch.setattr(StorageLaneBudget, 'remaining_ms', lambda self: 0)
-        return result
-    monkeypatch.setattr(retention_scan, 'current_retention_pins', exhaust_after_pins)
-    calls = []
-    result = history.maintain_asset_auxiliary_lane(request(setup, commits=calls))
-    assert calls == [] and path.exists() and not result['complete']
+    pin_calls, commits = [], []
+
+    def slow_pins(*args, **kwargs):
+        pin_calls.append(True)
+        time.sleep(2 * STORAGE_LANE_SLICE_MS / 1000)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(retention_scan, 'current_retention_pins', slow_pins)
+    before = _fd_count()
+    cursor, rows = {'phase': 'candidates', 'kind': 'script', 'after': ''}, []
+    for _ in range(8):
+        pending = any(path.exists() for path in paths)
+        pins_before, commits_before = len(pin_calls), len(commits)
+        row = history.maintain_asset_auxiliary_lane(request(setup, cursor=cursor, commits=commits))
+        validate_lane_receipt(row)
+        rows.append(row)
+        assert len(pin_calls) - pins_before <= 1
+        if pending:
+            assert row['deleted_items'] == 1
+            assert len(pin_calls) - pins_before == len(commits) - commits_before == 1
+        else:
+            # candidates穷尽后仍须经过原extractions空阶段；无工作不取得写门，不伪称做了删除。
+            assert row['deleted_items'] == 0 and len(commits) == commits_before
+        if row['complete']:
+            break
+        assert row['cursor'] != cursor
+        cursor = json.loads(json.dumps(row['cursor']))
+    assert rows[-1]['complete'] is True and all(not path.exists() for path in paths)
+    assert sum(row['deleted_items'] for row in rows) == len(paths)
+    assert sum(row['freed_bytes'] for row in rows) == expected_bytes
+    assert all(path.read_bytes() == body for path, body in preserved.items())
+    assert history._AUXILIARY_READ_METER.get() is None
+    delta = _fd_count() - before
+    record_property('fd_delta', delta)
+    record_property('pin_calls', len(pin_calls))
+    assert delta == 0
+
+
+# LLM: 使用真实领域锁或在固定父FD的unlink处模拟单次错误，保留原关闭式结果和恢复路径。
+# 函数用途: 验证辅助记录锁忙、删除失败时FD和读取计量上下文均归还。
+@pytest.mark.parametrize('condition', ['lock_busy', 'unlink_failure'])
+def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_property, condition):
+    import os
+    from contextlib import nullcontext
+
+    from agent_py_agent.tests.test_issues_w9_tool_output_retention import _fd_count
+
+    path = evolution_request(setup, 'fd-check')
+    original, failed = os.unlink, []
+
+    def fail_unlink(name, *args, **kwargs):
+        if name == path.name and kwargs.get('dir_fd') is not None:
+            failed.append(True)
+            raise OSError('simulated unlink failure')
+        return original(name, *args, **kwargs)
+
+    if condition == 'unlink_failure':
+        monkeypatch.setattr(os, 'unlink', fail_unlink)
+        # 能力不变，错误必须发生在实际unlink观察点而非平台能力检查阶段。
+        monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {fail_unlink})
+    lock = held_lock(locked_json_path(path)) if condition == 'lock_busy' else nullcontext()
+    with lock:
+        before = _fd_count()
+        row = history.maintain_asset_auxiliary_lane(request(setup))
+        delta = _fd_count() - before
+        record_property('fd_delta', delta)
+        assert delta == 0 and path.exists() and row['deleted_items'] == 0
+        assert not row['complete'] and row['cursor']['after'] == ''
+        assert history._AUXILIARY_READ_METER.get() is None
+        if condition == 'lock_busy':
+            assert row['skipped']['lock_busy'] == 1
+        else:
+            assert failed and row['errors']
+    monkeypatch.setattr(os, 'unlink', original)
+    assert sum(item['deleted_items'] for item in drain(setup, cursor=row['cursor'])) == 1
+    assert not path.exists()
 
 
 # LLM: 原unlink先删后同步；目录同步失败时仍要把已确认删除量记入回执，并报告同步错误。

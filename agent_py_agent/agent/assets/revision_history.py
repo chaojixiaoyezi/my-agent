@@ -833,7 +833,7 @@ def _auxiliary_next_cursor(cursor, now):
     return {'next_pass_at': now + _ASSET_AUXILIARY_PASS_INTERVAL_SECONDS}, True
 
 
-# LLM: 扫描和删除都校验真实普通单链接叶；值与inode一起冻结以保留并发新代次。
+# LLM: 扫描和删除都校验真实普通单链接叶；仅批次首项可跨时间门，字节额度及身份门不放宽。
 # 函数用途: 读取一份辅助JSON及用于复核和释放计量的身份。
 def _auxiliary_snapshot(home, parts, *, max_bytes=None):
     import os
@@ -843,7 +843,7 @@ def _auxiliary_snapshot(home, parts, *, max_bytes=None):
     limit = MAX_ASSET_BYTES * 16 if max_bytes is None else max(0, max_bytes)
     meter = _AUXILIARY_READ_METER.get()
     if meter is not None:
-        if meter['budget'].remaining_ms() <= 0:
+        if meter['budget'].remaining_ms() <= 0 and not meter.get('allow_expired', False):
             raise _AuxiliaryReadError('auxiliary time budget exhausted', 0, budget_exhausted=True)
         limit = min(limit, meter['remaining'])
     descriptor = open_readonly_file_beneath(home, parts)
@@ -905,17 +905,19 @@ def _unlink_auxiliary_file(home, parts, identity, result, name):
         os.close(parent)
 
 
-# LLM: 单次调用只持一把领域锁，所有复核/删除在run_write内；锁忙未决，其它新代次保留。
+# LLM: 单次调用只持一把领域锁，复核/删除在run_write内；min_items仅放行首项时间门，锁及字节门不变。
 # 函数用途: 执行本片辅助JSON删除批次，不触及blob、版本或锁文件。
-def _retire_auxiliary_batch(home, phase, kind, due, now, budget):
+def _retire_auxiliary_batch(home, phase, kind, due, now, budget, *, min_items: int = 0):
     result = {'decided': set(), 'deleted_items': 0, 'freed_bytes': 0, 'skipped': {}, 'errors': []}
-    for item in due:
-        if budget.remaining_ms() <= 0:
+    for index, item in enumerate(due):
+        if index >= min_items and budget.remaining_ms() <= 0:
             break
         meter = _AUXILIARY_READ_METER.get()
         if meter is not None and meter['remaining'] < item['identity'][2]:
             result['budget_exhausted'] = True
             break
+        if meter is not None:
+            meter['allow_expired'] = index < min_items
         parts, stem = item['parts'], item['name'][:-5]
         try:
             if phase == 'extractions':
@@ -959,7 +961,7 @@ def _retire_auxiliary_batch(home, phase, kind, due, now, budget):
     return result
 
 
-# LLM: 入口接受冻结DTO；每片至多一次写提交，固定阶段游标不跳过锁忙叶，pin仅在确有到期记录时获取一次。
+# LLM: 入口接受冻结DTO；每片至多一次写提交，固定阶段游标不跳锁忙叶，pin每片只取一次并推进首项。
 # 函数用途: 分片清理已处理演进请求、过期草稿/候选和到期自动提炼草稿。
 def _maintain_asset_auxiliary_slice(request) -> dict:
     from ..memory_store.retention_scan import current_retention_pins
@@ -1054,8 +1056,18 @@ def _maintain_asset_auxiliary_slice(request) -> dict:
     read_room = not eligible or meter is None or meter['remaining'] >= eligible[0]['identity'][2]
     if eligible and not read_room:
         receipt['deferred_reason'] = 'budget_exhausted'
-    if eligible and budget.remaining_ms() > 0 and read_room:
-        result = request.run_write(lambda: _retire_auxiliary_batch(home, phase, kind, eligible, now, budget))
+    if eligible and read_room:
+        # 写门可换线程，实际复读仍须绑定原片的字节/首项时间额度，并在退出时归还上下文。
+        def retire():
+            token = _AUXILIARY_READ_METER.set(meter)
+            try:
+                return _retire_auxiliary_batch(home, phase, kind, eligible, now, budget, min_items=1)
+            finally:
+                if meter is not None:
+                    meter.pop('allow_expired', None)
+                _AUXILIARY_READ_METER.reset(token)
+
+        result = request.run_write(retire)
         decided.update(result['decided'])
         for key in ('deleted_items', 'freed_bytes'):
             receipt[key] = result[key]

@@ -298,15 +298,17 @@ def test_move_after_per_member_open_preserves_output(tmp_path, monkeypatch, dire
     assert not [a for a in report.actions if a.category == "task_tmp" and a.status == "deleted"]
 
 
-# LLM: 两个真实Daily动作之间首次发表tasks或runs状态；不得重新生成计划掩盖缓存漏监视。
+# LLM: 两个真实过期trash动作之间首次发表tasks或runs状态；不得重新计划掩盖缓存漏监视。
 # 函数用途: 锁定已有work首次state写入后下一动作重建pins。
 @pytest.mark.parametrize("namespace", ["tasks", "runs"])
 def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monkeypatch, namespace):
+    from datetime import timedelta
+
     from agent_py_agent.agent.memory_store import retention_apply as apply
 
     home, _candidates, service = runtime(tmp_path)
-    first = old_file(home.owner_memory_daily_dir / "a-first.jsonl")
-    second = old_file(home.owner_memory_daily_dir / "b-pinned.jsonl")
+    first, second = _trash_tool_manifests(home, service, ["a-first", "b-pinned"])
+    later = NOW + timedelta(days=31)
     work = Path(home.owner_home_dir) / namespace / "2026-10-01/sample/work"
     work.mkdir(parents=True)
     original = apply._apply_action
@@ -316,17 +318,17 @@ def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monk
     # 函数用途: 模拟同阶段任务首次启动并新增证据引用。
     def publish(**kwargs):
         result = original(**kwargs)
-        if kwargs["action"].path == first:
-            assert result.status == "trashed"
+        if kwargs["action"].path == first.destination:
+            assert result.status == "deleted"
             old_file(work / "state.json", json.dumps({"task_id": "sample", "status": "RUNNING",
-                "updated_at": NOW.timestamp(), "source_refs": [{"path": str(second)}]}))
+                "updated_at": later.timestamp(), "source_refs": [{"path": str(second.path)}]}))
             published.append(True)
         return result
 
     monkeypatch.setattr(apply, "_apply_action", publish)
-    report = service.apply(now=NOW)
-    assert published and not first.exists() and second.exists()
-    assert next(a for a in report.actions if a.path == second).status == "state_changed"
+    report = service.apply(now=later)
+    assert published and not first.destination.exists() and second.destination.exists()
+    assert next(a for a in report.actions if a.path == second.destination).status == "state_changed"
 
 
 # LLM: 仅日期/任务目录的scandir失败，必须真的经过注入且complete=False，不靠chmod行为猜权限。
@@ -374,11 +376,11 @@ def test_trash_scoped_pins_revalidate_racing_source(tmp_path, monkeypatch, sourc
     from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
 
     home, candidates, service = runtime(tmp_path)
-    source = old_file(home.owner_memory_daily_dir / "expired.jsonl")
-    moved = next(a for a in service.apply(now=NOW).actions if a.path == source)
+    moved, = _trash_tool_manifests(home, service, ["expired"])
+    source, destination = moved.path, moved.destination
     later = NOW + timedelta(days=31)
     old_plan = service.plan(now=later)
-    assert [a for a in old_plan.actions if a.path == moved.destination]
+    assert [a for a in old_plan.actions if a.path == destination]
     path = home.owner_memory_curator_runs_dir / "racing.jsonl"
     content = json.dumps({"source_refs": [str(source)]}) if source_kind == "referenced" else "{}"
     old_file(path, content + "\n")
@@ -428,11 +430,11 @@ def test_trash_scoped_pins_revalidate_racing_source(tmp_path, monkeypatch, sourc
 
     monkeypatch.setattr(scan, "_fingerprint_source", racing)
     plan = service.plan(now=later)
-    assert bool([a for a in plan.actions if a.path == moved.destination]) is (source_kind == "unrelated")
+    assert bool([a for a in plan.actions if a.path == destination]) is (source_kind == "unrelated")
     report = execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=later)
     assert calls
-    assert moved.destination.exists() is (source_kind != "unrelated")
-    action = next(a for a in report.actions if a.path == moved.destination)
+    assert destination.exists() is (source_kind != "unrelated")
+    action = next(a for a in report.actions if a.path == destination)
     assert (action.status == "deleted") is (source_kind == "unrelated")
 
 
@@ -503,18 +505,22 @@ def test_disappearing_discovery_member_does_not_hide_active_sibling(tmp_path, mo
 # 函数用途: 验证合法任务名tmp/work/inputs/output不会被发现器当作内部目录忽略。
 @pytest.mark.parametrize("task_name", ["tmp", "work", "inputs", "output"])
 def test_internal_directory_names_are_legal_task_names(tmp_path, task_name):
+    from datetime import timedelta
+
     from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
 
     home, candidates, service = runtime(tmp_path)
-    target = old_file(home.owner_memory_daily_dir / "2000-01-01.jsonl")
-    old_plan = service.plan(now=NOW)
-    assert any(action.path == target for action in old_plan.actions)
+    moved, = _trash_tool_manifests(home, service, ["2000-01-01"])
+    source, target = moved.path, moved.destination
+    later = NOW + timedelta(days=31)
+    old_plan = service.plan(now=later)
+    assert any(action.path == target and action.operation == "delete_tree" for action in old_plan.actions)
     old_file(home.owner_tasks_dir / "2026-10-01" / task_name / "work/state.json", json.dumps({
-        "task_id": task_name, "status": "RUNNING", "updated_at": NOW.timestamp(), "source_refs": [str(target)]}))
-    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
-    assert complete and pins.protects(target, [])
-    assert not any(action.path == target for action in service.plan(now=NOW).actions)
-    execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=NOW)
+        "task_id": task_name, "status": "RUNNING", "updated_at": later.timestamp(), "source_refs": [str(source)]}))
+    pins, complete = scan.current_retention_pins(home, (), [], now=later)
+    assert complete and pins.protects(source, [])
+    assert not any(action.path == target for action in service.plan(now=later).actions)
+    execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=later)
     assert target.exists()
 
 
@@ -681,3 +687,15 @@ def test_curator_skips_invalid_anchor_scope_without_losing_valid_scopes(tmp_path
     result = attach_candidate_anchors(batch, candidates)
     assert {anchor["candidate_id"] for anchor in result.candidate_anchors} == {row.candidate_id for row in rows}
     assert result.messages == batch.messages and result.audit_events == batch.audit_events
+
+
+# LLM: 使用真实规划和首阶段回收，不直接调用私有trash写者；NOW时原文件确实具备回收资格。
+# 函数用途: 为引用复核测试生成tool_manifest原路径和真实已提交的回收容器。
+def _trash_tool_manifests(home, service, names):
+    root = Path(home.owner_home_dir) / "memory_archive/snapshots/tool_manifests"
+    sources = [old_file(root / f"{name}.json") for name in names]
+    report = service.apply(now=NOW)
+    moved = [next(action for action in report.actions if action.path == source) for source in sources]
+    assert report.ok and all(action.status == "trashed" for action in moved)
+    assert all(not action.path.exists() and action.destination.is_dir() for action in moved)
+    return sorted(moved, key=lambda action: str(action.destination))
