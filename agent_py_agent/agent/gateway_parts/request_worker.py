@@ -396,9 +396,13 @@ def dispatch_pending_requests(
     blocked = 0
     deferred_present = False
     for request in _iter_pending_requests(paths):
+        from .multiprocess_unroutable_closeout import resume_unroutable_closeout
         from .queued_steer_expiry import resume_expired_steer
 
-        resumed = resume_expired_steer(paths, request.path, admission_gate=admission_gate)
+        # 已封存退休答复先偿还补交责任；不能被steer专用校验或恢复退避截走。
+        resumed = resume_unroutable_closeout(paths, request.path, admission_gate=admission_gate)
+        if resumed is None:
+            resumed = resume_expired_steer(paths, request.path, admission_gate=admission_gate)
         if resumed is not None:
             blocked += int(resumed == "blocked")
             continue
@@ -1523,7 +1527,7 @@ def _retry_on_creation_guard_busy(operation):
             delay = min(delay * 2, max_delay)
 
 
-# LLM: 保持原release短门→CG避免Count0反转；竞争先展开全部短门再重试，首证明与精确清单仍在 CG 内耐久发表。
+# LLM: 无受管source时先CG再T；受管原release门内CG仅try，竞争展开全部短门再重试，首证明仍在CG内耐久发表。
 # 函数用途: 保存原结果和孩子申请清单，在原执行窗口内收口并核对确认。
 def _close_claimed_parent_capabilities(paths, processing_path, request_id, response, agent, attempt_id, lease_epoch):
     import copy
@@ -1550,8 +1554,9 @@ def _close_claimed_parent_capabilities(paths, processing_path, request_id, respo
         return
 
     def attempt():
-        with gateway_short_transaction("release"):
-            source = current_request_execution_source("release")
+        source = current_request_execution_source("release")
+        # Count0没有M/L登记，T内CG会阻塞，必须在原T/读取之前取得同一owner的CG。
+        with manager.creation_guard() if source is None else nullcontext(), gateway_short_transaction("release"):
             with gateway_turn_transition(paths, request_id) if source is None else nullcontext():
                 report = read_json_file_report(processing_path)
                 payload = report.payload

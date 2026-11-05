@@ -2146,6 +2146,12 @@ def _requeue_stale_processing_locked(paths, request_path, payload, context):
             "lease_epoch": int(fresh.get("lease_epoch") or 0),
             "route": dict(fresh["route"]),
         }
+        from .multiprocess_processing_recovery import stopped_requeue_evidence
+
+        # 先保原签发窗口的完整停止证据；退役可搬走P1/P3，不能同时擦掉本请求的收尾来源。
+        stopped = stopped_requeue_evidence(fresh)
+        if stopped is not None:
+            requeued["queue_transport_source"]["stopped_execution"] = stopped
     for key in (
         "execution_attempt_id",
         "lease_owner",

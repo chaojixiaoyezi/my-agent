@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -35,6 +37,7 @@ from .request_binding import gateway_runtime_authority
 
 _CURRENT = ContextVar("original_processing_recovery_source", default=None)
 _WINDOW = ContextVar("original_processing_recovery_window", default=None)
+_REQUEUED_STOP = ContextVar("original_requeued_stop_observation", default=None)
 
 
 # LLM: 普通Count0同样冻结host owner，不能拿它当MP标记；只认实际角色/gate或route/专属绑定版本拒默认路径，本判断不授权限；正MP冷启动没有实际gate也必须保留，Count0 None不新增读盘或P2观察。
@@ -87,6 +90,13 @@ def recover_stale_processing(paths, request_path, payload, context, operation):
         from .recovery import _settle_committed_terminal
 
         if operation is _settle_committed_terminal:
+            if ((payload.get("terminal_response") or {}).get("error_code") == "GATEWAY_REQUEST_ROUTE_RETIRED"
+                    and not (paths.processing / request_path.name).exists()
+                    and not _complete_processing_claim(payload)):
+                from .multiprocess_unroutable_closeout import project_unroutable_closeout
+
+                project_unroutable_closeout(paths, request_path.stem, admission_gate=gate)
+                return "archived"
             return settle_unroutable_terminal(paths, request_path, payload, context, reason, operation)
         if not unroutable_executor_dead(paths, request_path, payload, context):
             raise _rejection(payload, "processing_recovery.executor_unproven")
@@ -322,7 +332,7 @@ def _require_runtime_policy(source):
             or task["thread_id"] != source.payload["conversation_claim"].get("thread_id")):
         raise ValueError("processing_runtime_owner_mismatch")
     block = repository.agent_run_recovery_block_for_run_id(binding["run_id"])
-    require_resume_policy(RecoveryPolicyReadback(source._payload_bytes, _bytes(block)))
+    require_resume_policy(RecoveryPolicyReadback(_bytes(source.payload), _bytes(block)))
 
 
 # LLM: 仅真实ControlPlane可从原home_root投影路径；此纯选择不检查/签发权限，不调用ensure或补动态Agent属性。
@@ -602,6 +612,193 @@ def _complete_processing_claim(payload):
                 for key in ("id", "execution_attempt_id", "lease_owner"))
             and payload["lease_owner"] == payload["execution_attempt_id"]
             and type(payload.get("lease_epoch")) is int and payload["lease_epoch"] >= 1)
+
+
+def stopped_requeue_evidence(payload):
+    """在原P2签发/T窗口固化完整证据和记录，仅供后续元数据收尾，不授执行权。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+    from .multiprocess_takeover import _persist_evidence
+    from .multiprocess_takeover_ledger import read_ledger_scope
+    from .multiprocess_takeover_sources import confirmed_evidence
+
+    source = current_processing_recovery()
+    if type(source) is not OriginalProcessingRecoverySource:
+        return None
+    source.require_writer("processing_recovery.requeue_proof")
+    issued = source.controller._issued.get()
+    if issued is None or issued[0] is not source.authority or payload != source.payload:
+        raise source.rejection("processing_recovery.requeue_proof")
+    target, result = issued[2], issued[3]
+    detail = confirmed_evidence(target, result)
+    records = read_ledger_scope(target.ledger, target.scope)
+    if records["failures"]:
+        raise source.rejection("processing_recovery.requeue_records")
+    reference = result["barrier"]["ledger_ref"]
+    raw = read_bytes_beneath(source.gate.paths.root, tuple(reference.split("/")),
+                             max_bytes=16 * 1024 * 1024, require_dir_fd=True)
+    if raw is None or json.loads(raw) != detail or hashlib.sha256(raw).hexdigest() + ".json" != reference.split("/")[-1]:
+        raise source.rejection("processing_recovery.requeue_evidence_changed")
+    # 复制原内容寻址证据而非创建新的停止结论；业务requests命名空间不随代次设施退役。
+    retained = ("requests", "recovery_proofs", reference.split("/")[-1])
+    _persist_evidence(source.gate.paths.root, retained, raw)
+    keys = ("id", "request_fingerprint", "host_request_owner.v1", "owner_id", "route",
+            "conversation_claim", "runtime_authority", "lease_epoch")
+    return copy.deepcopy({"binding": {key: payload.get(key) for key in keys},
+                          "proof": result["proof"], "barrier": result["barrier"],
+                          "detail": detail, "records": records["records"], "retained_ledger_ref": "/".join(retained)})
+
+
+def _requeued_stop_records(paths, payload):
+    """按原codec和原内容寻址证据解码完整旧scope；仅只读，不做平台观察。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+    from .multiprocess_executor_ledger import ExecutorLedger
+    from .multiprocess_records import record_digest, validate_record
+    from .multiprocess_route import WorkerPartition, owner_digest
+    from .multiprocess_takeover_ledger import _validate_scope
+    from .request_binding import gateway_request_is_active_turn_recovery
+    from .request_owner_binding import frozen_request_owner
+
+    pending = dict(payload, status="pending")
+    # 原canonical builder补lease_owner空串；仅解码这项默认投影，不擦除运输来源或写回请求。
+    if payload.get("schema_version") == "gateway_terminal_request.v1" and payload.get("lease_owner") == "":
+        pending.pop("lease_owner")
+    owner = frozen_request_owner(payload)
+    if (owner is None or not _complete_transport_source(pending, owner_digest(owner))
+            or pending["queue_transport_source"]["window"] != "requeue"
+            or not gateway_request_is_active_turn_recovery(pending, payload["id"])):
+        raise ValueError("unroutable_requeued_source")
+    transport = payload["queue_transport_source"]
+    evidence = transport.get("stopped_execution")
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("binding"), dict):
+        raise ValueError("unroutable_requeued_proof")
+    keys = ("id", "request_fingerprint", "host_request_owner.v1", "owner_id", "route",
+            "conversation_claim", "runtime_authority", "lease_epoch")
+    if evidence["binding"] != {key: payload.get(key) for key in keys}:
+        raise ValueError("unroutable_requeued_binding")
+    proof = validate_record(evidence["proof"])
+    detail, barrier = evidence["detail"], evidence["barrier"]
+    if type(detail) is not dict or type(barrier) is not dict or type(evidence["records"]) is not list:
+        raise ValueError("unroutable_requeued_evidence")
+    reference = barrier.get("ledger_ref")
+    if type(reference) is not str or re.fullmatch(r"workers/takeover_evidence/[0-9a-f]{64}\.json", reference) is None:
+        raise ValueError("unroutable_requeued_reference")
+    retained = ("requests", "recovery_proofs", reference.split("/")[-1])
+    if evidence.get("retained_ledger_ref") != "/".join(retained):
+        raise ValueError("unroutable_requeued_reference")
+    raw = read_bytes_beneath(paths.root, retained, max_bytes=16 * 1024 * 1024, require_dir_fd=True)
+    if raw is None or hashlib.sha256(raw).hexdigest() + ".json" != retained[-1] or json.loads(raw) != detail:
+        raise ValueError("unroutable_requeued_evidence_changed")
+    records = [validate_record(row) for row in evidence["records"]]
+    if any(row["schema_version"] not in {"multiprocess_executor_reservation.v1", "multiprocess_executor_reservation.v2"} for row in records):
+        raise ValueError("unroutable_requeued_record_kind")
+    scope = proof["covered_scope"]
+    # 只用原P1纯scope校验；不读取已退役命名空间、不新建账本或补登记。
+    ledger = ExecutorLedger(paths.root, WorkerPartition(
+        int(scope["owner_shas"][0], 16) % scope["worker_count"], scope["worker_count"], scope["c_run_id"]))
+    _validate_scope(ledger, scope)
+    if (proof["schema_version"] != "multiprocess_takeover_proof.v2" or proof["status"] != "stopped"
+            or barrier.get("stopped") is not True or barrier.get("unresolved_instances") != []
+            or barrier.get("c_run_id") != proof["c_run_id"] or detail.get("failures") != []
+            or any(detail.get(key) != proof.get(key) for key in (
+                "c_run_id", "covered_scope", "platform", "method", "residual_risks"))
+            or detail.get("record_digests") != {row["reservation_id"]: record_digest(row) for row in records}
+            or set(scope["executor_reservation_ids"]) != {row["reservation_id"] for row in records}
+            or len(records) != len(scope["executor_reservation_ids"])
+            or {row["reservation_id"] for row in detail["instances"]} != set(scope["executor_reservation_ids"])
+            or len(detail["instances"]) != len(scope["executor_reservation_ids"])
+            or any(row.get("status") != "stopped" or not row.get("enumeration_complete")
+                   or row.get("observed_live_members") for row in detail["instances"])):
+        raise ValueError("unroutable_requeued_scope")
+    route = payload["route"]
+    if not validate_published_route(payload, scope["worker_count"], route["c_run_id"]).get("ok"):
+        raise ValueError("unroutable_requeued_route")
+    if (owner_digest(owner) not in scope["owner_shas"] or transport["route"] != route
+            or route["worker"] != ("C" if scope["role"] == "C" else scope["worker_index"])
+            or any(row["c_run_id"] != scope["c_run_id"] or row["owner_sha"] not in scope["owner_shas"] for row in records)
+            or not any(row["request_id"] == payload["id"] and row["owner_sha"] == route["owner_sha"]
+                   and row["execution_attempt_id"] == transport["execution_attempt_id"]
+                   and row["lease_epoch"] == transport["lease_epoch"] for row in records)):
+        raise ValueError("unroutable_requeued_claim")
+    return records
+
+
+def _requeued_stop_key(payload):
+    """只冻结请求及恢复来源；允许同一canonical builder的终态投影，不给执行字段补值。"""
+    keys = ("id", "request_fingerprint", "host_request_owner.v1", "owner_id", "route", "conversation_claim",
+            "runtime_authority", "lease_epoch", "active_turn_recovery", "queue_transport_source")
+    return _bytes({key: payload.get(key) for key in keys})
+
+
+class _RequeuedStopObservation:
+    """当次门外观察，只能在同gate/线程/进程的同步元数据补交中消费。"""
+    def __init__(self, gate, payload):
+        self.origin, self.gate, self.key = self, gate, _requeued_stop_key(payload)
+        self.controller = gate._runtime_takeover
+        self.lease = self.controller._lease
+        self.pid, self.thread, self.active = os.getpid(), threading.get_ident(), True
+
+    def matches(self, gate, payload):
+        return (self.origin is self and self.active and self.gate is gate and self.pid == os.getpid()
+                and self.thread == threading.get_ident() and self.key == _requeued_stop_key(payload)
+                and gate._runtime_takeover is self.controller and self.controller._lease is self.lease)
+
+
+def _prepare_requeued_stop(gate, path):
+    """在短锁外只读原运输与停止源，返回同次观察；不更新任何持久状态。"""
+    from . import multiprocess_takeover as p2
+    from .multiprocess_unroutable_closeout import unroutable_reason
+    from .queued_steer_expiry import _has_execution_responsibility
+
+    report = read_json_file_report(path)
+    payload = report.payload
+    if (report.load_error is not None or not payload or not _has_execution_responsibility(payload)
+            or not unroutable_reason(gate.paths, payload, gate=gate)):
+        return None
+    prior = _REQUEUED_STOP.get()
+    if type(prior) is _RequeuedStopObservation and prior.matches(gate, payload):
+        return prior
+    records = _requeued_stop_records(gate.paths, payload)
+    tables = p2._bounded_observations(p2.observe_processes, records)
+    if (any(table["failure"] for table in tables)
+            or any(p2._verify_record(row, tables)["status"] != "stopped" for row in records)):
+        raise ValueError("unroutable_requeued_executor_unproven")
+    return _RequeuedStopObservation(gate, payload)
+
+
+@contextmanager
+def requeued_closeout_scope(gate, path):
+    """准备失败只阻塞本条；业务体异常保留原样，观察不跨线程、门来源或同步区间。"""
+    try:
+        observation = _prepare_requeued_stop(gate, path)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as error:
+        rejection = error
+    else:
+        rejection = None
+    if rejection is not None:
+        yield rejection
+        return
+    if observation is None or _REQUEUED_STOP.get() is observation:
+        yield None
+        return
+    token = _REQUEUED_STOP.set(observation)
+    try:
+        yield None
+    finally:
+        observation.active = False
+        _REQUEUED_STOP.reset(token)
+
+
+def require_stopped_requeued_source(source):
+    """门内重新解码并核同次观察与原政策；坏/活/未知仍保留请求和清理证明。"""
+    source.require_writer("unroutable.requeued_source")
+    observation = _REQUEUED_STOP.get()
+    if type(observation) is not _RequeuedStopObservation or not observation.matches(source.gate, source.payload):
+        raise source.rejection("unroutable.requeued_observation")
+    try:
+        _requeued_stop_records(source.gate.paths, source.payload)
+        _require_runtime_policy(source)
+    except (KeyError, TypeError, AttributeError, IndexError, ValueError) as error:
+        raise source.rejection("unroutable.requeued_evidence") from error
 
 
 # LLM: 恢复只在真实controller._issued同期消费原P2；投影旧P3代次仅复用既有共同校验，实际P1唯一claim定位和完整fresh evidence不可省。

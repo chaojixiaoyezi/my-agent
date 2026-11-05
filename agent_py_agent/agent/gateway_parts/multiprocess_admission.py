@@ -372,6 +372,16 @@ class PersistentAdmission:
     # LLM: 先T→原C末门重读，不消费旧route校验的执行权；无P3旧请求只终结，正常请求返回None，投影必须退出原T/M/L后重取。
     # 函数用途: 让调度器在owner路由校验前尝试收口无路由pending，不盖章或创建预留。
     def try_close_unroutable_pending(self, request_path: Path, *, snapshot: dict | None = None) -> dict | None:
+        from .multiprocess_processing_recovery import requeued_closeout_scope
+
+        # 完整平台观察在任何T/M/L之前；锁内重读原不可变来源，变更则本条保留重试。
+        with requeued_closeout_scope(self, request_path) as rejection:
+            if rejection is not None:
+                return _blocked("unroutable_closeout_pending")
+            return self._try_close_unroutable_pending(request_path, snapshot=snapshot)
+
+    def _try_close_unroutable_pending(self, request_path: Path, *, snapshot: dict | None = None) -> dict | None:
+        """已完成门外观察后，复用原T→M→L提交及锁外投影顺序。"""
         from .multiprocess_unroutable_closeout import (
             close_out_unroutable_pending_locked,
             project_unroutable_closeout,
@@ -417,6 +427,15 @@ class PersistentAdmission:
     #   mc4-1706：snapshot 是锁外扫描到的请求正文，锁内用同一投影核对归属输入未漂移。
     # 函数用途: 为派发完成预留与盖章；过期插话保留inbox，退出原T后重新取得真实末门补投影。
     def admit(self, request_path: Path, ownership, limits, snapshot: dict | None = None) -> dict:
+        from .multiprocess_processing_recovery import requeued_closeout_scope
+
+        with requeued_closeout_scope(self, request_path) as rejection:
+            if rejection is not None:
+                return _blocked("unroutable_closeout_pending")
+            return self._admit_prepared(request_path, ownership, limits, snapshot)
+
+    def _admit_prepared(self, request_path: Path, ownership, limits, snapshot: dict | None = None) -> dict:
+        """保持原准入决策；重排停止观察已在外层完成，不能在短门内进行平台枚举。"""
         if not self.ready():
             return _blocked("coordinator_generation_unavailable")
         owner, session_scope = ownership if ownership else (None, None)
