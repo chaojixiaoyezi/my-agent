@@ -462,3 +462,256 @@ def test_default_byte_ceiling_explicitly_preserves_oversized_acked_row(tmp_path)
         assert report["copied_bytes"] == 0
         assert sha256(inputs.spool.read_bytes()).hexdigest() == before
         assert inputs.archive.read_bytes() == b""
+
+
+# LLM: 用真实归档和replace制造世代发表失败，不代写spool或读游标；返回时原游标仍指向旧文件偏移。
+# 函数用途: 准备切盘已完成、检查点仍在switching的真实恢复窗口。
+def _rotation_with_unpublished_generation(watch, monkeypatch):
+    state, source = watch
+    source.feed(4)
+    assert hv._harvest_cycle(state, source.handle)
+    path = hv.spool_path(state)
+    original, inode = _rows(path), path.stat().st_ino
+    batch, _ = hv.read_spool_records(state, max_candidates=1, consumer="w10")
+    assert batch
+    result = hv.submit_verdicts(state, consumer="w10", verdicts=[
+        {"ack_id": row["ack_id"], "verdict": "clear", "score": 1, "note": "已核对"}
+        for record in batch for row in record["candidates"]])
+    assert result["ok"]
+    cursor = hv.read_spool_cursor(state)
+    assert cursor["offset"] > 0 and not isinstance(cursor.get("inflight"), dict)
+    tail = [row for row in original if row["spool_seq"] > cursor["read_seq"]]
+    assert tail
+    previous, persist = state.spool_generation, hv.persist_state
+    failure = OSError("injected rotation generation publication failure")
+
+    def reject_generation(current):
+        if current.spool_generation != previous:
+            raise failure
+        return persist(current)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hv, "persist_state", reject_generation)
+        with pytest.raises(OSError) as caught:
+            for _ in range(100):
+                _renew(state)
+                with state.lock:
+                    hv._run_guarantee_rotation_slice(state)
+            pytest.fail("real rotation never reached generation publication")
+    assert caught.value is failure
+    progress = hv._spool_rotation_inputs(state).progress
+    assert json.loads(progress.read_text())["phase"] == "switching"
+    assert path.stat().st_ino != inode and _rows(path) == tail
+    assert path.stat().st_size < 1024 * 1024
+    assert state.spool_generation == previous
+    assert hv.read_spool_cursor(state) == cursor
+    return original, tail, cursor
+
+
+# LLM: 原轮转实现使用POSIX文件能力；直接枚举本测试进程的FD，不以业务回执冒充释放证明。
+# 函数用途: 在失败、读取和恢复边界核对实际描述符数量。
+def _open_fd_count():
+    directory = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    return len(os.listdir(directory))
+
+
+# LLM: 真实reader在replace与世代发表之间逐批签收；恢复前不运行生产者，保持原租约与签收门。
+# 函数用途: 防止旧字节偏移漏读热盘尾部，并核对失败及恢复没有FD泄漏。
+def test_failed_generation_persist_never_skips_unacknowledged_rows(watch, monkeypatch):
+    before = _open_fd_count()
+    original, tail, cursor = _rotation_with_unpublished_generation(watch, monkeypatch)
+    assert _open_fd_count() - before == 0
+    state, source = watch
+    inputs = hv._spool_rotation_inputs(state)
+    checkpoint, calls = inputs.progress.read_bytes(), source.calls
+    delivered, previous = [], cursor["read_seq"]
+    for expected in tail:
+        records, _ = hv.read_spool_records(state, max_candidates=1, consumer="w10")
+        assert [row["spool_seq"] for row in records] == [expected["spool_seq"]]
+        assert expected["spool_seq"] == previous + 1
+        inflight = hv.read_spool_cursor(state)["inflight"]
+        assert inflight["from_offset"] == 0 and inflight["from_seq"] == previous
+        assert inflight["generation"] == state.spool_generation == cursor["generation"]
+        assert hv._spool_rotation_inputs(state).acked_seq == previous
+        assert inputs.progress.read_bytes() == checkpoint
+        assert _open_fd_count() - before == 0
+        assert hv.submit_verdicts(state, consumer="w10", verdicts=[
+            {"ack_id": row["ack_id"], "verdict": "clear", "score": 1, "note": "已核对"}
+            for record in records for row in record["candidates"]])["ok"]
+        previous = expected["spool_seq"]
+        delivered.append(previous)
+        settled = hv.read_spool_cursor(state)
+        assert settled["read_seq"] == previous and not isinstance(settled.get("inflight"), dict)
+        assert hv._spool_rotation_inputs(state).acked_seq == previous
+    assert hv.read_spool_records(state, max_candidates=1, consumer="w10")[0] == []
+    assert hv._harvest_once(state, source.handle) == "ok"
+    assert _open_fd_count() - before == 0
+    assert state.spool_generation == cursor["generation"] + 1
+    assert not inputs.progress.exists() and source.calls == calls
+    assert _rows(inputs.archive) + _rows(inputs.spool) == original
+    assert [row["spool_seq"] for row in _rows(inputs.archive)] + delivered == [row["spool_seq"] for row in original]
+    source.feed(1)
+    assert hv._harvest_once(state, source.handle) == "ok"
+    assert source.calls > calls and state.spool_seq > tail[-1]["spool_seq"]
+
+
+# LLM: 损坏或读失败只使偏移失效，不清除或修复检查点；序号仍是去重和签收的唯一依据。
+# 函数用途: 检查点不能判读时仍不遗漏已经换盘的未读记录。
+@pytest.mark.parametrize("failure", ["json", "non_object", "unicode", "io", "stat"])
+def test_reader_rescans_when_rotation_checkpoint_is_unreadable(watch, monkeypatch, failure):
+    _original, tail, cursor = _rotation_with_unpublished_generation(watch, monkeypatch)
+    state, _source = watch
+    progress = hv._spool_rotation_inputs(state).progress
+    if failure == "stat":
+        exists = type(progress).exists
+
+        def cannot_stat(path):
+            if path == progress:
+                raise PermissionError("injected checkpoint stat failure")
+            return exists(path)
+
+        monkeypatch.setattr(type(progress), "exists", cannot_stat)
+    elif failure == "io":
+        read_text = type(progress).read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == progress:
+                raise PermissionError("injected checkpoint read failure")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(type(progress), "read_text", unreadable)
+    else:
+        progress.write_bytes({"json": b"{", "non_object": b"[]", "unicode": b"\xff"}[failure])
+    before = progress.read_bytes()
+    records, _ = hv.read_spool_records(state, max_candidates=8, consumer="w10")
+    assert [row["spool_seq"] for row in records] == [row["spool_seq"] for row in tail]
+    updated = hv.read_spool_cursor(state)
+    assert updated["inflight"]["from_offset"] == 0
+    assert updated["read_seq"] == tail[-1]["spool_seq"]
+    assert updated["inflight"]["from_seq"] == cursor["read_seq"]
+    assert hv._spool_rotation_inputs(state).acked_seq == cursor["read_seq"]
+    replayed, _ = hv.read_spool_records(state, max_candidates=8, consumer="takeover")
+    assert [row["spool_seq"] for row in replayed] == [row["spool_seq"] for row in tail]
+    assert hv._spool_rotation_inputs(state).acked_seq == cursor["read_seq"]
+    assert progress.read_bytes() == before
+
+
+# LLM: 没有待发表切盘证据时保留原偏移，不把正常增量读取变成从头全扫。
+# 函数用途: 冻结无检查点和copying阶段的原读取行为及序号去重。
+@pytest.mark.parametrize("phase", [None, "copying"])
+def test_reader_preserves_offset_without_pending_switch(watch, phase):
+    state, source = watch
+    source.feed(4)
+    assert hv._harvest_cycle(state, source.handle)
+    original = _rows(hv.spool_path(state))
+    records, _ = hv.read_spool_records(state, max_candidates=1, consumer="w10")
+    assert hv.submit_verdicts(state, consumer="w10", verdicts=[
+        {"ack_id": row["ack_id"], "verdict": "clear", "score": 1, "note": "已核对"}
+        for record in records for row in record["candidates"]])["ok"]
+    cursor = hv.read_spool_cursor(state)
+    progress = hv._spool_rotation_inputs(state).progress
+    if phase is not None:
+        write_private_json_file_atomic(progress, {"phase": phase})
+    records, _end, _taken, start = hv._scan_spool(state, cursor, max_candidates=8)
+    assert start == cursor["offset"] > 0
+    assert records == [row for row in original if row["spool_seq"] > cursor["read_seq"]]
+
+
+# LLM: 仅替换维护回执来穷举调度分支；磁盘水位、采集入口、HTTP回调和spool文件保持真实。
+# 函数用途: 仅成功切盘暂停一拍，复制及各种延期都不能替代原磁盘停采门。
+@pytest.mark.parametrize("backpressured", [False, True])
+@pytest.mark.parametrize("status,reason", [
+    ("copying", ""), ("deferred", "inflight"), ("deferred", "lease_lost"),
+    ("deferred", "cursor_busy"), ("deferred", "empty_budget"),
+    ("deferred", "stale_progress"), ("not_ready", "nothing_acked"),
+    ("idle", "missing_file"), ("failed", "rotation_io_error"), ("switched", ""),
+])
+def test_pending_rotation_preserves_fetch_gate(watch, monkeypatch, backpressured, status, reason):
+    state, source = watch
+    source.feed(40 if backpressured else 4)
+    assert hv._harvest_cycle(state, source.handle)
+    if backpressured:
+        for _ in range(8):
+            if hv.spool_path(state).stat().st_size >= 1024 * 1024:
+                break
+            assert hv._harvest_cycle(state, source.handle)
+    assert hv._disk_backpressured(state) is backpressured
+    progress = hv._spool_rotation_inputs(state).progress
+    write_private_json_file_atomic(progress, {"phase": "copying"})
+    slices, calls = [], source.calls
+
+    def rotation(current):
+        assert current is state
+        slices.append(1)
+        return sm._report(status, reason)
+
+    monkeypatch.setattr(hv, "_run_guarantee_rotation_slice", rotation)
+    assert hv._harvest_once(state, source.handle) == "ok"
+    assert slices
+    if backpressured or status == "switched":
+        assert source.calls == calls
+    else:
+        assert source.calls > calls
+    if backpressured:
+        assert len(slices) == 1
+        assert state.totals["disk_backpressure_skips"] == 1
+
+
+# LLM: 抛出的原维护异常不是failed回执，不可吞掉后继续采集。
+# 函数用途: 保留轮转异常传播和本拍零来源请求的合同。
+def test_pending_rotation_preserves_original_exception(watch, monkeypatch):
+    state, source = watch
+    source.feed(4)
+    assert hv._harvest_cycle(state, source.handle)
+    write_private_json_file_atomic(hv._spool_rotation_inputs(state).progress, {"phase": "copying"})
+    error, calls = OSError("injected slice failure"), source.calls
+
+    def fail(_state):
+        raise error
+
+    monkeypatch.setattr(hv, "_run_guarantee_rotation_slice", fail)
+    with pytest.raises(OSError) as caught:
+        hv._harvest_once(state, source.handle)
+    assert caught.value is error and source.calls == calls
+
+
+# LLM: 维护、真实追加与最终replace交错，不用状态回执替身；复制中的新行仍须完整保留在热盘尾部。
+# 函数用途: 验证允许继续采集后，原分片轮转没有丢行或重复归档。
+def test_rotation_in_progress_keeps_fetching(watch, monkeypatch):
+    state, source = watch
+    monkeypatch.setattr(sm, "SPOOL_MAINTENANCE_SLICE_BYTES", 64 * 1024)
+    source.feed(4)
+    assert hv._harvest_cycle(state, source.handle)
+    original = _rows(hv.spool_path(state))
+    batch, _ = hv.read_spool_records(state, max_candidates=1, consumer="w10")
+    assert hv.submit_verdicts(state, consumer="w10", verdicts=[
+        {"ack_id": row["ack_id"], "verdict": "clear", "score": 1, "note": "已核对"}
+        for record in batch for row in record["candidates"]])["ok"]
+    with state.lock:
+        first = hv._run_guarantee_rotation_slice(state)
+    assert first["status"] == "copying" and state.spool_generation == 0
+    held, _ = hv.read_spool_records(state, max_candidates=1, consumer="w10")
+    assert held
+    inflight = hv.read_spool_cursor(state)["inflight"]
+    for _ in range(3):
+        source.feed(1)
+        calls, sequence = source.calls, state.spool_seq
+        assert hv._harvest_once(state, source.handle) == "ok"
+        assert source.calls > calls and state.spool_seq == sequence + 1
+        assert hv.read_spool_cursor(state)["inflight"] == inflight
+        assert state.spool_generation == 0 and not hv._disk_backpressured(state)
+    expected = _rows(hv.spool_path(state))
+    assert expected[:len(original)] == original
+    assert hv.submit_verdicts(state, consumer="w10", verdicts=[
+        {"ack_id": row["ack_id"], "verdict": "clear", "score": 1, "note": "已核对"}
+        for record in held for row in record["candidates"]])["ok"]
+    for _ in range(100):
+        _renew(state)
+        assert hv._harvest_once(state, source.handle) == "ok"
+        if state.spool_generation == 1:
+            break
+    else:
+        pytest.fail("rotation with concurrent append did not finish")
+    inputs = hv._spool_rotation_inputs(state)
+    assert state.spool_generation == 1 and not inputs.progress.exists()
+    assert _rows(inputs.archive) + _rows(inputs.spool) == expected

@@ -734,16 +734,18 @@ def _locked_harvest_step(
 
 # LLM: 入口时钟仅用于背压时是否冻结；实际drain/收尾由原事务source_boundary决定，单拍未追平不能stop。
 # 函数用途: 完成一拍收割并提交状态，跨截止也不传递可能过期的收尾布尔值。
-# LLM: Resume half-finished switches before fetching; only the guarantee disk gate runs maintenance.
-# 函数用途: 背压时继续腾盘，已切换的世代先落盘再恢复采集。
+# LLM: 未完成维护不替代磁盘停采门；仅成功切盘独占一拍，背压分支仍最多执行一片维护。
+# 函数用途: 轮转复制或延期时继续采集，成功切盘的世代先落盘再恢复采集。
 def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
     """持 state.lock 跑一拍:先判停,再背压闸,再收割。"""
     with state.lock:
         _recover_pending_harvest(state)
         maintenance_ran = False
+        rotation_switched = False
         if state.audit_guarantee and _spool_rotation_inputs(state).progress.exists():
-            _run_guarantee_rotation_slice(state)
+            rotation = _run_guarantee_rotation_slice(state)
             maintenance_ran = True
+            rotation_switched = rotation.get("status") == "switched"
         if _should_stop(state):
             return "stop"
         if _backpressured(state):
@@ -761,7 +763,7 @@ def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
                 _record_harvest_schedule(state, DrainResult(cursor=state.cursor))
                 _commit_harvest_transaction(state, transaction)
             return "ok"
-        if maintenance_ran:
+        if rotation_switched:
             # A recovered switch gets its own tick; fetch resumes only after the new generation is durable.
             return "ok"
         healthy = _harvest_cycle(state, fetch_json)
@@ -1536,6 +1538,28 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
     )
 
 
+# LLM: 仅组装同一watch的既有恢复点路径；轮转写者和读取者共用，不创建文件或授予写权。
+# 函数用途: 统一轮转检查点的规范位置。
+def _spool_rotation_progress_path(state: WatchState) -> Path:
+    return state_dir(state.owner_home) / f"{state.watch_id}.spool-rotation.json"
+
+
+# LLM: 只读既有检查点；缺失不影响增量读取，存在但无法判读时保守废弃字节偏移。
+# 函数用途: 识别切盘与世代发表之间尚未确认的恢复窗口。
+def _spool_switch_pending(state: WatchState) -> bool:
+    path = _spool_rotation_progress_path(state)
+    try:
+        report = read_json_object_report(path, context="watch_spool.rotation_progress")
+        if report.load_error is not None:
+            # 原helper可能把读取期间的FileNotFound包装成错误；自然消失仍按缺失处理。
+            return path.exists()
+        return report.payload.get("phase") == "switching"
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 # LLM: Inputs snapshot cursor facts under state.lock without mutating the reader/ACK protocol.
 # 函数用途: 从现有游标和磁盘水位组装轮转参数。
 def _spool_rotation_inputs(state: WatchState) -> spool_maintenance.SpoolRotationInputs:
@@ -1544,7 +1568,7 @@ def _spool_rotation_inputs(state: WatchState) -> spool_maintenance.SpoolRotation
     return spool_maintenance.SpoolRotationInputs(
         spool=spool_path(state),
         archive=state_dir(state.owner_home) / f"{state.watch_id}.archive.ndjson",
-        progress=state_dir(state.owner_home) / f"{state.watch_id}.spool-rotation.json",
+        progress=_spool_rotation_progress_path(state),
         generation=state.spool_generation,
         acked_seq=int(cursor["inflight"].get("from_seq") or 0) if inflight else int(cursor.get("read_seq") or 0),
         inflight=inflight,
@@ -4156,6 +4180,8 @@ def _scan_spool_range(state: WatchState, inflight: dict) -> list[dict]:
     return records
 
 
+# LLM: 游标锁内只读检查恢复点；发表未确认时仅废弃字节偏移，序号去重与在途签收协议不变。
+# 函数用途: 从有效偏移读取；切盘尚未确认时重扫而不漏掉未签收的行。
 def _scan_spool(
     state: WatchState,
     cursor: dict,
@@ -4163,10 +4189,13 @@ def _scan_spool(
     *,
     max_bytes: int = 0,
 ) -> tuple[list[dict], int, int, int]:
-    """从读游标偏移顺扫 spool,收集未读记录;世代不符则从头扫(轮转后偏移作废)。
+    """从读游标偏移顺扫 spool；世代不符或切盘尚未确认时从头扫。
     返回 (records, 扫后偏移, 候选数, 起扫偏移)——起扫偏移供在途标记记录重投起点。"""
     offset = int(cursor.get("offset") or 0)
     if int(cursor.get("generation") or 0) != state.spool_generation:
+        offset = 0
+    # replace可能已成功但世代发表失败；保留read_seq，由原收集器跳过已签收行。
+    if offset and state.audit_guarantee and _spool_switch_pending(state):
         offset = 0
     start_offset = offset
     read_seq = int(cursor.get("read_seq") or 0)
