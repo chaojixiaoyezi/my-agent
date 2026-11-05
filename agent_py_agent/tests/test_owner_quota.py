@@ -831,3 +831,29 @@ def test_runtime_exclusions_match_host_layout():
     assert owner_read_index._DB_PARTS in quota._QUOTA_RUNTIME_FILES
     assert telemetry_ledger.PARTS in quota._QUOTA_RUNTIME_DIRS
     assert ('workspace', 'runtime', 'services') in path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS
+
+
+# LLM: 不改旧用例；公开探针必须在原模块显式导出，而不是仅可通过内部属性访问。
+# 函数用途: 验证压力探针公开导出合同。
+def test_w7_pressure_probe_is_exported():
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    assert 'owner_quota_pressure' in quota.__all__
+    assert callable(quota.owner_quota_pressure)
+
+
+# LLM: 使用真实冷账，普通变更和混合批次保留原拒绝码，不因永久资产特例获得额度。
+# 函数用途: 验证非永久写在挂起对账时仍拒绝增长。
+@pytest.mark.parametrize('mixed', [False, True])
+def test_w7_non_permanent_pending_reason_unchanged(tmp_path, mixed):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    for index in range(160):
+        (tmp_path / str(index)).write_bytes(b'x')
+    changes = [quota.OwnerQuotaChange(tmp_path / 'ordinary', 1)]
+    if mixed:
+        changes.append(quota.OwnerQuotaChange(tmp_path / 'memory' / 'x.md', 1))
+    with pytest.raises(quota.OwnerQuotaUnavailable) as error:
+        with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=100 * 1024 * 1024).admission() as admission:
+            admission.check(changes)
+    assert error.value.reason_code == 'reconciliation_pending'

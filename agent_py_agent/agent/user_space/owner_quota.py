@@ -37,9 +37,17 @@ from ..common.owner_write_errors import (
     LocalControlCoordinatorUnavailable,
     OwnerManagementIngressUnavailable,
 )
-from ..contracts.optimization_contracts import require_schema_generation
+from ..contracts.optimization_contracts import StoreSchemaNewerError, require_schema_generation
 
 _QUOTA_LOCK_BASENAME = ".owner-quota"
+# owner 用量达到配额该百分比即视为高水位。
+OWNER_QUOTA_PRESSURE_HIGH_PERCENT = 85
+# owner 用量达到配额该百分比即视为临界水位。
+OWNER_QUOTA_PRESSURE_CRITICAL_PERCENT = 95
+# 永久资产写入在配额之上允许使用的保底余量百分比。
+OWNER_QUOTA_PERMANENT_HEADROOM_PERCENT = 5
+# 对账未完成期间永久资产累计允许增长的字节数。
+OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES = 32 * 1024 * 1024
 # 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
 _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 # 前台快照仍限128项；墙钟预算容纳繁忙主机数百毫秒的调度暂停，超时仍拒绝未知用量增长。
@@ -269,13 +277,15 @@ class OwnerQuotaAdmission:
         # 中间结算只把本准入预留降为0字节标记、不移除：业务仍可能回滚，最后一次退出结算才清除。
         self._held = False
 
-    # LLM: 完整小批核对可准入；缺省未读完只允许非增长。显式控制写须有权威账且在同一锁内预留、按实际差额结算。
+    # LLM: 原 owner 锁内预留并按实际差额结算；永久资产独享比例余量与待对账累计额度，观察失效仍拒绝增长。
     # 函数用途: 计算本批增长并在写入前持久预留。
     def check(self, changes: Iterable[OwnerQuotaChange], *, bounded_control_growth_bytes: int = 0) -> OwnerQuotaProjection | None:
         _check_quota_cancelled()
         if not self.enabled:
             return None
         relevant = _normalized_owner_changes(self._enforcer.owner_root, changes)
+        permanent_only = _permanent_only_changes(self._enforcer.owner_root, relevant)
+        headroom = self._enforcer.max_bytes * OWNER_QUOTA_PERMANENT_HEADROOM_PERCENT // 100 if permanent_only else 0
         if not relevant:
             return None
         try:
@@ -369,21 +379,30 @@ class OwnerQuotaAdmission:
                    and type(bounded_control_growth_bytes) is int
                    and 0 < final - replaced <= bounded_control_growth_bytes
                    and _quota_control_baseline(root, ledger, reservation=self._reservation))
+        permanent_pending = False
         if not complete and not authoritative and not bounded and final > replaced:
-            ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
-            _write_quota_ledger(root, ledger)
-            raise OwnerQuotaUnavailable('owner usage reconciliation pending; growth refused', reason_code='reconciliation_pending')
-        used = total if complete else ledger['used_bytes'] if authoritative or bounded else max(ledger['used_bytes'], self._enforcer.max_bytes)
+            spent = ledger.get('permanent_pending_growth_bytes', 0)
+            spent = spent if type(spent) is int and spent >= 0 else OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES
+            if (permanent_only and not snapshot_invalidated
+                    and spent + (final - replaced) <= min(OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES, headroom)):
+                ledger['permanent_pending_growth_bytes'] = spent + (final - replaced)
+                permanent_pending = True
+            else:
+                ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+                _write_quota_ledger(root, ledger)
+                raise OwnerQuotaUnavailable('owner usage reconciliation pending; growth refused', reason_code='reconciliation_pending')
+        used = total if complete else ledger['used_bytes'] if authoritative or bounded or permanent_pending else max(ledger['used_bytes'], self._enforcer.max_bytes)
         projection = OwnerQuotaProjection(
             used_bytes=used,
             projected_bytes=max(0, used - replaced + final),
             max_bytes=self._enforcer.max_bytes,
         )
-        if projection.projected_bytes > projection.max_bytes and projection.projected_bytes > used:
+        if projection.projected_bytes > projection.max_bytes + headroom and projection.projected_bytes > used:
             raise OwnerQuotaExceeded(projection)
         rebased = None
         if complete:
-            ledger.update(used_bytes=total, inode_count=count, dirty_since=None, usage_authoritative=True)
+            ledger.update(used_bytes=total, inode_count=count, dirty_since=None, usage_authoritative=True,
+                          permanent_pending_growth_bytes=0)
             # 所有正规写者都持同一owner锁；拿到锁时旧预留只可能是退出未确认的遗留。
             ledger['reservations'] = {}
             # 全新快照已计入全部落盘结果，但上阶段前像、待确认结算与失效只在快照确已发布后才随之以当前大小重定基准：
@@ -900,6 +919,20 @@ def _normalized_owner_changes(
     return normalized
 
 
+# LLM: 只消费已归一化且属于该 owner 的相关路径；混合批次不能借用永久资产额度，不读取或改动文件。
+# 函数用途: 判断整批变更是否全部属于永久资产。
+def _permanent_only_changes(root: Path, relevant) -> bool:
+    if not relevant:
+        return False
+    for path in relevant:
+        parts = path.relative_to(root).parts
+        if ((len(parts) >= 2 and parts[0] in {"memory", "skills"})
+                or parts in {("SOUL.md",), ("AGENTS.md",), ("USER.md",)}):
+            continue
+        return False
+    return True
+
+
 # LLM: 只stat叶元数据且不跟随链接；并发消失按零，其他IO错误不得伪装成未写入。
 # 函数用途: 在准入与结算时读取单个普通文件的逻辑字节数。
 def _logical_file_size(path: Path) -> int:
@@ -956,6 +989,7 @@ __all__ = [
     "OwnerQuotaUnavailable",
     "owner_quota_enforcer_from_policy",
     "owner_logical_usage_bytes",
+    "owner_quota_pressure",
 ]
 
 
@@ -2031,6 +2065,8 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 # 清点放弃过的目录未补正或枚举观察失效，总量照常发布但保持脏，由下一轮补正后才恢复增长。
                 ledger.update(used_bytes=scan['used'], inode_count=scan['inodes'], usage_authoritative=not scan.get('dirty'),
                               dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
+                if not scan.get('dirty'):
+                    ledger['permanent_pending_growth_bytes'] = 0
                 scan['iterator'].close()
                 _QUOTA_SCANS.pop(key, None)
             else:
@@ -2159,6 +2195,37 @@ def owner_quota_reconcile_pending(owner_root, *, require_ledger=False):
         return not require_ledger
     cursor = ledger.get('reconcile_cursor')
     return ledger.get('dirty_since') is not None or not isinstance(cursor, dict) or cursor.get('complete') is not True
+
+
+# LLM: 供维护调度读取压力快照；缺策略、缺账或不可读时未知，不取配额锁、不扫描、不写账，不授予删除权限。
+# 函数用途: 按账本已用及预留字节返回 owner 配额压力等级。
+def owner_quota_pressure(owner_root) -> dict | None:
+    root = Path(owner_root).expanduser().resolve(strict=False)
+    mb = _parse_quota_disk_mb(read_json_object_report(
+        root / "quota.json", context="owner_policy.quota").payload.get("max_disk_mb"))
+    if mb <= 0 or not owner_quota_enabled(root):
+        return None
+    if not os.path.lexists(root / _QUOTA_LEDGER):
+        return None
+    try:
+        ledger = _read_quota_ledger(root)
+    except (OwnerQuotaUnavailable, OSError, ValueError, StoreSchemaNewerError):
+        return None
+    used = ledger['used_bytes'] + ledger['reserved_bytes']
+    max_bytes = mb * 1024 * 1024
+    try:
+        ratio = round(used / max_bytes, 6)
+    except OverflowError:
+        return None
+    level = 'normal'
+    if used * 100 >= max_bytes * OWNER_QUOTA_PRESSURE_CRITICAL_PERCENT:
+        level = 'critical'
+    elif used * 100 >= max_bytes * OWNER_QUOTA_PRESSURE_HIGH_PERCENT:
+        level = 'high'
+    return {'level': level, 'used_bytes': used, 'max_bytes': max_bytes,
+            'ratio': ratio,
+            'authoritative': ledger.get('usage_authoritative') is True and ledger.get('dirty_since') is None,
+            'reason': 'ledger'}
 
 
 # LLM: 宿主在准入外写完状态文件后调用。只在非阻塞配额锁下、对干净同步的完整目录表做一次有界核验（先核给定目录，
