@@ -13,6 +13,7 @@ import pytest
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation import (
     ConversationStore,
+    compact,
     compact_request_budget,
     message_scan,
 )
@@ -210,37 +211,61 @@ def test_late_append_during_summary_remains_next_source(tmp_path, monkeypatch):
     assert following.messages == tuple(late)
 
 
-@pytest.mark.parametrize('second', ['oversized', 'summary_failure'])
-def test_two_candidates_commit_own_retained_snapshot_and_projection(tmp_path, monkeypatch, second):
-    agent, thread, ids, _, _ = _case(tmp_path, count=4)
+# LLM: W12 唯一候选无论达到目标或仅落在软目标与硬门之间，都提交自己的来源快照；完整摘要可合法分段。
+# 函数用途: 经真实 reader、摘要、备份重测和 CAS 核对覆盖与材料身份。
+@pytest.mark.parametrize('watermark', ['target', 'soft_target'])
+def test_selected_candidate_commits_own_retained_snapshot_and_projection(tmp_path, monkeypatch, watermark):
+    agent, thread, ids, expected_digest, _ = _case(tmp_path, count=4)
     store, tail, views, materials = agent.conversation_store, [], [], []
     for role in ('user', 'assistant'):
         tail.append(store.messages.append({'thread_id': thread.thread_id, 'role': role, 'content': '近期完整问答'}))
     before = store.storage.message_path(thread.thread_id).read_bytes()
     source = load_conversation_compact_source(agent, store, thread, scope=THREAD_COMPACT_SCOPE)
 
-    # 大小按候选身份给（第一候选保留两条近期问答），不按调用次序：候选超出目标时原话备份收缩会多计量一次。
+    candidate_tokens = (source.policy.trigger_tokens - 1 if watermark == 'soft_target'
+                        else source.policy.recovery_target_tokens - 1)
+    calls, summaries = [], []
+    digest, covered = hashlib.sha256(), 0
+    original_summary = compact._summarize
+
+    # LLM: 旁听原整份摘要入口，不替代来源重放或合法分段；一次候选只能准备一次完整摘要。
+    # 函数用途: 区分第二个候选和同一来源的多个物理分段请求。
+    def summarize(*args, **kwargs):
+        summaries.append(True)
+        assert len(summaries) == 1, '软目标不能触发第二个候选摘要'
+        return original_summary(*args, **kwargs)
+
+    # 选区只量原尾部，正式候选必须保留同一尾部；软目标路径还会做一次原话备份重测。
     def project(view):
         views.append(view)
         materials.append(object())
-        first_candidate = view.is_candidate and len(view.messages) == len(tail)
-        tokens = source.policy.trigger_tokens - 1 if first_candidate else source.policy.trigger_tokens + 1
+        if view.is_candidate:
+            assert tuple(view.messages) == tuple(tail)
+        tokens = 0 if view.measure_only else candidate_tokens if view.is_candidate else source.policy.trigger_tokens + 1
         return ConversationCompactProjection(tokens, materials[-1])
 
+    # LLM: 原始大正文超单次预算，须按连续分段恰好覆盖一次；只替换每段模型答复。
+    # 函数用途: 记录每段精确区间与正文哈希，避免放松“一次整份摘要”检查。
     def generate(_request):
-        if second == 'summary_failure' and any(view.is_candidate for view in views):
-            raise RuntimeError('第二候选摘要失败')
-        return ModelResponse(text='第一候选仍保留近期问答。', backend='fake')
+        nonlocal covered
+        calls.append(_request)
+        assert _request.messages is None
+        start, end, _, part = segment_part(_request.prompt)
+        assert start == covered and len(part) == end - start
+        digest.update(part.encode())
+        covered = end
+        return ModelResponse(text='唯一候选仍保留近期问答。', backend='fake')
 
+    monkeypatch.setattr(compact, '_summarize', summarize)
     monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response', generate)
     result = _prepare(agent, thread, source, force=False, request_projector=project)
-    # 压缩前 1 次；第一候选超目标，缩小原话备份再计量 1 次（替身大小不变，保留首次计量）；
-    # 超上限的第二候选同样先收缩再计量（仍超限）才放弃，摘要失败的第二候选没有计量；
-    # 最终成功提交，不做失败诊断用的固定开销实测。
-    assert len(views) == (5 if second == 'oversized' else 3)
-    assert all(isinstance(view.messages, MessageSnapshotRows) for view in views[:2])
-    assert not any(view.measure_only for view in views)
-    assert result.messages == tuple(tail) and result.request_projection.material is materials[1]
+    assert len(summaries) == 1 and len(calls) > 1 and digest.digest() == expected_digest
+    assert len(views) == (4 if watermark == 'soft_target' else 3)
+    assert all(isinstance(view.messages, MessageSnapshotRows) for view in views[:3])
+    assert [index for index, view in enumerate(views) if view.measure_only] == [1]
+    assert result.messages == tuple(tail) and result.request_projection.material is materials[2]
+    assert result.request_projection.material is not materials[1]
+    assert result.projected_tokens == candidate_tokens
     chain = committed_compact_checkpoint_chain(agent, result.thread)
     assert result.thread.compact_generation == 1 and chain[0]['source_message_ids'] == ids
     assert chain[0]['retained_tail_message_ids'] == [row.message_id for row in tail]

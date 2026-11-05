@@ -328,6 +328,8 @@ def test_compactcall_captures_full_live_wire_prefix(tmp_path, monkeypatch, remot
 
 @pytest.mark.parametrize("remote", [True, False], ids=["remote", "text"])
 @pytest.mark.parametrize("last_role", ["user", "assistant"])
+# LLM: canonical 历史必须是逐字前缀；W3 当前展示事实是历史之后的独立尾段，不冒充已完成行。
+# 函数用途: 比较真实前台缓存字段、完整旧历史和 Compact 当前展示的实际运输字节。
 def test_compactcall_captures_full_preflight_wire_prefix(tmp_path, remote, last_role):
     import json
 
@@ -371,8 +373,10 @@ def test_compactcall_captures_full_preflight_wire_prefix(tmp_path, remote, last_
     count = next((i for i, item in enumerate(compact["input"]) if item.get("type") in {"configuration_update", "compaction_trigger"}), len(compact["input"]) - 1)
     a, b = main["input"], compact["input"][:count]
     print("compactcall_preflight", remote, last_role, "input", len(a), len(compact["input"]), "shared", len(b))
-    assert encode(a[:len(b)]) == encode(b)
-    assert len(b) == len(rows)
+    assert encode(a[:len(rows)]) == encode(b[:len(rows)])
+    expected_display = [{"role": "user", "content": text} for _source, text in surface.volatile_sections]
+    assert encode(b[len(rows):]) == encode(expected_display)
+    assert len(b) == len(rows) + len(expected_display)
 
 
 @pytest.mark.parametrize("remote", [True, False])

@@ -12,6 +12,9 @@ from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsT
 from agent_py_agent.agent.conversation.agent_thread import ensure_subagent_thread
 from agent_py_agent.agent.conversation.agent_thread_store import SUBAGENT_FIRST_REQUEST_KEY
 from agent_py_agent.tests.test_capability_package_task_refs import _agent
+from agent_py_agent.tests.test_subagent_runtime_compact import (
+    _capture_child_model_purpose,  # noqa: F401
+)
 
 
 # LLM: 开关写 pytest 私有配置并由原加载器消费；不替造包引用或 runner 状态。

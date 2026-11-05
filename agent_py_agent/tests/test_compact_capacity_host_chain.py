@@ -125,7 +125,8 @@ def _assert_fixed_measured_once(seen, fields) -> None:
     assert seen.candidates and all(view.summary and not view.measure_only for view, _ in seen.candidates)
 
 
-# 三种宿主的 transcript 入口：输出预留让最小候选自然被拒（不压上限）。
+# LLM: 三宿主均走真实 transcript 失败链；观察字段构造不等于已经接通公开进度通道。
+# 函数用途: 输出预留自然拒绝唯一候选，验证准确容量及一次固定开销实测。
 @pytest.mark.parametrize("host", ["gateway", "child", "background"])
 def test_transcript_entry_measures_fixed_overhead_once_through_the_host(tmp_path, monkeypatch, host):
     _agent, _tid, run, _requirement = _case(tmp_path, host, "anthropic_compatible", large=True)
@@ -141,8 +142,8 @@ def test_transcript_entry_measures_fixed_overhead_once_through_the_host(tmp_path
             run()
         error = failure.value
     assert sent == []
-    # 夹具里 Gateway 没接进度通道，其余宿主的失败都出自 transcript 压缩链。
-    assert seen.failed_in == ([] if host == "gateway" else ["compact"])
+    # W12 时序结算会构造失败字段；Gateway 即使没接公开进度也会经过该函数。
+    assert seen.failed_in == ["compact"]
     fields = _failure_fields(seen, error)
     _assert_fixed_measured_once(seen, fields)
     smallest = min((material for _, material in seen.candidates), key=_tokens)

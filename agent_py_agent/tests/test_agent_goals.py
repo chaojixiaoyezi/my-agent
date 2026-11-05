@@ -26,7 +26,11 @@ from agent_py_agent.cli.chat_parts.tui_goal_editor import _request_goal
 from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent
 from agent_py_agent.tests.test_gateway_agent_control_service import _bound_agent_tree
 from agent_py_agent.tests.test_runtime_guidance import _tool_loop_params
-from agent_py_agent.tests.test_subagent_runtime_compact import _OverflowThenCompleteChildBackend
+from agent_py_agent.tests.test_subagent_runtime_compact import (
+    _CHILD_SUMMARY_CALL,
+    _capture_child_model_purpose,  # noqa: F401
+    _OverflowThenCompleteChildBackend,
+)
 
 
 def test_goal_editor_displays_structured_http_conflict_without_losing_code():
@@ -220,8 +224,10 @@ def test_child_goal_continues_in_same_run_with_distinct_history_turns(tmp_path, 
             super().__init__(overflow_once=False)
             self.calls = 0
 
+        # LLM: 摘要用途由原宿主边界观察，不推进持久目标的业务游标。
+        # 函数用途: 保留 Goal 的完成与溢出序列，不依赖摘要文案。
         def generate(self, prompt, on_chunk=None, **kwargs):
-            if "You maintain a conversation summary" in prompt:
+            if _CHILD_SUMMARY_CALL.get():
                 return super().generate(prompt, on_chunk, **kwargs)
             self.calls += 1
             assert self.calls <= 3 + int(overflow_after_first_goal_turn), "Goal must stop after explicit completion"
@@ -301,7 +307,7 @@ def test_child_continuation_keeps_exact_denials_and_isolates_other_children(tmp_
         # LLM: 模型可以重复请求，但是否再次询问用户必须由宿主保留的精确拒绝事实决定。
         # 函数用途: 按固定序列产生工具调用、自动续轮边界和显式目标结束。
         def generate(self, prompt, on_chunk=None, **kwargs):
-            if "You maintain a conversation summary" in prompt:
+            if _CHILD_SUMMARY_CALL.get():
                 return super().generate(prompt, on_chunk, **kwargs)
             self.calls += 1
             compact = boundary == "goal_then_compact"

@@ -180,21 +180,28 @@ def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_
     _assert_uncommitted(case, failures=1)
 
 
-@pytest.mark.parametrize("second_result", ["oversized", "summary_failure"])
-def test_mixed_fallback_commits_its_own_complete_candidate(mixed_case, monkeypatch, second_result):
+# LLM: W12 单次选区后只生成一次摘要；达标和软目标未达都必须携带自己的联合来源和投影提交。
+# 函数用途: 核对真实 checkpoint/CAS 的文本、证据、双覆盖与原生工具引用，不再依赖已移除的第二候选。
+@pytest.mark.parametrize("watermark", ["target", "soft_target"])
+def test_mixed_selected_candidate_commits_its_own_complete_material(mixed_case, monkeypatch, watermark):
     case = mixed_case
     summaries, projections = [], []
     ceiling = compact._compact_request_input_ceiling(case.agent, case.source.policy)
     assert case.source.policy.recovery_target_tokens < ceiling - 1
+    candidate_tokens = (ceiling - 1 if watermark == "soft_target"
+                        else case.source.policy.recovery_target_tokens - 1)
 
+    # LLM: 只替换摘要模型，真实选区和候选计量不得通过第二次调用追逐软目标。
+    # 函数用途: 返回唯一联合摘要并观察完整来源。
     def summary(_agent, _previous, evidence, rows, *, call):
         summaries.append((tuple(rows), evidence, call))
-        if len(summaries) == 2 and second_result == "summary_failure":
-            raise RuntimeError("第二次摘要失败")
+        assert len(summaries) == 1, "软目标不能触发第二次摘要"
         return f"候选阶段摘要-{len(summaries)}"
 
+    # LLM: 空摘要选区不是正式候选；只有实际摘要才给出当前用例的完整请求大小。
+    # 函数用途: 分别记录选区材料和真正提交的候选材料。
     def project(view):
-        tokens = ceiling - 1 if len(projections) == 1 else ceiling + 1
+        tokens = 0 if view.measure_only else candidate_tokens if view.is_candidate else ceiling + 1
         value = ConversationCompactProjection(tokens, {"view": view, "identity": object()})
         projections.append(value)
         return value
@@ -202,20 +209,16 @@ def test_mixed_fallback_commits_its_own_complete_candidate(mixed_case, monkeypat
     monkeypatch.setattr(compact, "_summarize", summary)
     result = _compact(case, project, force=False)
 
-    assert len(summaries) == 2 and len(case.commits) == 1
-    selected = projections[1]
+    assert len(summaries) == len(case.commits) == 1 and len(projections) == 3
+    planning, selected = projections[1:]
     view = selected.material["view"]
     assert result.request_projection is selected and result.request_projection.material is selected.material
-    assert result.projected_tokens == ceiling - 1 and result.messages == view.messages
+    assert result.projected_tokens == candidate_tokens and result.messages == view.messages
     assert view.messages and view.retained_tool_records is case.tool_source.retained_records
     assert view.summary == "候选阶段摘要-1"
-    if second_result == "oversized":
-        # 最后一个是被拒的候选投影（成功提交不做固定开销实测），提交的必须是更早那个自己的候选。
-        assert len(projections) == 3 and result.request_projection is not projections[-1]
-        assert projections[-1].material["view"].messages == ()
-        assert projections[-1].material["view"].operation_evidence != view.operation_evidence
-    else:
-        assert len(projections) == 2
+    assert planning.material["view"].measure_only and not planning.material["view"].summary
+    assert not view.measure_only and result.request_projection is not planning
+    assert result.request_projection.material is not planning.material
     assert all(item[2].tool_source_records == case.tool_source.source_records for item in summaries)
     checkpoint, = committed_compact_checkpoint_chain(case.agent, result.thread)
     assert checkpoint["summary"] == view.summary
@@ -231,27 +234,33 @@ def test_mixed_fallback_commits_its_own_complete_candidate(mixed_case, monkeypat
     assert result.thread.compact_source_tool_pairs == len(case.tool_source.source_tool_refs)
 
 
+# LLM: W12 取消点改为唯一选定候选；摘要、完整投影或已停止后的普通错误都不得发布覆盖/失败账。
+# 函数用途: 保留原取消优先级与真实 CAS 不提交检查，不构造已不存在的第二候选。
 @pytest.mark.parametrize("stop_at", ["summary", "projection", "generic_failure_after_stop"])
-def test_second_candidate_cancellation_never_commits_earlier_acceptable_candidate(mixed_case, monkeypatch, stop_at):
+def test_selected_candidate_cancellation_never_publishes_state(mixed_case, monkeypatch, stop_at):
     case = mixed_case
     token = CancellationToken()
     summaries, projections, events = [], [], []
     ceiling = compact._compact_request_input_ceiling(case.agent, case.source.policy)
 
+    # LLM: 取消发生在真实唯一摘要阶段，普通异常不能遮住已到达的用户停止。
+    # 函数用途: 覆盖显式取消与停止后报错两个分支。
     def summary(*_args, **_kwargs):
         summaries.append(len(summaries) + 1)
-        if len(summaries) == 2:
-            if stop_at == "summary":
-                raise ToolCancelled("第二次摘要已取消")
-            if stop_at == "generic_failure_after_stop":
-                token.cancel("第二候选期间停止")
-                raise RuntimeError("停止之后出现普通错误")
+        assert len(summaries) == 1
+        if stop_at == "summary":
+            raise ToolCancelled("选定摘要已取消")
+        if stop_at == "generic_failure_after_stop":
+            token.cancel("选定摘要期间停止")
+            raise RuntimeError("停止之后出现普通错误")
         return f"候选摘要-{len(summaries)}"
 
+    # LLM: 选区允许完成，但正式候选计量的取消必须原样上抛，不记失败或进行 CAS。
+    # 函数用途: 在已生成摘要后的完整投影处注入取消。
     def project(view):
-        if view.is_candidate and len(projections) == 2:
-            raise ToolCancelled("第二次候选计量已取消")
-        tokens = ceiling - 1 if view.is_candidate else ceiling + 1
+        if view.summary and stop_at == "projection":
+            raise ToolCancelled("选定候选计量已取消")
+        tokens = 0 if view.measure_only else ceiling - 1 if view.is_candidate else ceiling + 1
         projection = ConversationCompactProjection(tokens, view)
         projections.append(projection)
         return projection
@@ -261,8 +270,9 @@ def test_second_candidate_cancellation_never_commits_earlier_acceptable_candidat
     with pytest.raises(expected):
         _compact(case, project, force=False, interrupt_check=lambda: token.cancelled, progress_callback=events.append)
 
-    assert len(summaries) == len(projections) == 2
-    assert case.source.policy.recovery_target_tokens < projections[1].projected_tokens < ceiling
+    assert len(summaries) == 1 and len(projections) == 2
+    assert not projections[0].material.is_candidate
+    assert projections[1].material.measure_only and projections[1].material.summary == ""
     assert events[-1]["phase"] == "superseded"
     assert not case.checkpoint_path.exists()
     _assert_uncommitted(case, failures=0)

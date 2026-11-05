@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +43,28 @@ from agent_py_agent.tests.test_subagent_compact_recovery_continuation import (
     _response,
 )
 
+_CHILD_SUMMARY_CALL = ContextVar("test_child_summary_call", default=False)
+
+
+# LLM: 只旁听宿主给出的 typed purpose，透传真实辅助请求；异常后恢复范围，不用摘要措辞或调用次序分流。
+# 函数用途: 让共享 fake 正确区分业务生成与摘要生成，不改生产准备或执行链。
+@pytest.fixture(autouse=True)
+def _capture_child_model_purpose(monkeypatch):
+    from agent_py_agent.agent.conversation import compact_request_budget
+
+    original = compact_request_budget.generate_auxiliary_model_response
+
+    # LLM: ContextVar 隔离并发调用，原对象及原输出不变；作用域只供测试后端观察。
+    # 函数用途: 在原辅助生成期间记录准确的摘要用途。
+    def generate(request):
+        token = _CHILD_SUMMARY_CALL.set(request.purpose == "conversation_compact_summary")
+        try:
+            return original(request)
+        finally:
+            _CHILD_SUMMARY_CALL.reset(token)
+
+    monkeypatch.setattr(compact_request_budget, "generate_auxiliary_model_response", generate)
+
 
 class _OverflowThenCompleteChildBackend:
     name = "overflow-then-complete-child"
@@ -65,8 +88,10 @@ class _OverflowThenCompleteChildBackend:
         self.summary_prompts: list[str] = []
         self.summary_kwargs: list[dict[str, object]] = []
 
+    # LLM: 由原辅助请求用途分流；业务正文即使含旧摘要标记也不能消耗摘要分支。
+    # 函数用途: 分别记录业务压力、摘要和恢复后的业务请求。
     def generate(self, prompt: str, on_chunk=None, **kwargs):
-        if "You maintain a conversation summary" in prompt:
+        if _CHILD_SUMMARY_CALL.get():
             self.summary_prompts.append(prompt)
             self.summary_kwargs.append(dict(kwargs))
             return ModelResponse(
@@ -111,6 +136,30 @@ class _OverflowThenCompleteChildBackend:
             backend=self.name,
             usage={"input_tokens": 500, "output_tokens": 100},
         )
+
+
+# LLM: 交叉覆盖真实 typed 用途和两种正文；旧标记不能误导业务，新摘要文案不能误导摘要。
+# 函数用途: 防止共享 fake 再次以提示词文本替代真实生成用途。
+@pytest.mark.parametrize("summary", [False, True], ids=["business", "summary"])
+@pytest.mark.parametrize("prompt", [
+    "You maintain a conversation summary",
+    "只保留已经核对的历史事实。",
+], ids=["legacy-marker", "reworded"])
+def test_child_backend_routes_by_host_purpose_not_prompt_text(summary, prompt):
+    from agent_py_agent.agent.conversation import compact_request_budget
+    from agent_py_agent.agent.conversation.auxiliary_model_call import AuxiliaryModelCallRequest
+
+    backend = _OverflowThenCompleteChildBackend(overflow_once=False)
+    if summary:
+        agent = SimpleNamespace(backend=backend, config=SimpleNamespace(max_tokens=4096))
+        compact_request_budget._generate_auxiliary_with_retry(AuxiliaryModelCallRequest(
+            agent=agent, prompt=prompt, purpose="conversation_compact_summary",
+        ))
+    else:
+        backend.generate(prompt)
+    assert backend.model_prompts == ([] if summary else [prompt])
+    assert backend.summary_prompts == ([prompt] if summary else [])
+    assert _CHILD_SUMMARY_CALL.get() is False
 
 
 class _WriteThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
@@ -178,8 +227,10 @@ def test_child_failure_keeps_native_history_in_own_thread(tmp_path, error_type):
 class _OverflowThenListThenCompleteChildBackend(_OverflowThenCompleteChildBackend):
     name = "overflow-list-then-complete-child"
 
+    # LLM: 使用与父 fake 相同的宿主用途范围，不以提示词决定工具回复阶段。
+    # 函数用途: 让业务恢复后继续真实工具调用，摘要不推进业务游标。
     def generate(self, prompt: str, on_chunk=None, **kwargs):
-        if "You maintain a conversation summary" in prompt:
+        if _CHILD_SUMMARY_CALL.get():
             self.summary_prompts.append(prompt)
             self.summary_kwargs.append(dict(kwargs))
             return ModelResponse(
