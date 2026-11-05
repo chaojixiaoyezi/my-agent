@@ -14,12 +14,8 @@ from agent_py_agent.agent.assets.monitor_adapter import (
     list_monitor_descriptors,
     save_monitor_binding,
 )
-from agent_py_agent.agent.assets.script_store import ScriptStore
-from agent_py_agent.agent.assets.workflow_store import (
-    WorkflowDefinition,
-    WorkflowStepSpec,
-    WorkflowStore,
-)
+from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStepSpec
+from agent_py_agent.agent.assets.workspace_assets import commit_asset_batch
 from agent_py_agent.agent.backends.base import EchoBackend, ModelResponse, ProviderToolCapability
 from agent_py_agent.agent.capability.decision_candidates import method_descriptors_for_agent
 from agent_py_agent.agent.capability.method_tree import build_method_tree, render_method_catalog
@@ -181,10 +177,11 @@ def _heavy_case(tmp_path, counts):
         path.write_text(
             f"---\n{front}\n---\n# 状态不变量检查方法\n保留原始证据引用。\n", encoding="utf-8"
         )
-    scripts = ScriptStore(home)
+    # 门禁验证目录/推荐，不逐项验收CRUD；真实批量入口保留校验、落盘、历史和步骤引用，避免重复读回。
+    assets = []
     for number in range(script_count):
-        scripts.save_script(
-            AssetDescriptor(
+        assets.append({
+            "descriptor": AssetDescriptor(
                 f"fixed-script-{number:03d}",
                 "script",
                 f"fixed-script-{number:03d}",
@@ -198,9 +195,8 @@ def _heavy_case(tmp_path, counts):
                     "trigger_matchers": {"indicator_types": ["ipv4"]} if number == 0 else {},
                 },
             ),
-            'raise AssertionError("fixture scripts must never execute")\n',
-        )
-    workflows = WorkflowStore(home)
+            "code": 'raise AssertionError("fixture scripts must never execute")\n',
+        })
     for number in range(workflow_count):
         children = range(number * 6, number * 6 + 6) if number < 10 else ()
         steps = tuple(
@@ -212,7 +208,7 @@ def _heavy_case(tmp_path, counts):
             )
             for index in children
         )
-        workflows.save_workflow(
+        assets.append(
             WorkflowDefinition(
                 AssetDescriptor(
                     f"workflow-id-{number:04d}",
@@ -222,8 +218,15 @@ def _heavy_case(tmp_path, counts):
                 ),
                 steps,
                 body_markdown="# 结构化事件关联\n只读取正式来源。\n",
-            )
+            ).to_dict()
         )
+    committed = commit_asset_batch(assets, owner_home=home)
+    assert committed["committed"] is True
+    assert len(committed["items"]) == script_count + workflow_count
+    assert {(row["kind"], row["id"]) for row in committed["items"]} == {
+        *(('script', f"fixed-script-{number:03d}") for number in range(script_count)),
+        *(('workflow', f"workflow-id-{number:04d}") for number in range(workflow_count)),
+    }
     for number in range(5):
         save_monitor_binding(
             home,
