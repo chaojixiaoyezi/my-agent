@@ -66,7 +66,30 @@ def _ordered_carried_names(record: dict[str, object]) -> tuple[str, ...]:
     ) else []
     search = envelope.get("tool_search")
     names = search.get("loaded_tool_names") if isinstance(search, dict) else None
-    return ordered_tool_names([*credential, *(names if isinstance(names, list) else [])])
+    package = envelope.get("capability_package_tools")
+    package_names = package.get("loaded_tool_names") if isinstance(package, dict) else None
+    return ordered_tool_names([*credential, *(names if isinstance(names, list) else []),
+                               *(package_names if isinstance(package_names, list) else [])])
+
+
+def merge_loop_loaded_tool_names(params: object, names: object) -> None:
+    """按原循环的 list/set 和有序归档规则追加展示名；只接受当前冻结快照，不授予工具权限。"""
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    allowed = {spec.name for spec in snapshot.specs} if snapshot is not None else set()
+    discovered = tuple(name for name in ordered_tool_names(names) if name in allowed)
+    existing = tuple(name for name in ordered_loop_loaded_tool_names(params) if name in allowed)
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        state = {}
+        params.live_archive_state = state
+    ordered = tuple(dict.fromkeys((*existing, *discovered)))
+    state["loaded_tool_order"] = ordered
+    loaded = getattr(params, "loaded_tool_names", None)
+    if isinstance(loaded, list):
+        params.loaded_tool_names = list(ordered)
+    elif isinstance(loaded, set):
+        loaded.intersection_update(allowed)
+        loaded.update(discovered)
 
 
 # LLM: 仅显式边界调用；默认32项不意外回收普通会话的工具前缀；显式限额、pins与新近性优先级保持。

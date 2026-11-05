@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ..common.cancellation import raise_if_cancelled
@@ -243,6 +244,11 @@ class SkillSearchTool(BaseTool):
                 record_method_read(self.agent, package, resource_path)
                 record_skill_usage_event(self.agent, event="manual_get", skill_id=package_id,
                                          kind="capability_package", source="package", chars=len(payload.get("body") or ""))
+                if outcome.ok and package.mcp_runtime == "on_demand" and package.mcp_tool_names:
+                    outcome = replace(outcome, result_envelope={**outcome.result_envelope, "capability_package_tools": {
+                        "package_id": package.package_id, "activation_id": package.activation_id,
+                        "loaded_tool_names": list(package.mcp_tool_names),
+                    }})
             return outcome
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)

@@ -389,7 +389,7 @@ def _mcp_rows(call):
     for runtime in snapshot.runtimes:
         spec = runtime.model_spec
         tool = registry.tools.get(spec.name)
-        if (not isinstance(tool, MCPProxyTool) or spec.hints.provider_id.startswith('plugin:')
+        if (not isinstance(tool, MCPProxyTool) or spec.hints.provider_id.startswith(('plugin:', 'package:'))
                 or not runtime.exposure.model_visible):
             continue
         effect = tool.client.config.effect_for_tool(tool.remote_tool)

@@ -7,7 +7,9 @@ import logging
 import time
 from collections import OrderedDict
 
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.log_redaction import redact_sensitive_text
+from ..plugin_activation_ref import remember_available_installations
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_runtime import PluginMCPClient, PluginProxyTool
 from .mcp_client import MCPError
@@ -32,6 +34,7 @@ def _discover_plugin_manifests(owner) -> tuple[tuple, tuple]:
     except OSError:
         return PluginInstallStore(owner).snapshot(), ()
     key = (str(path), *stamp)
+    trustworthy = cache_entry_trustworthy(stat.st_mtime_ns)
     if key not in _INSTALLATION_SNAPSHOTS:
         rows = PluginInstallStore(owner).snapshot()
         # 原子替换横跨读取时不缓存；下拍必须重读新表，旧客户端仍须逐个检查撤销。
@@ -42,7 +45,11 @@ def _discover_plugin_manifests(owner) -> tuple[tuple, tuple]:
         while len(_INSTALLATION_SNAPSHOTS) > _PLUGIN_CACHE_MAX_ENTRIES:
             _INSTALLATION_SNAPSHOTS.popitem(last=False)
     _INSTALLATION_SNAPSHOTS.move_to_end(key)
-    return _INSTALLATION_SNAPSHOTS[key], stamp
+    rows = _INSTALLATION_SNAPSHOTS[key]
+    # 原解析快照保持复用契约；只对正可用性 memo 应用两秒新写门，发送仍鲜活 require。
+    if trustworthy:
+        remember_available_installations(owner, rows, cache_stat_signature(stat))
+    return rows, stamp
 
 
 # LLM: 键绑定 owner、安装 revision、原激活代和环境 inode/mtime；未知环境不永久视作缺失。
@@ -90,7 +97,9 @@ def synchronize_plugin_clients(registry) -> None:
     try:
         rows, stamp = _discover_plugin_manifests(owner) if owner.identity == OwnerIdentity.local_main() else ((), ())
         active = ({row.activation_id: row for row in rows
-                   if row.enabled and not row.manifest.is_content_only}
+                   if row.enabled and not row.manifest.is_content_only
+                   and (not getattr(row.manifest, "has_mcp_runtime", False)
+                        or registry._construction_params.capability_pack_mcp_enabled is True)}
                   if owner.identity == OwnerIdentity.local_main() else {})
     except (OSError, ValueError) as exc:
         logger.warning("插件安装目录不可读：%s", type(exc).__name__)
@@ -141,7 +150,8 @@ def refresh_plugin_client(registry, client: PluginMCPClient, transport) -> None:
     occupied = {name for name, tool in registry.tools.items() if not isinstance(tool, PluginProxyTool)}
     for other in registry._mcp_clients:
         if isinstance(other, PluginMCPClient) and other is not client:
-            occupied.update(tool.model_spec.name for tool in other.validated_tools if tool.availability().available)
+            other_tools = other.pack_tools if getattr(other, "lazy", False) else other.validated_tools
+            occupied.update(tool.model_spec.name for tool in other_tools if tool.availability().available)
     if any(tool.model_spec.name in occupied for tool in tools):
         raise MCPError("插件工具与已有目录名称冲突", code="MCP_PROTOCOL_ERROR")
     client.publish_discovered_tools(transport, tools)
@@ -154,8 +164,10 @@ def project_plugin_tools(registry) -> None:
     for client in registry._mcp_clients:
         if not isinstance(client, PluginMCPClient):
             continue
-        tools = client.validated_tools
-        if not tools or not all(tool.availability().available for tool in tools):
+        tools = client.pack_tools if getattr(client, "lazy", False) else client.validated_tools
+        available = (client.activation_ref.available() and not client.drift) if getattr(client, "lazy", False) else (
+            bool(tools) and all(tool.availability().available for tool in tools))
+        if not tools or not available:
             continue
         if any(tool.model_spec.name in replacement for tool in tools):
             logger.warning("插件工具名称冲突，本视图未接入该插件")

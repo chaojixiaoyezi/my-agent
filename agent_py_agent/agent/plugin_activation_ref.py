@@ -3,14 +3,43 @@
 
 from __future__ import annotations
 
+import os
+import threading
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+from .common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from .common.path_segments import safe_path_segment
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallation
 from .tooling.process_scope import ProcessActivationScope
 from .user_space.owner_resolver import OwnerHomeResult, OwnerIdentity, resolve_owner_home
+
+# 展示与审批预检的正缓存最多保留 1024 条；FIFO 淘汰，不缓存发送权限或新写入的两秒窗口。
+ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES: int = int("1024")
+_ACTIVATION_AVAILABILITY_MEMO: OrderedDict[tuple, tuple[Path, tuple]] = OrderedDict()
+_AVAILABILITY_LOCK = threading.Lock()
+
+
+def remember_available_installations(owner: OwnerHomeResult, rows: tuple, signature: tuple) -> None:
+    """复用注册层已完整解码且前后指纹相等的 main 表；只预热展示正缓存，不给执行门读。"""
+    if owner.identity != OwnerIdentity.local_main():
+        return
+    path = owner.plugins_dir / "installations.json"
+    try:
+        info = os.stat(path, follow_symlinks=False)
+        if cache_stat_signature(info) != signature or not cache_entry_trustworthy(info.st_mtime_ns):
+            return
+        with _AVAILABILITY_LOCK:
+            for row in rows:
+                if row.enabled:
+                    key = (str(owner.root), owner.identity, row.manifest.plugin_id, row.activation_id)
+                    _ACTIVATION_AVAILABILITY_MEMO[key] = (path, signature)
+            while len(_ACTIVATION_AVAILABILITY_MEMO) > ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES:
+                _ACTIVATION_AVAILABILITY_MEMO.popitem(last=False)
+    except (OSError, ValueError):
+        return
 
 
 # LLM: root 与 identity 必须来自可信宿主，scope 只绑定原代；序列化用于私有启动信封，不能接受模型提供的权限地址。
@@ -70,6 +99,29 @@ class PluginActivationRef:
         if self.identity != OwnerIdentity.local_main() and current.installation_scope != "private":
             raise PermissionError("插件运行仅限管理员")
         return current
+
+    def available(self) -> bool:
+        """有界展示检查；未命中仍完整复核原 owner/代次，发送的 require 永不复用这里的结果。"""
+        key = (self.root, self.identity, self.scope.plugin_id, self.scope.activation_id)
+        with _AVAILABILITY_LOCK:
+            try:
+                path = self.owner().plugins_dir / "installations.json"
+                before = os.stat(path, follow_symlinks=False)
+                signature = cache_stat_signature(before)
+                cached = _ACTIVATION_AVAILABILITY_MEMO.get(key)
+                if (cached == (path, signature) and cache_entry_trustworthy(before.st_mtime_ns)):
+                    return True
+                _ACTIVATION_AVAILABILITY_MEMO.pop(key, None)
+                self.require()
+                after = os.stat(path, follow_symlinks=False)
+                if cache_stat_signature(after) == signature and cache_entry_trustworthy(after.st_mtime_ns):
+                    _ACTIVATION_AVAILABILITY_MEMO[key] = (path, signature)
+                    while len(_ACTIVATION_AVAILABILITY_MEMO) > ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES:
+                        _ACTIVATION_AVAILABILITY_MEMO.popitem(last=False)
+                return True
+            except (OSError, ValueError):
+                _ACTIVATION_AVAILABILITY_MEMO.pop(key, None)
+                return False
 
     # LLM: 载荷只包含固定身份和可信规范地址，没有配置值或授权缓存；仅写宿主私有的一次性信封。
     # 函数用途: 将原引用交给独立 host，避免其猜测用户目录。
