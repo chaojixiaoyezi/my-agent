@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import stat
+import time
 from collections import deque
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,14 +17,19 @@ from ..user_space.storage_lanes import (
     STORAGE_LANE_SLICE_BYTES,
     STORAGE_LANE_SLICE_ENTRIES,
     STORAGE_LANE_SLICE_MS,
+    StorageLaneBudget,
     lane_cursor_window,
 )
 from .store_io import ImmutableJsonIndex
 
 # 不可达对象至少保留七天，保护旧读取快照及尚未发表的新根。
 HAMT_SWEEP_GRACE_SECONDS = 7 * 86400
-# 单次根标记最多访问的节点数，超过后整棵树保留。
-HAMT_SWEEP_SLICE_NODES = 2048
+# 每片首个线程独享的标记时间上限，避免大提交链反复在常规短片中从头失败。
+HAMT_MARK_THREAD_MS = 5000
+# 每片首个线程独享的读取额度；全部读量仍进入回执，由调度器阻止后续通道透支。
+HAMT_MARK_THREAD_BYTES = 256 * 1024 * 1024
+# 单线程完整标记允许的最大节点数，超限只能保留整树并跳过该线程。
+HAMT_MARK_MAX_NODES = 65536
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,8 @@ def mark_reachable_nodes(
         visited += 1
         try:
             node = index._load(reference)
+        except _BudgetExceeded:
+            raise
         except OSError:
             dangling.append(name)
             complete = False
@@ -310,6 +318,8 @@ class _LaneWork:
         )
         self.items = self.size = self.deleted = self.freed = 0
         self.errors, self.skipped = [], {}
+        self._allowance_used = False
+        self._allowance = None
         state = request.cursor.get("sweep")
         self.sweep_state = (
             dict(state)
@@ -322,29 +332,71 @@ class _LaneWork:
         )
         self.retired_probe = request.cursor.get("retired_probe")
 
-    # LLM: 同时检查原预算与派生预算，保留原零预算语义。
+    # LLM: 只有首个实际处理的线程可借用独立额度，显式零条目或零字节预算仍拒绝；不改名称窗口预算。
+    # 函数用途: 为完整标记和锁内复核开启本片唯一一次五秒读取额度。
+    def begin_thread_allowance(self) -> bool:
+        if (
+            self._allowance_used
+            or self.request.budget.max_items == 0
+            or self.request.budget.max_bytes == 0
+        ):
+            return False
+        self._allowance_used = True
+        self._allowance = StorageLaneBudget(
+            self.items + self.budget.max_items,
+            self.size + HAMT_MARK_THREAD_BYTES,
+            time.monotonic() + HAMT_MARK_THREAD_MS / 1000,
+        )
+        return True
+
+    # LLM: 只关闭本栈临时额度，不改累计读量、清扫计量或本片已使用标记。
+    # 函数用途: 恢复普通通道预算。
+    def end_thread_allowance(self) -> None:
+        self._allowance = None
+
+    # LLM: 只选择本片实际额度，不改变名称发现窗口使用的 work.budget。
+    # 函数用途: 给预筛和清扫提供一致的条数预算。
+    def _active_budget(self):
+        return self._allowance or self.budget
+
+    # LLM: 异常与早退均归还临时额度，嵌套或后续调用不会关闭别人的额度。
+    # 函数用途: 用上下文确保首线程额度配对关闭。
+    @contextmanager
+    def thread_allowance(self):
+        first = self.begin_thread_allowance()
+        try:
+            yield first
+        finally:
+            if first:
+                self.end_thread_allowance()
+
+    # LLM: 首线程额度生效时单独计量；其余时间同时检查原预算和常规片预算，零预算不放大。
     # 函数用途: 判断本片是否已经没有额度。
     def exhausted(self):
+        if self._allowance is not None:
+            return self._allowance.exhausted(self.items, self.size)
         return self.request.budget.exhausted(self.items, self.size) or self.budget.exhausted(
             self.items, self.size
         )
 
-    # LLM: 先验证非负整数及剩余额度，再计量；不足抛 OSError 子类以阻止半棵树删除。
+    # LLM: 先验证非负整数，再按当前实际额度计量；不足抛专用异常，绝不授权半棵树清扫。
     # 函数用途: 为一次实际读取占用字节预算。
     def read(self, size):
         if type(size) is not int or size < 0:
             raise OSError("invalid reachability read size")
-        if (
-            self.budget.remaining_ms() <= 0
-            or self.request.budget.remaining_ms() <= 0
-            or size > self.available_bytes()
-        ):
+        timed_out = (
+            self._allowance.remaining_ms() <= 0 if self._allowance is not None else
+            self.budget.remaining_ms() <= 0 or self.request.budget.remaining_ms() <= 0
+        )
+        if timed_out or size > self.available_bytes():
             raise _BudgetExceeded("reachability budget exhausted")
         self.size += size
 
-    # LLM: 原零字节预算不能被 capped 的默认值放大；只返回本栈剩余额度。
+    # LLM: 首线程独立额度只在显式允许时生效，其他时候保留调用方零字节预算。
     # 函数用途: 计算下一次读取最多还能接收多少字节。
     def available_bytes(self):
+        if self._allowance is not None:
+            return max(0, self._allowance.max_bytes - self.size)
         cap = self.budget.max_bytes
         if self.request.budget.max_bytes is not None:
             cap = min(cap, self.request.budget.max_bytes)
@@ -401,7 +453,7 @@ class _LaneWork:
             reachable=frozenset(reachable),
             mark_started_at=started,
             now=self.request.now,
-            max_items=max(0, self.budget.max_items - self.items),
+            max_items=max(0, self._active_budget().max_items - self.items),
             run_write=self.request.run_write,
             after=after,
             allowed=lambda: not self.exhausted(),
@@ -426,7 +478,7 @@ class _LaneWork:
             if self.sweep_state and self.sweep_state["namespace"] == namespace
             else ""
         )
-        remaining = max(0, self.budget.max_items - self.items)
+        remaining = max(0, self._active_budget().max_items - self.items)
         result = _sweep_window(
             path,
             reachable=frozenset(reachable),

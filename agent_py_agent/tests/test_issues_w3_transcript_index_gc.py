@@ -46,7 +46,7 @@ def test_two_phase_sweep_collects_superseded_nodes_and_every_message_remains_rea
     request = request_for(home_for(case), kind="conversation_messages", now=now)
     first = maintain_transcript_index_lane(request)
     validate_lane_receipt(first)
-    assert not first["complete"] and first["deleted_items"] == 0
+    assert first["complete"] and first["deleted_items"] == 0
     assert {node.name for node in namespace.glob("*.json")} == files
     early = maintain_transcript_index_lane(
         replace(request, cursor=first["cursor"], now=now + 86400)
@@ -152,7 +152,7 @@ def test_broken_thread_does_not_block_later_healthy_thread(compact_case, monkeyp
         request_for(home_for(case), kind="conversation_messages")
     )
     assert any(error["code"] == "transcript_index_incomplete" for error in result["errors"])
-    assert result["cursor"]["pending"]["tid"] == case.thread_id
+    assert [entry["tid"] for entry in result["cursor"]["pending"]] == [case.thread_id]
 
 
 def test_missing_earlier_message_root_does_not_block_runtime_root(compact_case, monkeypatch):
@@ -167,7 +167,7 @@ def test_missing_earlier_message_root_does_not_block_runtime_root(compact_case, 
     result = maintain_transcript_index_lane(
         request_for(home_for(case), kind="conversation_messages")
     )
-    assert result["cursor"]["pending"]["tid"] == case.thread_id
+    assert [entry["tid"] for entry in result["cursor"]["pending"]] == [case.thread_id]
 
 
 def test_transcript_zero_candidates_and_hold_make_zero_commits(compact_case, monkeypatch):
@@ -208,7 +208,8 @@ def test_one_item_budget_prepares_and_finishes_transcript_gc(compact_case, monke
     target = aged(path.parent.joinpath(*index.parts, orphan["ref"]["ref"]))
     request = request_for(home_for(case), kind="conversation_messages", items=1)
     first = maintain_transcript_index_lane(request)
-    assert first["cursor"]["pending"]["tid"] == case.thread_id and first["deleted_items"] == 0
+    assert [entry["tid"] for entry in first["cursor"]["pending"]] == [case.thread_id]
+    assert first["deleted_items"] == 0
     cursor = first["cursor"]
     for _ in range(20):
         result = maintain_transcript_index_lane(
@@ -252,4 +253,4 @@ def test_full_name_window_preserves_root_and_reaches_later_thread(
     assert not first["complete"] and first["cursor"]["after"] == first_case.thread_id
     assert first["items"] == 1 and first["cursor"]["root_index"] == 0
     later = maintain_transcript_index_lane(replace(request, cursor=first["cursor"]))
-    assert later["cursor"]["pending"]["tid"] == later_case.thread_id
+    assert [entry["tid"] for entry in later["cursor"]["pending"]] == [later_case.thread_id]
