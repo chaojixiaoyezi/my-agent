@@ -85,37 +85,76 @@ def _retirement_required(root, generations, target_count):
     return facts if facts or facilities else None
 
 
-# LLM: 复用P1发现入口的strict nofollow字节/codec及摘要文件名绑定；缺count不猜分区权限，只核死亡，坏行整组拒绝。
-# 函数用途: 读取所有执行者身份，包括已released或abandoned的记录。
-def _executor_identities(root):
-    identities = []
+# LLM: 保留完整P1/原文件目录身份和原旧N；ledger短锁由调用栈持到移动结束，暂存只分类不解码成责任。
+# 函数用途: 读取全部原执行责任，不把缺身份或终态行丢成空账。
+def _executor_identities(root, retained):
+    import fcntl
+
+    from ..common.nofollow_fs import open_readonly_file_beneath
+    from .multiprocess_drain_sources import _generation_source_entry_kind
+    from .multiprocess_executor_ledger import ExecutorLedger
+    from .multiprocess_route import WorkerPartition
+    from .multiprocess_takeover_sources import _original_generation_count, _target
+
+    identities, groups, observed = [], {}, {}
+    registry = _discovery_registry(root)
     try:
         for name in list_names_beneath(root, ('workers', 'executors')):
             if re.fullmatch(r'w(0|[1-9][0-9]*)', name) is None:
                 raise ValueError('executor_partition_invalid')
             parts = ('workers', 'executors', name)
-            for filename in list_names_beneath(root, parts):
-                if filename == 'ledger.lock':
-                    read_bytes_beneath(root, (*parts, filename), max_bytes=16384, require_dir_fd=True)
+            names = list_names_beneath(root, parts)
+            descriptor = open_readonly_file_beneath(root, (*parts, 'ledger.lock'))
+            retained.callback(os.close, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for filename in names:
+                if _generation_source_entry_kind(root, parts, filename) != 'source':
+                    _tree_stamp(root, (*parts, filename))
                     continue
-                raw, _file_identity, _directory_identity = read_executor_source(root, (*parts, filename))
-                row = deserialize_record(raw)
+                source = read_executor_source(root, (*parts, filename))
+                row = deserialize_record(source[0])
                 if (row['schema_version'] not in {'multiprocess_executor_reservation.v1', 'multiprocess_executor_reservation.v2'}
-                        or hashlib.sha256(row['reservation_id'].encode()).hexdigest() + '.json' != filename
-                        or (row.get('execution_domain') is not None
-                            and row['execution_domain']['source_worker_index'] != int(name[1:]))):
+                        or hashlib.sha256(row['reservation_id'].encode()).hexdigest() + '.json' != filename):
                     raise ValueError('executor_binding_invalid')
-                if row['process_identity'] is not None:
-                    identities.append({'role': 'executor', 'pid': row['process_identity']['pid'],
-                                       'identity': row['process_identity']})
+                count = _original_generation_count(root, row['c_run_id'], registry, observed)
+                if count is None:
+                    raise ValueError('executor_original_scope_unknown')
+                ledger = ExecutorLedger(root, WorkerPartition(int(name[1:]), count, row['c_run_id']))
+                ledger._bound_record(row)
+                if ledger.read(row['reservation_id']) != row:
+                    raise ValueError('executor_source_changed')
+                from ..user_space.owner_resolver import OwnerIdentity
+                from .multiprocess_route import owner_digest
+
+                role = 'C' if row['owner_sha'] == owner_digest(OwnerIdentity.local_main()) else 'W'
+                key = (row['c_run_id'], role, None if role == 'C' else int(name[1:]), count)
+                groups.setdefault(key, []).append(row)
+                identity = row['process_identity']
+                identities.append({'role': 'executor', 'pid': None if identity is None else identity['pid'],
+                    'identity': identity, 'record': row, 'parts': (*parts, filename), 'source': source,
+                    'group': key, 'ledger': ledger})
+            if names != list_names_beneath(root, parts):
+                raise ValueError('executor_namespace_changed')
+        for item in identities:
+            generation, role, index, count = item['group']
+            target = _target(root, count, (generation, role, index), groups[item['group']])
+            from .multiprocess_takeover_ledger import _validate_scope
+
+            _validate_scope(target.ledger, target.scope)
+            item['scope'] = target.scope
+        if registry != _discovery_registry(root):
+            raise ValueError('executor_registry_changed')
+        for generation, metadata in observed.items():
+            if metadata != read_generation_metadata(root, generation):
+                raise ValueError('executor_generation_changed')
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise StandaloneSourceUnproven('retirement_executor_unreadable') from error
     return identities
 
 
-# LLM: C缺完整身份只消费原锁，所有P4和W marker身份分别核，不因重复PID省略不同出生；不读取请求正文。
-# 函数用途: 汇总本次必须证明已退出的角色和执行者。
-def _collect_identities(root):
+# LLM: C缺完整身份只消费原锁，所有P4和W marker身份分别核，完整P1及其原scope独立保留。
+# 函数用途: 汇总本次必须证明已退出的角色和执行责任。
+def _collect_identities(root, retained):
     identities = []
     registry = _discovery_registry(root)
     if registry is not None:
@@ -136,15 +175,18 @@ def _collect_identities(root):
                                'identity': row['process_identity']})
     if not any(row['role'] == 'C' for row in identities):
         identities.append({'role': 'C', 'pid': None, 'identity': None})
-    identities.extend(_executor_identities(root))
+    identities.extend(_executor_identities(root, retained))
     return identities
 
 
-# LLM: 根锁证明C不再拥有设施，完整C身份仍不能live；W/P1只认False，unknown绝不当dead，不发信号。
-# 函数用途: 为清单生产死亡结论，发现活或未知进程就拒绝整次移动。
+# LLM: 根锁只证明C；P1保原scope/整树且任次live/unknown拒绝；复用P2有界核验，不铸造native能力或完整域receipt。
+# 函数用途: 为全部原责任取得整树停止观察；父退出及缺身份都不能单独放行。
 def _prove(identities, lock_mode):
+    from . import multiprocess_takeover as p2
+
     if lock_mode not in {'standalone', 'coordinator'}:
         raise ValueError('retirement_lock_required')
+    executors = []
     for row in identities:
         live = daemon_metadata.process_identity_is_live(row['identity'])
         row['verdict'] = 'alive' if live is True else 'dead' if live is False else 'unknown'
@@ -156,8 +198,42 @@ def _prove(identities, lock_mode):
             if live is not False:
                 raise StandaloneSourceUnproven('retirement_worker_alive' if live is True
                                               else 'retirement_worker_liveness_unknown')
-        elif live is not False:
+        else:
+            # 空槽虽合法，却可能处于spawn后、登记前；没有原未执行证据时永久保守，不根据state猜。
+            if row['identity'] is None or live is not False:
+                raise StandaloneSourceUnproven('retirement_executor_alive_or_unknown')
+            executors.append(row)
+    if not executors:
+        return
+    started = time.monotonic()
+    budget = p2._takeover_budget(None)
+    deadline = started + budget['deadline_seconds']
+    tables = p2._bounded_observations(p2.observe_processes, [row['record'] for row in executors], budget, deadline)
+    for row in executors:
+        evidence = p2._verify_record(row['record'], tables)
+        row['exit_evidence'] = evidence
+        if (time.monotonic() >= deadline or any(table['failure'] for table in tables)
+                or not evidence['enumeration_complete'] or evidence['status'] != 'stopped'
+                or evidence['observed_live_members']
+                or any(item['status'] != 'stopped' for item in evidence['observations'])):
+            row['verdict'] = 'unknown'
             raise StandaloneSourceUnproven('retirement_executor_alive_or_unknown')
+        _require_executor_source(row)
+        row['verdict'] = 'dead'
+
+
+# LLM: 原P1完整字节/文件/目录身份、原绑定及scope均末核；不凭原JSON或观察结果生成执行权。
+# 函数用途: 阻止证明期间换行、换桶或更换文件洗掉责任。
+def _require_executor_source(item):
+    from .multiprocess_takeover_ledger import _validate_scope
+
+    ledger, record = item['ledger'], item['record']
+    _validate_scope(ledger, item['scope'])
+    if (read_executor_source(ledger.root, item['parts']) != item['source']
+            or ledger._bound_record(record) != record or ledger.read(record['reservation_id']) != record
+            or record['reservation_id'] not in item['scope']['executor_reservation_ids']
+            or record['owner_sha'] not in item['scope']['owner_shas']):
+        raise StandaloneSourceUnproven('retirement_sources_changed')
 
 
 # LLM: 逐段no-follow遍历设施，目录可原样移动但内部链接/特殊文件不可收编；目录身份与叶内容纳入前后比较。
@@ -180,20 +256,39 @@ def _tree_stamp(root, parts):
     return identity, hashlib.sha256(raw).hexdigest()
 
 
-# LLM: 只枚举固定白名单设施；请求、控制回执、ingress、responses、conversations与coordinator.lock永不进入移动集。
-# 函数用途: 按合同顺序列出全部待移设施，gateway_state始终最后。
+# LLM: 仅认registry的token暂存和heartbeat的UUID暂存；名称只绑定原canonical目标，不认证写者或授执行权。
+# 函数用途: 分类两种已实现writer的准确未发表设施名称。
+def _worker_staging_target(name):
+    registry = re.fullmatch(r'\.(registry\.json)\.tmp-[0-9a-f]{32}', name)
+    heartbeat = re.fullmatch(r'\.(w(?:0|[1-9][0-9]*)\.json)\.[0-9a-f]{32}\.tmp', name)
+    match = registry or heartbeat
+    return None if match is None else match[1]
+
+
+# LLM: 只枚举固定原设施及精确暂存；nofollow普通单link门先行，业务请求/控制/ingress/responses永不移动。
+# 函数用途: 按合同顺序列出待保全设施，canonical state始终最后。
 def _source_paths(root, *, include_state=True):
+    from ..common.nofollow_fs import open_readonly_file_beneath
+
     names = list_names_beneath(root, ('workers',))
     known = {'registry.json', 'registry.json.lock', 'control.json', 'control.json.lock',
              'executors', 'generations', 'takeover_evidence'}
-    if any(name not in known and re.fullmatch(r'w(0|[1-9][0-9]*)\.json(?:\.lock)?', name) is None
-           for name in names):
-        raise StandaloneSourceUnproven('retirement_unknown_source')
+    stages = {}
+    for name in names:
+        target = _worker_staging_target(name)
+        if target is not None:
+            descriptor = open_readonly_file_beneath(root, ('workers', name))
+            os.close(descriptor)
+            stages[name] = target
+        elif name not in known and re.fullmatch(r'w(0|[1-9][0-9]*)\.json(?:\.lock)?', name) is None:
+            raise StandaloneSourceUnproven('retirement_unknown_source')
     result = [('workers', name) for name in names if name in {'control.json', 'control.json.lock'}]
-    result.extend(('workers', name) for name in names if re.fullmatch(r'w(0|[1-9][0-9]*)\.json(?:\.lock)?', name))
+    result.extend(('workers', name) for name in names if re.fullmatch(r'w(0|[1-9][0-9]*)\.json(?:\.lock)?', name)
+                  or stages.get(name, '').startswith('w'))
     for directory in ('takeover_evidence', 'executors', 'generations'):
         result.extend(('workers', directory, name) for name in list_names_beneath(root, ('workers', directory)))
-    result.extend(('workers', name) for name in names if name in {'registry.json', 'registry.json.lock'})
+    result.extend(('workers', name) for name in names if name in {'registry.json', 'registry.json.lock'}
+                  or stages.get(name) == 'registry.json')
     result.extend(('admission', 'reservations', name)
                   for name in list_names_beneath(root, ('admission', 'reservations')))
     admission = list_names_beneath(root, ('admission',))
@@ -278,41 +373,78 @@ def _require_lock(paths, target_count, lifecycle):
     raise ValueError('retirement_lock_required')
 
 
-# LLM: 原锁内整组双读并证明死亡才创建manifest/移动；永不写closure，MP拒绝复用CoordinatorUnavailable，Count0复用既有source码。
-# 函数用途: 启动之前退役所有已证明死亡且阻塞当前拓扑的旧多进程设施。
+# LLM: 固定原活跃来源的全部父目录FD，不遍历退役历史；ExitStack确保拒绝/错误/成功时同样释放。
+# 函数用途: 为整次退役保留不会因路径替换而漂移的目录锚点。
+def _retained_directories(root, sources, retained):
+    anchors = {}
+    prefixes = {parts[:depth] for parts in sources for depth in range(len(parts))}
+    for parts in sorted(prefixes):
+        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+        retained.callback(os.close, descriptor)
+        info = os.fstat(descriptor)
+        anchors[parts] = info.st_dev, info.st_ino
+    return anchors
+
+
+# LLM: 不刷新初始源/角色/代次/目录或完整P1基线；manifest写入之后、首个move之前仍执行同一末门。
+# 函数用途: 在原锁内复核本次证明仍对应全部原来源。
+def _require_snapshot(root, sources, before, generations, current, identities, anchors):
+    for parts, identity in anchors.items():
+        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+        try:
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) != identity:
+                raise StandaloneSourceUnproven('retirement_sources_changed')
+        finally:
+            os.close(descriptor)
+    if (sources != _source_paths(root)
+            or before != {parts: _tree_stamp(root, parts) for parts in sources}
+            or generations != _old_generations(root, current)):
+        raise StandaloneSourceUnproven('retirement_sources_changed')
+    for item in identities:
+        if item['role'] == 'executor':
+            _require_executor_source(item)
+
+
+# LLM: 原生命周期锁及原ledger锁内固定整组来源；完整P2树观察通过且原源末核才归档，不补closure或授接班执行权。
+# 函数用途: 启动之前只退役本次已证明停止的旧代活跃设施，所有未知责任原地保留。
 def retire_dead_multiprocess_generations(paths, *, target_count: int, current_c_run_id: str | None = None,
                                        lifecycle=None) -> dict | None:
     lock_mode = _require_lock(paths, target_count, lifecycle)
     identities = []
-    try:
-        generations = _old_generations(paths.root, current_c_run_id)
-        facts = _retirement_required(paths.root, generations, target_count)
-        if facts is None:
-            return None
-        sources = _source_paths(paths.root)
-        before = [(parts, _tree_stamp(paths.root, parts)) for parts in sources]
-        identities = _collect_identities(paths.root)
-        _prove(identities, lock_mode)
+    with ExitStack() as retained:
+        try:
+            generations = _old_generations(paths.root, current_c_run_id)
+            facts = _retirement_required(paths.root, generations, target_count)
+            if facts is None:
+                return None
+            sources = _source_paths(paths.root)
+            anchors = _retained_directories(paths.root, sources, retained)
+            before = {parts: _tree_stamp(paths.root, parts) for parts in sources}
+            identities = _collect_identities(paths.root, retained)
+            _prove(identities, lock_mode)
+            _require_lock(paths, target_count, lifecycle)
+            _require_snapshot(paths.root, sources, before, generations, current_c_run_id, identities, anchors)
+        except (OSError, ValueError, TypeError, KeyError, StandaloneSourceUnproven) as error:
+            reason = str(error) if isinstance(error, StandaloneSourceUnproven) else 'retirement_source_unreadable'
+            observed = [{key: row.get(key, 'unknown') for key in ('role', 'pid', 'verdict')} for row in identities]
+            print(json.dumps({'event': 'gateway_generation_retirement_refused', 'reason': reason,
+                              'identities': observed}, sort_keys=True), file=sys.stderr)
+            if target_count > 0:
+                refusal = CoordinatorUnavailable(reason)
+                refusal.reason = reason
+                raise refusal from error
+            raise StandaloneSourceUnproven(reason) from error
+        manifest = {'schema_version': 'multiprocess_generation_retirement.v1', 'retired_at': time.time(),
+                    'target_count': target_count, 'generations': facts,
+                    'identities': [{key: row[key] for key in ('role', 'pid', 'verdict')} for row in identities],
+                    'execution_proofs': [{'source': '/'.join(row['parts']), 'scope': row['scope'],
+                        'record_sha256': hashlib.sha256(row['source'][0]).hexdigest(),
+                        'evidence': row['exit_evidence']} for row in identities if row['role'] == 'executor'],
+                    'moved': [], 'reason': 'multiprocess_to_standalone' if target_count == 0 else 'old_generation_incompatible'}
+        archive = _archive_dir(paths.root, generations)
+        _write_manifest(archive, manifest)
         _require_lock(paths, target_count, lifecycle)
-        if (sources != _source_paths(paths.root)
-                or before != [(parts, _tree_stamp(paths.root, parts)) for parts in sources]
-                or generations != _old_generations(paths.root, current_c_run_id)):
-            raise StandaloneSourceUnproven('retirement_sources_changed')
-    except (OSError, ValueError, TypeError, KeyError, StandaloneSourceUnproven) as error:
-        reason = str(error) if isinstance(error, StandaloneSourceUnproven) else 'retirement_source_unreadable'
-        observed = [{key: row.get(key, 'unknown') for key in ('role', 'pid', 'verdict')} for row in identities]
-        print(json.dumps({'event': 'gateway_generation_retirement_refused', 'reason': reason,
-                          'identities': observed}, sort_keys=True), file=sys.stderr)
-        if target_count > 0:
-            refusal = CoordinatorUnavailable(reason)
-            refusal.reason = reason
-            raise refusal from error
-        raise StandaloneSourceUnproven(reason) from error
-    manifest = {'schema_version': 'multiprocess_generation_retirement.v1', 'retired_at': time.time(),
-                'target_count': target_count, 'generations': facts,
-                'identities': [{key: row[key] for key in ('role', 'pid', 'verdict')} for row in identities],
-                'moved': [], 'reason': 'multiprocess_to_standalone' if target_count == 0 else 'old_generation_incompatible'}
-    archive = _archive_dir(paths.root, generations)
-    _write_manifest(archive, manifest)
-    _move_sources(paths.root, archive, manifest)
-    return manifest
+        _require_snapshot(paths.root, sources, before, generations, current_c_run_id, identities, anchors)
+        _move_sources(paths.root, archive, manifest)
+        return manifest
