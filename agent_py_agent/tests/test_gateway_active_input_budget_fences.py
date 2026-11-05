@@ -110,12 +110,15 @@ def test_one_deadline_covers_all_refs_and_keeps_earlier_partial_commit(tmp_path,
         params = params_for(agent, claim, thread)
         source = params.pending_turn_input_source
         append = source._append
+        # 每条只消耗0.10秒，共享0.17秒期限；冻结无关IO耗时，避免慢CI在首条提交前耗尽预算。
+        # 单条耗时仍小于总预算，若错误地为每个ref重置期限，本例必须失败。
+        clock = [time.monotonic()]
 
         def slow(paths, request_id, **options):
             result = reader(paths, request_id, **options)
             if request_id in ids and request_id not in delayed:
                 delayed.append(request_id)
-                time.sleep(0.10)
+                clock[0] += 0.10
             return result
 
         def observe(receipt, actual_agent, **options):
@@ -124,8 +127,11 @@ def test_one_deadline_covers_all_refs_and_keeps_earlier_partial_commit(tmp_path,
 
         monkeypatch.setattr(inputs, 'read_gateway_input_receipt', slow)
         monkeypatch.setattr(source, '_append', observe)
-        with provider_request_budget(0.17), pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
-            run_input_safe_point(source, agent, 'drain', params)
+        # 各层deadline检查使用同一时钟；真实reader/writer照跑，断言及foreground退出前恢复时钟。
+        with monkeypatch.context() as timing:
+            timing.setattr(time, 'monotonic', lambda: clock[0])
+            with provider_request_budget(0.17), pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
+                run_input_safe_point(source, agent, 'drain', params)
         assert caught.value.phase == 'input.transport.retry_admission'
         assert delayed == ordered and entered == ordered[:1]
         first, second = (reader(gate.paths, item) for item in ordered)
