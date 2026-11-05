@@ -560,7 +560,7 @@ def max_output_tokens(agent: object) -> int:
 def compact_summary_output_reserve_tokens(agent: object) -> int:
     legacy = max_output_tokens(agent)
     normal = configured_output_ceiling(agent) if request_budget_shared_window(agent) else legacy
-    raw = getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 16384)
+    raw = getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 0)
     try:
         configured = int(raw) if not isinstance(raw, bool) else -1
     except (TypeError, ValueError, OverflowError):
@@ -569,6 +569,8 @@ def compact_summary_output_reserve_tokens(agent: object) -> int:
         return normal
     if configured < 0:
         configured = 16384
+    if normal <= 0:
+        return configured
     return min(configured, normal) if _compact_reasoning_downshift_available(agent) else legacy
 
 
@@ -576,23 +578,47 @@ def compact_summary_output_reserve_tokens(agent: object) -> int:
 #   memory_compact_reasoning_level（空/auto/off 表示不降档）。两者都成立，压缩调用才会在低档下写摘要，输出预留才能收紧。
 # 函数用途: 判断这个 agent 的压缩调用能不能被安全地降档（决定能不能用小的输出预留）。
 def _compact_reasoning_downshift_available(agent: object) -> bool:
-    from ...backends.reasoning_control import compact_reasoning_target
+    from ...backends.reasoning_control import compact_reasoning_target, normalize_reasoning_level
 
-    level = getattr(getattr(agent, "config", None), "memory_compact_reasoning_level", "low")
-    target, _reason = compact_reasoning_target(getattr(agent, "backend", None), level,
-                                              configured_output_ceiling(agent))
+    backend = getattr(agent, "backend", None)
+    supports = getattr(backend, "supports_reasoning_update_items", None)
+    level = getattr(getattr(agent, "config", None), "memory_compact_reasoning_level", "")
+    if not callable(supports) or not supports() or normalize_reasoning_level(level) in {"", "auto", "off"}:
+        return False
+    # 旧能力投影/auto档案只声明尾项支持；保留其原预留合同，显式控制方式仍验证可表示性。
+    declared = getattr(getattr(agent, "config", None), "model_reasoning_control", "")
+    if not hasattr(backend, "reasoning_control") or declared == "auto":
+        return True
+    target, _reason = compact_reasoning_target(backend, level, configured_output_ceiling(agent))
     return bool(target)
 
 
-# LLM: 只读显式窗口和内置适配器身份；不把 resolver 合并后的整数当总窗口证据，不探测网络。
-# 函数用途: 判定这份配置是否足以支持共享总窗口规划。
-def request_budget_shared_window(agent: object) -> bool:
+# LLM: HTTP传输基类没有实现模型生成，不能只凭传输字段就签发共享预算证明；不读取元数据或发请求。
+# 函数用途: 判断是否具备具体HTTP模型生成入口。
+def request_budget_supported_backend(agent: object) -> bool:
+    from ...backends.base import BaseBackend
     from ...backends.http import HttpBackend
 
     backend = getattr(agent, "backend", None)
-    window = (configured_context_window_tokens(getattr(agent, "config", None))
-              or int(getattr(backend, "configured_context_window_tokens", 0) or 0))
-    return isinstance(backend, HttpBackend) and window > 0 and not request_output_server_managed(agent)
+    generate = getattr(type(backend), "generate", None)
+    return isinstance(backend, HttpBackend) and callable(generate) and generate is not BaseBackend.generate
+
+
+# LLM: 当前配置显式未知时不能借构造时旧值补成已知；只有旧局部配置缺字段才读后端快照，不探测网络。
+# 函数用途: 取得本请求仍有效的显式窗口。
+def _request_budget_configured_window(agent: object) -> int:
+    config = getattr(agent, "config", None)
+    if hasattr(config, "model_context_window_tokens"):
+        return configured_context_window_tokens(config)
+    return int(getattr(getattr(agent, "backend", None), "configured_context_window_tokens", 0) or 0)
+
+
+# LLM: r4只给Responses启用实测共享规划；其它协议保留工厂输出上限、原水位和本地预留，不把元数据当新协议授权。
+# 函数用途: 判定这份请求是否启用Responses共享窗口规划。
+def request_budget_shared_window(agent: object) -> bool:
+    backend = getattr(agent, "backend", None)
+    return (request_budget_supported_backend(agent) and getattr(backend, "name", "") == "openai_responses"
+            and _request_budget_configured_window(agent) > 0 and not request_output_server_managed(agent))
 
 
 # LLM: 只认现有订阅认证事实，与 Responses 去除 max_output_tokens 的线协议一致。
@@ -601,21 +627,24 @@ def request_output_server_managed(agent: object) -> bool:
     return (getattr(getattr(agent, "backend", None), "auth_ref", None) or {}).get("mode") == "chatgpt"
 
 
-# LLM: 复用构造时冻结的原始天花板；已加载的供应商输出最大值只能降低，不按模型名推断。
+# LLM: 当前配置可进一步收紧构造时天花板；缺失/无效字段不覆盖后端事实，不修改后端或按模型名推断。
 # 函数用途: 返回可供已测量请求使用的输出天花板，不修改后端。
 def configured_output_ceiling(agent: object) -> int:
     backend = getattr(agent, "backend", None)
     reader = getattr(backend, "request_output_ceiling", None)
-    return max(0, int(reader())) if callable(reader) else max_output_tokens(agent)
+    ceiling = max(0, int(reader())) if callable(reader) else max_output_tokens(agent)
+    try:
+        current = int(getattr(getattr(agent, "config", None), "max_tokens", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        current = 0
+    return min(ceiling, current) if current > 0 else ceiling
 
 
 # LLM: 输入由调用方按出站表面校准；未知或输入型元数据继续用旧上限，不新增元数据请求。
 # 函数用途: 为一次主请求冻结预算，重复调用可用于新投影但不能保存到共享后端。
 def model_request_token_budget(agent: object, *, input_tokens: int) -> RequestTokenBudget:
     shared = request_budget_shared_window(agent)
-    backend = getattr(agent, "backend", None)
-    window = (configured_context_window_tokens(getattr(agent, "config", None))
-              or int(getattr(backend, "configured_context_window_tokens", 0) or 0))
+    window = _request_budget_configured_window(agent)
     ceiling = configured_output_ceiling(agent) if shared else max_output_tokens(agent)
     return resolve_request_token_budget(input_tokens=input_tokens, context_window_tokens=window,
         output_ceiling=ceiling, shared_window=shared,

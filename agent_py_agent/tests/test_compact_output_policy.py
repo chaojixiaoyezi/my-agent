@@ -45,17 +45,17 @@ def _summary_request(agent, **changes):
 
 
 @pytest.mark.parametrize("normal", [32768, 65536, 128000])
-def test_disabled_tail_updates_use_request_level_low_without_losing_prefix(monkeypatch, normal):
+def test_disabled_tail_updates_preserve_thread_partition_and_legacy_reserve(monkeypatch, normal):
     agent, payloads = _responses_agent(monkeypatch, normal=normal, mode="off")
     request = _summary_request(agent)
     history = deepcopy(request.messages)
     legacy = agent.backend.max_tokens
-    assert compact_summary_output_reserve_tokens(agent) == 16384
+    assert compact_summary_output_reserve_tokens(agent) == legacy
     result = generate_bounded_compact_response(request)
     assert result.text == "已核实的事实"
     assert len(payloads) == 1
-    assert payloads[0]["max_output_tokens"] == 16384
-    assert payloads[0]["reasoning"] == {"effort": "low"}
+    assert payloads[0]["max_output_tokens"] == legacy
+    assert payloads[0]["reasoning"] == {"effort": "max"}
     assert not any(item.get("type") == "configuration_update" for item in payloads[0]["input"])
     assert [item for item in payloads[0]["input"] if item.get("role") in {"user", "assistant"}][:2] == history
     assert request.messages == history
@@ -328,7 +328,7 @@ def test_remote_compaction_contract_is_preserved(monkeypatch):
     assert not any(item.get("type") in {"configuration_update", "compaction_trigger"} for item in sent[-1]["input"])
 
 
-def test_summary_usage_and_timeout_use_resolved_cap(monkeypatch):
+def test_summary_usage_uses_resolved_cap_without_extending_fixed_timeout(monkeypatch):
     from agent_py_agent.agent.conversation import auxiliary_model_call as auxiliary
     from agent_py_agent.agent.conversation import compact_request_budget as budgets
 
@@ -354,7 +354,8 @@ def test_summary_usage_and_timeout_use_resolved_cap(monkeypatch):
     assert record.input_tokens == budget.input_tokens
     assert record.output_tokens_estimate == budget.output_tokens == sent[0][0]["max_output_tokens"] == 16384
     assert sent[0][1]["total_deadline_seconds"] == expected
-    assert expected > 240 and result.request_token_budget is budget
+    assert expected == auxiliary.AUXILIARY_CALL_FLOOR_SECONDS == 240
+    assert result.request_token_budget is budget
 
 
 def test_calibrated_admission_budget_reaches_auxiliary_dispatch_unchanged(monkeypatch):
@@ -433,7 +434,7 @@ def test_anthropic_structured_surface_and_repair_have_fresh_host_budgets(monkeyp
             system_instruction=item.system_instruction, purpose="conversation_compact_summary", thread_id="budget-test")
         measured = calibrated_compact_request_tokens(budgets.compact_request_tokens(surface), calibration)
         assert item.token_budget.input_tokens == measured
-        assert item.token_budget.output_tokens == payload["max_tokens"] == 16384
+        assert item.token_budget.output_tokens == payload["max_tokens"] == agent.backend.max_tokens == 68000
     assert requests[1].token_budget is not requests[0].token_budget
     assert requests[1].token_budget.input_tokens > requests[0].token_budget.input_tokens
     assert response.request_token_budget is requests[1].token_budget
@@ -463,7 +464,7 @@ def test_structured_repair_capacity_failure_stops_before_second_io(monkeypatch):
     with pytest.raises(ConversationCompactError) as error:
         generate_bounded_compact_response(replace(request, messages=None), message_source=source)
     assert error.value.code == "COMPACT_PREFIX_TOO_LARGE" and len(sent) == 1
-    assert request.messages == before and sent[0]["max_tokens"] == 16384
+    assert request.messages == before and sent[0]["max_tokens"] == agent.backend.max_tokens == 16000
 
 
 def test_segment_and_repair_keep_calibrated_budgets_and_complete_source(monkeypatch):

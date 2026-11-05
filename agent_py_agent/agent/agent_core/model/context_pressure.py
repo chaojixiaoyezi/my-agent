@@ -9,7 +9,7 @@ from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 
 from ...backends import ModelResponse, is_provider_context_window_error
-from ...backends.request_budget import REQUEST_INPUT_SAFETY_TOKENS, RequestBudgetExceeded
+from ...backends.request_budget import RequestBudgetExceeded, RequestTokenBudget
 from ...backends.request_content import classify_nontext_content
 from ...backends.tool_protocol_adapter import tools_for_choice
 from ...conversation.compact_calibration import (
@@ -283,15 +283,8 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
         prompt,
     )
     overflow = _tool_context_window_overflow(request) if policy.allow_persistent_apply else {}
-    request_ceiling = model_request_input_ceiling(request.agent, window)
     budget = getattr(request, "token_budget", None)
-    if budget is None and _known_shared_window_output_reserve(request.agent) > 0:
-        from .call_runtime import model_request_token_budget
-
-        try:
-            budget = model_request_token_budget(request.agent, input_tokens=prompt_tokens)
-        except RequestBudgetExceeded as exc:
-            return request_budget_failure_response(request, exc)
+    request_ceiling = model_request_input_ceiling(request.agent, window, token_budget=budget)
     compact_chain_available = params is None or compact_request_source_supported(
         params, media_policy=configured_media_policy(getattr(request, "agent", None)),
     )
@@ -358,12 +351,13 @@ def _known_shared_window_output_reserve(agent: object) -> int:
     return max(0, requested_output)
 
 
-# LLM: 普通生成与 transcript 候选共用已知共享窗口及实际输出 cap；未知协议不猜预留，返回值不改变 Context 的输入占用显示。
+# LLM: 未冻结的候选保留旧实际输出预留；已冻结共享预算的主请求沿自己的工程余量，避免重复扣完整输出天花板。
 # 函数用途: 计算本请求输入必须严格低于的容量边界，阻止压缩后仍因输出预留不足立即再次超窗。
-def model_request_input_ceiling(agent: object, context_window_tokens: int) -> int:
-    from .call_runtime import request_budget_shared_window
-
-    return max(0, context_window_tokens - (REQUEST_INPUT_SAFETY_TOKENS if request_budget_shared_window(agent) else 0))
+def model_request_input_ceiling(agent: object, context_window_tokens: int, *,
+                                token_budget: RequestTokenBudget | None = None) -> int:
+    reserve = (token_budget.safety_tokens if token_budget is not None and token_budget.shared_window
+               else _known_shared_window_output_reserve(agent))
+    return max(0, context_window_tokens - reserve)
 
 
 # LLM: 规划失败不是供应商 token 计数证明；无输出余量进入原恢复链，非法配置是单次终止而非重复压缩。

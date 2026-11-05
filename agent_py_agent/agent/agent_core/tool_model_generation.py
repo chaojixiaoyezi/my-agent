@@ -787,7 +787,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         started_at=time.monotonic(),
         raw_context_estimate_tokens=context_snapshot.raw_estimated_tokens,
         context_surface_fingerprint=context_snapshot.context_surface_fingerprint,
-        token_budget=request.token_budget,
+        token_budget=getattr(request, "token_budget", None),
     )
 
 
@@ -1002,7 +1002,7 @@ def _forwarded_guidance_seen(params: object) -> set:
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     response = _recover_unclosed_long_write_response(request, response)
     if isinstance(response, ModelResponse):
-        response.request_token_budget = state.token_budget
+        response.request_token_budget = getattr(state, "token_budget", None)
     _publish_provider_thinking(request, state, response)
     state.chunk_filter.finish()
     record_model_call_finished(state.ledger, state.call_id, response)
@@ -1202,7 +1202,7 @@ def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
             timeout_seconds=_effective_model_request_timeout_seconds(
                 record.request.agent,
                 record.first_token_timeout_seconds,
-                token_budget=record.request.token_budget,
+                token_budget=getattr(record.request, "token_budget", None),
             ),
             # 门槛2: stage 由异常携带（stream_idle/wall_clock/provider_declared），
             # getattr 兜底 provider_wall 兼容历史异常对象（门槛2 前无 stage 字段）。
@@ -1323,7 +1323,10 @@ def _generate_through_wall_guard(
     state: _ModelGenerationState,
     first_token_timeout_seconds: float = 0.0,
 ):
-    timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds, token_budget=state.token_budget)
+    # 旧状态没有冻结预算时沿用双参数调用，不强加新字段或可选关键字。
+    budget = getattr(state, "token_budget", None)
+    timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds,
+        **({"token_budget": budget} if budget is not None else {}))
     if timeout <= 0:
         return _invoke_backend_generate(request.agent.backend, request.prompt, state)
 

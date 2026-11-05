@@ -76,7 +76,9 @@ def test_structured_rejection_retries_once_and_memoizes(monkeypatch):
     assert not agent.backend.supports_reasoning_update_items()
     generate_bounded_compact_response(_summary_request(agent))
     assert len(sent) == 3
-    assert sent[-1]["reasoning"] == {"effort": "low"}
+    # 已失败调用的兼容重放保留low意图；后续新调用按r4恢复线程分区和旧输出预留。
+    assert sent[-1]["reasoning"] == {"effort": "max"}
+    assert sent[-1]["max_output_tokens"] == agent.backend.max_tokens == 68000
     assert not any(item.get("type") == "configuration_update" for item in sent[-1]["input"])
 
 
@@ -89,11 +91,12 @@ def test_on_is_strict_and_does_not_memoize_rejection(monkeypatch):
     assert agent.backend.supports_reasoning_update_items()
 
 
-def test_off_is_request_level_low_on_first_attempt(monkeypatch):
+def test_off_preserves_thread_effort_without_tail_or_probe(monkeypatch):
     agent, sent = _responses_agent(monkeypatch, mode="off")
     response = generate_bounded_compact_response(_summary_request(agent))
     assert response.text and len(sent) == 1
-    assert sent[0]["reasoning"] == {"effort": "low"} and sent[0]["max_output_tokens"] == 16384
+    assert sent[0]["reasoning"] == {"effort": "max"}
+    assert sent[0]["max_output_tokens"] == agent.backend.max_tokens == 68000
     assert not any(item.get("type") == "configuration_update" for item in sent[0]["input"])
 
 

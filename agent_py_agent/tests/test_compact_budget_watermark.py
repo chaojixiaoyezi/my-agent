@@ -193,11 +193,26 @@ def test_unknown_window_keeps_conservative_reserve_without_shared_capacity_claim
     assert not request_budget_shared_window(agent)
     policy = runtime_compact_policy(agent)
     assert policy.trigger_tokens == 258400 and policy.trigger_limit_reason == "percent"
-    assert compact_cache_surface_budget(agent) == 253568
-    assert compact_summary_budget(agent) == 199168
+    assert compact_cache_surface_budget(agent) == 255616
+    assert compact_summary_budget(agent) == 201216
     result, _, _ = _main_response(monkeypatch, agent, 50000)
     assert not result.request_token_budget.shared_window
     assert sent[0]["max_output_tokens"] == agent.backend.max_tokens
     monkeypatch.setattr(context_compactor, "resolve_model_context_window_tokens", lambda agent: 0)
     unknown = runtime_compact_policy(agent)
     assert unknown.trigger_tokens == unknown.recovery_target_tokens == 0
+
+
+# LLM: 元数据窗口不提供共享容量证明；同样的非法共享几何仍必须失败。
+# 函数用途: 防止普通状态查看因旧后端的输出估算而被共享窗口校验阻断。
+def test_nonshared_trigger_does_not_enforce_shared_output_geometry():
+    from agent_py_agent.agent.backends.request_budget import (
+        RequestBudgetExceeded,
+        compact_trigger_limit,
+    )
+
+    facts = dict(window=10000, percent=80, absolute_cap=300000, compact_reserve=16000)
+    assert compact_trigger_limit(**facts, shared_window=False) == 8000
+    with pytest.raises(RequestBudgetExceeded) as caught:
+        compact_trigger_limit(**facts, shared_window=True)
+    assert caught.value.reason == "invalid_geometry"

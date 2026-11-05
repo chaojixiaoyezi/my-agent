@@ -68,6 +68,13 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    # LLM: 预算不足不能原样重放；保留原输入和冻结事实，沿既有容量恢复或修正配置。
+    # 配置用途: 登记请求输出预算不可用的准确分类与安全恢复建议。
+    "REQUEST_OUTPUT_BUDGET_UNAVAILABLE": ErrorContract(
+        code="REQUEST_OUTPUT_BUDGET_UNAVAILABLE", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="核对reason、完整输入、输出上限和窗口；沿原压缩恢复或修正明确配置，不原样重放、不删除原始来源或伪造一token预算。",
+    ),
     # LLM: INT.REG仅补分类，不签发发布、继承、重放或越权许可；未知副作用必须先核原回执。
     # 配置用途: 登记冻结接口合同及当前生产代码实际发出的错误，保留明确恢复边界。
     "ASSET_VERSION_NOT_FOUND": ErrorContract(

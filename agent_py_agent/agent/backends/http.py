@@ -274,10 +274,12 @@ class HttpBackend(BaseBackend):
         # as a total wall-clock limit while valid events keep arriving.
         self.stream_timeout_is_idle = self.stream_enabled
 
-    # LLM: 只读已加载的结构化元数据，绝不在请求热路径新增探测或按模型名猜上限。
+    # LLM: 只有Responses协议允许实测请求突破旧默认；其它协议保持工厂夹取，元数据只能继续收紧，不新增探测。
     # 函数用途: 已知供应商输出上限只会降低构造时冻结的配置天花板。
     def request_output_ceiling(self) -> int:
         ceiling = self.configured_output_ceiling
+        if self.name != "openai_responses":
+            ceiling = min(ceiling, self.max_tokens)
         for key in ("max_output_tokens", "max_output_token_count", "output_token_limit"):
             value = self.model_metadata.get(key)
             if type(value) is int and value > 0:

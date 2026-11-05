@@ -40,8 +40,8 @@ from agent_py_agent.tests._tool_runtime_harness import (
 def _request(text: str) -> AuxiliaryModelCallRequest:
     agent = SimpleNamespace(
         backend=SimpleNamespace(max_tokens=128),
-        # 新2048工程余量必须放进测试几何；单次缓存面仍为原来的1872 tokens。
-        config=SimpleNamespace(model_context_window_tokens=4048),
+        # 旧无共享窗口证明的接口保留原2000窗口；单次输入仍为1872，分段仍不超过1472。
+        config=SimpleNamespace(model_context_window_tokens=2000),
     )
     return AuxiliaryModelCallRequest(
         agent=agent, prompt="请总结历史", system_instruction="稳定系统前缀",
@@ -92,8 +92,7 @@ def test_fitting_request_preserves_cache_surface_with_auto_choice(monkeypatch, v
     assert calls[0].tool_choice.reason == "compact_cache_surface"
     assert calls[0] == replace(request, tool_choice=calls[0].tool_choice, token_budget=calls[0].token_budget)
     assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name not in {"tool_choice", "token_budget"})
-    assert calls[0].token_budget.output_tokens == 128
-    assert calls[0].token_budget.input_tokens == budget_module.compact_request_tokens(calls[0])
+    assert calls[0].token_budget is None, "旧运输接口在实际辅助分派内冻结预算"
     assert request.tool_choice is None
 
 
@@ -167,6 +166,8 @@ def test_fitting_compact_keeps_schema_and_auto_in_actual_provider_payload(monkey
     ))
     request = _request("已完成的历史，不能继续执行")
     request.agent.backend = backend
+    # 换成真实HTTP适配器后明确提供2048工程余量，不把旧接口的窗口当成可发送总窗口。
+    request.agent.config.model_context_window_tokens = 4048
     schema = {"name": "write_file", "description": "只保留目录", "input_schema": {
         "type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"],
     }}
@@ -331,7 +332,7 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
     budget_module.generate_bounded_compact_response(request)
     assert calls[0] == replace(request, tool_choice=calls[0].tool_choice, token_budget=calls[0].token_budget)
     assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name not in {"tool_choice", "token_budget"})
-    assert calls[0].token_budget.output_tokens == 128
+    assert calls[0].token_budget is None
     assert calls[0].tool_choice.mode == "auto"
     assert len(calls) > 1
     assert "".join(segment_part(r.prompt)[3] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
@@ -656,3 +657,71 @@ def test_retries_stop_at_the_configured_budget(monkeypatch):
     with pytest.raises(ProviderTransientError, match="一直断开"):
         budget_module.generate_bounded_compact_response(_request("短历史"))
     assert len(calls) == 3 and len(waits) == 2
+
+
+# LLM: 旧后端没有输出估算时不伪造零输出预算；真实分派仍要返回正文。
+# 函数用途: 验证局部配置缺失字段、微型窗口和未知输出上限共存。
+def test_unknown_output_estimate_keeps_legacy_compact_dispatch():
+    calls = []
+
+    def generate(prompt, **options):
+        calls.append((prompt, options))
+        return ModelResponse(text="完整旧摘要", backend="legacy")
+
+    agent = SimpleNamespace(backend=SimpleNamespace(generate=generate),
+                            config=SimpleNamespace(model_context_window_tokens=1000))
+    response = budget_module.generate_bounded_compact_response(AuxiliaryModelCallRequest(
+        agent, "旧历史", purpose="conversation_compact_summary"))
+    assert response.text == "完整旧摘要" and len(calls) == 1
+    assert response.request_token_budget is None
+    options = calls[0][1].get("request_options")
+    assert options is None or options.max_output_tokens is None
+
+
+# LLM: 不声明共享物理窗口的旧后端仍守完整输入和原输出预留，不强加比窗口更大的工程余量。
+# 函数用途: 验证小窗口摘要不因新增固定余量而被提前拒绝。
+def test_legacy_small_window_preserves_positive_output_reserve():
+    calls = []
+    agent = SimpleNamespace(backend=SimpleNamespace(max_tokens=128,
+        generate=lambda prompt, **options: calls.append(options) or ModelResponse(text="旧摘要", backend="legacy")),
+        config=SimpleNamespace(model_context_window_tokens=1000))
+    response = budget_module.generate_bounded_compact_response(AuxiliaryModelCallRequest(
+        agent, "短历史", purpose="conversation_compact_summary"))
+    assert response.text == "旧摘要" and len(calls) == 1
+    budget = response.request_token_budget
+    assert budget.output_tokens == 128 and not budget.shared_window
+    assert budget.safety_tokens == 0
+    assert budget.input_tokens + budget.output_tokens <= 1000
+
+
+# LLM: 旧运输形状不提前加预算，但实际辅助分派仍必须按同一校准冻结并交给后端与账本。
+# 函数用途: 验证推迟冻结不会丢失校准或把预算只挂在外层回执上。
+def test_legacy_auxiliary_dispatch_freezes_calibrated_budget():
+    from agent_py_agent.agent.conversation.compact_calibration import (
+        CompactRequestCalibration,
+        calibrated_compact_request_tokens,
+    )
+
+    request = _request("校准历史" * 100)
+    calls = []
+    request.agent.backend.generate = lambda prompt, **options: calls.append(options) or ModelResponse(text="摘要", backend="legacy")
+    calibration = CompactRequestCalibration(10000, 5000)
+    expected = calibrated_compact_request_tokens(budget_module.compact_request_tokens(request), calibration)
+    result = budget_module.generate_bounded_compact_response(request, calibration=calibration)
+    assert len(calls) == 1
+    options = calls[0]["request_options"]
+    assert options.token_budget is None and options.max_output_tokens == 128
+    actual = result.request_token_budget
+    assert actual.input_tokens == expected and actual.output_tokens == 128
+    assert not actual.shared_window and actual.safety_tokens == 0
+    record = request.agent._model_call_ledger.records()[-1]
+    assert record.input_tokens == expected and record.output_tokens_estimate == 128
+
+
+# LLM: 旧本地预留不能容纳输入时只报告零余量，让原来源/固定前缀错误继续归责；不发请求或伪造1token。
+# 函数用途: 验证不可用的旧预算不会冒充可发送预算，也不抢占原类型化来源诊断。
+def test_legacy_no_input_capacity_is_zero_without_fabricating_a_budget():
+    agent = SimpleNamespace(backend=SimpleNamespace(max_tokens=64),
+                            config=SimpleNamespace(model_context_window_tokens=1))
+    assert budget_module.compact_summary_budget(agent) == 0
+    assert budget_module.compact_cache_surface_budget(agent) == 0
