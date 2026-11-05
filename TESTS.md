@@ -1,3 +1,32 @@
+## 2026-11-04 v15r2-r7：工作流保留历史脚本的重试来源
+
+来源：`rework-v15r2-r7.md`（内嵌 R1/F1）及 `sol_audit_v15-final-r2.md`；原审计 `34059f586116d59a785f26e53b696788ccc9d999`，本片使用总控预建的 `rework/v15r2-r7@c762b343c56194e8021fb938b485d83c264ce3e1`。已核实审计提交为其祖先，且本片引擎及两份测试在两提交间无差异，没有替换起点或操作原 checkout。
+
+- 方法：仅将 `WorkflowEngine._script_step` 的执行来源选择改为“存在 frozen 就传 frozen，否则传 current”。相同 code/ref 不再丢弃编号版本及历史重试策略；当前 metadata 仍绑定同一已读记录，原 `_same_pin`、漂移/缺历史门、runtime 权限交集、legacy resolver、锁和清理链均不改。正式 `_perform` 和 `_generic_debug_step` 两处调用已对齐；scheduler、scripts tool、business script 三个跨文件调用方只读核查，未改签名或调用语义。
+- 真实链：ScriptStore 保存 → 正式版本发布钩子 → WorkflowStore 发布冻结依赖 → `run_workflow(definition_version=1)` / resume / foreach → datasource runtime → 原 ScriptRunner → 真实本地 Python 子进程。计数子类每次均委托原 runner，不返回自造结果。脚本声明本地非只读目标，v1 不幂等，v2 同代码/ref 但幂等，输出确定的结构化瞬态报告。断言每步只执行一次、历史来源仍为 v1、无 retry、当前 v2 元数据原字节及 revision 不变；临时执行目录已清理。
+- 控制：历史许可不能抵消当前收窄；编号 direct runtime、旧无编号、当前及无选择的重试对照；定义解析后 code/payload blob 消失仍零执行；当前停用零执行；两种 debug 脚本入口保留 `record_summary=False`、零正式 run/摘要更新；原权限、SDK、侧文件及错误清理测试保留。AST 门放在允许的测试文件内，防止按 drift 再次替换 frozen；没有扩写静态检查脚本白名单。
+- 不变量：Event 固定终态发表与晚到旧步骤写的交错，成功/失败/取消均拒绝普通状态倒退；同 scope 首执行体存活时第二运行跳过，活跃数最大 1；原 ACK 前 canonical `release_pending` 和内存准确租约均保留，ACK 后变 `released`。正式、恢复、foreach、debug、拒绝及上述交错路径实测 `fd_delta == 0`，另有真实 open → FD 加一 → close → 恢复的观察器对照。未增加历史扫描或锁层。
+
+验证记录（JUnit 在隔离测试 HOME）：
+
+| 阶段 | 结果 | 证据 |
+|---|---|---|
+| 原引擎上的修正后七条缺陷/结构回归 | 7 断言失败，0 error/skip，退出 1；normal/resume 为 3≠1，foreach 为 6≠2，反向来源、两类缺历史和 AST 门亦红 | `r7-corrected-red.xml` |
+| 单行修复后的首轮双文件 | 44 通过，0 failure/error/skip，退出 0 | `r7-first-green.xml` |
+| 增补状态机守卫后完整双文件 | 48 通过，0 failure/error/skip，退出 0 | `r7-gate-final.xml` |
+
+旧失败不覆盖：`r7-red.xml` 的 44 项中 7 失败，含一条批模式名称写错的测试配置错误；纠正后才取得上述七条纯断言红灯。`r7-gate.xml` 的 48 项中 1 失败，是测试将 skip 准入字典误当 DTO；修正读取并增加真实 Store 核对后重跑同一入口。它们不算额外产品缺陷。原问题未抛异常，修复也未改变异常类型或 cause 链。
+
+复跑须在本 worktree 根；已核实指定 Python 3.12 的导入 origin 属于该树。命令只隔离测试 HOME、显式固定当前源码及禁用缓存写入，不安装依赖或改用户环境：
+
+```bash
+HOME=/private/tmp/home-v15r2-r7 MY_AGENT_HOME=/private/tmp/home-v15r2-r7 PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 /Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest agent_py_agent/tests/test_v15_w5_pinned_execution.py agent_py_agent/tests/test_v15_w6_pinned_code_run.py -q --tb=short -p no:cacheprovider --junitxml=/private/tmp/home-v15r2-r7/r7-gate-final.xml
+ruff check agent_py_agent/agent/workflows/engine.py agent_py_agent/tests/test_v15_w5_pinned_execution.py agent_py_agent/tests/test_v15_w6_pinned_code_run.py
+git diff --check
+```
+
+6.1sol 独立静态复核未发现所给单行/接口片段违反合同；未直接访问工树或独立跑测试，不作为独立端到端验收。真实子进程仍使用 `use_sandbox=False` 与 Python 根限制，本记录不宣称原生平台沙箱、真实外部查询/重复写、部署、线上或跨平台 CI、无关套件已验证。R2 alert-recovery 的 TESTS 条目仅在收到可核对的验证交接后另列，不借 R7 结果声称它已通过；该文档交接不阻塞本片实现与定向验证。
+
 ## 2026-11-04 CI-R4：TUI 页脚与分层名册合同回归
 
 来源：`task-ci-r4.md` 与 `resume-ci-r4.md`；基线 `34059f586116d59a785f26e53b696788ccc9d999`。只改页脚组合函数及两份相关测试，按工作约定在此补验证记录；未改导航、实时历史、领域存储或运输实现。
