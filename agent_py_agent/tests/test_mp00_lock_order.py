@@ -407,3 +407,139 @@ def test_business_stop_optional_creation_guard_precedes_task_guard(monkeypatch, 
         session_task_stop.stop_business_session_task(agent, task)
     assert caught.value is stop
     assert events == (["creation", "task"] if guard_available else ["task"])
+
+
+def test_f1_stop_binding_is_inside_creation_but_outside_conversation_guards():
+    path = Path(__file__).resolve().parents[1] / "agent/gateway_parts/control_service.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "_prepare_main_task_stop")
+    parents = {child: node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
+    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+             and ast.unparse(node.func) == "_fresh_stop_runtime_binding"]
+    assert len(calls) == 1
+    ancestors = []
+    node = calls[0]
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, ast.With):
+            ancestors.extend(ast.unparse(item.context_expr) for item in node.items)
+    assert any("creation_guard" in expression for expression in ancestors)
+    assert not any(name in expression for expression in ancestors
+                   for name in ("transition_guard", "background_stop_guard"))
+
+
+def test_f1_stop_reads_binding_before_entering_goal_guard(monkeypatch):
+    from agent_py_agent.agent.gateway_parts import control_service
+
+    held, events = [], []
+    stop = ValueError("已进入原 GG，结束锁序探针")
+    linked, scope = object(), object()
+
+    @contextmanager
+    def creation_guard():
+        held.append("CG")
+        events.append("CG")
+        try:
+            yield
+        finally:
+            held.pop()
+
+    def fresh_binding(record, selected_scope):
+        assert record is linked and selected_scope is scope
+        assert held == ["CG"]
+        events.append("binding")
+        return {"task_id": "task"}
+
+    fresh = Mock(side_effect=fresh_binding)
+
+    @contextmanager
+    def goal_guard(thread_id):
+        assert thread_id == "thread"
+        fresh.assert_called_once_with(linked, scope)
+        events.append("GG")
+        raise stop
+        yield
+
+    agent = SimpleNamespace(subagents=SimpleNamespace(creation_guard=creation_guard),
+        conversation_store=SimpleNamespace(goals=SimpleNamespace(transition_guard=goal_guard)))
+    active = SimpleNamespace(payload={"conversation_thread_id": "thread"}, linked_request=linked)
+    monkeypatch.setattr(control_service, "_fresh_stop_runtime_binding", fresh)
+    with pytest.raises(ValueError) as caught:
+        control_service._prepare_main_task_stop(agent, active, "task", scope)
+    assert caught.value is stop
+    assert events == ["CG", "binding", "GG"] and held == []
+
+
+@pytest.mark.parametrize("closeout,expected", [
+    ({"status": "blocked", "reason": "closeout_busy", "error_code": "OWNER_SCOPE_UNAVAILABLE"}, "blocked"),
+    ({"status": "blocked"}, "blocked"),
+    ({"status": "expired"}, "expired"),
+    ({"status": "admitted"}, "raced"),
+    ({"status": None}, "raced"),
+    ({}, "raced"),
+])
+def test_f4_pending_closeout_short_circuits_before_owner_route(tmp_path, monkeypatch, closeout, expected):
+    request = SimpleNamespace(path=tmp_path / "pending.json", payload={"id": "pending", "kind": "ask"})
+    paths, limits = object(), request_worker.AdmissionLimits(2, 2)
+    hook = Mock(return_value=closeout)
+    gate = SimpleNamespace(try_close_unroutable_pending=hook)
+    owner = Mock(side_effect=AssertionError("closeout 必须先于 owner 路由"))
+    decision, claim, submit, wait = Mock(), Mock(), Mock(), Mock()
+    monkeypatch.setattr(request_worker, "_durable_request_owner", owner)
+    monkeypatch.setattr(request_worker, "_durable_admission_decision", decision)
+    monkeypatch.setattr(request_worker, "claim_request", claim)
+    monkeypatch.setattr(request_worker, "_record_admission_wait", wait)
+    assert request_worker._admit_and_submit_durable(paths, request, (limits, submit, gate)) == expected
+    hook.assert_called_once_with(request.path, snapshot=request.payload)
+    assert hook.call_args.kwargs["snapshot"] is request.payload
+    for downstream in (owner, decision, claim, submit):
+        downstream.assert_not_called()
+    if expected == "blocked":
+        wait.assert_called_once_with(request,
+            reason=str(closeout.get("reason") or "admission_blocked"),
+            error_code=str(closeout.get("error_code") or ""), paths=paths, admission_gate=gate)
+    else:
+        wait.assert_not_called()
+
+
+@pytest.mark.parametrize("hook_mode", ["absent", "none", "returns_none"])
+def test_f4_absent_or_empty_closeout_preserves_original_admission(tmp_path, monkeypatch, hook_mode):
+    request = SimpleNamespace(path=tmp_path / "pending.json", payload={"id": "pending", "kind": "ask"})
+    paths, limits, owner_identity = object(), request_worker.AdmissionLimits(2, 2), object()
+    gate, hook = SimpleNamespace(), Mock(return_value=None)
+    if hook_mode != "absent":
+        gate.try_close_unroutable_pending = None if hook_mode == "none" else hook
+    owner = Mock(return_value=owner_identity)
+    decision = Mock(return_value={"status": "expired"})
+    wait, submit = Mock(), Mock()
+    monkeypatch.setattr(request_worker, "_durable_request_owner", owner)
+    monkeypatch.setattr(request_worker, "_durable_admission_decision", decision)
+    monkeypatch.setattr(request_worker, "_record_admission_wait", wait)
+    assert request_worker._admit_and_submit_durable(paths, request, (limits, submit, gate)) == "expired"
+    owner.assert_called_once_with(gate, request.payload)
+    decision.assert_called_once()
+    assert decision.call_args.args[:3] == (paths, request, gate)
+    assert decision.call_args.args[3][0] is owner_identity
+    if hook_mode == "returns_none":
+        hook.assert_called_once_with(request.path, snapshot=request.payload)
+    else:
+        hook.assert_not_called()
+    wait.assert_not_called()
+    submit.assert_not_called()
+
+
+def test_f4_closeout_error_is_not_silently_admitted(tmp_path, monkeypatch):
+    request = SimpleNamespace(path=tmp_path / "pending.json", payload={"id": "pending", "kind": "ask"})
+    error = OSError("收口来源读取失败")
+    hook = Mock(side_effect=error)
+    gate = SimpleNamespace(try_close_unroutable_pending=hook)
+    owner = Mock(side_effect=AssertionError("收口失败不能继续路由"))
+    submit = Mock()
+    monkeypatch.setattr(request_worker, "_durable_request_owner", owner)
+    with pytest.raises(OSError) as caught:
+        request_worker._admit_and_submit_durable(object(), request, (request_worker.AdmissionLimits(2, 2), submit, gate))
+    assert caught.value is error
+    hook.assert_called_once_with(request.path, snapshot=request.payload)
+    owner.assert_not_called()
+    submit.assert_not_called()

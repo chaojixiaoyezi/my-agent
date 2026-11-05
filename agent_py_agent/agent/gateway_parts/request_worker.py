@@ -1917,7 +1917,8 @@ def _durable_admission_decision(paths, request, gate, ownership, limits):
 # LLM: C 只准入盖章；W 路由保留 pending 给冻结分区认领，只有 C 路由进入本地 claim/submit。
 #   预留只由规范终态释放：claim 失败/回退、submit 失败都不动预留（A3 屏障点），
 #   进程内字典计数在 count>0 时完全不参与（C 本地与各 worker 共用一个持久全局上限）。
-# 函数用途: 为请求完成持久派发，返回 dispatched/claimed/blocked/raced，不抢 worker 的任务。
+#   可选 pending 收口在 owner 路由前执行；已处理则立即返回，未知/繁忙沿原等待记录，不再进入准入或 submit。
+# 函数用途: 为请求完成持久派发，返回 dispatched/claimed/blocked/expired/raced，不抢 worker 的任务。
 def _admit_and_submit_durable(
     paths: GatewayPaths,
     request: _PendingGatewayRequest,
@@ -1926,6 +1927,15 @@ def _admit_and_submit_durable(
     from .multiprocess_admission import session_scope_for_request
 
     limits, submit, gate = lane
+    close_pending = getattr(gate, "try_close_unroutable_pending", None)
+    if close_pending is not None:
+        closeout = close_pending(request.path, snapshot=request.payload)
+        if closeout is not None:
+            if str(closeout.get("status") or "") == "blocked":
+                _record_admission_wait(request, reason=str(closeout.get("reason") or "admission_blocked"),
+                    error_code=str(closeout.get("error_code") or ""), paths=paths, admission_gate=gate)
+                return "blocked"
+            return "expired" if str(closeout.get("status") or "") == "expired" else "raced"
     user_key = request_user_key(request.payload)
     conversation_key = request_conversation_key(request.payload)
     try:
