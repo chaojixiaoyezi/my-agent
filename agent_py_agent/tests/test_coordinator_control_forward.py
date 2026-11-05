@@ -244,18 +244,20 @@ def test_actual_worker_schedule_uses_original_repository(cold, monkeypatch, oper
     assert post(cold, command)[0] == 200 and path.read_bytes() == before
 
 
+# LLM: 原HTTP和Worker泵执行正式route控制；设置必须落在既有owner线程，只属于原actor，重复回执不再执行。
+# 函数用途: 验证冷协调器转发的路由控制修改正确线程且不影响其他用户。
 @pytest.mark.parametrize('cold', ['feishu'], indirect=True)
-@pytest.mark.parametrize('command', ['/delegate status', '/delegate enable', '/delegate disable'])
-def test_actual_worker_delegate_uses_original_preference(cold, monkeypatch, command):
-    from agent_py_agent.agent.settings.im_task_preferences import delegation_preference
+@pytest.mark.parametrize('command', ['/route status', '/route true', '/route false'])
+def test_actual_worker_route_uses_original_thread_setting(cold, monkeypatch, command):
+    from agent_py_agent.agent.conversation.route_mode import route_setting
     status, queued = post(cold, command)
     assert status == 202
     with worker(cold, monkeypatch) as (actual, pump):
         receipt = consume(cold, pump, queued['operation_id'])
         assert receipt.state == 'completed' and receipt.result['ok'], receipt.to_dict()
-        preference = delegation_preference(actual, 'feishu', 'alice')
-        assert preference['enabled'] == (command == '/delegate enable')
-        assert not delegation_preference(actual, 'feishu', 'bob')['enabled']
+        setting = route_setting(actual, cold.thread, actor_id='alice')
+        assert setting['enabled'] == (command == '/route true')
+        assert not route_setting(actual, cold.thread, actor_id='bob')['enabled']
     assert post(cold, command)[0] == 200
 
 

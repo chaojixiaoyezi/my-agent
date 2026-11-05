@@ -125,6 +125,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="声明的数据来源缺失或不可取得；核对原来源记录和授权，不补造来源、把未知当零结果或越权扩大查询。",
     ),
+    # LLM: 缺定位页保留unknown，不授权补页、历史全扫或执行重放；原软提醒仍由调用方决定。
+    # 配置用途: 登记运行意图定位页缺失的准确恢复建议。
+    "RUN_INTENT_LOCATOR_MISSING": ErrorContract(
+        code="RUN_INTENT_LOCATOR_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前owner/task-local的运行意图定位页缺失；核对原运行身份及事实根，按用户原话确认输出位置，不把unknown当作无意图，不枚举历史、补造定位页或自动重放。",
+    ),
     "ASSET_DEPENDENT_REPLAY_FAILED": ErrorContract(
         code="ASSET_DEPENDENT_REPLAY_FAILED", category="contract", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
