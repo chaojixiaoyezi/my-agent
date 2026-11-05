@@ -152,6 +152,7 @@ def plan_owner_retention(
 
 # LLM: 仍委托唯一v2 Service；预算默认关闭，显式开启才在原锁/提交门保存续点，不修改维护调用方。
 # LLM: 协调路径只运输本次原短门；候选目录/锁出生走已有C写叶，扫描与flock仍门外，嵌套写复用同一活窗口。
+# LLM: W的私有维护仍消费原请求短门；有callback不等于C，不借全局写scope绕过worker拒绝门。
 # 函数用途: 兼容 Gateway owner maintenance 和旧 home-retention CLI。
 def apply_owner_retention(
     home: object,
@@ -163,6 +164,13 @@ def apply_owner_retention(
 ) -> MemoryRetentionReport:
     if commit_transition is not None:
         from ..common.global_write_commit import execute_global_write, global_write_commit_scope
+        from ..gateway_parts.multiprocess_mode import current_worker_partition
+
+        if current_worker_partition() is not None:
+            candidates = commit_transition(lambda: CandidateService(home.owner_memory_candidates_jsonl))
+            service = MemoryRetentionService(home_paths=home, candidates=candidates)
+            return service.apply(now=now, commit_transition=commit_transition,
+                expected_policy_fingerprint=expected_policy_fingerprint, scan_budget=scan_budget)
 
         with global_write_commit_scope(commit_transition):
             candidates = CandidateService(home.owner_memory_candidates_jsonl, coordinator_io=True)

@@ -156,6 +156,10 @@ def test_expected_source_fingerprints_reject_before_private_retention(tmp_path, 
 
 
 def test_actual_worker_private_maintenance_cannot_compact_shared_indexes(actual, monkeypatch):
+    from agent_py_agent.agent.common.global_write_guard import (
+        GlobalWriteInWorkerError,
+        require_global_writer,
+    )
     from agent_py_agent.agent.gateway_parts import multiprocess_background_execution as bridge
     from agent_py_agent.agent.gateway_parts.multiprocess_dispatch import WorkerDispatchError
     from agent_py_agent.agent.gateway_parts.multiprocess_execution import worker_execution_scope
@@ -175,9 +179,14 @@ def test_actual_worker_private_maintenance_cannot_compact_shared_indexes(actual,
     context = {'agent': agent, 'request': request, 'request_path': binding.claim.path,
                'request_id': binding.claim.request_id}
     with worker_execution_scope(binding, agent), bridge.background_request_scope(context):
+        with pytest.raises(GlobalWriteInWorkerError):
+            require_global_writer('global_config')
         result = run_owner_retention_if_due(agent.home_paths, include_global_indexes=True,
             commit_transition=lambda operation: bridge.background_short_operation('owner_maintenance_commit', operation))
-    assert result.ran is True
+        # 私有维护不能临时关闭或借用协调者全局写权限。
+        with pytest.raises(GlobalWriteInWorkerError):
+            require_global_writer('global_config')
+    assert result.ran is True and result.status == 'success'
     marker = json.loads((agent.home_paths.owner_data_dir / 'maintenance.json').read_text())
     assert marker['indexes_compacted'] == marker['indexes_compact_failed'] == []
 
