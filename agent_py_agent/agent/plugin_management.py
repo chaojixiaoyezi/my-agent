@@ -123,6 +123,9 @@ class PluginManagementContext:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     # 唯一宿主部署配置给出的确认期限；不读 owner workspace 局部配置。
     approval_timeout_seconds: int = 1800
+    # 运行包独立安全开关；追加在所有已有位置参数之后，保留 playbook 的位置构造合同。
+    capability_pack_mcp_enabled: bool = False
+    capability_pack_mcp_idle_stop_seconds: int = 600
     host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
 
 
@@ -184,6 +187,8 @@ def plugin_management_context(
                                    events_owner_allowed=is_complete_local_admin_owner(home),
                                    host_credential_env_names=managed_secret_environment_names(config),
                                    approval_timeout_seconds=approval_timeout_seconds,
+                                   capability_pack_mcp_enabled=getattr(config, "capability_pack_mcp_enabled", False) is True,
+                                   capability_pack_mcp_idle_stop_seconds=getattr(config, "capability_pack_mcp_idle_stop_seconds", 600),
                                    host_exclusive_roots=host_exclusive_paths(home, config))
 
 
@@ -198,6 +203,8 @@ def _enable_policy(context, arguments) -> PluginEnablePolicy:
     return PluginEnablePolicy(process_sandbox=context.process_sandbox,
                               events_enabled=context.plugin_events_enabled,
                               events_owner_allowed=context.events_owner_allowed,
+                              pack_mcp_enabled=context.capability_pack_mcp_enabled,
+                              pack_mcp_idle_stop_seconds=context.capability_pack_mcp_idle_stop_seconds,
                               legacy_arguments=arguments,
                               legacy_sandbox_default=context.legacy_sandbox_default,
                               legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names,
@@ -635,6 +642,10 @@ class PluginManagement:
         if special:
             result["message"] = special
         result.setdefault("message", _outcome_message(payload, state, _reply_message(payload, state, business, subject)))
+        if payload.get("tool_name") in {PLUGIN_INSTALL_TOOL, PLUGIN_UPDATE_TOOL}:
+            summary = _import_receipt_summary(payload.get("details", {}))
+            if summary:
+                result["message"] += "\n" + summary
         self._attach_catalog(result, payload)
         if request_id:
             result["message"] += f"\n查询：/plugins status {request_id}"
@@ -650,6 +661,23 @@ class PluginManagement:
     # 函数用途: 组装某插件四段展示里的事件与账本事实（订阅、收紧、网络、决定、计数）。
     def _event_details(self, entry) -> PluginEventDetails:
         return _build_event_details(self.context, entry)
+
+
+def _import_receipt_summary(details: dict) -> str:
+    """只读取导入回执的结构化状态计数与包 ID；组件正文、路径和名称不进入用户消息。"""
+    receipt = details.get("import_receipt")
+    if not isinstance(receipt, dict) or receipt.get("schema") != "external_plugin_import_receipt.v1":
+        return ""
+    components, plugin_id = receipt.get("components"), receipt.get("plugin_id")
+    if not isinstance(components, list) or not isinstance(plugin_id, str) or not plugin_id:
+        return ""
+    counts = {"imported": 0, "mapped": 0, "unsupported": 0}
+    for item in components:
+        status = item.get("status") if isinstance(item, dict) else None
+        if isinstance(status, str) and status in counts:
+            counts[status] += 1
+    return (f"已导入为能力包：{counts['imported']} 项已导入，{counts['mapped']} 项已映射，"
+            f"{counts['unsupported']} 项不支持且未运行；详情：/plugins#{plugin_id} 查看")
 
 
 # LLM: 目录和使用卡使用同次可见快照；渲染失败不改结果，公共可见不泄漏私有配置。

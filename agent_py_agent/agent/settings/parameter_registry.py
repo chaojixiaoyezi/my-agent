@@ -112,6 +112,10 @@ _BOUNDARY_NAMES = frozenset({
     "pty_session_idle_timeout_minutes",
     # B7：M 线事件插件总开关是安全边界，只能用户经 /settings 改；显式列名，不靠键名记号猜。
     "plugin_events_enabled",
+    # 包内 MCP 可执行服务只由用户开启，不能让模型扩大执行边界。
+    "capability_pack_mcp_enabled",
+    # 包服务驻留期限是资源安全边界，只由用户调整。
+    "capability_pack_mcp_idle_stop_seconds",
     # 老插件权限：老格式新授权默认收紧也是安全边界，只能用户经 /settings 改。
     "plugin_legacy_sandbox_default",
     # 规则来源及网络读取由用户控制；模型不能关闭规则来源或自行开启URL加载。

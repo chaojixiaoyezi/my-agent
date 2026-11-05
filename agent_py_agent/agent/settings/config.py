@@ -204,6 +204,10 @@ class _ToolConfigFields:
     plugin_events_enabled: bool = False
     # 老格式新授权默认收紧；管理员关闭只影响以后授权且仍需宽权限确认，不降级已收紧的固定激活。
     plugin_legacy_sandbox_default: bool = True
+    # 能力包 MCP 是独立安全边界，默认关闭；与事件插件开关分离，只能用户在 /settings 修改。
+    capability_pack_mcp_enabled: bool = False
+    # 包服务空闲后的停止秒数；0 表示永不因空闲停止，修改后重启 Gateway。
+    capability_pack_mcp_idle_stop_seconds: int = 600
     max_tool_rounds: int | None = None
     # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
     # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。

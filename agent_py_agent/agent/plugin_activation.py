@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .common.strict_json import load_strict_json
-from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_activation_record import PluginActivation, activation_catalog_digest
 from .plugin_content_activation import PluginContentActivation
 from .plugin_installation import (
     PluginCommitReceipt,
@@ -119,9 +119,15 @@ def _validate_transition(request: PluginActivationRequest, existing: PluginInsta
     if target.phase == "active":
         if current.phase != "preparing":
             raise PluginInstallationError("activation_revoked", "原准备已结束或撤销，不能发布。")
-        if target.catalog_sha256 != plugin_catalog_digest(existing.manifest):
+        # pin 只能在本代准备发布时固定；三处摘要共用 W1 的规则，不让新行破坏整表解码。
+        pinned = (existing.manifest.has_mcp_runtime
+                  and existing.manifest.mcp_servers[0].tool_catalog == "pinned_on_enable")
+        if ((pinned and (current.pinned_catalog_json is not None or target.pinned_catalog_json is None))
+                or (not pinned and target.pinned_catalog_json is not None)
+                or target.catalog_sha256 != activation_catalog_digest(existing.manifest, target)):
             raise PluginInstallationError("activation_catalog_conflict", "候选工具目录与原包声明不同。")
-    elif target.catalog_sha256 != current.catalog_sha256:
+    elif (target.catalog_sha256 != current.catalog_sha256
+          or target.pinned_catalog_json != current.pinned_catalog_json):
         raise PluginInstallationError("activation_catalog_conflict", "撤销不能改换原工具目录。")
 
 

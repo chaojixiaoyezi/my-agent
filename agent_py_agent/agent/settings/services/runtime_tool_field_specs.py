@@ -14,6 +14,7 @@ TOOL_INT_FIELDS = (
     ("tool_web_max_chars", 0, None),
     ("tool_http_timeout", 1, None),
     ("plugin_tool_gate_timeout_ms", 200, 10000),
+    ("capability_pack_mcp_idle_stop_seconds", 0, None),
     ("tool_shell_timeout", 1, None),
     ("tool_shell_output_max_chars", 100, None),
     ("chat_history_max_turns", 1, None),
