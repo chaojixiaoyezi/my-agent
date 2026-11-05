@@ -24,7 +24,7 @@ from ..user_space.storage_lanes import (
 )
 from .compact_checkpoint import _read_cold_payload, iter_committed_compact_checkpoints
 from .hamt_reachability import (
-    HAMT_SWEEP_SLICE_NODES,
+    HAMT_MARK_MAX_NODES,
     _bounded_read,
     _BudgetExceeded,
     _Directory,
@@ -163,8 +163,10 @@ def _collect_roots(work, root, thread):
     marked = []
     for namespace, roots in (("indexes", indexes), ("timeline", timelines)):
         index = _MeasuredIndex(root, ("evidence", tid, namespace), work)
-        result = mark_reachable_nodes(index, roots.values(), max_nodes=HAMT_SWEEP_SLICE_NODES)
+        result = mark_reachable_nodes(index, roots.values(), max_nodes=HAMT_MARK_MAX_NODES)
         if not result.complete:
+            if not result.dangling:
+                raise _BudgetExceeded("compact HAMT mark node allowance exhausted")
             raise OSError("compact HAMT mark is incomplete")
         marked.append(result.reachable)
     return (*marked, frozenset(payloads), frozenset(copies))
@@ -518,7 +520,7 @@ def _purge_retired(work, root, row, proof):
     return True
 
 
-# LLM: 单物理行分页保留等待/未知行的精确字节位置；只有清理完成或已恢复才跨过该行。
+# LLM: 等待/未知行结束本轮且保留精确字节位置；complete 只表示本轮结束，不授予清扫权。
 # 函数用途: 消费一个受预算限制的退休证明窗口。
 def _retired_slice(work, root, cursor):
     while not work.exhausted():
@@ -529,7 +531,7 @@ def _retired_slice(work, root, cursor):
             work.skip("retired_thread_unknown")
             work.error("retired_thread_state_unknown", "data/retention/retired_threads.jsonl")
             cursor.update(phase="live", after="")
-            return False, "retired_thread_unknown"
+            return True, "retired_thread_unknown"
         row = page.rows[0]
         state = retired_thread_state(work.request.home, row)
         if state in {"waiting", "unknown"}:
@@ -537,7 +539,7 @@ def _retired_slice(work, root, cursor):
             if state == "unknown":
                 work.error("retired_thread_state_unknown", "data/retention/retired_threads.jsonl")
             cursor.update(phase="live", after="")
-            return False, "retired_thread_" + state
+            return True, "retired_thread_" + state
         if state == "restored":
             work.skip("restored")
             work.items += 1
@@ -571,7 +573,7 @@ def _retired_slice(work, root, cursor):
     return False, "budget_exhausted"
 
 
-# LLM: 全程只发布小游标；legal hold 与空目录均不调用写门，不产生第二份维护状态。
+# LLM: 首线程使用独立标记额度；超额保留整树并推进，轮次完成与逐线程错误分开表达。
 # 函数用途: 执行一个受预算限制的 compact 可达性维护片。
 def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
     work = _LaneWork(request)
@@ -582,7 +584,7 @@ def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
     }
     if request.legal_hold:
         return work.receipt(request.cursor, True, "legal_hold")
-    if work.exhausted():
+    if request.budget.exhausted():
         return work.receipt(cursor, False, "budget_exhausted")
     root = Path(request.home.owner_compact_dir)
     try:
@@ -591,37 +593,41 @@ def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
         if cursor["phase"] == "live":
             names = _live_window(request.home, root, cursor, work.budget.max_items)
             for name in names:
-                if work.exhausted():
+                if work._allowance_used and work.exhausted():
                     return work.receipt(cursor, False, "budget_exhausted")
                 tid = name[:-6]
                 before = work.items
+                first = False
                 try:
-                    try:
-                        thread = _thread_record(work, tid)
-                    except _BudgetExceeded:
-                        raise
-                    except (OSError, ValueError, TypeError, KeyError):
-                        thread = None
-                    if thread is None:
-                        work.sweep_state = None
-                        work.skip("thread_record_unavailable")
-                        _count_untracked(work, root, tid)
-                    else:
-                        if not _live_thread(work, root, tid, thread):
+                    with work.thread_allowance() as first:
+                        try:
+                            thread = _thread_record(work, tid)
+                        except _BudgetExceeded:
+                            raise
+                        except (OSError, ValueError, TypeError, KeyError):
+                            thread = None
+                        if thread is None:
+                            work.sweep_state = None
+                            work.skip("thread_record_unavailable")
+                        elif not _live_thread(work, root, tid, thread):
                             return work.receipt(cursor, False, "budget_exhausted")
+                    if thread is None:
+                        # 退休台账的名称查找不是线程标记，继续遵守原片预算。
+                        _count_untracked(work, root, tid)
                 except BlockingIOError:
                     work.skip("lock_busy")
                     return work.receipt(cursor, False, "lock_busy")
                 except _BudgetExceeded:
-                    return work.receipt(cursor, False, "budget_exhausted")
+                    if not first:
+                        return work.receipt(cursor, False, "budget_exhausted")
+                    work.sweep_state = None
+                    work.skip("mark_budget_exceeded")
                 except (OSError, ValueError, KeyError, TypeError):
                     work.error("compact_reachability_incomplete", "conversations/" + name)
                     incomplete = True
                 if work.items == before:
                     work.items += 1
                 cursor["after"] = name
-                if work.exhausted():
-                    return work.receipt(cursor, False, "budget_exhausted")
             if len(names) >= work.budget.max_items:
                 return work.receipt(cursor, False, "budget_exhausted")
             cursor.update(phase="retired", after="")
@@ -629,7 +635,7 @@ def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
         if done:
             cursor.update(phase="live", after="")
         return work.receipt(
-            cursor, done and not incomplete, "reachability_incomplete" if incomplete else deferred
+            cursor, done, "reachability_incomplete" if incomplete else deferred
         )
     except _BudgetExceeded:
         return work.receipt(cursor, False, "budget_exhausted")

@@ -158,6 +158,8 @@ def test_portable_layout_still_rejects_tampering(compact_case, monkeypatch, poin
         compact_case.store.messages.append({'thread_id': compact_case.thread_id, 'role': 'user', 'content': '不应追加'})
 
 
+# LLM: 归档事务只针对非活跃线程；保留真实绑定保护，不在故障注入前被保护门短路。
+# 函数用途: 构造可以合法进入回收事务的临时过期对象。
 def _retention_case(tmp_path, kind):
     owner = tmp_path / 'owner'
     owner.mkdir()
@@ -173,6 +175,11 @@ def _retention_case(tmp_path, kind):
             'channel_conversation_id': 'old-chat', 'channel_user_id': 'old-user', 'now': OLD.timestamp(),
         })
         store.messages.append({'thread_id': thread.thread_id, 'role': 'user', 'content': '原文', 'now': OLD.timestamp()})
+        for name in ('channel_bindings.json', 'user_latest_threads.json'):
+            update_json_file_atomic(root / name, lambda current: {
+                key: value for key, value in current.items() if str(value) != thread.thread_id
+            })
+            assert thread.thread_id not in json.loads((root / name).read_bytes()).values()
         thread = store.threads.require(thread.thread_id)
         related, errors = scan._conversation_related_paths(root, thread)
         assert not errors
@@ -213,8 +220,7 @@ def test_index_compensation_is_delta_based_and_keeps_interleaved_writes(tmp_path
     root = action.path.parent.parent
     indexes = (root / 'channel_bindings.json', root / 'user_latest_threads.json')
     for path in indexes:
-        update_json_file_atomic(path, lambda current: {**current, 'restore-me': action.record_id,
-                                                       'rebound': action.record_id, 'untouched': 'stable'})
+        update_json_file_atomic(path, lambda current: {**current, 'untouched': 'stable'})
     originals = _original_bytes(action)
     original_update, original_write = apply.update_json_file_atomic, apply._write_tombstone
     injected = set()
@@ -222,7 +228,11 @@ def test_index_compensation_is_delta_based_and_keeps_interleaved_writes(tmp_path
     def update(path, updater, **kwargs):
         if path in indexes and path not in injected:
             injected.add(path)
-            original_update(path, lambda current: {**current, 'late-target': action.record_id})
+            # 模拟通过绑定检查后才到达的并发写入，不预先把候选变成受保护的活跃线程。
+            original_update(path, lambda current: {
+                **current, 'restore-me': action.record_id, 'rebound': action.record_id,
+                'late-target': action.record_id,
+            })
         return original_update(path, updater, **kwargs)
 
     def fail(destination, **kwargs):
@@ -322,6 +332,19 @@ def test_rollback_failure_keeps_recoverable_payload_and_nonpurgeable_tombstone(t
     original_write, original_rename, original_replace = apply._write_tombstone, os.rename, os.replace
     failures = []
     payload = action.destination / 'payload'
+    if kind == 'conversation':
+        root = action.path.parent.parent
+        indexes = (root / 'channel_bindings.json', root / 'user_latest_threads.json')
+        original_update = apply.update_json_file_atomic
+        injected = set()
+
+        def update(path, updater, **kwargs):
+            if path in indexes and path not in injected:
+                injected.add(path)
+                original_update(path, lambda current: {**current, 'late-binding': action.record_id})
+            return original_update(path, updater, **kwargs)
+
+        monkeypatch.setattr(apply, 'update_json_file_atomic', update)
 
     def fail_final(container, **kwargs):
         if kwargs['status'] == 'trashed':
@@ -357,6 +380,7 @@ def test_rollback_failure_keeps_recoverable_payload_and_nonpurgeable_tombstone(t
                                protection=(scan._RetentionPins(home.owner_home_dir), True)) == []
     if kind == 'conversation':
         root = action.path.parent.parent
+        assert injected == set(indexes)
         assert action.record_id in json.loads((root / 'user_latest_threads.json').read_bytes()).values()
 
 
@@ -387,6 +411,9 @@ def test_partial_conversation_exdev_restores_already_moved_members(tmp_path, mon
     def reject(operation):
         def move(source, destination, *args, **kwargs):
             if Path(source) == reject_source:
+                # 此异常发生在索引删除之前；资格检查后才到达的新绑定必须保持原样。
+                latest = action.path.parent.parent / 'user_latest_threads.json'
+                apply.update_json_file_atomic(latest, lambda current: {**current, 'late-binding': action.record_id})
                 failed.append(source)
                 raise OSError(errno.EXDEV, 'later member crosses volume')
             return operation(source, destination, *args, **kwargs)
@@ -520,13 +547,14 @@ def test_unacknowledged_index_removal_does_not_resurrect_concurrent_deletion(tmp
     root = action.path.parent.parent
     path = root / 'channel_bindings.json'
     original_update = apply.update_json_file_atomic
-    original_update(path, lambda current: {**current, 'victim': action.record_id})
     failures = []
 
     def fail_update(target, updater, **kwargs):
         if target != path or failures:
             return original_update(target, updater, **kwargs)
         failures.append(target)
+        # 绑定仅在资格检查后、原索引事务开始前到达，仍覆盖未确认删除的补偿竞争。
+        original_update(path, lambda current: {**current, 'victim': action.record_id})
         if published:
             original_update(target, updater, **kwargs)
         else:
@@ -563,3 +591,24 @@ def test_remounted_legacy_without_integrity_evidence_is_not_silently_resealed(co
     with pytest.raises(DataCorruptionError, match='lacks a portable integrity frontier'):
         compact_case.store.messages.append({'thread_id': compact_case.thread_id, 'role': 'user', 'content': '不得凭空补封'})
     assert (manifest.read_bytes(), path.read_bytes()) == before
+
+
+@pytest.mark.parametrize('index_name', ['channel_bindings.json', 'user_latest_threads.json'])
+def test_bound_conversation_never_enters_trash_transaction(tmp_path, monkeypatch, index_name):
+    """旧的活跃绑定仍拒绝归档，不能为恢复故障注入测试而移除生产保护。"""
+    home, action, executor = _retention_case(tmp_path, 'conversation')
+    root = action.path.parent.parent
+    update_json_file_atomic(root / index_name, lambda current: {**current, 'active': action.record_id})
+    indexes = {root / name: (root / name).read_bytes()
+               for name in ('channel_bindings.json', 'user_latest_threads.json')}
+    originals = _original_bytes(action)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('活跃线程不应进入回收或搬移')
+
+    monkeypatch.setattr(apply, '_begin_trash', forbidden)
+    monkeypatch.setattr(apply, '_move_retention_payload', forbidden)
+    assert executor(home=home, action=action, now=NOW).status == 'state_changed'
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert not action.destination.exists()
+    assert {path: path.read_bytes() for path in indexes} == indexes

@@ -446,7 +446,8 @@ def test_retired_cursor_stops_before_waiting_or_unknown_row(compact_case, state)
         row["schema"] = "unknown.v99"
         journal.write_text(rows[0] + "\n" + json.dumps(row) + "\n")
     result = maintain_compact_reachability_lane(request_for(home))
-    assert not result["complete"] and result["cursor"]["journal_offset"] == first.next_offset
+    assert result["complete"] and result["cursor"]["journal_offset"] == first.next_offset
+    assert result["cursor"]["phase"] == "live" and result["cursor"]["after"] == ""
     assert result["skipped"]["restored"] == 1
     assert result["skipped"]["retired_thread_" + state] == 1
     if state == "unknown":
@@ -579,6 +580,7 @@ def test_previous_retirement_cannot_delete_current_waiting_generation(compact_ca
         if result.get("deferred_reason") == "retired_thread_waiting":
             break
     assert cursor["journal_offset"] == first.next_offset
+    assert result["complete"]
 
 
 def test_live_zero_due_candidates_and_hold_make_zero_commits(compact_case):

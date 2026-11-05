@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1360,
+  "count": 1363,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3444,20 +3444,36 @@
       "description": "每个处理名额最多枚举16个目录项，跳过与非UUID名称同样消耗扫描预算。"
     },
     {
+      "name": "HAMT_MARK_MAX_NODES",
+      "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
+      "value": 65536,
+      "unit": "个节点",
+      "category": "上限预算",
+      "description": "单线程完整标记允许的最大节点数，超限只能保留整树并跳过该线程。"
+    },
+    {
+      "name": "HAMT_MARK_THREAD_BYTES",
+      "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
+      "value": 268435456,
+      "unit": "字节",
+      "category": "其它",
+      "description": "每片首个线程独享的读取额度；全部读量仍进入回执，由调度器阻止后续通道透支。"
+    },
+    {
+      "name": "HAMT_MARK_THREAD_MS",
+      "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
+      "value": 5000,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "每片首个线程独享的标记时间上限，避免大提交链反复在常规短片中从头失败。"
+    },
+    {
       "name": "HAMT_SWEEP_GRACE_SECONDS",
       "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
       "value": 604800,
       "unit": "秒",
       "category": "其它",
       "description": "不可达对象至少保留七天，保护旧读取快照及尚未发表的新根。"
-    },
-    {
-      "name": "HAMT_SWEEP_SLICE_NODES",
-      "file": "agent_py_agent/agent/conversation/hamt_reachability.py",
-      "value": 2048,
-      "unit": "个节点",
-      "category": "其它",
-      "description": "单次根标记最多访问的节点数，超过后整棵树保留。"
     },
     {
       "name": "HOST_NOTICE_LIMIT_COUNT",
@@ -4098,6 +4114,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "工具输入进度：工具名最多 80 字符，超长截断避免撑爆事件结构。"
+    },
+    {
+      "name": "TRANSCRIPT_INDEX_PENDING_MAX_COUNT",
+      "file": "agent_py_agent/agent/conversation/transcript_index_gc.py",
+      "value": 48,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同时保留独立宽限证明的线程数上限，避免串行等待七天且保持游标有界。"
     },
     {
       "name": "WAKE_POISON_BACKOFF_BASE_SECONDS",
