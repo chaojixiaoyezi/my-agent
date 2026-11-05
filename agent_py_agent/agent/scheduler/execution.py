@@ -150,11 +150,51 @@ def _pinned_script_dispatch(tool, target, params):
         timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
 
 
-# LLM: 业务仅执行一次，结果/用量先落原run；初发与重投共原后台上下文，欠发释放claim而不进业务waiting。
+# LLM: 只读原后台绑定，名称与run_claimed一致；复制ContextVar不等于复制线程中断注册。
+# 函数用途: 将当前片的请求或委派回合名、准确claim名交给监控worker。
+def _claim_interrupt_names(kwargs) -> tuple[str, ...]:
+    from ..conversation.background_claim import _host_delivery_bound_turn
+    from ..conversation.claim_execution_binding import current_claim_execution
+    from ..conversation.control_commands import (
+        conversation_request_interrupt_name,
+        session_task_interrupt_name,
+    )
+    from ..conversation.run_claim import conversation_claim_interrupt_name
+
+    names = []
+    bound = _host_delivery_bound_turn(kwargs)
+    task_id = str(kwargs.get('task_id') or '').strip()
+    if bound:
+        names.append(session_task_interrupt_name(bound))
+    elif task_id:
+        names.append(conversation_request_interrupt_name(task_id))
+    execution = current_claim_execution()
+    if execution is not None and execution.claim_id:
+        names.append(conversation_claim_interrupt_name(execution.claim_id))
+    return tuple(names)
+
+
+# LLM: 登记必须覆盖实际回调；ExitStack退出清旗，不能让复用线程继承上一片的停止。
+# 函数用途: 在worker上恢复原片的中断名，并拒绝排队或登记之前已接受的停止。
+def _run_with_claim_interrupts(names, early, callback):
+    from ..concurrency.interrupt import is_interrupted, register_interruptible
+
+    with ExitStack() as stack:
+        for name in names:
+            stack.enter_context(register_interruptible(name))
+        if early.is_set() or is_interrupted():
+            raise InterruptedError('定时资产执行已中断')
+        return callback()
+
+
+# LLM: 业务仅执行一次，原claim停止传入worker且返回后重查；初发与重投共原后台上下文，欠发释放claim而不进业务waiting。
 # 函数用途: 执行固定目标并沿原TaskLink、终态和冻结通知收口，保留相同运输身份且不重跑业务。
 def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=None):
+    import threading
+
     from ..agent_core.model.call_runtime import model_call_ledger
     from ..agent_core.runtime.loop_models import RunParams
+    from ..concurrency.interrupt import is_interrupted, register_interrupt_callback
     from ..conversation.background_execution import _BackgroundRunControl
     from ..conversation.runtime import _background_task_attributes, _run_request
     from ..conversation.task_run_closeout import settle_terminal_task_run
@@ -168,10 +208,18 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
         write_boundary={'task_id': claim.run_id})
     try:
         from ..agent_core.runtime_mixin import current_prompt_scope
-        future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
-            partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id']),
-            run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
-        result = future.result()
+        if is_interrupted():
+            raise InterruptedError('定时资产执行已中断')
+        early = threading.Event()
+        # 先在claim线程记住早到停止，再移交；等待真实worker退出后才交回原收口链。
+        with register_interrupt_callback(early.set):
+            future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
+                partial(_run_with_claim_interrupts, _claim_interrupt_names(kwargs), early,
+                    partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id'])),
+                run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
+            result = future.result()
+        if is_interrupted():
+            raise InterruptedError('定时资产执行已中断')
         if isinstance(result, dict) and result.get('status') == 'skipped':
             service.finish(claim, status='skipped', response=json.dumps(result), error_code=result['error_code'])
             service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'cancelled',
