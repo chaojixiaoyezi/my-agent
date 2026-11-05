@@ -231,11 +231,10 @@ def test_script_run_and_override(api, tmp_path):
     assert not failed.ok and data['exit_code'] == 9 and data['needs_repair'] is True
 
 
-# LLM: 先注册真实脚本依赖以满足历史pin和前像保护；保存时重算refs，Skill仅挂分析/混合步，解绑移除闲置引用。
+# LLM: 保存时覆盖陈旧refs；Skill只能挂分析/混合步，解绑后移除不再被其他步骤使用的引用。
 # 函数用途: 验证工作流CRUD、说明文件、引用重算和Skill动态绑定。
 def test_workflow_crud_refs_and_skills(api, tmp_path):
-    scripts, workflows = api
-    register(scripts(tmp_path))
+    _, workflows = api
     tool = workflows(tmp_path)
     data = definition()
     data['descriptor']['refs'] = {'scripts': ['stale'], 'skills': ['stale']}
