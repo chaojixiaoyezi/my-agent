@@ -60,8 +60,12 @@ def test_multi_owner_build_is_fast_and_compact(multi_owner_spec):
         assert sandbox._effective_mount(data.parent / 'business.txt', mounts).writable
     assert argv[-2:] == ['--chdir', str(spec.workspace)] and '--share-net' in argv
     assert elapsed < .25, f'build_bwrap_argv took {elapsed:.6f}s'
-    # 任务2026-10-21修订：26 Owner完整保护最小765项，不删保护项去迎合旧700界限。
-    assert len(argv) < 800, f'{len(argv)} arguments'
+    # 隐藏根随宿主声明增长，每根必须有tmpfs+remount-ro四项，不能为旧总数删保护。
+    # 将必需遮罩单独计费，其余构参仍有固定500项上限，并禁止重复目标消耗预算。
+    targets = [mount.target for mount in mounts]
+    assert len(targets) == len(set(targets)), 'redundant mount targets'
+    non_mask_arguments = len(argv) - 4 * len(spec.hidden_paths)
+    assert non_mask_arguments < 500, f'{non_mask_arguments} non-mask arguments ({len(argv)} total)'
 
 
 # LLM: 已被父挂载重盖的重复项可以重放，未重盖的同源ro-bind则不应反复发给内核。

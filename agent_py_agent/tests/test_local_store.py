@@ -435,14 +435,23 @@ def test_local_doctor_memory_index_reports_unhealthy_real_coverage(memory_doctor
     index = MemoryReadIndex(agent.memory.path)
     if state == "partial":
         agent.memory.add("user", "尚未索引的第二条记忆", kind="fact")
-        assert agent.memory.rebuild_read_index(batch_size=1)["status"] == "partial"
+        # 正常写入会自动追平；清掉派生库后，以真实单条批次制造未完成水位。
+        index.invalidate()
+        progress = agent.memory.rebuild_read_index(batch_size=1)
+        assert progress["status"] == "partial"
+        assert progress["indexed_records"] == 1
+        assert progress["total_records"] == 2
     elif state != "missing":
         assert rebuild_local_store(agent, sources={"memory"})["memory_indexed"] == 1
         before = index.coverage()
         assert before["status"] == "complete"
         if state == "stale":
+            old_index = index.path.read_bytes()
             agent.memory.replace(saved.entry_id, "同条数但已换代的新正文", expected_version=saved.version)
             assert index.store.manifest()["generation"] > before["generation"]
+            assert index.coverage()["status"] == "complete"
+            # 模拟只恢复旧派生库的故障，不阻断写入链自身的自动索引维护。
+            index.path.write_bytes(old_index)
         elif state == "unavailable":
             with sqlite3.connect(index.path) as connection:
                 connection.execute("UPDATE metadata SET value='invalid-json' WHERE key='watermark'")
