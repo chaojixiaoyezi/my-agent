@@ -318,7 +318,14 @@ def test_tui_roster_and_workflow_numbers_consume_real_rows(gateway):
     roster.refresh()
     assert [row['agent_id'] for row in roster.rows] == [member['data']['agent']['agent_id']]
     assert (roster.count, roster.coverage, roster.read_denied) == (1, 'complete', False)
-    assert any('名册成员' in line and space['space_id'] in line for line in roster.lines())
+    roster.load_root()
+    root_rows = roster.navigation_rows(None)
+    assert any(row['kind'] == 'space' and row['space_id'] == space['space_id'] for row in root_rows)
+    assert not any(row.get('agent_id') == member['data']['agent']['agent_id'] for row in root_rows)
+    roster.load_space(space['space_id'])
+    assert [row['agent_id'] for row in roster.navigation_rows(space['space_id'])] == [member['data']['agent']['agent_id']]
+    assert roster.list_coverage(space['space_id']) == 'complete'
+    assert any('名册成员' in line and space['space_id'] in line for line in roster.lines(space_id=space['space_id']))
     definition = {'descriptor': {'id': 'wire-flow', 'kind': 'workflow', 'name': '线缆流程', 'access_targets': [],
                                  'data_sources': [], 'credential_refs': [], 'io_contract': {}}, 'steps': []}
     assert command(session, '/workflow create', params={'definition': definition, 'scope': {

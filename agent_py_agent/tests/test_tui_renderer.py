@@ -201,6 +201,55 @@ def test_full_frame_matches_reference_message_geometry_at_120_columns() -> None:
     ),)
 
 
+@pytest.mark.parametrize("width", [10, 16, 24, 40, 80, 120, 240])
+@pytest.mark.parametrize("options", [
+    {},
+    {"route_enabled": True},
+    {"background_process_count": 2},
+    {"business_agents_enabled": True, "background_process_count": 2},
+])
+def test_footer_composition_respects_total_display_width(width, options) -> None:
+    frame = render_tui_snapshot(TuiStateStore().snapshot(), TuiRenderContext(width=width, **options))
+
+    assert display_width_fragments(frame.footer) <= width
+
+
+@pytest.mark.parametrize("options", [
+    {"is_pasting": True},
+    {"help_open": True},
+    {"background_sync_failed": True},
+    {"notice": "操作已确认"},
+])
+def test_footer_status_and_help_keep_full_width_with_business_badges(options) -> None:
+    snapshot = TuiStateStore().snapshot()
+    context = TuiRenderContext(width=120, **options)
+    expected = render_tui_snapshot(snapshot, context).footer
+    decorated = render_tui_snapshot(snapshot, replace(
+        context, route_enabled=True, business_agents_enabled=True,
+        background_process_count=2, background_agent_count=3, background_agent_running_count=1,
+    )).footer
+
+    assert decorated == expected
+
+
+@pytest.mark.parametrize("route", [None, False, True])
+@pytest.mark.parametrize("business", [False, True])
+def test_process_badge_follows_history_hint_with_route_and_team_counts(route, business) -> None:
+    context = TuiRenderContext(
+        width=240, route_enabled=route, business_agents_enabled=business,
+        background_process_count=2, selected_agent_run_id="bg:watch",
+    )
+    frame = render_tui_snapshot(TuiStateStore().snapshot(), context)
+    text = fragments_text(frame.footer)
+
+    assert text.index("F6 原生模式") < text.index("⚡ 后台驻留 2 项")
+    assert ("class:tui-agent-selected", " · › ⚡ 后台驻留 2 项") in frame.footer
+    if business:
+        assert "后台Agent：运行 未知 / 总 未知" in text
+    if route is not None:
+        assert f"/route {str(route).lower()}" in text
+
+
 def test_tui_theme_dims_thinking_and_emphasizes_user_text() -> None:
     """主/子代理共用的主题必须弱化思考，并让用户输入明显区别于代理正文。"""
     style = _make_tui_style()
