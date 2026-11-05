@@ -21,6 +21,7 @@ from .errors import (
 from .http import HttpBackend, bounded_output_tokens, provider_stream_scope, request_stream_lines
 from .provider_headers import endpoint_parts
 from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
+from .request_budget import RequestBudgetExceeded, RequestTokenBudget
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -57,6 +58,7 @@ class _AnthropicGenerateRequest:
     total_deadline_seconds: float | None = None
     # 用户档位或空串；off 已折为开关，xhigh/ultra 只在唯一换算点转成协议字段。
     reasoning_effort: str = ""
+    token_budget: RequestTokenBudget | None = None
 
 
 # LLM: 流式回调一起传递，避免 _anthropic_stream_text_once 超过 4 个参数；收集器按非空字段逐个接线。
@@ -187,6 +189,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 tool_choice=tool_choice,
                 messages=messages,
                 max_output_tokens=provider_options.max_output_tokens,
+                token_budget=provider_options.token_budget,
                 thinking_disabled=provider_options.thinking_disabled,
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,
@@ -196,7 +199,20 @@ class AnthropicCompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: 强制工具仅是不可执行的 schema 信封；请求级 system/期限/输出预算须沿原传输，不改后端共享配置，同步辅助路由与摘要测试。
+    # LLM: 只读schema改写与真实发送共用；不计量或发请求，宿主用同一完整材料签发预算。
+    # 函数用途: 展开Messages结构化首答或修复的实际prompt和工具信封。
+    def structured_request_surface(self, prompt: str, response_schema: dict[str, Any], *, repair: bool = False) -> dict[str, Any]:
+        text = ("MANDATORY OUTPUT CONTRACT: Call the provided my_agent_structured_output tool "
+                "exactly once. Do not answer with prose, Markdown, XML, or a textual tool-call "
+                "imitation.\n\n" + prompt)
+        if repair:
+            text += ("\n\nThe previous provider response ignored the mandatory structured channel. "
+                     "Retry by calling my_agent_structured_output exactly once and emit no text.")
+        return {"prompt": text, "tools": [{"name": "my_agent_structured_output",
+            "description": "Required non-executable response envelope. Call exactly once; never answer in prose.",
+            "input_schema": response_schema}]}
+
+    # LLM: 强制工具仅是不可执行的schema信封；宿主解析最终输入并在修复时重签预算，未知重签入口本地拒绝复用旧预算。
     # 函数用途: 请求一个符合 schema 的结构化结果，校验唯一信封并转为 JSON 正文。
     def generate_structured(
         self,
@@ -210,35 +226,27 @@ class AnthropicCompatibleBackend(HttpBackend):
 
         options = request_options or ProviderRequestOptions()
         tool_name = "my_agent_structured_output"
-        structured_prompt = (
-            "MANDATORY OUTPUT CONTRACT: Call the provided my_agent_structured_output tool "
-            "exactly once. Do not answer with prose, Markdown, XML, or a textual tool-call "
-            "imitation.\n\n" + prompt
-        )
-        schema_tool = {
-            "name": tool_name,
-            "description": (
-                "Required non-executable response envelope. Call exactly once; never answer in prose."
-            ),
-            "input_schema": response_schema,
-        }
         for attempt in range(2):
-            request_prompt = structured_prompt
-            if attempt:
-                request_prompt += (
-                    "\n\nThe previous provider response ignored the mandatory structured channel. "
-                    "Retry by calling my_agent_structured_output exactly once and emit no text."
-                )
+            surface = self.structured_request_surface(prompt, response_schema, repair=bool(attempt))
+            request_prompt = surface["prompt"]
+            budget = options.token_budget
+            if budget is not None:
+                if options.structured_budget_resolver is not None:
+                    budget = options.structured_budget_resolver(request_prompt, surface["tools"])
+                elif attempt:
+                    raise RequestBudgetExceeded(reason="invalid_budget", input_tokens=budget.input_tokens,
+                        output_ceiling=budget.output_tokens, context_window_tokens=budget.context_window_tokens)
             response = self._generate_request(
                 _AnthropicGenerateRequest(
                     request_prompt,
-                    tools=[schema_tool],
+                    tools=surface["tools"],
                     tool_choice=ToolChoice.specific(tool_name),
                     messages=messages,
                     stream_response=False,
                     temperature=0.0,
                     system_instruction=options.system_instruction,
                     max_output_tokens=options.max_output_tokens,
+                    token_budget=budget,
                     first_event_timeout_seconds=options.first_event_timeout_seconds,
                     total_deadline_seconds=options.total_deadline_seconds,
                     # LLM: 强制工具信封不需要推理；部分兼容端点(如 工具运行时 zen)在思考模式下拒绝强制 tool_choice，
@@ -292,6 +300,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             prompt=prompt, tools=tools, tool_choice=tool_choice, messages=messages,
             system_instruction=options.system_instruction, thinking_disabled=options.thinking_disabled,
             reasoning_effort=options.reasoning_effort,
+            max_output_tokens=options.max_output_tokens, token_budget=options.token_budget,
         ))
         if self.stream_enabled:
             payload["stream"] = True
@@ -309,6 +318,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             "max_tokens": bounded_output_tokens(
                 self.max_tokens,
                 request.max_output_tokens,
+                configured_ceiling=self.request_output_ceiling(), token_budget=request.token_budget,
             ),
         }
         if request.temperature is not None or self.temperature_explicit:

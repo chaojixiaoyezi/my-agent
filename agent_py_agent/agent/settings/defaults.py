@@ -44,6 +44,17 @@ def effective_max_output_tokens(config: Any) -> int:
     return output_cap_for_window(getattr(config, "max_tokens", 0), context_window_or_default(config))
 
 
+# LLM: 只归一档案原始上限；不探测模型，不改旧的四分之一窗口兜底。
+# 函数用途: 为已有完整输入计量的请求保留可配置输出天花板。
+def configured_max_output_tokens(config: object) -> int:
+    raw = getattr(config, "max_tokens", 0)
+    try:
+        value = int(raw) if not isinstance(raw, bool) else 0
+    except (TypeError, ValueError, OverflowError):
+        value = 0
+    return value if value > 0 else DEFAULT_MODEL_MAX_TOKENS
+
+
 # LLM: model_context_window_tokens 是唯一窗口旋钮（原 model_context_window_explicit 已并入）：正整数 = 用户显式容量，
 #   空、0、布尔、非整数 = 没填，返回 0。窗口解析、输出预留、模型切换容量比对都用它判断“是否显式”，不能再另设开关。
 # 函数用途: 读出用户显式填写的上下文窗口，没填返回 0。
@@ -95,6 +106,7 @@ __all__ = [
     "DEFAULT_MODEL_MAX_TOKENS",
     "MODEL_OUTPUT_WINDOW_DIVISOR",
     "effective_max_output_tokens",
+    "configured_max_output_tokens",
     "output_cap_for_window",
     "default_agent_config",
     "default_config_bool",

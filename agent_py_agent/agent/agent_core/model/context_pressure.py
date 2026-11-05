@@ -9,6 +9,7 @@ from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 
 from ...backends import ModelResponse, is_provider_context_window_error
+from ...backends.request_budget import REQUEST_INPUT_SAFETY_TOKENS, RequestBudgetExceeded
 from ...backends.request_content import classify_nontext_content
 from ...backends.tool_protocol_adapter import tools_for_choice
 from ...conversation.compact_calibration import (
@@ -275,13 +276,22 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     if window <= 0:
         return None
     prompt = getattr(request, "prompt", "") or ""
-    prompt_tokens = model_visible_context_tokens(
+    snapshot = getattr(request, "context_snapshot", None)
+    prompt_tokens = snapshot.current_tokens if snapshot is not None else model_visible_context_tokens(
         getattr(request, "agent", None),
         getattr(request, "params", None),
         prompt,
     )
     overflow = _tool_context_window_overflow(request) if policy.allow_persistent_apply else {}
     request_ceiling = model_request_input_ceiling(request.agent, window)
+    budget = getattr(request, "token_budget", None)
+    if budget is None and _known_shared_window_output_reserve(request.agent) > 0:
+        from .call_runtime import model_request_token_budget
+
+        try:
+            budget = model_request_token_budget(request.agent, input_tokens=prompt_tokens)
+        except RequestBudgetExceeded as exc:
+            return request_budget_failure_response(request, exc)
     compact_chain_available = params is None or compact_request_source_supported(
         params, media_policy=configured_media_policy(getattr(request, "agent", None)),
     )
@@ -305,7 +315,7 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
     elif not compact_chain_available:
         # 压缩链对此请求不可用，在压缩点失败不是客观事实；越过窗口时仍由强制恢复给出结构化拒绝。
         threshold = window
-    output_reserve = _known_shared_window_output_reserve(getattr(request, "agent", None))
+    output_reserve = budget.output_tokens if budget is not None else _known_shared_window_output_reserve(getattr(request, "agent", None))
     if prompt_tokens < threshold and prompt_tokens < request_ceiling:
         return None
     reason = (
@@ -351,7 +361,21 @@ def _known_shared_window_output_reserve(agent: object) -> int:
 # LLM: 普通生成与 transcript 候选共用已知共享窗口及实际输出 cap；未知协议不猜预留，返回值不改变 Context 的输入占用显示。
 # 函数用途: 计算本请求输入必须严格低于的容量边界，阻止压缩后仍因输出预留不足立即再次超窗。
 def model_request_input_ceiling(agent: object, context_window_tokens: int) -> int:
-    return max(0, context_window_tokens - _known_shared_window_output_reserve(agent))
+    from .call_runtime import request_budget_shared_window
+
+    return max(0, context_window_tokens - (REQUEST_INPUT_SAFETY_TOKENS if request_budget_shared_window(agent) else 0))
+
+
+# LLM: 规划失败不是供应商 token 计数证明；无输出余量进入原恢复链，非法配置是单次终止而非重复压缩。
+# 函数用途: 把请求局部预算错误路由成宿主已有的上下文压力或明确的配置失败。
+def request_budget_failure_response(request: object, exc: RequestBudgetExceeded) -> ModelResponse:
+    if exc.reason == "input_overflow":
+        return context_pressure_response(request, source=COMPACT_TRIGGER_PREFLIGHT,
+            prompt_tokens=exc.input_tokens, detail=f"{exc.error_code} reason={exc.reason} input={exc.input_tokens}")
+    return ModelResponse(text="配置的窗口无法容纳输出预留，请调整窗口或压缩输出上限。",
+        backend=str(getattr(getattr(getattr(request, "agent", None), "backend", None), "name", "")),
+        runtime_status="error", runtime_reason="COMPACT_INVALID_OUTPUT_BUDGET",
+        runtime_source="request_budget")
 
 
 # LLM: This is the one preflight accounting path for the exact provider-visible input. Native

@@ -206,6 +206,23 @@ def protocol_for_backend(model_backend: object) -> str:
     return _PROTOCOLS.get(str(model_backend or "").strip().lower(), "")
 
 
+# LLM: 复用真实出站映射；tail 支持只是运输选项，thinking.enabled 不证明思考预算降低。
+# 函数用途: 判断压缩目标是否可表示，并给不能降档的分支一个结构化原因。
+def compact_reasoning_target(backend: object, level: object, output_tokens: int) -> tuple[str, str]:
+    target = normalize_reasoning_level(level)
+    if target in {"", "auto", "off"}:
+        return "", "downshift_disabled"
+    if not getattr(backend, "supports_provider_request_options", False):
+        return "", "downshift_unavailable"
+    protocol = protocol_for_backend(getattr(backend, "name", ""))
+    control = str(getattr(backend, "reasoning_control", "none") or "none")
+    if control == "budget" and protocol != "anthropic":
+        return "", "downshift_unavailable"
+    fields = effective_reasoning_wire_fields(control, target, protocol,
+        ReasoningPayloadLimits(output_tokens, tuple(getattr(backend, "reasoning_levels", ()) or ())))
+    return (target, "") if fields else ("", "downshift_unavailable")
+
+
 # LLM: 压缩降档的 configuration_update 项（OpenAI GPT-6 系列的 Responses 接口）：档位按同一张表换算成服务商值，
 #   和请求级已发的档位相同就不插（白费一项）；control 不是 effort 或换算不出也不插。只读、不发网络。
 # 函数用途: 生成要追加到 input 末尾的档位更新项；不需要时返回 None。

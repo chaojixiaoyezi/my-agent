@@ -180,6 +180,7 @@ class ConversationContextUsage:
     has_summary: bool
     # 触发线被 memory_compact_auto_trigger_max_tokens 压下来时为 True（取自 RuntimeCompactPolicy.trigger_capped）。
     trigger_capped: bool = False
+    trigger_limit_reason: str = "absolute_cap"
 
 
 # LLM: 内部宿主复用原来源/projector/摘要面；手动请求可显式绕过自动冷却但仍记录结果，不绕过来源/CAS校验。
@@ -373,7 +374,12 @@ def prepare_conversation_context(
     options: ConversationCompactOptions,
 ) -> ConversationCompactResult:
     """Load the uncompacted tail and compact it before it crosses the runtime policy."""
-    prepared = _prepare_compact_request(agent, store, thread, options)
+    from ..backends.request_budget import RequestBudgetExceeded
+
+    try:
+        prepared = _prepare_compact_request(agent, store, thread, options)
+    except RequestBudgetExceeded as exc:
+        raise ConversationCompactError("配置的摘要输出预算无法容纳", code="COMPACT_INVALID_OUTPUT_BUDGET") from exc
     if isinstance(prepared, ConversationCompactResult):
         return prepared
     return _execute_compact_request(prepared)
@@ -711,6 +717,7 @@ def inspect_conversation_context(
         pending_messages=len(pending),
         has_summary=bool(summary.strip()),
         trigger_capped=policy.trigger_capped,
+        trigger_limit_reason=policy.trigger_limit_reason,
     )
 
 
@@ -744,7 +751,7 @@ def render_conversation_context_usage(
             else f"距触发线约 {remaining:,} tokens"
         )
         rule = (
-            f"{usage.trigger_tokens:,} tokens 触发（绝对上限封顶，比 {usage.trigger_percent}% 更早）"
+            f"{usage.trigger_tokens:,} tokens 触发（{'共享窗口容量预留' if usage.trigger_limit_reason == 'capacity' else '绝对上限封顶'}，比 {usage.trigger_percent}% 更早）"
             if usage.trigger_capped
             else f"{usage.trigger_percent}% （{usage.trigger_tokens:,} tokens）触发"
         )
@@ -805,11 +812,11 @@ def _nontext_turn_start(rows: Sequence[MessageLogEntry], index: int) -> int:
 # LLM: 只用宿主纯计量投影或同口径本地估算选区，预留摘要输出；不调用模型、不提交候选或改变历史。
 # 函数用途: 在摘要之前确定唯一切分点，优先保留能达到恢复目标的近期尾部。
 def _select_compact_partition(request, partitions, protected_suffix):
-    from .compact_request_budget import _compact_summary_output_tokens
+    from ..agent_core.model.call_runtime import compact_summary_output_reserve_tokens
 
     if len(partitions) == 1:
         return partitions[0]
-    reserve = _compact_summary_output_tokens(request.agent)
+    reserve = compact_summary_output_reserve_tokens(request.agent)
     for compact_rows, ordinary_tail in partitions:
         raise_if_compact_interrupted(request.interrupt_check)
         tail = concatenate_message_rows((ordinary_tail, protected_suffix))

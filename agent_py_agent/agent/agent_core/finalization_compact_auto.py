@@ -60,7 +60,7 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
             max_context_tokens=policy.context_window_tokens,
             trigger_percent=policy.trigger_percent,
             # 触发线被绝对上限压下来时改按 token 判断；不封顶时仍按百分比，原行为不变。
-            trigger_tokens=policy.trigger_tokens if policy.trigger_capped else 0,
+            trigger_tokens=policy.trigger_tokens if policy.trigger_tokens > 0 else 0,
             plan_options=MemoryCompactPlanOptions(
                 session_id=getattr(agent, "session_id", agent.config.agent_name),
                 request_id=ctx.request_id or request_id,

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 from weakref import ref
 
+from ...backends.request_budget import RequestTokenBudget, resolve_request_token_budget
 from ...contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallAdmissionClosedError,
@@ -39,7 +40,11 @@ from ...observability.task_call_inspector import (
     bind_model_call_telemetry,
     record_model_call_telemetry,
 )
-from ...settings.defaults import context_window_or_default, output_cap_for_window
+from ...settings.defaults import (
+    configured_context_window_tokens,
+    context_window_or_default,
+    output_cap_for_window,
+)
 from ..dynamic_timeout import DYNAMIC_TIMEOUT_SAFETY_MARGIN
 from ..tool_stream import ToolBoundaryChunkFilter
 from .call_monitor import (
@@ -114,7 +119,8 @@ def start_model_call_record(
     )
     ledger.started(ModelCallStartedParams(
             call_id=call_id, backend=str(getattr(backend, "name", "") or ""), model=model_name(agent),
-            input_tokens=input_tokens, output_tokens_estimate=max_output_tokens(agent),
+            input_tokens=input_tokens, output_tokens_estimate=(request.token_budget.output_tokens
+                if getattr(request, "token_budget", None) is not None else max_output_tokens(agent)),
             request_id=str(getattr(params, "request_id", "") or ""), run_id=str(getattr(params, "run_id", "") or ""),
             metadata={
                 "purpose": response_call_purpose(params), "attempt_id": str(getattr(params, "attempt_id", "") or ""),
@@ -130,6 +136,7 @@ def start_model_call_record(
                 "supervision_sweep_ms": getattr(request, "supervision_sweep_ms", None),
                 "inter_round_gap_ms": _model_call_inter_round_gap_ms(ledger, params),
                 "estimated_input_tokens": input_tokens,
+                "server_managed_output": bool(getattr(getattr(request, "token_budget", None), "server_managed_output", False)),
             },
         ))
     with suppress(Exception):
@@ -426,7 +433,8 @@ def _empty_model_call_summary() -> dict[str, object]:
 
 # LLM: 动态预算复用配置和唯一输出上限，不缩短已配置的请求超时；调用方沿用原超时语义。
 # 函数用途: 合并固定请求时限与动态生成预算。
-def effective_model_request_timeout_seconds(agent: object, first_token_timeout_seconds: float) -> float:
+def effective_model_request_timeout_seconds(agent: object, first_token_timeout_seconds: float, *,
+                                            token_budget: RequestTokenBudget | None = None) -> float:
     base_timeout = model_request_timeout_seconds(agent)
     if base_timeout <= 0:
         return 0.0
@@ -434,7 +442,7 @@ def effective_model_request_timeout_seconds(agent: object, first_token_timeout_s
         return base_timeout
     options = first_token_timeout_options(agent)
     dynamic_timeout = _clamp_dynamic_request_timeout(
-        max(0.0, float(first_token_timeout_seconds)) + _output_generation_timeout_seconds(agent),
+        max(0.0, float(first_token_timeout_seconds)) + _output_generation_timeout_seconds(agent, token_budget=token_budget),
         options,
     )
     return max(base_timeout, dynamic_timeout)
@@ -521,14 +529,17 @@ def model_name(agent: object) -> str:
 # LLM: 与实际发送一致：后端上的 max_tokens 就是发送值（工厂已按窗口夹取），原样使用；没有这个属性的后端（测试替身、echo）
 #   按同一公式用当前窗口夹取配置值。未配置（0 或无法解析）时返回 0 表示没有估算，调用方据此跳过；compact 预算用
 #   “窗口×0.8−本值”，所以回退时不能返回未夹取的配置原值。
-# 函数用途: 返回本次模型调用的输出 token 上限，供 compact 预算与超时估算共用。
+#   已加载的结构化 provider 输出上限只能进一步降低旧默认，必须在冻结预算而非 serializer 才应用。
+# 函数用途: 返回受已知供应商上限约束的旧输出上限，供 compact、预算和超时共用。
 def max_output_tokens(agent: object) -> int:
     backend = getattr(agent, "backend", None)
     config = getattr(agent, "config", None)
     raw = getattr(backend, "max_tokens", None)
     try:
         if raw is not None:
-            return max(0, int(raw))
+            legacy = max(0, int(raw))
+            reader = getattr(backend, "request_output_ceiling", None)
+            return min(legacy, max(0, int(reader()))) if callable(reader) else legacy
         configured = max(0, int(getattr(config, "max_tokens", 0) or 0))
         window = int(getattr(backend, "context_window_tokens", 0) or 0) or context_window_or_default(config)
     except (TypeError, ValueError):
@@ -547,28 +558,74 @@ def max_output_tokens(agent: object) -> int:
 #   所以配置的预留只在后端能用 configuration_update 降档且配置了压缩档位时生效，其它后端沿用主请求上限（部署前口径）。
 # 函数用途: 返回压缩摘要调用的输出 token 上限；配置为 0、主请求上限更小、或压缩调用降不了档时沿用主请求的上限。
 def compact_summary_output_reserve_tokens(agent: object) -> int:
-    normal = max_output_tokens(agent)
-    configured = _nonnegative_int(getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 0))
-    if configured <= 0:
+    legacy = max_output_tokens(agent)
+    normal = configured_output_ceiling(agent) if request_budget_shared_window(agent) else legacy
+    raw = getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 16384)
+    try:
+        configured = int(raw) if not isinstance(raw, bool) else -1
+    except (TypeError, ValueError, OverflowError):
+        configured = -1
+    if configured == 0:
         return normal
-    if normal <= 0:
-        return configured
-    return min(configured, normal) if _compact_reasoning_downshift_available(agent) else normal
+    if configured < 0:
+        configured = 16384
+    return min(configured, normal) if _compact_reasoning_downshift_available(agent) else legacy
 
 
 # LLM: 只读两个结构化事实：后端的 supports_reasoning_update_items()（GPT-6 Responses 的 configuration_update 项）和配置的
 #   memory_compact_reasoning_level（空/auto/off 表示不降档）。两者都成立，压缩调用才会在低档下写摘要，输出预留才能收紧。
 # 函数用途: 判断这个 agent 的压缩调用能不能被安全地降档（决定能不能用小的输出预留）。
 def _compact_reasoning_downshift_available(agent: object) -> bool:
-    supports = getattr(getattr(agent, "backend", None), "supports_reasoning_update_items", None)
-    level = str(getattr(getattr(agent, "config", None), "memory_compact_reasoning_level", "") or "").strip().lower()
-    return callable(supports) and bool(supports()) and level not in {"", "auto", "off"}
+    from ...backends.reasoning_control import compact_reasoning_target
+
+    level = getattr(getattr(agent, "config", None), "memory_compact_reasoning_level", "low")
+    target, _reason = compact_reasoning_target(getattr(agent, "backend", None), level,
+                                              configured_output_ceiling(agent))
+    return bool(target)
+
+
+# LLM: 只读显式窗口和内置适配器身份；不把 resolver 合并后的整数当总窗口证据，不探测网络。
+# 函数用途: 判定这份配置是否足以支持共享总窗口规划。
+def request_budget_shared_window(agent: object) -> bool:
+    from ...backends.http import HttpBackend
+
+    backend = getattr(agent, "backend", None)
+    window = (configured_context_window_tokens(getattr(agent, "config", None))
+              or int(getattr(backend, "configured_context_window_tokens", 0) or 0))
+    return isinstance(backend, HttpBackend) and window > 0 and not request_output_server_managed(agent)
+
+
+# LLM: 只认现有订阅认证事实，与 Responses 去除 max_output_tokens 的线协议一致。
+# 函数用途: 标记服务端管理输出的调用，避免把本地预留宣称成线上封顶。
+def request_output_server_managed(agent: object) -> bool:
+    return (getattr(getattr(agent, "backend", None), "auth_ref", None) or {}).get("mode") == "chatgpt"
+
+
+# LLM: 复用构造时冻结的原始天花板；已加载的供应商输出最大值只能降低，不按模型名推断。
+# 函数用途: 返回可供已测量请求使用的输出天花板，不修改后端。
+def configured_output_ceiling(agent: object) -> int:
+    backend = getattr(agent, "backend", None)
+    reader = getattr(backend, "request_output_ceiling", None)
+    return max(0, int(reader())) if callable(reader) else max_output_tokens(agent)
+
+
+# LLM: 输入由调用方按出站表面校准；未知或输入型元数据继续用旧上限，不新增元数据请求。
+# 函数用途: 为一次主请求冻结预算，重复调用可用于新投影但不能保存到共享后端。
+def model_request_token_budget(agent: object, *, input_tokens: int) -> RequestTokenBudget:
+    shared = request_budget_shared_window(agent)
+    backend = getattr(agent, "backend", None)
+    window = (configured_context_window_tokens(getattr(agent, "config", None))
+              or int(getattr(backend, "configured_context_window_tokens", 0) or 0))
+    ceiling = configured_output_ceiling(agent) if shared else max_output_tokens(agent)
+    return resolve_request_token_budget(input_tokens=input_tokens, context_window_tokens=window,
+        output_ceiling=ceiling, shared_window=shared,
+        server_managed_output=request_output_server_managed(agent))
 
 
 # LLM: Non-stream total budgeting may estimate full output time; stream liveness must not use this as a hidden wall clock.
 # 函数用途: 按最大输出 token 与保守速度估算非流式生成时间。
-def _output_generation_timeout_seconds(agent: object) -> float:
-    tokens = max_output_tokens(agent)
+def _output_generation_timeout_seconds(agent: object, *, token_budget: RequestTokenBudget | None = None) -> float:
+    tokens = token_budget.output_tokens if token_budget is not None else max_output_tokens(agent)
     if tokens <= 0:
         return 0.0
     config = getattr(agent, "config", None)

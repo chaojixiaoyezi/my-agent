@@ -12,6 +12,7 @@ from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from .errors import (
     ModelNotConfiguredError,
 )
+from .request_budget import RequestTokenBudget
 
 
 # LLM: 后端唯一响应合同；诊断仅承载类型/长度，不进入正文或原生历史，新增字段须联测工具循环与Gateway失败。
@@ -56,6 +57,8 @@ class ModelResponse:
     # 仅 explicit 后台完成合同设置；模型内部总结与公开正文分开，不把它当作已核验事实。
     internal_response: str = ""
     public_receipt: dict[str, object] | None = None
+    # 宿主真实生成出口覆盖，不从供应商正文、历史字典或复用后端恢复。
+    request_token_budget: RequestTokenBudget | None = None
 
 
 # LLM: 后端连接、采样和物理并发上限是工作片冻结快照；与模型名/密钥一起缓存，流式请求中不可热改。
@@ -92,6 +95,7 @@ class BackendOptions:
     # Responses-only idle resources; other protocols ignore these frozen values.
     responses_ws_idle_ttl_seconds: int = 300
     responses_ws_max_idle_connections: int = 32
+    configured_output_ceiling: int = 0
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。
@@ -123,6 +127,9 @@ class ProviderRequestOptions:
     # LLM: 探测只提供能力证据，完整空输出由探测自身判未证明/不确定；业务请求默认仍严格判空。
     # 字段用途: 标记本次非业务探测用途，不表示探测成功，也不豁免供应商失败或不完整响应。
     is_probe: bool = False
+    token_budget: RequestTokenBudget | None = None
+    # 宿主按最终schema表面签发新预算；适配器不自行估算输入，也不能把此闭包存入共享后端。
+    structured_budget_resolver: Callable[[str, list[dict[str, Any]]], RequestTokenBudget] | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 后端 capability flag 决定上层能否传真实 system instruction；未声明支持的旧实现保持原关键字形态。

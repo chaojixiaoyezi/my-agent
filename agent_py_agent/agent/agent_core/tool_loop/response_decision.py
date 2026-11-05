@@ -929,7 +929,9 @@ def _record_thinking_downgrade(params: object, *, from_level: str, to_level: str
 #   否则窗口小于 4×上限时会高估、配置为 0 时会把上限当成 0 而误判"无变化"。伪后端缺该
 #   字段时回落同一个工厂函数，不另写换算；只读、不发网络。
 # 函数用途: 返回降档比较用的有效输出上限（优先真实后端冻结值，缺失时按工厂同款规则）。
-def _effective_output_cap(agent: object) -> int:
+def _effective_output_cap(agent: object, *, token_budget=None) -> int:
+    if token_budget is not None:
+        return token_budget.output_tokens
     cap = getattr(getattr(agent, "backend", None), "max_tokens", None)
     if type(cap) is int and cap > 0:
         return cap
@@ -943,7 +945,7 @@ def _effective_output_cap(agent: object) -> int:
 #   后端冻结值（见 _effective_output_cap），不在决策层重算配置值。协议未知（伪 agent/旧后端）
 #   时按旧行为处理；判定只读结构化配置，不发网络。
 # 函数用途: 判断从当前档位降到目标档位是否会改变真实出站思考控制字段。
-def _effective_wire_change(agent: object, control: str, current: str, target: str) -> bool:
+def _effective_wire_change(agent: object, control: str, current: str, target: str, *, token_budget=None) -> bool:
     from ...backends.reasoning_control import (
         ReasoningPayloadLimits,
         effective_reasoning_wire_fields,
@@ -956,7 +958,7 @@ def _effective_wire_change(agent: object, control: str, current: str, target: st
     if not protocol:
         return True
     limits = ReasoningPayloadLimits(
-        max_tokens=_effective_output_cap(agent),
+        max_tokens=_effective_output_cap(agent, token_budget=token_budget),
         levels=tuple(getattr(backend, "reasoning_levels", ()) or ()),
     )
     before = effective_reasoning_wire_fields(control, current, protocol, limits)
@@ -985,7 +987,8 @@ def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepa
     if not target:
         _record_thinking_downgrade(request.params, from_level=current, to_level="", outcome="already_lowest")
         return request.counters
-    if not _effective_wire_change(request.agent, control, current, target):
+    if not _effective_wire_change(request.agent, control, current, target,
+                                  token_budget=getattr(request.response, "request_token_budget", None)):
         _record_thinking_downgrade(
             request.params, from_level=current, to_level=target, outcome="no_effective_change",
         )
