@@ -23,6 +23,7 @@ from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
 from .message_replay import message_rows_iterator
 from .models import ConversationThread, MessageLogEntry
+from .store_io import _touch_node
 
 _COLD_PAYLOAD_FIELDS = ('operation_evidence', 'provider_compaction')
 # 单份检查点冷证据或供应商记录允许保存的最大字节数。
@@ -141,6 +142,8 @@ def _write_cold_payload(root, thread_id, payload):
     if previous is None:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         write_text_atomic_beneath(root, parts, text)
+    else:
+        _touch_node(root, parts, raw)
     return {'sha256': digest, 'byte_length': len(raw), 'ref': parts[-1]}
 
 
@@ -410,6 +413,8 @@ def _save_checkpoint_copy(root, row):
     if previous is None:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         write_bytes_atomic_beneath(root, parts, raw)
+    else:
+        _touch_node(root, parts, raw)
 
 
 # LLM: 固定文件名只由expected ID哈希构成；读取后仍核原v3封印，不以冷副本存在代替原head。
