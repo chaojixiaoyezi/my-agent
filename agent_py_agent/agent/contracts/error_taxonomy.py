@@ -4172,6 +4172,81 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
 }
 
 
+# 2026-11-05：W1 统一登记能力包 MCP、构建与外部导入错误；恢复建议不授予启用、导入或自动重放权。
+ERROR_CONTRACTS.update({
+    "PACK_MCP_DISABLED": ErrorContract(
+        code="PACK_MCP_DISABLED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="管理员还没打开能力包 MCP 总开关；在 /settings 打开 capability_pack_mcp_enabled 并重启 Gateway 后再启用。本次没有执行。",
+    ),
+    "PACK_MCP_OWNER_UNSUPPORTED": ErrorContract(
+        code="PACK_MCP_OWNER_UNSUPPORTED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前账号不支持启用能力包 MCP 进程；仅本机管理员 local_main 可启用，其他账号仍可读取公开包文档。本次没有执行，不切换账号绕过。",
+    ),
+    "MCP_PACK_CATALOG_INVALID": ErrorContract(
+        code="MCP_PACK_CATALOG_INVALID", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="服务返回的工具目录不满足名称、输入描述或数量和字节限制；核对原目录并修正服务后重新启用，不删约束或信任服务自报的只读标记。",
+    ),
+    "MCP_PACK_CATALOG_DRIFT": ErrorContract(
+        code="MCP_PACK_CATALOG_DRIFT", category="tool", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="服务当前工具目录与启用时固定的目录不同，调用没有发送；请用户确认变化，先停用再重新启用以重新固定目录，不自动接受新目录。",
+    ),
+    "MCP_PACK_SERVER_UNAVAILABLE": ErrorContract(
+        code="MCP_PACK_SERVER_UNAVAILABLE", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="能力包服务启动或初始化失败，或仍在重启退避期，调用没有发送；核对原启动错误和运行环境，不原样循环调用或重放业务。",
+    ),
+    "PACKAGE_BUILD_MCP_INVALID": ErrorContract(
+        code="PACKAGE_BUILD_MCP_INVALID", category="tool", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="能力包 MCP 声明不合法；核对字段、运行目录、入口、permissions.network 及工具目录模式，修正原声明后重新构建，不放宽文件或输入校验。",
+    ),
+    "PACKAGE_BUILD_MCP_SERVER_LIMIT": ErrorContract(
+        code="PACKAGE_BUILD_MCP_SERVER_LIMIT", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="一个能力包只能声明一个 MCP 服务；保留为独立能力包，或请用户选择保留的服务，不把多个服务自动合并成一个运行入口。",
+    ),
+    "PLUGIN_IMPORT_SOURCE_INVALID": ErrorContract(
+        code="PLUGIN_IMPORT_SOURCE_INVALID", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="导入来源不是路径策略允许的可读目录；核对原来源及授权范围，提供有效目录，不换路径写法或扩大读取范围。",
+    ),
+    "PLUGIN_IMPORT_PATH_UNSAFE": ErrorContract(
+        code="PLUGIN_IMPORT_PATH_UNSAFE", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="来源树含符号链接、特殊文件或不安全路径，整个导入已拒绝；修正原目录结构后再导入，不跟随链接、跳过异常项或绕过路径限制。",
+    ),
+    "PLUGIN_IMPORT_MANIFEST_INVALID": ErrorContract(
+        code="PLUGIN_IMPORT_MANIFEST_INVALID", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="外部插件或 MCP 清单不是大小限制内的合法 JSON 对象，或组件路径未以 ./ 开头并留在来源目录内；修正原清单后再导入，不忽略错误或放宽限制。",
+    ),
+    "PLUGIN_IMPORT_ID_INVALID": ErrorContract(
+        code="PLUGIN_IMPORT_ID_INVALID", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="导入得到的包标识不满足插件清单规则；核对来源标识并修正后再导入，不静默改名或替换现有安装。",
+    ),
+    "PLUGIN_IMPORT_ID_CONFLICT": ErrorContract(
+        code="PLUGIN_IMPORT_ID_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="同名安装是插件而不是能力包，不能用导入覆盖；核对原安装并使用不冲突的包标识，不删除、停用或改写已有插件来强行导入。",
+    ),
+    "PLUGIN_IMPORT_LIMIT_EXCEEDED": ErrorContract(
+        code="PLUGIN_IMPORT_LIMIT_EXCEEDED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="来源成员数、字节数、目录深度或路径长度超过包读取预算；在原授权范围精简来源后再导入，不拆分请求或提高限制绕过预算。",
+    ),
+    "PLUGIN_IMPORT_NO_CONTENT": ErrorContract(
+        code="PLUGIN_IMPORT_NO_CONTENT", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="来源中未找到可导入的技能、命令、代理、文档或支持的服务；核对原来源和支持格式，不补造内容，也不把没有内容当作导入成功。",
+    ),
+})
+
+
 # LLM: 仅按显式错误码大写查表，未登记码统一回退到UNKNOWN_ERROR合同，不猜自然语言。
 # 函数用途: 根据结构化错误码返回对应的ErrorContract对象。
 def error_contract(code: str) -> ErrorContract:

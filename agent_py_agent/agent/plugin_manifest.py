@@ -11,9 +11,14 @@ from dataclasses import asdict, dataclass
 
 from .capability_package_manifest import (
     CAPABILITY_PACKAGE_SCHEMA,
+    CAPABILITY_PACKAGE_SCHEMA_V10,
+    MAX_PACK_MCP_SERVERS,
     CapabilityDeclaration,
     CapabilityFile,
+    PackMCPServer,
+    _PackRuntimeFile,
     validate_capability_files,
+    validate_pack_runtime_files,
 )
 from .command_arguments import CommandActionSpec
 from .command_declarations import command_action_from_payload, declaration_list
@@ -157,6 +162,8 @@ class PluginManifest:
     permissions: PluginEventPermissions | None = None
     # v9显式版本标记；旧清单缺省False且不改变任何旧序列化字段。
     host_api_v9: bool = False
+    # v10 服务声明只补在末尾，旧位置构造及旧协议的默认输出保持不变。
+    mcp_servers: tuple[PackMCPServer, ...] = ()
 
     # LLM: 直接构造与JSON同源；v9独立验证能力，不扩大旧read枚举；v8订阅与host_api仍互斥。
     # 函数用途: 安装前验证入口与贡献，允许纯订阅的 v8，但不授执行权或放宽旧包贡献门。
@@ -176,8 +183,15 @@ class PluginManifest:
                 or any(not isinstance(name, str) or not _SKILL_NAME.fullmatch(name) for name in self.skills)):
             raise ValueError("随包 Skill 名单无效")
         # 入口校验排在 Skill 名单之后：v6 要拿已校验的 Skill 名单核对随包 SKILL.md
-        if self.is_content_only:
-            self._validate_content_entry()
+        if (not isinstance(self.mcp_servers, tuple)
+                or any(not isinstance(server, PackMCPServer) for server in self.mcp_servers)
+                or self.mcp_servers and not self.is_capability_pack):
+            raise ValueError("能力包 MCP 服务声明无效")
+        if self.is_capability_pack:
+            if self.mcp_servers:
+                self._validate_pack_runtime()
+            else:
+                self._validate_content_entry()
         elif self.entry is None:
             self._validate_python_entry()
         else:
@@ -188,7 +202,7 @@ class PluginManifest:
         panel_ids = {panel.id for panel in self.panels}
         # 版本门已验证，只有显式 v8 能把订阅算贡献；旧包连原拒绝文案也保持不变。
         v8_contributes = self.permissions is not None and bool(self.events or self.tool_gates)
-        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids or self.is_content_only or v8_contributes):
+        if len(tool_names) != len(self.tools) or not (tool_names or panel_ids or self.is_capability_pack or v8_contributes):
             raise ValueError("工具重名，或既没有工具也没有面板")
         _validate_observation_pairs(self.tools)
         for action in self.actions:
@@ -199,11 +213,51 @@ class PluginManifest:
         canonical = canonicalize_tool_input_schema(json.loads(self.settings_schema_json))
         object.__setattr__(self, "settings_schema_json", _json(canonical))
 
-    # LLM: 类型由显式 v7 能力声明决定，不从文件名或缺少 MCP 入口猜测；调用方据此排除进程路径。
+    # LLM: 包身份与进程贡献分别判断；只有有能力声明且没有服务的包可跳过进程路径。
     # 函数用途: 区分无需环境和服务的纯内容包。
     @property
     def is_content_only(self) -> bool:
+        return self.capability is not None and not self.mcp_servers
+
+    @property
+    def is_capability_pack(self) -> bool:
+        """显式能力声明决定包身份，不因是否附带进程而改变发现与内容归属。"""
         return self.capability is not None
+
+    @property
+    def has_mcp_runtime(self) -> bool:
+        """只表示存在静态运行声明，不代表已启用、已启动或已获授权。"""
+        return bool(self.mcp_servers)
+
+    @property
+    def runtime_files(self) -> tuple[PluginFile, ...]:
+        """仅投影去掉服务根的运行文件；旧协议保持空，不改变它们原有环境入口。"""
+        return validate_pack_runtime_files(self.mcp_servers[0], self.files) if self.mcp_servers else ()
+
+    def _validate_pack_runtime(self) -> None:
+        """v10 独立验证服务与内存投影，不能夹带旧执行贡献或内容核验授权。"""
+        if (len(self.mcp_servers) != MAX_PACK_MCP_SERVERS
+                or not isinstance(self.capability, CapabilityDeclaration)
+                or self.entry_module or self.entry_wheel or self.wheels or self.actions or self.default_action
+                or self.panels or self.skills or self.host_api or self.host_api_v9 or self.events or self.tool_gates
+                or self.capability.verification is not None):
+            raise ValueError("能力包 MCP 不能混入其它执行或核验声明")
+        server = self.mcp_servers[0]
+        if (self.entry != server.entry or self.platforms != server.platforms or self.tools != server.tools
+                or self.permissions != PluginEventPermissions(network=server.network)
+                or any(tool.observation is not None or tool.observation_ref is not None for tool in self.tools)):
+            raise ValueError("能力包 MCP 内存投影不一致")
+        if (not isinstance(self.files, tuple)
+                or any(not isinstance(item, (CapabilityFile, PluginFile)) for item in self.files)):
+            raise ValueError("能力包 MCP 文件清单无效")
+        prefix = server.root + "/"
+        if self.capability.entry_document == server.root or self.capability.entry_document.startswith(prefix):
+            raise ValueError("能力入口文档不能属于运行目录")
+        documents = tuple(item for item in self.files if not item.path.startswith(prefix))
+        if any(not isinstance(item, PluginFile) for item in self.files if item.path.startswith(prefix)):
+            raise ValueError("能力包 MCP 运行文件声明无效")
+        validate_capability_files(self.capability, documents)
+        validate_pack_runtime_files(server, self.files)
 
     # LLM: 首版能力包不混入执行入口、公开 Skill 或宿主授权，内部脚本只作为内容；运行继续经过原工具链。
     # 函数用途: 校验无进程能力包及其私有文件清单。
@@ -294,6 +348,12 @@ class PluginManifest:
     # LLM: 输出只含协议声明；显式v9由独立模块投影，旧版本JSON与字段保持不变。
     # 函数用途: 生成可复读的静态包描述。
     def to_payload(self) -> dict:
+        if self.is_capability_pack and self.mcp_servers:
+            return {"schema_version": CAPABILITY_PACKAGE_SCHEMA_V10, "package_kind": "capability",
+                    "plugin_id": self.plugin_id, "version": self.version, "summary": self.summary,
+                    "capability": self.capability.to_payload(), "files": [asdict(item) for item in self.files],
+                    "mcp_servers": [server.to_payload() for server in self.mcp_servers],
+                    "settings_schema": self.settings_schema}
         if self.is_content_only:
             return {"schema_version": CAPABILITY_PACKAGE_SCHEMA, "package_kind": "capability",
                     "plugin_id": self.plugin_id, "version": self.version, "summary": self.summary,
@@ -341,6 +401,8 @@ class PluginManifest:
                 return manifest_from_v9(cls, payload)
             if version == CAPABILITY_PACKAGE_SCHEMA:
                 return cls._from_content(payload)
+            if version == CAPABILITY_PACKAGE_SCHEMA_V10:
+                return cls._from_pack_v10(payload)
             if version in (PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8):
                 return cls._from_v6(payload)
             if version not in _SCHEMA_FIELDS:
@@ -391,6 +453,29 @@ class PluginManifest:
                    capability=CapabilityDeclaration.from_payload(row["capability"]),
                    files=tuple(CapabilityFile(**_fields(item, "path sha256 executable"))
                                for item in declaration_list(row["files"])))
+
+    @classmethod
+    def _from_pack_v10(cls, payload: dict) -> PluginManifest:
+        """严格解码 v10，文档和运行树按唯一服务根分区；旧 v1–v9 解码分支不变。"""
+        row = _fields(payload, "schema_version package_kind plugin_id version summary capability files mcp_servers settings_schema")
+        servers = declaration_list(row["mcp_servers"])
+        if (row["package_kind"] != "capability" or len(servers) != MAX_PACK_MCP_SERVERS
+                or not isinstance(row["capability"], dict) or "verification" in row["capability"]):
+            raise ValueError("能力包 MCP 类型、服务数或能力声明无效")
+        server = PackMCPServer.from_payload(servers[0])
+        files = []
+        for item in declaration_list(row["files"]):
+            member = _fields(item, "path sha256 executable")
+            if not isinstance(member["path"], str):
+                raise ValueError("能力包文件路径无效")
+            kind = _PackRuntimeFile if member["path"].startswith(server.root + "/") else CapabilityFile
+            files.append(kind(**member))
+        return cls(plugin_id=row["plugin_id"], version=row["version"], summary=row["summary"],
+                   entry_module="", entry_wheel="", wheels=(), actions=(), default_action="", tools=server.tools,
+                   settings_schema_json=_json(row["settings_schema"]), entry=server.entry,
+                   files=tuple(files), platforms=server.platforms,
+                   capability=CapabilityDeclaration.from_payload(row["capability"]),
+                   permissions=PluginEventPermissions(network=server.network), mcp_servers=(server,))
 
     # LLM: v6/v8/v9共用文件入口；v9已过专门能力门，只有其显式标记进入构造，不改变旧字段。
     # 函数用途: 恢复非 Python 包，并只在 v8 读取订阅与权限；错误由公共入口脱敏。
@@ -469,8 +554,11 @@ def _validate_event_declarations(manifest: PluginManifest) -> None:
         if manifest.events or manifest.tool_gates:
             raise ValueError("事件订阅必须声明 v8 权限")
         return
+    # v10 只带网络权限，不借 v8 订阅门；完整投影和禁止订阅已在清单构造时核对。
+    if manifest.has_mcp_runtime:
+        return
     if (not isinstance(manifest.permissions, PluginEventPermissions) or manifest.entry is None
-            or manifest.is_content_only or not (manifest.events or manifest.tool_gates)):
+            or manifest.is_capability_pack or not (manifest.events or manifest.tool_gates)):
         raise ValueError("v8 必须使用文件入口并声明订阅")
     if manifest.host_api:
         raise PluginPackageError("events_with_host_api_unsupported", "第一期事件插件不能同时声明宿主 API。")

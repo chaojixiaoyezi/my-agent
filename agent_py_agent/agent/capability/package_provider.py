@@ -2,6 +2,7 @@
 # 模块用途: 把已启用内容包装成当前轮快照，并在每次私有成员读取前后复核同一安装代次。
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -41,10 +42,12 @@ def list_installed_capability_packages(owner_home, *, include_disabled=True):
               PluginInstallStore(resolve_owner_home(owner.root, OwnerIdentity.local_main())).snapshot())
     rows = []
     for entry in (*own, *(item for item in public if item.installation_scope == 'public')):
-        if not entry.manifest.is_content_only or not include_disabled and not entry.enabled:
+        if not entry.manifest.is_capability_pack or not include_disabled and not entry.enabled:
             continue
         manifest = entry.manifest
-        assets = package_assets(manifest.files)
+        runtime_prefix = manifest.mcp_servers[0].root + "/" if manifest.has_mcp_runtime else ""
+        assets = package_assets(tuple(item for item in manifest.files
+                                     if not runtime_prefix or not item.path.startswith(runtime_prefix)))
         identifier = ('public/' if entry.installation_scope == 'public' else '') + manifest.plugin_id
         rows.append({'package_id': identifier, 'name': identifier, 'version': manifest.version, 'summary': manifest.summary,
             'enabled': entry.enabled, 'installation_scope': entry.installation_scope,
@@ -80,7 +83,7 @@ def enabled_capability_packages(owner) -> tuple[CapabilityPackageSnapshot, ...]:
         return ()
     store = PluginInstallStore(owner)
     return tuple(_package_snapshot(store, entry) for entry in store.snapshot()
-                 if entry.enabled and entry.manifest.is_content_only and entry.installation_scope == "private")
+                 if entry.enabled and entry.manifest.is_capability_pack and entry.installation_scope == "private")
 
 
 # LLM: 公共发布源只由规范 main owner 推出；筛选原安装表的 public 内容记录，不投影设置/凭据或私有安装，不给执行用户 main 身份。
@@ -89,8 +92,13 @@ def enabled_public_capability_packages(owner) -> tuple[CapabilityPackageSnapshot
     if owner is None:
         return ()
     store = PluginInstallStore(resolve_owner_home(owner.root, OwnerIdentity.local_main()))
-    return tuple(_package_snapshot(store, entry) for entry in store.snapshot()
-                 if entry.enabled and entry.manifest.is_content_only and entry.installation_scope == "public")
+    packages = tuple(_package_snapshot(store, entry) for entry in store.snapshot()
+                     if entry.enabled and entry.manifest.is_capability_pack and entry.installation_scope == "public")
+    # 存储 owner 是 main，但运行能力必须按消费 owner 裁剪；不重读表或借用 main 执行身份。
+    if owner.identity != OwnerIdentity.local_main():
+        return tuple(replace(package, mcp_runtime="owner_unsupported", mcp_tool_names=())
+                     if package.mcp_runtime != "none" else package for package in packages)
+    return packages
 
 
 # LLM: 私有内容仍受插件总闸；关闭插件时仅当前可信快照中的 public 内容可用，不扩展任何插件工具执行权。
@@ -108,14 +116,29 @@ def package_usage_enabled(agent: object) -> bool:
 def _package_snapshot(store: PluginInstallStore, installation: PluginInstallation) -> CapabilityPackageSnapshot:
     manifest = installation.manifest
     capability = manifest.capability
+    runtime_prefix = manifest.mcp_servers[0].root + "/" if manifest.has_mcp_runtime else ""
+    members = tuple(item for item in manifest.files if not runtime_prefix or not item.path.startswith(runtime_prefix))
+    runtime, names = "none", ()
+    if manifest.has_mcp_runtime:
+        if store._owner != OwnerIdentity.local_main():
+            runtime = "owner_unsupported"
+        elif installation.enabled:
+            # 只做名称投影，不初始化客户端或准备环境；声明/固定目录沿原安装记录读取。
+            from ..plugin_activation_record import installation_tool_declarations
+            from ..plugin_runtime import plugin_tool_name
+
+            runtime = "on_demand"
+            names = tuple(plugin_tool_name(manifest.plugin_id, tool.name)
+                          for tool in installation_tool_declarations(installation))
     return CapabilityPackageSnapshot(
         package_id=f"public/{manifest.plugin_id}" if installation.installation_scope == "public" else manifest.plugin_id,
         installation_scope=installation.installation_scope,
         version=manifest.version, summary=manifest.summary,
         description=capability.description, keywords=capability.keywords,
         entry_document=capability.entry_document, package_sha256=installation.package_sha256,
-        activation_id=installation.activation_id, members=manifest.files,
+        activation_id=installation.activation_id, members=members,
         application_scope=capability.to_payload().get('application_scope', {}),
+        mcp_runtime=runtime, mcp_tool_names=names,
         reader=partial(read_capability_member, store, installation),
     )
 
@@ -128,8 +151,13 @@ def read_capability_member(store: PluginInstallStore, expected: PluginInstallati
     from ..plugin_package import PackageReadLimits, PluginPackageSnapshot, read_plugin_member
 
     before = store.require_activation(expected.manifest.plugin_id, expected.activation_id)
-    if before != expected or not before.manifest.is_content_only:
+    if before != expected or not before.manifest.is_capability_pack:
         raise PluginInstallationError("activation_unavailable", "能力包原安装代次已变化。")
+    # 即使绕过快照直接调用读口，runtime 子树也不属于可交付的内容成员。
+    if before.manifest.has_mcp_runtime and member_path.startswith(before.manifest.mcp_servers[0].root + "/"):
+        from ..plugin_manifest import PluginPackageError
+
+        raise PluginPackageError("member_missing", "包中没有声明这个资源。")
     package = PluginPackageSnapshot(before.manifest, store.package_bytes(before))
     content = read_plugin_member(package, member_path, max_bytes=PackageReadLimits().member_bytes)
     try:

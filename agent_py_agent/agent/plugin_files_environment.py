@@ -62,11 +62,15 @@ class PluginFileSnapshot:
 
 
 # LLM: 只读安装快照里的 ZIP 字节，复用包读取器的成员校验与预算；摘要不符整包拒绝。
-# 函数用途: 取出并核对 v6 包声明的全部随包文件。
+# 函数用途: 核对 v6 全部文件或 v10 去根后的运行文件；能力文档不进入执行环境。
 def inspect_plugin_files(package: PluginPackageSnapshot) -> tuple[PluginFileSnapshot, ...]:
     limits = PackageReadLimits()
     with zipfile.ZipFile(io.BytesIO(package.archive_bytes)) as archive:
         members = validate_zip_members(archive.infolist(), limits)
+        if package.manifest.has_mcp_runtime:
+            root = package.manifest.mcp_servers[0].root
+            return tuple(_verified_file(archive, members[f"{root}/{item.path}"], item, limits)
+                         for item in package.manifest.runtime_files)
         return tuple(_verified_file(archive, members[item.path], item, limits) for item in package.manifest.files)
 
 

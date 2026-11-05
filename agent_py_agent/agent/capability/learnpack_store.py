@@ -115,7 +115,7 @@ class LearnpackStore:
             return None
         if (manifest.plugin_id, manifest.version) != (record.package_id, record.version):
             return None
-        return record if manifest.is_content_only == (record.kind == KIND_CAPABILITY_PACK) else None
+        return record if manifest.is_capability_pack == (record.kind == KIND_CAPABILITY_PACK) else None
 
     # LLM: 列出同一个包名做过的打包记录：按修改时间取最近的 _MAX_BUILD_SCAN_COUNT 个记录文件（复审：超出上限时要的是最近的，
     #   不是按文件名随便取一批），先读记录筛包名，再逐个用 build() 核对字节与清单，坏的跳过；结果按打包时间从早到晚。
