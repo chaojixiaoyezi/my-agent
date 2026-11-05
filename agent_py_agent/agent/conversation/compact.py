@@ -1220,8 +1220,10 @@ def _candidate_limits(request: _CompactRunRequest) -> _CandidateLimits:
 #   会话估算（不套校准）；计量返回后立即复核取消，避免过大候选在活动变化后误记失败；只读，不写状态。
 #   projection 保留原始纯投影，供提交后改写本轮观测基线；联测闲置竞争和候选容量门。
 #   计量开始前切换私有时钟，公开阶段事件仍按原顺序、原数字发送。
+#   计量、投影与提交的摘要必须和 _checkpoint_payload 规范形式逐字节一致。
 # 函数用途: 计量“某个摘要文本 + 保留尾部”组成的下一请求有多大。
 def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summary: str) -> _MeasuredSummary:
+    summary = str(summary or "").strip()
     raise_if_compact_interrupted(request.interrupt_check)
     timing = request.timing_state.get("clock")
     if timing is not None:
