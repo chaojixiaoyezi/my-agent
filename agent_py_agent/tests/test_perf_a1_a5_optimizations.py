@@ -220,6 +220,8 @@ def test_a4_projection_reused_across_materialization_and_content_changes():
 
 # LLM: 使用真实manager，只有下层列表被探针替换；空目录应不进入其canonical查询，出现子目录必须恢复查询。
 # 函数用途: 验证零子代理快路径不会永久缓存空状态。
+# LLM: 真实manager已创建索引设施，但零孩子仍须零canonical报告；新孩子出现则立即回到原报告。
+# 函数用途: 核验初始化索引不破坏空孩子快路径，且不会缓存空结果漏掉后续创建。
 def test_a4_empty_subagent_workspace_skips_reports_but_not_new_children(tmp_path):
     from types import SimpleNamespace
 
@@ -235,6 +237,29 @@ def test_a4_empty_subagent_workspace_skips_reports_but_not_new_children(tmp_path
         (manager.workspace / "new-child").mkdir()
         with pytest.raises(RuntimeError, match="canonical probe"):
             guidance._render_runtime_direct_children(agent, params)
+        assert report.call_count == 1
+
+
+# LLM: 只有已知普通索引设施可以忽略；未知普通文件、同名目录与软链接都必须保留原canonical诊断。
+# 函数用途: 防止空目录优化把未知或非普通条目当成空孩子目录。
+@pytest.mark.parametrize('shape', ['unknown-file', 'index-directory', 'index-symlink'])
+def test_a4_empty_fast_path_rejects_unknown_or_nonregular_entries(tmp_path, shape):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime import guidance
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    manager = SubAgentManager(tmp_path / 'children')
+    if shape == 'unknown-file':
+        (manager.workspace / 'unknown-state').write_text('unknown')
+    elif shape == 'index-directory':
+        (manager.workspace / '.run-index.sqlite3-journal').mkdir()
+    else:
+        (manager.workspace / '.run-index.sqlite3-journal').symlink_to(manager.workspace / '.run-index.sqlite3')
+    params = SimpleNamespace(task_id='root', task_attributes={}, runtime_injections=[])
+    with patch.object(manager.persistence, 'list_runs_for_root_report', side_effect=RuntimeError('canonical probe')) as report:
+        with pytest.raises(RuntimeError, match='canonical probe'):
+            guidance._render_runtime_direct_children(SimpleNamespace(subagents=manager), params)
         assert report.call_count == 1
 
 

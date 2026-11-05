@@ -18,6 +18,41 @@ from agent_py_agent.tests.test_gateway_claim_transition_scope import c_actual as
 from agent_py_agent.tests.test_gateway_prepared_route_immutability import context as context
 
 
+# LLM: 使用真实文件发布而非替身原子写；同代重放不换inode，竞争相同记录幂等、不同记录绝不覆盖。
+# 函数用途: 在当前平台核验代次元数据首次发布及竞争发布的耐久不可覆盖合同。
+@pytest.mark.parametrize('competitor', [None, 'same', 'different'])
+def test_generation_metadata_first_publication_never_clobbers(tmp_path, monkeypatch, competitor):
+    from agent_py_agent.agent.gateway_parts import multiprocess_generation_metadata as metadata
+
+    record = {'schema_version': 'multiprocess_c_generation.v1', 'c_run_id': 'publication-c', 'worker_count': 2}
+    destination = tmp_path.joinpath(*metadata.generation_metadata_parts(record['c_run_id']))
+    original = metadata._write_complete_generation
+    observed = []
+
+    # LLM: 仅在完整临时文件落盘后注入竞争者，不替换发布原语或读回校验。
+    # 函数用途: 重现读到缺失后另一个写者抢先发布的准确窗口。
+    def competing_write(descriptor, content):
+        original(descriptor, content)
+        if competitor is not None:
+            value = {**record, 'worker_count': 3 if competitor == 'different' else 2}
+            destination.write_bytes(metadata.serialize_record(value))
+            observed.append((destination.read_bytes(), destination.stat().st_ino))
+
+    monkeypatch.setattr(metadata, '_write_complete_generation', competing_write)
+    if competitor == 'different':
+        with pytest.raises(ValueError, match='generation_metadata_immutable_conflict'):
+            metadata._publish_generation_once(tmp_path, record)
+    else:
+        metadata._publish_generation_once(tmp_path, record)
+        first = destination.stat().st_ino
+        metadata._publish_generation_once(tmp_path, record)
+        assert destination.stat().st_ino == first
+        assert metadata.read_generation_metadata(tmp_path, record['c_run_id']) == (record, metadata.serialize_record(record))
+    if observed:
+        assert (destination.read_bytes(), destination.stat().st_ino) == observed[0]
+    assert destination.stat().st_nlink == 1
+    assert sorted(path.name for path in destination.parent.iterdir()) == [destination.name]
+
 # LLM: 仅解析本模块函数调用图，不执行被测源码，也不把跨模块未知调用解释成已覆盖。
 # 函数用途: 找出指定入口可达的静态调用名，守住热路径禁止全扫的约束。
 def reachable(source, start):
@@ -705,7 +740,7 @@ def _wire_finish(control, gate, identifier, *, ask=False):
     return terminal
 
 
-# LLM: 独立真实C沿正式目录初始化后运行原P0/P4、Mach或SCM、worker CLI/P3/P6；不替换消费链或物理证明。
+# LLM: 独立真实C沿正式目录运行原P0/P4、Mach或SCM、worker CLI/P3/P6；计量器只覆盖wire，不把全量P6封存包在profile内；原短门预算断言不变。
 # 函数用途: 完成真实headless启动和一代结清，保留阶段证据让下一真实进程接班。
 def _wire_generation(base, generation, *, initialize=False, stop_one=False, history=0):
     import time
@@ -768,8 +803,8 @@ def _wire_generation(base, generation, *, initialize=False, stop_one=False, hist
         write_json_file_atomic(paths.root / 'gateway_state.json',
             {'status': 'running', 'pid': os.getpid(), 'c_run_id': generation,
              'process_identity': build_process_identity(os.getpid()), 'http_port': 43123})
-        with _wire_meter(controller) as (launches, created):
-            try:
+        try:
+            with _wire_meter(controller) as (launches, created):
                 workers.start()
                 # 不在测试里补第二批冷维护：正式start必须自行等待已核全量，不能跳过unknown。
                 assert index.ready and not index.failed and not controller._all_quarantined, report['cold']
@@ -827,22 +862,23 @@ def _wire_generation(base, generation, *, initialize=False, stop_one=False, hist
                     save('one_worker_stopped')
                 report['quota_exit'] = accounting.read_quota_count(quota_path)
                 assert report['quota_exit'] > 0
-                workers.close(defer_native=True)
-                assert all(observer.confirmed for _, _, observer in workers._created_origins)
-                drain.stop_producers()
-                assessment = drain.assess()
-                report['assessments'] = [str(item) for item in assessment]
-                save('drain_assessed')
-                assert all(item.drained for item in assessment), assessment
-                write_json_file_atomic(paths.root / 'gateway_state.json',
-                                       {'status': 'stopped', 'pid': os.getpid(), 'c_run_id': generation})
-                drain.seal_generation()
-                save('sealed')
-            finally:
-                workers.close()
+            # P6必须真实全量末核，但它不是短提交计量对象；先恢复profile，避免探针放大1000条库存的封存成本。
+            workers.close(defer_native=True)
+            assert all(observer.confirmed for _, _, observer in workers._created_origins)
+            drain.stop_producers()
+            assessment = drain.assess()
+            report['assessments'] = [str(item) for item in assessment]
+            save('drain_assessed')
+            assert all(item.drained for item in assessment), assessment
+            write_json_file_atomic(paths.root / 'gateway_state.json',
+                                   {'status': 'stopped', 'pid': os.getpid(), 'c_run_id': generation})
+            drain.seal_generation()
+            save('sealed')
+        finally:
+            workers.close()
 
 
-# LLM: 正式C在独立进程中运行且原父子关系不替换；HOME/PYTHONPATH只隔离数据及锁定当前源码，输出文件仅作证据。
+# LLM: 正式C及原父子关系不替换；50秒基线另给每条真实历史100ms的夹具/全量P6总期限，不改12秒业务等待和短门计量；输出仅作证据。
 # 函数用途: 运行一代真实组合根，并保留stdout/stderr和原阶段结果供精确复核。
 def _wire_child(base, generation, *, initialize=False, stop_one=False, history=0):
     import subprocess
@@ -861,7 +897,7 @@ def _wire_child(base, generation, *, initialize=False, stop_one=False, history=0
                f'stop_one={stop_one!r}, history={history!r})')
     with (base / (generation + '.stdout')).open('w') as out, (base / (generation + '.stderr')).open('w') as err:
         result = subprocess.run([sys.executable, '-c', program], cwd=source, env=env,
-                                stdout=out, stderr=err, timeout=50, check=False)
+                                stdout=out, stderr=err, timeout=50 + history / 10, check=False)
     evidence = (base / (generation + '.json')).read_text() if (base / (generation + '.json')).exists() else 'no stage'
     assert result.returncode == 0, (result.returncode, evidence, (base / (generation + '.stderr')).read_text())
     return json.loads(evidence)
@@ -1006,10 +1042,12 @@ def test_production_spawn_waits_for_complete_cold_index(tmp_path):
         assert not thread.is_alive()
 
 
-# LLM: 只把真实文件形状作为冷输入反例；原nofollow分类与原C权限门不patch，成功亦保留原锁文件。
+# LLM: 优先真实文件形状；link明确EPERM时只注入同inode双链接元数据，原nofollow分类及原C权限门不patch，真实硬链接需外部车道复核。
 # 函数用途: 放行规范普通锁，但不能借相同后缀藏软链接、硬链接、目录或未知名字。
 @pytest.mark.parametrize('shape', ['regular', 'symlink', 'hardlink', 'directory', 'unknown'])
-def test_cold_admission_facility_preserves_strict_original_file_checks(tmp_path, shape):
+def test_cold_admission_facility_preserves_strict_original_file_checks(tmp_path, monkeypatch, shape):
+    import errno
+
     from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import coordinator_guard
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 
@@ -1019,10 +1057,41 @@ def test_cold_admission_facility_preserves_strict_original_file_checks(tmp_path,
     leaf = directory / ('untyped.lock' if shape == 'unknown' else 'original.json.lock')
     target = tmp_path / 'outside'
     target.write_bytes(b'not-a-reservation')
+    linked_observations = []
     if shape == 'symlink':
         leaf.symlink_to(target)
     elif shape == 'hardlink':
-        os.link(target, leaf)
+        try:
+            os.link(target, leaf)
+        except PermissionError as error:
+            if error.errno != errno.EPERM:
+                raise
+            leaf.write_bytes(target.read_bytes())
+            identity = leaf.stat().st_dev, leaf.stat().st_ino
+            original_stat, original_fstat = os.stat, os.fstat
+
+            # LLM: 仅改变目标inode的nlink观察，不替换opener、冷索引或准入裁决；不宣称证明内核硬链接创建。
+            # 函数用途: 在明确拒绝link的测试机保留多链接拒绝分支。
+            def linked_info(info):
+                if (info.st_dev, info.st_ino) == identity:
+                    linked_observations.append(True)
+                    return SimpleNamespace(**{**{name: getattr(info, name) for name in dir(info) if name.startswith('st_')},
+                                              'st_nlink': 2})
+                return info
+
+            from agent_py_agent.agent.common import nofollow_fs
+            from agent_py_agent.agent.gateway_parts import multiprocess_drain_sources
+
+            # LLM: 保留原stat的目录FD与nofollow入参，只改变准确目标的链接计数。
+            # 函数用途: 将测试的双链接元数据交给原分类器。
+            def linked_stat(*args, **kwargs):
+                return linked_info(original_stat(*args, **kwargs))
+            linked_os = SimpleNamespace(**{**vars(os), 'stat': linked_stat,
+                'fstat': lambda *args, **kwargs: linked_info(original_fstat(*args, **kwargs)),
+                'supports_dir_fd': os.supports_dir_fd | {linked_stat},
+                'supports_follow_symlinks': os.supports_follow_symlinks | {linked_stat}})
+            monkeypatch.setattr(nofollow_fs, 'os', linked_os)
+            monkeypatch.setattr(multiprocess_drain_sources, 'os', linked_os)
     elif shape == 'directory':
         leaf.mkdir()
     else:
@@ -1040,6 +1109,8 @@ def test_cold_admission_facility_preserves_strict_original_file_checks(tmp_path,
         else:
             assert index.failed and controller._all_quarantined
             assert decision['status'] == 'blocked' and observed == []
+            if shape == 'hardlink':
+                assert before.st_nlink == 2 or linked_observations, '必须实际观察到双链接元数据，不能因适配器不可用而误过'
         after = leaf.lstat()
         assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
         controller.close()

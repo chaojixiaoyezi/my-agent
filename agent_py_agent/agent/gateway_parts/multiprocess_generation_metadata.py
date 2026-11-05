@@ -3,6 +3,7 @@
 import hashlib
 import os
 import secrets
+import sys
 from contextlib import contextmanager
 
 from ..common.nofollow_fs import (
@@ -87,7 +88,7 @@ def archive_registry_generations(root, previous, candidate, source):
     require_generation_source(root, candidate, source)
 
 
-# LLM: 仅创建纯count或v2初始，不接收closed字典；已有v2字节原样保全、count冲突拒绝，真实封存只由原runtime另一末门一次CAS。
+# LLM: 仅创建纯count或v2初始，不接收closed字典；Darwin用原子exclusive rename、其余保原link，均不覆盖竞争记录；封存仍归原runtime。
 # 函数用途: 幂等耐久创建本代初始记录，或保留既有历史；异常不宣称完成。
 def _publish_generation_once(root, record):
     if record.get('schema_version') == 'multiprocess_c_generation.v2' and record.get('closure') is not None:
@@ -112,11 +113,14 @@ def _publish_generation_once(root, record):
         os.close(descriptor)
         descriptor = None
         try:
-            os.link(temporary, parts[-1], src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            _publish_generation_path(directory, temporary, parts[-1])
         except FileExistsError:
             if read_generation_metadata(root, record['c_run_id']) != (record, content):
                 raise ValueError('generation_metadata_immutable_conflict') from None
-        os.unlink(temporary, dir_fd=directory)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
         os.fsync(directory)
         if read_generation_metadata(root, record['c_run_id']) != (record, content):
             raise ValueError('generation_metadata_readback_changed')
@@ -130,7 +134,23 @@ def _publish_generation_once(root, record):
         os.close(directory)
 
 
-# LLM: 原exclusive临时descriptor完整写+fsync后才可link；短写异常保持未知，不发布半条元数据。
+# LLM: 只发布同一已固定父FD下的完整临时文件；Darwin RENAME_EXCL=4由内核保证目的存在即EEXIST，不退回覆盖式rename。
+# 函数用途: 在不支持硬链接的Darwin存储上仍原子首次发布，保留其他平台的原不可覆盖发布链。
+def _publish_generation_path(directory, temporary, destination):
+    if sys.platform != 'darwin':
+        os.link(temporary, destination, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        return
+    import ctypes
+
+    rename = ctypes.CDLL(None, use_errno=True).renameatx_np
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(directory, os.fsencode(temporary), directory, os.fsencode(destination), 4) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+# LLM: 原exclusive临时descriptor完整写+fsync后才可发布；短写异常保持未知，不发布半条元数据。
 # 函数用途: 完成同一个原文件的实际耐久写，不改current登记。
 def _write_complete_generation(descriptor, content):
     remaining = memoryview(content)

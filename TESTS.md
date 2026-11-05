@@ -1,3 +1,21 @@
+## 2026-11-04 CI-R10：定点回归修复
+
+来源：`task-ci-r10.md`、`resume-ci-r10.md`。不派子代理、不部署、不改运行配置；提交信息按后到的续作要求。
+
+- A4 空孩子快路径只忽略真实 manager 的已知普通索引设施；未知文件、同名目录、软链接仍回 canonical。新增三种反例，保留新孩子立即可见断言。
+- Darwin 代次首次发布改用同父 FD 的 `renameatx_np(RENAME_EXCL)`，保留其他平台原 link 路径；完整写入、fsync、竞争不覆盖与严格读回不变。新增首次发布、同内容竞争、冲突竞争三例，核 inode、单链接和临时文件回收。
+- 容量等待夹具显式开启任务路由，用有界可释放事件保持真实占位孩子，五拍等待后仍由原 runner 完成并释放；续跑前须读回 DONE 和完整的零活跃索引，未知不当成零，不替换容量裁决。插件夹具经原 claim 发布口绑定准确 task/run/attempt，原私有任务拒绝断言保留。
+- 配额节拍夹具在维护前初始化真实调度索引，避免干净基线后新增未受控文件；配额实现不改。原生锁形状测试优先创建真实硬链接，仅明确 EPERM 时注入同 inode 的 nlink=2 并断言确实观察该元数据；这不证明真实硬链接行为，仍需允许 link 的车道复核。
+- 原生wire计量器在最后一条预算断言后恢复原profile，再执行真实全量P6，避免探针放大封存扫描成本。外层测试watchdog以50秒为基线、每条真实历史额外100ms，容纳线性的历史构造和全量封存；不改12秒业务等待、短门文件/字节/工作量断言，不省封存和接班检查。这是夹具总期限，不是放宽产品热路径预算。
+- SSE写锁探针限定本次真实issuer，其他测试已关闭流仍走原重验并传播401，不混入当前检查次数和故障。可在前两例SSE结束后唤醒其已关闭旧流，复现原串观测；本次只修测试归属，令牌校验和撤权实现不改。
+- 协调者配额transition归属用例显式使用5秒测试片预算，避免把默认毫秒级真实切片耗尽误判为提交不生效；仍核恰好一次真实提交、完整结果以及无transition不落账。生产默认预算及另行预算断言不改。
+
+复现（工作树根目录；验证隔离 Home）：
+```sh
+HOME=/private/tmp/home-ci-r10 MY_AGENT_HOME=/private/tmp/home-ci-r10/.my-agent PYTHONUSERBASE=/Users/xiaoyezi/Library/Python/3.14 python3 -m pytest agent_py_agent/tests/test_scale_native_executor_retirement.py agent_py_agent/tests/test_rework_r9_capacity_wait_admission.py agent_py_agent/tests/test_owner_quota_incremental_recovery.py agent_py_agent/tests/test_mega_business_plugin_compatibility.py agent_py_agent/tests/test_perf_a1_a5_optimizations.py agent_py_agent/tests/test_v15_w11_background_agent_quota.py -q --tb=short
+```
+另对本次改动的 Python 文件执行 `ruff check`，并执行 `git diff --check`。真实外部 IM/供应商、Linux 原生执行器链路未由本机测试证明。
+
 ## 2026-11-04 R1：监控组合发布 pin 与原子归属保护
 
 来源：`rework-sol-r1.md`（`v15-sol-r1`），审计基线 `d89e9c5f9e08cf877a7fb451d199146fb1ef6d45`。仅修改 `monitor_composition.py`、`workflow_store.py`、`test_v15_w8_composition_pins.py` 和本记录；`monitor_adapter.py` 已核对但未改，scheduler/R2 文件未改。没有部署、启停服务或修改解释器环境。

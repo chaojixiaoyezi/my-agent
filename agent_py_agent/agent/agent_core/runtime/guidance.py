@@ -165,8 +165,8 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
     )
 
 
-# LLM: 只有原manager、未覆盖的列表入口且真实目录为空才可短路；未知、替代对象、历史条目或IO拒绝仍查canonical。
-# 函数用途: 检查零子代理快路径，每次观察目录，创建新孩子后立即恢复原扫描。
+# LLM: 只有原manager、未覆盖列表入口且目录仅含规范索引伴生普通文件才可短路；未知条目/软链接/IO拒绝仍查canonical。
+# 函数用途: 忽略manager初始化的索引文件检查零孩子快路径，新孩子或未知文件出现立即恢复原扫描。
 def _subagent_workspace_is_empty(manager):
     from ...subagents.manager import SubAgentManager
 
@@ -180,8 +180,10 @@ def _subagent_workspace_is_empty(manager):
     try:
         if path.is_symlink():
             return False
+        index_files = {".run-index.sqlite3", ".run-index.sqlite3-wal", ".run-index.sqlite3-shm",
+                       ".run-index.sqlite3-journal", ".run-index-access.guard.lock", ".run-index-init.guard.lock"}
         with os.scandir(path) as entries:
-            empty = next(entries, None) is None
+            empty = all(entry.name in index_files and entry.is_file(follow_symlinks=False) for entry in entries)
     except FileNotFoundError:
         return True
     except OSError:
