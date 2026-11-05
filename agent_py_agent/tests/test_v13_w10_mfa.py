@@ -603,10 +603,21 @@ def test_atomic_challenge_key_journal_recovery(env, monkeypatch):
     directory = call.owner_home / "data" / "business_v13"
     assert json.loads((directory / ".transaction.json").read_text()) == {}
     challenges, keys = [json.loads((directory / name).read_text()) for name in ("webauthn_challenges.json", "passkeys.json")]
-    common = set(challenges["receipts"]) & set(keys["receipts"])
+    assert challenges['receipts'] == keys['receipts'] == {}
+    receipts = []
+    for collection in ('webauthn_challenges', 'passkeys'):
+        rows = identity.store(call)._rows(collection)
+        committed = {}
+        for path in (directory / 'history' / collection / 'receipts').glob('*.json'):
+            row = rows.decode(path.read_bytes(), 'receipts')
+            assert rows.parts('receipts', row['key'])[-1] == path.name
+            committed[row['key']] = rows.get('receipts', row['key'])
+        receipts.append(committed)
+    common = set(receipts[0]) & set(receipts[1])
     assert len(common) == 1
     receipt_key = common.pop()
-    assert challenges["receipts"][receipt_key] == keys["receipts"][receipt_key]
+    assert receipts[0][receipt_key] == receipts[1][receipt_key]
+    assert receipts[0][receipt_key]['result'] == result
     assert len(keys["records"]) == 1
 
 

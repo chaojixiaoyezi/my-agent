@@ -131,9 +131,14 @@ def assets_list(call):
             ref = result['scan_ref']
             # 回执按指纹保存，不能依赖键序；同一扫描任一完成回执可关闭之前的续扫。
             scans[ref] = scans.get(ref, False) or result.get('complete') is True
-    if scans and not all(scans.values()):
+    metadata = state.get('metadata', {})
+    pending = metadata.get('pending_scan_refs', [])
+    if (type(pending) is not list or any(type(ref) is not str or not ref for ref in pending)
+            or type(metadata.get('scan_observed', False)) is not bool):
+        raise BusinessError('STORE_UNAVAILABLE')
+    if pending or scans and not all(scans.values()):
         page['coverage'] = 'partial'
-    elif not state['records'] and not scans:
+    elif not state['records'] and not scans and not metadata.get('scan_observed', False):
         page['coverage'] = 'unknown'
     return page
 
@@ -236,5 +241,22 @@ def scan_run(call):
         return {'scan_ref': result['scan_ref'], 'complete': result['complete'],
             'assets_upserted': len(assets), 'scanned_targets': targets}
 
+    # 集合只保留是否观察过和仍在途的扫描，不把永久幂等回执重新塞回每次重写的快照。
+    def update_metadata(metadata, result):
+        pending = set(metadata.get('pending_scan_refs', []))
+        fact_key = 'completed-scan:' + hashlib.sha256(result['scan_ref'].encode()).hexdigest()
+        expected = {'scan_ref': result['scan_ref'], 'complete': True}
+        completed = metadata.fact(fact_key)
+        if completed is not None and completed != expected:
+            raise BusinessError('STORE_UNAVAILABLE')
+        if result['complete'] or completed is not None:
+            pending.discard(result['scan_ref'])
+            if completed is None:
+                metadata.seal_fact(fact_key, expected)
+        else:
+            pending.add(result['scan_ref'])
+        metadata.update(scan_observed=True, pending_scan_refs=sorted(pending))
+
     return store.transaction('asset_discovery_assets', mutate, idempotency_key=call.idempotency_key,
-        params_digest=hashlib.sha256(canonical_json(call.params).encode()).hexdigest())
+        params_digest=hashlib.sha256(canonical_json(call.params).encode()).hexdigest(),
+        metadata_update=update_metadata)

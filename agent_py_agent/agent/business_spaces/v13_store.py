@@ -157,6 +157,12 @@ class V13Store:
                 or 'deleted_records' in state and (type(state['deleted_records']) is not list
                     or any(type(key) is not str or not key for key in state['deleted_records']))):
             raise ValueError('row state')
+        if 'metadata' in state and type(state['metadata']) is not dict:
+            raise ValueError('metadata')
+        if 'metadata_facts' in state and (type(state['metadata_facts']) is not dict
+                or any(type(key) is not str or not key or type(value) is not dict
+                       for key, value in state['metadata_facts'].items())):
+            raise ValueError('metadata facts')
         for key, receipt in state['receipts'].items():
             if (type(key) is not str or re.fullmatch(r'[0-9a-f]{64}', key) is None or type(receipt) is not dict
                     or set(receipt) != {'fingerprint', 'result'} or type(receipt['result']) is not dict
@@ -177,7 +183,7 @@ class V13Store:
     # LLM: 新格式元数据不携带永久回执；记录增量只存在于同一 transaction journal。
     # 函数用途: 从已提交的日志状态生成有界物化快照。
     def _snapshot(self, state):
-        return {key: value for key, value in state.items() if key != 'deleted_records'} | {
+        return {key: value for key, value in state.items() if key not in {'deleted_records', 'metadata_facts'}} | {
             'history_rows': True, 'receipts': {},
             'records': {} if self._incremental(state['collection']) else state['records']}
 
@@ -250,6 +256,7 @@ class V13Store:
                 continue
             rows = self._rows(collection)
             payloads.extend(rows.payload('receipts', key, value) for key, value in state['receipts'].items())
+            payloads.extend(rows.payload('metadata', key, value) for key, value in state.get('metadata_facts', {}).items())
             if self._incremental(collection):
                 payloads.extend(rows.payload('records', key, value) for key, value in state['records'].items())
                 payloads.extend(rows.payload('records', key, None) for key in state.get('deleted_records', []))
@@ -323,12 +330,12 @@ class V13Store:
         write_bytes_atomic_beneath(self.owner_home, journal, _encode({}))
 
     # LLM: 幂等键按主体和动作隔离，参数摘要与 CAS 都参与指纹；第一次响应和回执分别复制。
-    # 函数用途: 在单笔锁内变更集合、保存回执并追加审计，返回 mutate 的字典结果。
+    # 函数用途: 同笔提交记录、可选集合元数据及回执；元数据不另建提交点或永久回执副本。
     def transaction(self, collection, mutate, *, idempotency_key, params_digest,
-                    expected_revision=None, receipt_view=None):
+                    expected_revision=None, receipt_view=None, metadata_update=None):
         if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
             raise BusinessError('INVALID_SCHEMA')
-        if not callable(mutate):
+        if not callable(mutate) or metadata_update is not None and not callable(metadata_update):
             raise BusinessError('INVALID_SCHEMA')
 
         # LLM: 单集合入口只适配参数，提交逻辑与多集合完全共用。
@@ -336,13 +343,17 @@ class V13Store:
         def single(records):
             return mutate(records[collection])
 
+        def update_metadata(metadata, result):
+            metadata_update(metadata[collection], result)
+
         return self.transaction_many((collection,), single, idempotency_key=idempotency_key,
-            params_digest=params_digest, expected_revision=expected_revision, receipt_view=receipt_view)
+            params_digest=params_digest, expected_revision=expected_revision, receipt_view=receipt_view,
+            metadata_update=update_metadata if metadata_update is not None else None)
 
     # LLM: 同一日志提交修订、逐键回执、目标 delta 及本笔审计；重放先点查回执，不加载历史运行。
-    # 函数用途: 在原 quota 和目录锁内原子变更多集合，保留 CAS 与物化中断的逻辑一致性。
+    # 函数用途: 原锁内共同更新记录和元数据；同键重放不重跑回调，原journal仍是唯一提交点。
     def transaction_many(self, collections, mutate, *, idempotency_key, params_digest,
-                         expected_revision=None, receipt_view=None):
+                         expected_revision=None, receipt_view=None, metadata_update=None):
         if self._readonly:
             raise BusinessError('CAPABILITY_DENIED')
         if (type(collections) not in (tuple, list) or not collections
@@ -362,7 +373,8 @@ class V13Store:
         if (type(idempotency_key) is not str or not idempotency_key or len(idempotency_key) > 128
                 or type(params_digest) is not str or not params_digest or not callable(mutate)
                 or any(value is not None and (type(value) is not int or value < 0) for value in revisions.values())
-                or (receipt_view is not None and not callable(receipt_view))):
+                or (receipt_view is not None and not callable(receipt_view))
+                or (metadata_update is not None and not callable(metadata_update))):
             raise BusinessError('INVALID_SCHEMA')
         key = hashlib.sha256(_encode([self.subject_id, self.action, idempotency_key])).hexdigest()
         # 保持原单集合回执指纹稳定；多集合名称按排序后的集合绑定。
@@ -397,6 +409,16 @@ class V13Store:
                 if type(result) is not dict:
                     raise BusinessError('DOMAIN_RESULT_INVALID')
                 result = _copy(result)
+                if metadata_update is not None:
+                    metadata = {name: _MetadataChanges(state.get('metadata', {}), self._rows(name))
+                                for name, state in states.items()}
+                    metadata_update(metadata, _copy(result))
+                    if set(metadata) != set(names) or any(not isinstance(value, dict) for value in metadata.values()):
+                        raise BusinessError('DOMAIN_RESULT_INVALID')
+                    for name, state in states.items():
+                        state['metadata'] = _copy(metadata[name])
+                        if isinstance(metadata[name], _MetadataChanges) and metadata[name].facts:
+                            state['metadata_facts'] = _copy(metadata[name].facts)
                 receipt_result = result if receipt_view is None else receipt_view(_copy(result))
                 if type(receipt_result) is not dict:
                     raise BusinessError('DOMAIN_RESULT_INVALID')
@@ -489,6 +511,31 @@ class V13Store:
                 if all(row.get(k) == v for k, v in filters.items())]
         return _page_rows(rows, [str(self.owner_home), self.owner_id, self.subject_id, collection,
                                 revision, filters, rows], cursor=cursor, limit=limit)
+
+
+# LLM: 只在原事务锁内使用；快照保留小型活动元数据，永久完成事实由原journal逐键物化。
+# 类用途: 为元数据回调提供准确事实点查与不可覆盖的本笔事实增量。
+class _MetadataChanges(dict):
+    def __init__(self, current, rows):
+        super().__init__(_copy(current))
+        self.rows, self.facts, self.seen = rows, {}, {}
+
+    # 每个事实在本事务最多点查一次，副本不能篡改已提交事实。
+    def fact(self, key):
+        if key in self.facts:
+            return _copy(self.facts[key])
+        if key not in self.seen:
+            self.seen[key] = self.rows.get('metadata', key)
+        return _copy(self.seen[key])
+
+    def seal_fact(self, key, value):
+        if type(value) is not dict:
+            raise BusinessError('DOMAIN_RESULT_INVALID')
+        previous = self.fact(key)
+        if previous is not None and previous != value:
+            raise BusinessError('STORE_UNAVAILABLE')
+        if previous is None:
+            self.facts[key] = _copy(value)
 
 
 # LLM: scope 只选注册集合的存放 home，不替分片完成记录级授权。

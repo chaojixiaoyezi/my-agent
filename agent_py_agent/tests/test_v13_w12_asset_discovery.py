@@ -118,7 +118,10 @@ def test_assets_list_example_empty_params_unknown_until_first_scan(host, provide
     assert result['assets_upserted'] == 0 and result['complete'] is True
     assert ok(host, 'easm.assets.list') == {'items': [], 'next_cursor': None, 'coverage': 'complete'}
     state = V13Store(host.home_paths.owner_home_dir, owner_id=host.home_paths.owner_id)._read('asset_discovery_assets')
-    assert state['records'] == {} and len(state['receipts']) == 1
+    assert state['records'] == {} and state['receipts'] == {}
+    assert state['metadata'] == {'scan_observed': True, 'pending_scan_refs': []}
+    receipt_dir = host.home_paths.owner_home_dir / 'data/business_v13/history/asset_discovery_assets/receipts'
+    assert len(list(receipt_dir.glob('*.json'))) == 1
     assert {p.name for p in (host.home_paths.owner_home_dir / 'data/business_v13').glob('*.json')} == {
         'asset_discovery_assets.json', 'audit_log.json', '.transaction.json'}
     assert len(provider.calls) == 1
@@ -138,6 +141,71 @@ def test_assets_list_remains_partial_until_scan_complete(host, provider):
     provider.complete = True
     ok(host, 'easm.scan.run', {'targets': ['example.test'], 'resume_ref': first['scan_ref']}, key=idem())
     assert ok(host, 'easm.assets.list')['coverage'] == 'complete'
+
+
+# 空批次也必须在原集合、原journal内保留覆盖事实，不能重扫所有永久回执。
+def test_scan_coverage_tracks_independent_incomplete_scans(host, provider, monkeypatch):
+    scan = provider.scan
+    current = ['scan-a']
+
+    def batch(**kwargs):
+        result = scan(**kwargs)
+        return {**result, 'scan_ref': current[0]}
+
+    monkeypatch.setattr(provider, 'scan', batch)
+    provider.complete = False
+    ok(host, 'easm.scan.run', {'targets': ['example.test']}, key=idem())
+    current[0], provider.complete = 'scan-b', True
+    ok(host, 'easm.scan.run', {'targets': ['example.test']}, key=idem())
+    assert ok(host, 'easm.assets.list')['coverage'] == 'partial'
+    current[0] = 'scan-a'
+    ok(host, 'easm.scan.run', {'targets': ['example.test'], 'resume_ref': 'scan-a'}, key=idem())
+    assert ok(host, 'easm.assets.list')['coverage'] == 'complete'
+    current[0], provider.complete = 'scan-b', False
+    ok(host, 'easm.scan.run', {'targets': ['example.test'], 'resume_ref': 'scan-b'}, key=idem())
+    assert ok(host, 'easm.assets.list')['coverage'] == 'complete'
+    state = V13Store(host.home_paths.owner_home_dir, owner_id=host.home_paths.owner_id)._read('asset_discovery_assets')
+    assert state['metadata'] == {'scan_observed': True, 'pending_scan_refs': []}
+    assert state['records'] == state['receipts'] == {}
+    assert len(provider.calls) == 4
+
+
+@pytest.mark.parametrize('complete', [False, True])
+def test_scan_coverage_survives_committed_journal_recovery(host, provider, monkeypatch, complete):
+    from agent_py_agent.agent.business_spaces import v13_store
+
+    provider.complete = complete
+    context = api.bind_business_context(host, subject_id='alice', authorize=lambda action, facts: True)
+    call = V13Call('easm.scan.run', {'targets': ['example.test']}, 'scan-recovery',
+        host.home_paths.owner_id, 'alice', context, api.BusinessServices(host), host.home_paths.owner_home_dir,
+        idem(), None, host.business_v13_clock)
+    original, interrupted = v13_store.write_bytes_atomic_beneath, []
+
+    def cut(root, parts, raw):
+        if parts[-1] == 'asset_discovery_assets.json' and not interrupted:
+            interrupted.append(True)
+            raise OSError('scan metadata materialization interrupted')
+        return original(root, parts, raw)
+
+    monkeypatch.setattr(v13_store, 'write_bytes_atomic_beneath', cut)
+    with pytest.raises(OSError):
+        module.scan_run(call)
+    store = V13Store(call.owner_home, owner_id=call.owner_id)
+    expected = {'scan_observed': True, 'pending_scan_refs': [] if complete else ['scan-synthetic']}
+    assert store._read('asset_discovery_assets').get('metadata') == expected
+    coverage = 'complete' if complete else 'partial'
+    assert ok(host, 'easm.assets.list')['coverage'] == coverage
+    assert module.scan_run(call)['complete'] is complete
+    assert len(provider.calls) == 1 and store._pending() == {}
+    assert store._read('asset_discovery_assets')['metadata'] == expected
+    assert ok(host, 'easm.assets.list')['coverage'] == coverage
+    paths = list((call.owner_home / 'data/business_v13/history/asset_discovery_assets/metadata').glob('*.json'))
+    assert len(paths) == int(complete)
+    if complete:
+        rows = store._rows('asset_discovery_assets')
+        fact = rows.decode(paths[0].read_bytes(), 'metadata')
+        assert rows.parts('metadata', fact['key'])[-1] == paths[0].name
+        assert rows.get('metadata', fact['key']) == {'scan_ref': 'scan-synthetic', 'complete': True}
 
 
 # LLM: 同笔回放不可重扫，后续批次更新须保留首次发现时间与 ID。

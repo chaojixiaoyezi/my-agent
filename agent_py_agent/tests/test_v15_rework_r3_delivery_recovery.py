@@ -29,6 +29,8 @@ MODULE = 'agent_py_agent.agent.scheduler.alert_topic_anchor_migration'
 # 类用途: 保留测试使用的真实生产上限，不缩小阈值制造回归。
 class _RegressionLimits:
     LIMIT = 16777216
+    LARGE_ROWS = 513
+    ROW_METADATA_BYTES = 32768
 
 
 # LLM: Check declaration placement, not just names, so aliases/expressions cannot bypass the gate.
@@ -52,20 +54,23 @@ def _key(index):
 
 # LLM: Every persisted field and original dispatch is checked after migration.
 # 函数用途: 生成完整的旧版锚点和原始派发键。
-def _row(index):
-    return {'root_message_id': 'om_' + 'r' * 48 + str(index),
+def _row(index, *, metadata_bytes=0):
+    row = {'root_message_id': 'om_' + 'r' * 48 + str(index),
         'thread_id': 'omt_' + 't' * 48 + str(index),
         'state': 'unknown' if index % 2 else 'sent',
         'updated_at': '2026-11-04T18:00:00.000000+00:00'}
+    if metadata_bytes:
+        row['legacy_metadata'] = 'x' * metadata_bytes
+    return row
 
 
 # LLM: Build genuine v1 persisted history; do not simulate active tasks or lower a quota.
 # 函数用途: 写入可以被旧实现正常写出的历史累计账本。
-def _legacy(home, count, *, keys_first=False):
+def _legacy(home, count, *, keys_first=False, metadata_bytes=0):
     path = home / 'data/alert_topic_anchors.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {'schema_version': 'alert_topic_anchors.v1',
-        'anchors': {_key(i): _row(i) for i in range(count)},
+        'anchors': {_key(i): _row(i, metadata_bytes=metadata_bytes) for i in range(count)},
         'root_delivery_keys': {_key(i): f'original-dispatch-{i}' for i in range(count)}}
     if keys_first:
         data = {'root_delivery_keys': data['root_delivery_keys'],
@@ -100,12 +105,12 @@ def _finish(home, *, max_records=256, restart=False):
     pytest.fail('bounded migration did not converge')
 
 
-# LLM: A shared production-sized history avoids rebuilding/migrating 60,000 files per check.
-# 函数用途: 真实迁移超过原读取上限的六万事件账本。
+# LLM: 保留真实16MiB门限及多批迁移，用合法旧元数据增大字节量，避免六万次逐文件提交。
+# 函数用途: 准备超限字节夹具；独立多小记录用例另守记录条数维度。
 @pytest.fixture(scope='module')
 def large_history(tmp_path_factory):
     home = tmp_path_factory.mktemp('f08-over-limit')
-    source = _legacy(home, 60000)
+    source = _legacy(home, _RegressionLimits.LARGE_ROWS, metadata_bytes=_RegressionLimits.ROW_METADATA_BYTES)
     size = source.stat().st_size
     assert _RegressionLimits.LIMIT < size < 100_000_000
     reports = _finish(home)
@@ -117,9 +122,9 @@ def large_history(tmp_path_factory):
 def test_over_limit_history_preserves_proof_and_accepts_new_event(large_history):
     home, size, reports = large_history
     assert size > _RegressionLimits.LIMIT
-    for index in (0, 1, 255, 256, 29999, 59998, 59999):
+    for index in (0, 1, 255, 256, 300, _RegressionLimits.LARGE_ROWS - 2, _RegressionLimits.LARGE_ROWS - 1):
         row, first, dispatch = anchors._reserve_for_delivery(home, _key(index), now='reopen', dispatch_key='retry')
-        assert row == _row(index)
+        assert row == _row(index, metadata_bytes=_RegressionLimits.ROW_METADATA_BYTES)
         assert first is False and dispatch == f'original-dispatch-{index}'
     row, first, dispatch = anchors._reserve_for_delivery(home, _key(70001), now='new', dispatch_key='new-dispatch')
     assert row['state'] == 'pending' and first is True and dispatch == 'new-dispatch'
@@ -127,7 +132,7 @@ def test_over_limit_history_preserves_proof_and_accepts_new_event(large_history)
 
 
 # LLM: Observe actual bounded-reader/writer bytes; ready and exact-key files are the only reads.
-# 函数用途: 对比小历史与六万事件历史的单事件实际读写开销。
+# 函数用途: 对比小历史与真实超限历史的单事件实际读写开销。
 def test_hot_path_io_is_independent_of_history(tmp_path, large_history, monkeypatch):
     small = tmp_path / 'small'
     anchors.reserve(small, _key(999), now='init')
@@ -165,6 +170,17 @@ def test_hot_path_io_is_independent_of_history(tmp_path, large_history, monkeypa
         assert all(parts != ('data', 'alert_topic_anchors.json') for parts, _, _ in reads)
         observed.append((len(reads), len(writes)))
     assert observed[0] == observed[1]
+
+
+def test_many_small_records_migrate_across_multiple_batches(tmp_path):
+    count = 1201
+    _legacy(tmp_path, count)
+    reports = _finish(tmp_path, max_records=256)
+    assert len(reports) > 4
+    for index in range(count):
+        row, first, dispatch = anchors._reserve_for_delivery(tmp_path, _key(index), now='reopen')
+        assert row == _row(index)
+        assert first is False and dispatch == f'original-dispatch-{index}'
 
 
 # LLM: Hold one real write open; a different event must finish before the first is released.
@@ -350,10 +366,16 @@ def test_invalid_legacy_proof_fails_closed(tmp_path, damage):
 def test_new_process_reopens_exact_committed_proof(tmp_path):
     anchors._reserve_for_delivery(tmp_path, _key(5), now='first', dispatch_key='dispatch-original')
     expected = anchors.mark_sent(tmp_path, _key(5), root_message_id='om_confirmed', thread_id='omt_confirmed', now='sent')
-    script = ('import json,sys; from agent_py_agent.agent.scheduler import alert_topic_anchors as a; '
+    checkout = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join((str(checkout), str(checkout / 'agent_py_agent'),
+        env.get('PYTHONPATH', '')))
+    script = ('import json,sys; from pathlib import Path; '
+              'from agent_py_agent.agent.scheduler import alert_topic_anchors as a; '
+              'assert Path(a.__file__).resolve() == Path(sys.argv[3]).resolve(); '
               'print(json.dumps(a._reserve_for_delivery(sys.argv[1],sys.argv[2],now="restart",dispatch_key="retry")))')
-    result = subprocess.run([sys.executable, '-c', script, str(tmp_path), _key(5)],
-        check=True, capture_output=True, text=True, timeout=15)
+    result = subprocess.run([sys.executable, '-c', script, str(tmp_path), _key(5), anchors.__file__],
+        check=True, capture_output=True, text=True, timeout=15, cwd=checkout, env=env)
     assert json.loads(result.stdout) == [expected, False, 'dispatch-original']
 
 
