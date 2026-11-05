@@ -62,13 +62,22 @@ def run_coordinated_gateway(args, *, predecessor_exited: bool) -> int:
 
 
 # LLM: 实际持锁C先以同一冷配置核接班及standalone来源，再建控制面；冻结args为本次副本，不覆盖外部调用者或造Agent接口。
+# LLM: 接班前单独退役已证明死亡的不兼容旧代；拒绝不进入controller、Agent或恢复，不改变旧closure合同。
 # 函数用途: 固定本代控制面与配置，业务factory继续由原P2门决定是否执行。
 def _construct_coordinated_gateway(args, paths) -> int:
+    from ..agent.gateway_parts.multiprocess_generation_retirement import (
+        retire_dead_multiprocess_generations,
+    )
     from ..agent.gateway_parts.multiprocess_takeover_runtime import prepare_coordinator_takeover
     from . import gateway_process as api
     from .gateway_control_plane import build_control_plane
 
     generation = getattr(args, "_gateway_c_run_id", "") or uuid.uuid4().hex
+    try:
+        retire_dead_multiprocess_generations(paths, target_count=args._gateway_worker_count,
+                                           current_c_run_id=generation)
+    except CoordinatorUnavailable as error:
+        return coordinated_refusal("GATEWAY_STANDALONE_SOURCE_UNPROVEN", reason=str(error))
     from .common import agent_configuration
 
     config, _roots = agent_configuration(args)

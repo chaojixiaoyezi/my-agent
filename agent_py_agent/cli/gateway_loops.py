@@ -2560,12 +2560,17 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
         stop_event.wait(max(1, GATEWAY_HEARTBEAT_INTERVAL_SECONDS))
 
 
+# 仅去重本进程观察日志，按根、代次与分区隔离；不提供工作进程存活或执行权限。
+_WORKER_PARTITION_EXIT_LOGGED: set[tuple[str, str, int]] = set()
+
+
 # LLM: 心跳是本代"HTTP 已 bind 并可服务"的发布信号，所以它必须带代际锚点 started_at（语义与 state 的
 #   started_at 相同），否则同 PID 的上一代残留 running 无法被 status_rendering._record_is_current_generation
 #   拒绝，判据只能靠 pid+running 误判就绪。锚点在写入函数内部解析（见 _heartbeat_generation_started_at），
 #   调用方签名与发布顺序都不变：心跳循环照旧只传 status/pid，终止清理心跳也不新增参数。
 #   本函数只写心跳文件，不改state；C允许无业务Agent但必须原lease末门，撤权或替换不能回落裸写。
 #   队列计数复用一次，首次卡死在发布stalled前保全现场；诊断失败不得阻止原lease门写心跳。
+# LLM: worker退出仅消费进程内原observer，按代次单次记录；观察或日志异常走原错误记账，不能阻止心跳发表。
 # 函数用途: 写入一份 Gateway 心跳载荷（含本代 started_at），供外部判活、判就绪与诊断读取。
 def _write_gateway_heartbeat(
     paths: GatewayPaths,
@@ -2588,6 +2593,29 @@ def _write_gateway_heartbeat(
     health = evaluate_dispatcher_stall(loop_health.snapshot(), pending_count=counts.get("pending", 0))
     if loop_health.note_dispatcher_stall(bool(health["dispatcher_stalled"]) and status == "running"):
         _record_dispatcher_stall(paths, agent, health)
+    exited = []
+    try:
+        from .gateway_worker_runtime import _CURRENT_WORKERS, observe_exited_worker_partitions
+
+        exited = list(observe_exited_worker_partitions(paths))
+    except Exception as exc:
+        exited = []
+        _note_loop_tick_error(_LoopSite("heartbeat", "gateway.worker_exit_observation", "heartbeat"),
+                              exc, LoopErrorBackoff())
+    for index in exited:
+        try:
+            workers = _CURRENT_WORKERS.get(str(paths.root))
+            key = (str(paths.root), workers.control.c_run_id, index)
+            if key not in _WORKER_PARTITION_EXIT_LOGGED:
+                process = workers._created_origins[index][1]
+                payload = {"worker": index, "pid": process.pid, "returncode": process.returncode}
+                _WORKER_PARTITION_EXIT_LOGGED.add(key)
+                print(json.dumps({"event": "gateway_worker_partition_exited", **payload}), file=sys.stderr)
+                if agent is not None:
+                    log_gateway_event(agent, "gateway_worker_partition_exited", payload)
+        except Exception as exc:
+            _note_loop_tick_error(_LoopSite("heartbeat", "gateway.worker_exit_log", "heartbeat"),
+                                  exc, LoopErrorBackoff())
     _commit_gateway_heartbeat(
         paths, lease,
         {
@@ -2602,6 +2630,7 @@ def _write_gateway_heartbeat(
             "queue_ages": gateway_queue_ages(paths),
             # 两层限流在飞快照(全局 total + 每用户计数):压测/排障看"谁占着坑"。
             "inflight": admission.snapshot(),
+            "worker_partitions_exited": exited,
             # 派发线程存活与最近一次 tick：有 pending 却没人派发时，先看这里而不是只看 pending 数。
             **health,
         },

@@ -20,6 +20,9 @@ from ..agent.gateway_parts.multiprocess_records import validate_record
 from ..agent.gateway_parts.multiprocess_route import WorkerPartition
 from ..agent.gateway_parts.multiprocess_takeover_runtime import spawn_coordinator_worker
 
+# 仅本进程成功启动的原worker组；不从registry文件重建，不作为业务授权或重生来源。
+_CURRENT_WORKERS: dict[str, "CoordinatorWorkers"] = {}
+
 
 # LLM: 内核出生未知即失败，不回退PID；仅查询本次Popen返回的进程，不枚举其它进程。
 # 函数用途: 为原P4登记生成可验证的真实进程身份。
@@ -32,6 +35,7 @@ def worker_process_identity(pid):
 # 类用途: 管理当前Gateway亲自创建的worker及正常退出等待。
 class CoordinatorWorkers:
     # LLM: 构造纯内存，control/self/PID/出生集合保持；首次start才捕原generation lease，P6只消费实际Popen/waitstatus，不从metadata补历史退出。
+    # LLM: 注册键只在完整start成功时捕获；未启动的空组关闭不能要求paths或产生I/O。
     # 函数用途: 保存本代原worker启动依赖与实际出生/退出观察。
     def __init__(self, control, config_path, http_port):
         self.control, self.config_path, self.http_port = control, config_path, http_port
@@ -41,8 +45,10 @@ class CoordinatorWorkers:
         self._control_origin = control
         self._created_origins = []
         self._generation_source = self._generation_source_origin = None
+        self._registry_key = None
 
     # LLM: 原P2唯一启动门；先核C已解析roots与agent_root再运输原launch，不借home补根；同调用只准原线程一次出生，原对象齐才门外attach。
+    # LLM: 完整start成功后登记进程内原组，仅供心跳共享原退出观察；失败路径不留下观察注册。
     # 函数用途: 启动获准分区并核本次真实出生；失败保原资源，由关闭观察处理，握手不授权W写。
     def start(self):
         from ..agent.gateway_parts.multiprocess_native_runtime import NativeWorkerLane
@@ -118,6 +124,8 @@ class CoordinatorWorkers:
                     raise error
                 for lane, process in created:
                     lane.attach(control, process)
+            self._registry_key = str(control.paths.root)
+            _CURRENT_WORKERS[self._registry_key] = self
             return self
         except BaseException:
             self.close()
@@ -136,8 +144,12 @@ class CoordinatorWorkers:
         return subprocess.Popen(command, stdin=subprocess.DEVNULL, env=worker_environment(launch, dict(os.environ)))
 
     # LLM: 实际observer在reap前核同P4birth/原Popen，cached returncode不能结账；defer_native给P6保端点/树refs，退出不等整树，门外等。
+    # LLM: 关闭先撤本组观察注册，不允许旧组关闭时移除同root的新组。
     # 函数用途: 停止本代worker并保准确内核退出，完整排空前可保留原native来源。
     def close(self, *, defer_native=False):
+        if _CURRENT_WORKERS.get(self._registry_key) is self:
+            _CURRENT_WORKERS.pop(self._registry_key)
+        self._registry_key = None
         if not self.processes:
             if not defer_native:
                 self.close_native()
@@ -168,6 +180,16 @@ class CoordinatorWorkers:
         for lane in self.native_lanes:
             lane.close()
 
+    # LLM: 非阻塞地复用drain同一原observer；不调用Popen.poll或从缓存补物理退出，不改变分区归属或自动重生。
+    # 函数用途: 返回本代已取得准确内核退出事实的worker分区编号。
+    def exited_partitions(self) -> tuple[int, ...]:
+        exited = []
+        for index, (_lane, _process, observation) in enumerate(self._created_origins):
+            observation.observe()
+            if observation.confirmed:
+                exited.append(index)
+        return tuple(exited)
+
     # LLM: 原created/Popen/observer与controller首绑定issuer/P4集合精确一致；只透传同次runtime已核closed_sources作分类，默认空，不改W退出/观察或授信。
     # 函数用途: 用直接W内核退出和完整原持久观察评估每个worker，沿同一分类资料保留旧控制范围。
     def drain_assessments(self, durable, trees, *, closed_sources=()):
@@ -192,3 +214,10 @@ class CoordinatorWorkers:
             items = (*durable_items(scope, durable, closed_sources=closed_sources), InFlightItem('foreground', scope, f'worker/{scope.index}', state))
             results.append(_role_assessment(scope, items, trees))
         return tuple(results)
+
+
+# LLM: 仅查询本进程成功start留下的原组；Count0或组已关闭返回空，不读磁盘、spawn或poll。
+# 函数用途: 为Gateway心跳取得退出分区观察。
+def observe_exited_worker_partitions(paths) -> tuple[int, ...]:
+    workers = _CURRENT_WORKERS.get(str(paths.root))
+    return workers.exited_partitions() if workers is not None else ()

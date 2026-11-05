@@ -1308,6 +1308,7 @@ def _isolate_gateway_package_path() -> None:
 # LLM: 先清外来包根再写托管标记及构造Agent；不纠正已经被上层错误导入的包，子进程另以安全环境阻止cwd抢先。
 #   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
 # 函数用途: 从公开YAML选择拓扑；两种模式均先持同一生命周期锁，再构造业务和启动服务。
+# LLM: Count0在来源门和业务副作用之前退役已证明死亡的MP设施，未知来源仍按原结构码拒绝。
 def cmd_gateway_run(args) -> int:
     _isolate_gateway_package_path()
     from .common import frozen_gateway_arguments
@@ -1331,8 +1332,15 @@ def cmd_gateway_run(args) -> int:
     try:
         paths = _cold_gateway_paths(args)
         with standalone_lifecycle_guard(paths.root) as lifecycle:
+            from ..agent.gateway_parts.multiprocess_generation_retirement import (
+                retire_dead_multiprocess_generations,
+            )
             from ..agent.gateway_parts.standalone_sources import require_standalone_sources
 
+            retired = retire_dead_multiprocess_generations(paths, target_count=0, lifecycle=lifecycle)
+            if retired is not None:
+                print("[gateway-run] retired multiprocess generation(s) "
+                      + ", ".join(row["c_run_id"] for row in retired["generations"]), file=sys.stderr)
             require_standalone_sources(paths, lifecycle)
             return _run_standalone_gateway(args, lifecycle)
     except StandaloneLifecycleUnavailable as exc:
