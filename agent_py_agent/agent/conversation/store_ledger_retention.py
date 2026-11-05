@@ -549,7 +549,8 @@ def _journal_batch(home, cursor, result, limit, budget):
                     deferred = "budget"
                 break
             if not raw.endswith(b"\n"):
-                deferred = "journal_partial"
+                result["protected"]["journal_partial"] += 1
+                complete = True
                 break
             if budget.remaining_ms() <= 0:
                 deferred = "budget"

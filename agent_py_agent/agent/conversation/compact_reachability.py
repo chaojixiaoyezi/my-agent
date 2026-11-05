@@ -322,7 +322,7 @@ def _latest_retirement(work, row, next_offset, cursor):
         page = _journal_page(work, offset)
         work.items += 1
         if not page.rows or page.next_offset <= offset:
-            return "unknown", None
+            return ("undecidable" if page.next_offset > offset else "unknown"), None
         if any(later.get("thread_id") == row["thread_id"] for later in page.rows):
             work.retired_probe = None
             return "superseded", None
@@ -528,6 +528,10 @@ def _retired_slice(work, root, cursor):
         if not page.rows:
             if page.complete and page.next_offset == cursor["journal_offset"]:
                 return True, ""
+            if page.next_offset > cursor["journal_offset"]:
+                work.skip("retired_thread_malformed")
+                cursor["journal_offset"] = page.next_offset
+                continue
             work.skip("retired_thread_unknown")
             work.error("retired_thread_state_unknown", "data/retention/retired_threads.jsonl")
             cursor.update(phase="live", after="")
@@ -547,9 +551,17 @@ def _retired_slice(work, root, cursor):
             latest, proof = _latest_retirement(work, row, page.next_offset, cursor)
             if latest == "pending":
                 return False, "budget_exhausted" if work.exhausted() else "retired_journal_changed"
-            if latest == "unknown":
+            if latest == "undecidable":
+                work.skip("retired_thread_undecidable")
                 work.error("retired_thread_state_unknown", "data/retention/retired_threads.jsonl")
-                return False, "retired_thread_unknown"
+                cursor["journal_offset"] = page.next_offset
+                work.retired_probe = None
+                continue
+            if latest == "unknown":
+                work.skip("retired_thread_unknown")
+                work.error("retired_thread_state_unknown", "data/retention/retired_threads.jsonl")
+                cursor.update(phase="live", after="")
+                return True, "retired_thread_unknown"
             if latest == "superseded":
                 work.skip("superseded_retirement")
                 cursor["journal_offset"] = page.next_offset
