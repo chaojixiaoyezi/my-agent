@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
 from ..common.nofollow_fs import _supports_dir_fd, read_bytes_beneath
+from ..plugin_host.errors import HostAPIError
 from . import (
     MAX_ASSET_BYTES,
     _AssetStore,
@@ -28,6 +29,33 @@ WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid",
                        "condition_branch", "approval_wait", "notification", "script", "agent_task")
 WORKFLOW_ON_ERROR_POLICIES = ("escalate_to_agent", "fail", "skip")
 BUSINESS_WORKFLOW_METADATA = 'business_workflow'
+
+
+# LLM: 纯验证错误复用原宿主信封；not_started只表示本次拒绝，不否定旧运行的既有任务责任。
+# 类用途: 为不支持的异步批处理提供稳定错误码和安全步骤定位。
+class WorkflowForeachAgentTaskUnsupported(HostAPIError):
+    # LLM: 只保存结构化step_id，不读取存储或修改原执行状态。
+    # 函数用途: 构造提交或执行前的资格拒绝。
+    def __init__(self, step_id):
+        super().__init__('WORKFLOW_FOREACH_AGENT_TASK_UNSUPPORTED', message='agent_task暂不支持foreach批处理')
+        self.error_code = self.code
+        self.details = {'step_id': step_id, 'mode': 'agent_task'}
+
+
+# LLM: 只检查当前步骤的模式组合，不改变共享codec，历史定义及取消/对账身份仍可解码。
+# 函数用途: 在写入或执行前拒绝尚无异步完成语义的批节点。
+def validate_step_eligibility(step):
+    spec = step.to_dict() if isinstance(step, WorkflowStepSpec) else step
+    if spec.get('mode') == 'agent_task' and spec.get('foreach') is not None:
+        raise WorkflowForeachAgentTaskUnsupported(spec['step_id'])
+
+
+# LLM: 遍历仅限本次冻结定义，不查任务历史，不写状态；控制操作不调用新内容资格门。
+# 函数用途: 为定义写入口与引擎提供同一套有界准入校验。
+def validate_definition_eligibility(definition):
+    steps = definition.steps if isinstance(definition, WorkflowDefinition) else definition['steps']
+    for step in steps:
+        validate_step_eligibility(step)
 
 
 # LLM: 只在工作流本地投影排除画布展示字段；不修改共享描述符，不改变任何执行字段或旧hash。
@@ -262,6 +290,7 @@ class WorkflowStore(_AssetStore):
         with target._locked():
             old = target._get(definition.descriptor.id)
             next_asset_revision(old.descriptor.to_dict() if old else None, expected_revision)
+            validate_definition_eligibility(definition)
             # 普通正文编辑不能借 metadata 改宿主范围、治理或操作回执。
             metadata = dict(definition.descriptor.metadata)
             for key in ('hidden', 'composition'):
@@ -316,6 +345,8 @@ class WorkflowStore(_AssetStore):
                 if type(expected_revision) is not int or expected_revision != actual:
                     raise ValueError(f'REVISION_CONFLICT: expected={expected_revision}, actual={actual}')
             updated, result = transform(previous)
+            if action in ('workflows.create', 'workflows.update'):
+                validate_definition_eligibility(updated)
             next_revision = next_asset_revision(previous.descriptor.to_dict() if previous else None)
             # transform 用下个正式 revision 形成回执；读回 ACK 失败仍沿同键重放，不重复正文写。
             result = json.loads(json.dumps(result, allow_nan=False))
