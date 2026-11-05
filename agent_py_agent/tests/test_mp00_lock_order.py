@@ -1,6 +1,7 @@
 """MP-00：真实文件锁交错、有界 HTTP 出生和原 closeout 的重试契约。"""
 from __future__ import annotations
 
+import ast
 import gc
 import socket
 import threading
@@ -8,6 +9,7 @@ import time
 import weakref
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -308,3 +310,100 @@ def test_http_birth_timed_path_revalidates_and_releases_on_body_error(monkeypatc
     assert checks == [{"control": "control", "paths": "paths"}]
     assert not any(gate._is_owned() for gate in (runtime.controller._mutex,
                    runtime._lease_origin._lifecycle_gate, runtime._gate))
+
+
+def _assert_creation_guard_first(relative_path, function_name, protected):
+    source = (Path(__file__).resolve().parents[1] / "agent" / relative_path).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    matches = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+               and node.name == function_name]
+    assert len(matches) == 1
+    function = matches[0]
+    # session_task_stop 保留原可选 guard()/nullcontext()；解析真实别名，不靠函数名白名单豁免。
+    aliases = {target.id for node in ast.walk(function) if isinstance(node, ast.Assign)
+               and isinstance(node.value, ast.Call) and ast.unparse(node.value.func) == "getattr"
+               and len(node.value.args) > 1 and isinstance(node.value.args[1], ast.Constant)
+               and node.value.args[1].value == "creation_guard"
+               for target in node.targets if isinstance(target, ast.Name)}
+
+    def creation(expression):
+        return any(isinstance(node, ast.Call) and ("creation_guard" in ast.unparse(node.func)
+                   or isinstance(node.func, ast.Name) and node.func.id in aliases)
+                   for node in ast.walk(expression))
+
+    positions = []
+    for node in sorted((node for node in ast.walk(function) if isinstance(node, ast.With)),
+                       key=lambda node: node.lineno):
+        for index, item in enumerate(node.items):
+            text = ast.unparse(item.context_expr)
+            if creation(item.context_expr):
+                positions.append((node.lineno, index, "creation"))
+            elif any(name in text for name in protected):
+                positions.append((node.lineno, index, "protected"))
+    assert positions and positions[0][2] == "creation", (function_name, positions)
+    assert any(row[2] == "protected" for row in positions)
+
+    # 不仅检查文本先后：每个受保护的 with 都必须实际处于外层 CG 的作用域。
+    def check_scope(node, depth):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if creation(item.context_expr):
+                    depth += 1
+                elif any(name in ast.unparse(item.context_expr) for name in protected):
+                    assert depth, (function_name, node.lineno, ast.unparse(item.context_expr))
+        for child in ast.iter_child_nodes(node):
+            check_scope(child, depth)
+
+    check_scope(function, 0)
+
+
+@pytest.mark.parametrize("relative_path,function_name", [
+    ("gateway_parts/control_service.py", "_stop_unpromoted_main"),
+    ("gateway_parts/control_service.py", "_prepare_main_task_stop"),
+    ("gateway_parts/session_task_stop.py", "stop_business_session_task"),
+    ("scheduler/control.py", "cancel_scheduled_task"),
+])
+def test_stop_paths_take_creation_guard_first(relative_path, function_name):
+    _assert_creation_guard_first(relative_path, function_name,
+        ("transition_guard", "background_stop_guard", "locked_file_transition"))
+
+
+@pytest.mark.parametrize("relative_path,function_name", [
+    ("subagents/services/base.py", "create_run"),
+    ("subagents/services/lifecycle_runner_attempts.py", "prepare_runner_attempt"),
+    ("subagents/services/lifecycle_runner_attempts.py", "abandon_runner_attempt"),
+])
+def test_transaction_owners_take_creation_guard_first(relative_path, function_name):
+    _assert_creation_guard_first(relative_path, function_name, ("gateway_short_transaction",))
+
+
+@pytest.mark.parametrize("guard_available", [False, True])
+def test_business_stop_optional_creation_guard_precedes_task_guard(monkeypatch, guard_available):
+    from agent_py_agent.agent.gateway_parts import session_task_stop
+
+    events = []
+    stop = ValueError("已进入原 task guard，结束探针")
+
+    @contextmanager
+    def task_guard(_task_id):
+        events.append("task")
+        raise stop
+        yield
+
+    @contextmanager
+    def creation_guard():
+        events.append("creation")
+        yield
+
+    task = SimpleNamespace(target_thread_id="thread")
+    subagents = SimpleNamespace()
+    if guard_available:
+        subagents.creation_guard = creation_guard
+    agent = SimpleNamespace(subagents=subagents,
+        conversation_store=SimpleNamespace(tasks=SimpleNamespace(transition_guard=task_guard)))
+    monkeypatch.setattr(session_task_stop, "_business_stop_target",
+        lambda *_args: (None, task, None, "root", None, None, False))
+    with pytest.raises(ValueError) as caught:
+        session_task_stop.stop_business_session_task(agent, task)
+    assert caught.value is stop
+    assert events == (["creation", "task"] if guard_available else ["task"])

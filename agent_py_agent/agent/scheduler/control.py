@@ -92,7 +92,7 @@ def takeover_notifications(agent, repository, job_id, expected_version, actor):
     return repository.update_notification_binding(job_id, binding, expected_version=expected_version)
 
 
-# LLM: 原 task 锁及 child creation 锁内关闭 RuntimeDB 权限和输入、固定整树资源；claim 留给原执行者收口，绝不按名称杀进程。
+# LLM: 先 CG 再 Goal/task guard（MP-00），内层 CG 重入；锁内关闭原 RuntimeDB 权限和输入、固定整树资源，claim 留给原执行者收口。
 # 函数用途: 请求停止准确定时主根及孩子，并报告已确认与仍待收口的区别。
 def cancel_scheduled_task(agent, repository, run):
     from ..concurrency.interrupt import interrupt_by_name
@@ -110,7 +110,8 @@ def cancel_scheduled_task(agent, repository, run):
     try:
         if run.get('owner') != repository.owner:
             raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
-        with store.goals.transition_guard(thread_id), store.tasks.transition_guard(task_id):
+        with (agent.subagents.creation_guard(), store.goals.transition_guard(thread_id),
+              store.tasks.transition_guard(task_id)):
             current = repository.get_active_run(task_id)
             if current is None:
                 job = repository.get_job(run['job_id'], include_deleted=True)

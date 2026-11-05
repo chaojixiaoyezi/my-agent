@@ -2496,7 +2496,7 @@ def _stop_live_window_request(
     )
 
 
-# LLM: 释放 T 后只用冻结四元组；task guard 内再次排除已晋升任务及 Goal，未知不能降级为空，也不能猜线程。
+# LLM: 释放 T 后只用冻结四元组；先 CG 再 task guard（MP-00），内层 CG 重入；再次排除已晋升任务及 Goal，未知不能降级为空。
 # 函数用途: 为尚未晋升持久任务的请求关闭实际主执行权并冻结资源，清理失败与中断受理分别汇报。
 def _stop_unpromoted_main(
     owner_agent: object,
@@ -2510,7 +2510,8 @@ def _stop_unpromoted_main(
         if owner_agent is None or binding_error or not binding or _linked_conversation_task_id(active):
             raise ValueError("本请求缺少可确认的主执行身份")
         store = owner_agent.conversation_store
-        with store.tasks.transition_guard(binding["task_id"]), owner_agent.subagents.creation_guard():
+        with (owner_agent.subagents.creation_guard(), store.tasks.transition_guard(binding["task_id"]),
+              owner_agent.subagents.creation_guard()):
             from ..conversation.task_resources import (
                 close_main_task_authority,
                 freeze_task_resources,
@@ -2740,7 +2741,7 @@ def _continue_goal_after_turn_interrupt(
         return True
 
 
-# LLM: 后台 Goal→task→claim 内使用 core 原绑定，不回读旧运输 T；前台沿原请求代次核对，进入 creation 后冻结树。
+# LLM: 先 CG 再 Goal→task→claim（MP-00），内层 CG 重入；后台使用 core 原绑定不回读旧运输 T，前台沿原请求代次核对后冻结树。
 # 同id晋升且未回填的明确stop收为cancelled（包括索引修复），原中断/其他任务路径保留原合同。
 # 函数用途: 精确关闭主任务并取消其必要输入，再固定原资源清单；输入回收失败保留未确认事实。
 def _prepare_main_task_stop(
@@ -2755,7 +2756,7 @@ def _prepare_main_task_stop(
     ).strip().lower()
     thread_id = str(active.payload.get("conversation_thread_id") or "")
     preparation_errors = []
-    with store.goals.transition_guard(thread_id):
+    with owner_agent.subagents.creation_guard(), store.goals.transition_guard(thread_id):
         with store.tasks.transition_guard(task_id), background_stop_guard(store, scope) as matches:
             if not matches:
                 return _MainTaskStop()
