@@ -9,7 +9,7 @@
 
 [![Test](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/test.yml)
 [![Lint](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml/badge.svg)](https://github.com/chaojixiaoyezi/my-agent/actions/workflows/lint.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: Proprietary](https://img.shields.io/badge/license-Proprietary%20(All%20Rights%20Reserved)-red.svg)](LICENSE)
 
 - 主链路只用 Python 标准库，Python 3.10+，macOS / Linux / Windows 都能装。
 - 模型、密钥、权限都在 TUI 里配置，或者直接对代理说一句让它自己配；软件不预选任何模型。
@@ -325,4 +325,4 @@ python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q # 架�
 
 ## 许可
 
-Copyright 2026 超级小叶子 (chaojixiaoyezi)。代码按 [Apache License 2.0](LICENSE) 发布。随包提供的 bubblewrap 沙箱二进制保留其自身许可、源码归档与来源说明，见 [NOTICE](NOTICE) 与 `agent_py_agent/vendor/bubblewrap/`。
+Copyright 2026 超级小叶子 (chaojixiaoyezi)。All Rights Reserved（保留所有权利，详见 [LICENSE](LICENSE)）。随包提供的 bubblewrap 沙箱二进制保留其自身许可、源码归档与来源说明，见 [NOTICE](NOTICE) 与 `agent_py_agent/vendor/bubblewrap/`。
