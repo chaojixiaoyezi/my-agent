@@ -403,7 +403,7 @@ def test_b2_r3_local_event_ordinary_error_is_isolated(tmp_path, monkeypatch, sta
 # 函数用途: 验证实际后台来源能裁剪默认workspace库，SQL在原短门、JSONL读与锁等待在原短门外。
 def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path, monkeypatch):
     import sqlite3
-    from contextlib import contextmanager
+    from contextlib import closing, contextmanager
 
     from agent_py_agent.agent.common.request_execution_ports import (
         RequestExecutionOutcomeUncertainError,
@@ -411,7 +411,8 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
     from agent_py_agent.agent.gateway_parts.multiprocess_background_execution import (
         require_background_transaction,
     )
-    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.local_storage import LocalStore, maintenance
+    from agent_py_agent.agent.local_storage.maintenance import STEADY_STATE_EVENTS_KEEP_LAST
     from agent_py_agent.tests.test_gateway_background_curator_transactions import (
         curator_case,
         run_original,
@@ -425,7 +426,9 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
         original_open, original_connect = Path.open, sqlite3.connect
         original_lock = LocalStore._coordinator_events_lock
         original_maintain = LocalStore.maintain_events
+        original_lane = maintenance.maintain_local_events_lane
         maintaining = []
+        lane_counts = []
         observed = set()
         # LLM: 只观察维护阶段对同一JSONL的读取；正常审计追加仍须在写门内。
         # 函数用途: 核对真实文件读取没有占用后台短事务。
@@ -459,18 +462,33 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
                 return original_maintain(actual, **kwargs)
             finally:
                 maintaining.pop()
+
+        # LLM: 真实W6 lane返回时只读采样；后续响应收尾还会追加审计事件，不是该lane的保留结果。
+        # 函数用途: 在准确维护边界记录同一SQL快照，不替换维护实现或修改事件数据。
+        def maintain_lane(request):
+            result = original_lane(request)
+            with closing(original_connect(store.db_path.as_uri() + "?mode=ro", uri=True)) as conn:
+                lane_counts.append(conn.execute(
+                    "SELECT COUNT(*), SUM(event_type!='old'), SUM(event_type='old') FROM events").fetchone())
+            return result
+
         with monkeypatch.context() as patch:
             patch.setattr(Path, "open", opened)
             patch.setattr(sqlite3, "connect", connect)
             patch.setattr(LocalStore, "_coordinator_events_lock", event_lock)
             patch.setattr(LocalStore, "maintain_events", maintain)
+            patch.setattr(maintenance, "maintain_local_events_lane", maintain_lane)
             response = run_original(agent, gate, claim)
         marker = json.loads((agent.home_paths.owner_data_dir / "maintenance.json").read_text())
         assert response["ok"] is True
         assert marker.get("local_store_events_maintenance", {}).get("deleted_db") == 5000
         assert observed == {"sql", "lock", "read"}
-        with original_connect(store.db_path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM events WHERE event_type='old'").fetchone()[0] == 20005
+        assert len(lane_counts) == 1
+        total, non_old, old = lane_counts[0]
+        assert total == STEADY_STATE_EVENTS_KEEP_LAST
+        assert non_old == 2 and old == total - non_old
+        with closing(original_connect(store.db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM events WHERE event_type='old'").fetchone()[0] == old
 
 
 # LLM: R8-MAINT-01：多进程Coordinator发现层必须识别已提交partial与有限配额待续作账本，且稍晚于24小时的日调度不得令活跃配额游标过期重开。

@@ -266,10 +266,12 @@ def test_ledger_gc_wired_into_scheduler_tick(tmp_path):
 def test_gc_stale_ledger_records_cleans_orphan_lock_sidecars(tmp_path):
     """gc_stale_ledger_records 同步清理会话唤醒/策略/租约目录下超 24h 的孤儿 .lock 文件。"""
     import os
+    import time
 
     agent, _thread_id = _agent_with_thread(tmp_path)
     store = agent.conversation_store
-    now = 1_800_000_000.0
+    # 夹具新锁不因固定未来时钟被误判过期；仅显式回拨的两个孤儿锁满24h。
+    now = time.time()
     urgent_dir = store.storage.wake_queue_dir / "urgent"
     handled_dir = store.storage.wake_handled_dir
     dedupe_dir = store.storage.wake_dedupe_dir
