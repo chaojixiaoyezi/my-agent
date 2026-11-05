@@ -62,6 +62,8 @@ for line in sys.stdin:
 '''
 
 
+# LLM: 测试安装与激活仍经真实 Store；仅 W1 旧 API 适配摘要，W2 原生校验不能被补丁覆盖。
+# 函数用途: 准备兼容 W1 和 W2 激活接口的测试能力包。
 def staged_pack(tmp_path, *, name="lazy-pack", tools=1, pinned=False, actual=None, owner=None, prepare=True):
     """安装与 preparing/active 使用真实 Store；只装配准备操作接口，不伪造安装表 JSON。"""
     owner = owner or resolve_owner_home(tmp_path / "home")
@@ -101,8 +103,11 @@ def staged_pack(tmp_path, *, name="lazy-pack", tools=1, pinned=False, actual=Non
         activation = replace(activation, phase="active", catalog_sha256=activation_catalog_digest(entry.manifest, activation))
     if pinned:
         from agent_py_agent.agent import plugin_activation
-        # W1 基线尚无 W2 的 pin 发布转换；只适配该验证函数，真实记录仍经原 Store 写入。
-        with patch.object(plugin_activation, "plugin_catalog_digest", side_effect=lambda manifest: activation.catalog_sha256):
+        # 仅 W1 旧 API 需要摘要适配；W2 已原生支持固定目录的发布转换。
+        if hasattr(plugin_activation, "plugin_catalog_digest"):
+            with patch.object(plugin_activation, "plugin_catalog_digest", side_effect=lambda manifest: activation.catalog_sha256):
+                entry = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, activation)).installation
+        else:
             entry = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, activation)).installation
     else:
         entry = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, activation)).installation
