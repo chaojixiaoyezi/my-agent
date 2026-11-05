@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from ..capability_package_manifest import PACK_MCP_CONFIRMATION_KIND
 from ..capability_verifier_consent import CONSENT_KIND as VERIFIER_CONSENT_KIND
 from .learnpack_store import BuildRecord
 
@@ -142,6 +143,9 @@ def _confirmation(result: dict) -> dict | None:
 # 函数用途: 判断一份启用预览能不能由宿主代用户确认。
 def auto_confirmable(confirmation: dict) -> bool:
     kind = confirmation.get("kind")
+    if kind == PACK_MCP_CONFIRMATION_KIND:
+        # MCP 是通用程序执行权，自动装和 run_programs 都不能代用户确认。
+        return False
     if kind == VERIFIER_CONSENT_KIND:
         return True
     if kind != _LEGACY_PERMISSION_KIND or confirmation.get("mode") != "restricted":
@@ -172,6 +176,8 @@ def _host_request_id(confirmation: dict) -> str:
 #   让用户在自己的会话里拿到完整预览再确认（复审 S4）。检查程序确认码与会话无关，照给。纯函数。
 # 函数用途: 生成停在确认时交给用户的那一行。
 def _user_command(package_id: str, confirmation: dict, consent: InstallConsent) -> str:
+    if confirmation.get("kind") == PACK_MCP_CONFIRMATION_KIND:
+        return f"/plugins#{package_id} 启用 {confirmation['confirm_code']}"
     if consent.user_session or confirmation.get("kind") == VERIFIER_CONSENT_KIND:
         return _confirm_command(package_id, confirmation)
     return f"/plugins enable {package_id}"
@@ -180,6 +186,11 @@ def _user_command(package_id: str, confirmation: dict, consent: InstallConsent) 
 # LLM: 按预览类型说清为什么要用户自己确认；不解析预览文字。label 是宿主给的版本说法。纯函数。
 # 函数用途: 停在确认时给人看的一句话。
 def _needs_user_message(confirmation: dict, label: str) -> str:
+    if confirmation.get("kind") == PACK_MCP_CONFIRMATION_KIND:
+        entry = confirmation.get("entry", {})
+        program = " ".join(str(entry.get(key) or "") for key in ("interpreter", "command")).strip()
+        return (f"已装上 {label}；会运行 MCP 程序 {program}，联网：{'是' if confirmation.get('network') else '否'}。"
+                "程序执行权必须由你本人核对预览后确认，自动装开关不能代替；请自己发送下面这一行。")
     if confirmation.get("kind") == VERIFIER_CONSENT_KIND:
         return f"已装上 {label}，启用前要你确认它会运行的检查程序；核对后把下面这一行发给我。"
     return (f"已装上 {label}，但启用要你自己确认（它会运行程序，可能还要联网、读写别的目录或不受限运行）；"

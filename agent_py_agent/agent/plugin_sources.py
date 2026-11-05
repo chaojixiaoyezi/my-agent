@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from .common.nofollow_fs import read_bytes_beneath
@@ -64,3 +65,37 @@ def read_plugin_source(source: str, workspace: Path, policy: PathAccessPolicy, *
     if content is None:
         raise PluginSourceError("not_found", f"插件来源不存在：{source}。", source=source, base=workspace)
     return content
+
+
+# LLM: install/update 仅用它选择目录分支；lstat 不跟随来源链接，不作授权判断。
+# 函数用途: 看来源本身是不是目录，其它形状仍交原文件读取口。
+def plugin_source_is_directory(source: str, workspace: Path) -> bool:
+    """仅 lstat 判断目录分支，不跟随来源链接；其它形状仍交原文件错误合同处理。"""
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = workspace / path
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+# LLM: 复用原来源基准、严格解析和路径策略；返回已授权目录，不遍历、不执行、不写入。
+# 函数用途: 为外来插件目录导入取得合法来源地址。
+def open_plugin_source_directory(source: str, workspace: Path, policy: PathAccessPolicy) -> Path:
+    """按原文件来源的基准与策略解析目录；仅返回路径，不遍历、不保存或执行。"""
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = workspace / path
+    if path.is_symlink():
+        raise PluginSourceError("symlink", "插件来源不能是链接。", source=source, base=workspace)
+    try:
+        path = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise PluginSourceError("not_found", "插件目录来源不存在。", source=source, base=workspace) from exc
+    if not policy.check(path).allowed:
+        details = {"allowed_root": str(policy.owner_scope_root or ""), "source_base": str(workspace)}
+        raise PluginSourceError("unauthorized", source_unauthorized_message(details), source=source, base=workspace)
+    if not path.is_dir():
+        raise PluginSourceError("not_found", "插件来源不是目录。", source=source, base=workspace)
+    return path

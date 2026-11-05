@@ -33,13 +33,13 @@ tools_required: [skill_search, read_file, list_files]
 
 ## 仅在分发或安装时进入能力包流程
 
-1. **确认范围**：在此分支内，领域方法默认做能力包；离线自带的小工具可放 `tools/` 或 `checks/`。只有确需联网、账号或常驻服务的运行能力才考虑插件，并遵循 `write-my-agent-plugin` 的当前合同，不自行扩大授权。
+1. **确认范围**：在此分支内，领域方法默认做能力包；离线资料脚本可放 `tools/` 或 `checks/`。来源自带的 MCP 服务器，或值得封装成 MCP 的核心工具脚本，可与方法放进同一个能力包：`mcp_servers` 只声明一个服务，文件放 `mcp/<server>/`；联网必须显式声明并由用户启用确认。需要多服务、独立后台或私有账号配置时才另考虑插件，并遵循 `write-my-agent-plugin` 的当前合同，不自行扩大授权。
 2. **查同领域**：写包之前用 `skill_search` 查已有包；只能并入 `made_by_me=true` 的包。发现同领域对象时，先问用户并入还是独立成包，回答不等于安装确认。出现 `PACKAGE_BUILD_SAME_DOMAIN` 也先处理该选择，见[合并](references/merge.md)。
-3. **写包**：目录在授权任务工作区，结构见[包的结构](references/pack-layout.md)。入口 `CAPABILITY.md` 写适用与不适用场景、用法和方法目录；`PROVENANCE.md` 写来源、提交号、许可证和改动。原始 LICENSE 随许可要求保留，不放密钥、口令或个人信息。
+3. **写包**：目录在授权任务工作区，结构见[包的结构](references/pack-layout.md)。入口 `CAPABILITY.md` 写适用与不适用场景、用法和方法目录；`PROVENANCE.md` 写来源、提交号、许可证和改动。原始 LICENSE 随许可要求保留，不放密钥、口令或个人信息。已存在的 Claude 插件目录走零改写导入：交管理员用 `/plugins install <目录>`，不重写成另一套包；根配置是 `.mcp.json`，不是 `mcp.json`。自行整理的工具走 Track 2，把真正实现 stdio MCP 协议的服务放进 `mcp/<server>/`，普通脚本不能只改文件名就冒充 MCP。
 4. **声明语言**：写 `declaration` 时，`summary`、`capability.description`、`capability.keywords` 都用你和用户对话时用的语言写；原项目是另一种语言时两种都写（如中文说明、中英文关键词），使目录展示和关键词推荐匹配用户的说法。关键词用真实领域短词，避免各领域通用词和易误推荐的厂商、模型、脚本名称。
-5. **构建**：仅在已授权分发范围内调用 `package_build`，使用真实文件回执里的 `source_dir`，填写 `kind`、`declaration`、`origin`、`license`。版本只用字母、数字和 `.+-_`；声明文字、来源、许可证用单行。按错误和 warnings 修正，不绕过校验；`PACKAGE_BUILD_KEYWORDS_SCRIPT` 要补用户语言的领域关键词。
+5. **构建**：仅在已授权分发范围内调用 `package_build`，使用真实文件回执里的 `source_dir`，填写 `kind`、`declaration`、`origin`、`license`。可选的 `mcp_servers` 只收一个服务：声明 name、root、entry（command 相对 root）、platforms、permissions.network、tool_catalog（declared 或 pinned_on_enable）与 tools；只用随包代码，不用 npx/uvx 下载启动器，执行位只按 entry 声明。没有 MCP 声明时仍是 v7。版本只用字母、数字和 `.+-_`；声明文字、来源、许可证用单行。按错误和 warnings 修正，不绕过校验；`PACKAGE_BUILD_KEYWORDS_SCRIPT` 要补用户语言的领域关键词。
 6. **安装**：只有请求同时授权安装时才调用 `package_install`，传本次构建回执的 `sha256`。这是工具调用，不是让用户敲的命令。`user_notice` 原样告知；`host_notice_queued=true` 表示宿主将展示安装提示。
-7. **确认**：照回执原文提醒用户，只使用本次回执给出的 `user_confirm_command`、`open_orders`，不复用旧行，不凭记忆判断开关，不替用户执行任何确认命令。说明命令用途与撤回方式，见[提醒用户](references/tell-the-user.md)。
+7. **确认**：照回执原文提醒用户，只使用本次回执给出的 `user_confirm_command`、`open_orders`、`next_command`，不复用旧行，不凭记忆判断开关，不替用户执行任何确认命令。带 MCP 的包即使自动装开着也必须停在启用预览，用户在自己的会话核对程序、摘要和联网需求后，亲自发送 `/plugins#<包名> 启用 <确认码>`；不得代发或让子代理代发。说明命令用途与撤回方式，见[提醒用户](references/tell-the-user.md)。
 
 不自行安装外部现成包或改开关；外部包由管理员走 `/plugins install`，开关由管理员用 `/settings` 改。文案、包构建或安装回执均不代替原生业务链路验收。
 
