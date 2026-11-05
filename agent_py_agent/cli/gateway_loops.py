@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -77,7 +78,11 @@ from ..agent.settings.thread_model_selection import (
     thread_model_fingerprint,
     thread_model_is_configured,
 )
-from ..agent.user_space.owner_maintenance import OwnerMaintenanceResult, run_owner_retention_if_due
+from ..agent.user_space.owner_maintenance import (
+    OwnerMaintenanceResult,
+    owner_maintenance_due,
+    run_owner_retention_if_due,
+)
 from ..agent.user_space.owner_resolver import (
     OwnerIdentity,
     home_paths_with_owner,
@@ -1971,6 +1976,16 @@ def _submit_due_curators(
     return index
 
 
+# 单进程 owner 维护每拍最多使用的单调时钟秒数。
+_OWNER_MAINTENANCE_TICK_BUDGET_SECONDS = 20.0
+# 单进程 owner 维护每页发现的 owner 数。
+_OWNER_MAINTENANCE_PAGE_OWNERS_COUNT = 4
+# 单进程 owner 维护每拍最多翻的页数。
+_OWNER_MAINTENANCE_MAX_PAGES_COUNT = 256
+# 优先续作队列最多记住的 owner 数。
+_OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT = 64
+
+
 # LLM: 只推迟非紧急retention/闲置压缩；安全清理在保护期照跑，原分页与owner边界保持，不创建冷Agent。
 # 类用途: 分页维护磁盘保留和空闲会话压缩，沿原安全清理及已加载执行器范围运行。
 class _GatewayOwnerMaintenanceController:
@@ -1983,6 +1998,7 @@ class _GatewayOwnerMaintenanceController:
         self._base_agent = _gateway_agent_from_context(context)
         self._base_home = getattr(self._base_agent, "home_paths", None)
         self._cursor: OwnerWakeCursor | None = None
+        self._priority: OrderedDict[tuple, object] = OrderedDict()
         self._idle_compact_cursor: dict = {}
         self.interval = max(
             0.0,
@@ -2001,9 +2017,9 @@ class _GatewayOwnerMaintenanceController:
             _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
         )
 
-    # LLM: 每拍先跑基础 owner，再按分页游标跑一页 scoped owner，只做到期维护、不构造 owner agent；
+    # LLM: 每拍先跑基础 owner 与原闲置压缩，再在期限和页数内优先续作及分页；同拍去重、不构造 owner agent。
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘。
-    # 函数用途: 保护期后跑原retention分页及最多两条闲置会话，不推迟租约及未知结果恢复。
+    # 函数用途: 保护期后有界追赶 owner 维护，保留原摘要与安全清理。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         _cleanup_loaded_runtime_safety(self._base_agent)
         if _startup_grace_active(self):
@@ -2018,27 +2034,32 @@ class _GatewayOwnerMaintenanceController:
             "owner_agent_pool_max_agents",
             default=64,
         )
-        page = discover_owner_home_page(
-            self._base_home.owners_dir,
-            limit=min(limit, 4),
-            after_cursor=self._cursor,
-        )
-        self._cursor = page.next_cursor
-        for target in page.targets:
-            owner = resolve_owner_home(self._base_home.root, target.identity)
-            scoped_home = home_paths_with_owner(self._base_home, owner)
-            try:
-                reports.append(run_owner_retention_if_due(scoped_home, now=current))
-            except Exception as exc:
-                label = "/".join(
-                    (
-                        target.identity.provider,
-                        target.identity.owner_kind,
-                        target.identity.owner_id,
-                    )
-                )
-                _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)
-        summary = _maintenance_summary(reports, page.scanned)
+        deadline = time.monotonic() + _OWNER_MAINTENANCE_TICK_BUDGET_SECONDS
+        visited, scanned = set(), 0
+        for key, identity in list(self._priority.items()):
+            if time.monotonic() >= deadline:
+                break
+            self._priority.pop(key, None)
+            visited.add(key)
+            self._run_scoped_owner(identity, current, reports)
+        pages = 0
+        while pages < _OWNER_MAINTENANCE_MAX_PAGES_COUNT and time.monotonic() < deadline:
+            page = discover_owner_home_page(
+                self._base_home.owners_dir,
+                limit=min(limit, _OWNER_MAINTENANCE_PAGE_OWNERS_COUNT),
+                after_cursor=self._cursor,
+            )
+            pages += 1
+            scanned += page.scanned
+            self._cursor = page.next_cursor
+            for target in page.targets:
+                key = (target.identity.provider, target.identity.owner_kind, target.identity.owner_id)
+                if key not in visited:
+                    visited.add(key)
+                    self._run_scoped_owner(target.identity, current, reports)
+            if page.next_cursor is None:
+                break
+        summary = _maintenance_summary(reports, scanned)
         if summary["ran"] or summary["failed"]:
             print(
                 "[gateway-owner-maintenance] "
@@ -2046,6 +2067,26 @@ class _GatewayOwnerMaintenanceController:
                 flush=True,
             )
         return summary
+
+    # LLM: 仅解析该 owner 的目录并调用原维护入口；单 owner 异常隔离，成功后只将仍到期者放入有界 FIFO。
+    # 函数用途: 维护一个 scoped owner 并登记下拍需要优先续作的对象。
+    def _run_scoped_owner(self, identity, current, reports) -> None:
+        try:
+            owner = resolve_owner_home(self._base_home.root, identity)
+            scoped_home = home_paths_with_owner(self._base_home, owner)
+            reports.append(run_owner_retention_if_due(scoped_home, now=current))
+        except Exception as exc:
+            label = "/".join((identity.provider, identity.owner_kind, identity.owner_id))
+            _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)
+            return
+        try:
+            due = owner_maintenance_due(scoped_home.owner_home_dir, now=current)
+        except Exception:
+            # best-effort: 无法确认续作状态时不入优先队列，留给普通分页重试。
+            return
+        if due and len(self._priority) < _OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT:
+            key = (identity.provider, identity.owner_kind, identity.owner_id)
+            self._priority[key] = identity
 
 
 # LLM: 摘要只打印、不落盘，没有持久化读取方。failed 只算整次被拒（apply_outcome=refused，即 retention 用
