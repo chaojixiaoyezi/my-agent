@@ -1158,7 +1158,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             if descriptor.get('enabled', True) is False:
                 raise AssetDisabledError('skill', reference)
 
-    # LLM: 源/漂移门不变；正式步骤在原调用链绑定run-out目标，debug清空目标，产物引用沿原步骤账持久化。
+    # LLM: 源/漂移门不变；冻结pin保留历史版本与策略来源，当前快照只作权限上限/一致性绑定；debug不写正式账。
     # 函数用途: 沿原脚本链执行并保留成功/失败日志及调试合同，内存调试不写资产或运行账。
     def _script_step(self, record, spec, run, definition, *, record_summary=True):
         sources = definition.get('descriptor', definition).get('data_sources')
@@ -1177,13 +1177,13 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         if drift and not historical_pin_available(self.owner_home, frozen):
             result = _preflight_failure(record.script_id, metadata or {}, 'SCRIPT_REVISION_DRIFT', {})
         else:
-            # 同一记录经内容门后冻结交原数据源门；当前CAS只是该旧门的读取一致性令牌，不再作为执行身份。
+            # 执行内容相同也不能用当前CAS替换历史来源；编号/旧无编号pin均交原resolver裁决。
             with bind_run_out_target(self.owner_home, run.workflow_run_id, record.step_id,
                     record.escalation_result.get('attempt_id', ''), enabled=not run.ephemeral_debug), \
                     bind_script_execution_record(self.owner_home, record.script_id, self.workspace_root, metadata):
                 result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
                     runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
-                    expected_script_pin=frozen if drift else current, **options)
+                    expected_script_pin=frozen if frozen is not None else current, **options)
         if not record_summary:
             record.escalation_result['debug_logs'] = [text for text in
                 (result.stdout_preview, result.stderr_preview) if text]

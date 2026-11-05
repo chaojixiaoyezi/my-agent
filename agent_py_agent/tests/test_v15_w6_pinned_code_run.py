@@ -11,11 +11,89 @@ from agent_py_agent.agent.assets.descriptor import (
     CredentialBindingRef,
     DataSourceSpec,
 )
-from agent_py_agent.agent.assets.revision_history import blob_get, record_version
+from agent_py_agent.agent.assets.revision_history import (
+    blob_get,
+    get_version,
+    record_version,
+)
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.workflows import datasource_runtime as runtime
 from agent_py_agent.agent.workflows import script_runner
 from agent_py_agent.tests.test_v15_w6_harness_guardrails import CountingRunner, result
+
+TRANSIENT_CODE = '''import json,os
+print(json.dumps({"value":1,"stage":os.getcwd(),"source_report":{
+    "stage":"probe+fetch","discovered_sources":["local-observation"],"sources":[{
+        "source_id":"local-observation","status":"transient_error","hit_count":0,
+        "http_status":None,"error_code":"ECONNRESET"}]}}))
+'''
+
+
+class CountingLocalRunner(script_runner.ScriptRunner):
+    """每次计数都委托原runner执行真实本地进程；只关闭平台沙箱，不伪造结果。"""
+
+    # LLM: 临时Owner内使用原准备、Python守卫、进程执行及清理链，不接外部服务。
+    # 函数用途: 保存每次实际执行的合同、历史来源和原结果。
+    def __init__(self, home):
+        super().__init__(home, use_sandbox=False, restrict_to_roots=True)
+        self.calls, self.results = [], []
+
+    # LLM: 观察已绑定的真实Store快照，所有调用仍原样交给父类，无结果字典替身。
+    # 函数用途: 计数并记录真实子进程使用的版本及重试许可。
+    def run_script(self, script_id, inputs=None, *, timeout_seconds=None, override_data_sources=None,
+                   network_access=None, record_summary=True):
+        self.calls.append({'record': ScriptStore(self.owner_home).get_script(script_id),
+            'history': runtime.script_history_record(self.owner_home, script_id, self.workspace_root),
+            'record_summary': record_summary})
+        value = super().run_script(script_id, inputs, timeout_seconds=timeout_seconds,
+            override_data_sources=override_data_sources, network_access=network_access, record_summary=record_summary)
+        self.results.append(value)
+        return value
+
+
+# LLM: 普通Store保存触发正式版本钩子；访问声明不是只读，重试许可只能来自显式幂等策略。
+# 函数用途: 发布具有相同代码和执行引用、但重试策略可不同的本地脚本。
+def save_transient_version(home, *, idempotent):
+    descriptor = AssetDescriptor('probe', 'script', '本地瞬态报告',
+        access_targets=(AccessTarget('local', 'file', 'result.json', extra={'read_only': False}),),
+        metadata={'retry_policy': {'idempotent': idempotent}})
+    return ScriptStore(home).save_script(descriptor, TRANSIENT_CODE, timeout_seconds=10)
+
+
+# LLM: 编号pin必须点读完整历史；相同代码不允许复用当前重试策略，当前收窄也不能被历史放宽。
+# 函数用途: 用真实runner对照编号来源和三种历史/当前策略交集。
+@pytest.mark.parametrize('old_policy,current_policy,expected_calls', [(False, True, 1), (True, False, 1), (True, True, 3)])
+def test_numbered_equal_code_pin_keeps_policy_intersection(tmp_path, old_policy, current_policy, expected_calls):
+    first = save_transient_version(tmp_path, idempotent=old_policy)
+    history = get_version(tmp_path, 'script', 'probe', 1)
+    save_transient_version(tmp_path, idempotent=current_policy)
+    runner = CountingLocalRunner(tmp_path)
+    value = runtime.run_script_with_datasources(tmp_path, 'probe', runner=runner,
+        expected_script_pin={**pin(first), 'version': 1, 'execution_definition_ref': history['execution_definition_ref']})
+    assert value.ok, value.stderr_preview
+    assert len(runner.calls) == expected_calls
+    assert all(call['history']['version'] == 1 for call in runner.calls)
+    assert value.source_check['pin_resolution']['version'] == 1
+    assert len(value.source_check['query_health']['retries']) == expected_calls - 1
+    assert all(call['record']['metadata']['retry_policy']['idempotent'] is (old_policy and current_policy)
+               for call in runner.calls)
+    assert not list((tmp_path / 'tmp/script_exec').iterdir())
+
+
+# LLM: 旧无编号pin只在同存储revision时保留当前重试许可；未知来源仍允许首次执行但不得借新许可。
+# 函数用途: 用真实进程验证legacy保守收窄与当前直接执行没有被一刀切禁重试。
+@pytest.mark.parametrize('selection,expected_calls', [('legacy', 1), ('current', 3), ('unselected', 3)])
+def test_equal_code_legacy_and_current_retry_controls(tmp_path, selection, expected_calls):
+    first = save_transient_version(tmp_path, idempotent=False)
+    current = save_transient_version(tmp_path, idempotent=True)
+    expected = pin(first) if selection == 'legacy' else pin(current) if selection == 'current' else None
+    runner = CountingLocalRunner(tmp_path)
+    value = runtime.run_script_with_datasources(tmp_path, 'probe', runner=runner, expected_script_pin=expected)
+    assert value.ok, value.stderr_preview
+    assert len(runner.calls) == expected_calls
+    assert all(call['history'] is None for call in runner.calls)
+    assert value.source_check['pin_resolution'] == {'mode': 'current'}
+    assert len(value.source_check['query_health']['retries']) == expected_calls - 1
 
 
 # LLM: pin只取宿主已读取的代码身份，不从版本号或说明文本决定正文。
