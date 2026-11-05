@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import time
+from functools import partial
 from pathlib import Path
 from threading import Event, Thread, get_ident
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from agent_py_agent.agent.assets.workflow_store import (
 )
 from agent_py_agent.agent.concurrency.interrupt import (
     interrupt_by_name,
+    is_interrupted,
     is_interruptible_registered,
 )
 from agent_py_agent.agent.conversation import (
@@ -31,6 +33,7 @@ from agent_py_agent.agent.conversation.claim_execution_binding import current_cl
 from agent_py_agent.agent.conversation.control_commands import conversation_request_interrupt_name
 from agent_py_agent.agent.conversation.run_claim import conversation_claim_interrupt_name
 from agent_py_agent.agent.scheduler.control import cancel_monitor
+from agent_py_agent.agent.scheduler.execution import _run_with_claim_interrupts
 from agent_py_agent.agent.scheduler.execution_policy import execution_definition_ref
 from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
 from agent_py_agent.agent.workflows import script_runner
@@ -71,7 +74,7 @@ print(json.dumps({{'step': {index}}}))
     service.monitor_jitter_window_seconds = 0
     runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({'runtime': runtime, 'store': store, 'scheduler_service': service})
-    calls, threads, markers = [], [], {}
+    calls, threads, markers, completed = [], [], {}, {}
     original = ScriptRunner.run_script
     execute_process = script_runner._execute
 
@@ -82,21 +85,31 @@ print(json.dumps({{'step': {index}}}))
 
     monkeypatch.setattr(ScriptRunner, 'run_script', observed)
 
-    # 标记只写原 run_out，观察原进程参数和正式归档目标，不扩大脚本的写权限。
+    # 标记只写原 run_out；进程副作用与成功归档是两个观察点，失败或停止不得靠归档判断是否执行。
     def observed_process(command, folder, environment, input_json, timeout, capture):
         target = current_run_out_target(home)
         assert target is not None and environment.get('MY_AGENT_RUN_OUT')
+        label = json.loads(input_json)['run_label']
+        scratch = Path(environment['MY_AGENT_RUN_OUT'])
         archived = (home / 'data/workflow_runs' / target.workflow_run_id / 'artifacts'
             / target.step_id / target.attempt_id)
-        markers[json.loads(input_json)['run_label']].append(
-            (target.step_id, Path(environment['MY_AGENT_RUN_OUT']), archived))
-        return execute_process(command, folder, environment, input_json, timeout, capture)
+        markers[label].append((target.step_id, scratch, archived))
+        result = execute_process(command, folder, environment, input_json, timeout, capture)
+        # 原执行器已回收真实进程，runner尚未清理scratch；只读实物，不补文件、不伪造回执。
+        files = {}
+        for index in range(1, 4):
+            path = scratch / f's{index}'
+            if path.is_file():
+                files[path.name] = path.read_text()
+        completed[label].append(SimpleNamespace(step_id=target.step_id,
+            exit_code=result[0], cleanup=result[4], markers=files))
+        return result
 
     monkeypatch.setattr(script_runner, '_execute', observed_process)
     value = SimpleNamespace(agent=agent, home=home, store=store, service=service,
         repo=agent.scheduler_repository, scheduler=scheduler, channels=channels,
         workflows=WorkflowStore(home, workspace_root=tmp_path), runs=WorkflowRunStore(home),
-        root=tmp_path, calls=calls, threads=threads, markers=markers)
+        root=tmp_path, calls=calls, threads=threads, markers=markers, completed=completed)
     try:
         yield value
     finally:
@@ -109,6 +122,7 @@ print(json.dumps({{'step': {index}}}))
 def _schedule(case, name, *, fail=False):
     now = time.time()
     markers = case.markers[name] = []
+    completed = case.completed[name] = []
     workflow_id = 'r3_' + name
     case.workflows.save_workflow(WorkflowDefinition(
         AssetDescriptor(id=workflow_id, kind='workflow', name=name),
@@ -132,7 +146,8 @@ def _schedule(case, name, *, fail=False):
     run_id = next(row['run_id'] for row in runs if row['job_id'] == job['job_id'])
     signals = [signal for signal in case.store.wakes.pending() if signal.root_task_id == run_id]
     assert len(signals) == 1
-    return SimpleNamespace(job=job, signal=signals[0], markers=markers, workflow_id=workflow_id, now=now)
+    return SimpleNamespace(job=job, signal=signals[0], markers=markers, completed=completed,
+        workflow_id=workflow_id, now=now)
 
 
 def _start(case, run, *, thread_only=False):
@@ -170,6 +185,11 @@ def _await_step(run, thread, errors):
 
 def _markers(run):
     return [f's{index}' for index in range(1, 4)
+        if any(process.markers.get(f's{index}') == 'finished' for process in run.completed)]
+
+
+def _archived_markers(run):
+    return [f's{index}' for index in range(1, 4)
         if any((archived / f's{index}').exists() for _, _, archived in run.markers)]
 
 
@@ -196,6 +216,8 @@ def _assert_done(case, run):
         pytest.fail(json.dumps({'workflow_status': records[0].status,
             'errors': [(step.step_id, step.error_code, step.error_message) for step in records[0].steps]}, ensure_ascii=False))
     assert _markers(run) == ['s1', 's2', 's3']
+    assert _archived_markers(run) == ['s1', 's2', 's3']
+    assert [process.exit_code for process in run.completed] == [0, 0, 0]
     assert case.store.tasks.load(run.signal.root_task_id).status == 'completed'
 
 
@@ -225,6 +247,9 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     records = case.runs.list_runs(workflow_id=run.workflow_id)
     history, load_errors = case.repo.history(job_id=run.job['job_id'])
     assert _markers(run) == ['s1'], {'markers': _markers(run), 'workflow': [r.status for r in records], 'history': history}
+    assert [process.step_id for process in run.completed] == ['s1']
+    assert run.completed[0].exit_code == 0 and not run.completed[0].cleanup
+    assert all(not scratch.exists() for _, scratch, _ in run.markers)
     assert len(records) == 1 and records[0].status == 'paused_for_resume'
     assert not load_errors and not history, history
     assert len(case.channels.attempts) == delivery_before
@@ -236,15 +261,30 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     assert not is_interruptible_registered(conversation_claim_interrupt_name(binding.claim_id))
     assert _fd_count() - fd_before == 0
 
-    # C：保留原 pending wake，准确消费另一真实定时线程；同一池的旧 worker 不得残留停止旗。
+    # C：原 worker 必须清旗；这与已撤权操作保留 owner 资源锁是两份不同事实。
+    probe = case.service.monitor_pool.submit(case.home, run.job['job_id'], 'r3-reuse-probe',
+        partial(_run_with_claim_interrupts, (), Event(), lambda: (get_ident(), is_interrupted())))
+    assert probe.result(timeout=2) == (case.calls[call_before][1], False)
+    # 保留原 pending wake，准确消费另一真实定时线程，不清理或伪造原操作终态来放行业务。
     next_run = _schedule(case, 'fresh')
     case.scheduler = BackgroundMainAgentScheduler({'runtime': case.scheduler.runtime,
         'store': case.store, 'scheduler_service': case.service})
     _join(*_start(case, next_run, thread_only=True))
-    _assert_done(case, next_run)
+    if sender == 'cancel_monitor':
+        history, load_errors = case.repo.history(job_id=next_run.job['job_id'])
+        assert not load_errors and len(history) == 1
+        assert history[0]['status'] == 'failed'
+        assert history[0]['error_code'] == 'TOOL_OPERATION_BUSY_CONFLICT'
+        assert json.loads(history[0]['response'])['error_code'] == 'TOOL_OPERATION_BUSY_CONFLICT'
+        assert not case.runs.list_runs(workflow_id=next_run.workflow_id)
+        assert not next_run.markers and not next_run.completed
+        assert [call[0] for call in case.calls[call_before:]] == ['r3_s1']
+        assert case.store.tasks.load(next_run.signal.root_task_id).status == 'abandoned'
+    else:
+        _assert_done(case, next_run)
     assert {call[1] for call in case.calls[call_before:]} == {case.calls[call_before][1]}
     assert case.store.tasks.load(run.signal.root_task_id).status == ('cancelled' if sender == 'cancel_monitor' else 'active')
-    assert len(case.channels.attempts) == delivery_before + 1
+    assert len(case.channels.attempts) == delivery_before + (sender != 'cancel_monitor')
     assert _fd_count() - fd_before == 0
 
 
@@ -345,6 +385,9 @@ def test_real_script_failure_preserves_terminal_agreement_and_zero_fd_delta(case
     assert not errors and len(history) == len(records) == 1
     assert records[0].status == history[0]['status'] == 'failed'
     assert _markers(run) == ['s1']
+    assert _archived_markers(run) == []
+    assert [process.exit_code for process in run.completed] == [3]
+    assert all(not scratch.exists() for _, scratch, _ in run.markers)
     assert case.store.tasks.load(run.signal.root_task_id).status == 'abandoned'
     assert len(case.channels.attempts) == delivery_before
     assert _fd_count() - fd_before == 0
