@@ -47,6 +47,15 @@ def precheck_case(tmp_path):
     return case
 
 
+# LLM: 只读原尝试账的持久期限，不清退避、不改唤醒或重新触发业务。
+# 函数用途: 让重投测试按真实可重试时刻推进，不假定首轮在一秒内完成。
+def delivery_retry_at(case):
+    state, error = case.store.wakes.attempts.state_report(case.signal.wake_signal_id)
+    assert error is None
+    assert state.next_attempt_at > 1000
+    return state.next_attempt_at
+
+
 def test_unchanged_cycle_skips_model_and_changed_cycle_advances_checkpoint_after_done(tmp_path):
     case = precheck_case(tmp_path)
     repo = case.agent.scheduler_repository
@@ -82,15 +91,29 @@ def test_failed_precheck_and_mutating_tool_do_not_run_model_or_save_checkpoint(t
     assert case.backend.prompts == [] and case.tool.calls == 2
 
 
-def test_delivery_failure_retains_observation_until_frozen_result_delivered(tmp_path):
+@pytest.mark.parametrize("attempt_elapsed", [0.0, 2.0])
+# LLM: 使用原预检、冻结和检查点路径；只控制尝试记账时钟，覆盖慢首轮和重投边界。
+# 函数用途: 证明到期前不重投，确认送达后才提交原观察且不重跑模型。
+def test_delivery_failure_retains_observation_until_frozen_result_delivered(tmp_path, monkeypatch, attempt_elapsed):
+    from agent_py_agent.agent.conversation.wake_attempt_tracking import WakeAttemptTracker
+
+    # 只控制尝试记账的完成时刻，真实预检、模型、冻结和重投流程不替换。
+    monkeypatch.setattr(WakeAttemptTracker, "_clock", lambda tracker: tracker._now + attempt_elapsed)
     case = precheck_case(tmp_path)
     case.channels.status = "rejected"
     case.scheduler.tick(now=1000)
     repo = case.agent.scheduler_repository
     assert "precheck_checkpoint" not in repo.get_job(case.job["job_id"])
+    retry_at = delivery_retry_at(case)
+    assert retry_at == 1000 + attempt_elapsed + 30
     case.channels.status = "sent"
-    case.scheduler.tick(now=1031)
+    assert case.scheduler.tick(now=retry_at - 0.001) == []
+    assert len(case.channels.attempts) == 1
+    assert "precheck_checkpoint" not in repo.get_job(case.job["job_id"])
+    case.scheduler.tick(now=retry_at)
     assert case.tool.calls == 1 and len(case.backend.prompts) == 1
+    assert len(case.channels.attempts) == 2
+    assert case.channels.attempts[0][1] == case.channels.attempts[1][1]
     assert repo.get_job(case.job["job_id"])["precheck_checkpoint"]["run_id"] == case.signal.root_task_id
 
 
@@ -125,6 +148,8 @@ def test_precheck_uses_original_background_interrupt_and_claim(tmp_path):
     assert "precheck_observation" not in actual
 
 
+# LLM: 重建真实服务和调度器后仍从原尝试账取期限，不丢预检观察或跳过原退避。
+# 函数用途: 验证服务重启后的冻结重投不重做预检或模型。
 def test_precheck_observation_survives_service_restart_without_reexecution(tmp_path):
     from agent_py_agent.agent.conversation import BackgroundMainAgentScheduler
     from agent_py_agent.agent.scheduler.service import SchedulerService
@@ -137,11 +162,13 @@ def test_precheck_observation_survives_service_restart_without_reexecution(tmp_p
     restarted = BackgroundMainAgentScheduler({"runtime": case.scheduler.runtime, "store": case.store,
                                               "scheduler_service": case.agent.scheduler_service})
     case.channels.status = "sent"
-    restarted.tick(now=1031)
+    restarted.tick(now=delivery_retry_at(case))
     assert case.tool.calls == len(case.backend.prompts) == 1
     assert repo.get_job(case.job["job_id"])["precheck_checkpoint"]["run_id"] == case.signal.root_task_id
 
 
+# LLM: 旧执行的冻结结果按原账本到期重投；job 预检定义变更不能获得旧观察检查点。
+# 函数用途: 验证欠发期间编辑预检不会误提交旧检查点或重新执行业务。
 def test_editing_precheck_during_action_does_not_commit_old_checkpoint(tmp_path):
     case = precheck_case(tmp_path)
     case.channels.status = "rejected"
@@ -152,7 +179,7 @@ def test_editing_precheck_during_action_does_not_commit_old_checkpoint(tmp_path)
         "precheck": {"tool_name": "test_version", "arguments": {}, "json_pointer": "/unstable"},
     })
     case.channels.status = "sent"
-    case.scheduler.tick(now=1031)
+    case.scheduler.tick(now=delivery_retry_at(case))
     assert "precheck_checkpoint" not in repo.get_job(job["job_id"])
     assert case.tool.calls == len(case.backend.prompts) == 1
 

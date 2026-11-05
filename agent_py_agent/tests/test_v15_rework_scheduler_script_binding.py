@@ -500,18 +500,22 @@ def test_cancelled_late_result_cannot_revive_task_or_overlap_scope(case, monkeyp
         pool.shutdown()
 
 
-# LLM: 唯一替代项是外发渠道回执；调度预约、真实脚本、原 TaskLink/outbox 与恢复均走产品实现。
-# 函数用途: 从真实 scheduler tick 验证冻结重投及欠发期间取消，原终态绝不复活，业务不重跑。
+# LLM: 仅替换外发回执和尝试记账时钟；真实脚本、原 TaskLink/outbox 与恢复均走产品实现。
+# 函数用途: 覆盖快慢首轮的退避边界、冻结重投和欠发期间取消，原终态绝不复活，业务不重跑。
 @pytest.mark.parametrize('cancel_after_freeze', [False, True])
-def test_scheduler_notification_retry_never_reexecutes_script(case, cancel_after_freeze):
+@pytest.mark.parametrize('attempt_elapsed', [0.0, 2.0])
+def test_scheduler_notification_retry_never_reexecutes_script(case, monkeypatch, cancel_after_freeze, attempt_elapsed):
     from agent_py_agent.agent.conversation import (
         BackgroundMainAgentRuntime,
         BackgroundMainAgentScheduler,
     )
+    from agent_py_agent.agent.conversation.wake_attempt_tracking import WakeAttemptTracker
     from agent_py_agent.agent.scheduler.execution_policy import execution_definition_ref
     from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
     from agent_py_agent.tests.test_scheduler_runtime import _RetryDelivery
 
+    # 真实脚本照常启动；只把尝试完成时刻设为快、慢两种确定性输入。
+    monkeypatch.setattr(WakeAttemptTracker, '_clock', lambda tracker: tracker._now + attempt_elapsed)
     now = time.time()
     store = case.agent.conversation_store
     thread = store.threads.get_or_create({'channel': 'feishu', 'channel_user_id': 'ou_r2_actor',
@@ -540,6 +544,13 @@ def test_scheduler_notification_retry_never_reexecutes_script(case, cancel_after
     assert queued['status'] == 'queued' and queued['claim_id'] == ''
     assert queued['structured_result']['output_data'] == {'version': 1}
     assert repo.history(job_id=job['job_id'])[0] == []
+    retry_state, error = store.wakes.attempts.state_report(signal.wake_signal_id)
+    assert error is None
+    retry_at = retry_state.next_attempt_at
+    assert retry_at == now + attempt_elapsed + 30
+    # 期限前不可重投，也不能重新执行真实脚本；之后两分支共用原持久期限。
+    assert scheduler.tick(now=retry_at - 0.001) == []
+    assert len(case.calls) == len(case.processes) == len(channels.attempts) == 1
     if cancel_after_freeze:
         from agent_py_agent.agent.scheduler.control import cancel_monitor
 
@@ -550,15 +561,15 @@ def test_scheduler_notification_retry_never_reexecutes_script(case, cancel_after
         assert not errors and len(rows) == 1 and rows[0]['status'] == 'cancelled', rows
         assert repo.get_active_run(signal.root_task_id) is None
         channels.status = 'sent'
-        assert scheduler.tick(now=now + 31) == []
+        assert scheduler.tick(now=retry_at) == []
         assert len(case.calls) == len(case.processes) == len(channels.attempts) == 1
         assert store.tasks.load(signal.root_task_id).status == 'completed'
-        assert repo.release_run_claim(signal.root_task_id, 'obsolete-claim', now=now + 32) is False
+        assert repo.release_run_claim(signal.root_task_id, 'obsolete-claim', now=retry_at + 1) is False
         assert repo.history(job_id=job['job_id'])[0] == rows
         assert store.wakes.pending_one(signal.wake_signal_id) is None
         return
     channels.status = 'sent'
-    reports = scheduler.tick(now=now + 31)
+    reports = scheduler.tick(now=retry_at)
     assert len(case.calls) == len(case.processes) == 1
     retry_history = [(row['status'], row.get('delivery_status'), row.get('delivery_reason'), row.get('error_code'))
                      for row in repo.history(job_id=job['job_id'])[0]]
