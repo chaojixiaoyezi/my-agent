@@ -244,6 +244,24 @@ def _publish(store, pending):
     return result
 
 
+# LLM: 调用者持root/canonical锁；不完整或确定性失败仅隔离原证据，原始IO异常重抛，不授权补采后来依赖。
+# 函数用途: 在覆盖前发表准确快照，或将不能发表的快照保留到不可变隔离叶。
+def _publish_or_quarantine(store, pending) -> bool:
+    code = pending['snapshot'].get('error_code')
+    if not code:
+        try:
+            _publish(store, pending)
+            return True
+        except OSError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, 'code', type(exc).__name__)
+    history.quarantine_publication(store.owner_home, store.collection[:-1], pending['asset_id'],
+        pending, error_code=code)
+    logging.getLogger(__name__).warning('asset publication quarantined: %s', code)
+    return False
+
+
 # LLM: 只比较本资产当前revision及全部快照字节，不凭fingerprint把未提交候选认领为正式内容。
 # 函数用途: 判断prepared证据是否已在canonical事务结束后提交。
 def _matches(store, snapshot, payload):
@@ -254,14 +272,15 @@ def _matches(store, snapshot, payload):
             and (code.decode('utf-8') if code is not None else None) == snapshot['code'])
 
 
-# LLM: 调用方持root/canonical锁且已恢复undo；旧证据未确认则拒绝销毁，prepared不匹配只代表未提交候选。
-# 函数用途: 在覆盖或删除前补齐最后一个已提交快照，兼容无历史的旧资产。
+# LLM: 调用方持root/canonical锁且已恢复undo；隔离已提交证据后立即返回，不能把旧正文重新配给后来依赖。
+# 函数用途: 覆盖或删除前发表或隔离准确前像，瞬态发表IO失败仍保留证据并拒绝覆盖。
 def protect_preimage(store, payload):
     if not _eligible(store):
         return
     kind, asset_id = store.collection[:-1], payload['id'] if payload else None
     if asset_id is None:
         return
+
     pending = history.pending_publication(store.owner_home, kind, asset_id)
     if pending is not None:
         if pending['phase'] == 'prepared':
@@ -271,15 +290,15 @@ def protect_preimage(store, payload):
             else:
                 pending = history.retain_publication(store.owner_home, kind, asset_id,
                     pending['snapshot'], committed=True)
-        if pending is not None:
-            _publish(store, pending)
+        if pending is not None and not _publish_or_quarantine(store, pending):
+            return
     code, sides = _files(store, payload, {})
     fingerprint = history.asset_fingerprint(payload=_payload(payload), code=code, side_files=sides)
     if history.find_version(store.owner_home, kind, asset_id, fingerprint=fingerprint) is not None:
         return
     snapshot = _snapshot(store, payload, {}, legacy=True, summary='旧资产快照')
     pending = history.retain_publication(store.owner_home, kind, asset_id, snapshot, committed=True)
-    _publish(store, pending)
+    _publish_or_quarantine(store, pending)
 
 
 # LLM: 在undo及canonical写入前保留候选，只有事务结束后的精确读回能将其转committed，不先发版本。
@@ -296,7 +315,7 @@ def prepare_commit(store, payload, previous, updates):
     history.retain_publication(store.owner_home, store.collection[:-1], payload['id'], snapshot)
 
 
-# LLM: 任何发表故障不撤销已确认的canonical提交；快照证据留到不可变记录与索引都确认。
+# LLM: 发表故障不撤销已提交canonical；异常回执区分可重试IO，其它失败保留活动证据直到后续写隔离。
 # 函数用途: 在真实提交结束后完成待发表证据，并向工具回报非致命失败。
 def record_committed(store, payload, previous, updates):
     if not _eligible(store):
@@ -316,7 +335,8 @@ def record_committed(store, payload, previous, updates):
         receipt = {'recorded': True, 'created': result['created'], 'version': result['version']}
     except Exception as exc:
         logging.getLogger(__name__).warning('asset version recording failed: %s', type(exc).__name__)
-        receipt = {'recorded': False, 'error_code': getattr(exc, 'code', 'TOOL_EXECUTION_FAILED')}
+        receipt = {'recorded': False, 'error_code': getattr(exc, 'code', 'TOOL_EXECUTION_FAILED'),
+                   'retryable': isinstance(exc, OSError)}
     if state is not None:
         state['recording'] = receipt
     return receipt

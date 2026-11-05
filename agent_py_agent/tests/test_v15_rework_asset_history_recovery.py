@@ -325,9 +325,12 @@ def test_incomplete_pin_evidence_is_not_cleared_or_replaced_by_later_script(tmp_
     assert proof['snapshot']['error_code']
     scripts.save_script(AssetDescriptor('missing', 'script', 'later'), 'print(2)\n')
     result = WorkflowsTool(tmp_path).execute({'action': 'delete', 'workflow_id': 'flow'})
-    assert not result.ok
-    assert WorkflowStore(tmp_path).get_workflow('flow').body_markdown == 'incomplete'
-    assert history.pending_publication(tmp_path, 'workflow', 'flow') == proof
+    assert result.ok
+    assert WorkflowStore(tmp_path).get_workflow('flow') is None
+    assert history.pending_publication(tmp_path, 'workflow', 'flow') is None
+    retained = list((tmp_path / 'data/asset_evolution/pending/workflow').glob('flow.unpublishable.*.json'))
+    assert len(retained) == 1
+    assert json.loads(retained[0].read_text())['publication'] == proof
     assert history.latest_version(tmp_path, 'workflow', 'flow') is None
 
 

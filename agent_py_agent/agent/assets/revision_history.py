@@ -364,6 +364,26 @@ def acknowledge_publication(owner_home, kind, asset_id):
         unlink_file_beneath(Path(owner_home), (*_HISTORY_PARTS, 'pending', kind, f'{asset_id}.json'))
 
 
+# LLM: 原Store持root/canonical锁；只取_asset_lock，按内容摘要幂等保留证据，仅清仍等于原义务的活动槽，不删隔离叶。
+# 函数用途: 隔离不能发表的准确快照，避免同ID重建修订撞号或误清新提交。
+def quarantine_publication(owner_home, kind, asset_id, pending, *, error_code) -> dict:
+    _identity(kind, asset_id)
+    record = {'schema_version': 'asset_publication_unpublishable.v1', 'kind': kind,
+              'asset_id': asset_id, 'error_code': str(error_code), 'quarantined_at': _iso_time(),
+              'publication': pending}
+    revision = int(pending['snapshot'].get('storage_revision') or 0)
+    digest = hashlib.sha256(_canonical(pending).encode('utf-8')).hexdigest()[:16]
+    parts = (*_HISTORY_PARTS, 'pending', kind, f'{asset_id}.unpublishable.{revision}.{digest}.json')
+    with _asset_lock(owner_home, kind, asset_id):
+        if _read_json(owner_home, parts) is None:
+            _write_json(owner_home, parts, record)
+        active = (*_HISTORY_PARTS, 'pending', kind, f'{asset_id}.json')
+        # 已经出现另一份义务时，只保留本次旧证据，不删除新活动槽。
+        if _read_json(owner_home, active) == pending:
+            unlink_file_beneath(Path(owner_home), active)
+    return record
+
+
 # LLM: 发布版本与storage_revision独立；仅显式WORKFLOW.md、同存储修订或未指定修订、同定义且无正文/侧文件的workflow可补全；新修订、pin变化和回滚仍追加版本，CAS不变。
 # 函数用途: 在跨片保存入口之间去重、受限补全或追加完整正式版本。
 def record_version(owner_home, kind, asset_id, *, payload: Mapping, code: bytes | None = None,

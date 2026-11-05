@@ -669,7 +669,7 @@ def _commit_staged(root, entries, journal, *, admission=None):
         raise
 
 
-# LLM: 已提交决定不可undo；脚本先于工作流发表，任一失败保留journal及原快照义务，禁止之后的写丢掉证据。
+# LLM: 已提交决定不可undo；IO或未知回执保留journal并按脚本优先重试，确定性失败由单资产证据承接，不占根事务。
 # 函数用途: 幂等补齐已提交批量的取消历史，再清阶段文件和事务记录。
 def _finish_batch(root, journal, *, admission=None):
     from ..common.json_io import append_private_jsonl_records
@@ -689,7 +689,7 @@ def _finish_batch(root, journal, *, admission=None):
         view = _store_view(root, item['kind'])
         view._read_only = False
         receipt = view._history_notify('save', payload=item['payload'], previous=item['previous'], updates=item['updates'])
-        if receipt is None or receipt.get('recorded') is not True:
+        if receipt is None or (receipt.get('recorded') is not True and receipt.get('retryable', True)):
             return False
     _clean_stages(root, journal['entries'])
     unlink_file_beneath(root, (_BATCH_FILE,))
