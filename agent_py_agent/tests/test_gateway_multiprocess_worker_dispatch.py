@@ -137,8 +137,9 @@ def test_owner_initialization_failure_is_visible_and_processing_is_preserved(set
     try:
         assert pump.poll() == 1
     finally:
-        with pytest.raises(RuntimeError, match='owner-unavailable'):
-            pump.close()
+        pump.close()
+    assert pump.inflight == 1
+    assert str(next(iter(pump._active)).exception()) == 'owner-unavailable'
     assert (setup.paths.processing / path.name).exists()
     assert not (setup.paths.terminal / path.name).exists()
     assert reservation_file(setup.paths, setup.request['id']).exists()

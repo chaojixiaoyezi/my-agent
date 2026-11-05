@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-# LLM: 普通bootstrap前只解析原C内部argv/环境，同载荷roots完整核对后才导入W运行，不从请求/配置推断角色或补工作根。
+# LLM: 普通bootstrap前只解析原C内部argv/环境，核对完整roots后才导入W；每次启动独立通知去重状态，不由旧实例压掉首条。
 # 函数用途: 把 worker 命令分到内部骨架，非 worker 返回空保持原 CLI 行为。
 def dispatch_worker_entry(argv):
     prefix = argparse.ArgumentParser(add_help=False)
@@ -30,7 +30,7 @@ def dispatch_worker_entry(argv):
         return _worker_error(result)
     from ..agent.gateway_parts.multiprocess_worker import run_worker
 
-    return run_worker(launch, _heartbeat_notice, config_path=options.config)
+    return run_worker(launch, _HeartbeatNotice(), config_path=options.config)
 
 
 # LLM: 内部roots参数只运输C原解析结果且须env同值，不开放用户配置/worker数量开关，不加载全量扩展。
@@ -55,7 +55,18 @@ def _worker_error(result: dict) -> int:
     return 2
 
 
-# LLM: 标准输出是投影通知，真实权威仍是原子心跳文件；测试可用管道等待写完，不靠 sleep。
-# 函数用途: 在心跳写入完成后输出可观察的结构化通知。
-def _heartbeat_notice(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+# LLM: 标准输出仅是投影；按实例只打印首条及健康四元组变化，不改变原心跳文件发布周期或权威。
+# 类用途: 消除空闲心跳刷屏，仍报告每次健康状态切换。
+class _HeartbeatNotice:
+    # LLM: None与任何四元组不同，保证每次入口的新实例首条必输出。
+    # 函数用途: 初始化本次worker通知的状态记忆。
+    def __init__(self):
+        self._last = None
+
+    # LLM: inflight/时间变化不刷日志；状态在输出成功后更新，通知不授信也不写第二份心跳。
+    # 函数用途: 仅在首条或就绪、健康、原因、错误码变化时打印原载荷。
+    def __call__(self, payload: dict) -> None:
+        current = (payload.get('ready'), payload.get('loop_health'), payload.get('reason'), payload.get('error_code'))
+        if current != self._last:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+            self._last = current
