@@ -1,6 +1,7 @@
 """W3 真实包/安装表/stdio 往返与确定性交错；W2 启用 UI 不在此分片。"""
 from __future__ import annotations
 
+import gc
 import json
 import os
 import threading
@@ -179,6 +180,7 @@ def test_concurrent_first_calls_and_prepare_do_not_double_start(tmp_path, monkey
             assert entered.wait(5)
             two = pool.submit(client.pack_tools[0].execute, {})
             prepare = pool.submit(registry.prepare_for_run)
+            prepare.result(timeout=2)
             release.set()
             assert one.result(timeout=15).ok and two.result(timeout=15).ok
             prepare.result(timeout=15)
@@ -296,3 +298,52 @@ def test_component_idle_does_not_stop_pending_call(tmp_path, monkeypatch):
     finally:
         release.set()
         client.stop()
+
+
+def test_component_idle_check_does_not_wait_for_pending_start(tmp_path, monkeypatch):
+    def descriptor_count():
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.GetProcessHandleCount.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            count = wintypes.DWORD()
+            assert kernel.GetProcessHandleCount(kernel.GetCurrentProcess(), ctypes.byref(count))
+            return count.value
+        fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+        with os.scandir(fd_dir) as entries:
+            return sum(1 for _entry in entries)
+
+    gc.collect()
+    fd_before = descriptor_count()
+    client, _, _, _, starts, _ = component_client(tmp_path, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    original = client.start
+
+    def gated_start():
+        entered.set()
+        assert release.wait(10)
+        return original()
+
+    monkeypatch.setattr(client, "start", gated_start)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                first = pool.submit(client.pack_tools[0].execute, {})
+                assert entered.wait(5)
+                idle = pool.submit(client.idle_stop_if_due, client.last_used + 601, 600)
+                assert idle.result(timeout=1.0) is None
+                assert not first.done() and not starts
+            finally:
+                release.set()
+            assert first.result(timeout=15).ok
+        assert len(starts) == 1 and client._in_flight == 0
+        assert client.idle_stop_if_due(client.last_used + 601, 600).confirmed
+    finally:
+        release.set()
+        client.stop()
+    gc.collect()
+    fd_delta = descriptor_count() - fd_before
+    assert fd_delta == 0

@@ -424,7 +424,9 @@ class PluginMCPClient(MCPStdioClient):
 
     def idle_stop_if_due(self, now, idle_stop_seconds):
         """运行边界精确回收空闲 transport，保留客户端；永久 stop 事件不能清除或复活。"""
-        with self._lazy_lock:
+        if not self._lazy_lock.acquire(blocking=False):
+            return None
+        try:
             if (not self.lazy or not self.is_running() or self._in_flight or idle_stop_seconds <= 0
                     or now - self.last_used < idle_stop_seconds):
                 return None
@@ -433,6 +435,8 @@ class PluginMCPClient(MCPStdioClient):
             if receipt.confirmed:
                 self.validated_tools = ()
             return receipt
+        finally:
+            self._lazy_lock.release()
 
     # LLM: 先拿来源协调锁、再由原MCP取连接锁；只在无旧transport时从未包装argv重建最新投影，不重绑活连接。
     # 函数用途: 鲜活复核固定激活和来源版本后启动插件，旧策略失效须原资源清理再重连。
