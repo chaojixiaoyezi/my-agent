@@ -59,16 +59,38 @@ def _rejection(payload, phase):
     return RequestExecutionContextUnavailable("original_processing_recovery_source_required")
 
 
-# LLM: 长P2观察在原controller内且T外；冷C启动时确保绑定原执行端口校验器，callback只有原issued/P3末门可进入，P3已补章后拒仍占用。
-# 函数用途: 原链确定stale后，核真实旧域停止和运行库，再消费原预算/CAS动作。
+# LLM: 长P2观察在原controller内且T外；无P3旧请求只在判死后终结，Count0惰性印记仅在实际生命周期锁内回原链；有P3仍核原issued/政策。
+# 函数用途: 为旧processing选择原恢复或无路由收口，不剥标签、不重放旧请求。
 def recover_stale_processing(paths, request_path, payload, context, operation):
     if not processing_recovery_required(context, payload):
         return operation(paths, request_path, payload, context)
     gate = context.admission_gate
+    from .multiprocess_unroutable_closeout import (
+        close_out_unroutable_processing,
+        settle_unroutable_terminal,
+        standalone_lifecycle_held_for,
+        unroutable_executor_dead,
+        unroutable_reason,
+    )
+
+    control = getattr(context.agent, "_gateway_control_plane", None)
+    if (gate is None and not managed_request_execution_required()
+            and int(getattr(control, "coordinator_worker_count", 0) or 0) == 0
+            and standalone_lifecycle_held_for(paths.root)):
+        return operation(paths, request_path, payload, context)
     controller = getattr(gate, "_runtime_takeover", None)
     if (type(gate) is not PersistentAdmission or type(controller) is not CoordinatorTakeover
             or gate.paths != paths or gate.agent is not context.agent or not controller.active()):
         raise _rejection(payload, "processing_recovery.source")
+    reason = unroutable_reason(paths, payload, gate=gate)
+    if reason:
+        from .recovery import _settle_committed_terminal
+
+        if operation is _settle_committed_terminal:
+            return settle_unroutable_terminal(paths, request_path, payload, context, reason, operation)
+        if not unroutable_executor_dead(paths, request_path, payload, context):
+            raise _rejection(payload, "processing_recovery.executor_unproven")
+        return close_out_unroutable_processing(paths, request_path, payload, context, reason)
     from ..common.request_execution_ports import bind_request_context_rejection
     from .request_transactions import (
         missing_request_context_rejection,

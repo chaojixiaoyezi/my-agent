@@ -399,6 +399,14 @@ class PersistentAdmission:
             decision = self._admit_locked(request_path, ownership, limits, snapshot)
             if decision.get("status") != "expired":
                 return _remember_runtime_commit(self, request_path, decision)
+        if decision.get("closeout") == "unroutable":
+            from .multiprocess_unroutable_closeout import project_unroutable_closeout
+
+            try:
+                settled = project_unroutable_closeout(self.paths, request_path.stem, admission_gate=self)
+            except (OSError, ValueError, RuntimeError, DataCorruptionError):
+                return _blocked("unroutable_projection_pending")
+            return decision if settled else _blocked("unroutable_settlement_pending")
         from .queued_steer_expiry import project_expired_steer
 
         try:
@@ -449,6 +457,15 @@ class PersistentAdmission:
         if existing is _UNREADABLE:
             return _blocked("reservation_unreadable")
         if existing is None:
+            from .multiprocess_unroutable_closeout import (
+                close_out_unroutable_pending_locked,
+                unroutable_reason,
+            )
+
+            # 原T已持有；先补已有退休终态，不能误走steer专用终态校验。
+            reason = unroutable_reason(self.paths, current, gate=self)
+            if reason:
+                return close_out_unroutable_pending_locked(self, request_path, current, owner, reason)
             if current.get("route") is not None:
                 return _blocked("reservation_missing")
             expired = _expire_pending_steer_locked(self, request_path, current, owner)
@@ -482,6 +499,14 @@ class PersistentAdmission:
             return _blocked(reason)
         stamped = self._stamp_request(current, owner, time.time())
         if stamped is None:
+            from .multiprocess_unroutable_closeout import (
+                close_out_unroutable_pending_locked,
+                unroutable_reason,
+            )
+
+            reason = unroutable_reason(self.paths, current, gate=self)
+            if reason:
+                return close_out_unroutable_pending_locked(self, request_path, current, owner, reason)
             return _blocked("request_invalid")
         record = _reservation_record(request_path.stem, owner, session_scope, stamped)
         return _commit_created_record(self, request_path, owner, (stamped, record))
