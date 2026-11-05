@@ -224,9 +224,10 @@ def test_store_rejects_corrupt_and_mismatched_metadata(api, tmp_path):
         store.get_script("collect")
 
 
-# LLM: 工作流引用按步骤计算、去重，人工其它类引用保留；不执行脚本或Skill。
+# LLM: 工作流引用按步骤计算、去重；先保存真实脚本依赖以满足历史pin和前像保护，不执行脚本或Skill。
 # 函数用途: 验证定义往返、说明文件、引用推导、挂载、摘要和删除。
 def test_workflow_crud_refs_attach_and_runtime_summary(api, tmp_path):
+    api.ScriptStore(tmp_path).save_script(asset(api, asset_id="script-A"), "pass\n")
     store = api.WorkflowStore(tmp_path)
     steps = (api.WorkflowStepSpec("collect", "采集", "deterministic_script", script_id="script-A"),
              api.WorkflowStepSpec("analyze", "分析", "hybrid", script_id="script-A", skill_ids=("skill-A",),
