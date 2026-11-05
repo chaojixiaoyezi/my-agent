@@ -286,14 +286,15 @@ def _executor(paths):
     from agent_py_agent.agent.gateway_parts.multiprocess_executor_ledger import ExecutorLedger
     from agent_py_agent.agent.gateway_parts.multiprocess_route import WorkerPartition
 
+    from agent_py_agent.agent.gateway_parts.multiprocess_executor_runtime import _reservation
+
     ledger = ExecutorLedger(paths.root, WorkerPartition(0, 2, 'crashed-c'))
-    row = ledger.reserve({'schema_version': 'multiprocess_executor_reservation.v1',
-        'reservation_id': 'executor-old', 'kind': 'tool', 'c_run_id': 'crashed-c',
-        'request_id': 'request-old', 'execution_attempt_id': 'attempt-old', 'tool_call_id': 'call-old',
-        'owner_sha': '0' * 64, 'lease_epoch': 1, 'state': 'reserved',
-        'process_identity': None, 'pgid': None, 'sid': None})
+    binding = {'request_id': 'request-old', 'execution_attempt_id': 'attempt-old',
+               'tool_call_id': 'call-old', 'owner_sha': '0' * 64, 'lease_epoch': 1}
+    row = ledger.reserve(_reservation(ledger, binding, 'tool', 'executor-old'))
     identity = {**worker_process_identity(os.getpid()), 'pid': 900000002}
-    ledger.advance(row, 'registered', {'process_identity': identity, 'pgid': identity['pid'], 'sid': identity['pid']})
+    row = ledger.advance(row, 'registered', {'process_identity': identity, 'pgid': identity['pid'], 'sid': identity['pid']})
+    return ledger, row
 
 
 # LLM: 每一条P1即使终态也保留死亡核验，活/未知或不可解析都不得被移走。
@@ -384,3 +385,193 @@ def test_current_generation_is_excluded(tmp_path, monkeypatch):
         assert retirement.retire_dead_multiprocess_generations(
             paths, target_count=2, current_c_run_id='crashed-c') is None
         assert _files(paths.root) == before
+
+
+# LLM: 只替换原P2观测叶；ledger、codec、精确scope、原树求值和退役路径均真实运行。
+# 函数用途: 构造父已消失而原组/会话仍有活后代的受控观察。
+def _executor_table(row, *, descendant=False, failure=''):
+    import sys
+
+    identity = row['process_identity']
+    pid = identity['pid'] + 1
+    rows = {pid: {'pid': pid, 'ppid': 1, 'pgid': row['pgid'] if descendant else pid,
+                  'sid': row['sid'] if descendant else pid,
+                  'birth': identity['start_time'], 'state': 'S'}}
+    return {'platform': sys.platform, 'host_id': identity['host_id'], 'rows': rows, 'failure': failure}
+
+
+# LLM: 原v1 producer加真实ledger；先确认同一P2树求值发现活后代，再要求两种启动模式零移动。
+# 函数用途: 防止父进程已退出掩盖活后代或不完整观察。
+@pytest.mark.parametrize('count', [0, 2])
+@pytest.mark.parametrize('observation', ['descendant', 'incomplete'])
+def test_r2_executor_tree_must_be_completely_stopped(tmp_path, monkeypatch, count, observation):
+    from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+    from agent_py_agent.agent.gateway_parts.multiprocess_takeover_tree import evaluate_tree
+
+    paths = _dead_home(tmp_path, monkeypatch)
+    _ledger, row = _executor(paths)
+    table = _executor_table(row, descendant=observation == 'descendant',
+                            failure='enumeration_incomplete' if observation == 'incomplete' else '')
+    assert evaluate_tree(row, table)['status'] == ('live' if observation == 'descendant' else 'unknown')
+    monkeypatch.setattr(p2, 'observe_processes', lambda: table)
+    guard = standalone_lifecycle_guard(paths.root) if count == 0 else coordinator_guard(paths.root, count)
+    with guard as lifecycle:
+        before = _files(paths.root)
+        refusal = StandaloneSourceUnproven if count == 0 else CoordinatorUnavailable
+        with pytest.raises(refusal, match='retirement_executor_alive_or_unknown') as caught:
+            retirement.retire_dead_multiprocess_generations(paths, target_count=count,
+                current_c_run_id='next-c', lifecycle=lifecycle if count == 0 else None)
+        assert caught.value.__cause__ is not None
+        assert _files(paths.root) == before
+        assert not (paths.root / 'multiprocess_retired').exists()
+
+
+# LLM: reserved/abandoned的全空槽是合法P0形状，却不证明创建前死亡；缺原未执行证明必须保留责任。
+# 函数用途: 防止缺进程身份的原记录被静默丢弃。
+@pytest.mark.parametrize('state', ['reserved', 'abandoned'])
+def test_r2_empty_executor_identity_cannot_disappear(tmp_path, monkeypatch, state):
+    from agent_py_agent.agent.gateway_parts.multiprocess_executor_ledger import ExecutorLedger
+    from agent_py_agent.agent.gateway_parts.multiprocess_executor_runtime import _reservation
+    from agent_py_agent.agent.gateway_parts.multiprocess_route import WorkerPartition
+
+    paths = _dead_home(tmp_path, monkeypatch)
+    ledger = ExecutorLedger(paths.root, WorkerPartition(0, 2, 'crashed-c'))
+    row = ledger.reserve(_reservation(ledger, {'request_id': 'never-proved', 'execution_attempt_id': 'attempt',
+        'tool_call_id': 'tool', 'owner_sha': '0' * 64, 'lease_epoch': 1}, 'tool', 'unproven'))
+    if state == 'abandoned':
+        ledger.abandon(row)
+    with standalone_lifecycle_guard(paths.root) as lifecycle:
+        before = _files(paths.root)
+        with pytest.raises(StandaloneSourceUnproven, match='retirement_executor_alive_or_unknown'):
+            retirement.retire_dead_multiprocess_generations(paths, target_count=0, lifecycle=lifecycle)
+        assert _files(paths.root) == before
+
+
+# LLM: 原P2两次完整稳定观察加原ledger/scope重读才能作退休依据；输出不是执行许可或native域receipt。
+# 函数用途: 验证确已停止的v1原范围可退役并保留完整原账。
+def test_r2_complete_original_tree_exit_can_retire(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+
+    paths = _dead_home(tmp_path, monkeypatch)
+    ledger, row = _executor(paths)
+    observed = []
+
+    def probe():
+        observed.append(row['reservation_id'])
+        return _executor_table(row)
+
+    monkeypatch.setattr(p2, 'observe_processes', probe)
+    original = ledger.read(row['reservation_id'])
+    with standalone_lifecycle_guard(paths.root) as lifecycle:
+        manifest = retirement.retire_dead_multiprocess_generations(paths, target_count=0, lifecycle=lifecycle)
+        require_standalone_sources(paths, lifecycle)
+    assert len(observed) >= 2
+    archive = next((paths.root / 'multiprocess_retired').iterdir())
+    archived = archive.joinpath(*ledger._parts(row['reservation_id']))
+    from agent_py_agent.agent.gateway_parts.multiprocess_records import deserialize_record
+    assert deserialize_record(archived.read_bytes()) == original
+    assert {'role': 'executor', 'pid': row['process_identity']['pid'], 'verdict': 'dead'} in manifest['identities']
+
+
+# LLM: 子进程真实执行原publisher，在原atomic writer的rename前直接退出，不运行finally删除stage。
+# 函数用途: 留下原协议生成的完整或部分暂存原件，而非手写一个相似文件名。
+def _interrupted_publication(paths, family, *, partial=False, sibling=True):
+    import subprocess
+    import sys
+
+    if family == 'executor':
+        ledger, row = _executor(paths)
+        target = paths.root.joinpath(*ledger._parts(row['reservation_id']))
+    elif family == 'worker':
+        target = paths.root / 'workers/w0.json'
+        row = json.loads(target.read_bytes())
+    else:
+        target = paths.root / 'workers/registry.json'
+        row = json.loads(target.read_bytes())
+    if not sibling:
+        target.unlink()
+    script = r'''
+import json, os, sys
+from pathlib import Path
+from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap_publish import publish_worker_registry, read_worker_registry
+from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+from agent_py_agent.agent.gateway_parts.multiprocess_executor_ledger import ExecutorLedger
+from agent_py_agent.agent.gateway_parts.multiprocess_route import WorkerPartition
+root, family, row, target, partial = Path(sys.argv[1]), sys.argv[2], json.loads(sys.argv[3]), Path(sys.argv[4]), sys.argv[5] == 'True'
+rename, write, fdopen = os.rename, os.write, os.fdopen
+
+def publication_event(event, args):
+    if event == 'os.rename' and os.fspath(args[1]) in {target.name, str(target)}:
+        os._exit(71)
+
+def at_write(fd, data):
+    if partial and bytes(data).startswith(b'{'):
+        write(fd, bytes(data)[:7])
+        os._exit(72)
+    return write(fd, data)
+
+class PartialFile:
+    def __init__(self, handle):
+        self.handle = handle
+    def __enter__(self):
+        self.handle.__enter__()
+        return self
+    def __exit__(self, *args):
+        return self.handle.__exit__(*args)
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+    def write(self, data):
+        self.handle.write(data[:7])
+        self.handle.flush()
+        os._exit(72)
+
+def at_fdopen(fd, *args, **kwargs):
+    handle = fdopen(fd, *args, **kwargs)
+    return PartialFile(handle) if partial else handle
+
+sys.addaudithook(publication_event)
+os.write, os.fdopen = at_write, at_fdopen
+if family == 'registry':
+    publish_worker_registry(root, row, read_worker_registry(root))
+elif family == 'executor':
+    ledger = ExecutorLedger(root, WorkerPartition(0, 2, row['c_run_id']))
+    with ledger._locked():
+        ledger._write(row)
+else:
+    write_json_file_atomic(target, row)
+raise AssertionError('publication was not interrupted')
+'''
+    result = subprocess.run([sys.executable, '-c', script, str(paths.root), family,
+                             json.dumps(row), str(target), str(partial)], capture_output=True, timeout=15)
+    assert result.returncode == (72 if partial else 71), (result.returncode, result.stderr)
+    stages = [path for path in target.parent.iterdir() if path.name.startswith('.' + target.name + '.')]
+    assert len(stages) == 1
+    assert stages[0].read_bytes()
+    return stages[0], row
+
+
+# LLM: 精确原writer三种family，两个启动锁及partial/full和canonical兄弟组合；stage字节不是已发表身份或权限。
+# 函数用途: 验证中断发布遗留可在全部原责任退出后原样归档并恢复启动准入。
+@pytest.mark.parametrize('family', ['registry', 'worker', 'executor'])
+@pytest.mark.parametrize('partial,sibling', [(False, True), (True, True), (False, False), (True, False)])
+@pytest.mark.parametrize('count', [0, 2])
+def test_r2_interrupted_publication_archives_exact_bytes(tmp_path, monkeypatch, family, partial, sibling, count):
+    from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+
+    paths = _dead_home(tmp_path, monkeypatch)
+    stage, row = _interrupted_publication(paths, family, partial=partial, sibling=sibling)
+    if family == 'executor':
+        monkeypatch.setattr(p2, 'observe_processes', lambda: _executor_table(row))
+    relative, content = stage.relative_to(paths.root), stage.read_bytes()
+    guard = standalone_lifecycle_guard(paths.root) if count == 0 else coordinator_guard(paths.root, count)
+    with guard as lifecycle:
+        manifest = retirement.retire_dead_multiprocess_generations(paths, target_count=count,
+            current_c_run_id='next-c', lifecycle=lifecycle if count == 0 else None)
+        if count == 0:
+            require_standalone_sources(paths, lifecycle)
+        else:
+            successor = prepare_coordinator_takeover(paths, count, 'next-c')
+            assert successor.active() and not successor._all_quarantined
+    archive = next((paths.root / 'multiprocess_retired').iterdir())
+    assert archive.joinpath(relative).read_bytes() == content
+    assert not stage.exists() and manifest['moved']
