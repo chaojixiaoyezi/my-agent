@@ -2203,6 +2203,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
     |-- PLUGIN_OBSERVATION_CANDIDATES.md # 插件观察候选结构设计稿：manifest 声明、宿主铸 ID、两层执行前复核与动作候选决策点
     |-- CAPABILITY_PACKS_V2.md           # 能力包 v2：宿主跑钉住的原版检查程序、输入原件保护、交付存在（已确认、实施中）
     |-- LEARN_TO_PACK.md                 # 学外部 agent 做成能力包或插件：两个自动装开关、一行确认、/plugins# 命令（第一期开发中）
+    |-- CAPABILITY_PACK_MCP_AND_EXTERNAL_IMPORT.md # 能力包内置 MCP 合一与外部 Claude Plugin 免改造直装/偷学双轨接入设计（待实施）
     |-- SKILL_PACK_SELECTION.md          # skill 与能力包的挑选：开关现读、会话沿用（压缩后带回）、首次挑中三组对比、"不比原版差"验收（提议中）
     |-- J16_SCREEN_OBSERVATION.md        # J16 屏幕识别设计（已确认、未实施）：自家适配器结构化窗口观察、两层复核、自动执行默认关
     |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例

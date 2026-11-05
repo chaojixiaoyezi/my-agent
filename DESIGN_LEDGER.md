@@ -1,3 +1,13 @@
+## 2026-11-05 能力包内置 MCP 合一与外部插件（Claude Plugin / 开源 Agent）双轨接入设计（设计定稿，待排期实施）
+
+解决问题：现有能力包（`plugin_package.v7`，`/plugins#`）有按任务自动推荐、入口手册、多 `SKILL.md` 与同领域合并，但硬性禁止带 MCP 进程；插件（`plugin_package.v6/v8`，`/plugins@`）能带 MCP 却没有能力包的推荐与方法包结构，导致直装社区现成 Claude Plugin 或偷学带 MCP 的外部 Agent 时被迫手动改造或拆成两份管理。详细设计放在 [能力包内置 MCP 与外部插件双轨接入设计](docs/design/CAPABILITY_PACK_MCP_AND_EXTERNAL_IMPORT.md)。
+
+- **统一以「能力包方式 (`/plugins#`)」为唯一用户外壳**：在能力包清单中允许可选声明 `mcp_servers`（及工具收紧/核验入口）。不含 MCP 的包保持零进程快速启用；含 MCP 的包沿用同一套 `/plugins#` 安装与管理入口，启用时展示 MCP 启动命令与联网/目录权限确认码并绑定 `PluginActivationRef` 沙箱运行。
+- **双轨接入（现成插件免改造直装 + 外部 Agent 偷学连带 MCP 一体化入包）**：① 遇到社区现成标准插件（`.claude-plugin/plugin.json` + `skills/` + `mcp.json`）时，免改造直接解析转换为统一能力包安装；② 遇到非插件开源 Agent 时，`learn-external-agent` 将提炼的方法文档（`CAPABILITY.md` / `SKILL.md`）与搬迁/封装的 MCP 工具打入同一个能力包，支持同领域合并与一键回退。
+- **任务级按需挂载与子代理连带授权**：能力包被当轮任务命中或通过 `allowed_skills=["capability:<包ID>"]` 授权给子代理时，自动同步授予包内文档读取权与包内 MCP 工具调用权；`/plugins#<包名> 停用|删除` 时同步撤销并清理关联 MCP 进程树。
+
+状态：用户已确认设计方向并落盘文档，尚未修改生产代码。
+
 ## 2026-11-05 1 -> 500 -> 500,000 用户三阶段演进路线图与多 Agent 并行拆单总纲（Opus × GPT-6 Pro 统一版，长期设计，未启动）
 
 解决问题：HTTP 16 线程上限与空闲/流式连接占坑、跨整轮持有 PG 连接与全量搬运 `OwnerSnapshotStore`、高频目录/文件轮询、主模型每次调用新建 TCP+TLS 连接，以及 CPython GIL 与锁颗粒度限制了多用户并发密度；同时直接推倒重写 53.9 万行有效生产代码（外加 84.8 万行测试）风险过高。完整实测基线、Opus × GPT-6 Pro 交叉评审合成、三阶段架构与 `S1` / `S2` / `S3` 共 19 个工作流的文件级拆单放在 [三阶段扩缩容与分工路线图](docs/design/SCALING_1_TO_500K_ROADMAP.md)。
