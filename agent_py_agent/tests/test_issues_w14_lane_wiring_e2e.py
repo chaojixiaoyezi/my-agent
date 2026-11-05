@@ -380,6 +380,32 @@ def _fd_count():
     raise AssertionError('当前平台没有真实 FD 计数入口')
 
 
+# LLM: 两个 W14 真实入口共享有界收敛测量；负差值不归因于维护，持续正增长仍然失败。
+# 函数用途: 等待最多两秒回收临时 FD，再返回真实描述符差值。
+def _settled_fd_delta(before_fds):
+    """Descriptor growth after a bounded settle; a decrease is an unrelated pre-existing descriptor closing."""
+    deadline = time.monotonic() + 2.0
+    while True:
+        gc.collect()
+        delta = _fd_count() - before_fds
+        if delta <= 0 or time.monotonic() >= deadline:
+            return delta
+        time.sleep(0.05)
+
+
+# LLM: 保持真实文件 FD 超过收敛窗口，确保测量不会把持续增长吞成零。
+# 函数用途: 用真实持有和释放验证泄漏检测仍然有效。
+def test_settled_fd_delta_detects_persistent_growth(tmp_path):
+    gc.collect()
+    before_fds = _fd_count()
+    descriptor = os.open(tmp_path / 'held.txt', os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        assert _settled_fd_delta(before_fds) > 0
+    finally:
+        os.close(descriptor)
+    assert _settled_fd_delta(before_fds) <= 0
+
+
 def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monkeypatch):
     world = lane_world
     controller = _controller(world.home, monkeypatch)
@@ -407,8 +433,7 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
             MemoryRetentionPolicy().maintenance_interval_seconds)
     else:
         pytest.fail('真实控制器未在有界拍数内消费宽限证明并重新走完十种车道')
-    gc.collect()
-    assert _fd_count() - before_fds == 0
+    assert _settled_fd_delta(before_fds) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all, '完成首轮覆盖后，必须有后续一拍再次报告全部十种车道'
     _assert_retired(world)

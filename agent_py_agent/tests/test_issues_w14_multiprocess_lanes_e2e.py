@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sqlite3
+import threading
 import time
 import traceback
 from functools import wraps
@@ -30,6 +31,7 @@ from agent_py_agent.tests.test_issues_w14_lane_wiring_e2e import (
     _assert_retired,
     _fd_count,
     _observe_state,
+    _settled_fd_delta,
 )
 from agent_py_agent.tests.test_issues_w14_lane_wiring_e2e import lane_world as lane_world
 
@@ -76,9 +78,17 @@ def _watch_state_commits(monkeypatch, home):
     return writes
 
 
+# LLM: 观察器只归因安装时的当前线程及后续新线程；保留原系统调用与写门校验。
+# 函数用途: 排除既存外部线程后记录真实未受门保护的写入。
 def _watch_mutations(monkeypatch, transition):
     """透明观察真实文件变更、SQLite 写语句及车道写门；不替换任何领域算法。"""
     unfenced, lane_writes = [], set()
+    foreign = set(threading.enumerate()) - {threading.current_thread()}
+
+    def record(entry):
+        # 保留线程对象，不按可能被新线程复用的 ident 排除写入。
+        if threading.current_thread() not in foreign:
+            unfenced.append(entry)
 
     def install(name, original, observer):
         monkeypatch.setattr(os, name, observer)
@@ -95,7 +105,7 @@ def _watch_mutations(monkeypatch, transition):
         def called(*args, **kwargs):
             result = original(*args, **kwargs)
             if not transition.active:
-                unfenced.append((name, str(args[0])))
+                record((name, str(args[0])))
             return result
 
         install(name, original, called)
@@ -126,24 +136,24 @@ def _watch_mutations(monkeypatch, transition):
 
         def write(self, *args):
             if not transition.active:
-                unfenced.append(('write', str(self.handle.name)))
+                record(('write', str(self.handle.name)))
             return self.handle.write(*args)
 
         def truncate(self, *args):
             if not transition.active:
-                unfenced.append(('truncate', str(self.handle.name)))
+                record(('truncate', str(self.handle.name)))
             return self.handle.truncate(*args)
 
         def writelines(self, *args):
             if not transition.active:
-                unfenced.append(('writelines', str(self.handle.name)))
+                record(('writelines', str(self.handle.name)))
             return self.handle.writelines(*args)
 
     @wraps(original_open)
     def opened(file, mode='r', *args, **kwargs):
         handle = original_open(file, mode, *args, **kwargs)
         if any(flag in mode for flag in 'wx') and not transition.active:
-            unfenced.append(('io.open:' + mode, str(file)))
+            record(('io.open:' + mode, str(file)))
         return ObservedFile(handle) if any(flag in mode for flag in 'wax+') else handle
 
     monkeypatch.setattr(io, 'open', opened)
@@ -161,7 +171,7 @@ def _watch_mutations(monkeypatch, transition):
         if (creates or flags & os.O_TRUNC) and not transition.active:
             callers = ' -> '.join(f'{frame.filename}:{frame.lineno}#{frame.name}'
                 for frame in traceback.extract_stack(limit=32)[:-1])
-            unfenced.append(('os.open:write', str(path), callers))
+            record(('os.open:write', str(path), callers))
         return fd
 
     install('open', original_os_open, descriptor)
@@ -178,10 +188,10 @@ def _watch_mutations(monkeypatch, transition):
             if kind in {'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER', 'REPLACE', 'VACUUM'}:
                 pending_write = True
                 if not transition.active:
-                    unfenced.append('sqlite:' + kind)
+                    record('sqlite:' + kind)
             elif kind in {'COMMIT', 'END', 'ROLLBACK'}:
                 if kind != 'ROLLBACK' and pending_write and not transition.active:
-                    unfenced.append('sqlite:COMMIT')
+                    record('sqlite:COMMIT')
                 pending_write = False
 
         conn.set_trace_callback(trace)
@@ -202,6 +212,68 @@ def _watch_mutations(monkeypatch, transition):
 
     monkeypatch.setattr(StorageLaneRequest, 'run_write', lane_write)
     return unfenced, lane_writes
+
+
+# LLM: 用既存线程的真实文件写入和 FD 关闭验证观察范围；维护仍经过原 transition。
+# 函数用途: 防止把其他线程的写入与资源释放误算到本次维护。
+def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch):
+    home = ensure_my_agent_home(tmp_path / 'foreign')
+    home.owner_retention_json.write_text(json.dumps(MemoryRetentionPolicy().to_dict()))
+    stop, ready, installed = threading.Event(), threading.Event(), threading.Event()
+    wrote_after_install, close_requested, closed = threading.Event(), threading.Event(), threading.Event()
+    descriptor_lock = threading.Lock()
+    held, errors = [], []
+
+    def close_held():
+        with descriptor_lock:
+            if held:
+                os.close(held.pop())
+
+    def foreign_writer():
+        try:
+            with descriptor_lock:
+                held.append(os.open(tmp_path / 'held.txt', os.O_WRONLY | os.O_CREAT, 0o600))
+            while not stop.is_set():
+                with descriptor_lock:
+                    observed = installed.is_set()
+                    (tmp_path / 'foreign.txt').write_text('foreign writer\n', encoding='utf-8')
+                    ready.set()
+                    if observed:
+                        wrote_after_install.set()
+                if close_requested.is_set():
+                    close_held()
+                    closed.set()
+                stop.wait(0.01)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            close_held()
+
+    thread = threading.Thread(target=foreign_writer, daemon=True)
+    thread.start()
+    try:
+        assert ready.wait(5), '外部写线程没有准备完成'
+        gc.collect()
+        # 只在写入句柄关闭后取基准，保证其中恰好包含线程持有的那个 FD。
+        with descriptor_lock:
+            before_fds = _fd_count()
+        transition = _RecordingTransition(home)
+        with monkeypatch.context() as patch:
+            unfenced, _ = _watch_mutations(patch, transition)
+            installed.set()
+            assert wrote_after_install.wait(5), '安装观察器后没有发生真实外部写入'
+            close_requested.set()
+            assert closed.wait(5), '外部线程没有关闭持有的 FD'
+            result = run_with_transition(home, time.time(), transition)
+    finally:
+        stop.set()
+        thread.join(5)
+        close_held()
+        assert not thread.is_alive(), '外部写线程未退出'
+    assert errors == []
+    assert result.ran
+    assert unfenced == [], f'foreign descriptor delta: {_fd_count() - before_fds}'
+    assert _settled_fd_delta(before_fds) <= 0
 
 
 def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkeypatch):
@@ -232,8 +304,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
                 MemoryRetentionPolicy().maintenance_interval_seconds)
         else:
             pytest.fail('协调维护未在有界拍数内消费宽限证明并重新走完十种车道')
-    gc.collect()
-    assert _fd_count() - before_fds == 0
+    assert _settled_fd_delta(before_fds) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all
     # LocalStore 经 global_write_commit_scope 使用相同原写门，其余车道经 run_write。

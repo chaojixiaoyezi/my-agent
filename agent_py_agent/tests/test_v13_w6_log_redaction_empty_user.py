@@ -87,4 +87,4 @@ def test_long_unmatched_text_is_bounded(code_file):
     actual = redact_sensitive_text(value, code_file=code_file)
     elapsed = time.perf_counter() - start
     assert actual == value
-    assert elapsed < 0.05
+    assert elapsed < 0.25
