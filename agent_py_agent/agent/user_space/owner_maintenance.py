@@ -5,6 +5,8 @@
 # 模块用途: 保留Count0原维护；后台按原claim逐写私有状态及有界LocalStore事件裁剪，W不压shared索引。
 from __future__ import annotations
 
+import importlib
+import inspect
 import os
 import time
 from copy import deepcopy
@@ -39,6 +41,10 @@ _QUOTA_STEADY_MAX_MS = 10
 _QUOTA_CATCH_UP_MAX_ENTRIES = 1024
 # 配额追赶期每拍的扫描时间额度下限（毫秒）。
 _QUOTA_CATCH_UP_MAX_MS = 100
+# 每个已接线通道为本拍维护总预算追加的毫秒数。
+_OWNER_LANE_SLICE_MS = 25
+# 配额高水位时维护提前到期的最短间隔秒数。
+_OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS = 300
 
 
 # LLM: 只登记本owner使用<数据扩展名>.lock协议的私有目录；不递归、不包含local_users/operations或逻辑锁目录。
@@ -55,6 +61,7 @@ def owner_lock_sidecar_dirs(home: MyAgentHomePaths) -> tuple[Path, ...]:
         getattr(home, "owner_tmp_dir", None) or (root / "tmp"),
         getattr(home, "owner_scheduler_dir", None) or (root / "scheduler"),
         *(data_dir / name for name in ("decision", "context", "skill_learning", "skill_proposals")),
+        (getattr(home, "owner_compact_dir", None) or (root / "compact")) / "conversations",
     )
 
 
@@ -126,6 +133,23 @@ class OwnerMaintenanceResult:
         return payload
 
 
+# LLM: 仅惰性调用原只读压力接口；缺失不推断压力，普通读取故障不改变策略。
+# 函数用途: 只读探测原配额账压力，接口未合入或读取不可用时不改变维护节拍。
+def _owner_pressure_for_root(root: Path) -> dict | None:
+    try:
+        module = importlib.import_module('agent_py_agent.agent.user_space.owner_quota')
+        probe = getattr(module, 'owner_quota_pressure', None)
+        return probe(root) if callable(probe) else None
+    except (OSError, ValueError):
+        return None
+
+
+# LLM: 普通与协调者入口共用相同owner根，不缓存压力或创设删除许可。
+# 函数用途: 将当前所有者根交给原只读压力探测，不扫描目录或改变保留期。
+def _owner_pressure(home) -> dict | None:
+    return _owner_pressure_for_root(home.owner_home_dir)
+
+
 # LLM: 原关闭/间隔规则优先；已提交partial沿同一maintenance.json下一拍续作，不重新等待整周期。
 #   建过配额账（受有限配额准入）的owner账脏或一轮未走完时同样下一拍续作对账，不让一次准入外写入拒绝增长一整天。
 # 函数用途: 判断原维护是否到期，包含有游标的未完成片与待追赶的配额对账。
@@ -156,6 +180,9 @@ def owner_maintenance_due(
         return True
     last_attempt = _timestamp(marker.get("last_attempt_at"))
     current = float(now if now is not None else time.time())
+    if (current - last_attempt >= _OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS
+            and (_owner_pressure_for_root(home) or {}).get('level') in ('high', 'critical')):
+        return True
     return last_attempt <= 0 or current - last_attempt >= interval
 
 
@@ -206,9 +233,12 @@ def run_owner_retention_if_due(
             return _run_quota_continuation_slice(
                 state_path, home, previous, current,
                 quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
+        scan_options = ({'scan_budget': True}
+                        if 'scan_budget' in inspect.signature(apply_owner_retention).parameters else {})
         retention = apply_owner_retention(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
+            **scan_options,
         )
         derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                             now=datetime.fromtimestamp(current, timezone.utc))
@@ -403,6 +433,10 @@ def _write_maintenance_result(state_path, retention, previous, current, effects)
     if any(effects.get(key, {}).get('partial') is True for key in
            ('derived_records_pruned', 'local_store_events_maintenance')):
         payload['maintenance_partial'] = True
+    if getattr(retention, 'scan_partial', False) is True:
+        payload['maintenance_partial'] = True
+    payload['retention_scan_partial'] = bool(getattr(retention, 'scan_partial', False))
+    payload['retention_policy_fingerprint'] = getattr(retention, 'policy_fingerprint', '')
     write_json_file_atomic_unlocked(state_path, payload)
     # 维护状态在配额准入外写入；写完按当前内容核过data与root目录行并采纳新目录戳（锁忙或核验不过即留给准入核验）。
     refresh_owner_quota_host_rows(state_path.parent.parent, ('data', ''))
@@ -697,7 +731,7 @@ __all__ = [
 # 函数用途: 按item、字节、时间预算推进登记类别，未接线与未知结果保留为partial。
 def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: int = 512,
                                   max_bytes: int = 8 * 1024 * 1024, max_seconds: float = 0.05,
-                                  should_yield=None, read_fence=None) -> dict:
+                                  should_yield=None, read_fence=None, order: tuple[str, ...] | None = None) -> dict:
     import math
 
     from .home_retention import maintenance_fence, require_maintenance_fence, storage_kind_registry
@@ -709,6 +743,9 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
     kinds = {kind.kind: kind for kind in storage_kind_registry()}
     if any(key not in kinds for key in adapters):
         raise ValueError('unknown_storage_kind')
+    if order is not None and (not isinstance(order, tuple) or len(order) != len(kinds)
+            or any(not isinstance(key, str) for key in order) or set(order) != set(kinds)):
+        raise ValueError('invalid_maintenance_order')
     if (type(max_items) is not int or type(max_bytes) is not int
             or max_items < 0 or max_bytes < 0
             or type(max_seconds) not in (int, float) or not math.isfinite(max_seconds) or max_seconds < 0):
@@ -730,6 +767,9 @@ def run_storage_maintenance_slice(previous: dict, adapters: dict, *, max_items: 
     if next_kind not in kinds:
         raise ValueError('invalid_maintenance_kind_cursor')
     start = ordered.index(next_kind)
+    if order is not None:
+        ordered = order
+        start = 0
     for offset in range(len(ordered)):
         index = (start + offset) % len(ordered)
         key = ordered[index]
@@ -847,12 +887,28 @@ def _deferred_quota_reconciliation(home, *, coordinator, commit_transition, stat
 # LLM: 日周期尚未到期且已有上一拍完整保留头与storage_maintenance状态时返回True；到日周期仍走完整维护。
 # 函数用途: 判断当前维护触发是否属于同一日周期内的存储/配额续扫。
 def _quota_only_continuation_due(owner_home: Path, previous: dict[str, Any], current: float) -> bool:
+    from ..memory_store.retention_scan import file_fingerprint, valid_fingerprint
+    from .storage_lanes import LANE_BINDINGS
+
     policy = read_json_object_report(owner_home / "retention.json", context="owner_maintenance.policy").payload
     if not bool(policy.get("maintenance_enabled", True)):
         return False
     interval = _positive_interval(policy.get("maintenance_interval_seconds"))
     last_attempt = _timestamp(previous.get("last_attempt_at"))
     if interval <= 0 or last_attempt <= 0 or current - last_attempt >= interval:
+        return False
+    # 源扫描未完必须重新进入保留服务，不能只续配额后清掉它的partial责任。
+    if previous.get('retention_scan_partial') is True:
+        return False
+    # 跨拍领域欠账只能复用同一策略的安全结论；缺少来源指纹或策略变化须重新运行保留服务。
+    storage = previous.get('storage_maintenance', {})
+    if isinstance(storage, dict) and any(key in LANE_BINDINGS for key in storage.get('pending_kinds') or ()):
+        fingerprint = previous.get('retention_policy_fingerprint')
+        if not valid_fingerprint(fingerprint) or file_fingerprint(owner_home / 'retention.json') != fingerprint:
+            return False
+    # 高水位提前到期是一轮新的维护，必须重新分派领域并刷新last_attempt节拍。
+    if (current - last_attempt >= _OWNER_MAINTENANCE_PRESSURE_REDUE_SECONDS
+            and (_owner_pressure_for_root(owner_home) or {}).get('level') in ('high', 'critical')):
         return False
     if previous.get("apply_outcome") not in ("applied", "refused", "legal_hold"):
         return False
@@ -884,6 +940,11 @@ def _run_quota_continuation_slice(state_path, home, previous, current, *, coordi
             and set(storage.get('unbound_kinds') or ()) <= {'global_indexes'}
             and set(storage.get('pending_kinds') or ()) <= {'cache_tmp_trash'})
     )
+    # 原延期标记保真，但已接线协调者的领域欠账仍须经同一commit继续，不能只核配额后清掉partial。
+    coordinator_lanes = storage.get('coordinator_lanes')
+    if (coordinator and commit_transition is not None and isinstance(coordinator_lanes, dict)
+            and (coordinator_lanes.get('pending_kinds') or coordinator_lanes.get('errors'))):
+        quota_only = False
     if not quota_only:
         retention_stub = SimpleNamespace(
             load_errors=tuple(previous.get('load_errors') or ()),
@@ -980,6 +1041,39 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
         reconcile_owner_quota_slice,
     )
     from .runtime_paths import runtime_paths_for_agent
+    from .storage_lanes import (
+        LANE_BINDINGS,
+        LANE_EVICTION_ORDER,
+        STORAGE_LANE_SLICE_ENTRIES,
+        StorageLaneBudget,
+        StorageLaneRequest,
+        resolve_storage_lane,
+        validate_lane_receipt,
+    )
+
+    registry = storage_kind_registry()
+    pressure = _owner_pressure(home)
+    order = (LANE_EVICTION_ORDER + tuple(kind.kind for kind in registry if kind.kind not in LANE_EVICTION_ORDER)
+             if pressure and pressure.get('level') in ('high', 'critical') else None)
+    lane_reports, lane_fallbacks = {}, []
+
+    # LLM: 仅解析冻结入口并透传原写门；未合入时保留，领域异常由原调度器处理。
+    # 函数用途: 将领域通道接到原调度器，未合入的入口只做保留核验。
+    def lane_adapter(kind, *, coordinator=False, commit=None):
+        # LLM: 通道持有游标副本；仅通过严格回执校验的游标可返回原发布者。
+        # 函数用途: 在原预算内调用通道，严格校验回执后才向调度器提交游标。
+        def step(cursor, budget):
+            lane = resolve_storage_lane(kind.kind)
+            if lane is None:
+                lane_fallbacks.append(kind.kind)
+                return preservation_receipt(kind, home, cursor, budget)
+            request = StorageLaneRequest(kind=kind.kind, home=home, now=float(now), cursor=cursor,
+                budget=StorageLaneBudget(budget['items'], budget['bytes'], budget['deadline']),
+                legal_hold=bool(retention.legal_hold), coordinator=coordinator, pressure=pressure, commit=commit)
+            receipt = validate_lane_receipt(lane(request))
+            lane_reports[kind.kind] = {key: value for key, value in receipt.items() if key != 'cursor'}
+            return {key: receipt[key] for key in ('cursor', 'complete', 'items', 'bytes')}
+        return step
 
     raw_entries, raw_ms = quota_max_entries, quota_max_ms
     track_quota = raw_entries is not None or raw_ms is not None or owner_quota_enabled(home.owner_home_dir)
@@ -995,6 +1089,22 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                          'deferred_reason') not in ('coordinator_adapter_protocol_required', 'retention_not_safe'),
                      deletion_enabled=False, quota_reconciliation=reconciliation,
                      deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
+        if coordinator and commit_transition is not None and not retention.load_errors and (retention.applied or retention.legal_hold):
+            lane_adapters = {kind.kind: lane_adapter(kind, coordinator=True, commit=commit_transition)
+                             for kind in registry if kind.kind in LANE_BINDINGS}
+            # 空适配器的旧延期过渡会清空pending；同轮协调者续作须恢复原集合，不能重开已完成通道。
+            if original.get('continuation_pending') and isinstance(original.get('coordinator_lanes'), dict):
+                state['pending_kinds'] = original.get('pending_kinds')
+            lane_state = run_storage_maintenance_slice(state, lane_adapters,
+                max_items=len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
+                max_seconds=len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000, order=order)
+            for key in ('cursors', 'pending_kinds', 'next_kind', 'completed', 'errors', 'items', 'bytes'):
+                state[key] = lane_state[key]
+            state['coordinator_lanes'] = {'ran': sorted(lane_reports), 'pending_kinds': lane_state['pending_kinds'],
+                'errors': lane_state['errors'], 'fallback_kinds': sorted(set(lane_fallbacks))}
+            state['continuation_pending'] = (state['continuation_pending'] or bool(lane_state['pending_kinds'])
+                                             or bool(lane_state['errors']))
+        state['pressure'] = pressure
         return state
     if not state_locked:
         with locked_json_path(_maintenance_state_path(home.owner_home_dir)):
@@ -1090,14 +1200,19 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
             return preservation_receipt(kind, home, cursor, budget)
         return step
 
-    adapters = {kind.kind: preserve_adapter(kind) for kind in storage_kind_registry()
+    adapters = {kind.kind: lane_adapter(kind) if kind.kind in LANE_BINDINGS else preserve_adapter(kind) for kind in registry
                 if kind.kind not in {'cache_tmp_trash', 'gateway_terminal', 'session_pair_rate'}}
     adapters.update(cache_tmp_trash=quota_step, gateway_terminal=receipt_step, session_pair_rate=session_pair_step)
     original = {**original, 'schema_generation': expected[0], 'maintenance_epoch': expected[1]}
     if not original.get('continuation_pending', False):
         original.pop('pending_kinds', None)
-    state = run_storage_maintenance_slice(original, adapters, max_items=quota_max_entries + len(adapters),
-        max_seconds=max(0.1, quota_max_ms / 1000 + 0.05), read_fence=read_fence)
+    state = run_storage_maintenance_slice(original, adapters,
+        max_items=quota_max_entries + len(adapters) + len(LANE_BINDINGS) * STORAGE_LANE_SLICE_ENTRIES,
+        max_seconds=max(0.1, quota_max_ms / 1000 + 0.05) + len(LANE_BINDINGS) * _OWNER_LANE_SLICE_MS / 1000,
+        read_fence=read_fence, order=order)
+    state['lane_fallback_kinds'] = sorted(set(lane_fallbacks))
+    state['lane_reports'] = lane_reports
+    state['pressure'] = pressure
     state['coordinator_deferred'] = ['global_indexes']
     state['continuation_pending'] = bool(state['errors']) or any(
         key != 'global_indexes' and (key != 'cache_tmp_trash' or track_quota)

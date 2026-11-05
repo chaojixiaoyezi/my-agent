@@ -1,5 +1,5 @@
 # LLM: 使用原retention facade及maintenance.json验证登记/预算/游标，不复制领域清理器、不把未知对象当垃圾。
-# 模块用途: 覆盖32类生命周期的声明完整性与安全续作。
+# 模块用途: 覆盖36类生命周期的声明完整性与安全续作。
 from __future__ import annotations
 
 import pytest
@@ -12,9 +12,9 @@ from agent_py_agent.agent.user_space import owner_maintenance as maintenance
 # 函数用途: 防止实现漏掉Gateway、outbox、迁移等增长类别。
 def test_maintenance_registry_covers_all_thirty_two_kinds():
     registry = getattr(retention, 'storage_kind_registry', None)
-    assert callable(registry), '32 storage kinds must be declared in the existing retention facade'
+    assert callable(registry), '36 storage kinds must be declared in the existing retention facade'
     kinds = registry()
-    assert len(kinds) == len({kind.kind for kind in kinds}) == 32
+    assert len(kinds) == len({kind.kind for kind in kinds}) == 36
     assert {'gateway_active', 'gateway_terminal', 'outbox_delivery', 'legacy_layout', 'session_pair_rate'} <= {
         kind.kind for kind in kinds}
     for kind in kinds:
