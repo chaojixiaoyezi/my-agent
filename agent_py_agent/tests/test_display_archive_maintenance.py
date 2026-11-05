@@ -613,3 +613,27 @@ def test_stopped_holders_are_released_while_one_shot_roots_keep_arriving(tmp_pat
     holder_inodes = {root.stat().st_ino for root in holders}
     assert len(seen[victim.stat().st_ino]) == 100 and max(calls) == 64
     assert not [key for key in maintenance._live_scans if key[1] in holder_inodes]
+
+
+def test_display_archive_lane_import_executes_without_file_access(monkeypatch):
+    """预先编译源码，拒绝模块执行期的文件访问；不把加载源码自身的读盘算成副作用。"""
+    import builtins
+    import inspect
+    import io
+    from pathlib import Path
+
+    code = compile(Path(maintenance.__file__).read_text(), maintenance.__file__, "exec")
+    namespace = {"__name__": maintenance.__name__, "__package__": maintenance.__package__}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("归档维护模块导入时访问了文件")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, "open", forbidden)
+        guard.setattr(io, "open", forbidden)
+        for name in ("open", "stat", "lstat", "scandir", "listdir"):
+            guard.setattr(os, name, forbidden)
+        exec(code, namespace)
+    lane = namespace.get("maintain_display_archives_lane")
+    assert callable(lane)
+    assert list(inspect.signature(lane).parameters) == ["request"]
