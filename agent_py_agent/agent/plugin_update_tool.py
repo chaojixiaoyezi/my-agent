@@ -63,7 +63,7 @@ class PluginUpdateTool(BaseTool):
             limits = PackageReadLimits()
             if plugin_source_is_directory(params["source"], self.workspace):
                 source = open_plugin_source_directory(params["source"], self.workspace, self.policy)
-                imported = import_claude_plugin(ExternalImportRequest(source))
+                imported = import_claude_plugin(ExternalImportRequest(source, path_check=self.policy.check))
                 package = inspect_plugin_package(imported.built.payload, limits=limits)
                 if package.manifest.plugin_id != plugin_id:
                     raise ExternalImportError("PLUGIN_IMPORT_ID_CONFLICT", "update_id_mismatch")

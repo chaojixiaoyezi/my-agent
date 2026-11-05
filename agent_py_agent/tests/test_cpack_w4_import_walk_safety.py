@@ -1,9 +1,12 @@
 """W4 来源树安全与预算；Windows 无 FD 时必须明确拒绝而非路径降级。"""
 from __future__ import annotations
 
+import gc
 import os
+import shutil
 import socket
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -127,3 +130,45 @@ def test_walk_reads_each_regular_file_once_and_never_reads_hidden(tmp_path, monk
     imp.import_claude_plugin(imp.ExternalImportRequest(tmp_path))
     assert reads == ["CAPABILITY.md", "sub/a"]
     assert len(listings) == len(set(listings)) == 2
+
+
+@requires_fd
+def test_policy_denied_member_refuses_before_read(tmp_path, monkeypatch):
+    from agent_py_agent.tests.test_cpack_w4_import_synthesis import fixture_tree
+    from agent_py_agent.tests.test_pack_commands import _agent, _manager
+
+    agent = _agent(tmp_path, monkeypatch)
+    policy = _manager(agent).context.path_policy
+    root = fixture_tree(agent.home_paths.owner_home_dir / "workspace" / "runtime")
+    denied = put(root, "services/queue/item.md", "marker\n")
+    assert policy.check(root).allowed
+    assert not policy.check(denied).allowed
+    reads = []
+    original_read = imp.read_bytes_beneath
+
+    def recorder(source_root, parts, **kwargs):
+        reads.append(tuple(parts))
+        return original_read(source_root, parts, **kwargs)
+
+    monkeypatch.setattr(imp, "read_bytes_beneath", recorder)
+    fd_root = Path("/dev/fd") if Path("/dev/fd").is_dir() else Path("/proc/self/fd")
+    gc.collect()
+    before = len(os.listdir(fd_root))
+    request = imp.ExternalImportRequest(root, path_check=policy.check)
+    try:
+        with pytest.raises(imp.ExternalImportError) as error:
+            imp.import_claude_plugin(request)
+        assert error.value.code == "PLUGIN_IMPORT_PATH_UNSAFE"
+        assert error.value.detail == "member_unauthorized"
+    finally:
+        gc.collect()
+        fd_delta = len(os.listdir(fd_root)) - before
+        assert fd_delta == 0
+        assert all("services" not in parts for parts in reads), reads
+
+    shutil.rmtree(root / "services")
+    checked = imp.import_claude_plugin(imp.ExternalImportRequest(root, path_check=policy.check))
+    unchecked = imp.import_claude_plugin(imp.ExternalImportRequest(root))
+    assert checked.built.sha256 == unchecked.built.sha256
+    assert checked.built.payload == unchecked.built.payload
+    assert checked.receipt == unchecked.receipt

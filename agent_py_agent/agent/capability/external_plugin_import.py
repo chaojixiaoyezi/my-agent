@@ -11,6 +11,7 @@ import stat
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from ..capability_package_manifest import PackMCPServer, validate_capability_path
 from ..common.log_redaction import redact_sensitive_text
@@ -22,6 +23,11 @@ from ..plugin_package import PackageReadLimits
 from ..tooling.package_build_tool import _VERSION
 from .package_build import BuiltPackage, PackageBuildError, build_capability_pack
 from .skills import split_skill_frontmatter
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ..path_access_policy import PathAccessDecision
 
 _RECEIPT_PATH = "import/RECEIPT.json"
 _MANIFEST_PATH = ".claude-plugin/plugin.json"
@@ -43,6 +49,7 @@ class ExternalImportRequest:
     docs_only: bool = False
     network: bool = False
     limits: PackageReadLimits = field(default_factory=PackageReadLimits)
+    path_check: Callable[[Path], PathAccessDecision] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -137,6 +144,8 @@ def _walk(request: ExternalImportRequest) -> tuple[dict[str, bytes], list[dict]]
             if name.startswith(".") and not exception:
                 hidden.append(_component("hidden", name, path, "ignored", "hidden_entry_ignored"))
                 continue
+            if request.path_check is not None and not request.path_check(root.joinpath(*path_parts)).allowed:
+                raise ExternalImportError("PLUGIN_IMPORT_PATH_UNSAFE", "member_unauthorized")
             if stat.S_ISDIR(st.st_mode):
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 try:

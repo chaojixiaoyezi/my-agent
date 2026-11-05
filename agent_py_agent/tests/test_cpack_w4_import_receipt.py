@@ -12,6 +12,7 @@ from agent_py_agent.tests.test_cpack_w4_import_synthesis import (
     bundled,
     fixture_tree,
     members,
+    put,
     requires_fd,
 )
 
@@ -118,3 +119,59 @@ def test_directory_pack_never_overwrites_legacy_plugin(tmp_path, monkeypatch):
         refused = _tui(agent, text)
         assert refused["error_code"] == "PLUGIN_IMPORT_ID_CONFLICT", refused
         assert _manager(agent).installations.snapshot()[0] == before
+
+
+@requires_fd
+def test_directory_install_and_update_refuse_policy_denied_descendant(tmp_path, monkeypatch):
+    from agent_py_agent.agent.plugin_install_tool import PluginInstallTool
+    from agent_py_agent.agent.plugin_update_tool import PluginUpdateTool
+    from agent_py_agent.tests.test_pack_commands import _agent, _manager, _tui
+
+    outcomes = []
+    for tool_type in (PluginInstallTool, PluginUpdateTool):
+        original_execute = tool_type.execute
+
+        def record_outcome(self, params, execute=original_execute):
+            outcome = execute(self, params)
+            outcomes.append(outcome)
+            return outcome
+
+        monkeypatch.setattr(tool_type, "execute", record_outcome)
+
+    agent = _agent(tmp_path, monkeypatch)
+    manager = _manager(agent)
+    policy = manager.context.path_policy
+    store = manager.installations
+    root = fixture_tree(agent.home_paths.owner_home_dir / "workspace" / "runtime")
+    denied = put(root, "services/queue/item.md", "marker\n")
+    assert policy.check(root).allowed
+    assert not policy.check(denied).allowed
+
+    def store_bytes():
+        return {path.relative_to(store.root): path.read_bytes()
+                for path in store.root.rglob("*") if path.is_file()}
+
+    empty = store_bytes()
+    refused = _tui(agent, f"/plugins install {root}")
+    assert refused["error_code"] == "PLUGIN_IMPORT_PATH_UNSAFE", refused
+    assert refused["ok"] is False
+    assert len(outcomes) == 1
+    assert outcomes[-1].effect_outcome == "not_started"
+    assert _manager(agent).installations.snapshot() == ()
+    assert store_bytes() == empty
+
+    clean = fixture_tree(agent.home_paths.owner_home_dir / "fixture-source")
+    installed = _tui(agent, f"/plugins install {clean}")
+    assert installed["ok"], installed
+    before = _manager(agent).installations.snapshot()[0]
+    before_bytes = store_bytes()
+    package_bytes = store.package_bytes(before)
+    outcomes.clear()
+    refused = _tui(agent, f"/plugins update example-pack {root}")
+    assert refused["error_code"] == "PLUGIN_IMPORT_PATH_UNSAFE", refused
+    assert refused["ok"] is False
+    assert len(outcomes) == 1
+    assert outcomes[-1].effect_outcome == "not_started"
+    assert _manager(agent).installations.snapshot() == (before,)
+    assert store.package_bytes(before) == package_bytes
+    assert store_bytes() == before_bytes
