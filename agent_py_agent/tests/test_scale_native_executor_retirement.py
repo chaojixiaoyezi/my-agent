@@ -659,14 +659,13 @@ def _wire_assert_budget(launches, worker_count=2):
 def _wire_prepare(base):
     from dataclasses import replace
 
-    import yaml
-
     from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.gateway_parts import multiprocess_curator_accounting as accounting
     from agent_py_agent.agent.gateway_parts.multiprocess_background_request import freeze_source
     from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.settings.config_io import _format_yaml_scalar
     from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
     from agent_py_agent.agent.user_space.owner_resolver import ensure_owner_home
     from agent_py_agent.tests.test_scale_curator_quota_owner_budget import _append_run
@@ -693,8 +692,32 @@ def _wire_prepare(base):
     # 此规范完成记录是明确的历史输入，不是本轮真实模型执行结果；重启必须保留它且不重计。
     _append_run(home, owner, 'memory-curator-run-wire-history',
                 finished=accounting.quota_date() + 'T00:00:01+00:00')
-    (base / 'config.yaml').write_text(yaml.safe_dump(options), encoding='utf-8')
+    # 固定夹具仅含标量和空列表；复用标准库配置格式化，保留路径中的中文、空格和井号。
+    text = ''.join(f'{key}: {_format_yaml_scalar(value) if isinstance(value, str) else value}\n'
+                   for key, value in options.items())
+    (base / 'config.yaml').write_text(text, encoding='utf-8')
     (base / 'curator-source.json').write_text(json.dumps(freeze_source(home, owner, state.path, 'curator')))
+
+
+# 缺少可选 PyYAML 时仍须生成可由正式 loader 原样回读的配置，不能静默丢失字段或类型。
+def test_wire_prepare_config_roundtrip_without_pyyaml(tmp_path, monkeypatch):
+    import sys
+
+    from agent_py_agent.agent.settings import load_config, load_simple_yaml
+
+    base = tmp_path / 'wire 配置 #'
+    base.mkdir()
+    monkeypatch.setenv('MY_AGENT_HOME', str(base / 'home'))
+    monkeypatch.setitem(sys.modules, 'yaml', None)
+    _wire_prepare(base)
+    expected = {'my_agent_home': str(base / 'home'), 'model_backend': 'echo', 'prompt_files': [],
+                'gateway_worker_process_count': 2, 'max_tokens': 65536,
+                'memory_curator_turn_threshold': 1}
+    path = base / 'config.yaml'
+    assert load_simple_yaml(path) == expected
+    config = load_config(path)
+    # model_backend 是 host_only 投影，正式 loader 不从 YAML 选模型；原始文本仍须完整保留 echo。
+    assert {key: getattr(config, key) for key in expected} == {**expected, 'model_backend': ''}
 
 
 # LLM: 原prepared入口冻结真实owner/指纹，再由同一原gate准入；不直接写route/P3/claim或terminal。
