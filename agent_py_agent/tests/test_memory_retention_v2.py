@@ -135,7 +135,7 @@ def _reject_old_candidate(candidates: CandidateService):
     return old
 
 
-# LLM: 用真实 ConversationStore 写入带结构化用户与时间的临时会话，不直接伪造会话索引。
+# LLM: 用真实ConversationStore写会话；本夹具用于退休场景，明确解除写者自动建立的两份绑定。
 # 函数用途: 创建一条用户历史消息并返回存储、线程与消息身份。
 def _conversation(root: Path, *, user: str, at: float):
     store = ConversationStore(root)
@@ -156,6 +156,10 @@ def _conversation(root: Path, *, user: str, at: float):
             "now": at,
         }
     )
+    for name in ("channel_bindings.json", "user_latest_threads.json"):
+        index = root / name
+        payload = json.loads(index.read_text())
+        index.write_text(json.dumps({key: value for key, value in payload.items() if value != thread.thread_id}))
     return store, store.threads.load(thread.thread_id), message
 
 
@@ -270,14 +274,12 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     assert "audit" not in categories
     assert old_audit.exists()
     assert {
-        "daily",
-        "curator_run",
-        "compact",
         "rejected_candidate",
         "completed_task",
         "tool_output",
         "conversation",
     } <= categories
+    assert not categories.intersection({"daily", "curator_run", "compact"})
     assert not any(action.path == active for action in plan.actions)
     assert not any(str(held) in str(action.path) for action in plan.actions)
 
@@ -288,9 +290,9 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     # audit 类别不再参与清理，两个文件都必须原地保留。
     assert old_audit.exists()
     assert fresh_audit.exists()
-    assert not old_daily.exists()
-    assert not old_curator.exists()
-    assert not old_compact.exists()
+    assert old_daily.exists()
+    assert old_curator.exists()
+    assert old_compact.exists()
     assert rejected.candidate_id not in {item.candidate_id for item in candidates.list()}
     assert not completed.exists()
     assert tool_only.exists()

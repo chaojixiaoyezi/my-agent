@@ -199,8 +199,8 @@ def _protected_runtime_actions(
     return actions
 
 
-# LLM: 消费同次规划的严格pin快照；引用来源读全才规划Daily/Compact/Curator，保留原回收合同。
-# 函数用途: 汇总按龄动作并保护引用；安全审计按记录计龄，原始audit继续禁止删除。
+# LLM: 仅临时缓存按mtime规划；记忆和Compact不是年龄清理对象，策略兼容字段仍保留。
+# 函数用途: 汇总临时文件按龄动作与记录级安全审计整理。
 def _aged_file_actions(
     context: _RetentionScanContext,
     selected_task_roots: frozenset[Path],
@@ -208,22 +208,18 @@ def _aged_file_actions(
 ) -> list[MemoryRetentionAction]:
     home = context.home
     policy = context.policy
-    pins, complete = protection
+    # memory/daily和memory/curator/runs是记忆资产，永不按mtime删除；旧策略键仅用于兼容（#178）。
+    # O/compact保存活线程可达的CoW节点及检查点副本，mtime不表示存活；由W3按可达性回收。
     categories = (
         # LLM: audit 类别本次一律跳过。类别名与实际数据不符——O/audit/*.jsonl 是主代理每轮的记忆归档
         #   原始事件，Curator 要读，不是审计日志；直接删不可恢复。等存储登记表定了语义再处理
         #   （dev 2026-09-28 裁定）。
         # ("audit", Path(home.owner_audit_dir), policy.audit_days, "*.jsonl"),
-        ("daily", Path(home.owner_memory_daily_dir), policy.daily_days, "*.jsonl"),
-        ("curator_run", Path(home.owner_memory_curator_runs_dir), policy.curator_run_days, "*.jsonl"),
-        ("compact", Path(home.owner_compact_dir), policy.compact_days, "*"),
         ("cache", Path(home.owner_cache_dir), policy.cache_days, "*"),
         ("tmp", Path(home.owner_tmp_dir), policy.tmp_days, "*"),
     )
     actions: list[MemoryRetentionAction] = []
     for category, root, days, pattern in categories:
-        if category in {"daily", "compact", "curator_run"} and not complete:
-            continue
         actions.extend(
             _expired_file_actions(
                 category=category,
@@ -233,7 +229,7 @@ def _aged_file_actions(
                 now=context.now,
                 excluded_roots=selected_task_roots,
                 errors=context.errors,
-                protection=(pins, home) if category in {"daily", "compact", "curator_run"} else None,
+                protection=None,
             )
         )
     actions.extend(_security_audit_actions(home, policy.security_audit_days, context.now, context.errors))
@@ -1040,7 +1036,7 @@ def _subagent_scratch_actions(
     return actions
 
 
-# LLM: ConversationStore 原文按 thread 整体处理；有 active_task_ids、held task 或坏 transcript 时绝不删除。
+# LLM: 原文按thread整体处理；绑定、索引未知、active task、held task或坏transcript均保护。
 # 函数用途: 规划超过 conversation_days 的完整会话及其 thread-scoped 附属文件移入回收站。
 def _conversation_actions(
     *,
@@ -1056,6 +1052,9 @@ def _conversation_actions(
     cutoff = now.timestamp() - policy.conversation_days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     for root in roots:
+        bound = _bound_thread_ids(root, errors)
+        if bound is None:
+            continue
         for thread_path in sorted((root / "threads").glob("*.json")):
             report = read_json_object_report(
                 thread_path,
@@ -1092,6 +1091,8 @@ def _conversation_actions(
                 continue
             if thread.active_task_ids or held_task_ids.intersection(thread.task_ids):
                 continue
+            if thread.thread_id in bound:
+                continue
             if thread.updated_at <= 0:
                 errors.append(
                     _state_error("MEMORY_RETENTION_CONVERSATION_TIMESTAMP_INVALID", thread_path)
@@ -1127,6 +1128,23 @@ def _conversation_actions(
                 )
             )
     return actions
+
+
+# LLM: 两个共享路由只读一次；缺文件是空表，任何读取错误保护整个会话根并报告原因。
+# 函数用途: 收集仍被路由或用户最近会话索引绑定的线程。
+def _bound_thread_ids(root: Path, errors: list[MemoryRetentionError]) -> set[str] | None:
+    bound: set[str] = set()
+    unreadable = False
+    for name in ("channel_bindings.json", "user_latest_threads.json"):
+        path = root / name
+        report = read_json_object_report(path, context="memory_retention.binding_index")
+        if report.load_error is not None:
+            errors.append(MemoryRetentionError("MEMORY_RETENTION_BINDING_INDEX_UNREADABLE", str(path),
+                str(report.load_error.get("error_type") or "unreadable binding index")))
+            unreadable = True
+        else:
+            bound.update(value for value in report.payload.values() if isinstance(value, str))
+    return None if unreadable else bound
 
 
 # LLM: thread-scoped 文件通过结构化 ID 组成；message JSONL 坏行会阻断整个会话删除。
@@ -1382,6 +1400,9 @@ def _trash_actions(
             errors.append(_state_error("MEMORY_RETENTION_TOMBSTONE_INVALID", tombstone))
             continue
         if report.payload.get("status") != "trashed" or _trash_transaction_pending(tombstone.parent):
+            continue
+        # 旧记忆与Compact回收副本仍须可恢复；最终移除留给D-173-RESTORE，不能继续按龄清除。
+        if report.payload.get("category") in {"daily", "curator_run", "compact"}:
             continue
         if moved < cutoff:
             container = tombstone.parent
