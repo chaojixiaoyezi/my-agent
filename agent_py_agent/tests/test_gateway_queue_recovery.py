@@ -1,4 +1,9 @@
 """实际临时C认证HTTP重放与唯一queue去向，模型fake；普通资源故障保原部分事实，不修改坏记录造场景。"""
+import time
+from contextlib import contextmanager
+
+import pytest
+
 from agent_py_agent.agent.backends.request_scope import provider_request_budget
 from agent_py_agent.agent.gateway_parts import http_handlers
 from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
@@ -12,7 +17,8 @@ from agent_py_agent.tests.test_gateway_background_fresh_queue import (
 )
 
 
-def test_actual_http_pending_replay_recovers_after_first_queue_busy(tmp_path, monkeypatch):
+@pytest.mark.parametrize('slow_replay', [False, True])
+def test_actual_http_pending_replay_recovers_after_first_queue_busy(tmp_path, monkeypatch, slow_replay):
     original_deadline = producer.input_resource_deadline
     def short_budget():
         with provider_request_budget(0.10):
@@ -24,6 +30,7 @@ def test_actual_http_pending_replay_recovers_after_first_queue_busy(tmp_path, mo
         initialize = producer.CoordinatorInputReceiptSource.__init__
         load = inputs.load_or_prepare_gateway_input_request_locked
         host_prepare = http_handlers._prepare_http_gateway_input
+        guidance_scope = producer.CoordinatorInputReceiptSource._queue_guidance_receipt
         statuses, hosts, sources = [], [], []
         def construct(source, handler, server):
             initialize(source, handler, server)
@@ -39,10 +46,18 @@ def test_actual_http_pending_replay_recovers_after_first_queue_busy(tmp_path, mo
             canonical = store.storage.guidance_dedupe_path(expected.guidance_dedupe_key)
             with held_lock(locked_file_transition(canonical.with_name('.'+canonical.name+'.transition'))):
                 return route(source, expected, scope, **options)
+        @contextmanager
+        def delayed_replay(source, expected, deadline):
+            with guidance_scope(source, expected, deadline) as row:
+                if slow_replay and source._fresh is None:
+                    # 模拟重放读盘超过首拍专用100ms预算；正常重放仍须按原5s资源合同收敛。
+                    time.sleep(0.12)
+                yield row
         monkeypatch.setattr(producer.CoordinatorInputReceiptSource, 'route_fresh', busy)
         monkeypatch.setattr(producer.CoordinatorInputReceiptSource, '__init__', construct)
         monkeypatch.setattr(inputs, 'load_or_prepare_gateway_input_request_locked', observe)
         monkeypatch.setattr(http_handlers, '_prepare_http_gateway_input', capture_host)
+        monkeypatch.setattr(producer.CoordinatorInputReceiptSource, '_queue_guidance_receipt', delayed_replay)
         def first():
             code, failed = send_first(server)
             assert code == 503 and failed['terminal'] is False
@@ -50,6 +65,8 @@ def test_actual_http_pending_replay_recovers_after_first_queue_busy(tmp_path, mo
             assert receipt.state == 'pending' and receipt.transport is None
             assert not (gate.paths.inbox/(receipt.request_id+'.json')).exists()
             original = receipt.prepared_request
+            # 首拍专用短预算仅用于制造锁忙；新的HTTP重放恢复原生产预算。
+            monkeypatch.setattr(producer, 'input_resource_deadline', original_deadline)
             code, replay = send_first(server)
             assert code == 202 and replay['input_state'] == 'queued', replay
             restored = inputs.read_gateway_input_receipt(gate.paths, receipt.request_id)

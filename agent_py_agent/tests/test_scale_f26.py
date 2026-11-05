@@ -77,11 +77,14 @@ def test_pending_target_lookup_ignores_closed_history(tmp_path, monkeypatch):
         for number in range(history):
             case = CollaborationCase(case_id=f"closed-{number}", thread_id="thread", status="closed")
             (cases / f"{case.case_id}.json").write_text(json.dumps(case.to_dict()))
-        store = CollaborationStore(root)
-        worker = getattr(store, "_history_worker", None)
-        if worker is not None:
-            worker.join(timeout=10)
-            assert not worker.is_alive()
+        # 本测试测迁移后的热查询，不要求后台线程在固定10秒内完成冷历史。
+        # 仅把原生产维护任务调度到当前线程，实际分页、规范读取与索引写入不替换。
+        with monkeypatch.context() as setup:
+            setup.setattr(CollaborationStore, "_start_history_maintenance", CollaborationStore._maintain_history)
+            store = CollaborationStore(root)
+        migration = store._history_maintenance_report
+        assert not migration["errors"] and migration["complete"] is True, migration
+        assert migration["remaining"] == 0
         case = store.open_case({"thread_id": "thread", "title": "当前工作"})
         request = store.request_collaboration({"case_id": case.case_id, "target_agent_ids": ["target"], "question": "核对"})
         scans = []
