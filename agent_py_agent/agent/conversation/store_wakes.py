@@ -36,6 +36,7 @@ from .store_wake_publication import (
     publication_receipt,
     publish_deduped,
     rebuild_task_responsibility_index,
+    recover_task_responsibility_index,
     register_task_locator,
     remove_task_locator,
     session_task_identity,
@@ -238,6 +239,11 @@ class WakeStore:
     # 函数用途: 在热路径之外为旧库建立可核验的任务级覆盖。
     def rebuild_task_responsibility_index(self):
         return rebuild_task_responsibility_index(self.storage)
+
+    # LLM: 显式可写恢复；complete只查metadata，unknown按原owner/index门串行重建，失败保留queued义务并传播原错误。
+    # 函数用途: 在resume/restore/drain取任何task共享门前恢复派生覆盖，不把报告改成写入口。
+    def recover_task_responsibility_index(self, *, blocking=True):
+        return recover_task_responsibility_index(self.storage, blocking=blocking)
 
     # LLM: 有键配对先冻结原负载，再安装 wake/观察；部分提交原样报错，不追加随机无链观察。
     #   retain_handled 是显式通用策略；无键调用不承诺重试幂等，线程活动仍原子合并。

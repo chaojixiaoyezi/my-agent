@@ -15,6 +15,7 @@ from dataclasses import replace
 from ..gateway_parts.io import locked_file_transition
 from ..plugin_host.business_action_specs import business_action_spec
 from ..plugin_host.schemas import validate_object
+from ..runtime_errors import DataCorruptionError
 from .background_agent_quota import BackgroundAgentQuota
 from .background_team_lifecycle import (
     BACKGROUND_IDENTITY_KEY,
@@ -481,7 +482,8 @@ class BackgroundAgentService:
             # 原读取边界的任何失败都保留未知责任，不把关联损坏解释成当前没有执行。
             return None
 
-    # LLM: 恢复/退休drain共用原输入；原身份锁内只读一次claim，各任务在同一task锁内检查定位与发布，不追加正文或执行模型。
+    # LLM: 恢复/退休drain共用原输入；原身份锁内先在所有task共享门外恢复索引，再只读一次claim，各任务同锁检查/发布。
+    #   恢复失败或锁内责任报告未知均显式拒绝，已提交身份的同键重放仍会重试此义务；原queued正文、任务身份与去重证明不变。
     # 函数用途: 仅在原唤醒及执行责任均已结束时恢复调度，允许暂停身份排空旧工作。
     def _republish_pending_work(self, thread, tasks, *, actor):
         from .session_messaging import (
@@ -494,6 +496,8 @@ class BackgroundAgentService:
             thread = self._thread(thread.thread_id, actor)
             if not background_identity_allows_work(thread, existing=True) or thread.status != "active":
                 return
+            if tasks:
+                self.store.wakes.recover_task_responsibility_index()
             generation = str(background_identity(thread).identity_revision)
             executing = self._running_session_task(thread)
             for task in tasks:
@@ -509,7 +513,10 @@ class BackgroundAgentService:
                     continue
                 with self.store.wakes.task_responsibility_guard(thread.thread_id, current.task_id):
                     live, error = self.store.wakes.task_responsibility_report(thread.thread_id, current.task_id)
-                    if error or live:
+                    if error:
+                        # 快查complete后另一重建可能已发表unknown；持共享门时只报错，绝不升级锁或假报恢复成功。
+                        raise DataCorruptionError("task wake responsibility recovery is pending")
+                    if live:
                         continue
                     # 消费者可在查询期间结束准确任务；发布前仍沿原任务权威重读。
                     if self.store.session_tasks.require(current.task_id).status in SESSION_TASK_TERMINAL_STATUSES:
