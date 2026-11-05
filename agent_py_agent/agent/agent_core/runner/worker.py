@@ -430,33 +430,33 @@ def _attach_worker_runtime(worker, params: RunSubagentWorkerParams) -> None:
     _attach_worker_local_store(worker, params.local_store)
 
 
-# LLM: 激活后在 C 内按原 attempt 窄更新；不以锁外 load/save 覆盖停止或换代后的任务。
+# LLM: 先持 CG 再进入 C 的原短事务，按原 attempt 窄更新；不以锁外 load/save 覆盖停止或换代后的任务。
 # 函数用途: 记录本轮实际配置来源，迟到 worker 不能改写新轮元数据。
 def _record_effective_config_overlay(worker, run_id: str, task, *, attempt_id: str) -> None:
     from ...common.request_execution_ports import gateway_short_transaction
 
-    with gateway_short_transaction("child_config_overlay_commit"):
-        identity = getattr(task, "runtime_identity", None)
-        overlay_ref = str(getattr(identity, "config_overlay_ref", "") or "").strip()
-        if not overlay_ref:
-            return
-        overlay = {
-            "schema_version": "runtime_config_overlay.v1",
-            "overlay_ref": overlay_ref,
-            "scope": str(getattr(identity, "config_scope", "") or "run"),
-            "config_sources": getattr(worker.config, "config_sources", {}),
-            "config_layers": list(getattr(worker.config, "config_layers", []) or []),
-            "warnings": list(getattr(worker.config, "config_warnings", []) or []),
-        }
+    with worker.subagents.creation_guard():
+        with gateway_short_transaction("child_config_overlay_commit"):
+            identity = getattr(task, "runtime_identity", None)
+            overlay_ref = str(getattr(identity, "config_overlay_ref", "") or "").strip()
+            if not overlay_ref:
+                return
+            overlay = {
+                "schema_version": "runtime_config_overlay.v1",
+                "overlay_ref": overlay_ref,
+                "scope": str(getattr(identity, "config_scope", "") or "run"),
+                "config_sources": getattr(worker.config, "config_sources", {}),
+                "config_layers": list(getattr(worker.config, "config_layers", []) or []),
+                "warnings": list(getattr(worker.config, "config_warnings", []) or []),
+            }
 
-        # LLM: 同一 canonical mutation 再核准确执行轮；异常不写入，不重建整个旧任务快照。
-        # 函数用途: 只保存本次负责的配置诊断字段。
-        def record(current):
-            if current.runner_active_attempt_id != attempt_id or current.status != "RUNNING":
-                raise RuntimeConflictError("配置元数据的原执行轮已失效")
-            current.attributes = {**(current.attributes or {}), "runtime_config_overlay": overlay}
+            # LLM: 同一 canonical mutation 再核准确执行轮；异常不写入，不重建整个旧任务快照。
+            # 函数用途: 只保存本次负责的配置诊断字段。
+            def record(current):
+                if current.runner_active_attempt_id != attempt_id or current.status != "RUNNING":
+                    raise RuntimeConflictError("配置元数据的原执行轮已失效")
+                current.attributes = {**(current.attributes or {}), "runtime_config_overlay": overlay}
 
-        with worker.subagents.creation_guard():
             if runner_attempt_cancelled(worker.subagents, run_id, attempt_id):
                 raise RuntimeConflictError("配置元数据的原执行权已关闭")
             worker.subagents.mutate(run_id, record)

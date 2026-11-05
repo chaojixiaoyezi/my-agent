@@ -74,7 +74,7 @@ class LocalRunControl:
             self._finished = True
 
 
-# LLM: 已发布身份按 task→句柄锁顺序重新读取；与 Compact 创建/发布共用原 task guard，慢清理留在锁外。
+# LLM: 已发布身份按 CG→task→句柄锁顺序重新读取；与 Compact 创建/发布共用原 task guard，慢清理留在锁外。
 # 函数用途: 关闭本地主执行权并冻结原资源；未发布时只关闭发布门，无法管理的执行不能假称已清理。
 def prepare_local_task_stop(agent: object, control: LocalRunControl):
     from .task_resources import close_main_task_authority, freeze_task_resources
@@ -88,7 +88,7 @@ def prepare_local_task_stop(agent: object, control: LocalRunControl):
             if getattr(getattr(agent, "subagents", None), "runtime_db", None) is None:
                 raise ValueError("未管理的本地回合无法确认资源归属")
             return None
-    with agent.conversation_store.tasks.transition_guard(binding["task_id"]), agent.subagents.creation_guard():
+    with agent.subagents.creation_guard(), agent.conversation_store.tasks.transition_guard(binding["task_id"]):
         control.request_interrupt()
         binding = control.runtime_authority()
         scope = close_main_task_authority(
