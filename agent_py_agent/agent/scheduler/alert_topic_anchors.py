@@ -19,6 +19,7 @@ from ..common.nofollow_fs import (
     ensure_private_dir,
     open_directory_beneath,
     read_bytes_beneath,
+    unlink_file_beneath,
     write_text_atomic_beneath,
 )
 
@@ -153,6 +154,10 @@ def _validate_row(row):
             or not isinstance(row.get('root_message_id'), str) or not isinstance(row.get('thread_id'), str)
             or 'updated_at' not in row or row['state'] == 'sent' and not row['root_message_id']):
         raise ValueError('invalid alert anchor entry')
+    proof = row.get('root_delivery_proof')
+    if proof is not None and (not isinstance(proof, dict) or any(
+            not isinstance(value, str) for value in proof.values())):
+        raise ValueError('invalid alert root delivery proof')
     _encode(row)
 
 
@@ -211,7 +216,7 @@ def _current(root, alert_key):
 
 # LLM: 同事件判断、pending 与原始派发键同一锁/原子记录；布尔只给本次发送，不是持久重放许可。
 # 函数用途: 预留锚点并区分唯一首发者与已有预留。
-def _reserve_for_delivery(owner_home, alert_key, *, now, dispatch_key=''):
+def _reserve_for_delivery(owner_home, alert_key, *, now, dispatch_key='', delivery_proof=None):
     root, lock = _prepare(owner_home, alert_key)
     with locked_json_path(lock):
         layout, data = _current(root, alert_key)
@@ -219,10 +224,30 @@ def _reserve_for_delivery(owner_home, alert_key, *, now, dispatch_key=''):
             row = data['anchors'][alert_key]
             return dict(row), False, data.get('root_delivery_keys', {}).get(alert_key, '')
         row = {'root_message_id': '', 'thread_id': '', 'state': 'pending', 'updated_at': now}
+        if delivery_proof is not None:
+            row['root_delivery_proof'] = dict(delivery_proof)
         if not isinstance(dispatch_key, str):
             raise ValueError('invalid alert dispatch key')
         _write(root, _record(alert_key, layout, row, dispatch_key))
         return dict(row), True, dispatch_key
+
+
+# LLM: 零派发证明由原 sender 提供；此处只核对当前布局和原派发身份，不触碰锁文件。
+# 函数用途: 释放明确未发送的准确预留，次键以缺失表示可重新预留。
+def release_unsent(owner_home, alert_key, *, dispatch_key) -> None:
+    root, lock = _prepare(owner_home, alert_key)
+    with locked_json_path(lock):
+        layout, data = _current(root, alert_key)
+        row = data['anchors'].get(alert_key, {})
+        if (row.get('state') not in {'pending', 'unknown'} or row.get('root_message_id')
+                or data.get('root_delivery_keys', {}).get(alert_key) != dispatch_key):
+            return
+        if alert_key == layout['primary_key']:
+            del data['anchors'][alert_key]
+            data.get('root_delivery_keys', {}).pop(alert_key, None)
+            _write(root, data)
+        else:
+            unlink_file_beneath(root, _record_parts(alert_key))
 
 
 # LLM: 公共预留接口幂等，不把重放解释成新发送许可。
@@ -234,7 +259,8 @@ def reserve(owner_home, alert_key, *, now) -> dict:
 
 # LLM: 提供方确认只更新同事件原子记录；原始派发键保留，不接受逻辑回执替代根 ID。
 # 函数用途: 标记已确认的根与线程。
-def mark_sent(owner_home, alert_key, *, root_message_id, thread_id, now) -> dict:
+def mark_sent(owner_home, alert_key, *, root_message_id, thread_id, now,
+              dispatch_key=None, delivery_proof=None) -> dict:
     if not isinstance(root_message_id, str) or not root_message_id or not isinstance(thread_id, str):
         raise ValueError('confirmed provider root is required')
     root, lock = _prepare(owner_home, alert_key)
@@ -243,9 +269,12 @@ def mark_sent(owner_home, alert_key, *, root_message_id, thread_id, now) -> dict
         previous = data['anchors'].get(alert_key, {})
         if previous.get('root_message_id') and previous['root_message_id'] != root_message_id:
             raise ValueError('alert root cannot change after confirmation')
+        if (dispatch_key is not None and data.get('root_delivery_keys', {}).get(alert_key) != dispatch_key
+                or delivery_proof is not None and previous.get('root_delivery_proof') != delivery_proof):
+            raise ValueError('alert root delivery identity changed')
         if previous.get('state') == 'sent' and (not thread_id or previous.get('thread_id')):
             return dict(previous)
-        row = {'root_message_id': root_message_id, 'thread_id': thread_id, 'state': 'sent', 'updated_at': now}
+        row = {**previous, 'root_message_id': root_message_id, 'thread_id': thread_id, 'state': 'sent', 'updated_at': now}
         data['anchors'][alert_key] = row
         _write(root, data)
         return dict(row)
@@ -260,7 +289,7 @@ def mark_unknown(owner_home, alert_key, *, now) -> dict:
         previous = data['anchors'].get(alert_key, {})
         if previous.get('state') == 'sent':
             return dict(previous)
-        row = {'root_message_id': previous.get('root_message_id', ''),
+        row = {**previous, 'root_message_id': previous.get('root_message_id', ''),
             'thread_id': previous.get('thread_id', ''), 'state': 'unknown', 'updated_at': now}
         data['anchors'][alert_key] = row
         _write(root, data)

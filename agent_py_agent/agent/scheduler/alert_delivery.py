@@ -443,19 +443,9 @@ def _topic_send_not_started(observer, receipt=None):
 # LLM: 沿唯一锚点账的原锁/nofollow写口释放当前首发预留；已确认根和其它派发身份不能被删除。
 # 函数用途: 让确定未发送的告警在下一次重试重新取得首发权。
 def _release_unsent_topic(owner_home, key, dispatch_key):
-    from ..common.json_io import locked_json_path
     from . import alert_topic_anchors as anchors
 
-    root, lock = anchors._prepare(owner_home, key)
-    with locked_json_path(lock):
-        data = anchors._read(root)
-        row = data['anchors'].get(key, {})
-        if (row.get('state') not in {'pending', 'unknown'} or row.get('root_message_id')
-                or data.get('root_delivery_keys', {}).get(key) != dispatch_key):
-            return
-        del data['anchors'][key]
-        data.get('root_delivery_keys', {}).pop(key, None)
-        anchors._write(root, data)
+    anchors.release_unsent(owner_home, key, dispatch_key=dispatch_key)
 
 
 class _AlertTopicChannels:
@@ -485,11 +475,16 @@ class _AlertTopicChannels:
         key = anchors.make_alert_key(self._source, home.owner_id, context.target, self._event_id)
         now = datetime.now(timezone.utc).isoformat()
         dispatch_key = str(context.idempotency_key or self._request.task_id)
+        proof = self._root_delivery_proof(context, envelope, key, dispatch_key)
         row, first, root_dispatch = anchors._reserve_for_delivery(home.owner_home_dir, key,
-            now=now, dispatch_key=dispatch_key)
+            now=now, dispatch_key=dispatch_key, delivery_proof=proof)
+        # 同一首发重试必须仍是原冻结载荷；新更新有自己的派发键，不能借旧根键冒充已发送。
+        if (not first and root_dispatch == dispatch_key and row.get('root_delivery_proof') is not None
+                and row['root_delivery_proof'] != proof):
+            return _topic_receipt(context, envelope, key, row, sent=False)
         reconciled = False
         if not first and row['state'] != 'sent':
-            row = self._reconcile(context, key, row, now)
+            row = self._reconcile(context, key, row, now, envelope=envelope, root_dispatch=root_dispatch)
             reconciled = row['state'] == 'sent'
             if not reconciled:
                 anchors.mark_unknown(home.owner_home_dir, key, now=now)
@@ -528,11 +523,15 @@ class _AlertTopicChannels:
                 anchors.mark_unknown(home.owner_home_dir, key, now=now)
         return receipt
 
-    # LLM: 只有提供方显式 lookup 能力能恢复未知根，结果必须绑定当前键与目标；无能力不靠 fetch(id未知) 猜测。
+    # LLM: 本地原宿主回执先于可选网络核对；确认发布仍持同事件锁并核对原派发和冻结证明。
     # 函数用途: 在再次发送前精确核对已创建的根消息。
-    def _reconcile(self, context, key, row, now):
+    def _reconcile(self, context, key, row, now, *, envelope=None, root_dispatch=''):
         from .alert_topic_anchors import mark_sent
 
+        confirmed = self._durable_root(context, envelope, key, row, root_dispatch)
+        if confirmed:
+            return mark_sent(self._agent.home_paths.owner_home_dir, key, root_message_id=confirmed,
+                thread_id='', now=now, dispatch_key=root_dispatch, delivery_proof=row.get('root_delivery_proof'))
         registry = getattr(self._channels, 'registry', None)
         adapter = registry.adapter_for(context.channel) if registry is not None else None
         lookup = getattr(adapter, 'lookup_alert_root', None)
@@ -549,6 +548,65 @@ class _AlertTopicChannels:
             return row
         return mark_sent(self._agent.home_paths.owner_home_dir, key, root_message_id=found['root_message_id'],
             thread_id=found.get('thread_id', ''), now=now)
+
+    # LLM: 只保存原根的身份、路线和载荷摘要到原锚点，不复制正文或建立第二份 outbox。
+    # 函数用途: 冻结可以与原 DeliveryService 持久回执逐字段核对的根请求证明。
+    def _root_delivery_proof(self, context, envelope, key, dispatch_key):
+        from pathlib import Path
+
+        from ..delivery.service import DeliveryService
+
+        if type(self._channels) is not DeliveryService:
+            return None
+        store = self._channels._host_delivery_store
+        home = self._agent.home_paths
+        expected = Path(home.owner_home_dir) / 'data' / 'channel-delivery'
+        if store is None or not store.durable or store.root != expected or self._channels.registry.delivery_state_root != expected:
+            return None
+        try:
+            payload = json.dumps({'content': envelope.content, 'format': envelope.format,
+                'attachments': [(item.artifact_id, item.sha256, item.size_bytes) for item in envelope.attachments],
+                'evidence_refs': envelope.evidence_refs}, sort_keys=True, ensure_ascii=False)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            # 可选恢复证明不能抢先替代原 service 的 typed 输入拒绝或错误语义。
+            return None
+        return {'owner_id': home.owner_id, 'owner_home': str(home.owner_home_dir), 'store_root': str(expected),
+            'alert_key': key, 'dispatch_key': dispatch_key, 'request_id': 'host-delivery:alert-topic:' + key,
+            **_context_identity(context), 'conversation_id': context.conversation_id,
+            'reply_to': '', 'reply_policy': 'reference', 'payload_sha256': hashlib.sha256(payload.encode()).hexdigest()}
+
+    # LLM: 只读同 owner 的原 host store；绝不以当前更新正文重入原根 sender，也不把逻辑 receipt_id 当根 ID。
+    # 函数用途: 核验原事件、派发、路线、载荷和提供方确认，返回可用于修复锚点的同一个根。
+    def _durable_root(self, context, envelope, key, row, root_dispatch):
+        dispatch_key = str(context.idempotency_key or self._request.task_id)
+        candidate = self._root_delivery_proof(context, envelope, key, root_dispatch) if envelope is not None else None
+        proof = row.get('root_delivery_proof')
+        # 旧预留没有冻结摘要时，只接受原首发的准确重试；不能拿后续更新来猜旧载荷。
+        if proof is None and root_dispatch and root_dispatch == dispatch_key:
+            proof = candidate
+        if not isinstance(proof, dict) or candidate is None or not root_dispatch:
+            return ''
+        scope = ('owner_id', 'owner_home', 'store_root', 'alert_key', 'dispatch_key', 'request_id',
+            'channel', 'target', 'conversation_id', 'reply_to', 'reply_policy')
+        if any(proof.get(name) != candidate[name] for name in scope):
+            return ''
+        if root_dispatch == dispatch_key and proof != candidate:
+            return ''
+        terminal = self._channels._host_delivery_store.terminal_receipt(proof['request_id'])
+        fields = ('request_id', 'channel', 'target', 'conversation_id', 'reply_to', 'reply_policy', 'payload_sha256')
+        if (not isinstance(terminal, dict) or terminal.get('disposition') != 'sent'
+                or any(terminal.get(name) != proof.get(name) for name in fields)):
+            return ''
+        components = terminal.get('component_receipts')
+        if not isinstance(components, (list, tuple)):
+            return ''
+        for component in components:
+            if (isinstance(component, dict) and str(component.get('component_id', '')).split(':', 1)[0] == 'text'
+                    and component.get('phase') == 'send_confirmed' and component.get('effect_outcome') == 'confirmed'):
+                identity = component.get('provider_message_id')
+                if isinstance(identity, str) and identity:
+                    return identity
+        return ''
 
     # LLM: 首发根已确认后才建立种子；可选资料写失败不冒充发送失败或再次创建根。
     # 函数用途: 保存原始告警标题、正文、事件与准确 run 引用。

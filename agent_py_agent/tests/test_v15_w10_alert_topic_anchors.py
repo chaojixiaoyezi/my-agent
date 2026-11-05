@@ -430,3 +430,54 @@ def test_dispatch_observation_preserves_original_component_state_and_sink(tmp_pa
     assert receipt.delivery_status == 'sent' and state.snapshot() == receipt.component_receipts
     assert [snapshot[0]['phase'] for snapshot in snapshots] == ['accepted', 'unknown', 'send_confirmed']
     assert service.registry is registry and registry.adapter_for('feishu') is provider
+
+
+@pytest.mark.parametrize('secondary', [False, True])
+def test_exact_key_unavailable_release_retries_once_and_preserves_lock(tmp_path, secondary):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    service, capabilities = _native_service()
+    wrapped, context = _native_topic(tmp_path, service)
+    if secondary:
+        provider = NativeProvider()
+        service.registry.register_adapter('feishu', provider, capabilities=capabilities)
+        earlier = SimpleNamespace(wake_signal={'source': 'fixture-source', 'event_id': 'evt-earlier'}, task_id='earlier')
+        first = alert_delivery._topic_delivery(_delivery(tmp_path, service), earlier)
+        assert first.channels.deliver(context, ReplyEnvelope('earlier root')).delivery_status == 'sent'
+        service.registry.register_adapter('feishu', None, capabilities=capabilities)
+    root, lock = anchors._prepare(tmp_path, _key())
+    with locked_json_path(lock):
+        pass
+    sidecar = lock.with_name(lock.name + '.lock')
+    identity = (sidecar.stat().st_dev, sidecar.stat().st_ino)
+    ready = anchors._read_ready(root)
+    assert wrapped.channels.deliver(context, ReplyEnvelope('root')).delivery_status == 'unavailable'
+    with locked_json_path(lock):
+        assert anchors._current(root, _key())[1]['anchors'] == {}
+    if secondary:
+        assert not root.joinpath(*anchors._record_parts(_key())).exists()
+    provider = NativeProvider()
+    service.registry.register_adapter('feishu', provider, capabilities=capabilities)
+    assert wrapped.channels.deliver(context, ReplyEnvelope('root')).delivery_status == 'sent'
+    assert wrapped.channels.deliver(context, ReplyEnvelope('root')).delivery_status == 'sent'
+    assert len(provider.calls) == 1
+    assert anchors._read_ready(root) == ready
+    assert (sidecar.stat().st_dev, sidecar.stat().st_ino) == identity
+
+
+@pytest.mark.parametrize('secondary', [False, True])
+@pytest.mark.parametrize('confirmed,dispatch', [(True, 'original'), (False, 'foreign')])
+def test_exact_key_release_preserves_sent_and_foreign_dispatch(tmp_path, secondary, confirmed, dispatch):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    if secondary:
+        anchors.reserve(tmp_path, _key(event='evt-earlier'), now='earlier')
+    anchors._reserve_for_delivery(tmp_path, _key(), now='reserve', dispatch_key='original')
+    if confirmed:
+        anchors.mark_sent(tmp_path, _key(), root_message_id='om_immutable', thread_id='omt_immutable', now='sent')
+    root, lock = anchors._prepare(tmp_path, _key())
+    with locked_json_path(lock):
+        before = anchors._current(root, _key())
+    alert_delivery._release_unsent_topic(tmp_path, _key(), dispatch)
+    with locked_json_path(lock):
+        assert anchors._current(root, _key()) == before
