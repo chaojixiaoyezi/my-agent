@@ -466,10 +466,14 @@ class LocalStoreSchemaMixin:
         if self.coordinator_io:
             return self._local_write(self._connect_coordinator)
         _private_sqlite_files(self.db_path, create=True)
+        fresh = os.stat(self.db_path).st_size == 0
         conn = sqlite3.connect(self.db_path, timeout=30.0, factory=sqlite_connection_factory())
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=30000")
+            # LLM: 只在尚未建表的空文件启用增量回收；现存数据库绝不在连接时转换。
+            if fresh:
+                conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
             except sqlite3.OperationalError as exc:
@@ -566,11 +570,15 @@ class LocalStoreSchemaMixin:
     # 函数用途: 创建C的一条独立短连接，设置失败也关闭本次已打开FD。
     def _connect_coordinator(self):
         _private_sqlite_files(self.db_path, create=True)
+        fresh = os.stat(self.db_path).st_size == 0
         conn = sqlite3.connect(self.db_path, timeout=0.0)
         primary = None
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=0")
+            # LLM: 只在尚未建表的空文件启用增量回收；现存数据库绝不在连接时转换。
+            if fresh:
+                conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
             except sqlite3.OperationalError as exc:
