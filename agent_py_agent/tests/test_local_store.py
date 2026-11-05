@@ -29,6 +29,7 @@ from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_fold
 from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_request_path
 from agent_py_agent.agent.io import append_jsonl
 from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.agent.local_storage.maintenance import STEADY_STATE_EVENTS_KEEP_LAST
 from agent_py_agent.agent.memory_store import JsonlMemory, MemoryRecord
 from agent_py_agent.agent.memory_store.read_index import MemoryReadIndex
 from agent_py_agent.agent.settings import AgentConfig
@@ -1121,7 +1122,7 @@ def _r3_owner_store(tmp_path, layout):
     return home, store
 
 
-# LLM: 通过真实owner维护入口而非直接helper调用，核同一状态文件、新批至多5000及原not_due节流。
+# LLM: 真实owner入口保留旧批5000的回执，W6同拍继续追平keep_last；清洁周期完成后仍按原not_due节流。
 # 函数用途: 验证普通和transition两种维护周期确实裁剪已存在的owner事件库。
 @pytest.mark.parametrize("layout", ["data", "workspace"])
 @pytest.mark.parametrize("transition", [False, True])
@@ -1129,7 +1130,7 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     from types import SimpleNamespace
 
     from agent_py_agent.agent.conversation import session_pair_rate
-    from agent_py_agent.agent.user_space import owner_maintenance, owner_quota
+    from agent_py_agent.agent.user_space import owner_maintenance, owner_quota, storage_lanes
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
 
@@ -1138,22 +1139,28 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     monkeypatch.setattr(owner_maintenance, "time", clock)
     monkeypatch.setattr(owner_quota, "time", clock)
     monkeypatch.setattr(session_pair_rate, "time", clock)
+    # W6预算与owner期限使用同一单调时钟，不能让冻结期限与真实时钟相减后永久过期。
+    monkeypatch.setattr(storage_lanes, "time", clock)
     home, store = _r3_owner_store(tmp_path, layout)
     options = {"include_global_indexes": False}
     if transition:
         options["commit_transition"] = Door()
     result = run_owner_retention_if_due(home, now=200_000, **options)
     with sqlite3.connect(store.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     assert result.status == marker["status"] == "success" and result.apply_outcome == "applied"
     effect = marker.get("local_store_events_maintenance", {})
     assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5000
-    assert len(store.events_path.read_bytes().splitlines()) == 20005
+    assert len(store.events_path.read_bytes().splitlines()) == STEADY_STATE_EVENTS_KEEP_LAST
+    # W6的dirty周期还需一次清洁观察，才能证明无积压并恢复日常节流。
+    assert marker["maintenance_partial"] is True
+    assert run_owner_retention_if_due(home, now=200_001, **options).ran
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     assert marker["maintenance_partial"] is False
-    assert run_owner_retention_if_due(home, now=200_001, **options).status == "not_due"
+    assert run_owner_retention_if_due(home, now=200_002, **options).status == "not_due"
     with sqlite3.connect(store.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST
 
 
 # LLM: owner初始化不等于LocalStore初始化；只记录跳过原因，不创建空local.db或事件流水。
@@ -1197,7 +1204,7 @@ def test_b2_r3_events_only_store_keeps_original_bytes(tmp_path, transition):
     assert (directory / "local.db").is_file() and (directory / "events.jsonl").read_bytes() == source
 
 
-# LLM: 两种规范布局可能同时存在；每库只推进一个有界批次，汇总数字来自实际删除而非库数量。
+# LLM: 两种布局都走旧有界批次，W6再轮转追赶一个库；旧回执数字只代表旧批次的实际删除。
 # 函数用途: 验证不会只维护兼容旧库而遗漏owner的workspace库。
 @pytest.mark.parametrize("transition", [False, True])
 def test_b2_r3_owner_maintenance_covers_multiple_existing_stores(tmp_path, transition):
@@ -1215,7 +1222,7 @@ def test_b2_r3_owner_maintenance_covers_multiple_existing_stores(tmp_path, trans
     for store in (first, second):
         with sqlite3.connect(store.db_path) as conn:
             counts.append(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-    assert counts == [20005, 20000]
+    assert counts == [STEADY_STATE_EVENTS_KEEP_LAST, STEADY_STATE_EVENTS_KEEP_LAST]
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     effect = marker.get("local_store_events_maintenance", {})
     assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5001
@@ -1321,7 +1328,8 @@ def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, monk
     run_owner_retention_if_due(home, now=286_400, **options)
     recovered = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
     assert recovered["executed"] is True and recovered["deleted_db"] == 0 and recovered["deleted_jsonl"] == 5000
-    assert len(store.events_path.read_bytes().splitlines()) == 20005
+    # 旧pending发表后，W6还会删除剩余5条；原失败拍的SQL/pending精确断言保持。
+    assert len(store.events_path.read_bytes().splitlines()) == STEADY_STATE_EVENTS_KEEP_LAST
 
 
 # LLM: 只注入一个发现来源的普通IO故障；其余真实库仍可维护，并单列覆盖不完整，不能造全量计数。
@@ -1352,7 +1360,7 @@ def test_b2_r3_event_discovery_fault_is_isolated(tmp_path, monkeypatch, fault):
     monkeypatch.setattr(Path, "is_file", is_file)
     run_owner_retention_if_due(home, now=200_000, include_global_indexes=False)
     with sqlite3.connect(store.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST
     effect = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
     assert effect["executed"] is True and effect["deleted_db"] == 5000 and effect["counts_complete"] is False
     assert effect.get("ok") is False
