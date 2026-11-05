@@ -1,15 +1,21 @@
-## 2026-11-05 多进程 Gateway 全系列（MP-00–MP-17）新增生产模块
+## 2026-11-05 多进程 Gateway 全系列（MP-00–MP-17）新增生产模块、状态机形式化/混沌回放单测与三阶段扩缩容蓝图
 
-本轮针对多进程协调锁序反转、Worker 扫盘退避与异常存活、跨代次死锁与孤儿 pending 自愈新增以下三个生产模块：
+本轮针对多进程协调锁序反转、Worker 扫盘退避与异常存活、跨代次死锁与孤儿 pending 自愈新增以下生产模块与确定性状态机/仿真回放单测，并落盘 `1 -> 500 -> 500,000` 用户三阶段架构与拆单总纲（Opus × GPT-6 Pro 统一版）：
 
 ```text
 agent_py_agent/
-`-- agent/
-    |-- common/
-    |   `-- runtime_gate_registry.py  # MP-00 进程内运行时锁（M/L）只读持有观察与 SubagentCreationGuardBusy 退避异常，阻断 CG 与 M/L 的 AB-BA 死锁
-    `-- gateway_parts/
-        |-- multiprocess_unroutable_closeout.py  # MP-02/MP-06 跨代次/进程数缩容/单进程切换下不可路由 pending 请求的确定性自愈收口
-        `-- multiprocess_generation_retirement.py  # MP-05/MP-12/MP-13 启动准入前证明已死多进程代次的原子归档退役（multiprocess_retired/）
+|-- agent/
+|   |-- common/
+|   |   `-- runtime_gate_registry.py  # MP-00 进程内运行时锁（M/L）只读持有观察与 SubagentCreationGuardBusy 退避异常，阻断 CG 与 M/L 的 AB-BA 死锁
+|   `-- gateway_parts/
+|       |-- multiprocess_unroutable_closeout.py  # MP-02/MP-06 跨代次/进程数缩容/单进程切换下不可路由 pending 请求的确定性自愈收口
+|       `-- multiprocess_generation_retirement.py  # MP-05/MP-12/MP-13 启动准入前证明已死多进程代次的原子归档退役（multiprocess_retired/）
+`-- tests/
+    |-- test_tla_formal_state_machines.py  # 四大核心状态机（SessionTaskStore/ClaimStore/PtySessionRegistry/WorkflowEngine）有界 BFS 穷举与并发交错不变量单测
+    `-- test_deterministic_simulation_replay.py  # 多线程 Gateway 确定性随机种子故障注入回放与流式 steer -> /stop -> /new 连续交互序列单测
+docs/
+`-- design/
+    `-- SCALING_1_TO_500K_ROADMAP.md  # 1 -> 500 -> 500,000 用户三阶段扩缩容总方案（Opus × GPT-6 Pro 统一版：S1-W1..W6、S2-W1..W6、S3-W0..W6 共 19 个工作流）
 ```
 
 ## 2026-11-02 R9 rework 新增生产模块

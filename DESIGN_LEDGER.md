@@ -1,3 +1,13 @@
+## 2026-11-05 1 -> 500 -> 500,000 用户三阶段演进路线图与多 Agent 并行拆单总纲（Opus × GPT-6 Pro 统一版，长期设计，未启动）
+
+解决问题：HTTP 16 线程上限与空闲/流式连接占坑、跨整轮持有 PG 连接与全量搬运 `OwnerSnapshotStore`、高频目录/文件轮询、主模型每次调用新建 TCP+TLS 连接，以及 CPython GIL 与锁颗粒度限制了多用户并发密度；同时直接推倒重写 53.9 万行有效生产代码（外加 84.8 万行测试）风险过高。完整实测基线、Opus × GPT-6 Pro 交叉评审合成、三阶段架构与 `S1` / `S2` / `S3` 共 19 个工作流的文件级拆单放在 [三阶段扩缩容与分工路线图](docs/design/SCALING_1_TO_500K_ROADMAP.md)。
+
+- **第一阶段（Stage 1：`1 → 500` 用户单波次 6 路零重叠并行，`S1-W1`–`S1-W6`）**：HTTP 入口 `_ReadinessSelector`（`MSG_PEEK` 读就绪分派 + 队列 2s 过期丢弃）+ 4 线程控制快车道 + 原生 `/client/business/stream` 移交 `BusinessStreamPool`（`S1-W1`）；`OwnerSnapshotStore` 拆为 `T1/T2` 短事务租约 + `stat` 增量索引 `OwnerStatIndex` + 温热工作区复用（`S1-W2`）；组织闭包路由 + Go `deploy/cell-router` 目录网关与飞书集中入口（`S1-W3`）；主模型 HTTP 连接池 `MAIN_CONNECTION_POOL`（`S1-W4`）；边缘身份头防伪造硬化（`S1-W5`）；7 场景负载基准 `tests/slo/` + 10 场景黄金回放 `tests/golden/`（`S1-W6`）。
+- **第二阶段（Stage 2：单 Cell `500 → 3,000` 用户，4 波次 6 工作流，`S2-W1`–`S2-W6`）**：波次 1 并行推进纯 ASGI 异步网关（`uvicorn` + `h11` + `ASGIHandlerShim`，`S2-W1`）、两级 Actor（`OwnerBudget` + 按会话串行 `ConversationActor` + `LockLevel` 运行时死锁检测 + `owner_epoch` 围栏，`S2-W3`）、最小堆 `TimerService` 与内存活动索引（`S2-W4`）、`Python 3.14t` 准备与 `tests/ft/` 并发压测（`S2-W5` A 部分）；波次 2 落地进程内 `RequestEventHub` 与 `/client/requests/*/events` 统一 SSE 流、TUI 网络模式及飞书推送直投（`S2-W2`）；波次 3 按 import 图退役 134 个文件 / 27,597 行 `multiprocess_*` 协调子系统（`S2-W6`）；波次 4 全面开启 `Python 3.14t` 无 GIL 镜像（`S2-W5` B 部分）。
+- **第三阶段（Stage 3：`10,000 → 500,000` 用户，Go 控制面 + Python Cell，`S3-W0`–`S3-W6`）**：波次 0 冻结 `platform/` Go 工作区、gRPC/HTTP 头部与 Unix socket 契约（`S3-W0`）；波次 1 并行落地 Go 边缘网关 `platform/edge`（单节点 5 万并发流，`S3-W1`）、Go IM 集中入口 `platform/im-ingress`（PG 去重 + DLQ，`S3-W2`）、Go Cell 控制面 `platform/cellctl` + `cell-agent`（4,096 vshard 放置、PG 租约与 `lease_epoch` 故障转移/热迁移编排，`S3-W3`）、Python Cell 本地租约自隔离与外部副作用守门 + owner 增量热迁移 + 去路径哈希稳定 ID（`S3-W4`）、跨 Cell 双向 RPC 与 Ed25519 短期能力令牌（`S3-W5`）；波次 2 按实测条件触发抽取 Go `Session/Task Kernel` 并经影子模式 100% 黄金回放验证（`S3-W6`）。
+
+状态：三阶段架构与 `S1`–`S3`（共 19 个工作流）文件级契约已由 Opus × GPT-6 Pro 合成审定落盘（长期蓝图，尚未派发代码修改）；当前本地 TUI 集群正在并行收口存量多进程 Gateway P1 修复（`R1`–`R4`）与 21 个开放 GitHub Issues（`#159`–`#179`，`W1`–`W13`）。
+
 ## 2026-11-01 MEGA 统一设计与单一集成台账（W16）
 
 解决问题：业务空间 v1.2、Cache v2、Issue 修复原有多套活跃清单不能各自授予所有权或复用旧 PASS。当前统一架构放在 [MEGA_ARCHITECTURE_A4BC8B818](docs/design/MEGA_ARCHITECTURE_A4BC8B818.md)，唯一派工/状态放在 [MEGA_DISPATCH_PROGRESS](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，逐项与最终封包标准放在 [MEGA_ACCEPTANCE](docs/tasks/MEGA_ACCEPTANCE.md)。其余状态入口只导航，不再复制活跃分片表。
