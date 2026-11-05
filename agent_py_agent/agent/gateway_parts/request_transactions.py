@@ -134,8 +134,10 @@ class OriginalRequestWriteSource:
 def require_original_request_write_source(source, phase):
     from .multiprocess_host_command_scope import OriginalHostCommandWriteSource
     from .multiprocess_processing_recovery import OriginalProcessingRecoverySource
+    from .multiprocess_unroutable_closeout import UnroutableCloseoutSource
 
-    if type(source) not in (OriginalRequestWriteSource, OriginalHostCommandWriteSource, OriginalProcessingRecoverySource):
+    if type(source) not in (OriginalRequestWriteSource, OriginalHostCommandWriteSource,
+                            OriginalProcessingRecoverySource, UnroutableCloseoutSource):
         raise missing_request_context_rejection(phase)
     source.require_original(phase)
 

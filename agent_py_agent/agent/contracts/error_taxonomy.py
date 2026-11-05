@@ -380,6 +380,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="单进程启动的原状态、角色或文件来源无法确认；保留原记录并核对结构化拒绝原因，不清空目录、补造身份或将未知当作首次启动。",
     ),
+    "GATEWAY_REQUEST_ROUTE_RETIRED": ErrorContract(
+        code="GATEWAY_REQUEST_ROUTE_RETIRED", category="state", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="网关拓扑切换或旧代次退役，本请求未在当前拓扑执行；请重新发送。",
+    ),
     "GATEWAY_REVERSE_MIGRATION_UNSUPPORTED": ErrorContract(
         code="GATEWAY_REVERSE_MIGRATION_UNSUPPORTED", category="state", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,

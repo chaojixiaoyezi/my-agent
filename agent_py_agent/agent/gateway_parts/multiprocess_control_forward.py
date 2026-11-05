@@ -226,24 +226,26 @@ def read_remote_control_status(paths, receipt, *, agent=None):
     return None
 
 
-# LLM: 原op锁→lease内核死亡/代次；私卡先沿原C资源读决定事实，不能将已决定洗unknown，仍不执行决定或物化Agent。
-# 函数用途: 同域明确死亡的控制可封unknown，旧HTTP上下文只读并保留规范字节。
+# LLM: 原op锁内重读；prepared只封退休代次，claimed/executing须明确死亡，Count0不借失效C上下文写入；私卡有lease先对账、无lease保留。
+# 函数用途: 终结不能再执行且绝不重放的旧控制回执。
 def _seal_dead_control(paths, receipt, *, context=None):
+    from contextlib import nullcontext
+
     from . import control_operation_service as ops
-    from .multiprocess_control_identity import control_executor_live
 
     lease = coordinator_for_root(paths.root, context=context)
-    if (lease is None or receipt.state not in {'claimed', 'executing'}
-            or control_executor_live(receipt.dispatch.get('executor')) is not False):
+    if not _orphan_control_sealable(paths, receipt, lease, context):
         return receipt
     with ops.try_gateway_control_operation_transition(paths, receipt.operation_id) as acquired:
         if not acquired:
             return receipt
         current = ops.read_gateway_control_operation(paths, receipt.operation_id)
-        if current != receipt or control_executor_live(current.dispatch.get('executor')) is not False:
+        if current != receipt or not _orphan_control_sealable(paths, current, lease, context):
             return current
-        with lease._lifecycle_gate:
+        with lease._lifecycle_gate if lease is not None else nullcontext():
             if coordinator_for_root(paths.root, context=context) is not lease:
+                return current
+            if not _orphan_control_sealable(paths, current, lease, context):
                 return current
             if current.private_approval is not None:
                 from .private_approval_control import reconcile_private_approval_locked
@@ -251,8 +253,29 @@ def _seal_dead_control(paths, receipt, *, context=None):
                 if observed.state == 'completed':
                     write_json_file_atomic(ops.gateway_control_operation_path(paths, current.operation_id), observed.to_dict())
                     return observed
+            # prepared没有执行者；只有旧代prepared或明确死亡的claimed/executing才进入本叶。
+            message = ('dispatch generation retired; control was not executed and will not be replayed'
+                       if current.state == 'prepared' else
+                       'prior executor is dead; control effect will not be replayed')
             unknown = replace(current, state='terminal_unknown', updated_at=time.time(),
-                              error={'error_code': 'CONTROL_EXECUTOR_DEAD',
-                                     'message': 'prior executor is dead; control effect will not be replayed'})
+                              error={'error_code': 'CONTROL_EXECUTOR_DEAD', 'message': message})
             write_json_file_atomic(ops.gateway_control_operation_path(paths, current.operation_id), unknown.to_dict())
             return unknown
+
+
+# LLM: 纯判断不授控制执行权；无lease还须确认Count0且非失效C角色，私卡无来源保持deferred；活/未知executor不封口。
+# 函数用途: 判断回执是否满足孤儿封口合同。
+def _orphan_control_sealable(paths, receipt, lease, context):
+    from .multiprocess_control_identity import control_executor_live
+
+    if receipt is None or not isinstance(receipt.dispatch, dict):
+        return False
+    if lease is None:
+        if (coordinator_role_present(paths.root, context=context)
+                or int(getattr(context, 'coordinator_worker_count', 0) or 0) != 0
+                or receipt.private_approval is not None):
+            return False
+    if receipt.state == 'prepared':
+        return lease is None or receipt.dispatch.get('c_run_id') != lease.c_run_id
+    return (receipt.state in {'claimed', 'executing'}
+            and control_executor_live(receipt.dispatch.get('executor')) is False)

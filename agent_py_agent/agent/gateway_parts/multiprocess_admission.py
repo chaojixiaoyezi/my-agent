@@ -364,6 +364,53 @@ class PersistentAdmission:
             _count_reservation(self, path, snapshot)
         return snapshot
 
+    # LLM: 只封装既有controller/lease末门，不新建锁或授权；调用方必须先取得原请求T。
+    # 函数用途: 为独立pending收口入口复用原提交窗口。
+    def _commit_scope(self):
+        return _runtime_commit_scope(self)
+
+    # LLM: 先T→原C末门重读，不消费旧route校验的执行权；无P3旧请求只终结，正常请求返回None，投影必须退出原T/M/L后重取。
+    # 函数用途: 让调度器在owner路由校验前尝试收口无路由pending，不盖章或创建预留。
+    def try_close_unroutable_pending(self, request_path: Path, *, snapshot: dict | None = None) -> dict | None:
+        from .multiprocess_unroutable_closeout import (
+            close_out_unroutable_pending_locked,
+            project_unroutable_closeout,
+            unroutable_reason,
+        )
+        from .request_owner_binding import frozen_request_owner
+
+        if request_path.parent != self.paths.inbox:
+            return _blocked("request_identity_conflict")
+        with gateway_turn_transition(self.paths, request_path.stem), self._commit_scope() as rejection:
+            if rejection:
+                return rejection
+            report = read_json_file_report(request_path, context="gateway.admission.unroutable.read")
+            if report.load_error is not None:
+                return _blocked("request_unavailable")
+            current = report.payload
+            if not current:
+                return {"status": "raced", "reason": "request_moved"}
+            if str(current.get("id") or "") != request_path.stem:
+                return _blocked("request_identity_conflict")
+            if snapshot is not None and _ownership_projection(snapshot) != _ownership_projection(current):
+                return _blocked("request_scope_drift")
+            reason = unroutable_reason(self.paths, current, gate=self)
+            if not reason:
+                return None
+            owner = frozen_request_owner(current)
+            if owner is None:
+                return _blocked("owner_scope_unavailable")
+            decision = close_out_unroutable_pending_locked(self, request_path, current, owner, reason)
+        if decision.get("status") != "expired":
+            return decision
+        try:
+            # 本分支原投影器消费request_id及admission_gate，并从canonical核对实际decision。
+            settled = project_unroutable_closeout(self.paths, request_path.stem, admission_gate=self)
+        except (OSError, ValueError, RuntimeError, DataCorruptionError):
+            return _blocked("unroutable_projection_pending")
+        return ({"status": "expired", "response": decision["response"], "closeout": "unroutable"}
+                if settled else _blocked("unroutable_settlement_pending"))
+
     # LLM: 固定T→运行时内存→最终生命周期门；等T不占内存门，返回前在同区精确登记自身成功提交。
     #   同一请求重排或
     #   重新盖章复用原预留不重复扣；读不出的预留不能被覆盖；代次缺失或归属不明一律暂停。
@@ -399,6 +446,14 @@ class PersistentAdmission:
             decision = self._admit_locked(request_path, ownership, limits, snapshot)
             if decision.get("status") != "expired":
                 return _remember_runtime_commit(self, request_path, decision)
+        if decision.get("closeout") == "unroutable":
+            from .multiprocess_unroutable_closeout import project_unroutable_closeout
+
+            try:
+                settled = project_unroutable_closeout(self.paths, request_path.stem, admission_gate=self)
+            except (OSError, ValueError, RuntimeError, DataCorruptionError):
+                return _blocked("unroutable_projection_pending")
+            return decision if settled else _blocked("unroutable_settlement_pending")
         from .queued_steer_expiry import project_expired_steer
 
         try:
@@ -449,6 +504,15 @@ class PersistentAdmission:
         if existing is _UNREADABLE:
             return _blocked("reservation_unreadable")
         if existing is None:
+            from .multiprocess_unroutable_closeout import (
+                close_out_unroutable_pending_locked,
+                unroutable_reason,
+            )
+
+            # 原T已持有；先补已有退休终态，不能误走steer专用终态校验。
+            reason = unroutable_reason(self.paths, current, gate=self)
+            if reason:
+                return close_out_unroutable_pending_locked(self, request_path, current, owner, reason)
             if current.get("route") is not None:
                 return _blocked("reservation_missing")
             expired = _expire_pending_steer_locked(self, request_path, current, owner)
@@ -482,6 +546,14 @@ class PersistentAdmission:
             return _blocked(reason)
         stamped = self._stamp_request(current, owner, time.time())
         if stamped is None:
+            from .multiprocess_unroutable_closeout import (
+                close_out_unroutable_pending_locked,
+                unroutable_reason,
+            )
+
+            reason = unroutable_reason(self.paths, current, gate=self)
+            if reason:
+                return close_out_unroutable_pending_locked(self, request_path, current, owner, reason)
             return _blocked("request_invalid")
         record = _reservation_record(request_path.stem, owner, session_scope, stamped)
         return _commit_created_record(self, request_path, owner, (stamped, record))
