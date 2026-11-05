@@ -458,7 +458,8 @@ def test_stage3_provision_and_toggle_drive_canonical_execution_gates(managed, ki
                 assert caught.value.error_code == "ASSET_DISABLED_BY_OWNER"
 
 
-def test_stage3_skill_gate_rechecks_canonical_sidecar_even_for_old_snapshot(managed):
+@pytest.mark.parametrize("enabled_at_snapshot", [True, False])
+def test_stage3_skill_gate_rechecks_canonical_sidecar_even_for_old_snapshot(managed, enabled_at_snapshot):
     from hashlib import sha256
 
     from agent_py_agent.agent.capability.skill_snapshot import (
@@ -473,15 +474,16 @@ def test_stage3_skill_gate_rechecks_canonical_sidecar_even_for_old_snapshot(mana
     source = root / "owners/local/main/skills/gateskill/SKILL.md"
     source.parent.mkdir(parents=True)
     source.write_text(body)
-    service.provision_assets("alice", "skill", "gateskill", auto_enable=False)
+    service.provision_assets("alice", "skill", "gateskill", auto_enable=enabled_at_snapshot)
     path = home.home_dir / "skills/gateskill/SKILL.md"
     entry = SkillSnapshotEntry("owner:gateskill", "gateskill", "Local test skill", str(path), "owner", "test", sha256(body.encode()).hexdigest())
     snapshot = SkillSnapshot((entry,), (), "test", "local/alice", str(home.workspace_dir))
-    for step, enabled in enumerate((False, True, False)):
-        if step:
-            service.toggle_asset("alice", "skill", "gateskill", enabled)
+    assert snapshot.entries[0].enabled is enabled_at_snapshot
+    # 活侧开关可以撤销旧授权，但不能复活创建时已禁用的快照。
+    for enabled in (False, True, False):
+        service.toggle_asset("alice", "skill", "gateskill", enabled)
         assert skill_enabled(path) is enabled
-        if enabled:
+        if enabled_at_snapshot and enabled:
             assert snapshot.read_body("owner:gateskill") == body
         else:
             with pytest.raises(SkillSnapshotError) as caught:
@@ -675,6 +677,7 @@ def test_stage3_admin_only_curate_policy_blocks_owner_add_and_edit(managed):
 def test_r2_memory_mutations_acquire_quota_before_policy(managed, monkeypatch, operation):
     from contextlib import contextmanager
 
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
     from agent_py_agent.agent.user_space.managed_user_governance import (
         _GovernanceControl,
         _managed_memory_stores,
@@ -683,12 +686,19 @@ def test_r2_memory_mutations_acquire_quota_before_policy(managed, monkeypatch, o
 
     _root, service, home = managed
     entry = service.mutate_memories("alice", "add_memory", content="before", lock_memory=False)["entry"]
+    if operation in {"batch", "admitted_batch"}:
+        memory, _candidates = _managed_memory_stores(home)
+        # 小型旧库默认尚未迁移；先建真实代次，才能验证提交后的读索引维护确实完成。
+        memory.migrate_tiers()
     quota, policy, depth, seen = OwnerQuotaEnforcer.admission, _GovernanceControl.locked, [0], []
+    rebuild = JsonlMemory.rebuild_read_index
+    indexing, index_statuses, admissions = [False], [], []
 
     @contextmanager
     def checked_quota(enforcer, **kwargs):
         assert depth[0] == 0, "quota admission must be shared, not reacquired"
         with quota(enforcer, **kwargs) as admission:
+            admissions.append(admission)
             depth[0] += 1
             try:
                 yield admission
@@ -699,23 +709,39 @@ def test_r2_memory_mutations_acquire_quota_before_policy(managed, monkeypatch, o
     def checked_policy(control, name="policy"):
         if name == "policy":
             assert depth[0] == 1, "policy acquired before quota"
-            seen.append(name)
+            seen.append("index" if indexing[0] else name)
         with policy(control, name):
             yield
 
+    def checked_rebuild(memory, **kwargs):
+        indexing[0] = True
+        try:
+            result = rebuild(memory, **kwargs)
+            index_statuses.append(result["status"])
+            return result
+        finally:
+            indexing[0] = False
+
     monkeypatch.setattr(OwnerQuotaEnforcer, "admission", checked_quota)
     monkeypatch.setattr(_GovernanceControl, "locked", checked_policy)
+    monkeypatch.setattr(JsonlMemory, "rebuild_read_index", checked_rebuild)
     if operation in {"batch", "admitted_batch"}:
-        memory, _candidates = _managed_memory_stores(home)
         operations = [{"action": "replace", "entry_id": entry["entry_id"], "content": "after"}]
         if operation == "admitted_batch":
             with memory.quota_enforcer.admission() as admission:
-                memory.apply_batch(operations, _admission=admission)
+                committed = memory.apply_batch(operations, _admission=admission)
         else:
-            memory.apply_batch(operations)
+            committed = memory.apply_batch(operations)
+        assert [record.content for record in committed] == ["after"]
+        # 正式提交与派生索引各自取policy；索引失败不能被生产链的尽力维护吞掉后蒙混过关。
+        assert seen == ["policy", "index"]
+        assert index_statuses == ["complete"]
     else:
         service.mutate_memories("alice", operation, entry_id=entry["entry_id"], content="after")
-    assert seen == ["policy"]
+        assert seen == ["policy"]
+    # 独立批量在提交后重新准入；显式准入和管理员入口必须始终复用外层活锁。
+    assert len(admissions) == (2 if operation == "batch" else 1)
+    assert depth[0] == 0
 
 
 # LLM: 788f9b847后浓缩只按字符预算无损转冷，不再archive+remove；锁定条目固定热层，任何模式都不遗忘或改版本。
