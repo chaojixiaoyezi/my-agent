@@ -154,10 +154,12 @@ def create_request_pump(launch, config_path, *, native_client=None):
     return WorkerRequestPump(frozen, pool, capacity)
 
 
-# LLM: drain单向关认领→真实pool close/join→原六类源观察，空P1可本W确认；非空树须原C/kernel证明保持未知，exit原实际finish不伪造drained。
+# LLM: drain/P6原义不变；仅容忍连续3次C状态不可读，恢复前包括非心跳轮次均不认领；其它拒绝和父退出立即传播。
 # 函数用途: 收取原队列并在准确当前代控制下消费实际排空观察。
 def _worker_execution_loop(launch: WorkerLaunch, stop: threading.Event, notice, pump) -> str:
     next_heartbeat = time.monotonic()
+    unreadable_beats, tolerated = 0, 3
+    report = {}
     while not stop.wait(WORKER_PARENT_POLL_SECONDS):
         if os.getppid() != launch.parent_pid:
             return "parent_exited"
@@ -167,9 +169,16 @@ def _worker_execution_loop(launch: WorkerLaunch, stop: threading.Event, notice, 
             pump.stop_claiming()
             if action == "exit":
                 return "stopped"
-        next_heartbeat, ready = _refresh_due_heartbeat(launch, next_heartbeat, notice, pump=pump)
+        next_heartbeat, ready = _refresh_due_heartbeat(launch, next_heartbeat, notice, pump=pump, report=report)
         if not ready:
+            if report.get('reason') == 'coordinator_state_unreadable':
+                if report.get('refreshed'):
+                    unreadable_beats += 1
+                if unreadable_beats <= tolerated:
+                    continue
             return "not_ready"
+        if report.get('refreshed'):
+            unreadable_beats = 0
         pump.poll()
         if action == 'drain' and pump.inflight == 0:
             from .multiprocess_worker_drain import worker_pump_drain_assessment
@@ -179,20 +188,26 @@ def _worker_execution_loop(launch: WorkerLaunch, stop: threading.Event, notice, 
     return "stopped"
 
 
-# LLM: 每次发布重新核当前C；关认领后停止盖章，但继续报告原在途数；排空证明由P6另行给出。
+# LLM: 每次发布重核C；report只运输本循环上次就绪/原因与本轮是否发心跳，不改二元返回；不可读心跳仍不就绪，P6不变。
 # 函数用途: 固定节拍更新本worker健康及排空进度，不把在途清零。
-def _refresh_due_heartbeat(launch: WorkerLaunch, next_heartbeat: float, notice, *, pump=None) -> tuple[float, bool]:
+def _refresh_due_heartbeat(launch: WorkerLaunch, next_heartbeat: float, notice, *, pump=None, report=None) -> tuple[float, bool]:
+    if report is not None:
+        report['refreshed'] = False
     if time.monotonic() < next_heartbeat:
-        return next_heartbeat, True
+        return next_heartbeat, True if report is None else report.get('ready', True)
     readiness = prepare_worker_readiness(launch)
     ready = readiness["ready"]
+    if not ready and readiness.get('reason') == 'coordinator_state_unreadable':
+        readiness['loop_health'] = 'coordinator_state_unreadable'
     if ready and launch.instance_id:
         require_worker_registration(launch, readiness)
     if pump is not None:
         readiness["inflight"] = pump.inflight
-        if pump.claiming_stopped:
+        if pump.claiming_stopped and ready:
             readiness.update(ready=False, loop_health="draining")
     _publish_heartbeat(launch, readiness, notice)
+    if report is not None:
+        report.update(ready=ready, reason=readiness.get('reason', ''), refreshed=True)
     return time.monotonic() + WORKER_HEARTBEAT_SECONDS, ready
 
 

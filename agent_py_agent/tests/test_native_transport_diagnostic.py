@@ -230,9 +230,8 @@ def test_worker_two_futures_bind_failed_claim_keep_all_responsibility(capsys):
     b = SimpleNamespace(request_id=SECRET, execution_attempt_id='failed-attempt')
     pump = worker.WorkerRequestPump.__new__(worker.WorkerRequestPump)
     pump._active = {first: a, second: b}
-    with pytest.raises(RuntimeError) as caught:
-        pump._reap()
-    assert caught.value is error and pump._active == {second: b}
+    pump._reap()
+    assert second.exception() is error and pump._active == {second: b}
     row = diagnostic_rows(capsys)[0]
     assert row['stage'] == 'worker_future_result' and row['op'] is None and row['seq'] is None
     assert row['request']['sha256'] == hashlib.sha256(SECRET.encode()).hexdigest()
@@ -245,8 +244,7 @@ def test_worker_not_true_original_error_and_active_preserved(capsys):
     pump = worker.WorkerRequestPump.__new__(worker.WorkerRequestPump)
     claim = SimpleNamespace(request_id='not-processed', execution_attempt_id='a')
     pump._active = {future: claim}
-    with pytest.raises(RuntimeError, match='worker_request_not_processed'):
-        pump._reap()
+    pump._reap()
     assert pump._active == {future: claim}
     assert diagnostic_rows(capsys)[0]['stage'] == 'worker_future_result'
 
@@ -318,6 +316,10 @@ def test_worker_logger_failure_and_signal_preserve_original_claim(monkeypatch, f
     def broken(*a, **k):
         raise OSError('diagnostic sink failed')
     monkeypatch.setattr(diag, 'report_native_transport_diagnostic', broken)
-    with pytest.raises(failure) as caught:
+    if failure is RuntimeError:
         pump._reap()
-    assert caught.value is error and pump._active == {future: claim}
+    else:
+        with pytest.raises(failure) as caught:
+            pump._reap()
+        assert caught.value is error
+    assert future.exception() is error and pump._active == {future: claim}

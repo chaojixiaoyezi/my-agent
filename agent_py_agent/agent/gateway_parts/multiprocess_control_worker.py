@@ -12,6 +12,7 @@ from ..runtime_errors import DataCorruptionError, runtime_error_report
 from . import control_operation_service as ops
 from .daemon_metadata import process_host_id
 from .io import write_json_file_atomic
+from .multiprocess_admission_fs import released_cache_is_stable, reservation_signature
 from .multiprocess_bootstrap import WorkerBootstrapError, require_worker_bootstrap
 from .multiprocess_bootstrap_publish import read_worker_registry
 from .multiprocess_bootstrap_ready import require_current_worker
@@ -48,7 +49,7 @@ def control_worker_authority(frozen, *, claiming):
 # LLM: active表只保留线程责任，不替代原回执；poll串行化允许独立快控制轮询与组合根并用。
 # 类用途: 用独立执行槽处理远端控制，退出前等已认领的副作用结清。
 class WorkerControlPump:
-    # LLM: 冻结上下文先校验；原两个池绑定准确出生initializer，stop独立槽数量不变，不加池/线程表；坏记录指纹仅去重，观察者不授权。
+    # LLM: 冻结上下文先校验；原两个池和stop槽不变；目录门与内容判定只省读取，不授信；失败Future留原责任表。
     # 函数用途: 保存控制队列根、owner池和独立控制槽。
     def __init__(self, frozen, pool):
         require_worker_bootstrap(frozen, frozen.launch)
@@ -63,10 +64,15 @@ class WorkerControlPump:
         self._drain_resources[0].bind_executor(self._executor)
         self._drain_resources[1].bind_executor(self._stop_executor)
         self._active = {}
+        self._faulted = set()
         self._lock = threading.RLock()
         self._stopped = False
         self._read_faults = {}
         self._observation_cursor = ''
+        from .request_worker import GatewayInboxScanGate
+
+        self._scan_gate = GatewayInboxScanGate()
+        self._verdicts = {}
 
     # LLM: 包括返回但未核收的future；不能作为全部六类排空证明。
     # 函数用途: 返回尚承担结算责任的控制数。
@@ -86,7 +92,7 @@ class WorkerControlPump:
                 group._require_original()
             return self._stopped, self._drain_resources, tuple(self._active.items()), tuple(self._read_faults)
 
-    # LLM: 原操作短锁下重复读取认领；私卡写只try、prepared未首写无Future，prepared先于纯观察，普通槽满仍扫描stop，跨分区/旧代不写。
+    # LLM: 目录门与稳定五元组只跳过foreign/inert；fault/prepared/对账保持重扫；原短锁重读及撤权核验不变，只有未返回Future占槽。
     #   单条坏记录只保留并诊断，不关闭其它分区；bootstrap/撤权失败仍向组合根传播。
     # 函数用途: 将本分区prepared控制交给独立槽。
     def poll(self):
@@ -94,18 +100,31 @@ class WorkerControlPump:
             self._reap()
             if self._stopped:
                 return 0
-            submitted, observations = 0, []
-            for path in sorted((self.paths.root / 'control_operations').glob('*.json')):
-                receipt = self._read_receipt(path)
+            directory = self.paths.root / 'control_operations'
+            if not self._scan_gate.should_scan(directory):
+                self._offer_observations([row[3] for row in self._verdicts.values()
+                                          if row[2] == 'active' and self._reconcilable(row[3])
+                                          and row[3].state != 'prepared'])
+                return 0
+            submitted, observations, seen = 0, [], set()
+            deferred = False
+            for path in sorted(directory.glob('*.json')):
+                seen.add(path.name)
+                receipt = self._cached_receipt(path)
+                if receipt is None and path.name not in self._verdicts:
+                    deferred = True
                 if not self._matches(receipt):
                     continue
                 if receipt.state == 'completed' or (receipt.private_approval is not None and receipt.state in {'executing', 'terminal_unknown'}):
-                    observations.append(receipt)
+                    if self._reconcilable(receipt):
+                        observations.append(receipt)
                     continue
                 if receipt.state != 'prepared':
                     continue
+                deferred = True
                 stopping = receipt.command_kind == 'stop'
-                occupied = sum((item.command_kind == 'stop') == stopping for item in self._active.values())
+                occupied = sum(not future.done() and (item.command_kind == 'stop') == stopping
+                               for future, item in self._active.items())
                 if occupied >= (1 if stopping else 4):
                     continue
                 identity = control_worker_authority(self.frozen, claiming=True)
@@ -124,10 +143,52 @@ class WorkerControlPump:
                 executor = self._stop_executor if stopping else self._executor
                 self._active[self._submit(executor, self._execute, claimed)] = claimed
                 submitted += 1
-            for receipt in sorted(observations, key=lambda row: (
-                    row.operation_id <= self._observation_cursor, row.operation_id)):
-                self._offer_reconciliation(receipt)
+            self._offer_observations(observations)
+            self._verdicts = {name: row for name, row in self._verdicts.items() if name in seen}
+            faults_present = any(row[2] == 'fault' for row in self._verdicts.values())
+            self._scan_gate.record_scan(directory, processed=submitted,
+                                        deferred_present=deferred or bool(observations) or faults_present)
             return submitted
+
+    # LLM: 保留原观察游标排序；缓存观察也只进入原对账门，不直接提交或授予执行权。
+    # 函数用途: 公平重试已完成插话和未结私卡的只读对账。
+    def _offer_observations(self, observations):
+        for receipt in sorted(observations, key=lambda row: (
+                row.operation_id <= self._observation_cursor, row.operation_id)):
+            self._offer_reconciliation(receipt)
+
+    # LLM: 只有稳定的foreign/inert省读；fault和活跃项每轮重读，缺失删缓存；stat故障仍交原读取边界诊断，缓存不承担授权。
+    # 函数用途: 用原文件身份跳过内容未变且没有工作可做的回执。
+    def _cached_receipt(self, path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            self._verdicts.pop(path.name, None)
+            return None
+        except OSError:
+            self._verdicts.pop(path.name, None)
+            return self._read_receipt(path)
+        cached = self._verdicts.get(path.name)
+        if (cached is not None and cached[2] in {'foreign', 'inert'}
+                and released_cache_is_stable(cached[:2], info)):
+            return None
+        receipt = self._read_receipt(path)
+        self._verdicts[path.name] = (reservation_signature(info), time.time_ns(),
+                                    self._receipt_verdict(receipt), receipt)
+        return receipt
+
+    # LLM: 判定只来自完整读取内容，不由槽位/登记等易变事实决定；私卡与插话仍沿原谓词观察。
+    # 函数用途: 区分应继续读取的工作与可以稳定缓存的无动作回执。
+    def _receipt_verdict(self, receipt):
+        if receipt is None:
+            return 'fault'
+        if not self._matches(receipt):
+            return 'foreign'
+        if receipt.state == 'prepared':
+            return 'active'
+        observation = receipt.state == 'completed' or (
+            receipt.private_approval is not None and receipt.state in {'executing', 'terminal_unknown'})
+        return 'active' if observation and self._reconcilable(receipt) else 'inert'
 
     # LLM: 全kind观察沿原read_only codec读取原子发布快照，不取得JSON写锁；末次认领仍在原op锁内重读，不由快照授信。
     #   仅隔离读取原件的结构/IO故障，不捕获执行权/写入/线程异常；不删除或修复坏原件。
@@ -238,15 +299,22 @@ class WorkerControlPump:
             self._write(updated)
             return True
 
-    # LLM: 原steer与待私卡executing/UNKNOWN只排一次有界事实观察，待用户卡不持Future长poll；复用原槽/登记/pin，不批准或重发。
+    # LLM: 仅提取原对账入口的内容谓词；不包含槽位/登记/活跃表，因此可用于稳定内容缓存。
+    # 函数用途: 判断回执内容是否仍有插话或私卡事实需要核对。
+    def _reconcilable(self, receipt) -> bool:
+        private = receipt.private_approval is not None and receipt.state in {'executing', 'terminal_unknown'}
+        return bool(private or (receipt.command_kind == 'steer'
+                               and receipt.result.get('delivery_status') == 'unknown'
+                               and receipt.result.get('guidance_dedupe_key')))
+
+    # LLM: 原steer与待私卡executing/UNKNOWN只排一次有界观察；失败已返回Future保责任但不占槽，原op重复仍拒绝，不批准或重发。
     # 函数用途: 为既有插话结果安排只读对账，不重执行任何命令。
     def _offer_reconciliation(self, receipt):
-        private = receipt.private_approval is not None and receipt.state in {'executing', 'terminal_unknown'}
-        if ((not private and (receipt.command_kind != 'steer' or receipt.result.get('delivery_status') != 'unknown'
-                or not receipt.result.get('guidance_dedupe_key')))
+        if (not self._reconcilable(receipt)
                 or any(item.operation_id == receipt.operation_id for item in self._active.values())
-                or any(item.state == 'completed' for item in self._active.values())
-                or sum(item.command_kind != 'stop' for item in self._active.values()) >= 4):
+                or any(not future.done() and item.state == 'completed' for future, item in self._active.items())
+                or sum(not future.done() and item.command_kind != 'stop'
+                       for future, item in self._active.items()) >= 4):
             return
         identity = control_worker_authority(self.frozen, claiming=True)
         if (receipt.dispatch.get('executor') != identity
@@ -350,17 +418,32 @@ class WorkerControlPump:
         write_json_file_atomic(ops.gateway_control_operation_path(self.paths, receipt.operation_id), receipt.to_dict(),
                                **({} if blocking else {'blocking': False}))
 
-    # LLM: 私卡失败仅重试同receipt UNKNOWN/决定证据落盘，不重投输入；try忙原Future留_active而其它控制/stop继续，close忙仍抛原异常不虚称结清。
+    # LLM: 普通故障contain、retain responsibility、report once；私卡try核收/close与撤权/信号传播不变，不删除失败责任。
     # 函数用途: 核收已返回的执行future，避免锁忙留下无人观察的claimed或把部分写入当成功。
     def _reap(self, *, closing=False):
         for future in tuple(self._active):
+            if future in self._faulted:
+                continue
             if future.done():
                 claimed = self._active[future]
                 error = future.exception()
                 if error is not None and claimed.private_approval is not None:
                     _reap_private_control(self, future, claimed, error, closing=closing)
                     continue
-                future.result()
+                try:
+                    future.result()
+                except BaseException as error:
+                    try:
+                        from .logging import report_native_transport_diagnostic
+
+                        report_native_transport_diagnostic('worker_future_result', error,
+                                                           request_id=claimed.operation_id)
+                    except BaseException:
+                        pass
+                    if isinstance(error, WorkerBootstrapError) or not isinstance(error, Exception):
+                        raise
+                    self._faulted.add(future)
+                    continue
                 del self._active[future]
 
     # LLM: 同一个原Future的错误负责同一claim；新结算故障不得盖掉actual运输未知，保原对象给组合根且不删除责任。
