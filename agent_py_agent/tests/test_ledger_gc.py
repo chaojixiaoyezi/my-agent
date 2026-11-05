@@ -57,6 +57,46 @@ def _policy_thread(path: Path) -> str:
     return str(json.loads(path.read_text(encoding="utf-8")).get("thread_id") or "")
 
 
+# LLM: 冻结八个原目录的次序，仅追加清理会移动或删除记录的八个数据目录；无I/O也不创建路径。
+# 函数用途: 钉住侧锁目录的完整路径元组合同。
+def test_w4_lock_sidecar_directory_order_and_no_initialization(tmp_path):
+    from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+
+    root = tmp_path / "uncreated"
+    storage = ConversationStorage(root, initialize=False)
+    assert storage.lock_sidecar_dirs() == (
+        storage.policies_dir, storage.background_claims_dir,
+        storage.wake_queue_dir / "urgent", storage.wake_queue_dir / "normal",
+        storage.wake_handled_dir, storage.wake_dedupe_dir,
+        storage.wake_attempts_dir, storage.wake_quarantine_dir,
+        storage.goals_dir, storage.threads_dir, storage.tasks_dir,
+        storage.guidance_dedupe_dir, storage.guidance_turn_index_dir,
+        storage.guidance_input_index_dir, storage.model_usage_dir,
+        storage.root / "agent_transcript_events",
+    )
+    assert not root.exists()
+
+
+# LLM: 复用真实周期入口与try-flock/inode协议；老孤儿锁可回收，存在数据的同龄锁必须保留。
+# 函数用途: 验证新登记的threads目录既会清垃圾也不误删活锁。
+def test_w4_thread_orphan_lock_reclaimed_live_sidecar_kept(tmp_path):
+    import os
+    import time
+
+    agent, thread_id = _agent_with_thread(tmp_path)
+    store = agent.conversation_store
+    current = time.time()
+    orphan = store.storage.threads_dir / "t-gone.json.lock"
+    live = Path(str(store.storage.thread_path(thread_id)) + ".lock")
+    for path in (orphan, live):
+        path.write_text("{}", encoding="utf-8")
+        os.utime(path, (current - 48 * 3600, current - 48 * 3600))
+    result = store.gc_stale_ledger_records(now=current)
+    assert result["cleaned_orphan_locks"] >= 1
+    assert not orphan.exists()
+    assert live.exists() and store.storage.thread_path(thread_id).exists()
+
+
 def test_disabled_policy_archived_after_retention(tmp_path):
     """disabled 超保留期的 policy 归档(含 .lock),enabled 与未超期不动。"""
     agent, thread_id = _agent_with_thread(tmp_path)

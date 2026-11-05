@@ -1,13 +1,14 @@
-# LLM: 唤醒毒丸结案留档的保留期归档（毒丸第 4 步）：只移不删，保持相对位置。顶层结案记录按 quarantine.quarantined_at
+# LLM: 唤醒毒丸结案留档的保留期归档（毒丸第 4 步）：本模块只移动不删除，保持相对位置。顶层结案记录按 quarantine.quarantined_at
 #   判断（读不出或缺字段的按文件时间），超过保留期移到 quarantine/archive/<id>.json，它的坏账留档 ledger/<id>.json 一并移到
 #   archive/ledger/；读不出的信封留档 unreadable/<id>.json 与没有顶层记录对应的孤儿坏账按 max(mtime, ctime) 判断
 #   （os.replace 不改 mtime、会改 ctime）。replayed/ 不动，它是重放次数的唯一权威。
 #   每条顶层记录在它自己的结案锁（wake_quarantine_path）里移动，与 WakeAttemptStore.quarantine/replay 串行。
 #   归档只换物理位置、不改发布语义：archive/<id>.json 仍是发布层的只读安装位置（store_wake_publication._installed_signal），
 #   同键再发布返回原结案信号；重放对已归档的记录拒绝（WAKE_REPLAY_ARCHIVED）。改动时联测 test_wake_quarantine_archive.py。
-#   运维不能单独删 archive/<id>.json：同键回执还在时，再发布和查回执会抛 DataCorruptionError；要删必须连同 wake_queue/dedupe
-#   里同键的回执一起删（见 docs/design/WAKE_POISON_PILL.md 第 8 节）。
-# 模块用途: 在 6 小时一次的账本整理里，把超过 14 天的唤醒结案记录和留档移进归档目录，列表和计数只看近期的；清理归档须连同去重回执一起删。
+#   会话侧账留存通道仅在max(mtime, ctime)满30天且同键dedupe明确不存在时，在原结案锁内删主档后删同名ledger；
+#   dedupe存在或读取不确定时一律保留，避免发布或查回执抛DataCorruptionError（见docs/design/WAKE_POISON_PILL.md第8节）。
+#   archive/unreadable按同一文件年龄清理；replayed始终不动。
+# 模块用途: 周期性把超过14天的结案记录和留档移入归档；后续安全清理由会话侧账留存通道负责。
 from __future__ import annotations
 
 import math
