@@ -2017,7 +2017,7 @@ class _GatewayOwnerMaintenanceController:
             _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
         )
 
-    # LLM: 每拍先跑基础 owner 与原闲置压缩，再在期限和页数内优先续作及分页；同拍去重、不构造 owner agent。
+    # LLM: 每拍先跑基础 owner 与原闲置压缩；优先续作限半拍，发现至少一页，同拍去重、不构造 owner agent。
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘。
     # 函数用途: 保护期后有界追赶 owner 维护，保留原摘要与安全清理。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
@@ -2034,16 +2034,19 @@ class _GatewayOwnerMaintenanceController:
             "owner_agent_pool_max_agents",
             default=64,
         )
-        deadline = time.monotonic() + _OWNER_MAINTENANCE_TICK_BUDGET_SECONDS
+        started = time.monotonic()
+        deadline = started + _OWNER_MAINTENANCE_TICK_BUDGET_SECONDS
+        priority_deadline = started + _OWNER_MAINTENANCE_TICK_BUDGET_SECONDS / 2
         visited, scanned = set(), 0
         for key, identity in list(self._priority.items()):
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= priority_deadline:
                 break
             self._priority.pop(key, None)
             visited.add(key)
             self._run_scoped_owner(identity, current, reports)
         pages = 0
-        while pages < _OWNER_MAINTENANCE_MAX_PAGES_COUNT and time.monotonic() < deadline:
+        # 单个优先 owner 可能超时；即便整拍额度耗尽，也推进一页发现，避免新 owner 永久饥饿。
+        while pages < _OWNER_MAINTENANCE_MAX_PAGES_COUNT and (pages == 0 or time.monotonic() < deadline):
             page = discover_owner_home_page(
                 self._base_home.owners_dir,
                 limit=min(limit, _OWNER_MAINTENANCE_PAGE_OWNERS_COUNT),
