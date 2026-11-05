@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from threading import Event
 
 from agent_py_agent.agent.conversation.execution_threads import IM_TASK_EXECUTION_KEY
 from agent_py_agent.agent.conversation.wake_poison import (
@@ -22,7 +23,7 @@ from agent_py_agent.agent.settings.deployment_policy import update_deployment_po
 from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.cli.gateway_loops import _build_background_scheduler
-from agent_py_agent.tests.test_im_delegation_single_speaker import ask, ordinary_chain
+from agent_py_agent.tests.test_im_delegation_single_speaker import _set_route, ask, ordinary_chain
 
 # 相邻两拍间隔超过不计数退避上限（300 秒），每一拍这条唤醒都已到期。
 _TICK_GAP_SECONDS = 400.0
@@ -46,12 +47,31 @@ def _children_for(agent, task_id):
             if run.attributes.get("conversation_request_id") == task_id]
 
 
-def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, monkeypatch):
+# LLM: 当前IM任务分派须先经可信route开关，委派偏好不能隐式开启路由；原五拍与同任务续跑断言不变。
+# LLM: 测试屏障只延后真实孩子进入core，不替换容量裁决或执行结果；五拍后解除，必须由原runner完成。
+# 函数用途: 在真正启用任务路由的普通链上核验容量等待与释放后的继续执行。
+def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, monkeypatch, request):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.runtime_context import current_subagent_run_id
+
     _disable_provider_retry_ladder(tmp_path)
     agent, paths, _provider, calls, _ = ordinary_chain(tmp_path, monkeypatch)
+    release_child = Event()
+    request.addfinalizer(release_child.set)
+    original_run = SimpleAgent.run
+
+    # LLM: 保留真实run输入与返回，只让占位孩子等待显式测试事件；有界超时失败且异常退出亦释放。
+    # 函数用途: 排除离线孩子在第五拍前已跑完的时序竞态。
+    def run(current, prompt, *, params):
+        if current_subagent_run_id(current) and not release_child.wait(timeout=120):
+            raise TimeoutError('capacity test child release was not signalled')
+        return original_run(current, prompt, params=params)
+
+    monkeypatch.setattr(SimpleAgent, 'run', run)
     assert agent.runtime_guard_policy.provider_transient_auto_resume_delays_seconds == ()
     store = agent.conversation_store
     set_delegation_preference(agent, "feishu", "ou_a", True)
+    _set_route(agent, True)
     ask(agent, paths, "first", "整理工作区里的资料")
     scheduler = _build_background_scheduler(agent, agent.delivery_service)
     scheduler.tick(now=time.time())
@@ -86,7 +106,20 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     assert store.wakes.attempts.quarantined_count() == 0
 
     # 已有孩子由原调度监督与 runner 正常跑完，名额自然释放；之后由同一任务、同一唤醒继续委派。
+    release_child.set()
+    from agent_py_agent.agent.subagents.manager import creation_capacity_counts
+
     deadline, index = time.monotonic() + 120, 5
+    # 完成正文不等于canonical与索引均提交；先观察真实释放，避免把本测试混成pending-index并发故障测试。
+    while True:
+        try:
+            settled = creation_capacity_counts(agent, '')[0] == 0
+        except RuntimeError:
+            settled = False
+        if settled and agent.subagents.load(occupant.id).status == 'DONE':
+            break
+        assert time.monotonic() < deadline, agent.subagents.load(occupant.id).status
+        time.sleep(0.05)
     while not _children_for(agent, second.task_id):
         assert time.monotonic() < deadline, agent.subagents.load(occupant.id).status
         scheduler.tick(now=base + index * _TICK_GAP_SECONDS)

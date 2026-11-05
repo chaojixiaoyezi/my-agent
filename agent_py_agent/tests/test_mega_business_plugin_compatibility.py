@@ -260,6 +260,8 @@ def test_observation_plugin_real_sse_and_request_local_eight_event_bound(product
     assert services.host.conversation_store.session_tasks.require(task.task_id).status == task.status
 
 
+# LLM: 探针只记录本安装的真实流；前一测试已关闭流仍走原撤权门，不能把其正常401混进本次锁竞争断言。
+# 函数用途: 在真实WAL短写锁下验证当前订阅交付snapshot，保留鉴权与SQLite异常断言。
 def test_observation_plugin_sse_survives_short_runtime_write_lock(production_host, monkeypatch):
     """在200头之后制造真实WAL独占窗口，仍须交付原snapshot，不能静默EOF。"""
     import threading
@@ -274,6 +276,7 @@ def test_observation_plugin_sse_survives_short_runtime_write_lock(production_hos
     locked, reading, release = threading.Event(), threading.Event(), threading.Event()
     original_connect = runtime._runtime_connect
     original_revalidate = StreamSession._revalidate_stream
+    issuer = production_host[0].plugin_host.composition.issuer
     checks, faults, published = 0, [], []
 
     def writer_connect():
@@ -293,8 +296,12 @@ def test_observation_plugin_sse_survives_short_runtime_write_lock(production_hos
             raise
 
     with ThreadPoolExecutor(max_workers=1) as pool:
+        # LLM: 跨测试残留流仍执行原重验并传播拒绝，不计入当前安装的屏障、次数或faults。
+        # 函数用途: 将写锁探针绑定到本次真实宿主，避免全局类patch串入旧订阅。
         def revalidate(session):
             nonlocal checks
+            if session.authorized.binding.source._issuer is not issuer:
+                return original_revalidate(session)
             checks += 1
             if checks == 2:
                 published.append(pool.submit(runtime.append_event, event_type='attempt.progress',
@@ -631,6 +638,8 @@ def test_scope_explicit_existing_controllers_are_never_retagged_or_reactivated(e
     assert store.storage.thread_path(case.controller).read_bytes() == before
 
 
+# LLM: 使用真实claim发布口和完整task/run/attempt绑定；只构造隔离测试运行态，不删去插件来源隔离反例。
+# 函数用途: 核合法原任务能显示精确执行，私有任务即使有完整运行证据也不泄露。
 @pytest.mark.parametrize('permitted', [False, True], ids=['private-task', 'original-task'])
 def test_scope_agent_detail_filters_current_execution_using_original_task_and_run(production_host, permitted):
     from types import SimpleNamespace
@@ -639,9 +648,18 @@ def test_scope_agent_detail_filters_current_execution_using_original_task_and_ru
         BusinessContextIntent,
         BusinessExecutionContext,
     )
-    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
-    from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
-    from agent_py_agent.tests.test_mega_business_api_actions import seed_observed_runtime
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+        publish_claim_runtime_authority,
+    )
+    from agent_py_agent.agent.conversation.session_tasks import (
+        SESSION_TASK_ACCEPTED,
+        SessionTaskDraft,
+        SessionTaskUpdate,
+    )
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+    from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 
     case = native_scope_rows(production_host)
     created = production_call(production_host, 'business.background_agents.create',
@@ -653,13 +671,23 @@ def test_scope_agent_detail_filters_current_execution_using_original_task_and_ru
         business_context_intent=BusinessContextIntent(case.services.owner_id, case.space, None, None),
         business_context_factory=lambda tid: BusinessExecutionContext(case.services.owner_id, case.space,
             None, tid, 0, None, (), (), 'business-context.v1'))
-    runtime, run = seed_observed_runtime(case.services, task)
     run_id = 'observed-' + task.task_id
+    runtime = RuntimeRepository(runtime_db_path(case.services.owner_home))
+    run = runtime.record_run_creation(owner_id=case.services.owner_id, conversation_task_id=task.task_id,
+        run_id=run_id, thread_id=agent_id, attempt_status='running', task_run_metadata={
+            'business_context': task.metadata['business_context'], 'session_task_ref': task.task_id})
+    store.session_tasks.bind_execution(task.task_id, task_run_id=run['task_run_id'], target_thread_id=agent_id)
+    store.session_tasks.advance(task.task_id, SessionTaskUpdate(
+        status=SESSION_TASK_ACCEPTED, conversation_request_id='invocation-' + task.task_id))
     case.services.host.subagents = SimpleNamespace(runtime_db=runtime)
     claim = store.claims.acquire({'thread_id': agent_id, 'task_id': task.task_id})
     assert claim is not None
-    update_json_file_atomic(store.storage.background_claim_path(agent_id), lambda latest: {
-        **latest, 'runtime_authority': {'run_id': run_id, 'attempt_id': run['attempt_id']}})
+    with bind_claim_execution(ClaimExecutionBinding(store.claims, agent_id, claim['claim_id'], agent_id)):
+        publish_claim_runtime_authority({'invocation_run_id': 'invocation-' + task.task_id,
+            'task_id': task.task_id, 'run_id': run_id, 'agent_run_id': run['agent_run_id'],
+            'attempt_id': run['attempt_id']})
+    with runtime.transaction() as connection:
+        connection.execute("UPDATE agent_runs SET status='running' WHERE agent_run_id=?", (run['agent_run_id'],))
     result = production_call(production_host, 'business.background_agents.get', {'agent_id': agent_id})
     if permitted:
         assert result['current_execution']['run_id'] == run_id

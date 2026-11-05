@@ -1119,7 +1119,7 @@ def test_quota_reconcile_runs_when_retention_is_not_safe(tmp_path, reason):
     assert json.loads((home.owner_home_dir / '.owner-quota-ledger.json').read_text())['dirty_since'] is None
 
 
-# LLM: C/W下配额对账必须经原transition提交才写账；没有transition时只报告延期，不写配额账。
+# LLM: C/W配额对账只经原transition提交；此例验证归属而非默认毫秒级时限，显式给5秒测试片预算，仍真实扫描、提交且无transition不落账。
 # 函数用途: 验证协调模式的配额对账只走调用方给出的transition。
 def test_coordinator_quota_reconcile_runs_only_through_transition_commit(tmp_path):
     from agent_py_agent.agent.user_space import owner_maintenance as maintenance
@@ -1135,7 +1135,7 @@ def test_coordinator_quota_reconcile_runs_only_through_transition_commit(tmp_pat
         return operation()
 
     result = maintenance.run_owner_storage_maintenance_slice(home, {}, policy, now=2_000_000, coordinator=True,
-                                                             commit_transition=commit)
+                                                             commit_transition=commit, quota_max_ms=5000)
     assert len(committed) == 1 and result['quota_reconciliation']['complete'] is True
     assert result['deferred_reason'] == 'coordinator_adapter_protocol_required'
     other = ensure_my_agent_home(tmp_path / 'other')
@@ -1565,6 +1565,7 @@ def test_r8_public_maintenance_forwards_explicit_quota_budget(tmp_path, monkeypa
 
 # LLM: R7-Q4：配额关闭（max_disk_mb=0）时无论retention是否带load_errors，维护都保持每天一次且不置待续；
 #   配额开启时追赶期间每拍只推进轻量配额片，apply_owner_retention每天只跑一次。
+# LLM: 调度仓库的真实索引在维护前初始化；不能在干净基线后新增未受控文件，再要求配额放过增长。
 # 函数用途: 验证配额关闭与配额开启在正常路径与延期路径下的维护节拍与保留调用次数。
 @pytest.mark.parametrize('quota_enabled', [False, True])
 @pytest.mark.parametrize('load_error', [False, True])
@@ -1587,6 +1588,14 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
         quota_payload = json.loads((owner / 'quota.json').read_text())
         quota_payload['max_disk_mb'] = 1024
         (owner / 'quota.json').write_text(json.dumps(quota_payload))
+        from agent_py_agent.agent.scheduler.repository import (
+            SchedulerJobCreateRequest,
+            SchedulerRepository,
+        )
+
+        enforcer = quota.owner_quota_enforcer_from_policy(owner)
+        repository = SchedulerRepository(owner / 'data' / 'scheduler', owner_provider='feishu', owner_kind='user',
+                                         owner_id='u-1', default_timezone='Asia/Shanghai', quota_enforcer=enforcer)
     real_apply = maintenance.apply_owner_retention
     retention_calls = [0]
 
@@ -1620,19 +1629,11 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
     if not quota_enabled:
         assert day2_runs == [0]
     else:
-        from agent_py_agent.agent.scheduler.repository import (
-            SchedulerJobCreateRequest,
-            SchedulerRepository,
-        )
-
         maint_cursor = state['storage_maintenance'].get('cursors', {}).get('cache_tmp_trash') or {}
         assert not any(
             k in maint_cursor
             for k in ('dir_stamps', 'base_rows', 'scan_rows', 'dir_batch', 'prep', 'orphans')
         )
-        enforcer = quota.owner_quota_enforcer_from_policy(owner)
-        repository = SchedulerRepository(owner / 'data' / 'scheduler', owner_provider='feishu', owner_kind='user',
-                                         owner_id='u-1', default_timezone='Asia/Shanghai', quota_enforcer=enforcer)
         created, reused = repository.create_job(SchedulerJobCreateRequest(
             name='job-1', prompt='execute 1', thread_id='thread-1', source_task_id='task-1',
             schedule={'kind': 'every', 'every_seconds': 600, 'anchor_at': 1_000}, misfire_grace_seconds=None,
