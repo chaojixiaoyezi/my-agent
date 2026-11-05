@@ -12,7 +12,11 @@ from agent_py_agent.agent.capability.skill_learning_store import (
     SkillLearningRegistry,
     SkillLearningStore,
 )
-from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshot, SkillSnapshotEntry
+from agent_py_agent.agent.capability.skill_snapshot import (
+    SkillSnapshot,
+    SkillSnapshotEntry,
+    skill_content_sha256,
+)
 from agent_py_agent.tests.test_self_map_runtime import _read, make_agent  # noqa: F401
 
 
@@ -23,7 +27,7 @@ def _learned(agent, count, *, root=None):
     entries, records = [], {}
     for index in range(count):
         name = f'learned-{index}'
-        record = LearnedSkill(name, 1, 'a' * 64, '2026-10-23', '2026-10-23', layout='owner' if index % 2 else 'learned')
+        record = LearnedSkill(name, 1, skill_content_sha256('frozen body'), '2026-10-23', '2026-10-23', layout='owner' if index % 2 else 'learned')
         active = (store.skills_root if record.layout == 'owner' else store.learned_root) / name / 'SKILL.md'
         active.parent.mkdir(parents=True, exist_ok=True)
         active.write_text('active body')
@@ -31,7 +35,7 @@ def _learned(agent, count, *, root=None):
         frozen.parent.mkdir(parents=True, exist_ok=True)
         frozen.write_text('frozen body')
         records[name] = record
-        entries.append(SkillSnapshotEntry('owner:' + name, name, '用途', str(active), 'owner', 'future', 'a' * 64, frozen_path=str(frozen)))
+        entries.append(SkillSnapshotEntry('owner:' + name, name, '用途', str(active), 'owner', 'future', skill_content_sha256('frozen body'), frozen_path=str(frozen)))
     registry = SkillLearningRegistry(skills=records)
     store.registry_path.write_text(json.dumps(registry.to_record()))
     return store, tuple(entries), registry

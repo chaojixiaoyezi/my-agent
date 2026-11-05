@@ -120,8 +120,11 @@ def test_roots_sources_and_snapshot_authority(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         adapter.get_owner_skill_descriptor(home, 'same', skill_snapshot=empty)
     skill(roots[0], 'same', 'changed')
+    # 元数据沿冻结快照投影；只有显式正文读取才复核当前正文版本。
+    metadata = adapter.get_owner_skill_descriptor(home, 'workspace:same', skill_snapshot=restricted)
+    assert metadata['summary'] == 'workspace' and 'body_markdown' not in metadata
     with pytest.raises(SkillSnapshotError) as caught:
-        adapter.get_owner_skill_descriptor(home, 'workspace:same', skill_snapshot=restricted)
+        adapter.get_owner_skill_descriptor(home, 'workspace:same', skill_snapshot=restricted, include_body=True)
     assert caught.value.error_code == 'SKILL_SNAPSHOT_STALE'
 
 
