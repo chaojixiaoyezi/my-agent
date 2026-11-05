@@ -7,12 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from agent_py_agent.agent import core
 from agent_py_agent.agent.adapter import feishu_message_history as history
 from agent_py_agent.agent.capability.config import CapabilityConfig, load_capability_config
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.settings.config import load_simple_yaml
 from agent_py_agent.agent.tooling.channel_messages_tool import ChannelMessagesTool
 from agent_py_agent.agent.tooling.models import EffectResolverPolicy
 from agent_py_agent.tests.test_v14_feishu_message_history import environment as environment
@@ -29,7 +29,7 @@ def params(**overrides):
 # 函数用途: 检查代码、YAML 和注册表都默认不开放群历史。
 def test_defaults_off_in_dataclass_yaml_and_real_registry(tmp_path):
     assert CapabilityConfig().feishu_chat_history_enabled is False
-    config = yaml.safe_load((Path(__file__).parents[1] / "config" / "capability_config.yaml").read_text())
+    config = load_simple_yaml(Path(__file__).parents[1] / "config" / "capability_config.yaml")
     assert config["feishu_chat_history_enabled"] is False
     agent = core.SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "memory.jsonl")), str(tmp_path))
     assert "channel_messages" not in agent.tools.tools
@@ -40,9 +40,19 @@ def test_defaults_off_in_dataclass_yaml_and_real_registry(tmp_path):
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_history_switch_is_strict_config_bool(tmp_path, value):
     path = tmp_path / "capability.yaml"
-    path.write_text(yaml.safe_dump({"feishu_chat_history_enabled": value}))
+    # JSON 标量也是合法 YAML，保留字符串引号及整数/null 负例，不依赖 PyYAML。
+    path.write_text(f"feishu_chat_history_enabled: {json.dumps(value)}\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_capability_config(path)
+
+
+# LLM: 真布尔值沿真实配置加载；夹具只写单行 YAML，不需要第三方序列化器。
+# 函数用途: 检查去掉 PyYAML 后，启用和关闭仍能按严格布尔类型加载。
+@pytest.mark.parametrize("value", [False, True])
+def test_history_switch_accepts_config_bool(tmp_path, value):
+    path = tmp_path / "capability.yaml"
+    path.write_text(f"feishu_chat_history_enabled: {json.dumps(value)}\n", encoding="utf-8")
+    assert load_capability_config(path).feishu_chat_history_enabled is value
 
 
 # LLM: pytest 注册到执行链回归；真实 registry 加假 HTTP，保留默认折叠与短摘要合同。
