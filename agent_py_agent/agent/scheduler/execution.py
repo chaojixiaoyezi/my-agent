@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import json
-import logging
-import sqlite3
 import time
 from contextlib import ExitStack, contextmanager
 from copy import copy, deepcopy
@@ -46,7 +44,11 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
             return dependencies.run_once(kwargs)
         service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
         if claim.run.get('execution_target') is not None:
-            return execute_scheduled_target(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
+            try:
+                return execute_scheduled_target(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
+            except BaseException:
+                _release_interrupted_target(agent, claim)
+                raise
         if not claim.run.get("use_llm", True):
             from .tool_work import execute_scheduled_tool
             return execute_scheduled_tool(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
@@ -56,6 +58,25 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         return admission if admission is not False else None
 
     return replace(dependencies, run_once=run_once)
+
+
+# LLM: 调用点须已等 worker 交回；清理只处理 quiescent attempt，失败记录类型且不掩盖原异常。
+# 函数用途: 定时目标异常交回后释放已失权的工具资源，UNKNOWN 与执行锁仍由原生命周期守护。
+def _release_interrupted_target(agent, claim) -> None:
+    import logging
+    import sqlite3
+
+    repo = getattr(getattr(agent, 'subagents', None), 'runtime_db', None)
+    if repo is None:
+        return
+    try:
+        row = repo.main_agent_run_for_task(claim.run_id)
+        if row is None or not row['current_attempt_id']:
+            return
+        repo.release_terminal_attempt_operations(str(row['current_attempt_id']),
+            reason='scheduled_target_interrupted_after_authority_close')
+    except (OSError, sqlite3.Error, RuntimeError, KeyError, ValueError) as exc:
+        logging.getLogger(__name__).warning('terminal attempt release failed: %s', type(exc).__name__)
 
 
 # LLM: 历史定义只选内容，不签发当前授权；脚本由原数据源执行器加载当前记录、校验 pin 并绑定有效快照。
@@ -214,26 +235,14 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
             raise InterruptedError('定时资产执行已中断')
         early = threading.Event()
         # 先在claim线程记住早到停止，再移交；等待真实worker退出后才交回原收口链。
-        try:
-            with register_interrupt_callback(early.set):
-                future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
-                    partial(_run_with_claim_interrupts, _claim_interrupt_names(kwargs), early,
-                        partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id'])),
-                    run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
-                result = future.result()
-            if is_interrupted():
-                raise InterruptedError('定时资产执行已中断')
-        except InterruptedError:
-            # future 已交回，工具不再执行；只释放已由原取消入口关闭的准确 attempt。
-            try:
-                repo = getattr(getattr(agent, 'subagents', None), 'runtime_db', None)
-                row = repo.main_agent_run_for_task(claim.run_id) if repo is not None else None
-                if row is not None:
-                    repo.release_terminal_attempt_operations(str(row['current_attempt_id']),
-                        reason='scheduled_target_interrupted_after_authority_close')
-            except (OSError, sqlite3.Error, RuntimeError, KeyError, ValueError):
-                logging.getLogger(__name__).exception('定时资产中断后的资源清理未确认')
-            raise
+        with register_interrupt_callback(early.set):
+            future = service.monitor_pool.submit(agent.home_paths.owner_home_dir, claim.run['job_id'], claim.run_id,
+                partial(_run_with_claim_interrupts, _claim_interrupt_names(kwargs), early,
+                    partial(_execute_target_tool, agent, params, claim.run['execution_target'], monitor_id=claim.run['job_id'])),
+                run_params=params, bind_run_params=partial(current_prompt_scope, agent, params.root_user_prompt))
+            result = future.result()
+        if is_interrupted():
+            raise InterruptedError('定时资产执行已中断')
         if isinstance(result, dict) and result.get('status') == 'skipped':
             service.finish(claim, status='skipped', response=json.dumps(result), error_code=result['error_code'])
             service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'cancelled',

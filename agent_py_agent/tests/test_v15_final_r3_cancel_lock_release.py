@@ -11,7 +11,7 @@ import pytest
 
 from agent_py_agent.agent.common.heartbeat import process_start_time
 from agent_py_agent.agent.conversation import BackgroundMainAgentScheduler
-from agent_py_agent.agent.runtime_db.operations import attempt_status_is_terminal
+from agent_py_agent.agent.runtime_db.operations import attempt_status_is_terminal, exec_lock_scope
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.scheduler.control import cancel_monitor
 from agent_py_agent.agent.workflows import script_runner
@@ -132,11 +132,13 @@ def test_cancelled_pool_attempt_releases_without_replaying_and_fresh_run_complet
     else:
         reason = 'scheduled_target_interrupted_after_authority_close'
         released = _assert_unknown_dirty(repo, attempt_id, before, reason)
-        events = [row for row in released['runtime_events']
-            if row['event_type'] == 'agent_attempt.terminal_resources_released']
-        assert len(events) == 1
-        assert json.loads(events[0]['payload_json']) == {'attempt_id': attempt_id,
-            'operation_ids': [before['tool_operations'][0]['operation_id']], 'reason': reason}
+    reason = 'terminal_attempt_lease_expired' if release_error else 'scheduled_target_interrupted_after_authority_close'
+    events = [row for row in released['runtime_events']
+        if row['event_type'] == 'agent_attempt.terminal_resources_released']
+    assert len(events) == 1 and events[0]['agent_run_id'] == run['agent_run_id']
+    assert json.loads(events[0]['payload_json']) == {
+        'operation_ids': [before['tool_operations'][0]['operation_id']],
+        'lock_ids': [row['lock_id'] for row in in_flight['resource_locks']], 'reason': reason}
     assert repo.release_terminal_attempt_operations(attempt_id, reason='repeat') == []
     assert _rows(repo, attempt_id) == released, '已确认清理不得重复写 UNKNOWN/DIRTY 或事件'
 
@@ -162,17 +164,24 @@ def test_cancelled_pool_attempt_releases_without_replaying_and_fresh_run_complet
     assert _fd_count() - fd_before == 0
 
 
-def test_terminal_release_keeps_running_attempt_and_missing_attempt_unchanged(tmp_path):
+@pytest.mark.parametrize('status', ['running', 'unknown'])
+def test_terminal_release_keeps_running_unknown_and_missing_attempts_unchanged(tmp_path, status):
     repo = RuntimeRepository(tmp_path / 'runtime.db')
     chain = repo.record_run_creation(owner_id='local/main', run_id='running', goal='guard')
     attempt_id = chain['attempt_id']
-    repo.create_tool_operation(agent_run_id=chain['agent_run_id'], attempt_id=attempt_id,
+    operation = repo.create_tool_operation(agent_run_id=chain['agent_run_id'], attempt_id=attempt_id,
         operation_type='write', canonical_scope='owner:guard')
+    repo.mark_operation_executing(operation['operation_id'])
+    repo.begin_mutation(canonical_scope='owner:guard', attempt_id=attempt_id)
+    if status == 'unknown':
+        assert repo._mark_attempt_unknown(attempt_id, chain['agent_run_id'], reason='guard', operator='test')
     before = _rows(repo, attempt_id)
-    assert not attempt_status_is_terminal(repo.get_attempt(attempt_id)['status'])
+    assert repo.get_attempt(attempt_id)['status'] == status
     fd_before = _fd_count()
     assert repo.release_terminal_attempt_operations(attempt_id, reason='too_early') == []
     assert repo.release_terminal_attempt_operations('missing', reason='missing') == []
+    assert _rows(repo, attempt_id) == before
+    assert repo.cleanup_stale_resource_locks(now=time.time() + 3600) == []
     assert _rows(repo, attempt_id) == before
     assert _fd_count() - fd_before == 0
 
@@ -219,4 +228,51 @@ def test_backstop_waits_for_all_attempt_leases_and_keeps_confirmed_mutations(tmp
         assert mutation['state'] == 'DIRTY' and mutation['dirty_reason'] == 'terminal_attempt_lease_expired'
     assert dict(repo.mutation_for_scope('owner:stable')) == stable
     assert dict(repo.mutation_for_scope('owner:dirty')) == dirty
+    assert _fd_count() - fd_before == 0
+
+
+def test_terminal_release_never_deletes_execution_lock_and_rolls_back_on_event_error(tmp_path, monkeypatch):
+    repo = RuntimeRepository(tmp_path / 'runtime.db')
+    chain = repo.record_run_creation(owner_id='local/main', run_id='exec_guard', goal='exec guard')
+    attempt_id = chain['attempt_id']
+    operation = repo.create_tool_operation(agent_run_id=chain['agent_run_id'], attempt_id=attempt_id,
+        operation_type='write', canonical_scope='owner:exec_guard')
+    repo.mark_operation_executing(operation['operation_id'])
+    repo.begin_mutation(canonical_scope='owner:exec_guard', attempt_id=attempt_id)
+    assert repo.settle_agent_run(agent_run_id=chain['agent_run_id'], attempt_id=attempt_id,
+        status='cancelled')['settled']
+    attempt, run = repo.get_attempt(attempt_id), repo.get_agent_run(chain['agent_run_id'])
+    scopes = [exec_lock_scope(chain['agent_run_id']), 'owner:exec_guard']
+    locks = repo.acquire_locks(scopes, holder_instance=repo.instance_id, attempt_id=attempt_id,
+        attempt_generation=attempt['attempt_generation'], workspace_epoch=run['workspace_epoch'],
+        tool_operation_generation=operation['tool_operation_generation'], pid=os.getpid(),
+        start_token=process_start_time(os.getpid()), lease_seconds=60)
+    before = _rows(repo, attempt_id)
+    append = repo._append_event_conn
+
+    def fail_event(*args, **kwargs):
+        raise sqlite3.OperationalError('simulated event I/O error')
+
+    fd_before = _fd_count()
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, '_append_event_conn', fail_event)
+        with pytest.raises(sqlite3.OperationalError, match='simulated event'):
+            repo.release_terminal_attempt_operations(attempt_id, reason='event_error')
+    assert _rows(repo, attempt_id) == before
+    assert _fd_count() - fd_before == 0
+    assert repo._append_event_conn == append
+    assert repo.release_terminal_attempt_operations(attempt_id, reason='worker_exited') == [operation['operation_id']]
+    after = _rows(repo, attempt_id)
+    assert after['resource_locks'] == [row for row in before['resource_locks']
+        if row['canonical_scope'] == scopes[0]]
+    assert after['tool_operations'][0]['status'] == 'UNKNOWN'
+    assert after['resource_mutations'][0]['state'] == 'DIRTY'
+    events = [row for row in after['runtime_events']
+        if row['event_type'] == 'agent_attempt.terminal_resources_released']
+    assert len(events) == 1
+    assert json.loads(events[0]['payload_json'])['lock_ids'] == [row['lock_id'] for row in locks
+        if row['canonical_scope'] == scopes[1]]
+    assert repo.get_attempt(attempt_id)['status'] == repo.get_agent_run(chain['agent_run_id'])['status'] == 'cancelled'
+    assert repo.release_terminal_attempt_operations(attempt_id, reason='repeat') == []
+    assert _rows(repo, attempt_id) == after
     assert _fd_count() - fd_before == 0

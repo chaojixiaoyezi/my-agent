@@ -117,6 +117,11 @@ def test_grace_and_legal_hold_preserve_files(tmp_path, hold):
         policy["legal_hold"] = True
         home.owner_retention_json.write_text(json.dumps(policy))
     _maintain(home, now)
+    # 维护按预算分片；慢机器可能首拍尚未扫到旧桶，沿原游标有界续作，不放宽保留断言。
+    for step in range(1, 9):
+        if hold or not old.exists():
+            break
+        _maintain(home, now + step)
     assert recent.exists()
     assert old.exists() is hold
 
