@@ -53,9 +53,11 @@ def _children_for(agent, task_id):
 def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, monkeypatch, request):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.runtime_context import current_subagent_run_id
+    from agent_py_agent.agent.subagents.manager import creation_capacity_counts
 
     _disable_provider_retry_ladder(tmp_path)
     agent, paths, _provider, calls, _ = ordinary_chain(tmp_path, monkeypatch)
+    child_entered = Event()
     release_child = Event()
     request.addfinalizer(release_child.set)
     original_run = SimpleAgent.run
@@ -63,8 +65,10 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     # LLM: 保留真实run输入与返回，只让占位孩子等待显式测试事件；有界超时失败且异常退出亦释放。
     # 函数用途: 排除离线孩子在第五拍前已跑完的时序竞态。
     def run(current, prompt, *, params):
-        if current_subagent_run_id(current) and not release_child.wait(timeout=120):
-            raise TimeoutError('capacity test child release was not signalled')
+        if current_subagent_run_id(current):
+            child_entered.set()
+            if not release_child.wait(timeout=120):
+                raise TimeoutError('capacity test child release was not signalled')
         return original_run(current, prompt, params=params)
 
     monkeypatch.setattr(SimpleAgent, 'run', run)
@@ -74,9 +78,24 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     _set_route(agent, True)
     ask(agent, paths, "first", "整理工作区里的资料")
     scheduler = _build_background_scheduler(agent, agent.delivery_service)
-    scheduler.tick(now=time.time())
+    base = time.time()
+    scheduler.tick(now=base)
     (first,) = store.session_tasks.list_report(limit=0)[0]
     (occupant,) = _children_for(agent, first.task_id)
+    # tick 返回不代表异步 runner 已完成启动记账；先固定阻塞位置，再等权威容量收敛。
+    # 不重试五拍中的失败，也不把 pending 索引当作正常容量等待。
+    scheduler.prepare_tick(now=base + _TICK_GAP_SECONDS)
+    assert child_entered.wait(timeout=30), 'capacity test child did not enter the run barrier'
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            settled = creation_capacity_counts(agent, '')[0] == 1
+        except RuntimeError:
+            settled = False
+        if settled:
+            break
+        assert time.monotonic() < deadline, agent.subagents.load(occupant.id).status
+        time.sleep(0.01)
     # 原 owner 策略只留一个子代理名额，已有孩子占满；第二个任务沿原受理路径进入后台。
     agent.owner_policy = replace(agent.owner_policy, max_subagents=1)
     ask(agent, paths, "second", "整理另一组资料")
@@ -84,7 +103,7 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     assert not errors
     (second,) = [task for task in tasks if task.task_id != first.task_id]
     (wake,) = _thread_wakes(store, second.target_thread_id)
-    held, base = None, time.time()
+    held, base = None, base + 2 * _TICK_GAP_SECONDS
     for index in range(5):
         before = len(calls)
         scheduler.tick(now=base + index * _TICK_GAP_SECONDS)
@@ -107,7 +126,6 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
 
     # 已有孩子由原调度监督与 runner 正常跑完，名额自然释放；之后由同一任务、同一唤醒继续委派。
     release_child.set()
-    from agent_py_agent.agent.subagents.manager import creation_capacity_counts
 
     deadline, index = time.monotonic() + 120, 5
     # 完成正文不等于canonical与索引均提交；先观察真实释放，避免把本测试混成pending-index并发故障测试。
