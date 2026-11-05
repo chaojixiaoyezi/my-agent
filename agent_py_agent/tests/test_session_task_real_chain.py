@@ -753,15 +753,16 @@ def test_message_wake_that_fails_after_claiming_still_delivers_the_message(tmp_p
     chain.ask("A", f"RC-MESSAGE {chain.threads['C']} RC-NOTE-FAILONCE 你好 C。")
     sent = chain.tool_outputs("send_session_message")[-1]
     _require(sent.get("ok") is True, f"消息没有发出：{sent}")
-    now = time.time()
     with pytest.raises(Exception):  # noqa: B017,PT011 - 断线原样从后台片抛出，这里只要这一拍失败
-        chain.scheduler.tick(now=now)
+        chain.scheduler.tick(now=time.time())
+    # 冷却从失败收尾开始，不能扣掉慢 CI 上这一拍的执行耗时。
+    now = time.time()
     _require([call["kind"] for call in chain.wire.calls if call["kind"] == "connection-reset"] == ["connection-reset"],
              f"前提不成立：唤醒回合带着消息的调用应当断线一次，实际 {[call['kind'] for call in chain.wire.calls]}")
 
     before = len(chain.wire.calls)
     # 失败的唤醒按调度器的重试间隔（30 秒）再领取；时钟往后推过这个间隔。
-    chain.scheduler.tick(now=now + 31)
+    chain.scheduler.tick(now=max(now, time.time()) + 31)
 
     own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-FAILONCE" in call["own_notes"]]
     assert own, "唤醒回合认领消息后失败，重跑回合和之后的回合都没有把它作为自己的输入收到（卡在 reserved）"
@@ -944,14 +945,15 @@ def test_task_turn_that_fails_before_finishing_gets_its_body_back_on_the_rerun(t
     chain = _real_chain(tmp_path, monkeypatch)
     chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-FAILONCE 整理三条要点。")
     task = chain.task("RC-GOAL-FAILONCE")
-    now = time.time()
     with pytest.raises(Exception):  # noqa: B017,PT011 - 断线原样从后台片抛出，这里只要这一拍失败
-        chain.scheduler.tick(now=now)
+        chain.scheduler.tick(now=time.time())
+    # 失败回合可能运行数秒；用收尾后的墙钟作为重试冷却基准。
+    now = time.time()
     _require([call["kind"] for call in chain.wire.calls_for_task(task.task_id)] == ["connection-reset"],
              f"前提不成立：派活回合带着正文的调用应当断线一次，实际 {[call['kind'] for call in chain.wire.calls]}")
 
     # 失败的唤醒按调度器的重试间隔（30 秒）再领取；时钟往后推过这个间隔。
-    chain.scheduler.tick(now=now + 31)
+    chain.scheduler.tick(now=max(now, time.time()) + 31)
 
     kinds = [call["kind"] for call in chain.wire.calls_for_task(task.task_id)]
     assert kinds == ["connection-reset", "task-done"], f"重跑的派活回合没有拿到正文：{kinds}"
@@ -969,7 +971,7 @@ def test_task_cancelled_while_waiting_to_retry_does_not_get_its_body_back(tmp_pa
     task, now = _fail_once_then_cancel(chain)
     before = len(chain.wire.calls_for_task(task.task_id))
 
-    chain.scheduler.tick(now=now + 31)
+    chain.scheduler.tick(now=max(now, time.time()) + 31)
 
     later = chain.wire.calls_for_task(task.task_id)[before:]
     assert all("RC-GOAL-FAILONCE" not in call["own_goals"] for call in later), (
@@ -985,7 +987,7 @@ def test_cancelled_task_wake_does_not_run_while_waiting_to_retry(tmp_path, monke
     task, now = _fail_once_then_cancel(chain)
     before = len(chain.wire.calls_for_task(task.task_id))
 
-    chain.scheduler.tick(now=now + 31)
+    chain.scheduler.tick(now=max(now, time.time()) + 31)
 
     later = [call["kind"] for call in chain.wire.calls_for_task(task.task_id)[before:]]
     assert later == [], f"任务已取消，派活唤醒仍开了 {len(later)} 次模型调用：{later}"
@@ -1043,19 +1045,18 @@ def test_task_cancelled_after_its_turn_starts_but_before_claiming_the_body_deliv
     assert chain.agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled"
 
 
-# 函数用途: A 派活给 B（RC-GOAL-FAILONCE），B 的派活片带着正文断线一次、正文退回 pending；随后 A 取消任务。返回任务和时钟基准。
+# 函数用途: A 派活给 B，B 断线一次、正文退回 pending 后由 A 取消；返回任务和取消完成后的时钟基准。
 def _fail_once_then_cancel(chain: RealChain) -> tuple[object, float]:
     chain.ask("A", f"RC-DISPATCH {chain.threads['B']} RC-GOAL-FAILONCE 整理三条要点。")
     task = chain.task("RC-GOAL-FAILONCE")
-    now = time.time()
     with pytest.raises(ConnectionResetError):
-        chain.scheduler.tick(now=now)
+        chain.scheduler.tick(now=time.time())
     _require([call["kind"] for call in chain.wire.calls_for_task(task.task_id)] == ["connection-reset"],
              f"前提不成立：派活回合带着正文的调用应当断线一次，实际 {[call['kind'] for call in chain.wire.calls]}")
     _require(getattr(_task_body_receipt(chain, "B", task.task_id), "status", None) == "pending", "前提不成立：正文应已退回 pending")
     chain.ask("A", f"RC-CANCEL {task.task_id}")
     _require(chain.agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled", "任务没有转 cancelled")
-    return task, now
+    return task, time.time()
 
 
 # 函数用途: 某个会话里关于这条任务的派活回报的状态列表（按回报 metadata 的任务状态键，含已送达的），用来断言发送方收到了回报。
