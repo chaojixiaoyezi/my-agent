@@ -2204,9 +2204,11 @@ def test_audit_pull_can_raise_default_batch_count_within_outer_limits(
     assert all("__truncated__" not in row["event"] for row in pulled["candidates"])
 
 
+@pytest.mark.parametrize("output_tokens", [2_000, 4_000])
 def test_audit_large_record_target_is_bounded_by_shared_context_budget(
     owner_home,
     monkeypatch,
+    output_tokens,
 ):
     source = _FakeSource()
     state = new_state(
@@ -2242,7 +2244,8 @@ def test_audit_large_record_target_is_bounded_by_shared_context_budget(
     )
     tool.agent.backend = SimpleNamespace(
         context_window_tokens=10_000,
-        max_tokens=16_000,
+        # 输出预留必须小于共享窗口，才能实际测试输入批次受上下文限制。
+        max_tokens=output_tokens,
         name="fake",
     )
     tool.agent._current_run_params.run_id = "audit-context-budget"
@@ -2263,11 +2266,12 @@ def test_audit_large_record_target_is_bounded_by_shared_context_budget(
     assert 1 <= len(pulled["candidates"]) < 30
     assert batch["requested_records"] == 300
     assert batch["delivered_records"] == len(pulled["candidates"])
+    # 本地假后端沿统一压缩线计算输入额度，不另造HTTP共享窗口扣减规则。
     assert 0 < batch["safe_batch_tokens"] <= 9_000
     assert batch["safe_batch_tokens"] == batch["context_safe_batch_tokens"]
     assert batch["safe_batch_tokens"] == batch["context_limit_tokens"]
-    assert batch["model_output_budget_tokens"] == 16_000
-    assert batch["model_output_budget_k_tokens"] == 16.0
+    assert batch["model_output_budget_tokens"] == output_tokens
+    assert batch["model_output_budget_k_tokens"] == output_tokens / 1_000
     assert batch["verdict_output_tokens_per_record"] == 64
     assert batch["verdict_output_estimate_source"] == "initial_protocol_reserve"
     assert batch["estimated_output_safe_records"] > len(pulled["candidates"])
