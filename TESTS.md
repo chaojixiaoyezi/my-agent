@@ -25,7 +25,23 @@ ruff check agent_py_agent/agent/workflows/engine.py agent_py_agent/tests/test_v1
 git diff --check
 ```
 
-6.1sol 独立静态复核未发现所给单行/接口片段违反合同；未直接访问工树或独立跑测试，不作为独立端到端验收。真实子进程仍使用 `use_sandbox=False` 与 Python 根限制，本记录不宣称原生平台沙箱、真实外部查询/重复写、部署、线上或跨平台 CI、无关套件已验证。R2 alert-recovery 的 TESTS 条目仅在收到可核对的验证交接后另列，不借 R7 结果声称它已通过；该文档交接不阻塞本片实现与定向验证。
+6.1sol 独立静态复核未发现所给单行/接口片段违反合同；未直接访问工树或独立跑测试，不作为独立端到端验收。真实子进程仍使用 `use_sandbox=False` 与 Python 根限制，本记录不宣称原生平台沙箱、真实外部查询/重复写、部署、线上或跨平台 CI、无关套件已验证。R2 alert-recovery 的最终验证交接已核对并单独记录如下；本片只接文档，不合入 R2 代码，也不把两片通过数合计为组合验收。
+
+## 2026-11-04 v15r2-r2：准确告警预留释放与已确认根回执恢复（文档交接）
+
+来源：`rework-v15r2-r2.md` 的 P1-03/P1-04；R2 提交 `798c89022cb3bd2b188f7cddc11ccc2fcd29438b`，分支 `rework/v15r2-r2`。R2 只改 `alert_delivery.py`、`alert_topic_anchors.py`、`test_v15_rework_alert_recovery.py`、`test_v15_w10_alert_topic_anchors.py`，未写本文件。此条由 R7 单一文档写者接收最终交接后补入；已回读其提交文件清单、原红灯日志、最终 gate/commit 日志和完整 JUnit，未在 R7 重跑 R2 测试或合入该提交。
+
+- 方法：`release_unsent` 在原事件锁内按 `_current` 读取准确布局，核对 state、root 和 dispatch；primary 保存空 fence，secondary 仅删除准确记录、保留锁。同一原 anchor 冻结 owner/store/event/dispatch/route/payload 摘要，恢复先核 canonical host terminal 的 sent 与 confirmed text provider ID，再以原 dispatch/proof CAS 修复 anchor；不新增 outbox，不用更新正文重新发送原根，`mark_unknown` 保留原证明。另保留非法附件由原 service 拒绝的异常语义，避免可选证明提取提前报错。
+- 红绿：原日志 `job-1793848139640651000.log` 中 secondary、migrated 和 confirmed-root recovery 三条安全断言均为 `unknown != sent`，primary 对照通过；R2 回执的原 gate 退出 1。最终 `r2-focused.xml` 实际 87 项、87 通过、0 failure/error/skip，逐文件为 32、25、30；R2 回执 pytest、五文件 Ruff、diff gate 均退出 0，`job-1793851696438086000.log` 记录 lint 通过、完整测试运行及准确提交。
+- 覆盖：真实 DeliveryService 与持久 host store、同事件单首发/独立事件推进、未知结果不重发、错误证明拒绝、原 payload 与更新区分、迁移/AST 守卫、取消与 I/O 错误路径 FD 零差，以及原冻结通知 commit/wake 确认。提供方边界仍受控，不能从该组件门外推真实网络发送。
+
+R2 原复跑命令（在其 worktree 根，不在 R7 根执行）：
+
+```bash
+HOME=/private/tmp/home-v15r2-r2 MY_AGENT_HOME=/private/tmp/home-v15r2-r2 PYTHONPATH=/private/tmp/wt-v15r2-r2:/private/tmp/wt-v15r2-r2/agent_py_agent /Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest agent_py_agent/tests/test_v15_rework_alert_recovery.py agent_py_agent/tests/test_v15_w10_alert_topic_anchors.py agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py -q --tb=short --junitxml=/private/tmp/home-v15r2-r2/r2-focused.xml
+```
+
+证据：JUnit 为 `/private/tmp/home-v15r2-r2/r2-focused.xml`；前述两份日志均在本机 `.background_jobs` 目录。R2 的 6.1sol 只做源码片段静态审阅，指出的非法附件问题已由 R2 复现并修正，但没有最终独立复评。真实 provider 网络/UI、完整 Client/Gateway、真实业务脚本执行/重启链及附录 isolation/topic_seed 两测试文件未验证；不宣称已部署、已完成独立复验或 R2+R7 集成测试。
 
 ## 2026-11-04 CI-R4：TUI 页脚与分层名册合同回归
 
