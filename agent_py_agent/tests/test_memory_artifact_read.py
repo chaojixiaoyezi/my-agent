@@ -1063,3 +1063,12 @@ def _write_internal_tool_output(root: Path, tool: str, content: str) -> Path:
         )
     )
     return Path(record["artifact_ref"])
+
+
+# LLM: 只有对应日期分片里完整basename和SHA相符的退休证据才能改变错误语义，普通丢失不能冒充到期。
+# 函数用途: 验证W9读取分支继续区分意外缺失与策略退休。
+def test_w9_missing_without_retired_row_stays_missing(tmp_path):
+    path = _write_externalized_tool_output(tmp_path, content='registered but missing')
+    path.unlink()
+    result = read_tool_output_artifact(ReadToolOutputArtifactRequest(tmp_path, str(path)))
+    assert not result['ok'] and result['error_code'] == 'artifact_missing'

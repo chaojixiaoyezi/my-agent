@@ -27,6 +27,7 @@ from ...common.tool_output_paths import (
     tool_output_index_paths_for_lookup,
 )
 from ..tool_output_externalizer import _BLOB_BLOCK_SIZE
+from ..tool_output_retention import retired_tool_output
 from .read_modes import (
     ArtifactContentReadRequest,
     ArtifactContentReadResult,
@@ -254,6 +255,8 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
             return _inline_read_result(read, *cached)
         payload = json.loads(raw_bytes)
     except FileNotFoundError:
+        if retired_tool_output(read.root, path, read.record):
+            return _error_payload("artifact_expired", artifact_ref, "工具输出正文已按留存策略退休；请重跑工具或读取原始来源，勿重试该 ref")
         return _error_payload("artifact_missing", artifact_ref, "registered artifact file does not exist")
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         return _error_payload("artifact_unreadable", artifact_ref, f"{type(exc).__name__}: {exc}")
@@ -362,6 +365,8 @@ def _read_blob_artifact(read, payload):
                 _BLOB_INDEX_CACHE.put(logical_key, index)
         return _verified_read_result(read, payload, expected, index.total_bytes, result)
     except FileNotFoundError:
+        if retired_tool_output(read.root, read.path, read.record):
+            return _error_payload("artifact_expired", artifact_ref, "工具输出正文已按留存策略退休；请重跑工具或读取原始来源，勿重试该 ref")
         return _error_payload("artifact_missing", artifact_ref, "registered artifact blob file does not exist")
     except _ArtifactHashMismatch as exc:
         return _error_payload("artifact_hash_mismatch", artifact_ref, str(exc))

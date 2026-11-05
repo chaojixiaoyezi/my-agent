@@ -804,3 +804,68 @@ def _commit_batch(home, root, proposal, chosen, scope, key, *, admission=None):
             _write_record(home, _PROPOSALS, proposal, 'proposal_id')
             raise
     return receipt
+
+
+# 自动草稿退休时等待原记录集合锁的最大秒数。
+_ASSET_RECORDS_LOCK_WAIT_SECONDS = 0.02
+
+
+# LLM: 仅退休已过期的自动演进DRAFT；集合锁有界等待，重读核对状态/版本/族指纹，COMMITTED与用户草稿永不触碰。
+# 函数用途: 删除一个到期自动提炼草稿并返回释放的JSON字节数；锁忙抛BlockingIOError，不满足条件返回0。
+def retire_expired_extraction_draft(owner_home: Path, proposal_id: str, *, now: datetime, expected_revision: int) -> int:
+    import stat
+    import time
+
+    safe_asset_id(proposal_id)
+    home = Path(os.path.abspath(owner_home))
+    try:
+        _verify_directory_beneath(home, ('data', _PROPOSALS))
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
+    deadline = time.monotonic() + _ASSET_RECORDS_LOCK_WAIT_SECONDS
+
+    # LLM: 只限制取锁等待；取得锁后的完整复核与unlink不能被取消切成半笔。
+    # 函数用途: 及时中止繁忙记录集合锁的等待。
+    def wait_check():
+        if time.monotonic() > deadline:
+            raise BlockingIOError('asset records lock busy')
+
+    with locked_private_directory(home, relative_parts=('data', _PROPOSALS), lock_name='.records.lock', wait_check=wait_check):
+        parts = ('data', _PROPOSALS, proposal_id + '.json')
+        from .revision_history import (
+            _auxiliary_snapshot,
+            _AuxiliaryReadError,
+            _unlink_auxiliary_file,
+        )
+
+        try:
+            value, identity = _auxiliary_snapshot(home, parts, max_bytes=MAX_ASSET_BYTES)
+        except _AuxiliaryReadError as exc:
+            if exc.budget_exhausted:
+                raise
+            return 0
+        except (FileNotFoundError, ValueError):
+            return 0
+        try:
+            if (not isinstance(value, dict) or value.get('proposal_id') != proposal_id
+                    or value.get('status') != 'DRAFT' or type(value.get('revision')) is not int
+                    or type(expected_revision) is not int or value['revision'] != expected_revision
+                    or not isinstance(value.get('family_fingerprint'), str)
+                    or re.fullmatch(r'[0-9a-f]{64}', value['family_fingerprint']) is None
+                    or not isinstance(value.get('expires_at'), str)):
+                return 0
+            expires = datetime.fromisoformat(value['expires_at'].replace('Z', '+00:00'))
+            if expires.tzinfo is None or now.tzinfo is None or expires > now:
+                return 0
+        except (ValueError, TypeError, UnicodeError, OverflowError):
+            return 0
+        result = {'freed_bytes': 0, 'deleted_items': 0, 'decided': set()}
+        try:
+            _unlink_auxiliary_file(home, parts, identity, result, proposal_id + '.json')
+        except ValueError:
+            return 0
+        except OSError as exc:
+            if result['deleted_items']:
+                exc.retired_extraction_bytes = result['freed_bytes']
+            raise
+        return result['freed_bytes']

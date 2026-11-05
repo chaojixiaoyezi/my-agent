@@ -2725,6 +2725,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.READ_ARTIFACT_REF.value,
         recovery_hint="产物引用缺失；先按 refs 查找，找不到再重建产物。",
     ),
+    "ARTIFACT_EXPIRED": ErrorContract(
+        code="ARTIFACT_EXPIRED",
+        category="artifact",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="该工具输出正文已在执行结束且超过保留天数后按留存策略退休；别重试该 ref，按需重跑工具或读取原始来源。",
+    ),
     "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT": ErrorContract(
         code="TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",
         category="artifact",

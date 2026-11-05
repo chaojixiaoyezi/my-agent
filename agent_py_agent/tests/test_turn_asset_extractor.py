@@ -511,3 +511,46 @@ def test_extracted_entrypoint_accepts_null_argv_in_dry_run(history, tmp_path, in
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert output['argv'] == [] and output['executed'] is False
+
+
+# LLM: 用户草稿和COMMITTED来自真实提取/确认入口；自动草稿的退休另行按revision核对。
+# 函数用途: 验证W9退休入口不删除用户草稿或已提交提案。
+def test_w9_retirement_keeps_user_and_committed_proposals(history):
+    from datetime import datetime, timedelta, timezone
+
+    home, store, a, _, first, second, *_ = history
+    draft = extract.propose_assets_from_turns(store, owner_home=home,
+        turn_refs=[{'thread_id': a.thread_id, 'message_id': first.message_id}], target_types=('script',))
+    committed = extract.propose_assets_from_turns(store, owner_home=home,
+        turn_refs=[{'thread_id': a.thread_id, 'message_id': second.message_id}], target_types=('script',))
+    assert extract.commit_extracted_assets(home, proposal_id=committed['proposal_id'])['ok']
+    now = datetime.now(timezone.utc) + timedelta(days=365)
+    for proposal in (draft, committed):
+        path = home / 'data' / 'asset_extractions' / (proposal['proposal_id'] + '.json')
+        before = path.read_bytes()
+        assert extract.retire_expired_extraction_draft(home, proposal['proposal_id'], now=now,
+            expected_revision=proposal['revision']) == 0
+        assert path.read_bytes() == before
+
+
+# LLM: 同一路径的用户编辑或新代次不能被旧扫描revision清掉；无目录入口也不能创建集合锁。
+# 函数用途: 验证自动草稿退休的CAS和冷目录零写。
+def test_w9_automatic_retirement_revision_and_cold_root(history, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    home, store, a, _, first, *_ = history
+    now = datetime.now(timezone.utc)
+    draft = extract.propose_assets_from_turns(store, owner_home=home,
+        turn_refs=[{'thread_id': a.thread_id, 'message_id': first.message_id}], target_types=('script',))
+    automatic = extract.save_evolution_draft(home, 'f' * 64, draft['candidate_scripts'][0], run_id='automatic',
+        thread_id=a.thread_id, created_at=(now - timedelta(days=15)).isoformat())
+    path = home / 'data' / 'asset_extractions' / (automatic['proposal_id'] + '.json')
+    before = path.read_bytes()
+    assert extract.retire_expired_extraction_draft(home, automatic['proposal_id'], now=now, expected_revision=2) == 0
+    assert path.read_bytes() == before
+    assert extract.retire_expired_extraction_draft(home, automatic['proposal_id'], now=now,
+        expected_revision=automatic['revision']) == len(before)
+    assert not path.exists() and (path.parent / '.records.lock').exists()
+    cold = tmp_path / 'cold-extraction'
+    assert extract.retire_expired_extraction_draft(cold, automatic['proposal_id'], now=now, expected_revision=1) == 0
+    assert not cold.exists()

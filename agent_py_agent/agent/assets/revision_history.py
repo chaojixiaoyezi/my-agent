@@ -8,6 +8,7 @@ import stat
 import unicodedata
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -72,13 +73,13 @@ def _blob_parts(digest):
 # LLM: 与_AssetStore复用同一线程/进程锁原语；各侧账本共用该资产锁，配额另锁。
 # 函数用途: 在受控目录内串行化一个资产的历史操作。
 @contextmanager
-def _asset_lock(owner_home, kind, asset_id):
+def _asset_lock(owner_home, kind, asset_id, *, blocking: bool = True):
     _identity(kind, asset_id)
     home = Path(owner_home)
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     parts = (*_HISTORY_PARTS, 'versions', kind)
     parent = _verify_directory_beneath(home, parts, create=True)
-    with locked_json_path(parent / f'{asset_id}.json'):
+    with locked_json_path(parent / f'{asset_id}.json', blocking=blocking):
         yield
 
 
@@ -701,3 +702,407 @@ def compatible_successor(owner_home, kind, asset_id, from_version: int) -> int |
     while edges.get((current, current + 1)) == 'replay_passed':
         current += 1
     return current if current > from_version else None
+
+
+# 资产辅助状态完整扫描后再次扫描的最小间隔秒数。
+_ASSET_AUXILIARY_PASS_INTERVAL_SECONDS = 3600.0
+
+# 本片共享实际读取计量；不缓存删除权限或跨片文件事实。
+_AUXILIARY_READ_METER = ContextVar('asset_auxiliary_read_meter', default=None)
+
+
+# LLM: 辅助记录的路径及时间均是数据；缺失/未知schema/未知时间不产生删除授权。
+# 函数用途: 为一份辅助记录返回保留理由，None表示有明确到期事实。
+def _auxiliary_keep_reason(home, phase, kind, stem, value, now):
+    if not isinstance(value, dict):
+        return 'unknown_schema'
+    if phase == 'requests':
+        if value.get('schema_version') != 'asset_evolution_request.v1' or value.get('run_id') != stem:
+            return 'unknown_schema'
+        if not value.get('result'):
+            return 'request_unprocessed'
+        return None if _expired(value, now, 14) else 'not_due'
+    if phase == 'drafts':
+        if (value.get('schema_version') != 'asset_draft.v1' or value.get('kind') != kind
+                or value.get('asset_id') != stem):
+            return 'unknown_schema'
+        if not _expired(value, now, 14):
+            return 'not_due'
+        return 'publication_pending' if _auxiliary_pending_exists(home, kind, stem) else None
+    if phase == 'candidates':
+        if value.get('schema_version') != 'asset_evolution_candidate.v1' or value.get('candidate_id') != stem:
+            return 'unknown_schema'
+        return None if _expired(value, now, 30) else 'not_due'
+    if (value.get('status') != 'DRAFT' or value.get('proposal_id') != stem
+            or type(value.get('revision')) is not int or value['revision'] < 1
+            or not isinstance(value.get('family_fingerprint'), str)
+            or re.fullmatch(r'[0-9a-f]{64}', value['family_fingerprint']) is None
+            or not isinstance(value.get('expires_at'), str)):
+        return 'not_automatic_draft'
+    try:
+        expires = datetime.fromisoformat(value['expires_at'].replace('Z', '+00:00'))
+        return None if expires.tzinfo is not None and expires <= now else 'not_due'
+    except (ValueError, TypeError, OverflowError):
+        return 'unknown_schema'
+
+
+# LLM: 任意现存pending都只增加保护；无需解析JSON取得删除权，损坏/未知内容同样保留。
+# 函数用途: 用rooted只读FD检查pending存在性，避免旧读取器越过本片字节预算。
+def _auxiliary_pending_exists(home, kind, stem):
+    import os
+
+    from ..common.nofollow_fs import open_readonly_file_beneath
+
+    try:
+        descriptor = open_readonly_file_beneath(home, (*_HISTORY_PARTS, 'pending', kind, f'{stem}.json'))
+    except FileNotFoundError:
+        return False
+    os.close(descriptor)
+    return True
+
+
+# LLM: 仅追加有界相对路径错误；不暴露资产代码或异常正文。
+# 函数用途: 为资产维护回执追加一个错误。
+def _auxiliary_error(errors, code, parts=()):
+    if len(errors) < 16:
+        errors.append({'code': code, **({'path': '/'.join(parts)} if parts else {})})
+
+
+# LLM: 辅助回执只累计本片事实，不缓存跨片状态。
+# 函数用途: 累加保留或竞争原因。
+def _auxiliary_skip(receipt, reason):
+    receipt['skipped'][reason] = receipt['skipped'].get(reason, 0) + 1
+
+
+# LLM: 缺失集合是空集合，不创建目录；其余no-follow错误必须上抛。
+# 函数用途: 读取一个固定辅助集合的名字。
+def _auxiliary_names(home, parts):
+    try:
+        return list_names_beneath(home, parts)
+    except FileNotFoundError:
+        return []
+
+
+# LLM: 每片只选一个固定集合或候选子目录，候选续点可含asset_id/leaf而不是全量加载子树。
+# 函数用途: 返回本片实际扫描目录、名字窗口及候选资产目录身份。
+def _auxiliary_window(home, cursor, limit, window_function, receipt):
+    phase = cursor.get('phase', 'requests')
+    kind = cursor.get('kind', 'script')
+    after = cursor.get('after', '')
+    if phase not in ('requests', 'drafts', 'candidates', 'extractions') or kind not in _HISTORY_KINDS:
+        raise ValueError('invalid asset auxiliary cursor')
+    parts = (('data', 'asset_extractions') if phase == 'extractions' else
+             (*_HISTORY_PARTS, phase) if phase == 'requests' else (*_HISTORY_PARTS, phase, kind))
+    asset_id = None
+    if phase == 'candidates':
+        directory_after, separator, leaf_after = after.partition('/')
+        directories = _auxiliary_names(home, parts)
+        directories = window_function({'after': ''},
+            (name for name in directories if name >= directory_after if separator or name > directory_after), 1)
+        if not directories:
+            return parts, [], None
+        asset_id = directories[0]
+        try:
+            safe_asset_id(asset_id)
+            parent = _verify_directory_beneath(home, parts)
+            if not stat.S_ISDIR((parent / asset_id).lstat().st_mode):
+                raise ValueError('candidate member is not a directory')
+        except (ValueError, FileNotFoundError):
+            _auxiliary_skip(receipt, 'unknown_schema')
+            receipt['items'] += 1
+            return parts, [], asset_id
+        parts = (*parts, asset_id)
+        after = leaf_after if separator and directory_after == asset_id else ''
+    names = _auxiliary_names(home, parts)
+    names = (name for name in names if name.endswith('.json') and (phase != 'extractions' or name.startswith('exp_')))
+    return parts, window_function({'after': after}, names, limit), asset_id
+
+
+# LLM: 只在集合已穷尽时前进阶段/种类；不更动既有history发布及blob算法。
+# 函数用途: 计算辅助通道的下一集合续点。
+def _auxiliary_next_cursor(cursor, now):
+    phase = cursor.get('phase', 'requests')
+    kind = cursor.get('kind', 'script')
+    if phase == 'requests':
+        return {'phase': 'drafts', 'kind': 'script', 'after': ''}, False
+    if phase in ('drafts', 'candidates'):
+        index = _HISTORY_KINDS.index(kind)
+        if index + 1 < len(_HISTORY_KINDS):
+            return {'phase': phase, 'kind': _HISTORY_KINDS[index + 1], 'after': ''}, False
+        return {'phase': 'candidates' if phase == 'drafts' else 'extractions', 'kind': 'script', 'after': ''}, False
+    return {'next_pass_at': now + _ASSET_AUXILIARY_PASS_INTERVAL_SECONDS}, True
+
+
+# LLM: 扫描和删除都校验真实普通单链接叶；值与inode一起冻结以保留并发新代次。
+# 函数用途: 读取一份辅助JSON及用于复核和释放计量的身份。
+def _auxiliary_snapshot(home, parts, *, max_bytes=None):
+    import os
+
+    from ..common.nofollow_fs import open_readonly_file_beneath
+
+    limit = MAX_ASSET_BYTES * 16 if max_bytes is None else max(0, max_bytes)
+    meter = _AUXILIARY_READ_METER.get()
+    if meter is not None:
+        if meter['budget'].remaining_ms() <= 0:
+            raise _AuxiliaryReadError('auxiliary time budget exhausted', 0, budget_exhausted=True)
+        limit = min(limit, meter['remaining'])
+    descriptor = open_readonly_file_beneath(home, parts)
+    with os.fdopen(descriptor, 'rb') as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise _AuxiliaryReadError('unsafe auxiliary record', 0)
+        if before.st_size > limit:
+            exhausted = meter is not None and meter['remaining'] < meter['budget'].max_bytes
+            raise _AuxiliaryReadError('auxiliary record exceeds remaining byte budget', 0, budget_exhausted=exhausted)
+        raw = handle.read(limit)
+        if meter is not None:
+            meter['bytes'] += len(raw)
+            meter['remaining'] -= len(raw)
+        after = os.fstat(handle.fileno())
+    # LLM: 只比较FD外的单叶身份，不用时间授予删除权限。
+    # 函数用途: 提取并发替换检查所需的稳定字段。
+    def identity(info):
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+    if identity(before) != identity(after) or after.st_nlink != 1:
+        raise _AuxiliaryReadError('auxiliary identity changed during read', len(raw))
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise _AuxiliaryReadError('invalid auxiliary JSON', len(raw)) from exc
+    return value, identity(after)
+
+
+# LLM: 解析失败仍保存本片实际读到的字节量；不保存原始载荷，超预算预筛可为零读取。
+# 类用途: 将坏JSON的已执行读取量传回只读扫描回执。
+class _AuxiliaryReadError(ValueError):
+    # LLM: byte_count仅来自本地有限FD读取，不接受持久化JSON声明。
+    # 函数用途: 记录一个读取失败及其实际字节量。
+    def __init__(self, message, byte_count, *, budget_exhausted=False):
+        super().__init__(message)
+        self.byte_count = byte_count
+        self.budget_exhausted = budget_exhausted
+
+
+# LLM: 原锁内固定目录FD并核对单链接叶身份；unlink成功立即记量，fsync错误不能抹去物理删除事实。
+# 函数用途: 删除一个辅助JSON，并将已发生的释放计入原批次。
+def _unlink_auxiliary_file(home, parts, identity, result, name):
+    import os
+
+    from ..common.nofollow_fs import open_directory_beneath
+
+    parent = open_directory_beneath(home, parts[:-1], require_dir_fd=True)
+    try:
+        info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        actual = info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or actual != identity:
+            raise ValueError('auxiliary identity changed before unlink')
+        os.unlink(parts[-1], dir_fd=parent)
+        result['freed_bytes'] += info.st_size
+        result['deleted_items'] += 1
+        result['decided'].add(name)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+
+
+# LLM: 单次调用只持一把领域锁，所有复核/删除在run_write内；锁忙未决，其它新代次保留。
+# 函数用途: 执行本片辅助JSON删除批次，不触及blob、版本或锁文件。
+def _retire_auxiliary_batch(home, phase, kind, due, now, budget):
+    result = {'decided': set(), 'deleted_items': 0, 'freed_bytes': 0, 'skipped': {}, 'errors': []}
+    for item in due:
+        if budget.remaining_ms() <= 0:
+            break
+        meter = _AUXILIARY_READ_METER.get()
+        if meter is not None and meter['remaining'] < item['identity'][2]:
+            result['budget_exhausted'] = True
+            break
+        parts, stem = item['parts'], item['name'][:-5]
+        try:
+            if phase == 'extractions':
+                from .turn_extractor import retire_expired_extraction_draft
+
+                freed = retire_expired_extraction_draft(home, stem, now=now, expected_revision=item['value']['revision'])
+            else:
+                lock = (_asset_lock(home, kind, stem, blocking=False) if phase == 'drafts'
+                        else locked_json_path(home.joinpath(*parts), blocking=False))
+                with lock:
+                    value, identity = _auxiliary_snapshot(home, parts, max_bytes=item['identity'][2])
+                    if value != item['value'] or identity != item['identity']:
+                        reason = 'identity_changed'
+                    else:
+                        reason = _auxiliary_keep_reason(home, phase, kind, stem, value, now)
+                    freed = 0
+                    if reason is None:
+                        _unlink_auxiliary_file(home, parts, identity, result, item['name'])
+                    else:
+                        result['skipped'][reason] = result['skipped'].get(reason, 0) + 1
+            if freed:
+                result['freed_bytes'] += freed
+                result['deleted_items'] += 1
+            result['decided'].add(item['name'])
+        except BlockingIOError:
+            result['skipped']['lock_busy'] = result['skipped'].get('lock_busy', 0) + 1
+        except FileNotFoundError:
+            result['decided'].add(item['name'])
+        except _AuxiliaryReadError as exc:
+            if exc.budget_exhausted:
+                result['budget_exhausted'] = True
+            else:
+                _auxiliary_error(result['errors'], 'asset_auxiliary_unreadable', parts)
+        except (OSError, ValueError, UnicodeError) as exc:
+            extraction_bytes = getattr(exc, 'retired_extraction_bytes', 0)
+            if extraction_bytes:
+                result['freed_bytes'] += extraction_bytes
+                result['deleted_items'] += 1
+                result['decided'].add(item['name'])
+            _auxiliary_error(result['errors'], 'asset_auxiliary_unlink_failed', parts)
+    return result
+
+
+# LLM: 入口接受冻结DTO；每片至多一次写提交，固定阶段游标不跳过锁忙叶，pin仅在确有到期记录时获取一次。
+# 函数用途: 分片清理已处理演进请求、过期草稿/候选和到期自动提炼草稿。
+def _maintain_asset_auxiliary_slice(request) -> dict:
+    from ..memory_store.retention_scan import current_retention_pins
+    from ..user_space.storage_lanes import (
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+        lane_cursor_window,
+        owner_conversation_roots,
+        validate_lane_receipt,
+    )
+
+    cursor = dict(request.cursor)
+    receipt = {'cursor': cursor, 'complete': True, 'items': 0, 'bytes': 0}
+    if request.legal_hold:
+        receipt['deferred_reason'] = 'legal_hold'
+        return receipt
+    if cursor.get('next_pass_at', 0) > request.now:
+        return receipt
+    home = Path(request.home.owner_home_dir)
+    receipt.update(errors=[], skipped={}, protected=0, deleted_items=0, freed_bytes=0, backlog=0)
+    try:
+        data_names = _auxiliary_names(home, ('data',))
+        if not {'asset_evolution', 'asset_extractions'}.intersection(data_names):
+            receipt['cursor'] = {'next_pass_at': request.now + _ASSET_AUXILIARY_PASS_INTERVAL_SECONDS}
+            return validate_lane_receipt(receipt)
+        parts, window, asset_id = _auxiliary_window(home, cursor, STORAGE_LANE_SLICE_ENTRIES, lane_cursor_window, receipt)
+    except (OSError, ValueError):
+        _auxiliary_error(receipt['errors'], 'asset_auxiliary_unreadable')
+        receipt.update(complete=False, deferred_reason='asset_auxiliary_unreadable')
+        return validate_lane_receipt(receipt)
+    phase, kind = cursor.get('phase', 'requests'), cursor.get('kind', 'script')
+    meter = _AUXILIARY_READ_METER.get()
+    budget = (meter['budget'] if meter is not None else
+              request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS))
+    now = datetime.fromtimestamp(request.now, timezone.utc)
+    due, decided = [], set()
+    for name in window:
+        if budget.exhausted(receipt['items'], receipt['bytes']):
+            break
+        if due and budget.remaining_ms() <= STORAGE_LANE_SLICE_MS / 2:
+            break
+        if cursor.get('retry_name') and receipt['items'] >= 1:
+            break
+        receipt['items'] += 1
+        leaf_parts = (*parts, name)
+        try:
+            stem = safe_asset_id(name[:-5])
+            value, identity = _auxiliary_snapshot(home, leaf_parts,
+                                                  max_bytes=min(budget.max_bytes // 2, budget.max_bytes - receipt['bytes']))
+            receipt['bytes'] += identity[2]
+            reason = _auxiliary_keep_reason(home, phase, kind, stem, value, now)
+            if reason:
+                _auxiliary_skip(receipt, reason)
+                if reason == 'publication_pending':
+                    receipt['protected'] += 1
+                decided.add(name)
+            else:
+                due.append({'parts': leaf_parts, 'name': name, 'value': value, 'identity': identity})
+        except FileNotFoundError:
+            decided.add(name)
+        except BlockingIOError:
+            _auxiliary_skip(receipt, 'lock_busy')
+        except _AuxiliaryReadError as exc:
+            receipt['bytes'] += exc.byte_count
+            if exc.budget_exhausted:
+                receipt['deferred_reason'] = 'budget_exhausted'
+            else:
+                _auxiliary_skip(receipt, 'unknown_schema')
+                decided.add(name)
+        except (OSError, ValueError, UnicodeError):
+            _auxiliary_skip(receipt, 'unknown_schema')
+            decided.add(name)
+    eligible, pin_errors = [], []
+    if due:
+        pins, _ = current_retention_pins(request.home, owner_conversation_roots(request.home), pin_errors, now=now)
+        for item in due:
+            path = home.joinpath(*item['parts'])
+            reason = None
+            if not pins.complete_for(path, pin_errors):
+                reason = 'pins_incomplete'
+            elif pins.protects(path, pin_errors):
+                reason = 'pinned'
+            if reason:
+                _auxiliary_skip(receipt, reason)
+                receipt['protected'] += 1
+                decided.add(item['name'])
+            else:
+                eligible.append(item)
+    for error in pin_errors:
+        _auxiliary_error(receipt['errors'], str(getattr(error, 'code', None) or 'pins_unreadable'))
+    read_room = not eligible or meter is None or meter['remaining'] >= eligible[0]['identity'][2]
+    if eligible and not read_room:
+        receipt['deferred_reason'] = 'budget_exhausted'
+    if eligible and budget.remaining_ms() > 0 and read_room:
+        result = request.run_write(lambda: _retire_auxiliary_batch(home, phase, kind, eligible, now, budget))
+        decided.update(result['decided'])
+        for key in ('deleted_items', 'freed_bytes'):
+            receipt[key] = result[key]
+        for reason, count in result['skipped'].items():
+            receipt['skipped'][reason] = receipt['skipped'].get(reason, 0) + count
+        receipt['errors'].extend(result['errors'][:max(0, 16 - len(receipt['errors']))])
+        if result.get('budget_exhausted'):
+            receipt['deferred_reason'] = 'budget_exhausted'
+    after = cursor.get('after', '')
+    if phase == 'candidates':
+        old_asset, separator, old_leaf = after.partition('/')
+        after = old_leaf if separator and old_asset == asset_id else ''
+    for name in window:
+        if name not in decided:
+            break
+        after = name
+    exhausted = len(window) < STORAGE_LANE_SLICE_ENTRIES and all(name in decided for name in window)
+    if phase == 'candidates' and asset_id is not None:
+        receipt.update(cursor={'phase': phase, 'kind': kind, 'after': asset_id if exhausted else asset_id + '/' + after}, complete=False)
+    elif exhausted:
+        receipt['cursor'], receipt['complete'] = _auxiliary_next_cursor(cursor, request.now)
+    else:
+        receipt.update(cursor={'phase': phase, 'kind': kind, 'after': after}, complete=False)
+    receipt['backlog'] = sum(item['name'] not in decided for item in due)
+    pending = [item['name'] for item in due if item['name'] not in decided]
+    if pending and (budget.remaining_ms() <= 0 or receipt.get('deferred_reason') == 'budget_exhausted'):
+        receipt['cursor']['retry_name'] = min(pending)
+        receipt['deferred_reason'] = 'budget_exhausted'
+    return validate_lane_receipt(receipt)
+
+
+# LLM: ContextVar只绑定本次片；扫描/提交/提炼复读共享实际余额，finally归还上下文，不跨片缓存权限。
+# 函数用途: 执行辅助lane并把全部已发生JSON读取统一计入回执。
+def maintain_asset_auxiliary_lane(request) -> dict:
+    from ..user_space.storage_lanes import (
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+    )
+
+    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
+                                   ms=STORAGE_LANE_SLICE_MS)
+    meter = {'remaining': budget.max_bytes, 'bytes': 0, 'budget': budget}
+    token = _AUXILIARY_READ_METER.set(meter)
+    try:
+        result = _maintain_asset_auxiliary_slice(request)
+        result['bytes'] = meter['bytes']
+        return result
+    finally:
+        _AUXILIARY_READ_METER.reset(token)
