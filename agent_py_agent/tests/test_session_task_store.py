@@ -224,3 +224,29 @@ def test_business_wrong_owner_intent_and_wrong_task_context_fail_closed(tmp_path
         store.create(draft, business_context_intent=replace(intent, requested_space_id="space-b"),
                      business_context_factory=factory)
     assert store.load(task.task_id).metadata["business_context"]["space_id"] == "space-a"
+
+
+def test_w8_retired_draft_matches_original_digest_and_scope():
+    import hashlib
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.session_tasks import _draft_matches
+
+    draft = SessionTaskDraft("A", "B", "原任务")
+    task = SessionTask("task", "A", "B", "", status="done",
+                       metadata={"payload_retired": {"goal_sha256": hashlib.sha256(draft.goal.encode()).hexdigest()}})
+    assert _draft_matches(task, draft)
+    assert not _draft_matches(task, replace(draft, goal="不同正文"))
+    assert not _draft_matches(task, replace(draft, target_thread_id="C"))
+
+
+def test_w8_retire_payload_preserves_terminal_and_rejects_stale_cas(store):
+    task = store.create(SessionTaskDraft("", "B", "正文"), now=1)
+    store.advance(task.task_id, SessionTaskUpdate("accepted"), now=2)
+    store.advance(task.task_id, SessionTaskUpdate("done", summary="结果"), now=3)
+    assert not store.retire_payload(task.task_id, expected_updated_at=2, now=100)
+    assert store.require(task.task_id).goal == "正文"
+    assert store.retire_payload(task.task_id, expected_updated_at=3, now=100)
+    assert not store.retire_payload(task.task_id, expected_updated_at=3, now=101)
+    saved = store.bind_turn(task.task_id, turn_id="late-turn")
+    assert saved.status == "done" and saved.updated_at == 3 and saved.goal == saved.summary == ""

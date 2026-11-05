@@ -110,6 +110,14 @@ _STORAGE_LIFECYCLES = (
     ('legacy_layout', 'owner', 'original layout/migration authorities', 'explicit migration policy', 'ownership/references/user data', ('preserve', 'inventory')),
     ('session_pair_rate', 'owner', 'conversation.session_pair_rate', 'fixed hourly window plus one-window grace',
      'active window/current file identity/original sidecar lock', ('preserve', 'policy-delete')),
+    ('display_archives', 'workspace', 'conversation display archives', 'display archive 1/14/30-day lifecycle',
+     'manifest/tombstone/active pins', ('compact', 'policy-delete')),
+    ('conversation_ledgers', 'workspace', 'conversation side ledgers', 'handled/archive/lock retention',
+     'dedupe/retain_handled/live locks', ('preserve', 'policy-delete')),
+    ('asset_auxiliary', 'owner', 'asset evolution auxiliary state', 'draft/request 14d, candidate 30d',
+     'in-flight request/lease/committed versions', ('preserve', 'policy-delete')),
+    ('session_task_payloads', 'workspace', 'conversation.session_tasks', 'terminal payload retention',
+     'report/learning wake/cancel/dedupe', ('preserve', 'slim')),
 )
 
 
@@ -136,6 +144,8 @@ _PRESERVATION_ANCHORS = {
     'capability_grants': 'owner_capability_requests_dir', 'media_inputs': 'owner_artifacts_dir',
     'persona_versions': 'owner_data_dir', 'outbox_delivery': 'owner_data_dir',
     'process_sessions': 'owner_data_dir', 'legacy_layout': 'owner_home_dir',
+    'display_archives': 'owner_workspace_dir', 'conversation_ledgers': 'owner_workspace_dir',
+    'asset_auxiliary': 'owner_data_dir', 'session_task_payloads': 'owner_workspace_dir',
 }
 
 

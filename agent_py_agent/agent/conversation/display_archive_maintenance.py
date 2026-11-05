@@ -478,3 +478,115 @@ def prune_expired_display_archives(store_or_root, *, now: float | None = None, t
             return "removed"
         return "expired" if not expired else None
     return _maintain(store_or_root, max_archives, action)
+
+
+# LLM: 只推进通道续点；归档内部进度仍由冻结的领域维护器独占，不另写状态。
+# 函数用途: 返回下一根或下一阶段，全部走完时回绕为空游标。
+def _display_archive_lane_next(roots, index, phase):
+    if phase == "compact":
+        return {"root": roots[index], "phase": "expire"}
+    if index + 1 < len(roots):
+        return {"root": roots[index + 1], "phase": "compact"}
+    return {}
+
+
+# LLM: 只做一次有界的只读探测并关闭迭代器；缺失、链接或非目录不创建写门。
+# 函数用途: 检查规范会话根中是否实际存在归档目录项。
+def _display_archive_lane_nonempty(root):
+    directory = Path(root) / "display_archives"
+    try:
+        if not stat.S_ISDIR(os.lstat(directory).st_mode):
+            return False
+        descriptor = open_directory_beneath(directory, (), require_dir_fd=True)
+        try:
+            with os.scandir(descriptor) as entries:
+                return next(entries, None) is not None
+        finally:
+            os.close(descriptor)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+# LLM: 每片至多一个规范根/阶段，经协调器写门调用原维护器；法律保留与不完整pin关闭删除，不引入新删除路径。
+# 函数用途: 将既有1/14/30天归档生命周期接入所有者维护调度。
+def maintain_display_archives_lane(request) -> dict:
+    from ..user_space.storage_lanes import owner_conversation_roots, validate_lane_receipt
+
+    if request.legal_hold:
+        return validate_lane_receipt({
+            "cursor": request.cursor, "complete": True, "items": 0, "bytes": 0,
+            "deferred_reason": "legal_hold",
+        })
+    if os.name == "nt":
+        return validate_lane_receipt({
+            "cursor": {}, "complete": True, "items": 0, "bytes": 0,
+            "deferred_reason": "posix_only",
+        })
+
+    roots = sorted(str(root) for root in owner_conversation_roots(request.home))
+    after = request.cursor.get("root", "")
+    if not isinstance(after, str):
+        after = ""
+    index = next((index for index, root in enumerate(roots) if root >= after), len(roots))
+    if index == len(roots):
+        return validate_lane_receipt({"cursor": {}, "complete": True, "items": 0, "bytes": 0})
+    root = roots[index]
+    phase = request.cursor.get("phase") if root == after else "compact"
+    if phase not in ("compact", "expire"):
+        phase = "compact"
+    cursor = {"root": root, "phase": phase}
+    following = _display_archive_lane_next(roots, index, phase)
+    result = dict(scanned=0, compacted=0, expired=0, removed=0, skipped=0, errors=0)
+    pins_incomplete = 0
+    pin_errors = []
+    maximum = max(1, min(128, request.budget.max_items or 128))
+    try:
+        nonempty = _display_archive_lane_nonempty(root)
+    except OSError:
+        nonempty = False
+        result["errors"] = 1
+    if nonempty:
+        if phase == "compact":
+            result = request.run_write(lambda: compact_display_archives(
+                Path(root), now=request.now, min_age_days=1.0, max_archives=maximum,
+            ))
+        else:
+            from datetime import datetime, timezone
+
+            from ..memory_store.retention_scan import current_retention_pins
+
+            pins, _ = current_retention_pins(
+                request.home, tuple(Path(path) for path in roots), pin_errors,
+                now=datetime.fromtimestamp(request.now, timezone.utc),
+            )
+            if not pins.complete:
+                pins_incomplete = 1
+            else:
+                result = request.run_write(lambda: prune_expired_display_archives(
+                    Path(root), now=request.now, ttl_days=14.0, pinned_archive_ids=set(pins.ids),
+                    remove_expired_dirs_after_days=30.0, max_archives=maximum,
+                ))
+
+    changed = result["compacted"] + result["expired"] + result["removed"]
+    # 锁忙或中断补试一片，持续坏档则推进以免饿死后续根；下一轮仍会再访。
+    # retry只属于通道游标，不改领域维护器的游标文件格式或另建恢复状态。
+    retried = root == after and request.cursor.get("retry") is True
+    retry = changed >= maximum or (bool(result["errors"]) and not retried)
+    next_cursor = cursor if retry else following
+    if result["errors"] and changed < maximum and retry:
+        next_cursor = {**cursor, "retry": True}
+    skipped = {"compacted": result["compacted"], "kept": result["skipped"]}
+    if pins_incomplete:
+        skipped["pins_incomplete"] = pins_incomplete
+    errors = []
+    if result["errors"] or pin_errors:
+        errors.append({
+            "code": "display_archive_errors",
+            "path": str(Path(root).relative_to(request.home.owner_home_dir)),
+        })
+    return validate_lane_receipt({
+        "cursor": next_cursor, "complete": not next_cursor,
+        "items": result["scanned"], "bytes": 0,
+        "deleted_items": result["expired"] + result["removed"],
+        "skipped": skipped, "errors": errors, "backlog": int(retry),
+    })

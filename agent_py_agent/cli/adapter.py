@@ -185,6 +185,8 @@ def cmd_adapter_start(args) -> int:
     pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
     if options.daemon:
         return daemonize_adapter(AdapterDaemonRequest(agent, gpaths, pid_file, options))
+    from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+    install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     return _run_adapter_foreground(agent, options, gpaths)
 
 

@@ -726,3 +726,20 @@ def test_r1p2_empty_inventory_cannot_authorize_projection_removal(tmp_path):
     assert run.is_dir() and not list(run.iterdir())
     assert report == {"removed_dirs": 0, "removed_files": 0, "removed_bytes": 0}
     assert not list((home / "agents").glob(".purge_*"))
+
+
+def test_w8_write_callback_only_wraps_real_mutation(tmp_path):
+    home, run, now, _ = _projection(tmp_path)
+    calls = []
+
+    def commit(operation):
+        calls.append("mutation")
+        return operation()
+
+    service = _service()
+    preview = service.maintain_owner_agent_projections(home, now=now, dry_run=True, run_write=commit)
+    assert not calls and preview["page_complete"] and (run / "events.jsonl").exists()
+    report = service.maintain_owner_agent_projections(home, now=now, run_write=commit)
+    assert calls == ["mutation"] and report["slimmed_dirs"] == 1 and report["page_complete"]
+    service.maintain_owner_agent_projections(home, now=now, run_write=commit)
+    assert calls == ["mutation"]

@@ -16,9 +16,10 @@ class RetentionPolicyChangedError(RuntimeError):
     error_code = "MEMORY_RETENTION_POLICY_CHANGED"
 
 
-# LLM: 固定plan只取原Service；不持T扫描，逐批候选/动作/审计重核原policy和业务锁，保main清单引用保护。
+# LLM: 固定plan来自原Service；不持T扫描，逐写重核策略和业务锁；游标也必须通过同一提交门。
 # 函数用途: 把既有保留计划接到原请求短提交回调。
-def apply_with_transition(service, plan, now, transition):
+def apply_with_transition(service, plan, now, transition, *, scan_cursor=None):
+    from . import retention_scan_budget as budgets
     from .retention import _has_policy_level_error, _without_errored_subtrees
     from .retention_apply import execute_retention_plan, record_retention_report
 
@@ -45,6 +46,9 @@ def apply_with_transition(service, plan, now, transition):
     applied = execute_retention_plan(home=service.home, candidates=service.candidates, plan=executable,
         now=now, allowed_external_roots=service.conversation_roots, commit_transition=commit,
         audit_transition=commit)
+    applied = replace(applied, scan_partial=plan.scan_partial, scan_cursor=plan.scan_cursor)
+    if scan_cursor is not None:
+        commit(lambda: budgets.save_scan_cursor(service.home, scan_cursor))
     if plan.errors and applied.errors != plan.errors:
         return replace(applied, errors=(*applied.errors, *plan.errors))
     return applied

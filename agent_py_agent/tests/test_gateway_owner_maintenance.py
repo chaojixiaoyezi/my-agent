@@ -349,3 +349,16 @@ def test_h07_runtime_local_store_respects_owner_protected_refs(tmp_path):
     assert report["deleted_ids"] == [unreferenced.id]
     assert rec.id not in report["deleted_ids"]
     assert store.get_record(rec.id) is not None
+
+
+# LLM: 原摘要断言逐字保留；另加真实双owner入口，证明新多页控制器不增加摘要键或改变旧计数。
+# 函数用途: 验证小规模owner的维护摘要兼容。
+def test_w7_two_owner_summary_keys_remain_identical(tmp_path, monkeypatch, maintenance_clock):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
+
+    home = ensure_my_agent_home(tmp_path)
+    for owner_id in ('w7-first', 'w7-second'):
+        ensure_owner_home(home.root, OwnerIdentity.provider_user('feishu', owner_id))
+    summary = _tick_after_startup_grace(_controller_for(home, monkeypatch), maintenance_clock)
+    assert summary == {'scanned': 2, 'ran': 3, 'failed': 0, 'refused': 0, 'isolated': 0}

@@ -126,9 +126,9 @@ class ConversationStorage:
             self.wake_handled_dir,
         )
 
-    # LLM: 唤醒队列、策略与租约在消费或归档移走原 JSON 后会留下同名 .lock sidecar；
-    #   仅列出权威原目录供周期孤儿锁清理，不改变任何锁协议、安装位置或文件归档边界。
-    # 函数用途: 返回会话存储中可能遗留孤儿 .lock sidecar 的目录清单。
+    # LLM: 保留原八项次序，追加留存清理会移动或删除记录的数据目录；仅返回路径元组，不检查存在或创建目录，
+    #   孤儿锁仍由原周期入口的try-flock与inode复核协议回收，不改变任何锁协议或归档边界。
+    # 函数用途: 列出消费、归档和留存清理后可能遗留孤儿伴生锁的数据目录。
     def lock_sidecar_dirs(self) -> tuple[Path, ...]:
         return (
             self.policies_dir,
@@ -139,6 +139,14 @@ class ConversationStorage:
             self.wake_dedupe_dir,
             self.wake_attempts_dir,
             self.wake_quarantine_dir,
+            self.goals_dir,
+            self.threads_dir,
+            self.tasks_dir,
+            self.guidance_dedupe_dir,
+            self.guidance_turn_index_dir,
+            self.guidance_input_index_dir,
+            self.model_usage_dir,
+            self.root / "agent_transcript_events",
         )
 
     # LLM: 线程 ID 的原路径映射保持，权限与存在性校验仍在调用领域；路径段本身在这里拒绝式校验（_thread_stem）。

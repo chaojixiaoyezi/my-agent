@@ -277,8 +277,37 @@ def read_json_object_report(
 def unlink_quietly(path: Path) -> None:
     try:
         path.unlink()
-    except OSError:
+    except OSError:  # best-effort: queue/index cleanup ignores missing or raced files
         pass
+
+
+# LLM: 只刷新已验证相同字节的单链接对象；父链不跟随链接，消失时沿原原子写者恢复完整字节。
+# 函数用途: 让重新采用的不可变节点、载荷及检查点副本获得新的清扫宽限期。
+def _touch_node(root, parts, raw):
+    import os
+    import stat
+
+    from ..common import nofollow_fs as fs
+
+    fs._validate_relative_parts(parts)
+    try:
+        if fs._supports_dir_fd() and os.utime in os.supports_dir_fd and os.utime in os.supports_follow_symlinks:
+            parent = fs.open_directory_beneath(root, parts[:-1])
+            try:
+                info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise fs.NoFollowPathError('reused immutable object is not regular single-link')
+                os.utime(parts[-1], dir_fd=parent, follow_symlinks=False)
+            finally:
+                os.close(parent)
+        else:
+            path = fs._portable_path(root, parts, create=False)
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise fs.NoFollowPathError('reused immutable object is not regular single-link')
+            os.utime(path)
+    except FileNotFoundError:
+        fs.write_bytes_atomic_beneath(root, parts, raw)
 
 
 # LLM: 内容寻址索引只存储调用领域给出的不可变投影，根引用必须由原CAS封印；不创建业务提交权威。
@@ -337,7 +366,7 @@ class ImmutableJsonIndex:
             raise OSError('immutable index node exceeds its fanout')
         return node
 
-    # LLM: 节点出生即0600，逐段no-follow且先刷盘再返回；重复内容只复用相同字节，不覆盖损坏对象。
+    # LLM: 节点出生即0600，逐段no-follow且先刷盘再返回；相同字节复用时刷新引用寿命，不覆盖损坏对象。
     # 函数用途: 保存一个不可变小节点并携带有序范围查询需要的子树最大代次。
     def _save(self, node):
         from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
@@ -353,6 +382,8 @@ class ImmutableJsonIndex:
         if previous is None:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             write_bytes_atomic_beneath(self.root, parts, raw)
+        else:
+            _touch_node(self.root, parts, raw)
         values = node.get('entries', {}).values() if 'entries' in node else (
             child.get('maximum') for child in node['children'].values()
         )

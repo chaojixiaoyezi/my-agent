@@ -5,6 +5,7 @@ from __future__ import annotations
 """Memory v2 retention 计划的重验证与执行。"""
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -43,10 +44,12 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    _DAY_SECONDS,
     _TRASH_COMMIT_PENDING,
     _conversation_related_paths,
     _load_policy,
     _runtime_unlocked,
+    _subagent_run_settled,
     _trash_transaction_pending,
     current_retention_pins,
     current_tool_manifest_references,
@@ -63,6 +66,7 @@ from .retention_scan import (
     valid_fingerprint,
 )
 from .retention_transition import RetentionPolicyChangedError
+from .retired_thread_journal import append_retired_thread
 
 
 # LLM: None保原executor；callback按原候选批次/单动作/审计短提交，扫描引用门外，四实际类型优先。
@@ -131,6 +135,8 @@ def execute_retention_plan(
         errors=tuple(errors),
         policy_fingerprint=plan.policy_fingerprint,
         isolated_errors=plan.isolated_errors,
+        scan_partial=plan.scan_partial,
+        scan_cursor=plan.scan_cursor,
     )
     _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
     return report
@@ -255,7 +261,7 @@ def _apply_candidate_actions(
     return results, errors
 
 
-# LLM: 所有动作先拒绝无效摘要；scratch/Daily/Compact/Curator及trash执行前重核引用，不可读直接拒绝。
+# LLM: 永久资产路径和旧记忆/Compact类别独立拒绝；其余动作仍校验摘要、引用及目标状态。
 #   operation是宿主枚举；清单仍复核快照阶段后的引用，不信旧规划。
 # LLM: tmp/cache文件确已删除才按同一action cutoff清空过期祖先，沿规范根的nofollow目录句柄rmdir，不删根或跨链接。
 # 函数用途: 分派动作并复核当前源代次；安全审计仅按原追加锁整理记录，不用旧规划替代执行检查。
@@ -270,6 +276,8 @@ def _apply_action(
 ) -> MemoryRetentionAction:
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
+    if _permanent_asset_target(home, action.path) or action.category in {"daily", "compact", "curator_run"}:
+        return replace(action, status="state_changed")
     if not valid_fingerprint(action.source_fingerprint):
         return replace(action, status="state_changed")
     if action.operation == "scratch_clear":
@@ -693,7 +701,7 @@ def _restore_conversation_index(path, removed):
     update_json_file_atomic(path, restore)
 
 
-# LLM: 与消息writer（追加/冷转/prepared恢复）同锁序：先原消息锁、再thread转换锁，锁内重验摘要、active task、时间，
+# LLM: 与消息writer同锁序；锁内重验摘要、绑定、active task、cutoff及快路投影，提交后才追加退休证明。
 #   并重新枚举热/清单/暂存/冷段/索引完整成员；集合或指纹与规划不一致就放弃本轮，绝不搬半套或漏下冷段。
 #   移动及索引增量独立补偿，失败保留副本；提交后只rmdir本线程已空的冷目录，不碰*.lock侧车与共享archive根。
 # 函数用途: 将一个过期 ConversationStore thread 及其完整转写本、附属文件移入同一回收容器。
@@ -724,6 +732,16 @@ def _trash_conversation(
         ):
             return replace(action, status="state_changed")
         members, member_errors = _conversation_related_paths(root, thread)
+        if thread.thread_id.startswith("thread-subagent-"):
+            policy, policy_error = _load_policy(Path(home.owner_retention_json))
+            if policy_error is not None or policy is None:
+                return replace(action, status="state_changed")
+            normal_cutoff = now.timestamp() - policy.conversation_days * _DAY_SECONDS
+            if action.cutoff_timestamp > normal_cutoff and (
+                policy.subagent_thread_days <= 0
+                or not _subagent_run_settled(home, thread.thread_id[len("thread-"):], action.cutoff_timestamp)
+            ):
+                return replace(action, status="state_changed")
         if (
             member_errors
             or set(members) != set(action.related_paths)
@@ -734,8 +752,10 @@ def _trash_conversation(
             _assert_safe_target(path, (root,))
         bindings_path = root / "channel_bindings.json"
         latest_path = root / "user_latest_threads.json"
-        _read_index(bindings_path)
-        _read_index(latest_path)
+        bindings = _read_index(bindings_path)
+        latest = _read_index(latest_path)
+        if thread.thread_id in bindings.values() or thread.thread_id in latest.values():
+            return replace(action, status="state_changed")
         removed_bindings, removed_latest = {}, {}
         index_update_pending = False
         destination = _validated_destination(home, action)
@@ -767,6 +787,13 @@ def _trash_conversation(
             _finish_failed_trash(destination, action=action, payload=payload_root, now=now, restored=restored)
             raise
         _prune_transcript_archive_dirs(root / "messages" / "archive" / thread.thread_id, moved)
+        # 只有所有者内已提交的回收可成为退休证明；追加失败不得触发上面的移动回滚。
+        if root.is_relative_to(Path(home.owner_home_dir)):
+            try:
+                append_retired_thread(home, thread_id=thread.thread_id, conversation_root=root,
+                    action_id=action.action_id, trash_container=destination, retired_at=now.timestamp())
+            except OSError:
+                logging.getLogger(__name__).warning("RETIRED_THREAD_JOURNAL_APPEND_FAILED %s", thread.thread_id)
     return replace(action, status="trashed")
 
 
@@ -780,7 +807,7 @@ def _prune_transcript_archive_dirs(archive: Path, moved: list[tuple[Path, Path]]
         _prune_empty_directory(directory)
 
 
-# LLM: 权威文件必须有合法且不变摘要；trash只有明确trashed才能永久删除，moving/recovery_required永远不按龄放行。
+# LLM: 权威文件必须有合法不变摘要；旧记忆/Compact副本、moving/recovery_required永不按龄放行。
 # 函数用途: 重验证 task/subagent/tombstone 权威状态。
 def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
     authority = action.authority_path
@@ -792,6 +819,8 @@ def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
     if report.load_error is not None:
         return False
     if action.category == "trash":
+        if report.payload.get("category") in {"daily", "curator_run", "compact"}:
+            return False
         if _trash_transaction_pending(action.path):
             return False
         timestamp = _timestamp(report.payload.get("moved_at"))
@@ -842,6 +871,16 @@ def _validated_destination(home: object, action: MemoryRetentionAction) -> Path:
     if len(relative.parts) < 2:
         raise ValueError("retention trash destination is too broad")
     return resolved
+
+
+# LLM: 类别名不能授权删除永久资产；同时保护其祖先，避免宽目录动作绕过子树保护。
+# 函数用途: 判断动作是否会触碰正式记忆、人设、技能或Compact资产。
+def _permanent_asset_target(home: object, path: Path) -> bool:
+    owner = Path(home.owner_home_dir)
+    target = path.resolve(strict=False)
+    assets = (owner / "memory", owner / "skills", Path(home.owner_compact_dir),
+              *(owner / name for name in ("SOUL.md", "USER.md", "AGENTS.md")))
+    return any(target == asset or asset in target.parents or target in asset.parents for asset in assets)
 
 
 # LLM: delete/move 源必须严格位于 owner 或显式 conversation root 内，且不能是根或 symlink。

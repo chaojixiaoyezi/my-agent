@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import tempfile
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import EllipsisType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..common.json_io import (
     _sync_parent_directory,
@@ -35,17 +36,111 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
+from ..io.sqlite_connection import sqlite_error_details
+
+if TYPE_CHECKING:
+    from ..user_space.storage_lanes import StorageLaneRequest
 
 _EVENTS_PRUNE_PENDING_KEY = "events_prune_pending_ids"
 _DEFAULT_WRITE_ATOMIC_UNLOCKED = write_private_text_file_atomic_unlocked
 STEADY_STATE_EVENTS_KEEP_LAST = 20000
 STEADY_STATE_EVENTS_MAX_DELETE = 5000
 
+# 积压追平时单拍最多执行的事件裁剪步数。
+LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT = 16
+# 事件积压追平期间单批登记删除的最多事件行数。
+LOCAL_STORE_CATCHUP_BATCH_ROWS = 50000
+# 单次增量回收最多释放的数据库页数。
+LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT = 2048
+# 空闲页占比达到该百分比才执行页回收。
+LOCAL_STORE_VACUUM_FREE_PERCENT = 25
+# 旧库一次性切换增量回收模式允许的最大库文件字节数。
+LOCAL_STORE_VACUUM_CONVERT_MAX_BYTES = 512 * 1024 * 1024
+# 执行整库重建前要求的最小剩余磁盘字节数。
+LOCAL_STORE_VACUUM_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
+
 
 # LLM: 维护器通过 schema 提供的连接访问当前库，不缓存其它用户数据；显式 reset 保持旧契约。
 # LLM: C仅rebuild与prune_events固定叶闭合，其它维护writer仍各守原真实链；事件只删本批实际DB删除的ID。
 # 类用途: 管理全文索引与有界事件维护，保同库事务、恢复账本和JSONL独有记录。
 class LocalStoreMaintenanceMixin:
+
+    # LLM: 回收独立于事件裁剪；C沿原事务/末门，NONE整库转换只准小库、足够磁盘且非C。
+    # 函数用途: 有界释放增量库空闲页，或明确解释旧库为何需要离线维护。
+    def incremental_vacuum_step(self, *, max_pages: int = LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT,
+                                allow_convert: bool = False) -> dict:
+        if type(max_pages) is not int or max_pages <= 0:
+            raise ValueError("incremental vacuum page budget must be positive")
+        connection = self._coordinator_read_connection if self.coordinator_io else self._connection
+        try:
+            with connection() as conn:
+                before = _local_store_vacuum_state(conn)
+            mode, free, pages, page_size = before
+            before_size = os.stat(self.db_path).st_size
+            due = _local_store_vacuum_due(before, max_pages)
+            checkpoint_pending = _local_store_checkpoint_pending(self.db_path, before)
+            mode_name = {0: "none", 1: "full", 2: "incremental"}.get(mode, "unknown")
+            result = {"mode": mode_name, "performed": False}
+            if mode not in (0, 2):
+                return result
+            if not due and not checkpoint_pending:
+                return {**result, "deferred_reason": "below_threshold"}
+            if mode == 0:
+                reason = _local_store_conversion_deferral(
+                    self.db_path, before, coordinator=self.coordinator_io, allow_convert=allow_convert)
+                if reason is not None:
+                    return {**result, "deferred_reason": reason}
+                with self._connection() as conn:
+                    conn.execute("PRAGMA auto_vacuum=INCREMENTAL").fetchall()
+                    conn.execute("VACUUM").fetchall()
+                mode_name = "converted"
+            elif due:
+                statement = f"PRAGMA incremental_vacuum({int(max_pages)})"
+                if self.coordinator_io:
+                    self._coordinator_transaction(lambda conn: conn.execute(statement).fetchall())
+                else:
+                    with self._connection() as conn:
+                        conn.execute(statement).fetchall()
+                        conn.commit()
+
+            # LLM: checkpoint不在BEGIN内；C仍消费原末门，完整回填和物理缩小后才报释放量。
+            # 函数用途: 返回SQLite自身的checkpoint状态，不把PASSIVE未回填完冒充成功。
+            def checkpoint():
+                with connection() as conn:
+                    rows = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
+                    busy, frames, copied = rows[0]
+                    state = _local_store_vacuum_state(conn)
+                    if not busy and frames == copied and _local_store_checkpoint_pending(self.db_path, state):
+                        # 常驻连接仍可保留已回填WAL，零等待重置才能落实旧片已完成的逻辑截短。
+                        timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+                        conn.execute("PRAGMA busy_timeout=0").fetchall()
+                        try:
+                            rows = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+                        finally:
+                            conn.execute(f"PRAGMA busy_timeout={timeout}").fetchall()
+                    return rows
+
+            if self.coordinator_io:
+                checkpoint_rows = self._local_write(checkpoint)
+            else:
+                checkpoint_rows = checkpoint()
+            with connection() as conn:
+                _mode, after_free, after_pages, _page_size = _local_store_vacuum_state(conn)
+            busy, frames, copied = checkpoint_rows[0]
+            if busy or frames != copied or _local_store_checkpoint_pending(
+                    self.db_path, (_mode, after_free, after_pages, page_size)):
+                return {"mode": mode_name, "performed": False, "deferred_reason": "busy", "released_pages": 0,
+                        "free_pages": after_free, "page_count": after_pages}
+            physical_pages = max(0, before_size - os.stat(self.db_path).st_size) // page_size
+            released_pages = (physical_pages if checkpoint_pending else
+                              max(0, min(free - after_free, physical_pages)))
+            return {"mode": mode_name, "performed": True,
+                    "released_pages": released_pages,
+                    "free_pages": after_free, "page_count": after_pages}
+        except sqlite3.OperationalError as exc:
+            if sqlite_error_details(exc).get("category") in {"busy", "locked"}:
+                return {"performed": False, "deferred_reason": "busy"}
+            raise
 
     # LLM: 原SQL删除/pending先提交，JSONL按字节推进后才清账；原文件换代重启扫描，重启不丢游标或删除责任。
     # 函数用途: 后台只推进一拍事件维护，不同步重写无界JSONL，也不执行VACUUM。
@@ -307,6 +402,229 @@ class LocalStoreMaintenanceMixin:
             "record_count": record_count,
             "event_count": event_count,
         }
+
+
+# LLM: 固定只读PRAGMA，不创建连接、不提交；调用者决定使用普通或C读取入口。
+# 函数用途: 同一连接读取回收模式、空闲页、总页数和页字节数。
+def _local_store_vacuum_state(conn):
+    return tuple(int(conn.execute(f"PRAGMA {name}").fetchone()[0])
+                 for name in ("auto_vacuum", "freelist_count", "page_count", "page_size"))
+
+
+# LLM: FULL库由SQLite自己管理；NONE只按比例转换，INCREMENTAL也允许达到绝对页预算时推进。
+# 函数用途: 用纯状态判断有没有达到页回收阈值。
+def _local_store_vacuum_due(state, max_pages=LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT):
+    mode, free, pages, _page_size = state
+    ratio_due = free * 100 >= LOCAL_STORE_VACUUM_FREE_PERCENT * max(1, pages)
+    return (mode == 0 and ratio_due) or (mode == 2 and (free >= max_pages or ratio_due))
+
+
+# LLM: 只stat主库，不开关原db/sidecar文件FD；读者阻碍checkpoint时，逻辑已缩小但物理仍大须继续延期。
+# 函数用途: 识别增量库尚未完成物理截短的回填责任。
+def _local_store_checkpoint_pending(db_path, state):
+    mode, _free, pages, page_size = state
+    return mode == 2 and os.stat(db_path).st_size > pages * page_size
+
+
+# LLM: WAL可能承载尚未回填的增长，转换资源限额必须取逻辑库和主文件中的较大值。
+# 函数用途: 只读判定旧NONE库是否允许整库转换，C及资源不足不构造新的维护写者。
+def _local_store_conversion_deferral(db_path, state, *, coordinator, allow_convert):
+    if coordinator:
+        return "coordinator_conversion_refused"
+    size = max(os.stat(db_path).st_size, state[2] * state[3])
+    if not allow_convert or size > LOCAL_STORE_VACUUM_CONVERT_MAX_BYTES:
+        return "offline_vacuum_required"
+    if shutil.disk_usage(db_path.parent).free < LOCAL_STORE_VACUUM_MIN_FREE_DISK_BYTES + 2 * size:
+        return "insufficient_disk"
+    return None
+
+
+# LLM: metadata旧pending也属于恢复责任，不能只看已经删空的SQL范围而漏掉JSONL清账。
+# 函数用途: 在一个只读事务快照中取得事件积压、恢复标记和页回收状态。
+def _local_events_snapshot(conn, db_path):
+    # 两个独立极值子查询才命中SQLite MIN/MAX优化；合并聚合会全扫历史事件索引。
+    lo, hi = conn.execute("SELECT (SELECT MIN(seq) FROM events), (SELECT MAX(seq) FROM events)").fetchone()
+    backlog = max(0, hi - lo + 1 - STEADY_STATE_EVENTS_KEEP_LAST) if lo is not None and hi is not None else 0
+    if backlog and conn.execute("SELECT 1 FROM events ORDER BY seq LIMIT 1 OFFSET ?",
+                                (STEADY_STATE_EVENTS_KEEP_LAST,)).fetchone() is None:
+        # seq有空洞时跨度会高估；至多检查固定保留窗口，不能让已经空闲的库永久假积压。
+        backlog = 0
+    resumable = conn.execute(
+        "SELECT 1 FROM metadata WHERE key IN ('events_prune_cursor', 'events_prune_pending_ids') LIMIT 1"
+    ).fetchone() is not None
+    state = _local_store_vacuum_state(conn)
+    return backlog, resumable, state, _local_store_checkpoint_pending(db_path, state)
+
+
+# LLM: 仅SQLite API打开发现器给出的既有库，mode=ro不改业务/schema；允许SQLite管理自身WAL/SHM。
+#   此辅助文件边界由恢复派发显式批准；不用immutable忽略活跃WAL，也不手工开关或删除db/sidecar FD。
+# 函数用途: 构造Store前识别真正空闲的库，保证协调器空闲片零业务提交。
+def _local_events_precheck(db_path):
+    try:
+        if os.stat(db_path).st_size == 0:
+            return None
+    except FileNotFoundError:
+        return None
+    conn = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=0.0)
+    try:
+        conn.execute("BEGIN")
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('events','metadata')")}
+        return _local_events_snapshot(conn, db_path) if tables == {"events", "metadata"} else None
+    finally:
+        conn.close()
+
+
+# LLM: 只驱动原冻结裁剪step；最多16拍，后续拍受累计JSONL字节和协作时间限制，首拍即使过期也推进。
+# 函数用途: 追赶一个Store并在事件阶段后执行一次独立页回收。
+def _local_events_advance(store, request, snapshot, budget, receipt):
+    if snapshot is None:
+        with store._connection() as conn:
+            snapshot = _local_events_snapshot(conn, store.db_path)
+    backlog, resumable = snapshot[:2]
+    deleted_db = deleted_jsonl = scanned_bytes = 0
+    if backlog or resumable:
+        for step in range(LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT):
+            if step and (budget.remaining_ms() <= 0 or budget.exhausted(size=scanned_bytes)):
+                break
+            remaining = budget.max_bytes - scanned_bytes
+            if remaining <= 0:
+                break
+            result = store.prune_events_step(
+                before=request.now, keep_last=STEADY_STATE_EVENTS_KEEP_LAST,
+                max_delete=(LOCAL_STORE_CATCHUP_BATCH_ROWS if backlog > STEADY_STATE_EVENTS_MAX_DELETE
+                            else STEADY_STATE_EVENTS_MAX_DELETE), max_bytes=remaining)
+            deleted_db += result["deleted_db"]
+            deleted_jsonl += result["deleted_jsonl"]
+            scanned_bytes += result["scanned_bytes"]
+            backlog = max(0, backlog - result["deleted_db"])
+            receipt.update(deleted_items=deleted_db, bytes=scanned_bytes, backlog=backlog)
+            if not result["partial"] and result["deleted_db"] == 0:
+                break
+    if budget.exhausted(size=scanned_bytes):
+        vacuum = {"performed": False, "deferred_reason": "budget_exhausted"}
+    else:
+        vacuum = store.incremental_vacuum_step(allow_convert=not request.coordinator)
+    with store._connection() as conn:
+        after = _local_events_snapshot(conn, store.db_path)
+    return deleted_db, deleted_jsonl, scanned_bytes, vacuum, after
+
+
+# LLM: owner发现器是唯一路径来源；空闲预检不构造Store，实际维护只沿LocalStore原_local_write写门。
+#   游标额外保存一个布尔cycle_pending，跨DB证明本轮全部空闲；不另建维护状态或配额账。
+# 函数用途: 每片轮转一个库，追平事件与JSONL后回收页，返回严格领域回执。
+def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
+    from ..common.global_write_commit import global_write_commit_scope
+    from ..local_storage import LocalStore
+    from ..user_space.storage_lanes import (
+        STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT,
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+        lane_cursor_window,
+        owner_local_store_databases,
+    )
+
+    receipt = {"cursor": {}, "complete": True, "items": 0, "bytes": 0, "deleted_items": 0,
+               "freed_bytes": 0, "backlog": 0, "skipped": {"vacuum_deferred": 0}, "errors": []}
+    if request.legal_hold:
+        return {**receipt, "deferred_reason": "legal_hold"}
+    paths, discovery_errors = owner_local_store_databases(request.home)
+    for error in discovery_errors[:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]:
+        item = {"code": "local_store_discovery"}
+        source = error.get("source")
+        if isinstance(source, str) and not Path(source).is_absolute() and ".." not in Path(source).parts:
+            item["path"] = source
+        receipt["errors"].append(item)
+    receipt["complete"] = not discovery_errors
+    by_name = {path.relative_to(request.home.owner_home_dir).as_posix(): path for path in paths}
+    names = sorted(by_name)
+    if not names:
+        return receipt
+    cursor = request.cursor
+    selected = lane_cursor_window(cursor, names, 1)
+    if not selected:
+        cursor = {}
+        selected = lane_cursor_window(cursor, names, 1)
+    name = selected[0]
+    cycle_pending = bool(cursor.get("cycle_pending", False))
+    receipt.update(cursor={"after": name, "phase": "events", "cycle_pending": cycle_pending},
+                   complete=False, items=1)
+    db_path = by_name[name]
+    source_failure = []
+
+    # LLM: 仍调用原request.commit，不制造授权；区分原门自身异常与operation原异常，拒绝后不再消费来源。
+    # 函数用途: 让上层保留原提交门错误的同一对象，不将撤权或未知执行改成普通维护失败。
+    def commit(operation):
+        if source_failure:
+            raise source_failure[0]
+        operation_failure = []
+
+        # LLM: 只运输原操作并记录失败对象，不新增业务写入或重试。
+        # 函数用途: 辨认异常是否确实来自本次数据库/文件操作内部。
+        def run():
+            try:
+                return operation()
+            except BaseException as exc:
+                operation_failure.append(exc)
+                raise
+
+        try:
+            return request.commit(run)
+        except BaseException as exc:
+            if not operation_failure or exc is not operation_failure[0]:
+                source_failure.append(exc)
+            raise
+
+    try:
+        snapshot = _local_events_precheck(db_path)
+        event_work = snapshot is not None and bool(snapshot[0] or snapshot[1])
+        vacuum = {"performed": False, "deferred_reason": "below_threshold"}
+        vacuum_work = snapshot is not None and bool(snapshot[3] or _local_store_vacuum_due(snapshot[2]))
+        if vacuum_work and snapshot[2][0] == 0:
+            reason = _local_store_conversion_deferral(
+                db_path, snapshot[2], coordinator=request.coordinator, allow_convert=not request.coordinator)
+            if reason is not None:
+                vacuum_work = False
+                vacuum["deferred_reason"] = reason
+        initial_work = snapshot is None or event_work or vacuum_work
+        if initial_work:
+            budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES,
+                                          size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
+            if (request.budget.max_bytes == 0 or request.budget.max_items == 0
+                    or (request.budget.remaining_ms() <= 0 and not event_work)):
+                receipt["backlog"] = snapshot[0] if snapshot else 0
+                return {**receipt, "cursor": dict(cursor), "deferred_reason": "budget_exhausted"}
+            scope = global_write_commit_scope(commit) if request.coordinator else nullcontext()
+            with scope:
+                store = LocalStore(db_path, **({"coordinator_io": True} if request.coordinator else {}))
+                deleted, mirrored, scanned, vacuum, after = _local_events_advance(
+                    store, request, snapshot, budget, receipt)
+                if source_failure:
+                    raise source_failure[0]
+            receipt.update(deleted_items=deleted, bytes=scanned,
+                           freed_bytes=vacuum.get("released_pages", 0) * after[2][3])
+            cycle_pending = cycle_pending or initial_work or bool(deleted or mirrored or vacuum.get("performed"))
+            snapshot = after
+        receipt["backlog"] = snapshot[0]
+        pending = bool(snapshot[0] or snapshot[1] or snapshot[3] or _local_store_vacuum_due(snapshot[2]))
+        cycle_pending = cycle_pending or pending
+        if "deferred_reason" in vacuum:
+            receipt["skipped"]["vacuum_deferred"] = 1
+            receipt["deferred_reason"] = vacuum["deferred_reason"]
+        receipt["cursor"].update(phase="events" if pending else "vacuum", cycle_pending=cycle_pending)
+        receipt["complete"] = name == names[-1] and not cycle_pending and not discovery_errors
+    except (sqlite3.Error, OSError) as exc:
+        if source_failure and exc is source_failure[0]:
+            raise
+        if isinstance(exc, sqlite3.OperationalError) and sqlite_error_details(exc).get("category") not in {"busy", "locked"}:
+            raise
+        reason = "busy" if sqlite_error_details(exc).get("category") in {"busy", "locked"} else "local_store_maintenance"
+        if len(receipt["errors"]) < STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT:
+            receipt["errors"].append({"code": reason, "path": name})
+        receipt["deferred_reason"] = reason
+        receipt["cursor"]["cycle_pending"] = True
+    return receipt
 
 
 # LLM: pending只接受非空字符串ID数组；坏账拒绝继续删除，避免覆盖不可解释的恢复状态。

@@ -6,15 +6,19 @@ from __future__ import annotations
 """
 
 import hashlib
+import heapq
 import json
 import logging
+import math
 import os
+import stat
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from time import monotonic
 
 from ..common.json_io import locked_json_path
 
@@ -22,6 +26,12 @@ _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 8
 # 已外发回执正文保留 7 天：足够排查与重放，又不长期占用会话存储。
 _SENT_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+# 同一回送存储两次完整维护之间的最短间隔秒数。
+_SENT_RECEIPT_MAINTENANCE_INTERVAL_SECONDS = 60.0
+# sent 回执维护单片最多检查的文件数。
+_SENT_RECEIPT_MAINTENANCE_SLICE_FILES = 128
+# sent 回执维护单片墙钟预算毫秒数。
+_SENT_RECEIPT_MAINTENANCE_SLICE_MS = 25
 # 认领一次外部投递的默认租约 120 秒；已开始外发时还必须核验旧执行者，过期不等于死亡。
 _DEFAULT_CLAIM_TTL_SECONDS = 120.0
 # 投递循环同类异常日志的限频窗口 60 秒：轮询约每秒一轮，持续失败时同一异常在窗口内只记一次，
@@ -525,11 +535,20 @@ class _GatewayReplyClaimStoreMixin:
 class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
     """原子 pending 记录和短期 sent 回执。"""
 
+    # LLM: Only successful durable writes enter the time-ordered retirement map.
+    # 函数用途: 保存同一存储共享的维护游标与成功落盘时刻。
     def __init__(self, root: Path | None) -> None:
         self.root = Path(root).expanduser() if root is not None else None
         self._volatile_pending: dict[str, PendingGatewayReply] = {}
         self._volatile_sent: set[str] = set()
         self._volatile_receipts: dict[str, dict[str, object]] = {}
+        self._volatile_durable_at: dict[str, float] = {}
+        self._sent_cursor = ""
+        self._sent_maintenance_due_at = 0.0
+        self._sent_scan = None
+        self._sent_scan_names: list[str] = []
+        self._sent_window: list[str] | None = None
+        self._sent_window_complete = False
         self._lock = threading.RLock()
 
     @property
@@ -654,6 +673,8 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             return False
         return self._sent_path(stable_id).exists()
 
+    # LLM: Failed receipt writes retain their volatile proof without an expiry timestamp.
+    # 函数用途: 记录已发送回执，只有成功落盘的内存标记允许日后退役。
     def mark_sent(self, record: PendingGatewayReply) -> None:
         stable_id = record.stable_id
         with self._lock:
@@ -668,6 +689,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             if self.root is None:
                 self._volatile_pending.pop(stable_id, None)
                 return
+            self._volatile_durable_at.pop(stable_id, None)
             self._ensure_dirs()
             pending_path = self._pending_path(stable_id)
             with locked_json_path(pending_path):
@@ -680,6 +702,8 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                         "sent_at": time.time(),
                     },
                 )
+                self._volatile_durable_at.pop(stable_id, None)
+                self._volatile_durable_at[stable_id] = time.time()
                 pending_path.unlink(missing_ok=True)
 
     # LLM: A discard receipt is terminal delivery state for one interrupted request, preventing restart replay.
@@ -698,6 +722,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             if self.root is None:
                 self._volatile_pending.pop(stable_id, None)
                 return
+            self._volatile_durable_at.pop(stable_id, None)
             self._ensure_dirs()
             pending_path = self._pending_path(stable_id)
             with locked_json_path(pending_path):
@@ -712,6 +737,8 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                         "reason": str(reason or "interrupted"),
                     },
                 )
+                self._volatile_durable_at.pop(stable_id, None)
+                self._volatile_durable_at[stable_id] = time.time()
                 pending_path.unlink(missing_ok=True)
 
     # LLM: 原 sent 回执保留逻辑消息序号和实际 claim epoch；旧 owner/epoch 不能覆盖新的 unknown/sent。
@@ -749,6 +776,8 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 if current != record:
                     return False
                 _atomic_write_json(self._sent_path(stable_id), receipt)
+                self._volatile_durable_at.pop(stable_id, None)
+                self._volatile_durable_at[stable_id] = time.time()
                 pending_path.unlink(missing_ok=True)
                 self._volatile_sent.add(stable_id)
                 self._volatile_receipts[stable_id] = dict(receipt)
@@ -783,14 +812,69 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             ),
         )
 
+    # LLM: Startup uses the same bounded slicer, never creates missing sent directories.
+    # 函数用途: 启动时有限续扫已有回执，保持原来的同步清理入口。
     def prune_sent_receipts(self, *, now: float | None = None) -> None:
         if self.root is None:
             return
-        cutoff = (time.time() if now is None else now) - _SENT_RECEIPT_RETENTION_SECONDS
+        try:
+            limit = len(os.listdir(self.root / "sent")) // _SENT_RECEIPT_MAINTENANCE_SLICE_FILES + 2
+        except FileNotFoundError:
+            limit = 1
+        for _ in range(limit):
+            if self.maintain_sent_receipts(now=now, force=True).get("complete"):
+                break
+
+    # LLM: All workers share this store's cursor/deadline; disk-failed markers never enter retirement.
+    # 函数用途: 每拍有限清理七天前的持久回执及其内存去重标记。
+    def maintain_sent_receipts(self, *, now: float | None = None, force: bool = False) -> dict:
+        if self.root is None:
+            return {"ran": False, "reason": "not_durable"}
+        now = time.time() if now is None else now
         with self._lock:
-            self._ensure_dirs()
-            for path in (self.root / "sent").glob("*.json"):
-                _prune_sent_receipt(path, cutoff)
+            if not force and now < self._sent_maintenance_due_at:
+                return {"ran": False}
+            deadline = monotonic() + _SENT_RECEIPT_MAINTENANCE_SLICE_MS / 1000.0
+            cutoff = now - _SENT_RECEIPT_RETENTION_SECONDS
+            report = {"ran": True, "complete": False, "scanned": 0, "deleted": 0,
+                      "freed_bytes": 0, "volatile_retired": 0, "kept": {},
+                      "oldest_due_age_seconds": 0.0}
+            while self._volatile_durable_at and report["volatile_retired"] < _SENT_RECEIPT_MAINTENANCE_SLICE_FILES and monotonic() < deadline:
+                stable_id = next(iter(self._volatile_durable_at))
+                if self._volatile_durable_at[stable_id] > cutoff:
+                    break
+                self._volatile_durable_at.pop(stable_id)
+                self._volatile_sent.discard(stable_id)
+                self._volatile_receipts.pop(stable_id, None)
+                report["volatile_retired"] += 1
+            volatile_due = bool(self._volatile_durable_at and next(iter(self._volatile_durable_at.values())) <= cutoff)
+            window = _sent_receipt_window(self, deadline)
+            if window is None:
+                self._sent_maintenance_due_at = now
+                return report
+            decided = 0
+            for name in window:
+                if monotonic() >= deadline:
+                    break
+                report["scanned"] += 1
+                reason, freed, age = _maintain_sent_receipt(self, name, cutoff)
+                report["oldest_due_age_seconds"] = max(report["oldest_due_age_seconds"], age)
+                if reason == "deleted":
+                    report["deleted"] += 1
+                    report["freed_bytes"] += freed
+                else:
+                    report["kept"][reason] = report["kept"].get(reason, 0) + 1
+                if reason in {"lock_busy", "io_error", "identity_changed"}:
+                    break
+                self._sent_cursor = name
+                decided += 1
+            complete = self._sent_window_complete and decided == len(window)
+            self._sent_window = window[decided:] or None
+            if complete:
+                self._sent_cursor = ""
+            report["complete"] = complete and not volatile_due
+            self._sent_maintenance_due_at = now + _SENT_RECEIPT_MAINTENANCE_INTERVAL_SECONDS if report["complete"] else now
+            return report
 
     def _ensure_dirs(self) -> None:
         assert self.root is not None
@@ -1392,13 +1476,22 @@ class GatewayReplyDeliveryWorker(
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.0, timeout))
 
+    # LLM: Maintenance runs after delivery under the existing worker lock; failures never change delivered count.
+    # 函数用途: 投递完成后顺手跑一片共享维护，组合入口同样生效。
     def run_once(self) -> int:
         """Poll and deliver each currently ready record once. Useful for deterministic tests too."""
         if not self._run_lock.acquire(blocking=False):
             return 0
         try:
             now = time.time()
-            return sum(self._process_record(record, now) for record in self.store.pending())
+            delivered = sum(self._process_record(record, now) for record in self.store.pending())
+            try:
+                self.store.maintain_sent_receipts(now=now)
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                self._log_loop_error(exc)
+            return delivered
         finally:
             self._run_lock.release()
 
@@ -1636,14 +1729,112 @@ def _record_key(stable_id: str) -> str:
     return hashlib.sha256(stable_id.encode("utf-8", "replace")).hexdigest()
 
 
-# LLM: 按原保留期删除旧回执；失败只匿名引用/type，不打印路径或正文，不改变保留判断。
-# 函数用途: 清理过期已发送回执，沿原静默异常处理继续其他记录。
-def _prune_sent_receipt(path: Path, cutoff: float) -> None:
+# LLM: Reverse comparison keeps the largest selected name at heap[0], bounded to one window.
+# 类用途: 用标准最小堆保存最多一片候选里字典序最小的文件名。
+class _SentReceiptName(str):
+    # LLM: Heap elements are only these string names; no filesystem access occurs in comparisons.
+    # 函数用途: 倒转字符串比较，让更大的文件名先被替换。
+    def __lt__(self, other: str) -> bool:
+        return str.__gt__(self, other)
+
+
+# LLM: Resume both discovery and selected windows across deadlines, under the store lock.
+# 函数用途: 大目录按预算续扫，选好的窗口来不及清理时留到下一拍，避免反复零进展。
+def _sent_receipt_window(store: GatewayReplyDeliveryStore, deadline: float) -> list[str] | None:
+    if store._sent_window is not None:
+        return store._sent_window
+    if monotonic() >= deadline:
+        return None
+    assert store.root is not None
+    if store._sent_scan is None:
+        directory = store.root / "sent"
+        try:
+            if directory.is_symlink():
+                raise FileNotFoundError("sent directory is a symlink")
+            store._sent_scan = os.scandir(directory)
+        except FileNotFoundError:
+            store._sent_window = []
+            store._sent_window_complete = True
+            return []
     try:
-        if path.stat().st_mtime < cutoff:
-            path.unlink(missing_ok=True)
-    except OSError as exc:
-        _LOGGER.warning("cannot prune channel delivery receipt record_ref=%s error_type=%s", hashlib.sha256(str(path).encode()).hexdigest()[:12], type(exc).__name__)
+        while monotonic() < deadline:
+            try:
+                entry = next(store._sent_scan)
+            except StopIteration:
+                store._sent_scan.close()
+                store._sent_scan = None
+                names = sorted(str(name) for name in store._sent_scan_names)
+                store._sent_scan_names = []
+                store._sent_window = names
+                store._sent_window_complete = len(names) < _SENT_RECEIPT_MAINTENANCE_SLICE_FILES
+                return names
+            name = entry.name
+            if not name.endswith(".json") or name.startswith(".") or name <= store._sent_cursor:
+                continue
+            candidate = _SentReceiptName(name)
+            if len(store._sent_scan_names) < _SENT_RECEIPT_MAINTENANCE_SLICE_FILES:
+                heapq.heappush(store._sent_scan_names, candidate)
+            elif name < str(store._sent_scan_names[0]):
+                heapq.heapreplace(store._sent_scan_names, candidate)
+    except OSError:
+        store._sent_scan.close()
+        store._sent_scan = None
+        store._sent_scan_names = []
+        raise
+    return None
+
+
+# LLM: Only the existing pending-lock holder may unlink a receipt and then its own lock name.
+# 函数用途: 核验文件、活跃 pending 和终态后才删除，未知或隔离回执永久保留。
+def _maintain_sent_receipt(store: GatewayReplyDeliveryStore, name: str, cutoff: float) -> tuple[str, int, float]:
+    assert store.root is not None
+    path, pending = store.root / "sent" / name, store.root / "pending" / name
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return "not_regular", 0, 0.0
+        if before.st_mtime >= cutoff:
+            return "young", 0, 0.0
+        with store._lock, locked_json_path(pending, blocking=False):
+            current = path.lstat()
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino) or not stat.S_ISREG(current.st_mode):
+                return "identity_changed", 0, 0.0
+            if pending.exists() or pending.is_symlink():
+                return "pending_active", 0, 0.0
+            if current.st_mtime >= cutoff:
+                return "young", 0, 0.0
+            if current.st_size > 64 * 1024:
+                return "oversized", 0, 0.0
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                    return "identity_changed", 0, 0.0
+                payload = json.loads(handle.read(64 * 1024))
+            if not isinstance(payload, dict):
+                return "unreadable", 0, 0.0
+            if payload.get("disposition", "sent") not in ("sent", "discarded"):
+                return "disposition_protected", 0, 0.0
+            stamp = payload.get("sent_at")
+            sent_at = stamp if type(stamp) in (int, float) and math.isfinite(stamp) else current.st_mtime
+            if sent_at > cutoff:
+                return "young", 0, 0.0
+            final = path.lstat()
+            if (final.st_dev, final.st_ino) != (current.st_dev, current.st_ino):
+                return "identity_changed", 0, 0.0
+            path.unlink()
+            pending.with_suffix(pending.suffix + ".lock").unlink(missing_ok=True)
+            return "deleted", final.st_size, max(0.0, cutoff - sent_at)
+    except BlockingIOError:
+        return "lock_busy", 0, 0.0
+    except InterruptedError:
+        raise
+    except FileNotFoundError:
+        return "missing", 0, 0.0
+    except (ValueError, UnicodeDecodeError, OverflowError):
+        return "unreadable", 0, 0.0
+    except OSError:
+        return "io_error", 0, 0.0
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:

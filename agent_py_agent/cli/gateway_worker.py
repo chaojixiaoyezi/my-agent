@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +24,8 @@ def dispatch_worker_entry(argv):
     from ..agent.gateway_parts.multiprocess_route import WorkerPartition
 
     args = _worker_parser().parse_args(rest[2:])
+    from ..agent.observability.log_volume_rotation import install_daemon_log_rotation
+    install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     launch = WorkerLaunch(WorkerPartition(args.index, args.of, args.run), args.gateway_root, args.owner_root,
                           args.parent_pid, args.instance, tuple(args.workspace_root))
     result = establish_worker_mode(launch)

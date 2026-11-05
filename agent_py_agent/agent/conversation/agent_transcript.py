@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import stat
 from collections.abc import Mapping
+from contextvars import ContextVar
 from pathlib import Path
 
 from ..common.json_io import append_private_jsonl_records, write_private_text_file_atomic
@@ -26,6 +29,10 @@ from .store_io import read_jsonl_tail_report
 AGENT_TRANSCRIPT_MAX_EVENTS = 1024
 # agent 转录文件最大 8 MiB：超过即截断/轮转，防止转录无限增长占满磁盘。
 AGENT_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
+# 子代理终态展示转录的默认保留天数；完整会话账本不由此入口删除。
+AGENT_TRANSCRIPT_RETENTION_DAYS = 30
+# 仅传递本次调用的计量观察，避免把零字节删除、锁忙和未到期混为一谈；不落盘。
+_RETIRE_OBSERVATION: ContextVar[dict | None] = ContextVar("agent_transcript_retire_observation", default=None)
 
 
 # LLM: The path is derived only from a validated opaque run id under the owner
@@ -179,6 +186,40 @@ def compact_agent_transcript_events(agent: object, *, run_id: str) -> None:
     _compact_agent_transcript_file(agent_transcript_path(agent, run_id))
 
 
+# LLM: 复用所有追加者的非阻塞transition锁；只删除旧的单链接普通文件，旁锁和canonical账本不动。
+# 函数用途: 原子重核展示流年龄后删除，返回真实删除字节；锁忙保留到下次维护。
+def retire_agent_transcript_file(path: Path, *, now: float, retention_seconds: float) -> int:
+    from ..common.nofollow_fs import open_directory_beneath
+
+    observation = _RETIRE_OBSERVATION.get()
+    descriptor = None
+    try:
+        # 在创建旁锁前拒绝链接父链；删除沿此FD进行，不再跟随之后被替换的父目录。
+        descriptor = open_directory_beneath(path.parent, (), require_dir_fd=True)
+        with locked_file_transition(path.with_name(f".{path.name}.transition"), blocking=False):
+            info = os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not info.st_mtime <= now - retention_seconds:
+                return 0
+            # 域回调只能收紧许可：写门延迟期间出现运行或唤醒责任，必须在真正unlink前保留。
+            eligible = observation.get("eligible") if observation is not None else None
+            if eligible is not None and not eligible():
+                observation["protected"] = True
+                return 0
+            os.unlink(path.name, dir_fd=descriptor)
+            if observation is not None:
+                observation["deleted"] = True
+            return info.st_size
+    except BlockingIOError:
+        if observation is not None:
+            observation["lock_busy"] = True
+        return 0
+    except FileNotFoundError:
+        return 0
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 # LLM: Transition locking is shared by every writer and compactor for this run;
 # it prevents a trim from dropping a concurrently appended event.
 # 函数用途: 在跨进程互斥区内执行展示流裁剪。
@@ -239,10 +280,12 @@ def _safe_int(value: object) -> int:
 
 __all__ = [
     "AGENT_TRANSCRIPT_MAX_EVENTS",
+    "AGENT_TRANSCRIPT_RETENTION_DAYS",
     "agent_transcript_attempt_has_events",
     "agent_transcript_path",
     "append_agent_transcript_event",
     "begin_agent_transcript_turn",
     "compact_agent_transcript_events",
     "read_agent_transcript_events",
+    "retire_agent_transcript_file",
 ]

@@ -22,6 +22,7 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import build_retention_plan
+from .retention_scan_budget import RetentionScanBudget
 
 # LLM: 这几类错误表示"读不懂策略/仓库本身"，此时不能动任何数据；其余错误都能定位到某棵子树并单独保护。
 _POLICY_LEVEL_ERROR_CODES = frozenset({
@@ -50,34 +51,43 @@ class MemoryRetentionService:
             Path(path).expanduser().resolve(strict=False) for path in conversation_roots
         )
 
-    # LLM: dry-run 只调用只读 scanner，不创建 lock、trash、audit 或任何目标文件。
+    # LLM: dry-run仍纯读取；可选预算和输入游标只交给scanner，不保存续点或修改调用方对象。
     # 函数用途: 返回当前 owner 的 retention 清理计划。
-    def plan(self, *, now: datetime | None = None) -> MemoryRetentionReport:
+    def plan(self, *, now: datetime | None = None, scan_budget: RetentionScanBudget | None = None,
+             scan_cursor: dict | None = None) -> MemoryRetentionReport:
         return build_retention_plan(
             home=self.home,
             candidates=self.candidates,
             conversation_roots=self.conversation_roots,
             now=_normalize_now(now),
+            scan_budget=scan_budget,
+            scan_cursor=scan_cursor,
         )
 
-    # LLM: None保原锁内plan/apply；原callback路径长plan门外，固定policy逐写T→原锁，目标指纹/隔离不变。
+    # LLM: None保原锁内plan/apply；callback长扫描门外、逐写短提交；预算续点仅在同锁或原提交门保存。
     #   apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
     #   但单棵任务的 state 损坏只保护那一棵，不连累其他类别——否则生产上会被少数坏目录永久卡住（2026-09-28
     #   dev 裁定 R4）。隔离依据是错误路径与动作路径的前缀重叠，绝不按类别名或目录名放宽。
     #   返回的 errors 仍是执行期错误加扫描期错误（旧语义）；isolated_errors 单列被隔离的扫描期错误，整份拒绝时为空。
     # 函数用途: 应用当前时刻重新验证出的 retention 计划，坏的那一棵单独保护。
-    def apply(self, *, now: datetime | None = None, commit_transition=None, expected_policy_fingerprint=None) -> MemoryRetentionReport:
+    def apply(self, *, now: datetime | None = None, commit_transition=None, expected_policy_fingerprint=None,
+              scan_budget: bool = False) -> MemoryRetentionReport:
         current = _normalize_now(now)
+        from . import retention_scan_budget as budgets
+
         if commit_transition is not None:
             from .retention_transition import RetentionPolicyChangedError, apply_with_transition
 
-            plan = self.plan(now=current)
+            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default() if scan_budget else None,
+                             scan_cursor=budgets.load_scan_cursor(self.home) if scan_budget else None)
             if expected_policy_fingerprint is not None and plan.policy_fingerprint != expected_policy_fingerprint:
                 raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
-            return apply_with_transition(self, plan, current, commit_transition)
+            return apply_with_transition(self, plan, current, commit_transition,
+                                         scan_cursor=plan.scan_cursor if scan_budget else None)
         lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         with locked_json_path(lock_anchor):
-            plan = self.plan(now=current)
+            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default() if scan_budget else None,
+                             scan_cursor=budgets.load_scan_cursor(self.home) if scan_budget else None)
             if plan.legal_hold or _has_policy_level_error(plan.errors):
                 stopped = MemoryRetentionReport(
                     applied=False,
@@ -97,16 +107,12 @@ class MemoryRetentionService:
                 now=current,
                 allowed_external_roots=self.conversation_roots,
             )
+            applied = replace(applied, scan_partial=plan.scan_partial, scan_cursor=plan.scan_cursor)
+            if scan_budget:
+                budgets.save_scan_cursor(self.home, plan.scan_cursor)
             # 执行期错误 + 被隔离保护的扫描错误一起回执：执行过什么、还护着什么，都要看得见。
             if plan.errors and applied.errors != plan.errors:
-                return MemoryRetentionReport(
-                    applied=applied.applied,
-                    actions=applied.actions,
-                    errors=(*applied.errors, *plan.errors),
-                    legal_hold=applied.legal_hold,
-                    policy_fingerprint=applied.policy_fingerprint,
-                    isolated_errors=applied.isolated_errors,
-                )
+                return replace(applied, errors=(*applied.errors, *plan.errors))
             return applied
 
     # LLM: 正式长期记忆删除只按稳定 entry_id/version 调 JsonlMemory 权威链；不得重写 ConversationStore。
@@ -144,7 +150,7 @@ def plan_owner_retention(
     return service.plan(now=now)
 
 
-# LLM: 仍委托唯一v2 Service；原callback只包Candidate构造目录及实际写，None原成本/锁路径不变。
+# LLM: 仍委托唯一v2 Service；预算默认关闭，显式开启才在原锁/提交门保存续点，不修改维护调用方。
 # 函数用途: 兼容 Gateway owner maintenance 和旧 home-retention CLI。
 def apply_owner_retention(
     home: object,
@@ -152,14 +158,15 @@ def apply_owner_retention(
     now: datetime | None = None,
     commit_transition=None,
     expected_policy_fingerprint=None,
+    scan_budget: bool = False,
 ) -> MemoryRetentionReport:
     candidates = (CandidateService(home.owner_memory_candidates_jsonl) if commit_transition is None
                   else commit_transition(lambda: CandidateService(home.owner_memory_candidates_jsonl)))
     service = MemoryRetentionService(home_paths=home, candidates=candidates)
     if commit_transition is None:
-        return service.apply(now=now)
+        return service.apply(now=now, scan_budget=scan_budget)
     return service.apply(now=now, commit_transition=commit_transition,
-                         expected_policy_fingerprint=expected_policy_fingerprint)
+                         expected_policy_fingerprint=expected_policy_fingerprint, scan_budget=scan_budget)
 
 
 # LLM: naive datetime 仅供测试并按 UTC 解释，避免本地时区让保留 cutoff 漂移。
@@ -178,7 +185,7 @@ def _has_policy_level_error(errors: tuple[MemoryRetentionError, ...]) -> bool:
     return any(error.error_code in _POLICY_LEVEL_ERROR_CODES for error in errors)
 
 
-# LLM: 只按"错误路径是否为动作路径的祖先或后代"判断重叠；不按类别名、目录名或文件名放宽，
+# LLM: 仅按路径祖先/后代重叠隔离；replace保留预算游标等报告事实，不按类别放宽保护，
 #   也不因为某个类别有错就整类跳过。
 #   定位说明（dev 2026-09-29）：这是**纵深防御**——三类扫描在读不懂父任务 state.json 时都整棵跳过，
 #   合法输入构造不出"坏子树里带动作"的计划（见 test_unreadable_task_root_yields_no_actions_underneath）。
@@ -210,13 +217,7 @@ def _without_errored_subtrees(plan: MemoryRetentionReport) -> MemoryRetentionRep
     )
     if len(kept) == len(plan.actions):
         return plan
-    return MemoryRetentionReport(
-        applied=False,
-        actions=kept,
-        errors=plan.errors,
-        legal_hold=plan.legal_hold,
-        policy_fingerprint=plan.policy_fingerprint,
-    )
+    return replace(plan, applied=False, actions=kept)
 
 
 # LLM: 本平台的 Path 只理解本平台分隔符（POSIX 上 "C:\tasks\a" 是单个文件名），所以默认用

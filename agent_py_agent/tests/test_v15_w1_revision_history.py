@@ -366,3 +366,30 @@ def test_history_public_signatures():
         actual = inspect.signature(getattr(history, name))
         reference = inspect.signature(namespace['f'])
         assert [(p.name, p.kind, p.default) for p in actual.parameters.values()] == [(p.name, p.kind, p.default) for p in reference.parameters.values()], name
+
+
+# LLM: 原资产锁默认阻塞语义保持，维护调用blocking=False须在真实竞争时立即拒绝，锁文件不删除。
+# 函数用途: 覆盖W9新增的资产锁非阻塞参数。
+def test_w9_asset_lock_nonblocking_contention(tmp_path):
+    import threading
+
+    ready, release = threading.Event(), threading.Event()
+    # LLM: 用原资产领域锁持有临界区，不猴补锁返回值。
+    # 函数用途: 构造跨线程的真实资产锁竞争。
+    def worker():
+        with history._asset_lock(tmp_path, 'script', 'busy'):
+            ready.set()
+            assert release.wait(10)
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(5)
+    try:
+        with pytest.raises(BlockingIOError):
+            with history._asset_lock(tmp_path, 'script', 'busy', blocking=False):
+                pytest.fail('busy asset lock unexpectedly acquired')
+    finally:
+        release.set()
+        thread.join(5)
+        assert not thread.is_alive()
+    with history._asset_lock(tmp_path, 'script', 'busy', blocking=False):
+        assert (tmp_path / 'data' / 'asset_evolution' / 'versions' / 'script' / 'busy.json.lock').exists()

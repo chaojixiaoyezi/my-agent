@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
 
 
-# LLM: 已晋升候选冷详情仍须保护其证据；冷源损坏时关闭相关清理，完好时仍清理无引用对照文件，不能全停冒充保护。
+# LLM: 冷详情的pin合同不变；正式记忆无论是否引用都永久保留，并用缓存对照证明留存没有全停。
 # 函数用途: 验证冷候选证据在真实引用扫描、规划及执行中的保护与坏源失败边界。
 @pytest.mark.parametrize("damage", [False, True])
 def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, damage):
@@ -33,6 +33,7 @@ def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, 
     home, candidates, service = runtime(tmp_path)
     path = old_file(home.owner_memory_daily_dir / "cold-evidence.jsonl")
     control = old_file(home.owner_memory_daily_dir / "unreferenced.jsonl")
+    cache = old_file(home.owner_cache_dir / "unreferenced-cache.jsonl")
     row = candidates.observe(CandidateObservation(candidate_type="lesson", content="已晋升的归档事实",
         subject_key="r2.cold", scope=MemoryScope("personal", "personal"), origin="model_inferred",
         promotion_target="lesson", evidence_refs=[{"path": str(path)}]))
@@ -56,13 +57,13 @@ def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, 
     plan = service.plan(now=NOW)
     assert not [item for item in plan.actions if item.path == path]
     if not damage:
-        assert [item for item in plan.actions if item.path == control]
+        assert not [item for item in plan.actions if item.path == control]
     report = service.apply(now=NOW)
     assert path.exists() and not [item for item in report.actions if item.path == path and item.status == "trashed"]
-    assert control.exists() is damage
+    assert control.exists() and not cache.exists()
 
 
-# LLM: 真实运行账的检查点与增量跨日期形成恢复链；旧分片必须保留且无引用对照分片可回收，不能损坏日志可读性。
+# LLM: 运行账恢复链及未引用分片都是永久记忆资产；原pin与日志读取断言仍须满足。
 # 函数用途: 验证版本化 Curator 游标分片跨日被引用保护。
 def test_r2_versioned_curator_shards_are_pinned_across_days(tmp_path):
     from agent_py_agent.agent.memory_store.curator_run_log import (
@@ -87,16 +88,20 @@ def test_r2_versioned_curator_shards_are_pinned_across_days(tmp_path):
     warnings = [warning for line in old.read_text().splitlines() for warning in json.loads(line)["warnings"]]
     assert any(value.startswith(_CURSOR_CHECKPOINT) for value in warnings)
     assert any(value.startswith(_CURSOR_DELTA) for value in warnings)
-    control = old_file(old.with_name("2020-01-01.jsonl"), "{}\n")
+    log.append(replace(first, run_id="r2-unreferenced", started_at="2020-01-01T00:00:00+00:00",
+        finished_at="2020-01-01T00:00:00+00:00", cursor_before={}, cursor_after={}))
+    control = old.with_name("2020-01-01.jsonl")
+    os.utime(control, (1, 1))
     os.utime(old, (1, 1))
     errors = []
     pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
     assert complete and not errors and old.resolve() in pins.paths
     assert not [item for item in service.plan(now=NOW).actions if item.path == old]
-    assert [item for item in service.plan(now=NOW).actions if item.path == control]
+    assert not [item for item in service.plan(now=NOW).actions if item.path == control]
     report = service.apply(now=NOW)
-    assert report.ok and old.exists() and not control.exists()
-    assert len(log.list()) == 3 and len(log.recent_finished(3)) == 3
+    assert report.ok and old.exists() and control.exists()
+    assert {row.run_id for row in log.list()} == {"r2-checkpoint", "r2-delta", "r2-new-day", "r2-unreferenced"}
+    assert len(log.recent_finished(4)) == 4
 
 
 # LLM: 所有写入限于pytest临时home；返回真实服务，不替换授权和执行链。
@@ -105,6 +110,19 @@ def runtime(tmp_path):
     home = ensure_my_agent_home(tmp_path / "home")
     candidates = CandidateService(home.owner_memory_candidates_jsonl)
     return home, candidates, MemoryRetentionService(home_paths=home, candidates=candidates)
+
+
+# LLM: 用真实可恢复写者生成已过宽限的缓存容器；这些是依赖pins的可清理对象，不再要求删除永久记忆。
+# 函数用途: 为旧引用安全回归提供真实墓碑、摘要与payload。
+def _expired_pin_target(home, name, content="{}\n"):
+    source = old_file(home.owner_cache_dir / name, content)
+    destination = Path(home.owner_trash_dir) / "retention" / "cache" / Path(name).stem
+    moved = apply._trash_file(home=home, action=MemoryRetentionAction(
+        action_id=f"fixture-{Path(name).stem}", category="cache", operation="trash_file", path=source,
+        reason="expired cache fixture", destination=destination, source_fingerprint=scan.file_fingerprint(source),
+        cutoff_timestamp=NOW.timestamp()), now=NOW - timedelta(days=60))
+    assert moved.status == "trashed" and destination.exists() and not source.exists()
+    return destination
 
 
 def test_generation_formal_pins_invalidate_same_apply_snapshot(tmp_path):
@@ -164,6 +182,8 @@ def test_legacy_semantic_corruption_blocks_retention(tmp_path, source, damage):
     assert not [action for action in report.actions if action.path == target and action.status == "trashed"]
 
 
+# LLM: 真实墓碑与缓存pin沿同一留存入口验证；旧版本记录也不得通过重新追加而复活来源身份。
+# 函数用途: 验证被墓碑删除的记忆不再复活，也不再阻止其过期缓存进入回收计划。
 @pytest.mark.parametrize("version", [1, 3])
 def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version):
     from agent_py_agent.agent.memory_store.jsonl import (
@@ -172,7 +192,7 @@ def test_legacy_tombstone_remains_a_permanent_identity_barrier(tmp_path, version
     )
 
     home, _, service = runtime(tmp_path)
-    target = old_file(home.owner_memory_daily_dir / "deleted-source.jsonl")
+    target = _expired_pin_target(home, "deleted-source.jsonl")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     memory.add("user", "deleted fact", attributes={"source_refs": [str(target)]})
     row = json.loads(memory.path.read_text().splitlines()[0])
@@ -278,7 +298,7 @@ def test_legacy_zero_expiry_is_permanent(tmp_path, source, expiry):
 
     home, _, service = runtime(tmp_path)
     target = old_file(home.owner_memory_daily_dir / "permanent.jsonl")
-    control = old_file(home.owner_memory_daily_dir / "unreferenced.jsonl")
+    control = _expired_pin_target(home, "unreferenced.jsonl")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     memory.add("user", "permanent", attributes={"source_refs": [str(target)]})
     row = json.loads(memory.path.read_text().splitlines()[0])
@@ -301,7 +321,7 @@ def test_generation_pin_corruption_blocks_plan_and_apply(tmp_path, damage):
     from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
 
     home, candidates, service = runtime(tmp_path)
-    target = old_file(home.owner_memory_daily_dir / "generation-source.jsonl")
+    target = _expired_pin_target(home, "generation-source.jsonl")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     memory.add("user", "generation fact", attributes={"source_refs": ["other-evidence"]})
     memory.migrate_tiers()
@@ -381,7 +401,7 @@ def test_fresh_large_pin_source_is_streamed_and_detects_same_tick_rewrite(tmp_pa
     assert reads and max(reads) <= 64 * 1024
 
 
-# LLM: 将真实文件代次移到规范2秒窗口之外；冷文件的重验证只能查元数据，不重读正文。
+# LLM: 将真实文件代次移到2秒窗口外；日记永久保留，缓存删除仍提供多动作重验证成本对照。
 # 函数用途: 用读取次数而非易抖动耗时约束多动作保留成本。
 def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monkeypatch):
     import time
@@ -401,6 +421,7 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
         identities.add(path.stat().st_ino)
         source_paths.add(path)
         old_file(home.owner_memory_daily_dir / f"old-{index}.jsonl")
+        old_file(home.owner_cache_dir / f"old-{index}.jsonl")
     later = time.time_ns() + 3_000_000_000
     monkeypatch.setattr(time, "time_ns", lambda: later)
     original_read, reads = os.read, []
@@ -425,7 +446,9 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
     monkeypatch.setattr(scan, "_pin_object", pin_object)
     report = service.apply(now=NOW)
     assert report.ok
-    assert len([item for item in report.actions if item.category == "daily" and item.status == "trashed"]) == 20
+    assert len([item for item in report.actions if item.category == "daily" and item.status == "trashed"]) == 0
+    assert len(list(home.owner_memory_daily_dir.glob("old-*.jsonl"))) == 20
+    assert len([item for item in report.actions if item.category == "cache" and item.status == "deleted"]) == 20
     assert not reads, "settled thread content must not be rehashed per retention action"
     assert set(parsed) == source_paths and len(parsed) <= 4 * len(source_paths)
 
@@ -677,7 +700,7 @@ def test_fingerprint_distinguishes_unreadable_from_missing(tmp_path, monkeypatch
 @pytest.mark.parametrize("digest", ["missing", "unreadable", "", "a" * 63, "A" * 64, "g" * 64])
 def test_scan_never_schedules_invalid_digest(tmp_path, monkeypatch, digest):
     home, _, service = runtime(tmp_path)
-    path = old_file(home.owner_memory_daily_dir / "old.jsonl")
+    path = old_file(home.owner_cache_dir / "old.jsonl")
     original = scan.file_fingerprint
     monkeypatch.setattr(scan, "file_fingerprint", lambda p: digest if p == path else original(p))
     plan = service.plan(now=NOW)
@@ -775,12 +798,12 @@ def test_fresh_daily_and_compact_are_not_hashed(tmp_path, monkeypatch):
     assert not paths.intersection(observed)
 
 
-# LLM: 正式记忆走原仓库；未引用文件仍须可回收，防止全停假绿。
+# LLM: 正式记忆走原仓库；未引用的过期快照仍须可回收，防止永久记忆规则全停假绿。
 # 函数用途: 同时验证引用保护与30天回收宽限。
 def test_formal_source_pin_and_trash_grace(tmp_path):
     home, _, service = runtime(tmp_path)
     pinned = old_file(home.owner_memory_daily_dir / "pinned.jsonl")
-    unpinned = old_file(home.owner_compact_dir / "expired.json")
+    unpinned = old_file(Path(home.owner_home_dir) / "memory_archive/snapshots/context_bundles/2020-01-01/expired.json", "{}")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     memory.add("user", "fact", attributes={"source_refs": [{"path": str(pinned)}]})
     report = service.apply(now=NOW)
@@ -794,7 +817,7 @@ def test_formal_source_pin_and_trash_grace(tmp_path):
 # 函数用途: 验证执行前重核正式来源。
 def test_apply_rechecks_new_formal_pins(tmp_path):
     home, candidates, service = runtime(tmp_path)
-    path = old_file(home.owner_memory_daily_dir / "old.jsonl")
+    path = _expired_pin_target(home, "new-formal-pin.jsonl")
     plan = service.plan(now=NOW)
     JsonlMemory(home.owner_memory_long_term_jsonl).add("user", "fact", attributes={"source_refs": [str(path)]})
     report = apply.execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
@@ -890,7 +913,7 @@ def test_reference_pin_sources_cover_ids_and_paths(tmp_path, source):
 # 函数用途: 验证正式记忆删除后可释放pin。
 def test_deleted_formal_memory_releases_pin(tmp_path):
     home, _, service = runtime(tmp_path)
-    path = old_file(home.owner_memory_daily_dir / "daily.jsonl")
+    path = _expired_pin_target(home, "released-pin.jsonl")
     memory = JsonlMemory(home.owner_memory_long_term_jsonl)
     row = memory.add("user", "fact", attributes={"source_refs": [str(path)]})
     assert not [a for a in service.plan(now=NOW).actions if a.path == path]
@@ -990,7 +1013,7 @@ def test_checkpoint_pointer_to_missing_ledger_fails_closed(tmp_path):
 # 函数用途: 验证执行期来源读取故障安全关闭。
 def test_apply_pin_source_read_error_preserves_old_file(tmp_path):
     home, candidates, service = runtime(tmp_path)
-    path = old_file(home.owner_memory_daily_dir / "old.jsonl")
+    path = _expired_pin_target(home, "unreadable-pin.jsonl")
     plan = service.plan(now=NOW)
     old_file(home.owner_memory_long_term_jsonl, "{bad")
     report = apply.execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
@@ -1026,22 +1049,22 @@ def test_trash_purge_rechecks_original_source_pins(tmp_path, kind):
     from datetime import timedelta
 
     home, candidates, service = runtime(tmp_path)
-    source = old_file(home.owner_memory_daily_dir / "old.jsonl", '{"event_id":"daily-id"}\n')
-    moved = next(a for a in service.apply(now=NOW).actions if a.path == source)
+    container = _expired_pin_target(home, "old-source.jsonl", '{"event_id":"daily-id"}\n')
+    source = home.owner_cache_dir / "old-source.jsonl"
     later = NOW + timedelta(days=31)
     if kind == "unreadable":
         old_file(home.owner_memory_long_term_jsonl, "{bad")
         plan = service.plan(now=later)
-        assert not [a for a in plan.actions if a.path == moved.destination]
+        assert not [a for a in plan.actions if a.path == container]
     else:
         # 先生成允许purge的旧计划，再新增引用，执行仍须重新保护回收内容。
         plan = service.plan(now=later)
-        assert [a for a in plan.actions if a.path == moved.destination]
+        assert [a for a in plan.actions if a.path == container]
         ref = str(source) if kind == "path" else {"event_id": "daily-id"}
         JsonlMemory(home.owner_memory_long_term_jsonl).add("user", "fact", attributes={"source_refs": [ref]})
         report = apply.execute_retention_plan(home=home, candidates=candidates, plan=plan, now=later)
-        assert next(a for a in report.actions if a.path == moved.destination).status == "state_changed"
-    assert (moved.destination / "payload").exists()
+        assert next(a for a in report.actions if a.path == container).status == "state_changed"
+    assert (container / "payload").exists()
 
 
 # LLM: 递归目录动作与任一子文件pin相交即须保留。
@@ -1134,7 +1157,7 @@ def test_candidate_pin_schema_is_checked_when_candidate_cleanup_disabled(tmp_pat
 # 函数用途: 验证年龄预筛选故障留下诊断且不生成删除动作。
 def test_stat_failure_during_age_filter_is_diagnosed(tmp_path, monkeypatch):
     home, _, service = runtime(tmp_path)
-    target = old_file(home.owner_memory_daily_dir / "old.jsonl")
+    target = old_file(home.owner_cache_dir / "old.jsonl")
     original = Path.stat
 
     # LLM: 仅目标元数据读取失败，不改变其他来源或删除接口。
@@ -1299,6 +1322,7 @@ def test_r5_hot_large_source_mid_build_rewrite_never_publishes_stale_pins(
     home, service, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib)
     for index in range(24):
         old_file(home.owner_memory_daily_dir / f"a-drive-{index:02d}.jsonl")
+        _expired_pin_target(home, f"a-drive-{index:02d}.jsonl")
     changed, parsed, stream_rejected = [], [], []
     original_watch, original_load = scan.watch_pin_source, json.load
 

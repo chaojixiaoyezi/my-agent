@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -364,13 +365,17 @@ class ProcessLogTail:
     truncated: bool = False
     invalid_utf8: bool = False
     error_type: str = ""
+    expired: bool = False
 
-    # LLM: 字段来自本次读取，不从展示截断提示推断；没有正文，不修改原进程记录。
-    # 函数用途: 为现有进程工具的 JSON 输出投影机器可判断的日志采集事实。
+    # LLM: 字段来自本次读取；只为过期的规范 job 日志追加标记，其余事实字典逐字段保持原样。
+    # 函数用途: 为现有进程工具投影日志读取事实，不修改原进程状态。
     def to_fact(self) -> dict[str, object]:
-        return {"bytes_read": self.bytes_read, "limit_bytes": self.limit_bytes,
+        fact = {"bytes_read": self.bytes_read, "limit_bytes": self.limit_bytes,
                 "truncated": self.truncated, "invalid_utf8": self.invalid_utf8,
                 "error_type": self.error_type}
+        if self.expired:
+            fact["expired"] = True
+        return fact
 
 
 # LLM: 先打开再fstat同一fd，read最多取观察长度与预算的小者；并发追加不纳入本次观察，短读/坏UTF8均结构化。
@@ -386,6 +391,11 @@ def _read_log_tail(output_file: str, max_chars: int) -> ProcessLogTail:
             size = os.fstat(handle.fileno()).st_size
             handle.seek(max(0, size - limit))
             raw = handle.read(min(size, limit))
+    except FileNotFoundError as exc:
+        path = Path(output_file)
+        if path.parent.name == ".background_jobs" and re.fullmatch(r"job-\d+\.log", path.name):
+            return ProcessLogTail(limit_bytes=limit, error_type="FileNotFoundError", expired=True)
+        return ProcessLogTail(output_bytes=size, limit_bytes=limit, error_type=type(exc).__name__)
     except OSError as exc:
         return ProcessLogTail(output_bytes=size, limit_bytes=limit, error_type=type(exc).__name__)
     return _log_tail_result(raw, size=size, limit=limit)
