@@ -27,6 +27,14 @@ def unroutable_reason(paths, payload, *, gate) -> str:
         return ""
     if _read_reservation(reservation_file(paths, rid)) is not None:
         return ""
+    if (payload.get("schema_version") == "gateway_terminal_request.v1"
+            and (payload.get("terminal_response") or {}).get("error_code") == "GATEWAY_REQUEST_ROUTE_RETIRED"):
+        canonical = _committed_closeout(paths, paths.inbox / (rid + ".json"), payload)
+        reason = canonical["terminal_response"].get("route_retirement_reason") if canonical == payload else None
+        # canonical会补齐旧指纹；原原因是已提交事实，不能再用failed状态重做pending专用推断。
+        if reason in {"legacy_count0_request", "stale_generation_route", "legacy_unstamped_request"}:
+            return reason
+        raise DataCorruptionError("unroutable_terminal_conflict")
     metadata = payload.get("metadata")
     abv = metadata.get("gateway_admin_binding_version") if isinstance(metadata, dict) else None
     route = payload.get("route")
@@ -34,9 +42,29 @@ def unroutable_reason(paths, payload, *, gate) -> str:
         return "legacy_count0_request"
     if isinstance(route, dict) and route.get("c_run_id") != gate.c_run_id:
         return "stale_generation_route"
-    if payload.get("status", "pending") == "pending" and (not payload.get("request_fingerprint") or not abv):
-        return "legacy_unstamped_request"
+    if not payload.get("request_fingerprint") or not abv:
+        if payload.get("status", "pending") == "pending":
+            return "legacy_unstamped_request"
     return ""
+
+
+def resume_unroutable_closeout(paths, path, *, admission_gate=None):
+    """只分派结构化退休终态；完整身份及T→M→L校验仍由原投影器完成。"""
+    from .multiprocess_admission import PersistentAdmission
+
+    if type(admission_gate) is not PersistentAdmission or admission_gate.count <= 0:
+        return None
+    if not (paths.terminal / path.name).is_file():
+        return None
+    try:
+        report = read_gateway_terminal_envelope_report(paths.terminal / path.name, request_id=path.stem)
+        if report.load_error is not None:
+            return "blocked"
+        if not report.payload or report.payload["terminal_response"].get("error_code") != "GATEWAY_REQUEST_ROUTE_RETIRED":
+            return None
+        return "expired" if project_unroutable_closeout(paths, path.stem, admission_gate=admission_gate) else "blocked"
+    except (OSError, ValueError, RuntimeError, DataCorruptionError):
+        return "blocked"
 
 
 # LLM: 仅查看原guard登记和require_held，不修改_HELD、不造锁来源；fork/FD关闭/路径替换均失败关闭。
@@ -233,9 +261,12 @@ def _committed_closeout(paths, path, current):
             or canonical.get("turn_phase") != "closed" or canonical.get("status") != "failed"
             or response.get("status") != "failed" or response.get("ok") is not False
             or not _same_gateway_request_identity(canonical, current, request_id=path.stem)
+            or frozen_request_owner(current) is None
             or frozen_request_owner(canonical) != frozen_request_owner(current)
             or canonical.get("owner_id") != current.get("owner_id")
-            or canonical.get("route") != current.get("route")):
+            or canonical.get("route") != current.get("route")
+            or any(canonical.get(key) != current.get(key) for key in (
+                "conversation_claim", "lease_epoch", "active_turn_recovery", "queue_transport_source", "runtime_authority"))):
         raise DataCorruptionError("unroutable_terminal_conflict")
     return canonical
 
@@ -245,7 +276,7 @@ def _committed_closeout(paths, path, current):
 def close_out_unroutable_pending_locked(gate, request_path, current, owner, reason):
     from .input_delivery_service import require_gateway_prepared_identity
     from .multiprocess_admission import _blocked, _runtime_commit_scope
-    from .queued_steer_expiry import _expiry_coordinator_source, _require_never_started
+    from .queued_steer_expiry import _expiry_coordinator_source
     from .recovery import _commit_gateway_terminal_request, _terminal_gateway_request_payload
     from .request_owner_binding import frozen_request_owner
 
@@ -264,16 +295,19 @@ def close_out_unroutable_pending_locked(gate, request_path, current, owner, reas
                     or frozen_request_owner(current) != owner
                     or unroutable_reason(gate.paths, current, gate=gate) != reason):
                 raise DataCorruptionError("unroutable_pending_conflict")
-            _require_never_started(current)
-            require_gateway_prepared_identity(gate.paths, current)
-            canonical = _committed_closeout(gate.paths, request_path, current)
-            if canonical is None:
-                response = unroutable_closeout_response(current, reason)
-                canonical = _terminal_gateway_request_payload(request_path.stem, current, response)
-            _commit_gateway_terminal_request(gate.paths, gate.paths.terminal / request_path.name,
-                                             gate.paths.failed, request_path.stem, canonical)
+            from .multiprocess_processing_recovery import _held_recovery_window
+
+            with _closeout_source(gate, current, reason) as source, _held_recovery_window(source, gate.paths, request_path.stem):
+                _require_pending_metadata(source)
+                require_gateway_prepared_identity(gate.paths, current)
+                canonical = _committed_closeout(gate.paths, request_path, current)
+                if canonical is None:
+                    response = unroutable_closeout_response(current, reason)
+                    canonical = _terminal_gateway_request_payload(request_path.stem, current, response)
+                _commit_gateway_terminal_request(gate.paths, gate.paths.terminal / request_path.name,
+                                                 gate.paths.failed, request_path.stem, canonical)
             return {"status": "expired", "response": canonical["terminal_response"], "closeout": "unroutable"}
-    except (OSError, ValueError, RuntimeError, DataCorruptionError):
+    except (OSError, ValueError, RuntimeError, DataCorruptionError, KeyError, TypeError):
         return _blocked("unroutable_closeout_pending")
 
 
@@ -297,35 +331,70 @@ def _settle_queued_input(paths, request_id):
 # LLM: admit原T退出后再取T→C→lease，必须已提交退休终态且P3确实不存在；仅全部补交成功才移除inbox。
 # 函数用途: 修复无路由pending的响应、历史、输入回执及投影标记。
 def project_unroutable_closeout(paths, request_id, *, admission_gate=None):
+    from .multiprocess_processing_recovery import requeued_closeout_scope
+    from .queued_steer_expiry import _expiry_coordinator_source
+
+    _expiry_coordinator_source(admission_gate)
+    path = paths.inbox / (request_id + ".json")
+    candidate = path if path.exists() else paths.terminal / path.name
+    with requeued_closeout_scope(admission_gate, candidate) as rejection:
+        if rejection is not None:
+            raise BlockingIOError("unroutable_requeued_source_unavailable") from rejection
+        return _project_unroutable_closeout(paths, request_id, admission_gate=admission_gate)
+
+
+def _project_unroutable_closeout(paths, request_id, *, admission_gate=None):
+    """复用原canonical补交链；所有长观察已在外层，关联input仍在T外结算。"""
     from .input_delivery_service import require_gateway_prepared_identity
     from .multiprocess_admission import _read_reservation, reservation_file
-    from .queued_steer_expiry import _projection_scope, _require_never_started
-    from .recovery import _commit_gateway_terminal_request, _project_recovered_terminal_response
+    from .recovery import _commit_gateway_terminal_request, _settle_recovered_guidance
 
-    controller = getattr(admission_gate, "_runtime_takeover", None)
-    lease = getattr(controller, "_lease", None)
-    with _projection_scope(paths, request_id, admission_gate, controller, lease):
-        path = paths.inbox / (request_id + ".json")
-        current = read_json_file_report(path)
-        if current.load_error is not None:
-            raise DataCorruptionError("unroutable_pending_unreadable")
-        terminal = read_gateway_terminal_envelope_report(paths.terminal / path.name, request_id=request_id)
-        if terminal.load_error is not None or not terminal.payload:
-            raise DataCorruptionError("unroutable_terminal_unavailable")
-        payload = current.payload or terminal.payload
-        canonical = _committed_closeout(paths, path, payload)
-        if (canonical is None or (paths.processing / path.name).exists()
-                or _read_reservation(reservation_file(paths, request_id)) is not None):
-            raise DataCorruptionError("unroutable_projection_conflict")
-        _require_never_started(payload)
-        require_gateway_prepared_identity(paths, payload)
-        require_gateway_prepared_identity(paths, canonical)
-        _commit_gateway_terminal_request(paths, paths.terminal / path.name, paths.failed, request_id, canonical)
-        settled = _settle_queued_input(paths, request_id)
-        _project_recovered_terminal_response(paths, request_id, settled)
-        if settled and current.payload:
-            path.unlink()
+    path = paths.inbox / (request_id + ".json")
+    terminal = read_gateway_terminal_envelope_report(paths.terminal / path.name, request_id=request_id)
+    if terminal.load_error is not None or not terminal.payload:
+        raise DataCorruptionError("unroutable_terminal_unavailable")
+    reason = unroutable_reason(paths, terminal.payload, gate=admission_gate)
+    with _closeout_source(admission_gate, terminal.payload, reason) as source:
+        with source.short_scope("unroutable.pending_projection"):
+            current = read_json_file_report(path)
+            if current.load_error is not None:
+                raise DataCorruptionError("unroutable_pending_unreadable")
+            payload = current.payload or terminal.payload
+            canonical = _committed_closeout(paths, path, payload)
+            if (not reason or canonical != source.payload or (paths.processing / path.name).exists()
+                    or _read_reservation(reservation_file(paths, request_id)) is not None):
+                raise DataCorruptionError("unroutable_projection_conflict")
+            _require_pending_metadata(source)
+            require_gateway_prepared_identity(paths, payload)
+            require_gateway_prepared_identity(paths, canonical)
+            _commit_gateway_terminal_request(paths, paths.terminal / path.name, paths.failed, request_id, canonical)
+            store = source.conversation_store
+            _unchanged, settled = _settle_recovered_guidance(request_id, canonical, canonical["terminal_response"], store, True)
+            source.defer_terminal_projection(request_id, store, settled)
+        settled = _finish_closeout_projection(paths, source)
+        with source.short_scope("unroutable.pending_ack"):
+            fresh = read_json_file_report(path)
+            if fresh.load_error is not None or (fresh.payload and fresh.payload != current.payload):
+                raise DataCorruptionError("unroutable_pending_conflict")
+            if _committed_closeout(paths, path, fresh.payload or canonical) != canonical:
+                raise DataCorruptionError("unroutable_terminal_conflict")
+            if settled and fresh.payload:
+                path.unlink()
         return settled
+
+
+def _require_pending_metadata(source):
+    """恢复排队另核原运输/停止证据；从未执行分支仍保留原严格门。"""
+    from .multiprocess_processing_recovery import require_stopped_requeued_source
+    from .queued_steer_expiry import _has_execution_responsibility, _require_never_started
+
+    source.require_writer("unroutable.pending_metadata")
+    if _has_execution_responsibility(source.payload):
+        require_stopped_requeued_source(source)
+        if source.conversation_store is None:
+            raise source.rejection("unroutable.requeued_store")
+    else:
+        _require_never_started(source.payload)
 
 
 # LLM: claim与任务只按原request绑定精确收尾；不扫别的任务、不动已提升业务任务，坏账保留canonical供重试。
@@ -366,7 +435,7 @@ def _finish_closeout_projection(paths, source):
         if canonical.load_error is not None or not canonical.payload:
             raise DataCorruptionError("unroutable_terminal_unavailable")
         _finish_closeout_claim(canonical.payload, turn_id, store)
-        _settle_queued_input(paths, turn_id)
+        queued_settled = _settle_queued_input(paths, turn_id)
     settled = _complete_gateway_terminal_projection(paths, turn_id, store, settled)
     # 有关联输入时由原结算器作实际判断；本请求queued输入已在上方封口。
     with source.short_scope("unroutable.projection"):
@@ -375,7 +444,10 @@ def _finish_closeout_projection(paths, source):
         receipt = read_gateway_input_receipt(paths, turn_id)
         if receipt is not None and (receipt.state not in {"consumed", "terminal_unknown"} or receipt.reconcile_error):
             settled = False
+        # 关联输入交原complete结算器；queued-only无Store分支必须确实没有关联责任。
+        settled = settled and (queued_settled if store is None else True)
         _project_recovered_terminal_response(paths, turn_id, settled)
+    return settled
 
 
 # LLM: 已有终态原operation优先，绝不重新失败或覆盖canonical；source只供这次元数据补交，退出立即失效。

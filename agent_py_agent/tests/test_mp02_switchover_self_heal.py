@@ -1,14 +1,16 @@
 # LLM: 仅在隔离临时home使用真实C锁/准入/终态/会话存储；进程死亡观察是显式替身，不代表线上完整P2或真实用户E2E。
 # 模块用途: 钉住MP-02切换遗留请求与控制回执的安全收尾、重试和保守拒绝。
 import copy
+import json
 import time
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from agent_py_agent.agent.contracts.error_taxonomy import error_contract
-from agent_py_agent.agent.gateway_parts import daemon_metadata, recovery
+from agent_py_agent.agent.gateway_parts import daemon_metadata, recovery, request_worker
 from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
 from agent_py_agent.agent.gateway_parts import multiprocess_processing_recovery as pr
 from agent_py_agent.agent.gateway_parts import multiprocess_unroutable_closeout as closeout
@@ -30,6 +32,272 @@ from agent_py_agent.tests.test_gateway_prepared_route_immutability import _finge
 from agent_py_agent.tests.test_gateway_prepared_route_immutability import context as context
 from agent_py_agent.tests.test_rework_v14_admission_io_recovery import ordinary_case
 from agent_py_agent.tests.test_v13_w4_conversation_steer_stop import _count0_steer
+
+
+@pytest.mark.parametrize("variant", ["stale", "missing_stamp"])
+@pytest.mark.parametrize("retry_via", ["dispatcher", "projector", "admission"])
+def test_committed_retirement_converges_after_one_projection_error(context, monkeypatch, variant, retry_via):
+    gate, path, ownership = ordinary_case(context)
+    if variant == "stale":
+        payload = read_json_file(path)
+        payload = freeze_request_route(payload, ownership[0], RouteStamp(gate.count, "retired-c", 1.0,
+                                               payload["metadata"]["gateway_admin_binding_version"]))
+        write_json_file_atomic(path, payload)
+    else:
+        path, payload, ownership = _legacy_pending(gate, abv=True)
+    original = recovery._project_recovered_terminal_response
+    errors = []
+
+    def one_error(*args):
+        if not errors:
+            errors.append("projection")
+            raise OSError("simulated projection I/O error")
+        return original(*args)
+
+    monkeypatch.setattr(recovery, "_project_recovered_terminal_response", one_error)
+    submit = Mock(side_effect=AssertionError("terminal requests never execute"))
+    before = path.read_bytes()
+    limits = AdmissionLimits(8, 8)
+    assert request_worker.dispatch_pending_requests(gate.paths, limits, submit, admission_gate=gate) == 0
+    canonical = gate.paths.terminal / path.name
+    saved = canonical.read_bytes()
+    assert errors == ["projection"] and path.read_bytes() == before
+    assert not (gate.paths.responses / path.name).exists()
+    for _ in range(3):
+        if retry_via == "dispatcher":
+            assert request_worker.dispatch_pending_requests(gate.paths, limits, submit, admission_gate=gate) == 0
+        elif retry_via == "projector":
+            recovery.repair_gateway_terminal_projections(gate.paths, agent=gate.agent, full_scan=True,
+                recovery_context=recovery._RecoveryContext(time.time(), 3, 10, False, gate.agent, None, admission_gate=gate))
+        elif path.exists():
+            assert gate.admit(path, ownership, limits)["status"] == "expired"
+    assert not path.exists(), "committed retirement pending must converge after one successful retry"
+    assert canonical.read_bytes() == saved
+    response = read_json_file(gate.paths.responses / path.name)
+    assert response == read_json_file(canonical)["terminal_response"]
+    assert response["error_code"] == "GATEWAY_REQUEST_ROUTE_RETIRED"
+    assert not reservation_file(gate.paths, path.stem).exists()
+    receipt = inputs.read_gateway_input_receipt(gate.paths, path.stem)
+    if receipt is not None:
+        assert receipt.state == "terminal_unknown"
+    history = [json.loads(line) for line in gate.paths.history.read_text().splitlines()]
+    assert sum(row.get("id") == path.stem for row in history) == 1
+    submit.assert_not_called()
+
+
+@pytest.mark.parametrize("settlement_error", [False, True])
+@pytest.mark.parametrize("variant", ["single", "multi", "slow", "live", "unknown", "wrong_scope", "bad_detail", "cropped", "missing_proof", "wrong_claim"])
+def test_recovery_requeued_pending_closes_after_real_retirement(tmp_path, monkeypatch, settlement_error, variant):
+    from agent_py_agent.agent.gateway_parts.control_plane import GatewayControlPlane
+    from agent_py_agent.agent.gateway_parts.multiprocess_admission import coordinator_admission_gate
+    from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import coordinator_guard
+    from agent_py_agent.agent.gateway_parts.multiprocess_generation_retirement import (
+        retire_dead_multiprocess_generations,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_takeover_runtime import (
+        prepare_coordinator_takeover,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    if variant in {"multi", "cropped"}:
+        from agent_py_agent.tests import test_gateway_processing_recovery_source as fixtures
+
+        original_register = fixtures.register
+
+        def two_launches(ledger, source):
+            result = original_register(ledger, source)
+            extra = dict(source, reservation_id="exec-two")
+            if variant == "cropped":
+                extra["request_id"] = "another-request"
+            original_register(ledger, extra, pid=102)
+            return result
+
+        # 两次真实登记发生在旧scope冻结之前，不修改已捕获的P1来源。
+        monkeypatch.setattr(fixtures, "register", two_launches)
+    with cold_case(tmp_path, monkeypatch, with_input=True) as (original, control, gate, context):
+        binding = read_json_file(original.claim.path)["conversation_claim"]
+        original.store.tasks.bind({"task_id": binding["task_id"], "thread_id": binding["thread_id"], "status": "active"})
+        assert original.store.claims.acquire({"thread_id": binding["thread_id"], "task_id": binding["task_id"],
+                                              "recover_same_task_only": True})
+        report = recovery.recover_gateway_processing_requests_report(gate.paths, params=context)
+        assert not report.load_errors and report.summary["requeued"] == 1
+        paths, store, config = gate.paths, original.store, control.config
+        path = paths.inbox / original.claim.path.name
+        pending = read_json_file(path)
+        prior = path.read_bytes()
+        assert all(key in pending for key in ("conversation_claim", "lease_epoch", "active_turn_recovery", "queue_transport_source"))
+        home, root = control.home_root, control.agent_root
+    monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: False)
+    # 后继使用原constructor的新DTO，不让旧C捕获的角色租约跟随新代次。
+    paths = gateway_paths_from_root(paths.root)
+    with coordinator_guard(paths.root, 1):
+        assert retire_dead_multiprocess_generations(paths, target_count=1, current_c_run_id="successor-c")
+        assert path.read_bytes() == prior
+        successor = prepare_coordinator_takeover(paths, 1, "successor-c")
+        assert successor.active() and not successor._all_quarantined
+        control = GatewayControlPlane(config, home, paths, 1, "successor-c", agent_root=root, workspace_roots=(root,))
+        gate = coordinator_admission_gate(control, paths, SimpleNamespace(coordinator_worker_count=1))
+        if variant == "slow":
+            import threading
+
+            from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+            from agent_py_agent.agent.gateway_parts.io import gateway_turn_transition
+
+            observe, probes, probe_errors = p2.observe_processes, [], []
+
+            def slow_observation():
+                acquired = threading.Event()
+
+                def competing_metadata():
+                    try:
+                        with gateway_turn_transition(paths, path.stem), gate._runtime_takeover._mutex, gate._runtime_takeover._lease._lifecycle_gate:
+                            acquired.set()
+                    except BaseException as error:
+                        probe_errors.append(error)
+
+                probe = threading.Thread(target=competing_metadata, daemon=True)
+                probe.start()
+                probes.append(probe)
+                assert acquired.wait(3), "platform observation must not hold T/M/L"
+                probe.join(3)
+                assert not probe.is_alive() and not probe_errors
+                return observe()
+
+            monkeypatch.setattr(p2, "observe_processes", slow_observation)
+        elif variant in {"live", "unknown"}:
+            from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+
+            table = {"platform": "darwin", "host_id": "host-one", "rows": {}, "failure": ""}
+            if variant == "unknown":
+                table["failure"] = "observation_unavailable"
+            else:
+                table["rows"][101] = {"pid": 101, "ppid": 1, "pgid": 101, "sid": 101, "birth": 10, "state": "R"}
+                record = pending["queue_transport_source"]["stopped_execution"]["records"][0]
+                assert p2.evaluate_tree(record, table)["status"] == "live"
+            monkeypatch.setattr(p2, "observe_processes", lambda: table)
+        elif variant not in {"single", "multi", "slow"}:
+            changed = copy.deepcopy(pending)
+            evidence = changed["queue_transport_source"]["stopped_execution"]
+            if variant == "wrong_scope":
+                evidence["proof"]["covered_scope"]["worker_index"] = 1
+            elif variant == "bad_detail":
+                evidence["detail"] = None
+            elif variant == "missing_proof":
+                del evidence["proof"]
+            elif variant == "wrong_claim":
+                changed["conversation_claim"]["thread_id"] = "another-thread"
+            else:
+                evidence["records"] = evidence["records"][:1]
+                evidence["proof"]["covered_scope"]["executor_reservation_ids"] = ["exec-one"]
+                evidence["detail"]["covered_scope"]["executor_reservation_ids"] = ["exec-one"]
+                evidence["detail"]["instances"] = evidence["detail"]["instances"][:1]
+                evidence["detail"]["record_digests"].pop("exec-two")
+            write_json_file_atomic(path, changed)
+        from agent_py_agent.tests.test_rework_v14_admission_io_recovery import fd_count
+
+        before_fd = fd_count()
+        guarded = path.read_bytes()
+        original_finish = closeout._finish_closeout_claim
+        errors = []
+
+        def once(*args):
+            if settlement_error and not errors:
+                errors.append("settlement")
+                raise OSError("simulated settlement I/O error")
+            return original_finish(*args)
+
+        monkeypatch.setattr(closeout, "_finish_closeout_claim", once)
+        project = closeout.project_unroutable_closeout
+        projection_errors = []
+
+        def observed_projection(*args, **kwargs):
+            try:
+                return project(*args, **kwargs)
+            except Exception:
+                import traceback
+
+                projection_errors.append(traceback.format_exc())
+                raise
+
+        monkeypatch.setattr(closeout, "project_unroutable_closeout", observed_projection)
+        submit = Mock(side_effect=AssertionError("recovered retirement must not execute"))
+        for _ in range(3):
+            if variant not in {"single", "multi", "slow"}:
+                exact = path.read_bytes()
+                assert gate.try_close_unroutable_pending(path)["status"] == "blocked"
+                assert path.read_bytes() == exact
+            assert request_worker.dispatch_pending_requests(paths, AdmissionLimits(8, 8), submit, admission_gate=gate) == 0
+        if variant not in {"single", "multi", "slow"}:
+            # dispatcher按原契约新增等待投影；所有原字段必须逐项相等，不只挑几项证明。
+            unchanged, waiting = json.loads(guarded), read_json_file(path)
+            assert all(waiting[key] == value for key, value in unchanged.items())
+            assert set(waiting) - set(unchanged) <= {"admission_wait_at", "admission_wait_reason", "admission_wait_count",
+                                                   "admission_wait_error_code", "admission_wait_since"}
+            assert waiting["admission_wait_reason"] == "unroutable_closeout_pending"
+            assert not (paths.terminal / path.name).exists()
+            assert fd_count() - before_fd == 0
+            submit.assert_not_called()
+            return
+        assert not path.exists(), "\n".join(projection_errors)
+        canonical = read_json_file(paths.terminal / path.name)
+        assert canonical["terminal_response"]["error_code"] == "GATEWAY_REQUEST_ROUTE_RETIRED"
+        for key in ("conversation_claim", "lease_epoch", "active_turn_recovery", "queue_transport_source", "route", "metadata", "request_fingerprint"):
+            assert canonical[key] == pending[key]
+        binding = pending["conversation_claim"]
+        assert store.claims.load(binding["thread_id"])["status"] == "failed"
+        assert binding["task_id"] not in store.threads.require(binding["thread_id"]).active_task_ids
+        assert not reservation_file(paths, path.stem).exists()
+        # 原结算器将明确未消费的关联输入排回原队列，不得伪记consumed或丢掉输入。
+        receipt = inputs.read_gateway_input_receipt(paths, "input-original")
+        assert receipt.state == "queued" and receipt.target_turn_id == path.stem
+        assert receipt.guidance_dedupe_key == "input-key-original" and not receipt.reconcile_error
+        queued = read_json_file(paths.inbox / "input-original.json")
+        inputs.require_gateway_prepared_identity(paths, queued)
+        assert queued["metadata"]["expected_turn_id"] == path.stem
+        assert store.guidance.receipt("input-key-original").status == "rejected"
+        saved = (paths.terminal / path.name).read_bytes()
+        repair_context = recovery._RecoveryContext(time.time(), 3, 10, False, control, None, admission_gate=gate)
+        assert recovery.repair_gateway_terminal_projections(paths, agent=control,
+            recovery_context=repair_context, full_scan=True)[1] == []
+        assert (paths.terminal / path.name).read_bytes() == saved
+        assert fd_count() - before_fd == 0
+        submit.assert_not_called()
+
+
+@pytest.mark.parametrize("mismatch", ["unrelated_terminal", "owner_id", "host_request_owner.v1", "route", "request_fingerprint"])
+def test_retirement_resumer_protects_unrelated_or_mismatched_terminal(context, mismatch):
+    """真实canonical producer建立终态；错误身份不能借退休重试覆写或删除pending。"""
+    gate, path, ownership = ordinary_case(context)
+    payload = read_json_file(path)
+    stale = freeze_request_route(payload, ownership[0], RouteStamp(gate.count, "retired-negative", 1.0,
+        payload["metadata"]["gateway_admin_binding_version"]))
+    write_json_file_atomic(path, stale)
+    response = closeout.unroutable_closeout_response(stale, "stale_generation_route")
+    if mismatch == "unrelated_terminal":
+        response = {"id": path.stem, "status": "done", "ok": True, "response": "original result", "ended_at": 1.0}
+    canonical = recovery._terminal_gateway_request_payload(path.stem, stale, response)
+    target = gate.paths.terminal / path.name
+    recovery._commit_gateway_terminal_request(gate.paths, target, gate.paths.failed, path.stem, canonical)
+    if mismatch != "unrelated_terminal":
+        altered = copy.deepcopy(stale)
+        if mismatch == "owner_id":
+            altered[mismatch] = "providers/feishu/users/not-the-owner"
+        elif mismatch == "host_request_owner.v1":
+            altered[mismatch]["owner_id"] = "not-the-owner"
+        elif mismatch == "route":
+            altered[mismatch]["c_run_id"] = "different-retired-generation"
+        else:
+            altered[mismatch] = "0" * 64
+        write_json_file_atomic(path, altered)
+    before, pending = target.read_bytes(), path.read_bytes()
+    submit = Mock(side_effect=AssertionError("terminal requests cannot execute"))
+    for _ in range(2):
+        assert request_worker.dispatch_pending_requests(gate.paths, AdmissionLimits(8, 8), submit, admission_gate=gate) == 0
+        assert gate.try_close_unroutable_pending(path)["status"] == "blocked"
+    assert target.read_bytes() == before and path.read_bytes() == pending
+    assert not (gate.paths.responses / path.name).exists()
+    assert not reservation_file(gate.paths, path.stem).exists()
+    submit.assert_not_called()
 
 
 # LLM: 创建独立legacy输入而非剥除已有请求标签；沿既有cold helper的冻结owner和实际会话构造原claim。
