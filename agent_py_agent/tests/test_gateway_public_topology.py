@@ -169,16 +169,28 @@ def test_status_separates_yaml_target_from_observed_state(tmp_path, monkeypatch,
     }
 
 
+# LLM: 故意保留真实活W身份，使自动退役不能证明死亡；原Agent/凭据/恢复副作用拒绝断言不放宽。
+# 函数用途: 验证Count0仍在所有业务副作用前拒绝不可退役的MP事实。
 def test_count0_mp_source_refuses_before_agent_credentials_or_recovery(tmp_path, monkeypatch, capsys):
     import json
+    import os
 
     from agent_py_agent.cli import gateway_coordinated_run
+    from agent_py_agent.cli.gateway_worker_runtime import worker_process_identity
 
     path = _config(tmp_path, 0)
     frozen = common.frozen_gateway_arguments(Namespace(config=path))
     paths = gateway_coordinated_run._cold_gateway_paths(frozen)
     paths.root.mkdir(parents=True)
     paths.state.write_text(json.dumps({"pid": 123, "status": "stopped", "worker_count": 2, "c_run_id": "old-c"}))
+    (paths.root / "workers").mkdir()
+    (paths.root / "workers/w0.json").write_text(json.dumps({
+        "schema_version": "multiprocess_worker_heartbeat.v1", "worker": 0, "of": 2,
+        "pid": os.getpid(), "process_identity": worker_process_identity(os.getpid()),
+        "c_run_id": "old-c", "instance_id": "live-worker", "ready": False,
+        "loop_health": "stopped", "inflight": 0, "updated_at": 1.0,
+        "readiness": {"ready": False, "reason": "stopped"},
+    }))
     monkeypatch.setattr(gateway_process, "mark_hosting_gateway_process", lambda: None)
     monkeypatch.setattr(gateway_process, "wait_for_predecessor_exit", lambda _: True)
     effects = Mock(side_effect=AssertionError("来源拒绝必须在业务副作用前"))
@@ -186,5 +198,5 @@ def test_count0_mp_source_refuses_before_agent_credentials_or_recovery(tmp_path,
     monkeypatch.setattr(gateway_process, "_preflight_required_local_credential", effects)
     monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", effects)
     assert gateway_process.cmd_gateway_run(Namespace(config=path)) == 2
-    assert "GATEWAY_REVERSE_MIGRATION_UNSUPPORTED" in capsys.readouterr().err
+    assert "GATEWAY_STANDALONE_SOURCE_UNPROVEN" in capsys.readouterr().err
     effects.assert_not_called()
