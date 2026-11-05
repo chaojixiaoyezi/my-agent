@@ -32,6 +32,7 @@ MESSAGE = (
     "This response_format type is unavailable now"
 )
 SCHEMA = {"type": "object", "additionalProperties": True}
+ISOLATION = {"requested": "stateless_skill", "mode": "stateless_skill", "note": ""}
 
 
 def http_error(error, status=400):
@@ -173,7 +174,9 @@ def test_native_and_explicit_json_object_packaging_unchanged(monkeypatch, mode):
     assert agent.backend.structured_output == mode
     assert context.analysis_attempts == [{
         "attempt": 1, "response_schema": "native", "outcome": "succeeded",
+        "analysis_isolation": ISOLATION,
     }]
+    assert context.analysis_isolation == ISOLATION
 
 
 @pytest.mark.parametrize("mode", ["native", "json_object"])
@@ -195,10 +198,14 @@ def test_schema_rejection_downgrades_once_and_keeps_identity(monkeypatch, mode):
         "error_type": "ProviderRequestRejectedError",
         "error_code": "PROVIDER_REQUEST_REJECTED",
         "rejected_feature": "response_format",
+        "analysis_isolation": ISOLATION,
     }
     assert second == {
         "attempt": 2, "response_schema": None, "outcome": "succeeded",
+        "analysis_isolation": ISOLATION,
     }
+    assert context.analysis_isolation == ISOLATION
+    assert first["analysis_isolation"] is not second["analysis_isolation"]
 
 
 def test_non_schema_400_is_not_replayed(monkeypatch):

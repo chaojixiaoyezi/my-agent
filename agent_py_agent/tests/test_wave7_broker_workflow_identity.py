@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor, DataSourceSpec
+from agent_py_agent.agent.assets.revision_history import blob_get, latest_version
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import (
     WorkflowDefinition,
@@ -32,6 +33,15 @@ def api(module, name):
 def save_script(home, name='collect', sources=(), code='print("{\\"value\\": 1}")', **options):
     return ScriptStore(home, workspace_root=options.pop('workspace_root', None)).save_script(
         AssetDescriptor(name, 'script', '采集', summary='汇总', data_sources=tuple(sources)), code, **options)
+
+
+# LLM: 只删除测试Owner已存在的准确历史blob，并核对删除前后；不影响当前发布的脚本。
+# 函数用途: 构造历史确实不可用的漂移夹具，不让正常历史执行冒充硬门测试。
+def remove_history_code(home, sha):
+    """只移除临时Owner的准确历史blob，令漂移用例进入历史确实不可用的硬门。"""
+    assert blob_get(home, sha) is not None
+    (home / 'data' / 'asset_evolution' / 'blobs' / sha[:2] / sha).unlink()
+    assert blob_get(home, sha) is None
 
 
 # LLM: 源名称写在options而非扩展AssetDescriptor；文件只位于测试Owner。
@@ -152,7 +162,7 @@ def test_workflow_final_contract_hard_stop(tmp_path, output):
     assert engine.store.load_run(result.workflow_run_id).breakpoint == result.breakpoint
 
 
-# LLM: 从原pending步恢复必须核对尚未执行的依赖；明确允许漂移才能采用新版本。
+# LLM: 历史不可用时从原pending步恢复必须拦截漂移；明确允许后才可采用当前版本。
 # 函数用途: 验证暂停、脚本版本冻结、默认拦截和显式放行后的前缀保留。
 def test_workflow_resume_drift_gate_and_breakpoint(tmp_path):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
@@ -177,6 +187,7 @@ def test_workflow_resume_drift_gate_and_breakpoint(tmp_path):
     frozen = engine.store.load_workflow_snapshot(paused.workflow_run_id)['_frozen_scripts']['collect']
     assert frozen['script_id'] == 'collect' and frozen['code_sha256']
     save_script(tmp_path, code='print("{\\"value\\": 2}")')
+    remove_history_code(tmp_path, frozen['code_sha256'])
     blocked = engine.resume_workflow_run(paused.workflow_run_id)
     assert blocked.breakpoint['error_code'] == 'SCRIPT_REVISION_DRIFT'
     assert blocked.steps[2].error_code == 'SCRIPT_REVISION_DRIFT' and blocked.steps[2].needs_repair
@@ -208,12 +219,14 @@ def test_workflow_script_hard_stop_cannot_skip_or_auto_recover(tmp_path, policy,
     sources = (DataSourceSpec('missing', 'logs'),) if state == 'missing' else (
         (file_source(tmp_path, content=''),) if state == 'empty' else ())
     save_script(tmp_path, name='broken', sources=sources)
+    frozen = latest_version(tmp_path, 'script', 'broken')
     calls = []
-    # LLM: 前序分析后修改已冻结的后续代码，漂移必须在runner前被拦截。
+    # LLM: 前序分析后修改后续代码且准确历史不可用，漂移必须在runner前被拦截。
     # 函数用途: 为版本门构造确定性交错。
     def analyze(*_):
         if state == 'drift':
             save_script(tmp_path, name='broken', code='print("{}")')
+            remove_history_code(tmp_path, frozen['code_sha256'])
         return {'prefix': True}
     engine = WorkflowEngine(tmp_path, analysis_handler=analyze,
         escalation_handler=lambda *args: calls.append(args) or {'recovered': True, 'output_data': {'value': 1}})
@@ -310,17 +323,46 @@ def test_r2_runtime_errors_obey_explicit_policy(tmp_path, policy):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
     from agent_py_agent.agent.workflows.script_runner import ScriptRunner
     save_script(tmp_path, code='raise RuntimeError("broken")')
+    save_script(tmp_path, name='healthy')
     calls = []
     engine = WorkflowEngine(tmp_path, analysis_handler=lambda *_: {'done': True},
         escalation_handler=lambda *_: calls.append(True) or {'recovered': True, 'output_data': {'value': 1}})
     engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
     definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('prefix', '独立数据', 'deterministic_script', script_id='healthy'),
         WorkflowStepSpec('collect', '采集', 'deterministic_script', script_id='collect', on_error=policy),
-        WorkflowStepSpec('tail', '后续', 'llm_skill_analysis')))
+        WorkflowStepSpec('tail', '后续', 'llm_skill_analysis',
+            inputs_map={'value': {'step_id': 'prefix', 'key': 'value'}})))
     result = engine.run_workflow(definition.to_dict())
     assert result.status == 'succeeded' and result.final_output == {'done': True}
-    assert result.steps[0].status == ('skipped' if policy == 'skip' else 'succeeded')
+    assert result.steps[0].status == 'succeeded' and result.steps[0].output_snapshot == {'value': 1}
+    assert result.steps[1].status == ('skipped' if policy == 'skip' else 'succeeded')
     assert calls == ([] if policy == 'skip' else [True])
+
+
+# LLM: 默认分析依赖全部前序步骤；运行失败即便被skip也不得触发模型，暂停事实必须落盘。
+# 函数用途: 区分跳过故障与批准缺失数据分析，保留查询健康门的负向对照。
+def test_skipped_query_failure_still_blocks_dependent_analysis(tmp_path):
+    """skip只处理故障步骤，不能把未取得的数据交给模型分析。"""
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+
+    save_script(tmp_path, code='raise RuntimeError("broken")')
+    calls = []
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *_: calls.append(True) or {'done': True})
+    engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('collect', '采集', 'deterministic_script', script_id='collect', on_error='skip'),
+        WorkflowStepSpec('tail', '依赖失败数据', 'llm_skill_analysis')))
+    result = engine.run_workflow(definition.to_dict())
+    assert result.status == 'paused_for_resume' and calls == []
+    assert result.steps[0].status == 'skipped' and result.steps[0].error_code == 'SCRIPT_EXIT_NONZERO'
+    assert result.steps[0].escalation_result['query_health']['analysis_blocked'] is True
+    assert result.steps[1].error_code == 'ANALYSIS_BLOCKED_NO_DATA'
+    assert result.steps[1].llm_involved is False
+    assert result.breakpoint['step_id'] == 'tail'
+    persisted = engine.store.load_run(result.workflow_run_id)
+    assert persisted.steps[1].to_dict() == result.steps[1].to_dict()
 
 
 # LLM: 最后一步保持真实输出；显式类型合同可由成功前序步骤满足，不合并跳过或失败步骤。
@@ -349,7 +391,7 @@ def test_r2_legacy_untyped_workflow_contract(tmp_path, output, expected):
     assert result.status == expected
 
 
-# LLM: 显式续跑允许修好当前故障脚本，但不批准后续脚本变化；成功前缀不得重跑。
+# LLM: 原历史不可用时显式续跑可修好当前脚本，但不批准无可用历史的后续变化；成功前缀不得重跑。
 # 函数用途: 验证修复重钉与后续漂移硬门不会互相混淆。
 @pytest.mark.parametrize('change_tail', [False, True])
 def test_r2_repaired_current_step_repins_only_itself(tmp_path, change_tail):
@@ -365,9 +407,12 @@ def test_r2_repaired_current_step_repins_only_itself(tmp_path, change_tail):
         WorkflowStepSpec('tail', '尾步', 'deterministic_script', script_id='tail')))
     paused = engine.run_workflow(definition.to_dict())
     assert paused.status == 'paused_for_resume' and paused.steps[1].needs_repair
+    frozen = engine.store.load_workflow_snapshot(paused.workflow_run_id)['_frozen_scripts']
+    remove_history_code(tmp_path, frozen['repair']['code_sha256'])
     (tmp_path / 'scripts/broken/main.py').write_text('print("{}")')
     if change_tail:
         save_script(tmp_path, name='tail', code='print("{\\"value\\": 2}")')
+        remove_history_code(tmp_path, frozen['tail']['code_sha256'])
     result = WorkflowEngine(tmp_path)
     result.runner = ScriptRunner(tmp_path, use_sandbox=False)
     resumed = result.resume_workflow_run(paused.workflow_run_id)
@@ -689,13 +734,14 @@ def test_notification_callback_is_scoped_and_fail_open(tmp_path):
     assert result['recorded'] and result['delivery_status'] == 'unavailable'
 
 
-# LLM: 中途真实修改后续脚本必须在runner前拦截，不能只在恢复入口核对冻结版本。
+# LLM: 可用历史仍执行原冻结字节；历史不可用或资产删除必须在runner前拦截。
 # 函数用途: 证明普通连续执行也不会运行未经本次快照批准的新代码。
-@pytest.mark.parametrize('mutation', ['edit', 'delete', 'delete_code'])
+@pytest.mark.parametrize('mutation', ['edit', 'edit_history_available', 'delete', 'delete_code'])
 def test_workflow_live_edit_stops_before_next_script(tmp_path, mutation):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
     from agent_py_agent.agent.workflows.script_runner import ScriptRunner
     save_script(tmp_path)
+    frozen = latest_version(tmp_path, 'script', 'collect')
     calls = []
     # LLM: 保留真实runner执行，只记录是否已经进入执行口。
     # 类用途: 观察版本硬门是否先于子进程准备。
@@ -708,8 +754,10 @@ def test_workflow_live_edit_stops_before_next_script(tmp_path, mutation):
     # LLM: 在前序分析期间修改后续真实资产，制造启动冻结之后的漂移。
     # 函数用途: 模拟并发编辑者提交新版本。
     def edit(*_):
-        if mutation == 'edit':
+        if mutation in ('edit', 'edit_history_available'):
             save_script(tmp_path, code='print("{\\"value\\": 2}")')
+            if mutation == 'edit':
+                remove_history_code(tmp_path, frozen['code_sha256'])
         elif mutation == 'delete':
             ScriptStore(tmp_path).delete_script('collect')
         else:
@@ -721,6 +769,12 @@ def test_workflow_live_edit_stops_before_next_script(tmp_path, mutation):
         WorkflowStepSpec('before', '前序', 'llm_skill_analysis'),
         WorkflowStepSpec('collect', '采集', 'deterministic_script', script_id='collect', on_error='skip')))
     result = engine.run_workflow(definition.to_dict())
+    if mutation == 'edit_history_available':
+        assert result.status == 'succeeded' and result.final_output == {'value': 1}
+        assert calls == [True] and result.completed_steps == 2
+        assert engine.store.load_run(result.workflow_run_id).final_output == {'value': 1}
+        assert '\\"value\\": 2' in ScriptStore(tmp_path).get_script('collect')['code']
+        return
     assert result.status == 'failed' and result.breakpoint['error_code'] == 'SCRIPT_REVISION_DRIFT'
     assert calls == [] and result.completed_steps == 1
 
