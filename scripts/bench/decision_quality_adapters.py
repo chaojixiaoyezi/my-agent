@@ -267,14 +267,17 @@ def action_candidate(case: dict, shared: dict) -> tuple[dict, dict, dict]:
 # 函数用途: 生成能力推荐（skill_tool）一条用例的真实请求材料与期望答案。
 def skill_tool(case: dict, shared: dict) -> tuple[dict, dict, dict]:
     from agent_py_agent.agent.capability import decision_recommendation as module
+    from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotEntry
 
     runtimes = []
     for name, description, provider in case["tools"]:
         spec = SimpleNamespace(name=name, description=description, category="plugins", schema_hash=f"schema-{name}",
                                hints=SimpleNamespace(provider_id=provider))
         runtimes.append(SimpleNamespace(model_spec=spec, exposure=SimpleNamespace(model_visible=True)))
-    entries = [SimpleNamespace(stable_id=f"skill:{name}", name=name, description=description, when_to_use=when,
-                               content_sha256=f"sha-{name}", tools_required=())
+    # 使用正式元数据类型保留 tags/source/绑定默认值；只构造候选，不读取正文或目录。
+    entries = [SkillSnapshotEntry(stable_id=f"owner:{name}", name=name, description=description,
+                                  path="", source="owner", category="general",
+                                  content_sha256=hashlib.sha256(description.encode()).hexdigest(), when_to_use=when)
                for name, description, when in case.get("skills", [])]
     skills = SimpleNamespace(enabled_entries=lambda: list(entries), packages=[], fingerprint="skills-bench")
     snapshot = SimpleNamespace(runtimes=runtimes, snapshot_hash="snapshot-bench")

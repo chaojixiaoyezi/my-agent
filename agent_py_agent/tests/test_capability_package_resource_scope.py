@@ -359,8 +359,10 @@ def test_search_rejects_resource_path_before_snapshot_read_or_pin(
 def test_no_package_keeps_ordinary_skill_get_bytes_and_public_search_contract(tmp_path, skill_catalog_factory):
     _, snapshot, _, tool = discovery_fixture(tmp_path, skill_catalog_factory, [])
     entry = snapshot.entries[0]
+    # W2 统一 get 合同包含直接绑定列表；无固定资产时也须严格返回空列表。
     expected = {"skill_id": entry.stable_id, "name": entry.name, "source": entry.source,
-                "path": entry.path, "content_sha256": entry.content_sha256, "body": snapshot.read_body(entry.stable_id)}
+                "path": entry.path, "content_sha256": entry.content_sha256,
+                "body": snapshot.read_body(entry.stable_id), "bound_methods": []}
     result = tool.execute({"skill_id": entry.stable_id})
     assert result.output == json.dumps(expected, ensure_ascii=False, indent=2)
     search = tool.execute({"query": "普通用户方法"})

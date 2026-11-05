@@ -128,8 +128,11 @@ def test_skill_snapshot_keeps_original_typed_error(tmp_path, code):
         raise error
 
     snapshot = SimpleNamespace(enabled_entries=lambda: (entry,), read_body=fail)
+    # 元数据不预读正文；显式正文读取仍须原样传播同一个类型化异常。
+    metadata = get_owner_skill_descriptor(tmp_path, "owner:w6", skill_snapshot=snapshot)
+    assert metadata["metadata"]["content_hash"] == entry.content_sha256 and "body_markdown" not in metadata
     with pytest.raises(SkillSnapshotError) as caught:
-        get_owner_skill_descriptor(tmp_path, "owner:w6", skill_snapshot=snapshot)
+        get_owner_skill_descriptor(tmp_path, "owner:w6", skill_snapshot=snapshot, include_body=True)
     assert caught.value is error and caught.value.error_code == code
 
 

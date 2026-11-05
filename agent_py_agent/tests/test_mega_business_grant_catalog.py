@@ -93,6 +93,37 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
             assert not set(added) & set(definitions[name].get("required", []))
             for key in added:
                 del definitions[name]["properties"][key]
+    # W11 允许无归属后台 Agent，并追加只读工作状态与配额；先锁住新合同，再比较旧摘要。
+    quota_fields = ("limit", "used", "available", "available_agents", "unassigned")
+    quota_schema = {
+        "type": "object",
+        "properties": {**{key: {"type": ["integer", "null"], "minimum": 0} for key in quota_fields},
+                       "over_limit": {"type": ["boolean", "null"]},
+                       "unlimited": {"type": ["boolean", "null"]}, "coverage": {"$ref": "#/$defs/Coverage"}},
+        "required": [*quota_fields, "over_limit", "unlimited", "coverage"], "additionalProperties": False,
+    }
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        agent_view = definitions["AgentView"]
+        assert agent_view["properties"]["space_id"] == {"$ref": "#/$defs/NullableId"}
+        agent_view["properties"]["space_id"] = {"$ref": "#/$defs/Id"}
+        assert "work_state" not in agent_view["required"]
+        assert agent_view["properties"].pop("work_state") == {
+            "type": "string", "enum": ["idle", "running", "waiting", "failed", "unknown"]}
+        assert definitions.pop("BackgroundAgentQuotaView") == quota_schema
+        result = definitions["Result_background_agents_list"]
+        assert "quota" not in result["required"]
+        assert result["properties"].pop("quota") == {"$ref": "#/$defs/BackgroundAgentQuotaView"}
+    nullable_space_actions = {"background_agents.create", "background_agents.list", "tasks.assign", "tasks.submit"}
+    for index, row in enumerate(normalized_api["actions"]):
+        if row["action"] in nullable_space_actions:
+            request_params = normalized_schemas["request_schema"]["oneOf"][index]["properties"]["params"]
+            for params in (row["params_schema"], row["plugin_payload_schema"], request_params):
+                assert params["properties"]["space_id"] == {"$ref": "#/$defs/NullableId"}
+                params["properties"]["space_id"] = deepcopy(normalized_defs["Id"])
+        if row["action"] == "background_agents.list":
+            result = row["result_schema"]
+            assert "quota" not in result["required"]
+            assert result["properties"].pop("quota") == {"$ref": "#/$defs/BackgroundAgentQuotaView"}
     assert digest(normalized_api) == "d7f7859fded58ec5ab3e82a5dc8b1d363c7b45bb9a772deea17dcf54113df737"
     assert digest(normalized_schemas) == "d7883032c859fa4d2c7d6365d50e77b2d3f2cb6fa77904f355925bbf3dca2d4b"
     assert digest(normalized_defs) == "c2441120aa06032bd0aba9a5b83075f72d60d34f7cc69cd376b80779a5b9554a"
