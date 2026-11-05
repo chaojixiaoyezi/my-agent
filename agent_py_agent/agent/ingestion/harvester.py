@@ -45,6 +45,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
 )
+from . import spool_maintenance
 from .puller import SOURCE_FETCH_TIMEOUT_SECONDS, DrainBudget, DrainResult
 from .watch_payloads import (
     build_audit_record,
@@ -733,10 +734,16 @@ def _locked_harvest_step(
 
 # LLM: 入口时钟仅用于背压时是否冻结；实际drain/收尾由原事务source_boundary决定，单拍未追平不能stop。
 # 函数用途: 完成一拍收割并提交状态，跨截止也不传递可能过期的收尾布尔值。
+# LLM: Resume half-finished switches before fetching; only the guarantee disk gate runs maintenance.
+# 函数用途: 背压时继续腾盘，已切换的世代先落盘再恢复采集。
 def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
     """持 state.lock 跑一拍:先判停,再背压闸,再收割。"""
     with state.lock:
         _recover_pending_harvest(state)
+        maintenance_ran = False
+        if state.audit_guarantee and _spool_rotation_inputs(state).progress.exists():
+            _run_guarantee_rotation_slice(state)
+            maintenance_ran = True
         if _should_stop(state):
             return "stop"
         if _backpressured(state):
@@ -745,10 +752,17 @@ def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
             # 保证档只会因磁盘水位走到这里,单独记账(回执要能区分"判读慢"与"盘满")。
             key = "disk_backpressure_skips" if state.audit_guarantee else "backpressure_skips"
             state.totals[key] = int(state.totals.get(key, 0) or 0) + 1
+            if state.audit_guarantee and not maintenance_ran:
+                path = spool_path(state)
+                if path.exists() and path.stat().st_size >= _SPOOL_ROTATE_BYTES:
+                    _run_guarantee_rotation_slice(state)
             if _window_deadline_reached(state):
                 transaction = _begin_harvest_transaction(state)
                 _record_harvest_schedule(state, DrainResult(cursor=state.cursor))
                 _commit_harvest_transaction(state, transaction)
+            return "ok"
+        if maintenance_ran:
+            # A recovered switch gets its own tick; fetch resumes only after the new generation is durable.
             return "ok"
         healthy = _harvest_cycle(state, fetch_json)
         if not healthy:
@@ -1522,10 +1536,75 @@ def _spool_append(state: WatchState, drain: Any, digest: Any) -> None:
     )
 
 
+# LLM: Inputs snapshot cursor facts under state.lock without mutating the reader/ACK protocol.
+# 函数用途: 从现有游标和磁盘水位组装轮转参数。
+def _spool_rotation_inputs(state: WatchState) -> spool_maintenance.SpoolRotationInputs:
+    cursor = read_spool_cursor(state)
+    inflight = isinstance(cursor.get("inflight"), dict)
+    return spool_maintenance.SpoolRotationInputs(
+        spool=spool_path(state),
+        archive=state_dir(state.owner_home) / f"{state.watch_id}.archive.ndjson",
+        progress=state_dir(state.owner_home) / f"{state.watch_id}.spool-rotation.json",
+        generation=state.spool_generation,
+        acked_seq=int(cursor["inflight"].get("from_seq") or 0) if inflight else int(cursor.get("read_seq") or 0),
+        inflight=inflight,
+        min_free_bytes=int(state.tuning.guarantee_min_disk_free_mb or 0) * 1024 * 1024,
+    )
+
+
+# LLM: Compare the owner field written by _lease_payload, not a guessed lease key.
+# 函数用途: 只允许当前租约持有人切走热盘。
+def _lease_current(state: WatchState) -> bool:
+    lease = _read_lease(state)
+    return isinstance(lease, dict) and lease.get("owner") == _lease_owner() and _lease_is_fresh(lease)
+
+
+# LLM: Nonblocking cursor fencing serializes claims with replace+persist without reversing a waiting lock order.
+# 函数用途: 锁住游标跑一片归档，换代落盘后才放行新认领并清恢复点。
+def _run_guarantee_rotation_slice(state: WatchState) -> dict:
+    try:
+        with locked_json_path(_read_sidecar_path(state), blocking=False):
+            inputs = _spool_rotation_inputs(state)
+            report = spool_maintenance.run_spool_rotation_slice(
+                inputs, lease_current=lambda: _lease_current(state),
+                max_bytes=spool_maintenance.SPOOL_MAINTENANCE_SLICE_BYTES,
+                max_ms=spool_maintenance.SPOOL_MAINTENANCE_SLICE_MS,
+            )
+            if report["status"] == "switched":
+                previous = state.spool_generation
+                state.spool_generation = max(previous, int(report["new_generation"]))
+                try:
+                    persist_state(state)
+                except BaseException:
+                    state.spool_generation = previous
+                    raise
+                spool_maintenance.finish_spool_rotation(inputs.progress)
+    except BlockingIOError:
+        report = {"status": "deferred", "reason": "cursor_busy", "scanned_bytes": 0,
+                  "copied_bytes": 0, "freed_bytes": 0, "backlog_bytes": 0, "new_generation": None}
+    for key, value in (("slices", 1), ("copied_bytes", report["copied_bytes"]),
+                       ("freed_bytes", report["freed_bytes"])):
+        name = f"spool_maintenance_{key}"
+        state.totals[name] = int(state.totals.get(name, 0) or 0) + value
+    if report["reason"]:
+        name = f"spool_maintenance_{report['reason']}"
+        state.totals[name] = int(state.totals.get(name, 0) or 0) + 1
+    return report
+
+
+# LLM: Only guarantee watches take the new path; keep the existing non-guarantee conditions intact.
+# 函数用途: 保证档分片归档，普通 watch 保持旧的积压清空后轮转规则。
 def _maybe_rotate_spool(state: WatchState, path: Path) -> None:
     """积压已清(读游标追平倒数第二条,最后一条照旧留给读者)且无在途批、文件超限 →
     换代重写,读者按 generation 重置偏移。有在途不轮转:轮转会吃掉接管重投的依据
     (在途在消费者确认后清空,轮转窗口照常出现,长守不涨盘)。"""
+    if state.audit_guarantee:
+        try:
+            if _spool_rotation_inputs(state).progress.exists() or path.stat().st_size >= _SPOOL_ROTATE_BYTES:
+                _run_guarantee_rotation_slice(state)
+        except OSError:
+            _LOGGER.warning("spool rotation failed (watch=%s)", state.watch_id, exc_info=True)
+        return
     try:
         if path.stat().st_size < _SPOOL_ROTATE_BYTES:
             return
