@@ -233,8 +233,8 @@ def test_native_tool_loop_compact_forwards_thread_reasoning_context(monkeypatch)
 
 
 # LLM: A structured tool result is rejected without parsing prose or granting execution capability.
-# 函数用途: 验证 auto 结果含工具调用时只重试一次 none/无工具请求。
-def test_structured_tool_call_is_discarded_then_retried_once_without_tools():
+# 函数用途: 验证结构化工具回复被拒，唯一修复只追加末尾指令且保留 W12 冻结工具面。
+def test_structured_tool_call_is_discarded_then_retried_once_with_same_cache_surface():
     backend, agent, thread_id = _threaded_backend("max")
     tool = {
         "name": "read_file",
@@ -272,11 +272,14 @@ def test_structured_tool_call_is_discarded_then_retried_once_without_tools():
     assert len(payloads) == 2
     assert payloads[0]["tool_choice"] == "auto"
     assert payloads[0]["tools"]
-    assert payloads[1]["tool_choice"] == "none"
-    assert "tools" not in payloads[1]
+    assert payloads[1]["tool_choice"] == payloads[0]["tool_choice"] == "auto"
+    assert payloads[1]["tools"] == payloads[0]["tools"]
     assert payloads[1]["reasoning_effort"] == "max"
     assert "thinking" not in payloads[1]
-    assert payloads[1]["messages"][-1]["content"] == "stable task"
+    assert payloads[1]["messages"][:-1] == payloads[0]["messages"][:-1]
+    assert payloads[0]["messages"][-1]["content"] == "stable task"
+    assert payloads[1]["messages"][-1]["content"].startswith("stable task\n\n")
+    assert "上一轮你输出了工具调用而不是摘要" in payloads[1]["messages"][-1]["content"]
 
 
 # LLM: Fake transport captures the real OpenAI-compatible payload; thread and system are frozen in context.

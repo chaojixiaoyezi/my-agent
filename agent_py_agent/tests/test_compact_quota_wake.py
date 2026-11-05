@@ -100,13 +100,19 @@ class _WeeklyQuotaBackend:
     # LLM: 每个测试独立计数。
     # 函数用途: 创建调用计数为 0 的额度用完后端。
     def __init__(self) -> None:
-        self.calls = 0
+        self.requests = []
+
+    # LLM: W12 对后端做浅快照来封顶摘要输出，观察容器须与快照共享；只读计数不改变额度错误。
+    # 函数用途: 读回原后端及私有快照实际收到的总请求数。
+    @property
+    def calls(self) -> int:
+        return len(self.requests)
 
     # LLM: 与生产后端同名同参；业务调用和压缩摘要都会走到这里。
     # 函数用途: 记录一次调用后抛出每周额度用完。
     def generate(self, prompt, on_chunk=None, on_thinking_delta=None, **_kwargs):
         del prompt, on_chunk, on_thinking_delta
-        self.calls += 1
+        self.requests.append(True)
         raise _runtime_http_error(urllib.error.HTTPError(
             "https://api.example.com", 429, "Too Many Requests", {"Content-Type": "application/json"},
             BytesIO(json.dumps(WEEKLY_LIMIT_BODY).encode()),

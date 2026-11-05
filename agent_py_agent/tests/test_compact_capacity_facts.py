@@ -123,20 +123,21 @@ def test_normalizer_copies_capacity_only_when_given_and_clamps_it() -> None:
     }
 
 
-@pytest.mark.parametrize("measured", [(7_000, 6_500), (6_500, 7_000)])
-def test_transcript_failure_reports_the_smallest_rejected_candidate(tmp_path, monkeypatch, measured) -> None:
+# LLM: W12 在摘要前选定唯一分区；失败容量只报告实际生成的候选，不把选区计量记成候选。
+# 函数用途: 两种超限大小均须留下准确容量和唯一失败事件，不能再摘要换区。
+@pytest.mark.parametrize("measured", [7_000, 6_500])
+def test_transcript_failure_reports_the_selected_rejected_candidate(tmp_path, monkeypatch, measured) -> None:
     agent, store, thread = _transcript_case(tmp_path, monkeypatch, turns=3)
     # 英文摘要的估算 token 与字符数不同，能区分“摘要 token”与“摘要字符”。
-    summaries = iter(("first candidate summary " * 40, "second summary"))
+    summaries = iter(("selected candidate summary " * 40,))
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: next(summaries))
-    remaining = list(measured)
     seen = []
 
     def projected(*args, **_kwargs):
         summary, rows = args[1], args[2]
         if not summary:
             return 8_500
-        tokens = remaining.pop(0)
+        tokens = measured
         seen.append((tokens, summary, len(rows)))
         return tokens
 
@@ -147,14 +148,14 @@ def test_transcript_failure_reports_the_smallest_rejected_candidate(tmp_path, mo
             current_prompt="继续完整任务", progress_callback=events.append,
         ))
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
-    assert len(seen) == 2 and seen[0][2] > seen[1][2] == 0, seen
-    tokens, summary, retained = min(seen)
+    assert len(seen) == 1 and seen[0][2] == 0, seen
+    tokens, summary, retained = seen[0]
     assert estimate_tokens(summary) != len(summary)
     expected = CompactCapacityFacts(
         candidate_tokens=tokens, input_ceiling_tokens=_CEILING, summary_tokens=estimate_tokens(summary),
         # 没有宿主投影器时固定开销走同一本地估算路径；本例假实现把空摘要那一版定为 8_500。
         fixed_tokens=8_500, retained_items=retained, retained_ir_items=0, retained_ir_tokens=0,
-        candidates_tried=2,
+        candidates_tried=1,
     )
     assert error.value.capacity == expected
     failed = _failed_event(events)
@@ -183,12 +184,13 @@ def test_transcript_failure_without_candidate_keeps_capacity_empty(tmp_path, mon
     assert not set(COMPACT_CAPACITY_PROGRESS_FIELDS) & set(failed)
 
 
+# LLM: 成功用例给唯一真实候选可发送的完整大小，不再依赖旧多候选循环消费第二个数。
+# 函数用途: 验证提交成功时不会发布失败容量字段。
 def test_accepted_candidate_emits_no_capacity_fields(tmp_path, monkeypatch) -> None:
     agent, store, thread = _transcript_case(tmp_path, monkeypatch, turns=3)
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "新摘要")
-    measured = iter((7_000, 5_000))
     monkeypatch.setattr(compact_module, "_projected_context_tokens",
-                        lambda _agent, summary, *args, **kwargs: next(measured) if summary else 8_500)
+                        lambda _agent, summary, *args, **kwargs: 5_000 if summary else 8_500)
     events = []
     result = prepare_conversation_context(agent, store, thread, options=ConversationCompactOptions(
         current_prompt="继续完整任务", progress_callback=events.append,
@@ -258,9 +260,11 @@ def test_transcript_failure_measures_fixed_overhead_with_the_host_projector(tmp_
     # 本例没有工具来源，保留 IR 计量保持 0，不与固定开销混算。
     assert capacity.retained_ir_items == 0 and capacity.retained_ir_tokens == 0
     candidates = [view for view in views if view.is_candidate and view.summary]
-    overhead = [view for view in views if view.is_candidate and not view.summary]
-    # 两个分区的候选各投一次，固定开销只多投一次：成功路径不会走到这里。
-    assert len(candidates) == 2 and len(overhead) == 1, views
+    overhead = [view for view in views if view.measure_only and view.retained_ir_history == ()]
+    planning = [view for view in views if view.measure_only and view.retained_ir_history is None]
+    # W12 的两次选区计量不是摘要候选；实际候选只有一个，失败诊断仍只量一次。
+    assert len(candidates) == 1 and len(planning) == 2 and len(overhead) == 1, views
+    assert all(not view.summary for view in planning) and capacity.candidates_tried == 1
     assert overhead[0].measure_only and not any(view.measure_only for view in candidates)
     assert overhead[0].retained_tool_records == () and overhead[0].retained_ir_history == ()
     assert overhead[0].messages == ()
@@ -276,7 +280,7 @@ def test_fixed_overhead_projection_failure_leaves_the_field_missing(tmp_path, mo
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "候选摘要")
 
     def projector(view):
-        if view.measure_only:
+        if view.measure_only and view.retained_ir_history == ():
             raise RuntimeError("固定开销投影不可用")
         return ConversationCompactProjection(7_200, object())
 

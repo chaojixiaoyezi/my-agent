@@ -33,7 +33,11 @@ from agent_py_agent.tests.test_capability_package_task_refs import _agent
 from agent_py_agent.tests.test_gateway_model_adoption import actual_request, fake_http
 from agent_py_agent.tests.test_gateway_model_observation import install_backend
 from agent_py_agent.tests.test_subagent_capability_compact import append_prior_turn
-from agent_py_agent.tests.test_subagent_runtime_compact import _OverflowThenCompleteChildBackend
+from agent_py_agent.tests.test_subagent_runtime_compact import (
+    _CHILD_SUMMARY_CALL,
+    _capture_child_model_purpose,  # noqa: F401
+    _OverflowThenCompleteChildBackend,
+)
 
 
 # LLM: 使用真实 owner 安装库及内容 activation；不替换 core、SkillsService 或逐轮快照。
@@ -177,9 +181,11 @@ def test_child_compact_and_grandchild_keep_later_canonical_package_grant(tmp_pat
     calls = _capture_search(monkeypatch)
 
     class Backend(_OverflowThenCompleteChildBackend):
+        # LLM: 摘要和业务由宿主 typed purpose 区分，工具请求只属于第二次业务生成。
+        # 函数用途: 在 Compact 恢复后读取已授予的包，不让摘要文本改变业务计数。
         def generate(self, prompt, on_chunk=None, **kwargs):
             response = super().generate(prompt, on_chunk=on_chunk, **kwargs)
-            if len(self.model_prompts) == 2 and "You maintain a conversation summary" not in prompt:
+            if len(self.model_prompts) == 2 and not _CHILD_SUMMARY_CALL.get():
                 return ModelResponse(text="读取已经授予的资料。", backend=self.name, tool_use_blocks=[{
                     "id": "read-granted-b", "name": "skill_search", "input": {"action": "get", "package_id": "story-b"},
                 }])

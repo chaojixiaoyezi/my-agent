@@ -775,11 +775,13 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     )
 
     assert compacted.compact_generation == 1
-    # auto 和唯一 none 重试都回 tool_use 后，原机械回退保留事实；冻结前缀禁止额外分段请求。
-    assert "- reason: TOOL_CALL" in compacted.compact_summary
+    # W12 同面修复仍回工具后，预算层安全清空不合格正文，EMPTY 机械回退完整保留事实。
+    # 原始 TOOL_CALL 诊断须保留；冻结前缀禁止额外分段，任何工具都不得执行。
+    assert "- reason: EMPTY" in compacted.compact_summary
     assert not (tmp_path / "compact-tool-must-not-run.txt").exists()
     assert backend.calls == 2
-    assert backend.prompts[0] == backend.prompts[1]
+    assert str(backend.prompts[1]).startswith(str(backend.prompts[0]) + "\n\n")
+    assert "上一轮你输出了工具调用而不是摘要" in backend.prompts[1]
     assert {key: value for key, value in backend.kwargs[0].items()
             if key not in {"on_chunk", "tools", "tool_choice", "request_options"}} == {
         key: value for key, value in backend.kwargs[1].items()
@@ -787,8 +789,8 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     }
     original_options = backend.kwargs[0]["request_options"]
     retry_options = backend.kwargs[1]["request_options"]
-    assert retry_options.system_instruction == budget_module._SUMMARY_SYSTEM_INSTRUCTION
-    # none 请求移除工具后重算首包预算；它是传输等待元数据，摘要模型的其余采样选项不能改变。
+    assert retry_options.system_instruction == original_options.system_instruction
+    # 同面修复只重算首包预算；其余模型采样选项和缓存面保持不变。
     assert original_options.first_event_timeout_seconds > 0 and retry_options.first_event_timeout_seconds > 0
     assert replace(
         retry_options, system_instruction=original_options.system_instruction,
@@ -796,11 +798,12 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     ) == original_options
     assert backend.kwargs[0].get("tools")
     assert backend.kwargs[0].get("tool_choice").mode == "auto"
-    assert backend.kwargs[1].get("tool_choice").mode == "none"
-    assert all(not kwargs.get("tools") for kwargs in backend.kwargs[1:])
+    assert backend.kwargs[1].get("tool_choice") == backend.kwargs[0].get("tool_choice")
+    assert backend.kwargs[1].get("tools") == backend.kwargs[0].get("tools")
     diagnostic = [record.compact_response_shape for record in caplog.records
                   if hasattr(record, "compact_response_shape")]
-    assert {item["reason"] for item in diagnostic} == {"TOOL_CALL"} and diagnostic[0]["tool_use_count"] == 1
+    assert [item["reason"] for item in diagnostic] == ["TOOL_CALL", "TOOL_CALL", "EMPTY"]
+    assert [item["tool_use_count"] for item in diagnostic] == [1, 1, 0]
     assert diagnostic[0]["purpose"] == "conversation_compact_summary" and diagnostic[0]["thread_id"]
     assert "unsafe" not in caplog.text and "我将调用工具后再总结" not in caplog.text
 
@@ -2079,7 +2082,7 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
     assert layout is not None
     assert "# System" in layout.stable_prefix
     assert "# Tools" in layout.stable_prefix
-    assert "You maintain a conversation summary" in layout.volatile_suffix
+    assert "Direct factual archival only" in layout.volatile_suffix
     tools = backend.kwargs[0].get("tools")
     assert isinstance(tools, list) and tools
     assert getattr(backend.kwargs[0].get("tool_choice"), "mode", "") == "auto"
@@ -2098,7 +2101,7 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
         stable_system_cache_active=projection.stable_system_cache_active,
         structured_native_layout_active=projection.structured_native_layout_active,
     )
-    assert "You maintain a conversation summary" in json.dumps(
+    assert "Direct factual archival only" in json.dumps(
         wire_messages[-1],
         ensure_ascii=False,
     )

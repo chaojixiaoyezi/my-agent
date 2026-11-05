@@ -23,6 +23,8 @@ from agent_py_agent.agent.conversation.models import MessageLogEntry
 from agent_py_agent.tests.test_compact_landmarks import _Rebuild
 
 
+# LLM: 使用当前测量请求合同，包括 W12 的私有时钟容器；其余材料及容量断言保持不变。
+# 函数用途: 验证原话备份收缩经过完整计量且不丢保护材料。
 def test_original_render_and_full_projection_remeasure_keep_protected_material():
     semantic, trailing = '必须保留的语义摘要。', '\n必须保留的机械尾文。'
     rows = [MessageLogEntry(message_id='source-1', thread_id='t', role='user', content='原始要求。' * 500)]
@@ -50,7 +52,8 @@ def test_original_render_and_full_projection_remeasure_keep_protected_material()
 
     request = SimpleNamespace(interrupt_check=None, request_projector=project,
                               thread=SimpleNamespace(thread_id='t', compact_generation=0),
-                              policy=SimpleNamespace(trigger_tokens=20_000), tool_source=None, calibration=None)
+                              policy=SimpleNamespace(trigger_tokens=20_000), tool_source=None, calibration=None,
+                              timing_state={})
     tail = compact._CandidateTail(protected, evidence)
     initial = compact._measure_candidate(request, tail, rendered.text + trailing)
     minimum = rebuild.minimum_tokens()

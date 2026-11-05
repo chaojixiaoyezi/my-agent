@@ -8,7 +8,9 @@ from agent_py_agent.agent.gateway_parts.request_history import append_gateway_co
 from agent_py_agent.tests.test_gateway_compact_deferred_source import _pressure_thread
 
 
-def test_original_fallback_commits_its_own_projection_not_last_candidate(tmp_path, monkeypatch):
+# LLM: W12 的选区视图只计量、不提交；唯一摘要即使高于软目标也须携带自己的完整投影。
+# 函数用途: 防止把选区的空摘要材料误当成正式候选提交。
+def test_selected_candidate_commits_its_own_projection_not_planning_material(tmp_path, monkeypatch):
     agent, _, _, context = _pressure_thread(tmp_path)
     agent.config.memory_compact_auto_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
@@ -23,7 +25,8 @@ def test_original_fallback_commits_its_own_projection_not_last_candidate(tmp_pat
         views.append(view)
         material = object()
         materials.append(material)
-        tokens = source.policy.trigger_tokens + 1 if len(views) != 2 else source.policy.trigger_tokens - 1
+        tokens = (0 if view.measure_only else source.policy.trigger_tokens - 1
+                  if view.is_candidate else source.policy.trigger_tokens + 1)
         return ConversationCompactProjection(tokens, material)
 
     monkeypatch.setattr(compact, "_summarize", lambda *_a, **_k: "完整来源中的阶段摘要")
@@ -32,14 +35,14 @@ def test_original_fallback_commits_its_own_projection_not_last_candidate(tmp_pat
         agent, agent.conversation_store, thread,
         options=compact.ConversationCompactOptions(current_prompt="继续", source=source, request_projector=project),
     )
-    # 视图序列：初始投影 + 两次候选投影；成功提交不做失败诊断用的固定开销实测。
+    # 视图序列：初始、选区、唯一摘要候选；成功不做失败诊断用的固定开销实测。
     assert len(views) == 3 and views[0].is_candidate is False
     assert views[1].is_candidate and views[2].is_candidate
-    assert not any(view.measure_only for view in views)
+    assert [view.measure_only for view in views] == [False, True, False]
     assert result.compacted and result.thread.compact_generation == 1
-    assert result.messages == views[1].messages
-    assert result.request_projection.material is materials[1]
-    assert result.request_projection.material is not materials[-1]
+    assert result.messages == views[2].messages
+    assert result.request_projection.material is materials[2]
+    assert result.request_projection.material is not materials[1]
     assert result.projected_tokens == source.policy.trigger_tokens - 1
 
 
