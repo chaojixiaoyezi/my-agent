@@ -1,3 +1,27 @@
+## 2026-11-05 R5 / AUD-P1-06：W14 候选读锁出生接入原短写门
+
+来源：`authorize-c5-birth-commit.md` 的最小生产修复授权及 W14 接线交付。冷 owner 在 `readonly_rows` 规划时会创建 `candidates.jsonl.lock`，原协调路径只保护候选构造，遗漏了实际锁 FD 出生。
+
+- 做法：只改 `retention.apply_owner_retention` 的显式协调分支，复用现有 `global_write_commit_scope`、`CandidateService(coordinator_io=True)` 与 `execute_global_write`。原 state/policy 最后复核保留；候选锁出生受门，只读 flock/解析仍在门外；删除中的嵌套候选写复用活窗口，不重入原 transition。无 callback 分支保持原调用，未改候选算法、保留策略或底层锁原语。
+- 回归：新增冷锁准确出生、门外真实 flock/解析、扫描入口撤权阻止锁出生，以及真实到期候选删除且不重入的测试。两条缺陷回归在原实现均断言失败（`c5-birth-red.xml`），修复后通过；旧 W14 主体及既有断言经修前 SHA256 核对字节不变，没有预建锁或过滤写入事件。
+- 门禁：九文件合跑 175 通过、0 failure/error/skip，22.794 秒（`c5-birth-full-gate.xml`）；五文件 Ruff、导入边界检查（返回 `[]`）、`git diff --check` 均退出 0。两份 W14 保留双周期十类车道、实际退役、活数据和第二 owner 保护、配额下降、FD 差为零与逐写受门断言。空 owner 只要求 canonical 状态发布一次，不宣称总 callback 仅一次。
+- 复核：6.1sol 两轮内联静态复核；核实真实调用点仅传原同步 commit closure 或不传 callback，最终无本链路 BLOCK。入口直接传 dispatcher/转发 dispatcher 的组合不属于本次支持面；真实多进程启动、跨线程/异步、全仓测试、部署均未验证。
+
+在本 worktree 根复跑，使用现有 Python 3.12，不安装或更改用户环境：
+
+```bash
+export HOME=/private/tmp/my-agent-home-r5 MY_AGENT_HOME=/private/tmp/my-agent-home-r5 PYTHONPATH="$PWD"
+/Users/xiaoyezi/my-agent-dsh/.venv/bin/python -m pytest -q --tb=short --timeout=60 -p no:cacheprovider --junitxml=/private/tmp/my-agent-home-r5/c5-birth-full-gate.xml \
+  agent_py_agent/tests/test_issues_w7_maintenance_controller.py agent_py_agent/tests/test_issues_w14_lane_wiring_e2e.py \
+  agent_py_agent/tests/test_issues_w14_multiprocess_lanes_e2e.py agent_py_agent/tests/test_owner_maintenance.py \
+  agent_py_agent/tests/test_home_maintenance.py agent_py_agent/tests/test_issues_w6_local_store_catchup.py \
+  agent_py_agent/tests/test_issues_w9_asset_auxiliary.py agent_py_agent/tests/test_issues_w9_tool_output_retention.py \
+  agent_py_agent/tests/test_memory_retention_phase2.py
+/Users/xiaoyezi/my-agent-dsh/.venv/bin/ruff check agent_py_agent/agent/memory_store/retention.py agent_py_agent/cli/gateway_loops.py agent_py_agent/tests/test_issues_w7_maintenance_controller.py agent_py_agent/tests/test_issues_w14_lane_wiring_e2e.py agent_py_agent/tests/test_issues_w14_multiprocess_lanes_e2e.py
+/Users/xiaoyezi/my-agent-dsh/.venv/bin/python scripts/check_import_boundaries.py --json
+git diff --check
+```
+
 ## 2026-11-04 v15r2-r7：工作流保留历史脚本的重试来源
 
 来源：`rework-v15r2-r7.md`（内嵌 R1/F1）及 `sol_audit_v15-final-r2.md`；原审计 `34059f586116d59a785f26e53b696788ccc9d999`，本片使用总控预建的 `rework/v15r2-r7@c762b343c56194e8021fb938b485d83c264ce3e1`。已核实审计提交为其祖先，且本片引擎及两份测试在两提交间无差异，没有替换起点或操作原 checkout。
