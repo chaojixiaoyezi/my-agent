@@ -8,13 +8,18 @@
 # 模块用途: 让用户用 /plugins# 一套命令管理能力包，并标出哪些是 my-agent 自己做的。
 from __future__ import annotations
 
+import re
 import uuid
 
 from ..command_arguments import CommandArgumentError, lex_command_arguments
+from ..common.strict_json import load_strict_json
+from ..plugin_installation import PluginInstallationError
+from ..plugin_manifest import PluginPackageError
 from .learnpack_domain import same_domain_packs, same_domain_text
 from .learnpack_service import confirm_order, revert_install
 from .learnpack_store import ORDER_ID_PATTERN, LearnpackStore
 from .package_build import KIND_CAPABILITY_PACK
+from .package_provider import read_capability_member
 
 # 动作词（中文为主，英文同义）→ 规范动作名；不在表里的词按未知动作拒绝。
 PACK_ACTIONS = {"查看": "view", "view": "view", "info": "view",
@@ -22,13 +27,13 @@ PACK_ACTIONS = {"查看": "view", "view": "view", "info": "view",
                 "删除": "remove", "remove": "remove", "退回": "revert", "revert": "revert",
                 "安装": "install", "install": "install"}
 # 补全与帮助用的中文动作词与一句说明，顺序即展示顺序。
-PACK_ACTION_WORDS = (("查看", "看详情和可用命令"), ("启用", "启用这个能力包"), ("停用", "停用但保留"),
+PACK_ACTION_WORDS = (("查看", "看详情和可用命令"), ("启用", "启用 [确认码]，按预览确认 MCP"), ("停用", "停用但保留"),
                      ("删除", "删掉这个能力包"), ("退回", "退回她做的上一版"), ("安装", "确认安装单，后面跟单号"))
 # 会改动安装状态的动作（只读的列表/查看以外都要管理员）。
 _ADMIN_ACTIONS = frozenset({"enable", "disable", "remove", "revert", "install"})
-_USAGE = "用法：/plugins#[包名] [查看|启用|停用|删除|退回 [版本摘要]|安装 <单号>]；不带包名列出全部能力包。"
-# 每个动作允许的参数个数（最少, 最多）：安装要一个单号；退回可带一个版本摘要；其它不带参数。
-_ARGUMENT_RANGE = {"install": (1, 1), "revert": (0, 1)}
+_USAGE = "用法：/plugins#[包名] [查看|启用 [确认码]|停用|删除|退回 [版本摘要]|安装 <单号>]；不带包名列出全部能力包。"
+# 每个动作允许的参数个数（最少, 最多）：安装要单号；退回可带摘要；启用可带确认码；其它不带参数。
+_ARGUMENT_RANGE = {"install": (1, 1), "revert": (0, 1), "enable": (0, 1)}
 
 
 # LLM: namespace 来自 plugin_namespace（kind=pack）；request_id、revision 是用户这次命令的请求编号与目录版本，启用/停用/删除转成
@@ -58,6 +63,8 @@ def run_pack_command(manager: object, namespace: object, request_id: str = "", r
         name = entry.manifest.plugin_id
         return revert_install(manager, name, argument, f"/plugins#{name} 退回")
     text = f"/plugins {action} {entry.manifest.plugin_id}"
+    if action == "enable" and argument:
+        text += f" --confirm {argument}"
     return {"forwarded_reply": manager.command(text, revision=revision or manager.catalog().revision,
                                                request_id=request_id or f"lp-{uuid.uuid4().hex}", subject="能力包")}
 
@@ -73,15 +80,17 @@ def _parse(body: str) -> tuple[str, str]:
         raise CommandArgumentError("unknown_action", f"能力包没有“{tokens[0]}”这个动作。")
     low, high = _ARGUMENT_RANGE.get(action, (0, 0))
     if not low <= len(tokens) - 1 <= high:
-        raise CommandArgumentError("invalid_arguments", "“安装”后面跟一个单号，“退回”可以跟一个版本摘要，其它动作不带参数。")
+        raise CommandArgumentError("invalid_arguments", "“安装”后面跟一个单号，“退回”可跟版本摘要，“启用”可跟确认码，其它动作不带参数。")
+    if action == "enable" and len(tokens) == 2 and re.fullmatch(r"[0-9a-f]{12}", tokens[1]) is None:
+        raise CommandArgumentError("invalid_arguments", "启用确认码必须是 12 位小写十六进制，请照预览原样发送。")
     return action, tokens[1] if len(tokens) > 1 else ""
 
 
-# LLM: 只认安装表里的纯内容包；同名插件不当能力包。只读。
+# LLM: 只认安装表里的 v7/v10 能力包；同名 v6/v8/v9 插件不当能力包。只读。
 # 函数用途: 找到某个已装能力包的安装记录。
 def _pack_entry(manager: object, package_id: str):
     return next((row for row in manager.installations.snapshot()
-                 if row.manifest.plugin_id == package_id and row.manifest.is_content_only), None)
+                 if row.manifest.plugin_id == package_id and row.manifest.is_capability_pack), None)
 
 
 # LLM: 单号格式和单子归属都要对上（单子上的包名必须就是命令里的包名，而且是能力包的单；插件的单只认 /plugins confirm，
@@ -104,7 +113,7 @@ def _install_order(manager: object, package_id: str, order_id: str) -> dict[str,
 def render_pack_list(manager: object) -> str:
     store = LearnpackStore(manager.context.owner.home_dir)
     entries = tuple(manager.installations.snapshot())
-    rows = [row for row in entries if row.manifest.is_content_only]
+    rows = [row for row in entries if row.manifest.is_capability_pack]
     if not rows:
         return "当前没有装能力包。她学完外部 agent 做好能力包后，会给你装包的那一行命令。"
     lines = ["已装能力包（/plugins#<包名> 查看详情）："]
@@ -130,6 +139,14 @@ def render_pack_view(manager: object, entry) -> str:
              f"带检查程序：{'是' if _runs_checkers(capability) else '否'}；指纹 {entry.package_sha256[:12]}"]
     if record is not None:
         lines.extend([f"她做的（打包于 {record.built_at}）", _declared_line(record)])
+    if manifest.has_mcp_runtime:
+        server = manifest.mcp_servers[0]
+        catalog = "启用时固定" if server.tool_catalog == "pinned_on_enable" else f"包内声明 {len(server.tools)} 个"
+        entry_text = " ".join(filter(None, (server.entry.interpreter, server.entry.command)))
+        lines.append(f"带 MCP 工具：是（服务 {server.name}，{entry_text}，联网：{'是' if server.network else '否'}，工具清单：{catalog}）")
+    summary = _import_summary(manager, entry)
+    if summary:
+        lines.append(summary)
     name = manifest.plugin_id
     lines.append(f"管理：/plugins#{name} 启用｜/plugins#{name} 停用｜/plugins#{name} 删除｜/plugins#{name} 退回")
     return "\n".join(lines)
@@ -140,6 +157,31 @@ def render_pack_view(manager: object, entry) -> str:
 def _runs_checkers(capability) -> bool:
     verification = getattr(capability, "verification", None)
     return verification is not None and bool(verification.runs_package_code)
+
+
+# LLM: 只经 W1 有界成员读口读取回执；准入失败保持未知，不另开 ZIP 旁路或伪造激活。
+# 函数用途: 给详情补上经过准入读取的导入统计，读不到时明确说明。
+def _import_summary(manager: object, entry) -> str:
+    """只经原有界成员读口取回执；准入失败标未知，绝不伪造激活或把失败当零条。"""
+    path = "import/RECEIPT.json"
+    if not any(item.path == path for item in entry.manifest.files):
+        return ""
+    try:
+        receipt = load_strict_json(read_capability_member(manager.installations, entry, path))
+        if not isinstance(receipt, dict) or receipt.get("schema") != "external_plugin_import_receipt.v1":
+            raise ValueError("receipt_schema")
+        rows = receipt.get("components")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError("receipt_components")
+        counts = {status: sum(row.get("status") == status for row in rows) for status in ("imported", "mapped", "unsupported")}
+        codes = sorted({row["code"] for row in rows if row.get("status") == "unsupported"})
+        if any(not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) is None for code in codes):
+            raise ValueError("receipt_codes")
+        text = f"外部导入：导入 {counts['imported']} 项、映射 {counts['mapped']} 项、未支持 {counts['unsupported']} 项"
+        return text + (f"（{'、'.join(codes)}）" if codes else "")
+    except (PluginInstallationError, PluginPackageError, OSError, ValueError, KeyError, TypeError):
+        # W1 只接 active，首次安装和停用后的统计需上游调整读取合同；不另开 ZIP 旁路。
+        return "外部导入：统计未验证（回执读取未通过原准入，请交集成者核对停用包读取合同）"
 
 
 # LLM: 她声明的来源与许可证单独成行、标明是她的原文且宿主未核实（打包时已挡住换行、控制与格式字符，出不了这一行）。纯函数。

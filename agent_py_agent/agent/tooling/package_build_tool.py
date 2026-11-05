@@ -92,6 +92,8 @@ class PackageBuildTool(BaseTool):
             "（如中文说明、中英文关键词），让目录展示和关键词推荐匹配用户的说法。插件 declaration 要写全（不读目录里的"
             " declaration.json）：plugin_id、version、summary、entry、files（每项 path 与 executable）、platforms、actions、"
             "default_action、tools、settings_schema，照内置技能 write-my-agent-plugin 的模板写，不带 events/tool_gates/permissions。"
+            "能力包可选 mcp_servers（只能一个服务）：写 name、root、entry（command 相对 root）、platforms、permissions.network、"
+            "tool_catalog（declared/pinned_on_enable）、tools，服务文件放 root 下，不用 npx/uvx 这类运行时下载代码的启动器。"
             "origin 写学自哪里（仓库地址@提交，或“自己写的”），license 写来源的许可证。"
             "文件里有密钥或模型读不到的文件会整包拒绝。"
         ),
@@ -221,7 +223,14 @@ def _read_files(agent: object, request: _BuildRequest, base: Path | None) -> dic
         if not all(_safe_text(path, _DECLARED_TEXT_MAX_CHARS) for path in listed):
             raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID",
                                     "目录里有文件名带换行、控制字符或改变显示方向的字符，改名后再打包。")
-        request.declaration["files"] = [{"path": path} for path in listed]
+        executable = ""
+        servers = request.declaration.get("mcp_servers")
+        if isinstance(servers, list) and len(servers) == 1 and isinstance(servers[0], dict):
+            entry = servers[0].get("entry")
+            if isinstance(entry, dict) and entry.get("kind") == "executable":
+                executable = f"{servers[0].get('root', '')}/{entry.get('command', '')}"
+        # 只认显式 executable 入口，不采纳来源 mode；坏声明仍由 W1 唯一构建器分类。
+        request.declaration["files"] = [{"path": path, **({"executable": True} if path == executable else {})} for path in listed]
     paths = (capability_pack_paths(request.declaration) if request.kind == KIND_CAPABILITY_PACK
              else files_plugin_paths(request.declaration))
     for path in paths:

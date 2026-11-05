@@ -7,12 +7,23 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
+from .capability.external_plugin_import import (
+    ExternalImportError,
+    ExternalImportRequest,
+    import_claude_plugin,
+)
 from .path_access_policy import PathAccessPolicy
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallationError
 from .plugin_manifest import PluginPackageError
 from .plugin_package import PackageReadLimits, inspect_plugin_package
-from .plugin_sources import PluginSourceError, plugin_source_error_envelope, read_plugin_source
+from .plugin_sources import (
+    PluginSourceError,
+    open_plugin_source_directory,
+    plugin_source_error_envelope,
+    plugin_source_is_directory,
+    read_plugin_source,
+)
 from .plugin_update import PLUGIN_UPDATE_TOOL, PluginUpdateRequest
 from .tooling.models import (
     ApprovalPolicy,
@@ -47,11 +58,23 @@ class PluginUpdateTool(BaseTool):
     # 函数用途: 读取新包、按当前安装版本提交替换，返回可对账的领域回执。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         plugin_id = str(params["plugin"])
+        imported = None
         try:
             limits = PackageReadLimits()
-            package = inspect_plugin_package(read_plugin_source(
-                params["source"], self.workspace, self.policy, max_bytes=limits.archive_bytes,
-            ), limits=limits)
+            if plugin_source_is_directory(params["source"], self.workspace):
+                source = open_plugin_source_directory(params["source"], self.workspace, self.policy)
+                imported = import_claude_plugin(ExternalImportRequest(source))
+                package = inspect_plugin_package(imported.built.payload, limits=limits)
+                if package.manifest.plugin_id != plugin_id:
+                    raise ExternalImportError("PLUGIN_IMPORT_ID_CONFLICT", "update_id_mismatch")
+            else:
+                package = inspect_plugin_package(read_plugin_source(
+                    params["source"], self.workspace, self.policy, max_bytes=limits.archive_bytes,
+                ), limits=limits)
+        except ExternalImportError as exc:
+            return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, f"外部插件目录未导入：{exc.code}（{exc.detail}）。",
+                                      error_code=exc.code, effect_outcome="not_started",
+                                      result_envelope={PLUGIN_UPDATE_TOOL: {"reason": "import_" + exc.code.lower()}})
         except PluginSourceError as exc:
             # 来源问题按结构化原因分开告知：不存在（含解析基准）、越权、链接；不把三者混成一句。
             return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS",
@@ -65,6 +88,10 @@ class PluginUpdateTool(BaseTool):
             return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, "插件包来源不可读或格式无效。",
                                       error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         previous = next((entry for entry in self.store.snapshot() if entry.manifest.plugin_id == plugin_id), None)
+        if imported is not None and previous is not None and not previous.manifest.is_capability_pack:
+            return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, False, "同名的是插件，能力包不会覆盖它。",
+                                      error_code="PLUGIN_IMPORT_ID_CONFLICT", effect_outcome="not_started",
+                                      result_envelope={PLUGIN_UPDATE_TOOL: {"reason": "import_plugin_import_id_conflict"}})
         report = {"plugin_id": plugin_id, "enabled": False,
                   "previous_version": previous.manifest.version if previous is not None else "",
                   "package_version": package.manifest.version}
@@ -95,4 +122,6 @@ class PluginUpdateTool(BaseTool):
                                                                 if result.settings_reason == "incompatible" else "可直接 enable。")),
                    "unchanged": "新包与当前安装相同，没有变化。",
                    "replayed": "同一更新请求已提交过，复读原结果。"}[result.outcome]
+        if imported is not None:
+            report["import_receipt"] = imported.receipt
         return ToolHandlerOutcome(PLUGIN_UPDATE_TOOL, True, message, result_envelope={PLUGIN_UPDATE_TOOL: report})

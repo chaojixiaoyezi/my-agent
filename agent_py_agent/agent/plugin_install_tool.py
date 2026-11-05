@@ -6,12 +6,23 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
+from .capability.external_plugin_import import (
+    ExternalImportError,
+    ExternalImportRequest,
+    import_claude_plugin,
+)
 from .path_access_policy import PathAccessPolicy
 from .plugin_install_store import PluginInstallStore
 from .plugin_installation import PluginInstallationError, PluginInstallRequest
 from .plugin_manifest import PluginPackageError
 from .plugin_package import PackageReadLimits, inspect_plugin_package
-from .plugin_sources import PluginSourceError, plugin_source_error_envelope, read_plugin_source
+from .plugin_sources import (
+    PluginSourceError,
+    open_plugin_source_directory,
+    plugin_source_error_envelope,
+    plugin_source_is_directory,
+    read_plugin_source,
+)
 from .tooling.models import (
     ApprovalPolicy,
     BaseTool,
@@ -48,11 +59,21 @@ class PluginInstallTool(BaseTool):
     # LLM: 源严格打开先于写入；scope只限定枚举，公共管理员门仍在原Store，不因程序格式旁路。
     # 函数用途: 读取包、检查当前安装版本并提交默认停用记录，返回可对账的领域回执。
     def execute(self, params: dict) -> ToolHandlerOutcome:
+        imported = None
         try:
             limits = PackageReadLimits()
-            package = inspect_plugin_package(read_plugin_source(
-                params["source"], self.workspace, self.policy, max_bytes=limits.archive_bytes,
-            ), limits=limits)
+            if plugin_source_is_directory(params["source"], self.workspace):
+                source = open_plugin_source_directory(params["source"], self.workspace, self.policy)
+                imported = import_claude_plugin(ExternalImportRequest(source))
+                package = inspect_plugin_package(imported.built.payload, limits=limits)
+            else:
+                package = inspect_plugin_package(read_plugin_source(
+                    params["source"], self.workspace, self.policy, max_bytes=limits.archive_bytes,
+                ), limits=limits)
+        except ExternalImportError as exc:
+            return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, f"外部插件目录未导入：{exc.code}（{exc.detail}）。",
+                                      error_code=exc.code, effect_outcome="not_started",
+                                      result_envelope={PLUGIN_INSTALL_TOOL: {"reason": "import_" + exc.code.lower()}})
         except PluginSourceError as exc:
             # 来源问题按结构化原因分开告知：不存在（含解析基准）、越权、链接；不把三者混成一句。
             return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, str(exc), error_code="TOOL_INVALID_ARGUMENTS",
@@ -72,6 +93,10 @@ class PluginInstallTool(BaseTool):
         try:
             previous = next((entry for entry in self.store.snapshot()
                              if entry.manifest.plugin_id == package.manifest.plugin_id), None)
+            if imported is not None and previous is not None and not previous.manifest.is_capability_pack:
+                return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "同名的是插件，能力包不会覆盖它。",
+                                          error_code="PLUGIN_IMPORT_ID_CONFLICT", effect_outcome="not_started",
+                                          result_envelope={PLUGIN_INSTALL_TOOL: {"reason": "import_plugin_import_id_conflict"}})
             installed = self.store.install(PluginInstallRequest(
                 package, self.operation_id, previous.revision if previous is not None else 0,
                 installation_scope=scope,
@@ -93,5 +118,6 @@ class PluginInstallTool(BaseTool):
                 "installation_scope": installed.installation.installation_scope,
                 "outcome": installed.outcome, "commit_state": installed.commit_state,
                 "receipt": asdict(installed.receipt) if installed.receipt else None,
+                **({"import_receipt": imported.receipt} if imported is not None else {}),
             }},
         )

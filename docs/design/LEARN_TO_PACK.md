@@ -115,6 +115,32 @@ F5 `self_map` 只显示原元数据、快照及撤回事实，不读取 Skill �
 
 **第 7 步（假模型）已跑通**：用假模型驱动真实对话回合、真实工具和真实 `/plugins#`、`/plugins` 命令，把能力包开关关/开、插件两种开关位置、TUI 与飞书两个入口、确认行重发回放和重启后照常都跑了一遍（`test_learnpack_e2e.py`，见 TESTS.md 第 7 步）。真模型（MiniMax）在两个入口各跑一遍是第 8 步，先给用户 token 估算、用户点头才跑。
 
+## MCP 能力包与 Claude 目录导入（2026-11-05，W4 分片）
+
+本节补充并替代下文历史 §8–§10 中“工具一律另做插件”的限制；不改变原生 Skill/Workflow 请求或只读学习的授权边界。解决的问题是来源的方法和核心工具原来被拆成两套包、现成 Claude 插件必须重写，且 `/plugins#` 无法提交 MCP 确认码。
+
+### Track 1：不改来源的目录导入
+
+管理员 `/plugins install <目录>` 或 `/plugins update <包名> <目录>` 沿原 PathAccessPolicy 解析真实本地目录，再交 `capability/external_plugin_import.py`。导入器用目录 FD、排序 listdir、nofollow stat 与 read_bytes_beneath 只读快照，类型、成员、字节、资源地址深度/长度和目录名预算共同约束；无 FD 平台明确拒绝，不做路径降级。链接或特殊文件整包拒绝，隐藏入口按合同跳过并记账，不执行、下载、改名或相信 mode/默认启用字段。
+
+`.claude-plugin/plugin.json` 可省，存在时严格 JSON、最多 64 KiB；MCP 是根 `.mcp.json`，也接受清单的 mcpServers 路径、对象或数组。Skill 整树保持相对地址，commands/agents 只作参考文档；其它资源只是数据。只保留一个支持的随包 stdio 服务，以 pinned_on_enable 固定工具目录；远端服务、bundle、运行时下载器、env/headers 和额外变量等逐项写不支持码。默认 docs_only=false、network=false，CLI 选项由 D8 延期；要联网用 Track 2 明确重建。
+
+每个组件按 frozen code 记在 `external_plugin_import_receipt.v1`，规范 JSON 保存为 `import/RECEIPT.json` 并返回原 install/update 信封内的 import_receipt。来源树摘要覆盖所有实际读取的普通文件，同树同选项得到同一 sha256。元数据值、环境值、源正文、绝对路径和时间戳不进回执。导入包从不覆盖同名普通插件；更新的派生包名也必须与目标相等。
+
+### Track 2：方法与单 MCP 运行树同包
+
+学习技能在已授权分发时默认做能力包；来源有 MCP，或核心脚本值得封装成真正的 stdio MCP，就放 `mcp/<server>/`，与入口、来源和许可证一起构建。`package_build` 的可选 mcp_servers 只允许一个服务，entry.command 相对 root，显式 permissions.network；执行位只按 executable 入口声明，不读 mode。没有该字段时 v7 包字节不变。第二个来源也带服务器时由用户选择独立成包或保留哪一个，不能静默合成双服务。
+
+### 确认与退回
+
+`/plugins#<包名> 启用 [确认码]` 只接受 12 位小写 hex，可转发原 `/plugins enable ... --confirm ...`。v7/v10 均按 is_capability_pack 列出，v6/v8/v9 不混入。MCP 确认种类统一引用 PACK_MCP_CONFIRMATION_KIND；自动装和 run_programs 都不能代确认，始终把 `/plugins#<包名> 启用 <确认码>` 交用户本人在自己的会话发送。
+
+退回复用原 disable → update → enable：先撤旧代，文档与运行树按同一个包摘要换代；v10 目标停在新确认行，v7 目标沿原零进程启用。旧引用失效不等于在途调用或物理进程已经结束，清理仍由后续运行边界处理。capability_pack_mcp_enabled 是管理员开关；降级到不认识 v10 的版本前先移除 v10 包，仅停用不够。
+
+### 冻结接口留下的集成欠账
+
+W1 的 read_capability_member 只接 active；本片不能在首次安装、停用状态读到回执统计，也不能伪造激活或绕读 ZIP。详情明确写“统计未验证”；启用后的文档包可显示真实计数。停用包统计须上游修订成员读取合同，W2/W3 的完整启用预览和运行链须在组合树复验。本节不声称这些链路已部署或已验证。
+
 ## 8. 多包与融合（2026-10-06 用户追加）
 
 **用户目标**：以后不再下载很多不同领域的 agent，只用 my-agent 一个。通过学习，把各领域 agent 的能力都收进来，必要时融合在一起。
