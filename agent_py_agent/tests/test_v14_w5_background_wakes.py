@@ -24,6 +24,7 @@ from agent_py_agent.agent.conversation.session_tasks import SESSION_TASK_TERMINA
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.wake_poison import ledger_corrupt_decision
 from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.tests.test_v14_w5_model_set_adoption import (
     business_wire as business_wire,
 )
@@ -610,7 +611,7 @@ def test_producer_old_generation_lookup_has_one_claim_and_task_only_reads(busine
 
 
 # LLM: 索引/canonical错误与prepared都不能当作没有责任；私有producer仍运行真实存储与授权。
-# 函数用途: 验证未知或半提交责任保留原JSON，不产生新wake；缺失索引只由task门入口从canonical重建（R1），坏索引不隐式修。
+# 函数用途: 验证未知或半提交责任保留原JSON，不产生新wake；显式恢复可修派生库，canonical缺失必须可观察地拒绝而非假成功。
 @pytest.mark.parametrize("state", ["missing-index", "corrupt-index", "missing-wake", "prepared"])
 def test_producer_preserves_unknown_or_prepared_task_publication(business_wire, monkeypatch, state):
     case = runtime_case(business_wire)
@@ -637,7 +638,11 @@ def test_producer_preserves_unknown_or_prepared_task_publication(business_wire, 
                     "dedupe_key": f"session_task:{task_id}:older-resume", "metadata": {"session_task_id": task_id}})
     before = {path: path.read_bytes() for path in store.storage.wake_queue_dir.rglob("*.json")}
     service, actor = producer_service(case)
-    service._republish_pending_work(store.threads.require(thread_id), [store.session_tasks.require(task_id)], actor=actor)
+    if state == "missing-wake":
+        with pytest.raises(DataCorruptionError, match="recovery is pending"):
+            service._republish_pending_work(store.threads.require(thread_id), [store.session_tasks.require(task_id)], actor=actor)
+    else:
+        service._republish_pending_work(store.threads.require(thread_id), [store.session_tasks.require(task_id)], actor=actor)
     assert {path: path.read_bytes() for path in store.storage.wake_queue_dir.rglob("*.json")} == before
     if state == "missing-index":
         rows, error = store.wakes.task_responsibility_report(thread_id, task_id)

@@ -31,8 +31,9 @@ from .wake_poison import WAKE_STATUS_FAILED_PERMANENTLY
 _SCHEMA = "wake_dedupe.v2"
 _LEGACY_SCHEMA = "wake_dedupe.v1"
 _TASK_GUARDS = ContextVar("wake_task_responsibility_guards", default=())
-# 本进程已尝试从canonical重建过unknown覆盖的会话根（resolve后的路径）：可变登记表，不是常数；持锁读写，失败也不重复全量重建。
-_UNKNOWN_INDEX_REBUILDS: set[str] = set()
+# 同根重建由索引EX串行化；None只表示在途，代次指纹只节流已确认的canonical坏账。
+# 临时I/O、SQLite错误和取消必须在finally释放，不能把一次失败变成永久禁止恢复。
+_UNKNOWN_INDEX_REBUILDS: dict[str, tuple[int, int, int, int] | None] = {}
 # 保护上面登记表的进程内锁，只在判定/登记时短暂持有，不包住任何文件锁或重建IO。
 _UNKNOWN_INDEX_REBUILDS_LOCK = threading.Lock()
 
@@ -136,9 +137,9 @@ def _task_index_connection(storage: ConversationStorage, *, writable: bool = Fal
 
 # LLM: 纯ro只读metadata与表结构，不建表、不修账；缺失、空文件、无效字节或schema不符都返回None，锁忙原样上抛而不当成缺失。
 # 函数用途: 返回派生定位库的覆盖标记（complete/unknown），供初始化决定保留、原子新建或从canonical重建。
-def _task_index_coverage(storage: ConversationStorage) -> str | None:
+def _task_index_coverage(storage: ConversationStorage, *, blocking: bool = True) -> str | None:
     try:
-        with closing(_task_index_connection(storage)) as connection:
+        with closing(_task_index_connection(storage, blocking=blocking)) as connection:
             metadata = dict(connection.execute("SELECT key, value FROM metadata"))
             locators = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='locators'").fetchone()
@@ -174,15 +175,15 @@ def initialize_task_responsibility_index(storage: ConversationStorage) -> None:
         return
 
 
-# LLM: ownerSH→索引EX，与所有发布/确认/重放（索引SH）互斥；complete原样返回；缺失/无效且无旧账时原子发布空complete库，
-#   不再留下半建的零字节文件；有旧账或unknown从canonical重建，unknown每进程每根至多一次；重建失败保留其finally已发布的unknown。
+# LLM: ownerSH→索引EX，与所有发布/确认/重放（索引SH）互斥；complete原样返回；缺失/无效且无旧账时原子发布空complete库。
+#   有旧账或unknown从canonical重建；只有稳定坏账按索引代次节流，临时失败与取消释放在途标记，错误交给原调用边界裁决。
 # 函数用途: 供可写初始化与task门懒修复共用，建立或升级派生定位库，不改任何canonical唤醒或发布记录。
 def _initialize_task_index(storage: ConversationStorage, *, blocking: bool) -> None:
     import tempfile
 
     with (_publication_guard(storage.root, blocking=blocking),
           _task_index_guard(storage, exclusive=True, blocking=blocking)):
-        coverage = _task_index_coverage(storage)
+        coverage = _task_index_coverage(storage, blocking=blocking)
         if coverage == "complete":
             return
         legacy = any(next(directory.glob("*.json"), None) is not None for directory in (
@@ -205,17 +206,64 @@ def _initialize_task_index(storage: ConversationStorage, *, blocking: bool) -> N
                 finally:
                     os.close(descriptor)
             return
-        if coverage == "unknown":
-            root = str(storage.root.resolve())
-            with _UNKNOWN_INDEX_REBUILDS_LOCK:
-                if root in _UNKNOWN_INDEX_REBUILDS:
-                    return
-                _UNKNOWN_INDEX_REBUILDS.add(root)
+        root = str(storage.root.resolve())
+        generation = _task_index_generation(storage)
+        with _UNKNOWN_INDEX_REBUILDS_LOCK:
+            if coverage == "unknown" and generation is not None and _UNKNOWN_INDEX_REBUILDS.get(root) == generation:
+                return
+            _UNKNOWN_INDEX_REBUILDS[root] = None
+        invalid_source = False
         try:
             _rebuild_task_index_locked(storage)
-        except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError):
-            # 临时库已提交unknown schema并在finally原子替换上去，读者fail-closed；不把派生投影的失败抛给canonical调用方。
-            return
+        except (OSError, ValueError, TypeError, sqlite3.Error, DataCorruptionError) as exc:
+            invalid_source = _invalid_task_index_source(exc)
+            raise
+        finally:
+            # 重建的finally可能已替换unknown库，必须绑定新代次；取指纹失败也不能掩盖原始异常或保留在途抑制。
+            failed_generation = None
+            if invalid_source:
+                try:
+                    failed_generation = _task_index_generation(storage)
+                except OSError:
+                    pass
+            with _UNKNOWN_INDEX_REBUILDS_LOCK:
+                _UNKNOWN_INDEX_REBUILDS.pop(root, None)
+                if failed_generation is not None:
+                    _UNKNOWN_INDEX_REBUILDS[root] = failed_generation
+
+
+# LLM: 仅比较派生库自身身份，不扫描canonical；同一unknown坏账代次最多重建一次。
+# 函数用途: 为坏账节流绑定一个确切索引代次，替换后的新库可重新恢复。
+def _task_index_generation(storage: ConversationStorage) -> tuple[int, int, int, int] | None:
+    try:
+        observed = storage.wake_task_index_path.stat()
+    except FileNotFoundError:
+        return None
+    return observed.st_dev, observed.st_ino, observed.st_mtime_ns, observed.st_size
+
+
+# LLM: _read_record把OS错误包装成DataCorruptionError；必须沿显式cause核实，不能只按外层类型永久节流。
+# 函数用途: 将真正的格式/身份坏账与可重试的读取、SQLite失败区分开。
+def _invalid_task_index_source(error: BaseException) -> bool:
+    while error is not None:
+        if isinstance(error, (OSError, sqlite3.Error)):
+            return False
+        error = error.__cause__
+    return True
+
+
+# LLM: 显式可写恢复边界，必须在普通task/index共享门外；complete仅点查metadata，unknown才按ownerSH→indexEX重建。
+#   错误原样传播保留cause；节流坏账仍unknown时显式拒绝，不能把恢复未完成当成空责任或成功。
+# 函数用途: 供resume/restore/drain一次性恢复投影，不要求重启或操作员重建，不改canonical。
+def recover_task_responsibility_index(storage: ConversationStorage, *, blocking: bool = True) -> None:
+    root = str(storage.root.resolve())
+    if any(entry[0] == root for entry in _TASK_GUARDS.get()):
+        raise RuntimeError("wake index recovery must run outside a task guard")
+    if _task_index_coverage(storage, blocking=blocking) == "complete":
+        return
+    _initialize_task_index(storage, blocking=blocking)
+    if _task_index_coverage(storage, blocking=blocking) != "complete":
+        raise DataCorruptionError("task wake locator recovery is pending")
 
 
 # LLM: 定位先于prepared/canonical提交；崩溃留下孤儿引用会返回unknown，绝不会漏掉已提交责任。
