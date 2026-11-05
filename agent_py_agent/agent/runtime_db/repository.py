@@ -114,7 +114,6 @@ from .operations import (
     RuntimeExecutionBusyError,
     RuntimeOperationsMixin,
     RuntimeRecoveryRequiredError,
-    attempt_status_is_terminal,
     exec_lock_scope,
     holder_is_alive,
 )
@@ -1064,28 +1063,20 @@ class RuntimeRepository(
             after = getattr(self, "_stale_lock_cursor", (0.0, "")) if bounded else (0.0, "")
             rows = conn.execute("SELECT * FROM resource_locks WHERE (lease_expires_at,lock_id) > (?,?) "
                 "ORDER BY lease_expires_at,lock_id LIMIT ?", (*after, 256 if bounded else -1)).fetchall()
-            released_attempts = set()
             for lock in rows:
-                attempt_id = str(lock['attempt_id'])
-                if attempt_id in released_attempts:
-                    continue
-                if (not str(lock['canonical_scope']).startswith(EXEC_LOCK_SCOPE_PREFIX)
-                        and float(lock['lease_expires_at']) <= current):
-                    attempt = conn.execute('SELECT status FROM agent_attempts WHERE attempt_id = ?',
-                                           (attempt_id,)).fetchone()
+                if not self._lock_is_takeoverable(lock, current):
+                    if (str(lock['canonical_scope']).startswith(EXEC_LOCK_SCOPE_PREFIX)
+                            or float(lock['lease_expires_at']) > current):
+                        continue
                     # 整 attempt 清理必须等每把工具锁到期；exec 锁始终留给原生命周期，不由工具兜底释放。
                     protected = conn.execute('SELECT 1 FROM resource_locks WHERE attempt_id = ? '
-                        'AND (canonical_scope LIKE ? OR lease_expires_at > ?) LIMIT 1',
-                        (attempt_id, EXEC_LOCK_SCOPE_PREFIX + '%', current)).fetchone()
-                    if attempt is not None and attempt_status_is_terminal(attempt['status']) and protected is None:
-                        held = conn.execute('SELECT lock_id FROM resource_locks WHERE attempt_id = ?',
-                                            (attempt_id,)).fetchall()
-                        self._release_attempt_operations_conn(conn, attempt_id,
-                            reason='terminal_attempt_lease_expired', now=current)
-                        released.extend(str(row['lock_id']) for row in held)
-                        released_attempts.add(attempt_id)
+                        'AND (substr(canonical_scope, 1, ?) = ? OR lease_expires_at > ?) LIMIT 1',
+                        (str(lock['attempt_id'] or ''), len(EXEC_LOCK_SCOPE_PREFIX), EXEC_LOCK_SCOPE_PREFIX, current)).fetchone()
+                    if protected is not None:
                         continue
-                if not self._lock_is_takeoverable(lock, current):
+                    _, lock_ids = self._release_terminal_attempt_resources_conn(conn, str(lock['attempt_id'] or ''),
+                        reason='terminal_attempt_lease_expired', now=current)
+                    released.extend(lock_ids)
                     continue
                 # 仅收回死 holder 的执行权；op/mutation 不属于运维确认，必须完整保留原未知/脏事实。
                 fields = ("lock_id", "canonical_scope", "holder_instance", "pid", "start_token", "attempt_id",
@@ -1715,14 +1706,56 @@ class RuntimeRepository(
             if normalized and normalized not in cleanup_ids:
                 cleanup_ids.append(normalized)
         for cleanup_attempt_id in cleanup_ids:
-            self._release_attempt_operations_conn(conn, cleanup_attempt_id, reason=reason, now=now)
+            # outcome_json 保留 holder/lease/resource_scopes 等 claim 元数据；
+            # 只追加结构化未知原因，不能整段覆盖后丢掉副作用追踪锚点。
+            stale_rows = conn.execute(
+                "SELECT operation_id, outcome_json FROM tool_operations "
+                "WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')",
+                (cleanup_attempt_id,),
+            ).fetchall()
+            for stale in stale_rows:
+                payload = {}
+                try:
+                    loaded = json.loads(stale["outcome_json"])
+                except (TypeError, json.JSONDecodeError):
+                    loaded = {}
+                if isinstance(loaded, dict):
+                    payload = dict(loaded)
+                payload["reason"] = reason
+                payload["unknown_reason"] = reason
+                conn.execute(
+                    "UPDATE tool_operations SET status = 'UNKNOWN', outcome_json = ?, "
+                    "updated_at = ? WHERE operation_id = ? "
+                    "AND status IN ('CLAIMED', 'EXECUTING')",
+                    (
+                        json.dumps(payload, ensure_ascii=False),
+                        now,
+                        stale["operation_id"],
+                    ),
+                )
+            # 非 current attempt 已永久失去执行权；UNKNOWN 是结果不可知终态，
+            # 旧锁必须释放；STABLE 已有确认事实，不能因换代重新判为未知。
+            # 其余未确认 mutation 保守标 DIRTY，已有 DIRTY 的原因和时间保持。
+            conn.execute(
+                "DELETE FROM resource_locks WHERE attempt_id = ?",
+                (cleanup_attempt_id,),
+            )
+            conn.execute(
+                "UPDATE resource_mutations SET state = 'DIRTY', dirty_reason = ?, "
+                "updated_at = ? WHERE attempt_id = ? AND state NOT IN ('STABLE', 'DIRTY')",
+                (reason, now, cleanup_attempt_id),
+            )
         return superseded_ids
 
-    # LLM: 仅在调用方同一写事务内清理已失权 attempt，不重放工具、不确认副作用；原换代字节语义不变。
-    # 函数用途: 释放旧锁并保留操作 UNKNOWN、资源 DIRTY，已有 STABLE/DIRTY 不改写。
-    def _release_attempt_operations_conn(
+    # LLM: 复用调用方写事务，仅处理 quiescent attempt；不释放 exec 锁，不触碰 UNKNOWN hard stop。
+    # 函数用途: 保留原副作用元数据，把未结工具置 UNKNOWN、资源置 DIRTY，并记录实际释放的工具锁。
+    def _release_terminal_attempt_resources_conn(
         self, conn, attempt_id: str, *, reason: str, now: float,
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
+        row = conn.execute('SELECT status, agent_run_id FROM agent_attempts WHERE attempt_id = ?',
+            (attempt_id,)).fetchone()
+        if row is None or str(row['status'] or '') not in _QUIESCENT_ATTEMPT_STATUSES:
+            return [], []
         stale_rows = conn.execute(
             "SELECT operation_id, outcome_json FROM tool_operations "
             "WHERE attempt_id = ? AND status IN ('CLAIMED', 'EXECUTING')",
@@ -1745,13 +1778,23 @@ class RuntimeRepository(
                 "AND status IN ('CLAIMED', 'EXECUTING')",
                 (json.dumps(payload, ensure_ascii=False), now, stale["operation_id"]),
             )
-        conn.execute("DELETE FROM resource_locks WHERE attempt_id = ?", (attempt_id,))
+        locks = conn.execute('SELECT lock_id FROM resource_locks WHERE attempt_id = ? '
+            'AND substr(canonical_scope, 1, ?) != ?',
+            (attempt_id, len(EXEC_LOCK_SCOPE_PREFIX), EXEC_LOCK_SCOPE_PREFIX)).fetchall()
+        conn.execute('DELETE FROM resource_locks WHERE attempt_id = ? AND substr(canonical_scope, 1, ?) != ?',
+            (attempt_id, len(EXEC_LOCK_SCOPE_PREFIX), EXEC_LOCK_SCOPE_PREFIX))
         conn.execute(
             "UPDATE resource_mutations SET state = 'DIRTY', dirty_reason = ?, "
             "updated_at = ? WHERE attempt_id = ? AND state NOT IN ('STABLE', 'DIRTY')",
             (reason, now, attempt_id),
         )
-        return [str(row['operation_id']) for row in stale_rows]
+        operation_ids = [str(operation['operation_id']) for operation in stale_rows]
+        lock_ids = [str(lock['lock_id']) for lock in locks]
+        if operation_ids or lock_ids:
+            self._append_event_conn(conn, event_type='agent_attempt.terminal_resources_released',
+                attempt_id=attempt_id, agent_run_id=str(row['agent_run_id']),
+                payload={'operation_ids': operation_ids, 'lock_ids': lock_ids, 'reason': reason})
+        return operation_ids, lock_ids
 
     # LLM: 调用者须已等真实 worker 退出；终态与资源清理只在一个 BEGIN IMMEDIATE 连接内判定和提交。
     # 函数用途: 撤权中断交回后释放工具锁，保留原操作事实并幂等追加清理事件。
@@ -1761,15 +1804,7 @@ class RuntimeRepository(
         current = time.time() if now is None else float(now)
         with self.transaction() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            attempt = conn.execute('SELECT * FROM agent_attempts WHERE attempt_id = ?', (attempt_id,)).fetchone()
-            if attempt is None or not attempt_status_is_terminal(attempt['status']):
-                return []
-            before = conn.total_changes
-            operation_ids = self._release_attempt_operations_conn(conn, attempt_id, reason=reason, now=current)
-            if conn.total_changes != before:
-                self._append_event_conn(conn, event_type='agent_attempt.terminal_resources_released',
-                    attempt_id=attempt_id, agent_run_id=str(attempt['agent_run_id']),
-                    payload={'attempt_id': attempt_id, 'operation_ids': operation_ids, 'reason': reason})
+            operation_ids, _ = self._release_terminal_attempt_resources_conn(conn, attempt_id, reason=reason, now=current)
         return operation_ids
 
     # LLM: RuntimeDB 显式外部输入仅能为既有非终态代理预留 pending；此处写账不启动，生命周期与 owner 准入仍由外层核验，唯一激活在 create_attempt。

@@ -261,11 +261,11 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     assert not is_interruptible_registered(conversation_claim_interrupt_name(binding.claim_id))
     assert _fd_count() - fd_before == 0
 
-    # C：原 worker 必须清旗；撤权后的资源清理也不得阻塞新的真实运行。
+    # C：原 worker 必须清旗；取消操作仅在 worker 退出后结为 UNKNOWN 并释放 scope 锁。
     probe = case.service.monitor_pool.submit(case.home, run.job['job_id'], 'r3-reuse-probe',
         partial(_run_with_claim_interrupts, (), Event(), lambda: (get_ident(), is_interrupted())))
     assert probe.result(timeout=2) == (case.calls[call_before][1], False)
-    # 保留原 pending wake，准确消费另一真实定时线程，不清理或伪造原操作终态来放行业务。
+    # 保留原 pending wake；取消操作的 scope 锁只在 worker 退出后释放，新的真实定时线程可正常完成。
     next_run = _schedule(case, 'fresh')
     case.scheduler = BackgroundMainAgentScheduler({'runtime': case.scheduler.runtime,
         'store': case.store, 'scheduler_service': case.service})
@@ -420,25 +420,16 @@ def test_all_scheduler_pool_handoffs_are_scoped_and_fenced_before_effects():
 
     target = functions['execute_scheduled_target']
     guarded = next(node for node in target.body if isinstance(node, ast.Try))
-    joined = next(node for node in guarded.body if isinstance(node, ast.Try))
-    handoff = next(node for node in joined.body if isinstance(node, ast.With))
+    handoff = next(node for node in guarded.body if isinstance(node, ast.With))
     assert ast.unparse(handoff.items[0].context_expr) == 'register_interrupt_callback(early.set)'
     assert any(isinstance(node, ast.Call) and ast.unparse(node.func) == 'future.result'
         for node in ast.walk(handoff))
-    after = joined.body[joined.body.index(handoff) + 1]
+    after = guarded.body[guarded.body.index(handoff) + 1]
     assert isinstance(after, ast.If) and ast.unparse(after.test) == 'is_interrupted()'
     assert isinstance(after.body[0], ast.Raise)
-    before = guarded.body[guarded.body.index(joined) - 2]
+    before = guarded.body[guarded.body.index(handoff) - 2]
     assert isinstance(before, ast.If) and ast.unparse(before.test) == 'is_interrupted()'
     assert [ast.unparse(handler.type) for handler in guarded.handlers] == ['ScheduleValidationError']
-    assert [ast.unparse(handler.type) for handler in joined.handlers] == ['InterruptedError']
-    interrupted = joined.handlers[0]
-    assert isinstance(interrupted.body[-1], ast.Raise) and interrupted.body[-1].exc is None
-    cleanup = interrupted.body[0]
-    assert isinstance(cleanup, ast.Try)
-    assert ast.unparse(cleanup.handlers[0].type) == '(OSError, sqlite3.Error, RuntimeError, KeyError, ValueError)'
-    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr == 'release_terminal_attempt_operations' for node in ast.walk(cleanup))
 
     worker = functions['_run_with_claim_interrupts']
     scope = next(node for node in worker.body if isinstance(node, ast.With))
