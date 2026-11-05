@@ -11,6 +11,7 @@ from itertools import islice
 from pathlib import Path
 from types import SimpleNamespace
 
+from ....common import nofollow_fs
 from ....common.json_io import locked_json_path
 from ....common.nofollow_fs import (
     NoFollowPathError,
@@ -101,6 +102,10 @@ class SubagentRunIndex:
     @contextmanager
     def connect(self):
         with locked_json_path(self.workspace / ".run-index-access.guard"):
+            if not nofollow_fs._supports_dir_fd():
+                with self._connect_portable() as db:
+                    yield db
+                return
             with ExitStack() as resources:
                 root_fd = open_directory_beneath(self.workspace, (), require_dir_fd=True)
                 resources.callback(os.close, root_fd)
@@ -126,6 +131,36 @@ class SubagentRunIndex:
                         _verify_sqlite_files(self.workspace, root_fd, pinned)
                 finally:
                     db.close()
+
+    # LLM: 便携分支沿原访问锁和路径预检；种子FD先关再开SQLite，不声称具备POSIX目录FD的竞态强度。
+    # 函数用途: 在无dir_fd平台提供真实提交、回滚及确定性关闭的短连接。
+    @contextmanager
+    def _connect_portable(self):
+        root_info = nofollow_fs._portable_directory(self.workspace, (), create=False).lstat()
+        pinned = []
+        for suffix in ("-journal", "-wal", "-shm", ""):
+            path = Path(str(self.path) + suffix)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                if suffix:
+                    continue
+            descriptor = open_private_lock_beneath(self.workspace, (path.name,))
+            try:
+                if hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
+                    os.fchmod(descriptor, 0o600)
+                pinned.append((path, os.fstat(descriptor)))
+            finally:
+                os.close(descriptor)
+        _verify_sqlite_files(self.workspace, root_info, pinned)
+        db = sqlite3.connect(self.path.absolute().as_uri() + "?mode=rw", uri=True, timeout=5)
+        try:
+            _verify_sqlite_files(self.workspace, root_info, pinned)
+            with db:
+                yield db
+                _verify_sqlite_files(self.workspace, root_info, pinned)
+        finally:
+            db.close()
 
     # LLM: 每次规范提交先登记 pending；旧 pending 无恢复凭据仍视为可能已发表，不能重试后降格为未发表。
     # 函数用途: 在规范文件写入前留下精确 run 未结记录及首存没有 locator 时的恢复定位字段。
@@ -369,6 +404,10 @@ class SubagentRunIndex:
             for seq, run_id in batch:
                 try:
                     validate_opaque_id(run_id, kind="run_id")
+                    if not nofollow_fs._supports_dir_fd():
+                        self._backfill_portable(loader, run_id, seq)
+                        loaded += 1
+                        continue
                     # 拒绝旧 run/locator 链接先于创建 guard；完整 loader 仍复用原 canonical reader。
                     directory_fd = open_directory_beneath(self.workspace, (run_id,), require_dir_fd=True)
                     try:
@@ -404,6 +443,28 @@ class SubagentRunIndex:
                 db.execute("UPDATE meta SET value=? WHERE key='offset'", (offset,))
                 db.execute("UPDATE meta SET value=? WHERE key='complete'", (int(first_pending is None),))
             return {**self.coverage(), "loaded": loaded, "errors": errors}
+
+    # LLM: 只在原canonical guard内加载指定库存行；根及run目录重检，不因缺目录FD跳过身份或类型核验。
+    # 函数用途: 让便携平台以同一事务和完成标记迁移一条真实规范记录。
+    def _backfill_portable(self, loader, run_id, seq):
+        from .service import _canonical_state_guard_path
+
+        directory = nofollow_fs._portable_directory(self.workspace, (run_id,), create=False)
+        before = directory.lstat()
+        with locked_json_path(_canonical_state_guard_path(self.workspace, SimpleNamespace(id=run_id))):
+            source = (directory / "task.json").lstat()
+            if (not stat.S_ISREG(source.st_mode) or source.st_nlink != 1
+                    or getattr(source, "st_file_attributes", 0) & 0x400):
+                raise NoFollowPathError("inventory canonical file is not regular")
+            task = loader(run_id)
+            current = nofollow_fs._portable_directory(self.workspace, (run_id,), create=False).lstat()
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                raise InventoryCanonicalMismatch("inventory canonical directory changed")
+            if task.id != run_id:
+                raise InventoryCanonicalMismatch("inventory canonical identity mismatch")
+            with self.connect() as db:
+                self.upsert(task, connection=db)
+                db.execute("UPDATE inventory SET done=1,error_type='' WHERE seq=?", (seq,))
 
     # LLM: 恢复库存只按 pending 索引定位，大小恒有界；JSON 中只有宿主先写的定位字段，不是权威业务状态。
     # 函数用途: 读取一批精确 pending 记录供服务在 canonical guard 内修复。
@@ -441,6 +502,9 @@ class InventoryCanonicalMismatch(ValueError):
 # LLM: SQLite 连接前后复核原 no-follow FD 对应的路径；不存在的 sidecar 也必须在出现时保持普通私有单链接。
 # 函数用途: 拒绝索引文件、目录或 sidecar 被换成链接/其它身份，不放宽已有目录权限。
 def _verify_sqlite_files(workspace, root_fd, pinned):
+    if not nofollow_fs._supports_dir_fd():
+        _verify_portable_sqlite_files(workspace, root_fd, pinned)
+        return
     current = workspace.lstat()
     opened = os.fstat(root_fd)
     if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
@@ -465,6 +529,31 @@ def _verify_sqlite_files(workspace, root_fd, pinned):
             raise
         opened = os.fstat(descriptor)
         if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("private SQLite file identity changed")
+
+
+# LLM: 无FD平台只比较同源路径身份，仍拒绝目录/链接/reparse/多链接；没有fchmod时不套POSIX权限位。
+# 函数用途: 在SQLite连接和提交前复核便携路径，不持有阻碍Windows删除journal的文件句柄。
+def _verify_portable_sqlite_files(workspace, root_info, pinned):
+    current = nofollow_fs._portable_directory(workspace, (), create=False).lstat()
+    if ((current.st_dev, current.st_ino) != (root_info.st_dev, root_info.st_ino)
+            or getattr(current, "st_file_attributes", 0) & 0x400):
+        raise OSError("private SQLite directory identity changed")
+    main, identities = pinned[-1][0], dict(pinned)
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        path = Path(str(main) + suffix)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if suffix:
+                continue
+            raise
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
+            raise OSError("SQLite index must be a private regular single-link file")
+        opened = identities.get(path)
+        if opened is not None and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
             raise OSError("private SQLite file identity changed")
 
 

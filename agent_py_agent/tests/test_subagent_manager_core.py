@@ -585,3 +585,92 @@ def test_refreeze_preserves_task_identity_and_never_changes_published_task(tmp_p
         manager.base_service.refreeze_run(params=params, prepared=updated)
     assert asdict(created) == original
     assert _prepared_tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ["runs", "collaboration"])
+@pytest.mark.parametrize("has_fchmod", [True, False])
+def test_private_indexes_work_without_directory_fds(tmp_path, monkeypatch, kind, has_fchmod):
+    """使用真实SQLite；模拟Windows权限位并确认种子FD在连接前已经关闭。"""
+    import os
+    import sqlite3
+    import stat
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.collaboration import history_index
+    from agent_py_agent.agent.collaboration.store import CollaborationStore
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+    from agent_py_agent.agent.subagents.services.persistence import run_index
+
+    module = run_index if kind == "runs" else history_index
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
+    if not has_fchmod:
+        monkeypatch.setattr(module, "os", SimpleNamespace(**{key: value for key, value in vars(os).items()
+                                                           if key != "fchmod"}))
+        real_lstat = Path.lstat
+
+        def windows_mode(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if ".sqlite3" not in path.name:
+                return info
+            values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            values["st_mode"] = stat.S_IFMT(info.st_mode) | 0o666
+            return SimpleNamespace(**values)
+
+        monkeypatch.setattr(Path, "lstat", windows_mode)
+    original_seed, original_connect = module.open_private_lock_beneath, sqlite3.connect
+    descriptors = []
+
+    def seed(*args, **kwargs):
+        descriptor = original_seed(*args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor
+
+    def connect(*args, **kwargs):
+        for descriptor in descriptors:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+        descriptors.clear()
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(module, "open_private_lock_beneath", seed)
+    monkeypatch.setattr(module, "sqlite3", SimpleNamespace(connect=connect))
+    if kind == "runs":
+        manager = SubAgentManager(tmp_path)
+        index = manager.persistence.run_index
+    else:
+        store = CollaborationStore(tmp_path)
+        index = store.history_index
+    with index.connect() as db:
+        db.execute("CREATE TABLE portable_probe (value TEXT)")
+        db.execute("INSERT INTO portable_probe VALUES ('committed')")
+    with pytest.raises(RuntimeError, match="rollback probe"):
+        with index.connect() as db:
+            db.execute("INSERT INTO portable_probe VALUES ('rolled back')")
+            raise RuntimeError("rollback probe")
+    with index.connect() as db:
+        assert db.execute("SELECT value FROM portable_probe").fetchall() == [("committed",)]
+        if kind == "collaboration":
+            assert db.execute("PRAGMA foreign_keys").fetchone() == (1,)
+
+
+def test_run_index_backfill_without_directory_fds(tmp_path, monkeypatch):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+    from agent_py_agent.agent.subagents.services.persistence.run_index import SubagentRunIndex
+
+    run = tmp_path / "legacy-run"
+    run.mkdir()
+    task = SubAgentTask(id=run.name, goal="历史任务", thought="核验迁移", plan=["读取", "索引"])
+    (run / "task.json").write_text(json.dumps(asdict(task)), encoding="utf-8")
+    index = SubagentRunIndex(tmp_path)
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
+
+    def load(run_id):
+        return SubAgentTask(**json.loads((tmp_path / run_id / "task.json").read_text(encoding="utf-8")))
+
+    result = index.backfill(load)
+    assert result["loaded"] == 1 and result["complete"] and result["errors"] == []
+    assert index.known_ids([run.name]) == {run.name}

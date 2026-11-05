@@ -8,6 +8,7 @@ import stat
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from ..common import nofollow_fs
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     ensure_private_dir,
@@ -94,6 +95,10 @@ class CollaborationHistoryIndex:
     @contextmanager
     def connect(self):
         with locked_json_path(self.root / ".history-access"):
+            if not nofollow_fs._supports_dir_fd():
+                with self._connect_portable() as db:
+                    yield db
+                return
             with ExitStack() as resources:
                 root_fd = open_directory_beneath(self.root, (), require_dir_fd=True)
                 resources.callback(os.close, root_fd)
@@ -119,6 +124,37 @@ class CollaborationHistoryIndex:
                         _verify_files(self.root, root_fd, pinned)
                 finally:
                     db.close()
+
+    # LLM: 便携路径先校验并关闭种子FD，避免Windows因外部句柄无法删除journal；POSIX分支不变。
+    # 函数用途: 为无dir_fd平台保留外键、提交、回滚与连接关闭合同。
+    @contextmanager
+    def _connect_portable(self):
+        root_info = nofollow_fs._portable_directory(self.root, (), create=False).lstat()
+        pinned = []
+        for suffix in ("-journal", "-wal", "-shm", ""):
+            path = Path(str(self.path) + suffix)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                if suffix:
+                    continue
+            descriptor = open_private_lock_beneath(self.root, (path.name,))
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(descriptor, 0o600)
+                pinned.append((path, os.fstat(descriptor)))
+            finally:
+                os.close(descriptor)
+        _verify_files(self.root, root_info, pinned)
+        db = sqlite3.connect(self.path.absolute().as_uri() + "?mode=rw", uri=True, timeout=5)
+        try:
+            db.execute("PRAGMA foreign_keys=ON")
+            _verify_files(self.root, root_info, pinned)
+            with db:
+                yield db
+                _verify_files(self.root, root_info, pinned)
+        finally:
+            db.close()
 
     # LLM: 原子更新一个身份及活跃投影；legacy 可恢复 retired 身份，但不能覆盖 native 的后来登记。
     # 函数用途: 按精确 agent_id 登记能力，并同步独立活跃投影。
@@ -437,6 +473,9 @@ def file_signature(path):
 # LLM: SQLite 路径需匹配 no-follow 预检 FD；缺 sidecar 允许正常提交删除，出现时仍须私有普通单链接。
 # 函数用途: 复核目录、数据库和 journal/WAL 的身份与私有权限。
 def _verify_files(root, root_fd, pinned):
+    if not nofollow_fs._supports_dir_fd():
+        _verify_portable_files(root, root_fd, pinned)
+        return
     current, opened = root.lstat(), os.fstat(root_fd)
     if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
         raise OSError("collaboration SQLite directory identity changed")
@@ -460,6 +499,31 @@ def _verify_files(root, root_fd, pinned):
             raise
         opened = os.fstat(descriptor)
         if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("collaboration SQLite file identity changed")
+
+
+# LLM: 便携路径保留普通单链接、reparse及目录/文件身份检查；仅无fchmod的平台不判断POSIX权限位。
+# 函数用途: 不持外部SQLite文件FD地复核主库和正常增删的sidecar。
+def _verify_portable_files(root, root_info, pinned):
+    current = nofollow_fs._portable_directory(root, (), create=False).lstat()
+    if ((current.st_dev, current.st_ino) != (root_info.st_dev, root_info.st_ino)
+            or getattr(current, "st_file_attributes", 0) & 0x400):
+        raise OSError("collaboration SQLite directory identity changed")
+    main, identities = pinned[-1][0], dict(pinned)
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        path = Path(str(main) + suffix)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if suffix:
+                continue
+            raise
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
+            raise OSError("collaboration SQLite must be a private regular single-link file")
+        opened = identities.get(path)
+        if opened is not None and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
             raise OSError("collaboration SQLite file identity changed")
 
 
