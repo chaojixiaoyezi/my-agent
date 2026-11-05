@@ -207,7 +207,8 @@ def test_perf_e_sidecar_registry_is_exact_and_never_creates_paths(tmp_path):
     assert callable(registry), "missing registered sidecar directories"
     expected = (home.owner_memory_dir, home.owner_memory_daily_dir, home.owner_memory_curator_runs_dir,
         home.owner_compact_dir, home.owner_cache_dir, home.owner_tmp_dir, home.owner_scheduler_dir,
-        *(home.owner_data_dir / name for name in ("decision", "context", "skill_learning", "skill_proposals")))
+        *(home.owner_data_dir / name for name in ("decision", "context", "skill_learning", "skill_proposals")),
+        home.owner_compact_dir / "conversations")
     assert registry(home) == expected
     before = {path for path in expected if path.exists()}
     module.reclaim_owner_orphan_lock_files(home)
