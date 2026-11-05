@@ -15,7 +15,14 @@ from .capability_verifier_consent import (
 )
 from .path_access_policy import PathAccessPolicy
 from .plugin_activation import PLUGIN_ENABLE_TOOL, PluginActivationRequest
-from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_activation_record import (
+    PluginActivation,
+    activation_catalog_digest,
+    catalog_digest_of,
+    pinned_catalog_json_from_tools,
+    pinned_tool_declarations,
+    plugin_catalog_digest,
+)
 from .plugin_content_activation import PluginContentActivation
 from .plugin_environment import prepare_plugin_environment
 from .plugin_environment_plan import plan_plugin_environment
@@ -35,12 +42,13 @@ from .plugin_permissions.enable import (
 )
 from .plugin_permissions.sandbox import policy_from_grant
 from .plugin_permissions.state import canonical_permission_json
-from .plugin_runtime import PluginMCPClient
+from .plugin_runtime import PluginMCPClient, plugin_tool_name
 from .plugin_runtime_facts import (
     PluginRuntimeError,
     PluginRuntimeFacts,
     confirmation_code,
     confirmation_details,
+    pack_mcp_confirmation_facts,
     resolve_plugin_runtime,
 )
 from .plugin_sandbox import (
@@ -84,6 +92,12 @@ class PluginEnablePolicy:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     scope_ceiling: PathAccessPolicy | None = field(default=None, kw_only=True)
     host_exclusive_roots: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
+    pack_mcp_enabled: bool = field(default=False, kw_only=True)
+    pack_mcp_idle_stop_seconds: int = field(default=600, kw_only=True)
+
+
+class _PackCatalogInvalid(ValueError):
+    """仅表示候选已确认退出后的目录规范化失败；清理未知不能进入此分类。"""
 
 
 # LLM: 管理候选只消费宿主固定安装快照和结构化策略；启用预检与运行时复用 plugin_sandbox_spec，不另建平台规则。
@@ -102,11 +116,14 @@ class PluginEnableTool(BaseTool):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
         self.events_enabled, self.events_owner_allowed = policy.events_enabled, policy.events_owner_allowed
+        self.pack_mcp_enabled = policy.pack_mcp_enabled is True
+        self.pack_mcp_idle_stop_seconds = policy.pack_mcp_idle_stop_seconds
         self.host_credential_env_names = policy.host_credential_env_names
         # 宿主独占来源在这里冻结，不依赖只有老格式才有的 context；v8 与宽读候选同样消费。
         self.host_exclusive_roots = tuple(Path(path) for path in policy.host_exclusive_roots)
         # v8 事件/收紧插件（permissions 非空）强制进沙箱，不管全局 plugin_process_sandbox 开没开（B7 安全底座）。
         self._is_v8 = installation is not None and installation.manifest.permissions is not None
+        self._is_pack_runtime = installation is not None and installation.manifest.has_mcp_runtime
         # v1–v6 可执行包（permissions 为空、不是内容包）：宿主冻结的授权输入在这里组装成原授权上下文。
         self._is_legacy = (installation is not None and installation.manifest.permissions is None
                            and not installation.manifest.is_content_only)
@@ -119,6 +136,9 @@ class PluginEnableTool(BaseTool):
         # v8 与旧版可执行插件一样要构造运行计划（它们都有 entry、不是内容包）；老格式不管激活状态都要预测撤旧后的目标。
         needs_plan = installation is not None and ((self._is_v8 and installation.activation is None)
                                                    or self._is_legacy)
+        # 关闭或不支持的 owner 连只读运行解析/计划都不做；execute 返回专用 not_started。
+        needs_plan = needs_plan and (not self._is_pack_runtime
+                                    or (self.pack_mcp_enabled and owner_identity == OwnerIdentity.local_main()))
         self.runtime, self.runtime_error = _runtime_facts(installation) if needs_plan else (None, "")
         if needs_plan and not self.runtime_error:
             self._prepare_authorization(installation)
@@ -166,6 +186,8 @@ class PluginEnableTool(BaseTool):
                                  "unknown" if exc.commit_state == "unknown" else "failed", exc.commit_state)
         except EnvironmentPreparationError as exc:
             return self._failure(exc.reason, "TOOL_EXECUTION_FAILED", "failed" if exc.exit_confirmed else "unknown")
+        except _PackCatalogInvalid:
+            return self._failure("pack_catalog_invalid", "MCP_PACK_CATALOG_INVALID", "failed")
         except MCPError:
             return self._failure("plugin_endpoint_failed", "TOOL_EXECUTION_FAILED", "failed")
         except BackgroundLaunchError as exc:
@@ -236,14 +258,18 @@ class PluginEnableTool(BaseTool):
         self._require_authorization()
         prepare_plugin_environment(self.owner, package, operation)
         operation.authorize()
-        tools, cleanup = self._candidate(operation, prepared.installation)
+        tools, cleanup, pinned = self._candidate(operation, prepared.installation)
         self._require_authorization()
         operation.authorize()
-        active = replace(prepared.installation.activation, phase="active", catalog_sha256=plugin_catalog_digest(entry.manifest))
+        digest = (catalog_digest_of(pinned_tool_declarations(pinned)) if pinned is not None
+                  else plugin_catalog_digest(entry.manifest))
+        active = replace(prepared.installation.activation, phase="active", catalog_sha256=digest, pinned_catalog_json=pinned)
+        assert digest == activation_catalog_digest(entry.manifest, active)
         published = store.change_activation(PluginActivationRequest(self.plan.operation_id, prepared.installation.revision, active))
         return {"plugin_id": entry.manifest.plugin_id, "enabled": True, "activation_id": active.activation_id,
                 "revision": published.installation.revision, "environment_ref": self.plan.environment_ref,
-                "tools": [tool.model_spec.name for tool in tools], "commit_state": published.commit_state,
+                "tools": tools if pinned is not None else [tool.model_spec.name for tool in tools],
+                "commit_state": published.commit_state,
                 **({"previous_cleanup": self.previous_cleanup} if self.previous_cleanup else {}),
                 "candidate_cleanup": {"session_id": cleanup.record["session_id"], "confirmed": cleanup.confirmed,
                                       "terminations": [asdict(item) for item in cleanup.terminations]}}
@@ -255,17 +281,38 @@ class PluginEnableTool(BaseTool):
         client = PluginMCPClient(self.owner, installation, process_sandbox=self.process_sandbox,
                                  host_credential_env_names=self.host_credential_env_names,
                                  host_exclusive_roots=self.host_exclusive_roots)
+        pinned_mode = (installation.manifest.has_mcp_runtime
+                       and installation.manifest.mcp_servers[0].tool_catalog == "pinned_on_enable")
+        pinned = None
         try:
-            self._require_authorization()
-            transport = client.start()
-            tools = client.discover_tools(transport)
-            self._require_authorization()
-            operation.authorize()
-        finally:
-            cleanup = client.stop()
-            if not cleanup.confirmed:
-                raise EnvironmentPreparationError("candidate_cleanup_unconfirmed", started=True, exit_confirmed=False)
-        return tools, cleanup
+            try:
+                self._require_authorization()
+                transport = client.start()
+                if pinned_mode:
+                    try:
+                        infos = client.list_tools(transport=transport)
+                    except MCPError as exc:
+                        # 重名/坏 schema 在 MCP 解析层已拒绝；只转换目录阶段的协议错误，启动和超时仍原分类。
+                        if exc.code == "MCP_PROTOCOL_ERROR":
+                            raise ValueError("MCP_PACK_CATALOG_INVALID") from exc
+                        raise
+                    pinned = pinned_catalog_json_from_tools(infos)
+                    tools = [plugin_tool_name(installation.manifest.plugin_id, item.name)
+                             for item in pinned_tool_declarations(pinned)]
+                else:
+                    tools = client.discover_tools(transport)
+                self._require_authorization()
+                operation.authorize()
+            finally:
+                cleanup = client.stop()
+                if not cleanup.confirmed:
+                    raise EnvironmentPreparationError("candidate_cleanup_unconfirmed", started=True, exit_confirmed=False)
+        except ValueError as exc:
+            # finally 的退出证明先于错误转换；未确认清理仍由原异常进入 UNKNOWN，不能冒报 failed。
+            if pinned_mode and exc.args == ("MCP_PACK_CATALOG_INVALID",):
+                raise _PackCatalogInvalid() from exc
+            raise
+        return tools, cleanup, pinned
 
     # LLM: 老格式在候选启动与发布前复核固定授权；v8 没有这条授权账，保持原 B7 门。
     # 函数用途: 复核本次授权事实未变，变化时拒绝继续，不自动扩权或换代。
@@ -307,6 +354,11 @@ class PluginEnableTool(BaseTool):
             details["confirm_code"] = confirmation_code(details)
             return {**details, "confirm_command": permission_confirm_command(details)}
         details = confirmation_details(self.installation.manifest, package.sha256, self.runtime, inspect_plugin_files(package))
+        if self._is_pack_runtime:
+            pack = pack_mcp_confirmation_facts(self.installation.manifest, idle_stop_seconds=self.pack_mcp_idle_stop_seconds)
+            # 清单没有文件长度；纯投影不读盘，实际大小沿同次已核包字节补入，全部事实一起进确认码。
+            pack["files"] = details["files"]
+            details = {**details, **pack}
         return {**details, "confirm_code": confirmation_code(details)}
 
     # LLM: 失败保存旧代清理事实，UNKNOWN 不洗成未发生；不回显配置或底层异常。
@@ -325,9 +377,14 @@ def _preflight_failure(tool, params: dict) -> ToolHandlerOutcome | None:
         return tool._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
     if tool.installation is None or tool.installation.manifest.plugin_id != params["plugin"]:
         return tool._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
-    if tool._is_v8 and not tool.events_enabled:
+    is_pack_runtime = getattr(tool, "_is_pack_runtime", False)
+    if is_pack_runtime and not tool.pack_mcp_enabled:
+        return tool._failure("pack_mcp_disabled", "PACK_MCP_DISABLED", "not_started")
+    if is_pack_runtime and getattr(tool.owner, "identity", OwnerIdentity.local_main()) != OwnerIdentity.local_main():
+        return tool._failure("pack_mcp_owner_unsupported", "PACK_MCP_OWNER_UNSUPPORTED", "not_started")
+    if tool._is_v8 and not is_pack_runtime and not tool.events_enabled:
         return tool._failure("plugin_events_disabled", "TOOL_EXECUTION_FAILED", "not_started")
-    if tool._is_v8 and not tool.events_owner_allowed:
+    if tool._is_v8 and not is_pack_runtime and not tool.events_owner_allowed:
         return tool._failure("plugin_events_owner_not_allowed", "TOOL_EXECUTION_FAILED", "not_started")
     if tool.runtime_error:
         return tool._failure(tool.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")

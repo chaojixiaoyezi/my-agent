@@ -10,6 +10,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from ...capability.pack_tool_grant import pack_linked_tool_names
+from ...capability.skill_snapshot import SkillSnapshotError
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, bool_value, string_list
 from ...conversation.authority import (
     CONVERSATION_EXECUTION_CWD_ATTR,
@@ -305,6 +307,15 @@ def _role_policy(
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
     else:
         allowed_tools = leaf_allowed_tools(allowed_tools)
+    # 联动只是候选，不改只读/宿主精确清单；缺少冻结快照时少授工具，后续仍取父级交集。
+    if raw_params.get("_exact_allowed_tools") is not True and str(raw_params.get("tool_preset") or "") != "read_only":
+        snapshot = getattr(agent, "current_skill_snapshot", None)
+        if callable(snapshot):
+            try:
+                linked = pack_linked_tool_names(snapshot(), string_list(raw_params.get("allowed_skills"), TOOL_TEXT_LIST_OPTIONS))
+            except SkillSnapshotError:
+                linked = ()
+            allowed_tools = list(dict.fromkeys([*allowed_tools, *linked]))
     allowed_tools = _within_parent_tool_authority(agent, allowed_tools)
     from ...conversation.im_delegation_delivery import current_delegated_delivery_task
 
@@ -575,6 +586,9 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _inherit_audit_guarantee(attrs, agent)
     _clamp_service_window_to_audit_deadline(attrs)
     _bind_host_owned_selection(attrs, raw_params, agent)
+    # 宿主由本次创建入口固定隐式联动边界，覆盖模型同名属性；后续仅授文档不能悄悄扩张只读/精确工具表。
+    attrs["pack_linked_tools_allowed"] = (raw_params.get("_exact_allowed_tools") is not True
+                                          and str(raw_params.get("tool_preset") or "") != "read_only")
     return attrs
 
 

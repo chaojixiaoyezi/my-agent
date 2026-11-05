@@ -214,6 +214,10 @@ USER_SETTINGS_BOUNDARY_KEYS = frozenset(
      "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled",
      "capability_pack_host_verification_enabled", "action_candidate_auto_execute_enabled",
      "computer_use_observation_enabled", "plugin_events_enabled",
+     # 包内 MCP 服务的启用安全边界，只允许用户在 /settings 修改。
+     "capability_pack_mcp_enabled",
+     # 包服务驻留期限是资源安全边界，模型不能取消空闲回收。
+     "capability_pack_mcp_idle_stop_seconds",
      # learnpack：能力包、插件两个"自动装"开关；打开等于让她不经确认安装，开关只给管理员。
      "capability_pack_self_install_enabled", "plugin_self_install_enabled",
      # B5：收紧征询的等待预算。它登记成边界是为了防模型放大预算（模型 set/reset/revert 一律拒），

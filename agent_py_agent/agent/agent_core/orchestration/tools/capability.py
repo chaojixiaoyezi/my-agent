@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ....capability.pack_tool_grant import pack_linked_tool_names
 from ....runtime_errors import runtime_error_report
 from ....subagents.authorization_gate import (
     OperationRequest,
@@ -242,18 +243,25 @@ class ResolveCapabilityRequestsTool(BaseTool):
                 and not getattr(request, "requested_commands", []) and not getattr(request, "requested_skills", [])):
             tools = self._existing_directory_tools(ctx.task)
         requested_tool_names = list(dict.fromkeys([*tools, *mcp_tools]))
+        requested_skills = _string_list(getattr(request, "requested_skills", []))
+        # 原始创建限制是宿主事实，旧记录缺证明时不隐式加危险工具；显式申请仍沿原父权限裁决。
+        linked_allowed = (getattr(ctx.task, "attributes", {}).get("pack_linked_tools_allowed") is True)
+        linked = (pack_linked_tool_names(self.agent.current_skill_snapshot(), requested_skills)
+                  if requested_skills and linked_allowed else ())
         authority = direct_parent_tool_authority(
             self.agent,
             ctx.task,
-            requested_tool_names,
+            [*requested_tool_names, *linked],
         )
-        if authority.unavailable_tools:
+        # 显式工具缺权仍拒绝；包工具只是联动候选，父级不持有的静默剔除，不影响文档授权。
+        unavailable = [name for name in authority.unavailable_tools if name in requested_tool_names]
+        if unavailable:
             return _refusal(request.id, "MISSING_CAPABILITY", "申请工具超出直属父级当前可用工具快照，未授权。",
-                            {"unavailable_tools": list(authority.unavailable_tools),
+                            {"unavailable_tools": unavailable,
                              "parent_tool_authority": authority.to_dict()})
         skills, capability_cards, skill_error = _resolved_skill_grant(
             self.agent,
-            _string_list(getattr(request, "requested_skills", [])),
+            requested_skills,
         )
         if skill_error:
             return _refusal(request.id, "MISSING_CAPABILITY", skill_error)
@@ -262,7 +270,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
             "request_id": request.id,
             "status": "GRANTED",
             "path_scope": allowed_roots,
-            "tools": tools,
+            "tools": list(dict.fromkeys([*tools, *(name for name in linked if name in authority.grantable_tools)])),
             "mcp_tools": mcp_tools,
             "skills": skills,
             "capability_cards": capability_cards,

@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 
+from .capability_package_manifest import PACK_MCP_CONFIRMATION_KIND
 from .common.nofollow_fs import read_bytes_beneath
 from .common.strict_json import load_strict_json
 from .plugin_entry import host_platform_tag, platform_supported
@@ -196,9 +197,21 @@ def confirmation_code(details: dict) -> str:
     return hashlib.sha256(json.dumps(details, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
 
 
+def pack_mcp_confirmation_facts(manifest: object, *, idle_stop_seconds: int) -> dict:
+    """纯投影运行包声明，不读配置、环境或文件；字节长度由启用方的已核包快照补入。"""
+    server = manifest.mcp_servers[0]
+    return {"kind": PACK_MCP_CONFIRMATION_KIND, "package_id": manifest.plugin_id, "server": server.name,
+            "entry": server.entry.to_payload(), "files": [asdict(item) for item in manifest.runtime_files],
+            "network": server.network, "workspace_access": "none", "data_dir": f"plugins/data/{manifest.plugin_id}",
+            "tool_catalog": {"mode": server.tool_catalog, "tools": [tool.name for tool in server.tools]},
+            "per_call_approval": "dangerous", "idle_stop_seconds": idle_stop_seconds}
+
+
 # LLM: 只展示结构化确认事实，不据文本授权；v8 明示正文/参数/网络/强制沙箱，旧文案与文件截断不变。
 # 函数用途: 生成 TUI/IM 共用的启用前说明，末行给出绑定当前事实的确认命令。
 def confirmation_message(confirmation: dict) -> str:
+    if confirmation.get("kind") == PACK_MCP_CONFIRMATION_KIND:
+        return _pack_mcp_confirmation_message(confirmation)
     entry = confirmation.get("entry") or {}
     lines = ["启用前需要你确认：这个插件会以你本人的权限在本机运行下面的程序。",
              f"插件：{confirmation.get('plugin_id')} {confirmation.get('version')}（包摘要 {str(confirmation.get('package_sha256'))[:16]}…）"]
@@ -221,4 +234,37 @@ def confirmation_message(confirmation: dict) -> str:
         lines.append(f"  …… 另有 {len(files) - 20} 个文件")
     lines.append(f"确认无误后输入：/plugins enable {confirmation.get('plugin_id')} --confirm {confirmation.get('confirm_code')}")
     lines[-1:-1] = event_confirmation_lines(confirmation)
+    return "\n".join(lines)
+
+
+def _pack_mcp_confirmation_message(confirmation: dict) -> str:
+    """只渲染本次确认事实，不启动服务或解释正文作授权；旧插件文案不走此分支。"""
+    entry = confirmation.get("entry") or {}
+    lines = ["启用前需要你确认：这个能力包带有 MCP 工具服务，将在强制系统沙箱内运行。",
+             f"能力包：{confirmation.get('package_id')} {confirmation.get('version')}；服务：{confirmation.get('server')}"]
+    interpreter = confirmation.get("interpreter")
+    if interpreter:
+        lines.append(f"入口：用系统解释器 {interpreter.get('name')}（{interpreter.get('path')}，"
+                     f"sha256 {interpreter.get('sha256')}）运行随包程序 {entry.get('command')}")
+    else:
+        lines.append(f"入口：随包可执行程序 {entry.get('command')}")
+    if entry.get("args"):
+        lines.append("固定参数：" + " ".join(entry["args"]))
+    lines.append(f"本机平台：{confirmation.get('platform')}（包声明：{'、'.join(confirmation.get('declared_platforms') or [])}）")
+    # v10 没有订阅或收紧门；复用事件确认的网络、沙箱和读范围，明确省去其首行“订阅事件”。
+    lines.extend(event_confirmation_lines(confirmation)[1:])
+    lines.append(f"不能读写工作区；只能写自己的数据目录 {confirmation.get('data_dir')}。")
+    files = confirmation.get("files") or []
+    lines.append(f"运行文件（{len(files)} 个；不含能力文档）：")
+    lines.extend(f"  - {item.get('path')}  {'可执行' if item.get('executable') else '数据'}  {item.get('size')} 字节"
+                 f"  sha256 {item.get('sha256')}" for item in files)
+    catalog = confirmation.get("tool_catalog") or {}
+    if catalog.get("mode") == "declared":
+        lines.append("工具清单：" + "、".join(catalog.get("tools") or []))
+    else:
+        lines.append("工具清单将在启用时读取并固定；此后目录变化会被拒绝，不会自动接受新工具。")
+    lines.append("每次工具调用都视为危险动作，按你当前的审批设置执行；本次启用确认不替代逐次调用审批。")
+    idle = confirmation.get("idle_stop_seconds")
+    lines.append("空闲停止：永不因空闲停止。" if idle == 0 else f"空闲停止：空闲 {idle} 秒后停止服务，不停用能力包。")
+    lines.append(f"确认无误后输入：/plugins#{confirmation.get('package_id')} 启用 {confirmation.get('confirm_code')}")
     return "\n".join(lines)
