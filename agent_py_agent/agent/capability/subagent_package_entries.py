@@ -6,6 +6,7 @@ from concurrent.futures import CancelledError
 from dataclasses import replace
 
 from ..common.cancellation import ToolCancelled
+from ..tooling.tool_search_state import merge_loop_loaded_tool_names
 from .package_selection_context import (
     prepare_package_entry_context,
     record_package_entry_usage,
@@ -89,6 +90,11 @@ def prepare_subagent_package_entries(agent: object, params: object) -> None:
         if context.text:
             if record_runtime_facts_turn_ir(params, context.text, source="capability_package_entries") is True:
                 record_package_entry_usage(agent, context)
+                snapshot = agent.current_skill_snapshot()
+                packages = [snapshot.resolve_package(ref["package_id"]) for ref in _authorized_references(task, snapshot)]
+                merge_loop_loaded_tool_names(params, [name for package in packages
+                    if package is not None and package.mcp_runtime == "on_demand"
+                    for name in package.mcp_tool_names if name in task.allowed_tools])
         if context.warning_codes:
             record_runtime_facts_turn_ir(params, "能力包入口准备提示：" + ", ".join(context.warning_codes),
                                          source="capability_package_entry_warning")

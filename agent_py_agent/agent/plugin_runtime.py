@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from .capability.agents_source_processes import (
 )
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
+from .plugin_activation_record import installation_tool_declarations, pinned_catalog_json_from_tools
 from .plugin_activation_ref import PluginActivationRef
 from .plugin_entry import FILES_DIRECTORY
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
@@ -37,8 +40,19 @@ from .plugin_sandbox import (
     sandboxed_plugin_argv,
 )
 from .tooling.input_schema import canonicalize_tool_input_schema
-from .tooling.mcp_client import MCPError, MCPServerConfig, MCPStdioClient, sanitize_credentials
-from .tooling.mcp_registration import MCPProxyTool, build_proxy_tool, sanitize_name_component
+from .tooling.mcp_client import (
+    MCPError,
+    MCPServerConfig,
+    MCPStdioClient,
+    MCPToolInfo,
+    sanitize_credentials,
+)
+from .tooling.mcp_registration import (
+    MCPProxyTool,
+    build_proxy_tool,
+    disconnect_failed_mcp_transport,
+    sanitize_name_component,
+)
 from .tooling.models import (
     ResourceScopePolicy,
     ToolAvailability,
@@ -49,6 +63,9 @@ from .tooling.observation_binding import ObservationBinding
 from .tooling.process_session_store import ProcessSessionStore, process_session_store_root
 from .workspace_read_context import WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION
 from .workspace_write_context import WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_VERSION
+
+# 能力包握手等待上限（秒）；仍在来源边界内，D9 后续再缩小锁的持有范围。
+PACK_MCP_CONNECT_TIMEOUT_SECONDS: float = float("10.0")
 
 
 # LLM: 展示名由完整大小写敏感身份派生，截断只作用于可读部分；发布还必须检测实际名称冲突，不能覆盖核心工具。
@@ -80,14 +97,16 @@ class PluginProxyTool(MCPProxyTool):
     # LLM: 配置和代次只取固定 client；原表坏、撤销或换代都按不可用处理，不追随最新安装。
     # 函数用途: 只读检查原插件和已握手连接能否进入本轮目录。
     def availability(self) -> ToolAvailability:
-        if self._activation_revoked():
+        ref = getattr(self.client, "activation_ref", None)
+        if ref is not None and not ref.available():
             return ToolAvailability.unavailable("原插件已停用或激活不可用")
         return super().availability()
 
     # LLM: 先复核原激活（一次有界安装表读取），失效报 PLUGIN_ACTIVATION_UNAVAILABLE；再复核连接内存状态。不启动进程、不追随新代次。
     # 函数用途: 审批前/批准后执行前复核原插件是否仍启用且连接仍在。
     def precheck_availability(self) -> ToolAvailability:
-        if self._activation_revoked():
+        ref = getattr(self.client, "activation_ref", None)
+        if ref is not None and not ref.available():
             return ToolAvailability.unavailable("原插件已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
         return super().precheck_availability()
 
@@ -137,6 +156,8 @@ class PluginProxyTool(MCPProxyTool):
     #   写入上下文只给协商了写入扩展、且本工具声明 mutating/dangerous 的调用；只读工具永远拿不到写权限。
     # 函数用途: 为支持当前扩展版本的插件生成本次工作区读取/写入元数据。
     def _request_meta(self, context: ToolInvocationContext | None) -> dict[str, object] | None:
+        if getattr(self.client, "lazy", False):
+            return None
         meta: dict[str, object] = {}
         if self._negotiated(WORKSPACE_READ_EXTENSION, WORKSPACE_READ_VERSION):
             if context is None or context.workspace_read_context is None:
@@ -166,6 +187,53 @@ class PluginProxyTool(MCPProxyTool):
             if tool.name == self.remote_tool:
                 return tool.requested_effect
         return "read_only"
+
+
+class PackMCPProxyTool(PluginProxyTool):
+    """稳定的无连接门面；首次调用才启动，所有业务请求仍委托固定 transport 的已验代理。"""
+
+    def availability(self) -> ToolAvailability:
+        if not self.client.activation_ref.available():
+            return ToolAvailability.unavailable("原能力包已停用或激活不可用", error_code="PLUGIN_ACTIVATION_UNAVAILABLE")
+        if self.client.drift:
+            return ToolAvailability.unavailable("能力包工具目录已变化，须重新启用", error_code="MCP_PACK_CATALOG_DRIFT")
+        return ToolAvailability.ready()
+
+    def precheck_availability(self) -> ToolAvailability:
+        available = self.availability()
+        if not available.available:
+            return available
+        if time.monotonic() < self.client.retry_at:
+            return ToolAvailability.unavailable("能力包服务暂不可用", error_code="MCP_PACK_SERVER_UNAVAILABLE")
+        return available
+
+    def _execute(self, params: dict[str, object], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
+        if self._activation_revoked():
+            return self._not_started("PLUGIN_ACTIVATION_UNAVAILABLE")
+        # 在 ensure 之前预留在途名额，封住 ensure 返回与计数递增之间的 idle-stop 窗口。
+        with self.client._lazy_lock:
+            self.client._in_flight += 1
+        try:
+            transport = self.client.ensure_started()
+            with self.client._lazy_lock:
+                bound = next((tool for tool in self.client.validated_tools
+                              if tool.remote_tool == self.remote_tool and tool.transport is transport), None)
+            if bound is None:
+                return self._not_started("MCP_PACK_SERVER_UNAVAILABLE")
+            return bound._execute_with_meta(params, context, None)
+        except MCPError as exc:
+            return self._not_started(exc.code)
+        finally:
+            with self.client._lazy_lock:
+                self.client._in_flight -= 1
+                self.client.last_used = time.monotonic()
+
+    def _not_started(self, code: str) -> ToolHandlerOutcome:
+        """只描述门面尚未发业务请求的拒绝，不覆盖已发送请求的 UNKNOWN。"""
+        return ToolHandlerOutcome(
+            self.model_spec.name, False, json.dumps({"error": code}), error_code="TOOL_UNAVAILABLE",
+            reported_error_code=code, effect_outcome="not_started",
+        )
 
 
 PLUGIN_DATA_DIR_ENV = "MY_AGENT_PLUGIN_DATA_DIR"
@@ -240,15 +308,26 @@ class PluginMCPClient(MCPStdioClient):
                  process_sandbox: bool = False, host_credential_env_names: frozenset[str] = frozenset(),
                  host_exclusive_roots: tuple[Path, ...] = ()):
         self.runtime_repo = runtime_repo
+        self.lazy = bool(getattr(installation.manifest, "has_mcp_runtime", False))
+        self._lazy_lock = threading.Lock()
+        self.attempts, self.retry_at = 0, 0.0
+        self.drift = False
+        self._in_flight = 0
+        self.last_used = time.monotonic()
         # 首次启动与重连都只用构造时冻结的这份来源集合；重连沿 _source_sandbox_spec，不重新推导。
         self._host_exclusive_roots = tuple(Path(path) for path in (host_exclusive_roots or ()))
         activation = installation.activation
         if activation is None or activation.phase not in {"preparing", "active"}:
             raise ValueError("插件没有可启动的固定激活")
         self.activation_ref = PluginActivationRef.from_owner(owner, installation.manifest.plugin_id, activation.activation_id)
-        current = self.activation_ref.require(allow_preparing=True)
-        if current != installation:
-            raise ValueError("插件安装已变化")
+        if self.lazy and activation.phase == "active":
+            # 构造只生成展示门面，可复用同表已解码投影；实际启动与发送仍鲜活 require。
+            if not self.activation_ref.available():
+                raise ValueError("能力包激活已不可用")
+        else:
+            current = self.activation_ref.require(allow_preparing=True)
+            if current != installation:
+                raise ValueError("插件安装已变化")
         environment = owner.plugins_dir / "environments" / activation.plan.environment_ref
         command, args, cwd = _launch_argv(owner, installation.manifest, environment, activation.plan.interpreter_fingerprint)
         self._source_raw_argv = (command, *args)
@@ -291,7 +370,69 @@ class PluginMCPClient(MCPStdioClient):
             host_credential_env_names=frozenset(host_credential_env_names),
             catalog_category="plugins",
         ), activation=self.activation_ref)
+        if self.lazy:
+            self.config.connect_timeout = PACK_MCP_CONNECT_TIMEOUT_SECONDS
+        self.pack_tools: tuple[PackMCPProxyTool, ...] = tuple(
+            self._proxy_for_info(MCPToolInfo(tool.name, tool.description, tool.input_schema), None, facade=True)
+            for tool in installation_tool_declarations(installation)
+        ) if self.lazy else ()
         register_source_registry(self)
+
+    def ensure_started(self) -> object:
+        """一把客户端锁串行完成启动/发现/发布；只尝试一次，撤销门和原资源清理不得被缓存绕过。"""
+        with self._lazy_lock:
+            if self.drift:
+                raise MCPError("能力包目录已变化，须重新启用", code="MCP_PACK_CATALOG_DRIFT", effect_outcome="not_started")
+            if time.monotonic() < self.retry_at:
+                raise MCPError("能力包服务处于退避期", code="MCP_PACK_SERVER_UNAVAILABLE", effect_outcome="not_started")
+            try:
+                self.activation_ref.require()
+            except (OSError, ValueError) as exc:
+                raise MCPError("能力包激活已不可用", code="PLUGIN_ACTIVATION_UNAVAILABLE", effect_outcome="not_started") from exc
+            if self.is_running() and not self.tools_changed and self.validated_tools:
+                transport = self.connection()
+                if all(tool.transport is transport for tool in self.validated_tools):
+                    return transport
+            # 已验连接在调用间崩溃：先记录一次退避，不让其它工具或 prepare 承担重启成本。
+            if not self.is_running() and self.validated_tools and not self.attempts:
+                self.validated_tools = ()
+                self._advance_lazy_retry()
+                raise MCPError("能力包服务已退出", code="MCP_PACK_SERVER_UNAVAILABLE", effect_outcome="not_started")
+            transport = None
+            try:
+                transport = self.start() if self._transport is None else self.reconnect()
+                tools = self.discover_tools(transport)
+                self.publish_discovered_tools(transport, tools)
+                self.attempts, self.retry_at = 0, 0.0
+                return transport
+            except Exception as exc:
+                self.validated_tools = ()
+                if transport is not None:
+                    disconnect_failed_mcp_transport(self, transport)
+                if isinstance(exc, MCPError) and exc.code == "MCP_PACK_CATALOG_DRIFT":
+                    self.drift = True
+                    self.stop()
+                    raise
+                self._advance_lazy_retry()
+                code = "PLUGIN_ACTIVATION_UNAVAILABLE" if not self.activation_ref.available() else "MCP_PACK_SERVER_UNAVAILABLE"
+                raise MCPError("能力包服务暂不可用", code=code, effect_outcome="not_started") from exc
+
+    def _advance_lazy_retry(self) -> None:
+        """调用方持 lazy 锁；退避与普通 MCP 同公式，只属于这一个固定激活。"""
+        self.attempts += 1
+        self.retry_at = time.monotonic() + min(60.0, float(2 ** min(self.attempts - 1, 6)))
+
+    def idle_stop_if_due(self, now, idle_stop_seconds):
+        """运行边界精确回收空闲 transport，保留客户端；永久 stop 事件不能清除或复活。"""
+        with self._lazy_lock:
+            if (not self.lazy or not self.is_running() or self._in_flight or idle_stop_seconds <= 0
+                    or now - self.last_used < idle_stop_seconds):
+                return None
+            transport = self.connection()
+            receipt = self.disconnect(transport=transport)
+            if receipt.confirmed:
+                self.validated_tools = ()
+            return receipt
 
     # LLM: 先拿来源协调锁、再由原MCP取连接锁；只在无旧transport时从未包装argv重建最新投影，不重绑活连接。
     # 函数用途: 鲜活复核固定激活和来源版本后启动插件，旧策略失效须原资源清理再重连。
@@ -341,31 +482,42 @@ class PluginMCPClient(MCPStdioClient):
     # 函数用途: 验证当前服务确实提供所安装的工具，并沿原 MCP 代理生成受控能力。
     def discover_tools(self, transport) -> tuple[PluginProxyTool, ...]:
         actual = self.list_tools(transport=transport)
-        declared = {tool.name: tool for tool in self.installation.manifest.tools}
+        declared = {tool.name: tool for tool in installation_tool_declarations(self.installation)}
+        code = "MCP_PACK_CATALOG_DRIFT" if self.lazy else "MCP_PROTOCOL_ERROR"
+        pin = getattr(self.installation.activation, "pinned_catalog_json", None)
+        if pin is not None:
+            try:
+                if pinned_catalog_json_from_tools(actual) != pin:
+                    raise ValueError("固定目录已变化")
+            except ValueError as exc:
+                raise MCPError("能力包固定目录已变化", code=code, effect_outcome="not_started") from exc
         if len(actual) != len(declared) or {tool.name for tool in actual} != set(declared):
-            raise MCPError("插件工具集合与安装声明不一致", code="MCP_PROTOCOL_ERROR")
+            raise MCPError("插件工具集合与安装声明不一致", code=code, effect_outcome="not_started")
         proxies = []
         for info in actual:
             expected = declared[info.name]
             try:
                 schema = canonicalize_tool_input_schema(info.input_schema)
             except (TypeError, ValueError) as exc:
-                raise MCPError("插件输入结构不可执行", code="MCP_PROTOCOL_ERROR") from exc
-            if (info.description != expected.description
+                raise MCPError("插件输入结构不可执行", code=code, effect_outcome="not_started") from exc
+            if ((pin is None and info.description != expected.description)
                     or schema != expected.input_schema):
-                raise MCPError("插件工具说明或输入结构与安装声明不一致", code="MCP_PROTOCOL_ERROR")
-            proxy = build_proxy_tool(self, self.config.name, info, transport=transport, catalog_category="plugins")
-            name = plugin_tool_name(self.installation.manifest.plugin_id, info.name)
-            # 观察 ID 与新鲜度复核需要宿主的 run/task/operation 身份：只经声明的宿主参数注入，模型参数不能冒充，发送前会被过滤
-            policy = replace(proxy.runtime_policy, resource_scopes=ResourceScopePolicy(
-                "declared", static_scopes=(f"logical:plugin:{self.activation_ref.scope.activation_id}:{info.name}",),
-            ), input_policy=replace(proxy.runtime_policy.input_policy, internal_parameters=tuple(dict.fromkeys(
-                (*proxy.runtime_policy.input_policy.internal_parameters, "__operation_id", "__run_scope")))))
-            proxies.append(PluginProxyTool(self, info.name, self._plugin_model_spec(proxy.model_spec, name, info),
-                                           policy, transport=transport))
+                raise MCPError("插件工具说明或输入结构与安装声明不一致", code=code, effect_outcome="not_started")
+            proxies.append(self._proxy_for_info(info, transport))
         if len({tool.model_spec.name for tool in proxies}) != len(proxies):
             raise MCPError("插件工具名称冲突", code="MCP_PROTOCOL_ERROR")
         return tuple(proxies)
+
+    def _proxy_for_info(self, info, transport, *, facade=False):
+        """门面与连接代理共用 Schema/危险效果/内部参数，只有连接所有权不同。"""
+        proxy = build_proxy_tool(self, self.config.name, info, transport=transport, catalog_category="plugins")
+        name = plugin_tool_name(self.installation.manifest.plugin_id, info.name)
+        policy = replace(proxy.runtime_policy, resource_scopes=ResourceScopePolicy(
+            "declared", static_scopes=(f"logical:plugin:{self.activation_ref.scope.activation_id}:{info.name}",),
+        ), input_policy=replace(proxy.runtime_policy.input_policy, internal_parameters=tuple(dict.fromkeys(
+            (*proxy.runtime_policy.input_policy.internal_parameters, "__operation_id", "__run_scope")))))
+        cls = PackMCPProxyTool if facade else PluginProxyTool
+        return cls(self, info.name, self._plugin_model_spec(proxy.model_spec, name, info), policy, transport=transport)
 
     # LLM: 只改模型可见的说明与检索提示（软信息），不改权限、效果或实现身份；插件 ID 与简介来自已安装包描述。
     #   让模型、tool_search 与能力推荐都能按"插件 <ID>"找到它，而不是只看到通用 MCP 文案和哈希后的工具名。
@@ -376,8 +528,11 @@ class PluginMCPClient(MCPStdioClient):
         description = f"插件 {plugin_id}（{' '.join(manifest.summary.split())}）的 {info.name} 工具。{info.description}"
         keywords = tuple(dict.fromkeys((*spec.hints.keywords, plugin_id, plugin_id.replace("-", "_"),
                                         *plugin_id.replace("_", "-").split("-"), info.name)))
-        return replace(spec, name=name, description=sanitize_credentials(description),
-                       hints=replace(spec.hints, keywords=keywords, provider_id="plugin:" + plugin_id))
+        hints = replace(spec.hints, keywords=keywords, provider_id="plugin:" + plugin_id)
+        if getattr(self, "lazy", False):
+            hints = replace(hints, provider_id="package:" + plugin_id, default_deferred=True,
+                            deferred_summary=manifest.summary)
+        return replace(spec, name=name, description=sanitize_credentials(description), hints=hints)
 
     # LLM: 缓存只在原连接/激活再次核验后整体替换；当前安装版本不能改变同连接代理的实现身份。
     # 函数用途: 为下一轮缓存完整工具贡献，调用方仍须在自己的权限视图中投影。

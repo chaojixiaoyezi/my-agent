@@ -11,6 +11,7 @@ from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
 from ..conversation.authority import CONVERSATION_WORKSPACE_TASK_ID_ATTR
 from ..conversation.task_promotion import promote_conversation_task_for_run
+from ..tooling.tool_search_state import merge_loop_loaded_tool_names
 from .package_selection import build_package_selection_material, select_capability_packages
 from .package_selection_authority import PackageSelectionAuthority, package_selection_model_digest
 from .package_selection_context import prepare_package_entry_context, record_package_entry_usage
@@ -118,6 +119,11 @@ def _commit_selection(agent, params, scope, authority, claim, result, window: in
     if context is not None and context.text:
         if record_runtime_facts_turn_ir(params, context.text, source="capability_package_entries") is True:
             record_package_entry_usage(agent, context)
+            # 选择/入口只决定本轮展示；仍核对冻结包引用，工具名再由冻结工具快照裁剪。
+            packages = [scope.skills.resolve_package(ref["package_id"]) for ref in result.selected_refs]
+            merge_loop_loaded_tool_names(params, [name for package in packages
+                if package is not None and package.to_ref() in result.selected_refs and package.mcp_runtime == "on_demand"
+                for name in package.mcp_tool_names])
     if warnings:
         _selection_warning(params, tuple(dict.fromkeys(warnings)))
 

@@ -1134,6 +1134,8 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
                           if config.enable_plugins and config.enable_tools else None),
             runtime_repo=getattr(getattr(agent, "subagents", None), "runtime_db", None),
             plugin_process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
+            capability_pack_mcp_enabled=getattr(config, "capability_pack_mcp_enabled", False) is True,
+            capability_pack_mcp_idle_stop_seconds=int(getattr(config, "capability_pack_mcp_idle_stop_seconds", 600)),
             tool_embedder=_build_tool_embedder(agent),
             operation_store=select_operation_store(agent),
             operation_store_required=True,

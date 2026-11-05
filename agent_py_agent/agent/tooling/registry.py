@@ -246,6 +246,9 @@ class ToolRegistryParams:
     plugin_gate_reviewer: Callable | None = None
     # 原 owner 权限状态的当次只读投影；不持久权限，缺省不获得管理员 Full Access。
     permission_state_reader: Callable[[], dict[str, object]] | None = None
+    # 只由 core 注入：能力包运行默认关闭；空闲回收以秒计，0 表示不自动回收。
+    capability_pack_mcp_enabled: bool = False
+    capability_pack_mcp_idle_stop_seconds: int = 600
 
 
 # LLM: 目录与搜索共用请求快照；归档只投影规范工具名，动作令牌留在宿主权限里，不更新发现账或加载schema。
@@ -1372,6 +1375,9 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
 
             synchronize_plugin_clients(registry)
         for client in list(getattr(registry, "_mcp_clients", ()) or ()):
+            if getattr(client, "lazy", False):
+                client.idle_stop_if_due(time.monotonic(), registry._construction_params.capability_pack_mcp_idle_stop_seconds)
+                continue
             if client.is_closed():
                 registry._mcp_retry_state.pop(id(client), None)
                 continue
@@ -1717,6 +1723,7 @@ def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlis
     if not specs:
         return ""
     shown = [spec.name for spec in specs if spec.name not in declared_names
+             and not spec.hints.provider_id.startswith("package:")
              and (presentation_shortlist_names is None or spec.name in presentation_shortlist_names)]
     names = ", ".join(sorted(shown))
     index = _declared_deferred_index(specs, declared_names)
@@ -1729,7 +1736,8 @@ def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlis
     notice += f"。本轮提示 {len(shown)} 个：{names}" if shown else "。本轮未列短名单，仍可按能力搜索。"
     # 被折叠的插件按插件列出（数量受已启用插件数约束），否则模型不知道用户点名的插件其实已安装
     plugins = sorted({spec.description.split("的 ", 1)[0] for spec in specs
-                      if spec.category == "plugins" and spec.name not in shown and spec.description.startswith("插件 ")})
+                      if spec.category == "plugins" and spec.name not in shown and spec.description.startswith("插件 ")
+                      and not spec.hints.provider_id.startswith("package:")})
     if plugins:
         notice += "\n  已启用但本轮未展开的插件（可用 tool_search 按插件 ID 加载）：" + "；".join(plugins)
     return notice + index
@@ -1738,7 +1746,8 @@ def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlis
 # LLM: 只列折叠清单里由工具声明收起的那些；用途句取工具自己的 deferred_summary，不读模型或用户文本，不授予任何权限。
 # 函数用途: 生成“默认收起的工具：名字：一句用途”索引，让模型知道这些工具存在、需要时用 tool_search 一步加载。
 def _declared_deferred_index(specs: list[ToolModelSpec], declared_names: frozenset[str]) -> str:
-    rows = sorted((spec.name, spec.hints.deferred_summary) for spec in specs if spec.name in declared_names)
+    rows = sorted((spec.name, spec.hints.deferred_summary) for spec in specs if spec.name in declared_names
+                  and not spec.hints.provider_id.startswith("package:"))
     if not rows:
         return ""
     return "\n  默认收起的工具（需要时用 tool_search 按名字或用途搜索，加载后即可调用）：" + "".join(
