@@ -340,6 +340,7 @@ def _spawn_gateway_process(supervisor, cmd: list[str], creationflags: int, start
     environment.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
     environment["MY_AGENT_HOME"] = str(supervisor._agent.home_paths.root.resolve())
     environment["MY_AGENT_CONFIG"] = str(Path(supervisor.config_path).expanduser().resolve())
+    environment["MY_AGENT_DAEMON_LOG_PATH"] = str(supervisor._paths.log)
     with supervisor._paths.log.open("ab") as log_file:
         return subprocess.Popen(
             cmd, cwd=str(Path(supervisor.config_path).resolve().parent.parent),

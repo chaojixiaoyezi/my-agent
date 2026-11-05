@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import re
+import stat
+import time
 from dataclasses import asdict, dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -16,7 +20,10 @@ from agent_py_agent.agent.common.nofollow_fs import (
     append_text_beneath,
     ensure_private_dir,
     last_append_pre_stamp,
+    list_names_beneath,
+    open_directory_beneath,
     open_readonly_file_beneath,
+    unlink_file_beneath,
 )
 
 from ..common.log_redaction import redact_sensitive_value
@@ -32,6 +39,97 @@ SCHEMA = "tool_call_telemetry.v1"
 PARTS = ("data", "telemetry")
 # 大于2 MiB的账本追加见证最多核验16 KiB头中尾历史窗口字节（<=2 MiB旧前缀整读核验全部锚点），新增记录另计。
 _MAX_APPEND_WITNESS_READ_BYTES = 16 * 1024
+# 工具遥测单卷封口前的最大字节数。
+TELEMETRY_VOLUME_MAX_BYTES = 16 * 1024 * 1024
+# 每个 owner 遥测目录允许保留的总字节数。
+TELEMETRY_TOTAL_MAX_BYTES = 256 * 1024 * 1024
+# 已封口遥测卷的最长保留天数。
+TELEMETRY_RETENTION_DAYS = 30
+# 同一进程两次检查遥测封口卷到期的最短间隔秒数。
+_TELEMETRY_RETENTION_CHECK_INTERVAL_SECONDS = 3600.0
+_SEALED = re.compile(r'^tool_calls\.(\d{19})\.jsonl$')
+_NEXT_RETENTION_CHECK: dict[str, float] = {}
+_LOGGER = logging.getLogger(__name__)
+
+
+# LLM: 调用者必须持有原.telemetry.lock；换代只动同owner目录，不回写读索引或重读历史正文。
+# 函数用途: 把活动卷封存并创建空的新卷，失败只告警，不能把已成功追加变成工具失败。
+def _seal_active_volume(home):
+    try:
+        if os.rename in os.supports_dir_fd:
+            descriptor = open_directory_beneath(home, PARTS)
+            try:
+                stamp = time.time_ns()
+                while True:
+                    name = f'tool_calls.{stamp:019d}.jsonl'
+                    try:
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    except FileNotFoundError:
+                        break
+                    stamp += 1
+                os.rename('tool_calls.jsonl', name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+                # rename已提交：先补活动卷，后面的目录同步失败也不能跳过它。
+                append_text_beneath(home, (*PARTS, 'tool_calls.jsonl'), '')
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        else:
+            from ..common.nofollow_fs import _portable_directory
+
+            directory = _portable_directory(home, PARTS, create=False)
+            stamp = time.time_ns()
+            while (directory / f'tool_calls.{stamp:019d}.jsonl').exists():
+                stamp += 1
+            os.rename(directory / 'tool_calls.jsonl', directory / f'tool_calls.{stamp:019d}.jsonl')
+            append_text_beneath(home, (*PARTS, 'tool_calls.jsonl'), '')
+    except OSError:
+        _LOGGER.warning('遥测卷封存或目录同步失败，保留已完成的追加', exc_info=True)
+
+
+# LLM: 元数据只从原owner锚定的目录读取；软链接、多链接和非普通文件不获得退休资格。
+# 函数用途: 取得候选卷的字节数，不读取遥测正文。
+def _volume_size(home, name):
+    descriptor = open_readonly_file_beneath(home, (*PARTS, name))
+    try:
+        info = os.fstat(descriptor)
+        return info.st_size if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 else None
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 只在原领域锁内调用；普通追加按小时跳过枚举，封卷强制检查；每次至多删除128个已封卷，永不删除活动卷或锁。
+# 函数用途: 按封卷时间和总字节数淘汰最旧遥测卷，存储错误只告警。
+def _retire_sealed_volumes(home, *, now, force):
+    key = str(home)
+    if not force and now < _NEXT_RETENTION_CHECK.get(key, 0):
+        return
+    _NEXT_RETENTION_CHECK[key] = now + _TELEMETRY_RETENTION_CHECK_INTERVAL_SECONDS
+    try:
+        volumes = []
+        for name in list_names_beneath(home, PARTS):
+            match = _SEALED.fullmatch(name)
+            if match is None:
+                continue
+            try:
+                size = _volume_size(home, name)
+            except OSError:
+                continue
+            if size is not None:
+                volumes.append((int(match[1]), name, size))
+        try:
+            active = _volume_size(home, 'tool_calls.jsonl') or 0
+        except FileNotFoundError:
+            active = 0
+        total = active + sum(size for _, _, size in volumes)
+        for deleted, (stamp, name, size) in enumerate(sorted(volumes)):
+            if deleted >= 128:
+                break
+            if total <= TELEMETRY_TOTAL_MAX_BYTES and stamp / 1e9 >= now - TELEMETRY_RETENTION_DAYS * 86400:
+                break
+            unlink_file_beneath(home, (*PARTS, name))
+            total -= size
+    except OSError:
+        _LOGGER.warning('遥测封卷退休失败，保留其余卷待后续检查', exc_info=True)
 
 
 # LLM: 结构化秘密整值替换，字符串先用公共规则脱敏再截断；未知对象不调用 repr。
@@ -273,6 +371,10 @@ class ToolTelemetryLedger:
                         or (pre_stamp is not None and pre_stamp != before)):
                     raw_after = None
                 note_owner_append(self._home, (*PARTS, 'tool_calls.jsonl'), before, after, raw_after=raw_after)
+            sealed = after is not None and after[2] >= TELEMETRY_VOLUME_MAX_BYTES
+            if sealed:
+                _seal_active_volume(self._home)
+            _retire_sealed_volumes(self._home, now=time.time(), force=sealed)
         return item
 
     # LLM: 空字符串和None保持未指定口径，非空owner只匹配完全相同身份。

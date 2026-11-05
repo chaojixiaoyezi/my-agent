@@ -1119,3 +1119,50 @@ def test_r4_short_witness_read_preserves_successful_append(tmp_path, monkeypatch
     assert short_reads and page['coverage']['status'] == 'complete'
     assert page['view']['generation'] == first['view']['generation']
     assert page['total_count'] == 65 and page['rows'][0]['call_id'] == 'c1'
+
+
+# LLM: 真实账本与inspector共用原读索引，不直接修改索引或伪造查询结果。
+# 函数用途: 验证封卷后inspector仍完整查询新活动卷。
+def test_inspector_stays_complete_after_telemetry_volume_seal(tmp_path, monkeypatch):
+    from agent_py_agent.agent.observability import telemetry_ledger as telemetry
+
+    ledger = ToolTelemetryLedger(tmp_path)
+    inspector = TaskCallInspector(tmp_path)
+    inspector.upsert_task_call(dict(task_id='t1', owner_id='o1', status='running'))
+    ledger.record_tool_call(call(1))
+    before = ledger.query_tool_calls_page(limit=1)
+    monkeypatch.setattr(telemetry, 'TELEMETRY_VOLUME_MAX_BYTES', 1)
+    ledger.record_tool_call(call(2))
+    monkeypatch.setattr(telemetry, 'TELEMETRY_VOLUME_MAX_BYTES', 4096)
+    ledger.record_tool_call(call(3))
+
+    detail = inspector.get_task_call_detail('t1', ledger)
+    assert detail['tool_summary']['total_calls'] == 1
+    assert [row['call_id'] for row in detail['tool_calls']] == ['c3']
+    current = telemetry.require_complete(ledger.query_tool_calls_page(limit=1))
+    assert current['view']['generation'] != before['view']['generation']
+    assert current['total_count'] == 1
+
+
+# LLM: 复用verification真实公共出口夹具，断言封卷与业务验证回执均完成。
+# 函数用途: 验证运行时自动记账也触发分卷，而不只是直接调用账本。
+def test_verification_runtime_seals_telemetry_and_preserves_receipt(tmp_path, monkeypatch):
+    import json
+
+    from test_verification_runtime import _agent, _call, _success
+
+    from agent_py_agent.agent.observability import telemetry_ledger as telemetry
+    from agent_py_agent.agent.verification.runtime import record_tool_verification
+
+    agent, project, home = _agent(tmp_path)
+    home.mkdir()
+    monkeypatch.setattr(telemetry, 'TELEMETRY_VOLUME_MAX_BYTES', 1)
+    tool_call = _call('run_command', {'command': 'pytest -q', 'working_dir': str(project)})
+    result = record_tool_verification(agent, tool_call, _success(
+        tool_call, '1 passed', {'process': {'status': 'exited', 'return_code': 0}}))
+    assert result.ok and 'verification_evidence' in result.metadata['handler_details']
+    root = home / 'data/telemetry'
+    sealed = list(root.glob('tool_calls.*.jsonl'))
+    assert len(sealed) == 1
+    assert json.loads(sealed[0].read_text())['call_id'] == 'call-1'
+    assert (root / 'tool_calls.jsonl').is_file()
