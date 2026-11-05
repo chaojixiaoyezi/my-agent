@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,51 @@ from agent_py_agent.tests.test_gateway_multiprocess_worker_dispatch import (  # 
     enqueue,
     setup,
 )
+
+_ANCHOR_COMMIT = '11d2d961ac9497196aa85606d96cc77a3d715739'
+_ANCHOR_MODULE = 'agent_py_agent/agent/gateway_parts/multiprocess_control_worker.py'
+_ROOT = Path(__file__).resolve().parents[2]
+# 锚点模块92-130行WorkerControlPump.poll的逐字去缩进副本；浅层CI检出没有锚点对象，故嵌入源码。
+_ANCHOR_POLL_SOURCE = '''def poll(self):
+    with self._lock:
+        self._reap()
+        if self._stopped:
+            return 0
+        submitted, observations = 0, []
+        for path in sorted((self.paths.root / 'control_operations').glob('*.json')):
+            receipt = self._read_receipt(path)
+            if not self._matches(receipt):
+                continue
+            if receipt.state == 'completed' or (receipt.private_approval is not None and receipt.state in {'executing', 'terminal_unknown'}):
+                observations.append(receipt)
+                continue
+            if receipt.state != 'prepared':
+                continue
+            stopping = receipt.command_kind == 'stop'
+            occupied = sum((item.command_kind == 'stop') == stopping for item in self._active.values())
+            if occupied >= (1 if stopping else 4):
+                continue
+            identity = control_worker_authority(self.frozen, claiming=True)
+            with ops.try_gateway_control_operation_transition(self.paths, path.stem) as acquired:
+                if not acquired:
+                    continue
+                receipt = self._read_receipt(path)
+                if not self._matches(receipt) or receipt.state != 'prepared':
+                    continue
+                control_worker_authority(self.frozen, claiming=True)
+                claimed = replace(receipt, state='claimed', updated_at=time.time(),
+                                  dispatch={**receipt.dispatch, 'executor': identity,
+                                            'instance_id': self.frozen.launch.instance_id})
+                if not _write_control_claim(self, claimed):
+                    continue
+            executor = self._stop_executor if stopping else self._executor
+            self._active[self._submit(executor, self._execute, claimed)] = claimed
+            submitted += 1
+        for receipt in sorted(observations, key=lambda row: (
+                row.operation_id <= self._observation_cursor, row.operation_id)):
+            self._offer_reconciliation(receipt)
+        return submitted
+'''
 
 
 # LLM: 全部回执由原C producer生成唯一消息身份；完成态保原executor，数量只属测试输入，不修改业务来源。
@@ -250,15 +296,11 @@ def test_transient_control_read_fault_retried_without_file_change(tmp_path, monk
         pump.close()
 
 
-# LLM: 直接从任务锚点提取原poll函数；只在临时inert输入上做同进程对照，不改生产源码或构造其它worker。
-# 函数用途: 恢复本片修改前的准确扫描入口供本地微基准比较。
+# LLM: 使用嵌入的逐字锚点poll副本；只在临时inert输入上做同进程对照，不改生产源码或构造其它worker。
+# 函数用途: 绑定嵌入的原扫描入口供本地微基准比较，不依赖Git历史。
 def baseline_poll(pump):
-    source = subprocess.check_output(['git', 'show',
-        '11d2d961a:agent_py_agent/agent/gateway_parts/multiprocess_control_worker.py'], text=True)
-    cls = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == 'WorkerControlPump')
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'poll')
     namespace = dict(vars(controls))
-    exec(compile(ast.Module(body=[method], type_ignores=[]), '<anchor-worker-poll>', 'exec'), namespace)
+    exec(compile(_ANCHOR_POLL_SOURCE, '<anchor-worker-poll>', 'exec'), namespace)
     return namespace['poll'].__get__(pump)
 
 
@@ -282,3 +324,16 @@ def test_poll_benchmark_800_completed_receipts(tmp_path, monkeypatch):
         assert before >= 20 * after
     finally:
         pump.close()
+
+
+# LLM: 仅在本地对象库含准确锚点时核对AST；缺历史只跳过来源核验，不跳过真实回执基准。
+# 函数用途: 防止嵌入的原poll副本偏离可用的Git锚点。
+def test_anchor_poll_fixture_matches_git_object_when_available():
+    probe = subprocess.run(['git', 'cat-file', '-e', f'{_ANCHOR_COMMIT}^{{commit}}'],
+                           cwd=_ROOT, capture_output=True, check=False)
+    if probe.returncode != 0:
+        pytest.skip(f'object store lacks {_ANCHOR_COMMIT}; vendored anchor poll provenance not checked')
+    source = subprocess.check_output(['git', 'show', f'{_ANCHOR_COMMIT}:{_ANCHOR_MODULE}'], cwd=_ROOT, text=True)
+    cls = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == 'WorkerControlPump')
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'poll')
+    assert ast.dump(ast.parse(_ANCHOR_POLL_SOURCE).body[0]) == ast.dump(method)
