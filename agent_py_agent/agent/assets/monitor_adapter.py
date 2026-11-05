@@ -365,19 +365,25 @@ def _run_projection(run):
 # LLM: Scheduler保存准确stable_id/hash对象，不能把dict当字符串ID；仅普通Skill转拓扑ID，包身份完整留在metadata而非伪造Skill边。
 # 函数用途: 将已归一的任务Skill引用映射到技能资产，保留显式字符串绑定的调用兼容。
 def _scheduler_skill_ids(references):
+    from . import skill_asset_id
+
     identifiers = []
     for reference in references:
         if isinstance(reference, str):
-            identifiers.append(safe_asset_id(reference))
+            name = reference
+        else:
+            stable_id = reference['stable_id']
+            if reference.get('kind') == 'capability_package' or stable_id.startswith('capability:'):
+                continue
+            name = stable_id.partition(':')[2] if ':' in stable_id else stable_id
+        try:
+            identifiers.append(skill_asset_id(name))
+        except ValueError:
             continue
-        stable_id = reference['stable_id']
-        if reference.get('kind') == 'capability_package' or stable_id.startswith('capability:'):
-            continue
-        identifiers.append(safe_asset_id(stable_id.partition(':')[2] if ':' in stable_id else stable_id))
     return identifiers
 
 
-# LLM: 只读rules.tool/rules.precheck及顶层precheck的显式参数；不解释prompt，不执行动作，不安全ID沿原校验拒绝。
+# LLM: 只读rules.tool/rules.precheck及顶层precheck的显式参数；不解释prompt，不执行动作，不安全ID与缺失值一样不形成资产边。
 # 函数用途: 为定时工作流或脚本自动提取拓扑引用，缺失、空值或非字符串不构成资产边。
 def _scheduler_tool_asset_ids(job):
     refs = {'workflows': [], 'scripts': []}
@@ -394,5 +400,8 @@ def _scheduler_tool_asset_ids(job):
             continue
         identifier = arguments.get('workflow_id' if name == 'workflows' else 'script_id')
         if isinstance(identifier, str) and identifier:
-            refs[name].append(safe_asset_id(identifier))
+            try:
+                refs[name].append(safe_asset_id(identifier))
+            except ValueError:
+                continue
     return refs

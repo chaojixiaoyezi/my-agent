@@ -152,7 +152,7 @@ def _snapshot_for(agent):
 
 # LLM: 真实 owner 绑定与冻结 snapshot.owner_id 必须一致；受限上下文只保留内存中的授权技能，不触碰固定资产。
 # 函数用途: 向目录、候选和 L1 共用同一描述符清单，缺直接快照时沿原Router回退，隐藏项留给纯树裁剪。
-def method_descriptors_for_agent(agent, *, skill_snapshot=None) -> list[dict]:
+def method_descriptors_for_agent(agent, *, skill_snapshot=None, include_monitors=True) -> list[dict]:
     from ..assets.monitor_adapter import list_monitor_descriptors
 
     snapshot = skill_snapshot
@@ -169,7 +169,12 @@ def method_descriptors_for_agent(agent, *, skill_snapshot=None) -> list[dict]:
     if workspace is None:
         workspace = getattr(snapshot, "workspace_root", None)
     rows.extend(_stored_method_descriptors(owner_home, workspace))
-    rows.extend({**row, "source_scope": "owner"} for row in list_monitor_descriptors(owner_home))
+    if include_monitors:
+        # 监控只是展示徽标；坏投影不能丢掉可用的方法或阻断模型回合。
+        try:
+            rows.extend({**row, "source_scope": "owner"} for row in list_monitor_descriptors(owner_home))
+        except (OSError, ValueError, TypeError):
+            pass
     return rows
 
 
@@ -238,7 +243,8 @@ def _top_level_method_rows(descriptors: list[dict], skills) -> list[dict]:
 def asset_cards_for_agent(agent, *, skill_snapshot=None, descriptors=None):
     from .router import CapabilityCard
 
-    records = method_descriptors_for_agent(agent, skill_snapshot=skill_snapshot) if descriptors is None else descriptors
+    records = (method_descriptors_for_agent(agent, skill_snapshot=skill_snapshot, include_monitors=False)
+               if descriptors is None else descriptors)
     return [CapabilityCard(row['ref'], row['kind'], row['name'], row['description'], source=row['scope'],
                            metadata={**row, 'stable_id':row['ref'], 'next_read':{
                                'tool':'scripts' if row['kind']=='script' else 'workflows',
