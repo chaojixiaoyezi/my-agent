@@ -49,6 +49,7 @@ def registered_foreign(case):
     source._source_origin = (launch, process)
     source._controller, source._lease = c.issuer._controller, c.issuer._lease
     source._pins, source._executor_records = set(), {}
+    source._finished_pins = set()
     source._require_current = lambda: c.runtime.require_original()
     source._require_worker = lambda peer: (
         None if peer == process.pid else pytest.fail("wrong original peer")
@@ -125,13 +126,14 @@ def test_registered_other_worker_foreign_owner_original_pin_is_preserved_while_f
         source.finish(pin)
 
 
+# LLM: 原begin短暂解除同一测试隔离键后产真实pin，再恢复原键；不改索引来源、不伪造pin。
+# 函数用途: 验证当前owner的原在途责任阻止首次拒绝被误写成终态。
 def test_current_worker_same_owner_original_pin_prevents_first_terminal(case):
-    digest = owner_digest(case.owner)
-    case.issuer._controller._unproven_owners.remove(digest)
+    case.issuer._controller._quarantined.difference_update(case.owner_restrictions)
     try:
         pin = case.issuer.begin(case.owner, peer_pid=os.getpid(), rejection_origin=object())
     finally:
-        case.issuer._controller._unproven_owners.add(digest)
+        case.issuer._controller._quarantined.update(case.owner_restrictions)
     try:
         with pytest.raises(WorkerCommitRejected):
             case.operation.apply(
