@@ -122,18 +122,19 @@ def test_script_data_source_patch_and_candidate_upsert(api, tmp_path):
         store.update_data_sources("collect", "absent", query_scope={})
 
 
-# LLM: 原子读改写须由不同Store实例共用锁，不能丢并发运行次数。
+# LLM: 摘要按run_at/run_id排序；失败与成功阶段用递增时间，不凭随机ID或线程完成顺序判定最近运行。
 # 函数用途: 验证失败连计、成功归零及多线程计数。
 def test_script_run_summary_and_concurrent_updates(api, tmp_path):
     store = api.ScriptStore(tmp_path)
     store.save_script(asset(api), "pass")
-    store.record_run_summary("collect", "failed", 12, "2026-10-21")
-    failed = store.record_run_summary("collect", "failed", 15, "2026-10-21")
+    store.record_run_summary("collect", "failed", 12, "2026-10-21T00:00:00Z")
+    failed = store.record_run_summary("collect", "failed", 15, "2026-10-21T00:00:01Z")
     assert failed["runtime_summary"]["consecutive_failures"] == 2
+    succeeded_at = "2026-10-21T00:00:02Z"
     with ThreadPoolExecutor(max_workers=4) as executor:
-        list(executor.map(lambda _: api.ScriptStore(tmp_path).record_run_summary("collect", "succeeded", 3, "2026-10-21"), range(8)))
+        list(executor.map(lambda _: api.ScriptStore(tmp_path).record_run_summary("collect", "succeeded", 3, succeeded_at), range(8)))
     summary = store.get_script("collect")["runtime_summary"]
-    assert summary == {"last_run_at": "2026-10-21", "last_status": "succeeded", "last_duration_ms": 3,
+    assert summary == {"last_run_at": succeeded_at, "last_status": "succeeded", "last_duration_ms": 3,
                        "run_count": 10, "consecutive_failures": 0, "last_error": ""}
     with pytest.raises(ValueError):
         store.record_run_summary("collect", "failed", -1, "2026-10-21")
@@ -834,7 +835,7 @@ def test_global_symlink_paths_are_rejected(api, tmp_path, kind, level):
     assert collection_snapshot(target) == before
 
 
-# LLM: 真实硬链接创建若被权限拒绝，只注入nlink=2核验原拒绝分支，不冒称真实硬链接验证；符号链接使用实物。
+# LLM: 硬链接被权限拒绝时只向目标inode注入nlink=2；保留原平台能力并断言注入被读到，不冒称真实硬链接验证。
 # 函数用途: 验证全局代码链接拒绝，硬链接夹具不可建时保留精确元数据分支覆盖。
 @pytest.mark.parametrize('link_kind', ['symlink', 'hardlink'])
 def test_global_script_code_rejects_links(api, tmp_path, monkeypatch, record_property, link_kind):
@@ -845,6 +846,8 @@ def test_global_script_code_rejects_links(api, tmp_path, monkeypatch, record_pro
     save_scoped_asset(api, publisher, 'script')
     path, target = tmp_path / 'scripts/shared/main.py', tmp_path / 'code-target'
     path.rename(target)
+    injected_metadata = []
+    metadata_fallback = False
     if link_kind == 'symlink':
         path.symlink_to(target)
     else:
@@ -852,24 +855,49 @@ def test_global_script_code_rejects_links(api, tmp_path, monkeypatch, record_pro
             os.link(target, path)
             record_property('hardlink_observation', 'native')
         except PermissionError as error:
+            metadata_fallback = True
             record_property('hardlink_observation', f'metadata_injection_after_errno_{error.errno}')
             path.write_bytes(target.read_bytes())
-            original_stat = os.stat
+            original_stat, original_lstat = os.stat, os.lstat
+            target_metadata = original_stat(path)
+            target_identity = (target_metadata.st_dev, target_metadata.st_ino)
+            supports_dir_fd = nofollow_fs._supports_dir_fd()
 
-            # LLM: 只给目标代码的nofollow预检注入nlink=2，其它真实stat及所有生产拒绝逻辑保持不变。
-            # 函数用途: 在无法创建硬链接的运行中核验相同的链接数拒绝条件。
-            def linked_metadata(name, *args, **kwargs):
-                metadata = original_stat(name, *args, **kwargs)
-                if name == 'main.py' and kwargs.get('follow_symlinks') is False:
+            # LLM: 仅替换目标副本inode的链接数，其他元数据和生产拒绝逻辑不变。
+            # 函数用途: 为真实nofollow预检提供精确的双链接元数据。
+            def linked_result(metadata):
+                if (metadata.st_dev, metadata.st_ino) == target_identity:
+                    injected_metadata.append(metadata)
                     values = list(metadata)
                     values[3] = 2
                     return os.stat_result(values)
                 return metadata
 
+            # LLM: 原stat仍执行所有真实参数，只对nofollow观察注入目标链接数。
+            # 函数用途: 覆盖支持dir_fd时的代码叶预检。
+            def linked_metadata(name, *args, **kwargs):
+                metadata = original_stat(name, *args, **kwargs)
+                return linked_result(metadata) if kwargs.get('follow_symlinks') is False else metadata
+
+            # LLM: portable链通过lstat预检，目标以inode判定而非依赖路径参数形状。
+            # 函数用途: 为不支持dir_fd的平台提供同一链接数夹具。
+            def linked_lstat(name, *args, **kwargs):
+                return linked_result(original_lstat(name, *args, **kwargs))
+
             monkeypatch.setattr(nofollow_fs.os, 'stat', linked_metadata)
+            monkeypatch.setattr(nofollow_fs.os, 'lstat', linked_lstat)
+            # 能力集合按函数对象判定；包装器只继承原函数确实支持的能力。
+            replacements = ((original_stat, linked_metadata), (original_lstat, linked_lstat))
+            for capability in ('supports_dir_fd', 'supports_fd', 'supports_follow_symlinks'):
+                supported = getattr(os, capability)
+                wrappers = {wrapped for original, wrapped in replacements if original in supported}
+                monkeypatch.setattr(nofollow_fs.os, capability, supported | wrappers)
+            assert nofollow_fs._supports_dir_fd() == supports_dir_fd
     user = scoped_store(api, tmp_path / 'owners/local/main', 'script')
     with pytest.raises((OSError, ValueError)):
         user.get_script('shared')
+    if metadata_fallback:
+        assert injected_metadata, '拒绝必须实际观察到目标代码的双链接元数据'
     assert target.read_text() == 'print("{}")'
 
 

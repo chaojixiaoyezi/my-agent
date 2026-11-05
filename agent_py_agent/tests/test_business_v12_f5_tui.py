@@ -308,7 +308,7 @@ def test_invented_ok_and_contradictory_receipts_stay_unknown():
         assert result['http_status'] == status
 
 
-# LLM: pytest只渲染内存TUI快照和给定计数，断言route、驻留、后台身份与原控制的顺序；未知运行数保持未知，不查询服务或推进任务。
+# LLM: 只渲染内存快照；模式、route、后台身份位于快捷键前，驻留徽标在末尾，未知运行数保持未知。
 # 函数用途: 检查底栏新增信息的排列及未知数量文案。
 def test_footer_orders_mode_watch_team_before_existing_controls():
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext, _render_footer
@@ -317,7 +317,9 @@ def test_footer_orders_mode_watch_team_before_existing_controls():
     context = TuiRenderContext(width=200, background_process_count=1,
                                background_agent_count=4, background_agent_running_count=None)
     text = ''.join(x[1] for x in _render_footer(runtime.store.snapshot(), context))
-    assert text.index('/route 未知') < text.index('后台驻留') < text.index('后台Agent：运行 未知 / 总 4') < text.index('F4')
+    assert text.index('简洁') < text.index('/route 未知') < text.index('后台Agent：运行 未知 / 总 4') < text.index('F4')
+    assert text.index('F4') < text.index('F6 原生模式') < text.index('⚡ 后台驻留 1 项')
+    assert text.endswith('⚡ 后台驻留 1 项')
 
 
 def run_web(script, **fixtures):
