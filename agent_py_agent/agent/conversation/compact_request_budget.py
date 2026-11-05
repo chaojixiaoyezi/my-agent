@@ -11,13 +11,21 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import closing
-from copy import copy
 from dataclasses import dataclass, replace
 
-from ..agent_core.model.call_runtime import compact_summary_output_reserve_tokens, max_output_tokens
+from ..agent_core.model.call_runtime import (
+    compact_summary_output_reserve_tokens,
+    request_budget_shared_window,
+    request_output_server_managed,
+)
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..backends.base import ModelResponse
 from ..backends.errors import ProviderContextWindowError
+from ..backends.request_budget import (
+    REQUEST_INPUT_SAFETY_TOKENS,
+    RequestBudgetExceeded,
+    resolve_request_token_budget,
+)
 from ..backends.request_content import text_messages_supported
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolChoice
@@ -45,49 +53,6 @@ from .compact_message_source import (
 )
 from .compact_text_source import CompactTextSource
 from .input_media import InputMediaError
-
-# 压缩摘要单次输出的 token 上限；不改变共享后端或主请求的上限。
-COMPACT_SUMMARY_MAX_OUTPUT_TOKENS = 4_096
-
-
-# LLM: 小于上限的主请求预算不被抬高；未知主上限仍有明确的摘要上限。
-# 函数用途: 返回本次摘要的实际输出预留。
-def _compact_summary_output_tokens(agent: object) -> int:
-    normal = max_output_tokens(agent)
-    return min(normal, COMPACT_SUMMARY_MAX_OUTPUT_TOKENS) if normal > 0 else COMPACT_SUMMARY_MAX_OUTPUT_TOKENS
-
-
-# LLM: 只为本次调用替换后端快照，其余身份和账本读写仍交原 agent，不能丢失线程本地宿主绑定。
-# 类用途: 为辅助调用携带私有输出上限，不修改共享代理。
-class _CompactCallAgent:
-    # LLM: 只保存原代理及本次后端快照，不创建新的执行身份。
-    # 函数用途: 初始化本次摘要的只读后端视图。
-    def __init__(self, agent, backend):
-        object.__setattr__(self, '_agent', agent)
-        object.__setattr__(self, 'backend', backend)
-
-    # LLM: 保留原代理的动态线程属性、owner 及账本引用。
-    # 函数用途: 读取未覆盖的原代理属性。
-    def __getattr__(self, name):
-        return getattr(self._agent, name)
-
-    # LLM: 辅助调用创建或更新账本时仍写回同一个真实 agent。
-    # 函数用途: 防止模型用量变成本次临时视图的孤立状态。
-    def __setattr__(self, name, value):
-        setattr(self._agent, name, value)
-
-
-# LLM: 后端是浅快照，原传输资源与缓存配置保留；只改快照 max_tokens，绝不临时修改共享实例。
-# 函数用途: 在辅助调用入口附上可被现有后端直接消费的请求级输出上限。
-def _with_compact_output_cap(request: AuxiliaryModelCallRequest) -> AuxiliaryModelCallRequest:
-    cap = _compact_summary_output_tokens(request.agent)
-    normal = max_output_tokens(request.agent)
-    backend = getattr(request.agent, 'backend', None)
-    if backend is None or 0 < normal <= cap:
-        return request
-    capped = copy(backend)
-    capped.max_tokens = cap
-    return replace(request, agent=_CompactCallAgent(request.agent, capped))
 
 # LLM: Bounded repair budget for one source segment, driven by the typed response reason only.
 # 常量用途: 同一片段最多再纠正几次；1 + 该值就是单个片段允许的最大模型调用次数。
@@ -127,8 +92,7 @@ _SEGMENT_MERGE_INSTRUCTION = (
 # 函数用途: 算出当前模型一次摘要请求允许的输入 token 上限。
 def compact_summary_budget(agent: object) -> int:
     window = resolve_model_context_window_tokens(agent)
-    # 准入保留既有配置预留；它可保守大于本次实际的 4096 输出上限。
-    return max(1, int(window * 0.8) - compact_summary_output_reserve_tokens(agent))
+    return _compact_input_budget(agent, window * 80 // 100)
 
 
 # LLM: 带主请求工具的缓存安全单次摘要，前缀就是主请求本身，容量上限与主请求同一口径（窗口减输出预留）；80% 的
@@ -138,7 +102,34 @@ def compact_summary_budget(agent: object) -> int:
 #   max_output_tokens 同源）；之前按主请求的 32000 预留，27.2 万窗口按 90% 触发时单次请求永远装不下。
 # 函数用途: 算出缓存安全单次摘要允许的输入 token 上限。
 def compact_cache_surface_budget(agent: object) -> int:
-    return max(1, resolve_model_context_window_tokens(agent) - compact_summary_output_reserve_tokens(agent))
+    return _compact_input_budget(agent, resolve_model_context_window_tokens(agent))
+
+
+# LLM: 未知/输入型元数据也保留保守输出预留；这不是共享总窗口证据。
+# 函数用途: 不可能的正窗口配置统一报一次 typed 失败，不能伪装成一 token 预算。
+def _compact_input_budget(agent: object, window: int) -> int:
+    reserve = compact_summary_output_reserve_tokens(agent)
+    if window <= 0:
+        return 0
+    capacity = window - reserve - REQUEST_INPUT_SAFETY_TOKENS
+    if reserve <= 0 or capacity <= 0:
+        raise ConversationCompactError("模型窗口无法容纳配置的摘要输出预留", code="COMPACT_INVALID_OUTPUT_BUDGET")
+    return capacity
+
+
+# LLM: 只消费已经校准的完整输入；auxiliary 不得再用更大的 raw 估算重做本次准入。
+# 函数用途: 为实际摘要材料签发完整输出预算，窗口不足时明确抛规划错误。
+def freeze_compact_request_budget(request: AuxiliaryModelCallRequest, *, input_tokens: int) -> AuxiliaryModelCallRequest:
+    window = resolve_model_context_window_tokens(request.agent)
+    reserve = compact_summary_output_reserve_tokens(request.agent)
+    facts = dict(input_tokens=input_tokens, output_ceiling=reserve, context_window_tokens=window)
+    if reserve <= 0 or (window > 0 and window - reserve - REQUEST_INPUT_SAFETY_TOKENS <= 0):
+        raise RequestBudgetExceeded(reason="invalid_geometry", **facts)
+    if window > 0 and input_tokens + reserve + REQUEST_INPUT_SAFETY_TOKENS > window:
+        raise RequestBudgetExceeded(reason="input_overflow", **facts)
+    return replace(request, token_budget=resolve_request_token_budget(**facts,
+        shared_window=request_budget_shared_window(request.agent), require_full_output=True,
+        server_managed_output=request_output_server_managed(request.agent)))
 
 
 # LLM: 与内部 _request_tokens 同一口径（prompt、messages/来源、tools、system）；供媒体准入在构造来源后估算文字部分。
@@ -171,27 +162,27 @@ def generate_bounded_compact_response(
     if request.tools and request.tool_choice is None:
         # 后端对 None 本就发送 auto；只补等价的显式默认，不覆盖前台已选策略。
         request = replace(request, tool_choice=ToolChoice.auto('compact_cache_surface'))
-    budget = compact_summary_budget(request.agent)
     raise_if_compact_interrupted(interrupt_check)
     if vision_summary:
-        return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
-    attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source,
-                                     calibration=calibration)
+        return _generate_vision_summary_response(request, message_source, compact_summary_budget(request.agent), interrupt_check, media_reserve_tokens,
+                                                calibration=calibration)
     shared_prefix = message_source is not None and message_source.preserve_prefix
-    single_budget = compact_cache_surface_budget(request.agent) if request.tools or shared_prefix else budget
+    # 完整前缀只需能容纳完整窗口；尚未使用的80%分段几何不能提前否决它。
+    single_budget = (compact_cache_surface_budget(request.agent) if request.tools or shared_prefix
+                     else compact_summary_budget(request.agent))
+    attempt = _CompactAttemptContext(single_budget, interrupt_check, preserve_complete_fallback, message_source,
+                                     calibration=calibration)
     cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
     result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source, budget=single_budget))
               if cached_source is not None else None)
     if result is not None:
         if result.response is not None:
             return result.response
-        attempt = replace(
-            attempt,
-            budget=min(budget, result.budget),
-            tool_call_reply=result.tool_call_reply,
-        )
     if message_source is not None and message_source.preserve_prefix:
         return _prefix_failure_or_tool_reply(attempt)
+    budget = compact_summary_budget(request.agent)
+    attempt = replace(attempt, budget=min(budget, result.budget) if result is not None else budget,
+                      tool_call_reply=result.tool_call_reply if result is not None else None)
     return _summarize_or_return_tool_call(request, attempt, source_progress)
 
 
@@ -295,12 +286,16 @@ def _try_cached_compact_requests(
     except ProviderContextWindowError:
         # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
         return _CompactAttemptResult(None, rejected_response, max(1, attempt.budget // 2))
+    except RequestBudgetExceeded as exc:
+        if exc.reason != "input_overflow":
+            raise ConversationCompactError("配置的摘要输出预算无法容纳", code="COMPACT_INVALID_OUTPUT_BUDGET") from exc
+        return _CompactAttemptResult(None, rejected_response, attempt.budget)
 
 
 # LLM: EMPTY 原样补一次，TOOL_CALL 只在最后指令追加纠正；两者共用单次修复预算，计量沿冻结校准。
 # 函数用途: 不改工具、system 和历史前缀，给不可用摘要一次有界恢复机会。
 def _generate_cached_summary_response(request, attempt):
-    response = _generate_materialized_response(request, attempt.message_source)
+    response = _generate_materialized_response(request, attempt.message_source, calibration=attempt.calibration)
     raise_if_compact_interrupted(attempt.interrupt_check)
     if getattr(response, "text", None) is None:
         return response
@@ -312,7 +307,7 @@ def _generate_cached_summary_response(request, attempt):
         budget = _SurfaceBudget(attempt.budget, attempt.calibration)
         if budget.measure(_request_tokens(retry, attempt.message_source)) > budget.tokens:
             return response
-        response = _generate_materialized_response(retry, attempt.message_source)
+        response = _generate_materialized_response(retry, attempt.message_source, calibration=attempt.calibration)
         raise_if_compact_interrupted(attempt.interrupt_check)
     return response
 
@@ -346,6 +341,7 @@ def _summarize_or_return_tool_call(
             source_progress,
             attempt.preserve_complete_fallback,
             attempt.message_source,
+            calibration=attempt.calibration,
         )
     except ConversationCompactError as exc:
         if attempt.tool_call_reply is not None and exc.code in _TOOL_CALL_FALLBACK_CODES:
@@ -369,30 +365,30 @@ def _none_tool_compact_retry_request(request: AuxiliaryModelCallRequest) -> Auxi
     layout = prompt_cache_layout(request.prompt)
     prompt = (CacheStructuredPrompt(layout.stable_prefix, f'{layout.volatile_suffix}\n\n{instruction}')
               if layout is not None else f'{request.prompt}\n\n{instruction}')
-    return replace(request, prompt=prompt)
+    return replace(request, prompt=prompt, token_budget=None)
 
 
 # LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
 #   COMPACT_VISION_SUMMARY_FAILED，由上层写线程 compact_vision_failed_generation，同代次下一次压缩选 A；不减半预算、不分段。
 #   截断只补无正文的结构化形状日志，不改变原错误码或触发额外请求。
 # 函数用途: 发出保留图块的单次摘要请求，把所有随图失败归到同一个结构化码。
-def _generate_vision_summary_response(request, source, budget, interrupt_check, media_reserve_tokens):
-    if _request_tokens(request, source) + max(0, int(media_reserve_tokens)) > budget:
+def _generate_vision_summary_response(request, source, budget, interrupt_check, media_reserve_tokens, *, calibration=None):
+    if calibrated_compact_request_tokens(_request_tokens(request, source), calibration) + max(0, int(media_reserve_tokens)) > budget:
         raise ConversationCompactError("随图摘要超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
     try:
         raise_if_compact_interrupted(interrupt_check)
-        response = _generate_materialized_response(request, source)
-    except (ProviderContextWindowError, InputMediaError) as exc:
+        response = _generate_materialized_response(request, source, calibration=calibration, media_reserve_tokens=media_reserve_tokens)
+    except (ProviderContextWindowError, InputMediaError, RequestBudgetExceeded) as exc:
         raise ConversationCompactError(f"随图摘要请求失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED) from exc
     raise_if_compact_interrupted(interrupt_check)
     if _response_has_tool_calls(response):
         compact_summary_response_outcome(response, request=request)
         no_tools = _none_tool_compact_retry_request(request)
-        if _request_tokens(no_tools, source) + max(0, int(media_reserve_tokens)) > budget:
+        if calibrated_compact_request_tokens(_request_tokens(no_tools, source), calibration) + max(0, int(media_reserve_tokens)) > budget:
             raise ConversationCompactError("随图无工具重试超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
         try:
-            response = _generate_materialized_response(no_tools, source)
-        except (ProviderContextWindowError, InputMediaError) as exc:
+            response = _generate_materialized_response(no_tools, source, calibration=calibration, media_reserve_tokens=media_reserve_tokens)
+        except (ProviderContextWindowError, InputMediaError, RequestBudgetExceeded) as exc:
             raise ConversationCompactError(
                 f"随图无工具重试失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED
             ) from exc
@@ -408,8 +404,12 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
 
 # LLM: 只在完整来源已容纳时物化原运输列表；请求失败退出本帧后释放临时数组，外层仍持可重放来源。
 # 函数用途: 保持AuxiliaryModelCallRequest及供应商接口不接磁盘视图，普通列表请求原对象直传。
-def _generate_materialized_response(request, source):
-    return _generate_auxiliary_with_retry(request if source is None else replace(request, messages=list(source)))
+def _generate_materialized_response(request, source, *, calibration=None, media_reserve_tokens=0):
+    materialized = replace(request, messages=list(source) if source is not None else request.messages,
+                           token_budget=None, input_calibration=calibration)
+    tokens = calibrated_compact_request_tokens(_request_tokens(materialized), calibration) + max(0, int(media_reserve_tokens))
+    admitted = freeze_compact_request_budget(materialized, input_tokens=tokens)
+    return _generate_auxiliary_with_retry(admitted)
 
 
 # LLM: 与主回合模型采样同一退避口径（provider_transient_auto_resume，间隔读运行护栏配置
@@ -420,7 +420,6 @@ def _generate_materialized_response(request, source):
 def _generate_auxiliary_with_retry(request: AuxiliaryModelCallRequest) -> object:
     from ..agent_core.provider_transient_auto_resume import run_with_provider_transient_auto_resume
 
-    request = _with_compact_output_cap(request)
     return run_with_provider_transient_auto_resume(lambda: generate_auxiliary_model_response(request))
 
 
@@ -428,12 +427,38 @@ def _generate_auxiliary_with_retry(request: AuxiliaryModelCallRequest) -> object
 # summary carry；显式流式数组使用同一JSON计量，不用对象repr冒充历史。This is admission estimation, never billing.
 # 函数用途: 估算摘要真实请求大小，避免只算可见正文而漏掉工具历史和固定前缀。
 def _request_tokens(request: AuxiliaryModelCallRequest, source=None) -> int:
-    return estimate_compact_payload({
+    material = {
         "prompt": request.prompt,
         "messages": source if source is not None else request.messages or [],
         "tools": request.tools or [],
         "system_instruction": request.system_instruction,
-    })
+    }
+    if request.response_schema is not None:
+        surface = getattr(getattr(request.agent, "backend", None), "structured_request_surface", None)
+        if callable(surface):
+            material.update(surface(request.prompt, request.response_schema))
+        else:
+            material["response_schema"] = request.response_schema
+    from ..backends.reasoning_control import (
+        responses_reasoning_field,
+        responses_reasoning_update_item,
+    )
+    from .auxiliary_model_call import _compact_reasoning_options, _compact_reasoning_update_effort
+
+    backend = getattr(request.agent, "backend", None)
+    supports = getattr(backend, "supports_reasoning_update_items", None)
+    target = _compact_reasoning_update_effort(request, backend)
+    if target and callable(supports) and supports():
+        disabled, baseline = _compact_reasoning_options(request, backend)
+        levels = tuple(getattr(backend, "reasoning_levels", ()) or ())
+        control = str(getattr(backend, "reasoning_control", "none") or "none")
+        current = responses_reasoning_field(control, baseline, levels, disabled=disabled).get("reasoning")
+        update = responses_reasoning_update_item(control, target, current, levels)
+        if update is not None:
+            material["control_item"] = update
+    if request.compaction_trigger:
+        material["compaction_trigger"] = {"type": "compaction_trigger"}
+    return estimate_compact_payload(material)
 
 
 # LLM: Only complete textual source may be serialized into contiguous ranges. A segment may split
@@ -450,6 +475,7 @@ def _summarize_segments(
     source_progress: Callable[[int, int], object] | None,
     preserve_complete_fallback: bool = False,
     message_source: CompactMessageSource | None = None,
+    *, calibration: CompactRequestCalibration | None = None,
 ) -> object:
     native = message_source is not None or request.messages is not None
     if message_source is not None:
@@ -469,6 +495,7 @@ def _summarize_segments(
     base = replace(
         request, prompt=instruction, tools=[], tool_choice=ToolChoice.none("compact_summary_only"),
         system_instruction=_SUMMARY_SYSTEM_INSTRUCTION,
+        token_budget=None,
     )
     # 编码进摘要文字的来源去掉 Responses 加密思考密文（summary_source_message），两遍读取同一投影，一致校验不变。
     factory = (message_source.projected(summary_source_message).json_parts if message_source is not None else
@@ -476,19 +503,20 @@ def _summarize_segments(
                    [summary_source_message(message) for message in request.messages])) if native else
                (lambda: iter((str(request.prompt),))))
     with CompactTextSource(factory, interrupt_check) as source:
-        return _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback)
+        return _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback,
+                                 calibration=calibration)
 
 
 # LLM: 复用唯一分段/修复循环，成功才释放当前窗口；全部字符一致且未取消后才交回最终摘要，不推进canonical游标。
 # 函数用途: 逐段消费临时来源，保持原摘要累积、失败策略和进度，结束时验证两遍来源一致。
-def _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback):
+def _summarize_source(base, source, budget, interrupt_check, source_progress, preserve_complete_fallback, *, calibration=None):
     offset = 0
     summary = ""
     digests: list[str] = []
     response: object | None = None
     while offset < len(source):
         raise_if_compact_interrupted(interrupt_check)
-        outcome = _summarize_segment(base, source, offset, summary, budget, interrupt_check)
+        outcome = _summarize_segment(base, source, offset, summary, budget, interrupt_check, calibration=calibration)
         summary = outcome.text
         if outcome.degraded_text and preserve_complete_fallback:
             raise ConversationCompactError("分段摘要失败，不能用截短摘录覆盖原始来源", code="COMPACT_SEGMENT_SUMMARY_UNAVAILABLE")
@@ -536,8 +564,10 @@ def _summarize_segment(
     summary: str,
     budget: int,
     interrupt_check: CompactInterruptCheck | None,
+    *, calibration: CompactRequestCalibration | None = None,
 ) -> _SegmentOutcome:
-    end = _segment_end(base, source, offset, summary, budget)
+    end = _segment_end(base, source, offset, summary, budget, calibration=calibration)
+    measure = _SurfaceBudget(budget, calibration).measure
     # 截断重试只允许缩到原片段的一半：再往下缩会把源切成大量碎片，反而放大模型调用次数。
     shrink_floor = offset + max(1, (end - offset) // 2)
     repairs = 0
@@ -545,15 +575,15 @@ def _summarize_segment(
     while True:
         raise_if_compact_interrupted(interrupt_check)
         candidate = _segment_request(base, source, offset, end, summary, repair_reason=reason)
-        if _request_tokens(candidate) > budget:
+        if measure(_request_tokens(candidate)) > budget:
             raise ConversationCompactError("分段摘要请求超出当前预算，保留原始来源", code="COMPACT_SEGMENT_REQUEST_TOO_LARGE")
         raise_if_compact_interrupted(interrupt_check)
         try:
-            response = _generate_auxiliary_with_retry(candidate)
+            response = _generate_materialized_response(candidate, None, calibration=calibration)
         except ProviderContextWindowError:
             # 同一源片段按更小窗口重试，不跳过字节；小到无法容纳固定前缀时明确失败。
-            budget = max(1, min(budget - 1, _request_tokens(candidate) // 2))
-            end = _segment_end(base, source, offset, summary, budget)
+            budget = max(1, min(budget - 1, measure(_request_tokens(candidate)) // 2))
+            end = _segment_end(base, source, offset, summary, budget, calibration=calibration)
             shrink_floor = min(shrink_floor, end)
             reason = ""
             continue
@@ -678,17 +708,19 @@ def _segment_end(
     offset: int,
     summary: str,
     budget: int,
+    *, calibration: CompactRequestCalibration | None = None,
 ) -> int:
     repair_reason = max(
         ("", *_SEGMENT_REPAIR_INSTRUCTION),
         key=lambda reason: _request_tokens(_segment_request(base, source, offset, offset, summary, repair_reason=reason)),
     )
     low, high = offset, min(len(source), offset + 256)
-    while high < len(source) and _request_tokens(_segment_request(base, source, offset, high, summary, repair_reason=repair_reason)) <= budget:
+    measure = _SurfaceBudget(budget, calibration).measure
+    while high < len(source) and measure(_request_tokens(_segment_request(base, source, offset, high, summary, repair_reason=repair_reason))) <= budget:
         low, high = high, min(len(source), offset + 2 * (high - offset))
     while low < high:
         middle = (low + high + 1) // 2
-        if _request_tokens(_segment_request(base, source, offset, middle, summary, repair_reason=repair_reason)) <= budget:
+        if measure(_request_tokens(_segment_request(base, source, offset, middle, summary, repair_reason=repair_reason))) <= budget:
             low = middle
         else:
             high = middle - 1
@@ -723,4 +755,4 @@ def _segment_request(
         f"摘要规则：\n{str(base.prompt or '')}\n\n{_SEGMENT_MERGE_INSTRUCTION}"
         + (f"\n纠正要求：{hint}" if hint else "")
     )
-    return replace(base, prompt=text, messages=None)
+    return replace(base, prompt=text, messages=None, token_budget=None)

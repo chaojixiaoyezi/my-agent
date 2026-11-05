@@ -40,7 +40,8 @@ from agent_py_agent.tests._tool_runtime_harness import (
 def _request(text: str) -> AuxiliaryModelCallRequest:
     agent = SimpleNamespace(
         backend=SimpleNamespace(max_tokens=128),
-        config=SimpleNamespace(model_context_window_tokens=2000),
+        # 新2048工程余量必须放进测试几何；单次缓存面仍为原来的1872 tokens。
+        config=SimpleNamespace(model_context_window_tokens=4048),
     )
     return AuxiliaryModelCallRequest(
         agent=agent, prompt="请总结历史", system_instruction="稳定系统前缀",
@@ -89,8 +90,10 @@ def test_fitting_request_preserves_cache_surface_with_auto_choice(monkeypatch, v
     assert len(calls) == 1
     assert calls[0].tool_choice.mode == "auto"
     assert calls[0].tool_choice.reason == "compact_cache_surface"
-    assert calls[0] == replace(request, tool_choice=calls[0].tool_choice)
-    assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
+    assert calls[0] == replace(request, tool_choice=calls[0].tool_choice, token_budget=calls[0].token_budget)
+    assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name not in {"tool_choice", "token_budget"})
+    assert calls[0].token_budget.output_tokens == 128
+    assert calls[0].token_budget.input_tokens == budget_module.compact_request_tokens(calls[0])
     assert request.tool_choice is None
 
 
@@ -326,8 +329,9 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
 
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", generate)
     budget_module.generate_bounded_compact_response(request)
-    assert calls[0] == replace(request, tool_choice=calls[0].tool_choice)
-    assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
+    assert calls[0] == replace(request, tool_choice=calls[0].tool_choice, token_budget=calls[0].token_budget)
+    assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name not in {"tool_choice", "token_budget"})
+    assert calls[0].token_budget.output_tokens == 128
     assert calls[0].tool_choice.mode == "auto"
     assert len(calls) > 1
     assert "".join(segment_part(r.prompt)[3] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)

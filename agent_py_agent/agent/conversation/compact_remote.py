@@ -64,16 +64,21 @@ def request_remote_compaction(request: RemoteCompactionRequest) -> dict[str, Any
     from ..common.cancellation import ToolCancelled
     from .auxiliary_model_call import AuxiliaryModelCallRequest, generate_auxiliary_model_response
 
-    messages = _messages_within_budget(request)
-    if messages is None:
-        return None
     try:
-        response = generate_auxiliary_model_response(AuxiliaryModelCallRequest(
+        messages = _messages_within_budget(request)
+        if messages is None:
+            return None
+        from .compact_request_budget import _request_tokens, freeze_compact_request_budget
+
+        auxiliary = AuxiliaryModelCallRequest(
             agent=request.agent, prompt=request.prompt, messages=messages, tools=request.tools,
             system_instruction=request.system_instruction, request_id=request.request_id, run_id=request.run_id,
             task_id=request.task_id, thread_id=request.thread_id, purpose=REMOTE_COMPACTION_PURPOSE,
             compaction_trigger=True,
-        ))
+        )
+        auxiliary = freeze_compact_request_budget(auxiliary,
+            input_tokens=calibrated_compact_request_tokens(_request_tokens(auxiliary), request.calibration))
+        response = generate_auxiliary_model_response(auxiliary)
     except (InterruptedError, ToolCancelled):
         raise
     except Exception as exc:  # noqa: BLE001 - 服务端压缩是增强路径，失败形状交给调用方回退客户端压缩
@@ -89,19 +94,23 @@ def request_remote_compaction(request: RemoteCompactionRequest) -> dict[str, Any
 # LLM: 和单次缓存面同一预算、同一瘦身规则；瘦身只改交给这次请求的副本。
 # 函数用途: 返回装得进窗口的消息数组；装不下返回 None。
 def _messages_within_budget(request: RemoteCompactionRequest) -> list[dict[str, Any]] | None:
+    from .auxiliary_model_call import AuxiliaryModelCallRequest
     from .compact_message_source import (
         CompactMessageSource,
-        estimate_compact_payload,
         shrink_tool_outputs,
     )
-    from .compact_request_budget import compact_cache_surface_budget
+    from .compact_request_budget import _request_tokens, compact_cache_surface_budget
 
     budget = compact_cache_surface_budget(request.agent)
     source = CompactMessageSource(lambda: iter(request.messages))
+    auxiliary = AuxiliaryModelCallRequest(agent=request.agent, prompt=request.prompt, tools=request.tools,
+        system_instruction=request.system_instruction, thread_id=request.thread_id,
+        purpose=REMOTE_COMPACTION_PURPOSE, compaction_trigger=True)
 
+    # LLM: 原样与瘦身来源使用同一完整计量；包含真实局部控制项及末尾trigger，不触发HTTP。
+    # 函数用途: 计算候选远端压缩输入的原始上界。
     def raw_tokens(value: CompactMessageSource) -> int:
-        return estimate_compact_payload({"prompt": request.prompt, "messages": value, "tools": request.tools or [],
-                                        "system_instruction": request.system_instruction})
+        return _request_tokens(auxiliary, value)
 
     raw = raw_tokens(source)
     total = calibrated_compact_request_tokens(raw, request.calibration)

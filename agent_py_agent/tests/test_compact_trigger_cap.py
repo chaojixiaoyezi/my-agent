@@ -507,8 +507,8 @@ def _cycle_options(tmp_path, monkeypatch, cap):
     return options
 
 
-@pytest.mark.parametrize(("cap", "expected"), [(0, 0), (950_000, 0), (800_000, 0), (300_000, 300_000)])
-def test_finalization_cycle_receives_the_token_trigger_only_when_capped(tmp_path, monkeypatch, cap, expected):
+@pytest.mark.parametrize(("cap", "expected"), [(0, 800_000), (950_000, 800_000), (800_000, 800_000), (300_000, 300_000)])
+def test_finalization_cycle_always_receives_the_resolved_token_trigger(tmp_path, monkeypatch, cap, expected):
     options = _cycle_options(tmp_path, monkeypatch, cap)
 
     assert options.trigger_percent == 80 and options.max_context_tokens == WINDOW

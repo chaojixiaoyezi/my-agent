@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..settings.defaults import configured_context_window_tokens, effective_max_output_tokens
+from ..settings.defaults import (
+    configured_context_window_tokens,
+    configured_max_output_tokens,
+    effective_max_output_tokens,
+)
 from .anthropic import AnthropicCompatibleBackend
 from .base import BackendOptions, BaseBackend, EchoBackend, UnconfiguredBackend
 from .openai_chat import OpenAICompatibleBackend
@@ -55,6 +59,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         responses_ws_max_idle_connections=getattr(config, "responses_ws_max_idle_connections", 32),
         # 输出上限按已知窗口统一夹取（唯一权威见 effective_max_output_tokens），默认模型与模型档案走同一规则。
         max_tokens=effective_max_output_tokens(config),
+        configured_output_ceiling=configured_max_output_tokens(config),
         context_window_tokens=configured_context_window_tokens(config),
         **_temperature_options(config),
         top_p=getattr(config, "top_p", None),

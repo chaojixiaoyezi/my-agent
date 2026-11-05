@@ -42,8 +42,8 @@ class RecordingBackend:
 
 
 # LLM: 必须验证供应商入口的实际参数，而非仅断言常量存在。
-# 函数用途: 摘要封顶 4096，但不抬高较小上限或修改共享后端。
-@pytest.mark.parametrize('normal,expected', [(16384, 4096), (1024, 1024)])
+# 函数用途: 摘要封顶由统一可配置预留决定，不抬高较小上限或修改共享后端。
+@pytest.mark.parametrize('normal,expected', [(16384, 16384), (1024, 1024)])
 def test_summary_output_cap_is_request_local(normal, expected):
     request = _request('已完成的事实')
     backend = RecordingBackend(normal)
@@ -125,21 +125,28 @@ def test_split_point_is_selected_before_the_single_summary_call(tmp_path, monkey
     calls = []
     monkeypatch.setattr(budget, 'generate_auxiliary_model_response', lambda r: calls.append(r) or ModelResponse(text='真实已完成事实', backend='local'))
     surface = ConversationCompactProviderSurface('稳定前缀', (), '原系统')
+    from agent_py_agent.agent.agent_core.model.context_pressure import model_request_input_ceiling
+    from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
+
+    policy = runtime_compact_policy(agent)
+    ceiling = min(policy.trigger_tokens, model_request_input_ceiling(agent, policy.context_window_tokens))
+    candidate_tokens = (policy.recovery_target_tokens + ceiling) // 2
+    assert policy.recovery_target_tokens < candidate_tokens < ceiling
 
     # LLM: 该投影器是宿主的纯计量输入；候选落在软目标与硬上限之间。
     # 函数用途: 产生可提交但仍高于恢复目标的完整下一请求大小。
     def project(view):
-        return ConversationCompactProjection(7000 if view.is_candidate else 12000, object())
+        return ConversationCompactProjection(candidate_tokens if view.is_candidate else 12000, object())
 
     result = compact.prepare_conversation_context(agent, store, thread, options=compact.ConversationCompactOptions(
         current_prompt='继续原任务', provider_surface=surface, request_projector=project))
     assert result.compacted and len(calls) == 1
-    assert result.projected_tokens == 7000
+    assert result.projected_tokens == candidate_tokens
     assert store.threads.load(thread.thread_id).compact_generation == 1
 
 
 # LLM: 用真实 Chat/Responses 序列化器，仅替换 HTTP 传输；比较前台载荷及有界摘要的真实字节字段。
-# 函数用途: 输出 4096 上限真正到达供应商载荷，工具、选择策略和历史前缀不变。
+# 函数用途: 统一摘要上限真正到达供应商载荷，工具、选择策略和历史前缀不变。
 @pytest.mark.parametrize('provider,model,sequence_key,output_key', [
     ('openai_compatible', 'deepseek-v4-flash', 'messages', 'max_tokens'),
     ('openai_responses', 'gpt-6.1-sol', 'input', 'max_output_tokens'),
@@ -154,7 +161,11 @@ def test_real_provider_payload_has_cap_and_unchanged_foreground_prefix(provider,
     response = budget.generate_bounded_compact_response(request)
     assert response.text and len(payloads) == 2
     before, after = payloads
-    assert before[output_key] == normal_cap and after[output_key] == 4096
+    from agent_py_agent.agent.agent_core.model.call_runtime import (
+        compact_summary_output_reserve_tokens,
+    )
+
+    assert before[output_key] == normal_cap and after[output_key] == compact_summary_output_reserve_tokens(agent)
     assert backend.max_tokens == normal_cap
     assert after['tools'] == before['tools'] and after['tool_choice'] == before['tool_choice']
     assert after.get('instructions') == before.get('instructions')

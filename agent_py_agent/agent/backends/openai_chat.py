@@ -19,6 +19,7 @@ from .errors import (
 from .http import HttpBackend, bounded_output_tokens, provider_stream_scope, request_stream_lines
 from .provider_headers import endpoint_parts
 from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
+from .request_budget import RequestTokenBudget
 from .response_completion import (
     has_reasoning_content,
     incomplete_response_fields,
@@ -74,6 +75,7 @@ class _OpenAIGenerateRequest:
     # 智能程度用户档位或空串；off 已折为开关，两个新档按协议与声明换算，不能直接透传。
     reasoning_effort: str = ""
     is_probe: bool = False
+    token_budget: RequestTokenBudget | None = None
 
 
 # LLM: Chat 出站诊断只在显式环境开关下写入；payload 含任务正文，调用方必须使用仓库外私有路径。
@@ -158,6 +160,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 messages=messages,
                 thinking_disabled=provider_options.thinking_disabled,
                 max_output_tokens=provider_options.max_output_tokens,
+                token_budget=provider_options.token_budget,
                 reasoning_update_effort=provider_options.reasoning_update_effort,
                 compaction_trigger=provider_options.compaction_trigger,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
@@ -191,6 +194,10 @@ class OpenAICompatibleBackend(HttpBackend):
                 system_instruction=options.system_instruction,
                 thinking_disabled=options.thinking_disabled,
                 max_output_tokens=options.max_output_tokens,
+                token_budget=options.token_budget,
+                reasoning_update_effort=options.reasoning_update_effort,
+                compaction_trigger=options.compaction_trigger,
+                is_probe=options.is_probe,
                 first_event_timeout_seconds=options.first_event_timeout_seconds,
                 total_deadline_seconds=options.total_deadline_seconds,
                 reasoning_effort=options.reasoning_effort,
@@ -234,6 +241,7 @@ class OpenAICompatibleBackend(HttpBackend):
             prompt=prompt, tools=tools, tool_choice=tool_choice, messages=messages,
             system_instruction=options.system_instruction, thinking_disabled=options.thinking_disabled,
             reasoning_effort=options.reasoning_effort,
+            max_output_tokens=options.max_output_tokens, token_budget=options.token_budget,
         ))
         if self.stream_enabled:
             payload = openai_stream_payload(payload)
@@ -250,7 +258,8 @@ class OpenAICompatibleBackend(HttpBackend):
 
         payload = {
             "model": self.model_name,
-            "max_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens),
+            "max_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens,
+                configured_ceiling=self.request_output_ceiling(), token_budget=request.token_budget),
         }
         if cache_key := self._session_cache_key():
             payload["prompt_cache_key"] = cache_key

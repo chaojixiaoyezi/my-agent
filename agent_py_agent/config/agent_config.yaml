@@ -223,7 +223,9 @@ memory_rule_auto_read_limit: 3
 # - always：每轮都尝试加，适合专门做恢复/排障的会话。
 # 偶尔需要时单次运行加 --resume-context 就行，不用改这里。
 memory_resume_auto_context_mode: "off"
-# 四级压缩比例：管理员强制 > 当前会话 > 用户默认 > 此管理员默认，实际范围50..95。
+# 自动压缩的四级比例：管理员强制 > 当前会话 > 用户默认 > 此管理员默认，默认80，实际范围50..95。
+# 实际触发 tokens 由比例、memory_compact_auto_trigger_max_tokens 及可证共享窗口容量共同决定；
+# memory_compact_trigger_tokens 不是另一项可写设置。强制比例也不能覆盖物理容量，修改比例沿既有分层策略生效。
 memory_compact_trigger_percent: 80
 # 管理员全局强制开关；开启后用户和会话覆盖不能改变生效比例，运行覆盖层不得解除。
 # 同一管理员配置源也识别 admin_force_compact_trigger_percent / memory_compact_admin_forced，任一true即强制。
@@ -235,12 +237,12 @@ memory_compact_idle_seconds: 7200
 # 每拍最多检查的会话数，默认2；0关闭扫描，不迁移会话模型选择。
 memory_compact_idle_max_per_tick: 2
 # 自动压缩触发线的绝对上限（单位 tokens），和上面的百分比取小：实际触发线 = min(模型窗口 × 百分比, 这个数)。
-# 默认 0 表示不封顶，行为和以前完全一样。模型窗口很大（比如 1M）时百分比最低也只能压到 50%（50 万），
+# 显式 0 表示不启用绝对封顶；默认300000。模型窗口很大（比如 1M）时百分比最低也只能压到 50%（50 万），
 # 长期运行的后台线程会在几十万 token 之间跑很久才压缩，几个线程并发时容易顶住服务商的每分钟 token 上限；
 # 这种情况可以填一个绝对值（例如 250000）让压缩提前发生；压缩后的健康目标按同样比例下调（触发线 × 恢复百分比 ÷ 触发百分比，
 # 30 万时是 20 万）。填的值不低于“模型窗口 × 百分比”时不起作用。改完需要重启 Gateway 才生效。
 # 默认 300000：窗口 33 万以下的模型按百分比先触发，不受影响；1M 级窗口不再拖到约 90 万才压缩（09-29 429 事故的形状）。
-# 显式写 0 表示不封顶；乱填、负数会回到默认 300000。
+# 显式写 0 表示不启用绝对封顶；乱填、负数会回到默认 300000。已配置共享总窗口时还会预留摘要输出、2048安全余量和4096尾指令规划余量。
 memory_compact_auto_trigger_max_tokens: 300000
 # 上下文用量校准比值跨会话沿用（默认开）。状态条的 Context 数字和自动压缩判断，都会用服务商真实用量去校准本地估算；
 # 这份校准原本只在同一个会话里有效，新开的会话、换过模型的会话、刚压缩完的第一次调用只能用本地估算，常常偏高两三成。
@@ -250,23 +252,26 @@ memory_context_calibration_carry_enabled: true
 # 自动压缩后的历史收缩目标百分比。
 # 只有当你的模型窗口特别大、或压缩后仍频繁再次触发压缩时，才需要调低它压得更狠；调高会更保守、保留更多历史，但可能很快又触发下一次压缩。
 memory_compact_recovery_target_percent: 60
-# 压缩摘要请求的输出上限（单位 tokens，含思考）；0 表示沿用主请求的输出上限（max_tokens 按窗口夹取后的值）。
-# 默认 16384：压缩请求要先在本地判断"整段历史 + 本值 ≤ 模型窗口"，装得下才发一次复用主请求前缀（缓存几乎全命中）的请求；
-# 装不下就退到分段路径（换系统提示、去掉工具、逐段总结，缓存命中 0%，sol/astra 实测 10～33 分钟）。
-# 之前按主请求的 32000 预留，27.2 万窗口的模型按 90% 触发时永远装不下。摘要本身一般几千 token，16384 足够；
-# 思考很长的模型若摘要被截断可以调大，但越大越容易退回分段。改完需要重启 Gateway 才生效。
-# 注意：这个值只对"压缩调用能降档"的模型生效（GPT-6 系列的 Responses 接口，见 memory_compact_reasoning_level）；DeepSeek、MiniMax
-# 等模型的压缩调用仍按会话档位思考，思考 token 算进输出上限，用 16384 会把摘要截断（2026-10-08 生产实测），它们自动沿用主请求上限。
+# 压缩摘要输出预留（tokens，含思考），默认16384；准入、尾部分区、发送和记账共用一个实际值 C。
+# 0 优先继承常规天花板：显式共享窗口且能计量时可继承原始 max_tokens，否则继承旧四分之一窗口上限。
+# 正值只在 memory_compact_reasoning_level 的目标可由真实协议/档案表示时取 min(本值,常规天花板)；
+# 不支持降档或留空/auto/off 时沿用旧输出预留，记录 downshift_unavailable/downshift_disabled，绝不暗中改成4096。
+# 尾部更新 off 或被精确拒绝时仍可用请求级低档，C 不因此变大。已关闭思考的请求保持关闭。
+# 准入用完整校准输入加 C 和2048工程余量；16K/低档不保证摘要完整，严格截断仍拒绝并保留原文。
+# 缓存是否命中及真实摘要质量需要供应商观测，不能由本地规划保证。修改后按参数中心标注的重载时机生效。
 memory_compact_summary_max_output_tokens: 16384
 # 服务端压缩：true 时，后端声明支持的模型（目前是 ChatGPT 订阅登录的 gpt-6 系列 Responses 接口，和官方 Codex 同一路线）
 # 压缩不再自己发摘要请求，而是在主请求末尾放一个压缩触发项，由服务端返回一个不透明的压缩项（2026-10-08 真机：4.5 万历史
 # 11～14 秒、输出 152 token、前缀全命中；之后每轮只带压缩项约 154 token）。换到读不了压缩项的模型（MiniMax、DeepSeek 等）
 # 时程序自动从归档原文重新做一份文字摘要，不丢上下文。false 或后端不支持时走原客户端摘要。改完需要重启 Gateway 才生效。
 memory_compact_remote_enabled: true
-# 压缩摘要调用用什么思考档位：low / medium / high / xhigh / max，留空表示沿用会话当前档位。
-# 只对能用 configuration_update 项改档位的模型生效（OpenAI GPT-6 系列的 Responses 接口，见 model_reasoning_update_items）：
-# 请求级 reasoning.effort 保持会话档位不变，只在请求末尾追加一个降档项，这样前缀缓存不失配。写摘要不需要深思考，
-# 默认 low；其它模型（DeepSeek、MiniMax 等）暂不降档，仍沿用会话档位。改完需要重启 Gateway 才生效。
+# 压缩摘要思考档位 memory_compact_reasoning_level（不是新的 memory_compact_reasoning_effort），默认low；
+# 留空/auto/off 沿用会话档位，不把 off 重新解释为关闭思考。目标必须能由当前模型的控制方式/档位声明表示。
+# 模型档案字段 model_reasoning_update_items 默认auto：合适的 Responses 请求优先在冻结历史后、摘要指令前追加低档项；
+# 仅新项类型的精确400结构化拒绝允许一次请求级低档回退，负能力只记本后端实例。off 直接请求级低档，on 严格拒绝不回退。
+# 该档案字段由 /model 管理，参数中心只读展示（writable/user_editable=false），普通 user_config 不改写模型档案。
+# 其它协议若能真实表示目标，也用请求级档位/预算；仅 thinking.enabled 不是降低预算的证据。
+# 不改会话原来的档位；后端/档案重建清除能力 memo，修改压缩档位按参数中心标注的重载时机生效。
 memory_compact_reasoning_level: "low"
 # compact 自动续跑深度硬顶已降为代码常量（finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
 # compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
@@ -860,9 +865,9 @@ responses_ws_max_idle_connections: 32
 request_timeout: 240
 
 # 模型单次回答最多生成多少 token（含推理内容），所有模型统一 64K。
-# 实际发送值 = min(本值, 模型上下文窗口 ÷ 4)：窗口已知（/model 模型档案带入，或本文件写了 model_context_window_tokens）时，
-# 构造后端时按该窗口夹取，给输入留出至少四分之三窗口；窗口未知时按本值发送。compact 预算与超时估算用同一个值。输出上限也会从输入可用空间里预留，
-# 所以窗口较小（如 128K）的模型调大本值会让压缩更早触发。
+# 未计量的直接调用/探针仍取 min(本值,窗口÷4)，窗口没填时沿128K旧兜底；后端 max_tokens 保持这个冻结值。
+# 显式配置共享总窗口且完整输入已校准的内置 HTTP 请求，可逐次取 min(本值,窗口-输入-2048)，不修改共享后端。
+# 因而配置128K不等于每次都发128K；未知/仅输入型元数据不放大旧上限，订阅输出仍由服务端管理。
 max_tokens: 65536
 
 

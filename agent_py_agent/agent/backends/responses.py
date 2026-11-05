@@ -2,10 +2,20 @@
 # 模块用途: 支持 /responses 的显式采样、文本、工具调用、流式摘要、JSON 输出及用量统计。
 from __future__ import annotations
 
+import json
+import re
+import threading
+import time
+from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import replace
+
+from ..common.cancellation import raise_if_cancelled
+from ..concurrency.interrupt import is_interrupted
 from ..conversation.input_media import project_input_media
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .base import ModelResponse
-from .errors import ProviderResponseError
+from .errors import ProviderRequestRejectedError, ProviderResponseError, ProviderTimeoutError
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
 from .reply_diagnostics import responses_call_diagnostic
@@ -27,6 +37,8 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         super().__init__(options)
         self.responses_ws_idle_ttl_seconds = max(0, int(options.responses_ws_idle_ttl_seconds))
         self.responses_ws_max_idle_connections = max(0, min(256, int(options.responses_ws_max_idle_connections)))
+        self._reasoning_update_lock = threading.Lock()
+        self._reasoning_update_unsupported = False
 
     # LLM: Normal Responses HTTP envelopes use this hook; OAuth constructs its own envelope and invokes the same preparation explicitly.
     # 函数用途: 在最终HTTP信封上绑定Responses会话亲和，不改变其它协议请求。
@@ -61,7 +73,8 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     def _generate(self, request) -> ModelResponse:
         messages = project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes)
         payload = {"model": self.model_name, "store": False, "include": ["reasoning.encrypted_content"],
-                   "max_output_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens),
+                   "max_output_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens,
+                       configured_ceiling=self.request_output_ceiling(), token_budget=request.token_budget),
                    "input": input_items(request.prompt, messages, request.system_instruction, self.model_name)}
         if self.temperature_explicit:
             payload["temperature"] = self.temperature
@@ -84,7 +97,14 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         # 压缩降档：请求级 reasoning.effort 不动（前缀不失配），只在 input 末尾追加 configuration_update 项。
         update = (responses_reasoning_update_item(self.reasoning_control, request.reasoning_update_effort,
                                                   payload.get("reasoning"), self.reasoning_levels)
-                  if request.reasoning_update_effort and self.supports_reasoning_update_items() else None)
+                  if request.reasoning_update_effort and not request.thinking_disabled and self.supports_reasoning_update_items() else None)
+        if request.reasoning_update_effort and not request.thinking_disabled and update is None:
+            # 请求组装后能力 memo 可能已变化；意图不能随着 tail 消失而静默丢失。
+            target = responses_reasoning_field(self.reasoning_control, request.reasoning_update_effort,
+                                              self.reasoning_levels, disabled=False)
+            if not target:
+                raise ValueError("compact reasoning target is not representable")
+            payload.update(target)
         if update is not None:
             layout = prompt_cache_layout(request.prompt)
             before_suffix = not request.compaction_trigger and bool(layout and layout.volatile_suffix)
@@ -102,10 +122,11 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         # 服务端压缩：触发项放在 input 最末（压缩链保证此时没有压缩指令这条动态 user 消息），前缀逐字不变。
         if getattr(request, "compaction_trigger", False):
             payload["input"] = [*payload["input"], {"type": "compaction_trigger"}]
+        inserted_index = next((i for i, item in enumerate(payload["input"]) if item is update), -1)
         payload.update(_session_cache_key(subscription))
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
                    **_subscription_affinity_headers(subscription)}
-        obj = self._send_responses_request(payload, headers, request)
+        obj = self._send_with_reasoning_update_fallback(payload, headers, request, inserted_index=inserted_index)
         from .responses_ws_pool import cache_usage
 
         usage = obj.get("usage") or {}
@@ -120,7 +141,47 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         declared = str(getattr(self, "reasoning_update_items", "auto") or "auto").strip().lower()
         if declared in {"on", "off"}:
             return declared == "on"
+        with self._reasoning_update_lock:
+            if self._reasoning_update_unsupported:
+                return False
         return str(self.model_name or "").lower().startswith("gpt-6")
+
+    # LLM: 只重放本次新插入尾项的精确拒绝；同一绝对期限、取消及流关闭由原发送边界保留。
+    # 函数用途: auto 至多改用一次请求级目标档位，on 严格失败；memo 锁不跨 I/O。
+    def _send_with_reasoning_update_fallback(self, payload, headers, request, *, inserted_index: int):
+        if inserted_index < 0 or self.reasoning_update_items != "auto":
+            return self._send_responses_request(payload, headers, request)
+        deadline = (time.monotonic() + request.total_deadline_seconds
+                    if request.total_deadline_seconds is not None else None)
+        seen = [False]
+        observed = replace(request, on_chunk=_GenerationObserver(request.on_chunk, seen),
+                           on_thinking_delta=_GenerationObserver(request.on_thinking_delta, seen))
+        try:
+            return self._send_responses_request(payload, headers, observed)
+        except ProviderRequestRejectedError as first:
+            if seen[0] or not _is_reasoning_update_rejection(first, payload=payload, inserted_index=inserted_index):
+                raise
+            with self._reasoning_update_lock:
+                self._reasoning_update_unsupported = True
+            raise_if_cancelled()
+            if is_interrupted():
+                raise InterruptedError("Responses compatibility retry interrupted") from first
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise ProviderTimeoutError("Responses compatibility retry deadline exhausted", stage="wall_clock") from first
+            fallback = deepcopy(payload)
+            del fallback["input"][inserted_index]
+            from .reasoning_control import responses_reasoning_field
+
+            fallback.update(responses_reasoning_field(self.reasoning_control, request.reasoning_update_effort,
+                                                      self.reasoning_levels, disabled=False))
+            validate_responses_input(fallback["input"])
+            retried = replace(observed, reasoning_effort=request.reasoning_update_effort,
+                              reasoning_update_effort="", total_deadline_seconds=remaining)
+            try:
+                return self._send_responses_request(fallback, headers, retried)
+            except BaseException as second:
+                raise second from first
 
     # LLM: 服务端压缩能力只按结构化事实判断：订阅登录（auth_ref.mode == chatgpt，即官方 Codex 同一后端）已真机核实接受
     #   compaction_trigger 项并返回 compaction 项；API Key 的 Responses 端点未核实，先不声明。改动同步 conversation/compact_remote。
@@ -145,7 +206,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
                 "/responses", payload, headers, request.first_event_timeout_seconds, request.total_deadline_seconds,
             ))
             try:
-                return collect_response(lines, request.on_chunk, request.on_thinking_delta)
+                return collect_response(_observe_generation_lines(lines, request.on_chunk), request.on_chunk, request.on_thinking_delta)
             finally:
                 lines.close()
         if request.total_deadline_seconds is None:
@@ -163,6 +224,62 @@ def _checked_response_fields(obj: dict, model: str, tools: list, is_probe: bool)
            for block in fields["assistant_content_blocks"]):
         return fields
     raise ProviderResponseError("Responses 完整响应没有文本或工具调用", error_code="MODEL_EMPTY_RESPONSE")
+
+
+# LLM: 严格读取归一化 HTTP 事实和最终线索引；不看异常文案，也不触碰历史控制项。
+# 函数用途: 只有被当前调用插入的 configuration_update 类型被明确拒绝才允许回退。
+def _is_reasoning_update_rejection(exc: BaseException, *, payload: dict, inserted_index: int) -> bool:
+    if not isinstance(exc, ProviderRequestRejectedError) or type(exc.status_code) is not int or exc.status_code != 400:
+        return False
+    details = exc.details
+    provider = details.get("provider_error") if isinstance(details, Mapping) else None
+    error = provider.get("error") if isinstance(provider, Mapping) else None
+    if not isinstance(error, Mapping) or error.get("code") not in {"invalid_value", "unsupported_value", "unsupported_type"}:
+        return False
+    param = error.get("param")
+    match = re.fullmatch(r"input(?:\[([0-9]+)\]|\.([0-9]+))\.type", param) if isinstance(param, str) else None
+    items = payload.get("input")
+    return bool(match and isinstance(items, list) and type(inserted_index) is int
+                and 0 <= inserted_index < len(items)
+                and int(match.group(1) or match.group(2)) == inserted_index
+                and isinstance(items[inserted_index], Mapping)
+                and items[inserted_index].get("type") == "configuration_update")
+
+
+# LLM: 本次请求独占观察状态；原回调及 complete 方法原样代理，不把状态放到共享 backend。
+# 类用途: 标记已见生成 delta，阻止部分输出后兼容重放。
+class _GenerationObserver:
+    # LLM: 状态由本次逻辑调用独占，回调仅借用原展示观察者，不写共享后端。
+    # 函数用途: 绑定原回调和是否已经生成的标记。
+    def __init__(self, callback, seen):
+        self.callback, self.seen = callback, seen
+
+    # LLM: 原观察者仍接收原delta；生成事实单调置位，不能因显示回调缺席而允许重放。
+    # 函数用途: 标记已经开始生成，再转发同一增量。
+    def __call__(self, delta):
+        if delta:
+            self.seen[0] = True
+        if callable(self.callback):
+            self.callback(delta)
+
+    # LLM: 仅代理原complete等观察能力，不创建新的生成或提交入口。
+    # 函数用途: 保留原回调对象的附加方法。
+    def __getattr__(self, name):
+        return getattr(self.callback, name)
+
+
+# LLM: 只读已解析运输行的事件类型；工具参数 delta 也禁止重放，解析错误仍交原收集器裁决。
+# 函数用途: 即使没有可见正文回调，也识别本次流已经开始生成。
+def _observe_generation_lines(lines, observer):
+    for line in lines:
+        if isinstance(observer, _GenerationObserver):
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                event = None
+            if isinstance(event, dict) and str(event.get("type") or "").endswith(".delta"):
+                observer.seen[0] = True
+        yield line
 
 
 # LLM: 参考官方 Codex：同一会话的请求带稳定缓存键（宿主绑定的 owner+thread 摘要，不含凭据），让服务商把同一会话

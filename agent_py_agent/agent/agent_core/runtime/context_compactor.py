@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ...backends.request_budget import compact_trigger_limit
 from ...conversation.authority import conversation_transcript_is_authoritative
 from ...memory_archive.compact_circuit_breaker import (
     DEFAULT_COMPACT_COOLDOWN_SECONDS,
@@ -52,6 +53,8 @@ class RuntimeCompactPolicy:
     admin_default_percent: int = 80
     idle_trigger_percent: int = 60
     idle_seconds: int = 7200
+    trigger_limit_reason: str = "percent"
+    compact_output_reserve_tokens: int = 0
 
     # LLM: 只由结构化字段推出：上限严格小于「窗口 × 百分比」才算封顶；上限正好等于它时触发线与不封顶相同，
     #   finalization 仍按百分比判定。finalization 的 token 触发线、/context 展示和 recovery 的等比推导都据此切换；
@@ -59,7 +62,7 @@ class RuntimeCompactPolicy:
     # 函数用途: 判断这次的触发线是不是被绝对上限压下来的。
     @property
     def trigger_capped(self) -> bool:
-        return _trigger_is_capped(self.context_window_tokens, self.trigger_percent, self.trigger_max_tokens)
+        return 0 < self.trigger_tokens < compact_trigger_tokens(self.context_window_tokens, self.trigger_percent)
 
 
 # LLM: 比例仅由compact_threshold_policy消费配置并解析，禁止为元数据归属加入占位读取；不可变快照不随之后设置变化而变。
@@ -78,6 +81,10 @@ def runtime_compact_policy(
     thread: object = None,
 ) -> RuntimeCompactPolicy:
     from ...conversation.compact_threshold_policy import resolve_thread_compact_policy
+    from ..model.call_runtime import (
+        compact_summary_output_reserve_tokens,
+        request_budget_shared_window,
+    )
 
     window = resolve_model_context_window_tokens(agent)
     config = getattr(agent, "config", None)
@@ -86,7 +93,15 @@ def runtime_compact_policy(
     percent = resolution["effective_trigger_percent"]
     recovery_percent = compact_recovery_target_percent(getattr(config, "memory_compact_recovery_target_percent", None))
     trigger_max_tokens = compact_trigger_max_tokens(getattr(config, "memory_compact_auto_trigger_max_tokens", None))
-    trigger_tokens = _capped_trigger_tokens(window, percent, trigger_max_tokens)
+    reserve = compact_summary_output_reserve_tokens(agent)
+    # 没有可估算输出的旧本地后端保留原策略；HTTP 的非法正窗口配置不能静默回退。
+    trigger_tokens = (compact_trigger_limit(window=window, percent=percent, absolute_cap=trigger_max_tokens,
+        compact_reserve=reserve, shared_window=request_budget_shared_window(agent))
+        if reserve > 0 else _capped_trigger_tokens(window, percent, trigger_max_tokens))
+    percentage_trigger = compact_trigger_tokens(window, percent)
+    absolute_trigger = _capped_trigger_tokens(window, percent, trigger_max_tokens)
+    reason = ("capacity" if trigger_tokens < absolute_trigger else
+              "absolute_cap" if trigger_tokens < percentage_trigger else "percent")
     recent_tail_tokens = min(
         DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS,
         max(
@@ -94,7 +109,7 @@ def runtime_compact_policy(
             int(trigger_tokens * (DEFAULT_COMPACT_RECENT_TAIL_PERCENT / 100.0)),
         ),
     )
-    if _trigger_is_capped(window, percent, trigger_max_tokens):
+    if trigger_tokens < percentage_trigger:
         recovery_target_tokens = _capped_recovery_target_tokens(trigger_tokens, percent, recovery_percent, recent_tail_tokens)
     else:
         recovery_target_tokens = compact_recovery_target_tokens(window, trigger_tokens, recent_tail_tokens, recovery_percent)
@@ -119,6 +134,8 @@ def runtime_compact_policy(
         admin_default_percent=resolution["admin_default_percent"],
         idle_trigger_percent=idle_threshold,
         idle_seconds=idle_seconds,
+        trigger_limit_reason=reason,
+        compact_output_reserve_tokens=reserve,
     )
 
 

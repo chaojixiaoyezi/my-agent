@@ -38,6 +38,7 @@ SAFETY_BOUNDARY = "boundary"
 SOURCE_AGENT = "agent"
 SOURCE_CAPABILITY = "capability"
 SOURCE_RUNTIME_GUARD = "runtime_guard"
+SOURCE_MODEL_PROFILE = "model_profile"
 # 守卫各展示入口共用来源说明；参数中心只读不等于完整宿主管理员不能维护部署策略。
 RUNTIME_GUARD_SOURCE_TEXT = (
     "宿主 config/deployment_policy.json（未配置时用 Python 默认）；"
@@ -185,6 +186,8 @@ class ParameterSpec:
     # 函数用途: 返回实际支持的标量或结构化写路线。
     @property
     def writer(self) -> str:
+        if self.source == SOURCE_MODEL_PROFILE:
+            return ""
         if self.tier == "deployment":
             return ""
         if self.key in STRUCTURED_PARAMETER_KEYS:
@@ -368,6 +371,14 @@ def parameter_registry() -> dict[str, ParameterSpec]:
         )
     registry.update(_capability_specs())
     registry.update(_runtime_guard_specs())
+    # 只读公开档案控制，不复活已迁出的模型连接/凭据，也不签发普通设置写档案的权限。
+    profile_field = next(item for item in fields(AgentConfig) if item.name == "model_reasoning_update_items")
+    registry[profile_field.name] = ParameterSpec(
+        key=profile_field.name, default=profile_field.default, value_type="str",
+        description=descriptions.get("memory_compact_reasoning_level", ""),
+        category="模型请求", safety=SAFETY_BOUNDARY, masked=False, effect=EFFECT_GATEWAY_RESTART,
+        source=SOURCE_MODEL_PROFILE, owner_module="models", reader="agent/backends/responses",
+    )
     return registry
 
 
@@ -377,7 +388,7 @@ def parameter_registry() -> dict[str, ParameterSpec]:
 # 函数用途: 按来源取得参数运行值，守卫缺少冻结快照时明确返回未知。
 def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None,
                   policy: object | None = None) -> object:
-    if spec.source == SOURCE_AGENT:
+    if spec.source in {SOURCE_AGENT, SOURCE_MODEL_PROFILE}:
         return getattr(config, spec.key, spec.default) if config is not None else spec.default
     if spec.source == SOURCE_CAPABILITY:
         from ..capability.runtime_config_reload import (
@@ -461,9 +472,34 @@ def _reasoning_effect(config: object) -> str:
     return describe_config_reasoning_effect(configured_reasoning_level(config), config)
 
 
+# LLM: 只构造无凭据、无 OAuth 连接的配置预览；复用宿主 C 公式，不探测模型。配置入口没有运行后端 metadata，实际值必须显式未知。
+# 函数用途: 展示配置可推导的摘要预留，同时避免把预览冒充当前有效值；brief 丢掉规则文本时也保留此边界。
+def _compact_output_reserve(config: object) -> dict[str, object]:
+    from types import SimpleNamespace
+
+    from ..agent_core.model.call_runtime import compact_summary_output_reserve_tokens
+    from ..backends.factory import get_backend
+
+    safe = _ConfigWithValue(_ConfigWithValue(config, "api_key", ""), "model_auth_ref", {})
+    backend = get_backend(str(getattr(config, "model_backend", "") or ""), safe)
+    # 只保留是否由服务端管理输出这一公开事实，不读取或复制凭据引用。
+    if (getattr(config, "model_auth_ref", None) or {}).get("mode") == "chatgpt":
+        backend.auth_ref = {"mode": "chatgpt"}
+    return {
+        "basis": "configuration_preview",
+        "preview_tokens": compact_summary_output_reserve_tokens(SimpleNamespace(backend=backend, config=config)),
+        "runtime_effective_tokens": None,
+        "note": "仅配置推导，未读取当前实例已加载的供应商输出上限；当前有效值未知，实际调用可进一步收紧。",
+    }
+
+
 # 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。
 _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
-    "max_tokens": (effective_max_output_tokens, "按模型上下文窗口夹取：不超过窗口 ÷ 4，窗口没填时按 128000 算"),
+    "max_tokens": (effective_max_output_tokens, "未测量/探针的兜底上限：不超过窗口 ÷ 4，窗口没填时按 128000 算；"
+                   "已计量且配置共享总窗口的请求可用配置天花板，仍须逐次减去实际输入和安全余量"),
+    "memory_compact_summary_max_output_tokens": (_compact_output_reserve,
+        "配置预览而非当前运行值：0 继承可用常规天花板；目标档位可表示时取小，否则沿用旧输出预留。"
+        "真实准入、保留尾部和发送统一使用含当前供应商上限的宿主预留，配置入口无法确认该运行时事实"),
     "model_reasoning_effort": (_reasoning_effect, "按当前模型的思考控制方式换算：不支持调节的模型不发送任何推理参数；"
                                                   "会话里用 /effort 单独设过的以会话为准"),
 }

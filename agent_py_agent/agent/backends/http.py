@@ -18,6 +18,7 @@ from .errors import (
 from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .model_metadata import ProviderMetadataOptions, discover_provider_model_metadata
 from .provider_headers import current_probe_accounting, endpoint_parts, request_headers
+from .request_budget import RequestBudgetExceeded, RequestTokenBudget
 
 # 探针只缓存成功证据；短暂失败允许之后重试，但单次探测有界。
 _PROBE_MAX_ATTEMPT_COUNT = 3
@@ -52,10 +53,25 @@ def reset_unaccounted_probe_attempt_count() -> None:
 
 # LLM: HTTP 协议共同使用此请求级限额；不能热改实例配置，需同步 Chat/Messages/Responses 的摘要调用测试。
 # 函数用途: 将本轮输出上限限制在配置范围内，未覆盖时保留配置值。
-def bounded_output_tokens(configured: int, requested: int | None) -> int:
-    if requested is None:
-        return configured
-    return max(1, min(configured, int(requested)))
+def bounded_output_tokens(configured: int, requested: int | None, *,
+                          configured_ceiling: int | None = None,
+                          token_budget: RequestTokenBudget | None = None) -> int:
+    ceiling = configured_ceiling if configured_ceiling is not None else configured
+    legacy = min(configured, ceiling)
+    if token_budget is None:
+        return legacy if requested is None else max(1, min(legacy, int(requested)))
+    budget = token_budget
+    limit = ceiling if budget.shared_window and not budget.server_managed_output else legacy
+    invalid = (type(budget.output_tokens) is not int or budget.output_tokens <= 0
+               or budget.output_tokens > limit or budget.input_tokens < 0 or budget.safety_tokens < 0
+               or (requested is not None and int(requested) != budget.output_tokens))
+    if budget.shared_window:
+        invalid = invalid or budget.input_tokens + budget.output_tokens + budget.safety_tokens > budget.context_window_tokens
+    if invalid:
+        raise RequestBudgetExceeded(reason="invalid_budget", input_tokens=budget.input_tokens,
+                                    output_ceiling=budget.output_tokens,
+                                    context_window_tokens=budget.context_window_tokens)
+    return budget.output_tokens
 
 
 # LLM: 探测记账只在宿主绑定的 scope 内生效；函数内导入避免 backends 与 agent_core 互相依赖。
@@ -226,6 +242,7 @@ class HttpBackend(BaseBackend):
         self.connect_timeout = float(options.connect_timeout)
         self.provider_max_concurrent_requests = max(0, int(options.provider_max_concurrent_requests))
         self.max_tokens = int(options.max_tokens)
+        self.configured_output_ceiling = int(options.configured_output_ceiling or options.max_tokens)
         self.custom_headers = dict(options.custom_headers)
         self.session_header = options.session_header
         # 本地配置与供应商事实分开保存；不能再把 fallback 冒充 provider metadata。
@@ -256,6 +273,16 @@ class HttpBackend(BaseBackend):
         # timeout.  The tool-loop guard therefore must not also reinterpret it
         # as a total wall-clock limit while valid events keep arriving.
         self.stream_timeout_is_idle = self.stream_enabled
+
+    # LLM: 只读已加载的结构化元数据，绝不在请求热路径新增探测或按模型名猜上限。
+    # 函数用途: 已知供应商输出上限只会降低构造时冻结的配置天花板。
+    def request_output_ceiling(self) -> int:
+        ceiling = self.configured_output_ceiling
+        for key in ("max_output_tokens", "max_output_token_count", "output_token_limit"):
+            value = self.model_metadata.get(key)
+            if type(value) is int and value > 0:
+                ceiling = min(ceiling, value)
+        return ceiling
 
     # LLM: Serialize provider probes per backend instance and cache only proven-positive facts.
     # 函数用途: 并发冷启动共用一次有界协议探测，失败不缓存，避免暂时失败永久阻断后续任务。

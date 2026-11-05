@@ -3,6 +3,8 @@
 # 模块用途: 统一模型调用与流输出；临时降级仅在出站副本应用，真实IR和停止沿原线程与持久化边界。
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import time
 import uuid
@@ -15,7 +17,9 @@ from threading import Event, Lock, Thread
 
 from ..backends import ModelResponse, ProviderRequestOptions
 from ..backends.errors import ProviderTimeoutError
+from ..backends.request_budget import RequestBudgetExceeded, RequestTokenBudget
 from ..backends.tool_ir import AssistantTurn, ToolResult
+from ..common.cancellation import raise_if_cancelled
 from ..concurrency.interrupt import (
     is_interrupted,
     register_interrupt_callback,
@@ -30,7 +34,10 @@ from ..tooling.runtime_contracts import ToolChoice
 from ._runtime_params import ToolLoopExecuteParams
 from .model.call_runtime import (
     ModelCallTimeoutFacts,
+    logical_model_call_id,
+    max_output_tokens,
     model_call_ledger,
+    model_request_token_budget,
     observed_chunk_filter,
     record_model_call_failed,
     record_model_call_finished,
@@ -47,6 +54,7 @@ from .model.context_pressure import (
     model_visible_context_snapshot,
     preflight_context_pressure_response,
     record_provider_context_observation,
+    request_budget_failure_response,
 )
 from .native_tool_protocol import (
     model_turn_tool_choice,
@@ -130,6 +138,9 @@ class ModelGenerateParams:
     request_prepare_started_at: float = 0.0
     pre_call_housekeeping_ms: float | None = None
     supervision_sweep_ms: float | None = None
+    token_budget: RequestTokenBudget | None = None
+    context_snapshot: object | None = field(default=None, repr=False, compare=False)
+    budget_input_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +242,7 @@ class _ModelGenerationState:
     context_surface_fingerprint: str = ""
     # guard 与 worker 共享的"是否仍是当前调用"事实；放弃后 worker 不再提交插话或发出请求。
     liveness: _CallLiveness = field(default_factory=_CallLiveness)
+    token_budget: RequestTokenBudget | None = None
 
 
 # LLM: 工具模型轮先按可选真实 child 范围冻结输入，再沿原 IR/preflight/调用/用量路径；冻结未知不改变有效模型。
@@ -238,11 +250,19 @@ class _ModelGenerationState:
 def generate_model_response(request: ModelGenerateParams):
     from .subagent.model_selection import capture_first_request_input
 
+    raise_if_cancelled()
+    if is_interrupted():
+        raise InterruptedError("model generation interrupted")
     if request.context_assembly_started_at <= 0.0:
         request = replace(request, context_assembly_started_at=time.monotonic())
     capture_first_request_input(request.agent, request.params, request.prompt)
     request = _materialize_native_prompt_facts(request)
-    if preflight := preflight_context_pressure_response(request):
+    try:
+        request = _freeze_model_request_budget(request)
+        preflight = preflight_context_pressure_response(request)
+    except RequestBudgetExceeded as exc:
+        return request_budget_failure_response(request, exc)
+    if preflight:
         return preflight
     _trace_model_start(request)
     # LLM: 覆盖的清除归「消费它的这次逻辑调用」：入口判定归属，结束时统一清（含异常路径），
@@ -276,6 +296,28 @@ def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGener
     provider_prompt, history = project_request_prompt_history(materialization_params, request.prompt)
     native_tool_ir_history(request.params)[:] = history
     return replace(request, prompt=provider_prompt)
+
+
+# LLM: 输入身份只读真实 prompt/历史/工具/system；同一物理重试复用预算，投影变化必须重新校准计量。
+# 函数用途: 生成本次冻结输入的摘要键，不读取磁盘或修改原生历史。
+def _request_budget_input_identity(request: ModelGenerateParams) -> str:
+    surface = json.dumps([logical_model_call_id(request),
+        resolve_native_tools(request.agent, request.params), provider_system_instruction(request.agent.backend)],
+        ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(surface.encode("utf-8")).hexdigest()
+
+
+# LLM: 先捕获原遥测 CAS 再计量；该快照同时供预检、状态、记账，不把 raw 字符估算替代 calibrated current。
+# 函数用途: 在预检前冻结本次请求预算，输入身份未变时沿用同一对象。
+def _freeze_model_request_budget(request: ModelGenerateParams) -> ModelGenerateParams:
+    identity = _request_budget_input_identity(request)
+    if request.context_snapshot is not None and request.budget_input_identity == identity:
+        return request
+    binding = capture_context_usage_binding(request.agent, request.params)
+    snapshot = model_visible_context_snapshot(request.agent, request.params, request.prompt, usage_binding=binding)
+    budget = (model_request_token_budget(request.agent, input_tokens=snapshot.current_tokens)
+              if max_output_tokens(request.agent) > 0 else None)
+    return replace(request, token_budget=budget, context_snapshot=snapshot, budget_input_identity=identity)
 
 
 def _record_run_cost(request: ModelGenerateParams, response: object) -> None:
@@ -707,13 +749,8 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
 # 函数用途: 为一次模型请求建立调用账本，并让实时正文与最终提交使用同一个真实调用编号。
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
     _begin_model_turn_identity(request.params, request.tool_rounds)
-    usage_binding = capture_context_usage_binding(request.agent, request.params)
-    context_snapshot = model_visible_context_snapshot(
-        request.agent,
-        request.params,
-        request.prompt,
-        usage_binding=usage_binding,
-    )
+    request = _freeze_model_request_budget(request)
+    context_snapshot = request.context_snapshot
     ledger, call_id, first_token_estimate = start_model_call_record(
         request,
         context_snapshot=context_snapshot,
@@ -750,6 +787,7 @@ def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationSta
         started_at=time.monotonic(),
         raw_context_estimate_tokens=context_snapshot.raw_estimated_tokens,
         context_surface_fingerprint=context_snapshot.context_surface_fingerprint,
+        token_budget=request.token_budget,
     )
 
 
@@ -963,6 +1001,8 @@ def _forwarded_guidance_seen(params: object) -> set:
 # 函数用途: 先收口思考与调用账，再签发同一次响应来源并刷新显示与 trace，不从后端正文恢复身份。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     response = _recover_unclosed_long_write_response(request, response)
+    if isinstance(response, ModelResponse):
+        response.request_token_budget = state.token_budget
     _publish_provider_thinking(request, state, response)
     state.chunk_filter.finish()
     record_model_call_finished(state.ledger, state.call_id, response)
@@ -1152,6 +1192,8 @@ def _model_chunk_callback(on_chunk: object, *, model_call_id: str = ""):
     return writer if callable(writer) else on_chunk
 
 
+# LLM: 只用本次冻结输出预算与真实超时阶段记原账；不重发请求或修改超时策略。
+# 函数用途: 保存当前物理调用的超时事实并发布原用量诊断。
 def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
     record_model_call_timeout(
         record.ledger,
@@ -1160,6 +1202,7 @@ def _record_provider_timeout(record: _ProviderTimeoutRecord) -> None:
             timeout_seconds=_effective_model_request_timeout_seconds(
                 record.request.agent,
                 record.first_token_timeout_seconds,
+                token_budget=record.request.token_budget,
             ),
             # 门槛2: stage 由异常携带（stream_idle/wall_clock/provider_declared），
             # getattr 兜底 provider_wall 兼容历史异常对象（门槛2 前无 stage 字段）。
@@ -1280,7 +1323,7 @@ def _generate_through_wall_guard(
     state: _ModelGenerationState,
     first_token_timeout_seconds: float = 0.0,
 ):
-    timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds)
+    timeout = _effective_model_request_timeout_seconds(request.agent, first_token_timeout_seconds, token_budget=state.token_budget)
     if timeout <= 0:
         return _invoke_backend_generate(request.agent.backend, request.prompt, state)
 
@@ -1614,13 +1657,15 @@ def _provider_request_options(backend, state: _ModelGenerationState, *, forced: 
     thinking_disabled, effort = request_reasoning_options(
         getattr(state, "agent", None), getattr(state, "params", None), backend, forced=forced,
     )
-    if not (system_instruction or thinking_disabled or effort or first_event_timeout is not None):
+    if not (system_instruction or thinking_disabled or effort or first_event_timeout is not None
+            or getattr(state, "token_budget", None) is not None):
         return None
     return ProviderRequestOptions(
         system_instruction=system_instruction,
         thinking_disabled=thinking_disabled,
         first_event_timeout_seconds=first_event_timeout,
         reasoning_effort=effort,
+        token_budget=getattr(state, "token_budget", None),
     )
 
 
