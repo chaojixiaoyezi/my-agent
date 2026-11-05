@@ -347,3 +347,145 @@ def test_unreadable_reservation_never_means_unroutable(context):
     assert closeout.unroutable_reason(gate.paths, payload, gate=gate) == ""
     assert gate.admit(path, ownership, AdmissionLimits(8, 8))["reason"] == "reservation_unreadable"
     assert path.read_bytes() == before and not (gate.paths.terminal / path.name).exists()
+
+
+# LLM: 明确复现owner入口先拒旧代route，再调用新增接入口；真实T/C/lease和canonical投影不替换，投影只能在外层锁退出后发生。
+# 函数用途: 验证调度器可在owner校验前独立结清无P3的旧代pending。
+def test_try_close_unroutable_pending_precedes_owner_check_and_projects_outside_lock(context, monkeypatch):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.gateway_parts import multiprocess_admission as admission
+    from agent_py_agent.agent.gateway_parts.request_worker import (
+        OwnerRouteMismatchError,
+        _durable_request_owner,
+    )
+
+    gate, path, ownership = ordinary_case(context)
+    current = read_json_file(path)
+    stale = freeze_request_route(current, ownership[0], RouteStamp(gate.count, "retired-before-owner", 1.0,
+                                          current["metadata"]["gateway_admin_binding_version"]))
+    write_json_file_atomic(path, stale)
+    with pytest.raises(OwnerRouteMismatchError):
+        _durable_request_owner(gate, stale)
+    transition = admission.gateway_turn_transition
+    project = closeout.project_unroutable_closeout
+    held, projected = [], []
+
+    # LLM: 只记录原T入口是否仍在作用域，实际flock保持原实现，不以替身授权收口。
+    # 函数用途: 为投影时机断言记录新增入口的真实锁区间。
+    @contextmanager
+    def observe_transition(paths, request_id):
+        with transition(paths, request_id):
+            held.append(request_id)
+            try:
+                yield
+            finally:
+                held.pop()
+
+    # LLM: 在原投影器重新取T之前核外层已释放T/M/L，避免测试因非重入flock死锁而挂起。
+    # 函数用途: 验证先退出短提交窗口再完成真实投影。
+    def observe_projection(*args, **kwargs):
+        assert held == []
+        assert not gate._runtime_takeover._mutex._is_owned()
+        assert not gate._runtime_takeover._lease._lifecycle_gate._is_owned()
+        projected.append(path.stem)
+        return project(*args, **kwargs)
+
+    monkeypatch.setattr(admission, "gateway_turn_transition", observe_transition)
+    monkeypatch.setattr(closeout, "project_unroutable_closeout", observe_projection)
+    decision = gate.try_close_unroutable_pending(path, snapshot=stale)
+    assert decision == {"status": "expired", "response": decision["response"], "closeout": "unroutable"}
+    assert projected == [path.stem]
+    assert decision["response"]["route_retirement_reason"] == "stale_generation_route"
+    assert decision["response"]["error_code"] == "GATEWAY_REQUEST_ROUTE_RETIRED"
+    terminal = read_json_file(gate.paths.terminal / path.name)
+    assert terminal["route"] == stale["route"] and terminal["metadata"] == stale["metadata"]
+    assert terminal["request_fingerprint"] == stale["request_fingerprint"]
+    assert read_json_file(gate.paths.responses / path.name) == decision["response"]
+    assert inputs.read_gateway_input_receipt(gate.paths, path.stem).state == "terminal_unknown"
+    assert not path.exists() and not reservation_file(gate.paths, path.stem).exists()
+
+
+# LLM: legacy输入没有route或完整印记，新入口不依赖caller的owner校验，也不创建执行预留。
+# 函数用途: 验证新增入口能收口两类旧单进程pending。
+@pytest.mark.parametrize("abv", [False, True])
+def test_try_close_unroutable_pending_closes_legacy_input(context, abv):
+    gate, _path, _ownership = ordinary_case(context)
+    path, payload, _ownership = _legacy_pending(gate, abv=abv)
+    decision = gate.try_close_unroutable_pending(path, snapshot=payload)
+    assert decision["status"] == "expired" and decision["closeout"] == "unroutable"
+    assert decision["response"]["route_retirement_reason"] == ("legacy_unstamped_request" if abv else "legacy_count0_request")
+    assert read_json_file(gate.paths.responses / path.name) == decision["response"]
+    assert not path.exists() and not reservation_file(gate.paths, path.stem).exists()
+
+
+# LLM: 快照只是扫描线索；原门内必须重读当前文件，正常请求不能被旧快照误收口或获得新P3。
+# 函数用途: 验证非unroutable请求返回None且保留原字节。
+def test_try_close_unroutable_pending_rereads_normal_request(context):
+    gate, path, ownership = ordinary_case(context)
+    current = read_json_file(path)
+    stale_snapshot = freeze_request_route(current, ownership[0], RouteStamp(gate.count, "retired-scan", 1.0,
+                                                  current["metadata"]["gateway_admin_binding_version"]))
+    before = path.read_bytes()
+    assert gate.try_close_unroutable_pending(path, snapshot=stale_snapshot) is None
+    assert path.read_bytes() == before
+    assert not (gate.paths.terminal / path.name).exists() and not reservation_file(gate.paths, path.stem).exists()
+
+
+# LLM: 有预留或读不出预留都交还原P3链；不能把错误或旧代route当成无权威证据。
+# 函数用途: 验证独立入口保留可读及不可读的原预留。
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_try_close_unroutable_pending_preserves_reservation(context, unreadable):
+    gate, path, ownership = ordinary_case(context)
+    current = read_json_file(path)
+    if unreadable:
+        stale = freeze_request_route(current, ownership[0], RouteStamp(gate.count, "retired-with-p3", 1.0,
+                                            current["metadata"]["gateway_admin_binding_version"]))
+        write_json_file_atomic(path, stale)
+        reservation = reservation_file(gate.paths, path.stem)
+        reservation.parent.mkdir(parents=True, exist_ok=True)
+        reservation.write_text("{broken", encoding="utf-8")
+    else:
+        assert gate.admit(path, ownership, AdmissionLimits(8, 8))["status"] == "admitted"
+        reservation = reservation_file(gate.paths, path.stem)
+    before, p3_before = path.read_bytes(), reservation.read_bytes()
+    assert gate.try_close_unroutable_pending(path) is None
+    assert path.read_bytes() == before and reservation.read_bytes() == p3_before
+    assert not (gate.paths.terminal / path.name).exists()
+
+
+# LLM: 已封canonical在新入口重试时原样复用；投影失败不得返回expired，也不丢原pending补交责任。
+# 函数用途: 验证新增入口投影中断后可幂等重试。
+def test_try_close_unroutable_pending_retries_projection_without_restamping(context, monkeypatch):
+    gate, _path, _ownership = ordinary_case(context)
+    path, payload, _ownership = _legacy_pending(gate, fingerprint=True)
+    project = recovery._project_recovered_terminal_response
+
+    # LLM: 只替换展示写叶模拟I/O中断，真实canonical提交及原inbox保留逻辑不变。
+    # 函数用途: 制造可重试的投影失败。
+    def fail_projection(*_args):
+        raise OSError("projection interrupted before dispatcher retry")
+
+    monkeypatch.setattr(recovery, "_project_recovered_terminal_response", fail_projection)
+    decision = gate.try_close_unroutable_pending(path, snapshot=payload)
+    assert decision["status"] == "blocked" and decision["reason"] == "unroutable_projection_pending"
+    assert path.exists()
+    canonical = gate.paths.terminal / path.name
+    before = canonical.read_bytes()
+    monkeypatch.setattr(recovery, "_project_recovered_terminal_response", project)
+    decision = gate.try_close_unroutable_pending(path, snapshot=payload)
+    assert decision["status"] == "expired"
+    assert canonical.read_bytes() == before and not path.exists()
+    assert read_json_file(gate.paths.responses / path.name) == decision["response"]
+
+
+# LLM: 原C来源关闭后即使扫描快照仍合法也不得写；保留pending，不假造终态或回落普通执行。
+# 函数用途: 验证新增入口仍受真实提交末门约束。
+def test_try_close_unroutable_pending_rejects_closed_coordinator(context):
+    gate, _path, _ownership = ordinary_case(context)
+    path, payload, _ownership = _legacy_pending(gate, fingerprint=True)
+    before = path.read_bytes()
+    gate._runtime_takeover._lease._closing = True
+    decision = gate.try_close_unroutable_pending(path, snapshot=payload)
+    assert decision["status"] == "blocked"
+    assert path.read_bytes() == before and not (gate.paths.terminal / path.name).exists()
