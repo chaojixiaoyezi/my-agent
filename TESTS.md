@@ -1,3 +1,21 @@
+## 2026-11-04 CI-R4：TUI 页脚与分层名册合同回归
+
+来源：`task-ci-r4.md` 与 `resume-ci-r4.md`；基线 `34059f586116d59a785f26e53b696788ccc9d999`。只改页脚组合函数及两份相关测试，按工作约定在此补验证记录；未改导航、实时历史、领域存储或运输实现。
+
+- 原六文件基线 863 项、9 失败：无业务上下文仍加路由前缀，挤占帮助/状态及详细模式；占满宽度后又拼最小一列；后台进程徽标次序/样式回归。现按上下文装饰普通底栏，状态/帮助保留全宽，前缀/快捷键/徽标共用列预算，进程徽标回到 F6 提示之后。
+- 真实 Gateway 名册合同测试改走现行“根列表→指定空间”消费口；原成员名/空间归属和 workflow 数字寻址断言保留，并增加根层不得平铺空间成员、指定空间准确成员及完整覆盖断言，不加产品兼容旁路。
+- 新增 38 个参数化回归（列宽、状态/帮助、路由/团队/进程共存）；修产品前的定向 39 项为 21 失败、18 通过（含修订后的真实名册合同）。最终六文件 901 项全部通过，0 failure/error/skip，退出 0；其中导航 44 项、实时历史 17 项，已包含在总数内。三份改动 Python 的 Ruff 与 `git diff --check` 均退出 0。
+
+复跑在 worktree 根，安装项目 dev 依赖后执行：
+
+```bash
+HOME=/private/tmp/home-ci-r4 MY_AGENT_HOME=/private/tmp/home-ci-r4/.my-agent PYTHONUSERBASE=/Users/xiaoyezi/Library/Python/3.14 PYTHONPATH="$PWD:/private/tmp/home-ci-r4/test-deps" PYTHONDONTWRITEBYTECODE=1 HYPOTHESIS_STORAGE_DIRECTORY=/private/tmp/home-ci-r4/.hypothesis python3 -m pytest agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_tui_stateful.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_rework_r8_business_wire_contract.py agent_py_agent/tests/test_v15_w11_tui_navigation.py agent_py_agent/tests/test_v15_rework_r4_live_history.py -q --tb=short -p no:cacheprovider
+ruff check --no-cache agent_py_agent/cli/chat_parts/tui_block_renderer.py agent_py_agent/tests/test_tui_renderer.py agent_py_agent/tests/test_rework_r8_business_wire_contract.py
+git diff --check
+```
+
+JUnit 留在隔离测试 HOME：`r4-reproduced.xml`、`r4-regressions-red.xml`、`r4-after.xml`。本机缺失的 Hypothesis 6.170.14 仅安装至上述临时 `test-deps`，未改全局依赖。按派工不派子代理；线上 CI、跨平台矩阵及真实交互终端未验证，不推送或部署。
+
 ## 2026-11-04 R1：监控组合发布 pin 与原子归属保护
 
 来源：`rework-sol-r1.md`（`v15-sol-r1`），审计基线 `d89e9c5f9e08cf877a7fb451d199146fb1ef6d45`。仅修改 `monitor_composition.py`、`workflow_store.py`、`test_v15_w8_composition_pins.py` 和本记录；`monitor_adapter.py` 已核对但未改，scheduler/R2 文件未改。没有部署、启停服务或修改解释器环境。
