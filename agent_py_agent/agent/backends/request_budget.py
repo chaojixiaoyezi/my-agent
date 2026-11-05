@@ -62,8 +62,7 @@ def compact_trigger_limit(*, window: int, percent: int, absolute_cap: int,
                           suffix_allowance: int = COMPACT_SUFFIX_ALLOWANCE_TOKENS) -> int:
     if window <= 0:
         return 0
-    if (compact_reserve <= 0 or safety_tokens < 0 or suffix_allowance < 0
-            or window - compact_reserve - safety_tokens <= 0):
+    if compact_reserve <= 0 or safety_tokens < 0 or suffix_allowance < 0:
         raise RequestBudgetExceeded(reason="invalid_geometry", input_tokens=0,
                                     output_ceiling=compact_reserve, context_window_tokens=window)
     trigger = window * percent // 100

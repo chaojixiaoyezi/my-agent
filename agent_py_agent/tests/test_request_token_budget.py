@@ -235,7 +235,10 @@ def test_three_http_adapters_consume_same_budget(monkeypatch, adapter):
     response, _, snapshots = _main_response(monkeypatch, agent, 200000)
     assert response.text == "成功" and len(payloads) == len(snapshots) == 1
     cap = [payloads[0][key] for key in ("max_output_tokens", "max_tokens", "max_completion_tokens") if key in payloads[0]]
-    assert cap == [response.request_token_budget.output_tokens] == [69952]
+    # Responses保留实测提升；其它协议按r4保留工厂夹取的68000，但仍传递同一冻结预算。
+    expected = 69952 if adapter == "openai_responses" else 68000
+    assert cap == [response.request_token_budget.output_tokens] == [expected]
+    assert response.request_token_budget.shared_window == (adapter == "openai_responses")
     assert agent.backend.max_tokens == 68000
 
 
@@ -308,3 +311,79 @@ def test_budget_errors_enter_existing_context_pressure_and_compact_fallback_path
     with pytest.raises(InterruptedError):
         request_remote_compaction(RemoteCompactionRequest(agent, "前缀", request.messages))
     assert not sent
+
+
+# LLM: 传输基类不能发起模型生成，不因拥有HTTP字段就升级成共享窗口适配器。
+# 函数用途: 保留纯容量投影后端的百分比触发线。
+def test_http_transport_without_generation_has_no_shared_budget_proof():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.model.call_runtime import request_budget_shared_window
+    from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.http import HttpBackend
+
+    agent = SimpleNamespace(backend=HttpBackend(BackendOptions("https://fixture.invalid", "fixture", "fixture",
+        max_tokens=4000, context_window_tokens=10000)), config=SimpleNamespace(model_context_window_tokens=10000))
+    assert not request_budget_shared_window(agent)
+    assert 0 < runtime_compact_policy(agent).trigger_tokens <= 10000
+
+
+# LLM: 当前请求配置只能收紧构造时的天花板，不修改共享后端，也不恢复被供应商降低的上限。
+# 函数用途: 防止配置已降低输出上限而实测规划仍发送旧值。
+def test_measured_ceiling_obeys_current_lowered_configuration(monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_request_token_budget
+
+    agent, sent = _responses_agent(monkeypatch)
+    agent.config = replace(agent.config, max_tokens=50000)
+    before = (agent.backend.max_tokens, agent.backend.configured_output_ceiling)
+    budget = model_request_token_budget(agent, input_tokens=1000)
+    assert budget.output_tokens == 50000
+    assert (agent.backend.max_tokens, agent.backend.configured_output_ceiling) == before
+    assert not sent
+
+
+# LLM: 未冻结候选保留旧输出预留；已测量的主请求只沿冻结规划判断，不能再减一遍完整天花板。
+# 函数用途: 验证两种准入入口不会互相覆盖预算合同。
+def test_input_ceiling_distinguishes_unmeasured_and_frozen_requests(monkeypatch):
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_request_token_budget
+    from agent_py_agent.agent.agent_core.model.context_pressure import model_request_input_ceiling
+
+    agent, sent = _responses_agent(monkeypatch)
+    budget = model_request_token_budget(agent, input_tokens=200000)
+    assert model_request_input_ceiling(agent, 272000) == 272000 - agent.backend.max_tokens
+    assert model_request_input_ceiling(agent, 272000, token_budget=budget) == 272000 - budget.safety_tokens
+    assert not sent
+
+
+# LLM: 预算错误保留准确码和可调整策略，但绝不因登记分类自动重放同一请求。
+# 函数用途: 验证输出预算错误在正式错误目录有明确、非重放恢复建议。
+def test_budget_error_has_registered_non_replaying_recovery():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+    from agent_py_agent.agent.contracts.recovery import RecoveryAction
+
+    contract = error_contract("REQUEST_OUTPUT_BUDGET_UNAVAILABLE")
+    assert contract.code == "REQUEST_OUTPUT_BUDGET_UNAVAILABLE"
+    assert contract.category == "resource" and not contract.retryable
+    assert contract.recommended_action == RecoveryAction.CHANGE_STRATEGY.value
+
+
+# LLM: 配置明确清空窗口后，旧backend的构造值不再是当前请求的共享容量证明。
+# 函数用途: 防止清除配置仍被旧窗口升级成实测规划。
+def test_cleared_window_does_not_reuse_stale_backend_shared_proof(monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.model.call_runtime import (
+        model_request_token_budget,
+        request_budget_shared_window,
+    )
+
+    agent, sent = _responses_agent(monkeypatch)
+    assert agent.backend.configured_context_window_tokens == 272000
+    agent.config = replace(agent.config, model_context_window_tokens=None)
+    assert not request_budget_shared_window(agent)
+    budget = model_request_token_budget(agent, input_tokens=1000)
+    assert not budget.shared_window and budget.context_window_tokens == 0
+    assert budget.output_tokens == agent.backend.max_tokens and not sent

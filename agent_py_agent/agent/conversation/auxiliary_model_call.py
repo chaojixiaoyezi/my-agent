@@ -22,6 +22,7 @@ from ..agent_core.model.call_runtime import (
     record_model_call_failed,
     record_model_call_finished,
     record_model_provider_attempt,
+    request_budget_supported_backend,
 )
 from ..agent_core.model.llm_metrics import record_llm_call
 from ..backends import ModelResponse, ProviderRequestOptions
@@ -114,7 +115,8 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         from .compact_request_budget import compact_request_tokens, freeze_compact_request_budget
 
         try:
-            request = freeze_compact_request_budget(request, input_tokens=compact_request_tokens(request))
+            request = freeze_compact_request_budget(request, input_tokens=calibrated_compact_request_tokens(
+                compact_request_tokens(request), request.input_calibration))
         except RequestBudgetExceeded as exc:
             if exc.reason != "input_overflow":
                 from .compact_guard import ConversationCompactError
@@ -300,13 +302,7 @@ def _auxiliary_absolute_timeout(
     base = _auxiliary_base_request_timeout(request)
     if streaming:
         return max(base, AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS, (first_event or 0.0) + base)
-    planned = base
-    if request.token_budget is not None:
-        from ..agent_core.model.call_runtime import effective_model_request_timeout_seconds
-
-        planned = effective_model_request_timeout_seconds(request.agent, first_event or 0.0,
-                                                          token_budget=request.token_budget)
-    return max(base, AUXILIARY_CALL_FLOOR_SECONDS, planned)
+    return max(base, AUXILIARY_CALL_FLOOR_SECONDS)
 
 
 # LLM: 时限计划只在发起前算一次：首包预算按记账那份输入估算推出，绝对期限再复用这个首包预算；
@@ -444,7 +440,8 @@ def _auxiliary_provider_options(
     if not (declared or has_timeouts or output_cap is not None or request.token_budget is not None):
         return None
     if not _accepts_keyword(generate, "request_options"):
-        if declared:
+        if declared or (request.token_budget is not None
+                        and bool(getattr(backend, "supports_provider_request_options", False))):
             raise TypeError("auxiliary model backend does not accept request_options")
         if output_cap is not None and output_cap != max_output_tokens(request.agent):
             raise TypeError("auxiliary model backend cannot enforce required compact output cap")
@@ -458,7 +455,8 @@ def _auxiliary_provider_options(
         max_output_tokens=output_cap,
         first_event_timeout_seconds=timeouts.first_event_budget_seconds,
         total_deadline_seconds=timeouts.total_deadline_seconds,
-        token_budget=request.token_budget,
+        # 旧后端仍用既有max_output_tokens控制；不把新预算对象塞进它不认识的选项。
+        token_budget=request.token_budget if request_budget_supported_backend(request.agent) else None,
         structured_budget_resolver=_structured_compact_budget_resolver(request, budget_state),
     )
 
@@ -498,7 +496,7 @@ def _structured_compact_budget_resolver(request, budget_state):
 def _compact_output_cap(request: AuxiliaryModelCallRequest) -> int | None:
     if not _is_compact_purpose(request.purpose):
         return None
-    return compact_summary_output_reserve_tokens(request.agent)
+    return compact_summary_output_reserve_tokens(request.agent) or None
 
 
 # LLM: 压缩降档只走"追加 configuration_update 项"这一条缓存安全的路（OpenAI 缓存文档：改请求级 reasoning.effort 会让
@@ -511,6 +509,9 @@ def _compact_reasoning_update_effort(request: AuxiliaryModelCallRequest, backend
         return ""
     if getattr(backend, "name", "") != "openai_responses":
         return ""
+    supports = getattr(backend, "supports_reasoning_update_items", None)
+    if not callable(supports) or not supports():
+        return ""
     if _compact_baseline_reasoning(request, backend)[0]:
         return ""
     from ..backends.reasoning_control import compact_reasoning_target
@@ -521,17 +522,9 @@ def _compact_reasoning_update_effort(request: AuxiliaryModelCallRequest, backend
 
 
 # LLM: 只有后端声明支持 provider 请求选项、且是明确标记的压缩目的、带线程身份时，才按线程读取思考档位。
-# 函数用途: 返回压缩请求应沿用的 (thinking_disabled, reasoning_effort)；不适用时返回 (False, "")。
+# 函数用途: 保留压缩请求的线程级思考分区，降档只能通过尾部更新项表达。
 def _compact_reasoning_options(request: AuxiliaryModelCallRequest, backend: object) -> tuple[bool, str]:
-    baseline = _compact_baseline_reasoning(request, backend)
-    if not _is_compact_purpose(request.purpose) or baseline[0]:
-        return baseline
-    from ..backends.reasoning_control import compact_reasoning_target
-
-    configured = getattr(getattr(request.agent, "config", None), "memory_compact_reasoning_level", "low")
-    target, _reason = compact_reasoning_target(backend, configured, compact_summary_output_reserve_tokens(request.agent))
-    supports = getattr(backend, "supports_reasoning_update_items", None)
-    return baseline if not target or (callable(supports) and supports()) else (False, target)
+    return _compact_baseline_reasoning(request, backend)
 
 
 # LLM: 读取当前线程真实档位；压缩工具 none 不冒充强制工具的关思考操作。
@@ -554,9 +547,12 @@ def _compact_downshift_reason(request: AuxiliaryModelCallRequest, backend: objec
         return ""
     from ..backends.reasoning_control import compact_reasoning_target
 
-    _target, reason = compact_reasoning_target(backend,
+    target, reason = compact_reasoning_target(backend,
         getattr(getattr(request.agent, "config", None), "memory_compact_reasoning_level", "low"),
         compact_summary_output_reserve_tokens(request.agent))
+    supports = getattr(backend, "supports_reasoning_update_items", None)
+    if target and (not callable(supports) or not supports()):
+        return "downshift_unavailable"
     return reason
 
 

@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from ..agent_core.model.call_runtime import (
     compact_summary_output_reserve_tokens,
     request_budget_shared_window,
+    request_budget_supported_backend,
     request_output_server_managed,
 )
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
@@ -91,8 +92,8 @@ _SEGMENT_MERGE_INSTRUCTION = (
 # LLM: 摘要预算 = 窗口 80% 减输出预留，与 generate_bounded_compact_response 内部同一公式；供请求前的媒体准入判定复用。
 # 函数用途: 算出当前模型一次摘要请求允许的输入 token 上限。
 def compact_summary_budget(agent: object) -> int:
-    window = resolve_model_context_window_tokens(agent)
-    return _compact_input_budget(agent, window * 80 // 100)
+    window, reserve, safety = _compact_request_geometry(agent)
+    return _compact_input_budget(window * 80 // 100, reserve, safety)
 
 
 # LLM: 带主请求工具的缓存安全单次摘要，前缀就是主请求本身，容量上限与主请求同一口径（窗口减输出预留）；80% 的
@@ -102,17 +103,27 @@ def compact_summary_budget(agent: object) -> int:
 #   max_output_tokens 同源）；之前按主请求的 32000 预留，27.2 万窗口按 90% 触发时单次请求永远装不下。
 # 函数用途: 算出缓存安全单次摘要允许的输入 token 上限。
 def compact_cache_surface_budget(agent: object) -> int:
-    return _compact_input_budget(agent, resolve_model_context_window_tokens(agent))
+    return _compact_input_budget(*_compact_request_geometry(agent))
 
 
-# LLM: 未知/输入型元数据也保留保守输出预留；这不是共享总窗口证据。
-# 函数用途: 不可能的正窗口配置统一报一次 typed 失败，不能伪装成一 token 预算。
-def _compact_input_budget(agent: object, window: int) -> int:
+# LLM: 只有已证明的共享总窗口叠加工程余量；未知/输入型窗口和旧后端沿原本地输出预留，不升级物理容量保证。
+# 函数用途: 一次解析压缩窗口、输出预留及适用的工程余量。
+def _compact_request_geometry(agent: object) -> tuple[int, int, int]:
+    window = resolve_model_context_window_tokens(agent)
     reserve = compact_summary_output_reserve_tokens(agent)
+    safety = REQUEST_INPUT_SAFETY_TOKENS if request_budget_shared_window(agent) else 0
+    return window, reserve, safety
+
+
+# LLM: 共享规划的非法几何仍typed失败；旧本地预算无输入余地时返回0，交原来源/固定前缀检查，不伪造1token。
+# 函数用途: 计算可用输入空间并保留旧来源诊断优先级。
+def _compact_input_budget(window: int, reserve: int, safety: int) -> int:
     if window <= 0:
         return 0
-    capacity = window - reserve - REQUEST_INPUT_SAFETY_TOKENS
-    if reserve <= 0 or capacity <= 0:
+    capacity = window - reserve - safety
+    if reserve >= 0 and capacity <= 0 and safety == 0:
+        return 0
+    if reserve < 0 or capacity <= 0:
         raise ConversationCompactError("模型窗口无法容纳配置的摘要输出预留", code="COMPACT_INVALID_OUTPUT_BUDGET")
     return capacity
 
@@ -120,16 +131,17 @@ def _compact_input_budget(agent: object, window: int) -> int:
 # LLM: 只消费已经校准的完整输入；auxiliary 不得再用更大的 raw 估算重做本次准入。
 # 函数用途: 为实际摘要材料签发完整输出预算，窗口不足时明确抛规划错误。
 def freeze_compact_request_budget(request: AuxiliaryModelCallRequest, *, input_tokens: int) -> AuxiliaryModelCallRequest:
-    window = resolve_model_context_window_tokens(request.agent)
-    reserve = compact_summary_output_reserve_tokens(request.agent)
+    window, reserve, safety = _compact_request_geometry(request.agent)
+    if reserve == 0 and not request_budget_supported_backend(request.agent):
+        return replace(request, token_budget=None)
     facts = dict(input_tokens=input_tokens, output_ceiling=reserve, context_window_tokens=window)
-    if reserve <= 0 or (window > 0 and window - reserve - REQUEST_INPUT_SAFETY_TOKENS <= 0):
+    if reserve <= 0 or (window > 0 and window - reserve - safety <= 0):
         raise RequestBudgetExceeded(reason="invalid_geometry", **facts)
-    if window > 0 and input_tokens + reserve + REQUEST_INPUT_SAFETY_TOKENS > window:
+    if window > 0 and input_tokens + reserve + safety > window:
         raise RequestBudgetExceeded(reason="input_overflow", **facts)
     return replace(request, token_budget=resolve_request_token_budget(**facts,
         shared_window=request_budget_shared_window(request.agent), require_full_output=True,
-        server_managed_output=request_output_server_managed(request.agent)))
+        server_managed_output=request_output_server_managed(request.agent), safety_tokens=safety))
 
 
 # LLM: 与内部 _request_tokens 同一口径（prompt、messages/来源、tools、system）；供媒体准入在构造来源后估算文字部分。
@@ -402,13 +414,14 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
     return response
 
 
-# LLM: 只在完整来源已容纳时物化原运输列表；请求失败退出本帧后释放临时数组，外层仍持可重放来源。
+# LLM: 具体HTTP请求携带已校准准入预算；旧接口保留原运输形状，预算在实际辅助分派内冻结，媒体余量不能丢失。
 # 函数用途: 保持AuxiliaryModelCallRequest及供应商接口不接磁盘视图，普通列表请求原对象直传。
 def _generate_materialized_response(request, source, *, calibration=None, media_reserve_tokens=0):
     materialized = replace(request, messages=list(source) if source is not None else request.messages,
                            token_budget=None, input_calibration=calibration)
     tokens = calibrated_compact_request_tokens(_request_tokens(materialized), calibration) + max(0, int(media_reserve_tokens))
-    admitted = freeze_compact_request_budget(materialized, input_tokens=tokens)
+    admitted = (freeze_compact_request_budget(materialized, input_tokens=tokens)
+                if request_budget_supported_backend(request.agent) or media_reserve_tokens else materialized)
     return _generate_auxiliary_with_retry(admitted)
 
 

@@ -157,11 +157,11 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 # 函数用途: 核证当前目录的精确分层、部署守卫拆分和后台身份默认上限。
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 190, "deployment": 122}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 193, "deployment": 122}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
     assert len(DEPLOYMENT_ONLY_KEYS) == 99
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 326
+    assert len(registry) == 329
     assert registry["max_background_agents"].default == AgentConfig().max_background_agents == 8
     assert registry["max_background_agents"].tier == "deployment"
     assert not registry["max_background_agents"].writable and not registry["max_background_agents"].user_editable
