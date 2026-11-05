@@ -2407,19 +2407,22 @@ def test_scaling_d_terminal_queued_receipt_settles(tmp_path, hot):
     assert summary[expected] == 1 and summary["errors"] == 0
     receipt_path = delivery.gateway_input_receipt_path(paths, request_id)
     first_bytes = receipt_path.read_bytes()
-    for _ in range(3):
+    for tick in range(3):
         again = delivery.reconcile_gateway_input_receipts(paths, agent)
         current = delivery.read_gateway_input_receipt(paths, request_id)
         assert current.state == expected
         assert current.updated_at == settled.updated_at
         assert receipt_path.read_bytes() == first_bytes
-        assert again[expected] == 1 and again["errors"] == 0
+        # 状态写者登记了新版本，原页旧版本不能提前确认；下一拍复核后退出，热区 queued 则一直保留。
+        assert again[expected] == (1 if hot is not None or tick == 0 else 0)
+        assert again["errors"] == again["terminal_unknown_errors"] == 0
 
 
 # LLM: 真实目录和游标文件，glob spy透传；state子目录写入不应失效父目录投影。
 # 函数用途: 核对回执扫描按名字二分轮转，缓存复用与新增文件下一轮可见。
 def test_scaling_d_receipt_directory_cache_rotates_without_reglob(tmp_path, monkeypatch):
     from agent_py_agent.agent.gateway_parts import input_delivery_service as delivery
+    from agent_py_agent.agent.gateway_parts import recovery_pending_index as recovery_index
     from agent_py_agent.tests.test_steer_delivery_recovery import _gateway_agent
 
     _agent, paths = _gateway_agent(tmp_path)
@@ -2429,24 +2432,26 @@ def test_scaling_d_receipt_directory_cache_rotates_without_reglob(tmp_path, monk
         (root / f"{name}.json").write_text("{}")
     os.utime(root, (1, 1))
     calls = []
-    original = delivery.os.scandir
+    original = recovery_index.directory_page
 
-    # 观察实际scandir并透传上下文，确保未改回glob或泄漏枚举句柄。
-    def scan(path):
+    # 观察真正的有界目录游标；每拍最多一页128项，不再要求回退os.scandir全枚举。
+    def scan(path, *args, **kwargs):
+        page = original(path, *args, **kwargs)
         if path == root:
             calls.append(path)
-        return original(path)
+            assert len(page[0]) <= 128
+        return page
 
-    monkeypatch.setattr(delivery.os, "scandir", scan)
+    monkeypatch.setattr(recovery_index, "directory_page", scan)
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["a.json", "b.json"]
     before = root.stat().st_mtime_ns
     delivery._commit_reconcile_cursor(paths, root / "b.json")
     assert root.stat().st_mtime_ns == before
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "a.json"]
-    assert calls == [root]
+    assert calls == [root, root]  # 第二拍确认原生游标到EOF。
     (root / "d.json").write_text("{}")
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "d.json"]
-    assert calls == [root, root]
+    assert calls == [root, root, root]
 
 
 # LLM: 回执和canonical文件真实落盘，仅在新helper读取guidance的边界注入消费证明或typed未知；不伪装真实端到端鉴权。

@@ -234,7 +234,8 @@ class ModelUsageStore:
                  _model_usage_snapshot_digest_from_delta(existing.model_calls) == _model_usage_snapshot_digest(event.model_calls)) if snapshot else (
                      _model_usage_identity_payload(existing) == _model_usage_identity_payload(event))
         if not equal:
-            raise DataCorruptionError(f"model usage event id reused with different input: {event.event_id}")
+            label = "model usage snapshot" if snapshot else "model usage"
+            raise DataCorruptionError(f"{label} event id reused with different input: {event.event_id}")
         return existing
 
     # LLM: 所有delta字段和摘要仍由原函数生成，不能从展示数字推断费用。

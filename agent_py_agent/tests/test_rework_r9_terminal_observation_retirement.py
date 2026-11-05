@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.conversation import store_observations
 from agent_py_agent.agent.conversation.models import THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES
 from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentScheduler
 from agent_py_agent.tests.test_background_main_agent_runtime import (
@@ -57,16 +56,17 @@ def _terminal_case(tmp_path, terminal=None):
 @pytest.mark.parametrize("terminal", _TERMINAL_STATUSES)
 def test_ledger_error_after_wake_removal_retires_exact_observation_on_retry(tmp_path, monkeypatch, terminal):
     store, thread, backend, scheduler, (linked, bystander, wake, policy) = _terminal_case(tmp_path, terminal)
-    original = store_observations.update_json_file_atomic
+    index = store.observations._index
+    original = index._append
     failures = []
 
-    def ledger_write(path, updater, *args, **kwargs):
-        if path == store.storage.observation_handled_path and not failures:
-            failures.append(path)
+    def ledger_write(pairs):
+        if not failures:
+            failures.append(index.journal_path)
             raise OSError("simulated I/O error")
-        return original(path, updater, *args, **kwargs)
+        return original(pairs)
 
-    monkeypatch.setattr(store_observations, "update_json_file_atomic", ledger_write)
+    monkeypatch.setattr(index, "_append", ledger_write)
     # 唤醒先写 handled 回执并移出 pending，随后观察处理账写失败；失败照常上抛，不吞成成功。
     with pytest.raises(OSError, match="simulated I/O error"):
         scheduler.tick(now=100.0)

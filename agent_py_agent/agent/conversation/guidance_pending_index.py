@@ -275,7 +275,10 @@ class GuidancePendingIndex(ObservationIndex):
                         raise DataCorruptionError('guidance queue has oversized or incomplete row')
                     if raw.strip():
                         try:
-                            entry = GuidanceEntry.from_dict(json.loads(raw))
+                            payload = json.loads(raw)
+                            if not isinstance(payload, dict):
+                                raise ValueError('guidance queue row must be an object')
+                            entry = GuidanceEntry.from_dict(payload)
                             if entry.target_type != target_type or entry.target_id != target_id:
                                 raise ValueError('guidance queue scope mismatch')
                             self._queue_install(conn, entry, start, len(raw))
@@ -419,7 +422,8 @@ class GuidancePendingIndex(ObservationIndex):
                 args.append(limit)
             rows = conn.execute(sql, args).fetchall()
             path = self.storage.guidance_path(target_type, target_id)
-            errors = [{'code': 'GUIDANCE_QUEUE_INVALID', 'path': str(path), 'offset': row[0], 'message': row[1]}
+            errors = [{'code': 'GUIDANCE_QUEUE_INVALID', 'context': 'conversation.guidance.read',
+                       'path': str(path), 'offset': row[0], 'message': row[1]}
                       for row in conn.execute('SELECT offset,error FROM errors WHERE path=? ORDER BY offset', (str(path),))]
         return list(reversed(rows)), errors
 

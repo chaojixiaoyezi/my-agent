@@ -223,9 +223,10 @@ def test_notice_null_target_preserves_only_observed_foreground(monkeypatch, runn
     target = GatewayExecutionTarget("thread-1", "request", "req-1", "claim-1").to_dict()
     runtime.publish_execution_target(target)
     runtime._foreground_request_refs = (threading.Lock(), [running], [request_id])
-    monkeypatch.setattr(tui_threading, "_publish_gateway_background_watch_binding", lambda *_: False)
+    # 真实绑定校验通过后才更新目标；False 现在表示拒绝整页，不能用来模拟“无绑定变化”。
     tui_threading._apply_gateway_background_snapshot(None, "session", runtime, [None], set(), [0], None,
-                                                    {"ok": True, "execution_target": None}, 0)
+                                                    {"ok": True, "thread_id": "thread-1", "execution_target": None,
+                                                     "notices": [], "cursor": 0}, 0)
     assert runtime.execution_target() == (target if retained else None)
 
 

@@ -88,6 +88,12 @@ def test_background_context_reports_corrupt_jsonl_rows_without_dropping_good_row
     assert "conversation.observations.read" in prompt
     assert "conversation.guidance.read" in prompt
     assert "line_number" in prompt
+    # 坏行不是整队列失败；有界索引及其重开后的错误投影都须保留两条坏行和原正常消息。
+    for current in (store, ConversationStore(tmp_path / "conversations")):
+        entries, errors = current.guidance.pending_report("thread", thread.thread_id)
+        assert [entry.message for entry in entries] == ["这条运行中提示应该保留"]
+        assert len(errors) == 2
+        assert all(error["context"] == "conversation.guidance.read" and error["offset"] >= 0 for error in errors)
 
 
 def test_background_context_reports_corrupt_wake_signal_without_dropping_good_signal(tmp_path):
