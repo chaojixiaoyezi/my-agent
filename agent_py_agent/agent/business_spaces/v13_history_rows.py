@@ -39,7 +39,7 @@ class HistoryRows:
     # LLM: hash 只用于文件定位，身份仍须从行封套核对。
     # 函数用途: 为记录、回执或审计的原始键生成单个叶子名称。
     def parts(self, kind, key):
-        if kind not in {'records', 'receipts'} or type(key) is not str or not key:
+        if kind not in {'records', 'receipts', 'metadata'} or type(key) is not str or not key:
             raise BusinessError('STORE_UNAVAILABLE')
         return (*self.base, kind, hashlib.sha256(key.encode('utf-8')).hexdigest() + '.json')
 
@@ -61,6 +61,8 @@ class HistoryRows:
                     or key is not None and row['key'] != key
                     or row['value'] is not None and type(row['value']) is not dict):
                 raise ValueError('row identity')
+            if kind == 'metadata' and type(row['value']) is not dict:
+                raise ValueError('metadata fact')
             if kind == 'receipts':
                 value = row['value']
                 if (type(value) is not dict or set(value) != {'fingerprint', 'result'}
@@ -80,7 +82,7 @@ class HistoryRows:
     # LLM: 返回完整写入计划给原 quota；回执唯一约束在同一目录锁中检查，绝不覆盖不同的证明。
     # 函数用途: 编码单个行的幂等物化内容。
     def payload(self, kind, key, value):
-        if kind == 'receipts':
+        if kind in {'receipts', 'metadata'}:
             previous = self.get(kind, key)
             if previous is not None and previous != value:
                 raise BusinessError('STORE_UNAVAILABLE')

@@ -525,22 +525,40 @@ def test_opt7_history_ids_cache_is_private_thread_safe_and_bounded(tmp_path):
     assert not hasattr(repository_module, '_HISTORY_RUN_IDS_CACHE')
 
 
-# LLM: effect_run仍按原owner/schema解析，返回嵌套对象必须独立，不因缓存复活已变更历史。
-# 函数用途: 验证副作用查询复用历史解析并即时看见同mtime内容更新。
+# LLM: 只旁听真实索引，不替换查询结果；旧JSONL全量读取不再是查询入口。
+# 函数用途: 核对查询的准确目标及单页解码数量。
+def _history_index_read_spy(monkeypatch, repository):
+    original, calls = repository._history_index.read, []
+
+    def read(**kwargs):
+        rows, errors = original(**kwargs)
+        calls.append((kwargs, len(rows)))
+        return rows, errors
+
+    monkeypatch.setattr(repository._history_index, 'read', read)
+    return calls
+
+
+# LLM: effect_run仍按原owner/schema解析，返回嵌套对象必须独立，不因索引复活已变更历史。
+# 函数用途: 验证副作用按ID点查且即时拒绝同mtime内容更新后的旧索引。
 def test_opt7_effect_run_history_cache_and_nested_isolation(tmp_path, monkeypatch):
     repository = _repository(tmp_path)
     claim = _claimed_due_run(repository)
     terminal = repository.finish_run(str(claim["run_id"]), str(claim["claim_id"]), SchedulerRunFinish("done", now=1010))
     calls = _jsonl_read_spy(monkeypatch, effects_module)
+    indexed = _history_index_read_spy(monkeypatch, repository)
     first = repository.effect_run(terminal["run_id"])
     first["owner"]["id"] = "caller-poison"
     assert repository.effect_run(terminal["run_id"]) == terminal
-    assert len(calls) == 1
+    assert calls == []
+    assert indexed == [({'run_id': terminal['run_id']}, 1)] * 2
     before = repository.history_path.stat()
     repository.history_path.write_text(repository.history_path.read_text().replace('"status": "done"', '"status": "fail"'))
     os.utime(repository.history_path, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert repository.effect_run(terminal["run_id"]) is None
-    assert len(calls) == 2
+    assert calls == []
+    assert indexed[-1] == ({'run_id': terminal['run_id']}, 0)
+    assert len(indexed) == 3
 
 
 # LLM: 候选写入仍走真实Service和用户原话引用，避免只测手工构造的缓存记录。
@@ -681,8 +699,8 @@ def test_opt7_candidate_cache_path_and_byte_limits(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
-# LLM: 三个读取入口共享同一历史解析，但owner/schema、取消集合和公开返回隔离仍由原入口负责。
-# 函数用途: 验证历史列表和待取消查询不会绕过副作用历史缓存重解析全文件。
+# LLM: 三个读取入口共用真实有界索引，但owner/schema、取消集合和公开返回隔离仍由原入口负责。
+# 函数用途: 验证点查、历史页和待取消查询不再重解析整个JSONL。
 def test_opt7_history_readers_share_cache_without_exposing_rows(tmp_path, monkeypatch):
     repository = _repository(tmp_path)
     claim = _claimed_due_run(repository)
@@ -692,6 +710,7 @@ def test_opt7_history_readers_share_cache_without_exposing_rows(tmp_path, monkey
     repository.store_path.write_text(json.dumps(store))
     effect_reads = _jsonl_read_spy(monkeypatch, effects_module)
     repo_reads = _jsonl_read_spy(monkeypatch, repository_module)
+    indexed = _history_index_read_spy(monkeypatch, repository)
     assert repository.effect_run(terminal["run_id"]) == terminal
     rows, errors = repository.history()
     assert errors == [] and rows == [terminal]
@@ -700,7 +719,11 @@ def test_opt7_history_readers_share_cache_without_exposing_rows(tmp_path, monkey
     assert pending == [terminal]
     pending[0]["owner"]["id"] = "caller"
     assert repository.effect_run(terminal["run_id"]) == terminal
-    assert len(effect_reads) + len(repo_reads) == 1
+    assert effect_reads == repo_reads == []
+    assert indexed == [
+        ({'run_id': terminal['run_id']}, 1), ({'job_id': '', 'limit': 50}, 1),
+        ({'run_id': terminal['run_id']}, 1), ({'run_id': terminal['run_id']}, 1),
+    ]
 
 
 # LLM: 报告缓存按原始文件尺寸做全局预算；超限与坏行只能回退，不能截断历史或重用旧错误上下文。
