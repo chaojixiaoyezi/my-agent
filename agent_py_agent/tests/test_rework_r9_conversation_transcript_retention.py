@@ -58,7 +58,7 @@ def _owner(tmp_path):
     return home, service
 
 
-# LLM: 走真实追加、Compact 检查点与线程 CAS；冷转发生在原 writer 锁内，fault 只替换一次普通 I/O。
+# LLM: 真实追加、检查点与线程CAS后明确解绑，模拟闲置可退休会话；冷转阈值及普通I/O模拟不变。
 # 函数用途: 生成一个按原阈值完成（或在指定点中断）冷转的旧会话，返回线程、热文件路径与原始完整字节。
 def _rotated_conversation(home, monkeypatch, fault=None):
     store = ConversationStore(Path(home.owner_home_dir) / "conversations")
@@ -91,6 +91,10 @@ def _rotated_conversation(home, monkeypatch, fault=None):
         updated = store.threads.update_compact_state(thread.thread_id, commit=commit, expected_generation=0,
                                                      now=OLD + 1000)
     assert injected == ([] if fault is None else [fault])
+    for name in ("channel_bindings.json", "user_latest_threads.json"):
+        index = store.storage.root / name
+        payload = json.loads(index.read_text())
+        index.write_text(json.dumps({key: value for key, value in payload.items() if value != thread.thread_id}))
     return store, updated, path, original
 
 
