@@ -186,9 +186,9 @@ def _verified_manifest(archive: zipfile.ZipFile, limits: PackageReadLimits) -> P
     if "plugin.json" not in members:
         raise PluginPackageError("invalid_archive", "插件包缺少描述文件。")
     manifest = _read_manifest(read_zip_member(archive, members["plugin.json"], limits.manifest_bytes))
-    if not manifest.is_content_only:
+    if not manifest.is_capability_pack:
         _check_limit(len(members), min(limits.members, limits.legacy_members))
-    declared = manifest.files if manifest.is_content_only or manifest.entry is not None else manifest.wheels
+    declared = manifest.files if manifest.is_capability_pack or manifest.entry is not None else manifest.wheels
     if set(members) != {"plugin.json", *(item.path for item in declared)}:
         raise PluginPackageError("invalid_archive", "插件包成员与描述不一致。")
     for item in declared:

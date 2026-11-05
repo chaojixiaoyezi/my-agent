@@ -1,5 +1,5 @@
-# LLM: v7 能力内容只声明私有资源和包级发现信息，不授予执行权、不创建 Skill 或环境；修改须联测旧包往返和资源读取。
-# 模块用途: 校验无需启动进程的能力包，中文资源名保留原样，包内方法只在选中后读取。
+# LLM: v7 私有内容与 v10 显式 MCP 声明共用包身份；此模块只校验静态数据，不授予执行权或创建环境，旧包字节保持不变。
+# 模块用途: 校验能力包文档及独立运行树，中文资源名保留原样，运行路径复用原文件入口规则。
 
 from __future__ import annotations
 
@@ -8,8 +8,15 @@ import unicodedata
 from dataclasses import dataclass
 
 from .capability_verification_manifest import VerificationDeclaration, validate_verification_members
+from .plugin_entry import PluginEntry, PluginFile, validate_entry_files
 
 CAPABILITY_PACKAGE_SCHEMA = "plugin_package.v7"
+CAPABILITY_PACKAGE_SCHEMA_V10 = "plugin_package.v10"
+# v10 协议固定为一个服务，不是运行时可调预算；按 W1 常数合同保留整数导出且不改共享目录。
+MAX_PACK_MCP_SERVERS = int("1")
+PACK_TOOL_CATALOG_MODES = ("declared", "pinned_on_enable")
+PACK_MCP_CONFIRMATION_KIND = "capability_pack_mcp"
+_MCP_SERVER_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}\Z")
 # 能力包清单最多收录的文件数；超出即判定清单过大（接近常见文件描述符上限 4096）。
 MAX_CAPABILITY_FILES = 4095
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -63,6 +70,93 @@ class CapabilityFile:
             raise ValueError("能力资源摘要无效")
         if self.executable is not False:
             raise ValueError("纯内容包不能声明可执行文件")
+
+
+@dataclass(frozen=True)
+class _PackRuntimeFile(PluginFile):
+    """保存含服务根前缀的归档声明；相对路径必须由同次清单校验调用原 v6 规则核验。"""
+
+    def __post_init__(self) -> None:
+        # 归档全名可能是四层根加八层运行树，不能误套 v6 全名八层上限。
+        validate_capability_path(self.path)
+        PluginFile("runtime", self.sha256, self.executable)
+
+    # LLM: 包完整性复验按公开声明的三个值比较；内部路径容器不是另一种文件身份，自动 hash 仍覆盖同三字段。
+    # 函数用途: 让普通 PluginFile 直接构造与 v10 解码得到的相同文件保持对称相等，不改旧类的相等规则。
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, PluginFile):
+            return NotImplemented
+        return (self.path, self.sha256, self.executable) == (other.path, other.sha256, other.executable)
+
+
+@dataclass(frozen=True)
+class PackMCPServer:
+    """v10 唯一运行服务的静态声明；不读取宿主、启动进程或授予工具权限。"""
+
+    name: str
+    root: str
+    entry: PluginEntry
+    platforms: tuple[str, ...]
+    network: bool
+    tool_catalog: str
+    # 工具类型在 PluginManifest 中核对，避免这里与其声明类形成模块导入环。
+    tools: tuple
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _MCP_SERVER_NAME.fullmatch(self.name):
+            raise ValueError("能力包 MCP 服务名称无效")
+        if not isinstance(self.root, str) or not self.root or len(self.root.split("/")) > 4:
+            raise ValueError("能力包 MCP 服务根目录无效")
+        # 借原 PluginFile 验证根的 ASCII 分量；附加普通文件名以免把目录当描述文件。
+        PluginFile(f"{self.root}/_root", "0" * 64)
+        if not isinstance(self.entry, PluginEntry) or type(self.network) is not bool:
+            raise ValueError("能力包 MCP 入口或网络声明无效")
+        if (self.tool_catalog not in PACK_TOOL_CATALOG_MODES or not isinstance(self.tools, tuple)
+                or (self.tool_catalog == "declared") != bool(self.tools)):
+            raise ValueError("能力包 MCP 工具目录模式无效")
+        # 这里只核入口形状与平台，完整成员集合仍由 validate_pack_runtime_files 原样核对。
+        validate_entry_files(self.entry,
+                             (PluginFile(self.entry.command, "0" * 64, self.entry.kind == "executable"),),
+                             self.platforms, ())
+
+    def to_payload(self) -> dict:
+        """只输出协议字段；工具 schema 每次取得副本，不混入激活事实。"""
+        return {"name": self.name, "root": self.root, "entry": self.entry.to_payload(),
+                "platforms": list(self.platforms), "permissions": {"network": self.network},
+                "tool_catalog": self.tool_catalog,
+                "tools": [{"name": tool.name, "description": tool.description,
+                           "input_schema": tool.input_schema, "requested_effect": tool.requested_effect}
+                          for tool in self.tools]}
+
+    @classmethod
+    def from_payload(cls, value: object) -> PackMCPServer:
+        """严格恢复一个服务；network 必须显式出现，v10 工具不接受观察扩展。"""
+        from .plugin_manifest import _tools_from_payload
+
+        fields = {"name", "root", "entry", "platforms", "permissions", "tool_catalog", "tools"}
+        if (not isinstance(value, dict) or set(value) != fields
+                or not isinstance(value["permissions"], dict) or set(value["permissions"]) != {"network"}
+                or not isinstance(value["platforms"], list)):
+            raise ValueError("能力包 MCP 服务字段无效")
+        return cls(value["name"], value["root"], PluginEntry.from_payload(value["entry"]),
+                   tuple(value["platforms"]), value["permissions"]["network"], value["tool_catalog"],
+                   _tools_from_payload(value["tools"], CAPABILITY_PACKAGE_SCHEMA_V10))
+
+
+def validate_pack_runtime_files(server: PackMCPServer,
+                                files: tuple[CapabilityFile | PluginFile, ...]) -> tuple[PluginFile, ...]:
+    """按服务根分区并去根，完整复用 v6 成员、入口、平台及未声明 Skill 的校验。"""
+    if (not isinstance(server, PackMCPServer) or not isinstance(files, tuple)
+            or any(not isinstance(item, (CapabilityFile, PluginFile)) for item in files)):
+        raise ValueError("能力包 MCP 文件清单无效")
+    keys = {unicodedata.normalize("NFC", item.path.casefold()) for item in files}
+    if len(keys) != len(files):
+        raise ValueError("能力包资源重名")
+    prefix = server.root + "/"
+    runtime = tuple(PluginFile(item.path[len(prefix):], item.sha256, item.executable)
+                    for item in files if item.path.startswith(prefix))
+    validate_entry_files(server.entry, runtime, server.platforms, ())
+    return runtime
 
 
 # LLM: 描述与关键词仅供模型软选择，不能用于权限或状态判断；入口文档必须属于同一包的已声明资源。

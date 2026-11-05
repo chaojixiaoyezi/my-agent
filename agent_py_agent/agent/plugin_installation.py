@@ -9,7 +9,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from .common.strict_json import load_strict_json
-from .plugin_activation_record import PluginActivation, plugin_catalog_digest
+from .plugin_activation_record import PluginActivation, activation_catalog_digest
 from .plugin_content_activation import PluginContentActivation
 from .plugin_manifest import PluginManifest, canonical_plugin_settings
 from .plugin_package import PluginPackageSnapshot
@@ -183,7 +183,8 @@ class PluginInstallation:
                 or offset != {"preparing": 1, "active": 2,
                               "revoked": 3 if activation.catalog_sha256 else 2}[activation.phase]
                 or (activation.phase != "revoked" and self.last_commit.operation_id != plan.operation_id)
-                or (activation.catalog_sha256 and activation.catalog_sha256 != plugin_catalog_digest(self.manifest))):
+                or (activation.catalog_sha256
+                    and activation.catalog_sha256 != activation_catalog_digest(self.manifest, activation))):
             raise ValueError("安装激活与版本或提交回执不一致")
         canonical_plugin_settings(load_strict_json(self.settings_json or "{}"), self.manifest.settings_schema)
 

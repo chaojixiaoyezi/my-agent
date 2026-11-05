@@ -77,7 +77,7 @@ def _package_base(context):
     readable = {package.package_id: package for package in packages}
     items = {"active:" + package.package_id: _active_package(package) for package in packages}
     entries = _installed(context)
-    installed = [entry for entry in entries if entry.manifest.is_content_only]
+    installed = [entry for entry in entries if entry.manifest.is_capability_pack]
     for entry in installed:
         items.pop("active:" + entry.manifest.plugin_id, None)
         items["installed:" + entry.manifest.plugin_id] = _package_install(entry, readable)
@@ -211,7 +211,7 @@ def plugin_projection(context):
         items = tuple(map_item(name, name, fields={"authorized_tools": [spec.name for spec in specs if spec.hints.provider_id == "plugin:" + name],
                       "installation_state": "not_observed", "panels": None, "events": None}) for name in sorted(authorized))
         return SectionProjection(items, source="ToolRuntimeSnapshot plugin contributions")
-    entries = tuple(entry for entry in _installed(context) if not entry.manifest.is_content_only)
+    entries = tuple(entry for entry in _installed(context) if not entry.manifest.is_capability_pack)
     return SectionProjection(tuple(_plugin_install(entry, specs) for entry in entries),
                              source="PluginInstallStore.snapshot / validated manifest",
                              counts={"installed": len(entries), "enabled": sum(entry.enabled for entry in entries)},

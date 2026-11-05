@@ -75,6 +75,8 @@ class CapabilityPackageSnapshot:
     reader: Callable[[str], bytes] = field(repr=False, compare=False)
     installation_scope: str = "private"
     application_scope: dict = field(default_factory=dict)
+    mcp_tool_names: tuple[str, ...] = ()
+    mcp_runtime: str = "none"
 
     # LLM: 安装深校验归Manifest；复制范围并校验唯一资源/入口，范围和资源名仅展示，不授执行权。
     # 函数用途: 确认包快照能按唯一成员路径读取，且具有宿主固定的内容与激活身份。
@@ -84,6 +86,13 @@ class CapabilityPackageSnapshot:
         if self.installation_scope not in {"private", "public"} or (
                 self.installation_scope == "public" and not self.package_id.startswith("public/")):
             raise ValueError("CAPABILITY_PACKAGE_SCOPE_INVALID")
+        if not isinstance(self.mcp_runtime, str) or self.mcp_runtime not in {"none", "on_demand", "owner_unsupported"}:
+            raise ValueError("CAPABILITY_PACKAGE_MCP_RUNTIME_INVALID")
+        if (not isinstance(self.mcp_tool_names, tuple)
+                or not all(isinstance(name, str) and name and not name.isspace() for name in self.mcp_tool_names)
+                or len(set(self.mcp_tool_names)) != len(self.mcp_tool_names)
+                or self.mcp_tool_names and self.mcp_runtime != "on_demand"):
+            raise ValueError("CAPABILITY_PACKAGE_MCP_TOOL_NAMES_INVALID")
         if not isinstance(self.members, tuple) or not all(isinstance(item, CapabilityFile) for item in self.members):
             raise ValueError("CAPABILITY_PACKAGE_MEMBERS_INVALID")
         paths = {item.path for item in self.members}
@@ -95,10 +104,14 @@ class CapabilityPackageSnapshot:
     # 函数用途: 输出范围和包内资源索引的发现卡。
     def to_card(self):
         assets = package_assets(self.members)
-        return {'package_id': self.package_id, 'name': self.name, 'version': self.version, 'summary': self.summary,
+        card = {'package_id': self.package_id, 'name': self.name, 'version': self.version, 'summary': self.summary,
                 'installation_scope': self.installation_scope, 'application_scope': application_scope_payload(self.application_scope),
                 'assets': assets, 'asset_counts': {key: len(value) for key, value in assets.items()},
                 'digest': self.package_sha256, 'enabled': True}
+        # 旧内容卡不追加默认字段；运行态只是发现元信息，不进入引用或工具授权。
+        if self.mcp_runtime != "none":
+            card.update(mcp_runtime=self.mcp_runtime, mcp_tool_count=len(self.mcp_tool_names))
+        return card
 
     # LLM: 详情仅加公开声明，不预读入口正文或把资源转全局Skill。
     # 函数用途: 生成能力包公开详情。

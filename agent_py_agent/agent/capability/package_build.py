@@ -1,4 +1,5 @@
-# LLM: 能力包（plugin_package.v7）与文件型插件包（v6，声明订阅/权限时 v8）的唯一打包实现：清单、摘要、ZIP 成员与复验都在这里，
+# LLM: 能力包（纯内容 v7 / 单 MCP 运行树 v10）与文件型插件包（v6，声明订阅/权限时 v8）的唯一打包实现，
+#   清单、摘要、ZIP 成员与复验都在这里，
 #   scripts/build_capability_package.py、scripts/build_plugin_files_package.py 只是读文件 + 调这里 + 写产物的薄壳，
 #   learnpack 的 package_build 工具也调这里。构建不执行、不导入任何随包文件，不安装、不改安装表；同一输入得到同一包字节。
 #   改清单字段、成员顺序、时间戳或权限位会改变包 sha256，须同步 test_package_build 的固定摘要用例和两个脚本的测试。
@@ -16,11 +17,14 @@ from pathlib import Path, PurePosixPath
 from ..capability_package_manifest import (
     CAPABILITY_OPTIONAL_FIELDS,
     CAPABILITY_PACKAGE_SCHEMA,
+    CAPABILITY_PACKAGE_SCHEMA_V10,
     CAPABILITY_REQUIRED_FIELDS,
     MAX_CAPABILITY_FILES,
+    PackMCPServer,
     validate_capability_path,
 )
 from ..common.nofollow_fs import read_bytes_beneath
+from ..plugin_entry import PluginFile, validate_entry_files
 from ..plugin_manifest import (
     PLUGIN_PACKAGE_SCHEMA_V6,
     PLUGIN_PACKAGE_SCHEMA_V8,
@@ -30,7 +34,7 @@ from ..plugin_package import PackageReadLimits, inspect_plugin_package
 
 KIND_CAPABILITY_PACK = "capability_pack"
 KIND_PLUGIN = "plugin"
-# 能力包声明必须恰好包含这些字段（schema_version、package_kind、文件摘要由构建生成，声明不能自带）。
+# 能力包声明必须包含这些字段；只可额外声明 mcp_servers（schema_version、package_kind、摘要由构建生成）。
 _PACK_FIELDS = frozenset({"plugin_id", "version", "summary", "capability", "files", "settings_schema"})
 # 声明里出现这些键就打成 v8（事件订阅、收紧钩子、权限需求），否则 v6。
 _V8_KEYS = frozenset({"events", "tool_gates", "permissions"})
@@ -87,13 +91,14 @@ def read_declared_files(root: Path, paths: list[str], limits: PackageReadLimits 
     return contents
 
 
-# LLM: 声明字段必须恰好是 _PACK_FIELDS，capability 的字段按能力声明的字段表（capability_package_manifest，唯一出处）核对，
+# LLM: 声明必填字段仍是 _PACK_FIELDS，只额外接受 mcp_servers；capability 按能力声明字段表核对，
 #   缺了、多了都点名（learnpack 生产复测：她只看到"能力声明字段无效"，误以为是中文关键词不行，把关键词全改成了英文）；
-#   files 每项只写 path，数量 1..MAX_CAPABILITY_FILES；只看结构，不读文件。纯函数。
+#   文档每项只写 path，运行树可加 executable；数量 1..MAX_CAPABILITY_FILES，不读文件、不启动进程。纯函数。
 # 函数用途: 校验能力包声明的外形并返回要读的文件路径（按声明顺序）。
 def capability_pack_paths(declaration: object) -> list[str]:
-    if not isinstance(declaration, dict) or set(declaration) != _PACK_FIELDS:
-        shown = _diff_text(_PACK_FIELDS, set(declaration) if isinstance(declaration, dict) else set())
+    if not isinstance(declaration, dict) or not _PACK_FIELDS <= set(declaration) <= _PACK_FIELDS | {"mcp_servers"}:
+        shown = _diff_text(_PACK_FIELDS, set(declaration) if isinstance(declaration, dict) else set(),
+                           optional={"mcp_servers"})
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", f"能力包声明字段不完整或含生成字段：{shown}")
     capability = declaration["capability"]
     allowed = set(CAPABILITY_REQUIRED_FIELDS) | set(CAPABILITY_OPTIONAL_FIELDS)
@@ -104,24 +109,85 @@ def capability_pack_paths(declaration: object) -> list[str]:
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID",
                                 f"capability 要写成对象，keywords 是字符串列表（中文、英文都行）：{shown}")
     items = declaration["files"]
+    if "mcp_servers" in declaration:
+        return _pack_mcp_paths(declaration, _pack_mcp_server(declaration))
     if (not isinstance(items, list) or not 1 <= len(items) <= MAX_CAPABILITY_FILES
             or any(not isinstance(item, dict) or set(item) != {"path"} for item in items)):
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "能力包 files 每项只声明 path")
     return [item["path"] for item in items]
 
 
+# 服务声明由同一个 DTO 严格解析；显式空值不能退回 v7，超单服务器上限单独分类。
+def _pack_mcp_server(declaration: dict) -> PackMCPServer:
+    servers = declaration["mcp_servers"]
+    if not isinstance(servers, list) or not servers:
+        raise PackageBuildError("PACKAGE_BUILD_MCP_INVALID", "mcp_servers 必须声明一个服务器")
+    if len(servers) > 1:
+        raise PackageBuildError("PACKAGE_BUILD_MCP_SERVER_LIMIT", "一个能力包只能声明一个 MCP 服务器")
+    try:
+        server = PackMCPServer.from_payload(servers[0])
+        document = declaration["capability"]["entry_document"]
+        if ("verification" in declaration["capability"] or not isinstance(document, str)
+                or document == server.root or document.startswith(server.root + "/")):
+            raise ValueError("MCP 能力包入口文档须在运行树之外且不能声明核验器")
+        return server
+    except (ValueError, TypeError, KeyError) as exc:
+        raise PackageBuildError("PACKAGE_BUILD_MCP_INVALID", "MCP 服务器声明或入口文档无效") from exc
+
+
+# 只在去掉 root 后构造 PluginFile，运行树相对深度沿用 v6 的8层而非归档完整路径的深度。
+# 摘要占位仅用于读源之前的静态校验；构建时从本次 contents 生成真实摘要，最后仍走统一读包器复验。
+def _pack_mcp_paths(declaration: dict, server: PackMCPServer) -> list[str]:
+    items = declaration["files"]
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_CAPABILITY_FILES:
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "能力包 files 必须是预算内的非空列表")
+    prefix, runtime, paths = server.root + "/", [], []
+    for item in items:
+        if not isinstance(item, dict) or "path" not in item or not isinstance(item["path"], str):
+            raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "能力包 files 每项必须声明 path")
+        path = item["path"]
+        if path.startswith(prefix):
+            try:
+                if set(item) not in ({"path"}, {"path", "executable"}):
+                    raise ValueError("运行文件只可声明 path 与 executable")
+                runtime.append(PluginFile(path[len(prefix):], "0" * 64, item.get("executable", False)))
+            except (ValueError, TypeError) as exc:
+                raise PackageBuildError("PACKAGE_BUILD_MCP_INVALID", "MCP 运行文件声明无效") from exc
+        elif set(item) != {"path"}:
+            raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "能力包文档 files 每项只声明 path")
+        paths.append(path)
+    try:
+        validate_entry_files(server.entry, tuple(runtime), server.platforms, ())
+    except (ValueError, TypeError) as exc:
+        raise PackageBuildError("PACKAGE_BUILD_MCP_INVALID", "MCP 运行文件、入口或平台声明不一致") from exc
+    return paths
+
+
 # LLM: contents 的键必须与声明的 files 一致（通常来自 read_declared_files）；清单补上协议版本、包类型和逐文件摘要（无执行位）。
 #   成功返回已复验的包，失败抛 PackageBuildError 或校验器的 PluginPackageError。纯函数。
-# 函数用途: 打一个能力包（v7 纯内容包）。
+# 函数用途: 打一个能力包（缺省 v7，显式单 MCP 服务器时 v10）。
 def build_capability_pack(declaration: dict, contents: dict[str, bytes]) -> BuiltPackage:
     if capability_pack_paths(declaration) != list(contents):
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "能力包 files 与读到的文件不一致")
+    if "mcp_servers" in declaration:
+        return _build_mcp_pack(declaration, contents)
     manifest = {**declaration, "schema_version": CAPABILITY_PACKAGE_SCHEMA, "package_kind": "capability",
                 "files": [{"path": path, "sha256": hashlib.sha256(content).hexdigest(), "executable": False}
                           for path, content in sorted(contents.items())]}
     members = {"plugin.json": (json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode(), 0o644),
                **{path: (content, 0o644) for path, content in contents.items()}}
     # 能力包所有成员（含 plugin.json）整体按名字排序写入，与历史产物逐字节一致。
+    return _finish(KIND_CAPABILITY_PACK, _zip(sorted(members), members), require_entry=False)
+
+
+# v10 只由声明决定执行位，不读宿主 mode；输入已读一次，后续仅对本次字节快照打包与复验。
+def _build_mcp_pack(declaration: dict, contents: dict[str, bytes]) -> BuiltPackage:
+    executables = {item["path"] for item in declaration["files"] if item.get("executable") is True}
+    manifest = {**declaration, "schema_version": CAPABILITY_PACKAGE_SCHEMA_V10, "package_kind": "capability",
+                "files": [{"path": path, "sha256": hashlib.sha256(content).hexdigest(),
+                           "executable": path in executables} for path, content in sorted(contents.items())]}
+    members = {"plugin.json": (json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode(), 0o644),
+               **{path: (content, 0o755 if path in executables else 0o644) for path, content in contents.items()}}
     return _finish(KIND_CAPABILITY_PACK, _zip(sorted(members), members), require_entry=False)
 
 
