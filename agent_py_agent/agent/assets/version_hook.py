@@ -1,4 +1,4 @@
-"""资产提交后的历史旁账；不改变canonical写入或事务恢复语义。"""
+"""资产提交旁账与待发表证据；canonical仍是唯一可编辑资产权威。"""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from hashlib import sha256
+from pathlib import Path
 
 from . import revision_history as history
 from .version_diff import script_diff, single_line, workflow_diff
@@ -14,7 +15,7 @@ from .version_diff import script_diff, single_line, workflow_diff
 _VERSION_OPERATION = ContextVar('asset_version_operation', default=None)
 
 
-# LLM: 上下文仅传展示摘要、恢复来源和提交回执，不授予写根或执行权限。
+# LLM: 上下文只接受宿主验证的历史快照，不从模型metadata接受依赖覆盖；不授予写根或执行权限。
 # 函数用途: 为一次工具保存建立隔离的版本回执上下文。
 @contextmanager
 def version_operation(*, summary_line='', restored_from=None):
@@ -24,6 +25,43 @@ def version_operation(*, summary_line='', restored_from=None):
         yield state
     finally:
         _VERSION_OPERATION.reset(token)
+
+
+# LLM: 入口只接load_snapshot选定记录，复核原记录和全部依赖blob；覆盖仅在同Owner同资产保存栈内有效。
+# 函数用途: 将选中发布记录的完整依赖带到原Store提交钩子。
+@contextmanager
+def restoring_snapshot(owner_home, record):
+    selected = history.get_version(owner_home, 'workflow', record['asset_id'], record['version'])
+    if selected != record or record.get('kind') != 'workflow':
+        raise history.AssetHistoryError('ASSET_VERSION_CONFLICT')
+    payload = _version_payload(owner_home, record)
+    pins = deepcopy(record.get('pins'))
+    if not isinstance(pins, dict) or any(not isinstance(pins.get(key), dict) for key in ('scripts', 'skills', 'workflows')):
+        raise history.AssetHistoryError('ASSET_VERSION_NOT_FOUND')
+    for group, kind in (('scripts', 'script'), ('skills', 'skill'), ('workflows', 'workflow')):
+        for asset_id, pin in pins[group].items():
+            if not isinstance(pin, dict) or type(pin.get('version')) is not int:
+                raise history.AssetHistoryError('ASSET_VERSION_NOT_FOUND')
+            dependency = history.get_version(owner_home, kind, asset_id, pin['version'])
+            _version_payload(owner_home, dependency)
+            if kind == 'script' and any(pin.get(key) != dependency.get(key)
+                    for key in ('code_sha256', 'execution_definition_ref')):
+                raise history.AssetHistoryError('ASSET_VERSION_CONFLICT')
+    if any(step.get('script_id') and step['script_id'] not in pins['scripts'] for step in payload.get('steps', [])):
+        raise history.AssetHistoryError('ASSET_VERSION_NOT_FOUND')
+    state = _VERSION_OPERATION.get()
+    if state is None:
+        raise RuntimeError('restoration requires a version operation')
+    previous = state.get('restoration')
+    state['restoration'] = {'owner_home': str(Path(owner_home).absolute()), 'asset_id': record['asset_id'],
+                            'pins': pins, 'version': record['version']}
+    try:
+        yield
+    finally:
+        if previous is None:
+            state.pop('restoration', None)
+        else:
+            state['restoration'] = previous
 
 
 # LLM: 过滤只发生于历史快照；不修改传入payload或资产目录内容。
@@ -125,11 +163,15 @@ def _current_script_pin(store, scripts, script_id):
 
 # LLM: 基础步骤沿历史pin，追加步骤才读当前脚本；同ID不同不可变身份在发布前拒绝，每个当前依赖仅读一次。
 # 函数用途: 合并完整历史基础依赖和本次追加依赖，避免空pin或隐式换版。
-def _pins(store, payload):
+def _pins(store, payload, *, use_restoration=True):
     from .script_store import ScriptStore
 
     if store.collection != 'workflows':
         return {'scripts': {}, 'skills': {}, 'workflows': {}}
+    restoration = (_VERSION_OPERATION.get() or {}).get('restoration') if use_restoration else None
+    if (restoration is not None and restoration['owner_home'] == str(store.owner_home.absolute())
+            and restoration['asset_id'] == payload['id']):
+        return deepcopy(restoration['pins'])
     pins, base_steps = _base_pins(store, payload)
     scripts, current = ScriptStore(store.owner_home), {}
     for step in payload.get('steps', []):
@@ -159,37 +201,118 @@ def _reference(store, payload, code):
     return execution_definition_ref(payload | ({'code': code.decode('utf-8')} if code is not None else {}))
 
 
-# LLM: 任何历史故障仅影响旁账，绝不在canonical已经提交后抛出保存失败；下次提交会重新比较指纹。
-# 函数用途: 在成功提交后记录旧pre-image和新正式版本。
+# LLM: 指纹去重仍复用原历史语义，侧文件和原始代码额外保存在证据中，恢复不读后来依赖。
+# 函数用途: 在canonical尚未销毁前构造一份完整、可重启的发表快照。
+def _snapshot(store, payload, texts, *, legacy=False, summary=''):
+    code, sides = _files(store, payload, texts)
+    clean = _payload(payload)
+    snapshot = {'payload': clean, 'code': code.decode('utf-8') if code is not None else None,
+                'side_files': sides, 'storage_revision': payload.get('revision', 0), 'legacy': legacy,
+                'execution_definition_ref': _reference(store, payload, code), 'summary_line': summary,
+                'restored_from': None}
+    latest = history.latest_version(store.owner_home, store.collection[:-1], payload['id'])
+    state = _VERSION_OPERATION.get() or {}
+    try:
+        # 可信回滚优先于指纹去重，避免同正文不同pin被当前head替代。
+        # 组合Store的publication_pins来自原宿主校验，不是描述符metadata。
+        supplied = getattr(store, 'publication_pins', None) if not legacy else None
+        snapshot['pins'] = (deepcopy(supplied) if supplied is not None else
+            _pins(store, payload) if not legacy and state.get('restoration') else
+            deepcopy(latest['pins']) if latest is not None and not latest.get('legacy')
+            and latest['fingerprint'] == history.asset_fingerprint(payload=clean, code=code, side_files=sides)
+            else _pins(store, payload, use_restoration=not legacy))
+    except Exception as exc:
+        # 不完整依赖不授权改用将来的版本；保留准确正文和失败事实，不清除证据。
+        snapshot['error_code'] = getattr(exc, 'code', 'TOOL_EXECUTION_FAILED')
+    if not legacy:
+        snapshot['summary_line'] = state.get('summary_line') or summary
+        snapshot['restored_from'] = state.get('restored_from')
+    return snapshot
+
+
+# LLM: 待发表证据不是可执行资产，只有committed或canonical精确匹配的prepared才到此；ACK前不删。
+# 函数用途: 幂等发表已提交快照并确认对应义务。
+def _publish(store, pending):
+    snapshot = pending['snapshot']
+    if snapshot.get('error_code'):
+        raise history.AssetHistoryError(snapshot['error_code'])
+    values = dict(snapshot)
+    code = values.pop('code')
+    result = history.record_version(store.owner_home, store.collection[:-1], pending['asset_id'],
+        **values, code=code.encode('utf-8') if code is not None else None)
+    history.acknowledge_publication(store.owner_home, store.collection[:-1], pending['asset_id'])
+    return result
+
+
+# LLM: 只比较本资产当前revision及全部快照字节，不凭fingerprint把未提交候选认领为正式内容。
+# 函数用途: 判断prepared证据是否已在canonical事务结束后提交。
+def _matches(store, snapshot, payload):
+    if payload is None or payload.get('revision', 0) != snapshot['storage_revision']:
+        return False
+    code, sides = _files(store, payload, {})
+    return (_payload(payload) == snapshot['payload'] and sides == snapshot['side_files']
+            and (code.decode('utf-8') if code is not None else None) == snapshot['code'])
+
+
+# LLM: 调用方持root/canonical锁且已恢复undo；旧证据未确认则拒绝销毁，prepared不匹配只代表未提交候选。
+# 函数用途: 在覆盖或删除前补齐最后一个已提交快照，兼容无历史的旧资产。
+def protect_preimage(store, payload):
+    if not _eligible(store):
+        return
+    kind, asset_id = store.collection[:-1], payload['id'] if payload else None
+    if asset_id is None:
+        return
+    pending = history.pending_publication(store.owner_home, kind, asset_id)
+    if pending is not None:
+        if pending['phase'] == 'prepared':
+            if not _matches(store, pending['snapshot'], payload):
+                history.acknowledge_publication(store.owner_home, kind, asset_id)
+                pending = None
+            else:
+                pending = history.retain_publication(store.owner_home, kind, asset_id,
+                    pending['snapshot'], committed=True)
+        if pending is not None:
+            _publish(store, pending)
+    code, sides = _files(store, payload, {})
+    fingerprint = history.asset_fingerprint(payload=_payload(payload), code=code, side_files=sides)
+    if history.find_version(store.owner_home, kind, asset_id, fingerprint=fingerprint) is not None:
+        return
+    snapshot = _snapshot(store, payload, {}, legacy=True, summary='旧资产快照')
+    pending = history.retain_publication(store.owner_home, kind, asset_id, snapshot, committed=True)
+    _publish(store, pending)
+
+
+# LLM: 在undo及canonical写入前保留候选，只有事务结束后的精确读回能将其转committed，不先发版本。
+# 函数用途: 为本次提交冻结依赖、正文与侧文件，单次blob写失败后仍可恢复。
+def prepare_commit(store, payload, previous, updates):
+    if not _eligible(store):
+        return
+    before = json.loads(previous[store.filename]) if previous.get(store.filename) is not None else None
+    code, _ = _files(store, payload, updates)
+    old_code, _ = _files(store, before, previous) if before is not None else (b'', {})
+    summary = (script_diff(before or {}, payload, previous_code=old_code or b'', current_code=code or b'')
+               if store.collection == 'scripts' else workflow_diff(before or {}, payload))['summary_line']
+    snapshot = _snapshot(store, payload, updates, summary=summary)
+    history.retain_publication(store.owner_home, store.collection[:-1], payload['id'], snapshot)
+
+
+# LLM: 任何发表故障不撤销已确认的canonical提交；快照证据留到不可变记录与索引都确认。
+# 函数用途: 在真实提交结束后完成待发表证据，并向工具回报非致命失败。
 def record_committed(store, payload, previous, updates):
     if not _eligible(store):
         return None
     state = _VERSION_OPERATION.get()
     try:
         kind, asset_id = store.collection[:-1], payload['id']
-        before = json.loads(previous[store.filename]) if previous.get(store.filename) is not None else None
-        latest = history.latest_version(store.owner_home, kind, asset_id)
-        if latest is None and before is not None:
-            code, sides = _files(store, before, previous)
-            history.record_version(store.owner_home, kind, asset_id, payload=_payload(before), code=code,
-                side_files=sides, storage_revision=before.get('revision', 0), legacy=True,
-                execution_definition_ref=_reference(store, before, code), summary_line='旧资产快照',
-                pins=_pins(store, before) if kind == 'workflow' else None)
-        code, sides = _files(store, payload, updates)
-        old_code, _ = _files(store, before, previous) if before is not None else (b'', {})
-        summary = (script_diff(before or {}, payload, previous_code=old_code or b'', current_code=code or b'')
-                   if kind == 'script' else workflow_diff(before or {}, payload))['summary_line']
-        reference = _reference(store, payload, code)
-        clean = _payload(payload)
-        fingerprint = history.asset_fingerprint(payload=clean, code=code, side_files=sides)
-        latest = history.latest_version(store.owner_home, kind, asset_id)
-        # 去重先于依赖读取，避免摘要更新或相同保存因依赖暂缺而产生噪音。
-        pins = (latest['pins'] if latest is not None and not latest.get('legacy')
-                and latest['fingerprint'] == fingerprint else _pins(store, payload))
-        result = history.record_version(store.owner_home, kind, asset_id, payload=clean, code=code,
-            side_files=sides, storage_revision=payload['revision'], execution_definition_ref=reference, pins=pins,
-            summary_line=(state or {}).get('summary_line') or summary,
-            restored_from=(state or {}).get('restored_from'))
+        pending = history.pending_publication(store.owner_home, kind, asset_id)
+        if pending is None:
+            prepare_commit(store, payload, previous, updates)
+            pending = history.pending_publication(store.owner_home, kind, asset_id)
+        if pending['phase'] != 'committed':
+            if not _matches(store, pending['snapshot'], payload):
+                raise history.AssetHistoryError('ASSET_VERSION_CONFLICT')
+            pending = history.retain_publication(store.owner_home, kind, asset_id, pending['snapshot'], committed=True)
+        result = _publish(store, pending)
         receipt = {'recorded': True, 'created': result['created'], 'version': result['version']}
     except Exception as exc:
         logging.getLogger(__name__).warning('asset version recording failed: %s', type(exc).__name__)
@@ -197,6 +320,29 @@ def record_committed(store, payload, previous, updates):
     if state is not None:
         state['recording'] = receipt
     return receipt
+
+
+# LLM: 兼容既有组合Store的record_version回执；只确认真实不可变记录与准确候选，不相信返回标志或模型metadata。
+# 函数用途: 自定义宿主发布回调成功后确认共用快照，失败仍保留证据且不撤销canonical。
+def acknowledge_callback(store, result):
+    if not _eligible(store) or not isinstance(result, dict) or not isinstance(result.get('record'), dict):
+        return
+    try:
+        record = result['record']
+        kind, asset_id = store.collection[:-1], record['asset_id']
+        if history.get_version(store.owner_home, kind, asset_id, record['version']) != record:
+            return
+        pending = history.pending_publication(store.owner_home, kind, asset_id)
+        if pending is None:
+            return
+        snapshot = pending['snapshot']
+        code = snapshot['code'].encode('utf-8') if snapshot['code'] is not None else None
+        fingerprint = history.asset_fingerprint(payload=snapshot['payload'], code=code, side_files=snapshot['side_files'])
+        if record['fingerprint'] == fingerprint and record['pins'] == snapshot.get('pins'):
+            _version_payload(store.owner_home, record)
+            history.acknowledge_publication(store.owner_home, kind, asset_id)
+    except Exception as exc:
+        logging.getLogger(__name__).warning('asset callback acknowledgment failed: %s', type(exc).__name__)
 
 
 # LLM: 删除之后仅给独立索引打时间标记；历史错误不恢复已经删除的canonical资产。

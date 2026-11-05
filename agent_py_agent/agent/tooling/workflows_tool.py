@@ -402,8 +402,10 @@ class WorkflowsTool(BaseTool):
             delete_draft(self.owner_home, 'workflow', workflow_id)
             return {**data, 'publish_complete': True}
         if action == 'rollback':
-            _, payload, _, _ = load_snapshot(self.owner_home, 'workflow', workflow_id, params['to_version'])
-            return self._save_definition(self._from_flat(payload).to_dict(), workflow_id, params['expected_revision'])
+            from ..assets.version_hook import restoring_snapshot
+            record, payload, _, _ = load_snapshot(self.owner_home, 'workflow', workflow_id, params['to_version'])
+            with restoring_snapshot(self.owner_home, record):
+                return self._save_definition(self._from_flat(payload).to_dict(), workflow_id, params['expected_revision'])
         if action == 'save':
             return self._save_definition(params['definition'], workflow_id, params.get('expected_revision'))
         definition = store.get_workflow(workflow_id)

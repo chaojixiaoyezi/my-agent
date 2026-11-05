@@ -367,7 +367,7 @@ class _AssetStore:
         else:
             write_text_atomic_beneath(self.owner_home, parts, content)
 
-    # LLM: undo先持久化，元数据最后替换；版本只从锁内canonical旧记录递增，投影不能改变写入作用域。
+    # LLM: root/canonical锁下先保护已提交前像并冻结候选证据，再写undo；提交后历史失败只保留发表债务。
     # 函数用途: 在根锁及集合锁下发布元数据和侧文件，失败或重启恢复一致旧版。
     def _write(self, payload, side_files=None):
         if self.collection in ('scripts', 'workflows'):
@@ -379,7 +379,8 @@ class _AssetStore:
             payload = {**payload, 'metadata': metadata}
         asset_id = safe_asset_id(payload["id"])
         workspace = getattr(self, '_scope_workspace', '')
-        payload = {**payload, 'revision': next_asset_revision(self._read(asset_id)),
+        before = self._read(asset_id)
+        payload = {**payload, 'revision': next_asset_revision(before),
                    'scope_layer': 'workspace' if workspace else 'owner',
                    'source_scope': 'workspace' if workspace else 'owner', 'workspace_root': workspace}
         updates = dict(side_files or {})
@@ -391,6 +392,9 @@ class _AssetStore:
         journal = json.dumps({"schema_version": "asset_transaction.v1", "previous": previous}, ensure_ascii=False)
         if len(journal.encode("utf-8")) > MAX_ASSET_BYTES * 16:
             raise ValueError("资产事务恢复记录过大")
+        from .version_hook import prepare_commit, protect_preimage
+        protect_preimage(self, before)
+        prepare_commit(self, payload, previous, updates)
         self._put(asset_id, TRANSACTION_FILE, journal)
         try:
             for name, content in updates.items():
@@ -399,7 +403,9 @@ class _AssetStore:
         except BaseException:
             self._recover(asset_id)
             raise
-        self._history_notify('save', payload=payload, previous=previous, updates=updates)
+        result = self._history_notify('save', payload=payload, previous=previous, updates=updates)
+        from .version_hook import acknowledge_callback
+        acknowledge_callback(self, result)
 
     # LLM: 事务完成后才通知，导入与回调异常不进入undo，也不伪装canonical保存失败。
     # 函数用途: 非致命通知历史旁账并向已有工具上下文回报失败。
@@ -448,7 +454,7 @@ class _AssetStore:
             return []
         return [safe_asset_id(name) for name in sorted(names) if not name.startswith(".")]
 
-    # LLM: 全局只读视图不能删除空目录；可写根先验每一普通单链接叶，链接或子目录拒绝，不递归跟随。
+    # LLM: 删除最后一个canonical副本前必须确认完整历史，未确认的证据不能随目录删除；链接和子目录仍拒绝。
     # 函数用途: 在可写根受控删除单个资产目录，缺失返回False。
     def _delete(self, asset_id):
         if self._read_only:
@@ -461,6 +467,8 @@ class _AssetStore:
             return False
         for name in names:
             self._text(asset_id, name)
+        from .version_hook import protect_preimage
+        protect_preimage(self, self._read(asset_id))
         for name in names:
             self._put(asset_id, name, None)
         if not _supports_dir_fd():

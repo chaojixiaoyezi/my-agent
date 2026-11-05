@@ -637,7 +637,7 @@ def _put_text(root, parts, content):
         write_text_atomic_beneath(root, parts, content)
 
 
-# LLM: 先undo再发表资产/job/due，v2耐久提交决定后只补原历史，不回滚已提交任务；任何收口失败均保留日志。
+# LLM: 先undo再发表资产/job/due；含资产历史义务或v2的耐久提交决定之后只补账，不回滚canonical。
 # 函数用途: 执行两阶段批量提交，成功时删除暂存和undo才返回。
 def _commit_staged(root, entries, journal, *, admission=None):
     from .script_store_support import apply_scheduler_batch
@@ -657,7 +657,7 @@ def _commit_staged(root, entries, journal, *, admission=None):
             _put_text(root, parts, entry['content'])
         apply_scheduler_batch(root, journal.get('scheduler_jobs', {}), journal.get('scheduler_runs', {}),
             admission=admission, history=journal.get('scheduler_history', ()))
-        if journal['schema_version'] == 'asset_batch.v2':
+        if journal['schema_version'] == 'asset_batch.v2' or journal.get('asset_history'):
             journal = {**journal, 'committed': True}
             write_text_atomic_beneath(root, (_BATCH_FILE,), _json(journal))
         _finish_batch(root, journal, admission=admission)
@@ -669,7 +669,7 @@ def _commit_staged(root, entries, journal, *, admission=None):
         raise
 
 
-# LLM: 已提交决定不可undo；原history去重后追加，失败保留同一journal供下次修复，不引入第二恢复账本。
+# LLM: 已提交决定不可undo；脚本先于工作流发表，任一失败保留journal及原快照义务，禁止之后的写丢掉证据。
 # 函数用途: 幂等补齐已提交批量的取消历史，再清阶段文件和事务记录。
 def _finish_batch(root, journal, *, admission=None):
     from ..common.json_io import append_private_jsonl_records
@@ -685,8 +685,15 @@ def _finish_batch(root, journal, *, admission=None):
             admission.check([OwnerQuotaChange(repo.history_path, size, append=True)])
         if history:
             append_private_jsonl_records(repo.history_path, history)
+    for item in journal.get('asset_history', []):
+        view = _store_view(root, item['kind'])
+        view._read_only = False
+        receipt = view._history_notify('save', payload=item['payload'], previous=item['previous'], updates=item['updates'])
+        if receipt is None or receipt.get('recorded') is not True:
+            return False
     _clean_stages(root, journal['entries'])
     unlink_file_beneath(root, (_BATCH_FILE,))
+    return True
 
 
 # LLM: 仅清理本事务记录中的安全暂存叶，既有文件也须为单链接普通文件；不递归删除用户资源。
@@ -726,6 +733,27 @@ def _decode_journal(text):
     if not isinstance(journal, dict) or journal.get('schema_version') not in {'asset_batch.v1', 'asset_batch.v2'}:
         raise ValueError('批量恢复记录损坏')
     keys = {'schema_version', 'entries'}
+    if 'asset_history' in journal:
+        keys.update({'asset_history', 'committed'})
+        if type(journal.get('committed')) is not bool or not isinstance(journal['asset_history'], list):
+            raise ValueError('资产历史恢复结构损坏')
+        identities = set()
+        for item in journal['asset_history']:
+            if (not isinstance(item, dict) or set(item) != {'kind', 'id', 'payload', 'previous', 'updates'}
+                    or item['kind'] not in ('script', 'workflow') or not isinstance(item['payload'], dict)
+                    or item['payload'].get('id') != item['id']):
+                raise ValueError('资产历史恢复身份损坏')
+            identity = (item['kind'], safe_asset_id(item['id']))
+            if identity in identities:
+                raise ValueError('资产历史恢复身份重复')
+            identities.add(identity)
+            for texts in (item['previous'], item['updates']):
+                if not isinstance(texts, dict) or item['kind'] + '.json' not in texts:
+                    raise ValueError('资产历史恢复正文缺失')
+                for name, content in texts.items():
+                    safe_asset_id(name)
+                    if content is not None and (not isinstance(content, str) or len(content.encode('utf-8')) > MAX_ASSET_BYTES):
+                        raise ValueError('资产历史恢复正文损坏')
     if journal['schema_version'] == 'asset_batch.v2':
         from .script_store_support import validate_scheduler_batch
 
@@ -767,13 +795,15 @@ def _recover_batch(root):
         paths.append(('data', 'scheduler', 'store.json'))
     with _canonical_locks(root, paths):
         if journal.get('committed'):
-            _sync_batch_scheduler(root)
-            _finish_batch(root, journal)
+            if journal['schema_version'] == 'asset_batch.v2':
+                _sync_batch_scheduler(root)
+            if not _finish_batch(root, journal):
+                raise OSError('asset batch publication remains pending')
         else:
             _restore_batch(root, entries, journal.get('scheduler_jobs'), journal.get('scheduler_runs'))
 
 
-# LLM: scope须显式且不能由描述符推导；纯验证在任何写前，CAS及两阶段发表共享根/原canonical锁，不执行资产。
+# LLM: scope显式且不由描述符推导；旧快照先ACK，整个batch提交决定持久后才发新历史，失败保留义务。
 # 函数用途: 原子保存四类资产草稿，失败回滚全部正式叶，返回已提交描述符与作用域。
 def commit_asset_batch(items, *, scope='owner', workspace_root=None, owner_home):
     if scope not in {'owner', 'workspace'} or scope == 'workspace' and workspace_root is None:
@@ -791,19 +821,26 @@ def commit_asset_batch(items, *, scope='owner', workspace_root=None, owner_home)
         with _canonical_locks(root, [parts for plan in plans for parts in plan['updates']]):
             _finalize_plans(root, plans)
             entries, journal = _batch_entries(root, plans)
-            _commit_staged(root, entries, journal)
             if scope == 'owner':
-                # 全批次提交后才发表历史；先脚本后工作流，使同批次脚本pin可解析。
+                from .version_hook import protect_preimage
+                obligations = []
                 for plan in sorted(plans, key=lambda item: item['descriptor'].kind != 'script'):
                     kind = plan['descriptor'].kind
                     if kind not in ('script', 'workflow'):
                         continue
                     view = _store_view(root, kind)
                     view._read_only = False
+                    protect_preimage(view, view._read(plan['descriptor'].id))
                     previous = {entry['parts'][-1]: entry['previous'] for entry in entries
                                 if tuple(entry['parts'][:2]) == tuple(plan['metadata'][:2])}
                     updates = {parts[-1]: content for parts, content in plan['updates'].items()}
-                    view._history_notify('save', payload=plan['payload'], previous=previous, updates=updates)
+                    obligations.append({'kind': kind, 'id': plan['descriptor'].id,
+                        'payload': plan['payload'], 'previous': previous, 'updates': updates})
+                if obligations:
+                    journal.update(asset_history=obligations, committed=False)
+                    if len(_json(journal).encode('utf-8')) > _BATCH_LIMIT:
+                        raise ValueError('批量历史恢复记录超过安全预算')
+            _commit_staged(root, entries, journal)
             result['items'] = [plan['descriptor'].to_dict() for plan in plans]
     return result
 
