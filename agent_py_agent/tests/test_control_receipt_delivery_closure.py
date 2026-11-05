@@ -122,8 +122,10 @@ def delivery_case(tmp_path, monkeypatch, receipt):
     return manager._reply_delivery, pending, current, attempts, messages, seen
 
 
+# LLM: 使用正式route成功控制及退役delegate拒绝结果，仍沿原回执到provider的投递链核验唯一发送和身份。
+# 函数用途: 验证控制成功或拒绝都能原样投递一次，重放不会重复发送。
 @pytest.mark.parametrize("text,expected_ok,enabled", [
-    ("/delegate enable", True, True), ("/delegate status", True, True),
+    ("/route true", True, True), ("/route status", True, True),
     ("/delegate enable", False, False), ("/help", True, True),
     ("/status", True, True), ("/schedule", True, True),
     ("/schedule missing-id", False, True), ("/model", True, True),

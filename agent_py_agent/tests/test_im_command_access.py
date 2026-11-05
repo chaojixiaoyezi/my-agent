@@ -48,12 +48,15 @@ def test_mentions_never_use_names_or_remove_other_parameters():
     assert not directly_mentions_bot(payload["event"]["message"], "ou_bot")
 
 
+# LLM: 普通用户帮助与执行权限共用当前命令目录，route替代delegate；不恢复退役命令的公开入口。
+# 函数用途: 验证角色帮助只展示有权使用的正式命令。
 def test_role_help_and_execution_use_same_metadata():
     user = CommandAccessContext("im", False, True)
     admin = CommandAccessContext("im", True, True)
     ordinary = render_command_help(user)
     elevated = render_command_help(admin)
-    for name in ("status", "verbose", "help", "delegate"):
+    assert "/delegate" not in ordinary and "/delegate" not in elevated
+    for name in ("status", "verbose", "help", "route"):
         assert f"/{name}" in ordinary
         assert not command_access_error(COMMAND_INDEX[name], user)
     for name in ("restart", "endtask", "wakes", "plugins"):

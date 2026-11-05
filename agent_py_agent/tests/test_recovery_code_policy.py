@@ -247,6 +247,26 @@ def test_vapid_subject_required_has_configuration_recovery():
     assert "mailto:" in contract.recovery_hint and "https://" in contract.recovery_hint
 
 
+# LLM: 原只读 locator 读取器在临时事实根缺页时必须保留 unknown 和准确错误码；分类不授予补页、枚举历史或重放权。
+# 函数用途: 验证缺失的运行意图定位页有明确恢复建议，而不是被降级成未知错误。
+def test_missing_run_intent_locator_preserves_unknown_without_replay(tmp_path):
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+    from agent_py_agent.agent.run_intent_index import read_locator
+
+    facts_dir = tmp_path / "runtime_facts"
+    facts_dir.mkdir()
+    entries, errors = read_locator(facts_dir, limit=8)
+    assert entries == [] and len(errors) == 1
+    assert errors[0]["source_status"] == "unknown"
+    assert errors[0]["error_code"] == "RUN_INTENT_LOCATOR_MISSING"
+    assert not Path(errors[0]["path"]).exists()
+    contract = error_contract(errors[0]["error_code"])
+    assert contract.code == "RUN_INTENT_LOCATOR_MISSING"
+    assert contract.category == "state" and contract.retryable is False
+    assert contract.recommended_action == RecoveryAction.CHANGE_STRATEGY.value
+    assert not repairable_code(contract.code) and not recovering_code(contract.code)
+
+
 def test_all_used_error_codes_are_registered():
     """所有 error_code="XXX" 字面量必须在 ERROR_CONTRACTS 注册。
 

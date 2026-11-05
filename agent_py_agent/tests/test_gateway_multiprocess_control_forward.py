@@ -8,6 +8,7 @@ from agent_py_agent.agent.conversation.control_commands import (
     ConversationControlResult,
     parse_conversation_control,
 )
+from agent_py_agent.agent.conversation.route_mode import route_setting, route_thread_for_paths
 from agent_py_agent.agent.gateway_parts import control_operation_service as ops
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import (
@@ -99,7 +100,7 @@ def first_owner(tmp_path, monkeypatch):
     # LLM: 每场独立临时home，只由真实宿主初始化共享资源；不会预建目标owner或启动监听器。
     # 函数用途: 在原C lease内装配可清理的离线控制场景。
     @contextmanager
-    def build(*, ready=False, group=True, command='/delegate enable'):
+    def build(*, ready=False, group=True, command='/route true'):
         home, root = (tmp_path/'home').resolve(), (tmp_path/'repo').resolve()
         monkeypatch.setenv('MY_AGENT_HOME', str(home))
         config = AgentConfig(my_agent_home=str(home), model_backend='echo', enable_plugins=False,
@@ -192,11 +193,12 @@ def _consume_first_owner(case, monkeypatch, operation_id):
             pump.close()
 
 
+# LLM: 正式route写入由原C运输及原W消费完成；按真实通道会话定位线程，保留owner物化、actor隔离和字节级重放断言。
+# 函数用途: 验证首次远端路由控制只初始化正确owner并保存当前发送者设置。
 @pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
 @pytest.mark.parametrize('group', [True, False], ids=['group', 'user'])
 def test_first_remote_control_materializes_owner_in_c_before_readonly_worker(first_owner, monkeypatch, ready, group):
     from agent_py_agent.agent.gateway_parts.http_handlers import handle_control
-    from agent_py_agent.agent.settings.im_task_preferences import delegation_preference
 
     with first_owner(ready=ready, group=group) as case:
         # 只替换最外层HTTP鉴权返回；原source每个末门仍重核合成middleware凭据。
@@ -208,8 +210,11 @@ def test_first_remote_control_materializes_owner_in_c_before_readonly_worker(fir
         assert receipt.state == 'completed' and receipt.result['ok'], receipt.to_dict()
         assert case.target.is_dir(), 'C must materialize the canonical cold owner before publishing dispatch'
         assert actual.home_paths.owner_home_dir == case.target
-        assert delegation_preference(actual, 'feishu', 'member')['enabled']
-        assert not delegation_preference(actual, 'feishu', 'other-member')['enabled']
+        thread = route_thread_for_paths(actual.home_paths, actual.config,
+            GatewayControlScope('member', 'feishu', case.body['conversation_id']))
+        assert thread is not None
+        assert route_setting(actual, thread, actor_id='member')['enabled']
+        assert not route_setting(actual, thread, actor_id='other-member')['enabled']
         assert case.server.agent is (case.agent if ready else None)
         before = {p.relative_to(case.target): p.read_bytes() for p in case.target.rglob('*') if p.is_file()}
         handle_control(case.handler, case.server)
@@ -217,6 +222,8 @@ def test_first_remote_control_materializes_owner_in_c_before_readonly_worker(fir
         assert {p.relative_to(case.target): p.read_bytes() for p in case.target.rglob('*') if p.is_file()} == before
 
 
+# LLM: 改变原route正文或认证/资源来源仍必须在owner首写前拒绝，不以测试命令迁移放宽末门。
+# 函数用途: 验证首次路由控制失去原始权威时不生成owner或回执。
 @pytest.mark.parametrize('failure', ['work', 'credential', 'body', 'agent', 'root_closing', 'quarantine', 'link'])
 def test_first_control_rejects_changed_authority_or_unsafe_owner_before_materialization(first_owner, monkeypatch, failure):
     from agent_py_agent.agent.gateway_parts.coordinator_control_transport import (
@@ -238,7 +245,7 @@ def test_first_control_rejects_changed_authority_or_unsafe_owner_before_material
             elif failure == 'credential':
                 case.handler.headers.clear()
             elif failure == 'body':
-                case.body['command'] = '/delegate disable'
+                case.body['command'] = '/route false'
             elif failure == 'agent':
                 case.server.agent = None
             elif failure == 'root_closing':
@@ -414,13 +421,14 @@ def test_extracted_c_owner_materializer_rejects_restricted_actors_without_writes
         assert {p.relative_to(case.home): p.read_bytes() for p in case.home.rglob('*') if p.is_file()} == before
 
 
-@pytest.mark.parametrize('text', ['/delegate enable', '/delegate status', '/status', '/schedule'])
+# LLM: /ask的goal/prompt仍经原控制泵，真实route线程按宿主scope读取；保留冷/热、群/个人及重放不写断言。
+# 函数用途: 验证首次斜杠请求使用相同owner和正式路由设置。
+@pytest.mark.parametrize('text', ['/route true', '/route status', '/status', '/schedule'])
 @pytest.mark.parametrize('field', ['prompt', 'goal'])
 @pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
 @pytest.mark.parametrize('group', [True, False], ids=['group', 'user'])
 def test_first_ask_slash_materializes_same_owner_before_worker(first_owner, monkeypatch, text, field, ready, group):
     from agent_py_agent.agent.gateway_parts import http_handlers
-    from agent_py_agent.agent.settings.im_task_preferences import delegation_preference
 
     with first_owner(ready=ready, group=group, command=text) as case:
         case.body.pop('command')
@@ -437,8 +445,12 @@ def test_first_ask_slash_materializes_same_owner_before_worker(first_owner, monk
         assert receipt.owner_id == case.owner.owner_id
         assert actual.home_paths.owner_home_dir == case.target
         assert case.target.is_dir()
-        assert delegation_preference(actual, 'feishu', 'member')['enabled'] is (text == '/delegate enable')
-        assert not delegation_preference(actual, 'feishu', 'other-member')['enabled']
+        thread = route_thread_for_paths(actual.home_paths, actual.config,
+            GatewayControlScope('member', 'feishu', case.body['conversation_id']))
+        # status/schedule不为只读查询创建线程；route控制必须绑定准确线程。
+        assert (thread is not None) is text.startswith('/route')
+        assert route_setting(actual, thread, actor_id='member')['enabled'] is (text == '/route true')
+        assert not route_setting(actual, thread, actor_id='other-member')['enabled']
         original = ops.gateway_control_operation_path(case.paths, receipt.operation_id).read_bytes()
         before = {p.relative_to(case.target): p.read_bytes() for p in case.target.rglob('*') if p.is_file()}
         http_handlers.handle_ask(case.handler, case.server, lambda: 'ordinary-request-must-not-be-created')
@@ -488,27 +500,31 @@ def test_ask_slash_rejects_lost_authority_before_owner_or_dispatch(first_owner, 
         assert not list((case.paths.root/'control_operations').glob('*.json'))
 
 
+# LLM: goal/prompt的正式route命令优先于body.command，原运输只读适配而不得改写入站正文。
+# 函数用途: 验证斜杠命令取值仍遵守原有字段优先级。
 @pytest.mark.parametrize('field', ['prompt', 'goal'])
 def test_ask_slash_preserves_goal_prompt_authority_over_body_command(first_owner, monkeypatch, field):
     from agent_py_agent.agent.gateway_parts import http_handlers
 
     with first_owner(ready=True) as case:
         case.body['command'] = '/model'
-        case.body['prompt'] = '/delegate enable' if field == 'prompt' else '/delegate disable'
+        case.body['prompt'] = '/route true' if field == 'prompt' else '/route false'
         if field == 'goal':
-            case.body['goal'] = '/delegate enable'
+            case.body['goal'] = '/route true'
         before = dict(case.body)
         monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
         http_handlers.handle_ask(case.handler, case.server, lambda: 'unused')
         assert case.responses[-1][0] == 202
         receipt = ops.read_gateway_control_operation(case.paths, case.responses[-1][1]['operation_id'], read_only=True)
-        assert receipt.command_text == '/delegate enable' and receipt.command_kind == 'delegate'
+        assert receipt.command_text == '/route true' and receipt.command_kind == 'route'
         assert (receipt.owner_provider, receipt.owner_kind, receipt.owner_id) == ('feishu', 'group', 'new-room')
         assert case.body == before, 'transport adaptation must not rewrite the incoming body'
 
 
+# LLM: 非法route语法保持原冷/热拒绝边界；特殊控制仍核验真实领域、回执重放及无额外投递。
+# 函数用途: 验证命令迁移不把非法输入当成可执行控制。
 @pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
-@pytest.mark.parametrize('text', ['/model', '/agents', '/memory candidates', '/delegate invalid'])
+@pytest.mark.parametrize('text', ['/model', '/agents', '/memory candidates', '/route invalid'])
 def test_ask_special_or_invalid_slash_keeps_original_boundary(tmp_path, monkeypatch, ready, text):
     # 588明确迁移585新增的special冷503预期；真实领域/回执重放替代selector mock，不改变非法语法的旧边界。
     from agent_py_agent.tests.test_coordinator_model_card_delivery import delivery_case
@@ -520,7 +536,7 @@ def test_ask_special_or_invalid_slash_keeps_original_boundary(tmp_path, monkeypa
         body = parity_request(case, ready=ready, text=text)
         before = control_files(server)
         status, result = post_model(server, body, route='/ask', actor=row['actor_id'])
-        if text == '/delegate invalid':
+        if text == '/route invalid':
             assert status == (200 if ready else 503) and not result.get('ok')
             assert control_files(server) == before and not delivered
         else:
@@ -566,7 +582,9 @@ def test_ask_target_refusal_never_materializes_owner(first_owner, monkeypatch, r
         assert not case.target.exists()
 
 
-@pytest.mark.parametrize('text', ['/delegate enable', '/delegate status', '/status', '/schedule'])
+# LLM: 单进程仍使用原控制执行入口，不进入C运输；正式route控制也必须保留唯一owner身份和无dispatch结果。
+# 函数用途: 验证单进程首次斜杠路由控制沿原链路执行。
+@pytest.mark.parametrize('text', ['/route true', '/route status', '/status', '/schedule'])
 def test_single_process_first_ask_slash_keeps_original_execution(tmp_path, monkeypatch, text):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.gateway_parts import http_handlers
