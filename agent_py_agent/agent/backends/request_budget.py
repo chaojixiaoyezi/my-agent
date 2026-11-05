@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 # 工程余量，不是供应商计数误差或未来工具输出的上界。
 REQUEST_INPUT_SAFETY_TOKENS = 2048
+# 压缩请求固定尾缀与协议包装的默认预留 token 余量。
 COMPACT_SUFFIX_ALLOWANCE_TOKENS = 4096
 
 
