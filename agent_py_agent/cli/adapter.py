@@ -190,6 +190,8 @@ def cmd_adapter_start(args) -> int:
     return _run_adapter_foreground(agent, options, gpaths)
 
 
+# LLM: 飞书只借用原配置对象，入站按消息刷新；凭据和运输配置仍由原映射冻结，QQ接线不变。
+# 函数用途: 将实时飞书开关与原通道服务绑定，不创建配置副本。
 def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> None:
     workspace_root = _adapter_workspace_root(agent)
     if channel == "feishu":
@@ -197,6 +199,7 @@ def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> N
             config=_feishu_adapter_config(agent),
             callback_port=agent.config.feishu_callback_port or 8421,
             workspace_root=workspace_root,
+            live_config=agent.config,
         )
     elif channel == "qq":
         adapter = QQAdapter(

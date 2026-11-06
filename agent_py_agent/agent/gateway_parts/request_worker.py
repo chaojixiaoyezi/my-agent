@@ -1244,7 +1244,6 @@ def _process_claimed_gateway_request_path(
         )
         return _execute_claimed_gateway_request(
             context, paths, timing, (expected_attempt_id, expected_lease_epoch),
-            sqlite_reuse=bool(getattr(agent.config, "sqlite_connection_reuse", False)),
         )
 
 
@@ -1282,7 +1281,7 @@ def _requeue_owner_capacity(paths: GatewayPaths, processing_path: Path, request_
 
 # LLM: Caller holds the atomic owner lease through business and canonical settlement; post-business capacity errors must never trigger requeue/replay.
 # 函数用途: 在已固定的owner租用内执行和收尾，保留审批债务、未知结果与SQLite作用域的原边界。
-def _execute_claimed_gateway_request(context: _ClaimedGatewayRequestContext, paths: GatewayPaths, timing: dict, expected: tuple, *, sqlite_reuse: bool) -> bool:
+def _execute_claimed_gateway_request(context: _ClaimedGatewayRequestContext, paths: GatewayPaths, timing: dict, expected: tuple) -> bool:
     from .request_binding import record_gateway_request_stage
     from .request_transactions import request_transaction_ports_scope
 
@@ -1300,7 +1299,7 @@ def _execute_claimed_gateway_request(context: _ClaimedGatewayRequestContext, pat
 
     with (request_stage_timing_scope(timing), register_interruptible(conversation_request_interrupt_name(request_id)),
           request_transaction_ports_scope(request_agent),
-          sqlite_connection_scope(sqlite_reuse),
+          sqlite_connection_scope(True),
           approval_retirement_request_observation(request_agent, processing_path, request_payload,
               gateway_request_fingerprint(request_payload, request_id), receiver=True) as retirement_observation):
         try:

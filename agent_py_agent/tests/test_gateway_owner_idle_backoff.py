@@ -27,7 +27,7 @@ def _supervisor(tmp_path, monkeypatch, *, cap=10.0):
     db.write_bytes(b"initial")
     agent = SimpleNamespace(
         config=SimpleNamespace(background_owner_workers=4, background_threads_per_owner=4,
-                               background_idle_owner_max_backoff_seconds=cap, sqlite_connection_reuse=False),
+                               background_idle_owner_max_backoff_seconds=cap),
         home_paths=SimpleNamespace(owner_home_dir=tmp_path),
         subagents=SimpleNamespace(runtime_db=SimpleNamespace(db_path=db)),
     )

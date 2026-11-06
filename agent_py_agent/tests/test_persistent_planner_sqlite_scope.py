@@ -138,7 +138,7 @@ def test_copied_context_does_not_skip_later_activation_cleanup(tmp_path):
 # 函数用途: 验证scope.closed分支能恢复下一拍，而非只检查新建函数本身。
 def test_gateway_recreates_retired_planner_scope_on_next_activation(tmp_path):
     supervisor = object.__new__(_BackgroundMainSupervisor)
-    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace(sqlite_connection_reuse=True))
+    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace())
     path = tmp_path / "runtime.db"
     with supervisor._planner_sqlite_scope("owner"):
         retired = supervisor._owner_planner_sqlite_scopes["owner"]

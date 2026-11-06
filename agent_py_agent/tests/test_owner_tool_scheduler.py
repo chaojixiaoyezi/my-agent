@@ -488,7 +488,7 @@ def test_serial_workspace_promotion_and_concurrent_commit_dedupe(tmp_path, cap):
         # 函数用途: 初始化测试宿主。
         def __init__(self):
             self.home_paths = SimpleNamespace(owner_home_dir=tmp_path)
-            self.config = SimpleNamespace(max_parallel_tool_calls_per_owner=cap, sqlite_connection_reuse=False)
+            self.config = SimpleNamespace(max_parallel_tool_calls_per_owner=cap)
 
     agent = HostAgent()
     agent._current_run_task_workspace = str(tmp_path)
@@ -922,9 +922,10 @@ def test_control_lane_classification_is_safe_for_unvalidated_arguments():
     req = SimpleNamespace(params=SimpleNamespace(tool_runtime_snapshot=real_snapshot), agent=None)
     item = rounds._round_work_item(
         req, 0, SimpleNamespace(call_id='c1', tool_name='custom_control_probe', arguments={'action': 'inspect'}),
-        None, False, False,
+        None, False,
     )
     assert item.priority == 'control'
+    assert item.sqlite_reuse is True
 
 
 # LLM: 使用真实YAML加载，默认读口仅定向到受控宿主文件；不同身份来源均不能把私有配置变整机权威。

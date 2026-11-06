@@ -93,7 +93,7 @@ def test_actual_invocation_installs_original_port_and_clears_it_after_error(requ
         claim = binding.claim
         paths = gateway_paths_from_root(binding.snapshot.bootstrap.launch.gateway_root)
         scope = worker_execution_scope(binding, agent)
-    agent.config = SimpleNamespace(sqlite_connection_reuse=False)
+    agent.config = SimpleNamespace()
     marker = tmp_path / (role + "-short-write")
     failure = _error(claim)
     p3 = reservation_file(paths, claim.request_id)
@@ -351,7 +351,7 @@ def test_invocation_records_original_unknown_before_scope_exit_and_call_reap(req
         claim = binding.claim
         paths = gateway_paths_from_root(binding.snapshot.bootstrap.launch.gateway_root)
         scope = worker_execution_scope(binding, agent)
-    agent.config = SimpleNamespace(sqlite_connection_reuse=False)
+    agent.config = SimpleNamespace()
     p3 = reservation_file(paths, claim.request_id)
     before = p3.read_bytes()
     with scope:

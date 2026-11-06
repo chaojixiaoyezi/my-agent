@@ -374,11 +374,8 @@ class BusinessServices:
         self.host = host
         self.owner_id = host.home_paths.owner_id
         self.owner_home = Path(host.home_paths.owner_home_dir).resolve()
-        self.spaces = spaces if spaces is not None else BusinessSpaceService(self.owner_home, owner_id=self.owner_id,
-            enabled=bool(getattr(host.config, 'business_spaces_enabled', False)),
-            reference_resolver=getattr(host, 'business_reference_reader', None),
-            active_references=getattr(host, 'business_active_references', None),
-            governance=getattr(host, 'business_governance', None))
+        self._spaces = spaces
+        self._default_spaces = spaces is None
         if workflows is None:
             from ..workflows.business_scope import WorkflowScopeService
             workflows = WorkflowScopeService(self.owner_home, owner_id=self.owner_id,
@@ -390,12 +387,41 @@ class BusinessServices:
                 engine_factory=getattr(host, 'workflow_engine_factory', None))
         self.workflows = workflows
         self.background = background if background is not None else getattr(host, 'business_background', None)
-        if self.background is None and self.spaces.enabled and getattr(host, 'conversation_store', None) is not None:
-            self.background = _BackgroundPort(self)
         self.capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         self._default_projection = self.projection is None
-        if self.projection is None and self.spaces.enabled and getattr(host, 'conversation_store', None) is not None:
+        self.approvals = getattr(host, 'business_approval_decider', None)
+        # 被动组合由组合根声明完整宿主接线；直接传入的宿主本身即owner宿主。
+        self.complete_host_wired = bool(getattr(host, 'business_complete_host_wired', True))
+        self._prepare_live_ports()
+
+    # LLM: 默认领域服务保持同一实例及游标签名，启用值每次取当前宿主配置；显式注入端口不被覆盖。
+    # 函数用途: 在请求使用原空间服务时同步开关，不重建业务服务或另存配置快照。
+    @property
+    def spaces(self):
+        if self._default_spaces:
+            enabled = bool(getattr(self.host.config, 'business_spaces_enabled', False))
+            if self._spaces is None:
+                self._spaces = BusinessSpaceService(self.owner_home, owner_id=self.owner_id, enabled=enabled,
+                    reference_resolver=getattr(self.host, 'business_reference_reader', None),
+                    active_references=getattr(self.host, 'business_active_references', None),
+                    governance=getattr(self.host, 'business_governance', None))
+            else:
+                self._spaces.enabled = enabled
+        return self._spaces
+
+    @spaces.setter
+    def spaces(self, value):
+        self._spaces, self._default_spaces = value, False
+
+    # LLM: 关闭时不探测来源；首次启用只装配原缺失端口，保留显式注入和已有投影身份。
+    # 函数用途: 让冷启动时关闭的服务在下一次启用请求中补齐默认只读端口。
+    def _prepare_live_ports(self):
+        if not self.spaces.enabled or getattr(self.host, 'conversation_store', None) is None:
+            return
+        if self.background is None:
+            self.background = _BackgroundPort(self)
+        if self.projection is None:
             from ..observability.concurrency_metrics import owner_model_activity_provider
             from ..runtime_db.repository import RuntimeRepository
             from ..runtime_db.schema import runtime_db_path
@@ -405,22 +431,20 @@ class BusinessServices:
             )
 
             runtime = RuntimeRepository(runtime_db_path(self.owner_home), read_only=True)
-            resource_provider = getattr(host, '_business_model_activity_provider', None)
+            resource_provider = getattr(self.host, '_business_model_activity_provider', None)
             if resource_provider is None:
                 resource_provider = owner_model_activity_provider(self.owner_home, self.owner_id)
             self.projection = DefaultBusinessObservationService(self.owner_home, owner_id=self.owner_id,
-                store=host.conversation_store, runtime=runtime,
-                readers=default_observation_readers(self.owner_home, self.owner_id, host.conversation_store, runtime,
-                    resource_provider=resource_provider) if self.spaces.enabled else {})
-        self.approvals = getattr(host, 'business_approval_decider', None)
-        # 被动组合由组合根声明完整宿主接线；直接传入的宿主本身即owner宿主。
-        self.complete_host_wired = bool(getattr(host, 'business_complete_host_wired', True))
+                store=self.host.conversation_store, runtime=runtime,
+                readers=default_observation_readers(self.owner_home, self.owner_id, self.host.conversation_store, runtime,
+                    resource_provider=resource_provider))
 
     # LLM: 功能关闭不探测来源；显式端口不替换，刷新不建立快照或缓存授权。
     # 函数用途: 在下一请求识别首次创建或已消失的规范来源。
     def refresh_observation_readers(self):
         if not bool(getattr(self.host.config, 'business_spaces_enabled', False)):
             return
+        self._prepare_live_ports()
         if self._default_projection and isinstance(self.projection, BusinessObservationService):
             from ..observability.concurrency_metrics import owner_model_activity_provider
             from .business_api_v13_readers import default_observation_readers
@@ -466,6 +490,7 @@ class BusinessServices:
             return True
         if not bool(getattr(self.host.config, 'business_spaces_enabled', False)):
             return False
+        self._prepare_live_ports()
         if action == 'operations.get':
             return self._observation_ready(action)
         if action in {'costs.dashboard', 'costs.investigations_aggregate'}:

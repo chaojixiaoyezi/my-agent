@@ -825,8 +825,7 @@ def _execute_parallel_segment(
 ) -> list[tuple[int, ToolCall, float, ToolExecution]]:
     context = _capture_parallel_thread_context(request.agent)
     scheduler = scheduler_for_agent(request.agent)
-    reuse = bool(getattr(getattr(request.agent, "config", None), "sqlite_connection_reuse", False))
-    items = [_round_work_item(request, start_idx + offset, call, context, scheduler is not None, reuse)
+    items = [_round_work_item(request, start_idx + offset, call, context, scheduler is not None)
              for offset, call in enumerate(calls)]
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
@@ -878,9 +877,9 @@ def _request_tool_snapshot(request):
 
 # LLM: 每项独立Context；入队取消工厂仍走原启动屏障合成配对结果，不提前报告started。
 # 函数用途: 为并行调用绑定正确优先级和取消结果。
-def _round_work_item(request, idx, call, context, queued, reuse):
+def _round_work_item(request, idx, call, context, queued):
     invoke = partial(_started_parallel_call, request, idx, call, context, queued)
-    return ToolWorkItem(call.call_id, invoke, cancelled_result=invoke, sqlite_reuse=reuse,
+    return ToolWorkItem(call.call_id, invoke, cancelled_result=invoke, sqlite_reuse=True,
                         priority='control' if _is_control_lane_call(call, _request_tool_snapshot(request)) else 'normal')
 
 
@@ -927,15 +926,14 @@ def _execute_parallel_call(
 
 
 # LLM: 串行与批准重试共用单项边界及控制通道；正owner/global额度转worker并同步晋升，双0保留当前线程。
-# 函数用途: 为一条原执行请求安装可选owner额度和独立SQLite作用域。
+# 函数用途: 为一条原执行请求安装可选owner额度和始终复用的独立SQLite作用域。
 def _execute_owned_serial(request, work, *, emit_started=False):
     scheduler = scheduler_for_agent(request.agent)
     context = _capture_parallel_thread_context(request.agent) if scheduler is not None else None
-    reuse = bool(getattr(getattr(request.agent, "config", None), "sqlite_connection_reuse", False))
     promoted = []
     invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
     item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
-                       lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), reuse,
+                       lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), True,
                        priority='control' if _is_control_lane_call(work.call, _request_tool_snapshot(request)) else 'normal')
     if scheduler is None:
         return item.run()

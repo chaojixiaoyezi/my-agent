@@ -936,7 +936,6 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
         config=SimpleNamespace(
             background_owner_workers=2,
             background_threads_per_owner=2,
-            sqlite_connection_reuse=True,
         )
     )
     supervisor._base_scheduler = Scheduler(fail=True)
@@ -955,11 +954,6 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
     retained = list(connections)
     for connection in retained:
         assert connection.execute('SELECT 1').fetchone()[0] == 1
-    if not failure_stage:
-        supervisor._base_agent.config.sqlite_connection_reuse = False
-        connections.clear()
-        supervisor._submit_ready_thread_ticks()
-        assert len(connections) == 44
     supervisor._shutdown_control = SimpleNamespace(stop=lambda: None, wait=lambda: None)
     supervisor._executor = supervisor._curator_executor = None
     supervisor.shutdown()

@@ -1023,7 +1023,7 @@ class _BackgroundOwnerPlannerMixin:
         self._owner_idle_streaks[key] = min(5, self._owner_idle_streaks.get(key, 0) + 1)
         self._owner_next_check_at[key] = next_at
 
-    # LLM: 只在真正规划的线程创建原作用域；关闭配置时清理旧表并显式禁用外层缓存，不改变后台执行连接。
+    # LLM: 只在真正规划的线程创建原作用域；连接始终跨拍复用，不改变后台执行连接及owner退休清理。
     # 函数用途: 为一个owner激活跨拍复用的SQLite规划连接表。
     def _planner_sqlite_scope(self, owner_key: object):
         from ..agent.runtime_db.sqlite_scope import (
@@ -1033,9 +1033,6 @@ class _BackgroundOwnerPlannerMixin:
 
         scopes = self.__dict__.setdefault("_owner_planner_sqlite_scopes", {})
         used_at = self.__dict__.setdefault("_owner_planner_scope_used_at", {})
-        if not bool(getattr(self._base_agent.config, "sqlite_connection_reuse", False)):
-            self._drop_owner_planner_scope(owner_key)
-            return activate_sqlite_scope(None)
         scope = scopes.get(owner_key)
         if scope is None or scope.closed:
             scope = new_persistent_sqlite_scope()
@@ -1044,7 +1041,7 @@ class _BackgroundOwnerPlannerMixin:
         return activate_sqlite_scope(scope)
 
     # LLM: 只回收进程内规划表，保留原持久任务；关闭失败按原日志上报，不吞中断或改owner身份。
-    # 函数用途: 在owner退休、禁用复用或停机时关闭其规划连接。
+    # 函数用途: 在owner退休或停机时关闭其规划连接。
     def _drop_owner_planner_scope(self, owner_key: object) -> None:
         from ..agent.runtime_db.sqlite_scope import close_persistent_sqlite_scope
 
@@ -1096,7 +1093,7 @@ def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
 class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # LLM: 规划单线程且不调用模型，提交按所有者轮转、同时受全局及逐所有者上限约束，并以持久线程身份为键。
     # 恢复扫描属于Gateway独立孤儿对账器，准备阶段必须跳过重复内联扫描，再提交就绪车道。
-    # 每个owner的prepare/ready短查询按配置sqlite_connection_reuse跨拍复用连接；异常也解除Context，提交和后台执行不继承连接。
+    # 每个owner的prepare/ready短查询始终跨拍复用连接；异常也解除Context，提交和后台执行不继承连接。
     # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
         global_limit = _background_owner_workers(self._base_agent)

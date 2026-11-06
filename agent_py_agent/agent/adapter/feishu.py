@@ -521,6 +521,9 @@ def _session_message_lock_disposition(adapter: Any, msg: IncomingMessage) -> Fei
     chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
     if chat_type == "group" or not getattr(adapter, "_session_lock_enabled", True):
         return None
+    ensure_lock = getattr(adapter, '_ensure_session_lock', None)
+    if callable(ensure_lock):
+        ensure_lock()
     unlock = getattr(adapter, "_unlock", None)
     if unlock is None:
         logger.warning("私聊会话锁不可用，消息未分发")
@@ -769,8 +772,11 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         config: dict[str, Any],
         callback_port: int = 8421,
         workspace_root: Path | None = None,
+        *,
+        live_config: object | None = None,
     ) -> None:
         super().__init__(config)
+        self._live_config = live_config
         from .feishu_replay_guard import FeishuReplayGuard
 
         self._replay_guard = FeishuReplayGuard()
@@ -795,9 +801,6 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
             config.get("feishu_connection_mode", "long_connection") or "long_connection"
         ).strip().lower()
         self.ws_proxy = config.get("feishu_ws_proxy", "")
-        self.group_require_bot_mention = str(config.get("feishu_group_require_bot_mention", True)).lower() not in {"false", "0", "off"}
-        self.quoted_media_enabled = str(config.get('feishu_quoted_media_enabled', True)).lower() not in {'false', '0', 'off'}
-        self.quoted_text_enabled = str(config.get('feishu_quoted_text_enabled', True)).lower() not in {'false', '0', 'off'}
         self._bot_open_id = ""
         self._bot_identity_app_id = ""
         self._bot_identity_retry_at = 0.0
@@ -816,7 +819,6 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
 
         # 个人私聊会话锁默认开启；显式 false 才关闭。首次私聊要求设置密码，
         # 未设置密码也暂存原消息；群聊不受个人锁影响。初始化失败不允许私聊越过认证门。
-        self._session_lock_enabled = str(config.get("feishu_session_lock_enabled", True)).strip().lower() not in {"0", "false", "no", "off"}
         self._unlock = self._init_session_lock(config)
         self._pending_unlock_messages = (
             FeishuUnlockQueue() if self._unlock is not None else None
@@ -826,7 +828,48 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         self._unlock_drain_threads: dict[threading.Thread, str] = {}
 
 
-    # LLM: 开关由构造时显式配置固定；缺数据根或数据库失败返回不可用，由锁门拒绝私聊，不退化成关闭。
+    # LLM: 宿主开关从原AgentConfig读取，未传宿主的嵌入入口仍用原映射；不改凭据或其它启动配置。
+    # 函数用途: 为现有入站读取点提供同一个实时开关来源。
+    def _switch_value(self, key: str) -> object:
+        return getattr(self._live_config, key, self.config.get(key, True))
+
+    @property
+    def group_require_bot_mention(self) -> bool:
+        return str(self._switch_value('feishu_group_require_bot_mention')).lower() not in {'false', '0', 'off'}
+
+    @group_require_bot_mention.setter
+    def group_require_bot_mention(self, value) -> None:
+        self.config['feishu_group_require_bot_mention'] = value
+
+    @property
+    def quoted_media_enabled(self) -> bool:
+        return str(self._switch_value('feishu_quoted_media_enabled')).lower() not in {'false', '0', 'off'}
+
+    @quoted_media_enabled.setter
+    def quoted_media_enabled(self, value) -> None:
+        self.config['feishu_quoted_media_enabled'] = value
+
+    @property
+    def quoted_text_enabled(self) -> bool:
+        return str(self._switch_value('feishu_quoted_text_enabled')).lower() not in {'false', '0', 'off'}
+
+    @property
+    def _session_lock_enabled(self) -> bool:
+        return str(self._switch_value('feishu_session_lock_enabled')).strip().lower() not in {'0', 'false', 'no', 'off'}
+
+    # LLM: 仅在私聊锁已开启且服务尚未装配时重试原初始化；失败保留不可用事实，由原锁门拒绝派发。
+    # 函数用途: 支持关闭启动后首次启用会话锁，不要求重建适配器。
+    def _ensure_session_lock(self) -> None:
+        if self._unlock is None:
+            with self._lock:
+                if self._unlock is None:
+                    unlock = self._init_session_lock(self.config)
+                    if unlock is not None:
+                        self._pending_unlock_messages = FeishuUnlockQueue()
+                        # 队列先齐备，最后发布服务；并发首消息仍须等原初始化锁。
+                        self._unlock = unlock
+
+    # LLM: 每次读取当前开关；缺数据根或数据库失败返回不可用，由锁门拒绝私聊，不退化成关闭。
     # 函数用途: 打开原私聊密码库与解锁服务，失败只记类型，不记录凭据或回调正文。
     def _init_session_lock(self, config: dict[str, Any]) -> Any:
         if not self._session_lock_enabled:
@@ -1017,6 +1060,10 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         message = _feishu_event_message(payload)
         facts = _feishu_admission_facts(message if isinstance(message, dict) else {})
         try:
+            if self._live_config is not None:
+                from ..settings.live_switches import refresh_live_switches
+
+                refresh_live_switches(self._live_config)
             result = _admit_feishu_event(self, payload, facts)
         except Exception as exc:
             facts['error_type'] = type(exc).__name__

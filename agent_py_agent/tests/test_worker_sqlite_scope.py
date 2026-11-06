@@ -30,15 +30,14 @@ def borrow_twice(path, physical):
             conn.execute("select 1").fetchone()
 
 
-# LLM: 串行和并行工具应有相同单项scope；cap关闭也应遵守sqlite开关。
+# LLM: 串行和并行工具应有相同单项scope；cap关闭也始终复用本工作项的连接。
 # 函数用途: 暴露串行入口未建立单工具连接边界。
 @pytest.mark.parametrize("entry", ["serial", "parallel"])
 @pytest.mark.parametrize("cap", [0, 1])
-@pytest.mark.parametrize("reuse", [False, True])
-def test_serial_work_item_has_own_sqlite_scope(tmp_path, entry, cap, reuse):
+def test_serial_work_item_has_own_sqlite_scope(tmp_path, entry, cap):
     physical = []
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path),
-                            config=SimpleNamespace(sqlite_connection_reuse=reuse, max_parallel_tool_calls_per_owner=cap))
+                            config=SimpleNamespace(max_parallel_tool_calls_per_owner=cap))
 
     # LLM: execute_one是真工作项边界，借用原SQLite scope而不是模拟缓存。
     # 函数用途: 在一次工具调用内重复连接。
@@ -53,7 +52,7 @@ def test_serial_work_item_has_own_sqlite_scope(tmp_path, entry, cap, reuse):
         rounds._execute_serial_step(request, request.calls, 0, 0, rounds._ToolRoundProgress())
     else:
         rounds._execute_parallel_segment(request, request.calls, start_idx=1)
-    assert len(physical) == (1 if reuse else 2)
+    assert len(physical) == 1
     try:
         physical[0].execute("select 1")
     except sqlite3.ProgrammingError:
