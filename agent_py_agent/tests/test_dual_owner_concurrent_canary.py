@@ -585,7 +585,7 @@ def test_durable_capacity_preserves_real_gate_rejection(tmp_path, monkeypatch):
 def test_reopened_registry_replaces_old_proxy_and_invokes_new_client(tmp_path):
     from agent_py_agent.tests.test_mcp_lifecycle import _registry
 
-    tools = _registry(tmp_path)
+    tools = _registry(tmp_path, defer_mcp_connect=False)
     name = "mcp__echo__echo"
     old_client, old_proxy = tools._mcp_clients[0], tools.tools[name]
     try:

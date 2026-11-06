@@ -540,6 +540,7 @@ def test_direct_catalog_category_survives_default_mcp_progressive_disclosure(tmp
             vector_search_enabled=False,
             catalog_deferred_categories=["mcp"],
             mcp_servers=config,
+            defer_mcp_connect=False,
         )
     )
     try:
@@ -588,6 +589,7 @@ def test_registry_run_boundary_reconnects_and_refreshes_dead_mcp_binding(tmp_pat
             retrieval_limit=3,
             vector_search_enabled=False,
             mcp_servers=config,
+            defer_mcp_connect=False,
         )
     )
     try:
@@ -679,6 +681,7 @@ def test_registry_retains_failed_startup_and_recovers_on_later_run(tmp_path):
                     "tool_effects": {"ready": "read_only"},
                 }
             },
+            defer_mcp_connect=False,
         )
     )
     try:
@@ -724,6 +727,7 @@ def test_registry_reconnect_replaces_stale_mcp_catalog_exactly(tmp_path):
                     },
                 }
             },
+            defer_mcp_connect=False,
         )
     )
     try:

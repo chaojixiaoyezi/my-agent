@@ -698,9 +698,14 @@ def test_perf_a_registry_defers_initial_connection_and_never_revives(tmp_path, m
     assert len(connected) == 1
 
 
-def test_perf_a_default_registry_still_connects_eagerly(tmp_path, monkeypatch):
+# LLM: 默认延迟连接只改变首次连接时机；保留首次失败退避和初连幂等断言。
+# 函数用途: 验证默认构造不连接，首次运行准备才连接一次。
+def test_perf_a_default_registry_defers_until_run(tmp_path, monkeypatch):
     registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch, deferred=None, running=False)
     try:
+        assert connected == [] and registry._mcp_connected_state == [False]
+        assert registry._mcp_retry_state == {}
+        registry.prepare_for_run()
         assert len(connected) == 1 and registry._mcp_connected_state == [True]
         assert next(iter(registry._mcp_retry_state.values()))[0] == 1
         assert registry.ensure_mcp_connected() is False

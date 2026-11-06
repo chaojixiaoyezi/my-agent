@@ -109,10 +109,14 @@ def test_manifest_is_appended_only_when_switch_is_true():
     assert _with_input_media_manifest(enabled, [UserTurn("纯文字")]) == [UserTurn("纯文字")]
 
 
+# LLM: Schema 取实例的当前能力配置，关闭实例必须稳定且不得泄漏开启时的媒体参数。
+# 函数用途: 验证媒体开关对应的实例 Schema 哈希和参数边界。
 def test_tool_spec_adds_input_media_refs_only_when_switch_is_true(tmp_path):
     off = CreateSubagentsTool(_agent(tmp_path / "off", enabled=False)).model_spec
     on = CreateSubagentsTool(_agent(tmp_path / "on", enabled=True)).model_spec
-    assert off.schema_hash == CreateSubagentsTool.model_spec.schema_hash, "关闭时与原说明逐字节一致"
+    again_off = CreateSubagentsTool(_agent(tmp_path / "again-off", enabled=False)).model_spec
+    assert off.schema_hash == again_off.schema_hash, "关闭实例的说明逐字节一致"
+    assert off.schema_hash != on.schema_hash
     # items-only 合同（7101c9fa2）：顶层只有 items/batch_summary，开关只往每个 item 里加 input_media_refs。
     assert "input_media_refs" not in off.input_schema["properties"]
     assert "input_media_refs" not in off.input_schema["properties"]["items"]["items"]["properties"]

@@ -109,7 +109,9 @@ def test_create_subagents_inherits_current_task_workspace(tmp_path):
     assert task.agent_run_workspace_dir == str(task_root / "work" / "agents" / task.id)
 
 
-def test_subagent_tools_are_not_registered_when_subagents_disabled(tmp_path):
+# LLM: 开关改为实时门控，不改变子代理工具的执行授权上界或恢复已删的旧工具。
+# 函数用途: 验证关闭子代理时快照和模型目录均不开放编排工具。
+def test_subagent_tools_are_unavailable_when_subagents_disabled(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -125,7 +127,10 @@ def test_subagent_tools_are_not_registered_when_subagents_disabled(tmp_path):
         "wait",
         "send_guidance",
     }
-    assert hidden.isdisjoint(agent.tools.tools)
+    snapshot = agent.tools.runtime_snapshot()
+    assert hidden.isdisjoint(snapshot.available_tool_names)
+    for name in ("create_subagents", "list_agents", "cancel_subagents", "send_guidance"):
+        assert (name, "TOOL_UNAVAILABLE", "disabled by enable_subagents") in snapshot.unavailable_tools
     assert hidden.isdisjoint({spec.name for spec in agent.tools.specs(include_orchestration=True)})
 
 

@@ -1,6 +1,6 @@
 """J9：主模型只读长期记忆检索工具 memory_search（P5-A 缺口 2）。
 
-钉住：开关关时不注册；开着时只读（写参数在执行前被拒、正式记忆与候选账不变）；只查当前 owner 和本轮适用范围；
+钉住：开关关时快照不可用；开着时只读（写参数在执行前被拒、正式记忆与候选账不变）；只查当前 owner 和本轮适用范围；
 条数与正文摘录有上限；语义可用时报 semantic、嵌入失败或没有嵌入端时退回关键词并给原因；
 不写访问信号（不进自动召回账）；自动召回被抑制的回合不可用；模型不能自己打开开关。
 全部用临时 home 与 tests/_hashing_embedder.py，不读真实记忆、不联网。
@@ -53,10 +53,14 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "missing"
 
 
-def test_switch_off_keeps_tool_out_of_registry_and_snapshot(tmp_path):
+# LLM: 只更新开关的运行时门控合同，关闭时 canonical 执行仍必须在 handler 前拒绝。
+# 函数用途: 验证默认关闭时快照不放行记忆检索，并报告准确原因。
+def test_switch_off_keeps_tool_out_of_runtime_snapshot(tmp_path):
     agent = _agent(tmp_path, enabled=False)
     assert AgentConfig().enable_memory_search_tool is False
-    assert "memory_search" not in agent.tools.tools
+    snapshot = agent.tools.runtime_snapshot()
+    assert "memory_search" not in snapshot.available_tool_names
+    assert ("memory_search", "TOOL_UNAVAILABLE", "disabled by enable_memory_search_tool") in snapshot.unavailable_tools
     result = execute_registry_test_call(agent.tools, "memory_search", {"query": "端口"})
     assert result.ok is False and result.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
 

@@ -686,12 +686,16 @@ def test_main_thread_registry_hides_record_lesson_while_child_snapshot_exposes_i
     assert RECORD_LESSON_TOOL in child.available_tool_names
 
 
-def test_record_lesson_is_not_registered_when_subagents_are_disabled(tmp_path: Path) -> None:
+# LLM: 子代理经验工具仍仅随显式子代理授权可见；即使显式授权，关闭总开关也不能进入运行快照。
+# 函数用途: 验证关闭子代理后经验工具的运行时禁用原因，不把主线程隐藏误当成开关生效。
+def test_record_lesson_is_unavailable_when_subagents_are_disabled(tmp_path: Path) -> None:
     config = AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[], enable_subagents=False)
 
     agent = SimpleAgent(config, tmp_path / "workspace")
 
-    assert RECORD_LESSON_TOOL not in agent.tools.tools
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=[RECORD_LESSON_TOOL])
+    assert RECORD_LESSON_TOOL not in snapshot.available_tool_names
+    assert (RECORD_LESSON_TOOL, "TOOL_UNAVAILABLE", "disabled by enable_subagents") in snapshot.unavailable_tools
 
 
 # ---- runner 提示：一条可选软引导，不恢复状态 JSON ----

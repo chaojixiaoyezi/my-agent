@@ -243,7 +243,7 @@ def test_config_reaches_model_registry_and_panel_clients(tmp_path, monkeypatch, 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
                                     plugin_process_sandbox=sandbox), tmp_path)
     try:
-        assert agent.tools._construction_params.plugin_process_sandbox is sandbox
+        assert agent.tools.plugin_process_sandbox is sandbox
     finally:
         agent.tools.close_mcp_clients()
     server = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(

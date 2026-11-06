@@ -746,12 +746,13 @@ class ToolRegistry:
         if not params.defer_mcp_connect:
             self.ensure_mcp_connected()
 
-    # LLM: 只读宿主配置；独立注册表沿参数回退，不修改工具或权限。
+    # LLM: 只读宿主配置；旧装配缺字段时沿DTO默认值回退，未提供必填向量选项时关闭，不修改工具或权限。
     # 函数用途: 在使用时解析同一配置对象里的开关。
     def _live_bool(self, key: str, param_key: str | None = None) -> bool:
         params = self._construction_params
-        fallback = getattr(params, param_key or key)
-        return bool(getattr(params.live_config, key, fallback))
+        field_name = param_key or key
+        fallback = getattr(params, field_name, getattr(ToolRegistryParams, field_name, False))
+        return bool(getattr(getattr(params, "live_config", None), key, fallback))
 
     @property
     def catalog_include_examples(self) -> bool:
@@ -1394,7 +1395,7 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
         registry._mcp_retry_state.clear()
 
 
-# LLM: 新注册表首次连接经原幂等入口；已携客户端池的旧装配没有延后初连状态时只做原恢复，不另建连接或猜配置。
+# LLM: 新注册表首次连接经原幂等入口；没有服务状态或动态配置的旧装配只恢复原客户端，不另建连接或猜配置。
 # 函数用途: 为新运行准备MCP连接并投影视图，保留旧宿主装配的退避与关闭语义。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
@@ -1411,7 +1412,7 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     with registry._mcp_prepare_lock:
         if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
             return
-        if not initial_connect:
+        if not initial_connect and (dynamic_servers or hasattr(registry, "_mcp_servers_state")):
             _synchronize_registry_mcp_servers(registry)
         if plugin_owner is not None:
             from .plugin_registration import project_plugin_tools, synchronize_plugin_clients
@@ -1433,16 +1434,16 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
             project_plugin_tools(registry)
 
 
-# LLM: 回调只生成配置；关闭工具时本轮不能连接普通 MCP，不把旧配置作为错误兜底。
+# LLM: 回调只生成配置；旧装配可省略新增可选参数；关闭工具时本轮不能连接普通 MCP，不把旧配置作为错误兜底。
 # 函数用途: 从原宿主参数读取当前应当存在的服务表。
 def _current_registry_mcp_servers(registry: ToolRegistry) -> dict[str, Any]:
     from copy import deepcopy
 
     params = registry._construction_params
-    if not getattr(params.live_config, "enable_tools", True):
+    if not getattr(getattr(params, "live_config", None), "enable_tools", True):
         return {}
-    provider = params.mcp_servers_provider
-    return deepcopy(dict((provider() if provider is not None else params.mcp_servers) or {}))
+    provider = getattr(params, "mcp_servers_provider", None)
+    return deepcopy(dict((provider() if provider is not None else getattr(params, "mcp_servers", None)) or {}))
 
 
 # LLM: 调用方持共享 prepare 锁；先撤销旧代理并确认清理，失败阻断本轮，不启动同名替代服务。
@@ -1694,15 +1695,18 @@ def _snapshot_runtime(name: str, tool: object, availability: ToolAvailability, r
     return ToolRuntime(model_spec=model_spec, runtime_policy=runtime_policy, handler=tool, availability=availability)
 
 
+# LLM: 每轮快照复核实时门；旧装配缺少可选配置时门控仍关闭，异常不得放行工具或执行副作用。
+# 函数用途: 读取当前配置门并安全调用工具的只读可用性检查。
 def _safe_tool_availability(tool: BaseTool, *, registry: ToolRegistry | None = None) -> ToolAvailability:
     try:
         gate = registry._live_tool_gates.get(tool.model_spec.name) if registry is not None else None
         if gate is not None:
             params = registry._construction_params
             if gate in {"tool_program_enabled", "feishu_chat_history_enabled"}:
-                source = params.capability_provider() if params.capability_provider is not None else None
+                provider = getattr(params, "capability_provider", None)
+                source = provider() if provider is not None else None
             else:
-                source = params.live_config
+                source = getattr(params, "live_config", None)
             if not getattr(source, gate, False):
                 return ToolAvailability.unavailable(f"disabled by {gate}")
         return tool.availability()

@@ -86,7 +86,7 @@ def _remember_missing_environment(key: tuple, *, error: BaseException | None = N
             cache.popitem(last=False)
 
 
-# LLM: 原关闭/撤销链先于激活代负缓存；快照仅避重复解码，失败后不跳过权限视图重建。
+# LLM: 原关闭/撤销链先于激活代负缓存；旧装配可省略可选实时配置，失败后不跳过权限视图重建。
 # 函数用途: 将当前 owner 的已启用程序插件同步到原 MCP 集合；纯内容能力包不创建连接，撤销只影响准确旧连接。
 def synchronize_plugin_clients(registry) -> None:
     from ..user_space.owner_resolver import OwnerIdentity
@@ -94,7 +94,7 @@ def synchronize_plugin_clients(registry) -> None:
     owner = registry._construction_params.plugin_owner
     if owner is None:
         return
-    config = registry._construction_params.live_config
+    config = getattr(registry._construction_params, "live_config", None)
     enabled = bool(getattr(config, "enable_plugins", True) and getattr(config, "enable_tools", True))
     sandbox = registry.plugin_process_sandbox
     try:

@@ -26,13 +26,15 @@ def params(**overrides):
 
 
 # LLM: pytest 默认能力回归；使用真实配置与工具注册，所有状态限于临时 HOME。
-# 函数用途: 检查代码、YAML 和注册表都默认不开放群历史。
+# 函数用途: 检查代码、YAML 和运行快照都默认不开放群历史。
 def test_defaults_off_in_dataclass_yaml_and_real_registry(tmp_path):
     assert CapabilityConfig().feishu_chat_history_enabled is False
     config = load_simple_yaml(Path(__file__).parents[1] / "config" / "capability_config.yaml")
     assert config["feishu_chat_history_enabled"] is False
     agent = core.SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "memory.jsonl")), str(tmp_path))
-    assert "channel_messages" not in agent.tools.tools
+    snapshot = agent.tools.runtime_snapshot()
+    assert "channel_messages" not in snapshot.available_tool_names
+    assert ("channel_messages", "TOOL_UNAVAILABLE", "disabled by feishu_chat_history_enabled") in snapshot.unavailable_tools
 
 
 # LLM: pytest 严格 bool 回归；通过真实配置加载拒绝字符串、整数和空值，不能静默放行。

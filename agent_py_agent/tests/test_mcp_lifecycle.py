@@ -374,14 +374,15 @@ def test_queue_clock_advance_never_passes_negative_timeout(monkeypatch):
     assert not lock.locked()
 
 
-# LLM: 所有路径由 tmp_path 提供，服务是临时组件；不连接真实用户 MCP 或修改真实 Gateway。
+# LLM: 所有路径由 tmp_path 提供，服务是临时组件；生命周期用例显式即时连接，不连接真实用户 MCP 或修改真实 Gateway。
 # 函数用途: 构造原 ToolRegistry，验证共享权限视图和真实本地 MCP 进程的关系。
-def _registry(tmp_path, *, script=_ECHO_SERVER):
+def _registry(tmp_path, *, script=_ECHO_SERVER, defer_mcp_connect=False):
     return ToolRegistry(ToolRegistryParams(
         workspace_root=tmp_path, max_chars=1000, max_entries=20, max_matches=10,
         web_max_chars=1000, http_timeout=10, catalog_limit=10, retrieval_limit=3,
         vector_search_enabled=False,
         mcp_servers={"echo": {"command": _config(script).command, "args": ["-c", script]}},
+        defer_mcp_connect=defer_mcp_connect,
     ))
 
 

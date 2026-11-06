@@ -55,7 +55,7 @@ def register_base_tools(registry: Any, params: Any) -> None:
 
 
 # LLM: 文件类工具与归档读取工具在这里按注册参数构造；source resolver/schema 和语法开关只由宿主注入，三写入口共用配置；
-#   artifact 读取额度只传字符数（窗口固定在工具内），只注册不执行，逐调用仍由 Registry 裁剪目标权限。
+#   artifact 读取额度只传字符数（窗口固定在工具内），诊断选项在构造时采样；只注册不执行，逐调用仍由 Registry 裁剪目标权限。
 # 函数用途: 把列目录、找文件、读写文件、搜索和归档读取等工具注册进工具表，装配路径、配额、同源输入及可选诊断。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
@@ -66,7 +66,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         protected_persona_root=params.protected_persona_root,
         owner_quota_max_bytes=getattr(params, "owner_quota_max_bytes", 0),
         owner_quota_policy_available=getattr(params, "owner_quota_policy_available", True),
-        enable_file_syntax_diagnostics=params.enable_file_syntax_diagnostics,
+        enable_file_syntax_diagnostics=registry.enable_file_syntax_diagnostics,
     )
     registry.register(
         ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options)
@@ -104,7 +104,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(EditFileTool(registry.workspace_root, workspace_roots, access_options))
 
 
-# LLM: 抓取沿原G4门；单向推送另有固定路径/节点凭据/私网门，不变成任意Gateway请求。构造不执行网络。
+# LLM: 抓取沿原G4门；单向推送另有固定路径/节点凭据/私网门，不变成任意Gateway请求。构造不执行网络；Shell选项在构造时采样。
 # 函数用途: 装配网络和单向推送工具，保留命令凭据擦洗与原进程工具链。
 def _register_network_tools(registry: Any, params: Any) -> None:
     from .remote_agent_push_tool import RemoteAgentPushTool
@@ -142,11 +142,11 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             access_mode=params.access_mode,
             default_timeout=params.shell_tool_timeout,
             max_output_chars=params.shell_tool_output_max_chars,
-            listen_scope_enforce=params.background_process_listen_scope_enforce,
+            listen_scope_enforce=registry.background_process_listen_scope_enforce,
             host_private_roots=params.host_private_roots,
             full_access_other_owner_homes=getattr(params, "full_access_other_owner_homes", "read_only"),
             host_credential_env_names=params.host_credential_env_names,
-            sandbox_boundary_facts=params.shell_sandbox_boundary_facts,
+            sandbox_boundary_facts=registry.shell_sandbox_boundary_facts,
             pty_session_idle_timeout_minutes=getattr(params, "pty_session_idle_timeout_minutes", 30),
             host_exclusive_paths=tuple(getattr(params, "host_exclusive_paths", ()) or ()),
         ),

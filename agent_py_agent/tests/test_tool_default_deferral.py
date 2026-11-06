@@ -2,10 +2,10 @@
 # 模块用途: 验证前台默认折叠、后台按需发现及盲调用恢复。
 from __future__ import annotations
 
-"""按工具声明的默认收起（tool_default_deferral_enabled）合同单测。
+"""按工具声明、始终生效的默认收起合同单测。
 
-又大又少用的工具在自己的 ToolModelHints 里声明 default_deferred + deferred_summary。开关打开时，前台回合不再发它们的
-原生 Schema，目录末尾留“名字：一句用途”的索引，tool_search 一步找回；开关关闭时提示词与可见工具逐字不变。
+又大又少用的工具在自己的 ToolModelHints 里声明 default_deferred + deferred_summary。前台回合不再发它们的
+原生 Schema，目录末尾留“名字：一句用途”的索引，tool_search 一步找回。
 无 tool_search 的叶子不收起；有发现入口的 allowed_tools 也支持展示投影。
 """
 
@@ -50,18 +50,6 @@ def _visible(agent, **kwargs) -> set[str]:
     return {spec.name for spec in agent.tools.model_visible_specs(**kwargs)}
 
 
-def test_switch_defaults_off_and_keeps_surface_and_catalog_unchanged(tmp_path):
-    # 出厂默认已改为开启（toolfold，2026-10-05）：关回 false 时行为必须与历史全量直出逐字一致。
-    assert AgentConfig().tool_default_deferral_enabled is True
-    off = _agent(tmp_path / "off", tool_default_deferral_enabled=False)
-    # 部分声明工具按运行条件注册/可用（如 publish_audit_update 只在 Audit 回合、会话工具看管理员开关）；
-    # 断言只看“当前快照里真实可用”的子集，开关关闭时它们必须照旧直出（watch_stream 本来就按 web 类别收起）。
-    available = set(off.tools.runtime_snapshot().available_tool_names)
-    assert (DECLARED - {"watch_stream"}) & available <= _visible(off)
-    section = off.tools.render_catalog_section()
-    assert "默认收起的工具" not in section
-
-
 # LLM: 以本轮实际可用集合断言前台折叠；后台候选不再构成前台常驻豁免。
 # 函数用途: 验证默认折叠及每个工具仍有准确用途索引。
 def test_declared_tools_leave_the_native_surface_and_get_a_compact_index(tmp_path):
@@ -86,7 +74,7 @@ def test_declared_tools_leave_the_native_surface_and_get_a_compact_index(tmp_pat
 def test_declared_set_is_pinned_and_every_summary_is_short(tmp_path):
     agent = _agent(tmp_path)
     declared = {name for name, tool in agent.tools.tools.items() if tool.model_spec.hints.default_deferred}
-    # memory_search 默认不注册（enable_memory_search_tool 默认关）、部分会话工具按可见性条件注册；
+    # memory_search 默认不可用（enable_memory_search_tool 默认关）、部分会话工具按可见性条件注册；
     # 固定集合只钉“测试环境实际注册”的子集，未注册工具的标记由产品代码各自用例覆盖。
     assert declared == DECLARED & set(agent.tools.tools)
     assert not declared & TOOL_DISCOVERY_ENTRY_NAMES
@@ -130,15 +118,14 @@ def test_explicit_allowed_tools_stay_fully_visible(tmp_path):
 def test_declared_deferral_needs_an_available_visible_tool_search(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     snapshot = agent.tools.runtime_snapshot()
-    assert _declared_deferred_names(snapshot, [], enabled=True) == frozenset(
+    assert _declared_deferred_names(snapshot, []) == frozenset(
         DEFERRED_EFFECTIVE & snapshot.available_tool_names
     )
-    assert _declared_deferred_names(snapshot, [], enabled=False) == frozenset()
-    assert _declared_deferred_names(snapshot, ["system"], enabled=True) == frozenset(), "tool_search 被类别收起时不再额外收起"
+    assert _declared_deferred_names(snapshot, ["system"]) == frozenset(), "tool_search 被类别收起时不再额外收起"
     runtimes = tuple(runtime for runtime in snapshot.runtimes if runtime.model_spec.name != "tool_search")
     without_search = replace(snapshot, runtimes=runtimes, snapshot_hash="",
                              available_tool_names=frozenset(runtime.model_spec.name for runtime in runtimes))
-    assert _declared_deferred_names(without_search, [], enabled=True) == frozenset()
+    assert _declared_deferred_names(without_search, []) == frozenset()
 
 
 def test_decision_projection_and_declared_deferral_merge(tmp_path):
@@ -170,7 +157,7 @@ def test_discovery_entry_stays_direct_even_if_it_declares_deferral(tmp_path):
     spec = search_tool.model_spec
     search_tool.model_spec = replace(spec, hints=replace(spec.hints, default_deferred=True, deferred_summary="搜索工具"))
     assert "tool_search" in _visible(agent)
-    assert "tool_search" not in _declared_deferred_names(agent.tools.runtime_snapshot(), [], enabled=True)
+    assert "tool_search" not in _declared_deferred_names(agent.tools.runtime_snapshot(), [])
 
 
 # LLM: 目录帮助只指向规范catalog，不恢复独立list_tools模型入口。
@@ -212,7 +199,7 @@ def test_declared_deferral_backs_off_when_tool_search_is_unusable(tmp_path, brok
     }[broken]
     runtimes = tuple(replace(runtime, **damaged) if runtime.model_spec.name == "tool_search" else runtime
                      for runtime in snapshot.runtimes)
-    assert _declared_deferred_names(replace(snapshot, runtimes=runtimes, snapshot_hash=""), [], enabled=True) == frozenset()
+    assert _declared_deferred_names(replace(snapshot, runtimes=runtimes, snapshot_hash=""), []) == frozenset()
 
 
 # LLM: 带 tool_search 的白名单仍可按需展示，执行/发现授权闭包不变。
@@ -253,8 +240,6 @@ def test_blind_call_validation_failure_loads_the_schema_for_the_next_request(tmp
 
 
 @pytest.mark.parametrize("case", [
-    (False, "manage_models", False, "validation"),
-    (False, "web_fetch", False, "validation"),
     (True, "manage_models", True, "validation"),
     (True, "manage_models", False, "execution"),
     (True, "audit_records", False, "validation"),

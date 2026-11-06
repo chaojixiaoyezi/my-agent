@@ -217,17 +217,14 @@ def test_native_catalog_does_not_duplicate_provider_schemas(tmp_path) -> None:
 
 
 # LLM: 使用实际快照生产端与自身目录消费者；冻结之后改注册表不应改变原状态或授权哈希。
-# 函数用途: 区分类别折叠、默认开关关闭与开启，并守住显式授权和已加载工具。
-@pytest.mark.parametrize("categories,enabled,expected", [
-    (["filesystem"], False, "deferred"), ([], True, "deferred"), ([], False, "ready"),
-])
+# 函数用途: 验证默认折叠常开时的快照冻结，并守住显式授权和已加载工具。
+@pytest.mark.parametrize("categories", [[]])
 @pytest.mark.parametrize("scope", [None, ["tool_search", "read_file"]])
-def test_self_context_freezes_real_deferral_policy(tmp_path, monkeypatch, categories, enabled, expected, scope):
+def test_self_context_freezes_real_deferral_policy(tmp_path, monkeypatch, categories, scope):
     from agent_py_agent.agent.tooling.self_context import registry_self_context
 
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
-    agent = _agent(tmp_path, tool_catalog_deferred_categories=categories,
-                   tool_default_deferral_enabled=enabled)
+    agent = _agent(tmp_path, tool_catalog_deferred_categories=categories)
     registry = agent.tools
     tool = registry.tools["read_file"]
     tool.model_spec = replace(tool.model_spec, hints=replace(
@@ -235,11 +232,14 @@ def test_self_context_freezes_real_deferral_policy(tmp_path, monkeypatch, catego
     snapshot = registry.runtime_snapshot(allowed_tools=scope)
     before = registry_self_context(registry, snapshot)["tool_states"]
     state = next(item["state"] for item in before if item["name"] == "read_file")
-    assert state == ("ready" if scope is not None else expected)
+    assert state == ("ready" if scope is not None else "deferred")
+    deferred_tool_names = {item["name"] for item in before if item["state"] == "deferred"}
+    expected_deferred = {spec.name for spec in snapshot.specs
+                         if spec.hints.default_deferred or spec.category in categories} if scope is None else set()
+    assert deferred_tool_names == expected_deferred
     assert getattr(snapshot, "deferred_categories", None) == tuple(sorted(categories))
-    assert getattr(snapshot, "default_deferral_enabled", None) is enabled
+    assert snapshot.default_deferral_enabled is True
     registry.catalog_deferred_categories = [] if categories else ["filesystem"]
-    registry.catalog_default_deferral_enabled = not enabled
     registry.tools.pop("read_file")
     assert registry_self_context(registry, snapshot)["tool_states"] == before
     for field in ("loaded_tool_names", "preloaded_tool_names"):

@@ -3,8 +3,8 @@ from __future__ import annotations
 """按工具声明默认收起的真实链路用例（只有供应商传输是脚本）。
 
 真实 SimpleAgent + 真实 Gateway 前台 ask：脚本化模型先 tool_search，再调用被收起的工具，最后回复。
-核对每次请求实际带了哪些原生工具：开关打开时首个请求不带收起的工具，tool_search 之后的那次请求带上并真正执行；
-开关关闭时首个请求照旧直接带它。本机管理员和飞书普通用户两种 owner 都走一遍。
+核对每次请求实际带了哪些原生工具：首个请求不带收起的工具，tool_search 之后的那次请求带上并真正执行。
+本机管理员和飞书普通用户两种 owner 都走一遍。
 """
 
 import itertools
@@ -115,12 +115,6 @@ def test_deferred_tool_is_found_loaded_and_executed_in_one_search(tmp_path, monk
     assert len(heads) == 2, heads
     assert "tool=tool_search; status=succeeded" in heads[0]
     assert "tool=schedule; status=succeeded; handler_executed=true" in heads[1], "schedule 真的执行并把结果交回模型"
-
-
-def test_switch_off_keeps_the_tool_in_the_first_request(tmp_path, monkeypatch):
-    chain, wire = _chain(tmp_path, monkeypatch, _Setup(False))
-    chain.ask("A", _PROMPT)
-    assert "schedule" in wire.calls[0]
 
 
 def test_blind_call_of_a_deferred_tool_gets_its_schema_on_the_next_request(tmp_path, monkeypatch):

@@ -25,7 +25,6 @@ def _view(tmp_path, monkeypatch):
     registry = pack_registry(tmp_path, owner)
     registry._mcp_clients.append(client)
     registry.tools.update((tool.model_spec.name, tool) for tool in client.pack_tools)
-    registry.catalog_default_deferral_enabled = True
     return registry, client, starts, calls
 
 
@@ -46,8 +45,7 @@ def test_silent_names_truthful_catalog_and_explicit_full_output(tmp_path, monkey
         assert spec.name not in {s.name for s in registry.model_visible_specs(runtime_snapshot=snapshot)}
         catalog = registry.tools["tool_search"].execute({"action": "catalog"})
         assert catalog.ok and spec.name in catalog.output
-        registry.catalog_default_deferral_enabled = False
-        assert spec.name in {s.name for s in registry.model_visible_specs()}
+        assert spec.name in {s.name for s in registry.model_visible_specs(loaded_tool_names=[spec.name])}
         assert not starts
     finally:
         registry.close_mcp_clients()

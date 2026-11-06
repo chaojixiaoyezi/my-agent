@@ -57,12 +57,16 @@ def test_missing_reason_and_cooldown_are_not_started(tmp_path, monkeypatch):
     assert first["status"] == "scheduled"
 
 
-def test_registered_only_for_admin_main_agent_when_enabled(tmp_path):
+# LLM: 管理员主代理的结构注册条件不变；关闭配置必须在运行时快照明确禁用工具。
+# 函数用途: 验证重启工具的结构身份和实时关闭原因。
+def test_registered_for_admin_main_agent_but_unavailable_when_disabled(tmp_path):
     enabled = _agent(tmp_path / "on")
     assert enabled.tools.owner_type == "main_agent"
     assert "restart_gateway" in enabled.tools.tools
     disabled = _agent(tmp_path / "off", enable_gateway_restart_tool=False)
-    assert "restart_gateway" not in disabled.tools.tools
+    snapshot = disabled.tools.runtime_snapshot()
+    assert "restart_gateway" not in snapshot.available_tool_names
+    assert ("restart_gateway", "TOOL_UNAVAILABLE", "disabled by enable_gateway_restart_tool") in snapshot.unavailable_tools
 
 
 def test_trusted_admin_restart_requires_no_additional_confirmation(tmp_path):
