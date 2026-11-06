@@ -357,9 +357,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 决策点诊断记录（被挡下的跳过行 + 到达/未触发原因计数）：关闭时既不在结果日志记 skipped（原因码、无正文），
     # 也不累计 decision_reach_counts 的到达/未触发原因计数。
     decision_skip_records_enabled: bool = True
-    # 决策调用复用长连接（仓库默认关，Mac 线上验收后由集成方打开）：打开后同一进程里的决策请求复用已建好的 HTTPS 连接，
-    # 省掉每次约 0.9 秒的代理隧道与 TLS 握手；关着就每次新建连接，与改动前逐字节相同。不改请求内容、重试或期限。
-    decision_connection_reuse_enabled: bool = False
     # 选模型决策请求里对话摘要（只带语义部分，不带原文锚点段）与当前消息的字符上限；0 表示不截断，截断时如实标注
     # 规划/交付质量/动作候选三个决策点位发给决策模型的当前请求字数预算：更长时取首尾节选并标注；0 表示不截取
     decision_request_max_chars: int = 2000
@@ -399,8 +396,6 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_idle_max_per_tick: int = 2
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。
     memory_compact_auto_trigger_max_tokens: int = 300_000
-    # 校准比值跨会话沿用：开着时成功调用写 owner data/context/calibration.json，线程观测对不上时按比值折算；关掉不读不写。
-    memory_context_calibration_carry_enabled: bool = True
     # 含图历史的压缩策略：auto 默认走归档引用（视觉能力事实接入后按事实选择随图摘要）；archived_refs 固定归档引用；off 保持从首个媒体回合起保护全部后缀。
     compact_media_policy: str = "auto"
     # 当前模型声明的输入模态（如 text、image、video），来自模型档案的 input_modalities；空表示未知，压缩策略会用一次结构化视觉探针判断，不按模型名猜。

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1364,
+  "count": 1349,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -516,22 +516,6 @@
       "description": "compact 尾部占窗口的百分比，决定保留多少最近内容。"
     },
     {
-      "name": "DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT",
-      "file": "agent_py_agent/agent/agent_core/runtime/context_compactor.py",
-      "value": 60,
-      "unit": "%",
-      "category": "比例阈值",
-      "description": "compact 后目标上下文占用百分比，达到即停止压缩。"
-    },
-    {
-      "name": "DEFAULT_COMPACT_TRIGGER_MAX_TOKENS",
-      "file": "agent_py_agent/agent/agent_core/runtime/context_compactor.py",
-      "value": 300000,
-      "unit": "tokens",
-      "category": "上限预算",
-      "description": "触发线绝对上限的默认值：与 AgentConfig/MemorySettings/随包 YAML 的默认一致；0 只在显式配置时表示不封顶。"
-    },
-    {
       "name": "DEFAULT_COMPACT_TRIGGER_PERCENT",
       "file": "agent_py_agent/agent/agent_core/runtime/context_compactor.py",
       "value": 90,
@@ -546,30 +530,6 @@
       "unit": "字符",
       "category": "其它",
       "description": "函数用途: 给出归档摘要字符数与按归档等级的预览字符预算。"
-    },
-    {
-      "name": "_FORMAL_MEMORY_BUDGET_CHARS",
-      "file": "agent_py_agent/agent/agent_core/runtime/loop_support.py",
-      "value": 4000,
-      "unit": "字符",
-      "category": "上限预算",
-      "description": "非HOT池按安全信封计量4000字符（含遗漏提示），工作约定另受2400子预算。"
-    },
-    {
-      "name": "_HOT_MEMORY_CONTENT_BUDGET_CHARS",
-      "file": "agent_py_agent/agent/agent_core/runtime/loop_support.py",
-      "value": 5000,
-      "unit": "字符",
-      "category": "上限预算",
-      "description": "HOT独立按正文5000字符写入上限整条保留，序列化元数据不挤占其有效正文额度。"
-    },
-    {
-      "name": "_WORKING_AGREEMENT_SUB_BUDGET_CHARS",
-      "file": "agent_py_agent/agent/agent_core/runtime/loop_support.py",
-      "value": 2400,
-      "unit": "字符",
-      "category": "上限预算",
-      "description": "工作约定从总召回额度内分配子预算，不能挤占全部正式记忆。"
     },
     {
       "name": "_FINDING_EVIDENCE_INLINE_MAX_CHARS",
@@ -3028,14 +2988,6 @@
       "description": "进程内所有检查点缓存合计最多保留的行偏移量数。"
     },
     {
-      "name": "_DEFAULT_MAX_TOKENS",
-      "file": "agent_py_agent/agent/conversation/compact_landmarks.py",
-      "value": 20000,
-      "unit": "tokens",
-      "category": "上限预算",
-      "description": "compact 地标：默认最大 20000 tokens 的裁剪窗口。"
-    },
-    {
       "name": "_MIN_CLIP_TOKENS",
       "file": "agent_py_agent/agent/conversation/compact_landmarks.py",
       "value": 200,
@@ -3522,30 +3474,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "输入依赖记录进程内缓存的最大条目数。"
-    },
-    {
-      "name": "DEFAULT_MEDIA_BYTES",
-      "file": "agent_py_agent/agent/conversation/input_media.py",
-      "value": 16777216,
-      "unit": "字节",
-      "category": "其它",
-      "description": "单条输入媒体默认最大 16 MiB：超出拒绝，防超大附件拖垮请求。"
-    },
-    {
-      "name": "DEFAULT_MEDIA_FILES",
-      "file": "agent_py_agent/agent/conversation/input_media.py",
-      "value": 8,
-      "unit": "个文件",
-      "category": "其它",
-      "description": "一次请求默认最多 8 个媒体文件：限制批量上传成本。"
-    },
-    {
-      "name": "DEFAULT_IMAGE_PIXELS",
-      "file": "agent_py_agent/agent/conversation/input_media_images.py",
-      "value": 40000000,
-      "unit": "像素",
-      "category": "其它",
-      "description": "入站图片默认累计解码像素预算，多帧图片合计核验。"
     },
     {
       "name": "MAX_IMAGE_FRAMES",
@@ -4372,6 +4300,14 @@
       "description": "延迟升级到原生C看门狗的最小卡死观察窗口（秒）。"
     },
     {
+      "name": "HTTP_CONTROL_PEEK_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/http_lanes.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "其它",
+      "description": "就绪分类时最多窥视的请求首行字节数：只用于选择车道，首行更长时按普通车道处理，不影响请求本身。"
+    },
+    {
       "name": "_CONSUMED_RECEIPT_STAMP_MAX_ENTRIES",
       "file": "agent_py_agent/agent/gateway_parts/input_delivery_service.py",
       "value": 512,
@@ -4522,14 +4458,6 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "只限制控制帧资源，不截断、不筛业务记录；正常owner标识帧远小于此值。"
-    },
-    {
-      "name": "CURATOR_DAILY_QUOTA_DEFAULT_COUNT",
-      "file": "agent_py_agent/agent/gateway_parts/multiprocess_curator_accounting.py",
-      "value": 5000,
-      "unit": "个",
-      "category": "其它",
-      "description": "既有策展全局日上限，单位实际运行次数；此前只在CLI默认常量中声明。"
     },
     {
       "name": "_WORKER_EXIT_OBSERVATION_POLL_SECONDS",
@@ -6404,14 +6332,6 @@
       "description": "预检结果里每条新增事实给决策模型看的摘要长度，与已选记忆的摘要长度一致。"
     },
     {
-      "name": "MEMORY_LIBRARY_WRITE_CAP_CHARS",
-      "file": "agent_py_agent/agent/memory_store/jsonl.py",
-      "value": 20000,
-      "unit": "字符",
-      "category": "其它",
-      "description": "LLM: 仅保留旧调用方导入名；20k现在是默认热工作集预算，不再作为正式写入拒绝条件。"
-    },
-    {
       "name": "_AUTHORITY_SCAN_MAX_BYTES",
       "file": "agent_py_agent/agent/memory_store/jsonl.py",
       "value": 2097152,
@@ -6644,12 +6564,12 @@
       "description": "同一进程两次检查遥测封口卷到期的最短间隔秒数。"
     },
     {
-      "name": "_DEFAULT_MAX_AGENT_COUNT",
-      "file": "agent_py_agent/agent/owner_scoped_pool.py",
-      "value": 64,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "单 owner 默认最多并行的代理数；防止一个 owner 占满全部线程资源。"
+      "name": "OWNER_SNAPSHOT_RACY_MTIME_SECONDS",
+      "file": "agent_py_agent/agent/owner_snapshot_index.py",
+      "value": 2.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "文件时间戳粒度保护秒数：mtime 距记录时刻小于该值的条目视为可能未落定，下次必须重新计算摘要。"
     },
     {
       "name": "_DIRECTORY_CACHE_MAX_ENTRIES",
@@ -7634,14 +7554,6 @@
       "unit": "",
       "category": "其它",
       "description": "scrypt 块大小参数 r=8（无物理单位）：与 N、p 搭配的标准推荐值，改小会降低抗爆破成本。"
-    },
-    {
-      "name": "DEFAULT_IDLE_SECONDS",
-      "file": "agent_py_agent/agent/session_lock/service.py",
-      "value": 10800,
-      "unit": "秒",
-      "category": "其它",
-      "description": "会话闲置 3 小时自动锁定：不影响活跃使用，又避免离开后会话长期暴露。"
     },
     {
       "name": "MAX_FAILURE_ENTRIES_COUNT",
@@ -9257,7 +9169,7 @@
       "value": 1000000,
       "unit": "字节",
       "category": "上限预算",
-      "description": "从网络读取的响应体上限（字节，含解压后）；给模型的字符上限另见 web_http_helpers.MAX_BODY_CHARS。"
+      "description": "从网络读取的响应体兼容上限（字节，含解压后）；请求体字符预算与展示预览分别控制。"
     },
     {
       "name": "_MAX_REDIRECT_COUNT",
@@ -9281,7 +9193,7 @@
       "value": 1000000,
       "unit": "字符",
       "category": "上限预算",
-      "description": "HTTP 响应体最多取 100 万字符：超长响应截断，防超大 body 撑爆上下文。"
+      "description": "HTTP 请求体兼容上限为 100 万字符；不与传输响应字节上限或展示预览混用。"
     },
     {
       "name": "MIN_RESPONSE_PREVIEW_CHARS",
@@ -10004,14 +9916,6 @@
       "description": "历史里助手消息预览最多保留 500 字符，超出折叠"
     },
     {
-      "name": "MAX_HISTORY_TURNS",
-      "file": "agent_py_agent/cli/chat_parts/history.py",
-      "value": 20,
-      "unit": "轮",
-      "category": "上限预算",
-      "description": "聊天历史最多保留 20 轮对话，避免长期会话上下文无限膨胀"
-    },
-    {
       "name": "_CHAT_COLLAPSE_PREVIEW_CHARS",
       "file": "agent_py_agent/cli/chat_parts/plain_handlers.py",
       "value": 900,
@@ -10676,36 +10580,12 @@
       "description": "启动后暂缓非紧急后台维护的交互保护窗口秒数，不延迟撤销或恢复。"
     },
     {
-      "name": "_BACKGROUND_OWNER_WORKER_COUNT",
-      "file": "agent_py_agent/cli/gateway_loops.py",
-      "value": 8,
-      "unit": "个",
-      "category": "其它",
-      "description": "可由 config background_owner_workers 覆盖，此常量是无配置时的兜底。"
-    },
-    {
-      "name": "_BACKGROUND_PER_OWNER_THREAD_COUNT",
-      "file": "agent_py_agent/cli/gateway_loops.py",
-      "value": 4,
-      "unit": "个",
-      "category": "其它",
-      "description": "一个 owner 用大量待处理会话占满全局后台模型池。"
-    },
-    {
       "name": "_COLD_CURATOR_BUILDS_PER_TICK_COUNT",
       "file": "agent_py_agent/cli/gateway_loops.py",
       "value": 2,
       "unit": "个",
       "category": "其它",
       "description": "每拍后台维护最多冷构造的策展器数量，热实例不占此额度。"
-    },
-    {
-      "name": "_CURATOR_DAILY_QUOTA_COUNT",
-      "file": "agent_py_agent/cli/gateway_loops.py",
-      "value": 5000,
-      "unit": "个",
-      "category": "其它",
-      "description": "归档类晚一天无害,超限顺延;紧急车道(pending reason)不受此限。"
     },
     {
       "name": "_HEARTBEAT_INTERVAL_SECONDS",

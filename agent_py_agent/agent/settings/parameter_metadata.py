@@ -47,6 +47,8 @@ _DEFINITION_EXCLUDED = frozenset({
     _PACKAGE / "agent" / "settings" / "model_credentials.py",
     # 受管owner运行白名单只按字段名登记要复制的运行字段，不是这些配置的消费方。
     _PACKAGE / "agent" / "gateway_parts" / "managed_owner_runtime.py",
+    # 实时布尔开关登记表只声明热切换分类与分发规则，不是这些开关的业务消费方。
+    _PACKAGE / "agent" / "settings" / "live_switches.py",
 })
 # 推导模块自身和登记表会以字符串引用所有字段名，扫描时必须排除，否则每个字段都“被 settings 读取”。
 _SELF_EXCLUDED = {_DEFINITION, Path(__file__).resolve(),

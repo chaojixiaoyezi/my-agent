@@ -434,7 +434,10 @@ def test_responses_models_are_auto_probed_and_confirmed(tmp_path, monkeypatch):
 def test_detection_requests_carry_output_cap_and_receipt_is_fact_based(tmp_path, monkeypatch):
     # C7：检测请求显式带输出上限（与档案上限取小后就是真实发送值）；回执的耗时/token 由次数 × 每次上限算出，
     # 不再写死“约需 1～5 分钟 / 少量 token”。用小上限区分“确实传了上限”与“沿档案默认”。
+    from dataclasses import replace
+
     agent, _profile_id = _agent(tmp_path)
+    agent.config = replace(agent.config, reasoning_probe_max_output_tokens=500)
     wire = _Wire(_DEEPSEEK).install(monkeypatch)
     monkeypatch.setattr(probe, "_spawn", lambda target: target())
     monkeypatch.setattr(probe, "PROBE_MAX_OUTPUT_TOKENS", 500)
