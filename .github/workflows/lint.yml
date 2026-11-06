@@ -45,6 +45,9 @@ jobs:
       - name: Check clean package
         run: python3 scripts/check_clean_package.py .
 
+      - name: Check boolean switch binary law
+        run: python3 scripts/check_boolean_switches_and_hot_reload.py
+
       - name: Lint with ruff
         run: ruff check agent_py_agent scripts setup.py package_boundary_policy.py
 
