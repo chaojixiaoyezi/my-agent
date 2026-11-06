@@ -12,6 +12,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
+from typing import Protocol
 
 from ...capability.config import CapabilityConfig
 from ...capability.runtime_config_reload import capability_config_for_agent
@@ -55,7 +56,7 @@ from ...tooling.tool_search_state import pending_carried_loaded_tool_names
 from ...user_space.context_bundle import MainContextBundleRequest, build_main_context_bundle
 from ...user_space.home_layout import runtime_route_root_and_index
 from .._runtime_params import MAX_PROTOCOL_REPAIRS, ToolLoopExecuteParams
-from .._tool_loop_service import execute_tool_loop
+from .._tool_loop_service import ToolLoopRunResult, execute_tool_loop
 from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .live_archive import write_runtime_fact_start_if_enabled
@@ -69,6 +70,14 @@ from .loop_models import (
 )
 from .run_params import run_params_from_values as run_params_from_values
 from .turn_trigger import turn_trigger_recommendation
+
+
+# LLM: 只允许可信宿主设置 Agent._loop_driver；接收原参数并返回原结果合同，不新增模型字段或工具权限。
+# 类用途: 为宿主替换工具循环实现提供最小可调用协议，默认仍使用原循环。
+class ToolLoopDriver(Protocol):
+    # LLM: 调用方保留快照校验、异常历史和结算；实现必须沿原宿主执行器遵守权限及取消合同。
+    # 函数用途: 用本次运行的原始参数执行工具循环并交回最终参数。
+    def __call__(self, agent: object, params: ToolLoopExecuteParams) -> ToolLoopRunResult: ...
 
 
 # LLM: 范围与选中 ID 仅是当前片展示输入，权限仍从原工具快照和 scoped Skill 快照读取，不可变值不写共享 Agent。
@@ -764,7 +773,7 @@ def _runtime_injections_with_bundle(
     return injections
 
 
-# LLM: 原推荐接缝只采用合法展示；工具快照与循环参数逐 run 固定，直接调用唯一循环函数。首请求选模采用的完整参数
+# LLM: 原推荐接缝只采用合法展示；工具快照与循环参数逐 run 固定，默认调用原循环，可信宿主可设置 _loop_driver。首请求选模采用的完整参数
 # 由循环结果显式交回；异常先保存当前 IR 再原样抛错（候选只换协议快照、共享同一 IR），需核对原生历史与中断回归。
 # 能力推荐真的发起过决策时回传结构化观测；同一 selected 集合传给包动态建议，不绕过原展示选择或另发请求。
 # 回合触发类型原样交给推荐区与工具循环（当前回合开头、原生历史保存）。
@@ -826,7 +835,8 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
     _queue_audit_source_provision_reply(loop_params, audit_source_provision)
     # 每个 run 独占本次参数与循环局部计数，同一 owner 的并发聊天或后台轮也不能共享。
     try:
-        loop_result = execute_tool_loop(agent, loop_params)
+        driver: ToolLoopDriver | None = getattr(agent, "_loop_driver", None)
+        loop_result = (execute_tool_loop if driver is None else driver)(agent, loop_params)
         final_prompt, final_response = loop_result.final_prompt, loop_result.final_response
         tool_rounds = loop_result.tool_rounds
         loop_params = loop_result.params
