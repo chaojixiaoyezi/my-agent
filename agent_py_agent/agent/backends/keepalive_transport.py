@@ -1,14 +1,15 @@
-# LLM: 长连接复用只服务显式带连接池的严格请求（GatewayRequest.connection_pool 非空：零重试、禁止重定向、有绝对期限），
-#   目前只有决策调用传池（配置 decision_connection_reuse_enabled）。没有池的请求完全走原 urllib 路径，字节与行为不变。
+# LLM: 长连接只服务显式带池的请求；决策池保持零重试、禁止重定向、有绝对期限的合同，主模型按空闲容量配置显式启用。
+#   主池允许现有有界重试循环接管失败，每次发送单独记账；没有池的请求完全走原 urllib 路径，字节与行为不变。
 #   打开语义与 urllib.request.AbstractHTTPHandler.do_open 对齐：同一代理解析（环境/系统代理、回环直连、绕过表）、同一
 #   双超时连接类与中断守卫、同一请求头（只把 Connection: close 换成 keep-alive）、非 2xx 一律抛 urllib HTTPError；
-#   不跟随重定向、不重试——复用连接上的发送失败照原样上抛，不换新连接重发（避免同一请求被供应商收两次）。
-#   连接只在“正文完整读完、响应已关闭、服务端没要求关闭、守卫没中止过”时由 release_pooled_response 放回池；其余一律关闭。
+#   池内不跟随重定向、不重发；复用陈旧连接的失败仅标记并上抛，由现有重试层决定是否重新发送。
+#   连接只在关闭响应前证明正文已读到 EOF、服务端没要求关闭、守卫没中止过时归还；其余一律关闭。
 #   池按（协议, 主机, 端口, 代理）分组，凭据不进身份：同一 TLS 连接上的每个请求自带 Authorization。
 #   空闲超过 KEEPALIVE_MAX_IDLE_SECONDS 或对端已关（套接字可读）的连接取出时直接丢弃。改动须同步 test_keepalive_transport.py。
-# 模块用途: 让决策这类短小的严格请求复用已经建好的 HTTPS 长连接，省掉每次的代理隧道与 TLS 握手（真实约 0.9 秒）。
+# 模块用途: 让显式启用的主模型及决策请求复用长连接，省去重复建连、代理隧道与 TLS 握手。
 from __future__ import annotations
 
+import http.client
 import select
 import threading
 import time
@@ -18,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from .gateway_request_limits import remaining_deadline_seconds
+from .gateway_request_limits import remaining_deadline_seconds, stdlib_response_socket
 from .transport_timing import instrument_connection
 
 # 2026-10-01 经本机代理实测：代理链（FlClash 或其上游节点）在空闲约 103–131 秒时直接断开隧道（无 TLS 关闭通知，
@@ -50,6 +51,7 @@ class KeepAlivePool:
     max_idle_seconds: float = KEEPALIVE_MAX_IDLE_SECONDS
     max_idle_per_key: int = KEEPALIVE_IDLE_PER_ROUTE_COUNT
     clock: Any = time.monotonic
+    allows_retrying_requests: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _idle: dict[KeepAliveRoute, list[tuple[float, Any]]] = field(default_factory=dict, init=False, repr=False)
 
@@ -91,6 +93,15 @@ class KeepAlivePool:
             for _since, connection in entries:
                 _close_quietly(connection)
 
+    # LLM: 只在锁内摘掉指定线路的空闲表；实际关闭在锁外，正在使用的连接不受影响。
+    # 函数用途: 清空一条线路的空闲连接并返回关闭条数。
+    def drop_idle(self, route: KeepAliveRoute) -> int:
+        with self._lock:
+            entries = self._idle.pop(route, [])
+        for _since, connection in entries:
+            _close_quietly(connection)
+        return len(entries)
+
     # 函数用途: 返回池里当前空闲连接条数（测试与诊断用）。
     def idle_count(self) -> int:
         with self._lock:
@@ -99,6 +110,23 @@ class KeepAlivePool:
 
 # 决策调用共用的进程级连接池；只有配置打开 decision_connection_reuse_enabled 时才传给请求。
 DECISION_CONNECTION_POOL = KeepAlivePool()
+
+_MAIN_POOLS: dict[int, KeepAlivePool] = {}
+_MAIN_POOLS_LOCK = threading.Lock()
+
+
+# LLM: 进程内按容量共享池；注册表锁只保护创建与查找，不执行网络操作。
+# 函数用途: 返回指定空闲容量的主模型池，非正容量保持原无池路径。
+def main_connection_pool(max_idle_per_route: int) -> KeepAlivePool | None:
+    cap = int(max_idle_per_route)
+    if cap <= 0:
+        return None
+    with _MAIN_POOLS_LOCK:
+        pool = _MAIN_POOLS.get(cap)
+        if pool is None:
+            pool = KeepAlivePool(max_idle_per_key=cap, allows_retrying_requests=True)
+            _MAIN_POOLS[cap] = pool
+        return pool
 
 
 # LLM: 冻结值对象，由 keepalive_target 算出；pool 只要求有 checkout/checkin（GatewayRequest 校验过）。
@@ -148,11 +176,12 @@ def keepalive_route(url: str) -> KeepAliveRoute | None:
 
 # LLM: 由 gateway_helpers._gateway_urlopen 在打开守卫与期限作用域内调用，options 是本次尝试的 _SplitTimeoutOptions。
 #   新连接用原双超时连接类（构造即挂守卫、装计时）；复用连接改挂本次守卫、按本次剩余期限设读超时、计时记“跳过建连”。
-#   发送 OSError 照 urllib 包成 URLError；发送或取响应失败都关闭连接并原样上抛，不重试。非 2xx 抛 HTTPError（连接不放回）。
-# 函数用途: 经长连接池发出一次严格请求并返回标准库响应，成功响应带上归还池所需的租约。
+#   发送 OSError 照 urllib 包成 URLError；复用陈旧连接失败仅标记、清空线路并上抛，不在池内重发。非 2xx 抛 HTTPError。
+# 函数用途: 经长连接池发出一次请求并返回标准库响应，成功响应带上归还池所需的租约。
 def pooled_urlopen(target: KeepAliveTarget, req: urllib.request.Request, options: Any):
     route = target.route
     connection = target.pool.checkout(route)
+    reused = connection is not None
     try:
         if connection is None:
             connection = _new_connection(route, options)
@@ -161,8 +190,22 @@ def pooled_urlopen(target: KeepAliveTarget, req: urllib.request.Request, options
         try:
             connection.request(req.get_method(), _selector(req.full_url), req.data, _request_headers(req))
         except OSError as err:
-            raise urllib.error.URLError(err) from err
-        response = connection.getresponse()
+            wrapped = urllib.error.URLError(err)
+            if reused and isinstance(err, (BrokenPipeError, ConnectionResetError)):
+                wrapped.stale_reused_connection = True
+                drop_idle = getattr(target.pool, "drop_idle", None)
+                if callable(drop_idle):
+                    drop_idle(route)
+            raise wrapped from err
+        try:
+            response = connection.getresponse()
+        except http.client.RemoteDisconnected as exc:
+            if reused:
+                exc.stale_reused_connection = True
+                drop_idle = getattr(target.pool, "drop_idle", None)
+                if callable(drop_idle):
+                    drop_idle(route)
+            raise
     except BaseException:
         if connection is not None:
             _close_quietly(connection)
@@ -170,23 +213,59 @@ def pooled_urlopen(target: KeepAliveTarget, req: urllib.request.Request, options
     response.url = req.full_url
     response.msg = response.reason
     if not 200 <= response.status < 300:
+        # 与 urllib do_open 一致：正文文件继续持有 socket，读完或关闭正文即释放 fd，不依赖异常回收。
+        if connection.sock is not None:
+            connection.sock.close()
+            connection.sock = None
         raise urllib.error.HTTPError(req.full_url, response.status, response.reason, response.headers, response)
     setattr(response, _LEASE_ATTR, _Lease(target, connection))
     return response
 
 
 # LLM: 只在响应作用域收尾时调用（gateway_helpers._gateway_response_scope）；没有租约的响应什么都不做。
-#   aborted 来自响应守卫：被中断、到期或读失败中止过的连接一律关闭，绝不放回。
+#   aborted 来自响应守卫；显式 body_complete 必须是关闭前的 EOF 证明，None 保留已有直接调用方的判据。
 # 函数用途: 请求结束后把干净用完的长连接还给池，其余情况关闭它。
-def release_pooled_response(response: Any, *, aborted: bool) -> None:
+def release_pooled_response(response: Any, *, aborted: bool, body_complete: bool | None = None) -> None:
     lease = getattr(response, _LEASE_ATTR, None)
     if not isinstance(lease, _Lease):
         return
     setattr(response, _LEASE_ATTR, None)
-    if not aborted and response.isclosed() and not response.will_close and lease.connection.sock is not None:
+    complete = response.isclosed() if body_complete is None else bool(body_complete)
+    if not aborted and complete and not response.will_close and lease.connection.sock is not None:
         lease.target.pool.checkin(lease.target.route, lease.connection)
     else:
         _close_quietly(lease.connection)
+
+
+# LLM: 只认本模块签发的租约，不将测试替身或其它响应属性当作连接归属。
+# 函数用途: 判断响应是否持有需要归还或关闭的池连接。
+def has_pooled_lease(response: Any) -> bool:
+    return isinstance(getattr(response, _LEASE_ATTR, None), _Lease)
+
+
+# LLM: 关闭响应前以零等待单次读取证明 EOF；任何不完整或不可读取结果都拒绝归还，退出恢复原 socket 超时。
+# 函数用途: 尝试读完已就绪的正文尾部，不等待终止块或后续网络数据。
+def drain_completed_response(response: Any) -> bool:
+    if response.isclosed():
+        return True
+    sock = stdlib_response_socket(response)
+    if sock is None:
+        return False
+    restore_timeout = False
+    try:
+        timeout = sock.gettimeout()
+        restore_timeout = True
+        sock.settimeout(0.0)
+        response.read()
+        return response.isclosed()
+    except (OSError, ValueError, TypeError, http.client.HTTPException):
+        return False
+    finally:
+        if restore_timeout:
+            try:
+                sock.settimeout(timeout)
+            except OSError:
+                pass
 
 
 # LLM: 与 urllib 同一连接类和 TLS 默认上下文；经代理时用标准库 set_tunnel 走 CONNECT 隧道。
@@ -271,8 +350,11 @@ __all__ = [
     "KeepAlivePool",
     "KeepAliveRoute",
     "KeepAliveTarget",
+    "drain_completed_response",
+    "has_pooled_lease",
     "keepalive_route",
     "keepalive_target",
+    "main_connection_pool",
     "pooled_urlopen",
     "release_pooled_response",
 ]

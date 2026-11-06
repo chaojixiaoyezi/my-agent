@@ -96,6 +96,8 @@ class BackendOptions:
     responses_ws_idle_ttl_seconds: int = 300
     responses_ws_max_idle_connections: int = 32
     configured_output_ceiling: int = 0
+    # 主模型 HTTP 每条线路的空闲连接上限，零保持原无池路径。
+    model_http_max_idle_connections: int = 0
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。

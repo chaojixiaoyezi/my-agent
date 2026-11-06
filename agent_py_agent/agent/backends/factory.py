@@ -57,6 +57,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         provider_max_concurrent_requests=getattr(config, "provider_max_concurrent_requests", 0),
         responses_ws_idle_ttl_seconds=getattr(config, "responses_ws_idle_ttl_seconds", 300),
         responses_ws_max_idle_connections=getattr(config, "responses_ws_max_idle_connections", 32),
+        model_http_max_idle_connections=getattr(config, "model_http_max_idle_connections", 0),
         # 输出上限按已知窗口统一夹取（唯一权威见 effective_max_output_tokens），默认模型与模型档案走同一规则。
         max_tokens=effective_max_output_tokens(config),
         configured_output_ceiling=configured_max_output_tokens(config),
