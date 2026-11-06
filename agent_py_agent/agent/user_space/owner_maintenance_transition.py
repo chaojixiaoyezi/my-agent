@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from ..common.json_io import locked_json_path, read_json_object_report
 from ..common.nofollow_fs import read_bytes_beneath
 from ..common.request_execution_ports import gateway_transaction_writer
+from ..memory_store.retention import _call_retention_callback
 from ..memory_store.retention_scan import file_fingerprint
 from ..memory_store.retention_transition import RetentionPolicyChangedError
 from .home_retention import apply_owner_retention, maintenance_fence
@@ -81,8 +82,8 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         return _run_quota_continuation_slice(
             path, home, header, now, coordinator=True, commit_transition=commit,
             runtime_cleanup=runtime_cleanup, quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
-    retention = apply_owner_retention(home, now=datetime.fromtimestamp(now, timezone.utc),
-        commit_transition=commit, expected_policy_fingerprint=policy, config=config)
+    retention = _call_retention_callback(apply_owner_retention, home, now=datetime.fromtimestamp(now, timezone.utc),
+        commit_transition=commit, expected_policy_fingerprint=policy, config=config, scan_budget=True)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                          now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit)
                      if retention.applied and not retention.legal_hold and not retention.load_errors

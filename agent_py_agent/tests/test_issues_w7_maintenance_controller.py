@@ -250,3 +250,57 @@ def test_sixty_four_priority_owners_leave_half_budget_for_discovery(tmp_path, mo
         *(f'owner-{index:03d}' for index in range(6, 16)),
     ]
     assert controller._cursor is not None
+
+
+@pytest.mark.parametrize('style', ['keyword', 'positional', 'varargs', 'kwargs'])
+def test_controller_transports_exact_config_to_base_and_scoped_owners(tmp_path, monkeypatch, maintenance_clock, style):
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 2)
+    original, seen = gateway_loops.run_owner_retention_if_due, []
+    config = controller._base_agent.config
+
+    def run(scoped_home, received, now):
+        seen.append(received)
+        return original(scoped_home, now=now)
+
+    if style == 'keyword':
+        def callback(scoped_home, *, now, config):
+            return run(scoped_home, config, now)
+    elif style == 'positional':
+        def callback(scoped_home, settings, /, *, now):
+            return run(scoped_home, settings, now)
+    elif style == 'varargs':
+        def callback(scoped_home, *settings, now):
+            return run(scoped_home, settings[0], now)
+    else:
+        def callback(scoped_home, **options):
+            return run(scoped_home, options['config'], options['now'])
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', callback)
+    assert controller.tick(now=200_000)['ran'] == 3
+    assert calls == [home.owner_home_dir, *(owner.home_dir for owner in owners)]
+    assert len(seen) == 3 and all(received is config for received in seen)
+
+
+@pytest.mark.parametrize('scoped', [False, True])
+def test_controller_internal_typeerror_runs_once_and_preserves_isolation(tmp_path, monkeypatch, maintenance_clock, scoped, capsys):
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 2)
+    original, seen = gateway_loops.run_owner_retention_if_due, []
+    target = owners[0].home_dir if scoped else home.owner_home_dir
+    error = TypeError('maintenance callback body failed')
+
+    def broken(scoped_home, *, now, config=None):
+        seen.append(scoped_home.owner_home_dir)
+        if scoped_home.owner_home_dir == target:
+            raise error
+        return original(scoped_home, now=now)
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', broken)
+    if scoped:
+        assert controller.tick(now=200_000)['ran'] == 2
+        assert calls == [home.owner_home_dir, owners[1].home_dir]
+        assert 'gateway_owner_maintenance.owner' in capsys.readouterr().err
+    else:
+        with pytest.raises(TypeError) as raised:
+            controller.tick(now=200_000)
+        assert raised.value is error and not calls
+    assert seen.count(target) == 1

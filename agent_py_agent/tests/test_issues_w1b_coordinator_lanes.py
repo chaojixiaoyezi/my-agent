@@ -340,3 +340,59 @@ def test_lane_continuation_rechecks_changed_retention_policy(lane_home, monkeypa
         assert holds == [False, True] and marker['legal_hold'] is True
     else:
         assert holds == [False] and marker['load_errors']
+
+
+@pytest.mark.parametrize('coordinator', [False, True])
+@pytest.mark.parametrize('style', ['keyword', 'positional', 'varargs', 'kwargs'])
+def test_retention_callback_receives_config_and_supported_budget(lane_home, monkeypatch, coordinator, style):
+    """两条真实维护入口都保留配置身份、预算与原提交门。"""
+    module = owner_maintenance_transition if coordinator else owner_maintenance
+    original = module.apply_owner_retention
+    config, seen = object(), []
+
+    def invoke(home, received, options):
+        seen.append((received, options.pop('scan_budget', None), options.get('commit_transition')))
+        return original(home, config=received, **options)
+
+    if style == 'keyword':
+        def callback(home, *, config, scan_budget, **options):
+            return invoke(home, config, {**options, 'scan_budget': scan_budget})
+    elif style == 'positional':
+        def callback(home, settings, /, *, scan_budget, **options):
+            return invoke(home, settings, {**options, 'scan_budget': scan_budget})
+    elif style == 'varargs':
+        def callback(home, *settings, now, commit_transition=None, expected_policy_fingerprint=None, scan_budget):
+            return invoke(home, settings[0], dict(now=now, commit_transition=commit_transition,
+                expected_policy_fingerprint=expected_policy_fingerprint, scan_budget=scan_budget))
+    else:
+        def callback(home, **options):
+            return invoke(home, options.pop('config'), options)
+
+    monkeypatch.setattr(module, 'apply_owner_retention', callback)
+    options = {'include_global_indexes': False, 'config': config}
+    if coordinator:
+        options['commit_transition'] = lambda operation: operation()
+    result = owner_maintenance.run_owner_retention_if_due(lane_home, now=2_000_000, **options)
+    assert result.ran and len(seen) == 1
+    assert seen[0][:2] == (config, True)
+    assert callable(seen[0][2]) is coordinator
+    assert (lane_home.owner_data_dir / 'maintenance.json').is_file()
+
+
+@pytest.mark.parametrize('coordinator', [False, True])
+def test_retention_callback_internal_typeerror_is_not_retried(lane_home, monkeypatch, coordinator):
+    module = owner_maintenance_transition if coordinator else owner_maintenance
+    error, calls = TypeError('callback body failed after entry'), []
+
+    def broken(home, *, now, config=None, **options):
+        calls.append(home)
+        raise error
+
+    monkeypatch.setattr(module, 'apply_owner_retention', broken)
+    options = {'include_global_indexes': False}
+    if coordinator:
+        options['commit_transition'] = lambda operation: operation()
+    with pytest.raises(TypeError) as raised:
+        owner_maintenance.run_owner_retention_if_due(lane_home, now=2_000_000, **options)
+    assert raised.value is error and calls == [lane_home]
+    assert not (lane_home.owner_data_dir / 'maintenance.json').exists()

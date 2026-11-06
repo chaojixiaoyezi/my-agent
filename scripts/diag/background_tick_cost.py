@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # LLM: 仅在TemporaryDirectory中建立显式合成存储，不修改HOME/日常配置，不调用模型或网络；测量不代表整个Gateway或容量结论。
-# 模块用途: 在相同空闲存储夹具上比较后台便宜检查开关的实际查询开销与事实摘要。
+# 模块用途: 在相同空闲存储夹具上比较runtime wake探针的实际开销；scheduler/process缓存始终开启。
 from __future__ import annotations
 
 import argparse
@@ -131,7 +131,7 @@ def _observe_reads(counters: _Counters) -> Iterator[None]:
         RuntimeSchemaMixin._runtime_connect = runtime_connect
 
 
-# LLM: 只对齐wake/scheduler/process三个存储阶段，不包含事件预留、取消恢复、权限、通知或模型，不得声称完整tick收益。
+# LLM: 只对齐wake/scheduler/process三个存储阶段；cheap仅选择wake探针，scheduler/process原缓存不再有慢路开关。
 # 函数用途: 用真实产品读口检查一次相同空闲夹具，时间条件每轮使用当前时刻。
 def _storage_round(stores: list[_OwnerStores], cheap: bool) -> None:
     for store in stores:
@@ -139,10 +139,10 @@ def _storage_round(stores: list[_OwnerStores], cheap: bool) -> None:
         if not cheap or store.runtime.wakes_need_attention(now=current):
             assert store.runtime.reclaim_expired_wakes(now=current) == 0
             assert store.runtime.pop_due_wakes(now=current) == []
-        assert store.scheduler.waiting_runs(cheap_checks=cheap) == ([], [])
-        assert store.scheduler.reserve_due_runs(now=current, cheap_checks=cheap) == []
-        assert store.scheduler.queued_runs(now=current, cheap_checks=cheap) == []
-        assert store.process.list_records(cheap_checks=cheap) == ([], [])
+        assert store.scheduler.waiting_runs() == ([], [])
+        assert store.scheduler.reserve_due_runs(now=current) == []
+        assert store.scheduler.queued_runs(now=current) == []
+        assert store.process.list_records() == ([], [])
 
 
 # LLM: 比较规范事实内容，不把缓存命中数当成正确性；每个测量臂都必须得到相同摘要。
@@ -176,9 +176,9 @@ def _measure(stores: list[_OwnerStores], cheap: bool, ticks: int) -> dict:
 
 
 # LLM: 所有产品构造均使用本次临时路径；仅--out指定的JSON会持久保存，退出不留下模拟owner，不改环境变量。
-# 函数用途: 运行off/on实测并输出结构化结果，不做容量外推或配置切换。
+# 函数用途: 运行wake探针对照并输出结构化结果，不做容量外推或恢复已退役的配置开关。
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="后台便宜检查的临时存储实测；不改HOME、不调用模型或网络。")
+    parser = argparse.ArgumentParser(description="runtime wake探针的临时存储对照；scheduler/process缓存始终开启，不改HOME或调用网络。")
     parser.add_argument("--owners", type=int, default=4, help="合成owner数，默认4")
     parser.add_argument("--ticks", type=int, default=5, help="每个开关臂的测量轮数，默认5")
     parser.add_argument("--ledger-runs", type=int, default=0, help="每owner的未来排队行数，超过512会触发投影上限")
@@ -192,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         results = [_measure(stores, cheap, args.ticks) for cheap in (False, True)]
         assert all(row["facts_sha256"] == initial for row in results)
     report = {"schema": "background_tick_storage_cost.v1", "scope": "storage_phases_only",
+              "comparison": "runtime_wake_attention_probe", "scheduler_process_cache": "always_on",
               "sql_scope": "runtime_statements_after_connection_setup", "fixture_removed": True,
               "owners": args.owners, "ticks": args.ticks, "ledger_runs": args.ledger_runs, "results": results}
     serialized = json.dumps(report, ensure_ascii=False, indent=2) + "\n"

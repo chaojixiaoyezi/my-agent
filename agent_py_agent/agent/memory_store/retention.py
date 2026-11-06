@@ -5,6 +5,7 @@ from __future__ import annotations
 # LLM: 所有 plan/apply 调用必须进入 MemoryRetentionService；旧 home-retention 只能作为同服务 CLI alias。
 # 模块用途: 唯一typed保留服务；默认锁内原路径，可选callback仅逐写短门，长扫描仍门外。
 
+import inspect
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePath, PureWindowsPath
@@ -30,6 +31,34 @@ _POLICY_LEVEL_ERROR_CODES = frozenset({
     "MEMORY_RETENTION_POLICY_UNREADABLE",
     "MEMORY_RETENTION_CANDIDATES_UNREADABLE",
 })
+
+# LLM: 仅协商新增config/scan_budget选项；原now、提交门及指纹不删减，回调只执行一次，内部异常原样传播。
+# 函数用途: 调用前按签名选择新旧维护回调的参数形状，不以执行失败触发重试。
+def _call_retention_callback(callback, *args, config=None, scan_budget=None, **kwargs):
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        # 无签名时保留现代合同的原失败，不通过执行探测或吞掉业务错误。
+        if scan_budget is not None:
+            kwargs['scan_budget'] = scan_budget
+        return callback(*args, config=config, **kwargs)
+    parameters = signature.parameters
+    variadic_keywords = any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values())
+    budget_parameter = parameters.get('scan_budget')
+    if scan_budget is not None and (variadic_keywords or (budget_parameter is not None and
+            budget_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))):
+        kwargs['scan_budget'] = scan_budget
+    configured = {**kwargs, 'config': config}
+    try:
+        signature.bind(*args, **configured)
+    except TypeError:
+        try:
+            signature.bind(*args, config, **kwargs)
+        except TypeError:
+            return callback(*args, **kwargs)
+        return callback(*args, config, **kwargs)
+    return callback(*args, **configured)
+
 
 # LLM: Service 持有 owner home、唯一 CandidateService 和可选 JsonlMemory；它不解析自然语言删除范围。
 # 类用途: 为管理员 CLI 和 Gateway owner maintenance 提供同一 retention 计划/执行主链。
@@ -80,7 +109,7 @@ class MemoryRetentionService:
         if commit_transition is not None:
             from .retention_transition import RetentionPolicyChangedError, apply_with_transition
 
-            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config),
+            plan = self.plan(now=current, scan_budget=_call_retention_callback(budgets.RetentionScanBudget.default, config=self.config),
                              scan_cursor=budgets.load_scan_cursor(self.home))
             if expected_policy_fingerprint is not None and plan.policy_fingerprint != expected_policy_fingerprint:
                 raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
@@ -88,7 +117,7 @@ class MemoryRetentionService:
                                          scan_cursor=plan.scan_cursor)
         lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         with locked_json_path(lock_anchor):
-            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config),
+            plan = self.plan(now=current, scan_budget=_call_retention_callback(budgets.RetentionScanBudget.default, config=self.config),
                              scan_cursor=budgets.load_scan_cursor(self.home))
             if plan.legal_hold or _has_policy_level_error(plan.errors):
                 stopped = MemoryRetentionReport(

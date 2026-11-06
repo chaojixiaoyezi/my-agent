@@ -579,3 +579,63 @@ def test_deep_cursor_is_read_only_empty_fallback(tmp_path):
     original = b"[" * depth + b"0" + b"]" * depth
     path.write_bytes(original)
     assert load_scan_cursor(home) == {} and path.read_bytes() == original
+
+
+@pytest.mark.parametrize('transition', [False, True])
+@pytest.mark.parametrize('style', ['legacy', 'keyword', 'positional', 'varargs', 'kwargs'])
+def test_budget_factory_signature_compatibility_keeps_real_slice(tmp_path, monkeypatch, transition, style):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    home, service = _runtime(tmp_path)
+    paths = [_thread(home, f'thread-{index:04d}')[1] for index in range(3)]
+    config, seen = object(), []
+    service.config = config
+
+    def budget(cls, received):
+        seen.append(received)
+        return cls(2, 1000000, float('inf'))
+
+    if style == 'legacy':
+        def factory(cls):
+            return budget(cls, None)
+    elif style == 'keyword':
+        def factory(cls, *, config):
+            return budget(cls, config)
+    elif style == 'positional':
+        def factory(cls, settings, /):
+            return budget(cls, settings)
+    elif style == 'varargs':
+        def factory(cls, *settings):
+            return budget(cls, settings[0])
+    else:
+        def factory(cls, **options):
+            return budget(cls, options['config'])
+
+    monkeypatch.setattr(budgets.RetentionScanBudget, 'default', classmethod(factory))
+    options = {'commit_transition': lambda operation: operation()} if transition else {}
+    report = service.apply(now=NOW, **options)
+    assert seen == [None if style == 'legacy' else config]
+    assert report.applied and report.scan_partial and len(report.actions) == 2
+    assert all(not path.exists() for path in paths[:2]) and paths[2].exists()
+    cursor = home.owner_data_dir / 'retention_scan_cursor.json'
+    assert json.loads(cursor.read_text()) == report.scan_cursor
+
+
+@pytest.mark.parametrize('transition', [False, True])
+def test_budget_factory_internal_typeerror_is_not_retried(tmp_path, monkeypatch, transition):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    home, service = _runtime(tmp_path)
+    _, path = _thread(home)
+    error, calls = TypeError('budget factory body failed'), []
+
+    def broken(cls, config=None):
+        calls.append(config)
+        raise error
+
+    monkeypatch.setattr(budgets.RetentionScanBudget, 'default', classmethod(broken))
+    options = {'commit_transition': lambda operation: operation()} if transition else {}
+    with pytest.raises(TypeError) as raised:
+        service.apply(now=NOW, **options)
+    assert raised.value is error and calls == [None]
+    assert path.exists() and not (home.owner_data_dir / 'retention_scan_cursor.json').exists()

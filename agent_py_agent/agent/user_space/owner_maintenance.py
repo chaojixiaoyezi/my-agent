@@ -27,6 +27,7 @@ from ..common.request_execution_ports import (
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..contracts.optimization_contracts import require_schema_generation
+from ..memory_store.retention import _call_retention_callback
 from .home_layout import MyAgentHomePaths
 from .home_retention import OwnerRetentionPlan, apply_owner_retention, maintenance_fence
 
@@ -185,6 +186,12 @@ def owner_maintenance_due(
     return last_attempt <= 0 or current - last_attempt >= interval
 
 
+# LLM: Gateway只依赖owner维护领域入口；可注入操作仍归原维护写者，签名适配不提供准入、重试或新写门。
+# 函数用途: 将本拍owner、时刻与配置交给新旧维护操作，保留调用方原异常隔离规则。
+def invoke_owner_maintenance(callback, home, *, now, config=None):
+    return _call_retention_callback(callback, home, now=now, config=config)
+
+
 # LLM: 最早核原请求/owner；可选config只透传，Count0/正W权限及callback逐写T→业务锁顺序不变。
 #   维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
 #   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
@@ -233,10 +240,12 @@ def run_owner_retention_if_due(
             return _run_quota_continuation_slice(
                 state_path, home, previous, current,
                 quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
-        retention = apply_owner_retention(
+        retention = _call_retention_callback(
+            apply_owner_retention,
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
             config=config,
+            scan_budget=True,
         )
         derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                             now=datetime.fromtimestamp(current, timezone.utc))
