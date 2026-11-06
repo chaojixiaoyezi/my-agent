@@ -79,7 +79,6 @@ class AuditLogger:
     ):
         self.config = config
         self._local_store = local_store
-        self.enabled = _audit_enabled(config)
         paths = resolve_audit_paths(config, root=root)
         self._audit_root = paths.root
         self._audit_file = paths.log_file
@@ -93,6 +92,12 @@ class AuditLogger:
                 ensure_private_dir(self._audit_root, canonical_root=self._trusted_root)
             else:
                 ensure_private_dir(self._audit_root)
+
+    # LLM: 审计开关每次读取当前配置，不维护构造期副本，不提供独立写入口。
+    # 函数用途: 返回审计记录此刻是否启用。
+    @property
+    def enabled(self) -> bool:
+        return _audit_enabled(self.config)
 
     def _generate_entry_id(self) -> str:
         """生成条目 ID:秒级戳(可读/可排序)+ UUID4(122 位,无碰撞)。
