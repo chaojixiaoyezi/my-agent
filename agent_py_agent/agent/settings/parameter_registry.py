@@ -22,7 +22,7 @@ from pathlib import Path
 from .config import AgentConfig
 from .config_io import yaml_trailing_comment
 from .defaults import effective_max_output_tokens
-from .parameter_metadata import field_readers, ranges, unit_for_key
+from .parameter_metadata import _range_text, field_readers, ranges, unit_for_key
 from .user_config_capability import (
     BOUNDARY_KEYS,
     EFFECT_GATEWAY_RESTART,
@@ -46,7 +46,14 @@ RUNTIME_GUARD_SOURCE_TEXT = (
 )
 # 359 决策表的 deployment_only，按 v2 显式把 gateway_user_inflight_limit 留在高级管理员层。
 # 原表 99 项减这一项得到 98；不擅自迁移另一项来凑总数。运行时不依赖任务目录或生成副本。
-DEPLOYMENT_ONLY_KEYS = frozenset({
+# 宿主容量键保持显式字面量以供静态门禁解析；测试核对配置元数据，新增字段不得自动扩大权限集合。
+_HOST_CAPACITY_KEYS = frozenset({
+    "gateway_http_listen_backlog", "gateway_http_max_request_workers", "gateway_http_max_outstanding_requests",
+    "gateway_http_socket_timeout_seconds", "gateway_http_queue_timeout_seconds", "gateway_http_birth_gate_timeout_seconds",
+    "curator_daily_quota", "retention_scan_slice_entries", "retention_scan_slice_bytes", "retention_scan_slice_ms",
+    "memory_reference_pin_chunk_bytes",
+})
+DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "max_background_agents",
     "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",
     "my_agent_owner_id", "workspace_task_path_template", "memory_path", "local_store_path", "local_store_files_dir",
@@ -75,7 +82,7 @@ DEPLOYMENT_ONLY_KEYS = frozenset({
     "process_session_wait_slice_seconds", "max_parallel_tool_calls_global", "feishu_cloud_verify_sheet_writes_enabled",
     "decision_agent_timeout_min_seconds", "decision_agent_timeout_max_seconds", "session_pair_hourly_limit",
 })
-STRUCTURED_PARAMETER_KEYS = frozenset({"tool_catalog_categories", "tool_catalog_deferred_categories", "runner_timeout_by_role"})
+STRUCTURED_PARAMETER_KEYS = frozenset({"tool_catalog_categories", "tool_catalog_deferred_categories", "runner_timeout_by_role", "runner_role_limits"})
 # 展示策略由通道在首发时冻结；不是实时改变已经发出的 text/card，也不授予执行权。
 _CHANNEL_PRESENTATION_KEYS = frozenset({"im_topic_aggregation_enabled", "im_progress_cards_enabled"})
 # 键名按下划线切成记号，命中任一记号即为安全边界：凭据、权限与审批、管理员、访问与信任名单、网络与外部地址、端口、
@@ -97,7 +104,7 @@ _TARGET_TOKENS = frozenset({
 # 记号规则覆盖不到、但会改变模型流量去向、请求协议、执行权威链、工具可用性、写入保护、特权动作频率、审计记录保留期
 # 或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
 # 收紧超时是整数，不会命中 plugin 指向记号；显式登记才能防止模型自行放大征询预算。
-_BOUNDARY_NAMES = frozenset({
+_BOUNDARY_NAMES = _HOST_CAPACITY_KEYS | frozenset({
     "max_background_agents",
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
@@ -348,8 +355,8 @@ def _capability_specs() -> dict[str, ParameterSpec]:
     return specs
 
 
-# LLM: 进程内缓存一次；宿主专有 metadata 字段不属于参数目录，不能暴露凭据来源上界或让用户写入。
-# 函数用途: 返回用户可见的参数登记表，主配置、capability 与 runtime_guard 仍沿原语义。
+# LLM: 进程内缓存一次；host_only仍不登记，容量字段可见但部署只读；新范围和单位取构造/归一共用metadata，不开放热更新。
+# 函数用途: 返回用户可见的参数登记表，并按唯一schema投影集中参数的范围和单位。
 @lru_cache(maxsize=1)
 def parameter_registry() -> dict[str, ParameterSpec]:
     descriptions = _yaml_descriptions()
@@ -369,7 +376,8 @@ def parameter_registry() -> dict[str, ParameterSpec]:
             safety=classify_safety(item.name, value_type), masked=is_masked(item.name),
             effect=TUNABLE_KEYS[item.name].effect if item.name in TUNABLE_KEYS else EFFECT_GATEWAY_RESTART,
             common=item.name in COMMON_KEYS,
-            unit=unit_for_key(item.name), range=range_texts.get(item.name, ""),
+            unit=item.metadata.get("unit", unit_for_key(item.name)),
+            range=item.metadata.get("range", _range_text(*item.metadata["bounds"]) if "bounds" in item.metadata else range_texts.get(item.name, "")),
             owner_module="adapter" if item.name in _CHANNEL_PRESENTATION_KEYS else owner_module,
             reader="宿主通道首发策略（冻结后不迁移展示类型）" if item.name in _CHANNEL_PRESENTATION_KEYS else reader,
         )

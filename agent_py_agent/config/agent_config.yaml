@@ -1223,3 +1223,37 @@ decision_request_max_chars: 2000
 agents_source_enabled: true
 # HTTPS来源只读，默认关闭；启用后仍服从当前owner网络权限。
 agents_source_network_enabled: false
+
+# PARAM-W0 集中参数声明：配置保存后需重启 Gateway（CLI 下次启动）加载，不作即时热更新承诺。
+# 本波只建立 schema/校验/登记和 writer；尚未读取这些键的消费者由后续接线任务负责。
+# HTTP 监听等待队列容量，单位连接，范围1..65535；宿主容量只读，重启加载。
+gateway_http_listen_backlog: 128
+# HTTP 请求线程池大小，单位线程，范围1..1024；宿主容量只读，重启加载。
+gateway_http_max_request_workers: 16
+# HTTP 已接纳的排队和执行请求总量，单位请求，至少等于请求线程数；不等同业务 inflight，重启加载。
+gateway_http_max_outstanding_requests: 128
+# HTTP socket 阶段超时，单位秒，0.1..300；宿主参数，与请求排队超时分开，重启加载。
+gateway_http_socket_timeout_seconds: 5.0
+# HTTP 请求等待线程名额的超时，单位秒，0.01..300；宿主参数，重启加载。
+gateway_http_queue_timeout_seconds: 2.0
+# HTTP birth gate 等待期限，单位秒，0.01..30；保留原 gate 机制，宿主参数，重启加载。
+gateway_http_birth_gate_timeout_seconds: 1.0
+# Curator 每日调用额度，单位次/日，非负整数，0表示不限；宿主配额不可由模型自改，重启加载。
+curator_daily_quota: 5000
+# 每批次按角色接纳的数量上限，单位个/批次，默认空映射；值严格非负整数，拒绝布尔，0不接纳该角色。
+# 不是跨批次总并发上限；可由模型调整策略，角色名归一为小写，配置重启加载。
+runner_role_limits: {}
+# 请求提交传输阶段的等待上限，单位秒，0.1..300；与 gateway_request_timeout 取较小值，不是结果等待超时，重启加载。
+gateway_submission_timeout_cap_seconds: 30.0
+# 留存扫描每片最多处理的条目数，单位条，至少1；宿主预算，保留现有游标与状态机，重启加载。
+retention_scan_slice_entries: 128
+# 留存扫描每片字节预算，单位字节，至少1024，默认8 MiB；宿主预算，重启加载。
+retention_scan_slice_bytes: 8388608
+# 留存扫描每片时间预算，单位毫秒，至少1；不与条目/字节预算合并，宿主预算，重启加载。
+retention_scan_slice_ms: 25
+# 记忆引用 pin source 的分块读取尺寸，单位字节，至少1024，默认64 KiB；宿主参数，重启加载。
+memory_reference_pin_chunk_bytes: 65536
+# 推理能力探测的输出上限，单位tokens，至少1；仍受模型档案上限约束，模型可调策略，重启加载。
+reasoning_probe_max_output_tokens: 40000
+# 推理能力探测的请求期限，单位秒，严格大于0且有限；模型可调策略，重启加载。
+reasoning_probe_timeout_seconds: 180.0

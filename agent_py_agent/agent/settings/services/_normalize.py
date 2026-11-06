@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import fields
 from functools import cache
 
@@ -725,6 +726,91 @@ class TimeoutFieldsService:
 # top-level normalizer (was original _normalize.py)
 # ---------------------------------------------------------------------------
 
+# LLM: 只缓存schema字段，边界取AgentConfig元数据；不读取配置值、文件或环境，不构造第二份配置默认。
+# 函数用途: 列出集中声明且需要范围校验的数值参数。
+@cache
+def _central_numeric_fields(config_cls: type) -> tuple:
+    return tuple(item for item in fields(config_cls) if "bounds" in item.metadata)
+
+
+# LLM: 直接构造和YAML归一共用纯数值判据，拒绝bool/非有限float，不为开放上限另设隐藏天花板。
+# 函数用途: 按字段注解和范围元数据校验一个数值，非法时给出准确键名。
+def _validate_central_number(item: object, value: object) -> None:
+    key = item.name
+    if item.type in (int, "int"):
+        valid = type(value) is int
+    else:
+        try:
+            valid = type(value) in (int, float) and math.isfinite(value)
+        except (ValueError, OverflowError):
+            valid = False
+    if not valid:
+        raise ValueError(f"{key}: 必须是非布尔的有限{item.type}数值")
+    lower, upper = item.metadata["bounds"]
+    if lower is not None and (value < lower or item.metadata.get("exclusive_minimum") and value == lower):
+        raise ValueError(f"{key}: 小于允许下界或未满足严格正数约束")
+    if upper is not None and value > upper:
+        raise ValueError(f"{key}: 超过允许上界")
+
+
+# LLM: runner_role_limits只限制本批次接纳量；与期限writer相同的角色键归一，值严格非负int且拒绝bool/碰撞。
+# 函数用途: 校验并复制角色数量映射，失败不修改入参、不丢掉部分非法条目。
+def validate_runner_role_limits(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ValueError("runner_role_limits: 必须是角色到非负整数的映射")
+    normalized: dict[str, int] = {}
+    for role, limit in value.items():
+        if not isinstance(role, str) or not re.fullmatch(r"[A-Za-z0-9_.*-]+", role.strip()):
+            raise ValueError("runner_role_limits: 角色键无效")
+        key = role.strip().lower()
+        if key in normalized:
+            raise ValueError("runner_role_limits: 角色键归一后碰撞")
+        if type(limit) is not int or limit < 0:
+            raise ValueError("runner_role_limits: 数量必须是非负整数，不能是bool")
+        normalized[key] = limit
+    return normalized
+
+
+# LLM: __post_init__/replace使用严格校验，不用YAML的错误回默认掩盖编程错误；仅归一float类型和复制角色映射。
+# 函数用途: 拒绝非法构造和请求容量联合约束。
+def validate_central_parameters(config: object) -> None:
+    for item in _central_numeric_fields(type(config)):
+        value = getattr(config, item.name)
+        _validate_central_number(item, value)
+        if item.type in (float, "float"):
+            setattr(config, item.name, float(value))
+    config.runner_role_limits = validate_runner_role_limits(config.runner_role_limits)
+    if config.gateway_http_max_outstanding_requests < config.gateway_http_max_request_workers:
+        raise ValueError("gateway_http_max_outstanding_requests: 必须不小于gateway_http_max_request_workers")
+
+
+# LLM: YAML沿既有coercion归一，非法值告警回默认；联合回落后仍必须满足请求容量关系，不接线消费者。
+# 函数用途: 将集中参数的原始配置归一为可安全构造的有效值。
+def _normalize_central_parameters(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
+    out, warnings = dict(data), []
+    for item in _central_numeric_fields(type(defaults)):
+        key, default = item.name, getattr(defaults, item.name)
+        coerce = CoercionService.coerce_int if item.type in (int, "int") else CoercionService.coerce_float
+        lower, upper = item.metadata["bounds"]
+        try:
+            value, warn = coerce(key, out.get(key), default, min_val=lower, max_val=upper)
+            _validate_central_number(item, value)
+        except (TypeError, ValueError, OverflowError):
+            value, warn = default, f"{key}: 非法类型、非有限数或超出范围；使用默认值"
+        out[key] = value
+        _append_warning(warnings, warn)
+    try:
+        out["runner_role_limits"] = validate_runner_role_limits(out.get("runner_role_limits", defaults.runner_role_limits))
+    except ValueError as error:
+        out["runner_role_limits"] = dict(defaults.runner_role_limits)
+        warnings.append(str(error) + "；使用默认值")
+    workers, outstanding = "gateway_http_max_request_workers", "gateway_http_max_outstanding_requests"
+    if out[outstanding] < out[workers]:
+        out[outstanding] = max(getattr(defaults, outstanding), out[workers])
+        warnings.append(f"{outstanding}: 小于{workers}；回落到满足联合约束的容量")
+    return out, warnings
+
+
 _NORMALIZE_SERVICES = (
     CredentialFieldsService,
     ModelFieldsService,
@@ -744,6 +830,8 @@ _NORMALIZE_SERVICES = (
 class AgentConfigNormalizer:
     """Service for normalizing all non-memory AgentConfig fields."""
 
+    # LLM: 原服务顺序不变，最后按字段元数据归一集中参数；仅返回候选和告警，不写盘或调用消费者。
+    # 函数用途: 统一原配置和集中字段的类型、范围及联合约束。
     @staticmethod
     def normalize(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         """Validate and coerce all non-memory AgentConfig fields with safe defaults."""
@@ -755,4 +843,6 @@ class AgentConfigNormalizer:
             out, service_warnings = service.normalize(out, defaults)
             warnings.extend(service_warnings)
 
+        out, central_warnings = _normalize_central_parameters(out, defaults)
+        warnings.extend(central_warnings)
         return out, warnings

@@ -1,8 +1,8 @@
-# LLM: 参数中心只写登记了 writer 的用户参数；标量及三项 typed 结构统一走路径锁、CAS、正式预检、回读与配置/台账回滚。
+# LLM: 参数中心只写登记了 writer 的用户参数；标量及四项 typed 结构统一走路径锁、CAS、正式预检、回读与配置/台账回滚。
 #   set/reset/revert 在验证和 I/O 前消费全局拒门；宿主部署项（含 runtime_guard）不写 owner 局部覆盖，守卫由部署策略专用入口维护。
 #   v6 模型连接和选择不再由普通平铺参数修改；PROFILE_FIELDS 仍沿原模型目录的锁内保存和旁置台账，不扩大字段名单。
 #   模型不能写安全边界，仅已认证 /settings 的限时作用域可修改 USER_SETTINGS_BOUNDARY_KEYS；actor 字符串不授权。
-#   配置台账保留最近500条且统一脱敏，三项结构按 STRUCTURED_PARAMETER_KEYS 校验，其余无 writer 的结构与随包 YAML 拒绝。
+#   配置台账保留最近500条且统一脱敏，四项结构按 STRUCTURED_PARAMETER_KEYS 校验，其余无 writer 的结构与随包 YAML 拒绝。
 #   有改写配置、模型目录和台账副作用；修改须同步 parameter_registry、user_config_tool、settings_control_service 及事务回归。
 # 模块用途: 统一参数修改、恢复默认、历史和回滚，同时严格区分用户参数、模型目录和宿主部署策略。
 from __future__ import annotations
@@ -262,12 +262,17 @@ def _unique_json_pairs(pairs):
     return result
 
 
-# LLM: 仅三项结构有 writer；列表必须非空字符串且不重复；期限保持 0/off/null/inherit/auto，拒绝 bool、负数及非有限数。
-# 函数用途: 归一 typed 结构并生成正式 mini-YAML 可解析的单行表示。
+# LLM: 仅登记的四项结构有 writer；角色数量与构造/YAML共用严格校验，不影响期限的 off/null/inherit/auto 语义。
+# 函数用途: 归一 typed 结构并生成正式 mini-YAML 可解析的单行表示，失败不进入事务。
 def _render_structured(key: str, value: object) -> tuple[object, str]:
     try:
         if isinstance(value, str):
             value = json.loads(value, object_pairs_hook=_unique_json_pairs)
+        if key == "runner_role_limits":
+            from .services._normalize import validate_runner_role_limits
+
+            normalized = validate_runner_role_limits(value)
+            return normalized, repr(normalized)
         if key != "runner_timeout_by_role":
             if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() or v != v.strip()
                                                   or any(c in v for c in "\r\n\x00") for v in value):
