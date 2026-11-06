@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
@@ -72,7 +73,8 @@ class RecordingWaiter:
 
     # LLM: 不读写真实授权，保留规范入参与可观测事件顺序。
     # 函数用途: 记录等待调用并返回同一审批身份的测试决定。
-    def __call__(self, request: ToolApprovalRequest, options: ToolApprovalWaitOptions) -> ToolApprovalDecision:
+    def __call__(self, request: ToolApprovalRequest, options: ToolApprovalWaitOptions, *,
+                 cancellation_token=None) -> ToolApprovalDecision:
         self.trace.append("wait")
         self.calls.append((request, options))
         return ToolApprovalDecision(request.permission_id, self.decision, feedback="用户反馈", decided_at=17)
@@ -234,7 +236,7 @@ def test_mailbox_waiters_still_reject_wrong_binding(tmp_path, field_name, custom
 
     # LLM: 替代路径只绑定传输位置，身份核验继续走原桥接入口。
     # 函数用途: 提供协议兼容的可信邮箱适配器。
-    def waiter(req, options):
+    def waiter(req, options, *, cancellation_token=None):
         return permission_bridge.wait_for_gateway_permission_decision(transport, req, options=options)
 
     # LLM: 恶意内容仅写临时目录，不能被当作有效会话批准。
@@ -386,7 +388,7 @@ def test_waiter_adapters_preserve_cancellation_and_absolute_deadline_during_wait
 
     # LLM: token 由可信宿主闭包绑定而非来自模型参数。
     # 函数用途: 将协议调用接入原精确邮箱等待器。
-    def waiter(req, options):
+    def waiter(req, options, *, cancellation_token=None):
         calls.append(req)
         return permission_bridge.wait_for_gateway_permission_decision(
             transport, req, cancellation_token=token, options=options)
@@ -466,3 +468,112 @@ def test_owner_grant_persists_without_touching_other_owner_policy(tmp_path, cust
     renewed = replace(request, permission_id="approval:next", request_id="request:next")
     fresh = StreamApproval(tmp_path / "fresh", _forbidden, _forbidden, decision_waiter=_forbidden)
     assert fresh.request(renewed.to_dict(), options=StreamApprovalRequestOptions(True, provider))["decision"] == "approved"
+
+
+# 令牌在每次 request 时才确定，等待器不能依赖构造流时捕获的旧令牌。
+def test_custom_waiter_receives_the_per_call_cancellation_token(tmp_path):
+    request, received = _request(), []
+    token = SimpleNamespace(cancelled=False)
+
+    def waiter(req, options, *, cancellation_token=None):
+        received.append(cancellation_token)
+        return ToolApprovalDecision(req.permission_id, "denied")
+
+    stream = StreamApproval(tmp_path / "chunks", lambda event: None, lambda: None,
+                            decision_waiter=waiter)
+    result = stream.request(request.to_dict(), options=StreamApprovalRequestOptions(True, cancellation_token=token))
+    assert result["decision"] == "denied"
+    assert len(received) == 1 and received[0] is token
+
+
+# 错误审批身份即使带来任一种批准，也不能污染当前调用的缓存或长期授权。
+@pytest.mark.parametrize("decision", ["approved", "approved_session", "approved_owner"])
+def test_foreign_decision_from_custom_waiter_fails_closed(tmp_path, decision):
+    request, events, grants = _request(), [], []
+    request = replace(request, binding={**request.binding, "grant_key": "probe:mode=write"})
+
+    def waiter(req, options, *, cancellation_token=None):
+        return ToolApprovalDecision("approval:previous", decision)
+
+    cache = ToolApprovalSessionCache()
+    stream = StreamApproval(tmp_path / "chunks", events.append, lambda: None, decision_waiter=waiter)
+    stream.configure(cache, lambda: "scope:w7", grants.append)
+    result = stream.request(request.to_dict(), options=StreamApprovalRequestOptions(True))
+    assert result["decision"] == "unavailable"
+    assert result["permission_id"] == request.permission_id
+    assert not cache.is_approved("scope:w7", "probe:hash:w7")
+    assert grants == []
+    assert events[-1] == {"kind": "permission_resolved", **result}
+
+
+# 取消发生在等待器已经进入等待后；真实短轮询验证本次令牌，而非事前取消短路。
+def test_cancel_during_custom_wait_returns_cancelled(tmp_path):
+    request = _request()
+    token = SimpleNamespace(cancelled=False)
+    timer = threading.Timer(0.2, lambda: setattr(token, "cancelled", True))
+
+    def waiter(req, options, *, cancellation_token=None):
+        assert cancellation_token is token
+        timer.start()
+        deadline = time.monotonic() + 5
+        while not cancellation_token.cancelled:
+            assert time.monotonic() < deadline, "等待器未及时观察到取消"
+            time.sleep(0.01)
+        return ToolApprovalDecision(req.permission_id, "cancelled")
+
+    cache = ToolApprovalSessionCache()
+    stream = StreamApproval(tmp_path / "chunks", lambda event: None, lambda: None, decision_waiter=waiter)
+    stream.configure(cache, lambda: "scope:w7")
+    started = time.monotonic()
+    try:
+        result = stream.request(request.to_dict(), options=StreamApprovalRequestOptions(True, cancellation_token=token))
+    finally:
+        timer.cancel()
+        if timer.ident is not None:
+            timer.join(timeout=5)
+    assert time.monotonic() - started <= 5
+    assert result["decision"] == "cancelled"
+    assert result["permission_id"] == request.permission_id
+    assert not cache.is_approved("scope:w7", "probe:hash:w7")
+
+
+# 可信传输即使忽略令牌并交回批准，外层也必须在写入授权前再次拒绝已取消调用。
+def test_custom_waiter_ignoring_token_is_fenced_by_outer_check(tmp_path):
+    request, events = _request(), []
+    token = SimpleNamespace(cancelled=False)
+
+    def waiter(req, options, *, cancellation_token=None):
+        token.cancelled = True
+        return ToolApprovalDecision(req.permission_id, "approved_session")
+
+    cache = ToolApprovalSessionCache()
+    stream = StreamApproval(tmp_path / "chunks", events.append, lambda: None, decision_waiter=waiter)
+    stream.configure(cache, lambda: "scope:w7")
+    result = stream.request(request.to_dict(), options=StreamApprovalRequestOptions(True, cancellation_token=token))
+    assert result["decision"] == "cancelled"
+    assert result["permission_id"] == request.permission_id
+    assert not cache.is_approved("scope:w7", "probe:hash:w7")
+    assert events[-1] == {"kind": "permission_resolved", **result}
+
+
+# 用确定性时钟越过原绝对截止，禁止迟到的长期批准触发持久化。
+def test_custom_waiter_late_approval_after_deadline_is_denied(tmp_path, monkeypatch):
+    request, events, grants = _request(requested_at=100, expires_at=101), [], []
+    request = replace(request, binding={**request.binding, "grant_key": "probe:mode=write"})
+    now = [100]
+    monkeypatch.setattr(stream_approval.time, "time", lambda: now[0])
+
+    def waiter(req, options, *, cancellation_token=None):
+        now[0] = req.expires_at + 1
+        return ToolApprovalDecision(req.permission_id, "approved_owner")
+
+    cache = ToolApprovalSessionCache()
+    stream = StreamApproval(tmp_path / "chunks", events.append, lambda: None, decision_waiter=waiter)
+    stream.configure(cache, lambda: "scope:w7", grants.append)
+    result = stream.request(request.to_dict(), options=StreamApprovalRequestOptions(True))
+    assert result["decision"] == "denied"
+    assert result["reason_code"] == "APPROVAL_TIMEOUT"
+    assert result["permission_id"] == request.permission_id
+    assert not cache.is_approved("scope:w7", "probe:hash:w7")
+    assert grants == []
+    assert events[-1] == {"kind": "permission_resolved", **result}

@@ -28,7 +28,8 @@ from .permission_bridge import (
 class ApprovalDecisionWaiter(Protocol):
     # LLM: 接收规范请求及原宿主等待选项，返回同一审批的决定；调用方仍负责缓存与事件。
     # 函数用途: 等待当前审批的精确决定。
-    def __call__(self, request: ToolApprovalRequest, options: ToolApprovalWaitOptions) -> ToolApprovalDecision: ...
+    def __call__(self, request: ToolApprovalRequest, options: ToolApprovalWaitOptions, *,
+                 cancellation_token: object | None = None) -> ToolApprovalDecision: ...
 
 
 # LLM: 与等待入口同样使用固定宿主选项；只包装原参数，不接受任意关键字或新增配置源。
@@ -142,7 +143,14 @@ class StreamApproval:
                 options=wait_options,
             )
         else:
-            decision = self.decision_waiter(request, wait_options)
+            decision = self.decision_waiter(request, wait_options, cancellation_token=cancellation_token)
+            # 注入传输交回的决定须属于本次审批；取消与截止由外层再核一次，任何不符都失败关闭。
+            if decision.permission_id != request.permission_id:
+                decision = ToolApprovalDecision(request.permission_id, "unavailable")
+            elif _cancelled(cancellation_token):
+                decision = ToolApprovalDecision(request.permission_id, "cancelled")
+            elif time.time() >= approval_deadline(request):
+                decision = ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
         if session_key and str(decision.decision or "").strip().lower() == "approved_session":
             if approval_cache is not None:
                 approval_cache.approve(approval_scope, session_key)
