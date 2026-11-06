@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -55,6 +55,7 @@ class SelectedModelRead:
 
 
 # LLM: 正式有 Home 的模型选择只能走 v6 目录，缺模型不保留内存 echo；纯内存测试桩仅在下方无 Home 显式分支保留。
+#   来源浅副本保留加载时的不可变基线，不重新注册或读取配置。
 # 函数用途: 清除全部连接投影并保留非模型偏好及秘密擦洗上界，不制造可调用后端。
 def _unconfigured_model_projection(base_config):
     from .secret_ref import freeze_managed_secret_environment
@@ -62,8 +63,9 @@ def _unconfigured_model_projection(base_config):
     defaults = type(base_config)()
     empty = {item.name: getattr(defaults, item.name) for item in fields(defaults) if item.metadata.get("model_projection", False)}
     config = replace(freeze_managed_secret_environment(base_config), **empty)
-    config.config_sources = {**getattr(config, "config_sources", {}), **{
-        key: {"source": "model_unconfigured", "priority": 90} for key in empty}}
+    sources = getattr(config, "config_sources", {})
+    config.config_sources = copy(sources) if isinstance(sources, dict) else {}
+    config.config_sources.update({key: {"source": "model_unconfigured", "priority": 90} for key in empty})
     return config
 
 
@@ -452,6 +454,7 @@ def selected_model_config(agent: object, *, profile_id: str | None = None, capab
 
 
 # LLM: 正式目录、捕获、共享与凭据沿唯一算法；只有单元测试显式传入无 Home 的内存 echo 才原样返回，不是正式目录旁路。
+#   仅在独立来源浅副本上更新模型条目，保留文件基线及明确作用域覆盖。
 # 函数用途: 从真实配置和owner home解析指定用途的模型档案，保持默认选择与读取捕获语义。
 def selected_model_config_for_resources(base_config: object, home_paths: object, *,
                                         profile_id: str | None = None, capability: str = "agentic"):
@@ -474,9 +477,11 @@ def selected_model_config_for_resources(base_config: object, home_paths: object,
     # 输出上限不在这里夹取（后端工厂按 effective_max_output_tokens 统一处理）；max_tokens 仍按模型档案优先级冻结，
     # 任务级覆盖配置改不动它，与原行为一致。
     fields = {*row, "api_key_env", "max_tokens"}
-    config.config_sources = {**config.config_sources, **{key: {
+    sources = getattr(config, "config_sources", {})
+    config.config_sources = copy(sources) if isinstance(sources, dict) else {}
+    config.config_sources.update({key: {
         "source": "owner_model_profile", "priority": 90, "profile_id": selected,
-    } for key in fields}}
+    } for key in fields})
     return config
 
 

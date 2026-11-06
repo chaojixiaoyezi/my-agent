@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -575,3 +576,104 @@ def test_run_start_does_not_prepare_tools_for_scoped_restriction(tmp_path, monke
     assert runtime._run_once_with_params(agent, "核对工具限制", runtime.RunParams(context_scope=context_scope)) is result
     assert seen == [False]
     assert config.config_source_for("enable_tools")["source"] == str(overlay)
+
+
+# LLM: 真实管理入口只写隔离目录中的离线档案与会话选择，不替换模型解析或配置刷新。
+# 函数用途: 为投影回归保存并选中可由正常Agent回合使用的Echo模型。
+def _select_live_switch_echo_profile(agent):
+    from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
+    from agent_py_agent.agent.settings.thread_model_selection import execute_local_model_operation
+
+    profile_id = str(uuid4())
+    added = execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": {
+        "transport": "offline", "model_backend": "echo", "model_name": "live-switch-echo",
+        "model_context_window_tokens": 32768,
+    }})
+    assert any(row["id"] == profile_id for row in added["profiles"])
+    selected = execute_local_model_operation(agent, "live-switch-projection", "select", {"profile_id": profile_id})
+    assert selected["selected"] == profile_id
+    assert agent.conversation_store.threads.require(selected["thread_id"]).model_profile_id == profile_id
+    return profile_id, selected["thread_id"]
+
+
+# LLM: 先真实load再改文件，随后投影；三次刷新均须认回加载基线，不把旧值当局部覆盖。
+# 函数用途: 验证两处模型投影、无Home分支及直接配置在双向切换下保留独立来源和行为。
+@pytest.mark.parametrize("projection", ["direct", "selected", "unconfigured", "unconfigured_no_home"])
+@pytest.mark.parametrize("initial", [True, False])
+def test_model_projection_adopts_file_edit_across_three_refreshes(tmp_path, projection, initial):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.model_profiles import selected_model_config_for_resources
+
+    path, config = _config(tmp_path, f"enable_tools: {str(initial).lower()}\nmemory_curator_enabled: false\n")
+    original_sources = config.config_sources
+    baseline = (original_sources.path, original_sources.applied, original_sources.guard_applied)
+    original_model_source = config.config_source_for("model_name")
+    _write(path, f"enable_tools: {str(not initial).lower()}\nmemory_curator_enabled: false\n")
+    if projection == "direct":
+        projected = config
+    else:
+        agent = SimpleAgent(config, tmp_path / "workspace")
+        profile_id = _select_live_switch_echo_profile(agent)[0] if projection == "selected" else "default"
+        home = None if projection == "unconfigured_no_home" else agent.home_paths
+        projected = selected_model_config_for_resources(config, home, profile_id=profile_id)
+    projected_sources = projected.config_sources
+    for _ in range(3):
+        live.refresh_live_switches(projected, force=True)
+        assert projected.enable_tools is not initial
+    assert config.config_source_for("model_name") == original_model_source
+    if projection != "direct":
+        assert projected_sources is not original_sources
+        assert (projected_sources.path, projected_sources.applied, projected_sources.guard_applied) == baseline
+        assert projected.config_sources is not original_sources
+        assert (original_sources.path, original_sources.applied, original_sources.guard_applied) == baseline
+        assert projected.config_sources.path == path.resolve()
+        assert dict(projected.config_sources.applied)["enable_tools"] is not initial
+        assert isinstance(projected.config_sources.guard_applied, tuple)
+        expected = {"source": "owner_model_profile", "priority": 90, "profile_id": profile_id} if projection == "selected" else {
+            "source": "model_unconfigured", "priority": 90,
+        }
+        assert projected.config_source_for("model_name") == expected
+        if projection != "selected":
+            assert (projected.model_backend, projected.model_name, projected.api_key) == ("", "", "")
+
+
+# LLM: 正常run经过真实选模、依赖作用域及工具准备；仅观察原prepare调用，不替换运行或刷新链。
+# 函数用途: 验证连续两回合采用新文件开关，并保留与原文件同值的明确owner覆盖。
+@pytest.mark.parametrize("owner_override", [False, True])
+@pytest.mark.parametrize("initial", [True, False])
+def test_model_projected_normal_turns_refresh_before_tool_preparation(tmp_path, monkeypatch, initial, owner_override):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+
+    path, config = _config(tmp_path, f"enable_tools: {str(initial).lower()}\nmemory_curator_enabled: false\n")
+    if owner_override:
+        overlay = tmp_path / "owner.yaml"
+        _write(overlay, f"enable_tools: {str(initial).lower()}\n")
+        config = apply_runtime_config_environment(config, env={
+            "MY_AGENT_RUNTIME_CONFIG": str(overlay), "MY_AGENT_RUNTIME_CONFIG_SCOPE": "owner",
+        })
+        assert config.config_source_for("enable_tools") == {"source": str(overlay), "priority": 30}
+    agent = SimpleAgent(config, tmp_path / "workspace")
+    profile_id, thread_id = _select_live_switch_echo_profile(agent)
+    prepared = []
+    registry_type = type(agent.tools)
+    original_prepare = registry_type.prepare_for_run
+
+    def observed_prepare(registry, *args, **kwargs):
+        prepared.append((agent.config.enable_tools, agent.config.config_source_for("model_name")))
+        return original_prepare(registry, *args, **kwargs)
+
+    monkeypatch.setattr(registry_type, "prepare_for_run", observed_prepare)
+    _write(path, f"enable_tools: {str(not initial).lower()}\nmemory_curator_enabled: false\n")
+    enabled = initial if owner_override else not initial
+    for turn in range(2):
+        result = agent.run(f"核对本轮工具开关 {turn}", save=False, task_attributes={"conversation_thread_id": thread_id})
+        assert result.runtime_status == "ok"
+        assert len(prepared) == (turn + 1 if enabled else 0)
+    assert all(value is enabled and source == {"source": "owner_model_profile", "priority": 90, "profile_id": profile_id}
+               for value, source in prepared)
+    if owner_override:
+        assert agent.config.enable_tools is initial
+        assert agent.config.config_source_for("enable_tools") == {"source": str(overlay), "priority": 30}
