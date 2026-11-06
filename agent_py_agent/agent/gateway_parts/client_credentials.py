@@ -43,14 +43,14 @@ def credential_error_message(exc: LocalClientCredentialError) -> str:
 
 
 # LLM: 数据根优先沿原 Agent.home_paths.root，不能拿工作目录、队列根或 owner home 当全局 secrets 根；轻量替身用原配置解析器。
-#   旧迁移开关不再属于运行配置，不能被存量 YAML 或模型属性重新打开。
-# 函数用途: 取得当前宿主客户端的凭据来源，不在构造阶段读秘密或发请求。
+#   边缘身份要求开启时只传空部署token，让既有发送入口严读G1；默认关闭保留部署token优先。
+# 函数用途: 按宿主配置选择原凭据来源，不在构造阶段读秘密或发请求。
 def gateway_client_credentials(agent: object) -> GatewayClientCredentials:
     config = getattr(agent, "config", None)
     root = getattr(getattr(agent, "home_paths", None), "root", None)
     if not isinstance(root, (str, Path)):
         root = home_paths(configured_home_root(config)).root
-    token = getattr(config, "gateway_auth_token", "")
+    token = "" if bool(getattr(config, "gateway_edge_identity_required", False)) else getattr(config, "gateway_auth_token", "")
     return GatewayClientCredentials(
         Path(root), token if isinstance(token, str) else "",
     )

@@ -246,7 +246,7 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
         "my_agent_home": str(getattr(getattr(agent, "home_paths", None), "root", "") or ""),
         # 控制卡回调与普通消息使用同一宿主端口和配置凭据，不能回落到默认8420。
         "gateway_port": getattr(agent.config, "gateway_port", 8420),
-        "gateway_auth_token": getattr(agent.config, "gateway_auth_token", ""),
+        "gateway_auth_token": "" if bool(getattr(agent.config, "gateway_edge_identity_required", False)) else getattr(agent.config, "gateway_auth_token", ""),
     }
 
 
