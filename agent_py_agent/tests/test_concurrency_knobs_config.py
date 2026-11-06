@@ -383,7 +383,10 @@ def test_gw12_default_pools_start_and_explicit_zero_disables_after_restart(tmp_p
     from http.client import HTTPConnection
 
     from agent_py_agent.agent.core import SimpleAgent
-    from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer, GatewayHTTPServerParams
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))

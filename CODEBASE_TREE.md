@@ -1,3 +1,19 @@
+## 2026-11-06 SP1 原生沙箱启动器、1s 自适应降权与 12 项网关/并发预装迁移
+
+本轮合入档位 1（`SP1-W1` 原生 C 沙箱预执行助手 + 预构建 Landlock 规则集 FD、`SP1-W2` 1 秒长耗时命令自适应 nice 降权）以及 `GW-PRESETS-12`（12 项网关/池子/后台并发默认值与 `.run` 安装器升级配置自动迁移）：
+
+```text
+agent_py_agent/
+`-- tests/
+    |-- test_sandbox_helper.py             # SP1-W1 原生 C 沙箱启动器与预构建 Landlock FD 回归单测
+    |-- test_shell_adaptive_demote.py      # SP1-W2 长耗时命令 1 秒自适应 nice 降权回归单测
+    `-- test_private_release_installer.py  # GW-PRESETS-12 发行包安装器老机器配置升级自动迁移单测
+scripts/
+|-- build_sandbox_helper.py                # SP1-W1 编译/校验 my-agent-sandbox-helper 原生二进制构建脚本
+`-- sandbox_helper/
+    `-- sandbox_helper.c                   # SP1-W1 零 Python 解释器开销的 Landlock restrict_self + rlimit + execv 原生预执行助手
+```
+
 ## 2026-11-05 issues-159-179 存储留存车道与有界维护新增生产模块
 
 本轮针对 `#159`–`#179` 共 21 个存储膨胀、孤儿状态、无界扫盘与日志轮转 Issue，新增以下 12 个生产模块并接入统一 `storage_lanes` 维护调度：
