@@ -26,6 +26,11 @@ _LOOPBACK_PEERS = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
 # 字段用途: 强制档下"回环来源但没带本机凭据"的机器可读错误码。
 LOCAL_CREDENTIAL_REQUIRED = "LOCAL_CREDENTIAL_REQUIRED"
 
+# 部署凭据在边缘模式缺少唯一非空身份时返回的协议错误码。
+GATEWAY_EDGE_IDENTITY_REQUIRED = "GATEWAY_EDGE_IDENTITY_REQUIRED"
+# 部署凭据在边缘模式解析为管理员角色时返回的协议错误码。
+GATEWAY_EDGE_IDENTITY_FORBIDDEN = "GATEWAY_EDGE_IDENTITY_FORBIDDEN"
+
 
 def _is_loopback_peer(peer_ip: str) -> bool:
     ip = (peer_ip or "").strip().lower().strip("[]")
@@ -46,6 +51,12 @@ def _header_value(headers, name: str) -> str | None:
     return None if any(value != selected[0] for value in selected[1:]) else selected[0]
 
 
+# LLM: 与字段读取遍历同一原始载体，不合并值相同的副本，不改写输入。
+# 函数用途: 按大小写不敏感的字段名统计原始头条数。
+def _header_count(headers, name: str) -> int:
+    return sum(str(key or "").casefold() == name.casefold() for key, _value in headers.items())
+
+
 def _handler_peer_ip(handler) -> str | None:
     """从 HTTP handler 取对端 IP;取不到返回 None,由 _peer_trusted 校验凭据，未知来源不授予身份。"""
     addr = getattr(handler, "client_address", None)
@@ -63,11 +74,12 @@ class AuthMiddleware:
     HEADER_CHANNEL = "X-Channel"
     HEADER_TOKEN = "X-Gateway-Token"
 
-    # LLM: 构造不读取或导出凭据；临时迁移开关已经退场，所有受管身份头必须经同一凭据校验。
-    # 函数用途: 初始化原鉴权服务和旧客户端观察账。
-    def __init__(self, auth_manager: AuthManager, auth_token: str = "") -> None:
+    # LLM: 构造不读取或导出凭据；边缘身份要求默认关闭，所有角色仍由原认证服务决定。
+    # 函数用途: 初始化原鉴权服务、边缘身份开关和旧客户端观察账。
+    def __init__(self, auth_manager: AuthManager, auth_token: str = "", *, edge_identity_required: bool = False) -> None:
         self.auth_manager = auth_manager
         self.auth_token = auth_token  # 可选部署凭据，空值不代替 G1 本机凭据。
+        self.edge_identity_required = bool(edge_identity_required)
         self._local_client_credential = ""
         self._observation_lock = threading.Lock()
         self._uncredentialed_loopback_by_endpoint: dict[str, dict[str, int | float]] = {}
@@ -83,6 +95,34 @@ class AuthMiddleware:
         token = (_header_value(headers, self.HEADER_TOKEN) or "").encode("utf-8")
         return any(secret and hmac.compare_digest(token, secret.encode("utf-8"))
                    for secret in (self._local_client_credential, self.auth_token))
+
+    # LLM: 原字段冲突或空值不匹配；两种秘密用常量时间比较，值相同时本机凭据优先。
+    # 函数用途: 区分已匹配的宿主与部署凭据，不读盘、不记录秘密。
+    def credential_kind(self, headers) -> str | None:
+        token = _header_value(headers, self.HEADER_TOKEN)
+        if not token:
+            return None
+        encoded = token.encode("utf-8")
+        if self._local_client_credential and hmac.compare_digest(encoded, self._local_client_credential.encode("utf-8")):
+            return "local"
+        if self.auth_token and hmac.compare_digest(encoded, self.auth_token.encode("utf-8")):
+            return "deployment"
+        return None
+
+    # LLM: 只对显式开启的部署凭据检查原始身份；同一 authenticate 接收提取路径的原值，不另建角色策略。
+    # 函数用途: 返回边缘身份缺失或管理员拒绝码，本机 G1 与默认关闭路径不受影响。
+    def edge_identity_error(self, headers) -> str | None:
+        if not self.edge_identity_required or self.credential_kind(headers) != "deployment":
+            return None
+        if any(_header_count(headers, name) != 1 for name in (self.HEADER_USER_ID, self.HEADER_CHANNEL)):
+            return GATEWAY_EDGE_IDENTITY_REQUIRED
+        user_id = _header_value(headers, self.HEADER_USER_ID)
+        channel = _header_value(headers, self.HEADER_CHANNEL)
+        if not (user_id or "").strip() or not (channel or "").strip():
+            return GATEWAY_EDGE_IDENTITY_REQUIRED
+        if self.auth_manager.authenticate(channel, user_id).role is Role.ADMIN:
+            return GATEWAY_EDGE_IDENTITY_FORBIDDEN
+        return None
 
     # LLM: handler/route来自真实分发，每HTTP请求只记一次；只计credential/admin、真实回环、未凭据，未知peer不计。
     # 函数用途: 记录旧客户端请求，不拦截、不改变身份，不存原路径或请求头。
@@ -104,11 +144,12 @@ class AuthMiddleware:
         with self._observation_lock:
             return {key: dict(value) for key, value in self._uncredentialed_loopback_by_endpoint.items()}
 
-    # LLM: 可信来源同时要求原有效凭据和无歧义身份副本；peer_ip只作诊断，完全缺身份头仍是合法host终端。
-    # 函数用途: 检查宿主凭据，阻止模型或其它本机进程借回环地址冒充管理员。
+    # LLM: 可信来源要求原凭据、无歧义身份与可选边缘身份门；peer_ip只作诊断，G1缺身份仍是合法终端。
+    # 函数用途: 通过统一来源门拒绝不符合部署身份合同的请求。
     def _peer_trusted(self, peer_ip: str | None, headers: dict[str, str]) -> bool:
         return (self.has_gateway_credential(headers)
-                and all(_header_value(headers, name) is not None for name in (self.HEADER_USER_ID, self.HEADER_CHANNEL)))
+                and all(_header_value(headers, name) is not None for name in (self.HEADER_USER_ID, self.HEADER_CHANNEL))
+                and self.edge_identity_error(headers) is None)
 
     # LLM: 只有明确缺/错误单值凭据的已知回环请求才提示本机凭据；身份或token副本冲突不是缺token。
     # 函数用途: 为现有客户端提供可行动的缺凭据原因，判定不改变身份或授权。
@@ -213,8 +254,8 @@ def require_admin_handler(handler) -> bool:
     return False
 
 
-# LLM: 原受管入站先核凭据和身份头一致性，不提前dict抹副本；冲突403不是缺token提示。
-# 函数用途: 拒绝未认证或身份歧义的调用，保留原普通用户合法派工与显式单机合同。
+# LLM: 原受管入站保留全部头副本；边缘身份错误码优先于缺本机凭据诊断，状态和文案不变。
+# 函数用途: 拒绝未认证或不合边缘身份合同的调用，保留普通用户派工与本机终端路径。
 def require_trusted_source(handler) -> bool:
     """提交任务端点用:不可信来源(远程且无合法 token)拒绝。无中间件=回环单机,放行。
 
@@ -234,7 +275,10 @@ def require_trusted_source(handler) -> bool:
         return False
     body = {"error": "forbidden", "message": "untrusted source:不可信来源不可提交任务"}
     # 只读结构化事实决定要不要加码；不允许从 message 或请求正文反推。
-    if mw.needs_local_credential(peer_ip, headers):
+    edge = mw.edge_identity_error(headers)
+    if edge is not None:
+        body["error_code"] = edge
+    elif mw.needs_local_credential(peer_ip, headers):
         body["error_code"] = LOCAL_CREDENTIAL_REQUIRED
     handler._send_json(403, body)
     return True
