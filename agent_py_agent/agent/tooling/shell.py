@@ -2058,7 +2058,7 @@ def _run_shell_process_text(
             {"status": "not_started", "reason": "sandbox_unavailable"},
         )
     except OSError as exc:
-        if tool.executor is not None:
+        if getattr(tool, "executor", None) is not None:
             return ("自定义执行器失败，执行或清理结果未确认。", False,
                     "TOOL_OPERATION_OUTCOME_UNKNOWN", {"status": "unknown", "reason": type(exc).__name__})
         return (
@@ -2223,10 +2223,10 @@ def _run_shell_command(
             sandbox_protected_paths,
         )
     if os.name == "nt":
-        if tool.executor is not None:
+        if getattr(tool, "executor", None) is not None:
             if is_interrupted() or cancellation_requested():
                 raise CommandInterruptedError(command)
-            return tool.executor.run(ShellCommandRequest(command, ["powershell.exe", "-NoProfile", "-Command", command],
+            return getattr(tool, "executor", None).run(ShellCommandRequest(command, ["powershell.exe", "-NoProfile", "-Command", command],
                 target, timeout, _subprocess_text_env(tool.path_access_policy.owner_scope_root,
                                                     host_credential_env_names=tool.host_credential_env_names)))
         proc = subprocess.Popen(
@@ -2271,7 +2271,7 @@ def _run_attempt_sandboxed_shell_command(
         host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names,
                                       full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only"),
                                       host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ())),
-        **({"sandbox_factory": tool.sandbox_factory} if tool.sandbox_factory is not None else {}),
+        **({"sandbox_factory": getattr(tool, "sandbox_factory", None)} if getattr(tool, "sandbox_factory", None) is not None else {}),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
     completed = None
@@ -2281,8 +2281,8 @@ def _run_attempt_sandboxed_shell_command(
         remaining = timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
         if completed is not None and remaining <= 0:
             return completed
-        if tool.executor is not None:
-            completed = tool.executor.run(ShellCommandRequest(command, exec_arg, target, remaining,
+        if getattr(tool, "executor", None) is not None:
+            completed = getattr(tool, "executor", None).run(ShellCommandRequest(command, exec_arg, target, remaining,
                 _subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True,
                                      host_credential_env_names=tool.host_credential_env_names), use_shell))
         else:
