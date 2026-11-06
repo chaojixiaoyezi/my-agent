@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from ..concurrency import DurableDaemonThreadPoolExecutor
+from ..settings.config import AgentConfig
 from .multiprocess_http_transport import (
     HTTPBirthGateBusy,
     http_request_work_scope,
@@ -32,24 +33,36 @@ from .multiprocess_http_transport import (
 )
 
 
+# LLM: 仅原正式handler读取已有唯一宿主指针；容量配置不是认证或HTTP工作来源，独立server/子类不借其它宿主配置。
+# 函数用途: 在不改监听装配链的情况下取得本次Gateway的原Agent或冷控制面配置，不创建Agent或写状态。
+def _gateway_http_config(handler):
+    from .http_service import GatewayHTTPHandler, _server_instance
+
+    if handler is not GatewayHTTPHandler or _server_instance is None:
+        return None
+    control = getattr(_server_instance, "control_plane", None)
+    host = control if control is not None else getattr(_server_instance, "agent", None)
+    return getattr(host, "config", None)
+
+
 # LLM: This is the sole HTTP concurrency owner for the single Gateway. Keep the
 # accept backlog, reusable worker pool, and outstanding-request admission bound
 # together; never infer owner identity from an unauthenticated socket/header.
 # Handlers retain all authorization and durable per-owner operation semantics; 原work仅绑定本设施寿命，不扩大任何owner业务权限。
 # 类用途: 用固定工作线程和有界排队承接多个 TUI，避免每次轮询都新建系统线程。
 class GatewayBoundedHTTPServer(HTTPServer):
-    request_queue_size = 128
-    max_request_workers = 16
-    max_outstanding_requests = 128
-    request_socket_timeout = 5.0
-    request_queue_timeout = 2.0
-    http_birth_gate_timeout_seconds = 1.0
+    request_queue_size = getattr(AgentConfig, "gateway_http_listen_backlog", 128)
+    max_request_workers = getattr(AgentConfig, "gateway_http_max_request_workers", 16)
+    max_outstanding_requests = getattr(AgentConfig, "gateway_http_max_outstanding_requests", 128)
+    request_socket_timeout = getattr(AgentConfig, "gateway_http_socket_timeout_seconds", 5.0)
+    request_queue_timeout = getattr(AgentConfig, "gateway_http_queue_timeout_seconds", 2.0)
+    http_birth_gate_timeout_seconds = getattr(AgentConfig, "gateway_http_birth_gate_timeout_seconds", 1.0)
 
     # LLM: Construction must establish admission before serve_forever can
     # accept work. The daemon executor preserves the previous restart behavior:
     # an abandoned client must not keep the Gateway process alive.
     # LLM: 原C runtime/group与观察者在pool/socket前核，保存同一executor/runtime原引用供work末核；Count0不建work且不增加IO，W/host拒绝。
-    # 函数用途: 先检查同次设施来源，再初始化原有界监听器和工作池。
+    # 函数用途: 先核同次设施来源，再从原宿主配置冻结容量和分阶段超时，最后构造有界监听器和工作池。
     def __init__(
         self,
         server_address: tuple[str, int],
@@ -60,8 +73,21 @@ class GatewayBoundedHTTPServer(HTTPServer):
         request_worker_failure: Callable[[BaseException], None] | None = None,
         drain_runtime: Any = None,
         drain_resource: Any = None,
+        config: Any = None,
     ) -> None:
         require_http_worker_source(drain_runtime, drain_resource, request_worker_initializer, request_worker_failure)
+        config = _gateway_http_config(request_handler_class) if config is None else config
+        self.request_queue_size = max(1, int(getattr(config, "gateway_http_listen_backlog", self.request_queue_size)))
+        self.max_request_workers = max(1, int(getattr(config, "gateway_http_max_request_workers", self.max_request_workers)))
+        self.max_outstanding_requests = max(self.max_request_workers, int(getattr(
+            config, "gateway_http_max_outstanding_requests", self.max_outstanding_requests)))
+        # 缺字段时原样继承子类超时；配置约束由权威加载器校验，不新增兼容路径的最小时限。
+        self.request_socket_timeout = float(getattr(
+            config, "gateway_http_socket_timeout_seconds", self.request_socket_timeout))
+        self.request_queue_timeout = float(getattr(
+            config, "gateway_http_queue_timeout_seconds", self.request_queue_timeout))
+        self.http_birth_gate_timeout_seconds = float(getattr(
+            config, "gateway_http_birth_gate_timeout_seconds", self.http_birth_gate_timeout_seconds))
         workers = max(1, int(self.max_request_workers))
         capacity = max(workers, int(self.max_outstanding_requests))
         self._request_slots = threading.BoundedSemaphore(capacity)

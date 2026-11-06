@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from ..settings.config import AgentConfig
 from .client_credentials import gateway_client_credentials
 from .input_identity import http_input_identity
 from .io import gateway_response_path, new_gateway_request_id
@@ -117,8 +118,8 @@ def submit_authenticated_ask(paths, params, submit_request, on_request_allocated
     )
 
 
-# LLM: 同原G1 reader加载宿主凭据，原typed用户/群header随body发送；没有客户端owner猜测、网络重试或无认证降级。
-# 函数用途: 只向明确本地Gateway端口执行一次POST，响应未知返回原结构三态中的未知运输事实。
+# LLM: 同原G1 reader加载宿主凭据，原typed用户/群header随body发送；提交cap与结果等待分责，仍只发一次，无重试或无认证降级。
+# 函数用途: 按配置提交上限与请求超时的较小值向本地Gateway执行一次POST，未知仍保原运输事实。
 def post_gateway_ask(agent, payload):
     port = int(getattr(agent.config, "gateway_port", 0) or 0)
     if port <= 0:
@@ -138,7 +139,9 @@ def post_gateway_ask(agent, payload):
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers=headers,
     )
-    timeout = min(30.0, max(0.1, float(getattr(agent.config, "gateway_request_timeout", 30))))
+    cap = float(getattr(agent.config, "gateway_submission_timeout_cap_seconds",
+                        getattr(AgentConfig, "gateway_submission_timeout_cap_seconds", 30.0)))
+    timeout = min(cap, max(0.1, float(getattr(agent.config, "gateway_request_timeout", 30))))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))

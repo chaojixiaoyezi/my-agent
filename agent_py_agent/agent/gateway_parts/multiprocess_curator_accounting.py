@@ -22,13 +22,21 @@ from ..common.nofollow_fs import (
 from ..common.strict_json import load_strict_json
 from ..memory_store.curator_run_log import CuratorRunRecord
 from ..owner_wake_discovery import _owner_home_signature, discover_owner_home_page
+from ..settings.config import AgentConfig
 from ..user_space.owner_resolver import OwnerIdentity, _owner_home_dir
 from .multiprocess_mode import current_worker_partition
 from .multiprocess_route import owner_digest
 
 _QUOTA_SCHEMA = "curator_daily_quota.v2"
-# 既有策展全局日上限，单位实际运行次数；此前只在CLI默认常量中声明。
-CURATOR_DAILY_QUOTA_DEFAULT_COUNT = 5000
+# 既有策展全局日上限沿配置权威默认；配置集成前保留5000的兼容值，0为不限额。
+CURATOR_DAILY_QUOTA_DEFAULT_COUNT = getattr(AgentConfig, "curator_daily_quota", 5000)
+
+
+# LLM: CLI与C共用同一非负整数语义；显式0不限额，布尔/负值/坏类型沿兼容默认，不读取或改写会计账。
+# 函数用途: 取得当前策展日额度，避免正数读取器把零值洗回默认上限。
+def configured_curator_daily_quota(config):
+    limit = getattr(config, "curator_daily_quota", CURATOR_DAILY_QUOTA_DEFAULT_COUNT)
+    return limit if type(limit) is int and limit >= 0 else CURATOR_DAILY_QUOTA_DEFAULT_COUNT
 
 
 # LLM: 此异常只描述quota来源/锁/原未结投影不可核实；不能捕获原P3写入或观察者异常后改称quota故障。
@@ -304,7 +312,7 @@ def _occupied_request(paths, request_id):
     raise ValueError("curator_quota_request_unreadable")
 
 
-# LLM: 原P3最终短门持quota锁直到预留落盘；pending/lease保原豁免，typed源漂移只准原P5结运输，绝不运行新来源；cold control通过纯typed路径投影读取，不伪装Agent。
+# LLM: 原P3最终短门持quota锁直到预留落盘；0只取消数量上限，不跳来源/会计核验，pending/lease及typed源漂移豁免保持。
 # 函数用途: 在实际准入边界检查策展额度，跨线程并发不能把同一剩余额度重复授予。
 @contextmanager
 def curator_quota_admission(gate, request):
@@ -326,9 +334,7 @@ def curator_quota_admission(gate, request):
         yield None
         return
     path = home.global_index_dir / "curator_daily_quota.json"
-    limit = getattr(config, "curator_daily_quota", CURATOR_DAILY_QUOTA_DEFAULT_COUNT)
-    if type(limit) is not int or limit <= 0:
-        limit = CURATOR_DAILY_QUOTA_DEFAULT_COUNT
+    limit = configured_curator_daily_quota(config)
     guards = ExitStack()
     try:
         guards.enter_context(locked_json_path(path))
@@ -340,7 +346,7 @@ def curator_quota_admission(gate, request):
             raise ValueError("curator_quota_migration_pending")
         index.owner_facts(value, home.root, source_owner(ref["owner"]), value["date"])
         pending = unsettled_curator_requests(gate.paths)
-        rejection = "curator_daily_quota_exhausted" if value["count"] + pending >= limit else None
+        rejection = "curator_daily_quota_exhausted" if limit > 0 and value["count"] + pending >= limit else None
     except (OSError, ValueError, TypeError) as error:
         guards.close()
         raise CuratorQuotaUnavailable("curator_quota_unavailable") from error
