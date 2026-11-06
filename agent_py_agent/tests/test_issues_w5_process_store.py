@@ -4,6 +4,7 @@ from __future__ import annotations
 import errno
 import inspect
 import json
+import logging
 import os
 import stat
 import sys
@@ -116,7 +117,9 @@ def test_default_scan_budget_scales_but_explicit_budget_is_strict(tmp_path, monk
             tick += 0.0002
             return tick
         with monkeypatch.context() as patch:
+            # 默认额度按扫描线程CPU时间计量，显式额度按墙钟；两者共用同一假时钟。
             patch.setattr(store_module.time, "monotonic", monotonic)
+            patch.setattr(store_module.time, "thread_time", monotonic)
             records, errors = transaction.list_records()
             assert len(records) == 3000 and errors == []
             tick = 0.0
@@ -129,10 +132,54 @@ def test_default_scan_budget_scales_but_explicit_budget_is_strict(tmp_path, monk
                 nonlocal tick
                 tick += 0.0005
                 return tick
-            patch.setattr(store_module.time, "monotonic", slower)
+            patch.setattr(store_module.time, "thread_time", slower)
             with pytest.raises(RuntimeError, match="process_session_scan_budget_exceeded"):
                 transaction.list_records()
     assert "with os.scandir(self.root) as entries:" in inspect.getsource(store_module.ProcessSessionTransaction.list_records)
+
+
+def test_default_scan_budget_ignores_same_process_wall_clock_stalls(tmp_path, monkeypatch):
+    # 现场: 18+ TUI 同进程线程争用 GIL，墙钟远超实际扫描 CPU；默认额度不能因此拒绝整份清单（停止/裁剪/完成协调全失败）。
+    store = ProcessSessionStore(tmp_path / "sessions")
+    with store.transaction() as transaction:
+        for index in range(50):
+            transaction.write(_running(f"bg-{index}"))
+        wall, cpu = [0.0], [0.0]
+        def stalled_wall():
+            wall[0] += 5.0
+            return wall[0]
+        def scan_cpu():
+            cpu[0] += 0.00001
+            return cpu[0]
+        with monkeypatch.context() as patch:
+            patch.setattr(store_module.time, "monotonic", stalled_wall)
+            patch.setattr(store_module.time, "thread_time", scan_cpu)
+            records, errors = transaction.list_records()
+            assert len(records) == 50 and errors == []
+            with pytest.raises(RuntimeError, match="process_session_scan_budget_exceeded"):
+                transaction.list_records(max_ms=1000)
+
+
+def test_attach_keeps_committed_handoff_when_history_prune_fails(tmp_path, monkeypatch, caplog):
+    # 现场: 交接已提交、句柄已挂上后历史裁剪超额抛 RuntimeError；旧行为外抛，shell 把已启动命令报成结果未知并停住回合。
+    # 假句柄只提供 poll，从未派生进程或向假 PID 发信号。
+    store = ProcessSessionStore(tmp_path / "sessions")
+    payload = store.write(_running("bg-attach", pid=987654325, pid_birth_token="attach-birth",
+                                   child_pid=987654326, child_pid_birth_token="attach-child-birth"))
+    calls = []
+
+    def exhausted(self, *args, **kwargs):
+        calls.append(self.root)
+        raise RuntimeError("process_session_scan_budget_exceeded")
+
+    monkeypatch.setattr(store_module.ProcessSessionStore, "prune_finished", exhausted)
+    handle = SimpleNamespace(pid=987654325, poll=lambda: None)
+    process_registry = registry.ProcessRegistry()
+    with caplog.at_level(logging.WARNING, logger=registry.__name__):
+        record = process_registry.attach(payload, handle, store.root)
+    assert calls and record.session_id == "bg-attach" and record.process is handle
+    assert "PROCESS_ATTACH_PRUNE_DEFERRED" in caplog.text
+    assert process_registry.get("bg-attach", store_root=store.root) is record
 
 
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
