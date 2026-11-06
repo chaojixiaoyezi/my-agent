@@ -6,7 +6,7 @@
 2. 不带池时与原来一样每次新建连接、请求头是 Connection: close；
 3. 非 2xx、读正文到期中止的连接不放回池；空闲超时或对端已关的连接取出时丢弃；
 4. 带池的请求只能是零重试、禁止重定向、有绝对期限的严格请求；
-5. 决策服务只在配置开关打开时传池，Jev 后端经池发两次只用一条连接。
+5. 决策服务始终传共享池，缺配置或使用默认配置时，Jev 后端经池发两次也只用一条连接。
 不访问任何真实服务。
 """
 from __future__ import annotations
@@ -32,8 +32,7 @@ from agent_py_agent.agent.backends.gateway_helpers import (
 from agent_py_agent.agent.backends.keepalive_transport import KeepAlivePool, KeepAliveRoute
 from agent_py_agent.agent.backends.typesafe_decision import decision_backend_from_profile
 from agent_py_agent.agent.conversation.decision_service import _decision_connection_pool
-from agent_py_agent.agent.settings.config import AgentConfig, load_config
-from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.tests.test_decision_protocol import binding, questions
 from agent_py_agent.tests.test_decision_protocol import response as decision_response
 from agent_py_agent.tests.test_decision_transport_timing import (
@@ -246,27 +245,26 @@ def test_routes_skip_proxies_with_credentials_and_plain_http_through_a_proxy(mon
         "https", "jev.test", 443, "127.0.0.1", 7890)
 
 
-def test_the_decision_service_passes_the_pool_only_when_the_switch_is_on():
-    # 新功能仓库默认关（已定做法第 5 条），线上验收后由集成方打开。
-    assert AgentConfig().decision_connection_reuse_enabled is False
-    assert load_config(packaged_config_path()).decision_connection_reuse_enabled is False
-    assert _decision_connection_pool(SimpleNamespace()) is None, "缺配置的宿主替身与 dataclass 默认一致：不传池"
-    on = SimpleNamespace(config=SimpleNamespace(decision_connection_reuse_enabled=True))
-    off = SimpleNamespace(config=SimpleNamespace(decision_connection_reuse_enabled=False))
-    assert _decision_connection_pool(on) is keepalive_transport.DECISION_CONNECTION_POOL
-    assert _decision_connection_pool(off) is None
+@pytest.mark.parametrize("agent", [None, SimpleNamespace(), SimpleNamespace(config=None),
+                                  SimpleNamespace(config=AgentConfig())])
+def test_the_decision_service_always_passes_the_shared_pool(agent):
+    assert _decision_connection_pool(agent) is keepalive_transport.DECISION_CONNECTION_POOL
 
 
 def test_the_jev_backend_sends_two_decisions_over_one_connection(link):
     link.body = decision_response()
-    pool = KeepAlivePool()
-    backend = decision_backend_from_profile({"api_base": link.direct_url, "api_key": "k", "model_name": "jev-test",
-                                             "model_context_window_tokens": 32768, "model_custom_headers": {},
-                                             "model_session_header": ""}, connection_pool=pool)
-    request = DecisionRequest(binding(), {"lane": "a"}, questions())
+    pool = _decision_connection_pool(SimpleNamespace(config=AgentConfig()))
+    assert pool is keepalive_transport.DECISION_CONNECTION_POOL
+    pool.close_all()
+    try:
+        backend = decision_backend_from_profile({"api_base": link.direct_url, "api_key": "k", "model_name": "jev-test",
+                                                 "model_context_window_tokens": 32768, "model_custom_headers": {},
+                                                 "model_session_header": ""}, connection_pool=pool)
+        request = DecisionRequest(binding(), {"lane": "a"}, questions())
+        first = backend.decide(request, deadline=time.monotonic() + 5)
+        second = backend.decide(request, deadline=time.monotonic() + 5)
 
-    first = backend.decide(request, deadline=time.monotonic() + 5)
-    second = backend.decide(request, deadline=time.monotonic() + 5)
-
-    assert first.model == second.model == "jev-resolved-test"
-    assert len(link.tcp_connections) == 1 and link.requests == ["keep-alive", "keep-alive"]
+        assert first.model == second.model == "jev-resolved-test"
+        assert len(link.tcp_connections) == 1 and link.requests == ["keep-alive", "keep-alive"]
+    finally:
+        pool.close_all()

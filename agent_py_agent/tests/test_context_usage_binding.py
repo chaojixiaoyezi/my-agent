@@ -42,7 +42,7 @@ def _case(home):
     store = ConversationStore(home / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "owner-a"})
     agent = SimpleNamespace(conversation_store=store,
-        config=AgentConfig(my_agent_home=str(home), memory_context_calibration_carry_enabled=False),
+        config=AgentConfig(my_agent_home=str(home)),
         backend=SimpleNamespace(name="offline", model_name="sampled-old-model", max_tokens=128),
         _current_subagent_run_id="")
     params = replace(_tool_loop_params(), context_scope="conversation", request_id="request-a", run_id="run-a",

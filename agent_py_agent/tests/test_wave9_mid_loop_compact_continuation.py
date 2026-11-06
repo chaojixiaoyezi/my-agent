@@ -897,7 +897,7 @@ def test_round_three_current_run_trim_reaches_real_model_generation(monkeypatch,
             return ModelResponse(text="业务调用完成", backend=self.name)
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
-                                   auto_save_memory=False, memory_context_calibration_carry_enabled=False), tmp_path)
+                                   auto_save_memory=False), tmp_path)
     agent.backend = CaptureBackend()
     params = replace(loop_params(), save=False, conversation_history_seed=ConversationHistorySeed())
     params.tool_ir_history[:] = [replace(item, content_blocks=(ToolContentBlock("text", text="calibration payload " * 1000),))
@@ -954,8 +954,22 @@ def test_round_three_current_run_trim_reaches_real_model_generation(monkeypatch,
     assert params.compact_degraded_baseline_tokens == baseline
     assert context_pressure.model_visible_context_snapshot(agent, params, prompt).current_tokens == expected
     changed_surface = context_pressure.model_visible_context_snapshot(agent, params, "different system surface")
-    assert changed_surface.current_tokens == changed_surface.raw_estimated_tokens
-    assert changed_surface.measurement_kind == "conservative_estimate"
+    # 换表面不沿用本轮精确观测，但同一分词身份仍应按owner原始比值折算，不能借用缩减后的派生基线。
+    changed_calibration = context_pressure.frozen_compact_request_calibration(
+        agent, params, context_surface_fingerprint=changed_surface.context_surface_fingerprint)
+    assert changed_calibration is not None and changed_calibration.calibration_scope == "owner_ratio"
+    assert changed_calibration.context_surface_fingerprint != calibration.context_surface_fingerprint
+    assert changed_calibration.raw_estimated_tokens == calibration.raw_estimated_tokens
+    assert changed_calibration.provider_input_tokens == calibration.provider_input_tokens
+    assert changed_surface.current_tokens == calibrated_compact_request_tokens(
+        changed_surface.raw_estimated_tokens, changed_calibration)
+    assert changed_surface.measurement_kind == "calibrated_estimate"
+    # 换模型才失去owner比值；继续锁住身份不匹配时原始估算的负向合同。
+    with monkeypatch.context() as model_change:
+        model_change.setattr(agent.backend, "model_name", "different-model")
+        other_model = context_pressure.model_visible_context_snapshot(agent, params, "different system surface")
+        assert other_model.current_tokens == other_model.raw_estimated_tokens
+        assert other_model.measurement_kind == "conservative_estimate"
     response = generate_model_response(ModelGenerateParams(agent, params, prompt, 1))
     assert response.text == "业务调用完成"
     assert len(agent.backend.calls) == 1

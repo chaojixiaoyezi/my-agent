@@ -15,6 +15,8 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 )
 from agent_py_agent.agent.conversation.compact_calibration import calibrated_compact_request_tokens
 from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.agent.memory_store.owner_resources import build_owner_local_store
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
@@ -144,22 +146,30 @@ def test_cache_file_is_numbers_only_bounded_and_corruption_falls_back(tmp_path, 
     world.observe(world.params(world.thread("still-ok")), 100_000, 78_000)
 
 
-def test_switch_off_neither_reads_nor_writes_the_cache(tmp_path, monkeypatch):
+def test_successful_observations_refresh_the_owner_ratio(tmp_path, monkeypatch):
     world = _World(tmp_path, monkeypatch)
     world.observe(world.params(world.thread("a")), 100_000, 78_000)
     path = world.agent.home_paths.owner_context_calibration_json
     before = path.read_text(encoding="utf-8")
-    world.agent.config.memory_context_calibration_carry_enabled = False
-    # 关掉后：新会话不读缓存（回到原始估算），成功调用也不写缓存。
-    assert world.tokens(world.params(world.thread("b")), 50_000) == 50_000
+    assert world.tokens(world.params(world.thread("b")), 50_000) == 39_000
     world.observe(world.params(world.thread("c")), 100_000, 90_000)
-    assert path.read_text(encoding="utf-8") == before
-    world.agent.config.memory_context_calibration_carry_enabled = True
-    assert world.tokens(world.params(world.thread("d")), 50_000) == 39_000
+    assert path.read_text(encoding="utf-8") != before
+    assert world.tokens(world.params(world.thread("d")), 50_000) == 45_000
 
 
-def test_switch_off_from_the_start_creates_no_file(tmp_path, monkeypatch):
+def test_missing_owner_cache_falls_back_without_creating_a_file(tmp_path, monkeypatch):
     world = _World(tmp_path, monkeypatch)
-    world.agent.config.memory_context_calibration_carry_enabled = False
-    world.observe(world.params(world.thread("a")), 100_000, 78_000)
+    assert world.tokens(world.params(world.thread("a")), 50_000) == 50_000
     assert not world.agent.home_paths.owner_context_calibration_json.exists()
+
+
+def test_owner_local_store_uses_the_fast_constructor_default(tmp_path):
+    paths = {"local_store_path": tmp_path / "owner.sqlite",
+             "local_store_files_dir": tmp_path / "files", "local_store_events_path": tmp_path / "events.jsonl"}
+    store = build_owner_local_store(object(), paths)
+    assert store.enable_fts is True
+    assert store.db_path == paths["local_store_path"]
+    assert store.files_dir == paths["local_store_files_dir"]
+    assert store.events_path == paths["local_store_events_path"]
+    assert store.coordinator_io is False
+    assert LocalStore(tmp_path / "without-fts.sqlite", enable_fts=False).enable_fts is False
