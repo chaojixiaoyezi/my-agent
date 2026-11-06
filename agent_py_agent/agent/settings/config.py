@@ -2,7 +2,7 @@
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 #   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
-# LLM: gateway_worker_process_count是宿主唯一拓扑，YAML/直接构造都严格核非bool非负int，不接受聊天参数覆盖。
+# LLM: gateway_worker_process_count已退役，仅保留host_only内部零值，不再进入用户配置或参数中心。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 from __future__ import annotations
 
@@ -40,7 +40,6 @@ from .defaults import (
     DEFAULT_MODEL_MAX_TOKENS,
 )
 from .deployment_policy import RuntimeGuardPolicy
-from .gateway_topology import validate_gateway_worker_process_count
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -312,7 +311,7 @@ class _RuntimeBudgetConfigFields:
 
 # LLM: 用户默认同步随包配置；连接只作 host_only 目录投影，不成为 YAML/owner/task 输入；媒体及群附件授权不变。
 # 类用途: 汇总模型和运行配置；沟通指导可关闭，图片外发有独立开关，有限正时间只提供后续请求默认，不管理阶段时钟。
-# LLM: 宿主拓扑默认0，__post_init__与YAML规范化共用严格判据，replace不得绕过。
+# LLM: 宿主旧拓扑输入固定为0，__post_init__与YAML规范化均不再允许用户配置开启多进程。
 # 类用途: 保存同一配置权威的运行参数和内网白名单；部署拓扑不能由模型或用户会话改写。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
@@ -323,8 +322,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
 
     # PARAM-W0：范围元数据由构造校验、YAML 归一和登记表共用；model_read_only 不授予部署修改权限。
     gateway_http_listen_backlog: int = field(default=128, metadata={"bounds": (1, 65535), "unit": "个连接", "model_read_only": True})
-    gateway_http_max_request_workers: int = field(default=64, metadata={"bounds": (1, 1024), "unit": "个线程", "model_read_only": True})
-    gateway_http_max_outstanding_requests: int = field(default=128, metadata={"bounds": (1, None), "range": "≥gateway_http_max_request_workers", "unit": "次", "model_read_only": True})
+    gateway_http_max_request_workers: int = field(default=128, metadata={"bounds": (1, 1024), "unit": "个线程", "model_read_only": True})
+    gateway_http_max_outstanding_requests: int = field(default=256, metadata={"bounds": (1, None), "range": "≥gateway_http_max_request_workers", "unit": "次", "model_read_only": True})
+    gateway_http_control_lane_workers: int = field(default=10, metadata={"bounds": (0, 128), "unit": "个线程"})
+    gateway_native_stream_max: int = field(default=128, metadata={"bounds": (0, 4096), "unit": "条流"})
     gateway_http_socket_timeout_seconds: float = field(default=5.0, metadata={"bounds": (0.1, 300.0), "model_read_only": True})
     gateway_http_queue_timeout_seconds: float = field(default=2.0, metadata={"bounds": (0.01, 300.0), "model_read_only": True})
     gateway_http_birth_gate_timeout_seconds: float = field(default=1.0, metadata={"bounds": (0.01, 30.0), "model_read_only": True})
@@ -338,13 +339,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})
 
-    # LLM: 构造和 replace 共用类型、有限性、字段范围及联合校验；范围取字段元数据，不读盘或改变消费者状态。
-    # 函数用途: 校验集中参数和原拓扑，并清洗私网名单。
+    # LLM: 构造/replace共用字段范围与联合校验；退役拓扑只保留内部零值兼容，不从构造输入开启多进程。
+    # 函数用途: 校验集中参数、固定单进程兼容值并清洗私网名单，不读盘或启动服务。
     def __post_init__(self) -> None:
         from .services._normalize import validate_central_parameters
 
         validate_central_parameters(self)
-        validate_gateway_worker_process_count(self.gateway_worker_process_count)
+        self.gateway_worker_process_count = 0
         if type(self.max_background_agents) is not int or self.max_background_agents < 0:
             raise ValueError("max_background_agents 必须是非负整数（0 表示不限制）")
         self.host_exclusive_path_roots = tuple(str(path) for path in configured_host_source_paths(self))
@@ -521,8 +522,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
     # 子代理 runner 普通失败后最多自动重跑几次（唯一的家；原 runner_failure_policy 与守卫文件的两个重派上限已并入）；0 = 不自动重跑。
     runner_failure_retry_limit: int = 1
-    # 宿主唯一拓扑配置；0保留单进程，正数使用独立工作进程，不是请求线程数或并发上限。
-    gateway_worker_process_count: int = 0
+    # 已退役；仅供内部drain/getattr兼容，不进入YAML或参数中心，构造和加载固定为0。
+    gateway_worker_process_count: int = field(default=0, repr=False, metadata={"host_only": True})
     gateway_workspace: str = ""
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
@@ -530,7 +531,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 每用户「小坑」=单用户同时在飞上限(防一个用户独吞把别人饿死);
     # 全局「大坑」=总在飞上限(高天花板,超出留在 pending 排队、不拒不崩)。
     # 都是先设的限制值(不是吞吐目标),按机器/模型承载力调。执行线程按需起、用后驻留复用。
-    gateway_user_inflight_limit: int = 50
+    gateway_user_inflight_limit: int = 128
     gateway_global_inflight_limit: int = 500
     # Gateway同时在途的不同Owner数量上限；0跟随owner_agent_pool_max_agents，实际准入由Gateway消费。
     gateway_owner_inflight_limit: int = 0
@@ -551,15 +552,15 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     sandbox_full_access_other_owner_homes: str = "read_only"
     # 供应商临时故障的回合级自动续跑次数上限（0=关闭；跨 Gateway 重启累计，重排不重放工具）。
     provider_transient_turn_resume_max_count: int = 2
-    # 后台会话全局线程池上限，默认32；超出留在持久队列，同thread仍由run claim单飞。
-    background_owner_workers: int = 32
-    # 普通用户每个owner同时运行的后台会话上限，默认4；仍受全局线程池约束。
-    background_threads_per_owner: int = 4
-    # 管理员local/main同时运行的后台会话上限，默认16；不改变普通用户上限。
-    background_admin_threads_per_owner: int = 16
+    # 后台会话全局线程池上限，默认128；超出留在持久队列，同thread仍由run claim单飞。
+    background_owner_workers: int = 128
+    # 普通用户每个owner同时运行的后台会话上限，默认2；仍受全局线程池约束。
+    background_threads_per_owner: int = 2
+    # 管理员local/main同时运行的后台会话上限，默认64；不改变普通用户上限。
+    background_admin_threads_per_owner: int = 64
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
     # 超出逐出最久未用;千并发多用户时的驻留 agent 数调参入口。
-    owner_agent_pool_max_agents: int = 64
+    owner_agent_pool_max_agents: int = 128
     # 空闲实例寿命；只回收无执行租用、无持久工作者，0 关闭，身份和会话不删除。
     owner_agent_idle_seconds: float = 60.0
     input_media_max_bytes: int = 16 * 1024 * 1024

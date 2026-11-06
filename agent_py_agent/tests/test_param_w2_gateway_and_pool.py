@@ -60,14 +60,14 @@ def test_fallbacks_follow_authoritative_defaults(monkeypatch, source, module, co
 
 
 # LLM: 只核本次三个公开默认，运行时覆盖仍交原消费者，不实例化完整Agent或写用户目录。
-# 函数用途: 锁住默认行为不因去除重复常量而改变。
+# 函数用途: 锁住本轮新出厂值由统一配置到达实际消费者。
 def test_existing_defaults_remain_compatible(tmp_path):
     config = AgentConfig()
     pool = owner_pool.OwnerScopedAgentPool(config, tmp_path)
-    assert pool.gauges()["max_agents"] == config.owner_agent_pool_max_agents == 64
+    assert pool.gauges()["max_agents"] == config.owner_agent_pool_max_agents == 128
     agent = SimpleNamespace(config=config)
-    assert gateway_loops._background_owner_workers(agent) == config.background_owner_workers == 32
-    assert gateway_loops._background_threads_per_owner(agent) == config.background_threads_per_owner == 4
+    assert gateway_loops._background_owner_workers(agent) == config.background_owner_workers == 128
+    assert gateway_loops._background_threads_per_owner(agent) == config.background_threads_per_owner == 2
 
 
 # LLM: 显式构造参数仍高于config，缺字段/非法值仍使用原安全默认，0不在本池定义为无限。
@@ -77,9 +77,9 @@ def test_existing_defaults_remain_compatible(tmp_path):
     [
         (SimpleNamespace(owner_agent_pool_max_agents=7), None, 7),
         (SimpleNamespace(owner_agent_pool_max_agents=7), 2, 2),
-        (SimpleNamespace(), None, 64),
-        (SimpleNamespace(owner_agent_pool_max_agents=0), None, 64),
-        (SimpleNamespace(owner_agent_pool_max_agents="invalid"), None, 64),
+        (SimpleNamespace(), None, 128),
+        (SimpleNamespace(owner_agent_pool_max_agents=0), None, 128),
+        (SimpleNamespace(owner_agent_pool_max_agents="invalid"), None, 128),
     ],
 )
 def test_owner_pool_capacity_precedence(tmp_path, config, override, expected):
@@ -94,10 +94,10 @@ def test_background_worker_overrides_and_fallbacks(value):
     agent = SimpleNamespace(config=SimpleNamespace(
         background_owner_workers=value, background_threads_per_owner=value,
     ))
-    assert gateway_loops._background_owner_workers(agent) == (5 if value == 5 else 32)
-    assert gateway_loops._background_threads_per_owner(agent) == (5 if value == 5 else 4)
-    assert gateway_loops._background_owner_workers(SimpleNamespace()) == 32
-    assert gateway_loops._background_threads_per_owner(SimpleNamespace()) == 4
+    assert gateway_loops._background_owner_workers(agent) == (5 if value == 5 else 128)
+    assert gateway_loops._background_threads_per_owner(agent) == (5 if value == 5 else 2)
+    assert gateway_loops._background_owner_workers(SimpleNamespace()) == 128
+    assert gateway_loops._background_threads_per_owner(SimpleNamespace()) == 2
 
 
 # LLM: 原池容量包括pin及构建，使用仅内存builder；满池不得逐出在途owner来伪造余量。
@@ -156,25 +156,25 @@ def test_http_host_config_reaches_actual_resources(monkeypatch, capacity, expect
         server.server_activate()
         assert server.server_port > 0
     assert bounded.GatewayBoundedHTTPServer.request_queue_size == 128
-    assert bounded.GatewayBoundedHTTPServer.max_request_workers == 64
+    assert bounded.GatewayBoundedHTTPServer.max_request_workers == 128
 
 
-# LLM: GW-WORKERS-64 同时核权威配置及缺字段调用，观察真实执行器和信号量，不预先创建工作线程。
-# 函数用途: 验证默认资源容量为64工作线程、128个在途请求槽位。
+# LLM: 同时核权威配置及缺字段调用，观察真实执行器和信号量，不预先创建工作线程。
+# 函数用途: 验证新默认资源容量为128工作线程、256个在途请求槽位。
 @pytest.mark.parametrize("config_factory", [AgentConfig, SimpleNamespace])
 def test_http_worker_defaults_reach_actual_resources(monkeypatch, config_factory):
     with _http_server(monkeypatch, config_factory()) as server:
-        assert server.max_request_workers == server._request_executor._max_workers == 64
-        assert server.max_outstanding_requests == server._request_slots._initial_value == 128
+        assert server.max_request_workers == server._request_executor._max_workers == 128
+        assert server.max_outstanding_requests == server._request_slots._initial_value == 256
         assert not server._request_executor._threads
 
 
 # LLM: 仅在独立模块加载时移除类属性，直接反证getattr兜底仍残留16；monkeypatch回收原属性。
-# 函数用途: 验证配置类缺少字段时也使用64线程兜底。
+# 函数用途: 验证配置类缺少字段时也使用128线程兜底。
 def test_http_worker_fallback_without_config_attribute(monkeypatch):
     monkeypatch.delattr(AgentConfig, "gateway_http_max_request_workers")
     isolated = _load_consumer(monkeypatch, bounded, "http_worker_fallback")
-    assert isolated.GatewayBoundedHTTPServer.max_request_workers == 64
+    assert isolated.GatewayBoundedHTTPServer.max_request_workers == 128
 
 
 # LLM: 缺配置保原六默认，直接构造的测试子类覆盖仍有效，不修改类级共享状态。
@@ -182,7 +182,7 @@ def test_http_worker_fallback_without_config_attribute(monkeypatch):
 def test_http_missing_config_preserves_defaults_and_subclass(monkeypatch):
     with _http_server(monkeypatch, SimpleNamespace()) as server:
         assert (server.request_queue_size, server.max_request_workers,
-                server.max_outstanding_requests) == (128, 64, 128)
+                server.max_outstanding_requests) == (128, 128, 256)
         assert (server.request_socket_timeout, server.request_queue_timeout,
                 server.http_birth_gate_timeout_seconds) == (5.0, 2.0, 1.0)
 

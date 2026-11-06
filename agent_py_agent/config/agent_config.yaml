@@ -513,12 +513,6 @@ model_speed_profile_path: ""
 # - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
 # - 留空时固定落在 owner workspace/runtime/services/gateway；多个不同 cwd 的 TUI 共用这一处。
 # - 显式绝对路径原样使用；显式相对路径以 owner workspace 解析，不以启动 TUI 的 cwd 解析。
-# Gateway唯一宿主拓扑配置。0保持原单进程；正整数启用独立工作进程，不是请求并发数。
-# 只能在宿主配置文件修改；保存后正常重启生效。旧home切换必须具备迁移事实，不能以新home验收替代。
-# 旧Count0需用支持版保持0正常运行/停止一次，留下本次身份与责任来源，再改正数启动。
-# 后继只接受准确旧实例已死及稳定已结责任；缺birth/未知native/混MP应沿原入口恢复，不能删标记或补闭封。
-# MP→0与MP改数量仍不支持；配置保存不等于拓扑已经生效。
-gateway_worker_process_count: 0
 # Gateway运行目录；留空使用当前owner规范工作区，显式相对路径也按该工作区解析。
 gateway_workspace: ""
 # 停止后台服务时最多等它多久自己退出，超时就强制结束。
@@ -544,7 +538,8 @@ gateway_request_timeout: 300
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts：processing 租约实际卡死的累计失败上限，默认 2 即首次重排、再次卡死归档 failed。
 #   服务重启接续同一回合不占失败次数；旧 attempts 只记执行代次。0 表示不卡死次数上限，未知副作用门不放宽。
-gateway_user_inflight_limit: 50
+# 每个用户同时处理的请求上限，默认128；超出的请求排队，仍受下面的全局上限约束。
+gateway_user_inflight_limit: 128
 # 后台服务同时最多处理多少个请求（所有会话加在一起）。
 # 一般远远用不到；只有在同一台机器上跑很多并发任务、或想限制资源占用时才需要调小。
 gateway_global_inflight_limit: 500
@@ -574,18 +569,19 @@ sandbox_full_access_other_owner_homes: "read_only"
 # 0 表示关闭；每个请求跨 Gateway 重启累计，用满后按失败收口（发“继续”可以手动接着做）。
 # 只对已有完成工具往返的回合生效：重排从已落盘历史继续，不重放工具，退避 30/120 秒。
 provider_transient_turn_resume_max_count: 2
-# 后台会话全局线程池上限，默认 32；不同 owner 和不同 thread 都可并发，同 thread
+# 后台会话全局线程池上限，默认128；不同 owner 和不同 thread 都可并发，同 thread
 # 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。重启 Gateway 后生效。
-background_owner_workers: 32
-# 普通用户每个 owner 同时运行的后台会话上限，默认 4；避免单个用户占满全局模型池。
+background_owner_workers: 128
+# 普通用户每个 owner 同时运行的后台会话上限，默认2；避免单个用户占满全局模型池。
 # 调大会增加并发模型请求，仍受全局线程池上限约束；重启 Gateway 后生效。
-background_threads_per_owner: 4
-# 管理员 local/main 同时运行的后台会话上限，默认 16；不改变普通用户上限。
+background_threads_per_owner: 2
+# 管理员 local/main 同时运行的后台会话上限，默认64；不改变普通用户上限。
 # 同样受全局线程池上限约束，调大会增加并发模型请求；重启 Gateway 后生效。
-background_admin_threads_per_owner: 16
+background_admin_threads_per_owner: 64
 # per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
 # 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
-owner_agent_pool_max_agents: 64
+# 默认128个实例；Gateway不同Owner在途上限为0时自动跟随此值。保存后重启Gateway生效。
+owner_agent_pool_max_agents: 128
 # 用户实例连续空闲多久后释放（秒，0=关闭）；在途执行或持久任务/唤醒仍保留。
 # 身份、会话、记忆保存在磁盘；新消息按需重建。被动状态轮询不延长空闲时间。
 owner_agent_idle_seconds: 60.0
@@ -1225,13 +1221,20 @@ agents_source_enabled: true
 agents_source_network_enabled: false
 
 # PARAM-W0 集中参数声明：配置保存后需重启 Gateway（CLI 下次启动）加载，不作即时热更新承诺。
-# 本波只建立 schema/校验/登记和 writer；尚未读取这些键的消费者由后续接线任务负责。
-# HTTP 监听等待队列容量，单位连接，范围1..65535；宿主容量只读，重启加载。
+# HTTP 监听等待队列容量，默认128个连接，范围1..65535；等待接纳不等于正在处理，重启加载。
 gateway_http_listen_backlog: 128
-# HTTP 请求线程池大小，单位线程，范围1..1024；宿主容量只读，重启加载。
-gateway_http_max_request_workers: 64
-# HTTP 已接纳的排队和执行请求总量，单位请求，至少等于请求线程数；不等同业务 inflight，重启加载。
-gateway_http_max_outstanding_requests: 128
+# HTTP普通请求线程池大小，默认128个线程，范围1..1024；按需创建，宿主容量只读，重启加载。
+gateway_http_max_request_workers: 128
+# HTTP已接纳的排队和执行请求总量，默认256个，至少等于请求线程数；不等同业务inflight，重启加载。
+gateway_http_max_outstanding_requests: 256
+# 控制请求的VIP快速车道，默认10个独立线程，范围0..128；0关闭独立车道。
+# /stop、/cancel、健康检查和控制轮询不与繁忙的普通请求争抢工作线程，避免排在长请求后面。
+# 车道本身仍有容量上限，业务认证和权限不变；保存后重启Gateway生效。
+gateway_http_control_lane_workers: 10
+# Web/SSE/NDJSON长连接的独立流池，默认最多128条流，范围0..4096；0关闭独立池。
+# 正在输出token的连接移交给流池，尽快归还普通HTTP请求线程；飞书消息不占用此池。
+# 每用户仍受inflight额度约束；保存后重启Gateway生效，不改变已建立连接。
+gateway_native_stream_max: 128
 # HTTP socket 阶段超时，单位秒，0.1..300；宿主参数，与请求排队超时分开，重启加载。
 gateway_http_socket_timeout_seconds: 5.0
 # HTTP 请求等待线程名额的超时，单位秒，0.01..300；宿主参数，重启加载。

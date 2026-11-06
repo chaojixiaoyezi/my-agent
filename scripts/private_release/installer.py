@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -280,18 +281,133 @@ exec "$release/runtime/bin/python3" -I -B -X utf8 -m agent_py_agent "$@"
 '''
 
 
-# LLM: 首装保留 canonical YAML 的空 workspace_root，由原 owner resolver 选目录；更新不覆盖持久数据。
-# 函数用途: 在独立数据目录初始化空白配置与工作区，不带开发者账号或测试模型凭据。
+# 已知旧出厂值才能迁移；其它自定义值保持不动。
+_UPGRADEABLE_DEFAULTS = (
+    ("gateway_http_max_request_workers", ("16", "64"), "128"),
+    ("gateway_http_max_outstanding_requests", ("128",), "256"),
+    ("gateway_user_inflight_limit", ("50",), "128"),
+    ("owner_agent_pool_max_agents", ("64",), "128"),
+    ("background_admin_threads_per_owner", ("16",), "64"),
+    ("background_threads_per_owner", ("4",), "2"),
+    ("background_owner_workers", ("8", "32"), "128"),
+)
+# 缺失键的值及中文说明取自发行模板，不复制一套出厂默认。
+_NEW_CONCURRENCY_KEYS = (
+    "gateway_http_control_lane_workers",
+    "gateway_native_stream_max",
+    "background_admin_threads_per_owner",
+)
+_RETIRED_KEYS = ("gateway_worker_process_count",)
+
+
+# LLM: 只取模板中顶层键自己的注释块与键行，不解析或重排其它内容；不存在时交调用方告警。
+# 函数用途: 从发行模板抽取缺失并发键及中文说明。
+def _template_concurrency_block(template_content: str, key: str) -> list[str]:
+    lines = template_content.splitlines()
+    pattern = re.compile(rf"^{re.escape(key)}[ \t]*:")
+    for index in range(len(lines) - 1, -1, -1):
+        if pattern.match(lines[index]):
+            start = index
+            while start > 0 and lines[start - 1].startswith("#"):
+                start -= 1
+            return lines[start:index + 1]
+    return []
+
+
+# LLM: 同目录临时文件+fsync+os.replace，权限固定0600；异常清理临时文件且原件不动。
+# 函数用途: 原子写回升级配置，避免中断留下半写文件或放宽配置权限。
+def _atomic_write_config(config_path: Path, content: str) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=".agent_config.upgrade-", suffix=".tmp", dir=str(config_path.parent))
+    replaced = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, config_path)
+        replaced = True
+    finally:
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+# LLM: 只删退役零值及紧邻顶层注释；缩进#行可能是用户块标量内容，不能作为注释删除。
+# 函数用途: 移除旧的gateway_worker_process_count零值配置。
+def _remove_retired_keys(lines: list[str]) -> list[str]:
+    remaining: list[str] = []
+    for line in lines:
+        body = line.rstrip("\r\n")
+        for key in _RETIRED_KEYS:
+            match = re.fullmatch(rf"{re.escape(key)}[ \t]*:[ \t]*(?P<value>[^\r\n#]*)(?:[ \t]*#.*)?", body)
+            if match is not None and match.group("value").strip().strip("\"'") == "0":
+                while remaining and remaining[-1].startswith("#"):
+                    remaining.pop()
+                break
+        else:
+            remaining.append(line)
+    return remaining
+
+
+# LLM: 只迁移列明旧出厂值、删除退役零值、补齐新键；其它设置、注释与行序不变。
+#   重复升级无变化不写盘；非UTF-8明确告警并保留原件；失败向上抛且不破坏旧配置。
+# 函数用途: 让已有机器在initialize_data升级入口获得本发行版并发默认，不覆盖用户配置。
+def upgrade_existing_config_defaults(config_path: Path, template_content: str) -> None:
+    try:
+        original = config_path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        print(f"跳过并发配置迁移：{config_path} 不是 UTF-8 文本，原文件保持不变")
+        return
+    lines = original.splitlines(keepends=True)
+    for key, old_values, new_value in _UPGRADEABLE_DEFAULTS:
+        pattern = re.compile(rf"^(?P<prefix>{re.escape(key)}[ \t]*:[ \t]*)(?P<rest>[^\r\n]*)$")
+        for index, line in enumerate(lines):
+            body = line.rstrip("\r\n")
+            match = pattern.fullmatch(body)
+            if match is None:
+                continue
+            value = match.group("rest").partition("#")[0]
+            if value.strip().strip("\"'") not in old_values:
+                continue
+            # 只替换标量，后面的空白、行内注释与行尾按原样接回。
+            tail = match.group("rest")[len(value.rstrip()):]
+            lines[index] = match.group("prefix") + new_value + tail + line[len(body):]
+    lines = _remove_retired_keys(lines)
+    text = "".join(lines)
+    appended = False
+    for key in _NEW_CONCURRENCY_KEYS:
+        if re.search(rf"^{re.escape(key)}[ \t]*:", text, re.M):
+            continue
+        block = _template_concurrency_block(template_content, key)
+        if not block:
+            print(f"跳过补齐并发配置项：发行包模板中没有 {key}")
+            continue
+        if not appended:
+            if not text.endswith(("\n", "\r")):
+                text += "\n"
+            text += "\n# 以下并发配置项由安装升级自动补齐，值取自本发行版模板；修改后重启 Gateway 生效。\n"
+            appended = True
+        text += "\n".join(block) + "\n"
+    if text != original:
+        _atomic_write_config(config_path, text)
+
+
+# LLM: 首装保留原owner目录权威；更新只迁移旧并发出厂默认，不覆盖用户的模型、凭据或路径。
+# 函数用途: 初始化空白数据，已有配置通过受限的升级迁移入口更新。
 def initialize_data(prefix: Path, release: Path) -> None:
     config = prefix / "data" / "config" / "agent_config.yaml"
     config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     (prefix / "data/tmp").mkdir(exist_ok=True, mode=0o700)
     (prefix / "data/cache").mkdir(exist_ok=True, mode=0o700)
     workspace_path(prefix).mkdir(parents=True, exist_ok=True)
-    if config.exists():
-        return
     package = release / "runtime" / "lib" / "python3.11" / "site-packages" / "agent_py_agent"
     content = (package / "config" / "agent_config.yaml").read_text(encoding="utf-8")
+    if config.exists():
+        upgrade_existing_config_defaults(config, content)
+        return
     # 空工作区配置保留原 owner-home 权威；环境绑定 data 后无需另建外部目录或放宽权限。
     content = re.sub(r'^gateway_port:.*$', 'gateway_port: 18420', content, flags=re.M)
     with config.open("x", encoding="utf-8") as stream:

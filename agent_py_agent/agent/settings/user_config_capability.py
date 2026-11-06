@@ -102,9 +102,38 @@ def _non_empty_text(value: object) -> tuple[bool, str, object]:
     return True, "", text
 
 
-# LLM: 白名单宁窄勿宽：只放"用户自己的偏好/运行节奏"，不放任何影响权限、路径、凭据、模型路由或宿主控制面的项。
+# LLM: 纯整数范围工厂，和AgentConfig同界；0关闭独立池，拒绝布尔/小数，不启动或重配资源。
+# 函数用途: 为控制车道和流池生成保存时的有界容量校验。
+def _pool_capacity_within(maximum: int) -> Callable[[object], tuple[bool, str, object]]:
+    # LLM: 只返回校验结果，保存后仍须重启；非法输入不被当作零值启用或关闭。
+    # 函数用途: 检查本次提交是否是允许范围内的非负整数。
+    def validate(value: object) -> tuple[bool, str, object]:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return False, f"必须是0~{maximum}之间的整数（0关闭独立池）", 0
+        if not 0 <= number <= maximum:
+            return False, f"必须是0~{maximum}之间的整数（0关闭独立池）", 0
+        return True, "", number
+
+    return validate
+
+
+# LLM: 白名单宁窄勿宽：新池只调整已存在执行器的有界容量，不扩大认证、路径或模型路由权限。
 # 常量用途: 声明可自助修改的配置项。
 TUNABLE_KEYS: dict[str, TunableSpec] = {
+    "gateway_http_control_lane_workers": TunableSpec(
+        key="gateway_http_control_lane_workers",
+        describe="控制请求VIP车道的独立线程数，0关闭独立车道（默认10，范围0~128）",
+        validate=_pool_capacity_within(128),
+        effect=EFFECT_GATEWAY_RESTART,
+    ),
+    "gateway_native_stream_max": TunableSpec(
+        key="gateway_native_stream_max",
+        describe="Web/SSE独立流池容量，飞书不占用，0关闭独立池（默认128，范围0~4096）",
+        validate=_pool_capacity_within(4096),
+        effect=EFFECT_GATEWAY_RESTART,
+    ),
     "memory_compact_trigger_percent": TunableSpec(
         key="memory_compact_trigger_percent",
         describe="会话压缩的管理员默认比例（50~95，默认80；管理员强制、会话和用户策略另行解析）",

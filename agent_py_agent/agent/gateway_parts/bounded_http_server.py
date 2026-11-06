@@ -54,8 +54,8 @@ def _gateway_http_config(handler):
 # 类用途: 用固定工作线程和有界排队承接多个 TUI，避免每次轮询都新建系统线程。
 class GatewayBoundedHTTPServer(HTTPServer):
     request_queue_size = getattr(AgentConfig, "gateway_http_listen_backlog", 128)
-    max_request_workers = getattr(AgentConfig, "gateway_http_max_request_workers", 64)
-    max_outstanding_requests = getattr(AgentConfig, "gateway_http_max_outstanding_requests", 128)
+    max_request_workers = getattr(AgentConfig, "gateway_http_max_request_workers", 128)
+    max_outstanding_requests = getattr(AgentConfig, "gateway_http_max_outstanding_requests", 256)
     request_socket_timeout = getattr(AgentConfig, "gateway_http_socket_timeout_seconds", 5.0)
     request_queue_timeout = getattr(AgentConfig, "gateway_http_queue_timeout_seconds", 2.0)
     http_birth_gate_timeout_seconds = getattr(AgentConfig, "gateway_http_birth_gate_timeout_seconds", 1.0)

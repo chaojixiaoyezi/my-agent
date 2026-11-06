@@ -1480,7 +1480,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             return []
 
     # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
-    # 函数用途: 按有界条件把待唤醒owner加入登记表，避免每拍全量播种。
+    # 函数用途: 按统一配置容量把待唤醒owner加入登记表，避免每拍全量播种。
     def _maybe_seed_wake_pending_owners(self) -> None:
         if self._wake_rescan_interval <= 0:
             return
@@ -1491,7 +1491,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         if not owners_dir:
             self._next_wake_rescan_at = now + self._wake_rescan_interval
             return
-        limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
+        limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=AgentConfig.owner_agent_pool_max_agents)
         page = seed_registry_page_from_disk(
             self._registry,
             owners_dir,
@@ -2040,7 +2040,7 @@ class _GatewayOwnerMaintenanceController:
         )
 
     # LLM: 每拍先跑基础 owner 与原闲置压缩；优先续作限半拍，发现至少一页，同拍去重、不构造 owner agent。
-    #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘。
+    #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘；容量兜底取AgentConfig。
     # 函数用途: 保护期后有界追赶 owner 维护，保留原摘要与安全清理。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         _cleanup_loaded_runtime_safety(self._base_agent)
@@ -2057,7 +2057,7 @@ class _GatewayOwnerMaintenanceController:
         limit = _positive_int_config(
             self._base_agent,
             "owner_agent_pool_max_agents",
-            default=64,
+            default=AgentConfig.owner_agent_pool_max_agents,
         )
         started = time.monotonic()
         deadline = started + _OWNER_MAINTENANCE_TICK_BUDGET_SECONDS
@@ -2151,7 +2151,7 @@ class _GatewaySchedulerDueController:
     It never executes a job or reads another owner's prompt.
     """
 
-    # LLM: 索引唤醒立即运行；只有一次性 legacy 全盘修复受保护期约束。
+    # LLM: 索引唤醒立即运行；只有legacy全盘修复受保护期约束，缺字段容量沿AgentConfig默认。
     # 函数用途: 绑定原调度索引、启动时钟和修复完成标志。
     def __init__(self, context: GatewayRunContext) -> None:
         self._startup_started_at = time.monotonic()
@@ -2167,7 +2167,7 @@ class _GatewaySchedulerDueController:
         pool_limit = _positive_int_config(
             self._base_agent,
             "owner_agent_pool_max_agents",
-            default=64,
+            default=AgentConfig.owner_agent_pool_max_agents,
         )
         self._claim_limit = max(1, min(pool_limit, _background_owner_workers(self._base_agent)))
         self._lease_seconds = max(30.0, self.interval * 6)
@@ -2463,13 +2463,13 @@ class _GatewayOrphanReconciler:
         return reports
 
     # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
-    # 函数用途: 将已知owner写入共享登记表，沿原有界播种逻辑。
+    # 函数用途: 按统一配置容量将已知owner写入共享登记表，保留原有界播种逻辑。
     def _seed_owner_registry(self) -> None:
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         if not owners_dir:
             self._discovery_cursor = None
             return
-        limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=64)
+        limit = _positive_int_config(self._base_agent, "owner_agent_pool_max_agents", default=AgentConfig.owner_agent_pool_max_agents)
         page = seed_registry_page_from_disk(
             self._registry,
             owners_dir,

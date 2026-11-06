@@ -60,7 +60,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "local_store_events_path", "local_store_fts_enabled", "self_dev_worktree", "protect_running_runtime",
     "subagent_workspace", "subagent_role_template_dirs", "self_learning_global_daily_limit", "user_id", "auth_enabled",
     "admin_user_id", "skill_guard_max_files", "skill_guard_max_size_kb", "model_speed_profile_path",
-    "gateway_worker_process_count", "gateway_workspace", "gateway_stop_timeout", "gateway_request_timeout",
+    "gateway_workspace", "gateway_stop_timeout", "gateway_request_timeout",
     "gateway_global_inflight_limit", "gateway_owner_inflight_limit", "enable_gateway_memory_diagnostics",
     "gateway_processing_timeout_seconds", "gateway_request_max_attempts", "sqlite_connection_reuse",
     "background_tick_cheap_checks", "background_idle_owner_max_backoff_seconds", "background_owner_workers",
@@ -509,6 +509,14 @@ def _compact_output_reserve(config: object) -> dict[str, object]:
 
 # 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。
 _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
+    "gateway_http_control_lane_workers": (
+        lambda config: config.gateway_http_control_lane_workers,
+        "配置容量预览：0关闭独立控制车道，正数为独立线程上限；保存后重启Gateway加载，未探测当前实例",
+    ),
+    "gateway_native_stream_max": (
+        lambda config: config.gateway_native_stream_max,
+        "配置容量预览：0关闭独立Web/SSE流池，飞书不占此池；保存后重启Gateway加载，未探测当前实例",
+    ),
     "max_tokens": (effective_max_output_tokens, "未测量/探针的兜底上限：不超过窗口 ÷ 4，窗口没填时按 128000 算；"
                    "已计量且配置共享总窗口的请求可用配置天花板，仍须逐次减去实际输入和安全余量"),
     "memory_compact_summary_max_output_tokens": (_compact_output_reserve,
