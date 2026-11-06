@@ -166,7 +166,7 @@ def _plugin_private_roots(owner_home: Path, hidden_home: Path | None) -> tuple[P
 
 
 # LLM: 从 owner 布局、Gateway 进程和固定解释器事实推出唯一 v8 沙箱白名单；任何根或前缀不完整都返回 sandbox_unavailable。
-#   解释器候选路径及 realpath 若落在 my-agent 数据根内，必须以 interpreter_inside_hidden_root 拒绝，不能靠白名单重新露出。
+#   解释器候选路径及 realpath 若落在 my-agent 数据根内，先于运行时前缀探测以 interpreter_inside_hidden_root 拒绝，不能被探测故障掩盖。
 # 函数用途: 为插件构造隐藏 Gateway 家目录、已存在的安装前缀及 G4 Gateway 端口规则。
 def plugin_v8_sandbox_options(
     owner_home: Path,
@@ -177,12 +177,12 @@ def plugin_v8_sandbox_options(
     try:
         data_root = _required_directory(data_root)
         hidden_root = _required_directory(Path.home())
-        prefixes = _interpreter_prefixes(interpreter)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None, "sandbox_unavailable"
     try:
         if interpreter is not None and _interpreter_path_in_root(interpreter, data_root):
             return None, "interpreter_inside_hidden_root"
+        prefixes = _interpreter_prefixes(interpreter)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None, "sandbox_unavailable"
     if any(_is_relative_to(prefix, data_root) for prefix in prefixes):

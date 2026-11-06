@@ -372,6 +372,8 @@ def _fake_v8_client_case(tmp_path):
     return owner, installation, cwd, data_dir, hidden
 
 
+# LLM: 激活引用替身兼容正式config关键字，仍执行原v8构造与沙箱规格断言。
+# 函数用途: 捕获客户端真实选择的沙箱规格，不启动平台沙箱。
 def _capture_v8_client_sandbox(monkeypatch, installation, cwd, hidden):
     from agent_py_agent.agent import plugin_runtime
 
@@ -380,7 +382,7 @@ def _capture_v8_client_sandbox(monkeypatch, installation, cwd, hidden):
     monkeypatch.setattr(
         plugin_runtime.PluginActivationRef,
         "from_owner",
-        classmethod(lambda _cls, *_args: reference),
+        classmethod(lambda _cls, *_args, config=None: reference),
     )
     monkeypatch.setattr(plugin_runtime, "_launch_argv", lambda *_args: ("/fake/python", ["-c", "pass"], cwd))
     monkeypatch.setattr(plugin_runtime, "_plugin_v8_sandbox", lambda *_args: PluginV8Sandbox(
@@ -900,6 +902,39 @@ def test_interpreter_inside_my_agent_data_root_is_structured_rejection(tmp_path)
         interpreter=PluginInterpreterPaths("python3", hidden_interpreter, Path(sys.executable)),
     )
     assert options is None and reason == "interpreter_inside_hidden_root"
+
+
+# LLM: 仅替代后续运行时前缀探测为不可用；隐藏路径仍经原路径检查，不能把明确拒绝降级成平台故障。
+# 函数用途: 验证隐藏根中的解释器别名或真实目标在探测bwrap等运行时依赖之前就被拒绝。
+@pytest.mark.parametrize("hidden_target", [False, True])
+def test_hidden_interpreter_rejection_precedes_runtime_probe(tmp_path, monkeypatch, hidden_target):
+    from agent_py_agent.agent import plugin_sandbox
+
+    _home, data_root, _env, _data_dir = _layout(tmp_path)
+    hidden = data_root / "runtime/python"
+    hidden.parent.mkdir(parents=True)
+    if hidden_target:
+        hidden.write_text("fixture interpreter")
+        alias = tmp_path / "external-python"
+        alias.symlink_to(hidden)
+        interpreter = PluginInterpreterPaths("python3", alias, hidden)
+    else:
+        hidden.symlink_to(Path(sys.executable))
+        interpreter = PluginInterpreterPaths("python3", hidden, Path(sys.executable))
+    probes = []
+
+    # LLM: 模拟运行时探测不可用，不触碰真实平台沙箱或解释器；调用记录证明拒绝发生在它之前。
+    # 函数用途: 捕获不该发生的前缀探测。
+    def unavailable_runtime(candidate):
+        probes.append(candidate)
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: fixture runtime probe unavailable")
+
+    monkeypatch.setattr(plugin_sandbox, "_interpreter_prefixes", unavailable_runtime)
+    options, reason = plugin_sandbox.plugin_v8_sandbox_options(
+        owner_home=data_root / "owners/local/main", network=False, interpreter=interpreter,
+    )
+    assert options is None and reason == "interpreter_inside_hidden_root"
+    assert probes == []
 
 
 def test_missing_interpreter_prefix_is_structured_sandbox_unavailable(tmp_path, monkeypatch):

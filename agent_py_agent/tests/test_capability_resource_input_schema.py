@@ -158,3 +158,35 @@ def test_enabled_plugins_without_installed_packages_still_declare_the_host_sourc
     schema = tool.model_spec.input_schema["properties"]["source_ref"]
     assert set(schema["required"]) == set(_REFERENCE_FIELDS)
     assert tool.source_resolver is not None
+
+
+# LLM: 用原core/prepare入口切换同一实例，不重建Agent；旧工具Schema不可原位修改，关闭时纯文本写合同不变。
+# 函数用途: 验证插件总开关恢复包资源Schema，同时保留旧快照和同owner访问策略。
+@pytest.mark.parametrize("key", ["enable_plugins", "enable_tools"])
+def test_live_switch_restores_file_source_contract_without_mutating_old_tools(tmp_path, key):
+    config = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[])
+    setattr(config, key, False)
+    agent = SimpleAgent(config, tmp_path / "repo")
+    try:
+        disabled = agent.tools.tools["write_file"]
+        assert disabled.source_resolver is None
+        assert "source_ref" not in disabled.model_spec.input_schema["properties"]
+        setattr(agent.config, key, True)
+        agent.tools.prepare_for_run()
+        enabled = agent.tools.tools["write_file"]
+        assert enabled.source_resolver is not None
+        assert "source_ref" in enabled.model_spec.input_schema["properties"]
+        assert disabled.source_resolver is None
+        assert "source_ref" not in disabled.model_spec.input_schema["properties"]
+        assert enabled._access_options == disabled._access_options
+        agent.tools.prepare_for_run()
+        assert agent.tools.tools["write_file"] is enabled
+        setattr(agent.config, key, False)
+        agent.tools.prepare_for_run()
+        assert agent.tools.tools["write_file"].source_resolver is None
+        assert "source_ref" not in agent.tools.tools["write_file"].model_spec.input_schema["properties"]
+        assert enabled.source_resolver is not None
+        enabled.model_spec.assert_schema_hash()
+        disabled.model_spec.assert_schema_hash()
+    finally:
+        agent.tools.close_mcp_clients()

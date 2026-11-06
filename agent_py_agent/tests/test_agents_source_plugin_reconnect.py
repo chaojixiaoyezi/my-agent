@@ -18,6 +18,8 @@ from agent_py_agent.tests.test_agents_source_repository import choose
 
 
 @pytest.fixture
+# LLM: 替身接收正式from_owner的可选config关键字，仍只返回固定测试激活引用，不改变来源或清理断言。
+# 函数用途: 构造可观察启动/重连的来源保护客户端。
 def plugin_client(protected, monkeypatch):
     p = protected
     owner = SimpleNamespace(root=p.root, home_dir=p.home, plugins_dir=p.home / "data/plugins")
@@ -29,7 +31,7 @@ def plugin_client(protected, monkeypatch):
         environment_ref="fixture", interpreter_fingerprint="fixture"))
     installation = SimpleNamespace(manifest=manifest, activation=activation, settings_json="{}")
     ref = SimpleNamespace(require=lambda **kw: installation, owner=lambda: owner)
-    monkeypatch.setattr(plugin.PluginActivationRef, "from_owner", lambda *a: ref)
+    monkeypatch.setattr(plugin.PluginActivationRef, "from_owner", lambda *a, config=None: ref)
     monkeypatch.setattr(plugin, "_launch_argv", lambda *a: (sys.executable, ["-c", "pass"], environment))
     monkeypatch.setattr(plugin, "_plugin_v8_sandbox", lambda *a: None)
     launched, profiles = [], []

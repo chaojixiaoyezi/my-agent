@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import OrderedDict
+from dataclasses import replace
 
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.log_redaction import redact_sensitive_text
@@ -13,6 +14,8 @@ from ..plugin_activation_ref import remember_available_installations
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_runtime import PluginMCPClient, PluginProxyTool
 from .mcp_client import MCPError
+from .process_scope import ProcessActivationScope
+from .process_session_cleanup import ProcessSessionCleanup
 
 logger = logging.getLogger(__name__)
 _INSTALLATION_SNAPSHOTS: OrderedDict[tuple, tuple] = OrderedDict()
@@ -86,17 +89,37 @@ def _remember_missing_environment(key: tuple, *, error: BaseException | None = N
             cache.popitem(last=False)
 
 
-# LLM: 原关闭/撤销链先于激活代负缓存；旧装配可省略可选实时配置，失败后不跳过权限视图重建。
+# LLM: 仅承认原 Store 对准确旧代提交的 release；该 CAS 已核验完整清理再删环境，缺目录、换代或普通 revoke 都不是退出证明。
+# 函数用途: 核对旧客户端的清理责任是否已交给原管理释放操作，不制造新的进程停止回执。
+def _client_activation_released(owner, client, rows) -> bool:
+    previous = client.installation
+    if previous.activation is None or client.activation_ref.scope != ProcessActivationScope(
+            owner.owner_id, str(owner.home_dir), previous.manifest.plugin_id, previous.activation_id):
+        return False
+    revoked_digest = replace(previous.activation, phase="revoked").content_sha256
+    return any(
+        row.manifest.plugin_id == previous.manifest.plugin_id
+        and row.package_sha256 == previous.package_sha256
+        and row.activation is None
+        and row.last_commit.action == "release"
+        and row.last_commit.before_revision >= previous.revision
+        and row.last_commit.activation_sha256 == revoked_digest
+        for row in rows
+    )
+
+
+# LLM: 撤销先于负缓存；未知清理保留责任且不启替代；仅原代已提交 release 可接管已消费的资源账，原 stop 回执不改写。
 # 函数用途: 将当前 owner 的已启用程序插件同步到原 MCP 集合；纯内容能力包不创建连接，撤销只影响准确旧连接。
 def synchronize_plugin_clients(registry) -> None:
     from ..user_space.owner_resolver import OwnerIdentity
 
-    owner = registry._construction_params.plugin_owner
+    owner = getattr(registry, "_plugin_owner", registry._construction_params.plugin_owner)
     if owner is None:
         return
     config = getattr(registry._construction_params, "live_config", None)
-    enabled = bool(getattr(config, "enable_plugins", True) and getattr(config, "enable_tools", True))
+    enabled = getattr(registry, "plugins_enabled", bool(getattr(config, "enable_plugins", True) and getattr(config, "enable_tools", True)))
     sandbox = getattr(registry, "plugin_process_sandbox", getattr(registry._construction_params, "plugin_process_sandbox", True))
+    rows = ()
     try:
         rows, stamp = _discover_plugin_manifests(owner) if enabled and owner.identity == OwnerIdentity.local_main() else ((), ())
         active = ({row.activation_id: row for row in rows
@@ -120,7 +143,10 @@ def synchronize_plugin_clients(registry) -> None:
             _unregister_registry_mcp_proxies(registry, (client,))
             registry._mcp_retry_state.pop(id(client), None)
             try:
-                if client.stop().confirmed:
+                receipt = client.stop()
+                released = (isinstance(receipt, ProcessSessionCleanup) and receipt.authority_missing
+                            and _client_activation_released(owner, client, rows))
+                if receipt.confirmed or released:
                     registry._mcp_clients.remove(client)
                 else:
                     unsettled = True
@@ -128,7 +154,9 @@ def synchronize_plugin_clients(registry) -> None:
                 unsettled = True
                 logger.warning("原插件连接清理尚未确认：%s", type(exc).__name__)
     if unsettled:
-        raise RuntimeError("plugin policy transition cleanup unconfirmed")
+        if active:
+            raise RuntimeError("plugin policy transition cleanup unconfirmed")
+        return
     known = {client.activation_ref.scope.activation_id for client in registry._mcp_clients
              if isinstance(client, PluginMCPClient)}
     for identity, installation in active.items():

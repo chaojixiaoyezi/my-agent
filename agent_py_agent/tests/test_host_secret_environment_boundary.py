@@ -100,6 +100,8 @@ def test_mcp_declared_source_filters_default_baseline_but_preserves_native_expli
 
 
 @pytest.mark.parametrize("explicit", [False, True])
+# LLM: 本用例守真实握手环境来源而非默认连接时机，显式即时连接，保留擦洗上界及原生env全部断言。
+# 函数用途: 验证真实根MCP握手保留固定凭据来源并按授权处理显式环境。
 def test_real_root_mcp_handshake_uses_frozen_source_and_retains_native_env(tmp_path, monkeypatch, explicit):
     from agent_py_agent.tests.test_mcp_client import _ENV_ECHO_SERVER
 
@@ -109,7 +111,7 @@ def test_real_root_mcp_handshake_uses_frozen_source_and_retains_native_env(tmp_p
                          mcp_servers={"source-probe": {"command": sys.executable, "args": ["-c", script],
                                                       "env": {"XDG_SOURCE": "native-value"} if explicit else {},
                                                       "host_credential_env_names": ["FORGED"]}})
-    agent = SimpleAgent(config, tmp_path / "source")
+    agent = SimpleAgent(config, tmp_path / "source", defer_mcp_connect=False)
     try:
         assert len(agent.tools._mcp_clients) == 1
         client = agent.tools._mcp_clients[0]

@@ -55,7 +55,7 @@ def register_base_tools(registry: Any, params: Any) -> None:
 
 
 # LLM: 文件类工具与归档读取工具在这里按注册参数构造；source resolver/schema 和语法开关只由宿主注入，三写入口共用配置；
-#   artifact 读取额度只传字符数（窗口固定在工具内），诊断选项在构造时采样；只注册不执行，逐调用仍由 Registry 裁剪目标权限。
+#   关闭插件的实例不绑定包资源解析器或Schema；只注册不执行，逐调用仍由 Registry 裁剪目标权限。
 # 函数用途: 把列目录、找文件、读写文件、搜索和归档读取等工具注册进工具表，装配路径、配额、同源输入及可选诊断。
 def _register_filesystem_tools(registry: Any, params: Any) -> None:
     workspace_roots = registry.workspace_roots
@@ -96,13 +96,38 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
                 max_inline_content_chars=params.tool_write_inline_max_chars,
                 access_options=access_options,
                 runtime_fact_roots=_runtime_fact_roots(registry, params),
-                source_resolver=getattr(params, "file_source_resolver", None),
-                source_ref_schema=getattr(params, "file_source_ref_schema", None),
+                source_resolver=getattr(params, "file_source_resolver", None) if registry.plugins_enabled else None,
+                source_ref_schema=getattr(params, "file_source_ref_schema", None) if registry.plugins_enabled else None,
             ),
         )
     )
     registry.register(ApplyPatchTool(registry.workspace_root, workspace_roots, access_options))
     registry.register(EditFileTool(registry.workspace_root, workspace_roots, access_options))
+    registry._plugin_file_source_enabled = registry.plugins_enabled
+
+
+# LLM: 原prepare锁内只在实例开关变化时替换写工具；访问策略/额度/原resolver均保持同源，旧快照对象不原位改写。
+# 函数用途: 在下一轮恢复或撤回包资源写Schema，不重建其他文件工具。
+def synchronize_file_source_tool(registry: Any) -> None:
+    current = getattr(registry, "tools", {}).get("write_file")
+    if not isinstance(current, WriteFileTool):
+        return
+    enabled = registry.plugins_enabled
+    if getattr(registry, "_plugin_file_source_enabled", enabled) == enabled:
+        return
+    params = registry._construction_params
+    replacement = WriteFileTool(
+        registry.workspace_root, registry.workspace_roots,
+        WriteFileToolOptions(
+            max_inline_content_chars=current.max_inline_content_chars,
+            access_options=current._access_options,
+            runtime_fact_roots=current.runtime_fact_roots,
+            source_resolver=getattr(params, "file_source_resolver", None) if enabled else None,
+            source_ref_schema=getattr(params, "file_source_ref_schema", None) if enabled else None,
+        ),
+    )
+    registry.tools = {**registry.tools, "write_file": replacement}
+    registry._plugin_file_source_enabled = enabled
 
 
 # LLM: 抓取沿原G4门；单向推送另有固定路径/节点凭据/私网门，不变成任意Gateway请求。构造不执行网络；Shell选项在构造时采样。

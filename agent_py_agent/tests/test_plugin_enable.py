@@ -96,6 +96,7 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         view.prepare_for_run()
         registry.prepare_for_run()
         assert name not in view.tools and name not in registry.tools
+        assert client.is_closed() and client not in registry._mcp_clients
         assert "read_file" in registry.tools
         new = confirm_legacy_enable(service, preview_legacy_enable(service, "sample-peek", "reenable"))
         assert new["state"] == "succeeded", new

@@ -689,13 +689,17 @@ def _register_native_tools(registry, params):
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
 # 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
-    # LLM: 每个工具门面独立；MCP生命周期锁协调借用/关闭/重开，prepare锁仍仅串行连接与目录刷新。
+    # LLM: 每个工具门面独立；固定owner只供原实例下轮恢复，关闭时构造投影不注入插件；共享锁仅协调原连接生命周期。
     # 函数用途: 初始化owner工具表和唯一连接生命周期，按宿主参数决定何时首次连接。
     def __init__(
         self,
         params: ToolRegistryParams,
     ):
         self._construction_params = params
+        self._plugin_owner = params.plugin_owner
+        if params.plugin_owner is not None and not self.plugins_enabled:
+            params = replace(params, plugin_owner=None)
+            self._construction_params = params
         self._mcp_prepare_lock = threading.Lock()
         self._mcp_closed = threading.Event()
         self._mcp_retry_state: dict[int, tuple[int, float]] = {}
@@ -784,6 +788,13 @@ class ToolRegistry:
     @property
     def capability_pack_mcp_enabled(self) -> bool:
         return self._live_bool("capability_pack_mcp_enabled")
+
+    # LLM: 只读当前实例配置；裸注册表沿既有启用默认，不读全局开关或派生新的owner授权。
+    # 函数用途: 让插件注册和资源Schema共用同一实例的实时总开关。
+    @property
+    def plugins_enabled(self) -> bool:
+        config = getattr(self._construction_params, "live_config", None)
+        return bool(getattr(config, "enable_plugins", True) and getattr(config, "enable_tools", True))
 
     # LLM: 权限视图共享状态/锁/池和原目录owner；已开始标记不代表已完成，后继调用须等锁内发现结束再投影。
     # 函数用途: 只执行一次普通MCP初连并同步当前视图目录，关闭后不复活，返回本次是否首次连接。
@@ -1398,7 +1409,7 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
         registry._mcp_retry_state.clear()
 
 
-# LLM: 新注册表首次连接经原幂等入口；没有服务状态或动态配置的旧装配只恢复原客户端，不另建连接或猜配置。
+# LLM: 原锁内同步资源写Schema与连接；旧装配只恢复原客户端，退休资源不重连，旧快照不原位修改。
 # 函数用途: 为新运行准备MCP连接并投影视图，保留旧宿主装配的退避与关闭语义。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
@@ -1407,7 +1418,7 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if hasattr(registry, "_mcp_connected_state"):
         initial_connect = registry.ensure_mcp_connected()
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
-    plugin_owner = registry._construction_params.plugin_owner
+    plugin_owner = getattr(registry, "_plugin_owner", registry._construction_params.plugin_owner)
     dynamic_servers = (getattr(registry._construction_params, "mcp_servers_provider", None) is not None
                        or getattr(registry._construction_params, "live_config", None) is not None)
     if not dynamic_servers and plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
@@ -1415,6 +1426,9 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     with registry._mcp_prepare_lock:
         if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
             return
+        from .registry_bootstrap import synchronize_file_source_tool
+
+        synchronize_file_source_tool(registry)
         if not initial_connect and (dynamic_servers or hasattr(registry, "_mcp_servers_state")):
             _synchronize_registry_mcp_servers(registry)
         if plugin_owner is not None:
@@ -1422,6 +1436,8 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
 
             synchronize_plugin_clients(registry)
         for client in list(getattr(registry, "_mcp_clients", ()) or ()):
+            if getattr(client, "_registry_policy_retiring", False):
+                continue
             if getattr(client, "lazy", False):
                 client.idle_stop_if_due(time.monotonic(), registry._construction_params.capability_pack_mcp_idle_stop_seconds)
                 continue
