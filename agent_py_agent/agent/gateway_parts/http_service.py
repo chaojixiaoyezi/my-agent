@@ -16,6 +16,7 @@ GET /result/<id>、GET /progress/<id>、GET /status、POST /stop、POST /client/
 
 import errno
 import importlib
+import inspect
 import itertools
 import json
 import os
@@ -347,6 +348,23 @@ def local_credential_data_root(agent: object) -> Path | None:
     return data_root
 
 
+# LLM: Count0 的车道参数只传给声明支持的旧监听工厂；签名不可读时保留原参数与错误，不重试构造。
+# 函数用途: 按监听工厂签名过滤可选车道参数，不吞掉工厂内部的 TypeError。
+def _count0_listener_options(options: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parameters = inspect.signature(GatewayBoundedHTTPServer).parameters
+    except (TypeError, ValueError):
+        return options
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return options
+    return {
+        name: value for name, value in options.items()
+        if name in parameters and parameters[name].kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+
+
 # LLM: This wrapper owns the lifecycle of exactly one concurrent HTTP listener. Changes must keep
 # exposure checks before bind, preserve the module-global handler context, and stop cleanly without
 # changing request/owner serialization inside Gateway services.
@@ -411,6 +429,7 @@ class GatewayHTTPServer:
     # LLM: 唯一监听启动点，原认证配置/依赖、暴露及G1检查先于bind/全局指针；漏middleware自动保护，不安全部署拒绝，
     #   拒绝发生在设置全局指针与 bind 之前；停机不删凭据。
     # LLM: C设施源在认证/凭据/全局副作用前核，原controller/lease末门内保pool/listener出生；等待和关闭门外，原main鉴权/端口保护保持。
+    # LLM: 仅Count0可选车道参数按旧工厂签名适配；正count的排空来源参数必须完整传递，构造只调用一次。
     # 函数用途: 保留原设施来源后启动HTTP及独立宿主流池，ACK失败仍留原Runtime资源责任。
     def start(self) -> None:
         require_http_transport(self.drain_runtime, control=self.control_plane, paths=self.paths)
@@ -434,6 +453,8 @@ class GatewayHTTPServer:
                 "request_worker_failure": group.retain_fault,
                 "drain_runtime": self.drain_runtime, "drain_resource": group,
             }
+            if group is None:
+                options = _count0_listener_options(options)
             self.server = GatewayBoundedHTTPServer((self.bind_host, self.port), GatewayHTTPHandler, **options)
             if group is not None:
                 group.bind_executor(self.server._request_executor)
@@ -542,6 +563,7 @@ class GatewayHTTPServer:
             }
 
     # LLM: 先关同C记忆准入及宿主API来源/流池，再沿原HTTP关闭序；不刷新pending，不声称业务资源已停。
+    # LLM: 旧构造或未建流池时视为无资源；已有流池仍摘引用并关闭一次，不妨碍插件通道终态封闭。
     # 函数用途: 停止原服务，使已有HTTP后继写入与插件宿主调用失效。
     def stop(self, timeout: float = 5.0) -> None:
         global _server_instance
@@ -552,7 +574,7 @@ class GatewayHTTPServer:
             self.coordinator_memory_resources.close_admission()
         if getattr(self, "plugin_host", None) is not None:
             self.plugin_host.close()
-        pool, self.business_stream_pool = self.business_stream_pool, None
+        pool, self.business_stream_pool = getattr(self, "business_stream_pool", None), None
         if pool is not None:
             pool.close()
         set_host_api_base(None)
