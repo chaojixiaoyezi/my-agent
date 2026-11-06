@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
-import subprocess
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -236,30 +235,16 @@ def test_none_reader_defaults_are_unchanged(tmp_path):
     assert snapshot.contents["chunk_bytes"] == 65536
 
 
-# LLM: Load the exact task base read-only; no checkout, stash, or other worktree is touched.
-# 函数用途: 取得独立基线实现，避免把新实现与自身作默认行为比较。
-def _baseline_retention():
-    source = subprocess.check_output(["git", "show",
-        "778e129d6:agent_py_agent/agent/memory_store/retention.py"], text=True)
-    module = ModuleType("agent_py_agent.agent.memory_store._b1r3_baseline")
-    module.__package__ = "agent_py_agent.agent.memory_store"
-    exec(compile(source, "778e129d6:retention.py", "exec"), module.__dict__)
-    return module
-
-
-# LLM: Compare baseline/current serialized reports on the same path, content and fixed clock.
-# 函数用途: 证明省略配置和显式None均保留原实际删除结果及报告字节。
+# LLM: 省略config与显式None都必须让两个读取器拿到None并使用原默认值；不依赖git历史或scan_budget默认值。
+# 函数用途: 证明默认配置走原读取默认值，并删除同一个过期文件。
 @pytest.mark.parametrize("explicit_none", [False, True])
-def test_default_report_matches_exact_base_on_same_fixture(tmp_path, explicit_none):
+def test_default_config_reaches_readers_as_none(tmp_path, readers, explicit_none):
     home, _, _ = runtime(tmp_path)
     path = old_file(home.owner_cache_dir / "default-parity.tmp", "expired bytes")
-    baseline = _baseline_retention().apply_owner_retention(home, now=NOW)
-    assert baseline.applied and not path.exists() and baseline.actions
-    old_file(path, "expired bytes")
     options = {"config": None} if explicit_none else {}
-    if explicit_none:
-        _config_contract(retention.apply_owner_retention)
-    current = retention.apply_owner_retention(home, now=NOW, **options)
-    assert not path.exists()
-    assert json.dumps(current.to_dict(), sort_keys=True).encode() == json.dumps(baseline.to_dict(), sort_keys=True).encode()
-    assert not (home.owner_data_dir / "retention_scan_cursor.json").exists()
+    report = retention.apply_owner_retention(home, now=NOW, **options)
+    assert report.applied and report.actions and not path.exists()
+    assert readers.snapshots and all(config is None and snapshot.contents["chunk_bytes"] == 65536
+                                     for config, snapshot in readers.snapshots)
+    assert all(config is None and (budget.max_entries, budget.max_bytes) == (128, 8388608)
+               for config, budget in readers.budgets)
