@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import threading
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
@@ -22,7 +22,10 @@ _ACTIVATION_AVAILABILITY_MEMO: OrderedDict[tuple, tuple[Path, tuple]] = OrderedD
 _AVAILABILITY_LOCK = threading.Lock()
 
 
-def remember_available_installations(owner: OwnerHomeResult, rows: tuple, signature: tuple) -> None:
+# LLM: 可选配置仅限定共享正缓存的条数，锁内 FIFO 淘汰；缓存不参与执行门或持久化授权。
+# 函数用途: 预热已读且指纹可信的展示缓存，缺省保持旧容量。
+def remember_available_installations(owner: OwnerHomeResult, rows: tuple, signature: tuple,
+                                     *, config: object | None = None) -> None:
     """复用注册层已完整解码且前后指纹相等的 main 表；只预热展示正缓存，不给执行门读。"""
     if owner.identity != OwnerIdentity.local_main():
         return
@@ -36,10 +39,17 @@ def remember_available_installations(owner: OwnerHomeResult, rows: tuple, signat
                 if row.enabled:
                     key = (str(owner.root), owner.identity, row.manifest.plugin_id, row.activation_id)
                     _ACTIVATION_AVAILABILITY_MEMO[key] = (path, signature)
-            while len(_ACTIVATION_AVAILABILITY_MEMO) > ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES:
+            while len(_ACTIVATION_AVAILABILITY_MEMO) > _memo_max_entries(config):
                 _ACTIVATION_AVAILABILITY_MEMO.popitem(last=False)
     except (OSError, ValueError):
         return
+
+
+# LLM: 可选容量只影响内存正缓存，不参与身份比较或私有信封；无效配置不产生无界缓存。
+# 函数用途: 读取宿主给定的正整数展示缓存容量，缺省保留兼容值。
+def _memo_max_entries(config: object | None) -> int:
+    value = getattr(config, "plugin_activation_memo_max_entries", ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES)
+    return value if type(value) is int and value > 0 else ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES
 
 
 # LLM: root 与 identity 必须来自可信宿主，scope 只绑定原代；序列化用于私有启动信封，不能接受模型提供的权限地址。
@@ -49,6 +59,7 @@ class PluginActivationRef:
     root: str
     identity: OwnerIdentity
     scope: ProcessActivationScope
+    _memo_limit: int = field(default=ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES, repr=False, compare=False)
 
     # LLM: 不把畸形身份清洗成另一个合法用户；原 resolver 与资源 scope 必须得出完全相同的规范地址。
     # 函数用途: 拒绝不完整、非规范或归属冲突的引用，构造不创建目录。
@@ -69,12 +80,14 @@ class PluginActivationRef:
                 raise ValueError("插件用户身份不是规范路径段")
         self.owner()
 
-    # LLM: 只接受宿主既有 owner 解析结果，不能从工作目录、首个业务会话或权限视图反推用户。
+    # LLM: 只接受宿主既有 owner 解析结果，不能从工作目录、首个业务会话或权限视图反推用户；缓存容量不授予执行权。
     # 函数用途: 在组合入口为同一安装的固定代次创建引用。
     @classmethod
-    def from_owner(cls, owner: OwnerHomeResult, plugin_id: str, activation_id: str) -> PluginActivationRef:
+    def from_owner(cls, owner: OwnerHomeResult, plugin_id: str, activation_id: str,
+                   *, config: object | None = None) -> PluginActivationRef:
         return cls(str(owner.root), owner.identity,
-                   ProcessActivationScope(owner.owner_id, str(owner.home_dir), plugin_id, activation_id))
+                   ProcessActivationScope(owner.owner_id, str(owner.home_dir), plugin_id, activation_id),
+                   _memo_limit=_memo_max_entries(config))
 
     # LLM: 每次重新解析并比对原绝对地址；根目录被重定向不能悄悄读取另一份安装权威。
     # 函数用途: 还原同一用户的规范路径，不初始化 Agent 或写文件。
@@ -100,10 +113,14 @@ class PluginActivationRef:
             raise PermissionError("插件运行仅限管理员")
         return current
 
+    # LLM: 容量在命中和新增路径都受控；只加速展示，发送仍沿 require 鲜活读取唯一安装表。
+    # 函数用途: 有界检查固定激活的展示可用性，不缓存发送权限。
     def available(self) -> bool:
         """有界展示检查；未命中仍完整复核原 owner/代次，发送的 require 永不复用这里的结果。"""
         key = (self.root, self.identity, self.scope.plugin_id, self.scope.activation_id)
         with _AVAILABILITY_LOCK:
+            while len(_ACTIVATION_AVAILABILITY_MEMO) > self._memo_limit:
+                _ACTIVATION_AVAILABILITY_MEMO.popitem(last=False)
             try:
                 path = self.owner().plugins_dir / "installations.json"
                 before = os.stat(path, follow_symlinks=False)
@@ -116,7 +133,7 @@ class PluginActivationRef:
                 after = os.stat(path, follow_symlinks=False)
                 if cache_stat_signature(after) == signature and cache_entry_trustworthy(after.st_mtime_ns):
                     _ACTIVATION_AVAILABILITY_MEMO[key] = (path, signature)
-                    while len(_ACTIVATION_AVAILABILITY_MEMO) > ACTIVATION_AVAILABILITY_MEMO_MAX_ENTRIES:
+                    while len(_ACTIVATION_AVAILABILITY_MEMO) > self._memo_limit:
                         _ACTIVATION_AVAILABILITY_MEMO.popitem(last=False)
                 return True
             except (OSError, ValueError):

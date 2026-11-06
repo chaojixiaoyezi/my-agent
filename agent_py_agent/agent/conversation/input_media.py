@@ -15,11 +15,12 @@ from pathlib import Path
 from threading import Lock
 
 from ..common.nofollow_fs import ensure_private_dir
+from ..settings.config import AgentConfig
 
 # 单条输入媒体默认最大 16 MiB：超出拒绝，防超大附件拖垮请求。
-DEFAULT_MEDIA_BYTES = 16 * 1024 * 1024
+DEFAULT_MEDIA_BYTES = AgentConfig.input_media_max_bytes
 # 一次请求默认最多 8 个媒体文件：限制批量上传成本。
-DEFAULT_MEDIA_FILES = 8
+DEFAULT_MEDIA_FILES = AgentConfig.input_media_max_files
 # 模型可见附件清单在原生 IR 里的宿主来源标记（RuntimeFactsTurn.source）；派工解析端不读这段文字，只认 sha256。
 INPUT_MEDIA_MANIFEST_SOURCE = "input_media_manifest"
 # LLM: 每次提交独占一份小观察；worker Context只定位它，caller沿同次params引用读取，迟到worker不能覆盖新调用。

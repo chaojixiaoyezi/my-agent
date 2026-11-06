@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.error
 import zlib
-from dataclasses import dataclass, replace
+from dataclasses import InitVar, dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,7 @@ from .web_html_preview import is_html_response, visible_html_text
 from .web_http_helpers import MIN_RESPONSE_PREVIEW_CHARS
 from .web_markdown import html_to_markdown
 
-# 从网络读取的响应体上限（字节，含解压后）；给模型的字符上限另见 web_http_helpers.MAX_BODY_CHARS。
+# 从网络读取的响应体兼容上限（字节，含解压后）；请求体字符预算与展示预览分别控制。
 _MAX_BODY_BYTES = 1_000_000
 _TEXTUAL_CONTENT_MARKERS = (
     "text/",
@@ -53,6 +53,8 @@ class RawResponseParts:
     credential_selection: dict | None = None
 
 
+# LLM: 可选配置只在构造时取响应字节预算；显式 max_bytes 优先，重定向 replace 保留已冻结上限。
+# 类用途: 保存一次逐跳 HTTP 传输请求，不持有运行配置或改变网络授权。
 @dataclass(frozen=True)
 class FetchRawRequest:
     tool: str
@@ -61,8 +63,17 @@ class FetchRawRequest:
     headers: dict[str, str]
     data: bytes | None
     timeout: int
-    max_bytes: int = _MAX_BODY_BYTES
+    max_bytes: int | None = None
     authorization_origin: str = ""
+    config: InitVar[object | None] = None
+
+    # LLM: 缺失或无效配置沿旧百万字节兜底；不接受 bool、非整数或非正预算，不改调用者显式覆盖。
+    # 函数用途: 为本次请求冻结可用于读取和逐层解压的同一字节上限。
+    def __post_init__(self, config: object | None) -> None:
+        if self.max_bytes is None:
+            value = getattr(config, "web_response_body_max_bytes", _MAX_BODY_BYTES)
+            limit = value if type(value) is int and value > 0 else _MAX_BODY_BYTES
+            object.__setattr__(self, "max_bytes", limit)
 
 
 @dataclass(frozen=True)

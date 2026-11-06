@@ -8,7 +8,7 @@ from typing import Any
 
 from .models import ToolHandlerOutcome
 
-# HTTP 响应体最多取 100 万字符：超长响应截断，防超大 body 撑爆上下文。
+# HTTP 请求体兼容上限为 100 万字符；不与传输响应字节上限或展示预览混用。
 MAX_BODY_CHARS = 1_000_000
 # 响应正文预览的下限（web 工具共用一份）：模型请求的 max_chars 不低于它，HTTP 错误正文也按它截取预览。
 MIN_RESPONSE_PREVIEW_CHARS = 256
@@ -36,7 +36,13 @@ class HttpRequestParts:
     max_chars: int
 
 
-def scalar_text(value: Any, *, name: str, max_chars: int, allow_empty: bool = False) -> str:
+# LLM: 显式字符上限优先；正文缺省读取宿主配置，字节预算和 URL/方法的显式限制不受影响。
+# 函数用途: 校验标量文本及请求体字符预算，不发网络请求。
+def scalar_text(value: Any, *, name: str, max_chars: int | None = None,
+                allow_empty: bool = False, config: object | None = None) -> str:
+    if max_chars is None:
+        configured = getattr(config, "web_request_body_max_chars", MAX_BODY_CHARS)
+        max_chars = configured if type(configured) is int and configured > 0 else MAX_BODY_CHARS
     if value is None:
         raise ValueError(f"缺少必填参数 {name}")
     if not isinstance(value, (str, int, float, bool)):
