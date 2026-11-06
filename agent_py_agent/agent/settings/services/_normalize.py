@@ -772,24 +772,20 @@ def validate_runner_role_limits(value: object) -> dict[str, int]:
 
 
 # LLM: __post_init__/replace使用严格校验，不用YAML的错误回默认掩盖编程错误；仅归一float类型和复制角色映射。
-# 函数用途: 拒绝非法构造、无效联合约束和伪布尔镜像开关。
+# 函数用途: 拒绝非法构造和请求容量联合约束。
 def validate_central_parameters(config: object) -> None:
     for item in _central_numeric_fields(type(config)):
         value = getattr(config, item.name)
         _validate_central_number(item, value)
         if item.type in (float, "float"):
             setattr(config, item.name, float(value))
-    if type(config.store_event_mirror_enabled) is not bool:
-        raise ValueError("store_event_mirror_enabled: 必须是bool")
     config.runner_role_limits = validate_runner_role_limits(config.runner_role_limits)
     if config.gateway_http_max_outstanding_requests < config.gateway_http_max_request_workers:
         raise ValueError("gateway_http_max_outstanding_requests: 必须不小于gateway_http_max_request_workers")
-    if config.owner_quota_pressure_high_percent >= config.owner_quota_pressure_critical_percent:
-        raise ValueError("owner_quota_pressure_high_percent/owner_quota_pressure_critical_percent: 必须high<critical")
 
 
-# LLM: YAML沿既有coercion归一，非法值告警回默认；联合回落后仍必须满足workers和quota关系，不接线消费者。
-# 函数用途: 将24键的原始配置归一为可安全构造的有效值。
+# LLM: YAML沿既有coercion归一，非法值告警回默认；联合回落后仍必须满足请求容量关系，不接线消费者。
+# 函数用途: 将集中参数的原始配置归一为可安全构造的有效值。
 def _normalize_central_parameters(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
     out, warnings = dict(data), []
     for item in _central_numeric_fields(type(defaults)):
@@ -803,9 +799,6 @@ def _normalize_central_parameters(data: dict[str, object], defaults: object) -> 
             value, warn = default, f"{key}: 非法类型、非有限数或超出范围；使用默认值"
         out[key] = value
         _append_warning(warnings, warn)
-    key = "store_event_mirror_enabled"
-    out[key], warn = CoercionService.coerce_bool(key, out.get(key), getattr(defaults, key))
-    _append_warning(warnings, warn)
     try:
         out["runner_role_limits"] = validate_runner_role_limits(out.get("runner_role_limits", defaults.runner_role_limits))
     except ValueError as error:
@@ -815,10 +808,6 @@ def _normalize_central_parameters(data: dict[str, object], defaults: object) -> 
     if out[outstanding] < out[workers]:
         out[outstanding] = max(getattr(defaults, outstanding), out[workers])
         warnings.append(f"{outstanding}: 小于{workers}；回落到满足联合约束的容量")
-    high, critical = "owner_quota_pressure_high_percent", "owner_quota_pressure_critical_percent"
-    if out[high] >= out[critical]:
-        out[high], out[critical] = getattr(defaults, high), getattr(defaults, critical)
-        warnings.append(f"{high}/{critical}: 必须high<critical；两项共同回默认值")
     return out, warnings
 
 
@@ -842,7 +831,7 @@ class AgentConfigNormalizer:
     """Service for normalizing all non-memory AgentConfig fields."""
 
     # LLM: 原服务顺序不变，最后按字段元数据归一集中参数；仅返回候选和告警，不写盘或调用消费者。
-    # 函数用途: 统一原配置和24个新增字段的类型、范围及联合约束。
+    # 函数用途: 统一原配置和集中字段的类型、范围及联合约束。
     @staticmethod
     def normalize(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         """Validate and coerce all non-memory AgentConfig fields with safe defaults."""

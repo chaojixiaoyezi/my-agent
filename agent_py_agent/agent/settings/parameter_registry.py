@@ -46,7 +46,13 @@ RUNTIME_GUARD_SOURCE_TEXT = (
 )
 # 359 决策表的 deployment_only，按 v2 显式把 gateway_user_inflight_limit 留在高级管理员层。
 # 原表 99 项减这一项得到 98；不擅自迁移另一项来凑总数。运行时不依赖任务目录或生成副本。
-_HOST_CAPACITY_KEYS = frozenset(item.name for item in fields(AgentConfig) if item.metadata.get("model_read_only"))
+# 宿主容量键保持显式字面量以供静态门禁解析；测试核对配置元数据，新增字段不得自动扩大权限集合。
+_HOST_CAPACITY_KEYS = frozenset({
+    "gateway_http_listen_backlog", "gateway_http_max_request_workers", "gateway_http_max_outstanding_requests",
+    "gateway_http_socket_timeout_seconds", "gateway_http_queue_timeout_seconds", "gateway_http_birth_gate_timeout_seconds",
+    "curator_daily_quota", "retention_scan_slice_entries", "retention_scan_slice_bytes", "retention_scan_slice_ms",
+    "memory_reference_pin_chunk_bytes",
+})
 DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "max_background_agents",
     "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",

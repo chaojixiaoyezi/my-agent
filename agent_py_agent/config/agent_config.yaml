@@ -1243,8 +1243,6 @@ curator_daily_quota: 5000
 # 每批次按角色接纳的数量上限，单位个/批次，默认空映射；值严格非负整数，拒绝布尔，0不接纳该角色。
 # 不是跨批次总并发上限；可由模型调整策略，角色名归一为小写，配置重启加载。
 runner_role_limits: {}
-# 事件 JSONL 镜像开关，布尔值无数量单位，默认关闭；不改变正式事件权威，宿主参数，重启加载。
-store_event_mirror_enabled: false
 # 请求提交传输阶段的等待上限，单位秒，0.1..300；与 gateway_request_timeout 取较小值，不是结果等待超时，重启加载。
 gateway_submission_timeout_cap_seconds: 30.0
 # 留存扫描每片最多处理的条目数，单位条，至少1；宿主预算，保留现有游标与状态机，重启加载。
@@ -1255,23 +1253,7 @@ retention_scan_slice_bytes: 8388608
 retention_scan_slice_ms: 25
 # 记忆引用 pin source 的分块读取尺寸，单位字节，至少1024，默认64 KiB；宿主参数，重启加载。
 memory_reference_pin_chunk_bytes: 65536
-# Web HTTP 响应体单次读取预算，单位字节，至少1024；仍受宿主聚合预算约束，不是展示字符上限，重启加载。
-web_response_body_max_bytes: 1000000
-# Web HTTP 请求体单次输入预算，单位字符，至少1024；与响应字节预算独立，模型可调策略，重启加载。
-web_request_body_max_chars: 1000000
-# 能力包 MCP 服务连接期限，单位秒，严格大于0且有限，仍服从外层启动deadline；宿主参数，重启加载。
-plugin_pack_mcp_connect_timeout_seconds: 10.0
-# 插件激活memo的容量，单位条，至少1；缓存只做加速，不作为授权事实，宿主参数，重启加载。
-plugin_activation_memo_max_entries: 1024
 # 推理能力探测的输出上限，单位tokens，至少1；仍受模型档案上限约束，模型可调策略，重启加载。
 reasoning_probe_max_output_tokens: 40000
 # 推理能力探测的请求期限，单位秒，严格大于0且有限；模型可调策略，重启加载。
 reasoning_probe_timeout_seconds: 180.0
-# Owner用量压力高水位，单位百分比，0≤high<critical≤100；宿主配额只读，重启加载。
-owner_quota_pressure_high_percent: 85
-# Owner用量压力临界水位，单位百分比，0≤high<critical≤100；不引入low水位，宿主配额只读，重启加载。
-owner_quota_pressure_critical_percent: 95
-# 永久资产在配额之上的额外额度，单位百分比，0..100；不是空闲空间预留率，宿主参数，重启加载。
-owner_quota_permanent_headroom_percent: 5
-# 永久资产pending growth预算，单位字节，至少1，默认32 MiB；不增设1 GiB统一上限，宿主参数，重启加载。
-owner_quota_permanent_pending_growth_bytes: 33554432

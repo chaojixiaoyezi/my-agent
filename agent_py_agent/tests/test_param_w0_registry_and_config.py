@@ -1,7 +1,8 @@
 # LLM: PARAM-W0 只验配置权威、参数权限及正式写入，不将配置存在外推为消费者接线或部署成功。
-# 模块用途: 锁定24键默认、类型范围、联合约束和角色数量映射事务。
+# 模块用途: 锁定15键默认、类型范围、联合约束和角色数量映射事务。
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import fields, replace
 from pathlib import Path
@@ -23,26 +24,16 @@ DEFAULTS = {
     "gateway_http_birth_gate_timeout_seconds": 1.0,
     "curator_daily_quota": 5000,
     "runner_role_limits": {},
-    "store_event_mirror_enabled": False,
     "gateway_submission_timeout_cap_seconds": 30.0,
     "retention_scan_slice_entries": 128,
     "retention_scan_slice_bytes": 8388608,
     "retention_scan_slice_ms": 25,
     "memory_reference_pin_chunk_bytes": 65536,
-    "web_response_body_max_bytes": 1000000,
-    "web_request_body_max_chars": 1000000,
-    "plugin_pack_mcp_connect_timeout_seconds": 10.0,
-    "plugin_activation_memo_max_entries": 1024,
     "reasoning_probe_max_output_tokens": 40000,
     "reasoning_probe_timeout_seconds": 180.0,
-    "owner_quota_pressure_high_percent": 85,
-    "owner_quota_pressure_critical_percent": 95,
-    "owner_quota_permanent_headroom_percent": 5,
-    "owner_quota_permanent_pending_growth_bytes": 33554432,
 }
 STRATEGY_KEYS = {
     "runner_role_limits", "gateway_submission_timeout_cap_seconds",
-    "web_response_body_max_bytes", "web_request_body_max_chars",
     "reasoning_probe_max_output_tokens", "reasoning_probe_timeout_seconds",
 }
 HOST_KEYS = DEFAULTS.keys() - STRATEGY_KEYS
@@ -58,12 +49,7 @@ INVALID_NUMBERS = [
     ("gateway_submission_timeout_cap_seconds", 0.09), ("gateway_submission_timeout_cap_seconds", 301),
     ("retention_scan_slice_entries", 0), ("retention_scan_slice_bytes", 1023),
     ("retention_scan_slice_ms", 0), ("memory_reference_pin_chunk_bytes", 1023),
-    ("web_response_body_max_bytes", 1023), ("web_request_body_max_chars", 1023),
-    ("plugin_pack_mcp_connect_timeout_seconds", 0), ("plugin_activation_memo_max_entries", 0),
     ("reasoning_probe_max_output_tokens", 0), ("reasoning_probe_timeout_seconds", 0),
-    ("owner_quota_pressure_high_percent", -1), ("owner_quota_pressure_critical_percent", 101),
-    ("owner_quota_permanent_headroom_percent", -1), ("owner_quota_permanent_headroom_percent", 101),
-    ("owner_quota_permanent_pending_growth_bytes", 0),
 ]
 INVALID_ROLE_LIMITS = [
     [], None, "worker=1", {"worker": True}, {"worker": -1}, {"worker": 1.0},
@@ -86,7 +72,7 @@ def defaults_snapshot():
 
 
 # LLM: 原始token按mini-YAML契约逐值比对，正式构造/loader/registry严格比较数值类型，不用raw token冒充运行值。
-# 函数用途: 核对24键定义、默认类型、中文说明和重载语义。
+# 函数用途: 核对15键定义、默认类型、中文说明和重载语义。
 @pytest.mark.parametrize("key,expected", DEFAULTS.items())
 def test_defaults_yaml_and_registry_agree(key, expected, defaults_snapshot):
     _require_schema()
@@ -155,14 +141,11 @@ def test_direct_constructor_rejects_bad_numeric_types(key, bad):
         AgentConfig(**{key: bad})
 
 
-# LLM: 约束是 workers/outstanding 和 high/critical 的真实关系，不擅自引入其它统一上限。
+# LLM: 联合约束只保留请求线程数与总接纳容量的真实关系，不擅自引入其它统一上限。
 # 函数用途: 验证非法组合在直接构造被拒绝、在 YAML 归一后保持有效并告警。
 @pytest.mark.parametrize("values,marker", [
     ({"gateway_http_max_request_workers": 512, "gateway_http_max_outstanding_requests": 16}, "gateway_http_max_outstanding_requests"),
     ({"gateway_http_max_request_workers": 512}, "gateway_http_max_outstanding_requests"),
-    ({"owner_quota_pressure_high_percent": 95, "owner_quota_pressure_critical_percent": 95}, "owner_quota_pressure"),
-    ({"owner_quota_pressure_high_percent": 98, "owner_quota_pressure_critical_percent": 90}, "owner_quota_pressure"),
-    ({"owner_quota_pressure_critical_percent": 40}, "owner_quota_pressure"),
 ])
 def test_joint_constraints(values, marker):
     _require_schema()
@@ -170,11 +153,10 @@ def test_joint_constraints(values, marker):
         AgentConfig(**values)
     out, warnings = normalize_agent_config(values)
     assert out["gateway_http_max_outstanding_requests"] >= out["gateway_http_max_request_workers"]
-    assert 0 <= out["owner_quota_pressure_high_percent"] < out["owner_quota_pressure_critical_percent"] <= 100
     assert any(marker in warning for warning in warnings)
 
 
-# LLM: 所有有效边界保留原语义；quota 0 不限额、角色0禁止本批接纳、永久额外额度不是预留率。
+# LLM: 所有有效边界保留原语义；curator quota 0 不限额，角色0禁止本批接纳。
 # 函数用途: 检查有效极值、开放上限以及相互独立的角色映射默认。
 def test_valid_boundaries_and_default_factory():
     _require_schema()
@@ -183,14 +165,10 @@ def test_valid_boundaries_and_default_factory():
         "gateway_http_max_outstanding_requests": 1024, "gateway_http_socket_timeout_seconds": 0.1,
         "gateway_http_queue_timeout_seconds": 0.01, "gateway_http_birth_gate_timeout_seconds": 0.01,
         "curator_daily_quota": 0, "runner_role_limits": {" Worker ": 0, "*": 3},
-        "store_event_mirror_enabled": True, "gateway_submission_timeout_cap_seconds": 300.0,
+        "gateway_submission_timeout_cap_seconds": 300.0,
         "retention_scan_slice_entries": 1, "retention_scan_slice_bytes": 1024, "retention_scan_slice_ms": 1,
-        "memory_reference_pin_chunk_bytes": 1024, "web_response_body_max_bytes": 1024,
-        "web_request_body_max_chars": 1024, "plugin_pack_mcp_connect_timeout_seconds": 0.000001,
-        "plugin_activation_memo_max_entries": 1, "reasoning_probe_max_output_tokens": 1,
-        "reasoning_probe_timeout_seconds": 0.000001, "owner_quota_pressure_high_percent": 0,
-        "owner_quota_pressure_critical_percent": 100, "owner_quota_permanent_headroom_percent": 100,
-        "owner_quota_permanent_pending_growth_bytes": 2**40,
+        "memory_reference_pin_chunk_bytes": 1024, "reasoning_probe_max_output_tokens": 1,
+        "reasoning_probe_timeout_seconds": 0.000001,
     }
     config = AgentConfig(**values)
     expected = {**values, "runner_role_limits": {"worker": 0, "*": 3}}
@@ -202,17 +180,6 @@ def test_valid_boundaries_and_default_factory():
     first.runner_role_limits["worker"] = 1
     assert second.runner_role_limits == {}
     assert values["runner_role_limits"] == {" Worker ": 0, "*": 3}
-
-
-# LLM: schema 的布尔开关走原 coercion；直接构造要求真实 bool，不能用非空字符串误开镜像。
-# 函数用途: 验证镜像开关的类型和字符串 false 的正确归一。
-def test_mirror_boolean_normalization_and_validation():
-    _require_schema()
-    for value, expected in [("false", False), ("true", True), (False, False), (True, True)]:
-        out, warnings = normalize_agent_config({"store_event_mirror_enabled": value})
-        assert out["store_event_mirror_enabled"] is expected and not warnings
-    with pytest.raises(ValueError, match="store_event_mirror_enabled"):
-        AgentConfig(store_event_mirror_enabled="false")
 
 
 # LLM: 角色数量只允许严格非负整数；整份非法映射回落且警告，不保留其中部分条目。
@@ -228,7 +195,7 @@ def test_role_limits_reject_invalid_mapping(bad):
 
 
 # LLM: 参数权限不仅展示，还应在正式 writer 拒绝模型及认证用户局部覆写宿主容量。
-# 函数用途: 验证18个容量/配额键模型只读，6个逐任务策略具备真实写路线。
+# 函数用途: 验证11个容量/配额键模型只读，4个逐任务策略具备真实写路线。
 def test_registry_permissions_and_host_write_refusal(tmp_path):
     registry = parameter_registry()
     assert DEFAULTS.keys() <= registry.keys()
@@ -252,11 +219,10 @@ def test_registry_permissions_and_host_write_refusal(tmp_path):
 
 
 # LLM: 使用正式事务、加载器与台账验证策略写入；不是只断言字段存在或假回执。
-# 函数用途: 验证6个策略的写入、读取和恢复默认。
+# 函数用途: 验证4个策略的写入、读取和恢复默认。
 @pytest.mark.parametrize("key,value", [
     ("runner_role_limits", {"Worker": 0, "reviewer": 3}),
     ("gateway_submission_timeout_cap_seconds", 17.5),
-    ("web_response_body_max_bytes", 2048), ("web_request_body_max_chars", 4096),
     ("reasoning_probe_max_output_tokens", 2000), ("reasoning_probe_timeout_seconds", 12.5),
 ])
 def test_strategy_writer_round_trip(tmp_path, key, value):
@@ -312,3 +278,30 @@ def test_strategy_invalid_bounds_never_commit(tmp_path, key, value):
     report = changes.set_parameter(key, value, paths=changes.WritePaths(path), origin=changes.ChangeOrigin("model"))
     assert report["ok"] is False, report
     assert path.read_bytes() == before and not changes.ledger_path(path).exists()
+
+
+# LLM: 开关门禁只接受可静态解析的宿主集合；元数据相等性不能替代字面量约束，集合不能随新增字段自动扩权。
+# 函数用途: 同时锁定宿主键的静态声明、十一键名单和配置元数据一致性。
+def test_host_capacity_keys_are_static_and_match_schema():
+    from agent_py_agent.agent.settings.parameter_registry import _HOST_CAPACITY_KEYS
+
+    source = Path(__file__).resolve().parents[1] / "agent" / "settings" / "parameter_registry.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    declaration = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "_HOST_CAPACITY_KEYS"
+                               for target in node.targets))
+    assert isinstance(declaration, ast.Call)
+    assert isinstance(declaration.func, ast.Name) and declaration.func.id == "frozenset"
+    assert len(declaration.args) == 1 and not declaration.keywords
+    assert isinstance(declaration.args[0], ast.Set)
+    assert all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+               for item in declaration.args[0].elts)
+    expected = {
+        "gateway_http_listen_backlog", "gateway_http_max_request_workers",
+        "gateway_http_max_outstanding_requests", "gateway_http_socket_timeout_seconds",
+        "gateway_http_queue_timeout_seconds", "gateway_http_birth_gate_timeout_seconds",
+        "curator_daily_quota", "retention_scan_slice_entries", "retention_scan_slice_bytes",
+        "retention_scan_slice_ms", "memory_reference_pin_chunk_bytes",
+    }
+    assert expected == _HOST_CAPACITY_KEYS
+    assert {f.name for f in fields(AgentConfig) if f.metadata.get("model_read_only")} == _HOST_CAPACITY_KEYS

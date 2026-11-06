@@ -327,25 +327,16 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_http_birth_gate_timeout_seconds: float = field(default=1.0, metadata={"bounds": (0.01, 30.0), "model_read_only": True})
     curator_daily_quota: int = field(default=5000, metadata={"bounds": (0, None), "unit": "次/日", "model_read_only": True})
     runner_role_limits: dict[str, int] = field(default_factory=dict, metadata={"range": "dict[str,int]，值≥0，拒绝bool", "unit": "个/批次"})
-    store_event_mirror_enabled: bool = field(default=False, metadata={"model_read_only": True})
     gateway_submission_timeout_cap_seconds: float = field(default=30.0, metadata={"bounds": (0.1, 300.0)})
     retention_scan_slice_entries: int = field(default=128, metadata={"bounds": (1, None), "unit": "条", "model_read_only": True})
     retention_scan_slice_bytes: int = field(default=8388608, metadata={"bounds": (1024, None), "model_read_only": True})
     retention_scan_slice_ms: int = field(default=25, metadata={"bounds": (1, None), "model_read_only": True})
     memory_reference_pin_chunk_bytes: int = field(default=65536, metadata={"bounds": (1024, None), "model_read_only": True})
-    web_response_body_max_bytes: int = field(default=1000000, metadata={"bounds": (1024, None)})
-    web_request_body_max_chars: int = field(default=1000000, metadata={"bounds": (1024, None)})
-    plugin_pack_mcp_connect_timeout_seconds: float = field(default=10.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0", "model_read_only": True})
-    plugin_activation_memo_max_entries: int = field(default=1024, metadata={"bounds": (1, None), "unit": "条", "model_read_only": True})
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})
-    owner_quota_pressure_high_percent: int = field(default=85, metadata={"bounds": (0, 100), "range": "0≤high<critical≤100", "model_read_only": True})
-    owner_quota_pressure_critical_percent: int = field(default=95, metadata={"bounds": (0, 100), "range": "0≤high<critical≤100", "model_read_only": True})
-    owner_quota_permanent_headroom_percent: int = field(default=5, metadata={"bounds": (0, 100), "model_read_only": True})
-    owner_quota_permanent_pending_growth_bytes: int = field(default=33554432, metadata={"bounds": (1, None), "model_read_only": True})
 
     # LLM: 构造和 replace 共用类型、有限性、字段范围及联合校验；范围取字段元数据，不读盘或改变消费者状态。
-    # 函数用途: 校验24个集中参数和原拓扑，并清洗私网名单。
+    # 函数用途: 校验集中参数和原拓扑，并清洗私网名单。
     def __post_init__(self) -> None:
         from .services._normalize import validate_central_parameters
 
