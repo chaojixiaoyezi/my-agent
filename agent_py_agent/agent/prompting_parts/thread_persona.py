@@ -43,8 +43,6 @@ class RenderedPersonaSections:
 # LLM: 主/子/后台渲染安全点共用，只加载线程元数据，不读消息；缺线程保持一次性准备语义。
 # 函数用途: 从运行参数绑定真实线程事实，候选投影复用该值，不读取候选配置来刷新快照。
 def thread_persona_scope(agent: object, params: object) -> ThreadPersonaScope | None:
-    if not getattr(getattr(agent, "config", None), "thread_prompt_prefix_freeze_enabled", True):
-        return None
     attrs = getattr(params, "task_attributes", None)
     thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
     store = getattr(agent, "conversation_store", None)

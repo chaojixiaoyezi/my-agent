@@ -64,7 +64,6 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         context_window_tokens=configured_context_window_tokens(config),
         **_temperature_options(config),
         top_p=getattr(config, "top_p", None),
-        stream_enabled=getattr(config, "stream_enabled", True),
         prompt_cache_enabled=getattr(config, "anthropic_prompt_cache_enabled", True),
         custom_headers=getattr(config, "model_custom_headers", {}),
         session_header=getattr(config, "model_session_header", ""),
@@ -86,17 +85,19 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
                     "anthropic_compatible": OAuthMessagesBackend}
         if name not in adapters or (auth_ref.get("mode") == "chatgpt" and name != "openai_responses"):
             raise ValueError("登录类型与模型接口不匹配。")
-        return adapters[name](common, auth_ref=auth_ref)
-
-    if name == "openai_compatible":
-        return OpenAICompatibleBackend(common)
-    if name == "openai_responses":
+        backend = adapters[name](common, auth_ref=auth_ref)
+    elif name == "openai_compatible":
+        backend = OpenAICompatibleBackend(common)
+    elif name == "openai_responses":
         from .responses import OpenAIResponsesBackend
 
-        return OpenAIResponsesBackend(common)
-    if name == "anthropic_compatible":
-        return AnthropicCompatibleBackend(common)
-
-    raise ValueError(
-        "未知模型后端: %s。当前内置 echo / openai_compatible / openai_responses / anthropic_compatible。" % name
-    )
+        backend = OpenAIResponsesBackend(common)
+    elif name == "anthropic_compatible":
+        backend = AnthropicCompatibleBackend(common)
+    else:
+        raise ValueError(
+            "未知模型后端: %s。当前内置 echo / openai_compatible / openai_responses / anthropic_compatible。" % name
+        )
+    # 连接、认证和采样仍用冻结options；只有已声明的live开关按请求读取同一个config。
+    backend.config = config
+    return backend

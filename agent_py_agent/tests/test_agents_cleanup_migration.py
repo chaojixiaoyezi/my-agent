@@ -701,9 +701,7 @@ def test_freeze_and_expire_interleave_without_deadlock(tmp_path: Path):
     builder = SimpleNamespace(
         home_paths=home,
         persona_repository=repo,
-        config=SimpleNamespace(
-            home_context_enabled=True, thread_prompt_prefix_freeze_enabled=True
-        ),
+        config=SimpleNamespace(home_context_enabled=True),
     )
     request = SimpleNamespace(
         thread_persona=ThreadPersonaScope("r3-thread", 1, "test", ("fake", "native"))

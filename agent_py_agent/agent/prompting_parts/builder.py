@@ -894,14 +894,14 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
         return [value for value in sections.values() if value]
 
 
-# LLM: 有线程/开关/home启用时走唯一快照，无资格保持旧read_home_context；仅存安全渲染值，不存被拦原文。
+# LLM: 有线程且home启用时只走冻结快照；无线程仍逐轮现读，仅存安全渲染值，不存被拦原文。
 # 函数用途: 取得稳定人格与本轮行变化，task_local/control_plane 保持原隔离，不读 owner 人格。
 def _thread_persona_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> tuple[list[str], str]:
     if isolated or (not builder.home_paths and builder.persona_repository is None) or not builder.config.home_context_enabled:
         return [], ""
     scope = request.thread_persona
     repository = builder.persona_repository
-    if not builder.config.thread_prompt_prefix_freeze_enabled or scope is None or not scope.thread_id or repository is None:
+    if scope is None or not scope.thread_id or repository is None:
         return builder.read_home_context(request.user_prompt), ""
     # LLM: 先读失效代次再渲染（2905）：清理迁移在两步之间推进代次时，冻结写入会在锁内核对里
     #   被拒，旧渲染不会写回快照；代次读取必须发生在渲染之前，不能事后补读。

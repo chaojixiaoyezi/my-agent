@@ -168,8 +168,8 @@ class FileSystemTool(BaseTool):
     path_scope_description_base: ClassVar[str] = ""
     path_scope_notes: ClassVar[Mapping[str, str] | None] = None
 
-    # LLM: 这里只固定宿主配置，不读取文件或创建每调用诊断状态；联查 registry 装配和关闭零反馈测试。
-    # 函数用途: 初始化文件访问策略、配额和默认关闭的语法反馈开关。
+    # LLM: 路径策略仍在构造时固定；诊断保留宿主配置引用，执行时现读，不创建每调用诊断状态。
+    # 函数用途: 初始化文件访问策略、配额和诊断配置来源。
     def __init__(
         self,
         workspace_root: Path,
@@ -177,7 +177,7 @@ class FileSystemTool(BaseTool):
         access_options: FileSystemAccessOptions | None = None,
     ):
         access = access_options or FileSystemAccessOptions()
-        self.enable_file_syntax_diagnostics = access.enable_file_syntax_diagnostics is True
+        self._access_options = access
         self.workspace_root = workspace_root.resolve()
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
         # LLM: 只有宿主从结构化 write_boundary 下发的"墙外已授权根"才允许穿过 owner 墙；
@@ -207,6 +207,13 @@ class FileSystemTool(BaseTool):
             if str(access.owner_scope_root or "").strip() and access.owner_quota_max_bytes > 0
             else None
         )
+
+    # LLM: 只读取registry的live属性；独立工具无live来源时仍按显式options，诊断不赋予路径权限。
+    # 函数用途: 为三写入口和文件工具返回本次调用的语法反馈开关。
+    @property
+    def enable_file_syntax_diagnostics(self) -> bool:
+        access = self._access_options
+        return getattr(access.live_config, "enable_file_syntax_diagnostics", access.enable_file_syntax_diagnostics) is True
 
     # LLM: 由 ToolRegistry 冻结快照时按本 run 的读取范围调用；只换说明末句，input_schema 原样，replace 会复核 schema_hash。
     #   regime 只来自 path_access_policy.path_scope_regime 的结构化结果，不读模型参数或自然语言。
@@ -351,6 +358,8 @@ class FileSystemAccessOptions:
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
     enable_file_syntax_diagnostics: bool = False
+    # 仅由宿主传入，读取语法开关；所有路径和配额约束仍使用上方的冻结字段。
+    live_config: object | None = None
 
 
 def _path_is_under(path: Path, root: Path) -> bool:
@@ -372,6 +381,7 @@ def filesystem_access_options(
     owner_quota_max_bytes: int = 0,
     owner_quota_policy_available: bool = True,
     enable_file_syntax_diagnostics: bool = False,
+    live_config: object | None = None,
 ) -> FileSystemAccessOptions:
     roots = list(path_dangerous_roots) if isinstance(path_dangerous_roots, list) else None
     return FileSystemAccessOptions(
@@ -382,6 +392,7 @@ def filesystem_access_options(
         owner_quota_max_bytes=max(0, int(owner_quota_max_bytes or 0)),
         owner_quota_policy_available=bool(owner_quota_policy_available),
         enable_file_syntax_diagnostics=enable_file_syntax_diagnostics is True,
+        live_config=live_config,
     )
 
 

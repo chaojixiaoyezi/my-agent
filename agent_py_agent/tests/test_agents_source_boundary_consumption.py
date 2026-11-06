@@ -12,8 +12,8 @@ from agent_py_agent.tests.test_thread_persona_freeze import prefix_and_updates, 
 
 
 # LLM: 走真实PromptBuilder；只在renderer返回前撤销跳转目的权限，原始来源仍允许。
-# 函数用途: 无冻结的三个入口也必须在消费新正文前拒绝撤权来源，且保留其他人格。
-@pytest.mark.parametrize("case", [(mode, revoke) for mode in ("no_scope", "empty_thread", "disabled") for revoke in (False, True)])
+# 函数用途: 无线程的两个入口也必须在消费新正文前拒绝撤权来源，且保留其他人格。
+@pytest.mark.parametrize("case", [(mode, revoke) for mode in ("no_scope", "empty_thread") for revoke in (False, True)])
 def test_unfrozen_prompt_checks_rendered_source_permission(scene, remote, monkeypatch, case):
     mode, revoke = case
     source, state = remote
@@ -34,8 +34,6 @@ def test_unfrozen_prompt_checks_rendered_source_permission(scene, remote, monkey
     value = request(thread="" if mode == "empty_thread" else "thread-one")
     if mode == "no_scope":
         value.thread_persona = None
-    if mode == "disabled":
-        builder.config.thread_prompt_prefix_freeze_enabled = False
     prefix, updates = prefix_and_updates(builder, value)
     assert ("NEW_REDIRECT_MARKER" in prefix + updates) is not revoke
     assert "保留用户人格" in prefix

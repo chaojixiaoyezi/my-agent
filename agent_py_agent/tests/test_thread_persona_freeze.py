@@ -66,20 +66,14 @@ def test_committed_epoch_refreshes_and_clears_tail(scene, changed):
     assert "新增规则" in refreshed and not updates
 
 
-def test_disabled_and_threadless_keep_live_behavior(scene):
+def test_threadless_keeps_live_behavior(scene):
     builder, paths, home = scene
-    builder.config.thread_prompt_prefix_freeze_enabled = False
-    first, _ = prefix_and_updates(builder, request())
-    paths["agents"].write_text("- 现读\n", encoding="utf-8")
-    second, updates = prefix_and_updates(builder, request())
-    assert second != first and not updates
-    assert not (home / "persona" / "thread_prefix").exists()
-    builder.config.thread_prompt_prefix_freeze_enabled = True
     value = request(thread="")
     first, _ = prefix_and_updates(builder, value)
     paths["agents"].write_text("- 无线程继续现读\n", encoding="utf-8")
     second, updates = prefix_and_updates(builder, value)
     assert first != second and not updates
+    assert not (home / "persona" / "thread_prefix").exists()
 
 
 def test_long_agents_and_restart_keep_exact_frozen_bytes(scene):
@@ -157,18 +151,6 @@ def test_threads_do_not_share_snapshots(scene):
     assert first != other and not updates
     same, updates = prefix_and_updates(builder, request())
     assert same == first and "新线程规则" in updates
-
-
-def test_config_quoted_false_and_catalog(tmp_path):
-    from agent_py_agent.agent.settings.config import load_config
-    from agent_py_agent.agent.settings.parameter_registry import parameter_registry
-
-    path = tmp_path / "config.yaml"
-    path.write_text('thread_prompt_prefix_freeze_enabled: "false"\n', encoding="utf-8")
-    assert load_config(path).thread_prompt_prefix_freeze_enabled is False
-    spec = parameter_registry()["thread_prompt_prefix_freeze_enabled"]
-    assert spec.default is True and spec.value_type == "bool"
-    assert "AGENTS/SOUL/USER" in spec.description
 
 
 @pytest.mark.parametrize("source", ["gateway", "subagent", "background"])

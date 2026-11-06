@@ -267,13 +267,40 @@ class HttpBackend(BaseBackend):
         self.reasoning_update_items = str(options.reasoning_update_items or "auto")
         # 结构化输出方式随 profile 冻结；只有 OpenAI Chat 兼容接口会用到 json_object。
         self.structured_output = str(options.structured_output or "native")
-        self.stream_enabled = bool(options.stream_enabled)
+        # 工厂会绑定实际的live配置；独立构造仍使用显式BackendOptions。
+        self.config = options
+        self._stream_enabled_override: bool | None = None
+        self._stream_timeout_is_idle_override: bool | None = None
         self.prompt_cache_enabled = bool(options.prompt_cache_enabled)
         self.input_media_max_bytes = max(1, int(options.input_media_max_bytes))
-        # Streaming HTTP transports enforce request_timeout as an SSE idle
-        # timeout.  The tool-loop guard therefore must not also reinterpret it
-        # as a total wall-clock limit while valid events keep arriving.
-        self.stream_timeout_is_idle = self.stream_enabled
+
+    # LLM: 各协议在请求分派时读取同一live配置；OAuth的显式协议覆盖不被用户开关撤销。
+    # 函数用途: 取得下一次请求的流式选择，独立构造时保留原options语义。
+    @property
+    def stream_enabled(self) -> bool:
+        if self._stream_enabled_override is not None:
+            return self._stream_enabled_override
+        return bool(getattr(self.config, "stream_enabled", True))
+
+    # LLM: 保留OAuth订阅协议及既有调用者的显式覆盖；普通构造不再写入标量快照。
+    # 函数用途: 设置协议明确要求的流式模式，不修改共享AgentConfig。
+    @stream_enabled.setter
+    def stream_enabled(self, enabled: bool) -> None:
+        self._stream_enabled_override = bool(enabled)
+
+    # LLM: SSE沿原空闲超时合同，非流式仍使用总时限；跟随当前流式选择，不冻结旧开关。
+    # 函数用途: 向工具循环报告当前传输的超时语义。
+    @property
+    def stream_timeout_is_idle(self) -> bool:
+        if self._stream_timeout_is_idle_override is not None:
+            return self._stream_timeout_is_idle_override
+        return self.stream_enabled
+
+    # LLM: OAuth订阅接口已有显式idle声明，必须保持而不热改共享配置。
+    # 函数用途: 保存协议显式覆盖的超时语义。
+    @stream_timeout_is_idle.setter
+    def stream_timeout_is_idle(self, enabled: bool) -> None:
+        self._stream_timeout_is_idle_override = bool(enabled)
 
     # LLM: 只有Responses协议允许实测请求突破旧默认；其它协议保持工厂夹取，元数据只能继续收紧，不新增探测。
     # 函数用途: 已知供应商输出上限只会降低构造时冻结的配置天花板。

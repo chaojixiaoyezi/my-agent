@@ -67,6 +67,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
         owner_quota_max_bytes=getattr(params, "owner_quota_max_bytes", 0),
         owner_quota_policy_available=getattr(params, "owner_quota_policy_available", True),
         enable_file_syntax_diagnostics=registry.enable_file_syntax_diagnostics,
+        live_config=registry,
     )
     registry.register(
         ListFilesTool(registry.workspace_root, params.max_entries, workspace_roots, access_options)
