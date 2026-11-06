@@ -682,3 +682,34 @@ def test_child_result_index_keeps_recovery_refs_out_of_delivery_rows():
     assert row["read_order"] == []
     assert row["readiness"] == "running_no_result_yet"
     assert row["recent_tool_trace"] == [{"tool": "list_files", "ok": True, "summary": "最近成功调用工具: list_files"}]
+
+
+def test_agent_tree_visible_run_ids_render_only_visible_kernel_rows(monkeypatch):
+    """现场: 后台唤醒在 owner 约 750 个子代理上逐行读引导索引后才按 thread 筛；只应为可见 run 建节点。"""
+    from agent_py_agent.agent.agent_core.agent_tree import status as status_module
+
+    rows = [SubagentKernelRun(run_id=f"child-{index}", status="DONE") for index in range(200)]
+
+    class _Manager:
+        def kernel_snapshot(self, query):
+            return SubagentKernelSnapshot(schema_version="subagent_kernel_snapshot.v1", scope=query.scope, runs=rows)
+
+    class _Agent:
+        subagents = _Manager()
+
+    rendered = []
+    original = status_module.node_from_kernel_run
+
+    def counting(agent, row):
+        rendered.append(row.run_id)
+        return original(agent, row)
+
+    monkeypatch.setattr(status_module, "node_from_kernel_run", counting)
+    payload = agent_tree_status_payload(_Agent(), {"visible_run_ids": [" child-7 ", "missing"]})
+    assert rendered == ["child-7"]
+    assert [node["run_id"] for node in payload["nodes"]] == ["child-7"]
+    assert payload["main"]["child_run_ids"] == ["child-7"]
+    for unfiltered in ({}, {"visible_run_ids": []}, {"visible_run_ids": "child-7"}):
+        rendered.clear()
+        payload = agent_tree_status_payload(_Agent(), unfiltered)
+        assert len(rendered) == len(payload["nodes"]) == len(rows)
