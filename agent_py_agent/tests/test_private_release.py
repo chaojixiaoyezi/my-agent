@@ -662,7 +662,7 @@ def test_installer_maintenance_pauses_real_supervisor_health_entry(update_instal
 
 
 # LLM: 合成运行时只供真实build.main编译和归档，不执行伪原生文件或安装入口，不读取当前安装。
-# 函数用途: 准备包含既有bwrap资源的最小发行构建目录。
+# 函数用途: 准备包含bwrap与ELF64沙箱helper样本的最小发行构建目录。
 @pytest.fixture
 def c4_build_case(tmp_path, monkeypatch):
     root, helpers, output = tmp_path / 'bundle', tmp_path / 'helpers', tmp_path / 'output'
@@ -673,6 +673,10 @@ def c4_build_case(tmp_path, monkeypatch):
     (root / 'native/bwrap').write_bytes(b'synthetic bwrap')
     (root / 'native/lib/libfixture.so').write_bytes(b'synthetic library')
     (root / 'native/PROVENANCE.txt').write_text('synthetic provenance')
+    helper = bytearray(64)
+    helper[:7] = b'\x7fELF\x02\x01\x01'
+    helper[18:20] = (62).to_bytes(2, 'little')
+    (root / 'native/my-agent-sandbox-helper.linux-x86_64').write_bytes(helper)
     (package / '__init__.py').write_text('VALUE = 1\n')
     for name in ('installer', 'configure'):
         (helpers / f'{name}.py').write_text('VALUE = 1\n')
@@ -681,6 +685,8 @@ def c4_build_case(tmp_path, monkeypatch):
     return SimpleNamespace(root=root, package=package, output=output)
 
 
+# LLM: CLI来源矩阵保留原断言，helper只验证复制/清单/归档及执行位，不把合成ELF样本当原生执行证明。
+# 函数用途: 验证实际构建入口同时保留CLI资源与必选沙箱helper。
 @pytest.mark.parametrize('source', ['native', 'wheel', 'both'])
 def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source):
     case = c4_build_case
@@ -704,9 +710,16 @@ def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source)
     relative = backend.relative_to(case.root).as_posix()
     manifest = json.loads((case.root / 'release.json').read_text())
     assert manifest['files'][relative]['sha256'] == hashlib.sha256(expected).hexdigest()
+    helper = case.package / 'vendor/bin/my-agent-sandbox-helper.linux-x86_64'
+    helper_body = (case.root / 'native' / helper.name).read_bytes()
+    assert helper.read_bytes() == helper_body and helper.stat().st_mode & 0o777 == 0o755
+    helper_relative = helper.relative_to(case.root).as_posix()
+    assert manifest['files'][helper_relative]['sha256'] == hashlib.sha256(helper_body).hexdigest()
     with tarfile.open(case.output / 'my-agent-test.cli-linux-x86_64.tar.gz') as archive:
         member = archive.getmember('bundle/' + relative)
         assert member.mode & 0o777 == 0o755 and archive.extractfile(member).read() == expected
+        helper_member = archive.getmember('bundle/' + helper_relative)
+        assert helper_member.mode & 0o777 == 0o755 and archive.extractfile(helper_member).read() == helper_body
         existing_member = 'bundle/' + (case.package / 'vendor/lark_cli/existing.txt').relative_to(case.root).as_posix()
         assert archive.extractfile(existing_member).read() == b'preserved'
         if source != 'wheel':
