@@ -44,7 +44,7 @@ from .process_session_records import (
 )
 
 
-# LLM: 一期候选③（background_tick_cheap_checks）的进程记录目录投影缓存: 缓存"读到的记录/错误 +
+# LLM: 进程记录目录投影缓存: 缓存"读到的记录/错误 +
 #   目录身份 + 最近一次全量读取时刻",不含任何"无事"结论——调用方每次重新决定要不要通知。
 #   命中只凭目录身份 (dev, ino, mtime_ns): 记录的新建/改写/删除全走 root 内 rename/unlink,
 #   目录 mtime 必变;锁文件稳态 flock 不改 mtime。2 秒保护窗口 + 60 秒全量兜底由共用设施保证。
@@ -466,7 +466,7 @@ def _unlink_session_if_unchanged(root: Path, record: dict[str, object]) -> bool:
 
 # LLM: 公共入口共用原目录锁和恢复；v2/v3/v4 原版本更新，v1 不参与按任务控制，共享激活另按完整归属冻结。
 # 类用途: 提供跨进程的后台会话存取，以及需要持锁多检查点的启动与停止事务。
-# LLM: 可选目录投影仅用于初读内容；实际恢复、通知写回、停止与revision CAS仍读取原Store事务。
+# LLM: 目录投影仅用于初读内容；实际恢复、通知写回、停止与revision CAS仍读取原Store事务。
 class ProcessSessionStore:
     # LLM: 构造只规范路径，不创建目录；缺失目录的纯查询保持无副作用。
     # 函数用途: 绑定一个后台会话权威目录。
@@ -512,21 +512,21 @@ class ProcessSessionStore:
                 {}, process_session_error_report(exc, "process_session_store.load", path=self.root)
             )
 
-    # LLM: 保持原二元组API；公开全量读取始终复制全部记录，私有底座不得缓存过滤后的子集。
+    # LLM: 保持原二元组API和兼容关键字；预算仅约束缓存未命中的扫描，不再切换读取路径。
     # 函数用途: 返回独占的完整记录与错误，调用者修改不会污染冷热缓存。
     def list_records(
-        self, *, cheap_checks: bool = False, max_entries: int | None = None, max_ms: float | None = None
+        self, *, cheap_checks: bool = True, max_entries: int | None = None, max_ms: float | None = None
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         budget = {key: value for key, value in (("max_entries", max_entries), ("max_ms", max_ms)) if value is not None}
-        records, errors = self._load_records_projection_cached(cheap_checks=cheap_checks and not budget, scan_budget=budget)
+        records, errors = self._load_records_projection_cached(cheap_checks=True, scan_budget=budget)
         return [deepcopy(record) for record in records], [deepcopy(error) for error in errors]
 
     # LLM: 先取完整未过滤快照，再在存储层筛选并只复制命中；空规范目标{}不欠通知，错误不被过滤。
     # 函数用途: 提供完成协调专用查询，避免每tick深拷贝全部历史记录。
     def list_pending_completion_records_report(
-        self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = False
+        self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = True
     ) -> ProcessSessionListReport:
-        records, errors = self._load_records_projection_cached(cheap_checks=cheap_checks)
+        records, errors = self._load_records_projection_cached(cheap_checks=True)
         owner, task = str(owner_key or "").strip(), str(task_id or "").strip()
         matched = []
         for record in records:
@@ -542,17 +542,16 @@ class ProcessSessionStore:
 
     # LLM: 便捷查询沿同一report实现，不能独立过滤或回写缓存；需读错误的调用方用report入口。
     # 函数用途: 返回已深拷贝的待通知候选列表。
-    def list_pending_completion_records(self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = False) -> list[dict[str, object]]:
-        return self.list_pending_completion_records_report(owner_key=owner_key, task_id=task_id, cheap_checks=cheap_checks).records
+    def list_pending_completion_records(self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = True) -> list[dict[str, object]]:
+        return self.list_pending_completion_records_report(owner_key=owner_key, task_id=task_id, cheap_checks=True).records
 
-    # LLM: 私有只读底座永远是全量记录和错误，冷读直接移交新对象；公开API负责复制，False仍强制事务重读。
+    # LLM: 私有只读底座永远是全量记录和错误，冷读直接移交新对象；公开API负责复制，兼容参数不再选分支。
     #   信任在读前冻结，发布时只核目录身份；不因慢读跨过保护窗口而将旧视图变可信。
     # 函数用途: 复用目录内容投影，不缓存通知结论或暴露可变对象给外部。
-    def _load_records_projection_cached(self, *, cheap_checks: bool = False, scan_budget: dict | None = None):
-        if cheap_checks:
-            hit = _lookup_process_records_projection(self.root)
-            if hit is not None:
-                return hit.records, hit.errors
+    def _load_records_projection_cached(self, *, cheap_checks: bool = True, scan_budget: dict | None = None):
+        hit = _lookup_process_records_projection(self.root)
+        if hit is not None:
+            return hit.records, hit.errors
         before = _process_dir_stat_key(self.root)
         # MC4-1201: 在读取这一刻冻结"本次读取是否可信"——读取前目录 mtime 已离开 2 秒窗口才允许
         #   把结果写进缓存;发布处只认这个事实,不用发布时的目录年龄(跨窗口延迟发布时旧结果不得

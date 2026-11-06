@@ -1,5 +1,5 @@
 # LLM: 定时运行只经原领取、会话任务绑定和完成协议进入后台；身份或版本不可证明时禁止采样，不补建旧任务。
-#   cheap_checks只控制原仓库的只读投影，不能跳过当前事件预留、取消、恢复或通知策略。
+#   原仓库统一先探测只读投影，不能跳过当前事件预留、取消、恢复或通知策略。
 # 合法冻结交付复用原claim而不重开执行；终态映射由本模块统一提供给领取、等待对账和交付收口。
 # 模块用途: 把持久定时任务接入原会话唤醒队列，保持执行领取、TaskLink 与收口在同一条主链路。
 from __future__ import annotations
@@ -164,9 +164,9 @@ class SchedulerService:
 
     # LLM: queued run仍是唯一durable root，便宜检查仅透传给现行dispatch读取；取消、事件和恢复顺序不变。
     # 函数用途: 先沿持久意图重试准确取消并复核已死亡领取，再预留到期执行；仅新 queued 会唤醒，不重跑已开工的未知结果。
-    def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32, cheap_checks: bool = False) -> list[str]:
+    def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32, cheap_checks: bool = True) -> list[str]:
         from .dispatch import enqueue_ready_runs
-        return enqueue_ready_runs(self, now=now, limit=limit, cheap_checks=cheap_checks)
+        return enqueue_ready_runs(self, now=now, limit=limit, cheap_checks=True)
 
     # LLM: 领取后回读 pending 并验证 TaskLink；此处仅 claimed，原后台车道准入后才由 execution 写 running。
     # 函数用途: 领取定时工作或欠发回复；绑定异常结算，合法冻结只重投，不把等待执行的时间记成工作开始。
@@ -413,8 +413,8 @@ class SchedulerService:
     # rows already typed as waiting, then applying the same exact-task reconciliation as live wakes.
     # LLM: 可选投影只提供waiting行；每条运行仍按准确ID现读原任务并执行同一终态对账。
     # 函数用途: 批量对账当前 owner 的等待定时执行，保证重启后最终状态仍会收口。
-    def reconcile_waiting_runs(self, *, now: float | None = None, cheap_checks: bool = False) -> list[str]:
-        runs, _errors = self.repository.waiting_runs(cheap_checks=cheap_checks)
+    def reconcile_waiting_runs(self, *, now: float | None = None, cheap_checks: bool = True) -> list[str]:
+        runs, _errors = self.repository.waiting_runs(cheap_checks=True)
         settled: list[str] = []
         for run in runs:
             run_id = str(run.get("run_id") or "")

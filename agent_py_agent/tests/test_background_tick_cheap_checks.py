@@ -1,4 +1,4 @@
-"""E10 一期"便宜检查"（background_tick_cheap_checks）验收测试。
+"""后台统一缓存探测路径的行为验收测试。
 
 被测对象（设计 docs/design/GATEWAY_BACKGROUND_TICK.md 4.1–4.3、4.7）:
   ① runtime_db.wakes_need_attention + conversation.runtime 拍内 gate:
@@ -10,8 +10,8 @@
   ③ tooling/process_session_store 的进程记录目录 stat 门:
      目录身份 (dev, ino, mtime_ns) 未变且离开保护窗口才复用; root 内任何
      新建/改写/删除都改目录 mtime; 60 秒兜底无条件全读。
-另覆盖: 开关开/关外部可见结果一致(语义不变)、配置默认开且运行时动态读到、
-缓存上界 LRU 逐出。
+另覆盖: 默认及旧关键字值使用同一路径、写删与 redo 后缓存失效、
+缓存上界 LRU 逐出和冷/热投影结果一致。
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from agent_py_agent.agent.scheduler.repository import (
 )
 from agent_py_agent.agent.scheduler.schedule import build_schedule
 from agent_py_agent.agent.scheduler.service import SchedulerService
-from agent_py_agent.agent.settings.config import AgentConfig, load_config
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling.process_registry import BackgroundProcess, process_registry
 from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope, ProcessExecutionScope
 from agent_py_agent.agent.tooling.process_session_records import (
@@ -144,7 +144,7 @@ def _age_path(path: Path, *, seconds: float = 3.0) -> None:
 
 @pytest.fixture
 def projections():
-    """投影缓存是模块级: 用例前后清空两套设施(关=旧 waiting 设施, 开=新三切片设施), 避免跨用例统计串味。"""
+    """用例前后清空模块级投影和统计，避免跨用例串味。"""
     for cache in (
         scheduler_module._WAITING_PROJECTION_CACHE,
         scheduler_module._STORE_PROJECTION_CACHE,
@@ -217,6 +217,55 @@ def _prime_scheduler_hit(repository: SchedulerRepository, store_path: Path) -> t
 # --------------------------------------------------------------------------------------
 # 候选②: scheduler store.json 文件身份门 (4.2 测试清单 1–7 + 缓存上界)
 # --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("options", [{}, {"cheap_checks": True}, {"cheap_checks": False}])
+def test_scheduler_reads_always_use_hot_projection(tmp_path, projections, monkeypatch, options) -> None:
+    """默认和旧关键字值都只复用可信投影，不能重新启用整读分支。"""
+    root = tmp_path / "scheduler"
+    root.mkdir()
+    path = root / "store.json"
+    _write_store(path, _store_with_waiting(2, total=2))
+    repository = _repository(root)
+    expected = _prime_scheduler_hit(repository, path)
+    counter = _ProbeCounter()
+    counter.install(monkeypatch)
+
+    assert repository.waiting_runs(**options) == expected
+    assert repository.queued_runs(now=0, **options) == []
+    assert repository.dispatchable_queued_runs(now=0, **options) == []
+    assert counter.calls == 0
+
+
+@pytest.mark.parametrize("options", [{}, {"cheap_checks": True}, {"cheap_checks": False}])
+def test_process_reads_always_use_hot_projection(tmp_path, process_projections, monkeypatch, options) -> None:
+    """旧 False 和显式扫描预算不再关闭目录缓存；未命中仍沿原事务执行预算。"""
+    store = ProcessSessionStore(tmp_path / "records")
+    store.write(_reservation())
+    _age_path(store.root)
+    expected = store.list_records(cheap_checks=True)
+    counter = _TransactionCounter()
+    counter.install(monkeypatch)
+
+    assert store.list_records(**options) == expected
+    assert store.list_records(max_entries=100, max_ms=1000, **options) == expected
+    assert counter.calls == 0
+
+
+def test_tick_without_switch_always_uses_attention_probe(tmp_path) -> None:
+    """没有开关配置也先检查真实空队列，不执行无事的两个写事务。"""
+    repo = _wake_runtime_repo(tmp_path)
+    fake = _BackgroundSchedulerTickMixin()
+    fake.runtime = SimpleNamespace(agent=SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)))
+    fake._wake_reconcile_last_at = 100.0
+    calls = []
+    fake._reclaim_expired_wake_leases = lambda **kwargs: calls.append("reclaim")
+    fake._consume_due_wake_queue = lambda **kwargs: calls.append("consume")
+
+    fake._enqueue_unfinished_task_resume_wakes(now=100.0)
+
+    assert calls == []
+    assert repo.list_pending_wakes() == []
+
+
 def test_cheap_hit_skips_full_read_and_matches_full_path(tmp_path, projections, monkeypatch) -> None:
     """清单 1: 文件未变 → 不发生全量读, 且与整读路径结论逐字一致。"""
     root = tmp_path / "owner" / "scheduler"
@@ -234,8 +283,13 @@ def test_cheap_hit_skips_full_read_and_matches_full_path(tmp_path, projections, 
     assert warm_rows == cold_rows and warm_errors == cold_errors
     assert projections._STORE_PROJECTION_STATS["cheap_hit"] >= 1
 
-    full_rows, full_errors = repository.waiting_runs(cheap_checks=False)
-    assert full_rows == warm_rows and full_errors == warm_errors
+    _write_store(store_path, _store_with_waiting(1))
+    updated = repository.waiting_runs()
+    assert _wanting_ids(updated[0]) == ["srun_000"] and updated[1] == []
+    assert repository.waiting_runs(cheap_checks=False) == updated
+    _write_store(store_path, {})
+    assert repository.waiting_runs() == ([], [])
+    assert repository.waiting_runs(cheap_checks=False) == ([], [])
 
 
 def test_cheap_invalidated_by_atomic_replace(tmp_path, projections) -> None:
@@ -435,7 +489,7 @@ def test_cheap_projection_cache_is_bounded_lru(tmp_path, projections) -> None:
 
 
 # --------------------------------------------------------------------------------------
-# MC4-901 返工: 关闭开关必须真正走回旧读取路径(与 624871919 逐项一致)
+# 损坏 job 不妨碍健康运行读取与结算；不再固定已删除的旧缓存结构。
 # --------------------------------------------------------------------------------------
 def _bad_job_store(root: Path) -> Path:
     """写含坏 job(next_run_at="not-a-time")+健康 waiting+queued 的账本, 返回 store 路径。"""
@@ -461,12 +515,8 @@ def _bad_job_store(root: Path) -> Path:
     return store_path
 
 
-def test_off_path_matches_baseline_with_bad_job(tmp_path, projections) -> None:
-    """901 反例 1(基线录制对照): 坏 job 时关闭路径照常返回健康 waiting, 不解析 jobs 也不抛异常。
-
-    录制来源: 624871919 上同一场景的输出——waiting=[srun_wait]/errors=[]、queued=[srun_q]、
-    reserve 同样抛 ValueError、旧缓存 1 条; 本用例断言关闭路径逐项一致。
-    """
+def test_unified_path_keeps_healthy_runs_with_bad_job(tmp_path, projections) -> None:
+    """坏 job 时仍返回健康 waiting/queued，预约原数值错误不被缓存吞掉。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     _bad_job_store(root)
@@ -480,33 +530,10 @@ def test_off_path_matches_baseline_with_bad_job(tmp_path, projections) -> None:
     assert [row["run_id"] for row in queued] == ["srun_q"]
     with pytest.raises(ValueError):
         repository.reserve_due_runs(now=1_501.0, cheap_checks=False)
-    # 关闭路径只写旧 waiting 设施(1 条), 不构造三切片投影。
-    assert len(scheduler_module._WAITING_PROJECTION_CACHE) == 1
-    assert len(scheduler_module._STORE_PROJECTION_CACHE) == 0
 
 
-def test_off_path_only_caches_waiting_rows_with_cap_four(tmp_path, projections) -> None:
-    """901 反例 2(内存/结构, 基线录制对照): 关闭路径只缓存 waiting 行(旧结构), 上限仍是 4。
-
-    录制来源: 624871919 上 5 个 owner 各读一次 → 旧缓存 4 条(上限 4); 同账本 queued 不进缓存
-    (大 prompt 的 queued 完整记录不驻留)。
-    """
-    for index in range(5):
-        root = tmp_path / f"owner{index:02d}" / "scheduler"
-        root.mkdir(parents=True)
-        _write_store(root / "store.json", _store_with_waiting(1))
-        _age_path(root / "store.json")
-        _repository(root).waiting_runs(cheap_checks=False)
-
-    assert len(scheduler_module._WAITING_PROJECTION_CACHE) == 4
-    entry = next(iter(scheduler_module._WAITING_PROJECTION_CACHE.values()))
-    assert sorted(entry.__dataclass_fields__) == ["digest", "errors", "rows", "stat_key"]
-    assert all(str(row.get("status")) == "waiting" for row in entry.rows)
-    assert len(scheduler_module._STORE_PROJECTION_CACHE) == 0
-
-
-def test_off_path_settles_finished_task_with_bad_job(tmp_path, projections) -> None:
-    """901 反例 3(服务级, 基线录制对照): 坏 job 存在时关闭路径仍能读到健康 waiting 并完成结算。"""
+def test_unified_path_settles_finished_task_with_bad_job(tmp_path, projections) -> None:
+    """坏 job 存在时仍能读到健康 waiting 并完成结算。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     _bad_job_store(root)
@@ -660,8 +687,36 @@ def test_process_records_cheap_hit_skips_transaction_and_glob(
     assert counter.calls == 0
     assert warm == cold and warm_errors == cold_errors
 
-    legacy, legacy_errors = store.list_records(cheap_checks=False)
-    assert legacy == warm and legacy_errors == warm_errors
+    assert store.list_records(cheap_checks=False) == (warm, warm_errors)
+    assert counter.calls == 0
+
+
+@pytest.mark.parametrize("options", [{}, {"cheap_checks": True}, {"cheap_checks": False}])
+def test_process_projection_observes_write_delete_and_redo(tmp_path, process_projections, monkeypatch, options):
+    """同一缓存路径在真实提交、删除和已提交 redo 恢复后返回准确记录。"""
+    from agent_py_agent.tests.test_process_session_store import _pending_stop
+
+    store = ProcessSessionStore(tmp_path / "records")
+    current = store.write(_running())
+    _age_path(store.root)
+    assert store.list_records(cheap_checks=True) == ([current], [])
+
+    finished = store.write({**current, "status": "exited", "finished_at": 3.0, "exit_code": 0})
+    assert store.list_records(**options) == ([finished], [])
+    _age_path(store.root)
+    assert store.list_records(cheap_checks=True) == ([finished], [])
+    assert store.prune_finished(0) == ["bg-a"]
+    assert store.list_records(**options) == ([], [])
+
+    current = store.write(_running("bg-redo"))
+    _age_path(store.root)
+    assert store.list_records(cheap_checks=True) == ([current], [])
+    receipt = _pending_stop(store, monkeypatch)
+    redo = store.root / ".process-sessions.redo.json"
+    assert redo.exists() and receipt.committed and receipt.recovery_required
+    assert store.list_records(**options) == (list(receipt.records), [])
+    assert all(row["stop_requested"] for row in receipt.records)
+    assert not redo.exists()
 
 
 def test_process_records_new_record_invalidates_cache(tmp_path, process_projections) -> None:
@@ -959,7 +1014,7 @@ def test_wake_probe_quiet_path_uses_single_connection(tmp_path, monkeypatch) -> 
     assert counter.calls == 2
 
 
-def _cheap_agent(tmp_path: Path, *, cheap: bool) -> SimpleAgent:
+def _tick_agent(tmp_path: Path) -> SimpleAgent:
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
@@ -968,8 +1023,6 @@ def _cheap_agent(tmp_path: Path, *, cheap: bool) -> SimpleAgent:
         ),
         tmp_path,
     )
-    # 正式配置由集成根同步；这个本地矩阵直接设置冻结后的宿主事实，loader断言另保留。
-    agent.config.background_tick_cheap_checks = cheap
     return agent
 
 
@@ -1013,29 +1066,9 @@ class _StepCounter:
         monkeypatch.setattr(_BackgroundSchedulerTickMixin, "_consume_due_wake_queue", pop)
 
 
-def test_gate_off_short_circuits_probe_and_keeps_legacy_path(tmp_path, monkeypatch) -> None:
-    """开关关(默认): 判据不执行, 两步与改动前逐字相同。"""
-    agent = _cheap_agent(tmp_path, cheap=False)
-    probe_calls: list[float] = []
-    original = RuntimeRepository.wakes_need_attention
-
-    def counting(self, *, now):  # noqa: ANN001
-        probe_calls.append(now)
-        return original(self, now=now)
-
-    monkeypatch.setattr(RuntimeRepository, "wakes_need_attention", counting)
-    steps = _StepCounter()
-    steps.install(monkeypatch)
-
-    _call_enqueue(agent, now=100.0)
-
-    assert probe_calls == []
-    assert (steps.reclaim, steps.pop) == (1, 1)
-
-
 def test_gate_on_skips_both_steps_when_queue_quiet(tmp_path, monkeypatch) -> None:
     """清单 1: 无事 → 两个写事务都不被调用, 队列保持空。"""
-    agent = _cheap_agent(tmp_path, cheap=True)
+    agent = _tick_agent(tmp_path)
     steps = _StepCounter()
     steps.install(monkeypatch)
 
@@ -1047,7 +1080,7 @@ def test_gate_on_skips_both_steps_when_queue_quiet(tmp_path, monkeypatch) -> Non
 
 def test_gate_on_runs_steps_when_pending_due(tmp_path, monkeypatch) -> None:
     """清单 2: pending 到期 → pop 照常执行, 字条被消费。"""
-    agent = _cheap_agent(tmp_path, cheap=True)
+    agent = _tick_agent(tmp_path)
     agent.subagents.runtime_db.upsert_wake(root_task_id="t-due", next_due_at=50.0)
     steps = _StepCounter()
     steps.install(monkeypatch)
@@ -1060,7 +1093,7 @@ def test_gate_on_runs_steps_when_pending_due(tmp_path, monkeypatch) -> None:
 
 def test_gate_on_runs_reclaim_when_claimed_lease_expired(tmp_path, monkeypatch) -> None:
     """清单 3: claimed 且租约过期 → reclaim 照常执行。"""
-    agent = _cheap_agent(tmp_path, cheap=True)
+    agent = _tick_agent(tmp_path)
     repo = agent.subagents.runtime_db
     repo.upsert_wake(root_task_id="t-lease", next_due_at=50.0)
     assert len(repo.pop_due_wakes(now=100.0)) == 1  # 造 claimed + lease=400
@@ -1079,7 +1112,7 @@ def test_gate_on_runs_reclaim_when_claimed_lease_expired(tmp_path, monkeypatch) 
 
 def test_gate_on_skips_when_only_backoff_pending(tmp_path, monkeypatch) -> None:
     """退避中(retry_after 未到): 探针 False → 两步都跳过, 字条保持原样。"""
-    agent = _cheap_agent(tmp_path, cheap=True)
+    agent = _tick_agent(tmp_path)
     repo = agent.subagents.runtime_db
     repo.upsert_wake(root_task_id="t-backoff", next_due_at=50.0)
     popped = repo.pop_due_wakes(now=100.0)
@@ -1096,7 +1129,7 @@ def test_gate_on_skips_when_only_backoff_pending(tmp_path, monkeypatch) -> None:
 
 def test_gate_probe_error_falls_back_to_legacy_steps(tmp_path, monkeypatch) -> None:
     """清单 5: 探针抛错 → 仍执行原两步(宁多查不漏查)。"""
-    agent = _cheap_agent(tmp_path, cheap=True)
+    agent = _tick_agent(tmp_path)
     repo = agent.subagents.runtime_db
     repo.upsert_wake(root_task_id="t-err", next_due_at=50.0)
 
@@ -1143,37 +1176,6 @@ def _seed_tick_scenario(agent: SimpleAgent) -> None:
 
 class _TickFake(_BackgroundSchedulerThreadLaneMixin, _BackgroundSchedulerTickMixin):
     """组合两个 mixin: prepare_tick 在 ThreadLane 侧, 维护方法在 Tick 侧。"""
-
-
-def _prepare_fake(agent: SimpleAgent) -> _BackgroundSchedulerTickMixin:
-    fake = _TickFake()
-    fake.runtime = SimpleNamespace(agent=agent)
-    fake.store = agent.conversation_store
-    fake.collaboration_store = None
-    fake.scheduler_service = None
-    return fake
-
-
-def test_prepare_tick_semantics_unchanged_across_switch(tmp_path) -> None:
-    """4.7 语义不变: 同一合成输入, 开关开/关的 prepare_tick 外部可见结果一致。"""
-    snapshots: dict[bool, dict[str, object]] = {}
-    for cheap in (False, True):
-        case = tmp_path / ("on" if cheap else "off")
-        case.mkdir()
-        agent = _cheap_agent(case, cheap=cheap)
-        _seed_tick_scenario(agent)
-        fake = _prepare_fake(agent)
-        fake.prepare_tick(now=500.0, include_orphan_supervision=False)
-        repo = agent.subagents.runtime_db
-        snapshots[cheap] = {
-            "wake_table": _wake_table_state(repo.db_path),
-            "signals": sorted(
-                (signal.reason, signal.root_task_id)
-                for signal in agent.conversation_store.wakes.pending(limit=0)
-            ),
-        }
-
-    assert snapshots[True] == snapshots[False]
 
 
 # --------------------------------------------------------------------------------------
@@ -1317,12 +1319,12 @@ def _four_dimension_snapshot(
 
 
 def test_prepare_tick_four_dimensions_with_real_stores(tmp_path) -> None:
-    """904 返工: 真实临时存储四维对照(开/关一致)——wake、scheduler 账本、进程通知、协作。"""
+    """真实临时存储冷/热投影四维一致：wake、scheduler 账本、进程通知、协作。"""
     snapshots: dict[bool, dict[str, object]] = {}
-    for cheap in (False, True):
-        case = tmp_path / ("on" if cheap else "off")
+    for warm in (False, True):
+        case = tmp_path / ("warm" if warm else "cold")
         case.mkdir()
-        agent = _cheap_agent(case, cheap=cheap)
+        agent = _tick_agent(case)
         conversation = agent.conversation_store
         thread = conversation.threads.get_or_create(
             {
@@ -1355,21 +1357,29 @@ def test_prepare_tick_four_dimensions_with_real_stores(tmp_path) -> None:
         fake.store = conversation
         fake.collaboration_store = collaboration
         fake.scheduler_service = agent.scheduler_service
+        if warm:
+            agent.scheduler_repository.waiting_runs()
+            process_root = process_session_store_root(agent.effective_workspace_root, agent.home_paths.owner_home_dir)
+            _age_path(process_root)
+            ProcessSessionStore(process_root).list_records()
         fake.prepare_tick(now=500.0, include_orphan_supervision=False)
 
-        snapshots[cheap] = {
+        snapshots[warm] = {
             "wake_table_seeded": seeded_wake_table,
             **_four_dimension_snapshot(agent, conversation, collaboration, case_id),
         }
 
     assert snapshots[True] == snapshots[False]
+    assert snapshots[True]["process_notices"] == ["task-a"]
+    assert snapshots[True]["scheduler_runs"] == [("queued", "due"), ("waiting", "")]
 
 
-def test_scheduler_reads_switch_consistency(tmp_path, projections) -> None:
-    """4.7 语义不变(store 写维度): 同一份账本, 开/关的 waiting/queued/reserve 结果一致。"""
-    results: dict[bool, dict[str, object]] = {}
-    for cheap in (False, True):
-        case = tmp_path / ("cheap" if cheap else "full")
+def test_scheduler_reads_legacy_keyword_preserves_records_and_writes(tmp_path, projections) -> None:
+    """默认及旧关键字值的 waiting/queued/reserve 和实际写回结果一致。"""
+    results: dict[bool | None, dict[str, object]] = {}
+    for cheap in (None, False, True):
+        options = {} if cheap is None else {"cheap_checks": cheap}
+        case = tmp_path / str(cheap)
         root = case / "scheduler"
         root.mkdir(parents=True)
         repository = _repository(root)
@@ -1393,11 +1403,11 @@ def test_scheduler_reads_switch_consistency(tmp_path, projections) -> None:
         }
         _write_store(store_path, runs, jobs=payload["jobs"])
         _age_path(store_path)
-        repository.waiting_runs(cheap_checks=cheap)  # cheap 时预热投影
+        repository.waiting_runs(**options)
 
-        waiting = repository.waiting_runs(cheap_checks=cheap)
-        queued = repository.queued_runs(now=1_501.0, cheap_checks=cheap)
-        reserved = repository.reserve_due_runs(now=1_501.0, cheap_checks=cheap)
+        waiting = repository.waiting_runs(**options)
+        queued = repository.queued_runs(now=1_501.0, **options)
+        reserved = repository.reserve_due_runs(now=1_501.0, **options)
         updated = json.loads(store_path.read_text(encoding="utf-8"))
         results[cheap] = {
             "waiting": waiting,
@@ -1409,35 +1419,6 @@ def test_scheduler_reads_switch_consistency(tmp_path, projections) -> None:
             "job_next_run_at": updated["jobs"][job_id]["next_run_at"],
         }
 
-    assert results[True] == results[False]
-
-
-def test_tick_cheap_checks_reads_live_config() -> None:
-    """开关在拍内动态读取: 缺配置/关 → False; 开 → True。"""
-    mixin = _BackgroundSchedulerTickMixin()
-    assert (
-        mixin._tick_cheap_checks(
-            SimpleNamespace(config=SimpleNamespace(background_tick_cheap_checks=True))
-        )
-        is True
-    )
-    assert (
-        mixin._tick_cheap_checks(
-            SimpleNamespace(config=SimpleNamespace(background_tick_cheap_checks=False))
-        )
-        is False
-    )
-    assert mixin._tick_cheap_checks(SimpleNamespace()) is False
-
-
-# LLM: 默认开启优化但不取消用户回退能力，必须从真实 YAML 读取显式关闭值。
-# 函数用途: 验证便宜检查默认开启且配置 false 后确实关闭。
-def test_config_defaults_on_and_yaml_switch_can_disable(tmp_path) -> None:
-    assert AgentConfig().background_tick_cheap_checks is True
-    yaml_path = tmp_path / "agent_config.yaml"
-    yaml_path.write_text(
-        "model_backend: echo\nbackground_tick_cheap_checks: false\n",
-        encoding="utf-8",
-    )
-    loaded = load_config(yaml_path)
-    assert loaded.background_tick_cheap_checks is False
+    assert results[None] == results[True] == results[False]
+    assert results[None]["queued"] == ["srun_q"]
+    assert results[None]["reserved"] == [("queued", "due")]

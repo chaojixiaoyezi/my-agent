@@ -46,24 +46,23 @@ _PROCESS_COMPLETION_PRUNE_LOCK = threading.Lock()
 
 # LLM: 固定report读口存在时直接调用，内部异常原样传播；旧替身沿原二元组接口，不靠TypeError猜版本。
 # 函数用途: 为协调循环读取候选副本和完整错误，兼容旧authority替身。
-def _pending_completion_report(authority, *, cheap_checks: bool = False, task_id: str = "") -> ProcessSessionListReport:
+def _pending_completion_report(authority, *, cheap_checks: bool = True, task_id: str = "") -> ProcessSessionListReport:
     query = getattr(authority, "list_pending_completion_records_report", None)
     if callable(query):
-        return query(cheap_checks=cheap_checks, task_id=task_id)
-    records, errors = authority.list_records(cheap_checks=cheap_checks)
+        return query(cheap_checks=True, task_id=task_id)
+    records, errors = authority.list_records(cheap_checks=True)
     return ProcessSessionListReport(records, errors)
 
 
-# LLM: owner隔离由原权威目录承担，当前target无owner_key；task过滤保留原store_root复核，空cheap结果必须全读再裁定。
-# 函数用途: 为待通知发现提供便宜检查后严格复核，旧替身维持无参数调用。
+# LLM: owner隔离由原权威目录承担；task过滤保留原store_root复核，单次投影查询按目录变更和定期重读收敛。
+# 函数用途: 为待通知发现查询一次候选，旧替身维持无参数调用。
 def _pending_completion_reports(authority, *, task_id: str = ""):
     query = getattr(authority, "list_pending_completion_records_report", None)
     if not callable(query):
         records, errors = authority.list_records()
         yield ProcessSessionListReport(records, errors)
         return
-    for cheap in (True, False):
-        yield query(cheap_checks=cheap, task_id=task_id)
+    yield query(cheap_checks=True, task_id=task_id)
 
 
 # LLM: 每个conversation根最多五分钟一次，锁只保护有界节流表；磁盘清理仍在原Store事务中，pending与未知读取均保留。
@@ -143,7 +142,7 @@ def _agent_process_root(agent: object) -> Path | None:
     return process_session_store_root(workspace or owner, owner)
 
 
-# LLM: Count0保原循环/锁顺序，MP仅共用单会话发表叶；宿主周期tick与前台安全点共用；配置仅控制初步目录内容读取，发通知前仍核原status/target并持久去重，不缓存通知结论。
+# LLM: Count0保原循环/锁顺序，MP仅共用单会话发表叶；宿主周期tick与前台安全点共用；投影仅提供初步目录内容，发通知前仍核原status/target并持久去重，不缓存通知结论。
 # 仅任务的自然exited可唤醒；持久unknown不可再转终态，直接跳过；其余轻量刷新后重读原ID与收件身份。
 # 查询仅拷贝候选，末尾有界TTL不影响仍pending的wake读取；通知关闭时仍可做安全历史维护。
 # 函数用途: 不读日志地收割后台命令并通知所属主会话；保留坏记录重试与通知去重，不反复查询历史未知项。
@@ -156,10 +155,7 @@ def reconcile_process_completions(agent: object) -> int:
     if not getattr(getattr(agent, "config", None), "background_process_notifications", True):
         _prune_consumed_process_records(store, authority)
         return 0
-    cheap_checks = bool(
-        getattr(getattr(agent, "config", None), "background_tick_cheap_checks", False)
-    )
-    report = _pending_completion_report(authority, cheap_checks=cheap_checks)
+    report = _pending_completion_report(authority)
     records, errors = report.records, report.load_errors
     if errors:
         _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s", len(errors))
@@ -285,7 +281,7 @@ def _record_completion_notice(authority: ProcessSessionStore, current: dict[str,
 
 # LLM: 发现层只判断尚欠通知的结构化记录；持久 unknown 与共享激活永不产生会话完成通知，不纳入待处理事实；
 #   权威读取失败保留待检查，不能当成没有义务。
-#   有固定候选读口时先cheap再full，原owner目录是隔离边界，不从缺失的owner_key补造身份。
+#   固定候选读口只查询一次，原owner目录是隔离边界，不从缺失的owner_key补造身份。
 # 函数用途: Gateway 重启或 owner 热缓存淘汰后，仍能发现后台命令，不让完成通知无人处理。
 def owner_has_pending_process_completions(owner_home: Path) -> bool:
     root = process_session_store_root(owner_home, owner_home)
@@ -304,7 +300,7 @@ def owner_has_pending_process_completions(owner_home: Path) -> bool:
 #   读到的记录里已有本任务欠通知的就直接返回 True（同类坏记录不遮住它）；否则读错误先按记录归属限定：
 #   坏记录能解析出不属于本任务（见 _record_owned_elsewhere）就不计入，
 #   避免别的会话一条坏记录让所有定时收口都读不到。
-#   固定查询仅复制task候选，cheap未命中后仍全读；错误归属裁决与store_root匹配保持原义。
+#   固定查询仅复制task候选，投影未命中时沿原事务读取；错误归属裁决与store_root匹配保持原义。
 # 函数用途: 判断某个会话任务是否还有尚未发出完成通知的受管后台命令（命令仍在跑或刚结束待通知）。
 def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
     store = getattr(agent, "conversation_store", None)

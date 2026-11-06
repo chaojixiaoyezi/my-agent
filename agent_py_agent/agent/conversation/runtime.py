@@ -4133,19 +4133,13 @@ class _BackgroundSchedulerTickMixin:
         WK-INT: 每 tick 先回收 lease 过期的 claimed 字条(崩溃/卡死恢复)。
         """
         agent = getattr(getattr(self, "runtime", None), "agent", None)
-        if not self._tick_cheap_checks(agent) or self._wake_queue_might_have_work(agent, now=now):
+        if self._wake_queue_might_have_work(agent, now=now):
             self._reclaim_expired_wake_leases(now=now)
             self._consume_due_wake_queue(now=now)
         last = getattr(self, "_wake_reconcile_last_at", 0.0)
         if now - last >= _WAKE_RECONCILE_INTERVAL_SECONDS:
             self._wake_reconcile_last_at = now
             self._reconcile_wake_queue(now=now)
-
-
-    # LLM: E10 一期开关在拍内动态读取: 改了配置下一拍就生效(配置生效测试口径), 默认关。
-    # 函数用途: 读本拍"便宜检查"开关, 关闭时所有便宜判据短路回原路径。
-    def _tick_cheap_checks(self, agent: object) -> bool:
-        return bool(getattr(getattr(agent, "config", None), "background_tick_cheap_checks", False))
 
 
     # LLM: E10 一期候选①: 一条只读合并探针判断 wake_queue 有没有 reclaim/pop 该处理的行;
@@ -4392,8 +4386,8 @@ class _BackgroundSchedulerTickMixin:
             return "active"
         return "terminal"
 
-    # LLM: 每拍现读开关并传给原service；事件预留、取消恢复和通知继续由主线dispatch逐拍执行。
-    # 函数用途: 对账等待运行并预留当前到期计划；可选内容缓存不决定是否已经到期。
+    # LLM: 每拍调用原service的统一读取路径；事件预留、取消恢复和通知继续由主线dispatch逐拍执行。
+    # 函数用途: 对账等待运行并预留当前到期计划；内容缓存不决定是否已经到期。
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:
             return
@@ -4409,13 +4403,10 @@ class _BackgroundSchedulerTickMixin:
         if not wait.ready(now):
             return
         try:
-            agent = getattr(getattr(self, "runtime", None), "agent", None)
-            cheap_checks = self._tick_cheap_checks(agent)
-            self.scheduler_service.reconcile_waiting_runs(now=now, cheap_checks=cheap_checks)
+            self.scheduler_service.reconcile_waiting_runs(now=now)
             self.scheduler_service.enqueue_ready_runs(
                 now=now,
                 limit=PENDING_WAKE_CONSUME_LIMIT_COUNT,
-                cheap_checks=cheap_checks,
             )
         except OwnerQuotaUnavailable as exc:
             if wait.failed(now, exc):

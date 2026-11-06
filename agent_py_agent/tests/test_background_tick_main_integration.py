@@ -47,9 +47,8 @@ def process_projections():
     process_store_module._PROCESS_RECORDS_PROJECTION_CACHE.clear()
 
 
-@pytest.mark.parametrize("cheap", [False, True])
 @pytest.mark.parametrize("replacement", ["symlink", "hardlink"])
-def test_cached_scheduler_still_rejects_links_to_the_same_inode(tmp_path, projections, cheap, replacement):
+def test_cached_scheduler_still_rejects_links_to_the_same_inode(tmp_path, projections, replacement):
     repo = _repository(tmp_path / "scheduler")
     _write_store(repo.store_path, _store_with_waiting(1))
     _age_path(repo.store_path)
@@ -61,12 +60,11 @@ def test_cached_scheduler_still_rejects_links_to_the_same_inode(tmp_path, projec
     else:
         os.link(repo.store_path, repo.store_path.with_name("linked.json"))
     with pytest.raises(SchedulerStateError) as caught:
-        repo.waiting_runs(cheap_checks=cheap)
+        repo.waiting_runs(cheap_checks=True)
     assert caught.value.error_code == "SCHEDULER_STORE_UNREADABLE"
 
 
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cached_process_directory_rechecks_link_through_original_transaction(tmp_path, process_projections, monkeypatch, cheap):
+def test_cached_process_directory_rechecks_link_through_original_transaction(tmp_path, process_projections, monkeypatch):
     store = ProcessSessionStore(tmp_path / "processes")
     store.write(_reservation())
     _age_path(store.root)
@@ -77,7 +75,7 @@ def test_cached_process_directory_rechecks_link_through_original_transaction(tmp
     store.root.symlink_to(moved.name, target_is_directory=True)
     counter = _TransactionCounter()
     counter.install(monkeypatch)
-    records, errors = store.list_records(cheap_checks=cheap)
+    records, errors = store.list_records(cheap_checks=True)
     assert len(records) == 1 and errors == []
     assert counter.calls == 1
 
@@ -100,8 +98,7 @@ def test_same_inode_same_size_coarse_timestamp_rewrite_is_read_in_guard_window(t
     assert repo.waiting_runs(cheap_checks=True) == ([], [])
 
 
-@pytest.mark.parametrize("cheap", [False, True])
-def test_waiting_reads_keep_main_lock_free_snapshot_path(tmp_path, projections, monkeypatch, cheap):
+def test_waiting_reads_keep_main_lock_free_snapshot_path(tmp_path, projections, monkeypatch):
     repo = _repository(tmp_path / "scheduler")
     _write_store(repo.store_path, _store_with_waiting(1))
     _age_path(repo.store_path)
@@ -110,8 +107,8 @@ def test_waiting_reads_keep_main_lock_free_snapshot_path(tmp_path, projections, 
         pytest.fail("只读waiting投影不能恢复来源旧写锁")
 
     monkeypatch.setattr(scheduler_module, "locked_json_path", forbidden)
-    first = repo.waiting_runs(cheap_checks=cheap)
-    assert repo.waiting_runs(cheap_checks=cheap) == first
+    first = repo.waiting_runs(cheap_checks=True)
+    assert repo.waiting_runs(cheap_checks=True) == first
     assert _wanting_ids(first[0]) == ["srun_000"]
 
 
@@ -134,8 +131,7 @@ def test_process_projection_lru_evicts_oldest_owner_and_hit_moves_entry(tmp_path
     assert str(stores[1].root) in cache and str(stores[2].root) not in cache
 
 
-@pytest.mark.parametrize("cheap", [False, True])
-def test_hot_projection_keeps_rule_due_time_creator_delivery_and_cancellation(tmp_path, projections, cheap):
+def test_hot_projection_keeps_rule_due_time_creator_delivery_and_cancellation(tmp_path, projections):
     repo = SchedulerRepository(tmp_path / "scheduler", owner_provider="feishu", owner_kind="group", owner_id="test-group")
     creator = {"channel": "feishu", "actor_id": "test-human"}
     rules = [{"id": name, "name": name, "prompt": "读取既有事实", "use_llm": True,
@@ -146,25 +142,24 @@ def test_hot_projection_keeps_rule_due_time_creator_delivery_and_cancellation(tm
         creator=creator, delivery={"mode": "origin", "reply_policy": "explicit"}, now=900,
     ))
     _age_path(repo.store_path)
-    repo.waiting_runs(cheap_checks=cheap)
-    assert repo.reserve_due_runs(now=999, cheap_checks=cheap) == []
-    [run] = repo.reserve_due_runs(now=1000, cheap_checks=cheap)
+    repo.waiting_runs(cheap_checks=True)
+    assert repo.reserve_due_runs(now=999, cheap_checks=True) == []
+    [run] = repo.reserve_due_runs(now=1000, cheap_checks=True)
     assert run["rule_id"] == "first"
     assert run["creator"] == creator and run["delivery"]["reply_policy"] == "explicit"
     claim = repo.claim_run(run["run_id"], lease_seconds=60, now=1001)
     repo.mark_run_running(run["run_id"], claim["claim_id"], now=1002)
     _age_path(repo.store_path)
-    repo.waiting_runs(cheap_checks=cheap)
+    repo.waiting_runs(cheap_checks=True)
     current = repo.get_job(job["job_id"])
     repo.delete_job(job["job_id"], expected_version=current["version"], now=1003)
-    assert repo.queued_runs(now=1600, cheap_checks=cheap) == []
-    assert repo.reserve_due_runs(now=1600, cheap_checks=cheap) == []
+    assert repo.queued_runs(now=1600, cheap_checks=True) == []
+    assert repo.reserve_due_runs(now=1600, cheap_checks=True) == []
     [pending] = repo.pending_cancellation_runs()
     assert pending["run_id"] == run["run_id"] and pending["cancel_requested_at"] == 1003
 
 
-@pytest.mark.parametrize("cheap", [False, True])
-def test_empty_due_projection_does_not_skip_cancel_recovery_or_event_reservation(cheap):
+def test_empty_due_projection_does_not_skip_cancel_recovery_or_event_reservation():
     calls = []
     repo = SimpleNamespace(
         pending_cancellation_runs=lambda: [{"run_id": "cancel-me"}],
@@ -174,12 +169,11 @@ def test_empty_due_projection_does_not_skip_cancel_recovery_or_event_reservation
         queued_runs=lambda **kwargs: [],
     )
     service = SimpleNamespace(repository=repo, cancellation_handler=lambda run: calls.append(("cancel", run["run_id"])))
-    assert dispatch.enqueue_ready_runs(service, now=1000, cheap_checks=cheap) == []
-    assert calls == [("cancel", "cancel-me"), ("recovery", 1000), ("due", cheap), ("event", 1000)]
+    assert dispatch.enqueue_ready_runs(service, now=1000, cheap_checks=True) == []
+    assert calls == [("cancel", "cancel-me"), ("recovery", 1000), ("due", True), ("event", 1000)]
 
 
-@pytest.mark.parametrize("cheap", [False, True])
-def test_group_event_dispatch_and_retirement_keep_main_creator_and_explicit_delivery(tmp_path, projections, cheap):
+def test_group_event_dispatch_and_retirement_keep_main_creator_and_explicit_delivery(tmp_path, projections):
     from agent_py_agent.agent.conversation.store import ConversationStore
 
     store = ConversationStore(tmp_path / "conversations")
@@ -192,9 +186,9 @@ def test_group_event_dispatch_and_retirement_keep_main_creator_and_explicit_deli
         delivery={"mode": "origin", "reply_policy": "explicit"}, now=900))
     service = SchedulerService(repo, conversation_store=store)
     _age_path(repo.store_path)
-    repo.waiting_runs(cheap_checks=cheap)
+    repo.waiting_runs(cheap_checks=True)
     assert repo.accept_source_event(event(), now=1000)["status"] == "accepted"
-    [wake_id] = service.enqueue_ready_runs(now=1000, cheap_checks=cheap)
+    [wake_id] = service.enqueue_ready_runs(now=1000, cheap_checks=True)
     [signal] = store.wakes.pending()
     assert signal.wake_signal_id == wake_id
     run = repo.get_active_run(signal.root_task_id)
@@ -202,5 +196,5 @@ def test_group_event_dispatch_and_retirement_keep_main_creator_and_explicit_deli
     assert run["delivery"] == {"mode": "origin", "reply_policy": "explicit"}
     current = repo.get_job(job["job_id"])
     repo.delete_job(job["job_id"], expected_version=current["version"], now=1001)
-    assert service.enqueue_ready_runs(now=1061, cheap_checks=cheap) == []
+    assert service.enqueue_ready_runs(now=1061, cheap_checks=True) == []
     assert service.claim_wake(signal, now=1061).status == "stale"
