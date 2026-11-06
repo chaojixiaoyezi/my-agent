@@ -221,6 +221,8 @@ def handle_runner_failure(params: RunnerFailureParams) -> str:
     return effective_instruction
 
 
+# LLM: 自动召回条数由memory_push读取agent.config；保留失败软注入及幂等信封，不写记忆。
+# 函数用途: 给失败决策追加当前配置允许的正式教训。
 def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> str:
     effective_instruction = params.effective_instruction
     try:
@@ -232,7 +234,7 @@ def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> 
             "failure_type": failure_type_from_task_status(failure_type),
         }
         relevant_memories = push_relevant_memories(
-            params.agent, failure_type_from_task_status(failure_type), task_context, limit=3
+            params.agent, failure_type_from_task_status(failure_type), task_context
         )
         if relevant_memories:
             memory_hint = format_memories_for_injection(relevant_memories)

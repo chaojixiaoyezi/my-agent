@@ -291,7 +291,6 @@ def append_planner_memory_hint(agent: Any, state: dict[str, Any], prompt: str) -
             agent,
             "planning",
             {"task_id": "", "goal": _planner_memory_goal(state)},
-            limit=3,
         )
         hint = format_memories_for_injection(memories)
     except Exception as exc:

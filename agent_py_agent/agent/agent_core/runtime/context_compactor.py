@@ -11,6 +11,7 @@ from ...memory_archive.compact_circuit_breaker import (
     DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
 )
 from ...settings.config_layers import compact_idle_parameters
+from ...settings.defaults import default_config_int
 from ..model.context_window import resolve_model_context_window_tokens
 
 # LLM: 四层比例及闲置参数冻结进不可变策略；默认只读同owner治理，root与child共用且不授执行权。
@@ -19,9 +20,9 @@ from ..model.context_window import resolve_model_context_window_tokens
 # 旧数值辅助API维持90%缺省；会话四层默认80%由config_layers解析，不从这个兼容常量重建。
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
 # 触发线绝对上限的默认值：与 AgentConfig/MemorySettings/随包 YAML 的默认一致；0 只在显式配置时表示不封顶。
-DEFAULT_COMPACT_TRIGGER_MAX_TOKENS = 300_000
+DEFAULT_COMPACT_TRIGGER_MAX_TOKENS = default_config_int("memory_compact_auto_trigger_max_tokens")
 # compact 后目标上下文占用百分比，达到即停止压缩。
-DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT = 60
+DEFAULT_COMPACT_RECOVERY_TARGET_PERCENT = default_config_int("memory_compact_recovery_target_percent")
 # compact 保留的最近对话轮数。
 DEFAULT_COMPACT_RECENT_TAIL_MAX_TURNS = 4
 # compact 尾部保留的 token 上限。

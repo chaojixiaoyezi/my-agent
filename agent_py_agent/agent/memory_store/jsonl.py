@@ -46,6 +46,7 @@ def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
         return None
 
 from ._jsonl_indexing import _NATIVE_MEMORY_ERRORS, JsonlMemoryIndexMixin
+from .generation_manifest import MemoryPolicyV2
 from .operations import (
     append_memory_operation_events,
     append_memory_purge_event,
@@ -174,7 +175,7 @@ def _check_memory_quota(
 
 
 # LLM: 仅保留旧调用方导入名；20k现在是默认热工作集预算，不再作为正式写入拒绝条件。
-MEMORY_LIBRARY_WRITE_CAP_CHARS = 20000
+MEMORY_LIBRARY_WRITE_CAP_CHARS = MemoryPolicyV2().active_library_max_chars
 
 
 # LLM: 历史调用方仍导入此异常；新正式写链永不抛出，避免跨席位导入断裂。

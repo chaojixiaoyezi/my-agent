@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..memory_archive import estimate_tokens
+from ..settings.defaults import default_config_int
 from .channels import project_user_reply
 from .models import MessageLogEntry
 
@@ -33,7 +34,7 @@ _RECALL_LINE = (
 )
 _OMITTED_PREFIX = "- omitted_user_messages: "
 # compact 地标：默认最大 20000 tokens 的裁剪窗口。
-_DEFAULT_MAX_TOKENS = 20_000
+_DEFAULT_MAX_TOKENS = default_config_int("compact_landmark_max_tokens")
 # compact 地标：最少保留 500 tokens 的窗口。
 _MIN_TOKENS = 500
 # compact 地标：窗口占最近记录的 10%：控制裁剪比例。

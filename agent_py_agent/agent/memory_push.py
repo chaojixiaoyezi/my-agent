@@ -37,13 +37,21 @@ _STRUCTURED_SCOPE_FIELDS = (
 )
 
 
+# 用整数哨兵区分省略 limit 与显式 limit=3，同时保留旧签名的数值与展示。
+class _AutomaticRecallLimit(int):
+    pass
+
+
+_AUTOMATIC_RECALL_LIMIT = _AutomaticRecallLimit(3)
+
+
 # LLM: 返回值只能含 active 正式 Lesson/HOT 的 MemoryRecord 投影；候选、Daily、Ops 和 legacy long-term lesson 不可进入。
 # 函数用途: 查询关键决策点相关的正式教训，忽略可恢复的路由错误。
 def push_relevant_memories(
     agent: object,
     trigger_type: str,
     context: Mapping[str, object],
-    limit: int = 3,
+    limit: int = _AUTOMATIC_RECALL_LIMIT,
 ) -> list[MemoryRecord]:
     memories, _load_errors = push_relevant_memories_report(
         agent,
@@ -54,15 +62,19 @@ def push_relevant_memories(
     return memories
 
 
+# LLM: 省略limit才读取当前config；显式0/None仍关闭召回，错误沿原诊断路径失败关闭，不写正式记忆。
 # LLM: 路由或正式文件损坏时 fail closed 并返回结构化错误；决策主链不能因 Memory 故障崩溃。
 # 函数用途: 查询正式教训并同时返回诊断信息。
 def push_relevant_memories_report(
     agent: object,
     trigger_type: str,
     context: Mapping[str, object],
-    limit: int = 3,
+    limit: int = _AUTOMATIC_RECALL_LIMIT,
 ) -> tuple[list[MemoryRecord], list[dict[str, object]]]:
     try:
+        if limit is _AUTOMATIC_RECALL_LIMIT:
+            config = getattr(agent, "config", None)
+            limit = getattr(config, "memory_top_k", 5) if config is not None else 3
         bounded_limit = max(0, int(limit or 0))
         if bounded_limit <= 0:
             return [], []
@@ -99,7 +111,6 @@ def push_timeout_memories(
             "failure_type": "timeout",
             "timeout_count": max(0, int(timeout_count or 0)),
         },
-        limit=3,
     )
 
 
@@ -119,7 +130,6 @@ def push_failure_memories(
             "goal": goal,
             "failure_type": failure_type,
         },
-        limit=3,
     )
 
 
@@ -134,7 +144,6 @@ def push_planning_memories(
         agent,
         "planning",
         {"task_id": task_id, "goal": goal},
-        limit=3,
     )
 
 

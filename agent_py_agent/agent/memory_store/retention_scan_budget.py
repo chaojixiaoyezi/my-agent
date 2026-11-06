@@ -2,6 +2,7 @@
 # 模块用途: 为后续留存扫描提供条目、字节、时间计量与私有游标持久化。
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,14 +42,26 @@ class RetentionScanBudget:
             or time.monotonic() >= self.deadline
         )
 
-    # LLM: 每次调用创建独立计量和截止时间，不共享上一片状态。
-    # 函数用途: 使用冻结常量构造默认扫描预算。
+    # LLM: 每次调用读取可选已解析config并创建独立计量；拒绝非法或无界预算，不读写游标、不启用维护。
+    # 函数用途: 使用当前配置或原默认值构造一片扫描预算。
     @classmethod
-    def default(cls) -> RetentionScanBudget:
+    def default(cls, config: object = None) -> RetentionScanBudget:
+        entries = getattr(config, "retention_scan_slice_entries", RETENTION_SCAN_SLICE_ENTRIES)
+        size = getattr(config, "retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES)
+        milliseconds = getattr(config, "retention_scan_slice_ms", RETENTION_SCAN_SLICE_MS)
+        if (type(entries) is not int or entries <= 0 or type(size) is not int or size <= 0
+                or type(milliseconds) not in (int, float)):
+            raise ValueError("invalid_retention_scan_budget")
+        try:
+            duration = float(milliseconds)
+        except OverflowError as exc:
+            raise ValueError("invalid_retention_scan_budget") from exc
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("invalid_retention_scan_budget")
         return cls(
-            RETENTION_SCAN_SLICE_ENTRIES,
-            RETENTION_SCAN_SLICE_BYTES,
-            time.monotonic() + RETENTION_SCAN_SLICE_MS / 1000,
+            entries,
+            size,
+            time.monotonic() + duration / 1000,
         )
 
 
