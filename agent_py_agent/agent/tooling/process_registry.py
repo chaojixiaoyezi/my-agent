@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import signal
@@ -36,6 +37,7 @@ from .process_session_store import (
 HOST_STATE_SCHEMA = "background_process_host.v1"  # 仅供已发布 v1 记录读取旧终态文件。
 _IS_WINDOWS = os.name == "nt"
 _DEFAULT_SUBPROCESS_RUN = subprocess.run
+_LOGGER = logging.getLogger(__name__)
 
 # LLM: 只存原生复核成功的精确三元组；锁内合并并发探针，FIFO最多256项，不写磁盘也不代表实例仍存活。
 # 缓存用途: 让升级前旧locale指纹与新观察复用已验证的等价关系，未知/不匹配不入缓存。
@@ -472,7 +474,12 @@ class ProcessRegistry:
             if process.pid != record.pid:
                 raise ValueError("managed process handle conflict")
             record.process = process
-            self._prune_finished_locked(store_root)
+            try:
+                self._prune_finished_locked(store_root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                # 交接已提交且句柄已挂上；历史裁剪失败只延后到下一次启动或完成协调的周期裁剪，不能把已启动命令报成结果未知。
+                _LOGGER.warning("PROCESS_ATTACH_PRUNE_DEFERRED %s",
+                                process_session_error_report(exc, "process_registry.attach_prune"))
             _notify_test_process_spawn(record)
             return record
 

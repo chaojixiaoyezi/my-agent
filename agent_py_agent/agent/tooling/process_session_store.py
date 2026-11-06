@@ -203,7 +203,9 @@ class ProcessSessionTransaction:
         if (type(max_entries) is not int or max_entries < 1
                 or (max_ms is not None and (not math.isfinite(max_ms) or max_ms <= 0))):
             raise ValueError("invalid process record scan budget")
-        start = time.monotonic()
+        # 默认额度只计本扫描线程自身CPU时间：同进程GIL/IO排队不算扫描工作，不能把高并发误判成目录过大；显式额度仍按墙钟严格。
+        clock = time.monotonic if max_ms is not None else time.thread_time
+        start = clock()
         deadline = start + (max_ms if max_ms is not None else _PROCESS_SESSION_SCAN_BASE_MS) / 1000
         names = []
         # 默认额度随已见目录项线性增长；显式额度仍固定，超限拒绝整份选择，不返回半份停止/裁剪清单。
@@ -211,14 +213,14 @@ class ProcessSessionTransaction:
             for count, entry in enumerate(entries, 1):
                 if max_ms is None:
                     deadline = start + (_PROCESS_SESSION_SCAN_BASE_MS + count * _PROCESS_SESSION_SCAN_ENTRY_MS) / 1000
-                if count > max_entries or time.monotonic() >= deadline:
+                if count > max_entries or clock() >= deadline:
                     raise RuntimeError("process_session_scan_budget_exceeded")
                 if entry.name.startswith("bg-") and entry.name.endswith(".json"):
                     names.append(entry.name)
         # deadline 保留最终目录项计数的额度，读取阶段不能继续无限延长。
         records, errors = [], []
         for name in sorted(names):
-            if time.monotonic() >= deadline:
+            if clock() >= deadline:
                 raise RuntimeError("process_session_scan_budget_exceeded")
             path = self.root / name
             try:
