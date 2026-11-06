@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 
 import pytest
 
@@ -111,7 +112,8 @@ def test_m2_due_run_collects_inputs_once_and_formal_once(tmp_path, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(service, "_collect", collect)
-    assert service.run_if_due().status == "succeeded"
+    # 固定本地正午，验证增量采集而不是 23 点优先的日终采集。
+    assert service.run_if_due(now=datetime(2026, 8, 4, 12).astimezone()).status == "succeeded"
     assert scans == [False]
     assert formal.calls == 1
     assert service.state_store.load().per_thread_cursors[thread.thread_id] == message.message_id
@@ -130,7 +132,7 @@ def test_m2_precollected_batch_is_discarded_if_exclusions_change_under_lease(tmp
         return (frozenset() if len(reads) == 1 else frozenset({"chat-1"})), False
 
     service.learning_exclusions = exclusions
-    result = service.run_if_due()
+    result = service.run_if_due(now=datetime(2026, 8, 4, 12).astimezone())
     assert result.status == "succeeded"
     assert service.backend.calls == 0
     assert thread.thread_id not in service.state_store.load().per_thread_cursors

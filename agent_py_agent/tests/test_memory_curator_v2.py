@@ -1207,7 +1207,8 @@ def test_curator_turn_threshold_uses_same_service(tmp_path: Path):
     )
     service = _service(tmp_path, backend, store)
 
-    result = service.run_if_due()
+    # 固定本地正午，避免墙钟日终分支抢先于轮次阈值。
+    result = service.run_if_due(now=datetime(2026, 8, 4, 12).astimezone())
 
     assert result.reason == "turn_threshold"
     assert result.status == "succeeded"
