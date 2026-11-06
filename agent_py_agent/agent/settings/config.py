@@ -320,7 +320,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
 
     # PARAM-W0：范围元数据由构造校验、YAML 归一和登记表共用；model_read_only 不授予部署修改权限。
     gateway_http_listen_backlog: int = field(default=128, metadata={"bounds": (1, 65535), "unit": "个连接", "model_read_only": True})
-    gateway_http_max_request_workers: int = field(default=16, metadata={"bounds": (1, 1024), "unit": "个线程", "model_read_only": True})
+    gateway_http_max_request_workers: int = field(default=64, metadata={"bounds": (1, 1024), "unit": "个线程", "model_read_only": True})
     gateway_http_max_outstanding_requests: int = field(default=128, metadata={"bounds": (1, None), "range": "≥gateway_http_max_request_workers", "unit": "次", "model_read_only": True})
     gateway_http_socket_timeout_seconds: float = field(default=5.0, metadata={"bounds": (0.1, 300.0), "model_read_only": True})
     gateway_http_queue_timeout_seconds: float = field(default=2.0, metadata={"bounds": (0.01, 300.0), "model_read_only": True})

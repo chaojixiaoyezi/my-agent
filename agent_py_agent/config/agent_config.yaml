@@ -1220,7 +1220,7 @@ agents_source_network_enabled: false
 # HTTP 监听等待队列容量，单位连接，范围1..65535；宿主容量只读，重启加载。
 gateway_http_listen_backlog: 128
 # HTTP 请求线程池大小，单位线程，范围1..1024；宿主容量只读，重启加载。
-gateway_http_max_request_workers: 16
+gateway_http_max_request_workers: 64
 # HTTP 已接纳的排队和执行请求总量，单位请求，至少等于请求线程数；不等同业务 inflight，重启加载。
 gateway_http_max_outstanding_requests: 128
 # HTTP socket 阶段超时，单位秒，0.1..300；宿主参数，与请求排队超时分开，重启加载。

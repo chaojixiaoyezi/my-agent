@@ -155,7 +155,25 @@ def test_http_host_config_reaches_actual_resources(monkeypatch, capacity, expect
         server.server_activate()
         assert server.server_port > 0
     assert bounded.GatewayBoundedHTTPServer.request_queue_size == 128
-    assert bounded.GatewayBoundedHTTPServer.max_request_workers == 16
+    assert bounded.GatewayBoundedHTTPServer.max_request_workers == 64
+
+
+# LLM: GW-WORKERS-64 同时核权威配置及缺字段调用，观察真实执行器和信号量，不预先创建工作线程。
+# 函数用途: 验证默认资源容量为64工作线程、128个在途请求槽位。
+@pytest.mark.parametrize("config_factory", [AgentConfig, SimpleNamespace])
+def test_http_worker_defaults_reach_actual_resources(monkeypatch, config_factory):
+    with _http_server(monkeypatch, config_factory()) as server:
+        assert server.max_request_workers == server._request_executor._max_workers == 64
+        assert server.max_outstanding_requests == server._request_slots._initial_value == 128
+        assert not server._request_executor._threads
+
+
+# LLM: 仅在独立模块加载时移除类属性，直接反证getattr兜底仍残留16；monkeypatch回收原属性。
+# 函数用途: 验证配置类缺少字段时也使用64线程兜底。
+def test_http_worker_fallback_without_config_attribute(monkeypatch):
+    monkeypatch.delattr(AgentConfig, "gateway_http_max_request_workers")
+    isolated = _load_consumer(monkeypatch, bounded, "http_worker_fallback")
+    assert isolated.GatewayBoundedHTTPServer.max_request_workers == 64
 
 
 # LLM: 缺配置保原六默认，直接构造的测试子类覆盖仍有效，不修改类级共享状态。
@@ -163,7 +181,7 @@ def test_http_host_config_reaches_actual_resources(monkeypatch, capacity, expect
 def test_http_missing_config_preserves_defaults_and_subclass(monkeypatch):
     with _http_server(monkeypatch, SimpleNamespace()) as server:
         assert (server.request_queue_size, server.max_request_workers,
-                server.max_outstanding_requests) == (128, 16, 128)
+                server.max_outstanding_requests) == (128, 64, 128)
         assert (server.request_socket_timeout, server.request_queue_timeout,
                 server.http_birth_gate_timeout_seconds) == (5.0, 2.0, 1.0)
 

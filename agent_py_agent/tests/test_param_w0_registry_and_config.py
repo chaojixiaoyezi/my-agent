@@ -17,7 +17,7 @@ from agent_py_agent.agent.settings.user_config_capability import packaged_config
 
 DEFAULTS = {
     "gateway_http_listen_backlog": 128,
-    "gateway_http_max_request_workers": 16,
+    "gateway_http_max_request_workers": 64,
     "gateway_http_max_outstanding_requests": 128,
     "gateway_http_socket_timeout_seconds": 5.0,
     "gateway_http_queue_timeout_seconds": 2.0,

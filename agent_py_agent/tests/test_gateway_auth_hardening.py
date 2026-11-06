@@ -93,10 +93,12 @@ def test_default_bind_is_loopback(tmp_path) -> None:
         server.stop()
 
 
+# LLM: GW-WORKERS-64 只提高默认HTTP工作线程数，原有有界接纳关系不能放宽。
+# 函数用途: 锁定64线程默认和重连突发的有限容量。
 def test_gateway_server_absorbs_multi_tui_reconnect_bursts() -> None:
     """单 Gateway 复用固定 worker，并给重连突发保留有界容量。"""
     assert GatewayBoundedHTTPServer.request_queue_size >= 128
-    assert GatewayBoundedHTTPServer.max_request_workers == 16
+    assert GatewayBoundedHTTPServer.max_request_workers == 64
     assert (
         GatewayBoundedHTTPServer.max_outstanding_requests
         >= GatewayBoundedHTTPServer.max_request_workers
