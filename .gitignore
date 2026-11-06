@@ -96,5 +96,3 @@ blobs/
 .background_jobs/
 
 # 本地构建的原生沙箱 helper（不把二进制提交进仓库）
-agent_py_agent/vendor/bin/my-agent-sandbox-helper.linux-*
-agent_py_agent/vendor/bin/my-agent-sandbox-helper.linux-*.sha256
