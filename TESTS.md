@@ -1,3 +1,26 @@
+## 2026-11-06 CI-FIX-70A：TLS 真实参照、局部 FD 观察与确定性排空/重投
+
+来源：`ci-fix-70a27b55a.md`、追加的 `rework-scale-mem-r2-r3-steer.md`，对应 main `70a27b55a` 的 Test 失败。
+
+- TLS：标准库 3.11 的 `HTTPSConnection(context=None)` 构造函数实际会追加 ALPN/PHA，不能拿裸 `ssl.create_default_context()` 作参照。测试改用真实但未连接的标准库连接并在 `finally` 关闭，逐项设置、CA、强制证书和主机名校验均保留。生产 TLS 构造不变，未按初始规格的错误描述撤掉 PHA。并发用例自己预热缓存，明确验证已缓存对象的多线程复用，不再依赖其它测试先运行，也不声称 `functools.cache` 提供 cold single-flight。
+- W9：辅助维护的两处 FD 测量在基线及后像前先收 GC，只统计本临时 home 范围，避免无关网络/SQLite 清理扰动。仍要求 `delta == 0`；新增真实域外 FD 关闭不影响结果、域内持有一个 FD 仍能检出的反例，保留锁忙/删除失败、原续点和恢复断言。
+- W14：十车道完成不代表后台配额目录扫描已结束。测试显式传原稳态时间预算以要求配额续扫，覆盖默认及 32 条预算；沿原 `run_with_transition` 等待 `storage_maintenance.quota_reconciliation.complete`，同时保持双周期、宽限证明、活数据/第二 owner、计量、逐写受门及 FD 零增长检查。等待有 20 秒和 128 拍上界，不手工关闭扫描器、不用 sleep 猜结束、不跳过真实删除。
+- 调度：真实尝试退避从结束时刻起算；固定 `tick(now=1031)` 在慢 CI 上可能仍早。仅替换尝试跟踪模块的单调时钟绑定，覆盖 0/90 秒尝试；读取原持久重试状态，验证冷却前不外发、准确到期只重投原冻结信封、不再调用模型、身份和 canonical 历史只落一次。
+- 反证：原 Python 3.11 TLS 参照断言失败，原冷进程 `-k concurrent` 出现多份上下文；原 W14 出现范围内 FD `+1`，实际来自跨片配额扫描；给原重投测试施加 90 秒单调时长能重现外发次数仍为 1。当前最终结果以本轮交接和 JUnit 为准，不把 macOS 本地通过当作 GitHub Linux CI 已绿。
+
+在工作树根、已具备项目开发依赖的 Python 3.11/3.12 中运行（隔离 HOME，证据落工作树外）：
+
+```bash
+export HOME=/tmp/my-agent-home-ci-fix MY_AGENT_HOME=/tmp/my-agent-home-ci-fix
+python3 -m pytest agent_py_agent/tests/test_mem_w3_shared_provider_tls.py agent_py_agent/tests/test_issues_w9_asset_auxiliary.py agent_py_agent/tests/test_issues_w14_multiprocess_lanes_e2e.py agent_py_agent/tests/test_scheduler_runtime.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_mem_w3_shared_provider_tls.py -k concurrent -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+本片只改回归测试和本记录；不改生产实现、配置、权限或对外重试策略，不启动真实 Gateway、不发送真实渠道消息，不推送、不合并、不部署。
+
 ## 2026-11-06 BG-ADMIN-16：管理员与普通用户后台会话并发分流
 
 来源：`plan-bg-admin-16.md`。解决管理员与普通用户共用4条并发、全局8线程池又限制管理员16条的瓶颈。

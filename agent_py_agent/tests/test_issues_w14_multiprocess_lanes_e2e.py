@@ -276,7 +276,11 @@ def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch
     assert _settled_fd_delta(before_fds, root=home.root) <= 0
 
 
-def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkeypatch):
+# LLM: 十车道与配额扫描都必须真实收敛；跨片生成器可合法持一个目录 FD，不能在仍有配额欠账时测泄漏。
+# 函数用途: 沿同一 transition 排空领域和配额工作后，核对逐写受门、双周期及 FD 零增长。
+# 显式要求配额续扫，避免未启用配额的夹具在十车道完成后按日周期退出；两档预算均保持真实分片。
+@pytest.mark.parametrize('quota_entries', [None, 32])
+def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkeypatch, quota_entries):
     world = lane_world
     transition = _RecordingTransition(world.home)
     before = owner_logical_usage_bytes(world.home.owner_home_dir, exact=True)
@@ -288,22 +292,28 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
         unfenced, lane_writes = _watch_mutations(patch, transition)
         state_writes = _watch_state_commits(patch, world.home)
         now = world.now
-        for tick in range(24):
-            result = run_with_transition(world.home, now, transition)
+        deadline = time.monotonic() + 20.0
+        for tick in range(128):
+            result = run_with_transition(world.home, now, transition,
+                quota_max_entries=quota_entries, quota_max_ms=owner_maintenance._QUOTA_STEADY_MAX_MS)
             assert result.ran and result.apply_outcome == 'applied'
             marker, kinds = _observe_state(world.home, coordinator=True)
+            # 协调模式的配额回执独立于十车道 cursor，由原扫描器实际完成后发布。
+            quota_complete = marker['storage_maintenance']['quota_reconciliation']['complete'] is True
             if seen == set(LANE_BINDINGS):
                 revisited.update(kinds)
                 repeated_all |= kinds == set(LANE_BINDINGS)
             seen.update(kinds)
             if tick == 0:
                 assert world.orphan.exists(), '七天宽限期前不能清扫旧索引节点'
-            if not marker['maintenance_partial'] and not world.orphan.exists() and repeated_all:
+            if not marker['maintenance_partial'] and quota_complete and not world.orphan.exists() and repeated_all:
                 break
-            now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] else
+            assert time.monotonic() < deadline, f'协调维护排空超时：{marker["storage_maintenance"]}'
+            # 沿原维护入口续扫，不直接关闭/清掉生产扫描器，也不跳到新日周期重开一轮配额扫描。
+            now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] or not quota_complete else
                 MemoryRetentionPolicy().maintenance_interval_seconds)
         else:
-            pytest.fail('协调维护未在有界拍数内消费宽限证明并重新走完十种车道')
+            pytest.fail('协调维护未在有界拍数内排空配额、消费宽限证明并重新走完十种车道')
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all

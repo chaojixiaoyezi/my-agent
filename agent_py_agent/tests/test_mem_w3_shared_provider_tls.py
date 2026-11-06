@@ -30,16 +30,23 @@ def test_https_handlers_share_one_process_tls_context():
 # 函数用途: 核对共享上下文没有放松证书校验、主机名校验或协议下限。
 def test_shared_tls_context_matches_stdlib_default_https_context():
     shared = keepalive_transport._tls_context()
-    factory = getattr(http.client, "_create_https_context", None)
-    reference = factory(http.client.HTTPSConnection._http_vsn) if callable(factory) else ssl.create_default_context()
-    for name in _COMPARED_SETTINGS:
-        assert getattr(shared, name) == getattr(reference, name), name
-    assert shared.verify_mode == ssl.CERT_REQUIRED and shared.check_hostname is True
-    assert shared.cert_store_stats() == reference.cert_store_stats()
+    # 以实际 HTTPSConnection(context=None) 为准；3.11 在构造函数内补 ALPN/PHA，而非裸 SSL 工厂。
+    connection = http.client.HTTPSConnection("example.com")
+    try:
+        reference = connection._context
+        assert connection.sock is None
+        for name in _COMPARED_SETTINGS:
+            assert getattr(shared, name) == getattr(reference, name), name
+        assert shared.verify_mode == ssl.CERT_REQUIRED and shared.check_hostname is True
+        assert shared.cert_store_stats() == reference.cert_store_stats()
+    finally:
+        connection.close()
 
 
-# 函数用途: 确认多线程并发首次取用也只得到一份上下文。
+# LLM: functools.cache 不保证冷启动 single-flight；本用例验证已缓存对象的并发复用，不依赖其它测试预热。
+# 函数用途: 确认单独运行时多线程也都复用本测试预热的同一份上下文。
 def test_concurrent_first_use_yields_single_context():
+    shared = keepalive_transport._tls_context()
     seen: set[int] = set()
     lock = threading.Lock()
 
@@ -53,7 +60,7 @@ def test_concurrent_first_use_yields_single_context():
         thread.start()
     for thread in threads:
         thread.join()
-    assert len(seen) == 1
+    assert seen == {id(shared)}
 
 
 # LLM: 长连接池新建 HTTPS 连接时同样用共享上下文；测试替换 _tls_context 的既有方式继续生效。

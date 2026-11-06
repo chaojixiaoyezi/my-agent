@@ -1,5 +1,6 @@
 # LLM: 使用真实草稿、演进请求/候选、自动与用户提案writer，临时Owner内推进时间并注入并发。
 # 模块用途: 验证资产辅助TTL通道不碰正式版本、blob、待发表证据和用户提案。
+import gc
 import json
 import threading
 from contextlib import contextmanager
@@ -30,6 +31,7 @@ from agent_py_agent.agent.user_space.storage_lanes import (
     StorageLaneRequest,
     validate_lane_receipt,
 )
+from agent_py_agent.tests.test_issues_w14_lane_wiring_e2e import _fd_count
 
 
 # LLM: 真实初始化只落临时目录，策略和pin来源与生产格式一致。
@@ -279,7 +281,6 @@ def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch,
 
     from agent_py_agent.agent.memory_store import retention_scan
     from agent_py_agent.agent.user_space.storage_lanes import STORAGE_LANE_SLICE_MS
-    from agent_py_agent.tests.test_issues_w9_tool_output_retention import _fd_count
 
     paths = [candidate(setup, f'slow-{index}', age=31) for index in range(3)]
     expected_bytes = sum(path.stat().st_size for path in paths)
@@ -294,7 +295,8 @@ def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch,
         return original(*args, **kwargs)
 
     monkeypatch.setattr(retention_scan, 'current_retention_pins', slow_pins)
-    before = _fd_count()
+    gc.collect()
+    before = _fd_count(root=setup[0].root)
     cursor, rows = {'phase': 'candidates', 'kind': 'script', 'after': ''}, []
     for _ in range(8):
         pending = any(path.exists() for path in paths)
@@ -318,7 +320,8 @@ def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch,
     assert sum(row['freed_bytes'] for row in rows) == expected_bytes
     assert all(path.read_bytes() == body for path, body in preserved.items())
     assert history._AUXILIARY_READ_METER.get() is None
-    delta = _fd_count() - before
+    gc.collect()
+    delta = _fd_count(root=setup[0].root) - before
     record_property('fd_delta', delta)
     record_property('pin_calls', len(pin_calls))
     assert delta == 0
@@ -330,8 +333,6 @@ def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch,
 def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_property, condition):
     import os
     from contextlib import nullcontext
-
-    from agent_py_agent.tests.test_issues_w9_tool_output_retention import _fd_count
 
     path = evolution_request(setup, 'fd-check')
     original, failed = os.unlink, []
@@ -348,9 +349,12 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
         monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {fail_unlink})
     lock = held_lock(locked_json_path(path)) if condition == 'lock_busy' else nullcontext()
     with lock:
-        before = _fd_count()
+        # 先收旧对象，再只观察本夹具的 home；其它测试的网络/SQLite FD 关闭不属于本次维护。
+        gc.collect()
+        before = _fd_count(root=setup[0].root)
         row = history.maintain_asset_auxiliary_lane(request(setup))
-        delta = _fd_count() - before
+        gc.collect()
+        delta = _fd_count(root=setup[0].root) - before
         record_property('fd_delta', delta)
         assert delta == 0 and path.exists() and row['deleted_items'] == 0
         assert not row['complete'] and row['cursor']['after'] == ''
@@ -362,6 +366,19 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
     monkeypatch.setattr(os, 'unlink', original)
     assert sum(item['deleted_items'] for item in drain(setup, cursor=row['cursor'])) == 1
     assert not path.exists()
+
+
+# LLM: 使用真实域外关闭与域内持有验证计数边界，不允许 scoped 观察把真正泄漏也忽略。
+# 函数用途: 证明无关 FD 清理不扰动基线，而夹具内多留一个 FD 仍可检出。
+def test_auxiliary_fd_observation_ignores_foreign_cleanup_but_detects_growth(setup, tmp_path):
+    root = setup[0].root
+    with (tmp_path / 'outside.txt').open('w') as foreign:
+        before = _fd_count(root=root)
+        foreign.close()
+        assert _fd_count(root=root) == before
+        with (root / 'held.txt').open('w'):
+            assert _fd_count(root=root) == before + 1
+    assert _fd_count(root=root) == before
 
 
 # LLM: 原unlink先删后同步；目录同步失败时仍要把已确认删除量记入回执，并报告同步错误。
