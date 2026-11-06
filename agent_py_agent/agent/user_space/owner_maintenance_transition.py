@@ -28,10 +28,10 @@ def _state_bytes(home):
 # LLM: callback来自原C/W执行门；逐写重核原policy/state，已有局部副作用不回滚或伪造未进入。
 # LLM: TTL/事件删除仍在原保留安全门后；runtime安全清理沿commit执行，不被retention未到期或hold推迟。
 # 函数用途: 沿原活scope逐步提交维护并最终CAS同一状态，不新增维护账或权限来源。
-# LLM: 在runtime清理等任何领域动作前核准确CAS前像的代际及epoch，不能等最终写回才拒绝坏维护头。
+# LLM: 领域动作前核准确CAS前像代际及epoch；可选config只透传保留链，不改变原逐写门。
 # 函数用途: 先验证原状态版本，再沿原逐写门运行已有维护。
 def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None,
-                        quota_max_ms=None, quota_max_entries=None):
+                        quota_max_ms=None, quota_max_entries=None, config=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
         _backfill_hung_runs,
@@ -85,7 +85,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     scan_options = ({'scan_budget': True}
                     if 'scan_budget' in inspect.signature(apply_owner_retention).parameters else {})
     retention = apply_owner_retention(home, now=datetime.fromtimestamp(now, timezone.utc),
-        commit_transition=commit, expected_policy_fingerprint=policy, **scan_options)
+        commit_transition=commit, expected_policy_fingerprint=policy, config=config, **scan_options)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                          now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit)
                      if retention.applied and not retention.legal_hold and not retention.load_errors

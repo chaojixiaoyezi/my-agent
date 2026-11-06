@@ -413,6 +413,7 @@ def _execute_maintenance(agent, ref):
     from ..user_space.owner_maintenance import run_owner_retention_if_due
 
     result = run_owner_retention_if_due(agent.home_paths, include_global_indexes=False,
+        config=getattr(agent, "config", None),
         commit_transition=lambda operation: background_short_operation("owner_maintenance_commit", operation),
         expected_policy_fingerprint=ref["input_revision"],
         expected_state_fingerprint=ref["source_sha256"] if ref["source_exists"] else "missing")
