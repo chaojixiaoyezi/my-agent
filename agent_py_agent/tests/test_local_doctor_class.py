@@ -142,6 +142,27 @@ def _build_doctor_report_with_mocks(mock_agent, tmp_path, **kwargs):
         return build_local_doctor_report(mock_agent, workspace_root_mode=workspace_root_mode)
 
 
+def test_build_local_doctor_report_keeps_archive_totals(tmp_path, monkeypatch):
+    """诊断报告沿真实队列读口保留归档计数，不用计数替身掩盖默认值变化。"""
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.cli import local_doctor
+
+    agent = _mock_agent_for_doctor(tmp_path)
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    for folder in (paths.done, paths.failed, paths.responses):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "request.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(local_doctor, "gateway_paths", lambda _agent: paths)
+    monkeypatch.setattr(local_doctor, "gateway_stale_processing", lambda *_args: [])
+    monkeypatch.setattr(local_doctor, "_memory_record_count", lambda _agent: 5)
+
+    report = build_local_doctor_report(agent)
+    expected = {"pending": 0, "processing": 0, "done": 1, "failed": 1, "responses": 1}
+    assert report["gateway_counts"] == expected
+    queue_check = next(check for check in report["checks"] if check["name"] == "gateway_queue")
+    assert queue_check["details"]["counts"] == expected
+
+
 def test_build_local_doctor_report_basic(tmp_path):
     """测试基本报告构建。"""
     mock_agent = _mock_agent_for_doctor(tmp_path)

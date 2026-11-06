@@ -55,6 +55,23 @@ def _status_mock_agent(tmp_path: Path) -> MagicMock:
     return mock_agent
 
 
+def test_gateway_status_renderer_keeps_archive_totals(tmp_path):
+    """展示入口必须保留真实归档总量，不能随热路径默认值一起丢失。"""
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.status_rendering import render_gateway_status
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    for folder in (paths.done, paths.failed, paths.responses):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "request.json").write_text("{}", encoding="utf-8")
+
+    lines = render_gateway_status(SimpleNamespace(), paths)
+    counts_line = next(line for line in lines if line.startswith("gateway requests="))
+    assert json.loads(counts_line.partition("=")[2]) == {
+        "pending": 0, "processing": 0, "done": 1, "failed": 1, "responses": 1,
+    }
+
+
 class TestCmdStatus:
     """测试 cmd_status 命令。"""
 

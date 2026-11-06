@@ -131,7 +131,7 @@ def _cmd_business(args):
 def build_interactive_parser() -> argparse.ArgumentParser:
     parser = _build_root_parser()
     subparsers = parser.add_subparsers(dest="command", required=True)
-    add_chat_subcommands(subparsers, lazy_handlers=True)
+    add_chat_subcommands(subparsers)
     return parser
 
 

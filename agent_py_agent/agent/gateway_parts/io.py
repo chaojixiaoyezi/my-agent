@@ -879,7 +879,7 @@ def gateway_lock_sidecar_dirs(paths: GatewayPaths) -> tuple[Path, ...]:
 
 # LLM: 队列计数只投影目录事实，不读取请求或参与准入；scandir 复用目录类型，避免逐文件 stat 抢占状态线程。
 # 函数用途: 轻量统计等待和执行数量，历史归档仅在调用方明确需要时纳入。
-def gateway_request_counts(paths: GatewayPaths, *, include_archives: bool = True) -> dict[str, int]:
+def gateway_request_counts(paths: GatewayPaths, *, include_archives: bool = False) -> dict[str, int]:
 
     # LLM: 保持只计 JSON 普通文件的原语义；有界迭代，不把队列正文或所有 Path 常驻内存。
     # 函数用途: 一次目录遍历计数，避免高并发时重复释放和争抢 GIL。

@@ -204,7 +204,7 @@ def build_local_doctor_report(
     _check_memory_index(checks, suggestions, memory_count, memory_coverage)
     missing_files = agent.local_store.missing_content_files(limit=limit)
     _check_content_files(checks, suggestions, missing_files, limit)
-    counts = gateway_request_counts(paths)
+    counts = gateway_request_counts(paths, include_archives=True)
     _check_gateway_queue(checks, suggestions, GatewayQueueCheckContext(paths, counts, agent))
     _check_work_orders(checks, suggestions, agent, limit)
     if stats["record_count"] == 0 and (agent.subagents.list_runs() or any(counts.values())):

@@ -374,8 +374,9 @@ class TestGatewayRequestCounts:
         result = gateway_request_counts(paths)
         assert result["pending"] == 3
 
-    def test_counts_can_skip_archive_directories_for_hot_paths(self, tmp_path: Path):
-        """热路径可只统计活跃队列，避免心跳反复扫描历史响应目录。"""
+    @pytest.mark.parametrize("options", [{}, {"include_archives": False}], ids=["default", "explicit-false"])
+    def test_counts_can_skip_archive_directories_for_hot_paths(self, tmp_path: Path, monkeypatch, options):
+        """默认和显式热路径都只遍历活跃队列；显式全量仍保留归档计数。"""
         from agent_py_agent.agent.gateway_parts.io import gateway_request_counts
         from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
 
@@ -394,16 +395,27 @@ class TestGatewayRequestCounts:
             responses=tmp_path / "gateway/responses",
             history=tmp_path / "gateway/history.jsonl",
         )
-        for folder, prefix in ((paths.inbox, "pending"), (paths.processing, "processing"), (paths.done, "done"), (paths.responses, "response")):
+        for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
             folder.mkdir(parents=True, exist_ok=True)
-            (folder / f"{prefix}.json").write_text("{}", encoding="utf-8")
+            (folder / "request.json").write_text("{}", encoding="utf-8")
+            (folder / "request.txt").write_text("ignored", encoding="utf-8")
+            (folder / "directory.json").mkdir()
 
-        hot_counts = gateway_request_counts(paths, include_archives=False)
-        full_counts = gateway_request_counts(paths)
+        scanned_paths = []
+        real_scandir = os.scandir
+
+        def record_scandir(path):
+            scanned_paths.append(Path(path))
+            return real_scandir(path)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "scandir", record_scandir)
+            hot_counts = gateway_request_counts(paths, **options)
 
         assert hot_counts == {"pending": 1, "processing": 1}
-        assert full_counts["done"] == 1
-        assert full_counts["responses"] == 1
+        assert scanned_paths == [paths.inbox, paths.processing]
+        full_counts = gateway_request_counts(paths, include_archives=True)
+        assert full_counts == {"pending": 1, "processing": 1, "done": 1, "failed": 1, "responses": 1}
 
 
 class TestGatewayResponsePath:

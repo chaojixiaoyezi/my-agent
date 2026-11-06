@@ -689,10 +689,40 @@ class TestResumeCommand:
     或回退到其他历史; 存在 → 转调 cmd_chat 恢复该会话。
     """
 
-    def test_resume_parser_positional_session_id(self):
-        """resume 的 positional session_id 映射到 args.session_id + gateway 默认。"""
+    @pytest.mark.parametrize("command", ["chat", "resume"])
+    def test_canonical_chat_registration_defers_chat_import(self, command):
+        """冷进程注册两种命令时不得导入聊天运行时，处理器统一绑定懒包装器。"""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        script = """
+import argparse
+import sys
+from agent_py_agent.cli import chat_command_parser
+assert "agent_py_agent.cli.chat" not in sys.modules
+parser = argparse.ArgumentParser()
+chat_command_parser.add_chat_subcommands(parser.add_subparsers(dest="command"))
+argv = [sys.argv[1]]
+if sys.argv[1] == "resume":
+    argv.append("sess_1712_abcd1234")
+args = parser.parse_args(argv)
+assert "agent_py_agent.cli.chat" not in sys.modules
+expected = getattr(chat_command_parser, "_cmd_" + sys.argv[1])
+assert args.func is expected
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script, command],
+            cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_resume_parser_positional_session_id(self, monkeypatch):
+        """resume 保留参数默认值，并在调用懒处理器时转交原参数和返回码。"""
         import argparse
 
+        from agent_py_agent.cli import chat as chat_mod
+        from agent_py_agent.cli.chat_command_parser import _cmd_resume
         from agent_py_agent.cli.subcommands_basic import add_basic_subcommands
 
         parser = argparse.ArgumentParser()
@@ -703,9 +733,12 @@ class TestResumeCommand:
         assert args.command == "resume"
         assert args.session_id == "sess_1712_abcd1234"
         assert args.gateway is True
-        from agent_py_agent.cli.chat import cmd_resume
+        assert args.func is _cmd_resume
 
-        assert args.func is cmd_resume
+        calls = []
+        monkeypatch.setattr(chat_mod, "cmd_resume", lambda received: calls.append(received) or 7)
+        assert args.func(args) == 7
+        assert calls == [args]
 
     def test_resume_missing_session_fail_closed(self, monkeypatch, tmp_path):
         """会话不存在 → 返回 3 + stderr 报错 + 不创建任何 session 文件。"""
