@@ -250,7 +250,7 @@ def prepare_conversation_method_carry(agent: object, params: object, *, budget_c
 
 
 # LLM: 线程名经method_thread_id校验conversation_method_carry_enabled与非subagent上下文，schema只取当前授权snapshot；
-#   原IR按source去重，不新增第二持久标记；仅Compact后默认折叠开启时追加；更窄allowed_tools、取消/headroom保持。
+#   原IR按source去重，不新增第二持久标记；默认折叠固定开启，仅Compact后追加；更窄allowed_tools、取消/headroom保持。
 # 函数用途: 将最近已发现工具的参数速查放到压缩后的上下文尾部，返回真正新增的预算占用。
 def _prepare_discovered_tool_carry(agent: object, params: object, budget_cap: int | None) -> int:
     from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
@@ -258,13 +258,7 @@ def _prepare_discovered_tool_carry(agent: object, params: object, budget_cap: in
     from ..tooling.tool_search_state import ordered_tool_names
 
     snapshot = getattr(params, "tool_runtime_snapshot", None)
-    tools_deferral = getattr(getattr(agent, "tools", None), "catalog_default_deferral_enabled", None)
-    deferral_enabled = (
-        tools_deferral
-        if isinstance(tools_deferral, bool)
-        else getattr(snapshot, "default_deferral_enabled", False) is True
-    )
-    if (snapshot is None or not deferral_enabled
+    if (snapshot is None
             or getattr(params, "context_scope", "") in {"isolated", "control_plane"}
             or getattr(agent, "_current_run_params", params) is not params):
         return 0

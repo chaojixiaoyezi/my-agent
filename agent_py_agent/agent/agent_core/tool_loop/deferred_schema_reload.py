@@ -1,6 +1,6 @@
 # LLM: 只读工具归档里的结构化事实（ok、tool_execution.failure_stage）和本快照的可见性，不解析模型或工具输出正文；
 #   副作用仅为本轮加载名和schema_reload展示事实；线程账沿原post-archive写口，不阻断原结果归档。
-#   只在 tool_default_deferral_enabled 打开时生效，开关关闭时行为逐字不变。改动同步 test_tool_default_deferral 与其真实链路用例。
+#   默认折叠固定开启，恢复只依赖本轮真实可见性。改动同步默认折叠与真实链路用例。
 # 模块用途: 模型没先 tool_search 就直接调用收起的工具、在参数校验阶段失败时，把这个工具的完整参数定义加到下一次请求，
 #   让模型下一步照定义重试，而不是在没有定义的情况下反复猜参数。
 from __future__ import annotations
@@ -22,7 +22,7 @@ from ...tooling.models import ToolFailureStage
 def reload_schema_after_blind_call(agent: object, params: object, archive_record: dict[str, object]) -> str:
     registry = getattr(agent, "tools", None)
     snapshot = getattr(params, "tool_runtime_snapshot", None)
-    if snapshot is None or getattr(registry, "catalog_default_deferral_enabled", False) is not True:
+    if snapshot is None:
         return ""
     tool = str(archive_record.get("tool") or "").strip()
     execution = archive_record.get("tool_execution")
