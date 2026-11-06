@@ -254,9 +254,9 @@ def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch
     try:
         assert ready.wait(5), '外部写线程没有准备完成'
         gc.collect()
-        # 只在写入句柄关闭后取基准，保证其中恰好包含线程持有的那个 FD。
+        # 只在写入句柄关闭后取同目录范围基准，目录外持有的 FD 不归因于维护。
         with descriptor_lock:
-            before_fds = _fd_count()
+            before_fds = _fd_count(root=home.root)
         transition = _RecordingTransition(home)
         with monkeypatch.context() as patch:
             unfenced, _ = _watch_mutations(patch, transition)
@@ -272,8 +272,8 @@ def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch
         assert not thread.is_alive(), '外部写线程未退出'
     assert errors == []
     assert result.ran
-    assert unfenced == [], f'foreign descriptor delta: {_fd_count() - before_fds}'
-    assert _settled_fd_delta(before_fds) <= 0
+    assert unfenced == [], f'foreign descriptor delta: {_fd_count(root=home.root) - before_fds}'
+    assert _settled_fd_delta(before_fds, root=home.root) <= 0
 
 
 def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkeypatch):
@@ -283,7 +283,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
     seen, revisited = set(), set()
     repeated_all = False
     gc.collect()
-    before_fds = _fd_count()
+    before_fds = _fd_count(root=world.home.root)
     with monkeypatch.context() as patch:
         unfenced, lane_writes = _watch_mutations(patch, transition)
         state_writes = _watch_state_commits(patch, world.home)
@@ -304,7 +304,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
                 MemoryRetentionPolicy().maintenance_interval_seconds)
         else:
             pytest.fail('协调维护未在有界拍数内消费宽限证明并重新走完十种车道')
-    assert _settled_fd_delta(before_fds) <= 0
+    assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all
     # LocalStore 经 global_write_commit_scope 使用相同原写门，其余车道经 run_write。
