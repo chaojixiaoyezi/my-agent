@@ -6,15 +6,20 @@ from __future__ import annotations
 
 import time
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .tui_runtime import TuiTurnSummary
+
+if TYPE_CHECKING:
+    from .gateway_client import GatewayChatObserver
 
 
 # LLM: 已有gateway_request_id只接原已确认输入的同ID观察；本次HTTP未确认在prepare抛错，不进入无限续等，也不重投。
 # 未提交请求仍检查服务；观察超时不是任务终态，页面存活时保留同一请求与流游标，不重提业务。
 # 函数用途: 持续等原请求的真实终态；长时间无活动只提示，退出页面及时停止观察，不取消服务端任务。
-def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
+def _worker_gateway_path(
+    ctx: Any, *, observer: GatewayChatObserver | None = None,
+) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.gateway_parts.permission_bridge import write_gateway_permission_decision
     from .gateway_client import (
         GatewayChunkPollRequest,
@@ -32,7 +37,9 @@ def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
         partial(write_gateway_permission_decision, chunk_path)
     )
     try:
-        response = poll_gateway_chunks(
+        # 宿主观察器仍受原审批 sink 与退出清理包围，不重投或取消服务端请求。
+        observe = poll_gateway_chunks if observer is None else observer
+        response = observe(
             GatewayChunkPollRequest(
                 chunk_path,
                 terminal_path,

@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from ...agent.gateway_parts.io import STREAM_CHUNK_READ_MAX_BYTES, read_complete_utf8_rows
 from ...agent.gateway_parts.paths import gateway_chunk_path, gateway_chunk_path_candidates
@@ -60,6 +61,12 @@ class GatewayChunkPollRequest:
     on_event: object | None = None
     on_wait_timeout: Callable[[], None] | None = None
     is_wait_cancelled: Callable[[], bool] | None = None
+
+
+# LLM: 仅供可信宿主替换观察运输；实现须保留原终态、游标、计数及等待回调，不授权或重新提交请求。
+# 类用途: 约定 plain/TUI 共用的聊天观察器调用合同。
+class GatewayChatObserver(Protocol):
+    def __call__(self, request: GatewayChunkPollRequest) -> dict[str, object]: ...
 
 
 @dataclass(frozen=True)
@@ -387,6 +394,7 @@ def format_gateway_timing(ctx: GatewayTimingContext) -> str:
 
 __all__ = [
     "ChatRequestContent",
+    "GatewayChatObserver",
     "GatewayChunkPollRequest",
     "GatewayTimingContext",
     "check_gateway_alive",
