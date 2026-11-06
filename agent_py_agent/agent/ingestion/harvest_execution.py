@@ -77,9 +77,11 @@ def harvester_input_revision(payload):
         sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
-# LLM: 只读canonical节拍；首次到点立即冻结，已有同deadline边界则继续服从正退避，consumer仍重核。
-# 函数用途: 在不写状态的发现阶段兼顾截止唤醒与错误节拍。
+# LLM: 只读canonical节拍；轮询间隔与加载器同源校验，首次截止冻结优先、已冻结边界仍服从正退避，consumer重核。
+# 函数用途: 在不写状态的发现阶段兼顾配置轮询间隔、截止唤醒与错误节拍。
 def harvester_has_due_work(payload, now):
+    from .config import validated_poll_interval_seconds
+
     if payload['closed'] or payload['window_finalized_at'] > 0:
         return False
     tuning = payload['tuning']
@@ -93,7 +95,8 @@ def harvester_has_due_work(payload, now):
         return False
     window = payload['watch_window_seconds']
     # saved_at 是上一次原收割/工具快照时间；不生成持久timer或每轮新请求号。
-    return now >= payload['saved_at'] + 1.5 or window > 0 and now >= payload['opened_at'] + window
+    interval = validated_poll_interval_seconds(tuning.get('poll_interval_seconds'))
+    return now >= payload['saved_at'] + interval or window > 0 and now >= payload['opened_at'] + window
 
 
 # LLM: 原T/P5和同metadata引用才允许捕获；返回原scope而非序列化写许可，复制/退出对象不能延寿。

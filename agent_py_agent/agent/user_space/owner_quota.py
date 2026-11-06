@@ -277,7 +277,7 @@ class OwnerQuotaAdmission:
         # 中间结算只把本准入预留降为0字节标记、不移除：业务仍可能回滚，最后一次退出结算才清除。
         self._held = False
 
-    # LLM: 原 owner 锁内预留并按实际差额结算；永久资产独享比例余量与待对账累计额度，观察失效仍拒绝增长。
+    # LLM: 原 owner 锁内预留并按实际差额结算；永久资产独享实例配置的比例余量与待对账累计额度，观察失效仍拒绝增长。
     # 函数用途: 计算本批增长并在写入前持久预留。
     def check(self, changes: Iterable[OwnerQuotaChange], *, bounded_control_growth_bytes: int = 0) -> OwnerQuotaProjection | None:
         _check_quota_cancelled()
@@ -285,7 +285,7 @@ class OwnerQuotaAdmission:
             return None
         relevant = _normalized_owner_changes(self._enforcer.owner_root, changes)
         permanent_only = _permanent_only_changes(self._enforcer.owner_root, relevant)
-        headroom = self._enforcer.max_bytes * OWNER_QUOTA_PERMANENT_HEADROOM_PERCENT // 100 if permanent_only else 0
+        headroom = self._enforcer.max_bytes * self._enforcer.permanent_headroom_percent // 100 if permanent_only else 0
         if not relevant:
             return None
         try:
@@ -382,9 +382,10 @@ class OwnerQuotaAdmission:
         permanent_pending = False
         if not complete and not authoritative and not bounded and final > replaced:
             spent = ledger.get('permanent_pending_growth_bytes', 0)
-            spent = spent if type(spent) is int and spent >= 0 else OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES
+            pending_limit = self._enforcer.permanent_pending_growth_bytes
+            spent = spent if type(spent) is int and spent >= 0 else pending_limit
             if (permanent_only and not snapshot_invalidated
-                    and spent + (final - replaced) <= min(OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES, headroom)):
+                    and spent + (final - replaced) <= min(pending_limit, headroom)):
                 ledger['permanent_pending_growth_bytes'] = spent + (final - replaced)
                 permanent_pending = True
             else:
@@ -619,6 +620,22 @@ class OwnerQuotaAdmission:
         self.commit_delta()
 
 
+# LLM: 只读取显式配置或原模块默认；四字段均拒绝bool，水位联合校验，永久余量与待对账增长预算独立，不写账。
+# 函数用途: 为配额准入和只读压力查询解析同一组已校验调参。
+def _owner_quota_tuning(config: object | None) -> tuple[int, int, int, int]:
+    high = getattr(config, "owner_quota_pressure_high_percent", OWNER_QUOTA_PRESSURE_HIGH_PERCENT)
+    critical = getattr(config, "owner_quota_pressure_critical_percent", OWNER_QUOTA_PRESSURE_CRITICAL_PERCENT)
+    headroom = getattr(config, "owner_quota_permanent_headroom_percent", OWNER_QUOTA_PERMANENT_HEADROOM_PERCENT)
+    pending = getattr(config, "owner_quota_permanent_pending_growth_bytes", OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES)
+    if any(type(value) is not int for value in (high, critical, headroom, pending)):
+        raise ValueError("owner quota tuning must use integers")
+    if not 0 <= high < critical <= 100:
+        raise ValueError("owner quota watermarks require 0 <= high < critical <= 100")
+    if not 0 <= headroom <= 100 or pending < 0:
+        raise ValueError("owner quota headroom must be 0..100 and pending growth non-negative")
+    return high, critical, headroom, pending
+
+
 # LLM: 唯一 owner 配额锁始终先于领域文件锁；非阻塞模式不授予绕锁权限，等待选择不改变持久策略。
 # 类用途: 为用户目录内的结构化写入提供跨线程、跨进程的统一空间准入。
 class OwnerQuotaEnforcer:
@@ -631,9 +648,12 @@ class OwnerQuotaEnforcer:
     limit.
     """
 
-    # LLM: coordinator_io仅更严格IO策略，不缓存source；原quota公式/策略/扫描不改，C出生消费原scope。
-    # 函数用途: 绑定原owner配额与锁锚点，按实例选择准确FD出生门。
-    def __init__(self, owner_root: str | Path, *, max_bytes: int, policy_available: bool = True, coordinator_io: bool = False):
+    # LLM: 可选调参只在构造时验证并冻结到实例；原quota公式/锁序/扫描及C出生scope不变，不写配置。
+    # 函数用途: 绑定原owner配额、已校验增长预算和锁锚点，按实例选择准确FD出生门。
+    def __init__(self, owner_root: str | Path, *, max_bytes: int, policy_available: bool = True,
+                 coordinator_io: bool = False, config: object | None = None):
+        (self.pressure_high_percent, self.pressure_critical_percent,
+         self.permanent_headroom_percent, self.permanent_pending_growth_bytes) = _owner_quota_tuning(config)
         self.owner_root = Path(owner_root).expanduser().resolve(strict=False)
         self.max_bytes = max(0, int(max_bytes))
         self.policy_available = bool(policy_available)
@@ -681,12 +701,13 @@ def _parse_quota_disk_mb(raw) -> int:
         return 0
 
 
-# LLM: 无Agent的正式写入口仍读同一quota.json，坏策略关闭式拒绝；缺显式限额沿原默认无限。
-# 函数用途: 为确认回调等非Agent入口创建规范配额门。
+# LLM: 无Agent入口仍读同一quota.json，坏策略关闭式拒绝；仅透传可选调参，不从quota文件另造调参权威。
+# 函数用途: 为确认回调等非Agent入口创建携带可选配置的规范配额门。
 def owner_quota_enforcer_from_policy(
     owner_root: str | Path,
     *,
     quota_path: str | Path | None = None,
+    config: object | None = None,
 ) -> OwnerQuotaEnforcer:
     """Build the canonical gate for non-Agent write entrances.
 
@@ -705,6 +726,7 @@ def owner_quota_enforcer_from_policy(
         root,
         max_bytes=max_disk_mb * 1024 * 1024,
         policy_available=report.load_error is None,
+        config=config,
     )
 
 
@@ -2197,9 +2219,10 @@ def owner_quota_reconcile_pending(owner_root, *, require_ledger=False):
     return ledger.get('dirty_since') is not None or not isinstance(cursor, dict) or cursor.get('complete') is not True
 
 
-# LLM: 供维护调度读取压力快照；缺策略、缺账或不可读时未知，不取配额锁、不扫描、不写账，不授予删除权限。
-# 函数用途: 按账本已用及预留字节返回 owner 配额压力等级。
-def owner_quota_pressure(owner_root) -> dict | None:
+# LLM: 按同源校验水位只读压力；缺策略、缺账或不可读时未知，不取配额锁、不扫描、不写账，不授予删除权限。
+# 函数用途: 按账本已用及预留字节和可选配置返回 owner 配额压力等级。
+def owner_quota_pressure(owner_root, *, config: object | None = None) -> dict | None:
+    high, critical, _, _ = _owner_quota_tuning(config)
     root = Path(owner_root).expanduser().resolve(strict=False)
     mb = _parse_quota_disk_mb(read_json_object_report(
         root / "quota.json", context="owner_policy.quota").payload.get("max_disk_mb"))
@@ -2218,9 +2241,9 @@ def owner_quota_pressure(owner_root) -> dict | None:
     except OverflowError:
         return None
     level = 'normal'
-    if used * 100 >= max_bytes * OWNER_QUOTA_PRESSURE_CRITICAL_PERCENT:
+    if used * 100 >= max_bytes * critical:
         level = 'critical'
-    elif used * 100 >= max_bytes * OWNER_QUOTA_PRESSURE_HIGH_PERCENT:
+    elif used * 100 >= max_bytes * high:
         level = 'high'
     return {'level': level, 'used_bytes': used, 'max_bytes': max_bytes,
             'ratio': ratio,

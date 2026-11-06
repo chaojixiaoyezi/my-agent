@@ -355,6 +355,8 @@ def _merge_audit_run_fields(state: WatchState, disk: dict[str, Any]) -> None:
     state.source_task_goal = state.source_task_goal or str(disk.get("source_task_goal") or "")
 
 
+# LLM: 原快照及单调合并路径不变，调参投影保留轮询浮点间隔，恢复由同一加载器校验，不从快照授予执行权。
+# 函数用途: 生成 watch 的持久快照，供重启续读和后台发现共同消费。
 def _state_payload(state: WatchState, disk: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": _SCHEMA_VERSION,
@@ -419,6 +421,7 @@ def _state_payload(state: WatchState, disk: dict[str, Any]) -> dict[str, Any]:
                 "background_harvest",
                 "harvester_idle_stop_seconds",
                 "poll_query_seconds",
+                "poll_interval_seconds",
             )
         },
         "engine": state.engine.snapshot(time.time()),

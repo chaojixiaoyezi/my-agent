@@ -242,7 +242,22 @@ class FailureAnalysisService:
 
 
 class SubAgentFailureAnalyzer:
-    def __init__(self, max_timeout: float = _MAX_TIMEOUT_SECONDS, max_retry_attempts: int = _MAX_RETRY_ATTEMPT_COUNT):
+    # LLM: 旧总次数显式覆盖优先；新重试数加首次执行，无配置沿用三次，不改变供应恢复规则或任务状态。
+    # 函数用途: 将调用方的重试预算换算成失败建议器使用的总尝试次数。
+    def __init__(self, max_timeout: float = _MAX_TIMEOUT_SECONDS,
+                 max_retry_attempts: int | None = None, *, retry_limit: int | None = None,
+                 config: object | None = None):
+        if max_retry_attempts is None:
+            if retry_limit is not None:
+                if type(retry_limit) is not int or retry_limit < 0:
+                    raise ValueError("retry_limit must be a non-negative integer")
+                max_retry_attempts = 1 + retry_limit
+            elif config is not None:
+                from .runner.dispatch import runner_failure_retry_limit
+
+                max_retry_attempts = 1 + runner_failure_retry_limit(config)
+            else:
+                max_retry_attempts = _MAX_RETRY_ATTEMPT_COUNT
         self._service = FailureAnalysisService(max_timeout, max_retry_attempts)
 
     def analyze(

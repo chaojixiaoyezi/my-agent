@@ -169,8 +169,22 @@ _INT_FIELDS = {
 }
 
 
+# LLM: 加载器及收割发现共用正有限浮点校验；bool不当作秒数，非法值回到原调参对象默认，不写状态。
+# 函数用途: 规范化轮询秒数，避免NaN、无穷或非正数改变发现节拍。
+def validated_poll_interval_seconds(value: object) -> float:
+    import math
+
+    try:
+        parsed = 0.0 if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError, OverflowError):
+        return IngestTuning.poll_interval_seconds
+    return parsed if math.isfinite(parsed) and parsed > 0 else IngestTuning.poll_interval_seconds
+
+
+# LLM: 整数保持原钳位规则，浮点节拍使用同一正数校验；返回独立冻结对象，不修改调用参数。
+# 函数用途: 从工具参数读取摄取调参覆盖值，缺失或无效字段沿用默认。
 def tuning_from_params(params: dict[str, object]) -> IngestTuning:
-    """从工具参数取覆盖值,越界钳到边界;没给的用默认。"""
+    """从工具参数取覆盖值,整数越界钳到边界;没给的用默认。"""
     values: dict[str, object] = {}
     for field in fields(IngestTuning):
         bounds = _INT_FIELDS.get(field.name)
@@ -179,6 +193,7 @@ def tuning_from_params(params: dict[str, object]) -> IngestTuning:
         parsed = _clamped_int(params.get(field.name), bounds[0], bounds[1])
         if parsed is not None:
             values[field.name] = parsed
+    values["poll_interval_seconds"] = validated_poll_interval_seconds(params.get("poll_interval_seconds"))
     return IngestTuning(**values)  # type: ignore[arg-type]
 
 

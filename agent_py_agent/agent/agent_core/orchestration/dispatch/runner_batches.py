@@ -228,19 +228,13 @@ def _guard_multi_runner_instruction(agent, ctx: DispatchContext, batch: RunnerBa
     batch.effective_runner_instruction = ""
 
 
-# LLM: 非字典配置视为空限制；角色名转字符串，限额转非负整数，无法转换的条目跳过，不回写配置。
-# 函数用途: 为批次限流器生成标准化的角色并发配额映射。
+# LLM: 非字典视为空限制；只接收非负严格整数，bool及强转值跳过，零明确禁止本批接纳，不修改输入。
+# 函数用途: 为批次限流器生成角色接纳限额，不把它当作跨批次并发上限。
 def _runner_role_limits(config) -> dict[str, int]:
-    raw = getattr(config, "runner_role_limits", {}) or {}
+    raw = getattr(config, "runner_role_limits", {})
     if not isinstance(raw, dict):
         return {}
-    limits: dict[str, int] = {}
-    for role, limit in raw.items():
-        try:
-            limits[str(role)] = max(0, int(limit))
-        except (TypeError, ValueError):
-            continue
-    return limits
+    return {str(role): limit for role, limit in raw.items() if type(limit) is int and limit >= 0}
 
 
 # LLM: 从代理配置解析超时和并发并写入批次上下文；只有允许启动且并发大于一才走并行，否则逐项委托。
