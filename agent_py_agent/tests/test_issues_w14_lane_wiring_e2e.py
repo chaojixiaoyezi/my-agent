@@ -360,12 +360,32 @@ def _observe_state(home, *, coordinator):
     return marker, set(state['lane_reports'])
 
 
-def _fd_count():
-    """通过真实 FD 表计数，关闭枚举器，不以维护回执代替资源释放事实。"""
+def _fd_count(root: Path | str | None = None):
+    """读取真实 FD 表；指定目录时仅统计其原路径或规范路径下的描述符。"""
+    prefixes = () if root is None else tuple({str(Path(root)), str(Path(root).resolve())})
     for path in (Path('/proc/self/fd'), Path('/dev/fd')):
         if path.is_dir():
             with os.scandir(path) as entries:
-                return sum(1 for _ in entries)
+                if root is None:
+                    return sum(1 for _ in entries)
+                count = 0
+                for entry in entries:
+                    if path == Path('/proc/self/fd'):
+                        try:
+                            target = os.readlink(entry.path)
+                        except OSError:
+                            continue
+                    else:
+                        import fcntl
+
+                        try:
+                            target = fcntl.fcntl(int(entry.name), getattr(fcntl, 'F_GETPATH', 50),
+                                bytes(1024)).split(b'\x00', 1)[0].decode('utf-8', 'surrogateescape')
+                        except (OSError, ValueError):
+                            continue
+                    if any(target == prefix or target.startswith(prefix + os.sep) for prefix in prefixes):
+                        count += 1
+                return count
     if os.name == 'nt':
         import ctypes
 
@@ -382,28 +402,78 @@ def _fd_count():
 
 # LLM: 两个 W14 真实入口共享有界收敛测量；负差值不归因于维护，持续正增长仍然失败。
 # 函数用途: 等待最多两秒回收临时 FD，再返回真实描述符差值。
-def _settled_fd_delta(before_fds):
-    """Descriptor growth after a bounded settle; a decrease is an unrelated pre-existing descriptor closing."""
+def _settled_fd_delta(before_fds, root: Path | str | None = None):
+    """在同一观测范围内等待有界收敛，持续的正增长仍返回给调用方判定失败。"""
     deadline = time.monotonic() + 2.0
     while True:
         gc.collect()
-        delta = _fd_count() - before_fds
+        delta = _fd_count(root=root) - before_fds
         if delta <= 0 or time.monotonic() >= deadline:
             return delta
         time.sleep(0.05)
+
+
+@pytest.mark.parametrize('table', ['/proc/self/fd', '/dev/fd'])
+def test_fd_count_scopes_targets_without_changing_process_wide(tmp_path, monkeypatch, table):
+    """隔离两种平台的目标读取合同，验证路径边界、别名、异常和枚举器关闭。"""
+    import sys
+
+    root, canonical = tmp_path / 'owner', tmp_path / 'canonical-owner'
+    table = Path(table)
+    targets = [str(root), str(canonical / 'held.txt'), str(root) + '-other/held.txt',
+               str(tmp_path / 'outside.txt'), None]
+    entries = [SimpleNamespace(name=str(number), path=str(table / str(number)))
+               for number in range(len(targets))]
+    closed, lookups = [], []
+    original_resolve = Path.resolve
+
+    class Directory:
+        def __enter__(self):
+            return iter(entries)
+
+        def __exit__(self, *args):
+            closed.append(True)
+
+    def resolve(path, *args, **kwargs):
+        return canonical if path == root else original_resolve(path, *args, **kwargs)
+
+    def target(number):
+        lookups.append(number)
+        value = targets[number]
+        if value is None:
+            raise OSError('descriptor closed during observation')
+        return value
+
+    def fcntl(descriptor, command, buffer):
+        assert command == 50 and buffer == bytes(1024)
+        if descriptor == len(targets) - 1:
+            raise ValueError('descriptor unavailable')
+        return target(descriptor).encode('utf-8') + b'\x00unused'
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'is_dir', lambda path: path == table)
+        patch.setattr(Path, 'resolve', resolve)
+        patch.setattr(os, 'scandir', lambda path: Directory())
+        patch.setattr(os, 'readlink', lambda path: target(int(Path(path).name)))
+        patch.setitem(sys.modules, 'fcntl', SimpleNamespace(fcntl=fcntl))
+        assert _fd_count() == len(entries)
+        assert lookups == [], '默认进程级计数不能依赖描述符目标解析'
+        assert _fd_count(root=root) == 2
+        assert _fd_count(root=str(root)) == 2
+    assert closed == [True, True, True]
 
 
 # LLM: 保持真实文件 FD 超过收敛窗口，确保测量不会把持续增长吞成零。
 # 函数用途: 用真实持有和释放验证泄漏检测仍然有效。
 def test_settled_fd_delta_detects_persistent_growth(tmp_path):
     gc.collect()
-    before_fds = _fd_count()
+    before_fds = _fd_count(root=tmp_path)
     descriptor = os.open(tmp_path / 'held.txt', os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        assert _settled_fd_delta(before_fds) > 0
+        assert _settled_fd_delta(before_fds, root=tmp_path) > 0
     finally:
         os.close(descriptor)
-    assert _settled_fd_delta(before_fds) <= 0
+    assert _settled_fd_delta(before_fds, root=tmp_path) <= 0
 
 
 def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monkeypatch):
@@ -413,7 +483,7 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
     seen, revisited = set(), set()
     repeated_all = False
     gc.collect()
-    before_fds = _fd_count()
+    before_fds = _fd_count(root=world.home.root)
     # R2 的 complete 表示扫描一轮完成，不表示 pending 宽限证明已消费；继续驱动后续周期。
     now = world.now
     for tick in range(24):
@@ -433,7 +503,7 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
             MemoryRetentionPolicy().maintenance_interval_seconds)
     else:
         pytest.fail('真实控制器未在有界拍数内消费宽限证明并重新走完十种车道')
-    assert _settled_fd_delta(before_fds) <= 0
+    assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all, '完成首轮覆盖后，必须有后续一拍再次报告全部十种车道'
     _assert_retired(world)
