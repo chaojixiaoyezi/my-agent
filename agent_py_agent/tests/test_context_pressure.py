@@ -12,11 +12,10 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
-# LLM: 仅提供已有运行入口要求的最小宿主字段；跨owner比值读取关闭，避免测试读取用户真实校准数据。
+# LLM: 仅提供最小宿主字段且不设home_paths；owner比值无规范路径可读，不接触用户真实校准数据。
 # 函数用途: 创建不联网的计量对象与原生输入。
 def _inputs():
-    agent = SimpleNamespace(config=AgentConfig(model_context_window_tokens=128_000,
-        memory_context_calibration_carry_enabled=False),
+    agent = SimpleNamespace(config=AgentConfig(model_context_window_tokens=128_000),
         backend=SimpleNamespace(context_window_tokens=128_000, name="fake", model_name="test-model"))
     params = SimpleNamespace(context_scope="default", save=False, live_archive_state={},
         tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="native"),
@@ -125,3 +124,26 @@ def test_diagnostic_copy_does_not_rerun_dataclass_constructor(frozen, state_init
     agent, _params = _inputs()
     pressure.outbound_request_layer_breakdown(agent, params, "synthetic")
     assert (params.history, params.live_archive_state) == original
+
+
+def test_outbound_diagnostic_uses_the_loaded_owner_ratio_without_io(monkeypatch):
+    agent, params = _inputs()
+
+    def forbidden_read(*_args, **_kwargs):
+        raise AssertionError("diagnostic attempted calibration I/O")
+
+    monkeypatch.setattr(pressure, "read_owner_ratio", forbidden_read)
+    agent.conversation_store = SimpleNamespace(threads=SimpleNamespace(load_report=forbidden_read))
+    params.task_attributes = {"conversation_thread_id": "never-read"}
+    first = pressure.outbound_request_layer_breakdown(agent, params, "private-prompt")
+    raw = first["raw_estimated_tokens"]
+    key = pressure._tokenizer_identity_key(agent, pressure._request_protocol(params))
+    params.live_archive_state[pressure._PROVIDER_CONTEXT_OWNER_RATIO_KEY] = {
+        key: {"raw_estimated_tokens": raw, "provider_input_tokens": raw // 2, "observed_at": 1.0}}
+    before = copy.deepcopy(params.live_archive_state)
+    result = pressure.outbound_request_layer_breakdown(agent, params, "private-prompt")
+    assert result["calibrated_tokens"] == (raw + 1) // 2
+    assert result["measurement_kind"] == "calibrated_estimate"
+    assert result["calibration_lookup"] == "loaded_only"
+    assert sum(result["components"].values()) == result["calibrated_tokens"]
+    assert params.live_archive_state == before

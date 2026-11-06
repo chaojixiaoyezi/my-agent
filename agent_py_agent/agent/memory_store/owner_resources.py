@@ -50,13 +50,13 @@ def build_owner_memory_quota(home_paths: object, owner_policy: object, *, coordi
     )
 
 
-# LLM: 原LocalStore构造含目录和schema副作用，调用方仍负责原初始化权限与时点；此叶不改连接/FTS/timeout。
+# LLM: 原LocalStore构造含目录和schema副作用，调用方仍负责原初始化权限与时点；此叶不改连接/timeout。
 # 函数用途: 按原runtime paths构造当前owner的真实本地索引。
-# LLM: C显式透传到60本地IO，默认调用形状/原paths/FTS设置不变；真正构造仍在borrow当前scope。
-# 函数用途: 按原配置创建真实本地索引，不另建冷服务替身。
+# LLM: C显式透传到60本地IO，保留原paths与当前borrow scope；FTS沿LocalStore的快速默认值，不读配置开关。
+# 函数用途: 创建真实本地索引，不另建冷服务替身。
 def build_owner_local_store(config: object, paths: dict[str, object], *, coordinator_io: bool = False) -> LocalStore:
     return LocalStore(paths["local_store_path"], files_dir=paths["local_store_files_dir"],
-                      events_path=paths["local_store_events_path"], enable_fts=config.local_store_fts_enabled,
+                      events_path=paths["local_store_events_path"],
                       **({} if not coordinator_io else {"coordinator_io": True}))
 
 

@@ -32,7 +32,7 @@ from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapsh
 # LLM: 运行状态与协议快照真实兼容；只有后端网络被省略，输入估算和投影仍用产品函数。
 # 函数用途: 创建无凭据、无远程调用的native上下文夹具。
 def _context_case():
-    agent = SimpleNamespace(config=AgentConfig(auto_save_memory=False, memory_context_calibration_carry_enabled=False),
+    agent = SimpleNamespace(config=AgentConfig(auto_save_memory=False),
                             backend=SimpleNamespace(name="fake", model_name="q2", context_window_tokens=128000))
     params = SimpleNamespace(tool_protocol_snapshot=make_test_protocol_snapshot(source_protocol="native"),
                              live_archive_state={}, tool_ir_history=[UserTurn("当前请求")], tool_context=[],
