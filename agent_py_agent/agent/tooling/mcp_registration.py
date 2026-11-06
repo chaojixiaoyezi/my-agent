@@ -30,6 +30,7 @@ Tool Gateway。部署者只能通过 ``mcp_servers.<server>.tool_effects`` 逐�
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -70,6 +71,9 @@ from .observation_binding import ObservationBinding
 from .process_session_cleanup import ProcessSessionCleanupError
 
 logger = logging.getLogger(__name__)
+
+# 只由可信宿主装配；协议客户端继续负责原有连接、发布与清理合同。
+MCPClientFactory = Callable[[MCPServerConfig], MCPStdioClient]
 
 # 工具名前缀：mcp__<server>__<tool>。双下划线分隔，server/tool 各自做字符清洗，
 # 避免与内置工具名冲突，也避免 server 名含特殊字符破坏渲染/解析。
@@ -355,24 +359,39 @@ def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:
     return configs
 
 
-# LLM: 初次发现/恢复共用原 transport；默认继承来源由宿主 Registry 冻结，raw server 配置不能伪造内部字段。
-# 函数用途: 启动声明的 MCP 服务并注册工具，保留暂时失败的客户端供后续运行恢复。
-def register_mcp_servers(registry: Any, mcp_servers: object, *, host_credential_env_names: frozenset[str] = frozenset()) -> list[MCPStdioClient]:
+# LLM: 初次发现/恢复共用原 transport；工厂只由可信宿主注入，raw server 配置不能伪造内部字段或绕过权限链。
+# 函数用途: 用宿主工厂启动声明的 MCP 服务并注册工具，保留暂时失败的客户端供后续运行恢复。
+def register_mcp_servers(
+    registry: Any,
+    mcp_servers: object,
+    *,
+    host_credential_env_names: frozenset[str] = frozenset(),
+    mcp_client_factory: MCPClientFactory | None = None,
+) -> list[MCPStdioClient]:
     """连接所有配置的 MCP server，把已发现的工具注册进 ``registry``。
 
     返回每个合法配置对应的 ``MCPStdioClient``，包括本次启动失败的 client。失败连接没有
     工具可见，但必须保留同一个结构化配置，供后续 run 边界按退避策略重新连接；否则一次
     短暂启动故障会永久删掉该 server，直到整个 Agent 进程重启。调用方负责统一 ``stop()``。
     若 ``mcp_servers`` 为空则直接返回空列表，**不启动任何子进程**（零开销）。
+    可选工厂只替换客户端构造，不进入 MCP 配置或模型 Schema，也不替代原生命周期合同。
     """
     configs = parse_mcp_servers(mcp_servers)
     if not configs:
         return []
 
+    factory = MCPStdioClient if mcp_client_factory is None else mcp_client_factory
     clients: list[MCPStdioClient] = []
     for config in configs:
         config = replace(config, host_credential_env_names=frozenset(host_credential_env_names))
-        client = MCPStdioClient(config)
+        try:
+            client = factory(config)
+        except Exception as exc:
+            if mcp_client_factory is None:
+                raise
+            logger.warning("MCP server '%s' 客户端工厂构造失败，跳过（error_type=%s）",
+                           config.name, type(exc).__name__)
+            continue
         clients.append(client)
         transport = None
         try:
