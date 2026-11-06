@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from agent_py_agent.agent.artifacts.shell_operation_journal import operation_manifest_ref
 from agent_py_agent.agent.artifacts.shell_protection import (
@@ -39,7 +39,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy, agent_home_root_for_owner
 
-from ..attempt.sandbox import SandboxHostPolicy, sandbox_hides_host_paths
+from ..attempt.sandbox import SandboxFactory, SandboxHostPolicy, sandbox_hides_host_paths
 from ..common.cancellation import (
     ToolCancelled,
     cancellation_requested,
@@ -51,6 +51,7 @@ from .background_process_launch import (
     BACKGROUND_START_SETTLE_SECONDS,
     BackgroundLaunchError,
     BackgroundLaunchRequest,
+    BackgroundProcessLauncher,
     start_background_process,
     validate_launch_owner_scopes,
 )
@@ -168,6 +169,27 @@ class _ShellArtifactExecutionRequest:
     operation_managed: bool
     # H3：registry 给的本任务核验记录保护状态（protected / no_task_root），原样进回执；没经 registry 时为空、回执不加这一项。
     task_records: str = ""
+
+
+@dataclass(frozen=True)
+class ShellCommandRequest:
+    """宿主已校验命令并完成沙箱包装、环境擦洗；执行器必须遵守期限与取消。"""
+
+    command: str
+    argv: list[str]
+    cwd: Path
+    timeout: float
+    env: dict[str, str] = field(repr=False)
+    shell: bool = False
+
+
+class ShellCommandExecutor(Protocol):
+    """可信宿主执行已审计 argv，须遵守取消/期限并携原清理事实。
+
+    不接管权限、产物保护或结果裁决；不透明异常没有未启动证明。
+    """
+
+    def run(self, request: ShellCommandRequest) -> subprocess.CompletedProcess[str]: ...
 
 
 # LLM: Prepared state binds snapshots to one stable private operation key and must not be rebuilt
@@ -727,6 +749,7 @@ def _sandbox_exec(
     write_protection: SandboxWriteProtection | None = None,
     *,
     host_policy: SandboxHostPolicy | None = None,
+    sandbox_factory: SandboxFactory | None = None,
 ) -> tuple[Any, bool]:
     """把命令包进 attempt 沙箱（G6 接线）。
 
@@ -799,7 +822,9 @@ def _sandbox_exec(
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=gateway_bound_ports(),
     )
-    sandbox = AttemptExecutionSandbox(spec)
+    sandbox = (AttemptExecutionSandbox if sandbox_factory is None else sandbox_factory)(spec)
+    if sandbox_factory is not None:
+        sandbox.require_ready()
     # Attempt 网关的 SandboxUnavailableError 继承 SandboxUnavailable，
     # 生产既有 except SandboxUnavailable → SANDBOX_UNAVAILABLE 捕获链直接生效。
     argv = sandbox.build_argv(strict_posix_shell_argv(command))
@@ -895,11 +920,13 @@ def _background_command_argv(
     command: str, target: Path, owner_home: object, protected_persona_root: object,
     write_roots: tuple[Path, ...] | None, read_roots: tuple[Path, ...] | None,
     write_protection: SandboxWriteProtection | None, *, host_policy: SandboxHostPolicy | None = None,
+    sandbox_factory: SandboxFactory | None = None,
 ) -> list[str]:
     host_policy = host_policy or SandboxHostPolicy()
     if owner_home or protected_persona_root or os.name == "posix":
         argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
-                                        write_roots, read_roots, write_protection, host_policy=host_policy)
+                                        write_roots, read_roots, write_protection, host_policy=host_policy,
+                                        **({"sandbox_factory": sandbox_factory} if sandbox_factory is not None else {}))
         if use_shell or not isinstance(argv, list):
             raise OSError("managed background sandbox must provide argv execution")
         return argv
@@ -1088,8 +1115,12 @@ class ShellTool(BaseTool):
         workspace_root: Path,
         *,
         options: ShellToolOptions | None = None,
+        executor: ShellCommandExecutor | None = None,
+        sandbox_factory: SandboxFactory | None = None,
+        launcher: BackgroundProcessLauncher | None = None,
     ):
         options = options or ShellToolOptions()
+        self.executor, self.sandbox_factory, self.launcher = executor, sandbox_factory, launcher
         self.workspace_root = workspace_root.resolve()
         self.workspace_roots = [
             root.resolve() for root in (options.workspace_roots or [self.workspace_root])
@@ -1176,7 +1207,7 @@ class ShellTool(BaseTool):
             ),
             full_access=not bool(owner_text),
         )
-        report = AttemptExecutionSandbox(spec).probe(binary_only=True)
+        report = (AttemptExecutionSandbox if self.sandbox_factory is None else self.sandbox_factory)(spec).probe(binary_only=True)
         if report.ready:
             return ToolAvailability.ready()
         return ToolAvailability.unavailable(
@@ -1401,7 +1432,8 @@ class ShellTool(BaseTool):
                                             host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True),
                                                                           self.host_credential_env_names,
                                                                           full_access_other_owner_homes=self.full_access_other_owner_homes,
-                                                                          host_exclusive_paths=self.host_exclusive_paths))
+                                                                          host_exclusive_paths=self.host_exclusive_paths),
+                                            **({"sandbox_factory": self.sandbox_factory} if self.sandbox_factory is not None else {}))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
@@ -1416,7 +1448,7 @@ class ShellTool(BaseTool):
                 completion_target=dict(completion_target or {}), authority_check=context.execution_authority_check if context else None,
                 listen_scope=listen_scope, listen_scope_enforce=self.listen_scope_enforce,
             )
-            hosted = start_background_process(request)
+            hosted = start_background_process(request, **({"launcher": self.launcher} if self.launcher is not None else {}))
         except BackgroundLaunchError as exc:
             return _background_launch_failure(self.model_spec.name, exc)
         except (OSError, TypeError, ValueError, SandboxUnavailable) as exc:
@@ -2026,6 +2058,9 @@ def _run_shell_process_text(
             {"status": "not_started", "reason": "sandbox_unavailable"},
         )
     except OSError as exc:
+        if getattr(tool, "executor", None) is not None:
+            return ("自定义执行器失败，执行或清理结果未确认。", False,
+                    "TOOL_OPERATION_OUTCOME_UNKNOWN", {"status": "unknown", "reason": type(exc).__name__})
         return (
             f"COMMAND_FAILED: 命令执行失败: {exc}",
             False,
@@ -2188,6 +2223,12 @@ def _run_shell_command(
             sandbox_protected_paths,
         )
     if os.name == "nt":
+        if getattr(tool, "executor", None) is not None:
+            if is_interrupted() or cancellation_requested():
+                raise CommandInterruptedError(command)
+            return getattr(tool, "executor", None).run(ShellCommandRequest(command, ["powershell.exe", "-NoProfile", "-Command", command],
+                target, timeout, _subprocess_text_env(tool.path_access_policy.owner_scope_root,
+                                                    host_credential_env_names=tool.host_credential_env_names)))
         proc = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-Command", command],
             cwd=str(target),
@@ -2230,6 +2271,7 @@ def _run_attempt_sandboxed_shell_command(
         host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names,
                                       full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only"),
                                       host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ())),
+        **({"sandbox_factory": getattr(tool, "sandbox_factory", None)} if getattr(tool, "sandbox_factory", None) is not None else {}),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
     completed = None
@@ -2239,8 +2281,13 @@ def _run_attempt_sandboxed_shell_command(
         remaining = timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
         if completed is not None and remaining <= 0:
             return completed
-        proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
-        completed = _communicate_process(proc, command=command, timeout=remaining)
+        if getattr(tool, "executor", None) is not None:
+            completed = getattr(tool, "executor", None).run(ShellCommandRequest(command, exec_arg, target, remaining,
+                _subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True,
+                                     host_credential_env_names=tool.host_credential_env_names), use_shell))
+        else:
+            proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
+            completed = _communicate_process(proc, command=command, timeout=remaining)
         if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
             pruned = prune_transient_bwrap_sidecar_mounts(exec_arg, completed.stderr or '')
             if pruned is not None:

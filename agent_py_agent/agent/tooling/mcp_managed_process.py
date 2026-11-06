@@ -10,6 +10,7 @@ from pathlib import Path
 from ..plugin_activation_ref import PluginActivationRef
 from .background_process_launch import (
     BackgroundLaunchRequest,
+    BackgroundProcessLauncher,
     HostedBackgroundProcess,
     start_background_process,
 )
@@ -39,7 +40,8 @@ class ManagedMCPProcess:
     # 函数用途: 为插件启动带原资源登记的进程，将输出管道交给唯一的 UTF-8 文本读取端。
     @classmethod
     def launch(cls, activation: PluginActivationRef, *, argv: list[str], cwd: Path,
-               environment: dict[str, str], timeout: float) -> ManagedMCPProcess:
+               environment: dict[str, str], timeout: float,
+               launcher: BackgroundProcessLauncher | None = None) -> ManagedMCPProcess:
         owner = activation.owner()
         if not cwd.is_absolute():
             raise ValueError("插件 MCP 工作目录必须由宿主固定为绝对路径")
@@ -49,7 +51,7 @@ class ManagedMCPProcess:
             access_scope=ProcessAccessScope(owner.owner_id, "", str(owner.home_dir)),
             execution_scope=ProcessExecutionScope(owner_home=str(owner.home_dir)),
             io_mode="stdio", stop_on_launcher_exit=True, activation=activation,
-        ), startup_timeout_seconds=timeout)
+        ), startup_timeout_seconds=timeout, **({"launcher": launcher} if launcher is not None else {}))
         result = cls(hosted, activation)
         try:
             for name in ("stdout", "stderr"):

@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import write_private_json_file_atomic_unlocked
@@ -111,6 +111,17 @@ class HostedBackgroundProcess:
     store_root: Path
 
 
+class BackgroundProcessLauncher(Protocol):
+    """可信宿主实现须沿请求的唯一 Store 做锁内准入/启动/交接和出生核验。
+
+    不接收模型实现；不得裸启动、另建账或把启动后错误说成未启动。
+    启动后错误须携原 session/清理事实的 BackgroundLaunchError。
+    """
+
+    def __call__(self, request: BackgroundLaunchRequest, *,
+                 startup_timeout_seconds: float = 3.0) -> HostedBackgroundProcess: ...
+
+
 # LLM: 启动错误保留已有会话和清理事实；child 创建已准入后不可宣称未发生，更不能据异常自动重放。
 # 类用途: 向 Shell 返回明确失败类型、原 session 和清理是否确认，不包含环境变量或密钥。
 class BackgroundLaunchError(RuntimeError):
@@ -133,10 +144,36 @@ class BackgroundLaunchError(RuntimeError):
 # LLM: 准入与交接在原 Store 锁内；Popen 只执行一次，提交后异常恢复原 session；未交出的 stdio 由本入口关闭。
 # 函数用途: 预留资源并启动独立 host，交接成功后返回原句柄及管道，失败精确清理。
 def start_background_process(
-    request: BackgroundLaunchRequest, *, startup_timeout_seconds: float = 3.0
+    request: BackgroundLaunchRequest, *, startup_timeout_seconds: float = 3.0,
+    launcher: BackgroundProcessLauncher | None = None,
 ) -> HostedBackgroundProcess:
     if not request.argv or not all(isinstance(item, str) and item for item in request.argv):
         raise ValueError("managed background argv is invalid")
+    if launcher is not None:
+        _require_admission(request)
+        try:
+            hosted = launcher(request, startup_timeout_seconds=startup_timeout_seconds)
+        except BackgroundLaunchError:
+            raise
+        except Exception as exc:
+            raise BackgroundLaunchError(exc, {}, False) from exc
+        try:
+            _require_admission(request)
+            if hosted.store_root != request.store_root:
+                raise ValueError("managed background launcher store conflict")
+        except Exception as exc:
+            try:
+                cleanup = stop_process_session(ProcessSessionStore(request.store_root), hosted.record,
+                                               host_process=hosted.process)
+            except ProcessSessionCleanupError as cleanup_exc:
+                raise BackgroundLaunchError(exc, cleanup_exc.record, False, cleanup_exc.report) from exc
+            except Exception:
+                raise BackgroundLaunchError(exc, hosted.record, False) from exc
+            finally:
+                if request.io_mode == "stdio":
+                    _close_unhanded_pipes(hosted.process)
+            raise BackgroundLaunchError(exc, cleanup.record, cleanup.confirmed) from exc
+        return hosted
     store = ProcessSessionStore(request.store_root)
     session_id = f"bg-{int(time.time())}-{uuid.uuid4().hex[:16]}"
     record = _reservation(request, session_id)

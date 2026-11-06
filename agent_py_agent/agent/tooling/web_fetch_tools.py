@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,9 @@ class WebRuntimeDeps:
     allowed_private_hosts_provider: Any = None
     allow_private_resolution: bool | None = None
     gateway_endpoint_config: GatewayEndpointConfig = GatewayEndpointConfig()
+    # 仅可信宿主传输：每跳必须使用宿主 resolve_pin 的 IP，并遵守 timeout/max_bytes/取消。
+    # 不接收插件/模型代码；外层事后校验不能中断任意 Python 实现，不能据此宣称可隔离恶意传输。
+    raw_fetcher: Callable[..., RawResponseParts] | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,7 @@ class WebFetchTool(BaseTool):
         self._extra_private_hosts: tuple[str, ...] = ()
         self.allow_private_resolution = deps.allow_private_resolution
         self.gateway_endpoint_config = deps.gateway_endpoint_config
+        self.raw_fetcher = deps.raw_fetcher
         self._cache: OrderedDict[tuple[object, ...], CachedFetch] = OrderedDict()
         self._cache_lock = threading.Lock()
         self.model_spec = _web_fetch_model_spec()
@@ -211,7 +216,7 @@ class WebFetchTool(BaseTool):
         # LLM: send 固定原逐跳 pin，不接受任意脚本、库或模型提供的请求回调。
         # 函数用途: 为宿主登录和业务请求复用本工具的实际网络许可。
         def send(raw_request):
-            return fetch_raw_response(
+            return self._raw_response(
                 raw_request,
                 format_http_error=self.format_http_error,
                 resolve_pin=lambda hop_url: self._resolve_pin(hop_url, resolved_by_host=resolved_by_host),
@@ -241,6 +246,51 @@ class WebFetchTool(BaseTool):
                     value = value.replace(secret, "[private]")
                 headers[key] = value
             response = replace(response, body=body, headers=headers)
+        return response
+
+    # LLM: 仅可信宿主替换传输实现；仍须消费逐跳 pin/剩余预算，原默认实现保持晚绑定。
+    # 函数用途: 在自定义抓取前核初始授权，并在归档前核取消、期限、最终端点及正文预算。
+    def _raw_response(self, request: FetchRawRequest, *, format_http_error, resolve_pin):
+        if self.raw_fetcher is None:
+            return fetch_raw_response(request, format_http_error=format_http_error, resolve_pin=resolve_pin)
+        deadline = time.monotonic() + max(0.0, float(request.timeout))
+
+        def guarded_pin(url):
+            from ..user_space.task_credentials import credential_origin
+
+            if request.authorization_origin and credential_origin(url) != request.authorization_origin:
+                return PinResult(None, ToolHandlerOutcome("web_fetch", False, "私人认证请求不能跨 origin 重定向", error_code="TOOL_PERMISSION_DENIED"))
+            return resolve_pin(url)
+
+        if cancellation_requested():
+            return ToolHandlerOutcome("web_fetch", False, "HTTP 请求已取消。", error_code="CANCELLED")
+        pin = guarded_pin(request.url)
+        if pin.error is not None:
+            return pin.error
+        if not pin.ip:
+            return ToolHandlerOutcome("web_fetch", False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
+        remaining = deadline - time.monotonic()
+        if cancellation_requested() or remaining <= 0:
+            code = "CANCELLED" if cancellation_requested() else "TOOL_TIMEOUT"
+            return ToolHandlerOutcome("web_fetch", False, "HTTP 请求已取消或超时。", error_code=code)
+        # 首跳仅消费一次预检 pin，回跳同一 URL 也必须重新核 DNS/当前授权。
+        initial_pin = {request.url: pin}
+        response = self.raw_fetcher(replace(request, timeout=remaining), format_http_error=format_http_error,
+            resolve_pin=lambda url: initial_pin.pop(url) if url in initial_pin else guarded_pin(url))
+        if cancellation_requested() or time.monotonic() >= deadline:
+            code = "CANCELLED" if cancellation_requested() else "TOOL_TIMEOUT"
+            return ToolHandlerOutcome("web_fetch", False, "HTTP 请求已取消或超时。", error_code=code)
+        if isinstance(response, RawResponseParts):
+            if len(response.body) > request.max_bytes:
+                return ToolHandlerOutcome("web_fetch", False, "响应体过大", error_code="ARTIFACT_TOO_LARGE")
+            final_pin = pin if response.url == request.url else guarded_pin(response.url)
+            if final_pin.error is not None:
+                return final_pin.error
+            if not final_pin.ip:
+                return ToolHandlerOutcome("web_fetch", False, "主机解析失败", error_code="NETWORK_REQUEST_FAILED")
+        if cancellation_requested() or time.monotonic() >= deadline:
+            code = "CANCELLED" if cancellation_requested() else "TOOL_TIMEOUT"
+            return ToolHandlerOutcome("web_fetch", False, "HTTP 请求已取消或超时。", error_code=code)
         return response
 
     # LLM: 引用仅由宿主解析，本次 origin/scope 校验失败不发网络；认证头与同名显式头不能混用。
@@ -383,7 +433,7 @@ def _execute_extract(
         if cancellation_requested() or time.monotonic() >= deadline or remaining_bytes <= 0:
             remaining_urls = urls[urls.index(url):]
             break
-        response = fetch_raw_response(
+        response = tool._raw_response(
             FetchRawRequest(
                 tool="web_fetch",
                 url=url,
