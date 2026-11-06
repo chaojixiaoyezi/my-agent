@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TextIO
 
 from ..common.file_version import StaleFileVersionError, check_file_version, file_version
 from ..common.text_file_window import text_file_index
@@ -26,6 +26,31 @@ from .filesystem_artifact_guard import (
 )
 from .filesystem_path_recovery import MissingPathRequest, missing_path_result
 from .models import ToolHandlerOutcome
+
+
+class TextReadSnapshot(Protocol):
+    """已获准路径的文本读取视图；实现负责打开、读取后的快照一致性检查。"""
+
+    total_chars: int
+    total_lines: int
+
+    # LLM: 行读取方用 with 关闭；实现保留打开时的快照一致性检查。
+    # 函数用途: 打开本快照的文本流。
+    def open(self) -> TextIO: ...
+    # LLM: 字符窗口调用；实现负责有界读取和读后版本检查。
+    # 函数用途: 返回指定字符页。
+    def read(self, offset: int, limit: int) -> str: ...
+    # LLM: 不一致须抛错，由原读取错误合同处理，不能返回空页冒充成功。
+    # 函数用途: 核对快照是否仍有效。
+    def check_current(self) -> None: ...
+
+
+class TextSnapshotProvider(Protocol):
+    """仅可信宿主可注入；路径、包装文件与版本门仍由外层执行。"""
+
+    # LLM: 仅接收外层已获准路径；实现不替代路径、包装文件或文件版本门。
+    # 函数用途: 为本次文本读取提供快照。
+    def __call__(self, target: Path) -> TextReadSnapshot: ...
 
 
 @dataclass(frozen=True)
@@ -191,7 +216,8 @@ def _ordinary_file_result(request: ReadFileRequest) -> ToolHandlerOutcome:
 # LLM: 每次 readline 自带长度上限；半行续读 offset 使用原正文坐标，不包含展示行号。
 # 函数用途: 只保留请求行的有限文字，遇到超长行切换为字符游标，不跳过剩余部分。
 def _stream_numbered_result(request: ReadFileRequest) -> ToolHandlerOutcome:
-    index = text_file_index(request.tool, request.target)
+    provider = getattr(request.tool, "snapshot_provider", None)
+    index = provider(request.target) if provider is not None else text_file_index(request.tool, request.target)
     params = request.params
     start = _int_param(params.get("start_line"), name="start_line", default=1, min_value=1)
     end = _int_param(params.get("end_line"), name="end_line", default=max(index.total_lines, 1), min_value=1)
@@ -285,7 +311,8 @@ def _line_max_chars(params: dict[str, Any], default_max_chars: int) -> int:
 def _char_window_file_result(request: CharWindowFileRequest) -> ToolHandlerOutcome:
     try:
         offset, limit = _char_window_values(request.params, request.default_max_chars)
-        index = text_file_index(request.tool, request.target)
+        provider = getattr(request.tool, "snapshot_provider", None)
+        index = provider(request.target) if provider is not None else text_file_index(request.tool, request.target)
         total_chars = index.total_chars
         if offset > total_chars or (offset == total_chars and total_chars > 0):
             return _offset_out_of_range_result(offset, total_chars)

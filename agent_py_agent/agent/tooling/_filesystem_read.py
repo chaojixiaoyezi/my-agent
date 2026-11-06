@@ -33,7 +33,7 @@ from .filesystem_artifact_guard import (
     logical_reference_write_path_error,
     tool_output_artifact_typo_hint,
 )
-from .filesystem_read_file import execute_read_file
+from .filesystem_read_file import TextSnapshotProvider, execute_read_file
 from .models import (
     BaseTool,
     ConcurrencyPolicy,
@@ -439,12 +439,16 @@ class ReadFileTool(FileSystemTool):
         promotes_task=True,
     )
 
+    # LLM: 快照提供者只由宿主构造时传入；execute 的路径和版本门保持原顺序，不从模型参数选实现。
+    # 函数用途: 配置只读文本窗口，可选择替换内部文本快照来源。
     def __init__(
         self,
         workspace_root: Path,
         max_chars: int,
         workspace_roots: list[Path] | None = None,
         access_options: FileSystemAccessOptions | None = None,
+        *,
+        snapshot_provider: TextSnapshotProvider | None = None,
     ):
         super().__init__(
             workspace_root,
@@ -452,5 +456,7 @@ class ReadFileTool(FileSystemTool):
             access_options,
         )
         self.max_chars = max_chars
+        self.snapshot_provider = snapshot_provider
+
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         return execute_read_file(self, params, self.max_chars)

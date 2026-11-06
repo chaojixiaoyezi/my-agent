@@ -18,7 +18,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..attempt.sandbox import SandboxHostPolicy
 from ..capability._agents_contract_fields import AgentsContractError
@@ -147,6 +147,32 @@ class PtyAccessScope:
     write_scope_denied_roots: tuple[str, ...] = ()
     network_access: bool = True
     protected_persona_root: str = ""
+
+
+class _PtyReadableProcess(Protocol):
+    # LLM: 读取处理器独立调用两次，不能以缓存结果合并状态与退出码观察。
+    # 函数用途: 观察进程退出状态。
+    def poll(self) -> int | None: ...
+
+
+class PtyReadableSession(Protocol):
+    """只暴露读取和退出观察，不把注册表、FD 或写入能力交给读取侧。"""
+
+    # LLM: 只提供 poll 观察，不授予终止、写入或底层 FD 访问权。
+    # 函数用途: 返回可读会话的进程观察面。
+    @property
+    def process(self) -> _PtyReadableProcess: ...
+    # LLM: 处理器已完成整数转换和字节预算裁剪；实现保留增量游标语义。
+    # 函数用途: 返回有界输出、下一游标和截断标记。
+    def read(self, cursor: int, max_bytes: int) -> tuple[bytes, int, bool]: ...
+
+
+class PtyReadableSessionResolver(Protocol):
+    """可信宿主按完整访问范围解析；默认注册表继续核对范围和来源版本。"""
+
+    # LLM: 可信实现须按完整 scope 和来源有效性拒绝不可读会话；模型参数不能选实现。
+    # 函数用途: 解析当前权限下的只读终端句柄。
+    def __call__(self, session_id: str, access_scope: PtyAccessScope) -> PtyReadableSession | None: ...
 
 
 # LLM: 一次 PTY 启动的沙箱输入原样收拢，不做任何推断；字段与 tooling/shell._sandbox_exec 的同名参数一一对应，
@@ -994,9 +1020,13 @@ class TerminalSessionTool(BaseTool):
                                effect_outcome="not_started")
         return self._ok({"status": "written", "session_id": session_id, "bytes": len(encoded)})
 
-    def _read(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+    # LLM: 宿主解析器接收原完整权限键；查找、缺失、参数、read、两次独立poll的顺序不得改变。
+    # 函数用途: 读取当前权限下的终端输出，允许可信宿主替换只读会话查找。
+    def _read(self, params: dict[str, Any], *,
+              session_resolver: PtyReadableSessionResolver | None = None) -> ToolHandlerOutcome:
         session_id = str(params.get("session_id") or "").strip()
-        session = pty_session_registry.get(session_id, self._access_scope(params))
+        resolver = pty_session_registry.get if session_resolver is None else session_resolver
+        session = resolver(session_id, self._access_scope(params))
         if session is None:
             return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}")
         try:
@@ -1110,7 +1140,8 @@ def _pty_session_summary(session: PtySession) -> dict[str, object]:
     }
 
 
-__all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry", "reclaim_pty_sessions"]
+__all__ = ["PtyReadableSession", "PtyReadableSessionResolver", "PtySessionRegistry",
+           "TerminalSessionTool", "pty_session_registry", "reclaim_pty_sessions"]
 
 
 # LLM: 原session串行清退；新PTY先保留组长身份再拍树快照，旧已回收PID不得补发信号或冒充后代已退役。
