@@ -1,0 +1,41 @@
+{
+  "id": "steer_mid_generation",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "provider_request"
+    },
+    {
+      "action": "steer",
+      "ref": "steer-one",
+      "text": "fixture-steering"
+    },
+    {
+      "action": "release_provider"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "one",
+      "cancelled": false
+    }
+  ],
+  "fake_model_script": [
+    {
+      "wait_for_release": true,
+      "deadline_seconds": 10
+    }
+  ],
+  "expected_effects": {
+    "im_send": 1
+  },
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [],
+  "repetitions": 3,
+  "deadline_seconds": 55
+}

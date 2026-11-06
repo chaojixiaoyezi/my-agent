@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_cliff.py::test_idle_connections[cliff_idle]",
+      "reason": "S1-W1 control lane configuration is not integrated",
+      "clears_when": "S1-INT",
+      "added": "2026-11-05"
+    },
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_cliff.py::test_slow_handlers[cliff_slow_handler]",
+      "reason": "S1-W1 slow general handlers require the integrated control lane",
+      "clears_when": "S1-INT",
+      "added": "2026-11-05"
+    },
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_streams_control.py::test_streams_control[streams_control]",
+      "reason": "S1-W1 native stream handoff configuration is not integrated",
+      "clears_when": "S1-INT",
+      "added": "2026-11-05"
+    },
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_snapshot_counts.py::test_snapshot_counts[delta]",
+      "reason": "Delta snapshot checkout is not available at the anchor",
+      "clears_when": "S1-W2",
+      "added": "2026-11-05"
+    },
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_connection_reuse.py::test_connection_reuse",
+      "reason": "S1-W4 main HTTP pool configuration is not integrated",
+      "clears_when": "S1-INT",
+      "added": "2026-11-05"
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+{
+  "id": "vertical_slice_gp6",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "provider_request"
+    },
+    {
+      "action": "steer",
+      "ref": "steer-one",
+      "text": "fixture-steering"
+    },
+    {
+      "action": "stop",
+      "ref": "stop-one",
+      "session": "main",
+      "target": "one"
+    },
+    {
+      "action": "release_provider"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "one",
+      "cancelled": true
+    },
+    {
+      "action": "new",
+      "ref": "new-one",
+      "session": "main"
+    },
+    {
+      "action": "ask",
+      "ref": "two",
+      "session": "second",
+      "text": "fixture-question",
+      "wait": "completed"
+    },
+    {
+      "action": "wait_children",
+      "target": "two"
+    },
+    {
+      "action": "ask",
+      "ref": "three",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "none"
+    },
+    {
+      "action": "wait_process_ready",
+      "target": "three"
+    },
+    {
+      "action": "stop",
+      "ref": "stop-three",
+      "session": "main",
+      "target": "three"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "three",
+      "cancelled": true
+    },
+    {
+      "action": "prove_process_exit",
+      "target": "three"
+    },
+    {
+      "action": "ask",
+      "ref": "four",
+      "session": "second",
+      "text": "fixture-question",
+      "wait": "provider_request"
+    },
+    {
+      "action": "restart",
+      "target": "four"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "four",
+      "cancelled": false
+    }
+  ],
+  "fake_model_script": [
+    {
+      "wait_for_release": true,
+      "deadline_seconds": 10
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "fixture-spawn",
+          "type": "function",
+          "function": {
+            "name": "create_subagents",
+            "arguments": "{\"items\": [{\"goal\": \"Return fixture-answer.\", \"description\": \"fixture child\", \"tool_preset\": \"read_only\"}]}"
+          }
+        }
+      ]
+    },
+    {},
+    {},
+    {
+      "tool_calls": [
+        {
+          "id": "fixture-shell",
+          "type": "function",
+          "function": {
+            "name": "run_command",
+            "arguments": "{\"command\": \"\\\"{{PYTHON}}\\\" -c \\\"import os,threading;from pathlib import Path;Path('{{OWNER_HOME}}/process-ready').write_text(str(os.getpid()));threading.Event().wait()\\\"\", \"working_dir\": \"{{OWNER_HOME}}\", \"timeout\": 120}"
+          }
+        }
+      ]
+    },
+    {
+      "wait_for_release": "restart-processing",
+      "deadline_seconds": 10
+    },
+    {}
+  ],
+  "expected_effects": {
+    "im_send": 2,
+    "subagent_closeout": 1
+  },
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [
+    "ps",
+    "background_launcher_identity"
+  ],
+  "repetitions": 3,
+  "deadline_seconds": 55,
+  "config": {
+    "enable_subagents": true
+  }
+}

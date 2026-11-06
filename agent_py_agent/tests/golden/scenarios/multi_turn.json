@@ -1,0 +1,37 @@
+{
+  "id": "multi_turn",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "completed"
+    },
+    {
+      "action": "ask",
+      "ref": "two",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "completed"
+    },
+    {
+      "action": "ask",
+      "ref": "three",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "completed"
+    }
+  ],
+  "fake_model_script": [],
+  "expected_effects": {
+    "im_send": 3
+  },
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [],
+  "repetitions": 3,
+  "deadline_seconds": 55
+}

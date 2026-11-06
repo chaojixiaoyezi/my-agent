@@ -1,0 +1,1 @@
+"""Isolated Gateway regression fixtures."""

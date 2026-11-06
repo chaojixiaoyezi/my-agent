@@ -1,0 +1,63 @@
+{
+  "id": "approval_request_decision",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "none"
+    },
+    {
+      "action": "approve",
+      "target": "one",
+      "decision": "approved"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "one",
+      "cancelled": false
+    }
+  ],
+  "fake_model_script": [
+    {
+      "tool_calls": [
+        {
+          "id": "fixture-expand-persona",
+          "type": "function",
+          "function": {
+            "name": "tool_search",
+            "arguments": "{\"names\": [\"update_persona\"]}"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "fixture-approval-persona",
+          "type": "function",
+          "function": {
+            "name": "update_persona",
+            "arguments": "{\"target\": \"soul\", \"content\": \"Fixture tone is concise.\"}"
+          }
+        }
+      ]
+    },
+    {
+      "content": "fixture-answer"
+    }
+  ],
+  "expected_effects": {
+    "im_send": 1,
+    "approval_decision": 1
+  },
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [],
+  "repetitions": 3,
+  "deadline_seconds": 55,
+  "interactive_approvals": true
+}

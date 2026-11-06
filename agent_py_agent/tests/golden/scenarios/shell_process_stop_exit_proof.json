@@ -1,0 +1,59 @@
+{
+  "id": "shell_process_stop_exit_proof",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "none"
+    },
+    {
+      "action": "wait_process_ready",
+      "target": "one"
+    },
+    {
+      "action": "stop",
+      "ref": "stop-one",
+      "session": "main",
+      "target": "one"
+    },
+    {
+      "action": "release_provider"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "one",
+      "cancelled": true
+    },
+    {
+      "action": "prove_process_exit",
+      "target": "one"
+    }
+  ],
+  "fake_model_script": [
+    {
+      "tool_calls": [
+        {
+          "id": "fixture-shell",
+          "type": "function",
+          "function": {
+            "name": "run_command",
+            "arguments": "{\"command\": \"\\\"{{PYTHON}}\\\" -c \\\"import os,threading;from pathlib import Path;Path('{{OWNER_HOME}}/process-ready').write_text(str(os.getpid()));threading.Event().wait()\\\"\", \"working_dir\": \"{{OWNER_HOME}}\", \"timeout\": 120}"
+          }
+        }
+      ]
+    }
+  ],
+  "expected_effects": {},
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [
+    "ps",
+    "background_launcher_identity"
+  ],
+  "repetitions": 3,
+  "deadline_seconds": 55
+}
