@@ -96,7 +96,7 @@ def synchronize_plugin_clients(registry) -> None:
         return
     config = getattr(registry._construction_params, "live_config", None)
     enabled = bool(getattr(config, "enable_plugins", True) and getattr(config, "enable_tools", True))
-    sandbox = registry.plugin_process_sandbox
+    sandbox = getattr(registry, "plugin_process_sandbox", getattr(registry._construction_params, "plugin_process_sandbox", True))
     try:
         rows, stamp = _discover_plugin_manifests(owner) if enabled and owner.identity == OwnerIdentity.local_main() else ((), ())
         active = ({row.activation_id: row for row in rows
