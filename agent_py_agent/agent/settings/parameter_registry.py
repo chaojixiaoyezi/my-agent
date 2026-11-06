@@ -171,7 +171,7 @@ class ParameterSpec:
     effect: str
     # 是否属于常用层级（COMMON_KEYS）；只用于展示和推荐，不影响能否修改。
     common: bool = False
-    # 元数据（P8，2026-10-01）：单位/范围/归属模块/读取方，全部由 parameter_metadata 自动推导；推不出的留空。
+    # 元数据由 parameter_metadata 推导：真实读取方或明确标注的兼容定义来源；其余缺失留空，不据此授予写权。
     unit: str = ""
     range: str = ""
     owner_module: str = ""

@@ -1,7 +1,7 @@
 # LLM: 宿主拓扑范围只展示非负整数，实际拒绝由gateway_topology唯一判据负责，不开放写权限。
 # LLM: 参数登记表的元数据推导（单位、范围、归属模块、读取方），只读、纯函数、进程内缓存一次。
 #   单位与范围按结构化规则从键名和现有校验规格推导，读取方用与 test_config_field_readers 同一套
-#   属性访问/字符串键正则扫产品代码；推不出的一律留空，绝不手工抄一份或硬猜。改动须同步
+#   属性访问/字符串键正则扫产品代码；恒开兼容布尔项只标注定义来源，其余推不出的一律留空，不抄字段名单或硬猜。改动须同步
 #   parameter_registry.py、tooling/user_config_tool.py、gateway_parts/settings_control_service.py
 #   与 test_parameter_metadata.py。
 #   无源码发行读取构建时由同一 field_readers 扫描生成的展示快照；快照不参与配置裁决。
@@ -23,6 +23,7 @@ from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ._memory_coercion import _FIELDS as MEMORY_FIELDS
 from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
 from .config import AgentConfig
+from .live_switches import LIVE_SWITCH_KEYS
 from .services._normalize import GatewayFieldsService
 from .services.runtime_tool_field_specs import TOOL_INT_FIELDS
 
@@ -186,7 +187,8 @@ def ranges() -> dict[str, str]:
 # LLM: 只读规范任务与产品代码；排除自身模块和定义文件，避免字符串键把“登记表”当成读取方。
 #   归属模块取引用最多的文件相对 agent_py_agent 的顶层（agent 包内细分到第二段），读取方返回该文件相对名。
 #   已迁入目录的决策字段不再归 AgentConfig，不制造读取旧平铺值的虚假消费方。
-# 函数用途: 扫描产品代码，为每个配置字段找到主要读取方模块与归属顶层模块。
+#   默认True且不属实时开关的兼容布尔项，只展示定义来源并明确不是运行时读取方；不读取配置实例或恢复开关分支。
+# 函数用途: 扫描主要读取方，为恒开兼容字段保留诚实标注的定义来源。
 @lru_cache(maxsize=1)
 def field_readers() -> dict[str, tuple[str, str]]:
     snapshot = _PACKAGE / "config" / "parameter_readers.json"
@@ -209,6 +211,12 @@ def field_readers() -> dict[str, tuple[str, str]]:
     # log_level 经 apply_log_level 应用（定义在 config.py，已排除），调用点在 runtime_config_env/
     # runtime_config_task，没有直接的属性访问或字符串键引用，补显式映射指向真实消费方。
     mapped["log_level"] = ("settings", "agent/settings/services/runtime_config_env")
+    # 实时开关名单是现存布尔策略的权威分类；其余恒开布尔字段仅为配置兼容保留，不复制State-B键名。
+    declaration = _DEFINITION.relative_to(_PACKAGE).with_suffix("").as_posix()
+    for item in fields(AgentConfig):
+        if item.default is True and item.name not in LIVE_SWITCH_KEYS:
+            mapped[item.name] = (
+                _owner_module(declaration), f"{declaration}（兼容定义，非运行时读取方）")
     picked = {item.name: _reader_for(item.name, counts, mapped) for item in fields(AgentConfig)}
     return {name: reader for name, reader in picked.items() if reader is not None}
 

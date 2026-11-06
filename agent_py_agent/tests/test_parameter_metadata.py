@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+from dataclasses import make_dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -88,6 +89,53 @@ def test_every_listed_key_has_a_reader():
     assert missing == [], f"这些主配置参数没有推导出读取方/归属模块：{missing}"
     assert set(readers) >= {key for key, spec in registry.items()
                             if spec.source == "agent" and key not in LOADER_METADATA_KEYS}
+
+
+# LLM: CI-FIX-5 的恒开开关只保留兼容定义；展示不能复活运行时读取，也不能伪造业务消费者。
+# 函数用途: 验证五个遗留字段明确展示兼容定义来源，原全量读取方断言不放宽。
+@pytest.mark.parametrize("key", [
+    "background_tick_cheap_checks", "local_store_fts_enabled", "sqlite_connection_reuse",
+    "thread_prompt_prefix_freeze_enabled", "tool_default_deferral_enabled",
+])
+def test_always_on_compatibility_fields_show_definition_not_runtime_reader(key):
+    spec = parameter_registry()[key]
+    assert spec.default is True
+    assert spec.owner_module == "settings"
+    assert spec.reader == "agent/settings/config（兼容定义，非运行时读取方）"
+    assert field_readers()[key] == (spec.owner_module, spec.reader)
+
+
+# LLM: 通用兼容推导只接默认True且不属实时开关的布尔项；真实引用优先，其余缺失继续暴露。
+# 函数用途: 用独立源码夹具锁住分类边界，防止给任意未读参数填假读取方。
+def test_compatibility_derivation_preserves_real_readers_and_missing_fields(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import parameter_metadata as metadata
+
+    config = make_dataclass("FixtureConfig", [
+        ("retired_flag", bool, True),
+        ("retired_with_reader", bool, True),
+        ("stream_enabled", bool, True),
+        ("unused_false", bool, False),
+        ("unread_number", int, 1),
+    ])
+    definition = tmp_path / "agent/settings/config.py"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("# 仅兼容定义，不是运行时消费者。\n", encoding="utf-8")
+    reader = tmp_path / "agent/business/reader.py"
+    reader.parent.mkdir(parents=True)
+    reader.write_text("def consume(config):\n    return config.retired_with_reader\n", encoding="utf-8")
+    monkeypatch.setattr(metadata, "AgentConfig", config)
+    monkeypatch.setattr(metadata, "_PACKAGE", tmp_path)
+    monkeypatch.setattr(metadata, "_DEFINITION", definition)
+    monkeypatch.setattr(metadata, "_SELF_EXCLUDED", {definition})
+    metadata.field_readers.cache_clear()
+    try:
+        readers = metadata.field_readers()
+        assert readers.get("retired_flag") == (
+            "settings", "agent/settings/config（兼容定义，非运行时读取方）")
+        assert readers["retired_with_reader"] == ("business", "agent/business/reader")
+        assert not {"stream_enabled", "unused_false", "unread_number"} & readers.keys()
+    finally:
+        metadata.field_readers.cache_clear()
 
 
 # LLM: 迁移器属于输入定义侧，不得压过真正的 compact_threshold_policy 消费方。
