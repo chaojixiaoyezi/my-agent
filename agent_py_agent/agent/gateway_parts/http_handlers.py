@@ -2207,6 +2207,11 @@ def handle_client_history(handler, server) -> None:
         handler._send_json(400, {"error": f"invalid JSON: {exc}"})
         return
     user_id, channel = _request_channel(handler)
+    if body.get("operation") == "list":
+        from .client_session_list import handle_client_session_list
+
+        handle_client_session_list(handler, server, body, user_id=user_id, channel=channel)
+        return
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
@@ -2215,6 +2220,11 @@ def handle_client_history(handler, server) -> None:
         handler._send_json(400, {"error": "invalid history cursor"})
         return
     scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
+    if "target_thread_id" in body:
+        from .client_session_list import handle_client_history_by_thread
+
+        handle_client_history_by_thread(handler, server, body, scope, before=before)
+        return
     if (getattr(server, "control_plane", None) is not None
             or getattr(server, "drain_runtime", None) is not None):
         result = _read_coordinator_client_history(

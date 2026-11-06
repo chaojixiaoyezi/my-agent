@@ -126,6 +126,79 @@ history 增量字段均沿用历史接口的 owner/thread 鉴权，不暴露其�
 
 本合同提供 HTTP 轮询发现和续读，不声称新增了独立 SSE 端点。若外部 BFF 使用 SSE，应在保持游标与身份语义的前提下桥接该轮询。
 
+### 列出当前 owner 的会话（operation: "list"）
+
+仍使用已存在的 `POST /client/history` 及其可信来源认证。仅当 `operation` 精确等于字符串 `"list"` 时进入列表；其它值或缺省时保持原历史语义。列表不需要 `conversation_id`，也不使用历史的 `before_message_cursor`。
+
+| 请求字段 | 类型、默认与限制 |
+|---|---|
+| `operation` | 固定字符串 `"list"` |
+| `limit` | 正整数，默认 50，超过 100 截为 100；布尔、非整数或小于 1 返回 400 `invalid session list limit` |
+| `cursor` | 上一页 `next_cursor` 或 null；最长 2048 字符，格式、版本、类型或 owner/viewer 不符返回 400 `invalid session cursor` |
+| `include_inflight` | 布尔，默认 true；其它类型返回 400 `invalid include_inflight` |
+
+owner 只由原认证 scope 和 owner resolver 决定，正文不能选择其它 owner。存在认证中间件时忽略正文伪造的 `user_id/channel`；没有中间件时保留原 `_gateway_control_scope` 的正文覆盖规则。列表额外字段不筛选会话，也不提升权限。未初始化服务仍返回原 500；不可信来源在读取前沿原认证门拒绝。
+
+| 可信请求身份示例 | 选中的 owner | 可见绑定 |
+|---|---|---|
+| 不带身份头（原默认身份为 admin/chat） | `local/main` | `all_user_access=true` 时可见该库所有绑定，包括 TUI 的 `chat / sess_* / local-agent` |
+| `X-User-Id: alice`、`X-Channel: local` | `local/alice` | 普通用户仅看该库 `local / alice` 的绑定 |
+| `X-User-Id: alice`、`X-Channel: web` | `providers/web/users/alice` | 普通用户仅看该库 `web / alice` 的绑定 |
+
+即使有跨用户显示权，也只枚举**本次解析得到的 owner 库**，不聚合其它 owner。权限判断只取 `scope.all_user_access`，不依据用户名字符串。
+
+| 响应字段 | 类型与含义 |
+|---|---|
+| `ok`、`operation` | bool；固定字符串 `"list"` |
+| `owner_id` | 本次解析的规范 owner 标识 |
+| `items` | 当前页会话绑定数组，最多 100 项 |
+| `next_cursor` | 后续候选的同 owner/viewer 游标；没有后续候选为 null |
+| `coverage` | 正常 `complete`；条目/claim 读取错误为 `partial`；绑定目录不可读或 coordinator 来源失效为 `unknown`，此时 `ok=false, items=[]` |
+| `inflight_coverage` | `complete`；请求窗口超预算为 `partial`；关闭在途投影为 `skipped`；在途来源不可用为 `unavailable` |
+| `load_errors` | 安全错误数组：`code` 为 `CLIENT_SESSION_LOAD_FAILED` 或 `CLIENT_SESSION_CATALOG_UNAVAILABLE`；可含 `conversation_id` 和原安全 `error` 投影，不含路径或异常原文 |
+
+| `items` 字段 | 类型与含义 |
+|---|---|
+| `conversation_id`、`thread_id` | 当前绑定的会话 ID、线程 ID |
+| `owner_id`、`channel`、`channel_user_id` | 当前 owner 和真实绑定身份 |
+| `title`、`preview` | 线程标题；热消息文件最近用户/助手正文预览，空白折叠、最多 160 字符 |
+| `created_at`、`updated_at` | 线程记录的 epoch 秒数；排序另使用线程文件 mtime |
+| `message_count` | 原 canonical marker 的消息总数（冷段计数加热文件消息）；超剩余扫描预算或 marker 失败为 null，不是 0 |
+| `status`、`in_flight` | `running / queued / failed / idle`；仅前两种为 true |
+| `active_request_id` | 当前开放或最先排队的 Gateway 请求 ID；无对应请求、claim-only 或多活动冲突为 null |
+| `active_run_id` | 开放 Gateway 主回合的 `runtime_authority.run_id`，否则 null |
+
+状态优先级为：Gateway 运行中 > 有效运行 claim（`status=running` 且 `float(expires_at)>now`）> Gateway 排队 > failed claim > idle。过期 claim 不算运行；claim-only TUI 回合没有 Gateway 请求 ID，不能据此拼 `/progress` 地址。多活动恢复冲突仅报告 running，不猜一个活动请求。claim 读错时保留条目、按空 claim 推导状态，并增加错误使 coverage 为 partial。
+
+Gateway 投影复用原 owner、精确 scope、线程/claim 绑定、非终态与开放/停止中/closing 规则；排队按原 `_queue_order` 取首项。`active_run_id` 是**主回合 run ID，不是 agent-view 子代理 run ID**；不能直接用于子代理视图下钻。
+
+排序键为 `(线程文件 st_mtime_ns, conversation_id, channel, channel_user_id)` 降序。游标是无填充的 base64url JSON 数组 `["s1", owner_id, viewer_digest, mtime_ns, conversation_id, channel, channel_user_id]`，viewer_digest 为 `sha256(channel + "\x1f" + user_id + "\x1f" + 权限位).hexdigest()[:16]`，权限位为 `"1"` 或 `"0"`。下一页取严格小于游标的键。并发更新可能使绑定上移，重新从第一页可见，不承诺跨页快照一致性。
+
+成本与被动读取边界：
+
+- 每次只读一次 `channel_bindings.json`，只对可见绑定逐一 lstat；不枚举线程、消息或 claim 目录，不使用旧会话列表索引。
+- 按 2026-11-05 的 W1 裁决，每页最多检查 limit 个线程候选：直接读取候选线程，核对其 `channel_bindings` 三元组。缺失、非普通文件、归属不符或 archived 记录跳过；跳过后本页可能不足 limit，游标仍推进到本页末个已检查候选，避免重复空页。
+- 预览每项最多读取热文件尾部 65,536 字节，并拒绝符号链接与非普通文件。消息计数每次共享最多 8,388,608 字节实际热文件读取预算，包含 canonical marker 的尾界、前缀校验与扫描；余额不足返回 null，不接受截断计数。按 `(st_dev, st_ino, st_size, st_mtime_ns)` 缓存，最多 1024 项。
+- Gateway 在途状态每页只读取一次 processing/inbox 请求窗口，沿原预算最多 512 个目录项、1,048,576 字节；超预算不读取请求正文，仍应用 claim 状态。
+- 所有读取均被动打开 owner Store，不创建文件、冷 owner 目录或 Agent；新 owner 返回 `ok=true, items=[]`。coordinator 读取前后核验同一个 control/runtime/paths 和 HTTP transport，来源失效丢弃整页，不回退单进程。
+
+### 打开列表中的会话（target_thread_id）
+
+将列表项中的会话 ID 和线程 ID 一同发往原 `POST /client/history`。这让拥有当前 owner 跨用户显示权的调用方打开该库的 TUI 绑定，而不是把 admin/chat 强行当成 local-agent/chat。
+
+| 请求字段 | 类型与限制 |
+|---|---|
+| `conversation_id` | 列表项的 `conversation_id` |
+| `target_thread_id` | 列表项的 `thread_id`；必须为去空白后非空字符串，原长度不超过 256，否则 400 `invalid target_thread_id` |
+| `limit` | 沿原历史 `_request_limit`：默认 20，上限 200 |
+| `before_message_cursor` | 原历史向前游标，非负整数或 null；仍先执行原校验，非法返回 400 `invalid history cursor` |
+
+`target_thread_id` 仅在当前 owner 库中查找。候选绑定必须匹配请求的 conversation；普通用户还必须匹配原 channel/user。拥有 `all_user_access` 时优先当前精确绑定，否则按 `(channel, channel_user_id)` 选取稳定绑定，并经原 `resolve_report` 确认它仍指向目标线程。无权、缺失、非法路径 stem 或绑定已切换时返回原空历史形状，不跨 owner 查找。
+
+成功和失败响应字段均保持原 `GatewayClientHistoryResult`：`ok/thread_id/turns/load_errors/display_events/message_cursor/before_message_cursor/has_older` 及上文在途字段，不加入 `operation/items`。有活动请求时可按返回的 `progress_path` 续读，进度与结果仍沿原鉴权。
+
+旧 `thread_id/session_id` 继续只是 conversation ID 的别名，不是新增定点 selector；没有 list 或 target 字段的调用保持原行为。外部消费者的 live E2E 应在集成后独立复验，后端回环测试不代表外部浏览器或另一台机器已联通。
+
 ## 外部跟进与验证边界
 
 - **#58-2 外部跟进**：新标签页自动挂载 SSE/轮询的前端不在本仓库；需按上述 history → stream_cursor → progress → result 流程接线。

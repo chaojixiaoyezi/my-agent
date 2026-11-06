@@ -224,3 +224,81 @@ def _stream_cursor(path: Path, *, max_scan_bytes: int, max_cached_streams: int) 
         with _CURSOR_LOCK:
             _CURSORS.pop(key, None)
         return 0
+
+
+# LLM: 只读一次有界原请求窗口，复用原 owner/scope/claim 和开放回合规则；首末验证同一来源，不读 chunks 或创建宿主。
+# 函数用途: 为一页会话批量计算运行/排队状态，恢复冲突不猜活动请求，失败只公开覆盖范围。
+def client_inflight_index(
+    server, owner_scope, entries, *,
+    max_request_files: int = 512,
+    max_request_bytes: int = 1_048_576,
+) -> tuple[dict[str, dict[str, object]], str]:
+    """一次有界读取 processing/inbox，按每个绑定的原 scope 规则给出 running/queued；从不抛出。"""
+    try:
+        from .control_service import (
+            _GatewayRequestRecord,
+            _request_accepts_active_input,
+            _request_matches_scope,
+        )
+        from .io import read_json_file_report
+
+        paths = server.paths
+        control, runtime = getattr(server, "control_plane", None), getattr(server, "drain_runtime", None)
+        _check_source(server, control, runtime, paths)
+        agent = getattr(server, "agent", None)
+        source = control if control is not None else agent
+        config = source.config
+        home_root = (control.home_root if control is not None
+                     else getattr(getattr(agent, "home_paths", None), "root", None))
+        expected_owner = _resolve_request_owner_from_config(config, _scope_request_payload(owner_scope), home_root)
+        if not _within_request_budget(paths, max_request_files, max_request_bytes):
+            return {}, "partial"
+        folders = []
+        for folder in (paths.processing, paths.inbox):
+            records = []
+            for path in folder.glob("*.json"):
+                report = read_json_file_report(path, context="gateway.control.request.read")
+                if report.load_error is not None or not report.payload:
+                    continue
+                payload = dict(report.payload)
+                if _resolve_request_owner_from_config(config, payload, home_root) == expected_owner:
+                    records.append(_GatewayRequestRecord(path, payload))
+            folders.append(records)
+        processing, inbox = folders
+        result = {}
+        for key, (scope, thread_id) in entries.items():
+            # LLM: owner 已在窗口入口过滤；绑定校验仍与单线程投影一致，排队请求允许尚未生成 claim。
+            # 函数用途: 排除线程或 claim 绑定不符的请求记录。
+            def bound(record):
+                payload = record.payload
+                claim = payload.get("conversation_claim")
+                if claim is not None and not isinstance(claim, dict):
+                    return False
+                bindings = [payload.get("conversation_thread_id"), (claim or {}).get("thread_id")]
+                return all(not value or str(value) == thread_id for value in bindings)
+
+            active = [record for record in processing
+                      if _request_matches_scope(record.payload, scope) and bound(record)
+                      and str(record.payload.get("status") or "processing")
+                      not in {"done", "failed", "cancelled", "stopped", "interrupted"}
+                      and (_request_accepts_active_input(record)
+                           or record.payload.get("control_status") == "stopping"
+                           or record.payload.get("cancel_requested") is True
+                           or record.payload.get("turn_phase") == "closing")]
+            pending = [record for record in inbox
+                       if _request_matches_scope(record.payload, scope) and bound(record)
+                       and str(record.payload.get("status") or "pending") == "pending"]
+            pending.sort(key=_queue_order)
+            if len(active) > 1:
+                result[key] = {"status": "running", "active_request_id": "", "active_run_id": ""}
+            elif active:
+                record = active[0]
+                authority = record.payload.get("runtime_authority")
+                result[key] = {"status": "running", "active_request_id": _request_id(record),
+                               "active_run_id": str(authority.get("run_id") or "") if isinstance(authority, dict) else ""}
+            elif pending:
+                result[key] = {"status": "queued", "active_request_id": _request_id(pending[0]), "active_run_id": ""}
+        _check_source(server, control, runtime, paths)
+        return result, "complete"
+    except Exception:  # noqa: BLE001 附加信息失败不泄露路径、异常或破坏原历史。
+        return {}, "unavailable"
