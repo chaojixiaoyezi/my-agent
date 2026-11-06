@@ -150,7 +150,7 @@ python -m pytest agent_py_agent/tests/test_task_credential_storage.py agent_py_a
 
 观察extra的darwin/linux准确pins升级为MCP1.28.1（MIT、Python>=3.10）与Pillow12.3.0（MIT-CMU、Python>=3.10），官方元数据为 [MCP PyPI](https://pypi.org/pypi/mcp/1.28.1/json) 与 [Pillow PyPI](https://pypi.org/pypi/pillow/12.3.0/json)。原uv机制重新生成304包完整锁；其中新旧MCP/Pillow按互斥extra分支分别保存，新增PyJWT2.15.1，不用override篡改上游要求。
 
-上游最新computer-control-mcp0.3.13仍精确要求旧MCP1.13.0/Pillow11.3.0。`tool.uv.conflicts`明确自动执行 `computer-use` 与 `computer-use-observe` 不能同时安装；原自动执行extra不删、不偷偷升级，但仍含已知安全告警，本期观察runtime不安装它。默认依赖与自动执行开关均不变，不能使用`--all-extras`。若要自动执行安装形态，必须单独解决上游兼容和漏洞，不能沿用本期观察验收结论。
+上游 computer-control-mcp 0.3.13–0.3.16 仍精确要求旧 MCP 1.13.0/Pillow 11.3.0。#172 已移除 `computer-use` extra 和 `tool.uv.conflicts`；锁文件只保留 Pillow 13.0.0 和 MCP 1.30.0，完整执行档待上游放开版本约束后重新验收。默认依赖集合与自动执行开关均不变（核心 Pillow 下限已升至 13.0.0），仍不使用 `--all-extras`；只看档 `computer-use-observe` 的 pins 保持不变，不能沿用本期观察验收结论证明完整执行可用。
 
 隔离验证venv只更新MCP/Pillow和必要PyJWT，并卸除该验证克隆中未启用的旧自动执行器，`pip check`通过；原共享venv、实际旧runtime不动。退役Mac `.6`的实际METADATA没有computer-control-mcp。真实SDK测试经原computer_use_server完成stdio initialize/list_tools（仅observe_window，tools/call=0），替换桌面后端构造避免真实屏幕，合成PixelBuffer经原PNG编码、Pillow解码/重编码通过。SDK构造出现pydantic-settings的lifespan前向引用警告，未导致元数据协议失败，不把这次元数据验证等同真实屏幕/OCR或完整自动执行验收。
 

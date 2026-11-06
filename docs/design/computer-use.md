@@ -10,12 +10,11 @@ Computer Use 是可选能力，headless Gateway 默认不装。按你要用的�
   ```
   它按平台只钉观察链路真正用到的库（macOS：pyobjc 的 Quartz / ScreenCaptureKit / ApplicationServices、mss、rapidocr-onnxruntime、pillow；Linux：python-xlib、mss、rapidocr-onnxruntime、pillow），
   版本见 `pyproject.toml`。**它不带自动执行的点击**，也不需要上游执行器。
-- **要用上游那 16 个执行工具**（鼠标、键盘、拖拽）：装 `computer-use`。
-  ```bash
-  pip install -e ".[computer-use]"
-  ```
-  它会装上上游执行器 `computer-control-mcp==0.3.13` 及其整套传递依赖（含自动执行的 pyautogui）。两个 extra 可以在同一环境里共存；
-  只想观察就别装这个。
+- **完整执行档**（上游那 16 个鼠标、键盘、拖拽工具）自 #172 起不随包提供。
+  上游 0.3.13–0.3.16 仍钉死 Pillow 11.3.0 和 MCP 1.13.0，与底座 `pillow>=13.0.0` 冲突，不能在同一环境中安装。
+  原执行器标识与延迟导入保持不变，但不再提供 `computer-use` extra，也不在锁文件中保留上游执行器。
+  待上游放开版本约束后重新评估；不要把独立安装上游执行器视为当前底座的受支持安装方式。
+  **只看档 `computer-use-observe` 不受影响**，其依赖版本与默认关闭的执行开关保持不变。
 
 装完还要在系统里给权限，否则 macOS 上的截图和点击会被系统悄悄丢掉：
 

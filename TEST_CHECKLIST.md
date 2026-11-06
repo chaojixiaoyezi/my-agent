@@ -740,7 +740,7 @@
 
 ## Computer Use
 
-- [x] `my-agent[computer-use]` 在目标 Python 3.11 runtime 可安装，包版本固定为 `0.3.13`。
+- [ ] computer-use extra 已于 #172 移除；完整执行档待上游 computer-control-mcp 放开 pillow/mcp 钉版本后重新验收。
 - [x] 默认/普通 owner/WorkspaceOnly 不注册 `mcp__computer_use__*`，local/main + Full Access 才注册。
 - [x] Xvfb 真 TUI 经 MiniMax-M2.7 完成 list/OCR/activate/scroll/type/key/OCR 后置验证，并留下 tmux 名称。
 - [x] 危险动作 exact approval、同一 MCP 取消通道 `/stop`、单 Gateway/单 MCP 子进程与普通 owner 隔离都有证据。

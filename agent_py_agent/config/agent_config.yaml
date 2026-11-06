@@ -1162,7 +1162,7 @@ mcp_servers: {}
 
 # Computer Use：直接复用 MIT 开源的 computer-control-mcp 执行鼠标、键盘、窗口、截图和 OCR，
 # my-agent 只通过现有 MCP/Tool Gateway 做薄适配，不重复实现桌面自动化引擎。
-# - 安装：pip install 'my-agent[computer-use]'；当前执行器的 OCR 依赖支持 Python 3.10-3.13。
+# - 安装：#172 起不随包提供完整执行器（上游钉旧 Pillow/MCP，与底座依赖冲突）；只看档用 pip install 'my-agent[computer-use-observe]'。
 # - 默认 false：headless Gateway 不启动图形子进程，也不承担 OCR/ONNX 依赖。
 # - 只有结构化 local/main 管理员 + access_mode=full-access 才会注册；远程/普通 owner 即使改配置也不可见。
 # - 截图/OCR 和所有输入动作按 dangerous 审批；窗口枚举/屏幕尺寸/等待只读，移动鼠标/激活窗口按 mutating。

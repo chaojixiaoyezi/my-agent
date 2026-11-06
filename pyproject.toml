@@ -13,7 +13,7 @@ authors = [{ name = "超级小叶子 (chaojixiaoyezi)" }]
 dependencies = [
   "packaging>=24.2,<27",  # 插件本地 wheel 的 PEP 440/508、元数据和平台标签；避免自写依赖规则，许可与替代方案见环境合同
   "openpyxl>=3.1",
-  "pillow>=11.3,<14",  # 飞书原生图片的真实格式识别与有界解码；复用已有观察依赖，包内运行不请求额外外网
+  "pillow>=13.0.0,<14",  # 飞书原生图片的真实格式识别与有界解码；复用已有观察依赖，包内运行不请求额外外网
   "prompt_toolkit>=3.0",
   "markdown-it-py>=4.2,<5",  # TUI Markdown 用成熟 CommonMark token，终端布局/样式仍由本项目 renderer 控制
   "Pygments>=2.20,<3",  # TUI fenced code 的语言 lexer；只输出本项目 style role，不注入 ANSI
@@ -39,21 +39,14 @@ dev = [
   "pyte>=0.8.2,<0.9",  # 仅开发验收：成熟 VTXXX 屏幕模拟器用于 PTY ANSI checkpoint 重放，产品运行时不依赖
   "ruff>=0.8",
 ]
-# Computer Use 直接复用 MIT 开源执行器；它包含 OCR/ONNX 等较重桌面依赖，
-# 因此作为官方可选运行能力随底座发布，headless Gateway 默认不被强制安装。
-# 注意它会把上游那一整套（含自动执行的 pyautogui 与 222 个传递依赖）带进来；
-# 生产只要屏幕观察、不开自动执行时，用下面的 computer-use-observe，别用这个。
-computer-use = [
-  "computer-control-mcp==0.3.13",
-]
 # J16 屏幕观察（macOS AX/ScreenCaptureKit + Linux X11）自己实现采集，不调上游 computer_control_mcp 的任何内部对象，
 # 因此生产不需要那个会带进 222 个包的上游执行器。这里按平台钉死观察链路真正用到的库，让部署能照仓库声明装。
 # MCP/Pillow 采用已修复安全告警的准确版本，其余观察依赖保持原版本。
-# 自动执行的点击（pyautogui）不在本 extra 里：生产保持关闭，要开就用上面的 computer-use。
+# 自动执行的点击（pyautogui）不在本 extra 里：完整执行器自 #172 起不随包提供（上游钉旧 Pillow/MCP）。
 # MCP 的 Python SDK 必须在清单里：适配器就是靠它收发 stdio（computer_use_server.py 顶层 import
 # mcp.server.fastmcp / mcp.server.stdio），只看档也离不开；它本身不带点击能力（点击来自 pyautogui 与
-# computer-control-mcp，两个都不在本 extra 里）。上游自动执行 extra 仍钉旧 SDK/Pillow；
-# 两种安装形态在 tool.uv.conflicts 显式互斥，不覆写上游依赖，也不能同时安装。
+# 上游执行器，两个都不在本 extra 里）。上游执行器仍钉旧 SDK/Pillow，
+# 自 #172 起不再锁入本包；待上游放开版本约束后再评估。
 computer-use-observe = [
   "mcp==1.30.0; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
@@ -174,7 +167,3 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # 真实压力脚本故意保留 f-string 形态，便于同组 prompt 后续插入轮次变量。
 "scripts/live_lab/main_agent_limit_cases.py" = ["F541"]
-
-# 上游自动执行器固定旧 MCP/Pillow；观察能力独立使用安全版本，两种安装形态不可同时解析安装。
-[tool.uv]
-conflicts = [[{ extra = "computer-use" }, { extra = "computer-use-observe" }]]

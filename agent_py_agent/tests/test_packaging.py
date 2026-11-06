@@ -281,9 +281,8 @@ def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
 
     assert data["build-system"]["requires"] == ["setuptools>=84.1.0"]
     assert "setuptools>=84.1.0" in extras["dev"]
-    assert data["tool"]["uv"]["conflicts"] == [[
-        {"extra": "computer-use"}, {"extra": "computer-use-observe"},
-    ]]
+    assert "conflicts" not in data.get("tool", {}).get("uv", {})
+    assert "computer-use" not in extras
     observe = extras["computer-use-observe"]
     assert len(observe) == len(set(observe)), "computer-use-observe 有重复条目"
 
