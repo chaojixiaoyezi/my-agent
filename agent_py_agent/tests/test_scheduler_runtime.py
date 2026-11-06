@@ -127,8 +127,24 @@ def _scheduled_delivery_case(tmp_path):
     )
 
 
-def test_scheduled_delivery_retry_uses_frozen_reply_without_second_model_turn(tmp_path) -> None:
+# LLM: 只控制尝试记账的单调时钟；模型、调度、冻结和重投都走原实现，覆盖慢尝试后的真实退避边界。
+# 函数用途: 验证失败只冻结一次、冷却前不发送、到期只重投且不再次调用模型。
+@pytest.mark.parametrize('attempt_seconds', [0.0, 90.0])
+def test_scheduled_delivery_retry_uses_frozen_reply_without_second_model_turn(
+    tmp_path, monkeypatch, attempt_seconds,
+) -> None:
+    from agent_py_agent.agent.conversation import wake_attempt_tracking
+
+    elapsed = [0.0]
+    monkeypatch.setattr(wake_attempt_tracking, 'time', SimpleNamespace(monotonic=lambda: elapsed[0]))
     case = _scheduled_delivery_case(tmp_path)
+    deliver = case.channels.deliver
+
+    def delayed_delivery(context, envelope):
+        elapsed[0] += attempt_seconds
+        return deliver(context, envelope)
+
+    monkeypatch.setattr(case.channels, 'deliver', delayed_delivery)
     repository = case.agent.scheduler_repository
     task_id = case.signal.root_task_id
 
@@ -145,8 +161,17 @@ def test_scheduled_delivery_retry_uses_frozen_reply_without_second_model_turn(tm
     assert frozen["content"] == "已按计划完成。" and frozen["external_sent"] is False
     assert repository.history()[0] == []
 
+    # 持久退避从尝试结束起算；不能假定首次 tick 开始后 31 秒一定已到重投时刻。
+    state, error = case.store.wakes.attempts.state_report(case.signal.wake_signal_id)
+    assert error is None and state.redelivery_failures == 1
+    assert state.last_redelivery_failed_at == 1_000 + attempt_seconds
+    retry_at = max(state.next_attempt_at, case.scheduler._wake_retry_after[case.signal.wake_signal_id])
+    assert retry_at == 1_030 + attempt_seconds
     case.channels.status = "sent"
-    reports = case.scheduler.tick(now=1_031)
+    assert case.scheduler.tick(now=retry_at - 0.01) == []
+    assert len(case.backend.prompts) == len(case.channels.attempts) == 1
+    assert case.store.wakes.pending_one(case.signal.wake_signal_id) is not None
+    reports = case.scheduler.tick(now=retry_at)
 
     assert len(case.backend.prompts) == 1
     assert len(case.channels.attempts) == 2, "已完成业务仍欠原外发，只重投冻结信封"
@@ -173,7 +198,7 @@ def test_scheduled_delivery_retry_uses_frozen_reply_without_second_model_turn(tm
     assert len(final_rows) == 1 and final_rows[0].content == frozen["content"]
     assert final_rows[0].metadata["conversation_request_id"] == frozen["message_metadata"]["conversation_request_id"]
 
-    assert case.scheduler.tick(now=1_062) == []
+    assert case.scheduler.tick(now=retry_at + 31) == []
     assert len(case.backend.prompts) == 1 and len(case.channels.attempts) == 2
     assert repository.history()[0] == history
 
