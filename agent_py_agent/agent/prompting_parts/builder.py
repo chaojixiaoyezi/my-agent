@@ -15,6 +15,7 @@ from __future__ import annotations
 - 已经有工具记录时，最后放工具记录和继续指令，让模型从最新工具结果往下走
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -92,7 +93,7 @@ class ToolSections:
     in_use_method_ids: tuple[str, ...] = ()
 
 
-# LLM: 请求携带宿主已提交的线程人格断点；候选容量检查复制此值，不把候选状态写回持久快照。
+# LLM: 请求携带宿主已提交的线程人格断点及一次性可信贡献器；成功准备后贡献物化进inject，候选副本不回读宿主。
 # 类用途: 汇总本次提示输入与可选线程冻结事实，无线程时仍每次现读人格。
 @dataclass
 class PromptBuildRequest:
@@ -109,6 +110,11 @@ class PromptBuildRequest:
     # 回合触发类型（agent_core/runtime/turn_trigger.TurnTrigger）；生命周期唤醒时当前回合以“# Host Event”开头。
     turn_trigger: object | None = None
     thread_persona: ThreadPersonaScope | None = None
+    # 成功准备后清空；要采集新的宿主快照须使用新的请求或显式重新安装贡献器。
+    contributors: tuple[PromptContributor, ...] = ()
+
+
+PromptContributor = Callable[[PromptBuildRequest], tuple[InjectionValue, ...]]
 
 
 # LLM: 内部过渡参数包，用于在旧式平铺调用参数与PromptBuildRequest之间无损桥接，不对外暴露。
@@ -259,6 +265,7 @@ class PromptBuilder:
     #   self_map只追加固定入口指引，必须开关与本次实际可用资格同时成立，不读取目录；动态库存不进system。
     #   注入列表复制为元组，部署路径只采集到动态事实；纯投影只消费返回值，回合触发类型原样冻结。
     #   主会话沟通只在既有非隔离范围按配置追加固定软指导，保留override且不改变子代理/辅助表达职责或执行终态。
+    #   宿主贡献器成功准备后物化回当前请求并清空；原无贡献器请求不改，复制后的容量候选只消费冻结片段。
     # 函数用途: 冻结材料与当前部署位置；task_local不采集Owner目录教程/开发说明，仍保留归属边界与工作区事实。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
@@ -282,6 +289,11 @@ class PromptBuilder:
         persona, updates = _thread_persona_context(self, request, task_local)
         dynamic = _dynamic_prompt_text(self, request, persona)
         injection_fragments = request.inject if request.inject is not None else ()
+        contributors = request.contributors
+        if contributors:
+            injection_fragments = freeze_runtime_injections(injection_fragments)
+            for contributor in contributors:
+                injection_fragments += freeze_runtime_injections(contributor(request))
         snapshots_enabled = bool(getattr(self.config, "prompt_runtime_snapshots_enabled", True))
         workspace_context = (
             _workspace_context_text(self)
@@ -298,7 +310,7 @@ class PromptBuilder:
         selected_skills = _selected_skill_context(self, request, task_local)
         if selected_skills:
             recommendations += "\n\n" + selected_skills
-        return PromptRenderInput(
+        prepared = PromptRenderInput(
             system_prompt=system_prompt, memory_text=memory_text, owner_scope=owner_scope,
             dynamic=dynamic, workspace_context=workspace_context, injection_fragments=injection_fragments,
             tool_catalog=_tools.tool_catalog_section or default_tools,
@@ -315,6 +327,10 @@ class PromptBuilder:
             deployment_context=deployment_context,
             prompt_runtime_snapshots_enabled=snapshots_enabled,
         )
+        if contributors:
+            request.inject = list(prepared.injection_fragments)
+            request.contributors = ()
+        return prepared
 
     # LLM: 仅当home_context_enabled启用且存在owner路径或人格仓库时只读加载人格片段，忽略user_prompt文本内容。
     # 函数用途: 读取当前owner的AGENTS/SOUL/USER等人格与家庭上下文文本块。

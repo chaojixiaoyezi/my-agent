@@ -17,6 +17,7 @@ from .models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .nested_dispatch import ProgramOutputContractError
 from .program_data import DataBudget, project, resolve
 
 
@@ -56,13 +57,14 @@ class ToolProgramTool(BaseTool):
     def execute(self, params):
         return ToolHandlerOutcome('tool_program', False, '缺少原工具执行上下文。',error_code='TOOL_PROGRAM_INVALID',effect_outcome='not_started')
 
-    # LLM: 计划解释限16步/32调用/2MB中间数据/16KB返回；所有调用逐原工具执行，异常只给固定类型，已执行轨迹始终保留。
+    # LLM: 计划解释限16步/32调用/2MB中间数据/16KB返回；协议失败仅暴露安全结构化错误，已执行轨迹始终保留且不重试。
     # 函数用途: 执行固定只读步骤，返回最终投影、内部失败、覆盖、原证据引用和实际批次指标。
     def execute_scoped(self, params, context):
         started = time.monotonic()
         dispatch = context.tool_dispatch
         values, trace, skipped = {}, [], []
         error = ''
+        output_error = None
         try:
             if not self.enabled() or dispatch is None:
                 raise ValueError('受限编排不可用')
@@ -76,6 +78,8 @@ class ToolProgramTool(BaseTool):
                 if len(json.dumps(values, ensure_ascii=False).encode()) > 2_000_000:
                     raise ValueError('中间数据超过预算')
             result = values[params.get('return_step', steps[-1]['id'])]
+        except ProgramOutputContractError as exc:
+            result, error, output_error = None, type(exc).__name__, exc.args[0]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             result, error = None, type(exc).__name__
         encoded = json.dumps(result, ensure_ascii=False)
@@ -84,6 +88,8 @@ class ToolProgramTool(BaseTool):
             'result_chars':len(encoded),'calls':trace,'skipped_steps':skipped,
             'stats':{'tool_calls':dispatch.count if dispatch else 0,'execution_groups':dispatch.groups if dispatch else 0,
                 'elapsed_ms':int((time.monotonic()-started)*1000)},'program_error':error}
+        if output_error is not None:
+            payload['program_output_error'] = output_error
         live = self._live_payload(payload)
         failed = bool(error) or any(row['status'] != 'succeeded' for row in trace)
         return ToolHandlerOutcome('tool_program', not failed, json.dumps(payload,ensure_ascii=False),
@@ -91,7 +97,7 @@ class ToolProgramTool(BaseTool):
             result_envelope={'program':live,'tool_output_policy':{'preserve_prompt_output':True,
                 'live_prompt_output':json.dumps(live, ensure_ascii=False)}})
 
-    # LLM: step仅认准确结构，引用只指向已有数据；when跳过不能消掉之前失败，foreach溢出不静默裁掉条目。
+    # LLM: step仅认准确结构，引用只指向已有数据；保留完整批次轨迹后优先传播协议错误，不因兄弟预算溢出掩盖。
     # 函数用途: 执行一个调用/批次或纯转换，并将原调用事实记入输出。
     def _step(self, step, index, values, trace, skipped, dispatch):
         if not isinstance(step, dict) or set(step) - {'id','tool','arguments','calls','foreach','when','data','project'}:
@@ -137,14 +143,19 @@ class ToolProgramTool(BaseTool):
             trace.append({**{key:getattr(result,key) for key in ('call_id','tool_name','status','error_code','duration_ms')},
                 'refs':[ref.to_dict() for ref in result.refs],
                 'reported_error_code':result.reported_error_code, 'parent_call_id':dispatch.parent.call_id})
+        for result in results:
+            if 'contract_error' in result.metadata.get('program_data', {}):
+                self._value(result)
         rows = [self._value(result) for result in results]
         values[name] = rows if 'foreach' in step or 'calls' in step else rows[0]
 
-    # LLM: 原ToolResult保留不改，完整JSON解析只增加数据投影，解析失败仍保留原output；不扫描文本片段当结构化事实。
-    # 函数用途: 提供供下一步引用的工具结果及可选完整JSON值。
+    # LLM: 原ToolResult保留不改；显式协议失败优先于后续预算清理，抛安全结构化错误，不重新派发工具。
+    # 函数用途: 提供下一步可引用的校验值，拒绝预算溢出与显式协议失败。
     @staticmethod
     def _value(result):
         from ..common.log_redaction import redact_sensitive_value
+        if 'contract_error' in result.metadata.get('program_data', {}):
+            raise ProgramOutputContractError(result.metadata['program_data']['contract_error'])
         if result.metadata.get('program_data', {}).get('budget_exceeded'):
             raise ValueError('中间数据超过预算')
         value = {'ok':result.ok,'status':result.status,'output':result.output,
