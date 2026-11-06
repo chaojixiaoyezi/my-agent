@@ -892,14 +892,21 @@ def handle_client_business(handler, server):
     handler._send_json(status, response)
 
 
+# LLM: 首帧仍在handler鉴权并写出；detach后仅独立writer推进和关闭迭代器，失败由未移交方清理。
+# 函数用途: 保留原NDJSON协议，并在启用原生流池时移交长连接以释放HTTP线程。
 def handle_client_business_stream(handler, server):
-    """同一typed迭代器只编码一次；首帧成功后才发头，所有退出均关闭实际观察器。"""
+    """首帧成功后才发头；可选移交只改变运输所有权，不改变实时授权和事件编码。"""
+    import socket
     from importlib import import_module
     from itertools import chain
 
     from ..plugin_host.business_actions import business_stream_available
+    from .business_stream_pool import NativeStreamStopped, stream_services_view
     headers_sent = False
     iterator = None
+    ticket = sock = None
+    detached_fd = None
+    handed_off = False
     try:
         if not _native_source(handler):
             return
@@ -908,8 +915,25 @@ def handle_client_business_stream(handler, server):
         context.check('events.list', request)
         if not business_stream_available():
             raise HostAPIError('HOST_NOT_READY', 503)
+        pool = getattr(server, 'business_stream_pool', None)
+        if pool is not None:
+            home = services.host.home_paths
+            ticket = pool.reserve((home.owner_id, str(home.owner_home_dir)))
+            if ticket is None:
+                # 原JSON发送器没有附加响应头接口，此处保留同样编码并补充重试提示。
+                body = json.dumps({'error': {'code': 'GATEWAY_STREAM_BUSY'}}, ensure_ascii=False).encode('utf-8')
+                handler.send_response(503)
+                handler.send_header('Content-Type', 'application/json; charset=utf-8')
+                handler.send_header('Content-Length', str(len(body)))
+                handler.send_header('Retry-After', '1')
+                handler.send_header('Connection', 'close')
+                handler.end_headers()
+                headers_sent = True
+                handler.wfile.write(body)
+                return
         stream = import_module('agent_py_agent.agent.gateway_parts.business_event_stream').stream_business_events(
-            request, authenticated_context=context, services=services)
+            request, authenticated_context=context,
+            services=services if ticket is None else stream_services_view(services, ticket))
         iterator = stream.events()
         event_schema = standalone_schema({'$ref': '#/$defs/EventView'})
         try:
@@ -923,25 +947,70 @@ def handle_client_business_stream(handler, server):
         handler.send_header('Connection', 'close')
         handler.end_headers()
         headers_sent = True
-        for event in chain((first,), iterator):
-            context.check('events.list', request)
-            event = validate_object(event, event_schema)
-            handler.wfile.write((json.dumps(event, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8'))
+        if ticket is not None:
+            # 校验与编码闭包由原适配器持有，流池不认识业务schema。
+            # LLM: 每个后续事件仍重新检查本次请求权限，不能缓存首帧授权结果。
+            # 函数用途: 在writer写出前复核原业务授权。
+            def check(event):
+                context.check('events.list', request)
+
+            # LLM: 沿用原事件schema及NDJSON编码，禁止流池另造帧格式。
+            # 函数用途: 校验并编码一个原生业务事件。
+            def encode(event):
+                event = validate_object(event, event_schema)
+                return (json.dumps(event, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
+
+            check(first)
+            handler.wfile.write(encode(first))
             handler.wfile.flush()
+            handler.close_connection = True
+            detached_fd = handler.connection.detach()
+            sock = socket.socket(fileno=detached_fd)
+            detached_fd = None
+            sock.settimeout(pool.write_timeout_seconds)
+            ticket.attach(sock)
+            pool.submit(ticket, sock, iterator, encode, check)
+            handed_off = True
+        else:
+            for event in chain((first,), iterator):
+                context.check('events.list', request)
+                event = validate_object(event, event_schema)
+                handler.wfile.write((json.dumps(event, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8'))
+                handler.wfile.flush()
     except (HostAPIError, BusinessError) as error:
         if not headers_sent:
             code, status, _ = _error_code(error)
             handler._send_json(status, {'error': {'code': code}})
-    except (BrokenPipeError, ConnectionError):
+    except (NativeStreamStopped, BrokenPipeError, ConnectionError):
         pass
     except (OSError, ValueError, TypeError, RuntimeError):
         if not headers_sent:
             handler._send_json(503, {'error': {'code': 'HOST_NOT_READY'}})
     finally:
-        close = getattr(iterator, 'close', None)
-        if callable(close):
-            close()
-        handler.close_connection = True
+        try:
+            if not handed_off:
+                try:
+                    close = getattr(iterator, 'close', None)
+                    if callable(close):
+                        close()
+                finally:
+                    try:
+                        if sock is not None:
+                            try:
+                                sock.shutdown(socket.SHUT_RDWR)
+                            except OSError:
+                                pass
+                            sock.close()
+                        elif detached_fd is not None:
+                            try:
+                                socket.close(detached_fd)
+                            except OSError:
+                                pass
+                    finally:
+                        if ticket is not None:
+                            ticket.release()
+        finally:
+            handler.close_connection = True
 
 
 # LLM: 缓存仅属于这个live host，来源快照保留对象身份而非可变对象的相等比较；不保存actor或授权决定。
