@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .base import BaseBackend
+if TYPE_CHECKING:
+    # 设置校验层经 model_provider_schema 导入本模块；运行时导入 base 会形成 settings↔backends 环。
+    from .base import BaseBackend
 
-BackendConstructor = Callable[[Any], BaseBackend]
+BackendConstructor = Callable[[Any], "BaseBackend"]
 _BACKENDS: dict[str, BackendConstructor] = {}
 
 
