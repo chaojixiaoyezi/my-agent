@@ -116,14 +116,32 @@ class _ParseCounter:
         monkeypatch.setattr(SchedulerRepository, "_parse_run", counting)
 
 
+# LLM: 仅调整测试文件时间戳，显式越过共享投影可信窗口，不修改生产时钟或缓存判据。
+# 函数用途: 让需要缓存命中的账本离开两秒保护窗口。
+def _age_path(path: Path, *, seconds: float = 3.0) -> None:
+    """把路径 mtime 拨到 seconds 秒前, 让 2 秒保护窗口判定通过。"""
+    old_ns = int((time.time() - seconds) * 1_000_000_000)
+    os.utime(path, ns=(old_ns, old_ns))
+
+
+# LLM: 隔离新旧两套模块级投影和诊断计数，测试前后均复位，不改生产缓存策略。
+# 函数用途: 防止等待行用例互相借缓存或统计而空转通过。
 @pytest.fixture
 def waiting_projection():
     """投影缓存是模块级:用例前后清空,避免跨用例统计串味。"""
-    repository_module._WAITING_PROJECTION_CACHE.clear()
-    for name in list(repository_module._WAITING_PROJECTION_STATS):
-        repository_module._WAITING_PROJECTION_STATS[name] = 0
+    caches = (repository_module._WAITING_PROJECTION_CACHE, repository_module._STORE_PROJECTION_CACHE)
+    stats = (repository_module._WAITING_PROJECTION_STATS, repository_module._STORE_PROJECTION_STATS)
+    for cache in caches:
+        cache.clear()
+    for counters in stats:
+        for name in list(counters):
+            counters[name] = 0
     yield repository_module
-    repository_module._WAITING_PROJECTION_CACHE.clear()
+    for cache in caches:
+        cache.clear()
+    for counters in stats:
+        for name in list(counters):
+            counters[name] = 0
 
 
 @pytest.fixture
@@ -148,11 +166,14 @@ def _wanting_ids(rows: list[dict[str, object]]) -> list[str]:
 # --------------------------------------------------------------------------------------
 # ① waiting_runs 投影
 # --------------------------------------------------------------------------------------
+# LLM: 真实 waiting_runs 读取可信账本，解析次数与共享 cheap_hit 同时证明复用。
+# 函数用途: 验证第二次等待行读取不再解析任何 run。
 def test_waiting_runs_reuses_projection_without_reparsing(tmp_path, waiting_projection, monkeypatch) -> None:
     """store.json 未变:第二次调用解析 0 条,结果逐字相同,并记一次命中。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     _write_store(root / "store.json", _store_with_waiting(3))
+    _age_path(root / "store.json")
     repository = _repository(root)
     counter = _ParseCounter()
     counter.install(monkeypatch)
@@ -169,15 +190,18 @@ def test_waiting_runs_reuses_projection_without_reparsing(tmp_path, waiting_proj
         "srun_002",
     ]
     assert second_errors == first_errors == []
-    assert waiting_projection._WAITING_PROJECTION_STATS["hit"] >= 1
+    assert waiting_projection._STORE_PROJECTION_STATS["cheap_hit"] >= 1
 
 
+# LLM: 先建立真实共享缓存，再外部改写账本，不能只靠两次冷读证明缓存失效。
+# 函数用途: 验证外部改写后不会返回旧等待行。
 def test_waiting_runs_sees_external_rewrite_immediately(tmp_path, waiting_projection) -> None:
     """外部改写 store.json(非本进程写):下一次调用必须看到新状态,不得读陈旧投影。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     store_path = root / "store.json"
     _write_store(store_path, _store_with_waiting(2))
+    _age_path(store_path)
     repository = _repository(root)
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000", "srun_001"]
 
@@ -188,6 +212,8 @@ def test_waiting_runs_sees_external_rewrite_immediately(tmp_path, waiting_projec
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_001"]
 
 
+# LLM: 此例强制完整读取；廉价命中不承诺每次摘要核验，同 stat 改写由完整读取守卫检出。
+# 函数用途: 验证完整读取会发现同身份、不同内容的账本。
 def test_waiting_runs_guard_catches_same_stat_different_content(
     tmp_path, waiting_projection, monkeypatch
 ) -> None:
@@ -195,10 +221,12 @@ def test_waiting_runs_guard_catches_same_stat_different_content(
 
     这里显式把 mtime_ns/size/inode 全部还原成缓存里的那一份,模拟"stat 键完全相同、内容已变"。
     """
+    monkeypatch.setattr(repository_module, "_STORE_PROJECTION_FULL_READ_INTERVAL_SECONDS", 0.0)
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     store_path = root / "store.json"
     _write_store(store_path, _store_with_waiting(2))
+    _age_path(store_path)
     repository = _repository(root)
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000", "srun_001"]
 
@@ -213,22 +241,27 @@ def test_waiting_runs_guard_catches_same_stat_different_content(
     rows, _errors = repository.waiting_runs()
 
     assert _wanting_ids(rows) == ["srun_001"]
-    assert waiting_projection._WAITING_PROJECTION_STATS["guard"] >= 1
+    assert waiting_projection._STORE_PROJECTION_STATS["guard"] >= 1
 
 
+# LLM: 新实例仍共享模块缓存，独立冷读须显式清共享投影；三态比较保留完整行及错误。
+# 函数用途: 对比真实命中、清缓存和外部改写后的等待行结果。
 def test_waiting_runs_three_state_consistency(tmp_path, waiting_projection) -> None:
     """三态一致:缓存命中 / 清缓存 / 外部改写 的结论必须与全新实例(无缓存)逐个相等。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     store_path = root / "store.json"
     _write_store(store_path, _store_with_waiting(3))
+    _age_path(store_path)
     repository = _repository(root)
 
     hit_rows, hit_errors = repository.waiting_runs()  # 冷启动 → 写入投影
     warm_rows, warm_errors = repository.waiting_runs()  # 命中
-    waiting_projection._WAITING_PROJECTION_CACHE.clear()
+    assert waiting_projection._STORE_PROJECTION_STATS["cheap_hit"] >= 1
+    waiting_projection._STORE_PROJECTION_CACHE.clear()
     cold_rows, cold_errors = repository.waiting_runs()  # 清缓存后重解析
-    fresh_rows, fresh_errors = _repository(root).waiting_runs()  # 全新实例(不共享内存投影)
+    waiting_projection._STORE_PROJECTION_CACHE.clear()
+    fresh_rows, fresh_errors = _repository(root).waiting_runs()  # 清共享缓存后全新实例冷读
 
     assert hit_rows == warm_rows == cold_rows == fresh_rows
     assert hit_errors == warm_errors == cold_errors == fresh_errors == []
@@ -237,12 +270,15 @@ def test_waiting_runs_three_state_consistency(tmp_path, waiting_projection) -> N
     runs["srun_001"] = _run_row("srun_001", "done")
     _write_store(store_path, runs)
     rewritten_rows, _errors = repository.waiting_runs()
+    waiting_projection._STORE_PROJECTION_CACHE.clear()
     expected_rows, _errors = _repository(root).waiting_runs()
 
     assert rewritten_rows == expected_rows
     assert _wanting_ids(rewritten_rows) == ["srun_000", "srun_002"]
 
 
+# LLM: 先建立可信投影，再走原 claim/park/finish 写路径，下一次读取仍须看到新状态。
+# 函数用途: 验证本进程状态变更不被旧缓存遮住。
 def test_waiting_runs_in_process_mutation_is_visible(tmp_path, waiting_projection, monkeypatch) -> None:
     """本进程内 park/finish 走同一把权威写:下一轮对账必须立刻看到新状态。"""
     monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
@@ -253,6 +289,7 @@ def test_waiting_runs_in_process_mutation_is_visible(tmp_path, waiting_projectio
         {"srun_001": _run_row("srun_001", "claimed")},
         jobs={"job_1": {"status": "active", "next_run_at": 1_100.0}},
     )
+    _age_path(root / "store.json")
     repository = _repository(root)
     assert repository.waiting_runs()[0] == []
 
@@ -276,12 +313,15 @@ def test_waiting_runs_in_process_mutation_is_visible(tmp_path, waiting_projectio
     assert repository.waiting_runs()[0] == []
 
 
+# LLM: 先缓存有效账本，再写入坏 JSON，异常不得被旧投影吞掉。
+# 函数用途: 验证账本损坏与修复都立即可见。
 def test_waiting_runs_corrupt_store_never_serves_stale_projection(tmp_path, waiting_projection) -> None:
     """坏 store:结构化报错而不是回退到旧投影;修好后立刻恢复正确结论。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     store_path = root / "store.json"
     _write_store(store_path, _store_with_waiting(1))
+    _age_path(store_path)
     repository = _repository(root)
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000"]
 
@@ -304,11 +344,14 @@ def test_waiting_runs_missing_store_is_empty_and_recovers(tmp_path, waiting_proj
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000"]
 
 
+# LLM: 同一可信文件先由匹配 owner 建缓存，异身份读取仍须走原 owner 校验并拒绝。
+# 函数用途: 验证共享投影不会跨 owner 身份喂数据。
 def test_waiting_runs_projection_is_owner_scoped(tmp_path, waiting_projection) -> None:
     """同一路径、不同 owner 身份不得共享投影(逐条解析结果取决于 self.owner)。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     _write_store(root / "store.json", _store_with_waiting(1))
+    _age_path(root / "store.json")
     matching = _repository(root)
     foreign = SchedulerRepository(
         root,
@@ -322,11 +365,14 @@ def test_waiting_runs_projection_is_owner_scoped(tmp_path, waiting_projection) -
         foreign.waiting_runs()  # owner 身份不符 → 结构化拒绝,不能被别人的投影喂饱
 
 
+# LLM: 真实命中仍须返回独立副本，调用方篡改返回行不得污染共享投影。
+# 函数用途: 验证等待行缓存不会被返回值修改。
 def test_waiting_runs_returns_isolated_deep_copies(tmp_path, waiting_projection) -> None:
     """返回行是投影的 deepcopy:调用方改写不得污染缓存内容。"""
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     _write_store(root / "store.json", _store_with_waiting(1))
+    _age_path(root / "store.json")
     repository = _repository(root)
 
     rows, _errors = repository.waiting_runs()
@@ -336,6 +382,8 @@ def test_waiting_runs_returns_isolated_deep_copies(tmp_path, waiting_projection)
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000"]
 
 
+# LLM: 将排序和坏行错误一起缓存，再比较热读与冷读的完整结果。
+# 函数用途: 验证共享投影保留等待行顺序及错误码。
 def test_waiting_runs_keeps_error_rows_and_order(tmp_path, waiting_projection) -> None:
     """坏 run 仍进 errors、waiting 排序不变(投影只缓存结果,不改语义)。"""
     root = tmp_path / "owner" / "scheduler"
@@ -347,6 +395,7 @@ def test_waiting_runs_keeps_error_rows_and_order(tmp_path, waiting_projection) -
         "srun_002": _run_row("srun_002", "waiting", waiting_since=1_010.0),
     }
     _write_store(root / "store.json", runs)
+    _age_path(root / "store.json")
     repository = _repository(root)
 
     rows, errors = repository.waiting_runs()
@@ -357,12 +406,16 @@ def test_waiting_runs_keeps_error_rows_and_order(tmp_path, waiting_projection) -
     assert (again, again_errors) == (rows, errors)
 
 
+# LLM: 强制完整读取以真正消费过期字节探针，不能让廉价命中绕开待测回退路径。
+# 函数用途: 验证过期探针不会替代真实账本。
 def test_waiting_runs_ignores_stale_probe_and_reparses(tmp_path, waiting_projection, monkeypatch) -> None:
     """锁外探针与锁内 stat 不一致(读盘后账本又被改写): 绝不当作命中,回退权威读取路径。"""
+    monkeypatch.setattr(repository_module, "_STORE_PROJECTION_FULL_READ_INTERVAL_SECONDS", 0.0)
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     store_path = root / "store.json"
     _write_store(store_path, _store_with_waiting(2))
+    _age_path(store_path)
     repository = _repository(root)
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000", "srun_001"]
 
@@ -375,6 +428,8 @@ def test_waiting_runs_ignores_stale_probe_and_reparses(tmp_path, waiting_project
     assert _wanting_ids(rows) == ["srun_000", "srun_001"]  # 权威路径给的是真实账本,不是 {} 探针
 
 
+# LLM: 初始字节已可信，受控改写只触发解析身份变化分支，不能借新文件保护窗口空转通过。
+# 函数用途: 验证解析竞态会放弃共享缓存且下次读取新内容。
 def test_waiting_runs_skips_caching_when_store_changes_during_parse(
     tmp_path, waiting_projection, monkeypatch
 ) -> None:
@@ -383,6 +438,7 @@ def test_waiting_runs_skips_caching_when_store_changes_during_parse(
     root.mkdir(parents=True)
     store_path = root / "store.json"
     _write_store(store_path, _store_with_waiting(1))
+    _age_path(store_path)
     repository = _repository(root)
     original = SchedulerRepository._load_store_from_bytes_unlocked
 
@@ -398,24 +454,30 @@ def test_waiting_runs_skips_caching_when_store_changes_during_parse(
     rows, _errors = repository.waiting_runs()
 
     assert _wanting_ids(rows) == ["srun_000"]  # 本次返回解析到的那一份
-    assert repository.waiting_projection_cache_key() not in waiting_projection._WAITING_PROJECTION_CACHE
-    assert waiting_projection._WAITING_PROJECTION_STATS["skip"] >= 1
+    assert repository.waiting_projection_cache_key() not in waiting_projection._STORE_PROJECTION_CACHE
+    assert waiting_projection._STORE_PROJECTION_STATS["skip"] >= 1
     monkeypatch.undo()
     assert _wanting_ids(repository.waiting_runs()[0]) == []  # 下一次按新内容解析
 
 
-def test_waiting_projection_cache_is_bounded(tmp_path, waiting_projection) -> None:
+# LLM: 测试内将共享 LRU 缩至四项，账本均可信且必须真正填满，不能以空缓存证明有界。
+# 函数用途: 验证多账本的共享缓存严格受条目上界约束。
+def test_waiting_projection_cache_is_bounded(tmp_path, waiting_projection, monkeypatch) -> None:
     """条目上界:多个账本不会让投影缓存无限增长。"""
-    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES_COUNT
+    monkeypatch.setattr(repository_module, "_STORE_PROJECTION_MAX_ENTRIES_COUNT", 4)
+    limit = waiting_projection._STORE_PROJECTION_MAX_ENTRIES_COUNT
     for index in range(limit + 2):
         root = tmp_path / f"owner-{index}" / "scheduler"
         root.mkdir(parents=True)
         _write_store(root / "store.json", _store_with_waiting(1))
+        _age_path(root / "store.json")
         _repository(root).waiting_runs()
 
-    assert len(waiting_projection._WAITING_PROJECTION_CACHE) <= limit
+    assert len(waiting_projection._STORE_PROJECTION_CACHE) == limit
 
 
+# LLM: 在真实 cheap_hit 计数点插入第五个可信 owner，核对提级后目标存活且确实淘汰旧项。
+# 函数用途: 验证共享投影的命中与 LRU 提级不会留下并发淘汰窗口。
 def test_waiting_projection_hit_survives_concurrent_lru_eviction(
     tmp_path, waiting_projection, monkeypatch
 ) -> None:
@@ -425,49 +487,64 @@ def test_waiting_projection_hit_survives_concurrent_lru_eviction(
     旧实现"先 lookup 释放锁、再单独 move_to_end",中间被其它 owner 的写入挤掉就 KeyError。
     这里在命中路径上注入一次真实淘汰(填满缓存后让第 5 个 owner 写入)。
     """
-    limit = waiting_projection._WAITING_PROJECTION_MAX_ENTRIES_COUNT
+    monkeypatch.setattr(repository_module, "_STORE_PROJECTION_MAX_ENTRIES_COUNT", 4)
+    limit = waiting_projection._STORE_PROJECTION_MAX_ENTRIES_COUNT
     target = tmp_path / "owner-0" / "scheduler"
     target.mkdir(parents=True)
     _write_store(target / "store.json", _store_with_waiting(1))
+    _age_path(target / "store.json")
     repository = _repository(target)
     assert _wanting_ids(repository.waiting_runs()[0]) == ["srun_000"]
     key = repository.waiting_projection_cache_key()
-    # 其它 owner 填到"刚好满":目标 key 成为 LRU 最旧但仍驻留,下一次淘汰就是它
+    # 填满后目标最旧；本次命中必须先提级，使注入写方淘汰的是另一旧项。
     for index in range(1, limit):
         root = tmp_path / f"owner-{index}" / "scheduler"
         root.mkdir(parents=True)
         _write_store(root / "store.json", _store_with_waiting(1))
+        _age_path(root / "store.json")
         _repository(root).waiting_runs()
-    assert key in waiting_projection._WAITING_PROJECTION_CACHE
+    assert len(waiting_projection._STORE_PROJECTION_CACHE) == limit
+    assert next(iter(waiting_projection._STORE_PROJECTION_CACHE)) == key
+    evicted_key = list(waiting_projection._STORE_PROJECTION_CACHE)[1]
 
-    real_bump = waiting_projection._bump_projection_stat
+    real_bump = waiting_projection._bump_store_projection_stat
     injected = {"done": False}
 
+    # LLM: 仅在目标廉价命中后注入一次真实账本读取，递归 miss 不重复注入。
+    # 函数用途: 在命中与返回之间模拟另一 owner 挤入共享 LRU。
     def bump_with_eviction(name: str) -> None:
         real_bump(name)
-        if name == "hit" and not injected["done"]:
+        if name == "cheap_hit" and not injected["done"]:
             injected["done"] = True
             intruder = tmp_path / "intruder" / "scheduler"
             intruder.mkdir(parents=True)
             _write_store(intruder / "store.json", _store_with_waiting(1))
-            _repository(intruder).waiting_runs()  # 另一 owner 写入 → LRU 淘汰目标 key
+            _age_path(intruder / "store.json")
+            _repository(intruder).waiting_runs()  # 另一 owner 写入 → 真实 LRU 淘汰
 
-    monkeypatch.setattr(waiting_projection, "_bump_projection_stat", bump_with_eviction)
+    monkeypatch.setattr(waiting_projection, "_bump_store_projection_stat", bump_with_eviction)
 
     rows, errors = repository.waiting_runs()
 
     assert injected["done"], "必现竞态:注入必须真的发生,否则用例退化成空转"
     assert errors == []
     assert _wanting_ids(rows) == ["srun_000"]
+    assert len(waiting_projection._STORE_PROJECTION_CACHE) == limit
+    assert key in waiting_projection._STORE_PROJECTION_CACHE
+    assert evicted_key not in waiting_projection._STORE_PROJECTION_CACHE
 
 
-def test_waiting_runs_is_thread_safe_across_many_owners(tmp_path, waiting_projection) -> None:
+# LLM: 六个可信 owner 并发读取四项共享 LRU，强制发生缓存竞争，结果与上界同时验收。
+# 函数用途: 验证多 owner 等待行缓存线程安全且不串数据。
+def test_waiting_runs_is_thread_safe_across_many_owners(tmp_path, waiting_projection, monkeypatch) -> None:
     """5+ owner 并发: 结果按 owner 隔离、无异常,缓存始终有界。"""
+    monkeypatch.setattr(repository_module, "_STORE_PROJECTION_MAX_ENTRIES_COUNT", 4)
     owners = []
     for index in range(6):
         root = tmp_path / f"owner-{index}" / "scheduler"
         root.mkdir(parents=True)
         _write_store(root / "store.json", _store_with_waiting(index + 1))
+        _age_path(root / "store.json")
         owners.append((_repository(root), [f"srun_{position:03d}" for position in range(index + 1)]))
 
     errors: list[BaseException] = []
@@ -493,8 +570,8 @@ def test_waiting_runs_is_thread_safe_across_many_owners(tmp_path, waiting_projec
 
     assert errors == []
     assert mismatches == []
-    assert len(waiting_projection._WAITING_PROJECTION_CACHE) <= (
-        waiting_projection._WAITING_PROJECTION_MAX_ENTRIES_COUNT
+    assert len(waiting_projection._STORE_PROJECTION_CACHE) == (
+        waiting_projection._STORE_PROJECTION_MAX_ENTRIES_COUNT
     )
     # 并发结束后每个 owner 仍然给出自己的 waiting 行(缓存淘汰只影响耗时,不影响结论)。
     for repository, expected in owners:
