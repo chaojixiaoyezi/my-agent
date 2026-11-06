@@ -1,0 +1,483 @@
+{
+  "schema": 1,
+  "source": "docs/design/SCALING_1_TO_500K_ROADMAP.md#7",
+  "fixture": {
+    "startup_seconds": 30,
+    "probe_seconds": 1,
+    "poll_seconds": 0.01,
+    "teardown_seconds": 10,
+    "condition_seconds": 10,
+    "selftest_seconds": 30,
+    "model_context_window_tokens": 65536
+  },
+  "scenarios": [
+    {
+      "id": "cliff_idle",
+      "load_profile": {
+        "timeout_ms": 6000,
+        "arrivals": [
+          {
+            "offset_ms": 0,
+            "owner": "admin",
+            "kind": "qa"
+          }
+        ],
+        "extra_connections": 20,
+        "barrier_seconds": 1,
+        "slow_body_bytes": 4096
+      },
+      "targets": {
+        "p99_ms": 100
+      },
+      "config": {
+        "gateway_http_control_lane_workers": 4,
+        "gateway_native_stream_max": 256,
+        "gateway_global_inflight_limit": 512
+      }
+    },
+    {
+      "id": "cliff_slow_handler",
+      "load_profile": {
+        "timeout_ms": 6000,
+        "arrivals": [
+          {
+            "offset_ms": 0,
+            "owner": "admin",
+            "kind": "qa"
+          }
+        ],
+        "extra_connections": 20,
+        "barrier_seconds": 1,
+        "slow_body_bytes": 4096
+      },
+      "targets": {
+        "p99_ms": 100
+      },
+      "config": {
+        "gateway_http_control_lane_workers": 4,
+        "gateway_global_inflight_limit": 512
+      }
+    },
+    {
+      "id": "streams_control",
+      "load_profile": {
+        "timeout_ms": 1000,
+        "arrivals": [
+          {
+            "offset_ms": 0,
+            "owner": "admin",
+            "kind": "qa"
+          }
+        ],
+        "streams": 20,
+        "read_seconds": 5
+      },
+      "targets": {
+        "p99_ms": 100
+      },
+      "config": {
+        "gateway_http_control_lane_workers": 4,
+        "gateway_native_stream_max": 256,
+        "gateway_user_inflight_limit": 64,
+        "gateway_global_inflight_limit": 512
+      }
+    },
+    {
+      "id": "cell50",
+      "baseline_policy": "report_only",
+      "load_profile": {
+        "timeout_ms": 5000,
+        "users": 50,
+        "mix": {
+          "qa": 70,
+          "tool": 20,
+          "stream": 10
+        },
+        "arrivals": [
+          {
+            "offset_ms": 0,
+            "owner": "load-user-00",
+            "kind": "qa",
+            "message_id": "load-00"
+          },
+          {
+            "offset_ms": 10,
+            "owner": "load-user-01",
+            "kind": "qa",
+            "message_id": "load-01"
+          },
+          {
+            "offset_ms": 20,
+            "owner": "load-user-02",
+            "kind": "qa",
+            "message_id": "load-02"
+          },
+          {
+            "offset_ms": 30,
+            "owner": "load-user-03",
+            "kind": "qa",
+            "message_id": "load-03"
+          },
+          {
+            "offset_ms": 40,
+            "owner": "load-user-04",
+            "kind": "qa",
+            "message_id": "load-04"
+          },
+          {
+            "offset_ms": 50,
+            "owner": "load-user-05",
+            "kind": "qa",
+            "message_id": "load-05"
+          },
+          {
+            "offset_ms": 60,
+            "owner": "load-user-06",
+            "kind": "qa",
+            "message_id": "load-06"
+          },
+          {
+            "offset_ms": 70,
+            "owner": "load-user-07",
+            "kind": "tool",
+            "message_id": "load-07"
+          },
+          {
+            "offset_ms": 80,
+            "owner": "load-user-08",
+            "kind": "tool",
+            "message_id": "load-08"
+          },
+          {
+            "offset_ms": 90,
+            "owner": "load-user-09",
+            "kind": "stream",
+            "correlation_tag": "stream-09",
+            "message_id": "load-09"
+          },
+          {
+            "offset_ms": 100,
+            "owner": "load-user-10",
+            "kind": "qa",
+            "message_id": "load-10"
+          },
+          {
+            "offset_ms": 110,
+            "owner": "load-user-11",
+            "kind": "qa",
+            "message_id": "load-11"
+          },
+          {
+            "offset_ms": 120,
+            "owner": "load-user-12",
+            "kind": "qa",
+            "message_id": "load-12"
+          },
+          {
+            "offset_ms": 130,
+            "owner": "load-user-13",
+            "kind": "qa",
+            "message_id": "load-13"
+          },
+          {
+            "offset_ms": 140,
+            "owner": "load-user-14",
+            "kind": "qa",
+            "message_id": "load-14"
+          },
+          {
+            "offset_ms": 150,
+            "owner": "load-user-15",
+            "kind": "qa",
+            "message_id": "load-15"
+          },
+          {
+            "offset_ms": 160,
+            "owner": "load-user-16",
+            "kind": "qa",
+            "message_id": "load-16"
+          },
+          {
+            "offset_ms": 170,
+            "owner": "load-user-17",
+            "kind": "tool",
+            "message_id": "load-17"
+          },
+          {
+            "offset_ms": 180,
+            "owner": "load-user-18",
+            "kind": "tool",
+            "message_id": "load-18"
+          },
+          {
+            "offset_ms": 190,
+            "owner": "load-user-19",
+            "kind": "stream",
+            "correlation_tag": "stream-19",
+            "message_id": "load-19"
+          },
+          {
+            "offset_ms": 200,
+            "owner": "load-user-20",
+            "kind": "qa",
+            "message_id": "load-20"
+          },
+          {
+            "offset_ms": 210,
+            "owner": "load-user-21",
+            "kind": "qa",
+            "message_id": "load-21"
+          },
+          {
+            "offset_ms": 220,
+            "owner": "load-user-22",
+            "kind": "qa",
+            "message_id": "load-22"
+          },
+          {
+            "offset_ms": 230,
+            "owner": "load-user-23",
+            "kind": "qa",
+            "message_id": "load-23"
+          },
+          {
+            "offset_ms": 240,
+            "owner": "load-user-24",
+            "kind": "qa",
+            "message_id": "load-24"
+          },
+          {
+            "offset_ms": 250,
+            "owner": "load-user-25",
+            "kind": "qa",
+            "message_id": "load-25"
+          },
+          {
+            "offset_ms": 260,
+            "owner": "load-user-26",
+            "kind": "qa",
+            "message_id": "load-26"
+          },
+          {
+            "offset_ms": 270,
+            "owner": "load-user-27",
+            "kind": "tool",
+            "message_id": "load-27"
+          },
+          {
+            "offset_ms": 280,
+            "owner": "load-user-28",
+            "kind": "tool",
+            "message_id": "load-28"
+          },
+          {
+            "offset_ms": 290,
+            "owner": "load-user-29",
+            "kind": "stream",
+            "correlation_tag": "stream-29",
+            "message_id": "load-29"
+          },
+          {
+            "offset_ms": 300,
+            "owner": "load-user-30",
+            "kind": "qa",
+            "message_id": "load-30"
+          },
+          {
+            "offset_ms": 310,
+            "owner": "load-user-31",
+            "kind": "qa",
+            "message_id": "load-31"
+          },
+          {
+            "offset_ms": 320,
+            "owner": "load-user-32",
+            "kind": "qa",
+            "message_id": "load-32"
+          },
+          {
+            "offset_ms": 330,
+            "owner": "load-user-33",
+            "kind": "qa",
+            "message_id": "load-33"
+          },
+          {
+            "offset_ms": 340,
+            "owner": "load-user-34",
+            "kind": "qa",
+            "message_id": "load-34"
+          },
+          {
+            "offset_ms": 350,
+            "owner": "load-user-35",
+            "kind": "qa",
+            "message_id": "load-35"
+          },
+          {
+            "offset_ms": 360,
+            "owner": "load-user-36",
+            "kind": "qa",
+            "message_id": "load-36"
+          },
+          {
+            "offset_ms": 370,
+            "owner": "load-user-37",
+            "kind": "tool",
+            "message_id": "load-37"
+          },
+          {
+            "offset_ms": 380,
+            "owner": "load-user-38",
+            "kind": "tool",
+            "message_id": "load-38"
+          },
+          {
+            "offset_ms": 390,
+            "owner": "load-user-39",
+            "kind": "stream",
+            "correlation_tag": "stream-39",
+            "message_id": "load-39"
+          },
+          {
+            "offset_ms": 400,
+            "owner": "load-user-40",
+            "kind": "qa",
+            "message_id": "load-40"
+          },
+          {
+            "offset_ms": 410,
+            "owner": "load-user-41",
+            "kind": "qa",
+            "message_id": "load-41"
+          },
+          {
+            "offset_ms": 420,
+            "owner": "load-user-42",
+            "kind": "qa",
+            "message_id": "load-42"
+          },
+          {
+            "offset_ms": 430,
+            "owner": "load-user-43",
+            "kind": "qa",
+            "message_id": "load-43"
+          },
+          {
+            "offset_ms": 440,
+            "owner": "load-user-44",
+            "kind": "qa",
+            "message_id": "load-44"
+          },
+          {
+            "offset_ms": 450,
+            "owner": "load-user-45",
+            "kind": "qa",
+            "message_id": "load-45"
+          },
+          {
+            "offset_ms": 460,
+            "owner": "load-user-46",
+            "kind": "qa",
+            "message_id": "load-46"
+          },
+          {
+            "offset_ms": 470,
+            "owner": "load-user-47",
+            "kind": "tool",
+            "message_id": "load-47"
+          },
+          {
+            "offset_ms": 480,
+            "owner": "load-user-48",
+            "kind": "tool",
+            "message_id": "load-48"
+          },
+          {
+            "offset_ms": 490,
+            "owner": "load-user-49",
+            "kind": "stream",
+            "correlation_tag": "stream-49",
+            "message_id": "load-49"
+          }
+        ],
+        "baseline_owner": "baseline-user",
+        "noisy_requests": 4,
+        "quota": 2,
+        "noisy_hold_seconds": 30
+      },
+      "targets": {
+        "acceptance_added_p99_ms": 100,
+        "control_p99_ms": 100,
+        "forwarding_p99_ms": 50
+      },
+      "config": {
+        "gateway_user_inflight_limit": 2,
+        "gateway_global_inflight_limit": 128
+      },
+      "provider": {
+        "length": 1,
+        "inter_token_delay": 0.01,
+        "auto_tool": {
+          "name": "list_files",
+          "arguments": {
+            "path": ".",
+            "limit": 1
+          }
+        },
+        "long_stream_length": 64
+      }
+    },
+    {
+      "id": "snapshot_full",
+      "load_profile": {
+        "files": 20,
+        "turns": 2,
+        "changed_files": 1
+      },
+      "targets": {
+        "downloads_per_turn": 20,
+        "uploads_per_turn": 1
+      }
+    },
+    {
+      "id": "snapshot_delta",
+      "load_profile": {
+        "files": 20,
+        "turns": 2,
+        "changed_files": 1
+      },
+      "targets": {
+        "downloads_warm_max": 0,
+        "uploads_per_turn": 1
+      }
+    },
+    {
+      "id": "connection_reuse",
+      "load_profile": {
+        "calls": 20,
+        "handshake_delay": 0.01,
+        "timeout_ms": 5000
+      },
+      "targets": {
+        "warm_handshakes_max": 0,
+        "total_handshakes_max": 1,
+        "minimum_saved_ms": 100
+      },
+      "config": {
+        "model_http_max_idle_connections": 32
+      }
+    },
+    {
+      "id": "idle_cost",
+      "load_profile": {
+        "window_seconds": 1,
+        "timeout_ms": 1000
+      },
+      "targets": {
+        "cpu_cores_max": 0.002,
+        "context_switches_per_second_max": 5,
+        "assert_stage": 2
+      }
+    }
+  ]
+}
