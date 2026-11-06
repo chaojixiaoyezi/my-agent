@@ -2,8 +2,9 @@
 # 模块用途: 为有限只读编排提供宿主派发，复用原连续并行段计划和逐次工具审计事实。
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 
 from .concurrency import describe_tool_concurrency
@@ -17,6 +18,40 @@ from .owner_tool_scheduler import (
 )
 from .program_data import DataBudget
 from .runtime_contracts import ToolCall
+
+
+# LLM: 仅由可信宿主挂在handler上，不进模型schema；回调只接触已脱敏且通过共享预算的正文。
+# 类用途: 声明工具程序的可选解码与校验协议，缺省仍沿原JSON行为。
+@dataclass(frozen=True)
+class ProgramOutputContract:
+    decode: Callable[[str], object]
+    validate: Callable[[object], None] = lambda _: None
+
+
+# LLM: 仅携带固定错误码和异常类型，不传播异常正文，也不重执行已完成的工具。
+# 类用途: 在程序取值入口明确报告输出协议失败。
+class ProgramOutputContractError(ValueError):
+    """A host output contract rejected an already-executed tool result."""
+
+
+# LLM: 标记只在实际DataBudget正文预留失败处产生，序列化与回调异常不能借共享余额冒充预算溢出。
+# 类用途: 区分自定义协议的预算拒绝与数据错误，不改变旧JSON路径。
+class _ProgramOutputBudgetExceeded(ValueError):
+    """The shared budget rejected an already-serialized output chunk."""
+
+
+# LLM: 流式编码沿DataBudget同一JSON配置逐块预留；编码异常原样交给协议错误分类，不先构造大副本。
+# 函数用途: 为自定义解码值预留共享预算，并从实际预留入口标记预算失败。
+def _reserve_program_output(value, budget):
+    import json
+
+    for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(value):
+        try:
+            budget.reserve(chunk, text=True)
+        except UnicodeError:
+            raise
+        except ValueError as exc:
+            raise _ProgramOutputBudgetExceeded from exc
 
 
 # LLM: 仅由执行器构造，不能放入模型参数或共享handler；每批重新校验动态效果，原权限门仍逐调用执行。
@@ -81,7 +116,7 @@ class NestedToolDispatcher:
         with ThreadPoolExecutor(max_workers=len(items)) as pool:
             return execute_work_items(items, lambda item: pool.submit(item.captured_context.run, item.run))
 
-    # LLM: 只重入原executor与宿主runner，权限/取消/完整输出归档不旁路，子项不可再编排。
+    # LLM: 只重入原executor与宿主runner，预算清理只移除解码值，安全协议错误及已执行事实不得被覆盖。
     # 函数用途: 执行一条子调用并保留原生结果与结构化程序数据。
     def _execute(self, call, capture_budget):
         from .executor import ToolExecutor
@@ -97,7 +132,7 @@ class NestedToolDispatcher:
         try:
             capture_budget.reserve({'output':result.output, 'metadata':result.metadata})
         except (ValueError, TypeError):
-            captured.clear()
+            captured.pop('json', None)
             captured['budget_exceeded'] = True
             result = replace(result, content_blocks=(), metadata={})
         observe = (self.request.trusted_run_context or {}).get('nested_tool_result_sink')
@@ -105,8 +140,8 @@ class NestedToolDispatcher:
             observe(call, result)
         return replace(result, metadata={**result.metadata, 'program_data':captured})
 
-    # LLM: 捕获真实handler脱敏值，预算超限不保留部分JSON；完整证据仍由原archiver处理。
-    # 函数用途: 为下一步数据引用保留安全JSON并投影原始工具输出。
+    # LLM: 先脱敏并预留共享预算；自定义解码值只从实际预留入口标记预算失败，拒绝调用不运行自定义协议。
+    # 函数用途: 为下一步保留已校验数据或明确协议错误，默认仍解析原脱敏JSON。
     def _archive(self, child, outcome, *, captured, capture_budget):
         import json
 
@@ -116,9 +151,23 @@ class NestedToolDispatcher:
         runtime = self.request.runtime_snapshot.runtime(child.tool_name)
         policy = output_policy_for_outcome(runtime.runtime_policy, outcome)
         text = redact_tool_output_text(outcome.output, redaction=policy.redaction)
+        contract = getattr(runtime.handler, 'program_output_contract', None)
         try:
             capture_budget.reserve(text, text=True)
-            captured['json'] = json.loads(text)
+            if contract is None:
+                captured['json'] = json.loads(text)
+            elif outcome.ok:
+                try:
+                    value = contract.decode(text)
+                    _reserve_program_output(value, capture_budget)
+                    contract.validate(value)
+                    _reserve_program_output(value, capture_budget)
+                    captured['json'] = value
+                except _ProgramOutputBudgetExceeded:
+                    captured['budget_exceeded'] = True
+                except Exception as exc:
+                    captured['contract_error'] = {'code': 'TOOL_PROGRAM_OUTPUT_INVALID',
+                        'exception_type': type(exc).__name__}
         except ValueError:
             captured['budget_exceeded'] = capture_budget.remaining < 0
         except TypeError:
