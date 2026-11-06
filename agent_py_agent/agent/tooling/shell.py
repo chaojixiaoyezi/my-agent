@@ -1125,7 +1125,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
 # LLM: ShellTool 是命令执行的唯一注册入口；后台参数必须在 runtime policy 中声明为 dangerous。
 # 类用途: 在工作区内执行一次性命令，或启动可查看、可停止的受管后台进程。
 class ShellTool(BaseTool):
-    # LLM: model spec、effect、sandbox、幂等和受信补参必须同源；宿主凭据来源只从 options 保存，模型参数不得覆盖。
+    # LLM: model spec、effect、sandbox、幂等和受信补参必须同源；凭据来源仅由 options 保存，旧 options 缺降权字段时沿用禁用默认。
     # 函数用途: 按工作区和访问选项初始化 shell 工具的展示 schema 与执行边界。
     def __init__(
         self,
@@ -1166,8 +1166,8 @@ class ShellTool(BaseTool):
             else None
         )
         self.default_timeout = options.default_timeout
-        self.demote_after_seconds = options.demote_after_seconds
-        self.demoted_nice = options.demoted_nice
+        self.demote_after_seconds = getattr(options, "demote_after_seconds", 0)
+        self.demoted_nice = getattr(options, "demoted_nice", 15)
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.listen_scope_enforce = bool(options.listen_scope_enforce)
         self.sandbox_boundary_facts = bool(options.sandbox_boundary_facts)
@@ -2213,7 +2213,7 @@ def _background_session_hint(*, running: bool) -> str:
     )
 
 
-# LLM: 前台独立执行不继承宿主输入；两平台环境都擦除准确宿主来源，POSIX attempt 与 Windows 原路径权限不变。
+# LLM: 前台不继承宿主输入；两平台环境擦除准确宿主来源，权限不变；旧 tool 缺降权字段时保持原等待调用形状。
 # 函数用途: 选择平台执行路径并等待命令完成；管道和重定向由命令自身提供输入，人工交互使用 PTY 会话。
 def _run_shell_command(
     tool: ShellTool,
@@ -2262,14 +2262,14 @@ def _run_shell_command(
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         return _communicate_process(proc, command=command, timeout=timeout, **({
-            "demote_after_seconds": tool.demote_after_seconds, "demoted_nice": tool.demoted_nice,
-        } if tool.demote_after_seconds else {}))
+            "demote_after_seconds": getattr(tool, "demote_after_seconds", 0), "demoted_nice": getattr(tool, "demoted_nice", 15),
+        } if getattr(tool, "demote_after_seconds", 0) else {}))
     raise SandboxUnavailable(
         "SANDBOX_UNAVAILABLE: 当前平台无 attempt 沙箱实现（POSIX 之外仅支持 Windows 单租户宿主路径）"
     )
 
 
-# LLM: 前台只吃attempt argv；仅无stdout的瞬时侧车挂载失败裁剪后最多重试三次，无独立pre-exec证据时不重放持久挂载；共用期限和原取消/回收，不回退宿主shell。
+# LLM: 前台只吃attempt argv；瞬时侧车失败最多裁剪重试三次，无独立pre-exec证据不重放持久挂载；缺降权字段默认禁用，共用原期限/取消/回收，不回退宿主shell。
 # 函数用途: 在 attempt 沙箱内运行非交互命令并等待完成；无显式输入时得到 EOF，而不是白等宿主终端四分钟。
 def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
@@ -2309,8 +2309,8 @@ def _run_attempt_sandboxed_shell_command(
         else:
             proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
             completed = _communicate_process(proc, command=command, timeout=remaining, **({
-                "demote_after_seconds": tool.demote_after_seconds, "demoted_nice": tool.demoted_nice,
-            } if tool.demote_after_seconds else {}))
+                "demote_after_seconds": getattr(tool, "demote_after_seconds", 0), "demoted_nice": getattr(tool, "demoted_nice", 15),
+            } if getattr(tool, "demote_after_seconds", 0) else {}))
         if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
             pruned = prune_transient_bwrap_sidecar_mounts(exec_arg, completed.stderr or '')
             if pruned is not None:
