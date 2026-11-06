@@ -31,7 +31,26 @@ def _regular_identity(path: Path) -> tuple[int, int] | None:
     return info.st_dev, info.st_ino
 
 
-# LLM: 逐层dir_fd/no-follow保留父链；只接受当前身份或系统属主，非sticky共享可写祖先拒绝；仅收紧本投影父目录。
+# LLM: 构造与复核共用同一信任门；仅以已打开FD收紧当前用户的.my-agent子树，不改普通私有组祖先。
+# 函数用途: 拒绝非可信属主和非sticky公共可写祖先，兼容当前用户的私有组目录。
+def _ensure_trusted_ancestor(descriptor, current_path: Path, parent_stat):
+    owner = os.geteuid()
+    if parent_stat.st_uid not in {0, owner}:
+        raise PermissionError("projection ancestor is not a trusted directory")
+    if parent_stat.st_mode & stat.S_ISVTX:
+        return parent_stat
+    if parent_stat.st_mode & 0o002:
+        raise PermissionError("projection ancestor is not a trusted directory")
+    if parent_stat.st_mode & 0o020:
+        if parent_stat.st_uid == owner and ".my-agent" in current_path.parts:
+            os.fchmod(descriptor, parent_stat.st_mode & ~0o077)
+            return os.fstat(descriptor)
+        if parent_stat.st_uid != owner or parent_stat.st_gid != os.getegid():
+            raise PermissionError("projection ancestor is not a trusted directory")
+    return parent_stat
+
+
+# LLM: 逐层dir_fd/no-follow保留父链；按共用信任门收紧.my-agent祖先，投影父目录始终要求本人私有。
 # 函数用途: 在SQLite按路径打开之前建立私有父目录，并提供同一目录链的身份复核。
 @contextmanager
 def _projection_directory(path: Path):
@@ -44,9 +63,7 @@ def _projection_directory(path: Path):
     chain.append((current, descriptor))
     try:
         for part in path.parent.parts[1:]:
-            parent = os.fstat(descriptor)
-            if parent.st_uid not in {0, os.geteuid()} or (parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX):
-                raise PermissionError("projection ancestor is not a trusted directory")
+            _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor))
             try:
                 child = os.open(part, flags, dir_fd=descriptor)
             except FileNotFoundError:
@@ -58,22 +75,21 @@ def _projection_directory(path: Path):
             current = current / part
             descriptor = child
             chain.append((current, descriptor))
-        parent = os.fstat(descriptor)
+        parent = _ensure_trusted_ancestor(descriptor, current, os.fstat(descriptor))
         if parent.st_uid != os.geteuid():
             raise PermissionError("projection directory must belong to the current identity")
         if parent.st_mode & 0o077:
             os.fchmod(descriptor, 0o700)
 
-        # LLM: 复核所有已打开父节点，不只比较数据库叶子的inode；同身份仍不是业务授权。
-        # 函数用途: 在原锁等待后及SQLite连接前后拒绝父链换代或权限漂移。
+        # LLM: 复核所有已打开父节点及相同信任门；不以旧路径stat替代持有FD上的权限事实。
+        # 函数用途: 在原锁等待后及SQLite连接前后拒绝父链换代，并自愈允许收紧的组写权限。
         def verify():
             for directory, held in chain:
                 observed, opened = directory.lstat(), os.fstat(held)
                 if (not stat.S_ISDIR(observed.st_mode)
-                        or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)
-                        or observed.st_uid not in {0, os.geteuid()}
-                        or (observed.st_mode & 0o022 and not observed.st_mode & stat.S_ISVTX)):
+                        or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)):
                     raise ValueError("projection parent identity or trust changed")
+                _ensure_trusted_ancestor(held, directory, opened)
             if os.fstat(descriptor).st_mode & 0o077:
                 raise PermissionError("projection directory is no longer private")
 

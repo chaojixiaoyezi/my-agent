@@ -181,17 +181,24 @@ def _discovery_identity(info) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-# LLM: include_ignored只改变噪声过滤，路径权限与宿主托管存储仍由原策略裁决；链接仅跳过而非终止整轮。
+# LLM: include_ignored只过滤噪声；path_stat只复用本步nofollow观察，不跨出堆保存信任或绕过路径策略。
 # 函数用途: 在目录下降和文件交出前统一执行忽略、nofollow及权限检查。
-def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool, ignored_names) -> Path | None:
+def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool, ignored_names,
+                         path_stat=None) -> Path | None:
     try:
         relative = item.relative_to(root)
     except ValueError:
         return None
-    if not include_ignored and any(part in ignored_names for part in relative.parts[:-1]):
-        return None
+    if not include_ignored:
+        if any(part in ignored_names for part in relative.parts[:-1]):
+            return None
+        # 只剪宽根下的运行态子树；显式进入该目录或其后代时仍可发现文件。
+        if (relative.parts[:2] == ("workspace", "runtime")
+                and not any(root.parts[index:index + 2] == ("workspace", "runtime")
+                            for index in range(len(root.parts) - 1))):
+            return None
     try:
-        info = _discovery_nofollow_stat(item)
+        info = path_stat if path_stat is not None else _discovery_nofollow_stat(item)
     except _DiscoverySymlink:
         return None
     if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
@@ -207,8 +214,8 @@ def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool,
     return safe if safe == item else None
 
 
-# LLM: 目录排序键加尾斜线，使文件与子目录按同一Unicode路径序产出；候选入堆前即做权限剪枝。
-# 函数用途: 供find/search共用有界、可取消的安全候选流。
+# LLM: 入堆复用scandir的nofollow叶观察；出堆重新完整核祖先链与权限，不缓存安全裁决；排序与预算不变。
+# 函数用途: 供find/search共用有界、可取消的安全候选流，消除同一步内重复的完整父链lstat。
 def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_names,
                           scan_state, admit, observe=None):
     pending = [('', target)]
@@ -221,11 +228,14 @@ def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_
                 scan_state.limit_reason = scan_state.limit_reason or 'time_limit'
                 return
             _, item = heapq.heappop(pending)
+            try:
+                info = _discovery_nofollow_stat(item)
+            except _DiscoverySymlink:
+                continue
             safe = _safe_discovery_path(tool, item, root=target, include_ignored=include_ignored,
-                                        ignored_names=ignored_names)
+                                        ignored_names=ignored_names, path_stat=info)
             if safe is None:
                 continue
-            info = _discovery_nofollow_stat(safe)
             if observe is not None:
                 observe(safe)
             if stat.S_ISREG(info.st_mode):
@@ -246,11 +256,11 @@ def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_
                         scan_state.limit_reason = scan_state.limit_reason or 'time_limit'
                         return
                     child = safe / entry.name
+                    child_info = entry.stat(follow_symlinks=False)
                     accepted = _safe_discovery_path(tool, child, root=target,
-                        include_ignored=include_ignored, ignored_names=ignored_names)
+                        include_ignored=include_ignored, ignored_names=ignored_names, path_stat=child_info)
                     if accepted is None:
                         continue
-                    child_info = _discovery_nofollow_stat(accepted)
                     if observe is not None:
                         observe(accepted)
                     key = accepted.relative_to(target).as_posix()
