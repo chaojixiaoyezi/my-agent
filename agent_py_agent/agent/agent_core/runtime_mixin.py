@@ -1021,7 +1021,7 @@ def _log_run_stage(
 
 # LLM: 原执行片为已验证候选保留依赖到 finalization；所有异常仍结算真实 attempt/用量，清理不得热改 Agent 或猜补消耗。
 # LLM: 原审批退休native义务保同异常到原请求Future，用量照实结算而不写ordinary终态；普通错误/容量与现资源未知规则不扩。
-# LLM: 开关刷新后只同步同一 typed 守卫对象到执行副本，不重新加载策略、不改变局部收窄规则。
+# LLM: 开关刷新后只同步同一 typed 守卫对象到执行副本；旧配置替身缺字段时保持原副本，不跳过刷新或改变局部收窄规则。
 # 函数用途: 同步本轮执行守卫并执行原循环与收尾，准确未结不冒充failed或完成，原Params按词法范围恢复。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     _run_stage_started = time.monotonic()
@@ -1035,7 +1035,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
 
     try:
         refresh_live_switches(agent.config)
-        policy = agent.config.runtime_guard_policy
+        policy = getattr(agent.config, "runtime_guard_policy", None)
         if isinstance(policy, RuntimeGuardPolicy) and policy is not getattr(agent, "runtime_guard_policy", None):
             # 执行侧（工具循环 params、注册表、孤儿重试）读的是这两个副本，必须与刚刷新的配置同一对象。
             agent.runtime_guard_policy = policy

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
@@ -530,6 +531,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
 #   补充余量与最后选择复用安全信封计量；预算遗漏数跨排序/补充保留，真正追加编号只供观察，不扩大召回范围。
 # LLM: 基础与补充均不提前记访问；去重和最终信封预算完成后，统一重核JSONL候选并仅确认实际注入项。
 #   政策读取或解析失败仅跳过本轮正式召回，不回落默认预算；底层解析与维护入口仍原样报错。
+#   预算经调用上下文传给原单参回调，兼容观察器但不重试召回或前移访问确认。
 # 函数用途: 合并正式来源并完成最后预算准入，再为仍有效的长期记忆登记一次访问。
 def _formal_memories_for_request(
     agent,
@@ -577,7 +579,7 @@ def _formal_memories_for_request(
         if finding not in routed_context.findings:
             routed_context.findings.append(finding)
         return []
-    memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]), budget=budget)
+    memories = _apply_formal_memory_budget(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]), budget=budget)
     omitted_count = memories.omitted_count
     from ...conversation.decision_service import begin_decision_stage
     from ...memory_store.decision_recall import (
@@ -620,7 +622,7 @@ def _formal_memories_for_request(
         if isinstance(getattr(routed_context, "supplement_entry_ids", None), list):
             routed_context.supplement_entry_ids = [str(getattr(row, "entry_id", "")) for row in memories
                                                    if getattr(row, "entry_id", "") not in before]
-    memories = _budgeted_formal_memories(BudgetedMemoryRecords(
+    memories = _apply_formal_memory_budget(BudgetedMemoryRecords(
         _dedupe_formal_memories(memories), omitted_count=max(omitted_count, getattr(memories, "omitted_count", 0))),
         budget=budget)
     return _confirm_final_memory_access(agent, memories, recall_scope, fixed_source_ids, routed_context)
@@ -649,6 +651,7 @@ def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, route
 
 
 # LLM: 只读scope/ID刷新沿调用方本轮ContextBudget；成功时只发布实际固定来源ID，不能把未入选固定ID豁免补充JSONL。
+#   与初选和最终选择共用原单参预算接缝，异常不重试、不提前写访问。
 # 函数用途: 刷新合法候选及其实际来源，避免HOT撤销后同ID回落JSONL却漏过最终确认。
 def _refresh_recall_candidates(agent: object, records: list, read_paths: list[str], scope: MemoryRecallScope,
                                *, fixed_source_ids: set[str] | None = None, budget: ContextBudget | None = None) -> list:
@@ -663,7 +666,7 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
     ]
     current = {record.entry_id: record for record in _dedupe_formal_memories(available)}
     selected = [current[record.entry_id] for record in records if record.entry_id in current]
-    result = _budgeted_formal_memories(BudgetedMemoryRecords(
+    result = _apply_formal_memory_budget(BudgetedMemoryRecords(
         _dedupe_formal_memories(selected), omitted_count=getattr(records, "omitted_count", 0)),
         budget=_memory_context_budget(agent) if budget is None else budget)
     if fixed_source_ids is not None:
@@ -673,11 +676,29 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
     return result
 
 
-# 兼容旧导入名，默认值只从规范策略派生；运行时消费本轮已解析预算，不读这些别名。
+# 兼容旧导入名；默认值来自规范策略，显式非默认旧上限仅能收紧本轮真实预算。
 _DEFAULT_CONTEXT_BUDGET = ContextBudget.from_policy(MemoryPolicyV2())
 _FORMAL_MEMORY_BUDGET_CHARS = _DEFAULT_CONTEXT_BUDGET.recall_max_chars
 _HOT_MEMORY_CONTENT_BUDGET_CHARS = _DEFAULT_CONTEXT_BUDGET.hot_injection_max_chars
 _WORKING_AGREEMENT_SUB_BUDGET_CHARS = _DEFAULT_CONTEXT_BUDGET.working_agreement_chars
+_FORMAL_MEMORY_BUDGET_CONTEXT: ContextVar[ContextBudget | None] = ContextVar("formal_memory_budget", default=None)
+
+
+# LLM: 真实预算只在本次同步调用上下文传递；旧回调仅收records，异常原样抛出且不重试，退出必恢复外层预算。
+# 函数用途: 保持单参预算回调接缝，让包装器调用原预算器时仍消费本轮政策。
+def _apply_formal_memory_budget(records: list, *, budget: ContextBudget) -> list:
+    token = _FORMAL_MEMORY_BUDGET_CONTEXT.set(budget)
+    try:
+        return _budgeted_formal_memories(records)
+    finally:
+        _FORMAL_MEMORY_BUDGET_CONTEXT.reset(token)
+
+
+# LLM: 默认旧别名不覆盖本轮政策；非默认旧上限只收紧、不扩大真实额度，不增加参数或持久化字段。
+# 函数用途: 在保留政策约束的同时兼容旧字数上限。
+def _formal_memory_limit(budget: ContextBudget, name: str, legacy: int) -> int:
+    configured = getattr(budget, name)
+    return configured if legacy == getattr(_DEFAULT_CONTEXT_BUDGET, name) else min(configured, legacy)
 
 
 # LLM: 只沿正式库既有memory_policy读取owner政策；无政策接口时用规范默认，非法政策原样报错，不静默恢复召回。
@@ -688,20 +709,28 @@ def _memory_context_budget(agent: object) -> ContextBudget:
     return ContextBudget.from_policy(MemoryPolicyV2() if policy is None else policy)
 
 
-# LLM: 只计非HOT池的安全信封与原遗漏提示；HOT有独立正文预算，不挤占普通事实的补充额度，不写访问记录。
+# LLM: 只计非HOT池的安全信封与原遗漏提示；同预算器共用有效上限，HOT不挤占普通事实补充额度，不写访问记录。
 # 函数用途: 为初选后和刷新后的补充召回计算同一口径的可用字数。
 def _formal_recall_room(records: list, budget: ContextBudget) -> int:
     regular = BudgetedMemoryRecords(
         (record for record in records if str(getattr(record, "kind", "") or "") != "hot"),
         omitted_count=getattr(records, "omitted_count", 0),
     )
-    return max(0, budget.recall_max_chars - len(memory_context_text(regular)))
+    recall_cap = _formal_memory_limit(budget, "recall_max_chars", _FORMAL_MEMORY_BUDGET_CHARS)
+    return max(0, recall_cap - len(memory_context_text(regular)))
 
 
 # LLM: 先用共享渲染门隔离不可注入项；HOT正文/非HOT信封/约定60%子预算来自同一ContextBudget，原遗漏数随list传递。
+#   显式预算优先于调用上下文；默认旧别名不覆盖政策，非默认旧值仅可收紧，不改最终访问确认顺序。
 # 函数用途: 只为真正可渲染的正式记录分配预算；安全隔离不冒充预算遗漏，也不裁正文。
 def _budgeted_formal_memories(records: list, *, budget: ContextBudget | None = None) -> list:
-    budget = _DEFAULT_CONTEXT_BUDGET if budget is None else budget
+    if budget is None:
+        budget = _FORMAL_MEMORY_BUDGET_CONTEXT.get()
+    if budget is None:
+        budget = _DEFAULT_CONTEXT_BUDGET
+    recall_cap = _formal_memory_limit(budget, "recall_max_chars", _FORMAL_MEMORY_BUDGET_CHARS)
+    hot_cap = _formal_memory_limit(budget, "hot_injection_max_chars", _HOT_MEMORY_CONTENT_BUDGET_CHARS)
+    agreement_cap = _formal_memory_limit(budget, "working_agreement_chars", _WORKING_AGREEMENT_SUB_BUDGET_CHARS)
     records = BudgetedMemoryRecords((record for record in records if is_memory_context_admissible(record)),
                                    omitted_count=getattr(records, 'omitted_count', 0))
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
@@ -720,20 +749,20 @@ def _budgeted_formal_memories(records: list, *, budget: ContextBudget | None = N
     hot_chars = 0
     for record in hot:
         size = len(str(getattr(record, "content", "") or ""))
-        if hot_chars + size <= budget.hot_injection_max_chars:
+        if hot_chars + size <= hot_cap:
             kept.append(record)
             hot_chars += size
     regular: list = []
     for group in (lessons, agreements, rest):
         group_cap = (
-            budget.working_agreement_chars
+            agreement_cap
             if group is agreements
-            else budget.recall_max_chars
+            else recall_cap
         )
         group_kept = []
         for record in group:
             if (
-                len(memory_context_text([*regular, record])) > budget.recall_max_chars
+                len(memory_context_text([*regular, record])) > recall_cap
                 or len(memory_context_text([*group_kept, record])) > group_cap
             ):
                 continue
@@ -744,11 +773,11 @@ def _budgeted_formal_memories(records: list, *, budget: ContextBudget | None = N
     while regular:
         omitted = prior_omitted + len(records) - len(kept) - len(regular)
         selected_agreements = [record for record in regular if record in agreements]
-        if len(memory_context_text(BudgetedMemoryRecords(regular, omitted_count=omitted))) > budget.recall_max_chars:
+        if len(memory_context_text(BudgetedMemoryRecords(regular, omitted_count=omitted))) > recall_cap:
             regular.pop()
         elif selected_agreements and len(memory_context_text(BudgetedMemoryRecords(
             selected_agreements, omitted_count=omitted,
-        ))) > budget.working_agreement_chars:
+        ))) > agreement_cap:
             regular.remove(selected_agreements[-1])
         else:
             break

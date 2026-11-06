@@ -18,6 +18,7 @@ from ...tooling.models import ToolFailureStage
 # LLM: 条件全部来自结构化字段：开关、调用失败、参数出错（失败阶段是 validation，或错误码的错误合同推荐动作是修参数——工具在
 #   执行阶段自己判参数无效也算）、工具在本快照里、且下一次请求本来不会带它的定义（显式 allowed_tools 的回合全量可见，自然不触发）。
 #   当前params和snapshot允许集合取交集；命中时兼容list/set保序补名，持久化延至原归档边界。
+#   旧注册表缺可见性查询时跳过可选补载，不把完整 specs 猜成模型可见表，也不改原调用归档与结果。
 # 函数用途: 盲调参数失败后直接补下轮完整定义，同时在结果尾部放准确参数速查，省掉额外搜索。
 def reload_schema_after_blind_call(agent: object, params: object, archive_record: dict[str, object]) -> str:
     registry = getattr(agent, "tools", None)
@@ -38,7 +39,10 @@ def reload_schema_after_blind_call(agent: object, params: object, archive_record
             or getattr(getattr(runtime, "availability", None), "available", True) is not True
             or getattr(getattr(runtime, "exposure", None), "model_visible", True) is not True):
         return ""
-    visible = registry.model_visible_specs(
+    visible_specs = getattr(registry, "model_visible_specs", None)
+    if not callable(visible_specs):
+        return ""
+    visible = visible_specs(
         allowed_tools=getattr(params, "allowed_tools", None), loaded_tool_names=loaded, runtime_snapshot=snapshot,
     )
     if any(spec.name == tool for spec in visible):
