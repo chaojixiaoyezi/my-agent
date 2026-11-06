@@ -7,8 +7,10 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 
-# 聊天历史最多保留 20 轮对话，避免长期会话上下文无限膨胀
-MAX_HISTORY_TURNS = 20
+from ...agent.settings.config import AgentConfig
+
+# CLI 历史显示轮数的兼容默认，不与模型上下文保留轮数混用。
+MAX_HISTORY_TURNS = AgentConfig.chat_history_max_turns
 # 历史里助手消息预览最多保留 500 字符，超出折叠
 ASSISTANT_PREVIEW_CHARS = 500
 

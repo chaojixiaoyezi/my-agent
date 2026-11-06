@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -73,6 +74,25 @@ _TOTAL_REQUESTS = PROBE_ROUND_COUNT * len(PROBE_LEVELS)
 _RUNNING: set[str] = set()
 _RUNNING_LOCK = threading.Lock()
 _STARTED: dict[str, float] = {}
+
+
+# LLM: 配置限制与档案实际输出上限取小；缺失或无效配置保留旧值，回执和发送共用同一计算。
+# 函数用途: 返回本次检测每个请求的真实 token 上限，不改模型档案。
+def _probe_output_cap(config: object) -> int:
+    value = getattr(config, "reasoning_probe_max_output_tokens", PROBE_MAX_OUTPUT_TOKENS)
+    limit = value if type(value) is int and value > 0 else PROBE_MAX_OUTPUT_TOKENS
+    return min(limit, effective_max_output_tokens(config))
+
+
+# LLM: 仅覆盖检测请求的等待秒数，正常会话配置不变；非有限、非正或非数值回退旧值。
+# 函数用途: 解析宿主可选的检测超时预算，保持有限正浮点秒数。
+def _probe_timeout(config: object) -> float:
+    value = getattr(config, "reasoning_probe_timeout_seconds", _REQUEST_TIMEOUT_SECONDS)
+    try:
+        timeout = float(value) if type(value) in (int, float) else 0.0
+    except OverflowError:
+        timeout = 0.0
+    return timeout if math.isfinite(timeout) and timeout > 0 else float(_REQUEST_TIMEOUT_SECONDS)
 
 
 # LLM: profile_id 是会话选定的模型编号（"default"、私有 UUID 或 "shared:<UUID>"），config 是按它解析出的运行配置；
@@ -223,8 +243,8 @@ def _start(agent: object, target: ProbeTarget, trigger: str) -> str:
     _spawn(lambda: _run(job))
     head = "当前模型还没检测过是否支持调节智能程度，已" if trigger == "auto" else "已"
     # LLM: 回执的耗时与 token 说法只由结构化事实算出：次数 × 每次实际生效的输出上限
-    #   （min(探测常量, 档案输出上限)，配置更低时按配置说，不再虚报 40000）。
-    per_request_cap = min(PROBE_MAX_OUTPUT_TOKENS, effective_max_output_tokens(target.config))
+    #   （min(探测配置上限, 档案输出上限)，缺省仍用兼容常量）。
+    per_request_cap = _probe_output_cap(target.config)
     return (f"{head}在后台开始检测：同一道短题按“低”“最高”和不带参数各发 {PROBE_ROUND_COUNT} 次，共 {_TOTAL_REQUESTS} 次请求，"
             f"每次输出上限 {per_request_cap} token，最多约 {_TOTAL_REQUESTS * per_request_cap} token；"
             "长输出模型可能更久，完成后发 /effort 查看结果。")
@@ -301,31 +321,32 @@ def _verdict_fields(verdict: ProbeVerdict) -> dict:
     return {key: value for key, value in asdict(verdict).items() if value is not None}
 
 
-# LLM: 后端按档案配置构建，只把控制方式临时当作 effort（这样 low/max 才会真的发字段）并放宽单次等待；不改档案。
+# LLM: 后端按档案配置构建，只临时覆盖 effort 与检测等待；token 上限先从原配置取出，不能被 replace 丢失。
 #   三组按轮交替发送，每完成一次更新进度。会话头按独立的检测身份生成，不借用任何会话。副作用：网络请求、写进度。
 # 函数用途: 发出全部检测请求并收集样本。
 def _collect_samples(job: _ProbeJob) -> list[ProbeSample]:
-    config = replace(job.target.config, model_reasoning_control="effort", request_timeout=_REQUEST_TIMEOUT_SECONDS)
+    cap = _probe_output_cap(job.target.config)
+    config = replace(job.target.config, model_reasoning_control="effort", request_timeout=_probe_timeout(job.target.config))
     backend = get_backend(config.model_backend, config)
     plan = [level for _round in range(PROBE_ROUND_COUNT) for level in PROBE_LEVELS]
     samples: list[ProbeSample] = []
     with provider_runtime_scope(job.agent, SimpleNamespace(thread_id="reasoning-probe:" + job.target.profile_id)):
         for level in plan:
-            samples.append(_one_sample(backend, level))
+            samples.append(_one_sample(backend, level, max_output_tokens=cap))
             _save_record(job.agent, job.target.profile_id, _record_base(job, status="running", completed=len(samples)))
     return samples
 
 
 # LLM: 只保留档位、token 数、HTTP 状态和异常类型；回复正文与异常消息都不保存（可能回显密钥或请求头）。
-#   检测请求显式带上输出上限：成本有上界，且上限远高于判定门槛，截断不会改变 low/max 差异结论。
+#   检测请求显式带宿主算好的输出上限；保持原默认参数兼容独立调用，不从模型回复推算预算。
 # 函数用途: 发一次检测请求并得到一个样本。
-def _one_sample(backend: object, level: str) -> ProbeSample:
+def _one_sample(backend: object, level: str, *, max_output_tokens: int = PROBE_MAX_OUTPUT_TOKENS) -> ProbeSample:
     try:
         response = backend.generate(
             PROBE_PROMPT,
             request_options=ProviderRequestOptions(
                 reasoning_effort=level,
-                max_output_tokens=PROBE_MAX_OUTPUT_TOKENS,
+                max_output_tokens=max_output_tokens,
             ),
         )
     except Exception as exc:  # noqa: BLE001 - 单次失败只记成失败样本，由判定决定结论。

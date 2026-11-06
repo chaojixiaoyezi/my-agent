@@ -14,11 +14,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..settings.config import AgentConfig
 from .passwords import PasswordPolicyError, hash_password, verify_password
 from .store import SessionLockStore
 
 # 会话闲置 3 小时自动锁定：不影响活跃使用，又避免离开后会话长期暴露。
-DEFAULT_IDLE_SECONDS = 3 * 60 * 60
+DEFAULT_IDLE_SECONDS = AgentConfig.feishu_personal_idle_lock_seconds
 # 解锁口令暴破节流:前几次失败不锁(容忍手误),超阈值后每次失败指数退避(封顶),
 # 把在线暴破从"只受 scrypt 单次成本约束"压到每窗口 ~1 次;成功即清零。
 # 连续失败超过 5 次进入退避（个数）：手误通常不会连续 5 次，超过就该怀疑是暴破。

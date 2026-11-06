@@ -12,6 +12,8 @@ import json
 from prompt_toolkit.layout import HSplit
 from prompt_toolkit.widgets import Label, RadioList, TextArea
 
+from ...agent.settings.config import AgentConfig
+from ...agent.settings.defaults import context_window_or_default
 from .tui_model_menu import _dialog, _request
 from .tui_subscription_models import added_text, choose_models, with_ids
 
@@ -146,11 +148,13 @@ class _ConnectionForm:
 
     # LLM: 入口来源由调用方传结构化标志，非空目录补填不能伪称目录读取失败；错误详情仍只显示服务端已脱敏文本。
     #   手动模型名与上下文由服务端 validate_model 校验；取消返回 None，不写入目录。
+    #   默认容量取 AgentConfig 的权威窗口兜底，不借用当前会话模型的窗口。
     # 函数用途: 为目录缺项或读取失败提供手动填写表单，并按真实入口提示用户。
     async def _manual(self, catalog: dict, *, from_nonempty_catalog: bool = False) -> list[dict] | None:
         reason = str(catalog.get("message") or "接口没有列出模型。") if not catalog.get("ok") else "接口没有列出模型。"
         detail = str(catalog.get("provider_message") or "")
-        name, window = TextArea(height=1, multiline=False), TextArea(text="128000", height=1, multiline=False)
+        name = TextArea(height=1, multiline=False)
+        window = TextArea(text=str(context_window_or_default(AgentConfig)), height=1, multiline=False)
         heading = "列表里没有的模型，可以在这里手动填写" if from_nonempty_catalog else f"没拿到模型列表：{reason}"
         body = HSplit([Label(heading + (f"\n服务商说明：{detail}" if detail else "")),
                        Label("可以手动填写模型名称（区分大小写）"), name, Label("上下文窗口（总 tokens）"), window])

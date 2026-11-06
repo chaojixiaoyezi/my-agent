@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -66,6 +67,17 @@ from .workspace_write_context import WORKSPACE_WRITE_EXTENSION, WORKSPACE_WRITE_
 
 # 能力包握手等待上限（秒）；仍在来源边界内，D9 后续再缩小锁的持有范围。
 PACK_MCP_CONNECT_TIMEOUT_SECONDS: float = float("10.0")
+
+
+# LLM: 仅解析能力包连接阶段的宿主预算；无效、非有限或非正值保留旧值，不扩展外层 deadline。
+# 函数用途: 读取可选配置中的能力包 MCP 连接超时，返回有限正浮点秒数。
+def _pack_connect_timeout(config: object | None) -> float:
+    value = getattr(config, "plugin_pack_mcp_connect_timeout_seconds", PACK_MCP_CONNECT_TIMEOUT_SECONDS)
+    try:
+        timeout = float(value) if type(value) in (int, float) else 0.0
+    except OverflowError:
+        timeout = 0.0
+    return timeout if math.isfinite(timeout) and timeout > 0 else PACK_MCP_CONNECT_TIMEOUT_SECONDS
 
 
 # LLM: 展示名由完整大小写敏感身份派生，截断只作用于可读部分；发布还必须检测实际名称冲突，不能覆盖核心工具。
@@ -303,10 +315,11 @@ class PluginMCPClient(MCPStdioClient):
 #   v8 无视该开关强制沙箱、按清单断网、隐藏 Gateway 家目录，只放行插件目录与安装前缀；
 #   沙箱不可用时这里抛 SandboxUnavailable，调用方应先用 plugin_sandbox_problem 结构化拒绝。
 #   host_exclusive_roots 是宿主冻结的可信来源（含配置外部 file: 凭据），只进隐藏规格，不进插件 argv、env 或公开结果。
+#   可选 config 只绑定能力包连接预算及展示缓存容量，不改变普通插件连接默认或激活授权。
     # 函数用途: 将已准备的插件环境（Python 或 v6 随包文件）接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
     def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None,
                  process_sandbox: bool = False, host_credential_env_names: frozenset[str] = frozenset(),
-                 host_exclusive_roots: tuple[Path, ...] = ()):
+                 host_exclusive_roots: tuple[Path, ...] = (), config: object | None = None):
         self.runtime_repo = runtime_repo
         self.lazy = bool(getattr(installation.manifest, "has_mcp_runtime", False))
         self._lazy_lock = threading.Lock()
@@ -319,7 +332,8 @@ class PluginMCPClient(MCPStdioClient):
         activation = installation.activation
         if activation is None or activation.phase not in {"preparing", "active"}:
             raise ValueError("插件没有可启动的固定激活")
-        self.activation_ref = PluginActivationRef.from_owner(owner, installation.manifest.plugin_id, activation.activation_id)
+        self.activation_ref = PluginActivationRef.from_owner(
+            owner, installation.manifest.plugin_id, activation.activation_id, config=config)
         if self.lazy and activation.phase == "active":
             # 构造只生成展示门面，可复用同表已解码投影；实际启动与发送仍鲜活 require。
             if not self.activation_ref.available():
@@ -371,7 +385,7 @@ class PluginMCPClient(MCPStdioClient):
             catalog_category="plugins",
         ), activation=self.activation_ref)
         if self.lazy:
-            self.config.connect_timeout = PACK_MCP_CONNECT_TIMEOUT_SECONDS
+            self.config.connect_timeout = _pack_connect_timeout(config)
         self.pack_tools: tuple[PackMCPProxyTool, ...] = tuple(
             self._proxy_for_info(MCPToolInfo(tool.name, tool.description, tool.input_schema), None, facade=True)
             for tool in installation_tool_declarations(installation)

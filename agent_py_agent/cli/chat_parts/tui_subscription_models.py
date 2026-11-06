@@ -12,6 +12,8 @@ from uuid import uuid4
 from prompt_toolkit.layout import HSplit
 from prompt_toolkit.widgets import CheckboxList, Label, TextArea
 
+from ...agent.settings.config import AgentConfig
+from ...agent.settings.defaults import context_window_or_default
 from .tui_model_menu import _dialog, _request, _request_data
 
 _SWITCH_HINT = "在 /model →「选择模型」→「对话模型」里切换。"
@@ -42,6 +44,7 @@ async def pick_subscription_models(app, agent, session: str, provider_id: str) -
 
 # LLM: 勾选值是模型名、显示文字只给人看；可选手动回调只在调用方显式提供时入列，返回的模型与勾选结果合并。
 #   回调取消只放弃手动补填、不丢弃已勾选模型；无可保存项返回 None；上下文仍由 validate_model 作权威校验。
+#   未知窗口从 AgentConfig 的统一兜底取得；服务商已知窗口与用户填入值继续优先。
 # 函数用途: 弹出多选框；需要时允许用户从同一界面补填目录没有的模型，再把两类结果交回原保存流程。
 async def choose_models(
     app,
@@ -54,7 +57,7 @@ async def choose_models(
     if manual_entry is not None:
         items.append((_MANUAL_ENTRY_KEY, "手动填写模型名（列表里没有的模型）"))
     box = CheckboxList(items)
-    window = TextArea(text="128000", height=1, multiline=False)
+    window = TextArea(text=str(context_window_or_default(AgentConfig)), height=1, multiline=False)
     hint = "上下键移动，空格勾选；选好后按 Tab 到「添加」再回车。"
     if manual_entry is not None:
         hint = "列表里没有的模型可以手动填写；" + hint

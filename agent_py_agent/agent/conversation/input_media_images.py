@@ -8,10 +8,11 @@ import io
 import threading
 from collections import OrderedDict
 
+from ..settings.config import AgentConfig
 from .input_media import InputMediaError
 
 # 入站图片默认累计解码像素预算，多帧图片合计核验。
-DEFAULT_IMAGE_PIXELS = 40_000_000
+DEFAULT_IMAGE_PIXELS = AgentConfig.input_image_max_pixels
 # 入站图片最多解码的帧数，防止动图占满处理资源。
 MAX_IMAGE_FRAMES = 256
 # 出站图片长边上限：超过时按比例缩小到该像素数再发给模型，磁盘原件不变。
