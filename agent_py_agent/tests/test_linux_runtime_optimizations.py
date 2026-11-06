@@ -42,6 +42,7 @@ def test_projection_tightens_agent_home_under_umask_0002(tmp_path):
 def test_projection_accepts_private_group_ancestor_without_chmod(tmp_path):
     ancestor = tmp_path / "private-group-home"
     ancestor.mkdir()
+    os.chown(ancestor, -1, os.getegid())
     ancestor.chmod(0o775)
     assert ancestor.stat().st_gid == os.getegid()
     path = ancestor / "data" / "projection_state" / "pending.sqlite3"
