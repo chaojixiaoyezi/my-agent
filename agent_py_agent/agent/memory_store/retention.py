@@ -32,32 +32,57 @@ _POLICY_LEVEL_ERROR_CODES = frozenset({
     "MEMORY_RETENTION_CANDIDATES_UNREADABLE",
 })
 
+_MISSING_ARG = object()
+
+
 # LLM: 仅协商新增config/scan_budget选项；原now、提交门及指纹不删减，回调只执行一次，内部异常原样传播。
 # 函数用途: 调用前按签名选择新旧维护回调的参数形状，不以执行失败触发重试。
-def _call_retention_callback(callback, *args, config=None, scan_budget=None, **kwargs):
+def _call_retention_callback(
+    callback,
+    home=_MISSING_ARG,
+    *,
+    now=_MISSING_ARG,
+    commit_transition=_MISSING_ARG,
+    expected_policy_fingerprint=_MISSING_ARG,
+    config=None,
+    scan_budget=None,
+):
+    pos_args = () if home is _MISSING_ARG else (home,)
+    kw_args = {}
+    if now is not _MISSING_ARG:
+        kw_args["now"] = now
+    if commit_transition is not _MISSING_ARG:
+        kw_args["commit_transition"] = commit_transition
+    if expected_policy_fingerprint is not _MISSING_ARG:
+        kw_args["expected_policy_fingerprint"] = expected_policy_fingerprint
     try:
         signature = inspect.signature(callback)
     except (TypeError, ValueError):
         # 无签名时保留现代合同的原失败，不通过执行探测或吞掉业务错误。
         if scan_budget is not None:
-            kwargs['scan_budget'] = scan_budget
-        return callback(*args, config=config, **kwargs)
+            kw_args["scan_budget"] = scan_budget
+        return callback(*pos_args, config=config, **kw_args)
     parameters = signature.parameters
     variadic_keywords = any(value.kind == inspect.Parameter.VAR_KEYWORD for value in parameters.values())
-    budget_parameter = parameters.get('scan_budget')
-    if scan_budget is not None and (variadic_keywords or (budget_parameter is not None and
-            budget_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY))):
-        kwargs['scan_budget'] = scan_budget
-    configured = {**kwargs, 'config': config}
+    budget_parameter = parameters.get("scan_budget")
+    if scan_budget is not None and (
+        variadic_keywords
+        or (
+            budget_parameter is not None
+            and budget_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        )
+    ):
+        kw_args["scan_budget"] = scan_budget
+    configured = {**kw_args, "config": config}
     try:
-        signature.bind(*args, **configured)
+        signature.bind(*pos_args, **configured)
     except TypeError:
         try:
-            signature.bind(*args, config, **kwargs)
+            signature.bind(*pos_args, config, **kw_args)
         except TypeError:
-            return callback(*args, **kwargs)
-        return callback(*args, config, **kwargs)
-    return callback(*args, **configured)
+            return callback(*pos_args, **kw_args)
+        return callback(*pos_args, config, **kw_args)
+    return callback(*pos_args, **configured)
 
 
 # LLM: Service 持有 owner home、唯一 CandidateService 和可选 JsonlMemory；它不解析自然语言删除范围。
