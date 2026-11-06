@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..backends.request_content import compact_source_supported
 from ..common.cancellation import ToolCancelled
@@ -252,6 +252,7 @@ class _CompactRunRequest:
     commit_guard: Callable[[], bool] | None = field(default=None, kw_only=True, repr=False)
     started_monotonic: float = field(default_factory=time.monotonic, kw_only=True, compare=False)
     timing_state: dict[str, object] = field(default_factory=dict, kw_only=True, compare=False, repr=False)
+    summarizer: ConversationSummarizer | None = field(default=None, kw_only=True, repr=False)
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
@@ -306,6 +307,22 @@ class _CompactSummaryCall:
     idle_compact: bool = False
     # 主请求的校准事实：单次缓存面与服务端压缩的预算检查按它换算，不再用原始上界误判超预算（10-08 mc4 复盘）。
     calibration: CompactRequestCalibration | None = None
+
+
+# LLM: 仅可信宿主注入摘要调用；签名与_summarize一致，沿call交回三类outcome，不拥有来源校验、计量或提交权。
+# 类用途: 允许宿主替换摘要生成器，不向模型工具Schema开放工厂或权限参数。
+class ConversationSummarizer(Protocol):
+    # LLM: 调用上下文保留身份、取消、用量归属和outcome容器；返回文字仍须通过原候选接受门。
+    # 函数用途: 按原摘要调用合同生成文字，默认实现为_summarize。
+    def __call__(
+        self,
+        agent: SimpleAgent,
+        previous_summary: str,
+        operation_evidence: dict[str, object],
+        rows: Sequence[MessageLogEntry],
+        *,
+        call: _CompactSummaryCall | None = None,
+    ) -> str: ...
 
 
 # LLM: 只重算原话备份段，语义摘要、机械回退正文与尾随来源原样保留；不发模型请求、不写任何状态。
@@ -364,7 +381,7 @@ def conversation_scope(
     )
 
 
-# LLM: 使用原只读来源或本次加载的来源生成候选；typed取消不记供应商失败，完整材料仅随原checkpoint/CAS成功交回。
+# LLM: 使用原只读来源或本次加载的来源生成候选；summarizer仅由可信宿主提供，typed取消及原checkpoint/CAS边界不变。
 # 函数用途: 计量并一次提交会话摘要，保留原游标及失败边界；不替宿主再次准备恢复请求。
 def prepare_conversation_context(
     agent: SimpleAgent,
@@ -372,12 +389,13 @@ def prepare_conversation_context(
     thread: ConversationThread,
     *,
     options: ConversationCompactOptions,
+    summarizer: ConversationSummarizer | None = None,
 ) -> ConversationCompactResult:
     """Load the uncompacted tail and compact it before it crosses the runtime policy."""
     from ..backends.request_budget import RequestBudgetExceeded
 
     try:
-        prepared = _prepare_compact_request(agent, store, thread, options)
+        prepared = _prepare_compact_request(agent, store, thread, options, summarizer=summarizer)
     except RequestBudgetExceeded as exc:
         raise ConversationCompactError("配置的摘要输出预算无法容纳", code="COMPACT_INVALID_OUTPUT_BUDGET") from exc
     if isinstance(prepared, ConversationCompactResult):
@@ -436,13 +454,15 @@ def _prepare_compact_source(agent, store, thread, options):
     return source, compact_context
 
 
-# LLM: 原来源/冷却门保持；普通标记须先于来源冻结，显式来源不补造标记；闲置复用已冻结基线并在末写CAS。
+# LLM: 原来源/冷却门保持；普通标记须先于来源冻结，显式来源不补造标记；摘要器只随内部请求传递，闲置仍在末写CAS。
 # 函数用途: 构造压缩请求，去重不认领来源冻结后的新消息，手动恢复不绕过来源或容量检查。
 def _prepare_compact_request(
     agent: SimpleAgent,
     store: ConversationStore,
     thread: ConversationThread,
     options: ConversationCompactOptions,
+    *,
+    summarizer: ConversationSummarizer | None = None,
 ) -> ConversationCompactResult | _CompactRunRequest:
     expected_message_tail = options.expected_message_tail
     # 只为本次加载的来源捕获更早的观察；显式来源可能已冻结很久，不能把当前消息误记为已覆盖。
@@ -556,6 +576,7 @@ def _prepare_compact_request(
         expected_message_tail=expected_message_tail,
         idle_compact=options.idle_compact,
         commit_guard=options.commit_guard,
+        summarizer=summarizer,
     )
     return request
 
@@ -1098,7 +1119,7 @@ def _candidate_prefix_media_decision(agent, surface, rows, decision, facts):
     return decision
 
 
-# LLM: 候选继承同scope摘要/工具分区，媒体决定在探针前按本候选canonical范围复核；双来源和完整计量不提前提交。
+# LLM: 候选继承同scope摘要/工具分区与原outcome容器；显式摘要器优先于请求内注入，None延迟选择_summarize，完整计量不变。
 # 函数用途: 流式构造同源候选，保留媒体归档原因且不持已拒用前缀，范围与提交仍由原接受门裁决。
 def _build_compact_candidate(
     request: _CompactRunRequest,
@@ -1108,6 +1129,7 @@ def _build_compact_candidate(
     provider_surface: ConversationCompactProviderSurface | None,
     progress_range: tuple[int, int] = (15, 65),
     media_decision: CompactMediaDecision | None = None,
+    summarizer: ConversationSummarizer | None = None,
 ) -> _CompactCandidate:
     raise_if_compact_interrupted(request.interrupt_check)
     # 媒体事实只从 canonical 信封统计；策略为 off 或没有决定时不统计、也不写 checkpoint 字段。
@@ -1132,7 +1154,8 @@ def _build_compact_candidate(
 
     previous_provider_compaction = (provider_compaction_content(request.compact_context.view.provider_compaction)
                                     if request.compact_context is not None else "")
-    summary = _summarize(
+    selected_summarizer = summarizer if summarizer is not None else request.summarizer
+    summary = (_summarize if selected_summarizer is None else selected_summarizer)(
         request.agent,
         base_summary,
         evidence,
@@ -2181,6 +2204,7 @@ __all__ = [
     "ConversationCompactResult",
     "ConversationContextUsage",
     "ConversationScope",
+    "ConversationSummarizer",
     "conversation_scope",
     "inspect_conversation_context",
     "prepare_conversation_context",
