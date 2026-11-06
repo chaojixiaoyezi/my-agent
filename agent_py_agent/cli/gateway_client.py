@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ..agent.gateway_parts import (
     GatewayAskParams,
@@ -68,6 +68,12 @@ class GatewayPollRequest:
 class GatewayPollResult:
     payload: dict[str, Any]
     streamed_text: bool
+
+
+# LLM: 仅替换可信宿主的观察运输；实现保留唯一终态、尾读及流式显示事实，不取得提交或执行权限。
+# 类用途: 约定独立 ask 的观察请求和原结果结构。
+class GatewayAskObserver(Protocol):
+    def __call__(self, request: GatewayPollRequest) -> GatewayPollResult: ...
 
 
 @dataclass(frozen=True)
@@ -251,25 +257,31 @@ def _wait_for_gateway_response(request: GatewayPollRequest) -> GatewayPollResult
 # LLM: The submitted response path remains a repairable projection; derive completion from the
 # exact request id under requests/terminal instead.
 # 函数用途: 为一次 ask 组装流路径、终态路径和超时上限并执行轮询。
-def _poll_gateway_response(ctx: GatewayAskContext) -> GatewayPollResult:
+def _poll_gateway_response(
+    ctx: GatewayAskContext, *, observer: GatewayAskObserver | None = None,
+) -> GatewayPollResult:
     chunk_path = gateway_chunk_path(ctx.paths, ctx.request_id)
     spinner = ThinkingSpinner()
     if ctx.stream_output:
         spinner.start()
     deadline = time.time() + max(0.0, ctx.timeout)
     terminal_path = ctx.paths.terminal / f"{ctx.request_id}.json"
-    result = _wait_for_gateway_response(
-        GatewayPollRequest(
-            chunk_path,
-            terminal_path,
-            deadline,
-            spinner,
-            ctx.stream_output,
+    # 仅 None 选默认实现，合法但布尔值为假的可调用观察器也必须生效。
+    observe = _wait_for_gateway_response if observer is None else observer
+    try:
+        return observe(
+            GatewayPollRequest(
+                chunk_path,
+                terminal_path,
+                deadline,
+                spinner,
+                ctx.stream_output,
+            )
         )
-    )
-    if ctx.stream_output:
-        spinner.stop()
-    return result
+    finally:
+        # 动画归宿主所有，观察运输失败或中断也须收起；异常仍原样传播。
+        if ctx.stream_output:
+            spinner.stop()
 
 
 def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:

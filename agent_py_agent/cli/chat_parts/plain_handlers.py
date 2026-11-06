@@ -22,6 +22,7 @@ from ...agent.gateway_parts.response_renderer import (
 )
 from .gateway_client import (
     ChatRequestContent,
+    GatewayChatObserver,
     GatewayChunkPollRequest,
     check_gateway_alive,
     gateway_request_activity_paths,
@@ -54,7 +55,9 @@ class PlainJobContext:
 
 # LLM: plain与TUI共用认证HTTP，原输入和消息ID只作运输事实；未知显式收口不重投，确认后原canonical终态负责正文。
 # 函数用途: 提交一轮普通终端输入并显示原结果，未确认时保ID说明而不无限等待或宣称业务失败。
-def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
+def _plain_gateway_handle(
+    ctx: PlainJobContext, *, observer: GatewayChatObserver | None = None,
+) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
     on_chunk, stream_started_ref = _make_chunk_handler(
@@ -80,7 +83,9 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     )
     terminal_response_streamed_ref = [0]
     inactivity_timeout = _gateway_timeout_seconds(ctx)
-    response = poll_gateway_chunks(
+    # 注入仅改变宿主观察入口，提交认证、终态路径及显示计数仍沿原合同。
+    observe = poll_gateway_chunks if observer is None else observer
+    response = observe(
         GatewayChunkPollRequest(
             chunk_path,
             ctx.paths.terminal / f"{request_id}.json",
