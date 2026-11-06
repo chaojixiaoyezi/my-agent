@@ -17,6 +17,7 @@ from pathlib import Path
 from .attempt.sandbox import (
     AttemptExecutionSandbox,
     AttemptSandboxSpec,
+    SandboxFactory,
     SandboxReadMode,
     SandboxUnavailableError,
     _seatbelt_string_literal,
@@ -302,10 +303,20 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 # LLM: 规格仍只由统一工厂构造；宿主来源最后覆盖业务放行。Linux 单文件来源由编译器在 --chdir 前精确遮罩，不扩大到父目录。
 # 函数用途: 把插件启动命令按给定沙箱规格包进平台沙箱，返回新的完整 argv。
-def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str]:
+def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec, *,
+                          sandbox_factory: SandboxFactory | None = None) -> list[str]:
     system = platform.system()
     directories = tuple(Path(path).resolve() for path in spec.hidden_paths if Path(path).is_dir())
-    command = AttemptExecutionSandbox(spec).build_argv(argv)
+    sandbox = (AttemptExecutionSandbox if sandbox_factory is None else sandbox_factory)(spec)
+    if sandbox_factory is not None:
+        sandbox.require_ready()
+    command = sandbox.build_argv(argv)
+    # 自定义后端也必须支持原平台 overlay 语法，不能省略宿主隐藏规则来兼容。
+    if sandbox_factory is not None and (
+        (system == "Linux" and "--chdir" not in command)
+        or (system == "Darwin" and ("-p" not in command or command.index("-p") + 1 >= len(command)))
+    ):
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: BACKEND_ARGV_FORMAT_UNSUPPORTED")
     if system == "Linux":
         # 公共 hide_home 编译器会重新挂回业务根；宿主独占目录必须在这些挂载之后再次覆盖。
         overlays = [value for root in dict.fromkeys(directories)
@@ -329,6 +340,7 @@ def sandboxed_plugin_argv(argv: list[str], spec: AttemptSandboxSpec) -> list[str
 def plugin_sandbox_problem(
     enabled: bool, owner_home: Path, *, sandbox_policy: PluginSandboxPolicy | None = None,
     host_exclusive_roots: tuple[Path, ...] = (),
+    sandbox_factory: SandboxFactory | None = None,
 ) -> str:
     if not enabled:
         return ""
@@ -339,7 +351,7 @@ def plugin_sandbox_problem(
             cwd=owner_home, data_dir=owner_home, owner_home=owner_home, sandbox_policy=sandbox_policy,
             host_exclusive_roots=host_exclusive_roots,
         )
-        AttemptExecutionSandbox(spec).require_ready()
+        (AttemptExecutionSandbox if sandbox_factory is None else sandbox_factory)(spec).require_ready()
     except SandboxUnavailableError:
         return "sandbox_unavailable"
     return ""

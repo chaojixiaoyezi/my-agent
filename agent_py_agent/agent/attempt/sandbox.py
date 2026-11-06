@@ -39,10 +39,11 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from ..common.cancellation import raise_if_cancelled
 from ..path_access_policy import (
@@ -220,6 +221,17 @@ class AttemptSandboxSpec:
     deny_gateway_ports: tuple[int, ...] = ()
     # 仅宿主源配置投影，同步 run 默认环境必须剥离这些准确来源，不影响文件/网络授权。
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+
+
+class SandboxBackend(Protocol):
+    """可信宿主沙箱后端；探测与 argv 构造必须使用同一次构造的实例。"""
+
+    def probe(self, *, binary_only: bool = False) -> SandboxReadiness: ...
+    def require_ready(self) -> SandboxReadiness: ...
+    def build_argv(self, command_argv: list[str]) -> list[str]: ...
+
+
+SandboxFactory = Callable[[AttemptSandboxSpec], SandboxBackend]
 
 
 # LLM: 只负责平台规则和就绪门；同步 run 的取消及回收交给 process_run，不新增无沙箱旁路，联测 attempt 与 verifier。

@@ -2,6 +2,9 @@
 # 模块用途: 将真实工具调用结果交给重复门与成功重复观察，并为下一模型轮提供短提醒。
 from __future__ import annotations
 
+from typing import Protocol
+
+from ...contracts.gates.models import GateFinding
 from ...contracts.gates.tool_guardrail import (
     ToolGuardrailConfig,
     ToolGuardrailFacts,
@@ -25,6 +28,13 @@ from .call_guardrail_config import (
 _RECORDS_ATTR = "_tool_call_guardrail_records"
 # 调用护栏最多保留的记录条数，防内存膨胀。
 _MAX_RECORD_COUNT = 256
+
+
+class ToolObservationPolicy(Protocol):
+    """宿主可替换成功观察；不参与工具授权、审批或终态裁决。"""
+
+    def __call__(self, facts: ToolGuardrailFacts, records: tuple[dict[str, object], ...],
+                 *, threshold: int) -> GateFinding | None: ...
 
 
 def tool_guardrail_records(agent: object) -> tuple[dict[str, object], ...]:
@@ -52,6 +62,8 @@ def record_tool_guard_observation(
     runtime_params: object,
     call: ToolCall,
     result: ToolResult,
+    *,
+    policy: ToolObservationPolicy | None = None,
 ) -> str:
     facts = _facts_from_result(runtime_params, call, result)
     records = record_tool_guardrail_result(
@@ -68,13 +80,16 @@ def record_tool_guard_observation(
     )
     if decision.findings:
         return decision.model_message if decision.allowed else ""
-    finding = repeated_success_observation(
-        facts, records, threshold=config.repeated_success_hint_threshold,
+    finding = (repeated_success_observation if policy is None else policy)(
+        facts, records if policy is None or policy is repeated_success_observation else tuple(dict(item) for item in records),
+        threshold=config.repeated_success_hint_threshold,
     )
     _set_tool_guardrail_records(agent, records)
     if finding is None:
         return ""
-    records[-1]["repeated_success_hint_count"] = finding.evidence["count"]
+    # 计数是默认观察器的证据，不是自定义软提示的必填合同。
+    if "count" in finding.evidence:
+        records[-1]["repeated_success_hint_count"] = finding.evidence["count"]
     _set_tool_guardrail_records(agent, records)
     return finding.message[:500]
 
@@ -198,6 +213,7 @@ def _failure_class(result: ToolResult) -> str:
 
 
 __all__ = [
+    "ToolObservationPolicy",
     "record_tool_guard_observation",
     "tool_guardrail_policy",
     "tool_guardrail_records",

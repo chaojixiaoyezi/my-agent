@@ -18,6 +18,7 @@ from .tooling._subprocess_env_scrub import scrub_subprocess_env
 from .tooling.background_process_launch import (
     BackgroundLaunchError,
     BackgroundLaunchRequest,
+    BackgroundProcessLauncher,
     start_background_process,
 )
 from .tooling.process_scope import ProcessAccessScope, ProcessExecutionScope
@@ -123,6 +124,7 @@ def check_preparation_deadline(deadline: float) -> None:
 def run_environment_process(
     argv: tuple[str, ...], *, cwd: Path, environment: dict[str, str], deadline: float,
     operation: PluginEnvironmentOperation, stage: str, capture: bool = False,
+    launcher: BackgroundProcessLauncher | None = None,
 ) -> bytes:
     check_preparation_deadline(deadline)
     operation.authorize()
@@ -135,6 +137,7 @@ def run_environment_process(
         hosted = start_background_process(
             operation.launch_request(argv, cwd, environment, deadline, log_path),
             startup_timeout_seconds=min(3.0, max(0.1, deadline - time.monotonic())),
+            **({"launcher": launcher} if launcher is not None else {}),
         )
     except BackgroundLaunchError as exc:
         if exc.cleanup_confirmed and isinstance(exc.cause, ToolCancelled):
