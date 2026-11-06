@@ -1,0 +1,31 @@
+# Cell 必须开启认证。
+auth_enabled: true
+# 单个 Cell 的 owner 状态由单进程写入。
+gateway_worker_process_count: 0
+# HTTP 与飞书身份解析到独立 owner。
+gateway_per_user_owner_scoping: true
+# 仅在 Pod 网络内绑定，入口受 NetworkPolicy 保护。
+gateway_bind_host: "0.0.0.0"
+# 不通过通道身份启用管理员角色。
+admin_channel_identity_enabled: false
+# 邻居 owner 的目录必须隔离。
+sandbox_full_access_other_owner_homes: "isolate"
+# 跨 Cell 应用通过路由器接收 webhook。
+feishu_connection_mode: "webhook"
+# 每个 Cell 只配置一个飞书应用，环境变量由 Secret 提供。
+feishu_app_id: "env:FEISHU_APP_ID"
+# 飞书应用密钥使用已有 SecretRef 解析。
+feishu_app_secret: "env:FEISHU_APP_SECRET"
+# 飞书校验凭据来自挂载 Secret 的环境变量。
+feishu_verification_token: "env:FEISHU_VERIFICATION_TOKEN"
+# 飞书加密密钥与路由器该应用配置保持一致。
+feishu_encrypt_key: "env:FEISHU_ENCRYPT_KEY"
+# S1-W5 合入并经 S1-INT 注册后要求可信边缘身份。
+gateway_edge_identity_required: true
+# S1-INT 注册的控制车道容量。
+gateway_http_control_lane_workers: 4
+# S1-INT 注册的长流并发上限。
+gateway_native_stream_max: 256
+# S1-INT 注册的模型 HTTP 空闲连接池容量。
+model_http_max_idle_connections: 32
+# gateway_auth_token 只能由 MY_AGENT_RUNTIME_CONFIG_LAYERS 指定的 Secret 文件提供。

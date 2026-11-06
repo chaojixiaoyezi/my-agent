@@ -105,3 +105,39 @@ monitor 的 watch/proof 当前仍使用单副本 RWO 卷，后续应迁独立 wa
 对象数/带宽、热点 owner 锁等待、multipart、GC、跨区恢复与成本。
 
 单机用户不需要手工执行上述命令；根目录 `install.sh` 默认完成 build、probe 和透明 CLI 包装。
+
+## Cell 部署（Stage 1）
+
+该拓扑独立于上面的队列 worker 部署：个人 HTTP/飞书 webhook → 单副本 Go cell-router →
+组织闭包所属 Cell（每个 Cell 单副本 StatefulSet + 独占 home PVC）。目录按组织放置，
+新增 Cell 不移动已有组织；未知 owner 保留在 OWNER_UNKNOWN 死信，不选默认 Cell。
+
+每个 Cell 只服务一个飞书应用。`single_cell` 应用在 Cell 内保持长连接、不经路由器；
+`by_owner` 应用使用 webhook，路由器持久保存回执后才 ACK，卡片和 challenge 保持同步。
+HTTP 个人凭据只以摘要存目录，Cell 凭据经 Secret 文件/runtime 层提供；不能提交明文凭据。
+
+清单为 `k8s/cell-statefulset.yaml`、`k8s/cell-router.yaml`、`k8s/cell-networkpolicy.yaml`，
+模板为 `cell-template/agent_config.cell.yaml`。准备 Secret、存储和节点 Localhost seccomp profile 后，
+先应用 NetworkPolicy 再启动工作负载；管理口保持 ClusterIP，不暴露到公网。
+Cell 前台运行 gateway supervisor，postStart 显式登记飞书适配器供原监护逻辑恢复，避免空 home 无 webhook 监听器。
+
+目录 seed 是已提交 JSON；修改后先校验挂载内容，再发 SIGHUP 原子重载，非法快照保留旧版。
+应用 Encrypt Key/Verification Token 的热变更被拒绝；需先暂停入口、以旧凭据处理全部待投递和死信，
+经过平台重投窗口后再协调换 Secret 并重启，不能在旧密文尚需重放时直接轮换。
+
+手工移动组织必须逐步留证：
+
+1. **冻结**：把源 Cell 标为 frozen，重载目录，使新 HTTP 请求明确 503、飞书事件可靠积压。
+2. **排空**：确认源 Cell 所有在途请求和外部副作用结束；停源 Cell，取得退出证明，不只看 TCP 或 Pod 状态。
+3. **拷贝 home 与卷**：保留旧卷只读备份，再将整个组织闭包及其相关状态复制到目标卷；涉及 SQLite 时
+   必须停写后复制或使用一致性备份，不能在运行时只复制主文件。比较清单和摘要，不迁单个在途请求。
+4. **切换目录**：目标为相同应用和凭据的 Cell；更新该组织的 cell_id，完整校验后 SIGHUP。
+5. **解冻**：先确认目标身份与数据、单写者和本地业务入口，再恢复 serving，重放积压；旧写者不得复活。
+
+死信由受限管理口查询 `/dlq?reason=OWNER_UNKNOWN&limit=10`；完成接入并成功重载目录后，
+向 `/dlq/replay` POST `{"app_id":"app-example","event_id":"event-example"}`。
+`/receipts` 查询投递状态；`/configz` 查看有效运维参数。ACK 只证明账本已接收，不证明 Cell 已执行。
+
+上线顺序固定为 **S1-W5 合入 → S1-INT 配置注册与联调 → Cells**。
+真实飞书时序与 k8s 应用尚须目标环境验收；本机路由器测试不代替该验收。
+构建、参数默认值、凭据准备及完整运行手册见 [`cell-router/README.md`](cell-router/README.md)。

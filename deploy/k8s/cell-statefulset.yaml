@@ -1,0 +1,127 @@
+# 示例只配置一个应用；Secret 由运维单独提供，不在仓库保存凭据。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cell-a-config
+data:
+  agent_config.cell.yaml: |
+    # Cell 必须开启认证。
+    auth_enabled: true
+    # 单个 Cell 的 owner 状态由单进程写入。
+    gateway_worker_process_count: 0
+    # HTTP 与飞书身份解析到独立 owner。
+    gateway_per_user_owner_scoping: true
+    # 仅在 Pod 网络内绑定，入口受 NetworkPolicy 保护。
+    gateway_bind_host: "0.0.0.0"
+    # 不通过通道身份启用管理员角色。
+    admin_channel_identity_enabled: false
+    # 邻居 owner 的目录必须隔离。
+    sandbox_full_access_other_owner_homes: "isolate"
+    # 跨 Cell 应用通过路由器接收 webhook。
+    feishu_connection_mode: "webhook"
+    # 每个 Cell 只配置一个飞书应用，环境变量由 Secret 提供。
+    feishu_app_id: "env:FEISHU_APP_ID"
+    # 飞书应用密钥使用已有 SecretRef 解析。
+    feishu_app_secret: "env:FEISHU_APP_SECRET"
+    # 飞书校验凭据来自挂载 Secret 的环境变量。
+    feishu_verification_token: "env:FEISHU_VERIFICATION_TOKEN"
+    # 飞书加密密钥与路由器该应用配置保持一致。
+    feishu_encrypt_key: "env:FEISHU_ENCRYPT_KEY"
+    # S1-W5 合入并经 S1-INT 注册后要求可信边缘身份。
+    gateway_edge_identity_required: true
+    # S1-INT 注册的控制车道容量。
+    gateway_http_control_lane_workers: 4
+    # S1-INT 注册的长流并发上限。
+    gateway_native_stream_max: 256
+    # S1-INT 注册的模型 HTTP 空闲连接池容量。
+    model_http_max_idle_connections: 32
+    # gateway_auth_token 只能由 MY_AGENT_RUNTIME_CONFIG_LAYERS 指定的 Secret 文件提供。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cell-a
+spec:
+  clusterIP: None
+  selector: {app: my-agent-cell, cell: cell-a}
+  ports:
+    - {name: gateway, port: 8420, targetPort: gateway}
+    - {name: feishu, port: 8421, targetPort: feishu}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cell-a
+spec:
+  serviceName: cell-a
+  replicas: 1
+  selector:
+    matchLabels: {app: my-agent-cell, cell: cell-a}
+  template:
+    metadata:
+      labels: {app: my-agent-cell, cell: cell-a, my-agent/cell: "true"}
+    spec:
+      hostUsers: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: my-agent/seccomp-bwrap.json
+      containers:
+        - name: gateway
+          image: my-agent:latest
+          workingDir: /var/lib/my-agent
+          # 不带子动作的 supervisor 是前台合同，不使用 start 或虚构的 run 子动作。
+          command: ["/usr/bin/tini", "-g", "--", "my-agent", "--config", "/etc/my-agent/cell/agent_config.cell.yaml", "gateway", "supervisor"]
+          # 冷启动的 supervisor 不会凭空创建未登记的适配器；显式启动一次，再沿其状态监护。
+          lifecycle:
+            postStart:
+              exec:
+                command: ["my-agent", "--config", "/etc/my-agent/cell/agent_config.cell.yaml", "adapter", "start", "--channel", "feishu", "--daemon"]
+          env:
+            - {name: HOME, value: /var/lib/my-agent}
+            - {name: MY_AGENT_HOME, value: /var/lib/my-agent}
+            - {name: MY_AGENT_CONFIG, value: /etc/my-agent/cell/agent_config.cell.yaml}
+            - {name: MY_AGENT_RUNTIME_CONFIG_LAYERS, value: "cell-secret=/etc/my-agent/cell-secret/gateway.yaml"}
+            - {name: FEISHU_APP_ID, valueFrom: {secretKeyRef: {name: cell-a-feishu, key: app_id}}}
+            - {name: FEISHU_APP_SECRET, valueFrom: {secretKeyRef: {name: cell-a-feishu, key: app_secret}}}
+            - {name: FEISHU_VERIFICATION_TOKEN, valueFrom: {secretKeyRef: {name: cell-a-feishu, key: verification_token}}}
+            - {name: FEISHU_ENCRYPT_KEY, valueFrom: {secretKeyRef: {name: cell-a-feishu, key: encrypt_key}}}
+          ports:
+            - {name: gateway, containerPort: 8420}
+            - {name: feishu, containerPort: 8421}
+          startupProbe:
+            tcpSocket: {port: gateway}
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            tcpSocket: {port: feishu}
+            periodSeconds: 5
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: home, mountPath: /var/lib/my-agent}
+            - {name: config, mountPath: /etc/my-agent/cell, readOnly: true}
+            - {name: gateway-secret, mountPath: /etc/my-agent/cell-secret, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: cell-a-config}
+        - name: gateway-secret
+          secret:
+            secretName: cell-a-auth
+            items: [{key: gateway.yaml, path: gateway.yaml}]
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+  volumeClaimTemplates:
+    - metadata: {name: home}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 100Gi}
