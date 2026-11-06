@@ -52,8 +52,13 @@ def agent_tree_status_payload(agent: object, params: dict[str, object] | None = 
     )
     if unmatched_run_query:
         resolution = _with_unmatched_run_warning(resolution)
-    nodes = [node_from_kernel_run(agent, row) for row in snapshot.runs]
-    nodes = visible_nodes(nodes, params.get("visible_run_ids"))
+    # 后台唤醒只给当前 thread 的 run 建节点：先按 visible_nodes 同一规则筛 kernel 行，再逐行读守卫/进度，
+    #   否则 owner 全量子代理每行都读一次引导索引；未给或给空可见集时仍全量投影，结果与先建后筛一致。
+    raw_visible = params.get("visible_run_ids")
+    visible = ({str(item or "").strip() for item in raw_visible if str(item or "").strip()}
+               if isinstance(raw_visible, (list, tuple, set)) else set())
+    rows = [row for row in snapshot.runs if not visible or str(getattr(row, "run_id", "") or "").strip() in visible]
+    nodes = visible_nodes([node_from_kernel_run(agent, row) for row in rows], raw_visible)
     main = _main_agent_node(agent, nodes)
     advice = coordination_advice(nodes, params.get("allowed_tools"))
     payload = {
