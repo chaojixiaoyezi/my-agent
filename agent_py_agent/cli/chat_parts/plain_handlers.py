@@ -51,6 +51,7 @@ class PlainJobContext:
     build_history_context: Callable[[], str]
     current_session_id: str = ""
     local_run: object | None = None
+    on_request_allocated: Callable[[str], None] | None = None
 
 
 # LLM: plain与TUI共用认证HTTP，原输入和消息ID只作运输事实；未知显式收口不重投，确认后原canonical终态负责正文。
@@ -80,6 +81,7 @@ def _plain_gateway_handle(
             client_message_id=str(getattr(ctx.job, "client_message_id", "") or getattr(ctx.job, "request_id", "")),
         ),
         agent=ctx.agent,
+        on_request_allocated=ctx.on_request_allocated,
     )
     terminal_response_streamed_ref = [0]
     inactivity_timeout = _gateway_timeout_seconds(ctx)

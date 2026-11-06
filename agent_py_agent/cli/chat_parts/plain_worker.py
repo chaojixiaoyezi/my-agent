@@ -21,13 +21,20 @@ from .plain_state import (
 )
 
 
-# LLM: 只传递 worker 已发布的本地控制句柄；Gateway 路径仍由服务端拥有执行身份。
+# LLM: 只传递 worker 已发布的本地控制句柄；Gateway 分配回调仅更新控制目标，服务端仍拥有执行身份。
 # 函数用途: 为本次消息组装执行依赖并选择直跑或 Gateway。
 def _plain_process_job(
     cfg: PlainWorkerConfig,
     job,
 ) -> tuple[str, bool]:
     print(f"\n正在处理: {job.user}", flush=True)
+
+    # LLM: 同步回调只在原状态锁内发布目标，不改消息幂等身份，也不证明宿主已受理。
+    # 函数用途: 分配规范请求ID后，让普通终端的插话和停止指向同一回合。
+    def on_request_allocated(allocated_request_id: str) -> None:
+        with cfg.state_lock:
+            cfg.running_request_id_ref[0] = str(allocated_request_id or "").strip() or job.request_id
+
     job_ctx = PlainJobContext(
         job=job,
         agent=cfg.agent,
@@ -37,6 +44,7 @@ def _plain_process_job(
         build_history_context=cfg.build_history_context,
         current_session_id=cfg.current_session_id,
         local_run=cfg.local_run_ref[0],
+        on_request_allocated=on_request_allocated,
     )
     if cfg.use_gateway:
         return _plain_gateway_handle(job_ctx)
