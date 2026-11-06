@@ -1,0 +1,80 @@
+name: Free-threaded Python 3.14
+
+on:
+  push:
+    branches: [main, feat/s2-train, feat/s2-w5a]
+  pull_request:
+    branches: [main, feat/s2-train]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .:agent_py_agent
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # v7 advanced-usage.md 的 free-threading 版本语法；不设置 PYTHON_GIL=0，保留扩展重新开启 GIL 的可见性。
+          python-version: "3.14t"
+      - name: Isolate runtime home
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/my-agent-ft-home"
+          echo "HOME=$RUNNER_TEMP/my-agent-ft-home" >> "$GITHUB_ENV"
+          echo "MY_AGENT_HOME=$RUNNER_TEMP/my-agent-ft-home" >> "$GITHUB_ENV"
+      - name: Install dependencies without psycopg-binary
+        run: |
+          python -m pip install --upgrade pip
+          # psycopg-binary 暂无 cp314t wheel；纯 Python psycopg 使用系统 libpq，无 libpq 时仅跳过该导入探针。
+          python -m pip install ".[dev,secrets]" "sqlalchemy>=2.0" "psycopg>=3.1"
+      - name: Verify free-threaded runtime
+        run: python -c "import sys; assert not sys._is_gil_enabled(); print(sys.version)"
+      - name: Run runtime probes and core gateway tests from the fast suite
+        run: |
+          python -m pytest -o addopts='' -q --tb=short -p no:cacheprovider --timeout=60 -m "not slow and not e2e" \
+            agent_py_agent/tests/ft \
+            agent_py_agent/tests/test_gateway_http.py \
+            agent_py_agent/tests/test_gateway_auth_hardening.py \
+            agent_py_agent/tests/test_owner_scoped_pool.py \
+            agent_py_agent/tests/test_archive_tokens.py \
+            agent_py_agent/tests/test_self_install_switches.py
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: .:agent_py_agent
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+      - name: Isolate runtime home
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/my-agent-ft-home"
+          echo "HOME=$RUNNER_TEMP/my-agent-ft-home" >> "$GITHUB_ENV"
+          echo "MY_AGENT_HOME=$RUNNER_TEMP/my-agent-ft-home" >> "$GITHUB_ENV"
+      - name: Install dependencies without psycopg-binary
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev,secrets]" "sqlalchemy>=2.0" "psycopg>=3.1"
+      - name: Verify free-threaded runtime
+        run: python -c "import sys; assert not sys._is_gil_enabled(); print(sys.version)"
+      - name: Run runtime probes and core gateway tests from the fast suite
+        run: |
+          python -m pytest -o addopts='' -q --tb=short -p no:cacheprovider --timeout=60 -m "not slow and not e2e" \
+            agent_py_agent/tests/ft \
+            agent_py_agent/tests/test_gateway_http.py \
+            agent_py_agent/tests/test_gateway_auth_hardening.py \
+            agent_py_agent/tests/test_owner_scoped_pool.py \
+            agent_py_agent/tests/test_archive_tokens.py \
+            agent_py_agent/tests/test_self_install_switches.py

@@ -17,10 +17,12 @@ tests, and runtime entrypoints all target the same command surface.
 import argparse
 import faulthandler
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 import traceback
@@ -129,12 +131,26 @@ _UNSET_RESTART_MARKER = object()
 
 
 # LLM: Gateway启动前的进程级调度提示，不改变业务预算/线程顺序；不支持此API时继续原流程，联测两入口。
-# 函数用途: 将Gateway解释器GIL切换间隔调到1ms，减轻后台CPU工作对活跃线程的争用。
+# 函数用途: 仅在 GIL 开启时调到 1ms，无 GIL 的解释器不修改此调度提示。
 def _tune_gateway_gil_switch_interval() -> None:
+    if not getattr(sys, "_is_gil_enabled", lambda: True)():
+        return
     try:
         sys.setswitchinterval(0.001)
     except (AttributeError, ValueError):
         pass
+
+
+# LLM: 只观察当前解释器状态；不启停 GIL、不改变配置或把构建能力当成运行态。
+# 函数用途: 记录指定生命周期阶段的 GIL 运行态与 free-threaded 构建标志。
+def _record_gil_state(stage: str) -> None:
+    enabled = bool(getattr(sys, "_is_gil_enabled", lambda: True)())
+    disabled_build = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+    logging.getLogger(__name__).info(
+        "gateway GIL state stage=%s enabled=%s free_threaded_build=%s",
+        stage, enabled, disabled_build,
+        extra={"gil_stage": stage, "gil_enabled": enabled, "gil_disabled_build": disabled_build},
+    )
 
 
 @dataclass(frozen=True)
@@ -483,6 +499,7 @@ def _restart_state_fields(marker) -> dict:
 # LLM: 入口先调GIL，Count0保原三循环/端口顺序；实际control才走原C设施producer，不以字符串或None Agent制造就绪。
 # 函数用途: 启动本代请求、后台和心跳循环，协调者的原资源由独立同生命周期入口保留。
 def _cmd_gateway_run_threads(request: GatewayThreadsRequest, *, restart_marker=None):
+    _record_gil_state("startup")
     _tune_gateway_gil_switch_interval()
     if getattr(request.context, "control_plane", None) is not None:
         from .gateway_coordinated_run import start_coordinated_loops
