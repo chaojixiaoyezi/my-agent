@@ -199,7 +199,7 @@ def test_extra_sources_are_registered_with_yaml_descriptions():
     assert all(spec.description for key, spec in registry.items() if spec.source != "agent")
 
 
-# LLM: 模型字段与已退役拓扑须退出目录；其余边界仍拒写，不能按任意缺失键跳过断言。
+# LLM: 模型连接字段退出目录；宿主拓扑仍登记但拒写，不能按任意缺失键跳过边界断言。
 # 函数用途: 验证所有安全字段拒绝模型写入。
 @pytest.mark.parametrize("key", [
     *sorted(BOUNDARY_KEYS), "api_base", "model_backend", "system_prompt", "prompt_files",
@@ -209,7 +209,7 @@ def test_extra_sources_are_registered_with_yaml_descriptions():
 ])
 def test_security_relevant_keys_are_never_model_writable(key):
     registry = parameter_registry()
-    if key in {"api_key", "api_key_env", "api_base", "model_backend", "gateway_worker_process_count"}:
+    if key in {"api_key", "api_key_env", "api_base", "model_backend"}:
         assert key not in registry
     else:
         spec = registry[key]

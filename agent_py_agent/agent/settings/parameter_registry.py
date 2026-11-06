@@ -60,7 +60,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "local_store_events_path", "local_store_fts_enabled", "self_dev_worktree", "protect_running_runtime",
     "subagent_workspace", "subagent_role_template_dirs", "self_learning_global_daily_limit", "user_id", "auth_enabled",
     "admin_user_id", "skill_guard_max_files", "skill_guard_max_size_kb", "model_speed_profile_path",
-    "gateway_workspace", "gateway_stop_timeout", "gateway_request_timeout",
+    "gateway_worker_process_count", "gateway_workspace", "gateway_stop_timeout", "gateway_request_timeout",
     "gateway_global_inflight_limit", "gateway_owner_inflight_limit", "enable_gateway_memory_diagnostics",
     "gateway_processing_timeout_seconds", "gateway_request_max_attempts", "sqlite_connection_reuse",
     "background_tick_cheap_checks", "background_idle_owner_max_backoff_seconds", "background_owner_workers",

@@ -147,19 +147,34 @@ def test_gw12_new_pools_share_bounds_and_restart_contract(key, default, upper):
         assert TUNABLE_KEYS[key].validate(invalid)[0] is False
 
 
-# LLM: 旧拓扑字段仅供内部getattr兼容，YAML与构造都不能再开启工作进程或公开为参数。
-# 函数用途: 防止退役的多进程旋钮继续出现在管理员列表或被旧配置重新启用。
-@pytest.mark.parametrize("value", [0, 4, -1, True, "invalid"])
-def test_gw12_retired_process_count_is_silent_zero(value):
+# LLM: 拓扑只取宿主配置；零保留单进程，正整数原样保留，参数目录可见不等于模型或聊天可写。
+# 函数用途: 锁住宿主拓扑默认、严格整数值与只读部署边界，不影响12项并发预设。
+@pytest.mark.parametrize("value", [0, 1, 4, 17])
+def test_gw12_process_count_is_host_topology(value):
     from agent_py_agent.agent.settings.config_io import load_simple_yaml
     from agent_py_agent.agent.settings.user_config_capability import TUNABLE_KEYS
 
-    assert "gateway_worker_process_count" not in load_simple_yaml(packaged_config_path())
-    assert "gateway_worker_process_count" not in parameter_registry()
-    assert "gateway_worker_process_count" not in TUNABLE_KEYS
-    assert AgentConfig(gateway_worker_process_count=value).gateway_worker_process_count == 0
-    out, _warnings = normalize_agent_config({"gateway_worker_process_count": value})
-    assert out["gateway_worker_process_count"] == 0
+    key = "gateway_worker_process_count"
+    raw = load_simple_yaml(packaged_config_path())
+    assert type(raw.get(key)) is int and raw[key] == 0
+    spec = parameter_registry()[key]
+    assert spec.default == 0 and spec.tier == "deployment"
+    assert not spec.writable and not spec.user_editable and key not in TUNABLE_KEYS
+    assert AgentConfig(gateway_worker_process_count=value).gateway_worker_process_count == value
+    out, warnings = normalize_agent_config({key: value})
+    assert out[key] == value and not warnings
+
+
+# LLM: 构造与规范化各自拒绝非法拓扑，不能用归零或警告回退掩盖宿主配置错误。
+# 函数用途: 验证布尔、负数、小数、字符串、空值及容器均不能选择部署拓扑。
+@pytest.mark.parametrize("value", [True, False, -1, 1.5, "2", "invalid", None, []])
+@pytest.mark.parametrize("entry", ["dataclass", "normalizer"])
+def test_gw12_process_count_rejects_invalid_host_topology(value, entry):
+    with pytest.raises(ValueError, match="gateway_worker_process_count"):
+        if entry == "dataclass":
+            AgentConfig(gateway_worker_process_count=value)
+        else:
+            normalize_agent_config({"gateway_worker_process_count": value})
 
 
 # LLM: 显式管理员覆盖仍独立于普通owner上限，缺配置回统一默认。

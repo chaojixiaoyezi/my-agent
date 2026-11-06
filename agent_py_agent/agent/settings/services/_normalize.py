@@ -246,10 +246,8 @@ class ModelFieldsService:
         return out, warnings
 
 
-# LLM: Gateway 限额和空闲寿命都在本入口归一，0 秒明确关闭回收；不得让非法数字进入维护循环。
-# 类用途: 统一队列、连接、实例寿命和媒体数量/字节预算的数值校验。
-# LLM: 新池容量与dataclass共用范围；退役多进程键只返回内部兼容零值，不改变其它规范化合同。
-# 类用途: 归一网关配置，旧配置不再重新启用已退役的多进程旋钮。
+# LLM: 宿主拓扑只接受严格非bool的非负整数；新池共用dataclass范围，其它字段保留原告警与默认合同。
+# 类用途: 校验宿主拓扑并归一队列、连接、实例寿命和媒体预算，不让非法数量悄悄回落单进程。
 class GatewayFieldsService:
     _INT_FIELD_SPECS = (
         ("gateway_stop_timeout", 1, None),
@@ -274,12 +272,16 @@ class GatewayFieldsService:
         ("background_idle_owner_max_backoff_seconds", 0.0, None),
     )
 
-    # LLM: 纯计算，不启动服务；旧拓扑输入固定为零，新池接受非负有界整数，其它字段沿原默认合同。
-    # 函数用途: 归一网关容量并消除已退役多进程配置的作用。
+    # LLM: 纯计算，不启动服务；拓扑复用公开启动的严格校验，新池接受非负有界整数，不改写合法宿主数量。
+    # 函数用途: 校验宿主拓扑后按原合同归一网关容量。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
-        out["gateway_worker_process_count"] = 0
+        from ..gateway_topology import validate_gateway_worker_process_count
+
+        out["gateway_worker_process_count"] = validate_gateway_worker_process_count(
+            out.get("gateway_worker_process_count", defaults.gateway_worker_process_count)
+        )
         warnings = _apply_int_fields(out, defaults, GatewayFieldsService._INT_FIELD_SPECS)
         warnings.extend(_apply_float_fields(out, defaults, GatewayFieldsService._FLOAT_FIELD_SPECS))
         return out, warnings

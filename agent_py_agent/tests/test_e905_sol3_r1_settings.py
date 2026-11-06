@@ -153,15 +153,20 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
     assert len(COMMON_KEYS) == 14
 
 
-# LLM: 分类统计只算现存展示目录；v1.5新增参数不得靠搬无关键凑数，后台身份上限仍为不可普通写入的部署项。
-# 函数用途: 核证当前目录的精确分层、部署守卫拆分和后台身份默认上限。
+# LLM: 现存目录包含两项高级池容量及宿主拓扑；只恢复拓扑部署归属，不搬无关键凑精确计数。
+# 函数用途: 核证当前目录的精确分层、新池与拓扑边界、部署守卫拆分和后台身份默认上限。
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 195, "deployment": 133}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 197, "deployment": 136}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
-    assert len(DEPLOYMENT_ONLY_KEYS) == 110
+    assert len(DEPLOYMENT_ONLY_KEYS) == 113
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 342
+    assert len(registry) == 347
+    for key in ("gateway_http_control_lane_workers", "gateway_native_stream_max"):
+        assert registry[key].tier == "advanced" and registry[key].writable and registry[key].user_editable
+    topology = registry["gateway_worker_process_count"]
+    assert topology.tier == "deployment" and topology.default == 0
+    assert not topology.writable and not topology.user_editable
     assert registry["max_background_agents"].default == AgentConfig().max_background_agents == 8
     assert registry["max_background_agents"].tier == "deployment"
     assert not registry["max_background_agents"].writable and not registry["max_background_agents"].user_editable

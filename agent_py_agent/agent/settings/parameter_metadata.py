@@ -88,6 +88,7 @@ def unit_for_key(key: str) -> str:
 
 # 其它 Service 的整数/浮点范围（ModelFields、Subagent 组），来源是 settings/services/_normalize.py 的字面量。
 _EXTRA_INT_RANGES = {
+    "gateway_worker_process_count": (0, None),
     "request_timeout": (1, 600),
     "max_tokens": (1, None),
     "model_context_window_tokens": (1, None),

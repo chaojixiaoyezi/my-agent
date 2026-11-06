@@ -2,7 +2,7 @@
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 #   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
-# LLM: gateway_worker_process_count已退役，仅保留host_only内部零值，不再进入用户配置或参数中心。
+# LLM: gateway_worker_process_count是宿主拓扑配置；严格校验非负整数，参数中心只读，不从请求推导或静默归零。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from .defaults import (
     DEFAULT_MODEL_MAX_TOKENS,
 )
 from .deployment_policy import RuntimeGuardPolicy
+from .gateway_topology import validate_gateway_worker_process_count
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -339,13 +340,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     reasoning_probe_max_output_tokens: int = field(default=40000, metadata={"bounds": (1, None)})
     reasoning_probe_timeout_seconds: float = field(default=180.0, metadata={"bounds": (0.0, None), "exclusive_minimum": True, "range": ">0"})
 
-    # LLM: 构造/replace共用字段范围与联合校验；退役拓扑只保留内部零值兼容，不从构造输入开启多进程。
-    # 函数用途: 校验集中参数、固定单进程兼容值并清洗私网名单，不读盘或启动服务。
+    # LLM: 构造/replace共用字段范围与联合校验；宿主拓扑严格拒绝非法类型与负数，不改写合法数量。
+    # 函数用途: 校验集中参数、宿主拓扑并清洗私网名单，不读盘或启动服务。
     def __post_init__(self) -> None:
         from .services._normalize import validate_central_parameters
 
         validate_central_parameters(self)
-        self.gateway_worker_process_count = 0
+        validate_gateway_worker_process_count(self.gateway_worker_process_count)
         if type(self.max_background_agents) is not int or self.max_background_agents < 0:
             raise ValueError("max_background_agents 必须是非负整数（0 表示不限制）")
         self.host_exclusive_path_roots = tuple(str(path) for path in configured_host_source_paths(self))
@@ -522,8 +523,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
     # 子代理 runner 普通失败后最多自动重跑几次（唯一的家；原 runner_failure_policy 与守卫文件的两个重派上限已并入）；0 = 不自动重跑。
     runner_failure_retry_limit: int = 1
-    # 已退役；仅供内部drain/getattr兼容，不进入YAML或参数中心，构造和加载固定为0。
-    gateway_worker_process_count: int = field(default=0, repr=False, metadata={"host_only": True})
+    # 宿主拓扑唯一配置；0保持单进程，正整数选择工作进程数，只能改宿主配置并按原拓扑迁移约束重启。
+    gateway_worker_process_count: int = 0
     gateway_workspace: str = ""
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
