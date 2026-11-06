@@ -144,7 +144,7 @@ class CatalogRenderConfig:
     # 渐进式披露:这些 category 的工具不进初始模型 schema，只在目录末尾留折叠清单。
     # 模型通过 tool_search 加载命中工具；tool_search(action=catalog) 仍可查看完整注册表。默认空=全量直出。
     deferred_categories: list[str] = field(default_factory=list)
-    # 本轮由工具自己声明默认收起的名字（只在 tool_default_deferral_enabled 打开时非空）；目录给它们列“名字：一句用途”的索引。
+    # 本轮由工具自己声明默认收起的名字；目录给它们列“名字：一句用途”的索引。
     declared_deferred_names: frozenset[str] = frozenset()
 
 
@@ -161,6 +161,8 @@ class ToolRegistryParams:
     catalog_limit: int
     retrieval_limit: int
     vector_search_enabled: bool
+    live_config: object | None = field(default=None, repr=False, compare=False)
+    capability_provider: Callable[[], object] | None = field(default=None, repr=False, compare=False)
     workspace_roots: list[Path] | None = None
     path_access_mode: str = "normal"
     path_dangerous_roots: list[str] | None = None
@@ -194,12 +196,7 @@ class ToolRegistryParams:
     catalog_categories: list[str] | None = None
     catalog_deferred_categories: list[str] | None = None
     catalog_include_examples: bool = False
-    # 工具自己声明 default_deferred 的“默认收起”是否生效；由 core 装配时从 config.tool_default_deferral_enabled 传入
-    # （用户配置默认开）；这里保持 False 作为未传参调用方（测试/探针）的保守默认。只改展示，不改授权。
-    catalog_default_deferral_enabled: bool = False
     catalog_entry_max_chars: int = 700
-    # 参数减量第 3 批：目录分页/截断提示固定开启，原配置项 tool_catalog_show_truncated_notice 已删除。
-    catalog_show_truncated_notice: bool = True
     tool_detail_max_chars: int = 0
     tool_write_inline_max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
     enable_file_syntax_diagnostics: bool = False
@@ -217,8 +214,9 @@ class ToolRegistryParams:
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
     mcp_servers: dict[str, Any] | None = None
-    # CLI外层控制面可延后普通MCP首次连接；默认False保持原构造期连接行为。
-    defer_mcp_connect: bool = False
+    # 仅在连接或运行边界调用；构造参数本身不启动外部服务。
+    mcp_servers_provider: Callable[[], dict[str, Any]] | None = field(default=None, repr=False, compare=False)
+    defer_mcp_connect: bool = True
     # 只有宿主显式启用插件时注入规范 owner；不从工作目录或权限墙反推身份，构造不启动插件。
     plugin_owner: OwnerHomeResult | None = None
     # owner 权威运行库（agent.subagents.runtime_db）的只读引用：插件与 MCP 的动作工具按候选 ID 发送前复核观察新鲜度用；None 时复核一律不通过
@@ -510,7 +508,7 @@ def _deferred_tool_projection(registry, snapshot, allowed_tools=None):
     categories = tuple(registry.catalog_deferred_categories)
     key = (id(snapshot), getattr(registry, '_tool_registry_generation', 0),
            getattr(registry, 'operation_owner_id', ''), getattr(registry, 'owner_scope_root', ''),
-           categories, bool(registry.catalog_default_deferral_enabled),
+           categories,
            None if allowed is None else frozenset(allowed))
     with registry._deferred_projection_lock:
         cache = registry._deferred_projection_cache
@@ -700,6 +698,7 @@ class ToolRegistry:
         self._mcp_retry_state: dict[int, tuple[int, float]] = {}
         self._mcp_clients: list[Any] = []
         self._mcp_connected_state: list[bool] = [False]
+        self._mcp_servers_state: list[dict[str, Any] | None] = [None]
         self._mcp_catalog_owner = self
         self._mcp_lifecycle_lock = threading.RLock()
         self._mcp_borrowed = False
@@ -719,6 +718,7 @@ class ToolRegistry:
         self.owner_scope_root = params.owner_scope_root
         self.owner_type = str(params.owner_type or "main_agent").strip() or "main_agent"
         self.tools: dict[str, BaseTool] = {}
+        self._live_tool_gates: dict[str, str] = {}
         self.default_hidden_tool_names = set(_DEFAULT_HIDDEN_TOOL_NAMES)
         self.disabled_tool_names = {
             str(item).strip() for item in params.disabled_tools if str(item).strip()
@@ -732,10 +732,7 @@ class ToolRegistry:
         self.catalog_deferred_categories = [
             item.strip() for item in params.catalog_deferred_categories or [] if item.strip()
         ]
-        self.catalog_include_examples = params.catalog_include_examples
-        self.catalog_default_deferral_enabled = params.catalog_default_deferral_enabled is True
         self.catalog_entry_max_chars = max(0, params.catalog_entry_max_chars)
-        self.catalog_show_truncated_notice = params.catalog_show_truncated_notice
         self.tool_detail_max_chars = max(0, params.tool_detail_max_chars)
         self.runtime_guard_policy = params.runtime_guard_policy
         self.operation_store = params.operation_store
@@ -748,6 +745,41 @@ class ToolRegistry:
         _register_native_tools(self, params)
         if not params.defer_mcp_connect:
             self.ensure_mcp_connected()
+
+    # LLM: 只读宿主配置；独立注册表沿参数回退，不修改工具或权限。
+    # 函数用途: 在使用时解析同一配置对象里的开关。
+    def _live_bool(self, key: str, param_key: str | None = None) -> bool:
+        params = self._construction_params
+        fallback = getattr(params, param_key or key)
+        return bool(getattr(params.live_config, key, fallback))
+
+    @property
+    def catalog_include_examples(self) -> bool:
+        return self._live_bool("tool_catalog_include_examples", "catalog_include_examples")
+
+    @property
+    def vector_search_enabled(self) -> bool:
+        return self._live_bool("tool_vector_search_enabled", "vector_search_enabled")
+
+    @property
+    def background_process_listen_scope_enforce(self) -> bool:
+        return self._live_bool("background_process_listen_scope_enforce")
+
+    @property
+    def shell_sandbox_boundary_facts(self) -> bool:
+        return self._live_bool("shell_sandbox_boundary_facts")
+
+    @property
+    def enable_file_syntax_diagnostics(self) -> bool:
+        return self._live_bool("enable_file_syntax_diagnostics")
+
+    @property
+    def plugin_process_sandbox(self) -> bool:
+        return self._live_bool("plugin_process_sandbox")
+
+    @property
+    def capability_pack_mcp_enabled(self) -> bool:
+        return self._live_bool("capability_pack_mcp_enabled")
 
     # LLM: 权限视图共享状态/锁/池和原目录owner；已开始标记不代表已完成，后继调用须等锁内发现结束再投影。
     # 函数用途: 只执行一次普通MCP初连并同步当前视图目录，关闭后不复活，返回本次是否首次连接。
@@ -769,7 +801,7 @@ class ToolRegistry:
     def _mcp_config_fingerprint(self) -> str:
         params = self._construction_params
         return hashlib.sha256(json.dumps({
-            "servers": params.mcp_servers or {},
+            "servers": _current_registry_mcp_servers(self),
             "credential_env_names": sorted(params.host_credential_env_names),
         }, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
@@ -780,7 +812,7 @@ class ToolRegistry:
 
     # LLM: 注册表只存进程级实现；是否能给某个请求使用由 runtime_snapshot 决定。
     # 函数用途: 按稳定工具名登记一个实现；重复名称必须在装配期失败，不能静默换 handler。
-    def register(self, tool: BaseTool) -> None:
+    def register(self, tool: BaseTool, *, live_gate: str | None = None) -> None:
         model_spec = getattr(tool, "model_spec", None)
         runtime_policy = getattr(tool, "runtime_policy", None)
         if not isinstance(model_spec, ToolModelSpec) or not isinstance(
@@ -791,6 +823,8 @@ class ToolRegistry:
         if name in self.tools:
             raise ValueError(f"duplicate tool registration: {name}")
         self.tools[name] = tool
+        if live_gate is not None:
+            self._live_tool_gates[name] = live_gate
         self._tool_registry_generation = getattr(self, '_tool_registry_generation', 0) + 1
 
     # LLM: 快照先做硬权限交集，再做无副作用可用性检查；检查异常按不可用 fail-closed。
@@ -930,7 +964,7 @@ class ToolRegistry:
             deferred_categories=self.catalog_deferred_categories,
             include_examples=self.catalog_include_examples,
             entry_max_chars=self.catalog_entry_max_chars,
-            show_truncated_notice=self.catalog_show_truncated_notice,
+            show_truncated_notice=True,
             detail_max_chars=self.tool_detail_max_chars,
         )
 
@@ -1066,6 +1100,7 @@ def _ensure_registry_lifecycle_fields(registry: ToolRegistry) -> None:
             "_mcp_borrow_release_completed": None, "_mcp_owner_pid": os.getpid(),
             "_mcp_deferred_close_requested": False,
             "_mcp_connected_state": [bool(getattr(registry, "_mcp_clients", ()))],
+            "_mcp_servers_state": [None],
         }
         for name, value in defaults.items():
             if not hasattr(registry, name):
@@ -1094,11 +1129,12 @@ def _registry_with_access_policy(registry, access_mode, path_access_mode, owner_
         view.path_access_mode = path_access_mode
         view.owner_scope_root = owner_scope_root
         view.tools = {}
+        view._live_tool_gates = {}
         register_base_tools(view, params)
         view.register(ToolSearchTool(view))
         for name, tool in registry.tools.items():
             if name not in view.tools:
-                view.register(tool)
+                view.register(tool, live_gate=registry._live_tool_gates.get(name))
         _register_registry_borrow(view)
         return view
 
@@ -1123,7 +1159,7 @@ def _share_registry_mcp_state(registry, source):
                 return False
             if registry._mcp_config_fingerprint() != source._mcp_config_fingerprint():
                 return False
-            for attr in ("_mcp_prepare_lock", "_mcp_lifecycle_lock", "_mcp_closed", "_mcp_clients",
+            for attr in ("_mcp_servers_state", "_mcp_prepare_lock", "_mcp_lifecycle_lock", "_mcp_closed", "_mcp_clients",
                          "_mcp_connected_state", "_mcp_retry_state", "_mcp_catalog_owner", "_mcp_borrow_count"):
                 setattr(registry, attr, getattr(source, attr))
             registry._mcp_borrowed = True
@@ -1164,7 +1200,7 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
             catalog_specs.append(spec)
         if name in registry.disabled_tool_names or (catalog_only and name == "tool_search" and "list_tools" in registry.disabled_tool_names):
             continue
-        availability = _safe_tool_availability(tool)
+        availability = _safe_tool_availability(tool, registry=registry)
         if not availability.available:
             unavailable.append((name, availability.error_code or "TOOL_UNAVAILABLE", availability.reason))
             continue
@@ -1176,7 +1212,7 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
         unavailable_tools=tuple(unavailable), allowed_tools=frozenset(allowed) if allowed is not None else None,
         owner_type=registry.owner_type, catalog_specs=tuple(catalog_specs),
         deferred_categories=tuple(sorted(registry.catalog_deferred_categories)),
-        default_deferral_enabled=bool(registry.catalog_default_deferral_enabled),
+        default_deferral_enabled=True,
     )
 
 
@@ -1325,7 +1361,9 @@ def _ensure_registry_mcp_connected(registry: ToolRegistry) -> bool:
         owner = getattr(registry, "_mcp_catalog_owner", registry)
         if not registry._mcp_clients:
             _unregister_registry_mcp_proxies(owner)
-        clients = _connect_mcp_servers(owner, owner._construction_params.mcp_servers)
+        servers = _current_registry_mcp_servers(owner)
+        clients = _connect_mcp_servers(owner, servers)
+        registry._mcp_servers_state[0] = servers
         registry._mcp_clients.extend(clients)
         initial_retry_at = time.monotonic() + 1.0
         for client in clients:
@@ -1361,15 +1399,20 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
         return
+    initial_connect = False
     if hasattr(registry, "_mcp_connected_state"):
-        registry.ensure_mcp_connected()
+        initial_connect = registry.ensure_mcp_connected()
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
     plugin_owner = registry._construction_params.plugin_owner
-    if plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
+    dynamic_servers = (getattr(registry._construction_params, "mcp_servers_provider", None) is not None
+                       or getattr(registry._construction_params, "live_config", None) is not None)
+    if not dynamic_servers and plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
         return
     with registry._mcp_prepare_lock:
         if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
             return
+        if not initial_connect:
+            _synchronize_registry_mcp_servers(registry)
         if plugin_owner is not None:
             from .plugin_registration import project_plugin_tools, synchronize_plugin_clients
 
@@ -1388,6 +1431,55 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
         _project_shared_mcp_tools(registry)
         if plugin_owner is not None:
             project_plugin_tools(registry)
+
+
+# LLM: 回调只生成配置；关闭工具时本轮不能连接普通 MCP，不把旧配置作为错误兜底。
+# 函数用途: 从原宿主参数读取当前应当存在的服务表。
+def _current_registry_mcp_servers(registry: ToolRegistry) -> dict[str, Any]:
+    from copy import deepcopy
+
+    params = registry._construction_params
+    if not getattr(params.live_config, "enable_tools", True):
+        return {}
+    provider = params.mcp_servers_provider
+    return deepcopy(dict((provider() if provider is not None else params.mcp_servers) or {}))
+
+
+# LLM: 调用方持共享 prepare 锁；先撤销旧代理并确认清理，失败阻断本轮，不启动同名替代服务。
+# 函数用途: 在运行边界按服务配置差异关闭、重建客户端，保留普通服务与插件各自生命周期。
+def _synchronize_registry_mcp_servers(registry: ToolRegistry) -> None:
+    from ..plugin_runtime import PluginMCPClient
+
+    owner = getattr(registry, "_mcp_catalog_owner", registry)
+    desired = _current_registry_mcp_servers(owner)
+    previous = owner._mcp_servers_state[0] or {}
+    ordinary = [client for client in owner._mcp_clients if not isinstance(client, PluginMCPClient)]
+    present = {client.config.name for client in ordinary}
+    retiring = {client.config.name for client in ordinary if getattr(client, "_registry_policy_retiring", False)}
+    changed = ({name for name in previous.keys() | desired.keys() if previous.get(name) != desired.get(name)}
+               | retiring | (desired.keys() - present))
+    if not changed:
+        return
+    for client in ordinary:
+        if client.config.name not in changed:
+            continue
+        # stop 会先永久撤销；即使配置回退，也必须完成这次清理再创建替代连接。
+        client._registry_policy_retiring = True
+        _unregister_registry_mcp_proxies(owner, (client,))
+        _unregister_registry_mcp_proxies(registry, (client,))
+        receipt = client.stop()
+        if not getattr(receipt, "confirmed", False):
+            raise RuntimeError("MCP configuration transition cleanup unconfirmed")
+        owner._mcp_retry_state.pop(id(client), None)
+        owner._mcp_clients.remove(client)
+    replacements = _connect_mcp_servers(owner, {name: desired[name] for name in changed if name in desired})
+    owner._mcp_clients.extend(replacements)
+    # 与首次连接采用同一退避，不能在本轮立刻重连刚启动失败的替代客户端。
+    initial_retry_at = time.monotonic() + 1.0
+    for client in replacements:
+        if not client.is_running():
+            owner._mcp_retry_state[id(client)] = (1, initial_retry_at)
+    owner._mcp_servers_state[0] = desired
 
 
 # LLM: 调用者持共享prepare锁；旧原始注册表无共享owner时自身即目录权威，独立视图仍只投影原owner发布的普通MCP代理。
@@ -1471,9 +1563,7 @@ def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categor
 #   只读快照，不改注册表、授权或 snapshot_hash；改判定要同步 test_tool_default_deferral。
 # 函数用途: 算出本轮因工具声明而默认收起的工具名，供可见 Schema、收起搜索范围和目录索引共用。
 def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
-                             enabled: bool, allowed_tools: list[str] | None = None) -> frozenset[str]:
-    if not enabled:
-        return frozenset()
+                             allowed_tools: list[str] | None = None) -> frozenset[str]:
     search = snapshot.runtime("tool_search")
     if (not snapshot_search_can_load(snapshot)
             or search.model_spec.category in deferred_categories):
@@ -1491,7 +1581,7 @@ def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories:
 def _extra_deferred_names(registry: Any, snapshot: ToolRuntimeSnapshot,
                           allowed_tools: list[str] | None) -> tuple[frozenset[str], frozenset[str]]:
     categories = registry.catalog_deferred_categories
-    declared = _declared_deferred_names(snapshot, categories, enabled=registry.catalog_default_deferral_enabled,
+    declared = _declared_deferred_names(snapshot, categories,
                                         allowed_tools=allowed_tools)
     return _presentation_deferred_names(snapshot, categories, allowed_tools=allowed_tools) | declared, declared
 
@@ -1604,8 +1694,17 @@ def _snapshot_runtime(name: str, tool: object, availability: ToolAvailability, r
     return ToolRuntime(model_spec=model_spec, runtime_policy=runtime_policy, handler=tool, availability=availability)
 
 
-def _safe_tool_availability(tool: BaseTool) -> ToolAvailability:
+def _safe_tool_availability(tool: BaseTool, *, registry: ToolRegistry | None = None) -> ToolAvailability:
     try:
+        gate = registry._live_tool_gates.get(tool.model_spec.name) if registry is not None else None
+        if gate is not None:
+            params = registry._construction_params
+            if gate in {"tool_program_enabled", "feishu_chat_history_enabled"}:
+                source = params.capability_provider() if params.capability_provider is not None else None
+            else:
+                source = params.live_config
+            if not getattr(source, gate, False):
+                return ToolAvailability.unavailable(f"disabled by {gate}")
         return tool.availability()
     except Exception as exc:
         return ToolAvailability.unavailable(f"availability check failed: {type(exc).__name__}")

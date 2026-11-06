@@ -495,7 +495,7 @@ class SimpleAgent(
         *,
         channel_runtime_health_provider: RuntimeHealthProvider | None = None,
         worker_bootstrap=None,
-        defer_mcp_connect: bool = False,
+        defer_mcp_connect: bool = True,
     ):
         """initialize all SimpleAgent collaborators and register orchestration tools.
 
@@ -1045,7 +1045,7 @@ def _tool_registry_host_exclusive_kwargs(home_paths: object, config: AgentConfig
 # 函数用途: 按身份和工作区装配工具及动态内网配置，完整agent与显式配置装配宿主共用原接线。
 # LLM: 只给当前owner工具表注入真实Agent供节点库/源会话读取；推送仍走原Registry审批和出站单向网络门，构造不外发。
 # 函数用途: 构造当前用户工具表并绑定原宿主依赖，不复用另一owner的推送上下文。
-def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_connect: bool = False) -> ToolRegistry:
+def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_connect: bool = True) -> ToolRegistry:
     from functools import partial
 
     from .settings.secret_ref import managed_secret_environment_names
@@ -1058,19 +1058,18 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
     effective_path_access_mode = (
         "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
     )
-    mcp_servers = _tool_registry_mcp_servers(agent, config, access_mode)
-    source_resolver = None
-    source_ref_schema = None
-    if config.enable_plugins and config.enable_tools:
-        from .capability.package_resources import (
-            package_resource_reference_schema,
-            resolve_package_resource,
-        )
+    from .capability.package_resources import (
+        package_resource_reference_schema,
+        resolve_package_resource,
+    )
 
-        source_resolver = partial(resolve_package_resource, agent)
-        source_ref_schema = package_resource_reference_schema()
+    # 这里只绑定解析入口；使用时仍由原能力授权核验，构造不启动插件。
+    source_resolver = partial(resolve_package_resource, agent)
+    source_ref_schema = package_resource_reference_schema()
     return ToolRegistry(
         ToolRegistryParams(
+            live_config=config,
+            capability_provider=lambda: capability_config_for_agent(agent),
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             owner_scope_root=owner_scope_root,
@@ -1105,21 +1104,16 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             catalog_mode=config.tool_catalog_mode,
             catalog_categories=config.tool_catalog_categories,
             catalog_deferred_categories=config.tool_catalog_deferred_categories,
-            catalog_include_examples=config.tool_catalog_include_examples,
-            catalog_default_deferral_enabled=config.tool_default_deferral_enabled,
             tool_detail_max_chars=TOOL_DETAIL_MAX_CHARS,
             retrieval_limit=TOOL_RETRIEVAL_LIMIT_COUNT,
-            vector_search_enabled=config.tool_vector_search_enabled,
+            vector_search_enabled=True,
             shell_tool_timeout=config.tool_shell_timeout,
             process_session_wait_slice_seconds=(capability_config_for_agent(agent) or CapabilityConfig()).process_session_wait_slice_seconds,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
             pty_session_idle_timeout_minutes=config.pty_session_idle_timeout_minutes,
-            background_process_listen_scope_enforce=config.background_process_listen_scope_enforce,
-            shell_sandbox_boundary_facts=config.shell_sandbox_boundary_facts,
             path_access_mode=effective_path_access_mode,
             path_dangerous_roots=config.path_dangerous_roots,
             access_mode=access_mode,
-            enable_file_syntax_diagnostics=config.enable_file_syntax_diagnostics,
             file_source_resolver=source_resolver,
             file_source_ref_schema=source_ref_schema,
             artifact_read_budget_max_chars=config.tool_artifact_read_budget_max_chars,
@@ -1128,13 +1122,11 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             artifact_root=runtime_owner_root(agent),
             artifact_backup_root=agent.home_paths.owner_artifact_backups_dir,
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
-            mcp_servers=mcp_servers,
+            mcp_servers=getattr(config, "mcp_servers", {}),
+            mcp_servers_provider=partial(_tool_registry_mcp_servers, agent, config, access_mode),
             defer_mcp_connect=defer_mcp_connect,
-            plugin_owner=(resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config))
-                          if config.enable_plugins and config.enable_tools else None),
+            plugin_owner=resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config)),
             runtime_repo=getattr(getattr(agent, "subagents", None), "runtime_db", None),
-            plugin_process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
-            capability_pack_mcp_enabled=getattr(config, "capability_pack_mcp_enabled", False) is True,
             capability_pack_mcp_idle_stop_seconds=int(getattr(config, "capability_pack_mcp_idle_stop_seconds", 600)),
             tool_embedder=_build_tool_embedder(agent),
             operation_store=select_operation_store(agent),
@@ -1155,6 +1147,12 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
 #   总开关关、只开观察时仍装配同一个服务，但只交出 observe_window，不 import 上游执行器。
 # 函数用途: 按配置和 owner 身份组装计算机使用 MCP 服务表，交给工具注册参数。
 def _tool_registry_mcp_servers(agent: SimpleAgent, config: AgentConfig, access_mode: str):
+    return _live_tool_registry_mcp_servers(agent, config, access_mode)
+
+
+# LLM: 仅在运行边界调用，保持原管理员和权限限制；只返回配置，不启动进程。
+# 函数用途: 用当前配置生成计算机使用服务的档位。
+def _live_tool_registry_mcp_servers(agent: SimpleAgent, config: AgentConfig, access_mode: str):
     computer_use_enabled = bool(getattr(config, "computer_use_enabled", False))
     observation_enabled = bool(getattr(config, "computer_use_observation_enabled", False))
     return with_computer_use_observation(
@@ -1284,9 +1282,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
     if str(getattr(agent.tools, "owner_type", "") or "") == "main_agent":
         agent.tools.register(GatewayStatusTool(agent))
-        # 安全重启同样只给本机管理员主代理；开关 enable_gateway_restart_tool 关闭时不注册。
-        if agent.config.enable_gateway_restart_tool:
-            agent.tools.register(RestartGatewayTool(agent))
+        # 结构身份不变，策略开关在每轮可用性快照中读取。
+        agent.tools.register(RestartGatewayTool(agent), live_gate="enable_gateway_restart_tool")
         # learnpack：把整理好的目录打成能力包/插件包（只打包不安装，默认收起），第一期只给本机管理员。
         agent.tools.register(PackageBuildTool(agent))
         # learnpack：按"自动装"开关安装她打的包，开关关着只开待确认安装单（默认收起），同样只给本机管理员。
@@ -1327,16 +1324,14 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 长期记忆写入:记"需要时才想起"的具体事实/事件到 owner memory(对标 长期助手 memory_tool)。
     agent.tools.register(RememberTool(agent))
     # 长期记忆只读检索:自动召回漏掉时主模型自己按当前 owner 与范围查一次(P5-A 缺口 2);
-    # 开关 enable_memory_search_tool 默认关,关着不注册,工具目录里不出现。
-    if agent.config.enable_memory_search_tool:
-        agent.tools.register(MemorySearchTool(agent))
+    # 开关默认关；仍登记实现，每轮快照把关闭的工具标记为不可用。
+    agent.tools.register(MemorySearchTool(agent), live_gate="enable_memory_search_tool")
     # 人格文件写入:用户表达长期人设/画像/称呼/工作约定时,直接落 SOUL/USER/AGENTS.md(每轮注入,
     # 真正塑造每次交互)。区别于 remember——人设走这个,不进 memory(否则模型惯性把称呼/偏好塞进记忆)。
     agent.tools.register(UpdatePersonaTool(agent))
     # 模型目录自助管理:用户口头要求加/换/改/删模型时,主会话代理直接走唯一配置服务,不必自己进 /model 填表;
     # 开关在主配置 enable_model_profile_tool,密钥只经工具参数传一次且回执不回显。
-    if agent.config.enable_model_profile_tool:
-        agent.tools.register(ManageModelsTool(agent))
+    agent.tools.register(ManageModelsTool(agent), live_gate="enable_model_profile_tool")
     # owner 持久计划使用会话唤醒链；它不是子代理轮询或推进工具。
     agent.tools.register(ScheduleTool(agent))
     from .tooling.task_credential_tool import RequestCredentialsTool
@@ -1345,8 +1340,7 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     from .tooling.tool_program import ToolProgramTool
 
     # 原快照和每次执行都核查开关；程序不能借包装器发现/执行未授权工具。
-    agent.tools.register(ToolProgramTool(lambda: bool(
-        (capability := capability_config_for_agent(agent)) and capability.tool_program_enabled)))
+    agent.tools.register(ToolProgramTool(lambda: _live_tool_program_enabled(agent)), live_gate="tool_program_enabled")
     from .tooling.feishu_cloud_tool import FeishuCloudTool
 
     agent.tools.register(FeishuCloudTool(agent))
@@ -1369,10 +1363,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # 配置读不了(无读权限、路径是目录)或有非法值(校验抛 ValueError)时 capability_config_for_agent 返回 None,这里算一次兜到默认实例,
     # 三处共用:否则主代理构造会直接崩在属性读取上。
     session_capability_config = capability_config_for_agent(agent) or CapabilityConfig()
-    if getattr(session_capability_config, "feishu_chat_history_enabled", False) is True:
-        from .tooling.channel_messages_tool import ChannelMessagesTool
+    from .tooling.channel_messages_tool import ChannelMessagesTool
 
-        agent.tools.register(ChannelMessagesTool(agent))
+    agent.tools.register(ChannelMessagesTool(agent), live_gate="feishu_chat_history_enabled")
     if session_messaging_tool_visible(agent.home_paths, session_capability_config):
         agent.tools.register(SendSessionMessageTool(agent))
     # 会话间派活:第一期只开给管理员,并单独看派活开关;条件不满足时工具不进 registry。
@@ -1388,16 +1381,21 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     from .agent_core.self_map_bootstrap import register_self_map
 
     register_self_map(agent)
-    if not agent.config.enable_subagents:
-        return
-    agent.tools.register(CreateSubagentsTool(agent))
-    agent.tools.register(ListAgentsTool(agent))
-    agent.tools.register(CancelSubagentsTool(agent))
-    agent.tools.register(SendGuidanceTool(agent))
-    agent.tools.register(ResolveCapabilityRequestsTool(agent))
+    agent.tools.register(CreateSubagentsTool(agent), live_gate="enable_subagents")
+    agent.tools.register(ListAgentsTool(agent), live_gate="enable_subagents")
+    agent.tools.register(CancelSubagentsTool(agent), live_gate="enable_subagents")
+    agent.tools.register(SendGuidanceTool(agent), live_gate="enable_subagents")
+    agent.tools.register(ResolveCapabilityRequestsTool(agent), live_gate="enable_subagents")
     # 子代理可复用经验账(record_lesson):只写当前 child run 的 lessons.jsonl,结果收口合并成经验候选;
     # 注册表默认隐藏,只随子代理 allowed_tools 显式下发,主线程没有 child run 不提供。
-    agent.tools.register(RecordLessonTool(agent))
+    agent.tools.register(RecordLessonTool(agent), live_gate="enable_subagents")
+
+
+# LLM: 工具执行复用能力读口，读取失败时关闭；注册时只绑定回调，不冻结策略。
+# 函数用途: 在 tool_program 真正使用时复核当前能力开关。
+def _live_tool_program_enabled(agent: SimpleAgent) -> bool:
+    capability = capability_config_for_agent(agent)
+    return bool(capability and capability.tool_program_enabled)
 
 
 __all__ = [

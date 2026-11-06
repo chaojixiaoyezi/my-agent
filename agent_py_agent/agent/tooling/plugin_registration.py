@@ -94,25 +94,41 @@ def synchronize_plugin_clients(registry) -> None:
     owner = registry._construction_params.plugin_owner
     if owner is None:
         return
+    config = registry._construction_params.live_config
+    enabled = bool(getattr(config, "enable_plugins", True) and getattr(config, "enable_tools", True))
+    sandbox = registry.plugin_process_sandbox
     try:
-        rows, stamp = _discover_plugin_manifests(owner) if owner.identity == OwnerIdentity.local_main() else ((), ())
+        rows, stamp = _discover_plugin_manifests(owner) if enabled and owner.identity == OwnerIdentity.local_main() else ((), ())
         active = ({row.activation_id: row for row in rows
                    if row.enabled and not row.manifest.is_content_only
                    and (not getattr(row.manifest, "has_mcp_runtime", False)
-                        or registry._construction_params.capability_pack_mcp_enabled is True)}
+                        or registry.capability_pack_mcp_enabled is True)}
                   if owner.identity == OwnerIdentity.local_main() else {})
     except (OSError, ValueError) as exc:
         logger.warning("插件安装目录不可读：%s", type(exc).__name__)
         active = {}
     clients = [client for client in registry._mcp_clients if isinstance(client, PluginMCPClient)]
+    unsettled = False
     for client in clients:
-        if client.activation_ref.scope.activation_id not in active:
+        previous_sandbox = getattr(client, "_registry_process_sandbox", getattr(client, "_source_sandbox_spec", None) is not None)
+        if (client.activation_ref.scope.activation_id not in active or previous_sandbox != sandbox
+                or getattr(client, "_registry_policy_retiring", False)):
+            from .registry import _unregister_registry_mcp_proxies
+
+            # 先撤销代理；未确认旧树退出时，本轮不得恢复或替换旧客户端。
+            client._registry_policy_retiring = True
+            _unregister_registry_mcp_proxies(registry, (client,))
             registry._mcp_retry_state.pop(id(client), None)
             try:
                 if client.stop().confirmed:
                     registry._mcp_clients.remove(client)
-            except Exception as exc:  # noqa: BLE001 清理未知留原客户端，不阻断核心及其他插件
+                else:
+                    unsettled = True
+            except Exception as exc:  # noqa: BLE001 保留原客户端供下轮继续核实清理
+                unsettled = True
                 logger.warning("原插件连接清理尚未确认：%s", type(exc).__name__)
+    if unsettled:
+        raise RuntimeError("plugin policy transition cleanup unconfirmed")
     known = {client.activation_ref.scope.activation_id for client in registry._mcp_clients
              if isinstance(client, PluginMCPClient)}
     for identity, installation in active.items():
@@ -126,10 +142,11 @@ def synchronize_plugin_clients(registry) -> None:
         try:
             client = PluginMCPClient(owner, installation,
                                      runtime_repo=getattr(registry._construction_params, "runtime_repo", None),
-                                     process_sandbox=bool(getattr(registry._construction_params, "plugin_process_sandbox", False)),
+                                     process_sandbox=sandbox,
                                      host_credential_env_names=registry._construction_params.host_credential_env_names,
                                      host_exclusive_roots=tuple(
                                          getattr(registry._construction_params, "host_exclusive_paths", ()) or ()))
+            client._registry_process_sandbox = sandbox
             client.require_settled_previous_resources()
             registry._mcp_clients.append(client)
             if registry._mcp_closed.is_set():
@@ -162,7 +179,8 @@ def refresh_plugin_client(registry, client: PluginMCPClient, transport) -> None:
 def project_plugin_tools(registry) -> None:
     replacement = {name: tool for name, tool in registry.tools.items() if not isinstance(tool, PluginProxyTool)}
     for client in registry._mcp_clients:
-        if not isinstance(client, PluginMCPClient):
+        if (not isinstance(client, PluginMCPClient) or client.is_closed()
+                or getattr(client, "_registry_policy_retiring", False)):
             continue
         tools = client.pack_tools if getattr(client, "lazy", False) else client.validated_tools
         available = (client.activation_ref.available() and not client.drift) if getattr(client, "lazy", False) else (
