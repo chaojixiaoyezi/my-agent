@@ -15,21 +15,11 @@ from .bootstrap import add_resume_context_switches
 # LLM: Both the full CLI parser and the fast interactive parser call this function. Keep one
 # authoritative option definition and route execution through lazy wrappers below.
 # 函数用途: 注册新建聊天与恢复聊天两个交互命令，并保持两条入口的公共选项一致。
-def add_chat_subcommands(
-    sub: argparse._SubParsersAction,
-    *,
-    lazy_handlers: bool = False,
-) -> None:
-    if lazy_handlers:
-        chat_handler, resume_handler = _cmd_chat, _cmd_resume
-    else:
-        from .chat import cmd_chat, cmd_resume
-
-        chat_handler, resume_handler = cmd_chat, cmd_resume
+def add_chat_subcommands(sub: argparse._SubParsersAction) -> None:
     chat = sub.add_parser("chat", help="启动交互循环，反复与智能体交流")
     _add_shared_chat_arguments(chat)
     chat.add_argument("--session-id", help="恢复指定会话，不传则创建新会话")
-    chat.set_defaults(func=chat_handler)
+    chat.set_defaults(func=_cmd_chat)
 
     resume = sub.add_parser(
         "resume",
@@ -37,7 +27,7 @@ def add_chat_subcommands(
     )
     resume.add_argument("session_id", help="要恢复的会话 ID(如 sess_1712_abcd1234)")
     _add_shared_chat_arguments(resume)
-    resume.set_defaults(func=resume_handler)
+    resume.set_defaults(func=_cmd_resume)
 
 
 # LLM: chat/resume共用目录别名；子解析器不写默认值，防止覆盖顶层--dir，解析本身不授予权限。

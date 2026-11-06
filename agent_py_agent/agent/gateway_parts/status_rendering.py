@@ -871,7 +871,7 @@ def _base_status_lines(context: GatewayStatusRenderContext) -> list[str]:
         f"pid={context.running_report.pid if context.running_report.pid else '-'} "
         f"alive={context.running_report.alive}",
         "gateway requests="
-        + json.dumps(gateway_request_counts(context.paths), ensure_ascii=False, sort_keys=True),
+        + json.dumps(gateway_request_counts(context.paths, include_archives=True), ensure_ascii=False, sort_keys=True),
     ]
     if context.heartbeat_at:
         lines.append(f"gateway heartbeat_age_seconds={context.heartbeat_age_seconds:.1f}")
