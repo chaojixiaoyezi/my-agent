@@ -27,6 +27,7 @@ from ..conversation.authority import conversation_transcript_is_authoritative
 from ..conversation.task_run_closeout import settle_terminal_task_run
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES
 from ..runtime_db.run_takeover import TAKEOVER_RUNTIME_SOURCE
+from ..settings.live_switches import refresh_live_switches
 from ._finalization_service import FinalizationService
 from ._runtime_params import FinalizeContext
 from .cli_run_conversation import (
@@ -1031,6 +1032,7 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     from .subagent.model_selection import canonical_subagent_model_scope
 
     try:
+        refresh_live_switches(agent.config)
         with canonical_subagent_model_scope(agent, params.run_id, task_local=params.context_scope == "task_local"), model_dependency_lifetime(agent), current_prompt_scope(agent, user_prompt, params):
             if agent.config.enable_tools:
                 agent.tools.prepare_for_run()

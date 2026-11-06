@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from ..agent.agent_core.orchestration.dispatch.params import DispatchExecutionPlan, WatchParams
 from ..agent.capability.config import load_capability_config
 from ..agent.core import SimpleAgent
+from ..agent.settings.live_switches import refresh_live_switches
 from .common import int_arg_or_default, make_agent, make_capability_router
 from .models import DaemonOptions
 
@@ -49,6 +50,7 @@ def cmd_daemon(args) -> int:
 
     agent = make_agent(args)
     try:
+        refresh_live_switches(agent.config)
         options = _resolve_daemon_options(agent, args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

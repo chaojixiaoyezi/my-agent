@@ -100,7 +100,19 @@ def capability_config_for_agent(agent: object):
     config = getattr(snapshot, "config", None)
     # 只认真正的 CapabilityConfig：替身对象上自动生成的属性不是配置，不能让它的“真值”打开能力开关。
     if isinstance(config, CapabilityConfig):
-        return config
+        # 兼容显式内存注入；真实文件快照必须每次按完整 stat 身份重新核验。
+        if not isinstance(snapshot, CapabilityConfigSnapshot):
+            return config
+        stat_key = _snapshot_stat_key(snapshot.path)
+        if stat_key == getattr(snapshot, "_runtime_stat_key", None) and stat_key[1] != -1:
+            return config
+        try:
+            result = reload_capability_config_if_changed(snapshot, router=getattr(agent, "capability_router", None))
+        except (OSError, TypeError, ValueError):
+            return None
+        object.__setattr__(result.snapshot, "_runtime_stat_key", stat_key)
+        agent._capability_config_runtime_snapshot = result.snapshot
+        return result.snapshot.config
     root = getattr(agent, "root", None)
     user_path = _capability_user_path(
         root=root or ".", user_path=getattr(agent, "capability_config_path", ""),
@@ -189,16 +201,36 @@ def capability_config_version(config_path: str | Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# LLM: 与 _config_stat_key 保持同一六字段键；热路径不先 exists，避免一次读取产生两次 stat。
+# 函数用途: 获取能力文件完整身份，读失败返回与原 LRU 一致的不可缓存哨兵。
+def _snapshot_stat_key(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), -1, -1, -1, -1, -1)
+    return (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+# LLM: 沿用 stat LRU 加载真实配置，将初始身份附在本进程快照上，不改变公开 DTO 或文件格式。
+# 函数用途: 加载可在下次读取时重新核验的能力快照。
 def load_capability_config_snapshot(config_path: str | Path) -> CapabilityConfigSnapshot:
     path = Path(config_path)
     stat = path.stat()
-    return CapabilityConfigSnapshot(
+    parsed = load_capability_config(path)
+    version = capability_config_version(path)
+    stat_key = (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    if _snapshot_stat_key(path) != stat_key:
+        # 解析与哈希属于不同文件代次时不发布；下次调用沿原入口重新读取。
+        raise ValueError("能力配置在加载期间发生变化。")
+    snapshot = CapabilityConfigSnapshot(
         path=path,
-        config=load_capability_config(path),
-        version=capability_config_version(path),
+        config=parsed,
+        version=version,
         mtime_ns=stat.st_mtime_ns,
         size=stat.st_size,
     )
+    object.__setattr__(snapshot, "_runtime_stat_key", stat_key)
+    return snapshot
 
 
 def reload_capability_config_if_changed(

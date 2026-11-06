@@ -269,7 +269,9 @@ def test_fresh_switch_registry_reports_immediate_but_budgets_still_require_resta
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_selection_scope_reads_switch_fresh_without_refreshing_cached_budgets(tmp_path, enabled):
+# LLM: SW-W6 每次核验文件快照，保持旧对象不变，但新读取必须得到新文件的完整配置。
+# 函数用途: 验证开关与已有重载接口的配置快照同步，不能继续返回过期缓存。
+def test_selection_scope_reads_updated_file_snapshot_without_restart(tmp_path, enabled):
     fixture = _fixture(tmp_path, enabled=enabled, extra_config="capability_bundle_max_tokens: 731\n")
     assert (selection_scope.package_selection_scope(fixture.agent, fixture.params) is not None) is enabled
     cached = capability_config_for_agent(fixture.agent)
@@ -279,11 +281,14 @@ def test_selection_scope_reads_switch_fresh_without_refreshing_cached_budgets(tm
     )
     scope = selection_scope.package_selection_scope(fixture.agent, fixture.params)
     assert (scope is not None) is (not enabled)
-    assert capability_config_for_agent(fixture.agent) is cached
+    current = capability_config_for_agent(fixture.agent)
+    assert current is not cached
+    assert current.enable_capability_package_selection is (not enabled)
+    assert current.capability_bundle_max_tokens == 509
     assert cached.enable_capability_package_selection is enabled
     assert cached.capability_bundle_max_tokens == 731
     if scope is not None:
-        assert scope.config is cached and scope.config.capability_bundle_max_tokens == 731
+        assert scope.config is current and scope.config.capability_bundle_max_tokens == 509
 
 
 @pytest.mark.parametrize("damage", ["invalid_config", "invalid_bool", "unreadable"])
@@ -300,7 +305,13 @@ def test_damaged_selection_switch_uses_default_instead_of_cached_true(tmp_path, 
         fixture.path.write_text(text, encoding="utf-8")
     assert selection_scope.package_selection_scope(fixture.agent, fixture.params) is None
     assert subagent_entries_enabled(fixture.agent) is False
-    assert capability_config_for_agent(fixture.agent) is cached
+    current = capability_config_for_agent(fixture.agent)
+    if damage == "unreadable":
+        assert current is None
+    else:
+        assert current is not cached
+        assert current.enable_capability_package_selection is False
+    assert cached.enable_capability_package_selection is True
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -310,7 +321,9 @@ def test_subagent_entry_switch_reads_next_file_value_with_same_agent(tmp_path, e
     assert subagent_entries_enabled(fixture.agent) is enabled
     fixture.path.write_text(f"enable_capability_package_selection: {str(not enabled).lower()}\n", encoding="utf-8")
     assert subagent_entries_enabled(fixture.agent) is (not enabled)
-    assert capability_config_for_agent(fixture.agent) is cached
+    current = capability_config_for_agent(fixture.agent)
+    assert current is not cached and current.enable_capability_package_selection is (not enabled)
+    assert cached.enable_capability_package_selection is enabled
 
 
 def test_admin_settings_selection_switch_receipt_and_next_scope_match_without_restart(tmp_path, monkeypatch):
@@ -324,4 +337,6 @@ def test_admin_settings_selection_switch_receipt_and_next_scope_match_without_re
                                f"/settings set enable_capability_package_selection {str(enabled).lower()}", home=_ADMIN)
         assert report.ok and "马上生效" in report.message and "/restart" not in report.message
         assert (selection_scope.package_selection_scope(fixture.agent, fixture.params) is not None) is enabled
-        assert capability_config_for_agent(fixture.agent) is cached
+        current = capability_config_for_agent(fixture.agent)
+        assert current is not cached and current.enable_capability_package_selection is enabled
+        assert cached.enable_capability_package_selection is False
