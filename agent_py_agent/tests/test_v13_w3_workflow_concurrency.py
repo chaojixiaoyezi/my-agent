@@ -251,38 +251,17 @@ def store(tmp_path):
     return value
 
 
+# LLM: 主线程一直持有真实根锁直到写线程完成；宽等待只容纳调度/I/O，不容许等锁后通过。
+# 函数用途: 验证非阻塞脚本摘要不依赖Owner根锁，显式fold仍只记一次。
 def test_summary_write_does_not_wait_for_asset_lock(store):
-    entered, release = threading.Event(), threading.Event()
-    errors, elapsed = [], []
-
-    def hold():
+    started = time.monotonic()
+    with ThreadPoolExecutor(1) as pool:
         with asset_root_lock(store.owner_home):
-            entered.set()
-            assert release.wait(5)
-
-    def write():
-        try:
-            before = time.monotonic()
-            store.record_run_summary("sample", "succeeded", 12, blocking=False, run_id="run-1")
-            elapsed.append(time.monotonic() - before)
-        except Exception as exc:
-            errors.append(exc)
-
-    holder = threading.Thread(target=hold)
-    worker = threading.Thread(target=write)
-    holder.start()
-    assert entered.wait(2)
-    try:
-        worker.start()
-        worker.join(0.05)
-        assert not worker.is_alive(), "非阻塞摘要等待了Owner根锁"
-        assert not errors
-        assert elapsed[0] < 0.05
-        print(f"owner-lock-contention elapsed_ms={elapsed[0] * 1000:.3f}")
-    finally:
-        release.set()
-        holder.join(3)
-        worker.join(3)
+            pool.submit(
+                store.record_run_summary, "sample", "succeeded", 12,
+                blocking=False, run_id="run-1",
+            ).result(timeout=5)
+            print(f"owner-lock-contention elapsed_ms={(time.monotonic() - started) * 1000:.3f}")
     result = store.fold_run_summaries("sample")
     assert result["runtime_summary"]["run_count"] == 1
     assert result["runtime_summary"]["last_duration_ms"] == 12
@@ -615,23 +594,14 @@ store.fold_run_summaries('sample')
     assert reopened.fold_run_summaries("sample")["runtime_summary"]["run_count"] == 1
 
 
+# LLM: 与脚本摘要一样在主线程根锁未释放时等待真正完成，不能靠持锁线程超时解锁通过。
+# 函数用途: 验证工作流摘要的非阻塞写入、显式fold及编辑后的幂等回执。
 def test_workflow_summary_nonblocking_fold_and_edit_receipt(tmp_path):
     owner = tmp_path / "app/owners/local/test"
     store = WorkflowStore(owner)
     store.save_workflow(flow())
-    entered, release = threading.Event(), threading.Event()
-
-    def hold():
+    with ThreadPoolExecutor(1) as pool:
         with asset_root_lock(owner):
-            entered.set()
-            assert release.wait(5)
-
-    holder = threading.Thread(target=hold)
-    holder.start()
-    assert entered.wait(3)
-    try:
-        with ThreadPoolExecutor(1) as pool:
-            started = time.monotonic()
             result = pool.submit(
                 store.record_run_summary,
                 "shared",
@@ -639,12 +609,8 @@ def test_workflow_summary_nonblocking_fold_and_edit_receipt(tmp_path):
                 12,
                 blocking=False,
                 run_id="workflow-stable",
-            ).result(0.05)
-            assert time.monotonic() - started < 0.05
+            ).result(timeout=5)
             assert result.descriptor.runtime_summary.run_count == 0
-    finally:
-        release.set()
-        holder.join(3)
     assert store.fold_run_summaries("shared").descriptor.runtime_summary.run_count == 1
     store.save_workflow(flow())
     store.record_run_summary("shared", "succeeded", 12, blocking=False, run_id="workflow-stable")

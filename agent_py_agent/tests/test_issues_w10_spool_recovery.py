@@ -421,24 +421,59 @@ def test_cursor_lock_busy_defers_without_waiting_or_switching(watch):
     assert not reader.is_alive()
 
 
-def test_archive_reader_resolves_rows_as_archive_grows_between_slices(watch):
+# LLM: 真实归档可因初始化I/O耗尽墙钟片而零复制；按有界实际增长取观察点，不伪造行或放宽读回。
+# 函数用途: 空片后仍验证同inode归档追加、reader刷新和原记录无丢失。
+@pytest.mark.parametrize("empty_slices", [0, 2])
+def test_archive_reader_resolves_rows_as_archive_grows_between_slices(watch, monkeypatch, empty_slices):
     state, source = watch
     source.feed(8)
     assert hv._harvest_cycle(state, source.handle)
     _settle(state)
     original = _rows(hv.spool_path(state))
-    with state.lock:
-        first = hv._run_guarantee_rotation_slice(state)
-    assert first["status"] == "copying"
     archive = hv._spool_rotation_inputs(state).archive
+    reports, clock, delayed = [], [0.0], []
+    load_progress = sm._load_progress
+
+    # LLM: 仅推进轮转模块的单调时钟；检查点、fsync和复制仍走真实实现。
+    # 函数用途: 确定性制造前两片初始化后已过期，覆盖CI的合法零复制。
+    def checkpoint_io(*args, **kwargs):
+        result = load_progress(*args, **kwargs)
+        if len(delayed) < empty_slices:
+            delayed.append(True)
+            clock[0] += sm.SPOOL_MAINTENANCE_SLICE_MS / 1000 + 1
+        return result
+
+    if empty_slices:
+        monkeypatch.setattr(sm, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        monkeypatch.setattr(sm, "_load_progress", checkpoint_io)
+
+    # LLM: 不跳过错误或提前切盘；只有真实copied_bytes与磁盘增长吻合才能进入reader观察点。
+    # 函数用途: 有界续跑空片，等到同一归档实际追加了完整行。
+    def grow_archive():
+        before = archive.stat().st_size if archive.exists() else 0
+        for _ in range(100):
+            _renew(state)
+            with state.lock:
+                report = hv._run_guarantee_rotation_slice(state)
+            reports.append(report)
+            assert report["status"] == "copying", report
+            assert report["scanned_bytes"] <= sm.SPOOL_MAINTENANCE_SLICE_BYTES
+            if report["copied_bytes"]:
+                assert archive.stat().st_size > before
+                assert archive.stat().st_size - before == report["copied_bytes"]
+                return
+            assert archive.stat().st_size == before
+        pytest.fail(f"archive made no bounded forward progress: {reports!r}")
+
+    grow_archive()
+    assert [r["copied_bytes"] for r in reports[:empty_slices]] == [0] * empty_slices
     initial = archive.stat()
     first_rows = _rows(archive)
+    assert first_rows
     candidate, source_name, stored = hv._find_audit_candidate(state, first_rows[0]["spool_seq"], 0)
     assert candidate == first_rows[0]["candidates"][0] and stored == first_rows[0]
     assert source_name == archive.name
-    with state.lock:
-        second = hv._run_guarantee_rotation_slice(state)
-    assert second["status"] == "copying"
+    grow_archive()
     assert archive.stat().st_ino == initial.st_ino and archive.stat().st_size > initial.st_size
     appended = _rows(archive)[len(first_rows)]
     candidate, source_name, stored = hv._find_audit_candidate(state, appended["spool_seq"], 0)

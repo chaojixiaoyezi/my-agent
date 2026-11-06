@@ -1,3 +1,27 @@
+## 2026-11-06 CI-D7B8：锁观察点与允许空片的回归测试
+
+来源：`fix-ci-d7b81054b.md`，GitHub Actions `Test · 42235744510`，已核实其 head 为 `d7b81054baf14787418bdcac3359d8a6d987d964`。原三条失败栈已取得，批次按该基线的原 12 分片/25 文件算法冻结。
+
+- 摘要：原脚本/工作流用例把 50 毫秒当锁合同，真实 SQLite/文件 I/O 或线程调度稍慢即误报。改为主测试线程持有真实 Owner 根锁，另一个线程在锁未释放时必须完成，最多等待 5 秒。线程池在锁外收尾，异常/超时先释放锁再回收线程，不靠持锁线程的定时退出通过；保留真实写入、fold、计数、时长值和 run_id 幂等断言，不改变生产锁。
+- 归档：初始化检查点和 fsync 可能耗尽原 50 毫秒，`copying` 不保证已复制一行。按原入口有界续跑，只有真实 `copied_bytes` 与归档磁盘增长吻合才读首行；每片仍要求 `copying`、字节封顶，100 片无增长明确失败。保留同 inode 增长、两次真实 reader 读回及完整行集合核对。参数覆盖普通时钟及前两片初始化后确定耗尽预算；不增大生产时间/字节上限，不伪造回执。
+- 辅助清理：真实目录扫描可能用完原 25 毫秒，根本未抵达故障注入点。只允许无错误/无跳过/零候选的空片沿 JSON 游标续跑，100 片未抵达明确失败；每片均核对范围内 FD 零差、路径仍在、删除数零、续点未越过及计量上下文归还。最终仍须观察真实锁忙或固定父 FD 的 unlink 注入错误，之后原 drain 恢复必须仅删除一次。两种故障各覆盖普通时钟及前两片确定性扫描延迟。
+- 反证：未改的三个原测试在受控写入/单调时钟延迟下分别重现原锁断言、首片 `IndexError`、`failed=[]`，3 断言/用例失败且零 error/skip；这些探针只改内存绑定，不修改生产文件。实际 CI 当时的 CPU/I/O 现场未采样，不能声称测到了那一拍的具体耗时。
+- TLS 追加说明在本基线已包含：与上次交付 `e697b39c0` 逐字节无差异，不重复修改。所有当前结果以本轮交接/JUnit 为准，不将 macOS 本地测试称为 GitHub Linux 已复绿。
+- 本地验证：三份目标文件在 Python 3.11/3.12 均为 116 项、零 failure/error/skip。原批次 1 为 935 项全过；原批次 2 为 509 项、零 failure/error、3 个原环境 skip；原批次 9 为 505 项、8 failure、零 error、1 个原环境 skip。后者 8 项都在未改动的 `test_host_command_stream`，修前也失败，实际原夹具诊断捕获 `OSError: managed background launcher identity unavailable`，在插件环境准备阶段终止；未绕过身份门或加 skip，整批门禁如实保留非零，须在具备启动器身份的平台复核。
+- 独立只读审查无阻断；采纳计量精度建议，增加归档磁盘增量精确等于 `copied_bytes` 的断言后重跑通过。反向对照重新引入根锁等待、永久零复制或吞掉 unlink 错误，四项均正确失败；复制计量加一的对照也被精确断言检出。正向受控 120 毫秒写入在新锁观察点通过，旧 50 毫秒测试失败。
+
+在工作树根及安装项目开发依赖的 Python 3.11 环境运行；本任务的全部 Python/pytest 使用规定的隔离 HOME：
+
+```bash
+export HOME=/private/tmp/my-agent-home-fix-ci2 MY_AGENT_HOME=/private/tmp/my-agent-home-fix-ci2
+python3 -m pytest agent_py_agent/tests/test_v13_w3_workflow_concurrency.py agent_py_agent/tests/test_issues_w10_spool_recovery.py agent_py_agent/tests/test_issues_w9_asset_auxiliary.py -q --tb=short -o addopts=''
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+另按冻结名单合跑三个原失败批次及其全部邻居；不删测试、不增加 skip、不放宽 FD/读回/错误断言。新建 uv 环境需提供 pip（插件 wheel 邻居测试真实调用 `python -m pip`），环境缺失不能算业务失败。只改三份回归测试和本记录；生产实现、配置及时间片均不改，不推送、不合并、不部署。
+
 ## 2026-11-06 CI-FIX-70A：TLS 真实参照、局部 FD 观察与确定性排空/重投
 
 来源：`ci-fix-70a27b55a.md`、追加的 `rework-scale-mem-r2-r3-steer.md`，对应 main `70a27b55a` 的 Test 失败。

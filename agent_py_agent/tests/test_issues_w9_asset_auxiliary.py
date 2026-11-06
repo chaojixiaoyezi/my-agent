@@ -327,16 +327,37 @@ def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch,
     assert delta == 0
 
 
-# LLM: 使用真实领域锁或在固定父FD的unlink处模拟单次错误，保留原关闭式结果和恢复路径。
-# 函数用途: 验证辅助记录锁忙、删除失败时FD和读取计量上下文均归还。
+# LLM: 使用真实领域锁或固定父FD的unlink错误；合法空片必须续跑至观察点，全部原FD/关闭式恢复断言保留。
+# 函数用途: 在普通和扫描耗尽前两片的情况下验证锁忙/删除失败均释放FD并可恢复。
+@pytest.mark.parametrize('empty_slices', [0, 2])
 @pytest.mark.parametrize('condition', ['lock_busy', 'unlink_failure'])
-def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_property, condition):
+def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_property, condition, empty_slices):
     import os
     from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space import storage_lanes
 
     path = evolution_request(setup, 'fd-check')
     original, failed = os.unlink, []
+    clock, delayed = [0.0], []
+    auxiliary_window = history._auxiliary_window
 
+    # LLM: 只给预算时钟注入有限扫描延迟，真实目录、记录、锁、pin与unlink保持不变。
+    # 函数用途: 制造合法零候选片，确保错误路径测试不依赖25毫秒内到达unlink。
+    def directory_scan(*args, **kwargs):
+        result = auxiliary_window(*args, **kwargs)
+        if len(delayed) < empty_slices:
+            delayed.append(True)
+            clock[0] += storage_lanes.STORAGE_LANE_SLICE_MS / 1000 + 1
+        return result
+
+    if empty_slices:
+        monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+        monkeypatch.setattr(history, '_auxiliary_window', directory_scan)
+
+    # LLM: 能力检查保留，仅在实际目标父FD的unlink处报错，不吞其它文件操作。
+    # 函数用途: 证明到达了真实删除观察点，而非把预算延期当删除失败。
     def fail_unlink(name, *args, **kwargs):
         if name == path.name and kwargs.get('dir_fd') is not None:
             failed.append(True)
@@ -349,16 +370,27 @@ def test_auxiliary_failure_paths_close_descriptors(setup, monkeypatch, record_pr
         monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {fail_unlink})
     lock = held_lock(locked_json_path(path)) if condition == 'lock_busy' else nullcontext()
     with lock:
-        # 先收旧对象，再只观察本夹具的 home；其它测试的网络/SQLite FD 关闭不属于本次维护。
         gc.collect()
         before = _fd_count(root=setup[0].root)
-        row = history.maintain_asset_auxiliary_lane(request(setup))
-        gc.collect()
-        delta = _fd_count(root=setup[0].root) - before
+        cursor, rows = {}, []
+        for _ in range(100):
+            row = history.maintain_asset_auxiliary_lane(request(setup, cursor=cursor))
+            validate_lane_receipt(row)
+            rows.append(row)
+            gc.collect()
+            delta = _fd_count(root=setup[0].root) - before
+            assert delta == 0 and path.exists() and row['deleted_items'] == 0
+            assert not row['complete'] and row['cursor']['after'] == ''
+            assert history._AUXILIARY_READ_METER.get() is None
+            if row['skipped'].get('lock_busy') or failed:
+                break
+            # 没到故障点只能是扫描预算耗尽；不能静默接受其它跳过原因或错误。
+            assert row['items'] == 0 and not row['errors'] and not row['skipped']
+            cursor = json.loads(json.dumps(row['cursor']))
+        else:
+            pytest.fail(f'auxiliary failure observation never reached: {rows!r}')
         record_property('fd_delta', delta)
-        assert delta == 0 and path.exists() and row['deleted_items'] == 0
-        assert not row['complete'] and row['cursor']['after'] == ''
-        assert history._AUXILIARY_READ_METER.get() is None
+        assert [r['items'] for r in rows[:empty_slices]] == [0] * empty_slices
         if condition == 'lock_busy':
             assert row['skipped']['lock_busy'] == 1
         else:
