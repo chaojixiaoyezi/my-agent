@@ -98,7 +98,7 @@ def test_default_bind_is_loopback(tmp_path) -> None:
 def test_gateway_server_absorbs_multi_tui_reconnect_bursts() -> None:
     """单 Gateway 复用固定 worker，并给重连突发保留有界容量。"""
     assert GatewayBoundedHTTPServer.request_queue_size >= 128
-    assert GatewayBoundedHTTPServer.max_request_workers == 64
+    assert GatewayBoundedHTTPServer.max_request_workers == 128
     assert (
         GatewayBoundedHTTPServer.max_outstanding_requests
         >= GatewayBoundedHTTPServer.max_request_workers
