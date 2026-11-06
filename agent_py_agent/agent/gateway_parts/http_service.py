@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from ..auth.configuration import build_gateway_auth_middleware, validate_gateway_auth_configuration
 from ..runtime_errors import runtime_error_report
@@ -393,6 +393,7 @@ class GatewayHTTPServer:
         self._local_client_credential = ""
         # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
         self.plugin_display = None
+        self.business_stream_pool = None
         self.plugin_channel_pool = None
         from ..plugin_host.http_transport import HostTransport
         from ..plugin_host.gateway_composition import build_gateway_host_composition
@@ -422,8 +423,13 @@ class GatewayHTTPServer:
 
         group = (self.drain_runtime.prepare_pool("control", "http/requests")
                  if self.drain_runtime is not None else None)
+        config = getattr(self.agent if self.agent is not None else self.control_plane, "config", None)
         with original_http_birth(self.drain_runtime, control=self.control_plane, paths=self.paths):
-            options = {} if group is None else {
+            # 独立车道只用于count=0，不向同一排空组绑定第二个执行器。
+            options = {
+                "control_lane_workers": int(getattr(config, "gateway_http_control_lane_workers", 0) or 0),
+                "pending_connection_limit": int(getattr(config, "gateway_global_inflight_limit", 0) or 0),
+            } if group is None else {
                 "request_worker_initializer": group.remember_current_thread,
                 "request_worker_failure": group.retain_fault,
                 "drain_runtime": self.drain_runtime, "drain_resource": group,
@@ -438,6 +444,15 @@ class GatewayHTTPServer:
                 from ..plugin_host.http_transport import HostTransport
 
                 self.plugin_host = HostTransport(build_gateway_host_composition(self, self.paths))
+            if group is None and (stream_max := int(getattr(config, "gateway_native_stream_max", 0) or 0)) > 0:
+                from .business_stream_pool import BusinessStreamPool
+
+                self.business_stream_pool = BusinessStreamPool(
+                    max_streams=stream_max,
+                    per_owner_max=max(1, int(getattr(config, "gateway_user_inflight_limit", 1) or 1)),
+                    write_timeout_seconds=float(self.server.request_socket_timeout),
+                )
+                self.business_stream_pool.start()
             self.plugin_host.start(self.drain_runtime)
             self._thread = threading.Thread(target=self._serve, daemon=True)
             listener = (self.drain_runtime.retain_thread("control", "http/listener", self._thread)
@@ -537,6 +552,9 @@ class GatewayHTTPServer:
             self.coordinator_memory_resources.close_admission()
         if getattr(self, "plugin_host", None) is not None:
             self.plugin_host.close()
+        pool, self.business_stream_pool = self.business_stream_pool, None
+        if pool is not None:
+            pool.close()
         set_host_api_base(None)
         # G4：停机时注销本服务登记的 Gateway 端口（在 server_close 前取端口）。
         if self.server:

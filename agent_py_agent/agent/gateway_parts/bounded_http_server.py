@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -24,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 from ..concurrency import DurableDaemonThreadPoolExecutor
+from .http_lanes import HTTPLaneRouter
 from .multiprocess_http_transport import (
     HTTPBirthGateBusy,
     http_request_work_scope,
@@ -44,6 +46,7 @@ class GatewayBoundedHTTPServer(HTTPServer):
     request_socket_timeout = 5.0
     request_queue_timeout = 2.0
     http_birth_gate_timeout_seconds = 1.0
+    _lanes = None
 
     # LLM: Construction must establish admission before serve_forever can
     # accept work. The daemon executor preserves the previous restart behavior:
@@ -60,6 +63,8 @@ class GatewayBoundedHTTPServer(HTTPServer):
         request_worker_failure: Callable[[BaseException], None] | None = None,
         drain_runtime: Any = None,
         drain_resource: Any = None,
+        control_lane_workers: int = 0,
+        pending_connection_limit: int = 0,
     ) -> None:
         require_http_worker_source(drain_runtime, drain_resource, request_worker_initializer, request_worker_failure)
         workers = max(1, int(self.max_request_workers))
@@ -81,6 +86,14 @@ class GatewayBoundedHTTPServer(HTTPServer):
                 request_handler_class,
                 bind_and_activate=bind_and_activate,
             )
+        # 只有无排空运行时才建立独立执行器，原多进程设施来源和绑定保持不变。
+        if int(control_lane_workers) > 0 and drain_runtime is None:
+            self._lanes = HTTPLaneRouter(
+                self, control_workers=int(control_lane_workers),
+                pending_limit=int(pending_connection_limit) if int(pending_connection_limit) > 0 else capacity,
+                header_timeout_seconds=float(self.request_socket_timeout),
+                queue_timeout_seconds=float(self.request_queue_timeout), control_capacity=capacity,
+            )
 
     # LLM: 在途数包含运行和排队；从接收时计排队时限，socket 超时只约束传输，不中止已接收的持久任务。
     # LLM: 懒submit可能创建Thread，须同原runtime的controller→lease→runtime有界末门；超时未submit只回503，不保未知出生；submit异常仍保原group责任。
@@ -90,6 +103,10 @@ class GatewayBoundedHTTPServer(HTTPServer):
         request: socket.socket,
         client_address: tuple[str, int],
     ) -> None:
+        lanes = self._lanes
+        if lanes is not None and not isinstance(request, ssl.SSLSocket):
+            lanes.admit(request, client_address)
+            return
         if self._closing.is_set() or not self._request_slots.acquire(blocking=False):
             self._reject_overloaded_request(request)
             return
@@ -198,11 +215,41 @@ class GatewayBoundedHTTPServer(HTTPServer):
         finally:
             self.shutdown_request(request)
 
+    # LLM: 就绪和过期路径不能阻塞选择器或接收线程；单次尽力发送后仍关闭连接。
+    # 函数用途: 用与原过载响应相同的报文非阻塞拒绝连接。
+    def _reject_without_wait(self, request: socket.socket) -> None:
+        payload = json.dumps(
+            {
+                "ok": False,
+                "error_code": "GATEWAY_HTTP_BUSY",
+                "message": "Gateway 当前连接繁忙，请稍后重试。",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        response = (
+            f"HTTP/1.1 {HTTPStatus.SERVICE_UNAVAILABLE.value} "
+            f"{HTTPStatus.SERVICE_UNAVAILABLE.phrase}\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            "Retry-After: 1\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii") + payload
+        try:
+            request.setblocking(False)
+            request.send(response)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
+
     # LLM: Stop admission before cancelling queued work. Running daemon workers
     # may finish their current durable handler, matching the former daemon-thread
     # shutdown boundary without an interpreter-wide join.
     # 函数用途: 停止接收新请求，取消尚未执行的排队请求并关闭监听套接字。
     def server_close(self) -> None:
+        if self._lanes is not None:
+            self._lanes.close()
         self._closing.set()
         self._request_executor.shutdown(wait=False, cancel_futures=True)
         super().server_close()
