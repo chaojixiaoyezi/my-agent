@@ -11,6 +11,7 @@ EffectiveConfig so runtime code does not invent a second config hierarchy.
 """
 
 from collections.abc import Mapping
+from copy import copy
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -159,7 +160,9 @@ def _base_config_values(config: object, allowed: set[str], *, config_cls: type |
 # 函数用途: 复制基础配置的来源信息，供后续叠加保留管理员原值。
 def _base_config_sources(config: object, values: Mapping[str, Any]) -> dict[str, dict[str, object]]:
     raw_sources = getattr(config, "config_sources", {}) if config is not None else {}
-    sources: dict[str, dict[str, object]] = {}
+    # 保留来源字典的加载基线属性，公开键仍只按原值集合逐项规范化。
+    sources: dict[str, dict[str, object]] = copy(raw_sources) if isinstance(raw_sources, dict) else {}
+    sources.clear()
     for key in values:
         source = raw_sources.get(key) if isinstance(raw_sources, dict) else None
         sources[key] = _source_record(source)

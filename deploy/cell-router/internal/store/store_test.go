@@ -1,7 +1,9 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -103,5 +105,60 @@ func TestDurableLedgerLifecycle(t *testing.T) {
 		if _, e = s.GetReceipt(r.AppID, state); e != nil {
 			t.Fatal("purged live or DLQ row", state, e)
 		}
+	}
+}
+
+// LLM: Replay may reset scheduling only for DLQ; receipt identity, bytes and original age remain durable.
+// 函数用途: 验证只有死信可重放，清零后首次领取为一次，且去重不覆盖历史数据。
+func TestReplayPreservesReceiptIdentityAndAge(t *testing.T) {
+	for _, state := range []string{"pending", "delivering", "delivered", "dlq"} {
+		t.Run(state, func(t *testing.T) {
+			s, e := Open(filepath.Join(t.TempDir(), "receipts.sqlite"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer s.Close()
+			target := "cell-00"
+			r := Receipt{AppID: "app-example", EventID: "aged-example", RawBody: []byte(`{"original":true}`), HeadersJSON: `{"Content-Type":["application/json"]}`, ReceivedAt: 1, DirectoryVersion: 7, TargetCell: &target, State: state, Attempts: 9, NextAttemptAt: 5, LastError: "RETRY_HORIZON"}
+			if old, e := s.InsertReceipt(r); e != nil || old != nil {
+				t.Fatal(old, e)
+			}
+			const replayAt int64 = 99_000_000
+			e = s.Replay(r.AppID, r.EventID, replayAt)
+			if state != "dlq" {
+				if !errors.Is(e, ErrNotFound) {
+					t.Fatal("non-DLQ receipt replayed", e)
+				}
+				row, e := s.GetReceipt(r.AppID, r.EventID)
+				if e != nil || !reflect.DeepEqual(row, &r) {
+					t.Fatal("refused replay changed receipt", row, e)
+				}
+				return
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			want := r
+			want.State, want.Attempts, want.NextAttemptAt, want.LastError = "pending", 0, replayAt, ""
+			row, e := s.GetReceipt(r.AppID, r.EventID)
+			if e != nil || !reflect.DeepEqual(row, &want) {
+				t.Fatal("replay changed more than scheduling", row, e)
+			}
+			duplicate := r
+			duplicate.RawBody, duplicate.ReceivedAt, duplicate.DirectoryVersion = []byte(`{"replacement":true}`), replayAt, 8
+			if old, e := s.InsertReceipt(duplicate); e != nil || !reflect.DeepEqual(old, &want) {
+				t.Fatal("duplicate changed replayed receipt", old, e)
+			}
+			if rows, e := s.ClaimDue(replayAt-1, 1); e != nil || len(rows) != 0 {
+				t.Fatal("replay scheduled before requested time", rows, e)
+			}
+			want.State, want.Attempts = "delivering", 1
+			if rows, e := s.ClaimDue(replayAt, 1); e != nil || len(rows) != 1 || !reflect.DeepEqual(&rows[0], &want) {
+				t.Fatal("replay claim did not start at attempt one", rows, e)
+			}
+			if rows, e := s.ClaimDue(replayAt, 1); e != nil || len(rows) != 0 {
+				t.Fatal("replay claim was not exclusive", rows, e)
+			}
+		})
 	}
 }

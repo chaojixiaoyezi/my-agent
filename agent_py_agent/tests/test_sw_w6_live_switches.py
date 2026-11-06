@@ -444,3 +444,134 @@ def test_applied_yaml_baseline_is_published_even_when_policy_reload_fails(tmp_pa
         live.refresh_live_switches(config)
     assert config.enable_tools is True
     assert dict(config.config_sources.applied)["enable_tools"] is True
+
+
+@pytest.mark.parametrize("scope", ["owner", "task", "run"])
+@pytest.mark.parametrize("initial", [False, True])
+def test_live_refresh_preserves_equal_valued_scoped_source(tmp_path, scope, initial):
+    from agent_py_agent.agent.settings.runtime_scope_config import runtime_scope_priority
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+
+    text = f"enable_tools: {str(initial).lower()}\n"
+    path, host = _config(tmp_path, text)
+    overlay = tmp_path / f"{scope}.yaml"
+    _write(overlay, text)
+    scoped = apply_runtime_config_environment(host, env={
+        "MY_AGENT_RUNTIME_CONFIG": str(overlay), "MY_AGENT_RUNTIME_CONFIG_SCOPE": scope,
+    })
+    expected_source = {"source": str(overlay), "priority": runtime_scope_priority(scope)}
+    assert scoped.config_source_for("enable_tools") == expected_source
+    live.register_live_config(host)
+    live.register_live_config(scoped)
+    for enabled in (not initial, initial, not initial):
+        _write(path, f"enable_tools: {str(enabled).lower()}\n")
+        live.refresh_live_switches(path=path, force=True)
+        assert host.enable_tools is enabled
+        assert scoped.enable_tools is initial
+        assert scoped.config_source_for("enable_tools") == expected_source
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_first_refresh_adopts_edit_after_load_before_registration(tmp_path, initial):
+    path, config = _config(tmp_path, f"enable_tools: {str(initial).lower()}\n")
+    assert getattr(config, "_live_switch_binding", None) is None
+    assert path.resolve() not in live._FILES
+    _write(path, f"enable_tools: {str(not initial).lower()}\n")
+    for _ in range(3):
+        live.refresh_live_switches(config, force=True)
+        assert config.enable_tools is not initial
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_delayed_runtime_copy_keeps_programmatic_override_baseline(tmp_path, initial):
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+
+    path, host = _config(tmp_path, f"enable_tools: {str(initial).lower()}\n")
+    live.register_live_config(host)
+    overlay = tmp_path / "run.yaml"
+    _write(overlay, "tool_read_max_chars: 2000\n")
+    child = apply_runtime_config_environment(replace(host, enable_tools=not initial), env={
+        "MY_AGENT_RUNTIME_CONFIG": str(overlay), "MY_AGENT_RUNTIME_CONFIG_SCOPE": "run",
+    })
+    _write(path, f"enable_tools: {str(not initial).lower()}\n")
+    live.refresh_live_switches(host)
+    _write(path, f"enable_tools: {str(initial).lower()}\n")
+    live.refresh_live_switches(child, force=True)
+    assert host.enable_tools is initial
+    assert child.enable_tools is not initial
+    assert child.tool_read_max_chars == 2000
+    assert child.config_source_for("tool_read_max_chars")["source"] == str(overlay)
+
+
+def test_live_refresh_uses_source_ownership_not_priority_threshold(tmp_path):
+    from agent_py_agent.agent.settings.runtime_scope_config import (
+        RuntimeConfigLayer,
+        merge_runtime_config_layers,
+    )
+
+    path, host = _config(tmp_path, "")
+    effective = merge_runtime_config_layers(host, [
+        RuntimeConfigLayer("owner", "explicit-owner-policy", {"enable_tools": True}, priority=5),
+    ])
+    scoped = replace(host, **effective.values)
+    scoped.config_sources = effective.sources
+    scoped.config_layers = list(effective.layers)
+    expected_source = scoped.config_source_for("enable_tools")
+    live.register_live_config(host)
+    live.register_live_config(scoped)
+    _write(path, "enable_tools: false\n")
+    live.refresh_live_switches(host, force=True)
+    assert host.enable_tools is False
+    assert scoped.enable_tools is True
+    assert scoped.config_source_for("enable_tools") == expected_source
+
+
+def test_live_refresh_adopts_file_and_schema_default_roundtrip(tmp_path):
+    path, config = _config(tmp_path, "")
+    assert config.enable_tools is True
+    live.register_live_config(config)
+    _write(path, "enable_tools: false\n")
+    live.refresh_live_switches(config)
+    assert config.enable_tools is False
+    _write(path, "")
+    live.refresh_live_switches(config)
+    assert config.enable_tools is True
+
+
+@pytest.mark.parametrize("context_scope", ["main", "task_local"])
+def test_run_start_does_not_prepare_tools_for_scoped_restriction(tmp_path, monkeypatch, context_scope):
+    from agent_py_agent.agent.agent_core import runtime_mixin as runtime
+    from agent_py_agent.agent.agent_core.subagent import model_selection
+    from agent_py_agent.agent.settings import model_scope
+    from agent_py_agent.agent.settings.services.runtime_config_env import (
+        apply_runtime_config_environment,
+    )
+
+    path, host = _config(tmp_path, "enable_tools: false\n")
+    overlay = tmp_path / "task.yaml"
+    _write(overlay, "enable_tools: false\n")
+    config = apply_runtime_config_environment(host, env={
+        "MY_AGENT_RUNTIME_CONFIG": str(overlay), "MY_AGENT_RUNTIME_CONFIG_SCOPE": "task",
+    })
+    live.register_live_config(config)
+    _write(path, "enable_tools: true\n")
+    seen = []
+    result = SimpleNamespace(runtime_status="ok")
+    agent = SimpleNamespace(
+        config=config, tools=SimpleNamespace(prepare_for_run=lambda: seen.append("tools")),
+        _build_finalize_context=lambda *args: None,
+        _get_finalization_service=lambda: SimpleNamespace(finalize=lambda ctx: result),
+    )
+    monkeypatch.setattr(model_selection, "canonical_subagent_model_scope", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(model_scope, "model_dependency_lifetime", lambda *args: nullcontext())
+    monkeypatch.setattr(runtime, "current_prompt_scope", lambda *args: nullcontext())
+    monkeypatch.setattr(runtime, "_prepare_runtime_context", lambda *args: seen.append(config.enable_tools))
+    monkeypatch.setattr(runtime, "_runtime_loop_params", lambda *args: None)
+    monkeypatch.setattr(runtime, "_execute_runtime_loop", lambda *args: SimpleNamespace(native_compact_carry=None))
+    assert runtime._run_once_with_params(agent, "核对工具限制", runtime.RunParams(context_scope=context_scope)) is result
+    assert seen == [False]
+    assert config.config_source_for("enable_tools")["source"] == str(overlay)

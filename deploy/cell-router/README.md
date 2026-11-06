@@ -3,6 +3,16 @@
 本组件只接收飞书 webhook，并为个人 HTTP 凭据选择组织所属 Cell。不修改 Python。
 目录是经过校验的 JSON 快照；SQLite 仅保存投递回执和同步卡片结果。
 
+## R3 回归说明（2026-11-06）
+
+来源：SCALE-R3 / SCALE-R3-GO 的 P1-3、P1-4。
+`/authz` 从公开监听器移至受保护管理监听器；重放复用已有 attempts 清零与领取递增，
+只豁免首次尝试的发送前窗口检查，不改发送后窗口检查、表结构、参数或接收时间。
+四个 Go 测试文件覆盖双监听隔离、受信任鉴权响应、普通公开代理、过期首次投递、
+过期死信成功/失败重放、未知 owner 重载重放、终态拒绝及去重/历史字段保留。
+复现和回归入口：在 `deploy/cell-router` 执行 `go test ./... -v`；
+并发检查执行 `go test -race -count=1 ./...`。这些测试不替代生产网络策略验收。
+
 ## 构建与启动
 
 ```sh
@@ -78,12 +88,15 @@ Cell 的 `GatewayIngressStore.put_if_absent` 吸收；本地测试用稳定事�
 冲突或未知凭据 401，不联系 Cell。向 Cell 的请求清除所有大小写形式的客户端身份字段后，
 只设置一个 `X-Gateway-Token`、`X-User-Id`、`X-Channel`。`X-Cell-*` 和其他认证字段不透传。
 NDJSON 使用逐帧刷新，公共服务器没有写超时。frozen 返回 503 和 Retry-After。
-`GET /authz` 只鉴权，返回三身份头及 `X-Cell-Upstream`，供受信任 nginx auth_request 使用；
-它会返回 Cell 凭据，所以前置代理不得把此内部响应头暴露给浏览器。
+`GET $ROUTER_ADMIN/authz` 只鉴权，返回三身份头及 `X-Cell-Upstream`，
+供受信任 nginx `auth_request` 使用；子请求必须访问受保护的管理地址而非公开地址，
+并传入个人凭据。它会返回 Cell 凭据，所以前置代理不得把此内部响应头暴露给浏览器。
+公开监听器的 `/authz` 固定返回 404，即使个人凭据有效也不会返回 Cell 凭据。
 
-管理监听器提供 `/healthz`、`/readyz`、`/configz`、`/receipts`、`/dlq`、`/dlq/replay`，
-这些路由不在公开监听器注册。管理口不内置用户登录，必须保持 ClusterIP，
-并通过 NetworkPolicy/RBAC 限制为运维入口。回执查询不返回原始正文或请求头。
+管理监听器提供 `/authz`、`/healthz`、`/readyz`、`/configz`、`/receipts`、`/dlq`、`/dlq/replay`，
+公开监听器对这些路径显式返回 404。除 `/authz` 仍核验个人凭据外，管理口不内置用户登录，
+必须保持 ClusterIP，并通过 NetworkPolicy/RBAC 限制为运维及受信任前置代理入口。
+回执查询不返回原始正文或请求头。
 
 ```sh
 curl "$ROUTER_ADMIN/receipts?app_id=app-example&event_id=event-example"
@@ -93,7 +106,11 @@ curl -X POST "$ROUTER_ADMIN/dlq/replay" -H 'Content-Type: application/json' \
 ```
 
 重放仅允许 DLQ 回到 pending，清零 attempts 并立即调度；不会把已 delivered 的行倒退。
-先更正目录并成功重载，再重放 OWNER_UNKNOWN。
+接收时间 `ReceivedAt` 和原始正文保持不变。初次领取及每次显式重放后的首次领取
+（attempts 为 1）允许一次正常投递尝试，即使原始接收时间已经超过重试窗口。
+后续尝试仍受发送前窗口限制；首次尝试若失败且已超过窗口，发送后立即回到
+`RETRY_HORIZON` 死信，不再自动重试。归属未知或载荷无效仍按原规则拒绝投递，
+不选择默认 Cell；先更正目录并成功重载，再重放 OWNER_UNKNOWN。
 
 ## 运维参数（class E）
 

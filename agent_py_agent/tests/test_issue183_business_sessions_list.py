@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import http.client
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -113,6 +115,66 @@ def test_sessions_list_owner_isolation(background_http):
     assert alice.thread_id not in str(result) and bob.thread_id not in str(result)
 
 
+# LLM: 两次真实认证HTTP共享owner与services缓存，仅在首个上下文构建后暂停；不替换认证、列表读取或响应。
+#   第二请求完成后再释放首请求，两页的绑定与预览必须各自保持当前viewer；异常也释放Event避免挂住收尾。
+# 函数用途: 固定复现共享owner下请求闭包串用，验证交错请求不会读到对方会话。
+@pytest.mark.parametrize('first_user,second_user', [
+    ('business-alice', 'business-bob'), ('business-bob', 'business-alice'),
+])
+def test_sessions_list_keeps_request_viewer_during_interleaving(background_http, monkeypatch,
+        first_user, second_user):
+    _, base = background_http
+    base.config.gateway_per_user_owner_scoping = False
+    store = owner_conversation_store(base, base.home_paths, initialize=True)
+    expected = {}
+    for user in (first_user, second_user):
+        conversation_id = f'{user}-shared-owner'
+        thread = store.threads.get_or_create({'canonical_user_id': user, 'channel': 'feishu',
+            'channel_conversation_id': conversation_id, 'channel_user_id': user,
+            'owner_id': base.home_paths.owner_id, 'owner_home': str(base.home_paths.owner_home_dir)})
+        preview = f'会话预览 {user}'
+        store.messages.append({'thread_id': thread.thread_id, 'role': 'user', 'content': preview,
+            'metadata': {'gateway_request_id': conversation_id}})
+        expected[user] = (thread.thread_id, user, conversation_id, preview)
+
+    entered, release = Event(), Event()
+    contexts = {}
+    original = api.native_business_context
+
+    # LLM: 仅调度两个真实请求的先后，原上下文、认证与owner裁决照常执行。
+    # 函数用途: 等首请求拿到上下文后让第二请求完整走完。
+    def interleave(handler, server):
+        context, services = original(handler, server)
+        contexts[context.subject_id] = (context, services)
+        if context.subject_id == first_user:
+            entered.set()
+            assert release.wait(timeout=5), 'second request did not release the first request'
+        return context, services
+
+    monkeypatch.setattr(api, 'native_business_context', interleave)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(background_call, background_http, 'sessions.list', user=first_user)
+        try:
+            assert entered.wait(timeout=5), 'first request did not construct its context'
+            second_status, second_result = background_call(background_http, 'sessions.list', user=second_user)
+            assert second_status == 200 and second_result['error'] is None, second_result
+            assert second_result['data']['owner_id'] == base.home_paths.owner_id
+            assert [(item['thread_id'], item['channel_user_id'], item['conversation_id'], item['preview'])
+                for item in second_result['data']['items']] == [expected[second_user]]
+            first_context, first_services = contexts[first_user]
+            second_context, second_services = contexts[second_user]
+            assert first_services is second_services
+            assert first_context.host is not second_context.host
+            assert first_services.host is second_context.host
+        finally:
+            release.set()
+        first_status, first_result = first.result(timeout=10)
+    assert first_status == 200 and first_result['error'] is None, first_result
+    assert first_result['data']['owner_id'] == base.home_paths.owner_id
+    assert [(item['thread_id'], item['channel_user_id'], item['conversation_id'], item['preview'])
+        for item in first_result['data']['items']] == [expected[first_user]]
+
+
 # LLM: 关闭既有开关仍拒绝业务动作；W1 历史列表不随业务开关失效。
 # 函数用途: 保住默认关闭的业务门与始终可用的 HTTP 列表。
 def test_sessions_list_disabled_spaces_is_503(background_http):
@@ -187,3 +249,24 @@ def test_sessions_list_requires_native_host_binding(tmp_path):
     status, result = api.execute_business({'action': 'system.capabilities.extensions',
         'request_id': 'missing-host-discovery', 'params': {}}, context, services)
     assert status == 200 and 'sessions.list' not in result['data']['supported_actions'], result
+
+
+# LLM: 使用无请求context的原services.ready/v13_ready入口，只检查能力绑定，绝不能执行数据闭包。
+# 函数用途: 防止修数据读取时把context-free能力查询也改成依赖当前请求。
+def test_sessions_list_readiness_without_request_context(tmp_path):
+    paths = home_paths(tmp_path / 'readiness-home')
+    scoped = home_paths_with_owner(paths, resolve_owner_home(paths.root, OwnerIdentity.local_main()))
+
+    # LLM: readiness只允许检查可调用性，若读数据即为回归。
+    # 函数用途: 捕获能力检查不该触发的会话数据访问。
+    def forbidden(**params):
+        pytest.fail('capability readiness must not read session data')
+
+    host = SimpleNamespace(home_paths=scoped, config=SimpleNamespace(business_spaces_enabled=True),
+        business_session_list=forbidden)
+    services = api.BusinessServices(host)
+    assert services.ready('sessions.list') is True
+    assert v13.v13_ready('sessions.list', services, context=None) is True
+    host.config.business_spaces_enabled = False
+    assert services.ready('sessions.list') is False
+    assert v13.v13_ready('sessions.list', services, context=None) is False

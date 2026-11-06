@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+// LLM: Listener isolation is tested at the composition root; this handler retains the trusted authz contract.
+// 函数用途: 验证普通代理身份重写和管理口鉴权响应，拒绝路径不得返回 Cell 凭据。
 func TestIdentityRewriteAndAuthorization(t *testing.T) {
 	var calls atomic.Int32
 	var received http.Header
@@ -49,14 +51,17 @@ func TestIdentityRewriteAndAuthorization(t *testing.T) {
 		}
 	}
 	for _, token := range []string{"", testutil.Random(t)} {
-		req = httptest.NewRequest("GET", "/client/business/send", nil)
-		req.Header.Set("X-Gateway-Token", token)
-		w = httptest.NewRecorder()
-		h.ServeHTTP(w, req)
-		if w.Code != 401 || calls.Load() != 1 {
-			t.Fatal(w.Code, calls.Load())
+		for _, path := range []string{"/client/business/send", "/authz"} {
+			req = httptest.NewRequest("GET", path, nil)
+			req.Header.Set("X-Gateway-Token", token)
+			w = httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != 401 || w.Header().Get("X-Gateway-Token") != "" || w.Header().Get("X-Cell-Upstream") != "" || calls.Load() != 1 {
+				t.Fatal(path, w.Code, calls.Load())
+			}
 		}
 	}
+	// A direct authz handler call represents the protected listener, not the public mux.
 	req = httptest.NewRequest("GET", "/authz", nil)
 	req.Header.Set("Authorization", "Bearer "+e.Token)
 	w = httptest.NewRecorder()
@@ -64,6 +69,13 @@ func TestIdentityRewriteAndAuthorization(t *testing.T) {
 	if w.Code != 200 || w.Header().Get("X-User-Id") != "ou_example_00" || w.Header().Get("X-Channel") != "feishu" || w.Header().Get("X-Gateway-Token") != e.CellToken || w.Header().Get("X-Cell-Upstream") != cell.URL || calls.Load() != 1 {
 		t.Fatal(w.Code, w.Header())
 	}
+	req.Method = http.MethodPost
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed || w.Header().Get("X-Gateway-Token") != "" || w.Header().Get("X-Cell-Upstream") != "" || calls.Load() != 1 {
+		t.Fatal("authz method contract changed", w.Code)
+	}
+	req.Method = http.MethodGet
 	e.Seed.Cells[0].State = "frozen"
 	e.Save(t)
 	if err := e.Directory.Reload(); err != nil {
@@ -71,7 +83,7 @@ func TestIdentityRewriteAndAuthorization(t *testing.T) {
 	}
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != 503 || w.Header().Get("Retry-After") != "60" || calls.Load() != 1 {
+	if w.Code != 503 || w.Header().Get("Retry-After") != "60" || w.Header().Get("X-Gateway-Token") != "" || calls.Load() != 1 {
 		t.Fatal(w.Code, w.Header())
 	}
 	e.Seed.Cells[0].State = "draining"

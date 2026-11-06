@@ -120,7 +120,7 @@ def _register(config) -> _ConfigBinding | None:
     applied = dict(provenance.applied) if inherited else {
         key: getattr(source.fresh, key) for key in LIVE_SWITCH_KEYS if type(getattr(source.fresh, key, None)) is bool
     }
-    guard_applied = dict(provenance.guard_applied) if inherited else (
+    guard_applied = dict(provenance.guard_applied) if inherited and provenance.guard_applied else (
         {key: getattr(policy, key) for key in _GUARD_KEYS} if isinstance(policy, RuntimeGuardPolicy) else {}
     )
     binding = _ConfigBinding(weakref.ref(config), source, applied, guard_applied, raw_path)
@@ -201,12 +201,14 @@ def _auth_warning(fresh, candidate) -> str | None:
     return None
 
 
-# LLM: 每副本只覆盖仍等于上次文件值的字段；局部覆盖不推进其基线，反向切换也不会意外丢覆盖。
+# LLM: 来源归属和值基线共同决定刷新；显式作用域覆盖不推进基线，同值及反向切换也不会丢覆盖。
 # 函数用途: 应用 agent 家族开关，必要时按原入口校验 Memory 镜像。
 def _apply_switches(config, binding, fresh) -> set[str]:
+    file_sources = ({}, *fresh.config_layers)
     updates = {
         key: getattr(fresh, key) for key, previous in binding.applied.items()
-        if getattr(config, key) == previous and getattr(fresh, key) != previous
+        if config.config_sources.get(key, {}) in file_sources
+        and getattr(config, key) == previous and getattr(fresh, key) != previous
     }
     if any(getattr(config, key) != updates.get(key, getattr(config, key)) for key in _AUTH_KEYS):
         candidate = copy(config)
@@ -219,8 +221,9 @@ def _apply_switches(config, binding, fresh) -> set[str]:
             updates = {key: value for key, value in updates.items() if key not in _AUTH_KEYS}
     changed = set()
     for key, value in updates.items():
-        # 局部值在准备阶段变化时不提交；更重要的是，不为未变化字段制造覆盖写入。
-        if getattr(config, key) != binding.applied[key]:
+        # 局部来源或值在准备阶段变化时不提交，也不为未变化字段制造覆盖写入。
+        if (config.config_sources.get(key, {}) not in file_sources
+                or getattr(config, key) != binding.applied[key]):
             continue
         setattr(config, key, value)
         binding.applied[key] = value

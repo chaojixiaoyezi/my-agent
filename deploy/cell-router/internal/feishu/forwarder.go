@@ -134,7 +134,7 @@ func (f *Forwarder) backoff(attempt int) time.Duration {
 	return d
 }
 
-// LLM: Re-read current directory per delivery; never select a fallback Cell.
+// LLM: Re-read current directory; initial/replayed claims get one attempt without changing receipt age or using a fallback Cell.
 // 函数用途: 领取一条回执，重新解析当前归属并以新签名转发或入死信。
 func (f *Forwarder) DeliverOne(ctx context.Context) (bool, error) {
 	rows, e := f.Store.ClaimDue(f.Now().UnixMilli(), 1)
@@ -145,7 +145,7 @@ func (f *Forwarder) DeliverOne(ctx context.Context) (bool, error) {
 	dlq := func(reason string) (bool, error) {
 		return true, f.persist(ctx, func() error { return f.Store.MarkDLQ(r, reason) })
 	}
-	if f.Now().Sub(time.UnixMilli(r.ReceivedAt)) > f.Config.ForwardRetryHorizon.Duration {
+	if r.Attempts > 1 && f.Now().Sub(time.UnixMilli(r.ReceivedAt)) > f.Config.ForwardRetryHorizon.Duration {
 		return dlq("RETRY_HORIZON")
 	}
 	d := f.Directory.Current()

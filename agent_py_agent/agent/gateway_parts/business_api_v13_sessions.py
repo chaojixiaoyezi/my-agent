@@ -63,13 +63,13 @@ def _ready(call):
     return callable(getattr(call.services.host, 'business_session_list', None))
 
 
-# LLM: 读取前复核原上下文，只调用当前请求闭包；保留 W1 结果并归一既有业务错误码。
-# 函数用途: 返回当前认证 owner 的会话列表业务投影。
+# LLM: 读取前复核原上下文，只调用context.host的当前请求闭包，不回退缓存宿主；保留W1结果及既有错误码。
+# 函数用途: 返回当前认证viewer在本owner内的会话列表业务投影。
 def _list(call):
     v13_require_access(call)
     params = call.params
     try:
-        body = call.services.host.business_session_list(limit=params['limit'], cursor=params.get('cursor'),
+        body = call.context.host.business_session_list(limit=params['limit'], cursor=params.get('cursor'),
             include_inflight=params['include_inflight'])
     except ValueError as exc:
         if str(exc) == 'invalid session cursor':

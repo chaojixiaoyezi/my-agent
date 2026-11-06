@@ -250,6 +250,9 @@ func TestACKWaitsForCommit(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+// LLM: Replay must use the current directory without changing the receipt's original age.
+// 函数用途: 验证过期的未知归属死信仍可在更正目录后显式重放。
 func TestUnknownOwnerReplayAfterReload(t *testing.T) {
 	var calls atomic.Int32
 	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
@@ -262,8 +265,20 @@ func TestUnknownOwnerReplayAfterReload(t *testing.T) {
 	if e != nil || row.State != "dlq" || row.LastError != "OWNER_UNKNOWN" || calls.Load() != 0 {
 		t.Fatal(row, e)
 	}
+	receivedAt := row.ReceivedAt
+	r.now = r.now.Add(r.config.ForwardRetryHorizon.Duration + time.Second)
 	if done, e := r.f.DeliverOne(context.Background()); e != nil || done {
 		t.Fatal(done, e)
+	}
+	if e = r.ledger.Replay("app-example", "event-example", r.now.UnixMilli()); e != nil {
+		t.Fatal(e)
+	}
+	if done, e := r.f.DeliverOne(context.Background()); e != nil || !done {
+		t.Fatal(done, e)
+	}
+	row, e = r.ledger.GetReceipt("app-example", "event-example")
+	if e != nil || row.State != "dlq" || row.LastError != "OWNER_UNKNOWN" || row.ReceivedAt != receivedAt || calls.Load() != 0 {
+		t.Fatal("unresolved owner changed on replay", row, e, calls.Load())
 	}
 	owner := r.env.Seed.Owners[0]
 	owner.LocalOwnerID = "ou_new_example"
@@ -285,12 +300,142 @@ func TestUnknownOwnerReplayAfterReload(t *testing.T) {
 		t.Fatal(e)
 	}
 	row, e = r.ledger.GetReceipt("app-example", "event-example")
-	if e != nil || row.State != "delivered" || calls.Load() != 1 {
+	if e != nil || row.State != "delivered" || row.Attempts != 1 || row.ReceivedAt != receivedAt || calls.Load() != 1 {
 		t.Fatal(row, e, calls.Load())
 	}
 }
+
+// LLM: Aged initial claims get one HTTP attempt; unsuccessful outcomes remain horizon-bounded.
+// 函数用途: 用真实本机 HTTP 验证首次领取即使等待过期也不会在发送前被丢回死信。
+func TestAgedInitialAttempt(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var calls atomic.Int32
+			cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer cell.Close()
+			r := setup(t, cell.URL, false)
+			if w := r.send(t, r.event(t, "aged-initial", "ou_example_00")); w.Code != 200 {
+				t.Fatal(w.Code)
+			}
+			receivedAt := r.now.UnixMilli()
+			r.now = r.now.Add(r.config.ForwardRetryHorizon.Duration + time.Second)
+			if done, e := r.f.DeliverOne(context.Background()); e != nil || !done {
+				t.Fatal(done, e)
+			}
+			state, reason := "delivered", ""
+			if status != http.StatusOK {
+				state, reason = "dlq", "RETRY_HORIZON"
+			}
+			row, e := r.ledger.GetReceipt("app-example", "aged-initial")
+			if e != nil || row.State != state || row.LastError != reason || row.Attempts != 1 || row.ReceivedAt != receivedAt || calls.Load() != 1 {
+				t.Fatal("aged initial attempt", row, e, calls.Load())
+			}
+		})
+	}
+}
+
+// LLM: Use the real ledger, admin replay endpoint and HTTP Cell; count calls before and after replay.
+// 函数用途: 验证过期死信恢复后只多发送一次，失败仍有界，正文和接收时间不变。
+func TestAgedDLQReplayMakesOneDeliveryAttempt(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		for _, recovered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("encrypted=%t/recovered=%t", encrypted, recovered), func(t *testing.T) {
+				var calls, status atomic.Int32
+				status.Store(http.StatusServiceUnavailable)
+				bodies := make(chan []byte, 2)
+				cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					body, e := io.ReadAll(req.Body)
+					if e != nil {
+						t.Error(e)
+					}
+					bodies <- body
+					calls.Add(1)
+					w.WriteHeader(int(status.Load()))
+				}))
+				defer cell.Close()
+				r := setup(t, cell.URL, encrypted)
+				raw := r.event(t, "aged-replay", "ou_example_00")
+				if encrypted {
+					raw = encrypt(t, r.env.Credentials.EncryptKey, raw)
+				}
+				if w := r.send(t, raw); w.Code != 200 {
+					t.Fatal(w.Code)
+				}
+				receivedAt := r.now.UnixMilli()
+				if done, e := r.f.DeliverOne(context.Background()); e != nil || !done {
+					t.Fatal(done, e)
+				}
+				row, e := r.ledger.GetReceipt("app-example", "aged-replay")
+				if e != nil || row.State != "pending" || row.Attempts != 1 || calls.Load() != 1 {
+					t.Fatal(row, e, calls.Load())
+				}
+				r.now = r.now.Add(r.config.ForwardRetryHorizon.Duration + time.Second)
+				if done, e := r.f.DeliverOne(context.Background()); e != nil || !done {
+					t.Fatal(done, e)
+				}
+				row, e = r.ledger.GetReceipt("app-example", "aged-replay")
+				if e != nil || row.State != "dlq" || row.LastError != "RETRY_HORIZON" || row.Attempts != 2 || calls.Load() != 1 {
+					t.Fatal("pre-send horizon for subsequent attempt changed", row, e, calls.Load())
+				}
+				if recovered {
+					status.Store(http.StatusOK)
+				}
+				mux := http.NewServeMux()
+				r.f.RegisterAdmin(mux)
+				replay := func() int {
+					w := httptest.NewRecorder()
+					mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/dlq/replay", bytes.NewBufferString(`{"app_id":"app-example","event_id":"aged-replay"}`)))
+					return w.Code
+				}
+				if code := replay(); code != http.StatusOK {
+					t.Fatal("admin replay rejected", code)
+				}
+				row, e = r.ledger.GetReceipt("app-example", "aged-replay")
+				if e != nil || row.State != "pending" || row.Attempts != 0 || row.ReceivedAt != receivedAt || row.NextAttemptAt != r.now.UnixMilli() {
+					t.Fatal("replay reset contract", row, e)
+				}
+				if done, e := r.f.DeliverOne(context.Background()); e != nil || !done {
+					t.Fatal(done, e)
+				}
+				state, reason := "dlq", "RETRY_HORIZON"
+				if recovered {
+					state, reason = "delivered", ""
+				}
+				row, e = r.ledger.GetReceipt("app-example", "aged-replay")
+				if e != nil || row.State != state || row.LastError != reason || row.Attempts != 1 || row.ReceivedAt != receivedAt || !bytes.Equal(row.RawBody, raw) || calls.Load() != 2 {
+					t.Fatal("aged replay did not make exactly one HTTP attempt", row, e, calls.Load())
+				}
+				for i := 0; i < 2; i++ {
+					if body := <-bodies; !bytes.Equal(body, raw) {
+						t.Fatal("replay changed wire body")
+					}
+				}
+				if w := r.send(t, raw); w.Code != http.StatusOK {
+					t.Fatal("duplicate receipt rejected", w.Code)
+				}
+				r.now = r.now.Add(r.config.ForwardRetryHorizon.Duration)
+				if done, e := r.f.DeliverOne(context.Background()); e != nil || done || calls.Load() != 2 {
+					t.Fatal("replay or duplicate scheduled extra delivery", done, e, calls.Load())
+				}
+				if _, due, e := r.ledger.NextDue(); e != nil || due {
+					t.Fatal("terminal replay left pending work", due, e)
+				}
+				if recovered && replay() != http.StatusNotFound {
+					t.Fatal("delivered receipt replayed through admin API")
+				}
+			})
+		}
+	}
+}
+
+// LLM: Subsequent claims must stop before HTTP once the original retry horizon expires.
+// 函数用途: 验证正常重试的指数退避与既有窗口上限不被首次尝试豁免改变。
 func TestRetryBackoffAndHorizon(t *testing.T) {
-	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	var calls atomic.Int32
+	cell := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(503) }))
 	defer cell.Close()
 	r := setup(t, cell.URL, false)
 	if w := r.send(t, r.event(t, "event-example", "ou_example_00")); w.Code != 200 {
@@ -318,7 +463,7 @@ func TestRetryBackoffAndHorizon(t *testing.T) {
 		t.Fatal(e)
 	}
 	row, e := r.ledger.GetReceipt("app-example", "event-example")
-	if e != nil || row.State != "dlq" || row.LastError != "RETRY_HORIZON" {
+	if e != nil || row.State != "dlq" || row.LastError != "RETRY_HORIZON" || calls.Load() != 4 {
 		t.Fatal(row, e)
 	}
 }

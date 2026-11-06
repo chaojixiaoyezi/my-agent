@@ -58,9 +58,13 @@ func eventually(t *testing.T, check func() bool) {
 // 函数用途: 经真实双监听验证启动、投递、目录重载、管理隔离和退出。
 func TestRouterProcessLifecycle(t *testing.T) {
 	var calls atomic.Int32
+	businessHeaders := make(chan http.Header, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/feishu/callback" {
 			calls.Add(1)
+		}
+		if r.URL.Path == "/client/business/send" {
+			businessHeaders <- r.Header.Clone()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"ok":true}`)
@@ -123,15 +127,35 @@ func TestRouterProcessLifecycle(t *testing.T) {
 	if e = json.Unmarshal(b, &effective); e != nil || status != 200 || effective != c {
 		t.Fatal(status, string(b), e)
 	}
-	for _, p := range []string{"/readyz", "/healthz", "/configz", "/receipts", "/dlq", "/dlq/replay"} {
-		status, _, _ := get(public+p, true)
-		if status != 404 {
-			t.Fatal("public admin route", p, status)
+	for _, p := range []string{"/readyz", "/healthz", "/configz", "/receipts", "/dlq", "/dlq/replay", "/authz"} {
+		status, body, headers := get(public+p, true)
+		if status != 404 || headers.Get("X-Gateway-Token") != "" || bytes.Contains(body, []byte(env.CellToken)) {
+			t.Fatal("public admin route not isolated", p, status)
 		}
 	}
-	status, _, headers := get(public+"/authz", true)
-	if status != 200 || headers.Get("X-User-Id") != "ou_example_00" || headers.Get("X-Channel") != "feishu" {
+	status, _, _ = get(public+"/authz", false)
+	if status != 404 {
+		t.Fatal("public authz without personal credential", status)
+	}
+	status, _, headers := get(admin+"/authz", true)
+	if status != 200 || headers.Get("X-User-Id") != "ou_example_00" || headers.Get("X-Channel") != "feishu" || headers.Get("X-Gateway-Token") != env.CellToken || headers.Get("X-Cell-Upstream") != upstream.URL {
 		t.Fatal(status, headers)
+	}
+	status, _, headers = get(admin+"/authz", false)
+	if status != 401 || headers.Get("X-Gateway-Token") != "" {
+		t.Fatal("protected authz accepted missing credential", status)
+	}
+	status, _, headers = get(public+"/client/business/send", true)
+	if status != 200 || headers.Get("X-Gateway-Token") != "" {
+		t.Fatal("ordinary public proxy changed", status)
+	}
+	select {
+	case headers = <-businessHeaders:
+		if headers.Get("X-Gateway-Token") != env.CellToken || headers.Get("X-User-Id") != "ou_example_00" || headers.Get("X-Channel") != "feishu" {
+			t.Fatal("ordinary public proxy identity changed")
+		}
+	default:
+		t.Fatal("ordinary public request did not reach Cell")
 	}
 	raw, _ := json.Marshal(map[string]any{"header": map[string]string{"event_id": "event-example", "tenant_key": "tenant-example", "token": env.Credentials.VerificationToken}, "event": map[string]any{"sender": map[string]any{"sender_id": map[string]string{"open_id": "ou_example_00"}}, "message": map[string]string{"chat_type": "p2p"}}})
 	for i := 0; i < 2; i++ {
@@ -160,7 +184,7 @@ func TestRouterProcessLifecycle(t *testing.T) {
 	if e = cmd.Process.Signal(syscall.SIGHUP); e != nil {
 		t.Fatal(e)
 	}
-	eventually(t, func() bool { status, _, _ := get(public+"/authz", true); return status == 503 })
+	eventually(t, func() bool { status, _, _ := get(admin+"/authz", true); return status == 503 })
 	env.Seed.Cells[0].State = "serving"
 	env.Seed.Owners[0].LocalOwnerID = "admin"
 	env.Save(t)
@@ -171,7 +195,7 @@ func TestRouterProcessLifecycle(t *testing.T) {
 		b, _ := os.ReadFile(logfile.Name())
 		return strings.Contains(string(b), "DIRECTORY_OWNER")
 	})
-	status, _, _ = get(public+"/authz", true)
+	status, _, _ = get(admin+"/authz", true)
 	if status != 503 {
 		t.Fatal("invalid reload replaced previous snapshot", status)
 	}
@@ -182,7 +206,7 @@ func TestRouterProcessLifecycle(t *testing.T) {
 	if e = cmd.Process.Signal(syscall.SIGHUP); e != nil {
 		t.Fatal(e)
 	}
-	eventually(t, func() bool { status, _, _ := get(public+"/authz", true); return status == 200 })
+	eventually(t, func() bool { status, _, _ := get(admin+"/authz", true); return status == 200 })
 	// Reload traffic must not consume the termination notification slot.
 	if e = cmd.Process.Signal(syscall.SIGHUP); e != nil {
 		t.Fatal(e)

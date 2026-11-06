@@ -62,10 +62,11 @@ func run(c config.Config) error {
 	pub := http.NewServeMux()
 	pub.Handle("/feishu/", ingress)
 	pub.Handle("/", edgeHandler)
-	for _, path := range []string{"/healthz", "/readyz", "/configz", "/receipts", "/dlq", "/dlq/replay"} {
+	for _, path := range []string{"/healthz", "/readyz", "/configz", "/receipts", "/dlq", "/dlq/replay", "/authz"} {
 		pub.HandleFunc(path, http.NotFound)
 	}
 	admin := http.NewServeMux()
+	admin.Handle("/authz", edgeHandler)
 	f.RegisterAdmin(admin)
 	var ready atomic.Bool
 	admin.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })

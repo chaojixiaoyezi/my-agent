@@ -763,6 +763,15 @@ def load_config(config_path: str | Path) -> AgentConfig:
 
     normalize_agent_memory_config(config)
     apply_log_level(config)
+    from .live_switches import LIVE_SWITCH_KEYS, _ConfigSources
+
+    # 只冻结本次加载值，不登记或重读文件；守卫策略基线仍在宿主装配后的首次注册取得。
+    provenance = _ConfigSources(config.config_sources)
+    provenance.path = Path(resolved_path)
+    provenance.applied = tuple((key, getattr(config, key)) for key in LIVE_SWITCH_KEYS
+                               if type(getattr(config, key, None)) is bool)
+    provenance.guard_applied = ()
+    config.config_sources = provenance
     return config
 
 
