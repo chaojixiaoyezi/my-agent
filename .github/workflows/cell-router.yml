@@ -1,0 +1,22 @@
+name: Cell router
+on:
+  push:
+    paths: ["deploy/cell-router/**", ".github/workflows/cell-router.yml"]
+  pull_request:
+    paths: ["deploy/cell-router/**", ".github/workflows/cell-router.yml"]
+permissions:
+  contents: read
+jobs:
+  router:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/cell-router
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: deploy/cell-router/go.mod
+          cache-dependency-path: deploy/cell-router/go.sum
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...

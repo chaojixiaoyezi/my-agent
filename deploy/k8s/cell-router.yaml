@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cell-router-config
+data:
+  config.json: |
+    {
+      "listen_addr": ":8080", "admin_addr": ":8081",
+      "directory_seed_path": "/etc/cell-router/config/directory.json",
+      "receipts_db_path": "/var/lib/cell-router/receipts.sqlite",
+      "read_header_timeout": "5s", "timestamp_tolerance": "300s",
+      "forward_timeout": "10s", "forward_workers": 8,
+      "forward_backoff_initial": "1s", "forward_backoff_max": "60s",
+      "forward_retry_horizon": "30m", "card_proxy_timeout": "2500ms",
+      "receipt_retention": "24h", "shutdown_timeout": "25s"
+    }
+  directory.json: |
+    {
+      "version": 1,
+      "cells": [{"cell_id":"cell-a","base_url":"http://cell-a:8420","feishu_callback_url":"http://cell-a:8421/feishu/callback","token_secret_ref":"/etc/cell-router/cell-a/token","feishu_app_id":"app-example","capacity_users":300,"state":"serving"}],
+      "orgs": [{"org_id":"org-example","cell_id":"cell-a","state":"active"}],
+      "owners": [{"provider":"feishu","app_id":"app-example","tenant_key":"tenant-example","owner_kind":"user","provider_owner_id":"ou_example","local_owner_id":"ou_example","org_id":"org-example"}],
+      "principals": [{"token_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","principal_kind":"feishu","local_owner_id":"ou_example","org_id":"org-example","state":"disabled"}],
+      "feishu_apps": [{"app_id":"app-example","routing":"by_owner","cell_id":null,"credential_ref":"/etc/cell-router/feishu/app-example"}]
+    }
+---
+apiVersion: v1
+kind: Service
+metadata: {name: cell-router}
+spec:
+  type: ClusterIP
+  selector: {app: cell-router}
+  ports: [{name: public, port: 8080, targetPort: public}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: cell-router-admin}
+spec:
+  type: ClusterIP
+  selector: {app: cell-router}
+  ports: [{name: admin, port: 8081, targetPort: admin}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: cell-router}
+spec:
+  serviceName: cell-router
+  replicas: 1
+  selector:
+    matchLabels: {app: cell-router}
+  template:
+    metadata:
+      labels: {app: cell-router}
+    spec:
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: router
+          image: my-agent-cell-router:latest
+          args: ["-config", "/etc/cell-router/config/config.json"]
+          ports:
+            - {name: public, containerPort: 8080}
+            - {name: admin, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: receipts, mountPath: /var/lib/cell-router}
+            - {name: config, mountPath: /etc/cell-router/config, readOnly: true}
+            - {name: cell-token, mountPath: /etc/cell-router/cell-a, readOnly: true}
+            - {name: app-credentials, mountPath: /etc/cell-router/feishu/app-example, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: cell-router-config}
+        - name: cell-token
+          secret:
+            secretName: cell-a-auth
+            items: [{key: token, path: token}]
+        - name: app-credentials
+          secret:
+            secretName: cell-a-feishu
+            items:
+              - {key: encrypt_key, path: encrypt_key}
+              - {key: verification_token, path: verification_token}
+  volumeClaimTemplates:
+    - metadata: {name: receipts}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 10Gi}

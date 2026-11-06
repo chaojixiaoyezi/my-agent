@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: cell-router-only}
+spec:
+  podSelector:
+    matchLabels: {my-agent/cell: "true"}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: cell-router}
+      ports:
+        - {protocol: TCP, port: 8420}
+        - {protocol: TCP, port: 8421}
+---
+# 管理口不向普通命名空间工作负载开放；授权运维 Pod 单独标记。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: cell-router-admin-only}
+spec:
+  podSelector:
+    matchLabels: {app: cell-router}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{protocol: TCP, port: 8080}]
+    - from:
+        - podSelector:
+            matchLabels: {app: cell-operations}
+      ports: [{protocol: TCP, port: 8081}]
