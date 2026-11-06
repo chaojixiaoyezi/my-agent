@@ -41,6 +41,7 @@ from ...memory_store import (
     routed_lesson_records,
     runtime_long_term_scope,
 )
+from ...memory_store.generation_manifest import ContextBudget, MemoryPolicyV2
 from ...path_access_policy import effective_owner_scope_root
 from ...prompting_parts.memory_context import (
     BudgetedMemoryRecords,
@@ -528,6 +529,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
 # LLM: 原授权与预算先固定记忆集合；隔离/总闸关闭不读正式库；召回前后两点共用一次原阶段期限。
 #   补充余量与最后选择复用安全信封计量；预算遗漏数跨排序/补充保留，真正追加编号只供观察，不扩大召回范围。
 # LLM: 基础与补充均不提前记访问；去重和最终信封预算完成后，统一重核JSONL候选并仅确认实际注入项。
+#   政策读取或解析失败仅跳过本轮正式召回，不回落默认预算；底层解析与维护入口仍原样报错。
 # 函数用途: 合并正式来源并完成最后预算准入，再为仍有效的长期记忆登记一次访问。
 def _formal_memories_for_request(
     agent,
@@ -567,7 +569,15 @@ def _formal_memories_for_request(
         hot, lessons = [], []
     routed_context.injected_sections = []
     fixed_source_ids = {record.entry_id for record in [*hot, *lessons]}
-    memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]))
+    try:
+        budget = _memory_context_budget(agent)
+    except (OSError, UnicodeError, ValueError) as exc:
+        # 坏政策本轮不召回正式记忆（不回落默认预算），但不能让整轮对话失败。
+        finding = f"formal memory recall unavailable: {type(exc).__name__}"
+        if finding not in routed_context.findings:
+            routed_context.findings.append(finding)
+        return []
+    memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]), budget=budget)
     omitted_count = memories.omitted_count
     from ...conversation.decision_service import begin_decision_stage
     from ...memory_store.decision_recall import (
@@ -580,7 +590,7 @@ def _formal_memories_for_request(
     queries = supplemental_query_candidates(getattr(request, "user_prompt", ""))
     top_k = max(1, int(getattr(agent.config, "memory_top_k", 1) or 1))
     slots = max(0, top_k - len(long_term_memories))
-    remaining = _FORMAL_MEMORY_BUDGET_CHARS - len(memory_context_text(memories))
+    remaining = _formal_recall_room(memories, budget)
     post_eligible = sum(str(getattr(row, "kind", "") or "") not in {"hot", "lesson"} for row in memories) >= 2
     pre_eligible = bool(queries and slots and remaining > 0)
     operation = _operation_id(request)
@@ -590,19 +600,19 @@ def _formal_memories_for_request(
     memories, finding = rerank_recalled_memories(
         agent, request, memories, recall_scope=recall_scope,
         refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope,
-                                                    fixed_source_ids=fixed_source_ids),
+                                                    fixed_source_ids=fixed_source_ids, budget=budget),
         stage=stage,
     )
     if finding:
         routed_context.findings.append(finding)
     if pre_eligible and stage is not None:
-        remaining = _FORMAL_MEMORY_BUDGET_CHARS - len(memory_context_text(memories))
+        remaining = _formal_recall_room(memories, budget)
         before = {getattr(row, "entry_id", "") for row in memories}
         memories, finding = supplement_recalled_memories(
             agent, request, memories, recall_scope=recall_scope, stage=stage, queries=queries,
             slots=slots, search_top_k=top_k, remaining_chars=remaining,
             refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope,
-                                                        fixed_source_ids=fixed_source_ids),
+                                                        fixed_source_ids=fixed_source_ids, budget=budget),
             defer_access=True,
         )
         if finding:
@@ -611,7 +621,8 @@ def _formal_memories_for_request(
             routed_context.supplement_entry_ids = [str(getattr(row, "entry_id", "")) for row in memories
                                                    if getattr(row, "entry_id", "") not in before]
     memories = _budgeted_formal_memories(BudgetedMemoryRecords(
-        _dedupe_formal_memories(memories), omitted_count=max(omitted_count, getattr(memories, "omitted_count", 0))))
+        _dedupe_formal_memories(memories), omitted_count=max(omitted_count, getattr(memories, "omitted_count", 0))),
+        budget=budget)
     return _confirm_final_memory_access(agent, memories, recall_scope, fixed_source_ids, routed_context)
 
 
@@ -637,10 +648,10 @@ def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, route
     return selected
 
 
-# LLM: 原只读scope/ID/预算刷新不变；成功时只发布本次返回中实际固定来源ID，不能把未入选固定ID豁免补充JSONL。
+# LLM: 只读scope/ID刷新沿调用方本轮ContextBudget；成功时只发布实际固定来源ID，不能把未入选固定ID豁免补充JSONL。
 # 函数用途: 刷新合法候选及其实际来源，避免HOT撤销后同ID回落JSONL却漏过最终确认。
 def _refresh_recall_candidates(agent: object, records: list, read_paths: list[str], scope: MemoryRecallScope,
-                               *, fixed_source_ids: set[str] | None = None) -> list:
+                               *, fixed_source_ids: set[str] | None = None, budget: ContextBudget | None = None) -> list:
     fixed = [
         *hot_memory_records(agent.memory_hot, agent.memory_lessons, scope=scope),
         *routed_lesson_records(agent.memory_lessons, read_paths=read_paths, scope=scope,
@@ -653,7 +664,8 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
     current = {record.entry_id: record for record in _dedupe_formal_memories(available)}
     selected = [current[record.entry_id] for record in records if record.entry_id in current]
     result = _budgeted_formal_memories(BudgetedMemoryRecords(
-        _dedupe_formal_memories(selected), omitted_count=getattr(records, "omitted_count", 0)))
+        _dedupe_formal_memories(selected), omitted_count=getattr(records, "omitted_count", 0)),
+        budget=_memory_context_budget(agent) if budget is None else budget)
     if fixed_source_ids is not None:
         admitted = {record.entry_id for record in result}
         fixed_source_ids.clear()
@@ -661,17 +673,35 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
     return result
 
 
-# 非HOT池按安全信封计量4000字符（含遗漏提示），工作约定另受2400子预算。
-_FORMAL_MEMORY_BUDGET_CHARS = 4000
-# HOT独立按正文5000字符写入上限整条保留，序列化元数据不挤占其有效正文额度。
-_HOT_MEMORY_CONTENT_BUDGET_CHARS = 5000
-# 工作约定从总召回额度内分配子预算，不能挤占全部正式记忆。
-_WORKING_AGREEMENT_SUB_BUDGET_CHARS = 2400
+# 兼容旧导入名，默认值只从规范策略派生；运行时消费本轮已解析预算，不读这些别名。
+_DEFAULT_CONTEXT_BUDGET = ContextBudget.from_policy(MemoryPolicyV2())
+_FORMAL_MEMORY_BUDGET_CHARS = _DEFAULT_CONTEXT_BUDGET.recall_max_chars
+_HOT_MEMORY_CONTENT_BUDGET_CHARS = _DEFAULT_CONTEXT_BUDGET.hot_injection_max_chars
+_WORKING_AGREEMENT_SUB_BUDGET_CHARS = _DEFAULT_CONTEXT_BUDGET.working_agreement_chars
 
 
-# LLM: 先用共享渲染门隔离不可注入项；HOT5000正文/非HOT4000信封/约定2400预算不变，原遗漏数随list传递。
+# LLM: 只沿正式库既有memory_policy读取owner政策；无政策接口时用规范默认，非法政策原样报错，不静默恢复召回。
+# 函数用途: 为本轮初选、刷新和最终选择解析同一份上下文预算。
+def _memory_context_budget(agent: object) -> ContextBudget:
+    policy_reader = getattr(getattr(agent, "memory", None), "memory_policy", None)
+    policy = policy_reader() if callable(policy_reader) else policy_reader
+    return ContextBudget.from_policy(MemoryPolicyV2() if policy is None else policy)
+
+
+# LLM: 只计非HOT池的安全信封与原遗漏提示；HOT有独立正文预算，不挤占普通事实的补充额度，不写访问记录。
+# 函数用途: 为初选后和刷新后的补充召回计算同一口径的可用字数。
+def _formal_recall_room(records: list, budget: ContextBudget) -> int:
+    regular = BudgetedMemoryRecords(
+        (record for record in records if str(getattr(record, "kind", "") or "") != "hot"),
+        omitted_count=getattr(records, "omitted_count", 0),
+    )
+    return max(0, budget.recall_max_chars - len(memory_context_text(regular)))
+
+
+# LLM: 先用共享渲染门隔离不可注入项；HOT正文/非HOT信封/约定60%子预算来自同一ContextBudget，原遗漏数随list传递。
 # 函数用途: 只为真正可渲染的正式记录分配预算；安全隔离不冒充预算遗漏，也不裁正文。
-def _budgeted_formal_memories(records: list) -> list:
+def _budgeted_formal_memories(records: list, *, budget: ContextBudget | None = None) -> list:
+    budget = _DEFAULT_CONTEXT_BUDGET if budget is None else budget
     records = BudgetedMemoryRecords((record for record in records if is_memory_context_admissible(record)),
                                    omitted_count=getattr(records, 'omitted_count', 0))
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
@@ -690,20 +720,20 @@ def _budgeted_formal_memories(records: list) -> list:
     hot_chars = 0
     for record in hot:
         size = len(str(getattr(record, "content", "") or ""))
-        if hot_chars + size <= _HOT_MEMORY_CONTENT_BUDGET_CHARS:
+        if hot_chars + size <= budget.hot_injection_max_chars:
             kept.append(record)
             hot_chars += size
     regular: list = []
     for group in (lessons, agreements, rest):
         group_cap = (
-            _WORKING_AGREEMENT_SUB_BUDGET_CHARS
+            budget.working_agreement_chars
             if group is agreements
-            else _FORMAL_MEMORY_BUDGET_CHARS
+            else budget.recall_max_chars
         )
         group_kept = []
         for record in group:
             if (
-                len(memory_context_text([*regular, record])) > _FORMAL_MEMORY_BUDGET_CHARS
+                len(memory_context_text([*regular, record])) > budget.recall_max_chars
                 or len(memory_context_text([*group_kept, record])) > group_cap
             ):
                 continue
@@ -714,11 +744,11 @@ def _budgeted_formal_memories(records: list) -> list:
     while regular:
         omitted = prior_omitted + len(records) - len(kept) - len(regular)
         selected_agreements = [record for record in regular if record in agreements]
-        if len(memory_context_text(BudgetedMemoryRecords(regular, omitted_count=omitted))) > _FORMAL_MEMORY_BUDGET_CHARS:
+        if len(memory_context_text(BudgetedMemoryRecords(regular, omitted_count=omitted))) > budget.recall_max_chars:
             regular.pop()
         elif selected_agreements and len(memory_context_text(BudgetedMemoryRecords(
             selected_agreements, omitted_count=omitted,
-        ))) > _WORKING_AGREEMENT_SUB_BUDGET_CHARS:
+        ))) > budget.working_agreement_chars:
             regular.remove(selected_agreements[-1])
         else:
             break

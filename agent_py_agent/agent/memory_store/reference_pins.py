@@ -27,6 +27,13 @@ _TARGET_READ: ContextVar[bool] = ContextVar("retention_pin_target_read", default
 _RESUMABLE_DIGESTS: OrderedDict[Path, dict] = OrderedDict()
 
 
+# LLM: 只读当前snapshot的配置；无snapshot时保留原默认，不改变共享摘要预算或跨owner发布权限。
+# 函数用途: 为小文件、切片和解析绑定提供同一读取块大小。
+def _pin_source_chunk_bytes():
+    cache = _SOURCE_CONTENTS.get()
+    return cache.get("chunk_bytes", _PIN_SOURCE_CHUNK_BYTES) if cache is not None else _PIN_SOURCE_CHUNK_BYTES
+
+
 # LLM: 仅目标分域复核允许以已打开FD的新代次起读，首末仍严格稳定且禁止inode替换、缩短和读中变化。
 # 函数用途: 标记一次有界的目标引用复核，退出恢复原读取合同。
 @contextmanager
@@ -117,8 +124,9 @@ def _is_settled(stamp):
 # 函数用途: 对超出单次预算的热文件按有界切片递增验证，任何已验切片或尾部变化立即推进代次。
 def _resumable_file_digest(path, stamp, cache, *, advance=True):
     budget = max(1, int(_MAX_PIN_SOURCE_DIGEST_BYTES))
-    chunk_limit = min(_PIN_SOURCE_CHUNK_BYTES, budget)
-    tail_budget = min(chunk_limit, max(1, budget // 4))
+    chunk_limit = min(_pin_source_chunk_bytes(), budget)
+    # 配置只改变系统调用大小，切片与尾片布局保持原合同，已有解析基线才能跨snapshot比较。
+    tail_budget = min(_PIN_SOURCE_CHUNK_BYTES, budget, max(1, budget // 4))
     slice_budget = max(1, budget - tail_budget)
     body_limit = max(0, stamp[3] - tail_budget)
     total_slices = max(1, (body_limit + slice_budget - 1) // slice_budget)
@@ -224,7 +232,8 @@ def _file_digest(path, stamp, *, precharged=False):
     if stamp[3] > _MAX_PIN_SOURCE_DIGEST_BYTES:
         result = _resumable_file_digest(path, stamp, cache)
         return result if result is not None else ("partial", _RESUMABLE_DIGESTS[path]["generation"])
-    limit = stamp[3] + _PIN_SOURCE_CHUNK_BYTES
+    chunk_limit = min(_pin_source_chunk_bytes(), _MAX_PIN_SOURCE_DIGEST_BYTES)
+    limit = stamp[3] + chunk_limit
     spent = cache.setdefault("digest_bytes", {}) if precharged else None
     if spent is not None:
         limit = min(limit, stamp[3] + max(0, 4 * _MAX_PIN_SOURCE_DIGEST_BYTES - spent.get(path, 0)))
@@ -242,7 +251,7 @@ def _file_digest(path, stamp, *, precharged=False):
         digest = None if cached is not None else hashlib.blake2b(digest_size=16)
         remaining, index = limit, 0
         while remaining:
-            raw = os.read(descriptor, min(remaining, _PIN_SOURCE_CHUNK_BYTES, _MAX_PIN_SOURCE_DIGEST_BYTES))
+            raw = os.read(descriptor, min(remaining, chunk_limit))
             if not raw:
                 break
             remaining -= len(raw)
@@ -624,13 +633,17 @@ def rebaseline_watched_pin_source(path):
 # LLM: 对象仅在一次apply内使用；旧视图必须逐源重核，变化/错误完整重建且保留原complete门，不跨owner缓存。
 # 类用途: 在同阶段复用引用解析结果，保留执行前新引用与坏源的关闭式防线。
 class ReferencePinSnapshot:
-    # LLM: 构造不读写文件；待发布pins与来源成对暂存，临时块对照与FD只属于该snapshot。
+    # LLM: 构造校验可选config但不读写文件；块大小只属于本snapshot，待发布pins、原总预算与FD隔离不变。
     # 函数用途: 绑定本次owner和严格扫描器，准备有界热源块缓存。
-    def __init__(self, home, roots, now, builder):
+    def __init__(self, home, roots, now, builder, *, config=None):
+        chunk_bytes = getattr(config, "memory_reference_pin_chunk_bytes", _PIN_SOURCE_CHUNK_BYTES)
+        if type(chunk_bytes) is not int or chunk_bytes <= 0:
+            raise ValueError("invalid_memory_reference_pin_chunk_bytes")
         self.home, self.roots, self.now, self.builder = home, roots, now, builder
         self.sources, self.value = {}, None
         self.pending = None
-        self.contents = {"files": {}, "fds": {}, "bytes": 0, "digest_bytes": {}, "verified": {}, "recheck": set()}
+        self.contents = {"files": {}, "fds": {}, "bytes": 0, "digest_bytes": {}, "verified": {}, "recheck": set(),
+                         "chunk_bytes": chunk_bytes}
         weakref.finalize(self, _close_source_descriptors, self.contents["fds"])
 
     # LLM: 每current重置字节预算、小文件摘要和pass；热源post只认本pass读到的片，已发布视图下一current必须重开内容验证。
