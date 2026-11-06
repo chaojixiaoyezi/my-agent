@@ -520,6 +520,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
 # LLM: 原授权与预算先固定记忆集合；隔离/总闸关闭不读正式库；召回前后两点共用一次原阶段期限。
 #   补充余量与最后选择复用安全信封计量；预算遗漏数跨排序/补充保留，真正追加编号只供观察，不扩大召回范围。
 # LLM: 基础与补充均不提前记访问；去重和最终信封预算完成后，统一重核JSONL候选并仅确认实际注入项。
+#   政策读取或解析失败仅跳过本轮正式召回，不回落默认预算；底层解析与维护入口仍原样报错。
 # 函数用途: 合并正式来源并完成最后预算准入，再为仍有效的长期记忆登记一次访问。
 def _formal_memories_for_request(
     agent,
@@ -559,7 +560,14 @@ def _formal_memories_for_request(
         hot, lessons = [], []
     routed_context.injected_sections = []
     fixed_source_ids = {record.entry_id for record in [*hot, *lessons]}
-    budget = _memory_context_budget(agent)
+    try:
+        budget = _memory_context_budget(agent)
+    except (OSError, UnicodeError, ValueError) as exc:
+        # 坏政策本轮不召回正式记忆（不回落默认预算），但不能让整轮对话失败。
+        finding = f"formal memory recall unavailable: {type(exc).__name__}"
+        if finding not in routed_context.findings:
+            routed_context.findings.append(finding)
+        return []
     memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]), budget=budget)
     omitted_count = memories.omitted_count
     from ...conversation.decision_service import begin_decision_stage
