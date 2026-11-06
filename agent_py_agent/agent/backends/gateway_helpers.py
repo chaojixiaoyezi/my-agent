@@ -36,7 +36,13 @@ from .gateway_request_limits import (
     stdlib_response_socket,
     validate_request_limits,
 )
-from .keepalive_transport import keepalive_target, pooled_urlopen, release_pooled_response
+from .keepalive_transport import (
+    drain_completed_response,
+    has_pooled_lease,
+    keepalive_target,
+    pooled_urlopen,
+    release_pooled_response,
+)
 from .provider_send_gate import provider_send_attempt
 from .request_scope import acquire_provider_request, release_provider_response
 from .transport_timing import (
@@ -589,26 +595,35 @@ class _GatewayResponseGuard:
                 raise
 
 
-# LLM: 收尾先关响应，再按守卫是否中止过决定保活连接去留；无论关闭成败都幂等归还本次物理名额。
+# LLM: 有池租约时先证明 EOF 再关闭；消费者停止可零等待读取尾部，异常或中止不归还连接，无池路径保持原收尾。
 # 函数用途: 独占一次 provider 响应的生命周期，结束时关闭它并归还连接与排队资源。
 @contextmanager
 def _gateway_response_scope(response: Any):
     """Own one provider response without invoking urllib's racy context exit."""
     guard = _GatewayResponseGuard(response)
+    ending = "error"
     try:
         yield response, guard
+        ending = "normal"
+    except GeneratorExit:
+        ending = "consumer_stopped"
+        raise
     finally:
+        body_complete = None
+        if has_pooled_lease(response):
+            body_complete = (not guard.aborted and ending != "error"
+                             and drain_completed_response(response))
         try:
             guard.close()
         finally:
-            _release_response_resources(response, guard.aborted)
+            _release_response_resources(response, guard.aborted, body_complete)
 
 
 # LLM: 长连接归还和物理名额归还是独立资源；连接清理报错也不能泄漏本次名额。
-# 函数用途: 按响应关闭事实归还连接池资源，并无条件归还供应商物理请求名额。
-def _release_response_resources(response: Any, aborted: bool) -> None:
+# 函数用途: 按关闭前的 EOF 证明归还连接池资源，并无条件归还供应商物理请求名额。
+def _release_response_resources(response: Any, aborted: bool, body_complete: bool | None = None) -> None:
     try:
-        release_pooled_response(response, aborted=aborted)
+        release_pooled_response(response, aborted=aborted, body_complete=body_complete)
     finally:
         release_provider_response(response)
 
@@ -766,10 +781,12 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         return None
     except _NETWORK_IO_ERRORS as exc:
         retry_scheduled = _should_retry_network_error(exc, attempt, last_attempt)
-        retry_wait_seconds = _network_retry_delay_seconds(attempt) if retry_scheduled else 0.0
+        stale = getattr(exc, "stale_reused_connection", False) is True
+        retry_wait_seconds = (0.0 if stale else _network_retry_delay_seconds(attempt)) if retry_scheduled else 0.0
         _emit_provider_attempt(
             {
                 **base_event,
+                **({"reason": "stale_reused_connection"} if stale else {}),
                 "status": "failed",
                 "error_type": type(exc).__name__,
                 "retry_scheduled": retry_scheduled,
@@ -1243,8 +1260,11 @@ def _should_retry_http_error(exc: urllib.error.HTTPError, attempt: int, last_att
     return attempt < last_attempt and code in _RETRYABLE_HTTP_STATUS_CODES
 
 
+# LLM: 陈旧复用连接仅交给现有循环重试；显式零重试和原网络错误策略仍限制物理发送次数。
+# 函数用途: 按剩余尝试预算决定是否重试本次网络失败。
 def _should_retry_network_error(exc: BaseException, attempt: int, last_attempt: int) -> bool:
-    return attempt < last_attempt and _is_transient_network_error(exc)
+    return attempt < last_attempt and (getattr(exc, "stale_reused_connection", False) is True
+                                      or _is_transient_network_error(exc))
 
 
 def _retry_delay_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:

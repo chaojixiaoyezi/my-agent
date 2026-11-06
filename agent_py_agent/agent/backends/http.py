@@ -241,6 +241,7 @@ class HttpBackend(BaseBackend):
         self.request_timeout = int(options.request_timeout)
         self.connect_timeout = float(options.connect_timeout)
         self.provider_max_concurrent_requests = max(0, int(options.provider_max_concurrent_requests))
+        self.model_http_max_idle_connections = max(0, int(getattr(options, "model_http_max_idle_connections", 0) or 0))
         self.max_tokens = int(options.max_tokens)
         self.configured_output_ceiling = int(options.configured_output_ceiling or options.max_tokens)
         self.custom_headers = dict(options.custom_headers)
@@ -456,12 +457,15 @@ class HttpBackend(BaseBackend):
         options: StreamCallOptions | None = None,
     ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
+        from .keepalive_transport import main_connection_pool
         from .request_scope import provider_request_timeout
 
         path, payload, headers = stream_call_parts(call, payload, headers)
         options = options or StreamCallOptions()
         api_base, path = endpoint_parts(self.api_base, path)
         deadline = stream_call_deadline(options)
+        capacity = getattr(self, "model_http_max_idle_connections", 0)
+        pool = main_connection_pool(capacity) if payload is not None and capacity > 0 else None
         return GatewayRequest(
             api_base=api_base,
             api_key=self.api_key,
@@ -472,6 +476,7 @@ class HttpBackend(BaseBackend):
             connect_timeout=self.connect_timeout,
             first_event_timeout=options.first_event_timeout_seconds,
             deadline=deadline,
+            connection_pool=pool,
             provider_max_concurrent_requests=getattr(self, "provider_max_concurrent_requests", 0),
         )
 
