@@ -21,9 +21,10 @@ from functools import partial
 from typing import Any
 
 from .delivery import RuntimeHealthProvider
+from .settings.config import AgentConfig
 
-# 单 owner 默认最多并行的代理数；防止一个 owner 占满全部线程资源。
-_DEFAULT_MAX_AGENT_COUNT = 64
+# 池的总实例容量沿唯一配置默认；显式max_agents及运行时config仍按原优先级覆盖。
+_DEFAULT_MAX_AGENT_COUNT = AgentConfig.owner_agent_pool_max_agents
 
 
 # LLM: Exhaustion is transient local backpressure, not permission denial or a durable task failure.

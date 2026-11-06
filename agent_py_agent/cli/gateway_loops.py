@@ -54,6 +54,10 @@ from ..agent.gateway_parts.loop_health import (
     evaluate_dispatcher_stall,
     loop_health,
 )
+from ..agent.gateway_parts.multiprocess_curator_accounting import (
+    CURATOR_DAILY_QUOTA_DEFAULT_COUNT,
+    configured_curator_daily_quota,
+)
 from ..agent.gateway_parts.queue_service import GatewayClaim
 from ..agent.gateway_parts.recovery import repair_gateway_terminal_projections
 from ..agent.gateway_parts.request_worker import (
@@ -74,6 +78,7 @@ from ..agent.owner_wake_discovery import (
 )
 from ..agent.runtime_errors import runtime_error_report
 from ..agent.scheduler import SchedulerDueIndex
+from ..agent.settings.config import AgentConfig
 from ..agent.settings.thread_model_selection import (
     thread_model_fingerprint,
     thread_model_is_configured,
@@ -859,11 +864,11 @@ def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -
 
 
 # 后台会话的全局并发基数：owner 与 thread 都已分车道，超出的保留在持久队列。
-# 可由 config background_owner_workers 覆盖，此常量是无配置时的兜底。
-_BACKGROUND_OWNER_WORKER_COUNT = 8
+# 可由 config background_owner_workers 覆盖，无配置时沿AgentConfig唯一默认。
+_BACKGROUND_OWNER_WORKER_COUNT = AgentConfig.background_owner_workers
 # 同 owner 后台会话并发上限：一条长会话不再占住整个 owner，但也不允许
 # 一个 owner 用大量待处理会话占满全局后台模型池。
-_BACKGROUND_PER_OWNER_THREAD_COUNT = 4
+_BACKGROUND_PER_OWNER_THREAD_COUNT = AgentConfig.background_threads_per_owner
 # 记忆策展并发 worker 数 2
 _MEMORY_CURATOR_WORKER_COUNT = 2
 _BASE_SCHEDULER_KEY = "base"
@@ -871,7 +876,7 @@ _BASE_SCHEDULER_KEY = "base"
 _HEARTBEAT_INTERVAL_SECONDS = 60
 # 策展每日全局配额(默认 5000 次/天,config curator_daily_quota 覆盖):LLM 提取烧钱,
 # 归档类晚一天无害,超限顺延;紧急车道(pending reason)不受此限。
-_CURATOR_DAILY_QUOTA_COUNT = 5000
+_CURATOR_DAILY_QUOTA_COUNT = CURATOR_DAILY_QUOTA_DEFAULT_COUNT
 # 算实际消耗的 run 结果状态:只有真正执行了一次 curator 事务才记账;not_due(interval
 # 未到/无新消息)、busy(他人持 lease)、disabled 都没碰 LLM,不算消耗。
 _CURATOR_CONSUMED_STATUSES = frozenset({"succeeded", "failed"})
@@ -1612,10 +1617,10 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             pool,
         )
 
-    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
-    # 函数用途: 读取当前Curator每日配额配置，不在查询时扣额度。
+    # LLM: 与协调准入共用非负整数读取；0不限额且不改变原owner、停机、会计和future生命周期。
+    # 函数用途: 读取当前Curator每日额度，缺配置沿唯一默认，不在查询时扣额度。
     def _curator_daily_quota(self) -> int:
-        return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA_COUNT)
+        return configured_curator_daily_quota(getattr(self._base_agent, "config", None))
 
     # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
     # 函数用途: 只读检查Curator当日剩余额度，实际消费另行记账。
@@ -1630,17 +1635,14 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             self._curator_quota_count = 0
         return self._curator_quota_count < quota
 
-    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
-    # 函数用途: 仅在真实Curator事务执行后更新每日消费记录。
+    # LLM: 额度0只取消准入限制，实际消费仍沿原date/count记账；不改变真实执行后的调用时机或建立第二账。
+    # 函数用途: 在真实Curator事务执行后更新每日消费记录，不限额也保留计数与持久化。
     def _curator_quota_record_consumed(self) -> None:
         """实际执行后记账:只有真正跑了一次 curator 事务(提取/晋升/提交)才扣配额。
 
         提交前扣的旧语义把「每次 tick 的提交检查」都算消耗——run_if_due 大多返回
         not_due(interval 未到/无新消息),没烧 LLM 也照样扣(真机:当日配额被推到
         3651)。按 run 结果记账后,配额 ≈ 实际 LLM 消耗。按日滚动,落盘重启不丢。"""
-        quota = self._curator_daily_quota()
-        if quota <= 0:
-            return
         today = datetime.now(timezone.utc).date().isoformat()
         if self._curator_quota_date != today:
             self._curator_quota_date = today
