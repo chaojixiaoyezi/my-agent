@@ -259,6 +259,10 @@ class GatewayFieldsService:
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),
+        # 三项并发容量共用正整数范围，参数中心元数据也从此表推导。
+        ("background_owner_workers", 1, None),
+        ("background_threads_per_owner", 1, None),
+        ("background_admin_threads_per_owner", 1, None),
         ("input_media_max_bytes", 1, None),
         ("input_media_max_files", 1, None),
         ("input_image_max_pixels", 1, None),

@@ -43,6 +43,7 @@ def _load_consumer(monkeypatch, original, suffix):
         ("owner_agent_pool_max_agents", owner_pool, "_DEFAULT_MAX_AGENT_COUNT", 17),
         ("background_owner_workers", gateway_loops, "_BACKGROUND_OWNER_WORKER_COUNT", 3),
         ("background_threads_per_owner", gateway_loops, "_BACKGROUND_PER_OWNER_THREAD_COUNT", 2),
+        ("background_admin_threads_per_owner", gateway_loops, "_BACKGROUND_ADMIN_PER_OWNER_THREAD_COUNT", 19),
     ],
 )
 def test_fallbacks_follow_authoritative_defaults(monkeypatch, source, module, constant, replacement):
@@ -65,7 +66,7 @@ def test_existing_defaults_remain_compatible(tmp_path):
     pool = owner_pool.OwnerScopedAgentPool(config, tmp_path)
     assert pool.gauges()["max_agents"] == config.owner_agent_pool_max_agents == 64
     agent = SimpleNamespace(config=config)
-    assert gateway_loops._background_owner_workers(agent) == config.background_owner_workers == 8
+    assert gateway_loops._background_owner_workers(agent) == config.background_owner_workers == 32
     assert gateway_loops._background_threads_per_owner(agent) == config.background_threads_per_owner == 4
 
 
@@ -93,9 +94,9 @@ def test_background_worker_overrides_and_fallbacks(value):
     agent = SimpleNamespace(config=SimpleNamespace(
         background_owner_workers=value, background_threads_per_owner=value,
     ))
-    assert gateway_loops._background_owner_workers(agent) == (5 if value == 5 else 8)
+    assert gateway_loops._background_owner_workers(agent) == (5 if value == 5 else 32)
     assert gateway_loops._background_threads_per_owner(agent) == (5 if value == 5 else 4)
-    assert gateway_loops._background_owner_workers(SimpleNamespace()) == 8
+    assert gateway_loops._background_owner_workers(SimpleNamespace()) == 32
     assert gateway_loops._background_threads_per_owner(SimpleNamespace()) == 4
 
 

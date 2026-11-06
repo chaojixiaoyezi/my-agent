@@ -574,12 +574,15 @@ sandbox_full_access_other_owner_homes: "read_only"
 # 0 表示关闭；每个请求跨 Gateway 重启累计，用满后按失败收口（发“继续”可以手动接着做）。
 # 只对已有完成工具往返的回合生效：重排从已落盘历史继续，不重放工具，退避 30/120 秒。
 provider_transient_turn_resume_max_count: 2
-# 后台会话全局线程池上限；不同 owner 和不同 thread 都可并发，同 thread
-# 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。
-background_owner_workers: 8
-# 同一 owner 最多同时跑几个不同会话的后台回合。默认 4 能覆盖多 TUI，
-# 同时防止一个用户用大量历史会话占满全局模型池；调大会增加并发模型请求。
+# 后台会话全局线程池上限，默认 32；不同 owner 和不同 thread 都可并发，同 thread
+# 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。重启 Gateway 后生效。
+background_owner_workers: 32
+# 普通用户每个 owner 同时运行的后台会话上限，默认 4；避免单个用户占满全局模型池。
+# 调大会增加并发模型请求，仍受全局线程池上限约束；重启 Gateway 后生效。
 background_threads_per_owner: 4
+# 管理员 local/main 同时运行的后台会话上限，默认 16；不改变普通用户上限。
+# 同样受全局线程池上限约束，调大会增加并发模型请求；重启 Gateway 后生效。
+background_admin_threads_per_owner: 16
 # per-owner 作用域 agent 实例池上限（有界 LRU，超出逐出最久未用）。多用户高并发时按
 # 常驻活跃用户数调；每个实例含独立 home/记忆/local_store 句柄。
 owner_agent_pool_max_agents: 64

@@ -1,3 +1,25 @@
+## 2026-11-06 BG-ADMIN-16：管理员与普通用户后台会话并发分流
+
+来源：`plan-bg-admin-16.md`。解决管理员与普通用户共用4条并发、全局8线程池又限制管理员16条的瓶颈。
+
+- 做法：YAML与AgentConfig统一为全局32、普通owner 4、管理员local/main 16；三项容量沿Gateway规范化表登记同一正整数范围，参数元数据从原表推导。新增管理员参数与普通参数同属部署层，重启Gateway生效，不开放普通参数写权限。
+- 调度：base及结构化`owner_kind=main`选择管理员上限，其它用户/群用普通上限；空槽与就绪查询预算同步切换，原全局上限、owner轮转、在途去重、持久claim与停止控制不变。不按用户名或群名猜管理员。
+- 回归：默认值/YAML/loader/registry一致、独立覆盖与非法值回落、正整数字符串归一、权威默认别名、四个普通owner共存、自定义上限与在途扣减、main身份、全局满载、owner满载不阻塞其它owner及停止后零提交。真实线程池以Event保持20条同时在途，验证16条管理员与4条普通用户并行；业务工作是受控替身，不代表真实模型端到端。
+- 反证：生产改动前并发测试39项中30条断言失败、9通过、零error/skip；修改后原断言保留。旧无改动的规定8文件基线488通过。最终数量与门禁结果以交接回执和JUnit为准。
+
+在工作树根使用现有项目Python及开发依赖复跑（测试HOME隔离；无需安装、启动真实服务或改运行配置）：
+
+```bash
+HOME=/private/tmp/my-agent-home-bg16 MY_AGENT_HOME=/private/tmp/my-agent-home-bg16 python3 -m pytest agent_py_agent/tests/test_concurrency_knobs_config.py agent_py_agent/tests/test_param_w2_gateway_and_pool.py agent_py_agent/tests/test_param_w0_registry_and_config.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_parameter_metadata.py agent_py_agent/tests/test_user_config_capability.py agent_py_agent/tests/test_background_main_wake_recall.py agent_py_agent/tests/test_gateway_owner_idle_backoff.py -q --tb=short
+python3 scripts/check_boolean_switches_and_hot_reload.py --json
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+git diff --check
+python3 scripts/check_clean_package.py .
+```
+
+本片不改变已持久化的显式并发设置，不将读取器每拍取配置称作持久热更新；已有显式8线程设置仍须部署者自行调整。生产Gateway、真实供应商、CountN多进程实际部署及跨平台矩阵未验证，不推送、不合并、不部署。
+
 ## 2026-11-05 R5 / AUD-P1-06：W14 候选读锁出生接入原短写门
 
 来源：`authorize-c5-birth-commit.md` 的最小生产修复授权及 W14 接线交付。冷 owner 在 `readonly_rows` 规划时会创建 `candidates.jsonl.lock`，原协调路径只保护候选构造，遗漏了实际锁 FD 出生。

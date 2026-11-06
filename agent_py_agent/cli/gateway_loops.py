@@ -866,9 +866,10 @@ def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -
 # 后台会话的全局并发基数：owner 与 thread 都已分车道，超出的保留在持久队列。
 # 可由 config background_owner_workers 覆盖，无配置时沿AgentConfig唯一默认。
 _BACKGROUND_OWNER_WORKER_COUNT = AgentConfig.background_owner_workers
-# 同 owner 后台会话并发上限：一条长会话不再占住整个 owner，但也不允许
-# 一个 owner 用大量待处理会话占满全局后台模型池。
+# 普通owner后台会话并发上限，避免单个用户占满全局后台模型池。
 _BACKGROUND_PER_OWNER_THREAD_COUNT = AgentConfig.background_threads_per_owner
+# 管理员local/main有独立上限，仍与普通owner共用全局线程池。
+_BACKGROUND_ADMIN_PER_OWNER_THREAD_COUNT = AgentConfig.background_admin_threads_per_owner
 # 记忆策展并发 worker 数 2
 _MEMORY_CURATOR_WORKER_COUNT = 2
 _BASE_SCHEDULER_KEY = "base"
@@ -919,6 +920,21 @@ def _background_threads_per_owner(agent: object) -> int:
     except (TypeError, ValueError):
         return _BACKGROUND_PER_OWNER_THREAD_COUNT
     return parsed if parsed > 0 else _BACKGROUND_PER_OWNER_THREAD_COUNT
+
+
+# LLM: 管理员与普通owner使用独立配置；零、负数和不可解析值回落AgentConfig默认，不改变全局并发预算。
+# 函数用途: 读取管理员local/main后台会话的最大并发数，不产生IO或启动工作。
+def _background_admin_threads_per_owner(agent: object) -> int:
+    value = getattr(
+        getattr(agent, "config", None),
+        "background_admin_threads_per_owner",
+        _BACKGROUND_ADMIN_PER_OWNER_THREAD_COUNT,
+    )
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return _BACKGROUND_ADMIN_PER_OWNER_THREAD_COUNT
+    return parsed if parsed > 0 else _BACKGROUND_ADMIN_PER_OWNER_THREAD_COUNT
 
 
 # LLM: 记忆提取使用独立有界车道，防止低优先级所有者积压占满会话唤醒执行器；非法值保留安全默认值。
@@ -1092,6 +1108,7 @@ def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
 # 类用途: 公平提交owner/thread后台车道，不把规划连接传给执行线程。
 class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # LLM: 规划单线程且不调用模型，提交按所有者轮转、同时受全局及逐所有者上限约束，并以持久线程身份为键。
+    # base及结构化main身份使用管理员上限，其余owner使用普通上限；就绪查询与剩余槽位共用同一所选预算。
     # 恢复扫描属于Gateway独立孤儿对账器，准备阶段必须跳过重复内联扫描，再提交就绪车道。
     # 每个owner的prepare/ready短查询始终跨拍复用连接；异常也解除Context，提交和后台执行不继承连接。
     # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
@@ -1099,6 +1116,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
         per_owner_limit = _background_threads_per_owner(self._base_agent)
+        admin_per_owner_limit = _background_admin_threads_per_owner(self._base_agent)
         schedulers = [
             (_BASE_SCHEDULER_KEY, self._base_scheduler),
             *list(self._owner_schedulers.items()),
@@ -1117,8 +1135,13 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             with pool._lock:
                 active_agents = {key for key, count in pool._pins.items() if count > 0}
         for owner_key, scheduler in schedulers:
+            owner_limit = (
+                admin_per_owner_limit
+                if owner_key == _BASE_SCHEDULER_KEY or getattr(owner_key, "owner_kind", None) == "main"
+                else per_owner_limit
+            )
             active_threads = self._active_threads_for_owner(owner_key)
-            owner_slots = max(0, per_owner_limit - len(active_threads))
+            owner_slots = max(0, owner_limit - len(active_threads))
             if owner_slots <= 0:
                 continue
             try:
@@ -1134,7 +1157,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                     )
                     ready = scheduler.ready_thread_ids(
                         now=planned_at,
-                        limit=per_owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
+                        limit=owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
                     )
                     streak = self._owner_idle_streaks.get(owner_key, 0) + 1
                     delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and not ready else 0.0

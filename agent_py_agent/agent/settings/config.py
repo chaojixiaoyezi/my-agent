@@ -548,10 +548,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     sandbox_full_access_other_owner_homes: str = "read_only"
     # 供应商临时故障的回合级自动续跑次数上限（0=关闭；跨 Gateway 重启累计，重排不重放工具）。
     provider_transient_turn_resume_max_count: int = 2
-    # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
-    background_owner_workers: int = 8
-    # 单 owner 同时可跑的独立后台会话数；调大会增加并发模型请求。
+    # 后台会话全局线程池上限，默认32；超出留在持久队列，同thread仍由run claim单飞。
+    background_owner_workers: int = 32
+    # 普通用户每个owner同时运行的后台会话上限，默认4；仍受全局线程池约束。
     background_threads_per_owner: int = 4
+    # 管理员local/main同时运行的后台会话上限，默认16；不改变普通用户上限。
+    background_admin_threads_per_owner: int = 16
     # per-owner 作用域 agent 实例池上限(原 owner_scoped_pool.py 硬编码 64):有界 LRU,
     # 超出逐出最久未用;千并发多用户时的驻留 agent 数调参入口。
     owner_agent_pool_max_agents: int = 64
