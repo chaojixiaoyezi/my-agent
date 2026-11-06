@@ -25,7 +25,7 @@ from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
 from agent_py_agent.agent.gateway_parts.request_worker import _process_gateway_request_path
 from agent_py_agent.agent.observability.tracing import TraceContext
-from agent_py_agent.agent.owner_object_store import owner_store_from_runtime
+from agent_py_agent.agent.owner_object_store import OWNER_SNAPSHOT_MODES, owner_store_from_runtime
 from agent_py_agent.agent.scale_runtime import ScaleRole, ScaleRuntimeConfig
 from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.services.runtime_config_env import (
@@ -97,16 +97,26 @@ def _message_text(raw: object) -> str:
     return str(decoded.get("text") or "").strip() if isinstance(decoded, dict) else text
 
 
+# LLM: 锁保护单个 owner 执行；pins 在池锁下计数，覆盖运行、等待和淘汰阶段。
+# 类用途: 保存 owner 的唯一进程内锁和占用计数。
 class _AgentSlot:
+    # LLM: 新 slot 尚无人持有，调用方须在池锁下增加 pin。
+    # 函数用途: 创建 owner 串行锁与初始占用计数。
     def __init__(self) -> None:
         self.lock = threading.Lock()
+        self.pins = 0
 
 
 # LLM: 每个 owner 串行 checkout/commit，Gateway 自己维护每个请求的执行代次；不得共享 owner 的可变 Agent。
 # 类用途: 管理规模 worker 中的用户隔离运行及结果投递，任何失败保留给上游重试判断。
 class ScaleAgentPool:
-    """同进程锁 + PG advisory lock；owner 文件只在单次执行期间落本地缓存。"""
+    """同进程 owner 锁配合 full 快照或显式启用的租约温缓存。"""
 
+    _snapshot_mode = "full"
+    _lease_ttl_seconds = 0.0
+
+    # LLM: 配置只在组合根读取一次；未知快照模式保持 full，TTL 复用既有后台执行租约参数。
+    # 函数用途: 初始化 owner 池、快照模式和存储依赖。
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._slots: OrderedDict[tuple[str, str, str], _AgentSlot] = OrderedDict()
@@ -114,19 +124,54 @@ class ScaleAgentPool:
         default_config = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
         config_path = Path(os.environ.get("MY_AGENT_CONFIG") or default_config)
         self._base_config = apply_runtime_config_environment(load_config(config_path))
+        mode = str(getattr(self._base_config, "scale_owner_snapshot_mode", "full") or "full").strip().lower()
+        self._snapshot_mode = mode if mode in OWNER_SNAPSHOT_MODES else "full"
+        self._lease_ttl_seconds = float(getattr(self._base_config, "background_claim_ttl_seconds", 90) or 90)
         self._workspaces = Path(os.environ["MY_AGENT_SCALE_WORKSPACE_ROOT"]).expanduser().resolve()
         runtime = ScaleRuntimeConfig.from_env(ScaleRole.WORKER, os.environ)
         self._store = owner_store_from_runtime(runtime, StorageBackend(runtime.database_url))
 
+    # LLM: slot 从选中到等待和执行结束始终带 pin，异常也在池锁下归还。
+    # 函数用途: 串行运行 owner 回合并释放占用。
     def run(self, message: ScaleMessage, trace: TraceContext) -> int:
         slot = self._slot(message)
-        with slot.lock:
-            return self._run_locked(message, trace)
+        try:
+            with slot.lock:
+                return self._run_locked(message, trace)
+        finally:
+            with self._lock:
+                slot.pins -= 1
 
+    # LLM: full 分支保持原执行目录和四位置参数路径，只有显式增量模式进入温缓存。
+    # 函数用途: 在已持有 owner 锁时选择快照执行路径。
     def _run_locked(self, message: ScaleMessage, trace: TraceContext) -> int:
+        if self._snapshot_mode != "full":
+            return self._run_locked_warm(message, trace)
         execution = self._execution_root(message, trace)
         home_root = execution / "home"
         workspace = execution / "workspace"
+        identity = (
+            OwnerIdentity.provider_user("feishu", message.owner_id)
+            if message.owner_kind == "user"
+            else OwnerIdentity.provider_group("feishu", message.owner_id)
+        )
+        owner_home = resolve_owner_home(home_root, identity).home_dir
+        try:
+            paths = _ExecutionPaths(home_root, workspace, owner_home)
+            response, tokens = self._execute_and_commit(message, trace, paths)
+            if not _adapter().reply_message(message.message_id, response):
+                raise RuntimeError("飞书回复失败，队列消息将重试")
+            return tokens
+        finally:
+            shutil.rmtree(execution, ignore_errors=True)
+
+    # LLM: 温缓存仅由 slot 生命周期管理，回合只删除 trace workspace；快照提交必须早于外部回复。
+    # 函数用途: 在持有 owner 锁时复用温缓存执行消息。
+    def _run_locked_warm(self, message: ScaleMessage, trace: TraceContext) -> int:
+        execution = self._execution_root(message, trace)
+        workspace = execution / "workspace"
+        warm = self._warm_dir((message.tenant, message.owner_kind, message.owner_id))
+        home_root = warm / "home"
         identity = (
             OwnerIdentity.provider_user("feishu", message.owner_id)
             if message.owner_kind == "user"
@@ -150,7 +195,15 @@ class ScaleAgentPool:
         trace: TraceContext,
         paths: _ExecutionPaths,
     ) -> tuple[str, int]:
-        with self._store.checkout(message.tenant, message.owner_kind, message.owner_id, paths.owner_home):
+        if self._snapshot_mode == "full":
+            snapshot = self._store.checkout(message.tenant, message.owner_kind, message.owner_id, paths.owner_home)
+        else:
+            snapshot = self._store.checkout_delta(
+                message.tenant, message.owner_kind, message.owner_id, paths.owner_home,
+                warm_dir=paths.home_root.parent, lease_ttl_seconds=self._lease_ttl_seconds,
+                hold_advisory_lock=self._snapshot_mode == "delta_compat",
+            )
+        with snapshot:
             agent = self._build_agent(message, paths.home_root, paths.workspace)
             result = self._run_conversation_turn(agent, message, trace)
             response = str(result.get("response") or "").strip()
@@ -222,18 +275,42 @@ class ScaleAgentPool:
             raise RuntimeError(f"规模 Gateway 请求未成功：{code}")
         return response
 
+    # LLM: 池锁只修改表和 pins；淘汰在独立 slot 锁内做 IO，重新到达的同 owner 仍复用原 slot。
+    # 函数用途: 取得已 pin 的 owner slot 并清理可淘汰的最旧温缓存。
     def _slot(self, message: ScaleMessage) -> _AgentSlot:
         key = (message.tenant, message.owner_kind, message.owner_id)
+        evictions: list[tuple[tuple[str, str, str], _AgentSlot]] = []
         with self._lock:
-            existing = self._slots.pop(key, None)
-            if existing is not None:
-                self._slots[key] = existing
-                return existing
-            slot = _AgentSlot()
+            slot = self._slots.pop(key, None)
+            if slot is None:
+                slot = _AgentSlot()
             self._slots[key] = slot
-            while len(self._slots) > self._limit:
-                self._slots.popitem(last=False)
-            return slot
+            slot.pins += 1
+            while len(self._slots) - len(evictions) > self._limit:
+                candidate = next(((ref, entry) for ref, entry in self._slots.items()
+                                  if entry.pins == 0 and not entry.lock.locked()), None)
+                if candidate is None:
+                    break
+                ref, entry = candidate
+                entry.pins += 1
+                evictions.append((ref, entry))
+        for ref, evicted in evictions:
+            with evicted.lock:
+                try:
+                    if self._snapshot_mode != "full":
+                        shutil.rmtree(self._warm_dir(ref), ignore_errors=True)
+                finally:
+                    with self._lock:
+                        evicted.pins -= 1
+                        if evicted.pins == 0 and self._slots.get(ref) is evicted:
+                            del self._slots[ref]
+        return slot
+
+    # LLM: 缓存根由租户和 owner 三元组摘要决定，不由消息正文或 trace 决定。
+    # 函数用途: 返回 owner 独立的温缓存目录。
+    def _warm_dir(self, key: tuple[str, str, str]) -> Path:
+        digest = hashlib.sha256("\x1f".join(key).encode()).hexdigest()
+        return self._workspaces / ".owner-warm" / digest
 
     def _build_agent(self, message: ScaleMessage, home_root: Path, workspace: Path) -> SimpleAgent:
         config = copy.deepcopy(self._base_config)
