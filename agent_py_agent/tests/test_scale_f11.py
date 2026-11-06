@@ -188,8 +188,8 @@ def test_invalid_discovery_names_do_not_block_valid_responsibilities(tmp_path, k
     assert any("RECOVERY_DISCOVERY_INVALID_NAMES" in row.message for row in caplog.records)
 
 
-# LLM: 在SQLite真正打开前观测权限，不能靠连接后的chmod冒充私有边界；使用的仅为本测试临时目录。
-# 函数用途: 验证升级遗留的宽权限目录被安全收紧后才允许SQLite访问。
+# LLM: 在SQLite真正打开前观测权限；可信父目录先收紧，非sticky公共可写父目录须原样拒绝，不能靠chmod洗白信任。
+# 函数用途: 验证0755/0770修复后才连接，0777在连接及创建文件前失败且不泄漏FD。
 @pytest.mark.parametrize("mode", [0o755, 0o770, 0o777])
 def test_projection_parent_is_private_before_sqlite_connect(tmp_path, monkeypatch, mode):
     from agent_py_agent.agent.gateway_parts import recovery_pending_index as pending
@@ -209,10 +209,18 @@ def test_projection_parent_is_private_before_sqlite_connect(tmp_path, monkeypatc
 
     monkeypatch.setattr(pending.sqlite3, "connect", connect)
     baseline = _fd_count()
-    with pending.private_projection_connection(path) as db:
-        assert db.execute("SELECT 1").fetchone() == (1,)
-    assert seen_modes == [0o700]
-    assert path.stat().st_mode & 0o777 == 0o600
+    if mode & 0o002:
+        with pytest.raises(PermissionError, match="not a trusted directory"):
+            with pending.private_projection_connection(path):
+                pytest.fail("world-writable projection parent admitted")
+        assert seen_modes == []
+        assert directory.stat().st_mode & 0o777 == mode
+        assert list(directory.iterdir()) == []
+    else:
+        with pending.private_projection_connection(path) as db:
+            assert db.execute("SELECT 1").fetchone() == (1,)
+        assert seen_modes == [0o700]
+        assert path.stat().st_mode & 0o777 == 0o600
     assert _fd_count() == baseline
 
 
