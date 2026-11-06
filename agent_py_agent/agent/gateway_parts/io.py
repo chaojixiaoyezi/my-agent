@@ -395,15 +395,17 @@ def _updated_json_dict(updater: Callable[[dict], dict], current: dict) -> dict:
 # LLM: 默认仍原阻塞/序列化/锁序；C可显式非阻塞复用原try锁，争用必须报错而不跳过半边提交。
 # 函数用途: 在同一原文件事务内可选立即拒绝锁忙，不新增writer或假成功。
 @contextmanager
-def _locked_json_path(path: Path, *, blocking: bool = True):
+def _locked_json_path(path: Path, *, blocking: bool = True, category=None):
+    from ..concurrency.lock_order import category_for_path, ordered_lock
+
     if not blocking:
-        with try_locked_file_transition(path) as acquired:
+        with try_locked_file_transition(path, category=category) as acquired:
             if not acquired:
                 raise BlockingIOError("original_file_transition_busy")
             yield
         return
     handle = path_thread_lock(path)
-    with handle.lock:
+    with ordered_lock(category_for_path(path, category), handle.lock):
         with _locked_file_path(path):
             yield
 
@@ -411,14 +413,14 @@ def _locked_json_path(path: Path, *, blocking: bool = True):
 # LLM: 默认仍原阻塞/序列化/锁序；C可显式非阻塞复用原try锁，争用必须报错而不跳过半边提交。
 # 函数用途: 在同一原文件事务内可选立即拒绝锁忙，不新增writer或假成功。
 @contextmanager
-def locked_file_transition(path: Path, *, blocking: bool = True):
+def locked_file_transition(path: Path, *, blocking: bool = True, category=None):
     """Serialize a logical transition spanning more than one durable file.
 
     The JSON helpers make one file atomic.  Conversation steer/stop/complete must
     order a task-link transition and its guidance ledger together, so they share a
     dedicated lock path through this small public boundary.
     """
-    with _locked_json_path(path, blocking=blocking):
+    with _locked_json_path(path, blocking=blocking, category=category):
         yield
 
 
@@ -457,13 +459,16 @@ def try_existing_file_transition_at(directory_fd: int, path: Path):
 #   common包装强引用覆盖整个等待/释放窗口，OS句柄关闭异常也必须归还线程锁。
 # 函数用途: 尝试领取逻辑文件事务锁，锁正被使用时立即返回 False 而不是阻塞。
 @contextmanager
-def try_locked_file_transition(path: Path):
+def try_locked_file_transition(path: Path, *, category=None):
+    from ..concurrency.lock_order import category_for_path, note_acquired, note_released
+
     handle = path_thread_lock(path)
     if not handle.lock.acquire(blocking=False):
         yield False
         return
     file_handle = None
     os_lock_acquired = False
+    tracked = False
     try:
         file_handle = _open_lock_handle(path)
         os_lock_acquired = _try_flock_exclusive(file_handle)
@@ -475,10 +480,16 @@ def try_locked_file_transition(path: Path):
         if not _lock_handle_matches_path(file_handle, path.with_name(path.name + ".lock")):
             yield False
             return
+        note_acquired(category_for_path(path, category), id(handle.lock), try_acquire=True)
+        tracked = True
         yield True
     finally:
         try:
-            _release_transition_file_handle(file_handle, os_lock_acquired)
+            try:
+                if tracked:
+                    note_released(id(handle.lock))
+            finally:
+                _release_transition_file_handle(file_handle, os_lock_acquired)
         finally:
             handle.lock.release()
 
@@ -499,12 +510,14 @@ def _release_transition_file_handle(file_handle, os_lock_acquired: bool) -> None
 # 函数用途: 取得并持有某个 Gateway 回合唯一的跨进程状态转换锁。
 @contextmanager
 def gateway_turn_transition(paths: GatewayPaths, request_id: str):
+    from ..concurrency.lock_order import LockLevel
+
     turn_id = str(request_id or "").strip()
     if not turn_id:
         raise ValueError("gateway turn transition requires request_id")
     digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
     transition_path = paths.root / "turn_transitions" / f"{digest}.transition"
-    with locked_file_transition(transition_path):
+    with locked_file_transition(transition_path, category=LockLevel.T):
         yield
 
 
@@ -512,12 +525,14 @@ def gateway_turn_transition(paths: GatewayPaths, request_id: str):
 # 函数用途: 非阻塞尝试取得某个 Gateway 回合的跨进程状态转换锁。
 @contextmanager
 def try_gateway_turn_transition(paths: GatewayPaths, request_id: str):
+    from ..concurrency.lock_order import LockLevel
+
     turn_id = str(request_id or "").strip()
     if not turn_id:
         raise ValueError("gateway turn transition requires request_id")
     digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
     transition_path = paths.root / "turn_transitions" / f"{digest}.transition"
-    with try_locked_file_transition(transition_path) as acquired:
+    with try_locked_file_transition(transition_path, category=LockLevel.T) as acquired:
         yield acquired
 
 

@@ -339,7 +339,11 @@ class ClaimStore:
     # 函数用途: 原子释放租约并保留真实终态；重启后的失败收尾不依赖线程仍能读取。
     # LLM: 可选expected_raw只在原updater内核整份类型化JSON及running同claim/scope/thread，None不代表成功；默认参数保原Count0。
     # 函数用途: 在原唯一finish CAS中可选try锁和总deadline，拒绝先观察后覆盖新claim。
-    def finish(self, request: dict, *, expected_raw=None, blocking=True, deadline=None) -> dict[str, Any] | None:
+    def finish(self, request: dict, *, expected_raw=None, blocking=True, deadline=None,
+               expected_owner_epoch: int | None = None) -> dict[str, Any] | None:
+        from ..concurrency.lock_order import LockLevel, path_category
+        from ..user_space.owner_epoch import check_store_terminal_epoch
+
         thread_id = str(request.get("thread_id") or "")
         claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
@@ -372,6 +376,7 @@ class ClaimStore:
         # 函数用途: 在同一原子更新中核对租约身份，避免迟到的旧请求结束新请求的执行权。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal finished
+            check_store_terminal_epoch(self.storage, expected_owner_epoch)
             if expected_raw is not None:
                 if (serialize_private_json_no_newline(data) != expected_raw or data.get('status') != 'running'
                         or data.get('thread_id') != thread_id or data.get('claim_scope_id') != claim_scope_id
@@ -405,7 +410,8 @@ class ClaimStore:
             return payload
 
         options = {} if blocking and deadline is None else {'blocking': blocking, 'deadline': deadline}
-        updated = update_json_file_atomic(claim_path, updater, **options)
+        with path_category(claim_path, LockLevel.TASK_STORE):
+            updated = update_json_file_atomic(claim_path, updater, **options)
         return updated if finished else None
 
     # LLM: 只归档已终态且超过原保留期的 claim；坏账、运行中租约和缺少结束时间的记录保持原位。

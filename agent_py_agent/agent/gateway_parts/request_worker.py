@@ -25,9 +25,10 @@ import stat
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -103,6 +104,118 @@ class _ClaimedGatewayRequestContext:
     request_payload: dict
     request_id: str
     worker_id: str
+    owner_epoch: int = 0
+
+
+_CONVERSATION_CONTEXT_LOCK = threading.Lock()
+_CONVERSATION_CONTEXTS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_CLAIM_EPOCH_LOCK = threading.Lock()
+_CLAIM_EPOCHS: dict[tuple, tuple] = {}
+
+
+@dataclass(eq=False)
+class _GatewayConversationContext:
+    scheduler: object
+    config: object
+
+
+def gateway_conversation_scheduler(paths, agent=None):
+    """同一 Gateway 根只在组合时读一次worker数，弱注册表不延长宿主寿命。"""
+    key = (os.getpid(), str(paths.root.resolve()))
+    with _CONVERSATION_CONTEXT_LOCK:
+        context = _CONVERSATION_CONTEXTS.get(key)
+        if context is None and agent is not None:
+            from ..conversation.conversation_actor import ActorScheduler
+
+            config = getattr(agent, "config", None)
+            workers = int(getattr(config, "conversation_actor_workers", 0) or 0)
+            scheduler = ActorScheduler(workers=workers) if workers > 0 else None
+            context = _GatewayConversationContext(scheduler, config)
+            contexts = getattr(agent, "_gateway_conversation_contexts", None)
+            if contexts is None:
+                contexts = agent._gateway_conversation_contexts = {}
+            contexts[key] = context
+            _CONVERSATION_CONTEXTS[key] = context
+            if scheduler is not None:
+                weakref.finalize(context, scheduler.close)
+        return context.scheduler if context is not None else None
+
+
+def _claim_epoch_key(path, request_id, attempt_id):
+    return os.getpid(), str(path.absolute()), request_id, attempt_id
+
+
+def _stamp_claim_owner_epoch(agent, processing_path, payload, attempt_id):
+    from ..user_space.owner_epoch import ensure_process_owner_epoch_activated
+
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    if repo is None:
+        return None
+    stamp = ensure_process_owner_epoch_activated(repo)
+    config = getattr(agent, "config", None)
+    storage = getattr(getattr(agent, "conversation_store", None), "storage", None)
+    if storage is not None:
+        storage.owner_epoch_repository, storage.owner_epoch_config = repo, config
+    binding = (repo, stamp, config)
+    with _CLAIM_EPOCH_LOCK:
+        _CLAIM_EPOCHS[_claim_epoch_key(processing_path, str(payload.get("id") or processing_path.stem), attempt_id)] = binding
+    return binding
+
+
+def _finish_epoch_binding(path, request_id, attempt_id):
+    from ..user_space.owner_epoch import current_request_epoch
+
+    current = current_request_epoch()
+    if current is not None:
+        return current
+    with _CLAIM_EPOCH_LOCK:
+        return _CLAIM_EPOCHS.get(_claim_epoch_key(path, request_id, attempt_id))
+
+
+def _observe_stale_owner_epoch(binding, path, request_id, attempt_id, error):
+    """只向原运行attempt追加观察，绝不结束请求或把拒绝当作退出证明。"""
+    payload = read_json_file_report(path).payload
+    authority = payload.get("runtime_authority", {})
+    if (payload.get("execution_attempt_id", "") != attempt_id or not isinstance(authority, dict)
+            or not all(authority.get(key) for key in ("attempt_id", "agent_run_id", "run_id"))):
+        return
+    binding[0].append_event(event_type="STALE_OWNER_EPOCH", attempt_id=authority["attempt_id"],
+        agent_run_id=authority["agent_run_id"], task_run_id=authority["run_id"],
+        payload={"code": error.code, "request_id": request_id, "expected_owner_epoch": error.expected,
+                 "current_owner_epoch": error.current, "execution_attempt_id": attempt_id})
+
+
+def _archive_epoch_fenced(paths, path, folder, request_id, response, store, binding, attempt_id, lease_epoch):
+    """复用原终态锁内writer及锁外投影；不嵌套原来的非重入 T 锁。"""
+    from ..user_space.owner_epoch import require_current
+    from .multiprocess_processing_recovery import (
+        current_processing_recovery,
+        processing_metadata_scope,
+    )
+    from .queue_service import GatewayArchiveDisposition, GatewayArchiveResult
+    from .recovery import (
+        _complete_gateway_terminal_projection,
+        _terminal_projection_marker_path,
+        _terminalize_gateway_request_locked,
+    )
+
+    expected = dict(expected_execution_attempt_id=attempt_id, expected_lease_epoch=lease_epoch,
+        expected_lease_heartbeat_at=None, expected_request_status="", expected_turn_phase="",
+        expected_cancel_requested=None)
+    with processing_metadata_scope(paths, request_id):
+        # 原scope在这里已经持T；开关在末提交点再读，不能缓存首次finish预检的值。
+        if getattr(binding[2], "owner_epoch_fence_enabled", False):
+            require_current(binding[0], binding[1])
+        archived, settled = _terminalize_gateway_request_locked(paths, path, folder, request_id, store, response, expected)
+        source = current_processing_recovery()
+        if source is not None:
+            source.defer_terminal_projection(request_id, store, settled)
+            marker = _terminal_projection_marker_path(paths, request_id)
+            previous = read_json_file_report(marker).payload
+            write_json_file_atomic(marker, {**previous, "settlement_pending": True})
+    if source is None:
+        _complete_gateway_terminal_projection(paths, request_id, store, settled)
+    return GatewayArchiveResult(GatewayArchiveDisposition.COMMITTED, terminal_path=archived)
 
 
 @dataclass(frozen=True)
@@ -469,6 +582,16 @@ def _admit_and_submit(
         _record_admission_wait(request, reason=blocked_reason)
         return "blocked"
     handed_off = False
+    scheduler = gateway_conversation_scheduler(paths)
+    reserved = None
+    if scheduler is not None:
+        from ..conversation.conversation_actor import Admit
+
+        reserved = Admit(user_key, conversation_key or request.path.stem, request.path.stem)
+        if scheduler.sequencer.decide(reserved).action != "admit":
+            admission.release(user_key, conversation_key=conversation_key)
+            _record_admission_wait(request, reason="conversation_busy")
+            return "blocked"
     try:
         claim = claim_request(paths, request.path)
         if claim is None:
@@ -479,6 +602,10 @@ def _admit_and_submit(
         if not handed_off:
             # 移交前任何出口都不能漏坑;已认领请求留在 processing,由恢复扫描收尸。
             admission.release(user_key, conversation_key=conversation_key)
+            if reserved is not None:
+                from ..conversation.conversation_actor import TurnFinished
+
+                scheduler.post(TurnFinished(reserved.owner_key, reserved.conversation_key, reserved.request_id))
     return "claimed"
 
 
@@ -1153,6 +1280,7 @@ def _process_claimed_gateway_request_path(
     *,
     claim: GatewayClaim | None = None,
 ) -> bool:
+    scheduler = gateway_conversation_scheduler(paths, agent)
     request_report = read_json_file_report(processing_path, context="gateway.worker.request.read")
     if request_report.load_error is not None:
         request_id = processing_path.stem
@@ -1238,13 +1366,52 @@ def _process_claimed_gateway_request_path(
                 expected_lease_epoch=expected_lease_epoch,
             )
             return True
+        from ..conversation.conversation_actor import Admit
+        from ..user_space.owner_epoch import request_epoch_scope, require_current
+
+        epoch_binding = _stamp_claim_owner_epoch(request_agent, processing_path, request_payload, expected_attempt_id)
+        captured_epoch = epoch_binding[1] if epoch_binding is not None else 0
+        decision = None
+        conversation_key = request_conversation_key(request_payload) or request_id
+        if scheduler is not None:
+            decision = scheduler.sequencer.decide(Admit(request_user_key(request_payload), conversation_key,
+                request_id, expected_attempt_id, captured_epoch))
+            if decision.action != "admit":
+                from ..conversation.conversation_actor import TurnFinished
+
+                active = scheduler.sequencer.snapshot(conversation_key)["active"]
+                if active == (request_id, "", 0):
+                    scheduler.post(TurnFinished(request_user_key(request_payload), conversation_key, request_id))
+                return False
+        admitted = False
+        try:
+            with gateway_turn_transition(paths, request_id):
+                admitted = scheduler is None or scheduler.sequencer.check_still_current(conversation_key, decision.expected_seq)
+                if admitted and epoch_binding is not None and getattr(request_agent.config, "owner_epoch_fence_enabled", False):
+                    require_current(epoch_binding[0], captured_epoch)
+        except BaseException:
+            if scheduler is not None:
+                from ..conversation.conversation_actor import TurnFinished
+
+                scheduler.post(TurnFinished(request_user_key(request_payload), conversation_key,
+                    request_id, expected_attempt_id, captured_epoch))
+            raise
+        if not admitted:
+            if scheduler is not None:
+                from ..conversation.conversation_actor import TurnFinished
+
+                scheduler.post(TurnFinished(request_user_key(request_payload), conversation_key,
+                    request_id, expected_attempt_id, captured_epoch))
+            return False
         context = _ClaimedGatewayRequestContext(
             request_agent, processing_path, request_payload, request_id,
             str((claim.lease_owner if claim is not None else "") or request_payload.get("lease_owner") or worker_id),
+            captured_epoch,
         )
-        return _execute_claimed_gateway_request(
-            context, paths, timing, (expected_attempt_id, expected_lease_epoch),
-        )
+        with (request_epoch_scope(*epoch_binding) if epoch_binding is not None else nullcontext()):
+            return _execute_claimed_gateway_request(
+                context, paths, timing, (expected_attempt_id, expected_lease_epoch),
+            )
 
 
 # LLM: Only pre-business acquisition calls this; original T/P5 gate plus JSON lease/fingerprint CAS retain identity and reject pending/terminal collisions.
@@ -1636,6 +1803,16 @@ def _finish_claimed_gateway_request(
         raise DataCorruptionError(
             "gateway terminal response identity conflicts with the claimed request"
         )
+    from ..user_space.owner_epoch import StaleOwnerEpoch, require_current
+
+    epoch_binding = _finish_epoch_binding(processing_path, request_id, expected_execution_attempt_id)
+    if epoch_binding is not None and getattr(epoch_binding[2], "owner_epoch_fence_enabled", False):
+        try:
+            with gateway_turn_transition(paths, request_id):
+                require_current(epoch_binding[0], epoch_binding[1])
+        except StaleOwnerEpoch as error:
+            _observe_stale_owner_epoch(epoch_binding, processing_path, request_id, expected_execution_attempt_id, error)
+            return
     if response.get("kind") == "background":
         from .multiprocess_background_execution import requeue_pending_background_request
 
@@ -1658,18 +1835,33 @@ def _finish_claimed_gateway_request(
                                       expected_execution_attempt_id, expected_lease_epoch)
     target_folder = gateway_terminal_projection_folder(paths, response)
     response_path = gateway_response_path(paths, request_id)
-    archive_result = archive_request(
-        paths,
-        processing_path,
-        target_folder,
-        request_id,
-        conversation_store=conversation_store,
-        terminal_response=response,
-        expected_execution_attempt_id=expected_execution_attempt_id,
-        expected_lease_epoch=expected_lease_epoch,
-    )
+    try:
+        if epoch_binding is not None and getattr(epoch_binding[2], "owner_epoch_fence_enabled", False):
+            archive_result = _archive_epoch_fenced(paths, processing_path, target_folder, request_id,
+                response, conversation_store, epoch_binding, expected_execution_attempt_id, expected_lease_epoch)
+        else:
+            archive_result = archive_request(
+                paths, processing_path, target_folder, request_id,
+                conversation_store=conversation_store, terminal_response=response,
+                expected_execution_attempt_id=expected_execution_attempt_id,
+                expected_lease_epoch=expected_lease_epoch,
+            )
+    except StaleOwnerEpoch as error:
+        _observe_stale_owner_epoch(epoch_binding, processing_path, request_id, expected_execution_attempt_id, error)
+        return
     if not archive_result.terminal_committed:
         return
+    with _CLAIM_EPOCH_LOCK:
+        _CLAIM_EPOCHS.pop(_claim_epoch_key(processing_path, request_id, expected_execution_attempt_id), None)
+    scheduler = gateway_conversation_scheduler(paths)
+    if scheduler is not None:
+        from ..conversation.conversation_actor import TurnFinished
+
+        payload = read_json_file_report(paths.terminal / f"{request_id}.json").payload
+        conversation_key = request_conversation_key(payload) or request_id
+        scheduler.post(TurnFinished(request_user_key(payload), conversation_key,
+            request_id, expected_execution_attempt_id, epoch_binding[1] if epoch_binding else 0),
+            handler=lambda *_: scheduler.sequencer.retire_terminal(conversation_key, request_id))
     from .recovery import (
         mark_gateway_terminal_projection_complete,
         repair_gateway_chunk_projection,
@@ -1719,6 +1911,13 @@ def terminalize_unhandled_claimed_gateway_request(
     from ..conversation.agent_tool_approval import find_approval_retirement_error
 
     if find_approval_retirement_error(error) is not None:
+        return
+    from ..user_space.owner_epoch import StaleOwnerEpoch
+
+    if isinstance(error, StaleOwnerEpoch):
+        binding = _finish_epoch_binding(processing_path, processing_path.stem, expected_execution_attempt_id)
+        if binding is not None:
+            _observe_stale_owner_epoch(binding, processing_path, processing_path.stem, expected_execution_attempt_id, error)
         return
     report = read_json_file_report(
         processing_path,
