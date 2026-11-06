@@ -952,6 +952,38 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     return snapshot, complete
 
 
+# LLM: 前台等待仅在T/2T调用；使用新鲜树关系并复核根与每个成员出生身份，只增nice，不发送信号或修改隔离边界。
+# 函数用途: 尽力降低原命令树的CPU优先级，退出、权限或观察失败不改变命令结果；返回成功降权的进程数。
+def renice_process_tree(root_pid: int, birth_token: str | None, nice_level: int) -> int:
+    if (root_pid <= 1 or root_pid == os.getpid() or not birth_token
+            or type(nice_level) is not int or not 0 <= nice_level <= 19
+            or not all(hasattr(os, name) for name in ("getpriority", "setpriority", "PRIO_PROCESS"))
+            or not _same_process(root_pid, birth_token)):
+        return 0
+    try:
+        snapshot, _complete = _fresh_process_tree_snapshot(root_pid)
+        if (not snapshot.get(root_pid)
+                or not _birth_token_matches(root_pid, birth_token, snapshot[root_pid])
+                or not _same_process(root_pid, birth_token)):
+            return 0
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    changed = 0
+    for pid, token in snapshot.items():
+        if pid <= 1 or pid == os.getpid() or not token:
+            continue
+        try:
+            current_nice = os.getpriority(os.PRIO_PROCESS, pid)
+            # nice读取不是身份授权；在写入前复核，不能把旧PID或未知成员套给新进程。
+            if (nice_level > current_nice and _same_process(root_pid, birth_token)
+                    and _same_process(pid, token)):
+                os.setpriority(os.PRIO_PROCESS, pid, nice_level)
+                changed += 1
+        except OSError:
+            continue
+    return changed
+
+
 # LLM: 仅此线程临时禁用关系TTL缓存，finally恢复；仍调用原snapshot以保替身/身份守卫，不改外部观察者的默认缓存。
 # 函数用途: 终止及升级KILL前重新采集关系，避免旧关系配上复用PID的新出生身份。
 def _fresh_process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:

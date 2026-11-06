@@ -248,6 +248,9 @@ class _ToolConfigFields:
     access_mode: str = DEFAULT_COMMAND_ACCESS_MODE
     tool_shell_timeout: int = 240
     tool_shell_output_max_chars: int = 12_000
+    # SP1-W2：前台命令树的数值降权策略；0秒关闭，构造/replace与YAML共用严格范围。
+    tool_shell_demote_after_seconds: int = field(default=1, metadata={"bounds": (0, 3600), "unit": "秒"})
+    tool_shell_demoted_nice: int = field(default=15, metadata={"bounds": (0, 19)})
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）：分页器等按键会让命令永不退出，超过阈值由宿主自动收回。
     pty_session_idle_timeout_minutes: int = 30
     # 后台服务默认只允许监听本机回环；声明 loopback 却绑到局域网地址时由 host 回收（False 只记 listener_warning）。

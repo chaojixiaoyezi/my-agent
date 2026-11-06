@@ -17,6 +17,8 @@ TOOL_INT_FIELDS = (
     ("capability_pack_mcp_idle_stop_seconds", 0, None),
     ("tool_shell_timeout", 1, None),
     ("tool_shell_output_max_chars", 100, None),
+    ("tool_shell_demote_after_seconds", 0, 3600),
+    ("tool_shell_demoted_nice", 0, 19),
     ("chat_history_max_turns", 1, None),
     ("conversation_history_max_turns", 1, None),
     ("conversation_history_max_chars", 1000, None),

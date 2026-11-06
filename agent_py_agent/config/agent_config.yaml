@@ -1082,6 +1082,12 @@ pty_session_idle_timeout_minutes: 30
 # run_command 的 stdout/stderr 分别最多回显多少字符
 # 超出时只回显预览、总字符数和截断标记，完整大输出后续应走 artifact/日志引用
 tool_shell_output_max_chars: 12000
+# 前台命令超过多少秒后，把整棵进程树降权到 tool_shell_demoted_nice（秒，0-3600；0 = 关闭降权）。
+# 只调高 nice，绝不提高进程优先级；部署项，模型和普通用户不可改，修改后重启 Gateway 生效。
+tool_shell_demote_after_seconds: 1
+# 前台命令树降权目标 nice（0-19）；仅在目标大于当前 nice 时生效，权限不足保持原值。
+# nice 15 的 Linux CFS 权重为 36；部署项，修改后重启 Gateway 生效。
+tool_shell_demoted_nice: 15
 # 后台服务的监听范围：模型经 run_command(run_in_background=true) 起的服务默认只允许监听本机回环地址（127.0.0.1/::1）；
 # 要开放局域网必须在调用里声明 background_listen_scope=lan，首次由你在审批面板确认，可选"本用户长期允许"以后不再问；
 # 自主审批模式也不会替你放开。声明 loopback 却绑到局域网地址时，后台 host 按真实 socket 表回收该服务并在记录里留证据；

@@ -84,6 +84,7 @@ from .process_registry import (
     capture_process_birth_token,
     finish_foreground_process,
     process_registry,
+    renice_process_tree,
     terminate_process_tree,
 )
 from .process_scope import ProcessAccessScope, ProcessExecutionScope, process_access_scope
@@ -135,6 +136,9 @@ class ShellToolOptions:
     artifact_backup_root: Path | None = None
     access_mode: str = _DEFAULT_ACCESS_MODE
     default_timeout: int = 30
+    # 宿主数值部署项；低层直接调用默认不降权，正式装配读取AgentConfig的1秒默认。
+    demote_after_seconds: int = 0
+    demoted_nice: int = 15
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS
     # 后台服务声明 loopback 却绑到局域网地址时是否由 host 回收；False 只记 listener_warning。来自配置 background_process_listen_scope_enforce。
     listen_scope_enforce: bool = True
@@ -568,18 +572,23 @@ def _process_output_text(value: str | bytes | None) -> str:
 
 # LLM: 前台宿主与沙箱共用采集和终止；从启动冻结出生身份，管道 EOF 后也不能先 poll，必须先清理可验证的原组。
 # EOF后从2ms指数退避至50ms；generation在检查前采样，取消回调唤醒等待，不能将EOF视为进程退出。
+# 降权只在原启动身份仍已知的T/2T各尝试一次；0保留原等待路径，不影响后台或PTY。
 # 函数用途: 等待命令与管道完成并收回前台后代；保留原退出码、有限输出及独立清理回执，联测 foreground/orphan cleanup。
 def _communicate_process(
     proc: subprocess.Popen[str],
     *,
     command: str,
     timeout: int,
+    demote_after_seconds: int = 0,
+    demoted_nice: int = 15,
 ) -> subprocess.CompletedProcess[str]:
-    deadline = time.monotonic() + max(0.0, float(timeout))
+    started_at = time.monotonic()
+    deadline = started_at + max(0.0, float(timeout))
     birth_token = capture_process_birth_token(proc.pid) if os.name != "nt" else None
     capture = _start_foreground_capture(proc, birth_token)
     next_exit_probe = 0.0
     probe_interval = _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS
+    demotions = 0
     with register_cancellation_callback(lambda: _cancel_foreground_wait(proc, birth_token, capture)):
         while True:
             generation = getattr(capture, "generation", 0)
@@ -609,8 +618,16 @@ def _communicate_process(
                 result.capture = facts
                 result.termination = termination
                 return result
+            next_demote = (started_at + demote_after_seconds * (demotions + 1)
+                           if demote_after_seconds > 0 and birth_token and demotions < 2 else None)
+            if next_demote is not None and time.monotonic() >= next_demote:
+                renice_process_tree(proc.pid, birth_token, demoted_nice)
+                demotions += 1
+                next_demote = started_at + demote_after_seconds * 2 if demotions < 2 else None
             wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.1
             wait_step = min(remaining, wait, 0.02 if done else 0.1)
+            if next_demote is not None:
+                wait_step = min(wait_step, max(0.0, next_demote - time.monotonic()))
             if not done and hasattr(capture, "wait_changed"):
                 capture.wait_changed(wait_step, generation=generation)
             else:
@@ -1149,6 +1166,8 @@ class ShellTool(BaseTool):
             else None
         )
         self.default_timeout = options.default_timeout
+        self.demote_after_seconds = options.demote_after_seconds
+        self.demoted_nice = options.demoted_nice
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.listen_scope_enforce = bool(options.listen_scope_enforce)
         self.sandbox_boundary_facts = bool(options.sandbox_boundary_facts)
@@ -2242,7 +2261,9 @@ def _run_shell_command(
                                      host_credential_env_names=tool.host_credential_env_names),
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
-        return _communicate_process(proc, command=command, timeout=timeout)
+        return _communicate_process(proc, command=command, timeout=timeout, **({
+            "demote_after_seconds": tool.demote_after_seconds, "demoted_nice": tool.demoted_nice,
+        } if tool.demote_after_seconds else {}))
     raise SandboxUnavailable(
         "SANDBOX_UNAVAILABLE: 当前平台无 attempt 沙箱实现（POSIX 之外仅支持 Windows 单租户宿主路径）"
     )
@@ -2287,7 +2308,9 @@ def _run_attempt_sandboxed_shell_command(
                                      host_credential_env_names=tool.host_credential_env_names), use_shell))
         else:
             proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
-            completed = _communicate_process(proc, command=command, timeout=remaining)
+            completed = _communicate_process(proc, command=command, timeout=remaining, **({
+                "demote_after_seconds": tool.demote_after_seconds, "demoted_nice": tool.demoted_nice,
+            } if tool.demote_after_seconds else {}))
         if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
             pruned = prune_transient_bwrap_sidecar_mounts(exec_arg, completed.stderr or '')
             if pruned is not None:

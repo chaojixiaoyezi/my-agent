@@ -143,6 +143,8 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             access_mode=params.access_mode,
             default_timeout=params.shell_tool_timeout,
             max_output_chars=params.shell_tool_output_max_chars,
+            demote_after_seconds=params.tool_shell_demote_after_seconds,
+            demoted_nice=params.tool_shell_demoted_nice,
             listen_scope_enforce=registry.background_process_listen_scope_enforce,
             host_private_roots=params.host_private_roots,
             full_access_other_owner_homes=getattr(params, "full_access_other_owner_homes", "read_only"),

@@ -185,6 +185,9 @@ class ToolRegistryParams:
     shell_tool_timeout: int = 30
     process_session_wait_slice_seconds: int = 30
     shell_tool_output_max_chars: int = 12_000
+    # 宿主装配的前台降权策略；直接构造保持关闭，正式Agent从配置读取1秒默认。
+    tool_shell_demote_after_seconds: int = 0
+    tool_shell_demoted_nice: int = 15
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）；装配点据此配置进程级 PTY 注册表。
     pty_session_idle_timeout_minutes: int = 30
     background_process_listen_scope_enforce: bool = True
