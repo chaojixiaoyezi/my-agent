@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import http.client
 import select
+import ssl
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from functools import cache
 from typing import Any
 
 from .gateway_request_limits import remaining_deadline_seconds, stdlib_response_socket
@@ -283,10 +285,26 @@ def _new_connection(route: KeepAliveRoute, options: Any):
     return connection
 
 
-# LLM: 与 urllib 默认 HTTPSHandler 相同返回 None（标准库默认 TLS 上下文，校验证书与主机名）；单独成函数只为测试替换假握手。
-# 函数用途: 返回新建 HTTPS 长连接要用的 TLS 上下文。
+# LLM: 与标准库 context=None 时自建的默认上下文设置相同（系统 CA、校验证书与主机名、HTTP/1.1 ALPN），只是进程内共享一份；
+#   SSLContext 可多线程只读共享，调用方不得在返回值上改设置。单独成函数也供测试替换假握手。
+# 函数用途: 返回所有模型 HTTPS 连接共用的 TLS 上下文，免去每条连接约 0.7 MB 内存与约 20 ms CPU 的 CA 重新加载。
 def _tls_context():
-    return None
+    return _shared_https_context()
+
+
+# LLM: 首次调用时按 http.client 的默认规则建一次（3.12 私有工厂存在就直接用它，3.11 按同样三步构造）；并发首调最多多建一份，结果等价。
+# 函数用途: 创建并缓存进程级默认 HTTPS 客户端上下文。
+@cache
+def _shared_https_context() -> ssl.SSLContext:
+    factory = getattr(http.client, "_create_https_context", None)
+    if callable(factory):
+        return factory(http.client.HTTPSConnection._http_vsn)
+    context = ssl._create_default_https_context()
+    if http.client.HTTPSConnection._http_vsn == 11:
+        context.set_alpn_protocols(["http/1.1"])
+    if context.post_handshake_auth is not None:
+        context.post_handshake_auth = True
+    return context
 
 
 # LLM: 复用连接的守卫、期限与读超时都换成本次尝试的；本次已被中断就直接关闭并上抛。计时从原方法重新包裹后记“跳过建连”。

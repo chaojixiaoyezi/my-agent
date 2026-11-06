@@ -19,16 +19,16 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-try:
-    from sqlalchemy import create_engine, event, inspect, text
+if TYPE_CHECKING:
     from sqlalchemy.engine import Connection, Engine
 
-    _HAS_SQLALCHEMY = True
-except ImportError:  # 不装 SQLAlchemy 也能 import 本模块(构造 StorageBackend 时才报错)
-    _HAS_SQLALCHEMY = False
+# SQLAlchemy 只在构造 StorageBackend(PostgreSQL/规模路径)时才导入：默认 Gateway/TUI/子进程只用 ensure_sqlite_wal，
+# 不应为此常驻约 10 MB 的 SQLAlchemy 模块对象。不装 SQLAlchemy 也能 import 本模块(构造时才报错)。
+_HAS_SQLALCHEMY = find_spec("sqlalchemy") is not None
 
 
 def sqlite_url(path: str | Path) -> str:
@@ -58,6 +58,8 @@ class StorageBackend:
 
     def __init__(self, url: str, *, echo: bool = False, pool_size: int = 10, max_overflow: int = 20) -> None:
         _require_sqlalchemy()
+        from sqlalchemy import create_engine, event
+
         self.url = url
         kwargs: dict[str, Any] = {"echo": echo, "connect_args": {}}
         if url.startswith("sqlite"):
@@ -117,10 +119,14 @@ class StorageBackend:
             conn.close()
 
     def table_names(self) -> list[str]:
+        from sqlalchemy import inspect
+
         return sorted(inspect(self.engine).get_table_names())
 
     def scalar(self, sql: str, params: dict[str, Any] | None = None) -> Any:
         with self.engine.connect() as conn:
+            from sqlalchemy import text
+
             return conn.execute(text(sql), params or {}).scalar()
 
     def dispose(self) -> None:

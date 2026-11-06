@@ -22,7 +22,6 @@ from agent_py_agent.agent.retrieval.lexical import (
     reciprocal_rank_fusion,
     tokenize,
 )
-from agent_py_agent.agent.retrieval.pgvector_store import PgVectorStore
 from agent_py_agent.agent.retrieval.vector_store import VectorHit, VectorStore
 
 __all__ = [
@@ -41,3 +40,13 @@ __all__ = [
     "reciprocal_rank_fusion",
     "tokenize",
 ]
+
+
+# PgVectorStore 只服务 PostgreSQL 规模路径：按需加载，避免任何导入 retrieval 子模块的进程都连带加载 SQLAlchemy。
+# 函数用途: 保持 `from agent_py_agent.agent.retrieval import PgVectorStore` 的原入口，首次访问时才导入。
+def __getattr__(name: str):
+    if name == "PgVectorStore":
+        from agent_py_agent.agent.retrieval.pgvector_store import PgVectorStore
+
+        return PgVectorStore
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

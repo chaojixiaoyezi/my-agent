@@ -385,11 +385,12 @@ def _restore_missing_session_registration(agent, manager, session_id: str) -> bo
 
 
 # LLM: Both chat/resume decide the route before construction and before handoff redirects terminal output; MCP policy stays at the owning entrypoint.
+#   plain 终端连 Gateway 时与 TUI 一样只用瘦客户端：回合提交/轮询、斜杠命令与控制都走 TUI 已用的同一 Gateway 入口，完整智能体只留给 direct 聊天。
 # 函数用途: 用同一判据选择轻量Gateway界面，不改变普通direct聊天的构造策略。
 def _select_chat_client_mode(args) -> tuple[bool, bool]:
     use_gateway = bool(getattr(args, "gateway", False))
     use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
-    args._gateway_client_mode = bool(use_gateway and use_tui)
+    args._gateway_client_mode = use_gateway
     return use_gateway, use_tui
 
 

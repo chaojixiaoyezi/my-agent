@@ -362,8 +362,8 @@ def test_management_entrypoints_defer_before_original_factory(tmp_path, monkeypa
         getattr(cli, command)(args)
 
 
-# LLM: Plain Gateway chat retains the original full-agent path but must defer before calling it.
-# 函数用途: 防止--plain --gateway遗漏MCP延迟标记。
+# LLM: Plain Gateway chat constructs the same thin client as the TUI (MEM-W5) and still marks defer before construction.
+# 函数用途: 防止--plain --gateway退回完整代理或遗漏MCP延迟标记。
 def test_plain_gateway_chat_defers_before_construction(monkeypatch):
     from agent_py_agent.cli import chat
     from agent_py_agent.cli.chat_parts import tui_upgrade_follow
@@ -372,9 +372,9 @@ def test_plain_gateway_chat_defers_before_construction(monkeypatch):
     monkeypatch.setattr(tui_upgrade_follow, "adopt_handoff", lambda: SimpleNamespace(child=False))
 
     # LLM: Do not enter the actual terminal; validate both route and defer at the unchanged public construction boundary.
-    # 函数用途: 观察plain仍走完整代理接口，但不急连MCP。
+    # 函数用途: 观察plain走瘦客户端接口，且不急连MCP。
     def observe(args):
-        assert args._gateway_client_mode is False
+        assert args._gateway_client_mode is True
         assert getattr(args, "_defer_mcp_connect", False) is True
         raise _ConstructionObserved
 

@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import keepalive_transport
 from .errors import (
     ProviderConnectionError,
     ProviderContextWindowError,
@@ -1231,12 +1232,14 @@ class _SplitTimeoutHTTPHandler(urllib.request.HTTPHandler):
 # 类用途: 为 urllib HTTPS 请求选择可中断的双超时连接实现。
 class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
     # LLM: guard 生命周期归 `_gateway_urlopen`；handler 只保存引用到一次 opener.open 结束。
+    #   TLS 上下文复用 keepalive_transport 的进程级默认上下文（运行时取模块属性，测试替换仍生效）。
     # 函数用途: 保存本次 HTTPS open 的连接参数。
     def __init__(
         self,
         transport_options: _SplitTimeoutOptions,
     ):
-        super().__init__()
+        # 标准库 context=None 时每个 handler 都会重新加载整套 CA（约 0.7 MB、约 20 ms CPU），这里复用共享上下文。
+        super().__init__(context=keepalive_transport._tls_context())
         self.transport_options = transport_options
 
     # LLM: do_open 必须把同一 guard 和 SSL context 一起传给连接，不得在 handler 内另建取消 token。

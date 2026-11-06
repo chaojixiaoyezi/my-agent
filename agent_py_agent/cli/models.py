@@ -14,9 +14,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..agent.conversation.background_shutdown import BackgroundShutdown
+if TYPE_CHECKING:
+    from ..agent.conversation.background_shutdown import BackgroundShutdown
 from ..agent.gateway_parts.status_rendering import GatewayReadiness as _GatewayReadiness
 
 
@@ -70,6 +71,13 @@ class GatewayStartOptions:
     workspace_root: str = ""
 
 
+# 函数用途: 只在 Gateway 真正构造运行上下文时才加载后台停机观察（TUI 只用 ChatJob，不应加载 runtime_db/scheduler）。
+def _new_background_shutdown() -> BackgroundShutdown:
+    from ..agent.conversation.background_shutdown import BackgroundShutdown
+
+    return BackgroundShutdown()
+
+
 # LLM: This immutable value follows one exact Gateway process generation from setup through
 # cleanup. Identity/start time scope stop markers; the log byte offset scopes diagnostics.
 #   数量由公开YAML冻结，默认0；直接private字段只供原内部QA；安全重启仍拒绝未经实现的MP接班。
@@ -88,7 +96,7 @@ class GatewayRunContext:
     coordinator_worker_count: int = 0
     control_plane: Any = None
     drain_runtime: Any = None
-    background_shutdown: BackgroundShutdown = field(default_factory=BackgroundShutdown)
+    background_shutdown: BackgroundShutdown = field(default_factory=_new_background_shutdown)
 
     # LLM: 内部C独立保存配置，agent可以未获P2许可；默认单进程仍直接消费实际agent配置。
     # 函数用途: 返回本次启动的可信配置，不借假Agent填充接口。

@@ -13,8 +13,6 @@ from prompt_toolkit.layout import Float, HSplit
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList, TextArea
 
-from ...agent.settings.model_profiles import ModelProfileError
-from ...agent.settings.thread_model_selection import execute_local_model_operation
 from .tui_model_selection_wait import ModelMenuDetached, ModelSelectionSaved, save_selection
 
 
@@ -104,9 +102,14 @@ async def _request_data(agent, session_id: str, operation: str, payload: dict) -
 # LLM: 菜单与启动共用原配置入口，Gateway只传显式payload映射；必须由后台线程调用，异常不泄漏秘密。
 # 函数用途: 读取或保存用户模型配置；Gateway 模式发认证请求，本地模式访问私有配置文件。
 def _request_data_sync(agent, session_id: str, operation: str, payload: dict) -> dict:
+    # 本地模型配置链（model_profiles→权限/能力/记忆归档）只在 --direct 模式需要；Gateway 瘦客户端不加载它。
+    from ...agent.settings.model_provider_schema import ModelProfileError
+
     try:
         if getattr(agent, "gateway_client_only", False) is True:
             return agent.request_models(session_id=session_id, operation=operation, payload=payload)
+        from ...agent.settings.thread_model_selection import execute_local_model_operation
+
         return execute_local_model_operation(agent, session_id, operation, payload)
     except ModelProfileError as exc:
         return {"ok": False, "message": str(exc)}

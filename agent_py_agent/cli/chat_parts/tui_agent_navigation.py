@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ...agent.conversation.background_process_view import background_watch_rows
-from ...agent.conversation.background_transcript import BACKGROUND_TRANSCRIPT_SCHEMA
+from .tui_runtime import _BACKGROUND_TRANSCRIPT_SCHEMA as BACKGROUND_TRANSCRIPT_SCHEMA
 from .tui_runtime import TuiRuntime
 
 _TERMINAL_AGENT_STATUSES = frozenset(
