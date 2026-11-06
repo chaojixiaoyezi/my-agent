@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from ..contracts.tool_approval import (
     ToolApprovalDecision,
@@ -20,6 +21,15 @@ from .permission_bridge import (
     unavailable_gateway_permission_decision,
     wait_for_gateway_permission_decision,
 )
+
+
+# LLM: 仅可信宿主注入；实现须绑定传输身份核验、等待中取消与到期及插件人工确认，不能替换外层审批策略。
+# 类用途: 约定替换审批等待传输所需的最小调用接口。
+class ApprovalDecisionWaiter(Protocol):
+    # LLM: 接收规范请求及原宿主等待选项，返回同一审批的决定；调用方仍负责缓存与事件。
+    # 函数用途: 等待当前审批的精确决定。
+    def __call__(self, request: ToolApprovalRequest, options: ToolApprovalWaitOptions, *,
+                 cancellation_token: object | None = None) -> ToolApprovalDecision: ...
 
 
 # LLM: 与等待入口同样使用固定宿主选项；只包装原参数，不接受任意关键字或新增配置源。
@@ -42,6 +52,7 @@ class StreamApproval:
     scope_provider: Callable[[], str] | None = field(default=None, repr=False)
     # LLM: 用户选 approved_owner 时把 binding.grant_key 交给宿主持久化（owner 策略文件）；None 表示本流不支持长期授权。
     grant_recorder: Callable[[str], None] | None = field(default=None, repr=False)
+    decision_waiter: ApprovalDecisionWaiter | None = field(default=None, repr=False)
 
     # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
     # can call tools. Request payload prose or tool arguments must never choose this scope.
@@ -68,7 +79,7 @@ class StreamApproval:
         except (OSError, RuntimeError, TypeError, ValueError):
             return ""
 
-    # LLM: 插件先禁自主批准；取消和绝对截止优先于缓存/provider，无交互的剩余确认在发布前拒绝。
+    # LLM: 插件先禁自主批准；取消和绝对截止优先于缓存/provider，无交互的剩余确认在发布前拒绝；仅宿主可替换等待传输。
     # 函数用途: 在已授权范围内自动执行，交互时发布有限期确认，不让旧缓存批准过期请求。
     def request(
         self,
@@ -123,12 +134,23 @@ class StreamApproval:
                 "permission": request.to_dict(),
             },
         )
-        decision = wait_for_gateway_permission_decision(
-            self.chunk_path,
-            request,
-            cancellation_token=cancellation_token,
-            options=ToolApprovalWaitOptions(mode_decision_provider=mode_decision_provider),
-        )
+        wait_options = ToolApprovalWaitOptions(mode_decision_provider=mode_decision_provider)
+        if self.decision_waiter is None:
+            decision = wait_for_gateway_permission_decision(
+                self.chunk_path,
+                request,
+                cancellation_token=cancellation_token,
+                options=wait_options,
+            )
+        else:
+            decision = self.decision_waiter(request, wait_options, cancellation_token=cancellation_token)
+            # 注入传输交回的决定须属于本次审批；取消与截止由外层再核一次，任何不符都失败关闭。
+            if decision.permission_id != request.permission_id:
+                decision = ToolApprovalDecision(request.permission_id, "unavailable")
+            elif _cancelled(cancellation_token):
+                decision = ToolApprovalDecision(request.permission_id, "cancelled")
+            elif time.time() >= approval_deadline(request):
+                decision = ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
         if session_key and str(decision.decision or "").strip().lower() == "approved_session":
             if approval_cache is not None:
                 approval_cache.approve(approval_scope, session_key)
