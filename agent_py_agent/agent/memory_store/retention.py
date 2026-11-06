@@ -66,30 +66,30 @@ class MemoryRetentionService:
             scan_cursor=scan_cursor,
         )
 
-    # LLM: None保原锁内plan/apply；callback仍逐写短提交；预算/pins透传同config，续点沿原锁/提交门。
+    # LLM: None保原锁内plan/apply；callback长扫描门外、逐写短提交；始终预算扫描并透传同config，续点仅在同锁或原提交门保存。
     #   apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
     #   但单棵任务的 state 损坏只保护那一棵，不连累其他类别——否则生产上会被少数坏目录永久卡住（2026-09-28
     #   dev 裁定 R4）。隔离依据是错误路径与动作路径的前缀重叠，绝不按类别名或目录名放宽。
     #   返回的 errors 仍是执行期错误加扫描期错误（旧语义）；isolated_errors 单列被隔离的扫描期错误，整份拒绝时为空。
     # 函数用途: 应用当前时刻重新验证出的 retention 计划，坏的那一棵单独保护。
     def apply(self, *, now: datetime | None = None, commit_transition=None, expected_policy_fingerprint=None,
-              scan_budget: bool = False) -> MemoryRetentionReport:
+              scan_budget: bool = True) -> MemoryRetentionReport:
         current = _normalize_now(now)
         from . import retention_scan_budget as budgets
 
         if commit_transition is not None:
             from .retention_transition import RetentionPolicyChangedError, apply_with_transition
 
-            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config) if scan_budget else None,
-                             scan_cursor=budgets.load_scan_cursor(self.home) if scan_budget else None)
+            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config),
+                             scan_cursor=budgets.load_scan_cursor(self.home))
             if expected_policy_fingerprint is not None and plan.policy_fingerprint != expected_policy_fingerprint:
                 raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
             return apply_with_transition(self, plan, current, commit_transition,
-                                         scan_cursor=plan.scan_cursor if scan_budget else None)
+                                         scan_cursor=plan.scan_cursor)
         lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         with locked_json_path(lock_anchor):
-            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config) if scan_budget else None,
-                             scan_cursor=budgets.load_scan_cursor(self.home) if scan_budget else None)
+            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config),
+                             scan_cursor=budgets.load_scan_cursor(self.home))
             if plan.legal_hold or _has_policy_level_error(plan.errors):
                 stopped = MemoryRetentionReport(
                     applied=False,
@@ -111,8 +111,7 @@ class MemoryRetentionService:
                 config=self.config,
             )
             applied = replace(applied, scan_partial=plan.scan_partial, scan_cursor=plan.scan_cursor)
-            if scan_budget:
-                budgets.save_scan_cursor(self.home, plan.scan_cursor)
+            budgets.save_scan_cursor(self.home, plan.scan_cursor)
             # 执行期错误 + 被隔离保护的扫描错误一起回执：执行过什么、还护着什么，都要看得见。
             if plan.errors and applied.errors != plan.errors:
                 return replace(applied, errors=(*applied.errors, *plan.errors))
@@ -153,7 +152,7 @@ def plan_owner_retention(
     return service.plan(now=now)
 
 
-# LLM: 仍委托唯一v2 Service并透传可选config；预算默认关闭，显式开启才在原锁/提交门保存续点。
+# LLM: 仍委托唯一v2 Service并透传可选config；始终预算扫描并在原锁/提交门保存续点，旧scan_budget关键字不再选择慢路。
 # LLM: 协调路径只运输本次原短门；候选目录/锁出生走已有C写叶，扫描与flock仍门外，嵌套写复用同一活窗口。
 # LLM: W的私有维护仍消费原请求短门；有callback不等于C，不借全局写scope绕过worker拒绝门。
 # 函数用途: 兼容 Gateway owner maintenance 和旧 home-retention CLI。
@@ -163,7 +162,7 @@ def apply_owner_retention(
     now: datetime | None = None,
     commit_transition=None,
     expected_policy_fingerprint=None,
-    scan_budget: bool = False,
+    scan_budget: bool = True,
     config: object = None,
 ) -> MemoryRetentionReport:
     if commit_transition is not None:

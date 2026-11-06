@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from datetime import datetime, timezone
 
@@ -82,10 +81,8 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         return _run_quota_continuation_slice(
             path, home, header, now, coordinator=True, commit_transition=commit,
             runtime_cleanup=runtime_cleanup, quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
-    scan_options = ({'scan_budget': True}
-                    if 'scan_budget' in inspect.signature(apply_owner_retention).parameters else {})
     retention = apply_owner_retention(home, now=datetime.fromtimestamp(now, timezone.utc),
-        commit_transition=commit, expected_policy_fingerprint=policy, config=config, **scan_options)
+        commit_transition=commit, expected_policy_fingerprint=policy, config=config)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                          now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit)
                      if retention.applied and not retention.legal_hold and not retention.load_errors

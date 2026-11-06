@@ -1054,15 +1054,16 @@ class RuntimeRepository(
         return bool(changed)
 
     # LLM: exec 锁仍只按原死亡证明回收；终态且租约到期的工具锁按同事务 UNKNOWN/DIRTY 收口。
+    #   bounded仅保留调用兼容；始终扫描一页，游标回到起点表示本轮扫描完成。
     # 函数用途: 有界回收死持主或已停止续租的终态工具锁，保留未决副作用证明。
-    def cleanup_stale_resource_locks(self, *, now: float | None = None, bounded: bool = False) -> list[str]:
+    def cleanup_stale_resource_locks(self, *, now: float | None = None, bounded: bool = True) -> list[str]:
         current = time.time() if now is None else float(now)
         released = []
         with self.transaction() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            after = getattr(self, "_stale_lock_cursor", (0.0, "")) if bounded else (0.0, "")
+            after = getattr(self, "_stale_lock_cursor", (0.0, ""))
             rows = conn.execute("SELECT * FROM resource_locks WHERE (lease_expires_at,lock_id) > (?,?) "
-                "ORDER BY lease_expires_at,lock_id LIMIT ?", (*after, 256 if bounded else -1)).fetchall()
+                "ORDER BY lease_expires_at,lock_id LIMIT ?", (*after, 256)).fetchall()
             for lock in rows:
                 if not self._lock_is_takeoverable(lock, current):
                     if (str(lock['canonical_scope']).startswith(EXEC_LOCK_SCOPE_PREFIX)
@@ -1085,8 +1086,7 @@ class RuntimeRepository(
                                        tuple(lock[key] for key in fields)).rowcount
                 if changed:
                     released.append(str(lock["lock_id"]))
-            if bounded:
-                self._stale_lock_cursor = (rows[-1]["lease_expires_at"], rows[-1]["lock_id"]) if len(rows) == 256 else (0.0, "")
+            self._stale_lock_cursor = (rows[-1]["lease_expires_at"], rows[-1]["lock_id"]) if len(rows) == 256 else (0.0, "")
         return released
 
     # LLM: 原死亡恢复先标unknown；自动仅取消满24小时unknown与一小时孤儿，不重放未决工具或洗白脏资源。
