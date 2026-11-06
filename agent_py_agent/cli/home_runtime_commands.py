@@ -128,9 +128,12 @@ def cmd_home_status(args) -> int:
     return 0
 
 
+# LLM: 仅apply透传可信Agent配置；dry-run保持原计划入口，不新增清理授权或参数解释。
+# 函数用途: 预览或执行当前owner的保留清理。
 def cmd_home_retention(args) -> int:
     agent = make_agent(args)
-    result = apply_owner_retention(agent.home_paths) if bool(getattr(args, "apply", False)) else plan_owner_retention(agent.home_paths)
+    result = (apply_owner_retention(agent.home_paths, config=getattr(agent, "config", None))
+              if bool(getattr(args, "apply", False)) else plan_owner_retention(agent.home_paths))
     payload = {"ok": True, "home": str(agent.home_paths.owner_home_dir), "retention": result.to_dict()}
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

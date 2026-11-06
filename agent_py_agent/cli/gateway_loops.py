@@ -2025,7 +2025,7 @@ class _GatewayOwnerMaintenanceController:
         if _startup_grace_active(self):
             return _maintenance_summary([], 0)
         current = float(now if now is not None else time.time())
-        reports = [run_owner_retention_if_due(self._base_home, now=current)]
+        reports = [run_owner_retention_if_due(self._base_home, now=current, config=getattr(self._base_agent, "config", None))]
         from ..agent.gateway_parts.compact_operations import idle_compact_maintenance_tick
 
         idle_compact_maintenance_tick(self._base_agent, cursor=self._idle_compact_cursor, now=current)
@@ -2077,7 +2077,7 @@ class _GatewayOwnerMaintenanceController:
         try:
             owner = resolve_owner_home(self._base_home.root, identity)
             scoped_home = home_paths_with_owner(self._base_home, owner)
-            reports.append(run_owner_retention_if_due(scoped_home, now=current))
+            reports.append(run_owner_retention_if_due(scoped_home, now=current, config=getattr(self._base_agent, "config", None)))
         except Exception as exc:
             label = "/".join((identity.provider, identity.owner_kind, identity.owner_id))
             _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)

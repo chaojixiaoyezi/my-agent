@@ -85,7 +85,7 @@ def reclaim_owner_orphan_lock_files(home: MyAgentHomePaths, *, commit_transition
     return removed
 
 
-# LLM: 只给单进程本地主聊天收尾用；真实home、runner身份和原request门均检查，受限C/W即使有合法执行scope也不旁路维护。
+# LLM: 本地主聊天只透传Agent配置；真实home、runner身份与request门保持，受限C/W不旁路维护。
 # 函数用途: 到期才轻量触发CLI维护，子代理、受限环境或缺少准入时安静跳过。
 def maybe_run_cli_owner_maintenance(agent: object, *, now: float | None = None) -> OwnerMaintenanceResult | None:
     from ..gateway_parts.request_entry_admission import (
@@ -104,7 +104,7 @@ def maybe_run_cli_owner_maintenance(agent: object, *, now: float | None = None) 
     if not owner_maintenance_due(home.owner_home_dir, now=now):
         return None
     return run_owner_retention_if_due(home, now=now,
-        workflow_service=getattr(agent, 'business_workflow_scope_service', None))
+        workflow_service=getattr(agent, 'business_workflow_scope_service', None), config=getattr(agent, "config", None))
 
 
 # LLM: status 保持旧口径；apply_outcome（applied / refused / legal_hold）、isolated_error_count 与 failed_action_count
@@ -186,7 +186,7 @@ def owner_maintenance_due(
     return last_attempt <= 0 or current - last_attempt >= interval
 
 
-# LLM: 最早核原请求/owner；Count0 None保原维护成本，正W不写shared；callback逐写T→业务锁，扫描门外。
+# LLM: 最早核原请求/owner；可选config只透传，Count0/正W权限及callback逐写T→业务锁顺序不变。
 #   维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
 #   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
 # LLM: 单进程保留执行后回收已登记孤儿伴生锁，逻辑锁和原request门不变；C/W仍用transition路径。
@@ -203,6 +203,7 @@ def run_owner_retention_if_due(
     quota_max_ms: float | None = None,
     quota_max_entries: int | None = None,
     workflow_service=None,
+    config: object = None,
 ) -> OwnerMaintenanceResult:
     from ..gateway_parts.multiprocess_mode import current_worker_partition
     from ..gateway_parts.request_entry_admission import require_request_execution
@@ -218,7 +219,7 @@ def run_owner_retention_if_due(
         return run_with_transition(home, current, commit_transition,
             expected_policy_fingerprint=expected_policy_fingerprint,
             expected_state_fingerprint=expected_state_fingerprint,
-            quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
+            quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, config=config)
     if not owner_maintenance_due(home.owner_home_dir, now=current):
         return OwnerMaintenanceResult(False, "not_due")
     state_path = _maintenance_state_path(home.owner_home_dir)
@@ -238,6 +239,7 @@ def run_owner_retention_if_due(
         retention = apply_owner_retention(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
+            config=config,
             **scan_options,
         )
         derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,

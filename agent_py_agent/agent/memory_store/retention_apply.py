@@ -73,7 +73,7 @@ from .retired_thread_journal import append_retired_thread
 #   candidate 必须一次批量删除；清单阶段只扫描一次当前引用，快照动作失败或变化时保护仍被引用的清单。
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # LLM: 仅已通过策略/法律保留的executor追加tmp/cache空目录清扫；扫描门外，每次rmdir仍沿原transition核权。
-# LLM: 本次now沿候选phase/actions透传到原删除提交，冷归档年龄不得另取真实墙钟；CAS及原短门保持。
+# LLM: now沿候选phase/actions透传，config只传原引用快照；冷归档时钟、CAS及原短门保持。
 # 函数用途: 统一执行保留计划；同阶段引用视图按源代次复核后复用，保留原动作状态与错误。
 def execute_retention_plan(
     *,
@@ -84,10 +84,11 @@ def execute_retention_plan(
     allowed_external_roots: tuple[Path, ...] = (),
     commit_transition=None,
     audit_transition=None,
+    config: object = None,
 ) -> MemoryRetentionReport:
     results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan, now=now), commit_transition)
     manifest_references = None
-    pin_snapshot = ReferencePinSnapshot(home, allowed_external_roots, now, current_retention_pins)
+    pin_snapshot = ReferencePinSnapshot(home, allowed_external_roots, now, current_retention_pins, config=config)
     for action in plan.actions:
         if action.operation == "candidate_delete":
             continue

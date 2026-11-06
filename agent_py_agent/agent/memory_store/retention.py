@@ -34,7 +34,7 @@ _POLICY_LEVEL_ERROR_CODES = frozenset({
 # LLM: Service 持有 owner home、唯一 CandidateService 和可选 JsonlMemory；它不解析自然语言删除范围。
 # 类用途: 为管理员 CLI 和 Gateway owner maintenance 提供同一 retention 计划/执行主链。
 class MemoryRetentionService:
-    # LLM: 构造器只登记当前 owner 的规范根和正式仓库；conversation roots 仍由其独立 retention 合同管理。
+    # LLM: 构造器只登记原owner根、仓库与可选config；conversation roots仍由独立retention合同管理。
     # 函数用途: 初始化统一 Memory Retention 计划与执行服务。
     def __init__(
         self,
@@ -43,8 +43,10 @@ class MemoryRetentionService:
         candidates: CandidateService,
         long_term: JsonlMemory | None = None,
         conversation_roots: tuple[str | Path, ...] = (),
+        config: object = None,
     ) -> None:
         self.home = home_paths
+        self.config = config
         self.candidates = candidates
         self.long_term = long_term
         self.conversation_roots = tuple(
@@ -64,7 +66,7 @@ class MemoryRetentionService:
             scan_cursor=scan_cursor,
         )
 
-    # LLM: None保原锁内plan/apply；callback长扫描门外、逐写短提交；预算续点仅在同锁或原提交门保存。
+    # LLM: None保原锁内plan/apply；callback仍逐写短提交；预算/pins透传同config，续点沿原锁/提交门。
     #   apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
     #   但单棵任务的 state 损坏只保护那一棵，不连累其他类别——否则生产上会被少数坏目录永久卡住（2026-09-28
     #   dev 裁定 R4）。隔离依据是错误路径与动作路径的前缀重叠，绝不按类别名或目录名放宽。
@@ -78,7 +80,7 @@ class MemoryRetentionService:
         if commit_transition is not None:
             from .retention_transition import RetentionPolicyChangedError, apply_with_transition
 
-            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default() if scan_budget else None,
+            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config) if scan_budget else None,
                              scan_cursor=budgets.load_scan_cursor(self.home) if scan_budget else None)
             if expected_policy_fingerprint is not None and plan.policy_fingerprint != expected_policy_fingerprint:
                 raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
@@ -86,7 +88,7 @@ class MemoryRetentionService:
                                          scan_cursor=plan.scan_cursor if scan_budget else None)
         lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         with locked_json_path(lock_anchor):
-            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default() if scan_budget else None,
+            plan = self.plan(now=current, scan_budget=budgets.RetentionScanBudget.default(self.config) if scan_budget else None,
                              scan_cursor=budgets.load_scan_cursor(self.home) if scan_budget else None)
             if plan.legal_hold or _has_policy_level_error(plan.errors):
                 stopped = MemoryRetentionReport(
@@ -106,6 +108,7 @@ class MemoryRetentionService:
                 plan=executable,
                 now=current,
                 allowed_external_roots=self.conversation_roots,
+                config=self.config,
             )
             applied = replace(applied, scan_partial=plan.scan_partial, scan_cursor=plan.scan_cursor)
             if scan_budget:
@@ -150,7 +153,7 @@ def plan_owner_retention(
     return service.plan(now=now)
 
 
-# LLM: 仍委托唯一v2 Service；预算默认关闭，显式开启才在原锁/提交门保存续点，不修改维护调用方。
+# LLM: 仍委托唯一v2 Service并透传可选config；预算默认关闭，显式开启才在原锁/提交门保存续点。
 # LLM: 协调路径只运输本次原短门；候选目录/锁出生走已有C写叶，扫描与flock仍门外，嵌套写复用同一活窗口。
 # LLM: W的私有维护仍消费原请求短门；有callback不等于C，不借全局写scope绕过worker拒绝门。
 # 函数用途: 兼容 Gateway owner maintenance 和旧 home-retention CLI。
@@ -161,6 +164,7 @@ def apply_owner_retention(
     commit_transition=None,
     expected_policy_fingerprint=None,
     scan_budget: bool = False,
+    config: object = None,
 ) -> MemoryRetentionReport:
     if commit_transition is not None:
         from ..common.global_write_commit import execute_global_write, global_write_commit_scope
@@ -168,18 +172,18 @@ def apply_owner_retention(
 
         if current_worker_partition() is not None:
             candidates = commit_transition(lambda: CandidateService(home.owner_memory_candidates_jsonl))
-            service = MemoryRetentionService(home_paths=home, candidates=candidates)
+            service = MemoryRetentionService(home_paths=home, candidates=candidates, config=config)
             return service.apply(now=now, commit_transition=commit_transition,
                 expected_policy_fingerprint=expected_policy_fingerprint, scan_budget=scan_budget)
 
         with global_write_commit_scope(commit_transition):
             candidates = CandidateService(home.owner_memory_candidates_jsonl, coordinator_io=True)
-            service = MemoryRetentionService(home_paths=home, candidates=candidates)
+            service = MemoryRetentionService(home_paths=home, candidates=candidates, config=config)
             # 领域提交先建立短窗口，锁出生/raw写才能复用当前门，不能重入同一transition。
             return service.apply(now=now, commit_transition=execute_global_write,
                 expected_policy_fingerprint=expected_policy_fingerprint, scan_budget=scan_budget)
     candidates = CandidateService(home.owner_memory_candidates_jsonl)
-    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+    service = MemoryRetentionService(home_paths=home, candidates=candidates, config=config)
     return service.apply(now=now, scan_budget=scan_budget)
 
 
