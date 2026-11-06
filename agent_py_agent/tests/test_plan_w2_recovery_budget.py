@@ -106,7 +106,6 @@ def test_scheduler_quota_storage_wait_is_bounded_and_preserves_due(tmp_path, mon
         return service.due.pop()
 
     scheduler.scheduler_service = SimpleNamespace(reconcile_waiting_runs=reconcile, enqueue_ready_runs=enqueue)
-    scheduler._tick_cheap_checks = lambda _: False
     with caplog.at_level("WARNING"):
         for tick in range(100):
             scheduler._enqueue_scheduler_runs(now=10.0 + tick / 10)

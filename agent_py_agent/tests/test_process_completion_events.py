@@ -31,8 +31,10 @@ from agent_py_agent.agent.tooling.process_session_store import (
 )
 
 
-@pytest.mark.parametrize("entry", ["reconcile", "owner", "task"])
-def test_completion_discovery_uses_fixed_query_and_strict_second_pass(tmp_path, monkeypatch, entry):
+@pytest.mark.parametrize("entry,pending", [
+    ("reconcile", False), ("owner", False), ("owner", True), ("task", False), ("task", True),
+])
+def test_completion_discovery_uses_one_fixed_query(tmp_path, monkeypatch, entry, pending):
     from agent_py_agent.agent.conversation import process_events as module
 
     agent, params, authority = _fixture(tmp_path)
@@ -42,7 +44,7 @@ def test_completion_discovery_uses_fixed_query_and_strict_second_pass(tmp_path, 
     class Authority:
         def list_pending_completion_records_report(self, **options):
             calls.append(options)
-            rows = [record] if entry != "reconcile" and not options.get("cheap_checks") else []
+            rows = [record] if pending else []
             return ProcessSessionListReport(rows, [])
 
         def list_records(self, **kwargs):
@@ -52,12 +54,10 @@ def test_completion_discovery_uses_fixed_query_and_strict_second_pass(tmp_path, 
     if entry == "reconcile":
         assert reconcile_process_completions(agent) == 0
     elif entry == "owner":
-        assert owner_has_pending_process_completions(agent.home_paths.owner_home_dir)
+        assert owner_has_pending_process_completions(agent.home_paths.owner_home_dir) is pending
     else:
-        assert task_has_pending_process_completion(agent, params.task_id)
-    assert calls
-    if entry != "reconcile":
-        assert [item["cheap_checks"] for item in calls] == [True, False]
+        assert task_has_pending_process_completion(agent, params.task_id) is pending
+    assert calls == [{"cheap_checks": True, "task_id": params.task_id if entry == "task" else ""}]
 
 
 def test_completion_query_internal_typeerror_is_not_hidden_by_compatibility(tmp_path, monkeypatch):

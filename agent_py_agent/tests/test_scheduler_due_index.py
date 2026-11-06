@@ -370,39 +370,35 @@ def _cpu6_forbidden_scope():
     pytest.fail("空轮不应进入 _mutation_scope")
 
 
-# LLM: 四种在途状态均阻挡同一普通 job；开关两态都要在持锁前排除，热投影也不能误报候选。
+# LLM: 四种在途状态均阻挡同一普通 job；统一在持锁前排除，热投影也不能误报候选。
 # 函数用途: 复现已有运行且旧周期已到期时每拍重复加锁的问题。
 @pytest.mark.parametrize("status", ["queued", "claimed", "running", "waiting"])
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cpu6_active_job_reservation_never_enters_mutation(tmp_path, monkeypatch, status, cheap):
+def test_cpu6_active_job_reservation_never_enters_mutation(tmp_path, monkeypatch, status):
     repo, job, run = _cpu6_case(tmp_path)
     store = json.loads(repo.store_path.read_text())
     store["jobs"][job["job_id"]]["next_run_at"] = 200
     store["runs"][run["run_id"]]["status"] = status
     repo.store_path.write_text(json.dumps(store))
-    if cheap:
-        _cpu6_prime(repo)
-        assert repo._cheap_due_candidates_exist(now=210) is False
+    _cpu6_prime(repo)
+    assert repo._cheap_due_candidates_exist(now=210) is False
     monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
-    assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
+    assert repo.reserve_due_runs(now=210, cheap_checks=True) == []
 
 
-# LLM: 冷启动和关闭优化时同样不能为未来任务/空账本取得写锁。
+# LLM: 冷启动同样不能为未来任务/空账本取得写锁。
 # 函数用途: 冻结预约入口的无候选快照空返合同。
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cpu6_cold_future_job_never_enters_mutation(tmp_path, monkeypatch, cheap):
+def test_cpu6_cold_future_job_never_enters_mutation(tmp_path, monkeypatch):
     repo, _job, _run = _cpu6_case(tmp_path)
     store = json.loads(repo.store_path.read_text())
     store["runs"] = {}
     repo.store_path.write_text(json.dumps(store))
     monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
-    assert repo.reserve_due_runs(now=150, cheap_checks=cheap) == []
+    assert repo.reserve_due_runs(now=150, cheap_checks=True) == []
 
 
 # LLM: 规则退避结束前应无锁空返，时间跨过边界后同一账本必须仍能真正预约。
 # 函数用途: 验证监控有效到期时间、热投影和边界重算一致。
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cpu6_rule_backoff_is_respected_without_locks_and_expires(tmp_path, monkeypatch, cheap):
+def test_cpu6_rule_backoff_is_respected_without_locks_and_expires(tmp_path, monkeypatch):
     from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
     from agent_py_agent.agent.scheduler.monitor_state import _project
 
@@ -416,20 +412,18 @@ def test_cpu6_rule_backoff_is_respected_without_locks_and_expires(tmp_path, monk
     repo.store_path.write_text(json.dumps(store))
     assert _project(raw)["next_run_at"] == 800
     assert _earliest_due_at(store, now=210) == 800
-    if cheap:
-        _cpu6_prime(repo)
-        assert repo._cheap_due_candidates_exist(now=210) is False
+    _cpu6_prime(repo)
+    assert repo._cheap_due_candidates_exist(now=210) is False
     with monkeypatch.context() as patch:
         patch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
-        assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
-    assert [row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=cheap)] == ["busy"]
+        assert repo.reserve_due_runs(now=210, cheap_checks=True) == []
+    assert [row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=True)] == ["busy"]
 
 
 # LLM: 一条规则的 waiting/running 不能挡另一条规则；索引不沿用被阻挡规则的旧顶层最小值。
 # 函数用途: 保证独立规则预约与按规则排除活动运行的语义一致。
 @pytest.mark.parametrize("status", ["running", "waiting"])
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cpu6_active_rule_keeps_other_rule_schedulable(tmp_path, status, cheap):
+def test_cpu6_active_rule_keeps_other_rule_schedulable(tmp_path, status):
     from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
 
     repo, job, run = _cpu6_case(tmp_path, monitor=True)
@@ -441,16 +435,14 @@ def test_cpu6_active_rule_keeps_other_rule_schedulable(tmp_path, status, cheap):
     store["runs"][run["run_id"]].update(status=status, claim_expires_at=500 if status == "running" else 0)
     repo.store_path.write_text(json.dumps(store))
     assert _earliest_due_at(store, now=210) == 200
-    if cheap:
-        _cpu6_prime(repo)
-    assert [row["rule_id"] for row in repo.reserve_due_runs(now=210, cheap_checks=cheap)] == ["free"]
+    _cpu6_prime(repo)
+    assert [row["rule_id"] for row in repo.reserve_due_runs(now=210, cheap_checks=True)] == ["free"]
 
 
 # LLM: 唯一已到期规则被活动运行占用时，另一条未来规则不能使冷读/热投影误判本拍需要写锁。
 # 函数用途: 锁定复合监控按规则排除活动运行的空轮快路。
 @pytest.mark.parametrize("status", ["running", "waiting"])
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cpu6_active_rule_with_future_sibling_is_lock_free(tmp_path, monkeypatch, status, cheap):
+def test_cpu6_active_rule_with_future_sibling_is_lock_free(tmp_path, monkeypatch, status):
     from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
 
     repo, job, run = _cpu6_case(tmp_path, monitor=True)
@@ -462,11 +454,10 @@ def test_cpu6_active_rule_with_future_sibling_is_lock_free(tmp_path, monkeypatch
     store["runs"][run["run_id"]].update(status=status, claim_expires_at=500 if status == "running" else 0)
     repo.store_path.write_text(json.dumps(store))
     assert _earliest_due_at(store, now=210) == (500 if status == "running" else 800)
-    if cheap:
-        _cpu6_prime(repo)
-        assert repo._cheap_due_candidates_exist(now=210) is False
+    _cpu6_prime(repo)
+    assert repo._cheap_due_candidates_exist(now=210) is False
     monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
-    assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
+    assert repo.reserve_due_runs(now=210, cheap_checks=True) == []
 
 
 # LLM: 普通 job 有活动运行时只投影运行自身的派发/租约时间，waiting 无进程租约不能回退成 now。
@@ -623,8 +614,7 @@ def test_cpu6_invalid_waiting_cannot_hide_valid_due_job(tmp_path, monitor, corru
 
 # LLM: 迁移监控可保留旧 job 顶层退避；只读候选必须同时遵守原预约事务的顶层门槛。
 # 函数用途: 复现规则已到期但父 job 仍退避时误入写锁的空轮。
-@pytest.mark.parametrize("cheap", [False, True])
-def test_cpu6_parent_backoff_applies_to_monitor_candidates(tmp_path, monkeypatch, cheap):
+def test_cpu6_parent_backoff_applies_to_monitor_candidates(tmp_path, monkeypatch):
     from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
 
     repo, job, _run = _cpu6_case(tmp_path, monitor=True)
@@ -637,13 +627,12 @@ def test_cpu6_parent_backoff_applies_to_monitor_candidates(tmp_path, monkeypatch
     assert repo._parse_job(raw)[0] is not None
     repo.store_path.write_text(json.dumps(store))
     assert _earliest_due_at(store, now=210) == 800
-    if cheap:
-        _cpu6_prime(repo)
-        assert repo._cheap_due_candidates_exist(now=210) is False
+    _cpu6_prime(repo)
+    assert repo._cheap_due_candidates_exist(now=210) is False
     with monkeypatch.context() as patch:
         patch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
-        assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
-    assert {row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=cheap)} == {"busy", "free"}
+        assert repo.reserve_due_runs(now=210, cheap_checks=True) == []
+    assert {row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=True)} == {"busy", "free"}
 
 
 # LLM: waiting运行在TaskLink仍active时不每秒唤醒，但TaskLink已终态时必须被发现层判定为硬事实以收口。

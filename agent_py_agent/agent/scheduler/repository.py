@@ -1,5 +1,5 @@
 # LLM: 原owner store是唯一任务权威；规范调度写按quota→资产root→store/CAS，pending先恢复；正常冷快照只复用已有读锁。
-#   便宜检查只缓存有界内容投影，时间条件每拍重算；关闭时保留原完整字节复核和waiting缓存。
+#   统一先探测可信的有界内容投影，未命中仍完整核验；时间条件每拍重算。
 #   实例缓存锁只交换引用与失效代次，文件IO和深复制不持该锁；独立冷读门合并同实例并发未命中。
 #   历史去重只查询本批身份，覆盖不足退回规范文件，文件级读取失败阻止写入。
 # 模块用途: 持久化监控、运行、逐目标outbox和历史；目标授权在写前核验，回执不改变运行或配置身份。
@@ -181,7 +181,7 @@ _WAITING_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _WaitingRunsPr
 _WAITING_PROJECTION_LOCK = threading.Lock()
 # 结构化可观测计数:命中/回退/守卫。测试与现场体检用它证明缓存真的在生效、且异常时确实回退。
 _WAITING_PROJECTION_STATS: dict[str, int] = {"hit": 0, "miss": 0, "guard": 0, "skip": 0}
-# 开关打开时的三切片投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）：测试机 owner 池上限 600，
+# 三切片投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）：测试机 owner 池上限 600，
 # 但每拍真正被后台 worker 检查的活跃 owner 受全局 8 个并发 worker 约束、轮转窗口远小于池上限；
 # 单条投影只含 waiting 完整行、queued 轻量键与 due 键（不保留 queued 完整记录），被逐出的
 # owner 下次整读，只变慢不出错。
@@ -191,7 +191,7 @@ _STORE_PROJECTION_MAX_ROWS_COUNT = 512
 # 单条三切片投影的载荷字节近似上限（waiting 行字符串 + 轻量键固定开销）：行数上限挡不住
 # "少量超大行"，超限不缓存（下次全读，只慢不错）。
 _STORE_PROJECTION_MAX_BYTES_COUNT = 256 * 1024
-# 便宜检查（background_tick_cheap_checks）下，距最近一次全量核验（读字节+摘要）超过这个秒数
+# 复用投影时，距最近一次全量核验（读字节+摘要）超过这个秒数
 # 就无条件重核一次：防时间戳精度与极端竞态。命中复用的条目不会刷新这个时间。
 _STORE_PROJECTION_FULL_READ_INTERVAL_SECONDS = 60.0
 _STORE_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _StoreProjection] = (
@@ -578,11 +578,11 @@ class _SchedulerReservationOperations:
         *,
         now: float | None = None,
         limit: int = 32,
-        cheap_checks: bool = False,
+        cheap_checks: bool = True,
     ) -> list[dict[str, object]]:
         self.maintain_history_index()
         current = _now(now)
-        if cheap_checks and not self._cheap_due_candidates_exist(now=current):
+        if not self._cheap_due_candidates_exist(now=current):
             return []
         if not _snapshot_due_candidates_exist(self, now=current):
             return []
@@ -661,14 +661,13 @@ class _SchedulerRunOperations:
         *,
         now: float | None = None,
         limit: int = 64,
-        cheap_checks: bool = False,
+        cheap_checks: bool = True,
         exclude_active_lanes: bool = False,
     ) -> list[dict[str, object]]:
         current = _now(now)
-        if cheap_checks:
-            hit = self._cheap_projection_hit()
-            if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
-                return []
+        hit = self._cheap_projection_hit()
+        if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
+            return []
         store = self._store_snapshot(readonly=True)
         if exclude_active_lanes:
             runs, _errors = self._valid_runs(store)
@@ -687,8 +686,8 @@ class _SchedulerRunOperations:
 
     # LLM: 只读候选每车道一条，先排除被活动同车道阻挡的积压再限量，不能挤掉别的job或规则；最终派发仍须原事务CAS。
     # 函数用途: 按当前时间选择不互相重叠的排队候选，避免同job/同rule积压造成队首阻塞。
-    def dispatchable_queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
-        return self.queued_runs(now=now, limit=limit, cheap_checks=cheap_checks, exclude_active_lanes=True)
+    def dispatchable_queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = True) -> list[dict[str, object]]:
+        return self.queued_runs(now=now, limit=limit, cheap_checks=True, exclude_active_lanes=True)
 
     # LLM: 只解冻选中的run，严格沿用原schema和owner验证；不复制未命中的账本行。
     # 函数用途: 从不可变快照取得一个活跃run的独立可变副本。
@@ -993,17 +992,13 @@ class _SchedulerRunOperations:
 # LLM: waiting是无进程claim的持久阶段；可选缓存仅提供当前内容投影，每条终态仍回原owner账本按准确run做CAS。
 # 类用途: 管理模型工作片结束后、根任务仍在继续时的等待、重启对账读取和最终结算。
 class _SchedulerWaitingRunOperations:
-    # LLM: 默认按现读签名和摘要复核；开启后才用2秒可信窗口/60秒重读的有界内容投影，读取仍不取写锁。
+    # LLM: 统一使用2秒可信窗口/60秒重读的有界内容投影；兼容关键字不选分支，读取仍不取写锁。
     # 函数用途: 读取等待任务终态的执行，缓存未变账本的解析结果，不创建锁文件或等待写方。
-    def waiting_runs(self, *, cheap_checks: bool = False) -> tuple[list[dict[str, object]], list[str]]:
-        if cheap_checks:
-            hit = self._cheap_projection_hit()
-            if hit is None:
-                hit = self._store_projection_unlocked(_probe_store_bytes(self.store_path))
-            return [deepcopy(row) for row in hit.waiting_rows], list(hit.errors)
-        probe = _probe_store_bytes(self.store_path)
-        projection = self._waiting_runs_projection_unlocked(probe)
-        return [deepcopy(row) for row in projection.rows], list(projection.errors)
+    def waiting_runs(self, *, cheap_checks: bool = True) -> tuple[list[dict[str, object]], list[str]]:
+        hit = self._cheap_projection_hit()
+        if hit is None:
+            hit = self._store_projection_unlocked(_probe_store_bytes(self.store_path))
+        return [deepcopy(row) for row in hit.waiting_rows], list(hit.errors)
 
     # LLM: A model slice may legitimately yield after spawning durable child work. Preserve the
     # scheduler run as waiting without a live process claim; queued dispatch must never reclaim it.
@@ -1739,14 +1734,14 @@ class _SchedulerRecordParsing:
 
 
 
-# LLM: 此mixin只服务开启的内容投影；关闭路径保留主线原有waiting缓存、完整字节摘要与无写锁快照。
+# LLM: 此mixin提供统一内容投影；缓存未命中时保留完整字节摘要与无写锁快照。
 #   三类切片都不缓存now判断，写方仍使用原owner锁、规范账本与CAS。
-# 类用途: 开关打开时的 store.json 三切片投影缓存（命中判定、全量核验与 due 判据）。
+# 类用途: store.json 三切片投影缓存（命中判定、全量核验与 due 判据）。
 class _SchedulerProjectionSupport:
-    """store.json 三切片投影缓存：全量核验、便宜命中与 due 判据（E10 一期，仅开关打开时使用）。"""
+    """store.json 三切片投影缓存：全量核验、便宜命中与 due 判据。"""
 
     # LLM: 投影只绑定原子快照字节与现读身份；不可恢复来源旧写锁，异常仍走原读取错误。
-    # 函数用途: 复核完整投影或解析本次账本，供开关开启的三处读取共用。
+    # 函数用途: 复核完整投影或解析本次账本，供三处候选读取共用。
     # LLM: 恢复单任务事务后不再使用恢复前probe；正常只读投影的校验和预算保持。
     # 函数用途: 从一致账本建立调度/等待投影，避免沿用半提交代次。
     def _store_projection_unlocked(self, probe: _StoreBytesProbe | None) -> _StoreProjection:

@@ -67,6 +67,39 @@ def test_pending_query_copies_only_matches_and_keeps_full_cache(tmp_path, monkey
         assert not method(owner_key="other", cheap_checks=cheap).records
 
 
+@pytest.mark.parametrize("budget", [{"max_entries": 1}, {"max_ms": 1.0}])
+def test_budget_failure_never_publishes_partial_projection(tmp_path, monkeypatch, budget):
+    """扫描预算失败不缓存半份清单；热命中不扫描，写入失效后仍按预算拒绝整份选择。"""
+    store = ProcessSessionStore(tmp_path / "records")
+    expected = [store.write(_reservation(sid)) for sid in ("bg-a", "bg-b", "bg-c")]
+    old = time.time() - 5
+    os.utime(store.root, (old, old))
+    key = str(store.root)
+    cache = store_module._PROCESS_RECORDS_PROJECTION_CACHE
+    assert key not in cache
+
+    with monkeypatch.context() as patch:
+        if "max_ms" in budget:
+            clock = iter((0.0, 1.0))
+            patch.setattr(store_module, "time", SimpleNamespace(time=time.time, monotonic=lambda: next(clock)))
+        records, errors = store.list_records(**budget)
+    assert records == [] and len(errors) == 1
+    assert errors[0]["error_type"] == "RuntimeError"
+    assert key not in cache
+
+    assert store.list_records() == (expected, [])
+    cached = cache[key]
+    assert store.list_records(**budget) == (expected, [])
+    assert cache[key] is cached
+
+    expected.append(store.write(_reservation("bg-new")))
+    records, errors = store.list_records(max_entries=1)
+    assert records == [] and len(errors) == 1
+    assert errors[0]["error_type"] == "RuntimeError"
+    assert cache[key] is cached
+    assert store.list_records() == (expected, [])
+
+
 def test_pending_query_preserves_load_errors_on_every_read_mode(tmp_path):
     store = ProcessSessionStore(tmp_path)
     store.record_path("bg-broken").write_text("broken JSON")

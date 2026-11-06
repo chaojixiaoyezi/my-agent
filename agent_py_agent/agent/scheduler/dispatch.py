@@ -1,5 +1,5 @@
 # LLM: 派发仍使用原 Repository、SessionTask 和 Wake；事件与时间只是同一原运行的不同触发器，不新增队列或执行循环。
-#   cheap_checks仅透传给到期/队列只读候选读取，取消、重启恢复、事件预留与通知仍逐拍现算。
+#   到期/队列候选统一先探测可信投影，取消、重启恢复、事件预留与通知仍逐拍现算。
 # 模块用途: 组合原 scheduler 派发步骤并在唤醒前收口退休事件，避免服务类增长为第二执行器。
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from .schedule import monitor_dispatch_after
 
 # LLM: 原服务唯一入口委托到此；经queued_runs(exclude_active_lanes=True)按同job/rule车道筛选候选，job级准入在prepare/wake前原子提交。
 # 函数用途: 把已就绪且无同车道冲突的原运行接入同一 Wake，并对已退代事件留下取消终态。
-def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
+def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=True):
     from .policy import queue_expired
     from .service import _SCHEDULER_WAKE_REASON, _wake_metadata
 
@@ -20,13 +20,13 @@ def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
         for run in service.repository.pending_cancellation_runs():
             service.cancellation_handler(run)
     service.repository.recover_interrupted_executions(now=current)
-    service.repository.reserve_due_runs(now=current, limit=limit, cheap_checks=cheap_checks)
+    service.repository.reserve_due_runs(now=current, limit=limit, cheap_checks=True)
     service.repository.reserve_event_runs(now=current, limit=limit)
     wake_ids: list[str] = []
     for run in service.repository.queued_runs(
         now=current,
         limit=max(1, limit * 2),
-        cheap_checks=cheap_checks,
+        cheap_checks=True,
         exclude_active_lanes=True,
     ):
         if monitor_dispatch_after(run, owner_id=service.repository.owner['id'],

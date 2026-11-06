@@ -21,7 +21,6 @@ def test_scheduler_enqueue_backoff_survives_agent_rebuild(tmp_path, caplog):
     def runtime(owner):
         scheduler = _BackgroundSchedulerTickMixin()
         scheduler.runtime = SimpleNamespace(agent=SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=owner)))
-        scheduler._tick_cheap_checks = lambda _: True
         scheduler.scheduler_service = SimpleNamespace(reconcile_waiting_runs=lambda **_: None, enqueue_ready_runs=calls)
         return scheduler
 
