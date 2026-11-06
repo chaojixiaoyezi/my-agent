@@ -773,6 +773,16 @@ def native_business_context(handler, server):
             if bool(getattr(base.config, 'business_spaces_enabled', False)) else None))
     # 路径句柄仅供可信只读适配器关联原生push；不接受JSON路径，也不因此授予其它owner权限。
     host.business_v13_gateway_paths = server.paths
+
+    # LLM: 只读列表复用 W1 规范 helper；server 与 scope 绑定当前认证请求，不由业务参数选 owner。
+    # 函数用途: 给业务会话列表绑定本次请求的原生读取入口。
+    def business_session_list(*, limit, cursor, include_inflight):
+        from .client_session_list import gateway_client_session_list
+
+        return gateway_client_session_list(server, scope, limit=limit, cursor=cursor,
+            include_inflight=include_inflight)
+
+    host.business_session_list = business_session_list
     if getattr(base, 'conversation_store', None) is not None:
         from .owner_conversation_store import owner_conversation_store
         host.conversation_store = owner_conversation_store(base, home, initialize=False)
