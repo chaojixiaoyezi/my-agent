@@ -163,7 +163,9 @@ def test_authority_rejects_execution_replacement_before_any_read(tmp_path, field
     assert fixture.reads == before and records(fixture)[0]["carried_generation"] == 0
 
 
-def test_carry_budget_stays_cached_when_fresh_switch_file_changes(tmp_path):
+# LLM: 真实能力文件变更必须更新带回预算；只有 RuntimeFacts 投递成功才记已带回的 Compact 代次。
+# 函数用途: 验证小预算未投递后，新文件的大预算能在本代投递一次并记账。
+def test_carry_budget_follows_fresh_capability_file(tmp_path):
     from agent_py_agent.agent.capability.runtime_config_reload import capability_config_for_agent
     fixture = method_fixture(tmp_path)
     assert read_package(fixture).ok
@@ -172,5 +174,9 @@ def test_carry_budget_stays_cached_when_fresh_switch_file_changes(tmp_path):
     assert capability_config_for_agent(fixture.agent).capability_bundle_max_tokens == 1
     fixture.params = replace(fixture.params, conversation_method_carry_attempts=set())
     fixture.agent._current_run_params = fixture.params
-    assert carry(fixture, 10000) == []
-    assert records(fixture)[0]["carried_generation"] == 0
+    turns = carry(fixture, 10000)
+    assert capability_config_for_agent(fixture.agent).capability_bundle_max_tokens == 10000
+    assert len(turns) == 1
+    assert isinstance(turns[0], RuntimeFactsTurn)
+    assert turns[0].source == "conversation_method_carry"
+    assert records(fixture)[0]["carried_generation"] == 1

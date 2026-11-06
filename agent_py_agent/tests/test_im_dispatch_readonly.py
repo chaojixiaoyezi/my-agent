@@ -383,7 +383,9 @@ def test_cold_capture_matches_actual_explicit_capability_path(tmp_path, monkeypa
     assert _tree(tmp_path) == before
 
 
-def test_real_agent_cached_stricter_capability_remains_upper_bound(tmp_path, monkeypatch):
+# LLM: 冷捕获和真实 Agent 均读取新能力文件；旧快照保持不变，不能作为后续请求的永久关闭上界。
+# 函数用途: 验证能力委派从关闭切到开启时，两种派发入口一致且替换旧快照。
+def test_real_agent_reads_fresh_capability_file(tmp_path, monkeypatch):
     from agent_py_agent.agent.gateway_parts import control_service
     agent, scope = _real_pool_case(tmp_path, "false", "true")
     cached = runtime_config_reload.capability_config_for_agent(agent)
@@ -392,8 +394,11 @@ def test_real_agent_cached_stricter_capability_remains_upper_bound(tmp_path, mon
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
     monkeypatch.setattr(control_service, "_request_agent_for_scope", lambda _agent, _scope: agent)
     assert _capture(agent, scope)["mode"] == "delegated"
-    assert im_dispatch_policy.capture_im_dispatch(agent, scope)["mode"] == "original"
-    assert runtime_config_reload.capability_config_for_agent(agent) is cached
+    assert im_dispatch_policy.capture_im_dispatch(agent, scope)["mode"] == "delegated"
+    current = runtime_config_reload.capability_config_for_agent(agent)
+    assert current is not cached
+    assert current.im_task_delegation_enabled is True
+    assert cached.im_task_delegation_enabled is False
 
 
 def test_cold_api_requires_explicit_host_origin_and_no_positional_owner_default(tmp_path):

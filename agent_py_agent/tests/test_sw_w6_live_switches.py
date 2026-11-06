@@ -175,6 +175,39 @@ def test_runtime_guard_policy_edit_updates_registered_config_copies(tmp_path):
     assert {"terminal_block_enabled", "hard_failure_halt_enabled"} <= changed
 
 
+# LLM: 使用真实 Echo Agent 和隔离宿主文件；执行片入口必须在工具循环前同步配置与两个执行侧策略引用。
+# 函数用途: 验证部署守卫双向切换后，Agent 和工具注册表都消费本轮的新策略对象。
+@pytest.mark.parametrize("enabled", [False, True])
+def test_run_refreshes_guard_policy_on_agent_and_tools(tmp_path, enabled):
+    from agent_py_agent.agent.agent_core import runtime_mixin as runtime
+    from agent_py_agent.agent.core import SimpleAgent
+
+    _path, config = _config(tmp_path, "memory_curator_enabled: false\n")
+    home = Path(os.environ["MY_AGENT_HOME"])
+    config = replace(config, model_backend="echo", my_agent_home=str(home))
+    policy_path = home / "config" / "deployment_policy.json"
+    _write(policy_path, json.dumps({"schema_version": "deployment-policy.v1", "revision": 1,
+                                  "runtime_guards": {"terminal_block_enabled": not enabled}}))
+    agent = SimpleAgent(config, tmp_path)
+    live.register_live_config(agent.config)
+    live.refresh_live_switches(agent.config)
+    previous = agent.config.runtime_guard_policy
+    assert agent.runtime_guard_policy is previous
+    assert agent.tools.runtime_guard_policy is previous
+    assert previous.terminal_block_enabled is not enabled
+
+    _write(policy_path, json.dumps({"schema_version": "deployment-policy.v1", "revision": 2,
+                                  "runtime_guards": {"terminal_block_enabled": enabled}}))
+    result = runtime._run_once_with_params(agent, "核对本轮部署守卫", runtime.RunParams(save=False))
+
+    assert result.runtime_status == "ok"
+    assert agent.config.runtime_guard_policy is not previous
+    assert agent.runtime_guard_policy is agent.config.runtime_guard_policy
+    assert agent.tools.runtime_guard_policy is agent.config.runtime_guard_policy
+    assert agent.runtime_guard_policy.terminal_block_enabled is enabled
+    assert agent.tools.runtime_guard_policy.terminal_block_enabled is enabled
+
+
 def test_registration_does_not_retain_dead_config(tmp_path):
     path, config = _config(tmp_path)
     live.register_live_config(config)
