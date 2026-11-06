@@ -72,6 +72,7 @@ from ..tooling.sandbox import (
     allowlisted_directory,
     build_bwrap_argv,
     find_bwrap,
+    find_sandbox_helper,
     probe_sandbox,
 )
 from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
@@ -82,6 +83,28 @@ SandboxReadMode = Literal["hide_home", "allowlist"]
 
 # 单条 macOS Seatbelt 字符串字面量允许的最大 UTF-8 字节数（低于 TinyScheme 1024B 缓冲上限）。
 _SEATBELT_LITERAL_MAX_BYTES = 768
+
+_PREBUILT_RULESETS: dict[tuple[int, ...], int] = {}
+_PREBUILT_RULESETS_LOCK = threading.Lock()
+
+
+# LLM: 仅前台spawn把可信helper的deny换成预建fd；缓存fd不关闭以兼容并发pass_fds，失败保持原argv交helper自建并fail-closed。
+# 函数用途: 复用按端口集合隔离的ruleset，返回新argv及只能传给helper的fd。
+def adopt_prebuilt_landlock_ruleset(argv: list[str]) -> tuple[list[str], tuple[int, ...]]:
+    helper = find_sandbox_helper()
+    if not helper or argv[:2] != [helper, "--deny"] or len(argv) < 4:
+        return argv, ()
+    try:
+        ports = tuple(sorted({int(port) for port in argv[2].split(",") if port}))
+        if not ports or any(port < 0 or port > 65535 for port in ports):
+            return argv, ()
+        with _PREBUILT_RULESETS_LOCK:
+            fd = _PREBUILT_RULESETS.get(ports)
+            if fd is None:
+                fd = _PREBUILT_RULESETS[ports] = landlock_launcher.build_connect_tcp_ruleset(set(ports))
+    except (ValueError, landlock_launcher.LandlockUnavailable, landlock_launcher.LandlockApplyError, OSError):
+        return argv, ()
+    return [helper, "--landlock-fd", str(fd), *argv[3:]], (fd,)
 
 
 # LLM: 宿主隐私、网络与环境来源上界沿原请求传递，不是授权存储；凭据来源不能由模型参数覆盖。
@@ -430,6 +453,7 @@ class AttemptExecutionSandbox:
     #   不会出现“报了 applied 其实没挡”。环境没能力时不包、命令照跑（如实报 unavailable、靠第 (2) 层兜底）；施加失败的 fail-closed
     #   在启动器里（exec 前失败即非零退出、不 exec）。没登记端口时原样返回，Linux 既有 argv 逐字节不变。
     #   -B 必须显式传入：-I 会忽略 PYTHONDONTWRITEBYTECODE，离线包启动器不能往不可变 runtime 写标准库缓存。
+    #   资源层为原生helper时合成单跳，仍先施加Landlock再应用资源限制，非helper路径保持原argv。
     # 函数用途: Linux 下按就绪情况给 bwrap argv 套 Landlock 端口拒绝启动器，启动过程不写字节码缓存。
     def _wrap_with_landlock(self, bwrap_argv: list[str]) -> list[str]:
         ports = self.spec.deny_gateway_ports
@@ -439,6 +463,9 @@ class AttemptExecutionSandbox:
         if not ready:
             return bwrap_argv
         deny = ",".join(str(port) for port in dict.fromkeys(ports))
+        helper = find_sandbox_helper()
+        if helper and bwrap_argv[:1] == [helper]:
+            return [helper, "--deny", deny, *bwrap_argv[1:]]
         # -I 隔离模式跑启动器：忽略 PYTHONPATH/用户 site，避免 Gateway 的 PYTHONPATH 或脚本目录遮住 ctypes/os（ae 复审）。
         return [sys.executable, "-I", "-B", str(_LANDLOCK_LAUNCHER), "--deny", deny, "--", *bwrap_argv]
 

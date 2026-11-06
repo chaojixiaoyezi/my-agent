@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1349,
+  "count": 1350,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8890,6 +8890,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "沙箱事实里每条允许目录路径最多展示多少字符（更长的整条跳过，原账不变）。"
+    },
+    {
+      "name": "_SANDBOX_HELPER_PROBE_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/tooling/sandbox.py",
+      "value": 10,
+      "unit": "秒",
+      "category": "超时",
+      "description": "helper一次性自检超时（秒）：只在本进程首次发现时执行，不让坏二进制阻塞后续命令。"
     },
     {
       "name": "OBSERVATION_SCREENSHOT_MAX_BYTES",

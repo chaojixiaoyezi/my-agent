@@ -32,6 +32,7 @@ if not _IS_RESOURCE_LAUNCHER:
     import stat
     import subprocess
     import tempfile
+    import threading
     from collections.abc import Sequence
 
     from ..path_access_policy import (
@@ -93,12 +94,16 @@ class ResourceLimits:
         return cls(**values)
 
 
-# LLM: 包装发生在全部权限底图完成之后；不新增preexec、不创建session，原start_new_session/--new-session完整保留。
+# LLM: 包装发生在权限底图完成之后；原生helper仅接绝对命令，缺失时Python argv逐字节不变，不改变session或增加preexec。
 # 函数用途: 在原命令前增加独立资源启动器，避免在fork后的Gateway解释器执行Python。
 def wrap_resource_command(argv: list[str], limits: ResourceLimits | None = None) -> list[str]:
     selected = limits if limits is not None else ResourceLimits.from_environment()
     if not any(asdict(selected).values()):
         return list(argv)
+    helper = find_sandbox_helper()
+    if helper and argv and os.path.isabs(argv[0]):
+        return [helper, "--nice", str(selected.nice_increment), "--oom-score-adj", str(selected.oom_score_adj),
+                "--max-memory-mb", str(selected.max_memory_mb), "--max-processes", str(selected.max_processes), "--", *argv]
     return [sys.executable, "-I", "-B", "-S", str(Path(__file__).resolve()), "--resource-launcher",
             json.dumps(asdict(selected), separators=(",", ":")), *argv]
 
@@ -237,6 +242,40 @@ def find_bwrap() -> str | None:
         if _VENDOR_BWRAP.exists() and os.access(_VENDOR_BWRAP, os.X_OK):
             return str(_VENDOR_BWRAP)
     return None
+
+
+_VENDOR_BIN = Path(__file__).resolve().parents[2] / "vendor" / "bin"
+# helper一次性自检超时（秒）：只在本进程首次发现时执行，不让坏二进制阻塞后续命令。
+_SANDBOX_HELPER_PROBE_TIMEOUT_SECONDS = 10
+_SANDBOX_HELPER_LOCK = threading.Lock()
+_SANDBOX_HELPER: list[str | None] = []
+
+
+# LLM: 原生pre-exec的唯一发现入口；锁内只自检一次，失败返回None，由调用方保持旧Python安全路径。
+# 函数用途: 返回当前架构可执行且自检通过的helper绝对路径。
+def find_sandbox_helper() -> str | None:
+    with _SANDBOX_HELPER_LOCK:
+        if not _SANDBOX_HELPER:
+            _SANDBOX_HELPER.append(_probe_sandbox_helper())
+        return _SANDBOX_HELPER[0]
+
+
+# LLM: 无参数探针必须返回BAD_ARGV，证明可exec且没有执行命令；不探测Landlock、不施加资源或网络限制。
+# 函数用途: 在Linux查找本架构helper，缺失、超时或架构错误时停用优化。
+def _probe_sandbox_helper() -> str | None:
+    from ..attempt.landlock_launcher import BAD_ARGV_EXIT_CODE
+
+    if platform.system() != "Linux":
+        return None
+    candidate = _VENDOR_BIN / f"my-agent-sandbox-helper.linux-{platform.machine()}"
+    if not os.access(candidate, os.X_OK):
+        return None
+    try:
+        probe = subprocess.run([str(candidate)], capture_output=True,
+                               timeout=_SANDBOX_HELPER_PROBE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return str(candidate) if probe.returncode == BAD_ARGV_EXIT_CODE else None
 
 
 # LLM: 这是镜像构建、worker 启动、K8s readiness 共用的结构化 sandbox 事实。
@@ -723,13 +762,15 @@ def _is_ephemeral_readonly_sidecar(path: Path) -> bool:
     return path.name.endswith((*SQLITE_SIDECAR_SUFFIXES, HOST_STATE_LOCK_SUFFIX))
 
 
-# LLM: 仅识别landlock_launcher前置包装后的首个bwrap命令分隔符，不把用户命令内部的--当成挂载区结尾。
+# LLM: 识别landlock_launcher和原生helper的前置分隔符，不把用户命令内部的--当成挂载区结尾。
 # 函数用途: 返回bwrap挂载选项的扫描上界下标，隔离--之后的用户命令参数。
 def _bwrap_mount_limit(argv: list[str]) -> int:
     if "--" not in argv:
         return len(argv)
     first = argv.index("--")
-    start = first + 1 if any("landlock_launcher" in str(item) for item in argv[:first]) else 0
+    helper = find_sandbox_helper()
+    wrapped = any("landlock_launcher" in str(item) for item in argv[:first]) or bool(helper and argv[:1] == [helper])
+    start = first + 1 if wrapped else 0
     return argv.index("--", start) if "--" in argv[start:] else len(argv)
 
 

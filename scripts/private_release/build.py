@@ -16,6 +16,8 @@ from pathlib import Path
 from agent_py_agent.agent.settings.parameter_metadata import field_readers
 
 SCHEMA = "my-agent.private-release.v1"
+# 沙箱 helper 的发行架构：x86_64 必带，aarch64 有就带。
+HELPER_ARCHES = ("x86_64", "aarch64")
 
 
 # LLM: 构建阶段显式编译，文件名写相对路径；删除源码前要求对应字节码成功生成，不读取用户目录。
@@ -84,7 +86,55 @@ __MY_AGENT_PAYLOAD__
     return header.replace("@LINE@", str(header.count("\n") + 1)).replace("@DIGEST@", digest).encode()
 
 
-# LLM: main在编译和归档前调用；只改发行副本，native飞书后端优先，保留wheel已有资源，缺后端或资源硬拒绝。
+# LLM: 只读发行副本与已准备的 native 目录，不访问用户目录；找不到或文件无效时返回 None，由调用方按必选/可选处理。
+# 函数用途: 在候选位置里找到沙箱 helper 二进制（发行机 native 目录优先于包内已有文件）。
+def find_helper_source(root: Path, package: Path, arch: str) -> Path | None:
+    name = f"my-agent-sandbox-helper.linux-{arch}"
+    for base in (root / "native", package / "vendor/bin"):
+        candidate = base / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+# LLM: 校验ELF64小端机器号和普通文件身份；有sha旁文件时须与字节一致，不能把损坏、链接或错架构文件打进包。
+# 函数用途: 判断某个沙箱 helper 是否可以作为发行内容。
+def helper_is_valid(path: Path | None, arch: str) -> bool:
+    if path is None or path.is_symlink() or not path.is_file():
+        return False
+    data = path.read_bytes()
+    if (len(data) < 20 or data[:6] != b"\x7fELF\x02\x01"
+            or int.from_bytes(data[18:20], "little") != {"x86_64": 62, "aarch64": 183}[arch]):
+        return False
+    sidecar = Path(str(path) + ".sha256")
+    if sidecar.is_file():
+        expected = sidecar.read_text(encoding="utf-8", errors="replace").split()
+        if not expected or expected[0] != hashlib.sha256(data).hexdigest():
+            return False
+    return True
+
+
+# LLM: 复制 helper 与校验和旁文件并设置可执行位；x86_64 缺失或无效即拒绝出包，aarch64 有就带上。
+# 函数用途: 把沙箱 helper 装进发行包的 vendor/bin。
+def copy_sandbox_helpers(root: Path, package: Path) -> None:
+    target_dir = package / "vendor/bin"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for arch in HELPER_ARCHES:
+        source = find_helper_source(root, package, arch)
+        if not helper_is_valid(source, arch):
+            if arch == "x86_64":
+                raise ValueError("发行包缺少有效的沙箱 helper: vendor/bin/my-agent-sandbox-helper.linux-x86_64")
+            continue
+        target = target_dir / source.name
+        if source.resolve() != target.resolve():
+            shutil.copyfile(source, target)
+        target.chmod(0o755)
+        sidecar = Path(str(source) + ".sha256")
+        if sidecar.is_file() and sidecar.resolve() != Path(str(target) + ".sha256").resolve():
+            shutil.copyfile(sidecar, Path(str(target) + ".sha256"))
+
+
+# LLM: main在编译和归档前调用；只改发行副本，native飞书后端优先，保留wheel资源，缺飞书后端/资源或有效x86沙箱helper硬拒绝。
 # 函数用途: 复制bwrap、飞书CLI后端及lark资源，统一后端执行权限，避免发布残包。
 def copy_native_assets(root: Path, package: Path) -> None:
     # 保持原vendor发现入口，子进程即使不继承PATH也能找到Ubuntu兼容版本。
@@ -104,6 +154,7 @@ def copy_native_assets(root: Path, package: Path) -> None:
         raise ValueError("发行包缺少随包飞书 CLI 后端: vendor/bin/feishu-cli-host.linux-x86_64")
     if lark_dir.is_symlink() or not lark_dir.is_dir() or not any(lark_dir.iterdir()):
         raise ValueError("发行包缺少随包飞书 CLI 资源: vendor/lark_cli")
+    copy_sandbox_helpers(root, package)
 
 
 # LLM: 只接收一次冻结后的payload；先核原生后端完整，再编译及归档，未来重打必须使用新version。

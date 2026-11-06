@@ -2296,9 +2296,12 @@ def _run_attempt_sandboxed_shell_command(
         return completed
 
 
-# LLM: 每次启动沿用同一沙箱权限、独立会话及宿主环境擦洗，异常仍映射SandboxUnavailable；不含回退或重试判定。
+# LLM: 前台spawn单独采用预建Landlock fd，只传给可信helper并由其exec前关闭；原argv供裁剪重试，保持权限/session/env及错误映射。
 # 函数用途: 以关闭stdin和捕获管道的方式启动本次attempt命令。
 def _start_attempt_shell_process(exec_arg, use_shell: bool, target: Path, tool: ShellTool) -> subprocess.Popen:
+    from ..attempt.sandbox import adopt_prebuilt_landlock_ruleset
+
+    exec_arg, pass_fds = adopt_prebuilt_landlock_ruleset(exec_arg) if isinstance(exec_arg, list) else (exec_arg, ())
     try:
         return subprocess.Popen(
             exec_arg,
@@ -2313,6 +2316,7 @@ def _start_attempt_shell_process(exec_arg, use_shell: bool, target: Path, tool: 
             env=_subprocess_text_env(tool.path_access_policy.owner_scope_root, hidden_roots=tool.host_private_roots, sandboxed=True,
                                      host_credential_env_names=tool.host_credential_env_names),
             start_new_session=True,
+            **({"pass_fds": pass_fds} if pass_fds else {}),
         )
     except OSError as exc:
         raise SandboxUnavailable(f"BWRAP_EXEC_FAILED:{exc}") from exc

@@ -59,6 +59,21 @@ _CLEAN_ALIAS_MODULES: dict[int, dict[str, tuple[int, int]]] = {}
 _KNOWN_ALIAS_MODULES: dict[int, dict[int, tuple[str, Any]]] = {}
 
 
+# LLM: 默认固定Python回退，保证本机构建过helper也不改变既有argv断言；只有显式opt-in fixture可使用原生路径。
+# 函数用途: 在每条测试里关闭helper自动发现，同时覆盖已加载的旧包导入别名。
+@pytest.fixture(autouse=True)
+def _sandbox_helper_python_fallback(monkeypatch, request):
+    if "sandbox_helper_opt_in" in request.fixturenames:
+        return
+    from agent_py_agent.agent.attempt import sandbox as attempt_sandbox
+    from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
+
+    modules = [tooling_sandbox, attempt_sandbox]
+    modules.extend(sys.modules[name] for name in ("agent.tooling.sandbox", "agent.attempt.sandbox") if name in sys.modules)
+    for module in modules:
+        monkeypatch.setattr(module, "find_sandbox_helper", lambda: None)
+
+
 # LLM: 只复制创建时 host/child 出生与执行身份；重复通知不重绑已知实例，读状态和出生探针不产生清理权限。
 # 函数用途: 去重登记完整创建快照，让目录消失后仍能按原 child 身份回收。
 def _record_test_process_spawn(state, nodeid: str, proc, scope_context=None) -> None:

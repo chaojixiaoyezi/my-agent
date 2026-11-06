@@ -71,6 +71,24 @@ def landlock_abi(libc: ctypes.CDLL, nums: tuple[int, int, int]) -> int:
     return value if value >= 0 else -ctypes.get_errno()
 
 
+# LLM: 在调用方预建CONNECT_TCP规则，只返回内核CLOEXEC fd；不设NNP、不restrict_self，失败关闭未发布fd，不限制Gateway自身。
+# 函数用途: 为前台helper准备可并发复用的端口拒绝ruleset。
+def build_connect_tcp_ruleset(blocked_ports: set[int]) -> int:
+    nums = syscall_numbers()
+    if nums is None:
+        raise LandlockUnavailable("LANDLOCK_UNKNOWN_ARCH")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if landlock_abi(libc, nums) < 4:
+        raise LandlockUnavailable("LANDLOCK_NET_UNSUPPORTED")
+    fd = _create_net_ruleset(libc, nums)
+    try:
+        _add_allow_rules(libc, nums, fd, blocked_ports)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 # LLM: 进程级施加 CONNECT_TCP 端口白名单：给 0..65535 中不在 blocked 里的端口各加一条允许规则，再 NO_NEW_PRIVS + restrict_self。
 #   任何一步失败抛 LandlockApplyError（fail-closed）；环境不具备（create 返回 ENOSYS/EOPNOTSUPP、ABI<4、架构不认识）抛
 #   LandlockUnavailable。成功后本进程及其 exec 出来的子进程都只能连未被拒的端口。有副作用：永久限制本进程网络。
