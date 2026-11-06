@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import importlib
-import inspect
 import os
 import time
 from copy import deepcopy
@@ -233,12 +232,9 @@ def run_owner_retention_if_due(
             return _run_quota_continuation_slice(
                 state_path, home, previous, current,
                 quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries)
-        scan_options = ({'scan_budget': True}
-                        if 'scan_budget' in inspect.signature(apply_owner_retention).parameters else {})
         retention = apply_owner_retention(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
-            **scan_options,
         )
         derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                             now=datetime.fromtimestamp(current, timezone.utc))

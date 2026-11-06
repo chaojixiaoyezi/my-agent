@@ -171,14 +171,21 @@ def test_three_hundred_threads_resume_and_finish(tmp_path, monkeypatch):
     assert "conversation:conversations" not in json.loads(cursor.read_text())
 
 
-# LLM: 默认未启用预算的现有入口仍一次处理全部权威，兼容原CLI与调用方。
-# 函数用途: 验证非预算模式不意外截断300线程。
-def test_unbudgeted_path_keeps_full_scan(tmp_path):
+# LLM: 默认入口只推进一片，调用方沿返回的scan_partial重复调用才能完成全部权威。
+# 函数用途: 验证默认预算模式可续扫完成300线程，没有慢路开关。
+def test_default_budgeted_path_resumes_to_finish(tmp_path):
     home, _service = _runtime(tmp_path)
     paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(300)]
-    report = apply_owner_retention(home, now=NOW, scan_budget=False)
+    report = apply_owner_retention(home, now=NOW)
+    assert report.scan_partial
+    retired = sum(action.status == "trashed" for action in report.actions)
+    for _ in range(32):
+        report = apply_owner_retention(home, now=NOW)
+        retired += sum(action.status == "trashed" for action in report.actions)
+        if not report.scan_partial:
+            break
     assert not report.scan_partial and report.scan_cursor == {}
-    assert sum(action.status == "trashed" for action in report.actions) == 300
+    assert retired == 300
     assert not any(path.exists() for path in paths)
 
 

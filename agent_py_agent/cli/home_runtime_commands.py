@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from typing import Any
 
 from ..agent.memory_api import DAILY_ACTORS, DAILY_EVENT_TYPES
@@ -128,9 +129,21 @@ def cmd_home_status(args) -> int:
     return 0
 
 
+# LLM: 显式apply沿同一owner持久续点逐片完成；来源错误/法律保留不无限重试，回执保留所有已执行动作。
+# 函数用途: 预览保留计划，或用有界扫描完成显式清理并汇总结果。
 def cmd_home_retention(args) -> int:
     agent = make_agent(args)
-    result = apply_owner_retention(agent.home_paths) if bool(getattr(args, "apply", False)) else plan_owner_retention(agent.home_paths)
+    if bool(getattr(args, "apply", False)):
+        actions = []
+        while True:
+            result = apply_owner_retention(agent.home_paths)
+            actions.extend(result.actions)
+            # scan_partial也包含不可读来源的重试续点；有错时原样交还诊断，不把重试当预算推进。
+            if not result.scan_partial or not result.applied or not result.ok:
+                break
+        result = replace(result, actions=tuple(actions))
+    else:
+        result = plan_owner_retention(agent.home_paths)
     payload = {"ok": True, "home": str(agent.home_paths.owner_home_dir), "retention": result.to_dict()}
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -163,7 +176,13 @@ def cmd_runtime_stale_attempts(args) -> int:
     if bool(getattr(args, "settle", False)):
         days = max(0.0, float(getattr(args, "older_than_days", 1.0) or 0.0))
         repo.recover_stale_attempts()
-        released_locks = repo.cleanup_stale_resource_locks()
+        # 显式运维从头完成一轮，不能漏掉此实例此前已扫过但仍留存的前缀。
+        repo._stale_lock_cursor = (0.0, "")
+        while True:
+            released_locks.extend(repo.cleanup_stale_resource_locks())
+            # 返回的是删除列表，不是扫描条数；整页受保护时也要等原游标回绕。
+            if repo._stale_lock_cursor == (0.0, ""):
+                break
         settled = repo.settle_unidentified_attempts(older_than_seconds=days * 86400.0)
     remaining = repo.unidentified_stale_attempts()
     payload = {"ok": True, "settled_agent_run_ids": settled, "released_resource_lock_ids": released_locks, "remaining": remaining}
