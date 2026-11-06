@@ -92,7 +92,7 @@ from .host_commands import (
     read_host_command,
     read_host_command_by_operation,
 )
-from .input_lifecycle import RuntimeInputLifecycleMixin
+from .input_lifecycle import RuntimeInputLifecycleMixin, _notify_wake_writer
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
@@ -3441,6 +3441,7 @@ class RuntimeRepository(
     # 起, 档案证明已终结 → 清行(僵尸即清, 不累积)。
     # LLM: 同id重排claimed字条显式撤回旧lease并回pending；旧消费者必须整行CAS complete/release，不能删新责任。
     # 函数用途: 保存任务原唯一唤醒字条，使新安排不用等待旧消费者lease。
+    @_notify_wake_writer
     def upsert_wake(
         self,
         *,
@@ -3492,6 +3493,7 @@ class RuntimeRepository(
 
     # LLM: RuntimeDB 在原连接事务中选 due pending 并标 claimed、写五分钟租约后提交；不是删除，也不代表 runner 已启动，修改须联查消费失败重试。
     # 函数用途: 领取一批到期唤醒字条，留在库中直到完成或释放。
+    @_notify_wake_writer
     def pop_due_wakes(self, *, now: float, limit: int = 64) -> list[dict[str, Any]]:
         """取出到期的待醒字条(CAS 标 claimed, 防双叫); 只索引查询不翻目录。
 
@@ -3527,6 +3529,7 @@ class RuntimeRepository(
 
     # LLM: RuntimeDB 完成 wake 会按 ID 删除并提交，调用方先证明已启动/确认终结；删除结果不等于任务成功。
     # 函数用途: 移除已处理的持久唤醒字条，返回是否实际删除。
+    @_notify_wake_writer
     def complete_wake(self, wake_id: str) -> bool:
         """字条处理完毕(任务已拉起/已确认终结)——删除该行(终态无保留价值)。"""
         with self._runtime_connection() as conn:
@@ -3538,6 +3541,7 @@ class RuntimeRepository(
 
     # LLM: RuntimeDB 仅将 claimed wake 退回 pending，持久化重试点、次数与截断错误后提交；不丢字条，不自动调度本次执行。
     # 函数用途: 处理失败或限流后归还唤醒字条，供后续按退避时间重试。
+    @_notify_wake_writer
     def release_wake(
         self,
         wake_id: str,
@@ -3562,6 +3566,7 @@ class RuntimeRepository(
 
     # LLM: RuntimeDB 回收已过租约 claimed wake，写 pending、次数和一秒后重试点并提交；无候选不写，不重放模型或工具。
     # 函数用途: 将崩溃消费者遗留的唤醒字条重新放回等待队列。
+    @_notify_wake_writer
     def reclaim_expired_wakes(self, *, now: float) -> int:
         """WK-INT: 崩溃/卡死回收——claimed 但 lease 过期的行回 pending 重试。"""
         current = float(now)
@@ -3604,6 +3609,7 @@ class RuntimeRepository(
 
     # LLM: RuntimeDB 按 root_task_id 删除该任务全部 wake 并提交，不区分 pending/claimed；调用方须先通过终止或接管准入。
     # 函数用途: 清掉已终止任务的后续唤醒字条，返回实际删除行数。
+    @_notify_wake_writer
     def cancel_wakes_for_task(self, root_task_id: str) -> int:
         """任务终止/接管时清掉它的全部字条, 返回删除行数。"""
         with self._runtime_connection() as conn:
