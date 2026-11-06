@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 from ...backends.provider_headers import provider_agent_owner_scope
 from ...common.managed_owner_generation import current_managed_owner_generation
@@ -30,6 +31,9 @@ from .session_pool import (
     runner_session_lease,
 )
 from .slice_closeout import settle_resumable_worker_slice
+
+if TYPE_CHECKING:
+    from ...core import SimpleAgent
 
 _LOGGER = logging.getLogger(__name__)
 # 子代理 runner 会话的固定心跳秒数：与后台会话租约无关（原来借用的 background_claim_heartbeat_interval_seconds 已删除）。
@@ -56,6 +60,7 @@ class RunSubagentWorkerParams:
     # 只在父执行线程构造时捕获进程内已签发的受管原代次对象；序列化或重建的副本不是授权。
     managed_owner_generation: object | None = field(
         default_factory=current_managed_owner_generation, repr=False, compare=False)
+    worker_agent_type: type[SimpleAgent] | None = field(default=None, repr=False, compare=False, kw_only=True)
 
 
 # LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
@@ -75,11 +80,11 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     with bind_managed_owner_generation(generation):
         if (refusal := _managed_generation_refusal(params)) is not None:
             return refusal
-        worker = _build_worker_agent(SimpleAgent, params)
-        if generation is not None:
+        from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
+        worker = _build_worker_agent(params.worker_agent_type or SimpleAgent, params)
+        if generation is not None and params.worker_agent_type is None:
             # 子worker沿父执行的同一原代次；其后续线程经provider/工具关口只收窄复核，不重新签发。
             worker._managed_owner_generation = generation
-        from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
 
         try:
             if params.request_transport is not None:
@@ -286,10 +291,22 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
 # LLM: Native workers resolve owner/dispatch/model/overlay before their sole Agent construction; legacy factories retain their own bootstrap contract.
 # 函数用途: 先取得授权的最终配置再构造真实worker，只有最终同用户门面可借用父连接。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
+    pending = []
+    try:
+        return _build_worker_agent_in_scope(simple_agent_cls, params, pending)
+    finally:
+        for worker in pending if params.worker_agent_type is not None else ():
+            _close_worker_mcp_clients(worker, params)
+
+
+# LLM: Track unreturned workers through generation attachment; the caller closes successful returns, while default legacy assembly stays unchanged.
+# 函数用途: 沿原授权与配置顺序装配worker，交付前记录待清理资源。
+def _build_worker_agent_in_scope(simple_agent_cls, params, pending):
     context = _worker_configuration_context(simple_agent_cls, params)
     native_context = context is not None
     if context is None:
         context = _construct_transported_worker(simple_agent_cls, params, params.config)
+        pending.append(context)
         _attach_worker_runtime(context, params)
     # 3.txt B.4：dispatch/resume 执行阶段过统一授权查询门。系统驱动（调度器）
     # 无 requester run_id——只做 owner 一致性 + ID 形态 + 存在性；owner 不
@@ -311,8 +328,10 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     )
     if native_context or effective_config is not params.config:
         if not native_context:
+            pending.pop()
             _close_worker_mcp_clients(context, params)
         worker = _construct_transported_worker(simple_agent_cls, params, effective_config)
+        pending.append(worker)
         _attach_worker_runtime(worker, params)
     else:
         worker = context
@@ -329,6 +348,9 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
         if (callable(share) and callable(getattr(parent_tools, "share_same_owner_mcp_state_from", None))
                 and worker_tools.operation_owner_id == parent_tools.operation_owner_id):
             share(parent_tools)
+    if params.worker_agent_type is not None and (generation := current_managed_owner_generation()) is not None:
+        worker._managed_owner_generation = generation
+    pending.clear()
     return worker
 
 
