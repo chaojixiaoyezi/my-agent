@@ -210,7 +210,7 @@ def _normalize_temperature(out: dict[str, object], defaults: object) -> list[str
 class ModelFieldsService:
     # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，智能程度档位/控制方式按枚举校验，非法 YAML 告警回默认。
     #   上下文窗口和温度留空都是 None：窗口交给服务商元数据/探测，温度不发送。
-    #   Responses闲置TTL最小零，池容量0..256，越界/坏类型告警并回默认。
+    #   Responses闲置TTL最小零，池容量0..256，越界/坏类型告警并回默认；主HTTP池越界夹取，坏类型仍回默认。
     # 函数用途: 统一模型字段的类型和范围，供 YAML/overlay 共用；None 保留为不覆盖供应商采样。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
@@ -219,6 +219,14 @@ class ModelFieldsService:
             out, defaults, "model_backend",
             ("", "echo", "anthropic_compatible", "openai_compatible", "openai_responses"),
         )
+        # 主模型池按部署字段元数据夹取；不改变已有整数旋钮的越界回默认语义。
+        key = "model_http_max_idle_connections"
+        capacity, warning = CoercionService.coerce_int(key, out.get(key), getattr(defaults, key))
+        bounds = next(item.metadata["bounds"] for item in fields(defaults) if item.name == key)
+        out[key] = max(bounds[0], min(capacity, bounds[1]))
+        _append_warning(warnings, warning)
+        if out[key] != capacity:
+            warnings.append(f"{key}: expected {bounds[0]}..{bounds[1]}, got {capacity}; clamped to {out[key]}")
         warnings.extend(_apply_int_fields(
             out, defaults,
             (
@@ -227,6 +235,7 @@ class ModelFieldsService:
                 ("provider_max_concurrent_requests", 0, None),
                 ("responses_ws_idle_ttl_seconds", 0, None),
                 ("responses_ws_max_idle_connections", 0, 256),
+                ("model_http_max_idle_connections", 0, 256),  # bounds：与字段元数据一致。
                 ("model_context_window_tokens", 1, None),
             ),
         ))
@@ -419,7 +428,7 @@ _RUNTIME_BOOL_FIELDS = (
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning", "enable_self_map", "self_learning_include_background",
-    "audit_enabled",
+    "audit_enabled", "gateway_edge_identity_required",
 )
 
 
@@ -432,10 +441,11 @@ def _normalize_runtime_bools(out: dict[str, object], defaults: object) -> list[s
     return warnings
 
 
-# LLM: 运行策略只读显式枚举，维护缺省observe，非法值不得默开自主归档；同步YAML/dataclass与学习设置测试。
-# 函数用途: 规范日志级别和自学维护策略，返回可追踪的配置告警。
+# LLM: 运行策略只读显式枚举，维护缺省observe、快照缺省full，非法值告警且不推进部署迁移。
+# 函数用途: 规范日志级别、自学维护和owner快照策略，返回可追踪的配置告警。
 def _normalize_runtime_choices(out: dict[str, object], defaults: object) -> list[str]:
     maintenance_warnings = _apply_choice_field(out, defaults, "self_learning_maintenance_mode", ("observe","autonomous"))
+    maintenance_warnings.extend(_apply_choice_field(out, defaults, "scale_owner_snapshot_mode", ("full", "delta_compat", "delta")))
     value, warn = CoercionService.coerce_choice(
         "log_level", out.get("log_level"), defaults.log_level,
         choices=("debug", "info", "warning", "error", "critical"),

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,12 +45,66 @@ class ObjectClient:
         self.objects[key] = Path(path).read_bytes()
 
 
+class MemoryBackend:
+    # LLM: 仅替代外部数据库端口；生产租约SQL及快照算法照常运行，不声明真实PG/RLS验收。
+    # 函数用途: 建立单测隔离的清单、租约与事务锁。
+    def __init__(self, store):
+        self.is_postgres, self.store = True, store
+        self.lock, self.head, self.tenant = threading.RLock(), None, None
+
+    # LLM: 同一事务绑定tenant，防续租线程与清单写入交错；不跳过tenant_session。
+    # 函数用途: 提供生产租约助手实际调用的begin端口。
+    @contextlib.contextmanager
+    def begin(self):
+        with self.lock:
+            yield self
+
+    # LLM: 未识别SQL必须失败；只模拟本fixture用到的tenant、incarnation、版本与清单持久值。
+    # 函数用途: 执行快照租约和增量清单的内存数据库端口。
+    def execute(self, statement, params):
+        sql, value, count = str(statement), None, 0
+        if sql.startswith("SELECT set_config"):
+            self.tenant = params["t"]
+        elif sql.startswith("INSERT INTO owner_snapshot_head"):
+            assert params["tenant"] == self.tenant
+            assert self.head is None or self.head["expires"] <= time.monotonic()
+            version = self.head["version"] if self.head else 0
+            self.head = {"version": version, "inc": params["inc"], "expires": time.monotonic() + params["ttl"]}
+            value = version
+        elif sql.startswith("UPDATE owner_snapshot_head"):
+            assert params["tenant"] == self.tenant
+            valid = self.head and self.head["inc"] == params["inc"]
+            if "lease_expires_at > now()" in sql:
+                valid = valid and self.head["expires"] > time.monotonic()
+            if valid:
+                count = 1
+                if "version = version + 1" in sql:
+                    self.head["version"] += 1
+                    value = self.head["version"]
+                if "holder = NULL" in sql:
+                    self.head["inc"], self.head["expires"] = None, 0
+                else:
+                    self.head["expires"] = time.monotonic() + params["ttl"]
+        elif sql.startswith("INSERT INTO owner_file_manifest"):
+            rows = {row.relative_path: row for row in self.store.rows}
+            for row in params:
+                assert row["tenant"] == self.tenant
+                rows[row["path"]] = OwnerFile(row["path"], row["object_key"], row["sha"], row["size"], row["mode"])
+            self.store.rows = list(rows.values())
+        elif sql.startswith("DELETE FROM owner_file_manifest"):
+            removed = {row["path"] for row in params}
+            self.store.rows = [row for row in self.store.rows if row.relative_path not in removed]
+        else:
+            raise AssertionError(f"unhandled snapshot SQL: {sql}")
+        return SimpleNamespace(scalar_one_or_none=lambda: value, rowcount=count)
+
+
 class MemoryManifestStore(OwnerSnapshotStore):
     # LLM: Only the external DB/object ports are fake; restore, commit and checkout remain production code.
     # 函数用途: Construct a snapshot store with a test-owned complete manifest.
     def __init__(self, client):
-        super().__init__(SimpleNamespace(is_postgres=True), client, OwnerObjectConfig("fixture"))
         self.rows = []
+        super().__init__(MemoryBackend(self), client, OwnerObjectConfig("fixture"))
 
     # LLM: Single-threaded test ownership replaces only the external advisory lock.
     # 函数用途: Provide the database lock port without a PostgreSQL dependency.

@@ -40,11 +40,11 @@ def validate_gateway_auth_configuration(config: object, middleware: AuthMiddlewa
     return True
 
 
-# LLM: 原CLI配置唯一构造点传入默认关闭的边缘身份要求；既有角色、部署token与G1绑定不变。
+# LLM: 原CLI构造点传入同一可热刷配置及兼容flag；middleware逐请求读取身份要求，角色、部署token与G1绑定不变。
 # 函数用途: 按配置创建受保护middleware，合法单机返回None，不提前读凭据或建立另一身份协议。
 def build_gateway_auth_middleware(config: object) -> AuthMiddleware | None:
     if not validate_gateway_auth_configuration(config):
         return None
     manager = AuthManager(admin_user_id=getattr(config, 'admin_user_id', 'admin'), auth_enabled=True)
     return AuthMiddleware(manager, auth_token=getattr(config, 'gateway_auth_token', ''),
-                          edge_identity_required=bool(getattr(config, "gateway_edge_identity_required", False)))
+                          edge_identity_required=bool(getattr(config, "gateway_edge_identity_required", False)), config=config)

@@ -17,7 +17,43 @@ from .load import Sample, durable_receipt, json_request, open_loop, wait_until
 from .report import apply_report_gate, correlate_forwarding, percentile
 
 
-# LLM: Every offered owner remains in the denominator; noisy requests use their own identity and quota.
+# LLM: 每个噪声响应保留一行，完成要求预期数量、唯一ID、成功接收回执与全部终态同时成立。
+# 函数用途: 汇总噪声终态证据，不把缺ID或重复响应从报告中丢掉。
+def noisy_completion(responses, terminal, expected_count):
+    rows = []
+    for status, body, receipt in responses:
+        request_id = body.get("request_id") or ""
+        rows.append({"request_id": request_id, "status": status, "receipt": receipt,
+            "terminal_observed": bool(request_id) and (terminal / f"{request_id}.json").is_file()})
+    complete = (expected_count > 0 and len(rows) == expected_count
+        and len({row["request_id"] for row in rows}) == expected_count
+        and all(row["status"] in {200, 202} and row["receipt"] and row["terminal_observed"] for row in rows))
+    return rows, complete
+
+
+# LLM: 缺ID、重复ID、缺持久回执或缺终态都不能从噪声请求分母中消失。
+# 函数用途: 用独立的响应和终态文件检验噪声完成报告的完整性。
+@pytest.mark.parametrize("mutation", ["none", "missing_id", "duplicate_id", "missing_receipt", "missing_terminal", "missing_response"])
+def test_noisy_completion_keeps_every_offered_request(tmp_path, mutation):
+    responses = [(202, {"request_id": name}, "durable") for name in ("one", "two")]
+    for name in ("one", "two"):
+        (tmp_path / f"{name}.json").write_text(json.dumps({"id": name, "status": "done"}))
+    if mutation == "missing_id":
+        responses[1] = (503, {}, "")
+    elif mutation == "duplicate_id":
+        responses[1] = responses[0]
+    elif mutation == "missing_receipt":
+        responses[1] = (202, {"request_id": "two"}, "")
+    elif mutation == "missing_terminal":
+        (tmp_path / "two.json").rename(tmp_path / "two.hidden")
+    elif mutation == "missing_response":
+        responses.pop()
+    rows, completed = noisy_completion(responses, tmp_path, 2)
+    assert len(rows) == len(responses)
+    assert completed is (mutation == "none")
+
+
+# LLM: 所有到达保留分母；观测期限到时把缺终态写入报告，阶段门仍以原冻结指标拒绝，不能在报告前丢掉失败。
 # 函数用途: Measure isolated acceptance, stop acknowledgement, terminal exit evidence and stream observations.
 @pytest.mark.slo
 @pytest.mark.parametrize("isolated_gateway", ["cell50"], indirect=True)
@@ -150,9 +186,13 @@ def test_cell50(isolated_gateway, request, fake_provider, slo_data, slo_report):
     baseline_p99 = percentile([sample.latency_ms() for sample in baseline], 0.99)
     added = percentile([sample.latency_ms() for sample in samples], 0.99) - baseline_p99
     noisy_paths = [paths.terminal / f"{body['request_id']}.json" for _status, body, _receipt in noisy if body.get("request_id")]
-    for path in noisy_paths:
-        wait_until(path.exists, bounds["condition_seconds"], bounds["poll_seconds"])
-    proof = json.loads(noisy_paths[0].read_text()).get("capability_closeout") if noisy_paths else None
+    try:
+        wait_until(lambda: all(path.exists() for path in noisy_paths), bounds["condition_seconds"], bounds["poll_seconds"])
+    except AssertionError:
+        pass  # 与accepted样本一样，观测超时是待报告的失败，不是放宽测量目标。
+    noisy_states, noisy_completed = noisy_completion(noisy, paths.terminal, profile["noisy_requests"])
+    proof = (json.loads((paths.terminal / f"{noisy_states[0]['request_id']}.json").read_text()).get("capability_closeout")
+        if noisy_states and noisy_states[0]["terminal_observed"] else None)
     checks = {
         "all_durable_acceptances": all(sample.receipt for sample in samples),
         "single_user_baseline_confirmed": all(sample.receipt for sample in baseline),
@@ -160,6 +200,7 @@ def test_cell50(isolated_gateway, request, fake_provider, slo_data, slo_report):
         "control_durable_receipt": bool(stop_sample.receipt),
         "control_p99": stop_ms <= scenario["targets"]["control_p99_ms"],
         "exit_proof": bool(proof and proof.get("acknowledged") is True),
+        "noisy_all_completed": noisy_completed,
         "all_completed": all(sample.completed for sample in samples),
         "forwarding_receipts": not observer_errors and all(not token["failure"] for token in forwarding),
         "forwarding_p99": percentile([token["latency_ms"] for token in forwarding], 0.99) <= scenario["targets"]["forwarding_p99_ms"],
@@ -172,7 +213,7 @@ def test_cell50(isolated_gateway, request, fake_provider, slo_data, slo_report):
         exit_proof={"source": "canonical_terminal_capability_closeout", "receipt": proof},
         provider_calls=len(fake_provider.records), provider_calls_before_noise=before_noise,
         offered_mix=dict(Counter(sample.kind for sample in samples)), tool_executions=tools,
-        completion_states=terminals, observer_errors=observer_errors, target_checks=checks,
+        completion_states=terminals, noisy_completion_states=noisy_states, observer_errors=observer_errors, target_checks=checks,
         targets_met=all(checks.values()), performance_enforced=enforce,
         forwarding={"samples": forwarding, "denominator": len(forwarding),
             "receipt_correlation": sum(not token["failure"] for token in forwarding) / len(forwarding),

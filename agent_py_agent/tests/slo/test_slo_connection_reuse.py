@@ -1,10 +1,12 @@
 """Measure real HTTPS model transports through the public backend factory."""
 from __future__ import annotations
 
+import ssl
 import time
 
 import pytest
 
+from agent_py_agent.agent.backends import keepalive_transport
 from agent_py_agent.agent.backends.factory import get_backend
 from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.model_profiles import selected_model_config_for_resources
@@ -20,7 +22,7 @@ from .load import GatewayProcess
 from .report import require_target
 
 
-# LLM: Unknown Stage 1 keys remain in the isolated YAML until the integrator wires them.
+# LLM: 每轮fixture信任自己的临时CA，不沿用MEM-W3首次创建的进程共享上下文；仍完整校验证书。
 # 函数用途: Compare actual handshake counts and elapsed model-call time with pooling off and requested on.
 @pytest.mark.slo
 def test_connection_reuse(tmp_path, monkeypatch, slo_data, slo_report):
@@ -31,6 +33,7 @@ def test_connection_reuse(tmp_path, monkeypatch, slo_data, slo_report):
         with FakeProvider(tmp_path / mode, https=True, handshake_delay=profile["handshake_delay"],
                           teardown_seconds=slo_data["fixture"]["teardown_seconds"]) as provider:
             monkeypatch.setenv("SSL_CERT_FILE", str(provider.cert_path))
+            monkeypatch.setattr(keepalive_transport, "_tls_context", lambda: ssl.create_default_context(cafile=str(provider.cert_path)))
             capacity = scenario["config"]["model_http_max_idle_connections"] if mode == "pooled" else 0
             gateway = GatewayProcess(tmp_path / f"{mode}-home", provider, slo_data["fixture"],
                 {"stream_enabled": False, "model_http_max_idle_connections": capacity})

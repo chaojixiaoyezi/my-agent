@@ -9,6 +9,52 @@ import pytest
 from .normalize import ID_NAMESPACES, assert_invariants, normalize
 
 
+# LLM: 日期只在测试根下的完整路径段替换，重复关系与请求因果ID不变；原始哈希仍须先验证。
+# 函数用途: 验证跨日回放、日期一一映射、业务正文保留和归一幂等性。
+def test_fixture_date_segments_are_bijective_before_body_hashing():
+    import hashlib
+
+    def event(first, second):
+        body = {"messages": [{"role": "user", "content":
+            f"/tmp/fixture/context_bundles/{first}/request.json "
+            f"/tmp/fixture/archive/{second}/next.json /tmp/fixture/context_bundles/{first}/again.json"}]}
+        return {"source": "provider", "seq": 1, "fixture_root": "/tmp/fixture", "request_id": "request-one",
+            "body": body, "body_hash": hashlib.sha256(json.dumps(body, sort_keys=True,
+                ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()}
+
+    raw = event("2026-11-05", "2026-11-06")
+    normalized = normalize([raw])
+    assert normalized == normalize([event("2027-01-01", "2027-01-02")])
+    text = normalized[0]["body"]["messages"][0]["content"]
+    assert text.count("date#1/") == 2 and text.count("date#2/") == 1
+    assert normalize([event("2026-11-05", "2026-11-05")]) != normalized
+    assert normalize(normalized) == normalized
+    assert raw["body"]["messages"][0]["content"].count("2026-11-05") == 2
+    business = {"source": "provider", "seq": 1, "fixture_root": "/tmp/fixture",
+        "text": "appointment 2026-11-05 /business/2026-11-05/a /tmp/fixture/report-2026-11-05.txt"}
+    assert normalize([business])[0]["text"] == business["text"].replace("/tmp/fixture", "fixture_root#1")
+
+
+# LLM: 只有本事件声明的测试根授权日期目录归一，源码发布目录与普通文字必须可区分。
+# 函数用途: 保留源码日期、伪根、根名前缀以及无扩展名日期文件的反例。
+@pytest.mark.parametrize("roots,path", [
+    ({"source_root": "/checkout"}, "/checkout/releases/{day}/config.json"),
+    ({}, "fixture_root#1/orders/{day}/item"),
+    ({}, "customer_fixture_root#1/orders/{day}/item"),
+    ({"fixture_root": "/tmp/fixture"}, "customer_fixture_root#1/orders/{day}/item"),
+    ({"fixture_root": "fixture_root#1"}, "customer_fixture_root#1/orders/{day}/item"),
+    ({"fixture_root": "/tmp/fixture"}, "/tmp/fixture-other/orders/{day}/item"),
+    ({"fixture_root": "/tmp/fixture"}, "/tmp/fixture/exports/{day}"),
+])
+def test_non_fixture_directory_dates_remain_visible(roots, path):
+    first = {"source": "provider", "seq": 1, **roots, "text": path.format(day="2025-01-01")}
+    second = {**first, "text": path.format(day="2026-06-09")}
+    normalized = normalize([first])
+    assert "2025-01-01" in normalized[0]["text"]
+    assert normalized != normalize([second])
+    assert normalize(normalized) == normalized
+
+
 # LLM: Two sessions share an owner but not their stop, receipt or execution identity.
 # 函数用途: Build an independently specified valid causal trace.
 def trace_fixture():
