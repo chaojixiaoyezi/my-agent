@@ -5,7 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent_py_agent.agent.gateway_parts import compact_operations as idle
-from agent_py_agent.tests.test_cache_prefix_regression import _environment, _observe_compact_requests
+from agent_py_agent.tests.test_cache_prefix_regression import (
+    _environment,
+    _observe_compact_requests,
+)
 
 
 # LLM: 真实 Gateway ask 两轮后走真实闲置维护入口；只观察出站载荷的档位与工具数，不读正文。

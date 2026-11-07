@@ -7,6 +7,8 @@
 - owner：W2 单写者
 - date：2026-11-07
 - 起始提交：`bfafa4ca7ec084570136abaadd0f62f9af352d34`
+- 门禁期间已有进程将本轮五文件改动提交为 `9a61fb27b2b37e797a048ba34ec1530f9f458f56`；保留该提交，收尾以追加提交完成。
+- 集成时应合入本分支的完整提交范围，包含功能提交与收尾提交，不能仅挑选收尾提交。
 
 ## 本线目标
 
@@ -35,7 +37,8 @@
 - 修复后，指定 ci-venv-312（Python 3.12.13）两文件回归通过。
 - 完整门禁按任务书动态扫描 23 个辅助调用消费方，并加入指定回合中/闲置/前缀回归和十个 GUARDS；同时执行全仓 Ruff、导入边界、diff 检查与 clean-package。
 - ci-venv-312 缺 Pillow；按任务书排除 `agent_py_agent/tests/test_iface_w4_compact_summarizer.py`，没有修改共享虚拟环境或测试豁免。
-- 完整门禁最终结果在提交前填入；原始输出保留于忽略目录 `tmp/plan-cache-w2/gate.log`。
+- 首轮完整 pytest 退出 0；Ruff 对参考补丁的两条长导入报 I001，已仅拆成括号导入，语义与参考补丁一致。导入边界、diff 与 clean-package 该轮均退出 0。
+- 完整门禁复跑：948 项 pytest 全部成功，`pytest=0 ruff=0 boundaries=0 diffcheck=0 clean=0`，`gate rc=0`。原始输出保留于忽略目录 `tmp/plan-cache-w2/gate.log`；首轮记录保留于 `gate-first.log`。
 
 ## 提交后统一验收
 

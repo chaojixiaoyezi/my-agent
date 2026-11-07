@@ -536,7 +536,11 @@ def _prefix_free_downshift(request: AuxiliaryModelCallRequest, backend: object,
     thinking_disabled, effort = baseline
     if thinking_disabled or not effort or not _prefix_free_compact(request):
         return None
-    from ..backends.reasoning_control import REASONING_LEVELS, compact_reasoning_target, reasoning_request_values
+    from ..backends.reasoning_control import (
+        REASONING_LEVELS,
+        compact_reasoning_target,
+        reasoning_request_values,
+    )
 
     configured = getattr(getattr(request.agent, "config", None), "memory_compact_reasoning_level", "low")
     target, _reason = compact_reasoning_target(backend, configured, compact_summary_output_reserve_tokens(request.agent))
