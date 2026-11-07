@@ -23,6 +23,7 @@ from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+from .events import rotate_event_jsonl_if_due_unlocked
 
 logger = logging.getLogger(__name__)
 
@@ -653,8 +654,13 @@ class LocalStoreSchemaMixin:
     def _append_coordinator_event_records(self, path, records, *, sort_keys=True):
         if path != self.events_path:
             raise ValueError("local_store_event_path_changed")
-        return self._local_write(lambda: append_private_jsonl_records_unlocked(
-            self.events_path, records, sort_keys=sort_keys))
+
+        def append():
+            # 调用方已持原事件锁，rename 与追加必须同在当次原写门内。
+            rotate_event_jsonl_if_due_unlocked(self.events_path)
+            return append_private_jsonl_records_unlocked(self.events_path, records, sort_keys=sort_keys)
+
+        return self._local_write(append)
 
 
 # LLM: 只清理原已打开连接，不新连接、不新增业务DML；rollback/close全部尝试，有主异常时不覆盖其对象。
