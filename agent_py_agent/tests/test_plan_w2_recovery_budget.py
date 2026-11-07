@@ -215,6 +215,22 @@ def test_derived_prune_resumes_bounded_scan_and_keeps_cross_batch_active_group(t
     assert len({str(position) for position in positions}) > 1
 
 
+def _seal_event_prefix(store, count):
+    """用真实追加字节布置封存前缀，后续裁剪仍由原 Store 执行。"""
+    from agent_py_agent.agent.local_storage.events import event_segments_dir
+
+    lines = store.events_path.read_bytes().splitlines(keepends=True)
+    directory = event_segments_dir(store.events_path)
+    directory.mkdir()
+    segments = []
+    for index, line in enumerate(lines[:count]):
+        segment = directory / f'2020-01-01.{index}.jsonl'
+        segment.write_bytes(line)
+        segments.append(segment)
+    store.events_path.write_bytes(b''.join(lines[count:]))
+    return segments
+
+
 def test_event_cleanup_resumes_jsonl_budget_and_separates_page_reuse_from_shrink(tmp_path):
     import json
 
@@ -224,22 +240,40 @@ def test_event_cleanup_resumes_jsonl_budget_and_separates_page_reuse_from_shrink
     store = LocalStore(path)
     for index in range(20):
         store.record_event("test", payload={"index": index, "padding": "x" * 80})
+    segments = _seal_event_prefix(store, 5)
+    sealed_bytes = sum(segment.stat().st_size for segment in segments)
+    # 单拍可检查一个完整段尾，但放不下两个段，强制验证真实跨拍进展。
+    budget = max(segment.stat().st_size for segment in segments)
+    assert budget < sum(segment.stat().st_size for segment in segments[:2])
+    active = store.events_path.read_bytes()
+    active_inode = store.events_path.stat().st_ino
     step = getattr(store, "prune_events_step", None)
     assert callable(step), "background event pruning must expose a bounded step"
     deleted = 0
     reports = []
     for _ in range(200):
-        report = LocalStore(path).prune_events_step(before=2_000_000_000, keep_last=2, max_delete=5, max_bytes=256)
-        assert report["scanned_bytes"] <= 256
+        report = LocalStore(path).prune_events_step(before=2_000_000_000, keep_last=2, max_delete=5, max_bytes=budget)
+        assert report["scanned_bytes"] <= budget and report["deleted_db"] <= 5
+        assert not report["errors"]
         deleted += report["deleted_db"]
         reports.append(report)
         if not report["partial"]:
             break
     else:
         raise AssertionError("event JSONL cursor did not complete")
-    assert deleted == 5
+    assert reports[0]["deleted_db"] == 5 and deleted == 18
+    assert reports[0]["partial"] and len(reports) > 1
+    assert sum(report["removed_segments"] for report in reports) == 5
+    assert sum(report["removed_bytes"] for report in reports) == sealed_bytes
+    assert all(report["deleted_jsonl"] == report["removed_segments"] for report in reports)
+    assert all(not segment.exists() for segment in segments)
+    assert store.events_path.read_bytes() == active and store.events_path.stat().st_ino == active_inode
     remaining = [json.loads(line) for line in store.events_path.read_text().splitlines()]
     assert len(remaining) == 15
+    # SQL 的两行保留窗口独立推进；活动流中的旧行只在将来封存后才能按整段退休。
+    with store._connection() as conn:
+        assert [row[0] for row in conn.execute("SELECT event_id FROM events ORDER BY seq")] == [
+            row["event_id"] for row in remaining[-2:]]
     assert all("expired_rows" in result and "free_page_reuse" in result and "physical_shrink" in result for result in reports)
     assert all(result["physical_shrink"]["performed"] is False for result in reports)
 
@@ -291,31 +325,56 @@ def test_background_run_request_freezes_topic_and_old_call_defaults():
 def test_event_cleanup_recovers_after_publish_before_cursor_commit(tmp_path, monkeypatch):
     import json
 
+    import pytest
+
     from agent_py_agent.agent.local_storage import LocalStore, maintenance
 
     store = LocalStore(tmp_path / 'local.db')
     for index in range(5):
         store.record_event('test', payload={'number': index})
-    original = maintenance._event_step_save
+    segments = _seal_event_prefix(store, 3)
+    budget = max(segment.stat().st_size for segment in segments)
+    active = store.events_path.read_bytes()
+    active_inode = store.events_path.stat().st_ino
+    original = maintenance._sync_parent_directory
     failed = []
+    fault = OSError('crash after sealed segment retirement')
 
-    def crash(conn, job, targets):
-        if job is None and targets and not failed:
-            failed.append(True)
-            raise OSError('crash after file publication')
-        return original(conn, job, targets)
+    def crash(path):
+        # 新流程没有逐行游标提交；在整段已 unlink、同步与回执尚未完成的实际窗口中断。
+        if path == segments[0] and not failed:
+            assert not path.exists()
+            failed.append(path)
+            raise fault
+        return original(path)
 
-    monkeypatch.setattr(maintenance, '_event_step_save', crash)
-    import pytest
+    monkeypatch.setattr(maintenance, '_sync_parent_directory', crash)
 
-    with pytest.raises(OSError):
-        for _ in range(100):
-            store.prune_events_step(before=2_000_000_000, keep_last=2, max_delete=3, max_bytes=48)
+    with pytest.raises(OSError) as caught:
+        store.prune_events_step(before=2_000_000_000, keep_last=2, max_delete=3, max_bytes=budget)
+    assert caught.value is fault and failed == [segments[0]]
+    assert not segments[0].exists() and all(segment.exists() for segment in segments[1:])
+    with store._connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 2
+    assert store.events_path.read_bytes() == active and store.events_path.stat().st_ino == active_inode
+    reports = []
     for _ in range(100):
-        result = LocalStore(store.db_path).prune_events_step(before=2_000_000_000, keep_last=2, max_delete=3, max_bytes=48)
+        result = LocalStore(store.db_path).prune_events_step(before=2_000_000_000, keep_last=2, max_delete=3, max_bytes=budget)
+        assert result['scanned_bytes'] <= budget and result['deleted_db'] == 0 and not result['errors']
+        reports.append(result)
         if not result['partial']:
             break
-    assert not result['partial'] and len([json.loads(line) for line in store.events_path.read_text().splitlines()]) == 2
+    else:
+        raise AssertionError('sealed event retirement did not recover')
+    assert sum(report['removed_segments'] for report in reports) == 2
+    assert all(not segment.exists() for segment in segments)
+    assert store.events_path.read_bytes() == active and store.events_path.stat().st_ino == active_inode
+    remaining = [json.loads(line) for line in active.splitlines()]
+    assert len(remaining) == 2
+    with store._connection() as conn:
+        assert [row[0] for row in conn.execute('SELECT event_id FROM events ORDER BY seq')] == [
+            row['event_id'] for row in remaining]
+        assert conn.execute("SELECT COUNT(*) FROM metadata WHERE key IN ('events_prune_cursor', 'events_prune_pending_ids')").fetchone()[0] == 0
 
 
 def test_real_source_directory_page_uses_bounded_scandir(tmp_path, monkeypatch):
