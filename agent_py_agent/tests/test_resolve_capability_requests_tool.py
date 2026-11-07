@@ -54,6 +54,110 @@ def _tool(agent: SimpleAgent):
     return ResolveCapabilityRequestsTool(agent)
 
 
+def _enable_background_continuation(agent, task):
+    from agent_py_agent.agent.subagents.process_control import (
+        BackgroundStartUpdate,
+        build_background_start_record,
+    )
+
+    task = agent.subagents.load(task.id)
+    task.attributes["background_start"] = build_background_start_record(
+        None, BackgroundStartUpdate(launch_id="previous-capability-launch", status="finished"),
+    )
+    agent.subagents.save(task)
+
+
+@pytest.mark.parametrize("decision", ["grant", "deny"])
+def test_resolved_background_child_starts_after_durable_wake_without_waiting(tmp_path, monkeypatch, decision):
+    from threading import Event
+
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+
+    agent, task, _request = _agent_and_blocked_task(str(tmp_path))
+    _enable_background_continuation(agent, task)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "immediate"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task.id})
+    entered, release, finished = Event(), Event(), Event()
+    observed = []
+
+    def worker(request):
+        try:
+            current = agent.subagents.load(task.id)
+            observed.append((current.attributes["capability_resolution_wake"], request.run_ids,
+                             request.params.expected_attempt_ids[task.id]))
+            entered.set()
+            assert release.wait(5)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(dispatch, "_use_inprocess_autostart", lambda _agent: True)
+    monkeypatch.setattr(dispatch, "_background_dispatch_worker", worker)
+    try:
+        result = _tool(agent).execute({"run_id": task.id, "decision": decision, "reason": "继续原后台任务"})
+        assert result.ok, result.output
+        payload = json.loads(result.output)
+        assert payload["continuation"]["status"] == "queued"
+        assert payload["continuation"]["dispatch"]["started"] == 1
+        assert entered.wait(2) and not finished.is_set()
+        wake, run_ids, attempt_id = observed[0]
+        assert wake["status"] == "raised" and wake["decision"] == decision
+        assert store.wakes.pending_one(wake["wake_signal_id"]) is not None
+        assert run_ids == [task.id]
+        assert agent.subagents.runtime_db.get_attempt(attempt_id)["status"] == "pending"
+        assert _tool(agent).execute({"run_id": task.id, "decision": decision, "reason": "重复裁决"}).ok
+        assert len(observed) == 1
+    finally:
+        release.set()
+        assert finished.wait(2) if entered.is_set() else True
+
+
+def test_resolved_storage_only_child_does_not_start_runner(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+
+    agent, task, _request = _agent_and_blocked_task(str(tmp_path))
+    monkeypatch.setattr(capability_auto_sweep, "auto_start_orphan_run", lambda *_args: pytest.fail("未配置后台启动"))
+    result = _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "仅裁决存储任务"})
+    assert result.ok and json.loads(result.output)["continuation"]["status"] == "queued"
+    assert agent.subagents.load(task.id).status == "PENDING"
+
+
+@pytest.mark.parametrize("status", ["PAUSED", "CANCELLED"])
+def test_immediate_capability_continuation_rechecks_control_after_wake(tmp_path, monkeypatch, status):
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
+    from agent_py_agent.agent.agent_core.orchestration.tools import capability
+
+    agent, task, _request = _agent_and_blocked_task(str(tmp_path))
+    _enable_background_continuation(agent, task)
+    original = capability._wake_subagent
+
+    def wake_then_stop(actual, ctx):
+        original(actual, ctx)
+        agent.subagents.lifecycle.set_status(task.id, status)
+
+    monkeypatch.setattr(capability, "_wake_subagent", wake_then_stop)
+    monkeypatch.setattr(dispatch, "_start_background_dispatch", lambda *_args, **_kwargs: pytest.fail("控制已关闭执行"))
+    result = _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "与控制交错"})
+    assert result.ok
+    assert json.loads(result.output)["continuation"]["dispatch"]["started"] == 0
+    assert agent.subagents.load(task.id).status == status
+
+
+def test_grant_accepts_current_owner_tasks_but_rejects_other_owner(tmp_path):
+    agent, task, _request = _agent_and_blocked_task(str(tmp_path))
+    target = agent.home_paths.owner_home_dir / "tasks" / "new-task" / "output"
+    result = _tool(agent).execute({"run_id": task.id, "decision": "grant", "reason": "同一 owner 的任务目录",
+                                  "write_roots": [str(target)]})
+    assert result.ok, result.output
+    assert agent.subagents.load(task.id).capability_grants[-1].path_scope == [str(target)]
+    other = agent.home_paths.root / "owners" / "local" / "other" / "tasks" / "output"
+    request = agent.subagents.lifecycle.record_capability_request(task.id, RecordCapabilityRequestParams(
+        problem="隔离范围", needed_capability="filesystem", capability_type="filesystem", path_scope=[str(other)],
+    ))
+    result = _tool(agent).execute({"run_id": task.id, "request_id": request.id, "decision": "grant", "reason": "不得跨 owner"})
+    assert not result.ok and result.error_code == "PATH_OUTSIDE_WORKSPACE"
+
+
 # LLM: 只在 tmp_path 的真实 canonical/ConversationStore 上冻结旧结果和授权的交错；不启动模型或宿主进程。
 # 函数用途: 复现旧 runner 已按 OPEN 构造 BLOCKED、父级在旧结果保存前授权的边界。
 def _capability_closeout_race(tmp_path, *, grant=True, real_attempt=False):

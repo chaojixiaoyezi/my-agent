@@ -34,6 +34,126 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 
 
+def _fix3_background_supervisor(store):
+    from agent_py_agent.cli import gateway_loops
+
+    agent = SimpleNamespace(config=AgentConfig(model_backend="echo"), conversation_store=store)
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._base_agent = agent
+    supervisor._base_scheduler = scheduler
+    supervisor._inflight = {}
+    supervisor._owner_schedulers = {}
+    supervisor._lane_retry = gateway_loops.BackgroundLaneRetry()
+    return supervisor, scheduler
+
+
+@pytest.mark.parametrize("delete_during_tick", [False, True])
+def test_gateway_background_deleted_thread_retires_sources_without_loop_error(tmp_path, monkeypatch, capsys, delete_during_tick):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "deleted"})
+    healthy = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "healthy"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "orphan-task"})
+    event = store.observations.append({"thread_id": thread.thread_id, "event_type": "test",
+                                       "requires_main_agent": True, "summary": "原线程被删除"})
+    orphan = store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "test", "observation": event,
+                                       "root_task_id": "orphan-task"})
+    retained = store.wakes.raise_signal({"thread_id": healthy.thread_id, "reason": "test"})
+    policy = store.progress.create({"thread_id": thread.thread_id, "task_id": "orphan-task", "interval_seconds": 60})
+    supervisor, scheduler = _fix3_background_supervisor(store)
+    path = store.storage.thread_path(thread.thread_id)
+
+    def tick(thread_id):
+        if thread_id == thread.thread_id:
+            path.unlink()
+            store.threads.require(thread_id)
+        return ["healthy-ran"]
+
+    monkeypatch.setattr(scheduler, "tick_thread", tick)
+    if not delete_during_tick:
+        path.unlink()
+    assert supervisor._safe_thread_tick(scheduler, "owner", thread.thread_id) == []
+    assert supervisor._safe_thread_tick(scheduler, "owner", thread.thread_id) == []
+    assert store.wakes.pending_one(orphan.wake_signal_id) is None
+    assert store.wakes.pending_one(retained.wake_signal_id) is not None
+    assert store.observations.unhandled_requiring_main(limit=20) == []
+    assert not store.progress.load(policy.policy_id).enabled
+    assert store.tasks.load("orphan-task").status == "active"
+    assert not path.exists() and supervisor._lane_retry.count("owner") == 0
+    assert supervisor._safe_thread_tick(scheduler, "owner", healthy.thread_id) == ["healthy-ran"]
+    assert "gateway-loop-error" not in capsys.readouterr().err
+
+
+def test_gateway_background_observation_sync_still_submits_queued_wake(tmp_path, monkeypatch, capsys):
+    from agent_py_agent.agent.conversation.observation_index import ObservationIndexIncomplete
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "wake"})
+    signal = store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "test"})
+    for index in range(20):
+        (store.storage.observations_dir / f"history-{index:02d}.jsonl").touch()
+    supervisor, scheduler = _fix3_background_supervisor(store)
+    monkeypatch.setattr(scheduler, "prepare_tick", lambda **_kwargs: None)
+    pending = store.observations._index.pending
+    partial = []
+
+    def indexed(*args, **kwargs):
+        try:
+            return pending(*args, **kwargs)
+        except ObservationIndexIncomplete:
+            partial.append(True)
+            raise
+
+    monkeypatch.setattr(store.observations._index, "pending", indexed)
+    submitted = []
+    supervisor._submit_thread_candidates = lambda candidates, **_kwargs: submitted.extend(candidates)
+    supervisor._submit_ready_thread_ticks()
+    assert partial and submitted[0][2] == [thread.thread_id]
+    assert store.wakes.pending_one(signal.wake_signal_id) is not None
+    for _ in range(10):
+        try:
+            assert indexed(20) == []
+            break
+        except ObservationIndexIncomplete:
+            continue
+    else:
+        pytest.fail("索引分片游标未能推进完成")
+    assert "gateway-loop-error" not in capsys.readouterr().err
+
+
+def test_gateway_background_partial_tick_retries_without_cooldown(tmp_path, monkeypatch, capsys):
+    from agent_py_agent.agent.conversation.observation_index import ObservationIndexIncomplete
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "partial"})
+    supervisor, scheduler = _fix3_background_supervisor(store)
+
+    def partial(_thread_id):
+        raise ObservationIndexIncomplete("sync in progress")
+
+    monkeypatch.setattr(scheduler, "tick_thread", partial)
+    assert supervisor._safe_thread_tick(scheduler, "owner", thread.thread_id) == []
+    assert supervisor._lane_retry.count("owner") == 0
+    monkeypatch.setattr(scheduler, "tick_thread", lambda _thread_id: ["resumed"])
+    assert supervisor._safe_thread_tick(scheduler, "owner", thread.thread_id) == ["resumed"]
+    assert "gateway-loop-error" not in capsys.readouterr().err
+
+
+def test_gateway_background_unrelated_keyerror_keeps_programmer_bug_diagnostic(tmp_path, monkeypatch, capsys):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "valid"})
+    supervisor, scheduler = _fix3_background_supervisor(store)
+
+    def broken(_thread_id):
+        raise KeyError("unrelated application key")
+
+    monkeypatch.setattr(scheduler, "tick_thread", broken)
+    assert supervisor._safe_thread_tick(scheduler, "owner", thread.thread_id) == []
+    assert supervisor._lane_retry.count("owner") == 1
+    assert "gateway-loop-error" in capsys.readouterr().err
+
+
 # LLM: 只为公开回复断言分离空正文原生事实行；事实行必须有合法信封，不能借此隐藏漏写或空白 final。
 # 函数用途: 测试真实公开聊天内容，同时验证后台原生历史仍保存在同一个 transcript。
 def _public_background_messages(store, thread_id, *, limit=0):
