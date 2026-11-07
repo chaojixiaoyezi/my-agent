@@ -456,9 +456,9 @@ class NetworkGatewayObserver:
                 headers["Authorization"] = f"Bearer {token}"
         return headers
 
-    # LLM: Reuse authenticated no-redirect transport; this method never queues a file request or retries a write.
+    # LLM: 复用认证且禁止重定向的HTTP；total_deadline_seconds仍表示原单次运输秒数，默认值及0.1秒下限不变，不入文件队列或重试写入。
     # 函数用途: 执行一次有界JSON请求，所有控制和审批沿同一HTTP入口。
-    def request_json(self, method, path, payload=None, *, timeout=None):
+    def request_json(self, method, path, payload=None, *, total_deadline_seconds=None):
         import urllib.error
         import urllib.request
 
@@ -469,7 +469,7 @@ class NetworkGatewayObserver:
             headers["Content-Type"] = "application/json"
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
-        timeout = max(0.1, float(timeout if timeout is not None else getattr(self.agent.config, "gateway_request_timeout", 30)))
+        timeout = max(0.1, float(total_deadline_seconds if total_deadline_seconds is not None else getattr(self.agent.config, "gateway_request_timeout", 30)))
         try:
             with open_authenticated_request(request, timeout=timeout) as response:
                 raw = response.read(STREAM_CHUNK_READ_MAX_BYTES + 1)
@@ -503,11 +503,11 @@ class NetworkGatewayObserver:
         if status != 200 or not body.get("ok"):
             raise PermissionError("Gateway未确认审批决定")
 
-    # LLM: Existing thin-client methods keep their schemas and authority checks; only their transport is rebound for this client instance.
+    # LLM: 原客户端保留公开timeout关键字、schema与授权检查；只为当前实例将同一秒数传给HTTP运输，不改共享类。
     # 函数用途: 为当前客户端绑定远程只读查询和控制HTTP，不更改共享类或其他用户客户端。
     def bind_client_transport(self):
-        self.agent.get_gateway_json = lambda path, *, timeout, **_: self.request_json("GET", path, timeout=timeout)
-        self.agent.post_gateway_json = lambda path, payload, *, timeout: self.request_json("POST", path, payload, timeout=timeout)
+        self.agent.get_gateway_json = lambda path, *, timeout, **_: self.request_json("GET", path, total_deadline_seconds=timeout)
+        self.agent.post_gateway_json = lambda path, payload, *, timeout: self.request_json("POST", path, payload, total_deadline_seconds=timeout)
 
     # LLM: LF/blank-line terminated frames alone are observable. An incomplete UTF-8/data/id fragment never commits the cursor.
     # 函数用途: 解析有界SSE完整帧，断连时丢弃半帧并保留上一条已消费游标。
@@ -540,7 +540,7 @@ class NetworkGatewayObserver:
         if request.visible_chunks_ref is not None:
             request.visible_chunks_ref[0] += visible
 
-    # LLM: Terminal is accepted only from the original HTTP result projection or terminal SSE frame; no local stat/open/read fallback exists.
+    # LLM: 终态只认原HTTP结果投影或SSE终态帧；轮询透传原剩余秒数，不新增本地stat/open/read降级。
     # 函数用途: 优先SSE续读原请求；503、重复连接失败或认证刷新失败后仅用HTTP进度与结果兜底。
     def __call__(self, request):
         import urllib.error
@@ -606,14 +606,14 @@ class NetworkGatewayObserver:
                 if not self._http_only:
                     time.sleep(_WAIT_POLL_STEPS_SECONDS[0])
                     continue
-            status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", timeout=max(0.1, deadline-time.time()))
+            status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", total_deadline_seconds=max(0.1, deadline-time.time()))
             if status in (401, 403):
                 raise PermissionError("Gateway网络观察未获授权")
             if status == 200:
                 for event in batch.get("events", []):
                     self._emit(request, event)
                 self.line_cursor = max(self.line_cursor, int(batch.get("next") or 0))
-            status, result = self.request_json("GET", f"/result/{quoted}", timeout=max(0.1, deadline-time.time()))
+            status, result = self.request_json("GET", f"/result/{quoted}", total_deadline_seconds=max(0.1, deadline-time.time()))
             if status == 200:
                 return result
             if status in (401, 403):

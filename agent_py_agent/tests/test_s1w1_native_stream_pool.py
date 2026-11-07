@@ -14,6 +14,7 @@ from agent_py_agent.agent.gateway_parts.business_stream_pool import (
     NativeStreamStopped,
     stream_services_view,
 )
+from agent_py_agent.agent.gateway_parts.request_event_hub import RequestEventHub
 
 
 def eventually(predicate, timeout=1):
@@ -140,6 +141,89 @@ def test_services_view_does_not_mutate_shared_mapping_or_object(pool):
         assert get(view, 'event_signal') is None
         assert get(view, 'other') is sentinel
     ticket.release()
+
+
+@pytest.mark.parametrize('as_mapping', [True, False])
+def test_services_view_keeps_real_notifications_and_interrupts_wait(pool, monkeypatch, as_mapping):
+    hub = RequestEventHub(ring_events=8, topic_capacity=2, subscribers_per_topic=2, idle_seconds=1)
+    signal = hub.signal(('owner', 'alice'))
+    ticket = pool.reserve(('alice', '/a'))
+    services = {'event_signal': signal, 'wait': object()}
+    shared = services if as_mapping else SimpleNamespace(**services)
+    view = stream_services_view(shared, ticket)
+    wrapped = view['event_signal'] if as_mapping else view.event_signal
+    entered, finished = threading.Event(), threading.Event()
+    outcomes = []
+    original_wait = signal.wait
+
+    def waiting(timeout, stop):
+        assert stop is ticket.stop_event
+        entered.set()
+        return original_wait(timeout, stop)
+
+    def consume():
+        try:
+            wrapped.wait(30)
+        except NativeStreamStopped:
+            outcomes.append('stopped')
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=consume, daemon=True)
+    try:
+        assert wrapped is not signal
+        assert hub.publish(('owner', 'alice'), 'chunk', 'r', {}) == 1
+        assert wrapped.wait(0) is True
+        assert wrapped.wait(0) is False
+        monkeypatch.setattr(signal, 'wait', waiting)
+        thread.start()
+        assert entered.wait(1)
+        ticket.stop()
+        assert finished.wait(1), '通知等待必须感知本流停止，不能阻塞到心跳超时'
+        thread.join(1)
+        assert outcomes == ['stopped']
+        assert (shared['event_signal'] if as_mapping else shared.event_signal) is signal
+        assert not signal._subscription._closed
+        assert hub.publish(('owner', 'alice'), 'chunk', 'r', {}) == 2
+        assert original_wait(0) is True, '停止观察不能关闭原业务信号'
+    finally:
+        ticket.stop()
+        hub.close()
+        if thread.ident is not None:
+            thread.join(1)
+        ticket.release()
+
+
+@pytest.mark.parametrize('as_mapping', [True, False])
+def test_services_view_without_ticket_preserves_original_signal_and_wait(as_mapping):
+    signal, wait = object(), object()
+    services = {'event_signal': signal, 'wait': wait}
+    shared = services if as_mapping else SimpleNamespace(**services)
+    view = stream_services_view(shared, None)
+    get = (lambda source, name: source[name]) if as_mapping else getattr
+    assert get(view, 'event_signal') is signal
+    assert get(view, 'wait') is wait
+    assert get(shared, 'event_signal') is signal
+
+
+def test_services_view_factory_creates_independent_notification_consumers(pool):
+    hub = RequestEventHub(ring_events=8, topic_capacity=2, subscribers_per_topic=2, idle_seconds=1)
+    sentinel = object()
+    shared = SimpleNamespace(event_signal=sentinel, host=SimpleNamespace(
+        business_event_signal_factory=lambda: hub.signal(('owner', 'alice'))))
+    ticket = pool.reserve(('alice', '/a'))
+    try:
+        first = stream_services_view(shared, ticket).event_signal
+        second = stream_services_view(shared, ticket).event_signal
+        assert first is not second
+        assert hub.publish(('owner', 'alice'), 'chunk', 'r', {}) == 1
+        assert first.wait(0) is True
+        assert second.wait(0) is True, '一个流消费通知不能清掉另一条流的唤醒'
+        assert first.wait(0) is second.wait(0) is False
+        assert shared.event_signal is sentinel
+    finally:
+        hub.close()
+        ticket.release()
 
 
 def test_stopped_queued_stream_releases_and_closes_on_worker(pool):

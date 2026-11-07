@@ -226,10 +226,20 @@ class BusinessStreamPool:
             executor.shutdown(wait=False, cancel_futures=False)
 
 
+# LLM: 与业务迭代器共用callable(wait)能力判断；无票据保持原信号，有票据只包装真实等待入口，不修改共享对象。
+# 函数用途: 为有效通知绑定本流停止，非通知占位值继续使用票据等待。
+def _stream_signal_view(signal, ticket):
+    if ticket is None:
+        return signal
+    if not callable(getattr(signal, 'wait', None)):
+        return None
+    return _StopAwareSignal(signal, ticket)
+
+
 # LLM: 每条流独享等待视图，共享服务、缓存及其event_signal不得被修改。
 # 类用途: 将属性型服务的等待入口绑定到本次流停止票据。
 class _StreamServicesView:
-    # LLM: 保留原服务引用，其余属性按需透传。
+    # LLM: 保留原服务引用，优先使用宿主单流信号工厂；只包装有效通知，其余属性按需透传。
     # 函数用途: 创建单流停止视图。
     def __init__(self, services, ticket):
         self._services = services
@@ -237,7 +247,7 @@ class _StreamServicesView:
         self.wait = ticket.wait if ticket is not None else getattr(services, 'wait', time.sleep)
         factory = getattr(getattr(services, 'host', None), 'business_event_signal_factory', None)
         signal = factory() if callable(factory) else getattr(services, 'event_signal', None)
-        self.event_signal = _StopAwareSignal(signal, ticket) if signal is not None and ticket is not None else signal
+        self.event_signal = _stream_signal_view(signal, ticket)
 
     # LLM: 不复制或持久化业务服务，不覆盖原授权属性。
     # 函数用途: 读取未被流专用等待入口覆盖的原属性。
@@ -245,13 +255,13 @@ class _StreamServicesView:
         return getattr(self._services, name)
 
 
-# LLM: 映射返回浅拷贝，属性型服务返回代理；两者都不修改owner共享对象。
+# LLM: 映射浅拷贝与属性代理共用信号能力判断；两者都不修改owner共享对象或屏蔽有效通知。
 # 函数用途: 为一条流注入停止感知等待而保留原业务读取入口。
 def stream_services_view(services, ticket):
     if isinstance(services, Mapping):
         signal = services.get('event_signal')
         return {**services, 'wait': ticket.wait if ticket is not None else services.get('wait'),
-                'event_signal': _StopAwareSignal(signal, ticket) if signal is not None and ticket is not None else signal}
+                'event_signal': _stream_signal_view(signal, ticket)}
     return _StreamServicesView(services, ticket)
 
 
