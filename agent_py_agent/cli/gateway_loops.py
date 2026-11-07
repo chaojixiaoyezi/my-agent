@@ -32,6 +32,7 @@ from ..agent.conversation import (
     BackgroundMainAgentScheduler,
 )
 from ..agent.conversation.background_shutdown import BackgroundShutdown
+from ..agent.conversation.observation_index import ObservationIndexIncomplete
 from ..agent.delivery import DeliveryService
 from ..agent.gateway_parts import (
     GatewayInboxScanGate,
@@ -1355,6 +1356,58 @@ def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
         return None
 
 
+def _background_thread_deleted(scheduler, thread_id: str) -> bool:
+    """只把规范线程文件确实缺失视为删除，损坏、权限错误和未发布继任线程仍走原诊断。"""
+    path_for = getattr(getattr(getattr(scheduler, "store", None), "storage", None), "thread_path", None)
+    if not callable(path_for):
+        return False
+    path = path_for(thread_id)
+    if not isinstance(path, Path):
+        return False
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _retire_deleted_thread_sources(scheduler, thread_id: str = "") -> bool:
+    """退休删除线程的一页活跃来源，不扫历史、不修改原任务状态或重建旧线程。"""
+    if thread_id and not _background_thread_deleted(scheduler, thread_id):
+        return False
+    store = getattr(scheduler, "store", None)
+    if not callable(getattr(getattr(store, "storage", None), "thread_path", None)):
+        return False
+    wakes = store.wakes.pending(limit=100)
+    try:
+        observations = store.observations.unhandled_requiring_main(limit=100)
+    except ObservationIndexIncomplete:
+        observations = []  # 游标已推进；本拍仍可结清独立的 wake 和 policy。
+    policies, _errors = store.progress.list_report(enabled_only=True)
+    candidates = ({thread_id} if thread_id else
+                  {row.thread_id for row in [*wakes, *observations, *policies] if row.thread_id})
+    deleted = {key for key in candidates if _background_thread_deleted(scheduler, key)}
+    if not deleted:
+        return False
+    for signal in wakes:
+        if signal.thread_id in deleted:
+            try:
+                store.wakes.mark_handled(signal.wake_signal_id)
+            except ObservationIndexIncomplete:
+                # wake 已结案，关联观察的有界确认留给索引下一拍继续。
+                pass
+    ids = [event.observation_id for event in observations if event.thread_id in deleted]
+    if ids:
+        try:
+            store.observations.mark_handled(ids)
+        except ObservationIndexIncomplete:
+            pass
+    for policy in policies:
+        if policy.thread_id in deleted:
+            store.progress.disable(policy.policy_id)
+    return True
+
+
 # LLM: 仅持有本进程执行槽；规划缓存继承私有mixin，原scheduler/store仍是durable执行权威。
 # 类用途: 公平提交owner/thread后台车道，不把规划连接传给执行线程。
 class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
@@ -1402,20 +1455,28 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                 if wait:
                     continue
                 with self._planner_sqlite_scope(owner_key):
-                    scheduler.prepare_tick(
-                        now=planned_at,
-                        include_orphan_supervision=False,
-                    )
-                    ready = scheduler.ready_thread_ids(
-                        now=planned_at,
-                        limit=owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
-                    )
+                    try:
+                        scheduler.prepare_tick(now=planned_at, include_orphan_supervision=False)
+                    except ObservationIndexIncomplete:
+                        pass
+                    try:
+                        ready = scheduler.ready_thread_ids(
+                            now=planned_at,
+                            limit=owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
+                        )
+                    except ObservationIndexIncomplete:
+                        # 同一原就绪查询取一个工位即可在读观察前返回已有 wake，所有准入门保持原样。
+                        ready = scheduler.ready_thread_ids(now=planned_at, limit=1)
                     streak = self._owner_idle_streaks.get(owner_key, 0) + 1
                     delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and not ready else 0.0
                     if delay:
                         delay = self._owner_plan_idle_delay(scheduler, delay, planned_at)
                 self._note_owner_plan(owner_key, signature, delay, planned_mono)
+            except ObservationIndexIncomplete:
+                continue  # 分片同步继续下一拍，不进入异常退避或阻塞其它 owner。
             except Exception as exc:
+                if isinstance(exc, KeyError) and _retire_deleted_thread_sources(scheduler):
+                    continue
                 _print_gateway_loop_error(
                     "gateway_background_main.plan",
                     f"background-main:{owner_key}",
@@ -1432,6 +1493,10 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # 函数用途: 检查一条后台车道是否可以再跑，不构造后端或占用模型执行工位。
     def _thread_lane_can_retry(self, scheduler: BackgroundMainAgentScheduler, label: str, thread_id: str) -> bool:
         try:
+            if _background_thread_deleted(scheduler, thread_id):
+                _retire_deleted_thread_sources(scheduler, thread_id)
+                self._lane_retry.succeeded(label, thread_id)
+                return False
             return self._lane_retry.ready(
                 label, thread_id,
                 model_ready=lambda: thread_model_is_configured(scheduler.runtime.agent, thread_id),
@@ -1564,11 +1629,22 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     ) -> list[object]:
         inbound_marker = _thread_inbound_marker(scheduler, thread_id)
         try:
+            if _background_thread_deleted(scheduler, thread_id):
+                _retire_deleted_thread_sources(scheduler, thread_id)
+                self._lane_retry.succeeded(label, thread_id)
+                return []
             result = list(scheduler.tick_thread(thread_id) or [])
             self._lane_retry.succeeded(label, thread_id)
             return result
+        except ObservationIndexIncomplete:
+            self._lane_retry.succeeded(label, thread_id)
+            return []
         except Exception as exc:
             if isinstance(exc, InterruptedError) and self._shutdown_control.stopping:
+                return []
+            if isinstance(exc, KeyError) and _background_thread_deleted(scheduler, thread_id):
+                _retire_deleted_thread_sources(scheduler, thread_id)
+                self._lane_retry.succeeded(label, thread_id)
                 return []
             self._record_thread_failure(label, thread_id, exc, wait_for_inbound_marker=inbound_marker)
             return []

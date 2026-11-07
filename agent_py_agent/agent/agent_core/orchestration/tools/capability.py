@@ -166,6 +166,7 @@ class ResolveCapabilityRequestsTool(BaseTool):
         )
         task = self.agent.subagents.load(run_id)
         _wake_subagent(self.agent, _ResolveContext(task=task, decision=decision, params=params, reason=reason))
+        _start_resolved_child_continuation(self.agent, task, continuation)
         payload = {
             "ok": bool(resolved) and not errors,
             "run_id": run_id,
@@ -356,7 +357,7 @@ def _deny_one(request: Any, reason: str) -> dict[str, object]:
     return {"ok": True, "request_id": request.id, "status": "CLOSED", "denial_reason": reason}
 
 
-# 函数用途: grant 目录围栏的基准集合：子代理任务工作区 + 主代理 workspace roots。
+# 函数用途: grant 目录围栏包含任务工作区、父级工作区及当前 owner 的任务目录。
 def _safe_grant_roots(agent: Any, task: Any) -> list[Path]:
     bases: list[Path] = []
     for raw in (
@@ -368,6 +369,11 @@ def _safe_grant_roots(agent: Any, task: Any) -> list[Path]:
         text = str(raw or "").strip()
         if text:
             bases.append(Path(text).expanduser().resolve(strict=False))
+    owner_home = (getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+                  or getattr(agent, "owner_home", None)
+                  or getattr(getattr(agent, "subagents", None), "owner_scope_root", None))
+    if isinstance(owner_home, (str, Path)) and str(owner_home).strip():
+        bases.append((Path(owner_home).expanduser() / "tasks").resolve(strict=False))
     return bases
 
 
@@ -520,6 +526,22 @@ def _reactivate_child_conversation_link(agent: Any, run_id: str) -> None:
             exc,
             exc_info=True,
         )
+
+
+def _start_resolved_child_continuation(agent: Any, task: Any, continuation: dict[str, object]) -> None:
+    """持久唤醒发表后立即续派原后台 run；纯存储调用仍只排队，不隐式启动执行器。"""
+    if continuation.get("status") != "queued":
+        return
+    background = dict(getattr(task, "attributes", {}) or {}).get("background_start")
+    if (not isinstance(background, dict) or not background.get("launch_id")
+            or not callable(getattr(agent, "dispatch_subagents", None))
+            or getattr(agent, "capability_router", None) is None
+            or not isinstance(getattr(agent.subagents, "workspace", None), (str, Path))):
+        return
+    from ..dispatch.capability_auto_sweep import auto_start_orphan_run
+
+    # 原入口复读 canonical，统一检查暂停/取消、活会话、在途启动、RuntimeDB 与受管执行来源。
+    continuation["dispatch"] = auto_start_orphan_run(agent, str(task.id))
 
 
 # 函数用途: 找出该 run 需要父级裁决的请求（OPEN 或 fail-closed 的非法状态）。
