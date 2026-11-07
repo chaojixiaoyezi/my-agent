@@ -13,6 +13,8 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from ..common.opaque_id import OpaqueIdError, validate_opaque_id
+
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 
 _SCAN_INDEX_SCHEMA = "conversation.scan_index.v1"
@@ -73,20 +75,32 @@ class _ScanIndexEntry:
     path: str = ""
 
 
+# LLM: 只约束单星后缀模式的文件名主干；其余模式保持原口径，不读文件、不检查类型或新增共享状态。
+# 函数用途: 排除操作员副本和临时文件，规范名的坏记录仍交给原读取方报错。
+def _canonical_scan_name(name: str, pattern: str) -> bool:
+    suffix = pattern[1:]
+    if not pattern.startswith("*") or not suffix or any(char in suffix for char in "*?["):
+        return True
+    try:
+        validate_opaque_id(name[:-len(suffix)], kind="scan_name")
+    except OpaqueIdError:
+        _STORE_LOGGER.debug("non-canonical scan entry skipped name=%s pattern=%s", name, pattern)
+        return False
+    return True
+
+
 # LLM: 这里用 os.scandir 而不是 Path.glob,唯一目的是把"目录自身读不到"与"目录为空"分开:
 # glob 在权限不足时静默返回空列表,调用方会把一次瞬时故障当成"文件都被删了",进而清掉
 # 全部有效投影。scandir 会抛 OSError,于是这里能明确返回 None(不可列出)而不是空集合。
-# 成员口径必须与 Path.glob 逐字一致:glob 对最后一段**只按名字匹配、不看条目类型**,断链
-# 符号链接、FIFO、名字匹配的目录都会被列出。绝不能加 is_file()/is_dir() 过滤——那会让
-# 调用方"少看一批文件":断链的 wake-*.json 本来会产生一条 load_error,而 runtime/guidance
-# 消费方以"有 load_error 就不消费"作硬门,静默丢文件等于悄悄绕过该硬门。
-# 函数用途: 列出目录下匹配单段 fnmatch 模式的名字(成员集合与 Path.glob 相同),目录不存在
+# 非规范名不属于记录；禁止类型过滤，规范 wake-*.json 的断链、目录或坏账仍须产生 load_error。
+# 函数用途: 列出目录下匹配单段 fnmatch 模式的规范名字，目录不存在
 # 或不是目录视为空集合,目录不可列出返回 None。
 def _scan_dir_match_names(directory: Path, pattern: str) -> frozenset[str] | None:
     try:
         with os.scandir(directory) as items:
             return frozenset(
-                item.name for item in items if fnmatchcase(item.name, pattern)
+                item.name for item in items
+                if fnmatchcase(item.name, pattern) and _canonical_scan_name(item.name, pattern)
             )
     except FileNotFoundError:
         # 目录还没建 = 权威空集合,与旧 glob 的行为一致(不算不可读,不误清)。

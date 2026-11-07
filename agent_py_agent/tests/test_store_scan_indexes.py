@@ -847,10 +847,10 @@ def test_scan_index_does_not_prune_when_directory_is_unreadable(
     assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root)) == baseline
 
 
-# LLM: 枚举成员口径须与Path.glob相同，非普通文件不能被静默过滤。
-# 函数用途: 验证目录、链接等形状参与相同的成员枚举。
+# LLM: 单星后缀模式只收规范名字，其余模式保持glob口径；规范非普通文件仍不能按类型过滤。
+# 函数用途: 验证副本不算记录，但规范目录、断链和FIFO仍参与成员枚举。
 def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -> None:
-    """枚举成员口径必须与 Path.glob 逐字相同: 非普通文件也算成员,不许被静默过滤掉。"""
+    """规范名过滤不改变类型语义；一般模式仍与 Path.glob 逐字相同。"""
     root = tmp_path / "conversations"
     queue = root / "wake_queue" / "urgent"
     queue.mkdir(parents=True, exist_ok=True)
@@ -867,7 +867,7 @@ def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -
     except OSError:  # pragma: no cover - 平台不允许建符号链接时只跳过这一项
         pass
 
-    # (1) 成员集合与 Path.glob 逐字相同。非普通条目(FIFO 等)单独放在一个 store 永远不会
+    # (1) 规范名字仍与 Path.glob 一致。非普通条目(FIFO 等)单独放在一个 store 永远不会
     # 读到的目录里: 读 FIFO 会阻塞(既有行为,与本索引无关),不能拿它去喂真实查询。
     parity = tmp_path / "parity"
     parity.mkdir()
@@ -888,9 +888,12 @@ def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -
     for pattern in ("*.json", "*.json*", "*.jsonl", "*.JSON"):
         expected = {path.name for path in parity.glob(pattern)}
         assert store_module._scan_dir_match_names(parity, pattern) == expected, pattern  # noqa: SLF001
-        assert store_module._scan_dir_match_names(queue, pattern) == {  # noqa: SLF001
-            path.name for path in queue.glob(pattern)
-        }, pattern
+        expected_queue = (
+            {"wake-live.json", "wake-dir.json", *ghosts}
+            if pattern == "*.json"
+            else {path.name for path in queue.glob(pattern)}
+        )
+        assert store_module._scan_dir_match_names(queue, pattern) == expected_queue, pattern  # noqa: SLF001
 
     # (2) 安全语义: 断链/不可读成员必须照旧产出结构化 load_error。runtime/guidance 消费方
     # 以"有 load_error 就不消费"作硬门,索引不许把这类文件静默跳过(那等于绕过硬门)。
@@ -902,6 +905,7 @@ def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -
     failed = {Path(item["path"]).name for item in hot[1]}
     assert failed >= set(ghosts)
     assert failed >= {"wake-dir.json"}
+    assert failed.isdisjoint({".wake-hidden.json", "wake-中文.json"})
     # 再来一轮(热索引已建立)必须仍然看得见这些失败文件。
     assert _wake_snapshot(store) == hot
 
@@ -943,8 +947,8 @@ def test_scan_index_schema_constant_is_self_consistent(tmp_path) -> None:
     assert index.stats()["schema"] == _SCAN_INDEX_SCHEMA
 
 
-# LLM: 特殊文件名仍按原路径顺序枚举，不能因缓存顺序改变业务结果。
-# 函数用途: 验证复杂名字下有序扫描的稳定排序。
+# LLM: 非规范名不属于记录；规范名按原Path顺序枚举并复用集合缓存，不按条目类型过滤。
+# 函数用途: 验证过滤后排序、目录成员和缓存复用仍保持稳定。
 def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
@@ -964,7 +968,8 @@ def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     (queue / "zz-dir.json").mkdir(parents=True, exist_ok=True)
 
     index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
-    expected = [path.name for path in sorted(queue.glob("*.json"))]
+    # 独立写明预期集合，不用被测过滤函数生成期望，避免过滤失效时测试仍通过。
+    expected = ["Wake-1.json", "wake-0001.json", "wake-0002.json", "wake-10.json", "zz-dir.json"]
     first = index.ordered_paths(queue, "*.json")
     assert [path.name for path in first] == expected
 
@@ -972,12 +977,10 @@ def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     second = index.ordered_paths(queue, "*.json")
     assert second is first
 
-    # 集合变化 → 重新按 Path 排序,结果与直接 sorted() 一致。
+    # 规范集合变化后重新排序；非规范名字继续被排除。
     (queue / "wake-0000.json").write_text("{}", encoding="utf-8")
     third = index.ordered_paths(queue, "*.json")
-    assert [path.name for path in third] == [
-        path.name for path in sorted(queue.glob("*.json"))
-    ]
+    assert [path.name for path in third] == sorted([*expected, "wake-0000.json"])
 
 
 # LLM: 并发观察写入与索引读取共存，最终规范记录不得丢失或重复。
