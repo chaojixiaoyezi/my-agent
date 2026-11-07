@@ -2,14 +2,58 @@
 # 模块用途: 防旧到期消费者删掉重排字条，并在输入静默取消后安全结束准确执行账。
 from __future__ import annotations
 
+import threading
 import time
+from functools import wraps
+from pathlib import Path
 
 from ..common.strict_json import load_strict_json
+from ..owner_activity_index import next_hint_revision
 from .operations import (
     AGENT_RUN_TERMINAL_STATUSES,
     RUN_STATUS_LEGACY_CREATED,
     attempt_status_is_terminal,
 )
+
+_WAKE_LISTENER_LOCK = threading.Lock()
+_WAKE_LISTENERS = {}
+_wake_listener_failures = 0
+
+
+def add_wake_listener(fn):
+    """运行库身份使用实际数据库路径，组合根再映射为本Cell的规范owner。"""
+    token = object()
+    with _WAKE_LISTENER_LOCK:
+        _WAKE_LISTENERS[token] = fn
+
+    def remove():
+        with _WAKE_LISTENER_LOCK:
+            _WAKE_LISTENERS.pop(token, None)
+    return remove
+
+
+def _notify_wake_change(owner_key, row_or_none):
+    global _wake_listener_failures
+    revision = next_hint_revision()
+    with _WAKE_LISTENER_LOCK:
+        listeners = tuple(_WAKE_LISTENERS.values())
+    for listener in listeners:
+        try:
+            listener(owner_key, row_or_none, revision)
+        except Exception:
+            with _WAKE_LISTENER_LOCK:
+                _wake_listener_failures += 1
+
+
+def _notify_wake_writer(fn):
+    """原方法先完整退出提交/连接上下文，再通知；不改变其SQL、返回值或异常。"""
+    @wraps(fn)
+    def committed(self, *args, **kwargs):
+        result = fn(self, *args, **kwargs)
+        if result:
+            self._wake_changed()
+        return result
+    return committed
 
 
 # LLM: 比较整行，不用DB文件mtime/字节；必须在同一SQL事务里读取，回放不能把旧claim当新许可。
@@ -22,6 +66,26 @@ def _same_wake(conn, expected):
 # LLM: 发现、认领、收口共享原wake_queue；构造和方法不新建调度器，外层RuntimeRepository仍控制ro/事务。
 # 类用途: 为原运行库提供输入期限与静默退休的精确事务。
 class RuntimeInputLifecycleMixin:
+    def next_runtime_wake(self):
+        """只读最早可消费行，pending服从退避，claimed服从当前租期。"""
+        with self._runtime_connection() as conn:
+            row = conn.execute("SELECT * FROM wake_queue WHERE status IN ('pending','claimed') ORDER BY "
+                "CASE WHEN status='claimed' THEN lease_until ELSE MAX(next_due_at,retry_after) END,wake_id LIMIT 1").fetchone()
+        return dict(row) if row is not None else None
+
+    def _wake_changed(self):
+        global _wake_listener_failures
+        # 无消费者时不额外读库；通知仍在原提交/连接上下文之后。
+        with _WAKE_LISTENER_LOCK:
+            registered = bool(_WAKE_LISTENERS)
+        if registered:
+            try:
+                row = self.next_runtime_wake()
+                _notify_wake_change(Path(self.db_path).resolve(), row)
+            except Exception:
+                with _WAKE_LISTENER_LOCK:
+                    _wake_listener_failures += 1
+
     # LLM: 只读索引页包括原lease到期claim，不因读取初始化库或改变状态；C的repo须read_only=True。
     # 函数用途: 找到有限的真实到期字条供原后台运输发现。
     def due_runtime_wakes(self, *, now, limit=64):
@@ -59,7 +123,9 @@ class RuntimeInputLifecycleMixin:
             conn.execute("UPDATE wake_queue SET status='claimed',woke_at=?,lease_until=?,updated_at=?,"
                 "attempt_count=attempt_count+?,last_error=? WHERE wake_id=?",
                 (now, now+300.0, now, int(reclaim), 'lease_expired' if reclaim else expected['last_error'], expected['wake_id']))
-            return dict(conn.execute('SELECT * FROM wake_queue WHERE wake_id=?', (expected['wake_id'],)).fetchone())
+            result = dict(conn.execute('SELECT * FROM wake_queue WHERE wake_id=?', (expected['wake_id'],)).fetchone())
+        self._wake_changed()
+        return result
 
     # LLM: quota先于此SQL事务由调用方持有；整行claim与实际文件效果同一事务窗口，重排必须等效果结束，旧消费者不能先副作用后拒complete。
     # 函数用途: 在仍持有准确claim时同步提交一段不含模型/网络/嵌套DB写的领域效果。
@@ -69,7 +135,8 @@ class RuntimeInputLifecycleMixin:
             if claim['status'] != 'claimed' or not _same_wake(conn,claim):
                 return False
             operation()
-            return True
+        self._wake_changed()
+        return True
 
     # LLM: complete/release只能消费自己整行claim；并发upsert同id改期限/kind或新lease时零写，不能删除/回退新责任。
     # 函数用途: 完成精确字条，或按原字段退避重试。
@@ -84,7 +151,8 @@ class RuntimeInputLifecycleMixin:
                 conn.execute("UPDATE wake_queue SET status='pending',retry_after=?,attempt_count=attempt_count+1,"
                     "last_error='consume_failed',updated_at=? WHERE wake_id=?",
                     (retry_after, time.time(), claim['wake_id']))
-            return True
+        self._wake_changed()
+        return True
 
     # LLM: 无pending输入才由领域调用；只删原观察的pending输入期限，活claim/其它kind/重排版本全部保留。
     # 函数用途: 及时回收已经没有输入责任的旧期限。
@@ -94,7 +162,8 @@ class RuntimeInputLifecycleMixin:
             if expected['kind'] != 'task_input_deadline' or expected['status'] != 'pending' or not _same_wake(conn, expected):
                 return False
             conn.execute('DELETE FROM wake_queue WHERE wake_id=?', (expected['wake_id'],))
-            return True
+        self._wake_changed()
+        return True
 
     # LLM: 此例外只收准确已结束等待片；所有树/attempt/op UNKNOWN及活动锁在同一最终事务拒绝，不改变旧generic settle。
     # 函数用途: 输入已静默退休时，将本次运行账记cancelled，保留长期Task和外部TaskLink。

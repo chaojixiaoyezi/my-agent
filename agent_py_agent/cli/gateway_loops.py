@@ -21,7 +21,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -70,14 +70,17 @@ from ..agent.gateway_parts.request_worker import (
 from ..agent.gateway_parts.restart_service import RESTART_DRAIN_HOLD_REASON, restart_draining
 from ..agent.ingestion.continuous_monitor import recover_active_audit_harvesters
 from ..agent.observability.concurrency_metrics import background_tick_inflight
+from ..agent.owner_activity_index import OwnerActivityIndex, next_hint_revision
 from ..agent.owner_scoped_pool import shared_active_owner_registry
 from ..agent.owner_wake_discovery import (
     OwnerWakeCursor,
+    bind_owner_activity_index,
     discover_owner_home_page,
     seed_registry_page_from_disk,
 )
 from ..agent.runtime_errors import runtime_error_report
 from ..agent.scheduler import SchedulerDueIndex
+from ..agent.scheduler.timer_service import TimerService
 from ..agent.settings.config import AgentConfig
 from ..agent.settings.thread_model_selection import (
     thread_model_fingerprint,
@@ -680,6 +683,213 @@ def _require_coordinator_loop_source(context):
         raise ValueError("gateway_original_coordinator_loop_closed")
 
 
+class _OwnerWakeHints:
+    """后台组合根只维护提示；通知锁不参与权威写事务，堆锁永不跨I/O。"""
+
+    def __init__(self, context):
+        from ..agent.runtime_db.input_lifecycle import add_wake_listener
+
+        self.base = _gateway_agent_from_context(context)
+        self.home = self.base.home_paths
+        self.backstop = float(getattr(self.base.config, "owner_maintenance_scan_interval_seconds",
+                                      AgentConfig.owner_maintenance_scan_interval_seconds))
+        if self.backstop <= 0:
+            self.backstop = float(AgentConfig.owner_maintenance_scan_interval_seconds)
+        self.rescan = float(getattr(self.base.config, "background_owner_wake_rescan_seconds", BACKGROUND_OWNER_WAKE_RESCAN_SECONDS))
+        self.timer = TimerService(resample_seconds=self.backstop)
+        self.index = OwnerActivityIndex(self.home.global_index_dir / "owner_activity.sqlite3")
+        self.due_index = getattr(getattr(self.base, "scheduler_repository", None), "due_index", None)
+        if self.due_index is None:
+            self.due_index = SchedulerDueIndex(self.home.global_index_dir / "scheduler_due.sqlite3")
+        self.events = {kind: threading.Event() for kind in ("scheduler_due", "runtime_wake", "maintenance")}
+        for kind, event in self.events.items():
+            self.timer.bind(kind, event)
+        self._notice_lock = threading.RLock()
+        self._closed = False
+        self._closed_event = threading.Event()
+        self._hint_failures = 0
+        self._scheduler_changes = 0
+        self._armed = {}
+        self._removers = [self.due_index.add_due_listener(self._due_changed), add_wake_listener(self._runtime_changed)]
+        self.discovery = bind_owner_activity_index(self.home.owners_dir, self.index,
+            sweep_seconds=self.rescan, freshness_seconds=self.backstop, note_owner=self.note_owner, forget_owner=self.forget_owner)
+        self.base._owner_wake_hints = self
+
+    def bind_controller(self, kind, controller):
+        controller._wake_hints = self
+        controller._wake_event = self.events[kind]
+        controller._hint_kind = kind
+
+    def start(self):
+        self.timer.start()
+
+    def close(self):
+        with self._notice_lock:
+            self._closed = True
+            self._closed_event.set()
+        for remove in self._removers:
+            remove()
+        self.discovery.close()
+        self.timer.stop(2)
+        for event in self.events.values():
+            event.set()
+        if getattr(self.base, "_owner_wake_hints", None) is self:
+            del self.base._owner_wake_hints
+
+    def _publish(self, owner, kind, due, *, force=False):
+        key = (owner, kind)
+        if due is None and key not in self._armed and not force:
+            return
+        previous = self._armed.get(key)
+        if not force and previous is not None and due is not None and max(previous, due) <= time.time():
+            return  # 已到期但未推进：留给backstop，不反复重排过去时间自激唤醒。
+        if force or key not in self._armed or self._armed[key] != due:
+            self.timer.schedule(key, due)
+            self.index.note_deadline(owner, kind, due, revision=next_hint_revision())
+            if due is None:
+                self._armed.pop(key, None)
+            else:
+                self._armed[key] = due
+
+    def _due_changed(self, owner, _due, _revision):
+        with self._notice_lock:
+            if not self._closed:
+                self._scheduler_changes += 1
+                # 重读最新提交而非传输快照，防两个提交后的通知反序覆盖。
+                self._publish(owner, "scheduler_due", self.due_index.next_due_at(owner), force=True)
+
+    def _runtime_owner(self, path):
+        path = Path(path).resolve()
+        relative = path.parent.relative_to(Path(self.home.owners_dir).resolve()).parts
+        if len(relative) == 2 and relative[0] == "local":
+            return ("local", "main" if relative[1] == "main" else "user", relative[1])
+        if len(relative) == 4 and relative[0] == "providers" and relative[2] in ("users", "groups"):
+            return (relative[1], "user" if relative[2] == "users" else "group", relative[3])
+        raise ValueError("wake source is not a canonical owner database")
+
+    def _runtime_changed(self, path, _row, _revision):
+        try:
+            owner = self._runtime_owner(path)
+        except ValueError:
+            return
+        with self._notice_lock:
+            if not self._closed:
+                self._refresh_runtime(owner, path, force=True)
+
+    def _refresh_runtime(self, owner, path, *, force=False):
+        from ..agent.runtime_db.repository import RuntimeRepository
+
+        row = RuntimeRepository(path, read_only=True).next_runtime_wake() if Path(path).is_file() else None
+        due = (row["lease_until"] if row["status"] == "claimed" else max(row["next_due_at"], row["retry_after"])) if row else None
+        self._publish(owner, "runtime_wake", due, force=force)
+
+    def refresh_scheduler(self, *, made_progress=False):
+        # 全局最小值只重建一个提示，不全表取快照；原claim分页仍是唯一领取路径。
+        with self._notice_lock:
+            if not self._closed:
+                due = self.due_index.next_due_at()
+                if due is not None and due <= time.time() and not made_progress:
+                    due = time.time() + self.backstop
+                self.timer.schedule(("scheduler-backstop", "scheduler_due"), due)
+
+    def forget_owner(self, owner):
+        with self._notice_lock:
+            for kind in self.events:
+                key = (owner, kind)
+                self.timer.cancel(key)
+                self._armed.pop(key, None)
+
+    def note_owner(self, owner, home):
+        from ..agent.runtime_db.schema import runtime_db_path
+
+        with self._notice_lock:
+            if self._closed:
+                return
+            self._refresh_runtime(owner, runtime_db_path(home))
+            self._publish(owner, "scheduler_due", self.due_index.next_due_at(owner))
+            self.note_maintenance(owner, home)
+
+    def note_maintenance(self, owner, home, *, not_before=None):
+        from ..agent.user_space.owner_maintenance import _maintenance_state_path, _positive_interval
+
+        current = time.time()
+        def read(path):
+            try:
+                value = json.loads(Path(path).read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return {}
+            if not isinstance(value, dict):
+                raise ValueError("maintenance source must be an object")
+            return value
+
+        policy = read(Path(home) / "retention.json")
+        marker = read(_maintenance_state_path(Path(home)))
+        interval = _positive_interval(policy.get("maintenance_interval_seconds"))
+        due = None
+        if policy.get("maintenance_enabled", True) and interval > 0:
+            due = current if owner_maintenance_due(home, now=current) else float(marker.get("last_attempt_at") or 0) + interval
+        if due is not None and not_before is not None:
+            due = max(due, not_before)
+        with self._notice_lock:
+            if not self._closed:
+                self._publish(owner, "maintenance", due)
+
+
+class _HintedStopWait:
+    """只替换原循环的等待；扫描体、异常退避与启动安全检查保持原样。"""
+    def __init__(self, stop, event, backstop, closed_event):
+        self.stop, self.event, self.backstop = stop, event, backstop
+        self.closed_event = closed_event
+
+    def is_set(self):
+        return self.stop.is_set() or self.closed_event.is_set()
+
+    def wait(self, seconds):
+        if self.is_set():
+            return True
+        return self.event.wait(max(self.backstop, seconds))
+
+
+def _run_hinted_controller(controller, stop_event, site):
+    hints = getattr(controller, "_wake_hints", None)
+    if hints is None:
+        _run_loop_with_backoff(stop_event, controller.tick, site)
+        return
+    event = controller._wake_event
+
+    def tick():
+        if stop_event.is_set() or hints._closed_event.is_set():
+            return None
+        # 先清事件再读权威源：扫描期间到达的通知保留到下一轮。
+        event.clear()
+        if controller._hint_kind == "maintenance":
+            now = time.time()
+            try:
+                for key in hints.index.priority_owners(now=now, facts_before=now - hints.backstop,
+                                                      limit=_OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT):
+                    row = hints.index.row(key)
+                    if (key != ("local", "main", "main") and row is not None
+                            and row["next_maintenance_at"] is not None and row["next_maintenance_at"] <= now):
+                        controller._priority[key] = OwnerIdentity(*key)
+            except Exception:
+                hints._hint_failures += 1
+        before = hints._scheduler_changes
+        result = controller.tick()
+        try:
+            if controller._hint_kind == "scheduler_due":
+                hints.refresh_scheduler(made_progress=hints._scheduler_changes > before)
+            else:
+                not_before = None
+                if _startup_grace_active(controller):
+                    not_before = time.time() + max(0, STARTUP_GRACE_WINDOW_SECONDS - (time.monotonic() - controller._startup_started_at))
+                hints.note_maintenance(("local", "main", "main"), controller._base_home.owner_home_dir, not_before=not_before)
+        except Exception:
+            hints._hint_failures += 1
+        return result
+
+    _run_loop_with_backoff(_HintedStopWait(stop_event, event, hints.backstop, hints._closed_event), tick, replace(site, interval=hints.backstop))
+
+
 # LLM: Count0原supervisor/三设施线程保序；C只接真实metadata来源，不物化远端owner Agent或执行旧inline维护，坏源不回退。
 # 函数用途: 依本次真实组合根选择既有业务循环或C来源发现循环。
 def _gateway_background_main_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
@@ -697,12 +907,16 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
     except Exception as exc:
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
+    hints = _OwnerWakeHints(context)
+    hints.bind_controller("runtime_wake", supervisor)
+    hints.start()
     reconcile_thread = _start_orphan_reconcile_loop(context, stop_event)
     maintenance_thread = _start_owner_maintenance_loop(context, stop_event)
     scheduler_due_thread = _start_scheduler_due_loop(context, stop_event)
     try:
         _run_background_main_ticks(supervisor, stop_event, poll_interval)
     finally:
+        hints.close()
         _shutdown_background_main(
             supervisor,
             (reconcile_thread, maintenance_thread, scheduler_due_thread),
@@ -800,6 +1014,9 @@ def _start_owner_maintenance_loop(
         return None
     if controller.interval <= 0:
         return None
+    hints = getattr(context.agent, "_owner_wake_hints", None)
+    if hints is not None:
+        hints.bind_controller("maintenance", controller)
     thread = threading.Thread(
         target=controller.run,
         name="gateway-owner-maintenance",
@@ -821,6 +1038,9 @@ def _start_scheduler_due_loop(
     except Exception as exc:
         _print_gateway_loop_error("gateway_scheduler_due.initialize", "scheduler-due", exc)
         return None
+    hints = getattr(context.agent, "_owner_wake_hints", None)
+    if hints is not None:
+        hints.bind_controller("scheduler_due", controller)
     thread = threading.Thread(
         target=controller.run,
         name="gateway-scheduler-due",
@@ -1364,7 +1584,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # LRU 会逐出,且只有新入站请求才补记;长盯守非阻塞挂起期恰恰没有新请求 →
         # scoped owner 的到点 policy 从此无人消费。这里启动即扫一次、之后按间隔重扫,
         # 把磁盘上「有 enabled policy / 待处理唤醒信号」的 owner 种回登记表,重启自愈。
-        self._wake_rescan_interval = BACKGROUND_OWNER_WAKE_RESCAN_SECONDS
+        self._wake_rescan_interval = float(getattr(self._base_agent.config, "background_owner_wake_rescan_seconds", BACKGROUND_OWNER_WAKE_RESCAN_SECONDS))
         self._next_wake_rescan_at = 0.0
         self._wake_discovery_cursor: OwnerWakeCursor | None = None
         # Named Audit harvesters live inside the Gateway process. A clean
@@ -1485,8 +1705,11 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         if self._wake_rescan_interval <= 0:
             return
         now = time.monotonic()
-        if now < self._next_wake_rescan_at:
+        hints = getattr(self, "_wake_hints", None)
+        if now < self._next_wake_rescan_at and (hints is None or not self._wake_event.is_set()):
             return
+        if hints is not None:
+            self._wake_event.clear()
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         if not owners_dir:
             self._next_wake_rescan_at = now + self._wake_rescan_interval
@@ -1503,7 +1726,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # owner 在 Gateway 重启后会平白等待 N × rescan_interval，真实长任务看起来
         # 像永久卡住。下一页留给下一个 supervisor tick，避免启动线程内全量阻塞。
         self._next_wake_rescan_at = _next_owner_discovery_at(
-            now, self._wake_rescan_interval, page.next_cursor
+            now, min(self._wake_rescan_interval, hints.backstop) if hints is not None else self._wake_rescan_interval, page.next_cursor
         )
         if page.seeded:
             print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
@@ -2034,8 +2257,8 @@ class _GatewayOwnerMaintenanceController:
     # LLM: 节奏交给 _run_loop_with_backoff：出错记账、限流打印、等 max(interval, 退避)。
     # 函数用途: 跑维护循环直到 stop_event 置位。
     def run(self, stop_event: threading.Event) -> None:
-        _run_loop_with_backoff(
-            stop_event, self.tick,
+        _run_hinted_controller(
+            self, stop_event,
             _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
         )
 
@@ -2118,6 +2341,9 @@ class _GatewayOwnerMaintenanceController:
         if due and len(self._priority) < _OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT:
             key = (identity.provider, identity.owner_kind, identity.owner_id)
             self._priority[key] = identity
+        hints = getattr(self, "_wake_hints", None)
+        if hints is not None:
+            hints.note_maintenance((identity.provider, identity.owner_kind, identity.owner_id), scoped_home.owner_home_dir)
 
 
 # LLM: 摘要只打印、不落盘，没有持久化读取方。failed 只算整次被拒（apply_outcome=refused，即 retention 用
@@ -2175,8 +2401,8 @@ class _GatewaySchedulerDueController:
     # LLM: 未索引旧表修复不得挡在已索引任务的首次 tick 前。
     # 函数用途: 立即运行到期唤醒循环，重型修复交由后续 tick。
     def run(self, stop_event: threading.Event) -> None:
-        _run_loop_with_backoff(
-            stop_event, self.tick,
+        _run_hinted_controller(
+            self, stop_event,
             _LoopSite("scheduler-due", "gateway_scheduler_due.tick", "scheduler-due", self.interval),
         )
 
