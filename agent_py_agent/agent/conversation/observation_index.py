@@ -9,13 +9,28 @@ import math
 import os
 import sqlite3
 import stat
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from ..common.json_io import locked_json_path
+from ..common.cache_freshness import CACHE_TRUST_AGE_SECONDS
+from ..common.json_io import check_io_deadline, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
 from ..user_space.home_indexes import is_sqlite_busy
 from .models import ObservationEvent
+
+_INSTALLED: set[tuple[str, int, int]] = set()
+_INSTALLED_LOCK = threading.Lock()
+
+
+def _directory_stamp(path):
+    """只看目录代次，不遍历已完成的历史来源。"""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
 
 
 # LLM: 迁移/损坏不能伪装成空集合，原 list 接口没有 coverage 字段时通过异常明确暴露。
@@ -123,6 +138,8 @@ class ObservationIndex:
         self.path = storage.root.parent / f".{storage.root.name}-observations.sqlite3"
         self.journal_path = storage.root.parent / f".{storage.root.name}-observation-acks.jsonl"
         self.last_work = {}
+        self._probe_after = ""
+        self._quiet = None
 
     # LLM: busy/磁盘写错不是损坏，只允许 CORRUPT/NOTADB 重建投影，且保留 ack 日志。
     # 函数用途: 在原路径锁内打开、提交和关闭连接。
@@ -143,6 +160,8 @@ class ObservationIndex:
                 code = getattr(exc, "sqlite_errorcode", 0) & 255
                 if is_sqlite_busy(exc) or code not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
                     raise
+                with _INSTALLED_LOCK:
+                    _INSTALLED.discard((str(self.path), *info[:2]))
                 fd = os.open(self.path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
                 try:
                     current = os.fstat(fd)
@@ -165,28 +184,109 @@ class ObservationIndex:
     # LLM: ack 与 pending 同事务更新；全局及 thread 两种访问均有匹配的排序索引。
     # 函数用途: 初始化私有 WAL 数据库。
     def _open(self):
+        identity = _identity(self.path)
+        key = (str(self.path), *identity[:2])
         conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=FULL")
             conn.execute("PRAGMA cache_size=-1024")
-            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-            conn.execute("CREATE TABLE IF NOT EXISTS acks (id TEXT PRIMARY KEY, at REAL NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, stamp TEXT, offset INTEGER, complete INTEGER)")
-            conn.execute("CREATE TABLE IF NOT EXISTS fragments (path TEXT PRIMARY KEY, start INTEGER, raw BLOB)")
-            conn.execute("CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, thread TEXT, needs_main INTEGER, status TEXT, due REAL, path TEXT, offset INTEGER, length INTEGER, wake TEXT)")
-            conn.execute("CREATE INDEX IF NOT EXISTS pending_thread ON pending(thread,needs_main,status,due,id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS pending_all ON pending(needs_main,status,due,id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS pending_source ON pending(path)")
-            conn.execute("CREATE INDEX IF NOT EXISTS pending_wake ON pending(wake,status,due,id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS source_work ON sources(complete,path)")
-            conn.commit()
+            with _INSTALLED_LOCK:
+                if key not in _INSTALLED or not identity[2]:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+                    conn.execute("CREATE TABLE IF NOT EXISTS acks (id TEXT PRIMARY KEY, at REAL NOT NULL)")
+                    conn.execute("CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, stamp TEXT, offset INTEGER, complete INTEGER)")
+                    conn.execute("CREATE TABLE IF NOT EXISTS fragments (path TEXT PRIMARY KEY, start INTEGER, raw BLOB)")
+                    conn.execute("CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, thread TEXT, needs_main INTEGER, status TEXT, due REAL, path TEXT, offset INTEGER, length INTEGER, wake TEXT)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS pending_thread ON pending(thread,needs_main,status,due,id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS pending_all ON pending(needs_main,status,due,id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS pending_source ON pending(path)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS pending_wake ON pending(wake,status,due,id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS source_work ON sources(complete,path)")
+                    conn.commit()
+                    _INSTALLED.add(key)
             return conn
         except BaseException:
             conn.close()
             raise
+
+    @contextmanager
+    def _read_connection(self, *, blocking=True, deadline=None):
+        """已安装且 WAL 设施齐备时只读；返回 None 由调用方在退出后进入原写路径。"""
+        check_io_deadline(deadline)
+        identity = _identity(self.path)
+        key = (str(self.path), *identity[:2]) if identity else None
+        with _INSTALLED_LOCK:
+            installed = key in _INSTALLED
+        if not installed or not identity[2] or any(
+            _identity(Path(str(self.path) + suffix)) is None for suffix in ("-wal", "-shm")
+        ):
+            yield None
+            return
+        seconds = 5 if blocking else 0
+        if deadline is not None:
+            seconds = min(seconds, max(0, deadline - time.monotonic()))
+        conn = None
+        try:
+            conn = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=seconds)
+            conn.row_factory = sqlite3.Row
+            conn.execute(f"PRAGMA busy_timeout={int(seconds * 1000)}")
+            conn.execute("BEGIN")
+            conn.execute("SELECT 1 FROM meta LIMIT 1").fetchone()
+            current = _identity(self.path)
+            if current is None or current[:2] != identity[:2]:
+                conn.close()
+                conn = None
+        except sqlite3.DatabaseError as exc:
+            if conn is not None:
+                conn.close()
+            if getattr(exc, "sqlite_errorcode", 0) & 255 not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                raise
+            with _INSTALLED_LOCK:
+                _INSTALLED.discard(key)
+            conn = None
+        except BaseException:
+            if conn is not None:
+                conn.close()
+            raise
+        try:
+            yield conn
+            check_io_deadline(deadline)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _journal_current(self, conn):
+        """只比较持久游标与权威字节身份，不在查询事务中回放或改写。"""
+        identity = _identity(self.journal_path)
+        offset = int(self._get(conn, "journal_offset"))
+        if identity is None:
+            return offset == 0
+        return (offset == identity[2]
+                and self._get(conn, "journal_identity", "") == json.dumps(identity[:2])
+                and self._get(conn, "journal_stamp", "") == json.dumps(identity))
+
+    def _legacy_current(self, conn, path):
+        return (self._get(conn, "legacy_complete") == "1"
+                and self._get(conn, "legacy_stamp", "") == json.dumps(_identity(path)))
+
+    def _quiet_signature(self, scope=None):
+        return (_identity(self.journal_path), _identity(self.storage.observation_handled_path),
+                _directory_stamp(self.storage.observations_dir))
+
+    def _quiet_hit(self, scope, signature):
+        quiet = self._quiet
+        return bool(quiet and quiet[0] == (scope, signature, _identity(self.path))
+                    and 0 <= time.monotonic() - quiet[2] < CACHE_TRUST_AGE_SECONDS
+                    and time.time() < quiet[1])
+
+    def _remember_quiet(self, scope, before, earliest_due):
+        # 不能把查询结束后新到的来源签名配给旧的空结果。
+        after = self._quiet_signature(scope)
+        self._quiet = (((scope, after, _identity(self.path)), earliest_due, time.monotonic())
+                       if before == after else None)
 
     # LLM: 标量元数据不复制整个历史。
     # 函数用途: 精确读取一个持久游标。
@@ -197,6 +297,8 @@ class ObservationIndex:
     # LLM: 游标更新与该批数据同事务提交。
     # 函数用途: 保存一个恢复位置。
     def _put(self, conn, key, value):
+        if self._get(conn, key, None) == str(value):
+            return
         conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(value)))
 
     # LLM: 首次正处理时间单调保留，零值仍可由之后真正的确认提升。
@@ -369,6 +471,13 @@ class ObservationIndex:
         ids = list(dict.fromkeys(ids))
         work = {"bytes_read": 0, "bytes_written": 0, "json_decodes": 0}
         complete, result = False, {}
+        with self._read_connection() as conn:
+            if conn is not None and self._journal_current(conn):
+                result = self._lookup(conn, ids)
+                if (not include_legacy or all(result.get(key, 0) > 0 for key in ids)
+                        or self._legacy_current(conn, self.storage.observation_handled_path)):
+                    self.last_work = work
+                    return result
         with self._connection() as conn:
             synced = self._sync(conn, work)
             result = self._lookup(conn, ids)
@@ -413,13 +522,13 @@ class ObservationIndex:
                         self._source(conn, Path(entry.path))
             self._put(conn, "directory_offset", offset + min(len(selected), 128))
             self._put(conn, "directory_complete", int(len(selected) <= 128))
-        after = self._get(conn, "probe_after", "")
+        after = self._probe_after
         rows = conn.execute("SELECT path FROM sources WHERE path>? ORDER BY path LIMIT 2", (after,)).fetchall()
         if not rows:
             rows = conn.execute("SELECT path FROM sources ORDER BY path LIMIT 2").fetchall()
         for row in rows:
             self._source(conn, directory / row[0])
-        self._put(conn, "probe_after", rows[-1][0] if rows else "")
+        self._probe_after = rows[-1][0] if rows else ""
 
     # LLM: 观察账按追加协议增长；替换/缩短/等长改写丢弃引用及未完成行，删除源也清理片段。
     # 函数用途: 更新一个来源的身份与待回填位置。
@@ -545,6 +654,11 @@ class ObservationIndex:
     # 函数用途: 返回指定数量的活跃待处理观察，不扫描历史；旧 limit<=0 返回全部活跃项。
     def pending(self, limit, *, wake=None):
         work = {"bytes_read": 0, "bytes_written": 0, "json_decodes": 0}
+        scope = (limit, wake)
+        signature = self._quiet_signature(scope)
+        if self._quiet_hit(scope, signature):
+            self.last_work = {**work, "candidate_rows": 0}
+            return []
         result, complete = [], False
         with self._connection() as conn:
             synced = self._sync(conn, work)
@@ -584,4 +698,8 @@ class ObservationIndex:
         self.last_work = work
         if not complete:
             raise ObservationIndexIncomplete("observation pending coverage is partial; retry continues its cursor")
+        if not result:
+            self._remember_quiet(scope, signature, min((row["due"] for row in rows), default=math.inf))
+        else:
+            self._quiet = None
         return result
