@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import time
 from collections.abc import Sequence
-from contextlib import closing
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,7 +25,9 @@ from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
 from .message_replay import message_rows_iterator
 from .models import ConversationThread, MessageLogEntry
-from .store_io import _touch_node
+from .store_io import _touch_node, complete_jsonl_end
+
+logger = logging.getLogger(__name__)
 
 _COLD_PAYLOAD_FIELDS = ('operation_evidence', 'provider_compaction')
 # 单份检查点冷证据或供应商记录允许保存的最大字节数。
@@ -147,7 +151,7 @@ def _write_cold_payload(root, thread_id, payload):
     return {'sha256': digest, 'byte_length': len(raw), 'ref': parts[-1]}
 
 
-# LLM: 长度和摘要来自封印引用；完整父链及叶均不跟随链接，不以缺失、坏JSON或空载荷降级成功。
+# LLM: 缺失载荷单独报告FileNotFoundError供turn路径识别；摘要、长度、JSON与no-follow错误仍拒绝，不降级为空。
 # 函数用途: 按需恢复本owner的一份冷证据或供应商记录，验证固定路径、字节长度和SHA256。
 def _read_cold_payload(root, thread_id, ref):
     if type(ref) is not dict or set(ref) != {'sha256', 'byte_length', 'ref'}:
@@ -158,7 +162,9 @@ def _read_cold_payload(root, thread_id, ref):
             or ref['ref'] != f'{digest}.json'):
         raise OSError('conversation compact cold payload reference is invalid')
     raw = read_bytes_beneath(root, ('evidence', thread_id, ref['ref']), max_bytes=size)
-    if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+    if raw is None:
+        raise FileNotFoundError('conversation compact cold payload is missing')
+    if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
         raise OSError('conversation compact cold payload digest or length mismatches')
     try:
         payload = json.loads(raw)
@@ -227,7 +233,57 @@ def _checkpoint_payload(agent, request) -> dict[str, object]:
     }
 
 
-# LLM: 唯一追加路径先落私有冷载荷，封印引用并检查最终行预算后才追加候选；head仍由原CAS发布。
+# LLM: 调用方持原账本锁；排他创建0600旁车，文件及父目录fsync后才允许截断来源，碰撞或错误原样抛出。
+# 函数用途: 先耐久保留残尾字节，不覆盖既有取证文件。
+def _save_torn_ledger_tail(path, tail):
+    sidecar = path.with_name(f'.{path.name}.torn-{int(time.time() * 1000)}')
+    with os.fdopen(os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as saved:
+        saved.write(tail)
+        saved.flush()
+        os.fsync(saved.fileno())
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return sidecar
+
+
+# LLM: 仅由持有locked_json_path的写者调用；只碰末个LF后的字节，完整对象补LF，残尾先0600留证再截断并fsync。
+# 函数用途: 封闭断电残尾以保护下一次追加，不改任何完整行的字节或偏移。
+def _seal_torn_ledger_tail(path: Path) -> str:
+    try:
+        handle = os.fdopen(os.open(path, os.O_RDWR | os.O_NOFOLLOW), 'r+b')
+    except FileNotFoundError:
+        return ''
+    with handle:
+        size = os.fstat(handle.fileno()).st_size
+        if not size:
+            return ''
+        handle.seek(size - 1)
+        if handle.read(1) == b'\n':
+            return ''
+        end = complete_jsonl_end(handle, size)
+        handle.seek(end)
+        tail = handle.read(size - end)
+        try:
+            complete = isinstance(json.loads(tail.decode('utf-8')), dict)
+        except (ValueError, UnicodeError, RecursionError):
+            complete = False
+        sidecar, action = '-', 'completed'
+        if complete:
+            handle.seek(size)
+            handle.write(b'\n')
+        else:
+            sidecar, action = _save_torn_ledger_tail(path, tail), 'quarantined'
+            handle.truncate(end)
+        handle.flush()
+        os.fsync(handle.fileno())
+        logger.warning('COMPACT_LEDGER_TORN_TAIL_SEALED path=%s action=%s bytes=%s sidecar=%s', path, action, len(tail), sidecar)
+        return action
+
+
+# LLM: 唯一追加路径先落私有冷载荷并封印；持原锁封闭残尾后追加候选，head仍仅由原CAS发布。
 # 函数用途: 将带冷证据引用的候选写入原owner检查点账本，拒绝不可读超长行且不更新线程。
 def _append_checkpoint(agent, row: dict[str, object]) -> str:
     from .compact_checkpoint_scan import _CHECKPOINT_ROW_MAX_BYTES
@@ -248,6 +304,7 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
     _save_checkpoint_copy(root, row)
     path = root / 'conversations' / f"{row['thread_id']}.jsonl"
     with locked_json_path(path):
+        _seal_torn_ledger_tail(path)
         append_private_jsonl_records_unlocked(path, [row], sort_keys=True)
         _maintain_active_checkpoints(root, row['thread_id'], path)
     return row["checkpoint_id"]
@@ -335,7 +392,32 @@ def committed_compact_checkpoint_chain(agent: SimpleAgent, thread: ConversationT
         return tuple(reversed(tuple(chain)))
 
 
-# LLM: 从原thread head逆序逐行校验后yield；消费者必须完整耗尽后才能采用，失败/提前退出须close以释放描述符。
+# LLM: 仅接管scanner进入时三类账本错误；yield后的查询/校验不捕获，冷副本也缺失时重抛原异常。
+# 函数用途: 为两条读取入口提供只读账本快照，必要时保留原故障并让精确冷寻址接管。
+@contextmanager
+def _ledger_checkpoint_lookup(path, thread_id, *, validator=None):
+    from .compact_checkpoint_scan import checkpoint_row_lookup
+
+    fallback_error = None
+    with ExitStack() as stack:
+        try:
+            lookup = stack.enter_context(checkpoint_row_lookup(path, validator=validator))
+        except OSError as error:
+            if str(error) not in ('conversation compact checkpoint ledger is unreadable',
+                    'conversation compact checkpoint record exceeds byte budget',
+                    'conversation compact checkpoint ledger was truncated'):
+                raise
+            fallback_error = error
+            logger.warning('COMPACT_LEDGER_COLD_FALLBACK thread=%s reason=%s', thread_id, error)
+
+            # LLM: 回退只报告热行未命中，不在这里递归读取或吞掉冷行的验证错误。
+            # 函数用途: 让原读取循环逐ID使用冷副本。
+            def lookup(_checkpoint_id):
+                return None
+        yield lookup, fallback_error
+
+
+# LLM: 从原thread head逆序逐行校验后yield；仅扫描入口允许冷副本回退，消费者仍须完整耗尽且关闭描述符。
 # v3内容封印及旧版本合同不变，原writer/CAS唯一；hydrate=False只供摘要元数据选择，完整接口默认恢复冷载荷。
 # 函数用途: 为摘要视图提供最新到最旧的只读检查点，完整链不成立时拒绝恢复。
 def iter_committed_compact_checkpoints(agent: SimpleAgent, thread: ConversationThread, *, hydrate: bool = True):
@@ -349,10 +431,8 @@ def iter_committed_compact_checkpoints(agent: SimpleAgent, thread: ConversationT
     raw_root = str(getattr(home, "owner_compact_dir", "") or "").strip()
     if not raw_root:
         raise OSError("owner compact directory is unavailable")
-    from .compact_checkpoint_scan import checkpoint_row_lookup
-
     path = Path(raw_root) / "conversations" / f"{thread.thread_id}.jsonl"
-    with checkpoint_row_lookup(path) as lookup:
+    with _ledger_checkpoint_lookup(path, thread.thread_id) as (lookup, fallback_error):
         visited: set[str] = set()
         current_id = checkpoint_id
         expected_generation = generation
@@ -362,8 +442,10 @@ def iter_committed_compact_checkpoints(agent: SimpleAgent, thread: ConversationT
             visited.add(current_id)
             row = lookup(current_id)
             if row is None:
-                row = _cold_checkpoint(Path(raw_root), thread.thread_id, current_id)
+                row = _cold_checkpoint(Path(raw_root), thread.thread_id, current_id, fallback_hot=False)
             if row is None:
+                if fallback_error is not None:
+                    raise fallback_error
                 raise OSError("conversation compact checkpoint chain is incomplete")
             if str(row.get("thread_id") or "").strip() != thread.thread_id:
                 raise OSError("conversation compact checkpoint thread identity mismatches")
@@ -417,16 +499,26 @@ def _save_checkpoint_copy(root, row):
         _touch_node(root, parts, raw)
 
 
-# LLM: 固定文件名只由expected ID哈希构成；读取后仍核原v3封印，不以冷副本存在代替原head。
-# 函数用途: 按明确身份读取归档检查点，不枚举归档目录或历史代次。
-def _cold_checkpoint(root, thread_id, checkpoint_id):
-    from .compact_checkpoint_scan import _CHECKPOINT_ROW_MAX_BYTES, _parse_row
+# LLM: 冷副本缺失才按精确ID查热账本；刚查过热账本的调用方禁重试；任何已有冷副本损坏不回退。
+# 函数用途: 在归档被删时保留幸存热行的读取能力，不枚举目录、不封尾、不写修复或改变提交权威。
+def _cold_checkpoint(root, thread_id, checkpoint_id, *, fallback_hot=True):
+    from .compact_checkpoint_scan import (
+        _CHECKPOINT_ROW_MAX_BYTES,
+        _parse_row,
+        checkpoint_row_lookup,
+    )
 
     name = hashlib.sha256(checkpoint_id.encode('utf-8')).hexdigest() + '.checkpoint.json'
     raw = read_bytes_beneath(root, ('archive', thread_id, name), max_bytes=_CHECKPOINT_ROW_MAX_BYTES)
     if raw is None:
-        return None
-    row = _parse_row(raw)
+        if not fallback_hot:
+            return None
+        with checkpoint_row_lookup(root / 'conversations' / f'{thread_id}.jsonl', validator=_validate_hot_checkpoint_row) as lookup:
+            row = lookup(checkpoint_id)
+        if row is None:
+            return None
+    else:
+        row = _parse_row(raw)
     if row is None or row.get('checkpoint_id') != checkpoint_id or row.get('thread_id') != thread_id:
         raise OSError('conversation compact archived checkpoint identity mismatches')
     if row.get('schema') == 'conversation_compact_checkpoint.v3' and scoped_compact_checkpoint_id(row) != checkpoint_id:
@@ -434,7 +526,7 @@ def _cold_checkpoint(root, thread_id, checkpoint_id):
     return row
 
 
-# LLM: 持canonical账本锁；冷副本与冷段先落盘，再原子替换热文件，最后旁车。旁车可重建且不确认提交。
+# LLM: 持canonical账本锁；只跳_parse_row拒绝的非对象坏行并每次告警一次，下一次轮转丢弃；有效行原规则不变。
 # 函数用途: 同时约束热账本条数与严格小于2MiB的字节数，保存地址、文件身份和归档水位。
 def _maintain_active_checkpoints(root, thread_id, path):
     from .compact_checkpoint_scan import _checkpoint_byte_rows, _parse_row
@@ -442,7 +534,16 @@ def _maintain_active_checkpoints(root, thread_id, path):
     with path.open('rb', buffering=0) as handle:
         through = handle.seek(0, 2)
         handle.seek(0)
-        rows = [(raw, _parse_row(raw)) for _, raw in _checkpoint_byte_rows(handle, through)]
+        rows, skipped = [], False
+        for offset, raw in _checkpoint_byte_rows(handle, through):
+            try:
+                row = _parse_row(raw)
+            except OSError:
+                if not skipped:
+                    logger.warning('COMPACT_LEDGER_ROW_SKIPPED thread=%s byte=%s', thread_id, offset)
+                    skipped = True
+                continue
+            rows.append((raw, row))
     rows = [(raw, row) for raw, row in rows if row is not None]
     archived_floor = 0
     if len(rows) > _ACTIVE_CHECKPOINT_HIGH_WATER_COUNT or sum(len(raw) for raw, _ in rows) >= _ACTIVE_CHECKPOINT_BYTE_BUDGET:
@@ -493,11 +594,9 @@ def _validate_hot_checkpoint_row(row):
         _validate_summary(row)
 
 
-# LLM: 此接口只寻址原线程确切head，旁车不可信时改读有界热文件；旧v3由原完整链路径解释。
+# LLM: 此接口只寻址原线程确切head；仅扫描入口三类故障可回退冷副本，后续身份、代次、边界校验不捕获。
 # 函数用途: 常数上界恢复当前已提交的单条检查点，验证身份与代次而不走历史链。
 def load_latest_committed_compact_checkpoint(agent, thread):
-    from .compact_checkpoint_scan import checkpoint_row_lookup
-
     checkpoint_id = str(thread.compact_checkpoint_id or '')
     generation = int(thread.compact_generation or 0)
     if not checkpoint_id and generation == 0:
@@ -506,11 +605,13 @@ def load_latest_committed_compact_checkpoint(agent, thread):
         raise OSError('conversation compact pointer is incomplete')
     root = _compact_root(agent, thread.thread_id)
     path = root / 'conversations' / f'{thread.thread_id}.jsonl'
-    with checkpoint_row_lookup(path, validator=_validate_hot_checkpoint_row) as lookup:
+    with _ledger_checkpoint_lookup(path, thread.thread_id, validator=_validate_hot_checkpoint_row) as (lookup, fallback_error):
         row = lookup(checkpoint_id)
     if row is None:
-        row = _cold_checkpoint(root, thread.thread_id, checkpoint_id)
+        row = _cold_checkpoint(root, thread.thread_id, checkpoint_id, fallback_hot=False)
     if row is None:
+        if fallback_error is not None:
+            raise fallback_error
         raise OSError('conversation compact checkpoint chain is incomplete')
     if row.get('thread_id') != thread.thread_id or row.get('generation') != generation:
         raise OSError('conversation compact checkpoint generation or thread mismatches')
