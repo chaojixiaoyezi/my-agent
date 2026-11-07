@@ -4848,4 +4848,9 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
         recovery_hint="目标主机不在出站域名允许列表中；由有权用户核对准确目标与部署规则，不用重定向或替代地址绕过。",
     ),
+    "STATE_CONFLICT": ErrorContract(
+        code="STATE_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标资源当前状态与请求操作冲突；先读取最新权威状态核对生命周期，再决定后续操作。",
+    ),
 })

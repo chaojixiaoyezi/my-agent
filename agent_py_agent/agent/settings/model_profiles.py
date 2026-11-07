@@ -605,7 +605,7 @@ def inherit_model_profile(attrs: dict, agent: object, *, model: object = None, e
     source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
     selected = source.get("profile_id") if source.get("source") == "owner_model_profile" else "default"
     parent_thread_id = _inheritance_parent_thread_id(agent)
-    if parent_thread_id:
+    if parent_thread_id and getattr(agent, "conversation_store", None) is not None:
         from .thread_model_selection import thread_model_profile_id
 
         canonical = thread_model_profile_id(agent, parent_thread_id)

@@ -201,9 +201,9 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     #   compaction_trigger 项并返回 compaction 项；API Key 的 Responses 端点未核实，先不声明。改动同步 conversation/compact_remote。
     # 函数用途: 这个后端能不能让服务端替我们压缩历史。
     def supports_remote_compaction(self) -> bool:
-        from ..settings.model_oauth_schema import CHATGPT_BASE
+        from ..settings.model_oauth_schema import SIWC_BASE
 
-        return str((getattr(self, "auth_ref", None) or {}).get("mode") or "") == "chatgpt" and self.api_base == CHATGPT_BASE
+        return str((getattr(self, "auth_ref", None) or {}).get("mode") or "") == "chatgpt" and self.api_base != SIWC_BASE
 
     # LLM: 压缩项只有同一协议、同一端点的后端能读（真机核实 sol/astra 可互读）；检查点里存这份范围，
     #   compact_summary_view 按它判断兼容，不兼容的后端把该检查点当透明、从归档原文重新压缩。
@@ -216,7 +216,9 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     #   非流式只在有绝对期限时才带关键字，旧替身的三参 request_json 不受影响。同步 test_responses_backend。
     # 函数用途: 把组装好的 Responses 请求发出去（流式边收边转观察者），返回供应商的完整响应对象。
     def _send_responses_request(self, payload: dict, headers: dict, request) -> dict:
-        if self.stream_enabled or getattr(self, "auth_ref", {}).get("mode") == "chatgpt":
+        from ..settings.model_oauth_schema import SIWC_BASE
+
+        if self.stream_enabled or (getattr(self, "auth_ref", {}).get("mode") == "chatgpt" and self.api_base == SIWC_BASE):
             payload["stream"] = True
             lines = request_stream_lines(self.request_stream_iter, (
                 "/responses", payload, headers, request.first_event_timeout_seconds, request.total_deadline_seconds,

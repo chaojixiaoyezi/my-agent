@@ -656,7 +656,7 @@ def _adoption_conflict(latest: object, candidate: _CandidateRequest, attempt_id:
 @contextmanager
 def canonical_subagent_model_scope(agent: object, run_id: str, *, task_local: bool = True):
     from ...backends.request_scope import foreground_model_scope
-    from ...settings.model_profiles import inherited_model_config
+    from ...settings.model_profiles import _default_for_owner, inherited_model_config
     from ...settings.model_scope import model_dependencies_scope, prepare_model_dependencies
     from ...settings.services.runtime_config_task import project_task_runtime_config_overlay
 
@@ -670,6 +670,16 @@ def canonical_subagent_model_scope(agent: object, run_id: str, *, task_local: bo
     store = getattr(manager, "conversation_store", None)
     thread = store.threads.load(task.agent_thread_id) if task is not None and store is not None else None
     if thread is None or thread.model_selection_source not in {"inherited", "automatic", "explicit"}:
+        yield
+        return
+    sources = getattr(getattr(agent, "config", None), "config_sources", {})
+    source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
+    if (
+        thread.model_selection_source == "inherited"
+        and thread.model_profile_id == "default"
+        and _default_for_owner(agent) == "default"
+        and source.get("source") != "owner_model_profile"
+    ):
         yield
         return
     config = project_task_runtime_config_overlay(inherited_model_config(agent, task), task, workspace_root=manager.workspace_root)
