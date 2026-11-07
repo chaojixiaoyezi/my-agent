@@ -22,6 +22,8 @@ from .models import ObservationEvent
 
 _INSTALLED: set[tuple[str, int, int]] = set()
 _INSTALLED_LOCK = threading.Lock()
+_ACK_READ_BYTES = 65536
+_DISCOVER_ENTRIES = 1024
 
 
 def _directory_stamp(path):
@@ -45,6 +47,10 @@ class ObservationIndexIncomplete(ObservationIndexError):
     pass
 
 
+def _stat_identity(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 # LLM: 所有来源拒绝链接及特殊文件，missing 仅代表真实不存在。
 # 函数用途: 返回包含 ctime 的文件身份。
 def _identity(path):
@@ -54,7 +60,7 @@ def _identity(path):
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ObservationIndexError("observation source must be a single regular file")
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return _stat_identity(info)
 
 
 # LLM: 不依赖普通 open 的跟随链接行为，打开后再次核对同一 inode。
@@ -67,7 +73,10 @@ def _reader(path):
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         info = os.fstat(fd)
-        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != expected or info.st_nlink != 1:
+        actual = _stat_identity(info)
+        # 追加及权限刷新会改变时间戳；同一私有 inode 未缩短即可继续读实际打开的文件。
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or actual[:2] != expected[:2] or actual[2] < expected[2]):
             raise ObservationIndexError("observation source changed while opening")
         with os.fdopen(fd, "rb", closefd=False) as handle:
             yield handle
@@ -336,7 +345,7 @@ class ObservationIndex:
                 os.close(parent)
         return end, len(raw)
 
-    # LLM: 恢复一次最多 128 行/64KiB，未追平前不允许用不完整 ack 表解释未知 ID。
+    # LLM: 恢复一次最多128行，达到64KiB后在完整行边界停止；单行仍受64KiB限制。
     # 函数用途: 将权威 ack 日志的下一批安装到投影。
     def _sync(self, conn, work):
         offset = int(self._get(conn, "journal_offset"))
@@ -352,18 +361,30 @@ class ObservationIndex:
             raise ObservationIndexError("observation ack journal was truncated")
         if offset == identity[2]:
             stamp = self._get(conn, "journal_stamp", "")
-            if stamp and json.loads(stamp) != list(identity):
+            if stamp and json.loads(stamp)[:4] != list(identity[:4]):
                 raise ObservationIndexError("observation ack journal changed without append")
+            # fchmod 仅刷新 ctime，不能把权限维护误判为等长正文改写。
+            self._put(conn, "journal_stamp", json.dumps(identity))
             return True
         pairs, consumed = [], 0
         with _reader(self.journal_path) as handle:
+            opened = _stat_identity(os.fstat(handle.fileno()))
+            if opened[:2] != identity[:2] or opened[2] < identity[2]:
+                raise ObservationIndexError("observation ack journal changed while opening")
+            identity = opened
             handle.seek(offset)
             for _ in range(128):
-                raw = handle.readline(65536 - consumed)
+                raw = handle.readline(_ACK_READ_BYTES + 1)
                 if not raw:
                     break
-                consumed += len(raw)
+                work["bytes_read"] += len(raw)
+                if len(raw) > _ACK_READ_BYTES:
+                    raise ObservationIndexError("observation ack journal has an incomplete or oversized record")
                 if not raw.endswith(b"\n"):
+                    current = _stat_identity(os.fstat(handle.fileno()))
+                    if current != identity and current[2] >= identity[2]:
+                        # 写者仍在追加尾行，本拍只提交此前完整行，下一拍从该行开头重读。
+                        break
                     raise ObservationIndexError("observation ack journal has an incomplete or oversized record")
                 try:
                     payload = json.loads(raw)
@@ -373,13 +394,18 @@ class ObservationIndex:
                 except (ValueError, KeyError, TypeError) as exc:
                     raise ObservationIndexError("observation ack journal is unreadable") from exc
                 pairs.append((key, value))
-                if consumed >= 65536:
+                consumed += len(raw)
+                if consumed >= _ACK_READ_BYTES:
                     break
+            info = os.fstat(handle.fileno())
+            if info.st_nlink != 1 or info.st_size < max(identity[2], offset + consumed):
+                raise ObservationIndexError("observation ack journal changed while reading")
+            # 游标与实际 FD 的代次一起提交，不使用打开前可能已过时的大小和时间戳。
+            identity = _stat_identity(info)
         self._install(conn, pairs)
         self._put(conn, "journal_offset", offset + consumed)
         self._put(conn, "journal_identity", json.dumps(identity[:2]))
         self._put(conn, "journal_stamp", json.dumps(identity))
-        work["bytes_read"] += consumed
         work["json_decodes"] += len(pairs)
         return offset + consumed == identity[2]
 
@@ -499,7 +525,7 @@ class ObservationIndex:
         return complete
 
     # LLM: 文件目录只发现来源引用，正文下一阶段按独立持久字节游标读取。
-    # 函数用途: 每轮最多发现 128 个目录项并抽查两个已知来源身份。
+    # 函数用途: 每轮最多发现1024个目录项并抽查两个已知来源身份，常见目录变化可一拍覆盖。
     def _discover(self, conn):
         directory = self.storage.observations_dir
         try:
@@ -516,12 +542,12 @@ class ObservationIndex:
             selected = []
             if stamp != "missing":
                 with os.scandir(directory) as iterator:
-                    selected = list(itertools.islice(iterator, offset, offset + 129))
-                for entry in selected[:128]:
+                    selected = list(itertools.islice(iterator, offset, offset + _DISCOVER_ENTRIES + 1))
+                for entry in selected[:_DISCOVER_ENTRIES]:
                     if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
                         self._source(conn, Path(entry.path))
-            self._put(conn, "directory_offset", offset + min(len(selected), 128))
-            self._put(conn, "directory_complete", int(len(selected) <= 128))
+            self._put(conn, "directory_offset", offset + min(len(selected), _DISCOVER_ENTRIES))
+            self._put(conn, "directory_complete", int(len(selected) <= _DISCOVER_ENTRIES))
         after = self._probe_after
         rows = conn.execute("SELECT path FROM sources WHERE path>? ORDER BY path LIMIT 2", (after,)).fetchall()
         if not rows:

@@ -62,6 +62,7 @@ from agent_py_agent.agent.gateway_parts.input_delivery_service import (
     load_or_prepare_gateway_input_locked,
     read_gateway_input_receipt,
     reconcile_gateway_input_receipts,
+    reconcile_gateway_input_request,
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.chat_client_context import ActiveTurnInputDelivery, GatewayChatClientAgent
@@ -358,3 +359,64 @@ def test_background_target_steer_waits_while_running_and_queues_after_the_task_e
     # 没有任务记录或记录读不出来时不能当终态收尾。
     assert [_input_target_lifecycle(paths, store, task, target_type="task")
             for task in ("srun_missing", "srun_broken")] == ["unknown"] * 2
+
+
+def test_active_steer_recovers_large_delivered_journal_without_terminal_unknown(tmp_path):
+    """读取真实旧确认日志时保留活跃回执，追平后仍能由模型确认收成 consumed。"""
+    agent, paths, request_id = _background_input(tmp_path, "srun_large_journal")
+    store = agent.conversation_store
+    index = store.guidance.ledger.pending_index()
+    index._append([(f"old-{number:03}-" + "x" * 900, 10.0) for number in range(180)])
+    assert index.journal_path.stat().st_size > 128 * 1024
+    before = read_gateway_input_receipt(paths, request_id)
+    for _ in range(8):
+        state = reconcile_gateway_input_request(paths, request_id=request_id, conversation_store=store)
+        assert state == "active_pending"
+        assert read_gateway_input_receipt(paths, request_id) == before
+        assert not (paths.inbox / f"{request_id}.json").exists()
+        with index._connection() as conn:
+            if index._journal_current(conn):
+                break
+    else:
+        pytest.fail("active steer did not finish bounded journal recovery")
+    entry = store.guidance.receipt("steer-d").entry
+    assert store.guidance.claim_for_turn(entry, expected_turn_id="srun_large_journal", attempt_id="attempt-1")
+    assert store.guidance.submissions.mark_submitted("srun_large_journal", [entry], attempt_id="attempt-1",
+        provider_call_id="provider-1") == (entry.guidance_id,)
+    assert store.guidance.acknowledgements.consume_submitted("srun_large_journal", [entry],
+        provider_call_id="provider-1") == (entry.guidance_id,)
+    assert reconcile_gateway_input_request(paths, request_id=request_id, conversation_store=store) == "consumed"
+    assert read_gateway_input_receipt(paths, request_id).reconcile_error == {}
+
+
+@pytest.mark.parametrize("index_domain", ["observation", "guidance", "corrupt"])
+@pytest.mark.parametrize("target_terminal", [False, True])
+def test_partial_index_is_transient_only_while_steer_target_is_active(tmp_path, monkeypatch,
+                                                                  index_domain, target_terminal):
+    from agent_py_agent.agent.conversation.guidance_pending_index import GuidanceIndexIncomplete
+    from agent_py_agent.agent.conversation.observation_index import (
+        ObservationIndexError,
+        ObservationIndexIncomplete,
+    )
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
+
+    agent, paths, request_id = _background_input(tmp_path, "srun_partial_index")
+    before = read_gateway_input_receipt(paths, request_id)
+    error_type = {"observation": ObservationIndexIncomplete, "guidance": GuidanceIndexIncomplete,
+                  "corrupt": ObservationIndexError}[index_domain]
+
+    def incomplete(*args, **kwargs):
+        raise error_type("bounded recovery is partial")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(inputs, "gateway_input_guidance_binding", incomplete)
+        state = reconcile_gateway_input_request(paths, request_id=request_id,
+            conversation_store=agent.conversation_store, target_terminal=target_terminal)
+    after = read_gateway_input_receipt(paths, request_id)
+    if target_terminal or index_domain == "corrupt":
+        assert state == after.state == "terminal_unknown" and after.reconcile_error
+    else:
+        assert state == "active_pending" and after == before
+    assert not (paths.inbox / f"{request_id}.json").exists()
+    assert reconcile_gateway_input_request(paths, request_id=request_id,
+        conversation_store=agent.conversation_store) == state
