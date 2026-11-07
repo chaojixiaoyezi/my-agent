@@ -6,23 +6,40 @@
 #  - 非 root 运行(USER appuser):避免默认扩大应用权限。
 #  - HEALTHCHECK 打 /healthz:容器层存活探测。
 
-FROM python:3.12-slim AS build
+# S2-W5B: 短CPU探针未达到4线程3倍门槛，不能声称默认切换已验收。
+# 保持py312=1；复核通过后可用 --build-arg py312=0 选择3.14t。
+# 普通3.14与3.14t均使用纯Python psycopg，目标系统必须保留libpq5。
+ARG py312=1
+FROM ghcr.io/astral-sh/uv:latest AS uv
+
+FROM debian:bookworm-slim AS python0
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_PYTHON_BIN_DIR=/usr/local/bin
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libpq5 \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv python install --default 3.14t
+
+FROM python:3.12-slim AS python1
+COPY --from=uv /uv /usr/local/bin/uv
+
+FROM python${py312} AS build
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY agent_py_agent ./agent_py_agent
-# 装规模 + 密钥两个 extra(PG/ASGI 驱动 + 加密)到独立前缀,便于 runtime 阶段整体拷贝
-RUN pip install --no-cache-dir --prefix=/install ".[scale,secrets]"
+# 独立venv使uv管理的3.14t与/usr/local内的3.12具有一致的包搜索路径。
+RUN uv venv --python python /opt/venv \
+    && uv pip install --python /opt/venv/bin/python --no-cache ".[scale,secrets]"
 
-FROM python:3.12-slim AS runtime
+FROM python${py312} AS runtime
 # tini:轻量 init,PID 1 信号转发 + 僵尸回收。
 # bubblewrap:执行节点的强制用户命令隔离；系统包优先于 wheel 内 vendor 离线版本，
 # 避免 vendor ELF 与镜像 glibc/libcap 漂移。
-RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap tini \
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap tini libpq5 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /install /usr/local
+COPY --from=build /opt/venv /opt/venv
 COPY --from=build /app/agent_py_agent /app/agent_py_agent
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8080
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=8080 PATH="/opt/venv/bin:${PATH}"
 # 非 root:固定 uid 便于 K8s runAsUser 对齐
 RUN useradd -r -u 10001 -m appuser
 USER 10001
