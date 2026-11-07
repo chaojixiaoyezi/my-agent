@@ -64,14 +64,16 @@ class _LockProbe:
         self.cleanup_attempt = threading.Event()
         self.events, self.errors, self.results = [], [], {}
 
+    # LLM: 探针只记录诊断交错，分类沿原链交给真实双层锁，不屏蔽锁序检查。
+    # 函数用途: 记录真实取锁与释放事件，并保留调用方的锁类别。
     @contextmanager
-    def lock(self, path, *, blocking=True):
+    def lock(self, path, *, blocking=True, category=None):
         name = threading.current_thread().name
         held = getattr(self.local, "held", [])
         if name == "r33-cleanup" and path.name == ".owner-quota":
             self.cleanup_attempt.set()
         self.events.append((name, "attempt", path.name, tuple(held)))
-        manager = self._acquire(path, blocking)
+        manager = self._acquire(path, blocking, category=category)
         self.local.held = [*held, path.name]
         try:
             yield
@@ -79,12 +81,12 @@ class _LockProbe:
             self.local.held = held
             manager.__exit__(None, None, None)
 
-    # LLM: 非阻塞取锁保留BlockingIOError供quota轮询，只有阻塞诊断等待耗尽才报TimeoutError。
+    # LLM: 每次真实尝试沿用原分类；非阻塞竞争保留BlockingIOError，只有阻塞诊断等待耗尽才报TimeoutError。
     # 函数用途: 保持真实锁竞争语义，同时给阻塞死锁诊断保留两秒上限。
-    def _acquire(self, path, blocking):
+    def _acquire(self, path, blocking, category=None):
         end = time.monotonic() + 2
         while True:
-            manager = self._try_acquire(path)
+            manager = self._try_acquire(path, category=category)
             if manager is not None:
                 return manager
             if not blocking:
@@ -93,8 +95,10 @@ class _LockProbe:
                 raise TimeoutError(f"{path.name} blocked while holding {getattr(self.local, 'held', [])}") from None
             time.sleep(0.005)
 
-    def _try_acquire(self, path):
-        manager = self.real_lock(path, blocking=False)
+    # LLM: 仅将真实非阻塞竞争转换为未取得锁，其余异常与类别完整保留。
+    # 函数用途: 带原分类尝试取得真实锁。
+    def _try_acquire(self, path, category=None):
+        manager = self.real_lock(path, blocking=False, category=category)
         try:
             manager.__enter__()
         except BlockingIOError:
@@ -123,6 +127,32 @@ def _cleanup_after_concurrent_persona(env):
         # USER/SOUL 与 AGENTS 共用版本尾；并发真实写入后必须重新 dry-run，不能绕过 CAS。
         env.request = replace(env.request, plan_digest=migration.plan_agents_cleanup(persona=env.service.persona).plan_digest)
         return _apply(env)
+
+
+@pytest.mark.parametrize("probe_kind", ["review33", "review33b"])
+@pytest.mark.parametrize("explicit_category", [False, True])
+def test_lock_probes_forward_categories_and_release(tmp_path, probe_kind, explicit_category):
+    """两套探针都要把分类交给真实锁，并在退出时恢复完整持有集。"""
+    from agent_py_agent.agent.concurrency.lock_order import LockLevel, held_locks
+
+    if probe_kind == "review33":
+        lock = _LockProbe(None).lock
+    else:
+        from agent_py_agent.tests.test_agents_cleanup_review33b_locks import _QuotaCycleProbe
+
+        probe = object.__new__(_QuotaCycleProbe)
+        probe.original_lock = json_io._locked_json_path
+        probe.local = threading.local()
+        probe.events = []
+        probe.quota = tmp_path / ".owner-quota"
+        lock = probe.bounded_real_lock
+    before = held_locks()
+    options = {"category": LockLevel.CG} if explicit_category else {}
+    with lock(tmp_path / "category-probe", **options):
+        held = held_locks()
+        assert len(held) == len(before) + 1
+        assert held[-1].level == (LockLevel.CG if explicit_category else None)
+    assert held_locks() == before
 
 
 # LLM: 两套诊断探针必须保留真实双层锁的非阻塞异常，不能让配额轮询把正常竞争误判为存储故障。
