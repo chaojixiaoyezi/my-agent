@@ -34,6 +34,7 @@ from ..conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
 )
+from ..conversation.store_io import LEDGER_ARCHIVE_DIR, archive_ledger_file
 from ..conversation.tool_context_window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
     build_conversation_terminal_tool_fold,
@@ -57,6 +58,24 @@ if TYPE_CHECKING:
     from . import request_context
 
 logger = logging.getLogger(__name__)
+
+
+# LLM: Context-only failures use Gateway's warning channel; ordinary list callers retain their error contract.
+# 函数用途: 将可降级读取错误送到警告列表，没有专用列表则保持原行为。
+def _degrade(load_errors: list[dict], error: dict) -> None:
+    warnings = getattr(load_errors, "warnings", None)
+    (warnings if isinstance(warnings, list) else load_errors).append(error)
+
+
+# LLM: Only hot JSON-row reports retain every other dedupe fact; parse/I/O/rotated-window failures stay blocking.
+# 函数用途: 确认全是可跳过坏行并逐条记位置，不把空历史错误当作去重未命中。
+def _garbage_row_errors(errors) -> bool:
+    if not all(isinstance(error, dict) and error.get("context") == "conversation.messages.read"
+               and "line_number" in error for error in errors):
+        return False
+    for error in errors:
+        logger.warning("JSONL_ROW_SKIPPED context=gateway.dedupe path=%s line=%s", error.get("path", "-"), error["line_number"])
+    return True
 
 
 # LLM: 这是同一结果的不可变传输包，不是第二份会话事实源；正常提交和 repair 必须使用相同投影。
@@ -438,7 +457,7 @@ def ensure_gateway_conversation_index(
             )
 
 
-# LLM: 近期产物只从当前 thread 的 assistant metadata 或旧版完整完成协议恢复；普通对话文字不获此权威。
+# LLM: 近期产物只采信当前thread的结构化metadata；投影错误可降级，不阻断Gateway，普通列表仍保留错误。
 # 函数用途: 为“把上一个文件发我”提供已登记产物引用，避免模型重新搜索、复制或生成。
 def gateway_recent_artifacts(
     agent: SimpleAgent,
@@ -453,9 +472,11 @@ def gateway_recent_artifacts(
             thread_id, limit=80, project=lambda row: _conversation_row_artifacts(row, current_request_id),
         )
     except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="gateway.conversation.recent_artifacts"))
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.recent_artifacts"))
         return ()
-    load_errors.extend(error for error in errors if isinstance(error, dict))
+    for error in errors:
+        if isinstance(error, dict):
+            _degrade(load_errors, error)
     selected: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     candidates = [ref for refs in refs_by_row for ref in reversed(refs)]
@@ -516,6 +537,7 @@ def _metadata_artifact_refs(value: object) -> list[dict[str, object]]:
 # persisted in separate fields. The public body must stay unchanged while later model turns may
 # consume the bounded fold from metadata.
 # 本地队列来源决定展示通道，owner provider 仍只负责身份；实时和重放不得使用不同的路径策略。
+# 仅热尾窗口的无身份坏JSON可跳过；模型解析、I/O及不完整轮转窗口仍拒绝去重判定。
 # 函数用途: 幂等追加 Gateway 消息；空正文停止、截断或错误也落 final 元数据，保留工具历史但不生成替代正文。
 def append_gateway_conversation_message(
     agent: SimpleAgent,
@@ -544,7 +566,7 @@ def append_gateway_conversation_message(
     try:
         # 与原 recent_report(limit=100) 同窗同错，只保留去重所需字段，不驻留正文；判定顺序与原实现相同。
         facts, errors = store.messages.recent_projection_report(conversation.thread_id, limit=100, project=_dedupe_facts)
-        if errors:
+        if errors and not _garbage_row_errors(errors):
             raise OSError("conversation message ledger could not be read reliably")
         normalized_part_id = (
             str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
@@ -689,29 +711,43 @@ def _queue_gateway_conversation_repair(
         logger.error("会话修复记录写入失败(%s): %s: %s", path, type(exc).__name__, exc)
 
 
-# LLM: 补交只读原 repair 包，按 thread/request/part 幂等追加成功后才删除文件；不重做工具或重生成正文。
-# 函数用途: 在加载历史前补交该线程曾写失败的消息，读取与追加失败沿原错误列表报告。
+# LLM: 原锁内封口后按thread/request/part补交；隔离失败也降级，坏包不占100个可读包预算，去重仍保守，不重做工具。
+# 函数用途: 在加载历史前修复半行和该线程延迟消息，坏修复包不阻断其他线程。
 def repair_gateway_conversation_messages(
     store: object,
     thread_id: str,
     load_errors: list[dict],
 ) -> None:
+    try:
+        store.messages.seal_torn_tail(thread_id)
+    except Exception as exc:
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.tail_seal"))
     root = getattr(getattr(store, "storage", None), "root", None)
     repair_dir = Path(root) / "message_repairs" if root else None
     if repair_dir is None or not repair_dir.exists():
         return
-    for path in sorted(repair_dir.glob("*.json"))[:100]:
+    processed = 0
+    for path in sorted(repair_dir.glob("*.json")):
+        if processed >= 100:
+            break
         report = read_json_file_report(path, context="gateway.conversation.repair.read")
         if report.load_error is not None:
-            load_errors.append(report.load_error)
+            try:
+                archived = archive_ledger_file(path, repair_dir / LEDGER_ARCHIVE_DIR)
+            except Exception as exc:
+                archived = False
+                _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.repair.quarantine"))
+            _degrade(load_errors, report.load_error)
+            logger.warning("GATEWAY_REPAIR_FILE_QUARANTINED path=%s archived=%s", path, archived)
             continue
+        processed += 1
         payload = report.payload
         if str(payload.get("thread_id") or "") != thread_id:
             continue
         try:
             # 与原 recent_report(limit=200) 同窗同错，只保留去重所需字段，不驻留正文；判定顺序与原实现相同。
             facts, errors = store.messages.recent_projection_report(thread_id, limit=200, project=_dedupe_facts)
-            if errors:
+            if errors and not _garbage_row_errors(errors):
                 load_errors.extend(errors)
                 continue
             request_id = str((payload.get("metadata") or {}).get("gateway_request_id") or "")

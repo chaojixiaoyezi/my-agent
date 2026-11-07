@@ -210,18 +210,27 @@ def test_append_once_streams_all_rows_and_replays_first_key(conversation, monkey
     assert store.messages.append_once(request, dedupe_key="new") == appended
 
 
+# LLM: RES-W1 authorizes sealing unfinished tails; LF-ended bad records still fail closed even after a dedupe hit.
+# 函数用途: 已提交坏行仍拒绝，只有未完成尾巴先隔离再返回原幂等消息。
 @pytest.mark.parametrize("bad_suffix", [b"broken\n", b"[]\n", b"{", b"\xff\n"])
 def test_dedupe_match_does_not_hide_later_corruption(conversation, bad_suffix):
     store, tid = conversation
     request = {"thread_id": tid, "role": "user", "content": "same"}
-    store.messages.append_once(request, dedupe_key="same")
+    first = store.messages.append_once(request, dedupe_key="same")
     path = store.storage.message_path(tid)
     with path.open("ab") as handle:
         handle.write(bad_suffix)
     before = path.read_bytes()
-    with pytest.raises(DataCorruptionError, match="unreadable"):
-        store.messages.append_once(request, dedupe_key="same")
-    assert path.read_bytes() == before
+    if bad_suffix == b"{":
+        assert store.messages.append_once(request, dedupe_key="same") == first
+        assert path.read_bytes() == before[:-len(bad_suffix)]
+        sidecars = list(path.parent.glob(f".{path.name}.torn-*"))
+        assert len(sidecars) == 1 and sidecars[0].read_bytes() == bad_suffix
+        assert sidecars[0].stat().st_mode & 0o777 == 0o600
+    else:
+        with pytest.raises(DataCorruptionError, match="unreadable"):
+            store.messages.append_once(request, dedupe_key="same")
+        assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("blank", [" ", "\u00a0", "\u2028"])
@@ -234,19 +243,41 @@ def test_dedupe_keeps_blank_crlf_and_unicode_semantics(conversation, blank):
     assert store.messages.append_once({"thread_id": tid, "role": row.role, "content": row.content}, dedupe_key="same") == original
 
 
+# LLM: RES-W1 C-RES-TORN-TAIL completes JSON objects or quarantines whitespace before ordinary dedupe/append.
+# 函数用途: 有效半行补换行，空白半行留档裁剪，随后追加和重试各按原幂等规则执行。
 @pytest.mark.parametrize("ending", ["valid_json", "whitespace"])
 @pytest.mark.parametrize("same_key", [False, True])
-def test_dedupe_rejects_uncommitted_tail_before_any_append(conversation, ending, same_key):
+def test_dedupe_seals_uncommitted_tail_before_any_append(conversation, ending, same_key):
     store, tid = conversation
     first = _append(store, tid)
     path = store.storage.message_path(tid)
-    row = replace(first, metadata={"dedupe_key": "same"})
+    # 独立身份只测尾行边界，不让重复message_id混入这条封口回归。
+    row = replace(first, message_id="tail-without-lf", metadata={"dedupe_key": "same"})
+    prefix = path.read_bytes()
+    tail = json.dumps(row.to_dict()).encode() if ending == "valid_json" else b"   "
     with path.open("ab") as handle:
-        handle.write(json.dumps(row.to_dict()).encode() if ending == "valid_json" else b"   ")
-    before = path.read_bytes()
-    with pytest.raises(DataCorruptionError, match="unreadable"):
-        store.messages.append_once({"thread_id": tid, "role": first.role, "content": first.content}, dedupe_key="same" if same_key else "new")
-    assert path.read_bytes() == before
+        handle.write(tail)
+    request = {"thread_id": tid, "role": first.role, "content": first.content}
+    key = "same" if same_key else "new"
+    result = store.messages.append_once(request, dedupe_key=key)
+    rows, errors = store.messages.recent_report(tid, limit=0)
+    expected = [first, row] if ending == "valid_json" else [first]
+    if ending == "valid_json" and same_key:
+        assert result == row and path.read_bytes() == prefix + tail + b"\n"
+    else:
+        expected.append(result)
+        assert result.message_id not in {first.message_id, row.message_id}
+    assert not errors and rows == expected and result.metadata["dedupe_key"] == key
+    assert path.read_bytes().startswith(prefix) and path.read_bytes().endswith(b"\n")
+    sidecars = list(path.parent.glob(f".{path.name}.torn-*"))
+    if ending == "whitespace":
+        assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
+        assert sidecars[0].stat().st_mode & 0o777 == 0o600
+    else:
+        assert not sidecars
+    after = path.read_bytes()
+    assert store.messages.append_once(request, dedupe_key=key) == result
+    assert path.read_bytes() == after
 
 
 @pytest.mark.parametrize("raw", [b"[]\n", b"null\n", b"1\n", b"broken\n", b"{\"created_at\": []}\n", b"\xff\n", (json.dumps({"created_at": 10**400}) + "\n").encode()])
