@@ -1899,6 +1899,10 @@ def _payload_progress_detail(call: ToolCall) -> str:
     payload = getattr(call, "arguments", None)
     if not isinstance(payload, Mapping):
         return ""
+    if call.tool_name == 'read_artifact':
+        return '读取归档内容' + (f"，偏移 {payload['offset']}" if type(payload.get('offset')) is int else '')
+    if call.tool_name == 'workflows':
+        return _shorten(str(payload.get('action') or '工作流'))
     for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope"):
         value = str(payload.get(key) or "").strip()
         if value:

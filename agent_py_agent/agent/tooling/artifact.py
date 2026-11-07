@@ -34,6 +34,7 @@ from .models import (
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
+from .result_display import artifact_read_display
 
 # artifact 正文读取预算的固定滚动窗口（10 分钟）；额度只由 tool_artifact_read_budget_max_chars 决定（原窗口配置已并入）。
 _ARTIFACT_READ_BUDGET_WINDOW_SECONDS = 600
@@ -268,6 +269,7 @@ class ReadArtifactTool(BaseTool):
             error_code=(
                 "" if ok else str(payload.get("error_code") or "TOOL_EXECUTION_FAILED").upper()
             ),
+            result_envelope={'display': artifact_read_display(model_payload)},
         )
 
 

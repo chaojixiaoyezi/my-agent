@@ -1077,25 +1077,75 @@ def _local_business_services(host):
         return cached[2]
 
 
-# LLM: 每次捕获当前准确actor并发行新上下文；服务缓存不能恢复上次身份或省略live复核。
+def _model_business_actor(host):
+    """本地业务身份取当前规范线程；外部来源仍沿原冻结发起人校验。"""
+    from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
+    from ..conversation.execution_threads import execution_origin_thread
+    from ..conversation.host_actor import HostChannelActor, current_actor_for_child
+
+    actor = current_actor_for_child(host)
+    if actor is not None:
+        return actor
+    current = getattr(host, '_current_run_params', None)
+    thread_id = str((getattr(current, 'task_attributes', None) or {}).get('conversation_thread_id') or '')
+    if not thread_id:
+        return None
+    home = host.home_paths
+    if home.owner_provider != 'local' or home.owner_kind not in {'main', 'user'}:
+        raise HostAPIError('CAPABILITY_DENIED', 403)
+    thread = host.conversation_store.threads.require(thread_id)
+    source = execution_origin_thread(host.conversation_store.threads.require, thread)
+    if any(row.owner_id != home.owner_id or Path(row.owner_home).resolve() != Path(home.owner_home_dir).resolve()
+           for row in (thread, source)):
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    binding = next((row for row in source.channel_bindings if row.channel in LOCAL_PRIVATE_CHANNELS), None)
+    request_id = str(getattr(current, 'request_id', '') or getattr(current, 'run_id', '') or '')
+    if binding is None or not request_id:
+        raise HostAPIError('CAPABILITY_DENIED', 403)
+    return HostChannelActor(home.owner_id, source.thread_id, request_id, binding.channel,
+        binding.channel_conversation_id, binding.channel_user_id or home.owner_id)
+
+
+def _model_request_binding(host):
+    """读取当前宿主的结构化绑定，不在列表逐项授权时重复读取来源文件。"""
+    current = getattr(host, '_current_run_params', None)
+    home = host.home_paths
+    return (getattr(current, 'request_id', ''), getattr(current, 'run_id', ''), getattr(current, 'task_id', ''),
+        getattr(current, 'host_channel_actor', None),
+        (getattr(current, 'task_attributes', None) or {}).get('conversation_thread_id'),
+        home.owner_id, home.owner_provider, home.owner_kind, str(home.owner_home_dir))
+
+
+# LLM: 每次调用重新读取来源并发行上下文；本地列表逐项只复核当前绑定，外部身份仍沿原实时核验，不缓存跨调用授权。
 # 函数用途: 给本地命令和注册模型工具绑定当前调用身份及同宿主业务服务。
 def local_business_context(host, *, model=False):
-    from ..conversation.host_actor import HostActorError, current_actor_for_child
+    from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
+    from ..conversation.host_actor import HostActorError
     actor = None
+    current_run = getattr(host, '_current_run_params', None)
     if model:
         try:
-            actor = current_actor_for_child(host)
-        except (HostActorError, ValueError):
+            actor = _model_business_actor(host)
+        except (HostActorError, ValueError, KeyError, OSError):
             raise HostAPIError('CAPABILITY_DENIED', 403) from None
+    local_actor = actor is not None and actor.channel in LOCAL_PRIVATE_CHANNELS
+    local_binding = _model_request_binding(host) if local_actor else None
 
     def check(action, facts):
         spec = resolve_business_action_spec(action)
         if spec.human_authorization_required:
             return False
         if model:
+            if getattr(host, '_current_run_params', None) is not current_run:
+                return False
             try:
-                current = current_actor_for_child(host)
-            except (HostActorError, ValueError):
+                if local_actor:
+                    if _model_request_binding(host) != local_binding:
+                        return False
+                    current = actor
+                else:
+                    current = _model_business_actor(host)
+            except (HostActorError, ValueError, KeyError, OSError):
                 return False
             if current != actor or (current is not None and current.owner_id != host.home_paths.owner_id):
                 return False
@@ -1103,7 +1153,8 @@ def local_business_context(host, *, model=False):
                 return False
         return facts.get('owner_id', host.home_paths.owner_id) == host.home_paths.owner_id
 
-    return bind_business_context(host, authorize=check, actor=actor), _local_business_services(host)
+    return bind_business_context(host, authorize=check, actor=actor,
+        subject_id=actor.actor_id if actor is not None else 'host'), _local_business_services(host)
 
 
 def business_command_request(namespace, text):
@@ -1180,9 +1231,25 @@ def register_business_tools(agent):
     class BusinessTool(BaseTool):
         def __init__(self, spec):
             self.action = spec.action
+            family = spec.action.split('.')[0]
+            title, keywords = {
+                'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
+                'background_agents': ('后台代理', ('后台代理', '常驻代理', 'background_agents', 'team', '/team')),
+            }.get(family, ('业务动作', (spec.action,)))
+            verbs = {
+                'list': ('列出', '列表', '查询'), 'get': ('查看', '详情', '查询'),
+                'create': ('创建', '新建'), 'update': ('修改', '更新'),
+                'messages.send': ('发送消息', '发消息', 'send_message'),
+                'suspend': ('暂停', '挂起'), 'resume': ('恢复', '继续'),
+                'retire': ('退役', '停用'), 'restore': ('还原', '复原'),
+            }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents'} else ()
+            purpose = (verbs[0] if verbs else '') + title + '：' + spec.action
             self.model_spec = ToolModelSpec('business_' + spec.action.replace('.', '_'),
-                '业务动作 ' + spec.action + '；状态和权限由原宿主复核。', _model_business_schema(spec.native_request_schema),
-                hints=ToolModelHints(category='business', default_deferred=True, deferred_summary='业务空间、团队与工作流：' + spec.action))
+                purpose + '；直接调用内置工具，状态和权限由当前宿主复核。',
+                _model_business_schema(spec.native_request_schema),
+                hints=ToolModelHints(category=family if family in {'spaces', 'background_agents'} else 'business',
+                    keywords=(*keywords, *verbs), use_cases=(purpose,),
+                    default_deferred=True, deferred_summary=purpose))
             effect = {'read': 'read_only', 'configure': 'mutating', 'execute': 'dangerous'}.get(spec.metadata['effect'], 'mutating')
             self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy(default_effect=effect),
                 sandbox_policy=SandboxPolicy('none'), concurrency_policy=ConcurrencyPolicy('serial'),
@@ -1205,6 +1272,7 @@ def register_business_tools(agent):
             effect = result.get('effect_outcome', 'not_started')
             tool_effect = 'not_started' if effect == 'none' else effect if effect in {'not_started', 'unknown'} else 'unknown'
             return ToolHandlerOutcome(self.model_spec.name, status < 400, json.dumps(result, ensure_ascii=False),
+                result_envelope=result,
                 error_code=code, reported_error_code=code,
                 effect_outcome=tool_effect if status >= 400 else '')
 

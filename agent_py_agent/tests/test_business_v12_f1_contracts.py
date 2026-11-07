@@ -145,7 +145,7 @@ def test_injection_module_has_no_io_runtime_or_business_imports():
             assert node.level == 0 and node.module in {"__future__", "dataclasses", "collections.abc", "typing"}
 
 
-@pytest.mark.parametrize("key, default", [("business_spaces_enabled", False), ("prompt_runtime_snapshots_enabled", True)])
+@pytest.mark.parametrize("key, default", [("business_spaces_enabled", True), ("prompt_runtime_snapshots_enabled", True)])
 def test_shared_flags_have_matching_python_yaml_registry_defaults(key, default):
     assert getattr(AgentConfig(), key, None) is default
     path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
@@ -165,7 +165,7 @@ def test_shared_flags_use_existing_boolean_normalizer(key, raw, expected):
     assert normalized[key] is expected and original[key] == raw and warnings == []
 
 
-@pytest.mark.parametrize("key, default", [("business_spaces_enabled", False), ("prompt_runtime_snapshots_enabled", True)])
+@pytest.mark.parametrize("key, default", [("business_spaces_enabled", True), ("prompt_runtime_snapshots_enabled", True)])
 def test_invalid_shared_flags_warn_and_use_safe_defaults(key, default):
     normalized, warnings = normalize_agent_config({key: ["false"]})
     assert normalized[key] is default

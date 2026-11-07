@@ -33,6 +33,7 @@ from ..assets.version_diff import diff_versions, field_changes, load_snapshot
 from ..assets.version_hook import _VERSION_OPERATION
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..capability.skills import split_skill_frontmatter
+from ..plugin_host.errors import HostAPIError
 from ..workflows.business_scope import (
     WORKFLOW_ACTION_FIELDS,
     WORKFLOW_READ_ACTIONS,
@@ -170,6 +171,7 @@ class WorkflowsTool(BaseTool):
     def __init__(self, owner_home: Path, *, store=None, engine=None, analysis_handler=None,
                  workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None, im_notifier=None,
                  runner_options_provider=None, business_service=None, business_actor_provider=None,
+                 business_binding_provider=None,
                  run_params_provider=None, schedule_ids_provider=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
@@ -181,6 +183,7 @@ class WorkflowsTool(BaseTool):
         self.workspace_root = workspace_root
         self.runner_options_provider = runner_options_provider
         self.business_service, self.business_actor_provider = business_service, business_actor_provider
+        self.business_binding_provider = business_binding_provider
         self.run_params_provider, self.schedule_ids_provider = run_params_provider, schedule_ids_provider
         _owner(self.owner_home, getattr(business_service, 'store', None))
 
@@ -262,10 +265,14 @@ class WorkflowsTool(BaseTool):
     # LLM: 原业务服务负责身份/幂等校验，本次engine只绑定宿主端口；持久准入回执不替代执行事实。
     # 函数用途: 调用原业务入口并保持并发准入在首次调用和同键重试中的返回语义。
     def _dispatch_business(self, params):
-        if self.business_service is None or not callable(self.business_actor_provider):
-            raise PermissionError('WORKFLOW_BUSINESS_HOST_UNAVAILABLE')
-        _owner(self.owner_home, self.business_service.store)
-        backend = copy.copy(self.business_service)
+        if callable(self.business_binding_provider):
+            service, actor = self.business_binding_provider()
+        else:
+            if self.business_service is None or not callable(self.business_actor_provider):
+                raise PermissionError('WORKFLOW_BUSINESS_HOST_UNAVAILABLE')
+            service, actor = self.business_service, self.business_actor_provider()
+        _owner(self.owner_home, service.store)
+        backend = copy.copy(service)
         factory = backend.engine_factory or self._business_engine
         admissions = []
 
@@ -279,7 +286,7 @@ class WorkflowsTool(BaseTool):
         backend.engine_factory = make_engine
         from ..workflows.datasource_runtime import bind_asset_im_notifier
         with bind_asset_im_notifier(self.owner_home, self.im_notifier) if callable(self.im_notifier) else nullcontext():
-            result = backend.execute(params['action'], self._business_request(params), actor=self.business_actor_provider(),
+            result = backend.execute(params['action'], self._business_request(params), actor=actor,
                 expected_revision=params.get('expected_revision'), idempotency_key=params.get('idempotency_key', ''))
         if not admissions and params['action'] == 'workflows.run' and result.get('state') == 'blocked':
             from ..workflows.run_store import WorkflowRunStore
@@ -329,6 +336,15 @@ class WorkflowsTool(BaseTool):
     # LLM: inspect失败是成功读取；运行失败保留断点机器码，CAS在Store原锁拒绝，不冒称写入已发生。
     # 函数用途: 统一工具结果与结构化错误，不吞中断。
     def execute(self, params):
+        from .result_display import workflow_result_display
+
+        outcome = self._execute(params)
+        outcome.result_envelope = {**outcome.result_envelope, 'display': workflow_result_display(
+            params.get('action', '') if isinstance(params, dict) else '',
+            outcome.result_envelope, ok=outcome.ok, error_code=outcome.error_code)}
+        return outcome
+
+    def _execute(self, params):
         invalid = self.validate_invocation(params, None)
         if invalid is not None:
             return invalid
@@ -351,6 +367,9 @@ class WorkflowsTool(BaseTool):
         except WorkflowExecutionError as exc:
             return _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
                             effect_outcome=exc.receipt['effect_outcome'], failure_stage='execution')
+        except HostAPIError as exc:
+            return _outcome('workflows', {'error_code': exc.code}, False, exc.code,
+                            effect_outcome='not_started' if exc.outcome == 'not_started' else 'unknown')
         except PermissionError as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_PERMISSION_DENIED', effect_outcome='not_started')
         except (ValueError, KeyError, TypeError) as exc:

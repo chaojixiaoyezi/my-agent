@@ -52,7 +52,7 @@ def test_overview_and_all_domains_are_read_only_without_body_or_network(make_age
     overview = _read(agent)
     sections = [row['section'] for row in overview['sections']]
     assert set(sections) == {'directories', 'tools', 'skills', 'packages', 'plugins', 'mcp',
-                             'memory', 'models', 'config', 'work', 'permissions', 'context'}
+                             'memory', 'models', 'config', 'work', 'permissions', 'context', 'business'}
     for section in sections:
         _read(agent, section)
     assert _bytes(tmp_path) == before

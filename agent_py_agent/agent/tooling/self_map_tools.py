@@ -7,6 +7,28 @@ from .self_map_registry import SectionDescriptor, SectionProjection, map_item, n
 # 函数用途: 将工具分块接入当前代理的自我目录。
 def register_tool_section(registry):
     registry.register(SectionDescriptor("tools", "工具", 20, tool_projection, "当前工具用途、来源、权限与按需加载状态"))
+    registry.register(SectionDescriptor("business", "业务空间与后台代理", 25, business_projection,
+                                        "业务空间与常驻后台代理的内置工具入口，不读取业务正文或启动执行"))
+
+
+def business_projection(context):
+    """只投影本轮授权目录，发现业务能力不创建宿主、线程或工作任务。"""
+    if not getattr(context.agent.config, 'business_spaces_enabled', False):
+        return SectionProjection((), state='disabled', source='business_spaces_enabled / current owner config')
+    specs = public_catalog_specs(context)
+    states = {row['name']: row['state'] for row in context.public_context.get('tool_states', ())}
+    items = []
+    for family, title, purpose in (
+            ('spaces', '业务空间', '查询、创建和管理业务空间；与 /space 共用原服务'),
+            ('background_agents', '后台代理', '查询、创建、发消息、暂停、恢复和退役常驻代理；与 /team 共用原服务')):
+        names = [spec.name for spec in specs if spec.category == family]
+        if names:
+            available = any(states.get(name) in {'ready', 'deferred'} for name in names)
+            items.append(map_item(family, title, state='available' if available else 'unavailable', fields={
+                'purpose': purpose, 'tools': names,
+                'next_read': next_read('tool_search', {'query': family, 'limit': 5})}))
+    return SectionProjection(tuple(items), state='known' if items else 'unavailable',
+                             source='current authorized ToolRuntimeSnapshot')
 
 
 # LLM: disabled/unavailable保留main原原因；投影仅用当前owner/run的公开tool_states和冻结catalog_specs，不回退读取可变live registry。
