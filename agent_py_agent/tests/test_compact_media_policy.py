@@ -14,6 +14,7 @@ from agent_py_agent.agent.backends.request_content import (
 )
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation import compact as compact_module
+from agent_py_agent.agent.conversation import input_media as input_media_module
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
     _split_nontext_transcript_suffix,
@@ -128,6 +129,8 @@ def media_case(tmp_path, monkeypatch):
         return f"{previous}|摘要"
 
     monkeypatch.setattr(compact_module, "_summarize", summarize)
+    # 合成 local_file 夹具代表仍可读的历史附件；回放只把真正不可用的历史附件降级为占位文本（REWORK-R1）。
+    monkeypatch.setattr(input_media_module, "_history_media_available", lambda _source: (True, ""))
     return SimpleNamespace(store=store, thread=thread, agent=agent, policy=policy, calls=calls)
 
 

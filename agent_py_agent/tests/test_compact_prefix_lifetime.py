@@ -12,6 +12,7 @@ from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapte
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn
 from agent_py_agent.agent.conversation import compact
 from agent_py_agent.agent.conversation import compact_request_budget as budgets
+from agent_py_agent.agent.conversation import input_media as input_media_module
 from agent_py_agent.agent.conversation.auxiliary_model_call import AuxiliaryModelCallRequest
 from agent_py_agent.agent.conversation.compact_calibration import CompactRequestCalibration
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
@@ -39,6 +40,8 @@ from agent_py_agent.agent.settings import AgentConfig
 def isolated_agent(tmp_path, monkeypatch):
     home = tmp_path / "my-agent-home"
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    # 合成 local_file 夹具代表仍可读的历史附件；回放只把真正不可用的历史附件降级为占位文本（REWORK-R1）。
+    monkeypatch.setattr(input_media_module, "_history_media_available", lambda _source: (True, ""))
     return SimpleNamespace(config=AgentConfig(my_agent_home=str(home)))
 
 

@@ -29,6 +29,7 @@ from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation import compact as compact_module
 from agent_py_agent.agent.conversation import compact_media_policy as media_policy_module
 from agent_py_agent.agent.conversation import compact_request_budget as budget_module
+from agent_py_agent.agent.conversation import input_media as input_media_module
 from agent_py_agent.agent.conversation.compact import (
     ConversationCompactOptions,
     prepare_conversation_context,
@@ -264,6 +265,8 @@ def vision_case(tmp_path, monkeypatch):
     backend = _Backend()
     # 图块预留是代码常量；这个夹具的窗口只有 1000 token，按 50 试算才能装下看图小请求
     monkeypatch.setattr(media_policy_module, "INPUT_MEDIA_TOKEN_RESERVE_TOKENS", 50)
+    # 合成 local_file 夹具代表仍可读的历史附件；回放只把真正不可用的历史附件降级为占位文本（REWORK-R1）。
+    monkeypatch.setattr(input_media_module, "_history_media_available", lambda _source: (True, ""))
     agent = SimpleNamespace(
         home_paths=SimpleNamespace(owner_compact_dir=tmp_path / "compact"), backend=backend,
         config=SimpleNamespace(compact_media_policy="auto", model_input_modalities=["image"],

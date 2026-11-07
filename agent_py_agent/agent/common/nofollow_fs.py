@@ -556,7 +556,8 @@ def _open_private_lock_portable(root: str | Path, parts: tuple[str, ...], *, exc
         raise NoFollowPathError("managed lock is not a regular file")
     if exclusive and before is not None:
         raise FileExistsError(str(target))
-    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    # Windows 的 os.open 默认文本模式；压缩账本封尾经此描述符按字节偏移读写，必须二进制打开。
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         descriptor = os.open(target, flags | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
