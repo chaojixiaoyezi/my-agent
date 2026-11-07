@@ -138,74 +138,143 @@ HELP_SHORTCUT_GROUPS = (
         "ctrl + c/d twice to exit",
     ),
 )
-TERMINAL_BUNNY_AVATAR = (
-    (
-        ("class:tui-avatar-hair", "╭╮          ╭╮"),
-        ("", "       "),
-        ("class:tui-avatar-umbrella", "╱╲"),
-    ),
-    (
-        ("class:tui-avatar-hair", "│╰╮        ╭╯│"),
-        ("", "      "),
-        ("class:tui-avatar-umbrella", "╱╱ "),
-    ),
-    (
-        ("class:tui-avatar-hair", "╰╮╰─"),
-        ("class:tui-avatar-ribbon", "◆"),
-        ("class:tui-avatar-hair", "────"),
-        ("class:tui-avatar-ribbon", "◆"),
-        ("class:tui-avatar-hair", "─╯╭╯"),
-        ("", "     "),
-        ("class:tui-avatar-umbrella", "╱╱  "),
-    ),
-    (
-        ("class:tui-avatar-hair", " ╰╮  "),
-        ("class:tui-avatar-face", "◕  ◕"),
-        ("class:tui-avatar-hair", "  ╭╯"),
-        ("", "    "),
-        ("class:tui-avatar-umbrella", "╭─╯   "),
-    ),
-    (
-        ("class:tui-avatar-hair", "  │"),
-        ("class:tui-avatar-face", "   ᴗ    "),
-        ("class:tui-avatar-hair", "│"),
-        ("", "     "),
-        ("class:tui-avatar-umbrella", "│     "),
-    ),
-    (
-        ("class:tui-avatar-dress", "╭─┴╮  ♡  ╭─┴╮"),
-        ("", "    "),
-        ("class:tui-avatar-umbrella", "│     "),
-    ),
-    (
-        ("class:tui-avatar-dress", "╰╮ ╰┬────┬╯ ╭╯"),
-        ("", "    "),
-        ("class:tui-avatar-umbrella", "│    "),
-    ),
-    (
-        ("class:tui-avatar-bunny", "ᘏ⑅ᘏ"),
-        ("", " "),
-        ("class:tui-avatar-dress", "╰──╯    ╰──╯"),
-        ("", "  "),
-        ("class:tui-avatar-umbrella", "╯    "),
-    ),
+# LLM: 欢迎头像照参考图画成像素画：兔耳金发少女抱红纸伞蹲坐草地，左下小白兔捧胡萝卜啃。
+#   每两行像素合成一行终端字符，"▀" 前景取上像素、背景取下像素；这里只产出 tui-avatar-* 样式类，
+#   颜色全部定义在 tui_ui_setup._make_tui_style，同名 "-bg" 背景类也在那里由前景色派生。
+# 常量用途: 像素键到头像样式类后缀的映射；"." 是透明像素，露出终端底色。
+_AVATAR_PIXEL_STYLES = {
+    "W": "ear",  # 白：兔耳、小兔、衣领、眼睛高光、鞋上绒球
+    "w": "ear-shade",  # 浅灰：白色部位的轮廓
+    "p": "ear-inner",  # 粉：耳内
+    "H": "hair",
+    "h": "hair-shade",  # 发丝阴影与头发轮廓
+    "L": "hair-light",  # 头顶光环
+    "T": "hair-tip",  # 发梢与袖口亮部
+    "F": "face",  # 脸、手、腿
+    "q": "ribbon",  # 发饰花瓣、腮红、舌头
+    "E": "eye",
+    "e": "iris",
+    "R": "red",  # 上衣、鞋、发饰、额心菱形、嘴、伞骨
+    "r": "umbrella",
+    "G": "gold",  # 发饰金叶、伞尖、伞柄铜头
+    "s": "shaft",
+    "O": "dress",  # 袖口与飘带
+    "K": "skirt",
+    "k": "skirt-fold",
+    "C": "carrot",
+    "c": "carrot-shade",
+    "V": "grass-light",
+    "v": "grass",
+    "g": "grass-dark",
+    "n": "bunny",  # 小兔肚子的粉白
+}
+# 常量用途: 单元格上像素写这些键时整格换成点缀字形（伞骨、小兔眯眼、草地小花），背景取下像素颜色。
+_AVATAR_GLYPHS = {"/": ("╱", "red"), "^": ("^", "eye"), "*": ("✿", "ear-inner")}
+# 常量用途: 宽卡头像像素图，46 列 × 44 像素，合成 22 行终端字符。
+_BUNNY_GIRL_PIXELS = (
+    ".............................wWw..............",
+    "............................wWWWw.............",
+    "............................wWpWWw............",
+    "...........wwwww...........HwWppWw............",
+    "..........wWWWWWwww......HHHHHppWWw...........",
+    "...........wWWppWWWww....HHHHHppWWw...........",
+    "............wWWppppWWw...HGRGHWppWw...........",
+    ".............wWWWppppWHHHHHHHHHHHWw.........G.",
+    "..............wWWWqRpHHHHLLHLLHHHHw.Rq.....G..",
+    "...............wwqRRGHHLLHHHHHLLHHHGRRq..rr...",
+    ".................GRRRGLHHHHHHHHHLHGRRRG.///...",
+    "..................GRGHHHHHHHHHHHHHHGRG.rrrr...",
+    "..................HGHHHHHHHHHHHHHHHHG.////....",
+    ".................hHHHHHHHHHHHHHHHHHHHrrrrr....",
+    ".................hHHHHHHHHHHHHHHHHHH/////.....",
+    ".................hHHHHHHHHHHHHHHHHHrrrrrr.....",
+    ".................hHHHHHFHFFRFFHFHHH////r......",
+    ".................hHHhHFFEEFFFEEFFHrrrrr.......",
+    ".................hHHhHFEWEFFFEWEF/////r.......",
+    ".................hHHhHFEEEFFFEEEFrrrrr........",
+    ".................hHHhHFeeeFFFeee////rh........",
+    "............w....hHHhHqqFFRRRFFqrrrrHHh.......",
+    "....www....wWw..hHHHhHFFFFFqFFF///rHHHh.......",
+    "...wWWWw...wpWw.hHHHhHhFWWWWWWWrrrhHHHh.......",
+    "....wpWw..wWpWw.hHHHRWWWWWWWWWrrrWHHHHh.......",
+    "....wWpWw.wWpWw.hHHRRRWWWWWWFFGGWRRRHHh.......",
+    "....wWppWwwWpWw..hRRRRRRRFFsFFFRRRRRRHh.......",
+    ".....wWpWwwWpWw..hRRRRRKFFFRKKKKRRRRRHh.......",
+    ".....wWWWwWWWw...hROOOKKKFsKKKKKKROORHh.......",
+    "......wWWWWWWWw..hOOOOKKssKKKKKKKOOOOTh.......",
+    "g.....wW^WWW^Ww..hOTTTKssKKKKKKKKOTTOh.......g",
+    "g.....wWWWWWWWw..hTTTKssKKKkKKKKKKTTTh.......g",
+    "gg....wqWWWCWqw...hTTssKKkKkKkKKKKTTTh......gg",
+    "gg.V...wWCCCWw....hTssKKKkKkKkKKKKTTh.......gg",
+    "gg.v...wCCcWWWw...hTsKKKKkKkKkK.KKhhTh...V..gg",
+    "ggVvV.wCCcCWWWWw.hTsThhKFF....FF....h....vV.gg",
+    "ggvvvwVWCWWWWWWWw.s.OOO.FF....FF.OOO.....vv.gg",
+    "ggvvvwvVWWWWWWWWw.GOOT.RWWR..RWWR.TOOOO..vv.gg",
+    "ggvvvwWgnnnnnnnWwGVOVVVRRRRVVRRRR....OO..vv.gg",
+    "ggvvv.wnnnnnnnnnWWvvvvvvvvvvvVVVVVVV.....vvggg",
+    "ggvvv.VVnnnnnnnnWWWvvvvvvvvvvvvvvvvvVVVV.vvggg",
+    "ggvvvVgvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvgvvVvvggg",
+    "gVvvvgvgvvvv*vvvvvvvvgvvvvvvvvvvvvvvgvgvvvvVVg",
+    "VvvvvvvvvvvvvvvvvvvvgvgvvvvvvvvvvvvvvvvvvvvvvV",
 )
-TERMINAL_BUNNY_AVATAR_COMPACT = (
-    (("class:tui-avatar-hair", "╭╮    ╭╮"),),
-    (
-        ("class:tui-avatar-hair", "╰"),
-        ("class:tui-avatar-ribbon", "◆────◆"),
-        ("class:tui-avatar-hair", "╯"),
-    ),
-    (("class:tui-avatar-face", " (◕  ◕) "),),
-    (("class:tui-avatar-face", "  ( ᴗ )  "),),
-    (("class:tui-avatar-dress", "  ╱♡╲  "),),
-    (
-        ("class:tui-avatar-bunny", "ᘏ⑅ᘏ"),
-        ("", "  "),
-        ("class:tui-avatar-umbrella", "╱╲"),
-    ),
+# 常量用途: 窄终端头像像素图，30 列 × 24 像素，合成 12 行终端字符。
+_BUNNY_GIRL_COMPACT_PIXELS = (
+    "..................wWWw........",
+    "........wwww......wWWw........",
+    ".......wWWWWww....HWpWw.......",
+    ".......wWWppWWw..GRGpWw.......",
+    "........wWWppWWwHHHHHWw.......",
+    ".........wwWWpHLLLHLLLH......G",
+    "...........wqRLHHHHHHHLRq.../.",
+    "...........GRRGHHHHHHHHGRRGrr.",
+    ".......w....GHHHHHHHHHHHG.//r.",
+    "..ww..wWw.hHHHHHHHHHHHHHHrrr..",
+    ".wWWwwWWw.hHHHHHHHHHHHHH////..",
+    ".wWpwwWpw.hHHHHHFFRFFFHHrrrr..",
+    ".wWpWwWpw..hHHFEEFFFEEF///r...",
+    ".wWpWwWWw.hHHHFWEFFFEWrrrrh...",
+    "..wWWWWWw.hHHHFeeFFFee///rh...",
+    "..wWWWWWw.hHHHqFFFRFFrrrrHh...",
+    "g.wW^WW^WwhHHHHhFFqFF//rHHh..g",
+    "g.wWWWWWWwhTTRWWWWWWWrrRTTh..g",
+    "g..qWWCCqwhTRRRRWFFsGrRRRTh..g",
+    "ggwWWCCWWWhRRRRRRFFFRRRRRR..gg",
+    "ggWWCCCWWWwROOORssFRRRROOR..gg",
+    "ggwVnnnnnWwOOOssRRRRRRROOO..gg",
+    "ggVVVVVVVVVVVVVV*VVVVVVVVVVVgg",
+    "ggvvvvgvvvvgvvvvvvvgvvvvvgvvgg",
 )
+
+
+# LLM: 只按像素键查样式类，相邻同样式的格子并成一个 fragment；整行显示宽度恒等于像素列数。
+# 函数用途: 把两行一组的像素图转换成终端半块字符的多色 formatted lines。
+def _avatar_lines(pixels: tuple[str, ...]) -> tuple[FormattedLine, ...]:
+    lines: list[FormattedLine] = []
+    for top_row, bottom_row in zip(pixels[0::2], pixels[1::2]):
+        fragments: list[Fragment] = []
+        for top, bottom in zip(top_row, bottom_row):
+            under = "" if bottom == "." else f" class:tui-avatar-{_AVATAR_PIXEL_STYLES[bottom]}-bg"
+            if top in _AVATAR_GLYPHS:
+                glyph, role = _AVATAR_GLYPHS[top]
+                style, char = f"class:tui-avatar-{role}{under}", glyph
+            elif top == "." and bottom == ".":
+                style, char = "", " "
+            elif top == ".":
+                style, char = f"class:tui-avatar-{_AVATAR_PIXEL_STYLES[bottom]}", "▄"
+            elif top == bottom:
+                style, char = f"class:tui-avatar-{_AVATAR_PIXEL_STYLES[top]}", "█"
+            else:
+                style, char = f"class:tui-avatar-{_AVATAR_PIXEL_STYLES[top]}{under}", "▀"
+            if fragments and fragments[-1][0] == style:
+                fragments[-1] = (style, fragments[-1][1] + char)
+            else:
+                fragments.append((style, char))
+        lines.append(tuple(fragments))
+    return tuple(lines)
+
+
+TERMINAL_BUNNY_AVATAR = _avatar_lines(_BUNNY_GIRL_PIXELS)
+TERMINAL_BUNNY_AVATAR_COMPACT = _avatar_lines(_BUNNY_GIRL_COMPACT_PIXELS)
 
 
 # LLM: TuiRenderContext 固定所有会影响 golden 的显示输入，时钟/尺寸/品牌都不能从全局隐式读取。
@@ -1578,7 +1647,8 @@ def _wide_welcome_card(
     return lines
 
 
-# LLM: 窄卡不硬挤双栏，保留同一标题/Logo/模型/目录信息并让每行严格落在当前宽度内。
+# LLM: 窄卡不硬挤双栏，保留同一标题/Logo/模型/目录信息并让每行严格落在当前宽度内；
+#   像素头像裁切后只剩乱块，连紧凑版都放不下时整幅省略。
 # 函数用途: 生成单栏欢迎卡。
 def _narrow_welcome_card(
     agent_name: str,
@@ -1589,10 +1659,13 @@ def _narrow_welcome_card(
 ) -> list[FormattedLine]:
     inner_width = max(1, card_width - 2)
     lines = [_welcome_header(agent_name, version, card_width)]
-    avatar = (
-        TERMINAL_BUNNY_AVATAR
-        if inner_width >= display_width_fragments(TERMINAL_BUNNY_AVATAR[0])
-        else TERMINAL_BUNNY_AVATAR_COMPACT
+    avatar = next(
+        (
+            art
+            for art in (TERMINAL_BUNNY_AVATAR, TERMINAL_BUNNY_AVATAR_COMPACT)
+            if inner_width >= display_width_fragments(art[0])
+        ),
+        (),
     )
     rows: tuple[FormattedLine, ...] = (
         (("class:tui-strong", "欢迎回来！"),),

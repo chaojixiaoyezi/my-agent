@@ -6,6 +6,8 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+    TERMINAL_BUNNY_AVATAR,
+    TERMINAL_BUNNY_AVATAR_COMPACT,
     TuiBlockRenderCache,
     TuiRenderContext,
     TuiRenderFrame,
@@ -411,26 +413,107 @@ def test_narrow_frame_never_exceeds_width_and_uses_single_column_card() -> None:
     assert not any("最近活动" in text for text in texts)
 
 
+def _welcome_card_lines(frame: TuiRenderFrame) -> tuple:
+    card_end = next(
+        index
+        for index, line in enumerate(frame.transcript_lines)
+        if fragments_text(line).startswith("╰")
+    )
+    return frame.transcript_lines[: card_end + 1]
+
+
+def _avatar_classes(lines) -> set[str]:
+    return {
+        part.removeprefix("class:")
+        for line in lines
+        for style, _text, *_ in line
+        for part in style.split()
+        if part.startswith("class:tui-avatar-")
+    }
+
+
 def test_welcome_card_renders_bunny_girl_terminal_avatar_styles() -> None:
     frame = render_tui_snapshot(
         _fixture_store().snapshot(),
         TuiRenderContext(width=120, model_name="MiniMax-M2.7", workspace="/root"),
     )
-    texts = _frame_lines(frame)
-    welcome_fragments = [fragment for line in frame.transcript_lines[:14] for fragment in line]
+    card = _welcome_card_lines(frame)
+    card_texts = [fragments_text(line) for line in card]
+    avatar_texts = [fragments_text(line) for line in TERMINAL_BUNNY_AVATAR]
+    start = next(index for index, text in enumerate(card_texts) if avatar_texts[0] in text)
 
-    assert any("◕  ◕" in text for text in texts)
-    assert any("◆────◆" in text for text in texts)
-    assert any("ᘏ⑅ᘏ" in text for text in texts)
-    assert any("╱╲" in text for text in texts)
+    # 整幅像素头像按原顺序落在宽卡左栏里，没有被裁成纯文本降级。
+    assert all(
+        avatar in text
+        for avatar, text in zip(avatar_texts, card_texts[start:start + len(avatar_texts)], strict=True)
+    )
+    joined = "\n".join(card_texts)
+    assert "▀" in joined and "▄" in joined
+    assert "╱" in joined and "^" in joined and "✿" in joined  # 伞骨、小兔眯眼、草地小花
     assert {
-        "class:tui-avatar-hair",
-        "class:tui-avatar-ribbon",
-        "class:tui-avatar-face",
-        "class:tui-avatar-dress",
-        "class:tui-avatar-umbrella",
-        "class:tui-avatar-bunny",
-    }.issubset({style for style, _text, *_ in welcome_fragments})
+        "tui-avatar-hair",
+        "tui-avatar-ribbon",
+        "tui-avatar-face",
+        "tui-avatar-dress",
+        "tui-avatar-umbrella",
+        "tui-avatar-bunny",
+        "tui-avatar-ear",
+        "tui-avatar-ear-inner",
+        "tui-avatar-eye",
+        "tui-avatar-gold",
+        "tui-avatar-skirt",
+        "tui-avatar-carrot",
+        "tui-avatar-grass",
+    }.issubset(_avatar_classes(card))
+
+
+@pytest.mark.parametrize(
+    ("avatar", "min_rows", "max_rows", "max_width"),
+    [(TERMINAL_BUNNY_AVATAR, 18, 24, 47), (TERMINAL_BUNNY_AVATAR_COMPACT, 10, 12, 32)],
+)
+def test_bunny_avatar_rows_share_one_display_width(avatar, min_rows, max_rows, max_width) -> None:
+    widths = {display_width_fragments(line) for line in avatar}
+
+    assert len(widths) == 1
+    assert min_rows <= len(avatar) <= max_rows
+    assert widths.pop() <= max_width
+
+
+def test_bunny_avatar_classes_resolve_to_theme_colors() -> None:
+    """每个像素格的前景/背景类都要在主题里有真实颜色，拼错类名会退化成默认色。"""
+    style = _make_tui_style()
+    defined = {names for names, _value in style.style_rules}
+
+    for line in (*TERMINAL_BUNNY_AVATAR, *TERMINAL_BUNNY_AVATAR_COMPACT):
+        for style_str, text in line:
+            if not style_str:
+                assert not text.strip()
+                continue
+            names = {part.removeprefix("class:") for part in style_str.split()}
+            attrs = style.get_attrs_for_style_str(style_str)
+            assert names <= defined, names - defined
+            assert attrs.color
+            assert bool(attrs.bgcolor) == style_str.endswith("-bg")
+
+
+@pytest.mark.parametrize(
+    ("width", "avatar"),
+    [(58, TERMINAL_BUNNY_AVATAR), (40, TERMINAL_BUNNY_AVATAR_COMPACT), (30, ())],
+)
+def test_narrow_welcome_card_uses_largest_avatar_that_fits(width, avatar) -> None:
+    frame = render_tui_snapshot(
+        _fixture_store().snapshot(),
+        TuiRenderContext(width=width, model_name="MiniMax-M2.7", workspace="/root"),
+    )
+    card = _welcome_card_lines(frame)
+    card_texts = [fragments_text(line) for line in card]
+
+    assert all(display_width_fragments(line) == width for line in card)
+    assert all(any(fragments_text(row) in text for text in card_texts) for row in avatar)
+    if not avatar:
+        # 连紧凑头像都放不下时整幅省略，不输出被裁断的半块字符。
+        assert not _avatar_classes(card)
+        assert not any(char in "".join(card_texts) for char in "▀▄█")
 
 
 @pytest.mark.parametrize("width", [80, 120, 140])

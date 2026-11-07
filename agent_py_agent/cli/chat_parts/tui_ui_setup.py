@@ -1086,11 +1086,12 @@ def _before_tui_render(
 
 
 # LLM: style role 名必须与 block/Markdown renderer 一一对应；颜色是显示主题，不参与状态判断。
+#   tui-avatar-* 是欢迎头像像素画的调色板，每个前景类自动配一个同色 "-bg" 背景类。
 # 函数用途: 定义 TUI 样式表，后台驻留指示器使用亮青色独立强调。
 def _make_tui_style():
     from prompt_toolkit.styles import Style
 
-    return Style.from_dict(
+    style = Style.from_dict(
         {
             "tui-transcript": "",
             "tui-input": "#ffffff",
@@ -1152,6 +1153,24 @@ def _make_tui_style():
             "tui-avatar-dress": "#ff875f bold",
             "tui-avatar-umbrella": "#ff5f5f bold",
             "tui-avatar-bunny": "#ffd7d7",
+            "tui-avatar-ear": "#ffffff",
+            "tui-avatar-ear-shade": "#d0d0d0",
+            "tui-avatar-ear-inner": "#ffafd7",
+            "tui-avatar-hair-shade": "#d7af87",
+            "tui-avatar-hair-light": "#ffffd7",
+            "tui-avatar-hair-tip": "#ffaf87",
+            "tui-avatar-eye": "#5f0000",
+            "tui-avatar-iris": "#af5f00",
+            "tui-avatar-red": "#d70000",
+            "tui-avatar-gold": "#ffaf00",
+            "tui-avatar-shaft": "#af8700",
+            "tui-avatar-skirt": "#5f5f87",
+            "tui-avatar-skirt-fold": "#444444",
+            "tui-avatar-carrot": "#ff8700",
+            "tui-avatar-carrot-shade": "#d75f00",
+            "tui-avatar-grass": "#5faf00",
+            "tui-avatar-grass-light": "#87d75f",
+            "tui-avatar-grass-dark": "#008700",
             "tui-permission-accent": "#d7d7af",
             "tui-permission-title": "#ffffff bold",
             "tui-permission-selected": "#ffffff bg:#3a3a3a",
@@ -1163,6 +1182,17 @@ def _make_tui_style():
             "tui-search-match": "bg:#5f5f00",
             "tui-search-current": "#000000 bg:#ffff5f bold",
         }
+    )
+    # 头像像素画 "▀" 的下半格靠背景色：从同名前景类派生 "<类>-bg"，调色只改上面一处。
+    return Style(
+        [
+            *style.style_rules,
+            *(
+                (f"{name}-bg", "bg:" + value.split()[0])
+                for name, value in style.style_rules
+                if name.startswith("tui-avatar-")
+            ),
+        ]
     )
 
 
