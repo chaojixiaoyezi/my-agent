@@ -573,7 +573,7 @@ class _SchedulerReservationOperations:
             self._write_store_unlocked(store, admission)
         return deepcopy(run)
 
-    # LLM: 先在原事务对账旧副本终态，再用投影排除空轮；退避、规则与活动运行仍在原锁内实时重核。
+    # LLM: 空轮排除不读账本；旧副本终态由恢复在预留前对账；退避、规则与活动运行仍在原锁内重核。
     # 函数用途: 清掉历史已完成的旧活动副本后预约到期计划，无变化不重写账本。
     def reserve_due_runs(
         self,
@@ -584,9 +584,10 @@ class _SchedulerReservationOperations:
     ) -> list[dict[str, object]]:
         self.maintain_history_index()
         current = _now(now)
-        if not self._cheap_due_candidates_exist(now=current) or not _snapshot_due_candidates_exist(self, now=current):
-            if not self._history_terminal_runs(self._store_snapshot(readonly=True)):
-                return []
+        if not self._cheap_due_candidates_exist(now=current):
+            return []
+        if not _snapshot_due_candidates_exist(self, now=current):
+            return []
         reserved: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
         with self._mutation_scope() as (store, admission):

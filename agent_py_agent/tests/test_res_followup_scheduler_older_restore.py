@@ -91,6 +91,7 @@ def test_restored_terminal_run_does_not_block_job(tmp_path, state, entry):
     elif entry == "manual":
         reserved = repository.reserve_manual_run(job_id, now=1005)
     else:
+        repository.recover_interrupted_executions(now=1060)
         runs = repository.reserve_due_runs(now=1060)
         assert len(runs) == 1
         reserved = runs[0]
