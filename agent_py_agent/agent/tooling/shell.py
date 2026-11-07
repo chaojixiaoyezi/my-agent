@@ -785,6 +785,14 @@ def _sandbox_exec(
     protection = write_protection or SandboxWriteProtection()
     owner_text = str(owner_home or "").strip()
     persona_text = str(protected_persona_root or "").strip()
+    anchor_text = owner_text or persona_text
+    if anchor_text and agent_home_root_for_owner(anchor_text) is not None:
+        from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
+
+        anchor = Path(anchor_text).expanduser().absolute()
+        if anchor.is_dir():
+            # 先恢复原声明的私有挂载点，再取按存在性过滤的隐藏投影；内部链接仍须拒绝。
+            ensure_private_dir(anchor.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS), canonical_root=anchor)
     host_paths = _host_sandbox_paths_for(owner_text, persona_text)
     # Full Access is the absence of an owner wall. Persona and control metadata remain more
     # specific read-only overlays; they must not silently downgrade the rest of the filesystem.
