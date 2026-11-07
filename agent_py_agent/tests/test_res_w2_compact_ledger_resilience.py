@@ -455,12 +455,16 @@ def test_cold_fallback_warning_covers_missing_hot_without_duplicates(compact_cas
 # 只替换被测模块的能力表，不删除进程级 os 属性；原 portable 分支仍执行真实文件操作。
 @contextmanager
 def _portable_checkpoint_io(monkeypatch):
-    descriptors, handles, opened_paths = set(), [], {}
+    descriptors, handles, opened_paths, opens = set(), [], {}, []
+    # 无 O_BINARY 的平台注入一个高于全部真实 O_* 的标记位：只记录、不下传，用来核对 Windows 二进制打开。
+    binary = getattr(os, 'O_BINARY', 0) or 1 << max(
+        value.bit_length() for name, value in vars(os).items() if name.startswith('O_') and isinstance(value, int))
 
-    def tracked_open(path, *args, **kwargs):
-        descriptor = os.open(path, *args, **kwargs)
+    def tracked_open(path, flags, *args, **kwargs):
+        descriptor = os.open(path, flags if hasattr(os, 'O_BINARY') else flags & ~binary, *args, **kwargs)
         descriptors.add(descriptor)
         opened_paths[descriptor] = Path(path)
+        opens.append((Path(path), flags))
         return descriptor
 
     def tracked_fdopen(descriptor, *args, **kwargs):
@@ -472,7 +476,7 @@ def _portable_checkpoint_io(monkeypatch):
                                  if key not in {'O_NOFOLLOW', 'O_DIRECTORY'}})
     portable.supports_dir_fd = set()
     portable.open, portable.fdopen = tracked_open, tracked_fdopen
-    portable.opened_paths = opened_paths
+    portable.opened_paths, portable.opens, portable.O_BINARY = opened_paths, opens, binary
     with monkeypatch.context() as patch:
         for module in (checkpoints, nofollow_fs, json_io):
             patch.setattr(module, 'os', portable)
@@ -605,3 +609,16 @@ def test_portable_seal_failure_preserves_head_and_closes_resources(compact_case,
     sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))
     assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
     assert len(list(_copy_path(case, head.compact_checkpoint_id).parent.glob('*.checkpoint.json'))) == 2
+
+
+# Windows 的 os.open 默认文本模式会折叠 CRLF；封尾按字节偏移读写账本，必须经二进制描述符打开。
+def test_portable_seal_opens_ledger_in_binary_mode(compact_case, monkeypatch):
+    case = compact_case
+    _commit(case, 'base')
+    path = _checkpoint_path(case)
+    path.write_bytes(path.read_bytes() + b'{"unfinished":"private')
+    with _portable_checkpoint_io(monkeypatch) as portable:
+        _commit_portable_writer(case, 'transcript', 'portable')
+    sealed = [flags for target, flags in portable.opens
+              if target == path and flags & getattr(os, 'O_ACCMODE', 3) == os.O_RDWR]
+    assert sealed and all(flags & portable.O_BINARY for flags in sealed)
