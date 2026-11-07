@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..runtime_errors import DataCorruptionError
 from .io import read_json_file_report, validated_gateway_request_fingerprint
+from .owner_retention import gateway_terminal_exists
 from .response_renderer import read_gateway_terminal_envelope_report
 
 
@@ -54,9 +55,10 @@ def resume_unroutable_closeout(paths, path, *, admission_gate=None):
 
     if type(admission_gate) is not PersistentAdmission or admission_gate.count <= 0:
         return None
-    if not (paths.terminal / path.name).is_file():
-        return None
     try:
+        # 终态未知沿原 blocked 路径保留责任，不重新准入或执行旧请求。
+        if not gateway_terminal_exists(paths, path.name):
+            return None
         report = read_gateway_terminal_envelope_report(paths.terminal / path.name, request_id=path.stem)
         if report.load_error is not None:
             return "blocked"
@@ -484,7 +486,8 @@ def close_out_unroutable_processing(paths, request_path, payload, context, reaso
             if not unroutable_executor_dead(paths, request_path, payload, context):
                 raise source.rejection("executor_unproven")
             # 已提交终态必须回原settle路径，不覆盖它，即使另一调用刚刚提交。
-            if (paths.terminal / request_path.name).exists():
+            # 终态未知向原收口异常上报，不能另造退休终态覆盖旧结果。
+            if gateway_terminal_exists(paths, request_path.name):
                 from .recovery import _settle_committed_terminal
 
                 result = _settle_committed_terminal(paths, request_path, payload, context)

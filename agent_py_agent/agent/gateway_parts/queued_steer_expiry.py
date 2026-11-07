@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..runtime_errors import DataCorruptionError
 from .io import gateway_request_fingerprint, gateway_turn_transition, read_json_file_report
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths
 from .response_renderer import read_gateway_terminal_envelope_report
 
@@ -251,12 +252,13 @@ def _validate_expiry_reservation(gate, payload):
 # LLM: 早于ordinary准入检查；只补已提交canonical，原提交器RuntimeError冲突同样保留inbox及冲突投影，不中断扫描。
 # 函数用途: 在下一次派发扫描中偿还过期请求的崩溃补交责任。
 def resume_expired_steer(paths: GatewayPaths, path: Path, *, admission_gate: object = None) -> str | None:
-    if not (paths.terminal / path.name).is_file():
-        return None
-    current = read_json_file_report(path)
-    if current.load_error is not None or not current.payload:
-        return "blocked"
     try:
+        # 终态未知交原 blocked 分支，不退回 ordinary 准入重新派发。
+        if not gateway_terminal_exists(paths, path.name):
+            return None
+        current = read_json_file_report(path)
+        if current.load_error is not None or not current.payload:
+            return "blocked"
         if _committed_expiry(paths, current.payload) is None:
             return None
         settled = project_expired_steer(paths, path.stem, admission_gate=admission_gate)

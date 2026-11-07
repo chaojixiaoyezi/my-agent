@@ -243,6 +243,32 @@ def lookup_sealed_receipt(paths, relative: str) -> bytes | None:
         os.close(directory)
 
 
+# LLM: 只核规范路径在已提交封存索引中是否存在，不读段正文；索引损坏原样失败关闭，不能当作不存在。
+# 函数用途: 以同一归档定位器和一次主键查询判断封存回执是否存在。
+def sealed_receipt_exists(paths, relative: str) -> bool:
+    parts = Path(relative).parts
+    if not parts or any(part in ('..', '.') for part in parts) or Path(relative).is_absolute():
+        raise ValueError('invalid_gateway_receipt_path')
+    if not (paths.root / 'archive' / 'receipts-manifest.json').exists():
+        return False
+    try:
+        connection = _receipt_index(paths)
+        try:
+            return connection.execute('SELECT 1 FROM receipts WHERE path=?', (relative,)).fetchone() is not None
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as exc:
+        # SQLite 打开或查询损坏库也必须沿数据损坏通道上报，不能让调用方误判为未终态。
+        raise DataCorruptionError('gateway_archive_index_invalid') from exc
+
+
+# 函数用途: 原件优先判断终态存在；原件缺失时才查同一 Gateway 的封存索引。
+def gateway_terminal_exists(paths, name: str) -> bool:
+    if (paths.terminal / name).is_file():
+        return True
+    return sealed_receipt_exists(paths, str((paths.terminal / name).relative_to(paths.root)))
+
+
 # LLM: 原terminal schema、指纹、投影stamp与settlement事实共同准入；未知/在途/年轻对象一律保留。
 # 函数用途: 在原请求T内捕获一组可封存文件的准确前像。
 def _receipt_bundle(paths, canonical, before):

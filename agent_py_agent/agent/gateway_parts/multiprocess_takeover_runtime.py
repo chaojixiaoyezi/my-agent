@@ -8,6 +8,7 @@ import time
 from contextvars import ContextVar
 
 from ..common.runtime_gate_registry import register_runtime_gate
+from ..runtime_errors import DataCorruptionError
 from . import multiprocess_takeover as p2
 from .multiprocess_coordinator import bind_coordinator_generation, current_coordinator
 from .multiprocess_route import owner_digest
@@ -31,6 +32,7 @@ from .multiprocess_takeover_unresolved_source import (
     UnresolvedExecutorSource,
     unresolved_recheck_state,
 )
+from .owner_retention import gateway_terminal_exists
 
 
 # LLM: 控制器仅附真实锁并保存旧关闭raw；后台无P3权，历史关闭范围不替fresh P2，不靠TTL/心跳/覆盖state解除未知。
@@ -976,11 +978,12 @@ def _processing_request_target(controller, gate, path, ownership):
         if report.load_error is not None or report.payload.get("id") != path.stem or not ownership:
             return None
         if report.payload.get("status") == "pending" and (
-            (gate.paths.inbox / path.name).exists() or (gate.paths.terminal / path.name).exists()
+            (gate.paths.inbox / path.name).exists() or gateway_terminal_exists(gate.paths, path.name)
         ):
             return None
         return original_processing_target(controller.targets, report.payload, owner_digest(ownership[0]))
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, DataCorruptionError):
+        # 终态未知沿原无恢复目标路径退出，不给旧请求重新执行的来源。
         return None
 
 

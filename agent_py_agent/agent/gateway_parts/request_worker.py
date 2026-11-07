@@ -56,6 +56,7 @@ from .io import (
     update_json_file_atomic,
     write_json_file_atomic,
 )
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths, gateway_chunk_path
 from .queue_service import (
     GatewayClaim,
@@ -675,7 +676,9 @@ def _write_admission_wait_field(request_path: Path, fields: dict[str, object], *
         if request_path.parent != paths.inbox:
             return False
         with gateway_turn_transition(paths, request_path.stem):
-            if any((folder / request_path.name).exists() for folder in (paths.processing, paths.terminal, paths.done, paths.failed)):
+            # 终态未知沿原投影失败路径退出，不能给旧请求刷新排队信号。
+            if (gateway_terminal_exists(paths, request_path.name)
+                    or any((folder / request_path.name).exists() for folder in (paths.processing, paths.done, paths.failed))):
                 return False
             from .multiprocess_admission import _runtime_commit_scope
 
@@ -686,7 +689,7 @@ def _write_admission_wait_field(request_path: Path, fields: dict[str, object], *
                     return False
                 update_json_file_atomic(request_path, apply, require_existing=True)
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, DataCorruptionError):
         return False
 
 
@@ -1738,11 +1741,12 @@ def _close_claimed_parent_capabilities(paths, processing_path, request_id, respo
             with gateway_turn_transition(paths, request_id) if source is None else nullcontext():
                 report = read_json_file_report(processing_path)
                 payload = report.payload
+                # 终态未知向原收尾错误上报，不写新的 closeout 证明或推进旧执行。
                 if (report.load_error is not None or payload.get("id") != request_id
                         or payload.get("status") != "processing"
                         or (attempt_id and payload.get("execution_attempt_id") != attempt_id)
                         or (lease_epoch and payload.get("lease_epoch") != lease_epoch)
-                        or (paths.terminal / processing_path.name).exists()):
+                        or gateway_terminal_exists(paths, processing_path.name)):
                     return
                 authority = gateway_runtime_authority(payload, request_id)
                 runtime = payload.get("conversation_runtime")
