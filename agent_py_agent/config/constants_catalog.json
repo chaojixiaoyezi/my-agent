@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1404,
+  "count": 1403,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -6034,14 +6034,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "防长跑进程随历史租户数无界增长(审计 #16)。真·活跃且在限流中的租户是工作集不是泄漏,保留。"
-    },
-    {
-      "name": "LOCAL_STORE_CATCHUP_BATCH_ROWS",
-      "file": "agent_py_agent/agent/local_storage/maintenance.py",
-      "value": 50000,
-      "unit": "行",
-      "category": "其它",
-      "description": "事件积压追平期间单批登记删除的最多事件行数。"
     },
     {
       "name": "LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT",

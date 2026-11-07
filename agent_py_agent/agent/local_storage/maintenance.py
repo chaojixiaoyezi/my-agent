@@ -482,23 +482,13 @@ def _local_events_alignment_needed(conn):
     return not fts_rowid_aligned(conn)
 
 
-def _local_events_extra_work(db_path, max_bytes):
-    """空 SQL 积压仍可有段过期或旧 FTS 对齐工作；只读最旧段的有界尾窗。"""
+def _local_events_extra_work(db_path):
+    """预检只发现封存段和 FTS 责任，段尾读取留给执行步骤以免重复消耗预算。"""
     conn = sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True, timeout=0.0)
     try:
         alignment = _local_events_alignment_needed(conn)
         active = db_path.parent / 'events.jsonl'
-        segments = [path for path in iter_event_jsonl_paths(active) if path != active]
-        if not segments:
-            return alignment, False, 0, []
-        path = segments[0]
-        try:
-            event_id, _size, scanned = _event_segment_tail(path, max_bytes)
-        except (OSError, ValueError, RecursionError) as error:
-            return alignment, True, getattr(error, 'scanned_bytes', 0), [
-                {'code': 'event_segment_tail_unreadable', 'path': path.name}]
-        due = event_id is None or conn.execute('SELECT 1 FROM events WHERE event_id=?', (event_id,)).fetchone() is None
-        return alignment, due, scanned, []
+        return alignment, any(path != active for path in iter_event_jsonl_paths(active))
     finally:
         conn.close()
 
@@ -512,6 +502,7 @@ def _local_events_advance(store, request, snapshot, budget, receipt, *, segments
     backlog, resumable = snapshot[:2]
     deleted_db = deleted_jsonl = 0
     scanned_bytes = receipt['bytes']
+    segments_pending = segments_due
     if backlog or resumable or segments_due:
         for step in range(LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT):
             if step and (budget.remaining_ms() <= 0 or budget.exhausted(size=scanned_bytes)):
@@ -525,6 +516,7 @@ def _local_events_advance(store, request, snapshot, budget, receipt, *, segments
             deleted_db += result["deleted_db"]
             deleted_jsonl += result["deleted_jsonl"]
             scanned_bytes += result["scanned_bytes"]
+            segments_pending = result['partial']
             backlog = max(0, backlog - result["deleted_db"])
             receipt.update(deleted_items=deleted_db, bytes=scanned_bytes, backlog=backlog)
             if result.get('errors'):
@@ -539,7 +531,7 @@ def _local_events_advance(store, request, snapshot, budget, receipt, *, segments
         vacuum = store.incremental_vacuum_step(allow_convert=not request.coordinator)
     with store._connection() as conn:
         after = _local_events_snapshot(conn, store.db_path)
-    return deleted_db, deleted_jsonl, scanned_bytes, vacuum, after
+    return deleted_db, deleted_jsonl, scanned_bytes, vacuum, after, segments_pending
 
 
 # LLM: owner发现器是唯一路径来源；空闲预检不构造Store，实际维护只沿LocalStore原_local_write写门。
@@ -613,11 +605,7 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
         event_work = snapshot is not None and bool(snapshot[0] or snapshot[1])
         alignment_work = segment_work = False
         if snapshot is not None:
-            read_budget = min(request.budget.max_bytes if request.budget.max_bytes is not None else STORAGE_LANE_SLICE_BYTES,
-                              STORAGE_LANE_SLICE_BYTES)
-            alignment_work, segment_work, scanned, errors = _local_events_extra_work(db_path, read_budget)
-            receipt['bytes'] = scanned
-            receipt['errors'] = (receipt['errors'] + errors)[:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]
+            alignment_work, segment_work = _local_events_extra_work(db_path)
         vacuum = {"performed": False, "deferred_reason": "below_threshold"}
         vacuum_work = snapshot is not None and bool(snapshot[3] or _local_store_vacuum_due(snapshot[2]))
         if vacuum_work and snapshot[2][0] == 0:
@@ -642,7 +630,7 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
                     store = LocalStore(db_path, **({"coordinator_io": True} if request.coordinator else {}))
                 finally:
                     _FTS_BATCH_LIMITS.reset(token)
-                deleted, mirrored, scanned, vacuum, after = _local_events_advance(
+                deleted, mirrored, scanned, vacuum, after, segments_pending = _local_events_advance(
                     store, request, snapshot, budget, receipt, segments_due=segment_work)
                 if store.fts_available and budget.remaining_ms() > 0 and scanned < budget.max_bytes:
                     with store._connection() as conn:
@@ -658,7 +646,8 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
                     raise source_failure[0]
             receipt.update(deleted_items=deleted, bytes=scanned,
                            freed_bytes=vacuum.get("released_pages", 0) * after[2][3])
-            cycle_pending = cycle_pending or initial_work or bool(deleted or mirrored or vacuum.get("performed"))
+            cycle_pending = cycle_pending or event_work or vacuum_work or alignment_work or bool(
+                deleted or mirrored or segments_pending or vacuum.get("performed"))
             snapshot = after
         receipt["backlog"] = snapshot[0]
         pending = bool(snapshot[0] or snapshot[1] or snapshot[3] or _local_store_vacuum_due(snapshot[2]))
@@ -817,7 +806,7 @@ def _select_prunable_event_ids(conn, before: float, keep_last: int, max_delete: 
     return selected
 
 
-# LLM: 同一维护事务端口，不另开写者；C已持events锁，普通模式仍按DB→JSONL锁序。
+# LLM: 同一维护事务端口，不另开写者；SQL提交后才进行独立的段级文件操作。
 # 函数用途: 提交一个可恢复事件维护步骤。
 def _event_step_transaction(store, operation):
     if store.coordinator_io:
@@ -834,8 +823,8 @@ _EVENT_STEP_PROBE_BYTES = 4096
 _EVENT_STEP_TEMP_NAME = re.compile(r"\.events-prune-[a-zA-Z0-9_-]+\.step")
 
 
-# LLM: 有效游标沿用其原登记目标，不扩大或改换集合；并发新登记的pending留给下一批，SQL删除与原pending同事务。
-# 函数用途: 仅在没有未完成流式批次时选择新的一批旧事件，续扫批次保持原目标归属。
+# LLM: 存量游标不再恢复逐行重写，SQL始终选择当次事务中的有界seq前缀。
+# 函数用途: 沿同一事务准备本拍删除，旧恢复账交给段级步骤消化。
 def _event_step_prepare(conn, options):
     return _prepare_event_prune(conn, options)
 
@@ -1081,8 +1070,8 @@ def _event_step_locked_eof(store, source, job, windows):
     return size
 
 
-# LLM: 调用方已释放JSONL锁（C模式按原JSONL→SQLite序由step锁持有），同类step串行；发表成功后才清本游标原目标pending。
-# 函数用途: 在短SQL事务里发布本拍流式位置或完成确认，不清并发新增目标。
+# LLM: 完成态只消化旧pending/游标；新生产路径不再写部分逐行位置。
+# 函数用途: 在短SQL事务里清理旧恢复账，保留原私有调用接口。
 def _event_step_save(conn, job, targets):
     if job is None:
         conn.execute("DELETE FROM metadata WHERE key IN ('events_prune_cursor', ?)", (_EVENTS_PRUNE_PENDING_KEY,))
