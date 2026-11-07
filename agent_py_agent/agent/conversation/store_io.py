@@ -310,6 +310,12 @@ def _touch_node(root, parts, raw):
         fs.write_bytes_atomic_beneath(root, parts, raw)
 
 
+# LLM: 只区分已确认缺失的节点；不将digest、长度、形状或危险路径错误重新归类为空索引。
+# 类用途: 让有限恢复入口辨识数据丢失，其余OSError调用者仍按原错误处理。
+class ImmutableIndexNodeMissing(FileNotFoundError):
+    pass
+
+
 # LLM: 内容寻址索引只存储调用领域给出的不可变投影，根引用必须由原CAS封印；不创建业务提交权威。
 # 类用途: 为有界热清单提供共享历史节点的固定深度键索引。
 class ImmutableJsonIndex:
@@ -336,7 +342,7 @@ class ImmutableJsonIndex:
         candidates = [value for value in values if isinstance(value, dict) and type(value.get('generation')) is int]
         return max(candidates, key=lambda value: value['generation'], default=None)
 
-    # LLM: 根由原领域清单封印，子引用由父节点SHA绑定；路径、长度及hash均严格检查，不容忍缺失节点。
+    # LLM: 根及子引用原封印不变；缺字节用专用FileNotFoundError区分，路径、长度及hash错误仍拒绝。
     # 函数用途: 从私有no-follow目录读取一个有界不可变节点。
     def _load(self, reference):
         from ..common.nofollow_fs import read_bytes_beneath
@@ -351,7 +357,9 @@ class ImmutableJsonIndex:
                 or type(size) is not int or not 0 < size <= 1024 * 1024 or ref['ref'] != f'{digest}.json'):
             raise OSError('immutable index reference is invalid')
         raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
-        if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+        if raw is None:
+            raise ImmutableIndexNodeMissing('immutable index node is missing')
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
             raise OSError('immutable index node digest or length mismatches')
         try:
             node = json.loads(raw)

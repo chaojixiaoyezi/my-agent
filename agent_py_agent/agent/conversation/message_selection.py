@@ -5,11 +5,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import threading
 from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from itertools import chain
 from pathlib import Path
 from types import MappingProxyType
 
@@ -18,6 +20,7 @@ from .compact_guard import raise_if_compact_interrupted
 from .display_checkpoint import is_display_checkpoint
 from .message_replay import MessageRowAddress, MessageSnapshotRows
 from .message_scan import (
+    TranscriptColdSegmentMissing,
     TranscriptReader,
     _dedupe_tail_anchor,
     _message_from_line,
@@ -26,7 +29,9 @@ from .message_scan import (
 )
 from .message_scan import scan_message_snapshot as scan_message_snapshot
 from .models import MessageLogEntry
-from .store_io import json_row, jsonl_error
+from .store_io import ImmutableIndexNodeMissing, json_row, jsonl_error
+
+logger = logging.getLogger(__name__)
 
 MessageSelectorFactory = Callable[[Mapping[str, int]], Callable[[MessageLogEntry], bool]]
 
@@ -287,12 +292,12 @@ def select_message_snapshot(
     return MessageSnapshotRows(path, thread_id, through, identity, tuple(selected), interrupt_check)
 
 
-# LLM: 不存在的canonical仍执行原factory/取消和legacy锚点合同；回调创建或替换来源不能重绑定原空快照。
+# LLM: 已丢失的canonical不再要求旧锚点存在；仍执行factory/取消，回调创建来源不能重绑定空快照。
 # 函数用途: 选择空历史时保留回调与拒绝语义，不创建文件或缓存。
 def _empty_message_snapshot(path, thread_id, selector_factory, exclude_ends, interrupt_check):
     raise_if_compact_interrupted(interrupt_check)
     if exclude_ends:
-        raise OSError("legacy compact source boundary is missing from canonical history")
+        logger.warning("TRANSCRIPT_ABSENT_LEGACY_BOUNDARY_IGNORED thread=%s", thread_id)
     predicate = selector_factory(MappingProxyType({})) if selector_factory is not None else None
     if _file_identity(path) is not None:
         raise DataCorruptionError("canonical message source changed during selection")
@@ -313,11 +318,14 @@ def _verify_selection_source(path, identity, through, digest):
         raise DataCorruptionError("canonical message source changed during selection")
 
 
-# LLM: 所有物理行都先验证，display也不能藏跨thread行；不把错误、空ID或重复身份当过滤结果。
+# LLM: 仅无对象身份的JSON/UTF8坏行可跳过；model错误、跨thread、空ID及重复身份仍拒绝。
 # 函数用途: 构造完整非展示身份表，供范围锚点及legacy覆盖选择。
 def _validated_positions(index: _PositionIndex, thread_id: str) -> dict[str, int]:
-    if index.errors:
+    if any(model_only for _, _, model_only in index.errors):
         raise DataCorruptionError("invalid canonical message row")
+    if index.errors:
+        logger.warning("JSONL_ROW_SKIPPED context=conversation.messages.select thread=%s lines=%s",
+                       thread_id, ','.join(str(number) for number, _, _ in index.errors))
     positions = {}
     for item in index.entries:
         if item.thread_id != thread_id:
@@ -373,7 +381,7 @@ def _layout_digest(manifest):
     return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode('utf-8')).digest()
 
 
-# LLM: 只有当前可读摘要不能证明冷前缀已覆盖时才显式扫描；先验全部身份，再执行原factory与精确排除。
+# LLM: 未覆盖来源仅跳过已确认丢失的冷区间与非对象坏行；身份/内容错误仍拒绝，幸存原字节复核不省略。
 # 函数用途: 为provider/scope切换恢复真实未覆盖历史，返回可反复校验的逻辑地址快照。
 def _select_segmented_snapshot(path, thread_id, *, selector_factory, exclude_message_ids,
                                exclude_through_message_ids, retain_limit, interrupt_check):
@@ -382,18 +390,39 @@ def _select_segmented_snapshot(path, thread_id, *, selector_factory, exclude_mes
         identity = (stamp.st_dev, stamp.st_ino)
         layout = _layout_digest(reader.manifest)
         entries, positions, digest = [], {}, hashlib.sha256()
+        gaps = []
         while reader.tell() < reader.end:
             raise_if_compact_interrupted(interrupt_check)
             offset = reader.tell()
-            raw = reader.readline()
+            try:
+                raw = reader.readline()
+            except (TranscriptColdSegmentMissing, ImmutableIndexNodeMissing) as exc:
+                end = exc.end if isinstance(exc, TranscriptColdSegmentMissing) else reader.base
+                reader.seek(end)
+                gaps.append((offset, end))
+                logger.warning("TRANSCRIPT_COLD_LAYER_MISSING thread=%s op=select skipped_to=%s", thread_id, end)
+                continue
             digest.update(raw)
-            row = _message_from_line(raw, thread_id, skip_blank=True)
+            try:
+                row = _message_from_line(raw, thread_id, skip_blank=True)
+            except DataCorruptionError:
+                try:
+                    is_object = isinstance(json.loads(raw), dict)
+                except (ValueError, UnicodeError):
+                    is_object = False
+                if is_object:
+                    raise
+                logger.warning("JSONL_ROW_SKIPPED context=conversation.messages.select thread=%s offset=%s",
+                               thread_id, offset)
+                continue
             if row is None or is_display_checkpoint(row):
                 continue
             if not row.message_id or row.message_id in positions:
                 raise DataCorruptionError('canonical message identities are missing or repeated')
             positions[row.message_id] = len(positions)
             entries.append(MessageRowAddress(offset, len(raw), hashlib.sha256(raw).digest()))
+        if gaps:
+            exclude_through_message_ids = tuple(end for end in exclude_through_message_ids if end in positions)
         if any(end not in positions for end in exclude_through_message_ids):
             raise OSError('legacy compact source boundary is missing from canonical history')
         covered_end = max((positions[end] for end in exclude_through_message_ids), default=-1)
@@ -415,7 +444,22 @@ def _select_segmented_snapshot(path, thread_id, *, selector_factory, exclude_mes
                 selected.append(address)
         reader.cached = None
         if (_file_identity(path) != identity or _layout_digest(transcript_manifest(path)) != layout
-                or _prefix_hasher(reader, reader.end).digest() != digest.digest()):
+                or _surviving_source_digest(reader, gaps, interrupt_check) != digest.digest()):
             raise DataCorruptionError('canonical message source changed during selection')
         return _SegmentedMessageSnapshotRows(path, thread_id, reader.end, identity, tuple(selected),
                                              interrupt_check, layout)
+
+
+# LLM: 只跳首次扫描已确认的缺口；其它范围仍逐字节复核，复核时新增丢失或损坏不得被吞掉。
+# 函数用途: 对幸存冷段和热尾做有界分块hash，保留回调后的完整来源一致性检查。
+def _surviving_source_digest(reader, gaps, interrupt_check):
+    if not gaps:
+        return _prefix_hasher(reader, reader.end).digest()
+    reader.seek(0)
+    digest = hashlib.sha256()
+    for start, end in chain(gaps, ((reader.end, reader.end),)):
+        while reader.tell() < start:
+            raise_if_compact_interrupted(interrupt_check)
+            digest.update(reader.read(min(65536, start - reader.tell())))
+        reader.seek(end)
+    return digest.digest()

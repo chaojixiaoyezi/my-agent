@@ -91,12 +91,13 @@ def test_summary_view_does_not_retain_all_checkpoint_bodies(compact_case, commit
 
 
 @pytest.mark.parametrize('bad', [b'{', b'[]\n', b'null\n', b'\xff\n'])
-def test_bad_orphan_is_not_hidden_by_committed_head(compact_case, bad):
+def test_bad_orphan_is_not_hidden_by_committed_head(compact_case, bad, caplog):
     thread = _ledger(compact_case)
     with _checkpoint_path(compact_case).open('ab') as handle:
         handle.write(bad)
-    with pytest.raises(OSError, match='ledger is unreadable'):
-        resolve_compact_summary_view(compact_case.agent, thread, THREAD_COMPACT_SCOPE)
+    view = resolve_compact_summary_view(compact_case.agent, thread, THREAD_COMPACT_SCOPE)
+    assert view.checkpoint_id == 'legacy-1' and view.summary.startswith('摘要-0')
+    assert 'COMPACT_LEDGER_ROW_SKIPPED' in caplog.text
 
 
 @pytest.mark.parametrize('ending', [b'\n', b'\r\n', b''])
@@ -136,7 +137,7 @@ def test_scanned_selected_row_changed_before_lookup_is_rejected(compact_case, ch
             lookup('legacy-1')
 
 
-def test_late_append_is_outside_fixed_snapshot(compact_case):
+def test_late_append_is_outside_fixed_snapshot(compact_case, caplog):
     from agent_py_agent.agent.conversation.compact_checkpoint_scan import checkpoint_row_lookup
 
     _ledger(compact_case)
@@ -146,9 +147,9 @@ def test_late_append_is_outside_fixed_snapshot(compact_case):
         with path.open('ab') as handle:
             handle.write(b'{')
         assert lookup('legacy-1') == expected
-    with pytest.raises(OSError, match='ledger is unreadable'):
-        with checkpoint_row_lookup(path):
-            pass
+    with checkpoint_row_lookup(path) as fresh:
+        assert fresh('legacy-1') == expected
+    assert 'COMPACT_LEDGER_ROW_SKIPPED' in caplog.text
 
 
 def test_unselected_committed_summary_still_validated_and_file_closed(compact_case, monkeypatch):

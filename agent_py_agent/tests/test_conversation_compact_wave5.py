@@ -148,10 +148,10 @@ def test_mid_selection_corruption_guard(conversation, callback, mutation):
                                 interrupt_check=mutate if callback == "interrupt" else None)
 
 
-# LLM: 64KiB锚仍相同的前缀改写必须使位置索引冷扫；过滤不能掩盖损坏。
-# 函数用途: 验证中段改写加追加既刷新合法内容，也拒绝坏行。
+# LLM: 64KiB锚仍相同的前缀改写必须使索引冷扫；非对象坏行按D-1告警跳过，身份/冻结来源守卫不变。
+# 函数用途: 验证中段改写加追加刷新合法内容，坏行后的幸存消息仍完整保留。
 @pytest.mark.parametrize("bad", [False, True])
-def test_rewrite_before_tail_anchor_invalidates_index(conversation, bad):
+def test_rewrite_before_tail_anchor_invalidates_index(conversation, bad, caplog):
     store, tid = conversation
     path = store.storage.message_path(tid)
     before = encoded(tid, 0, content="original") + encoded(tid, 1, content="x" * 80000)
@@ -161,8 +161,11 @@ def test_rewrite_before_tail_anchor_invalidates_index(conversation, bad):
     assert changed[-65536:] == before[-65536:]
     path.write_bytes(changed + encoded(tid, 2))
     if bad:
-        with pytest.raises(DataCorruptionError):
-            select_message_snapshot(store.messages, tid)
+        selected = select_message_snapshot(store.messages, tid)
+        assert [(row.message_id, row.content) for row in selected] == [("m-1", "x" * 80000), ("m-2", "原文")]
+        assert any(record.name == message_selection.__name__ and record.getMessage() ==
+                   f"JSONL_ROW_SKIPPED context=conversation.messages.select thread={tid} lines=1"
+                   for record in caplog.records)
     else:
         assert select_message_snapshot(store.messages, tid)[0].content == "tampered"
 
@@ -379,15 +382,18 @@ def test_compact_two_layers_scope_backend_and_deepcopy(tmp_path, monkeypatch):
     assert len(calls) == 1 and path.exists()
 
 
-# LLM: 原head不变而账本有追加也必须重验所有JSON，不能用L1或L2掩盖坏orphan。
+# LLM: 原head不变而账本有追加也必须重验；非对象orphan按D-1告警跳过，不能因缓存命中漏报。
 # 函数用途: 验证Compact缓存按完整文件版本而非仅head失效。
-def test_compact_append_bad_orphan_invalidates_both_layers(tmp_path):
+def test_compact_append_bad_orphan_invalidates_both_layers(tmp_path, caplog):
     agent, thread, path, scope, _rows = compact_case(tmp_path)
-    assert summaries.resolve_compact_summary_view(agent, thread, scope).summary
+    expected = summaries.resolve_compact_summary_view(agent, thread, scope)
+    assert expected.summary
     with path.open("ab") as handle:
         handle.write(b"bad orphan\n")
-    with pytest.raises(OSError, match="unreadable"):
-        summaries.resolve_compact_summary_view(agent, thread, scope)
+    assert summaries.resolve_compact_summary_view(agent, thread, scope) == expected
+    digest = hashlib.sha256(b"bad orphan\n").hexdigest()[:16]
+    warning = f"COMPACT_LEDGER_ROW_SKIPPED bytes=11 sha256={digest}"
+    assert any(record.name == checkpoints.__name__ and record.getMessage() == warning for record in caplog.records)
 
 
 # LLM: 稳定偏移缓存省去首次全文件解析，但每次lookup仍hash；近期文件不读取旧缓存。
