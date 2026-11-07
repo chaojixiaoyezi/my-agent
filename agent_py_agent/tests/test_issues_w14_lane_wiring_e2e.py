@@ -28,7 +28,9 @@ from agent_py_agent.agent.conversation.models import ConversationCompactCommit
 from agent_py_agent.agent.conversation.session_task_report import result_report_key
 from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft, SessionTaskUpdate
 from agent_py_agent.agent.conversation.store_io import ImmutableJsonIndex
+from agent_py_agent.agent.gateway_parts import gateway_history_index
 from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
+from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.local_storage import maintenance as local_maintenance
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
@@ -53,6 +55,7 @@ from agent_py_agent.agent.user_space.owner_resolver import (
     ensure_owner_home,
     home_paths_with_owner,
 )
+from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
 from agent_py_agent.agent.user_space.storage_lanes import LANE_BINDINGS, validate_lane_receipt
 from agent_py_agent.cli import gateway_loops
 
@@ -253,7 +256,7 @@ def _live_owner(home, now, *, managed_process=True):
 
 @pytest.fixture
 def lane_world(tmp_path, monkeypatch):
-    """只缩小转录切片及事件保留数量，真实生成十种到期样本并保留原策略/算法。"""
+    """只缩小转录切片及事件保留数量，真实生成通道到期样本并保留原策略/算法。"""
     monkeypatch.setattr(message_scan, 'TRANSCRIPT_ROTATE_BYTES', 1024)
     monkeypatch.setattr(message_scan, '_TRANSCRIPT_SEGMENT_BYTES', 1024)
     monkeypatch.setattr(local_maintenance, 'STEADY_STATE_EVENTS_KEEP_LAST', 3)
@@ -287,6 +290,20 @@ def lane_world(tmp_path, monkeypatch):
     update_json_file_atomic(wake_path, lambda row: {**row, 'handled_at': now - 15 * 86400}, require_existing=True)
     log = _process_log(home, now, session_id='bg-due', terminal=True)
 
+    gateway_root = runtime_paths_for_agent(None, home.owner_home_dir, home)['gateway_workspace']
+    history = gateway_history_index.GatewayHistoryIndex(gateway_paths_from_root(gateway_root))
+    # 兼容热段已满后，由真实 writer 生成过期日段，避免空历史库跳过写门。
+    with history.connection() as conn:
+        history._set_meta(conn, 'compat_count', 128)
+    history_time = now - (MemoryRetentionPolicy().audit_days + 1) * 86400
+    history_payload = {'id': 'expired-gateway-request', 'status': 'done', 'ended_at': history_time}
+    with monkeypatch.context() as patch:
+        patch.setattr(gateway_history_index, 'time', SimpleNamespace(time=lambda: history_time))
+        assert history.append(history_payload)
+    history_day = datetime.fromtimestamp(history_time, timezone.utc).strftime('%Y-%m-%d')
+    history_segment = gateway_root / 'history_segments' / (history_day + '.jsonl')
+    assert history.get(history_payload['id']) == history_payload and history_segment.is_file()
+
     local = LocalStore(home.owner_workspace_dir / 'runtime/workspaces/fixture/local_store/local.db')
     with local.connection_batch():
         events = [local.record_event('fixture', payload={'number': number, 'padding': '原事件' * 2000}).event_id
@@ -308,7 +325,8 @@ def lane_world(tmp_path, monkeypatch):
     return SimpleNamespace(home=home, now=now, live=live, second=second, retired=retired,
         retired_tree=retired_tree, active=active, messages=messages, orphan=orphan_path,
         archive=archive, wake=wake, wake_path=wake_path, log=log, local=local, events=events,
-        projection=projection, task=task, output=output, evolution=evolution)
+        event_jsonl=local.events_path.read_bytes(), history=history, history_payload=history_payload,
+        history_segment=history_segment, projection=projection, task=task, output=output, evolution=evolution)
 
 
 def _assert_live(owner):
@@ -335,7 +353,11 @@ def _assert_retired(world):
     with sqlite3.connect(world.local.db_path) as conn:
         ids = [row[0] for row in conn.execute('SELECT event_id FROM events ORDER BY seq')]
     assert ids == world.events[-3:]
-    assert [json.loads(line)['event_id'] for line in world.local.events_path.read_text().splitlines()] == ids
+    # SQLite 裁剪不重写活跃追加文件，封存前仍保留完整原事件。
+    assert world.local.events_path.read_bytes() == world.event_jsonl
+    assert [json.loads(line)['event_id'] for line in world.event_jsonl.splitlines()] == world.events
+    assert world.history.get(world.history_payload['id']) is None
+    assert not world.history_segment.exists()
     assert not (world.projection / 'events.jsonl').exists()
     assert (world.projection / 'subagent_compact.json').is_file()
     task = world.live.store.session_tasks.require(world.task.task_id)
@@ -506,9 +528,9 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
         now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] else
             MemoryRetentionPolicy().maintenance_interval_seconds)
     else:
-        pytest.fail('真实控制器未在有界拍数内消费宽限证明并重新走完十种车道')
+        pytest.fail('真实控制器未在有界拍数内消费宽限证明并重新走完全部登记车道')
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
-    assert repeated_all, '完成首轮覆盖后，必须有后续一拍再次报告全部十种车道'
+    assert repeated_all, '完成首轮覆盖后，必须有后续一拍再次报告全部登记车道'
     _assert_retired(world)
     assert owner_logical_usage_bytes(world.home.owner_home_dir, exact=True) < before

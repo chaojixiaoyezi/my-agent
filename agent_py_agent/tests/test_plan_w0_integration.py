@@ -402,8 +402,9 @@ def test_recovery_barrier_allows_healthy_batch_and_bounded_maintenance(tmp_path,
 
     monkeypatch.setattr(candidate_ledger, "write_private_text_file_atomic_unlocked", observe_write)
     local = LocalStore(agent.home_paths.owner_home_dir / "local.db", enable_fts=False)
-    for index in range(8):
-        local.record_event("w0", payload={"index": index, "padding": "x" * 80})
+    events = [local.record_event("w0", payload={"index": index, "padding": "x" * 80}).event_id
+              for index in range(8)]
+    active_events = local.events_path.read_bytes()
 
     # LLM: 真正执行候选批次与首拍清理，返回有界扫描事实，不伪造成功计数。
     # 函数用途: 将记忆和存储两个片的实际业务放入健康任务。
@@ -450,16 +451,15 @@ def test_recovery_barrier_allows_healthy_batch_and_bounded_maintenance(tmp_path,
     durable = operations.get_tool_operation(owner_id=agent.home_paths.owner_id,
         run_id="w0-healthy-run", operation_id=operation_id)
     assert durable.status == "succeeded" and durable.attempt_id == healthy["attempt_id"]
-    assert steps[0]["partial"] and steps[0]["scanned_bytes"] <= 128
-    for _tick in range(64):
-        if not steps[-1]["partial"]:
-            break
-        steps.append(LocalStore(local.db_path, enable_fts=False).prune_events_step(
-            before=clock.now + 1, keep_last=2, max_delete=2, max_bytes=128))
-    assert not steps[-1]["partial"] and all(row["scanned_bytes"] <= 128 for row in steps)
-    assert sum(row["expired_rows"]["deleted"] for row in steps) == 2
-    assert all(not row["physical_shrink"]["performed"] for row in steps)
-    assert len(local.events_path.read_text().splitlines()) == 6
+    # 无封存段时首拍即可完成；行数预算仍生效，活跃 JSONL 不参与扫描或重写。
+    assert len(steps) == 1
+    report = steps[0]
+    assert not report["partial"] and report["scanned_bytes"] <= 128
+    assert report["errors"] == [] and report["expired_rows"]["deleted"] == 2
+    assert report["removed_segments"] == 0 and not report["physical_shrink"]["performed"]
+    assert [row.event_id for row in local.timeline(limit=8)] == list(reversed(events[2:]))
+    assert local.events_path.read_bytes() == active_events
+    assert [json.loads(line)["event_id"] for line in active_events.splitlines()] == events
     assert guard.block_for_task(params.task_id) == original_block
     assert scheduler.store.wakes.pending_one(signal.wake_signal_id) is not None
     assert len(repo.attempts_for_run(record["agent_run_id"])) == 1

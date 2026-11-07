@@ -47,7 +47,7 @@ def lane_home(tmp_path, monkeypatch):
     return ensure_my_agent_home(tmp_path / 'home')
 
 
-# 函数用途: 固定前32项的顺序与新增四类的元数据，不把登记当作删除许可。
+# 函数用途: 固定前32项的顺序与后续新增类别的元数据，不把登记当作删除许可。
 def test_registry_appends_four_kinds_without_changing_original_order():
     original = ('long_term', 'candidates', 'memory_operations', 'vector_cache', 'raw_memory_audit', 'daily_curator',
         'conversation_messages', 'compact_checkpoints', 'context_bundles', 'tool_outputs', 'local_records', 'local_events',
@@ -55,11 +55,12 @@ def test_registry_appends_four_kinds_without_changing_original_order():
         'security_audit', 'skill_usage', 'skill_registry', 'installed_versions', 'task_workspaces', 'subagents',
         'capability_grants', 'media_inputs', 'persona_versions', 'outbox_delivery', 'process_sessions', 'cache_tmp_trash',
         'legacy_layout', 'session_pair_rate')
+    appended = ('display_archives', 'conversation_ledgers', 'asset_auxiliary', 'session_task_payloads',
+        'runtime_history', 'gateway_history')
     registry = home_retention.storage_kind_registry()
-    assert len(registry) == len({kind.kind for kind in registry}) == 36
+    assert len(registry) == len({kind.kind for kind in registry}) == len(original) + len(appended)
     assert tuple(kind.kind for kind in registry[:32]) == original
-    assert tuple(kind.kind for kind in registry[32:]) == (
-        'display_archives', 'conversation_ledgers', 'asset_auxiliary', 'session_task_payloads')
+    assert tuple(kind.kind for kind in registry[32:]) == appended
     for kind in registry[32:]:
         assert kind.scope and kind.authority and kind.policy_ref and kind.protected_refs and kind.actions
         with pytest.raises(LookupError):
@@ -98,7 +99,7 @@ def test_lane_dto_budget_and_run_write(monkeypatch, lane_home):
     assert direct.run_write(lambda: value) is value
 
 
-# 函数用途: 缺失的十个通道均有保留回执，不制造未绑定类别或永久续作。
+# 函数用途: 所有缺失通道均有保留回执，不制造未绑定类别或永久续作。
 def test_all_missing_lanes_fall_back_and_finish(lane_home):
     state = _run(lane_home)
     for _ in range(8):
@@ -107,7 +108,7 @@ def test_all_missing_lanes_fall_back_and_finish(lane_home):
         state = _run(lane_home, {'storage_maintenance': state})
     assert state['unbound_kinds'] == [] and not state['continuation_pending']
     assert state['lane_fallback_kinds'] == sorted(storage_lanes.LANE_BINDINGS)
-    assert len(state['lane_fallback_kinds']) == 10 and state['lane_reports'] == {}
+    assert state['lane_reports'] == {}
 
 
 # 函数用途: 验证单进程DTO、hold透传和真实调度器发布的游标与可选计量。
