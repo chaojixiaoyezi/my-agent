@@ -100,7 +100,9 @@ class OAuthResponsesBackend(_OAuthMixin, OpenAIResponsesBackend):
     #   会话池使用宿主身份及实际刷新凭据生成隔离键；TTL/容量只传给Responses，不改变其它登录协议。
     # 函数用途: 按登录模式选择流式传输：订阅账号走隔离会话WebSocket，其余走原SSE。
     def request_stream_iter(self, path, payload, headers, *, options=None):
-        if self.auth_ref["mode"] != "chatgpt":
+        from ..settings.model_oauth_schema import SIWC_BASE
+
+        if self.auth_ref["mode"] != "chatgpt" or self.api_base == SIWC_BASE:
             return super().request_stream_iter(path, payload, headers, options=options)
         from .responses_websocket import iter_responses_websocket
 

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from ..backends import get_backend
 from ..backends.gateway_helpers import GatewayRequest, get_json
 from ..backends.provider_headers import provider_runtime_scope, request_headers
-from .model_oauth_schema import CHATGPT_CATALOG_CLIENT_VERSION
+from .model_oauth_schema import CHATGPT_CATALOG_CLIENT_VERSION, SIWC_BASE
 from .model_provider_schema import (
     ModelProfileError,
     resolved_model,
@@ -20,7 +20,7 @@ from .model_provider_schema import (
 from .shared_model_catalog import resolve_shared_model, shared_profile_key
 
 
-# LLM: 目录只投影 ID/显式容量；OAuth 只在显式动作解析引用。ChatGPT 订阅读订阅接口自己的 /models 目录（不猜普通 /v1/models）。
+# LLM: 目录只投影ID/显式容量；OAuth只在显式动作解析引用。SIWC读公开models，旧Codex保留带版本的原目录。
 # 函数用途: 读取服务商模型目录，供用户挑选后填写接口和上下文；订阅账号直接给出可一键添加的完整条目。
 def _discover(provider: dict, *, auth_ref: dict | None = None) -> dict:
     account_headers = {}
@@ -54,18 +54,20 @@ def _discover(provider: dict, *, auth_ref: dict | None = None) -> dict:
 
 
 # LLM: 只读订阅目录的结构化字段（slug、display_name、context_window、visibility），服务商标成隐藏的不列；
-#   带账号头与令牌、不跟随重定向；容量不合法的条目不给出，避免一键添加出无效模型。一次 GET，不调用模型、不写配置。
+#   旧Codex沿原账号头与版本，SIWC可返回未报告容量供手动确认；两者不跟随重定向，只读一次GET，不调用模型。
 # 函数用途: 列出 ChatGPT 订阅账号可用的模型（名称、显示名、上下文），供 TUI 勾选后直接添加。
 def _subscription_catalog(provider: dict, key: str, account_headers: dict) -> dict:
     headers = request_headers({"Authorization": "Bearer " + key, "Accept": "application/json", **account_headers},
                               provider["custom_headers"], provider["session_header"])
+    direct = provider["api_base"] == SIWC_BASE
     obj = get_json(GatewayRequest(api_base=provider["api_base"], api_key=key,
-                                  path="/models?client_version=" + CHATGPT_CATALOG_CLIENT_VERSION, payload={},
+                                  path="/models" if direct else "/models?client_version=" + CHATGPT_CATALOG_CLIENT_VERSION, payload={},
                                   headers=headers, timeout=15, connect_timeout=8, allow_redirects=False))
-    items = obj.get("models") if isinstance(obj, dict) else None
+    items = obj.get("models", obj.get("data")) if direct and isinstance(obj, dict) else obj.get("models") if isinstance(obj, dict) else None
     if not isinstance(items, list):
         raise ModelProfileError("订阅接口没有返回模型列表，请稍后重试。")
-    rows = [_subscription_row(item) for item in items[:500] if isinstance(item, dict) and item.get("visibility") != "hide"]
+    rows = [_subscription_row(item, allow_missing_window=direct) for item in items[:500]
+            if isinstance(item, dict) and item.get("visibility") != "hide"]
     rows = [row for row in rows if row]
     return {"ok": True, "models": rows, "message": f"这个账号可用 {len(rows)} 个模型。"}
 
@@ -73,11 +75,14 @@ def _subscription_catalog(provider: dict, key: str, account_headers: dict) -> di
 # LLM: 形状不对的条目丢弃而不是猜；容量沿用 validate_model 的 4096..2^31-1 口径。思考档位取目录的
 #   supported_reasoning_levels[].effort（服务商逐模型声明），格式不合规就不带（按未声明处理），不影响条目本身。
 # 函数用途: 把订阅目录的一条记录整理成可直接保存的模型条目，不合规返回 None。
-def _subscription_row(item: dict) -> dict | None:
-    slug, window = item.get("slug"), item.get("context_window")
+def _subscription_row(item: dict, *, allow_missing_window: bool = False) -> dict | None:
+    slug, window = item.get("slug", item.get("id")), item.get("context_window")
     if not isinstance(slug, str) or not slug or len(slug) > 200 or any(ord(c) < 33 for c in slug):
         return None
-    if isinstance(window, bool) or not isinstance(window, int) or not 4096 <= window <= 2**31 - 1:
+    absent = window is None and allow_missing_window
+    if absent:
+        window = 0
+    if isinstance(window, bool) or not isinstance(window, int) or not (absent or 4096 <= window <= 2**31 - 1):
         return None
     name = item.get("display_name")
     display = name if isinstance(name, str) and name and len(name) <= 80 and name.isprintable() else slug
@@ -201,7 +206,7 @@ def _redact_network_text(text: str, data: dict) -> str:
 
     for row in data["providers"].values():
         secrets = [provider_api_key(row), *row["custom_headers"].values(),
-                   *[row.get("auth", {}).get(key, "") for key in ("access_token", "refresh_token", "client_secret")]]
+                   *[row.get("auth", {}).get(key, "") for key in ("access_token", "refresh_token", "id_token", "client_secret")]]
         for secret in secrets:
             if secret:
                 text = text.replace(secret, "[已隐藏]")

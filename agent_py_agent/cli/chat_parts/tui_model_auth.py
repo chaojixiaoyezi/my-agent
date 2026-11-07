@@ -10,7 +10,7 @@ from uuid import uuid4
 from prompt_toolkit.layout import HSplit
 from prompt_toolkit.widgets import Checkbox, Label, RadioList, TextArea
 
-from ...agent.settings.model_oauth_schema import CHATGPT_BASE, oauth_config
+from ...agent.settings.model_oauth_schema import SIWC_BASE, oauth_config
 from .tui_browser_login import LoginOutcome, browser_login, browser_login_available, open_browser
 from .tui_model_menu import _dialog, _request, _request_data
 from .tui_subscription_models import pick_subscription_models
@@ -27,11 +27,11 @@ async def _choose(app, title: str, values: list[tuple[str, str]]):
 #   RFC 8628 接口。服务商编号自动生成 login-<8位>。返回 (服务商编号, 登录类型)，取消或保存失败返回两个空串。
 # 函数用途: 创建一个未登录的账号服务商，不预填模型型号或容量，不调用模型。
 async def _new_provider(app, agent, session: str) -> tuple[str, str]:
-    mode = await _choose(app, "登录类型", [("chatgpt", "ChatGPT 订阅登录（Plus / Pro 等账号）"),
+    mode = await _choose(app, "登录类型", [("chatgpt", "Continue with ChatGPT · my-agent（本人套餐；凭据保存在本机）"),
         ("oauth_device", "通用 OAuth 2.0（设备码授权，填写服务商参数）")])
     if not mode:
         return "", ""
-    provider = ({"display_name": "ChatGPT 订阅", "api_base": CHATGPT_BASE, "api_key": "", "auth": {"mode": "chatgpt"}}
+    provider = ({"display_name": "my-agent · ChatGPT", "api_base": SIWC_BASE, "api_key": "", "auth": {"mode": "chatgpt"}}
                 if mode == "chatgpt" else await _generic_provider(app))
     if not provider:
         return "", ""
@@ -179,6 +179,9 @@ async def manage_account(app, agent, session: str, row: dict) -> str:
     provider, chatgpt = row["id"], row["auth_mode"] == "chatgpt"
     choices = [("login", "登录 / 重新登录"), ("model", "添加模型（勾选这个账号能用的模型）" if chatgpt else "添加此账号的模型"),
                ("models", "编辑或删除这个账号下的模型")]
+    if chatgpt:
+        choices += [("manual_model", "手动添加模型（目录未提供容量时）"),
+                    ("usage", "管理 ChatGPT 应用用量：https://chatgpt.com/settings/usage")]
     if row["auth_mode"] == "oauth_device":
         choices.append(("edit", "编辑认证参数（变化后需重新登录）"))
     choices += [("logout", "退出登录（后续请求停止使用此凭据）"), ("delete", "删除这个账号（需先删掉其下模型）")]
@@ -190,6 +193,11 @@ async def manage_account(app, agent, session: str, row: dict) -> str:
                       else _edit_model(app, agent, session, provider, None))
     if action == "models":
         return await manage_provider_models(app, agent, session, provider)
+    if action == "manual_model":
+        return await _edit_model(app, agent, session, provider, None)
+    if action == "usage":
+        opened = await asyncio.to_thread(open_browser, "https://chatgpt.com/settings/usage")
+        return "已打开 ChatGPT 用量管理。" if opened else "请访问 https://chatgpt.com/settings/usage 管理应用用量。"
     if action == "edit":
         return await _edit_parameters(app, agent, session, row)
     if action == "delete":
@@ -200,8 +208,8 @@ async def manage_account(app, agent, session: str, row: dict) -> str:
 # LLM: 退出只删除本用户保存的令牌，需二次确认；取消无副作用。
 # 函数用途: 确认后退出一个账号的登录。
 async def _logout(app, agent, session: str, provider: str) -> str:
-    if not await _dialog(app, "确认退出登录", Label("将删除本用户保存的访问/刷新令牌。\n不会退出其他应用或其他用户；已经发出的请求无法撤回。"),
+    if not await _dialog(app, "确认退出登录", Label("将尝试撤销本人可续期会话，并删除本机访问/刷新/ID令牌。\n不会退出其他应用或其他用户；已经发出的请求无法撤回。"),
                          (("退出账号", True), ("取消", None))):
         return ""
     result = await _request(app, agent, session, "auth_logout", {"provider_id": provider})
-    return "已退出登录；再次使用需重新授权。" if result.get("ok") else str(result.get("message") or "退出未确认。")
+    return str(result.get("message") or "已退出登录；再次使用需重新授权。") if result.get("ok") else str(result.get("message") or "退出未确认。")

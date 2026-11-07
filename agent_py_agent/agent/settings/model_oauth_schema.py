@@ -7,10 +7,14 @@ import hashlib
 import json
 import math
 from urllib.parse import urlsplit
+from uuid import UUID
 
 CHATGPT_BASE = "https://chatgpt.com/backend-api/codex"
 CHATGPT_CLIENT = "app_EMoamEEZ73f0CkXaXp7hrann"
 CHATGPT_ISSUER = "https://auth.openai.com"
+SIWC_BASE = "https://api.openai.com/v1"
+SIWC_CLIENT = "dynamic_agent_client"
+SIWC_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 # 官方授权服务器只接受这两个本机回调端口（与官方命令行登录登记的回调地址一致），换端口会被拒绝。
 CHATGPT_CALLBACK_PORTS = (1455, 1457)
 CHATGPT_BROWSER_SCOPE = "openid profile email offline_access"
@@ -22,9 +26,17 @@ _BASE64URL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 
 # LLM: 回调地址逐字比对登记值，不接受其它主机、端口、路径或查询；客户端只能从这两个值里选。
 # 函数用途: 校验浏览器登录的本机回调地址，给 Gateway 开始登录和读取已保存的等待状态共用。
-def chatgpt_callback_uri(value: object) -> str:
+def chatgpt_callback_uri(value: object, *, issued_client: bool = False) -> str:
     from .model_provider_schema import ModelProfileError
 
+    if issued_client and isinstance(value, str):
+        try:
+            parts = urlsplit(value)
+            port = parts.port
+            if port and 1 <= port <= 65535 and value == f"http://127.0.0.1:{port}/auth/callback":
+                return value
+        except ValueError:
+            pass
     if value not in {f"http://127.0.0.1:{port}/auth/callback" for port in CHATGPT_CALLBACK_PORTS}:
         raise ModelProfileError("浏览器登录的本机回调地址无效。")
     return str(value)
@@ -69,6 +81,12 @@ def oauth_config(value: object, api_base: str) -> dict:
     mode = value["mode"]
     auth_url(api_base)
     if mode == "chatgpt":
+        if api_base == SIWC_BASE:
+            return {"mode": mode, "client_id": siwc_client_id(value.get("client_id", SIWC_CLIENT)),
+                    "authorize_url": CHATGPT_ISSUER + "/api/accounts/authorize",
+                    "token_url": CHATGPT_ISSUER + "/api/accounts/oauth/token",
+                    "revocation_url": CHATGPT_ISSUER + "/api/accounts/oauth/revoke",
+                    "resource": SIWC_BASE, "scope": SIWC_SCOPE}
         if api_base != CHATGPT_BASE:
             raise ModelProfileError("ChatGPT 订阅凭据只能发送到内置订阅接口。")
         return {"mode": mode, "client_id": CHATGPT_CLIENT,
@@ -92,12 +110,22 @@ def stored_oauth(value: object, api_base: str) -> dict:
     from .model_provider_schema import ModelProfileError
 
     result = oauth_config(value, api_base)
-    for field in ("generation", "account_id", "access_token", "refresh_token"):
+    for field in ("generation", "account_id", "access_token", "refresh_token", "id_token", "issuer", "subject", "email"):
         text = value.get(field, "")
         if not isinstance(text, str) or len(text) > 65536 or any(ord(c) < 32 for c in text):
             raise ModelProfileError("保存的登录凭据无效，请重新登录。")
         if text:
             result[field] = text
+    if is_siwc(result):
+        host_id = value.get("ext_agent_host_id")
+        if host_id is not None:
+            result["ext_agent_host_id"] = _host_id(host_id)
+        scopes = value.get("scopes", [])
+        if (not isinstance(scopes, list) or len(scopes) > 100
+                or any(not isinstance(scope, str) or not scope or len(scope) > 512
+                       or any(ord(c) < 33 for c in scope) for scope in scopes)):
+            raise ModelProfileError("保存的授权范围无效，请重新登录。")
+        result["scopes"] = list(dict.fromkeys(scopes))
     for field in ("expires_at",):
         number = value.get(field, 0)
         if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0:
@@ -105,6 +133,10 @@ def stored_oauth(value: object, api_base: str) -> dict:
         result[field] = number
     if "pending" in value:
         result["pending"] = _stored_pending(value["pending"])
+        pending = result["pending"]
+        if is_siwc(result) and pending.get("flow") == "browser" and (
+                pending.get("resource") != SIWC_BASE or pending.get("client_id") != result["client_id"]):
+            raise ModelProfileError("保存的 SIWC 登录请求与账户登记不一致，请重新登录。")
     return result
 
 
@@ -148,8 +180,13 @@ def _device_pending(pending: dict) -> dict:
 def _browser_pending(pending: dict) -> dict:
     from .model_provider_schema import ModelProfileError
 
-    kept = {"flow": "browser", "redirect_uri": chatgpt_callback_uri(pending.get("redirect_uri"))}
-    for field in ("state", "code_verifier"):
+    direct = pending.get("resource") == SIWC_BASE
+    client = siwc_client_id(pending.get("client_id")) if direct else ""
+    kept = {"flow": "browser", "redirect_uri": chatgpt_callback_uri(
+        pending.get("redirect_uri"), issued_client=direct and client != SIWC_CLIENT)}
+    if direct:
+        kept.update(resource=SIWC_BASE, client_id=client)
+    for field in (("state", "code_verifier", "nonce") if direct else ("state", "code_verifier")):
         text = pending.get(field)
         if not isinstance(text, str) or not 43 <= len(text) <= 128 or not set(text) <= _BASE64URL:
             raise ModelProfileError("保存的浏览器登录请求无效，请重新发起登录。")
@@ -165,6 +202,8 @@ def _browser_pending(pending: dict) -> dict:
 # 函数用途: 为请求和异步登录回调提供不可混用的配置身份。
 def oauth_binding(provider: dict) -> str:
     config = oauth_config(provider["auth"], provider["api_base"])
+    if is_siwc(config):
+        config["ext_agent_host_id"] = provider["auth"].get("ext_agent_host_id", "")
     return hashlib.sha256(json.dumps([provider["api_base"], config], sort_keys=True).encode()).hexdigest()
 
 
@@ -174,4 +213,41 @@ def has_credential(provider: dict) -> bool:
     from .model_credentials import provider_api_key
 
     auth = provider.get("auth", {})
+    if is_siwc(auth) and "chatgpt.tokens.use.direct" not in auth.get("scopes", []):
+        return False
     return bool(auth.get("access_token") and auth.get("generation")) if auth else bool(provider_api_key(provider))
+
+
+# LLM: 只读取已由官方端点配置派生的 resource，不按模型名、令牌正文或邮箱猜协议。
+# 函数用途: 区分官方 SIWC 与已有 Codex 档案的认证协议。
+def is_siwc(auth: dict) -> bool:
+    return auth.get("mode") == "chatgpt" and auth.get("resource") == SIWC_BASE
+
+
+# LLM: client_id 是授权服务器签发的不透明标识；不把示例前缀当封闭格式，动态入口仅能用于初次登记。
+# 函数用途: 校验 Client ID 的传输形状，按需拒绝尚未完成的登记。
+def siwc_client_id(value: object, *, issued: bool = False) -> str:
+    from .model_provider_schema import ModelProfileError
+
+    if (not isinstance(value, str) or not value or len(value) > 512
+            or any(ord(c) < 33 or ord(c) > 126 for c in value) or issued and value == SIWC_CLIENT):
+        raise ModelProfileError("SIWC 回调缺少有效的已签发 Client ID，请重新登录。")
+    return value
+
+
+# LLM: host ID 只标识本机生命周期，不是账号或授权证明；读取时保留原值，不生成新身份。
+# 函数用途: 校验官方允许的不透明宿主标识。
+def _host_id(value: object) -> str:
+    from .model_provider_schema import ModelProfileError
+
+    if isinstance(value, str) and len(value) <= 2048 and value.isascii() and value.isprintable() and " " not in value:
+        if value.startswith("urn:uuid:"):
+            try:
+                if UUID(value[9:]).version == 4:
+                    return value
+            except ValueError:
+                pass
+        elif any(value.startswith(prefix) and len(value) > len(prefix) for prefix in (
+                "urn:ietf:params:oauth:jwk-thumbprint:", "did:key:")):
+            return value
+    raise ModelProfileError("保存的 SIWC 宿主标识无效，未自动更换宿主身份。")
