@@ -41,6 +41,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         _prune_local_store_derived_records,
         _quota_only_continuation_due,
         _reclaim_text_vector_cache_orphans,
+        _retention_deletion_safe,
         _run_quota_continuation_slice,
         _tighten_archive_permissions,
         _write_maintenance_result,
@@ -86,7 +87,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         commit_transition=commit, expected_policy_fingerprint=policy, config=config, scan_budget=True)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                          now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit)
-                     if retention.applied and not retention.legal_hold and not retention.load_errors
+                     if _retention_deletion_safe(retention)
                      else {"executed": False, "reason": "retention_not_safe"})
     reclaim_owner_orphan_lock_files(home, commit_transition=commit)
     reclaimed, error = _reclaim_text_vector_cache_orphans(home, commit_transition=commit)

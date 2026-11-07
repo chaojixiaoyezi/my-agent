@@ -27,7 +27,7 @@ from ..common.request_execution_ports import (
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..contracts.optimization_contracts import require_schema_generation
-from ..memory_store.retention import _call_retention_callback
+from ..memory_store.retention import _POLICY_LEVEL_ERROR_CODES, _call_retention_callback
 from .home_layout import MyAgentHomePaths
 from .home_retention import OwnerRetentionPlan, apply_owner_retention, maintenance_fence
 
@@ -249,7 +249,7 @@ def run_owner_retention_if_due(
         )
         derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
                             now=datetime.fromtimestamp(current, timezone.utc))
-                         if retention.applied and not retention.legal_hold and not retention.load_errors
+                         if _retention_deletion_safe(retention)
                          else {"executed": False, "reason": "retention_not_safe"})
         reclaim_owner_orphan_lock_files(home)
         # 正文哈希缓存只是派生索引，孤儿键（换模型/迁移/绕过写入路径的改动留下）只有 index_all
@@ -277,7 +277,7 @@ def run_owner_retention_if_due(
                    "storage_maintenance": run_owner_storage_maintenance_slice(home, previous, retention, now=current,
                        quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, state_locked=True)}
         effects['workflow_maintenance'] = run_owner_workflow_maintenance(home, previous, now=current,
-            safe_to_delete=retention.applied and not retention.legal_hold and not retention.load_errors,
+            safe_to_delete=_retention_deletion_safe(retention),
             service=workflow_service)
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
@@ -577,6 +577,26 @@ def _apply_outcome(retention: OwnerRetentionPlan) -> str:
     if retention.legal_hold:
         return "legal_hold"
     return "applied" if retention.applied else "refused"
+
+
+# LLM: 删除闸门与 retention.apply() 的整份拒绝同口径：只有带结构化 error_code 与非空 path、且不属于策略级的
+#   错误，才算已被保留计划隔离到单一路径；裸字符串、缺字段、策略级码一律视为不安全（失败关闭）。
+# 函数用途: 判断保留加载错误是否全部为已隔离的路径级错误（兼容对象与 maintenance.json 回读的 dict）。
+def _retention_errors_path_scoped(errors) -> bool:
+    for error in errors or ():
+        if isinstance(error, dict):
+            code, path = error.get("error_code"), error.get("path")
+        else:
+            code, path = getattr(error, "error_code", None), getattr(error, "path", None)
+        if type(code) is not str or not code or not path or code in _POLICY_LEVEL_ERROR_CODES:
+            return False
+    return True
+
+
+# 函数用途: 派生记录、工作流与存储通道等删除类维护共用的安全闸门。
+def _retention_deletion_safe(retention) -> bool:
+    return (bool(retention.applied) and not retention.legal_hold
+            and _retention_errors_path_scoped(retention.load_errors))
 
 
 # LLM: 所有普通与transition维护写者共用此路径，不能另建epoch账本。
@@ -1087,7 +1107,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
     quota_max_entries, quota_max_ms = _quota_maintenance_budget(home, quota_max_entries, quota_max_ms)
     original = previous.get('storage_maintenance', {})
     require_schema_generation(original)
-    if coordinator or retention.load_errors or (not retention.applied and not retention.legal_hold):
+    if coordinator or not _retention_errors_path_scoped(retention.load_errors) or (not retention.applied and not retention.legal_hold):
         state = run_storage_maintenance_slice(original, {})
         reconciliation = _deferred_quota_reconciliation(
             home, coordinator=coordinator, commit_transition=commit_transition,
@@ -1096,7 +1116,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                          'deferred_reason') not in ('coordinator_adapter_protocol_required', 'retention_not_safe'),
                      deletion_enabled=False, quota_reconciliation=reconciliation,
                      deferred_reason='coordinator_adapter_protocol_required' if coordinator else 'retention_not_safe')
-        if coordinator and commit_transition is not None and not retention.load_errors and (retention.applied or retention.legal_hold):
+        if coordinator and commit_transition is not None and _retention_errors_path_scoped(retention.load_errors) and (retention.applied or retention.legal_hold):
             lane_adapters = {kind.kind: lane_adapter(kind, coordinator=True, commit=commit_transition)
                              for kind in registry if kind.kind in LANE_BINDINGS}
             # 空适配器的旧延期过渡会清空pending；同轮协调者续作须恢复原集合，不能重开已完成通道。
