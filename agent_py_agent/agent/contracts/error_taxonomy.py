@@ -652,6 +652,12 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="文件版本已变化；重新 read_file，合并其他修改，并使用新版本号。不要直接重放旧写入。",
     ),
+    # 旧执行代次被栅栏拒绝后，分类不能授权刷新身份、自动重放或释放原责任。
+    "STALE_OWNER_EPOCH": ErrorContract(
+        code="STALE_OWNER_EPOCH", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="当前执行携带的owner代次已失效；核对原请求、执行身份和当前激活代次，保留原责任及未知副作用，由原恢复流程确认接管，不刷新旧执行的代次、不自动重放或补写终态。",
+    ),
     "DECISION_SETTINGS_CONFLICT": ErrorContract(
         code="DECISION_SETTINGS_CONFLICT", category="state", retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

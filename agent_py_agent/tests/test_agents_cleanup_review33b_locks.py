@@ -58,8 +58,10 @@ def _promotion_candidate(runtime, target):
     return candidate
 
 
-def _try_real_lock(original_lock, path):
-    manager = original_lock(path, blocking=False)
+# LLM: 分类必须到达真实双层锁，只有原BlockingIOError能表示普通竞争。
+# 函数用途: 带原锁类别执行一次非阻塞取锁。
+def _try_real_lock(original_lock, path, category=None):
+    manager = original_lock(path, blocking=False, category=category)
     try:
         manager.__enter__()
         return manager, None
@@ -80,12 +82,12 @@ class _QuotaCycleProbe:
         self.quota = self.service.persona.owner_home / '.owner-quota'
         self.local = threading.local()
 
-    # LLM: 非阻塞竞争原样返回给quota取消轮询；不能把正常锁忙改写成存储不可用。
+    # LLM: 分类沿每次尝试透传；非阻塞竞争原样返回给quota取消轮询，不能把锁忙改写成存储不可用。
     # 函数用途: 保留真实BlockingIOError，只为阻塞诊断设置两秒超时。
-    def _wait_for_lock(self, path, blocking):
+    def _wait_for_lock(self, path, blocking, category=None):
         end = time.monotonic() + 2
         while True:
-            manager, error = _try_real_lock(self.original_lock, path)
+            manager, error = _try_real_lock(self.original_lock, path, category=category)
             if manager is not None:
                 return manager
             if not blocking:
@@ -96,8 +98,10 @@ class _QuotaCycleProbe:
                 raise TimeoutError(f'{name} waits for {path.name} while holding {held}') from error
             time.sleep(0.005)
 
+    # LLM: 诊断探针保留分类、真实竞争与释放协议，不改变原生产锁实现。
+    # 函数用途: 在有界真实锁等待外记录交错事件。
     @contextmanager
-    def bounded_real_lock(self, path, *, blocking=True):
+    def bounded_real_lock(self, path, *, blocking=True, category=None):
         name = threading.current_thread().name
         held = getattr(self.local, 'held', [])
         if name == 'r33-promotion' and path == self.quota:
@@ -105,7 +109,7 @@ class _QuotaCycleProbe:
         if name == 'r33-cleanup' and path == self.quota:
             self.cleanup_quota.set()
         self.events.append({'thread': name, 'event': 'attempt', 'path': path.name, 'held': list(held)})
-        manager = self._wait_for_lock(path, blocking)
+        manager = self._wait_for_lock(path, blocking, category=category)
         self.local.held = [*held, path.name]
         self.events.append({'thread': name, 'event': 'acquired', 'path': path.name, 'held': list(held)})
         try:

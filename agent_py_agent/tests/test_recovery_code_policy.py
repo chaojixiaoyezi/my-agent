@@ -96,6 +96,19 @@ def test_exact_code_policy_wins_over_family_prefix():
     assert not repairable_code("STATE_SOMETHING_ELSE")
 
 
+def test_stale_owner_epoch_preserves_fence_without_automatic_retry():
+    """旧代次必须保留准确错误码；分类不能授权重放或刷新写入身份。"""
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    contract = error_contract("STALE_OWNER_EPOCH")
+    assert contract.code == "STALE_OWNER_EPOCH"
+    assert contract.category == "state"
+    assert contract.retryable is False
+    assert contract.recommended_action == RecoveryAction.MANUAL_REVIEW.value
+    assert not repairable_code(contract.code) and not recovering_code(contract.code)
+    assert "重放" in contract.recovery_hint and "代次" in contract.recovery_hint
+
+
 def test_history_read_and_task_binding_errors_have_distinct_recovery():
     from agent_py_agent.agent.contracts.error_taxonomy import error_contract
 

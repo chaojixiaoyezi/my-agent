@@ -15,6 +15,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from agent_py_agent.agent.concurrency.lock_order import LockLevel
 from agent_py_agent.agent.gateway_parts import multiprocess_http_transport as transport
 from agent_py_agent.agent.gateway_parts import request_worker
 from agent_py_agent.agent.gateway_parts.bounded_http_server import GatewayBoundedHTTPServer
@@ -88,6 +89,8 @@ def test_creation_guard_busy_when_runtime_gate_held(tmp_path, runtime_owner, gat
             assert not timer.is_alive()
 
 
+# LLM: CG首次取锁必须携带分类；M内同一物理CG的重入不能额外尝试取锁。
+# 函数用途: 验证带类别的创建锁只取得一次。
 def test_reentrant_guard_inside_runtime_gate_does_not_trylock(tmp_path, runtime_owner, monkeypatch):
     original = coordination.locked_json_path
     calls = []
@@ -100,7 +103,7 @@ def test_reentrant_guard_inside_runtime_gate_does_not_trylock(tmp_path, runtime_
     with coordination.subagent_creation_guard(tmp_path), runtime_owner._mutex:
         with coordination.subagent_creation_guard(tmp_path):
             pass
-    assert calls == [{}]
+    assert calls == [{"category": LockLevel.CG}]
 
 
 def test_creation_guard_does_not_reclassify_body_blocking_io_error(tmp_path, runtime_owner):
