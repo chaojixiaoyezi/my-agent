@@ -11,6 +11,7 @@ import os
 import sqlite3
 import stat
 import sys
+import tempfile
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -104,12 +105,85 @@ def _glibc_malloc_trim():
         return None
 
 
-# LLM: 索引只是不可变段的定位投影；丢失/损坏且已有manifest时必须报错，不把旧终态当不存在。
-# 函数用途: 打开同一Gateway归档索引，首次发布使用私有权限。
+# LLM: 调用方已持维护锁；仅投影manifest连续序号覆盖的不可变段，完整提交后原子发布，失败不改原段或manifest。
+# 函数用途: 从已提交分段重建私有回执定位器，不收录未提交孤儿段。
+def _rebuild_receipt_index(paths, index):
+    raw = read_bytes_beneath(paths.root, ('archive', 'receipts-manifest.json'),
+                             max_bytes=_RECEIPT_MAX_FILE_BYTES, require_dir_fd=True)
+    manifest = json.loads(raw) if raw is not None else {}
+    require_schema_generation(manifest)
+    sequence, count = manifest.get('next_seq'), manifest.get('segment_count')
+    if type(sequence) is not int or type(count) is not int or count < 0 or sequence != count + 1:
+        raise DataCorruptionError('gateway_archive_sequence_invalid')
+    descriptor, temporary = tempfile.mkstemp(prefix=f'.{index.name}.rebuild-', dir=index.parent)
+    os.close(descriptor)
+    try:
+        connection = sqlite3.connect(temporary, timeout=0.05)
+        try:
+            with connection:
+                connection.execute('CREATE TABLE receipts(path TEXT PRIMARY KEY, segment TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, digest TEXT NOT NULL)')
+                for number in range(1, sequence):
+                    segment = f'receipts-seg-{number:012d}.jsonl'
+                    encoded = read_bytes_beneath(paths.root, ('archive', segment),
+                                                 max_bytes=_RECEIPT_MAX_SEGMENT_BYTES, require_dir_fd=True)
+                    if not encoded or not encoded.endswith(b'\n'):
+                        raise DataCorruptionError('gateway_archive_segment_missing_or_invalid')
+                    offset, records = 0, 0
+                    for line in encoded.splitlines(keepends=True):
+                        record = json.loads(line)
+                        require_schema_generation(record)
+                        body = base64.b64decode(record['body'], validate=True)
+                        relative, digest = record['path'], record['digest']
+                        if (type(relative) is not str or not Path(relative).parts or Path(relative).is_absolute()
+                                or str(Path(relative)) != relative or '..' in Path(relative).parts
+                                or len(body) > _RECEIPT_MAX_FILE_BYTES or len(line) > 2 * _RECEIPT_MAX_FILE_BYTES
+                                or hashlib.sha256(body).hexdigest() != digest):
+                            raise DataCorruptionError('gateway_archive_record_hash_mismatch')
+                        connection.execute('INSERT OR REPLACE INTO receipts VALUES(?,?,?,?,?)',
+                                           (relative, segment, offset, len(line), digest))
+                        offset += len(line)
+                        records += 1
+                    if number == sequence - 1:
+                        expected = {'name': segment, 'bytes': len(encoded), 'records': records,
+                                    'sha256': hashlib.sha256(encoded).hexdigest()}
+                        if any(manifest['last_segment'].get(key) != value for key, value in expected.items()):
+                            raise DataCorruptionError('gateway_archive_segment_manifest_mismatch')
+        finally:
+            connection.close()
+        if index.is_symlink() or index.parent.is_symlink():
+            raise DataCorruptionError('gateway_archive_index_symlink')
+        os.replace(temporary, index)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise DataCorruptionError('gateway_archive_segment_invalid') from exc
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+# LLM: 正常读不取维护锁；缺库/缺schema时非阻塞竞选，锁内重核，写者必须已持同一维护锁。
+# 函数用途: 打开同一Gateway归档索引，必要时从已提交段一次性恢复定位投影。
 def _receipt_index(paths, *, writable=False):
     index = paths.root / 'archive' / 'receipts-index.sqlite3'
     if index.is_symlink() or index.parent.is_symlink():
         raise DataCorruptionError('gateway_archive_index_symlink')
+    if index.exists():
+        connection = sqlite3.connect(index.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
+                                     uri=True, timeout=0.05)
+        try:
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(receipts)')}
+        except BaseException:
+            connection.close()
+            raise
+        if {'path', 'segment', 'offset', 'length', 'digest'} <= columns:
+            return connection
+        connection.close()
+    if (index.parent / 'receipts-manifest.json').exists():
+        if writable:
+            _rebuild_receipt_index(paths, index)
+        else:
+            with locked_json_path(index.parent / 'receipts-maintenance', blocking=False):
+                _receipt_index(paths, writable=True).close()
+        return sqlite3.connect(index.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
+                               uri=True, timeout=0.05)
     if not index.exists():
         if not writable:
             raise DataCorruptionError('gateway_archive_index_missing')
@@ -263,6 +337,7 @@ def _remove_sealed_bundle(paths, bundle):
 
 # LLM: 每根目录只保留有界scandir句柄；重启从头枚举但已删条目无需重放，绝不持久化不稳定offset作权威。
 #   生产接线传remove_loose=False，读口切换未闭合前不能自动删原件。
+#   已提交manifest的定位器先在同一维护锁下恢复；无新候选也能自愈，缺分段继续失败关闭。
 # 函数用途: 在总候选/时间/字节预算内封存一片原终态回执。
 def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128, max_ms: float = 50,
                                 max_bytes: int = 4 * 1_048_576, remove_loose: bool = True) -> dict:
@@ -273,11 +348,15 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
             or type(before) not in (int, float) or not math.isfinite(before)):
         raise ValueError('invalid_gateway_receipt_budget')
     result = {'sealed_requests': 0, 'archived_requests': 0, 'scanned_entries': 0, 'bytes': 0, 'errors': [], 'complete': False}
-    if not paths.terminal.is_dir():
+    if not paths.terminal.is_dir() and not (paths.root / 'archive' / 'receipts-manifest.json').exists():
         return {**result, 'complete': True}
     deadline = time.monotonic() + max_ms / 1000
     anchor = paths.root / 'archive' / 'receipts-maintenance'
     with locked_json_path(anchor):
+        if (anchor.parent / 'receipts-manifest.json').exists():
+            _receipt_index(paths, writable=True).close()
+        if not paths.terminal.is_dir():
+            return {**result, 'complete': True}
         identity = str(paths.root.absolute())
         iterator = _RECEIPT_SCANS.get(identity)
         if iterator is None:
