@@ -497,7 +497,7 @@ class TestCleanupOrphanLockFiles:
         assert cleanup_orphan_lock_files(tmp_path / "nope") == 0
 
     def test_sidecar_dirs_cover_queue_terminal_and_transitions(self, tmp_path: Path):
-        """清理巡的目录清单覆盖队列、终态、响应与 turn_transitions。"""
+        """清理巡覆盖队列、终态、响应、turn_transitions、input_receipts、client_outbox 和 control_operations。"""
         from agent_py_agent.agent.gateway_parts.io import gateway_lock_sidecar_dirs
         from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 
@@ -510,6 +510,9 @@ class TestCleanupOrphanLockFiles:
             paths.terminal,
             paths.responses,
             tmp_path / "gateway" / "turn_transitions",
+            tmp_path / "gateway" / "input_receipts",
+            tmp_path / "gateway" / "client_outbox",
+            tmp_path / "gateway" / "control_operations",
         }
 
 

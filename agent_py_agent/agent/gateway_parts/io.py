@@ -877,7 +877,8 @@ def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
 
 
 # LLM: 这些目录的 JSON 读/写都走 _locked_file_path（<name>.lock sidecar），文件归档/删除后 sidecar 会累积；
-#   锁清理巡只扫这一份清单（队列四个目录 + 终态副本 + 响应 + 每个请求都会建锁的 turn_transitions），
+#   锁清理巡只扫这一份清单（队列四个目录、终态副本、响应、turn_transitions、input_receipts、client_outbox、control_operations），
+#   各目录仅非递归扫描，不包含 input_receipts/by_turn/*；
 #   新增别的锁目录要同步加进来。清理只删孤儿（见 cleanup_orphan_lock_files），活锁与在用文件不动。
 # 函数用途: 列出会积累锁 sidecar 的 Gateway 目录，供周期清理。
 def gateway_lock_sidecar_dirs(paths: GatewayPaths) -> tuple[Path, ...]:
@@ -889,6 +890,9 @@ def gateway_lock_sidecar_dirs(paths: GatewayPaths) -> tuple[Path, ...]:
         paths.terminal,
         paths.responses,
         paths.root / "turn_transitions",
+        paths.root / "input_receipts",
+        paths.root / "client_outbox",
+        paths.root / "control_operations",
     )
 
 
