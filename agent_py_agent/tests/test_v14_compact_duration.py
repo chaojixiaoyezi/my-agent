@@ -135,8 +135,17 @@ def test_gateway_compact_wire_preserves_timing_through_real_consumers(tmp_path, 
     assert events and events[0]["phase"] == "started" and events[-1]["phase"] == "completed"
     for event in events:
         assert type(event["duration_ms"]) is int and event["duration_ms"] >= 0
-        assert _tui_conversation_compact_progress_payload(event) == event
-        assert schema.normalize_conversation_compact_progress(event) == event
+        # 计时 schema 只消费阶段与数字；Gateway 同次附带的公开身份仍须完整穿过事件流。
+        identity_fields = ("thread_id", "producer", "model_name", "reasoning_level")
+        progress = {key: value for key, value in event.items() if key not in identity_fields}
+        identity = {key: event[key] for key in identity_fields}
+        assert _tui_conversation_compact_progress_payload(event) == progress
+        assert schema.normalize_conversation_compact_progress(event) == progress
+        assert event == {**progress, **identity}
+        assert identity["thread_id"] == fixture.thread_id
+        assert identity["model_name"] == "original-model" and identity["reasoning_level"] == ""
+        assert identity["producer"]["scope"] == "main"
+        assert set(identity["producer"]) == {"scope", "agent_run_id"}
     assert "stage_durations_ms" in events[-1]
     logs = [r for r in caplog.records if getattr(r, "event", None) == "conversation_compaction"]
     assert len(logs) == 1 and logs[0].thread_id == fixture.thread_id

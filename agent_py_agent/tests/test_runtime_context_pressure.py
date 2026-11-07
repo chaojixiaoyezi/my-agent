@@ -526,8 +526,10 @@ def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeyp
         "measurement_kind",
         "counter_id",
         "count_scope",
+        "producer",
     }
     assert public["model_name"] == "" and public["reasoning_level"] == "auto"
+    assert public["producer"] == {"scope": "main", "agent_run_id": ""}
     assert "private" not in repr(public)
     assert "secret" not in repr(public)
 

@@ -208,6 +208,34 @@ def test_batch_commits_prepared_objects_after_parent_revision_updates(prepared, 
     assert [advice(agent, task)["profile_id"] for task in tasks] == [a, b]
 
 
+@pytest.mark.parametrize("error_type,recoverable", [
+    (FileNotFoundError, True), (KeyError, True), (PermissionError, False), (RuntimeError, False),
+])
+def test_parent_model_lookup_only_recovers_missing_records(prepared, monkeypatch, error_type, recoverable):
+    from agent_py_agent.agent.settings.model_profiles import inherit_model_profile
+    from agent_py_agent.agent.settings.thread_model_selection import thread_model_profile_id
+
+    agent, (_a, expected), _ = prepared
+    parent_id = agent._current_run_params.task_attributes["conversation_thread_id"]
+    assert thread_model_profile_id(agent, parent_id, select=expected) == expected
+    agent._current_subagent_run_id = "missing-parent"
+    reads = []
+
+    def unavailable(run_id):
+        reads.append(run_id)
+        raise error_type(run_id)
+
+    monkeypatch.setattr(agent.subagents, "load", unavailable)
+    if recoverable:
+        attrs = {}
+        inherit_model_profile(attrs, agent)
+        assert attrs["host_model_profile.v1"] == {"profile_id": expected}
+    else:
+        with pytest.raises(error_type):
+            inherit_model_profile({}, agent)
+    assert reads == ["missing-parent"]
+
+
 @pytest.mark.parametrize("recursive", [False, True])
 def test_reuse_discovered_after_jev_keeps_existing_task_and_discards_unpublished_preparation(prepared, monkeypatch, recursive):
     from agent_py_agent.tests.test_orchestration_create_subagents_idempotency import (
@@ -785,9 +813,13 @@ def test_explicit_selection_atomically_retires_pending_even_if_same_profile(prep
 
     agent, (a, b), _ = prepared
     agent.config.config_sources = {"model_name": {"source": "owner_model_profile", "profile_id": b}}
+    # 子线程现在继承 canonical 父线程选择，配置标签不能替代真实的同模型前置状态。
+    parent_id = agent._current_run_params.task_attributes["conversation_thread_id"]
+    assert thread_model_profile_id(agent, parent_id, select=b) == b
     provider(monkeypatch, prepared, {"0": a})
     task = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))[0]
     store = agent.conversation_store.threads
+    assert store.require(task.agent_thread_id).model_profile_id == b
     store.update_atomic(task.agent_thread_id, lambda row: replace(row, metadata={**row.metadata, "other": "keep"},
         provider_context_observation={"count": 10}, model_context_usage={"count": 11}))
     calls_seen = []

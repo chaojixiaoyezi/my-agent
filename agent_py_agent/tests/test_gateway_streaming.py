@@ -228,7 +228,8 @@ def test_compact_boundary_is_typed_and_does_not_copy_summary(tmp_path):
     row = json.loads(chunk_path.read_text(encoding="utf-8").strip())
     assert row["kind"] == "conversation_compacted"
     assert row["compact_generation"] == 3
-    assert set(row) == {"t", "kind", "compact_generation"}
+    assert set(row) == {"t", "kind", "compact_generation", "thread_id"}
+    assert row["thread_id"] == ""
 
 
 def test_turn_resumed_boundary_is_typed_content_free_and_after_buffered_output(tmp_path):
@@ -358,8 +359,7 @@ def test_conversation_compact_progress_is_rich_only_and_content_free(tmp_path):
 
     assert row["kind"] == "conversation_compaction_progress"
     assert row["compact_progress"] == {
-        key: value[key]
-        for key in (
+        **{key: value[key] for key in (
             "schema",
             "phase",
             "stage",
@@ -373,7 +373,9 @@ def test_conversation_compact_progress_is_rich_only_and_content_free(tmp_path):
             "trigger_tokens",
             "source_messages",
             "error_code",
-        )
+        )},
+        "model_name": "",
+        "reasoning_level": "",
     }
     assert "summary" not in row["compact_progress"]
     assert "prompt" not in row["compact_progress"]
@@ -403,7 +405,7 @@ def test_conversation_compact_superseded_crosses_gateway_as_typed_terminal(tmp_p
 
     row = json.loads(chunk_path.read_text(encoding="utf-8").strip())
     assert row["kind"] == "conversation_compaction_progress"
-    assert row["compact_progress"] == value
+    assert row["compact_progress"] == {**value, "model_name": "", "reasoning_level": ""}
 
 
 def test_noninteractive_gateway_permission_fails_closed_without_waiting(tmp_path):
