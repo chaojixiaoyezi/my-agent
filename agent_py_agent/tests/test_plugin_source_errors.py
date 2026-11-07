@@ -19,9 +19,10 @@ from agent_py_agent.tests.test_plugin_package import _bundle
 def test_read_plugin_source_reports_structured_reasons(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    (workspace / "pkg.zip").write_bytes(_bundle())
+    expected = _bundle()
+    (workspace / "pkg.zip").write_bytes(expected)
     policy = PathAccessPolicy.from_values(mode="full")
-    assert read_plugin_source("pkg.zip", workspace, policy, max_bytes=1 << 20) == _bundle(), "相对路径按工作区根解析"
+    assert read_plugin_source("pkg.zip", workspace, policy, max_bytes=1 << 20) == expected, "相对路径按工作区根解析"
     with pytest.raises(PluginSourceError) as missing:
         read_plugin_source("nope/pkg.zip", workspace, policy, max_bytes=1 << 20)
     assert missing.value.reason == "not_found" and missing.value.base == workspace
