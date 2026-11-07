@@ -4,7 +4,6 @@ import pytest
 
 from agent_py_agent.agent.conversation import history_projection
 from agent_py_agent.agent.conversation.compact import load_conversation_compact_source
-from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.gateway_parts.request_context import (
     GatewayConversationLoadRequest,
     gateway_conversation_context,
@@ -160,7 +159,9 @@ def test_deferred_source_excludes_only_unfinished_current_user_suffix(tmp_path) 
     assert direct.messages == forced.compact_source.messages
 
 
-def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path) -> None:
+# LLM: RES-W5/W9 只降级无身份坏行，返回给模型的合法历史不得清空；读取不能回写转录或推进压缩代次。
+# 函数用途: 验证尾部垃圾行不丢原文、不改磁盘消息，也不触发压缩。
+def test_bad_canonical_source_degrades_without_becoming_empty(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     request = _request("ou_deferred_bad_source")
     initial = _context(agent, request, "gw-create", "开始")
@@ -175,10 +176,11 @@ def test_bad_canonical_source_raises_instead_of_becoming_empty(tmp_path) -> None
         handle.write(b"broken canonical row\n")
     corrupted_bytes = path.read_bytes()
 
-    with pytest.raises(ConversationCompactError):
-        gateway_conversation_context(
-            GatewayConversationLoadRequest(agent, request, "gw-follow", "继续", defer_compact=True)
-        )
+    loaded = gateway_conversation_context(
+        GatewayConversationLoadRequest(agent, request, "gw-follow", "继续", defer_compact=True)
+    )
+    assert ("user", "必须保留的原文") in context_history(loaded)
+    assert loaded.compact_generation == 0
 
     after = store.threads.load(initial.thread_id)
     assert before is not None and after is not None
