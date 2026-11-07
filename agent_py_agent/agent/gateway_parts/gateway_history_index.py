@@ -1,19 +1,28 @@
 """按请求号寻址的历史投影；canonical terminal 仍是完成权威。
 
-旧 JSONL 只分批迁入。新记录写一行 SQLite 和一个有界导出段，导出未完成意图
+旧 JSONL 只分批迁入。新记录写一行 SQLite 并按天追加导出，导出未完成意图
 先提交，可在下一次调用重放；不在完成路径物化全部历史。
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import stat
+import time
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
 from ..common.json_io import append_private_jsonl_records, write_private_text_file_atomic
+from ..common.nofollow_fs import (
+    open_directory_beneath,
+    open_readonly_file_beneath,
+    unlink_file_beneath,
+)
+from ..memory_archive._storage_dates import _date_key as _day_key
 from .recovery_pending_index import private_projection_connection
 
 
@@ -39,6 +48,7 @@ class GatewayHistoryIndex:
                 conn.execute("PRAGMA synchronous=FULL")
                 conn.execute("CREATE TABLE IF NOT EXISTS history (request_id TEXT PRIMARY KEY, body TEXT NOT NULL, digest TEXT NOT NULL, origin TEXT NOT NULL, conflict INTEGER NOT NULL DEFAULT 0, export_pending INTEGER NOT NULL DEFAULT 0, export_path TEXT NOT NULL DEFAULT '', export_offset INTEGER NOT NULL DEFAULT 0, export_mode TEXT NOT NULL DEFAULT '')")
                 conn.execute("CREATE INDEX IF NOT EXISTS history_export_pending ON history(export_pending,request_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS history_export_path ON history(export_path)")
                 conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS migration_errors (line_number INTEGER PRIMARY KEY, context TEXT NOT NULL, reason TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS migration_fragment (singleton INTEGER PRIMARY KEY, body BLOB NOT NULL)")
@@ -102,8 +112,8 @@ class GatewayHistoryIndex:
             self._flush_pending(conn)
             return True
 
-    # LLM: 小热段只服务有界旧读者；最多128项/256KiB，之后每请求一个独立原子段。
-    # 函数用途: 为单行更新选择固定大小的导出位置。
+    # 小热段规则保持不变；之后只stat当天日段，不随历史长度读取或改写旧正文。
+    # 函数用途: 在原历史锁内为本次追加固定日期和准确字节偏移。
     def _export_location(self, conn, row, body):
         size = len(body.encode("utf-8")) + 1
         if row is not None and row["export_path"] == "@history" and self._meta(conn, "compat") == "1":
@@ -116,10 +126,49 @@ class GatewayHistoryIndex:
             if current + size <= 256 * 1024:
                 self._set_meta(conn, "compat_count", count + 1)
                 return "@history", current, "append"
-        payload = json.loads(body)
-        request_id = str(payload.get("id") or payload.get("request_id") or "").strip()
-        name = hashlib.sha256(request_id.encode()).hexdigest() + ".jsonl"
-        return f"history_segments/{name}", 0, "replace"
+        export_path = f"history_segments/{_day_key(time.time())}.jsonl"
+        try:
+            offset = (self.paths.root / export_path).stat().st_size
+        except FileNotFoundError:
+            offset = 0
+        return export_path, offset, "append"
+
+    def _append_daily_export(self, row, payload):
+        """只重放原意图拥有的日段尾部；已提交的前缀缺失时保留意图并报错。"""
+        parts = Path(row["export_path"]).parts
+        data = (row["body"] + "\n").encode("utf-8")
+        offset = row["export_offset"]
+        try:
+            descriptor = open_readonly_file_beneath(self.paths.root, parts)
+        except FileNotFoundError:
+            info, existing = None, b""
+        else:
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                handle.seek(offset)
+                existing = handle.read(len(data))
+        if existing == data:
+            return
+        current_size = info.st_size if info is not None else 0
+        if current_size < offset:
+            raise ValueError("daily history export prefix is missing")
+        if current_size != offset:
+            parent = open_directory_beneath(self.paths.root, parts[:-1], require_dir_fd=True)
+            try:
+                descriptor = os.open(parts[-1], os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+                try:
+                    current = os.fstat(descriptor)
+                    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                            or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+                            != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)):
+                        raise ValueError("daily history export changed during replay")
+                    os.ftruncate(descriptor, offset)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(parent)
+        append_private_jsonl_records(self.paths.root / row["export_path"], [payload], sort_keys=True)
 
     # LLM: 单次最多重放一个意图；它成功前不会接纳下一个导出，避免未决队列失控。
     # 函数用途: 根据已耐久的准确正文恢复一次私有JSONL导出。
@@ -130,7 +179,10 @@ class GatewayHistoryIndex:
         payload = json.loads(row["body"])
         if row["export_path"] != "@history":
             target = self.paths.root / row["export_path"]
-            write_private_text_file_atomic(target, row["body"] + "\n")
+            if row["export_mode"] == "append":
+                self._append_daily_export(row, payload)
+            else:
+                write_private_text_file_atomic(target, row["body"] + "\n")
         elif row["export_mode"] == "append":
             data = (row["body"] + "\n").encode("utf-8")
             try:
@@ -285,3 +337,111 @@ class GatewayHistoryIndex:
         with self.connection() as conn:
             rows = conn.execute("SELECT * FROM migration_errors WHERE line_number>? ORDER BY line_number LIMIT 128", (after,)).fetchall()
             return [{"context": row["context"], "line_number": row["line_number"], "message": row["reason"], "path": str(self.paths.history)} for row in rows]
+
+    def prune_history_step(self, *, cutoff: float, max_rows: int) -> dict:
+        """按持久rowid游标检查一小批；删除与游标共事务，正文未知或导出未决均保留。"""
+        with self.connection() as conn:
+            cursor = int(self._meta(conn, "retention_cursor", "0"))
+            rows = conn.execute("SELECT rowid,* FROM history WHERE rowid>? ORDER BY rowid LIMIT ?",
+                                (cursor, max(0, max_rows))).fetchall()
+            paths, removed, size = set(), [], 0
+            for row in rows:
+                size += len(row["body"].encode("utf-8"))
+                if row["export_pending"] or not _expired_history_body(row["body"], cutoff):
+                    continue
+                removed.append((row["rowid"],))
+                paths.add(row["export_path"])
+            conn.executemany("DELETE FROM history WHERE rowid=?", removed)
+            today = _day_key(time.time())
+            for export_path in paths:
+                parts = _retention_export_parts(export_path, today)
+                if parts is not None and conn.execute(
+                        "SELECT 1 FROM history WHERE export_path=? LIMIT 1", (export_path,)).fetchone() is None:
+                    # 共用历史锁防止并发append；安全unlink拒绝目录链接，也不触碰JSON锁侧车。
+                    unlink_file_beneath(self.paths.root, parts)
+            if rows:
+                cursor = rows[-1]["rowid"]
+            complete = conn.execute("SELECT 1 FROM history WHERE rowid>? LIMIT 1", (cursor,)).fetchone() is None
+            if complete:
+                cursor = 0
+            self._set_meta(conn, "retention_cursor", cursor)
+            return {"cursor": cursor, "complete": complete, "items": len(rows), "bytes": size}
+
+
+def _expired_history_body(body: str, cutoff: float) -> bool:
+    """历史writer传入response：只认精确终态与有限正数ended_at，不猜别名或创建时间。"""
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not isinstance(payload, dict) or payload.get("status") not in ("done", "failed", "cancelled", "interrupted"):
+        return False
+    ended = payload.get("ended_at")
+    try:
+        return type(ended) in (int, float) and math.isfinite(ended) and 0 < ended < cutoff
+    except OverflowError:
+        return False
+
+
+def _retention_export_parts(export_path: str, today: str) -> tuple[str, ...] | None:
+    """删除范围仅限已知日段及旧请求hash叶；兼容热段和未知路径均保留。"""
+    parts = Path(export_path).parts
+    if len(parts) != 2 or parts[0] != "history_segments" or export_path != "/".join(parts):
+        return None
+    name = parts[1]
+    if not name.endswith(".jsonl"):
+        return None
+    stem = name[:-6]
+    if len(stem) == 64 and all(char in "0123456789abcdef" for char in stem):
+        return parts
+    try:
+        day = date.fromisoformat(stem).isoformat()
+    except ValueError:
+        return None
+    return parts if day == stem and day != today else None
+
+
+def maintain_gateway_history_lane(request) -> dict:
+    """复用owner路径与原写门，在条数及毫秒预算内逐条推进唯一数据库游标。"""
+    from ..common.json_io import read_json_object_report
+    from ..memory_store.retention_models import MemoryRetentionPolicy
+    from ..user_space.owner_maintenance import _real_owner_directory
+    from ..user_space.runtime_paths import runtime_paths_for_agent
+    from ..user_space.storage_lanes import (
+        OWNER_RETENTION_OVERRIDE_MAX_DAYS,
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+    )
+    from .paths import gateway_paths_from_root
+
+    receipt = {"cursor": dict(request.cursor), "complete": True, "items": 0, "bytes": 0}
+    if request.legal_hold:
+        return {**receipt, "deferred_reason": "legal_hold"}
+    root = runtime_paths_for_agent(None, request.home.owner_home_dir, request.home)["gateway_workspace"]
+    if not _real_owner_directory(request.home, root):
+        return receipt
+    index = GatewayHistoryIndex(gateway_paths_from_root(root))
+    if not index.path.exists():
+        return receipt
+    # 与owner_retention_override读取同一策略；audit_days的0关闭语义不能被正整数覆盖器吞掉。
+    policy = read_json_object_report(Path(request.home.owner_retention_json), context="storage_lanes.override")
+    days = MemoryRetentionPolicy().audit_days
+    override = policy.payload.get("audit_days")
+    if policy.load_error is None and type(override) is int and override <= OWNER_RETENTION_OVERRIDE_MAX_DAYS:
+        days = override
+    if days <= 0:
+        return receipt
+    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
+                                   ms=STORAGE_LANE_SLICE_MS)
+    receipt["complete"] = False
+    while (not request.budget.exhausted(receipt["items"], receipt["bytes"])
+           and not budget.exhausted(receipt["items"], receipt["bytes"])):
+        report = request.run_write(lambda: index.prune_history_step(cutoff=request.now - days * 86400, max_rows=1))
+        receipt["cursor"] = {"retention_cursor": report["cursor"]}
+        receipt["items"] += report["items"]
+        receipt["bytes"] += report["bytes"]
+        if report["complete"]:
+            receipt["complete"] = True
+            break
+    return receipt
