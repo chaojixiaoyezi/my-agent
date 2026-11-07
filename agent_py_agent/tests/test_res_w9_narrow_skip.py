@@ -256,3 +256,59 @@ def test_lost_compact_coverage_index_uses_missing_signal(compact_case):
         source = compact.load_conversation_compact_source(case.agent, case.store, thread, scope=THREAD_COMPACT_SCOPE)
         assert tuple(source.messages) == tuple(rows)
         assert not case.store.threads.require(case.thread_id).compact_checkpoint_id
+
+
+# LLM: 真实writer/CAS与转录字节不伪造；接口探针同时适用于独立W9和已集成W2的分支。
+# 函数用途: 保证冷转必须确认冷副本，且接口内部异常不得触发第二次热回退读取。
+@pytest.mark.parametrize('damage', ['missing', 'present', 'reader_type_error'])
+def test_rotation_requires_cold_copy_with_fallback_aware_reader(compact_case, monkeypatch, damage):
+    import hashlib
+
+    from agent_py_agent.agent.conversation import compact_checkpoint as checkpoints
+    from agent_py_agent.agent.conversation.compact_checkpoint_scan import checkpoint_row_lookup
+
+    case = compact_case
+    original_reader = checkpoints._cold_checkpoint
+    calls, maintaining = [], False
+
+    # LLM: 冷路径存在才委托真实读取器，避免已集成W2时叠加其默认热回退；热查找使用真实账本。
+    # 函数用途: 在独立分支重现W2的新接口，并注入仅发生在维护读取内部的TypeError。
+    def fallback_reader(root, thread_id, checkpoint_id, *, fallback_hot=True):
+        calls.append(fallback_hot)
+        if maintaining and damage == 'reader_type_error':
+            raise TypeError('invalid archived checkpoint object')
+        name = hashlib.sha256(checkpoint_id.encode()).hexdigest() + '.checkpoint.json'
+        copy = root / 'archive' / thread_id / name
+        row = original_reader(root, thread_id, checkpoint_id) if copy.exists() else None
+        if row is None and fallback_hot:
+            with checkpoint_row_lookup(root / 'conversations' / f'{thread_id}.jsonl') as lookup:
+                row = lookup(checkpoint_id)
+        return row
+
+    # LLM: 仅在真实writer返回后操作临时冷副本；热账本与CAS保持原路径，准备期调用不计入维护次数。
+    # 函数用途: 为真实冷转准备缺副本、好副本和读取内部错误三个对照场景。
+    def prepare_copy(checkpoint_id):
+        nonlocal maintaining
+        calls.clear()
+        maintaining = True
+        if damage == 'missing':
+            name = hashlib.sha256(checkpoint_id.encode()).hexdigest() + '.checkpoint.json'
+            copy = case.root / 'compact' / 'archive' / case.thread_id / name
+            assert copy.exists()
+            copy.rename(copy.with_suffix('.missing-test'))
+
+    monkeypatch.setattr(checkpoints, '_cold_checkpoint', fallback_reader)
+    updated, _, original, path = _commit_rotation(case, monkeypatch, before_commit=prepare_copy)
+    assert updated.compact_generation == 1 and updated.summary == '已覆盖旧行'
+    assert case.store.threads.require(case.thread_id) == updated
+    if damage == 'present':
+        assert 'compact_transcript_maintenance' not in updated.metadata
+        assert path.with_suffix('.manifest.json').exists() and path.read_bytes() != original
+        with message_scan.TranscriptReader(path) as reader:
+            assert reader.read() == original
+    else:
+        assert updated.metadata.get('compact_transcript_maintenance') == {
+            'status': 'pending', 'error_type': 'DataCorruptionError', 'checkpoint_id': updated.compact_checkpoint_id,
+        }
+        assert path.read_bytes() == original and not path.with_suffix('.manifest.json').exists()
+    assert calls == [False]

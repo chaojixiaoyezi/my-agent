@@ -757,10 +757,12 @@ def cold_message_lookup(path: Path, key: str, *, reader=None):
     return entry, address
 
 
-# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再核冷副本；prepared封印旧/新前缀和逻辑代次，设备号仅作观察。
+# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再仅核冷副本（禁热回退）；prepared封印旧/新前缀和逻辑代次。
 # 对非终态、活动索引或未知任务保守pin；终态任务仍须被本次thread摘要精确覆盖，原字节保存在冷段。
 # 函数用途: 将已覆盖且无活跃任务pin的前缀冷存，保留边界本行及全部迟到尾部。
 def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | None = None):
+    from inspect import signature
+
     from ..common.nofollow_fs import write_bytes_atomic_beneath, write_text_atomic_beneath
     from .compact_checkpoint import _cold_checkpoint
     from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
@@ -786,7 +788,14 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
         return
     compact_root = storage.resolve_compact_root(compact_root)
     try:
-        row = _cold_checkpoint(compact_root, thread.thread_id, thread.compact_checkpoint_id)
+        args = (compact_root, thread.thread_id, thread.compact_checkpoint_id)
+        # 只对参数绑定失败走旧接口；读取内部TypeError仍由外层按冷副本无效处理，不重试。
+        try:
+            signature(_cold_checkpoint).bind(*args, fallback_hot=False)
+        except TypeError:
+            row = _cold_checkpoint(*args)
+        else:
+            row = _cold_checkpoint(*args, fallback_hot=False)
         if (row is None or row.get('schema') != 'conversation_compact_checkpoint.v3'
                 or CompactScope.from_dict(row['scope']) != THREAD_COMPACT_SCOPE
                 or row.get('source_kind') not in {'transcript', 'transcript_and_tool_archive'}
