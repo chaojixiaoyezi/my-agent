@@ -496,7 +496,7 @@ def _broadcast_model_messages(messages):
     return result
 
 
-# LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
+# LLM: threads.list_report 逐记录错误只隔离该线程；无身份错误和 messages.after_report 读错仍阻断游标。
 # 两个读取能力来自同一 ConversationStore 的显式领域，不探测旧方法或建立第二份消息来源。
 # 学习排除名单与线程只读标记在读取任何消息前生效；消息级严格True标记有界跨页跳过并记录跳过游标前缀。
 # 函数用途: 收集预算内消息；排除来源先跳过，已确认EOF且文件未变的冷线程不再调用消息读取器。
@@ -514,7 +514,8 @@ def _collect_messages(
     if not callable(list_report) or not callable(after_report):
         raise TypeError("ConversationStore lacks incremental Memory Curator read contract")
     threads, thread_errors = list_report(limit=0)
-    errors: list[dict[str, object]] = [dict(item) for item in thread_errors]
+    unreadable_thread_ids = {str(item["thread_id"]) for item in thread_errors if item.get("thread_id")}
+    errors: list[dict[str, object]] = [dict(item) for item in thread_errors if not item.get("thread_id")]
     if source.excluded_conversation_ids is None:
         # fail-closed：名单不可读时本轮不学任何会话；消息留在原游标后，名单修复后重放。
         return [], errors
@@ -532,7 +533,8 @@ def _collect_messages(
     for thread in sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id))):
         if len(selected) >= limit or int(state["used_chars"]) >= max_chars:
             break
-        if _thread_learning_excluded(thread) or thread_is_excluded(thread, source.excluded_conversation_ids):
+        if (str(thread.thread_id) in unreadable_thread_ids or _thread_learning_excluded(thread)
+                or thread_is_excluded(thread, source.excluded_conversation_ids)):
             continue
         _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
     return selected, errors
@@ -651,16 +653,20 @@ def _thread_learning_excluded(thread: object) -> bool:
     )
 
 
-# LLM: audit与消息共用名单及线程metadata门；线程或名单不可读时不消费audit游标。
-# 函数用途: 即使owner名单为空，也排除只读/不可学习线程的审计事件。
+# LLM: audit与消息共用名单及线程metadata门；逐记录读错只排除该线程，名单或无身份错误仍阻断游标。
+# 函数用途: 排除只读、不可学习及不可读线程的审计事件，不让一个坏线程卡住其它线程。
 def _excluded_audit_thread_ids(source: CuratorMessageSource) -> frozenset[str] | None:
     if source.excluded_conversation_ids is None:
         return None
     threads, errors = source.conversation_store.threads.list_report(limit=0)
-    if errors:
-        return None
-    return frozenset(str(thread.thread_id) for thread in threads if _thread_learning_excluded(thread)
-                     or thread_is_excluded(thread, source.excluded_conversation_ids))
+    excluded = set()
+    for error in errors:
+        if not error.get("thread_id"):
+            return None
+        excluded.add(str(error["thread_id"]))
+    excluded.update(str(thread.thread_id) for thread in threads if _thread_learning_excluded(thread)
+                    or thread_is_excluded(thread, source.excluded_conversation_ids))
+    return frozenset(excluded)
 
 
 # LLM: 排除会话的 audit 事件不进入模型输入；窗口整段被排除时给出可安全跳过的游标，

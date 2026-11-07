@@ -175,11 +175,17 @@ class LessonRepository:
     # 绝不因单个旧文件拖垮整表;迁移已 complete(正式 v2 区建立)后仍出现无 marker 文件
     # → 损坏,必须 fail-closed 不可静默吞(防模型拿到被破坏的正式记忆)。有 marker 但
     # metadata 非法的文件两种模式都抛(与迁移 CORRUPT_LESSON_MARKER 同一 fail-closed 约定)。
+    # 副本名在读取前跳过；写入器允许 slug 内有点，但末尾必须是八位小写哈希。
+    # 仅满八十字符的截断 slug 可能保留尾部标点；规范文件仍走原迁移和元数据校验。
     # 函数用途: 按迁移状态容错或严格列出当前正式 lesson。
     def list(self) -> list[LessonRecord]:
         tolerate_legacy = not (self.lessons_dir.parent / "migration.json").exists()
         records: list[LessonRecord] = []
         for path in sorted(self.lessons_dir.glob("*.md")):
+            name = re.fullmatch(r"([A-Za-z0-9_][A-Za-z0-9_.-]{0,79})-[0-9a-f]{8}", path.stem)
+            if name is None or (len(name[1]) < 80 and name[1].endswith((".", "-"))):
+                logger.debug("Ignoring non-canonical lesson name=%s", path.name)
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
             except OSError:
