@@ -201,6 +201,9 @@ def test_durable_gateway_job_keeps_receipt_across_gateway_restart(tmp_path, monk
     ctx.cfg.paths = gateway_paths_from_root(tmp_path / "gateway")
     ctx.cfg.running_request_id_ref = [""]
     ctx.cfg.args = SimpleNamespace(gateway_timeout=1)
+    ctx.cfg.agent = None
+    monkeypatch.delenv("MY_AGENT_TUI_NETWORK", raising=False)
+    monkeypatch.delenv("MY_AGENT_GATEWAY_URL", raising=False)
     ctx.job.gateway_request_id = "gwreq-existing" if submitted else ""
     ctx.turn_inject = []
     cleared = []
