@@ -115,7 +115,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["text"] = {"format": {"type": "json_object"}}
         subscription = getattr(self, "auth_ref", {}).get("mode") == "chatgpt"
         if subscription:
-            for field in ("temperature", "top_p", "max_output_tokens", "truncation", "user", "metadata", "max_tool_calls",
+            for field in ("temperature", "max_output_tokens", "truncation", "user", "metadata", "max_tool_calls",
                           "background", "conversation", "prompt", "prompt_cache_retention", "safety_identifier",
                           "top_logprobs", "moderation", "multi_agent", "previous_response_id"):
                 payload.pop(field, None)
@@ -124,6 +124,8 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             from ..settings.model_oauth_schema import SIWC_BASE
 
             if self.api_base == SIWC_BASE:
+                # top_p 只在官方 SIWC 路由禁用；兼容地址保留用户显式采样值及重试语义。
+                payload.pop("top_p", None)
                 # 历史调用身份与工具声明一致；即使本轮不再提供工具，也须保留 namespace。
                 for item in payload["input"]:
                     if item.get("type") == "function_call":
