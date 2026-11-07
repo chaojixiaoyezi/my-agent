@@ -37,6 +37,8 @@ from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
 # 函数用途: 恢复MemoryRecord并保留未来版本字段，构造失败仍交容错读跳过。
 def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
     """dict → MemoryRecord:过滤未知顶层字段(旧版本读新字段记录不崩),构造失败返回 None(跳过坏记录)。"""
+    if not isinstance(obj, dict):
+        return None
     known = set(MemoryRecord.__dataclass_fields__) - {"_extra_fields"}
     try:
         record = MemoryRecord(**{k: v for k, v in obj.items() if k in known})
