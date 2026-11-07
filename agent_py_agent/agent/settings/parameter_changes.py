@@ -73,6 +73,7 @@ _BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外
 PROFILE_FIELDS = frozenset({"reasoning_control"})
 _USER_SETTINGS_WRITE: ContextVar[bool] = ContextVar("user_settings_write", default=False)
 _CLI_DEPLOYMENT_WRITE: ContextVar[bool] = ContextVar("cli_deployment_write", default=False)
+_MCP_SERVERS_WRITE: ContextVar[bool] = ContextVar("mcp_servers_write", default=False)
 _LOCKED_LEDGER: ContextVar[Path | None] = ContextVar("config_transaction_ledger", default=None)
 _UNSPECIFIED = object()
 
@@ -99,6 +100,17 @@ def cli_deployment_write_scope():
         yield
     finally:
         _CLI_DEPLOYMENT_WRITE.reset(token)
+
+
+# LLM: 仅已认证管理员的 MCP 业务入口进入；不扩大 CLI 白名单、用户设置边界或模型写权，退出立即撤销。
+# 函数用途: 让部署 MCP 配置复用原参数事务、CAS 和脱敏账本。
+@contextmanager
+def mcp_servers_write_scope():
+    token = _MCP_SERVERS_WRITE.set(True)
+    try:
+        yield
+    finally:
+        _MCP_SERVERS_WRITE.reset(token)
 
 
 # LLM: 谁发起、为什么；actor 用固定短标签（model / chat / cli / test），reason 只给人看、截断后记账，不参与任何判断。
@@ -208,7 +220,8 @@ def _writable_spec(key: str) -> ParameterSpec:
         raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
     cli_allowed = (_CLI_DEPLOYMENT_WRITE.get() and spec.source == SOURCE_AGENT
                    and spec.key in CLI_DEPLOYMENT_WRITABLE_KEYS)
-    if spec.tier == "deployment" and not cli_allowed:
+    mcp_allowed = _MCP_SERVERS_WRITE.get() and spec.source == SOURCE_AGENT and spec.key == "mcp_servers"
+    if spec.tier == "deployment" and not (cli_allowed or mcp_allowed):
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",
             f"'{spec.key}' 属于宿主部署配置（{spec.source}），须由完整宿主管理员经对应部署入口维护；"
@@ -216,7 +229,7 @@ def _writable_spec(key: str) -> ParameterSpec:
     if not spec.writer and not cli_allowed:
         raise ParameterChangeError("PARAMETER_STRUCTURED", "没有支持该类型的参数 writer，不能修改。")
     user_allowed = _USER_SETTINGS_WRITE.get() and spec.user_editable
-    if not spec.writable and not user_allowed and not cli_allowed:
+    if not spec.writable and not user_allowed and not cli_allowed and not mcp_allowed:
         reason = BOUNDARY_KEYS.get(spec.key, _BOUNDARY_REASON)
         raise ParameterChangeError("PARAMETER_BOUNDARY", f"'{spec.key}' 属于安全边界，不能由模型自行修改：{reason}")
     return spec
@@ -279,12 +292,27 @@ def _unique_json_pairs(pairs):
     return result
 
 
-# LLM: 仅登记的四项结构有 writer；角色数量与构造/YAML共用严格校验，不影响期限的 off/null/inherit/auto 语义。
+# LLM: 仅登记的结构有 writer；MCP 逐项用真实连接配置校验，角色数量与构造/YAML 共用严格校验。
 # 函数用途: 归一 typed 结构并生成正式 mini-YAML 可解析的单行表示，失败不进入事务。
 def _render_structured(key: str, value: object) -> tuple[object, str]:
     try:
         if isinstance(value, str):
             value = json.loads(value, object_pairs_hook=_unique_json_pairs)
+        if key == "mcp_servers":
+            from ..tooling.mcp_client import MCPError, MCPServerConfig
+
+            if not isinstance(value, dict):
+                raise ValueError("MCP 服务必须是映射")
+            for name, entry in value.items():
+                if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
+                    raise ValueError("MCP 服务名无效")
+                try:
+                    MCPServerConfig.from_mapping(name, entry)
+                except MCPError:
+                    raise ValueError("MCP 服务声明无效") from None
+            # 保留部署者原字段，连接解析器只负责验证；JSON 回路拒绝非有限数字及不可持久化对象。
+            normalized = json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+            return normalized, repr(normalized)
         if key == "runner_role_limits":
             from .services._normalize import validate_runner_role_limits
 
@@ -553,6 +581,29 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
 
 
+# LLM: 批次与单值共享同一候选、CAS、回读和台账事务；不能借其中一个可写字段扩张其他字段权限。
+# 函数用途: 原子修改同一配置文件中的多个参数，任一验证或写入失败均保留原事务恢复语义。
+def set_parameters(values: dict, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('global_config')
+
+    try:
+        if not isinstance(values, dict) or not values:
+            raise ParameterChangeError('PARAMETER_INVALID', '配置批次不能为空。')
+        prepared = []
+        for key, value in values.items():
+            spec = _writable_spec(key)
+            expected, rendered = _render(spec, value)
+            prepared.append((spec, rendered, expected))
+        spec, rendered, expected = prepared[0]
+        return _config_transaction(spec, paths, rendered, origin, action='set', expected=expected,
+                                   updates=tuple(prepared[1:]))
+    except ParameterChangeError as error:
+        return _failure(error)
+    except (OSError, ValueError):
+        return _failure(ParameterChangeError('USER_CONFIG_WRITE_FAILED', '配置事务写入失败，请核对配置与账本。'))
+
+
 # LLM: 仅本地 CLI 的短作用域允许调用；保留 config-set 的五键白名单，连接模式是固定派生项而不是任意部署写权限。
 # 函数用途: 将飞书凭据和长连接模式作为同一批候选原子提交，返回正式回读和脱敏账本回执。
 def set_feishu_connection(app_id: str, app_secret: str, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
@@ -612,10 +663,18 @@ def reset_parameter(key: object, *, paths: WritePaths, origin: ChangeOrigin) -> 
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
 
 
-# LLM: 记账用的文本：None 表示“默认值/没有覆盖”，原样保留；其余一律结构脱敏。
-# 函数用途: 把要写进修改记录的一个值脱敏。
+# LLM: MCP 的正式 YAML 是映射文本；先经原标量解析恢复结构再脱敏，否则 env 容器会退化为普通字符串。
+# 函数用途: 把要写进修改记录的一个值脱敏，旧不可解析的 MCP 文本只保留遮蔽标记。
 def _ledger_text(key: str, value: str | None) -> str | None:
-    return None if value is None else mask_value(key, value)
+    if value is None:
+        return None
+    if key == 'mcp_servers':
+        try:
+            parsed = parse_scalar(value)
+        except (ValueError, TypeError):
+            return '***'
+        return mask_value(key, parsed) if isinstance(parsed, dict) else '***'
+    return mask_value(key, value)
 
 
 # LLM: 历史记录的回显出口：previous/value 再过一遍 mask_value（旧记录可能写于脱敏收紧之前，脱敏对已遮住的值不再改变）。
