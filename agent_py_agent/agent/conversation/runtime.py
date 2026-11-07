@@ -103,6 +103,7 @@ from .background_tool_policy import (
     background_tool_policy_decision,
 )
 from .compact_guard import is_provider_quota_failure
+from .host_notices import host_notice, queue_host_notice
 from .learning_source import LEARNING_SOURCE_KEY, background_projection
 from .models import (
     SESSION_MESSAGE_WAKE_REASON,
@@ -127,11 +128,16 @@ from .wake_attempt_tracking import (
     wake_attempt_deferred,
     wake_attempt_waiting,
 )
-from .wake_domain_closeout import close_out_abandoned_source
+from .wake_domain_closeout import WAKE_POISON_NOTICE_SOURCE, close_out_abandoned_source
 from .wake_poison import (
     WAKE_ATTEMPT_PATH_CLAIMED,
     WAKE_ATTEMPT_PATH_QUOTA_FALLBACK,
     WAKE_ATTEMPT_PATH_REDELIVERY,
+    WAKE_VERDICT_FAILURE,
+    WakePoisonState,
+    next_poison_state,
+    quarantine_decision,
+    verdict_for_error,
 )
 
 
@@ -3767,15 +3773,80 @@ def _consume_observation_batches(
         if observation_limit > 0:
             selected = selected[: observation_limit - admitted]
         admitted += len(selected)
-        report = consume_with_supply_guard(
-            scheduler._supply_backoff,
-            thread_id,
-            current,
-            partial(_run_observation_batch, scheduler, thread_id, selected, now=current),
-        )
+        try:
+            report = consume_with_supply_guard(
+                scheduler._supply_backoff,
+                thread_id,
+                current,
+                partial(_run_observation_batch, scheduler, thread_id, selected, now=current),
+            )
+        except Exception as exc:
+            if not _quarantine_poison_observations(scheduler, (thread_id, task_id), selected, exc, now=current):
+                raise
+            continue
         if report is not None:
+            _observation_poison(scheduler).pop((thread_id, task_id), None)
             reports.append(report)
             reported.add(report.thread_id)
+
+
+# LLM: 进程内按 (thread, task) 记观察批次毒丸状态；拿到报告或结案即清，未执行（None）不清不加；重启清零（最多再试同因上限次）。
+# 函数用途: 取（必要时建立）调度器上的观察批次毒丸计数表。
+def _observation_poison(scheduler: object) -> dict[tuple[str, str], WakePoisonState]:
+    table = getattr(scheduler, "_observation_poison", None)
+    if not isinstance(table, dict):
+        table = {}
+        scheduler._observation_poison = table
+    return table
+
+
+# LLM: 观察批次没有 wake 尝试账；复用 wake_poison 的判定/计数/阈值（同因 5 次、总 12 次），瞬时/环境/额度类不计数。
+#   未到阈值返回 False，由调用方原样抛出（车道冷却节奏不变）；到阈值把本批 observation 标记已处理并留宿主提示，返回 True。
+#   标记写入失败时保留计数并返回 False，下次再判；宿主提示失败只记日志。
+# 函数用途: 让确定性失败的观察批次有界重试后结案，不再无限占用后台车道。
+def _quarantine_poison_observations(
+    scheduler: BackgroundMainAgentScheduler,
+    key: tuple[str, str],
+    observations: list[ObservationEvent],
+    exc: Exception,
+    *,
+    now: float,
+) -> bool:
+    verdict = verdict_for_error(exc)
+    if verdict.kind != WAKE_VERDICT_FAILURE:
+        return False
+    table = _observation_poison(scheduler)
+    state = next_poison_state(table.get(key, WakePoisonState()), verdict, now=now)
+    decision = quarantine_decision(state)
+    if decision is None:
+        table[key] = state
+        return False
+    ids = [item.observation_id for item in observations]
+    try:
+        scheduler.store.observations.mark_handled(ids, now=now)
+    except Exception as mark_exc:  # noqa: BLE001 - 结案写不进去就保留计数，下次再判
+        table[key] = state
+        _HEARTBEAT_LOGGER.warning(
+            "OBSERVATION_QUARANTINE_FAILED thread=%s task=%s error_type=%s",
+            key[0], key[1], type(mark_exc).__name__,
+        )
+        return False
+    table.pop(key, None)
+    _HEARTBEAT_LOGGER.warning(
+        "OBSERVATION_BATCH_QUARANTINED thread=%s task=%s obs=%d reason=%s same_cause=%d total=%d",
+        key[0], key[1], len(ids), decision.reason_code, state.same_cause_count, state.total_count,
+    )
+    try:
+        queue_host_notice(scheduler.store, key[0], host_notice(
+            WAKE_POISON_NOTICE_SOURCE, decision.reason_code,
+            f"后台观察（{len(ids)} 条）连续失败，已停止重试并结案。原因码：{decision.reason_code}。",
+        ), replace_same_code=True)
+    except Exception as notice_exc:  # noqa: BLE001 - 提示写不进去不影响已结案
+        _HEARTBEAT_LOGGER.warning(
+            "OBSERVATION_QUARANTINE_NOTICE_FAILED thread=%s error_type=%s",
+            key[0], type(notice_exc).__name__,
+        )
+    return True
 
 
 def _observation_waits_for_linked_wake(
