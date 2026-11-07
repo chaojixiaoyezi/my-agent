@@ -52,6 +52,11 @@ from .models import (
     ToolRuntimePolicy,
 )
 
+try:
+    from ..common import cache_capacity
+except ImportError:
+    cache_capacity = None
+
 _LOGGER = logging.getLogger(__name__)
 
 # 文件查找快照及其分页续点允许复用的存活秒数。
@@ -369,7 +374,8 @@ class FindFilesTool(FileSystemTool):
         for token, (key, _, expiry) in list(self._snapshot_cursors.items()):
             if expiry <= now or key not in self._snapshots:
                 del self._snapshot_cursors[token]
-        while len(self._snapshots) > _FIND_SNAPSHOT_MAX_CACHED:
+        while len(self._snapshots) > (cache_capacity.owner_sessions(_FIND_SNAPSHOT_MAX_CACHED)
+                                     if cache_capacity is not None else _FIND_SNAPSHOT_MAX_CACHED):
             self._snapshots.popitem(last=False)
         while len(self._snapshot_cursors) > _FIND_SNAPSHOT_MAX_CURSORS:
             self._snapshot_cursors.popitem(last=False)
@@ -382,6 +388,9 @@ class FindFilesTool(FileSystemTool):
         watches: dict[Path, tuple[int, ...]] = {}
         paths: list[Path] = []
         retained = 0
+        max_bytes = (_FIND_SNAPSHOT_MAX_BYTES * (cache_capacity.owner_sessions(_FIND_SNAPSHOT_MAX_CACHED)
+                     if cache_capacity is not None else _FIND_SNAPSHOT_MAX_CACHED)
+                     // _FIND_SNAPSHOT_MAX_CACHED)
 
         # LLM: 入队、下降及扫描后重复观察同一目录，不把末尾一次根stat当作强快照。
         # 函数用途: 收集来源身份并拒绝已观察到的构建期间漂移。
@@ -394,7 +403,7 @@ class FindFilesTool(FileSystemTool):
                     raise _FindSnapshotStale('changed_during_scan')
                 return
             cost = len(str(path).encode('utf-8', 'surrogatepass')) + 256
-            if retained + cost > _FIND_SNAPSHOT_MAX_BYTES:
+            if retained + cost > max_bytes:
                 raise _FindSnapshotLimit()
             retained += cost
             watches[path] = identity
@@ -407,7 +416,7 @@ class FindFilesTool(FileSystemTool):
                 if not _matches_find_pattern(self.display_path(item), item.name, request.pattern):
                     continue
                 cost = len(str(item).encode('utf-8', 'surrogatepass')) + 64
-                if retained + cost > _FIND_SNAPSHOT_MAX_BYTES:
+                if retained + cost > max_bytes:
                     raise _FindSnapshotLimit()
                 retained += cost
                 paths.append(item)
