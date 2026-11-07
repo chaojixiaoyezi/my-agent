@@ -448,6 +448,15 @@ V13_SLICE_MODULES = (
     'agent_py_agent.agent.gateway_parts.business_api_v13_w11',
     'agent_py_agent.agent.gateway_parts.business_api_v13_w12',
     'agent_py_agent.agent.gateway_parts.business_api_v13_sessions',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w1',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w2',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w3',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w4',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w5',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w6',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w7',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w8',
+    'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w9',
 )
 
 

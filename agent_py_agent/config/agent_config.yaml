@@ -80,6 +80,18 @@ home_context_enabled: true
 thread_prompt_prefix_freeze_enabled: true
 # 业务空间合同总开关；默认关闭保留旧owner路径，开启也不授予空间或插件权限。
 business_spaces_enabled: false
+# OpenAI 兼容网关与诊断模型调用入口；默认关闭，不增加路由或模型用量，只允许用户显式启用。
+openai_compat_gateway_enabled: false
+# 是否将模型终态调用记录保存到本人 runtime.db；默认关闭，不改变现有运行记录。
+llm_call_records_enabled: false
+# 本人数据库模型调用记录行数上限；默认50000，0不封顶，旧记录按有界批次清理。
+llm_call_records_max_rows: 50000
+# 旁问会增加模型请求，默认关闭；启用也仍受本人并发额度与业务空间总开关约束。
+side_questions_enabled: false
+# 通知渠道的出站投递；默认关闭，不改变原通知行为，也不扩大网络允许范围。
+notify_delivery_enabled: false
+# 管理员通过业务接口执行远程运维更新；默认关闭，不授权模型开启此能力。
+ops_remote_update_enabled: false
 # 运行时快照投影默认开启；关闭恢复旧粗粒度文本，消费方须按单次请求冻结值。
 prompt_runtime_snapshots_enabled: true
 # 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
@@ -877,6 +889,8 @@ model_http_max_idle_connections: 0
 # HTTP 基础超时秒数：非流式请求把它当总时长下限；流式请求把它当首包后的滚动空闲窗口。
 # 首包等待会根据本轮输入量单独扩展，健康流式输出不会再被这个值当作整次总墙钟强杀。
 request_timeout: 240
+# 可重试模型HTTP错误的退避秒数；只接受非负有限数字列表，默认与原重试常量一致，修改后重启加载。
+model_retry_backoff_seconds: [2.0, 5.0, 15.0]
 
 # 模型单次回答最多生成多少 token（含推理内容），所有模型统一 64K。
 # 未计量的直接调用/探针仍取 min(本值,窗口÷4)，窗口没填时沿128K旧兜底；后端 max_tokens 保持这个冻结值。
@@ -929,6 +943,8 @@ anthropic_prompt_cache_enabled: true
 enable_tools: true
 # 允许显式插件管理；未安装并启用时不加载插件、不启动额外进程。关闭后仍可查询原结果。
 enable_plugins: true
+# 本人自定义工具管理；默认关闭，开启后仍沿原插件授权，不自动运行工具。
+custom_tools_enabled: false
 # 插件进程 OS 沙箱（试点，默认关闭）：
 # - false：插件进程以你本人的权限运行（现状）。
 # - true：每个插件进程都放进系统沙箱（Linux 用 bubblewrap，macOS 用 sandbox-exec），能读的范围不变，
@@ -1094,6 +1110,8 @@ tool_shell_timeout: 240
 # PTY 交互终端会话空闲多久后由宿主自动收回（分钟；0 表示不限制）
 # 分页器（less 等）看到终端会等按键、命令永远不退出，超时后宿主会杀掉整个进程组回收
 pty_session_idle_timeout_minutes: 30
+# 浏览器终端入口；默认关闭，不改变原PTY会话及空闲回收策略。
+web_terminal_enabled: false
 
 # run_command 的 stdout/stderr 分别最多回显多少字符
 # 超出时只回显预览、总字符数和截断标记，完整大输出后续应走 artifact/日志引用
@@ -1184,6 +1202,10 @@ tool_vector_search_enabled: true
 #   带凭证的 server（凭证经 env 显式传入，日志自动脱敏）：
 #   mcp_servers: {"github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}, "timeout": 120}}
 mcp_servers: {}
+# ACP外部代理桥接；默认关闭，开启后仍核对本人权限、命令配置及会话数量限制。
+acp_bridge_enabled: false
+# 部署定义的ACP代理映射：代理编号对应command、env_allowlist和display_name；仅YAML可写，默认空且不启动进程。
+acp_bridge_agents: {}
 
 # Computer Use：直接复用 MIT 开源的 computer-control-mcp 执行鼠标、键盘、窗口、截图和 OCR，
 # my-agent 只通过现有 MCP/Tool Gateway 做薄适配，不重复实现桌面自动化引擎。

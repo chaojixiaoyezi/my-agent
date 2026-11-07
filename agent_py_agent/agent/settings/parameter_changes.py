@@ -47,6 +47,7 @@ from .user_config_capability import (
     EFFECT_IMMEDIATE,
     TUNABLE_KEYS,
     USER_SETTINGS_BOUNDARY_KEYS,
+    _non_negative_numbers,
     effect_text,
     mask_value,
     packaged_config_path,
@@ -222,7 +223,7 @@ def _writable_spec(key: str) -> ParameterSpec:
 
 
 # LLM: 显式白名单项先用原校验（如百分比区间）；其余按字段类型解析：布尔认常见中英文词，整数/小数默认非负时拒绝负数，
-#   文本拒绝换行和引号且限 500 字；列表/映射不在聊天里改。返回（期望生效值，写入文本）。
+#   文本拒绝换行和引号且限 500 字；只有正式数字序列writer可写列表，其余结构仍拒绝。
 # 函数用途: 把用户给的值解析并渲染成可写入的 YAML 标量。
 def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
     if spec.key in STRUCTURED_PARAMETER_KEYS:
@@ -232,6 +233,8 @@ def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
             validate_config_scalar_text(value)
         except ValueError:
             raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 含不支持的控制字符或编码字符，没有写入。") from None
+    if spec.writer == "numeric_sequence":
+        return _render_numeric_sequence(spec, value)
     text = str(value if value is not None else "").strip()
     if spec.key in TUNABLE_KEYS:
         ok, error, normalized = TUNABLE_KEYS[spec.key].validate(value)
@@ -250,6 +253,19 @@ def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
             raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：文本不能含引号或换行，且不超过 {_MAX_TEXT_CHARS} 字")
         return text, f'"{text}"'
     raise ParameterChangeError("PARAMETER_STRUCTURED", f"'{spec.key}' 是 {spec.value_type} 结构，请直接编辑用户配置文件。")
+
+
+# LLM: 数字序列沿原事务写回；JSON数组不带引号，限制同原台账文本预算，拒绝时没有文件副作用。
+# 函数用途: 校验数字列表或元组并生成mini-YAML可解析的有限数字数组。
+def _render_numeric_sequence(spec: ParameterSpec, value: object) -> tuple[object, str]:
+    validator = TUNABLE_KEYS[spec.key].validate if spec.key in TUNABLE_KEYS else _non_negative_numbers
+    ok, error, normalized = validator(value)
+    if not ok:
+        raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：{error}")
+    rendered = json.dumps(normalized, allow_nan=False)
+    if len(rendered) > _MAX_TEXT_CHARS:
+        raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 数字列表超过配置台账文本预算，没有写入。")
+    return normalized, rendered
 
 
 # LLM: JSON 重复键不能静默取末项；本 helper 只解析用户候选，不生成执行或授权信息。
@@ -333,9 +349,11 @@ def _effective(path: Path, key: str) -> object:
     return getattr(load_config(path), key)
 
 
-# LLM: 类型也必须一致：小数目标读回来必须真是数字（不能是 "0.9" 这样的字符串，否则供应商会收到字符串参数）。
+# LLM: 数字序列按元素递归核类型，允许YAML将元组读成列表；布尔不能冒充整数，小数沿原有限数值核对。
 # 函数用途: 判断加载后的值是否就是想写入的值。
 def _same(expected: object, actual: object) -> bool:
+    if isinstance(expected, (list, tuple)) and isinstance(actual, (list, tuple)):
+        return len(expected) == len(actual) and all(_same(left, right) for left, right in zip(expected, actual))
     if isinstance(expected, float):
         numeric = isinstance(actual, (int, float)) and not isinstance(actual, bool)
         return numeric and math.isclose(float(expected), float(actual), rel_tol=1e-9, abs_tol=1e-12)
@@ -393,7 +411,9 @@ def _config_transaction(spec, paths, rendered, origin, *, action, expected=_UNSP
             if _write_target(item, paths).resolve() != path:
                 raise ParameterChangeError("CONFIG_INVALID", "配置批次不能跨来源文件，没有写入。")
             try:
-                candidate, previous = render_config_change(candidate, item.key, value, structured=item.key in STRUCTURED_PARAMETER_KEYS)
+                candidate, previous = render_config_change(
+                    candidate, item.key, value,
+                    structured=item.key in STRUCTURED_PARAMETER_KEYS or item.writer == "numeric_sequence")
             except ValueError:
                 raise ParameterChangeError("CONFIG_INVALID", "配置候选无效或目标键重复，没有写入。") from None
             if value is None and previous is None:
@@ -647,7 +667,7 @@ def revert_change(change_id: str, *, paths: WritePaths, origin: ChangeOrigin) ->
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
 
 
-# LLM: 回滚单条记录的核心写入：先把当前配置值写回 previous（或删除覆盖行），再用正式加载器回读核对。
+# LLM: 回滚仍核原writer/权限；数字序列历史按原YAML标量恢复，其余previous沿原解析，不放宽公开set的文本元素拒绝。
 #   凭据类记录只有脱敏值、不能回滚；capability 文件原本不存在且目标就是默认时按没有覆盖拒绝。
 #   嵌套用早返回压平：masked、无覆盖、回读没变化各自提前抛错，不把 if 叠起来。副作用：写配置与账本。
 # 函数用途: 执行一条修改记录的回滚写入与回读核对，返回结构化回执。
@@ -658,7 +678,12 @@ def _revert_entry(paths: WritePaths, entry: dict[str, object], origin: ChangeOri
     target = entry.get("previous")
     if target is None:
         return _config_transaction(spec, paths, None, origin, action="revert", reverts=str(entry["id"]))
-    expected, rendered = _render(spec, parse_scalar(str(target)))
+    previous = parse_scalar(str(target))
+    if spec.writer == "numeric_sequence":
+        valid, error, previous = _non_negative_numbers(previous, yaml_scalars=True)
+        if not valid:
+            raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 原数字列表无效：{error}")
+    expected, rendered = _render(spec, previous)
     return _config_transaction(spec, paths, rendered, origin, action="revert", expected=expected, reverts=str(entry["id"]))
 
 

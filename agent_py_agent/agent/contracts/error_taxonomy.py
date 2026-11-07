@@ -4815,3 +4815,37 @@ ERROR_CONTRACTS.update({
         recovery_hint="原记忆候选的待履约责任已隔离；保留原候选、证据pin和提交回执，沿原责任核对，不清理责任、不补造成功或重放未知晋升。",
     ),
 })
+
+# 只登记共享恢复合同；是否执行或重试仍由所属服务核对原操作事实。
+ERROR_CONTRACTS.update({
+    "ARCHIVE_ENTRY_REJECTED": ErrorContract(
+        code="ARCHIVE_ENTRY_REJECTED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="归档条目在解包前被拒绝；按 entry 与 reason 核对条目路径、类型和大小，修正归档后再提交。",
+    ),
+    "POLICY_RULE_DENIED": ErrorContract(
+        code="POLICY_RULE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="当前工具调用被本人策略规则拒绝；核对准确规则与调用范围，由有权用户调整，不更换入口绕过。",
+    ),
+    "TARGET_SCOPE_DENIED": ErrorContract(
+        code="TARGET_SCOPE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="调用目标超出当前目标范围约束；核对原任务的有效范围，由有权用户明确授权，不扩大目标或借用其他身份。",
+    ),
+    "MAINTENANCE_BUSY": ErrorContract(
+        code="MAINTENANCE_BUSY", category="state", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="另一个维护或更新任务仍持有单运行锁；先查询该任务状态，待它释放后再提交，不强行清锁。",
+    ),
+    "EXTERNAL_PROCESS_FAILED": ErrorContract(
+        code="EXTERNAL_PROCESS_FAILED", category="tool", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="外部进程启动或初始化失败；核对 exit_code、部署命令与依赖，并确认原进程状态后再决定重试。",
+    ),
+    "OUTBOUND_DOMAIN_DENIED": ErrorContract(
+        code="OUTBOUND_DOMAIN_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="目标主机不在出站域名允许列表中；由有权用户核对准确目标与部署规则，不用重定向或替代地址绕过。",
+    ),
+})

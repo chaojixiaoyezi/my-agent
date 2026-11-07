@@ -723,6 +723,29 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 仅部署凭据的身份要求热刷新；飞书回调凭据保持启动值，需重启适配器收敛。
     gateway_edge_identity_required: bool = False
 
+    # 兼容模型网关会产生模型用量；默认关闭，仅登记配置，不增加路由或请求。
+    openai_compat_gateway_enabled: bool = field(default=False, kw_only=True)
+    # 模型终态调用记录默认不持久化；开关不替代所属服务的身份核验。
+    llm_call_records_enabled: bool = field(default=False, kw_only=True)
+    # 每个本人运行库的调用记录行数上限；0 不封顶，清理由所属服务按批执行。
+    llm_call_records_max_rows: int = field(default=50000, kw_only=True, metadata={"bounds": (0, None), "unit": "行"})
+    # 旁问会增加模型调用；默认关闭，不创建额外任务或后台执行器。
+    side_questions_enabled: bool = field(default=False, kw_only=True)
+    # 默认退避与现有模型 HTTP 重试常量一致；各实例独立持有列表。
+    model_retry_backoff_seconds: list[float] = field(default_factory=lambda: [2.0, 5.0, 15.0], kw_only=True)
+    # 自定义工具沿本人插件权限；默认关闭，不加载或执行任何新工具。
+    custom_tools_enabled: bool = field(default=False, kw_only=True)
+    # 通知出站投递默认关闭；不改变原有通知路径或网络授权。
+    notify_delivery_enabled: bool = field(default=False, kw_only=True)
+    # 远程运维更新只预留部署开关；默认关闭且不能由模型自助开启。
+    ops_remote_update_enabled: bool = field(default=False, kw_only=True)
+    # ACP 桥接会启动外部进程；默认关闭，配置构造本身不启动进程。
+    acp_bridge_enabled: bool = field(default=False, kw_only=True)
+    # ACP 命令与允许环境变量仅由部署 YAML 定义，参数中心不提供写入口。
+    acp_bridge_agents: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    # 浏览器终端默认关闭，仍沿原 PTY 生命周期及本人权限边界。
+    web_terminal_enabled: bool = field(default=False, kw_only=True)
+
     # LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
     # 函数用途: 查询一个配置项的有效来源，不更改其当前值。
     def config_source_for(self, key: str) -> dict[str, object]:
@@ -747,6 +770,14 @@ def load_config(config_path: str | Path) -> AgentConfig:
         raise FileNotFoundError(f"配置文件不存在: {path}")
     diagnostics: list[ConfigParseDiagnostic] = []
     raw = load_simple_yaml(path, diagnostics=diagnostics)
+    # 旧mini-YAML对多行小数项保留文本；按本字段的数字序列schema归一，不改变其它列表或标量的旧解析。
+    if "model_retry_backoff_seconds" in raw:
+        from .user_config_capability import _non_negative_numbers
+
+        valid, error, delays = _non_negative_numbers(raw["model_retry_backoff_seconds"], yaml_scalars=True)
+        if not valid:
+            raise ValueError("model_retry_backoff_seconds: " + error)
+        raw["model_retry_backoff_seconds"] = delays
     if {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"} & raw.keys():
         from .memory import normalize_memory_settings
 

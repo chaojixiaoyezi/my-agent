@@ -44,6 +44,10 @@ class CapabilityConfig:
     owner_default_permission_mode: str = "auto"
     # 交互审批的绝对截止；续租、卡片或换代不得延长，0 不表示无限。
     tool_approval_timeout_seconds: int = 1800
+    # 命令审批过滤默认关闭；关闭时保留原 ActionPolicy 判断，不额外执行策略。
+    command_approval_filter_enabled: bool = field(default=False, kw_only=True)
+    # 目标范围策略默认关闭；开关本身不授予文件、网络或目标访问权限。
+    target_scope_policy_enabled: bool = field(default=False, kw_only=True)
     # 飞书云操作使用随包受控 CLI 后端；关闭时沿原宿主 HTTP，不开放模型裸 CLI。
     feishu_cli_backend_enabled: bool = True
     # 本人 OAuth 只使用此部署回调及 scopes；空回调明确未配置，不借管理员登录。
