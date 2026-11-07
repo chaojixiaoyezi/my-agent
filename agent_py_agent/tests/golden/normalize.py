@@ -19,7 +19,7 @@ ID_NAMESPACES.update({"previous_request_id": "request_id", "previous_execution_a
 TERMINAL = frozenset({"done", "failed", "cancelled", "completed", "succeeded", "interrupted"})
 ACTIVE = frozenset({"running", "processing", "started"})
 TIMESTAMP_KEYS = frozenset({"at", "timestamp", "created_at", "updated_at", "started_at", "finished_at", "heartbeat_at"})
-GENERATED_LABEL = re.compile(r"gwreq-msg-[0-9a-f]{32}|gateway-attempt-[0-9a-f]{32}|tool_operation:[0-9a-f]{32}|thread-[0-9a-f]{16}|(?:agentrun|taskrun|attempt|subagent)-[0-9]+-[0-9a-f]+")
+GENERATED_LABEL = re.compile(r"gwreq-msg-[0-9a-f]{32}|gateway-attempt-[0-9a-f]{32}|tool_operation:[0-9a-f]{32}|thread-[0-9a-f]{16}|wake-[0-9a-f]{16}|(?:agentrun|taskrun|attempt|subagent)-[0-9]+-[0-9a-f]+")
 
 
 # LLM: Timestamp ordering uses numerical or ISO instants, not dictionary visitation order.
@@ -87,10 +87,12 @@ def normalize(trace):
     def text(value, event, *, tool_header=False):
         root = event.get("fixture_root")
         if root:
-            value = re.sub(r"(?<![\w/.-])(" + re.escape(root) + r")(/[^\s\"'<>\\]*)", fixture_dates, value)
+            value = re.sub(r"(?<![\w/.-])((?:/private)?" + re.escape(root) + r")(/[^\s\"'<>\\]*)", fixture_dates, value)
         for namespace in ("fixture_root", "source_root"):
             root = event.get(namespace)
             if root:
+                if root.startswith(("/var/", "/tmp/")):
+                    value = value.replace("/private" + root, identity(namespace, root))
                 value = value.replace(root, identity(namespace, root))
         for key in ("provider_origin", "gateway_origin"):
             origin = event.get(key)
@@ -110,6 +112,10 @@ def normalize(trace):
                        lambda match: match.group(1) + identity("model_turn_nonce", match.group(2)), value)
         value = re.sub(r"(/tool_outputs/[^/\s\"]+)-([0-9a-f]{24})-([0-9a-f]{12})(?=\.json)",
                        lambda match: match.group(1) + "-" + identity("artifact_nonce", match.group(2)) + "-" + match.group(3), value)
+        value = re.sub(r"(/runs/date#\d+/)([0-9a-f]{24})", lambda match: match.group(1) + identity("run_dir_id", match.group(2)), value)
+        value = re.sub(r'("observed_at":\s*)\d+(?:\.\d+)?', r"\g<1>1", value)
+        if "[RUNTIME_TASK_EVENTS]" in value:
+            value = re.sub(r'("created_at":\s*)\d+(?:\.\d+)?', r"\g<1>1", value)
         for digest, (canonical_digest, canonical_size, original_size) in event.get("_output_aliases", {}).items():
             pattern = r"(output_hash: )" + digest + r"(\s*[-] output_size_bytes: )(\d+)"
             for match in re.finditer(pattern, value):

@@ -114,6 +114,7 @@ class FakeProvider:
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            disable_nagle_algorithm = True
             # LLM: Fixture requests must not leak prompts or authentication values into stderr.
             # 函数用途: Suppress default HTTP access logging.
             def log_message(self, *_args):
