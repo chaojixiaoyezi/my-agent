@@ -10,13 +10,104 @@ from __future__ import annotations
 """
 
 import json
+import os
 import sqlite3
 import time
 import uuid
+from datetime import date
+from pathlib import Path
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import (
+    _tighten_private_file,
+    append_private_jsonl_records_unlocked,
+    locked_json_path,
+)
+from ..common.nofollow_fs import ensure_private_dir
+from ..memory_archive._storage_dates import _coerce_datetime, _date_key
+from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES, STORAGE_LANE_SLICE_ENTRIES
 from .models import LocalStoreEvent, LocalTimelineItem
+
+# 只保留最近一个文件身份；多 Store 交错时整份替换，避免热路径缓存随历史增长。
+_event_first_day_cache: dict[tuple[int, int], str] = {}
+
+
+def event_segments_dir(events_path: Path) -> Path:
+    """封存段沿活动文件的配置路径派生，避免另建一份路径权威。"""
+    return events_path.parent / f"{events_path.stem}-daily"
+
+
+def iter_event_jsonl_paths(events_path: Path) -> list[Path]:
+    """供显式读取遍历旧段到活动文件；轮转热路径不调用此目录枚举。"""
+    try:
+        with os.scandir(event_segments_dir(events_path)) as entries:
+            paths = sorted(Path(entry.path) for entry in entries
+                           if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False))
+    except FileNotFoundError:
+        paths = []
+    if events_path.exists():
+        paths.append(events_path)
+    return paths
+
+
+def _event_line_day(line: bytes) -> str | None:
+    """坏行或无效时间不能借归档日期的今日兜底误封存，日期口径仍复用原实现。"""
+    try:
+        record = json.loads(line)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    if not isinstance(record, dict) or _coerce_datetime(record.get("created_at")) is None:
+        return None
+    return _date_key(record["created_at"])
+
+
+def rotate_event_jsonl_if_due_unlocked(events_path: Path) -> Path | None:
+    """调用方必须持原 events_path 的 JSONL 锁；只 rename，禁止重写或截断流水。"""
+    global _event_first_day_cache
+    try:
+        info = events_path.stat()
+    except FileNotFoundError:
+        return None
+    if info.st_size < STORAGE_LANE_SLICE_BYTES:
+        return None
+    identity = (info.st_dev, info.st_ino)
+    first_day = _event_first_day_cache.get(identity)
+    today = date.today().isoformat()
+    if first_day == today:
+        return None
+    with events_path.open("rb") as handle:
+        if first_day is None:
+            first_line = handle.readline(64 * 1024)
+            first_day = _event_line_day(first_line) if first_line.endswith(b"\n") else None
+            if first_day is None:
+                return None
+            _event_first_day_cache = {identity: first_day}
+        if first_day == today:
+            return None
+        # 只在尾部窗口内找最后一个完整行；窗口截断的行不能充当封存日期。
+        offset = max(0, info.st_size - 64 * 1024)
+        handle.seek(offset)
+        tail = handle.read(64 * 1024)
+        end = tail.rfind(b"\n")
+        start = tail.rfind(b"\n", 0, end) + 1
+        if end < 0 or (start == 0 and offset > 0):
+            return None
+        last_day = _event_line_day(tail[start:end])
+    if last_day is None:
+        return None
+    segment_dir = event_segments_dir(events_path)
+    ensure_private_dir(segment_dir)
+    # 不扫封存历史，只探测固定数量的同日名字，锁保持在活动文件旁车上。
+    for number in range(STORAGE_LANE_SLICE_ENTRIES + 1):
+        suffix = f".{number}" if number else ""
+        target = segment_dir / f"{last_day}{suffix}.jsonl"
+        if not os.path.lexists(target):
+            # 沿用原追加的权限收紧，避免宽权限旧流被 rename 后跳过这一步。
+            _tighten_private_file(events_path)
+            os.rename(events_path, target)
+            _event_first_day_cache = {}
+            return target
+    return None
 
 
 # LLM: 默认追加自取锁不变；C内部append固定原events_path/已持原锁，维护仅由显式有界周期调用。
@@ -120,17 +211,20 @@ class LocalStoreEventMixin:
             (event.event_id, event.event_type, event.record_id, payload_json, event.created_at),
         )
         # 私有追加：0600/0700，存量宽权限事件流水下次写入即收紧；内容逐字节不变。
-        (append_private_jsonl_records if append_records is None else append_records)(
-            self.events_path,
-            [{
-                "event_id": event.event_id,
-                "event_type": event.event_type,
-                "record_id": event.record_id,
-                "payload": event.payload,
-                "created_at": event.created_at,
-            }],
-            sort_keys=True,
-        )
+        records = [{
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "record_id": event.record_id,
+            "payload": event.payload,
+            "created_at": event.created_at,
+        }]
+        if append_records is None:
+            # 保持 SQL 写事务在先、JSONL 锁在后；封存和追加共用原锁，不能嵌套自取锁。
+            with locked_json_path(self.events_path):
+                rotate_event_jsonl_if_due_unlocked(self.events_path)
+                append_private_jsonl_records_unlocked(self.events_path, records, sort_keys=True)
+        else:
+            append_records(self.events_path, records, sort_keys=True)
         return event
 
     def _timeline_row(self, row: sqlite3.Row) -> LocalTimelineItem:
