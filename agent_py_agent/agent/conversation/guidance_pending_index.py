@@ -21,7 +21,15 @@ from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from ..user_space.home_indexes import is_sqlite_busy
 from .models import GuidanceEntry
-from .observation_index import ObservationIndex, _identity, _legacy_slice, _reader
+from .observation_index import (
+    _INSTALLED,
+    _INSTALLED_LOCK,
+    ObservationIndex,
+    _directory_stamp,
+    _identity,
+    _legacy_slice,
+    _reader,
+)
 from .store_guidance_records import _guidance_queue_entry_matches_receipt
 
 
@@ -43,6 +51,7 @@ class GuidancePendingIndex(ObservationIndex):
         self.journal_path = storage.root / '.guidance-delivered.jsonl'
         self.dirty_dir = storage.root / '.guidance-dirty'
         self.last_work = {}
+        self._quiet = None
 
     # LLM: 所有新增等待共享原blocking/deadline；busy不是损坏，不得截断；每个出口关闭连接。
     # 函数用途: 打开一次私有SQLite事务，必要时仅重建损坏投影。
@@ -66,6 +75,8 @@ class GuidancePendingIndex(ObservationIndex):
                     raise BlockingIOError('guidance projection is busy') from exc
                 if getattr(exc, 'sqlite_errorcode', 0) & 255 not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
                     raise
+                with _INSTALLED_LOCK:
+                    _INSTALLED.discard((str(self.path), *info[:2]))
                 fd = os.open(self.path, os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0))
                 try:
                     current = os.fstat(fd)
@@ -98,27 +109,34 @@ class GuidancePendingIndex(ObservationIndex):
         seconds = 5 if blocking else 0
         if deadline is not None:
             seconds = min(seconds, max(0, deadline - time.monotonic()))
+        identity = _identity(self.path)
+        key = (str(self.path), *identity[:2])
         conn = sqlite3.connect(f'{self.path.as_uri()}?mode=rw', uri=True, timeout=seconds)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute(f'PRAGMA busy_timeout={int(seconds * 1000)}')
-            conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('PRAGMA synchronous=FULL')
-            conn.execute('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT)')
-            generation = self._get(conn, 'generation', '')
-            if generation != 'guidance_pending.v1':
-                for table in ('acks', 'entries', 'pending', 'sources', 'errors'):
-                    conn.execute(f'DROP TABLE IF EXISTS {table}')
-                conn.execute('DELETE FROM meta')
-                self._put(conn, 'generation', 'guidance_pending.v1')
-            conn.execute('CREATE TABLE IF NOT EXISTS acks(id TEXT PRIMARY KEY,at REAL NOT NULL)')
-            conn.execute('CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,target_type TEXT,target_id TEXT,sequence INTEGER,length INTEGER,dedupe TEXT)')
-            conn.execute('CREATE INDEX IF NOT EXISTS entries_recent ON entries(target_type,target_id,sequence DESC)')
-            conn.execute('CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY,target_type TEXT,target_id TEXT,status TEXT,sequence INTEGER)')
-            conn.execute('CREATE INDEX IF NOT EXISTS pending_target ON pending(target_type,target_id,status,sequence DESC)')
-            conn.execute('CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY,stamp TEXT,offset INTEGER)')
-            conn.execute('CREATE TABLE IF NOT EXISTS errors(path TEXT,offset INTEGER,error TEXT,PRIMARY KEY(path,offset))')
-            conn.commit()
+            with _INSTALLED_LOCK:
+                if key in _INSTALLED and identity[2] and self._get(conn, 'generation', '') != 'guidance_pending.v1':
+                    _INSTALLED.discard(key)
+                if key not in _INSTALLED or not identity[2]:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT)')
+                    generation = self._get(conn, 'generation', '')
+                    if generation != 'guidance_pending.v1':
+                        for table in ('acks', 'entries', 'pending', 'sources', 'errors'):
+                            conn.execute(f'DROP TABLE IF EXISTS {table}')
+                        conn.execute('DELETE FROM meta')
+                        self._put(conn, 'generation', 'guidance_pending.v1')
+                    conn.execute('CREATE TABLE IF NOT EXISTS acks(id TEXT PRIMARY KEY,at REAL NOT NULL)')
+                    conn.execute('CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,target_type TEXT,target_id TEXT,sequence INTEGER,length INTEGER,dedupe TEXT)')
+                    conn.execute('CREATE INDEX IF NOT EXISTS entries_recent ON entries(target_type,target_id,sequence DESC)')
+                    conn.execute('CREATE TABLE IF NOT EXISTS pending(id TEXT PRIMARY KEY,target_type TEXT,target_id TEXT,status TEXT,sequence INTEGER)')
+                    conn.execute('CREATE INDEX IF NOT EXISTS pending_target ON pending(target_type,target_id,status,sequence DESC)')
+                    conn.execute('CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY,stamp TEXT,offset INTEGER)')
+                    conn.execute('CREATE TABLE IF NOT EXISTS errors(path TEXT,offset INTEGER,error TEXT,PRIMARY KEY(path,offset))')
+                    conn.commit()
+                    _INSTALLED.add(key)
             return conn
         except BaseException:
             conn.close()
@@ -202,12 +220,22 @@ class GuidancePendingIndex(ObservationIndex):
     # LLM: 同一有限候选批共用一次恢复探针，不对每个ID重复解析日志身份与legacy游标。
     # 函数用途: 批量精确查询请求涉及的退休事实。
     def delivered_many(self, ids, *, blocking=True, deadline=None):
+        ids = tuple(ids)
+        with self._read_connection(blocking=blocking, deadline=deadline) as conn:
+            if conn is not None and self._acks_current(conn):
+                self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
+                return self._lookup(conn, ids)
         with self._connection(blocking=blocking, deadline=deadline) as conn:
             complete = self._prepare_acks(conn, blocking=blocking, deadline=deadline)
             found = self._lookup(conn, ids)
         if not complete and any(key not in found for key in ids):
             raise GuidanceIndexIncomplete('guidance delivered recovery is partial')
         return found
+
+    def _acks_current(self, conn):
+        return (self._get(conn, 'generation', '') == 'guidance_pending.v1'
+                and self._journal_current(conn)
+                and self._legacy_current(conn, self.storage.guidance_delivered_path))
 
     # LLM: ack只受新日志恢复约束，不依赖整个legacy map；重复正ack不追加，不重写旧map。
     # 函数用途: 持久退休明确指定的内部消息ID。
@@ -256,6 +284,8 @@ class GuidancePendingIndex(ObservationIndex):
         previous = json.loads(old[0]) if old else None
         offset = int(old[1]) if old else 0
         stamp = json.dumps(identity)
+        if old and old[0] == stamp and (identity is None or offset == identity[2]):
+            return True
         append = identity and previous and list(identity[:2]) == previous[:2] and identity[2] > previous[2] and offset <= identity[2]
         if previous != (list(identity) if identity else None) and not append:
             conn.execute('DELETE FROM entries WHERE target_type=? AND target_id=?', (target_type, target_id))
@@ -297,6 +327,9 @@ class GuidancePendingIndex(ObservationIndex):
         with self._connection(blocking=blocking, deadline=deadline) as conn:
             row = conn.execute('SELECT sequence FROM entries WHERE id=?', (entry.guidance_id,)).fetchone()
             sequence = row[0] if row else -1
+            previous = conn.execute('SELECT target_type,target_id,status,sequence FROM pending WHERE id=?', (entry.guidance_id,)).fetchone()
+            if previous and tuple(previous) == (entry.target_type, entry.target_id, receipt.status, sequence):
+                return
             conn.execute('INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?)',
                          (entry.guidance_id, entry.target_type, entry.target_id, receipt.status, sequence))
 
@@ -408,6 +441,11 @@ class GuidancePendingIndex(ObservationIndex):
     # LLM: 完整列表成本随实际返回规模；limit20只取最近匹配状态，历史终态不进入候选扫描。
     # 函数用途: 返回有界队列定位与累计坏行报告。
     def rows(self, target_type, target_id, limit, include_delivered):
+        scope = (target_type, target_id, limit, include_delivered)
+        signature = self._quiet_signature(scope)
+        if self._quiet_hit(scope, signature):
+            self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
+            return [], []
         complete = self.refresh(target_type, target_id)
         if not complete:
             raise GuidanceIndexIncomplete('guidance index recovery is partial; retry continues its cursor')
@@ -425,11 +463,26 @@ class GuidancePendingIndex(ObservationIndex):
             errors = [{'code': 'GUIDANCE_QUEUE_INVALID', 'context': 'conversation.guidance.read',
                        'path': str(path), 'offset': row[0], 'message': row[1]}
                       for row in conn.execute('SELECT offset,error FROM errors WHERE path=? ORDER BY offset', (str(path),))]
+        if not rows and not errors:
+            # 插话没有延迟 due 状态；任何新队列、退休事实或脏标记都会改变签名。
+            self._remember_quiet(scope, signature, math.inf)
+        else:
+            self._quiet = None
         return list(reversed(rows)), errors
+
+    def _quiet_signature(self, scope):
+        target_type, target_id, _limit, _include_delivered = scope
+        return (_identity(self.journal_path), _identity(self.storage.guidance_delivered_path),
+                _identity(self.storage.guidance_path(target_type, target_id)),
+                _directory_stamp(self.dirty_dir))
 
     # LLM: 兼容显式全列表读口，不得在pending/recent或回执热路径调用。
     # 函数用途: 返回已经完整恢复的全部送达事实。
     def all_delivered(self, *, blocking=True, deadline=None):
+        with self._read_connection(blocking=blocking, deadline=deadline) as conn:
+            if conn is not None and self._acks_current(conn):
+                self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
+                return dict(conn.execute('SELECT id,at FROM acks'))
         with self._connection(blocking=blocking, deadline=deadline) as conn:
             complete = self._prepare_acks(conn, blocking=blocking, deadline=deadline)
             result = dict(conn.execute('SELECT id,at FROM acks')) if complete else None

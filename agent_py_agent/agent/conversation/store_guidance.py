@@ -398,6 +398,8 @@ class GuidanceStore:
             rows, errors = index.rows(normalized_type, str(target_id), limit, include_delivered)
         except Exception as exc:
             return [], [runtime_error_report(exc, context="conversation.guidance.index")]
+        if not rows:
+            return [], errors
         entries = []
         try:
             delivered = index.delivered_many([row['id'] for row in rows])
