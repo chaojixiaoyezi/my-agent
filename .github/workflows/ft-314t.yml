@@ -2,7 +2,7 @@ name: Free-threaded Python 3.14
 
 on:
   push:
-    branches: [main, feat/s2-train, feat/s2-w5a]
+    branches: [main, feat/s2-train, feat/s2-w5a, feat/s2-w5b]
   pull_request:
     branches: [main, feat/s2-train]
   workflow_dispatch:
@@ -32,8 +32,10 @@ jobs:
       - name: Install dependencies without psycopg-binary
         run: |
           python -m pip install --upgrade pip
-          # psycopg-binary 暂无 cp314t wheel；纯 Python psycopg 使用系统 libpq，无 libpq 时仅跳过该导入探针。
-          python -m pip install ".[dev,secrets]" "sqlalchemy>=2.0" "psycopg>=3.1"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpq5
+          # 正式 scale extra 的版本标记选择纯 Python psycopg，不绕开依赖声明。
+          python -m pip install ".[dev,secrets,scale]"
       - name: Verify free-threaded runtime
         run: python -c "import sys; assert not sys._is_gil_enabled(); print(sys.version)"
       - name: Run runtime probes and core gateway tests from the fast suite
@@ -66,7 +68,9 @@ jobs:
       - name: Install dependencies without psycopg-binary
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ".[dev,secrets]" "sqlalchemy>=2.0" "psycopg>=3.1"
+          brew list libpq >/dev/null 2>&1 || brew install libpq
+          echo "DYLD_LIBRARY_PATH=$(brew --prefix libpq)/lib" >> "$GITHUB_ENV"
+          python -m pip install ".[dev,secrets,scale]"
       - name: Verify free-threaded runtime
         run: python -c "import sys; assert not sys._is_gil_enabled(); print(sys.version)"
       - name: Run runtime probes and core gateway tests from the fast suite

@@ -364,13 +364,15 @@ def test_legacy_warning_same_inode_skips_reads(tmp_path, monkeypatch):
     assert module._legacy_location_warning(tmp_path) is None
 
 
-# LLM: 两个生产入口都要在任何线程/Agent构造前设置间隔，替身在首个业务动作停止，绝不启动服务。
-# 函数用途: 核验standalone、普通线程及协调线程路径的真实入口调用顺序。
+# LLM: GIL开启时在业务前调优；无GIL时不调用调度API。所有入口仍在首个业务动作停止。
+# 函数用途: 两种GIL状态都核验standalone、普通线程及协调线程的真实入口顺序。
 @pytest.mark.parametrize('entry', ['standalone', 'threads', 'coordinated'])
-def test_gateway_entry_tunes_gil_before_work(monkeypatch, entry):
+@pytest.mark.parametrize('gil_enabled', [False, True])
+def test_gateway_entry_tunes_gil_before_work(monkeypatch, entry, gil_enabled):
     from agent_py_agent.cli import gateway_coordinated_run
     from agent_py_agent.cli import gateway_process as module
     events = []
+    monkeypatch.setattr(module.sys, '_is_gil_enabled', lambda: gil_enabled, raising=False)
     monkeypatch.setattr(module.sys, 'setswitchinterval', lambda value: events.append(('gil', value)))
     # LLM: 在入口第一个业务动作处结束测试，不允许碰真实Gateway或创建线程。
     # 函数用途: 留下GIL设置后的入口观察点。
@@ -387,7 +389,7 @@ def test_gateway_entry_tunes_gil_before_work(monkeypatch, entry):
         invoke = partial(module._cmd_gateway_run_threads, SimpleNamespace(context=context))
     with pytest.raises(ValueError, match='stop-before-start'):
         invoke()
-    assert events == [('gil', .001), ('work', None)]
+    assert events == ([('gil', .001)] if gil_enabled else []) + [('work', None)]
 
 
 # LLM: 只调整子进程启动路径中的解释器调度提示，不因不支持该API而阻断Gateway。
@@ -402,13 +404,14 @@ def test_gateway_gil_tuning_tolerates_unsupported_api(monkeypatch, error):
 
 
 # LLM: 只在本测试解释器中真实设置并finally恢复，不触碰运行中Gateway。
-# 函数用途: 验证解释器实际采纳1ms值，入口顺序另由替身测试守住。
+# 函数用途: 有GIL时实际采纳1ms值，无GIL时保持原值，入口顺序另由替身测试守住。
 def test_gateway_gil_tuning_sets_real_interval():
     from agent_py_agent.cli import gateway_process as module
     previous = module.sys.getswitchinterval()
+    gil_enabled = getattr(module.sys, '_is_gil_enabled', lambda: True)()
     try:
         module._tune_gateway_gil_switch_interval()
-        assert module.sys.getswitchinterval() == pytest.approx(.001)
+        assert module.sys.getswitchinterval() == pytest.approx(.001 if gil_enabled else previous)
     finally:
         module.sys.setswitchinterval(previous)
 

@@ -95,6 +95,26 @@ def test_durable_executor_reuse_does_not_retain_first_owner(case, inherit):
     )
 
 
+# LLM: Preserve the inventory's named raw-pool case and verify empty birth as well as reuse.
+# 函数用途: 通过原生子进程证明新工作线程从出生起就不继承触发扩容的owner。
+def test_raw_executor_reuse_does_not_retain_first_owner():
+    observed = _probe_executor("durable", "next_owner", None)
+    assert observed["first"] is None
+    assert observed["inherited"] is None
+
+
+# LLM: Exercise the two inventory targets through real thread birth, reuse and queued cancellation.
+# 函数用途: 分别核验执行器类的取消路径和扩容方法的后续owner复用路径。
+@pytest.mark.parametrize("case", ["cancelled", "next_owner"], ids=[
+    "agent/concurrency/daemon_executor.py:DurableDaemonThreadPoolExecutor",
+    "agent/concurrency/daemon_executor.py:_adjust_thread_count",
+])
+def test_thread_submission_target(case):
+    observed = _probe_executor("durable", case, None)
+    assert observed["first"] is None
+    assert observed["inherited"] is None
+
+
 def test_monitor_submit_binds_each_request_context_and_restores_worker(tmp_path):
     from contextvars import ContextVar
     from threading import Event, get_ident
