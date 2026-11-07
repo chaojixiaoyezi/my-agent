@@ -770,24 +770,32 @@ def test_rework_missing_index_never_reprepares_consumed_input(tmp_path, legacy_w
         marker.unlink(missing_ok=True)
     (paths.root / 'archive/runtime-files.sqlite3').unlink()
     prepare = Mock(side_effect=AssertionError('must not prepare a second input'))
-    with pytest.raises(ReworkCorruption):
-        rework_prepare(paths, row, prepare)
+    reused, created = rework_prepare(paths, row, prepare)
+    assert reused == row and not created
     prepare.assert_not_called()
     assert not hot.exists() and not (paths.root / 'archive/runtime-files.sqlite3').exists()
     assert json.loads(cold.read_text()) == row.to_dict()
 
 
-def test_rework_writer_cannot_recreate_lost_authority_index(tmp_path):
+def test_rework_writer_rebuilds_lost_index_from_cold_copies(tmp_path, monkeypatch):
     paths = rework_paths(tmp_path / 'gateway')
     rework_outbox(paths, 'first')
     assert not any(r['errors'] for r in rework_archive(paths, 'client_outbox'))
     index = paths.root / 'archive/runtime-files.sqlite3'
     index.unlink()
+    def publish(source, destination):
+        destination = Path(destination)
+        if destination.exists():
+            raise FileExistsError(destination)
+        destination.write_bytes(Path(source).read_bytes())
+    monkeypatch.setattr(rework_retention.os, 'link', publish)
     second = rework_outbox(paths, 'second')
     before = second.read_bytes()
     reports = rework_archive(paths, 'client_outbox')
-    assert any(r['errors'] for r in reports)
-    assert second.read_bytes() == before and not index.exists()
+    assert not any(r['errors'] for r in reports)
+    assert rework_retention.lookup_runtime_file(paths, 'client_outbox', 'first.json') == (
+        paths.root / 'archive/client_outbox/197001/first.json')
+    assert not second.exists() and (paths.root / 'archive/client_outbox/197001/second.json').read_bytes() == before
 
 
 def test_rework_input_copy_retains_original_and_original_prepare_identity(tmp_path):
