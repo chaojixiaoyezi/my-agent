@@ -164,6 +164,8 @@ class GatewayRequest:
     allow_redirects: bool = True
     deadline: float | None = None
     max_retries: int | None = None
+    # 空序列沿用锚点退避，显式序列只属于这一请求，不改变严格零重试。
+    retry_backoff_seconds: tuple[float, ...] = ()
     max_response_bytes: int | None = None
     # 实验发送许可：存在时每次物理发送前由 _gateway_request_attempt 硬门复核；None 保持原请求合同与字节。
     send_permit: Any | None = field(default=None, repr=False, compare=False)
@@ -706,7 +708,8 @@ def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
 # LLM: 显式 max_retries 是整次 HTTP 调用的唯一重试计数；None 维持普通请求既有策略，期限耗尽前不再发请求。
 # 函数用途: 每次重试先取得物理名额再执行有限次 HTTP open；零重试仍在每次物理发送前生效。
 def _open_gateway_request(request: GatewayRequest):
-    last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS) if request.max_retries is None else request.max_retries
+    schedule = request.retry_backoff_seconds or _RETRYABLE_HTTP_DELAYS_SECONDS
+    last_attempt = len(schedule) if request.max_retries is None else request.max_retries
     for attempt in range(last_attempt + 1):
         remaining_deadline_seconds(request.deadline)
         response = (_gateway_admitted_attempt(request, attempt, last_attempt)
@@ -762,7 +765,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         raise
     except urllib.error.HTTPError as exc:
         retry_scheduled = _request_http_retry(exc, request, attempt, last_attempt)
-        retry_wait_seconds = _retry_delay_seconds(exc, attempt) if retry_scheduled else 0.0
+        retry_wait_seconds = _retry_delay_seconds(exc, attempt, request=request) if retry_scheduled else 0.0
         _emit_provider_attempt(
             {
                 **base_event,
@@ -783,7 +786,7 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
     except _NETWORK_IO_ERRORS as exc:
         retry_scheduled = _should_retry_network_error(exc, attempt, last_attempt)
         stale = getattr(exc, "stale_reused_connection", False) is True
-        retry_wait_seconds = (0.0 if stale else _network_retry_delay_seconds(attempt)) if retry_scheduled else 0.0
+        retry_wait_seconds = (0.0 if stale else _network_retry_delay_seconds(attempt, request=request)) if retry_scheduled else 0.0
         _emit_provider_attempt(
             {
                 **base_event,
@@ -1270,17 +1273,20 @@ def _should_retry_network_error(exc: BaseException, attempt: int, last_attempt: 
                                       or _is_transient_network_error(exc))
 
 
-def _retry_delay_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+# LLM: 服务商 Retry-After 保持原封顶；无头部时只消费本请求冻结的序列。
+# 函数用途: 算出 HTTP 重试等待，不改变默认值及严格重试计数。
+def _retry_delay_seconds(exc: urllib.error.HTTPError, attempt: int, *, request: GatewayRequest | None = None) -> float:
     header_delay = _retry_after_header_seconds(exc)
     if header_delay is not None:
         return min(header_delay, _MAX_RETRY_AFTER_SECONDS)
-    index = min(attempt, len(_RETRYABLE_HTTP_DELAYS_SECONDS) - 1)
-    return _RETRYABLE_HTTP_DELAYS_SECONDS[index]
+    return _network_retry_delay_seconds(attempt, request=request)
 
 
-def _network_retry_delay_seconds(attempt: int) -> float:
-    index = min(attempt, len(_RETRYABLE_HTTP_DELAYS_SECONDS) - 1)
-    return _RETRYABLE_HTTP_DELAYS_SECONDS[index]
+# LLM: 显式 max_retries 可长于退避列表，后续只复用末项，空列表沿用锚点。
+# 函数用途: 为瞬时网络失败返回同一请求策略的等待秒数。
+def _network_retry_delay_seconds(attempt: int, *, request: GatewayRequest | None = None) -> float:
+    schedule = (request.retry_backoff_seconds if request is not None else ()) or _RETRYABLE_HTTP_DELAYS_SECONDS
+    return schedule[min(attempt, len(schedule) - 1)]
 
 
 def _provider_retry_wait(delay_seconds: float) -> None:
