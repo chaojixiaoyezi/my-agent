@@ -785,9 +785,13 @@ def test_explicit_selection_atomically_retires_pending_even_if_same_profile(prep
 
     agent, (a, b), _ = prepared
     agent.config.config_sources = {"model_name": {"source": "owner_model_profile", "profile_id": b}}
+    # 子线程现在继承 canonical 父线程选择，配置标签不能替代真实的同模型前置状态。
+    parent_id = agent._current_run_params.task_attributes["conversation_thread_id"]
+    assert thread_model_profile_id(agent, parent_id, select=b) == b
     provider(monkeypatch, prepared, {"0": a})
     task = created(agent, CreateSubagentsTool(agent).execute({"items": [{"goal": "检查材料"}]}))[0]
     store = agent.conversation_store.threads
+    assert store.require(task.agent_thread_id).model_profile_id == b
     store.update_atomic(task.agent_thread_id, lambda row: replace(row, metadata={**row.metadata, "other": "keep"},
         provider_context_observation={"count": 10}, model_context_usage={"count": 11}))
     calls_seen = []

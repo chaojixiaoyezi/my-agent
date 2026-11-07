@@ -40,6 +40,13 @@ def execution_case(tmp_path, *, precheck=None, policy=None, cwd=None, execution=
                            job=job, channels=channels, scheduler=scheduler)
 
 
+def delivery_retry_at(case, signal):
+    """持久退避从实际尝试结束起算，不能假定首次 tick 后 31 秒已经到期。"""
+    state, error = case.store.wakes.attempts.state_report(signal.wake_signal_id)
+    assert error is None and state.redelivery_failures == 1
+    return max(state.next_attempt_at, case.scheduler._wake_retry_after[signal.wake_signal_id])
+
+
 def test_isolated_execution_does_not_load_origin_history_and_redelivery_does_not_rerun(tmp_path):
     case = execution_case(tmp_path)
     run = case.agent.scheduler_repository.get_active_run(case.signal.root_task_id)
@@ -51,8 +58,11 @@ def test_isolated_execution_does_not_load_origin_history_and_redelivery_does_not
     assert case.channels.attempts[0][0].thread_id == case.thread.thread_id
     pending = case.store.wakes.pending_one(case.signal.wake_signal_id)
     assert pending.metadata["owner_delivery"]["content"] == "已按计划完成。"
+    retry_at = delivery_retry_at(case, case.signal)
     case.channels.status = "sent"
-    case.scheduler.tick(now=1031)
+    case.scheduler.tick(now=retry_at - 0.01)
+    assert len(case.backend.prompts) == 1 and len(case.channels.attempts) == 1
+    case.scheduler.tick(now=retry_at)
     assert len(case.backend.prompts) == 1 and len(case.channels.attempts) == 2
     rows = case.store.messages.recent(case.thread.thread_id, limit=0)
     assert len([r for r in rows if r.role == "assistant" and r.content]) == 1
@@ -68,7 +78,7 @@ def test_origin_reset_keeps_frozen_delivery_without_guessing_new_thread(tmp_path
     case.store.threads._create({"channel": "feishu", "channel_conversation_id": "chat-isolated", "channel_user_id": "open-1",
                              "canonical_user_id": "user-1", "now": 1010})
     case.channels.status = "sent"
-    case.scheduler.tick(now=1031)
+    case.scheduler.tick(now=delivery_retry_at(case, case.signal))
     assert len(case.backend.prompts) == 1 and len(case.channels.attempts) == 1
     pending = case.store.wakes.pending_one(case.signal.wake_signal_id)
     assert pending is not None and pending.metadata["owner_delivery"]["content"] == "已按计划完成。"
@@ -260,7 +270,7 @@ def test_waiting_schedule_does_not_commit_checkpoint_during_final_delivery(tmp_p
         assert case.store.wakes.pending_one(signal.wake_signal_id).metadata["owner_delivery"]
         assert service.reconcile_waiting_run(claim.run_id, now=1010) is None
         case.channels.status = "sent"
-        case.scheduler.tick(now=1034)
+        case.scheduler.tick(now=delivery_retry_at(case, signal))
     assert len(case.backend.prompts) == 1
     history, errors = service.repository.history()
     assert errors == [] and history[0]["status"] == "done"
