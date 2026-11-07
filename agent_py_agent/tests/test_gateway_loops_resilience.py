@@ -78,11 +78,11 @@ def test_failed_thread_cools_down_without_blocking_healthy_thread(monkeypatch):
     assert supervisor._lane_retry.count(str(key)) == 0
 
 
-def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(monkeypatch, capsys) -> None:
+def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(tmp_path, monkeypatch, capsys) -> None:
     from agent_py_agent.cli import gateway_loops
 
     stop_event = threading.Event()
-    ticks = {"count": 0}
+    ticks = {"count": 0, "closed": 0}
 
     class _ExplodingSupervisor:
         poll_interval = 0.01
@@ -96,14 +96,22 @@ def test_background_main_loop_survives_tick_exceptions_and_reports_supply_error(
                 stop_event.set()
             raise ProviderTransientError('HTTP 429: rate_limit_error "已达到 Token Plan 用量上限"')
 
+        def shutdown(self) -> None:
+            ticks["closed"] += 1
+
     monkeypatch.setattr(gateway_loops, "_BackgroundMainSupervisor", _ExplodingSupervisor)
     monkeypatch.setattr(gateway_loops, "_start_orphan_reconcile_loop", lambda _context, _stop: None)
     monkeypatch.setattr(gateway_loops, "_start_owner_maintenance_loop", lambda _context, _stop: None)
     monkeypatch.setattr(gateway_loops, "_start_scheduler_due_loop", lambda _context, _stop: None)
 
-    gateway_loops._gateway_background_main_loop(SimpleNamespace(), stop_event)  # 撤修复:异常在这里炸出
+    # 使用真实提示设施所需的组合根，仍保留连续tick失败及原错误分类断言。
+    context = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(), home_paths=SimpleNamespace(
+        root=tmp_path, global_index_dir=tmp_path / "global_index", owners_dir=tmp_path / "owners")))
+    gateway_loops._gateway_background_main_loop(context, stop_event)  # 撤修复:异常在这里炸出
 
     assert ticks["count"] >= 3  # 循环在异常后继续跑,只随 stop_event 退出
+    assert ticks["closed"] == 1
+    assert getattr(context.agent, "_owner_wake_hints", None) is None
     err = capsys.readouterr().err
     assert "[gateway-loop-error]" in err
     assert '"category": "provider_transient"' in err  # 联动分类修复:429 不再误标 programmer_bug
