@@ -131,7 +131,8 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
                     if item.get("type") == "function_call":
                         item["namespace"] = "my_agent"
                 if payload.get("tools"):
-                    payload["tools"] = [{"type": "namespace", "name": "my_agent", "tools": payload["tools"]}]
+                    payload["tools"] = [{"type": "namespace", "name": "my_agent",
+                                         "description": "my-agent runtime tools", "tools": payload["tools"]}]
                     if isinstance(payload.get("tool_choice"), dict):
                         payload["tool_choice"]["namespace"] = "my_agent"
         validate_responses_input(payload["input"])

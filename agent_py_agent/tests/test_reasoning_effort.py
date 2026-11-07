@@ -58,11 +58,27 @@ DEEPSEEK = "https://api.deepseek.com"
     ("none", DEEPSEEK, "openai_compatible", "none"),
     ("effort", DEEPSEEK, "openai_responses", "effort"),  # 09-30 起 Responses 按 reasoning.effort 发送
     ("auto", "https://chatgpt.com/backend-api/codex", "openai_responses", "effort"),
+    ("auto", "https://api.openai.com/v1", "openai_responses", "effort"),
+    ("none", "https://api.openai.com/v1", "openai_responses", "none"),
+    ("auto", "https://api.openai.com/v1", "openai_compatible", "none"),
     ("auto", "https://opencode.ai/zen/go/v1", "openai_responses", "none"),
     ("effort", DEEPSEEK, "typesafe_decision", "none"),
 ])
 def test_control_resolution_uses_declaration_then_verified_hosts(declared, base, backend, expected):
     assert resolved_reasoning_control(declared, base, backend) == expected
+
+
+def test_openai_responses_auto_control_does_not_start_probe(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import reasoning_probe as probe
+    from agent_py_agent.tests.test_reasoning_probe import _agent, _run
+
+    agent, _profile = _agent(tmp_path, base="https://api.openai.com/v1", model_backend="openai_responses")
+    jobs = []
+    monkeypatch.setattr(probe, "_spawn", jobs.append)
+    result = _run(agent, "/effort high")
+    assert result.ok and "发送 high" in result.message
+    assert jobs == []
+    assert not probe.probe_records_path(agent.home_paths).exists()
 
 
 @pytest.mark.parametrize(("level", "control", "forced", "expected"), [

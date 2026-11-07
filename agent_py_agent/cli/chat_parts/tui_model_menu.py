@@ -189,6 +189,7 @@ async def _select_model(app, agent, session_id: str, runtime, *, operation: str 
     setting_default = operation == "set_default"
     current = result.get("default_selected", "default") if setting_default else result["selected"]
     choices = RadioList([(row["id"], f"{'● ' if row['id'] == current else ''}{row['model_name']}"
+                         f"{' · ' + row['provider_name'] if row.get('provider_name') else ''}"
                          f" · {row['model_backend']} · {row['model_context_window_tokens']} tokens"
                          f"{default_label(row) if row['id'] == 'default' else ' · ' + row['api_base']}"
                          f"{'（管理员共享）' if row.get('shared') else ''} · 档案编号：{row['id']}") for row in rows],
