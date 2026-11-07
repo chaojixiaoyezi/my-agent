@@ -17,6 +17,7 @@ from copy import deepcopy
 from typing import Any
 
 from .display_checkpoint import is_display_checkpoint
+from .input_media import _history_media_content, _InputMediaDelivery
 from .message_replay import message_rows_iterator
 
 CANONICAL_NATIVE_MESSAGES_METADATA_KEY = "canonical_native_messages"
@@ -48,6 +49,17 @@ def canonical_native_messages_from_metadata(metadata: object) -> tuple[dict[str,
     if str(envelope.get("schema") or "") != CANONICAL_NATIVE_MESSAGES_SCHEMA:
         return ()
     return tuple(_normalized_native_messages(envelope.get("messages")))
+
+
+# 已结束信封的用户块均为历史；只改 decoder 的独占副本，不污染原始引用或当前回合的媒体观察。
+def provider_history_native_messages_from_metadata(metadata: object) -> tuple[dict[str, Any], ...]:
+    messages = canonical_native_messages_from_metadata(metadata)
+    delivery = _InputMediaDelivery()
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") == "user" and isinstance(content, list):
+            message["content"] = _history_media_content(content, delivery)
+    return messages
 
 
 # LLM: A final-row canonical envelope replaces every visible row bearing the same structured
@@ -82,12 +94,12 @@ def iter_provider_history_messages_from_rows(rows: Iterable[object]):
             envelope = envelopes.get(identity) if identity else None
             if envelope is not None:
                 if identity not in emitted:
-                    yield from canonical_native_messages_from_metadata(getattr(selected[envelope], 'metadata', None))
+                    yield from provider_history_native_messages_from_metadata(getattr(selected[envelope], 'metadata', None))
                     emitted.add(identity)
                 continue
             anonymous = anonymous_envelopes.get(_anonymous_row_key(row, index))
             if anonymous is not None:
-                yield from canonical_native_messages_from_metadata(getattr(selected[anonymous], 'metadata', None))
+                yield from provider_history_native_messages_from_metadata(getattr(selected[anonymous], 'metadata', None))
                 continue
             legacy = _legacy_row_message(row)
             if legacy is not None:
@@ -183,5 +195,6 @@ __all__ = [
     "CANONICAL_NATIVE_MESSAGES_SCHEMA",
     "canonical_native_messages_envelope",
     "canonical_native_messages_from_metadata",
+    "provider_history_native_messages_from_metadata",
     "provider_history_messages_from_rows",
 ]
