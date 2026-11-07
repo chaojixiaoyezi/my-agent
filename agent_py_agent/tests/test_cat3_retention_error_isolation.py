@@ -42,6 +42,15 @@ def test_policy_errors_refuse_deletion(path_error, code, serialized):
     assert maintenance._retention_deletion_safe(retention) is False
 
 
+@pytest.mark.parametrize("serialized", [False, True])
+def test_reference_source_error_with_path_refuses_deletion(path_error, serialized):
+    error = MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", path_error.path, "x")
+    error = error.to_dict() if serialized else error
+    retention = SimpleNamespace(applied=True, legal_hold=False, load_errors=[error])
+
+    assert maintenance._retention_deletion_safe(retention) is False
+
+
 @pytest.mark.parametrize(
     "error",
     [

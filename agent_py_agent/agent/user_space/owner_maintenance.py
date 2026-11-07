@@ -326,7 +326,11 @@ def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_tran
     if not paths:
         return {"executed": False, "reason": "error" if errors else "no_local_store", **({"discovery_errors": errors} if errors else {})}
     selected, position = _maintenance_store_page(paths, home, cursor)
-    protected_refs = owner_protected_ref_ids(Path(home), now.timestamp())
+    try:
+        protected_refs = owner_protected_ref_ids(Path(home), now.timestamp())
+    except OSError as exc:
+        return {"executed": False, "reason": "error",
+                "error_type": type(exc).__name__, "partial": True}
     results = [_prune_derived_store(path, now=now, protected_refs=protected_refs, commit_transition=commit_transition) for path in selected]
     result = results[0] if len(results) == 1 else {
         "executed": any(item["executed"] for item in results),
@@ -580,7 +584,7 @@ def _apply_outcome(retention: OwnerRetentionPlan) -> str:
 
 
 # LLM: 删除闸门与 retention.apply() 的整份拒绝同口径：只有带结构化 error_code 与非空 path、且不属于策略级的
-#   错误，才算已被保留计划隔离到单一路径；裸字符串、缺字段、策略级码一律视为不安全（失败关闭）。
+#   错误，才算已被保留计划隔离到单一路径；引用源不完整、裸字符串、缺字段、策略级码一律视为不安全。
 # 函数用途: 判断保留加载错误是否全部为已隔离的路径级错误（兼容对象与 maintenance.json 回读的 dict）。
 def _retention_errors_path_scoped(errors) -> bool:
     for error in errors or ():
@@ -588,7 +592,7 @@ def _retention_errors_path_scoped(errors) -> bool:
             code, path = error.get("error_code"), error.get("path")
         else:
             code, path = getattr(error, "error_code", None), getattr(error, "path", None)
-        if type(code) is not str or not code or not path or code in _POLICY_LEVEL_ERROR_CODES:
+        if type(code) is not str or not code or not path or code in _POLICY_LEVEL_ERROR_CODES | {"MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"}:
             return False
     return True
 

@@ -627,7 +627,7 @@ def _resolve_local_store_owner(db_path: Path) -> Path | None:
     return parent.parent.resolve()
 
 
-# LLM: 不初始化owner、不建文件；复用规范路径投影及现存只读pin扫描（含直连与runtime会话库），未知来源/导入IO失败按best-effort返回空集。
+# LLM: 不初始化owner、不建文件；复用规范路径投影及只读pin扫描，引用不完整时拒绝清理，执行上下文未知原样传播。
 # 函数用途: 按显式owner根目录收集正式记忆、候选、恢复与Compact的有效引用ID。
 def owner_protected_ref_ids(owner_root: Path, current: float) -> set[str]:
     try:
@@ -642,10 +642,12 @@ def owner_protected_ref_ids(owner_root: Path, current: float) -> set[str]:
             **_owner_memory_path_fields(owner / "memory"), **_owner_workspace_path_fields(owner))
         direct_conv = owner / "conversations"
         explicit_roots = (direct_conv,) if (direct_conv / "threads").exists() else ()
-        pins, _complete = current_retention_pins(home, explicit_roots, [], now=datetime.fromtimestamp(current, timezone.utc))
+        pins, complete = current_retention_pins(home, explicit_roots, [], now=datetime.fromtimestamp(current, timezone.utc))
+        if not complete:
+            raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
         return _derived_owner_pin_ids(home, pins)
-    except Exception:
-        return set()
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+        raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE") from exc
 
 
 # LLM: 不初始化owner、不建文件；支持全部四种规范owner数据库位置并复用owner_protected_ref_ids。
@@ -660,6 +662,7 @@ def _derived_owner_ref_ids(store, current):
 # LLM: 只补当前owner内已被原pin扫描保护的恢复根身份，不读pin声明的任意外部文件，不从目录名猜ID。
 # 函数用途: 合并显式来源引用及活跃/受引用恢复任务的结构化ID。
 def _derived_owner_pin_ids(home, pins):
+    from ..conversation.workspace_paths import canonical_task_root
     from ..memory_store.retention_scan import _pin_object
 
     ids = set(pins.ids)
@@ -669,7 +672,9 @@ def _derived_owner_pin_ids(home, pins):
         state = root / "work" / "state.json"
         try:
             payload = _pin_object(state)
-        except (OSError, ValueError, TypeError):
+        except (FileNotFoundError, NotADirectoryError):
+            if canonical_task_root(home.owner_home_dir, root) is not None:
+                raise
             continue
         ids.update(_derived_run_keys({"source_id": ""}, payload))
     return ids
