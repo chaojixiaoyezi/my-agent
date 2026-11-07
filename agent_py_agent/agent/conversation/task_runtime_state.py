@@ -165,8 +165,7 @@ def _plan_continuation_contract(
     }
 
 
-# LLM: Task-link corruption is surfaced through load_errors while other valid
-# links remain usable; do not silently manufacture a link from task prose.
+# 精确查询只报告目标链接的坏账；其它历史坏账留给全量审计入口，不影响无关任务。
 # 函数用途: 在当前会话中按精确任务编号查找任务链接，并记录读取错误。
 def _task_link(
     store: object,
@@ -175,6 +174,13 @@ def _task_link(
     load_errors: list[dict[str, Any]],
 ) -> object | None:
     try:
+        link_report = getattr(getattr(store, "tasks", None), "link_report", None)
+        if callable(link_report):
+            link, error = link_report(thread_id, task_id)
+            if isinstance(error, dict):
+                load_errors.append(error)
+            return link
+        # 测试替身兼容：仅缺少 link_report 时保留旧全量查询，真实 TaskStore 不走此分支。
         if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
             links, errors = store.tasks.list_report(thread_id)
             load_errors.extend(item for item in errors if isinstance(item, dict))
