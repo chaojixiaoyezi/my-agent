@@ -31,6 +31,7 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import open_readonly_file_beneath, unlink_file_beneath
 from .models import PREVIEW_CHARS, LocalSearchResult
+from .search import fts_rowid_aligned
 
 DERIVED_PRUNABLE_SOURCE_TYPES: frozenset[str] = frozenset({
     "subagent_dispatch", "subagent_work_log", "subagent_channel_probe",
@@ -370,7 +371,8 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
         with self._connection() as conn:
             conn.execute("PRAGMA secure_delete=ON")
             if self.fts_available:
-                conn.execute("DELETE FROM records_fts WHERE id = ?", (clean_id,))
+                found = conn.execute("SELECT rowid FROM records WHERE id = ?", (clean_id,)).fetchone()
+                self._delete_fts_row(conn, clean_id, found[0] if found else None)
             conn.execute("DELETE FROM records WHERE id = ?", (clean_id,))
             self._record_event(
                 conn,
@@ -453,7 +455,11 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             created_at = self._existing_created_at(conn, prepared.record_id, prepared.now)
             self._upsert_record_row(conn, prepared, created_at)
             if self.fts_available:
-                self._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
+                rowid = conn.execute("SELECT rowid FROM records WHERE id = ?", (prepared.record_id,)).fetchone()[0]
+                if fts_rowid_aligned(conn):
+                    self._replace_fts_row_at(conn, rowid, prepared.record_id, prepared.title, prepared.content)
+                else:
+                    self._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
             self._record_upsert_event(conn, prepared, append_records=self._append_coordinator_event_records)
             return created_at
         with self._coordinator_events_lock():
@@ -477,7 +483,8 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
         # 函数用途: 完成C删除的原SQL和无正文事件。
         def operation(conn):
             if self.fts_available:
-                conn.execute("DELETE FROM records_fts WHERE id = ?", (clean_id,))
+                found = conn.execute("SELECT rowid FROM records WHERE id = ?", (clean_id,)).fetchone()
+                self._delete_fts_row(conn, clean_id, found[0] if found else None)
             conn.execute("DELETE FROM records WHERE id = ?", (clean_id,))
             self._record_event(conn, "record_deleted", clean_id, {
                 "source_type": str(row["source_type"] or ""),
@@ -707,7 +714,11 @@ def _upsert_record_serialized(store, params):
             created_at = store._existing_created_at(conn, prepared.record_id, prepared.now)
             store._upsert_record_row(conn, prepared, created_at)
             if store.fts_available:
-                store._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
+                rowid = conn.execute("SELECT rowid FROM records WHERE id = ?", (prepared.record_id,)).fetchone()[0]
+                if fts_rowid_aligned(conn):
+                    store._replace_fts_row_at(conn, rowid, prepared.record_id, prepared.title, prepared.content)
+                else:
+                    store._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
             store._record_upsert_event(conn, prepared)
             conn.commit()
         return store._prepared_record_result(prepared, created_at)
@@ -849,14 +860,15 @@ def _records_fts_table_exists(conn: sqlite3.Connection) -> bool:
 
 # LLM: 物理FTS与records同SAVEPOINT删除；任一SQL失败保留两边，不因检索开关关闭而留下全文孤儿。
 # 函数用途: 复核精确版本并在一笔事务删除记录和全文索引。
-def _derived_delete_row(conn, row, has_fts_table):
+def _derived_delete_row(store, conn, row, has_fts_table):
     current = conn.execute("SELECT * FROM records WHERE id=?", (row["id"],)).fetchone()
     if current is None or any(current[key] != row[key] for key in row):
         return False
     conn.execute("SAVEPOINT derived_prune_record")
     try:
         if has_fts_table:
-            conn.execute("DELETE FROM records_fts WHERE id=?", (row["id"],))
+            found = conn.execute("SELECT rowid FROM records WHERE id = ?", (row["id"],)).fetchone()
+            store._delete_fts_row(conn, row["id"], found[0] if found else None)
         conn.execute("DELETE FROM records WHERE id=? AND updated_at=? AND content_hash=? AND content_path=?",
                      (row["id"], row["updated_at"], row["content_hash"], row["content_path"]))
         removed = conn.execute("SELECT 1 FROM records WHERE id=?", (row["id"],)).fetchone() is None
@@ -875,7 +887,7 @@ def _derived_delete_batch(store, conn, plan, snapshots):
     current_ids = {row["id"] for row in _derived_candidates(conn, plan)}
     pending, deleted = _derived_pending_files(conn), []
     for row in snapshots:
-        if row["id"] not in current_ids or not _derived_delete_row(conn, row, has_fts_table):
+        if row["id"] not in current_ids or not _derived_delete_row(store, conn, row, has_fts_table):
             continue
         metadata = _derived_metadata(row) or {}
         pending.append({"id": row["id"], "content_path": row["content_path"], "content_hash": row["content_hash"],
@@ -1178,7 +1190,7 @@ def _prune_derived_step(store, plan, dry_run, limit):
                     continue
                 snapshot = {key: row[key] for key in row.keys() if key != "scan_id"}
                 result["candidate_ids"].append(row["id"])
-                if _derived_delete_row(conn, snapshot, has_fts):
+                if _derived_delete_row(store, conn, snapshot, has_fts):
                     result["deleted_ids"].append(row["id"])
                     pending.append({"id": row["id"], "content_path": row["content_path"],
                                     "content_hash": row["content_hash"], "source_ids": sorted(keys)})

@@ -9,6 +9,30 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import LocalSearchResult
+from .schema import _FTS_REBUILD_PENDING_KEY
+
+# records_fts 的 rowid 与 records.rowid 一一对齐的结构化证明；只允许 'true'/'false'。
+FTS_ROWID_ALIGNED_KEY = "records_fts_rowid_aligned"
+
+
+def fts_rowid_aligned(conn: sqlite3.Connection) -> bool:
+    """在当前事务内核验对齐证明；只有空索引可以在缺标记时直接建立证明。"""
+    metadata = dict(conn.execute(
+        "SELECT key, value FROM metadata WHERE key IN (?, ?)",
+        (FTS_ROWID_ALIGNED_KEY, _FTS_REBUILD_PENDING_KEY),
+    ).fetchall())
+    if metadata.get(_FTS_REBUILD_PENDING_KEY) == "true":
+        return False
+    if FTS_ROWID_ALIGNED_KEY in metadata:
+        return metadata[FTS_ROWID_ALIGNED_KEY] == "true"
+    if conn.execute("SELECT 1 FROM records_fts LIMIT 1").fetchone() is None:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (FTS_ROWID_ALIGNED_KEY, "true"),
+        )
+        return True
+    return False
 
 
 class LocalStoreSearchMixin:
@@ -150,6 +174,33 @@ class LocalStoreSearchMixin:
             "INSERT INTO records_fts(id, title, content) VALUES (?, ?, ?)",
             (record_id, title, content),
         )
+
+    def _replace_fts_row_at(
+        self,
+        conn: sqlite3.Connection,
+        rowid: int,
+        record_id: str,
+        title: str,
+        content: str,
+    ) -> None:
+        """已对齐时按 records.rowid 精确替换文档，避免扫描 UNINDEXED 的 id 列。"""
+        conn.execute("DELETE FROM records_fts WHERE rowid = ?", (rowid,))
+        conn.execute(
+            "INSERT INTO records_fts(rowid, id, title, content) VALUES (?, ?, ?, ?)",
+            (rowid, record_id, title, content),
+        )
+
+    def _delete_fts_row(
+        self,
+        conn: sqlite3.Connection,
+        record_id: str,
+        rowid: int | None,
+    ) -> None:
+        """有对齐证明且取得 rowid 时精确删除，否则保留旧索引的删除语义。"""
+        if rowid is not None and fts_rowid_aligned(conn):
+            conn.execute("DELETE FROM records_fts WHERE rowid = ?", (rowid,))
+        else:
+            conn.execute("DELETE FROM records_fts WHERE id = ?", (record_id,))
 
     def _safe_search_fts(
         self,
