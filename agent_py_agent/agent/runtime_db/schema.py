@@ -225,6 +225,10 @@ _BASE_RUNTIME_SQL = (
         updated_at REAL NOT NULL
     )
     """,
+    # 按 attempt 收口资源变更时只看这一 attempt 的行，不随历史增长整表扫描。
+    "CREATE INDEX IF NOT EXISTS idx_resource_mutations_attempt ON resource_mutations(attempt_id, state)",
+    # 工具调用认领只看本 run 仍在 CLAIMED/EXECUTING 的少数行，不逐行检查本 run 的全部历史操作。
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_run_status ON tool_operations(agent_run_id, status)",
     # PublishOperation（H.2/H.7）：staging→共享唯一通道；崩溃只允许落
     # COMMITTED 或 DIRTY/UNKNOWN，不能谎称原子成功。
     """
