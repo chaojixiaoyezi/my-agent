@@ -23,7 +23,7 @@ dependencies = [
   "websockets>=15,<16",  # Responses 与飞书 WS 共用；15 起提供显式 HTTP/SOCKS 代理及系统/环境代理发现
   "python-socks[asyncio]>=2.7.2,<3",  # WebSocket 显式/系统 SOCKS 代理的上游实现；随包安装，不新增运行外网服务
   "cryptography>=42.0",  # 内置凭据卡加密与通道回调验签；固化为默认内置依赖
-  "mcp>=1.30.0",  # 内置 MCP 服务（workspace-peek / computer_use）协议底座；固化为默认内置依赖
+  "mcp>=1.30.0,<2.0",  # 内置 MCP 服务协议底座；FastMCP 使用 1.x 接口，保留已修复版本下限
   "mss>=10.2.0",  # 内置屏幕观察跨平台截图底座；固化为默认内置依赖
   "pyobjc-framework-Quartz>=12.2.2; sys_platform == 'darwin'",  # macOS 内置屏幕观察窗口与事件底座
   "pyobjc-framework-ScreenCaptureKit>=12.2.2; sys_platform == 'darwin'",  # macOS 14+ 单窗口截图底座

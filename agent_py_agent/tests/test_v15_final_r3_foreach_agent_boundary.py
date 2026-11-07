@@ -572,7 +572,7 @@ def test_ast_eligibility_gate_precedes_every_execution_write(module, method, gua
         assert_guard_precedes_effects(late, guard, effects)
 
 
-# LLM: 原工具包装归R1只读；保留其既有TOOL_INVALID_ARGUMENTS合同，额外记录业务码投影现状。
+# LLM: 工具与HTTP保留同一结构化资格拒绝码；写前拒绝不能新增执行或丢失原任务责任。
 # 函数用途: 实测旧工具save/run/resume均拒绝且不新增执行，不把公开HTTP门当作唯一保护。
 @pytest.mark.parametrize('action', ['save', 'run', 'resume'])
 def test_native_tool_refuses_without_claiming_new_execution(business, action, record_property):
@@ -592,10 +592,12 @@ def test_native_tool_refuses_without_claiming_new_execution(business, action, re
     task_ids = [task.task_id for task in tasks(case)]
     tool = WorkflowsTool(case.home, engine=case.services.workflows._engine(case.scope_actor))
     receipt = tool.execute(params)
-    assert receipt.ok is False and receipt.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert receipt.ok is False and receipt.error_code == REFUSAL
+    assert receipt.reported_error_code == REFUSAL
+    assert receipt.error_category == 'contract' and receipt.retryable is False
     assert receipt.effect_outcome == 'not_started'
     data = json.loads(receipt.output)
-    assert REFUSAL in data['error']
+    assert data['error_code'] == REFUSAL
     record_property('native_tool_business_error_code', data.get('error_code'))
     record_property('native_tool_projection_fields', json.dumps(sorted(data)))
     assert [task.task_id for task in tasks(case)] == task_ids
