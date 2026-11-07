@@ -1723,17 +1723,30 @@ def test_latest_thread_for_user_report_reports_corrupt_latest_index(tmp_path) ->
     assert error["path"] == str(store.storage.user_latest_path)
 
 
-def test_get_or_create_thread_does_not_duplicate_when_bindings_index_is_corrupt(tmp_path) -> None:
+# LLM: 绑定坏JSON按C-RES-T3-REBIND隔离；重复get_or_create不得继续分叉，旧线程和归档字节须保留。
+# 函数用途: 验证损坏绑定索引只恢复一次，并留下可核对的重绑警告。
+def test_get_or_create_thread_does_not_duplicate_when_bindings_index_is_corrupt(tmp_path, caplog) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    request = {'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1"}
+    old = store.threads.get_or_create({**request, 'now': 1.0})
+    original = store.storage.thread_path(old.thread_id).read_bytes()
     store.storage.bindings_path.write_text("{bad-json", encoding="utf-8")
 
-    with pytest.raises(DataCorruptionError):
-        store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 2.0})
+    with caplog.at_level("WARNING", logger="agent_py_agent.agent.conversation.store_threads"):
+        recovered = store.threads.get_or_create({**request, 'now': 2.0})
+        again = store.threads.get_or_create({**request, 'now': 3.0})
 
     threads, errors = store.threads.list_report()
-    assert len(threads) == 1
+    assert recovered.thread_id != old.thread_id and again.thread_id == recovered.thread_id
+    assert {thread.thread_id for thread in threads} == {old.thread_id, recovered.thread_id}
     assert errors == []
+    assert store.threads.resolve(channel="internal", channel_conversation_id="thread-1", channel_user_id="user-1").thread_id == recovered.thread_id
+    assert store.storage.thread_path(old.thread_id).read_bytes() == original
+    archive = store.storage.root / ".ledger_archive"
+    assert (archive / "channel_bindings.json").read_bytes() == b"{bad-json"
+    assert (archive / "channel_bindings.json.lock").is_file()
+    assert "THREAD_RECORD_QUARANTINED" in caplog.text
+    assert f"CONVERSATION_THREAD_REBOUND thread={recovered.thread_id}" in caplog.text
 
 
 def test_get_or_create_thread_does_not_duplicate_when_latest_index_is_corrupt(tmp_path) -> None:
