@@ -26,6 +26,7 @@ from .gateway_client import (
     GatewayChunkPollRequest,
     check_gateway_alive,
     gateway_request_activity_paths,
+    network_gateway_observer,
     poll_gateway_chunks,
     submit_chat_request,
 )
@@ -59,7 +60,8 @@ class PlainJobContext:
 def _plain_gateway_handle(
     ctx: PlainJobContext, *, observer: GatewayChatObserver | None = None,
 ) -> tuple[str, bool]:
-    if not check_gateway_alive(ctx.paths):
+    network = network_gateway_observer(ctx.agent)
+    if network is None and not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name,
@@ -86,7 +88,7 @@ def _plain_gateway_handle(
     terminal_response_streamed_ref = [0]
     inactivity_timeout = _gateway_timeout_seconds(ctx)
     # 注入仅改变宿主观察入口，提交认证、终态路径及显示计数仍沿原合同。
-    observe = poll_gateway_chunks if observer is None else observer
+    observe = observer if observer is not None else network if network is not None else poll_gateway_chunks
     response = observe(
         GatewayChunkPollRequest(
             chunk_path,
@@ -95,7 +97,7 @@ def _plain_gateway_handle(
             on_chunk,
             [0],
             terminal_response_streamed_ref,
-            activity_paths=gateway_request_activity_paths(
+            activity_paths=() if network is not None else gateway_request_activity_paths(
                 ctx.paths,
                 request_id,
                 chunk_path,

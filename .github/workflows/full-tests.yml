@@ -16,6 +16,7 @@ jobs:
       matrix:
         python-version:
           - "3.12"
+          - "3.14"
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
@@ -35,6 +36,8 @@ jobs:
           # Full suite 覆盖加密、队列/存储、Tracing 等正式 feature；依赖合同必须与 push Test
           # 一致，不能靠 runner 预装，也不能因为缺 optional extra 而把真实测试变成环境失败。
           python3 -m pip install -e ".[dev,secrets,scale]"
+          # 与push套件保持相同extras和依赖完整性检查，覆盖3.12与3.14。
+          python3 -m pip check
 
       - name: Install ripgrep for native search regressions
         # 文件发现/搜索的原生回归（test_opt_filesystem_cursor_context.py）必须执行真实 rg；ubuntu runner

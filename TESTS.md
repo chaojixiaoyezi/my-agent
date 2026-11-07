@@ -1,3 +1,20 @@
+## 2026-11-06 S2-INT：并行配置接线回归
+
+来源：`plan-s2-int-go.md`及`steer-fast-commit.md`。在保留旧配置/拓扑校验器和写权限边界的前提下，接通五个Stage 2部署参数。新增`test_s2_int_stage2_parameters.py`覆盖默认三方一致、数值夹取告警、非法类型与非有限数、Cell加载、模型/聊天拒绝、部署CLI唯一栅栏写入、派生值，以及YAML热刷新后真实ClaimStore终态拒绝和重新放行。
+
+反证基线：原指定三文件103项通过；新增41项在接线前均为断言失败，零error/skip。计数钉子从139/116/350增加为144/121/355。常数目录只用生成器写入；当前并行基线新增Actor和Timer两项，无删除。
+
+```bash
+export HOME=/private/tmp/my-agent-home-s2-int MY_AGENT_HOME=/private/tmp/my-agent-home-s2-int PYTHONPATH=.:agent_py_agent
+python -m pytest -q --tb=short -p no:cacheprovider --timeout=60 agent_py_agent/tests/test_s2_int_stage2_parameters.py agent_py_agent/tests/test_parameter_changes.py agent_py_agent/tests/test_e905_sol3_r1_settings.py agent_py_agent/tests/test_concurrency_knobs_config.py
+python scripts/check_boolean_switches_and_hot_reload.py
+ruff check agent_py_agent/agent/settings/config.py agent_py_agent/agent/settings/live_switches.py agent_py_agent/agent/settings/parameter_changes.py agent_py_agent/agent/settings/parameter_registry.py agent_py_agent/agent/settings/services/_normalize.py agent_py_agent/tests/test_s2_int_stage2_parameters.py agent_py_agent/tests/test_parameter_changes.py agent_py_agent/tests/test_e905_sol3_r1_settings.py
+python scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+独立双审由控制方合并后负责，本片不派内部审查。整列车后续仍须重跑常数目录、SLO baseline与Cell stage、golden、3.14t的`ft-314t.yml`作业，以及`pytest -p agent_py_agent.tests.support.lockdep_plugin agent_py_agent/tests/test_gateway_http.py agent_py_agent/tests/test_gateway_safe_restart.py agent_py_agent/tests/test_subagent_manager_core.py`。这些未执行项不能由本片focused通过替代；现有SLO expected_failures保持，未将仍失败/未测用例移除。
+
 ## 2026-11-06 CI-D7B8：锁观察点与允许空片的回归测试
 
 来源：`fix-ci-d7b81054b.md`，GitHub Actions `Test · 42235744510`，已核实其 head 为 `d7b81054baf14787418bdcac3359d8a6d987d964`。原三条失败栈已取得，批次按该基线的原 12 分片/25 文件算法冻结。

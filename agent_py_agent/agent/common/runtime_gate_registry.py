@@ -6,8 +6,51 @@ from __future__ import annotations
 import threading
 import weakref
 
+from ..concurrency.lock_order import (
+    LockLevel,
+    check_order,
+    held_locks,
+    is_strict,
+    note_acquired,
+    note_released,
+)
+
 _LIVE = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
+
+
+class _CategorisedGate:
+    """保持原RLock及私有协议；诊断身份始终是原物理锁。"""
+    def __init__(self, lock, level):
+        self.lock, self.level = lock, level
+
+    def acquire(self, blocking=True, timeout=-1):
+        if is_strict():
+            check_order(self.level, id(self.lock), try_acquire=not blocking)
+        acquired = self.lock.acquire(blocking, timeout)
+        if acquired:
+            try:
+                note_acquired(self.level, id(self.lock), try_acquire=not blocking)
+            except BaseException:
+                self.lock.release()
+                raise
+        return acquired
+
+    def release(self):
+        try:
+            note_released(id(self.lock))
+        finally:
+            self.lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    def __getattr__(self, name):
+        return getattr(self.lock, name)
 
 
 # LLM: 仅表示 M/L 持有者首次获取 CG 时的竞争，继承原非阻塞 IO 语义，不代表业务体写入失败。
@@ -19,6 +62,11 @@ class SubagentCreationGuardBusy(BlockingIOError):
 # LLM: 构造器在 M/L 字段赋值后调用；只保存弱引用，不延长控制器或租约寿命。
 # 函数用途: 登记一个需要参与当前线程锁序检查的运行时对象。
 def register_runtime_gate(owner) -> None:
+    for target, name, level in ((owner, "_mutex", LockLevel.M),
+                                (getattr(owner, "_lease", None), "_lifecycle_gate", LockLevel.L)):
+        lock = getattr(target, name, None)
+        if lock is not None and not isinstance(lock, _CategorisedGate):
+            setattr(target, name, _CategorisedGate(lock, level))
     with _LIVE_LOCK:
         _LIVE.add(owner)
 
@@ -26,6 +74,8 @@ def register_runtime_gate(owner) -> None:
 # LLM: 只观察当前线程，缺属性的对象计为未持锁；快照门不跨运行时锁检查，避免引入第二锁序。
 # 函数用途: 判断当前线程是否已持任一登记控制器的互斥锁或租约生命周期锁。
 def current_thread_holds_runtime_gate() -> bool:
+    if any(entry.level in (LockLevel.M, LockLevel.L) for entry in held_locks()):
+        return True
     with _LIVE_LOCK:
         owners = tuple(_LIVE)
     for owner in owners:

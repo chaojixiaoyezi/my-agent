@@ -1,0 +1,41 @@
+{
+  "id": "restart_mid_processing_recovery",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "provider_request"
+    },
+    {
+      "action": "restart",
+      "target": "one"
+    },
+    {
+      "action": "wait_terminal",
+      "target": "one",
+      "cancelled": false
+    }
+  ],
+  "fake_model_script": [
+    {
+      "wait_for_release": true,
+      "deadline_seconds": 10
+    },
+    {}
+  ],
+  "expected_effects": {
+    "im_send": 1
+  },
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [
+    "ps",
+    "background_launcher_identity"
+  ],
+  "repetitions": 3,
+  "deadline_seconds": 55
+}

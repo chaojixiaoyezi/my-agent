@@ -412,6 +412,11 @@ class GatewayHTTPServer:
         # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
         self.plugin_display = None
         self.business_stream_pool = None
+        from .request_event_hub import bind_hub, hub_from_config
+
+        self.request_event_hub = hub_from_config(getattr(self.agent if self.agent is not None else self.control_plane, "config", None))
+        if self.request_event_hub is not None:
+            bind_hub(paths, self.request_event_hub)
         self.plugin_channel_pool = None
         from ..plugin_host.http_transport import HostTransport
         from ..plugin_host.gateway_composition import build_gateway_host_composition
@@ -569,6 +574,12 @@ class GatewayHTTPServer:
         global _server_instance
         from ..plugin_host_api import set_host_api_base
         from .plugin_panels_http import close_plugin_channel
+
+        from .request_event_hub import unbind_hub
+        hub = getattr(self, "request_event_hub", None)
+        if hub is not None:
+            unbind_hub(self.paths, hub)
+            hub.close()
 
         if self.coordinator_memory_resources is not None:
             self.coordinator_memory_resources.close_admission()

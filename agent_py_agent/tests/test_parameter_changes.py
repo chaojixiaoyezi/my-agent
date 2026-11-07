@@ -179,7 +179,8 @@ def test_cli_deployment_allowlist_has_one_canonical_definition():
     from agent_py_agent.cli import config_cmd
 
     expected = frozenset({"feishu_app_id", "feishu_app_secret", "feishu_verification_token",
-                          "feishu_encrypt_key", "feishu_callback_port"})
+                          "feishu_encrypt_key", "feishu_callback_port", "gateway_edge_identity_required",
+                          "owner_epoch_fence_enabled"})
     assert getattr(changes, "CLI_DEPLOYMENT_WRITABLE_KEYS", None) == expected
     assert config_cmd.CLI_DEPLOYMENT_WRITABLE_KEYS is changes.CLI_DEPLOYMENT_WRITABLE_KEYS
 

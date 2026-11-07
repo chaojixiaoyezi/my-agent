@@ -11,6 +11,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 
 from ..common.executor_registration import managed_request_execution_required
 from ..common.request_execution_ports import (
@@ -31,9 +32,44 @@ from .multiprocess_admission import (
     session_scope_for_request,
 )
 from .multiprocess_route import validate_published_route
-from .multiprocess_supervisor_policy import RecoveryPolicyReadback, require_resume_policy
 from .multiprocess_takeover_runtime import CoordinatorTakeover
 from .request_binding import gateway_runtime_authority
+
+
+@dataclass(frozen=True)
+class RecoveryPolicyReadback:
+    """原恢复读回只属于本模块，不增加独立授权或第二份策略账。"""
+    request_bytes: bytes
+    runtime_block_bytes: bytes
+
+
+def require_resume_policy(readback):
+    """原只读门内联到唯一调用模块，保留类型、阻塞与计数判断。"""
+    from ..common.strict_json import load_strict_json
+    from .multiprocess_records import MultiprocessRecordError
+    from .recovery import (
+        _gateway_processing_failure_count,
+        _unplanned_resume_count,
+        provider_resume_count,
+    )
+
+    if type(readback) is not RecoveryPolicyReadback or any(type(value) is not bytes for value in
+                                                        (readback.request_bytes, readback.runtime_block_bytes)):
+        raise MultiprocessRecordError("recovery_policy_readback_invalid", "readback")
+    try:
+        request = load_strict_json(readback.request_bytes)
+        block = load_strict_json(readback.runtime_block_bytes)
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise MultiprocessRecordError("recovery_policy_readback_invalid", "readback") from error
+    if type(request) is not dict:
+        raise MultiprocessRecordError("recovery_policy_request_invalid", "request")
+    if block is not None:
+        raise MultiprocessRecordError("runtime_recovery_blocked", "runtime_block")
+    _gateway_processing_failure_count(request)
+    _unplanned_resume_count(request)
+    provider_resume_count(request)
+    return request
+
 
 _CURRENT = ContextVar("original_processing_recovery_source", default=None)
 _WINDOW = ContextVar("original_processing_recovery_window", default=None)

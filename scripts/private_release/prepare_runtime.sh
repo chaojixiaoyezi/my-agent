@@ -7,7 +7,7 @@ source_dir="${2:?传入冻结源码目录}"
 mkdir -p "$root/bundle/runtime" "$root/wheels"
 for item in bin lib include share; do cp -a "$root/$item" "$root/bundle/runtime/"; done
 # 这是新复制的发行运行时，不再由构建机的 uv 管理；不修改宿主 Python。
-rm -f "$root/bundle/runtime/lib/python3.11/EXTERNALLY-MANAGED"
+rm -f "$root/bundle/runtime/lib"/python3.*/EXTERNALLY-MANAGED
 python_bin="$root/bundle/runtime/bin/python3"
 export PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 "$python_bin" -m pip wheel --no-deps --no-build-isolation "$source_dir" --wheel-dir "$root/wheels"

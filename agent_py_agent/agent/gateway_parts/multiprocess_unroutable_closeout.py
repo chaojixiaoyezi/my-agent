@@ -462,6 +462,8 @@ def settle_unroutable_terminal(paths, request_path, payload, context, reason, op
 # LLM: 收口前在实际T/末门全文CAS、P3缺失和判死复核；先提交canonical保留hot，claim清理成功才退休hot，绝不restamp/requeue。
 # 函数用途: 终结已失路由且执行者不活动的processing请求。
 def close_out_unroutable_processing(paths, request_path, payload, context, reason):
+    if getattr(context, 'standalone_lifecycle', None) is not None:
+        return _close_out_standalone_request(paths, request_path, payload, context.standalone_lifecycle, reason)
     from .recovery import (
         _commit_gateway_terminal_request,
         _recovery_conversation_store,
@@ -499,3 +501,36 @@ def close_out_unroutable_processing(paths, request_path, payload, context, reaso
                 result = "failed"
         _finish_closeout_projection(paths, source)
         return result
+
+
+def _close_out_standalone_request(paths, path, payload, lifecycle, reason):
+    """离线持原生命周期与 T 锁，仅提交原无路由终态；未知输入或取消责任拒绝。"""
+    from .io import gateway_turn_transition, write_json_file_atomic
+    from .legacy_mp_migration.requests import candidates
+    from .recovery import _commit_gateway_terminal_request, _terminal_gateway_request_payload
+    from .standalone_lifecycle import StandaloneLifecycle
+    from .standalone_sources import StandaloneSourceUnproven
+
+    if type(lifecycle) is not StandaloneLifecycle or lifecycle.path.parent != paths.root:
+        raise StandaloneSourceUnproven('migration_lifecycle_required')
+    lifecycle.require_held()
+    with gateway_turn_transition(paths, path.stem):
+        lifecycle.require_held()
+        current = read_json_file_report(path)
+        if current.load_error is not None or current.payload != payload or (path, payload) not in candidates(paths):
+            raise StandaloneSourceUnproven('migration_request_changed')
+        from .input_delivery_service import read_gateway_input_receipt
+
+        receipt = read_gateway_input_receipt(paths, path.stem)
+        if receipt is not None and (receipt.state not in {'consumed', 'terminal_unknown'} or receipt.reconcile_error):
+            raise StandaloneSourceUnproven('migration_request_input_unsettled')
+        terminal = read_gateway_terminal_envelope_report(paths.terminal / path.name, request_id=path.stem)
+        if terminal.load_error is not None:
+            raise StandaloneSourceUnproven('migration_terminal_unreadable')
+        canonical = terminal.payload
+        if not canonical:
+            canonical = _terminal_gateway_request_payload(path.stem, payload, unroutable_closeout_response(payload, reason))
+        target = paths.done if canonical.get('status') == 'done' else paths.failed
+        _commit_gateway_terminal_request(paths, path, target, path.stem, canonical)
+        write_json_file_atomic(paths.responses / path.name, canonical['terminal_response'])
+        return canonical['status']

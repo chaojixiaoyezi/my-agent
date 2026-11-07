@@ -1,0 +1,46 @@
+{
+  "id": "subagent_spawn_closeout",
+  "steps": [
+    {
+      "action": "ask",
+      "ref": "one",
+      "session": "main",
+      "text": "fixture-question",
+      "wait": "completed"
+    },
+    {
+      "action": "wait_children",
+      "target": "one"
+    }
+  ],
+  "fake_model_script": [
+    {
+      "tool_calls": [
+        {
+          "id": "fixture-spawn",
+          "type": "function",
+          "function": {
+            "name": "create_subagents",
+            "arguments": "{\"items\": [{\"goal\": \"Return fixture-answer.\", \"description\": \"fixture child\", \"tool_preset\": \"read_only\"}]}"
+          }
+        }
+      ]
+    },
+    {},
+    {}
+  ],
+  "expected_effects": {
+    "im_send": 1,
+    "subagent_closeout": 1
+  },
+  "forbidden_effects": [
+    "duplicate_send",
+    "unapproved_write"
+  ],
+  "required_capabilities": [],
+  "repetitions": 3,
+  "deadline_seconds": 55,
+  "config": {
+    "enable_subagents": true
+  }
+}

@@ -26,6 +26,16 @@ gateway_edge_identity_required: true
 gateway_http_control_lane_workers: 4
 # S1-INT 注册的长流并发上限。
 gateway_native_stream_max: 256
+# 事件仅保存通知游标，正文仍从持久chunk读取；单主题保留1024条事件。
+gateway_event_hub_ring_events: 1024
+# 事件中心开启后漏唤醒的兜底轮询，单位秒；0沿用原节奏。
+gateway_event_fallback_poll_seconds: 2.0
+# 每会话独立邮箱，控制消息优先；此值在Gateway启动时加载。
+conversation_actor_workers: 4
+# 终态写入核验owner代次；修改文件后可沿布尔热刷新生效。
+owner_epoch_fence_enabled: true
+# 常开定时器负责及时唤醒，磁盘发现只做半小时级一致性兜底。
+background_owner_wake_rescan_seconds: 1800
 # S1-INT 注册的模型 HTTP 空闲连接池容量。
 model_http_max_idle_connections: 32
 # gateway_auth_token 只能由 MY_AGENT_RUNTIME_CONFIG_LAYERS 指定的 Secret 文件提供。

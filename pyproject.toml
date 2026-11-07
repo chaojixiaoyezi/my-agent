@@ -71,7 +71,8 @@ secrets = [
 # psycopg 是 PostgreSQL 驱动(不能自建)。不装则用现有 raw-sqlite3 local_storage,本扩展不影响现状。
 scale = [
   "sqlalchemy>=2.0",
-  "psycopg[binary]>=3.1",
+  "psycopg[binary]>=3.1; python_version < '3.14'",  # 旧解释器继续使用现有二进制驱动，不改变 3.12 的安装行为。
+  "psycopg>=3.1; python_version >= '3.14'",  # cp314t 无 binary wheel；普通 3.14 与自由线程构建均加载系统 libpq。
   "fastapi>=0.115",   # Tier 0.2 异步两层架构接入层(ASGI 路由/校验,研究建议借库,自研高危)
   "uvicorn>=0.30",    # ASGI 服务器(asyncio,扛 10 万并发连接;asyncio 是 stdlib,生产服务器借库)
   "redis>=5.2",       # 跨副本一致限流/token+USD 预算/全局并发租约；Redis 协议客户端不自建

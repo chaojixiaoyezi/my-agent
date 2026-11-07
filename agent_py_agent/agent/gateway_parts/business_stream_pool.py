@@ -233,8 +233,11 @@ class _StreamServicesView:
     # 函数用途: 创建单流停止视图。
     def __init__(self, services, ticket):
         self._services = services
-        self.wait = ticket.wait
-        self.event_signal = None
+        import time
+        self.wait = ticket.wait if ticket is not None else getattr(services, 'wait', time.sleep)
+        factory = getattr(getattr(services, 'host', None), 'business_event_signal_factory', None)
+        signal = factory() if callable(factory) else getattr(services, 'event_signal', None)
+        self.event_signal = _StopAwareSignal(signal, ticket) if signal is not None and ticket is not None else signal
 
     # LLM: 不复制或持久化业务服务，不覆盖原授权属性。
     # 函数用途: 读取未被流专用等待入口覆盖的原属性。
@@ -246,5 +249,24 @@ class _StreamServicesView:
 # 函数用途: 为一条流注入停止感知等待而保留原业务读取入口。
 def stream_services_view(services, ticket):
     if isinstance(services, Mapping):
-        return {**services, 'wait': ticket.wait, 'event_signal': None}
+        signal = services.get('event_signal')
+        return {**services, 'wait': ticket.wait if ticket is not None else services.get('wait'),
+                'event_signal': _StopAwareSignal(signal, ticket) if signal is not None and ticket is not None else signal}
     return _StreamServicesView(services, ticket)
+
+
+# LLM: Stop is transport-only; do not erase owner notifications or mutate shared services. Both before and after wait recheck the original ticket.
+# 类用途: 让每条流的唤醒信号同时感知本连接停止，关连接不会取消业务。
+class _StopAwareSignal:
+    # LLM: Retain only this stream's ticket and notification view, no new threads or sockets.
+    # 函数用途: 为当前流绑定原停止票据。
+    def __init__(self, signal, ticket):
+        self.signal, self.ticket = signal, ticket
+
+    # LLM: The hub waits outside its leaf lock, with bounded checks of the original stop event.
+    # 函数用途: 事件、超时或连接关闭后返回，并保持原NativeStreamStopped语义。
+    def wait(self, timeout):
+        self.ticket.wait(0)
+        result = self.signal.wait(timeout, self.ticket.stop_event)
+        self.ticket.wait(0)
+        return result

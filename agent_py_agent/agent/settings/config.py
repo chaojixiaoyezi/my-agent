@@ -327,6 +327,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_http_max_outstanding_requests: int = field(default=256, metadata={"bounds": (1, None), "range": "≥gateway_http_max_request_workers", "unit": "次", "model_read_only": True})
     gateway_http_control_lane_workers: int = field(default=10, metadata={"bounds": (0, 128), "unit": "个线程"})
     gateway_native_stream_max: int = field(default=128, metadata={"bounds": (0, 4096), "unit": "条流"})
+    # 事件中心与其兜底轮询默认关闭；数值范围由构造、归一与登记表共享。
+    gateway_event_hub_ring_events: int = field(default=0, metadata={"bounds": (0, 65536), "clamp": True})
+    gateway_event_fallback_poll_seconds: float = field(default=0.0, metadata={"bounds": (0.0, 60.0), "clamp": True})
     gateway_http_socket_timeout_seconds: float = field(default=5.0, metadata={"bounds": (0.1, 300.0), "model_read_only": True})
     gateway_http_queue_timeout_seconds: float = field(default=2.0, metadata={"bounds": (0.01, 300.0), "model_read_only": True})
     gateway_http_birth_gate_timeout_seconds: float = field(default=1.0, metadata={"bounds": (0.01, 30.0), "model_read_only": True})
@@ -523,7 +526,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
     # 子代理 runner 普通失败后最多自动重跑几次（唯一的家；原 runner_failure_policy 与守卫文件的两个重派上限已并入）；0 = 不自动重跑。
     runner_failure_retry_limit: int = 1
-    # 宿主拓扑唯一配置；0保持单进程，正整数选择工作进程数，只能改宿主配置并按原拓扑迁移约束重启。
+    # 仅保留旧拓扑输入；S2-W6 启动迁移后按单进程运行，校验器仍接受合法旧值。
     gateway_worker_process_count: int = 0
     gateway_workspace: str = ""
     gateway_stop_timeout: int = 20
@@ -564,6 +567,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     owner_agent_pool_max_agents: int = 128
     # 空闲实例寿命；只回收无执行租用、无持久工作者，0 关闭，身份和会话不删除。
     owner_agent_idle_seconds: float = 60.0
+    # 代次戳始终记录；仅终态拒绝策略热切换，会话 Actor 数量则在启动时读取。
+    owner_epoch_fence_enabled: bool = field(default=False, metadata={"range": "true|false", "effect": "immediate"})
+    conversation_actor_workers: int = field(default=0, metadata={"bounds": (0, 64), "clamp": True})
     input_media_max_bytes: int = 16 * 1024 * 1024
     input_media_max_files: int = 8
     # 飞书原生图片进入模型前的逐帧累计像素上限；先检查后解码，不按扩展名猜图片。
@@ -571,6 +577,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # owner retention 扫描控制器每拍只处理一个有界页，不创建 Agent、不调用 LLM。
     # 每个 owner 的 retention.json 另有日级执行节流；0 关闭网关自动扫描。
     owner_maintenance_scan_interval_seconds: int = 60
+    # 常开定时器以外的磁盘发现兜底；默认保持原120秒节奏。
+    background_owner_wake_rescan_seconds: int = field(default=120, metadata={"bounds": (30, 86400), "clamp": True})
     gateway_port: int = 8420
     # 多用户通道默认按 X-User-Id/channel 解析独立 owner；远程身份缺失或 owner 创建失败时
     # fail-closed，绝不回退共享 main。单机 CLI 无远程 provider 身份时仍使用 local main。
@@ -707,6 +715,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     config_layers: list[dict[str, object]] = field(default_factory=list)
     # 宿主内部擦洗上界：配置解析/克隆时冻结，不能由 YAML、参数中心或模型覆盖，也不含密钥值。
     host_credential_env_names: tuple[str, ...] = field(default=(), repr=False, metadata={"host_only": True})
+
+    # 新部署字段追加在末尾，保留既有位置参数顺序；0 保持主模型 HTTP 不复用连接。
+    model_http_max_idle_connections: int = field(default=0, metadata={"bounds": (0, 256), "unit": "个连接"})
+    # full 保持整目录快照；部署升级按 full→delta_compat→delta 顺序推进，改动需重启。
+    scale_owner_snapshot_mode: str = "full"
+    # 仅部署凭据的身份要求热刷新；飞书回调凭据保持启动值，需重启适配器收敛。
+    gateway_edge_identity_required: bool = False
 
     # LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
     # 函数用途: 查询一个配置项的有效来源，不更改其当前值。

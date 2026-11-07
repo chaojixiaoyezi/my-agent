@@ -136,6 +136,87 @@ _OWNER_FACT_STATS: dict[str, int] = {
 }
 _RECOVERY_SOURCE_SCANS: dict[tuple[int, str], Iterator] = {}
 _RECOVERY_SOURCE_SCAN_LOCK = threading.Lock()
+_ACTIVITY_BINDINGS = {}
+_ACTIVITY_BINDING_LOCK = threading.Lock()
+
+
+def bind_owner_activity_index(owners_dir, index, *, sweep_seconds, freshness_seconds, note_owner=None, forget_owner=None):
+    """只在组合根登记投影，不改变原发现器的调用签名或owner权限。"""
+    binding = _ActivityDiscovery(owners_dir, index, sweep_seconds, freshness_seconds, note_owner, forget_owner)
+    with _ACTIVITY_BINDING_LOCK:
+        _ACTIVITY_BINDINGS[binding.key] = binding
+    return binding
+
+
+class _ActivityDiscovery:
+    def __init__(self, owners_dir, index, sweep_seconds, freshness_seconds, note_owner, forget_owner):
+        self.key = str(Path(owners_dir).resolve())
+        self.index = index
+        self.sweep_seconds = sweep_seconds
+        self.freshness_seconds = freshness_seconds
+        self.note_owner = note_owner
+        self.forget_owner = forget_owner
+        self.next_sweep_at = 0.0
+
+    def close(self):
+        with _ACTIVITY_BINDING_LOCK:
+            if _ACTIVITY_BINDINGS.get(self.key) is self:
+                del _ACTIVITY_BINDINGS[self.key]
+
+    def page(self, owners_dir, *, limit, after_cursor):
+        from .owner_activity_index import next_hint_revision, owner_key
+        from .user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+        now = time.time()
+        targets = {}
+        # 优先候选也有页上限，完整发现游标只由原磁盘页推进。
+        for key in self.index.priority_owners(now=now, facts_before=now - self.freshness_seconds, limit=limit):
+            identity = OwnerIdentity(*key)
+            home = resolve_owner_home(Path(owners_dir).parent, identity).home_dir
+            if home.is_dir() and not home.is_symlink() and key != ("local", "main", "main"):
+                targets[key] = OwnerHomeDiscoveryTarget(identity, home)
+            elif key != ("local", "main", "main"):
+                self.index.forget_owner(key)
+                if self.forget_owner is not None:
+                    self.forget_owner(key)
+        cursor, scanned = None, len(targets)
+        if after_cursor is not None or time.monotonic() >= self.next_sweep_at:
+            page = discover_owner_home_page(owners_dir, limit=limit, after_cursor=after_cursor)
+            self.index.rebuild(owner_key(target.identity) for target in page.targets)
+            for target in page.targets:
+                targets[owner_key(target.identity)] = target
+            scanned += page.scanned
+            cursor = page.next_cursor
+            if cursor is None:
+                self.next_sweep_at = time.monotonic() + self.sweep_seconds
+        hard, soft = [], []
+        for key, target in targets.items():
+            revision = next_hint_revision()
+            kind = "none"
+            try:
+                kind = _owner_fact_kind(target.home_dir)
+                # 原谓词为登记表容错会吞部分读取错误；idle投影不能把这些错误当False。
+                for relative in ("data/scheduler/store.json", "memory/curator/state.json"):
+                    path = target.home_dir / relative
+                    try:
+                        value = json.loads(path.read_text(encoding="utf-8"))
+                    except FileNotFoundError:
+                        continue
+                    if not isinstance(value, dict):
+                        raise ValueError("owner fact store must be an object")
+                if self.note_owner is not None:
+                    self.note_owner(key, target.home_dir)
+                self.index.note_facts(key, kind == "hard", kind == "soft", revision=revision)
+            except Exception:
+                try:
+                    self.index.note_facts(key, None, None, revision=revision)
+                except Exception:
+                    pass  # 辅助索引故障不能抹掉已由原谓词证实的hard/soft事实。
+            if kind == "hard":
+                hard.append(target.identity)
+            elif kind == "soft":
+                soft.append(target.identity)
+        return OwnerWakeDiscoveryPage((*hard, *soft), cursor, scanned, tuple(hard), tuple(soft))
 
 
 @dataclass(frozen=True)
@@ -225,6 +306,7 @@ class _OwnerHomeSnapshot:
     created_at: float
     candidates: tuple[tuple[Any, Path], ...]
     keys: tuple[OwnerWakeCursor, ...]
+    quick_signature: tuple[Any, ...] = ()
 
 
 def discover_wake_pending_owners(owners_dir: str | Path, *, limit: int = 64) -> list[Any]:
@@ -249,6 +331,14 @@ def discover_wake_pending_owner_page(
     resolve_owner_home / release_idle_owner_agents)看同一个目录,不会出现
     「旧位置发现、规范位置消费」的空转。
     """
+    with _ACTIVITY_BINDING_LOCK:
+        activity = _ACTIVITY_BINDINGS.get(str(Path(owners_dir).resolve()))
+    if activity is not None:
+        try:
+            return activity.page(owners_dir, limit=limit, after_cursor=after_cursor)
+        except Exception:
+            # 投影不是权威；索引读写失败仍执行下方同一原扫描，不另造事实判据。
+            _LOGGER.warning("owner activity projection unavailable", exc_info=True)
     page = discover_owner_home_page(
         owners_dir,
         limit=limit,
@@ -325,7 +415,17 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
     """
     cache_key = str(providers_root)
     now = time.monotonic()
-    signature = _owner_home_signature(providers_root)
+    with _ACTIVITY_BINDING_LOCK:
+        activity = _ACTIVITY_BINDINGS.get(str(providers_root.parent.resolve()))
+    quick_signature = _owner_home_quick_signature(providers_root) if activity is not None else ()
+    if activity is not None:
+        with _SNAPSHOT_LOCK:
+            cached = _OWNER_HOME_SNAPSHOTS.get(cache_key)
+            if (cached is not None and cached.quick_signature == quick_signature
+                    and now - cached.created_at <= min(_SNAPSHOT_TTL_SECONDS, activity.freshness_seconds)):
+                _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
+                return cached
+    signature = _owner_home_signature(providers_root) if activity is None else quick_signature
     with _SNAPSHOT_LOCK:
         cached = _OWNER_HOME_SNAPSHOTS.get(cache_key)
         if (
@@ -342,6 +442,7 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
         created_at=now,
         candidates=candidates,
         keys=tuple(_identity_cursor(identity) for identity, _home in candidates),
+        quick_signature=quick_signature,
     )
     with _SNAPSHOT_LOCK:
         _OWNER_HOME_SNAPSHOTS[cache_key] = snapshot
@@ -349,6 +450,16 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
         while len(_OWNER_HOME_SNAPSHOTS) > _SNAPSHOT_MAX_ENTRY_COUNT:
             _OWNER_HOME_SNAPSHOTS.popitem(last=False)
     return snapshot
+
+
+def _owner_home_quick_signature(providers_root: Path) -> tuple[Any, ...]:
+    """索引接线后，相邻页只核目录代次，不为每四个owner重复列整个bucket。
+
+    元数据变化立即失效；粗粒度mtime风险仍由原快照TTL和扫描兜底限制。
+    """
+    return (_dir_own_signature(providers_root), _dir_own_signature(providers_root.parent / "local"),
+            tuple((str(bucket), _dir_own_signature(bucket))
+                  for _provider, _kind, bucket in _provider_buckets(providers_root)))
 
 
 # LLM: local目录签名也参与原快照失效，新增普通用户不得等TTL；只读元数据不作为执行授权。

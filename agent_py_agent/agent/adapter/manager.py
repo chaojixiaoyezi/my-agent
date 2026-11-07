@@ -858,6 +858,50 @@ def _sensitive_gateway_submission(manager: ChannelManager, msg: IncomingMessage)
 #   开关开抛 G1 原因码，开关关降级为不带凭据（由 G2a 计数兜底）。
 # 类用途: 带凭据查询进度、输入、控制及结果；不提交新任务，不持久化秘密。
 class _GatewayReplyPollClient:
+    # LLM: Only the matching live same-process listener supplies a hub; other processes and disabled hubs retain HTTP transport.
+    # 函数用途: 只识别真实同进程网关，端口相同不被外推为远程可达。
+    def in_process_hub(self):
+        from ..gateway_parts.http_service import _server_instance
+        listener = getattr(_server_instance, "server", None)
+        if listener is not None and listener.server_address[1] == self._gateway_port:
+            return getattr(_server_instance, "request_event_hub", None)
+        return None
+
+    # LLM: Reuse the original authenticated read handlers, never a second result/progress or delivery authority. No writes are admitted by this adapter.
+    # 函数用途: 同进程复用原HTTP只读投影；中心关闭或进程不同则保留原HTTP传输。
+    def _open(self, request, *, timeout):
+        if self.in_process_hub() is None:
+            return open_authenticated_request(request, timeout=timeout)
+        import io
+        import urllib.error
+        from email.message import Message
+        from types import SimpleNamespace
+        from urllib.parse import urlsplit
+
+        from ..gateway_parts import http_handlers
+        from ..gateway_parts.http_service import _server_instance
+        parsed = urlsplit(request.full_url)
+        readers = {"/progress/": http_handlers.handle_progress, "/result/": http_handlers.handle_result,
+                   "/input-status/": http_handlers.handle_input_status, "/control-status/": http_handlers.handle_control_status}
+        reader = next((value for prefix, value in readers.items() if parsed.path.startswith(prefix)), None)
+        if reader is None or request.get_method() != "GET":
+            return open_authenticated_request(request, timeout=timeout)
+        headers = Message()
+        for key, value in request.header_items():
+            headers[key] = value
+        result = []
+        view = SimpleNamespace(headers=headers, path=parsed.path + ("?" + parsed.query if parsed.query else ""),
+            client_address=("127.0.0.1", 0), _auth_middleware=_server_instance.auth_middleware,
+            _send_json=lambda status, body: result.append((status, body)))
+        if not http_handlers.require_trusted_source(view):
+            reader(view, _server_instance)
+        status, body = result[-1]
+        buffer = io.BytesIO(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+        if status >= 400:
+            raise urllib.error.HTTPError(request.full_url, status, "Gateway read denied", {}, buffer)
+        buffer.status = status
+        return buffer
+
     # LLM: 构造仅选路径，不读秘密；CLI 在启动前以原 Agent 数据根和配置 token 替换来源。
     # 函数用途: 绑定原 Gateway 端口和进程内凭据来源，不发请求。
     def __init__(self, gateway_port: int) -> None:
@@ -867,6 +911,7 @@ class _GatewayReplyPollClient:
     # LLM: 原游标/身份/凭据不变；退休draft不截断合法committed事件，缺凭据在请求前失败，认证HTTP拒绝重定向。
     # 函数用途: 只读拉取原进度，保持合法committed事件顺序、游标/档位/等待状态，退休draft不再截断前文。
     def poll_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
+        open_authenticated_request = self._open
         import urllib.error
         import urllib.request
 
@@ -916,6 +961,7 @@ class _GatewayReplyPollClient:
     # LLM: 原稳定输入ID只读对账；宿主凭据缺失在请求前失败，固定认证接口不重定向。
     # 函数用途: 查询原普通消息状态，不重复提交，也不从文字猜测成功。
     def poll_input_receipt(self, pending: PendingGatewayReply) -> str:
+        open_authenticated_request = self._open
         import urllib.error
         import urllib.parse
         import urllib.request
@@ -958,6 +1004,7 @@ class _GatewayReplyPollClient:
         self,
         pending: PendingGatewayReply,
     ) -> GatewayControlReceiptResult | None:
+        open_authenticated_request = self._open
         import urllib.error
         import urllib.parse
         import urllib.request
@@ -1030,6 +1077,7 @@ class _GatewayReplyPollClient:
         pending: PendingGatewayReply,
         interval: float,
     ) -> str | None:
+        open_authenticated_request = self._open
         import urllib.error
         import urllib.request
 
@@ -1118,6 +1166,7 @@ class ChannelManager:
                 clear_placeholder=self._clear_consumed_input_placeholder,
             ),
             poll_interval=delivery_poll_interval,
+            event_hub=self._reply_poll_client.in_process_hub,
         )
         self._reply_delivery.stream_preview_max_chars = max(1, min(8000, int(stream_preview_max_chars)))
         self._ingress_callbacks = _ChannelIngressCoordinator(self)

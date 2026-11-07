@@ -17,6 +17,8 @@ class GatewayHTTPRoute:
 
 GATEWAY_HTTP_ROUTES = {
     "GET": (
+        GatewayHTTPRoute("/client/requests/*/events", "handle_request_events", "credential", ".request_event_routes"),
+        GatewayHTTPRoute("/v1/requests/*/events", "handle_request_events", "credential", ".request_event_routes"),
         GatewayHTTPRoute("/api/admin/*", "handle_admin_api_get", "admin", ".admin_api"),
         GatewayHTTPRoute("/client/business/artifacts/*/content", "handle_business_artifact_content", "credential", ".business_artifacts_http"),
         GatewayHTTPRoute("/status", "_handle_status", "public"),
@@ -64,6 +66,10 @@ GATEWAY_HTTP_ROUTES = {
 # LLM: 不做URL归一化以免改变旧路由语义；返回同一个路由对象作为处理器和计数模板的来源。
 # 函数用途: 按方法与原请求路径找到实际路由，未知路径返回None。
 def match_gateway_http_route(method: str, path: str) -> GatewayHTTPRoute | None:
+    # 仅新事件路由匹配时去查询串；handler.path 保持原样供 durable cursor 解析，旧路由不变。
+    clean_path = path.split("?", 1)[0]
+    if method == "GET" and clean_path.startswith(("/client/requests/", "/v1/requests/")) and clean_path.endswith("/events"):
+        path = clean_path
     if method == 'GET' and path.startswith('/client/business/artifacts/'):
         from urllib.parse import urlsplit
         path = urlsplit(path).path

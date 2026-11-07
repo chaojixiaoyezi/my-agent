@@ -109,14 +109,20 @@ class HomeBackupVerifyResult:
     mismatches: tuple[str, ...]  # 哈希/大小不符或缺失的文件相对路径
 
 
+# LLM: 恢复校验要求有效快照清单及完整文件集合；不把清单缺失或漏项当作空备份成功。
+# 函数用途: 逐文件核对备份摘要与清单覆盖，本函数不修改目标home。
 def verify_home_backup_snapshot(backup_dir: str | Path) -> HomeBackupVerifyResult:
     """恢复前完整性校验:重算备份区每文件 sha256/size 与 manifest 比对(学 参考实现 恢复前校验)。"""
     root = Path(backup_dir)
     files_root = root / "files"
-    manifest = read_json_object(root / "manifest.json")
-    recorded = manifest.get("checksums") if isinstance(manifest, dict) else {}
-    recorded = recorded if isinstance(recorded, dict) else {}
-    mismatches: list[str] = []
+    manifest_path = root / "manifest.json"
+    manifest = read_json_object(manifest_path) if manifest_path.is_file() else {}
+    recorded = manifest.get("checksums")
+    if (not manifest_path.is_file() or manifest.get("mode") != "snapshot"
+            or not isinstance(recorded, dict)):
+        return HomeBackupVerifyResult(backup_dir=root, ok=False, checked=0, mismatches=("manifest.json",))
+    mismatches = [str(path.relative_to(files_root)) for path in _snapshot_files(files_root)
+                  if str(path.relative_to(files_root)) not in recorded]
     for rel, meta in recorded.items():
         target = files_root / rel
         if not target.is_file():

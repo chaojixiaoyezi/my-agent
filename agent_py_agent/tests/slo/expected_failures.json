@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_cliff.py::test_slow_handlers[cliff_slow_handler]",
+      "reason": "Control status passes, but saturating every general worker still rejects the offered ask with GATEWAY_HTTP_BUSY; S2-INT must confirm durable acceptance with the unchanged 100 ms target",
+      "clears_when": "S2-INT",
+      "added": "2026-11-05"
+    },
+    {
+      "nodeid": "agent_py_agent/tests/slo/test_slo_snapshot_counts.py::test_snapshot_counts[delta]",
+      "reason": "The transaction-capable fake now completes delta checkout, but the immediate warm turn still downloads 20/20 files because recent-mtime stat entries remain racy; S2-INT must meet downloads_warm_max=0 without changing the target or timestamp guard",
+      "clears_when": "S2-INT",
+      "added": "2026-11-05"
+    }
+  ]
+}

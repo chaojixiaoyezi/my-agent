@@ -1,0 +1,2145 @@
+[
+  {
+    "source": "client",
+    "seq": 1,
+    "kind": "request_sent",
+    "request_id": null,
+    "thread_id": null,
+    "execution_attempt_id": null,
+    "lease_epoch": 0,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 1,
+    "method": "POST",
+    "path": "/ask",
+    "session_id": "session_id#1",
+    "client_message_id": "one",
+    "text": "fixture-question"
+  },
+  {
+    "source": "client",
+    "seq": 2,
+    "kind": "response",
+    "request_id": "request_id#1",
+    "thread_id": null,
+    "execution_attempt_id": null,
+    "lease_epoch": 0,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 2,
+    "session_id": "session_id#1",
+    "status_code": 202,
+    "ok": null,
+    "delivery_status": "accepted",
+    "input_state": "queued",
+    "disposition": "queued",
+    "control_state": null,
+    "error_code": null,
+    "control_kind": null
+  },
+  {
+    "source": "queue",
+    "seq": 1,
+    "kind": "attempt_start",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 1,
+    "state": "processing"
+  },
+  {
+    "source": "client",
+    "seq": 3,
+    "kind": "request_sent",
+    "request_id": null,
+    "thread_id": null,
+    "execution_attempt_id": null,
+    "lease_epoch": 0,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 3,
+    "method": "POST",
+    "path": "/control",
+    "session_id": "session_id#1",
+    "client_message_id": "stop-one",
+    "text": "/stop"
+  },
+  {
+    "source": "client",
+    "seq": 4,
+    "kind": "response",
+    "request_id": "request_id#1",
+    "thread_id": null,
+    "execution_attempt_id": null,
+    "lease_epoch": 0,
+    "tool_call_id": null,
+    "receipt_id": "receipt_id#1",
+    "timestamp": 4,
+    "session_id": "session_id#1",
+    "status_code": 200,
+    "ok": true,
+    "delivery_status": "accepted",
+    "input_state": null,
+    "disposition": "system_command",
+    "control_state": "completed",
+    "error_code": null,
+    "control_kind": "stop"
+  },
+  {
+    "source": "client",
+    "seq": 5,
+    "kind": "stop_ack",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": "receipt_id#1",
+    "timestamp": 1
+  },
+  {
+    "source": "provider",
+    "seq": 1,
+    "kind": "model_request",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 1,
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_hash": "064a56b3e4852a252ccde4b5e042be6af7c6d373566575845e4b8ce754eb4656",
+    "body_hash_basis": "canonical_json_sha256",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 16384,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call my_agent_capability_probe exactly once with nonce probe_nonce#1. Do not answer in prose."
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "my_agent_capability_probe",
+            "description": "Internal protocol capability probe with no host-side effect.",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "nonce": {
+                  "description": "Copy the nonce from the user request exactly.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "nonce"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      "tool_choice": "auto",
+      "stream_options": {
+        "include_usage": true
+      },
+      "stream": true
+    },
+    "referenced_outputs": [],
+    "fixture_root": "fixture_root#1",
+    "source_root": "source_root#1",
+    "provider_origin": "http://127.0.0.1:<provider_origin-port>/v1",
+    "gateway_origin": "http://127.0.0.1:<gateway_origin-port>",
+    "connection_id": "connection_id#1",
+    "is_probe": true,
+    "message_roles": [
+      "user"
+    ],
+    "raw_index": 7
+  },
+  {
+    "source": "provider",
+    "seq": 2,
+    "kind": "model_request",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 2,
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body_hash": "e7b5c16c4788c0639013b11c8fcc41ea09d0f127bf8e29cfdfe545b0566777eb",
+    "body_hash_basis": "canonical_json_sha256",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 16384,
+      "messages": [
+        {
+          "role": "system",
+          "content": "证据观察点：版本、输入和观察点未变时复用已有有效结果；定位后针对实际改动验证。当前主机进程、端口、0.0.0.0绑定或localhost成功不证明外部网络、另一台机器或真实用户可达；模拟器、替代环境、局部入口和单一身份也不能外推完整端到端。未取得目标观察点结果时明确写“未验证”，说明已验入口与缺少的复核，不写“应该可用”。编译不证明启动或业务链路；须针对当前版本而非旧进程或旧产物。观察到的失败与原因假设分开；没有明确权限拒绝或隔离证据，不把超时、空日志、无响应归因于沙箱。授权反例：仅要求查看、解释或诊断时，做必要的只读检查，不自行修改、安装、部署或发送；明确修复/构建后不为正常步骤重复索要授权。只读分工须向子代理保留同样的检查范围，不能把查找问题改写成发现后直接修复；角色、工具可用性和 Full Access 都不代表新增业务目标的授权。新增的高风险、不可逆或对外动作不在原请求范围内时先取得授权；宿主审批、owner 隔离及专用确认规则始终有效。\n\n# System\n你是 my-agent，一个使用当前授权工具完成真实任务的 CLI 智能体。 自主决策：优先从当前目录、现有代码、用户约束和工具事实补齐信息；缺少次要实现选择时，不要停下来反问，采用合理默认并继续。只有缺失信息无法从上下文取得且合理假设会导致实质偏离、越权或不可逆风险时，才提一个简短关键问题；不要输出多选菜单来代替工作。任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞。 执行归属：普通回合负责当前用户请求；运行时存在 current_goal 时，本轮负责该目标的完整要求。每个代理最多一个未结束 Goal，历史目标不是新任务。主子代理目标各自独立，不能替未结束的下级宣布完成。执行纪律：只要本轮负责的目标仍有你已知的未完成部分，且现有工具、子代理或证据还能推进，就持续推进到实现、验证和清楚交付，不停在分析、骨架或未完成清单上。工具失败先读错误修正；仅目标端到端解决、用户暂停/改向或存在真实阻塞时才结束本轮。本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付；验证纪律：验证必须覆盖本轮目标实际要求的可见行为和端到端入口；关键路径失败修正后须重跑同一入口，不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功。有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在；无法解决时如实报告。相关检查通过且无新失败时直接交付，不重复核验。 工作方式：先读取与当前目标直接相关的现有代码、约定和测试，再按可验证的小步实现；已有信息足够可靠时直接回答，不扩大搜索范围。证据：不编造操作、权限或结果。验证对应当前版本、输入和目标入口，局部或模拟结果不能外推完整链路；未验证就明确写未验证。安全：只读请求只做必要读取，修复/构建在授权内推进；主代理仅协调或只读的限制必须保留，不能转交后扩权。工具可用、角色或 Full Access 不等于新增业务授权；范围外高风险、不可逆及对外动作先确认，不重复索要已有授权；宿主审批、专用确认和 owner 隔离始终有效。持续目标：仅用户或直接父级明确要求时建立 Goal，普通任务不自动建立 Goal；已有目标用 update_goal 修订。任务管理：主子代理可按复杂度自行选择用 task_progress 建清单或直接执行。使用清单时沿用原 id；委派现有开放项时，create_subagents 对应 item 必须原样复制该项 id 到 covers，不能拿无关 id 顶替。绑定 child 完成后按原项核对；未绑定 child 不会关闭原 Todo，父级须按证据更新原项。仍有可推进工作时继续；清单只是模型自查，不是宿主机器验收。沟通：用用户的语言简短直接回答，不加空洞开场结尾；失败、跳过、未完成和阻塞如实说明。\n\n自身self_map()总览→section/item。tools/skills数量核counts/完整性，名卡/推荐/展开/本页非总量，未知说未核实。items列名称用途，数量非清单，回执非用户已见；unknown/partial非0/没有。循next_read、准确path不重拼cwd；目录非授权/执行/外部或完成证据。self_map(section=...)：settings压缩比例/闲置设置→compact_policy/user_config；schedules监控定时/同通道顺延/多通道双线告警→schedule；remote_peers远端别名单向告警复测→remote_agent_push；assets技能/包/脚本/工作流/数据源→skill_search；schema→tool_search。\n\n查询结果纪律：query_evidence 是本次实际条件、返回数和覆盖范围的观察；解析器返回零条不能直接证明来源没有数据。首次查询或条件改变后出现零结果，先检查准确字段/接口键、来源、时间范围、分页、错误和截断；在同一 owner、同一来源及原时间范围内，预算和权限允许时最多做一次更宽但有界的基线复查，移除未证可靠的额外 AND/并列过滤。中文可以是有效查询值，不能按语言或固定词表否定；不要自动扫全量、扩权限或无限重试。有可靠已执行基线即可复用，不必重复请求；网络不可用、权限不足或无预算时如实说明未知。shell/自定义脚本/MCP 没有声明查询协议时，不能从 stdout 猜查询条件、记录数或伪造 verified 查询事实。普通零结果无需单独 IM 告警；最终回复由模型按实际证据表达条件和局限，不靠词句硬门。\n\n执行中沟通：复杂执行任务开始时，用一两句说明第一步；有新发现、调整方向或重要编辑、验证前，简短说明已确认的发现和下一步。连续探索中，有正常模型采样机会时，以约 30–60 秒为软目标给出有信息的新进展；不为汇报额外请求模型，不机械地每个工具前说一句，不重复空话。说明只能基于真实上下文，不把工具名、计时心跳或内部思考当作过程说明。仍有可推进的工作时，说明后在同一轮继续调用相应工具，不把进度句当作最终交付。普通短问答或单次小读取不强制过程说明；用户要求安静或少说时尊重其要求。\n\n# Owner Scope\n当前资料边界是本地管理员自己的 owner home，默认始终在这里工作；不要把启动 TUI 时的进程目录当成任务目录。只有 Full Access 已由宿主开启，并且用户明确指定外部路径或明确要求排查系统问题时，才离开自己的 owner home。涉及其他用户目录时也必须有用户明确要求；无需额外反问授权，但默认优先只读，只修改用户明确要求的范围，并尽量少改。WorkspaceOnly 只限制本机文件范围，不限制外部网络。\n\n# Dynamic Prompt Files\n# Prompt File: builtin:prompts/default.md\n# 默认动态 Prompt\n\n## 协作与交付\n\n- 普通问答可以直接回答；需要交付物时按用户要求组织正文、文件或附件，不用固定报告模板代替用户想要的结果。\n- 承诺检查或修改时，在同一轮调用对应工具；建立清单、写出阶段文件都不会启动后台续跑，后台状态只认宿主回执。\n- 大型工作交接要让一个刚回来的用户也能单独看懂：成果、实际验证、交付引用和剩余限制；不要只回复“任务已完成”。文件名和附件优先，不暴露无关内部编号。\n- 用户限定“主代理只能协调 / 不准自己写 / 只能由子代理执行”时，创建失败或容量不足都不能成为主代理静默接管功能实现的授权；修正派工或等现有生命周期事件。\n- 仅明确要求时调用 create_goal 并确认成功；已有目标用 update_goal，不另开同义目标。task_progress 可选，不能代替 Goal 或机器验收；确有帮助才建清单，沿用原 id 随做随勾。委派 open 项在 covers 复制 exact id，未绑定项由父级按实际证据更新；结果等生命周期事件，不轮询或 sleep。\n\n## 人格与长期记忆\n\n- 用户的长期称呼、背景、偏好用 `update_persona target=user` 写 USER.md；同条消息的多个事实用一次 `action=batch` + `operations` 原子写入。只有工具保存成功才说已记住。\n- `update_persona target=agents` 只读 AGENTS.md；修改只能由当前用户通过 `/agents` 完整预览确认或直接编辑。性格、语气和核心人设用 `target=soul`，SOUL.md 的任何变更须经宿主统一危险动作审批；不自行填写 Schema 没有的确认参数。不得用文件或 shell 绕过专用入口；临时语气不写 SOUL。\n- 需要以后检索的具体事实、事件和任务知识用 `remember` 写自己的 memory；人设和长期偏好不重复写进 memory。\n- 用户当轮直接要求优先于长期工作约定和人格默认值，但不能改变宿主权限与安全边界。\n\n## 模型配置\n\n- 用户要求新增、修改、删除服务商或模型，切换本会话模型或改新会话默认模型时，直接调用 `manage_models`，不要让用户自己进 `/model` 填表；先 `action=list` 拿精确 id 再做变更。密钥只作为工具参数传一次，回复里不复述；缺上下文窗口等必填信息先问用户或用 `discover` 读取，不要猜。\n\n## 数据与来源\n\n- 数据聚合前检查缺失、重复和异常值；异常单列或按明确口径处理，说明口径与影响，不静默删掉不符合预期的数据。\n- 数据统计、聚合、测量、对账以及产物中的统计数字和核对结论须来自实际工具证据，不做心算合计；同一产物里的数字对不上时重新计算并改正，不要编造原因来解释差异。普通解释的示例数字和简单问答不因此强制调用工具；已有工具证据仍可沿用，不重复取数。\n\n# Available Skills\n下列是本轮可用 Skill 的 name + description + stable skill_id。普通问答没有匹配项时无需调用。\n- academic-word-pdf-layout: 把论文/报告/正式商务文档(SOW、 (skill_id: builtin:academic-word-pdf-layout)\n- api-onboarding: 从当前 Owner 的接口资料和只读 (skill_id: builtin:api-onboarding)\n- attack-path-analysis: 把已验证或仍可信的安全发现，转成显式 (skill_id: builtin:attack-path-analysis)\n- brainstorming: 在需求确有歧义或设计取舍时澄清目标， (skill_id: builtin:brainstorming)\n- deep-code-analysis: 把一个代码项目真正读懂读深的方法—— (skill_id: builtin:deep-code-analysis)\n- deep-security-scan: 只用于源代码仓库或指定代码子路径的高 (skill_id: builtin:deep-security-scan)\n- define-goal: 把用户模糊的意图打磨成一个具体、可度 (skill_id: builtin:define-goal)\n- dispatching-parallel-agents: 手上有两件以上彼此独立、互不共享状态 (skill_id: builtin:dispatching-parallel-agents)\n- executing-plans: 按一份现成的实施计划把工作做到交付： (skill_id: builtin:executing-plans)\n- finding-discovery: 安全扫描的\"漏洞发现\"阶段——以威胁 (skill_id: builtin:finding-discovery)\n- finding-validation: 把\"疑似安全问题\"逐条做成有证据的验 (skill_id: builtin:finding-validation)\n- fix-finding: 把一条已确认或基本可信的安全发现,变 (skill_id: builtin:fix-finding)\n- learn-external-agent: 学习外部方法，按请求交付原生 Ski (skill_id: builtin:learn-external-agent)\n- log-incident-triage: 用于运行日志、告警流、防火墙/IDS  (skill_id: builtin:log-incident-triage)\n- pdf: 读取、生成、审阅 PDF 时以\"渲染 (skill_id: builtin:pdf)\n- pdf-translate-toolchain: 把英文 PDF(论文/文档)翻译成中 (skill_id: builtin:pdf-translate-toolchain)\n- receiving-code-review: 对待收到的代码评审意见：逐条核实后再 (skill_id: builtin:receiving-code-review)\n- requesting-code-review: 按改动风险安排针对性评审，用原始需求 (skill_id: builtin:requesting-code-review)\n- security-diff-scan: 对一组改动(任务收尾的 diff / (skill_id: builtin:security-diff-scan)\n- security-scan: 只用于源代码仓库或指定代码路径的穷尽 (skill_id: builtin:security-scan)\n- subagent-driven-development: 对可独立交付的任务按边界委派，按风险 (skill_id: builtin:subagent-driven-development)\n- systematic-debugging: 排查 bug、测试失败或异常行为的系 (skill_id: builtin:systematic-debugging)\n- test-driven-development: 以测试引导开发：先写一个会失败的测试 (skill_id: builtin:test-driven-development)\n- threat-model: 为一个代码仓库建立\"仓库级威胁模型\" (skill_id: builtin:threat-model)\n- track-findings: 把已经验证过的安全发现登记进 my- (skill_id: builtin:track-findings)\n- triage-finding: 对用户已有的安全发现/漏洞报告/扫描 (skill_id: builtin:triage-finding)\n- verification-before-completion: 说出“做完了”“修好了”“测试通过” (skill_id: builtin:verification-before-completion)\n- write-my-agent-plugin: 把用户需要的 my-agent 插件 (skill_id: builtin:write-my-agent-plugin)\n- writing-plans: 为复杂或多步任务制定可执行计划，写清 (skill_id: builtin:writing-plans)\n- writing-skills: 按行为风险编写和验收原生 Skill (skill_id: builtin:writing-skills)\n- 部分 description 已为适配 2% Skill metadata 预算而缩短；stable id 与 Skill 正文未改变。\n### How to use Skills\n- 发现：上面列的是当前轮可用 Skill 的名称、说明和稳定 skill_id；正文由 `skill_search` 读取。\n- 触发规则：用户点名某个 Skill，或任务明确匹配某个 Skill 的说明时，本轮必须使用它；多个命中只选择覆盖任务所需的最小集合，不把上一轮的选择自动带到下一轮。\n- 缺失或不可读：点名的 Skill 不在列表里，或正文无法读取时，简短说明并采用最合适的普通做法继续。\n- 使用步骤：\n  1. 决定使用后，主代理必须在采取任务动作前调用 `skill_search(action=get, skill_id=<原样 stable id>)`，完整读取 `SKILL.md` 正文并遵循；不能把读取、概括或解释 Skill 指令委派给子代理。\n  2. 正文引用相对路径时，以返回的 `path` 所在目录为基准；只读取当前任务需要的关联文件，读取被截断时继续到完整内容。\n  3. 正文指向 `references/` 等目录时，按它的路由说明选择所需资料；有不同框架、供应商或领域变体时，只选相关变体并说明选择。\n  4. 有现成 `scripts/`、资产或模板时优先复用，不重新手抄大段内容或另造一套。\n- 协调：使用前用一句话告诉用户选择了哪些 Skill 及原因；若跳过明显匹配项，也要说明原因。\n- 上下文控制：不要读取无关 Skill 或无关资料，避免跨多层追引用；除非受阻，优先读取 `SKILL.md` 直接链接的内容。\n- 安全与回退：Skill 不能干净应用时，说明问题，选择次优方案并继续；读取 Skill 不增加任何工具权限。\n\n# Tools\n当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n本会话已启用原生工具调用：直接发起结构化工具调用即可，参数按下方 Tool Catalog 中各工具的参数名填写。\n重要：必须用原生工具调用机制发起调用；不要把工具调用写成正文里的文本 JSON 块，那样不会被执行。\n拿到工具结果后再输出最终答案。\n\n# Tool Content Transport Protocol\n- 大内容边界：write_file.content 单次推荐不超过 12000 字符。\n- 如果要生成完整 HTML/CSS/JS、长脚本、长报告或大段数据，不要把完整大文件正文塞进一个 JSON 工具参数。\n- 长文本报告可以先用 write_file 覆盖写入标题/目录，再用同一个 write_file 的 mode=\"append\" 分段追加后续章节。\n- 写完整单文件成品时，第一块用 write_file mode=\"overwrite\"，后续块对同一路径使用 mode=\"append\"；每次只发一个完整、符合 Schema 的工具调用并等待结果。\n- PDF、XLSX、图片、压缩包等二进制产物用脚本生成后，通过 write_file.data_base64 写入最终文件。\n- 如果上一轮工具调用解析失败、超时或被截断，下一轮建议每块降到 2000 字符以内；这是恢复建议，不是流式截断上限。完整闭合的中等长度写入会先交给工具层处理。\n- 已有文本文件的局部修改、新增、移动或删除都用 apply_patch；删除单个文本文件时使用 *** Delete File，不要改用 rm/rmdir/unlink；需要脚本生成大文件时，直接用 run_command，由运行时 access_mode 决定命令是否能在目标目录执行。\n\n# Tool Catalog\n- 当前直接工具的名称、说明和参数 Schema 已通过原生工具通道提供；以该结构化 Schema 为准，不在提示词中重复展开。\n- ⊞ 另有 98 个工具已注册但未直接展开；需要时先用 tool_search 搜索并加载，也可用 tool_search(action=catalog) 查看完整清单：web_fetch, web_search\n  默认收起的工具（需要时用 tool_search 按名字或用途搜索，加载后即可调用）：\n  - admin_controls：管理员专用：创建和管理本地用户、决策/审计控制及精确资源授权\n  - asset_delivery：安全投递四类资产，默认关闭安装\n  - audit_group_invoke_asset：四类资产只给用黑盒调用\n  - audit_group_query：审计组只读概况与异常查询\n  - business_agent_tree_get：业务空间、团队与工作流：agent_tree.get\n  - business_artifacts_get：业务空间、团队与工作流：artifacts.get\n  - business_artifacts_list：业务空间、团队与工作流：artifacts.list\n  - business_background_agents_create：业务空间、团队与工作流：background_agents.create\n  - business_background_agents_get：业务空间、团队与工作流：background_agents.get\n  - business_background_agents_list：业务空间、团队与工作流：background_agents.list\n  - business_background_agents_messages_send：业务空间、团队与工作流：background_agents.messages.send\n  - business_background_agents_model_get：业务空间、团队与工作流：background_agents.model.get\n  - business_background_agents_model_set：业务空间、团队与工作流：background_agents.model.set\n  - business_background_agents_restore：业务空间、团队与工作流：background_agents.restore\n  - business_background_agents_resume：业务空间、团队与工作流：background_agents.resume\n  - business_background_agents_retire：业务空间、团队与工作流：background_agents.retire\n  - business_background_agents_suspend：业务空间、团队与工作流：background_agents.suspend\n  - business_background_agents_update：业务空间、团队与工作流：background_agents.update\n  - business_controllers_ensure：业务空间、团队与工作流：controllers.ensure\n  - business_controllers_get：业务空间、团队与工作流：controllers.get\n  - business_events_list：业务空间、团队与工作流：events.list\n  - business_executions_cancel：业务空间、团队与工作流：executions.cancel\n  - business_executions_get：业务空间、团队与工作流：executions.get\n  - business_executions_list：业务空间、团队与工作流：executions.list\n  - business_messages_list：业务空间、团队与工作流：messages.list\n  - business_model_profiles_list：业务空间、团队与工作流：model_profiles.list\n  - business_spaces_create：业务空间、团队与工作流：spaces.create\n  - business_spaces_get：业务空间、团队与工作流：spaces.get\n  - business_spaces_list：业务空间、团队与工作流：spaces.list\n  - business_spaces_packages_attach：业务空间、团队与工作流：spaces.packages.attach\n  - business_spaces_packages_catalog：业务空间、团队与工作流：spaces.packages.catalog\n  - business_spaces_packages_detach：业务空间、团队与工作流：spaces.packages.detach\n  - business_spaces_packages_list：业务空间、团队与工作流：spaces.packages.list\n  - business_spaces_packages_preview：业务空间、团队与工作流：spaces.packages.preview\n  - business_spaces_packages_reorder：业务空间、团队与工作流：spaces.packages.reorder\n  - business_spaces_packages_set：业务空间、团队与工作流：spaces.packages.set\n  - business_spaces_restore：业务空间、团队与工作流：spaces.restore\n  - business_spaces_update：业务空间、团队与工作流：spaces.update\n  - business_subagents_cancel：业务空间、团队与工作流：subagents.cancel\n  - business_subagents_get：业务空间、团队与工作流：subagents.get\n  - business_subagents_list：业务空间、团队与工作流：subagents.list\n  - business_subagents_messages_send：业务空间、团队与工作流：subagents.messages.send\n  - business_system_capabilities：业务空间、团队与工作流：system.capabilities\n  - business_tasks_assign：业务空间、团队与工作流：tasks.assign\n  - business_tasks_cancel：业务空间、团队与工作流：tasks.cancel\n  - business_tasks_follow_up：业务空间、团队与工作流：tasks.follow_up\n  - business_tasks_get：业务空间、团队与工作流：tasks.get\n  - business_tasks_list：业务空间、团队与工作流：tasks.list\n  - business_tasks_submit：业务空间、团队与工作流：tasks.submit\n  - business_tool_calls_get：业务空间、团队与工作流：tool_calls.get\n  - business_tool_calls_list：业务空间、团队与工作流：tool_calls.list\n  - business_usage_get：业务空间、团队与工作流：usage.get\n  - business_workflow_runs_cancel：业务空间、团队与工作流：workflow_runs.cancel\n  - business_workflow_runs_get：业务空间、团队与工作流：workflow_runs.get\n  - business_workflow_runs_list：业务空间、团队与工作流：workflow_runs.list\n  - business_workflow_runs_resume：业务空间、团队与工作流：workflow_runs.resume\n  - business_workflows_cleanup_policy_get：业务空间、团队与工作流：workflows.cleanup.policy.get\n  - business_workflows_cleanup_policy_set：业务空间、团队与工作流：workflows.cleanup.policy.set\n  - business_workflows_cleanup_preview：业务空间、团队与工作流：workflows.cleanup.preview\n  - business_workflows_cleanup_run：业务空间、团队与工作流：workflows.cleanup.run\n  - business_workflows_create：业务空间、团队与工作流：workflows.create\n  - business_workflows_disable：业务空间、团队与工作流：workflows.disable\n  - business_workflows_enable：业务空间、团队与工作流：workflows.enable\n  - business_workflows_get：业务空间、团队与工作流：workflows.get\n  - business_workflows_list：业务空间、团队与工作流：workflows.list\n  - business_workflows_preview：业务空间、团队与工作流：workflows.preview\n  - business_workflows_protection_set：业务空间、团队与工作流：workflows.protection.set\n  - business_workflows_recycle：业务空间、团队与工作流：workflows.recycle\n  - business_workflows_restore：业务空间、团队与工作流：workflows.restore\n  - business_workflows_scope_get：业务空间、团队与工作流：workflows.scope.get\n  - business_workflows_scope_set：业务空间、团队与工作流：workflows.scope.set\n  - business_workflows_update：业务空间、团队与工作流：workflows.update\n  - cancel_session_task：取消一条尚未结束的会话间任务\n  - compact_policy：查询或配置多级上下文压缩触发比例与管理员强制开关\n  - create_session_task：把任务耐久派给本人的另一个会话\n  - datasources：管理数据源代号、隔离凭据、SQLite schema与迁移\n  - gateway_status：查Gateway权威健康与native摘要；显式可读脱敏有界双日志尾，不用ps/ss猜\n  - get_session_task：查询已派会话任务的状态和结果引用\n  - list_owner_sessions：列出本人可发消息或派活的会话\n  - manage_models：新增、切换、删除或测试模型与服务商，含语义记忆的向量模型（等同 /model）\n  - package_build：把整理好的外部学习能力包或插件目录打成包（不用于普通Skill或workflows/scripts）\n  - package_install：安装你用 package_build 打好的包：开关开着直接装，关着给用户一行确认\n  - remote_agent_push：单向推送事件与脱敏上下文到已配置节点\n  - restart_gateway：安排 Gateway 安全重启（不要用 shell 重启或 kill 进程）\n  - runtime_governance：管理员运行治理：三层看门狗、维护锁与准确孤儿清理，不限制普通脚本\n  - schedule：管理定时任务、提醒与已授权群机器人消息订阅（event_source）；宿主核验引用来源\n  - scripts：管理Owner固化脚本、标准提取Key与源评估\n  - send_session_message：给同一用户下的另一个会话发一条消息\n  - skill_summarize：用户让你把这次的做法总结成内部技能时，交给自学习流水线\n  - skill_transfer：准备Skill定向投递或一次复刻的准确清单、查询状态；双端本人用/skills transfer确认。\n  - stop_named_work：停止或取消当前会话里点名的一个持续目标或审计\n  - tool_program：确定的只读取数、有限遍历、筛选去重统计；保持原工具权限。\n  - update_persona：USER画像/称呼/长期偏好可写；AGENTS只读，修改由用户/agents预览确认；SOUL性格语气须宿主审批\n  - user_config：查看或修改配置参数（参数中心，等同 /settings；含决策模型设置）\n  - watch_stream：持续盯守数据流：直播/HTTP 游标流、持续增长的日志、定时轮询接口\n  - workflows：管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与断点续跑"
+        },
+        {
+          "role": "user",
+          "content": "# User Task\nfixture-question"
+        },
+        {
+          "role": "user",
+          "content": "# Related Memory\n（无相关记忆）"
+        },
+        {
+          "role": "user",
+          "content": "# Recommended Tools\n（当前无候选工具详情）"
+        },
+        {
+          "role": "user",
+          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1 PST\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
+        },
+        {
+          "role": "user",
+          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/2026-11-05/request_id#1.json\n- self_check_ok: true"
+        },
+        {
+          "role": "user",
+          "content": "# Conversation Runtime State\n{\"authority\":\"conversation_history_seed.compact_generation\",\"compact_generation\":0,\"current\":true,\"schema\":\"conversation_runtime_state.v1\",\"supersedes_prior_runtime_state\":true}"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "list_files",
+            "description": "列出目录中的文件和子目录，适合先摸清项目结构。只能列当前用户自己的数据目录、shared 公共区和本任务明确授权的外部工作目录；其它路径会在授权阶段被拒，返回 PATH_OWNER_SCOPE_BLOCKED 等 PATH_*_BLOCKED 错误码，换写法重试同一位置不会成功——需要墙外的文件时如实说明缺哪个文件。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "description": "相对工作区的目录路径；不传时默认从项目根目录开始列。",
+                  "type": "string"
+                },
+                "recursive": {
+                  "description": "传 true 时会继续往下展开子目录；目录很大时要谨慎用，避免结果太长。",
+                  "type": "boolean"
+                },
+                "limit": {
+                  "description": "分页大小；目录很多时先小批量查看，再用 next_offset 继续。",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "offset": {
+                  "description": "上一页返回 next_offset 后，下一次传入这里继续看。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_depth": {
+                  "description": "只在 recursive=true 时生效；1 表示只看当前目录下一层。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "file_glob": {
+                  "description": "按工作区相对路径或文件名匹配；例如 *.py、src/*.ts。",
+                  "type": "string"
+                },
+                "include_dirs": {
+                  "description": "false 时只返回文件。",
+                  "type": "boolean"
+                },
+                "include_files": {
+                  "description": "false 时只返回目录。",
+                  "type": "boolean"
+                },
+                "include_ignored": {
+                  "description": "宽泛列表默认跳过 .git、node_modules 和常见缓存目录。未传该参数且显式 file_glob 在可见文件中零命中时，会自动检查忽略目录；传 false 可强制排除，传 true 可始终包含。",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "find_files",
+            "description": "按 glob 查找文件路径，适合不知道文件具体位置但知道文件名模式时使用。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "pattern": {
+                  "description": "必填；glob 模式，例如 *.py、**/*.md、src/**/*.ts。匹配路径或文件名，不会打开正文。",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "可选；从哪个目录开始找，默认工作区根目录。缩小范围会更快。",
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "分页大小；结果很多时先看一小页，再用 next_offset 继续。",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "offset": {
+                  "description": "上一页返回 next_offset 后，下一次传入这里继续看。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "include_ignored": {
+                  "description": "是否包含 .git、node_modules 和常见缓存目录；默认 false。",
+                  "type": "boolean"
+                },
+                "snapshot": {
+                  "default": false,
+                  "description": "显式冻结有界有序清单；可变目录一致性为best_effort，触顶披露partial。",
+                  "type": "boolean"
+                },
+                "cursor": {
+                  "description": "冻结分页的不透明凭证，不能与offset并用；失效后显式新建snapshot。",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pattern"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "description": "读取普通文本文件内容；已外置 tool-output 的包装文件只能用 read_artifact，不能用本工具。默认一次返回整个文件——理解或复刻一个源码文件时直接读全文，不要自己分段反复读同一个文件；只有文件极大（几十万字符以上）或只需确认某几行时才用 start_line/end_line/max_chars。只能读当前用户自己的数据目录、shared 公共区和本任务明确授权的外部工作目录；其它路径会在授权阶段被拒，返回 PATH_OWNER_SCOPE_BLOCKED 等 PATH_*_BLOCKED 错误码，换写法重试同一位置不会成功——需要墙外的文件时如实说明缺哪个文件。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "description": "相对工作区的普通文本文件路径；已外置 tool-output 必须改用 read_artifact。",
+                  "type": "string"
+                },
+                "start_line": {
+                  "description": "从第几行开始读，默认从第 1 行开始。",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "end_line": {
+                  "description": "读到第几行结束，包含该行；不传时默认读到文件结尾。",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "offset": {
+                  "description": "当文件是一整行大文本或返回 next_offset 时，下一次传入 offset 继续读。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_chars": {
+                  "description": "字符窗口大小；适合大文件分块阅读、摘要、再继续。",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "search_text",
+            "description": "只在当前本地工作区文件中做字面或正则匹配，适合找函数名、配置项、章节标记和日志锚点；不联网、不分词、不做语义搜索，默认使用 ripgrep 正则语义；精确原文请传 literal=true。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "description": "必填；默认使用 ripgrep 正则语义，不做分词、语义检索或联网搜索；要把整段 query 当普通文字时传 literal=true。",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "可选，只能是当前工作区内已经存在的文件或目录；源码尚未下载时先获取正确 checkout。",
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "分页大小；命中很多时先看小批量，再用 next_offset 继续。",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "offset": {
+                  "description": "上一页返回 next_offset 后，下一次传入这里继续看。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "file_glob": {
+                  "description": "按文件名或工作区相对路径过滤，例如 *.py、docs/*.md。",
+                  "type": "string"
+                },
+                "context": {
+                  "description": "需要看命中附近内容时传 1 或 2；越大越占 prompt。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "literal": {
+                  "default": false,
+                  "description": "默认 false，使用 ripgrep 正则语义；搜索包含正则符号的普通原文时传 true。",
+                  "type": "boolean"
+                },
+                "ignore_case": {
+                  "description": "大小写不确定时传 true。",
+                  "type": "boolean"
+                },
+                "output_mode": {
+                  "description": "content 返回行内容；line_numbers 只返回文件:行号；files_with_matches 只返回文件；count 返回每个文件命中数。",
+                  "enum": [
+                    "content",
+                    "files_with_matches",
+                    "count",
+                    "line_numbers"
+                  ],
+                  "type": "string"
+                },
+                "include_ignored": {
+                  "description": "默认跳过 .git、node_modules 和常见缓存目录；确实要查时传 true。",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "read_artifact",
+            "description": "显式读取已外置 tool-output artifact 的正文切片；不能读取任意文件路径。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_ref": {
+                  "description": "工具结果给出的逻辑 artifact_ref（优先 scoped_call_id）；不要填写或猜内部文件路径。",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "mode=slice 时从正文第几个字符开始读取，默认 0；head/tail/search 会忽略它。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_chars": {
+                  "description": "最多读取多少字符；0 表示读取全部。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "mode": {
+                  "description": "读取模式，默认 slice；tail 直接返回真实末尾且不再需要向后续读。",
+                  "enum": [
+                    "slice",
+                    "head",
+                    "tail",
+                    "search"
+                  ],
+                  "type": "string"
+                },
+                "query": {
+                  "description": "mode=search 时要搜索的关键词。",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_ref"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "write_file",
+            "description": "原子写入或覆盖完整文件；支持文本 content 或二进制 data_base64，缺失父目录会自动创建。复制已有脚本、模板或资源时优先原样传入 skill_search 返回的完整 source_ref，不经 content 手抄；三种内容输入互斥，复制不执行。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "source_ref": {
+                  "additionalProperties": false,
+                  "description": "原样使用 skill_search 返回的完整 source_ref 对象，精确复制完整资源（不是正文预览）；不要自行拼字段或把归档地址当来源。只支持 overwrite，不授予脚本执行权。",
+                  "properties": {
+                    "kind": {
+                      "const": "capability_package",
+                      "description": "来源类型，保留原值。",
+                      "type": "string"
+                    },
+                    "stable_id": {
+                      "description": "原引用的稳定能力标识，不自行拼接。",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "原引用的展示名称，等于 package_id，也必须完整保留。",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "source": {
+                      "const": "capability_package",
+                      "description": "来源域，保留原值。",
+                      "type": "string"
+                    },
+                    "content_sha256": {
+                      "description": "原引用的整包字节摘要。",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "package_id": {
+                      "description": "当前已授权能力包的精确标识。",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "activation_id": {
+                      "description": "原引用固定的激活代次，不能改成新代次。",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "resource_path": {
+                      "description": "包清单声明的完整成员路径，不是工作区路径。",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "resource_sha256": {
+                      "description": "原引用的完整成员字节摘要。",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "stable_id",
+                    "name",
+                    "source",
+                    "content_sha256",
+                    "package_id",
+                    "activation_id",
+                    "resource_path",
+                    "resource_sha256"
+                  ],
+                  "type": "object"
+                },
+                "expected_version": {
+                  "description": "基于 read_file 内容修改时，填它返回的 file_version；过期会拒绝覆盖，需重新读取合并。",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "相对工作区的目标文件路径；缺失父目录会自动创建。",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "会直接成为文件的新内容；原文件存在时会被整体覆盖。长文件应使用 write_file mode=\"append\" 分段追加，单次 inline content 推荐不超过 12000 字符；如果合法工具调用已经包含更长正文，工具层会自动落盘，但后续请改用小块追加或 data_base64。",
+                  "type": "string"
+                },
+                "data_base64": {
+                  "description": "可选。用于 PDF、XLSX、图片、压缩包等二进制文件；传入后按原始字节写入。",
+                  "type": "string"
+                },
+                "mode": {
+                  "description": "可选，精确值 overwrite 或 append。省略时始终覆盖；只有显式 append 才会原子地保留已有内容并追加到文件末尾。不接受 completed/continue 等别名。",
+                  "enum": [
+                    "overwrite",
+                    "append"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "apply_patch",
+            "description": "应用结构化文本补丁。每个文件头必须写成 *** Update File: <相对路径> （冒号后一个空格），Update 的每个正文行必须以 +、- 或一个真实空格开头。例如保留末行 last line 并在后面追加 appended line：\n*** Begin Patch\n*** Update File: notes.txt\n-last line\n+last line\n+appended line\n*** End Patch",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "patch": {
+                  "description": "严格使用 apply_patch 语法：第一行必须是 *** Begin Patch；每个变更头必须把相对路径写在同一行，格式严格为 *** Add File: <path>、*** Update File: <path> 或 *** Delete File: <path>（冒号后有一个空格）；仅 Update File 可紧跟 *** Move to；新增/删除/上下文行分别以 +、-、空格开头；Update 不能是空段；末尾追加时把最后一行同时作为 -/+ 上下文，再在 + 版本后写新增行；最后一行必须是 *** End Patch。不要使用 ---/+++ 统一 diff。",
+                  "type": "string"
+                },
+                "expected_versions": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "基于读取修改时，填路径到 read_file.file_version 的映射；过期先重读合并。",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "patch"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "edit_file",
+            "description": "把已有文本文件里的 old_string 精确替换成 new_string。改几行时首选；成功后返回实际修改处的新片段。空白容错需要显式 allow_fuzzy=true，字符串和正则中的空白可能有语义，默认不放宽。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "description": "要编辑的文件路径。",
+                  "type": "string"
+                },
+                "expected_version": {
+                  "description": "基于 read_file 修改时填它返回的 file_version；版本过期先重新读取合并。",
+                  "type": "string"
+                },
+                "old_string": {
+                  "description": "必须能在文件中唯一定位；若多处相同，请多带上下文或设 replace_all=true。默认逐字匹配；空白不一致时先读回原文。",
+                  "type": "string"
+                },
+                "new_string": {
+                  "description": "替换后的文本；允许空串以删除 old_string，并保持原有缩进风格。",
+                  "type": "string"
+                },
+                "replace_all": {
+                  "description": "true 时替换所有匹配处；默认只允许唯一匹配。",
+                  "type": "boolean"
+                },
+                "allow_fuzzy": {
+                  "default": false,
+                  "description": "显式允许空白容错；可能影响有语义的空白，默认 false。",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "old_string",
+                "new_string"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "run_command",
+            "description": "Execute one shell command in the workspace. For a server or other persistent process or a command expected to take tens of seconds, pass run_in_background=true; keep the command itself in foreground form; shell '&' backgrounding is rejected because it cannot return a managed session. The tool already returns the final exit code; do not append '; echo $?' or another always-successful command because that masks an earlier failure. Long output is already truncated for you, so run tests and checks on their own (&& chains are fine) instead of piping them into tail/head or joining them with ';': otherwise the exit code is not theirs and the run is not recorded as verification evidence.",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "description": "Required shell command string, for example 'ls -la' or 'python build.py'.",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "timeout": {
+                  "description": "Timeout in seconds; default 240.",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "working_dir": {
+                  "description": "Execution directory; defaults to this run's trusted effective cwd and must obey workspace access policy.",
+                  "type": "string"
+                },
+                "run_in_background": {
+                  "description": "When true, start a managed background command and briefly observe startup. If it remains alive, promptly return status=started plus session_id/output_file; do not start the same command again. if it exits immediately, return status=exited plus exit_code/output_tail.",
+                  "type": "boolean"
+                },
+                "background_listen_scope": {
+                  "description": "Only with run_in_background=true. loopback (default): the service may listen on 127.0.0.1/::1 only; the host recycles it if it binds a LAN address. lan: the user asked to expose the service to the local network; the first such call asks the user once and can be remembered for this owner.",
+                  "enum": [
+                    "loopback",
+                    "lan"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "process_session",
+            "description": "管理 run_command(run_in_background=true) 启动的后台命令，支持 list/status/wait/network_status/stop。session_id 是唯一稳定的管理句柄；network_status 是宿主机对受管进程树的权威只读观测，run_command 沙箱可能看不到其中的监听 PID；服务对外可达必须区分真实监听进程、主机防火墙与外部验证。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "后台进程动作。",
+                  "enum": [
+                    "list",
+                    "status",
+                    "wait",
+                    "network_status",
+                    "stop"
+                  ],
+                  "type": "string"
+                },
+                "session_id": {
+                  "description": "status/wait/network_status/stop 所需的后台 session id；不要猜测或传操作系统 PID。",
+                  "type": "string"
+                },
+                "timeout_seconds": {
+                  "description": "请求等待秒数，默认30、协议最大600；宿主默认每片最多30秒后交回控制，届满不代表进程失败，保留原session_id继续查询或停止。",
+                  "maximum": 600.0,
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "port": {
+                  "description": "network_status 可选端口；填写后只核对这个端口是否由该受管进程监听。",
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "terminal_session",
+            "description": "启动并操作真实 PTY 交互终端会话，支持 list/start/write/read/resize/close。start 立即返回 session_id，进程可继续运行；用 read 读取后续输出，用 write 输入。不接受 run_in_background；非交互后台命令使用 run_command 的该参数。resize 必须使用结构化 columns/rows；发送终端 ESC 文本不能代替真实尺寸调整。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "要执行的终端会话动作。",
+                  "enum": [
+                    "list",
+                    "start",
+                    "write",
+                    "read",
+                    "resize",
+                    "close"
+                  ],
+                  "type": "string"
+                },
+                "session_id": {
+                  "description": "本工具 start/list 返回的 PTY 句柄；不能填 run_command 的后台进程编号。",
+                  "type": "string"
+                },
+                "command": {
+                  "description": "start 所需命令。",
+                  "type": "string"
+                },
+                "working_dir": {
+                  "description": "start 的工作目录；省略时使用本轮可信有效目录。",
+                  "type": "string"
+                },
+                "data": {
+                  "description": "write 写入的文本。",
+                  "type": "string"
+                },
+                "append_newline": {
+                  "description": "write 后是否追加换行。",
+                  "type": "boolean"
+                },
+                "cursor": {
+                  "description": "read 的增量游标。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_bytes": {
+                  "description": "read 最多返回的字节数。",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "columns": {
+                  "description": "resize 后的终端列数。",
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "rows": {
+                  "description": "resize 后的终端行数。",
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "tool_search",
+            "description": "action=catalog查询本人完整工具目录、不可用原因及执行边界，不加载工具；默认action=search。按工具名查询完整参数，或按能力搜索当前授权的折叠工具。一次搜索即会在下一次模型调用中展开命中工具的 Schema，同一线程累计加载并跨 Compact 恢复，不需要再次调用或填写选择参数。当任务需要 /goal 生命周期、外部协作、web、vision 或 MCP，而当前工具列表里没有对应工具时使用。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "catalog只接收action；search按query/names搜索并加载。",
+                  "enum": [
+                    "search",
+                    "catalog"
+                  ],
+                  "type": "string"
+                },
+                "query": {
+                  "description": "描述需要的工具能力或工具名；与 names 至少提供一项。",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "names": {
+                  "description": "精确工具名批量加载，最多16项；只在当前授权快照内查找。",
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 16,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "category": {
+                  "description": "可选，只筛选 query 的模糊搜索类别。",
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "可选。query 搜索时最多返回多少个精简候选，默认 3。",
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "audit_records",
+            "description": "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属。scope默认owner，current_thread限本会话，all_owners仅显式获跨用户审计权限的管理员。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "topic": {
+                  "description": "审计主题：decision（决策模型使用）或 requests（请求成败与错误码）。",
+                  "enum": [
+                    "decision",
+                    "requests"
+                  ],
+                  "type": "string"
+                },
+                "scope": {
+                  "description": "默认 owner（本人全部会话）。",
+                  "enum": [
+                    "current_thread",
+                    "owner",
+                    "all_owners"
+                  ],
+                  "type": "string"
+                },
+                "since_hours": {
+                  "description": "只看最近多少小时，默认 24。",
+                  "exclusiveMinimum": 0,
+                  "maximum": 720,
+                  "type": "number"
+                },
+                "limit": {
+                  "description": "最多返回多少条观察记录，默认 20。",
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "topic"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "task_progress",
+            "description": "读取或更新当前run的可选进度账本，不切会话/工作区，也不负责续跑或完成判定。复杂长任务建立稳定items并沿原id更新；每项有证据完成时标done。原样委派open项时在child.covers复制exact id；未绑定child由父级按证据更新原项。返工用原id、status=in_progress、correction=true重开，不拿无关项顶替。仍有可推进工作时继续；目标完成或真实阻塞时交付。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "read/update；不填默认read，首次建清单也用update；不负责续跑或完成判定。",
+                  "enum": [
+                    "read",
+                    "update"
+                  ],
+                  "type": "string"
+                },
+                "run_id": {
+                  "description": "省略时读写当前运行计划。主代理跨回合补充同一会话的旧计划时，read 和 update 都传 read 返回的精确 run_id；这不会切换工作区或重启旧任务。子代理只能更新自己的计划。",
+                  "type": "string"
+                },
+                "summary": {
+                  "description": "可选。当前整体进展一句话",
+                  "type": "string"
+                },
+                "next_action": {
+                  "description": "可选。下一步最应该做什么",
+                  "type": "string"
+                },
+                "items": {
+                  "description": "这是开放清单，不是业务模板。status 只用 pending/in_progress/done/skipped/blocked；completed/read/ok 这类说明写 notes/summary，不要写进 status。长文、长清单、逐章/逐项任务里，优先每个对象写一个 item；notes 写真实读到的短事实，evidence 写文件、offset/行号、artifact_ref 或来源说明。不要只写“章节001-012已覆盖”来代替逐项事实。返工规则见工具说明。",
+                  "items": {
+                    "properties": {
+                      "id": {
+                        "description": "稳定条目 ID；更新已有项时使用原 ID。",
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "evidence": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "notes": {
+                        "type": "string"
+                      },
+                      "next": {
+                        "type": "string"
+                      },
+                      "result": {
+                        "type": "string"
+                      },
+                      "outcome": {
+                        "type": "string"
+                      },
+                      "conclusion": {
+                        "type": "string"
+                      },
+                      "decision": {
+                        "type": "string"
+                      },
+                      "summary": {
+                        "type": "string"
+                      },
+                      "owner": {
+                        "type": "string"
+                      },
+                      "priority": {},
+                      "updated_at": {},
+                      "correction": {
+                        "type": "boolean"
+                      },
+                      "overwrite": {
+                        "type": "boolean"
+                      },
+                      "replace": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "coverage": {
+                  "additionalProperties": false,
+                  "description": "这是开放世界覆盖清单，不限定对象类型。targets 可以是项目、论文、API、日志源、文件、模块或任何当前任务对象；checks 必须是对象映射，键由当前任务自己定义，值只写 pending/in_progress/done/skipped/blocked。长任务里建议边读、边分析、边写报告时更新，不要最后一次性随便打钩；范围进度和逐项事实最好分开写。它只是模型维护的软计划，不是系统完成判定。",
+                  "properties": {
+                    "goal": {
+                      "type": "string"
+                    },
+                    "dimensions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "targets": {
+                      "items": {
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "checks": {
+                            "additionalProperties": {
+                              "type": "string"
+                            },
+                            "type": "object"
+                          },
+                          "evidence": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "notes": {
+                            "type": "string"
+                          },
+                          "next": {
+                            "type": "string"
+                          },
+                          "owner": {
+                            "type": "string"
+                          },
+                          "priority": {},
+                          "updated_at": {},
+                          "coverage_kind": {
+                            "type": "string"
+                          },
+                          "source_ref": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "coverage_requirement": {
+                      "type": "string"
+                    },
+                    "enforcement": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "required": [],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "get_goal",
+            "description": "Get this agent's current goal and retained history, including status, budgets, token and elapsed-time usage.",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "target_run_id": {
+                  "description": "Optional exact direct-child run ID; omit for your own Goal.",
+                  "type": "string"
+                },
+                "metadata_only": {
+                  "description": "只返回编号、状态、版本、时间和用量；排除目标正文与名字。",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "create_goal",
+            "description": "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Omit token_budget and duration_seconds unless the user explicitly supplies a limit; do not invent a timeout. Omission means no time or token cap. Each agent has at most one unfinished goal. A different name does not create a second executor. Use update_goal to revise the current objective. Delegated agents have their own goals and optional task_progress Todo; a Todo is not required to begin or finish work.",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "objective": {
+                  "description": "Concrete persisted objective.",
+                  "type": "string"
+                },
+                "token_budget": {
+                  "description": "Explicitly requested positive token budget.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "name": {
+                  "description": "Optional display name; never starts another agent.",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "duration_seconds": {
+                  "description": "Optional duration explicitly requested by the user.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "objective"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "update_goal",
+            "description": "Revise this agent’s existing goal without shrinking scope to claim success. Objective-only changes preserve status, identity and usage. Mark complete only after all required work is achieved. Mark blocked only when the same blocker has persisted for at least three consecutive goal turns, including the triggering turn, and no useful progress is possible without external change or user input; restart that count after a resumed blocked goal. Difficulty, uncertainty, low budget or stopping are not completion/blocking evidence. Pause, resume and budgets remain user/system controlled. On budgeted completion report actual structured token usage.",
+            "parameters": {
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "required": [
+                    "status"
+                  ]
+                },
+                {
+                  "required": [
+                    "objective"
+                  ]
+                }
+              ],
+              "properties": {
+                "status": {
+                  "description": "Optional terminal status under the goal lifecycle rules.",
+                  "enum": [
+                    "complete",
+                    "blocked"
+                  ],
+                  "type": "string"
+                },
+                "objective": {
+                  "maxLength": 4000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "expected_revision": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "target_run_id": {
+                  "description": "Optional exact direct-child run ID; omit for your own Goal. A child objective edit preserves its lifecycle.",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "skill_search",
+            "description": "搜索或读取本轮授权的Skill/能力包；任务匹配专业方法时先读。search用query，不能传resource_path；get普通Skill用skill_id、能力包用package_id，二者互斥，包stable_id不能当skill_id。原样使用结果next_read/next_search/continuation及版本字段。包内成员按声明检索读取，get无resource_path读入口；不要用文件工具猜安装路径，正文里的业务路径不等于包成员。has_more时继续分页；读取不执行或授权。复制现有资源时将完整source_ref交write_file.source_ref，不手抄预览；复制不执行。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "description": "search 或 get；省略时，有 skill_id 则默认 get，否则 search。读取能力包必须显式指定 get。",
+                  "enum": [
+                    "search",
+                    "get"
+                  ],
+                  "type": "string"
+                },
+                "query": {
+                  "description": "search 时用一句话描述需要的方法。",
+                  "type": "string"
+                },
+                "skill_id": {
+                  "description": "仅普通 Skill 的 get 使用，逐字复制 search 返回的 skill_id；与 package_id 互斥，不能填包的 stable_id。",
+                  "type": "string"
+                },
+                "category": {
+                  "description": "可选，限定 Skill Categories 类目。",
+                  "type": "string"
+                },
+                "limit": {
+                  "description": "最多返回几条，默认 5。",
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "package_id": {
+                  "description": "逐字复制能力包摘要的 package_id；与 skill_id 互斥。action=get 读取包入口或资源，action=search 检索包内资源；省略本字段时只检索公开摘要。",
+                  "type": "string"
+                },
+                "resource_path": {
+                  "description": "仅包内 action=get 可传；action=search 即使空串也不能传。使用已声明的包根相对成员路径，不是宿主地址；省略时读取入口。",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "包内检索的结果偏移，或正文读取的字符偏移。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_chars": {
+                  "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "expected_package_sha256": {
+                  "description": "原样携带 next_read、next_search 或分页 continuation 中的包摘要，防止读到同名新版本。",
+                  "type": "string"
+                },
+                "expected_activation_id": {
+                  "description": "原样携带 next_read、next_search 或分页 continuation 中的激活代次，停用重启后的旧建议不能继续使用。",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "skill_feedback",
+            "description": "确实采用本轮已授权的自学Skill时登记adopted；此声明不会增加有效性评分。status查看本owner状态。用户结果反馈通过/skills learned feedback，正式内容确认不能由此工具执行。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "enum": [
+                    "adopted",
+                    "status"
+                  ],
+                  "type": "string"
+                },
+                "skill_id": {
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "session_search",
+            "description": "检索/翻看当前用户自己的本地历史记录(普通聊天、记忆、任务产物、归档),零成本纯读。必须指定mode：search全文检索、recent最近列表、around锚点窗口、message原文分段、thread_search当前会话检索、thread_browse当前会话分页。各模式字段互斥。已结束的 Gateway 任务命中可能带 task_ref，并在默认检索结果里优先展示；其中 task_path 是该历史任务的精确目录，用户要求续作时优先使用。message按next_offset续读，thread_browse用older_cursor翻页，会话归属只由宿主核验。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "search",
+                    "recent",
+                    "around",
+                    "message",
+                    "thread_search",
+                    "thread_browse"
+                  ],
+                  "type": "string"
+                },
+                "query": {
+                  "description": "search/thread_search必填非空检索词，其它模式不接受。",
+                  "type": "string"
+                },
+                "around_id": {
+                  "description": "around必填记录ID，其它模式不接受。",
+                  "type": "string"
+                },
+                "window": {
+                  "description": "锚点两侧各取几条，默认 5。",
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "limit": {
+                  "description": "检索或浏览返回条数。",
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "source_type": {
+                  "description": "限定来源类型，如 memory。",
+                  "type": "string"
+                },
+                "message_id": {
+                  "description": "message必填消息编号，取自检索结果或压缩摘要。",
+                  "type": "string"
+                },
+                "thread_id": {
+                  "description": "配合 message_id 读取本人其它会话的消息，取自检索结果 scope；不传则读当前会话。",
+                  "type": "string"
+                },
+                "offset": {
+                  "description": "读取原文的起始字符位置，默认 0；长消息按返回的 next_offset 续读。",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_chars": {
+                  "description": "本次最多返回多少字符，默认 6000。",
+                  "maximum": 20000,
+                  "minimum": 200,
+                  "type": "integer"
+                },
+                "cursor": {
+                  "description": "浏览当前会话时翻到更早一页，取上一页返回的 older_cursor。",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "remember",
+            "description": "提交当前owner的事实、事件或项目知识候选。正式保存须用户完整预览并确认；来源可信不等于批准，不把模型推断当已验证事实。替换/删除须entry_id，宿主冻结目标版本并在确认时CAS。用户亲口提供或明确要求保存用user_explicit；事实仅来自成功工具结果时用tool_verified并附精确evidence_refs。省略scope使用本人personal；personal/session不自填身份键，session不填有效时间，需时间过期用temporary。画像/称呼/长期偏好用update_persona，教训走lesson候选链。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "entry_id": {
+                  "description": "replace/remove 的正式长期记忆稳定编号；必须来自 list。",
+                  "type": "string"
+                },
+                "content": {
+                  "description": "add/replace 的简短、自包含正文。",
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "fact、event 或 project；lesson 不在长期 JSONL 中。",
+                  "enum": [
+                    "fact",
+                    "event",
+                    "project"
+                  ],
+                  "type": "string"
+                },
+                "tags": {
+                  "description": "可选短标签，只辅助检索，不决定事实权威。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "origin": {
+                  "description": "user_explicit、tool_verified 或 model_inferred；不能从正文猜。",
+                  "enum": [
+                    "user_explicit",
+                    "tool_verified",
+                    "model_inferred"
+                  ],
+                  "type": "string"
+                },
+                "evidence_refs": {
+                  "description": "tool_verified 的当前成功工具 operation/call/artifact 引用。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "subject_key": {
+                  "description": "稳定主题键；同主题同 scope 不允许静默新增冲突事实。",
+                  "type": "string"
+                },
+                "scope": {
+                  "additionalProperties": false,
+                  "description": "可选结构化适用范围；省略时由宿主绑定当前 owner 的 personal/personal。当前会话只写 scope_type=session，宿主绑定真实 thread；只有公司、项目、任务类型或临时范围才需要显式 scope_key。",
+                  "properties": {
+                    "scope_type": {
+                      "description": "适用范围类型；不能用正文或时间猜范围。",
+                      "enum": [
+                        "global",
+                        "personal",
+                        "company",
+                        "project",
+                        "task_class",
+                        "session",
+                        "temporary"
+                      ],
+                      "type": "string"
+                    },
+                    "scope_key": {
+                      "description": "动态范围的稳定键。personal 和当前 session 请省略，由宿主绑定；global 只能写 global；公司、项目等使用 company:<id>、project:<id>。",
+                      "type": "string"
+                    },
+                    "applies_when": {
+                      "description": "可选的人类可读适用条件，不参与范围身份判断。",
+                      "type": "string"
+                    },
+                    "excludes_when": {
+                      "description": "可选排除条件，不参与范围身份判断。",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "scope_type"
+                  ],
+                  "type": "object"
+                },
+                "valid_from": {
+                  "description": "可选带时区 ISO 生效时间。",
+                  "type": "string"
+                },
+                "valid_until": {
+                  "description": "可选带时区 ISO 失效时间；temporary scope 必须填写；session scope 禁止填写，其寿命由真实会话决定。",
+                  "type": "string"
+                },
+                "action": {
+                  "description": "add(默认)、list、replace、remove 或 batch。",
+                  "enum": [
+                    "add",
+                    "list",
+                    "replace",
+                    "remove",
+                    "batch"
+                  ],
+                  "type": "string"
+                },
+                "operations": {
+                  "description": "batch 的操作数组；整批只原子进入统一候选账本。",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "entry_id": {
+                        "type": "string"
+                      },
+                      "content": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "fact",
+                          "event",
+                          "project"
+                        ],
+                        "type": "string"
+                      },
+                      "tags": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "origin": {
+                        "enum": [
+                          "user_explicit",
+                          "tool_verified",
+                          "model_inferred"
+                        ],
+                        "type": "string"
+                      },
+                      "evidence_refs": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "subject_key": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "additionalProperties": false,
+                        "description": "同顶层 scope。",
+                        "properties": {
+                          "scope_type": {
+                            "enum": [
+                              "global",
+                              "personal",
+                              "company",
+                              "project",
+                              "task_class",
+                              "session",
+                              "temporary"
+                            ],
+                            "type": "string"
+                          },
+                          "scope_key": {
+                            "type": "string"
+                          },
+                          "applies_when": {
+                            "type": "string"
+                          },
+                          "excludes_when": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "scope_type"
+                        ],
+                        "type": "object"
+                      },
+                      "valid_from": {
+                        "type": "string"
+                      },
+                      "valid_until": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "enum": [
+                          "add",
+                          "replace",
+                          "remove"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "origin"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "request_credentials",
+            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群站点先find准确URL或list已授权凭据；selected_credential_ref由宿主按本人优先选择，可直接交web_fetch。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅缺失或用户明确新增/换账号才request；群新卡默认群共享、个人来源仅本人，可显式access_scope=task。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
+            "parameters": {
+              "additionalProperties": false,
+              "anyOf": [
+                {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "list"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operation"
+                  ]
+                },
+                {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "find"
+                      ]
+                    },
+                    "url": {
+                      "minLength": 1
+                    },
+                    "credential_ref": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "operation",
+                    "url"
+                  ]
+                },
+                {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "request"
+                      ]
+                    }
+                  },
+                  "required": []
+                },
+                {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "update"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operation",
+                    "credential_ref"
+                  ]
+                },
+                {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "configure"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operation",
+                    "credential_ref",
+                    "authentication"
+                  ]
+                },
+                {
+                  "properties": {
+                    "operation": {
+                      "enum": [
+                        "status",
+                        "revoke",
+                        "share"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "operation",
+                    "credential_ref"
+                  ]
+                }
+              ],
+              "properties": {
+                "url": {
+                  "description": "find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。",
+                  "type": "string"
+                },
+                "authentication": {
+                  "enum": [
+                    "collected",
+                    "basic",
+                    "bearer",
+                    "header",
+                    "login",
+                    "signature"
+                  ],
+                  "type": "string"
+                },
+                "collection_mode": {
+                  "description": "常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。",
+                  "enum": [
+                    "username_password",
+                    "password"
+                  ],
+                  "type": "string"
+                },
+                "header_name": {
+                  "type": "string"
+                },
+                "job_id": {
+                  "type": "string"
+                },
+                "fields": {
+                  "description": "需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "label"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "auth_config": {
+                  "type": "object"
+                },
+                "ttl_seconds": {
+                  "anyOf": [
+                    {
+                      "const": 0
+                    },
+                    {
+                      "maximum": 31536000,
+                      "minimum": 60
+                    }
+                  ],
+                  "description": "保存后有效秒数；0持续复用直到认证拒绝或撤销，缺省使用能力配置（默认0）。不改变卡片填写期限。",
+                  "type": "integer"
+                },
+                "operation": {
+                  "enum": [
+                    "request",
+                    "status",
+                    "update",
+                    "configure",
+                    "revoke",
+                    "list",
+                    "find",
+                    "share"
+                  ],
+                  "type": "string"
+                },
+                "credential_ref": {
+                  "description": "宿主返回的不透明引用，不是账号、密码或其它内容；查询原卡保存状态用status。find不能携带本字段。",
+                  "type": "string"
+                },
+                "credential_name": {
+                  "description": "find可选名称筛选；名称只是查找元数据，不能扩大权限或绕过本人账号优先。",
+                  "type": "string"
+                },
+                "access_scope": {
+                  "description": "新卡使用范围；省略由原宿主决定：群新卡默认group本群共享，个人仅task。个人来源不能选group。",
+                  "enum": [
+                    "group",
+                    "task"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "self_map",
+            "description": "查询自己的目录、工具、能力、模型、权限和工作状态；无参数总览，section 分块，cursor 翻页。\ndirectories：工作目录位置及当前读写标注。\ntools：当前工具用途、来源、权限与按需加载状态。\nskills：普通Skill方法清单、短用途与数量。\npackages：能力包安装、启用、授权与构建库存。\nplugins：插件安装和启用数量及贡献。\nmcp：MCP服务已配置、已连接数量与状态。\nmemory：记忆组件、正式记忆位置及人格入口。\nmodels：当前模型与可用模型档案。\nconfig：配置文件位置、有效参数与设置入口。\nwork：项目工作位置、会话与受管任务状态。\npermissions：当前身份、路径策略与未观测边界。\ncontext：当前上下文估算与Compact代次。\nremote_peers：本Owner可用的单向推送节点别名，不读取凭据或联机。\nsettings：当前多级压缩比例、闲置压缩及配置工具导航。\nschedules：监控绑定线程、同通道顺延及多通道告警摘要。\nassets：Skill和能力包数量摘要、脚本/工作流/数据源工具入口。\n默认列表用item_columns声明短行；省略列沿item_defaults，item_name_from明确同ID名称来源。首列next_read是完整item参数，合并detail_next_read.arguments后调详情；显式limit给详细页。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "section": {
+                  "enum": [
+                    "directories",
+                    "tools",
+                    "skills",
+                    "packages",
+                    "plugins",
+                    "mcp",
+                    "memory",
+                    "models",
+                    "config",
+                    "work",
+                    "permissions",
+                    "context",
+                    "remote_peers",
+                    "settings",
+                    "schedules",
+                    "assets"
+                  ],
+                  "type": "string"
+                },
+                "item": {
+                  "type": "string"
+                },
+                "cursor": {
+                  "type": "string"
+                },
+                "limit": {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "create_subagents",
+            "description": "将边界清楚且能并行的独立工作交给直属下级；主、子、孙共用。一项或多项统一用items，每项goal必填；所有items立即并发，文字中的先后顺序不生效。依赖前项结果或可能修改同一文件/模块的任务须分批。明确共同目录、独占范围、交付物与验收；output_files仅为协调线索，不是写集、锁或授权。承接现有open Todo时在covers复制exact id；返工先按原id重开，不能借无关id。child沿原owner工作区授权，goal和路径不能扩权。创建后生命周期事件自动通知父级，无需轮询；回合结束后由新续跑回合交付结果，不改已返回响应。本次交付依赖child时，在结束前等结果或明确阶段交付。优先完成自己负责的工作，只委派可独立部分；用户明确留给你的职责不可整体转交，不重复child正在做的工作。等待时推进已授权且不冲突的工作，关键结果须对照原始资料核验后整合测试；无有用工作时自然等待。遵守用户对主代理实现范围的限制；接手child范围前确认其已结束或停止冲突操作，慢不等于失败，不盲目重复派工。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "items": {
+                  "description": "独立派工项；一项也用数组，每项有完整goal。",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "goal": {
+                        "description": "每个item都必填；只写这一个子代理要完成和交付的具体工作，不要复制batch_summary。该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来；编码任务要同时写清共同目标目录以及与兄弟项互不重叠的文件或模块范围。",
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "persistent_goal": {
+                        "description": "可选持续目标正文；提供时为这个 child 创建唯一 Goal，正常回合结束后继续到完成或明确阻塞。省略是普通 prompt 派工，子代理的 Todo 可自行选择使用",
+                        "maxLength": 4000,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "covers": {
+                        "description": "承接已有 Todo 时复制 items/coverage.targets 的 exact id，不要因为字段可选而漏掉；额外工作可省略。未知、已关闭或跨 item 重复 id 会整批拒绝。返工先对原 id 更新 in_progress、correction=true。绑定项随 child DONE 打勾；省略则由父级据实更新，不拿无关 id 顶替。",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "description": {
+                        "description": "每个item可选；职责短标题只用3-12字概括这一个子代理负责什么，不要复制整批说明。",
+                        "maxLength": 240,
+                        "type": "string"
+                      },
+                      "role": {
+                        "description": "优先用模板角色。可用角色模板索引：\n- bug_finder: 找茬子代理；专门挑问题，可以一次检查多个 worker、多个文件、多个页面或多份产物。；适用=需要找 bug、风险、遗漏、矛盾、引用失效或不符合需求的地方。；不适用=只是执行一个明确改动时不要用找茬角色。；能力=write,depends_on_outputs\n- coordinator: 协调子代理；拆分独立工作、推进自己负责的部分，逐项接入下级成果并处理阻塞。；适用=任务需要多层分工、接管、排队或跨子代理同步。；不适用=只有一个明确小改动时不需要协调角色。；能力=spawn_children,write\n- researcher: 研究子代理；负责查找、对比和整理资料，适用于文档、竞品、技术方案或背景研究。；适用=需要先找资料、比对多个来源或整理证据。；不适用=已有明确实现方案，只差写代码时不要单独用研究角色。；能力=write\n- tester: 测试子代理；负责测试多个交付物或流程，关注可复现步骤、结果证据和失败原因。；适用=需要回归测试、E2E 测试、功能测试、文档检查或批量验证。；不适用=只是主观判断是否喜欢时不要用测试角色。；能力=write,test,depends_on_outputs\n- worker: 执行子代理；负责完成一块实际交付，可以是代码、文档、研究、PPT、文案或分析。；适用=已有明确目标、边界和交付物，需要实际完成一块工作。；不适用=只需要验收、找问题或汇总时不要用 worker。；能力=write\n- writer: 写作子代理；负责写作、润色、改结构和统一表达，可用于文档、文案、脚本或报告。；适用=需要生成或优化一组文本产物。；不适用=只要客观验收或找错时不要用写作角色。；能力=write",
+                        "type": "string"
+                      },
+                      "agent_name": {
+                        "description": "展示名不是角色；需要职责差异时仍应使用 role 或 goal 表达。",
+                        "type": "string"
+                      },
+                      "model": {
+                        "description": "仅当用户要求或任务需要独立模型时填写。只认当前 owner 已新增配置；同名多配置用回执中的 id，未知模型先请用户 /model 新增，不传地址或密钥。每个 item 可分别选择；子孙默认继续继承其直接父级。",
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "effort": {
+                        "description": "仅当用户要求或任务明显需要不同思考深度时填写（例如简单检索用 low、难题用 max）。宿主按模型实际支持的方式换算，模型不支持时按服务商默认运行；每个 item 可分别选择，子孙默认继承直接父级。",
+                        "enum": [
+                          "auto",
+                          "off",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          "ultra"
+                        ],
+                        "type": "string"
+                      },
+                      "tool_preset": {
+                        "description": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
+                        "enum": [
+                          "coding",
+                          "read_only",
+                          "none"
+                        ],
+                        "type": "string"
+                      },
+                      "allowed_tools": {
+                        "description": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "allowed_skills": {
+                        "description": "可选 Skill 名称或 stable_id 列表；能力包使用 capability:<package_id>。授权分别填各item.allowed_skills；未填时沿宿主默认策略，goal或input_refs中提及包不等于授权。创建时解析为不可变快照引用，未知或禁用项整批拒绝，包内资源仍按需私有读取。",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "plan": {
+                        "description": "子代理初始步骤",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "input_refs": {
+                        "description": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "output_files": {
+                        "description": "可选；用户明确保存路径时用于保留交付身份与协调线索。它不是权限、完整写集或创建前置条件，路径仍服从当前 workspace 权限。阅读资料用 input_refs。同批多个 item 可以声明共同 task root；具体输出使用约定业务目录或工具返回的真实路径，不猜内部目录。",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "artifact_refs": {
+                        "description": "已有交付物或参考产物引用",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "replacement_for_run_ids": {
+                        "description": "用于结构化接管卡住或过时的旧 run。",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "related_finding_id": {
+                        "description": "仅当你决定为一个已收到的 Audit finding 创建调查、复核或补证子代理时填写。必须原样使用事件中的 finding_id；系统会验证 owner、会话、活跃 Audit 和真实 run，并在工具结果的 finding_investigations 中返回 investigation_run_id 与真实状态。",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "long_running": {
+                        "description": "true 声明这是故意长期运行的守望/常驻任务(持续监控数小时~数天)；系统放开其上下文压缩续跑深度上限(无进展仍会熔断)。只在任务本质是持续盯守/常驻服务时声明",
+                        "type": "boolean"
+                      },
+                      "service_window_seconds": {
+                        "description": "可选,配合 long_running:持续型任务的最短值守窗口(秒)。窗口未走完时子代理不会因'已产出一次成果'被系统提前收口;若仍提前退出,父代理会收到'窗口未走完'的结构化事实以便重派或接管。派盯守/常驻任务时把用户要求的守候时长写进来",
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "audit_source_id": {
+                        "description": "只在当前 Audit 的结构化 source_bindings 列表中选择一个原样 source_id。每个实际来源创建一个叶子 item；子代理只需调用 watch_stream(action=open)，URL、请求体、游标位置和文档引用由运行时从该绑定补入，禁止猜 watch_id。",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "goal"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "batch_summary": {
+                  "description": "整批简述，不广播给孩子。",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "items"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "list_agents",
+            "description": "只读列出当前代理可见的主代理、子代理和孙代理状态，以及 read_order 中可直接读取的实际产物或终态报告。没有结果引用不等于失败，不要猜内部目录或恢复文件。它不会启动、推进、等待、重试或取消任何代理；正常工作不需要轮询，宿主仍会在直属下级发生结构化生命周期事件时自动唤醒父级。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "run_id": {
+                  "description": "可选。查看一个已经知道的 run_id 及其子树；省略时查看当前任务可见代理树。",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "cancel_subagents",
+            "description": "取消当前代理直接创建的一个或多个下级；会废弃 active attempt、记录取消审计，有关联 pid 时会尝试终止。这是父级对直属下级的打断动作，不承担轮询、推动或质量验收。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "run_id": {
+                  "description": "可选。单个子代理 run_id。",
+                  "type": "string"
+                },
+                "run_ids": {
+                  "description": "可选。多个直接子代理 run_id；只停止点名目标，不递归代管孙代理。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "reason": {
+                  "description": "可选。取消原因，会写入子代理 work log 和审计字段。",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "send_guidance",
+            "description": "给一个正在运行的下级代理补充消息。成功只证明消息已耐久排队，不证明目标模型已接收、执行或完成；后续以结构化消息状态和目标输出为准。该工具不启动、轮询、推动或验收代理；要停止下级请用 cancel_subagents。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "target": {
+                  "description": "接收消息的直接子代理 run_id（来自 create_subagents 回执或生命周期事件）。",
+                  "type": "string"
+                },
+                "message": {
+                  "description": "要插入该子代理当前任务的普通自然语言要求。",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "target",
+                "message"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "resolve_capability_requests",
+            "description": "主代理对子代理能力申请的裁决入口：grant 授权（可附目录写权限），deny 显式拒绝。两种处理都会唤醒子代理继续任务，并保留结构化审计记录。grant 不能扩出父级 workspace；也不能超出直属父级当前 ToolRuntimeSnapshot。越界请求应 deny，让 child 使用现有目录，不能反复 grant。这里不走用户审批；获批工具的具体危险调用仍单独进入用户审批。",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "run_id": {
+                  "description": "必填。子代理 run_id。",
+                  "type": "string"
+                },
+                "decision": {
+                  "description": "必填。grant=授权能力申请，deny=显式拒绝能力申请。deny 会把请求置为 CLOSED 并唤醒子代理按现有权限调整方案；不会终止子代理。",
+                  "enum": [
+                    "grant",
+                    "deny"
+                  ],
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "必填。裁决原因，写入审计。",
+                  "type": "string"
+                },
+                "request_id": {
+                  "description": "可选。grant/deny 时指定单个请求 id；缺省处理该 run 全部未决请求。",
+                  "type": "string"
+                },
+                "write_roots": {
+                  "description": "可选。grant 文件系统请求时授权的目录列表；缺省用请求自带 path_scope。目录必须落在当前任务工作区或主代理 workspace 内；若请求的是兄弟/越界目录，不要重试 grant，改用 deny 唤醒 child 回现有写区。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "tools": {
+                  "description": "可选。grant 时附加授权的精确模型工具名；缺省用请求自带 requested_tools。只能授予宿主 parent_tool_authority 标为 grantable 的工具；能力 grant 不等于用户批准随后某一次危险 ToolCall。",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "run_id",
+                "decision"
+              ],
+              "type": "object"
+            }
+          }
+        }
+      ],
+      "tool_choice": "auto",
+      "stream_options": {
+        "include_usage": true
+      },
+      "stream": true
+    },
+    "referenced_outputs": [],
+    "fixture_root": "fixture_root#1",
+    "source_root": "source_root#1",
+    "provider_origin": "http://127.0.0.1:<provider_origin-port>/v1",
+    "gateway_origin": "http://127.0.0.1:<gateway_origin-port>",
+    "connection_id": "connection_id#2",
+    "is_probe": false,
+    "message_roles": [
+      "system",
+      "user",
+      "user",
+      "user",
+      "user",
+      "user",
+      "user"
+    ],
+    "raw_index": 8
+  },
+  {
+    "source": "queue",
+    "seq": 2,
+    "kind": "exit_proof",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 2,
+    "confirmed": true,
+    "proof_kind": "canonical_capability_closeout"
+  },
+  {
+    "source": "session",
+    "seq": 1,
+    "kind": "message",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 1,
+    "event_id": "event_id#1",
+    "role": "user",
+    "content": "fixture-question",
+    "channel": "chat",
+    "created_at": 3,
+    "turn_end_reason": null,
+    "operation_verification": null,
+    "raw_index": 10
+  },
+  {
+    "source": "session",
+    "seq": 2,
+    "kind": "message",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 2,
+    "event_id": "event_id#2",
+    "role": "assistant",
+    "content": "",
+    "channel": "chat",
+    "created_at": 4,
+    "turn_end_reason": "aborted",
+    "operation_verification": null,
+    "raw_index": 11
+  },
+  {
+    "source": "queue",
+    "seq": 3,
+    "kind": "attempt_terminal",
+    "request_id": "request_id#1",
+    "thread_id": "thread_id#1",
+    "execution_attempt_id": "execution_attempt_id#1",
+    "lease_epoch": 1,
+    "tool_call_id": null,
+    "receipt_id": null,
+    "timestamp": 3,
+    "state": "interrupted",
+    "disposition": "committed",
+    "response": "",
+    "ok": true,
+    "tool_calls": 0,
+    "tool_rounds": 0,
+    "attempts": 1,
+    "closeout_acknowledged": true
+  }
+]

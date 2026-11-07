@@ -22,6 +22,7 @@ from pathlib import Path
 from stat import S_ISREG
 from typing import Any
 
+from ..owner_activity_index import next_hint_revision
 from ..storage_backend import ensure_sqlite_wal
 
 _SCHEMA_VERSION = 1
@@ -30,6 +31,9 @@ _SCHEMA_INITIALIZED_DBS: OrderedDict[str, tuple[int, int, int]] = OrderedDict()
 _SCHEMA_INITIALIZED_MAX = 256
 _ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running", "waiting"})
 _LEGACY_SCAN_KEY = "owner_scheduler_ledgers_v1"
+_DUE_LISTENER_LOCK = threading.Lock()
+_DUE_LISTENERS: dict[str, dict[object, Any]] = {}
+_DUE_LISTENER_FAILURES: dict[str, int] = {}
 
 
 class SchedulerDueIndexError(RuntimeError):
@@ -61,6 +65,50 @@ class SchedulerDueIndex:
         self.path = Path(path).expanduser().resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
+
+    def add_due_listener(self, fn):
+        """同物理库的所有实例共享提交后提示；返回解除注册函数。"""
+        key, token = str(self.path), object()
+        with _DUE_LISTENER_LOCK:
+            _DUE_LISTENERS.setdefault(key, {})[token] = fn
+
+        def remove():
+            with _DUE_LISTENER_LOCK:
+                listeners = _DUE_LISTENERS.get(key, {})
+                listeners.pop(token, None)
+                if not listeners:
+                    _DUE_LISTENERS.pop(key, None)
+        return remove
+
+    @property
+    def listener_failures(self):
+        with _DUE_LISTENER_LOCK:
+            return _DUE_LISTENER_FAILURES.get(str(self.path), 0)
+
+    def next_due_at(self, owner=None) -> float | None:
+        """返回可再次领取的时间，保留现有有效租约而不制造忙醒。"""
+        where, args = "", ()
+        if owner is not None:
+            where = "WHERE provider=? AND owner_kind=? AND owner_id=?"
+            args = _owner_key(owner) if isinstance(owner, dict) else tuple(owner)
+        with closing(self._connect()) as conn:
+            row = conn.execute(f"SELECT MIN(MAX(next_due_at,lease_until)) FROM scheduler_due_owners {where}", args).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def _notify_due_change(self, owner):
+        key = str(self.path)
+        with _DUE_LISTENER_LOCK:
+            listeners = tuple(_DUE_LISTENERS.get(key, {}).values())
+        if not listeners:
+            return
+        revision = next_hint_revision()
+        for listener in listeners:
+            try:
+                listener(owner, self.next_due_at(owner), revision)
+            except Exception:
+                # 已提交的权威结果不被可丢失提示或索引读失败反转。
+                with _DUE_LISTENER_LOCK:
+                    _DUE_LISTENER_FAILURES[key] = _DUE_LISTENER_FAILURES.get(key, 0) + 1
 
     # LLM: 展示编号使用原全局 SQLite 的原子分配器，唯一 job 仍在 owner 账；丢弃的预留允许留空号，不回收编号。
     #   先退出原事务再立即close短连接，_connect仍返回原始SQLite连接以兼容既有hook。
@@ -122,6 +170,7 @@ class SchedulerDueIndex:
                 conn.commit()
         except (OSError, sqlite3.Error) as exc:
             raise SchedulerDueIndexError("scheduler due index update failed") from exc
+        self._notify_due_change((provider, owner_kind, owner_id))
         return next_due_at
 
     # LLM: 到期owner全局领取只归C；守原父类公开门使W adapter及直接父类均拒，sync_owner/alias受控业务保持。
@@ -168,6 +217,8 @@ class SchedulerDueIndex:
                 conn.commit()
         except (OSError, sqlite3.Error) as exc:
             raise SchedulerDueIndexError("scheduler due index claim failed") from exc
+        for row in rows:
+            self._notify_due_change((str(row["provider"]), str(row["owner_kind"]), str(row["owner_id"])))
         return [
             DueOwner(
                 provider=str(row["provider"]),
@@ -230,6 +281,8 @@ class SchedulerDueIndex:
                 conn.commit()
         except (OSError, sqlite3.Error) as exc:
             raise SchedulerDueIndexError("scheduler due index legacy repair failed") from exc
+        for provider, kind, identity, _due, _updated in rows:
+            self._notify_due_change((provider, kind, identity))
         return {
             "completed": errors == 0,
             "scanned": scanned,

@@ -513,12 +513,12 @@ model_speed_profile_path: ""
 # - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
 # - 留空时固定落在 owner workspace/runtime/services/gateway；多个不同 cwd 的 TUI 共用这一处。
 # - 显式绝对路径原样使用；显式相对路径以 owner workspace 解析，不以启动 TUI 的 cwd 解析。
-# Gateway唯一宿主拓扑配置。0保持原单进程；正整数启用独立工作进程，不是请求并发数。
-# 只能在宿主配置文件修改；保存后正常重启生效。旧home切换必须具备迁移事实，不能以新home验收替代。
-# 旧Count0需用支持版保持0正常运行/停止一次，留下本次身份与责任来源，再改正数启动。
-# 后继只接受准确旧实例已死及稳定已结责任；缺birth/未知native/混MP应沿原入口恢复，不能删标记或补闭封。
-# MP→0与MP改数量仍不支持；配置保存不等于拓扑已经生效。
+# 多进程拓扑已退役；此键仅保留用于加载旧配置，0 表示单进程。
+# 大于 0 时启动先执行一次单进程迁移（与 my-agent gateway migrate-single-process 相同），再按单进程服务。
 gateway_worker_process_count: 0
+
+# 规模 worker 的 owner 快照模式。full 为原有整目录恢复与整表替换；delta_compat 在保留 PG advisory 锁的同时启用租约行与增量清单（滚动升级期间新旧 Pod 混跑用）；delta 只用租约行与增量清单。只能按 full→delta_compat→delta 顺序升级。
+scale_owner_snapshot_mode: full
 # Gateway运行目录；留空使用当前owner规范工作区，显式相对路径也按该工作区解析。
 gateway_workspace: ""
 # 停止后台服务时最多等它多久自己退出，超时就强制结束。
@@ -544,7 +544,7 @@ gateway_request_timeout: 300
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts：processing 租约实际卡死的累计失败上限，默认 2 即首次重排、再次卡死归档 failed。
 #   服务重启接续同一回合不占失败次数；旧 attempts 只记执行代次。0 表示不卡死次数上限，未知副作用门不放宽。
-# 每个用户同时处理的请求上限，默认128；超出的请求排队，仍受下面的全局上限约束。
+# 每个用户同时处理的请求上限，默认128；也作为事件中心每个主题的订阅者上限，超出请求仍排队。
 gateway_user_inflight_limit: 128
 # 后台服务同时最多处理多少个请求（所有会话加在一起）。
 # 一般远远用不到；只有在同一台机器上跑很多并发任务、或想限制资源占用时才需要调小。
@@ -590,7 +590,12 @@ background_admin_threads_per_owner: 64
 owner_agent_pool_max_agents: 128
 # 用户实例连续空闲多久后释放（秒，0=关闭）；在途执行或持久任务/唤醒仍保留。
 # 身份、会话、记忆保存在磁盘；新消息按需重建。被动状态轮询不延长空闲时间。
+# 同时作为事件中心主题的空闲逐出时间。
 owner_agent_idle_seconds: 60.0
+# 是否启用 owner 激活代次栅栏。激活时代次总是加 1 并记录在认领上；true 时带旧代次的认领与终态写入被拒绝（STALE_OWNER_EPOCH），为迁移和故障转移做准备；false 时只记录不拦截。改文件后下一次终态写入即生效，不用重启。
+owner_epoch_fence_enabled: false
+# 会话 Actor 调度线程数，0~64。0 表示关闭，stop/steer/受理沿用原锁路径；大于 0 时每个会话一个邮箱，控制消息先于新提问处理。改动需重启 Gateway。
+conversation_actor_workers: 0
 # 用户显式添加的图片/视频：单条消息原始附件总字节上限与数量上限。
 # 历史仅保存引用；同一字节上限也约束每次模型请求，较旧附件超预算时只发归档引用。
 # 模型和接口仍须支持对应模态，不自动换模型。
@@ -607,7 +612,10 @@ input_image_max_pixels: 40000000
 # 清理超过期限的全部非promoted状态，包括pending_review、approved但未晋升、blocked_*、observed、rejected、expired、superseded；
 # 保留版本绑定墓碑，不把陈旧候选清理等同于删除正式记忆。
 # 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
+# 同时作为常开定时器的一致性兜底扫描与墙钟重采样间隔。
 owner_maintenance_scan_interval_seconds: 60
+# 磁盘级 owner 唤醒发现整轮扫完后的休眠间隔（秒），30~86400，默认 120 与原行为一致。定时器提示常开，到期唤醒不靠这轮扫描，可调大（Cell 模板为 1800），扫描只做一致性兜底。改动需重启 Gateway。
+background_owner_wake_rescan_seconds: 120
 # CLI/TUI 等待 Gateway 就绪的最长秒数。TUI 会先显示连接状态再后台探测；默认 3 秒，
 # 避免 Gateway 未启动时让用户面对长时间空白或无响应。
 gateway_ready_timeout_seconds: 3
@@ -643,6 +651,9 @@ gateway_per_user_owner_scoping: true
 # 需要确认的工具会在聊天里提示，回复 `/approve <密码>` 批准本次、`/deny` 拒绝。群聊永远不匹配。
 # 没设密码时不会有任何绑定；设为 false 时 /admin 拒绝，已有绑定不生效（文件保留）。只在 base owner 为 local/main 时可用。
 admin_channel_identity_enabled: true
+
+# Cell 部署的边缘身份要求。true 时携带部署凭据（gateway_auth_token）的请求必须带唯一且非空的 X-User-Id 与 X-Channel，且最终角色不能是管理员，否则返回 403；本机终端改用本机 G1 凭据。false 为原有单机行为。改文件后下一个请求即生效，不用重启；飞书回调进程在重启前沿用启动时的凭据。
+gateway_edge_identity_required: false
 
 # 网关 HTTP 绑定地址。默认 127.0.0.1(仅本机可达)。
 # 改成 0.0.0.0 等非回环地址会把网关暴露到网络,此时必须 auth_enabled=true,否则 fail-closed 拒绝启动
@@ -858,6 +869,9 @@ provider_max_concurrent_requests: 0
 responses_ws_idle_ttl_seconds: 300
 # Responses会话WebSocket进程内空闲连接池最大保留连接数（0至256，0表示关闭连接复用）。
 responses_ws_max_idle_connections: 32
+
+# 主模型 HTTP 调用（Chat Completions/Anthropic 兼容接口）每条线路保留的空闲长连接上限，0~256。0 表示不复用连接（原行为）；大于 0 时同一服务商线路的回合复用 TCP/TLS 连接，空闲超过 60 秒自动关闭。
+model_http_max_idle_connections: 0
 
 
 # HTTP 基础超时秒数：非流式请求把它当总时长下限；流式请求把它当首包后的滚动空闲窗口。
@@ -1241,6 +1255,10 @@ gateway_http_control_lane_workers: 10
 # 正在输出token的连接移交给流池，尽快归还普通HTTP请求线程；飞书消息不占用此池。
 # 每用户仍受inflight额度约束；保存后重启Gateway生效，不改变已建立连接。
 gateway_native_stream_max: 128
+# 请求事件中心每个主题保留的最近事件条数，0~65536。0 表示关闭事件中心，派发、投递、TUI 与通知继续按原节奏轮询；大于 0 时写入后即时唤醒等待方，事件只带游标不带正文。改动需重启 Gateway。
+gateway_event_hub_ring_events: 0
+# 事件中心开启后的兜底轮询间隔（秒），0~60，覆盖派发、渠道投递和通知长轮询。0 表示保持各循环原有间隔；事件中心关闭时不生效。漏掉一次唤醒时最多多等这么久。改动需重启 Gateway。
+gateway_event_fallback_poll_seconds: 0.0
 # HTTP socket 阶段超时，单位秒，0.1..300；宿主参数，与请求排队超时分开，重启加载。
 gateway_http_socket_timeout_seconds: 5.0
 # HTTP 请求等待线程名额的超时，单位秒，0.01..300；宿主参数，重启加载。

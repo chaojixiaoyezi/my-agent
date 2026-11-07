@@ -239,12 +239,13 @@ def read_gateway_terminal_envelope_report(
 
 # LLM: Only a validated canonical envelope may be unwrapped as a response. Load/corruption errors
 # remain typed client failures rather than being mistaken for missing or successful completion.
-# 函数用途: 从通过校验的唯一终态归档取出完整最终答复。
+# 函数用途: 读取唯一终态；仅显式要求已存在时报告归档丢失，默认保留轮询等待语义。
 def read_gateway_terminal_response_file(
     terminal_path: Path,
     *,
     request_id: str | None = None,
     context: str = "gateway.terminal.read",
+    require_exists: bool = False,
 ) -> dict[str, Any]:
     path = Path(terminal_path)
     expected_id = str(request_id or path.stem).strip()
@@ -259,6 +260,12 @@ def read_gateway_terminal_response_file(
             report.load_error,
             request_id=expected_id,
         )
+    if require_exists and not report.payload:
+        return {
+            "id": expected_id, "ok": False, "status": "state_lost",
+            "error_code": "GATEWAY_TERMINAL_STATE_LOST",
+            "user_error": "Gateway 终态归档已丢失，无法读取最终结果；请核对归档或备份，不要自动重放请求。",
+        }
     terminal_response = report.payload.get("terminal_response")
     return dict(terminal_response) if isinstance(terminal_response, dict) else {}
 

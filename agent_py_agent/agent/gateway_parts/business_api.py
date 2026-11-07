@@ -773,6 +773,10 @@ def native_business_context(handler, server):
             if bool(getattr(base.config, 'business_spaces_enabled', False)) else None))
     # 路径句柄仅供可信只读适配器关联原生push；不接受JSON路径，也不因此授予其它owner权限。
     host.business_v13_gateway_paths = server.paths
+    from .request_event_hub import hub_for_paths
+    hub = hub_for_paths(server.paths)
+    if hub is not None:
+        host.business_event_signal_factory = lambda: hub.signal(("owner", home.owner_id))
 
     # LLM: 只读列表复用 W1 规范 helper；server 与 scope 绑定当前认证请求，不由业务参数选 owner。
     # 函数用途: 给业务会话列表绑定本次请求的原生读取入口。
@@ -968,7 +972,7 @@ def handle_client_business_stream(handler, server):
                 return
         stream = import_module('agent_py_agent.agent.gateway_parts.business_event_stream').stream_business_events(
             request, authenticated_context=context,
-            services=services if ticket is None else stream_services_view(services, ticket))
+            services=stream_services_view(services, ticket))
         iterator = stream.events()
         event_schema = standalone_schema({'$ref': '#/$defs/EventView'})
         try:

@@ -13,10 +13,12 @@ and a stale worker is fenced from committing.
 
 from __future__ import annotations
 
+import sys
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker
+from contextvars import Context
 
 
 class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
@@ -24,7 +26,7 @@ class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
 
     # LLM: This mirrors CPython's worker creation except that recovery-safe
     # jobs use daemon workers and skip the interpreter-wide join registry.
-    # 中文说明：这里沿用 CPython 的线程池创建逻辑，只把可由持久租约恢复的任务放到
+    # 函数用途: 沿用 CPython 的线程池创建逻辑，只把可由持久租约恢复的任务放到
     # daemon 线程，并且不登记到解释器退出时的全局等待表，防止卡死调用拖住服务重启。
     def _adjust_thread_count(self) -> None:
         if self._idle_semaphore.acquire(timeout=0):
@@ -56,11 +58,17 @@ class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
                 self._initializer,
                 self._initargs,
             )
+        # 3.14t 默认继承触发扩容的请求上下文；显式空上下文避免跨 owner 复用和保留引用。
+        # 3.12 没有 context 参数，继续沿用原来的空出生上下文。
+        thread_kwargs = {}
+        if hasattr(sys.flags, "thread_inherit_context"):
+            thread_kwargs["context"] = Context()
         thread = threading.Thread(
             name=f"{self._thread_name_prefix or self}_{thread_count}",
             target=_worker,
             args=worker_args,
             daemon=True,
+            **thread_kwargs,
         )
         thread.start()
         self._threads.add(thread)

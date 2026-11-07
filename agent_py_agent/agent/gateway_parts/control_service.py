@@ -258,6 +258,23 @@ def _ordinary_input_control_result(scope, turn_id, *, queued=False, error_code='
 
 # LLM: 外层持原Gateway T/turn M/task/claim；所有正count/message_id写者以原纯公式取同input T，仅try并持到append末写，既有ordinary冲突不从receipt抄摘要。
 # 函数用途: 与G0原input T→M→queue CAS互斥；queue先则不append，append先则canonical迫使G0延期。
+def _control_command_decision(paths, scope, kind, turn_id, *, agent=None):
+    """邮箱只排版本；返回时短门已释放，调用者随后自行进入原 T。"""
+    from ..conversation.conversation_actor import Steer, Stop
+    from .request_worker import gateway_conversation_scheduler
+
+    scheduler = gateway_conversation_scheduler(paths, agent)
+    if scheduler is None:
+        return None
+    key = "\x1f".join((scope.user_id, scope.channel, scope.conversation_id))
+    command = (Stop if kind == "stop" else Steer)(scope.user_id, key, turn_id)
+    return scheduler.sequencer, key, scheduler.sequencer.decide(command)
+
+
+def _control_decision_current(token):
+    return token is None or token[0].check_still_current(token[1], token[2].expected_seq)
+
+
 def _append_ordinary_input_guidance(store, paths, scope, payload, turn_id, deadline):
     from ..common.json_io import check_io_deadline
     from ..runtime_errors import DataCorruptionError
@@ -270,11 +287,14 @@ def _append_ordinary_input_guidance(store, paths, scope, payload, turn_id, deadl
     ordinary_id = str(scope.metadata.get('gateway_input_request_id') or '')
     if not request_id or ordinary_id and ordinary_id != request_id:
         return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_CONFLICT', input_request_id=request_id)
+    decision = _control_command_decision(paths, scope, "steer", turn_id)
     try:
         check_io_deadline(deadline)
         with try_gateway_turn_transition(paths, request_id) as acquired:
             if not acquired:
                 return _ordinary_input_control_result(scope, turn_id, error_code='BlockingIOError', input_request_id=request_id)
+            if not _control_decision_current(decision):
+                return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_UNCONFIRMED', input_request_id=request_id)
             check_io_deadline(deadline)
             report = read_json_file_report(inputs.gateway_input_receipt_path(paths, request_id),
                 context='gateway.control.input_disposition.read', blocking=False, deadline=deadline)
@@ -422,7 +442,10 @@ def reconcile_gateway_steer_delivery(
         return None
     # A crash may leave the wrapper operation after executing but before append_guidance_once.
     # Re-read the exact receipt while holding T so a concurrent append/terminal cannot be missed.
+    decision = _control_command_decision(paths, scope, "steer", turn_id, agent=agent)
     with gateway_turn_transition(paths, turn_id):
+        if not _control_decision_current(decision):
+            return None
         try:
             receipt = _active_turn_steer_receipt(agent, command, scope)
         except Exception:
@@ -654,13 +677,20 @@ def execute_gateway_conversation_control(
                 delivery_status="rejected",
             )
     if command.kind == "status":
+        from ..concurrency.lock_order import lockdep_snapshot
+
         status = _gateway_task_status(agent, paths, scope, active)
+        diagnostics = lockdep_snapshot()
+        message = render_conversation_task_status(status)
+        if diagnostics["violations"] or diagnostics["handler_overruns"]:
+            message += f"\n锁顺序违反：{diagnostics['violations']}；邮箱处理超时：{diagnostics['handler_overruns']}。"
         return ConversationControlResult(
             "status",
             True,
-            render_conversation_task_status(status),
+            message,
             request_id=_record_id(active),
             status=status,
+            details={"lockdep": diagnostics},
         )
     if active is None:
         message = (
@@ -1931,8 +1961,11 @@ def _steer_active_request(
     target_type = "task" if active.target_kind == "task" else "request"
     turn_id = _active_turn_request_id(active)
     deadline = _ordinary_input_control_deadline(paths, scope)
+    decision = _control_command_decision(paths, scope, "steer", turn_id, agent=base_agent)
     try:
         with gateway_turn_transition(paths, turn_id):
+            if not _control_decision_current(decision):
+                return _execution_changed_result("steer", turn_id)
             expected_turn_id = _steer_expected_turn_id(scope)
             if expected_turn_id and expected_turn_id != turn_id:
                 return ConversationControlResult(
@@ -2160,7 +2193,10 @@ def _reconcile_existing_steer_receipt(
     turn_id = str(expected_turn_id or "").strip()
     if not turn_id:
         return _unknown_existing_steer_result(receipt, "")
+    decision = _control_command_decision(paths, scope, "steer", turn_id)
     with gateway_turn_transition(paths, turn_id):
+        if not _control_decision_current(decision):
+            return _unknown_existing_steer_result(receipt, turn_id)
         with receipt.store.guidance.ledger.turn_guard(turn_id), ExitStack() as guards:
             if receipt.entry.target_type == "task":
                 from .input_delivery_service import _input_target_lifecycle
@@ -2422,7 +2458,10 @@ def _stop_live_window_request(
         owner_agent = None
         store = None
     binding, binding_error = {}, ""
+    decision = _control_command_decision(paths, scope, "stop", request_id, agent=base_agent)
     with gateway_turn_transition(paths, request_id):
+        if not _control_decision_current(decision):
+            return _execution_changed_result("stop", request_id)
         with execution_scope_guard(paths, store, scope) as matches:
             if not matches:
                 return _execution_changed_result("stop", request_id)
@@ -2562,7 +2601,10 @@ def _mark_request_stopping(
     request_root = processing_dir.parent
     root = request_root.parent if request_root.name == "requests" else request_root
     paths = gateway_paths_from_root(root)
+    decision = _control_command_decision(paths, scope, "stop", _record_id(active))
     with gateway_turn_transition(paths, _record_id(active)):
+        if not _control_decision_current(decision):
+            return False, "当前任务刚刚结束，无需停止。"
         return _mark_request_stopping_locked(active, scope)
 
 
@@ -2837,7 +2879,11 @@ def _fresh_stop_runtime_binding(
     request_id = _record_id(record)
     request_root = record.path.parent.parent
     root = request_root.parent if request_root.name == "requests" else request_root
-    with gateway_turn_transition(gateway_paths_from_root(root), request_id):
+    paths = gateway_paths_from_root(root)
+    decision = _control_command_decision(paths, scope, "stop", request_id)
+    with gateway_turn_transition(paths, request_id):
+        if not _control_decision_current(decision):
+            return None
         report = read_json_file_report(record.path)
         if (report.load_error or not _request_matches_scope(report.payload, scope)
                 or _record_id(_GatewayRequestRecord(record.path, report.payload)) != request_id

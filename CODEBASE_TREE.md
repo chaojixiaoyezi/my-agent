@@ -1,3 +1,17 @@
+## 2026-11-06 Stage 2 配置接线与已合入模块
+
+```text
+agent_py_agent/
+|-- agent/
+|   |-- conversation/conversation_actor.py  # 会话邮箱和控制优先调度，读取部署线程数
+|   |-- scheduler/timer_service.py          # 常开到期唤醒提示，扫描仍为一致性兜底
+|   `-- user_space/owner_epoch.py           # owner代次戳及终态写入实时栅栏
+`-- tests/test_s2_int_stage2_parameters.py   # 五键加载/范围/权限与真实终态热刷新回归
+deploy/cell-template/agent_config.cell.yaml # 五键的Cell部署值，不改变出厂默认
+```
+
+事件中心与MP退役切片并行实施，不把未合入文件列为当前源码。MP删除集合应在S2-W6合入后对照其`legacy_mp_migration/RESPONSIBILITY_MAP.md`核验；本片没有删除MP模块。
+
 ## 2026-11-06 SP1 原生沙箱启动器、1s 自适应降权与 12 项网关/并发预装迁移
 
 本轮合入档位 1（`SP1-W1` 原生 C 沙箱预执行助手 + 预构建 Landlock 规则集 FD、`SP1-W2` 1 秒长耗时命令自适应 nice 降权）以及 `GW-PRESETS-12`（12 项网关/池子/后台并发默认值与 `.run` 安装器升级配置自动迁移）：

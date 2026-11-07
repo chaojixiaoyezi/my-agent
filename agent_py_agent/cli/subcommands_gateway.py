@@ -176,6 +176,26 @@ def _add_gateway_run_subcommand(gateway_sub):
 
     gateway_status = gateway_sub.add_parser("status", help="查看 gateway 状态")
     gateway_status.set_defaults(func=cmd_gateway_status)
+    migration = gateway_sub.add_parser('migrate-single-process', help='证明旧执行者退出后迁移为单进程')
+    migration.add_argument('--dry-run', action='store_true', help='只读预览，不创建锁、日志或目录')
+    migration.set_defaults(func=cmd_gateway_migrate_single_process)
+
+
+def cmd_gateway_migrate_single_process(args):
+    """离线命令和启动使用同一迁移入口，不启动服务、不修改配置。"""
+    import json
+
+    from ..agent.gateway_parts.legacy_mp_migration import run_single_process_migration
+    from ..agent.gateway_parts.standalone_lifecycle import StandaloneLifecycleUnavailable
+    from .gateway_coordinated_run import _cold_gateway_paths, coordinated_refusal
+
+    try:
+        result = run_single_process_migration(_cold_gateway_paths(args), dry_run=args.dry_run)
+    except (StandaloneLifecycleUnavailable, OSError, ValueError) as error:
+        return coordinated_refusal(getattr(error, 'error_code', 'GATEWAY_STANDALONE_SOURCE_UNPROVEN'),
+                                   reason=str(error))
+    print(json.dumps(result, sort_keys=True))
+    return 0
 
 
 # LLM: 只声明原请求与结果读取选项，解析不投递任务。

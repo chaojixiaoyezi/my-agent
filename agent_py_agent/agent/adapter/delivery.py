@@ -1402,6 +1402,7 @@ class GatewayReplyDeliveryWorker(
         receipt_callbacks: GatewayReplyReceiptCallbacks | None = None,
         poll_interval: float = 1.0,
         lease: GatewayClaimLeaseConfig | None = None,
+        event_hub=None,
     ) -> None:
         receipt_callbacks = receipt_callbacks or GatewayReplyReceiptCallbacks()
         lease = lease or GatewayClaimLeaseConfig()
@@ -1421,6 +1422,8 @@ class GatewayReplyDeliveryWorker(
         self._claim_ttl = lease.ttl_seconds
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._event_hub = event_hub
+        self._hub_subscriptions = {}
         self._state_lock = threading.Lock()
         self._run_lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -1484,7 +1487,9 @@ class GatewayReplyDeliveryWorker(
             return 0
         try:
             now = time.time()
-            delivered = sum(self._process_record(record, now) for record in self.store.pending())
+            records = list(self.store.pending())
+            self._sync_hub_subscriptions(records)
+            delivered = sum(self._process_record(record, now) for record in records)
             try:
                 self.store.maintain_sent_receipts(now=now)
             except InterruptedError:
@@ -1619,8 +1624,28 @@ class GatewayReplyDeliveryWorker(
             )
             return False
 
+    # LLM: Subscribe before canonical rereads using only the existing wake Event; hints never authorize delivery, mutate claims or enter callbacks under the hub lock.
+    # 函数用途: 为待回送请求绑定有界订阅，收口或中心切换后释放旧订阅。
+    def _sync_hub_subscriptions(self, records):
+        hub = self._event_hub() if callable(self._event_hub) else self._event_hub
+        wanted = {record.request_id for record in records if record.request_id}
+        for request_id in tuple(self._hub_subscriptions):
+            old_hub, subscription = self._hub_subscriptions[request_id]
+            if request_id not in wanted or old_hub is not hub:
+                subscription.close()
+                del self._hub_subscriptions[request_id]
+        if hub is not None:
+            for request_id in wanted:
+                if len(self._hub_subscriptions) >= hub.topic_capacity:
+                    break
+                if request_id not in self._hub_subscriptions:
+                    self._hub_subscriptions[request_id] = (hub, hub.subscribe(("request", request_id), wake_event=self._wake))
+
+    # LLM: Clear before the durable tick, never after; a commit during the tick remains visible to the following wait.
+    # 函数用途: 有通知提前对账，无通知按原间隔兜底，结束时释放全部订阅。
     def _run(self) -> None:
         while not self._stop.is_set():
+            self._wake.clear()
             # LLM: 单轮意外异常（例如持续落盘失败时 release_claim 抛错）不能让投递线程静默退出——
             #   线程一死，之后所有通道回复都停了，而且没有任何信号。这里记 warning 并按轮询间隔退避后继续，
             #   既保留可观测性又不打满 CPU；停止请求仍然生效。
@@ -1635,7 +1660,9 @@ class GatewayReplyDeliveryWorker(
             except Exception as exc:  # noqa: BLE001 投递线程必须活着，异常只记录不上抛
                 self._log_loop_error(exc)
             self._wake.wait(self._poll_interval)
-            self._wake.clear()
+        for _, subscription in self._hub_subscriptions.values():
+            subscription.close()
+        self._hub_subscriptions.clear()
 
     # LLM: 同类异常按时间窗限频：轮询约每秒一轮，持续失败时不能一秒一条 warning 刷日志；
     #   窗口内相同异常只累计计数，下一次真正记录时先输出被抑制的次数。只在投递线程内调用，不加锁。

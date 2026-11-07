@@ -3,6 +3,8 @@ from __future__ import annotations
 
 """JSON payload helpers for the local status command."""
 
+import sys
+import sysconfig
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -55,10 +57,16 @@ class StatusPayloadContext:
     surviving_background_sessions: int = 0
 
 
+# LLM: Build the CLI status snapshot; read this interpreter's live GIL state on every call.
+# 函数用途: 汇总状态，并区分解释器是否支持自由线程与此刻是否实际开启 GIL。
 def build_status_payload(ctx: StatusPayloadContext) -> dict:
     return {
         "agent_name": ctx.agent.config.agent_name,
         "workspace_root": str(ctx.agent.root),
+        "interpreter": {
+            "gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
+            "free_threaded_build": bool(sysconfig.get_config_var("Py_GIL_DISABLED")),
+        },
         "gateway": _gateway_payload(ctx),
         "local_store": ctx.local_stats,
         "subagents": _subagents_payload(ctx),

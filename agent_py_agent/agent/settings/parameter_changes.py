@@ -54,6 +54,7 @@ from .user_config_capability import (
 
 # CLI 与内层写服务共享此边界；进入作用域不能放行其他 SOURCE_AGENT 安全项。
 CLI_DEPLOYMENT_WRITABLE_KEYS = frozenset({
+    "gateway_edge_identity_required", "owner_epoch_fence_enabled",
     "feishu_app_id", "feishu_app_secret", "feishu_verification_token",
     "feishu_encrypt_key", "feishu_callback_port",
 })

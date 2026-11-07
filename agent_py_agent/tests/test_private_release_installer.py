@@ -53,17 +53,36 @@ custom_unknown_key: "keep-me"
 
 # LLM: 只在临时prefix造既有配置与本次发行模板，不启动安装或服务。
 # 函数用途: 准备真实initialize_data升级分支的输入。
-def _prepare(tmp_path, config_text=_OLD_CONFIG, template=_TEMPLATE):
+def _prepare(tmp_path, config_text=_OLD_CONFIG, template=_TEMPLATE, *, python_dir="python3.11"):
     prefix = tmp_path / "app"
     config_dir = prefix / "data/config"
     config_dir.mkdir(parents=True)
     config = config_dir / "agent_config.yaml"
     config.write_text(config_text, encoding="utf-8")
     release = tmp_path / "release"
-    package = release / "runtime/lib/python3.11/site-packages/agent_py_agent/config"
+    package = release / "runtime/lib" / python_dir / "site-packages/agent_py_agent/config"
     package.mkdir(parents=True)
     (package / "agent_config.yaml").write_text(template, encoding="utf-8")
     return prefix, release, config
+
+
+# LLM: 模板和既有配置都在临时目录；同时验证首装与旧配置迁移，不依赖系统解释器版本。
+# 函数用途: 检查3.11/3.12/3.14/3.14t布局的配置模板都真正参与安装。
+@pytest.mark.parametrize("python_dir", ["python3.11", "python3.12", "python3.14", "python3.14t"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_initialize_data_resolves_bundled_runtime_template(tmp_path, python_dir, existing):
+    prefix, release, config = _prepare(tmp_path, python_dir=python_dir)
+    if not existing:
+        config.unlink()
+    installer.initialize_data(prefix, release)
+    text = config.read_text(encoding="utf-8")
+    assert _value(text, "gateway_port") == "18420"
+    assert _value(text, "gateway_http_control_lane_workers") == "10"
+    assert _value(text, "gateway_native_stream_max") == "128"
+    assert config.stat().st_mode & 0o777 == 0o600
+    if existing:
+        assert 'model_name: "user-choice"' in text
+        assert 'gateway_workspace: "/custom/workspace"' in text
 
 
 # LLM: 只读取顶层标量，重复键返回None，不能把重复追加误当通过。
