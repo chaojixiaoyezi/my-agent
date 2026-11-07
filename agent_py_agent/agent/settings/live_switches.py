@@ -13,7 +13,7 @@ from .memory import MemorySettings
 from .runtime_guard_config import RuntimeGuardPolicy, runtime_guard_policy
 
 DEPLOY_LIVE_SWITCH_KEYS = frozenset({
-    "gateway_edge_identity_required",
+    "gateway_edge_identity_required", "owner_epoch_fence_enabled",
     "admin_channel_identity_enabled", "audit_enabled", "auth_enabled",
     "daemon_mutate_state", "daemon_start_runners", "enable_gateway_memory_diagnostics",
     "feishu_bot_subscriptions_enabled", "feishu_cli_backend_enabled",

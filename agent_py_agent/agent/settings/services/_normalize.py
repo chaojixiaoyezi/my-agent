@@ -255,6 +255,31 @@ class ModelFieldsService:
         return out, warnings
 
 
+# LLM: 仅声明clamp元数据的字段采用夹取；类型错误/非有限数回默认，范围仍取唯一schema，不改变旧旋钮的越界回默认语义。
+# 函数用途: 在原Gateway归一链内规范有界数值并保留明确告警，不读写文件。
+def _normalize_clamped_numeric_fields(out: dict[str, object], defaults: object) -> list[str]:
+    warnings: list[str] = []
+    for item in _central_numeric_fields(type(defaults)):
+        if not item.metadata.get("clamp"):
+            continue
+        key, default = item.name, getattr(defaults, item.name)
+        coerce = CoercionService.coerce_int if item.type in (int, "int") else CoercionService.coerce_float
+        try:
+            value, warning = coerce(key, out.get(key), default)
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("non-finite number")
+            lower, upper = item.metadata["bounds"]
+            bounded = max(lower, value) if lower is not None else value
+            bounded = min(upper, bounded) if upper is not None else bounded
+            if bounded != value:
+                warning = f"{key}: 超出允许范围{lower}..{upper}；夹取为{bounded}"
+            out[key] = bounded
+        except (TypeError, ValueError, OverflowError):
+            out[key], warning = default, f"{key}: 非法类型或非有限数；使用默认值"
+        _append_warning(warnings, warning)
+    return warnings
+
+
 # LLM: 宿主拓扑只接受严格非bool的非负整数；新池共用dataclass范围，其它字段保留原告警与默认合同。
 # 类用途: 校验宿主拓扑并归一队列、连接、实例寿命和媒体预算，不让非法数量悄悄回落单进程。
 class GatewayFieldsService:
@@ -265,6 +290,9 @@ class GatewayFieldsService:
         ("gateway_global_inflight_limit", 1, None),
         ("gateway_http_control_lane_workers", 0, 128),
         ("gateway_native_stream_max", 0, 4096),
+        ("gateway_event_hub_ring_events", 0, 65536),
+        ("conversation_actor_workers", 0, 64),
+        ("background_owner_wake_rescan_seconds", 30, 86400),
         ("gateway_processing_timeout_seconds", 30, None),
         ("gateway_request_max_attempts", 0, None),
         ("gateway_port", 0, 65535),
@@ -277,12 +305,13 @@ class GatewayFieldsService:
         ("input_image_max_pixels", 1, None),
     )
     _FLOAT_FIELD_SPECS = (
+        ("gateway_event_fallback_poll_seconds", 0.0, 60.0),
         ("owner_agent_idle_seconds", 0.0, None),
         ("background_idle_owner_max_backoff_seconds", 0.0, None),
     )
 
-    # LLM: 纯计算，不启动服务；拓扑复用公开启动的严格校验，新池接受非负有界整数，不改写合法宿主数量。
-    # 函数用途: 校验宿主拓扑后按原合同归一网关容量。
+    # LLM: 纯计算，不启动服务；clamp字段先按schema夹取再走原范围链；拓扑仍严格校验，旧池越界合同不变。
+    # 函数用途: 校验宿主拓扑并归一网关容量，收集原类型及范围告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -291,7 +320,8 @@ class GatewayFieldsService:
         out["gateway_worker_process_count"] = validate_gateway_worker_process_count(
             out.get("gateway_worker_process_count", defaults.gateway_worker_process_count)
         )
-        warnings = _apply_int_fields(out, defaults, GatewayFieldsService._INT_FIELD_SPECS)
+        warnings = _normalize_clamped_numeric_fields(out, defaults)
+        warnings.extend(_apply_int_fields(out, defaults, GatewayFieldsService._INT_FIELD_SPECS))
         warnings.extend(_apply_float_fields(out, defaults, GatewayFieldsService._FLOAT_FIELD_SPECS))
         return out, warnings
 
@@ -428,7 +458,7 @@ _RUNTIME_BOOL_FIELDS = (
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning", "enable_self_map", "self_learning_include_background",
-    "audit_enabled", "gateway_edge_identity_required",
+    "audit_enabled", "gateway_edge_identity_required", "owner_epoch_fence_enabled",
 )
 
 

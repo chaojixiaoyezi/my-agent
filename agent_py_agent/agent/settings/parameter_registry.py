@@ -55,6 +55,8 @@ _HOST_CAPACITY_KEYS = frozenset({
 })
 DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
+    "gateway_event_hub_ring_events", "gateway_event_fallback_poll_seconds", "conversation_actor_workers",
+    "owner_epoch_fence_enabled", "background_owner_wake_rescan_seconds",
     "max_background_agents",
     "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",
     "my_agent_owner_id", "workspace_task_path_template", "memory_path", "local_store_path", "local_store_files_dir",
@@ -358,8 +360,8 @@ def _capability_specs() -> dict[str, ParameterSpec]:
     return specs
 
 
-# LLM: 进程内缓存一次；host_only仍不登记，容量字段可见但部署只读；新范围和单位取构造/归一共用metadata，不开放热更新。
-# 函数用途: 返回用户可见的参数登记表，并按唯一schema投影集中参数的范围和单位。
+# LLM: 进程内缓存一次；host_only仍不登记，部署只读；范围/单位及显式生效时机取schema，未声明effect的旧参数时机不变。
+# 函数用途: 从唯一schema投影参数目录；生效时机只作回执，不授予写权限或执行热刷新。
 @lru_cache(maxsize=1)
 def parameter_registry() -> dict[str, ParameterSpec]:
     descriptions = _yaml_descriptions()
@@ -377,7 +379,7 @@ def parameter_registry() -> dict[str, ParameterSpec]:
             key=item.name, default=default, value_type=value_type,
             description=descriptions.get(item.name, ""), category=category_for(item.name),
             safety=classify_safety(item.name, value_type), masked=is_masked(item.name),
-            effect=TUNABLE_KEYS[item.name].effect if item.name in TUNABLE_KEYS else EFFECT_GATEWAY_RESTART,
+            effect=item.metadata.get("effect", TUNABLE_KEYS[item.name].effect if item.name in TUNABLE_KEYS else EFFECT_GATEWAY_RESTART),
             common=item.name in COMMON_KEYS,
             unit=item.metadata.get("unit", unit_for_key(item.name)),
             range=item.metadata.get("range", _range_text(*item.metadata["bounds"]) if "bounds" in item.metadata else range_texts.get(item.name, "")),
@@ -510,6 +512,15 @@ def _compact_output_reserve(config: object) -> dict[str, object]:
 
 # 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。
 _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
+    "gateway_event_fallback_poll_seconds": (
+        lambda config: getattr(config, "gateway_event_fallback_poll_seconds", 0.0)
+        if getattr(config, "gateway_event_hub_ring_events", 0) > 0 else 0,
+        "只在事件中心开启时生效",
+    ),
+    "gateway_worker_process_count": (
+        lambda config: 0,
+        "多进程拓扑已退役：大于 0 时启动先执行一次迁移，然后按单进程运行",
+    ),
     "gateway_http_control_lane_workers": (
         lambda config: config.gateway_http_control_lane_workers,
         "配置容量预览：0关闭独立控制车道，正数为独立线程上限；保存后重启Gateway加载，未探测当前实例",
