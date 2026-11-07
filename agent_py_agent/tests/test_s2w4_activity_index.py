@@ -147,7 +147,11 @@ def test_index_first_discovery_matches_full_sweep_and_preserves_unknown(tmp_path
         binding.close()
 
 
+# LLM: 观察Path的目录枚举边界，避免把Python版本选择listdir/scandir的细节当成发现合同。
+# 函数用途: 验证相邻页只枚举一次bucket，结构变化仍立即重建。
 def test_bound_discovery_reuses_topology_within_a_page_budget(tmp_path, monkeypatch):
+    from pathlib import Path
+
     from agent_py_agent.agent import owner_wake_discovery as discovery
     owners = tmp_path / "owners"
     bucket = owners / "providers/feishu/users"
@@ -156,24 +160,31 @@ def test_bound_discovery_reuses_topology_within_a_page_budget(tmp_path, monkeypa
     index = OwnerActivityIndex(tmp_path / "activity.sqlite3")
     binding = discovery.bind_owner_activity_index(owners, index, sweep_seconds=1800, freshness_seconds=60)
     calls = []
-    original = discovery.os.listdir
+    original = Path.iterdir
 
-    def listdir(path):
-        if str(path) == str(bucket):
+    def iterdir(path):
+        if path == bucket:
             calls.append(path)
-        return original(path)
+        yield from original(path)
 
-    monkeypatch.setattr(discovery.os, "listdir", listdir)
+    monkeypatch.setattr(Path, "iterdir", iterdir)
     try:
         cursor, seen = None, set()
         while True:
             page = discovery.discover_owner_home_page(owners, limit=4, after_cursor=cursor)
-            seen.update(target.identity.owner_id for target in page.targets)
+            page_ids = {target.identity.owner_id for target in page.targets}
+            assert page.scanned <= 4 and len(page.targets) <= 4
+            assert seen.isdisjoint(page_ids)
+            seen.update(page_ids)
             cursor = page.next_cursor
             if cursor is None:
                 break
-        assert len(seen) == 40
+        assert seen == {str(value) for value in range(40)}
         assert len(calls) == 1
+        (bucket / "new").mkdir()
+        page = discovery.discover_owner_home_page(owners, limit=64)
+        assert {target.identity.owner_id for target in page.targets} == seen | {"new"}
+        assert len(calls) == 2
     finally:
         binding.close()
 

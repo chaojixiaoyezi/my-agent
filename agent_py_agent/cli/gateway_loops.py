@@ -160,7 +160,7 @@ def _cold_curator_precheck(supervisor, owner) -> tuple[str, bool]:
 # LLM: GatewayRunContext 拥有唯一长生命周期基础代理组合根，基础所有者控制器及请求车道均须复用它；所有者隔离仍由OwnerScopedAgentPool负责。
 # 函数用途: 取得 Gateway 启动时已经初始化好的基础智能体，禁止后台线程再次加载配置并构造整套智能体。
 def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
-    agent = context.agent
+    agent = getattr(context, "agent", None)
     if agent is None:
         raise RuntimeError("GatewayRunContext 缺少已初始化的 agent")
     return agent
@@ -192,7 +192,7 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
         if coordinator_background_required(getattr(context, "control_plane", None), paths,
                 getattr(context, "coordinator_worker_count", 0)):
             _require_coordinator_loop_source(context)
-            if context.agent is None:
+            if getattr(context, "agent", None) is None:
                 from .gateway_coordinator_request_pump import CoordinatorMetadataRequestPump
 
                 dispatcher = CoordinatorMetadataRequestPump(context, paths)
@@ -341,7 +341,7 @@ def _record_request_loop_exit(context: GatewayRunContext, stage: str, error: Bas
         return
     _print_gateway_loop_error(stage, "dispatcher", error)
     log_gateway_event(
-        context.agent,
+        getattr(context, "agent", None),
         "gateway_request_loop_exited",
         {"status": "exited", "pid": os.getpid(), "stage": stage, **loop_health.snapshot()},
     )
@@ -668,9 +668,9 @@ class _RequestDispatcher:
 # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
 # 函数用途: 把共享活跃owner登记表绑定到隔离Agent，不复制其它owner业务状态。
 def _attach_shared_owner_registry(agent: SimpleAgent, context: GatewayRunContext) -> None:
-    """把共享活跃 owner 登记表(挂在 context.agent 上)同步给本 worker 的隔离 agent。best-effort。"""
+    """把基础代理上的共享活跃 owner 登记表同步给本 worker 的隔离 agent。best-effort。"""
     try:
-        agent._active_owner_registry = shared_active_owner_registry(context.agent)
+        agent._active_owner_registry = shared_active_owner_registry(getattr(context, "agent", None))
     except Exception as exc:
         _print_gateway_loop_error("gateway_request_worker.owner_registry", "owner-registry", exc)
 
@@ -917,16 +917,19 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
     except Exception as exc:
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
-    hints = _OwnerWakeHints(context)
-    hints.bind_controller("runtime_wake", supervisor)
-    hints.start()
+    # 旧组合缝可提供supervisor而不携带agent；没有基础代理就不物化提示设施。
+    hints = _OwnerWakeHints(context) if getattr(context, "agent", None) is not None else None
+    if hints is not None:
+        hints.bind_controller("runtime_wake", supervisor)
+        hints.start()
     reconcile_thread = _start_orphan_reconcile_loop(context, stop_event)
     maintenance_thread = _start_owner_maintenance_loop(context, stop_event)
     scheduler_due_thread = _start_scheduler_due_loop(context, stop_event)
     try:
         _run_background_main_ticks(supervisor, stop_event, poll_interval)
     finally:
-        hints.close()
+        if hints is not None:
+            hints.close()
         _shutdown_background_main(
             supervisor,
             (reconcile_thread, maintenance_thread, scheduler_due_thread),
@@ -1024,7 +1027,7 @@ def _start_owner_maintenance_loop(
         return None
     if controller.interval <= 0:
         return None
-    hints = getattr(context.agent, "_owner_wake_hints", None)
+    hints = getattr(getattr(context, "agent", None), "_owner_wake_hints", None)
     if hints is not None:
         hints.bind_controller("maintenance", controller)
     thread = threading.Thread(
@@ -1048,7 +1051,7 @@ def _start_scheduler_due_loop(
     except Exception as exc:
         _print_gateway_loop_error("gateway_scheduler_due.initialize", "scheduler-due", exc)
         return None
-    hints = getattr(context.agent, "_owner_wake_hints", None)
+    hints = getattr(getattr(context, "agent", None), "_owner_wake_hints", None)
     if hints is not None:
         hints.bind_controller("scheduler_due", controller)
     thread = threading.Thread(
@@ -1571,7 +1574,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._channels = self._base_agent.delivery_service
         self._base_scheduler = _build_background_scheduler(self._base_agent, self._channels)
         self.poll_interval = _background_main_poll_interval()
-        self._registry = shared_active_owner_registry(context.agent)
+        self._registry = shared_active_owner_registry(getattr(context, "agent", None))
         self._owner_pool: object | None = None
         # 已登记普通账号的受管派单由独立准入受管池承载；原普通池对其拒绝保持不变，容量共享。
         self._managed_owner_pool: object | None = None
@@ -2393,7 +2396,7 @@ class _GatewaySchedulerDueController:
         self._startup_started_at = time.monotonic()
         self._legacy_repair_done = False
         self._base_agent = _gateway_agent_from_context(context)
-        self._registry = shared_active_owner_registry(context.agent)
+        self._registry = shared_active_owner_registry(getattr(context, "agent", None))
         repository = getattr(self._base_agent, "scheduler_repository", None)
         due_index = getattr(repository, "due_index", None)
         self._due_index = due_index or SchedulerDueIndex(
@@ -2488,7 +2491,7 @@ class _GatewayOrphanReconciler:
     def __init__(self, context: GatewayRunContext) -> None:
         self._coordinator_requests = _coordinator_request_context(context)
         self._base_agent = _gateway_agent_from_context(context)
-        self._registry = shared_active_owner_registry(context.agent)
+        self._registry = shared_active_owner_registry(getattr(context, "agent", None))
         self._owner_pool: object | None = None
         self._discovery_cursor: OwnerWakeCursor | None = None
         self.interval = max(
@@ -2852,7 +2855,7 @@ class _RecoverThrottle:
 # 函数用途: Gateway 主进程的心跳线程主体，stop_event 置位后退出。
 def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     paths = context.paths
-    agent = context.agent
+    agent = getattr(context, "agent", None)
 
     backoff = LoopErrorBackoff()
     site = _LoopSite("heartbeat", "gateway_heartbeat.write", "heartbeat")
