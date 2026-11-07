@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -343,3 +344,23 @@ def collect_audit_window(request: AuditRead, project: Callable):
         return _scan_window(_new_window(request, project, cursor), paths, cursor)
     except _AuditRescan:
         return _scan_window(_new_window(request, project, None), paths, None)
+
+
+# LLM: 仅显式操作员确认同一owner目录与预期游标；不掩盖损坏，不改持久Curator状态。
+# 函数用途: 接受已丢失的审计定位缺口，返回存活分片的有界输入，仍由原提交链推进游标。
+def accept_missing_audit_cursor_gap(
+    request: AuditRead, project: Callable, *, expected_root: Path, expected_cursor: str,
+):
+    if (request.root.resolve() != Path(expected_root).resolve()
+            or not isinstance(expected_cursor, str) or not expected_cursor.strip()
+            or request.target != expected_cursor):
+        raise ValueError("audit gap owner or cursor mismatch")
+    rows, errors = collect_audit_window(request, project)
+    if len(errors) != 1 or errors[0].get("error_code") != "AUDIT_CURSOR_MISSING":
+        return rows, errors
+    rows, errors = collect_audit_window(replace(request, target=""), project)
+    if not errors:
+        logging.getLogger(__name__).warning(
+            "AUDIT_CURSOR_GAP_ACCEPTED root=%s expected_cursor=%r", request.root, expected_cursor,
+        )
+    return rows, errors
