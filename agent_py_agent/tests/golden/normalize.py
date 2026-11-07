@@ -43,13 +43,13 @@ def normalize(trace):
     child_labels = {}
     dates = {}
 
-    # LLM: 调用方仅传入本事件测试根后的路径；必须有后续斜线，不能把末段日期文件名当目录。
+    # LLM: 只处理本事件测试根下的日期目录或带扩展名日期文件，裸日期末段仍可比较。
     # 函数用途: 按首次出现顺序保留路径日期的相等和不同关系。
     def fixture_dates(match):
         def label(segment):
             day = segment.group()
             return dates.setdefault(day, f"date#{len(dates) + 1}")
-        return match.group(1) + re.sub(r"(?<=/)\d{4}-\d{2}-\d{2}(?=/)", label, match.group(2))
+        return match.group(1) + re.sub(r"(?<=/)\d{4}-\d{2}-\d{2}(?=[/.])", label, match.group(2))
 
     # LLM: Each namespace retains a bijection including references embedded in provider messages.
     # 函数用途: Assign one stable label to each generated identity.
@@ -82,7 +82,7 @@ def normalize(trace):
             collect(json.loads(output["content"]), stream)
     ordinals = {stream: {stamp: index + 1 for index, stamp in enumerate(sorted(stamps))} for stream, stamps in clocks.items()}
 
-    # LLM: 日期只在本事件声明的fixture根路径内处理；源码日期、伪根文本与末段文件名保持可比较。
+    # LLM: 日期只在本事件声明的fixture根路径内处理；源码日期、伪根文本与普通文件名保持可比较。
     # 函数用途: Preserve provider prompt text while making its generated labels repeatable.
     def text(value, event, *, tool_header=False):
         root = event.get("fixture_root")
@@ -127,7 +127,9 @@ def normalize(trace):
             value = header + separator + payload
         value = re.sub(r"(?<=nonce )[0-9a-f]{16}", lambda match: identity("probe_nonce", match.group()), value)
         # Rendered workspace clock snapshots are independent metadata substreams, not lifecycle clocks.
-        value = re.sub(r"(current_local_(?:date|year|time): )\d{4}(?:-\d{2}-\d{2})?(?: \d{2}:\d{2}:\d{2})?",
+        # 生产端使用 %Z；旧基线已替换日期但仍带时区，也须归入同一幂等表示。
+        value = re.sub(r"(current_local_(?:date|year|time): )(?:\d{4}(?:-\d{2}-\d{2})?(?: \d{2}:\d{2}:\d{2})?|timestamp#1)"
+                       r"(?: (?:[A-Za-z]+|[+-]\d{2}(?::?\d{2})?))?",
                        r"\1timestamp#1", value)
         # Range endpoints share a substream so an inverted or collapsed interval stays observable.
         # LLM: Both endpoints retain their shared temporal ordering and equality relation.

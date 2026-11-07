@@ -531,3 +531,43 @@ def test_checkout_root_moves_keep_relative_source_identity():
     changed[0]["source_root"] = "/checkout-two"
     assert normalize(first) == normalize(moved)
     assert normalize(first) != normalize(changed)
+
+
+@pytest.mark.parametrize("zone", ["PST", "UTC", "+04", "+0530", "+05:30", "-0800"])
+def test_rendered_clock_zones_normalize_without_changing_lifecycle_order(zone):
+    """生产端 %Z 的缩写或数字时区都是快照元数据，不是生命周期时序。"""
+    def snapshot(clock):
+        trace = provider_message_trace(
+            "- current_local_date: 2026-11-06\n- current_local_year: 2026\n"
+            f"- current_local_time: {clock}\n")
+        trace[0].update(started_at=10, finished_at=20)
+        return trace
+
+    normalized = normalize(snapshot(f"2026-11-06 23:38:58 {zone}"))
+    assert normalized == normalize(snapshot("2026-11-07 07:38:58 UTC"))
+    assert normalized == normalize(snapshot(f"timestamp#1 {zone}"))
+    assert "current_local_time: timestamp#1\n" in normalized[0]["body"]["messages"][0]["content"]
+    assert normalized[0]["started_at"] < normalized[0]["finished_at"]
+    reversed_clock = snapshot(f"2026-11-06 23:38:58 {zone}")
+    reversed_clock[0]["finished_at"] = 5
+    assert normalize(reversed_clock) != normalized
+    assert normalize(normalized) == normalized
+
+
+def test_fixture_date_file_stems_are_bijective_before_body_hashing():
+    """测试根内日期文件名跨日等价，但同一回放内不同日期仍可区分。"""
+    def event(first, second):
+        trace = provider_message_trace(
+            f"/tmp/fixture/audit/{first}.jsonl /tmp/fixture/audit/{second}.jsonl "
+            f"/tmp/fixture/audit/{first}.jsonl")
+        trace[0]["fixture_root"] = "/tmp/fixture"
+        return trace
+
+    raw = event("2026-11-06", "2026-11-07")
+    normalized = normalize(raw)
+    assert normalized == normalize(event("2027-01-01", "2027-01-02"))
+    assert normalize(event("2026-11-06", "2026-11-06")) != normalized
+    content = normalized[0]["body"]["messages"][0]["content"]
+    assert content.count("date#1.jsonl") == 2 and content.count("date#2.jsonl") == 1
+    assert normalize(normalized) == normalized
+    assert "2026-11-06.jsonl" in raw[0]["body"]["messages"][0]["content"]
