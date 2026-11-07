@@ -4,19 +4,22 @@ from __future__ import annotations
 
 """Single owner-scoped Skill discovery, policy, cache, and snapshot service."""
 
+import errno
 import hashlib
 import json
 import os
 import stat
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError, Future
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
+from weakref import WeakKeyDictionary, WeakValueDictionary
 
-from ..common.cache_freshness import cache_entry_trustworthy
+from ..common.cache_freshness import CACHE_TRUST_AGE_SECONDS, cache_entry_trustworthy
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
 from ..settings.defaults import owner_agent_slot_count
 from ..user_space.owner_policy import EffectiveOwnerPolicy
@@ -38,6 +41,12 @@ from .skills import (
     split_skill_frontmatter,
 )
 
+try:
+    from ..common import cache_capacity
+except ImportError:
+    # R0 尚未合入时沿用已有并发容量计算；合入后只消费它的统一推导口。
+    cache_capacity = None
+
 # 扫描技能目录的最大深度，防止递归过深。
 _MAX_SCAN_DEPTH = 6
 # 每个根目录下最多收录的技能个数。
@@ -48,6 +57,8 @@ _NAME_MAX_CHARS = 128
 _DESCRIPTION_MAX_CHARS = 1024
 _PROCESS_SKILL_DIR_CACHE: dict[tuple[str, str], SkillManifestItem] = {}
 _PROCESS_BUILTIN_ROOT_CACHE: dict[tuple, _SkillTreeState] = {}
+# 旧的独立签名读口没有服务宿主，状态只随调用方仍持有的 SkillRoot 存活。
+_ROOT_SIGNATURE_STATES: WeakKeyDictionary[SkillRoot, dict] = WeakKeyDictionary()
 _PROCESS_SKILL_CACHE_LOCK = threading.RLock()
 # 服务内发现入口：服务调用 _build_manifest 时设置，按根合流发现并复用未变私有目录；直接调用时为空，行为不变。
 _SERVICE_ROOT_DISCOVERY: ContextVar[Callable[[SkillRoot], tuple[list, list]] | None] = ContextVar(
@@ -60,6 +71,10 @@ _PROCESS_SKILL_CACHE_MAX_BYTES = 16 * 1024 * 1024
 _PROCESS_ROOT_CACHE_MAX_ENTRIES = 128
 # 进程内内置技能根树状态缓存允许记录的最大路径总数上限。
 _PROCESS_ROOT_CACHE_MAX_PATHS = 65536
+# 未登记容量时沿用现有配置默认值，不再新增一份数值配置。
+_SERVICE_CACHE_MAX_ENTRIES = owner_agent_slot_count(None)
+# 旧宿主可替换 guard 读口；这类显式钩子继续保留原来的即时复核语义。
+_STATIC_SKILL_GUARD = evaluate_skill_guard_gate
 
 
 # LLM: 根路径与来源共同参与发现优先级和缓存身份；该值对象不自行解析路径或授予读取权限。
@@ -86,14 +101,13 @@ class SkillManifestItem:
     freeze_error: SkillLoadError | None = None
 
 
-# LLM: stat包含全部guard资源及目录；命中仍逐项复核，不能仅信根mtime来忽略后代改写。
-#   settled=列名时每个目录mtime都已离开2秒窗口(读前冻结)；只有这种清单才能给可编辑根复用。
-# 类用途: 缓存目录清单与摘要，省去重复rglob/列目录而不省略变更检测。
+# 完整目录清单、摘要及校验时刻同次冻结；短窗口外仍按原目录稳定性规则复核。
 @dataclass(frozen=True)
 class _SkillTreeState:
     stats: tuple[tuple, ...]
     digest: str
     settled: bool = False
+    validated_at: float = 0.0
 
 
 # LLM: part 是该根在根集合签名里的完整分量(路径/来源 + 全部后代 stat 摘要或不可变代次)，一致才可复用。
@@ -133,23 +147,32 @@ class SkillsService:
         self.workspace_root = Path(workspace_root).expanduser().resolve(strict=False)
         self.policy_provider = policy_provider
         self._extra_roots: tuple[Path, ...] = ()
-        # (owner, 工作区) → (根集合签名, 内容键, 根集合, 快照)；按最久未用淘汰，上限为该 Owner 的并发代理槽位
-        # (宿主按 owner_agent_slot_count 传入，缺省按同一公式取配置默认值)，配置内的并发工作区互不挤掉。
+        # 缺失的工作区根不参与身份，相同技能树共用一份内容，工作区仅在出口绑定。
         self._cache: OrderedDict[tuple[str, str], tuple[str, str, tuple[SkillRoot, ...], SkillSnapshot]] = OrderedDict()
-        self._capacity = cache_entries if type(cache_entries) is int and cache_entries > 0 else owner_agent_slot_count(None)
+        self._cache_floor = cache_entries if type(cache_entries) is int and cache_entries > 0 else _SERVICE_CACHE_MAX_ENTRIES
         # _manifest_cache 是最近一次使用的 (roots, signature, manifest, errors)。
         self._manifest_cache: tuple | None = None
-        # 按根发现结果、按内容共享的快照及私有根目录状态只被 _cache 条目引用时保留(引用计数归零即释放)。
-        self._roots: dict[SkillRoot, _RootManifest] = {}
+        # 内容缓存和清单缓存共同持有根引用，最后一个引用释放时回收该根的发现结果。
+        self._roots: OrderedDict[SkillRoot, _RootManifest] = OrderedDict()
+        self._manifests: OrderedDict[tuple[SkillRoot, ...], tuple] = OrderedDict()
         self._root_refs: dict[SkillRoot, int] = {}
         self._contents: dict[str, SkillSnapshot] = {}
         self._content_refs: dict[str, int] = {}
-        self._trees: dict[str, tuple[tuple, _SkillTreeState]] = {}
+        self._root_states: OrderedDict[str, tuple[tuple, _SkillTreeState]] = OrderedDict()
+        # 兼容已有宿主观察口，只有 _root_states 持有真实状态。
+        self._trees = self._root_states
+        # 弱引用保留在途工作区投影的对象身份，历史工作区不再占内容缓存槽。
+        self._workspace_snapshots: WeakValueDictionary[tuple[str, str], SkillSnapshot] = WeakValueDictionary()
         # 同键发现/快照构建合流；换代(clear/force/改根)后开始的构建才登记结果。
         self._builds: dict[tuple, Future] = {}
         self._generation = 0
         self._force_manifest_reload = False
+        self._learning_state: str | None = None
         self._lock = threading.RLock()
+
+    @property
+    def _capacity(self) -> int:
+        return cache_capacity.owner_agents(self._cache_floor) if cache_capacity is not None else self._cache_floor
 
     # LLM: 新根集合须同时清除快照与stat缓存，不能跨来源复用旧manifest。
     # 函数用途: 设置宿主额外根并使发现缓存失效。
@@ -176,13 +199,16 @@ class SkillsService:
         self._cache.clear()
         self._manifest_cache = None
         self._roots.clear()
+        self._manifests.clear()
         self._root_refs.clear()
         self._contents.clear()
         self._content_refs.clear()
-        self._trees.clear()
+        with _PROCESS_SKILL_CACHE_LOCK:
+            self._root_states.clear()
+        self._workspace_snapshots.clear()
         self._generation += 1
 
-    # LLM: 只有stat命中才复用旧快照；目录/guard资源变化即使正文hash相同也须重建，包/策略仍逐次核对。
+    # 根签名按校验窗口复用；已检测到的目录或资源变化仍须重建，包和策略每次核对。
     # 函数用途: 创建或复用当前 owner 的逐轮快照，并单独报告能力包发现错误。
     def snapshot_for(
         self,
@@ -195,34 +221,39 @@ class SkillsService:
         if not policy.skills_enabled:
             # 总闸关闭：空快照（来源名单是细粒度控制，总闸是 effective flag——对称 memory_policy）
             return _build_snapshot((), (), policy, workspace)
+        from .skill_learning_versions import freeze_learned_snapshot, learning_state_fingerprint
+        learning_state = learning_state_fingerprint(self.home_paths)
+        with self._lock:
+            # 托管发布有明确版本事实，不能让新的 registry 搭配窗口内的旧正文。
+            if self._learning_state is not None and self._learning_state != learning_state:
+                self._reset_locked()
+                self._force_manifest_reload = True
+            self._learning_state = learning_state
         roots = self._skill_roots(workspace, policy)
         manifest, discovery_errors, signature, content, generation = self._manifest_for(roots, force_reload=force_reload)
         packages, package_errors = self._packages()
         discovery_errors.extend(package_errors)
-        from .skill_learning_versions import freeze_learned_snapshot, learning_state_fingerprint
         limit = self.learning_recommended_limit_provider()
-        learning = learning_state_fingerprint(self.home_paths) + str(limit)
+        learning = learning_state + str(limit)
         fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace, packages) + learning
-        cache_key = (policy.owner_id, str(workspace))
+        shared_fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, Path(), packages) + learning
+        content_key = content + shared_fingerprint
+        cache_key = (policy.owner_id, signature)
         with self._lock:
             cached = None if force_reload else self._cache.get(cache_key)
             if cached is not None:
                 self._cache.move_to_end(cache_key)
-        # 同一工作区只在完整根签名(含guard资源stat)与指纹都没变时复用；目录/guard资源变了即使正文hash相同也重建。
-        if cached is not None and cached[0] == signature and cached[3].fingerprint == fingerprint:
-            return cached[3]
-        # 内容键 = 有内容根的签名分量 + 不含工作区的指纹：多个工作区/worktree 内容相同时共用一次构建与同一批冻结条目，
-        # 只各自换上工作区与指纹(条目都已冻结，快照构造不再读盘)。
-        content_key = content + _snapshot_fingerprint(manifest, discovery_errors, policy, Path(), packages) + learning
+        if cached is not None and cached[1] == content_key:
+            return self._bind_workspace(cached[3], workspace, fingerprint, content_key)
 
         def build() -> SkillSnapshot:
             with self._lock:
                 ready = None if force_reload else self._contents.get(content_key)
             if ready is not None:  # 上一位领头者刚登记完：直接共用
                 return ready
-            built = _build_snapshot(manifest, discovery_errors, policy, workspace, packages)
+            built = _build_snapshot(manifest, discovery_errors, policy, Path(), packages)
             built = freeze_learned_snapshot(built, self.home_paths, recommended_limit=limit)
-            built = replace(built, fingerprint=fingerprint)
+            built = replace(built, fingerprint=shared_fingerprint)
             with self._lock:
                 if self._generation == generation:
                     self._contents[content_key] = built
@@ -232,22 +263,29 @@ class SkillsService:
             shared = None if force_reload else self._contents.get(content_key)
         if shared is None:
             shared = build() if force_reload else self._shared(("content", content_key, generation), build)
-        snapshot = (shared if shared.workspace_root == str(workspace) and shared.fingerprint == fingerprint
-                    else replace(shared, workspace_root=str(workspace), fingerprint=fingerprint))
+        snapshot = self._bind_workspace(shared, workspace, fingerprint, content_key)
         with self._lock:
             if self._generation == generation:
-                value = (signature, content_key, roots, snapshot)
+                value = (signature, content_key, roots, shared)
                 self._contents.setdefault(content_key, shared)
                 self._hold_locked(value, 1)
                 previous = self._cache.pop(cache_key, None)
                 self._cache[cache_key] = value
                 if previous is not None:
                     self._hold_locked(previous, -1)
-                while len(self._cache) > self._capacity:
-                    self._hold_locked(self._cache.popitem(last=False)[1], -1)
+                self._trim_caches_locked()
         return snapshot
 
-    # LLM: 调用方持服务锁；工作区条目是按根结果、内容快照与私有目录状态的唯一持有者，引用归零即一并释放。
+    def _bind_workspace(self, snapshot: SkillSnapshot, workspace: Path, fingerprint: str, content_key: str) -> SkillSnapshot:
+        with self._lock:
+            key = (content_key, str(workspace))
+            bound = self._workspace_snapshots.get(key)
+            if bound is None:
+                bound = replace(snapshot, workspace_root=str(workspace), fingerprint=fingerprint)
+                self._workspace_snapshots[key] = bound
+            return bound
+
+    # 调用方持服务锁；内容缓存撤销自己的根引用，不会提前释放清单缓存仍持有的根。
     # 函数用途: 登记或撤销一个工作区缓存条目对根结果与内容快照的引用。
     def _hold_locked(self, value: tuple, delta: int) -> None:
         _signature, content, roots, _snapshot = value
@@ -257,6 +295,9 @@ class SkillsService:
         else:
             self._content_refs.pop(content, None)
             self._contents.pop(content, None)
+        self._hold_roots_locked(roots, delta)
+
+    def _hold_roots_locked(self, roots: tuple[SkillRoot, ...], delta: int) -> None:
         for root in roots:
             count = self._root_refs.get(root, 0) + delta
             if count > 0:
@@ -264,9 +305,21 @@ class SkillsService:
                 continue
             self._root_refs.pop(root, None)
             released = self._roots.pop(root, None)
-            self._trees.pop(str(root.path), None)
-            for directory in (released.keyed if released is not None else ()):
-                self._trees.pop(directory, None)
+            with _PROCESS_SKILL_CACHE_LOCK:
+                self._root_states.pop(str(root.path), None)
+                for directory in (released.keyed if released is not None else ()):
+                    self._root_states.pop(directory, None)
+
+    def _trim_caches_locked(self) -> None:
+        capacity = self._capacity
+        while len(self._cache) > capacity:
+            self._hold_locked(self._cache.popitem(last=False)[1], -1)
+        while len(self._manifests) > capacity:
+            released, _ = self._manifests.popitem(last=False)
+            self._hold_roots_locked(released, -1)
+        with _PROCESS_SKILL_CACHE_LOCK:
+            while len(self._root_states) > capacity:
+                self._root_states.popitem(last=False)
 
     # LLM: 同键并发只构建一次，其余调用等同一结果或原异常；构建在服务锁外，锁只护登记表。领头者被中断时各自重建。
     # 函数用途: 合并同一根发现或同一内容快照的并发构建。
@@ -296,10 +349,8 @@ class SkillsService:
         future.set_result(result)
         return result
 
-    # LLM: 仅宿主显式承诺不可变的公开根可按generation热命中；默认可编辑根仍核全部guard资源，force/clear必重扫。
-    #   按根复用：根的签名分量(全部后代stat)不变才复用该根发现结果，变了只重读身份变化的私有Skill目录；同根同分量
-    #   并发只发现一次。私有根目录状态只存本服务(随Owner实例释放)，进程级缓存只放builtin/shared公开树。
-    #   force/clear清空全部根与快照，保持"下一次各工作区都重读正文与guard"。磁盘I/O都在服务锁外。
+    # 标准根按完整校验时刻限频；显式挂载、guard 钩子和宿主代次保留旧合同，force/clear 必须重扫。
+    # 根发现仍合流；私有状态随服务释放，进程仅保留 builtin 树，磁盘 I/O 不占服务锁。
     # 函数用途: 返回当前根集合的manifest、错误、完整签名、只含有内容根的内容签名及所用缓存代次。
     def _manifest_for(self, roots: tuple[SkillRoot, ...], *, force_reload: bool):
         generations = getattr(self.home_paths, 'immutable_skill_root_generations', {})
@@ -312,9 +363,20 @@ class SkillsService:
             generation = self._generation
         if force:
             _invalidate_public_skill_cache(roots)
-        parts = {root: _root_signature_part(root, generations, self._trees) for root in roots}
+        immediate_roots = set(self._extra_roots)
+        custom_guard = evaluate_skill_guard_gate is not _STATIC_SKILL_GUARD
+        # 未接能力包版本读口的旧插件宿主，维持逐轮现场发现的原合同。
+        legacy_plugin_host = self.plugin_roots is not None and self.package_provider is None
+        parts = {root: _root_signature_part(root, generations, self._root_states,
+                 validate=custom_guard or legacy_plugin_host or root.path in immediate_roots) for root in roots}
         signature = hashlib.sha256(b"".join(parts.values())).hexdigest()
         with self._lock:
+            self._trim_caches_locked()
+            cached = self._manifests.get(roots)
+            if cached is not None and cached[0] == signature:
+                self._manifests.move_to_end(roots)
+                self._manifest_cache = (roots, signature, list(cached[1]), cached[2])
+                return list(cached[1]), list(cached[2]), signature, cached[3], generation
             found = {root: self._roots.get(root) for root in roots}
         missing = tuple(root for root in roots if found[root] is None or found[root].part != parts[root])
         if missing:
@@ -334,7 +396,13 @@ class SkillsService:
         errors = [error for result in results for error in result.errors]
         content = hashlib.sha256(b"".join(result.part for result in results if result.items or result.errors)).hexdigest()
         with self._lock:
-            self._manifest_cache = (roots, signature, manifest, tuple(errors))
+            if self._generation == generation:
+                self._manifest_cache = (roots, signature, manifest, tuple(errors))
+                previous = self._manifests.pop(roots, None)
+                self._manifests[roots] = (signature, tuple(manifest), tuple(errors), content)
+                if previous is None:
+                    self._hold_roots_locked(roots, 1)
+                self._trim_caches_locked()
         return manifest, errors, signature, content, generation
 
     # LLM: 分量一致直接复用；否则同根同分量合流成一次发现，私有根把上一版目录身份交给发现以复用未变目录。
@@ -353,13 +421,15 @@ class SkillsService:
             if ready is not None and ready.part == part:  # 上一位领头者刚登记完：直接共用
                 return ready
             keyed: dict[str, tuple[tuple[str, str], SkillManifestItem]] = {}
-            items, errors = _discover_root(root, previous=previous, keyed=keyed, tree_cache=self._trees)
+            items, errors = _discover_root(root, previous=previous, keyed=keyed, tree_cache=self._root_states)
             result = _RootManifest(part, tuple(items), tuple(errors), keyed)
             with self._lock:
                 if self._generation == generation:
                     self._roots[root] = result
-                    for directory in previous.keys() - keyed.keys():
-                        self._trees.pop(directory, None)
+                    self._roots.move_to_end(root)
+                    with _PROCESS_SKILL_CACHE_LOCK:
+                        for directory in previous.keys() - keyed.keys():
+                            self._root_states.pop(directory, None)
             return result
 
         return self._shared(("root", root, part, generation), discover)
@@ -403,24 +473,30 @@ class SkillsService:
         return _dedupe_roots(roots)
 
 
-# LLM: 只有宿主Home投影显式提供的不可变builtin/shared代次可免全树stat，默认不信任根mtime或磁盘自报token。
-#   tree_cache 是服务自有的私有根目录状态表；不传时沿进程级表(直接调用与测试的原行为)。
-# 函数用途: 按不可变发布代次或可编辑根完整stat计算来源指纹，撤销代次立即退回完整复核。
+# 独立签名读口保留立即复核语义；代次参数仅兼容已有显式宿主，不作为正常热路径的开关。
 def _roots_signature(roots: tuple[SkillRoot, ...], *, immutable_generations=None, tree_cache=None) -> str:
     generations = immutable_generations if isinstance(immutable_generations, dict) else {}
-    return hashlib.sha256(b"".join(_root_signature_part(root, generations, tree_cache) for root in roots)).hexdigest()
+    parts = []
+    for root in roots:
+        cache = tree_cache
+        if cache is None and root.source != "builtin":
+            with _PROCESS_SKILL_CACHE_LOCK:
+                cache = _ROOT_SIGNATURE_STATES.setdefault(root, {})
+        parts.append(_root_signature_part(root, generations, cache, validate=True))
+    return hashlib.sha256(b"".join(parts)).hexdigest()
 
 
-# LLM: 与原逐根update的字节序列一致，整组签名值不变；私有根状态进服务自有表，公开根仍用进程级表。
+# 来源和真实存在的路径参与身份；缺失根为空分量，不能让工作区名称挤占内容缓存。
 # 函数用途: 计算单个根在根集合签名里的分量，供整组签名与按根复用共用。
-def _root_signature_part(root: SkillRoot, generations: dict, tree_cache: dict | None) -> bytes:
+def _root_signature_part(root: SkillRoot, generations: dict, tree_cache: dict | None, *, validate: bool = False) -> bytes:
     head = repr((str(root.path), root.source)).encode()
     generation = generations.get(str(root.path)) if root.source in {'builtin', 'shared'} else None
     if isinstance(generation, str) and generation:
         # 根替换/删除仍实时失效；内容不可变性是宿主安装发布合同，不适用于workspace/owner/plugin。
         return head + repr(('immutable-release', generation, _path_stat_signature(root.path))).encode()
-    private = tree_cache if root.source not in {"builtin", "shared"} else None
-    return head + _skill_tree_state(root.path, builtin=root.source == "builtin", cache=private).digest.encode()
+    private = tree_cache if root.source != "builtin" else None
+    state = _skill_tree_state(root.path, builtin=root.source == "builtin", cache=private, validate=validate)
+    return head + state.digest.encode() if state.digest else b""
 
 
 # LLM: 文件/链接两种身份、权限及纳秒时间参与指纹；读不到时保留errno，中断不吞掉。
@@ -444,36 +520,51 @@ def _path_stat_signature(path: Path) -> tuple:
         return str(path), type(exc).__name__, exc.errno
 
 
-# LLM: 命中复核全部stat；未命中逐目录稳定枚举，最多三次重试，不能发表漏项但带新目录stat的清单。
-#   builtin沿原规则缓存；可编辑根(owner/workspace/shared/plugin)只缓存settled清单：同片时间戳内的
-#   追加不会改目录mtime，列名时已离开2秒窗口的目录之后任何增删必改stat，命中复核即可发现。
-#   cache 是调用方自有的路径 → (键, 状态) 表(私有根随服务释放)；不传时用进程级表。
-# 函数用途: 复用目录清单，检测子文件改写和枚举期间增删，不无限重试。
-def _skill_tree_state(path: Path, *, builtin: bool = False, cache: dict | None = None) -> _SkillTreeState:
+# 完整根校验限频，根本身的增删和身份变化仍立即失效；发现正文时 validate=True 保留原前后复核。
+# 非 builtin 只写服务自己的有界表，直接调用不把私有树登记进进程缓存。
+def _skill_tree_state(
+    path: Path, *, builtin: bool = False, cache: dict | None = None, validate: bool = False,
+) -> _SkillTreeState:
     first = _path_stat_signature(path)
-    key = (str(path), first[5], first[1]) if len(first) >= 7 else None
-    if cache is not None:
-        slot = cache.get(str(path)) if key is not None else None
-        cached = slot[1] if slot is not None and slot[0] == key else None
-    else:
-        with _PROCESS_SKILL_CACHE_LOCK:
-            cached = _PROCESS_BUILTIN_ROOT_CACHE.get(key) if key is not None else None
-    if (cached is not None and (builtin or cached.settled)
-            and all(_path_stat_signature(Path(row[0])) == row for row in cached.stats)):
+    now = time.monotonic()
+    key = first if len(first) >= 7 else None
+    if key is None:
+        digest = "" if first[2] == errno.ENOENT else hashlib.sha256(repr((first,)).encode()).hexdigest()
+        return _SkillTreeState((first,), digest, validated_at=now)
+    with _PROCESS_SKILL_CACHE_LOCK:
+        if cache is not None:
+            slot = cache.get(str(path)) if key is not None else None
+            cached = slot[1] if slot is not None and slot[0] == key else None
+            if cached is not None and isinstance(cache, OrderedDict):
+                cache.move_to_end(str(path))
+        else:
+            cached = _PROCESS_BUILTIN_ROOT_CACHE.get(key) if builtin and key is not None else None
+    if cached is not None and not validate and 0 <= now - cached.validated_at < CACHE_TRUST_AGE_SECONDS:
         return cached
-    for _ in range(3):
-        scanned = _scan_skill_tree_stats(path)
-        if scanned is not None:
-            break
+    if (cached is not None and (builtin or cached.settled)
+            and all(_path_stat_signature(Path(row[0])) == row for row in cached.stats[1:])):
+        state = replace(cached, validated_at=now)
     else:
-        raise OSError("skill directory changed during stat scan")
-    stats, settled = scanned
-    state = _SkillTreeState(stats, hashlib.sha256(repr(stats).encode()).hexdigest(), settled)
-    if cache is not None:
-        if (builtin or settled) and key is not None:
+        for _ in range(3):
+            scanned = _scan_skill_tree_stats(path)
+            if scanned is not None:
+                break
+        else:
+            raise OSError("skill directory changed during stat scan")
+        stats, settled = scanned
+        digest = "" if len(stats[0]) < 7 and stats[0][2] == errno.ENOENT else hashlib.sha256(repr(stats).encode()).hexdigest()
+        state = _SkillTreeState(stats, digest, settled, now)
+        key = stats[0] if stats and len(stats[0]) >= 7 else None
+    with _PROCESS_SKILL_CACHE_LOCK:
+        if cache is not None and key is not None:
             cache[str(path)] = (key, state)
-    elif (builtin or settled) and key is not None and len(stats) <= _PROCESS_ROOT_CACHE_MAX_PATHS:
-        with _PROCESS_SKILL_CACHE_LOCK:
+            capacity = cache_capacity.owner_agents(_SERVICE_CACHE_MAX_ENTRIES) if cache_capacity is not None else _SERVICE_CACHE_MAX_ENTRIES
+            while len(cache) > capacity:
+                cache.pop(next(iter(cache)))
+        elif builtin and key is not None and len(state.stats) <= _PROCESS_ROOT_CACHE_MAX_PATHS:
+            for old in tuple(_PROCESS_BUILTIN_ROOT_CACHE):
+                if old[0] == str(path) and old != key:
+                    _PROCESS_BUILTIN_ROOT_CACHE.pop(old)
             _PROCESS_BUILTIN_ROOT_CACHE[key] = state
             while (len(_PROCESS_BUILTIN_ROOT_CACHE) > _PROCESS_ROOT_CACHE_MAX_ENTRIES
                    or sum(len(item.stats) for item in _PROCESS_BUILTIN_ROOT_CACHE.values()) > _PROCESS_ROOT_CACHE_MAX_PATHS):
@@ -505,6 +596,10 @@ def _scan_skill_tree_stats(root: Path) -> tuple[tuple[tuple, ...], bool] | None:
 def _invalidate_public_skill_cache(roots: tuple[SkillRoot, ...]) -> None:
     public = {(str(root.path), root.source) for root in roots if root.source in {"builtin", "shared"}}
     with _PROCESS_SKILL_CACHE_LOCK:
+        builtin = tuple(root.path for root in roots if root.source == "builtin")
+        for key in tuple(_PROCESS_BUILTIN_ROOT_CACHE):
+            if any(Path(key[0]).is_relative_to(root) for root in builtin):
+                _PROCESS_BUILTIN_ROOT_CACHE.pop(key)
         for key, item in tuple(_PROCESS_SKILL_DIR_CACHE.items()):
             if (str(item.root.path), item.root.source) in public:
                 _PROCESS_SKILL_DIR_CACHE.pop(key)
@@ -626,8 +721,8 @@ def _skill_directory_key(root: SkillRoot, path: Path) -> tuple[str, str]:
 # LLM: 与 _skill_directory_key 同一身份；私有目录状态进调用方自有表，并报告列名时目录是否已settled。
 # 函数用途: 返回Skill目录缓存身份及其目录状态是否可信。
 def _skill_directory_identity(root: SkillRoot, path: Path, *, tree_cache: dict | None = None) -> tuple[tuple[str, str], bool]:
-    private = tree_cache if root.source not in {"builtin", "shared"} else None
-    state = _skill_tree_state(path.parent, builtin=root.source == "builtin", cache=private)
+    private = tree_cache if root.source != "builtin" else None
+    state = _skill_tree_state(path.parent, builtin=root.source == "builtin", cache=private, validate=True)
     context = root.source, str(root.path), str(path), _derived_category(root.path, path), state.digest
     return (str(path.parent), hashlib.sha256(repr(context).encode()).hexdigest()), state.settled or root.source == "builtin"
 
