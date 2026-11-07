@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -44,6 +46,35 @@ from .store_wake_publication import (
     task_responsibility_guard,
     task_responsibility_report,
 )
+
+try:
+    import fcntl
+except ImportError:  # Windows 沿原锁协议保留 sidecar，不尝试即时删除。
+    fcntl = None
+
+
+def _discard_orphan_lock(json_path: Path) -> None:
+    """只在原锁上非阻塞取得排他权且记录已消失时，尽力回收普通伴生锁。"""
+    if fcntl is None:
+        return
+    lock_path = json_path.with_name(json_path.name + ".lock")
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        opened = os.fstat(descriptor)
+        latest = lock_path.lstat()
+        # 旧 inode 被另一清扫者移除后，不能误删同名的新锁；非常规文件和多链接也保留。
+        if (stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+                and (opened.st_dev, opened.st_ino) == (latest.st_dev, latest.st_ino)
+                and not json_path.exists() and not json_path.is_symlink()):
+            os.unlink(lock_path)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 # LLM: 显式 refs 优先于观察 refs，沿原有值归一，不推断证据真实性。
@@ -212,6 +243,7 @@ class WakeStore:
         self._mark_observations_handled = mark_observations_handled
         self._wake_obj_cache_lock = threading.RLock()
         self._wake_obj_cache: OrderedDict[str, tuple[dict[str, Any], WakeSignal]] = OrderedDict()
+        self._orphan_lock_swept_dirs: set[Path] = set()
         # 毒丸尝试账、结案与重放挂在子对象上；pending 定位与观察结案沿用本类同一实现；
         # 读不出信封时按观察记录上的 wake_signal_id 结观察的回调由 ConversationStore 经 attempts.bind_wake_observation_settler 绑定。
         self.attempts = WakeAttemptStore(
@@ -453,6 +485,7 @@ class WakeStore:
                 self.storage.wake_handled_dir / f"{handled.wake_signal_id}.json", handled.to_dict()
             )
             unlink_quietly(path)
+            _discard_orphan_lock(path)
             remove_task_locator(self.storage, handled)
         if handled.observation_id:
             self._mark_observations_handled([handled.observation_id], now=handled.handled_at)
@@ -476,12 +509,21 @@ class WakeStore:
     def _pending_kind_report(self, kind: str) -> tuple[list[WakeSignal], list[dict[str, Any]]]:
         signals: list[WakeSignal] = []
         load_errors: list[dict[str, Any]] = []
+        directory = self.storage.wake_queue_dir / kind
+        # 旧锁只在本实例首次查询该目录时清扫；后续结案即时回收，热拍不重复扫描历史。
+        with self._wake_obj_cache_lock:
+            if directory not in self._orphan_lock_swept_dirs:
+                for lock_path in directory.glob("*.json.lock"):
+                    json_path = lock_path.with_suffix("")
+                    if not json_path.exists():
+                        _discard_orphan_lock(json_path)
+                self._orphan_lock_swept_dirs.add(directory)
         index = self.storage.indexes.get(f"wake:{kind}")
-        paths = index.ordered_paths(self.storage.wake_queue_dir / kind, "*.json")
+        paths = index.ordered_paths(directory, "*.json")
         use_index = self.storage.indexes.usable(
             index,
             key=f"wake:{kind}",
-            directory=self.storage.wake_queue_dir / kind,
+            directory=directory,
             pattern="*.json",
         )
         for path in paths:
