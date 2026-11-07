@@ -454,8 +454,8 @@ class TestSearchTextTool:
         assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
         assert result.result_envelope["tool_output_policy"]["redaction"] == "default"
 
-    def test_search_text_broad_scope_inherits_matching_artifact_projection(self, tmp_path: Path):
-        """从宽目录搜索命中归档时，也按命中路径传递来源而非看查询文字。"""
+    def test_search_text_broad_scope_skips_archives_but_explicit_scope_keeps_projection(self, tmp_path: Path):
+        """宽根跳过 blobs；显式搜索归档子树时，仍按命中路径传递外部来源。"""
         workspace = tmp_path / "workspace"
         artifact = workspace / "work" / "blobs" / "tool_outputs" / "web_fetch-demo.txt"
         artifact.parent.mkdir(parents=True)
@@ -466,8 +466,14 @@ class TestSearchTextTool:
         result = tool.execute({"query": "needle", "path": str(workspace)})
 
         assert result.ok is True
-        assert "web_fetch-demo.txt" in result.output
+        assert "web_fetch-demo.txt" not in result.output
         assert "ordinary.txt" in result.output
+        assert "tool_output_policy" not in result.result_envelope
+
+        result = tool.execute({"query": "needle", "path": str(artifact.parent)})
+        assert result.ok is True
+        assert "web_fetch-demo.txt" in result.output and "external needle" in result.output
+        assert "ordinary.txt" not in result.output
         assert result.result_envelope["tool_output_policy"]["trust"] == "external_data"
         assert result.result_envelope["tool_output_policy"]["redaction"] == "default"
 

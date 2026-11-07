@@ -37,7 +37,11 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
     analyze_command,
     evaluate_command_policy,
 )
-from agent_py_agent.agent.path_access_policy import PathAccessPolicy, agent_home_root_for_owner
+from agent_py_agent.agent.path_access_policy import (
+    PathAccessPolicy,
+    agent_home_root_for_owner,
+    owner_home_containing,
+)
 
 from ..attempt.sandbox import SandboxFactory, SandboxHostPolicy, sandbox_hides_host_paths
 from ..common.cancellation import (
@@ -96,6 +100,8 @@ from .write_boundary import SandboxWriteProtection
 # shell 命令输出默认最多回 12000 字符：防超长输出撑爆工具结果。
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
 _DEFAULT_ACCESS_MODE = "workspace-write"
+# 运行数据宽根的只读递归搜索单独退避，不占满普通命令可能长达数分钟的超时。
+_RUNTIME_SEARCH_MAX_SECONDS = 15
 _ShellSandboxRoots = tuple[
     tuple[Path, ...] | None,
     tuple[Path, ...] | None,
@@ -1012,6 +1018,8 @@ def _build_shell_tool_model_spec(
             "truncated for you, so run tests and checks on their own (&& chains are fine) instead of piping "
             "them into tail/head or joining them with ';': otherwise the exit code is not theirs and the run "
             "is not recorded as verification evidence."
+            " 查找本地文本或文件名优先使用 search_text / find_files；不要在 ~/.my-agent 或 owner_home 根执行"
+            "未排除运行归档的 grep -r / rg / find。可识别的宽根只读搜索最多运行 15 秒，超时后应缩小范围。"
         ),
         input_schema={
             "type": "object",
@@ -1061,6 +1069,7 @@ def _build_shell_tool_model_spec(
             ),
             avoid_when=(
                 "Use read_file / write_file when only file IO is needed.",
+                "本地搜索优先 search_text / find_files：它们默认排除 runs、compact、memory_archive、blobs、.background_jobs、releases 和代码缓存，并返回扫描预算事实。",
                 "Avoid for interactive terminal workflows.",
                 "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers, set run_in_background=true, then use process_session to wait, inspect, or stop it.",
                 "Do not append '; echo $?' or another successful command to inspect status; run_command already reports the final return_code, and such suffixes hide earlier failures.",
@@ -2012,6 +2021,91 @@ def _cleanup_warning_text(return_code: object, termination: object) -> str:
 #   不报成副作用未知、不叫停整轮（2026-09-29：高负载下清理确认超时把正常跑完的前台命令报成未知，连带定时任务停摆）。
 #   超时、取消等退出码拿不到的路径不在这里，仍按原合同报 TOOL_TIMEOUT/unknown。改动时联查 test_shell_foreground_cleanup。
 # 函数用途: 运行前台命令并保留预览与有界采集原文；命令成功也要明确报告未收回的进程资源。
+def _search_command_targets(executable: str, args: tuple[str, ...]) -> list[str] | None:
+    """只解释顶层搜索命令的目标位置，查询文本、选项值和 find 执行动作不能冒充路径。"""
+    if executable == 'find':
+        targets = []
+        for arg in args:
+            if arg in {'-H', '-L', '-P'} or re.fullmatch(r'-O[0-3]', arg):
+                continue
+            if arg.startswith('-') or arg in {'(', '!', ')'}:
+                break
+            targets.append(arg)
+        return targets
+    if executable not in {'grep', 'rg'}:
+        return None
+    if executable == 'rg' and any(arg == '--pre' or arg.startswith('--pre=') for arg in args):
+        return None
+    if executable == 'grep' and not any(
+        arg in {'--recursive', '--dereference-recursive', '--directories=recurse'}
+        or (re.fullmatch(r'-[a-zA-Z]+', arg) and ('r' in arg or 'R' in arg)) for arg in args
+    ):
+        return None
+    values = {'-e', '--regexp', '-f', '--file', '-A', '-B', '-C', '-m', '--after-context',
+              '--before-context', '--context', '--max-count', '--include', '--exclude', '--exclude-dir'}
+    if executable == 'rg':
+        values |= {'-g', '--glob', '--iglob', '-t', '-T', '--type', '--type-not', '--max-depth',
+                   '--ignore-file', '-E', '--encoding', '--engine'}
+    targets = []
+    skip, explicit_pattern, literal_args = False, False, False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg == '--' and not literal_args:
+            literal_args = True
+            continue
+        if arg.startswith('-') and not literal_args:
+            flag = arg.split('=', 1)[0]
+            if flag in {'-e', '--regexp', '-f', '--file'} or arg.startswith(('-e', '-f')):
+                explicit_pattern = True
+            skip = arg in values
+            continue
+        targets.append(arg)
+    return targets if explicit_pattern or (executable == 'rg' and '--files' in args) else targets[1:]
+
+
+def _runtime_search_backoff(tool, command: str, target: Path, timeout: int) -> dict[str, object] | None:
+    """预算只收窄已判只读的单条搜索；沿宿主路径事实识别宽根，不改写命令或推导权限。"""
+    analysis = analyze_command(command)
+    if analysis.classification != 'read_only' or len(analysis.segments) != 1:
+        return None
+    segment = analysis.segments[0]
+    targets = _search_command_targets(segment.executable, segment.argv[1:])
+    if targets is None:
+        return None
+    policy = tool.path_access_policy
+    data_root = policy.agent_home_root
+    roots = {root for root in (data_root, policy.owner_scope_root) if root is not None}
+    if tool.protected_persona_root:
+        roots.add(Path(tool.protected_persona_root).expanduser().resolve(strict=False))
+    broad = {}
+    for raw in targets or ['.']:
+        try:
+            expanded = os.path.expandvars(raw)
+            redirected = _redirected_home(os.environ.get('HOME'), policy.owner_scope_root, tool.host_private_roots)
+            if redirected and (expanded == '~' or expanded.startswith('~/')):
+                expanded = redirected + expanded[1:]
+            path = Path(expanded).expanduser()
+            path = (target / path).resolve(strict=False) if not path.is_absolute() else path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path in roots or (data_root is not None and owner_home_containing(path, data_root) == path):
+            broad[str(path)] = None
+    if not broad:
+        return None
+    from ._filesystem_read import _COMMON_FILE_DISCOVERY_IGNORES
+
+    return {
+        'reason': 'runtime_root_search_budget',
+        'target_paths': list(broad),
+        'budget_seconds': min(timeout, _RUNTIME_SEARCH_MAX_SECONDS),
+        'requested_timeout_seconds': timeout,
+        'excluded_directories_hint': sorted(_COMMON_FILE_DISCOVERY_IGNORES),
+        'suggested_actions': ['use_search_text', 'use_find_files', 'narrow_path', 'exclude_runtime_directories'],
+    }
+
+
 def _run_shell_process_text(
     tool: ShellTool,
     command: str,
@@ -2021,6 +2115,9 @@ def _run_shell_process_text(
     sandbox_read_roots: tuple[Path, ...] | None,
     sandbox_protected_paths: tuple[Path, ...] | None,
 ) -> tuple[str, bool, str, dict[str, object]]:
+    search_backoff = _runtime_search_backoff(tool, command, target, timeout)
+    if search_backoff is not None:
+        timeout = min(timeout, _RUNTIME_SEARCH_MAX_SECONDS)
     try:
         result = tool._run_command(
             command,
@@ -2069,6 +2166,11 @@ def _run_shell_process_text(
         )
     except subprocess.TimeoutExpired as exc:
         output, facts = _shell_timeout_result(exc, command, timeout, tool.max_output_chars)
+        if search_backoff is not None:
+            facts['search_backoff'] = search_backoff
+            output += ('\n[搜索退避] 运行数据根的递归搜索已达到短预算；已保留采集到的部分输出。'
+                       '请改用 search_text / find_files 并缩小 path，或显式排除 runs、compact 等归档目录；不要原样重试。'
+                       '\nsearch_backoff=' + json.dumps(search_backoff, ensure_ascii=False))
         return output, False, "TOOL_TIMEOUT", facts
     except CommandInterruptedError:
         return (

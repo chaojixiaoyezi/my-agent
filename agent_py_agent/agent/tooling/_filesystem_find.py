@@ -29,10 +29,13 @@ from ._filesystem_helpers import (
     _discovery_identity,
     _discovery_matches_glob,
     _discovery_nofollow_stat,
+    _discovery_process_budget,
     _int_param,
     _iter_discovery_files,
     _optional_path,
     _safe_discovery_path,
+    _scan_budget_details,
+    _scan_budget_expired,
     _text_param,
     path_resolution_error_outcome,
 )
@@ -131,8 +134,11 @@ def _find_snapshot_binding(tool, target: Path, request) -> tuple:
 # LLM: 沿已有STALE_VERSION错误分类与原reported字段披露快照细类，不篡改归一化后的错误码或共享错误表。
 # 函数用途: 返回必须显式新建快照、不能重扫接页的失效结果。
 def _find_snapshot_stale(reason: str, snapshot_id: str = '') -> ToolHandlerOutcome:
+    message = ('冻结文件清单校验达到扫描预算；请缩小 path 后重新请求 snapshot。'
+               if reason == 'validation_budget' else
+               '冻结文件清单已失效；旧cursor不能继续。请移除cursor后显式重新请求snapshot。')
     return ToolHandlerOutcome('find_files', False,
-        '冻结文件清单已失效；旧cursor不能继续。请移除cursor后显式重新请求snapshot。',
+        message,
         error_code='STALE_VERSION', reported_error_code='FILE_SNAPSHOT_STALE',
         result_envelope={'snapshot': {
             'snapshot_id': snapshot_id, 'next_cursor': '', 'consistency': 'stale',
@@ -140,7 +146,8 @@ def _find_snapshot_stale(reason: str, snapshot_id: str = '') -> ToolHandlerOutco
         }})
 
 
-def _find_watch_identity(path: Path) -> tuple[int, ...]:
+def _find_watch_identity(path: Path, *, deadline: float | None = None) -> tuple[int, ...]:
+    deadline = deadline if deadline is not None else time.monotonic() + _FALLBACK_SCAN_MAX_SECONDS
     info = _discovery_nofollow_stat(path)
     base = _discovery_identity(info)
     if not stat.S_ISDIR(info.st_mode):
@@ -150,6 +157,9 @@ def _find_watch_identity(path: Path) -> tuple[int, ...]:
     entries_sum = 0
     with os.scandir(path) as entries:
         for entry in entries:
+            raise_if_cancelled()
+            if time.monotonic() >= deadline:
+                raise _FindSnapshotStale('validation_budget')
             entries_count += 1
             digest = int.from_bytes(
                 hashlib.blake2b(os.fsencode(entry.name), digest_size=16).digest(), "little"
@@ -161,14 +171,14 @@ def _find_watch_identity(path: Path) -> tuple[int, ...]:
 
 # LLM: 筛选串线单独披露；每个已观察目录及文件仍重核原权限和五元指纹，不能以绑定相等或根mtime替代，I/O在锁外。
 # 函数用途: 在发布或续页前验证冻结清单的来源与权限未观察到变化。
-def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot) -> None:
+def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot, *, started_at=None) -> None:
     if time.monotonic() >= snapshot.expires_at:
         raise _FindSnapshotStale('expired')
     if (request.pattern, request.include_ignored) != snapshot.filters:
         raise _FindSnapshotStale('filter_mismatch')
     if _find_snapshot_binding(tool, target, request) != snapshot.binding:
         raise _FindSnapshotStale('binding_changed')
-    started = time.monotonic()
+    started = time.monotonic() if started_at is None else started_at
     for path, expected in snapshot.watches:
         raise_if_cancelled()
         if time.monotonic() - started >= _FALLBACK_SCAN_MAX_SECONDS:
@@ -177,7 +187,7 @@ def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot
                                     ignored_names=_COMMON_FILE_DISCOVERY_IGNORES)
         if safe is None:
             raise _FindSnapshotStale('permission_or_path_changed')
-        if _find_watch_identity(safe) != expected:
+        if _find_watch_identity(safe, deadline=started + _FALLBACK_SCAN_MAX_SECONDS) != expected:
             raise _FindSnapshotStale('source_changed')
     if _find_snapshot_binding(tool, target, request) != snapshot.binding:
         raise _FindSnapshotStale('binding_changed')
@@ -188,7 +198,9 @@ def _validate_find_snapshot(tool, target: Path, request, snapshot: _FindSnapshot
 def _build_find_files_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="find_files",
-        description="按 glob 查找文件路径，适合不知道文件具体位置但知道文件名模式时使用。",
+        description=("按 glob 查找文件路径，适合不知道具体位置但知道文件名模式时使用。"
+                     "默认跳过运行归档及代码缓存；整次扫描最多 8 秒，触顶保留部分匹配并提示缩小 path。"
+                     "优先使用本工具，避免在 ~/.my-agent / owner_home 根执行未排除归档的 grep -r / rg / find。"),
         input_schema={
             "type": "object",
             "properties": {
@@ -212,7 +224,7 @@ def _build_find_files_model_spec() -> ToolModelSpec:
                 },
                 "include_ignored": {
                     "type": "boolean",
-                    "description": "是否包含 .git、node_modules 和常见缓存目录；默认 false。",
+                    "description": "是否包含运行归档、.git、node_modules 和缓存目录；默认 false。也可明确将 path 指向 runs、compact 等被忽略目录以搜索其中内容。",
                 },
                 "snapshot": {
                     "type": "boolean",
@@ -382,9 +394,10 @@ class FindFilesTool(FileSystemTool):
 
     # LLM: 构建固定筛选和权限值绑定，受文件数、目录项、时间及保留字节预算约束，不用首屏哨兵冒充完整快照。
     # 函数用途: 在缓存锁外构建按根相对Unicode路径排序的冻结清单。
-    def _build_snapshot(self, target: Path, request: _FindFilesRequest) -> _FindSnapshot:
+    def _build_snapshot(self, target: Path, request: _FindFilesRequest, *, started_at=None) -> _FindSnapshot:
         binding = _find_snapshot_binding(self, target, request)
-        state = _FindScanState(started_at=time.monotonic())
+        state = _FindScanState(started_at=time.monotonic() if started_at is None else started_at,
+                               current_path=target)
         watches: dict[Path, tuple[int, ...]] = {}
         paths: list[Path] = []
         retained = 0
@@ -396,7 +409,7 @@ class FindFilesTool(FileSystemTool):
         # 函数用途: 收集来源身份并拒绝已观察到的构建期间漂移。
         def observe(path: Path) -> None:
             nonlocal retained
-            identity = _find_watch_identity(path)
+            identity = _find_watch_identity(path, deadline=state.started_at + _FALLBACK_SCAN_MAX_SECONDS)
             previous = watches.get(path)
             if previous is not None:
                 if previous != identity:
@@ -429,7 +442,7 @@ class FindFilesTool(FileSystemTool):
             paths=tuple(sorted(paths, key=lambda path: path.relative_to(target).as_posix())),
             watches=tuple(watches.items()), expires_at=time.monotonic() + _FIND_SNAPSHOT_TTL_SECONDS,
             scan_exhausted=not state.limited, limit_reason=state.limit_reason, scanned_files=state.candidates)
-        _validate_find_snapshot(self, target, request, snapshot)
+        _validate_find_snapshot(self, target, request, snapshot, started_at=state.started_at)
         return snapshot
 
     # LLM: 调用方持缓存锁；凭证的位置与期限只存本实例，不允许模型编辑offset签名。
@@ -447,6 +460,7 @@ class FindFilesTool(FileSystemTool):
     # 函数用途: 处理首个冻结请求或同一清单的cursor续页。
     def _find_snapshot_page(self, target: Path, request: _FindFilesRequest) -> ToolHandlerOutcome:
         snapshot = None
+        started_at = time.monotonic()
         try:
             if request.cursor:
                 with self._snapshot_lock:
@@ -460,12 +474,12 @@ class FindFilesTool(FileSystemTool):
                     return _find_snapshot_stale('snapshot_missing_or_expired', key)
             else:
                 position = request.offset
-                snapshot = self._build_snapshot(target, request)
+                snapshot = self._build_snapshot(target, request, started_at=started_at)
                 with self._snapshot_lock:
                     self._prune_snapshots()
                     self._snapshots[snapshot.snapshot_id] = snapshot
                     self._prune_snapshots()
-            _validate_find_snapshot(self, target, request, snapshot)
+            _validate_find_snapshot(self, target, request, snapshot, started_at=started_at)
             page = snapshot.paths[position:position + request.limit]
             rows: list[str] = []
             for item in page:
@@ -475,7 +489,7 @@ class FindFilesTool(FileSystemTool):
                 if safe is None:
                     raise _FindSnapshotStale('page_path_denied')
                 rows.append(self.display_path(safe))
-            _validate_find_snapshot(self, target, request, snapshot)
+            _validate_find_snapshot(self, target, request, snapshot, started_at=started_at)
             end = position + len(rows)
             has_more = end < len(snapshot.paths)
             with self._snapshot_lock:
@@ -544,6 +558,7 @@ class _FindMatchBatch:
     scanned_files: int
     scanned_files_known: bool
     limit_reason: str = ""
+    scan_budget: dict[str, object] | None = None
 
 
 # LLM: The Python fallback is deliberately bounded; hitting the boundary must
@@ -555,6 +570,9 @@ class _FindScanState:
     candidates: int = 0
     limited: bool = False
     limit_reason: str = ""
+    current_path: Path | None = None
+    limit_path: Path | None = None
+    budget_exhausted: bool = False
 
 
 def _find_directory_matches(
@@ -562,10 +580,11 @@ def _find_directory_matches(
     target: Path,
     request: _FindFilesRequest,
 ) -> _FindMatchBatch:
-    rg_batch = _find_directory_matches_with_rg(tool, target, request)
+    state = _FindScanState(started_at=time.monotonic(), current_path=target)
+    rg_batch = _find_directory_matches_with_rg(tool, target, request, state)
     if rg_batch is not None:
         return rg_batch
-    return _find_directory_matches_with_python(tool, target, request)
+    return _find_directory_matches_with_python(tool, target, request, state)
 
 
 # LLM: 后备遍历按稳定目录序流式交付候选，见当前页哨兵即停止，资源触顶必须明确披露而非宣称无匹配。
@@ -574,11 +593,12 @@ def _find_directory_matches_with_python(
     tool: FindFilesTool,
     target: Path,
     request: _FindFilesRequest,
+    scan_state: _FindScanState | None = None,
 ) -> _FindMatchBatch:
     results: list[str] = []
     seen = 0
     has_more = False
-    scan_state = _FindScanState(started_at=time.monotonic())
+    scan_state = scan_state or _FindScanState(started_at=time.monotonic(), current_path=target)
     for item in _iter_find_candidates(
         target,
         tool=tool,
@@ -608,6 +628,7 @@ def _find_directory_matches_with_python(
         scanned_files=scan_state.candidates,
         scanned_files_known=True,
         limit_reason=scan_state.limit_reason,
+        scan_budget=_scan_budget_details(tool, scan_state) if scan_state.budget_exhausted else None,
     )
 
 
@@ -617,26 +638,32 @@ def _find_directory_matches_with_rg(
     tool: FindFilesTool,
     target: Path,
     request: _FindFilesRequest,
+    scan_state: _FindScanState | None = None,
 ) -> _FindMatchBatch | None:
     if not shutil.which('rg'):
         return None
-    state = _FindScanState(started_at=time.monotonic())
+    state = scan_state or _FindScanState(started_at=time.monotonic(), current_path=target)
     candidates = _discovery_file_batch(tool, target, include_ignored=request.include_ignored,
         ignored_names=_COMMON_FILE_DISCOVERY_IGNORES, scan_state=state,
         admit=_admit_find_candidate)
-    if not candidates:
+    if not candidates or _scan_budget_expired(state):
         return _FindMatchBatch([], 0, False, not state.limited, 'rg', state.candidates, True,
-                               state.limit_reason)
+                               state.limit_reason,
+                               _scan_budget_details(tool, state) if state.budget_exhausted else None)
     process = _start_rg_find_process(candidates)
     if process is None:
         return None
-    with register_cancellation_callback(lambda: _stop_find_process(process)):
-        batch = _read_rg_find_process(tool, target, request, process)
+    state.current_path = target
+    with register_cancellation_callback(lambda: _stop_find_process(process)), _discovery_process_budget(
+        process, state, _stop_find_process,
+    ):
+        batch = _read_rg_find_process(tool, target, request, process, scan_state=state)
     if batch is None:
         return None
     return replace(batch, scan_complete=batch.scan_complete and not state.limited,
                    scanned_files=state.candidates, scanned_files_known=True,
-                   limit_reason=state.limit_reason)
+                   limit_reason=state.limit_reason,
+                   scan_budget=_scan_budget_details(tool, state) if state.budget_exhausted else None)
 
 
 # LLM: 子进程只接收已经准入的类型化路径，不执行shell命令；其生命周期由当前工具取消令牌负责。
@@ -680,6 +707,7 @@ def _read_rg_find_process(
     target: Path,
     request: _FindFilesRequest,
     process: subprocess.Popen[str],
+    *, scan_state: _FindScanState | None = None,
 ) -> _FindMatchBatch | None:
     stdout = process.stdout
     if stdout is None:
@@ -692,6 +720,10 @@ def _read_rg_find_process(
     try:
         for raw_line in stdout:
             raise_if_cancelled()
+            if scan_state is not None and _scan_budget_expired(scan_state):
+                _stop_find_process(process)
+                stopped_early = True
+                break
             raw_path = Path(raw_line.rstrip("\r\n"))
             if not raw_path.name:
                 continue
@@ -703,6 +735,8 @@ def _read_rg_find_process(
                 continue
             if safe_candidate is None:
                 continue
+            if scan_state is not None:
+                scan_state.current_path = safe_candidate.parent
             if not _matches_find_pattern(tool.display_path(safe_candidate), safe_candidate.name, request.pattern):
                 continue
             if seen < request.offset:
@@ -728,7 +762,7 @@ def _read_rg_find_process(
             if process.stdout is not None:
                 with contextlib.suppress(OSError):
                     process.stdout.close()
-    if not stopped_early and return_code not in {0, 1}:
+    if not stopped_early and return_code not in {0, 1} and not (scan_state and scan_state.budget_exhausted):
         return None
     return _FindMatchBatch(
         results=results,
@@ -781,6 +815,10 @@ def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolHandlerOu
         )
     output = "\n".join(output_rows)
     envelope = _find_result_envelope(result)
+    if result.batch.limit_reason:
+        output += f"\n文件查找未完整覆盖：{result.batch.limit_reason}；请缩小 path，保留上述部分匹配。"
+        if result.batch.scan_budget:
+            output += f"\n达到扫描预算的目录：{result.batch.scan_budget['limit_path']}"
     return ToolHandlerOutcome(
         "find_files",
         True,
@@ -827,7 +865,8 @@ def _find_result_envelope(result: _FindDirectoryResultRequest) -> dict[str, obje
                 scan_complete=batch.scan_complete,
             )
         )}
-    status = "matches" if batch.results else ("no_matches" if batch.scan_complete else "incomplete")
+    status = ("incomplete" if batch.limit_reason else
+              "matches" if batch.results else "no_matches" if batch.scan_complete else "incomplete")
     envelope["file_search_result"] = {
         "schema": "local_file_search.v1",
         "scope": "local_workspace",
@@ -840,6 +879,8 @@ def _find_result_envelope(result: _FindDirectoryResultRequest) -> dict[str, obje
         "scan_limit_reason": batch.limit_reason,
         "suggested_actions": ["narrow_path", "use_specific_pattern"] if status == "incomplete" else [],
     }
+    if batch.scan_budget:
+        envelope['file_search_result']['scan_budget'] = batch.scan_budget
     return envelope
 
 
@@ -901,15 +942,13 @@ def _iter_find_candidates(
 
 # LLM: This liveness fence only bounds the Python fallback and is reported as
 # incomplete; it never authorizes a no-match conclusion.
-# 函数用途: 在后备文件遍历超过 2 万文件或 10 秒前停止，保护单 Gateway 不被大目录长期占住。
+# 函数用途: 在文件遍历超过 2 万文件或共享扫描预算前停止，保护 Gateway 不被大目录长期占住。
 def _admit_find_candidate(state: _FindScanState) -> bool:
     if state.candidates >= _FALLBACK_SCAN_MAX_FILES:
         state.limited = True
         state.limit_reason = "file_limit"
         return False
-    if time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
-        state.limited = True
-        state.limit_reason = "time_limit"
+    if _scan_budget_expired(state):
         return False
     state.candidates += 1
     return True
