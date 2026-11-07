@@ -13,6 +13,9 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts import business_api as api
 from agent_py_agent.agent.gateway_parts import business_api_v13 as v13
 from agent_py_agent.tests import test_gap_w2_intercept_actions as support
+from agent_py_agent.tests.test_gap_w2_intercept_actions import (
+    native_owner_runtime as native_owner_runtime,
+)
 
 w2 = support.w2
 error_code = support.error_code
@@ -160,7 +163,47 @@ def test_task_scope_symlink_cannot_use_owner_root_as_workspace(w2):
         {'task_id': task_id, 'workspace_subpaths': ['safe'], 'network': 'inherit',
          'workspace_root': str(w2.home)}, revision=0)
     w2.host.workspace_root = None
-    error_code('HOST_NOT_READY', w2.call, 'scope_policy.task_scope.set',
+    assert w2.call('scope_policy.task_scope.set',
+        {'task_id': task_id, 'workspace_subpaths': ['safe'], 'network': 'inherit'}, revision=0)['scope']['workspace_subpaths'] == ['safe']
+
+
+def test_native_path_mutations_use_canonical_thread_and_effective_root(native_owner_runtime):
+    runtime = native_owner_runtime
+    store = runtime.host.conversation_store
+    task = store.session_tasks.create(SessionTaskDraft(runtime.thread.thread_id, runtime.thread.thread_id, '路径任务'))
+    status, viewed = runtime.call('tasks.get', {'task_id': task.task_id})
+    assert status == 200 and viewed['data']['task']['thread_id'] == runtime.thread.thread_id
+    assert 'workspace_root' not in viewed['data']['task']
+    for action, params, field, expected in [
+        ('scope_policy.rules.create', {'kind': 'path_allow', 'pattern': 'global'}, 'pattern', 'global'),
+        ('intercept.rules.create', {'name': '路径审批', 'tool': 'read_file', 'decision': 'ask', 'path_prefix': 'intercept'}, 'path_prefix', 'intercept'),
+        ('scope_policy.task_rules.create', {'task_id': task.task_id, 'kind': 'path_deny', 'pattern': 'task'}, 'pattern', 'task'),
+    ]:
+        status, body = runtime.call(action, params, key=action)
+        assert status == 200, body
+        root = runtime.workspace if 'task_id' in params else runtime.host.effective_workspace_root
+        assert body['data']['rule'][field] == str(root / expected)
+    status, scoped = runtime.call('scope_policy.task_scope.set', {'task_id': task.task_id,
+        'workspace_subpaths': ['safe'], 'network': 'inherit'}, key='task-scope', revision=0)
+    assert status == 200 and scoped['data']['scope']['workspace_subpaths'] == ['safe'], scoped
+    status, escaped = runtime.call('scope_policy.task_scope.set', {'task_id': task.task_id,
+        'workspace_subpaths': ['../outside'], 'network': 'inherit'}, key='escape', revision=1)
+    assert status == 403 and escaped['error']['code'] == 'PATH_OUTSIDE_WORKSPACE'
+    status, foreign = runtime.call('scope_policy.task_rules.create', {'task_id': task.task_id,
+        'kind': 'path_deny', 'pattern': 'foreign'}, key='foreign-task', user='business-bob')
+    assert status == 404 and foreign['error']['code'] == 'RESOURCE_NOT_FOUND'
+    assert [kind for kind, _ in runtime.leases] == ['acquired', 'released'] * 2
+
+
+@pytest.mark.parametrize('field', ['owner_id', 'owner_home'])
+def test_task_workspace_rejects_foreign_canonical_thread(w2, field):
+    from dataclasses import replace
+
+    task_id = task_for(w2)
+    task = w2.host.conversation_store.session_tasks.load(task_id)
+    w2.host.conversation_store.threads.update_atomic(task.target_thread_id,
+        lambda thread: replace(thread, **{field: 'foreign'}))
+    error_code('RESOURCE_NOT_FOUND', w2.call, 'scope_policy.task_scope.set',
         {'task_id': task_id, 'workspace_subpaths': ['safe'], 'network': 'inherit'}, revision=0)
 
 

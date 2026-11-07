@@ -1,11 +1,13 @@
 """W2 命令策略：真实 V13 调用、事务回执、owner 隔离及只读缓存回归。"""
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
@@ -25,6 +27,7 @@ from agent_py_agent.agent.user_space.owner_resolver import (
     home_paths_with_owner,
     resolve_owner_home,
 )
+from agent_py_agent.tests.test_decision_subagent import prepared as prepared
 
 
 class Harness:
@@ -35,6 +38,7 @@ class Harness:
         identity = OwnerIdentity.local_main() if name == 'main' else OwnerIdentity.local_user(name)
         paths = home_paths_with_owner(paths, resolve_owner_home(paths.root, identity))
         self.host = SimpleNamespace(home_paths=paths, workspace_root=paths.owner_home_dir / 'workspace',
+            effective_workspace_root=paths.owner_home_dir / 'workspace',
             config=SimpleNamespace(business_spaces_enabled=True), business_v13_clock=lambda: 1794000000.0)
         self.context = api.bind_business_context(self.host, subject_id='w2-tester', authorize=lambda action, facts: True)
         self.services = api.BusinessServices(self.host)
@@ -73,6 +77,176 @@ def error_code(code, function, *args, **kwargs):
         function(*args, **kwargs)
     assert caught.value.code == code
     return caught.value
+
+
+@pytest.fixture
+def native_owner_runtime(tmp_path, monkeypatch):
+    """真实 HTTP/owner 池与原租约；资源完整退出后核对描述符平衡。"""
+    from agent_py_agent.agent.gateway_parts.request_worker import _owner_pool
+    from agent_py_agent.tests.test_v13_w0_harness import v13_call, v13_native
+    fd_root = '/dev/fd' if os.path.isdir('/dev/fd') else '/proc/self/fd'
+
+    def descriptors():
+        result = set()
+        for name in os.listdir(fd_root):
+            try:
+                info = os.fstat(int(name))
+            except OSError:
+                continue  # listdir 自己的临时目录描述符已经关闭。
+            result.add((int(name), info.st_dev, info.st_ino, info.st_mode))
+        return result
+    generator = v13_native.__wrapped__(tmp_path, monkeypatch)
+    server, base = native = next(generator)
+    base.config.side_questions_enabled = True
+    base.config.acp_bridge_enabled = True
+    identity = OwnerIdentity.provider_user('feishu', 'business-alice')
+    pool = _owner_pool(base)
+    host = pool.get(identity)
+    workspace = host.home_paths.owner_home_dir / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    host.config.workspace_root = str(workspace)
+    thread = host.conversation_store.threads.create(title='原生请求', owner_id=host.home_paths.owner_id,
+        owner_home=str(host.home_paths.owner_home_dir), workspace_root=str(workspace), cwd=str(workspace))
+    leases, acquire = [], pool.acquire_pinned
+
+    @contextmanager
+    def tracked(owner, **kwargs):
+        with acquire(owner, **kwargs) as agent:
+            leases.append(('acquired', agent))
+            try:
+                yield agent
+            finally:
+                leases.append(('released', agent))
+
+    monkeypatch.setattr(pool, 'acquire_pinned', tracked)
+
+    def call(action, params=None, *, key=None, revision=None, user='business-alice'):
+        if key is None and api.resolve_business_action_spec(action).metadata['effect'] != 'read':
+            key = uuid4().hex
+        key = hashlib.sha256(key.encode()).hexdigest() if key is not None else None
+        return v13_call(native, action, params or {}, user=user,
+            idempotency_key=key, expected_revision=revision)
+
+    # 只核调用新增且收尾后仍存活的描述符；宿主自身监听/事件句柄的关闭不算负向泄漏。
+    before = descriptors()
+    try:
+        yield SimpleNamespace(native=native, server=server, base=base, host=host, pool=pool,
+            identity=identity, thread=thread, workspace=workspace, call=call, leases=leases)
+    finally:
+        generator.close()
+        assert not pool._pins
+        assert sum(kind == 'acquired' for kind, _ in leases) == sum(kind == 'released' for kind, _ in leases)
+        fd_delta = len(descriptors() - before)
+        assert fd_delta == 0, 'fd_delta must be zero after native teardown'
+
+
+def native_pending(runtime, turn_id='native-turn'):
+    """通过原任务、子代理及审批发布入口准备真实 pending。"""
+    import time
+
+    from agent_py_agent.agent.business_spaces import gap158_w2_judge as judge
+    from agent_py_agent.agent.contracts.tool_approval import build_tool_approval_request
+    from agent_py_agent.agent.conversation.agent_tool_approval import publish_agent_tool_approval
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+
+    host, thread = runtime.host, runtime.thread
+    root_id = 'approval-root-' + uuid4().hex
+    host.conversation_store.tasks.bind({'thread_id': thread.thread_id, 'task_id': root_id,
+        'goal': '确认工具请求', 'status': 'active', 'now': time.time()})
+    child = host.subagents.create_run(goal='确认工具请求', root_id=root_id, parent_id=root_id)
+    child = host.subagents.lifecycle.prepare_runner_attempt(child.id)
+    tool = ToolCall(call_id='native-call', tool_name='run_command', arguments={'command': 'git status'},
+        source_protocol='native', schema_hash='sha256:native', run_id=child.id,
+        turn_id=turn_id, attempt_id='native-attempt')
+    request = SimpleNamespace(call=tool, owner_scope_root=str(host.home_paths.owner_home_dir))
+    policy = SimpleNamespace(runtime_policy=SimpleNamespace(
+        approval_policy=SimpleNamespace(owner_grant_parameters=())))
+    row = judge.add_pending(request, policy, SimpleNamespace(decision='ask', rule_id='native-rule'))
+    approval = build_tool_approval_request(tool, request_id=tool.turn_id, round_number=0,
+        call_index=0, description='确认工具请求')
+    handle = publish_agent_tool_approval(host, run_id=child.id,
+        thread_id=child.agent_thread_id, request_value=approval)
+    return row, handle
+
+
+@pytest.mark.parametrize('decision', ['approved', 'denied'])
+def test_native_pending_decision_uses_original_owner_runtime_and_replays(native_owner_runtime, decision):
+    from agent_py_agent.agent.common.json_io import read_json_object_report
+
+    runtime = native_owner_runtime
+    row, handle = native_pending(runtime)
+    status, listed = runtime.call('intercept.pending.list')
+    assert status == 200 and listed['data']['items'][0]['approval_id'] == row['approval_id']
+    params = {'approval_id': row['approval_id'], 'decision': decision}
+    status, foreign = runtime.call('intercept.pending.decide', params, key='foreign-decision', user='business-bob')
+    assert status == 404 and foreign['error']['code'] == 'RESOURCE_NOT_FOUND'
+    status, result = runtime.call('intercept.pending.decide', params, key='native-decision')
+    assert status == 200 and result['data']['state'] == decision, result
+    canonical = read_json_object_report(handle.path, context='r1.native.approval').payload
+    assert canonical['status'] == 'decided' and canonical['decision']['decision'] == decision
+    replay_status, replay = runtime.call('intercept.pending.decide', params, key='native-decision')
+    assert replay_status == 200 and replay['data'] == result['data']
+    assert [kind for kind, _ in runtime.leases] == ['acquired', 'released']
+    assert not runtime.pool._pins
+
+
+def test_native_pending_acquisition_failure_preserves_pending_and_can_retry(native_owner_runtime, monkeypatch):
+    from agent_py_agent.agent.common.json_io import read_json_object_report
+
+    runtime = native_owner_runtime
+    row, handle = native_pending(runtime)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('owner runtime unavailable')
+
+    params = {'approval_id': row['approval_id'], 'decision': 'approved'}
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.pool, 'acquire_pinned', unavailable)
+        status, body = runtime.call('intercept.pending.decide', params, key='retry-decision')
+    assert status == 503 and body['error']['code'] == 'HOST_NOT_READY', body
+    assert V13Store(runtime.host.home_paths.owner_home_dir).get('policy_pending_index', row['approval_id'])['state'] == 'pending'
+    assert read_json_object_report(handle.path, context='r1.native.pending').payload['status'] == 'pending'
+    status, body = runtime.call('intercept.pending.decide', params, key='retry-decision')
+    assert status == 200 and body['data']['state'] == 'approved', body
+
+
+def test_stream_steer_native_approval_stop_new_next_turn(prepared, native_owner_runtime, monkeypatch):
+    from agent_py_agent.agent.common.json_io import read_json_object_report
+    from agent_py_agent.cli.chat_parts import tui_actions
+    from agent_py_agent.tests.test_gap_w10_headless_sequence import (
+        test_spawn_compact_stream_steer_stop_new_next_turn,
+    )
+
+    runtime = native_owner_runtime
+    row, handle = native_pending(runtime, turn_id='gwreq-turn-1')
+    original = tui_actions._tui_submit_active_turn_input
+    views, decisions = [], []
+
+    def with_approval(params, *args, **kwargs):
+        accepted = original(params, *args, **kwargs)
+        if accepted:
+            view = params.tui_runtime
+            views.append(view)
+            turn = view._turns['chat-turn-1']
+
+            def decide(approval, decision):
+                assert approval.permission_id == row['approval_id']
+                status, body = runtime.call('intercept.pending.decide', {'approval_id': approval.permission_id,
+                    'decision': decision.decision}, key='headless-approval')
+                assert status == 200, body
+                decisions.append(body['data']['state'])
+
+            turn.configure_gateway_permission_sink(decide)
+            assert turn.on_gateway_event({'kind': 'permission_requested', 'permission': handle.request.to_dict()})
+            assert view.store.snapshot().permission.permission_id == row['approval_id']
+            assert view.resolve_permission(row['approval_id'], 'approved')
+        return accepted
+
+    monkeypatch.setattr(tui_actions, '_tui_submit_active_turn_input', with_approval)
+    test_spawn_compact_stream_steer_stop_new_next_turn(prepared, monkeypatch, 'before_stop')
+    assert decisions == ['approved'] and views[0].store.snapshot().permission is None
+    assert read_json_object_report(handle.path, context='r1.headless.canonical').payload['status'] == 'decided'
+    assert not runtime.pool._pins
 
 
 def create_rule(w2, **changes):

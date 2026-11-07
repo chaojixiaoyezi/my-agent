@@ -10,6 +10,7 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import ExitStack
 from contextvars import copy_context
 from dataclasses import replace
 from pathlib import Path
@@ -308,7 +309,22 @@ def _delegate(call, entry):
             raise HostAPIError('HOST_NOT_READY', 503)
         return foundation.v13_call_frozen(call, 'approvals.decide', {**params, 'response_ticket': ticket})
     if _agent_for(call) is None:
-        raise HostAPIError('HOST_NOT_READY', 503)
+        provider = call.context.host_provider
+        if not callable(provider):
+            raise HostAPIError('HOST_NOT_READY', 503)
+        from ..gateway_parts.business_api import bind_business_context
+
+        with ExitStack() as stack:
+            host = provider(stack)
+            paths = getattr(host, 'home_paths', None)
+            if (getattr(paths, 'owner_id', None) != call.owner_id
+                    or Path(getattr(paths, 'owner_home_dir', '')).resolve() != Path(call.owner_home).resolve()):
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            original = call.context
+            # 派生上下文必须重新签发；授权仍逐次回到原请求，租约只覆盖本次委派。
+            issued = bind_business_context(host, authorize=original.check, subject_id=original.subject_id,
+                actor=original.actor, business_context=original.business_context, actor_factory=original.actor_factory)
+            return _delegate(replace(call, context=issued), entry)
     token = secrets.token_urlsafe(32)
     active = True
 

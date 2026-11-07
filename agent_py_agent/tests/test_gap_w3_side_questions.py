@@ -12,6 +12,9 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.concurrency.daemon_executor import DurableDaemonThreadPoolExecutor
 from agent_py_agent.agent.gateway_parts import business_api_v13 as v13
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
+from agent_py_agent.tests.test_gap_w2_intercept_actions import (
+    native_owner_runtime as native_owner_runtime,
+)
 
 
 class TrackingPool(DurableDaemonThreadPoolExecutor):
@@ -33,6 +36,96 @@ class HeldPool:
         future = Future()
         self.futures.append(future)
         return future
+
+
+def test_native_worker_uses_configured_owner_profile_and_keeps_cancelled_lease(native_owner_runtime, monkeypatch):
+    from agent_py_agent.agent.business_spaces import gap158_w3_side_questions as side
+    from agent_py_agent.agent.business_spaces.v13_store import V13Store
+    from agent_py_agent.agent.plugin_host.model_settings_v2_handlers import ModelSettingsV2Handlers
+
+    runtime = native_owner_runtime
+    catalog = ModelSettingsV2Handlers(runtime.host.home_paths).save_provider({'provider_id': 'r1-side',
+        'display_name': '侧问回归', 'api_base': 'https://model.invalid/v1', 'api_key': 'test-only-key', 'models': [
+            {'model_name': 'r1-side-model', 'model_backend': 'openai_compatible', 'capability': 'agentic'}]})
+    profile = catalog['providers'][0]['models'][0]['profile_id']
+    entered, release, calls, configs = Event(), Event(), [], []
+
+    class Backend:
+        name = 'r1-side-boundary'
+
+        def generate(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            if len(calls) == 2:
+                entered.set()
+                assert release.wait(10)
+            return ModelResponse(backend=self.name, text='受控回答')
+
+    backend = Backend()
+
+    def configured_backend(kind, config):
+        configs.append((kind, config.model_name))
+        return backend
+
+    monkeypatch.setattr('agent_py_agent.agent.backends.get_backend', configured_backend)
+    pool = TrackingPool()
+    monkeypatch.setattr(side, '_executor', pool)
+    runtime.host.conversation_store.messages.append({'thread_id': runtime.thread.thread_id,
+        'role': 'user', 'content': '来自规范线程的材料'})
+    params = {'conversation_id': runtime.thread.thread_id, 'question': '原生侧问', 'model_profile_id': profile}
+    owner = (str(runtime.host.home_paths.owner_home_dir.resolve()), runtime.host.home_paths.owner_id)
+    try:
+        status, body = runtime.call('side_questions.create', params, key='first-side-question')
+        assert status == 200 and body['data']['side_question']['state'] == 'queued', body
+        first = body['data']['side_question']['request_id']
+        pool.futures[0].result(timeout=10)
+        row = V13Store(runtime.host.home_paths.owner_home_dir).get('side_questions', first)
+        assert row['state'] == 'answered' and row['answer'] == '受控回答'
+        assert configs == [('openai_compatible', 'r1-side-model')]
+        assert '来自规范线程的材料' in str(calls[0])
+        assert not runtime.pool._pins and owner not in side._jobs
+        status, body = runtime.call('side_questions.create', params, key='second-side-question')
+        assert status == 200, body
+        second = body['data']['side_question']['request_id']
+        assert entered.wait(5)
+        assert runtime.pool._pins.get(id(runtime.host)) == 1 and len(side._jobs[owner]) == 1
+        status, body = runtime.call('side_questions.cancel', {'request_id': second}, key='cancel-side-question')
+        assert status == 200 and body['data']['state'] == 'cancelled', body
+        assert not pool.futures[1].done()
+        assert runtime.pool._pins.get(id(runtime.host)) == 1 and second in side._jobs[owner]
+        release.set()
+        pool.futures[1].result(timeout=10)
+        row = V13Store(runtime.host.home_paths.owner_home_dir).get('side_questions', second)
+        assert row['state'] == 'cancelled' and not row.get('answer')
+        assert not runtime.pool._pins and owner not in side._jobs
+        assert [kind for kind, _ in runtime.leases] == ['acquired', 'released'] * 2
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+
+def test_native_side_worker_acquisition_failure_releases_job_slot(native_owner_runtime, monkeypatch):
+    from agent_py_agent.agent.business_spaces import gap158_w3_side_questions as side
+    from agent_py_agent.agent.business_spaces.v13_store import V13Store
+
+    runtime = native_owner_runtime
+    pool = TrackingPool()
+    monkeypatch.setattr(side, '_executor', pool)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('owner runtime unavailable')
+
+    monkeypatch.setattr(runtime.pool, 'acquire_pinned', unavailable)
+    try:
+        status, body = runtime.call('side_questions.create', {'conversation_id': runtime.thread.thread_id,
+            'question': '宿主不可用'}, key='unavailable-side-question')
+        assert status == 200, body
+        pool.futures[0].result(timeout=10)
+        row = V13Store(runtime.host.home_paths.owner_home_dir).get('side_questions',
+            body['data']['side_question']['request_id'])
+        assert row['state'] == 'failed' and row['error_code'] == 'HOST_NOT_READY'
+        assert not runtime.pool._pins and not side._jobs
+    finally:
+        pool.shutdown(wait=True)
 
 
 @pytest.fixture

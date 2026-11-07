@@ -16,10 +16,123 @@ from agent_py_agent.agent.business_spaces.v13_store import V13Store
 from agent_py_agent.agent.conversation.business_access import BusinessError
 from agent_py_agent.agent.gateway_parts.business_api import bind_business_context
 from agent_py_agent.agent.gateway_parts.business_api_v13 import V13Call
+from agent_py_agent.tests.test_gap_w2_intercept_actions import (
+    native_owner_runtime as native_owner_runtime,
+)
 
 
 class Host:
     pass
+
+
+@pytest.fixture
+def native_acp_runtime(native_owner_runtime, monkeypatch):
+    """真实 HTTP 与 stdio ACP；观察原构造函数，不替换路由或传输成功结果。"""
+    from agent_py_agent.agent.business_spaces import gap158_w8_acp_bridge as module
+
+    runtime = native_owner_runtime
+    (runtime.workspace / 'project').mkdir()
+    fixture = Path(__file__).parent / 'fixtures' / 'gap_w8_fake_acp_agent.py'
+    runtime.base.config.acp_bridge_agents = {'native': {'command': [sys.executable, str(fixture)],
+        'env_allowlist': [], 'display_name': '原生 stdio 回归'}}
+    bridges, original = [], module.AcpBridge.__init__
+
+    def observed(bridge, call):
+        original(bridge, call)
+        bridges.append(bridge)
+
+    monkeypatch.setattr(module.AcpBridge, '__init__', observed)
+
+    def call(action, params=None, *, key=None):
+        status, body = runtime.call('acp_bridge.' + action, params, key=key)
+        assert status == 200, body
+        return body['data']
+
+    try:
+        yield runtime, call, bridges
+    finally:
+        for bridge in bridges:
+            receipts = bridge.shutdown()
+            assert all(receipt['process_group_released'] for receipt in receipts.values()), receipts
+
+
+def test_native_http_acp_survives_service_eviction_and_keeps_gateway_identity(native_acp_runtime):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.tests.test_v13_w0_harness import v13_call
+
+    runtime, call, bridges = native_acp_runtime
+    created = call('create', {'agent_id': 'native', 'project_root': 'workspace/project'}, key='native-acp-create')
+    sid = created['session']['session_id']
+    original = bridges[0]
+    trusted_host = original.host
+    first_service = next(value for value in runtime.server._business_services.values()
+        if value.owner_id == runtime.host.home_paths.owner_id)
+    listed = call('list')['items']
+    assert listed[0]['session_id'] == sid and listed[0]['process_alive']
+    for number in range(65):
+        status, body = runtime.call('acp_bridge.catalog', user='catalog-owner-' + str(number))
+        assert status == 200, body
+    assert first_service not in runtime.server._business_services.values()
+    runtime.base.config = replace(runtime.base.config, tool_read_max_chars=12345)
+    call('catalog')
+    service = next(value for value in runtime.server._business_services.values()
+        if value.owner_id == runtime.host.home_paths.owner_id)
+    assert service.host is not trusted_host and service.host._gap158_acp_bridge is original
+    assert original.host is trusted_host and original.host.config is runtime.base.config
+    assert sum(bridge.owner_id == original.owner_id for bridge in bridges) == 1
+    turn = prompt(call, sid, 'hello')
+    wait_event(call, sid, 'turn_completed', turn_id=turn['turn_id'])
+    closed = call('close', {'session_id': sid}, key='native-acp-close')
+    assert closed['closed'] and closed['cleanup']['process_group_released']
+    assert not original.sessions[sid].transport.is_running()
+    # HTTP 宿主是进程单例；第二个真实 Gateway 顺序启动，仍验证不同 paths 身份不复用桥。
+    runtime.server.stop()
+    second = GatewayHTTPServer(0, gateway_paths_from_root(runtime.base.home_paths.root / 'other-gateway'),
+        params=GatewayHTTPServerParams(agent=runtime.base))
+    second.start()
+    try:
+        status, body = v13_call(second, 'acp_bridge.catalog', {}, user='business-alice')
+        assert status == 200, body
+        other = next(value.host._gap158_acp_bridge for value in second._business_services.values()
+            if value.owner_id == original.owner_id)
+        assert other is not original and other.owner_home == original.owner_home
+        assert other.host.business_v13_gateway_paths is second.paths
+    finally:
+        second.stop()
+    assert not runtime.leases, 'ACP continuity must not acquire owner Agent pins'
+
+
+def test_native_http_acp_keeps_original_transport_after_unconfirmed_close(native_acp_runtime, monkeypatch):
+    from agent_py_agent.agent.tooling.process_registry import ProcessTerminationReceipt
+
+    runtime, call, bridges = native_acp_runtime
+    sid = call('create', {'agent_id': 'native', 'project_root': 'workspace/project'})['session']['session_id']
+    bridge = bridges[0]
+    session = bridge.sessions[sid]
+    transport, original, attempts = session.transport, session.transport.terminate, []
+
+    def once_unconfirmed(*, grace_seconds):
+        attempts.append(True)
+        if len(attempts) == 1:
+            return ProcessTerminationReceipt('test-unconfirmed', False, None, 1)
+        return original(grace_seconds=grace_seconds)
+
+    monkeypatch.setattr(transport, 'terminate', once_unconfirmed)
+    first = call('close', {'session_id': sid}, key='first-close')
+    assert not first['closed'] and not session.cleanup['process_group_released']
+    assert session.transport is transport and transport.is_running()
+    call('catalog')
+    assert len(bridges) == 1 and bridge.sessions[sid] is session
+    second = call('close', {'session_id': sid}, key='second-close')
+    assert second['closed'] and session.cleanup['process_group_released'] and len(attempts) == 2
+    record = V13Store(runtime.host.home_paths.owner_home_dir).get('acp_sessions', sid)
+    assert record['cleanup']['process_group_released'] and record['state'] == 'closed'
 
 
 @pytest.fixture

@@ -9,6 +9,7 @@ import re
 import threading
 import uuid
 from collections import OrderedDict
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
@@ -148,7 +149,26 @@ def _task(call):
 
 
 def _workspace_root(call, task):
-    candidate = (task or {}).get('workspace_root') or getattr(call.context.host, 'workspace_root', None)
+    candidate = None
+    if task and task.get('thread_id'):
+        store = getattr(call.context.host, 'conversation_store', None)
+        if store is None:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        thread = store.threads.load(task['thread_id'])
+        if (thread is None or thread.owner_id != call.owner_id
+                or Path(thread.owner_home).resolve() != Path(call.owner_home).resolve()):
+            _not_found()
+        candidate = thread.workspace_root or thread.cwd
+    if not candidate:
+        with ExitStack() as stack:
+            provider = call.context.host_provider
+            host = provider(stack) if callable(provider) else call.context.host
+            paths = getattr(host, 'home_paths', None)
+            if (getattr(paths, 'owner_id', None) != call.owner_id
+                    or Path(getattr(paths, 'owner_home_dir', '')).resolve() != Path(call.owner_home).resolve()):
+                _not_found()
+            # 冻结 TaskView 不承载工作区；未绑定时只取准确 owner 宿主的规范根。
+            candidate = getattr(host, 'effective_workspace_root', None)
     if not isinstance(candidate, (str, Path)) or not Path(candidate).is_absolute():
         raise HostAPIError('HOST_NOT_READY', 503)
     return Path(candidate).resolve()

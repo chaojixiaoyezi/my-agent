@@ -8,6 +8,7 @@ from collections import OrderedDict, deque
 from contextlib import ExitStack
 from contextvars import Context
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 from ..concurrency.daemon_executor import DurableDaemonThreadPoolExecutor
@@ -187,6 +188,13 @@ def _run(job):
         thread_id = row['conversation_id']
         _conversation(call, thread_id)
         with ExitStack() as stack:
+            provider = call.context.host_provider
+            agent = provider(stack) if callable(provider) else agent
+            paths = getattr(agent, 'home_paths', None)
+            if (getattr(paths, 'owner_id', None) != call.owner_id
+                    or Path(getattr(paths, 'owner_home_dir', '')).resolve() != Path(call.owner_home).resolve()):
+                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+            # 取消只丢弃结果；完整宿主租约与 job 槽都保留到物理生成结束。
             profile = row.get('model_profile_id')
             if profile:
                 # 显式覆盖不依赖失效的旧模型，也不写回 canonical 选择。

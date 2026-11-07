@@ -900,15 +900,20 @@ def bridge_for(call):
 
     v13_require_access(call)
     host = call.context.host
-    # 同一宿主并发首次创建也必须合流；锁属于模块，不包含会话或 owner 数据。
+    scope = getattr(host, 'business_v13_gateway_paths', host)
+    key = (id(scope), str(Path(call.owner_home).resolve()), call.owner_id)
+    # 原桥保留可信宿主及 scope 引用；HTTP 临时宿主和 services 淘汰不改变 transport 所有权。
     with _bridge_lock:
-        bridge = getattr(host, '_gap158_acp_bridge', None)
+        bridge = _bridges.get(key)
         if bridge is None:
             bridge = AcpBridge(call)
-            host._gap158_acp_bridge = bridge
+            _bridges[key] = bridge
         if bridge.owner_id != call.owner_id or bridge.owner_home != Path(call.owner_home).resolve():
             raise BusinessError('RESOURCE_NOT_FOUND')
+        host._gap158_acp_bridge = bridge
+        bridge.host.config = host.config
         return bridge
 
 
 _bridge_lock = threading.Lock()
+_bridges = {}
