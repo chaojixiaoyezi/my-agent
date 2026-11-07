@@ -24,10 +24,12 @@ from agent_py_agent.agent.user_space import owner_epoch
 
 
 @pytest.fixture
-def lane(tmp_path, monkeypatch):
+def lane(tmp_path, monkeypatch, request):
     paths = gateway_paths_from_root(tmp_path / "gateway")
     ensure_gateway_folders(paths)
-    agent = SimpleNamespace(config=SimpleNamespace(conversation_actor_workers=1), conversation_store=None)
+    agent = SimpleNamespace(config=SimpleNamespace(
+        conversation_actor_workers=getattr(request, "param", 1), owner_epoch_fence_enabled=False,
+    ), conversation_store=None)
     scheduler = worker.gateway_conversation_scheduler(paths, agent)
     monkeypatch.setattr(worker, "admission", worker.GatewayAdmission())
     monkeypatch.setattr(worker, "_CLAIM_EPOCHS", {})
@@ -35,7 +37,8 @@ def lane(tmp_path, monkeypatch):
     try:
         yield state
     finally:
-        scheduler.close(wait=True)
+        if scheduler is not None:
+            scheduler.close(wait=True)
 
 
 def enqueue(lane):
@@ -387,3 +390,68 @@ def test_owner_capacity_changed_claim_cannot_release_reservation(lane):
     assert lane.scheduler.sequencer.snapshot(key)["active"] == (claim.request_id, "", 0)
     assert exact in worker._CLAIM_EPOCHS
     assert claim.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("lane", [0], indirect=True)
+@pytest.mark.parametrize("kind", ["provider", "background"])
+def test_disabled_actor_requeue_then_terminal_leaves_no_request_bindings(lane, monkeypatch, kind):
+    assert lane.scheduler is None
+    assert lane.agent.config.owner_epoch_fence_enabled is False
+    lane.agent.subagents = SimpleNamespace(runtime_db=RuntimeRepository(lane.root / "disabled-epoch.db"))
+    rid, _, _ = enqueue(lane)
+    claim, user, key = dispatch(lane)
+    binding = worker._stamp_claim_owner_epoch(
+        lane.agent, claim.path, read_json_file(claim.path), claim.execution_attempt_id,
+    )
+    exact = worker._claim_epoch_key(claim.path, rid, claim.execution_attempt_id)
+    unrelated = worker._claim_epoch_key(lane.paths.processing / "unrelated.json", "unrelated", "other-attempt")
+    worker._CLAIM_EPOCHS[unrelated] = binding
+    assert exact in worker._CLAIM_EPOCHS
+    assert requeue(lane, claim, kind, monkeypatch)
+    assert exact not in worker._CLAIM_EPOCHS
+    pending = lane.paths.inbox / claim.name
+    assert read_json_file(pending)["status"] == "pending"
+    assert not (lane.paths.terminal / claim.name).exists()
+    worker.admission.release(user, conversation_key=key)
+    update_json_file_atomic(pending, lambda payload: dict(payload, not_before_at=0))
+    following, _, _ = dispatch(lane)
+    assert following.execution_attempt_id != claim.execution_attempt_id
+    worker._stamp_claim_owner_epoch(
+        lane.agent, following.path, read_json_file(following.path), following.execution_attempt_id,
+    )
+    assert worker._claim_epoch_key(following.path, rid, following.execution_attempt_id) in worker._CLAIM_EPOCHS
+    finish(lane, following, {"id": rid, "status": "done", "ok": True})
+    assert read_json_file(lane.paths.terminal / following.name)["terminal_response"]["status"] == "done"
+    assert [entry for entry in worker._CLAIM_EPOCHS if entry[2] == rid] == []
+    assert unrelated in worker._CLAIM_EPOCHS
+
+
+@pytest.mark.parametrize("lane", [0], indirect=True)
+@pytest.mark.parametrize("outcome", ["unknown", "uncommitted", "restart_resume"])
+def test_disabled_actor_unfinished_exits_keep_claim_binding(lane, monkeypatch, outcome):
+    from agent_py_agent.agent.backends.bounded_call import BoundedCallExitUnconfirmedError
+
+    assert lane.scheduler is None
+    assert lane.agent.config.owner_epoch_fence_enabled is False
+    lane.agent.subagents = SimpleNamespace(runtime_db=RuntimeRepository(lane.root / "unfinished-epoch.db"))
+    enqueue(lane)
+    claim, _, _ = dispatch(lane)
+    worker._stamp_claim_owner_epoch(lane.agent, claim.path, read_json_file(claim.path), claim.execution_attempt_id)
+    exact = worker._claim_epoch_key(claim.path, claim.request_id, claim.execution_attempt_id)
+    before = claim.path.read_bytes()
+    if outcome == "unknown":
+        worker.terminalize_unhandled_claimed_gateway_request(
+            lane.paths, claim.path, BoundedCallExitUnconfirmedError("unconfirmed-call", "worker_exit_unknown"),
+            expected_execution_attempt_id=claim.execution_attempt_id, expected_lease_epoch=claim.lease_epoch,
+        )
+    else:
+        response = {"id": claim.request_id, "status": "done"}
+        if outcome == "restart_resume":
+            response["restart_resume"] = {"cause": "shutdown"}
+        else:
+            monkeypatch.setattr(worker, "archive_request", lambda *_args, **_kwargs:
+                                GatewayArchiveResult(GatewayArchiveDisposition.RETRYABLE_IO))
+        finish(lane, claim, response)
+    assert exact in worker._CLAIM_EPOCHS
+    assert claim.path.read_bytes() == before
+    assert not (lane.paths.terminal / claim.name).exists()
