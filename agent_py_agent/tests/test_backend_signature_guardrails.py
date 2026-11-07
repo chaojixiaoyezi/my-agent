@@ -11,6 +11,8 @@ import inspect
 import pkgutil
 from pathlib import Path
 
+import pytest
+
 # 四个必须与基类保持同一签名的传输方法（基类定义在 backends/http.py）。
 GUARDED_TRANSPORT_METHODS = (
     "_gateway_request",
@@ -18,7 +20,7 @@ GUARDED_TRANSPORT_METHODS = (
     "request_stream",
     "request_stream_iter",
 )
-# 调用点扫描范围：agent_py_agent 包根（tests/ 子目录排除——替身允许用 **kwargs 换签名）。
+# 调用点只扫描agent/backends模块；包根用于范围限定和诊断路径，CLI同名方法不属于该合同。
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -168,7 +170,7 @@ def _transport_call_target(func: ast.expr) -> str | None:
 
 # LLM: 关键字集合以基类签名为权威——覆盖签名已由上一个守卫保证与基类一致，无需按 MRO 逐个解析；
 #   **kwargs 展开（arg 为 None）无法静态判定，跳过；基类方法带 VAR_KEYWORD 时整个方法放宽。
-# 函数用途: ast 扫描产品代码（tests/ 除外），返回四个传输方法调用里签名不认识的关键字位置。
+# 函数用途: ast扫描后端模块（tests/除外），返回四个传输方法调用里签名不认识的关键字位置。
 def _scan_transport_call_sites() -> tuple[list[str], int]:
     from agent_py_agent.agent.backends.http import HttpBackend
 
@@ -178,7 +180,7 @@ def _scan_transport_call_sites() -> tuple[list[str], int]:
     }
     violations: list[str] = []
     call_count = 0
-    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+    for path in sorted((_PACKAGE_ROOT / "agent" / "backends").rglob("*.py")):
         call_count += _scan_file_call_sites(path, allowed, violations)
     return violations, call_count
 
@@ -200,15 +202,16 @@ def _allowed_keywords(method: object) -> set[str] | None:
     return names
 
 
-# LLM: 单文件扫描独立成函数：tests/ 目录整文件跳过（替身允许用 **kwargs 换签名）；
-#   调用点关键字检查交给 _call_site_violations，保持本函数"文件 → 调用"两层。
-# 函数用途: 扫描一个文件里的传输方法直接调用，返回发现的相关调用点数量。
+# LLM: 只接收agent/backends下的模块，排除其他客户端的同名方法；tests替身继续整文件跳过。
+#   调用点关键字仍由真实基类签名检查，不因范围限定而放宽self/super的关键字约束。
+# 函数用途: 扫描一个后端文件里的传输方法直接调用，返回发现的相关调用点数量。
 def _scan_file_call_sites(
     path: Path,
     allowed: dict[str, set[str] | None],
     violations: list[str],
 ) -> int:
-    if "tests" in path.relative_to(_PACKAGE_ROOT).parts:
+    relative_parts = path.relative_to(_PACKAGE_ROOT).parts
+    if relative_parts[:2] != ("agent", "backends") or "tests" in relative_parts:
         return 0
     call_count = 0
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -279,3 +282,74 @@ def test_signature_fingerprint_detects_name_kind_and_default_changes() -> None:
     assert fingerprint(base) != fingerprint(renamed)
     assert fingerprint(base) != fingerprint(keyword_only_changed)
     assert fingerprint(base) != fingerprint(default_dropped)
+
+
+# LLM: 样本只写pytest临时树，关键字仍从真实HttpBackend签名提取，不修改产品文件。
+# 函数用途: 为扫描器范围和错误识别准备一个独立源码文件。
+def _call_site_fixture(tmp_path, monkeypatch, relative_path: str, source: str):
+    from agent_py_agent.agent.backends.http import HttpBackend
+
+    package_root = tmp_path / "agent_py_agent"
+    monkeypatch.setitem(globals(), "_PACKAGE_ROOT", package_root)
+    path = package_root / relative_path
+    path.parent.mkdir(parents=True)
+    path.write_text(source, encoding="utf-8")
+    allowed = {
+        name: _allowed_keywords(getattr(HttpBackend, name))
+        for name in GUARDED_TRANSPORT_METHODS
+    }
+    return path, allowed
+
+
+# LLM: 同名CLI/普通客户端不属于后端传输合同；tests替身也继续排除。
+# 函数用途: 防止把非后端的conversation_id参数误报为HttpBackend签名错误。
+@pytest.mark.parametrize("relative_path", [
+    "cli/chat_parts/gateway_client.py",
+    "agent/other_client.py",
+    "tests/fake_backend.py",
+    "agent/backends/tests/fake_backend.py",
+])
+def test_transport_call_scanner_ignores_non_backend_clients(tmp_path, monkeypatch, relative_path):
+    source = (
+        "class OtherClient:\n"
+        "    def invoke(self):\n"
+        "        self.request_json(conversation_id='thread')\n"
+        "        super().request_json(conversation_id='thread')\n"
+    )
+    path, allowed = _call_site_fixture(tmp_path, monkeypatch, relative_path, source)
+    violations = []
+    assert _scan_file_call_sites(path, allowed, violations) == 0
+    assert violations == []
+
+
+# LLM: 四个方法和两种直接接收者都必须继续受守卫覆盖，目录限定不能变成全跳过。
+# 函数用途: 验证后端模块的未知关键字仍被识别并附带准确调用位置。
+@pytest.mark.parametrize("method", GUARDED_TRANSPORT_METHODS)
+@pytest.mark.parametrize("target", ["self", "super()"])
+def test_transport_call_scanner_keeps_backend_keyword_checks(tmp_path, monkeypatch, method, target):
+    source = (
+        "class ProbeBackend(HttpBackend):\n"
+        "    def invoke(self):\n"
+        f"        {target}.{method}(unknown_transport_keyword=True)\n"
+    )
+    path, allowed = _call_site_fixture(tmp_path, monkeypatch, "agent/backends/nested/probe.py", source)
+    violations = []
+    assert _scan_file_call_sites(path, allowed, violations) == 1
+    assert len(violations) == 1
+    assert "agent_py_agent/agent/backends/nested/probe.py:3" in violations[0]
+    assert f"{target}.{method}(unknown_transport_keyword=...)" in violations[0]
+
+
+# LLM: 合法参数不能被目录修复误伤，self与super调用仍分别计入覆盖数。
+# 函数用途: 保留后端正常关键字调用的通过语义。
+def test_transport_call_scanner_accepts_known_backend_keywords(tmp_path, monkeypatch):
+    source = (
+        "class ProbeBackend(HttpBackend):\n"
+        "    def invoke(self):\n"
+        "        self.request_json(path='/model', payload={}, headers=None)\n"
+        "        super().request_json(path='/model', payload={}, total_deadline_seconds=1)\n"
+    )
+    path, allowed = _call_site_fixture(tmp_path, monkeypatch, "agent/backends/probe.py", source)
+    violations = []
+    assert _scan_file_call_sites(path, allowed, violations) == 2
+    assert violations == []
