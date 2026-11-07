@@ -696,6 +696,8 @@ def _require_coordinator_loop_source(context):
 class _OwnerWakeHints:
     """后台组合根只维护提示；通知锁不参与权威写事务，堆锁永不跨I/O。"""
 
+    # LLM: 构造失败撤销本次已登记监听并保留原异常，不启动半成品提示设施。
+    # 函数用途: 装配可丢失的唤醒提示，失败不留下订阅。
     def __init__(self, context):
         from ..agent.runtime_db.input_lifecycle import add_wake_listener
 
@@ -720,10 +722,18 @@ class _OwnerWakeHints:
         self._hint_failures = 0
         self._scheduler_changes = 0
         self._armed = {}
-        self._removers = [self.due_index.add_due_listener(self._due_changed), add_wake_listener(self._runtime_changed)]
-        self.discovery = bind_owner_activity_index(self.home.owners_dir, self.index,
-            sweep_seconds=self.rescan, freshness_seconds=self.backstop, note_owner=self.note_owner, forget_owner=self.forget_owner)
-        self.base._owner_wake_hints = self
+        self._removers = []
+        try:
+            self._removers.append(self.due_index.add_due_listener(self._due_changed))
+            self._removers.append(add_wake_listener(self._runtime_changed))
+            self.discovery = bind_owner_activity_index(self.home.owners_dir, self.index,
+                sweep_seconds=self.rescan, freshness_seconds=self.backstop, note_owner=self.note_owner, forget_owner=self.forget_owner)
+            self.base._owner_wake_hints = self
+        except Exception:
+            for remove in self._removers:
+                remove()
+            self._removers.clear()
+            raise
 
     def bind_controller(self, kind, controller):
         controller._wake_hints = self
@@ -917,11 +927,19 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
     except Exception as exc:
         _print_gateway_loop_error("gateway_background_main.initialize", "background-main", exc)
         return
-    # 旧组合缝可提供supervisor而不携带agent；没有基础代理就不物化提示设施。
-    hints = _OwnerWakeHints(context) if getattr(context, "agent", None) is not None else None
-    if hints is not None:
-        hints.bind_controller("runtime_wake", supervisor)
-        hints.start()
+    # 提示初始化失败只降级本次提示，不能让原三条辅助循环和主循环等候重试。
+    hints = None
+    try:
+        if getattr(context, "agent", None) is not None:
+            hints = _OwnerWakeHints(context)
+            hints.bind_controller("runtime_wake", supervisor)
+            hints.start()
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_owner_wake_hints.initialize", "background-main", exc)
+        if hints is not None:
+            hints.close()
+        hints = context.agent._owner_wake_hints = None
+        supervisor._wake_hints = None
     reconcile_thread = _start_orphan_reconcile_loop(context, stop_event)
     maintenance_thread = _start_owner_maintenance_loop(context, stop_event)
     scheduler_due_thread = _start_scheduler_due_loop(context, stop_event)
