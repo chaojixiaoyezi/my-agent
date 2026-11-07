@@ -754,6 +754,8 @@ def _current_at(parent, leaf):
         os.close(descriptor)
 
 
+# LLM: mkdir 前后复核同一技能父链；提交前换绑是冲突，已建目录后才发现则保留未知和耐久占位。
+# 函数用途: 在仍绑定当前 owner 技能的目录内创建资源目录。
 @_boundary
 def dirs_create(call: V13Call) -> dict:
     name, directory = _name(call.params['name']), call.params['dir']
@@ -763,8 +765,17 @@ def dirs_create(call: V13Call) -> dict:
     def create(_admission, mark_effect):
         _owner_skill(call, name, writable=True)
         created = False
-        with _directory(call.owner_home, ('skills', name)) as parent:
+        parts = ('skills', name)
+        try:
+            chain = _parent_chain(call.owner_home, parts)
+        except BusinessError as error:
+            if error.code == 'REVISION_CONFLICT':
+                raise BusinessError('STATE_CONFLICT') from None
+            raise
+        with _directory(call.owner_home, parts) as parent:
             try:
+                v13_require_access(call)
+                _bound_parent(call.owner_home, parts, parent, chain)
                 try:
                     os.mkdir(directory, mode=0o700, dir_fd=parent)
                     created = True
@@ -772,10 +783,13 @@ def dirs_create(call: V13Call) -> dict:
                 except FileExistsError:
                     with _directory(call.owner_home, ('skills', name, directory)):
                         pass
+                _bound_parent(call.owner_home, parts, parent, chain)
                 os.fsync(parent)
             except BaseException as error:
                 if created:
                     raise HostAPIError('OUTCOME_UNKNOWN', 503, 'unknown') from error
+                if isinstance(error, BusinessError) and error.code == 'REVISION_CONFLICT':
+                    raise BusinessError('STATE_CONFLICT') from None
                 raise
         return {'created': created, 'path': directory}
     return _receipt(call, create)

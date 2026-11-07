@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shlex
 import subprocess
 import sys
 import threading
@@ -81,7 +82,9 @@ class _Manager(PluginManagement):
         assert expected_revision == (old.revision if old else 0)
         assert old is None or not old.enabled
         entry = SimpleNamespace(manifest=package.manifest, package_sha256=package.sha256,
-                                revision=expected_revision + 1, enabled=False, activation_id="")
+                                revision=expected_revision + 1, enabled=False, activation_id="",
+                                installation_ref=hashlib.sha256(operation_id.encode()).hexdigest(),
+                                installation_scope='private')
         self.entries[package.manifest.plugin_id] = entry
         return SimpleNamespace(installation=entry)
 
@@ -98,6 +101,20 @@ class _Manager(PluginManagement):
         entry.revision += 1
         entry.activation_id = "activation-" + str(entry.revision) if entry.enabled else ""
         return entry, {"state": "succeeded", "ok": True}
+
+    def command(self, text, *, revision, request_id):
+        # 替身也消费原命令的冻结目录修订；真实 Store/卸载 CAS 另有原生交错用例。
+        if revision != self.catalog().revision:
+            return {'state': 'failed', 'ok': False, 'error_code': 'PLUGIN_CATALOG_STALE',
+                    'effect_outcome': 'not_started'}
+        _, action, plugin_id = shlex.split(text)
+        _, outcome = self.package_lifecycle(plugin_id, 'uninstall' if action == 'remove' else action,
+                                            operation_id=request_id.removesuffix('-0'))
+        if outcome.get('state') == 'succeeded' and action != 'remove':
+            thread = self._thread(create=True)
+            self.entries[plugin_id].last_commit = SimpleNamespace(
+                operation_id=self._identity(thread.thread_id, request_id).operation_id)
+        return outcome
 
     def _business_sandbox_problem(self, entry):
         return self.problem
@@ -372,15 +389,16 @@ def test_native_plugin_install_and_authorization_flow_without_network(env, monke
     # 这里只替代业务鉴权夹具；原生 manager、安装 Store、审批工具和 runtime.db 全部真实。
     monkeypatch.setattr(plugins, "management", native_management)
     observed = []
-    lifecycle = PluginManagement.package_lifecycle
+    command = PluginManagement.command
 
     def observe(manager, *args, **kwargs):
-        result = lifecycle(manager, *args, **kwargs)
-        observed.append(result[1])
+        result = command(manager, *args, **kwargs)
+        observed.append(result)
         return result
 
-    monkeypatch.setattr(PluginManagement, "package_lifecycle", observe)
+    monkeypatch.setattr(PluginManagement, "command", observe)
     result = tools.create(call)["tool"]
+    assert observed
     assert result["state"] == "pending_authorization", observed
     manager = native_management(call)
     entries = manager.installations.snapshot()
@@ -634,3 +652,160 @@ def test_delete_failure_after_disable_preserves_committed_effect(env, monkeypatc
     assert error.outcome == 'committed'
     assert result['plugin_id'] in manager.entries and not manager.entries[result['plugin_id']].enabled
     assert '_busy' not in v13_store_for(call, 'owner').get('custom_tools', result['tool_id'])
+
+
+def test_delete_sha_binding_survives_concurrent_native_package_replacement(env, monkeypatch):
+    call = env.call(params=_params())
+    call.context.host.config.plugin_legacy_sandbox_default = False
+    monkeypatch.setattr(plugins, 'management', native_management)
+    result = tools.create(call)['tool']
+    manager = native_management(call)
+    original = tools._native_entry
+    entered, release = threading.Event(), threading.Event()
+
+    def bound(manager, record, **kwargs):
+        entry = original(manager, record, **kwargs)
+        entered.set()
+        assert release.wait(10), '原生替换交错未释放'
+        return entry
+
+    monkeypatch.setattr(tools, '_native_entry', bound)
+    deleting = _same(env, call, 'delete', {'tool_id': result['tool_id'], 'expected_sha256': result['sha256']})
+    replacement = tools._package(result['plugin_id'], tools._definition(_params(entry_script="print('native B')")))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(lambda: _error('REVISION_CONFLICT', lambda: tools.delete(deleting)))
+        try:
+            assert entered.wait(10)
+            entry = manager.installations.snapshot()[0]
+            manager.install_package_bytes(replacement, operation_id='native-replace-during-delete',
+                                          expected_revision=entry.revision)
+        finally:
+            release.set()
+        running.result(timeout=10)
+    entries = manager.installations.snapshot()
+    assert len(entries) == 1 and entries[0].package_sha256 == hashlib.sha256(replacement).hexdigest()
+    assert entries[0].package_sha256 != result['sha256']
+
+
+@pytest.mark.parametrize('action', ['create', 'update', 'delete', 'test'])
+def test_native_effect_then_entity_finish_store_failure_is_unknown_and_not_reexecuted(env, monkeypatch, action):
+    if action == 'create':
+        call = env.call(params=_params())
+    else:
+        initial, result = _created(env)
+        params = {'tool_id': result['tool_id'], 'expected_sha256': result['sha256']}
+        if action == 'update':
+            params['entry_script'] = "print('new')"
+        elif action == 'test':
+            params = {'tool_id': result['tool_id'], 'args': {'text': 'x'}}
+        call = _same(env, initial, action, params)
+    native_store = tools.v13_store_for
+    failures, executed = [], []
+
+    class Store:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def transaction(self, *args, **kwargs):
+            if kwargs.get('idempotency_key', '').endswith('-finish') and not failures:
+                failures.append(True)
+                raise BusinessError('STORE_UNAVAILABLE')
+            return self.delegate.transaction(*args, **kwargs)
+
+    def invoke(*args):
+        executed.append(True)
+        return {'state': 'succeeded', 'ok': True, 'output': 'done'}
+
+    monkeypatch.setattr(tools, 'execute_plugin_invocation', invoke)
+    monkeypatch.setattr(tools, 'v13_store_for', lambda *args: Store(native_store(*args)))
+    handler = tools.HANDLERS[call.action]
+    error = _error('OUTCOME_UNKNOWN', lambda: handler(call))
+    assert error.outcome == 'unknown' and failures == [True]
+    calls = len(env.managers[call.owner_id].calls)
+    assert _error('OUTCOME_UNKNOWN', lambda: handler(call)).outcome == 'unknown'
+    assert len(env.managers[call.owner_id].calls) == calls
+    assert executed == ([True] if action == 'test' else [])
+    records = v13_store_for(call, 'owner').list('custom_tools')
+    assert len(records) == 1 and records[0]['_busy'] == tools._operation(call)
+
+
+@pytest.mark.parametrize('action,stage,authorized', [
+    ('delete', 'disable', True), ('update', 'disable', True),
+    ('create', 'enable', True), ('update', 'enable', True), ('create', 'enable', False),
+])
+def test_lifecycle_readback_rejects_same_bytes_reinstall_and_preserves_unknown(env, monkeypatch, action, stage, authorized):
+    """原生命令 I/O 替身交错；真实身份算法和 owner 收口仓库不替换，不冒充批准后插件运行。"""
+    if action == 'create':
+        call = env.call(params=_params())
+    else:
+        initial, result = _created(env)
+        params = {'tool_id': result['tool_id'], 'expected_sha256': result['sha256']}
+        if action == 'update':
+            params['entry_script'] = "print('new')"
+        call = _same(env, initial, action, params)
+    manager = env.managers[call.owner_id]
+    manager.authorization = authorized
+    original = manager.command
+    entered, release = threading.Event(), threading.Event()
+    selected = []
+
+    def paused(text, **kwargs):
+        outcome = original(text, **kwargs)
+        if shlex.split(text)[1] == stage:
+            selected.append(shlex.split(text)[2])
+            entered.set()
+            assert release.wait(10), '同包重装交错未释放'
+        return outcome
+
+    monkeypatch.setattr(manager, 'command', paused)
+    handler = tools.HANDLERS[call.action]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(lambda: _error('OUTCOME_UNKNOWN', lambda: handler(call)))
+        try:
+            assert entered.wait(10), '未进入目标原生命令读回窗口'
+            prior = manager.entries[selected[0]]
+            # 同 SHA、相同 enabled 甚至相同数值 revision，也不能代替另一安装提交的身份。
+            replacement = SimpleNamespace(**{**vars(prior),
+                'installation_ref': hashlib.sha256(b'foreign-installation').hexdigest(),
+                'last_commit': SimpleNamespace(operation_id='foreign-native-installation')})
+            manager.entries[selected[0]] = replacement
+            calls_at_swap = len(manager.calls)
+        finally:
+            release.set()
+        assert running.result(timeout=10).outcome == 'unknown'
+    assert manager.entries[selected[0]] is replacement
+    assert _error('OUTCOME_UNKNOWN', lambda: handler(call)).outcome == 'unknown'
+    assert len(manager.calls) == calls_at_swap
+    record = v13_store_for(call, 'owner').get('custom_tools', selected[0])
+    assert record['_busy'] == tools._operation(call)
+
+
+@pytest.mark.parametrize('action', ['create', 'update', 'delete'])
+def test_lifecycle_readback_failure_after_native_effect_stays_unknown(env, monkeypatch, action):
+    if action == 'create':
+        call = env.call(params=_params())
+    else:
+        initial, result = _created(env)
+        params = {'tool_id': result['tool_id'], 'expected_sha256': result['sha256']}
+        if action == 'update':
+            params['entry_script'] = "print('new')"
+        call = _same(env, initial, action, params)
+    manager = env.managers[call.owner_id]
+    original = manager.command
+
+    def unreadable():
+        raise PluginInstallationError('table_corrupt', '提交后的只读表故障')
+
+    def command(*args, **kwargs):
+        outcome = original(*args, **kwargs)
+        manager.installations.snapshot = unreadable
+        return outcome
+
+    monkeypatch.setattr(manager, 'command', command)
+    handler = tools.HANDLERS[call.action]
+    assert _error('OUTCOME_UNKNOWN', lambda: handler(call)).outcome == 'unknown'
+    commands = len(manager.calls)
+    assert _error('OUTCOME_UNKNOWN', lambda: handler(call)).outcome == 'unknown'
+    assert len(manager.calls) == commands
+    record = v13_store_for(call, 'owner').list('custom_tools')[0]
+    assert record['_busy'] == tools._operation(call)

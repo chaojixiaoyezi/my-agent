@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from ..conversation.business_access import BusinessError
 from ..plugin_host.errors import HostAPIError
 from ..plugin_installation import PluginInstallationError
 from ..plugin_invocation import PluginInvocation, execute_plugin_invocation
+from ..plugin_management import _visible_entries
 from ..plugin_manifest import PluginPackageError
 from ..plugin_package import inspect_plugin_package
 from ..plugin_runtime import PluginMCPClient, plugin_tool_name
@@ -71,12 +73,16 @@ def _operation(call):
     return "ct-" + _digest([call.owner_id, call.subject_id, call.action, call.idempotency_key])[:40]
 
 
+# LLM: reserve 失败仍可确定未开始；finish 位于原生副作用之后，持久化不确定时不得降为普通拒绝。
+# 函数用途: 复用原 owner 事务，并把收尾存储故障保留为未知结局。
 def _transaction(call, stage, mutate):
     try:
         return v13_store_for(call, "owner").transaction(
             "custom_tools", mutate, idempotency_key=_operation(call) + "-" + stage,
             params_digest=_digest([call.params, call.expected_revision]))
     except BusinessError as error:
+        if stage == 'finish':
+            raise HostAPIError('OUTCOME_UNKNOWN', 503, 'unknown', '实体收尾提交尚未确认。') from None
         status = {"IDEMPOTENCY_CONFLICT": 409, "REVISION_CONFLICT": 409,
                   "RESOURCE_NOT_FOUND": 404, "INVALID_SCHEMA": 400}.get(error.code, 503)
         code = error.code if error.code in {"IDEMPOTENCY_CONFLICT", "REVISION_CONFLICT",
@@ -90,6 +96,8 @@ class _Replay(Exception):
         self.fact = fact
 
 
+# LLM: 先耐久 claim 再执行原生动作；unknown 不封成失败回执，也不清除占位或自动重执行。
+# 函数用途: 为自定义工具保存同键重放与未结操作的唯一身份。
 def _receipted(call, work):
     """同一 owner Store 保存有界在途元数据与逐键终态事实，副作用在原事务锁外执行。"""
     _access(call)
@@ -143,6 +151,8 @@ def _receipted(call, work):
     try:
         result = work()
     except HostAPIError as error:
+        if error.outcome == 'unknown':
+            raise
         finish({"state": "failed", "error": {"code": error.code, "status": error.status, "outcome": error.outcome}})
         raise
     except Exception:
@@ -313,12 +323,22 @@ def _view(record, entry):
             "state": state, "sha256": entry.package_sha256}
 
 
-def _lifecycle(call, record, action, suffix):
+# LLM: 原安装及同次目录修订进入原管理命令；读回变更须属于该 HostCommand 提交，不能接受同包重装。
+# 函数用途: 固定启停和卸载的目标，保留原审批/CAS，并把提交后读回故障留为未知。
+def _lifecycle(call, record, action, suffix, *, expected):
     _access(call, execute=True)
     manager = plugins.management(call)
     try:
-        current, outcome = manager.package_lifecycle(record["plugin_id"], action,
-                                                      operation_id=_operation(call) + "-" + suffix)
+        entries = manager.installations.snapshot()
+        current = next((item for item in entries if item.manifest.plugin_id == record['plugin_id']), None)
+        if current is None or _installation_stamp(current) != _installation_stamp(expected):
+            raise HostAPIError('REVISION_CONFLICT', 409, message='原生插件安装已变化。')
+        selected_stamp = _installation_stamp(current)
+        revision = manager._catalog(_visible_entries(manager, entries)).revision
+        command = 'remove' if action == 'uninstall' else action
+        request_id = _operation(call) + '-' + suffix + '-0'
+        outcome = manager.command('/plugins ' + command + ' ' + shlex.quote(record['plugin_id']),
+                                  revision=revision, request_id=request_id) or {}
     except PluginInstallationError as error:
         raise _installation_error(call, error) from None
     except RuntimeConflictError:
@@ -326,7 +346,33 @@ def _lifecycle(call, record, action, suffix):
     if isinstance(outcome, dict) and (outcome.get("state") == "outcome_unknown"
                                       or outcome.get("effect_outcome") == "unknown"):
         raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown", "原生插件操作结果尚未确认。")
+    if outcome.get('error_code') == 'PLUGIN_CATALOG_STALE':
+        raise HostAPIError('REVISION_CONFLICT', 409, message='原生插件目录已经变化。')
+    try:
+        current = next((item for item in manager.installations.snapshot()
+                        if item.manifest.plugin_id == record['plugin_id']), None)
+    except Exception:
+        # 已调用原执行门，读表失败不能借异常的默认 not_committed 断言副作用未发生。
+        raise HostAPIError('OUTCOME_UNKNOWN', 503, 'unknown', '原生提交后的安装事实尚不可读。') from None
+    if outcome.get('state') == 'succeeded':
+        if ((action == 'uninstall' and current is not None)
+                or (action != 'uninstall' and (current is None or current.package_sha256 != record['sha256']
+                    or current.enabled is not (action == 'enable')))):
+            raise HostAPIError('OUTCOME_UNKNOWN', 503, 'unknown', '原生提交后的安装事实已经变化。')
+    if action != 'uninstall' and current is not None and _installation_stamp(current) != selected_stamp:
+        # 启停合法改变引用，但即使本次只返回待审批，也不能接受另一请求重装的安装。
+        thread = manager._thread(create=False)
+        commit = getattr(current, 'last_commit', None)
+        if (thread is None or getattr(commit, 'operation_id', None)
+                != manager._identity(thread.thread_id, request_id).operation_id):
+            raise HostAPIError('OUTCOME_UNKNOWN', 503, 'unknown', '读回安装不属于本次原生命令提交。')
     return current, outcome or {}
+
+
+# LLM: 绑定重装引用、修订及激活代次，不能只按可重复的 plugin_id 或包 SHA 认定旧请求目标。
+# 函数用途: 提取原安装的不可变目标身份。
+def _installation_stamp(entry):
+    return (entry.installation_ref, entry.revision, entry.package_sha256, entry.enabled, entry.activation_id)
 
 
 def _installation_error(call, error):
@@ -365,7 +411,7 @@ def _install_enable(call, record, raw, expected_revision, *, before=None):
     entry = result.installation
     updated = {**record, "sha256": entry.package_sha256, "pending_authorization": False}
     try:
-        current, outcome = _lifecycle(call, updated, "enable", "enable")
+        current, outcome = _lifecycle(call, updated, "enable", "enable", expected=entry)
     except HostAPIError as error:
         # 包已写入时保留真实内容；未知仍留占位，不假报失败前的旧版本。
         if error.outcome != "unknown":
@@ -412,7 +458,7 @@ def update(call: V13Call) -> dict:
             raw = _package(record["plugin_id"], definition)
             current = _native_entry(plugins.management(call), record)
             if current.enabled:
-                current, outcome = _lifecycle(call, record, "disable", "disable")
+                current, outcome = _lifecycle(call, record, "disable", "disable", expected=current)
                 disabled = current is not None and not current.enabled
                 if current is None or current.enabled or outcome.get("state") != "succeeded":
                     raise HostAPIError("HOST_NOT_READY", 503, message="请先完成原生插件停用确认；尚未替换包。")
@@ -441,11 +487,11 @@ def delete(call: V13Call) -> dict:
         try:
             current = _native_entry(plugins.management(call), record)
             if current.enabled:
-                current, outcome = _lifecycle(call, record, "disable", "disable")
+                current, outcome = _lifecycle(call, record, "disable", "disable", expected=current)
                 disabled = current is not None and not current.enabled
                 if current is None or current.enabled or outcome.get("state") != "succeeded":
                     raise HostAPIError("HOST_NOT_READY", 503, message="请先完成原生插件停用确认；尚未删除。")
-            current, outcome = _lifecycle(call, record, "uninstall", "remove")
+            current, outcome = _lifecycle(call, record, "uninstall", "remove", expected=current)
             if current is not None or outcome.get("state") != "succeeded":
                 raise HostAPIError("HOST_NOT_READY", 503, message="原生插件删除尚未确认。")
         except HostAPIError as error:

@@ -949,3 +949,56 @@ def test_upload_rejects_replaced_skills_root_without_publishing(host, monkeypatc
     assert not (root / 'sample').exists()
     assert not (moved / 'sample').exists()
     assert (moved / 'keep' / 'SKILL.md').read_bytes() == _body('keep')
+
+
+@pytest.mark.parametrize('when', ['before_mkdir', 'during_mkdir'])
+def test_dirs_create_rechecks_parent_binding_before_and_after_effect(host, monkeypatch, when):
+    from contextlib import contextmanager
+
+    root = _skill(host)
+    moved = root.with_name('moved-sample')
+    entered, release = threading.Event(), threading.Event()
+    original_directory, original_mkdir = packages._directory, os.mkdir
+    attempts = []
+    parent_opens = []
+
+    def pause():
+        attempts.append(True)
+        entered.set()
+        assert release.wait(10), '目录换绑交错未释放'
+
+    @contextmanager
+    def directory(home, parts, **kwargs):
+        with original_directory(home, parts, **kwargs) as descriptor:
+            if when == 'before_mkdir' and tuple(parts) == ('skills', 'sample'):
+                parent_opens.append(True)
+                # 第一次是 _owner_skill 的存在性探针；第二次才是 mkdir 真正持有的父 FD。
+                if len(parent_opens) == 2:
+                    pause()
+            yield descriptor
+
+    def mkdir(path, *args, **kwargs):
+        if when == 'during_mkdir' and path == 'references' and kwargs.get('dir_fd') is not None and not attempts:
+            pause()
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(packages, '_directory', directory)
+    monkeypatch.setattr(os, 'mkdir', mkdir)
+    monkeypatch.setattr(os, 'supports_dir_fd', {*os.supports_dir_fd, mkdir})
+    call = _call(host, 'dirs.create', {'name': 'sample', 'dir': 'references'})
+    code = 'STATE_CONFLICT' if when == 'before_mkdir' else 'OUTCOME_UNKNOWN'
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(lambda: _assert_error(code, lambda: packages.dirs_create(call)))
+        try:
+            assert entered.wait(10)
+            root.rename(moved)
+            _skill(host)
+        finally:
+            release.set()
+        error = running.result(timeout=10)
+    if when == 'during_mkdir':
+        assert error.outcome == 'unknown'
+    assert not (root / 'references').exists()
+    assert (moved / 'references').exists() is (when == 'during_mkdir')
+    _assert_error(code, lambda: packages.dirs_create(call))
+    assert attempts == [True]
