@@ -350,6 +350,122 @@ class RuntimeDeliveryMixin:
         return [self._outbox_row_to_dict(row) for row in rows]
 
     @staticmethod
+    def _ensure_scoped_outbox_indexes(conn):
+        """W0 尚未合入时补齐相同索引；不改变已有投递状态或旧方法语义。"""
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_scope_owner '
+                     'ON outbox_entries(scope, owner_id, created_at, outbox_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_scope_due '
+                     'ON outbox_entries(scope, owner_id, status, next_retry_at, created_at, outbox_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_scope_lease '
+                     'ON outbox_entries(scope, owner_id, status, claimed_at, outbox_id)')
+
+    def prepare_outbox_pages(self):
+        """写入消费者初始化时提交 W0 缺失的兼容索引；只读分页永不执行 DDL。"""
+        with self._runtime_connection() as conn:
+            self._ensure_scoped_outbox_indexes(conn)
+            conn.commit()
+
+    def list_outbox_page(self, *, scope, owner_id='', status='', after=None, limit=50):
+        """按准确 scope/owner 的复合键取有界窗口；空 owner 不是跨用户通配符。"""
+        import math
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('outbox page limit must be in 1..100')
+        clauses, args = ['scope = ?', 'owner_id = ?'], [scope, owner_id]
+        if status:
+            clauses.append('status = ?')
+            args.append(status)
+        if after is not None:
+            if (not isinstance(after, (tuple, list)) or len(after) != 2
+                    or isinstance(after[0], bool) or not isinstance(after[0], (float, int))
+                    or not math.isfinite(after[0]) or not isinstance(after[1], str)):
+                raise ValueError('invalid outbox keyset')
+            clauses.append('(created_at, outbox_id) > (?, ?)')
+            args.extend(after)
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                'SELECT * FROM outbox_entries WHERE ' + ' AND '.join(clauses)
+                + ' ORDER BY created_at, outbox_id LIMIT ?', (*args, limit + 1)).fetchall()
+        page = [self._outbox_row_to_dict(row) for row in rows[:limit]]
+        next_after = (page[-1]['created_at'], page[-1]['outbox_id']) if len(rows) > limit else None
+        return page, next_after
+
+    def claim_outbox_for_scope(self, *, scope, owner_id, claimed_by, batch_size=10, now=None,
+                               outbox_id=''):
+        """新消费者只领本 scope/owner 的到期行，不能抢走原通道消费者的投递。"""
+        if type(batch_size) is not int or not 1 <= batch_size <= 100:
+            raise ValueError('outbox claim batch must be in 1..100')
+        current = time.time() if now is None else now
+        claimed = []
+        with self._runtime_connection() as conn:
+            self._ensure_scoped_outbox_indexes(conn)
+            target_clause = ' AND outbox_id = ?' if outbox_id else ''
+            target_args = (outbox_id,) if outbox_id else ()
+            rows = conn.execute(
+                "SELECT * FROM outbox_entries WHERE scope = ? AND owner_id = ? "
+                "AND status IN ('PENDING', 'FAILED') AND next_retry_at <= ? "
+                + target_clause + ' ORDER BY next_retry_at, created_at, outbox_id LIMIT ?',
+                (scope, owner_id, current, *target_args, batch_size)).fetchall()
+            for row in rows:
+                changed = conn.execute(
+                    "UPDATE outbox_entries SET status = 'IN_FLIGHT', claimed_at = ?, "
+                    'claimed_by = ?, attempts = attempts + 1, updated_at = ? '
+                    "WHERE outbox_id = ? AND scope = ? AND owner_id = ? "
+                    "AND status IN ('PENDING', 'FAILED') AND next_retry_at <= ?",
+                    (current, claimed_by, current, row['outbox_id'], scope, owner_id, current))
+                if changed.rowcount == 1:
+                    item = self._outbox_row_to_dict(row)
+                    item.update(status=OUTBOX_IN_FLIGHT, attempts=item['attempts'] + 1,
+                                claimed_at=current, claimed_by=claimed_by, updated_at=current)
+                    claimed.append(item)
+            conn.commit()
+        return claimed
+
+    def recover_outbox_for_scope(self, *, scope, owner_id, now, lease_seconds, limit=50):
+        """由新入队或显式重试触发有界租约回收；过期不代表副作用未发生。"""
+        if lease_seconds <= 0 or not 1 <= limit <= 100:
+            raise ValueError('invalid outbox recovery budget')
+        with self.transaction() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            rows = conn.execute(
+                "SELECT outbox_id, attempts, provider_evidence_json FROM outbox_entries WHERE scope=? AND owner_id=? "
+                "AND status='IN_FLIGHT' AND claimed_at<=? ORDER BY claimed_at,outbox_id LIMIT ?",
+                (scope, owner_id, now - lease_seconds, limit)).fetchall()
+            for row in rows:
+                state = OUTBOX_DEAD_LETTER if row['attempts'] >= MAX_DELIVERY_ATTEMPT_COUNT else OUTBOX_FAILED
+                evidence = json.loads(row['provider_evidence_json'] or '{}')
+                evidence['attempt_' + str(row['attempts'])] = {'ok': False, 'error_code': 'OUTCOME_UNKNOWN',
+                    'reason': 'claim_lease_expired'}
+                conn.execute("UPDATE outbox_entries SET status=?, claimed_by='', next_retry_at=0, updated_at=?, "
+                    "provider_evidence_json=? WHERE outbox_id=? AND scope=? AND owner_id=? "
+                    "AND status='IN_FLIGHT' AND claimed_at<=?",
+                    (state, now, json.dumps(evidence, ensure_ascii=False, sort_keys=True), row['outbox_id'],
+                     scope, owner_id, now - lease_seconds))
+        return len(rows)
+
+    def settle_outbox_for_claim(self, *, claim, status, provider_evidence=None, next_retry_at=0.0):
+        """同事务核对 owner、scope、领取者和次数；过期 worker 不能结算后继尝试。"""
+        if status not in (OUTBOX_ACKED, OUTBOX_FAILED, OUTBOX_DEAD_LETTER):
+            raise RuntimeConflictError('invalid scoped outbox settlement')
+        current = time.time()
+        with self.transaction() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM outbox_entries WHERE outbox_id=? AND scope=? AND owner_id=?',
+                (claim['outbox_id'], claim['scope'], claim['owner_id'])).fetchone()
+            if (row is None or row['status'] != OUTBOX_IN_FLIGHT
+                    or row['claimed_by'] != claim['claimed_by'] or row['attempts'] != claim['attempts']):
+                raise RuntimeConflictError('outbox claim is no longer current')
+            final = (OUTBOX_DEAD_LETTER if status == OUTBOX_FAILED
+                     and row['attempts'] >= MAX_DELIVERY_ATTEMPT_COUNT else status)
+            evidence = json.loads(row['provider_evidence_json'] or '{}')
+            evidence['attempt_' + str(row['attempts'])] = dict(provider_evidence or {})
+            conn.execute('UPDATE outbox_entries SET status=?, provider_evidence_json=?, '
+                'next_retry_at=?, settled_at=?, updated_at=? WHERE outbox_id=?',
+                (final, json.dumps(evidence, ensure_ascii=False, sort_keys=True), next_retry_at,
+                 current if final == OUTBOX_ACKED else 0, current, claim['outbox_id']))
+        return self.outbox_entry(claim['outbox_id'])
+
+    @staticmethod
     def _outbox_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "outbox_id": str(row["outbox_id"]),
