@@ -286,7 +286,7 @@ def _plugin_sources(call):
 
 
 def _session_workspaces(call):
-    """只消费认证 owner 的原线程目录；条目数、单文件与总字节均有界。"""
+    """流式检查认证 owner 的保留线程；限制单文件和不同工作根，不限制历史总量。"""
     from ..gateway_parts.owner_conversation_store import owner_conversation_store_from_config
 
     host = call.context.host
@@ -298,22 +298,16 @@ def _session_workspaces(call):
         descriptor = open_directory_beneath(directory, (), require_dir_fd=True)
     except FileNotFoundError:
         return ()
-    workspaces, examined, total = set(), 0, 0
+    workspaces = set()
     try:
         before = _stamp(os.fstat(descriptor))
         with os.scandir(descriptor) as entries:
             for entry in entries:
-                examined += 1
-                if examined > _MAX_SKILLS_PER_ROOT_COUNT:
-                    raise BusinessError('HOST_NOT_READY')
                 if entry.name.startswith('.') or not entry.name.endswith('.json'):
                     continue
                 raw = read_bytes_beneath(directory, (entry.name,), max_bytes=SKILL_PACKAGE_FILE_MAX_BYTES,
                                          require_dir_fd=True)
                 if raw is None:
-                    raise BusinessError('HOST_NOT_READY')
-                total += len(raw)
-                if total > SKILL_PACKAGE_FILE_MAX_BYTES:
                     raise BusinessError('HOST_NOT_READY')
                 row = json.loads(raw)
                 if not isinstance(row, dict):

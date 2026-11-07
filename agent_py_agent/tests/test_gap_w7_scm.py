@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import os
+import random
 import stat
 import subprocess
 import sys
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,11 +45,11 @@ def fixture(tmp_path, monkeypatch):
     git(root, 'commit', '-m', 'first')
     bounds = SimpleNamespace(SCM_MAX_SUBSCRIPTIONS_PER_OWNER=3, SCM_MAX_STATUS_ENTRIES=32,
         SCM_MAX_LOG_ENTRIES=5, SCM_MAX_PATHS_PER_ACTION=8, SCM_GIT_TIMEOUT_SECONDS=2,
-        SCM_MIN_REFRESH_INTERVAL_SECONDS=1)
+        SCM_MIN_REFRESH_INTERVAL_SECONDS=1, FS_WATCH_IDLE_EXPIRY_SECONDS=900)
     production_limits, production_fs = scm._limits, scm._fs
     monkeypatch.setattr(scm, '_limits', lambda: bounds)
     monkeypatch.setattr(scm, '_subscriptions', {})
-    monkeypatch.setattr(scm, '_owner_states', {}, raising=False)
+    monkeypatch.setattr(scm, '_owner_states', OrderedDict(), raising=False)
     now, epoch = [100.0], [1]
     fs = SimpleNamespace(workspace_root=lambda call: Path(call.context.host.config.workspace_root),
                          current_epoch=lambda call: epoch[0])
@@ -780,3 +782,185 @@ def test_regression_metadata_rechecked_between_git_commands(fixture, monkeypatch
         subscription(fixture)
     assert len(started) == 1
     assert 'status' in started[0] and 'log' not in started[0]
+
+
+@pytest.mark.parametrize('change', ['text', 'binary', 'index'])
+def test_completed_same_status_edits_reject_stale_discard_without_data_loss(fixture, monkeypatch, change):
+    path = fixture.root / 'a.txt'
+    first, second = b'first-v1\n', b'first-v2\n'
+    if change == 'binary':
+        path.write_bytes(b'\0base-v0\n')
+        git(fixture.root, 'add', '--', 'a.txt')
+        git(fixture.root, 'commit', '-m', 'binary base')
+        first, second = b'\0edit-v1\n', b'\0edit-v2\n'
+    path.write_bytes(first)
+    if change == 'index':
+        git(fixture.root, 'add', '--', 'a.txt')
+        path.write_bytes(b'worktree\n')
+    created = subscription(fixture)
+    status = git(fixture.root, 'status', '--porcelain=v1')
+    path.write_bytes(second)
+    if change == 'index':
+        git(fixture.root, 'add', '--', 'a.txt')
+        path.write_bytes(b'worktree\n')
+    assert len(first) == len(second)
+    assert git(fixture.root, 'status', '--porcelain=v1') == status
+    newer, index = path.read_bytes(), git(fixture.root, 'show', ':a.txt')
+    actual, checkouts = scm._git, []
+
+    def observe(descriptor, args, hooks):
+        if args[0] == 'checkout':
+            checkouts.append(args)
+        return actual(descriptor, args, hooks)
+
+    monkeypatch.setattr(scm, '_git', observe)
+    descriptor_root = '/proc/self/fd' if Path('/proc/self/fd').exists() else '/dev/fd'
+    before = len(os.listdir(descriptor_root))
+    with pytest.raises(HostAPIError) as caught:
+        scm.discard(fixture.call('discard', {'subscription_id': created['subscription_id'],
+            'paths': ['a.txt'], 'expected_repo_seq': created['repo_seq']}))
+    assert caught.value.code == 'REVISION_CONFLICT'
+    assert caught.value.current_repo_seq > created['repo_seq']
+    assert not checkouts and path.read_bytes() == newer
+    assert git(fixture.root, 'show', ':a.txt') == index
+    valid = scm.discard(fixture.call('discard', {'subscription_id': created['subscription_id'],
+        'paths': ['a.txt'], 'expected_repo_seq': caught.value.current_repo_seq}))
+    assert valid['succeeded'] == ['a.txt'] and not valid['failed']
+    assert path.read_bytes() == index and len(checkouts) == 1
+    fd_delta = len(os.listdir(descriptor_root)) - before
+    assert fd_delta == 0
+
+
+@pytest.mark.parametrize('incomplete', ['status', 'binary_diff'])
+def test_preexisting_incomplete_projection_rejects_discard_before_checkout(fixture, monkeypatch, incomplete):
+    path = fixture.root / 'a.txt'
+    if incomplete == 'status':
+        path.write_text('retained newer content\n')
+        for index in range(fixture.bounds.SCM_MAX_STATUS_ENTRIES + 1):
+            (fixture.root / f'extra-{index:03d}').write_text('untracked\n')
+    else:
+        generator = random.Random(158)
+        size = scm._output_budget() + 4096
+        path.write_bytes(b'\0' + generator.randbytes(size))
+        git(fixture.root, 'add', '--', 'a.txt')
+        git(fixture.root, 'commit', '-m', 'bounded binary base')
+        path.write_bytes(b'\0' + generator.randbytes(size))
+    created = subscription(fixture)
+    assert created['repository']['truncated'] is True
+    newer, actual, checkouts = path.read_bytes(), scm._git, []
+
+    def observe(descriptor, args, hooks):
+        if args[0] == 'checkout':
+            checkouts.append(args)
+        return actual(descriptor, args, hooks)
+
+    monkeypatch.setattr(scm, '_git', observe)
+    descriptor_root = '/proc/self/fd' if Path('/proc/self/fd').exists() else '/dev/fd'
+    before = len(os.listdir(descriptor_root))
+    with pytest.raises(HostAPIError) as caught:
+        scm.discard(fixture.call('discard', {'subscription_id': created['subscription_id'],
+            'paths': ['a.txt'], 'expected_repo_seq': created['repo_seq']}))
+    assert caught.value.code == 'HOST_NOT_READY'
+    assert not checkouts and path.read_bytes() == newer
+    fd_delta = len(os.listdir(descriptor_root)) - before
+    assert fd_delta == 0
+
+
+def test_production_control_receipt_capacity_recovers_after_idle_window(fixture, monkeypatch):
+    """保持 2000 条生产容量；只复用不变仓库的真实 Git 只读输出，领域路径照常执行。"""
+    monkeypatch.setattr(scm, '_limits', fixture.production_limits)
+    bounds, actual, output = scm._limits(), scm._git, {}
+
+    def stable_git(descriptor, args, hooks):
+        assert args[0] in {'status', 'log', 'diff'}
+        key = tuple(args)
+        if key not in output:
+            output[key] = actual(descriptor, args, hooks)
+        return output[key]
+
+    monkeypatch.setattr(scm, '_git', stable_git)
+    descriptor_root = '/proc/self/fd' if Path('/proc/self/fd').exists() else '/dev/fd'
+    before = len(os.listdir(descriptor_root))
+    assert bounds.SCM_MAX_STATUS_ENTRIES == 2000
+    for _ in range(1000):
+        create = fixture.call('subscribe', {'repo_root': 'repo'})
+        created = scm.subscribe(create)
+        remove = fixture.call('unsubscribe', {'subscription_id': created['subscription_id']})
+        assert scm.unsubscribe(remove) == {'removed': True}
+    state = scm._owner_states[scm._owner_key(create)]
+    assert len(state.controls) == 2000 and not state.subscriptions and not scm._subscriptions
+    assert scm.subscribe(fresh_request(create)) == created
+    assert scm.unsubscribe(fresh_request(remove)) == {'removed': True}
+    with pytest.raises(HostAPIError, match='IDEMPOTENCY_CONFLICT'):
+        scm.subscribe(replace(create, params={'repo_root': 'different'}))
+    with pytest.raises(HostAPIError, match='LIMIT_EXCEEDED'):
+        subscription(fixture)
+    fixture.now[0] += bounds.FS_WATCH_IDLE_EXPIRY_SECONDS
+    assert subscription(fixture)['subscription_id'] != created['subscription_id']
+    assert len(state.controls) == 1 and len(state.subscriptions) == 1
+    fd_delta = len(os.listdir(descriptor_root)) - before
+    assert fd_delta == 0
+
+
+def test_idle_receipt_cleanup_preserves_active_subscribe_and_unknown_mutation(fixture, monkeypatch):
+    monkeypatch.setattr(scm, '_limits', fixture.production_limits)
+    create = fixture.call('subscribe', {'repo_root': 'repo'})
+    created = scm.subscribe(create)
+    sid, actual, checkouts = created['subscription_id'], scm._git, []
+
+    def unknown(descriptor, args, hooks):
+        if args[0] == 'checkout':
+            checkouts.append(args)
+            raise subprocess.TimeoutExpired(args, 2)
+        return actual(descriptor, args, hooks)
+
+    monkeypatch.setattr(scm, '_git', unknown)
+    mutate = fixture.call('discard', {'subscription_id': sid, 'paths': ['a.txt'],
+        'expected_repo_seq': created['repo_seq']})
+    with pytest.raises(HostAPIError, match='OUTCOME_UNKNOWN'):
+        scm.discard(mutate)
+    state = scm._owner_states[scm._owner_key(create)]
+    for index in range(1999):
+        scm.unsubscribe(fixture.call('unsubscribe', {'subscription_id': f'missing-{index}'}))
+    assert len(state.controls) == 2000
+    fixture.now[0] += scm._limits().FS_WATCH_IDLE_EXPIRY_SECONDS
+    assert scm.subscribe(fresh_request(create)) == created
+    assert len(state.controls) == 1 and sid in state.subscriptions
+    for _ in range(2):
+        with pytest.raises(HostAPIError, match='OUTCOME_UNKNOWN'):
+            scm.discard(fresh_request(mutate))
+    key = mutate.subject_id, mutate.action, mutate.idempotency_key
+    assert scm._subscriptions[sid].receipts[key][1] is None
+    assert len(checkouts) == 1
+
+
+@pytest.mark.parametrize('active', [False, True])
+def test_owner_capacity_only_reuses_idle_empty_oldest_bucket(fixture, monkeypatch, active):
+    monkeypatch.setattr(scm, '_limits', fixture.production_limits)
+    if active:
+        created = subscription(fixture)
+    else:
+        scm.unsubscribe(fixture.call('unsubscribe', {'subscription_id': 'already-absent'}))
+    call = fixture.call('subscribe', {'repo_root': 'repo'})
+    original = scm._owner_key(call)
+    for index in range(1999):
+        other = replace(call, owner_id=f'local/cached-{index}', owner_home=fixture.owner / f'cached-{index}')
+        with scm._lock:
+            scm._owner_state(other, fixture.epoch[0])
+    assert len(scm._owner_states) == 2000
+    next_owner = replace(call, owner_id='local/next-owner', owner_home=fixture.owner / 'next-owner')
+    with scm._lock, pytest.raises(HostAPIError, match='HOST_NOT_READY'):
+        scm._owner_state(next_owner, fixture.epoch[0])
+    expiry = scm._limits().FS_WATCH_IDLE_EXPIRY_SECONDS
+    future = scm.time.monotonic() + expiry
+    monkeypatch.setattr(scm.time, 'monotonic', lambda: future)
+    fixture.now[0] += expiry
+    with scm._lock:
+        if active:
+            with pytest.raises(HostAPIError, match='HOST_NOT_READY'):
+                scm._owner_state(next_owner, fixture.epoch[0])
+            assert created['subscription_id'] in scm._subscriptions and original in scm._owner_states
+        else:
+            scm._owner_state(next_owner, fixture.epoch[0])
+            assert original not in scm._owner_states and scm._owner_key(next_owner) in scm._owner_states
+    assert len(scm._owner_states) == 2000

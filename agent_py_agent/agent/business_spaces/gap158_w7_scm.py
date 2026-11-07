@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -27,7 +27,7 @@ from ..plugin_host.errors import HostAPIError
 
 # 进程结束后所有编号失效；未知写回执在订阅存在期间绝不淘汰或重做。
 _subscriptions = {}
-_owner_states = {}
+_owner_states = OrderedDict()
 _lock = threading.RLock()
 
 
@@ -41,7 +41,8 @@ def _limits():
             raise
         return SimpleNamespace(SCM_MAX_SUBSCRIPTIONS_PER_OWNER=8, SCM_MAX_STATUS_ENTRIES=2000,
             SCM_MAX_LOG_ENTRIES=50, SCM_MAX_PATHS_PER_ACTION=200, SCM_GIT_TIMEOUT_SECONDS=15,
-            SCM_MIN_REFRESH_INTERVAL_SECONDS=1.0, FS_WATCH_MAX_ENTRIES_PER_SCAN=5000)
+            SCM_MIN_REFRESH_INTERVAL_SECONDS=1.0, FS_WATCH_MAX_ENTRIES_PER_SCAN=5000,
+            FS_WATCH_IDLE_EXPIRY_SECONDS=900)
     return gap158_limits
 
 
@@ -78,14 +79,20 @@ def _owner_key(call):
     return str(Path(call.owner_home).resolve()), call.owner_id
 
 
-# LLM: 所有状态仅在模块锁内访问；满容量拒绝新 owner，绝不淘汰未知回执。
+# 所有状态仅在模块锁内访问；满容量只检查最旧桶，活动订阅及未决回执不得淘汰。
 # 函数用途: 按规范 home 和 owner 保存当前代次的有限订阅及控制回执。
 def _owner_state(call, epoch):
     owner = _owner_key(call)
     state = _owner_states.get(owner)
     if state is None:
         if len(_owner_states) >= _limits().SCM_MAX_STATUS_ENTRIES:
-            raise HostAPIError('HOST_NOT_READY', 503)
+            oldest, stale = next(iter(_owner_states.items()))
+            expiry = _limits().FS_WATCH_IDLE_EXPIRY_SECONDS
+            if (time.monotonic() - stale.touched < expiry or stale.subscriptions
+                    or any(result is None or call.clock() - completed_at < expiry
+                           for _fingerprint, result, completed_at, _sid in stale.controls.values())):
+                raise HostAPIError('HOST_NOT_READY', 503)
+            del _owner_states[oldest]
         state = SimpleNamespace(epoch=epoch, subscriptions={}, controls={})
         _owner_states[owner] = state
     elif state.epoch != epoch:
@@ -93,6 +100,8 @@ def _owner_state(call, epoch):
         for sid in state.subscriptions:
             _subscriptions.pop(sid, None)
         state.epoch, state.subscriptions, state.controls = epoch, {}, {}
+    state.touched = time.monotonic()
+    _owner_states.move_to_end(owner)
     return state
 
 
@@ -101,7 +110,12 @@ def _owner_state(call, epoch):
 def _control_receipts(call, epoch):
     if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', call.idempotency_key):
         raise HostAPIError('INVALID_SCHEMA')
-    return _owner_state(call, epoch).controls
+    state, now = _owner_state(call, epoch), call.clock()
+    for key, (_fingerprint, result, completed_at, sid) in tuple(state.controls.items()):
+        if (result is not None and sid not in state.subscriptions
+                and now - completed_at >= _limits().FS_WATCH_IDLE_EXPIRY_SECONDS):
+            del state.controls[key]
+    return state.controls
 
 
 # LLM: 每次重新鉴权并只清理当前 owner 的旧代次状态，不扫描全局资源。
@@ -486,10 +500,9 @@ def _status(call, sub, root, raw, truncated):
     return repository
 
 
-# LLM: 两个固定只读进程各自重验权限，超时不能伪造干净状态。
-# 函数用途: 读取当前仓库的状态和有限提交日志。
+# 公开 DTO 保持原样；私有版本绑定有界原始状态与二进制差异，避免相同状态码漏掉内容变化。
 def _projection(call, sub, root, descriptor, hooks):
-    """状态和日志各运行一次固定 argv，读超时不能伪造干净投影。"""
+    """状态、日志和内容差异各运行固定 argv，读超时不能伪造完整投影。"""
     _authorize(call, sub)
     try:
         raw, truncated, rc = _git(descriptor, ['status', '--porcelain=v2', '-z', '--branch',
@@ -497,6 +510,7 @@ def _projection(call, sub, root, descriptor, hooks):
         if rc and not truncated:
             raise HostAPIError('HOST_NOT_READY', 503)
         repository = _status(call, sub, root, raw, truncated)
+        status_version = hashlib.sha256(raw).hexdigest()
         if repository['head']:
             _authorize(call, sub)
             raw, limited, rc = _git(descriptor, ['log', '-n', str(_limits().SCM_MAX_LOG_ENTRIES),
@@ -518,20 +532,26 @@ def _projection(call, sub, root, descriptor, hooks):
                                                 'author': author[:256], 'at': int(at)})
                 repository['truncated'] |= len(subject) > 500 or len(author) > 256
         _authorize(call, sub)
-        return repository
+        delta, limited, rc = _git(descriptor,
+            ['diff', '--no-ext-diff', '--no-textconv', '--binary', '--'], hooks)
+        if rc and not limited:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        repository['truncated'] |= limited
+        _authorize(call, sub)
+        return repository, (status_version, hashlib.sha256(delta).hexdigest())
     except subprocess.TimeoutExpired:
         raise HostAPIError('HOST_NOT_READY', 503) from None
 
 
-# LLM: 只有 DTO 摘要变化才递增 repo_seq，写后与 discard CAS 可强制刷新。
+# 公开投影或私有内容版本变化均递增 repo_seq，写后与 discard CAS 可强制刷新。
 # 函数用途: 更新仓库投影和有限事件环。
 def _refresh(call, sub, root, descriptor, hooks, *, force=False):
-    """仅实际 DTO 摘要变化递增；强制刷新专用于写后观察和 discard CAS。"""
+    """绑定投影及真实内容版本；强制刷新专用于写后观察和 discard CAS。"""
     now = call.clock()
     if not force and now - sub.refreshed_at < _limits().SCM_MIN_REFRESH_INTERVAL_SECONDS:
         return
-    repository = _projection(call, sub, root, descriptor, hooks)
-    digest = hashlib.sha256(json.dumps(repository, sort_keys=True, ensure_ascii=True,
+    repository, private_version = _projection(call, sub, root, descriptor, hooks)
+    digest = hashlib.sha256(json.dumps((repository, private_version), sort_keys=True, ensure_ascii=True,
                                        separators=(',', ':')).encode()).hexdigest()
     if digest != sub.digest:
         sub.repo_seq += 1
@@ -581,7 +601,7 @@ def subscribe(call: V13Call):
         sub.receipts[(call.subject_id, call.action, call.idempotency_key)] = (fingerprint, result)
         _subscriptions[sid] = sub
         state.subscriptions[sid] = sub
-        controls[key] = fingerprint, result
+        controls[key] = fingerprint, result, call.clock(), sid
         return deepcopy(result)
 
 
@@ -606,7 +626,7 @@ def events(call: V13Call):
                 'overflow': overflow}
 
 
-# LLM: 删除前查稳定控制回执，外来编号与缺失编号一致；容量满不淘汰旧回执。
+# 删除前查稳定控制回执，外来编号与缺失编号一致；未到期或仍有活动订阅的回执不淘汰。
 # 函数用途: 移除本 owner 订阅并保存幂等控制结果。
 def unsubscribe(call: V13Call):
     """外来编号和缺失编号同样返回 false，不泄露资源存在性。"""
@@ -627,7 +647,7 @@ def unsubscribe(call: V13Call):
             del _subscriptions[sid]
             del state.subscriptions[sid]
         result = {'removed': removed}
-        controls[key] = fingerprint, result
+        controls[key] = fingerprint, result, call.clock(), sid
         return result
 
 
@@ -641,7 +661,7 @@ def _fingerprint(call):
 # LLM: 未知写结果不可重做，参数变动拒绝，成功 DTO 通过深拷贝返回。
 # 函数用途: 核对指纹并重放已保存的领域回执。
 def _replay(receipt, fingerprint):
-    previous, result = receipt
+    previous, result = receipt[:2]
     if previous != fingerprint:
         raise HostAPIError('IDEMPOTENCY_CONFLICT', 409)
     if result is None:
@@ -689,6 +709,8 @@ def _mutate(call, command):
                     failed.append({'path': path, 'code': error.code})
             if safe and command == ['checkout']:
                 _refresh(call, sub, root, descriptor, hooks, force=True)
+                if sub.repository['truncated']:
+                    raise HostAPIError('HOST_NOT_READY', 503)
                 if call.params['expected_repo_seq'] != sub.repo_seq:
                     error = HostAPIError('REVISION_CONFLICT', 409,
                         message='仓库状态已变化；当前 repo_seq=' + str(sub.repo_seq))
