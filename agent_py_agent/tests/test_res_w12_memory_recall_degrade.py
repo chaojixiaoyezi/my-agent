@@ -1,7 +1,9 @@
 """前台记忆读取按轮降级；真实权威库、写入拒绝和 native 异常保持严格。"""
 
 import logging
+import os
 import shutil
+from asyncio import CancelledError
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +11,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime import loop_support
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
+from agent_py_agent.agent.backends.base import EchoBackend
 from agent_py_agent.agent.capability.memory_search_tool import MemorySearchTool
 from agent_py_agent.agent.common.owner_write_errors import OwnerManagementIngressUnavailable
 from agent_py_agent.agent.core import SimpleAgent
@@ -31,6 +34,8 @@ def recall_case(tmp_path):
     )
     agent = SimpleAgent(config, Path(__file__).resolve().parents[2],
                         workspace_roots=[tmp_path], defer_mcp_connect=True)
+    # 显式注入离线后端，避免空模型目录在运行作用域内替换构造时的 echo。
+    agent.backend = EchoBackend()
     rows = [MemoryRecord(
         "user", f"sentinel confirmed fact {number}", entry_id=f"fact-{number}", kind="fact",
         attributes={"origin": "user_explicit", "scope_type": "personal", "scope_key": "personal",
@@ -47,7 +52,7 @@ def _prepare(agent):
         prepared = loop_support._prepare_runtime_context(
             agent, RuntimeContextRequest("sentinel", None, False, allowed_tools=[]),
         )
-    except (OSError, UnicodeError, ValueError, KeyError) as exc:
+    except (AttributeError, OSError, UnicodeError, ValueError, KeyError) as exc:
         error = exc
     assert error is None, f"foreground prompt failed instead of degrading: {type(error).__name__}"
     return prepared
@@ -72,6 +77,7 @@ def _warm_generation(agent, rows):
 @pytest.mark.parametrize("fault,error_type", [
     ("middle", "JSONDecodeError"), ("tail", "JSONDecodeError"),
     ("utf8", "UnicodeDecodeError"), ("invalid_record", "ValueError"),
+    ("null", "ValueError"), ("array", "ValueError"), ("scalar", "ValueError"),
 ])
 def test_corrupt_legacy_rows_degrade_prompt_without_repair(recall_case, caplog, fault, error_type):
     agent, rows = recall_case
@@ -81,14 +87,34 @@ def test_corrupt_legacy_rows_degrade_prompt_without_repair(recall_case, caplog, 
         "tail": good + b'{"role":',
         "utf8": good + b"\xff\n",
         "invalid_record": good + b'{"unexpected": "not a memory event"}\n',
+        "null": good + b"null\n",
+        "array": good + b"[]\n",
+        "scalar": good + b"0\n",
     }[fault]
     agent.memory.path.write_bytes(payload)
     caplog.set_level(logging.WARNING)
+    assert isinstance(agent.backend, EchoBackend)
+    fd_dir = next((path for path in (Path("/proc/self/fd"), Path("/dev/fd")) if path.is_dir()), None)
+    if fd_dir is not None:
+        with os.scandir(fd_dir) as descriptors:
+            fd_before = sum(1 for _ in descriptors)
     for _ in range(2):
+        result = agent.run("sentinel chat still works", save=False)
+        assert "sentinel chat still works" in result.response
         _assert_degraded(_prepare(agent), caplog, error_type)
         assert agent.memory.path.read_bytes() == payload
         assert not agent.memory._pending_access
-    assert not MemorySearchTool(agent).execute({"query": "sentinel"}).ok
+    tool_result = MemorySearchTool(agent).execute({"query": "sentinel"})
+    assert not tool_result.ok and tool_result.error_code == "TOOL_EXECUTION_FAILED"
+    with pytest.raises(MemoryAuthorityCorruptError, match="MEMORY_AUTHORITY_UNREADABLE"):
+        agent.memory.add("user", "must not overwrite damaged authority", kind="fact", attributes={
+            **rows[0].attributes, "subject_key": "replacement"})
+    assert agent.memory.path.read_bytes() == payload
+    assert not agent.memory._pending_access
+    if fd_dir is not None:
+        with os.scandir(fd_dir) as descriptors:
+            fd_delta = sum(1 for _ in descriptors) - fd_before
+        assert fd_delta == 0
 
 
 def test_healthy_legacy_recall_and_access_are_unchanged(recall_case, caplog):
@@ -203,20 +229,24 @@ def test_confirmation_only_error_drops_unconfirmed_records_and_keeps_fixed_sourc
 
 
 @pytest.mark.parametrize("boundary", ["search_scoped_candidates", "confirm_scoped_access"])
-@pytest.mark.parametrize("error_class", [RuntimeError, InterruptedError, OwnerManagementIngressUnavailable])
+@pytest.mark.parametrize("error_class", [
+    RuntimeError, AttributeError, InterruptedError, CancelledError, OwnerManagementIngressUnavailable,
+])
 def test_unexpected_cancel_and_native_errors_propagate_unchanged(
     recall_case, monkeypatch, caplog, boundary, error_class,
 ):
     agent, _ = recall_case
     failure = error_class("must propagate unchanged")
+    cause = ValueError("original read cause")
 
     def fail_read(*_args, **_kwargs):
-        raise failure
+        raise failure from cause
 
     monkeypatch.setattr(agent.memory, boundary, fail_read)
     with pytest.raises(error_class) as caught:
         loop_support._prepare_runtime_context(agent, RuntimeContextRequest("sentinel", None, False))
     assert caught.value is failure
+    assert caught.value.__cause__ is cause
     assert not agent.memory._pending_access
     assert "MEMORY_RECALL_DEGRADED" not in caplog.text
 
