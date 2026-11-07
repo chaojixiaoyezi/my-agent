@@ -10,14 +10,17 @@ import os
 import shutil
 import stat
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..audit.paths import audit_segment_day, audit_segment_matches
+from ..audit.query import _audit_append_lock, _audit_lock_key_path, _audit_parent_current
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     append_private_jsonl_records,
     locked_json_path,
+    path_thread_lock,
     read_json_object_report,
     write_private_json_file_atomic,
     write_private_text_file_atomic_unlocked,
@@ -30,6 +33,7 @@ from ..common.request_execution_ports import (
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.models import ConversationThread
 from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
+from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from .candidate_models import MemoryCandidate
 from .candidates import (
     RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
@@ -60,6 +64,8 @@ from .retention_scan import (
     scratch_tree_pinned,
     security_audit_content,
     security_audit_paths,
+    security_audit_prefix_fingerprint,
+    security_audit_segment_fingerprint,
     task_scratch_unlocked,
     trash_payload_pinned,
     tree_fingerprint,
@@ -287,13 +293,19 @@ def _apply_action(
     if action.operation == "security_audit_compact":
         if action.path not in security_audit_paths(home) or action.cutoff_timestamp is None:
             return replace(action, status="state_changed")
-        with locked_json_path(action.path):
-            if file_fingerprint(action.path) != action.source_fingerprint:
+        root = Path(home.owner_home_dir)
+        handle = path_thread_lock(_audit_lock_key_path(action.path, root))
+        with handle.lock, _audit_append_lock(
+            None, action.path.name, path=action.path, trusted_root=root,
+        ) as (parent, trusted_root):
+            if (action.path.stat(follow_symlinks=False).st_size >= STORAGE_LANE_SLICE_BYTES
+                    or security_audit_prefix_fingerprint(action.path) != action.source_fingerprint):
                 return replace(action, status="state_changed")
             content, removed = security_audit_content(action.path, action.cutoff_timestamp)
-            if file_fingerprint(action.path) != action.source_fingerprint:
+            if security_audit_prefix_fingerprint(action.path) != action.source_fingerprint:
                 return replace(action, status="state_changed")
             if removed:
+                _audit_parent_current(action.path, trusted_root, parent)
                 write_private_text_file_atomic_unlocked(action.path, content)
         return replace(action, status="compacted" if removed else "state_changed")
     if action.category in {"daily", "compact", "curator_run", "trash"}:
@@ -309,6 +321,10 @@ def _apply_action(
         if protected:
             return replace(action, status="state_changed")
     if action.operation == "delete_file":
+        if action.category == "security_audit" and not any(
+            audit_segment_matches(path, action.path) for path in security_audit_paths(home)
+        ):
+            return replace(action, status="state_changed")
         result = _delete_file(action)
         if result.status == "deleted" and action.category in {"tmp", "cache"}:
             root = Path(home.owner_tmp_dir if action.category == "tmp" else home.owner_cache_dir)
@@ -442,11 +458,14 @@ def _clear_scratch(home, action, now, *, allowed_external_roots=(), pin_snapshot
 def _delete_file(action: MemoryRetentionAction) -> MemoryRetentionAction:
     if not action.path.exists():
         return replace(action, status="missing")
+    segment_day = audit_segment_day(action.path) if action.category == "security_audit" else None
+    fingerprint = security_audit_segment_fingerprint if segment_day is not None else file_fingerprint
     if (
         action.path.is_symlink()
-        or not _fingerprint_matches(action.source_fingerprint, file_fingerprint(action.path))
+        or not _fingerprint_matches(action.source_fingerprint, fingerprint(action.path))
         or action.cutoff_timestamp is None
-        or action.path.stat().st_mtime >= action.cutoff_timestamp
+        or (segment_day >= datetime.fromtimestamp(action.cutoff_timestamp, tz=timezone.utc).date().isoformat()
+            if segment_day is not None else action.path.stat().st_mtime >= action.cutoff_timestamp)
     ):
         return replace(action, status="state_changed")
     action.path.unlink()

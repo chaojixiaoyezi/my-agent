@@ -12,6 +12,7 @@ import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,7 +25,12 @@ if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 from .logger import AuditAction, AuditEntry
-from .paths import resolve_audit_paths
+from .paths import (
+    audit_segment_day,
+    audit_segment_paths,
+    audit_uses_daily_segments,
+    resolve_audit_paths,
+)
 
 # 审计保留清理单次最多读取的源文件字节数。
 _AUDIT_RETENTION_MAX_BYTES = 16 * 1024 * 1024
@@ -126,6 +132,7 @@ class AuditQuery:
         self._trusted_root = Path(os.path.abspath(os.path.expanduser(os.fspath(root)))) if root is not None else None
         self._read_index = None
         self._read_parts = None
+        self._segment_parts = set()
         self._index_reason = 'trusted_root_required'
         if root is not None:
             home = Path(os.path.abspath(os.path.expanduser(os.fspath(root))))
@@ -176,7 +183,50 @@ class AuditQuery:
     def _capture_view(self):
         if self._read_index is None:
             return {'status': 'unavailable', 'reason': self._index_reason}
-        return self._read_index.advance('audit', self._read_parts)
+        views = [self._read_index.advance('audit', self._read_parts)]
+        if not audit_uses_daily_segments(self._audit_file, self._trusted_root):
+            return views
+        try:
+            with _audit_parent(self._audit_file, self._trusted_root):
+                segments = audit_segment_paths(self._audit_file)
+        except FileNotFoundError:
+            segments = []
+        except OSError:
+            return [self._read_index._coverage(views[0], 'unavailable', 'unsafe_path')]
+        parts = {(*self._read_parts[:-1], path.name) for path in segments}
+        # 仅比较上一次仍活动的来源集合，不积累终生段名；缺源检查仍由索引给出结构化事实。
+        for missing in self._segment_parts - parts:
+            missing_view = self._read_index.advance('audit', missing)
+            self._forget_deleted_segment(missing_view, missing_view)
+        self._segment_parts = parts
+        for segment in reversed(segments):
+            segment_parts = (*self._read_parts[:-1], segment.name)
+            captured = self._read_index.advance('audit', segment_parts)
+            if self._forget_deleted_segment(captured, captured):
+                continue
+            views.append(captured)
+        return views
+
+    def _forget_deleted_segment(self, view, coverage):
+        if not isinstance(view, dict):
+            return False
+        parts = view.get('source_parts') or ()
+        if (coverage.get('reason') == 'source_deleted' and parts
+                and tuple(parts) != tuple(self._read_parts) and audit_segment_day(Path(parts[-1])) is not None):
+            return self._read_index.forget('audit', parts)
+        return False
+
+    @staticmethod
+    def _worst_coverage(coverages):
+        rank = {'complete': 0, 'partial': 1, 'unavailable': 2}
+        return max(coverages, key=lambda item: rank.get(item.get('status'), 2),
+            default={'status': 'unavailable', 'reason': 'invalid_view'})
+
+    def _view_name(self, view):
+        if not isinstance(view, dict):
+            return None
+        parts = tuple(view.get('source_parts') or ())
+        return None if parts == tuple(self._read_parts) else (parts[-1] if parts else None)
 
     # LLM: 时间相等仍按物理顺序，seek绑定固定view和过滤；旧offset仅首拍使用，内部续页不重复COUNT或偏移扫描。
     # 函数用途: 返回审计条目、总数、coverage和下一页游标，不扩大固定through范围。
@@ -211,21 +261,54 @@ class AuditQuery:
             filters['since'] = params.start_time
         if params.end_time:
             filters['until'] = params.end_time
+        views = view if isinstance(view, list) else [view]
+        segment, cursor = None, after_cursor
+        if isinstance(after_cursor, dict) and 'segment' in after_cursor:
+            segment, cursor = after_cursor['segment'], after_cursor.get('cursor')
+        names = [self._view_name(item) for item in views]
+        if not views or (after_cursor is not None and segment not in names):
+            return {'entries': [], 'total_count': None, 'query_time_ms': 0,
+                    'coverage': {'status': 'unavailable', 'reason': 'invalid_cursor'},
+                    'view': view, 'next_cursor': None}
+        first = names.index(segment) if after_cursor is not None else 0
         entries, offset, remaining = [], params.offset, params.limit
-        cursor = after_cursor
-        while True:
-            page = self._read_index.query(view, filters=filters, limit=min(remaining, 1000),
-                                          offset=offset, descending=True, after_cursor=cursor)
-            entries.extend(AuditEntry.from_dict(row) for row in page['rows'])
-            count = len(page['rows'])
-            remaining -= count
-            cursor = page['next_cursor']
-            offset = 0
-            if (page['coverage']['status'] != 'complete' or remaining <= 0
-                    or count == 0 or cursor is None):
-                return {'entries': entries, 'total_count': page['total_count'],
-                        'query_time_ms': (time.perf_counter() - started) * 1000,
-                        'coverage': page['coverage'], 'view': view, 'next_cursor': cursor}
+        coverages, total, complete, next_cursor = [], 0, True, None
+        for index, current in enumerate(views):
+            probe = self._read_index.query(current, filters=filters, limit=0, descending=True)
+            coverages.append(probe['coverage'])
+            self._forget_deleted_segment(current, probe['coverage'])
+            count = probe['total_count']
+            complete = complete and probe['coverage']['status'] == 'complete' and count is not None
+            if count is not None:
+                total += count
+            if index < first:
+                continue
+            if not remaining:
+                if params.limit and next_cursor is None and count:
+                    next_cursor = {'segment': names[index], 'cursor': None}
+                continue
+            if count is not None and offset >= count and cursor is None:
+                offset -= count
+                continue
+            while True:
+                page = self._read_index.query(current, filters=filters, limit=min(remaining, 1000),
+                    offset=offset, descending=True, after_cursor=cursor if index == first else None)
+                coverages.append(page['coverage'])
+                self._forget_deleted_segment(current, page['coverage'])
+                complete = complete and page['coverage']['status'] == 'complete'
+                entries.extend(AuditEntry.from_dict(row) for row in page['rows'])
+                remaining -= len(page['rows'])
+                cursor, offset = page['next_cursor'], 0
+                if page['coverage']['status'] != 'complete' or not cursor or not remaining:
+                    break
+                # 同一段超过 SQL 单页上限时继续 seek，不重新从该段开头读取。
+                first = index
+            if cursor is not None and not remaining:
+                next_cursor = {'segment': names[index], 'cursor': cursor}
+            cursor = None
+        return {'entries': entries, 'total_count': total if complete else None,
+                'query_time_ms': (time.perf_counter() - started) * 1000,
+                'coverage': self._worst_coverage(coverages), 'view': view, 'next_cursor': next_cursor}
 
     # LLM: 不可用来源不生成零摘要，用户过滤在固定SQL内执行。
     # 函数用途: 返回带coverage的审计统计。
@@ -233,7 +316,22 @@ class AuditQuery:
         view = self._capture_view() if view is None else view
         if self._read_index is None:
             return {'value': None, 'coverage': self._capture_view()}
-        return self._read_index.audit_rollup(view, user_id=user_id)
+        reports = []
+        value = {'user_id': user_id, 'total_actions': 0, 'by_action': {}, 'by_status': {}, 'last_action_time': 0}
+        for current in view if isinstance(view, list) else [view]:
+            report = self._read_index.audit_rollup(current, user_id=user_id)
+            reports.append(report['coverage'])
+            self._forget_deleted_segment(current, report['coverage'])
+            if report['value'] is None:
+                continue
+            row = report['value']
+            value['total_actions'] += row['total_actions']
+            value['last_action_time'] = max(value['last_action_time'], row['last_action_time'])
+            for bucket in ('by_action', 'by_status'):
+                for key, count in row[bucket].items():
+                    value[bucket][key] = value[bucket].get(key, 0) + count
+        coverage = self._worst_coverage(reports)
+        return {'value': value if coverage['status'] == 'complete' else None, 'coverage': coverage}
 
     # LLM: 成功字典只代表完整覆盖，调用方可捕获异常coverage展示未知。
     # 函数用途: 保持原审计摘要接口。
@@ -243,10 +341,25 @@ class AuditQuery:
     # LLM: 用户最后活动同时间时以首次出现物理顺序排序。
     # 函数用途: 返回带coverage的有限最近用户列表。
     def recent_users_report(self, limit=10, *, view=None):
+        if type(limit) is not int or limit < 0:
+            raise ValueError('invalid recent-user limit')
         view = self._capture_view() if view is None else view
         if self._read_index is None:
             return {'value': None, 'coverage': self._capture_view()}
-        return self._read_index.audit_rollup(view, recent_limit=limit)
+        users, coverages = {}, []
+        for current in view if isinstance(view, list) else [view]:
+            report = self._read_index.audit_rollup(current, recent_limit=limit)
+            coverages.append(report['coverage'])
+            self._forget_deleted_segment(current, report['coverage'])
+            for row in report['value'] or ():
+                previous = users.get(row['user_id'])
+                if previous is None or previous['last_action_time'] < row['last_action_time']:
+                    users[row['user_id']] = row
+            # 每段前 limit 的并集足够求全局前 limit，并在每步裁剪保持内存有界。
+            users = {row['user_id']: row for row in sorted(users.values(),
+                key=lambda row: row['last_action_time'], reverse=True)[:limit]}
+        coverage = self._worst_coverage(coverages)
+        return {'value': list(users.values()) if coverage['status'] == 'complete' else None, 'coverage': coverage}
 
     # LLM: 部分观察不返回成功空列表，未知通过结构异常传播。
     # 函数用途: 保持原最近用户列表接口。
@@ -260,15 +373,27 @@ class AuditQuery:
             return 0
         try:
             with _audit_parent(self._audit_file, self._trusted_root) as (check_parent, _check_root):
-                _audit_regular(os.stat(self._audit_file.name, dir_fd=check_parent, follow_symlinks=False))
+                try:
+                    _audit_regular(os.stat(self._audit_file.name, dir_fd=check_parent, follow_symlinks=False))
+                except FileNotFoundError:
+                    pass
             handle = path_thread_lock(_audit_lock_key_path(self._audit_file, self._trusted_root))
             with handle.lock, _audit_append_lock(
                 None, self._audit_file.name, path=self._audit_file, trusted_root=self._trusted_root,
             ) as (parent, root):
-                _audit_regular(os.stat(self._audit_file.name, dir_fd=parent, follow_symlinks=False))
-                plan = _plan_audit_retention(self._audit_file, cutoff_time=time.time() - days * 86400,
+                cutoff = time.time() - days * 86400
+                cutoff_day = datetime.fromtimestamp(cutoff, tz=timezone.utc).date().isoformat()
+                deleted = 0
+                if audit_uses_daily_segments(self._audit_file, self._trusted_root):
+                    for segment in audit_segment_paths(self._audit_file):
+                        if audit_segment_day(segment) < cutoff_day:
+                            _audit_parent_current(self._audit_file, root, parent)
+                            _audit_regular(os.stat(segment.name, dir_fd=parent, follow_symlinks=False))
+                            os.unlink(segment.name, dir_fd=parent)
+                            deleted += 1
+                plan = _plan_audit_retention(self._audit_file, cutoff_time=cutoff,
                                              parent_fd=parent, trusted_root=root)
-                return _apply_audit_retention_unlocked(plan, parent_fd=parent)
+                return deleted + _apply_audit_retention_unlocked(plan, parent_fd=parent)
         except FileNotFoundError:
             return 0
 

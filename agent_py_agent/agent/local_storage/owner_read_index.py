@@ -1511,6 +1511,40 @@ class OwnerReadIndex:
             "document": document,
         }
 
+    def forget(self, domain, relative_parts) -> bool:
+        """事务删除一个已失去来源的派生投影，不改事实文件或其它来源。"""
+        if domain not in _TABLES:
+            raise ValueError("unsupported domain")
+        parts = _parts(relative_parts)
+        sid = self._source_id(domain, parts)
+        with _PROCESS_ADVANCE_LOCK:
+            try:
+                with self._database(write=True, deadline=_Budget().deadline) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        connection.execute(f"DELETE FROM {_TABLES[domain]} WHERE sid=?", (sid,))
+                        connection.execute("DELETE FROM ori_spans WHERE sid=?", (sid,))
+                        connection.execute("DELETE FROM ori_meta WHERE key IN (?,?)", ("append:" + sid, "proof:" + sid))
+                        deleted = connection.execute("DELETE FROM ori_sources WHERE sid=?", (sid,)).rowcount
+                        connection.commit()
+                    except BaseException:
+                        connection.rollback()
+                        raise
+            except FileNotFoundError:
+                deleted = 0
+            with self._lock:
+                self._seen.discard(sid)
+                self._revoked.pop(sid, None)
+                # 缓存总量有界；count 的 binding 不含明文 sid，整体废弃实例备忘避免留下旧计数。
+                self._memo.clear()
+                self._memo_bytes = 0
+            with _PROCESS_MEMO_LOCK:
+                _PROCESS_APPENDS.pop((str(self._home), parts), None)
+                for key in list(_PROCESS_MEMOS):
+                    if key[:2] == (str(self._home), self._owner_id) and sid in key[2]:
+                        _PROCESS_MEMOS.pop(key)
+            return bool(deleted)
+
     # LLM: 首次缺源是无创建的有效空；已存在后删除、坏源、busy 和预算不足都有明确 coverage。
     # 函数用途: 有界推进一个固定领域和相对来源的读投影。
     def advance(
