@@ -19,7 +19,8 @@ class Replayer:
     # LLM: Scenario roots are exclusive test directories; no installed or live user Gateway is used.
     # 函数用途: Bind the scenario, real isolated process, fake provider and evidence recorder.
     def __init__(self, root, scenario, fixture_parameters):
-        self.root, self.scenario, self.bounds = Path(root), scenario, fixture_parameters
+        self.root, self.scenario = Path(root), scenario
+        self.bounds = {**fixture_parameters, "condition_seconds": max(fixture_parameters["condition_seconds"], 25)}
         self.recorder = Recorder(self.root / "evidence")
         self.requests, self.aliases, self.last_stopped, self.delivered = {}, {}, None, set()
         self.provider = FakeProvider(self.root / "provider", script=scenario["fake_model_script"],
