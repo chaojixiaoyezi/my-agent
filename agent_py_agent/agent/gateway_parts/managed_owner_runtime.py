@@ -22,6 +22,7 @@ from ..owner_scoped_pool import (
     _resolved_max_agents,
 )
 from ..plugin_host.errors import HostAPIError
+from ..settings.defaults import register_resident_owner_capacity
 
 # 有限宿主运行白名单：只含时限、预算与产品开关。凭据、访问模式/写根/私网、MCP/扩展、路径覆盖、
 # 提示文件与模型投影一律不复制；模型由受管用户自己的选择（或管理员显式共享的初始模型）逐片解析。
@@ -162,6 +163,8 @@ class ManagedOwnerPool:
             max_agents = (host_options.get("owner_agent_pool_max_agents") if isinstance(host_options, Mapping)
                           else getattr(host_options, "owner_agent_pool_max_agents", None))
         self._max = _resolved_max_agents(max_agents)
+        # 进程级按 owner 定界的派生缓存同样跟随受管池容量。
+        register_resident_owner_capacity(self._max)
         self._lock = threading.Lock()
         self._entries: OrderedDict[tuple, _Entry] = OrderedDict()
         self._by_agent: dict[int, _Entry] = {}

@@ -131,6 +131,27 @@ class SkillSnapshotEntry:
         return payload
 
 
+# LLM: 快照构造与发现缓存共用的唯一冻结规则：已有refs、禁用或无路径的条目原样返回；缺正文不产生绑定，
+#   其余读取失败降为禁用条目并给出结构化错误。只读磁盘，不改条目以外的状态。
+# 函数用途: 为单个快照条目冻结资产绑定，返回(冻结后的条目, 失败时的加载错误)。
+def freeze_snapshot_entry(entry: SkillSnapshotEntry) -> tuple[SkillSnapshotEntry, SkillLoadError | None]:
+    if entry.refs or not entry.enabled or not entry.path:
+        return entry, None
+    try:
+        from ..assets.skill_adapter import _freeze_skill_asset_metadata
+
+        refs, metadata, asset_fields = _freeze_skill_asset_metadata(entry)
+    except InterruptedError:
+        raise
+    except FileNotFoundError:
+        # 缺文件的宿主构造条目不产生绑定；显式read_body仍沿原SKILL_READ_FAILED读口拒绝。
+        return entry, None
+    except (OSError, ValueError, SkillSnapshotError) as exc:
+        code = exc.error_code if isinstance(exc, SkillSnapshotError) else 'SKILL_READ_FAILED'
+        return replace(entry, enabled=False), SkillLoadError(entry.path, code, str(exc), entry.source)
+    return replace(entry, refs=refs, asset_metadata=metadata, asset_fields=asset_fields), None
+
+
 # LLM: entries 只包含原公开 Skill，packages 只包含包级摘要与私有声明；授权消费者使用 resolve_reference 而非展平成员。
 # 类用途: 保存当前轮统一能力快照，公开发现、包内读取和子代理限制都沿同一身份集合。
 @dataclass(frozen=True)
@@ -147,25 +168,10 @@ class SkillSnapshot:
     def __post_init__(self) -> None:
         entries, errors = [], list(self.errors)
         for entry in self.entries:
-            if entry.refs or not entry.enabled or not entry.path:
-                entries.append(entry)
-                continue
-            try:
-                from ..assets.skill_adapter import _freeze_skill_asset_metadata
-
-                refs, metadata, asset_fields = _freeze_skill_asset_metadata(entry)
-            except InterruptedError:
-                raise
-            except FileNotFoundError:
-                # 缺文件的宿主构造条目不产生绑定；显式read_body仍沿原SKILL_READ_FAILED读口拒绝。
-                entries.append(entry)
-                continue
-            except (OSError, ValueError, SkillSnapshotError) as exc:
-                code = exc.error_code if isinstance(exc, SkillSnapshotError) else 'SKILL_READ_FAILED'
-                errors.append(SkillLoadError(entry.path, code, str(exc), entry.source))
-                entries.append(replace(entry, enabled=False))
-                continue
-            entries.append(replace(entry, refs=refs, asset_metadata=metadata, asset_fields=asset_fields))
+            frozen, error = freeze_snapshot_entry(entry)
+            entries.append(frozen)
+            if error is not None:
+                errors.append(error)
         object.__setattr__(self, 'entries', tuple(entries))
         object.__setattr__(self, 'errors', tuple(errors))
 

@@ -25,6 +25,7 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import read_bytes_beneath, unlink_file_beneath
 from ..runtime_errors import runtime_error_report
+from ..settings.defaults import resident_owner_capacity
 from .process_cleanup_evidence import confirm_cleanup_reference, validate_cleanup_reference
 from .process_scope import ProcessActivationScope, ProcessExecutionScope
 from .process_session_commit import (
@@ -48,8 +49,8 @@ from .process_session_records import (
 #   目录身份 + 最近一次全量读取时刻",不含任何"无事"结论——调用方每次重新决定要不要通知。
 #   命中只凭目录身份 (dev, ino, mtime_ns): 记录的新建/改写/删除全走 root 内 rename/unlink,
 #   目录 mtime 必变;锁文件稳态 flock 不改 mtime。2 秒保护窗口 + 60 秒全量兜底由共用设施保证。
-#   条目上限按 owner 数 LRU: 测试机 owner 池上限 600,但热点轮转窗口远小于池上限,单条缓存
-#   只有几条记录;被逐出的 owner 下次全读,只变慢不出错。调用方拿到的永远是 deepcopy。
+#   每个 owner 只有一个记录根，条目按根 LRU，上限跟随本进程 owner 池常驻容量(owner_agent_pool_max_agents)：
+#   配置内常驻的 owner 互不挤掉；被逐出的根下次全读，只变慢不出错。调用方拿到的永远是 deepcopy。
 # 类用途: 保存一代目录中的记录与错误；命中仅提供内容，调用方仍实时决定完成通知。
 @dataclass(frozen=True)
 class _ProcessRecordsProjection:
@@ -59,8 +60,6 @@ class _ProcessRecordsProjection:
     verified_at: float
 
 
-# 进程记录投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）；被逐出的 owner 下次全读，只变慢不出错。
-_PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT = 64
 # 便宜检查下,距最近一次全量读取(事务 + glob + 逐文件读)超过这个秒数就无条件重读一次:
 # 防时间戳精度与极端竞态。命中复用不会刷新这个时间。
 _PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS = 60.0
@@ -71,7 +70,39 @@ _PROCESS_RECORDS_PROJECTION_LOCK = threading.Lock()
 #   指纹一致且该文件 mtime 已离开 2 秒窗口才复用(cache_freshness 唯一实现)，读前冻结可信、读后复核指纹
 #   未变才登记；每次完整扫描整体替换该根映射，删除的文件随之消失。记录对象与目录投影共享、只读使用，
 #   公开读口仍逐条深拷贝；改写/停止/裁剪事务从不借用，仍逐条新读。根数沿用投影的 LRU 上限。
-_PROCESS_RECORD_FILES_CACHE: OrderedDict[str, dict[str, tuple[tuple[int, ...], dict[str, object]]]] = OrderedDict()
+#   validated_at 是映射里每条记录最近一次逐文件核指纹的最早时刻；待通知读取据此限定免核复用的期限。
+# 类用途: 保存一个根上一次完整扫描的逐文件结果及其最早核对时刻，发布后不再修改。
+@dataclass(frozen=True)
+class _ProcessRecordFiles:
+    entries: dict[str, tuple[tuple[int, ...], dict[str, object]]]
+    validated_at: float
+
+
+_PROCESS_RECORD_FILES_CACHE: OrderedDict[str, _ProcessRecordFiles] = OrderedDict()
+
+
+# LLM: 合并读取: 每根至多一个仍可加入的批次。领头者取得目录锁(含 redo 恢复)后才封批，批内成员都在读开始前到达，
+#   拿到的视图不早于各自到达时刻，与各自持锁读取等价；其余调用只等结果，不排队取锁、不重复扫描。
+#   只要有一个成员要全量记录，整批按全量核对；显式扫描预算的调用不入批，预算仍按单次调用计。
+# 类用途: 承载一次合并读取的模式、到达人数与共享结果。
+class _ProcessRecordsScanBatch:
+    def __init__(self, key: str, pending_only: bool) -> None:
+        self.key = key
+        self.pending_only = pending_only
+        self.followers = 0
+        self.done = threading.Event()
+        self.result: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None
+
+    # LLM: 只在持目录锁之后调用；封批后到达的调用另起下一批，本批模式从此固定。
+    # 函数用途: 停止接纳新成员并返回本批是否只需待通知记录。
+    def seal(self) -> bool:
+        with _PROCESS_RECORDS_PROJECTION_LOCK:
+            if _PROCESS_RECORDS_SCAN_BATCHES.get(self.key) is self:
+                _PROCESS_RECORDS_SCAN_BATCHES.pop(self.key)
+            return self.pending_only
+
+
+_PROCESS_RECORDS_SCAN_BATCHES: dict[str, _ProcessRecordsScanBatch] = {}
 
 # 进程记录默认扫描的基础毫秒额度。
 _PROCESS_SESSION_SCAN_BASE_MS = 1000
@@ -142,53 +173,76 @@ def _store_process_records_projection(
     with _PROCESS_RECORDS_PROJECTION_LOCK:
         _PROCESS_RECORDS_PROJECTION_CACHE[key] = entry
         _PROCESS_RECORDS_PROJECTION_CACHE.move_to_end(key)
-        while len(_PROCESS_RECORDS_PROJECTION_CACHE) > _PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT:
+        while len(_PROCESS_RECORDS_PROJECTION_CACHE) > resident_owner_capacity():
             _PROCESS_RECORDS_PROJECTION_CACHE.popitem(last=False)
 
 
-# LLM: 映射发布后只整体替换、从不原地修改，调用方可直接只读引用；未登记的根返回空表(全部按新读处理)。
+# LLM: 映射发布后只整体替换、从不原地修改，调用方可直接只读引用；未登记的根返回空表且核对时刻为 0(全部按新读处理)。
 # 函数用途: 取某根上一次完整扫描登记的逐文件解析结果，并提级 LRU。
-def _process_record_files(root: Path) -> dict[str, tuple[tuple[int, ...], dict[str, object]]]:
+def _process_record_files(root: Path) -> _ProcessRecordFiles:
     key = str(root)
     with _PROCESS_RECORDS_PROJECTION_LOCK:
         files = _PROCESS_RECORD_FILES_CACHE.get(key)
         if files is None:
-            return {}
+            return _ProcessRecordFiles({}, 0.0)
         _PROCESS_RECORD_FILES_CACHE.move_to_end(key)
         return files
 
 
 # LLM: 只由完整走完的持锁扫描发布；预算超限或异常中断的扫描不发布，旧映射仍要逐文件核指纹才会被复用。
-# 函数用途: 用本次扫描的逐文件结果整体替换该根映射，按投影根数上限做 LRU 淘汰。
-def _store_process_record_files(root: Path, files: dict[str, tuple[tuple[int, ...], dict[str, object]]]) -> None:
+# 函数用途: 用本次扫描的逐文件结果整体替换该根映射，按常驻 owner 容量做 LRU 淘汰。
+def _store_process_record_files(root: Path, files: _ProcessRecordFiles) -> None:
     key = str(root)
     with _PROCESS_RECORDS_PROJECTION_LOCK:
         _PROCESS_RECORD_FILES_CACHE[key] = files
         _PROCESS_RECORD_FILES_CACHE.move_to_end(key)
-        while len(_PROCESS_RECORD_FILES_CACHE) > _PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT:
+        while len(_PROCESS_RECORD_FILES_CACHE) > resident_owner_capacity():
             _PROCESS_RECORD_FILES_CACHE.popitem(last=False)
+
+
+# LLM: 与完成协调查询同一判据：有收件目标且尚未登记通知号。merge_process_record 保证目标不可变、通知号一经写入即保留，
+#   所以已结清的文件除非被替换(换 inode)或删除，永远不会重新变成待通知。
+# 函数用途: 判断一条记录是否仍欠完成通知。
+def _completion_pending(record: dict[str, object]) -> bool:
+    target = record.get("completion_target")
+    return isinstance(target, dict) and bool(target) and not str(record.get("completion_notice_id") or "").strip()
+
+
+# LLM: POSIX 的 inode 来自 readdir，不发系统调用；取不到时返回 None，该文件照常逐个 stat。
+# 函数用途: 取目录项自带的 inode，供待通知读取识别未被替换的已结清文件。
+def _listed_inode(entry: os.DirEntry) -> int | None:
+    try:
+        return entry.inode()
+    except OSError:
+        return None
 
 
 # LLM: 指纹取自跟随链接的 stat，与 read_text 解析同一目标；读前冻结可信，窗口内、读写交错或读失败都只返回不登记。
 #   缺失文件与原逐条读取一样返回 None；其余 OSError/校验错误原样上抛，由扫描循环记为该文件的读取错误。
+#   inode 只由待通知读取在 60 秒核对期内传入：已结清、可信登记且目录项 inode 未变的文件免 stat 直接复用，
+#   待通知、新出现、被替换和读错的文件仍逐个核对；返回值第二项标记本条是否免核复用。
 # 函数用途: 持锁扫描时按文件代次复用已校验记录，未变文件不再读取、解析与校验。
 def _read_listed_record(
     root: Path,
     name: str,
     previous: dict[str, tuple[tuple[int, ...], dict[str, object]]],
     current: dict[str, tuple[tuple[int, ...], dict[str, object]]],
-) -> dict[str, object] | None:
+    *, inode: int | None = None,
+) -> tuple[dict[str, object] | None, bool]:
+    cached = previous.get(name)
+    if inode is not None and cached is not None and cached[0][1] == inode and not _completion_pending(cached[1]):
+        current[name] = cached
+        return cached[1], True
     path = os.path.join(root, name)  # 千级文件逐个 stat，避免每项构造 Path
     try:
         before = os.stat(path)
     except FileNotFoundError:
-        return None
+        return None, False
     signature = cache_stat_signature(before)
     trusted = cache_entry_trustworthy(before.st_mtime_ns)
-    cached = previous.get(name)
     if trusted and cached is not None and cached[0] == signature:
         current[name] = cached
-        return cached[1]
+        return cached[1], False
     record = read_process_record(root, name[:-len(".json")])
     if trusted and record is not None:
         try:
@@ -197,7 +251,7 @@ def _read_listed_record(
             unchanged = False
         if unchanged:
             current[name] = (signature, record)
-    return record
+    return record, False
 
 
 # LLM: 读取损坏与记录不存在必须区分；异常不能暴露原始命令、环境或记录内容。
@@ -245,6 +299,10 @@ class ProcessSessionTransaction:
         # 只读投影专用：置 True 时 list_records 复用代次未变文件的已校验记录(与投影共享的只读对象)；
         # 改写、停止、裁剪等事务保持 False，逐条新读并独占返回值。
         self.reuse_listed_records = False
+        # 待通知读取专用：再置 True 时，核对期内已结清且未被替换的文件免 stat 复用。
+        self.skip_settled_records = False
+        # 本次 list_records 是否有记录免核复用；有则结果不能发布为目录投影(全量读口只认逐个核对过的视图)。
+        self.listed_unverified = False
 
     # LLM: 离开目录锁后必须失败，防止把一次临界区对象保存在长寿命缓存里继续写。
     # 函数用途: 检查当前事务是否仍处于持锁上下文。
@@ -270,7 +328,8 @@ class ProcessSessionTransaction:
         clock = time.monotonic if max_ms is not None else time.thread_time
         start = clock()
         deadline = start + (max_ms if max_ms is not None else _PROCESS_SESSION_SCAN_BASE_MS) / 1000
-        names = []
+        names: list[tuple[str, int | None]] = []
+        skip_settled = self.reuse_listed_records and self.skip_settled_records
         # 默认额度随已见目录项线性增长；显式额度仍固定，超限拒绝整份选择，不返回半份停止/裁剪清单。
         with os.scandir(self.root) as entries:
             for count, entry in enumerate(entries, 1):
@@ -279,23 +338,34 @@ class ProcessSessionTransaction:
                 if count > max_entries or clock() >= deadline:
                     raise RuntimeError("process_session_scan_budget_exceeded")
                 if entry.name.startswith("bg-") and entry.name.endswith(".json"):
-                    names.append(entry.name)
+                    names.append((entry.name, _listed_inode(entry) if skip_settled else None))
         # deadline 保留最终目录项计数的额度，读取阶段不能继续无限延长。
         records, errors = [], []
+        scanned_at = time.time()
         previous = _process_record_files(self.root) if self.reuse_listed_records else None
+        # 免核复用只在上一轮逐文件核对后的全量兜底期内成立；到期这一轮逐个核对并刷新核对时刻。
+        skip_settled = skip_settled and previous is not None and (
+            scanned_at - previous.validated_at < _PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS)
         current: dict[str, tuple[tuple[int, ...], dict[str, object]]] = {}
-        for name in sorted(names):
+        reused_unverified = False
+        for name, inode in sorted(names):
             if clock() >= deadline:
                 raise RuntimeError("process_session_scan_budget_exceeded")
             try:
-                record = (self.load(Path(name).stem) if previous is None
-                          else _read_listed_record(self.root, name, previous, current))
+                if previous is None:
+                    record = self.load(Path(name).stem)
+                else:
+                    record, unverified = _read_listed_record(
+                        self.root, name, previous.entries, current, inode=inode if skip_settled else None)
+                    reused_unverified = reused_unverified or unverified
                 if record is not None:
                     records.append(record)
             except (OSError, TypeError, ValueError) as exc:
                 errors.append(process_session_error_report(exc, "process_session_store.validate", path=self.root / name))
         if previous is not None:
-            _store_process_record_files(self.root, current)
+            self.listed_unverified = reused_unverified
+            validated_at = previous.validated_at if reused_unverified else scanned_at
+            _store_process_record_files(self.root, _ProcessRecordFiles(current, validated_at))
         return records, errors
 
     # LLM: v1 沿原逐记录锁，v2/v3/v4 共用 revision CAS 和 redo；旧版本原样更新，不能迁移或覆盖坏记录。
@@ -593,13 +663,13 @@ class ProcessSessionStore:
     def list_pending_completion_records_report(
         self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = True
     ) -> ProcessSessionListReport:
-        records, errors = self._load_records_projection_cached(cheap_checks=True)
+        records, errors = self._load_records_projection_cached(cheap_checks=True, pending_only=True)
         owner, task = str(owner_key or "").strip(), str(task_id or "").strip()
         matched = []
         for record in records:
-            target = record.get("completion_target")
-            if not isinstance(target, dict) or not target or str(record.get("completion_notice_id") or "").strip():
+            if not _completion_pending(record):
                 continue
+            target = record["completion_target"]
             if owner and str(target.get("owner_key") or "").strip() != owner:
                 continue
             if task and str(target.get("task_id") or "").strip() != task:
@@ -614,12 +684,43 @@ class ProcessSessionStore:
 
     # LLM: 私有只读底座永远是全量记录和错误，冷读移交新对象或逐文件缓存中的共享只读对象；公开API负责复制，兼容参数不再选分支。
     #   信任在读前冻结，发布时只核目录身份；不因慢读跨过保护窗口而将旧视图变可信。
-    #   目录未命中仍原事务持锁扫描(先恢复redo)，但只重读代次变化或仍在2秒窗口内的文件。
+    #   目录未命中仍原事务持锁扫描(先恢复redo)，但只重读代次变化或仍在2秒窗口内的文件；同根并发未命中合并成
+    #   一次持锁扫描(见 _ProcessRecordsScanBatch)，几十个代理不在目录锁上逐个排队重扫。
+    #   pending_only 只给完成协调读口：结果里的已结清记录可能是核对期内免 stat 复用的对象，调用方只取待通知记录；
+    #   这样的结果不发布为目录投影，目录投影始终来自逐个核对过的扫描。
     # 函数用途: 复用目录内容投影，不缓存通知结论或暴露可变对象给外部。
-    def _load_records_projection_cached(self, *, cheap_checks: bool = True, scan_budget: dict | None = None):
+    def _load_records_projection_cached(self, *, cheap_checks: bool = True, scan_budget: dict | None = None,
+                                        pending_only: bool = False):
         hit = _lookup_process_records_projection(self.root)
         if hit is not None:
             return hit.records, hit.errors
+        if scan_budget:
+            return self._scan_records_projection(scan_budget=scan_budget)
+        key = str(self.root)
+        with _PROCESS_RECORDS_PROJECTION_LOCK:
+            batch = _PROCESS_RECORDS_SCAN_BATCHES.get(key)
+            if batch is None:
+                batch = _PROCESS_RECORDS_SCAN_BATCHES[key] = _ProcessRecordsScanBatch(key, pending_only)
+                leader = True
+            else:
+                batch.followers += 1
+                batch.pending_only = batch.pending_only and pending_only
+                leader = False
+        if not leader:
+            batch.done.wait()
+            # 领头者被中断(未产出结果)时各自回到原持锁扫描，不等下一位领头者。
+            return batch.result if batch.result is not None else self._scan_records_projection(pending_only=pending_only)
+        try:
+            batch.result = self._scan_records_projection(batch=batch)
+        finally:
+            batch.seal()
+            batch.done.set()
+        return batch.result
+
+    # LLM: 原事务持锁扫描(先恢复 redo)；合并批次在取得目录锁后封批并决定是否只核待通知记录。
+    # 函数用途: 执行一次持锁目录读取，按读前冻结的可信度发布目录投影。
+    def _scan_records_projection(self, *, scan_budget: dict | None = None, batch: _ProcessRecordsScanBatch | None = None,
+                                 pending_only: bool = False):
         before = _process_dir_stat_key(self.root)
         # MC4-1201: 在读取这一刻冻结"本次读取是否可信"——读取前目录 mtime 已离开 2 秒窗口才允许
         #   把结果写进缓存;发布处只认这个事实,不用发布时的目录年龄(跨窗口延迟发布时旧结果不得
@@ -630,10 +731,12 @@ class ProcessSessionStore:
                 return [], []
             with self.transaction() as transaction:
                 transaction.reuse_listed_records = True
+                transaction.skip_settled_records = batch.seal() if batch is not None else pending_only
                 records, errors = transaction.list_records(**(scan_budget or {}))
+                complete = not transaction.listed_unverified
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
-        if read_trusted:
+        if read_trusted and complete:
             _store_process_records_projection(self.root, before, records, errors, take_ownership=True)
         return records, errors
 
