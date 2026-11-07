@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict
 from dataclasses import replace
 
+from ..common import cache_capacity
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.log_redaction import redact_sensitive_text
 from ..plugin_activation_ref import remember_available_installations
@@ -45,7 +46,7 @@ def _discover_plugin_manifests(owner) -> tuple[tuple, tuple]:
         if (after.st_mtime_ns, after.st_size, after.st_ino, after.st_ctime_ns, after.st_mode) != stamp:
             return PluginInstallStore(owner).snapshot(), ()
         _INSTALLATION_SNAPSHOTS[key] = rows
-        while len(_INSTALLATION_SNAPSHOTS) > _PLUGIN_CACHE_MAX_ENTRIES:
+        while len(_INSTALLATION_SNAPSHOTS) > cache_capacity.resident_owners(_PLUGIN_CACHE_MAX_ENTRIES):
             _INSTALLATION_SNAPSHOTS.popitem(last=False)
     _INSTALLATION_SNAPSHOTS.move_to_end(key)
     rows = _INSTALLATION_SNAPSHOTS[key]

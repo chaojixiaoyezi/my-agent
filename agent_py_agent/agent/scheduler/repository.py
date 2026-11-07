@@ -33,6 +33,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ..common import cache_capacity
 from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.heartbeat import process_start_time, start_time_relation
 from ..common.json_io import (
@@ -172,7 +173,7 @@ def _history_membership_fallback(
 # A hit therefore requires the same stat key *and* the same content digest, so any external or
 # in-process rewrite (even same-size, same-timestamp) invalidates it. store.json stays the single
 # authority; this is a read-through projection of it, never a second source of state.
-# waiting 投影缓存最多缓存 4 个 owner 账本快照：每次对账只重解析未变化的文件，够日常并发又防缓存膨胀。
+# waiting 投影缓存以 4 个 owner 快照为下限，随已登记的常驻用户容量推导上限。
 _WAITING_PROJECTION_MAX_ENTRIES_COUNT = 4
 # 单个 waiting 投影最多 512 行：行数太多说明账本异常，按满行直接视为需要全量重读。
 _WAITING_PROJECTION_MAX_ROWS_COUNT = 512
@@ -182,10 +183,8 @@ _WAITING_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _WaitingRunsPr
 _WAITING_PROJECTION_LOCK = threading.Lock()
 # 结构化可观测计数:命中/回退/守卫。测试与现场体检用它证明缓存真的在生效、且异常时确实回退。
 _WAITING_PROJECTION_STATS: dict[str, int] = {"hit": 0, "miss": 0, "guard": 0, "skip": 0}
-# 三切片投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）：测试机 owner 池上限 600，
-# 但每拍真正被后台 worker 检查的活跃 owner 受全局 8 个并发 worker 约束、轮转窗口远小于池上限；
-# 单条投影只含 waiting 完整行、queued 轻量键与 due 键（不保留 queued 完整记录），被逐出的
-# owner 下次整读，只变慢不出错。
+# 三切片投影缓存以 64 个 owner 快照为下限，随已登记的常驻用户容量推导上限。
+# 单条投影只含 waiting 完整行、queued 轻量键与 due 键；行数和单条字节预算独立保持有界。
 _STORE_PROJECTION_MAX_ENTRIES_COUNT = 64
 # 单条三切片投影最多 512 行（waiting + queued 键 + due 键合计）：行数太多说明账本异常，直接视为需要全量重读。
 _STORE_PROJECTION_MAX_ROWS_COUNT = 512
@@ -1361,7 +1360,7 @@ class _SchedulerStoreSupport:
         with _WAITING_PROJECTION_LOCK:
             _WAITING_PROJECTION_CACHE[cache_key] = projection
             _WAITING_PROJECTION_CACHE.move_to_end(cache_key)
-            while len(_WAITING_PROJECTION_CACHE) > _WAITING_PROJECTION_MAX_ENTRIES_COUNT:
+            while len(_WAITING_PROJECTION_CACHE) > cache_capacity.resident_owners(_WAITING_PROJECTION_MAX_ENTRIES_COUNT):
                 _WAITING_PROJECTION_CACHE.popitem(last=False)
         return projection
 
@@ -2563,7 +2562,7 @@ def _write_store_projection_cache(cache_key: tuple[str, str, str, str], projecti
     with _STORE_PROJECTION_LOCK:
         _STORE_PROJECTION_CACHE[cache_key] = projection
         _STORE_PROJECTION_CACHE.move_to_end(cache_key)
-        while len(_STORE_PROJECTION_CACHE) > _STORE_PROJECTION_MAX_ENTRIES_COUNT:
+        while len(_STORE_PROJECTION_CACHE) > cache_capacity.resident_owners(_STORE_PROJECTION_MAX_ENTRIES_COUNT):
             _STORE_PROJECTION_CACHE.popitem(last=False)
 
 
