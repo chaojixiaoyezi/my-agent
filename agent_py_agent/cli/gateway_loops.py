@@ -79,7 +79,7 @@ from ..agent.owner_wake_discovery import (
     discover_owner_home_page,
     seed_registry_page_from_disk,
 )
-from ..agent.runtime_errors import runtime_error_report
+from ..agent.runtime_errors import DataCorruptionError, runtime_error_report
 from ..agent.scheduler import SchedulerDueIndex
 from ..agent.scheduler.timer_service import TimerService
 from ..agent.settings.config import AgentConfig
@@ -1265,12 +1265,14 @@ class _BackgroundOwnerPlannerMixin:
         wait = not reset and time.monotonic() < checks.get(key, 0.0)
         return wait, cap, signature, reset
 
-    # LLM: 已知策略到期及尚未消费的wake不能被空闲退避盖住；只在空规划时沿原读取口核实，坏账立即重查。
+    # LLM: 可运行的来源不能被空闲退避盖住；已在普通失败冷却的线程不因同一份 pending 来源强制每秒重规划。
     # 函数用途: 将指数退避限制在原有待办的最早可行动时间以内。
-    def _owner_plan_idle_delay(self, scheduler: object, delay: float, planned_at: float) -> float:
+    def _owner_plan_idle_delay(
+        self, scheduler: object, delay: float, planned_at: float, cooling: frozenset[str],
+    ) -> float:
         store = getattr(scheduler, "store", None)
         pending = getattr(getattr(store, "wakes", None), "pending", None)
-        if callable(pending) and pending(limit=1):
+        if callable(pending) and any(getattr(signal, "thread_id", None) not in cooling for signal in pending(limit=1)):
             return 0.0
         report = getattr(getattr(store, "progress", None), "list_report", None)
         if callable(report):
@@ -1278,6 +1280,8 @@ class _BackgroundOwnerPlannerMixin:
             if errors:
                 return 0.0
             for policy in policies:
+                if getattr(policy, "thread_id", None) in cooling:
+                    continue
                 delay = min(delay, max(0.0, float(policy.next_due_at) - planned_at))
         return delay
 
@@ -1353,7 +1357,7 @@ def _thread_inbound_marker(scheduler, thread_id: str) -> str | None:
         if type(generation) is not int or generation < 0:
             return None
         return json.dumps([generation, metadata.get("last_user_activity_request_id", "")])
-    except (AttributeError, KeyError, OSError, ValueError):
+    except (AttributeError, KeyError, OSError, ValueError, DataCorruptionError):
         return None
 
 
@@ -1469,10 +1473,11 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                         # 同一原就绪查询取一个工位即可在读观察前返回已有 wake，所有准入门保持原样。
                         ready = scheduler.ready_thread_ids(now=planned_at, limit=1)
                     streak = self._owner_idle_streaks.get(owner_key, 0) + 1
-                    idle = not set(ready) - self._lane_retry.cooling(str(owner_key))
+                    cooling = self._lane_retry.cooling(str(owner_key))
+                    idle = not set(ready) - cooling
                     delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and idle else 0.0
                     if delay:
-                        delay = self._owner_plan_idle_delay(scheduler, delay, planned_at)
+                        delay = self._owner_plan_idle_delay(scheduler, delay, planned_at, cooling)
                 self._note_owner_plan(owner_key, signature, delay, planned_mono)
             except ObservationIndexIncomplete:
                 continue  # 分片同步继续下一拍，不进入异常退避或阻塞其它 owner。
@@ -1629,12 +1634,13 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         label: str,
         thread_id: str,
     ) -> list[object]:
-        inbound_marker = _thread_inbound_marker(scheduler, thread_id)
+        inbound_marker = None
         try:
             if _background_thread_deleted(scheduler, thread_id):
                 _retire_deleted_thread_sources(scheduler, thread_id)
                 self._lane_retry.succeeded(label, thread_id)
                 return []
+            inbound_marker = _thread_inbound_marker(scheduler, thread_id)
             result = list(scheduler.tick_thread(thread_id) or [])
             self._lane_retry.succeeded(label, thread_id)
             return result

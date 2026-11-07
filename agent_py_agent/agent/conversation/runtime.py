@@ -3801,6 +3801,7 @@ def _observation_poison(scheduler: object) -> dict[tuple[str, str], WakePoisonSt
 
 
 # LLM: 观察批次没有 wake 尝试账；复用 wake_poison 的判定/计数/阈值（同因 5 次、总 12 次），瞬时/环境/额度类不计数。
+#   ModelProfileError 等持久引用错误沿共享判定计数；不能在观察车道另判为“等待模型配置”。
 #   未到阈值返回 False，由调用方原样抛出（车道冷却节奏不变）；到阈值把本批 observation 标记已处理并留宿主提示，返回 True。
 #   标记写入失败时保留计数并返回 False，下次再判；宿主提示失败只记日志。
 # 函数用途: 让确定性失败的观察批次有界重试后结案，不再无限占用后台车道。
@@ -4809,7 +4810,8 @@ def _quota_wake_report_after_error(
     return report
 
 
-# LLM: 本地缺模型保留原 wake/Goal，由 Gateway 配置依赖退避；原错误分类后才调用目标组件，显式恢复语义不变。
+# LLM: 未配置模型保留原 wake/Goal 等配置；失效档案也先保留来源，由外层 track_wake_attempt 计数并在阈值结案，不能提前吃掉。
+#   Gateway 对失效档案走定时冷却，只有 ModelNotConfiguredError 走配置依赖等待；不替换任务原模型。
 # 函数用途: 已外发补账失败保留原冻结wake并释放claim，其余关闭或释放失败的调度claim；不能把暂缺模型配置误作任务已受阻并吃掉恢复事件。
 def _handle_nonquota_wake_error(
     scheduler: BackgroundMainAgentScheduler,

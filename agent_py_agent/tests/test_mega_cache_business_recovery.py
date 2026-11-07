@@ -1,5 +1,7 @@
 """W5 的业务材料/恢复合同与真实 Compact 入口；W2 canonical 业务恢复另行联验。"""
 
+from dataclasses import replace
+
 import pytest
 
 from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
@@ -17,6 +19,7 @@ from agent_py_agent.agent.prompting_parts.runtime_injection import (
     RuntimeInjectionFragment,
     runtime_injection_clear_text,
 )
+from agent_py_agent.tests.test_business_v12_f2_spaces import World
 from agent_py_agent.tests.test_cache_opt_snapshot_contract import prepared
 from agent_py_agent.tests.test_compact_native_ir_recovery import _native_ir_attempt
 from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
@@ -110,7 +113,12 @@ def test_foreground_real_gateway_compact_keeps_raw_recovery_and_frozen_switch(tm
 def test_background_real_recovery_preserves_business_material_and_each_full_snapshot(tmp_path, monkeypatch, backend):
     agent, store, thread, execution, sink, history, params, context, _recorded = _native_ir_attempt(
         tmp_path, monkeypatch, backend=backend, full_result='FULL-BODY-' + 'x' * 5000)
-    business = business_context().to_dict()
+    # 恢复会复核当前业务空间，冻结材料须绑定同一 Owner 的真实空间。
+    world = World(agent.home_paths.owner_home_dir, owner=agent.home_paths.owner_id)
+    space = world.create(name='恢复空间', key='recovery-space')
+    agent.business_spaces, agent.business_actor = world.service, world.actor
+    business = replace(business_context(), owner_id=agent.home_paths.owner_id,
+        space_id=space['space_id'], space_revision=space['revision']).to_dict()
     params.task_attributes['business_context'] = business
     goal_reads = []
     monkeypatch.setattr(goal_prompting, 'current_goal_scope_prompt', lambda *_: goal_reads.append(True) or 'complete frozen goal')

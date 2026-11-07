@@ -9,6 +9,8 @@ import pytest
 from agent_py_agent.agent.backends.errors import ProviderConnectionError
 from agent_py_agent.agent.conversation import runtime as rt
 from agent_py_agent.agent.conversation.host_actor import HostActorError
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 
 
 @pytest.fixture
@@ -241,3 +243,105 @@ def test_notice_failure_does_not_undo_quarantine(observation_lane, monkeypatch, 
     assert lane.handled == [(["obs-1"], 1005.0)]
     assert lane.scheduler._observation_poison == {}
     assert _consume(lane, 6) == ([], set())
+
+
+@pytest.mark.parametrize("error", [
+    ModelProfileError("任务原模型已删除", reason="profile_not_found"),
+    ModelProfileError("模型目录损坏"),
+    DataCorruptionError("线程记录损坏"),
+], ids=["missing-profile", "corrupt-profile", "corrupt-thread"])
+def test_deterministic_model_and_thread_errors_quarantine(observation_lane, monkeypatch, error):
+    lane = observation_lane
+    _raise_batch(monkeypatch, error)
+    for attempt in range(1, 5):
+        with pytest.raises(type(error)):
+            _consume(lane, attempt)
+        assert lane.handled == lane.notices == []
+    assert _consume(lane, 5) == ([], set())
+    assert lane.handled == [(["obs-1"], 1005.0)]
+    assert lane.notices[0][2].code.endswith(":" + type(error).__name__)
+    assert lane.scheduler._observation_poison == {}
+
+
+@pytest.mark.parametrize("lane", ["observation", "wake", "continuation"])
+@pytest.mark.parametrize("error_type", [ModelProfileError, DataCorruptionError])
+def test_real_pending_sources_leave_ready_set_after_quarantine(tmp_path, monkeypatch, lane, error_type):
+    from agent_py_agent.agent.conversation import ConversationStore
+    from agent_py_agent.agent.settings import AgentConfig
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"channel": "internal", "channel_conversation_id": "poison"})
+    agent = SimpleNamespace(config=AgentConfig(model_backend="echo"), conversation_store=store)
+    runtime = rt.BackgroundMainAgentRuntime(agent=agent, store=store)
+    scheduler = rt.BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    request = {"thread_id": thread.thread_id, "event_type": "test", "requires_main_agent": True}
+    if lane == "observation":
+        observation = store.observations.append(request)
+        wake = None
+    else:
+        observation, wake = store.wakes.append_observation(request, {
+            "thread_id": thread.thread_id,
+            "reason": "thread_goal_continue" if lane == "continuation" else "test",
+        })
+    calls = []
+
+    def broken(*args, **kwargs):
+        calls.append(kwargs["now"])
+        raise error_type("原持久引用不可用")
+
+    if lane == "observation":
+        monkeypatch.setattr(rt, "_run_observation_batch", broken)
+    else:
+        monkeypatch.setattr(scheduler, "_run_wake_signal", broken)
+    for attempt in range(1, 6):
+        now = 1000.0 * attempt
+        assert scheduler.ready_thread_ids(now=now) == (thread.thread_id,)
+        if lane != "observation" or attempt < 5:
+            with pytest.raises(error_type):
+                scheduler.tick_thread(thread.thread_id, now=now)
+        else:
+            assert scheduler.tick_thread(thread.thread_id, now=now) == []
+        if attempt < 5:
+            assert store.observations.unhandled_requiring_main() == [observation]
+            if wake is not None:
+                assert store.wakes.pending_one(wake.wake_signal_id) is not None
+    assert store.wakes.pending() == []
+    assert store.observations.unhandled_requiring_main() == []
+    assert scheduler.ready_thread_ids(now=10000.0) == ()
+    assert scheduler.tick_thread(thread.thread_id, now=10000.0) == []
+    assert len(calls) == 5
+    if wake is not None:
+        rows, errors = store.wakes.attempts.quarantined()
+        assert errors == []
+        assert [row["wake_signal_id"] for row in rows] == [wake.wake_signal_id]
+        assert rows[0]["reason_code"].endswith(":" + error_type.__name__)
+
+
+def test_goal_continuation_keeps_original_model_then_quarantines(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import FakeDeliveryService
+    from agent_py_agent.agent.conversation.goal_runtime import raise_goal_continuation_wake
+    from agent_py_agent.tests.test_conversation_goal_tools import _goal_agent
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    store = agent.conversation_store
+    runtime = rt.BackgroundMainAgentRuntime(agent=agent, store=store, channels=FakeDeliveryService())
+    scheduler = rt.BackgroundMainAgentScheduler({"runtime": runtime, "store": store})
+    signal = raise_goal_continuation_wake(store, goal, now=1000.0)
+    calls = []
+
+    def unavailable(request):
+        calls.append(request)
+        raise ModelProfileError("任务原模型已删除", reason="profile_not_found")
+
+    monkeypatch.setattr(runtime, "run_once", unavailable)
+    for attempt in range(1, 6):
+        with pytest.raises(ModelProfileError):
+            scheduler.tick_thread(thread.thread_id, now=1000.0 * attempt)
+    assert len(calls) == 5
+    assert store.wakes.pending() == []
+    rows, errors = store.wakes.attempts.quarantined()
+    assert errors == [] and [row["wake_signal_id"] for row in rows] == [signal.wake_signal_id]
+    # 相同 Goal 的来源再次发布也不能复活已隔离的唤醒。
+    raise_goal_continuation_wake(store, store.goals.load(thread.thread_id), now=10000.0)
+    assert store.wakes.pending() == []
+    assert scheduler.ready_thread_ids(now=10000.0) == ()
