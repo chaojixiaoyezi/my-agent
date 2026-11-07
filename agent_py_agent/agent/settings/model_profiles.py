@@ -566,12 +566,18 @@ def _inheritance_parent_thread_id(agent: object) -> str:
         thread_id = getattr(task, "agent_thread_id", "")
         if isinstance(thread_id, str) and thread_id.strip():
             return thread_id.strip()
+    # 调度执行线程不是选模来源；固定策略保留片内配置，继承策略只读原会话。
+    selection = current_model_selection(agent)
+    if selection is not None:
+        if selection.selection_source == "scheduler_fixed":
+            return ""
+        if selection.selection_source == "scheduler_inherit":
+            return selection.selection_thread_id
     attrs = current_conversation_task_attributes(agent)
     thread_id = attrs.get("conversation_thread_id")
     if isinstance(thread_id, str) and thread_id.strip():
         return thread_id.strip()
     # Gateway 预检在生成 RunParams 前已建立同线程的选择快照；只借线程身份，不能借快照中的旧模型编号。
-    selection = current_model_selection(agent)
     return selection.thread_id if selection is not None and selection.selection_source == "thread" else ""
 
 

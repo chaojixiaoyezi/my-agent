@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import stat
 import threading
 import time
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -34,6 +36,70 @@ ISSUER = "https://auth.openai.com"
 SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 CALLBACK = "http://127.0.0.1:1455/auth/callback"
 CLIENT = "oaiapp_local-test-registration"
+
+
+@pytest.fixture
+def responses_replay_server():
+    """完整经过本地 HTTP/SSE；拒绝丢失身份的回放，并核对停机后的描述符数。"""
+    def fd_count():
+        directory = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
+        if not os.path.isdir(directory):
+            return None
+        with os.scandir(directory) as entries:
+            return len(list(entries))
+
+    before = fd_count()
+    state = SimpleNamespace(calls=[], namespace="my_agent")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state.calls.append((self.path, body, dict(self.headers)))
+            calls = [item for item in body["input"] if item.get("type") == "function_call"]
+            if any(item.get("namespace") != state.namespace for item in calls):
+                raw = json.dumps({"error": {"type": "invalid_request_error", "code": "invalid_value",
+                    "param": "input", "message": "历史函数身份不一致"}}).encode()
+                self.send_response(400)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if len(state.calls) == 1:
+                item = {"type": "function_call", "id": "fc-local", "call_id": "local-replay-call",
+                        "name": "local_echo", "arguments": '{"text":"本机"}', "status": "completed"}
+                if state.namespace is not None:
+                    item["namespace"] = state.namespace
+                events = [{"type": "response.output_item.done", "output_index": 0, "item": item},
+                          {"type": "response.completed", "response": {"status": "completed", "output": []}}]
+            else:
+                events = [{"type": "response.output_text.delta", "delta": "本机回放完成"},
+                          {"type": "response.completed", "response": {"status": "completed", "output": [
+                              {"type": "message", "content": [{"type": "output_text", "text": "本机回放完成"}]}]}}]
+            raw = "".join("data: " + json.dumps(event, ensure_ascii=False) + "\n\n" for event in events).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    state.base = f"http://127.0.0.1:{server.server_port}/v1"
+    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+    worker.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+        assert not worker.is_alive() and server.fileno() == -1
+        after = fd_count()
+        if before is not None:
+            fd_delta = after - before
+            assert fd_delta == 0
 
 
 def _encoded(value: bytes) -> str:
@@ -432,6 +498,92 @@ def test_direct_responses_omits_sampling_and_uses_http_sse(tmp_path, identity_se
         assert body["tools"][0]["tools"][0]["name"] == "local_echo"
         assert body["tool_choice"] == {"type": "function", "name": "local_echo", "namespace": "my_agent"}
     assert backend.supports_remote_compaction() is False
+
+
+@pytest.mark.parametrize("with_tools", [True, False])
+@pytest.mark.parametrize("route", ["siwc", "api_key", "legacy"])
+def test_function_call_history_roundtrip_keeps_route_identity(
+    tmp_path, identity_server, responses_replay_server, monkeypatch, with_tools, route,
+):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.backends import get_backend, responses_websocket
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+    from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    owner, key = _new_owner(tmp_path)
+    _connect(owner, identity_server)
+    if route == "legacy":
+        path = model_profiles_path(owner.home_paths)
+        data = read_model_profiles(path)
+        data["providers"]["account"].update(api_base=schema.CHATGPT_BASE, auth={
+            "mode": "chatgpt", "access_token": "legacy-test-access", "account_id": "legacy-test-account",
+            "generation": "legacy-test-generation", "expires_at": time.time() + 3600})
+        _save_profiles(path, data)
+    config = _config(owner, key)
+    if route == "api_key":
+        config = replace(config, model_auth_ref={}, api_key="test-api-key")
+    backend = get_backend("openai_responses", config)
+    server = responses_replay_server
+    server.namespace = "my_agent" if route == "siwc" else None
+    envelopes, websocket_calls = [], []
+    original_request = backend._gateway_request
+
+    def local_request(*args, **kwargs):
+        request = original_request(*args, **kwargs)
+        envelopes.append(request)
+        return replace(request, api_base=server.base)
+
+    # 只替换外部目的地；旧订阅仍须进入自己的 WS 入口，本例用实际 SSE 承接该外部边界。
+    def local_websocket(request, **_kwargs):
+        websocket_calls.append(request)
+        return post_stream_iter(request)
+
+    monkeypatch.setattr(backend, "_gateway_request", local_request)
+    monkeypatch.setattr(responses_websocket, "iter_responses_websocket", local_websocket)
+    tools = [{"name": "local_echo", "description": "本机回声", "input_schema": {
+        "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]
+    options = ProviderRequestOptions(system_instruction="本机回放检查", total_deadline_seconds=5)
+    first = backend.generate("检查资料", tools=tools, tool_choice=ToolChoice.specific("local_echo"), request_options=options)
+    expected = {"type": "tool_use", "id": "local-replay-call", "name": "local_echo", "input": {"text": "本机"}}
+    assert first.tool_use_blocks == [expected] and first.assistant_content_blocks == [expected]
+    history = [{"role": "assistant", "content": first.assistant_content_blocks},
+               {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "local-replay-call", "content": "已核对"}]}]
+    original_history = deepcopy(history)
+    chunks = []
+    second = backend.generate("", messages=history, tools=tools if with_tools else None,
+                              on_chunk=chunks.append, request_options=options)
+    assert second.text == "本机回放完成" and chunks == ["本机回放完成"]
+    assert history == original_history
+    assert len(server.calls) == 2 and all(path == "/v1/responses" for path, _body, _headers in server.calls)
+    assert len(websocket_calls) == (2 if route == "legacy" else 0)
+    expected_base = schema.CHATGPT_BASE if route == "legacy" else API
+    assert all(request.url == expected_base + "/responses" for request in envelopes)
+    for _path, body, headers in server.calls:
+        assert body["store"] is False and body["stream"] is True
+        assert "previous_response_id" not in body
+        assert headers["Authorization"] == "Bearer " + (
+            "legacy-test-access" if route == "legacy" else "test-api-key" if route == "api_key" else "test-access")
+    first_body, replay = server.calls[0][1], server.calls[1][1]
+    call = next(item for item in replay["input"] if item.get("type") == "function_call")
+    result = next(item for item in replay["input"] if item.get("type") == "function_call_output")
+    assert call["call_id"] == result["call_id"] == "local-replay-call"
+    assert call["name"] == "local_echo" and json.loads(call["arguments"]) == {"text": "本机"}
+    assert result["output"] == "已核对" and "namespace" not in result
+    assert ("tools" in replay) is with_tools
+    if route == "siwc":
+        assert call["namespace"] == "my_agent"
+        assert first_body["tools"][0]["type"] == "namespace" and first_body["tools"][0]["name"] == "my_agent"
+        assert first_body["tool_choice"] == {"type": "function", "name": "local_echo", "namespace": "my_agent"}
+        if with_tools:
+            assert replay["tools"] == first_body["tools"]
+    else:
+        assert "namespace" not in call
+        assert first_body["tools"][0]["type"] == "function"
+        assert first_body["tool_choice"] == {"type": "function", "name": "local_echo"}
+        if with_tools:
+            assert replay["tools"] == first_body["tools"]
 
 
 @pytest.mark.parametrize("code,kind", [
