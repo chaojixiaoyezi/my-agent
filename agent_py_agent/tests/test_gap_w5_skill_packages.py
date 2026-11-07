@@ -29,6 +29,7 @@ from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.tests import test_v13_w0_harness as harness
 
 v13_host = harness.v13_host
+v13_native = harness.v13_native
 
 
 @pytest.fixture
@@ -785,12 +786,94 @@ def test_passive_native_context_uses_bounded_authenticated_session_workspaces(ho
         host.conversation_store.storage.thread_path(thread.thread_id).write_bytes(b'{broken')
     elif damage == 'over_budget':
         monkeypatch.setattr(packages, '_MAX_SKILLS_PER_ROOT_COUNT', 1)
-        host.conversation_store.threads.write(replace(thread, thread_id='thread-another'))
+        another = str(tmp_path / 'another-distinct-workspace')
+        host.conversation_store.threads.write(replace(thread, thread_id='thread-another',
+            workspace_root=another, cwd=another, runtime_workspace_roots=(another,)))
     call = _passive_call(host, monkeypatch)
     _assert_error('STATE_CONFLICT' if damage == 'protected' else 'HOST_NOT_READY',
         lambda: packages.upload_zip(call))
     assert not (call.owner_home / 'skills' / 'sample').exists()
     assert (protected / 'SKILL.md').read_bytes() == _body()
+
+
+def test_retained_same_workspace_history_allows_real_http_skill_mutations(v13_native):
+    from agent_py_agent.agent.conversation.models import ConversationThread
+    from agent_py_agent.agent.gateway_parts.owner_conversation_store import owner_conversation_store
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        OwnerIdentity,
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    _server, agent = v13_native
+    user = 'business-alice'
+    owner = resolve_owner_home(agent.home_paths.root, OwnerIdentity.provider_user('feishu', user))
+    paths = home_paths_with_owner(agent.home_paths, owner)
+    store = owner_conversation_store(agent, paths)
+    workspace = paths.owner_workspace_dir
+    for index in range(548):
+        store.threads.write(ConversationThread(thread_id=f'retained-{index:04d}', canonical_user_id=user,
+            owner_id=owner.owner_id, owner_home=str(paths.owner_home_dir), title=f'普通历史会话 {index}',
+            workspace_root=str(workspace), cwd=str(workspace), runtime_workspace_roots=(str(workspace),)))
+    sources = list(store.storage.threads_dir.glob('*.json'))
+    assert len(sources) == 548
+    assert sum(path.stat().st_size for path in sources) > packages.SKILL_PACKAGE_FILE_MAX_BYTES
+    assert max(path.stat().st_size for path in sources) < packages.SKILL_PACKAGE_FILE_MAX_BYTES
+
+    def invoke(action, params):
+        status, body = harness.v13_call(v13_native, 'skills_pkg.' + action, params, user=user,
+                                       idempotency_key='retained-history-' + uuid4().hex)
+        assert status == 200, body
+        assert body['state'] == 'completed' and body['error'] is None
+        assert body['effect_outcome'] == 'committed'
+        return body['data']
+
+    installed = invoke('upload_zip', {'name': 'sample', 'archive_b64': base64.b64encode(_zip()).decode()})
+    assert installed['skill']['source'] == 'owner'
+    assert invoke('dirs.create', {'name': 'sample', 'dir': 'references'})['created']
+    written = invoke('files.write', {'name': 'sample', 'path': 'references/note.txt',
+        'content_b64': base64.b64encode(b'retained history write').decode(), 'expected_sha256': 'absent'})
+    leaf = paths.owner_home_dir / 'skills/sample/references/note.txt'
+    assert leaf.read_bytes() == b'retained history write'
+    assert invoke('files.delete', {'name': 'sample', 'path': 'references/note.txt',
+        'expected_sha256': written['sha256']})['deleted']
+    assert not leaf.exists() and len(list(store.storage.threads_dir.glob('*.json'))) == 548
+    protected = workspace / '.agents/skills/protected-history'
+    protected.mkdir(parents=True)
+    (protected / 'SKILL.md').write_bytes(_body('protected-history'))
+    status, body = harness.v13_call(v13_native, 'skills_pkg.upload_zip', {'name': 'protected-history',
+        'archive_b64': base64.b64encode(_zip([('SKILL.md', _body('protected-history'))])).decode()},
+        user=user, idempotency_key='retained-protected-' + uuid4().hex)
+    assert status == 409 and body['error']['code'] == 'STATE_CONFLICT', body
+    assert not (paths.owner_home_dir / 'skills/protected-history').exists()
+
+
+@pytest.mark.parametrize('oversized', [False, True])
+def test_history_sources_keep_single_file_limit_and_close_descriptors(host, oversized):
+    from agent_py_agent.agent.conversation.models import ConversationThread
+    from agent_py_agent.agent.gateway_parts.owner_conversation_store import (
+        owner_conversation_store_from_config,
+    )
+
+    store = owner_conversation_store_from_config(host.config, host.home_paths, initialize=True)
+    host.conversation_store = store
+    workspace = host.home_paths.owner_workspace_dir
+    thread = ConversationThread(thread_id='bounded-history', canonical_user_id='test-user',
+        owner_id=host.home_paths.owner_id, owner_home=str(host.home_paths.owner_home_dir),
+        workspace_root=str(workspace), cwd=str(workspace), runtime_workspace_roots=(str(workspace),))
+    store.threads.write(thread)
+    if oversized:
+        path = store.storage.thread_path(thread.thread_id)
+        path.write_bytes(b' ' * (packages.SKILL_PACKAGE_FILE_MAX_BYTES + 1) + path.read_bytes())
+    descriptor_root = '/proc/self/fd' if Path('/proc/self/fd').exists() else '/dev/fd'
+    before = len(os.listdir(descriptor_root))
+    call = _call(host, 'upload_zip', {})
+    if oversized:
+        _assert_error('HOST_NOT_READY', lambda: packages._session_workspaces(call))
+    else:
+        assert packages._session_workspaces(call) == (workspace,)
+    fd_delta = len(os.listdir(descriptor_root)) - before
+    assert fd_delta == 0
 
 
 def test_native_envelope_preserves_unknown_and_durable_replay_after_mkdir(host, monkeypatch):
