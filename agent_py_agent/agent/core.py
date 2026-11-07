@@ -891,7 +891,13 @@ def _initialize_agent_construction(agent, config: AgentConfig, root, worker_boot
     agent.runtime_guard_policy = frozen_guard
     # 同一 owner 的 Gateway/后台 worker 会并发共用 agent；启动时只建一份线程安全
     # 模型调用账本，避免首次并发请求各建一份后互相覆盖。
-    agent._model_call_ledger = ModelCallLedger()
+    if bool(getattr(config, "llm_call_records_enabled", False)):
+        from .business_spaces.gap158_w1_llm_records import make_record_sink
+        from .contracts.model_call_ledger import ModelCallLedgerOptions
+
+        agent._model_call_ledger = ModelCallLedger(ModelCallLedgerOptions(record_sink=make_record_sink(agent)))
+    else:
+        agent._model_call_ledger = ModelCallLedger()
     agent.root = Path(root)
     return config
 

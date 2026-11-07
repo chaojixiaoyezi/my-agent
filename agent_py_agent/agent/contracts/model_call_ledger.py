@@ -55,6 +55,8 @@ class ModelCallLedgerOptions:
     max_records: int = 128
     # 在途调用无活动超过这么多秒算失联、可被裁剪（防泄漏），默认见 _OPEN_CALL_STALE_SECONDS。
     open_call_stale_seconds: float = _OPEN_CALL_STALE_SECONDS
+    # 首终态提交后才通知，持久层失败不能改变模型调用结果。
+    record_sink: Callable[[ModelCallRecord], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -768,7 +770,8 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 events=_append_event(record.events, "finished"),
             )
             self._replace(updated)
-            return updated
+        self._notify_record_sink(updated)
+        return updated
 
     # LLM: 超时阶段必须属于原合同；只有活动调用能首次终结，迟到或重复 timeout 不覆盖成功与失败。
     # 函数用途: 保存首次超时的阶段和时长，保持调用终态单调。
@@ -812,7 +815,8 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                 events=_append_event(record.events, "timeout"),
             )
             self._replace(updated)
-            return updated
+        self._notify_record_sink(updated)
+        return updated
 
     # LLM: 失败只终结活动调用；不能把已成功或已超时记录改成另一失败，首次错误码和耗时保持稳定。
     # 函数用途: 一次性登记调用失败，重复或迟到异常仅返回原记录。
@@ -821,19 +825,30 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             record = self._require_record(params.call_id)
             if record.status in _TERMINAL_STATUSES:
                 return record
-            now = float(self.context.now())
-            updated = replace(
-                record,
-                status="failed",
-                failure_at=now,
-                last_activity_at=now,
-                total_latency_seconds=max(0.0, now - record.started_at),
-                error_type=params.error_type,
-                error_code=params.error_code,
-                events=_append_event(record.events, "failed"),
-            )
-            self._replace(updated)
-            return updated
+            updated = self._failed_locked(record, params)
+        self._notify_record_sink(updated)
+        return updated
+
+    def _failed_locked(self, record: ModelCallRecord, params: ModelCallFailureParams) -> ModelCallRecord:
+        """普通失败与停机批量结清共用写入，调用者持原账本锁。"""
+        now = float(self.context.now())
+        updated = replace(
+            record, status="failed", failure_at=now, last_activity_at=now,
+            total_latency_seconds=max(0.0, now - record.started_at),
+            error_type=params.error_type, error_code=params.error_code,
+            events=_append_event(record.events, "failed"),
+        )
+        self._replace(updated)
+        return updated
+
+    def _notify_record_sink(self, record: ModelCallRecord) -> None:
+        """外部 I/O 不持账本锁；异常只记类型，避免异常正文泄漏请求。"""
+        sink = self.options.record_sink
+        if sink is not None:
+            try:
+                sink(record)
+            except Exception as error:
+                _LOGGER.warning("model call record sink failed (%s)", type(error).__name__)
 
     # LLM: 终态之后仍可追加的结构化事件（例如被放弃调用的迟到线程按复核结果跳过发出）；只进 events，
     #   不改状态、时钟、用量、错误码或尝试计数，重复同名事件按 _append_event 去重。改动时联查 test_model_call_ledger。
@@ -1106,11 +1121,14 @@ def find_model_call_admission_error(exc: BaseException | None) -> ModelCallAdmis
 # 函数用途: 把一本账本里仍在途的调用按关门原因记成 failed。
 def _fail_open_calls(ledger: ModelCallLedger, closure: ModelCallAdmissionClosure) -> tuple[ModelCallRecord, ...]:
     with ledger._lock:
-        open_ids = [record.call_id for record in ledger._records if record.status not in _TERMINAL_STATUSES]
-        return tuple(
-            ledger.failed(ModelCallFailureParams(call_id=call_id, error_type=closure.error_type, error_code=closure.error_code))
-            for call_id in open_ids
+        updated = tuple(
+            ledger._failed_locked(record, ModelCallFailureParams(
+                call_id=record.call_id, error_type=closure.error_type, error_code=closure.error_code))
+            for record in ledger._records if record.status not in _TERMINAL_STATUSES
         )
+    for record in updated:
+        ledger._notify_record_sink(record)
+    return updated
 
 
 # LLM: 在途且最近有活动（距最后活动不到 stale_seconds）才算仍在进行；已结束或失联的都不受裁剪豁免。只读。

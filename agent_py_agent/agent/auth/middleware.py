@@ -286,3 +286,28 @@ def require_trusted_source(handler) -> bool:
         body["error_code"] = LOCAL_CREDENTIAL_REQUIRED
     handler._send_json(403, body)
     return True
+
+
+def compatible_gateway_headers(headers):
+    """仅供兼容路由调用：Bearer 映射到原宿主凭据字段，歧义或冲突一律拒绝。"""
+    from copy import copy
+
+    authorization = _header_value(headers, 'Authorization')
+    gateway = _header_value(headers, AuthMiddleware.HEADER_TOKEN)
+    if authorization is None or gateway is None:
+        raise ValueError('ambiguous credential')
+    if _header_count(headers, 'Authorization') > 1 or _header_count(headers, AuthMiddleware.HEADER_TOKEN) > 1:
+        raise ValueError('duplicate credential')
+    if not authorization:
+        return headers
+    parts = authorization.split(' ')
+    if len(parts) != 2 or parts[0].casefold() != 'bearer' or not parts[1]:
+        raise ValueError('invalid credential')
+    token = parts[1]
+    if gateway and not hmac.compare_digest(gateway.encode(), token.encode()):
+        raise ValueError('conflicting credential')
+    result = copy(headers)
+    if gateway:
+        del result[AuthMiddleware.HEADER_TOKEN]
+    result[AuthMiddleware.HEADER_TOKEN] = token
+    return result

@@ -170,7 +170,9 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 40 and len({(method, template) for method, template, _ in pairs}) == 40
+    assert len(pairs) == 42 and len({(method, template) for method, template, _ in pairs}) == 42
+    assert ("POST", "/v1/chat/completions", "credential") in pairs
+    assert ("POST", "/api/llm/test", "credential") in pairs
     assert ("POST", "/client/goal", "credential") in pairs
     assert ("POST", "/channel-observations", "credential") in pairs
     assert {(method, path, tier) for method, path, tier in pairs
@@ -213,7 +215,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
             assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == len(pairs) == 40
+        assert len(called) == len(pairs) == 42
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()

@@ -191,11 +191,21 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             return
         middleware = getattr(self, "_auth_middleware", None)
         if middleware is not None:
+            compatible = self.path.startswith('/v1/') or self.path == '/api/llm/test'
+            if compatible:
+                from ..auth.middleware import compatible_gateway_headers
+                from .openai_compat_routes import reject_untrusted, send_error
+
+                try:
+                    self.headers = compatible_gateway_headers(self.headers)
+                except ValueError:
+                    send_error(self, 401, 'CAPABILITY_DENIED')
+                    return
             middleware.observe_loopback_request(self, route)
             if route.access_tier in {"credential", "admin"}:
                 from ..auth.middleware import require_trusted_source
 
-                if require_trusted_source(self):
+                if (reject_untrusted(self, middleware) if compatible else require_trusted_source(self)):
                     return
         if (route.access_tier == "credential"
                 and (route.template.startswith("/client/") or route.template in {"/control", "/control-status/*"})
@@ -388,6 +398,9 @@ class GatewayHTTPServer:
         auth_middleware: AuthMiddleware | None = None,
     ):
         server_params = params or GatewayHTTPServerParams(cross_channel, admin_query, auth_middleware)
+        from .business_api_v13_gap158_w1 import install_actions
+
+        install_actions()
         self.port = port
         self.paths = paths
         self.cross_channel = server_params.cross_channel

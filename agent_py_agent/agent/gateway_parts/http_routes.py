@@ -32,6 +32,8 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/metrics", "_handle_metrics", "public"),
     ),
     "POST": (
+        GatewayHTTPRoute("/v1/chat/completions", "handle_openai_chat_completions", "credential", ".openai_compat_routes"),
+        GatewayHTTPRoute("/api/llm/test", "handle_llm_gateway_test", "credential", ".openai_compat_routes"),
         GatewayHTTPRoute("/api/admin/*", "handle_admin_api_post", "admin", ".admin_api"),
         GatewayHTTPRoute("/client/business", "handle_client_business", "credential", ".business_api"),
         GatewayHTTPRoute("/client/business/stream", "handle_client_business_stream", "credential", ".business_api"),
