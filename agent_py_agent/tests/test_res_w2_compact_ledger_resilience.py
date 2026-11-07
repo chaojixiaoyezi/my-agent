@@ -377,13 +377,21 @@ def test_tail_sidecar_collision_preserves_source_and_evidence(compact_case):
     assert path.read_bytes() == damaged and sidecar.read_bytes() == b'previous evidence'
 
 
-# LLM: Decoder-depth exhaustion is a failed parse, including semantically complete but unparseable deep objects.
-# 函数用途: Preserve undecodable tail bytes rather than letting the writer's classifier raise before quarantine.
+# LLM: Probe the active decoder's recursion guard with bounded doubling; no interpreter-wide limit changes or skipped assertions.
+# 函数用途: Preserve undecodable tail bytes across Python versions, including complete but unparseable deep objects.
 @pytest.mark.parametrize('shape', ['incomplete_array', 'incomplete_object', 'deep_object'])
 def test_depth_exhausted_tail_is_preserved_before_quarantine(compact_case, shape):
     case = compact_case
-    # CPython 3.12's C decoder depth is independent of the Python recursion limit.
+    # Decoder guards differ across CPython versions and need not follow the Python recursion limit.
     depth = max(10_000, sys.getrecursionlimit() + 50)
+    for _ in range(8):
+        try:
+            json.loads(b'[' * depth + b']' * depth)
+        except RecursionError:
+            break
+        depth *= 2
+    else:
+        pytest.fail('JSON decoder did not reach RecursionError within eight depth probes')
     tail = b'[' * depth
     if shape != 'incomplete_array':
         tail = b'{"value":' + tail
