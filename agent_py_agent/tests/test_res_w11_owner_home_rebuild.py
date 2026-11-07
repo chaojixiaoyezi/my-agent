@@ -157,21 +157,26 @@ def test_rebuild_never_closes_an_agent_until_its_last_pin_is_released(tmp_path, 
     assert pool.get(owner) is second
 
 
+# LLM: 验证健康缓存命中的双根探测顺序、实例复用和无重建告警，不改变生产逻辑。
+# 函数用途: 用跨版本稳定的目录判断入口检查缓存命中路径。
 def test_healthy_cache_hit_checks_both_roots_without_rebuilding(tmp_path, monkeypatch, caplog):
     pool, owner, built = _real_pool(tmp_path)
     first = pool.get(owner)
     home, store = first.home_paths.owner_home_dir, first.conversation_store.storage.root
-    observed, stat = [], Path.stat
+    observed, is_dir = [], Path.is_dir
 
+    # LLM: 只记录目标根目录的探测，再委派原始 Path.is_dir，不伪造文件系统结果。
+    # 函数用途: 观察双根探测，同时保留真实目录判断。
     def observe(path, *args, **kwargs):
         if path in (home, store):
             observed.append(path)
-        return stat(path, *args, **kwargs)
+        return is_dir(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", observe)
+    monkeypatch.setattr(Path, "is_dir", observe)
     with caplog.at_level(logging.WARNING, logger=owner_scoped_pool.__name__):
         assert pool.get(owner) is first
-    # 续作明确改为两个独立根；固定两次stat仍是O(1)，不把外置会话根当home存在的证明。
+    # 固定两次目录探测仍是O(1)，不把外置会话根当home存在的证明。
+    # 拦截公开API，不依赖不同Python版本是否通过Path.stat判断目录。
     assert observed == [home, store]
     assert built == [owner]
     assert not [record for record in caplog.records if record.name == owner_scoped_pool.__name__]
